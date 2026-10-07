@@ -53,7 +53,7 @@ with tempfile.TemporaryDirectory(prefix="nullmoth-card-log-tests-") as directory
         path.write_text("#!/bin/bash\n" + body)
         path.chmod(0o755)
     source = (ROOT / "app/Resources/nullmoth-setup.sh").read_text()
-    start = '  { echo "macOS $(sw_vers -productVersion)'
+    start = '  for f in "$ST"/*.log'
     stop = '  n=0; collection_errors=0'
     assert source.count(start) == source.count(stop) == 1
     body = start + source.split(start, 1)[1].split(stop, 1)[0]
@@ -64,11 +64,19 @@ with tempfile.TemporaryDirectory(prefix="nullmoth-card-log-tests-") as directory
     body = body.replace('/private/tmp/nvmtl.log', str(filelog))
     collection = tmp / "logs"
     collection.mkdir()
+    saved = tmp / "saved state"
+    saved.mkdir()
+    record = "CONFIG_BACKUP_REL=EFI/OC/config.plist.before-nullmoth\nADDED_ARGS='nvfb=1 nvaccel=1'\n"
+    (saved / "state").write_text(record)
+    (saved / "install.log").write_text("fixture install log\n")
     script = tmp / "collect.sh"
-    script.write_text('COLLECT="$1"\n' + body)
+    script.write_text('COLLECT="$1"; ST="$2"\n' + body)
     env = dict(os.environ, PATH=str(commands) + ":" + os.environ["PATH"])
-    subprocess.run(["/bin/bash", str(script), str(collection)], env=env, check=True)
+    subprocess.run(["/bin/bash", str(script), str(collection), str(saved)], env=env, check=True)
     state = (collection / "driver-state.txt").read_text()
+    assert record in state, "saved install record was overwritten by runtime diagnostics"
+    assert (saved / "state").read_text() == record
+    assert (collection / "driver-install.log.txt").read_text() == "fixture install log\n"
     for needle in ('"device-id" = <82280000>', 'fixture-bar-data', '"nvrm-boot-hold" = "display armed"'):
         assert needle in state
     assert 'unrelated@1' not in state and 'ffff0000' not in state
@@ -79,6 +87,12 @@ with tempfile.TemporaryDirectory(prefix="nullmoth-card-log-tests-") as directory
     update = (collection / "driver-update-log.txt").read_text()
     assert "log show exit: 3" in update and "apfs: DONE reverting to snapshot fixture" in update
     print("PASS NVIDIA identifiers, BARs, query failures, kernel ring, plugin errors, and update context retained")
+    without_record = tmp / "logs without install record"
+    without_record.mkdir()
+    subprocess.run(["/bin/bash", str(script), str(without_record), str(tmp / "absent state")], env=env, check=True)
+    state = (without_record / "driver-state.txt").read_text()
+    assert "== install record\n(none recorded)" in state and "fixture-bar-data" in state
+    print("PASS saved install record and runtime diagnostics coexist; absent record is optional")
     start, stop = 'collect_recent_logs() {', 'if [ -n "$COLLECT" ]; then'
     assert source.count(start) == source.count(stop) == 1
     helper = start + source.split(start, 1)[1].split(stop, 1)[0]
