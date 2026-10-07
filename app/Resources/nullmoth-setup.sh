@@ -181,6 +181,7 @@ if [ -n "$COLLECT" ]; then
   for f in "$ST"/*.log "$ST/state"; do [ -f "$f" ] && cp "$f" "$COLLECT/driver-$(basename "$f").txt"; done
   { echo "macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion))   model $(sysctl -n hw.model)"
     echo "boot-args: $(nvram boot-args 2>/dev/null | cut -f2-)"; echo "SIP: $(csrutil status 2>/dev/null)"
+    echo; echo "== install record"; cat "$ST/state" 2>/dev/null || echo "(none recorded)"
     echo; echo "== NullMoth kexts loaded"; kmutil showloaded --list-only 2>/dev/null | grep -i nullmoth
     echo; echo "== auxiliary collection"; kmutil inspect -a x86_64 -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -i nullmoth
     echo; echo "== driver files"; ls -la /Library/Extensions/NV*.kext /Library/GPUBundles 2>/dev/null
