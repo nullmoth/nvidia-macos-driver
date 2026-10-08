@@ -9523,7 +9523,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --exclude=__pycache__ --exclude=*.bak* --exclude=*.orig --exclude=.git --exclude=open-gpu-kernel-modules --strip-trailing-cr upmesa/mesa-17ca6174/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c rebase263/mesa/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c	1969-12-31 16:00:00
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c	2026-10-05 13:15:54
-@@ -0,0 +1,489 @@
+@@ -0,0 +1,492 @@
 +
 +
 +
@@ -9927,7 +9927,10 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +   if (mapping == NULL)
 +      return vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
 +
-+   NV_STATUS nvRes = nvRmApiMapMemory(&rm, pdev->hSubdevice, mem->hMemoryPhys, 0, mem->base.size_B, mem->isSystemMem, 0, mapping);
++   /* GPU-cached system memory needs an explicit direct CPU mapping on the
++    * Turing bus path. Video memory continues to use its BAR mapping. */
++   const NvU32 map_flags_os33 = mem->isSystemMem ? (1u << 15) : 0;
++   NV_STATUS nvRes = nvRmApiMapMemory(&rm, pdev->hSubdevice, mem->hMemoryPhys, 0, mem->base.size_B, mem->isSystemMem, map_flags_os33, mapping);
 +   if (nvRes != NV_OK) {
 +      fprintf(stderr, "[!] nvRes: %#x\n", nvRes);
 +      free(mapping);

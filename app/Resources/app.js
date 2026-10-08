@@ -63,6 +63,8 @@ const NM = {
     if (event === "lines") data.forEach(logLine);
     if (event === "dl") {
       if (data.state === "progress" && data.total > 0) $("dlp").textContent = Math.floor((100 * data.done) / data.total) + "%";
+      if (data.state === "start") ["dl", "updchk", "upddrv"].forEach((b) => ($(b).disabled = true));
+      if (data.state === "error" || data.state === "done") ["dl", "updchk", "upddrv"].forEach((b) => ($(b).disabled = false));
       if (data.state === "error") $("dlp").innerHTML = `<span class="bad">${esc(data.why)}</span>`;
       if (data.state === "done") { $("dlp").textContent = "done, checksum OK"; post({ act: "scan" }); }
     }
@@ -72,6 +74,7 @@ const NM = {
         const have = data.installed ? `installed ${esc(data.installed)}, ` : "";
         $("updr").innerHTML = data.newer ? `${have}newest ${esc(data.latest)} - ready to update.` : `${have}you have the newest driver (${esc(data.latest)}).`;
         $("upddrv").hidden = !data.newer;
+        $("upddrv").disabled = !data.newer;
       }
     }
     if (event === "run") {

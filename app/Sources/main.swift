@@ -418,11 +418,14 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
 
     // "Update driver": the newest driver release, not the version this app was built with. The package is checked against
     // the SHA256SUMS.txt published in the same release and installed by the normal install path (backup, OpenCore checks).
-    var dlName = Package.name, dlSha = Package.sha256
-    var dlThenInstall: String? = nil
-    // 10-07: install passed --sha Package.sha256 (the version this app was built with), so "Update driver" installing a
-    // NEWER package would stop at the setup script's checksum test. The update path passes the release's published hash.
-    var installSha: String? = nil
+    struct DownloadPlan {
+        let name: String
+        let sha: String
+        let efi: String?
+    }
+    var pendingDownload: (id: Int, plan: DownloadPlan)? = nil
+    var runningSetup = false
+    lazy var downloadSession = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
     var latest: (version: String, name: String, url: URL, sha: String)? = nil
     static func versionKey(_ v: String) -> [Int] { v.split(separator: ".").map { Int($0) ?? 0 } }
     static func newer(_ a: String, than b: String) -> Bool {
@@ -455,40 +458,54 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
                 let sha = txt.split(separator: "\n").compactMap { l -> String? in
                     let f = l.split(whereSeparator: { $0 == " " || $0 == "\t" }); return f.count >= 2 && f.last.map(String.init) == pkg.1 ? String(f[0]).lowercased() : nil }.first ?? ""
                 guard sha.count == 64 else { return fail("SHA256SUMS.txt does not list \(pkg.1)") }
-                self.latest = (pkg.0, pkg.1, pkg.2, sha)
+                DispatchQueue.main.async { self.latest = (pkg.0, pkg.1, pkg.2, sha) }
                 let have = self.installedDriverVersion()
                 self.send("upd", ["state": "checked", "latest": pkg.0, "installed": have,
                                   "newer": have.isEmpty || App.newer(pkg.0, than: have)])
             }.resume()
         }.resume()
     }
+    func startDownload(name: String, sha: String, url: URL, efi: String?) {
+        guard pendingDownload == nil, !runningSetup else { return }
+        do { try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true) }
+        catch { send("dl", ["state": "error", "why": error.localizedDescription]); return }
+        let task = downloadSession.downloadTask(with: url)
+        pendingDownload = (task.taskIdentifier, DownloadPlan(name: name, sha: sha, efi: efi))
+        send("dl", ["state": "start"])
+        task.resume()
+    }
     func updateDriver(efi: String) {
         guard let l = latest else { send("upd", ["state": "error", "why": "check for an update first"]); return }
-        dlName = l.name; dlSha = l.sha; dlThenInstall = efi
-        try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
-        URLSession(configuration: .default, delegate: self, delegateQueue: nil).downloadTask(with: l.url).resume()
-        send("dl", ["state": "start"])
+        startDownload(name: l.name, sha: l.sha, url: l.url, efi: efi)
     }
     func download() {
-        dlName = Package.name; dlSha = Package.sha256; dlThenInstall = nil
-        try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
-        URLSession(configuration: .default, delegate: self, delegateQueue: nil).downloadTask(with: Package.url).resume()
-        send("dl", ["state": "start"])
+        startDownload(name: Package.name, sha: Package.sha256, url: Package.url, efi: nil)
     }
     func urlSession(_ s: URLSession, downloadTask t: URLSessionDownloadTask, didWriteData b: Int64, totalBytesWritten w: Int64, totalBytesExpectedToWrite e: Int64) {
+        guard pendingDownload?.id == t.taskIdentifier else { return }
         send("dl", ["state": "progress", "done": w, "total": e])
     }
     func urlSession(_ s: URLSession, downloadTask t: URLSessionDownloadTask, didFinishDownloadingTo loc: URL) {
+        guard let pending = pendingDownload, pending.id == t.taskIdentifier else { return }
+        let plan = pending.plan
         let code = (t.response as? HTTPURLResponse)?.statusCode ?? 0
-        let dst = support.appendingPathComponent(dlName)
+        let dst = support.appendingPathComponent(plan.name)
         guard code == 200 else { send("dl", ["state": "error", "why": "the server answered HTTP \(code)"]); return }
-        guard sha256(loc) == dlSha else { send("dl", ["state": "error", "why": "the download does not match its SHA-256, so it was thrown away"]); return }
-        try? FileManager.default.removeItem(at: dst)
-        do { try FileManager.default.moveItem(at: loc, to: dst) } catch { send("dl", ["state": "error", "why": error.localizedDescription]); return }
+        guard sha256(loc) == plan.sha else { send("dl", ["state": "error", "why": "the download does not match its SHA-256, so it was thrown away"]); return }
+        do {
+            if FileManager.default.fileExists(atPath: dst.path) {
+                _ = try FileManager.default.replaceItemAt(dst, withItemAt: loc)
+            } else { try FileManager.default.moveItem(at: loc, to: dst) }
+        } catch { send("dl", ["state": "error", "why": error.localizedDescription]); return }
+        pendingDownload = nil
         send("dl", ["state": "done", "path": dst.path])
-        if let efi = dlThenInstall { dlThenInstall = nil; let sha = dlSha; DispatchQueue.main.async { self.installSha = sha; self.run(mode: "install", pkg: dst.path, efi: efi, extra: []) } }
+        if let efi = plan.efi {
+            run(mode: "install", pkg: dst.path, efi: efi, extra: [], expectedSha: plan.sha)
+        }
     }
     func urlSession(_ s: URLSession, task: URLSessionTask, didCompleteWithError e: Error?) {
+        guard pendingDownload?.id == task.taskIdentifier else { return }
+        pendingDownload = nil
         if let e { send("dl", ["state": "error", "why": e.localizedDescription]) }
     }
 
@@ -602,7 +619,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         } else { send("crashDone", ["ok": false, "why": "Could not write the report to the Desktop."]) }
     }
 
-    func run(mode: String, pkg: String, efi: String, extra: [String]) {
+    func run(mode: String, pkg: String, efi: String, extra: [String], expectedSha: String? = nil) {
+        guard !runningSetup, pendingDownload == nil else { return }
+        runningSetup = true
         try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let log = logs.appendingPathComponent("setup-\(mode)-\(stamp).log")
@@ -613,9 +632,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         case "remove": args = ["--remove"]
         case "usbmap", "verbose", "update": args = extra
         default:
-            args = ["--pkg", pkg, "--sha", installSha ?? Package.sha256, "--tool", res.appendingPathComponent("NullMothSafe.efi").path,
+            args = ["--pkg", pkg, "--sha", expectedSha ?? Package.sha256, "--tool", res.appendingPathComponent("NullMothSafe.efi").path,
                     "--app", Bundle.main.executablePath ?? ""]
-            installSha = nil
             if mode == "dry" { args.append("--dry") }
             // per-system rules: this machine's profile picks the rules (nullmoth-rules.json); their knobs go to the setup script
             let prof = App.machineProfile(pciDisplays())
@@ -628,7 +646,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
             }
             args += extra
         }
-        if mode != "remove", efi != "auto", !efi.isEmpty { args += ["--efi", efi] }
+        if efi != "auto", !efi.isEmpty { args += ["--efi", efi] }
         let q = { (s: String) in "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         let cmd = "/bin/bash \(q(res.appendingPathComponent("nullmoth-setup.sh").path)) \(args.map(q).joined(separator: " ")) >> \(q(log.path)) 2>&1"
         let asrc = "do shell script \"\(cmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\" with administrator privileges"
@@ -644,9 +662,15 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
             done.signal()
             Thread.sleep(forTimeInterval: 0.4)
             sent = self.flush(log, from: sent)
-            if let err, (err[NSAppleScript.errorNumber] as? Int) == -128 { self.send("run", ["state": "cancelled", "mode": mode]); return }
+            let cancelled = (err?[NSAppleScript.errorNumber] as? Int) == -128
             let text = (try? String(contentsOf: log, encoding: .utf8)) ?? ""
-            self.send("run", ["state": "end", "mode": mode, "ok": text.contains("RESULT ok"), "log": log.path])
+            let result = text.split(separator: "\n").last(where: { $0.hasPrefix("RESULT ") })
+            let succeeded = err == nil && result == "RESULT ok"
+            DispatchQueue.main.async {
+                self.runningSetup = false
+                if cancelled { self.send("run", ["state": "cancelled", "mode": mode]) }
+                else { self.send("run", ["state": "end", "mode": mode, "ok": succeeded, "log": log.path]) }
+            }
         }
     }
     func flush(_ log: URL, from: Int) -> Int {
