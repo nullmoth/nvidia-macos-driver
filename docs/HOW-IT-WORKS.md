@@ -83,6 +83,10 @@ plugin's MPS convolution fast path is `plugin/nvconv.metal`.
 | `Kernel > Block` | `com.apple.iokit.IONDRVSupport`, `Exclude` | otherwise the firmware framebuffer takes display index 0 from NVRMFB |
 | BIOS | Above 4G Decoding on, CSM off | the card maps memory above 4 GB |
 
+Optional boot arguments, for troubleshooting: `-nvrmnoflip` keeps NVAccel on the copy path (no zero-copy scan-out
+of the composited surface) and is the first thing to try when the desktop flashes or tears while the cursor moves;
+`-nvrmnogo` leaves the GPU idle until `nvrmctl go <pass>`; `-nvrmnobootscreen` skips the boot-screen snapshot.
+
 Installing macOS itself needs different values. The macOS installer has no NVIDIA driver, so it runs on the firmware's
 screen, which only survives macOS's PCI setup with a small BAR: `ResizeAppleGpuBars = 0`, `ResizeGpuBars = -1`, and
 `IONDRVSupport` not excluded. 1401 builds the installer that way. The 1401 Mac app switches to the table above when it
