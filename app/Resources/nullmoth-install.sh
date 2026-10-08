@@ -188,6 +188,14 @@ done
 chown -R root:wheel /Library/NullMoth/kexts && chmod -R go-w /Library/NullMoth/kexts || die "cached accelerator permissions"
 echo "$MAJ" > /Library/NullMoth/os-major || die "record selected OS"
 mkdir -p "$GB" "$FW" || die "create bundle and firmware directories"
+# $GB/nvmtl is replaced wholesale below, so move the shared shader caches aside first. NVMTLLibraryLoad.m
+# reads them from NVMTL_AIRCACHE_DIR (/Library/GPUBundles/nvmtl/aircache) and uses that path whenever it is
+# writable, which is what lets every process - WindowServer included - share one persistent cache instead of
+# compiling into a private one that a reboot or a temp sweep throws away.
+CACHEKEPT=""
+for c in aircache spvcache; do
+  [ ! -d "$GB/nvmtl/$c" ] || { mv "$GB/nvmtl/$c" "$T/keep-$c" && CACHEKEPT="$CACHEKEPT $c" || die "stash $GB/nvmtl/$c"; }
+done
 for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl; do rm -rf "$GB/$b" && ditto "$HERE/Library/GPUBundles/$b" "$GB/$b" || die "copy $b (restore from $BK)"; done
 cp "$HERE/Library/GPUBundles/nvmtl-allow.txt" "$GB/" || die "copy bundle allow list"
 ditto "$HERE/Users/Shared/nvfw" "$FW" || die "copy firmware"
@@ -198,6 +206,16 @@ chown -R root:wheel "$GB/NVMTLDriver.bundle" "$GB/NVIDIAShared.bundle" "$GB/nvmt
 # ("Failed to create MetalDevice") on every start: the crash loop after install on many machines.
 chmod -R go-w,a+rX "$GB/NVMTLDriver.bundle" "$GB/NVIDIAShared.bundle" "$GB/nvmtl" && chmod 644 "$GB/nvmtl-allow.txt" || die "bundle permissions"
 sudo -u _windowserver /bin/test -r "$GB/nvmtl-allow.txt" || die "WindowServer cannot read $GB/nvmtl-allow.txt (restore from $BK)"
+# Create the shared shader caches the plugin looks for, and make them writable for every process that loads
+# it. Without them NVMTL_AIRCACHE_DIR never resolves, so each process keeps its own cache: WindowServer, which
+# compiles the compositor's pipelines on demand, re-translates them from scratch and its content renders black
+# until the translation finishes. 1777 keeps the entries writable for all of them without letting one user
+# unlink another's.
+# NOTE: this must stay AFTER the "chmod -R go-w ... $GB/nvmtl" above. That recursive chmod would otherwise
+# strip the write bits back off aircache/spvcache and the shared cache would silently stop working.
+mkdir -p "$GB/nvmtl/aircache" "$GB/nvmtl/spvcache" || die "create the shared shader caches"
+for c in $CACHEKEPT; do [ ! -d "$T/keep-$c" ] || { rm -rf "$GB/nvmtl/$c" && mv "$T/keep-$c" "$GB/nvmtl/$c" || die "restore $GB/nvmtl/$c"; }; done
+chmod 1777 "$GB/nvmtl/aircache" "$GB/nvmtl/spvcache" || die "shared shader cache permissions"
 NEWKC="$KC.nullmoth-install-new"; rm -f "$NEWKC"
 kmutil create -n aux --volume-root / ${KARG[@]+"${KARG[@]}"} -B $KB -S $KS --repository "$EXT" -A "$NEWKC" -z >"$T/kmutil2.log" 2>&1 || die "live kernel collection build failed (restore from $BK)"
 [ -s "$NEWKC" ] || die "live kernel collection build produced no output (restore from $BK)"
