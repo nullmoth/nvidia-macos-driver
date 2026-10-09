@@ -1,0 +1,163 @@
+name: Technical finding or analysis
+description: For people who have measured, traced or read the source. Root causes, timing measurements, code-level findings, corrections to earlier issues and workarounds with an explanation.
+title: "[Finding]: <component>: <what you found>"
+labels: ["technical-finding", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Some of the most useful issues here are write-ups by people who dug in themselves: a timing breakdown of the boot, a root cause traced to a specific function, a correction to an earlier finding. This form is for those.
+
+        **If you've only hit a problem and haven't investigated it, use Bug report instead.** That isn't a lesser report, it just asks different questions.
+
+        **Keep what's established separate from what's a hypothesis.** A finding that clearly says "measured on hardware" and "not yet verified" is far more useful than one that sounds certain throughout. This matters especially when an AI assistant helped with the analysis. Assistants are good at reading code and suggesting causes, but they can't run your hardware, and their explanations sound equally confident whether they're right or wrong.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of finding is this?
+      options:
+        - Root cause of a bug (observed on hardware, then traced)
+        - Performance or boot-time measurement
+        - "Code-level finding from reading the source (not observed on hardware)"
+        - Correction or follow-up to an earlier issue or finding
+        - A workaround that fixes a problem, and why it works
+        - Documentation is wrong or out of date
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Select every component that applies.
+      multiple: true
+      options:
+        - "NVRM kext (RM, GSP firmware, bring-up, BAR placement)"
+        - "NVRMFB (framebuffer, display modes, flips, hot-plug)"
+        - "NVAccel (accelerator, WindowServer composition, surfaces)"
+        - "NVRMAGDC (display policy)"
+        - "Metal plugin (NVMTLDriver.bundle)"
+        - "Shader translator (Apple AIR to SPIR-V)"
+        - "NVK / NAK (Mesa Vulkan and compiler)"
+        - 1401 Mac app or its scripts
+        - install.sh, uninstall.sh or packaging
+        - Build scripts
+        - Docs
+        - "OpenCore or firmware interaction (not driver code)"
+        - Don't know
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Two or three sentences. What happens, why, and what it affects.
+      placeholder: |
+        On cards with a 256 MB BAR1, the console framebuffer (25 MB) exceeds the 24 MB park ceiling, so every small allocation after
+        bring-up is refused about once per second. Raising the ceiling to at least the console size stops the refusals.
+    validations:
+      required: true
+
+  - type: textarea
+    id: established
+    attributes:
+      label: What is established
+      description: What you **observed or measured on real hardware**, and how. Include exact numbers, log lines and the commands that produced them.
+      placeholder: |
+        - `log show --predicate 'sender == "NVRM"' --last boot` shows "park refused" 1x/s from 00:41 onward (excerpt below).
+        - ioreg: nvrm-autogo-settle-ms = 500; BAR1 = 256 MiB.
+        - Reproduced on 3 consecutive boots.
+    validations:
+      required: true
+
+  - type: textarea
+    id: not-established
+    attributes:
+      label: What is NOT established yet
+      description: Hypotheses, parts you inferred from the code but didn't observe, other hardware you couldn't test, and anything you're unsure of. "Nothing" is rarely true. Be generous here.
+      placeholder: |
+        - Untested on Turing and on cards with a BAR1 of 4 GB or more.
+        - I believe the refusals cause the stutter, but haven't shown it directly.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs, measurements and output
+      description: Paste as-is, and say which command each block came from. Attach long logs as files.
+      render: text
+
+  - type: textarea
+    id: source-refs
+    attributes:
+      label: Source references (optional)
+      description: "Use `path/to/file.cpp:123` plus the commit hash you read. Line numbers change between commits, so the hash matters."
+      placeholder: "kexts/NVRM/NVRM.cpp:343 at b9a5a2b"
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change (optional)
+      description: A description, a diff, or a link to a branch. Mention side effects you can think of.
+      render: diff
+
+  - type: dropdown
+    id: verification
+    attributes:
+      label: How far has the proposed change been tested?
+      options:
+        - "Built and tested on real hardware: the problem is gone"
+        - "Built and tested on real hardware: partial improvement"
+        - Built, but not yet tested on hardware
+        - Not built, only described
+        - No change proposed
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Hardware and versions you tested on
+      value: |
+        NVIDIA GPU and PCI ID:
+        BAR1 size:
+        CPU and motherboard or laptop:
+        macOS version and build:
+        Driver version, or commit if built from source:
+        OpenCore version and relevant settings:
+    validations:
+      required: true
+
+  - type: input
+    id: related
+    attributes:
+      label: Related issues (optional)
+      description: Issues this explains, corrects or builds on.
+      placeholder: "Explains #23, corrects my earlier comment in #35"
+
+  - type: dropdown
+    id: ai-assist
+    attributes:
+      label: How much of this analysis came from an AI assistant?
+      description: Your answer doesn't change how the finding is treated. It tells maintainers which parts to re-check before acting on it.
+      options:
+        - "None: I did the analysis myself"
+        - An assistant helped with wording or formatting only
+        - "An assistant helped with the analysis, and I verified every claim in \"What is established\" myself"
+        - An assistant did most of the analysis and I haven't verified all of it
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: Everything under "What is established" was observed or measured by me (or the person named), not inferred or generated.
+          required: true
+        - label: I removed serial numbers and personal data from logs and attachments.
+          required: true

@@ -19,6 +19,10 @@ body:
 
         **One problem per issue.** If you have two unrelated problems, open two issues.
 
+        **Not sure it's a bug?** If you only want to know whether your hardware or macOS version is supported, use **Question**. If you've traced or measured a problem in depth, **Technical finding** is a better fit for that write-up.
+
+        You can write in your own language if English is hard for you. An English title helps other people find the issue.
+
   - type: checkboxes
     id: preflight
     attributes:

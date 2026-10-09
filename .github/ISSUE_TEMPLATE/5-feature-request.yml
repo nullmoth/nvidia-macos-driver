@@ -10,10 +10,11 @@ body:
 
         **These are outside what this driver can do, and requests for them will be closed:**
         - Support for GTX 10 (Pascal), GTX 900 (Maxwell), Kepler or older. They need a completely different kernel and firmware implementation; see [docs/CARD-SUPPORT.md](https://github.com/nullmoth/nvidia-macos-driver/blob/main/docs/CARD-SUPPORT.md).
-        - CUDA on macOS.
         - Selling, bundling or commercial use of the driver. The license forbids it.
 
         Requests for a specific macOS version, such as macOS 26 Tahoe, should say what you're able to test.
+
+        If you're only asking **whether** something is supported, use **Question** instead. You can write in your own language if English is hard for you.
 
   - type: textarea
     id: problem
@@ -55,6 +56,13 @@ body:
       placeholder: "RTX 4070 (10DE:2786), driver 1.1.0, macOS 15.8.1"
     validations:
       required: true
+
+  - type: textarea
+    id: technical
+    attributes:
+      label: Technical background (optional)
+      description: What you know about why it's missing or how it could work, such as the component involved, log lines, or how NVIDIA's open kernel modules or Mesa handle it. Mark guesses as guesses.
+      placeholder: "No adaptive sync: NVKMS refuses the hardware vblank, so the driver falls back to a timer (log line below)."
 
   - type: textarea
     id: alternatives

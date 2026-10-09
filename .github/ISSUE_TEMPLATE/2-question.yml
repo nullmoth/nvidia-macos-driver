@@ -1,0 +1,89 @@
+name: Question
+description: Ask whether your hardware or macOS version is supported, how to do something, or whether a behavior is expected. Not for reporting something broken.
+title: "[Question]: <short question>"
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Questions are welcome. Many have already been answered, so here are the common ones, all taken from the project's own docs:
+
+        | Question | Short answer |
+        | --- | --- |
+        | **Does my GTX 10 / 900 / 700 card work?** | No. The driver is built on NVIDIA's GSP firmware, which starts with **Turing** (GTX 16, RTX 20). Pascal, Maxwell, Kepler and older need a completely different kernel and firmware implementation. See [CARD-SUPPORT.md](https://github.com/nullmoth/nvidia-macos-driver/blob/main/docs/CARD-SUPPORT.md). |
+        | **Is my RTX card supported?** | Probably covered: the device table holds 235 NVIDIA PCI IDs from Turing to Blackwell. Being in the table doesn't mean the card has been tested; see "Physical validation" in [CARD-SUPPORT.md](https://github.com/nullmoth/nvidia-macos-driver/blob/main/docs/CARD-SUPPORT.md) and search issues for your card. |
+        | **Does it work on macOS 26 Tahoe?** | Not qualified yet. The package carries a separate build for Tahoe, but full hardware and application testing is still pending. See the [README](https://github.com/nullmoth/nvidia-macos-driver#1401-mac-app-easiest). macOS 15 Sequoia is the supported version. |
+        | **Will it work on my laptop?** | Only on a screen or port that is wired to the NVIDIA card. The driver doesn't implement Optimus switching, so in hybrid mode the internal screen (wired to the iGPU) can't use it. A MUX or "dGPU only" mode, or an external port wired to the NVIDIA card, is needed. |
+        | **macOS doesn't boot at all, even without the driver.** | That's an OpenCore setup problem. Follow the [Dortania OpenCore Install Guide](https://dortania.github.io/OpenCore-Install-Guide/) first, then install the driver. |
+        | **Can I sell it or bundle it with something I sell?** | No. The license is noncommercial. See [LICENSE](https://github.com/nullmoth/nvidia-macos-driver/blob/main/LICENSE). |
+
+        If something **used to work and now doesn't**, or crashes, hangs or shows the wrong picture, please use **Bug report** instead. It asks for what's needed to fix it.
+
+        You can write in your own language if English is hard for you. An English title helps other people find the issue.
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: What is your question about?
+      options:
+        - "Is my hardware supported? (GPU, CPU, laptop, motherboard)"
+        - Is my macOS version supported?
+        - How do I install, configure or remove something?
+        - Is this behavior expected or a bug?
+        - "How the driver works (architecture, design, source code)"
+        - Building from source
+        - "License, contributing or the project itself"
+        - Something else
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before asking
+      options:
+        - label: I read the short answers above, and my question isn't answered there.
+          required: true
+        - label: I searched open and closed issues for my question, including the names of my GPU and macOS version.
+          required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: Be as specific as you can. "Will it work on my PC?" can't be answered without knowing the PC; "Does the internal screen work on a Legion 5 Pro in dGPU mode?" can.
+      placeholder: My laptop has a MUX switch. If I set it to dGPU-only in the BIOS, will the internal screen work with the RTX 3070 Laptop GPU, or only the HDMI port?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Your hardware and software (if the question is about your machine)
+      description: Copy these from your machine rather than looking them up. Write "don't know" for anything you're unsure of.
+      value: |
+        Machine type (desktop / laptop / real Mac):
+        NVIDIA GPU and PCI ID (10DE:xxxx):
+        Other GPUs (iGPU, second card):
+        CPU:
+        Motherboard or laptop model:
+        Laptop graphics mode (hybrid / dGPU only / no setting):
+        macOS version (or the one you plan to install):
+        Driver and 1401 version (if installed):
+
+  - type: textarea
+    id: already-tried
+    attributes:
+      label: What you've already read or tried (optional)
+      description: Links to docs, issues or guides you followed, and where they didn't answer your question.
+
+  - type: dropdown
+    id: ai-assist
+    attributes:
+      label: How was this question written?
+      options:
+        - I wrote it myself
+        - An AI assistant helped with wording or translation
+        - An AI assistant suggested I ask this, and I've checked the details above against my machine
+    validations:
+      required: true
