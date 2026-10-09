@@ -68,6 +68,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     NvKmsKapiDisplay fDisplay = 0; NvKmsKapiConnector fConnector = 0; NvU32 fHead = 0;
     unsigned fIndex = 0; bool fOwnsHead = false;
     bool fBootConsole = false;
+    bool fInternal = false;     // NVKMS static display info: laptop panel (eDP/LVDS)
     struct NvKmsKapiDisplayMode fMode = {};
     struct NvKmsKapiMemory *fMem = nullptr; struct NvKmsKapiSurface *fSurf = nullptr;
     void *fKva = nullptr; NvU64 fPhys = 0, fSize = 0; NvU32 fPitch = 0, fW = 0, fH = 0;
@@ -226,7 +227,7 @@ public:
 };
 OSDefineMetaClassAndStructors(NVRMNVDAFramebuffer, IOFramebuffer)
 struct nvrm_dpy_rec {
-    NvKmsKapiDisplay handle; NvKmsKapiConnector connector; NvU32 headMask;
+    NvKmsKapiDisplay handle; NvKmsKapiConnector connector; NvU32 headMask; NvBool internal;
     NvU32 edidSize; NvU8 edid[NVKMS_KAPI_EDID_BUFFER_SIZE];
 };
 static struct NvKmsKapiDevice *gDev;
@@ -401,14 +402,14 @@ bool NVRMNVDAFramebuffer::kapiInit()
             }
             struct NvKmsKapiStaticDisplayInfo si = {};
             NvBool gs = dd->connected ? fKms->getStaticDisplayInfo(fDev, handles[i], &si) : NV_FALSE;
-            FBLOG("dpy %u/%u 0x%x: connected %u edid %u B connector 0x%x headMask 0x%x%s",
+            FBLOG("dpy %u/%u 0x%x: connected %u edid %u B connector 0x%x headMask 0x%x internal %u%s",
                   i, n, handles[i], dd->connected, dd->edid.bufferSize,
-                  gs ? (unsigned)si.connectorHandle : 0u, gs ? (unsigned)si.headMask : 0u,
+                  gs ? (unsigned)si.connectorHandle : 0u, gs ? (unsigned)si.headMask : 0u, gs ? (unsigned)si.internal : 0u,
                   (dd->connected && !gs) ? " STATIC INFO FAILED" : "");
             if (!dd->connected || !gs) continue;
             if (gNDpy >= (int)(sizeof gDpy / sizeof gDpy[0])) { FBLOG("dpy table full at %d", gNDpy); break; }
             struct nvrm_dpy_rec *r = &gDpy[gNDpy++];
-            r->handle = handles[i]; r->connector = si.connectorHandle; r->headMask = si.headMask;
+            r->handle = handles[i]; r->connector = si.connectorHandle; r->headMask = si.headMask; r->internal = si.internal;
             r->edidSize = dd->edid.bufferSize > sizeof r->edid ? (NvU32)sizeof r->edid : dd->edid.bufferSize;
             nvu_copy(r->edid, dd->edid.buffer, r->edidSize);
         }
@@ -474,7 +475,8 @@ bool NVRMNVDAFramebuffer::kapiInit()
     }
     {
         struct nvrm_dpy_rec *r = &gDpy[fIndex];
-        fDisplay = r->handle; fConnector = r->connector;
+        fDisplay = r->handle; fConnector = r->connector; fInternal = r->internal;
+        if (fInternal) FBLOG("fb%u: display 0x%x is internal -- reporting kIOConnectionBuiltIn", fIndex, fDisplay);
         fEdidSize = (NvU16)(r->edidSize > sizeof fEdid ? sizeof fEdid : r->edidSize);
         nvu_copy(fEdid, r->edid, fEdidSize);
         NvU32 avail = r->headMask & ~gHeadsTaken;
@@ -2246,7 +2248,7 @@ IOReturn NVRMNVDAFramebuffer::getAttributeForConnection(IOIndex connectIndex, IO
     FBSEL(attribute);
     switch (attribute) {
     case kConnectionEnable: if (value) *value = 1; FBLOG("getAFC '%s' -> enable 1", _s); return kIOReturnSuccess;
-    case kConnectionFlags:  if (value) *value = 0; return kIOReturnSuccess;
+    case kConnectionFlags:  if (value) *value = fInternal ? kIOConnectionBuiltIn : 0; return kIOReturnSuccess;
     case kConnectionColorModesSupported:       if (value) *value = 0x00000001; return kIOReturnSuccess;
     case kConnectionColorDepthsSupported:      if (value) *value = 0x00000002; return kIOReturnSuccess;
     case kConnectionControllerColorDepth:      if (value) *value = 0x00000002; return kIOReturnSuccess;
