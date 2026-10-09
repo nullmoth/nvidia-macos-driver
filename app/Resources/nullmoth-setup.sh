@@ -155,7 +155,9 @@ if [ -n "$COLLECT" ]; then
   fi
   for f in /private/tmp/nvmtl.log "${console_tmp:+${console_tmp%/}/nvmtl.log}"; do
     [ -f "$f" ] || continue
-    { echo; echo "== plugin file log"; tail -c 262144 "$f"; } >> "$COLLECT/driver-plugin-log.txt"
+    # /tmp is writable by every account: read as nobody so a planted link to a root-only file stays unreadable
+    reader=nobody; [ -n "$console_tmp" ] && [ "$f" = "${console_tmp%/}/nvmtl.log" ] && reader=$console_user
+    { echo; echo "== plugin file log"; sudo -u "$reader" tail -c 262144 "$f"; } >> "$COLLECT/driver-plugin-log.txt"
   done
   # The rolling logs above keep only the newest lines, so the boot where WindowServer actually crashed was usually
   # gone by the time the user sent logs: eight crash reports in one day named the abort ("Failed to create
