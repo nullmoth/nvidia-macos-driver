@@ -336,6 +336,22 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: gpu-connection
+    attributes:
+      label: How is that card connected?
+      description: Riser cables, adapters and enclosures can limit link speed and change how the BIOS initializes the card.
+      options:
+        - "Directly in the motherboard's main x16 slot"
+        - Directly in a secondary slot (x16-sized but running at x8, x4 or x1)
+        - "Through a PCIe riser cable (vertical mount, small form factor case)"
+        - "Through an M.2-to-PCIe adapter"
+        - "External enclosure (Thunderbolt, USB4 or OCuLink)"
+        - Built into a laptop
+        - Don't know
+    validations:
+      required: true
+
   - type: textarea
     id: all-gpus
     attributes:
@@ -367,20 +383,6 @@ body:
     validations:
       required: true
 
-  - type: dropdown
-    id: laptop-mux
-    attributes:
-      label: "Laptops only: how is the internal screen wired?"
-      description: The driver doesn't implement Optimus switching. If the internal panel is wired only to the iGPU, the NVIDIA card can't drive it.
-      options:
-        - Not a laptop
-        - "MUX switch or BIOS set to dedicated GPU only (dGPU drives the panel)"
-        - "Optimus / hybrid, panel wired to the iGPU (no MUX, or MUX left on hybrid)"
-        - Advanced Optimus or automatic switching
-        - Don't know
-    validations:
-      required: true
-
   - type: textarea
     id: displays
     attributes:
@@ -395,6 +397,110 @@ body:
       required: true
 
   # ------------------------------------------------------------------
+  # Laptops
+  # ------------------------------------------------------------------
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        ## Laptops only
+
+        **Desktop users:** answer "Not a laptop" to the first question and skip the rest of this section.
+
+        Most gaming laptops have two GPUs, and **which one is wired to which screen** decides what this driver can do. The driver runs only on the NVIDIA card and doesn't implement Optimus switching. That means:
+        - **Hybrid / Optimus mode:** the internal screen is wired to the iGPU, so the NVIDIA card can't light it. External ports wired to the NVIDIA card may still work.
+        - **Discrete / dGPU-only / MUX mode:** the NVIDIA card drives the internal screen. This is the mode most likely to work.
+        - **iGPU-only / Eco mode:** the NVIDIA card is powered off, and the driver has nothing to run on.
+
+  - type: dropdown
+    id: laptop-gpu-mode
+    attributes:
+      label: Which graphics mode is the laptop in when it boots macOS?
+      description: Vendors use different names. Pick the one that matches what the mode **does**.
+      options:
+        - Not a laptop
+        - "Hybrid / Optimus / MSHybrid / Standard / Switchable (iGPU drives the screen, NVIDIA renders)"
+        - "Discrete / dGPU only / Ultimate / MUX set to NVIDIA (NVIDIA drives the screen)"
+        - "iGPU only / Eco / Integrated / dGPU disabled (NVIDIA card switched off)"
+        - "Auto / Advanced Optimus / Dynamic display switching (the laptop switches by itself)"
+        - My laptop has no graphics mode setting
+        - Don't know
+    validations:
+      required: true
+
+  - type: dropdown
+    id: laptop-mode-where
+    attributes:
+      label: "Laptops only: where is that mode set?"
+      description: Select every option that applies. Modes set from Windows apps are usually stored in the firmware and still apply when macOS boots.
+      multiple: true
+      options:
+        - "BIOS setup (\"Display Mode\", \"Graphics Device\", \"Hybrid Graphics\", \"Discrete Graphics\", \"MSHybrid\")"
+        - "ASUS Armoury Crate or G-Helper (GPU Mode / MUX Switch)"
+        - "Lenovo Vantage or Legion Space (Hybrid Mode, GPU Working Mode)"
+        - "MSI Center (GPU Switch)"
+        - "HP OMEN Gaming Hub (Graphics Switcher)"
+        - "Dell / Alienware Command Center or BIOS (Advanced Optimus, Hybrid Graphics)"
+        - "Razer Synapse (GPU Mode)"
+        - "Gigabyte / Aorus Control Center"
+        - "Clevo, Tongfang or other ODM Control Center"
+        - "NVIDIA Control Panel (Manage Display Mode)"
+        - A Fn key combination or hardware switch
+        - "Not applicable: no mode setting, or not a laptop"
+        - Don't know
+
+  - type: dropdown
+    id: laptop-mode-applied
+    attributes:
+      label: "Laptops only: after the last mode change, did the laptop fully restart before booting macOS?"
+      description: Most MUX changes take effect only after a full restart, and some need two. Booting straight into OpenCore after changing the mode in Windows can leave the old wiring active.
+      options:
+        - "Yes, I restarted (or shut down and powered on) after changing the mode"
+        - "No, I changed the mode and booted macOS on the next start"
+        - "I never changed the mode, it's the factory setting"
+        - "Not applicable: not a laptop"
+        - Don't know
+
+  - type: dropdown
+    id: laptop-panel-wiring
+    attributes:
+      label: "Laptops only: which GPU is the internal screen wired to?"
+      description: |
+        Check the laptop's spec sheet or service manual, or a review that tests the MUX. Notebookcheck usually says.
+        In Windows on the same mode, NVIDIA Control Panel lists the internal screen under the NVIDIA card only when the card drives it.
+      options:
+        - "Always the iGPU (no MUX)"
+        - "Always the NVIDIA card (no iGPU path)"
+        - Switchable with a MUX, and it's set to the NVIDIA card now
+        - Switchable with a MUX, and it's set to the iGPU now
+        - "Not applicable: not a laptop"
+        - Don't know
+
+  - type: textarea
+    id: laptop-ports
+    attributes:
+      label: "Laptops only: which GPU is each external video port wired to?"
+      description: |
+        One line per port. Sources are the same as above. In Windows on the same mode, plug a monitor into the port and see whether NVIDIA Control Panel lists it under the NVIDIA card.
+        Write "don't know" for any port you haven't checked, and say which ports you actually tried in macOS.
+      value: |
+        HDMI:
+        USB-C / Thunderbolt (DisplayPort Alt Mode):
+        Mini DisplayPort:
+        Tried in macOS:
+
+  - type: dropdown
+    id: laptop-power
+    attributes:
+      label: "Laptops only: power while testing"
+      options:
+        - "Plugged in (AC adapter)"
+        - On battery
+        - Both, with the same result
+        - Both, with different results (describe in "What happens")
+        - "Not applicable: not a laptop"
+
+  # ------------------------------------------------------------------
   # Firmware
   # ------------------------------------------------------------------
   - type: markdown
@@ -403,7 +509,27 @@ body:
         ---
         ## BIOS / UEFI settings
 
-        Check these in the BIOS itself, don't answer from memory. Names differ by vendor: Above 4G Decoding is also called "Above 4GB MMIO" or "64-bit BAR". Resizable BAR is also called "Re-Size BAR" or "Smart Access Memory".
+        Check these in the BIOS itself; don't answer from memory. Many laptop BIOSes hide most of these settings. In that case answer "Not in my BIOS".
+
+        Names differ by vendor:
+        - **Above 4G Decoding:** "Above 4GB MMIO", "64-bit BAR", "Memory Mapped I/O above 4GB"
+        - **Resizable BAR:** "Re-Size BAR Support", "Smart Access Memory", "Clever Access Memory"
+        - **CSM:** "Compatibility Support Module", "Legacy Support", "Boot Mode: UEFI / Legacy"
+        - **Primary display:** "Initial Display Output", "Primary Graphics Adapter", "Init Display First"
+        - **VT-d:** "Intel Virtualization Technology for Directed I/O"; on AMD, "IOMMU"
+
+  - type: dropdown
+    id: bios-reset
+    attributes:
+      label: Has the BIOS been updated, reset to defaults or had its CMOS cleared since you configured it for macOS?
+      description: A BIOS update or CMOS reset puts every setting back to default, and that commonly breaks a setup that worked before.
+      options:
+        - "No"
+        - Yes, and I set everything again and checked it
+        - Yes, and I haven't checked the settings since
+        - Don't know
+    validations:
+      required: true
 
   - type: dropdown
     id: above4g
@@ -417,9 +543,19 @@ body:
     id: rebar
     attributes:
       label: Resizable BAR
-      options: ["On", "Off", Not in my BIOS, Don't know]
+      options: ["On", "Off", "Not in my BIOS", "In my BIOS, but greyed out or not available", Don't know]
     validations:
       required: true
+
+  - type: input
+    id: bar1-size
+    attributes:
+      label: BAR1 size of the NVIDIA card, as reported outside macOS (optional, very useful)
+      description: |
+        This shows whether Resizable BAR actually took effect, not just whether the setting is on.
+        - **Windows:** run `nvidia-smi -q -d MEMORY` in a terminal and copy the **BAR1 Memory Usage > Total** line. GPU-Z also shows "Resizable BAR: Enabled / Disabled".
+        - **Linux:** `nvidia-smi -q -d MEMORY`, or `sudo lspci -vv -d 10de:` and copy the `Region 1` line.
+      placeholder: "BAR1 Total 8192 MiB (GPU-Z: Resizable BAR Enabled)"
 
   - type: dropdown
     id: csm
@@ -438,6 +574,15 @@ body:
       required: true
 
   - type: dropdown
+    id: fast-boot
+    attributes:
+      label: Fast Boot
+      description: On some boards, Fast Boot skips the graphics card's firmware (GOP) at startup, so the OpenCore picker shows on no screen or only on the iGPU.
+      options: ["Off", "On", "Ultra Fast", Not in my BIOS, Don't know]
+    validations:
+      required: true
+
+  - type: dropdown
     id: primary-display
     attributes:
       label: Primary or initial display adapter in BIOS
@@ -445,12 +590,69 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: boot-screen
+    attributes:
+      label: Where do the BIOS logo and the OpenCore picker appear?
+      description: This shows which GPU the firmware starts on, which is what OpenCore and the start of macOS boot see.
+      options:
+        - On a monitor connected to the NVIDIA card
+        - "On a monitor connected to the motherboard's video ports (iGPU)"
+        - "On the laptop's internal screen"
+        - "On no screen: everything stays black until macOS (or the driver) starts"
+        - The BIOS logo shows, but the OpenCore picker never appears
+        - Don't know
+    validations:
+      required: true
+
+  - type: dropdown
+    id: pcie-speed
+    attributes:
+      label: PCIe link speed for the graphics slot
+      description: Usually "PCIEX16 Link Speed", "PCIe Slot Configuration" or "PEG Port Configuration". Riser cables often need it forced lower.
+      options: ["Auto", "Gen 5", "Gen 4", "Gen 3", "Gen 2 or lower", Not in my BIOS, Don't know]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: vtd
+    attributes:
+      label: VT-d (Intel) / IOMMU (AMD)
+      description: If it's on, say in the notes below whether OpenCore's `DisableIoMapper` quirk is enabled.
+      options: ["Off", "On", Not in my BIOS, Don't know]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: igpu-multimonitor
+    attributes:
+      label: "iGPU Multi-Monitor (Intel) / Integrated Graphics set to Force (AMD)"
+      description: Keeps the iGPU enabled alongside a dedicated card. Skip this if your CPU has no iGPU.
+      options: ["Off", "On", Not in my BIOS, "Not applicable: no iGPU", Don't know]
+
+  - type: dropdown
+    id: aspm
+    attributes:
+      label: PCIe power management (ASPM / Native ASPM)
+      description: Can affect sleep and wake and dGPU power on some boards.
+      options: ["Auto", "On / Enabled", "Off / Disabled", Not in my BIOS, Don't know]
+
   - type: textarea
     id: bios-other
     attributes:
       label: Other BIOS changes or notes (optional)
-      description: VT-d, CFG Lock, a VBIOS update for Resizable BAR, PCIe generation forced, and so on.
-      placeholder: VT-d off. Updated the card's VBIOS to enable ReBAR in March.
+      description: |
+        For example:
+        - CFG Lock
+        - DVMT Pre-Allocated (iGPU memory)
+        - Resizable BAR size, if your BIOS lets you choose it
+        - a VBIOS update for the card to support Resizable BAR
+        - OpenCore's `DisableIoMapper` quirk
+        - Thunderbolt / USB4 security level (for eGPUs)
+        - anything you changed from defaults that isn't listed above
+      placeholder: |
+        CFG Lock off. DVMT 64M. Updated the card's VBIOS from the vendor's site to enable ReBAR.
+        VT-d on with DisableIoMapper true.
 
   # ------------------------------------------------------------------
   # OpenCore and macOS
@@ -548,6 +750,8 @@ body:
         - "The driver's kexts (NVRM, NVAccel, NVRMFB, NVRMAGDC) also copied into EFI/OC/Kexts"
         - "AMD CPU kernel patches (AMD Vanilla)"
         - "-wegnoegpu or disable-gpu for any card"
+        - "An SSDT or ACPI patch that powers off the dGPU (SSDT-dGPU-Off, _OFF / _PS3 patches), common in laptop guides"
+        - "-igfxvesa, -radvesa or another software-rendering boot-arg"
         - Don't know
     validations:
       required: true

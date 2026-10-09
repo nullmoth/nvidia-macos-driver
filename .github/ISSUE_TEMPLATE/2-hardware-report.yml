@@ -75,13 +75,33 @@ body:
       label: Machine type
       options:
         - Desktop PC
-        - "Laptop, dGPU drives the panel (MUX or dGPU-only)"
-        - "Laptop, Optimus / hybrid"
+        - Laptop
         - Mini PC or small form factor PC
         - External GPU
         - Real Intel Mac
     validations:
       required: true
+
+  - type: dropdown
+    id: laptop-gpu-mode
+    attributes:
+      label: "Laptops: graphics mode when booting macOS"
+      description: Set in the BIOS or a vendor app (Armoury Crate, Lenovo Vantage, MSI Center, OMEN Gaming Hub and so on).
+      options:
+        - Not a laptop
+        - "Hybrid / Optimus / MSHybrid (iGPU drives the internal screen)"
+        - "Discrete / dGPU only / Ultimate / MUX set to NVIDIA (NVIDIA drives the internal screen)"
+        - "Auto / Advanced Optimus"
+        - No graphics mode setting
+        - Don't know
+    validations:
+      required: true
+
+  - type: input
+    id: laptop-outputs
+    attributes:
+      label: "Laptops: which screens and ports worked in macOS"
+      placeholder: "internal screen yes, HDMI yes, USB-C DisplayPort no (wired to iGPU)"
 
   - type: input
     id: versions
