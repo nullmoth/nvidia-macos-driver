@@ -28,6 +28,8 @@ elif name=='kmutil':
   else:print('org.example.Other')
 elif name=='rm':
  if os.environ.get('FAKE_REMOVE_TREE_FAIL') and str(r/'Library/Extensions/NVAccel.kext') in a:sys.exit(9)
+ if os.environ.get('FAKE_TERM_AFTER_NVRM') and str(r/'Library/Extensions/NVRM.kext') in a:
+  import signal,subprocess;subprocess.run(['/bin/rm']+a);os.kill(os.getppid(),signal.SIGTERM);sys.exit(0)
  os.execv('/bin/rm',['rm']+a)
 elif name=='nvram':
  p=r/'remove-flag'
@@ -92,6 +94,10 @@ class Recovery(unittest.TestCase):
         r=self.run_remove(FAKE_REMOVE_TREE_FAIL='1');self.assertNotEqual(r.returncode,0)
         self.assertTrue((self.ext/'NVAccel.kext').exists());self.assertEqual(self.kc.read_bytes(),b'LIVE_WITH_NV')
         self.assertEqual(self.version.read_text(),'1.0.7')
+    def test_term_signal_mid_removal_restores_previous_files(self):
+        r=self.run_remove(FAKE_TERM_AFTER_NVRM='1');self.assertNotEqual(r.returncode,0);self.assertIn('signal TERM',r.stderr)
+        self.assertTrue((self.ext/'NVRM.kext/Contents/MacOS/NVRM').exists());self.assertEqual(self.kc.read_bytes(),b'LIVE_WITH_NV')
+        self.assertEqual(self.version.read_text(),'1.0.7');self.assertFalse(Path(str(self.kc)+'.nullmoth-remove-new').exists())
     def test_final_inspection_failure_is_not_reported_as_success(self):
         r=self.run_remove(FAKE_FINAL_INSPECT_FAIL='1');self.assertNotEqual(r.returncode,0)
         self.assertIn('cannot verify',r.stderr)

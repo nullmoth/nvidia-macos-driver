@@ -29,6 +29,9 @@ die() {
   [ -z "$NEWKC" ] || rm -f "$NEWKC"
   exit 1
 }
+trap 'die "uninstaller interrupted (signal HUP)"' HUP
+trap 'die "uninstaller interrupted (signal INT)"' INT
+trap 'die "uninstaller interrupted (signal TERM)"' TERM
 [ "$(id -u)" -eq 0 ] || die "run with sudo"
 BK=${1:-}
 [ -z "$BK" ] || [ -d "$BK" ] || die "no backup at $BK"
