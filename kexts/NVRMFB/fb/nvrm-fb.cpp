@@ -167,6 +167,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     static inline volatile SInt32 sFlipLatched[8] = {};
     bool flipToMemory(struct NvKmsKapiMemory *mem, unsigned w, unsigned h, unsigned pitch, int *rcOut, bool pure = false, UInt64 cookie = 0);
     bool fSubmissionSeen = false, fSubmissionFaulted = false;
+    unsigned fRejected = 0;     // commits NVKMS refused on this head, for NVRMRejectedCommits
     NvBool submitConfig(struct NvKmsKapiRequestedModeSetConfig *cfg, struct NvKmsKapiModeSetReplyConfig *rep, NvBool commit,
                         bool bootstrap = false, bool cursorOnly = false);
     thread_call_t fReflip = nullptr;
@@ -1066,12 +1067,26 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
         // KAPI resets and advances the layer's completion-notifier slot before it submits (its own comment: "What if
         // commit fail?"), so after a rejection the current slot is one NVKMS will never write and reads NOT_BEGUN
         // forever. The previous flip was already proven complete above (or nothing was tracked), so forget it here;
-        // the next accepted flip gets a fresh slot that NVKMS does write.
-        fSubmissionSeen = false;
-        static unsigned rejected;
-        if (++rejected <= 8) FBLOG("commit rejected on head %u result %d (this request only)", fHead, (int)rep->flipResult);
+        // the next accepted flip gets a fresh slot that NVKMS does write. A cursor-only request never advanced it.
+        if (!cursorOnly) fSubmissionSeen = false;
+        // Per head, first 8 then every 64th: the old global cap of 8 was used up by the login cursor rejections,
+        // so later rejections (e.g. after a refresh change on the other head) left no trace.
+        if (++fRejected <= 8 || (fRejected % 64) == 0) {
+            const struct NvKmsKapiHeadRequestedConfig *h = &cfg->headRequestedConfig[fHead];
+            const struct NvKmsKapiLayerRequestedConfig *p = &h->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX];
+            FBLOG("commit rejected on head %u result %d accepted %u (#%u) | heads 0x%x active %u mode/act/dpy chg %u%u%u "
+                  "primary surf %u chg %u src %ux%u dst %ux%u | cursor surf %u chg %u",
+                  fHead, (int)rep->flipResult, (unsigned)accepted, fRejected, cfg->headsMask,
+                  (unsigned)h->modeSetConfig.bActive, (unsigned)h->flags.modeChanged, (unsigned)h->flags.activeChanged,
+                  (unsigned)h->flags.displaysChanged, p->config.surface ? 1u : 0u, (unsigned)p->flags.surfaceChanged,
+                  (unsigned)p->config.srcWidth, (unsigned)p->config.srcHeight, (unsigned)p->config.dstWidth,
+                  (unsigned)p->config.dstHeight, h->cursorRequestedConfig.surface ? 1u : 0u,
+                  (unsigned)h->cursorRequestedConfig.flags.surfaceChanged);
+        }
+        setProperty("NVRMRejectedCommits", (unsigned long long)fRejected, 32);
         return NV_FALSE;
     }
+    if (cursorOnly) return NV_TRUE;
     if (!tracked) { fSubmissionSeen = false; return NV_TRUE; }
     fSubmissionSeen = true;
     // Initial acceptance permits console handoff, never surface retirement. The owned boot surface remains pinned.
