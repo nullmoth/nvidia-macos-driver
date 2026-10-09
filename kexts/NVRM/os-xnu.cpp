@@ -193,11 +193,44 @@ void  NV_API_CALL os_put_pid_info(void *pid_info) { NV_XNU_TRC;}
 NV_STATUS NV_API_CALL os_find_ns_pid(void *pid_info, NvU32 *ns_pid) { NV_XNU_TRC; return NV_ERR_NOT_SUPPORTED; }
 NV_STATUS NV_API_CALL os_get_random_bytes(NvU8 *buf, NvU16 n) { NV_XNU_TRC; read_random(buf, n); return NV_OK; }
 
-static nv_xnu_pci_slot nv_xnu_slots[8];
+#define NV_XNU_MAX_PCI 256
+static nv_xnu_pci_slot nv_xnu_slots[NV_XNU_MAX_PCI];
 static int nv_xnu_nslots;
 void nv_xnu_register_pci(IOPCIDevice *pci, NvU32 domain, NvU8 bus, NvU8 slot, NvU8 function)
 {
-    if (nv_xnu_nslots < 8) { nv_xnu_slots[nv_xnu_nslots++] = { pci, domain, bus, slot, function }; }
+    if (!pci) return;
+    for (int i = 0; i < nv_xnu_nslots; i++) {
+        nv_xnu_pci_slot *s = &nv_xnu_slots[i];
+        if (s->pci == pci ||
+            (s->domain == domain && s->bus == bus && s->slot == slot && s->function == function)) {
+            return; // already registered
+        }
+    }
+    if (nv_xnu_nslots < NV_XNU_MAX_PCI) { nv_xnu_slots[nv_xnu_nslots++] = { pci, domain, bus, slot, function }; }
+}
+
+// The RM enumerates the whole PCI tree through os_pci_init_handle to find the
+// host bridge (FHB), root ports and P2P bridges for its chipset object. Only the
+// GPU used to be registered here, so that enumeration came up empty and the RM
+// logged "FHB/P2P/3DCTRL not found in cached bus topology" + "Unable to get PCI
+// port handles". Walk every IOPCIDevice in the IORegistry and register them all
+// so the RM sees the real topology.
+void nv_xnu_register_all_pci(void)
+{
+    OSDictionary *match = IOService::serviceMatching("IOPCIDevice");
+    if (!match) return;
+    OSIterator *it = IOService::getMatchingServices(match);
+    if (it) {
+        OSObject *obj;
+        while ((obj = it->getNextObject()) != NULL) {
+            IOPCIDevice *pd = OSDynamicCast(IOPCIDevice, obj);
+            if (pd) {
+                nv_xnu_register_pci(pd, 0, pd->getBusNumber(), pd->getDeviceNumber(), pd->getFunctionNumber());
+            }
+        }
+        it->release();
+    }
+    match->release();
 }
 void *NV_API_CALL os_pci_init_handle(NvU32 domain, NvU8 bus, NvU8 slot, NvU8 function, NvU16 *vendor, NvU16 *device)
 { NV_XNU_TRC;

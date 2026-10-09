@@ -1,0 +1,36 @@
+diff --git a/src/nvidia/src/kernel/gpu/fsp/kern_fsp.c b/src/nvidia/src/kernel/gpu/fsp/kern_fsp.c
+index b4dc535..5460620 100644
+--- a/src/nvidia/src/kernel/gpu/fsp/kern_fsp.c
++++ b/src/nvidia/src/kernel/gpu/fsp/kern_fsp.c
+@@ -261,7 +261,15 @@ kfspCleanupBootState_IMPL
+ )
+ {
+     OBJTMR *pTmr = GPU_GET_TIMER(pGpu);
+-    tmrEventDestroy(pTmr, pKernelFsp->pPollEvent);
++    // NM: kfspCleanupBootState runs both from the failed: path of
++    // kfspSendBootCommands and again from kfspStateDestroy; destroying the same
++    // tmrEvent twice faults on the freed event (seen: page fault at 0x1010 in
++    // nv_destroy_nano_timer + 0x33). Destroy it once and forget the pointer.
++    if (pKernelFsp->pPollEvent != NULL)
++    {
++        tmrEventDestroy(pTmr, pKernelFsp->pPollEvent);
++        pKernelFsp->pPollEvent = NULL;
++    }
+ 
+     portMemFree(pKernelFsp->pCotPayload);
+     pKernelFsp->pCotPayload = NULL;
+diff --git a/src/nvidia/src/kernel/gpu/timer/timer_ostimer.c b/src/nvidia/src/kernel/gpu/timer/timer_ostimer.c
+index d51e7fe..a89cb18 100644
+--- a/src/nvidia/src/kernel/gpu/timer/timer_ostimer.c
++++ b/src/nvidia/src/kernel/gpu/timer/timer_ostimer.c
+@@ -218,6 +218,10 @@ NV_STATUS tmrEventDestroyOSTimer_OSTIMER
+     {
+         // Cancel the callback of OS timer
+         status = osDestroyNanoTimer(pGpu->pOsGpuInfo, pTmrEvent->super.pOSTmrCBdata);
++        // NM: clear the handle after destroying it — a second destroy of the
++        // same event (retry paths call kfspCleanupBootState twice) otherwise
++        // faults in nv_destroy_nano_timer on the freed/stale handle.
++        pTmrEvent->super.pOSTmrCBdata = NULL;
+         pTmrEvent->super.flags &= ~TMR_FLAG_OS_TIMER_QUEUED;
+     }
+     else
