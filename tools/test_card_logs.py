@@ -47,6 +47,7 @@ with tempfile.TemporaryDirectory(prefix="nullmoth-card-log-tests-") as directory
         "csrutil": "echo 'fixture'\n",
         "stat": "echo root\n",
         "ls": "exit 0\n",
+        "sudo": 'echo "$*" >> "$(dirname "$0")/sudo-calls"; shift 2; exec "$@"\n',
     }
     for name, body in mocks.items():
         path = commands / name
@@ -76,6 +77,7 @@ with tempfile.TemporaryDirectory(prefix="nullmoth-card-log-tests-") as directory
     plugin = (collection / "driver-plugin-log.txt").read_text()
     assert "log show exit: 3" in kernel and "GSP ring fixture" in kernel
     assert "log show exit: 3" in plugin and "vkCreateDevice -> -8" in plugin
+    assert "-u nobody tail -c 262144 " + str(filelog) in (commands / "sudo-calls").read_text()
     update = (collection / "driver-update-log.txt").read_text()
     assert "log show exit: 3" in update and "apfs: DONE reverting to snapshot fixture" in update
     print("PASS NVIDIA identifiers, BARs, query failures, kernel ring, plugin errors, and update context retained")
