@@ -17,7 +17,7 @@ KARG=(--allow-missing-kdk); [ -f "$K" ] && KARG+=(--kernel "$K")
 KB=/System/Library/KernelCollections/BootKernelExtensions.kc
 KS=/System/Library/KernelCollections/SystemKernelExtensions.kc
 BK=""; LOCKDIR=/Library/NullMoth/install.lock; LOCK_HELD=0; LOCK_RELEASE_OK=1; LOCK_ID=""
-INSTALLING=0; NEWKC=""
+INSTALLING=0; NEWKC=""; STAGE=""
 release_install_lock() {
   if [ "$LOCK_HELD" = 1 ] && [ "$LOCK_RELEASE_OK" = 1 ]; then
     if [ -z "$LOCK_ID" ] || [ -L "$LOCKDIR" ] || [ ! -d "$LOCKDIR" ] ||
@@ -111,7 +111,8 @@ backup_copy() {
     die "back up $component"
   fi
 }
-trap release_install_lock EXIT
+finish_install() { [ -z "$STAGE" ] || rm -rf "$STAGE"; release_install_lock; }
+trap finish_install EXIT
 trap 'die "installer interrupted (signal HUP)"' HUP
 trap 'die "installer interrupted (signal INT)"' INT
 trap 'die "installer interrupted (signal TERM)"' TERM
@@ -155,6 +156,17 @@ CARD=""; for i in $NV_IDS; do case " $(echo $SUPPORTED_IDS) " in *" $i "*) CARD=
 ok "macOS $v, x86_64, NVIDIA GPU present"
 
 step "2. package integrity"
+# The extracted package is usually writable by the logged-in user, so a process running as that user could swap a kext
+# between this check and the copy into /Library/Extensions. Check and install a root-owned private copy instead.
+SELF=$(cd "$(dirname "$0")" && pwd)
+STAGE=$(mktemp -d /var/tmp/nullmoth-package.XXXXXX) && [ -n "$STAGE" ] && [ -d "$STAGE" ] || die "create private package copy"
+cp -cR "$HERE" "$STAGE/pkgroot" 2>/dev/null || { rm -rf "$STAGE/pkgroot"; ditto "$HERE" "$STAGE/pkgroot"; } && chown -R root:wheel "$STAGE" && chmod -R go-w "$STAGE" || die "copy package to $STAGE"
+# shasum follows links: a link to an identical file outside the copy passes the check and can still change later.
+while IFS= read -r -d '' link; do
+  case "$(readlink "$link")" in /*|..|../*|*/..|*/../*) die "package holds a link that leaves the package: ${link#"$STAGE/pkgroot/"}";; esac
+done < <(find "$STAGE/pkgroot" -type l -print0)
+[ "$SELF" = "$HERE" ] && SELF="$STAGE/pkgroot"
+HERE="$STAGE/pkgroot"
 # --strict: without it shasum skips a malformed line and still reports success
 (cd "$HERE" && shasum -a 256 --strict -c SHA256SUMS --quiet) || die "SHA256SUMS mismatch: re-download the package"
 for target in 15 26; do
@@ -162,7 +174,7 @@ for target in 15 26; do
     [ -f "$HERE/Library/NullMoth/kexts/$target/NVAccel.kext/Contents/Info.plist" ] || die "this package lacks the complete macOS $target accelerator"
 done
 ok "every file matches SHA256SUMS and both OS accelerators are present"
-RUNTIME_PREFLIGHT="$(cd "$(dirname "$0")" && pwd)/nullmoth-runtime-check.sh"
+RUNTIME_PREFLIGHT="$SELF/nullmoth-runtime-check.sh"
 [ -x "$RUNTIME_PREFLIGHT" ] || die "runtime compatibility checker is missing"
 /bin/bash "$RUNTIME_PREFLIGHT" "$HERE" "$v" || die "userland runtime cannot load on this macOS version"
 
