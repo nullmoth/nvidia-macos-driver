@@ -691,6 +691,29 @@ static bool nvrmRangeBusy(UInt64 lo, UInt64 hi, IOPCIDevice *self, IOPCIDevice *
     return busy;
 }
 
+// True when the bus numbers advertised by a root port contain another PCI function. When BAR1 is moved,
+// placeLargeBar1() replaces that root port's prefetchable window, so a sibling behind the same port must keep
+// the old forwarding window and makes the move unsafe.
+static bool nvrmBusRangeHasOtherDevices(UInt8 first, UInt8 last, IOPCIDevice *self)
+{
+    IORegistryIterator *it = IORegistryIterator::iterateOver(gIOServicePlane, kIORegistryIterateRecursively);
+    if (!it) return true;  // Fail closed: do not replace a bridge window if the bus range cannot be checked.
+    bool found = false;
+    while (OSObject *e = it->getNextObject()) {
+        IOPCIDevice *d = OSDynamicCast(IOPCIDevice, e);
+        if (!d || d == self) continue;
+        const UInt8 bus = d->getBusNumber();
+        if (bus >= first && bus <= last) {
+            LOG("bar1: root port bus range %u-%u also contains PCI device %u:%u:%u",
+                first, last, bus, d->getDeviceNumber(), d->getFunctionNumber());
+            found = true;
+            break;
+        }
+    }
+    it->release();
+    return found;
+}
+
 bool NVRM::placeLargeBar1()
 {
     static const UInt64 kBigBase = 0x10000000000ULL;
@@ -771,7 +794,14 @@ bool NVRM::placeLargeBar1()
     }
     UInt32 busr = rp->configRead32(0x18);
     UInt8 sec = (busr >> 8) & 0xff, sub = (busr >> 16) & 0xff, mybus = fPCI->getBusNumber();
-    if (sec != mybus || sub != mybus) { LOG("bar1: root port spans buses %u-%u, not only ours (%u) — not placing", sec, sub, mybus); return false; }
+    if (sec != mybus || sub < mybus) { LOG("bar1: root port bus range %u-%u does not cover our bus %u — not placing", sec, sub, mybus); return false; }
+    // Firmware can leave unused subordinate bus numbers reserved (for example, GPU bus 1 with range 1-5).
+    // Accept that range only when no other PCI function occupies it: changing the root port's window would
+    // otherwise stop forwarding the sibling's BARs.
+    if (sub > mybus && nvrmBusRangeHasOtherDevices(sec, sub, fPCI)) {
+        LOG("bar1: root port range %u-%u has other PCI devices — not placing", sec, sub);
+        return false;
+    }
     UInt32 rp24 = rp->configRead32(0x24), rp28 = rp->configRead32(0x28), rp2c = rp->configRead32(0x2c);
     if ((rp24 & 0xf) != 1) { LOG("bar1: root port prefetchable window is not 64-bit (0x%x) — not placing", rp24); return false; }
     LOG("bar1: placing BAR1 %llu MB @0x%llx, BAR3 %llu MB @0x%llx, root port window 0x%llx-0x%llx (was 0x%08x %08x/%08x)",
