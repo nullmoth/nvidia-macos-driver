@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The iGPU mode planner turns a panel EDID into Intel's transcoder/pipe/plane values. Checked against 20 recorded
-laptops (igfx_check.py, 20/20); here a synthetic EDID per display version, including the ADL+ VBLANK_START rule."""
+laptops (igfx_check.py, 20/20); here a synthetic EDID per display version, including the ADL+ VBLANK_START rule, and a
+synthetic VBT for the panel power sequence and backlight PWM (also 20/20 recorded)."""
 import os
 import sys
 import unittest
@@ -14,6 +15,7 @@ def edid_1080p():
     # 1920x1080, htotal 2085 (hblank 165), vtotal 1176 (vblank 96), hsync +48/32, vsync +3/5, 147.0 MHz
     d = bytes([0x6C, 0x39, 0x80, 0xA5, 0x70, 0x38, 0x60, 0x40, 0x30, 0x20, 0x35, 0x00, 0, 0, 0, 0, 0, 0x1A])
     e[54:72] = d
+    e[8:18] = bytes.fromhex("09e5e90800000000271d")   # PnP id of a BOE panel (one recorded HP's)
     return bytes(e)
 
 
@@ -39,6 +41,47 @@ class Plan(unittest.TestCase):
     def test_negative_control_no_detailed_timing_is_refused(self):
         with self.assertRaises(ValueError):
             P.preferred_timing(bytes(128))
+
+    def test_vbt_panel_type_picks_the_power_sequence_and_backlight(self):
+        p = P.vbt_panel(vbt(panel_type=2), edid_1080p())
+        self.assertEqual((p["panel_type"], p["t1_t3"], p["t10"], p["t11_t12"], p["pwm_hz"]), (2, 2000, 500, 5000, 200))
+        r = P.panel_plan(p, 13)
+        self.assertEqual(r["PP_ON_DELAYS"], 0x07D00001)
+        self.assertEqual(r["PP_OFF_DELAYS"], 0x01F40001)
+        self.assertEqual(r["PP_CYCLE"], 6)
+        self.assertEqual(r["BLC_PWM_PCH_CTL2"], 96000)   # 19.2 MHz / 200 Hz
+
+    def test_panel_type_255_matches_the_edid_pnp_id(self):
+        p = P.vbt_panel(vbt(panel_type=0xFF, pnp_at=5), edid_1080p())
+        self.assertEqual(p["panel_type"], 5)
+
+    def test_arrow_lake_backlight_counts_a_38_4_mhz_clock(self):
+        # the 7-245HX recording wrote 192000 for a 200 Hz VBT; a 19.2 MHz clock would give 96000 and a dark-or-dim panel
+        r = P.panel_plan(P.vbt_panel(vbt(panel_type=2), edid_1080p()), 14)
+        self.assertEqual(r["BLC_PWM_PCH_CTL2"], 192000)
+        self.assertNotEqual(r["BLC_PWM_PCH_CTL2"], P.panel_plan(P.vbt_panel(vbt(panel_type=2), edid_1080p()), 13)["BLC_PWM_PCH_CTL2"])
+
+    def test_negative_control_not_a_vbt_is_refused(self):
+        with self.assertRaises(ValueError):
+            P.vbt_blocks(b"\0" * 64)
+
+
+def vbt(panel_type, pnp_at=None):
+    """Minimal VBT: header, BDB with LVDS_OPTIONS (40), EDP power sequences (27), LFP_DATA (42), LFP_BACKLIGHT (43)."""
+    import struct
+    seqs = b"".join(struct.pack("<5H", 2000, 10, 2000, 500, 5000) if i == (pnp_at if panel_type == 0xFF else panel_type)
+                    else struct.pack("<5H", 1, 1, 1, 1, 1000) for i in range(16))
+    lfp = bytearray(16 * 20)
+    if pnp_at is not None:
+        lfp[pnp_at * 20 + 4:pnp_at * 20 + 14] = edid_1080p()[8:18]
+    bl = bytes([6]) + b"".join(struct.pack("<BHBBB", 2, 200, 0, 0, 0) for _ in range(16))
+    blocks = b"".join(bytes([i]) + struct.pack("<H", len(d)) + d
+                      for i, d in ((40, bytes([panel_type]) + bytes(7)), (27, seqs), (42, bytes(lfp)), (43, bl)))
+    bdb = b"BIOS_DATA_BLOCK " + struct.pack("<HHH", 243, 22, 22 + len(blocks)) + blocks
+    hdr = bytearray(0x30)
+    hdr[:4] = b"$VBT"
+    struct.pack_into("<I", hdr, 0x1C, len(hdr))
+    return bytes(hdr) + bdb
 
 
 if __name__ == "__main__":

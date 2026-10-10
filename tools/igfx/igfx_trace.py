@@ -11,7 +11,10 @@ import sys
 # transcoder/pipe/plane register blocks repeat per instance; A at these bases, B/C/D at +0x1000 steps (Linux _PIPE/_TRANS)
 TRANS = {0x00: "HTOTAL", 0x04: "HBLANK", 0x08: "HSYNC", 0x0C: "VTOTAL", 0x10: "VBLANK", 0x14: "VSYNC", 0x1C: "PIPESRC",
          0x400: "TRANS_DDI_FUNC_CTL"}
-NAMES = {0x61200: "PP_STATUS", 0x61204: "PP_CONTROL", 0xC8250: "BLC_PWM_PCH_CTL1", 0xC8254: "BLC_PWM_PCH_CTL2",
+# panel power lives in the PCH block (0xC72xx) on every PCH-split platform; 0x612xx is the old GMCH copy nothing here uses.
+# From CNP on, 0xC8254 holds the backlight PWM period in raw-clock ticks.
+NAMES = {0xC7200: "PP_STATUS", 0xC7204: "PP_CONTROL", 0xC7208: "PP_ON_DELAYS", 0xC720C: "PP_OFF_DELAYS",
+         0xC8250: "BLC_PWM_PCH_CTL1", 0xC8254: "BLC_PWM_PCH_CTL2",
          0x64000: "DDI_BUF_CTL_A"}
 
 

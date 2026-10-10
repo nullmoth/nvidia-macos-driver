@@ -26,16 +26,18 @@ def machines(folder):
         tr = [n for n in names if re.search(r"/trace/(i915|xe)-0000_00_02\.0\.mmio\.xz$", n)]
         edid = [n for n in names if re.search(r"/gpu/drm/card\d+-eDP-\d+\.edid$", n)]
         if tr and edid:
-            yield z, f, tr[0], edid[0]
+            vbt = [n for n in names if n.endswith("i915_vbt.bin")]
+            yield z, f, tr[0], edid[0], vbt[0] if vbt else None
 
 
-def check(f, trace_name, edid_name):
+def check(f, trace_name, edid_name, vbt_name=None):
     tmp = os.path.join(tempfile.mkdtemp(), "t.mmio.xz")
     with open(tmp, "wb") as out:
         out.write(f.read(trace_name))
     _, last, _ = T.decode(tmp)
+    edid = f.read(edid_name)
     try:
-        timing = P.preferred_timing(f.read(edid_name))
+        timing = P.preferred_timing(edid)
     except ValueError:
         return "no-timing", None, None
     ver = P.display_version(last.get("_DEVICE", 0))
@@ -49,6 +51,13 @@ def check(f, trace_name, edid_name):
             got = {k: last.get("%s_%s" % (k, t)) for k in ("HTOTAL", "HBLANK", "HSYNC", "VTOTAL", "VBLANK", "VSYNC", "PIPESRC")}
             got["PLANE_SIZE_1"] = last.get("PLANE_SIZE_1_%s" % t)
             got["PLANE_STRIDE_1"] = last.get("PLANE_STRIDE_1_%s" % t)
+            if vbt_name:
+                # panel power + backlight come from the VBT, not the EDID
+                want.update(P.panel_plan(P.vbt_panel(f.read(vbt_name), edid), ver))
+                for k in ("PP_ON_DELAYS", "PP_OFF_DELAYS", "BLC_PWM_PCH_CTL2"):
+                    got[k] = last.get(k)
+                ctl = last.get("PP_CONTROL")
+                got["PP_CYCLE"] = None if ctl is None else (ctl >> 4) & 0x1F
             diff = {k: (want[k], got[k]) for k in want if got.get(k) is not None and got[k] != want[k]}
             missing = [k for k in want if got.get(k) is None]
             return t, diff, missing
@@ -57,8 +66,8 @@ def check(f, trace_name, edid_name):
 
 if __name__ == "__main__":
     total = passed = 0
-    for z, f, tr, ed in machines(sys.argv[1]):
-        t, diff, missing = check(f, tr, ed)
+    for z, f, tr, ed, vb in machines(sys.argv[1]):
+        t, diff, missing = check(f, tr, ed, vb)
         if t in (None, "no-timing", "unknown-device"):
             if t:
                 print("SKIP %-60s %s" % (tr.split("/")[0][:60], t))

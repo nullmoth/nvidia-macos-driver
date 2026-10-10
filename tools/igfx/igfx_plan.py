@@ -6,6 +6,7 @@ driver runs this same plan; igfx_check.py compares it with what Linux's driver a
 usage: igfx_plan.py <panel.edid>"""
 import json
 import os
+import struct
 import sys
 
 VERSIONS = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "display_versions.json")))["ids"]
@@ -33,6 +34,52 @@ def preferred_timing(edid):
     vsw = (d[10] & 0x0F) | (d[11] & 0x03) << 4
     return {"pclk_khz": pclk_khz, "hactive": ha, "htotal": ha + hb, "hsync_start": ha + hso, "hsync_end": ha + hso + hsw,
             "vactive": va, "vtotal": va + vb, "vsync_start": va + vso, "vsync_end": va + vso + vsw}
+
+
+def vbt_blocks(vbt):
+    """BDB blocks of a Video BIOS Table (Linux intel_vbt_defs.h layout): {block id: bytes}."""
+    if vbt[:4] != b"$VBT":
+        raise ValueError("no $VBT signature")
+    bdb = struct.unpack_from("<I", vbt, 0x1C)[0]
+    hsz, bsz = struct.unpack_from("<HH", vbt, bdb + 18)
+    p, end, out = bdb + hsz, bdb + bsz, {}
+    while p + 3 <= end:
+        bid, size = vbt[p], struct.unpack_from("<H", vbt, p + 1)[0]
+        out[bid] = vbt[p + 3:p + 3 + size]
+        p += 3 + size
+    return out
+
+
+def vbt_panel(vbt, edid):
+    """The eDP panel's power sequence (100 us units) and backlight PWM frequency from the VBT, picked the way Linux does:
+    BDB_LVDS_OPTIONS.panel_type, or 255 = the entry whose PnP id matches the EDID's (bytes 8..17), else entry 0."""
+    b = vbt_blocks(vbt)
+    pt = b[40][0] if 40 in b else 0
+    if pt == 0xFF:
+        lfp = b.get(42, b"")
+        i = lfp.find(edid[8:18])
+        pt = i // (len(lfp) // 16) if i >= 0 else 0
+    t1_t3, t8, t9, t10, t11_t12 = struct.unpack_from("<5H", b[27], pt * 10)
+    hz = None
+    if 43 in b:
+        esz = b[43][0]
+        hz = struct.unpack_from("<H", b[43], 1 + pt * esz + 1)[0]
+    return {"panel_type": pt, "t1_t3": t1_t3, "t8": t8, "t9": t9, "t10": t10, "t11_t12": t11_t12, "pwm_hz": hz}
+
+
+def rawclk_hz(display_version):
+    # measured on 21 recorded laptops: TGL/ADL/RPL program the PWM period against 19.2 MHz, Arrow Lake (14) against 38.4
+    return 38400000 if display_version >= 14 else 19200000
+
+
+def panel_plan(p, display_version):
+    """Panel power + backlight registers. Backlight on/off delays are done in software, so their fields hold 1."""
+    regs = {"PP_ON_DELAYS": p["t1_t3"] << 16 | 1,
+            "PP_OFF_DELAYS": p["t10"] << 16 | 1,
+            "PP_CYCLE": p["t11_t12"] // 1000 + 1}      # PP_CONTROL bits 8:4, in 100 ms units, rounded up past the delay
+    if p["pwm_hz"]:
+        regs["BLC_PWM_PCH_CTL2"] = round(rawclk_hz(display_version) / p["pwm_hz"])
+    return regs
 
 
 def pack(lo, hi):
