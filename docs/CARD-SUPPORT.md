@@ -46,6 +46,13 @@ paths and error propagation, and proves the previous submission-only method fail
 ordering test. The physical desktop acceptance also requires page flipping and 60 seconds of
 stable WindowServer operation with no flip-latch timeouts or new desktop/kernel crashes.
 
+When a card still flashes under cursor movement with that ordering in place, `-nvrmnoflip` keeps
+the composited frame on the copy path: NVRM never sets `debug.nvaccel_iop_flip`, so the display
+reads a finished copy instead of the surface the GPU may still be writing. It costs one copy per
+frame and is the supported way to trade that for a stable picture. NVRM turns zero-copy scan-out
+on about 60 seconds after it releases the boot hold (`NVRM::autoGo`), which is why a desktop that
+flashes may look clean for the first minute and then start.
+
 ## Shader target selection
 
 The optional vendor compiler selects the SM target from the chip name reported by NVK. Unknown

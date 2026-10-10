@@ -85,6 +85,14 @@ them from `EFI/OC/Kexts`. OpenCore only needs to set SIP and boot-args.
 | `csr-active-config` | `<430A0000>` (Data) | the tested value: unsigned kexts, plus what root patches need |
 | `boot-args` | `nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80` | framebuffer + accelerator, 4 display heads; the AMFI args let WindowServer load the driver bundle |
 
+Optional boot arguments, for troubleshooting:
+
+| boot-arg | Effect |
+|---|---|
+| `-nvrmnoflip` | keeps the composited frame on the copy path: NVRM never turns on zero-copy scan-out (`debug.nvaccel_iop_flip`), so the display reads a finished copy instead of the surface the GPU may still be drawing. Try it first when the desktop flashes or tears while the cursor moves. |
+| `-nvrmnogo` | the driver idles until `nvrmctl go <pass>` instead of starting the GPU itself. |
+| `-nvrmnobootscreen` | do not snapshot the boot screen. |
+
 Add every key you set to `NVRAM → Delete` as well, so the values are rewritten each boot.
 
 | Setting | Value | Why |
