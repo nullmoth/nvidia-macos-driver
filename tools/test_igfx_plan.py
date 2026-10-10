@@ -86,6 +86,19 @@ class Plan(unittest.TestCase):
         self.assertEqual(P.dpll_plan(2700, 19200, 12)["DPLL_CFGCR0"], 0x01C001A5)
         self.assertNotEqual(P.dpll_plan(5400, 38400, 12), r)
 
+    def test_a_faster_preferred_displayid_mode_wins_and_brings_its_polarity(self):
+        e = bytearray(edid_with_displayid(389381))
+        e[128 + 8 + 3] = 0x80                                    # preferred flag
+        e[128 + 8 + 4:128 + 8 + 6] = (1920 - 1).to_bytes(2, "little")
+        e[128 + 8 + 12:128 + 8 + 14] = (1080 - 1).to_bytes(2, "little")
+        e[128 + 8 + 16:128 + 8 + 18] = (0x8000 | 2).to_bytes(2, "little")   # vsync positive
+        t = P.preferred_timing(bytes(e))
+        self.assertEqual((t["pclk_khz"], t["vsync_pos"]), (389381, 1))
+        self.assertEqual(P.ddi_plan(t, 24, 4)["TRANS_DDI_FUNC_CTL"], 0x8A020006)
+
+    def test_a_displayid_mode_not_flagged_preferred_is_ignored(self):
+        self.assertEqual(P.preferred_timing(edid_with_displayid(389381))["pclk_khz"], 147000)
+
     def test_negative_control_not_a_vbt_is_refused(self):
         with self.assertRaises(ValueError):
             P.vbt_blocks(b"\0" * 64)

@@ -66,6 +66,8 @@ def check(f, trace_name, edid_name, vbt_name=None):
             if rate and not dsc:
                 r, n = P.link_plan(dpcd, edid, panel["max_link_rate"] if panel else 0)
                 want["LINK"], got["LINK"] = r << 8 | n, rate << 8 | lanes
+                want.update(P.ddi_plan(timing, P.edid_bpp(edid), n))
+                got["TRANS_DDI_FUNC_CTL"], got["DDI_BUF_CTL"] = last.get("TRANS_DDI_FUNC_CTL_%s" % t), last.get("DDI_BUF_CTL_A")
                 if ver <= 13 and refclk and last.get("DPLL0_ENABLE", 0) >> 31:
                     want.update({"DPLL0_" + k[5:]: v for k, v in P.dpll_plan(rate, refclk, ver).items()})
                     got["DPLL0_CFGCR0"], got["DPLL0_CFGCR1"] = last.get("DPLL0_CFGCR0"), last.get("DPLL0_CFGCR1")
