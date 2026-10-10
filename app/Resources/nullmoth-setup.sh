@@ -864,6 +864,15 @@ SINCE=$(date -r "$(sysctl -n kern.boottime | sed -E 's/.*\{ sec = ([0-9]+),.*/\1
 capture "BEFORE restart"
 SINCE=$(date '+%Y-%m-%d %H:%M:%S')
 : > "$MARK"   # claim the single shot BEFORE touching WindowServer, so a respawn can never loop
+# Only ever at the login window. 1.9.0 (10-10): with auto-login the session already existed when this fired, so the
+# restart logged the user out to the password screen. A restart under a logged-in user ends their session; never do it.
+CONSOLE=$(stat -f%Su /dev/console 2>/dev/null)
+if [ -n "$(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null)" ]; then
+  echo "$(date) skipped the restart: auto-login is on (a restart would end the automatic session)" >> "$LOG" 2>&1; exit 0
+fi
+if [ -n "$CONSOLE" ] && [ "$CONSOLE" != root ]; then
+  echo "$(date) skipped the restart: $CONSOLE is already logged in" >> "$LOG" 2>&1; exit 0
+fi
 P=$(pgrep -x WindowServer); [ -n "$P" ] && { kill -TERM $P 2>/dev/null; sleep 2; pgrep -x WindowServer >/dev/null 2>&1 && kill -9 $P 2>/dev/null; }
 for i in $(seq 1 30); do pgrep -x WindowServer >/dev/null 2>&1 && break; sleep 1; done
 sleep 8
