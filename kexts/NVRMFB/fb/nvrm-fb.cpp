@@ -19,6 +19,8 @@
 #include <IOKit/IOSubMemoryDescriptor.h>
 #include <IOKit/graphics/IOFramebuffer.h>
 #include <IOKit/graphics/IOGraphicsTypes.h>
+#include <IOKit/graphics/IODisplay.h>
+#include <IOKit/ndrvsupport/IOMacOSVideo.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
 #include <libkern/OSAtomic.h>
@@ -62,6 +64,98 @@ static const char kPixelFormats[] = IO32BitDirectPixels "\0";
 static const IODisplayModeID kModeId = 1;
 static const unsigned kTraceMax = 900;
 
+// Laptop panel brightness. macOS gives the brightness keys and the brightness slider to its built-in
+// display, an AppleBacklightDisplay. IOGraphics creates one (AppleBacklightDisplay::probe) for a connection
+// that reports kIOConnectionBuiltIn and an LCD from getAppleSense(), provided a service named "backlight"
+// existed when the first framebuffer was opened (gIOFBHaveBacklight, IOFramebuffer::open). On Macs that is
+// the ACPI PNLF device; here it is this handler, published by the panel's framebuffer before super::start().
+// IODisplay finds it below the framebuffer (searchParameterHandlers) and offers "brightness" and
+// "linear-brightness" through it; both are percent of the panel's PWM. The level goes to NVRM
+// ("NVRMBacklight": nvKmsSetBacklight on the backlight NVKMS registered), from a thread call, because
+// IODisplay calls doIntegerSet() with the framebuffer lock held.
+static const SInt32 kNVRMMinBacklight = 5;   // never 0: some panels switch the backlight off completely
+#define BLLOG(fmt, ...) do { IOLog("NVRM-fb: " fmt "\n", ##__VA_ARGS__); kprintf("NVRM-fb: " fmt "\n", ##__VA_ARGS__); } while (0)
+
+class NVRMBacklightHandler : public IODisplayParameterHandler {
+    OSDeclareDefaultStructors(NVRMBacklightHandler)
+    IOService *fRM = nullptr;
+    const OSSymbol *fFn = nullptr;
+    thread_call_t fApply = nullptr;
+    volatile SInt32 fPending = -1;
+    SInt32 fLevel = 100;
+    static void applyFire(thread_call_param_t me, thread_call_param_t);
+public:
+    static NVRMBacklightHandler *withRM(IOService *rm, NvU32 level);
+    bool setDisplay(IODisplay *display) override;
+    bool doIntegerSet(OSDictionary *params, const OSSymbol *paramName, UInt32 value) override;
+    bool doDataSet(const OSSymbol *, OSData *) override { return false; }
+    bool doUpdate() override { return true; }
+    void free() override;
+};
+OSDefineMetaClassAndStructors(NVRMBacklightHandler, IODisplayParameterHandler)
+
+NVRMBacklightHandler *NVRMBacklightHandler::withRM(IOService *rm, NvU32 level)
+{
+    NVRMBacklightHandler *h = OSTypeAlloc(NVRMBacklightHandler);
+    if (!h || !h->init()) { OSSafeReleaseNULL(h); return nullptr; }
+    h->fRM = rm; rm->retain();
+    h->fFn = OSSymbol::withCStringNoCopy("NVRMBacklight");
+    h->fApply = thread_call_allocate(applyFire, h);
+    h->fLevel = level <= 100 ? (SInt32)level : 100;
+    if (!h->fFn || !h->fApply) { h->release(); return nullptr; }
+    return h;
+}
+
+void NVRMBacklightHandler::free()
+{
+    if (fApply) { thread_call_cancel(fApply); while (!thread_call_free(fApply)) { thread_call_cancel(fApply); IOSleep(1); } fApply = nullptr; }
+    OSSafeReleaseNULL(fFn);
+    OSSafeReleaseNULL(fRM);
+    IODisplayParameterHandler::free();
+}
+
+// NVRMFB reports no framebuffer display parameters, so the display may have no IODisplayParameters yet;
+// IODisplay::setProperties() only accepts parameters listed there.
+bool NVRMBacklightHandler::setDisplay(IODisplay *display)
+{
+    if (!display) return false;
+    OSObject *old = display->copyProperty(gIODisplayParametersKey);
+    OSDictionary *cur = OSDynamicCast(OSDictionary, old);
+    OSDictionary *params = cur ? OSDictionary::withDictionary(cur) : OSDictionary::withCapacity(2);
+    OSSafeReleaseNULL(old);
+    if (!params) return false;
+    IODisplay::addParameter(params, gIODisplayBrightnessKey, 0, 100);
+    IODisplay::setParameter(params, gIODisplayBrightnessKey, fLevel);
+    IODisplay::addParameter(params, gIODisplayLinearBrightnessKey, 0, 100);
+    IODisplay::setParameter(params, gIODisplayLinearBrightnessKey, fLevel);
+    display->setProperty(gIODisplayParametersKey, params);
+    params->release();
+    BLLOG("backlight: brightness parameters on %s, panel at %d%%", display->getName(), (int)fLevel);
+    return true;
+}
+
+// User changes arrive with the parameter's own { min, max, value } (IODisplay::setForKey stores the value);
+// AppleBacklightDisplay's power states (dim, display sleep, lid) pass the whole IODisplayParameters.
+bool NVRMBacklightHandler::doIntegerSet(OSDictionary *, const OSSymbol *paramName, UInt32 value)
+{
+    if (paramName != gIODisplayBrightnessKey && paramName != gIODisplayLinearBrightnessKey) return false;
+    fPending = value > 100 ? 100 : (SInt32)value;
+    thread_call_enter(fApply);
+    return true;
+}
+
+void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
+{
+    NVRMBacklightHandler *me = (NVRMBacklightHandler *)p;
+    SInt32 v;
+    do { v = me->fPending; } while (!OSCompareAndSwap((UInt32)v, (UInt32)-1, (volatile UInt32 *)&me->fPending));
+    if (v < 0) return;
+    NvU32 percent = (NvU32)(v < kNVRMMinBacklight ? kNVRMMinBacklight : v);
+    IOReturn r = me->fRM->callPlatformFunction(me->fFn, false, &percent, (void *)1, NULL, NULL);
+    if (r == kIOReturnSuccess) me->fLevel = v;
+    else BLLOG("backlight: setting %u%% failed (0x%x)", (unsigned)percent, r);
+}
+
 class NVRMNVDAFramebuffer : public IOFramebuffer {
     OSDeclareDefaultStructors(NVRMNVDAFramebuffer)
     struct NvKmsKapiFunctionsTable *fKms = nullptr; NvU32 fGpuId = 0; nvrm_phys_for_va_t fPhysForVa = nullptr;
@@ -70,6 +164,8 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     unsigned fIndex = 0; bool fOwnsHead = false;
     bool fBootConsole = false;
     bool fInternal = false;     // NVKMS static display info: laptop panel (eDP/LVDS)
+    NVRMBacklightHandler *fBacklight = nullptr;   // the panel's brightness control, see NVRMBacklightHandler
+    void publishBacklight();
     struct NvKmsKapiDisplayMode fMode = {};
     struct NvKmsKapiMemory *fMem = nullptr; struct NvKmsKapiSurface *fSurf = nullptr;
     void *fKva = nullptr; NvU64 fPhys = 0, fSize = 0; NvU32 fPitch = 0, fW = 0, fH = 0;
@@ -213,6 +309,7 @@ public:
     uint32_t fVramGrants = 0;
     IOReturn getAttribute(IOSelect attribute, uintptr_t *value) override;
     IOReturn getAttributeForConnection(IOIndex connectIndex, IOSelect attribute, uintptr_t *value) override;
+    IOReturn getAppleSense(IOIndex connectIndex, UInt32 *senseType, UInt32 *primary, UInt32 *extended, UInt32 *displayType) override;
     IOReturn setAttribute(IOSelect attribute, uintptr_t value) override;
     IOReturn setPowerState(unsigned long ordinal, IOService *device) override;
     IOReturn setCursorImage(void *cursorImage) override;
@@ -1399,6 +1496,7 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
         return false;
     }
     setName("NVRMFramebuffer");
+    if (fInternal) publishBacklight();   // before super::start(): IOFramebuffer::open looks for "backlight"
     if (!super::start(provider)) {
         NVRMDisplayGate gate; if (gate.valid() && fOwnsHead) { gHeadsTaken &= ~(1u << fHead); fOwnsHead = false; }
         FBLOG("super::start failed after kapiInit succeeded"); return false;
@@ -1469,7 +1567,38 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
         }
         *calls[i] = nullptr;
     }
+    if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
     super::stop(provider);
+}
+
+// The internal panel's brightness control, when NVKMS registered a backlight for it (needs the NBCI _DSM).
+void NVRMNVDAFramebuffer::publishBacklight()
+{
+    IOService *rm = getProvider();
+    while (rm && strcmp(rm->getMetaClass()->getClassName(), "NVRM") != 0) rm = rm->getProvider();
+    const OSSymbol *fn = OSSymbol::withCString("NVRMBacklight");
+    NvU32 level = 0;
+    IOReturn r = (rm && fn) ? rm->callPlatformFunction(fn, false, &level, NULL, NULL, NULL) : kIOReturnNotFound;
+    OSSafeReleaseNULL(fn);
+    if (r != kIOReturnSuccess) { FBLOG("fb%u: internal panel, but NVKMS registered no backlight (0x%x) -- no brightness control", fIndex, r); return; }
+    fBacklight = NVRMBacklightHandler::withRM(rm, level);
+    if (!fBacklight) { FBLOG("fb%u: backlight handler allocation failed", fIndex); return; }
+    fBacklight->setName("backlight");
+    if (!fBacklight->attach(this)) { OSSafeReleaseNULL(fBacklight); FBLOG("fb%u: backlight handler attach failed", fIndex); return; }
+    fBacklight->registerService(kIOServiceSynchronous);
+    FBLOG("fb%u: panel backlight at %u%% -- brightness keys and slider through AppleBacklightDisplay", fIndex, (unsigned)level);
+}
+
+// AppleBacklightDisplay::probe takes only an LCD connection. IODisplay itself never asks: NVRMFB answers
+// kConnectionSupportsAppleSense with unsupported, so the display's identity still comes from the EDID.
+IOReturn NVRMNVDAFramebuffer::getAppleSense(IOIndex connectIndex, UInt32 *senseType, UInt32 *primary, UInt32 *extended, UInt32 *displayType)
+{
+    if (connectIndex != 0 || !fInternal || !fBacklight) return kIOReturnUnsupported;
+    if (senseType) *senseType = 0;
+    if (primary) *primary = 0;
+    if (extended) *extended = 0;
+    if (displayType) *displayType = kGenericLCD;
+    return kIOReturnSuccess;
 }
 
 void NVRMNVDAFramebuffer::free()
