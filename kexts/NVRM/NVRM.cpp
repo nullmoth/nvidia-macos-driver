@@ -1005,6 +1005,10 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
         *outp = fBootScreen->getBytesNoCopy(); dims[0] = fBootW; dims[1] = fBootH; dims[2] = fBootPitch;
         return kIOReturnSuccess;
     }
+    if (fn && fn->isEqualTo("NVRMBacklight")) {      // NVRMFB: laptop panel brightness. p1 = NvU32 *percent, p2 != NULL sets it
+        NvU32 *percent = (NvU32 *)p1; if (!percent) return kIOReturnBadArgument;
+        return nvkms_xnu_backlight(p2 != NULL, percent) ? kIOReturnSuccess : kIOReturnNotFound;
+    }
     if (fn && fn->isEqualTo("NVRMBootScreenDone")) {
         if (fBootScreen) { fBootScreen->release(); fBootScreen = nullptr; LOG("boot screen: buffer released after the takeover"); }
         return kIOReturnSuccess;

@@ -344,8 +344,38 @@ NvU32 nvkms_enumerate_gpus(nv_gpu_info_t *gpu_info)
 NvBool nvkms_open_gpu(NvU32 gpuId, NvBool) { nv_state_t *nv = nv_xnu_gpu_state(); return nv && nv->gpu_id == gpuId; }
 void nvkms_close_gpu(NvU32, NvBool) {}
 
-struct nvkms_backlight_device *nvkms_register_backlight(NvU32, NvU32, void *, NvU32) { return NULL; }
-void nvkms_unregister_backlight(struct nvkms_backlight_device *) {}
+// NVKMS reports a backlight-capable internal panel here (nvRmRegisterBacklight); nvidia-modeset-linux.c
+// turns it into a Linux backlight device. Kept so NVRMFB can set the panel's brightness through
+// NVRM::callPlatformFunction("NVRMBacklight") -> nvkms_xnu_backlight().
+struct nvkms_backlight_device { NvU32 gpu_id, display_id; void *drv_priv; };
+static struct nvkms_backlight_device gKmsBacklight;
+static NvBool gKmsBacklightRegistered;
+struct nvkms_backlight_device *nvkms_register_backlight(NvU32 gpu_id, NvU32 display_id, void *drv_priv, NvU32 current_brightness)
+{
+    if (gKmsBacklightRegistered || !drv_priv) return NULL;
+    gKmsBacklight = { gpu_id, display_id, drv_priv };
+    gKmsBacklightRegistered = NV_TRUE;
+    kprintf("NVRM-xnu: backlight registered: gpu 0x%x display 0x%x at %u%%\n", gpu_id, display_id, current_brightness);
+    return &gKmsBacklight;
+}
+void nvkms_unregister_backlight(struct nvkms_backlight_device *bd)
+{
+    if (bd != &gKmsBacklight) return;
+    gKmsBacklightRegistered = NV_FALSE;
+    kprintf("NVRM-xnu: backlight unregistered\n");
+}
+// Panel brightness in percent (0-100), read or set under the NVKMS lock like nvkms_get_backlight_brightness()
+// and nvkms_update_backlight_status() in nvidia-modeset-linux.c. Not for callers that hold gKmsLock.
+NvBool nvkms_xnu_backlight(NvBool set, NvU32 *percent)
+{
+    if (!percent || !gKmsLock) return NV_FALSE;
+    IOLockLock(gKmsLock);
+    NvBool ok = gKmsBacklightRegistered &&
+                (set ? nvKmsSetBacklight(gKmsBacklight.display_id, gKmsBacklight.drv_priv, *percent)
+                     : nvKmsGetBacklight(gKmsBacklight.display_id, gKmsBacklight.drv_priv, percent));
+    IOLockUnlock(gKmsLock);
+    return ok;
+}
 
 struct nvkms_per_open *nvkms_open_from_kapi(struct NvKmsKapiDevice *device) { return kms_open_common(NVKMS_CLIENT_KERNEL_SPACE, device, 0); }
 void nvkms_close_from_kapi(struct nvkms_per_open *popen) { kms_close_common(popen); }
