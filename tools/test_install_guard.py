@@ -18,7 +18,7 @@ class Backup(m.Install):
   guard=self.root/'Library/NullMoth/install.lock';guard.mkdir();(guard/'foreign').write_bytes(b'guard-owner')
   r=self.run_install(CHECK='1');self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertEqual((guard/'foreign').read_bytes(),b'guard-owner');self.assertFalse(self.backup_paths());self.assert_creates(1)
  def test_backup_copy_failure_is_bounded_and_before_install(self):
-  wrapper=self.bin/'cp';wrapper.write_text('#!/bin/bash\ncase "$1 $2 $3" in *GPUBundles/nvmtl*) /usr/bin/printf "%20000s" "" >&2; echo "controlled copy error" >&2; exit 73;; esac\nexec /bin/cp "$@"\n');wrapper.chmod(0o755)
+  wrapper=self.bin/'ditto';wrapper.write_text('#!/bin/bash\ncase "$1 $2" in *GPUBundles/nvmtl\ *NullMoth/backup-*) /usr/bin/printf "%20000s" "" >&2; echo "controlled copy error" >&2; exit 73;; esac\nexec /usr/bin/ditto "$@"\n');wrapper.chmod(0o755)
   r=self.run_install();self.assert_restored(r);self.assertIn('command-status=73',r.stderr);self.assertIn('controlled copy error',r.stderr);self.assertLess(len(r.stderr.encode()),4400);self.assertIn('STOP: back up nvmtl',r.stderr);self.assert_creates(1);self.assertEqual(len(self.backup_paths()),1);self.assertFalse((self.root/'Library/NullMoth/install.lock').exists())
  def test_same_second_runs_have_distinct_immutable_backup_sets(self):
   old=self.root/'Library/GPUBundles/nvmtl/obsolete';old.write_bytes(b'old-only')

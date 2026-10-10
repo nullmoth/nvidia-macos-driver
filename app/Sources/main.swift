@@ -738,7 +738,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
             if err != nil { errs.append("Some system logs could not be collected. See collect.txt for details.") }
             // Directory enumeration is unordered: a stick with many boot logs could crowd out
             // the GPU state, kernel log, or crash report. Always send those first.
-            let important = ["hardware-map.json", "driver-state.txt", "driver-kernel-log.txt", "driver-display.txt", "driver-plugin-log.txt", "crash-report.txt", "driver-wsreset.log.txt", "diagnostic-session.json", "collect.txt", "driver-update-log.txt"]
+            let important = ["hardware-map.json", "driver-state.txt", "driver-kernel-log.txt", "driver-display.txt", "previous-boot-kernel-log.txt", "driver-plugin-log.txt", "crash-report.txt", "driver-wsreset.log.txt", "diagnostic-session.json", "collect.txt", "driver-update-log.txt"]
             files.sort {
                 let a = supportCrashRank($0.lastPathComponent) ?? (important.firstIndex(of: $0.lastPathComponent) ?? important.count)
                 let b = supportCrashRank($1.lastPathComponent) ?? (important.firstIndex(of: $1.lastPathComponent) ?? important.count)

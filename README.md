@@ -83,7 +83,7 @@ them from `EFI/OC/Kexts`. OpenCore only needs to set SIP and boot-args.
 | Key | Value | Why |
 |---|---|---|
 | `csr-active-config` | `<430A0000>` (Data) | the tested value: unsigned kexts, plus what root patches need |
-| `boot-args` | `nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80` | framebuffer + accelerator, 4 display heads; the AMFI args let WindowServer load the driver bundle |
+| `boot-args` | `nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80 ipc_control_port_options=0` | framebuffer + accelerator, 4 display heads; the AMFI args let WindowServer load the driver bundle |
 
 Add every key you set to `NVRAM → Delete` as well, so the values are rewritten each boot.
 

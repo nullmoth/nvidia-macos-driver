@@ -167,8 +167,10 @@ ok "test collection holds all four kexts"
 BK=$(mktemp -d "/Library/NullMoth/backup-$(date +%Y%m%d-%H%M%S).XXXXXX") && [ -n "$BK" ] && [ -d "$BK" ] || die "create unique backup directory"
 step "4. back up what is there now -> $BK"
 printf '%s\n' "$BUILD" > "$BK/macos-build" || die "record backup macOS build"
-for k in $KEXTS; do [ ! -e "$EXT/$k.kext" ] || backup_copy "$k" cp -Rp "$EXT/$k.kext" "$BK/"; done
-for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do [ ! -e "$GB/$b" ] || backup_copy "$b" cp -Rp "$GB/$b" "$BK/"; done
+# ditto, not cp -Rp: cp re-applies file flags through symlinks and stopped on nvmtl/libvulkan.dylib with "chflags: Too
+# many levels of symbolic links" (Mac 1.10 logs 10-10, 2 uploads); ditto keeps links, flags and xattrs, as the restore does.
+for k in $KEXTS; do [ ! -e "$EXT/$k.kext" ] || backup_copy "$k" ditto "$EXT/$k.kext" "$BK/$k.kext"; done
+for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do [ ! -e "$GB/$b" ] || backup_copy "$b" ditto "$GB/$b" "$BK/$b"; done
 [ ! -f "$KC" ] || backup_copy "kernel collection" cp -p "$KC" "$BK/AuxiliaryKernelExtensions.kc"
 [ ! -d /Library/NullMoth/kexts ] || backup_copy "cached accelerators" ditto /Library/NullMoth/kexts "$BK/kexts"
 [ ! -f /Library/NullMoth/os-major ] || backup_copy "OS record" cp -p /Library/NullMoth/os-major "$BK/os-major"
@@ -207,6 +209,10 @@ mv -f "$NEWKC" "$KC" || die "cannot publish the new kernel collection (restore f
 INSTALLING=0
 rm -rf "$T"
 ok "installed"
+# Record the version for the app's update check. Only the app's setup wrote it, so installs from the release tar left it
+# empty and the app kept offering the version already installed (10-10 chat, 1.10.0).
+if [ -f "$HERE/VERSION" ]; then mkdir -p /Library/NullMoth && tr -cd '0-9.\n' < "$HERE/VERSION" | head -n 1 > /Library/NullMoth/driver-version.tmp \
+  && chmod 644 /Library/NullMoth/driver-version.tmp && mv /Library/NullMoth/driver-version.tmp /Library/NullMoth/driver-version; fi
 
 step "6. boot-args"
 # A remove flag left by a boot-picker removal that did not finish keeps every NullMoth kext off at boot. Installing

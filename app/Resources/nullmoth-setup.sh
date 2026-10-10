@@ -1,7 +1,9 @@
 #!/bin/bash
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 B=7C436110-AB2A-4BBB-A880-FE41995C9F82
-WANT_ARGS="nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80"
+# ipc_control_port_options=0: with AMFI relaxed, Firefox and other hardened apps crash at launch on their task control
+# port (10-10 chat: Firefox "instant crash", fixed by this argument); OpenCore Legacy Patcher sets it for the same reason.
+WANT_ARGS="nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80 ipc_control_port_options=0"
 DROP_ARGS="nv_disable=1 -wegnoegpu"          # both hide the NVIDIA card from macOS
 SIP_BITS=$((0x0A43))
 TOOL_NAME="1401: Remove NVIDIA driver"; TOOL_FILE=NullMothSafe.efi
@@ -15,7 +17,8 @@ while [ $# -gt 0 ]; do case "$1" in
   --knob) KNOBS+=("$2"); shift;; --profile) PROFILE=$2; shift;;
   *) echo "STOP unknown option $1"; echo "RESULT stop"; exit 2;; esac; shift; done
 step() { echo "STEP $*"; }; ok() { echo "OK $*"; }; note() { echo "NOTE $*"; }
-cleanup() { for d in $MOUNTED; do diskutil unmount "$d" >/dev/null 2>&1; done; [ -n "$T" ] && rm -rf "$T"; }
+KT=""
+cleanup() { for d in $MOUNTED; do diskutil unmount "$d" >/dev/null 2>&1; done; [ -n "$T" ] && rm -rf "$T"; [ -n "${KT:-}" ] && rm -rf "$KT"; }
 stop() { echo "STOP $*"; cleanup; echo "RESULT stop"; exit 1; }
 [ "$(id -u)" = 0 ] || { echo "STOP needs administrator rights"; echo "RESULT stop"; exit 1; }
 [ "$UPD" = finish ] && [ ! -f "$ST/update-pending" ] && { echo "RESULT ok"; exit 0; }
@@ -57,6 +60,22 @@ ocrel_in() {    # $1 = mount point; prints where OpenCore lives on it (EFI/OC, o
       cm=$(plutil -extract "$k" raw -o - "$c" 2>/dev/null); [ -n "$cm" ] && break; done
     [ -n "$m" ] && [ -n "$cm" ] && [ "$cm" != "$m" ] && continue
     echo $d; return; done; }
+# Kexts the driver's OpenCore setup needs, pinned to the same files 1401 builds with (p1401/mirror.json).
+kurl() { case $1 in
+  Lilu.kext) echo "https://github.com/dortania/build-repo/releases/download/Lilu-0515f40/Lilu-1.7.3-RELEASE.zip 261aebb9dc83adb6515c96405653f53c3c50b09c89babdb91fb41f7b33a1cd2a";;
+  AMFIPass.kext) echo "https://github.com/dortania/OpenCore-Legacy-Patcher/raw/main/payloads/Kexts/Acidanthera/AMFIPass-v1.4.1-RELEASE.zip 07b266145906db41f4b13a7938fbb173ea28888cc1fa65f84417f8820adc961e";;
+  USBToolBox.kext) echo "https://github.com/USBToolBox/kext/releases/download/1.2.0/USBToolBox-1.2.0-RELEASE.zip c315a3a5acfd496dd97d0d19b4fbd1d487103d2fd541c5651583d4c9cebcfe07";;
+esac; }
+# Downloads $1 into $KT/$1.x (checked against its SHA-256) before anything is changed; stops on any failure. $2 = where it goes.
+fetch_kext() {
+  local k=$1 u s
+  [ -n "$KT" ] || KT=$(mktemp -d) || stop "could not create a download folder"
+  read -r u s <<<"$(kurl $k)"
+  curl -fsSL --max-time 180 -o "$KT/$k.zip" "$u" \
+    || stop "$k could not be downloaded ($u). Check the internet connection and try again, or put $k in $2"
+  [ "$(shasum -a 256 "$KT/$k.zip" | awk '{print $1}')" = "$s" ] || stop "$k download did not match its SHA-256; nothing was changed. Try again"
+  ditto -x -k "$KT/$k.zip" "$KT/$k.x" && [ -f "$KT/$k.x/$k/Contents/Info.plist" ] || stop "$k download could not be unpacked; nothing was changed"
+}
 booted_part() { # the partition OpenCore started this Mac from, read from OpenCore's boot-path variable
   local bp u d
   bp=$(nvram 4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:boot-path 2>/dev/null | cut -f2-)
@@ -218,7 +237,16 @@ if [ -n "$COLLECT" ]; then
     done
   } > "$COLLECT/driver-crash-window.txt" 2>&1
   n=0; collection_errors=0
-  collect_recent_logs macos 3 /Library/Logs/DiagnosticReports/*.panic
+  collect_recent_logs macos 3 /Library/Logs/DiagnosticReports/*.panic /Library/Logs/DiagnosticReports/Retired/*.panic
+  # A boot that hung or went black never writes a panic: its kernel messages are only in the log store. Users could not
+  # send them (10-10 chat: "the logs from the kernel don't get saved to a file"), so keep the whole kernel log of the boots
+  # before this one, up to this boot's start: the tail is how the last failed boot ended.
+  { boot=$(sysctl -n kern.boottime | sed -E 's/.*sec = ([0-9]+),.*/\1/')
+    echo "== kernel messages before this boot (started $(date -r "$boot" '+%Y-%m-%d %H:%M:%S'))"
+    log show --start "$(date -r $((boot - 259200)) '+%Y-%m-%d %H:%M:%S')" --end "$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')" \
+      --style compact --predicate 'process == "kernel"' 2>&1 \
+      | grep -v -e 'NVRM-fb: kapi event type 5$' -e 'NVRM-xnu: >os_map_kernel_space' -e 'NVRM-fb: flipToMemory #' | tail -n 8000
+  } > "$COLLECT/previous-boot-kernel-log.txt" 2>&1
   # WindowServer can fail outside a driver frame. Include the complete recent reports
   # during an explicit Send logs request; automatic crash notifications stay selective.
   collect_recent_logs macos 3 /Library/Logs/DiagnosticReports/WindowServer*.ips /Library/Logs/DiagnosticReports/Retired/WindowServer*.ips
@@ -402,6 +430,10 @@ else
             cm=$(plutil -extract "$k" raw -o - "$c" 2>/dev/null); [ -n "$cm" ] && break; done
           echo "NOTE $d: OpenCore config ${c#$mp/} for ${cm:-no model set}"; done; done
       nvram 4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:opencore-version >/dev/null 2>&1 || echo "NOTE OpenCore did not start this Mac (no opencore-version in NVRAM)"
+      # 10-10 (iMacPro1,1, MacBookPro16,1, iMac20,2): this stop printed no NOTE at all - no partition was even listed. Show
+      # what macOS sees, so the next report names the cause: where OpenCore says it started from, and every partition.
+      echo "NOTE boot-path: $(nvram 4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:boot-path 2>/dev/null | cut -f2- | head -c 300)"
+      diskutil list 2>&1 | grep -E '^ +[0-9]+:|^/dev/' | head -n 40 | sed 's/^/NOTE disks: /'
       [ -n "$clover" ] && ! nvram 4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:opencore-version >/dev/null 2>&1 && \
         stop "this Mac starts with Clover, not OpenCore - the NVIDIA driver's settings are made for OpenCore. Make an OpenCore setup (1401 on Windows builds one), start from it, then run this again"
       stop "no OpenCore config for this Mac ($(sysctl -n hw.model)) on any connected disk - plug in the disk or USB stick OpenCore started from, then try again (the NOTE lines above show what each partition holds)"
@@ -455,6 +487,11 @@ else
     fi
     if [ "$BOOT_BOUND" != 1 ]; then
       for d in $found; do echo "NOTE candidate $d"; done
+      # Mac 1.9/1.10 logs 10-10 (5 uploads, one candidate each): OpenCore hides boot-path and its version when
+      # Misc > Security > ExposeSensitiveData lacks bits 0x1/0x2, so nothing proves which partition started the Mac, and
+      # editing one that did not would install the driver without its settings or the removal tool. Say how to fix it.
+      nvram 4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:opencore-version >/dev/null 2>&1 || \
+        echo "NOTE OpenCore hides where it started from: set Misc > Security > ExposeSensitiveData to 7 in this config.plist (bit 1 publishes boot-path; 1401 builds use 7), restart, then try again - or choose the partition in the app"
       stop "OpenCore's startup partition could not be confirmed - select the partition this Mac started from"
     fi
     EFI=${found# }
@@ -572,10 +609,14 @@ if [ -n "$USBMAP" ]; then
   case "$USBMAP" in */UTBMap.kext|*/UTBMap.kext/) K="${USBMAP%/}";; *) K="$USBMAP/UTBMap.kext";; esac
   [ -f "$K/Contents/Info.plist" ] || stop "the USB map the app wrote is missing ($K)"
   plutil -lint "$K/Contents/Info.plist" >/dev/null || stop "the USB map the app wrote is not valid"
-  KD="$(dirname "$C")/Kexts"; [ -d "$KD/USBToolBox.kext" ] || stop "USBToolBox.kext is not in $KD - the map needs it (1401 builds include it)"
+  KD="$(dirname "$C")/Kexts"
   kidx() { local i=0 p; while p=$(plutil -extract Kernel.Add.$i.BundlePath raw -o - "$C" 2>/dev/null); do [ "$p" = "$1" ] && { echo $i; return; }; i=$((i+1)); done; }
-  [ -n "$(kidx USBToolBox.kext)" ] || stop "USBToolBox.kext is not in the config's Kernel -> Add"
+  # The map is a USBToolBox map. 1.10 stopped when the EFI had no USBToolBox (10-10, an EFI not built by 1401); fetch it.
+  NEEDUTB=0; [ -d "$KD/USBToolBox.kext" ] || { fetch_kext USBToolBox.kext "$KD"; NEEDUTB=1; echo "CHANGE Kexts: add USBToolBox.kext (downloaded, SHA-256 checked)"; }
   BKC="$C.nullmoth-usb-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C"; ok "backed up the config to $BKC"
+  [ $NEEDUTB = 0 ] || ditto "$KT/USBToolBox.kext.x/USBToolBox.kext" "$KD/USBToolBox.kext" || stop "could not copy USBToolBox.kext"
+  [ -n "$(kidx USBToolBox.kext)" ] || { plutil -insert Kernel.Add -json '{"Arch":"Any","BundlePath":"USBToolBox.kext","Comment":"USBToolBox (NullMoth USB map)","Enabled":true,"ExecutablePath":"Contents/MacOS/USBToolBox","MaxKernel":"","MinKernel":"","PlistPath":"Contents/Info.plist"}' -append "$C" \
+    || { cp -p "$BKC" "$C"; stop "could not add USBToolBox.kext to the config"; }; echo "CHANGE Kernel -> Add: USBToolBox.kext"; }
   [ -d "$KD/UTBMap.kext" ] && { mv "$KD/UTBMap.kext" "$KD/UTBMap.kext.nullmoth-$(date +%Y%m%d-%H%M%S)" || stop "could not move the old map aside"; note "the old UTBMap.kext was kept beside it"; }
   cp -R "$K" "$KD/UTBMap.kext" || { cp -p "$BKC" "$C"; stop "could not copy the map"; }
   fail=0
@@ -623,19 +664,23 @@ fi
 # the same SIP bits and amfi boot-args, 1.9.0 logs (10-10, Ryzen 9 9900X) show "mapping process is a platform binary,
 # but mapped file is not", no Metal device and a black screen with a cursor. Every working machine has it on.
 kpos() { local i=0 p; while p=$(get Kernel.Add.$i.BundlePath); do [ "$p" = "$1" ] && { echo $i; return; }; i=$((i+1)); done; }
-KX="$(dirname "$C")/Kexts"; NEEDAMFIPASS=0
+KX="$(dirname "$C")/Kexts"; ADDK=(); FETCH=()
+# 1.10 stopped here when either kext was missing, and 1401 had only built AMFIPass for OCLP Wi-Fi, so updating users were
+# sent to rebuild an EFI that still lacked it (10-10: 9 uploads, several chat reports). Setup now fetches them itself,
+# from the same pinned files 1401 builds with (p1401/mirror.json), and checks each SHA-256 before anything is changed.
 for k in Lilu.kext AMFIPass.kext; do
   ki=$(kpos $k)
+  [ -d "$KX/$k" ] || { FETCH+=($k); echo "CHANGE Kexts: add $k to $KX (downloaded, SHA-256 checked)"; }
   if [ -n "$ki" ]; then
     [ "$(get Kernel.Add.$ki.Enabled)" = true ] || { echo "CHANGE Kernel -> Add: turn $k on (the driver cannot load without it)"; EDITS+=("Kernel.Add.$ki.Enabled|-bool|true"); }
-  elif [ $k = AMFIPass.kext ] && [ -d "$KX/AMFIPass.kext" ] && [ -n "$(kpos Lilu.kext)" ]; then
-    echo "CHANGE Kernel -> Add: add AMFIPass.kext after Lilu (the driver cannot load without it)"; NEEDAMFIPASS=1
   else
-    stop "$k is not in this OpenCore EFI ($KX). The driver needs Lilu and AMFIPass; build the EFI again with 1401, or add them, then try again"
+    ADDK+=($k); echo "CHANGE Kernel -> Add: add $k (the driver cannot load without it)"
   fi
 done
+for k in "${FETCH[@]+"${FETCH[@]}"}"; do fetch_kext $k "$KX"; done
 lp=$(kpos Lilu.kext); ap=$(kpos AMFIPass.kext)
-[ -n "$ap" ] && [ "$ap" -lt "$lp" ] && stop "AMFIPass.kext loads before Lilu.kext in Kernel -> Add; move it below Lilu in the config, then try again"
+[ -n "$ap" ] && [ -n "$lp" ] && [ "$ap" -lt "$lp" ] && stop "AMFIPass.kext loads before Lilu.kext in Kernel -> Add; move it below Lilu in the config, then try again"
+NEEDAMFIPASS=$(( ${#ADDK[@]} + ${#FETCH[@]} ))
 # The macOS installer boots with a small GPU BAR (ResizeAppleGpuBars 0, so its fallback screen survives PCI setup); the
 # driver was tested with the card's full 8 GB BAR, so the installed system gets that back.
 bar=$(get UEFI.Quirks.ResizeGpuBars); abar=$(get Booter.Quirks.ResizeAppleGpuBars)
@@ -714,9 +759,14 @@ if [ $DRY = 0 ]; then
     has Kernel.Block || plutil -insert Kernel.Block -array "$C" || fail=1
     plutil -insert Kernel.Block -json '{"Arch":"Any","Comment":"boot framebuffer IONDRVFramebuffer steals index 0 from NVRMFB","Enabled":true,"Identifier":"com.apple.iokit.IONDRVSupport","MaxKernel":"","MinKernel":"","Strategy":"Exclude"}' -append "$C" || fail=1
   fi
-  if [ $NEEDAMFIPASS = 1 ]; then
-    plutil -insert Kernel.Add -json '{"Arch":"Any","BundlePath":"AMFIPass.kext","Comment":"AMFIPass (NullMoth driver)","Enabled":true,"ExecutablePath":"Contents/MacOS/AMFIPass","MaxKernel":"","MinKernel":"","PlistPath":"Contents/Info.plist"}' -append "$C" || fail=1
-  fi
+  for k in "${FETCH[@]+"${FETCH[@]}"}"; do ditto "$KT/$k.x/$k" "$KX/$k" || fail=1; done
+  for k in "${ADDK[@]+"${ADDK[@]}"}"; do
+    n=${k%.kext}
+    j="{\"Arch\":\"Any\",\"BundlePath\":\"$k\",\"Comment\":\"$n (NullMoth driver)\",\"Enabled\":true,\"ExecutablePath\":\"Contents/MacOS/$n\",\"MaxKernel\":\"\",\"MinKernel\":\"\",\"PlistPath\":\"Contents/Info.plist\"}"
+    # Lilu loads before every plugin, so it goes first; AMFIPass is a Lilu plugin and goes after it (end of the list)
+    if [ $k = Lilu.kext ]; then plutil -insert Kernel.Add.0 -json "$j" "$C" || fail=1
+    else plutil -insert Kernel.Add -json "$j" -append "$C" || fail=1; fi
+  done
   if [ ${#DELADD[@]} -gt 0 ]; then
     has NVRAM.Delete || plutil -insert NVRAM.Delete -dictionary "$C" || fail=1
     plutil -extract NVRAM.Delete.$B xml1 -o - "$C" >/dev/null 2>&1 || plutil -insert NVRAM.Delete.$B -array "$C" || fail=1
