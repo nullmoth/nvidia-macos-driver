@@ -21,7 +21,7 @@ class HardwareMapTests(unittest.TestCase):
 
     def test_consent_priority_and_exact_native_command(self):
         source = (ROOT / 'app/Sources/main.swift').read_text()
-        send = source.split('    func sendLogs() {', 1)[1].split('    func crashReportFromWindow()', 1)[0]
+        send = source.split('    func sendLogs(sample: String = "") {', 1)[1].split('    func crashReportFromWindow()', 1)[0]
         self.assertLess(send.index('guard a.runModal()'), send.index('HardwareMapWorker.run'))
         self.assertLess(send.index('DispatchQueue.global().async'), send.index('HardwareMapWorker.run'))
         self.assertIn('let important = ["hardware-map.json",', send)

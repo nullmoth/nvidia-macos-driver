@@ -1568,6 +1568,14 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
             if (tmpl < 0 && j < fromMac && !d.horizontalScaled && !d.verticalScaled) tmpl = (int)j;
         }
         if (!fromMac) raster = fBootW && k.hVisible == fBootW && k.vVisible == fBootH && hz != bootHz && hz + 1 != bootHz && hz != bootHz + 1;
+        // A raster macOS never proposed is offered too when NVKMS validated it for this display and it fits the scanout
+        // memory and the scaler. Without this, rasters that exist only in the EDID's DisplayID extension (most 100-240 Hz
+        // modes, issue #29) and every raster above a 1080p firmware raster (a 4K monitor stuck at 1920x1080, issue #49)
+        // were never listed. switchMode re-checks the memory, and NVKMS validates the commit itself.
+        if (!raster && !have && fMemBytes && k.hVisible <= fScalerMaxW && k.vVisible <= fScalerMaxH) {
+            NvU32 pitch = 0;
+            if (nvrmCheckedPitch(k.hVisible, fPitchAlign, &pitch) && (NvU64)pitch * k.vVisible <= fMemBytes) raster = true;
+        }
         if (have || !raster) continue;
         IODetailedTimingInformationV2 b;
         if (tmpl >= 0) b = fDT[tmpl];
