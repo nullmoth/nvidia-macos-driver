@@ -50,6 +50,7 @@ def decode(path):
         for line in f:
             if bar0 is None and line.startswith("PCIDEV ") and line.split()[2].startswith("8086") and line.rstrip().endswith(("i915", "xe")):
                 bar0 = bar0_of(line)
+                last["_DEVICE"] = int(line.split()[2][4:8], 16)
                 continue
             if bar0 is None or not line.startswith("W "):
                 continue

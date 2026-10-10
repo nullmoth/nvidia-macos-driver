@@ -1,0 +1,341 @@
+{
+ "source": "Linux include/drm/intel/pciids.h (MIT); versions per i915 display platform descriptors",
+ "ids": {
+  "4626": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "4628": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "462a": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "4680": {
+   "display_version": 12,
+   "family": "ADLS"
+  },
+  "4682": {
+   "display_version": 12,
+   "family": "ADLS"
+  },
+  "4688": {
+   "display_version": 12,
+   "family": "ADLS"
+  },
+  "468a": {
+   "display_version": 12,
+   "family": "ADLS"
+  },
+  "468b": {
+   "display_version": 12,
+   "family": "ADLS"
+  },
+  "4690": {
+   "display_version": 12,
+   "family": "ADLS"
+  },
+  "4692": {
+   "display_version": 12,
+   "family": "ADLS"
+  },
+  "4693": {
+   "display_version": 12,
+   "family": "ADLS"
+  },
+  "46a0": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46a1": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46a2": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46a3": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46a6": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46a8": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46aa": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46b0": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46b1": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46b2": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46b3": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46c0": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46c1": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46c2": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46c3": {
+   "display_version": 13,
+   "family": "ADLP"
+  },
+  "46d0": {
+   "display_version": 13,
+   "family": "ADLN"
+  },
+  "46d1": {
+   "display_version": 13,
+   "family": "ADLN"
+  },
+  "46d2": {
+   "display_version": 13,
+   "family": "ADLN"
+  },
+  "46d3": {
+   "display_version": 13,
+   "family": "ADLN"
+  },
+  "46d4": {
+   "display_version": 13,
+   "family": "ADLN"
+  },
+  "4905": {
+   "display_version": 12,
+   "family": "DG1"
+  },
+  "4906": {
+   "display_version": 12,
+   "family": "DG1"
+  },
+  "4907": {
+   "display_version": 12,
+   "family": "DG1"
+  },
+  "4908": {
+   "display_version": 12,
+   "family": "DG1"
+  },
+  "4909": {
+   "display_version": 12,
+   "family": "DG1"
+  },
+  "4c80": {
+   "display_version": 12,
+   "family": "RKL"
+  },
+  "4c8a": {
+   "display_version": 12,
+   "family": "RKL"
+  },
+  "4c8b": {
+   "display_version": 12,
+   "family": "RKL"
+  },
+  "4c8c": {
+   "display_version": 12,
+   "family": "RKL"
+  },
+  "4c90": {
+   "display_version": 12,
+   "family": "RKL"
+  },
+  "4c9a": {
+   "display_version": 12,
+   "family": "RKL"
+  },
+  "6420": {
+   "display_version": 20,
+   "family": "LNL"
+  },
+  "64a0": {
+   "display_version": 20,
+   "family": "LNL"
+  },
+  "64b0": {
+   "display_version": 20,
+   "family": "LNL"
+  },
+  "7d40": {
+   "display_version": 14,
+   "family": "MTL"
+  },
+  "7d41": {
+   "display_version": 14,
+   "family": "ARL"
+  },
+  "7d45": {
+   "display_version": 14,
+   "family": "MTL"
+  },
+  "7d51": {
+   "display_version": 14,
+   "family": "ARL"
+  },
+  "7d55": {
+   "display_version": 14,
+   "family": "MTL"
+  },
+  "7d60": {
+   "display_version": 14,
+   "family": "MTL"
+  },
+  "7d67": {
+   "display_version": 14,
+   "family": "ARL"
+  },
+  "7dd1": {
+   "display_version": 14,
+   "family": "ARL"
+  },
+  "7dd5": {
+   "display_version": 14,
+   "family": "MTL"
+  },
+  "9a40": {
+   "display_version": 12,
+   "family": "TGL"
+  },
+  "9a49": {
+   "display_version": 12,
+   "family": "TGL"
+  },
+  "9a59": {
+   "display_version": 12,
+   "family": "TGL"
+  },
+  "9a60": {
+   "display_version": 12,
+   "family": "TGL"
+  },
+  "9a68": {
+   "display_version": 12,
+   "family": "TGL"
+  },
+  "9a70": {
+   "display_version": 12,
+   "family": "TGL"
+  },
+  "9a78": {
+   "display_version": 12,
+   "family": "TGL"
+  },
+  "9ac0": {
+   "display_version": 12,
+   "family": "TGL"
+  },
+  "9ac9": {
+   "display_version": 12,
+   "family": "TGL"
+  },
+  "9ad9": {
+   "display_version": 12,
+   "family": "TGL"
+  },
+  "9af8": {
+   "display_version": 12,
+   "family": "TGL"
+  },
+  "a720": {
+   "display_version": 13,
+   "family": "RPLP"
+  },
+  "a721": {
+   "display_version": 13,
+   "family": "RPLU"
+  },
+  "a780": {
+   "display_version": 12,
+   "family": "RPLS"
+  },
+  "a781": {
+   "display_version": 12,
+   "family": "RPLS"
+  },
+  "a782": {
+   "display_version": 12,
+   "family": "RPLS"
+  },
+  "a783": {
+   "display_version": 12,
+   "family": "RPLS"
+  },
+  "a788": {
+   "display_version": 12,
+   "family": "RPLS"
+  },
+  "a789": {
+   "display_version": 12,
+   "family": "RPLS"
+  },
+  "a78a": {
+   "display_version": 12,
+   "family": "RPLS"
+  },
+  "a78b": {
+   "display_version": 12,
+   "family": "RPLS"
+  },
+  "a7a0": {
+   "display_version": 13,
+   "family": "RPLP"
+  },
+  "a7a1": {
+   "display_version": 13,
+   "family": "RPLU"
+  },
+  "a7a8": {
+   "display_version": 13,
+   "family": "RPLP"
+  },
+  "a7a9": {
+   "display_version": 13,
+   "family": "RPLU"
+  },
+  "a7aa": {
+   "display_version": 13,
+   "family": "RPLP"
+  },
+  "a7ab": {
+   "display_version": 13,
+   "family": "RPLP"
+  },
+  "a7ac": {
+   "display_version": 13,
+   "family": "RPLU"
+  },
+  "a7ad": {
+   "display_version": 13,
+   "family": "RPLU"
+  },
+  "b640": {
+   "display_version": 14,
+   "family": "ARL"
+  }
+ }
+}
