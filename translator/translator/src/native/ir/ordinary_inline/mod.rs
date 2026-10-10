@@ -502,9 +502,27 @@ impl LlModule {
 
                     let mut local_rename = HashMap::new();
                     let mut parameter_bindings = Vec::with_capacity(arguments.len());
-                    for (index, ((parameter, _), argument)) in
+                    for (index, ((parameter, parameter_type), argument)) in
                         helper.params.iter().zip(arguments).enumerate()
                     {
+                        // A pointer passed as a plain caller local IS that local: use its name. Through a proxy the
+                        // emitter lost what it knows about a kernel buffer's struct layout, so an i64 load across two
+                        // i32 fields translated in the entry and failed in a one-block helper ("reinterpret load bit
+                        // width mismatch Int(32) vs Int(64)").
+                        // Only for a kernel buffer of structs the metadata describes; any other pointer keeps its
+                        // proxy (a pointer-chasing buffer relies on it: the loop-carried device address case).
+                        if let (LlType::Ptr(_), LlValue::Local(argument_name)) = (parameter_type, &argument.value) {
+                            let key = (caller_name.clone(), argument_name.clone());
+                            if source_data_buffers.contains(&key)
+                                && matches!(
+                                    source_value_pointees.get(&key),
+                                    Some(LlType::Struct(_)) | Some(LlType::Named(_))
+                                )
+                            {
+                                local_rename.insert(parameter.clone(), argument_name.clone());
+                                continue;
+                            }
+                        }
                         let proxy = format!(
                             "%metal2vulkan.helper.{}.{}.param.{index}",
                             helper.ordinal, site
