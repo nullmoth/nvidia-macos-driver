@@ -72,10 +72,10 @@ int main(void){
 UPLOAD = r'''
 import Foundation
 var files=(0..<50).map { URL(fileURLWithPath: "old-\($0).txt") }
-files += ["hardware-map.json","crash-report.txt","driver-state.txt","driver-plugin-log.txt","collect.txt","driver-kernel-log.txt","driver-update-log.txt","diagnostic-session.json","driver-wsreset.log.txt"].map {URL(fileURLWithPath:$0)}
+files += ["hardware-map.json","crash-report.txt","driver-state.txt","driver-plugin-log.txt","collect.txt","driver-kernel-log.txt","driver-display.txt","driver-update-log.txt","diagnostic-session.json","driver-wsreset.log.txt"].map {URL(fileURLWithPath:$0)}
 files += (0..<3).map { URL(fileURLWithPath: "macos-WindowServer-\($0).ips.txt") }
             PRODUCTION
-let sent=Set(files.prefix(12).map { $0.lastPathComponent })
+let sent=Set(files.prefix(important.count + 3).map { $0.lastPathComponent })  // every priority file + the 3 WindowServer reports
 assert(Set(important).isSubset(of:sent))
 assert(Set((0..<3).map { "macos-WindowServer-\($0).ips.txt" }).isSubset(of:sent))
 print("PASS essential diagnostics and WindowServer reports survive 50 competing files")
