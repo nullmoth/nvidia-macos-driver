@@ -1522,8 +1522,87 @@ NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, NSStri
 
 #pragma mark - batch 32: visible-function linking
 static NSError *nvmtl_link_err(NSString *m) {
-    nvlog("link: %s", m.UTF8String);
+    /* "FAILED" keeps this line in the release syslog (nvmtl_log_failure): a refused link makes the caller's
+     * pipeline nil, and RenderBox only reports that as a <private> "precondition failure". */
+    nvlog("link FAILED: %s", m.UTF8String);
     return [NSError errorWithDomain:@"NVMTL" code:4 userInfo:@{NSLocalizedDescriptionKey: m}];
+}
+
+/* MTLFunctionDescriptor.specializedName renames the function it creates, and a linked caller then refers
+ * to it by that new name. RenderBox does exactly this for every custom shader: it asks for IconRendering's
+ * glassHighlight_v1 / glow_v1 / sdfFill_v1 / shapeAwareGradientMask_v1 / clampToEdges_v1 (and its own
+ * distanceGradient_v1 ...) with specializedName "custom_fn" and links it as a privateFunction into
+ * primitive_/accumulator_/filter_custom_fragment and custom_effect_fragment, whose AIR references
+ * !"custom_fn". The AIR we keep still defines @glassHighlight_v1, and the translator's validate_linkage()
+ * refuses any symbol its module does not define ("linked module does not define authored visible function
+ * reference \"custom_fn\""), so every such pipeline failed and the icon effect was never drawn.
+ * These helpers mirror linked_functions.rs llvm_global()/module_defines(). */
+static BOOL nvmtl_llvm_plain_char(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '$' || c == '-';
+}
+static NSString *nvmtl_llvm_global_name(NSString *sym) {
+    const char *s = sym.UTF8String;
+    if (!s || !*s) return nil;
+    BOOL plain = YES;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p == '\n' || *p == '\r') return nil;
+        if (!nvmtl_llvm_plain_char(*p)) plain = NO;
+    }
+    if (plain) return [@"@" stringByAppendingString:sym];
+    NSString *q = [[sym stringByReplacingOccurrencesOfString:@"\\" withString:@"\\5C"] stringByReplacingOccurrencesOfString:@"\"" withString:@"\\22"];
+    return [NSString stringWithFormat:@"@\"%@\"", q];
+}
+static BOOL nvmtl_air_defines(NSString *ll, NSString *sym) {
+    NSString *g = nvmtl_llvm_global_name(sym);
+    if (!g || !ll.length) return NO;
+    NSString *call = [g stringByAppendingString:@"("];
+    __block BOOL found = NO;
+    [ll enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
+        NSUInteger i = 0, n = line.length;
+        while (i < n && ([line characterAtIndex:i] == ' ' || [line characterAtIndex:i] == '\t')) i++;
+        if (n - i > 7 && [line compare:@"define " options:NSLiteralSearch range:NSMakeRange(i, 7)] == NSOrderedSame &&
+            [line rangeOfString:call options:NSLiteralSearch].location != NSNotFound) { found = YES; *stop = YES; }
+    }];
+    return found;
+}
+/* Every whole-token use of global `from` (definition, calls, metadata such as !air.visible) becomes `to`.
+ * nil when `to` is already a global of this module (nothing is renamed then). */
+static NSString *nvmtl_air_rename_global(NSString *ll, NSString *from, NSString *to) {
+    NSString *gf = nvmtl_llvm_global_name(from), *gt = nvmtl_llvm_global_name(to);
+    if (!gf || !gt || !ll.length) return nil;
+    BOOL quoted = [gf hasPrefix:@"@\""];
+    NSMutableString *outs = [NSMutableString stringWithCapacity:ll.length + 64];
+    NSUInteger pos = 0, n = ll.length, hits = 0;
+    for (;;) {
+        NSRange r = [ll rangeOfString:gf options:NSLiteralSearch range:NSMakeRange(pos, n - pos)];
+        if (r.location == NSNotFound) break;
+        NSUInteger end = NSMaxRange(r);
+        unichar next = end < n ? [ll characterAtIndex:end] : 0;
+        BOOL whole = quoted || end >= n || next >= 128 || !nvmtl_llvm_plain_char((unsigned char)next);
+        [outs appendString:[ll substringWithRange:NSMakeRange(pos, r.location - pos)]];
+        [outs appendString:whole ? gt : gf];
+        if (whole) hits++;
+        pos = end;
+    }
+    if (!hits) return nil;
+    [outs appendString:[ll substringFromIndex:pos]];
+    if (nvmtl_air_defines(ll, to)) return nil;
+    return outs;
+}
+/* The AIR a linked function contributes, under the name its callers use. */
+static NSString *nvmtl_link_candidate_air(NVMTLFunction *cf, NSString **nameOut) {
+    NSString *air = cf->_air, *name = cf->_fname;
+    if (cf->_specName.length && cf->_fname.length && ![cf->_specName isEqualToString:cf->_fname]) {
+        if (nvmtl_air_defines(air, cf->_specName)) name = cf->_specName;
+        else {
+            NSString *renamed = nvmtl_air_defines(air, cf->_fname) ? nvmtl_air_rename_global(air, cf->_fname, cf->_specName) : nil;
+            if (renamed) { air = renamed; name = cf->_specName;
+                nvlog("link: \"%s\" renamed to its specializedName \"%s\"", cf->_fname.UTF8String, cf->_specName.UTF8String); }
+            else nvlog("link: specializedName \"%s\" of \"%s\" could not be applied - FAILED to rename its AIR", cf->_specName.UTF8String, cf->_fname.UTF8String);
+        }
+    }
+    if (nameOut) *nameOut = name;
+    return air;
 }
 id<MTLFunction> nvmtl_link_kernel(MTLComputePipelineDescriptor *d, NSError **err)
 {
@@ -1677,8 +1756,10 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
         [seen appendFormat:@" [%@%@%@ air=%lu fc=%lu]", cf->_fname, cf->_specName ? @"/" : @"", cf->_specName ?: @"",
             (unsigned long)cf->_air.length, (unsigned long)cf->_fc.count];
         if (!cf->_air.length) continue;
-        for (NSString *nm in @[cf->_fname ?: @"", cf->_specName ?: @"", cf.name ?: @""])
-            if (nm.length && !mods[nm]) mods[nm] = cf->_air;
+        NSString *air = nvmtl_link_candidate_air(cf, NULL);
+        /* Only names the module really defines: validate_linkage() refuses the whole link otherwise. */
+        for (NSString *nm in @[cf->_specName ?: @"", cf.name ?: @"", cf->_fname ?: @""])
+            if (nm.length && !mods[nm] && nvmtl_air_defines(air, nm)) mods[nm] = air;
         for (NSString *ki in cf->_fc) {
             if (fc[ki] && ![fc[ki] isEqual:cf->_fc[ki]]) nvlog("link: constant %s differs between linked functions - first kept", ki.UTF8String);
             else fc[ki] = cf->_fc[ki];
@@ -1720,7 +1801,10 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
         const char **rs = calloc(nr ? nr : 1, sizeof *rs), **rm = calloc(nr ? nr : 1, sizeof *rm);
         const char **cs = calloc(tc.count ? tc.count : 1, sizeof *cs), **cm = calloc(tc.count ? tc.count : 1, sizeof *cm);
         size_t j = 0; for (NSString *s in refs) if (mods[s]) { rs[j] = s.UTF8String; rm[j] = [mods[s] UTF8String]; j++; }
-        for (NSUInteger i = 0; i < tc.count; i++) { NVMTLFunction *cf = tc[i]; cs[i] = cf->_fname.UTF8String; cm[i] = cf->_air.UTF8String; }
+        NSMutableArray *keep = [NSMutableArray arrayWithCapacity:tc.count * 2];
+        for (NSUInteger i = 0; i < tc.count; i++) { NVMTLFunction *cf = tc[i]; NSString *cn = nil; NSString *ca = nvmtl_link_candidate_air(cf, &cn);
+            [keep addObject:cn ?: @""]; [keep addObject:ca ?: @""];
+            cs[i] = [keep[2 * i] UTF8String]; cm[i] = [keep[2 * i + 1] UTF8String]; }
         nvlog("link: \"%s\" reads a visible function table - %lu table candidate(s), %zu direct reference(s)", fn->_fname.UTF8String, (unsigned long)tc.count, nr);
         rc = xlate_link_rt(fn->_air.UTF8String, fn->_stage.UTF8String, rs, rm, nr, cs, cm, tc.count, &out, &len, e, sizeof e);
         free(rs); free(rm); free(cs); free(cm);
