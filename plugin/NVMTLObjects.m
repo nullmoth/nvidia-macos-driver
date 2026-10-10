@@ -4248,9 +4248,9 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
           (unsigned long)so.y, (unsigned long)size.width, (unsigned long)size.height, [d nvi]->w, [d nvi]->h, nvmtl_surf_id(d), (unsigned long)dof.x, (unsigned long)dof.y);
       g_trace_mute = was; }
     [s nvmtlSurfaceIn]; [d nvmtlSurfaceIn]; nvmtl_surf_dirty(_cb, d);
-    if (nvmtl_vk_cmd_copy_image_sub(&_cb->_c, [s nvi], (uint32_t)sl + s->_baseLevel, (uint32_t)ss + s->_baseSlice, (uint32_t)so.x, (uint32_t)so.y,
-                                [d nvi], (uint32_t)dl + d->_baseLevel, (uint32_t)ds + d->_baseSlice, (uint32_t)dof.x, (uint32_t)dof.y,
-                                (uint32_t)size.width, (uint32_t)size.height))
+    if (nvmtl_vk_cmd_copy_image_sub3(&_cb->_c, [s nvi], (uint32_t)sl + s->_baseLevel, (uint32_t)ss + s->_baseSlice, (uint32_t)so.x, (uint32_t)so.y, (uint32_t)so.z,
+                                [d nvi], (uint32_t)dl + d->_baseLevel, (uint32_t)ds + d->_baseSlice, (uint32_t)dof.x, (uint32_t)dof.y, (uint32_t)dof.z,
+                                (uint32_t)size.width, (uint32_t)size.height, (uint32_t)(size.depth ? size.depth : 1)))
         nvlog("blit copyFromTexture: FAILED");
 }
 - (void)sampleCountersInBuffer:(id)sb atSampleIndex:(NSUInteger)i withBarrier:(BOOL)b { nvmtl_sample_counter(_cb, sb, i, self, b); }
@@ -4288,8 +4288,9 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
         for (NSUInteger l = 0; l < (nlevels ? nlevels : 1); l++) {
             if (sl + l >= s.mipmapLevelCount || dl + l >= d.mipmapLevelCount) { nvlog("blit sliceCount: mip outside view"); return; }
             NSUInteger w = MAX((NSUInteger)1, s.width >> (sl + l)), h = MAX((NSUInteger)1, s.height >> (sl + l));
+            NSUInteger dp = s.textureType == MTLTextureType3D ? MAX((NSUInteger)1, s.depth >> (sl + l)) : 1;
             [self copyFromTexture:s sourceSlice:ss + k sourceLevel:sl + l sourceOrigin:MTLOriginMake(0,0,0)
-                      sourceSize:MTLSizeMake(w,h,1) toTexture:d destinationSlice:ds + k destinationLevel:dl + l destinationOrigin:MTLOriginMake(0,0,0)];
+                      sourceSize:MTLSizeMake(w,h,dp) toTexture:d destinationSlice:ds + k destinationLevel:dl + l destinationOrigin:MTLOriginMake(0,0,0)];
         }
 }
 - (void)optimizeContentsForGPUAccess:(id<MTLTexture>)t {}
@@ -4314,7 +4315,7 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
     NVMTLTexture *s = (NVMTLTexture *)src;
     if (!s) { nvlog("blit copyFromTexture:toTexture: nil"); return; }
     [self copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
-               sourceSize:MTLSizeMake(s.width, s.height, 1) toTexture:dst
+               sourceSize:MTLSizeMake(s.width, s.height, s.textureType == MTLTextureType3D ? s.depth : 1) toTexture:dst
          destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
 }
 - (void)copyFromBuffer:(id<MTLBuffer>)src sourceOffset:(NSUInteger)so sourceBytesPerRow:(NSUInteger)row
