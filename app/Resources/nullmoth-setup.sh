@@ -154,7 +154,21 @@ if [ -n "$COLLECT" ]; then
   # the kernel's own words from the last boots: NVRM/NVAccel/NVRMFB print why they stopped (GSP boot, BAR, display).
   # A boot that hung early may not have reached the log store; a later boot's panic report then carries it.
   log show --last 3d --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "nvrm" OR eventMessage CONTAINS[c] "nvaccel" OR eventMessage CONTAINS[c] "nvidia" OR eventMessage CONTAINS[c] "nullmoth" OR eventMessage CONTAINS[c] "gsp")' 2>&1 \
-    | grep -v 'NVRM-fb: kapi event type 5$' | tail -n 6000 > "$COLLECT/driver-kernel-log.txt"
+    | grep -v -e 'NVRM-fb: kapi event type 5$' -e 'NVRM-xnu: >os_map_kernel_space' -e 'NVRM-fb: flipToMemory #' \
+    | tail -n 6000 > "$COLLECT/driver-kernel-log.txt"
+  # 1.9.0 report (10-10, 2K 165 Hz monitor stuck at 1080p 60 Hz): the 6000-line tail above was all os_map_kernel_space
+  # and flipToMemory lines, so the boot-time mode list, the EDID and why each mode was or was not offered were gone.
+  # Everything the display decision used, from THIS boot only, never tailed away.
+  { echo "== monitors (EDID as macOS sees it)"
+    ioreg -l -w0 -r -c IODisplayConnect 2>/dev/null | grep -E '"(IODisplayEDID|DisplayProductName|DisplayVendorID|DisplayProductID)"'
+    echo; echo "== NVIDIA framebuffers"
+    ioreg -l -w0 -r -c NVRMNVDAFramebuffer 2>/dev/null | grep -E '"(IOFB[A-Za-z]*(Mode|Timing|Pixel|Display)[A-Za-z]*|nvrm[A-Za-z-]*|NVRM[A-Za-z]*|IOFBDependentIndex)"'
+    echo; echo "== framebuffer messages since this boot"
+    boot=$(sysctl -n kern.boottime | sed -E 's/.*sec = ([0-9]+),.*/\1/')
+    log show --start "$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')" --style compact \
+      --predicate 'process == "kernel" AND (eventMessage CONTAINS "NVRM-fb" OR eventMessage CONTAINS "nvkms")' 2>&1 \
+      | grep -v -e 'kapi event type 5$' -e 'flipToMemory #' | head -n 4000
+  } > "$COLLECT/driver-display.txt" 2>&1
   log_status=${PIPESTATUS[0]}; echo "log show exit: $log_status" >> "$COLLECT/driver-kernel-log.txt"
   # The current kernel message ring can retain early GSP/BAR failures absent from the log store.
   { echo; echo "== current kernel message ring"; dmesg 2>&1 | grep -iE 'nvrm|nvaccel|nvidia|nullmoth|gsp' | tail -n 2000; } >> "$COLLECT/driver-kernel-log.txt"
