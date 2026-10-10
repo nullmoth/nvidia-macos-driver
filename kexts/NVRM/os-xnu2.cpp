@@ -17,6 +17,7 @@
 #include <sys/fcntl.h>
 #include <sys/uio.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
+#include <IOKit/acpi/IOACPIPlatformDevice.h>
 #include <sys/proc.h>
 #include <sys/kauth.h>
 
@@ -1175,8 +1176,117 @@ void  NV_API_CALL os_delete_record_for_crashLog(void *p) { TRC; }
 void  NV_API_CALL nv_get_disp_smmu_stream_ids(nv_state_t *nv, NvU32 *a, NvU32 *b) { TRC; if (a) *a = 0; if (b) *b = 0; }
 void  NV_API_CALL nv_acpi_methods_init(NvU32 *handlesPresent) { TRC; if (handlesPresent) *handlesPresent = 0; }
 void  NV_API_CALL nv_acpi_methods_uninit(void) { TRC; }
-NV_STATUS NV_API_CALL nv_acpi_dod_method(nv_state_t *nv, NvU32 *a, NvU32 *b) { TRC; return NV_ERR_NOT_SUPPORTED; }
-NV_STATUS NV_API_CALL nv_acpi_dsm_method(nv_state_t *nv, NvU8 *guid, NvU32 a, NvBool b, NvU32 c, void *d, NvU16 e, NvU32 *f, void *g, NvU16 *h) { TRC; return NV_ERR_NOT_SUPPORTED; }
+
+// Laptop panel backlight. RM only finds an internal panel's backlight when it can read the panel's
+// backlight tables from the firmware: the NBCI _DSM functions GETOBJBYTYPE (0x10) and GETBACKLIGHT
+// (0x14), plus the display ACPI ids from _DOD. Without them NV0073_CTRL_CMD_SPECIFIC_GET_BACKLIGHT_BRIGHTNESS
+// fails with NV_ERR_NOT_SUPPORTED and NVKMS never calls nvkms_register_backlight().
+// Both are evaluated on the GPU's ACPI node, as kernel-open/nvidia/nv-acpi.c does. Only NBCI is answered:
+// RM asks each _DSM GUID for its functions separately (_acpiDsmSupportedFuncCacheInit), so every other
+// GUID (NVHG, MXM, NVOP, GPS, JT, NVPCF...) stays "not supported", as before.
+extern "C" {
+#include "nbci.h"
+}
+#define NV_XNU_MAX_ACPI_DSM_PARAM_SIZE 1024                                                  // NV_MAX_ACPI_DSM_PARAM_SIZE (nv-linux.h)
+static const NvU8 nv_xnu_nbci_guid[16] = { 0x75, 0x0B, 0xA5, 0xD4, 0xC7, 0x65, 0xF7, 0x46,      // NBCI_DSM_GUID_STR
+                                           0xBF, 0xB7, 0x41, 0x51, 0x4C, 0xEA, 0x02, 0x44 };    // (acpidsmguids.h)
+
+// The GPU's ACPI node: AppleACPIPCI puts its IOACPIPlane path on the PCI device as "acpi-path".
+static IOACPIPlatformDevice *nv_xnu_gpu_acpi(nv_state_t *nv)
+{
+    static IOACPIPlatformDevice *acpi;      // one GPU per driver instance; kept for the life of the kext
+    if (acpi || !nv) return acpi;
+    nv_xnu_pci_slot *s = (nv_xnu_pci_slot *)os_pci_init_handle(nv->pci_info.domain, nv->pci_info.bus,
+                                                               nv->pci_info.slot, nv->pci_info.function, NULL, NULL);
+    OSString *path = s ? OSDynamicCast(OSString, s->pci->getProperty("acpi-path")) : NULL;
+    IORegistryEntry *e = path ? IORegistryEntry::fromPath(path->getCStringNoCopy()) : NULL;
+    acpi = OSDynamicCast(IOACPIPlatformDevice, e);
+    if (acpi) kprintf("NVRM-xnu: GPU ACPI node %s\n", path->getCStringNoCopy());
+    else if (e) e->release();
+    return acpi;
+}
+
+// nv_acpi_extract_object (nv-acpi.c): integers, buffers and packages of them, flattened into one buffer.
+static NV_STATUS nv_xnu_acpi_extract(OSObject *o, NvU8 *buf, NvU32 cap, NvU32 *size)
+{
+    *size = 0;
+    if (!o) return NV_OK;
+    if (OSNumber *n = OSDynamicCast(OSNumber, o)) {
+        NvU64 v = n->unsigned64BitValue(); NvU32 len = (v >> 32) ? 8 : 4;
+        *size = len; if (cap < len) return NV_ERR_BUFFER_TOO_SMALL;
+        memcpy(buf, &v, len); return NV_OK;
+    }
+    if (OSData *d = OSDynamicCast(OSData, o)) {
+        *size = d->getLength(); if (cap < d->getLength()) return NV_ERR_BUFFER_TOO_SMALL;
+        if (d->getLength()) memcpy(buf, d->getBytesNoCopy(), d->getLength());
+        return NV_OK;
+    }
+    if (OSArray *a = OSDynamicCast(OSArray, o)) {
+        NvU32 used = 0;
+        for (unsigned i = 0; i < a->getCount(); i++) {
+            NvU32 len = 0; NV_STATUS st = nv_xnu_acpi_extract(a->getObject(i), buf + used, cap - used, &len);
+            if (st != NV_OK) { *size = used; return st; }
+            used += len;
+        }
+        *size = used; return NV_OK;
+    }
+    return NV_ERR_NOT_SUPPORTED;
+}
+
+NV_STATUS NV_API_CALL nv_acpi_dod_method(nv_state_t *nv, NvU32 *pOutData, NvU32 *pSize)
+{
+    TRC;
+    IOACPIPlatformDevice *acpi = nv_xnu_gpu_acpi(nv);
+    if (!acpi || !pOutData || !pSize) return NV_ERR_INVALID_ARGUMENT;
+    NvU32 count = *pSize / sizeof(NvU32);
+    OSObject *o = NULL;
+    if (acpi->evaluateObject("_DOD", &o) != kIOReturnSuccess) { OSSafeReleaseNULL(o); return NV_ERR_GENERIC; }
+    OSArray *dod = OSDynamicCast(OSArray, o);
+    NV_STATUS st = NV_ERR_GENERIC;
+    if (dod && dod->getCount() <= count) {
+        st = NV_OK; *pSize = 0;
+        for (unsigned i = 0; i < dod->getCount(); i++) {
+            OSNumber *n = OSDynamicCast(OSNumber, dod->getObject(i));
+            if (!n) { st = NV_ERR_GENERIC; break; }
+            pOutData[i] = n->unsigned32BitValue(); *pSize += sizeof(NvU32);
+        }
+    }
+    kprintf("NVRM-xnu: _DOD -> 0x%x, %u display id(s)\n", st, dod ? dod->getCount() : 0);
+    OSSafeReleaseNULL(o);
+    return st;
+}
+
+NV_STATUS NV_API_CALL nv_acpi_dsm_method(nv_state_t *nv, NvU8 *pAcpiDsmGuid, NvU32 acpiDsmRev, NvBool acpiNvpcfDsmFunction,
+                                         NvU32 acpiDsmSubFunction, void *pInParams, NvU16 inParamSize, NvU32 *outStatus,
+                                         void *pOutData, NvU16 *pSize)
+{
+    TRC;
+    if (!pAcpiDsmGuid || !pInParams || inParamSize > NV_XNU_MAX_ACPI_DSM_PARAM_SIZE || !pOutData || !pSize)
+        return NV_ERR_INVALID_ARGUMENT;
+    if (acpiNvpcfDsmFunction || memcmp(pAcpiDsmGuid, nv_xnu_nbci_guid, sizeof nv_xnu_nbci_guid) != 0 ||
+        (acpiDsmSubFunction != 0 /* NV_ACPI_ALL_FUNC_SUPPORT */ && acpiDsmSubFunction != NV_NBCI_FUNC_GETOBJBYTYPE &&
+         acpiDsmSubFunction != NV_NBCI_FUNC_GETBACKLIGHT))
+        return NV_ERR_NOT_SUPPORTED;
+    IOACPIPlatformDevice *acpi = nv_xnu_gpu_acpi(nv);
+    if (!acpi) return NV_ERR_NOT_SUPPORTED;
+
+    OSObject *args[4] = { OSData::withBytes(pAcpiDsmGuid, 16), OSNumber::withNumber(acpiDsmRev, 32),
+                          OSNumber::withNumber(acpiDsmSubFunction, 32),
+                          inParamSize ? OSData::withBytes(pInParams, inParamSize) : OSData::withCapacity(1) };
+    OSObject *o = NULL;
+    IOReturn r = (args[0] && args[1] && args[2] && args[3]) ? acpi->evaluateObject("_DSM", &o, args, 4) : kIOReturnNoMemory;
+    for (OSObject *a : args) OSSafeReleaseNULL(a);
+    NV_STATUS st = NV_ERR_OPERATING_SYSTEM;
+    if (r == kIOReturnSuccess) {
+        NvU32 len = 0;
+        st = nv_xnu_acpi_extract(o, (NvU8 *)pOutData, *pSize, &len);
+        *pSize = (NvU16)len;
+    }
+    OSSafeReleaseNULL(o);
+    static unsigned logged;
+    if (logged < 8) { logged++; kprintf("NVRM-xnu: NBCI _DSM 0x%x -> 0x%x (%u B)\n", acpiDsmSubFunction, st, (unsigned)*pSize); }
+    return st;
+}
 void  NV_API_CALL nv_get_screen_info(nv_state_t *nv, NvU64 *pa, NvU32 *w, NvU32 *h, NvU32 *depth, NvU32 *pitch, NvU64 *size)
 {
     TRC;
