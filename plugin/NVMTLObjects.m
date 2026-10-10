@@ -903,6 +903,35 @@ static void nvmtl_nonzero(const void *base, size_t row, size_t rowValid, uint32_
     for (uint32_t y = 0; y < h; y += step) { const unsigned char *p = (const unsigned char *)base + (size_t)y * row;
         for (size_t x = 0; x < take; x++) { *nz += p[x] != 0; (*n)++; } }
 }
+// A full overwrite of a single 8-bit RGBA/BGRA subresource cannot consume the previous CPU contents.
+// Keep all partial updates, views, arrays, volumes, compressed and multisample images
+// on SurfaceIn: their untouched bytes still have to be preserved.
+static BOOL nvmtl_surface_full_overwrite(NVMTLTexture *t, MTLRegion r, NSUInteger level, NSUInteger slice) {
+    if (!t || !t->_surf || t->_parent || t->_viewParent || t->_tbView || t->_baseLevel || t->_baseSlice || level || slice)
+        return NO;
+    const nvk_image *i = &t->_i;
+    if (i->bpp != 4 || (t->_fmt != MTLPixelFormatBGRA8Unorm && t->_fmt != MTLPixelFormatBGRA8Unorm_sRGB
+        && t->_fmt != MTLPixelFormatRGBA8Unorm && t->_fmt != MTLPixelFormatRGBA8Unorm_sRGB)) return NO;
+    return i->mtl_type == MTLTextureType2D && i->mips == 1 && i->layers == 1 && i->samples <= 1
+        && i->bw <= 1 && i->bh <= 1 && !r.origin.x && !r.origin.y && !r.origin.z
+        && r.size.width == i->w && r.size.height == i->h && r.size.depth == 1;
+}
+// A recorded overwrite only defines contents for subsequent commands in this
+// command buffer. Do not promote global Seed/generation state before it executes:
+// an abandoned command buffer must leave SurfaceIn able to restore CPU contents.
+static void nvmtl_surface_overwrite_recorded(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
+    if (!cb || !t) return;
+    NVMTLTexture *r = t->_parent ? t->_parent : t;
+    if (!r->_surf) return;
+    if (!cb->_surfOverwrites) cb->_surfOverwrites = [NSMutableSet new];
+    [cb->_surfOverwrites addObject:r];
+}
+static void nvmtl_surface_in_for_cb(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
+    if (!t) return;
+    NVMTLTexture *r = t->_parent ? t->_parent : t;
+    if (cb && r->_surf && [cb->_surfOverwrites containsObject:r]) return;
+    [t nvmtlSurfaceIn];
+}
 static unsigned nvmtl_surf_id(NVMTLTexture *t) { NVMTLTexture *r = (t && t->_parent) ? t->_parent : t; return (r && r->_surf) ? (unsigned)IOSurfaceGetID(r->_surf) : 0u; }
 static int nvmtl_noseed(void) { static uint64_t next; static int on; uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     if (now >= next) { next = now + 250000000ull; int was = on; on = access("/tmp/nvmtl-noseed", F_OK) == 0;
@@ -1184,7 +1213,7 @@ extern int nvmtl_depthfmt_public(MTLPixelFormat, uint32_t *, uint32_t *);
             (unsigned long)region.size.height, (unsigned long)region.origin.x, (unsigned long)region.origin.y, (unsigned long)level, (unsigned long)row,
             [self nvi]->w, [self nvi]->h, nvmtl_surf_id(self), nz, nn); }
       g_trace_mute = was; }
-    [self nvmtlSurfaceIn];
+    if (!bytes || row < (size_t)_i.w * (_i.bpp ? _i.bpp : 4) || !nvmtl_surface_full_overwrite(self, region, level, 0)) [self nvmtlSurfaceIn];
     if (nvmtl_vk_image_write_region_level_layer(_q, [self nvi], (const uint8_t *)bytes, row, (uint32_t)region.origin.x, (uint32_t)region.origin.y,
                                                 (uint32_t)region.size.width, (uint32_t)region.size.height, (uint32_t)level + _baseLevel, _baseSlice))
         nvlog("replaceRegion: upload FAILED");
@@ -1199,7 +1228,7 @@ extern int nvmtl_depthfmt_public(MTLPixelFormat, uint32_t *, uint32_t *);
         if (bb.storageMode == MTLStorageModeManaged) [bb didModifyRange:NSMakeRange(at, len)];
         return; }
     if (level >= [self mipmapLevelCount]) { nvlog("replaceRegion: mip level %lu — this texture has %lu", (unsigned long)level, (unsigned long)[self mipmapLevelCount]); return; }
-    [self nvmtlSurfaceIn];
+    if (!bytes || row < (size_t)_i.w * (_i.bpp ? _i.bpp : 4) || !nvmtl_surface_full_overwrite(self, region, level, slice)) [self nvmtlSurfaceIn];
     nvk_image *im = [self nvi]; BOOL vol = im->mtl_type == 7; NSUInteger nz = vol ? (region.size.depth ? region.size.depth : 1) : 1;
     if (!vol && (region.size.depth > 1 || region.origin.z)) { nvlog("replaceRegion:slice: depth %lu@z%lu on a non-3D texture — REFUSED", (unsigned long)region.size.depth, (unsigned long)region.origin.z); return; }
     NSUInteger per = img ? img : row * region.size.height; int rc = 0;
@@ -2487,8 +2516,8 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
             [cb->_resources addObject:t];
             NVMTLTexture *sr = t->_parent ? t->_parent : t;
             if (sr->_surf) {
-                if (ca.loadAction == MTLLoadActionClear) { sr->_surfSeed = IOSurfaceGetSeed(sr->_surf); sr->_surfSynced = YES; sr->_surfGen = sr->_vramOn ? sr->_surfGen : nvmtl_vram_gen(sr->_surf, sr->_plane); }
-                else [sr nvmtlSurfaceIn];
+                if (ca.loadAction == MTLLoadActionClear) nvmtl_surface_overwrite_recorded(cb, sr);
+                else nvmtl_surface_in_for_cb(cb, sr);
                 nvmtl_surf_dirty(cb, sr); }
         }
         MTLStoreAction sa = ca.storeAction;
@@ -2697,7 +2726,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     NVMTLTexture *nt = (NVMTLTexture *)t;
     if (!nt) { nvlog("setVertexTexture: nil at index %lu", (unsigned long)i); return; }
     nvmtl_retain_resource(_cb, nt);
-    [nt nvmtlSurfaceIn];
+    nvmtl_surface_in_for_cb(_cb, nt);
     if (nt->_tbView) nvmtl_vk_bind_texel_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, nt->_tbView, nt->_tbStorage);
     else {
     if (nvmtl_vk_bind_texture_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, [nt nvview])) nvlog("setVertexTexture: bind FAILED");
@@ -2731,7 +2760,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     if (!nt) { nvlog("setFragmentTexture: nil at index %lu", (unsigned long)i); return; }
     nvmtl_retain_resource(_cb, nt);
     nvmtl_surface_cpu_dump(nt->_parent ? nt->_parent : nt);
-    [nt nvmtlSurfaceIn];
+    nvmtl_surface_in_for_cb(_cb, nt);
     { NVMTLTexture *rt = nt->_parent ? nt->_parent : nt; nvtrace("FTEX[%lu] %ux%u surf %u view %d", (unsigned long)i, [nt nvi]->w, [nt nvi]->h,
         rt->_surf ? (unsigned)IOSurfaceGetID(rt->_surf) : 0u, nt->_parent != nil); }
     if (nt->_tbView) nvmtl_vk_bind_texel_view(&_cb->_c, NVMTL_SET_FRAGMENT, (uint32_t)i, nt->_tbView, nt->_tbStorage);
@@ -4063,7 +4092,7 @@ static void nvmtl_zprobe_drain(void) {
     if (!nt) { nvlog("compute setTexture: nil at %lu", (unsigned long)i); return; }
     nvmtl_zprobe_record(nt, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, (unsigned)i, nt->_stex ? 1u : 0u);
     nvmtl_retain_resource(_cb, nt);
-    [nt nvmtlSurfaceIn]; if (nt->_stex) nvmtl_surf_dirty(_cb, nt);
+    nvmtl_surface_in_for_cb(_cb, nt); if (nt->_stex) nvmtl_surf_dirty(_cb, nt);
     if (nt->_tbView) nvmtl_vk_bind_texel_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, nt->_tbView, nt->_tbStorage);
     else {
     if (nvmtl_vk_cmd_prepare_sampled_image(&_cb->_c, [nt nvi], nt->_stex)) { nvlog("compute setTexture: image layout preparation refused"); return; }
@@ -4247,11 +4276,16 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
       nvtrace("BLIT tex %ux%u surf %u (%lu,%lu %lux%lu) -> tex %ux%u surf %u (%lu,%lu)", [s nvi]->w, [s nvi]->h, nvmtl_surf_id(s), (unsigned long)so.x,
           (unsigned long)so.y, (unsigned long)size.width, (unsigned long)size.height, [d nvi]->w, [d nvi]->h, nvmtl_surf_id(d), (unsigned long)dof.x, (unsigned long)dof.y);
       g_trace_mute = was; }
-    [s nvmtlSurfaceIn]; [d nvmtlSurfaceIn]; nvmtl_surf_dirty(_cb, d);
+    nvmtl_surface_in_for_cb(_cb, s);
+    const BOOL overwrite = [s nvi] != [d nvi] && (!s->_surf || !d->_surf || IOSurfaceGetID(s->_surf) != IOSurfaceGetID(d->_surf))
+        && nvmtl_surface_full_overwrite(d, (MTLRegion){dof, size}, dl, ds);
+    if (!overwrite) nvmtl_surface_in_for_cb(_cb, d);
+    nvmtl_surf_dirty(_cb, d);
     if (nvmtl_vk_cmd_copy_image_sub(&_cb->_c, [s nvi], (uint32_t)sl + s->_baseLevel, (uint32_t)ss + s->_baseSlice, (uint32_t)so.x, (uint32_t)so.y,
                                 [d nvi], (uint32_t)dl + d->_baseLevel, (uint32_t)ds + d->_baseSlice, (uint32_t)dof.x, (uint32_t)dof.y,
                                 (uint32_t)size.width, (uint32_t)size.height))
         nvlog("blit copyFromTexture: FAILED");
+    else if (overwrite) nvmtl_surface_overwrite_recorded(_cb, d);
 }
 - (void)sampleCountersInBuffer:(id)sb atSampleIndex:(NSUInteger)i withBarrier:(BOOL)b { nvmtl_sample_counter(_cb, sb, i, self, b); }
 - (void)resolveCounters:(id)sb inRange:(NSRange)r destinationBuffer:(id<MTLBuffer>)dst destinationOffset:(NSUInteger)off {
@@ -4275,7 +4309,7 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
     [_cb->_resources addObject:t];
     { int was = nvtrace_scope([t nvi]->w, [t nvi]->h); nvtrace("MIPS tex %ux%u surf %u", [t nvi]->w, [t nvi]->h, nvmtl_surf_id(t)); g_trace_mute = was; }
-    [t nvmtlSurfaceIn]; nvmtl_surf_dirty(_cb, t);
+    nvmtl_surface_in_for_cb(_cb, t); nvmtl_surf_dirty(_cb, t);
     if (nvmtl_vk_cmd_image_gen_mipmaps(&_cb->_c, [t nvi])) nvlog("generateMipmapsForTexture: FAILED");
 }
 - (void)copyFromTexture:(id<MTLTexture>)src sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl toTexture:(id<MTLTexture>)dst
@@ -4335,12 +4369,15 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
         nvtrace("BLIT buf len %lu off %lu row %lu (%lux%lu) -> tex %ux%u surf %u (%lu,%lu) | nonzero %u/%u sampled bytes", (unsigned long)b->_b.size, (unsigned long)so,
             (unsigned long)row, (unsigned long)size.width, (unsigned long)size.height, [t nvi]->w, [t nvi]->h, nvmtl_surf_id(t), (unsigned long)dof.x, (unsigned long)dof.y, nz, nn); }
       g_trace_mute = was; }
-    [t nvmtlSurfaceIn]; nvmtl_surf_dirty(_cb, t);
+    const BOOL overwrite = nvmtl_surface_full_overwrite(t, (MTLRegion){dof, size}, dl, ds);
+    if (!overwrite) nvmtl_surface_in_for_cb(_cb, t);
+    nvmtl_surf_dirty(_cb, t);
     { BOOL vol = [t nvi]->mtl_type == 7; NSUInteger nz = vol ? (size.depth ? size.depth : 1) : 1; NSUInteger per = img ? img : row * size.height; int rc = 0;
       for (NSUInteger zi = 0; zi < nz && !rc; zi++)
           rc = nvmtl_vk_cmd_copy_buffer_to_image_level_layer(&_cb->_c, &b->_b, so + zi * per, (uint32_t)row, [t nvi],
                                       (uint32_t)dof.x, (uint32_t)dof.y, (uint32_t)size.width, (uint32_t)size.height, (uint32_t)dl + t->_baseLevel, (uint32_t)(vol ? dof.z + zi : ds + t->_baseSlice));
-      if (rc) nvlog("blit copyFromBuffer:toTexture: FAILED (level %lu slice %lu)", (unsigned long)dl, (unsigned long)ds); }
+      if (rc) nvlog("blit copyFromBuffer:toTexture: FAILED (level %lu slice %lu)", (unsigned long)dl, (unsigned long)ds);
+      else if (overwrite) nvmtl_surface_overwrite_recorded(_cb, t); }
 }
 - (void)copyFromBuffer:(id<MTLBuffer>)src sourceOffset:(NSUInteger)so sourceBytesPerRow:(NSUInteger)row
    sourceBytesPerImage:(NSUInteger)img sourceSize:(MTLSize)size toTexture:(id<MTLTexture>)dst
@@ -4366,7 +4403,7 @@ destinationBytesPerImage:(NSUInteger)img {
     { nvk_image *ti = [t nvi]; uint32_t tl = (uint32_t)nvmtl_texture_slice_count(t), tm = (uint32_t)t.mipmapLevelCount; BOOL vol = ti->mtl_type == 7;
       if (ss >= tl || sl >= tm || (vol ? (so.z + size.depth > MAX((NSUInteger)1, t.depth >> sl)) : (size.depth != 1 || so.z))) {
           nvlog("blit copyFromTexture:toBuffer: slice %lu/%u level %lu/%u depth %lu@z%lu — outside this texture", (unsigned long)ss, tl, (unsigned long)sl, tm, (unsigned long)size.depth, (unsigned long)so.z); return; } }
-    [t nvmtlSurfaceIn];
+    nvmtl_surface_in_for_cb(_cb, t);
     nvmtl_census("copy texture->buffer", [t nvi]->w, [t nvi]->h, t->_surf != NULL);
     { int was = nvtrace_scope([t nvi]->w, [t nvi]->h);
       nvtrace("BLIT tex %ux%u surf %u (%lu,%lu %lux%lu) -> buf len %lu off %lu row %lu", [t nvi]->w, [t nvi]->h, nvmtl_surf_id(t), (unsigned long)so.x, (unsigned long)so.y,
@@ -4484,8 +4521,8 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
             (unsigned long)d.colorAttachments[0].storeAction, d.colorAttachments[0].clearColor.red, d.colorAttachments[0].clearColor.green,
             d.colorAttachments[0].clearColor.blue, d.colorAttachments[0].clearColor.alpha, d.depthAttachment.texture != nil);
         if (sr->_surf) {
-            if (d.colorAttachments[0].loadAction == MTLLoadActionClear) { sr->_surfSeed = IOSurfaceGetSeed(sr->_surf); sr->_surfSynced = YES; sr->_surfGen = sr->_vramOn ? sr->_surfGen : nvmtl_vram_gen(sr->_surf, sr->_plane); }
-            else [sr nvmtlSurfaceIn];
+            if (d.colorAttachments[0].loadAction == MTLLoadActionClear) nvmtl_surface_overwrite_recorded(self, sr);
+            else nvmtl_surface_in_for_cb(self, sr);
             nvmtl_surf_dirty(self, sr); } }
     const float defaultBlend[4] = { 0, 0, 0, 0 };
     nvmtl_vk_cmd_set_blend_color(&_c, defaultBlend);
