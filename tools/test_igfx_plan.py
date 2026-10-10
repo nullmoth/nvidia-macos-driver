@@ -61,9 +61,46 @@ class Plan(unittest.TestCase):
         self.assertEqual(r["BLC_PWM_PCH_CTL2"], 192000)
         self.assertNotEqual(r["BLC_PWM_PCH_CTL2"], P.panel_plan(P.vbt_panel(vbt(panel_type=2), edid_1080p()), 13)["BLC_PWM_PCH_CTL2"])
 
+    def test_edp_older_than_1_4_trains_at_max_rate_and_lanes(self):
+        dpcd = {0: 0x12, 1: 0x14, 2: 0x84, 0x700: 0x02}
+        self.assertEqual(P.link_plan(dpcd, edid_1080p()), (5400, 4))
+
+    def test_edp_1_4_takes_the_lowest_rate_that_carries_the_fastest_mode(self):
+        # recorded ASUS V3607: 1080p DTD at 162 MHz, 389 MHz DisplayID type VII mode (1 kHz units), 8 bpc -> 3.24 x 4
+        dpcd = {0: 0x14, 1: 0x14, 2: 0x84, 0x700: 0x05}
+        for i, r in enumerate((1620, 2160, 2430, 2700, 3240, 4320, 5400)):
+            v = r * 1000 // 200
+            dpcd[0x10 + 2 * i], dpcd[0x11 + 2 * i] = v & 0xFF, v >> 8
+        self.assertEqual(P.link_plan(dpcd, edid_with_displayid(389381)), (3240, 4))
+
+    def test_a_mode_that_only_fits_with_dsc_is_left_out(self):
+        # MS-15P2: a 1175 MHz mode cannot ride 5.4 x 4 uncompressed; we plan the 147 MHz DTD instead of DSC
+        dpcd = {0: 0x14, 1: 0x14, 2: 0x84, 0x700: 0x05,
+                0x10: 1620 * 5 & 0xFF, 0x11: 1620 * 5 >> 8, 0x12: 5400 * 5 & 0xFF, 0x13: 5400 * 5 >> 8}
+        self.assertEqual(P.link_plan(dpcd, edid_with_displayid(1175110)), (1620, 4))
+
+    def test_dpll_at_38_4_mhz_halves_the_dco_fraction(self):
+        # 19 of 21 recorded laptops wrote CFGCR0 0x00e001a5 / CFGCR1 0x88 for 2.7 Gbps on a 38.4 MHz reference
+        r = P.dpll_plan(2700, 38400, 12)
+        self.assertEqual((r["DPLL_CFGCR0"], r["DPLL_CFGCR1"]), (0x00E001A5, 0x88))
+        self.assertEqual(P.dpll_plan(2700, 19200, 12)["DPLL_CFGCR0"], 0x01C001A5)
+        self.assertNotEqual(P.dpll_plan(5400, 38400, 12), r)
+
     def test_negative_control_not_a_vbt_is_refused(self):
         with self.assertRaises(ValueError):
             P.vbt_blocks(b"\0" * 64)
+
+
+def edid_with_displayid(clock_khz):
+    """The 1080p base EDID plus a DisplayID extension holding one type VII timing (pixel clock - 1, in kHz)."""
+    ext = bytearray(128)
+    ext[0], ext[1], ext[2] = 0x70, 0x20, 3 + 20
+    ext[5], ext[6], ext[7] = 0x22, 0, 20
+    ext[8:11] = (clock_khz - 1).to_bytes(3, "little")
+    ext[12:14] = (1920 - 1).to_bytes(2, "little")
+    base = bytearray(edid_1080p())
+    base[126] = 1
+    return bytes(base) + bytes(ext)
 
 
 def vbt(panel_type, pnp_at=None):

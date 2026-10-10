@@ -41,8 +41,8 @@ def vbt_blocks(vbt):
     if vbt[:4] != b"$VBT":
         raise ValueError("no $VBT signature")
     bdb = struct.unpack_from("<I", vbt, 0x1C)[0]
-    hsz, bsz = struct.unpack_from("<HH", vbt, bdb + 18)
-    p, end, out = bdb + hsz, bdb + bsz, {}
+    ver, hsz, bsz = struct.unpack_from("<HHH", vbt, bdb + 16)
+    p, end, out = bdb + hsz, bdb + bsz, {"version": ver}
     while p + 3 <= end:
         bid, size = vbt[p], struct.unpack_from("<H", vbt, p + 1)[0]
         out[bid] = vbt[p + 3:p + 3 + size]
@@ -64,7 +64,12 @@ def vbt_panel(vbt, edid):
     if 43 in b:
         esz = b[43][0]
         hz = struct.unpack_from("<H", b[43], 1 + pt * esz + 1)[0]
-    return {"panel_type": pt, "t1_t3": t1_t3, "t8": t8, "t9": t9, "t10": t10, "t11_t12": t11_t12, "pwm_hz": hz}
+    # BDB_EDP.edp_max_port_link_rate[panel_type] (VBT 244+, byte 780), Linux units x20 = 10 kbps; 0 = no cap
+    cap = 0
+    if b["version"] >= 244 and len(b[27]) >= 812:
+        cap = struct.unpack_from("<H", b[27], 780 + 2 * pt)[0] * 20 // 100
+    return {"panel_type": pt, "t1_t3": t1_t3, "t8": t8, "t9": t9, "t10": t10, "t11_t12": t11_t12, "pwm_hz": hz,
+            "max_link_rate": cap}
 
 
 def rawclk_hz(display_version):
@@ -80,6 +85,102 @@ def panel_plan(p, display_version):
     if p["pwm_hz"]:
         regs["BLC_PWM_PCH_CTL2"] = round(rawclk_hz(display_version) / p["pwm_hz"])
     return regs
+
+
+# link rates (Mbps) the combo/C10 PHY can drive (Linux icl_rates / mtl_rates); a sink rate outside this set is unusable
+SOURCE_RATES = (1620, 2160, 2430, 2700, 3240, 4320, 5400, 6480, 8100)
+DP_EDP_14 = 0x03
+
+
+def edid_modes(edid):
+    """(pixel clock kHz, hactive) for every timing the panel lists: base DTDs, CTA DTDs, DisplayID type I (10 kHz) and
+    type VII (1 kHz) timings. eDP high-refresh modes usually live only in the DisplayID extension."""
+    out = []
+    for blk in range(len(edid) // 128):
+        b = edid[blk * 128:(blk + 1) * 128]
+        offs = [54, 72, 90, 108] if blk == 0 else (list(range(b[2], 110, 18)) if b[0] == 0x02 and b[2] >= 4 else [])
+        for o in offs:
+            pc = (b[o] | b[o + 1] << 8) * 10
+            if pc:
+                out.append((pc, b[o + 2] | (b[o + 4] & 0xF0) << 4))
+        if b[0] == 0x70:
+            p = 5
+            while p + 3 <= 5 + b[2] and p + 3 < 128:
+                tag, ln = b[p], b[p + 2]
+                if tag in (0x03, 0x22):
+                    for q in range(p + 3, min(p + 3 + ln, 128 - 19), 20):
+                        unit = 10 if tag == 0x03 else 1
+                        out.append(((int.from_bytes(b[q:q + 3], "little") + 1) * unit, int.from_bytes(b[q + 4:q + 6], "little") + 1))
+                p += 3 + ln
+    return out
+
+
+def edid_bpp(edid):
+    """EDID 1.4 digital bit depth x3, else 24 (Linux uses display_info.bpc; 0 = undefined -> 8 bpc here)."""
+    if edid[18:20] >= b"\x01\x04" and edid[20] & 0x80:
+        bpc = {1: 6, 2: 8, 3: 10, 4: 12, 5: 14, 6: 16}.get((edid[20] >> 4) & 7)
+        if bpc:
+            return min(bpc, 10) * 3          # Gen12 eDP pipes go up to 10 bpc for this path
+    return 24
+
+
+def link_plan(dpcd, edid, vbt_max_rate=0):
+    """The eDP link (rate Mbps, lanes) Linux trains, measured on 21 recorded laptops:
+    eDP < 1.4 -> max rate x max lanes; eDP 1.4+ -> lowest rate, then fewest lanes, that carries the panel's highest-clock
+    mode at its EDID bpp (8b/10b: rate x lanes x 0.8 Mbps). We do not drive DSC, so a mode that only fits compressed is
+    left out (Linux instead runs such panels at max link + DSC: one recorded MS-15P2)."""
+    lanes_max = dpcd.get(2, 0) & 0x1F or 4
+    sink = []
+    for i in range(8):
+        lo, hi = dpcd.get(0x10 + 2 * i), dpcd.get(0x11 + 2 * i, 0)
+        if not lo and not hi:
+            break
+        sink.append(((lo or 0) | hi << 8) * 200 // 1000)
+    if not sink:
+        top = dpcd.get(1, 0x0A) * 270
+        sink = [r for r in (1620, 2700, 5400, 8100) if r <= top]
+    common = sorted(set(sink) & set(SOURCE_RATES))
+    if vbt_max_rate:
+        common = [r for r in common if r <= vbt_max_rate]
+    if not common:
+        raise ValueError("no link rate common to the panel and the PHY")
+    if dpcd.get(0x700, 0) < DP_EDP_14:
+        return common[-1], lanes_max
+    bpp = edid_bpp(edid)
+    cap = common[-1] * lanes_max * 0.8
+    clocks = [c for c, _ in edid_modes(edid) if c / 1000 * bpp <= cap]
+    if not clocks:
+        raise ValueError("no panel mode fits the link uncompressed")
+    need = max(clocks) / 1000 * bpp
+    for r in common:
+        for n in (1, 2, 4):
+            if n <= lanes_max and r * n * 0.8 >= need:
+                return r, n
+    return common[-1], lanes_max
+
+
+# Linux icl_dp_combo_pll_{24MHz,19_2MHz}_values: link rate -> (dco_integer, dco_fraction, pdiv, kdiv, qdiv_mode, qdiv_ratio)
+COMBO_PLL = {
+    24000: {5400: (0x151, 0x4000, 2, 1, 0, 0), 2700: (0x151, 0x4000, 2, 2, 0, 0), 1620: (0x151, 0x4000, 4, 2, 0, 0),
+            3240: (0x151, 0x4000, 4, 1, 0, 0), 2160: (0x168, 0, 1, 2, 1, 2), 4320: (0x168, 0, 1, 2, 0, 0),
+            6480: (0x195, 0, 2, 1, 0, 0), 8100: (0x151, 0x4000, 1, 1, 0, 0)},
+    19200: {5400: (0x1A5, 0x7000, 2, 1, 0, 0), 2700: (0x1A5, 0x7000, 2, 2, 0, 0), 1620: (0x1A5, 0x7000, 4, 2, 0, 0),
+            3240: (0x1A5, 0x7000, 4, 1, 0, 0), 2160: (0x1C2, 0, 1, 2, 1, 2), 4320: (0x1C2, 0, 1, 2, 0, 0),
+            6480: (0x1FA, 0x2000, 2, 1, 0, 0), 8100: (0x1A5, 0x7000, 1, 1, 0, 0)},
+}
+
+
+def dpll_plan(rate, refclk_khz, display_version):
+    """Combo PHY DPLL CFGCR0/CFGCR1 for a DP link rate (display 11-13; display 14 uses the C10 PHY, not planned here).
+    38.4 MHz uses the 19.2 table with the DCO fraction halved (Linux ehl_combo_pll_div_frac_wa_needed: display 12+)."""
+    dco_int, frac, pdiv, kdiv, qmode, qratio = COMBO_PLL[24000 if refclk_khz == 24000 else 19200][rate]
+    if display_version >= 12 and refclk_khz == 38400:
+        frac = (frac + 1) // 2
+    cfgcr0 = frac << 10 | dco_int
+    cfgcr1 = qratio << 10 | qmode << 9 | kdiv << 6 | pdiv << 2
+    if display_version < 12:
+        cfgcr1 |= 3                              # DPLL_CFGCR1_CENTRAL_FREQ_8400 (ICL); TGL+ writes CFSELOVRD_NORMAL_XTAL = 0
+    return {"DPLL_CFGCR0": cfgcr0, "DPLL_CFGCR1": cfgcr1}
 
 
 def pack(lo, hi):

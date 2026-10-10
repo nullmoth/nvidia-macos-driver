@@ -12,6 +12,7 @@ import tempfile
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import igfx_aux as X  # noqa: E402
 import igfx_plan as P  # noqa: E402
 import igfx_trace as T  # noqa: E402
 
@@ -51,13 +52,23 @@ def check(f, trace_name, edid_name, vbt_name=None):
             got = {k: last.get("%s_%s" % (k, t)) for k in ("HTOTAL", "HBLANK", "HSYNC", "VTOTAL", "VBLANK", "VSYNC", "PIPESRC")}
             got["PLANE_SIZE_1"] = last.get("PLANE_SIZE_1_%s" % t)
             got["PLANE_STRIDE_1"] = last.get("PLANE_STRIDE_1_%s" % t)
-            if vbt_name:
+            panel = P.vbt_panel(f.read(vbt_name), edid) if vbt_name else None
+            if panel:
                 # panel power + backlight come from the VBT, not the EDID
-                want.update(P.panel_plan(P.vbt_panel(f.read(vbt_name), edid), ver))
+                want.update(P.panel_plan(panel, ver))
                 for k in ("PP_ON_DELAYS", "PP_OFF_DELAYS", "BLC_PWM_PCH_CTL2"):
                     got[k] = last.get(k)
                 ctl = last.get("PP_CONTROL")
                 got["PP_CYCLE"] = None if ctl is None else (ctl >> 4) & 0x1F
+            # the eDP link: our plan from the DPCD the panel answered with vs the link Linux trained
+            dpcd, writes, refclk = X.decode(tmp)
+            rate, lanes, dsc = X.chosen_link(dpcd, writes)
+            if rate and not dsc:
+                r, n = P.link_plan(dpcd, edid, panel["max_link_rate"] if panel else 0)
+                want["LINK"], got["LINK"] = r << 8 | n, rate << 8 | lanes
+                if ver <= 13 and refclk and last.get("DPLL0_ENABLE", 0) >> 31:
+                    want.update({"DPLL0_" + k[5:]: v for k, v in P.dpll_plan(rate, refclk, ver).items()})
+                    got["DPLL0_CFGCR0"], got["DPLL0_CFGCR1"] = last.get("DPLL0_CFGCR0"), last.get("DPLL0_CFGCR1")
             diff = {k: (want[k], got[k]) for k in want if got.get(k) is not None and got[k] != want[k]}
             missing = [k for k in want if got.get(k) is None]
             return t, diff, missing
