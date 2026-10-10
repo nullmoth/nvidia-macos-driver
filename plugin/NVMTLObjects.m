@@ -2404,7 +2404,7 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
             if(cached==[NSNull null]) return NO;
             selected=cached;
             if(!selected) {
-                NVMTLFunction *vf=(id)_ps->_descriptor.vertexFunction,*ff=(id)_ps->_descriptor.fragmentFunction;
+                NVMTLFunction *vf=_ps->_linkedVert?:(id)_ps->_descriptor.vertexFunction,*ff=_ps->_linkedFrag?:(id)_ps->_descriptor.fragmentFunction;
                 NSString *why=nil;
                 NSString *gk=nvmtl_sampvar_key(_ps->_descriptor,vf,ff,key); selected=nvmtl_sampvar_get(gk);
                 NSData *v=selected?nil:nvmtl_translate_samplers(vf,vS,&why),*f=(selected||!v)?nil:(ff?nvmtl_translate_samplers(ff,fS,&why):[NSData data]);
