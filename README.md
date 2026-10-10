@@ -131,7 +131,11 @@ build/build_xlate.sh       # translator  -> libnvmtl_translate.dylib
 RELEASE=1 build/build_plugin.sh   # plugin -> NVMTLDriver.bundle (RELEASE=1 strips every diagnostic)
 build/build263.sh          # NVK: apply nvk/nvk-macos.patch to Mesa 17ca6174 first
 build/accel_build.sh <src> <out>  # kexts
+build/accel_build_all.sh kexts/NVRM <out>  # NVAccel for macOS 15 and 26 (NM_TAHOE=1) -> <out>/{15,26}
 ```
+
+Rebuild both accelerators whenever `nvrm_vram_abi.h` or `nvrm_gpuva_abi.h` changes: an accelerator built against an
+older ABI loads, but NVRMFB refuses all its VRAM requests and the desktop stays black.
 
 ## License
 
