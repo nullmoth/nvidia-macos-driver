@@ -1,0 +1,91 @@
+name: Feature request
+description: Ask for something the driver or 1401 doesn't do yet.
+title: "[Feature]: <short description>"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check that it isn't already requested. Search [open and closed issues](https://github.com/nullmoth/nvidia-macos-driver/issues?q=is%3Aissue) and read the **Scope** section of the [latest release notes](https://github.com/nullmoth/nvidia-macos-driver/blob/main/docs/RELEASE-1.1.0.md).
+
+        **These are outside what this driver can do, and requests for them will be closed:**
+        - Support for GTX 10 (Pascal), GTX 900 (Maxwell), Kepler or older. They need a completely different kernel and firmware implementation; see [docs/CARD-SUPPORT.md](https://github.com/nullmoth/nvidia-macos-driver/blob/main/docs/CARD-SUPPORT.md).
+        - Selling, bundling or commercial use of the driver. The license forbids it.
+
+        Requests for a specific macOS version, such as macOS 26 Tahoe, should say what you're able to test.
+
+        If you're only asking **whether** something is supported, use **Question** instead. You can write in your own language if English is hard for you.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe what you're trying to do and what stops you today. Lead with the problem rather than the solution.
+      placeholder: My monitor supports 10-bit HDR, but macOS only offers SDR on the RTX 4070, so HDR video plays washed out.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like to happen
+      placeholder: Offer the HDR toggle in System Settings > Displays for HDR-capable monitors.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - "Display (modes, refresh rates, HDR, VRR, multi-monitor)"
+        - "Graphics APIs (Metal, OpenGL, OpenCL, Core ML)"
+        - "Video (decode, encode, DRM)"
+        - Power, sleep and wake
+        - "1401 app (install, reports, USB map, removal)"
+        - New hardware or macOS version
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: hardware
+    attributes:
+      label: Your GPU, driver version and macOS version
+      placeholder: "RTX 4070 (10DE:2786), driver 1.1.0, macOS 15.8.1"
+    validations:
+      required: true
+
+  - type: textarea
+    id: technical
+    attributes:
+      label: Technical background (optional)
+      description: What you know about why it's missing or how it could work, such as the component involved, log lines, or how NVIDIA's open kernel modules or Mesa handle it. Mark guesses as guesses.
+      placeholder: "No adaptive sync: NVKMS refuses the hardware vblank, so the driver falls back to a timer (log line below)."
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds or alternatives you've considered (optional)
+
+  - type: dropdown
+    id: can-test
+    attributes:
+      label: Can you test a candidate build on real hardware?
+      options:
+        - "Yes"
+        - "No"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ai-assist
+    attributes:
+      label: How was this request written?
+      options:
+        - I wrote it myself
+        - An AI assistant helped with wording or translation only
+        - An AI assistant wrote most of it, and I reviewed it
+    validations:
+      required: true

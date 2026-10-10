@@ -1,0 +1,899 @@
+name: Bug report
+description: The driver, 1401 or the install broke something. Use this for boot hangs, panics, black screens, WindowServer crashes, display or app problems.
+title: "[Bug]: <GPU> · driver <version> · macOS <version>: <what happens>"
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Before you start
+
+        Thanks for reporting. Maintainers fix problems from facts about your machine, so this form asks for a lot of them. It takes about 15 minutes. A complete report is usually answered once. An incomplete one goes back and forth for days.
+
+        **Do these first:**
+        1. If macOS still starts, open **1401 > Crash report > Send logs to NullMoth** and copy the **report ID** it shows. It collects driver state, kernel and plugin logs, crash reports and OpenCore logs, with names, serial numbers and addresses removed.
+        2. Read the support status for your card in [docs/CARD-SUPPORT.md](https://github.com/nullmoth/nvidia-macos-driver/blob/main/docs/CARD-SUPPORT.md) and the **Known issue** and **Scope** sections of the [latest release notes](https://github.com/nullmoth/nvidia-macos-driver/blob/main/docs/RELEASE-1.1.0.md).
+        3. Search [open and closed issues](https://github.com/nullmoth/nvidia-macos-driver/issues?q=is%3Aissue) for your GPU and symptom. If you find a match, add your details there in a comment instead of opening a new issue.
+
+        **If an AI assistant is helping you:** that's fine, and many people install this driver with one. But an assistant can't see your machine. It will fill gaps with plausible guesses, such as versions, PCI IDs, log lines or "the cause is X". Guesses look exactly like facts in a report and send everyone in the wrong direction. Copy values from your own machine, paste logs as they are (don't summarize them), and write **don't know** when you don't know. An honest "don't know" is useful. A guess is not.
+
+        **One problem per issue.** If you have two unrelated problems, open two issues.
+
+        **Not sure it's a bug?** If you only want to know whether your hardware or macOS version is supported, use **Question**. If you've traced or measured a problem in depth, **Technical finding** is a better fit for that write-up.
+
+        You can write in your own language if English is hard for you. An English title helps other people find the issue.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Checklist
+      description: All boxes are required. If one isn't true yet, please sort it out before filing.
+      options:
+        - label: I searched open **and closed** issues for my GPU and symptom and found no existing report of this problem.
+          required: true
+        - label: My NVIDIA card is **Turing or newer** (GTX 16, RTX 20/30/40/50, TITAN RTX, Quadro T/RTX, RTX A or RTX PRO). I understand that GTX 10 (Pascal) and older cards are not supported.
+          required: true
+        - label: I read the support status for my card in docs/CARD-SUPPORT.md and the Known issue and Scope sections of the latest release notes.
+          required: true
+        - label: Every value in this report comes from my own machine. Where I didn't know something, I wrote "don't know" instead of guessing, and I didn't let an AI invent or summarize log output.
+          required: true
+        - label: This issue describes **one** problem.
+          required: true
+
+  # ------------------------------------------------------------------
+  # Report ID and how this report was written
+  # ------------------------------------------------------------------
+  - type: input
+    id: report-id
+    attributes:
+      label: 1401 Send logs report ID
+      description: |
+        In 1401 open **Crash report > Send logs to NullMoth** and paste the report ID. This is the most useful single thing you can give.
+        If you can't get one, write `not available` and say why, for example `not available: macOS never reaches the desktop` or `not available: installed with install.sh`.
+      placeholder: "the report ID 1401 showed, or: not available: <reason>"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ai-assist
+    attributes:
+      label: How was this report written?
+      description: Your answer doesn't change how the report is treated. It tells maintainers which details to double-check.
+      options:
+        - I wrote it myself
+        - An AI assistant helped with wording or translation only, and I checked every value against my machine
+        - An AI assistant wrote most of it or suggested the cause, and I checked every value against my machine
+        - An AI assistant wrote most of it and I have not checked every value
+    validations:
+      required: true
+
+  - type: dropdown
+    id: off-guide-changes
+    attributes:
+      label: Did you change anything that the README or 1401 didn't tell you to?
+      description: This includes settings suggested by an AI assistant, a forum, a video or a prebuilt EFI, such as extra boot-args, kexts, DeviceProperties, ACPI patches, nvrm610.conf keys or copied kext files.
+      options:
+        - "No, I only followed the README / 1401"
+        - Yes, and I list every change in "What you already tried" below
+        - Don't know (someone else or a prebuilt EFI configured it)
+    validations:
+      required: true
+
+  # ------------------------------------------------------------------
+  # The problem
+  # ------------------------------------------------------------------
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        ## The problem
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: How far does the machine get?
+      description: Pick the **first** point where things go wrong.
+      options:
+        - OpenCore picker never appears (hangs before the boot menu)
+        - Picker appears, but the boot stalls before "PCI configuration end"
+        - Stalls at "PCI configuration end" for more than 2 minutes (up to 1 minute is normal on the first start with the driver)
+        - Kernel panic, or the machine reboots by itself during startup
+        - Black screen after boot (monitor on, no picture, no cursor)
+        - Black screen with only a cursor
+        - Text or verbose console stays on screen and never reaches the login window
+        - Login window or desktop appears, then the screen flashes and returns (WindowServer crash loop)
+        - "Desktop works, but there's a display problem (flicker, blank second display, missing resolutions or refresh rates)"
+        - Desktop works, but an app, game or framework misbehaves (Metal, OpenGL, OpenCL, Core ML, video)
+        - Sleep, wake or shutdown problem
+        - "1401 app problem (install, Send logs, USB map, removal entry)"
+        - install.sh or uninstall.sh problem
+        - Something else (describe below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happens
+      description: |
+        Describe what you see, in order. Quote any on-screen text **exactly** (for example the last line on a verbose boot screen).
+        "It doesn't work" or "it loops" isn't enough to act on. Say what loops, where, and what's on the screen when it does.
+      placeholder: |
+        After installing with 1401 Mac and restarting, the verbose screen stops at
+        "PCI configuration end, bridges 12, devices 18" for about 40 s, then the
+        monitor goes black and the machine restarts. This repeats every boot.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      placeholder: Reach the desktop on the RTX 3060 with Metal supported, as before the update.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact steps from a known state, including restarts. For app problems, name the app, its version and what you do in it.
+      placeholder: |
+        1. Fresh macOS 15.8.1, booting on the iGPU, desktop works
+        2. Run 1401 Mac 1.1.1, Install driver, accept the config changes
+        3. Allow the extensions in System Settings > Privacy & Security
+        4. Restart
+        5. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often does it happen?
+      options:
+        - Every time
+        - Most of the time
+        - Sometimes
+        - It happened once
+    validations:
+      required: true
+
+  - type: dropdown
+    id: regression
+    attributes:
+      label: Did this work on an earlier driver or 1401 version?
+      options:
+        - "No, this is my first install of the driver"
+        - "No, it never worked on any version I tried"
+        - Yes, it worked on an earlier version (name it below)
+        - Don't know
+    validations:
+      required: true
+
+  - type: input
+    id: last-working
+    attributes:
+      label: Last version that worked (if any)
+      placeholder: "driver 1.0.18 / 1401 Mac 1.0.18"
+
+  - type: dropdown
+    id: removal
+    attributes:
+      label: Does macOS work again with the driver removed?
+      description: 'Choose "1401: Remove NVIDIA driver" in the OpenCore boot picker, or run `sudo ./uninstall.sh` and restart.'
+      options:
+        - Yes, removing the driver brings the machine back to how it was
+        - No, it's still broken after removing the driver
+        - The removal entry or uninstall itself fails
+        - I haven't tried
+    validations:
+      required: true
+
+  # ------------------------------------------------------------------
+  # History of this machine
+  # ------------------------------------------------------------------
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        ## Your history with macOS on this machine
+
+        Many reports turn out to be OpenCore or macOS setup problems that show up for the first time when the driver is installed. These questions separate the two.
+
+  - type: dropdown
+    id: first-boot
+    attributes:
+      label: Is this the first time this machine has run macOS?
+      options:
+        - "Yes, I set up OpenCore and macOS on this machine for this driver"
+        - "No, macOS has run on this machine before"
+        - "It's a real Mac, not an OpenCore PC"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: prior-boot
+    attributes:
+      label: Before you installed this driver, how had macOS reached the desktop on this machine?
+      description: Select every option that applies.
+      multiple: true
+      options:
+        - On this NVIDIA card without acceleration (software rendering, "Metal not supported", slow or laggy UI)
+        - On the CPU's integrated graphics (Intel iGPU)
+        - On an AMD graphics card
+        - On another NVIDIA card (for example Kepler with OCLP, or the old Web Driver)
+        - "Never: macOS has not reached the desktop on this machine yet"
+        - Don't know
+    validations:
+      required: true
+
+  - type: dropdown
+    id: macos-install
+    attributes:
+      label: What kind of macOS installation is this?
+      options:
+        - Fresh install made for this driver
+        - Existing install that I had been using
+        - Upgraded from an older macOS (for example 14 to 15)
+        - Restored or migrated from another Mac (Time Machine, Migration Assistant)
+        - Don't know
+    validations:
+      required: true
+
+  - type: dropdown
+    id: efi-source
+    attributes:
+      label: Who made the OpenCore EFI you boot from?
+      options:
+        - 1401 (Windows)
+        - 1401 Mac
+        - I built it by hand from the Dortania OpenCore Install Guide
+        - OpCore-Simplify or a similar generator
+        - "A prebuilt EFI downloaded from GitHub, a forum or a video"
+        - An AI assistant wrote or edited most of the config.plist
+        - "Not applicable: real Mac without OpenCore"
+        - Other or don't know
+    validations:
+      required: true
+
+  - type: dropdown
+    id: experience
+    attributes:
+      label: How much OpenCore / Hackintosh experience do you have?
+      description: This only helps maintainers pitch the answer at the right level.
+      options:
+        - This is my first OpenCore build
+        - I've built a few
+        - I'm experienced
+    validations:
+      required: true
+
+  # ------------------------------------------------------------------
+  # Hardware
+  # ------------------------------------------------------------------
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        ## Hardware
+
+        **Finding a PCI ID:** a GPU's PCI ID looks like `10DE:2504`. Find it with any of these:
+        - **Windows:** Device Manager > Display adapters > the card > Properties > Details > **Hardware Ids**. `PCI\VEN_10DE&DEV_2504&SUBSYS_397D1462` means `10DE:2504`, subsystem `1462:397D`.
+        - **Linux:** `lspci -nn | grep -iE 'vga|3d|display'`
+        - **macOS:** `system_profiler SPDisplaysDataType | grep -E 'Chipset|Vendor|Device ID'`
+
+  - type: dropdown
+    id: form-factor
+    attributes:
+      label: What kind of machine is it?
+      options:
+        - Desktop PC
+        - Laptop
+        - Mini PC or small form factor PC
+        - PC with an external GPU (Thunderbolt or OCuLink enclosure)
+        - "Real Intel Mac (for example Mac Pro 2019)"
+        - Real Mac running OpenCore Legacy Patcher
+    validations:
+      required: true
+
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU
+      description: Exact model. Include the suffix; F, KF and Ryzen models without G have no integrated graphics.
+      placeholder: "Intel Core i5-12400F / AMD Ryzen 7 5800X"
+    validations:
+      required: true
+
+  - type: input
+    id: board
+    attributes:
+      label: Motherboard or laptop model, with BIOS version
+      placeholder: "MSI MAG B550M MORTAR WIFI, BIOS 7C94v1F / ASUS ROG Strix G15 G513QM, BIOS 319"
+    validations:
+      required: true
+
+  - type: input
+    id: ram
+    attributes:
+      label: RAM
+      placeholder: 32 GB DDR4-3200
+    validations:
+      required: false
+
+  - type: input
+    id: gpu
+    attributes:
+      label: NVIDIA card the driver runs on
+      description: Brand, exact model and VRAM. For laptops, write "Laptop GPU".
+      placeholder: "MSI GeForce RTX 3060 Ventus 2X 12GB / RTX 4070 Laptop GPU 8GB"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu-pci-id
+    attributes:
+      label: PCI ID and subsystem ID of that card
+      description: See "Finding a PCI ID" above. Copy it, don't look it up online, because the same model name can have several IDs.
+      placeholder: "10DE:2504, subsystem 1462:397D"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: gpu-connection
+    attributes:
+      label: How is that card connected?
+      description: Riser cables, adapters and enclosures can limit link speed and change how the BIOS initializes the card.
+      options:
+        - "Directly in the motherboard's main x16 slot"
+        - Directly in a secondary slot (x16-sized but running at x8, x4 or x1)
+        - "Through a PCIe riser cable (vertical mount, small form factor case)"
+        - "Through an M.2-to-PCIe adapter"
+        - "External enclosure (Thunderbolt, USB4 or OCuLink)"
+        - Built into a laptop
+        - Don't know
+    validations:
+      required: true
+
+  - type: textarea
+    id: all-gpus
+    attributes:
+      label: Every GPU in the machine
+      description: |
+        List **all** of them, including the CPU's integrated graphics and any second dedicated card, even if they're disabled or hidden. For each one, say:
+        - the model and PCI ID
+        - its slot (PCIe x16 slot 1, onboard iGPU, laptop dGPU)
+        - whether it's enabled in BIOS, and whether OpenCore hides it from macOS (`disable-gpu`, `-wegnoegpu`, SSDT)
+        - whether any monitor is plugged into it
+      value: |
+        GPU 1:
+        GPU 2:
+        GPU 3:
+    validations:
+      required: true
+
+  - type: dropdown
+    id: igpu
+    attributes:
+      label: Integrated graphics (iGPU)
+      options:
+        - "My CPU has no iGPU (F / KF / most Ryzen without G)"
+        - The iGPU is enabled and drives a display
+        - "The iGPU is enabled without a display (headless / compute only)"
+        - The iGPU is disabled in BIOS
+        - The iGPU is hidden from macOS by OpenCore
+        - Don't know
+    validations:
+      required: true
+
+  - type: textarea
+    id: displays
+    attributes:
+      label: Displays
+      description: |
+        One line per screen: model, resolution and refresh rate, connection (DisplayPort, HDMI, USB-C, DVI, and any adapter or dock), and which GPU and port it's plugged into.
+        Also say whether HDR, G-Sync/FreeSync or adaptive sync is turned on in the monitor's own menu.
+      placeholder: |
+        1. Dell U2720Q, 3840x2160 @ 60 Hz, DisplayPort cable, RTX 3060 port 1, HDR off
+        2. LG 24GL600F, 1920x1080 @ 144 Hz, HDMI, RTX 3060 HDMI port, FreeSync on
+    validations:
+      required: true
+
+  # ------------------------------------------------------------------
+  # Laptops
+  # ------------------------------------------------------------------
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        ## Laptops only
+
+        **Desktop users:** answer "Not a laptop" to the first question and skip the rest of this section.
+
+        Most gaming laptops have two GPUs, and **which one is wired to which screen** decides what this driver can do. The driver runs only on the NVIDIA card and doesn't implement Optimus switching. That means:
+        - **Hybrid / Optimus mode:** the internal screen is wired to the iGPU, so the NVIDIA card can't light it. External ports wired to the NVIDIA card may still work.
+        - **Discrete / dGPU-only / MUX mode:** the NVIDIA card drives the internal screen. This is the mode most likely to work.
+        - **iGPU-only / Eco mode:** the NVIDIA card is powered off, and the driver has nothing to run on.
+
+  - type: dropdown
+    id: laptop-gpu-mode
+    attributes:
+      label: Which graphics mode is the laptop in when it boots macOS?
+      description: Vendors use different names. Pick the one that matches what the mode **does**.
+      options:
+        - Not a laptop
+        - "Hybrid / Optimus / MSHybrid / Standard / Switchable (iGPU drives the screen, NVIDIA renders)"
+        - "Discrete / dGPU only / Ultimate / MUX set to NVIDIA (NVIDIA drives the screen)"
+        - "iGPU only / Eco / Integrated / dGPU disabled (NVIDIA card switched off)"
+        - "Auto / Advanced Optimus / Dynamic display switching (the laptop switches by itself)"
+        - My laptop has no graphics mode setting
+        - Don't know
+    validations:
+      required: true
+
+  - type: dropdown
+    id: laptop-mode-where
+    attributes:
+      label: "Laptops only: where is that mode set?"
+      description: Select every option that applies. Modes set from Windows apps are usually stored in the firmware and still apply when macOS boots.
+      multiple: true
+      options:
+        - "BIOS setup (\"Display Mode\", \"Graphics Device\", \"Hybrid Graphics\", \"Discrete Graphics\", \"MSHybrid\")"
+        - "ASUS Armoury Crate or G-Helper (GPU Mode / MUX Switch)"
+        - "Lenovo Vantage or Legion Space (Hybrid Mode, GPU Working Mode)"
+        - "MSI Center (GPU Switch)"
+        - "HP OMEN Gaming Hub (Graphics Switcher)"
+        - "Dell / Alienware Command Center or BIOS (Advanced Optimus, Hybrid Graphics)"
+        - "Razer Synapse (GPU Mode)"
+        - "Gigabyte / Aorus Control Center"
+        - "Clevo, Tongfang or other ODM Control Center"
+        - "NVIDIA Control Panel (Manage Display Mode)"
+        - A Fn key combination or hardware switch
+        - "Not applicable: no mode setting, or not a laptop"
+        - Don't know
+
+  - type: dropdown
+    id: laptop-mode-applied
+    attributes:
+      label: "Laptops only: after the last mode change, did the laptop fully restart before booting macOS?"
+      description: Most MUX changes take effect only after a full restart, and some need two. Booting straight into OpenCore after changing the mode in Windows can leave the old wiring active.
+      options:
+        - "Yes, I restarted (or shut down and powered on) after changing the mode"
+        - "No, I changed the mode and booted macOS on the next start"
+        - "I never changed the mode, it's the factory setting"
+        - "Not applicable: not a laptop"
+        - Don't know
+
+  - type: dropdown
+    id: laptop-panel-wiring
+    attributes:
+      label: "Laptops only: which GPU is the internal screen wired to?"
+      description: |
+        Check the laptop's spec sheet or service manual, or a review that tests the MUX. Notebookcheck usually says.
+        In Windows on the same mode, NVIDIA Control Panel lists the internal screen under the NVIDIA card only when the card drives it.
+      options:
+        - "Always the iGPU (no MUX)"
+        - "Always the NVIDIA card (no iGPU path)"
+        - Switchable with a MUX, and it's set to the NVIDIA card now
+        - Switchable with a MUX, and it's set to the iGPU now
+        - "Not applicable: not a laptop"
+        - Don't know
+
+  - type: textarea
+    id: laptop-ports
+    attributes:
+      label: "Laptops only: which GPU is each external video port wired to?"
+      description: |
+        One line per port. Sources are the same as above. In Windows on the same mode, plug a monitor into the port and see whether NVIDIA Control Panel lists it under the NVIDIA card.
+        Write "don't know" for any port you haven't checked, and say which ports you actually tried in macOS.
+      value: |
+        HDMI:
+        USB-C / Thunderbolt (DisplayPort Alt Mode):
+        Mini DisplayPort:
+        Tried in macOS:
+
+  - type: dropdown
+    id: laptop-power
+    attributes:
+      label: "Laptops only: power while testing"
+      options:
+        - "Plugged in (AC adapter)"
+        - On battery
+        - Both, with the same result
+        - Both, with different results (describe in "What happens")
+        - "Not applicable: not a laptop"
+
+  # ------------------------------------------------------------------
+  # Firmware
+  # ------------------------------------------------------------------
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        ## BIOS / UEFI settings
+
+        Check these in the BIOS itself; don't answer from memory. Many laptop BIOSes hide most of these settings. In that case answer "Not in my BIOS".
+
+        Names differ by vendor:
+        - **Above 4G Decoding:** "Above 4GB MMIO", "64-bit BAR", "Memory Mapped I/O above 4GB"
+        - **Resizable BAR:** "Re-Size BAR Support", "Smart Access Memory", "Clever Access Memory"
+        - **CSM:** "Compatibility Support Module", "Legacy Support", "Boot Mode: UEFI / Legacy"
+        - **Primary display:** "Initial Display Output", "Primary Graphics Adapter", "Init Display First"
+        - **VT-d:** "Intel Virtualization Technology for Directed I/O"; on AMD, "IOMMU"
+
+  - type: dropdown
+    id: bios-reset
+    attributes:
+      label: Has the BIOS been updated, reset to defaults or had its CMOS cleared since you configured it for macOS?
+      description: A BIOS update or CMOS reset puts every setting back to default, and that commonly breaks a setup that worked before.
+      options:
+        - "No"
+        - Yes, and I set everything again and checked it
+        - Yes, and I haven't checked the settings since
+        - Don't know
+    validations:
+      required: true
+
+  - type: dropdown
+    id: above4g
+    attributes:
+      label: Above 4G Decoding
+      options: ["On", "Off", Not in my BIOS, Don't know]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: rebar
+    attributes:
+      label: Resizable BAR
+      options: ["On", "Off", "Not in my BIOS", "In my BIOS, but greyed out or not available", Don't know]
+    validations:
+      required: true
+
+  - type: input
+    id: bar1-size
+    attributes:
+      label: BAR1 size of the NVIDIA card, as reported outside macOS (optional, very useful)
+      description: |
+        This shows whether Resizable BAR actually took effect, not just whether the setting is on.
+        - **Windows:** run `nvidia-smi -q -d MEMORY` in a terminal and copy the **BAR1 Memory Usage > Total** line. GPU-Z also shows "Resizable BAR: Enabled / Disabled".
+        - **Linux:** `nvidia-smi -q -d MEMORY`, or `sudo lspci -vv -d 10de:` and copy the `Region 1` line.
+      placeholder: "BAR1 Total 8192 MiB (GPU-Z: Resizable BAR Enabled)"
+
+  - type: dropdown
+    id: csm
+    attributes:
+      label: CSM / Legacy boot
+      options: ["Off (UEFI only)", "On", Not in my BIOS, Don't know]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: secure-boot
+    attributes:
+      label: Secure Boot (in the BIOS, not OpenCore)
+      options: ["Off", "On", Don't know]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: fast-boot
+    attributes:
+      label: Fast Boot
+      description: On some boards, Fast Boot skips the graphics card's firmware (GOP) at startup, so the OpenCore picker shows on no screen or only on the iGPU.
+      options: ["Off", "On", "Ultra Fast", Not in my BIOS, Don't know]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: primary-display
+    attributes:
+      label: Primary or initial display adapter in BIOS
+      options: ["PCIe / PEG (dedicated card)", "IGFX / iGPU", "Auto", Not in my BIOS, Don't know]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: boot-screen
+    attributes:
+      label: Where do the BIOS logo and the OpenCore picker appear?
+      description: This shows which GPU the firmware starts on, which is what OpenCore and the start of macOS boot see.
+      options:
+        - On a monitor connected to the NVIDIA card
+        - "On a monitor connected to the motherboard's video ports (iGPU)"
+        - "On the laptop's internal screen"
+        - "On no screen: everything stays black until macOS (or the driver) starts"
+        - The BIOS logo shows, but the OpenCore picker never appears
+        - Don't know
+    validations:
+      required: true
+
+  - type: dropdown
+    id: pcie-speed
+    attributes:
+      label: PCIe link speed for the graphics slot
+      description: Usually "PCIEX16 Link Speed", "PCIe Slot Configuration" or "PEG Port Configuration". Riser cables often need it forced lower.
+      options: ["Auto", "Gen 5", "Gen 4", "Gen 3", "Gen 2 or lower", Not in my BIOS, Don't know]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: vtd
+    attributes:
+      label: VT-d (Intel) / IOMMU (AMD)
+      description: If it's on, say in the notes below whether OpenCore's `DisableIoMapper` quirk is enabled.
+      options: ["Off", "On", Not in my BIOS, Don't know]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: igpu-multimonitor
+    attributes:
+      label: "iGPU Multi-Monitor (Intel) / Integrated Graphics set to Force (AMD)"
+      description: Keeps the iGPU enabled alongside a dedicated card. Skip this if your CPU has no iGPU.
+      options: ["Off", "On", Not in my BIOS, "Not applicable: no iGPU", Don't know]
+
+  - type: dropdown
+    id: aspm
+    attributes:
+      label: PCIe power management (ASPM / Native ASPM)
+      description: Can affect sleep and wake and dGPU power on some boards.
+      options: ["Auto", "On / Enabled", "Off / Disabled", Not in my BIOS, Don't know]
+
+  - type: textarea
+    id: bios-other
+    attributes:
+      label: Other BIOS changes or notes (optional)
+      description: |
+        For example:
+        - CFG Lock
+        - DVMT Pre-Allocated (iGPU memory)
+        - Resizable BAR size, if your BIOS lets you choose it
+        - a VBIOS update for the card to support Resizable BAR
+        - OpenCore's `DisableIoMapper` quirk
+        - Thunderbolt / USB4 security level (for eGPUs)
+        - anything you changed from defaults that isn't listed above
+      placeholder: |
+        CFG Lock off. DVMT 64M. Updated the card's VBIOS from the vendor's site to enable ReBAR.
+        VT-d on with DisableIoMapper true.
+
+  # ------------------------------------------------------------------
+  # OpenCore and macOS
+  # ------------------------------------------------------------------
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        ## macOS and OpenCore
+
+        Copy these from your **current** config.plist or from Terminal, not from the README. A typo in boot-args is a common cause of problems, and maintainers can only spot it if you paste the real value.
+
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version and build
+      description: Run `sw_vers` in Terminal, or use Apple menu > About This Mac > More Info.
+      placeholder: "15.8.1 (24H32)"
+    validations:
+      required: true
+
+  - type: input
+    id: opencore-version
+    attributes:
+      label: OpenCore version and variant
+      description: Shown in the boot picker, or in `nvram 4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:opencore-version`. Write "none" for a real Mac without OpenCore.
+      placeholder: "1.0.9 RELEASE"
+    validations:
+      required: true
+
+  - type: input
+    id: smbios
+    attributes:
+      label: SMBIOS model
+      description: Run `sysctl -n hw.model`. Only the model name is needed. **Do not** paste the serial number, MLB, ROM or SystemUUID.
+      placeholder: iMacPro1,1
+    validations:
+      required: true
+
+  - type: input
+    id: boot-args
+    attributes:
+      label: boot-args (exact)
+      description: Run `nvram boot-args` and paste the whole output, or copy the value from config.plist.
+      placeholder: "boot-args	nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80"
+    validations:
+      required: true
+
+  - type: input
+    id: sip
+    attributes:
+      label: csr-active-config and SIP status
+      description: The csr-active-config value in config.plist, plus the output of `csrutil status`.
+      placeholder: "<430A0000>, System Integrity Protection status: unknown (Custom Configuration)"
+    validations:
+      required: true
+
+  - type: input
+    id: bar-quirks
+    attributes:
+      label: ResizeGpuBars and ResizeAppleGpuBars
+      description: "UEFI > Quirks > ResizeGpuBars and Booter > Quirks > ResizeAppleGpuBars in config.plist."
+      placeholder: "ResizeGpuBars 13, ResizeAppleGpuBars -1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: secure-boot-model
+    attributes:
+      label: "Misc > Security > SecureBootModel"
+      options: [Disabled, Default, "Another value (say which in the notes below)", Don't know]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: iondrv
+    attributes:
+      label: "Is com.apple.iokit.IONDRVSupport excluded in Kernel > Block?"
+      options: ["Yes", "No", Don't know]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: conflicts
+    attributes:
+      label: Which of these are in your EFI or config.plist?
+      description: Select every option that applies. Several of these conflict with the driver.
+      multiple: true
+      options:
+        - None of these
+        - WhateverGreen.kext
+        - nv_disable=1 in boot-args
+        - agdpmod=pikera or another agdpmod value
+        - DeviceProperties entries for the NVIDIA card
+        - "The driver's kexts (NVRM, NVAccel, NVRMFB, NVRMAGDC) also copied into EFI/OC/Kexts"
+        - "AMD CPU kernel patches (AMD Vanilla)"
+        - "-wegnoegpu or disable-gpu for any card"
+        - "An SSDT or ACPI patch that powers off the dGPU (SSDT-dGPU-Off, _OFF / _PS3 patches), common in laptop guides"
+        - "-igfxvesa, -radvesa or another software-rendering boot-arg"
+        - Don't know
+    validations:
+      required: true
+
+  - type: textarea
+    id: kexts
+    attributes:
+      label: Kexts in EFI/OC/Kexts and other OpenCore notes (optional)
+      description: List the kext file names, and anything else unusual in the config, such as custom SSDTs, ACPI patches or a non-default ScanPolicy.
+      placeholder: Lilu, VirtualSMC, SMCProcessor, SMCSuperIO, AppleALC, RestrictEvents, USBToolBox, UTBMap, IntelMausi
+
+  # ------------------------------------------------------------------
+  # Driver
+  # ------------------------------------------------------------------
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        ## Driver and 1401
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How did you install the driver?
+      options:
+        - 1401 Mac app
+        - 1401 for Windows (built the installer and EFI)
+        - "Prebuilt tarball (install.sh from Releases)"
+        - Built from source
+        - Other (describe in the notes)
+    validations:
+      required: true
+
+  - type: input
+    id: driver-version
+    attributes:
+      label: Driver version
+      description: From the release file name (`nullmoth-nvidia-<version>.tar.gz`), or from the version 1401 shows. If you built from source, give the commit hash.
+      placeholder: 1.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: 1401 version (if used)
+      placeholder: "1401 Mac 1.1.1"
+
+  - type: dropdown
+    id: extensions-allowed
+    attributes:
+      label: Did you allow the extensions in System Settings > Privacy & Security and restart again afterwards?
+      options:
+        - Yes, allowed them and restarted
+        - "macOS never asked me to allow anything"
+        - "No, or I'm not sure"
+        - "Can't tell: macOS doesn't reach the desktop"
+    validations:
+      required: true
+
+  - type: textarea
+    id: state
+    attributes:
+      label: Driver state from Terminal
+      description: |
+        If macOS reaches a desktop, even a slow one or one booted with the driver removed, run this in Terminal and paste the **whole** output:
+        ```
+        sw_vers; sysctl -n hw.model machdep.cpu.brand_string; nvram boot-args; csrutil status
+        kmutil showloaded --list-only | grep nullmoth
+        ioreg -r -n NVRM -d 1 -l | grep -E '"nvrm-'
+        sysctl debug.nvaccel_heads_published debug.nvaccelfb debug.nvrmfb_agdc debug.nvaccel_iop
+        system_profiler SPDisplaysDataType
+        ```
+        A working install shows 4 `nullmoth` kexts and your GeForce with `Metal Support`. If you can't reach a desktop at all, write `no desktop`.
+      render: text
+    validations:
+      required: true
+
+  # ------------------------------------------------------------------
+  # Evidence
+  # ------------------------------------------------------------------
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        ## Logs and evidence
+
+        Paste logs **as they are**. Don't summarize them or have an assistant "clean them up", because the lines that look like noise are often the ones that matter. Long logs are better attached as a `.txt` or `.zip` file than pasted.
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Whatever applies to your problem:
+        - **Kernel panic:** the full panic report from the "Your computer restarted because of a problem" dialog, or from `/Library/Logs/DiagnosticReports/` (`*.panic`)
+        - **WindowServer crash:** the newest `WindowServer*.ips` from `/Library/Logs/DiagnosticReports/`, at least the first 100 lines
+        - **App crash:** the app's `.ips` report from `~/Library/Logs/DiagnosticReports/`
+        - **Boot hang:** the last 20 lines of the verbose screen (boot with `-v`), typed out or as a photo below
+        - **OpenCore hang:** `opencore-*.txt` from the EFI root, written by the DEBUG build with `Misc > Debug > Target` set to `67`
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: attachments
+    attributes:
+      label: Photos, screenshots and files
+      description: |
+        Drag files here. For a boot hang, photograph the **whole** screen, in focus, with no glare. Phone photos of a verbose screen are fine and often the only evidence there is.
+        Attach your `config.plist` with the PlatformInfo serials removed, plus any log files that are too long to paste.
+    validations:
+      required: false
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you already tried
+      description: |
+        List each change and its result. This includes every change that the README or 1401 didn't tell you to make (see the earlier question), whoever suggested it.
+        If an AI assistant suggested a cause, say so here as a guess rather than presenting it as a finding.
+      placeholder: |
+        - Set ResizeGpuBars to -1: picker appears again, but the desktop still never loads.
+        - Added nvrmsettle=10000 (suggested by an AI): no change.
+        - Removed the driver with the boot picker entry: desktop works on the iGPU again.
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else (optional)
+      description: Related issues (link them as #123), questions for the maintainers, or what you're able to test, for example "I can test a candidate build".
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: I removed serial numbers (SystemSerialNumber, MLB, ROM, SystemUUID), my Apple ID, my user name and any other personal data from everything I pasted or attached.
+          required: true

@@ -1,0 +1,203 @@
+name: Hardware compatibility report
+description: Tell us how the driver runs on your card, whether it works, partly works or doesn't. Reports that it works matter too.
+title: "[Hardware]: <GPU> (<PCI ID>) · driver <version> · macOS <version>: <works / partly works / doesn't work>"
+labels: ["hardware-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The driver's device table covers far more cards than have been physically tested. See [docs/CARD-SUPPORT.md](https://github.com/nullmoth/nvidia-macos-driver/blob/main/docs/CARD-SUPPORT.md). A short, accurate report from your machine helps fill in that table, **especially when everything works**.
+
+        If something is broken and you want it fixed, please **also** file a **Bug report**. This form records results; it doesn't ask for the detail needed to debug a failure.
+
+        Copy every value from your own machine. If an AI assistant is helping, don't let it fill in IDs or versions it can't see. Write **don't know** instead.
+
+        You can write in your own language if English is hard for you. An English title helps other people find the issue.
+
+  - type: dropdown
+    id: result
+    attributes:
+      label: Overall result
+      options:
+        - Works, with no problems I noticed after normal daily use
+        - Works, with minor problems (list them below)
+        - "Partly works: desktop is reached, but major features are broken"
+        - "Doesn't work: no stable desktop"
+    validations:
+      required: true
+
+  - type: input
+    id: days
+    attributes:
+      label: How long have you used it?
+      placeholder: 3 days of daily use / one 20-minute test
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: NVIDIA card
+      description: Brand, exact model and VRAM.
+      placeholder: Gigabyte RTX 4060 Ti Eagle 8GB
+    validations:
+      required: true
+
+  - type: input
+    id: gpu-pci-id
+    attributes:
+      label: PCI ID and subsystem ID
+      description: |
+        **Windows:** Device Manager > Display adapters > Properties > Details > Hardware Ids. **Linux:** `lspci -nn`. **macOS:** `system_profiler SPDisplaysDataType`.
+        Copy it from your machine rather than looking it up online.
+      placeholder: "10DE:2803, subsystem 1458:4116"
+    validations:
+      required: true
+
+  - type: input
+    id: cpu-board
+    attributes:
+      label: CPU and motherboard or laptop model
+      placeholder: "Intel Core i7-12700K, ASUS PRIME Z690-P"
+    validations:
+      required: true
+
+  - type: textarea
+    id: other-gpus
+    attributes:
+      label: Other GPUs in the machine
+      description: Integrated graphics and any second card. Say whether each is enabled, hidden from macOS or driving a display. Write "none" if there are none.
+      placeholder: UHD 770 iGPU enabled, headless, no display attached
+    validations:
+      required: true
+
+  - type: dropdown
+    id: form-factor
+    attributes:
+      label: Machine type
+      options:
+        - Desktop PC
+        - Laptop
+        - Mini PC or small form factor PC
+        - External GPU
+        - Real Intel Mac
+    validations:
+      required: true
+
+  - type: dropdown
+    id: laptop-gpu-mode
+    attributes:
+      label: "Laptops: graphics mode when booting macOS"
+      description: Set in the BIOS or a vendor app (Armoury Crate, Lenovo Vantage, MSI Center, OMEN Gaming Hub and so on).
+      options:
+        - Not a laptop
+        - "Hybrid / Optimus / MSHybrid (iGPU drives the internal screen)"
+        - "Discrete / dGPU only / Ultimate / MUX set to NVIDIA (NVIDIA drives the internal screen)"
+        - "Auto / Advanced Optimus"
+        - No graphics mode setting
+        - Don't know
+    validations:
+      required: true
+
+  - type: input
+    id: laptop-outputs
+    attributes:
+      label: "Laptops: which screens and ports worked in macOS"
+      placeholder: "internal screen yes, HDMI yes, USB-C DisplayPort no (wired to iGPU)"
+
+  - type: input
+    id: versions
+    attributes:
+      label: Driver, 1401, macOS and OpenCore versions
+      placeholder: "driver 1.1.0, 1401 Mac 1.1.1, macOS 15.8.1 (24H32), OpenCore 1.0.9"
+    validations:
+      required: true
+
+  - type: input
+    id: rebar
+    attributes:
+      label: Resizable BAR and BAR quirks
+      description: The BIOS Resizable BAR setting, plus ResizeGpuBars and ResizeAppleGpuBars from config.plist.
+      placeholder: "ReBAR on, ResizeGpuBars 13, ResizeAppleGpuBars -1"
+    validations:
+      required: true
+
+  - type: textarea
+    id: displays
+    attributes:
+      label: Displays
+      description: Model, resolution and refresh rate, connection type, one line per screen.
+      placeholder: |
+        Dell S2721DGF, 2560x1440 @ 165 Hz, DisplayPort
+        Internal laptop panel, 1920x1080 @ 144 Hz
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: tested-ok
+    attributes:
+      label: What you tested and found WORKING
+      description: Tick only what you actually tried and saw working.
+      options:
+        - label: Boots to the desktop on every restart (at least 3 restarts)
+        - label: "`system_profiler SPDisplaysDataType` shows the card with Metal support"
+        - label: Full native resolution and refresh rate on every display
+        - label: Changing resolution or refresh rate in System Settings
+        - label: More than one display at the same time
+        - label: Sleep and wake
+        - label: Video playback (Safari, QuickTime, YouTube)
+        - label: A Metal app or game (name it below)
+        - label: "Blender, Geekbench, or another benchmark or 3D app (name it below)"
+        - label: OpenGL or OpenCL app (name it below)
+        - label: Hot-plugging a display
+
+  - type: textarea
+    id: problems
+    attributes:
+      label: Problems, and anything you tested that did NOT work
+      description: Name apps with their versions. For each problem, link the bug report if you filed one.
+      placeholder: |
+        - Geekbench 6 Metal: completed, score 98,000
+        - Second display flashes when changing refresh on the first (known issue in 1.1.0)
+        - Sleep: screen stays black after wake, filed as #00
+    validations:
+      required: true
+
+  - type: textarea
+    id: workarounds
+    attributes:
+      label: Anything you had to do differently from the README or 1401 to make it work
+      description: |
+        Extra boot-args, BIOS settings, a VBIOS update, hiding a GPU, a different SMBIOS, a laptop MUX setting, and so on. Write "nothing" if you followed the README exactly.
+        These are often the most useful part of a report, because the next person with the same card needs them.
+      placeholder: |
+        - Had to hide the UHD 770 iGPU with -wegnoigpu, otherwise boot took 60 s longer
+        - Set the card's dual-BIOS switch to the position that advertises the larger BAR1 sizes
+    validations:
+      required: true
+
+  - type: input
+    id: report-id
+    attributes:
+      label: 1401 Send logs report ID (optional, but very helpful)
+      description: From 1401 > Crash report > Send logs to NullMoth. It's useful even when everything works, because it records how your card came up.
+
+  - type: dropdown
+    id: ai-assist
+    attributes:
+      label: How was this report written?
+      options:
+        - I wrote it myself
+        - An AI assistant helped with wording or translation only, and I checked every value against my machine
+        - An AI assistant helped more than that, and I checked every value against my machine
+        - An AI assistant helped and I have not checked every value
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: Every value here comes from my own machine, and I removed serial numbers and personal data.
+          required: true

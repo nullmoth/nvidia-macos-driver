@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Is my card supported?
+    url: https://github.com/nullmoth/nvidia-macos-driver/blob/main/docs/CARD-SUPPORT.md
+    about: Which GPU families the driver covers, what has been physically tested, and why GTX 10 and older cards can't be supported.
+  - name: macOS doesn't boot even without the driver
+    url: https://dortania.github.io/OpenCore-Install-Guide/
+    about: If macOS fails before the driver is installed, or still fails after removing it, the problem is in the OpenCore setup. Start with the Dortania guide and its troubleshooting section.
+  - name: Installing macOS from Windows (1401)
+    url: https://github.com/nullmoth/1401
+    about: Problems that happen in 1401 on Windows, before macOS is installed, belong in the 1401 repository.
+  - name: How the driver works
+    url: https://github.com/nullmoth/nvidia-macos-driver/blob/main/docs/HOW-IT-WORKS.md
+    about: The full write-up of the kernel, Metal plugin, translator and NVK pieces. Read this before asking design questions.
