@@ -289,6 +289,7 @@ bool NVRM::start(IOService *provider)
     nv_xnu_log_init();
     UInt8 bus = fPCI->getBusNumber(), dev = fPCI->getDeviceNumber(), fn = fPCI->getFunctionNumber();
     nv_xnu_register_pci(fPCI, 0, bus, dev, fn);
+    nv_xnu_register_all_pci();   // RM's chipset init needs the whole PCI tree (host bridge, root ports)
     nv_state_t *nv = &fNv;
     nv->pci_info.domain    = 0;
     nv->pci_info.bus       = bus;
@@ -741,7 +742,25 @@ bool NVRM::placeLargeBar1()
         if (m->getPhysicalAddress() == bar3Old) bar3Size = m->getLength();
         if (m->getPhysicalAddress() == (lo10 & ~0xFULL)) bar0 = m;
     }
-    if (!bar0 || !bar3Size) { LOG("bar1: BAR0/BAR3 apertures not found in the nub (bar0 %d bar3 %llu) — not placing", bar0 != NULL, bar3Size); return false; }
+    // 10-09 (RTX 5050, MacPro7,1 + npci=0x3000): the nub's apertures can be stale — they sit at 0x100000000+ while
+    // config space and assigned-addresses agree on BAR0 0x40000000 / BAR3 0x46000000 — so neither lookup above hits
+    // and BAR1 is never placed. Take the missing BAR0/BAR3 from assigned-addresses, only where it agrees with the
+    // live BAR register.
+    UInt64 bar0Size = 0;
+    if (!bar0 || !bar3Size) {
+        UInt64 a0 = 0, s0 = 0, a3 = 0, s3 = 0;
+        if (OSData *aa = OSDynamicCast(OSData, fPCI->getProperty("assigned-addresses"))) {
+            const UInt32 *c = (const UInt32 *)aa->getBytesNoCopy();
+            for (unsigned i = 0; c && i + 5 <= aa->getLength() / 4; i += 5) {
+                const UInt64 a = ((UInt64)c[i + 1] << 32) | c[i + 2], s = ((UInt64)c[i + 3] << 32) | c[i + 4];
+                if ((c[i] & 0xff) == 0x10) { a0 = a; s0 = s; }
+                if ((c[i] & 0xff) == 0x1c) { a3 = a; s3 = s; }
+            }
+        }
+        if (!bar0 && s0 && a0 == (lo10 & ~0xFULL)) { bar0Size = s0; LOG("bar1: BAR0 0x%llx+0x%llx taken from assigned-addresses (nub stale)", a0, s0); }
+        if (!bar3Size && s3 && a3 == bar3Old) { bar3Size = s3; LOG("bar1: BAR3 0x%llx+0x%llx taken from assigned-addresses (nub stale)", a3, s3); }
+    }
+    if ((!bar0 && !bar0Size) || !bar3Size) { LOG("bar1: BAR0/BAR3 apertures not found in the nub (bar0 %d bar3 %llu) — not placing", bar0 != NULL, bar3Size); return false; }
     UInt64 wMin = 0, wMax = 0;
     const unsigned physBits = nvrmPhysBits();
     const UInt64 physTop = physBits >= 63 ? ~0ULL : (1ULL << physBits) - 1;
@@ -813,11 +832,14 @@ bool NVRM::placeLargeBar1()
     }
     fPCI->configWrite16(0x04, cmd | 0x2);
 
-    OSArray *arr = OSArray::withCapacity(mem->getCount() + 1);
+    const unsigned memCount = mem ? mem->getCount() : 0;
+    OSArray *arr = OSArray::withCapacity(memCount + 3);
     IODeviceMemory *m1 = IODeviceMemory::withRange(bar1Base, bar1Size), *m3 = IODeviceMemory::withRange(bar3Base, bar3Size);
-    if (!arr || !m1 || !m3) { LOG("bar1: placed in hardware but the aperture list could not be built (no memory)"); OSSafeReleaseNULL(arr); OSSafeReleaseNULL(m1); OSSafeReleaseNULL(m3); return false; }
-    arr->setObject(bar0); arr->setObject(m1); arr->setObject(m3);
-    for (unsigned i = 0; i < mem->getCount(); i++) {
+    IODeviceMemory *m0 = bar0 ? NULL : IODeviceMemory::withRange(lo10 & ~0xFULL, bar0Size);
+    if (!arr || !m1 || !m3 || (!bar0 && !m0)) { LOG("bar1: placed in hardware but the aperture list could not be built (no memory)"); OSSafeReleaseNULL(arr); OSSafeReleaseNULL(m1); OSSafeReleaseNULL(m3); OSSafeReleaseNULL(m0); return false; }
+    arr->setObject(bar0 ? bar0 : m0); arr->setObject(m1); arr->setObject(m3);
+    OSSafeReleaseNULL(m0);
+    for (unsigned i = 0; i < memCount; i++) {
         IOMemoryDescriptor *m = OSDynamicCast(IOMemoryDescriptor, mem->getObject(i));
         if (!m || m == bar0) continue;
         UInt64 pa = m->getPhysicalAddress();
