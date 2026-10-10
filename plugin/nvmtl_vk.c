@@ -5365,31 +5365,74 @@ void nvmtl_vk_queue_destroy(nvk_queue *q)
 
 size_t nvmtl_vk_allocated_bytes(void) { return g_alloc_bytes; }
 
+/* Two staging slots per thread, so the GPU copy recorded for one surface can still be running while
+ * the next surface is copied in: the fence wait is deferred until the same slot is needed again.
+ * Each slot owns its command buffer, because nvmtl_inflight stores a bare nvk_cmdbuf* and must
+ * outlive the deferred nvmtl_vk_submit_finish(). (Leaving that command buffer on the stack here
+ * crashed WindowServer with EXC_BAD_ACCESS in nvmtl_cmd_retire.) */
+typedef struct { nvk_buffer buf; nvk_cmdbuf cb; nvmtl_inflight inflight; int busy; } nvmtl_stage_slot;
+typedef struct { nvmtl_stage_slot s[2]; int next; } nvmtl_stage_set;
+static pthread_key_t g_stage_set_key; static pthread_once_t g_stage_set_once = PTHREAD_ONCE_INIT;
+static void nvmtl_stage_set_free(void *p)
+{
+    nvmtl_stage_set *st = p; if (!st) return;
+    for (int i = 0; i < 2; i++) {
+        if (st->s[i].busy) { nvmtl_vk_submit_finish(&st->s[i].inflight); st->s[i].busy = 0; }
+        if (st->s[i].buf.buf) nvmtl_vk_buffer_destroy(&st->s[i].buf);
+    }
+    free(st);
+}
+static void nvmtl_stage_set_make(void)
+{
+    if (pthread_key_create(&g_stage_set_key, nvmtl_stage_set_free)) nvlog("stage: pthread_key_create FAILED");
+}
+static nvmtl_stage_slot *nvmtl_stage_set_get(nvk_queue *q, size_t size)
+{
+    (void)q;
+    pthread_once(&g_stage_set_once, nvmtl_stage_set_make);
+    nvmtl_stage_set *st = pthread_getspecific(g_stage_set_key);
+    if (!st) { st = calloc(1, sizeof *st); if (!st) return NULL;
+               if (pthread_setspecific(g_stage_set_key, st)) { free(st); return NULL; } }
+    nvmtl_stage_slot *sl = &st->s[st->next]; st->next ^= 1;
+    if (sl->busy) { nvmtl_vk_submit_finish(&sl->inflight); sl->busy = 0; }
+    if (!sl->buf.buf || sl->buf.size < size) {
+        if (sl->buf.buf) nvmtl_vk_buffer_destroy(&sl->buf);
+        memset(&sl->buf, 0, sizeof sl->buf);
+        if (nvmtl_vk_buffer_create(size, 1, &sl->buf)) { memset(&sl->buf, 0, sizeof sl->buf); return NULL; }
+    }
+    return sl;
+}
+
 int nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes)
 {
     const size_t bpp = img->bpp ? img->bpp : 4;
     const uint32_t cols = nvmtl_blocks(img->w, img->bw), rows = nvmtl_blocks(img->h, img->bh);
     if (row_bytes < (size_t)cols * bpp) { nvlog("image_write: bytesPerRow %zu < %u blocks * %zu B", row_bytes, cols, bpp); return -1; }
-    nvk_buffer stage;
-    if (nvmtl_vk_stage(q, (size_t)cols * rows * bpp, &stage)) return -1;
-    uint8_t *dst = (uint8_t *)stage.map;
-    for (uint32_t y = 0; y < rows; y++)
-        memcpy(dst + (size_t)y * cols * bpp, (const uint8_t *)src + (size_t)y * row_bytes, (size_t)cols * bpp);
-    nvk_cmdbuf c; if (nvmtl_vk_cmd_begin(q, &c)) return -1;
+    const size_t tight = (size_t)cols * bpp;
+    nvmtl_stage_slot *sl = nvmtl_stage_set_get(q, tight * (size_t)rows);
+    if (!sl) return -1;
+    uint8_t *dst = (uint8_t *)sl->buf.map;
+    if (row_bytes == tight) memcpy(dst, src, tight * (size_t)rows);   /* a 4K surface is 2160 rows of 15 KB: one pass, not 2160 calls */
+    else for (uint32_t y = 0; y < rows; y++)
+        memcpy(dst + (size_t)y * tight, (const uint8_t *)src + (size_t)y * row_bytes, tight);
+    nvk_cmdbuf *const c = &sl->cb;
+    if (nvmtl_vk_cmd_begin(q, c)) return -1;
     VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };
     VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
-    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst);
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst);
     VkBufferImageCopy bic = { 0, 0, 0, { nvmtl_copy_aspect(img), 0, 0, 1 }, { 0, 0, 0 }, { img->w, img->h, 1 } };
-    pvkCmdCopyBufferToImage(c.cb, (VkBuffer)stage.buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    pvkCmdCopyBufferToImage(c->cb, (VkBuffer)sl->buf.buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
     VkImageMemoryBarrier toRead = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
         VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
-    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &toRead);
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &toRead);
     img->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    return nvmtl_vk_submit_wait(&c);
+    if (nvmtl_vk_submit_begin_at(c, &sl->inflight, "surface upload") != 0) return -1;
+    sl->busy = 1;
+    return 0;
 }
 
 int nvmtl_vk_copy_buffer(nvk_queue *q, nvk_buffer *src, size_t srcOff, nvk_buffer *dst, size_t dstOff, size_t size)
