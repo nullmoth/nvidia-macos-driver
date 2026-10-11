@@ -189,6 +189,11 @@ mkdir -p /Library/NullMoth && rm -rf /Library/NullMoth/kexts && ditto "$HERE/Lib
 if [ -d "$HERE/Library/NullMoth/gpu-userland" ]; then
   rm -rf /Library/NullMoth/gpu-userland && ditto "$HERE/Library/NullMoth/gpu-userland" /Library/NullMoth/gpu-userland || die "copy the AMD/Intel Vulkan drivers (restore from $BK)"
 fi
+# the NPU userland (Level Zero loader + Intel's NPU user driver), loaded from /Library/NullMoth/npu/lib by apps
+if [ -d "$HERE/Library/NullMoth/npu" ]; then
+  rm -rf /Library/NullMoth/npu && ditto "$HERE/Library/NullMoth/npu" /Library/NullMoth/npu && chmod -R go-w,a+rX /Library/NullMoth/npu \
+    || die "copy the NPU userland (restore from $BK)"
+fi
 for target in 15 26; do
   dir=/Library/NullMoth/kexts/$target
   [ -f "$dir/NVAccel.kext/Contents/MacOS/NVAccel" ] && [ -f "$dir/NVAccel.kext/Contents/Info.plist" ] || die "missing macOS $target accelerator (restore from $BK)"

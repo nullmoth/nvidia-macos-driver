@@ -71,7 +71,8 @@ done
 REMOVING=1
 for k in $KEXTS; do rm -rf "$EXT/$k.kext" || die "cannot remove $k"; done
 for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do rm -rf "$GB/$b" || die "cannot remove $b"; done
-rm -rf /Library/NullMoth/kexts /Library/NullMoth/firmware /Library/NullMoth/driver-version /Library/NullMoth/update-pending /Library/LaunchDaemons/com.nullmoth.osupdate.plist || die "cannot remove the cached driver or update switcher"
+# the AMD/Intel Vulkan drivers and the NPU userland are package caches (the package restores them): removed, not backed up
+rm -rf /Library/NullMoth/kexts /Library/NullMoth/firmware /Library/NullMoth/gpu-userland /Library/NullMoth/npu /Library/NullMoth/driver-version /Library/NullMoth/update-pending /Library/LaunchDaemons/com.nullmoth.osupdate.plist || die "cannot remove the cached driver or update switcher"
 if [ "$REMOVE_KC" = 1 ]; then
   rm -f "$KC" "$KC.nullmoth-install-new" "$KC.nullmoth-update-new" "$KC.nullmoth-remove-new" || die "cannot remove the auxiliary collection"
 elif [ "$CANDIDATE" = "$NEWKC" ]; then
