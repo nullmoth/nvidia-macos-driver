@@ -38,10 +38,20 @@ static void               nvAccelWriteStamp(int index, unsigned int value);
 #include "nvkms-kapi.h"
 #include <sys/sysctl.h>
 #include <libkern/OSAtomic.h>
+extern "C" {   // kern/thread_call.h and kern/clock.h clash with the family headers here, so the KPIs are declared by hand
+struct thread_call *thread_call_allocate(void (*func)(void *, void *), void *param0);
+int thread_call_enter_delayed(struct thread_call *call, uint64_t deadline);
+void clock_interval_to_deadline(uint32_t interval, uint32_t scale_factor, uint64_t *result);
+}
 static volatile SInt64 gCntVmAlloc, gCntVmAllocBytes, gCntVmDealloc, gCntVmDeallocBytes, gCntVmRefused,
                        gCntResNew, gCntResFree, gCntMapCommit, gCntMapRelease, gCntMapFree;
 static void nvaccelInstallSysctl(void);
 static int gNvAccelArmed = 0;
+// 1 once the headless check restored the plugin name without arming (no NVIDIA display head). The Metal plugin reads it:
+// a headless GPU hands frames to another GPU's WindowServer through system memory, so IOSurfaces must be copied out.
+static int gNvHeadless = 0;
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_headless, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gNvHeadless, 0,
+           "1 = no NVIDIA display: Metal device for apps only, WindowServer on the GPU that owns the display");
 // 4 NVIDIA heads (nvfbheads=4) + 1 for an Intel built-in panel (NMIntelFB, IOFBDependentIndex 4): WindowServer composites
 // that panel on the NVIDIA card and the display-pipe copy path below writes each frame into the Intel scan-out surface.
 static const unsigned kNvMaxFB = 5;
@@ -263,6 +273,52 @@ public:
         else
             ALOG("  to register it:  sudo sysctl -w debug.nvaccelfb=1   (2 = re-run the family's own sweep)");
         return true;
+    }
+    // Headless GPU (laptops whose panel and outputs are all on the Intel or AMD GPU: issues #76, #106). NVKMS finds no
+    // display, so no NVRMFB head ever publishes and the withheld MetalPluginName was never restored: Metal never offered
+    // the card, although NVRM and NVK run it fine (#106: vkCreateInstance enumerates the GTX 1660 Ti). Apple's own
+    // two-GPU MacBook Pros work this way: the integrated GPU drives every display and WindowServer, and the discrete GPU
+    // is a second Metal device that apps choose and macOS copies their frames from. So when no head has published by the
+    // deadline, the plugin name goes back on WITHOUT arming: apps get the NVIDIA device, and WindowServer (allow-listed
+    // "!WindowServer" = only when armed) keeps the GPU that owns the display. Nothing here touches a display pipe or a
+    // mode change. Boot-arg -nvaccelnoheadless keeps the old behaviour.
+    static constexpr uint32_t kHeadlessDeadlineSec = 60;   // chosen: NVRMFB heads publish within ~20 s of start (#76 log)
+    struct thread_call *fHeadlessCall = nullptr;
+    void armHeadlessCheck() {
+        int off = 0;
+        if (PE_parse_boot_argn("-nvaccelnoheadless", &off, sizeof off)) { ALOG("headless check: off (-nvaccelnoheadless)"); return; }
+        fHeadlessCall = thread_call_allocate(&NVAccel::headlessCheck, this);
+        if (!fHeadlessCall) { ALOG("headless check: thread_call_allocate FAILED -- a GPU with no display stays hidden from Metal"); return; }
+        uint64_t when = 0;
+        clock_interval_to_deadline(kHeadlessDeadlineSec, kSecondScale, &when);
+        thread_call_enter_delayed(fHeadlessCall, when);
+        ALOG("headless check: armed for %u s from now", kHeadlessDeadlineSec);
+    }
+    static void headlessCheck(void *p0, void *) {
+        NVAccel *me = (NVAccel *)p0;
+        if (!me || me != gAccel) return;
+        if (me->fRegLock) IOLockLock(me->fRegLock);
+        const char *why = me->fFB ? "a display head published" : !me->fMetalPlugin ? "no plugin name to restore"
+                        : me->getProperty("MetalPluginName") ? "the plugin name is already back" : nullptr;
+        if (why) {
+            ALOG("headless check: not headless (%s) -- nothing to do", why);
+        } else {
+            // name the GPU that owns the display, so a log says which driver WindowServer is on
+            char owner[64] = "none found";
+            if (OSIterator *it = getMatchingServices(serviceMatching("IOFramebuffer"))) {
+                while (OSObject *o = it->getNextObject()) {
+                    IOService *s = OSDynamicCast(IOService, o);
+                    if (s && !s->metaCast("NVRMNVDAFramebuffer")) { strlcpy(owner, s->getMetaClass()->getClassName(), sizeof owner); break; }
+                }
+                it->release();
+            }
+            me->setProperty("MetalPluginName", me->fMetalPlugin);
+            me->setProperty("NVAccelHeadless", kOSBooleanTrue);
+            gNvHeadless = 1;
+            ALOG("headless check: no NVIDIA display head after %u s -- MetalPluginName restored WITHOUT arming: apps get "
+                 "the NVIDIA Metal device, WindowServer stays on the display's GPU (%s)", kHeadlessDeadlineSec, owner);
+        }
+        if (me->fRegLock) IOLockUnlock(me->fRegLock);
     }
     void deliverModeChange() {
         if (!fDM) return;
@@ -536,6 +592,7 @@ public:
                     removeProperty("MetalPluginName");
                     ALOG("MetalPluginName withheld -- nothing will load the Metal plugin until "
                          "`sysctl -w debug.nvaccelfb=1` puts it back, and a reboot takes it away again");
+                    armHeadlessCheck();
                 }
             } else ALOG("serviceMatching(NVRMFramebuffer) returned NULL -- cannot watch for the framebuffer");
         }
@@ -956,6 +1013,7 @@ static void nvaccelInstallSysctl(void)
 {
     if (gSysctlInstalled) return;
     sysctl_register_oid(&sysctl__debug_nvaccelfb);
+    sysctl_register_oid(&sysctl__debug_nvaccel_headless);
     sysctl_register_oid(&sysctl__debug_nvaccel_vm_alloc);       sysctl_register_oid(&sysctl__debug_nvaccel_vm_alloc_bytes);
     sysctl_register_oid(&sysctl__debug_nvaccel_vm_dealloc);     sysctl_register_oid(&sysctl__debug_nvaccel_vm_dealloc_bytes);
     sysctl_register_oid(&sysctl__debug_nvaccel_vm_refused);
