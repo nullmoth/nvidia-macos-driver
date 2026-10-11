@@ -204,6 +204,11 @@ if [ -d "$EXT/NMXGPU.kext" ] && [ -d /Library/NullMoth/kexts/15/NMXGPU.kext ]; t
     rm -rf "$EXT/NMXAccel.kext" && ditto /Library/NullMoth/kexts/15/NMXAccel.kext "$EXT/NMXAccel.kext" && chown -R root:wheel "$EXT/NMXAccel.kext" \
       && chmod -R 755 "$EXT/NMXAccel.kext" || die "refresh the AMD/Intel Metal accelerator (restore from $BK)"
   fi
+  # and the NPU driver, where it was turned on
+  if [ -d "$EXT/NMXNPU.kext" ] && [ -d /Library/NullMoth/kexts/15/NMXNPU.kext ]; then
+    rm -rf "$EXT/NMXNPU.kext" && ditto /Library/NullMoth/kexts/15/NMXNPU.kext "$EXT/NMXNPU.kext" && chown -R root:wheel "$EXT/NMXNPU.kext" \
+      && chmod -R 755 "$EXT/NMXNPU.kext" || die "refresh the NPU driver (restore from $BK)"
+  fi
 fi
 echo "$MAJ" > /Library/NullMoth/os-major || die "record selected OS"
 mkdir -p "$GB" "$FW" || die "create bundle and firmware directories"

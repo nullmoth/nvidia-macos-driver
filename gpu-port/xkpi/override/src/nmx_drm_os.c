@@ -19,11 +19,15 @@
 #include <drm/drm_file.h>
 #include <linux/pci.h>
 #include <drm/drm_gem.h>
+#ifndef NMX_NO_TTM
 #include <drm/drm_gem_ttm_helper.h>
+#endif
 #include <drm/drm_writeback.h>
 #include <drm/drm_utils.h>
 #include <drm/display/drm_hdcp_helper.h>
+#ifndef NMX_NO_TTM
 #include <drm/ttm/ttm_bo.h>
+#endif
 #include <drm_os_freebsd.h>
 
 #include "nmx_vma.h"
@@ -61,6 +65,8 @@ void drm_dev_alias_free(struct drm_minor *minor)
 
 /* ---- GEM objects backed by TTM buffers ------------------------------------------------------------------------------ */
 
+/* NMX_NO_TTM: NMXNPU builds this file without TTM (its drivers use GEM shmem objects only) */
+#ifndef NMX_NO_TTM
 static struct ttm_buffer_object *bo_of(struct drm_gem_object *gem)
 {
     return container_of(gem, struct ttm_buffer_object, base);
@@ -105,6 +111,8 @@ int drm_gem_ttm_mmap(struct drm_gem_object *gem, struct vm_area_struct *vma)
     drm_gem_object_put(gem);
     return 0;
 }
+
+#endif
 
 /* ---- writeback connectors: none are created on macOS (amdgpu logs the refusal and continues) ------------------------ */
 

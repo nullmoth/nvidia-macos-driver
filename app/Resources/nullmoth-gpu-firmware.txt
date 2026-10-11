@@ -1,8 +1,11 @@
-# linux-firmware afabaf773c4c2e2c841429933a6a084a5af4d14d: the GPU firmware the AMD and Intel drivers load (redistributable; see LICENSES/LICENSE.amdgpu, LICENSES/LICENSE.i915, LICENSES/LICENSE.xe)
+# linux-firmware afabaf773c4c2e2c841429933a6a084a5af4d14d: the GPU firmware the AMD and Intel drivers load (redistributable; see LICENSES/LICENSE.amdgpu, LICENSES/LICENSE.i915, LICENSES/LICENSE.xe, LICENSES/LICENSE.intel_vpu, LICENSES/LICENSE.amdnpu)
 # <sha256> <path>; fetched from https://gitlab.com/kernel-firmware/linux-firmware/-/raw/afabaf773c4c2e2c841429933a6a084a5af4d14d/<path>
+# #link <name> -> <target in the same directory>: linux-firmware's WHENCE links, made by setup after the checksums pass
 572872598565dc3513470de971a32bf9db301f47afeef3636345eadae33b2eee LICENSES/LICENSE.amdgpu
 8542aeabf2761935122d693561e16766ce1bcc2b0d003204f9040b7d6d929f2e LICENSES/LICENSE.i915
 26b3c946f1f378ff25bb3bb7c365d108a2bc0bf08619e5e08bc0e4f9aaa6ee1e LICENSES/LICENSE.xe
+4a10165191a9ab82daf1539cab4242ac266eeaa1ad1d158d5d9699546966c139 LICENSES/LICENSE.intel_vpu
+8878d6ddf5f941f81d0b532cd5d63329d81c6f1603f917f3a14b2c8cd032a503 LICENSES/LICENSE.amdnpu
 0634acf566946df7036b92dc351e0781e091a1c14c24979e49c5e7cb81a702ef amdgpu/aldebaran_ip_discovery.bin
 40b0107fbc753e2a1a43b427f5604bd18422debac848d4e2aee439fae8683734 amdgpu/aldebaran_mec.bin
 40b0107fbc753e2a1a43b427f5604bd18422debac848d4e2aee439fae8683734 amdgpu/aldebaran_mec2.bin
@@ -836,3 +839,18 @@ de81c75f46a127c33cd59f604d800e9ffc7ed3495967ba0d8767cd6985ab398b xe/bmg_guc_70.b
 ac42861c62b69f19923d9a69d971fb849921585a01924e14c0e8ac679d7cde81 xe/ptl_guc_70.bin
 93e9aaf15362630441042a31fe864f9e4df76b401ada91de6df64e0f6b8adbca xe/ptl_huc.bin
 76e77660fa1a492aeef256eba65078a76f6801a8827cfd0758e8669d7462a465 xe/ptl_gsc_1.bin
+4078ca4af807e3f28b095df0c7539482ec79afc8c69160ef0480e6d7b67722e6 intel/vpu/vpu_37xx_v1.bin
+cdfe2ebd66aaec21d896134c93d82d60de2d8eede75a2c62898aeb9006e5a26f intel/vpu/vpu_40xx_v1.bin
+c8ca936bc259198f040b1623ff632fd44b66ec006067c646dceb24b2ee3fbb3e intel/vpu/vpu_50xx_v1.bin
+718142a5778b003e5cc2719c9785772b67e5b4e6fa64cba0632a3c0466030bcc amdnpu/1502_00/npu.sbin.1.5.2.380
+d13ff9fb95c6cea40213fa69e5a3465529f00bb67c0984d62343c6e31808fb9e amdnpu/1502_00/npu.sbin.1.5.5.391
+81831072efc3db9e0a1038cded24afd2e67a29434de550e51a19544de05ba91a amdnpu/17f0_10/npu.sbin.1.0.0.63
+7ed0f242f253b581eb75c8c8b34638d92fba598063b635a541beb94869245469 amdnpu/17f0_10/npu.sbin.1.1.2.64
+7f1cc47f1b462d9267486818ede34e7936c312d48e14cfa0a7e357e4600e9a17 amdnpu/17f0_11/npu.sbin.1.0.0.166
+3e3c996ef1e562e96ee4c4d90faa9faf1132c72da3af1bcf35d592cc34903fed amdnpu/17f0_11/npu.sbin.1.1.2.65
+#link amdnpu/1502_00/npu.sbin -> npu.sbin.1.5.2.380
+#link amdnpu/1502_00/npu_7.sbin -> npu.sbin.1.5.5.391
+#link amdnpu/17f0_10/npu.sbin -> npu.sbin.1.0.0.63
+#link amdnpu/17f0_10/npu_7.sbin -> npu.sbin.1.1.2.64
+#link amdnpu/17f0_11/npu.sbin -> npu.sbin.1.0.0.166
+#link amdnpu/17f0_11/npu_7.sbin -> npu.sbin.1.1.2.65

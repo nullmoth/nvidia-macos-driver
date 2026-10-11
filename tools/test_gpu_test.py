@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The opt-in AMD/Intel GPU driver (setup --gpu-test): the firmware list and the GPU detection it relies on."""
-import pathlib, re, subprocess, sys
+import os, pathlib, re, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAN = ROOT / "app/Resources/nullmoth-gpu-firmware.txt"
@@ -23,8 +23,10 @@ arm("every firmware line is a SHA-256 and a path", all(len(e) == 2 and re.fullma
 paths = [e[1] for e in entries]
 arm("the AMD and Intel licences travel with the firmware",
     "LICENSES/LICENSE.amdgpu" in paths and "LICENSES/LICENSE.i915" in paths and "LICENSES/LICENSE.xe" in paths)
-arm("only amdgpu, i915, xe and licence files are fetched",
-    all(p.startswith(("amdgpu/", "i915/", "xe/", "LICENSES/")) and ".." not in p for p in paths))
+arm("only GPU, NPU and licence files are fetched",
+    all(p.startswith(("amdgpu/", "i915/", "xe/", "intel/vpu/", "amdnpu/", "LICENSES/")) and ".." not in p for p in paths))
+arm("the NPU licences travel with the NPU firmware",
+    "LICENSES/LICENSE.intel_vpu" in paths and "LICENSES/LICENSE.amdnpu" in paths)
 
 # the awk setup runs over ioreg: each device's vendor and class are paired even when class-code comes first
 awk = re.search(r"LC_ALL=C awk -F'<\|>' '(.*?)' \| sort -u\)", SETUP.read_text(), re.S).group(1).replace("\n    ", " ")
@@ -75,5 +77,41 @@ arm("the Metal plugin loads RADV for AMD and ANV for Intel, NVK otherwise",
     and 'default:     return "/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib"' in plugin)
 arm("NVIDIA machine code is never dispatched on an AMD/Intel device",
     "if (nvmtl_vk_vendor() != 0x10de) return -3;" in plugin)
+
+# NPUs: Intel's processing accelerator (class 12) and AMD's signal-processing NPU (1180) are found, nothing else
+npu_awk = re.search(r"NPUS=\$\(ioreg -r -c IOPCIDevice -l -w0 \| LC_ALL=C awk -F'<\|>' '(.*?)' \| sort -u\)", src, re.S)
+npu_sample = """+-o NPU0@b  <class IOPCIDevice>
+    | "class-code" = <00001200>
+    | "vendor-id" = <86800000>
++-o AMDN@0  <class IOPCIDevice>
+    | "vendor-id" = <22100000>
+    | "class-code" = <00801100>
++-o HDEF@0  <class IOPCIDevice>
+    | "vendor-id" = <22100000>
+    | "class-code" = <00030400>
++-o SIO@0  <class IOPCIDevice>
+    | "vendor-id" = <86800000>
+    | "class-code" = <00801100>
+"""
+npus = subprocess.run(["awk", "-F<|>", npu_awk.group(1).replace("\n    ", " ")], input=npu_sample, capture_output=True,
+                      text=True).stdout.split() if npu_awk else []
+arm("an Intel NPU and an AMD NPU are found; AMD audio and an Intel 1180 device are not", sorted(npus) == ["1022", "8086"],
+    " ".join(npus))
+# firmware links: made inside one directory only, a target outside it is refused
+link_loop = re.search(r"(    grep '\^#link ' \"\$MAN\" \| while read -r _ n _ tgt; do\n.*?\n    done\n)", src, re.S)
+with tempfile.TemporaryDirectory() as d:
+    ft = pathlib.Path(d, "ft"); (ft / "amdnpu/1502_00").mkdir(parents=True)
+    (ft / "amdnpu/1502_00/npu.sbin.1.5.5.391").write_text("fw")
+    man = pathlib.Path(d, "man.txt")
+    man.write_text("#link amdnpu/1502_00/npu_7.sbin -> npu.sbin.1.5.5.391\n#link amdnpu/1502_00/evil.sbin -> ../../etc\n"
+                   "#link ../escape -> npu.sbin.1.5.5.391\n")
+    r = subprocess.run(["bash", "-c", link_loop.group(1) if link_loop else "exit 9"],
+                       env={"MAN": str(man), "FT": str(ft), "PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
+    good = (ft / "amdnpu/1502_00/npu_7.sbin").is_symlink() and os.readlink(ft / "amdnpu/1502_00/npu_7.sbin") == "npu.sbin.1.5.5.391"
+    bad = (ft / "amdnpu/1502_00/evil.sbin").exists() or os.path.lexists(pathlib.Path(d, "escape"))
+    arm("firmware links are made within their directory; traversal is refused", r.returncode == 0 and good and not bad)
+unin = (ROOT / "package/uninstall.sh").read_text()
+arm("uninstall removes the NPU driver too", 'KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NMXGPU NMXAccel NMXNPU"' in unin)
+arm("turning it off clears the NPU opt-in", "ga del nmxnpu=1" in src)
 print(f"{len(fails)} failed")
 sys.exit(1 if fails else 0)

@@ -94,4 +94,11 @@ static inline void mmu_interval_set_seq(struct mmu_interval_notifier *sub, unsig
 	WRITE_ONCE(sub->invalidate_seq, cur_seq);
 }
 
+/* registration with the mmap lock already held: the same, as nothing is registered with xnu */
+static inline int mmu_interval_notifier_insert_locked(struct mmu_interval_notifier *sub, struct mm_struct *mm,
+						      unsigned long start, unsigned long length,
+						      const struct mmu_interval_notifier_ops *ops)
+{
+	return mmu_interval_notifier_insert(sub, mm, start, length, ops);
+}
 #endif

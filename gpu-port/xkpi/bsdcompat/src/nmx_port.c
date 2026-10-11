@@ -73,14 +73,28 @@ int nmx_port_busy(void)
     return nmx_xnu_devfs_busy();
 }
 
+static void *attach_on(void *iopci, const char *busclass, int display);
+
 /* offers the IOPCIDevice to the registered drivers; the device record when one attached, else NULL */
 void *nmx_port_attach(void *iopci)
+{
+    return attach_on(iopci, "vgapci", 1);
+}
+
+/* the same for a device that is not a display (an NPU): its drivers register on the plain "pci" bus class */
+void *nmx_port_attach_pci(void *iopci)
+{
+    return attach_on(iopci, "pci", 0);
+}
+
+static void *attach_on(void *iopci, const char *busclass, int display)
 {
     device_t dev = nmx_device_for_pci(iopci);
     if (dev == NULL)
         return NULL;
-    nmx_fb_before_attach();
-    int err = nmx_bus_add_device(dev, "vgapci");
+    if (display)
+        nmx_fb_before_attach();
+    int err = nmx_bus_add_device(dev, busclass);
     device_t *kids = NULL;
     int n = 0, attached = 0;
     if (err == 0 && device_get_children(dev, &kids, &n) == 0) {

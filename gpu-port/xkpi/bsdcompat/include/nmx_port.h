@@ -10,6 +10,7 @@ void nmx_port_stop(void);
 /* device-node opens still outstanding: the kext must not stop while this is nonzero */
 int nmx_port_busy(void);
 void *nmx_port_attach(void *iopci);
+void *nmx_port_attach_pci(void *iopci);
 void nmx_port_detach(void *dev);
 int nmx_port_power(void *dev, int on);
 int nmx_port_shutdown(void *dev);

@@ -36,6 +36,26 @@ void *nmx_xnu_map_phys(uint64_t pa, size_t size, int cache, void **handle);
 void *nmx_xnu_map_pages(const uint64_t *pages, size_t npages, int cache, void **handle);
 void nmx_xnu_unmap(void *handle);
 
+/* ---- another process's memory (nmx_mm.cpp) -------------------------------------------------------------------------- */
+
+/*
+ * The port keeps one Linux mm_struct per process. These record which Mach task an mm belongs to (called from the
+ * process's own thread when its mm is created, and when the mm is freed), so a driver worker thread can later read
+ * or write that process's memory (Linux: kthread_use_mm + copy_to_user). The caller must hold an mm_users reference
+ * (mmget_not_zero), which keeps a thread of the process, and so its task, alive for the copy.
+ */
+void nmx_xnu_mm_note_task(void *mm);
+void nmx_xnu_mm_forget(void *mm);
+/* copies len bytes between kbuf and uaddr in mm's process; to_user != 0 writes it. Returns 0 or an errno. */
+int nmx_xnu_mm_copy(void *mm, uint64_t uaddr, void *kbuf, size_t len, int to_user);
+
+/*
+ * Wires npages of user memory at uaddr in mm's process (mm NULL: the calling process) and returns each page's
+ * physical address, plus a handle that keeps the range wired until nmx_xnu_user_unwire. Returns 0 or an errno.
+ */
+int nmx_xnu_user_wire(void *mm, uint64_t uaddr, size_t npages, int write, uint64_t *phys, void **handle);
+void nmx_xnu_user_unwire(void *handle);
+
 /* ---- DMA (nmx_dma.cpp) -------------------------------------------------------------------------------------------- */
 
 /*
