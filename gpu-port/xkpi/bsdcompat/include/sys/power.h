@@ -10,3 +10,23 @@
 #define POWER_PROFILE_PERFORMANCE 0
 #define POWER_PROFILE_ECONOMY 1
 int power_profile_get_state(void);
+
+/*
+ * Sleep types and the suspend/resume notifications (FreeBSD's names and values). The kext's IOKit power-state
+ * changes invoke power_suspend_early / power_suspend / power_resume with the sleep type macOS is entering.
+ */
+#include <sys/eventhandler.h>
+enum power_stype {
+    POWER_STYPE_AWAKE,
+    POWER_STYPE_STANDBY,
+    POWER_STYPE_FW_SUSPEND,
+    POWER_STYPE_SUSPEND_TO_IDLE,
+    POWER_STYPE_FW_HIBERNATE,
+    POWER_STYPE_POWEROFF,
+    POWER_STYPE_UNKNOWN,
+    POWER_STYPE_COUNT = POWER_STYPE_UNKNOWN,
+};
+typedef void (*power_change_fn)(void *, enum power_stype stype);
+EVENTHANDLER_DECLARE(power_resume, power_change_fn);
+EVENTHANDLER_DECLARE(power_suspend, power_change_fn);
+EVENTHANDLER_DECLARE(power_suspend_early, power_change_fn);

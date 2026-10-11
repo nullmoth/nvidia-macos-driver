@@ -21,7 +21,7 @@ def replace_once(old, new):
 # FreeBSD VM internals (radix tree, reservations, UMA internals) do not exist on macOS
 for line in ["#include <vm/vm_radix.h>\n", "#include <vm/vm_reserv.h>\n", "#include <vm/uma_int.h>\n"]:
     replace_once(line, "")
-replace_once("#include <vm/vm_extern.h>\n", '#include <vm/vm_extern.h>\n#include "nmx_xnu.h"\n')
+replace_once("#include <vm/vm_extern.h>\n", '#include <vm/vm_extern.h>\n#include "nmx_xnu.h"\n#include "nmx_vma.h"\n')
 
 replace_func("linux_alloc_pages(gfp_t flags, unsigned int order)\n", r'''
 /*
@@ -206,33 +206,31 @@ vunmap(void *addr)
 
 replace_func("lkpi_vmf_insert_pfn_prot_locked(struct vm_area_struct *vma, unsigned long addr,\n", r'''
 /*
- * macOS port: user mappings of GPU memory are created whole by the device-node glue (an IOKit mapping in the
- * calling task), never page by page from a fault handler, so this fault-time path is not reached.
+ * macOS port: a fault handler's insert records the page in the user-mapping record that owns the vma
+ * (nmx_linux_cdev.c), which maps the whole range into the process once every page is known.
  */
 vm_fault_t
 lkpi_vmf_insert_pfn_prot_locked(struct vm_area_struct *vma, unsigned long addr,
     unsigned long pfn, pgprot_t prot)
 {
-	return (VM_FAULT_SIGBUS);
+	return (nmx_umap_insert(vma, addr, pfn, prot));
 }
 ''')
 
 replace_func("lkpi_remap_pfn_range(struct vm_area_struct *vma, unsigned long start_addr,\n", r'''
+/* macOS port: a driver's direct mapping of a physical range is recorded page by page, as a fault would insert it */
 int
 lkpi_remap_pfn_range(struct vm_area_struct *vma, unsigned long start_addr,
     unsigned long start_pfn, unsigned long size, pgprot_t prot)
 {
-	return (-EOPNOTSUPP);
-}
-''')
+	unsigned long off;
 
-replace_func("lkpi_io_mapping_map_user(struct io_mapping *iomap,\n", r'''
-int
-lkpi_io_mapping_map_user(struct io_mapping *iomap,
-    struct vm_area_struct *vma, unsigned long addr,
-    unsigned long pfn, unsigned long size)
-{
-	return (-EOPNOTSUPP);
+	for (off = 0; off < size; off += PAGE_SIZE) {
+		if (nmx_umap_insert(vma, start_addr + off, start_pfn + (off >> PAGE_SHIFT),
+		    prot) != VM_FAULT_NOPAGE)
+			return (-EINVAL);
+	}
+	return (0);
 }
 ''')
 

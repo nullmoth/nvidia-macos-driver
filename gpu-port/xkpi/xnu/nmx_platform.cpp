@@ -17,6 +17,9 @@
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSDictionary.h>
+#include <libkern/c++/OSArray.h>
+#include <libkern/c++/OSString.h>
+#include <libkern/c++/OSBoolean.h>
 #include <sys/vnode.h>
 #include <sys/fcntl.h>
 #include <sys/uio.h>
@@ -135,51 +138,279 @@ extern "C" size_t nmx_xnu_acpi_table(const char *sig, int instance, void *buf, s
     return n;
 }
 
-static IOACPIPlatformDevice *acpi_node_for(void *pci)
+/*
+ * ACPI namespace nodes are the IOACPIPlatformDevice entries of the ACPI plane; its root ("acpi", the platform
+ * expert) is the namespace root. Only devices are registry entries: methods and data objects are reached by name
+ * through the device that contains them (validateObject / evaluateObject). Names in the plane drop ACPI's trailing
+ * underscore padding ("_SB_" is "_SB"), so comparisons ignore it.
+ */
+static const IORegistryPlane *acpi_plane(void)
 {
-    if (pci == nullptr)
-        return nullptr;
-    IORegistryEntry *e = (IORegistryEntry *)pci;
-    const IORegistryPlane *acpiPlane = IORegistryEntry::getPlane("IOACPIPlane");
-    if (acpiPlane == nullptr)
-        return nullptr;
-    /* a PCI device is attached in the ACPI plane to the ACPI node describing it */
-    return OSDynamicCast(IOACPIPlatformDevice, e->getParentEntry(acpiPlane));
+    static const IORegistryPlane *plane;
+    if (plane == nullptr)
+        plane = IORegistryEntry::getPlane("IOACPIPlane");
+    return plane;
 }
 
-extern "C" int nmx_xnu_acpi_eval(void *pci, const char *method, const uint64_t *int_args, int nargs, const void *buf_arg,
-                                 size_t buf_len, uint64_t *int_result, void *buf_result, size_t *buf_result_len)
+static bool same_seg(const char *a, const char *b)
 {
-    IOACPIPlatformDevice *node = acpi_node_for(pci);
-    if (node == nullptr)
-        return ENOENT;
-    OSObject *params[8] = {};
-    int np = 0;
-    for (int i = 0; i < nargs && np < 7; i++)
-        params[np++] = OSNumber::withNumber(int_args[i], 64);
-    if (buf_arg && np < 8)
-        params[np++] = OSData::withBytes(buf_arg, (unsigned)buf_len);
-    OSObject *result = nullptr;
-    IOReturn r = node->evaluateObject(method, &result, params, (IOItemCount)np);
-    for (int i = 0; i < np; i++)
-        if (params[i])
-            params[i]->release();
-    if (r != kIOReturnSuccess)
-        return r == kIOReturnNotFound ? ENOENT : EIO;
-    if (result) {
-        if (OSNumber *num = OSDynamicCast(OSNumber, result)) {
-            if (int_result)
-                *int_result = num->unsigned64BitValue();
-        } else if (OSData *data = OSDynamicCast(OSData, result)) {
-            if (buf_result && buf_result_len) {
-                size_t n = data->getLength() < *buf_result_len ? data->getLength() : *buf_result_len;
-                memcpy(buf_result, data->getBytesNoCopy(), n);
-                *buf_result_len = data->getLength();
-            }
-        }
-        result->release();
+    char x[5] = {}, y[5] = {};
+    strlcpy(x, a, sizeof(x));
+    strlcpy(y, b, sizeof(y));
+    for (int i = 3; i >= 0 && (x[i] == '_' || x[i] == 0); i--)
+        x[i] = 0;
+    for (int i = 3; i >= 0 && (y[i] == '_' || y[i] == 0); i--)
+        y[i] = 0;
+    return strncmp(x, y, 4) == 0;
+}
+
+extern "C" void *nmx_xnu_acpi_node_root(void)
+{
+    if (acpi_plane() == nullptr)
+        return nullptr;
+    IORegistryEntry *root = IORegistryEntry::fromPath("/", acpi_plane());
+    if (root == nullptr)
+        return nullptr;
+    IORegistryEntry *acpi = root->getChildEntry(acpi_plane());     /* "acpi": the namespace root */
+    if (acpi)
+        acpi->retain();
+    root->release();
+    return acpi;
+}
+
+extern "C" void *nmx_xnu_acpi_node_for_pci(void *pci)
+{
+    if (pci == nullptr || acpi_plane() == nullptr)
+        return nullptr;
+    /* a PCI device is attached in the ACPI plane to the ACPI node describing it */
+    IORegistryEntry *e = ((IORegistryEntry *)pci)->getParentEntry(acpi_plane());
+    IOACPIPlatformDevice *n = OSDynamicCast(IOACPIPlatformDevice, e);
+    if (n)
+        n->retain();
+    return n;
+}
+
+extern "C" void nmx_xnu_acpi_node_get(void *node)
+{
+    if (node)
+        ((OSObject *)node)->retain();
+}
+
+extern "C" void nmx_xnu_acpi_node_put(void *node)
+{
+    if (node)
+        ((OSObject *)node)->release();
+}
+
+extern "C" void *nmx_xnu_acpi_node_parent(void *node)
+{
+    if (node == nullptr || acpi_plane() == nullptr)
+        return nullptr;
+    IORegistryEntry *p = ((IORegistryEntry *)node)->getParentEntry(acpi_plane());
+    if (p == nullptr || OSDynamicCast(IOACPIPlatformDevice, p) == nullptr) {
+        /* the parent of a top-level node is the namespace root, which is not an IOACPIPlatformDevice */
+        return p && p->getParentEntry(acpi_plane()) != nullptr ? (p->retain(), (void *)p) : nullptr;
     }
+    p->retain();
+    return p;
+}
+
+/* the next child device of 'parent' after 'prev' (NULL = first); references are the caller's */
+extern "C" void *nmx_xnu_acpi_node_next_child(void *parent, void *prev)
+{
+    if (parent == nullptr || acpi_plane() == nullptr)
+        return nullptr;
+    OSIterator *it = ((IORegistryEntry *)parent)->getChildIterator(acpi_plane());
+    if (it == nullptr)
+        return nullptr;
+    void *found = nullptr;
+    bool past = prev == nullptr;
+    while (OSObject *o = it->getNextObject()) {
+        IOACPIPlatformDevice *d = OSDynamicCast(IOACPIPlatformDevice, o);
+        if (d == nullptr)
+            continue;
+        if (!past) {
+            past = (void *)d == prev;
+            continue;
+        }
+        d->retain();
+        found = d;
+        break;
+    }
+    it->release();
+    return found;
+}
+
+extern "C" void *nmx_xnu_acpi_node_child(void *parent, const char *seg)
+{
+    void *c = nullptr;
+    while ((c = nmx_xnu_acpi_node_next_child(parent, c)) != nullptr) {
+        const char *name = ((IORegistryEntry *)c)->getName(acpi_plane());
+        if (name && same_seg(name, seg))
+            return c;
+        /* keep the reference only for the match; the iterator above re-finds 'c' by pointer */
+        ((OSObject *)c)->release();
+    }
+    return nullptr;
+}
+
+/* the node's 4-character ACPI name, padded with '_' as ACPI writes it */
+extern "C" int nmx_xnu_acpi_node_name(void *node, char out[5])
+{
+    memset(out, '_', 4);
+    out[4] = 0;
+    if (node == nullptr || acpi_plane() == nullptr)
+        return 0;
+    const char *name = ((IORegistryEntry *)node)->getName(acpi_plane());
+    if (name == nullptr)
+        return 0;
+    for (int i = 0; i < 4 && name[i] && name[i] != '@'; i++)
+        out[i] = name[i];
+    return 1;
+}
+
+extern "C" int nmx_xnu_acpi_has(void *node, const char *name)
+{
+    IOACPIPlatformDevice *d = OSDynamicCast(IOACPIPlatformDevice, (OSObject *)node);
+    return d != nullptr && d->validateObject(name) == kIOReturnSuccess;
+}
+
+/* ---- evaluating objects: ACPI values <-> OSNumber / OSString / OSData / OSArray ---------------------------------- */
+
+static OSObject *to_os(const nmx_acpi_obj *o, int depth)
+{
+    if (depth > 8)
+        return nullptr;
+    switch (o->type) {
+    case NMX_ACPI_INTEGER:
+        return OSNumber::withNumber(o->integer, 64);
+    case NMX_ACPI_STRING:
+        return OSString::withCString((const char *)o->ptr);
+    case NMX_ACPI_BUFFER:
+        return OSData::withBytes(o->ptr, (unsigned)o->len);
+    case NMX_ACPI_PACKAGE: {
+        OSArray *a = OSArray::withCapacity(o->count ? o->count : 1);
+        if (a == nullptr)
+            return nullptr;
+        const nmx_acpi_obj *el = (const nmx_acpi_obj *)o->ptr;
+        for (uint32_t i = 0; i < o->count; i++) {
+            OSObject *c = to_os(&el[i], depth + 1);
+            if (c == nullptr) {
+                a->release();
+                return nullptr;
+            }
+            a->setObject(c);
+            c->release();
+        }
+        return a;
+    }
+    default:
+        return nullptr;
+    }
+}
+
+/* bytes the result tree needs: the nodes, then string and buffer data, each 8-byte aligned */
+static size_t tree_size(OSObject *o, int depth)
+{
+    size_t n = sizeof(nmx_acpi_obj);
+    if (depth > 8)
+        return n;
+    if (OSString *s = OSDynamicCast(OSString, o))
+        n += (s->getLength() + 1 + 7) & ~(size_t)7;
+    else if (OSData *d = OSDynamicCast(OSData, o))
+        n += (d->getLength() + 7) & ~(size_t)7;
+    else if (OSArray *a = OSDynamicCast(OSArray, o))
+        for (unsigned i = 0; i < a->getCount(); i++)
+            n += tree_size(a->getObject(i), depth + 1);
+    return n;
+}
+
+/* fills 'dst' from 'o', taking extra space from *cursor */
+static void tree_fill(OSObject *o, nmx_acpi_obj *dst, char **cursor, int depth)
+{
+    memset(dst, 0, sizeof(*dst));
+    if (OSNumber *num = OSDynamicCast(OSNumber, o)) {
+        dst->type = NMX_ACPI_INTEGER;
+        dst->integer = num->unsigned64BitValue();
+    } else if (OSBoolean *b = OSDynamicCast(OSBoolean, o)) {
+        dst->type = NMX_ACPI_INTEGER;
+        dst->integer = b->isTrue() ? 1 : 0;
+    } else if (OSString *s = OSDynamicCast(OSString, o)) {
+        dst->type = NMX_ACPI_STRING;
+        dst->len = s->getLength();
+        memcpy(*cursor, s->getCStringNoCopy(), dst->len + 1);
+        dst->ptr = *cursor;
+        *cursor += (dst->len + 1 + 7) & ~(size_t)7;
+    } else if (OSData *d = OSDynamicCast(OSData, o)) {
+        dst->type = NMX_ACPI_BUFFER;
+        dst->len = d->getLength();
+        memcpy(*cursor, d->getBytesNoCopy(), dst->len);
+        dst->ptr = *cursor;
+        *cursor += (dst->len + 7) & ~(size_t)7;
+    } else if (OSArray *a = OSDynamicCast(OSArray, o)) {
+        dst->type = NMX_ACPI_PACKAGE;
+        dst->count = depth > 8 ? 0 : a->getCount();
+        nmx_acpi_obj *el = (nmx_acpi_obj *)*cursor;
+        *cursor += sizeof(nmx_acpi_obj) * dst->count;
+        dst->ptr = el;
+        for (uint32_t i = 0; i < dst->count; i++)
+            tree_fill(a->getObject(i), &el[i], cursor, depth + 1);
+    } else {
+        dst->type = NMX_ACPI_ANY;   /* a reference or other object the caller cannot use */
+    }
+}
+
+extern "C" int nmx_xnu_acpi_evaluate(void *node, const char *name, const nmx_acpi_obj *args, int nargs,
+                                     nmx_acpi_obj **result, size_t *result_size)
+{
+    if (result)
+        *result = nullptr;
+    if (result_size)
+        *result_size = 0;
+    IOACPIPlatformDevice *d = OSDynamicCast(IOACPIPlatformDevice, (OSObject *)node);
+    if (d == nullptr || name == nullptr || nargs < 0 || nargs > 7)
+        return ENOENT;
+    OSObject *params[7] = {};
+    for (int i = 0; i < nargs; i++) {
+        params[i] = to_os(&args[i], 0);
+        if (params[i] == nullptr) {
+            for (int j = 0; j < i; j++)
+                params[j]->release();
+            return EINVAL;
+        }
+    }
+    OSObject *out = nullptr;
+    IOReturn r = d->evaluateObject(name, &out, nargs ? params : nullptr, (IOItemCount)nargs);
+    for (int i = 0; i < nargs; i++)
+        params[i]->release();
+    if (r != kIOReturnSuccess) {
+        if (out)
+            out->release();
+        return r == kIOReturnNotFound || r == kIOReturnBadArgument ? ENOENT : EIO;
+    }
+    if (out == nullptr || result == nullptr) {
+        if (out)
+            out->release();
+        return 0;
+    }
+    size_t size = tree_size(out, 0);
+    char *mem = (char *)IOMallocZero(size);
+    if (mem == nullptr) {
+        out->release();
+        return ENOMEM;
+    }
+    char *cursor = mem + sizeof(nmx_acpi_obj);
+    tree_fill(out, (nmx_acpi_obj *)mem, &cursor, 0);
+    out->release();
+    *result = (nmx_acpi_obj *)mem;
+    *result_size = size;
     return 0;
+}
+
+extern "C" void nmx_xnu_acpi_free(void *p, size_t size)
+{
+    if (p)
+        IOFree(p, size);
 }
 
 /* ---- SMBIOS / DMI ------------------------------------------------------------------------------------------------- */
@@ -199,13 +430,14 @@ static const char *smbios_string(const uint8_t *s, const uint8_t *end, int n)
 }
 
 /* Linux DMI field -> (SMBIOS structure type, string-index byte offset) */
-struct dmi_map { int field; uint8_t type; uint8_t offset; };
+/* numeric: the field is a byte value (chassis type), given to LinuxKPI as its decimal text */
+struct dmi_map { int field; uint8_t type; uint8_t offset; uint8_t numeric; };
 static const dmi_map dmi_fields[] = {
     { 1, 0, 0x04 }, { 2, 0, 0x05 }, { 3, 0, 0x08 },                                   /* BIOS vendor, version, date */
     { 6, 1, 0x04 }, { 7, 1, 0x05 }, { 8, 1, 0x06 }, { 9, 1, 0x07 },                   /* system maker..serial */
     { 11, 1, 0x19 }, { 12, 1, 0x1a },                                                 /* SKU, family */
     { 13, 2, 0x04 }, { 14, 2, 0x05 }, { 15, 2, 0x06 }, { 16, 2, 0x07 }, { 17, 2, 0x08 },/* board */
-    { 18, 3, 0x04 }, { 20, 3, 0x06 }, { 21, 3, 0x07 }, { 22, 3, 0x08 },               /* chassis */
+    { 18, 3, 0x04 }, { 19, 3, 0x05, 1 }, { 20, 3, 0x06 }, { 21, 3, 0x07 }, { 22, 3, 0x08 }, /* chassis */
 };
 
 extern "C" size_t nmx_xnu_dmi_field(int field, char *buf, size_t max)
@@ -233,6 +465,11 @@ extern "C" size_t nmx_xnu_dmi_field(int field, char *buf, size_t max)
             while (next + 1 < end && !(next[0] == 0 && next[1] == 0))
                 next++;
             next += 2;
+            if (p[0] == m->type && m->offset < p[1] && m->numeric) {
+                snprintf(buf, max, "%u", p[m->offset] & 0x7f);  /* bit 7 is the chassis lock flag */
+                out = strlen(buf);
+                break;
+            }
             if (p[0] == m->type && m->offset < p[1]) {
                 const char *s = smbios_string(p, end, p[m->offset]);
                 if (s) {

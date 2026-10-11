@@ -51,6 +51,7 @@
 #include <vm/vm_pager.h>
 #include <vm/vm_extern.h>
 #include "nmx_xnu.h"
+#include "nmx_vma.h"
 
 #include <vm/uma.h>
 
@@ -418,21 +419,29 @@ vunmap(void *addr)
 }
 
 /*
- * macOS port: user mappings of GPU memory are created whole by the device-node glue (an IOKit mapping in the
- * calling task), never page by page from a fault handler, so this fault-time path is not reached.
+ * macOS port: a fault handler's insert records the page in the user-mapping record that owns the vma
+ * (nmx_linux_cdev.c), which maps the whole range into the process once every page is known.
  */
 vm_fault_t
 lkpi_vmf_insert_pfn_prot_locked(struct vm_area_struct *vma, unsigned long addr,
     unsigned long pfn, pgprot_t prot)
 {
-	return (VM_FAULT_SIGBUS);
+	return (nmx_umap_insert(vma, addr, pfn, prot));
 }
 
+/* macOS port: a driver's direct mapping of a physical range is recorded page by page, as a fault would insert it */
 int
 lkpi_remap_pfn_range(struct vm_area_struct *vma, unsigned long start_addr,
     unsigned long start_pfn, unsigned long size, pgprot_t prot)
 {
-	return (-EOPNOTSUPP);
+	unsigned long off;
+
+	for (off = 0; off < size; off += PAGE_SIZE) {
+		if (nmx_umap_insert(vma, start_addr + off, start_pfn + (off >> PAGE_SHIFT),
+		    prot) != VM_FAULT_NOPAGE)
+			return (-EINVAL);
+	}
+	return (0);
 }
 
 int
@@ -440,7 +449,13 @@ lkpi_io_mapping_map_user(struct io_mapping *iomap,
     struct vm_area_struct *vma, unsigned long addr,
     unsigned long pfn, unsigned long size)
 {
-	return (-EOPNOTSUPP);
+	pgprot_t prot;
+	int ret;
+
+	prot = cachemode2protval(iomap->attr);
+	ret = lkpi_remap_pfn_range(vma, addr, pfn, size, prot);
+
+	return (ret);
 }
 
 /*

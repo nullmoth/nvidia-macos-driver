@@ -1,3 +1,28 @@
+diff --git a/libdrm_macros.h b/libdrm_macros.h
+index 81af270..28b6f72 100644
+--- a/libdrm_macros.h
++++ b/libdrm_macros.h
+@@ -47,6 +47,20 @@ static inline void *drm_mmap(void *addr, size_t length, int prot, int flags,
+               munmap(addr, length)
+ 
+ 
++#elif defined(__APPLE__)
++/*
++ * macOS: a kext cannot implement mmap(2) on a device node, so the NullMoth DRM nodes map GPU memory through an
++ * ioctl, and xf86drm.c remembers which node each mapping came from so it can be released. Other nodes (drm-shim)
++ * fall back to mmap(2).
++ */
++#include <sys/types.h>
++extern void *drmNmxMmap(size_t length, int prot, int flags, int fd, off_t offset);
++extern int drmNmxMunmap(void *addr, size_t length);
++#  define drm_mmap(addr, length, prot, flags, fd, offset) \
++              drmNmxMmap((length), (prot), (flags), (fd), (offset))
++#  define drm_munmap(addr, length) \
++              drmNmxMunmap((addr), (length))
++
+ #else
+ 
+ /* assume large file support exists */
 diff --git a/meson.build b/meson.build
 index ec3a0d5..5bc9388 100644
 --- a/meson.build
@@ -13,7 +38,7 @@ index ec3a0d5..5bc9388 100644
  endif
  
 diff --git a/xf86drm.c b/xf86drm.c
-index 07dec49..9ec6a13 100644
+index 07dec49..73e4861 100644
 --- a/xf86drm.c
 +++ b/xf86drm.c
 @@ -82,7 +82,8 @@
@@ -94,3 +119,89 @@ index 07dec49..9ec6a13 100644
      struct drm_pciinfo pinfo;
      int fd, type;
  
+@@ -5295,3 +5323,85 @@ drmGetFormatName(uint32_t format)
+ 
+     return str;
+ }
++
++#ifdef __APPLE__
++#include <pthread.h>
++#include <sys/ioctl.h>
++
++/* the NullMoth DRM node ioctls (the kext's nmx_drm_uapi.h; the two must stay identical) */
++struct nmx_drm_mmap {
++    uint64_t offset;
++    uint64_t size;
++    uint32_t prot;
++    uint32_t flags;
++    uint64_t addr;
++};
++struct nmx_drm_munmap {
++    uint64_t addr;
++    uint64_t size;
++};
++#define NMX_DRM_IOCTL_MMAP _IOWR('N', 0x40, struct nmx_drm_mmap)
++#define NMX_DRM_IOCTL_MUNMAP _IOW('N', 0x41, struct nmx_drm_munmap)
++
++/* mappings made through a node, so drm_munmap (which has no fd) can release them through the right one */
++struct nmx_map {
++    void *addr;
++    size_t length;
++    int fd;
++    struct nmx_map *next;
++};
++static struct nmx_map *nmx_maps;
++static pthread_mutex_t nmx_maps_lock = PTHREAD_MUTEX_INITIALIZER;
++
++drm_public void *drmNmxMmap(size_t length, int prot, int flags, int fd, off_t offset)
++{
++    struct nmx_drm_mmap req = { (uint64_t)offset, (uint64_t)length, (uint32_t)prot, 0, 0 };
++    struct nmx_map *m;
++
++    if (drmIoctl(fd, NMX_DRM_IOCTL_MMAP, &req) != 0) {
++        /* ENOTTY: not a NullMoth node (drm-shim interposes mmap(2) itself) */
++        if (errno == ENOTTY)
++            return mmap(NULL, length, prot, flags, fd, offset);
++        return MAP_FAILED;
++    }
++    m = malloc(sizeof(*m));
++    if (m == NULL) {
++        struct nmx_drm_munmap un = { req.addr, (uint64_t)length };
++        drmIoctl(fd, NMX_DRM_IOCTL_MUNMAP, &un);
++        errno = ENOMEM;
++        return MAP_FAILED;
++    }
++    m->addr = (void *)(uintptr_t)req.addr;
++    m->length = length;
++    m->fd = fd;
++    pthread_mutex_lock(&nmx_maps_lock);
++    m->next = nmx_maps;
++    nmx_maps = m;
++    pthread_mutex_unlock(&nmx_maps_lock);
++    return m->addr;
++}
++
++drm_public int drmNmxMunmap(void *addr, size_t length)
++{
++    struct nmx_map **pp, *m = NULL;
++    struct nmx_drm_munmap un;
++    int r;
++
++    pthread_mutex_lock(&nmx_maps_lock);
++    for (pp = &nmx_maps; *pp; pp = &(*pp)->next) {
++        if ((*pp)->addr == addr) {
++            m = *pp;
++            *pp = m->next;
++            break;
++        }
++    }
++    pthread_mutex_unlock(&nmx_maps_lock);
++    if (m == NULL)
++        return munmap(addr, length);        /* made by mmap(2) */
++    un.addr = (uint64_t)(uintptr_t)addr;
++    un.size = (uint64_t)m->length;
++    r = drmIoctl(m->fd, NMX_DRM_IOCTL_MUNMAP, &un);
++    free(m);
++    return r;
++}
++#endif

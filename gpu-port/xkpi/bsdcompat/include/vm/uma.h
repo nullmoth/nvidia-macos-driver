@@ -10,7 +10,11 @@ typedef int (*uma_ctor)(void *mem, int size, void *arg, int flags);
 typedef void (*uma_dtor)(void *mem, int size, void *arg);
 typedef int (*uma_init)(void *mem, int size, int flags);
 typedef void (*uma_fini)(void *mem, int size);
+typedef int (*uma_import)(void *arg, void **store, int count, int domain, int flags);
+typedef void (*uma_release)(void *arg, void **store, int count);
 uma_zone_t uma_zcreate(const char *name, size_t size, uma_ctor ctor, uma_dtor dtor, uma_init uminit, uma_fini fini, int align, uint32_t flags);
+uma_zone_t uma_zcache_create(const char *name, int size, uma_ctor ctor, uma_dtor dtor, uma_init zinit, uma_fini zfini,
+                             uma_import zimport, uma_release zrelease, void *arg, int flags);
 void uma_zdestroy(uma_zone_t zone);
 void *uma_zalloc_arg(uma_zone_t zone, void *arg, int flags);
 void uma_zfree_arg(uma_zone_t zone, void *item, void *arg);

@@ -11,6 +11,7 @@
 
 MALLOC_DEFINE(M_SYSCTLOID, "sysctloid", "sysctl dynamic nodes");
 
+struct sysctl_oid_list sysctl__children;
 struct sysctl_oid_list sysctl__hw_children;
 struct sysctl_oid_list sysctl__kern_children;
 struct sysctl_oid_list sysctl__debug_children;

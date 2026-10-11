@@ -37,6 +37,7 @@ enum sysinit_elem_order {
     SI_ORDER_EIGHTH = 0x0000007,
     SI_ORDER_MIDDLE = 0x1000000,
     SI_ORDER_ANY = 0xfffffff,
+    SI_ORDER_LAST = 0xfffffff,
 };
 
 typedef void (*sysinit_cfunc_t)(const void *);
@@ -68,7 +69,7 @@ struct sysinit {
     C_SYSUNINIT(uniquifier, subsystem, order, (sysinit_cfunc_t)(sysinit_nfunc_t)(func), (void *)(ident))
 
 #define SYSINIT(u, s, o, f, i) NMX_SYSINIT(u, s, o, f, i)
-void nmx_sysinit_run(void);
+int nmx_sysinit_run(void);
 void nmx_sysuninit_run(void);
 
 /* the system clock: 1000 ticks per second, counted from kext start (FreeBSD's default hz) */

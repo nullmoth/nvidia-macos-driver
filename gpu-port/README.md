@@ -33,6 +33,31 @@ Build on the build Mac (Apple silicon, cross-compiling to x86_64) with the cross
 - **`tools/vk_chip_matrix.sh`** runs `vkprobe` once per GPU through Mesa's noop drm-shim kernels: 20 AMD chips (GCN1 to RDNA4, every APU) and 21 Intel chips (Gen9 to Xe3). Each must create a device and compile a compute pipeline (`tools/fill.comp`). Result on 2026-10-11: 41 of 41.
 - **`tools/drmlist`** enumerates devices through libdrm, the same way Mesa does, then queries each render node. On studio with NMDRM loaded, it reports `10de:2d05` at `pci:0000:02:00.0` from `/dev/dri/renderD128`.
 
-## Next
+## Kernel driver: NMXAMD
 
-The amdgpu and xe kernel interfaces go behind NMDRM one family at a time. Until a family's ioctls exist, NMDRM reports the driver name `nmdrm`, and RADV/ANV skip the device.
+`xkpi/` runs the AMD kernel driver (amdgpu from drm-kmod, with DRM, TTM and dma-fence) on macOS through FreeBSD's
+LinuxKPI and a FreeBSD-kernel layer implemented on xnu (`xkpi/bsdcompat`, `xkpi/xnu`). `xkpi/kext` links it all
+into `NMXAMD.kext`.
+
+- **Build** (on the build Mac): `xkpi/all.sh` compiles the driver sources drm-kmod's Makefiles select (429 + 3 DRM
+  extras), `xkpi/rt.sh` the runtime (67 sources), `xkpi/kext/build.sh <out>` links the kext (5.6 MB).
+- **Link check**: `kmutil create` against macOS 15.8.1's kernel collections resolves every symbol (test
+  collection in `/tmp` only; nothing installed).
+- **Device nodes**: each DRM minor is an xnu devfs clone node, so every open has its own file, as LinuxKPI expects.
+- **Mapping GPU memory**: a kext cannot implement `mmap(2)` on a device, so mappings use the node ioctls in
+  `xkpi/bsdcompat/include/nmx_drm_uapi.h`. The driver's own fault handler fills the page list; the range is mapped
+  whole into the caller. TTM buffers stay pinned while mapped. libdrm's `drm_mmap`/`drm_munmap` use these ioctls on
+  Darwin (`patches/libdrm-macos.patch`).
+- **Opt-in only**: the kext declines every AMD GPU unless the boot argument `nmxamd=1` or the device property
+  `nullmoth-amdgpu` is set. Taking a GPU that drives the boot display resets its display engine.
+
+Not done yet:
+
+- It has not been loaded on hardware. Start-up runs all SYSINITs, then the driver probes the device.
+- The display core (DC) is not built, so this is render and compute only.
+- There are no file descriptors for dma-buf or sync_file (a kext cannot create them), so PRIME export and sync
+  file import/export report EOPNOTSUPP.
+- DMI quirks see the SMBIOS the bootloader presents (the Mac model), not the PC's board.
+- Kernel FPU sections run with interrupts off.
+
+Intel (i915/xe) follows on the same layer.

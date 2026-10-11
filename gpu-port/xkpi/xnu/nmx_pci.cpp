@@ -16,6 +16,8 @@
 extern "C" uint32_t nmx_xnu_pci_read(void *pci, int reg, int width)
 {
     IOPCIDevice *d = (IOPCIDevice *)pci;
+    if (d == nullptr)   /* reads like a device that is not there */
+        return width == 1 ? 0xff : width == 2 ? 0xffff : 0xffffffff;
     switch (width) {
     case 1: return d->extendedConfigRead8((IOByteCount)reg);
     case 2: return d->extendedConfigRead16((IOByteCount)reg);
@@ -26,6 +28,8 @@ extern "C" uint32_t nmx_xnu_pci_read(void *pci, int reg, int width)
 extern "C" void nmx_xnu_pci_write(void *pci, int reg, uint32_t val, int width)
 {
     IOPCIDevice *d = (IOPCIDevice *)pci;
+    if (d == nullptr)
+        return;
     switch (width) {
     case 1: d->extendedConfigWrite8((IOByteCount)reg, (UInt8)val); break;
     case 2: d->extendedConfigWrite16((IOByteCount)reg, (UInt16)val); break;
@@ -37,6 +41,10 @@ extern "C" void nmx_xnu_pci_location(void *pci, uint32_t *domain, uint8_t *bus, 
 {
     IOPCIDevice *d = (IOPCIDevice *)pci;
     *domain = 0;
+    if (d == nullptr) {
+        *bus = *dev = *func = 0xff;
+        return;
+    }
     *bus = d->getBusNumber();
     *dev = d->getDeviceNumber();
     *func = d->getFunctionNumber();
@@ -56,6 +64,8 @@ extern "C" void *nmx_xnu_pci_map_bar(void *pci, int bar_reg, int cache, uint64_t
 {
     IOPCIDevice *d = (IOPCIDevice *)pci;
     *handle = nullptr;
+    if (d == nullptr)
+        return nullptr;
     IODeviceMemory *mem = d->getDeviceMemoryWithRegister((UInt8)bar_reg);
     if (mem == nullptr)
         return nullptr;
@@ -71,6 +81,8 @@ extern "C" void *nmx_xnu_pci_map_bar(void *pci, int bar_reg, int cache, uint64_t
 extern "C" int nmx_xnu_pci_bar_info(void *pci, int bar_reg, uint64_t *phys, uint64_t *size, int *is_io)
 {
     IOPCIDevice *d = (IOPCIDevice *)pci;
+    if (d == nullptr)
+        return 0;
     IODeviceMemory *mem = d->getDeviceMemoryWithRegister((UInt8)bar_reg);
     if (mem == nullptr)
         return 0;
@@ -101,7 +113,7 @@ static void irq_action(OSObject *owner, IOInterruptEventSource *src, int count)
         irq->handler(irq->arg);
 }
 
-/* the IOKit interrupt index of the n-th message-signalled vector, or of the legacy line when there is none */
+/* the IOKit interrupt index of the n-th message-signalled vector (vector >= 0) or of the legacy line (vector < 0) */
 static int interrupt_index(IOPCIDevice *d, int vector)
 {
     int n = 0, legacy = -1;
@@ -117,12 +129,14 @@ static int interrupt_index(IOPCIDevice *d, int vector)
             legacy = index;
         }
     }
-    return vector == 0 ? legacy : -1;
+    return vector < 0 ? legacy : -1;
 }
 
 extern "C" int nmx_xnu_pci_msi_count(void *pci)
 {
     IOPCIDevice *d = (IOPCIDevice *)pci;
+    if (d == nullptr)
+        return 0;
     int n = 0;
     for (int index = 0; ; index++) {
         int type = 0;
@@ -138,6 +152,8 @@ extern "C" int nmx_xnu_pci_irq_setup(void *pci, int vector, void (*handler)(void
 {
     IOPCIDevice *d = (IOPCIDevice *)pci;
     *cookie = nullptr;
+    if (d == nullptr)
+        return kIOReturnNotFound;
     int index = interrupt_index(d, vector);
     if (index < 0)
         return kIOReturnNotFound;
@@ -220,6 +236,8 @@ extern "C" void *nmx_xnu_pci_find(uint32_t domain, uint8_t bus, uint8_t dev, uin
 extern "C" size_t nmx_xnu_pci_rom(void *pci, void *buf, size_t max)
 {
     IOPCIDevice *d = (IOPCIDevice *)pci;
+    if (d == nullptr || buf == nullptr)
+        return 0;
     static const char *const props[] = { "vbios", "ATY,bin_image", "rom", nullptr };
     for (int i = 0; props[i]; i++) {
         OSData *data = OSDynamicCast(OSData, d->getProperty(props[i]));

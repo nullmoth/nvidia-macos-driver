@@ -41,6 +41,11 @@ long long strtoll(const char *nptr, char **endptr, int base);
 unsigned long long strtoull(const char *nptr, char **endptr, int base);
 #define strtoq strtoll
 #define strtouq strtoull
+/* FreeBSD's copyin/copyout take user pointers; xnu's take user_addr_t */
+#define copyin(u, k, l) (copyin)((user_addr_t)(uintptr_t)(u), (k), (l))
+#define copyout(k, u, l) (copyout)((k), (user_addr_t)(uintptr_t)(u), (l))
+#define copyinstr(u, k, l, d) (copyinstr)((user_addr_t)(uintptr_t)(u), (k), (l), (d))
+#define VM_MAXUSER_ADDRESS 0x00007ffffffff000ULL
 int nmx_copyin_nofault(const void *uaddr, void *kaddr, size_t len);
 int nmx_copyout_nofault(const void *kaddr, void *uaddr, size_t len);
 #define copyin_nofault(u, k, l) nmx_copyin_nofault((u), (k), (l))
@@ -49,8 +54,11 @@ int32_t fuword32(volatile const void *base);
 int suword32(volatile void *base, int32_t word);
 int64_t fuword64(volatile const void *base);
 int suword64(volatile void *base, int64_t word);
-#define fueword32(b, v) (*(v) = fuword32(b), 0)
-#define fueword64(b, v) (*(v) = fuword64(b), 0)
+/* the fueword forms report a fault separately from the value (fuword's -1 is also a valid word), so they copy in */
+#define fueword32(b, v) (copyin((const void *)(b), (v), sizeof(int32_t)) ? -1 : 0)
+#define fueword64(b, v) (copyin((const void *)(b), (v), sizeof(int64_t)) ? -1 : 0)
+#define subyte(u, c) (subyte)((user_addr_t)(uintptr_t)(u), (c))
+#define fubyte(u) (fubyte)((user_addr_t)(uintptr_t)(u))
 #define bootverbose 0
 #define SCHEDULER_STOPPED() 0
 #define KERNEL_PANICKED() 0

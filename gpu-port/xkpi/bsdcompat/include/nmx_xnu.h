@@ -38,7 +38,10 @@ void nmx_xnu_unmap(void *handle);
 
 /* ---- DMA (nmx_dma.cpp) -------------------------------------------------------------------------------------------- */
 
-/* device-visible address for a physical range of 'pci' (an IOPCIDevice *); handle releases the mapping */
+/*
+ * device-visible address for a physical range of 'pci' (an IOPCIDevice *); handle releases the mapping (NULL when no
+ * IOMMU is active and the address is the physical one). Returns 0, ENOMEM, or EFBIG (beyond dma_mask / split).
+ */
 int nmx_xnu_dma_map(void *pci, uint64_t pa, size_t size, uint64_t dma_mask, uint64_t *dma_addr, void **handle);
 void nmx_xnu_dma_unmap(void *handle);
 int nmx_xnu_iommu_active(void);
@@ -72,14 +75,70 @@ void nmx_xnu_firmware_free(void *data, size_t size);
 
 /* copies the ACPI table with this 4-character signature (instance 1..n); returns its length or 0 */
 size_t nmx_xnu_acpi_table(const char *sig, int instance, void *buf, size_t max);
-/* evaluates 'method' on the ACPI node of 'pci' (or an absolute path); integer and buffer results are copied out */
-int nmx_xnu_acpi_eval(void *pci, const char *method, const uint64_t *int_args, int nargs, const void *buf_arg,
-                      size_t buf_len, uint64_t *int_result, void *buf_result, size_t *buf_result_len);
+/*
+ * ACPI namespace nodes (device objects) are retained IOACPIPlatformDevice references: every function returning
+ * one hands the caller a reference to drop with nmx_xnu_acpi_node_put. Methods and data objects are named
+ * through the node that contains them.
+ */
+void *nmx_xnu_acpi_node_root(void);
+void *nmx_xnu_acpi_node_for_pci(void *pci);
+void *nmx_xnu_acpi_node_parent(void *node);
+void *nmx_xnu_acpi_node_child(void *parent, const char *seg);
+/* the child device after 'prev' (NULL = the first) */
+void *nmx_xnu_acpi_node_next_child(void *parent, void *prev);
+int nmx_xnu_acpi_node_name(void *node, char out[5]);
+void nmx_xnu_acpi_node_get(void *node);
+void nmx_xnu_acpi_node_put(void *node);
+/* 1 when the node contains an object (method or data) of this name */
+int nmx_xnu_acpi_has(void *node, const char *name);
+
+/* ACPI values across the boundary; the type numbers are ACPICA's ACPI_TYPE_* */
+#define NMX_ACPI_ANY 0
+#define NMX_ACPI_INTEGER 1
+#define NMX_ACPI_STRING 2
+#define NMX_ACPI_BUFFER 3
+#define NMX_ACPI_PACKAGE 4
+struct nmx_acpi_obj {
+    uint32_t type;
+    uint32_t count;             /* package: elements */
+    uint64_t integer;
+    const void *ptr;            /* string (NUL-terminated) or buffer bytes; package: struct nmx_acpi_obj[count] */
+    size_t len;                 /* string length without the NUL, or buffer length */
+};
+/*
+ * Evaluates 'name' in 'node' with up to 7 arguments. A returned value comes back as one allocation holding the
+ * whole tree (*result, *result_size), released with nmx_xnu_acpi_free. Returns 0, ENOENT (no such object), EINVAL,
+ * ENOMEM or EIO (the method failed).
+ */
+int nmx_xnu_acpi_evaluate(void *node, const char *name, const struct nmx_acpi_obj *args, int nargs,
+                          struct nmx_acpi_obj **result, size_t *result_size);
+void nmx_xnu_acpi_free(void *p, size_t size);
 
 /* ---- SMBIOS / DMI (nmx_dmi.cpp) ----------------------------------------------------------------------------------- */
 
 /* one SMBIOS string by Linux DMI field number (DMI_SYS_VENDOR, ...); returns its length or 0 */
 size_t nmx_xnu_dmi_field(int field, char *buf, size_t max);
+
+/* ---- device nodes (nmx_devfs.cpp) --------------------------------------------------------------------------------- */
+
+int nmx_xnu_devfs_init(void);
+void nmx_xnu_devfs_fini(void);
+/* opens still outstanding (unload must wait for zero) */
+int nmx_xnu_devfs_busy(void);
+/* a clone node at /dev/<path>; 'cookie' is handed back to nmx_cdev_open for every open of it */
+void *nmx_xnu_devfs_make(const char *path, uint32_t uid, uint32_t gid, int mode, void *cookie);
+void nmx_xnu_devfs_remove(void *node);
+/* maps physical pages into the calling process (the GPU mmap ioctl); 'uaddr' receives the user address */
+int nmx_xnu_map_user(const uint64_t *pages, size_t npages, int cache, int writable, uint64_t *uaddr, void **handle);
+void nmx_xnu_unmap_user(void *handle);
+
+/* implemented on the LinuxKPI side (override/src/nmx_linux_cdev.c), called by the device-node glue */
+int nmx_cdev_open(void *cookie, int open_id, int fflags);
+int nmx_cdev_close(int open_id, int fflags);
+int nmx_cdev_ioctl(int open_id, unsigned long cmd, void *data, int fflag);
+/* reads into the caller's own buffer at 'uaddr' (the driver copies out to it) */
+int nmx_cdev_read(int open_id, uint64_t uaddr, size_t len, size_t *done, int nonblock);
+int nmx_cdev_poll(int open_id, int events);
 
 #ifdef __cplusplus
 }

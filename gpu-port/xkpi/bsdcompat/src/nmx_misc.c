@@ -19,6 +19,7 @@
 #include <sys/file.h>
 #include <sys/selinfo.h>
 #include <sys/capsicum.h>
+#include <sys/counter.h>
 #include <vm/swap_pager.h>
 #include <sys/kauth.h>
 
@@ -144,6 +145,36 @@ int nmx_vprintf(const char *fmt, va_list ap)
     return 0;
 }
 
+/* FreeBSD uiomove for the kernel-buffer uios the device-node glue builds */
+int nmx_uiomove(void *cp, int n, struct uio *uio)
+{
+    char *c = cp;
+    while (n > 0 && uio->uio_resid > 0 && uio->uio_iovcnt > 0) {
+        struct iovec *iov = uio->uio_iov;
+        size_t cnt = iov->iov_len;
+        if (cnt == 0) {
+            uio->uio_iov++;
+            uio->uio_iovcnt--;
+            continue;
+        }
+        if (cnt > (size_t)n)
+            cnt = (size_t)n;
+        if (uio->uio_segflg != UIO_SYSSPACE)
+            return EFAULT;
+        if (uio->uio_rw == UIO_READ)
+            memcpy(iov->iov_base, c, cnt);
+        else
+            memcpy(c, iov->iov_base, cnt);
+        iov->iov_base = (char *)iov->iov_base + cnt;
+        iov->iov_len -= cnt;
+        uio->uio_resid -= (ssize_t)cnt;
+        uio->uio_offset += (off_t)cnt;
+        c += cnt;
+        n -= (int)cnt;
+    }
+    return 0;
+}
+
 /* ---- randomness and CRC-32 ---------------------------------------------------------------------------------------- */
 
 void arc4random_buf(void *ptr, size_t len)
@@ -246,14 +277,31 @@ void nmx_eventhandler_deregister(const char *name, eventhandler_tag tag)
     mtx_unlock(&eh_mtx);
 }
 
-/* calls every handler registered under 'name' as void (*)(void *arg, int how) */
+/*
+ * Calls every handler registered under 'name' as void (*)(void *arg, int how), lowest priority value first (FreeBSD's
+ * order), outside the list lock so a handler may sleep. Handlers are deregistered only at unload, never while an
+ * event is being delivered.
+ */
+#define EH_MAX 32
 void nmx_eventhandler_invoke(const char *name, int how)
 {
+    struct { void *func; void *arg; int pri; } h[EH_MAX];
+    int n = 0;
     mtx_lock(&eh_mtx);
-    for (struct eh_entry *e = eh_list; e; e = e->next)
-        if (strcmp(e->name, name) == 0)
-            ((void (*)(void *, int))e->func)(e->arg, how);
+    for (struct eh_entry *e = eh_list; e && n < EH_MAX; e = e->next)
+        if (strcmp(e->name, name) == 0) {
+            int i = n++;
+            while (i > 0 && h[i - 1].pri > e->priority) {
+                h[i] = h[i - 1];
+                i--;
+            }
+            h[i].func = e->func;
+            h[i].arg = e->arg;
+            h[i].pri = e->priority;
+        }
     mtx_unlock(&eh_mtx);
+    for (int i = 0; i < n; i++)
+        ((void (*)(void *, int))h[i].func)(h[i].arg, how);
 }
 
 /* ---- notifications that have no macOS counterpart: logged so they are never silent -------------------------------- */
@@ -451,11 +499,7 @@ int fget_unlocked(struct thread *td, int fd, cap_rights_t *needrightsp, struct f
     return EBADF;
 }
 
-void fdrop(struct file *fp, struct thread *td)
-{
-    if (fp)
-        __atomic_fetch_sub(&fp->f_count, 1, __ATOMIC_SEQ_CST);
-}
+/* fdrop lives with the device nodes (nmx_linux_cdev.c): the last reference closes the file */
 
 int falloc(struct thread *td, struct file **resultfp, int *resultfd, int flags)
 {
@@ -472,6 +516,231 @@ void finit(struct file *fp, u_int flag, short type, void *data, struct fileops *
 
 void fdclose(struct thread *td, struct file *fp, int idx)
 {
+}
+
+counter_u64_t counter_u64_alloc(int flags)
+{
+    return malloc(sizeof(uint64_t), M_NMXMISC, (flags & M_NOWAIT ? M_NOWAIT : M_WAITOK) | M_ZERO);
+}
+
+void counter_u64_free(counter_u64_t c)
+{
+    free(c, M_NMXMISC);
+}
+
+/* the "invalid operation" file entries, with FreeBSD kern_descrip.c's answers */
+int invfo_rdwr(struct file *fp, struct uio *uio, struct ucred *cred, int flags, struct thread *td)
+{
+    return EOPNOTSUPP;
+}
+
+int invfo_truncate(struct file *fp, off_t length, struct ucred *cred, struct thread *td)
+{
+    return EINVAL;
+}
+
+int invfo_ioctl(struct file *fp, u_long com, void *data, struct ucred *cred, struct thread *td)
+{
+    return ENOTTY;
+}
+
+int invfo_poll(struct file *fp, int events, struct ucred *cred, struct thread *td)
+{
+    return 0;
+}
+
+int invfo_kqfilter(struct file *fp, struct knote *kn)
+{
+    return EINVAL;
+}
+
+int invfo_chmod(struct file *fp, mode_t mode, struct ucred *cred, struct thread *td)
+{
+    return EINVAL;
+}
+
+int invfo_chown(struct file *fp, uid_t uid, gid_t gid, struct ucred *cred, struct thread *td)
+{
+    return EINVAL;
+}
+
+int invfo_sendfile(struct file *fp, int sockfd, struct uio *hdr_uio, struct uio *trl_uio, off_t offset, size_t nbytes,
+                   off_t *sent, int flags, struct thread *td)
+{
+    return EINVAL;
+}
+
+/*
+ * F_SETOWN / FIOSETOWN: xnu gives kexts no way to post SIGIO to a process group on a device's behalf, so a request
+ * for an owner is refused (EOPNOTSUPP) rather than accepted and then never signalled. Clearing the owner (0) works.
+ */
+int fsetown(pid_t pgid, struct sigio **sigiop)
+{
+    if (pgid == 0) {
+        *sigiop = NULL;
+        return 0;
+    }
+    return EOPNOTSUPP;
+}
+
+pid_t fgetown(struct sigio **sigiop)
+{
+    return 0;
+}
+
+void funsetown(struct sigio **sigiop)
+{
+    *sigiop = NULL;
+}
+
+/*
+ * libkern functions xnu declares in its headers but does not export to kexts (a kmutil link of the kext names
+ * them): fls, flsll, strnstr, qsort, strtoll, strtoull, suword64.
+ */
+int fls(unsigned int x)
+{
+    return x ? 32 - __builtin_clz(x) : 0;
+}
+
+int flsll(unsigned long long x)
+{
+    return x ? 64 - __builtin_clzll(x) : 0;
+}
+
+char *strnstr(const char *s, const char *find, size_t slen)
+{
+    size_t len = strlen(find);
+    if (len == 0)
+        return __DECONST(char *, s);
+    for (; slen >= len && *s; s++, slen--)
+        if (*s == *find && strncmp(s, find, len) == 0)
+            return __DECONST(char *, s);
+    return NULL;
+}
+
+static int digit_value(int c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'z')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'Z')
+        return c - 'A' + 10;
+    return 99;
+}
+
+/* the C library's rules: leading space, sign, 0x / 0 prefixes for base 16 / 0, saturation on overflow */
+static unsigned long long parse_ull(const char *nptr, char **endptr, int base, int *neg, int *overflow)
+{
+    const char *s = nptr;
+    *neg = 0;
+    *overflow = 0;
+    while (*s == ' ' || (*s >= '\t' && *s <= '\r'))
+        s++;
+    if (*s == '-' || *s == '+')
+        *neg = *s++ == '-';
+    if ((base == 0 || base == 16) && s[0] == '0' && (s[1] == 'x' || s[1] == 'X') && digit_value(s[2]) < 16) {
+        s += 2;
+        base = 16;
+    } else if (base == 0) {
+        base = s[0] == '0' ? 8 : 10;
+    }
+    if (base < 2 || base > 36) {
+        if (endptr)
+            *endptr = __DECONST(char *, nptr);
+        return 0;
+    }
+    unsigned long long acc = 0;
+    int any = 0;
+    for (;; s++) {
+        int d = digit_value((unsigned char)*s);
+        if (d >= base)
+            break;
+        any = 1;
+        if (acc > (~0ULL - (unsigned)d) / (unsigned)base)
+            *overflow = 1;
+        else
+            acc = acc * (unsigned)base + (unsigned)d;
+    }
+    if (endptr)
+        *endptr = __DECONST(char *, any ? s : nptr);
+    return acc;
+}
+
+unsigned long long strtoull(const char *nptr, char **endptr, int base)
+{
+    int neg, overflow;
+    unsigned long long v = parse_ull(nptr, endptr, base, &neg, &overflow);
+    if (overflow)
+        return ~0ULL;
+    return neg ? (unsigned long long)(-(long long)v) : v;
+}
+
+long long strtoll(const char *nptr, char **endptr, int base)
+{
+    int neg, overflow;
+    unsigned long long v = parse_ull(nptr, endptr, base, &neg, &overflow);
+    const unsigned long long lim = neg ? (unsigned long long)LLONG_MAX + 1 : (unsigned long long)LLONG_MAX;
+    if (overflow || v > lim)
+        return neg ? LLONG_MIN : LLONG_MAX;
+    return neg ? (long long)(0 - v) : (long long)v;
+}
+
+int suword64(volatile void *base, int64_t word)
+{
+    return copyout(&word, __DEVOLATILE(void *, base), sizeof(word)) == 0 ? 0 : -1;
+}
+
+static int qsort_adapter(const void *a, const void *b, void *cmp)
+{
+    return ((int (*)(const void *, const void *))cmp)(a, b);
+}
+
+void qsort(void *a, size_t n, size_t es, int (*cmp)(const void *, const void *))
+{
+    qsort_r(a, n, es, qsort_adapter, (void *)cmp);
+}
+
+/*
+ * qsort_r (C11 argument order, as FreeBSD 14 and LinuxKPI's list_sort use it). Heapsort: no recursion and no
+ * allocation, so it is safe at any kernel stack depth, and O(n log n) in the worst case.
+ */
+static void qs_swap(char *a, char *b, size_t size)
+{
+    while (size--) {
+        char t = *a;
+        *a++ = *b;
+        *b++ = t;
+    }
+}
+
+static void qs_sift(char *base, size_t root, size_t n, size_t size, int (*cmp)(const void *, const void *, void *),
+                    void *thunk)
+{
+    for (;;) {
+        size_t child = 2 * root + 1;
+        if (child >= n)
+            return;
+        if (child + 1 < n && cmp(base + child * size, base + (child + 1) * size, thunk) < 0)
+            child++;
+        if (cmp(base + root * size, base + child * size, thunk) >= 0)
+            return;
+        qs_swap(base + root * size, base + child * size, size);
+        root = child;
+    }
+}
+
+void qsort_r(void *a, size_t n, size_t size, int (*cmp)(const void *, const void *, void *), void *thunk)
+{
+    char *base = a;
+    if (n < 2 || size == 0)
+        return;
+    for (size_t i = n / 2; i-- > 0;)
+        qs_sift(base, i, n, size, cmp, thunk);
+    for (size_t end = n - 1; end > 0; end--) {
+        qs_swap(base, base + end * size, size);
+        qs_sift(base, 0, end, size, cmp, thunk);
+    }
 }
 
 /* poll() on a DRM node is wired through the device-node glue; until then these keep their state consistent */

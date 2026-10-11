@@ -14,6 +14,7 @@
 #include <sys/types.h>
 #include <stdint.h>
 #include <sys/queue.h>
+#include <sys/counter.h>
 
 struct thread;
 struct sysctl_req;
@@ -132,6 +133,10 @@ void sysctl_rename_oid(struct sysctl_oid *oidp, const char *name);
 int sysctl_move_oid(struct sysctl_oid *oidp, struct sysctl_oid_list *parent);
 
 #define SYSCTL_CHILDREN(oid_ptr) (&(oid_ptr)->oid_children)
+/* the port's own sysctl tree (not xnu's): its root, which LinuxKPI hangs "sys" (its sysfs) from */
+extern struct sysctl_oid_list sysctl__children;
+#define SYSCTL_ADD_ROOT_NODE(ctx, nbr, name, access, handler, descr) \
+    SYSCTL_ADD_NODE((ctx), &sysctl__children, (nbr), (name), (access), (handler), (descr))
 #define SYSCTL_PARENT(oid_ptr) NULL
 #define SYSCTL_FOREACH(oidp, list) SLIST_FOREACH((oidp), (list), oid_link)
 #define SYSCTL_ADD_OID(ctx, parent, nbr, name, kind, a1, a2, handler, fmt, descr) \
