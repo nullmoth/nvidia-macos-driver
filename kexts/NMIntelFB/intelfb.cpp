@@ -14,8 +14,24 @@
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/graphics/IOFramebuffer.h>
 #include <libkern/OSAtomic.h>
+#include "nvrm_vram_abi.h"
+#include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IOTimerEventSource.h>
+#include <IOKit/IOWorkLoop.h>
+#include <kern/thread_call.h>
 
 #define IFBLOG(fmt, ...) IOLog("NMIntelFB: " fmt "\n", ##__VA_ARGS__)
+
+// kmutil places a kext in a kernel collection only with a _kmod_info symbol (Xcode generates it; this build does not)
+#include <mach/kmod.h>
+extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
+#ifdef NMINTELFB_VIRTUAL
+extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NMIntelFBVirtual, "0.1", _start, _stop) }
+#else
+extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NMIntelFB, "0.1", _start, _stop) }
+#endif
+extern "C" kern_return_t _start(kmod_info_t *ki, void *d) { return KERN_SUCCESS; }
+extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return KERN_SUCCESS; }
 
 namespace {
 // display version by PCI device ID, from Linux include/drm/intel/pciids.h (MIT); 0 = not ours
@@ -49,6 +65,45 @@ class NMIntelFB : public IOFramebuffer {
     OSDeclareDefaultStructors(NMIntelFB)
     IOPCIDevice *fPCI = nullptr;
     IOMemoryMap *fMMIO = nullptr;
+    IOMemoryMap *fSurfMap = nullptr;   // write-combined CPU view of the scan-out surface (NVIDIA frames land here)
+    // WindowServer paces an accelerated display on its VBL interrupt: the NVIDIA display pipe completes each frame on it.
+    // Without one the first frame never completed and WindowServer stalled every display (studio test 10-10, the
+    // virtual panel froze the Mac). A 60 Hz timer is the VBL, as NVRMFB's fallback is.
+    struct Irq { IOFBInterruptProc proc = nullptr; OSObject *target = nullptr; void *ref = nullptr; };
+    Irq fVbl, fConnect;
+    thread_call_t fVblTimer = nullptr;
+    uint64_t fVblNext = 0, fVblCalls = 0;
+    volatile bool fStopping = false;
+    static void vblFire(thread_call_param_t p0, thread_call_param_t) {
+        NMIntelFB *me = (NMIntelFB *)p0;
+        if (me->fStopping) return;
+        if (me->fVbl.proc) { me->fVbl.proc(me->fVbl.target, me->fVbl.ref); me->fVblCalls++; }
+        uint64_t period; nanoseconds_to_absolutetime(16666667ull, &period);
+        uint64_t now = mach_absolute_time();
+        me->fVblNext = (me->fVblNext && me->fVblNext + period > now) ? me->fVblNext + period : now + period;
+        thread_call_enter_delayed(me->fVblTimer, me->fVblNext);
+    }
+    void armVbl() {
+        fVblTimer = thread_call_allocate(vblFire, this);
+        if (fVblTimer) { uint64_t d; clock_interval_to_deadline(16667, kMicrosecondScale, &d); fVblNext = d; thread_call_enter_delayed(fVblTimer, d); }
+        IFBLOG("vbl timer %s", fVblTimer ? "armed (60 Hz)" : "ALLOCATE FAILED");
+    }
+#ifdef NMINTELFB_VIRTUAL
+    IOBufferMemoryDescriptor *fVBuf = nullptr;
+    IOTimerEventSource *fTimer = nullptr;
+    unsigned fSamples = 0;
+    // 64 pixels across the buffer: how many are non-black and how many differ from the first, published in the registry
+    void sample() {
+        if (!fSurfMap) return;
+        const volatile uint32_t *px = (const volatile uint32_t *)fSurfMap->getVirtualAddress();
+        unsigned nz = 0, varied = 0; uint32_t first = px[0] & 0xFFFFFF;
+        for (unsigned i = 0; i < 8; i++) for (unsigned j = 0; j < 8; j++) {
+            uint32_t v = px[(fHeight * (2 * i + 1) / 16) * (fRowBytes / 4) + fWidth * (2 * j + 1) / 16] & 0xFFFFFF;
+            if (v) nz++; if (v != first) varied++; }
+        char b[96]; snprintf(b, sizeof b, "sample %u: nonzero %u/64 varied %u/64 first 0x%06x", ++fSamples, nz, varied, first);
+        setProperty("NMIntelFBSample", b);
+    }
+#endif   // write-combined CPU view of the scan-out surface (NVIDIA frames land here)
     volatile uint8_t *fRegs = nullptr;
     IOPhysicalAddress fApertureBase = 0;
     IOPhysicalLength fApertureLen = 0;
@@ -77,6 +132,23 @@ public:
     IOReturn getStartupDisplayMode(IODisplayModeID *mode, IOIndex *depth) override { return getCurrentDisplayMode(mode, depth); }
     IOReturn setDisplayMode(IODisplayModeID mode, IOIndex depth) override { return (mode == 1 && depth == 0) ? kIOReturnSuccess : kIOReturnUnsupported; }
     IOItemCount getConnectionCount() override { return 1; }
+    IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) override;
+    IOReturn registerForInterruptType(IOSelect type, IOFBInterruptProc proc, OSObject *target, void *ref, void **iref) override {
+        if (type == kIOFBVBLInterruptType) { fVbl = { proc, target, ref }; if (iref) *iref = &fVbl; return kIOReturnSuccess; }
+        if (type == kIOFBConnectInterruptType) { fConnect = { proc, target, ref }; if (iref) *iref = &fConnect; return kIOReturnSuccess; }
+        return kIOReturnUnsupported;
+    }
+    IOReturn unregisterInterrupt(void *) override { return kIOReturnSuccess; }
+    IOReturn setInterruptState(void *, UInt32) override { return kIOReturnSuccess; }
+    IOReturn setGammaTable(UInt32, UInt32, UInt32, void *) override { return kIOReturnSuccess; }
+    IOReturn setGammaTable(UInt32, UInt32, UInt32, void *, bool) override { return kIOReturnSuccess; }
+    IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnSuccess; }
+    IOReturn setApertureEnable(IOPixelAperture, IOOptionBits) override { return kIOReturnSuccess; }
+    IOReturn setStartupDisplayMode(IODisplayModeID, IOIndex) override { return kIOReturnSuccess; }
+    IOReturn getAttribute(IOSelect attribute, uintptr_t *value) override {
+        if (attribute == kIOWindowServerActiveAttribute) { if (value) *value = 1; return kIOReturnSuccess; }
+        return IOFramebuffer::getAttribute(attribute, value);
+    }
     IOReturn getAttributeForConnection(IOIndex idx, IOSelect attr, uintptr_t *value) override;
 };
 
@@ -84,6 +156,11 @@ OSDefineMetaClassAndStructors(NMIntelFB, IOFramebuffer)
 
 IOService *NMIntelFB::probe(IOService *provider, SInt32 *score)
 {
+#ifdef NMINTELFB_VIRTUAL
+    // test build: a virtual 1920x1080 "panel" in system memory, so the NVIDIA -> Intel frame path can be proven on a
+    // machine with no Intel GPU (frames composited on the NVIDIA card must arrive in this buffer)
+    fVer = 0xFF; return IOFramebuffer::probe(provider, score);
+#endif
     IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
     if (!pci) return nullptr;
     if (PE_parse_boot_argn("-nmintelfboff", nullptr, 0)) { IFBLOG("off by boot-arg"); return nullptr; }
@@ -125,6 +202,26 @@ bool NMIntelFB::adoptFirmwareMode()
 
 bool NMIntelFB::start(IOService *provider)
 {
+#ifdef NMINTELFB_VIRTUAL
+    fWidth = 1920; fHeight = 1080; fRowBytes = 7680; fSurf = 0; fPipe = 0;
+    fVBuf = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous,
+                                                             (mach_vm_size_t)fRowBytes * fHeight, 0xFFFFFFFFFFFFF000ull);
+    if (!fVBuf || fVBuf->prepare() != kIOReturnSuccess) { IFBLOG("virtual: no contiguous buffer"); OSSafeReleaseNULL(fVBuf); return false; }
+    bzero(fVBuf->getBytesNoCopy(), fVBuf->getLength());
+    fApertureBase = fVBuf->getPhysicalSegment(0, nullptr, kIOMemoryMapperNone); fApertureLen = fVBuf->getLength();
+    if (!IOFramebuffer::start(provider)) { fVBuf->complete(); OSSafeReleaseNULL(fVBuf); return false; }
+    fSurfMap = fVBuf->map();
+    setProperty("IOFBDependentID", 0x4E56524D00000001ull, 64);
+    setProperty("IOFBDependentIndex", 4ull, 32);
+    if (IOWorkLoop *wl = getWorkLoop()) {
+        fTimer = IOTimerEventSource::timerEventSource(this, [](OSObject *o, IOTimerEventSource *t) {
+            ((NMIntelFB *)o)->sample(); t->setTimeoutMS(2000); });
+        if (fTimer && wl->addEventSource(fTimer) == kIOReturnSuccess) fTimer->setTimeoutMS(2000);
+    }
+    armVbl();
+    IFBLOG("virtual panel published (1920x1080 at phys 0x%llx)", (unsigned long long)fApertureBase);
+    return true;
+#endif
     fPCI = OSDynamicCast(IOPCIDevice, provider);
     if (!fPCI) return false;
     fPCI->setMemoryEnable(true);
@@ -135,16 +232,28 @@ bool NMIntelFB::start(IOService *provider)
     fApertureBase = ap->getPhysicalAddress(); fApertureLen = ap->getLength();
     if (!adoptFirmwareMode()) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false; }
     if (!IOFramebuffer::start(provider)) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false; }
+    // Head 4 of the NVIDIA accelerator (NVAccel): WindowServer composites this panel on the NVIDIA card and the
+    // display pipe copies each frame into fSurfMap. Without NVAccel the panel stays a plain framebuffer.
+    if (IODeviceMemory *sm = IODeviceMemory::withRange(fApertureBase + fSurf, (IOPhysicalLength)fRowBytes * fHeight)) {
+        fSurfMap = sm->map(kIOMapWriteCombineCache); sm->release();
+    }
+    if (fSurfMap) {
+        setProperty("IOFBDependentID", 0x4E56524D00000001ull, 64);
+        setProperty("IOFBDependentIndex", 4ull, 32);
+    } else IFBLOG("the surface would not map write-combined: NVIDIA rendering stays off for this panel");
     setProperty("NMIntelFBPipe", fPipe, 32);
     setProperty("NMIntelFBDisplayVersion", fVer, 32);
     setProperty("built-in", kOSBooleanTrue);   // the panel is the laptop's own (kConnectionFlags says so too)
+    armVbl();
     IFBLOG("built-in panel published (%ux%u)", fWidth, fHeight);
     return true;
 }
 
 void NMIntelFB::stop(IOService *provider)
 {
-    OSSafeReleaseNULL(fMMIO); fRegs = nullptr;
+    fStopping = true;
+    if (fVblTimer) { thread_call_cancel_wait(fVblTimer); thread_call_free(fVblTimer); fVblTimer = nullptr; }
+    OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr;
     IOFramebuffer::stop(provider);
 }
 
@@ -182,6 +291,27 @@ IOReturn NMIntelFB::getAttributeForConnection(IOIndex idx, IOSelect attr, uintpt
     case kConnectionEnable: *value = 1; return kIOReturnSuccess;
     case kConnectionCheckEnable: *value = 1; return kIOReturnSuccess;
     case kConnectionFlags: *value = kIOConnectionBuiltIn; return kIOReturnSuccess;
+    // the colour answers NVRMFB gives (RGB, 8 bits per component), which WindowServer asks before compositing
+    case kConnectionColorModesSupported: case kConnectionColorMode: *value = 0x00000001; return kIOReturnSuccess;
+    case kConnectionColorDepthsSupported: case kConnectionControllerColorDepth: case kConnectionControllerDepthsSupported:
+        *value = 0x00000002; return kIOReturnSuccess;
     default: return IOFramebuffer::getAttributeForConnection(idx, attr, value);
     }
+}
+
+// NVAccel's display pipe asks every head for its scan-out (NVRM_VRAM_FN_SCANOUT). This head answers with a CPU mapping and
+// no VRAM address: phys 0 keeps NVAccel from treating Intel memory as NVIDIA VRAM (it is not in the NVIDIA card's BAR1),
+// so frames reach the panel only through the copy into kva.
+IOReturn NMIntelFB::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4)
+{
+    if (fn && fn->isEqualTo(NVRM_VRAM_FN_SCANOUT)) {
+        NVRMVramRequest *r = (NVRMVramRequest *)p1;
+        if (!r || r->version != NVRM_VRAM_ABI_VERSION) return kIOReturnBadArgument;
+        if (!fSurfMap) return kIOReturnNotReady;
+        r->kva = (void *)fSurfMap->getVirtualAddress();
+        r->phys = 0; r->actualSize = 0;
+        r->width = fWidth; r->height = fHeight; r->pitch = fRowBytes;
+        return kIOReturnSuccess;
+    }
+    return IOFramebuffer::callPlatformFunction(fn, wait, p1, p2, p3, p4);
 }
