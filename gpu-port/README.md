@@ -39,8 +39,8 @@ Build on the build Mac (Apple silicon, cross-compiling to x86_64) with the cross
 LinuxKPI and a FreeBSD-kernel layer implemented on xnu (`xkpi/bsdcompat`, `xkpi/xnu`). `xkpi/kext` links it all
 into `NMXAMD.kext`.
 
-- **Build** (on the build Mac): `xkpi/all.sh` compiles the driver sources drm-kmod's Makefiles select (429 + 3 DRM
-  extras), `xkpi/rt.sh` the runtime (67 sources), `xkpi/kext/build.sh <out>` links the kext (5.6 MB).
+- **Build** (on the build Mac): `xkpi/all.sh` compiles the driver sources drm-kmod's Makefiles select, display core
+  included (899), `xkpi/rt.sh` the runtime (67 sources), `xkpi/kext/build.sh <out>` links the kext (10.8 MB).
 - **Link check**: `kmutil create` against macOS 15.8.1's kernel collections resolves every symbol (test
   collection in `/tmp` only; nothing installed).
 - **Device nodes**: each DRM minor is an xnu devfs clone node, so every open has its own file, as LinuxKPI expects.
@@ -54,7 +54,10 @@ into `NMXAMD.kext`.
 Not done yet:
 
 - It has not been loaded on hardware. Start-up runs all SYSINITs, then the driver probes the device.
-- The display core (DC) is not built, so this is render and compute only.
+- The display core (DC) is built, but nothing hands its output to macOS yet: a framebuffer bridge (DRM client
+  modeset into a contiguous VRAM buffer, published as an IOFramebuffer) is next. Until then, taking the GPU that
+  drives the screen leaves that screen dark.
+- HDCP, writeback connectors and the panel brightness quirk table are not offered (their DRM helpers are GPL).
 - There are no file descriptors for dma-buf or sync_file (a kext cannot create them), so PRIME export and sync
   file import/export report EOPNOTSUPP.
 - DMI quirks see the SMBIOS the bootloader presents (the Mac model), not the PC's board.
