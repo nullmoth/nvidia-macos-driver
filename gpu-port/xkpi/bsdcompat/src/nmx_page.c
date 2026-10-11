@@ -274,8 +274,115 @@ void vm_page_wire(vm_page_t m)
  * drops one wiring; true when it was the last and the page belongs to no object, so the caller frees it. A page in
  * an object stays with the object at zero wirings, as in FreeBSD; the object frees it.
  */
+/*
+ * ---- a process's pages pinned for a device (Linux get_user_pages) -------------------------------------------------------
+ * xnu wires a user range through an IOMemoryDescriptor on the process's task (nmx_xnu_user_wire), one descriptor per
+ * request. Each page of the request gets the port's page record (a fictitious one: the memory is the process's) and
+ * one extra wiring, plus an entry on the record's pin list naming the request. Linux drops a pin with put_page; here
+ * the matching unwire pops one entry from that page's list and, when every page of a request has been put, the
+ * descriptor is released and xnu unwires the range. A page pinned by several requests carries one entry per pin,
+ * and any of them may be popped: each request is only released after as many puts as it has pages, and a page's
+ * entries are only consumed by puts of that page, so no page is unwired while one of its pins is still held.
+ * The release can block (xnu unwires the range), so put_page on a pinned user page must come from thread context,
+ * which is where Linux drivers release userptr pages.
+ */
+struct user_pin {
+    void *handle;                          /* nmx_xnu_user_wire descriptor */
+    volatile u_int remaining;              /* page puts still to come */
+};
+struct pin_ref {
+    struct user_pin *pin;
+    struct pin_ref *next;
+};
+
+static void pin_put(struct user_pin *pin)
+{
+    if (__atomic_sub_fetch(&pin->remaining, 1, __ATOMIC_SEQ_CST) == 0) {
+        nmx_xnu_user_unwire(pin->handle);
+        free(pin, M_NMXPAGE);
+    }
+}
+
+/* takes one pin entry off a page, if it has any; the request it named, or NULL */
+static struct user_pin *page_pop_pin(vm_page_t m)
+{
+    struct pin_ref *r;
+    lck_spin_lock(pg_lock);
+    r = m->nmx_pins;
+    if (r != NULL)
+        m->nmx_pins = r->next;
+    lck_spin_unlock(pg_lock);
+    if (r == NULL)
+        return NULL;
+    struct user_pin *pin = r->pin;
+    free(r, M_NMXPAGE);
+    return pin;
+}
+
+int nmx_user_pages_pin(void *mm, uintptr_t start, int npages, int write, vm_page_t *pages)
+{
+    if (npages <= 0)
+        return 0;
+    uint64_t *phys = malloc(sizeof(uint64_t) * (size_t)npages, M_NMXPAGE, M_WAITOK);
+    struct user_pin *pin = malloc(sizeof(*pin), M_NMXPAGE, M_WAITOK | M_ZERO);
+    struct pin_ref **refs = malloc(sizeof(*refs) * (size_t)npages, M_NMXPAGE, M_WAITOK | M_ZERO);
+    int err = ENOMEM, i;
+    if (phys == NULL || pin == NULL || refs == NULL)
+        goto fail;
+    for (i = 0; i < npages; i++)
+        if ((refs[i] = malloc(sizeof(struct pin_ref), M_NMXPAGE, M_WAITOK)) == NULL)
+            goto fail;
+    err = nmx_xnu_user_wire(mm, start, (size_t)npages, write, phys, &pin->handle);
+    if (err != 0)
+        goto fail;
+    for (i = 0; i < npages; i++) {
+        pages[i] = nmx_phys_to_page(phys[i]);
+        if (pages[i] == NULL) {
+            /* no record could be made: give back the pins already placed, then the wiring */
+            pin->remaining = (u_int)i + 1;
+            for (int k = 0; k < i; k++) {
+                __atomic_sub_fetch(&pages[k]->ref_count, 1, __ATOMIC_SEQ_CST);
+                pin_put(page_pop_pin(pages[k]));
+            }
+            pin_put(pin);
+            pin = NULL;
+            for (int k = i; k < npages; k++)
+                free(refs[k], M_NMXPAGE);
+            free(refs, M_NMXPAGE);
+            free(phys, M_NMXPAGE);
+            return -ENOMEM;
+        }
+    }
+    pin->remaining = (u_int)npages;
+    for (i = 0; i < npages; i++) {
+        refs[i]->pin = pin;
+        lck_spin_lock(pg_lock);
+        refs[i]->next = pages[i]->nmx_pins;
+        pages[i]->nmx_pins = refs[i];
+        lck_spin_unlock(pg_lock);
+        vm_page_wire(pages[i]);
+    }
+    free(refs, M_NMXPAGE);
+    free(phys, M_NMXPAGE);
+    return npages;
+fail:
+    if (refs != NULL)
+        for (i = 0; i < npages; i++)
+            free(refs[i], M_NMXPAGE);
+    free(refs, M_NMXPAGE);
+    free(pin, M_NMXPAGE);
+    free(phys, M_NMXPAGE);
+    return -err;
+}
+
 bool vm_page_unwire_noq(vm_page_t m)
 {
+    /* a pinned user page: this put releases one pin (see nmx_user_pages_pin) */
+    if ((m->flags & PG_FICTITIOUS) != 0 && m->nmx_pins != NULL) {
+        struct user_pin *pin = page_pop_pin(m);
+        if (pin != NULL)
+            pin_put(pin);
+    }
     return __atomic_sub_fetch(&m->ref_count, 1, __ATOMIC_SEQ_CST) == 0 && m->object == NULL;
 }
 

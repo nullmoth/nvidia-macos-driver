@@ -23,6 +23,7 @@ struct vm_page {
         struct { SLIST_ENTRY(vm_page) ss; } s;
     } plinks;
     void *nmx_lkpi;                 /* LinuxKPI per-page data (struct page private) */
+    void *nmx_pins;                 /* user-page pins this page is held by (see nmx_user_pages_pin) */
 };
 TAILQ_HEAD(pglist, vm_page);
 #define PG_FICTITIOUS 0x0004
@@ -63,6 +64,8 @@ void vm_page_free(vm_page_t m);
 void vm_page_free_contig(vm_page_t m, u_long npages);
 void vm_page_wire(vm_page_t m);
 bool vm_page_unwire_noq(vm_page_t m);
+/* pins npages of a process's memory at 'start' (mm NULL = the calling process); returns npages or -errno */
+int nmx_user_pages_pin(void *mm, uintptr_t start, int npages, int write, vm_page_t *pages);
 void vm_page_unwire(vm_page_t m, uint8_t queue);
 #define vm_page_xbusy(m) do { } while (0)
 #define vm_page_xunbusy(m) do { } while (0)

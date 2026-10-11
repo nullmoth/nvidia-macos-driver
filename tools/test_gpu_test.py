@@ -22,9 +22,9 @@ arm("every firmware line is a SHA-256 and a path", all(len(e) == 2 and re.fullma
     f"{len(entries)} lines")
 paths = [e[1] for e in entries]
 arm("the AMD and Intel licences travel with the firmware",
-    "LICENSES/LICENSE.amdgpu" in paths and "LICENSES/LICENSE.i915" in paths)
-arm("only amdgpu, i915 and licence files are fetched",
-    all(p.startswith(("amdgpu/", "i915/", "LICENSES/")) and ".." not in p for p in paths))
+    "LICENSES/LICENSE.amdgpu" in paths and "LICENSES/LICENSE.i915" in paths and "LICENSES/LICENSE.xe" in paths)
+arm("only amdgpu, i915, xe and licence files are fetched",
+    all(p.startswith(("amdgpu/", "i915/", "xe/", "LICENSES/")) and ".." not in p for p in paths))
 
 # the awk setup runs over ioreg: each device's vendor and class are paired even when class-code comes first
 awk = re.search(r"LC_ALL=C awk -F'<\|>' '(.*?)' \| sort -u\)", SETUP.read_text(), re.S).group(1).replace("\n    ", " ")

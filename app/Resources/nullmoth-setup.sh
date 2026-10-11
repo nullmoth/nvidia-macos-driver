@@ -640,7 +640,7 @@ if [ -n "${SETLOGO:-}" ]; then
 fi
 
 if [ -n "${GPUTEST:-}" ]; then
-  # The app's "AMD / Intel GPU driver (test)": NMXGPU (amdgpu and i915 for macOS) for the AMD and Intel GPUs this Mac
+  # The app's "AMD / Intel GPU driver (test)": NMXGPU (amdgpu, i915 and xe for macOS) for the AMD and Intel GPUs this Mac
   # has, opt-in per vendor with nmxamd=1 / nmxintel=1. On: the GPU firmware from linux-firmware at the commit the
   # manifest pins, every file SHA-256 checked; the kext into /Library/Extensions; a new auxiliary kernel collection,
   # checked to contain it; the boot argument. Off undoes each step. The "Start once without NVIDIA driver" entry
