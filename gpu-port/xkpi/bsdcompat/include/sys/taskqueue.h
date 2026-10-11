@@ -14,7 +14,7 @@ struct taskqueue *taskqueue_create_fast(const char *name, int mflags, taskqueue_
 int taskqueue_start_threads(struct taskqueue **tqp, int count, int pri, const char *name, ...) __printflike(4, 5);
 int taskqueue_enqueue(struct taskqueue *queue, struct task *task);
 int taskqueue_enqueue_flags(struct taskqueue *queue, struct task *task, int flags);
-int taskqueue_enqueue_timeout(struct taskqueue *queue, struct timeout_task *timeout_task, int ticks);
+int taskqueue_enqueue_timeout(struct taskqueue *queue, struct timeout_task *timeout_task, int nticks);
 int taskqueue_enqueue_timeout_sbt(struct taskqueue *queue, struct timeout_task *timeout_task, sbintime_t sbt, sbintime_t pr, int flags);
 int taskqueue_poll_is_busy(struct taskqueue *queue, struct task *task);
 int taskqueue_cancel(struct taskqueue *queue, struct task *task, u_int *pendp);

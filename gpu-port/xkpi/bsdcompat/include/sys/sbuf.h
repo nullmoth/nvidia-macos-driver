@@ -40,6 +40,8 @@ struct sbuf {
 #define sbuf_delete nmx_sbuf_delete
 #define sbuf_error nmx_sbuf_error
 #define sbuf_trim nmx_sbuf_trim
+#define sbuf_bcpy nmx_sbuf_bcpy
+#define sbuf_setpos nmx_sbuf_setpos
 struct sbuf *sbuf_new(struct sbuf *s, char *buf, int length, int flags);
 void sbuf_clear(struct sbuf *s);
 int sbuf_cat(struct sbuf *s, const char *str);
@@ -49,6 +51,8 @@ int sbuf_printf(struct sbuf *s, const char *fmt, ...) __attribute__((__format__(
 int sbuf_vprintf(struct sbuf *s, const char *fmt, va_list ap);
 int sbuf_putc(struct sbuf *s, int c);
 int sbuf_trim(struct sbuf *s);
+int sbuf_bcpy(struct sbuf *s, const void *buf, size_t len);
+int sbuf_setpos(struct sbuf *s, ssize_t pos);
 int sbuf_error(const struct sbuf *s);
 int sbuf_finish(struct sbuf *s);
 char *sbuf_data(struct sbuf *s);

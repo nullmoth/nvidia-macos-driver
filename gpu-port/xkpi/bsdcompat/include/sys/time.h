@@ -14,12 +14,13 @@
 #define SBT_1NS (SBT_1S / 1000000000)
 #define SBT_MAX 0x7fffffffffffffffLL
 extern sbintime_t tick_sbt;
-static inline sbintime_t nstosbt(int64_t ns) { return (sbintime_t)((ns * (((uint64_t)1 << 63) / 500000000)) >> 32) + (ns >= 1000000000 ? (ns / 1000000000) * 0 : 0); }
-static inline sbintime_t ustosbt(int64_t us) { return (sbintime_t)((us * (((uint64_t)1 << 63) / 500000)) >> 32); }
-static inline sbintime_t mstosbt(int64_t ms) { return (sbintime_t)((ms * (((uint64_t)1 << 63) / 500)) >> 32); }
-static inline int64_t sbttons(sbintime_t sbt) { return (int64_t)(((sbt >> 32) * 1000000000LL) + (((sbt & 0xffffffffLL) * 1000000000LL) >> 32)); }
-static inline int64_t sbttous(sbintime_t sbt) { return (int64_t)(((sbt >> 32) * 1000000LL) + (((sbt & 0xffffffffLL) * 1000000LL) >> 32)); }
-static inline int64_t sbttoms(sbintime_t sbt) { return (int64_t)(((sbt >> 32) * 1000LL) + (((sbt & 0xffffffffLL) * 1000LL) >> 32)); }
+/* conversions split whole seconds from the remainder so no intermediate product can overflow 64 bits */
+static inline sbintime_t nstosbt(int64_t ns) { return ((sbintime_t)(ns / 1000000000) << 32) + (sbintime_t)((((uint64_t)(ns % 1000000000)) << 32) / 1000000000); }
+static inline sbintime_t ustosbt(int64_t us) { return ((sbintime_t)(us / 1000000) << 32) + (sbintime_t)((((uint64_t)(us % 1000000)) << 32) / 1000000); }
+static inline sbintime_t mstosbt(int64_t ms) { return ((sbintime_t)(ms / 1000) << 32) + (sbintime_t)((((uint64_t)(ms % 1000)) << 32) / 1000); }
+static inline int64_t sbttons(sbintime_t sbt) { return (int64_t)((sbt >> 32) * 1000000000LL) + (int64_t)(((uint64_t)(sbt & 0xffffffffLL) * 1000000000ULL) >> 32); }
+static inline int64_t sbttous(sbintime_t sbt) { return (int64_t)((sbt >> 32) * 1000000LL) + (int64_t)(((uint64_t)(sbt & 0xffffffffLL) * 1000000ULL) >> 32); }
+static inline int64_t sbttoms(sbintime_t sbt) { return (int64_t)((sbt >> 32) * 1000LL) + (int64_t)(((uint64_t)(sbt & 0xffffffffLL) * 1000ULL) >> 32); }
 static inline sbintime_t tstosbt(struct timespec ts) { return ((sbintime_t)ts.tv_sec << 32) + nstosbt(ts.tv_nsec); }
 static inline struct timespec sbttots(sbintime_t sbt) { struct timespec ts; ts.tv_sec = sbt >> 32; ts.tv_nsec = sbttons(sbt & 0xffffffffLL); return ts; }
 static inline sbintime_t tvtosbt(struct timeval tv) { return ((sbintime_t)tv.tv_sec << 32) + ustosbt(tv.tv_usec); }

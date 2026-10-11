@@ -1,9 +1,9 @@
-/* FreeBSD <sys/_callout.h> on xnu: a callout is an xnu thread_call (see sys/callout.h). */
+/* FreeBSD <sys/_callout.h> on xnu: callouts run on the port's softclock thread (src/nmx_task.c). */
 #pragma once
 #include <sys/types.h>
 struct lock_object;
 struct callout {
-    void *c_call;                       /* thread_call_t */
+    struct callout *c_next;             /* next callout on the softclock list, ordered by deadline */
     void (*c_func)(void *);
     void *c_arg;
     struct lock_object *c_lock;         /* taken around c_func when set (callout_init_mtx/rw) */

@@ -22,6 +22,10 @@ void arc4random_buf(void *ptr, size_t len);
 u_long nmx_random(void);
 #define random() nmx_random()
 char *strsep(char **stringp, const char *delim);
+char *strrchr(const char *s, int c);
+struct malloc_type;
+char *strdup_flags(const char *string, struct malloc_type *type, int flags);
+#define strdup(s, type) strdup_flags((s), (type), 0x0002 /* M_WAITOK */)
 char *strpbrk(const char *s, const char *charset);
 size_t strspn(const char *s, const char *charset);
 size_t strcspn(const char *s, const char *charset);
