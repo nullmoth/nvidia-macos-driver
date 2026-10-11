@@ -18,6 +18,7 @@ struct proc {
     pid_t p_pid;
     char p_comm[MAXCOMLEN + 1];
     void *p_vmspace;
+    sigset_t p_siglist;             /* pending signals, refreshed from xnu by PROC_LOCK */
     void *nmx_xnu;                  /* the xnu proc_t */
 };
 struct thread {
@@ -32,6 +33,9 @@ struct thread {
     int td_intr_nesting_level;      /* refreshed from ml_at_interrupt_context() by curthread */
     int td_flags;
     int td_owepreempt;              /* FreeBSD's deferred-preemption flag; xnu preempts on its own, so always 0 */
+    int td_inhibitors;
+    sigset_t td_siglist;            /* signals pending for this thread (filled with the process's, see PROC_LOCK) */
+    sigset_t td_sigmask;
     int td_pflags;
     char td_name[32];
     void *td_wchan;
@@ -44,7 +48,9 @@ struct thread {
 #define TD_ON_LOCK(td) 0
 #define thread_lock(td) do { } while (0)
 #define thread_unlock(td) do { } while (0)
-#define PROC_LOCK(p) do { } while (0)
+/* LinuxKPI takes PROC_LOCK right before it reads a process's pending signals, so that is where they are refreshed */
+void nmx_proc_refresh_signals(struct proc *p);
+#define PROC_LOCK(p) nmx_proc_refresh_signals(p)
 #define PROC_UNLOCK(p) do { } while (0)
 #define PROC_LOCK_ASSERT(p, w) do { } while (0)
 #define FIRST_THREAD_IN_PROC(p) curthread

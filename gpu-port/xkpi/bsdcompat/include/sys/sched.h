@@ -16,6 +16,11 @@ int sched_is_bound(struct thread *td);
 void sched_bind(struct thread *td, int cpu);
 void sched_unbind(struct thread *td);
 void kern_yield(int prio);
+/* FreeBSD's voluntary context switch: here, a yield of the CPU to any other runnable thread */
+void mi_switch(int flags);
+#define SW_VOL 0x0100
+#define SW_INVOL 0x0200
+#define SWT_RELINQUISH 23
 void maybe_yield(void);
 #define SRQ_BORING 0x0000
 #define PRI_USER -2

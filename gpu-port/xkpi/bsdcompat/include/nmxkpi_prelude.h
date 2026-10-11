@@ -42,6 +42,7 @@
 #include <IOKit/IOLib.h>
 #include <miscfs/devfs/devfs.h>
 #include <pexpert/pexpert.h>
+#include <sys/kauth.h>
 
 /* xnu's strcpy macro deliberately takes three arguments to break two-argument callers; use the checked builtin */
 #undef strcpy

@@ -54,6 +54,9 @@ struct lock_object {
 /* release/re-acquire whatever lock 'lo' is, in the mode the current thread holds it; used by sleep and cv waits */
 uintptr_t nmx_lock_release(struct lock_object *lo);
 void nmx_lock_reacquire(struct lock_object *lo, uintptr_t how);
+/* take / drop any lock once, in shared or exclusive mode (locked callouts) */
+void nmx_lock_acquire(struct lock_object *lo, int shared);
+void nmx_lock_drop(struct lock_object *lo);
 
 /* xnu lock group every compatibility lock is allocated in (one group, so lock statistics stay in one place) */
 extern lck_grp_t *nmx_lck_grp;

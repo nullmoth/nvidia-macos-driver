@@ -71,5 +71,7 @@ int bus_setup_intr(device_t dev, struct resource *r, int flags, int (*filter)(vo
 int bus_teardown_intr(device_t dev, struct resource *r, void *cookie);
 int bus_describe_intr(device_t dev, struct resource *irq, void *cookie, const char *fmt, ...) __printflike(4, 5);
 #define RF_ACTIVE 0x0002
+int bus_bind_intr(device_t dev, struct resource *r, int cpu);
+int bus_get_domain(device_t dev, int *domain);
 #define RF_SHAREABLE 0x0004
 #endif
