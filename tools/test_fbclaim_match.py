@@ -18,9 +18,19 @@ def matches(spec, word):
     return (word & mask) == (value & mask)
 
 
-def claims(p, vendor, device, cls, subvendor=0):
-    # IOPCIPrimaryMatch looks at the primary ids only (IOPCIMatch would also try the subsystem vendor)
-    return matches(p["IOPCIPrimaryMatch"], device << 16 | vendor) and matches(p["IOPCIClassMatch"], cls << 8)
+def claims(p, vendor, device, cls, subvendor=0, subdevice=0):
+    # IOPCIBridge::pciMatchNub: every PCI key present must match. IOPCIMatch takes the primary (device << 16 | vendor)
+    # or the subsystem (subdevice << 16 | subvendor) word; IOPCIPrimaryMatch only the primary one. No PCI key: IONameMatch
+    # "display" alone decides, and IOPCIFamily names every base-class-03 device "display".
+    primary, sub = device << 16 | vendor, subdevice << 16 | subvendor
+    ok = cls >> 16 == 0x03
+    if "IOPCIMatch" in p:
+        ok = ok and (matches(p["IOPCIMatch"], primary) or matches(p["IOPCIMatch"], sub))
+    if "IOPCIPrimaryMatch" in p:
+        ok = ok and matches(p["IOPCIPrimaryMatch"], primary)
+    if "IOPCIClassMatch" in p:
+        ok = ok and matches(p["IOPCIClassMatch"], cls << 8)
+    return ok
 
 
 class FBClaim(unittest.TestCase):
@@ -53,6 +63,15 @@ class FBClaim(unittest.TestCase):
         for name, vendor, device, cls, sub, want in cases:
             with self.subTest(name):
                 self.assertEqual(claims(self.claim, vendor, device, cls, sub), want)
+
+    def test_controls(self):
+        # the personality before this fix (IONameMatch only) took the Intel GPU (#119) ...
+        old = {k: v for k, v in self.claim.items() if not k.startswith("IOPCI")}
+        self.assertTrue(claims(old, 0x8086, 0x9A49, 0x030000, 0x17AA))
+        # ... and IOPCIMatch instead of IOPCIPrimaryMatch would take an Intel GPU with an NVIDIA subsystem id
+        loose = dict(old, IOPCIMatch="0x000010de&0x0000ffff", IOPCIClassMatch=self.claim["IOPCIClassMatch"])
+        self.assertTrue(claims(loose, 0x8086, 0x9A49, 0x030000, 0x10DE))
+        self.assertFalse(claims(self.claim, 0x8086, 0x9A49, 0x030000, 0x10DE))
 
 
 if __name__ == "__main__":
