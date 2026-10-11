@@ -8,7 +8,7 @@
 - A driver installed from the release `.tar.gz` records its version, so the app stops offering the version you already have.
 - "STOP back up nvmtl" is fixed: the backup copies the Vulkan library links correctly.
 - Installing a USB map no longer stops when USBToolBox is missing; setup adds it.
-- When setup cannot tell which OpenCore partition started the Mac, it says why (OpenCore hides its boot path) and what to change (Misc > Security > ExposeSensitiveData 7), or choose the partition in the app. When it finds no OpenCore at all, it lists every partition it sees so the next report shows the cause.
+- When setup cannot tell which OpenCore partition started the Mac, it says why (OpenCore hides its boot path) and what to change (Misc > Security > ExposeSensitiveData 7), or you can choose the partition in the app. When it finds no OpenCore at all, it lists every partition it sees so the next report shows the cause.
 - **Send logs** now includes the kernel log of the boots before this one, so a boot that hung or went black (which writes no panic) can be read, and panics macOS moved to its Retired folder.
 
 ## Windows (1401 1.11.0)
