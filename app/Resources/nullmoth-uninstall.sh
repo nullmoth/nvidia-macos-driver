@@ -1,6 +1,7 @@
 #!/bin/bash
 set -u
-KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NMXGPU"   # NMXGPU: the opt-in AMD/Intel GPU driver, when it was turned on; EXT=/Library/Extensions; GB=/Library/GPUBundles
+# NMXGPU: the opt-in AMD/Intel GPU driver, when it was turned on
+KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NMXGPU"; EXT=/Library/Extensions; GB=/Library/GPUBundles
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 K=/System/Library/Kernels/kernel
 KARG=(--allow-missing-kdk); [ -f "$K" ] && KARG+=(--kernel "$K")   # without a matching Kernel Debug Kit, kmutil needs --allow-missing-kdk
