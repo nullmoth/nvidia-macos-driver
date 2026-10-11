@@ -98,4 +98,15 @@ edit("src/vpux_compiler/src/dialect/config/IR/resources.cpp", [
     ("        offset = alignValDown(topStart - size, alignment);\n",
      "        offset = alignValDown<size_t>(topStart - size, alignment);\n"),
 ])
+# the compiler library exports only CreateNPUCompiler (Linux: a GNU version script; macOS: an exported-symbols list)
+edit("src/vpux_compiler/CMakeLists.txt", [
+    ("if(UNIX)\n    target_link_options(${COMPILER_LIB} PRIVATE -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/compiler.exports)\nendif()\n",
+     "if(APPLE)\n"
+     "    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/compiler.exported_symbols \"_CreateNPUCompiler\\n\")\n"
+     "    target_link_options(${COMPILER_LIB} PRIVATE\n"
+     "        -Wl,-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/compiler.exported_symbols)\n"
+     "elseif(UNIX)\n"
+     "    target_link_options(${COMPILER_LIB} PRIVATE -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/compiler.exports)\n"
+     "endif()\n"),
+])
 print("npu_compiler patched")
