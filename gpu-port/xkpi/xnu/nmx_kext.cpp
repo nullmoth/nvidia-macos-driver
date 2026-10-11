@@ -22,9 +22,14 @@
 
 #define AMD_VENDOR 0x1002
 
+/* the display bridge (nmx_fb.cpp) */
+IOService *nmx_fb_publish(IOService *gpu, void *dev);
+void nmx_fb_unpublish(IOService *fb, IOService *gpu, void *dev);
+
 class NMXAMDGPU : public IOService {
     OSDeclareDefaultStructors(NMXAMDGPU)
     void *dev_;
+    IOService *fb_;
 public:
     IOService *probe(IOService *provider, SInt32 *score) override;
     bool start(IOService *provider) override;
@@ -99,6 +104,8 @@ bool NMXAMDGPU::start(IOService *provider)
     provider->joinPMtree(this);
     registerPowerDriver(this, states, 2);
     registerService();
+    /* light the outputs and hand them to macOS; without it the device still renders, with no screen of its own */
+    fb_ = nmx_fb_publish(this, dev_);
     IOLog("NullMoth AMD: driving %04x:%04x\n", pci->configRead16(kIOPCIConfigVendorID),
           pci->configRead16(kIOPCIConfigDeviceID));
     return true;
@@ -106,6 +113,8 @@ bool NMXAMDGPU::start(IOService *provider)
 
 void NMXAMDGPU::stop(IOService *provider)
 {
+    nmx_fb_unpublish(fb_, this, dev_);
+    fb_ = nullptr;
     PMstop();
     nmx_port_detach(dev_);
     dev_ = nullptr;

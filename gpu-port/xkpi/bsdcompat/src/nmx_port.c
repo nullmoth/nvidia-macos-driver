@@ -79,6 +79,7 @@ void *nmx_port_attach(void *iopci)
     device_t dev = nmx_device_for_pci(iopci);
     if (dev == NULL)
         return NULL;
+    nmx_fb_before_attach();
     int err = nmx_bus_add_device(dev, "vgapci");
     device_t *kids = NULL;
     int n = 0, attached = 0;

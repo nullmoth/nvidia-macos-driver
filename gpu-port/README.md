@@ -54,9 +54,10 @@ into `NMXAMD.kext`.
 Not done yet:
 
 - It has not been loaded on hardware. Start-up runs all SYSINITs, then the driver probes the device.
-- The display core (DC) is built, but nothing hands its output to macOS yet: a framebuffer bridge (DRM client
-  modeset into a contiguous VRAM buffer, published as an IOFramebuffer) is next. Until then, taking the GPU that
-  drives the screen leaves that screen dark.
+- Display: the bridge (`override/src/nmx_fb_bridge.c`, `xnu/nmx_fb.cpp`) is an in-kernel DRM client that lights every
+  connected output with one XRGB8888 buffer in contiguous VRAM and publishes it as an IOFramebuffer (no copy). One
+  mode, the largest output's; smaller outputs mirror the top-left. Mode switching and per-output framebuffers are not
+  done yet.
 - HDCP, writeback connectors and the panel brightness quirk table are not offered (their DRM helpers are GPL).
 - There are no file descriptors for dma-buf or sync_file (a kext cannot create them), so PRIME export and sync
   file import/export report EOPNOTSUPP.
