@@ -2059,6 +2059,37 @@ linux_find_cdev(const char *name, unsigned major, unsigned minor)
 	return (cdev != NULL ? cdev->si_drv1 : NULL);
 }
 
+/*
+ * The DRM (226) and accel (261) majors get their device nodes one per registered minor, under the names Linux gives
+ * them (dri/card%d, dri/renderD%d, accel/accel%d), from drm_dev_alias (nmx_drm_os.c). FreeBSD's LinuxKPI instead
+ * creates all 256 minors of a major up front, as <name>/<minor> (register_chrdev_p) or as 256 nodes all called <name>
+ * (register_chrdev). On macOS that used every device-node slot a kext has before the first driver attached, and named
+ * nothing where libdrm (/dev/dri), Level Zero and XRT (/dev/accel) look. Registering these two majors only records
+ * their stub file operations.
+ */
+static struct {
+	unsigned int major;
+	const struct file_operations *fops;
+} nmx_named_majors[] = { { 226, NULL }, { 261, NULL } };
+
+static int
+nmx_named_major_slot(unsigned int major)
+{
+	for (int i = 0; i < (int)nitems(nmx_named_majors); i++)
+		if (nmx_named_majors[i].major == major)
+			return (i);
+	return (-1);
+}
+
+/* the stub file operations registered for a per-minor major, or NULL when it is not registered */
+const struct file_operations *
+nmx_chrdev_fops(unsigned int major)
+{
+	int s = nmx_named_major_slot(major);
+
+	return (s < 0 ? NULL : nmx_named_majors[s].fops);
+}
+
 int
 __register_chrdev(unsigned int major, unsigned int baseminor,
     unsigned int count, const char *name,
@@ -2068,6 +2099,10 @@ __register_chrdev(unsigned int major, unsigned int baseminor,
 	int ret = 0;
 	int i;
 
+	if ((i = nmx_named_major_slot(major)) >= 0) {
+		nmx_named_majors[i].fops = fops;
+		return (0);
+	}
 	for (i = baseminor; i < baseminor + count; i++) {
 		cdev = cdev_alloc();
 		cdev->ops = fops;
@@ -2090,6 +2125,10 @@ __register_chrdev_p(unsigned int major, unsigned int baseminor,
 	int ret = 0;
 	int i;
 
+	if ((i = nmx_named_major_slot(major)) >= 0) {
+		nmx_named_majors[i].fops = fops;
+		return (0);
+	}
 	for (i = baseminor; i < baseminor + count; i++) {
 		cdev = cdev_alloc();
 		cdev->ops = fops;
@@ -2109,6 +2148,11 @@ __unregister_chrdev(unsigned int major, unsigned int baseminor,
 	struct linux_cdev *cdevp;
 	int i;
 
+	/* per-minor nodes are removed with their minors (drm_dev_alias_free) */
+	if ((i = nmx_named_major_slot(major)) >= 0) {
+		nmx_named_majors[i].fops = NULL;
+		return;
+	}
 	for (i = baseminor; i < baseminor + count; i++) {
 		cdevp = linux_find_cdev(name, major, i);
 		if (cdevp != NULL)

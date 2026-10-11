@@ -150,8 +150,13 @@ int nmx_xnu_devfs_busy(void);
 /* a clone node at /dev/<path>; 'cookie' is handed back to nmx_cdev_open for every open of it */
 void *nmx_xnu_devfs_make(const char *path, uint32_t uid, uint32_t gid, int mode, void *cookie);
 void nmx_xnu_devfs_remove(void *node);
-/* maps physical pages into the calling process (the GPU mmap ioctl); 'uaddr' receives the user address */
-int nmx_xnu_map_user(const uint64_t *pages, size_t npages, int cache, int writable, uint64_t *uaddr, void **handle);
+/*
+ * maps physical pages into the calling process (the GPU mmap ioctl); 'uaddr' receives the user address. fixed != 0
+ * places the mapping at that address, replacing whatever the process had there (Linux MAP_FIXED); unmapping such a
+ * mapping leaves a hole, as munmap(2) does.
+ */
+int nmx_xnu_map_user(const uint64_t *pages, size_t npages, int cache, int writable, uint64_t fixed, uint64_t *uaddr,
+                     void **handle);
 void nmx_xnu_unmap_user(void *handle);
 
 /* implemented on the LinuxKPI side (override/src/nmx_linux_cdev.c), called by the device-node glue */

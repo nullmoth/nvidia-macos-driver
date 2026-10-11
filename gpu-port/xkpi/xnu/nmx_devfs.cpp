@@ -24,6 +24,15 @@
 #include <libkern/OSAtomic.h>
 #include "nmx_xnu.h"
 
+/* exported to kexts (xnu config: Mach.exports task_reference/task_deallocate; Unsupported.exports get_task_map,
+   vm_deallocate) but not declared in Kernel.framework's headers */
+extern "C" {
+void task_reference(task_t task);
+void task_deallocate(task_t task);
+vm_map_t get_task_map(task_t task);
+kern_return_t vm_deallocate(vm_map_t target, vm_offset_t address, vm_size_t size);
+}
+
 #define NODE_MINORS 256
 #define OPEN_MINOR_MAX 65536
 
@@ -231,12 +240,25 @@ static IOOptionBits cache_option(int cache)
     }
 }
 
-extern "C" int nmx_xnu_map_user(const uint64_t *pages, size_t npages, int cache, int writable, uint64_t *uaddr,
-                                void **handle)
+/*
+ * A fixed mapping is entered over the process's own range with kIOMapOverwrite (atomic, like Linux MAP_FIXED). IOKit
+ * never deallocates an overwrite mapping's range when the map is released (IOMemoryDescriptor::doUnmap), so the
+ * device pages would stay visible to the process after the buffer is freed. The record therefore keeps a reference to
+ * the task and removes the range itself before releasing the map.
+ */
+struct UserMap {
+    IOMemoryMap *map;
+    task_t task;            /* fixed mappings only: the task whose range is removed at unmap */
+    uint64_t addr;
+    uint64_t size;
+};
+
+extern "C" int nmx_xnu_map_user(const uint64_t *pages, size_t npages, int cache, int writable, uint64_t fixed,
+                                uint64_t *uaddr, void **handle)
 {
     *handle = nullptr;
     *uaddr = 0;
-    if (npages == 0)
+    if (npages == 0 || (fixed & PAGE_MASK) != 0)
         return EINVAL;
     IOAddressRange *ranges = (IOAddressRange *)IOMalloc(sizeof(IOAddressRange) * npages);
     if (ranges == nullptr)
@@ -256,19 +278,41 @@ extern "C" int nmx_xnu_map_user(const uint64_t *pages, size_t npages, int cache,
     IOFree(ranges, sizeof(IOAddressRange) * npages);
     if (md == nullptr)
         return ENOMEM;
-    IOOptionBits opts = kIOMapAnywhere | cache_option(cache) | (writable ? 0 : kIOMapReadOnly);
-    IOMemoryMap *map = md->createMappingInTask(current_task(), 0, opts);
-    md->release();
-    if (map == nullptr)
+    UserMap *um = IONew(UserMap, 1);
+    if (um == nullptr) {
+        md->release();
         return ENOMEM;
-    *uaddr = map->getAddress();
-    *handle = map;
+    }
+    IOOptionBits opts = cache_option(cache) | (writable ? 0 : kIOMapReadOnly) | (fixed ? kIOMapOverwrite : kIOMapAnywhere);
+    IOMemoryMap *map = md->createMappingInTask(current_task(), fixed, opts);
+    md->release();
+    if (map == nullptr) {
+        IODelete(um, UserMap, 1);
+        return fixed ? EINVAL : ENOMEM;
+    }
+    um->map = map;
+    um->addr = map->getAddress();
+    um->size = (uint64_t)npages * PAGE_SIZE;
+    um->task = nullptr;
+    if (fixed) {
+        um->task = current_task();
+        task_reference(um->task);
+    }
+    *uaddr = um->addr;
+    *handle = um;
     return 0;
 }
 
 extern "C" void nmx_xnu_unmap_user(void *handle)
 {
-    IOMemoryMap *map = (IOMemoryMap *)handle;
-    if (map)
-        map->release();
+    UserMap *um = (UserMap *)handle;
+    if (um == nullptr)
+        return;
+    if (um->task != nullptr) {
+        /* the range goes first, while the map still holds the pages: the process never sees freed memory */
+        vm_deallocate(get_task_map(um->task), (vm_offset_t)um->addr, (vm_size_t)um->size);
+        task_deallocate(um->task);
+    }
+    um->map->release();
+    IODelete(um, UserMap, 1);
 }
