@@ -95,6 +95,7 @@ static inline uint32_t nvmtl_vk_layers_for_desc(uint32_t t, uint32_t n, uint32_t
   @public NSArray<NSDictionary *> *_fields; NSDictionary *_fieldByIndex;
   int64_t *_offAt; NSUInteger _offN;
   NVMTLBuffer *_dst; NSUInteger _dstOffset; NSString *_label;
+  NSUInteger _airSize, _airAlign;
 } @end
 extern id gNVMTLMainDevice;
 @interface NVMTLLibrary : NSObject <MTLLibrary> { @public NSDictionary<NSString *, NSData *> *_fns; NSMutableDictionary<NSString *, NSData *> *_compiledFns; NSDictionary<NSString *, NSString *> *_stages, *_airs; NSArray<NSString *> *_externs;
@@ -242,6 +243,8 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
 @interface NVMTLLibrary () { @public NSString *_label; } @end
 @interface NVMTLCommandQueue () { @public NSString *_label; } @end
 @interface NVMTLCommandBuffer () { @public NSString *_label; uint64_t _rep; } @end
+@interface NVMTLCommandBuffer () { @public NSMutableSet *_stTwins; } @end
+@interface NVMTLTexture () { @public nvk_image _stTwin; BOOL _stTwinTried; } @end
 @interface NVMTLDepthStencilState () { @public NSString *_label; } @end
 @interface NVMTLSamplerState () { @public NSString *_label; } @end
 @interface NVMTLComputePipelineState () { @public NSString *_label; } @end

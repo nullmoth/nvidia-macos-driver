@@ -866,6 +866,64 @@ static void nvmtl_surf_dirty(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     if (!cb->_surfDirty) cb->_surfDirty = [NSMutableSet new];
     [cb->_surfDirty addObject:r];
 }
+// A texture a kernel writes through a storage binding although NVK cannot make it a storage image - an IOSurface in a
+// pitch-linear layout (ImageIO's RGBA16Unorm HDR / gain-map output), or a format NVK refuses linear storage for. The
+// binding fell back to the dummy image and every write vanished: HDR photos decoded black. The kernel now writes a
+// storage twin of the same VkFormat in optimal tiling, filled from the texture when this encoder first binds it and
+// copied back after every dispatch (nvmtl_storage_twins_out), the IOSurface marked dirty as for a direct write.
+static void nvmtl_retain_resource(NVMTLCommandBuffer *cb, id resource);
+// `writes`: the shader declares a storage binding there. A texture made with MTLTextureUsageUnknown (0) may be used
+// any way Metal allows - ImageIO makes its HDR output IOSurface textures that way and writes them.
+static void *nvmtl_storage_view_for(NVMTLCommandBuffer *cb, NVMTLTexture *t, BOOL writes) {
+    if (!t) return NULL;
+    if (t->_stex) return [t nvview];
+    const MTLTextureUsage usage = (MTLTextureUsage)t->_usage;   // not -usage, which answers ShaderRead for Unknown
+    if (!writes || !cb || cb->_c.in_rp || t->_parent || (usage && !(usage & MTLTextureUsageShaderWrite))) return NULL;
+    nvk_image *im = [t nvi];
+    if (!im || !im->img || !im->w || !im->h || (im->mips ? im->mips : 1) > 1 || (im->layers ? im->layers : 1) > 1
+        || im->mtl_type != 2 || (im->samples ? im->samples : 1) > 1 || im->bw > 1) return NULL;
+    if (!t->_stTwin.img) {
+        if (t->_stTwinTried) return NULL;
+        t->_stTwinTried = YES;
+        if (nvmtl_vk_image_create_typed(im->w, im->h, im->fmt, im->bpp, 0, 1, 1, 2, 1, &t->_stTwin) || !t->_stTwin.storage) {
+            if (t->_stTwin.img) nvmtl_vk_image_destroy(&t->_stTwin);
+            memset(&t->_stTwin, 0, sizeof t->_stTwin);
+            nvlog("storage twin: VkFormat %u %ux%u cannot be a storage image in optimal tiling either - shader writes to it are LOST", im->fmt, im->w, im->h);
+            return NULL;
+        }
+        static int said; if (said++ < 4) nvlog("storage twin: %ux%u VkFormat %u%s is written through an optimal-tiled storage copy", im->w, im->h, im->fmt, t->_surf ? " (IOSurface)" : "");
+    }
+    if (!cb->_stTwins) cb->_stTwins = [NSMutableSet new];
+    if (![cb->_stTwins containsObject:t]) {
+        if (nvmtl_vk_cmd_copy_image_sub(&cb->_c, im, 0, 0, 0, 0, &t->_stTwin, 0, 0, 0, 0, im->w, im->h)) return NULL;
+        [cb->_stTwins addObject:t];
+        nvmtl_retain_resource(cb, t);
+    }
+    nvmtl_vk_cmd_prepare_sampled_image(&cb->_c, &t->_stTwin, 1);
+    return t->_stTwin.view;
+}
+NSDictionary *nvmtl_function_reflection(NVMTLFunction *function);
+static BOOL nvmtl_function_writes_texture(NVMTLFunction *fn, NSUInteger index) {
+    NSArray *bindings = fn ? nvmtl_function_reflection(fn)[@"bindings"] : nil;
+    if (![bindings isKindOfClass:[NSArray class]]) return NO;
+    for (NSDictionary *b in bindings) {
+        if (![b isKindOfClass:[NSDictionary class]] || [b[@"metal_index"] unsignedLongValue] != index) continue;
+        NSString *kind = b[@"kind"], *access = b[@"access"];
+        if (![kind isKindOfClass:[NSString class]] || [kind hasPrefix:@"Embedded"] || [kind isEqualToString:@"Buffer"] || [kind isEqualToString:@"Sampler"]
+            || [kind isEqualToString:@"StaticSampler"]) continue;
+        if ([kind isEqualToString:@"StorageImage"] || ([access isKindOfClass:[NSString class]] && ([access isEqualToString:@"Storage"] || [access isEqualToString:@"ReadWrite"] || [access isEqualToString:@"WriteOnly"]))) return YES;
+    }
+    return NO;
+}
+static void nvmtl_storage_twins_out(NVMTLCommandBuffer *cb) {
+    for (NVMTLTexture *t in cb->_stTwins) {
+        nvk_image *im = [t nvi];
+        if (nvmtl_vk_cmd_copy_image_sub(&cb->_c, &t->_stTwin, 0, 0, 0, 0, im, 0, 0, 0, 0, im->w, im->h)) {
+            nvlog("storage twin: copy back to the %ux%u texture FAILED", im->w, im->h); continue; }
+        nvmtl_vk_cmd_prepare_sampled_image(&cb->_c, &t->_stTwin, 1);
+        nvmtl_surf_dirty(cb, t);
+    }
+}
 static int g_trace_lines;
 static int g_trace_bigonly, g_trace_mute;
 static int nvmtl_trace_on(void) {
@@ -1038,6 +1096,7 @@ extern int nvmtl_depthfmt_public(MTLPixelFormat, uint32_t *, uint32_t *);
     if (!_parent && _parkable && _subHeap && _i.img) nvmtl_heap_park(_subHeap, &_i, _pkey, _heapOffset, _pkLen);
     if (!_parent && _bparkable && _backBuf && _i.img) nvmtl_bpark_put(_backBuf, &_i, _pkey);
     if (!_parent) nvmtl_vk_image_destroy(&_i);
+    if (_stTwin.img) nvmtl_vk_image_destroy(&_stTwin);
     if (!_parent && _vramOn) { nvmtl_vk_buffer_destroy(&_vramBuf); _vramOn = NO; }
     if (_surfOwned && _surf) CFRelease(_surf);
     if (_subHeap) { NVMTLHeap *h = _subHeap; NSUInteger c = _subCharge; _subHeap = nil; _subCharge = 0;
@@ -1330,6 +1389,7 @@ static uint32_t nvmtl_tex_attach_vkfmt(NVMTLTexture *t, int *a8) {
 @end
 
 NSArray<NSDictionary *> *nvmtl_argbuf_fields(NVMTLFunction *function, NSUInteger ownerBufferIndex);
+NSArray<NSDictionary *> *nvmtl_air_argbuf_layout(NVMTLFunction *fn, NSUInteger bufferIndex, NSUInteger *size, NSUInteger *align);
 NSData *nvmtl_translate_with_fc(NSString *air, NSString *stage, const uint32_t *idx, const uint32_t *sizes,
                                 const uint8_t *const *payloads, size_t n, NSString **err);
 NSData *nvmtl_translate_with_fc_cached(NSString *air, NSString *stage, NSString *name, NSDictionary *constants,
@@ -1570,10 +1630,16 @@ static NSDictionary *nvmtl_ci_stitch_entry(NVMTLFunction *fn)
     return _bcHash;
 }
 - (id<MTLArgumentEncoder>)newArgumentEncoderWithBufferIndex:(NSUInteger)index {
-    NSArray *fields = nvmtl_argbuf_fields(self, index);
-    if (!fields.count) { nvlog("newArgumentEncoderWithBufferIndex:%lu — %s declares no argument buffer there", (unsigned long)index, _fname.UTF8String); return nil; }
+    // The AIR layout names every member (constants and nested structs too) with Metal's [[id]] and offset; the
+    // translator's fields add any resource the AIR walk did not reach.
+    NSUInteger airSize = 0, airAlign = 0;
+    NSMutableArray *fields = [nvmtl_air_argbuf_layout(self, index, &airSize, &airAlign) mutableCopy];
+    NSMutableSet *ids = [NSMutableSet set]; for (NSDictionary *f in fields) [ids addObject:f[@"argument_index"]];
+    for (NSDictionary *f in nvmtl_argbuf_fields(self, index)) if (![ids containsObject:@([f[@"argument_index"] unsignedLongValue])]) [fields addObject:f];
+    if (!fields.count && !airSize) { nvlog("newArgumentEncoderWithBufferIndex:%lu — %s declares no argument buffer there", (unsigned long)index, _fname.UTF8String); return nil; }
     NVMTLArgumentEncoder *e = [NVMTLArgumentEncoder new];
     e->_fields = fields; e->_fieldByIndex = nvmtl_index_argument_fields(fields);
+    e->_airSize = airSize; e->_airAlign = airAlign;
     return e;
 }
 - (NSArray<MTLVertexAttribute *> *)vertexAttributes { return (NSArray<MTLVertexAttribute *> *)nvmtl_vertex_attributes_for(self); }
@@ -1924,9 +1990,9 @@ NSDictionary *nvmtl_index_argument_fields(NSArray *fields) {
         NSUInteger e = [f[@"field_offset"] unsignedLongValue] + 8;
         if (e > end) end = e;
     }
-    return end ?: 8;
+    return MAX(end, _airSize) ?: 8;
 }
-- (NSUInteger)alignment { return 8; }
+- (NSUInteger)alignment { return _airAlign ?: 8; }
 - (void)setArgumentBuffer:(id<MTLBuffer>)b offset:(NSUInteger)off { _dst = (NVMTLBuffer *)b; _dstOffset = off; nvtrace("AE argbuf %p off %lu (%lu fields)", (__bridge void *)b, (unsigned long)off, (unsigned long)_fields.count); }
 - (void)setArgumentBuffer:(id<MTLBuffer>)b startOffset:(NSUInteger)off arrayElement:(NSUInteger)i {
     [self setArgumentBuffer:b offset:off + i * [self encodedLength]];
@@ -4097,7 +4163,7 @@ static void nvmtl_zprobe_drain(void) {
     else {
     if (nvmtl_vk_cmd_prepare_sampled_image(&_cb->_c, [nt nvi], nt->_stex)) { nvlog("compute setTexture: image layout preparation refused"); return; }
     if (nvmtl_vk_bind_texture_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, [nt nvview])) nvlog("compute setTexture: bind FAILED");
-    nvmtl_vk_bind_storage_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, nt->_stex ? [nt nvview] : NULL);
+    nvmtl_vk_bind_storage_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, nvmtl_storage_view_for(_cb, nt, nt->_stex || nvmtl_function_writes_texture(_ps ? _ps->_function : nil, i)));
     }
 }
 - (void)nvmtlE78Barrier:(BOOL)indirect {
@@ -4133,8 +4199,8 @@ static void nvmtl_zprobe_drain(void) {
         nvtrace("DISPATCH %s | threads %ux%ux%u tg %ux%ux%u", (_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL) ?: "-", t[0], t[1], t[2], l[0], l[1], l[2]);
         nvtrace("  BUFS%s", bufs_); }
     [self nvmtlE78Barrier:NO];
-    if (nvmtl_vendor_dispatch_sass(selected, &_cb->_c, t, l) == 0) return;
-    nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, l);
+    if (nvmtl_vendor_dispatch_sass(selected, &_cb->_c, t, l) != 0) nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, l);
+    if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
 }
 - (void)dispatchThreads:(MTLSize)threads threadsPerThreadgroup:(MTLSize)tg {
     NVMTLComputePipelineState *selected = [self nvmtlSamplerPipeline];
@@ -4147,8 +4213,8 @@ static void nvmtl_zprobe_drain(void) {
         nvtrace("DISPATCH %s | threads %ux%ux%u tg %ux%ux%u", (_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL) ?: "-", t[0], t[1], t[2], l[0], l[1], l[2]);
         nvtrace("  BUFS%s", bufs_); }
     [self nvmtlE78Barrier:NO];
-    if (nvmtl_vendor_dispatch_sass(selected, &_cb->_c, t, l) == 0) return;
-    nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, l);
+    if (nvmtl_vendor_dispatch_sass(selected, &_cb->_c, t, l) != 0) nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, l);
+    if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
 }
 - (void)setBufferOffset:(NSUInteger)off atIndex:(NSUInteger)i {
     { NSArray *b = _bufAt[@(i)]; if (b) _bufAt[@(i)] = @[b[0], @(off)]; }
@@ -4211,6 +4277,7 @@ static void nvmtl_zprobe_drain(void) {
     if (nvmtl_vk_tg_reject(l, NULL, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, selected->_p.lin)) return;
     [self nvmtlE78Barrier:YES];
     nvmtl_vk_cmd_dispatch_indirect_tg(&_cb->_c, &selected->_p, &nb->_b, off, l);
+    if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
 }
 - (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u { nvmtl_retain_resource(_cb, r); }
 - (void)useResources:(const id<MTLResource> __unsafe_unretained [])r count:(NSUInteger)n usage:(MTLResourceUsage)u { for (NSUInteger i=0;i<n;i++) nvmtl_retain_resource(_cb,r[i]); }
@@ -4231,6 +4298,7 @@ static void nvmtl_zprobe_drain(void) {
         _e78Loose = NO; _g79Bar = NO;
     } else if (_e78Loose || _g79Bar) { nvmtl_vk_cmd_barrier(&_cb->_c); _e78Loose = NO; _g79Bar = NO; nvmtl_enc78_count(E78C_ENDFULL, 1); }
     nvmtl_g79_census();
+    [_cb->_stTwins removeAllObjects];   // the next encoder copies each twin in again
     _cb->_nEnd++; nvmtl_enc78_census();
     // The command buffer holds every resource until the GPU is done; the encoder's own binding tables are dead after
     // this point, as in Apple's encoders. WAS: kept until dealloc, which MPS defers to the completion handler; by then
