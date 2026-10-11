@@ -283,7 +283,14 @@ func failurePart(_ u: URL) -> String {
 func makeReport(_ crashes: [URL]) -> String {
     var r = ""
     for u in crashes.suffix(3) {
-        r += "\n=== \(u.lastPathComponent.replacingOccurrences(of: #"-\d{4}-\d{2}-\d{2}-\d{6}"#, with: "", options: .regularExpression)) ===\n"
+        // The date and "before this install" ride in the header: 1.12 reports carried mediaanalysisd crashes from a 1.9
+        // plugin (the return address fits only 1.3-1.9's drawPrimitives) and read as a 1.12 regression (10-11).
+        let fmc = FileManager.default
+        let when = (try? fmc.attributesOfItem(atPath: u.path))?[.modificationDate] as? Date
+        let installed = (try? fmc.attributesOfItem(atPath: "/Library/NullMoth/state"))?[.modificationDate] as? Date
+        let stamp = when.map { ISO8601DateFormatter().string(from: $0) } ?? "date unknown"
+        let old = (when != nil && installed != nil && when! < installed!) ? ", BEFORE this driver install" : ""
+        r += "\n=== \(u.lastPathComponent.replacingOccurrences(of: #"-\d{4}-\d{2}-\d{2}-\d{6}"#, with: "", options: .regularExpression)) (\(stamp)\(old)) ===\n"
         r += failurePart(u) + "\n"
     }
     return hardwareFacts() + redact(r)

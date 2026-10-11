@@ -4,6 +4,22 @@ B=7C436110-AB2A-4BBB-A880-FE41995C9F82
 # ipc_control_port_options=0: with AMFI relaxed, Firefox and other hardened apps crash at launch on their task control
 # port (10-10 chat: Firefox "instant crash", fixed by this argument); OpenCore Legacy Patcher sets it for the same reason.
 WANT_ARGS="nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80 ipc_control_port_options=0"
+# The NVIDIA display card's PCI device id (4 hex digits), read from the registry.
+nv_device_id() {
+  ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | LC_ALL=C awk '
+    function emit() { if (v && c && d != "") { print substr(d,3,2) substr(d,1,2); found=1; exit } }
+    /\+-o / { emit(); v=0; c=0; d="" }
+    /"vendor-id" = <de100000>/ { v=1 }
+    /"class-code" = <00000300>/ { c=1 }
+    /"device-id" = </ { if (match($0, /<[0-9a-f]+>/)) d=substr($0, RSTART+1, 4) }
+    END { if (!found) emit() }'
+}
+# Turing (TU102/104/106/117 = 1E00-1FFF, TU116 = 2180-21FF) needs longer for GSP to settle before the display arms:
+# a GTX 1660 SUPER stuck at boot on the 0.5 s default and started with nvrmsettle=10000, as an RTX 2070 SUPER had
+# (Discord 10-11, after 1.12). Only added when the user has not chosen a value.
+NVDEV=$(nv_device_id)
+case "$NVDEV" in 1[eEfF]??|21[89a-fA-F]?) TURING=1;; *) TURING=0;; esac
+[ "$TURING" = 1 ] && WANT_ARGS="$WANT_ARGS nvrmsettle=10000"
 DROP_ARGS="nv_disable=1 -wegnoegpu"          # both hide the NVIDIA card from macOS
 SIP_BITS=$((0x0A43))
 TOOL_NAME="1401: Remove NVIDIA driver"; TOOL_FILE=NullMothSafe.efi
@@ -658,7 +674,9 @@ step "Checking the OpenCore settings"
 EDITS=(); ADDED=""; REMOVED=""
 args=$(get NVRAM.Add.$B.boot-args); new=""
 for a in $args; do case " $DROP_ARGS " in *" $a "*) echo "CHANGE boot-args: remove $a (it hides the NVIDIA card)"; REMOVED="$REMOVED $a";; *) new="$new $a";; esac; done
-for a in $WANT_ARGS; do case " $new " in *" $a "*) ;; *) new="$new $a"; ADDED="$ADDED $a"; echo "CHANGE boot-args: add $a";; esac; done
+for a in $WANT_ARGS; do
+  case "$a" in nvrmsettle=*) case " $new " in *" nvrmsettle="*) continue;; esac;; esac   # the user's own value wins
+  case " $new " in *" $a "*) ;; *) new="$new $a"; ADDED="$ADDED $a"; echo "CHANGE boot-args: add $a";; esac; done
 new=${new# }
 [ "$new" != "$args" ] && EDITS+=("NVRAM.Add.$B.boot-args|-string|$new")
 cur=$(csr_of); want=$(( cur | SIP_BITS ))
