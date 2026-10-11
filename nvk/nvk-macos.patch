@@ -11663,7 +11663,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +    if (reuse) gPoolHit++; else gPoolMiss++;
 +    pthread_mutex_unlock(&gLock);
 +    if (reuse) {
-+        int rfd = open("/dev/null", O_RDWR | O_CLOEXEC);
++        int rfd = open("/dev/null", O_RDONLY | O_CLOEXEC);
 +        if (rfd < 0 || rfd >= NVRM_XNU_MAX_FD) {
 +            if (rfd >= 0) close(rfd);
 +            pthread_mutex_lock(&gLock);
@@ -11693,7 +11693,9 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +    }
 +    if (svc) IOObjectRelease(svc);
 +    if (kr != KERN_SUCCESS) { fprintf(stderr, "nvrm_xnu: IOServiceOpen(type %u) 0x%08x\n", type, kr); errno = EIO; return -1; }
-+    int fd = open("/dev/null", O_RDWR | O_CLOEXEC);
++    // read-only: the fd is only a handle number; browser GPU sandboxes allow reading /dev/null but not opening it
++    // read-write, so with O_RDWR Safari/Chromium GPU processes saw no device and no WebGL (user report 10-10)
++    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
 +    if (fd < 0 || fd >= NVRM_XNU_MAX_FD) { IOServiceClose(conn); if (fd >= 0) close(fd); errno = EMFILE; return -1; }
 +    uint64_t in = (uint64_t)fd;
 +    IOConnectCallScalarMethod(conn, SEL_BINDFD, &in, 1, NULL, NULL);
