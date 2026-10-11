@@ -34,7 +34,23 @@ fn threadgroup_lengths() -> Vec<(u32, u32)> {
     })
 }
 
+// The pipeline's raster sample count, for air.get_num_samples (fragment shaders read it; ANGLE's WebGL shaders do).
+// WAS: never set by the driver, so every such shader failed to translate ("requires TransformOptions::raster_sample_count")
+// and WebGL pages said the browser has no WebGL. 0 = the plugin did not say: one sample, which is every pipeline without
+// MSAA. The plugin can name the real count for an MSAA pipeline with nvmtl_translate_set_raster_sample_count.
+thread_local! { static RSC: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
+#[no_mangle]
+pub extern "C" fn nvmtl_translate_set_raster_sample_count(n: u32) { RSC.with(|c| c.set(n)); }
+fn apply_rsc(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::passes::TransformOptions {
+    if o.raster_sample_count.is_none() {
+        let n = RSC.with(|c| c.get());
+        o.raster_sample_count = Some(if matches!(n, 1 | 2 | 4 | 8 | 16 | 32 | 64) { n } else { 1 });
+    }
+    o
+}
+
 fn apply_tg(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::passes::TransformOptions {
+    o = apply_rsc(o);
     for (index, length) in threadgroup_lengths() {
         match o.with_threadgroup_memory_length(index, length) {
             Ok(next) => o = next,
@@ -594,7 +610,7 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
             }
         }
         if used==0{return translate_one(ll,st)}
-        metal2vulkan::translate_native_no_retry_constructed_with_options(ll,st,opts)
+        metal2vulkan::translate_native_no_retry_constructed_with_options(ll,st,apply_rsc(opts))
     })();
     match result {
         Ok(bytes)=>{let mut b=bytes.into_boxed_slice();*out=b.as_mut_ptr();*out_len=b.len();std::mem::forget(b);0}

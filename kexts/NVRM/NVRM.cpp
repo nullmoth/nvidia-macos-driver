@@ -106,6 +106,7 @@ public:
     static void headWatch(void *p0, wait_result_t w);
     IOBufferMemoryDescriptor *fBootScreen = nullptr; uint32_t fBootW = 0, fBootH = 0, fBootPitch = 0;
     uint32_t     fAutoGoSettleMs = 10000;
+    bool         fBar1Placed = false;
     volatile UInt32 fBootHold = 0;
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait,
                                          void *p1, void *p2, void *p3, void *p4) override;
@@ -303,6 +304,7 @@ bool NVRM::start(IOService *provider)
     nv->fb   = &nv->bars[NV_GPU_BAR_INDEX_FB];
     snapshotBootScreen();
     const bool bar1Placed = placeLargeBar1();
+    fBar1Placed = bar1Placed;
     readBARs();
     {
         const char *nm = rm_get_device_name(nv->pci_info.device_id, nv->subsystem_vendor, nv->subsystem_id);
@@ -579,6 +581,24 @@ void NVRM::autoGo(void *p0, wait_result_t)
         s->releaseBootHold(armed == 1 && ag == 1 && iop == 1 ? "display armed" : "display PARTIAL");
         if (armed == 1 && iop == 1 && !PE_parse_boot_argn("-nvrmnoflip", nb, sizeof(nb))) {
             IOSleep(60000);
+            // Zero-copy scan-out shows only what sits in this GPU's VRAM. Two setups black the screen (cursor only) the
+            // moment it starts, 60 s after the desktop came up on the copy path, and every report was fixed by
+            // -nvrmnoflip: a second accelerated GPU (Intel/AMD iGPU; WindowServer composites there, issues #16 #26), and
+            // a BAR1 left at its small firmware window (256 MB, no Resizable BAR; #20 #54 #82). Both keep the copy path.
+            const char *why = nullptr;
+            if (!s->fBar1Placed) why = "BAR1 not placed (small firmware window)";
+            else if (OSIterator *it = IOService::getMatchingServices(IOService::serviceMatching("IOAccelerator"))) {
+                while (OSObject *o = it->getNextObject()) {
+                    const char *cn = o->getMetaClass()->getClassName();
+                    if (cn && strncmp(cn, "NV", 2)) { why = "another GPU's accelerator is running"; LOG("auto-go: accelerator %s present", cn); break; }
+                }
+                it->release();
+            }
+            if (why) {
+                LOG("auto-go: zero-copy flip NOT started: %s; the copy path stays (as -nvrmnoflip)", why);
+                s->setProperty("nvrm-flip", "off (copy path)");
+                s->release(); thread_terminate(current_thread()); return;
+            }
             int f = -99; nvrmSysW("debug.nvaccel_iop_flip", 1); nvrmSysR("debug.nvaccel_iop_flip", &f);
             LOG("auto-go: flip debug.nvaccel_iop_flip=%d (60 s after the release)", f);
             s->setProperty("nvrm-flip", f == 1 ? "on" : "FAILED");

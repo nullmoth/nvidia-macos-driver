@@ -1,0 +1,16 @@
+[package]
+name = "nullmoth-logo"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "OpenCore driver: the boot logo macOS boot.efi draws, through the Apple Image Conversion protocol"
+
+[dependencies]
+uefi = { version = "0.41.0", features = ["panic_handler", "alloc", "global_allocator"] }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+
+[profile.dev]
+panic = "abort"

@@ -206,6 +206,29 @@ if [ -n "$COLLECT" ]; then
       --predicate 'process == "kernel" AND (eventMessage CONTAINS "NVRM-fb" OR eventMessage CONTAINS "nvkms")' 2>&1 \
       | grep -v -e 'kapi event type 5$' -e 'flipToMemory #' | head -n 4000
   } > "$COLLECT/driver-display.txt" 2>&1
+  # Every GPU and the processor, whatever the vendor and age, supported by NullMoth or not (maintainer 10-11: "open macOS up
+  # for everyone"). The sections above only name NVIDIA; Intel iGPUs (HD to Xe and Arc), Radeon cards and Ryzen iGPUs
+  # need the same facts: what macOS bound to them, whether Metal sees them, and what the boot loader injected.
+  { echo "== every display device (any vendor)"
+    ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | LC_ALL=C awk '
+      /\+-o / { if (gpu) print block "\n"; block=$0; gpu=0; next }
+      /"class-code" = <[0-9a-f][0-9a-f][0-9a-f][0-9a-f]0300>/ { gpu=1 }   # class 03xx: VGA (0300), XGA, 3D controller (0302: many laptop dGPUs)
+      /"(vendor-id|device-id|subsystem-vendor-id|subsystem-id|revision-id|class-code|model|acpi-path|pcidebug|AAPL,ig-platform-id|AAPL,snb-platform-id|framebuffer-[^"]*|device-id-spoof|built-in|hda-gfx|IOName|IOPCIExpressLinkStatus|IOPCIResourced)"/ { block=block "\n" $0 }
+      END { if (gpu) print block }'
+    echo; echo "== accelerators (a GPU macOS accelerates has one, with its Metal plugin)"
+    ioreg -r -c IOAccelerator -d 1 -w0 2>/dev/null | LC_ALL=C grep -aoE '\+-o [A-Za-z0-9_]+|"(MetalPluginName|MetalPluginClassName|IOGLBundleName|IOClass|GPUConfigurationVariable|model)" = [^,}]{0,120}'
+    echo; echo "== framebuffers (which driver owns each screen)"
+    ioreg -r -c IOFramebuffer -d 1 -w0 2>/dev/null | LC_ALL=C grep -aoE '\+-o [A-Za-z0-9_@,]+|"(IOFBCurrentPixelClock|IOFBCurrentPixelCount|IOFBDependentID|IOFBDependentIndex|AAPL,boot-display|IOFBScalerInfo)" = [^,}]{0,80}'
+    echo; echo "== graphics kexts loaded"
+    kmutil showloaded --list-only 2>/dev/null | grep -iE 'graphic|intel|amd|radeon|ati|nvidia|nullmoth|lilu|whatevergreen|noot|gfx|framebuffer|accel' | awk '{print $NF, $(NF-1)}'
+    echo; echo "== Metal"; system_profiler SPDisplaysDataType 2>/dev/null
+    echo; echo "== processor"
+    sysctl machdep.cpu hw.physicalcpu hw.logicalcpu hw.memsize hw.cpufrequency hw.packages 2>/dev/null
+    echo; echo "== graphics messages since this boot (non-NVIDIA drivers)"
+    boot=$(sysctl -n kern.boottime | sed -E 's/.*sec = ([0-9]+),.*/\1/')
+    log show --start "$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')" --style compact \
+      --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "igfx" OR eventMessage CONTAINS[c] "IntelAccel" OR eventMessage CONTAINS[c] "AppleIntel" OR eventMessage CONTAINS[c] "AMDRadeon" OR eventMessage CONTAINS[c] "ATIController" OR eventMessage CONTAINS[c] "AMDFramebuffer" OR eventMessage CONTAINS[c] "NMIntelFB" OR eventMessage CONTAINS[c] "WhateverGreen" OR eventMessage CONTAINS[c] "IOAccel")' 2>&1 | head -n 3000
+  } > "$COLLECT/gpu-all.txt" 2>&1
   log_status=${PIPESTATUS[0]}; echo "log show exit: $log_status" >> "$COLLECT/driver-kernel-log.txt"
   # The current kernel message ring can retain early GSP/BAR failures absent from the log store.
   { echo; echo "== current kernel message ring"; dmesg 2>&1 | grep -iE 'nvrm|nvaccel|nvidia|nullmoth|gsp' | tail -n 2000; } >> "$COLLECT/driver-kernel-log.txt"
@@ -498,8 +521,12 @@ else
         # The usual tie: OpenCore was copied from the 1401 stick to the macOS disk, so both configs set this serial.
         # The copy on the disk macOS runs from is the one in use once a Mac starts without the stick (measured on a
         # Mac with both: the internal copy is what started it).
-        esp=$(boot_esp)
-        for d in $match; do [ "$d" = "$esp" ] && { found=$d; BOOT_BOUND=1; ok "OpenCore started this Mac from $d (on the macOS disk; the copy on$(echo " $match" | sed "s/ $d//") sets the same serial)"; }; done
+        # Only when one match is on that disk: with two OpenCore partitions on the macOS disk itself (an EFI partition and
+        # a FAT one labelled EFI, issue #81) the ESP is not necessarily the one that started it; the boot-args test below decides.
+        esp=$(boot_esp); edisk=${esp%s[0-9]*}; ondisk=0
+        for d in $match; do [ "${d%s[0-9]*}" = "$edisk" ] && ondisk=$((ondisk + 1)); done
+        [ "$ondisk" = 1 ] && for d in $match; do [ "$d" = "$esp" ] && { found=$d; BOOT_BOUND=1; ok "OpenCore started this Mac from $d (on the macOS disk; the copy on$(echo " $match" | sed "s/ $d//") sets the same serial)"; }; done
+        [ "$ondisk" -gt 1 ] && found=${match# }
       fi
     fi
     # Still two or more (user reports 10-10, Mac 1.5 and 1.6: disk0s1 + disk2s1, neither config's serial matched): OpenCore

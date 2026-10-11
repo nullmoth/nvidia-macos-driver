@@ -74,7 +74,15 @@ const NM = {
         $("updr").innerHTML = data.newer ? `${have}newest ${esc(data.latest)} - ready to update.` : `${have}you have the newest driver (${esc(data.latest)}).`;
         $("upddrv").hidden = !data.newer;
         $("upddrv").disabled = !data.newer;
+        if (data.app) $("updr").innerHTML += data.appNewer ? ` App ${esc(data.appHave)} -> ${esc(data.app)} is ready.` : ` The app (${esc(data.appHave)}) is up to date.`;
+        $("updapp").hidden = !data.appNewer;
+        $("updapp").disabled = !data.appNewer;
       }
+    }
+    if (event === "appupd") {
+      if (data.state === "error") { $("updapp").disabled = false; $("updr").innerHTML = `<span class="bad">${esc(data.why)}</span>`; }
+      if (data.state === "start") $("updr").textContent = `Downloading 1401 ${data.version}...`;
+      if (data.state === "restarting") $("updr").textContent = `1401 ${data.version} checked - restarting into it...`;
     }
     if (event === "run") {
       const busy = data.state === "start";
@@ -98,6 +106,7 @@ $("efi").onchange = () => {
 };
 $("dl").onclick = () => post({ act: "download" });
 $("updchk").onclick = () => { $("updr").textContent = "Checking..."; post({ act: "checkUpdate" }); };
+$("updapp").onclick = () => { $("updapp").disabled = true; post({ act: "updateApp" }); };
 $("upddrv").onclick = () => { $("upddrv").disabled = true; $("updr").textContent = "Downloading the newest driver..."; post({ act: "updateDriver", efi: efi() }); };
 $("ocg").onclick = (e) => { e.preventDefault(); post({ act: "open", url: "https://dortania.github.io/OpenCore-Install-Guide/" }); };
 $("dry").onclick = () => post({ act: "run", mode: "dry", pkg: S.pkg, efi: efi() });
