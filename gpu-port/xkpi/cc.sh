@@ -9,7 +9,7 @@ A=$D/drivers/gpu/drm/amd
 SDK=$(xcrun --sdk macosx --show-sdk-path)
 KF=$SDK/System/Library/Frameworks/Kernel.framework/Headers
 src=$1; shift
-exec xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -mkernel -fapple-kext -nostdinc -std=gnu11 \
+exec xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -ffile-prefix-map=$NULLMOTH_BUILD_ROOT/build/gpu-src=/src -mkernel -fapple-kext -nostdinc -std=gnu11 \
   -fno-builtin -fno-common -fno-strict-aliasing -fms-extensions -O2 -g0 \
   -Wno-pointer-sign -Wno-unused-parameter -Wno-microsoft-anon-tag -ferror-limit=80 \
   -D_KERNEL -DKERNEL -DKERNEL_PRIVATE -DLINUXKPI_VERSION=61400 -DNMXKPI=1 \

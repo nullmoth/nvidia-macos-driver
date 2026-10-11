@@ -1,6 +1,6 @@
 #!/bin/bash
 set -u
-KEXTS="NVRM NVAccel NVRMFB NVRMAGDC"; EXT=/Library/Extensions; GB=/Library/GPUBundles
+KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NMXGPU"   # NMXGPU: the opt-in AMD/Intel GPU driver, when it was turned on; EXT=/Library/Extensions; GB=/Library/GPUBundles
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 K=/System/Library/Kernels/kernel
 KARG=(--allow-missing-kdk); [ -f "$K" ] && KARG+=(--kernel "$K")   # without a matching Kernel Debug Kit, kmutil needs --allow-missing-kdk
@@ -64,13 +64,13 @@ fi
 if [ -z "$RB" ]; then RB=$(mktemp -d /var/tmp/nullmoth-remove.XXXX) && [ -n "$RB" ] || die "cannot create the removal backup"; fi
 for k in $KEXTS; do [ ! -e "$EXT/$k.kext" ] || ditto "$EXT/$k.kext" "$RB/$k.kext" || die "cannot back up $k"; done
 for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do [ ! -e "$GB/$b" ] || ditto "$GB/$b" "$RB/$b" || die "cannot back up $b"; done
-for f in /Library/NullMoth/kexts /Library/NullMoth/driver-version /Library/NullMoth/update-pending /Library/LaunchDaemons/com.nullmoth.osupdate.plist "$KC"; do
+for f in /Library/NullMoth/kexts /Library/NullMoth/firmware /Library/NullMoth/driver-version /Library/NullMoth/update-pending /Library/LaunchDaemons/com.nullmoth.osupdate.plist "$KC"; do
   [ ! -e "$f" ] || cp -Rp "$f" "$RB/" || die "cannot back up the removal state"
 done
 REMOVING=1
 for k in $KEXTS; do rm -rf "$EXT/$k.kext" || die "cannot remove $k"; done
 for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do rm -rf "$GB/$b" || die "cannot remove $b"; done
-rm -rf /Library/NullMoth/kexts /Library/NullMoth/driver-version /Library/NullMoth/update-pending /Library/LaunchDaemons/com.nullmoth.osupdate.plist || die "cannot remove the cached driver or update switcher"
+rm -rf /Library/NullMoth/kexts /Library/NullMoth/firmware /Library/NullMoth/driver-version /Library/NullMoth/update-pending /Library/LaunchDaemons/com.nullmoth.osupdate.plist || die "cannot remove the cached driver or update switcher"
 if [ "$REMOVE_KC" = 1 ]; then
   rm -f "$KC" "$KC.nullmoth-install-new" "$KC.nullmoth-update-new" "$KC.nullmoth-remove-new" || die "cannot remove the auxiliary collection"
 elif [ "$CANDIDATE" = "$NEWKC" ]; then

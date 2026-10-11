@@ -191,6 +191,11 @@ for target in 15 26; do
   (cd "$dir" && find NVAccel.kext -type f -exec shasum -a 256 '{}' \;) > "$dir/SHA256SUMS" || die "cache manifest for macOS $target"
 done
 chown -R root:wheel /Library/NullMoth/kexts && chmod -R go-w /Library/NullMoth/kexts || die "cached accelerator permissions"
+# the AMD/Intel GPU driver (opt-in, setup --gpu-test): when it is on, an update brings its new build along
+if [ -d "$EXT/NMXGPU.kext" ] && [ -d /Library/NullMoth/kexts/15/NMXGPU.kext ]; then
+  rm -rf "$EXT/NMXGPU.kext" && ditto /Library/NullMoth/kexts/15/NMXGPU.kext "$EXT/NMXGPU.kext" && chown -R root:wheel "$EXT/NMXGPU.kext" \
+    && chmod -R 755 "$EXT/NMXGPU.kext" || die "refresh the AMD/Intel GPU driver (restore from $BK)"
+fi
 echo "$MAJ" > /Library/NullMoth/os-major || die "record selected OS"
 mkdir -p "$GB" "$FW" || die "create bundle and firmware directories"
 # $GB/nvmtl is replaced wholesale below, so move the shared shader caches aside first. NVMTLLibraryLoad.m

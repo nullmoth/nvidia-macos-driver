@@ -35,7 +35,7 @@ KNOBS=(); PROFILE=""; COLLECT=""; UPD=""; VERB=""; PKG=""; SHA=""; CFG=""; EFI=a
 while [ $# -gt 0 ]; do case "$1" in
   --pkg) PKG=$2; shift;; --sha) SHA=$2; shift;; --config) CFG=$2; shift;; --efi) EFI=$2; shift;;
   --tool) TOOL=$2; shift;; --usbmap) USBMAP=$2; shift;; --app) APPBIN=$2; shift;; --dry) DRY=1;; --remove) REMOVE=1;; --verbose) VERB=$2; shift;; --update) UPD=$2; shift;; --collect-logs) COLLECT=$2; shift;;
-  --knob) KNOBS+=("$2"); shift;; --profile) PROFILE=$2; shift;; --logo) LOGO=$2; shift;; --set-logo) SETLOGO=$2; shift;;
+  --knob) KNOBS+=("$2"); shift;; --profile) PROFILE=$2; shift;; --logo) LOGO=$2; shift;; --set-logo) SETLOGO=$2; shift;; --gpu-test) GPUTEST=$2; shift;;
   *) echo "STOP unknown option $1"; echo "RESULT stop"; exit 2;; esac; shift; done
 step() { echo "STEP $*"; }; ok() { echo "OK $*"; }; note() { echo "NOTE $*"; }
 KT=""
@@ -637,6 +637,62 @@ if [ -n "${SETLOGO:-}" ]; then
   elif [ -n "$li" ]; then plutil -replace UEFI.Drivers.$li.Enabled -bool false "$C" || fail=1; fi
   if [ $fail = 1 ] || ! plutil -lint "$C" >/dev/null; then cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; fi
   ok "boot logo $SETLOGO - takes effect at the next restart"; cleanup; echo "RESULT ok"; exit 0
+fi
+
+if [ -n "${GPUTEST:-}" ]; then
+  # The app's "AMD / Intel GPU driver (test)": NMXGPU (amdgpu and i915 for macOS) for the AMD and Intel GPUs this Mac
+  # has, opt-in per vendor with nmxamd=1 / nmxintel=1. On: the GPU firmware from linux-firmware at the commit the
+  # manifest pins, every file SHA-256 checked; the kext into /Library/Extensions; a new auxiliary kernel collection,
+  # checked to contain it; the boot argument. Off undoes each step. The "Start once without NVIDIA driver" entry
+  # (-nvoff) parks this driver too, and taking a GPU that lights the screen resets that screen, so it stays opt-in.
+  case "$GPUTEST" in on|off) ;; *) stop "--gpu-test takes on or off";; esac
+  GK=/Library/NullMoth/kexts/15/NMXGPU.kext; GFW=/Library/NullMoth/firmware; EXT=/Library/Extensions
+  MAN="$(dirname "${TOOL:-/nonexistent}")/nullmoth-gpu-firmware.txt"; [ -f "$MAN" ] || MAN="$(dirname "$0")/nullmoth-gpu-firmware.txt"
+  # vendors of the display-class PCI functions present (class 03xxxx; ioreg prints vendor-id/class-code little-endian)
+  # (the two keys come in either order, so each device's pair is printed when the next device starts)
+  VENDORS=$(ioreg -r -c IOPCIDevice -l -w0 | LC_ALL=C awk -F'<|>' '/\+-o /{if (c=="03") print v; c=""; v=""}
+    /"vendor-id" =/{v=substr($2,3,2) substr($2,1,2)} /"class-code" =/{c=substr($2,5,2)} END{if (c=="03") print v}' | sort -u)
+  WANT=""; for v in $VENDORS; do case $v in 1002) WANT="$WANT -nmxamd";; 8086) WANT="$WANT -nmxintel";; esac; done
+  BKC="$C.nullmoth-gputest-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C"
+  ga() {  # $1 = add|del, $2 = boot argument; the config and NVRAM together
+    local a new="" nv=""
+    for a in $(get NVRAM.Add.$B.boot-args); do [ "$a" = "$2" ] || new="$new $a"; done
+    [ "$1" = add ] && new="$new $2"; new=${new# }
+    if has NVRAM.Add.$B.boot-args; then plutil -replace NVRAM.Add.$B.boot-args -string "$new" "$C"; else plutil -insert NVRAM.Add.$B.boot-args -string "$new" "$C"; fi
+    for a in $(nvram boot-args 2>/dev/null | cut -f2-); do [ "$a" = "$2" ] || nv="$nv $a"; done
+    [ "$1" = add ] && nv="$nv $2"; nvram boot-args="${nv# }" || note "could not write NVRAM boot-args"; }
+  auxkc() {
+    K=/System/Library/Kernels/kernel; KA=(--allow-missing-kdk); [ -f "$K" ] && KA+=(--kernel "$K")
+    kmutil create -n aux --volume-root / "${KA[@]}" -B /System/Library/KernelCollections/BootKernelExtensions.kc \
+      -S /System/Library/KernelCollections/SystemKernelExtensions.kc --repository "$EXT" \
+      -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc -z > "$ST/gputest-kmutil.log" 2>&1; }
+  if [ "$GPUTEST" = on ]; then
+    [ -n "$WANT" ] || stop "this Mac has no AMD or Intel GPU for this driver"
+    [ -d "$GK" ] || stop "this driver package has no AMD/Intel GPU driver (NMXGPU) - update the driver first"
+    [ -f "$MAN" ] || stop "this copy of the app has no GPU firmware list"
+    step "Downloading the GPU firmware (linux-firmware, every file checked)"
+    COMMIT=$(awk 'NR==2{print}' "$MAN" | grep -oE 'raw/[0-9a-f]{40}' | cut -d/ -f2); [ -n "$COMMIT" ] || stop "the GPU firmware list names no commit"
+    FT="$GFW.new"; rm -rf "$FT"; mkdir -p "$FT" || stop "cannot create $FT"
+    grep -v '^#' "$MAN" | awk '{print $2}' | while read -r f; do echo "$f"; done | \
+      xargs -P 8 -I{} sh -c 'mkdir -p "$(dirname "$0/{}")" && curl -fsSL --retry 3 -o "$0/{}" "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/$1/{}"' "$FT" "$COMMIT" \
+      || { rm -rf "$FT"; stop "downloading the GPU firmware failed (network?) - nothing was changed"; }
+    (cd "$FT" && grep -v '^#' "$MAN" | shasum -a 256 -c --quiet) >/dev/null 2>&1 || { rm -rf "$FT"; stop "a GPU firmware file did not match its checksum - nothing was changed"; }
+    rm -rf "$GFW" && mv "$FT" "$GFW" && chown -R root:wheel "$GFW" && chmod -R go-w,a+rX "$GFW" || stop "cannot install the GPU firmware"
+    ok "GPU firmware installed ($(grep -vc '^#' "$MAN") files, $(du -sh "$GFW" | cut -f1))"
+    step "Installing the AMD/Intel GPU driver"
+    rm -rf "$EXT/NMXGPU.kext" && ditto "$GK" "$EXT/NMXGPU.kext" && chown -R root:wheel "$EXT/NMXGPU.kext" && chmod -R 755 "$EXT/NMXGPU.kext" || stop "cannot copy NMXGPU.kext"
+    if ! auxkc || ! kmutil inspect -a x86_64 -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -q com.nullmoth.NMXGPU; then
+      rm -rf "$EXT/NMXGPU.kext"; auxkc; cp -p "$BKC" "$C"; stop "the kernel collection did not take NMXGPU (log: $ST/gputest-kmutil.log) - removed again"
+    fi
+    for a in $WANT; do ga add "${a#-}=1"; done
+  else
+    step "Removing the AMD/Intel GPU driver"
+    ga del nmxamd=1; ga del nmxintel=1
+    if [ -d "$EXT/NMXGPU.kext" ]; then rm -rf "$EXT/NMXGPU.kext" && auxkc || note "the kernel collection rebuild reported an error (log: $ST/gputest-kmutil.log)"; fi
+    rm -rf "$GFW"
+  fi
+  plutil -lint "$C" >/dev/null || { cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; }
+  ok "AMD/Intel GPU driver $GPUTEST - takes effect at the next restart"; cleanup; echo "RESULT ok"; exit 0
 fi
 
 if [ -n "$UPD" ]; then

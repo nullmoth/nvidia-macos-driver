@@ -117,6 +117,8 @@ $("vbon").onclick = () => post({ act: "verbose", on: true, efi: efi() });
 $("vboff").onclick = () => post({ act: "verbose", on: false, efi: efi() });
 $("logoon").onclick = () => post({ act: "logo", on: true, efi: efi() });
 $("logooff").onclick = () => post({ act: "logo", on: false, efi: efi() });
+$("gpuon").onclick = () => post({ act: "gputest", on: true, efi: efi() });
+$("gpuoff").onclick = () => post({ act: "gputest", on: false, efi: efi() });
 $("priv").onclick = (e) => { e.preventDefault(); post({ act: "privacy" }); };
 $("logs").onclick = (e) => { e.preventDefault(); post({ act: "logs" }); };
 $("src").onclick = (e) => { e.preventDefault(); post({ act: "open", url: "https://github.com/nullmoth/nvidia-macos-driver" }); };
