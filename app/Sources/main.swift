@@ -12,7 +12,7 @@ struct Package {
     static let version = "1.14.0"
     static let name = "nullmoth-nvidia-1.14.0.tar.gz"
     static let url = URL(string: "https://github.com/nullmoth/nvidia-macos-driver/releases/download/v1.14.0/nullmoth-nvidia-1.14.0.tar.gz")!
-    static let sha256 = "02b1eb5783c4ec95f851143a719f8732afee9d604fb28b848f6cc8020c348674"
+    static let sha256 = "4bb0c3a3d3009701d5c5305e755a35982368807ac709e768c6df3a943056e9ae"
 }
 let uploadPage = URL(string: "https://nullmothsystems.com/#send")!
 let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("NullMoth")
@@ -407,6 +407,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         case "logo": run(mode: "verbose", pkg: "", efi: b["efi"] as? String ?? "auto",
                          extra: ["--set-logo", (b["on"] as? Bool ?? true) ? "on" : "off",
                                  "--tool", Bundle.main.resourceURL!.appendingPathComponent("NullMothSafe.efi").path])
+        // the opt-in AMD/Intel GPU driver (setup --gpu-test); --tool tells setup where the firmware list sits
+        case "gputest": run(mode: "verbose", pkg: "", efi: b["efi"] as? String ?? "auto",
+                            extra: ["--gpu-test", (b["on"] as? Bool ?? false) ? "on" : "off",
+                                    "--tool", Bundle.main.resourceURL!.appendingPathComponent("NullMothSafe.efi").path])
         default: break
         }
     }

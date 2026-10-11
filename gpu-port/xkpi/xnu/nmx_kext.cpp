@@ -48,6 +48,9 @@ static int g_devices;
 static bool opted_in(IOPCIDevice *pci, uint16_t vendor)
 {
     int v = 0;
+    /* the boot picker's "Start once without NVIDIA driver" entry (-nvoff) parks every NullMoth GPU driver for that start */
+    if (PE_parse_boot_argn("-nvoff", &v, sizeof(v)))
+        return false;
     if (PE_parse_boot_argn(vendor == AMD_VENDOR ? "nmxamd" : "nmxintel", &v, sizeof(v)) && v != 0)
         return true;
     OSObject *p = pci->getProperty("nullmoth-gpu");
