@@ -656,6 +656,7 @@ static BOOL nvmtl_desc_fbo(MTLTextureDescriptor *d) {
     t->_usage = d.usage;
     if (wantStex && !t->_stex) { static unsigned long lost; lost++;
         if (!(lost & (lost - 1))) nvlog("newTextureWithDescriptor: pixel format %lu asked for ShaderWrite and NVK cannot make it a storage image — shader writes to it will be LOST (%lu texture(s) so far in this process)", (unsigned long)d.pixelFormat, lost); }
+    nvmtl_texture_desc_swizzle(t, d);
     nvlog("newTextureWithDescriptor: %lux%lu%s -> %p", (unsigned long)d.width, (unsigned long)d.height, t->_stex ? " +storage" : "", (__bridge void *)t); return t; }
 
 typedef struct { uint32_t magic, seed, gen; } nvmtl_vram_tag;
@@ -741,6 +742,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
     t->_fmt = d.pixelFormat;
     t->_stex = t->_i.storage != 0;
     t->_usage = d.usage;
+    nvmtl_texture_desc_swizzle(t, d);
     nvlog("newTextureWithDescriptor:iosurface:%p plane:%lu -> %p (%zux%zu fmt %lu)",
           (void *)surf, (unsigned long)plane, (__bridge void *)t, w, h, (unsigned long)d.pixelFormat);
     return t; }

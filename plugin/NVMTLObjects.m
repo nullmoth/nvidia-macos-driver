@@ -788,6 +788,7 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
     t->_backBuf = self; t->_backOff = offset; t->_backBPR = bpr;
     t->_bparkable = !noRecycle; memcpy(t->_pkey, bkey, sizeof bkey);
     atomic_fetch_add(brec ? &gBTRecycled : &gBTNew, 1); nvmtl_buftex_census(brec ? "recycled" : "new");
+    nvmtl_texture_desc_swizzle(t, d);
     nvlog("buffer %p newTextureWithDescriptor:offset:%lu bytesPerRow:%lu -> %p (%zux%zu fmt %lu usage 0x%lx, storage %lu)", (__bridge void *)self,
           (unsigned long)offset, (unsigned long)bpr, (__bridge void *)t, w, h, (unsigned long)d.pixelFormat, (unsigned long)d.usage, (unsigned long)_storage);
     return t; }
@@ -1085,6 +1086,27 @@ extern int nvmtl_depthfmt_public(MTLPixelFormat, uint32_t *, uint32_t *);
     }
     return _ownView ? _ownView : image->view;
 }
+- (void *)nvsampleview { return _swzView ? _swzView : [self nvview]; }
+/* MTLTextureDescriptor.swizzle applies when the texture is sampled or read, not to attachments or shader writes, so it
+ * gets a view of its own for the sampled binds and the identity view stays for everything else. IconServices hands
+ * gray + alpha image layers over as RG8 with swizzle (r, r, r, g); with the swizzle dropped, alpha landed in green. */
+void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
+    if (!t || !d || ![d respondsToSelector:@selector(swizzle)]) return;
+    const MTLTextureSwizzleChannels sw = d.swizzle;
+    if (sw.red == MTLTextureSwizzleRed && sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha) return;
+    t->_swz = sw; t->_hasSwz = YES;
+    if (d.textureType == MTLTextureTypeTextureBuffer || d.sampleCount > 1 || t->_tbView) {
+        nvlog("texture swizzle %u,%u,%u,%u on texture type %lu (samples %lu) is not applied", sw.red, sw.green, sw.blue, sw.alpha,
+              (unsigned long)d.textureType, (unsigned long)d.sampleCount); return; }
+    extern int nvmtl_pixfmt_public(MTLPixelFormat f, uint32_t *vk, uint32_t *bpp, int *a8);
+    uint32_t vkf = 0, bpp = 0; int a8 = 0;
+    const uint8_t s4[4] = { (uint8_t)sw.red, (uint8_t)sw.green, (uint8_t)sw.blue, (uint8_t)sw.alpha };
+    if (nvmtl_pixfmt_public(d.pixelFormat, &vkf, &bpp, &a8) ||
+        nvmtl_vk_image_view_create_range_swz([t nvi], vkf, a8, 0, 0, 0, 0, (uint32_t)d.textureType, s4, &t->_swzView)) {
+        t->_swzView = NULL;
+        nvlog("texture swizzle FAILED: no swizzled view for format %lu - samples keep the identity mapping", (unsigned long)d.pixelFormat); return; }
+    { static int said; if (said++ < 8) nvlog("texture swizzle: format %lu samples r,g,b,a <- %u,%u,%u,%u", (unsigned long)d.pixelFormat, s4[0], s4[1], s4[2], s4[3]); }
+}
 - (id<MTLHeap>)heap { return _heap ?: _subHeap; }
 - (NSUInteger)heapOffset { return _heapOffset; }
 - (void)dealloc {
@@ -1093,6 +1115,7 @@ extern int nvmtl_depthfmt_public(MTLPixelFormat, uint32_t *, uint32_t *);
     if (_tbView || _tbAlias) { nvmtl_vk_texel_view_destroy(_tbAlias, _tbView); _tbView = _tbAlias = NULL; }
     if (_resid) nvmtl_resid_texture_gone(_resid);
     if (_ownView) nvmtl_vk_image_view_destroy(_ownView);
+    if (_swzView) nvmtl_vk_image_view_destroy(_swzView);
     if (!_parent && _parkable && _subHeap && _i.img) nvmtl_heap_park(_subHeap, &_i, _pkey, _heapOffset, _pkLen);
     if (!_parent && _bparkable && _backBuf && _i.img) nvmtl_bpark_put(_backBuf, &_i, _pkey);
     if (!_parent) nvmtl_vk_image_destroy(&_i);
@@ -2795,7 +2818,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     nvmtl_surface_in_for_cb(_cb, nt);
     if (nt->_tbView) nvmtl_vk_bind_texel_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, nt->_tbView, nt->_tbStorage);
     else {
-    if (nvmtl_vk_bind_texture_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, [nt nvview])) nvlog("setVertexTexture: bind FAILED");
+    if (nvmtl_vk_bind_texture_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, [nt nvsampleview])) nvlog("setVertexTexture: bind FAILED");
     nvmtl_vk_bind_storage_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, nt->_stex ? [nt nvview] : NULL);
     }
 }
@@ -2831,7 +2854,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
         rt->_surf ? (unsigned)IOSurfaceGetID(rt->_surf) : 0u, nt->_parent != nil); }
     if (nt->_tbView) nvmtl_vk_bind_texel_view(&_cb->_c, NVMTL_SET_FRAGMENT, (uint32_t)i, nt->_tbView, nt->_tbStorage);
     else {
-    if (nvmtl_vk_bind_texture_view(&_cb->_c, NVMTL_SET_FRAGMENT, (uint32_t)i, [nt nvview])) nvlog("setFragmentTexture: bind FAILED");
+    if (nvmtl_vk_bind_texture_view(&_cb->_c, NVMTL_SET_FRAGMENT, (uint32_t)i, [nt nvsampleview])) nvlog("setFragmentTexture: bind FAILED");
     nvmtl_vk_bind_storage_view(&_cb->_c, NVMTL_SET_FRAGMENT, (uint32_t)i, nt->_stex ? [nt nvview] : NULL);
     }
 }
@@ -3476,6 +3499,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
                                             (uint32_t)d.textureType, nvmtl_vk_layers_for_desc((uint32_t)d.textureType, (uint32_t)d.arrayLength, (uint32_t)d.depth), &_hm, off, &t->_i)) {
         nvlog("heap newTextureWithDescriptor: %lux%lu offset:%lu FAILED", (unsigned long)d.width, (unsigned long)d.height, (unsigned long)off); return nil; }
     t->_q = nvmtl_device_queue(); t->_stex = t->_i.storage != 0; t->_heap = self; t->_heapOffset = off;
+    nvmtl_texture_desc_swizzle(t, d);
     nvlog("heap newTextureWithDescriptor: %lux%lu%s offset:%lu -> %p", (unsigned long)d.width, (unsigned long)d.height, t->_stex ? " +storage" : "", (unsigned long)off, (__bridge void *)t);
     return t;
 }
@@ -4162,7 +4186,7 @@ static void nvmtl_zprobe_drain(void) {
     if (nt->_tbView) nvmtl_vk_bind_texel_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, nt->_tbView, nt->_tbStorage);
     else {
     if (nvmtl_vk_cmd_prepare_sampled_image(&_cb->_c, [nt nvi], nt->_stex)) { nvlog("compute setTexture: image layout preparation refused"); return; }
-    if (nvmtl_vk_bind_texture_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, [nt nvview])) nvlog("compute setTexture: bind FAILED");
+    if (nvmtl_vk_bind_texture_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, [nt nvsampleview])) nvlog("compute setTexture: bind FAILED");
     nvmtl_vk_bind_storage_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, nvmtl_storage_view_for(_cb, nt, nt->_stex || nvmtl_function_writes_texture(_ps ? _ps->_function : nil, i)));
     }
 }
