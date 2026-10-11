@@ -785,6 +785,11 @@ if nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove >/dev/null 2>&1 &&
   DELADD+=("nullmoth-remove"); echo "CHANGE NVRAM Delete: add nullmoth-remove (a leftover remove flag this Mac cannot clear from macOS)"
 fi
 NEEDTOOL=0; [ -z "$(tool_index)" ] && { NEEDTOOL=1; echo "CHANGE boot picker: add \"$TOOL_NAME\" (the way back if the driver ever stops macOS starting)"; }
+# The tool asks for Y on screen. Run in graphics mode its text never showed, so it sat waiting for a key nobody could see
+# ("Remove driver hangs", Discord 10-11); text mode shows it. Existing entries are switched too.
+ti=$(tool_index); if [ -n "$ti" ] && [ "$(get Misc.Tools.$ti.TextMode)" != true ]; then
+  echo "CHANGE boot picker: show \"$TOOL_NAME\" in text mode, so its question is visible"; EDITS+=("Misc.Tools.$ti.TextMode|-bool|true"); fi
+REFRESHTOOL=0; [ -n "$ti" ] && [ -f "$TOOL" ] && ! cmp -s "$TOOL" "$(dirname "$C")/Tools/$TOOL_FILE" && REFRESHTOOL=1
 [ ${#EDITS[@]} = 0 ] && [ ${#DELADD[@]} = 0 ] && [ $NEEDTOOL = 0 ] && [ $NEEDBLOCK = 0 ] && [ $NEEDAMFIPASS = 0 ] && ok "OpenCore already has every setting the driver needs"
 
 if [ $SIPON = 1 ]; then
@@ -826,9 +831,10 @@ if [ $DRY = 0 ]; then
   fi
   if [ $NEEDTOOL = 1 ]; then
     plutil -extract Misc.Tools xml1 -o - "$C" >/dev/null 2>&1 || plutil -insert Misc.Tools -array "$C" || fail=1
-    plutil -insert Misc.Tools -json "{\"Arguments\":\"\",\"Auxiliary\":false,\"Comment\":\"NullMoth: remove the NVIDIA driver at the next start\",\"Enabled\":true,\"Flavour\":\"Auto\",\"FullNvramAccess\":true,\"Name\":\"$TOOL_NAME\",\"Path\":\"$TOOL_FILE\",\"RealPath\":false,\"TextMode\":false}" -append "$C" || fail=1
+    plutil -insert Misc.Tools -json "{\"Arguments\":\"\",\"Auxiliary\":false,\"Comment\":\"NullMoth: remove the NVIDIA driver at the next start\",\"Enabled\":true,\"Flavour\":\"Auto\",\"FullNvramAccess\":true,\"Name\":\"$TOOL_NAME\",\"Path\":\"$TOOL_FILE\",\"RealPath\":false,\"TextMode\":true}" -append "$C" || fail=1
     mkdir -p "$MP/$OCREL/Tools" && cp "$TOOL" "$MP/$OCREL/Tools/$TOOL_FILE" || fail=1
   fi
+  [ "${REFRESHTOOL:-0}" = 1 ] && { cp "$TOOL" "$MP/$OCREL/Tools/$TOOL_FILE" || fail=1; }   # the current tool (drains stale keys)
   if [ $fail = 1 ] || ! plutil -lint "$C" >/dev/null; then cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; fi
   ok "OpenCore config updated"
   mkdir -p "$ST"

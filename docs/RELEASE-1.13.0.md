@@ -12,6 +12,10 @@
   *Cause:* the removal runs at the next macOS start, before anything has mounted the EFI partition. Installs that recorded their OpenCore config only by its path (`/Volumes/EFI/...`), or whose recorded partition was no longer attached, stopped with "the recorded config is missing" or "could not mount the recorded OpenCore partition". The driver then stayed off but installed, start after start.
   *Fix:* when the recorded config cannot be found, removal uses the OpenCore partition this Mac started from, which is the one whose picker asked for the removal. It finishes and restarts by itself.
 
+- **"Remove NVIDIA driver" in the boot picker hung or closed at once.**
+  *Cause:* the tool asks you to press Y before it does anything. OpenCore ran it in graphics mode, so its question never appeared on screen and it sat waiting for a key nobody could see (it gave up after 60 seconds). On other machines the Enter that started it from the picker was still queued, counted as "not Y", and the tool closed straight away.
+  *Fix:* the picker entry now runs in text mode, so the question is visible, and the tool ignores keys typed before it asks. Updating with the Mac app switches existing entries and replaces the tool.
+
 - **Crash reports showed crashes from before you updated.**
   *Cause:* the report includes recent crash files, and some were from an older driver. A Live Text crash fixed in 1.12 showed up in 1.12 reports and looked like it was still there.
   *Fix:* every crash in a report now carries its date and says when it happened before the current driver install.

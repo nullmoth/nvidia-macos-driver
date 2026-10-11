@@ -26,6 +26,15 @@ fn fail(msg: &str, st: Status) -> Status {
 // Waits up to 60 s for one key. Only Y goes ahead: this entry sits in the boot picker next to macOS, and one stray
 // Enter used to remove the driver with no question asked.
 fn confirmed() -> bool {
+    // The Enter that chose this entry in the picker can still be queued: read as "not Y", it closed the tool at once and
+    // the screen went straight back to booting ("restarts immediately", Discord 10-11). Drop anything already typed.
+    boot::stall(Duration::from_millis(300));
+    for _ in 0..64 {
+        match uefi::system::with_stdin(|stdin| stdin.read_key()) {
+            Ok(Some(_)) => continue,
+            _ => break,
+        }
+    }
     println!("");
     println!("  NullMoth: remove the NVIDIA driver?");
     println!("  Press Y to remove it at the next macOS start. Any other key, or waiting 60 seconds, changes nothing.");
