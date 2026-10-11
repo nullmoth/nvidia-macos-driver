@@ -1192,18 +1192,29 @@ static const NvU8 nv_xnu_nbci_guid[16] = { 0x75, 0x0B, 0xA5, 0xD4, 0xC7, 0x65, 0
                                            0xBF, 0xB7, 0x41, 0x51, 0x4C, 0xEA, 0x02, 0x44 };    // (acpidsmguids.h)
 
 // The GPU's ACPI node: AppleACPIPCI puts its IOACPIPlane path on the PCI device as "acpi-path".
+// Cached per GPU (PCI address), kept retained for the life of the kext: a PC with two NVIDIA cards must ask each
+// card's own ACPI node, never the first one found.
+static struct { NvU32 domain; NvU8 bus, slot, function; IOACPIPlatformDevice *acpi; } nv_xnu_acpi_nodes[8];
 static IOACPIPlatformDevice *nv_xnu_gpu_acpi(nv_state_t *nv)
 {
-    static IOACPIPlatformDevice *acpi;      // one GPU per driver instance; kept for the life of the kext
-    if (acpi || !nv) return acpi;
-    nv_xnu_pci_slot *s = (nv_xnu_pci_slot *)os_pci_init_handle(nv->pci_info.domain, nv->pci_info.bus,
-                                                               nv->pci_info.slot, nv->pci_info.function, NULL, NULL);
+    if (!nv) return NULL;
+    const nv_pci_info_t *pi = &nv->pci_info;
+    for (auto &n : nv_xnu_acpi_nodes)
+        if (n.acpi && n.domain == pi->domain && n.bus == pi->bus && n.slot == pi->slot && n.function == pi->function)
+            return n.acpi;
+    nv_xnu_pci_slot *s = (nv_xnu_pci_slot *)os_pci_init_handle(pi->domain, pi->bus, pi->slot, pi->function, NULL, NULL);
     OSString *path = s ? OSDynamicCast(OSString, s->pci->getProperty("acpi-path")) : NULL;
     IORegistryEntry *e = path ? IORegistryEntry::fromPath(path->getCStringNoCopy()) : NULL;
-    acpi = OSDynamicCast(IOACPIPlatformDevice, e);
-    if (acpi) kprintf("NVRM-xnu: GPU ACPI node %s\n", path->getCStringNoCopy());
-    else if (e) e->release();
-    return acpi;
+    IOACPIPlatformDevice *acpi = OSDynamicCast(IOACPIPlatformDevice, e);
+    if (!acpi) { OSSafeReleaseNULL(e); return NULL; }
+    for (auto &n : nv_xnu_acpi_nodes)
+        if (!n.acpi && OSCompareAndSwapPtr(NULL, acpi, (void * volatile *)&n.acpi)) {
+            n.domain = pi->domain; n.bus = pi->bus; n.slot = pi->slot; n.function = pi->function;
+            kprintf("NVRM-xnu: GPU %02x:%02x.%x ACPI node %s\n", pi->bus, pi->slot, pi->function, path->getCStringNoCopy());
+            return acpi;
+        }
+    acpi->release();   // table full: answer this call, keep nothing
+    return NULL;
 }
 
 // nv_acpi_extract_object (nv-acpi.c): integers, buffers and packages of them, flattened into one buffer.

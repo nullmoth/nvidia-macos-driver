@@ -369,6 +369,7 @@ void nvkms_unregister_backlight(struct nvkms_backlight_device *bd)
 NvBool nvkms_xnu_backlight(NvBool set, NvU32 *percent)
 {
     if (!percent || !gKmsLock) return NV_FALSE;
+    if (set && *percent > 100) *percent = 100;   // NVKMS takes percent; never pass more than full brightness
     IOLockLock(gKmsLock);
     NvBool ok = gKmsBacklightRegistered &&
                 (set ? nvKmsSetBacklight(gKmsBacklight.display_id, gKmsBacklight.drv_priv, *percent)
