@@ -2,7 +2,7 @@
 
 The driver uses NVIDIA's r610 open RM, HAL, and GSP stack. That stack targets Turing and later
 ([upstream compatibility](https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus)).
-The installer carries 235 distinct display-card PCI device IDs from NVIDIA's 610.57.04 table in
+The installer carries 245 distinct display-card PCI device IDs from NVIDIA's 610.57.04 table in
 [`nvidia_gsp_ids.json`](../app/Resources/nvidia_gsp_ids.json). The kernel matches NVIDIA display
 and 3D-controller PCI classes, then asks NVIDIA's own supported-device gates to accept the card.
 A device-table match does not establish that a particular laptop's display routing, firmware,
@@ -10,7 +10,7 @@ BAR placement, or macOS installation works.
 
 | Family | Examples covered by the device table | Physical validation in this release |
 | --- | --- | --- |
-| Turing | GTX 1650/1660, RTX 20, TITAN RTX, Quadro T1000/RTX | Pending |
+| Turing | GTX 1650/1660, RTX 20, TITAN RTX, Quadro T1000/T2000/RTX, NVIDIA T400/T600/T1000, T500/T550/T600/T1200 laptop | Pending |
 | Ampere | RTX 30, RTX A workstation and laptop cards | Pending |
 | Ada | RTX 40, supported RTX workstation and laptop cards | Pending |
 | Blackwell | RTX 50 and supported RTX PRO cards | RTX 5060 automated; RTX 5070/5080 reported working |
@@ -87,5 +87,6 @@ successful device-table lookup cannot prove a card initialized correctly.
 ## Regressions
 
 Run `python3 tools/test_card_support.py` on macOS with command line developer tools. The tests
+check that both installers' `SUPPORTED_IDS` and this page's count match `nvidia_gsp_ids.json`, then
 compile production snippets for startup timing, chip selection, release error classification,
 desktop completion ordering, and upload ordering. They require neither GPU access nor a driver installation.

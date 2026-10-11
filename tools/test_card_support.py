@@ -3,6 +3,8 @@
 Run on macOS with Xcode command line tools: python3 tools/test_card_support.py.
 Tests compile the production snippets; no GPU or installation is required.
 """
+import json
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -117,6 +119,24 @@ int main(int argc,char **argv) { @autoreleasepool {
 }}
 '''
 
+def device_table():
+    ids = json.loads((ROOT / "app/Resources/nvidia_gsp_ids.json").read_text())["ids"]
+    keys = list(ids)
+    assert keys == sorted(set(keys)) and all(re.fullmatch(r"[0-9A-F]{4}", k) for k in keys), "ids: sorted, unique, 4 upper-case hex"
+    for script in ("package/install.sh", "app/Resources/nullmoth-install.sh"):
+        listed = re.search(r'^SUPPORTED_IDS="\n(.*?)\n"$', (ROOT / script).read_text(), re.S | re.M).group(1).split()
+        assert listed == keys, (script, sorted(set(listed) ^ set(keys)))
+    count = re.search(r"carries (\d+) distinct display-card PCI device IDs", (ROOT / "docs/CARD-SUPPORT.md").read_text())
+    assert count and int(count.group(1)) == len(keys), ("docs/CARD-SUPPORT.md", count and count.group(1), len(keys))
+    # NVIDIA names the T-series rows without GeForce/RTX/Quadro/TITAN (610.57.04 README), so a brand filter drops them;
+    # where a device id has several rows the table keeps the first one's name (1FB0, 1FF2)
+    for dev, name in {"1FB0": "NVIDIA T1000", "1FB1": "NVIDIA T600", "1FB2": "NVIDIA T400", "1FF0": "NVIDIA T1000 8GB",
+                      "1FF2": "NVIDIA T400 4GB", "1FB6": "NVIDIA T600 Laptop GPU", "1FB7": "NVIDIA T550 Laptop GPU",
+                      "1FBA": "NVIDIA T600 Laptop GPU", "1FBB": "NVIDIA T500", "1FBC": "NVIDIA T1200 Laptop GPU"}.items():
+        assert ids.get(dev) == name, (dev, ids.get(dev))
+    print("PASS device table: %d ids; both installers and CARD-SUPPORT.md agree" % len(keys))
+
+device_table()
 with tempfile.TemporaryDirectory(prefix="nullmoth-card-tests-") as directory:
     tmp = Path(directory)
     timing = snippet("kexts/NVRM/NVRM.cpp", "uint64_t dl, settle;", "retain(); thread_call_enter_delayed")
