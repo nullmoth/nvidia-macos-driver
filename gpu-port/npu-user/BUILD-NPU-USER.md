@@ -16,6 +16,12 @@ x86_64, deployment target macOS 15.0, with Xcode's clang and CMake (Unix Makefil
 | xdna-driver/xrt (Xilinx/XRT) | `1932bdf94577410e29d96423e9de5aa680090471` | `patch_xrt.py` |
 | xdna-driver/vtd (Xilinx/VTD) | `fa945e489497397269cbb912e3e7cce33d1935ff` | none (fetched at install, `nullmoth-npu-tests.txt`) |
 
+The compiler's prebuilt SHAVE kernels are git-LFS files embedded into every compiled model: fetch them with
+`python3 fetch_lfs.py $R/npu_compiler openvinotoolkit/npu_compiler sw_runtime_kernels/kernels/prebuild
+sw_runtime_kernels/rt_kernel/prebuild` (794 files, each checked against its pointer's sha256; without them compilation
+stops at "Incorrect ELF magic"). Builds may spread compiles over other Macs: `RCC_HOSTS="laptop:10"` with
+build_openvino.sh (rcc.py launcher; the remote needs the same clang major as the build machine).
+
 Each patch script runs once on a pristine checkout (`python3 patch_X.py <tree>`); every edit is an exact anchor with an
 asserted count, so a script that no longer matches its tree stops instead of half-applying. OpenVINO and XRT are
 cloned without git-lfs content (`-c filter.lfs.smudge= -c filter.lfs.process= -c filter.lfs.required=false`).
@@ -57,6 +63,13 @@ replaces build rpaths, signs every Mach-O ad hoc and refuses any file that names
 (`support-cycle/release.py`) takes it from `build/kexts/gpu/npu-user` and refuses a package missing any part.
 
 ## What was checked without NPU hardware
+
+- Intel NPU compiler: `nmx-npu-compile-check` compiles networks for NPU 3720 (Meteor/Arrow Lake) and 4000 (Lunar Lake)
+  to ELF blobs through the loader the user-mode driver uses (ReLU 65,312 / 58,720 bytes).
+- Intel's user-mode driver unit tests on its mock NPU: `ze_intel_npu_tests` 164/164 with
+  `--blob <3720 blob of tests/models/relu_flat> --model tests/models/add_abc.xml --model_flags <io options>` (the
+  in-driver compiler tests compile through the macOS compiler; it must sit beside the test binary or libze_intel_npu),
+  `npu_shared_tests` 60/60.
 
 On an M4 Mac mini under Rosetta (no NPU present): `xrt-smi examine` loads XRT, finds the XDNA plug-in, scans for NPU
 nodes and reports `0 devices found` (exit 0); `xrt-smi validate` asks for a device; `nmx-npu-probe` reports no

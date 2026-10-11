@@ -5,6 +5,8 @@
  * from "the NPU runs what it compiled" in a report.
  *
  *   nmx-npu-compile-check [loader dylib] [platform...]     platforms: 3720 (Meteor/Arrow Lake), 4000 (Lunar Lake)
+ *   NMX_MODEL_XML=<model.xml> [NMX_MODEL_BIN=<weights.bin>] [NMX_MODEL_OPTIONS=<io options>]: compile that OpenVINO IR
+ *   instead (the options name its inputs and outputs, as --inputs_precisions="name:FP32" ...)
  *
  * The network is Parameter[1,3,16,16] f32 -> ReLU -> Result, serialized the way OpenVINO's NPU plugin hands a model to
  * the compiler: compiler version, input count (2), IR XML size + bytes, weights size + bytes.
@@ -58,6 +60,25 @@ static int device_for(const char *platform, vcl_device_desc_t *d)
     return -1;
 }
 
+static uint8_t *read_file(const char *path, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    if (f == NULL)
+        return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *b = n >= 0 ? malloc((size_t)n + 1) : NULL;
+    if (b != NULL && fread(b, 1, (size_t)n, f) != (size_t)n) {
+        free(b);
+        b = NULL;
+    }
+    fclose(f);
+    if (b != NULL)
+        *len = (size_t)n;
+    return b;
+}
+
 #define SYM(h, name) name##_fn name##_p = (name##_fn)dlsym(h, #name)
 typedef vcl_result_t (*vclGetVersion_fn)(vcl_version_info_t *, vcl_version_info_t *);
 typedef vcl_result_t (*vclCompilerCreate_fn)(vcl_compiler_desc_t *, vcl_device_desc_t *, vcl_compiler_handle_t *,
@@ -94,10 +115,31 @@ int main(int argc, char **argv)
     vclGetVersion_p(&cv, &pv);
     printf("compiler API %u.%u, profiling %u.%u\n", cv.major, cv.minor, pv.major, pv.minor);
 
-    /* the serialized model: version, count, xml, weights (none) */
+    /* the model: the built-in ReLU network, or an IR from files */
+    const char *xml_text = model_xml;
+    uint64_t xml_size = sizeof(model_xml) - 1, weights_size = 0;
+    uint8_t *weights = NULL;
+    const char *mx = getenv("NMX_MODEL_XML"), *mb = getenv("NMX_MODEL_BIN");
+    if (mx != NULL && *mx != '\0') {
+        size_t n;
+        char *x = (char *)read_file(mx, &n);
+        if (x == NULL) {
+            printf("FAIL cannot read %s\n", mx);
+            return 1;
+        }
+        xml_text = x, xml_size = n;
+        if (mb != NULL && *mb != '\0') {
+            weights = read_file(mb, &n);
+            if (weights == NULL) {
+                printf("FAIL cannot read %s\n", mb);
+                return 1;
+            }
+            weights_size = n;
+        }
+    }
+    /* the serialized model: version, count, xml, weights */
     const uint32_t count = 2;
-    const uint64_t xml_size = sizeof(model_xml) - 1, weights_size = 0;
-    const uint64_t ir_size = sizeof(cv) + sizeof(count) + sizeof(xml_size) + xml_size + sizeof(weights_size);
+    const uint64_t ir_size = sizeof(cv) + sizeof(count) + sizeof(xml_size) + xml_size + sizeof(weights_size) + weights_size;
     uint8_t *ir = calloc(1, ir_size);
     if (ir == NULL)
         return 1;
@@ -105,8 +147,10 @@ int main(int argc, char **argv)
     memcpy(w, &cv, sizeof(cv)), w += sizeof(cv);
     memcpy(w, &count, sizeof(count)), w += sizeof(count);
     memcpy(w, &xml_size, sizeof(xml_size)), w += sizeof(xml_size);
-    memcpy(w, model_xml, xml_size), w += xml_size;
-    memcpy(w, &weights_size, sizeof(weights_size));
+    memcpy(w, xml_text, xml_size), w += xml_size;
+    memcpy(w, &weights_size, sizeof(weights_size)), w += sizeof(weights_size);
+    if (weights_size)
+        memcpy(w, weights, weights_size);
 
     const char *defaults[] = { "3720", "4000" };
     const char **platforms = argc > 2 ? (const char **)argv + 2 : defaults;
@@ -129,12 +173,19 @@ int main(int argc, char **argv)
             continue;
         }
         vcl_compiler_properties_t prop = { 0 };
-        if (vclCompilerGetProperties_p(c, &prop) == VCL_RESULT_SUCCESS)
-            printf("%s: compiler %s, opsets %u\n", platforms[i], prop.id ? prop.id : "?", prop.supportedOpsets);
-        char options[256];
-        snprintf(options, sizeof(options),
-                 "--inputs_precisions=\"data:FP32\" --inputs_layouts=\"data:NCHW\" --outputs_precisions=\"relu:FP32\" "
-                 "--outputs_layouts=\"relu:NCHW\" --config NPU_PLATFORM=\"%s\"", platforms[i]);
+        if (vclCompilerGetProperties_p(c, &prop) == VCL_RESULT_SUCCESS) {
+            printf("%s: compiler %s (IR version %u.%u), opsets %u\n", platforms[i], prop.id ? prop.id : "?",
+                   prop.version.major, prop.version.minor, prop.supportedOpsets);
+            /* the IR carries the compiler's own version (OpenVINO's compiler_impl.cpp stamps _compilerProperties.version,
+               not vclGetVersion's API version); the deserializer refuses any other */
+            memcpy(ir, &prop.version, sizeof(prop.version));
+        }
+        char options[1024];
+        const char *io = getenv("NMX_MODEL_OPTIONS");
+        snprintf(options, sizeof(options), "%s --config NPU_PLATFORM=\"%s\"",
+                 io != NULL && *io != '\0' ? io
+                 : "--inputs_precisions=\"data:FP32\" --inputs_layouts=\"data:NCHW\" --outputs_precisions=\"relu:FP32\" "
+                   "--outputs_layouts=\"relu:NCHW\"", platforms[i]);
         vcl_executable_desc_t ed = { .modelIRData = ir, .modelIRSize = ir_size, .options = options,
                                      .optionsSize = strlen(options) + 1 };
         vcl_executable_handle_t e = NULL;
@@ -147,6 +198,19 @@ int main(int argc, char **argv)
             r = vclExecutableGetSerializableBlob_p(e, blob, &blob_size);
         if (r == VCL_RESULT_SUCCESS && blob != NULL && blob_size >= 4 && memcmp(blob, "\x7f" "ELF", 4) == 0) {
             printf("OK   %s: compiled to a %llu-byte ELF blob\n", platforms[i], (unsigned long long)blob_size);
+            /* NMX_SAVE_BLOB_DIR: keep the blob (nmx_relu_<platform>.blob), e.g. as test input for the NPU driver */
+            const char *dir = getenv("NMX_SAVE_BLOB_DIR");
+            if (dir != NULL && *dir != '\0') {
+                char out[1024];
+                snprintf(out, sizeof(out), "%s/nmx_relu_%s.blob", dir, platforms[i]);
+                FILE *f = fopen(out, "wb");
+                if (f == NULL || fwrite(blob, 1, blob_size, f) != blob_size) {
+                    printf("FAIL %s: cannot write %s\n", platforms[i], out);
+                    failed++;
+                }
+                if (f != NULL)
+                    fclose(f);
+            }
         } else {
             printf("FAIL %s: vclExecutableCreate/GetSerializableBlob 0x%x, %llu bytes\n", platforms[i], (unsigned)r,
                    (unsigned long long)blob_size);

@@ -22,6 +22,11 @@ common=(-G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES
         -DENABLE_INTEL_GPU=OFF -DENABLE_DOCS=OFF -DENABLE_PYTHON=OFF -DENABLE_TESTS=OFF
         -DENABLE_OV_ONNX_FRONTEND=OFF -DENABLE_OV_PADDLE_FRONTEND=OFF -DENABLE_OV_PYTORCH_FRONTEND=OFF
         -DENABLE_OV_TF_FRONTEND=OFF -DENABLE_OV_TF_LITE_FRONTEND=OFF -DENABLE_OV_JAX_FRONTEND=OFF)
+# RCC_HOSTS="laptop:10 ...": compiles are spread over those Macs by rcc.py (preprocessed here, compiled there, local
+# fallback); unset, the launcher is cleared so a cached one never lingers
+launcher=""
+[ -z "${RCC_HOSTS:-}" ] || launcher=${RCC:-$NULLMOTH_BUILD_ROOT/build/rcc/rcc.py}
+common+=("-DCMAKE_C_COMPILER_LAUNCHER=$launcher" "-DCMAKE_CXX_COMPILER_LAUNCHER=$launcher")
 
 if [ "${1:-all}" != cid ]; then
     cmake -S "$OV" -B "$OV/build-x86" "${common[@]}" -DCMAKE_INSTALL_PREFIX=/Library/NullMoth/npu \
