@@ -131,6 +131,15 @@ int sysctl_remove_oid(struct sysctl_oid *oidp, int del, int recurse);
 int sysctl_remove_name(struct sysctl_oid *parent, const char *name, int del, int recurse);
 void sysctl_rename_oid(struct sysctl_oid *oidp, const char *name);
 int sysctl_move_oid(struct sysctl_oid *oidp, struct sysctl_oid_list *parent);
+/*
+ * Port additions, for answering sysfs reads and writes from userland. nmx_sysctl_find returns the leaf at 'path'
+ * ("name" or "node/name") under 'list', or NULL. The leaf must outlive the call: callers hold its owner (a device).
+ * nmx_sysctl_read runs its handler into buf (NUL-terminated, *len without the NUL): 0, ENOMEM (longer than max) or the
+ * handler's errno. nmx_sysctl_write hands it a new value of len bytes: 0 or the handler's errno.
+ */
+struct sysctl_oid *nmx_sysctl_find(struct sysctl_oid_list *list, const char *path);
+int nmx_sysctl_read(struct sysctl_oid *o, char *buf, size_t max, size_t *len);
+int nmx_sysctl_write(struct sysctl_oid *o, const void *val, size_t len);
 
 #define SYSCTL_CHILDREN(oid_ptr) (&(oid_ptr)->oid_children)
 /* the port's own sysctl tree (not xnu's): its root, which LinuxKPI hangs "sys" (its sysfs) from */

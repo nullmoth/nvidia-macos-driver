@@ -9,6 +9,7 @@
 #include <sys/systm.h>
 #include <sys/malloc.h>
 #include <sys/sysctl.h>
+#include <sys/priv.h>
 
 #include <linux/kernel.h>
 #include <linux/err.h>
@@ -18,6 +19,10 @@
 #include <drm/drm_device.h>
 #include <drm/drm_file.h>
 #include <linux/pci.h>
+#include <linux/cdev.h>
+#undef cdev                     /* LinuxKPI renames struct cdev; the node below is the BSD one (as drm_os_freebsd.c) */
+#include <sys/conf.h>
+#include <drm/drm_ioctl.h>
 #include <drm/drm_gem.h>
 #ifndef NMX_NO_TTM
 #include <drm/drm_gem_ttm_helper.h>
@@ -31,6 +36,7 @@
 #include <drm_os_freebsd.h>
 
 #include "nmx_vma.h"
+#include "nmx_drm_uapi.h"
 
 MALLOC_DEFINE(DRM_MEM_DRIVER, "drm_driver", "DRM driver data");
 
@@ -51,16 +57,83 @@ void unregister_fictitious_range(struct drm_device *ddev, vm_paddr_t start, vm_p
 }
 
 /*
- * FreeBSD publishes each DRM minor as hw.dri.N (PCI id, type) for its libdrm. The port's libdrm asks the node
- * itself (DRM_IOCTL_GET_PCIINFO), so there is no alias to make.
+ * Each DRM and accel minor's device node, under the name Linux gives it: /dev/dri/card%d, /dev/dri/renderD%d,
+ * /dev/accel/accel%d. drm-kmod makes the /dev/dri names here too (as aliases of 256 nodes created up front); the port
+ * creates the one node itself when the minor registers (linux_compat.c records the stub file operations of the two
+ * majors instead of making nodes). The PCI identity FreeBSD publishes as hw.dri.N is asked of the node instead
+ * (DRM_IOCTL_GET_PCIINFO).
+ *
+ * Modes follow what Linux distributions give these nodes: render and accel nodes are meant for any process (Mesa's
+ * Vulkan drivers, Level Zero, XRT run inside apps and WindowServer), so 0666; the primary node can change what the
+ * screens show, so root only.
  */
+#ifndef ACCEL_MAJOR
+#define ACCEL_MAJOR 261         /* include/drm/drm_accel.h */
+#endif
+const struct file_operations *nmx_chrdev_fops(unsigned int major);   /* linux_compat.c */
+
 int drm_dev_alias(struct device *ldev, struct drm_minor *minor, const char *minor_str)
 {
-    return 0;
+	const struct file_operations *fops;
+	struct make_dev_args args;
+	struct linux_cdev *lc;
+	struct cdev *node;
+	const char *dir;
+	char name[32];
+	unsigned int major;
+	int mode, err;
+
+	switch (minor->type) {
+	case DRM_MINOR_ACCEL:
+		major = ACCEL_MAJOR, dir = "accel", mode = 0666;
+		break;
+	case DRM_MINOR_RENDER:
+		major = DRM_MAJOR, dir = "dri", mode = 0666;
+		break;
+	default:
+		major = DRM_MAJOR, dir = "dri", mode = 0600;
+		break;
+	}
+	fops = nmx_chrdev_fops(major);
+	if (fops == NULL)
+		return (-ENXIO);
+	snprintf(name, sizeof(name), minor_str, minor->index);
+
+	lc = cdev_alloc();
+	if (lc == NULL)
+		return (-ENOMEM);
+	lc->ops = fops;
+	lc->dev = MKDEV(major, minor->index);       /* iminor() of an open is minor->index, as on Linux */
+	kobject_set_name(&lc->kobj, "%s", major == ACCEL_MAJOR ? "accel" : "drm");
+
+	make_dev_args_init(&args);
+	args.mda_devsw = &linuxcdevsw;
+	args.mda_uid = UID_ROOT;
+	args.mda_gid = GID_WHEEL;
+	args.mda_mode = mode;
+	args.mda_si_drv1 = lc;
+	err = make_dev_s(&args, &node, "%s/%s", dir, name);
+	if (err != 0) {
+		printf("NullMoth drm: cannot create /dev/%s/%s (%d)\n", dir, name, err);
+		kobject_put(&lc->kobj);
+		return (-err);
+	}
+	lc->cdev = node;
+	minor->bsd_device = node;
+	minor->bsd_alias = node;
+	return (0);
 }
 
 void drm_dev_alias_free(struct drm_minor *minor)
 {
+	struct cdev *node = minor->bsd_device;
+
+	if (node == NULL)
+		return;
+	minor->bsd_device = NULL;
+	minor->bsd_alias = NULL;
+	/* the linux_cdev's release destroys the node (draining opens in flight) and frees it */
+	kobject_put(&((struct linux_cdev *)node->si_drv1)->kobj);
 }
 
 /* ---- GEM objects backed by TTM buffers ------------------------------------------------------------------------------ */
@@ -222,9 +295,44 @@ int nmx_drm_node_ioctl(struct linux_file *filp, unsigned long cmd, void *data)
 	struct drm_pciinfo *pi = data;
 	struct pci_dev *pdev;
 
-	if (cmd != DRM_IOCTL_GET_PCIINFO)
+	if (cmd != DRM_IOCTL_GET_PCIINFO && cmd != NMX_DRM_IOCTL_SYSFS_GET && cmd != NMX_DRM_IOCTL_SYSFS_PUT)
 		return -1;
 	df = filp != NULL ? filp->private_data : NULL;
+	if (cmd == NMX_DRM_IOCTL_SYSFS_GET || cmd == NMX_DRM_IOCTL_SYSFS_PUT) {
+		/* an attribute of the node's device (the PCI function), through its show/store handler */
+		struct nmx_drm_sysfs_get *sg = data;
+		struct sysctl_oid *oid;
+		struct device *ldev;
+		size_t len;
+		int err;
+
+		if (df == NULL || df->minor == NULL || df->minor->dev == NULL || df->minor->dev->dev == NULL)
+			return ENODEV;
+		ldev = df->minor->dev->dev;
+		sg->name[sizeof(sg->name) - 1] = '\0';
+		oid = ldev->kobj.oidp != NULL ? nmx_sysctl_find(SYSCTL_CHILDREN(ldev->kobj.oidp), sg->name) : NULL;
+		if (oid == NULL)
+			return ENOENT;
+		if (cmd == NMX_DRM_IOCTL_SYSFS_PUT) {
+			/*
+			 * Linux lets only root write an attribute, and only one whose mode has a write bit. Every leaf under a
+			 * device's kobject is a LinuxKPI sysfs attribute, whose arg2 is the struct attribute (a bin_attribute
+			 * starts with one).
+			 */
+			const struct attribute *attr = (const struct attribute *)(uintptr_t)oid->oid_arg2;
+			if (attr == NULL || (attr->mode & 0222) == 0)
+				return EACCES;
+			err = priv_check(curthread, PRIV_DRIVER);
+			if (err)
+				return err;
+			if (sg->len == 0 || sg->len > sizeof(sg->value))
+				return EINVAL;
+			return nmx_sysctl_write(oid, sg->value, sg->len);
+		}
+		err = nmx_sysctl_read(oid, sg->value, sizeof(sg->value), &len);
+		sg->len = err ? 0 : (uint32_t)len;
+		return err;
+	}
 	if (df == NULL || df->minor == NULL || df->minor->dev == NULL || !dev_is_pci(df->minor->dev->dev))
 		return ENODEV;
 	pdev = to_pci_dev(df->minor->dev->dev);

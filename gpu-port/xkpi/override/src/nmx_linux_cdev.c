@@ -506,8 +506,10 @@ static void umap_free(struct nmx_umap *u)
 
 static int nmx_mmap(struct nmx_open *o, struct nmx_drm_mmap *req)
 {
+    uint64_t fixed = (req->flags & NMX_DRM_MMAP_FIXED) ? req->addr : 0;
     req->addr = 0;
-    if (req->flags != 0 || (req->offset & PAGE_MASK) != 0 || req->size == 0 || req->size > (1ULL << 40))
+    if ((req->flags & ~NMX_DRM_MMAP_FIXED) != 0 || (req->offset & PAGE_MASK) != 0 || req->size == 0 ||
+        req->size > (1ULL << 40) || (fixed & PAGE_MASK) != 0 || ((req->flags & NMX_DRM_MMAP_FIXED) && fixed == 0))
         return EINVAL;
     struct linux_file *filp = o->fp->f_data;
     if (o->fp->f_ops == NULL || filp == NULL || filp->f_op == NULL || filp->f_op->mmap == NULL)
@@ -568,7 +570,7 @@ static int nmx_mmap(struct nmx_open *o, struct nmx_drm_mmap *req)
 
     if (err == 0) {
         int writable = (vma->vm_flags & VM_WRITE) != 0;
-        err = nmx_xnu_map_user(u->pages, u->npages, u->cache, writable, &u->uaddr, &u->xmap);
+        err = nmx_xnu_map_user(u->pages, u->npages, u->cache, writable, fixed, &u->uaddr, &u->xmap);
     }
     if (err) {
         umap_free(u);

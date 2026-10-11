@@ -223,3 +223,113 @@ int sysctl_handle_opaque(SYSCTL_HANDLER_ARGS)
         return err;
     return SYSCTL_IN(req, arg1, (size_t)arg2);
 }
+
+/* ---- reading and writing a leaf from inside the kernel (nmx_sysctl_find/read/write) ------------------------------- */
+
+struct rw_ctx {
+    char *buf;              /* NULL: the handler's output is counted and dropped (a write) */
+    size_t max;
+    const void *val;        /* a write's new value */
+};
+
+static int rw_out(struct sysctl_req *req, const void *p, size_t l)
+{
+    struct rw_ctx *c = req->oldptr;
+    if (c->buf != NULL) {
+        if (req->oldidx + l > c->max)
+            return ENOMEM;
+        memcpy(c->buf + req->oldidx, p, l);
+    }
+    req->oldidx += l;
+    return 0;
+}
+
+static int rw_in(struct sysctl_req *req, void *p, size_t l)
+{
+    struct rw_ctx *c = req->oldptr;
+    if (c->val == NULL)
+        return EPERM;       /* a read carries no new value */
+    if (req->newidx + l > req->newlen)
+        return EINVAL;
+    memcpy(p, (const char *)c->val + req->newidx, l);
+    req->newidx += l;
+    return 0;
+}
+
+static struct sysctl_oid *find_child(struct sysctl_oid_list *list, const char *name, size_t n)
+{
+    struct sysctl_oid *o;
+    SLIST_FOREACH(o, list, oid_link)
+        if (strncmp(o->oid_name, name, n) == 0 && o->oid_name[n] == '\0')
+            return o;
+    return NULL;
+}
+
+struct sysctl_oid *nmx_sysctl_find(struct sysctl_oid_list *list, const char *path)
+{
+    if (list == NULL || path == NULL)
+        return NULL;
+    /* the lock covers the walk only; the handlers run unlocked because a sysfs show/store may sleep */
+    mtx_lock(&sysctl_tree_mtx);
+    struct sysctl_oid *o = NULL;
+    const char *seg = path;
+    for (;;) {
+        const char *slash = strchr(seg, '/');
+        size_t n = slash ? (size_t)(slash - seg) : strlen(seg);
+        o = n ? find_child(list, seg, n) : NULL;
+        if (o == NULL || slash == NULL)
+            break;
+        if ((o->oid_kind & CTLTYPE) != CTLTYPE_NODE) {
+            o = NULL;
+            break;
+        }
+        list = SYSCTL_CHILDREN(o);
+        seg = slash + 1;
+    }
+    mtx_unlock(&sysctl_tree_mtx);
+    if (o == NULL || o->oid_handler == NULL || (o->oid_kind & CTLTYPE) == CTLTYPE_NODE)
+        return NULL;
+    return o;
+}
+
+/* runs the leaf's handler: c->buf receives its output (bounded by rw_out), c->val is the new value if any */
+static int run(struct sysctl_oid *o, struct rw_ctx *c, size_t newlen, size_t *outlen)
+{
+    struct sysctl_req req = { 0 };
+    req.oldptr = c;
+    req.oldlen = c->max;
+    req.oldfunc = rw_out;
+    req.newfunc = rw_in;
+    req.newptr = c->val;
+    req.newlen = newlen;
+    int err = o->oid_handler(o, o->oid_arg1, o->oid_arg2, &req);
+    *outlen = req.oldidx;
+    return err;
+}
+
+int nmx_sysctl_read(struct sysctl_oid *o, char *buf, size_t max, size_t *len)
+{
+    *len = 0;
+    if (o == NULL || buf == NULL || max == 0)
+        return EINVAL;
+    struct rw_ctx c = { .buf = buf, .max = max - 1, .val = NULL };     /* room kept for the NUL */
+    size_t n;
+    int err = run(o, &c, 0, &n);
+    if (err)
+        return err;
+    /* string handlers copy out their NUL too; the length reported is the text's */
+    while (n > 0 && buf[n - 1] == '\0')
+        n--;
+    buf[n] = '\0';
+    *len = n;
+    return 0;
+}
+
+int nmx_sysctl_write(struct sysctl_oid *o, const void *val, size_t len)
+{
+    if (o == NULL || val == NULL || len == 0)
+        return EINVAL;
+    struct rw_ctx c = { .buf = NULL, .max = 0, .val = val };
+    size_t ignored;
+    return run(o, &c, len, &ignored);
+}
