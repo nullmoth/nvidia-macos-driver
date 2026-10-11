@@ -23,6 +23,11 @@ case "$NVDEV" in 1[eEfF]??|21[89a-fA-F]?) TURING=1;; *) TURING=0;; esac
 DROP_ARGS="nv_disable=1 -wegnoegpu"          # both hide the NVIDIA card from macOS
 SIP_BITS=$((0x0A43))
 TOOL_NAME="1401: Remove NVIDIA driver"; TOOL_FILE=NullMothSafe.efi
+# the same tool with Arguments "once": macOS starts one time without the driver (to reach Recovery, or to get past a bad
+# start), and the driver is back after that - OpenCore rewrites boot-args at every start. Asked for on Discord 10-11.
+ONCE_NAME="1401: Start once without NVIDIA driver"
+# the NullMoth boot logo (an OpenCore driver that draws it where boot.efi draws the Apple logo). On unless --logo off.
+LOGO=on; LOGO_FILE=NullMothLogo.efi
 ST=${NULLMOTH_STATE_DIR:-/Library/NullMoth}; STATE=$ST/state
 AGENT=/Library/LaunchAgents/com.nullmoth.crashcheck.plist
 RECOVER=/Library/LaunchDaemons/com.nullmoth.recover.plist
@@ -30,7 +35,7 @@ KNOBS=(); PROFILE=""; COLLECT=""; UPD=""; VERB=""; PKG=""; SHA=""; CFG=""; EFI=a
 while [ $# -gt 0 ]; do case "$1" in
   --pkg) PKG=$2; shift;; --sha) SHA=$2; shift;; --config) CFG=$2; shift;; --efi) EFI=$2; shift;;
   --tool) TOOL=$2; shift;; --usbmap) USBMAP=$2; shift;; --app) APPBIN=$2; shift;; --dry) DRY=1;; --remove) REMOVE=1;; --verbose) VERB=$2; shift;; --update) UPD=$2; shift;; --collect-logs) COLLECT=$2; shift;;
-  --knob) KNOBS+=("$2"); shift;; --profile) PROFILE=$2; shift;;
+  --knob) KNOBS+=("$2"); shift;; --profile) PROFILE=$2; shift;; --logo) LOGO=$2; shift;; --set-logo) SETLOGO=$2; shift;;
   *) echo "STOP unknown option $1"; echo "RESULT stop"; exit 2;; esac; shift; done
 step() { echo "STEP $*"; }; ok() { echo "OK $*"; }; note() { echo "NOTE $*"; }
 KT=""
@@ -100,10 +105,20 @@ booted_part() { # the partition OpenCore started this Mac from, read from OpenCo
   for d in $(diskutil list | grep -oE 'disk[0-9]+s[0-9]+$' | sort -u); do
     diskutil info "$d" 2>/dev/null | grep -qi "Partition UUID: *$u" && { echo "$d"; return 0; }; done
   return 1; }
-tool_index() {  # index of our entry in Misc.Tools, or nothing
+tool_index() {  # index of our remove entry in Misc.Tools, or nothing (the once entry shares the file, not the Arguments)
   local i=0 p
   while p=$(plutil -extract Misc.Tools.$i.Path raw -o - "$C" 2>/dev/null); do
-    [ "$p" = "$TOOL_FILE" ] && { echo $i; return; }; i=$((i+1)); done; }
+    [ "$p" = "$TOOL_FILE" ] && [ "$(plutil -extract Misc.Tools.$i.Arguments raw -o - "$C" 2>/dev/null)" != once ] && { echo $i; return; }
+    i=$((i+1)); done; }
+once_index() {  # index of the start-once entry in Misc.Tools, or nothing
+  local i=0 p
+  while p=$(plutil -extract Misc.Tools.$i.Path raw -o - "$C" 2>/dev/null); do
+    [ "$p" = "$TOOL_FILE" ] && [ "$(plutil -extract Misc.Tools.$i.Arguments raw -o - "$C" 2>/dev/null)" = once ] && { echo $i; return; }
+    i=$((i+1)); done; }
+logo_index() {  # index of the boot-logo driver in UEFI.Drivers, or nothing
+  local i=0 p
+  while p=$(plutil -extract UEFI.Drivers.$i.Path raw -o - "$C" 2>/dev/null); do
+    [ "$p" = "$LOGO_FILE" ] && { echo $i; return; }; i=$((i+1)); done; }
 csr_of() { local h; h=$(get NVRAM.Add.$B.csr-active-config | base64 -D 2>/dev/null | xxd -p)
   [ ${#h} = 8 ] && echo $(( 0x${h:6:2}${h:4:2}${h:2:2}${h:0:2} )) || echo 0; }
 csr_data() { printf '%08x' "$1" | sed -E 's/(..)(..)(..)(..)/\4\3\2\1/' | xxd -r -p | base64; }
@@ -415,6 +430,8 @@ if [ $REMOVE = 1 ]; then
       if [ "$(csr_of)" = "${NEW_CSR:-x}" ]; then plutil -replace NVRAM.Add.$B.csr-active-config -data "$(csr_data "$OLD_CSR")" "$C" || stop "could not stage the recorded SIP setting - nothing changed"; fi
       if [ -n "${OLD_SBM:-}" ] && [ "$(get Misc.Security.SecureBootModel)" = Disabled ]; then plutil -replace Misc.Security.SecureBootModel -string "$OLD_SBM" "$C" || stop "could not stage SecureBootModel - nothing changed"; fi
       i=$(tool_index); if [ -n "$i" ]; then plutil -remove Misc.Tools.$i "$C" || stop "could not stage removal of the picker tool - nothing changed"; fi
+      # the start-once entry goes with the driver (it only switches the driver off); the boot logo stays, it is not the driver's
+      i=$(once_index); if [ -n "$i" ]; then plutil -remove Misc.Tools.$i "$C" || stop "could not stage removal of the start-once entry - nothing changed"; fi
       # back to the installer-safe settings 1401 wrote: small BAR for macOS, firmware framebuffer allowed
       plutil -replace UEFI.Quirks.ResizeGpuBars -integer -1 "$C" && plutil -replace Booter.Quirks.ResizeAppleGpuBars -integer 0 "$C" || stop "could not stage installer-safe BAR settings - nothing changed"
       bi=$(bidx 2>/dev/null); if [ -n "$bi" ]; then plutil -replace Kernel.Block.$bi.Enabled -bool false "$C" || stop "could not stage firmware display support - nothing changed"; fi
@@ -594,6 +611,26 @@ if [ -n "$VERB" ]; then
   [ "$VERB" = on ] && nv="$nv -v"; nv=${nv# }
   nvram boot-args="$nv" && ok "NVRAM boot-args: $nv" || note "could not write NVRAM boot-args; the config change still applies"
   ok "verbose startup $VERB - takes effect at the next restart"; cleanup; echo "RESULT ok"; exit 0
+fi
+
+if [ -n "${SETLOGO:-}" ]; then
+  # The app's "Boot logo on/off": only the logo driver's entry changes (backup first, restored on any failure).
+  # -nmlogooff in boot-args turns it off for one start without touching the config.
+  case "$SETLOGO" in on|off) ;; *) stop "--set-logo takes on or off";; esac
+  step "Turning the NullMoth boot logo $SETLOGO"
+  BKC="$C.nullmoth-logo-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C"
+  LOGOSRC="$(dirname "${TOOL:-/nonexistent}")/$LOGO_FILE"; li=$(logo_index); fail=0
+  if [ "$SETLOGO" = on ]; then
+    if [ -z "$li" ]; then
+      [ -f "$LOGOSRC" ] || stop "this copy of the app has no boot logo file"
+      has UEFI.Drivers || plutil -insert UEFI.Drivers -array "$C" || fail=1
+      hv=""; plutil -extract UEFI.Drivers.0.HideVerbose raw -o - "$C" >/dev/null 2>&1 && hv=',"HideVerbose":false'
+      plutil -insert UEFI.Drivers -json "{\"Arguments\":\"\",\"Comment\":\"NullMoth boot logo\",\"Enabled\":true,\"LoadEarly\":false,\"Path\":\"$LOGO_FILE\"$hv}" -append "$C" || fail=1
+    else plutil -replace UEFI.Drivers.$li.Enabled -bool true "$C" || fail=1; fi
+    [ ! -f "$LOGOSRC" ] || { mkdir -p "$MP/$OCREL/Drivers" && cp "$LOGOSRC" "$MP/$OCREL/Drivers/$LOGO_FILE"; } || fail=1
+  elif [ -n "$li" ]; then plutil -replace UEFI.Drivers.$li.Enabled -bool false "$C" || fail=1; fi
+  if [ $fail = 1 ] || ! plutil -lint "$C" >/dev/null; then cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; fi
+  ok "boot logo $SETLOGO - takes effect at the next restart"; cleanup; echo "RESULT ok"; exit 0
 fi
 
 if [ -n "$UPD" ]; then
@@ -817,7 +854,18 @@ NEEDTOOL=0; [ -z "$(tool_index)" ] && { NEEDTOOL=1; echo "CHANGE boot picker: ad
 ti=$(tool_index); if [ -n "$ti" ] && [ "$(get Misc.Tools.$ti.TextMode)" != true ]; then
   echo "CHANGE boot picker: show \"$TOOL_NAME\" in text mode, so its question is visible"; EDITS+=("Misc.Tools.$ti.TextMode|-bool|true"); fi
 REFRESHTOOL=0; [ -n "$ti" ] && [ -f "$TOOL" ] && ! cmp -s "$TOOL" "$(dirname "$C")/Tools/$TOOL_FILE" && REFRESHTOOL=1
-[ ${#EDITS[@]} = 0 ] && [ ${#DELADD[@]} = 0 ] && [ $NEEDTOOL = 0 ] && [ $NEEDBLOCK = 0 ] && [ $NEEDAMFIPASS = 0 ] && ok "OpenCore already has every setting the driver needs"
+NEEDONCE=0; [ -z "$(once_index)" ] && { NEEDONCE=1; echo "CHANGE boot picker: add \"$ONCE_NAME\" (start macOS or Recovery one time without the driver)"; }
+LOGOSRC="$(dirname "${TOOL:-/nonexistent}")/$LOGO_FILE"; NEEDLOGO=0; REFRESHLOGO=0; li=$(logo_index)
+if [ "$LOGO" != off ] && [ -f "$LOGOSRC" ]; then
+  if [ -z "$li" ]; then NEEDLOGO=1; echo "CHANGE boot logo: add the NullMoth boot logo (turn it off in the app, or with -nmlogooff)"
+  else
+    [ "$(get UEFI.Drivers.$li.Enabled)" = true ] || { echo "CHANGE boot logo: turn the NullMoth boot logo on"; EDITS+=("UEFI.Drivers.$li.Enabled|-bool|true"); }
+    cmp -s "$LOGOSRC" "$(dirname "$C")/Drivers/$LOGO_FILE" || REFRESHLOGO=1
+  fi
+elif [ "$LOGO" = off ] && [ -n "$li" ] && [ "$(get UEFI.Drivers.$li.Enabled)" = true ]; then
+  echo "CHANGE boot logo: turn the NullMoth boot logo off (the Apple logo shows again)"; EDITS+=("UEFI.Drivers.$li.Enabled|-bool|false")
+fi
+[ ${#EDITS[@]} = 0 ] && [ ${#DELADD[@]} = 0 ] && [ $NEEDTOOL = 0 ] && [ $NEEDONCE = 0 ] && [ $NEEDLOGO = 0 ] && [ $NEEDBLOCK = 0 ] && [ $NEEDAMFIPASS = 0 ] && ok "OpenCore already has every setting the driver needs"
 
 if [ $SIPON = 1 ]; then
   note "SIP is still fully on in this boot: only SIP, Secure Boot, boot arguments and the boot picker entry change now"
@@ -862,6 +910,19 @@ if [ $DRY = 0 ]; then
     mkdir -p "$MP/$OCREL/Tools" && cp "$TOOL" "$MP/$OCREL/Tools/$TOOL_FILE" || fail=1
   fi
   [ "${REFRESHTOOL:-0}" = 1 ] && { cp "$TOOL" "$MP/$OCREL/Tools/$TOOL_FILE" || fail=1; }   # the current tool (drains stale keys)
+  if [ $NEEDONCE = 1 ]; then
+    plutil -extract Misc.Tools xml1 -o - "$C" >/dev/null 2>&1 || plutil -insert Misc.Tools -array "$C" || fail=1
+    plutil -insert Misc.Tools -json "{\"Arguments\":\"once\",\"Auxiliary\":false,\"Comment\":\"NullMoth: start macOS once without the NVIDIA driver\",\"Enabled\":true,\"Flavour\":\"Auto\",\"FullNvramAccess\":true,\"Name\":\"$ONCE_NAME\",\"Path\":\"$TOOL_FILE\",\"RealPath\":false,\"TextMode\":true}" -append "$C" || fail=1
+    [ -f "$MP/$OCREL/Tools/$TOOL_FILE" ] || { mkdir -p "$MP/$OCREL/Tools" && cp "$TOOL" "$MP/$OCREL/Tools/$TOOL_FILE"; } || fail=1
+  fi
+  if [ $NEEDLOGO = 1 ]; then
+    has UEFI.Drivers || plutil -insert UEFI.Drivers -array "$C" || fail=1
+    # the entry carries the keys this config's own driver entries carry, so an older OpenCore never meets a key it lacks
+    hv=""; plutil -extract UEFI.Drivers.0.HideVerbose raw -o - "$C" >/dev/null 2>&1 && hv=',"HideVerbose":false'
+    plutil -insert UEFI.Drivers -json "{\"Arguments\":\"\",\"Comment\":\"NullMoth boot logo\",\"Enabled\":true,\"LoadEarly\":false,\"Path\":\"$LOGO_FILE\"$hv}" -append "$C" || fail=1
+    mkdir -p "$MP/$OCREL/Drivers" && cp "$LOGOSRC" "$MP/$OCREL/Drivers/$LOGO_FILE" || fail=1
+  fi
+  [ "${REFRESHLOGO:-0}" = 1 ] && { cp "$LOGOSRC" "$MP/$OCREL/Drivers/$LOGO_FILE" || fail=1; }
   if [ $fail = 1 ] || ! plutil -lint "$C" >/dev/null; then cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; fi
   ok "OpenCore config updated"
   mkdir -p "$ST"
