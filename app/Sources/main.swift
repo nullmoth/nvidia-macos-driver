@@ -9,10 +9,10 @@ import WebKit
 import UniformTypeIdentifiers
 
 struct Package {
-    static let version = "1.11.0"
-    static let name = "nullmoth-nvidia-1.11.0.tar.gz"
-    static let url = URL(string: "https://github.com/nullmoth/nvidia-macos-driver/releases/download/v1.11.0/nullmoth-nvidia-1.11.0.tar.gz")!
-    static let sha256 = "6e568e28ee34c3b41f4dfda980fd8feb50fdd0a69cf6d0f6e54338873b8ec2e7"
+    static let version = "1.12.0"
+    static let name = "nullmoth-nvidia-1.12.0.tar.gz"
+    static let url = URL(string: "https://github.com/nullmoth/nvidia-macos-driver/releases/download/v1.12.0/nullmoth-nvidia-1.12.0.tar.gz")!
+    static let sha256 = "40c47c41e4410a3bf3805478df1057e77412fce072d4ef34b323aeacb5da9fe0"
 }
 let uploadPage = URL(string: "https://nullmothsystems.com/#send")!
 let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("NullMoth")
@@ -696,9 +696,14 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
             }
             var files = ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
             let sessions = (try? fm.contentsOfDirectory(at: logs.appendingPathComponent("Reports"), includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+            // Setup logs written before this app was built came from an older setup script. 1.11 sent 1.10's
+            // "AMFIPass.kext is not in this OpenCore EFI" stops under a 1.11 label (10-11: 13 uploads), beside the
+            // newer run that had already fixed it. Pending files are kept: they are uploads that have not gone out yet.
+            let built = Bundle.main.executableURL.flatMap { try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate } ?? .distantPast
             let retained = sessions.filter { $0 != dir }.flatMap { session in
                 ((try? fm.contentsOfDirectory(at: session, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
-                    .filter { $0.lastPathComponent.hasPrefix("setup-") || $0.lastPathComponent.hasPrefix("pending-") }
+                    .filter { $0.lastPathComponent.hasPrefix("pending-") || ($0.lastPathComponent.hasPrefix("setup-") &&
+                        ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) >= built) }
             }
             let mine = ((try? fm.contentsOfDirectory(at: logs, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
                 .sorted { ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) >
@@ -738,7 +743,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
             if err != nil { errs.append("Some system logs could not be collected. See collect.txt for details.") }
             // Directory enumeration is unordered: a stick with many boot logs could crowd out
             // the GPU state, kernel log, or crash report. Always send those first.
-            let important = ["hardware-map.json", "driver-state.txt", "driver-kernel-log.txt", "driver-display.txt", "previous-boot-kernel-log.txt", "display-trace.txt", "display-kernel.txt", "driver-plugin-log.txt", "crash-report.txt", "driver-wsreset.log.txt", "diagnostic-session.json", "collect.txt", "driver-update-log.txt"]
+            let important = ["hardware-map.json", "driver-state.txt", "driver-kernel-log.txt", "driver-display.txt", "previous-boot-kernel-log.txt", "display-trace.txt", "display-kernel.txt", "display-ws.txt", "driver-plugin-log.txt", "crash-report.txt", "driver-wsreset.log.txt", "diagnostic-session.json", "collect.txt", "driver-update-log.txt"]
             files.sort {
                 let a = supportCrashRank($0.lastPathComponent) ?? (important.firstIndex(of: $0.lastPathComponent) ?? important.count)
                 let b = supportCrashRank($1.lastPathComponent) ?? (important.firstIndex(of: $1.lastPathComponent) ?? important.count)
@@ -815,7 +820,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         let log: URL
         do {
             let directory = try SavedReports.session(in: logs.appendingPathComponent("Reports"))
-            log = try SavedReports.create(Data("Setup \(mode) started.\n".utf8), in: directory, name: "setup-\(mode).log")
+            // The version and time ride in the log itself: a sent log is otherwise unattributable once it is retained.
+            let stamp = ISO8601DateFormatter().string(from: Date())
+            let app = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+            log = try SavedReports.create(Data("Setup \(mode) started (1401 Mac \(app), driver \(Package.version), \(stamp)).\n".utf8), in: directory, name: "setup-\(mode).log")
         } catch {
             runningSetup = false
             send("run", ["state": "end", "mode": mode, "ok": false, "why": "Could not save a local report: \(error.localizedDescription)"])

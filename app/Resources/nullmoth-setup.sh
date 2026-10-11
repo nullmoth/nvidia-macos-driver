@@ -241,7 +241,7 @@ if [ -n "$COLLECT" ]; then
   n=0; collection_errors=0
   collect_recent_logs macos 3 /Library/Logs/DiagnosticReports/*.panic /Library/Logs/DiagnosticReports/Retired/*.panic
   # the display tracker (every boot, from the first second): current and previous file, newest 3 MB of each
-  for f in trace.txt trace.txt.1 kernel.txt kernel.txt.1; do
+  for f in trace.txt trace.txt.1 kernel.txt kernel.txt.1 ws.txt ws.txt.1; do
     [ -f "/Library/NullMoth/display-trace/$f" ] && tail -c 3145728 "/Library/NullMoth/display-trace/$f" > "$COLLECT/display-$f"
   done
   # A boot that hung or went black never writes a panic: its kernel messages are only in the log store. Users could not
@@ -988,9 +988,9 @@ cat > /Library/NullMoth/nullmoth-displaytrace.sh <<'DT'
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 kextstat 2>/dev/null | grep -q com.nullmoth.NVAccel || exit 0
 D=/Library/NullMoth/display-trace; mkdir -p "$D"; chmod 755 "$D"
-T=$D/trace.txt; K=$D/kernel.txt; CAP=8388608
+T=$D/trace.txt; K=$D/kernel.txt; W=$D/ws.txt; CAP=8388608
 rot() { local s; s=$(stat -f%z "$1" 2>/dev/null || echo 0); [ "$s" -gt $CAP ] && mv -f "$1" "$1.1"; }
-rot "$T"; rot "$K"
+rot "$T"; rot "$K"; rot "$W"
 CTRS="debug.nvaccel_iop_ok debug.nvaccel_iop_fail debug.nvaccel_iop_empty debug.nvaccel_iop_blank debug.nvaccel_iop_flips debug.nvaccel_iop_flip_hit debug.nvaccel_iop_flip_miss debug.nvaccel_iop_flip_stale debug.nvaccel_iop_flip_refused debug.nvaccel_iop_flip_novram debug.nvaccel_iop_flip_lock debug.nvaccel_iop_flip_home debug.nvaccel_iop_async_flips debug.nvaccel_iop_async_refused debug.nvaccel_iop_async_drop debug.nvaccel_iop_ok_h0 debug.nvaccel_iop_ok_h1 debug.nvaccel_iop_ok_h2 debug.nvaccel_iop_ok_h3 debug.nvaccel_heads_published debug.nvaccel_heads_piped debug.nvrmfb_agdc_cmds debug.nvrmfb_agdc_refused debug.nvrmfb_agdc_last_refused debug.nvrmfb_agdc_k5_link debug.nvrmfb_agdc_k5_caps debug.nvrmfb_agdc_fbmap"
 hz() { ioreg -r -c NVRMNVDAFramebuffer -w0 2>/dev/null | LC_ALL=C awk '
   /"IOFBDependentIndex" =/    { if (match($0, /= [0-9]+/)) idx = substr($0, RSTART+2, RLENGTH-2) }
@@ -1002,7 +1002,10 @@ snapshot() {
     echo "boot-args: $(nvram boot-args 2>/dev/null | cut -f2-)"
     sysctl debug 2>/dev/null | grep -E '^debug\.(nvaccel|nvrmfb)' | grep -v -E 'nvaccel_vm_|nvaccel_res_|nvaccel_map_'
     ioreg -r -c NVRMNVDAFramebuffer -w0 2>/dev/null | grep -oaE '"(IOFB[A-Za-z]*(Mode|Timing|Pixel)[A-Za-z]*|IOFBDependentIndex|NVRMTrace|NVRMTraceCount|reflips|fVblCalls|fBarPaints)" = [^,}]{0,240}'
-    echo "displays: $(hz)"; echo
+    echo "displays: $(hz)"
+    # The monitor's own list of timings: a rate that goes black is checked against what the panel says it accepts
+    ioreg -l -r -c AppleDisplay -w0 2>/dev/null | grep -oaE '"IODisplayEDID" = <[0-9a-f]+>' | sort -u
+    echo
   } >> "$T" 2>&1; }
 BOOT=$(sysctl -n kern.boottime | sed -E 's/.*sec = ([0-9]+),.*/\1/')
 echo "#### boot $(date -r "$BOOT" -u +%Y-%m-%dT%H:%M:%SZ), tracker start $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$T"
@@ -1012,7 +1015,15 @@ echo "#### boot $(date -r "$BOOT" -u +%Y-%m-%dT%H:%M:%SZ), tracker start $(date 
            if (s != ls || m != lm) { if (n) print (n > 1 ? n "x " : "") last; n = 0 }
            ls = s; lm = m; last = $0; n++; fflush() }' >> "$K" &
 LS=$!
-trap 'kill $LS 2>/dev/null' EXIT
+# WindowServer's side of a mode change (the ">60 Hz goes black" reports): our kexts log a successful commit at every
+# rate, so the black is after the modeset and only WindowServer/CoreDisplay say what happened next. Same per-second
+# folding, own file so it cannot crowd out the kernel lines.
+/usr/bin/log stream --style compact --predicate 'process == "WindowServer" AND (eventMessage CONTAINS[c] "mode" OR eventMessage CONTAINS[c] "refresh" OR eventMessage CONTAINS[c] "reconfig" OR eventMessage CONTAINS[c] "blank" OR eventMessage CONTAINS[c] "online" OR eventMessage CONTAINS[c] "timing" OR eventMessage CONTAINS[c] "revert" OR eventMessage CONTAINS[c] "edid") AND NOT eventMessage CONTAINS "RunLoopMode"' 2>/dev/null \
+  | awk '{ s = substr($0, 1, 19); m = $0; sub(/^[^ ]+ [^ ]+ +[^ ]+ +[^ ]+ +/, "", m); gsub(/[0-9]+/, "#", m)
+           if (s != ls || m != lm) { if (n) print (n > 1 ? n "x " : "") last; n = 0 }
+           ls = s; lm = m; last = $0; n++; fflush() }' >> "$W" &
+LW=$!
+trap 'kill $LS $LW 2>/dev/null' EXIT
 WS=""; PREV=""; i=0
 while :; do
   w=$(pgrep -x WindowServer | head -1)
@@ -1022,7 +1033,7 @@ while :; do
   i=$((i + 1))
   # every second for the first 15 minutes after boot (the handoff and login), then every 5 s
   if [ $(( $(date +%s) - BOOT )) -lt 900 ]; then sleep 1; else sleep 5; fi
-  [ $((i % 300)) = 0 ] && { rot "$T"; s=$(stat -f%z "$K" 2>/dev/null || echo 0); [ "$s" -gt $CAP ] && { : > "$K.1"; cp "$K" "$K.1"; : > "$K"; }; }
+  [ $((i % 300)) = 0 ] && { rot "$T"; for f in "$K" "$W"; do s=$(stat -f%z "$f" 2>/dev/null || echo 0); [ "$s" -gt $CAP ] && { cp "$f" "$f.1"; : > "$f"; }; done; }
 done
 DT
 chmod 755 /Library/NullMoth/nullmoth-displaytrace.sh; chown root:wheel /Library/NullMoth/nullmoth-displaytrace.sh
