@@ -12809,9 +12809,45 @@ join:
 
 #[test]
 fn native_constant_member_pointer_reaches_a_helper_as_a_cursor() {
-    let kern = meta::parse_air_kernel_meta(CONSTANT_MEMBER_HELPER_LL);
+    assert_constant_member_helper_reads_the_member(CONSTANT_MEMBER_HELPER_LL);
+}
+
+// CoreImage's stitched kernels define their helpers before the kernel. The helper learns its
+// parameter's byte cursor from the call, so emitted first it read the constant buffer at offset 0
+// (ci_lanczosDownH's sampler transform came from bytes 0..31 instead of 80..111). A single-block
+// helper is inlined as text before emission and never showed it.
+#[test]
+fn native_constant_member_cursor_reaches_a_multi_block_helper_defined_before_the_kernel() {
+    let kernel_start = CONSTANT_MEMBER_HELPER_LL
+        .find("define void @k(")
+        .expect("kernel");
+    let helper_start = CONSTANT_MEMBER_HELPER_LL
+        .find("define internal fastcc i32 @divide(")
+        .expect("helper");
+    let helper_end = helper_start
+        + CONSTANT_MEMBER_HELPER_LL[helper_start..]
+            .find("\n}\n")
+            .expect("helper end")
+        + 3;
+    let reordered = format!(
+        "{}{}\n{}{}",
+        &CONSTANT_MEMBER_HELPER_LL[..kernel_start],
+        &CONSTANT_MEMBER_HELPER_LL[helper_start..helper_end],
+        &CONSTANT_MEMBER_HELPER_LL[kernel_start..helper_start],
+        &CONSTANT_MEMBER_HELPER_LL[helper_end..]
+    );
+    assert!(
+        reordered.find("@divide(").expect("helper")
+            < reordered.find("define void @k(").expect("kernel"),
+        "the helper must be defined before the kernel:\n{reordered}"
+    );
+    assert_constant_member_helper_reads_the_member(&reordered);
+}
+
+fn assert_constant_member_helper_reads_the_member(ll: &str) {
+    let kern = meta::parse_air_kernel_meta(ll);
     let emitted = crate::native::emit_vulkan_spirv_with_sidecar(
-        CONSTANT_MEMBER_HELPER_LL,
+        ll,
         kern.as_ref(),
         Some("k"),
         kern.as_ref().map(|meta| &meta.buffer_layouts),
