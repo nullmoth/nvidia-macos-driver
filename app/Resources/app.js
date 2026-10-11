@@ -147,6 +147,7 @@ function usbRender() {
 $("uw").onclick = () => { U.pick = {}; U.off = new Set(); post({ act: "usbStart" }); $("uw").textContent = "Watching..."; $("uw").disabled = true; };
 $("uwr").onclick = () => { $("uerr").textContent = ""; post({ act: "usbStop" }); post({ act: "usbWrite", sel: U.pick, efi: efi() }); };
 $("mk").onclick = () => post({ act: "crashReport" });
+$("cf").onclick = () => post({ act: "open", url: "https://buymeacoffee.com/nullmoth" });
 $("sl").onclick = () => { $("sl").disabled = true; $("slr").textContent = "Collecting and sending..."; post({ act: "sendLogs" }); };
 $("fl").onclick = () => { $("sl").disabled = true; $("fl").disabled = true; $("slr").textContent = "Recording the display for 20 seconds, then sending..."; post({ act: "sendLogs", sample: "flicker" }); };
 $("od").onclick = () => post({ act: "optionalDiagnostics" });
