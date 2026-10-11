@@ -65,6 +65,11 @@ constexpr uint32_t FRMCOUNT(int p)     { return 0x70040u + (uint32_t)p * 0x1000u
 // PLANE_CTL (display 11+): enable bit 31, format bits 27:23 (8 = XRGB 8:8:8:8, Linux PLANE_CTL_FORMAT_XRGB_8888 on
 // ICL+), tiling bits 12:10 (0 = linear)
 constexpr uint32_t kEnable = 1u << 31;
+// the two power states NVRMFB registers: off, and on + usable
+IOPMPowerState kPowerStates[2] = {
+    { kIOPMPowerStateVersion1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { kIOPMPowerStateVersion1, kIOPMDeviceUsable, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 },
+};
 constexpr uint32_t fmtOf(uint32_t ctl)  { return (ctl >> 23) & 0x1F; }
 constexpr uint32_t tileOf(uint32_t ctl) { return (ctl >> 10) & 0x7; }
 }
@@ -176,6 +181,40 @@ public:
     IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnSuccess; }
     IOReturn setApertureEnable(IOPixelAperture, IOOptionBits) override { return kIOReturnSuccess; }
     IOReturn setStartupDisplayMode(IODisplayModeID, IOIndex) override { return kIOReturnSuccess; }
+    // Power and connection handling copied from NVRMFB, which shares this controller (same IOFBDependentID). Left to
+    // IOFramebuffer's base class, a power change queues on the shared controller thread and waits for an acknowledge
+    // (IOFramebuffer::setPowerState returns a 45 s timeout, checkPowerWork -> setAttribute(kIOPowerStateAttribute));
+    // NVRMFB acknowledges at once and answers the power attributes itself. Studio 10-10: with NMIntelFB under NVRM the
+    // first WindowServer restart froze every display.
+    IOReturn setPowerState(unsigned long ordinal, IOService *) override {
+        handleEvent(ordinal ? kIOFBNotifyDidPowerOn : kIOFBNotifyWillPowerOff);
+        return kIOPMAckImplied;
+    }
+    IOReturn setAttribute(IOSelect attribute, uintptr_t value) override {
+        if (attribute == kIOWindowServerActiveAttribute) return kIOReturnSuccess;
+        if (attribute == kIOPowerAttribute) {
+            if (value) { IOReturn r = IOFramebuffer::setAttribute(attribute, value); handleEvent(kIOFBNotifyDidPowerOn);
+                         return r == kIOReturnUnsupported ? kIOReturnSuccess : r; }
+            handleEvent(kIOFBNotifyWillPowerOff);
+            IOReturn r = IOFramebuffer::setAttribute(attribute, value);
+            return r == kIOReturnUnsupported ? kIOReturnSuccess : r;
+        }
+        return IOFramebuffer::setAttribute(attribute, value);
+    }
+    IOReturn setAttributeForConnection(IOIndex idx, IOSelect attribute, uintptr_t value) override {
+        switch (attribute) {
+        case kConnectionPower: case kConnectionColorModesSupported: case kConnectionColorDepthsSupported:
+        case kConnectionControllerColorDepth: case kConnectionControllerDepthsSupported: case kConnectionColorMode:
+        case kConnectionDisplayFlags: case kConnectionFlags:
+            return kIOReturnSuccess;
+        default: return IOFramebuffer::setAttributeForConnection(idx, attribute, value);
+        }
+    }
+    IOReturn connectFlags(IOIndex, IODisplayModeID, IOOptionBits *flags) override {
+        if (flags) *flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeDefaultFlag;
+        return kIOReturnSuccess;
+    }
+    IODeviceMemory *getVRAMRange() override { return getApertureRange(kIOFBSystemAperture); }
     IOReturn getAttribute(IOSelect attribute, uintptr_t *value) override {
         if (attribute == kIOWindowServerActiveAttribute) { if (value) *value = 1; return kIOReturnSuccess; }
         return IOFramebuffer::getAttribute(attribute, value);
@@ -278,6 +317,7 @@ bool NMIntelFB::start(IOService *provider)
         if (fTimer && wl->addEventSource(fTimer) == kIOReturnSuccess) fTimer->setTimeoutMS(2000);
     }
     armVbl();
+    registerPowerDriver(this, kPowerStates, 2);
     gVirt = this; sysctl_register_oid(&sysctl__debug_nmintelfb_sample);
     IFBLOG("virtual panel published (1920x1080 at phys 0x%llx)", (unsigned long long)fApertureBase);
     return true;
@@ -305,6 +345,7 @@ bool NMIntelFB::start(IOService *provider)
     setProperty("NMIntelFBDisplayVersion", fVer, 32);
     setProperty("built-in", kOSBooleanTrue);   // the panel is the laptop's own (kConnectionFlags says so too)
     armVbl();
+    registerPowerDriver(this, kPowerStates, 2);
     IFBLOG("built-in panel published (%ux%u)", fWidth, fHeight);
     return true;
 }
