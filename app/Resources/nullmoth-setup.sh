@@ -130,6 +130,8 @@ if [ -n "$COLLECT" ]; then
   # kernel messages, WindowServer's CPU and the refresh rate. Flicker never shows on a 60 Hz single-display test Mac,
   # so the users' own machines are the measurement.
   if [ "${NULLMOTH_SAMPLE:-}" = flicker ]; then
+    # mark the moment in the display tracker, so its timeline shows where the user saw the flicker
+    [ -d /Library/NullMoth/display-trace ] && echo "== USER: flicker seen now $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /Library/NullMoth/display-trace/trace.txt
     { echo "== display timing sample, $(date -u +%Y-%m-%dT%H:%M:%SZ), 20 s at 0.25 s"
       system_profiler SPDisplaysDataType 2>/dev/null | grep -E "Resolution|Refresh|UI Looks|Display Type|Connection Type|Online"
       /usr/bin/log stream --style compact --predicate 'sender == "NVRMFB" OR sender == "NVRM" OR sender == "NVAccel"' > "$COLLECT/.flicker-kmsg" 2>&1 &
@@ -238,6 +240,10 @@ if [ -n "$COLLECT" ]; then
   } > "$COLLECT/driver-crash-window.txt" 2>&1
   n=0; collection_errors=0
   collect_recent_logs macos 3 /Library/Logs/DiagnosticReports/*.panic /Library/Logs/DiagnosticReports/Retired/*.panic
+  # the display tracker (every boot, from the first second): current and previous file, newest 3 MB of each
+  for f in trace.txt trace.txt.1 kernel.txt kernel.txt.1; do
+    [ -f "/Library/NullMoth/display-trace/$f" ] && tail -c 3145728 "/Library/NullMoth/display-trace/$f" > "$COLLECT/display-$f"
+  done
   # A boot that hung or went black never writes a panic: its kernel messages are only in the log store. Users could not
   # send them (10-10 chat: "the logs from the kernel don't get saved to a file"), so keep the whole kernel log of the boots
   # before this one, up to this boot's start: the tail is how the last failed boot ended.
@@ -702,7 +708,18 @@ fi
 # The installer runs on the firmware framebuffer (IONDRVSupport); once the driver is in, that framebuffer would take
 # display index 0 from NVRMFB, so the installed system excludes it (as on the tested RTX 5060 setup).
 NEEDBLOCK=0; bi=$(bidx)
-if [ -z "$bi" ]; then NEEDBLOCK=1; echo "CHANGE Kernel -> Block: exclude IONDRVSupport (the firmware framebuffer would take NVRMFB's display)"
+# Laptops whose built-in panel is wired to an iGPU macOS has no driver for (Intel Tiger Lake and newer): 1401 1.12 keeps
+# that GPU on (no disable-gpu, no framebuffer properties) so the panel shows macOS through the firmware framebuffer.
+# Excluding IONDRVSupport there leaves the built-in screen dark (10-10: 86 of 184 scans had the panel on the Intel GPU).
+IGPU="PciRoot(0x0)/Pci(0x2,0x0)"; INTELPANEL=0
+# LC_ALL=C: ioreg prints raw bytes, and awk in a UTF-8 locale stops on them (measured on the test Mac)
+if ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | LC_ALL=C awk '/\+-o /{v=0;c=0} /"vendor-id" = <86800000>/{v=1} /"class-code" = <00000300>/{c=1} v&&c{f=1} END{exit !f}' \
+   && ! has "DeviceProperties.Add.$IGPU.disable-gpu" && ! has "DeviceProperties.Add.$IGPU.AAPL,ig-platform-id"; then
+  INTELPANEL=1; note "the built-in screen runs on the Intel GPU through the firmware framebuffer; IONDRVSupport stays on"
+fi
+if [ $INTELPANEL = 1 ]; then
+  [ -n "$bi" ] && [ "$(get Kernel.Block.$bi.Enabled)" = true ] && { EDITS+=("Kernel.Block.$bi.Enabled|-bool|false"); echo "CHANGE Kernel -> Block: turn the IONDRVSupport exclude off (it would leave the built-in screen dark)"; }
+elif [ -z "$bi" ]; then NEEDBLOCK=1; echo "CHANGE Kernel -> Block: exclude IONDRVSupport (the firmware framebuffer would take NVRMFB's display)"
 elif [ "$(get Kernel.Block.$bi.Enabled)" != true ]; then EDITS+=("Kernel.Block.$bi.Enabled|-bool|true"); echo "CHANGE Kernel -> Block: turn the IONDRVSupport exclude on"; fi
 # AMD (AMD Vanilla patches): with Shaneee's "Fix PAT" on, the driver stopped at "RmInitAdapter failed! (0x25:0x40:1310)"
 # right after a valid 8 GB BAR1 (user report 10-10, Ryzen 5 7600 + RTX 4060); switching to Algrey's "Fix PAT" - the one
@@ -961,5 +978,67 @@ cat > /Library/LaunchDaemons/com.nullmoth.wsreset.plist <<'PL'
 PL
 chmod 644 /Library/LaunchDaemons/com.nullmoth.wsreset.plist; chown root:wheel /Library/LaunchDaemons/com.nullmoth.wsreset.plist
 ok "flicker stopgap armed (restarts WindowServer once per boot; opt out with /Library/NullMoth/no-wsreset)"
+# Display tracker: flicker and black screens only happen on monitors we do not have (>60 Hz DisplayPort, two displays),
+# and a "Send logs" afterwards only photographs the end state. This records from boot: the driver's flip/scan-out/AGDC
+# counters every second (only lines that changed, plus a heartbeat), the refresh rate of each framebuffer, every
+# WindowServer start or restart with a full snapshot, and the driver's kernel messages (repeated flip lines counted per
+# second instead of dropped). Bounded: each file rotates at 8 MB, one old copy kept. "Send logs" uploads both.
+cat > /Library/NullMoth/nullmoth-displaytrace.sh <<'DT'
+#!/bin/bash
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+kextstat 2>/dev/null | grep -q com.nullmoth.NVAccel || exit 0
+D=/Library/NullMoth/display-trace; mkdir -p "$D"; chmod 755 "$D"
+T=$D/trace.txt; K=$D/kernel.txt; CAP=8388608
+rot() { local s; s=$(stat -f%z "$1" 2>/dev/null || echo 0); [ "$s" -gt $CAP ] && mv -f "$1" "$1.1"; }
+rot "$T"; rot "$K"
+CTRS="debug.nvaccel_iop_ok debug.nvaccel_iop_fail debug.nvaccel_iop_empty debug.nvaccel_iop_blank debug.nvaccel_iop_flips debug.nvaccel_iop_flip_hit debug.nvaccel_iop_flip_miss debug.nvaccel_iop_flip_stale debug.nvaccel_iop_flip_refused debug.nvaccel_iop_flip_novram debug.nvaccel_iop_flip_lock debug.nvaccel_iop_flip_home debug.nvaccel_iop_async_flips debug.nvaccel_iop_async_refused debug.nvaccel_iop_async_drop debug.nvaccel_iop_ok_h0 debug.nvaccel_iop_ok_h1 debug.nvaccel_iop_ok_h2 debug.nvaccel_iop_ok_h3 debug.nvaccel_heads_published debug.nvaccel_heads_piped debug.nvrmfb_agdc_cmds debug.nvrmfb_agdc_refused debug.nvrmfb_agdc_last_refused debug.nvrmfb_agdc_k5_link debug.nvrmfb_agdc_k5_caps debug.nvrmfb_agdc_fbmap"
+hz() { ioreg -r -c NVRMNVDAFramebuffer -w0 2>/dev/null | LC_ALL=C awk '
+  /"IOFBDependentIndex" =/    { if (match($0, /= [0-9]+/)) idx = substr($0, RSTART+2, RLENGTH-2) }
+  /"IOFBCurrentPixelCount" =/ { if (match($0, /= [0-9]+/)) cnt = substr($0, RSTART+2, RLENGTH-2) }
+  /"IOFBCurrentPixelClock" =/ { if (match($0, /= [0-9]+/)) { clk = substr($0, RSTART+2, RLENGTH-2);
+    if (cnt+0 > 0) printf "fb%s=%.2fHz ", idx, clk/cnt; cnt="" } }'; }
+snapshot() {
+  { echo "== $1 $(date -u +%Y-%m-%dT%H:%M:%SZ) up=$(($(date +%s) - BOOT))s"
+    echo "boot-args: $(nvram boot-args 2>/dev/null | cut -f2-)"
+    sysctl debug 2>/dev/null | grep -E '^debug\.(nvaccel|nvrmfb)' | grep -v -E 'nvaccel_vm_|nvaccel_res_|nvaccel_map_'
+    ioreg -r -c NVRMNVDAFramebuffer -w0 2>/dev/null | grep -oaE '"(IOFB[A-Za-z]*(Mode|Timing|Pixel)[A-Za-z]*|IOFBDependentIndex|NVRMTrace|NVRMTraceCount|reflips|fVblCalls|fBarPaints)" = [^,}]{0,240}'
+    echo "displays: $(hz)"; echo
+  } >> "$T" 2>&1; }
+BOOT=$(sysctl -n kern.boottime | sed -E 's/.*sec = ([0-9]+),.*/\1/')
+echo "#### boot $(date -r "$BOOT" -u +%Y-%m-%dT%H:%M:%SZ), tracker start $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$T"
+# kernel messages: the flip/vblank lines repeat many times a second, so identical lines become "Nx <line>" per second
+/usr/bin/log stream --style compact --predicate 'sender == "NVRMFB" OR sender == "NVRM" OR sender == "NVAccel"' 2>/dev/null \
+  | awk '{ s = substr($0, 1, 19); m = $0; sub(/^[^ ]+ [^ ]+ +[^ ]+ +[^ ]+ +/, "", m); gsub(/[0-9]+/, "#", m)
+           if (s != ls || m != lm) { if (n) print (n > 1 ? n "x " : "") last; n = 0 }
+           ls = s; lm = m; last = $0; n++; fflush() }' >> "$K" &
+LS=$!
+trap 'kill $LS 2>/dev/null' EXIT
+WS=""; PREV=""; i=0
+while :; do
+  w=$(pgrep -x WindowServer | head -1)
+  if [ "$w" != "$WS" ]; then snapshot "WindowServer ${WS:+restarted ($WS -> )}${w:-gone}"; WS=$w; fi
+  cur="$(sysctl $CTRS 2>/dev/null | sed -E 's/^debug\.(nvaccel_|nvrmfb_)?//; s/: /=/' | tr '\n' ' ')$(hz)"
+  if [ "$cur" != "$PREV" ] || [ $((i % 30)) = 0 ]; then echo "$(date -u +%H:%M:%S) ws=$w $cur" >> "$T"; PREV=$cur; fi
+  i=$((i + 1))
+  # every second for the first 15 minutes after boot (the handoff and login), then every 5 s
+  if [ $(( $(date +%s) - BOOT )) -lt 900 ]; then sleep 1; else sleep 5; fi
+  [ $((i % 300)) = 0 ] && { rot "$T"; s=$(stat -f%z "$K" 2>/dev/null || echo 0); [ "$s" -gt $CAP ] && { : > "$K.1"; cp "$K" "$K.1"; : > "$K"; }; }
+done
+DT
+chmod 755 /Library/NullMoth/nullmoth-displaytrace.sh; chown root:wheel /Library/NullMoth/nullmoth-displaytrace.sh
+cat > /Library/LaunchDaemons/com.nullmoth.displaytrace.plist <<'PL'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.nullmoth.displaytrace</string>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>/Library/NullMoth/nullmoth-displaytrace.sh</string></array>
+<key>RunAtLoad</key><true/>
+<key>ProcessType</key><string>Background</string>
+<key>LowPriorityIO</key><true/>
+<key>Nice</key><integer>10</integer>
+</dict></plist>
+PL
+chmod 644 /Library/LaunchDaemons/com.nullmoth.displaytrace.plist; chown root:wheel /Library/LaunchDaemons/com.nullmoth.displaytrace.plist
+ok "display tracker armed (records the driver's display state from every boot; Send logs uploads it)"
 if [ $INSTALL_THEN_PREPARE = 1 ]; then do_prepare; else ok "driver installed - restart to load it"; fi
 cleanup; echo "RESULT ok"

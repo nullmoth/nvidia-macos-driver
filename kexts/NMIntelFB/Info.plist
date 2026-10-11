@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.nullmoth.NMIntelFB</string>
+  <key>CFBundleName</key><string>NMIntelFB</string>
+  <key>CFBundleExecutable</key><string>NMIntelFB</string>
+  <key>CFBundlePackageType</key><string>KEXT</string>
+  <key>CFBundleVersion</key><string>0.1</string>
+  <key>CFBundleShortVersionString</key><string>0.1</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>IOKitPersonalities</key><dict>
+    <key>NMIntelFB</key><dict>
+      <key>CFBundleIdentifier</key><string>com.nullmoth.NMIntelFB</string>
+      <key>IOClass</key><string>NMIntelFB</string>
+      <key>IOProviderClass</key><string>IOPCIDevice</string>
+      <!-- any Intel display-class device; probe() keeps only the display versions this driver knows -->
+      <key>IOPCIMatch</key><string>0x00008086&amp;0x0000ffff</string>
+      <key>IOPCIClassMatch</key><string>0x03000000&amp;0xff000000</string>
+      <!-- above the firmware framebuffer (IONDRVFramebuffer); if start() declines, that one still takes the device -->
+      <key>IOProbeScore</key><integer>60000</integer>
+      <key>IOMatchCategory</key><string>IOFramebuffer</string>
+    </dict>
+  </dict>
+  <key>OSBundleLibraries</key><dict>
+    <key>com.apple.kpi.iokit</key><string>8.0</string>
+    <key>com.apple.kpi.libkern</key><string>8.0</string>
+    <key>com.apple.kpi.mach</key><string>8.0</string>
+    <key>com.apple.iokit.IOPCIFamily</key><string>1.0.0</string>
+    <key>com.apple.iokit.IOGraphicsFamily</key><string>1.0.0</string>
+  </dict>
+</dict></plist>
