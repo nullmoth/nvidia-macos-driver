@@ -691,6 +691,58 @@ int suword64(volatile void *base, int64_t word)
     return copyout(&word, __DEVOLATILE(void *, base), sizeof(word)) == 0 ? 0 : -1;
 }
 
+void *bsearch(const void *key, const void *base, size_t n, size_t size, int (*cmp)(const void *, const void *))
+{
+    const char *lo = base;
+    while (n > 0) {
+        const char *mid = lo + (n / 2) * size;
+        int c = cmp(key, mid);
+        if (c == 0)
+            return __DECONST(void *, mid);
+        if (c > 0) {
+            lo = mid + size;
+            n = n - n / 2 - 1;
+        } else {
+            n /= 2;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * pagefault_disable(): copies from user memory must not sleep on a fault while this is set (LinuxKPI's
+ * copy_from_user_inatomic then returns a short count and the driver takes its slow path)
+ */
+int vm_fault_disable_pagefaults(void)
+{
+    struct thread *td = curthread;
+    int save = td->td_pflags & TDP_NOFAULTING;
+    td->td_pflags |= TDP_NOFAULTING;
+    return save;
+}
+
+void vm_fault_enable_pagefaults(int save)
+{
+    struct thread *td = curthread;
+    td->td_pflags = (td->td_pflags & ~TDP_NOFAULTING) | save;
+}
+
+/*
+ * copyin/copyout for code running with page faults disabled (LinuxKPI's __copy_from_user_inatomic). xnu has no
+ * fault-free user copy for kexts; its copyin may take and resolve a fault. The callers (i915 relocations, amdgpu)
+ * hold sleepable locks only, never a spin lock, so a resolved fault is safe; a failed one returns EFAULT and the
+ * driver takes its slow path, as on Linux.
+ */
+int nmx_copyin_nofault(const void *uaddr, void *kaddr, size_t len)
+{
+    return copyin(uaddr, kaddr, len);
+}
+
+int nmx_copyout_nofault(const void *kaddr, void *uaddr, size_t len)
+{
+    return copyout(kaddr, uaddr, len);
+}
+
 static int qsort_adapter(const void *a, const void *b, void *cmp)
 {
     return ((int (*)(const void *, const void *))cmp)(a, b);

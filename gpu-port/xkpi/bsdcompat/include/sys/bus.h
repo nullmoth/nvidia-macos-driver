@@ -116,4 +116,13 @@ int bus_describe_intr(device_t dev, struct resource *irq, void *cookie, const ch
 int bus_bind_intr(device_t dev, struct resource *r, int cpu);
 int bus_get_domain(device_t dev, int *domain);
 #define RF_SHAREABLE 0x0004
+/*
+ * Bus methods a driver calls on its parent to carve a new MMIO range (i915's MCHBAR when the firmware left it off).
+ * xnu has no allocator for unassigned PCI address space, so no range is found; the driver reports that and goes on.
+ * Every machine the port has seen arrives with MCHBAR already enabled by its firmware.
+ */
+#define BUS_ALLOC_RESOURCE(bus, child, type, rid, start, end, count, flags) ((struct resource *)NULL)
+#define BUS_DEACTIVATE_RESOURCE(bus, child, ...) 0
+#define BUS_RELEASE_RESOURCE(bus, child, ...) 0
+#include <sys/rman.h>
 #endif

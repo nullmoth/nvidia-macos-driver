@@ -7,6 +7,13 @@
 #define NMXKPI_SYS_TIME_H
 #include_next <sys/time.h>
 #include <sys/types.h>
+/* clock ids LinuxKPI's hrtimers take (FreeBSD's values; xnu's kernel headers have none) */
+#ifndef CLOCK_REALTIME
+#define CLOCK_REALTIME 0
+#endif
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 4
+#endif
 #define SBT_1S ((sbintime_t)1 << 32)
 #define SBT_1M (SBT_1S * 60)
 #define SBT_1MS (SBT_1S / 1000)

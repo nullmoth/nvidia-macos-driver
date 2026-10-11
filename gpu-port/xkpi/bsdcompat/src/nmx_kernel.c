@@ -451,6 +451,10 @@ void nmx_module_event(void *arg)
 
 /* ---- start/stop of the whole layer -------------------------------------------------------------------------------- */
 
+/* FreeBSD's tsc_freq (machine/clock.h): drivers scale clocks by it */
+uint64_t tsc_freq;
+extern int sysctlbyname(const char *, void *, size_t *, void *, size_t);
+
 int nmx_kernel_init(void)
 {
     clock_timebase_info(&nmx_tb);
@@ -468,6 +472,9 @@ int nmx_kernel_init(void)
     for (int i = 0; i < mp_ncpus && i < CPU_SETSIZE; i++)
         CPU_SET(i, &all_cpus);
     nmx_cpu_identify();
+    size_t len = sizeof(tsc_freq);
+    if (sysctlbyname("machdep.tsc.frequency", &tsc_freq, &len, NULL, 0) != 0)
+        tsc_freq = 0;
     return 0;
 }
 

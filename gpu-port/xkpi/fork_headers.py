@@ -15,6 +15,11 @@ def fork(rel, pairs):
 
 # jiffies: FreeBSD's is a variable the clock interrupt advances; the port reads the clock when asked, so code that
 # spins on jiffies sees it move without any timer having to run
+fork("linux/sort.h", [
+    ("\tqsort_r(base, num, size, cmp, priv);\t\t\\\n",
+     "\tqsort_r(base, num, size, (int (*)(const void *, const void *, void *))(cmp), priv); \\\n"),
+])
+
 fork("linux/jiffies.h", [
     ("extern unsigned long jiffies;\t/* defined in sys/kern/subr_ticks.S */\n",
      "unsigned long nmx_jiffies(void);\t/* macOS port: hz ticks since load, read from the clock (nmx_kernel.c) */\n"

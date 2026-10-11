@@ -66,7 +66,10 @@ struct nmx_intr {
     driver_intr_t *handler;
     void *arg;
     void *xcookie;
+    TAILQ_ENTRY(nmx_intr) link;     /* in 'intrs', for _intr_drain */
 };
+
+static TAILQ_HEAD(, nmx_intr) intrs = TAILQ_HEAD_INITIALIZER(intrs);
 
 /*
  * The PCI function a device belongs to: itself, or the nearest PCI ancestor (a DRM device is a child of the GPU's
@@ -706,6 +709,24 @@ int nmx_bus_call_children(device_t dev, const char *method)
     return first;
 }
 
+/*
+ * synchronize_irq(): returns once no handler for interrupt number 'irq' is running. Handlers run on their interrupt
+ * source's work loop, so a pass through that work loop's gate waits for one in flight.
+ */
+void _intr_drain(int irq)
+{
+    void *cookies[8];
+    int n = 0;
+    struct nmx_intr *in;
+    mtx_lock(&bus_mtx);
+    TAILQ_FOREACH(in, &intrs, link)
+        if ((int)in->r->irqno == irq && n < 8)
+            cookies[n++] = in->xcookie;
+    mtx_unlock(&bus_mtx);
+    for (int i = 0; i < n; i++)
+        nmx_xnu_pci_irq_drain(cookies[i]);
+}
+
 int bus_child_present(device_t child)
 {
     struct nmx_device *f = P(child);
@@ -830,6 +851,11 @@ int bus_setup_intr(device_t dev, struct resource *r, int flags, driver_filter_t 
     in->handler = handler;
     in->arg = arg;
     int err = nmx_xnu_pci_irq_setup(P(dev)->xnu, r->vector, intr_trampoline, in, &in->xcookie);
+    if (err == 0) {
+        mtx_lock(&bus_mtx);
+        TAILQ_INSERT_TAIL(&intrs, in, link);
+        mtx_unlock(&bus_mtx);
+    }
     if (err) {
         free(in, M_NMXBUS);
         return ENXIO;
@@ -843,6 +869,9 @@ int bus_teardown_intr(device_t dev, struct resource *r, void *cookie)
     struct nmx_intr *in = cookie;
     if (in == NULL)
         return EINVAL;
+    mtx_lock(&bus_mtx);
+    TAILQ_REMOVE(&intrs, in, link);
+    mtx_unlock(&bus_mtx);
     nmx_xnu_pci_irq_teardown(in->xcookie);
     free(in, M_NMXBUS);
     return 0;

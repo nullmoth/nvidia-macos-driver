@@ -143,6 +143,12 @@ void drm_hdcp_update_content_protection(struct drm_connector *connector, u64 val
 {
 }
 
+/* the revocation list check of an HDCP handshake, which never starts without the property: nothing is revoked */
+int drm_hdcp_check_ksvs_revoked(struct drm_device *dev, u8 *ksvs, u32 ksv_count)
+{
+    return 0;
+}
+
 
 int drm_writeback_set_fb(struct drm_connector_state *cs, struct drm_framebuffer *fb)
 {
@@ -174,6 +180,10 @@ struct dentry *debugfs_create_file(const char *name, umode_t mode, struct dentry
                                    const struct file_operations *fops)
 {
     return ERR_PTR(-ENODEV);
+}
+
+void debugfs_create_bool(const char *name, umode_t mode, struct dentry *parent, bool *value)
+{
 }
 
 void debugfs_create_atomic_t(const char *name, umode_t mode, struct dentry *parent, atomic_t *value)

@@ -1,5 +1,7 @@
 /* FreeBSD KTR tracing: not built on macOS. */
 #pragma once
+/* drm-kmod's i915 trace points call the variadic form */
+#define CTR(m, ...) do { } while (0)
 #define CTR0(m, f) do { } while (0)
 #define CTR1(m, f, a) do { } while (0)
 #define CTR2(m, f, a, b) do { } while (0)

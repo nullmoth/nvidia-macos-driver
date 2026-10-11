@@ -33,14 +33,15 @@ Build on the build Mac (Apple silicon, cross-compiling to x86_64) with the cross
 - **`tools/vk_chip_matrix.sh`** runs `vkprobe` once per GPU through Mesa's noop drm-shim kernels: 20 AMD chips (GCN1 to RDNA4, every APU) and 21 Intel chips (Gen9 to Xe3). Each must create a device and compile a compute pipeline (`tools/fill.comp`). Result on 2026-10-11: 41 of 41.
 - **`tools/drmlist`** enumerates devices through libdrm, the same way Mesa does, then queries each render node. On studio with NMDRM loaded, it reports `10de:2d05` at `pci:0000:02:00.0` from `/dev/dri/renderD128`.
 
-## Kernel driver: NMXAMD
+## Kernel driver: NMXGPU (AMD and Intel)
 
-`xkpi/` runs the AMD kernel driver (amdgpu from drm-kmod, with DRM, TTM and dma-fence) on macOS through FreeBSD's
+`xkpi/` runs the AMD and Intel kernel drivers (amdgpu and i915 from drm-kmod, on one DRM core with TTM and dma-fence) on macOS through FreeBSD's
 LinuxKPI and a FreeBSD-kernel layer implemented on xnu (`xkpi/bsdcompat`, `xkpi/xnu`). `xkpi/kext` links it all
-into `NMXAMD.kext`.
+into `NMXGPU.kext`.
 
 - **Build** (on the build Mac): `xkpi/all.sh` compiles the driver sources drm-kmod's Makefiles select, display core
-  included (899), `xkpi/rt.sh` the runtime (67 sources), `xkpi/kext/build.sh <out>` links the kext (10.8 MB).
+  included (900), `xkpi/all-i915.sh` i915 (275 with the port's own), `xkpi/rt.sh` the runtime (73 sources),
+  `xkpi/kext/build.sh <out>` links the kext (13.6 MB).
 - **Link check**: `kmutil create` against macOS 15.8.1's kernel collections resolves every symbol (test
   collection in `/tmp` only; nothing installed).
 - **Device nodes**: each DRM minor is an xnu devfs clone node, so every open has its own file, as LinuxKPI expects.
@@ -48,8 +49,8 @@ into `NMXAMD.kext`.
   `xkpi/bsdcompat/include/nmx_drm_uapi.h`. The driver's own fault handler fills the page list; the range is mapped
   whole into the caller. TTM buffers stay pinned while mapped. libdrm's `drm_mmap`/`drm_munmap` use these ioctls on
   Darwin (`patches/libdrm-macos.patch`).
-- **Opt-in only**: the kext declines every AMD GPU unless the boot argument `nmxamd=1` or the device property
-  `nullmoth-amdgpu` is set. Taking a GPU that drives the boot display resets its display engine.
+- **Opt-in only, per vendor**: the kext declines every AMD and Intel GPU unless the boot argument `nmxamd=1` /
+  `nmxintel=1` or the device property `nullmoth-gpu` is set. Taking a GPU that drives the boot display resets its display engine.
 
 Not done yet:
 
@@ -64,4 +65,6 @@ Not done yet:
 - DMI quirks see the SMBIOS the bootloader presents (the Mac model), not the PC's board.
 - Kernel FPU sections run with interrupts off.
 
-Intel (i915/xe) follows on the same layer.
+- i915 covers Gen9 through Meteor Lake (display included); Lunar Lake and later need xe, which drm-kmod does not carry.
+  Intel stolen memory is read from the IGD as FreeBSD's early quirks do; the legacy whole-object mmap ioctl is refused
+  (Mesa uses the offset path).
