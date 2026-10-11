@@ -1,0 +1,4 @@
+# A boot-service driver stays resident after its entry point returns (an application would be unloaded with the
+# protocol it installed).
+[target.x86_64-unknown-uefi]
+rustflags = ["-C", "link-arg=/subsystem:efi_boot_service_driver"]

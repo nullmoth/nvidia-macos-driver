@@ -5458,6 +5458,17 @@ int nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_byte
     nvk_buffer stage;
     if (nvmtl_vk_stage(q, (size_t)cols * rows * bpp, &stage)) return -1;
     nvk_cmdbuf c; if (nvmtl_vk_cmd_begin(q, &c)) return -1;
+    // SurfaceOut also reads images last used as sampled/storage images or blit
+    // destinations. A completed fence does not change their image layout or
+    // provide the transfer-read dependency. Transition the copied subresource.
+    VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };
+    VkImageMemoryBarrier toSrc = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+        VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+        (VkImageLayout)img->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
+    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, NULL, 0, NULL, 1, &toSrc);
+    img->layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     VkBufferImageCopy bic = { 0, 0, 0, { nvmtl_copy_aspect(img), 0, 0, 1 }, { 0, 0, 0 }, { img->w, img->h, 1 } };
     pvkCmdCopyImageToBuffer(c.cb, img->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stage.buf, 1, &bic);
     if (nvmtl_vk_submit_wait(&c)) return -1;
@@ -6872,9 +6883,15 @@ int nvmtl_vk_image_size_align(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t m
     return rc;
 }
 
-int nvmtl_vk_cmd_copy_image_sub(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint32_t ss, uint32_t sx, uint32_t sy,
-                                nvk_image *dst, uint32_t dl, uint32_t ds, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h)
+/* Texture-to-texture copy with a depth range. A 3D image keeps its depth in ->layers; a Metal copy into or out of a 3D texture names
+   the plane with origin.z and the plane count with size.depth (slice must be 0). WAS: z and depth were dropped, so every plane of a
+   3D destination landed on plane 0 (Factorio builds its night colour-grading LUT, a 16x16x16 3D texture, from sixteen 16x16 copies). */
+int nvmtl_vk_cmd_copy_image_sub3(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint32_t ss, uint32_t sx, uint32_t sy, uint32_t sz,
+                                 nvk_image *dst, uint32_t dl, uint32_t ds, uint32_t dx, uint32_t dy, uint32_t dz,
+                                 uint32_t w, uint32_t h, uint32_t depth)
 {
+    if (!depth) depth = 1;
+    const int s3 = src && src->mtl_type == 7, d3 = dst && dst->mtl_type == 7;
     if (!c || !src || !dst || !w || !h || src->fmt != dst->fmt
         || (src->samples ? src->samples : 1) != (dst->samples ? dst->samples : 1)
         || ss >= (src->layers ? src->layers : 1) || ds >= (dst->layers ? dst->layers : 1)
@@ -6889,14 +6906,24 @@ int nvmtl_vk_cmd_copy_image_sub(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint
         nvlog("copy_image_sub: region outside selected mip extent");
         return -1;
     }
+    {   /* planes: a 3D image has nvmtl_lvl(layers, level) of them; a 2D image only plane 0 */
+        const uint32_t sd = s3 ? nvmtl_lvl(src->layers ? src->layers : 1, sl) : 1u, dd = d3 ? nvmtl_lvl(dst->layers ? dst->layers : 1, dl) : 1u;
+        if ((s3 ? (sz > sd || depth > sd - sz) : (sz != 0 || (!d3 && depth != 1)))
+            || (d3 ? (dz > dd || depth > dd - dz) : (dz != 0 || (!s3 && depth != 1)))) {
+            nvlog("copy_image_sub: depth range z %u/%u +%u is outside the 3D extent (%u / %u planes)", sz, dz, depth, sd, dd);
+            return -1;
+        }
+    }
 
     const VkImageAspectFlags aspects = nvmtl_barrier_aspect(src);
     VkImageCopy regions[2]; uint32_t count = 0;
     for (VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
          aspect <= VK_IMAGE_ASPECT_STENCIL_BIT; aspect <<= 1) {
         if (!(aspects & aspect)) continue;
-        regions[count++] = (VkImageCopy){ { aspect, sl, ss, 1 }, { (int32_t)sx, (int32_t)sy, 0 },
-                                         { aspect, dl, ds, 1 }, { (int32_t)dx, (int32_t)dy, 0 }, { w, h, 1 } };
+        /* Vulkan: a 3D image uses base layer 0 / layer count 1 and offset.z; a 2D side of a 2D<->3D copy carries the plane count as its layerCount */
+        regions[count++] = (VkImageCopy){ { aspect, sl, s3 ? 0u : ss, s3 ? 1u : (d3 ? depth : 1u) }, { (int32_t)sx, (int32_t)sy, s3 ? (int32_t)sz : 0 },
+                                         { aspect, dl, d3 ? 0u : ds, d3 ? 1u : (s3 ? depth : 1u) }, { (int32_t)dx, (int32_t)dy, d3 ? (int32_t)dz : 0 },
+                                         { w, h, depth } };
     }
     nvmtl_vk_cmd_barrier(c);
     img_to(c, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
@@ -6909,6 +6936,11 @@ int nvmtl_vk_cmd_copy_image_sub(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint
            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     nvmtl_vk_cmd_barrier(c);
     return 0;
+}
+int nvmtl_vk_cmd_copy_image_sub(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint32_t ss, uint32_t sx, uint32_t sy,
+                                nvk_image *dst, uint32_t dl, uint32_t ds, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h)
+{
+    return nvmtl_vk_cmd_copy_image_sub3(c, src, sl, ss, sx, sy, 0, dst, dl, ds, dx, dy, 0, w, h, 1);
 }
 int nvmtl_vk_image_view_create_range(nvk_image *img, uint32_t vkfmt, int a8, uint32_t baseLevel, uint32_t levelCount,
                                      uint32_t baseLayer, uint32_t layerCount, uint32_t mtl_view_type, void **out_view)

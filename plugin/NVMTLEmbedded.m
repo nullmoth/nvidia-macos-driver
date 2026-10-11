@@ -292,7 +292,7 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
         } else {
             NVMTLTexture *t = resource;
             nvmtl_retain_resource(cb, t);
-            [t nvmtlSurfaceIn];
+            nvmtl_surface_in_for_cb(cb, t);
             { NVMTLTexture *sr = t->_parent ? t->_parent : t; if (sr->_surf) embSurf = YES; }
             if (nvmtl_vk_bind_texture_view(&cb->_c, set, slot, [t nvview]))
                 nvlog("embedded texture slot %u: bind FAILED", slot);

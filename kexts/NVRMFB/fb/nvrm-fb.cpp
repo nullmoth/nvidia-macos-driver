@@ -46,6 +46,16 @@ extern "C" {
 }
 #include <libkern/OSAtomic.h>
 #include "nvrm_vram_abi.h"
+
+// Surfaces may use half of a resizable BAR1 (>= 4 GB) and three quarters of a smaller one. WAS: a fixed 192 MB below
+// 4 GB, which is 3/4 of the 256 MB firmware window but left a 512 MB or 1 GB BAR1 no better off (issue #27).
+static inline uint64_t nvrmVramBudget(uint64_t barLen)
+{
+    if (barLen >= (4ull << 30)) return barLen / 2;
+    uint64_t b = barLen / 4 * 3;
+    return b > NVRM_VRAM_BAR1_BUDGET ? b : NVRM_VRAM_BAR1_BUDGET;
+}
+
 typedef NvU64 (*nvrm_phys_for_va_t)(const void *va);
 #include <mach/kmod.h>
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
@@ -74,6 +84,12 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     void *fKva = nullptr; NvU64 fPhys = 0, fSize = 0; NvU32 fPitch = 0, fW = 0, fH = 0;
     IODeviceMemory *fConsMem = nullptr; IOMemoryMap *fConsMap = nullptr;
     void *fConsKva = nullptr; NvU64 fConsPhys = 0, fConsSize = 0; NvU32 fConsPitch = 0;
+    // The centre of the boot image (the logo the firmware screen showed: NullMoth's, or Apple's when it is turned off),
+    // kept so it can be painted again after IOFramebuffer's own boot drawing (IOFramebufferBootInitFB, from postOpen and
+    // doSetup) puts its built-in Apple logo on this surface. Freed once WindowServer owns the screen.
+    uint32_t *fLogoKeep = nullptr; uint32_t fLogoX = 0, fLogoY = 0, fLogoW = 0, fLogoH = 0;
+    void keepBootLogo(const uint32_t *img, uint32_t iw, uint32_t ih, uint32_t ipitch, uint32_t dx, uint32_t dy, uint32_t sx, uint32_t sy);
+    void repaintBootLogo(const char *why);
     NvU64 fVtFbBase = 0, fVtFbSize = 0;
     void *fUserPhys = nullptr;
     IOService *fPciNub = nullptr;
@@ -157,6 +173,8 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     static void barsFire(thread_call_param_t p0, thread_call_param_t);
     static void reflipFire(thread_call_param_t p0, thread_call_param_t);
     bool reflip();
+    bool headOff();
+    bool fHeadSlept = false;
     static void eventCallback(const struct NvKmsKapiEvent *event) {
         // only display changes are logged: the routine events arrive every minute for as long as the Mac is up, and
         // in sent logs they pushed every boot line past the collector's 512 KB limit
@@ -180,6 +198,7 @@ public:
     void stop(IOService *provider) override;
     void free() override;
     IOReturn enableController() override;
+    IOReturn open() override;
     const char *getPixelFormats() override { return kPixelFormats; }
     // macOS builds its mode list from getDisplayModes BEFORE it calls setDetailedTimings, and never re-reads it: a
     // mode added only in setDetailedTimings never reached WindowServer (measured on studio: 36 added, 0 shown). So the
@@ -748,6 +767,7 @@ bool NVRMNVDAFramebuffer::kapiInit()
                 for (uint32_t x = dx + cw; x < pitchPx; x++) row[x] = bg;
             }
             painted = true;
+            keepBootLogo((const uint32_t *)img, dims[0], dims[1], dims[2], dx, dy, sx, sy);
             FBLOG("boot screen: head 0 painted the %ux%u boot image (pitch %u) centred on %ux%u", dims[0], dims[1], dims[2], fW, fH);
         } else {
             FBLOG("boot screen: NVRM had none (0x%x, provider NVRM %s) — black takeover", r, rm ? "found" : "NOT found");
@@ -757,6 +777,46 @@ bool NVRMNVDAFramebuffer::kapiInit()
     }
     if (!painted) for (NvU64 i = 0; i < fSize / 4; i++) px[i] = 0x00000000;
     return true;
+}
+
+void NVRMNVDAFramebuffer::keepBootLogo(const uint32_t *img, uint32_t iw, uint32_t ih, uint32_t ipitch,
+                                       uint32_t dx, uint32_t dy, uint32_t sx, uint32_t sy)
+{
+    // the middle of the boot image, at most 512x512: every boot logo (Apple's 84x103/168x206, NullMoth's 144x180/288x360)
+    const uint32_t cw = iw < fW ? iw : fW, ch = ih < fH ? ih : fH;
+    const uint32_t w = cw < 512 ? cw : 512, h = ch < 512 ? ch : 512;
+    if (!w || !h) return;
+    uint32_t *keep = IONew(uint32_t, (size_t)w * h);
+    if (!keep) return;
+    const uint32_t ox = (cw - w) / 2, oy = (ch - h) / 2;
+    for (uint32_t y = 0; y < h; y++) {
+        const uint32_t *srow = (const uint32_t *)((const uint8_t *)img + (NvU64)(sy + oy + y) * ipitch) + sx + ox;
+        for (uint32_t x = 0; x < w; x++) keep[(size_t)y * w + x] = srow[x];
+    }
+    if (fLogoKeep) IODelete(fLogoKeep, uint32_t, (size_t)fLogoW * fLogoH);
+    fLogoKeep = keep; fLogoW = w; fLogoH = h; fLogoX = dx + ox; fLogoY = dy + oy;
+}
+void NVRMNVDAFramebuffer::repaintBootLogo(const char *why)
+{
+    if (!fLogoKeep || !fKva || !fPitch) return;
+    volatile uint32_t *px = (volatile uint32_t *)fKva;
+    const uint32_t pitchPx = fPitch / 4;
+    for (uint32_t y = 0; y < fLogoH; y++) {
+        if ((NvU64)(fLogoY + y + 1) * fPitch > fSize) break;
+        volatile uint32_t *row = px + (NvU64)(fLogoY + y) * pitchPx + fLogoX;
+        for (uint32_t x = 0; x < fLogoW; x++) row[x] = fLogoKeep[(size_t)y * fLogoW + x];
+    }
+    FBLOG("boot screen: logo %ux%u repainted at %u,%u after %s", fLogoW, fLogoH, fLogoX, fLogoY, why);
+}
+IOReturn NVRMNVDAFramebuffer::open()
+{
+    // postOpen reads IOFBNeedsRefresh: false makes needsInit 2, and initFB then leaves the screen alone instead of
+    // clearing it and drawing IOFramebuffer's built-in Apple logo (and arming kPERefreshBootGraphics). The boot screen
+    // already painted, logo included, stays. A repaint after open() alone lost: the screen still turned white.
+    if (fLogoKeep) setProperty(kIOFBNeedsRefreshKey, false);
+    IOReturn r = super::open();   // runs postOpen -> initFB
+    repaintBootLogo("IOFramebuffer::open");
+    return r;
 }
 
 static NVRMNVDAFramebuffer *gFB = nullptr;
@@ -1378,7 +1438,7 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     nvrmDiscoverBar1(provider, &fBarLen, &fBar1Base);
     FBLOG("BAR1 metadata: %llu MB at 0x%llx; normal surface budget %llu MB",
           (unsigned long long)(fBarLen >> 20), (unsigned long long)fBar1Base,
-          (unsigned long long)((fBarLen >= (4ull << 30) ? fBarLen / 2 : NVRM_VRAM_BAR1_BUDGET) >> 20));
+          (unsigned long long)(nvrmVramBudget(fBarLen) >> 20));
     if (fIndex == 0 && gFB != this) { retain(); gFB = this; }
     if (fIndex == 0 && !gHotplug) gHotplug = thread_call_allocate(hotplugFire, nullptr);
     fPhysForVa = (nvrm_phys_for_va_t)(uintptr_t)propU64(provider, "phys-for-va");
@@ -1473,6 +1533,7 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
 void NVRMNVDAFramebuffer::free()
 {
     if (fFlipCacheLock) { IOSimpleLockFree(fFlipCacheLock); fFlipCacheLock = nullptr; }
+    if (fLogoKeep) { IODelete(fLogoKeep, uint32_t, (size_t)fLogoW * fLogoH); fLogoKeep = nullptr; }
     super::free();
 }
 
@@ -1587,6 +1648,19 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
         b.verticalSyncPulseWidth = k.vSyncEnd - k.vSyncStart;
         b.horizontalSyncConfig = k.flags.hSyncPos ? 1 : 0; b.verticalSyncConfig = k.flags.vSyncPos ? 1 : 0;
         b.detailedTimingModeID = 0x10000u | (i << 8);
+        // NVKMS validated this mode, so above DP 1.4's uncompressed limit (HBR3 x4 = 25.92 Gbit/s payload) it drives it
+        // with DSC. Without DSC fields macOS judges the mode by its uncompressed bandwidth, declares the display offline and
+        // the panel goes black (issue #77, RTX 5080 4K@120: 7 offline / 35 virtual framebuffers -> 0 / 0 with these
+        // values). 257 = 16.06 bpp x16, what NVKMS itself picked there ("EVO-DSC bppX16 257 sliceCount 4"); the slices
+        // follow its count for 4K, two below; the reporter's slice height (the full frame) is kept.
+        if ((NvU64)k.pixelClockHz * 24 > 25920000000ull && !b.dscCompressedBitsPerPixel) {
+            const UInt16 slices = k.hVisible >= 3840 ? 4 : 2;
+            b.dscCompressedBitsPerPixel = 257;
+            b.dscSliceWidth = (UInt16)((k.hVisible + slices - 1) / slices);
+            b.dscSliceHeight = (UInt16)k.vVisible;
+            FBLOG("fb%u %ux%u pclk %u needs DSC: %u slices of %u, 16.06 bpp", fIndex, k.hVisible, k.vVisible, k.pixelClockHz,
+                  slices, b.dscSliceWidth);
+        }
         fDT[n++] = b; added++;
         FBLOG("fb%u refresh rate from NVKMS: %ux%u @%u Hz (pclk %u) as dt 0x%x", fIndex, k.hVisible, k.vVisible, hz,
               k.pixelClockHz, b.detailedTimingModeID);
@@ -1915,8 +1989,11 @@ bool NVRMNVDAFramebuffer::verifyAperture(NvU64 phys, const char *label)
 
 static volatile SInt64 gVramMappedBytes = 0;
 
-#define NVRM_VRAM_PARK_CEILING (24ull * 1024ull * 1024ull)
-static struct { struct NvKmsKapiMemory *m; void *k; NvU64 n; } gParkedForever[24];
+// Parked = allocations NVKMS placed over the scanout or the boot console. WAS 24 MB / 24 slots: a 2560x1440 console is
+// 25 MB, so the last MB could never be parked and every allocation landing there was refused, about once a second
+// (issue #28). 64 MB / 64 slots covers a 5K console (59 MB).
+#define NVRM_VRAM_PARK_CEILING (64ull * 1024ull * 1024ull)
+static struct { struct NvKmsKapiMemory *m; void *k; NvU64 n; } gParkedForever[64];
 static int      gNParkedForever   = 0;
 static volatile SInt64 gVramParkedBytes = 0;
 static volatile SInt64 gCntGrant, gCntGrantBytes, gCntRelease, gCntReleaseBytes;
@@ -1989,7 +2066,7 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
     NvU64 want = (r->size + 0xFFFFull) & ~0xFFFFull;
     if (!want) return false;
 
-    const SInt64 budget = (SInt64)(fBarLen >= (4ull << 30) ? fBarLen / 2 : NVRM_VRAM_BAR1_BUDGET);
+    const SInt64 budget = (SInt64)nvrmVramBudget(fBarLen);
     gVramBudgetBytes = budget;
     SInt64 before = OSAddAtomic64((SInt64)want, &gVramMappedBytes) + gVramParkedBytes;
     if (before + (SInt64)want > budget) {
@@ -2356,17 +2433,55 @@ IOReturn NVRMNVDAFramebuffer::getAttributeForConnection(IOIndex connectIndex, IO
     }
     }
 }
+// Display sleep turns the head off through NVKMS and wake commits the mode and the front surface again, as NVIDIA's
+// Linux driver does for DPMS. WAS: both were only logged, so a sleeping display kept showing its last frame, frozen,
+// and never went to standby (issue #90). -nvrmnodpms restores the old behaviour.
+bool NVRMNVDAFramebuffer::headOff()
+{
+    NVRMDisplayGate gate; if (!gate.valid()) return false;
+    if (!fKms || !fDev) return false;
+    struct NvKmsKapiRequestedModeSetConfig *cfg = (struct NvKmsKapiRequestedModeSetConfig *)IOMalloc(sizeof *cfg);
+    struct NvKmsKapiModeSetReplyConfig *rep = (struct NvKmsKapiModeSetReplyConfig *)IOMalloc(sizeof *rep);
+    if (!cfg || !rep) { if (cfg) IOFree(cfg, sizeof *cfg); if (rep) IOFree(rep, sizeof *rep); return false; }
+    nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
+    cfg->headsMask = 1u << fHead;
+    struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
+    nvrmHeadConfigBaseline(hr);
+    hr->modeSetConfig.bActive = NV_FALSE;
+    hr->modeSetConfig.numDisplays = 0;
+    hr->flags.activeChanged = hr->flags.displaysChanged = NV_TRUE;
+    NvBool ok = fKms->applyModeSetConfig(fDev, cfg, rep, NV_TRUE);
+    IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
+    return ok ? true : false;
+}
 IOReturn NVRMNVDAFramebuffer::setPowerState(unsigned long ordinal, IOService *device)
 {
     FBLOG("setPowerState %lu", (unsigned long)ordinal);
-    if (ordinal) handleEvent(kIOFBNotifyDidPowerOn);
-    else         handleEvent(kIOFBNotifyWillPowerOff);
+    char nb[8] = { 0 };
+    const bool dpms = !PE_parse_boot_argn("-nvrmnodpms", nb, sizeof nb);
+    if (ordinal) {
+        if (dpms && fHeadSlept) {
+            fHeadSlept = false;
+            bool ok = reflip();
+            FBLOG("display wake: head %u mode and surface committed again -> %s (rc %d)", fHead, ok ? "ok" : "FAILED", fReflipRc);
+        }
+        handleEvent(kIOFBNotifyDidPowerOn);
+    } else {
+        handleEvent(kIOFBNotifyWillPowerOff);
+        if (dpms && fModeSet && fSurf && !fHeadSlept && !OSAddAtomic(0, &fStopping)) {
+            bool ok = headOff(); fHeadSlept = ok;
+            FBLOG("display sleep: head %u off -> %s", fHead, ok ? "ok (monitor goes to standby)" : "FAILED (last frame stays)");
+        }
+    }
     return kIOPMAckImplied;
 }
 IOReturn NVRMNVDAFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
 {
     char c[5] = { (char)(attribute >> 24), (char)(attribute >> 16), (char)(attribute >> 8), (char)attribute, 0 };
-    if (attribute == kIOWindowServerActiveAttribute) { FBLOG("setAttribute 'wsrv' %lu -> success", (unsigned long)value); return kIOReturnSuccess; }
+    if (attribute == kIOWindowServerActiveAttribute) {
+        FBLOG("setAttribute 'wsrv' %lu -> success", (unsigned long)value);
+        if (value && fLogoKeep) { IODelete(fLogoKeep, uint32_t, (size_t)fLogoW * fLogoH); fLogoKeep = nullptr; }   // WindowServer owns the screen now
+        return kIOReturnSuccess; }
     if (attribute == kIOPowerAttribute) {
         FBLOG("setAttribute POWER '%s' -> %lu", c, (unsigned long)value);
         if (value) {
