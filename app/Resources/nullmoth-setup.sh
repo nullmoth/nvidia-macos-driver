@@ -648,12 +648,17 @@ if [ -n "${GPUTEST:-}" ]; then
   case "$GPUTEST" in on|off) ;; *) stop "--gpu-test takes on or off";; esac
   GK=/Library/NullMoth/kexts/15/NMXGPU.kext; GFW=/Library/NullMoth/firmware; EXT=/Library/Extensions
   GA=/Library/NullMoth/kexts/15/NMXAccel.kext; GU=/Library/NullMoth/gpu-userland; GB=/Library/GPUBundles
+  GN=/Library/NullMoth/kexts/15/NMXNPU.kext
   MAN="$(dirname "${TOOL:-/nonexistent}")/nullmoth-gpu-firmware.txt"; [ -f "$MAN" ] || MAN="$(dirname "$0")/nullmoth-gpu-firmware.txt"
   # vendors of the display-class PCI functions present (class 03xxxx; ioreg prints vendor-id/class-code little-endian)
   # (the two keys come in either order, so each device's pair is printed when the next device starts)
   VENDORS=$(ioreg -r -c IOPCIDevice -l -w0 | LC_ALL=C awk -F'<|>' '/\+-o /{if (c=="03") print v; c=""; v=""}
     /"vendor-id" =/{v=substr($2,3,2) substr($2,1,2)} /"class-code" =/{c=substr($2,5,2)} END{if (c=="03") print v}' | sort -u)
   WANT=""; for v in $VENDORS; do case $v in 1002) WANT="$WANT -nmxamd";; 8086) WANT="$WANT -nmxintel";; esac; done
+  # NPUs: Intel's is a processing accelerator (class 12xxxx), AMD's Ryzen AI NPU a signal-processing controller (1180xx)
+  NPUS=$(ioreg -r -c IOPCIDevice -l -w0 | LC_ALL=C awk -F'<|>' 'function out(){if ((c=="12" && v=="8086") || (c=="11" && s=="80" && v=="1022")) print v}
+    /\+-o /{out(); c=""; s=""; v=""} /"vendor-id" =/{v=substr($2,3,2) substr($2,1,2)} /"class-code" =/{c=substr($2,5,2); s=substr($2,3,2)} END{out()}' | sort -u)
+  [ -n "$NPUS" ] && [ -d "$GN" ] && WANT="$WANT -nmxnpu"
   BKC="$C.nullmoth-gputest-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C"
   ga() {  # $1 = add|del, $2 = boot argument; the config and NVRAM together
     local a new="" nv=""
@@ -678,6 +683,12 @@ if [ -n "${GPUTEST:-}" ]; then
       xargs -P 8 -I{} sh -c 'mkdir -p "$(dirname "$0/{}")" && curl -fsSL --retry 3 -o "$0/{}" "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/$1/{}"' "$FT" "$COMMIT" \
       || { rm -rf "$FT"; stop "downloading the GPU firmware failed (network?) - nothing was changed"; }
     (cd "$FT" && grep -v '^#' "$MAN" | shasum -a 256 -c --quiet) >/dev/null 2>&1 || { rm -rf "$FT"; stop "a GPU firmware file did not match its checksum - nothing was changed"; }
+    # the names drivers ask for that linux-firmware publishes as links (WHENCE "Link:"), within one directory only
+    grep '^#link ' "$MAN" | while read -r _ n _ tgt; do
+      case "$n/$tgt" in *..*|/*|*//*) continue;; esac
+      case "$tgt" in */*) continue;; esac
+      [ -f "$FT/$(dirname "$n")/$tgt" ] && ln -sfh "$tgt" "$FT/$n"
+    done
     rm -rf "$GFW" && mv "$FT" "$GFW" && chown -R root:wheel "$GFW" && chmod -R go-w,a+rX "$GFW" || stop "cannot install the GPU firmware"
     ok "GPU firmware installed ($(grep -vc '^#' "$MAN") files, $(du -sh "$GFW" | cut -f1))"
     step "Installing the AMD/Intel GPU driver"
@@ -689,16 +700,21 @@ if [ -n "${GPUTEST:-}" ]; then
     else
       note "this driver package has no AMD/Intel Metal accelerator: the GPU gets a screen, apps get no Metal on it"
     fi
+    # the NPU driver (NMXNPU: Intel NPU, AMD Ryzen AI), when this Mac has an NPU
+    if [ -n "$NPUS" ] && [ -d "$GN" ]; then
+      rm -rf "$EXT/NMXNPU.kext" && ditto "$GN" "$EXT/NMXNPU.kext" && chown -R root:wheel "$EXT/NMXNPU.kext" && chmod -R 755 "$EXT/NMXNPU.kext" || stop "cannot copy NMXNPU.kext"
+    fi
     if ! auxkc || ! kmutil inspect -a x86_64 -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -q com.nullmoth.NMXGPU \
-       || { [ -d "$EXT/NMXAccel.kext" ] && ! kmutil inspect -a x86_64 -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -q com.nullmoth.NMXAccel; }; then
-      rm -rf "$EXT/NMXGPU.kext" "$EXT/NMXAccel.kext"; auxkc; cp -p "$BKC" "$C"; stop "the kernel collection did not take NMXGPU/NMXAccel (log: $ST/gputest-kmutil.log) - removed again"
+       || { [ -d "$EXT/NMXAccel.kext" ] && ! kmutil inspect -a x86_64 -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -q com.nullmoth.NMXAccel; } \
+       || { [ -d "$EXT/NMXNPU.kext" ] && ! kmutil inspect -a x86_64 -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -q com.nullmoth.NMXNPU; }; then
+      rm -rf "$EXT/NMXGPU.kext" "$EXT/NMXAccel.kext" "$EXT/NMXNPU.kext"; auxkc; cp -p "$BKC" "$C"; stop "the kernel collection did not take NMXGPU/NMXAccel/NMXNPU (log: $ST/gputest-kmutil.log) - removed again"
     fi
     for a in $WANT; do ga add "${a#-}=1"; done
   else
     step "Removing the AMD/Intel GPU driver"
-    ga del nmxamd=1; ga del nmxintel=1
-    if [ -d "$EXT/NMXGPU.kext" ] || [ -d "$EXT/NMXAccel.kext" ]; then
-      rm -rf "$EXT/NMXGPU.kext" "$EXT/NMXAccel.kext" && auxkc || note "the kernel collection rebuild reported an error (log: $ST/gputest-kmutil.log)"
+    ga del nmxamd=1; ga del nmxintel=1; ga del nmxnpu=1
+    if [ -d "$EXT/NMXGPU.kext" ] || [ -d "$EXT/NMXAccel.kext" ] || [ -d "$EXT/NMXNPU.kext" ]; then
+      rm -rf "$EXT/NMXGPU.kext" "$EXT/NMXAccel.kext" "$EXT/NMXNPU.kext" && auxkc || note "the kernel collection rebuild reported an error (log: $ST/gputest-kmutil.log)"
     fi
     # the AMD/Intel Vulkan drivers come out of nvmtl by the names the cache holds; NVK's files are never touched
     if [ -d "$GU" ]; then (cd "$GU" && find . -type f) | while read -r f; do rm -f "$GB/nvmtl/${f#./}"; done; rmdir "$GB/nvmtl/share/libdrm" "$GB/nvmtl/share" 2>/dev/null; fi

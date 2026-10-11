@@ -74,6 +74,24 @@ into `NMXGPU.kext`.
   only when the AMD/Intel driver is turned on. libdrm finds each GPU through `DRM_IOCTL_GET_PCIINFO`, which the port
   answers at the node (`override/src/nmx_drm_os.c`).
 
+## NPUs: NMXNPU (Intel NPU, AMD Ryzen AI)
+
+`xkpi/kext-npu` links NMXNPU.kext: Intel's NPU driver (Linux 6.14 ivpu: Meteor Lake, Arrow Lake, Lunar Lake, Panther
+Lake) and AMD's Ryzen AI NPU driver (Linux 7.3 amdxdna) on the DRM accel core, each NPU published as
+`/dev/accel/accelN`. Those drivers are GPL-2.0, so NMXNPU is its own GPL-2.0 kext with its own copy of the layer and a
+DRM core built with accel minors (`all-npucore.sh`); NullMoth's layer files are licensed to it under GPL-2.0
+(`kext-npu/NOTICE-GPL.txt`). `kext-npu/mksource.sh` packs its complete corresponding source from a compiler dependency
+pass, and every release that carries NMXNPU publishes that archive beside the package.
+
+- **Build** (on the build Mac): `all-npucore.sh` (75), `all-npu.sh` (ivpu, accel core, shmem helper, amdxdna and the glue:
+  47), `kext-npu/build.sh <out>` (1.2 MB). `fork_npu.py` holds the macOS forms (BAR mapping, module registration,
+  firmware names, the 7.x scheduler interface on the 6.14 scheduler).
+- **AMD without IOMMU**: macOS gives no AMD IOMMU domain or PASID, so amdxdna runs on carveout memory - one physically
+  contiguous region (512 MB down to 64 MB) allocated at probe, which Linux would set through debugfs.
+- **Firmware**: `intel/vpu/vpu_*_v1.bin` (API 3.37/3.41, the same major as the driver) and `amdnpu/*/npu*.sbin`, with
+  linux-firmware's links made by setup after the checksums pass.
+- **Opt-in**: `nmxnpu=1` or the `nullmoth-npu` device property; setup --gpu-test installs it when an NPU is present.
+
 Not done yet:
 
 - It has not been loaded on hardware. Start-up runs all SYSINITs, then the driver probes the device.

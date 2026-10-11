@@ -19,4 +19,4 @@ exec xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -ffile-prefix-map=$NULLM
   -I$D/include -I$D/include/drm -I$D/include/uapi -I$D/drivers/gpu/drm -I$D/drivers/gpu -I$D/drivers \
   -I$A/amdgpu -I$A/include -I$A/include/asic_reg -I$A/acp/include -I$A/pm/inc -I$A/pm/swsmu/inc -I$A/pm/swsmu \
   -I$A/pm/powerplay/inc -I$A/pm/legacy-dpm -I$A/amdxcp -I$A/display -I$A/display/include -I$A/display/modules/inc -I$A/display/dc -I$A/display/amdgpu_dm -I$A/amdkfd \
-  $(sed "s/^/ /" $X/amd.flags | tr "\n" " ") -I$KF "$@" -c "$src" -o $X/srcobj/$(basename "${src%.c}").o
+  $(sed "s/^/ /" $X/amd.flags | tr "\n" " ") -I$KF "$@" -c "$src" -o ${NMX_OBJ:-$X/srcobj/$(basename "${src%.c}").o}

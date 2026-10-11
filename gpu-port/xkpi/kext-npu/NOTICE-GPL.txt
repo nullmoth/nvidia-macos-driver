@@ -1,0 +1,18 @@
+NMXNPU - the NullMoth NPU driver for macOS (Intel NPU, AMD Ryzen AI NPU)
+Copyright (c) 2026 NullMoth Systems, and the authors of the Linux, drm-kmod and FreeBSD sources it is built from.
+
+NMXNPU.kext is distributed under the GNU General Public License, version 2 (GPL-2.0-only), because it contains Linux's
+ivpu and amdxdna drivers, the DRM accel core and the GEM shmem helper, which are GPL-2.0.
+
+This archive is its complete corresponding source: every source and header the compiler read to build NMXNPU.kext
+(Apple's SDK headers excepted, as system headers), at its path under the build root, and the scripts that build it.
+
+  upstream/linux-6.14, upstream/linux   Linux sources (ivpu, accel core, shmem helper; amdxdna from the newer tree)
+  upstream/kpi/drm-kmod                 drm-kmod, the Linux 6.14 DRM core for FreeBSD
+  upstream/kpi/freebsd-src              FreeBSD's LinuxKPI and ACPICA headers, Concurrency Kit (BSD licences)
+  xkpi/                                 the NullMoth port layer, the NPU sources after fork_npu.py (xkpi/npu-src),
+                                        and the build scripts
+
+The NullMoth port layer files in xkpi/ are otherwise licensed under the PolyForm Noncommercial License 1.0.0; NullMoth
+Systems also licenses them under GPL-2.0-only as part of NMXNPU, so this kext and this source can be redistributed under
+the GPL. Files that carry their own SPDX identifier keep that licence as well.
