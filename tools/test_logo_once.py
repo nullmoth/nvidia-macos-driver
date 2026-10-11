@@ -37,6 +37,11 @@ def run(cfg, logo="on", stage="install"):
     app = os.path.join(t, "app"); os.makedirs(app)
     for n, b in (("NullMothSafe.efi", b"tool"), ("NullMothLogo.efi", b"logo")):
         open(os.path.join(app, n), "wb").write(b)
+    # a config from an earlier run comes with the EFI files that run copied (each run gets a fresh folder here)
+    if any(d.get("Path") == "NullMothLogo.efi" for d in cfg.get("UEFI", {}).get("Drivers", [])):
+        open(os.path.join(oc, "Drivers", "NullMothLogo.efi"), "wb").write(b"logo")
+    if any(x.get("Path") == "NullMothSafe.efi" for x in cfg.get("Misc", {}).get("Tools", [])):
+        open(os.path.join(oc, "Tools", "NullMothSafe.efi"), "wb").write(b"tool")
     edits = 'for e in "${EDITS[@]}"; do IFS="|" read -r k ty v <<<"$e"; plutil -replace "$k" $ty "$v" "$C"; done\n'
     body = remove if stage == "remove" else plan + "\n" + edits + apply
     script = (f'ok() {{ echo "OK $*"; }}\nstop() {{ echo "STOP $*"; exit 1; }}\nC="{c}"; MP="{t}"; OCREL=EFI/OC; TOOL="{app}/NullMothSafe.efi"\n'
