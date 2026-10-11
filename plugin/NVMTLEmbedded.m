@@ -126,7 +126,7 @@ static int nvmtl_static_samplers_on(void)
 
 @interface NVMTLEmbeddedPlan : NSObject {
 @public
-    BOOL wantSampler;
+    BOOL wantSampler, storage;
     uint32_t slot;
     NSUInteger ownerIndex, fieldOffset;
     uint32_t dset, dbinding;
@@ -172,6 +172,7 @@ static NSArray<NVMTLEmbeddedPlan *> *nvmtl_embedded_plan(NVMTLFunction *fn) {
             if (![src isKindOfClass:[NSDictionary class]] || !slotNum) continue;
             NVMTLEmbeddedPlan *plan = [NVMTLEmbeddedPlan new];
             plan->wantSampler = [entry[@"kind"] isEqualToString:@"EmbeddedArgBufferSampler"];
+            plan->storage = [entry[@"access"] isKindOfClass:[NSString class]] && [entry[@"access"] isEqualToString:@"Storage"];
             plan->slot = (uint32_t)slotNum.unsignedLongValue;
             plan->ownerIndex = [src[@"buffer_index"] unsignedLongValue];
             plan->fieldOffset = [src[@"field_offset"] unsignedLongValue];
@@ -296,7 +297,9 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
             { NVMTLTexture *sr = t->_parent ? t->_parent : t; if (sr->_surf) embSurf = YES; }
             if (nvmtl_vk_bind_texture_view(&cb->_c, set, slot, [t nvview]))
                 nvlog("embedded texture slot %u: bind FAILED", slot);
-            nvmtl_vk_bind_storage_view(&cb->_c, set, slot, t->_stex ? [t nvview] : NULL);
+            void *sv = nvmtl_storage_view_for(cb, t, plan->storage);
+            if (sv && !t->_stex) embSurf = YES;   // a twin is copied in and out per encoder: never skip this binding
+            nvmtl_vk_bind_storage_view(&cb->_c, set, slot, sv);
         }
     }
     nvmtl_vk_emb_note(&cb->_c, set, (embKeyed && !embSurf) ? (__bridge void *)fn : NULL, embKey, embN);

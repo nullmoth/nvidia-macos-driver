@@ -1390,6 +1390,98 @@ NSArray<NSDictionary *> *nvmtl_argbuf_fields(NVMTLFunction *function, NSUInteger
     return mine;
 }
 
+// The tokens of one AIR metadata tuple `!N = !{a, b, ...}`, commas inside quoted strings kept
+// (`!"texture2d<float, sample>"` is one token).
+static NSArray<NSString *> *nvmtl_air_tuple_tokens(NSString *line)
+{
+    NSRange br = line ? [line rangeOfString:@"!{"] : NSMakeRange(NSNotFound, 0);
+    if (br.location == NSNotFound) return @[];
+    NSMutableArray *tok = [NSMutableArray array]; NSMutableString *cur = [NSMutableString string]; BOOL q = NO;
+    for (NSUInteger i = br.location + 2; i < line.length; i++) {
+        unichar c = [line characterAtIndex:i];
+        if (c == '"') q = !q;
+        if (!q && (c == ',' || c == '}')) {
+            NSString *t = [cur stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if (t.length) [tok addObject:t];
+            [cur setString:@""];
+            if (c == '}') break;
+            continue;
+        }
+        [cur appendFormat:@"%C", c];
+    }
+    return tok;
+}
+// One `air.struct_type_info` tuple: members of `i32 offset, i32 size, i32 count, !"type", !"name",
+// !"air.indirect_argument", leaf`. A leaf is either a node with the member's `air.location_index` (its [[id]] inside the
+// struct), or, for a nested struct - whose member starts with `!"air.struct_type_info", !child` - `i32 id`, the
+// struct's own [[id]]. An encoder addresses a nested member by its struct's id plus its id inside the struct, at the
+// struct's offset plus its own (Metal numbers ImageIO's xdr::colorTransformIn trc.lut 11 at byte 64 this way).
+static void nvmtl_air_argbuf_walk(NSDictionary *nodes, NSString *node, NSUInteger baseId, NSUInteger baseOff, NSUInteger depth,
+                                  NSUInteger bufferIndex, NSMutableArray *out)
+{
+    if (depth > 16) return;
+    NSArray<NSString *> *tok = nvmtl_air_tuple_tokens(nodes[node]);
+    for (NSUInteger i = 0; i < tok.count; ) {
+        NSString *child = nil; NSUInteger j = i;
+        if ([tok[j] isEqualToString:@"!\"air.struct_type_info\""] && j + 1 < tok.count) { child = tok[j + 1]; j += 2; }
+        if (j + 6 >= tok.count || ![tok[j] hasPrefix:@"i32 "] || ![tok[j + 1] hasPrefix:@"i32 "] || ![tok[j + 2] hasPrefix:@"i32 "]
+            || ![tok[j + 3] hasPrefix:@"!\""] || ![tok[j + 4] hasPrefix:@"!\""] || ![tok[j + 5] isEqualToString:@"!\"air.indirect_argument\""]) {
+            i++; continue;
+        }
+        const NSUInteger off = (NSUInteger)[[tok[j] substringFromIndex:4] integerValue], size = (NSUInteger)[[tok[j + 1] substringFromIndex:4] integerValue];
+        NSString *ref = tok[j + 6], *name = [tok[j + 4] substringWithRange:NSMakeRange(2, tok[j + 4].length - 3)];
+        if (child) {
+            if ([ref hasPrefix:@"i32 "]) nvmtl_air_argbuf_walk(nodes, child, baseId + (NSUInteger)[[ref substringFromIndex:4] integerValue],
+                                                               baseOff + off, depth + 1, bufferIndex, out);
+        } else if ([ref hasPrefix:@"!"]) {
+            NSString *leaf = nodes[ref]; NSInteger rel = leaf ? nvmtl_air_i32_after(leaf, @"air.location_index") : -1;
+            NSString *kind = [leaf rangeOfString:@"!\"air.indirect_constant\""].location != NSNotFound ? @"constant"
+                           : [leaf rangeOfString:@"!\"air.texture\""].location != NSNotFound ? @"texture"
+                           : [leaf rangeOfString:@"!\"air.sampler\""].location != NSNotFound ? @"sampler" : @"other";
+            if (rel >= 0)
+                [out addObject:@{ @"buffer_index": @(bufferIndex), @"argument_index": @(baseId + (NSUInteger)rel), @"field_offset": @(baseOff + off),
+                                  @"size": @(size), @"kind": kind, @"name": name }];
+        }
+        i = j + 7;
+    }
+}
+// Every member of the argument buffer at [[buffer(bufferIndex)]] as the function's AIR declares it, nested structs
+// flattened, and the buffer's size and alignment. The translator's argument_buffer_fields carry only the resources
+// a shader reaches; Metal's encoder also covers the constants and the nested structs (ImageIO's HDR converter sizes
+// and fills xdr::colorTransformIn, which has no top-level resource, through it).
+NSArray<NSDictionary *> *nvmtl_air_argbuf_layout(NVMTLFunction *fn, NSUInteger bufferIndex, NSUInteger *size, NSUInteger *align)
+{
+    if (size) *size = 0;
+    if (align) *align = 0;
+    NSString *ll = fn ? fn->_air : nil, *fname = fn ? fn->_fname : nil;
+    if (!ll.length || !fname.length) return @[];
+    NSMutableDictionary *nodes = [NSMutableDictionary new]; NSString *entryLine = nil; NSRange er = NSMakeRange(NSNotFound, 0);
+    NSArray *needles = @[[NSString stringWithFormat:@"@%@, ", fname], [NSString stringWithFormat:@"@\"%@\", ", fname]];
+    for (NSString *line in [ll componentsSeparatedByString:@"\n"]) {
+        if (![line hasPrefix:@"!"]) continue;
+        NSRange eq = [line rangeOfString:@" = !{"]; if (eq.location == NSNotFound) continue;
+        nodes[[line substringToIndex:eq.location]] = line;
+        if (!entryLine && [line rangeOfString:@"air."].location == NSNotFound)
+            for (NSString *needle in needles) { NSRange r = [line rangeOfString:needle]; if (r.location != NSNotFound) { entryLine = line; er = r; break; } }
+    }
+    if (!entryLine) return @[];
+    NSArray *erefs = [[entryLine substringFromIndex:NSMaxRange(er)] componentsSeparatedByString:@", "];
+    if (erefs.count < 2) return @[];
+    NSString *argsRef = [erefs[1] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"} "]];
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *ref in nvmtl_air_tuple_tokens(nodes[argsRef])) {
+        NSString *line = nodes[ref];
+        if ([line rangeOfString:@"!\"air.indirect_buffer\""].location == NSNotFound) continue;
+        if (nvmtl_air_i32_after(line, @"air.location_index") != (NSInteger)bufferIndex) continue;
+        if (size) *size = (NSUInteger)MAX(0, nvmtl_air_i32_after(line, @"air.arg_type_size"));
+        if (align) *align = (NSUInteger)MAX(0, nvmtl_air_i32_after(line, @"air.arg_type_align_size"));
+        NSString *st = nvmtl_air_node_after(line, @"air.struct_type_info", 0, NULL);
+        if (st) nvmtl_air_argbuf_walk(nodes, st, 0, 0, 0, bufferIndex, out);
+        break;
+    }
+    return out;
+}
+
 NSArray<NSDictionary *> *nvmtl_embedded_bindings(NVMTLFunction *function)
 {
     if (!function) return nil;
