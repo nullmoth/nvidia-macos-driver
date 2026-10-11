@@ -1,0 +1,632 @@
+diff --git a/meson.build b/meson.build
+index ee207a9..e2fbf39 100644
+--- a/meson.build
++++ b/meson.build
+@@ -157,7 +157,8 @@ pre_args += '-DHAVE_OPENGL_ES_2=@0@'.format(with_gles2.to_int())
+ 
+ with_any_opengl = with_opengl or with_gles1 or with_gles2
+ 
+-system_has_kms_drm = ['openbsd', 'netbsd', 'freebsd', 'gnu/kfreebsd', 'dragonfly', 'linux', 'sunos', 'android', 'managarm'].contains(host_machine.system())
++# darwin: the NullMoth kexts provide DRM device nodes (/dev/dri/*), as drm-kmod does on FreeBSD
++system_has_kms_drm = ['openbsd', 'netbsd', 'freebsd', 'gnu/kfreebsd', 'dragonfly', 'linux', 'sunos', 'android', 'managarm', 'darwin'].contains(host_machine.system())
+ 
+ gallium_drivers = get_option('gallium-drivers')
+ if gallium_drivers.contains('auto')
+@@ -822,6 +823,11 @@ if dep_libdrm.found()
+     with_gallium_drisw_kms = true
+   endif
+ endif
++# AMD addrlib: its __APPLE__ branch includes addrExtDef.h, which only Apple's AMD driver team has; take the
++# branch every other platform uses.
++if host_machine.system() == 'darwin'
++  pre_args += '-DHAVE_TSERVER'
++endif
+ 
+ # Then get each libdrm module
+ foreach name, d : _libdrm_checks
+diff --git a/src/amd/vulkan/meson.build b/src/amd/vulkan/meson.build
+index 0234b4e..d38d934 100644
+--- a/src/amd/vulkan/meson.build
++++ b/src/amd/vulkan/meson.build
+@@ -303,6 +303,9 @@ libvulkan_radeon = shared_library(
+   gnu_symbol_visibility : 'hidden',
+   name_prefix : host_machine.system() == 'windows' ? '' : [],
+   install : true,
++  # macOS: the generated entrypoint tables reference every Vulkan entrypoint weakly; Mach-O weak_import still
++  # wants a definition at link time, so undefined symbols must be allowed (as targets/lavapipe/meson.build does).
++  override_options : ['b_lundef=@0@'.format(host_machine.system() == 'darwin' ? 'false' : get_option('b_lundef').to_string())],
+ )
+ 
+ if with_symbols_check
+diff --git a/src/drm-shim/device.c b/src/drm-shim/device.c
+index 7df5900..1d45c5e 100644
+--- a/src/drm-shim/device.c
++++ b/src/drm-shim/device.c
+@@ -29,7 +29,9 @@
+ 
+ #include <c11/threads.h>
+ #include <errno.h>
++#ifdef __linux__
+ #include <linux/memfd.h>
++#endif
+ #include <stdbool.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -44,7 +46,24 @@
+ 
+ #define SHIM_MEM_SIZE (4ull * 1024 * 1024 * 1024)
+ 
+-#ifndef HAVE_MEMFD_CREATE
++#if defined(__APPLE__)
++#include <fcntl.h>
++#include <sys/stat.h>
++
++#define MFD_CLOEXEC 0
++
++/* macOS has no memfd: an unlinked POSIX shared-memory object is the same thing. */
++static inline int
++memfd_create(const char *name, unsigned int flags)
++{
++   char path[64];
++   snprintf(path, sizeof(path), "/drm-shim.%d", (int)getpid());
++   int fd = shm_open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
++   if (fd >= 0)
++      shm_unlink(path);
++   return fd;
++}
++#elif !defined(HAVE_MEMFD_CREATE)
+ #include <sys/syscall.h>
+ 
+ static inline int
+diff --git a/src/drm-shim/drm_shim.h b/src/drm-shim/drm_shim.h
+index b44138d..3063182 100644
+--- a/src/drm-shim/drm_shim.h
++++ b/src/drm-shim/drm_shim.h
+@@ -33,6 +33,17 @@
+ #define DRM_MAJOR 226
+ #endif
+ 
++#ifdef __APPLE__
++#include <sys/types.h>
++/* Darwin's off_t is 64-bit on every architecture. */
++typedef off_t off64_t;
++/* BSD ioctl encoding keeps the number in bits 0-7 and the group in bits 8-15, as Linux does. */
++#ifndef _IOC_NR
++#define _IOC_NR(cmd) ((cmd) & 0xff)
++#define _IOC_TYPE(cmd) (((cmd) >> 8) & 0xff)
++#endif
++#endif
++
+ typedef int (*ioctl_fn_t)(int fd, unsigned long request, void *arg);
+ 
+ struct shim_bo;
+diff --git a/src/drm-shim/drm_shim_darwin.c b/src/drm-shim/drm_shim_darwin.c
+new file mode 100644
+index 0000000..cdcfefe
+--- /dev/null
++++ b/src/drm-shim/drm_shim_darwin.c
+@@ -0,0 +1,376 @@
++/*
++ * Copyright © 2018 Broadcom
++ * SPDX-License-Identifier: MIT
++ */
++
++/**
++ * @file
++ *
++ * macOS front end for drm-shim.
++ *
++ * On Linux, drm-shim is preloaded and overrides libc by symbol name, and fakes
++ * the sysfs files libdrm reads.  macOS has no sysfs: libdrm finds a DRM node by
++ * its device number among the entries of /dev/dri and asks the kernel for the
++ * PCI identity with DRM_IOCTL_GET_PCIINFO (as on OpenBSD).  This file fakes
++ * exactly that surface, and routes ioctl/mmap on the fake node into the shared
++ * core in device.c.
++ *
++ * Load it with DYLD_INSERT_LIBRARIES.  The libc entry points are replaced with
++ * dyld interposing (__DATA,__interpose), which applies to every image except
++ * this one, so calls made from inside the shim reach the real libc directly.
++ */
++
++#include <dirent.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <pthread.h>
++#include <stdarg.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++#include "drm-uapi/drm.h"
++#include "drm_shim.h"
++#include "util/u_debug.h"
++
++/* Darwin assigns character majors at run time; this one is only ever seen
++ * through the shim's own stat answers, never by the kernel.
++ */
++#define SHIM_DARWIN_MAJOR 250
++
++/* Same layout and request number as libdrm's OpenBSD/Darwin definition. */
++struct drm_pciinfo {
++   uint16_t domain;
++   uint8_t bus;
++   uint8_t dev;
++   uint8_t func;
++   uint16_t vendor_id;
++   uint16_t device_id;
++   uint16_t subvendor_id;
++   uint16_t subdevice_id;
++   uint8_t revision_id;
++};
++#define DRM_IOCTL_GET_PCIINFO DRM_IOR(0x15, struct drm_pciinfo)
++
++static const char render_node_path[] = "/dev/dri/renderD128";
++static const char render_node_dirent_name[] = "renderD128";
++const int render_node_minor = 128;
++bool drm_shim_driver_prefers_new_render_node = true;
++bool drm_shim_debug;
++
++static struct drm_pciinfo shim_pciinfo;
++
++static pthread_mutex_t shim_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_once_t shim_once = PTHREAD_ONCE_INIT;
++static bool inited;
++
++/* opendir("/dev/dri") handles that still owe the caller our fake entry.  A
++ * handful at most are open at once; the bound is checked, never assumed.
++ */
++#define MAX_DRI_DIRS 16
++static DIR *dri_dirs[MAX_DRI_DIRS];
++
++/* When /dev/dri does not exist (no DRM kernel driver yet), opendir returns
++ * this pointer, which no real opendir can return.
++ */
++static int fake_dir_storage;
++#define FAKE_DEV_DRI ((DIR *)&fake_dir_storage)
++
++static void
++init_shim_once(void)
++{
++   drm_shim_debug = debug_get_bool_option("DRM_SHIM_DEBUG", false);
++   if (drm_shim_debug)
++      fprintf(stderr, "Initializing DRM shim on %s\n", render_node_path);
++   drm_shim_device_init();
++   inited = true;
++}
++
++static void
++init_shim(void)
++{
++   pthread_once(&shim_once, init_shim_once);
++}
++
++bool
++drm_shim_inited(void)
++{
++   return inited;
++}
++
++/* The Linux files these describe do not exist on macOS; nothing reads them. */
++void
++drm_shim_override_file(const char *contents, const char *path_format, ...)
++{
++}
++
++void
++drm_shim_override_link(const char *contents, const char *path_format, ...)
++{
++}
++
++void
++drm_shim_pci_device_setup(uint16_t vendor_id, uint16_t device_id,
++                          const char *pci_slot, const char *driver_name)
++{
++   unsigned domain = 0, bus = 0, dev = 0, func = 0;
++
++   if (sscanf(pci_slot, "%x:%x:%x.%x", &domain, &bus, &dev, &func) != 4) {
++      fprintf(stderr, "drm-shim: bad PCI slot '%s'\n", pci_slot);
++      abort();
++   }
++
++   shim_device.bus_type = DRM_BUS_PCI;
++   shim_device.driver_name = driver_name;
++   shim_pciinfo = (struct drm_pciinfo) {
++      .domain = domain, .bus = bus, .dev = dev, .func = func,
++      .vendor_id = vendor_id, .device_id = device_id,
++      .subvendor_id = 0x1234, .subdevice_id = 0x1234, .revision_id = 0,
++   };
++}
++
++void
++drm_shim_platform_device_setup(const char *driver_name, const char *fullname,
++                               const char *compatible)
++{
++   /* libdrm has no Darwin platform-bus parser; only PCI devices are faked. */
++   fprintf(stderr, "drm-shim: platform devices are not supported on macOS\n");
++   abort();
++}
++
++static bool
++is_render_node(const char *path)
++{
++   return path && strcmp(path, render_node_path) == 0;
++}
++
++static void
++fill_node_stat(struct stat *st)
++{
++   memset(st, 0, sizeof(*st));
++   st->st_rdev = makedev(SHIM_DARWIN_MAJOR, render_node_minor);
++   st->st_mode = S_IFCHR | 0666;
++}
++
++static int
++shim_open(const char *path, int flags, ...)
++{
++   mode_t mode = 0;
++   if (flags & O_CREAT) {
++      va_list ap;
++      va_start(ap, flags);
++      mode = (mode_t)va_arg(ap, int);
++      va_end(ap);
++   }
++
++   if (!is_render_node(path))
++      return open(path, flags, mode);
++
++   init_shim();
++   int fd = open("/dev/null", O_RDWR | (flags & O_CLOEXEC));
++   if (fd >= 0)
++      drm_shim_fd_register(fd, NULL);
++   return fd;
++}
++
++static int
++shim_close(int fd)
++{
++   if (inited)
++      drm_shim_fd_unregister(fd);
++   return close(fd);
++}
++
++static int
++shim_access(const char *path, int mode)
++{
++   if (is_render_node(path))
++      return 0;
++   return access(path, mode);
++}
++
++static int
++shim_stat(const char *path, struct stat *st)
++{
++   if (is_render_node(path)) {
++      fill_node_stat(st);
++      return 0;
++   }
++   return stat(path, st);
++}
++
++static int
++shim_lstat(const char *path, struct stat *st)
++{
++   if (is_render_node(path)) {
++      fill_node_stat(st);
++      return 0;
++   }
++   return lstat(path, st);
++}
++
++static int
++shim_fstat(int fd, struct stat *st)
++{
++   if (inited && drm_shim_fd_lookup(fd)) {
++      fill_node_stat(st);
++      return 0;
++   }
++   return fstat(fd, st);
++}
++
++static DIR *
++shim_opendir(const char *name)
++{
++   DIR *dir = opendir(name);
++   if (strcmp(name, "/dev/dri") != 0)
++      return dir;
++
++   if (!dir)
++      dir = FAKE_DEV_DRI;
++
++   pthread_mutex_lock(&shim_lock);
++   int i;
++   for (i = 0; i < MAX_DRI_DIRS && dri_dirs[i]; i++)
++      ;
++   if (i == MAX_DRI_DIRS) {
++      pthread_mutex_unlock(&shim_lock);
++      fprintf(stderr, "drm-shim: more than %d open /dev/dri handles\n", MAX_DRI_DIRS);
++      abort();
++   }
++   dri_dirs[i] = dir;
++   pthread_mutex_unlock(&shim_lock);
++   return dir;
++}
++
++/* Our render node is listed first, then the real entries, if any. */
++static struct dirent *
++shim_readdir(DIR *dir)
++{
++   static struct dirent render_node_dirent;
++   bool ours = false;
++
++   pthread_mutex_lock(&shim_lock);
++   for (int i = 0; i < MAX_DRI_DIRS; i++) {
++      if (dri_dirs[i] == dir) {
++         dri_dirs[i] = NULL;
++         ours = true;
++         break;
++      }
++   }
++   pthread_mutex_unlock(&shim_lock);
++
++   if (ours) {
++      memset(&render_node_dirent, 0, sizeof(render_node_dirent));
++      strcpy(render_node_dirent.d_name, render_node_dirent_name);
++      render_node_dirent.d_namlen = strlen(render_node_dirent_name);
++      render_node_dirent.d_type = DT_CHR;
++      return &render_node_dirent;
++   }
++
++   if (dir == FAKE_DEV_DRI)
++      return NULL;
++   return readdir(dir);
++}
++
++static int
++shim_closedir(DIR *dir)
++{
++   pthread_mutex_lock(&shim_lock);
++   for (int i = 0; i < MAX_DRI_DIRS; i++) {
++      if (dri_dirs[i] == dir)
++         dri_dirs[i] = NULL;
++   }
++   pthread_mutex_unlock(&shim_lock);
++
++   if (dir == FAKE_DEV_DRI)
++      return 0;
++   return closedir(dir);
++}
++
++static int
++shim_ioctl(int fd, unsigned long request, ...)
++{
++   va_list ap;
++   va_start(ap, request);
++   void *arg = va_arg(ap, void *);
++   va_end(ap);
++
++   if (!inited || !drm_shim_fd_lookup(fd))
++      return ioctl(fd, request, arg);
++
++   if (request == DRM_IOCTL_GET_PCIINFO) {
++      memcpy(arg, &shim_pciinfo, sizeof(shim_pciinfo));
++      return 0;
++   }
++   return drm_shim_ioctl(fd, request, arg);
++}
++
++static int
++shim_fcntl(int fd, int cmd, ...)
++{
++   va_list ap;
++   va_start(ap, cmd);
++   void *arg = va_arg(ap, void *);
++   va_end(ap);
++
++   int ret = fcntl(fd, cmd, arg);
++
++   if (ret >= 0 && inited && (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC)) {
++      struct shim_fd *shim_fd = drm_shim_fd_lookup(fd);
++      if (shim_fd)
++         drm_shim_fd_register(ret, shim_fd);
++   }
++   return ret;
++}
++
++static int
++shim_dup(int fd)
++{
++   int ret = dup(fd);
++   if (ret >= 0 && inited) {
++      struct shim_fd *shim_fd = drm_shim_fd_lookup(fd);
++      if (shim_fd)
++         drm_shim_fd_register(ret, shim_fd);
++   }
++   return ret;
++}
++
++static void *
++shim_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
++{
++   if (inited && fd >= 0) {
++      struct shim_fd *shim_fd = drm_shim_fd_lookup(fd);
++      if (shim_fd)
++         return drm_shim_mmap(shim_fd, length, prot, flags, fd, offset);
++   }
++   return mmap(addr, length, prot, flags, fd, offset);
++}
++
++#define INTERPOSE(replacement, replacee)                                       \
++   __attribute__((used)) static const struct {                                 \
++      const void *r;                                                           \
++      const void *o;                                                           \
++   } interpose_##replacee __attribute__((section("__DATA,__interpose"))) = {   \
++      (const void *)(unsigned long)&replacement,                               \
++      (const void *)(unsigned long)&replacee}
++
++INTERPOSE(shim_open, open);
++INTERPOSE(shim_close, close);
++INTERPOSE(shim_access, access);
++INTERPOSE(shim_stat, stat);
++INTERPOSE(shim_lstat, lstat);
++INTERPOSE(shim_fstat, fstat);
++INTERPOSE(shim_opendir, opendir);
++INTERPOSE(shim_readdir, readdir);
++INTERPOSE(shim_closedir, closedir);
++INTERPOSE(shim_ioctl, ioctl);
++INTERPOSE(shim_fcntl, fcntl);
++INTERPOSE(shim_dup, dup);
++INTERPOSE(shim_mmap, mmap);
+diff --git a/src/drm-shim/meson.build b/src/drm-shim/meson.build
+index 4f0fe4e..8c87748 100644
+--- a/src/drm-shim/meson.build
++++ b/src/drm-shim/meson.build
+@@ -6,7 +6,7 @@ drm_shim = static_library(
+   'drm_shim',
+   [
+     'device.c',
+-    'drm_shim.c',
++    host_machine.system() == 'darwin' ? 'drm_shim_darwin.c' : 'drm_shim.c',
+   ],
+   include_directories: [inc_include, inc_src],
+   dependencies: [dep_libdrm, idep_mesautil, dep_dl],
+diff --git a/src/intel/meson.build b/src/intel/meson.build
+index e504a82..88a1b32 100644
+--- a/src/intel/meson.build
++++ b/src/intel/meson.build
+@@ -39,6 +39,17 @@ if with_intel_tools
+   subdir('tools')
+   subdir('executor')
+ endif
++# The Intel tools need glibc; the noop drm-shim (a fake i915 kernel driver) does not.
++if with_tools.contains('drm-shim') and not with_intel_tools
++  libintel_stub_gpu = shared_library(
++    'intel_noop_drm_shim',
++    [files('tools/intel_noop_drm_shim.c'), intel_dev_serialize_src],
++    include_directories: [inc_include, inc_src, inc_intel],
++    dependencies: [dep_libdrm, dep_drm_shim, idep_mesautil, idep_libintel_common, idep_intel_dev, idep_parson],
++    gnu_symbol_visibility : 'hidden',
++    install : true,
++  )
++endif
+ if get_option('vulkan-layers').contains('intel-nullhw')
+   subdir('nullhw-layer')
+ endif
+diff --git a/src/intel/vulkan/meson.build b/src/intel/vulkan/meson.build
+index 7048757..ef257b4 100644
+--- a/src/intel/vulkan/meson.build
++++ b/src/intel/vulkan/meson.build
+@@ -329,6 +329,9 @@ libvulkan_intel = shared_library(
+   link_args : [vulkan_icd_link_args, ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections],
+   link_depends : vulkan_icd_link_depends,
+   install : true,
++  # macOS: the generated entrypoint tables reference every Vulkan entrypoint weakly; Mach-O weak_import still
++  # wants a definition at link time, so undefined symbols must be allowed (as targets/lavapipe/meson.build does).
++  override_options : ['b_lundef=@0@'.format(host_machine.system() == 'darwin' ? 'false' : get_option('b_lundef').to_string())],
+ )
+ 
+ if with_symbols_check
+diff --git a/src/util/futex.c b/src/util/futex.c
+index df3e949..44585aa 100644
+--- a/src/util/futex.c
++++ b/src/util/futex.c
+@@ -114,6 +114,37 @@ int futex_wait(uint32_t *addr, int32_t value, const struct timespec *timeout)
+    return futex(addr, FUTEX_WAIT, value, &tsrel, NULL);
+ }
+ 
++#elif defined(__APPLE__)
++
++/* macOS 14.4+: os_sync_wait_on_address / os_sync_wake_by_address are the futex primitives (wait while the 32-bit
++ * value at addr equals value; wake one or all waiters on addr). The timeout, as on Linux and OpenBSD here, is an
++ * absolute CLOCK_MONOTONIC time; the wait takes a relative one. */
++#include <os/os_sync_wait_on_address.h>
++#include <errno.h>
++#include <limits.h>
++#include <time.h>
++
++int futex_wake(uint32_t *addr, int32_t count)
++{
++   int r = count == 1 ? os_sync_wake_by_address_any(addr, sizeof(*addr), OS_SYNC_WAKE_BY_ADDRESS_NONE)
++                      : os_sync_wake_by_address_all(addr, sizeof(*addr), OS_SYNC_WAKE_BY_ADDRESS_NONE);
++   /* ENOENT = nobody was waiting, which is not an error for a futex wake */
++   return (r < 0 && errno == ENOENT) ? 0 : r;
++}
++
++int futex_wait(uint32_t *addr, int32_t value, const struct timespec *timeout)
++{
++   if (timeout == NULL)
++      return os_sync_wait_on_address(addr, (uint32_t)value, sizeof(*addr), OS_SYNC_WAIT_ON_ADDRESS_NONE);
++
++   struct timespec now;
++   clock_gettime(CLOCK_MONOTONIC, &now);
++   int64_t ns = (int64_t)(timeout->tv_sec - now.tv_sec) * 1000000000ll + (timeout->tv_nsec - now.tv_nsec);
++   if (ns <= 0) { errno = ETIMEDOUT; return -1; }
++   return os_sync_wait_on_address_with_timeout(addr, (uint32_t)value, sizeof(*addr), OS_SYNC_WAIT_ON_ADDRESS_NONE,
++                                                OS_CLOCK_MACH_ABSOLUTE_TIME, (uint64_t)ns);
++}
++
+ #elif defined(_WIN32) && !defined(WINDOWS_NO_FUTEX)
+ 
+ #include <windows.h>
+diff --git a/src/util/futex.h b/src/util/futex.h
+index b7ce088..fa074aa 100644
+--- a/src/util/futex.h
++++ b/src/util/futex.h
+@@ -33,6 +33,8 @@
+ #define UTIL_FUTEX_SUPPORTED 1
+ #elif defined(__OpenBSD__)
+ #define UTIL_FUTEX_SUPPORTED 1
++#elif defined(__APPLE__)
++#define UTIL_FUTEX_SUPPORTED 1   /* os_sync_wait_on_address, macOS 14.4+ */
+ #elif defined(_WIN32) && !defined(WINDOWS_NO_FUTEX)
+ #define UTIL_FUTEX_SUPPORTED 1
+ #else
+diff --git a/src/vulkan/runtime/vk_image.c b/src/vulkan/runtime/vk_image.c
+index 1813634..8a35cda 100644
+--- a/src/vulkan/runtime/vk_image.c
++++ b/src/vulkan/runtime/vk_image.c
+@@ -23,7 +23,7 @@
+ 
+ #include "vk_image.h"
+ 
+-#if DETECT_OS_LINUX || DETECT_OS_BSD
++#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_APPLE
+ #include <drm-uapi/drm_fourcc.h>
+ #endif
+ 
+@@ -111,7 +111,7 @@ vk_image_init(struct vk_device *device,
+       vk_find_struct_const(pCreateInfo->pNext, WSI_IMAGE_CREATE_INFO_MESA);
+    image->wsi_legacy_scanout = wsi_info && wsi_info->scanout;
+ 
+-#if DETECT_OS_LINUX || DETECT_OS_BSD
++#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_APPLE
+    image->drm_format_mod = ((1ULL << 56) - 1) /* DRM_FORMAT_MOD_INVALID */;
+ #endif
+ 
+@@ -191,7 +191,7 @@ vk_image_destroy(struct vk_device *device,
+    vk_object_free(device, alloc, image);
+ }
+ 
+-#if DETECT_OS_LINUX || DETECT_OS_BSD
++#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_APPLE
+ VKAPI_ATTR VkResult VKAPI_CALL
+ vk_common_GetImageDrmFormatModifierPropertiesEXT(UNUSED VkDevice device,
+                                                  VkImage _image,
+diff --git a/src/vulkan/runtime/vk_image.h b/src/vulkan/runtime/vk_image.h
+index f560519..90fed58 100644
+--- a/src/vulkan/runtime/vk_image.h
++++ b/src/vulkan/runtime/vk_image.h
+@@ -77,7 +77,7 @@ struct vk_image {
+    /* wsi_image_create_info::scanout */
+    bool wsi_legacy_scanout;
+ 
+-#if DETECT_OS_LINUX || DETECT_OS_BSD
++#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_APPLE
+    /* VK_EXT_drm_format_modifier
+     *
+     * Initialized by vk_image_create/init() to DRM_FORMAT_MOD_INVALID.  It's

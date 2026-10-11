@@ -1,0 +1,96 @@
+diff --git a/meson.build b/meson.build
+index ec3a0d5..5bc9388 100644
+--- a/meson.build
++++ b/meson.build
+@@ -34,7 +34,8 @@ project(
+ 
+ patch_ver = meson.project_version().split('.')[2]
+ 
+-if ['windows', 'darwin'].contains(host_machine.system())
++# macOS: the NullMoth kexts provide the DRM device nodes (/dev/dri/*), as drm-kmod does on FreeBSD
++if ['windows'].contains(host_machine.system())
+   error('unsupported OS: @0@'.format(host_machine.system()))
+ endif
+ 
+diff --git a/xf86drm.c b/xf86drm.c
+index 07dec49..9ec6a13 100644
+--- a/xf86drm.c
++++ b/xf86drm.c
+@@ -82,7 +82,8 @@
+ #define DRM_MAJOR 226 /* Linux */
+ #endif
+ 
+-#if defined(__OpenBSD__) || defined(__DragonFly__)
++
++#if defined(__OpenBSD__) || defined(__DragonFly__) || defined(__APPLE__)
+ struct drm_pciinfo {
+ 	uint16_t	domain;
+ 	uint8_t		bus;
+@@ -105,6 +106,31 @@ struct drm_pciinfo {
+ static drmServerInfoPtr drm_server_info;
+ 
+ static bool drmNodeIsDRM(int maj, int min);
++#ifdef __APPLE__
++/* Darwin assigns character majors at run time and its devname_r searches only the top level of /dev, so a DRM
++ * node is recognised by finding its device number among the entries of /dev/dri. */
++static bool drm_darwin_node_exists(int maj, int min)
++{
++    DIR *dir = opendir(DRM_DIR_NAME);
++    struct dirent *ent;
++    bool found = false;
++
++    if (!dir)
++        return false;
++    while (!found && (ent = readdir(dir)) != NULL) {
++        char path[PATH_MAX];
++        struct stat sbuf;
++
++        if (ent->d_name[0] == '.')
++            continue;
++        snprintf(path, sizeof(path), "%s/%s", DRM_DIR_NAME, ent->d_name);
++        found = stat(path, &sbuf) == 0 && S_ISCHR(sbuf.st_mode) &&
++                (int)major(sbuf.st_rdev) == maj && (int)minor(sbuf.st_rdev) == min;
++    }
++    closedir(dir);
++    return found;
++}
++#endif
+ static char *drmGetMinorNameForFD(int fd, int type);
+ 
+ #define DRM_MODIFIER(v, f, f_name) \
+@@ -3311,6 +3337,8 @@ static bool drmNodeIsDRM(int maj, int min)
+     snprintf(path, sizeof(path), "/sys/dev/char/%d:%d/device/drm",
+              maj, min);
+     return stat(path, &sbuf) == 0;
++#elif defined(__APPLE__)
++    return drm_darwin_node_exists(maj, min);
+ #elif defined(__FreeBSD__)
+     char name[SPECNAMELEN];
+ 
+@@ -3620,7 +3648,7 @@ static int drmParseSubsystemType(int maj, int min)
+             return DRM_BUS_VIRTIO;
+      }
+     return subsystem_type;
+-#elif defined(__OpenBSD__) || defined(__DragonFly__) || defined(__FreeBSD__)
++#elif defined(__OpenBSD__) || defined(__DragonFly__) || defined(__FreeBSD__) || defined(__APPLE__)
+     return DRM_BUS_PCI;
+ #else
+ #warning "Missing implementation of drmParseSubsystemType"
+@@ -3728,7 +3756,7 @@ static int drmParsePciBusInfo(int maj, int min, drmPciBusInfoPtr info)
+     info->func = func;
+ 
+     return 0;
+-#elif defined(__OpenBSD__) || defined(__DragonFly__)
++#elif defined(__OpenBSD__) || defined(__DragonFly__) || defined(__APPLE__)
+     struct drm_pciinfo pinfo;
+     int fd, type;
+ 
+@@ -3899,7 +3927,7 @@ static int drmParsePciDeviceInfo(int maj, int min,
+         return parse_config_sysfs_file(maj, min, device);
+ 
+     return 0;
+-#elif defined(__OpenBSD__) || defined(__DragonFly__)
++#elif defined(__OpenBSD__) || defined(__DragonFly__) || defined(__APPLE__)
+     struct drm_pciinfo pinfo;
+     int fd, type;
+ 
