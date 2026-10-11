@@ -15,6 +15,10 @@ def replace_once(old, new):
     s = s.replace(old, new)
 
 replace_func("find_other_mm(struct proc *p)\n", r"""
+/* macOS port: the mm -> Mach task record (nmx_mm.cpp), declared here because this file sees no IOKit headers */
+void nmx_xnu_mm_note_task(void *mm);
+void nmx_xnu_mm_forget(void *mm);
+
 /*
  * macOS port: one mm_struct per process, kept on the port's process record (FreeBSD finds it by walking the
  * process's threads, which xnu does not let a kext do).
@@ -32,7 +36,8 @@ find_other_mm(struct proc *p)
 """)
 # record a new mm on the process so later threads share it
 replace_once("\t\t\t/* set mm_struct pointer */\n\t\t\tts->mm = mm;\n",
-             "\t\t\t/* set mm_struct pointer */\n\t\t\tts->mm = mm;\n\t\t\t/* macOS port: later threads of this process share it */\n\t\t\tproc->p_lkpi_mm = mm;\n")
+             "\t\t\t/* set mm_struct pointer */\n\t\t\tts->mm = mm;\n\t\t\t/* macOS port: later threads of this process share it */\n\t\t\tproc->p_lkpi_mm = mm;\n"
+             "\t\t\t/* macOS port: remember the Mach task, for driver workers that copy to this process */\n\t\t\tnmx_xnu_mm_note_task(mm);\n")
 
 replace_func("linux_mm_dtor(struct mm_struct *mm)\n", r"""
 void
@@ -43,6 +48,7 @@ linux_mm_dtor(struct mm_struct *mm)
 
 	if (p != NULL && p->p_lkpi_mm == mm)
 		p->p_lkpi_mm = NULL;
+	nmx_xnu_mm_forget(mm);
 	uma_zfree(linux_mm_zone, mm);
 }
 """)

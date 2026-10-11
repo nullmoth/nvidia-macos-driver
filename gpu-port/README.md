@@ -35,13 +35,22 @@ Build on the build Mac (Apple silicon, cross-compiling to x86_64) with the cross
 
 ## Kernel driver: NMXGPU (AMD and Intel)
 
-`xkpi/` runs the AMD and Intel kernel drivers (amdgpu and i915 from drm-kmod, on one DRM core with TTM and dma-fence) on macOS through FreeBSD's
+`xkpi/` runs the AMD and Intel kernel drivers (amdgpu and i915 from drm-kmod, and Intel's xe from Linux 6.14, on one DRM core with TTM and
+dma-fence) on macOS through FreeBSD's
 LinuxKPI and a FreeBSD-kernel layer implemented on xnu (`xkpi/bsdcompat`, `xkpi/xnu`). `xkpi/kext` links it all
 into `NMXGPU.kext`.
 
 - **Build** (on the build Mac): `xkpi/all.sh` compiles the driver sources drm-kmod's Makefiles select, display core
-  included (900), `xkpi/all-i915.sh` i915 (275 with the port's own), `xkpi/rt.sh` the runtime (73 sources),
-  `xkpi/kext/build.sh <out>` links the kext (13.6 MB).
+  included (900), `xkpi/all-i915.sh` i915 (274 with the port's own), `xkpi/all-xe.sh` xe (193 with the port's own),
+  `xkpi/rt.sh` the runtime (75 sources), `xkpi/kext/build.sh <out>` links the kext (15.4 MB).
+- **xe** comes from Linux 6.14 (`linux-6.14`, the DRM core version drm-kmod tracks). `all-xe.sh` copies it to `xe-src`
+  without its GPL-licensed files and KUnit tests and refuses to build if any GPL source is left; the page-table walker,
+  resource cursor, module glue and trace/test headers are the port's own (`override/xe`). `fork_xe.py` holds the few
+  macOS forms (BAR resize left to the firmware, drm-kmod's drm_file/TTM, worker copies into a process, Panther Lake
+  firmware names). xe carries its own build of the Intel display code, so the kext links it as one object that exports
+  nothing. It drives Lunar Lake and Battlemage, and Panther Lake by its forced device ids; i915 keeps every older part.
+- **User pages**: `get_user_pages` pins a process's pages through an IOMemoryDescriptor wiring on its task; the last
+  `put_page` releases it. xe userptr (`override/xe/nmx_xe_hmm.c`) and the other drivers' userptr paths use it.
 - **Link check**: `kmutil create` against macOS 15.8.1's kernel collections resolves every symbol (test
   collection in `/tmp` only; nothing installed).
 - **Device nodes**: each DRM minor is an xnu devfs clone node, so every open has its own file, as LinuxKPI expects.
@@ -65,6 +74,7 @@ Not done yet:
 - DMI quirks see the SMBIOS the bootloader presents (the Mac model), not the PC's board.
 - Kernel FPU sections run with interrupts off.
 
-- i915 covers Gen9 through Meteor Lake (display included); Lunar Lake and later need xe, which drm-kmod does not carry.
+- i915 covers Gen9 through Arrow Lake/Meteor Lake (display included); xe covers Lunar Lake, Battlemage and Panther Lake.
+  Panther Lake runs 6.14's early support with newer firmware (no GSC, so HuC stays unauthenticated there).
   Intel stolen memory is read from the IGD as FreeBSD's early quirks do; the legacy whole-object mmap ioctl is refused
   (Mesa uses the offset path).

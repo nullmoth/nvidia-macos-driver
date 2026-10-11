@@ -1,0 +1,87 @@
+/* SPDX-License-Identifier: MIT */
+/*
+ * xe's tracepoints, as no-ops: macOS has no ftrace. Written for this port (Linux's xe_trace*.h are GPL-2.0).
+ * Each name xe calls expands to nothing that evaluates its arguments; xe_trace.h, xe_trace_bo.h, xe_trace_guc.h
+ * and xe_trace_lrc.h all come here.
+ */
+#ifndef _NMX_XE_TRACE_H_
+#define _NMX_XE_TRACE_H_
+
+/* xe sources reach the BO, VM and scheduler interfaces through this header, as they do on Linux */
+#include "xe_bo.h"
+#include "xe_sched_job.h"
+#include "xe_vm.h"
+
+#define trace_xe_bo_cpu_fault(...) do { } while (0)
+#define trace_xe_bo_move(...) do { } while (0)
+#define trace_xe_bo_validate(...) do { } while (0)
+#define trace_xe_exec_queue_cleanup_entity(...) do { } while (0)
+#define trace_xe_exec_queue_close(...) do { } while (0)
+#define trace_xe_exec_queue_create(...) do { } while (0)
+#define trace_xe_exec_queue_deregister_done(...) do { } while (0)
+#define trace_xe_exec_queue_deregister(...) do { } while (0)
+#define trace_xe_exec_queue_destroy(...) do { } while (0)
+#define trace_xe_exec_queue_kill(...) do { } while (0)
+#define trace_xe_exec_queue_lr_cleanup(...) do { } while (0)
+#define trace_xe_exec_queue_memory_cat_error(...) do { } while (0)
+#define trace_xe_exec_queue_register(...) do { } while (0)
+#define trace_xe_exec_queue_reset(...) do { } while (0)
+#define trace_xe_exec_queue_resubmit(...) do { } while (0)
+#define trace_xe_exec_queue_scheduling_disable(...) do { } while (0)
+#define trace_xe_exec_queue_scheduling_done(...) do { } while (0)
+#define trace_xe_exec_queue_scheduling_enable(...) do { } while (0)
+#define trace_xe_exec_queue_stop(...) do { } while (0)
+#define trace_xe_exec_queue_submit(...) do { } while (0)
+#define trace_xe_gt_tlb_invalidation_fence_cb(...) do { } while (0)
+#define trace_xe_gt_tlb_invalidation_fence_create(...) do { } while (0)
+#define trace_xe_gt_tlb_invalidation_fence_recv(...) do { } while (0)
+#define trace_xe_gt_tlb_invalidation_fence_send(...) do { } while (0)
+#define trace_xe_gt_tlb_invalidation_fence_signal(...) do { } while (0)
+#define trace_xe_gt_tlb_invalidation_fence_timeout(...) do { } while (0)
+#define trace_xe_gt_tlb_invalidation_fence_work_func(...) do { } while (0)
+#define trace_xe_guc_ct_g2h_flow_control(...) do { } while (0)
+#define trace_xe_guc_ct_h2g_flow_control(...) do { } while (0)
+#define trace_xe_guc_ctb_g2h(...) do { } while (0)
+#define trace_xe_guc_ctb_h2g(...) do { } while (0)
+#define trace_xe_hw_fence_create(...) do { } while (0)
+#define trace_xe_hw_fence_signal(...) do { } while (0)
+#define trace_xe_hw_fence_try_signal(...) do { } while (0)
+#define trace_xe_lrc_update_timestamp(...) do { } while (0)
+#define trace_xe_pm_resume(...) do { } while (0)
+#define trace_xe_pm_runtime_get_ioctl(...) do { } while (0)
+#define trace_xe_pm_runtime_get(...) do { } while (0)
+#define trace_xe_pm_runtime_put(...) do { } while (0)
+#define trace_xe_pm_runtime_resume(...) do { } while (0)
+#define trace_xe_pm_runtime_suspend(...) do { } while (0)
+#define trace_xe_pm_suspend(...) do { } while (0)
+#define trace_xe_reg_rw(...) do { } while (0)
+#define trace_xe_sched_job_ban(...) do { } while (0)
+#define trace_xe_sched_job_create(...) do { } while (0)
+#define trace_xe_sched_job_exec(...) do { } while (0)
+#define trace_xe_sched_job_free(...) do { } while (0)
+#define trace_xe_sched_job_run(...) do { } while (0)
+#define trace_xe_sched_job_set_error(...) do { } while (0)
+#define trace_xe_sched_job_timedout(...) do { } while (0)
+#define trace_xe_sched_msg_add(...) do { } while (0)
+#define trace_xe_sched_msg_recv(...) do { } while (0)
+#define trace_xe_vm_cpu_bind(...) do { } while (0)
+#define trace_xe_vm_create(...) do { } while (0)
+#define trace_xe_vm_free(...) do { } while (0)
+#define trace_xe_vm_kill(...) do { } while (0)
+#define trace_xe_vm_ops_fail(...) do { } while (0)
+#define trace_xe_vm_rebind_worker_enter(...) do { } while (0)
+#define trace_xe_vm_rebind_worker_exit(...) do { } while (0)
+#define trace_xe_vm_rebind_worker_retry(...) do { } while (0)
+#define trace_xe_vma_acc(...) do { } while (0)
+#define trace_xe_vma_bind(...) do { } while (0)
+#define trace_xe_vma_evict(...) do { } while (0)
+#define trace_xe_vma_invalidate(...) do { } while (0)
+#define trace_xe_vma_pagefault(...) do { } while (0)
+#define trace_xe_vma_pf_bind(...) do { } while (0)
+#define trace_xe_vma_rebind_exec(...) do { } while (0)
+#define trace_xe_vma_rebind_worker(...) do { } while (0)
+#define trace_xe_vma_unbind(...) do { } while (0)
+#define trace_xe_vma_userptr_invalidate_complete(...) do { } while (0)
+#define trace_xe_vma_userptr_invalidate(...) do { } while (0)
+
+#endif

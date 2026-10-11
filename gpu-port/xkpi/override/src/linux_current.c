@@ -51,6 +51,10 @@ extern u_int first_msi_irq, num_msi_irqs;
 static uma_zone_t linux_current_zone;
 static uma_zone_t linux_mm_zone;
 
+/* macOS port: the mm -> Mach task record (nmx_mm.cpp), declared here because this file sees no IOKit headers */
+void nmx_xnu_mm_note_task(void *mm);
+void nmx_xnu_mm_forget(void *mm);
+
 /*
  * macOS port: one mm_struct per process, kept on the port's process record (FreeBSD finds it by walking the
  * process's threads, which xnu does not let a kext do).
@@ -121,6 +125,8 @@ linux_alloc_current(struct thread *td, int flags)
 			ts->mm = mm;
 			/* macOS port: later threads of this process share it */
 			proc->p_lkpi_mm = mm;
+			/* macOS port: remember the Mach task, for driver workers that copy to this process */
+			nmx_xnu_mm_note_task(mm);
 			/* clear pointer to not free memory */
 			mm = NULL;
 		} else {
@@ -161,6 +167,7 @@ linux_mm_dtor(struct mm_struct *mm)
 
 	if (p != NULL && p->p_lkpi_mm == mm)
 		p->p_lkpi_mm = NULL;
+	nmx_xnu_mm_forget(mm);
 	uma_zfree(linux_mm_zone, mm);
 }
 

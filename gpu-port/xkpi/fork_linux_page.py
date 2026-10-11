@@ -62,15 +62,15 @@ linux_free_kmem(vm_offset_t addr, unsigned int order)
 
 replace_func("linux_get_user_pages_internal(vm_map_t map, unsigned long start, int nr_pages,\n", r'''
 /*
- * macOS port: pinning a process's own pages for the GPU (amdgpu "userptr" buffers) needs an IOMemoryDescriptor
- * on the user task; it is not part of this stage, so it is reported as unsupported and userspace falls back to
- * copying through driver-owned buffers.
+ * macOS port: pinning a process's pages for the GPU (userptr buffers, imported host memory) goes through the
+ * port's pin facility (nmx_user_pages_pin: an IOMemoryDescriptor wiring on the task, released by the last put_page).
+ * 'map' is unused: the calling process is the one whose pages are pinned.
  */
 static int
 linux_get_user_pages_internal(vm_map_t map, unsigned long start, int nr_pages,
     int write, struct page **pages)
 {
-	return (-EOPNOTSUPP);
+	return (nmx_user_pages_pin(NULL, start, nr_pages, write, pages));
 }
 ''')
 
@@ -80,7 +80,10 @@ get_user_pages_remote(struct task_struct *task, struct mm_struct *mm,
     unsigned long start, unsigned long nr_pages, unsigned int gup_flags,
     struct page **pages, struct vm_area_struct **vmas)
 {
-	return (-EOPNOTSUPP);
+	/* macOS port: another process's pages, found through its mm (nmx_mm.cpp) */
+	if (pages == NULL)
+		return (-EOPNOTSUPP);
+	return (nmx_user_pages_pin(mm, start, (int)nr_pages, (gup_flags & FOLL_WRITE) != 0, pages));
 }
 ''')
 
@@ -89,7 +92,9 @@ long
 lkpi_get_user_pages(unsigned long start, unsigned long nr_pages,
     unsigned int gup_flags, struct page **pages)
 {
-	return (-EOPNOTSUPP);
+	if (pages == NULL)
+		return (-EOPNOTSUPP);
+	return (nmx_user_pages_pin(NULL, start, (int)nr_pages, (gup_flags & FOLL_WRITE) != 0, pages));
 }
 ''')
 
