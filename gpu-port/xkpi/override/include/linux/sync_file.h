@@ -6,7 +6,9 @@
 #ifndef NMXKPI_LINUX_SYNC_FILE_H
 #define NMXKPI_LINUX_SYNC_FILE_H
 #include <linux/types.h>
+#include <linux/file.h>
 #include <linux/dma-fence.h>
+#include <linux/dma-fence-array.h>
 struct sync_file {
     struct linux_file *file;
     char user_name[32];

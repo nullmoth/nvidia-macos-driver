@@ -7,5 +7,7 @@ void kva_free(vm_offset_t addr, vm_size_t size);
 void *kmem_malloc(vm_size_t size, int flags);
 void kmem_free(void *addr, vm_size_t size);
 void *kmem_alloc_contig(vm_size_t size, int flags, vm_paddr_t low, vm_paddr_t high, u_long alignment, vm_paddr_t boundary, vm_memattr_t memattr);
+int vm_fault_disable_pagefaults(void);
+void vm_fault_enable_pagefaults(int save);
 void *kmem_alloc_attr(vm_size_t size, int flags, vm_paddr_t low, vm_paddr_t high, vm_memattr_t memattr);
 #endif

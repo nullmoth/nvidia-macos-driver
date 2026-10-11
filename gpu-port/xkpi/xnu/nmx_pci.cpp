@@ -183,6 +183,19 @@ extern "C" int nmx_xnu_pci_irq_setup(void *pci, int vector, void (*handler)(void
     return 0;
 }
 
+static IOReturn drain_action(OSObject *, void *, void *, void *, void *)
+{
+    return kIOReturnSuccess;
+}
+
+/* the work loop gate is held while a handler runs, so taking it once waits for that handler */
+extern "C" void nmx_xnu_pci_irq_drain(void *cookie)
+{
+    NMXIrq *irq = (NMXIrq *)cookie;
+    if (irq != nullptr && irq->wl != nullptr)
+        irq->wl->runAction(drain_action, irq);
+}
+
 extern "C" void nmx_xnu_pci_irq_enable(void *cookie, int on)
 {
     NMXIrq *irq = (NMXIrq *)cookie;

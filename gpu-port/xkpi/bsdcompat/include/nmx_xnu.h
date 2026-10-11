@@ -59,6 +59,8 @@ int nmx_xnu_pci_bar_info(void *pci, int bar_reg, uint64_t *phys, uint64_t *size,
 int nmx_xnu_pci_msi_count(void *pci);
 int nmx_xnu_pci_irq_setup(void *pci, int vector, void (*handler)(void *), void *arg, void **cookie);
 void nmx_xnu_pci_irq_teardown(void *cookie);
+/* returns once a handler running on this source has finished */
+void nmx_xnu_pci_irq_drain(void *cookie);
 void nmx_xnu_pci_irq_enable(void *cookie, int on);
 /* the IOPCIDevice at domain:bus:dev.func, or NULL */
 void *nmx_xnu_pci_find(uint32_t domain, uint8_t bus, uint8_t dev, uint8_t func);

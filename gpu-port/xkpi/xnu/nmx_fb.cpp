@@ -20,8 +20,8 @@ static IOPMPowerState kFbPowerStates[2] = {
     { kIOPMPowerStateVersion1, kIOPMDeviceUsable, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 
-class NMXAMDFB : public IOFramebuffer {
-    OSDeclareDefaultStructors(NMXAMDFB)
+class NMXGPUFB : public IOFramebuffer {
+    OSDeclareDefaultStructors(NMXGPUFB)
     void *fDev = nullptr;
     nmx_fb_info fInfo = {};
     uint32_t fRefresh16 = 60 << 16;
@@ -33,7 +33,7 @@ class NMXAMDFB : public IOFramebuffer {
     volatile bool fStopping = false;
 
     static void vblFire(thread_call_param_t p0, thread_call_param_t) {
-        NMXAMDFB *me = (NMXAMDFB *)p0;
+        NMXGPUFB *me = (NMXGPUFB *)p0;
         if (me->fStopping) return;
         if (me->fVbl.proc) me->fVbl.proc(me->fVbl.target, me->fVbl.ref);
         uint64_t period;
@@ -212,7 +212,7 @@ public:
         }
     }
 };
-OSDefineMetaClassAndStructors(NMXAMDFB, IOFramebuffer)
+OSDefineMetaClassAndStructors(NMXGPUFB, IOFramebuffer)
 
 /* lights the device's outputs and publishes them under 'gpu'; nullptr when there is nothing to show (reason logged) */
 IOService *nmx_fb_publish(IOService *gpu, void *dev)
@@ -223,7 +223,7 @@ IOService *nmx_fb_publish(IOService *gpu, void *dev)
         FBLOG("no framebuffer (%d)", err);
         return nullptr;
     }
-    NMXAMDFB *fb = OSTypeAlloc(NMXAMDFB);
+    NMXGPUFB *fb = OSTypeAlloc(NMXGPUFB);
     if (fb == nullptr || !fb->initWith(dev, info) || !fb->attach(gpu)) {
         OSSafeReleaseNULL(fb);
         nmx_fb_close(dev);

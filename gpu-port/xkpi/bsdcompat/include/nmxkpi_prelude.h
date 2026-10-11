@@ -51,6 +51,13 @@
 #include <sys/kauth.h>
 #undef scnprintf
 #undef vscnprintf
+/* mach/error.h names error subsystems err_vm, err_kern...; i915 uses err_vm as a goto label */
+#undef err_vm
+#undef err_kern
+#undef err_ipc
+#undef err_local
+#undef err_server
+#undef err_us
 
 /* xnu's strcpy macro deliberately takes three arguments to break two-argument callers; use the checked builtin */
 #undef strcpy

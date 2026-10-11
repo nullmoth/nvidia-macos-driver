@@ -23,6 +23,9 @@ for it in items:
     name = it.split("=")[0]
     if name in EXCLUDE or name in skip_arch or name in seen: continue
     seen.add(name)
+    # values are written for a shell (DRM_I915_FORCE_PROBE='"*"'); cc.sh passes flags as words, so drop the quoting
+    if "='" in it and it.endswith("'"):
+        it = it.replace("='", "=", 1)[:-1]
     flags.append("-DCONFIG_" + it)
 mk = (dk / "amd/amdgpu/Makefile").read_text()
 src = dk / "drivers/gpu/drm/amd"

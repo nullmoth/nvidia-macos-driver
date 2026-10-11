@@ -17,4 +17,6 @@
 typedef int driver_filter_t(void *);
 /* interrupt CPU affinity: xnu places device interrupts itself; the request is accepted and reported as done */
 int intr_setaffinity(int irq, int mode, const void *mask);
+/* waits until no handler of interrupt number 'irq' is running (LinuxKPI synchronize_irq) */
+void _intr_drain(int irq);
 typedef void driver_intr_t(void *);

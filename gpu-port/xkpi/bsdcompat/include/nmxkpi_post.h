@@ -6,3 +6,7 @@
 #undef __counted_by
 #define __counted_by(member)
 #endif
+
+/* xnu's stdbool makes 'bool' a macro (FreeBSD a typedef); a parameter type passed through one more macro layer then
+ * reaches LINUXKPI_PARAM_##type as _Bool (i915_param_named(x, bool, ...)) */
+#define LINUXKPI_PARAM__Bool LINUXKPI_PARAM_bool

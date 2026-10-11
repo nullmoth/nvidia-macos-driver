@@ -20,7 +20,8 @@ while read -r f; do
 done < srcs.all
 
 # DRM sources drm-kmod builds in other modules that the AMD driver also calls (MIT or GPL-2.0-or-MIT)
-EXTRA="drm_client.c drm_client_modeset.c drm_panel_orientation_quirks.c"
+# drm_mipi_dsi.c: i915 drives DSI panels through it (MIT)
+EXTRA="drm_client.c drm_client_modeset.c drm_panel_orientation_quirks.c drm_mipi_dsi.c"
 for e in $EXTRA; do echo "$K/drm-kmod/drivers/gpu/drm/$e" >> srcs.txt; done
 n=$(wc -l < srcs.txt | tr -d ' ')
 xargs -P 10 -n 1 ./one.sh < srcs.txt
