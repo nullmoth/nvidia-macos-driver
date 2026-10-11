@@ -54,12 +54,60 @@ static inline const char *nvmtl_pick_vk(const char *staged, const char *dev) {
 }
 #define NVMTL_LOADER nvmtl_pick_vk("/Library/GPUBundles/nvmtl/libvulkan.dylib", \
                                    "/Library/GPUBundles/nvmtl/libvulkan.dylib")
-#define NVMTL_ICD    nvmtl_pick_vk("/Library/GPUBundles/nvmtl/nvk_icd.json", \
-                                   "/Library/GPUBundles/nvmtl/nvk_icd.json")
+/*
+ * The Vulkan driver under this process's Metal device follows the GPU it runs on: NVK for NVIDIA (the NVAccel
+ * accelerator), RADV for AMD and ANV for Intel (NMXAccel, the accelerator for the GPUs NMXGPU drives).
+ */
+#include <IOKit/IOKitLib.h>
+static uint16_t g_vendor;
+static uint16_t nvmtl_pci_vendor_of(io_service_t accel)
+{
+    io_registry_entry_t pci = 0; uint16_t v = 0;
+    if (IORegistryEntryGetParentEntry(accel, kIOServicePlane, &pci) != KERN_SUCCESS) return 0;
+    CFTypeRef d = IORegistryEntryCreateCFProperty(pci, CFSTR("vendor-id"), kCFAllocatorDefault, 0);
+    if (d && CFGetTypeID(d) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)d) >= 2) {
+        const UInt8 *b = CFDataGetBytePtr((CFDataRef)d); v = (uint16_t)(b[0] | (b[1] << 8));
+    }
+    if (d) CFRelease(d);
+    IOObjectRelease(pci);
+    return v;
+}
+/* the vendor of the accelerator a Metal device was made on (0 if the port is neither of ours); the first one wins */
+uint16_t nvmtl_vk_set_accelerator(mach_port_t accel)
+{
+    uint16_t v = 0;
+    if (accel && IOObjectConformsTo(accel, "NMXAccel")) { v = nvmtl_pci_vendor_of(accel); if (v != 0x1002 && v != 0x8086) v = 0; }
+    else if (accel && IOObjectConformsTo(accel, "NVAccel")) v = 0x10de;
+    if (v && !g_vendor) g_vendor = v;
+    return v;
+}
+/* a process that starts Vulkan before Metal makes a device: NVIDIA when its accelerator runs, else the AMD/Intel one */
+uint16_t nvmtl_vk_vendor(void)
+{
+    if (g_vendor) return g_vendor;
+    io_service_t s = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"));
+    if (s) { IOObjectRelease(s); g_vendor = 0x10de; return g_vendor; }
+    s = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NMXAccel"));
+    uint16_t v = s ? nvmtl_pci_vendor_of(s) : 0;
+    if (s) IOObjectRelease(s);
+    g_vendor = (v == 0x1002 || v == 0x8086) ? v : 0x10de;
+    return g_vendor;
+}
+static const char *nvmtl_vk_icd_json(void) {
+    switch (nvmtl_vk_vendor()) {
+    case 0x1002: return "/Library/GPUBundles/nvmtl/radeon_icd.json";
+    case 0x8086: return "/Library/GPUBundles/nvmtl/intel_icd.json";
+    default:     return "/Library/GPUBundles/nvmtl/nvk_icd.json";
+    }
+}
+#define NVMTL_ICD    nvmtl_vk_icd_json()
 static inline const char *nvmtl_icd_lib_path(void) {
     const char *e = getenv("NVMTL_ICD_LIB"); if (e && access(e, R_OK) == 0) return e;
-    return nvmtl_pick_vk("/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib",
-                         "/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib");
+    switch (nvmtl_vk_vendor()) {
+    case 0x1002: return "/Library/GPUBundles/nvmtl/libvulkan_radeon.dylib";
+    case 0x8086: return "/Library/GPUBundles/nvmtl/libvulkan_intel.dylib";
+    default:     return "/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib";
+    }
 }
 #define NVMTL_ICD_LIB nvmtl_icd_lib_path()
 
@@ -1695,6 +1743,8 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
 static int nvmtl_gpu_headless(void)
 {
     static int h = -1;
+    /* AMD/Intel (NMXAccel): WindowServer draws into NMXGPU's framebuffer, so this device is always an app-only GPU */
+    if (h < 0 && nvmtl_vk_vendor() != 0x10de) { h = 1; nvlog("AMD/Intel GPU: IOSurfaces are copied out to system memory"); }
     if (h < 0) { int v = 0; size_t n = sizeof v; h = sysctlbyname("debug.nvaccel_headless", &v, &n, NULL, 0) == 0 && v;
                  if (h) nvlog("headless GPU: the display belongs to another GPU - IOSurfaces are copied out to system memory"); }
     return h;
@@ -3856,6 +3906,7 @@ int nvmtl_vk_cmd_dispatch_sass(nvk_cmdbuf *c,
     uint32_t grid[3];
 
     if (!c || !c->cb || !sass || !sass_len) return -1;
+    if (nvmtl_vk_vendor() != 0x10de) return -3;     /* NVIDIA machine code: the caller dispatches the SPIR-V instead */
     if (nparams > 16) { nvlog("sass dispatch: %u parameters is more than 16 — REFUSED", nparams); return -2; }
 
     if (!looked) {

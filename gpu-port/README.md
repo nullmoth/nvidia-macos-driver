@@ -61,6 +61,19 @@ into `NMXGPU.kext`.
 - **Opt-in only, per vendor**: the kext declines every AMD and Intel GPU unless the boot argument `nmxamd=1` /
   `nmxintel=1` or the device property `nullmoth-gpu` is set. Taking a GPU that drives the boot display resets its display engine.
 
+## Metal on AMD and Intel GPUs
+
+- **Accelerator**: `kexts/NVRM/accel/nvrm-accel.cpp` built with `-DNMX_ACCEL` (`build/nmxaccel_build.sh`) is NMXAccel: the
+  same IOAcceleratorFamily2 accelerator under its own class names, matched to AMD/Intel display functions and started only
+  on a device NMXGPU has claimed (`nmxgpu-claimed`). It runs the way an NVIDIA GPU without a display does: a Metal device
+  for apps, with frames copied into the IOSurfaces WindowServer reads from NMXGPU's framebuffer.
+- **Plugin**: the Metal plugin reads the vendor of the accelerator it was made on and loads RADV (AMD) or ANV (Intel, i915
+  and xe) instead of NVK; NVIDIA-only paths (SASS dispatch, NVDEC/NVENC, family-VRAM surface sharing) stay off there.
+  One process runs Metal on one vendor's GPU.
+- **Userland**: Mesa RADV/ANV with libdrm for Darwin (`patches/`), installed beside NVK in `/Library/GPUBundles/nvmtl`
+  only when the AMD/Intel driver is turned on. libdrm finds each GPU through `DRM_IOCTL_GET_PCIINFO`, which the port
+  answers at the node (`override/src/nmx_drm_os.c`).
+
 Not done yet:
 
 - It has not been loaded on hardware. Start-up runs all SYSINITs, then the driver probes the device.

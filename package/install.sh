@@ -185,6 +185,10 @@ INSTALLING=1
 for k in $KEXTS; do rm -rf "$EXT/$k.kext" && ditto "$(kpath $k)" "$EXT/$k.kext" || die "copy $k (restore from $BK)"; done
 # both NVAccel builds stay on disk, so the first start after a macOS upgrade can switch to the matching one
 mkdir -p /Library/NullMoth && rm -rf /Library/NullMoth/kexts && ditto "$HERE/Library/NullMoth/kexts" /Library/NullMoth/kexts || die "copy per-macOS accelerators (restore from $BK)"
+# the AMD/Intel Vulkan drivers under the Metal plugin (RADV, ANV, libdrm), cached for setup --gpu-test like NMXGPU
+if [ -d "$HERE/Library/NullMoth/gpu-userland" ]; then
+  rm -rf /Library/NullMoth/gpu-userland && ditto "$HERE/Library/NullMoth/gpu-userland" /Library/NullMoth/gpu-userland || die "copy the AMD/Intel Vulkan drivers (restore from $BK)"
+fi
 for target in 15 26; do
   dir=/Library/NullMoth/kexts/$target
   [ -f "$dir/NVAccel.kext/Contents/MacOS/NVAccel" ] && [ -f "$dir/NVAccel.kext/Contents/Info.plist" ] || die "missing macOS $target accelerator (restore from $BK)"
@@ -195,6 +199,11 @@ chown -R root:wheel /Library/NullMoth/kexts && chmod -R go-w /Library/NullMoth/k
 if [ -d "$EXT/NMXGPU.kext" ] && [ -d /Library/NullMoth/kexts/15/NMXGPU.kext ]; then
   rm -rf "$EXT/NMXGPU.kext" && ditto /Library/NullMoth/kexts/15/NMXGPU.kext "$EXT/NMXGPU.kext" && chown -R root:wheel "$EXT/NMXGPU.kext" \
     && chmod -R 755 "$EXT/NMXGPU.kext" || die "refresh the AMD/Intel GPU driver (restore from $BK)"
+  # and its Metal accelerator
+  if [ -d /Library/NullMoth/kexts/15/NMXAccel.kext ]; then
+    rm -rf "$EXT/NMXAccel.kext" && ditto /Library/NullMoth/kexts/15/NMXAccel.kext "$EXT/NMXAccel.kext" && chown -R root:wheel "$EXT/NMXAccel.kext" \
+      && chmod -R 755 "$EXT/NMXAccel.kext" || die "refresh the AMD/Intel Metal accelerator (restore from $BK)"
+  fi
 fi
 echo "$MAJ" > /Library/NullMoth/os-major || die "record selected OS"
 mkdir -p "$GB" "$FW" || die "create bundle and firmware directories"
@@ -207,6 +216,10 @@ for c in aircache spvcache; do
   [ ! -d "$GB/nvmtl/$c" ] || { mv "$GB/nvmtl/$c" "$T/keep-$c" && CACHEKEPT="$CACHEKEPT $c" || die "stash $GB/nvmtl/$c"; }
 done
 for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl; do rm -rf "$GB/$b" && ditto "$HERE/Library/GPUBundles/$b" "$GB/$b" || die "copy $b (restore from $BK)"; done
+# nvmtl was just replaced wholesale: with the AMD/Intel driver on, its Vulkan drivers go back in beside NVK
+if [ -d "$EXT/NMXGPU.kext" ] && [ -d /Library/NullMoth/gpu-userland ]; then
+  ditto /Library/NullMoth/gpu-userland "$GB/nvmtl" || die "copy the AMD/Intel Vulkan drivers (restore from $BK)"
+fi
 cp "$HERE/Library/GPUBundles/nvmtl-allow.txt" "$GB/" || die "copy bundle allow list"
 ditto "$HERE/Users/Shared/nvfw" "$FW" || die "copy firmware"
 for k in $KEXTS; do chown -R root:wheel "$EXT/$k.kext" && chmod -R 755 "$EXT/$k.kext" || die "permissions for $k"; done
