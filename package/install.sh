@@ -189,10 +189,22 @@ mkdir -p /Library/NullMoth && rm -rf /Library/NullMoth/kexts && ditto "$HERE/Lib
 if [ -d "$HERE/Library/NullMoth/gpu-userland" ]; then
   rm -rf /Library/NullMoth/gpu-userland && ditto "$HERE/Library/NullMoth/gpu-userland" /Library/NullMoth/gpu-userland || die "copy the AMD/Intel Vulkan drivers (restore from $BK)"
 fi
-# the NPU userland (Level Zero loader + Intel's NPU user driver), loaded from /Library/NullMoth/npu/lib by apps
+# the NPU userland (Level Zero + Intel's NPU driver and compiler, OpenVINO, AMD's XRT), loaded from /Library/NullMoth/npu
+# by apps. AMD's validation archives in xrt/share/amdxdna/bins were fetched by setup for this Mac's NPU and are not in
+# the package, so they are carried over the replacement.
 if [ -d "$HERE/Library/NullMoth/npu" ]; then
+  NPUKEEP=""
+  if [ -d /Library/NullMoth/npu/xrt/share/amdxdna/bins ]; then
+    NPUKEEP=$(mktemp -d /private/var/tmp/nullmoth-npu-bins.XXXXXX) && ditto /Library/NullMoth/npu/xrt/share/amdxdna/bins "$NPUKEEP" \
+      || die "keep the NPU validation archives (restore from $BK)"
+  fi
   rm -rf /Library/NullMoth/npu && ditto "$HERE/Library/NullMoth/npu" /Library/NullMoth/npu && chmod -R go-w,a+rX /Library/NullMoth/npu \
     || die "copy the NPU userland (restore from $BK)"
+  if [ -n "$NPUKEEP" ]; then
+    mkdir -p /Library/NullMoth/npu/xrt/share/amdxdna && ditto "$NPUKEEP" /Library/NullMoth/npu/xrt/share/amdxdna/bins \
+      && chmod -R go-w,a+rX /Library/NullMoth/npu/xrt/share/amdxdna/bins && rm -rf "$NPUKEEP" \
+      || die "restore the NPU validation archives from $NPUKEEP"
+  fi
 fi
 for target in 15 26; do
   dir=/Library/NullMoth/kexts/$target
