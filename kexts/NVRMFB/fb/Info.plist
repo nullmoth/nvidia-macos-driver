@@ -29,13 +29,20 @@
 		</dict>
 		<!-- Retires Apple's IONDRVFramebuffer (.Display_boot, probe 20000) so only ONE
 		     framebuffer publishes BAR1+0. With two of them the blank extended desktop
-		     overwrote the real one in the same physical memory.-->
+		     overwrote the real one in the same physical memory.
+		     NVIDIA only: the same vendor and display-class match as NVRM.kext. WAS: IONameMatch
+		     display alone, which IOPCIFamily gives EVERY display-class PCI device, so the claim
+		     also held the Intel GPU's slot; on a muxless laptop whose panel runs on the Intel
+		     GPU's firmware framebuffer no IOFramebuffer published at all (#119).
+		     IOPCIPrimaryMatch, not IOPCIMatch: IOPCIMatch also accepts the subsystem vendor.-->
 		<key>NVRMFBClaim</key>
 		<dict>
 			<key>CFBundleIdentifier</key><string>com.nullmoth.NVRMFB</string>
 			<key>IOClass</key><string>NVRMFBClaim</string>
 			<key>IOProviderClass</key><string>IOPCIDevice</string>
 			<key>IONameMatch</key><string>display</string>
+			<key>IOPCIPrimaryMatch</key><string>0x000010de&amp;0x0000ffff</string>
+			<key>IOPCIClassMatch</key><string>0x03000000&amp;0xff000000</string>
 			<key>IOMatchCategory</key><string>IOFramebuffer</string>
 			<key>IOProbeScore</key><integer>30000</integer>
 		</dict>
