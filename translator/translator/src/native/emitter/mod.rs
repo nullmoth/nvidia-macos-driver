@@ -2603,7 +2603,7 @@ impl Emitter {
             })
             .map(|function| function.name.clone())
             .collect::<Vec<_>>();
-        for f in functions {
+        for f in raw_cursor_callees_after_callers(&self.ir, functions) {
             attempt!(self.emit_function(&f));
         }
         let mut retained_type_capabilities = self
@@ -3130,4 +3130,65 @@ fn padding_widened_vector(declared: &LlType, call: &LlType) -> bool {
         }
         _ => false,
     }
+}
+
+/// A helper whose pointer parameter is a raw buffer cursor learns the caller's constant byte offset
+/// only when the call is emitted (`raw_device_call_arg_id` records it in `raw_call_param_offsets`,
+/// and the parameter set-up in `emit_function` reads it). Emitted first, the helper reads that
+/// parameter at offset 0. CoreImage's stitched libraries define their helpers before the kernel, so
+/// a multi-block helper handed `buffer0 + 80` (the sampler transform of a `coreimage::Sampler`)
+/// loaded its matrix from bytes 0..31: `ci_lanczosDownH` / `ci_lanczosDownV` came out empty or
+/// smeared, and with them the small graphic icons IconServices shrinks through
+/// CILanczosScaleTransform (System Settings' sidebar). Single-block helpers were spared only
+/// because they are inlined as text first. Such helpers are now emitted after every function that
+/// calls them; the relative order of all other functions is unchanged, and a call cycle falls back
+/// to source order.
+fn raw_cursor_callees_after_callers(ir: &LlModule, functions: Vec<LlFunction>) -> Vec<LlFunction> {
+    let late: HashSet<&str> = ir
+        .raw_buffer_params
+        .iter()
+        .map(|(function, _)| function.as_str())
+        .collect();
+    if late.is_empty() {
+        return functions;
+    }
+    let count = functions.len();
+    let mut callers: Vec<HashSet<usize>> = vec![HashSet::new(); count];
+    for (caller, function) in functions.iter().enumerate() {
+        for inst in function.carrier_insts() {
+            let Some(call) = inst.call().as_deref() else {
+                continue;
+            };
+            if !late.contains(call.callee.as_str()) {
+                continue;
+            }
+            if let Some(callee) = functions.iter().position(|f| f.name == call.callee) {
+                if callee != caller {
+                    callers[callee].insert(caller);
+                }
+            }
+        }
+    }
+    if callers
+        .iter()
+        .enumerate()
+        .all(|(callee, set)| set.iter().all(|&caller| caller < callee))
+    {
+        return functions;
+    }
+    let mut emitted = vec![false; count];
+    let mut order = Vec::with_capacity(count);
+    while order.len() < count {
+        let next = (0..count)
+            .find(|&i| !emitted[i] && callers[i].iter().all(|&caller| emitted[caller]))
+            .or_else(|| (0..count).find(|&i| !emitted[i]))
+            .expect("an unemitted function remains");
+        emitted[next] = true;
+        order.push(next);
+    }
+    let mut slots: Vec<Option<LlFunction>> = functions.into_iter().map(Some).collect();
+    order
+        .into_iter()
+        .map(|i| slots[i].take().expect("each function once"))
+        .collect()
 }
