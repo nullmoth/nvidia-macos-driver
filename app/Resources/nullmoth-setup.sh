@@ -253,6 +253,84 @@ if [ -n "$COLLECT" ]; then
     | tail -n 2000 > "$COLLECT/driver-update-log.txt"
   log_status=${PIPESTATUS[0]}; echo "log show exit: $log_status" >> "$COLLECT/driver-update-log.txt"
   { echo; echo "== current update message ring"; dmesg 2>&1 | grep -iE 'apfs|MobileSoftwareUpdate|softwareupdated' | tail -n 1000; } >> "$COLLECT/driver-update-log.txt"
+  # NPUs (Intel NPU, AMD Ryzen AI): every layer from the PCI function up to the runtimes, so one report names the layer
+  # that failed. The runtime probes run as the logged-in user (apps do; root would also hide node-permission faults
+  # and make XRT ignore its debug ini) with their own debug logging on, each bounded in time.
+  npu_run() {  # <seconds> <command...>: runs it as the console user; kills it past the bound and says so
+    local secs=$1 p w rc; shift
+    if [ -z "${console_user:-}" ] || [ "$console_user" = root ] || [ "$console_user" = loginwindow ]; then
+      echo "(skipped: nobody is logged in to run it as)"; return 0
+    fi
+    sudo -u "$console_user" "$@" 2>&1 & p=$!
+    ( sleep "$secs"; kill -9 "$p" 2>/dev/null && echo "(killed after ${secs} s)" ) & w=$!
+    wait "$p"; rc=$?
+    kill "$w" 2>/dev/null; wait "$w" 2>/dev/null
+    echo "(exit $rc)"
+  }
+  console_user=$(stat -f %Su /dev/console 2>/dev/null)
+  NPUDIR=/Library/NullMoth/npu
+  {
+    echo "== NPU PCI functions (Intel class 12xxxx, AMD signal-processing 1180xx) and their properties"
+    # ioreg lists a device's properties alphabetically (class-code before vendor-id), so each device is judged at its end
+    ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | LC_ALL=C awk '
+      function out() { if ((cls=="12" && v=="intel") || (cls=="1180" && v=="amd")) print block "\n" }
+      /\+-o / { out(); block=$0; cls=""; v=""; next }
+      /"vendor-id" = <8680/ { v="intel" } /"vendor-id" = <2210/ { v="amd" }
+      /"class-code" = <[0-9a-f][0-9a-f][0-9a-f][0-9a-f]1200>/ { cls="12" }
+      /"class-code" = <[0-9a-f][0-9a-f]801100>/ { cls="1180" }
+      /"(vendor-id|device-id|subsystem-vendor-id|subsystem-id|revision-id|class-code|IOName|IOPCIExpressLinkStatus|IOPCIResourced|assigned-addresses|acpi-path)"/ { block=block "\n" $0 }
+      END { out() }'
+    echo; echo "== what attached to them (NMXNPU is the NPU driver)"
+    ioreg -r -c NMXNPU -l -w0 2>/dev/null | head -60 || true
+    echo; echo "== NPU boot arguments"; nvram boot-args 2>/dev/null | tr ' \t' '\n\n' | grep -E 'nmx|npu' || echo "(none)"
+    echo; echo "== NMXNPU kext: loaded, in the auxiliary collection, installed file"
+    kmutil showloaded --list-only 2>/dev/null | grep -i nmxnpu || echo "(not loaded)"
+    kmutil inspect -a x86_64 -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -i nmxnpu || echo "(not in the auxiliary collection)"
+    [ ! -f /Library/Extensions/NMXNPU.kext/Contents/MacOS/NMXNPU ] || shasum -a 256 /Library/Extensions/NMXNPU.kext/Contents/MacOS/NMXNPU
+    echo; echo "== NPU firmware"; ls -la /Library/NullMoth/firmware/intel/vpu /Library/NullMoth/firmware/amdnpu/* 2>&1 | head -40
+    echo; echo "== device nodes"; ls -la /dev/accel 2>&1
+    echo; echo "== each node: driver, PCI identity, driver attributes (nmx-npu-probe)"
+    if [ -x "$NPUDIR/bin/nmx-npu-probe" ]; then npu_run 20 "$NPUDIR/bin/nmx-npu-probe"; else echo "(nmx-npu-probe not installed)"; fi
+    echo; echo "== NPU userland installed (sha256)"
+    if [ -d "$NPUDIR" ]; then find "$NPUDIR" -type f ! -name '*.a' -exec shasum -a 256 {} + 2>&1 | sed "s|$NPUDIR/||" | head -200; ls -la "$NPUDIR/xrt/share/amdxdna/bins" 2>&1
+    else echo "(no $NPUDIR)"; fi
+    echo; echo "== Intel: the NPU compiler on a small network (Meteor/Arrow Lake 3720, Lunar Lake 4000; needs no NPU)"
+    if [ -x "$NPUDIR/bin/nmx-npu-compile-check" ]; then npu_run 300 "$NPUDIR/bin/nmx-npu-compile-check"
+    else echo "(nmx-npu-compile-check not installed)"; fi
+    echo; echo "== Intel: OpenVINO devices with Level Zero, the NPU driver and the NPU plugin logging"
+    if [ -x "$NPUDIR/openvino/bin/hello_query_device" ]; then
+      npu_run 90 env ZE_ENABLE_LOADER_DEBUG_TRACE=1 ZE_INTEL_NPU_LOGLEVEL=INFO OV_NPU_LOG_LEVEL=LOG_INFO \
+        "$NPUDIR/openvino/bin/hello_query_device"
+    else echo "(OpenVINO not installed)"; fi
+    echo; echo "== AMD: xrt-smi examine, then examine and validate on each AMD NPU, with XRT's runtime log on"
+    if [ -x "$NPUDIR/xrt/bin/xrt-smi" ]; then
+      ini=$(sudo -u "$console_user" mktemp -d /tmp/nullmoth-xrt.XXXXXX 2>/dev/null)/xrt.ini
+      if [ -n "$console_user" ] && [ "$ini" != /xrt.ini ]; then
+        printf '[Runtime]\nverbosity=7\nruntime_log=console\n' | sudo -u "$console_user" tee "$ini" > /dev/null
+      fi
+      npu_run 60 env XRT_INI_PATH="$ini" "$NPUDIR/xrt/bin/xrt-smi" examine
+      for bdf in $("$NPUDIR/bin/nmx-npu-probe" 2>/dev/null | awk '/^  driver amdxdna/ {a=1} a && /^  pci / {print $2; a=0}'); do
+        echo; echo "-- examine -d $bdf -r all"; npu_run 60 env XRT_INI_PATH="$ini" "$NPUDIR/xrt/bin/xrt-smi" examine -d "$bdf" -r all
+        echo; echo "-- validate -d $bdf"; npu_run 240 env XRT_INI_PATH="$ini" "$NPUDIR/xrt/bin/xrt-smi" validate -d "$bdf"
+      done
+      [ "$ini" = /xrt.ini ] || rm -rf "$(dirname "$ini")"
+    else echo "(XRT not installed)"; fi
+    echo; echo "== NPU kernel messages since this boot"
+    boot=$(sysctl -n kern.boottime | sed -E 's/.*sec = ([0-9]+),.*/\1/')
+    log show --start "$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')" --style compact \
+      --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "NMXNPU" OR eventMessage CONTAINS[c] "ivpu" OR eventMessage CONTAINS[c] "intel_vpu" OR eventMessage CONTAINS[c] "amdxdna" OR eventMessage CONTAINS[c] "xdna" OR eventMessage CONTAINS "NullMoth drm")' 2>&1 | head -n 4000
+    echo; echo "== NPU messages in the kernel ring"; dmesg 2>&1 | grep -iE 'nmxnpu|ivpu|intel_vpu|amdxdna|xdna|nullmoth drm' | tail -n 1000
+    echo; echo "== app messages from the NPU runtimes, last 3 days"
+    log show --last 3d --style compact --predicate 'process != "kernel" AND (eventMessage CONTAINS[c] "ze_intel_npu" OR eventMessage CONTAINS[c] "level_zero" OR eventMessage CONTAINS[c] "openvino" OR eventMessage CONTAINS[c] "xrt" OR eventMessage CONTAINS[c] "amdxdna")' 2>&1 | tail -n 2000
+  } > "$COLLECT/npu.txt" 2>&1
+  # crash reports of processes that had the NPU runtimes loaded (newest three)
+  n_npu=0
+  for ips in $(ls -t /Library/Logs/DiagnosticReports/*.ips /Users/*/Library/Logs/DiagnosticReports/*.ips 2>/dev/null | head -n 200); do
+    [ "$n_npu" -lt 3 ] || break
+    grep -q "/Library/NullMoth/npu/" "$ips" 2>/dev/null || continue
+    # the uploader takes only plain file names
+    cp "$ips" "$COLLECT/npu-crash-$(basename "$ips" | LC_ALL=C tr -c 'A-Za-z0-9._\n-' '_')" && n_npu=$((n_npu+1))
+  done
   # Release builds report failures to syslog rather than nvmtl.log. Debug builds may use either
   # the system temp directory or the console user's temp directory.
   log show --last 3d --style compact --predicate 'process != "kernel" AND (eventMessage CONTAINS[c] "NVMTL" OR eventMessage CONTAINS[c] "NullMoth" OR eventMessage CONTAINS[c] "nvk-reason")' 2>&1 \
@@ -704,6 +782,26 @@ if [ -n "${GPUTEST:-}" ]; then
     if [ -n "$NPUS" ] && [ -d "$GN" ]; then
       rm -rf "$EXT/NMXNPU.kext" && ditto "$GN" "$EXT/NMXNPU.kext" && chown -R root:wheel "$EXT/NMXNPU.kext" && chmod -R 755 "$EXT/NMXNPU.kext" || stop "cannot copy NMXNPU.kext"
     fi
+    # AMD NPU: the validation archive xrt-smi validate runs on this NPU's family (AMD's VTD, pinned, every file checked).
+    # Only the family present is fetched (the three together are 150 MB). Without it the NPU still works, only
+    # validate cannot, so a failed download is a note, not a stop.
+    AMDNPU=$(ioreg -r -c IOPCIDevice -l -w0 | LC_ALL=C awk -F'<|>' 'function out(){if (c=="11" && s=="80" && v=="1022") print d}
+      /\+-o /{out(); c=""; s=""; v=""; d=""} /"vendor-id" =/{v=substr($2,3,2) substr($2,1,2)} /"device-id" =/{d=substr($2,3,2) substr($2,1,2)}
+      /"class-code" =/{c=substr($2,5,2); s=substr($2,3,2)} END{out()}' | sort -u)
+    VT="$(dirname "$MAN")/nullmoth-npu-tests.txt"
+    VB=/Library/NullMoth/npu/xrt/share/amdxdna/bins
+    if [ -n "$AMDNPU" ] && [ -d "$EXT/NMXNPU.kext" ] && [ -f "$VT" ]; then
+      VC=$(awk 'NR==2{print}' "$VT" | grep -oE 'VTD/[0-9a-f]{40}' | cut -d/ -f2)
+      for d in $AMDNPU; do case $d in 1502) echo phx;; 17f0) echo strx;; 17f1|17f2|17f3|1b0a|1b0b|1b0c) echo npu3;; esac; done | sort -u | while read -r fam; do
+        grep -v '^#' "$VT" | awk -v f="$fam" '$2==f || $2=="license"' | while read -r sum _ p; do
+          case "$p" in *..*|/*) continue;; esac
+          if mkdir -p "$VB" && curl -fsSL --retry 3 -o "$VB/.dl" "https://raw.githubusercontent.com/Xilinx/VTD/$VC/$p" \
+             && [ "$(shasum -a 256 "$VB/.dl" | cut -d' ' -f1)" = "$sum" ]; then mv -f "$VB/.dl" "$VB/$(basename "$p")"
+          else rm -f "$VB/.dl"; note "could not fetch the NPU validation archive $p (xrt-smi validate needs it; the NPU works without it)"; fi
+        done
+      done
+      [ ! -d "$VB" ] || { chown -R root:wheel "$VB"; chmod -R go-w,a+rX "$VB"; }
+    fi
     if ! auxkc || ! kmutil inspect -a x86_64 -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -q com.nullmoth.NMXGPU \
        || { [ -d "$EXT/NMXAccel.kext" ] && ! kmutil inspect -a x86_64 -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -q com.nullmoth.NMXAccel; } \
        || { [ -d "$EXT/NMXNPU.kext" ] && ! kmutil inspect -a x86_64 -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -q com.nullmoth.NMXNPU; }; then
@@ -718,7 +816,7 @@ if [ -n "${GPUTEST:-}" ]; then
     fi
     # the AMD/Intel Vulkan drivers come out of nvmtl by the names the cache holds; NVK's files are never touched
     if [ -d "$GU" ]; then (cd "$GU" && find . -type f) | while read -r f; do rm -f "$GB/nvmtl/${f#./}"; done; rmdir "$GB/nvmtl/share/libdrm" "$GB/nvmtl/share" 2>/dev/null; fi
-    rm -rf "$GFW"
+    rm -rf "$GFW" /Library/NullMoth/npu/xrt/share/amdxdna/bins
   fi
   plutil -lint "$C" >/dev/null || { cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; }
   ok "AMD/Intel GPU driver $GPUTEST - takes effect at the next restart"; cleanup; echo "RESULT ok"; exit 0

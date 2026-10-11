@@ -1,0 +1,7 @@
+# VTD fa945e489497397269cbb912e3e7cce33d1935ff: AMD's NPU validation archives that xrt-smi validate runs (redistributable unmodified; LICENSE.vtd)
+# <sha256> <family> <path>; fetched from https://raw.githubusercontent.com/Xilinx/VTD/fa945e489497397269cbb912e3e7cce33d1935ff/<path>
+# family: phx (1022:1502), strx (1022:17f0), npu3 (1022:17f1 17f2 17f3 1b0a 1b0b 1b0c); license comes with any of them
+4ee9886599d9d906068a59e71386a8cba62132bfb52e55a695bbc382297ef067 phx archive/phx/xrt_smi_phx.a
+1d3a9b2195619c40e5e9303d61a0c399385ba178cff29482d8d3aa861f4af35d strx archive/strx/xrt_smi_strx.a
+583e2c6301e6bc1531baf23a0d1fd34f169e1729db6d6f4c458d2e696f956ad5 npu3 archive/npu3/xrt_smi_npu3.a
+de9addc2ce528b7c2b8f9dd4edb7c029cc1a55f2f221aaf15179dd3a22251d41 license LICENSE.vtd

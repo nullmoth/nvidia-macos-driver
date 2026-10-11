@@ -92,4 +92,13 @@ edit("umd/vpu_driver/source/os_interface/os_interface_imp.cpp", [
      "#endif\n"
      "    return munmap(addr, size);\n}\n"),
 ])
+# the driver compiler beside the UMD: Linux libopenvino_intel_npu_compiler_loader.so, macOS .dylib
+edit("umd/level_zero_driver/source/ext/vcl_symbols.hpp", [
+    ('                                               "libopenvino_intel_npu_compiler_loader.so"};\n',
+     '#ifdef __APPLE__\n'
+     '                                               "libopenvino_intel_npu_compiler_loader.dylib"};\n'
+     '#else\n'
+     '                                               "libopenvino_intel_npu_compiler_loader.so"};\n'
+     '#endif\n'),
+])
 print("npu umd patched")
