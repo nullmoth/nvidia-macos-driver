@@ -863,7 +863,7 @@ if [ "$LOGO" != off ] && [ -f "$LOGOSRC" ]; then
   if [ -z "$li" ]; then NEEDLOGO=1; echo "CHANGE boot logo: add the NullMoth boot logo (turn it off in the app, or with -nmlogooff)"
   else
     [ "$(get UEFI.Drivers.$li.Enabled)" = true ] || { echo "CHANGE boot logo: turn the NullMoth boot logo on"; EDITS+=("UEFI.Drivers.$li.Enabled|-bool|true"); }
-    cmp -s "$LOGOSRC" "$(dirname "$C")/Drivers/$LOGO_FILE" || REFRESHLOGO=1
+    cmp -s "$LOGOSRC" "$(dirname "$C")/Drivers/$LOGO_FILE" || { REFRESHLOGO=1; echo "CHANGE boot logo: update the NullMoth boot logo driver to this version"; }
   fi
 elif [ "$LOGO" = off ] && [ -n "$li" ] && [ "$(get UEFI.Drivers.$li.Enabled)" = true ]; then
   echo "CHANGE boot logo: turn the NullMoth boot logo off (the Apple logo shows again)"; EDITS+=("UEFI.Drivers.$li.Enabled|-bool|false")
