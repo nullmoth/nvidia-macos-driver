@@ -4665,7 +4665,14 @@ int nvmtl_vk_cmd_empty_pass(nvk_cmdbuf *c, const nvk_pass *ps)
 int nvmtl_vk_cmd_begin_render(nvk_cmdbuf *c, nvk_image *img, nvk_pipeline *p, const float clear[4])
 { return nvmtl_vk_cmd_begin_render_ex(c, img, p, clear, 0); }
 void nvmtl_vk_cmd_set_viewport(nvk_cmdbuf *c, float x, float y, float w, float h, float zn, float zf)
-{ VkViewport vp = { x, y + h, w, -h, zn, zf }; pvkCmdSetViewport(c->cb, 0, 1, &vp); }
+{
+    /* Vulkan requires minDepth/maxDepth in [0,1] and NVK asserts it (nvk_emit_viewport "0.0 <= zmin && zmin <= 1.0");
+       Apple GPUs take any value. 1.10 crash reports (10-11, RTX 4060): mediaanalysisd's Live Text draw aborted there on
+       every run. The !(>=) form also sends NaN to Metal's defaults, 0 and 1. */
+    if (!(zn >= 0.0f)) zn = 0.0f; else if (zn > 1.0f) zn = 1.0f;
+    if (!(zf >= 0.0f)) zf = isnan(zf) ? 1.0f : 0.0f; else if (zf > 1.0f) zf = 1.0f;
+    VkViewport vp = { x, y + h, w, -h, zn, zf }; pvkCmdSetViewport(c->cb, 0, 1, &vp);
+}
 static void nvmtl_vk_zero_dummies(void)
 {
     static int done;
