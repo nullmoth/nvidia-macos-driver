@@ -190,6 +190,9 @@ static int nvmtl_skip_empty_on(void) {
     _executionDone = YES;
     [_completionCondition unlock];
     [_parts removeAllObjects];
+    // Applications may retain completed command buffers. Pending overwrite
+    // bookkeeping must not keep their IOSurfaces and VRAM alive indefinitely.
+    [_surfOverwrites removeAllObjects]; _surfOverwrites = nil;
     if (!error) nvmtl_res2_cb_done(self);
     [self nvmtlReleaseCapacity];
 }
