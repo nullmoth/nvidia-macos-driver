@@ -245,7 +245,12 @@ if [ -n "$COLLECT" ]; then
     echo "== kernel messages before this boot (started $(date -r "$boot" '+%Y-%m-%d %H:%M:%S'))"
     log show --start "$(date -r $((boot - 259200)) '+%Y-%m-%d %H:%M:%S')" --end "$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')" \
       --style compact --predicate 'process == "kernel"' 2>&1 \
-      | grep -v -e 'NVRM-fb: kapi event type 5$' -e 'NVRM-xnu: >os_map_kernel_space' -e 'NVRM-fb: flipToMemory #' | tail -n 8000
+      | grep -v -e 'NVRM-fb: kapi event type 5$' -e 'NVRM-xnu: >os_map_kernel_space' -e 'NVRM-fb: flipToMemory #' \
+      | awk -v end="$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')" '
+          # log show runs past --end (measured 10-10: this file ended in the current boot), so cut at the boot time here;
+          # a line without a timestamp belongs to the line above it
+          /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] / { keep = ($1 " " substr($2, 1, 8)) < end }
+          keep' | tail -n 8000
   } > "$COLLECT/previous-boot-kernel-log.txt" 2>&1
   # WindowServer can fail outside a driver frame. Include the complete recent reports
   # during an explicit Send logs request; automatic crash notifications stay selective.
