@@ -75,6 +75,9 @@ int nvmtl_vk_sample_positions_default(uint32_t count, nvmtl_sample_pattern *out)
 int  nvmtl_vk_cmd_abandon(nvk_cmdbuf *c);
 void nvmtl_vk_cmd_counts(uint64_t *begun, uint64_t *submitted, uint64_t *abandoned);
 const char *nvmtl_vk_device_name(void);
+/* the GPU vendor (0x10de, 0x1002, 0x8086) of this process's Metal device; set from the accelerator it was made on */
+uint16_t nvmtl_vk_set_accelerator(mach_port_t accelerator);
+uint16_t nvmtl_vk_vendor(void);
 void nvmtl_vk_limits(uint32_t *layers, uint32_t *shared_bytes, uint32_t wg[3], uint32_t *wg_inv, uint32_t *sm);
 int nvmtl_vk_tg_reject(const uint32_t l[3], const uint32_t *t, const char *kernel, uint32_t lin);
 void nvmtl_vk_pubcaps(uint32_t *color_samples, uint32_t *depth_samples, uint64_t *max_storage_range, uint64_t *linear_align);

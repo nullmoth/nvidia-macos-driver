@@ -110,6 +110,8 @@ bool NMXGPU::start(IOService *provider)
     provider->joinPMtree(this);
     registerPowerDriver(this, states, 2);
     registerService();
+    /* NMXAccel (the Metal accelerator for this GPU) starts only on a device this driver has claimed */
+    pci->setProperty("nmxgpu-claimed", kOSBooleanTrue);
     /* light the outputs and hand them to macOS; without it the device still renders, with no screen of its own */
     fb_ = nmx_fb_publish(this, dev_);
     IOLog("NullMoth GPU: driving %04x:%04x\n", pci->configRead16(kIOPCIConfigVendorID),
@@ -119,6 +121,7 @@ bool NMXGPU::start(IOService *provider)
 
 void NMXGPU::stop(IOService *provider)
 {
+    provider->removeProperty("nmxgpu-claimed");
     nmx_fb_unpublish(fb_, this, dev_);
     fb_ = nullptr;
     PMstop();

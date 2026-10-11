@@ -342,6 +342,7 @@ int nmx_cdev_close(int open_id, int fflags)
 }
 
 static int nmx_mmap(struct nmx_open *o, struct nmx_drm_mmap *req);
+int nmx_drm_node_ioctl(struct linux_file *filp, unsigned long cmd, void *data);   /* nmx_drm_os.c: -1 = not one of its ioctls */
 static int nmx_munmap(struct nmx_open *o, struct nmx_drm_munmap *req);
 
 int nmx_cdev_ioctl(int open_id, unsigned long cmd, void *data, int fflag)
@@ -355,6 +356,8 @@ int nmx_cdev_ioctl(int open_id, unsigned long cmd, void *data, int fflag)
         err = nmx_mmap(o, data);
     } else if (cmd == NMX_DRM_IOCTL_MUNMAP) {
         err = nmx_munmap(o, data);
+    } else if (o->fp->f_ops != NULL && (err = nmx_drm_node_ioctl(o->fp->f_data, cmd, data)) != -1) {
+        /* answered by the port (DRM_IOCTL_GET_PCIINFO) */
     } else if (o->fp->f_ops != NULL) {
         err = o->fp->f_ops->fo_ioctl(o->fp, cmd, data, NULL, curthread);
     } else {

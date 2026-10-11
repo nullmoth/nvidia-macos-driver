@@ -647,6 +647,7 @@ if [ -n "${GPUTEST:-}" ]; then
   # (-nvoff) parks this driver too, and taking a GPU that lights the screen resets that screen, so it stays opt-in.
   case "$GPUTEST" in on|off) ;; *) stop "--gpu-test takes on or off";; esac
   GK=/Library/NullMoth/kexts/15/NMXGPU.kext; GFW=/Library/NullMoth/firmware; EXT=/Library/Extensions
+  GA=/Library/NullMoth/kexts/15/NMXAccel.kext; GU=/Library/NullMoth/gpu-userland; GB=/Library/GPUBundles
   MAN="$(dirname "${TOOL:-/nonexistent}")/nullmoth-gpu-firmware.txt"; [ -f "$MAN" ] || MAN="$(dirname "$0")/nullmoth-gpu-firmware.txt"
   # vendors of the display-class PCI functions present (class 03xxxx; ioreg prints vendor-id/class-code little-endian)
   # (the two keys come in either order, so each device's pair is printed when the next device starts)
@@ -681,14 +682,26 @@ if [ -n "${GPUTEST:-}" ]; then
     ok "GPU firmware installed ($(grep -vc '^#' "$MAN") files, $(du -sh "$GFW" | cut -f1))"
     step "Installing the AMD/Intel GPU driver"
     rm -rf "$EXT/NMXGPU.kext" && ditto "$GK" "$EXT/NMXGPU.kext" && chown -R root:wheel "$EXT/NMXGPU.kext" && chmod -R 755 "$EXT/NMXGPU.kext" || stop "cannot copy NMXGPU.kext"
-    if ! auxkc || ! kmutil inspect -a x86_64 -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -q com.nullmoth.NMXGPU; then
-      rm -rf "$EXT/NMXGPU.kext"; auxkc; cp -p "$BKC" "$C"; stop "the kernel collection did not take NMXGPU (log: $ST/gputest-kmutil.log) - removed again"
+    # Metal on the AMD/Intel GPU: its accelerator (NMXAccel) and the Vulkan drivers the Metal plugin runs on it (RADV, ANV)
+    if [ -d "$GA" ] && [ -d "$GU" ]; then
+      rm -rf "$EXT/NMXAccel.kext" && ditto "$GA" "$EXT/NMXAccel.kext" && chown -R root:wheel "$EXT/NMXAccel.kext" && chmod -R 755 "$EXT/NMXAccel.kext" || stop "cannot copy NMXAccel.kext"
+      ditto "$GU" "$GB/nvmtl" && chown -R root:wheel "$GB/nvmtl" && chmod -R go-w,a+rX "$GB/nvmtl" || stop "cannot copy the AMD/Intel Vulkan drivers"
+    else
+      note "this driver package has no AMD/Intel Metal accelerator: the GPU gets a screen, apps get no Metal on it"
+    fi
+    if ! auxkc || ! kmutil inspect -a x86_64 -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -q com.nullmoth.NMXGPU \
+       || { [ -d "$EXT/NMXAccel.kext" ] && ! kmutil inspect -a x86_64 -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -q com.nullmoth.NMXAccel; }; then
+      rm -rf "$EXT/NMXGPU.kext" "$EXT/NMXAccel.kext"; auxkc; cp -p "$BKC" "$C"; stop "the kernel collection did not take NMXGPU/NMXAccel (log: $ST/gputest-kmutil.log) - removed again"
     fi
     for a in $WANT; do ga add "${a#-}=1"; done
   else
     step "Removing the AMD/Intel GPU driver"
     ga del nmxamd=1; ga del nmxintel=1
-    if [ -d "$EXT/NMXGPU.kext" ]; then rm -rf "$EXT/NMXGPU.kext" && auxkc || note "the kernel collection rebuild reported an error (log: $ST/gputest-kmutil.log)"; fi
+    if [ -d "$EXT/NMXGPU.kext" ] || [ -d "$EXT/NMXAccel.kext" ]; then
+      rm -rf "$EXT/NMXGPU.kext" "$EXT/NMXAccel.kext" && auxkc || note "the kernel collection rebuild reported an error (log: $ST/gputest-kmutil.log)"
+    fi
+    # the AMD/Intel Vulkan drivers come out of nvmtl by the names the cache holds; NVK's files are never touched
+    if [ -d "$GU" ]; then (cd "$GU" && find . -type f) | while read -r f; do rm -f "$GB/nvmtl/${f#./}"; done; rmdir "$GB/nvmtl/share/libdrm" "$GB/nvmtl/share" 2>/dev/null; fi
     rm -rf "$GFW"
   fi
   plutil -lint "$C" >/dev/null || { cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; }

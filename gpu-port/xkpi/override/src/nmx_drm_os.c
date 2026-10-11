@@ -14,7 +14,10 @@
 #include <linux/err.h>
 #include <linux/debugfs.h>
 
+#include <drm/drm.h>
 #include <drm/drm_device.h>
+#include <drm/drm_file.h>
+#include <linux/pci.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_gem_ttm_helper.h>
 #include <drm/drm_writeback.h>
@@ -198,4 +201,34 @@ struct dentry *debugfs_create_file_unsafe(const char *name, umode_t mode, struct
 
 void debugfs_remove(struct dentry *dentry)
 {
+}
+
+/*
+ * DRM_IOCTL_GET_PCIINFO, the BSD way for libdrm to learn which PCI device a DRM node is (Linux reads sysfs instead).
+ * The port's libdrm uses it to enumerate GPUs (drmGetDevices2), which is how Mesa's RADV and ANV find their device;
+ * drm-kmod leaves it to FreeBSD's own drm code, so the port answers it at the node. Returns -1 for any other ioctl.
+ */
+int nmx_drm_node_ioctl(struct linux_file *filp, unsigned long cmd, void *data)
+{
+	struct drm_file *df;
+	struct drm_pciinfo *pi = data;
+	struct pci_dev *pdev;
+
+	if (cmd != DRM_IOCTL_GET_PCIINFO)
+		return -1;
+	df = filp != NULL ? filp->private_data : NULL;
+	if (df == NULL || df->minor == NULL || df->minor->dev == NULL || !dev_is_pci(df->minor->dev->dev))
+		return ENODEV;
+	pdev = to_pci_dev(df->minor->dev->dev);
+	memset(pi, 0, sizeof(*pi));
+	pi->domain = pci_domain_nr(pdev->bus);
+	pi->bus = pdev->bus->number;
+	pi->dev = PCI_SLOT(pdev->devfn);
+	pi->func = PCI_FUNC(pdev->devfn);
+	pi->vendor_id = pdev->vendor;
+	pi->device_id = pdev->device;
+	pi->subvendor_id = pdev->subsystem_vendor;
+	pi->subdevice_id = pdev->subsystem_device;
+	pi->revision_id = pdev->revision;
+	return 0;
 }

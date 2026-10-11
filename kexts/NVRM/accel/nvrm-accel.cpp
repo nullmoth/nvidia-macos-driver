@@ -5,6 +5,10 @@
  */
 
 #include "../nvrm_off.h"
+#ifdef NMX_ACCEL
+// NMXAccel: this accelerator built for the AMD and Intel GPUs that NMXGPU drives (see nmx_accel_names.h)
+#include "nmx_accel_names.h"
+#endif
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/pci/IOPCIDevice.h>
@@ -29,7 +33,12 @@ static bool               nvAccelCopyToScanout(IOAccelResource2 *res);
 void                      nvAccelSwapProbe(IOAccelResource2 *a1, IOAccelResource2 *a2);
 bool                      nvAccelResHasContent(IOAccelResource2 *res);
 static void               nvAccelWriteStamp(int index, unsigned int value);
-#define ALOG(fmt, ...) do { kprintf("NVAccel: " fmt "\n", ##__VA_ARGS__); IOLog("NVAccel: " fmt "\n", ##__VA_ARGS__); } while (0)
+#ifdef NMX_ACCEL
+#define NV_LOG_TAG "NMXAccel: "
+#else
+#define NV_LOG_TAG "NVAccel: "
+#endif
+#define ALOG(fmt, ...) do { kprintf(NV_LOG_TAG fmt "\n", ##__VA_ARGS__); IOLog(NV_LOG_TAG fmt "\n", ##__VA_ARGS__); } while (0)
 #include <libkern/c++/OSSymbol.h>
 #include "nvrm_vram_abi.h"
 #include <IOKit/IODeviceMemory.h>
@@ -50,8 +59,13 @@ static int gNvAccelArmed = 0;
 // 1 once the headless check restored the plugin name without arming (no NVIDIA display head). The Metal plugin reads it:
 // a headless GPU hands frames to another GPU's WindowServer through system memory, so IOSurfaces must be copied out.
 static int gNvHeadless = 0;
+#ifdef NMX_ACCEL
+SYSCTL_INT(_debug, OID_AUTO, nmxaccel_headless, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gNvHeadless, 0,
+           "1 = AMD/Intel Metal device for apps; frames are copied to the framebuffer WindowServer draws");
+#else
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_headless, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gNvHeadless, 0,
            "1 = no NVIDIA display: Metal device for apps only, WindowServer on the GPU that owns the display");
+#endif
 // 4 NVIDIA heads (nvfbheads=4) + 1 for an Intel built-in panel (NMIntelFB, IOFBDependentIndex 4): WindowServer composites
 // that panel on the NVIDIA card and the display-pipe copy path below writes each frame into the Intel scan-out surface.
 static const unsigned kNvMaxFB = 5;
@@ -65,7 +79,11 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_igpu, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG
            "1 = give an Intel built-in panel (NMIntelFB, head 4) a display pipe on this accelerator");
 
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
+#ifdef NMX_ACCEL
+extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NMXAccel, "0.1", _start, _stop) }
+#else
 extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NVAccel, "0.1", _start, _stop) }
+#endif
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d) { return KERN_SUCCESS; }
 extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return KERN_SUCCESS; }
 
@@ -464,6 +482,11 @@ public:
                      (handler && *handler) ? (*handler)->getMetaClass()->getClassName() : "(none)"); }
             return fr;
         }
+#ifdef NMX_ACCEL
+        // NVIDIA RM clients are NVK's; RADV and ANV talk to NMXGPU's DRM device nodes instead
+        ALOG("newUserClient(0x%x): an NVIDIA RM client type on an AMD/Intel accelerator -- refused", type);
+        return kIOReturnUnsupported;
+#endif
 
         if (!fNVRM) {
             OSDictionary *m = serviceMatching("NVRM");
@@ -528,7 +551,11 @@ public:
         if (IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider)) {
             const unsigned cls = pci->configRead8(0x0B), sub = pci->configRead8(0x0A);
             const unsigned ven = pci->configRead16(0x00), dev = pci->configRead16(0x02);
+#ifdef NMX_ACCEL
+            if (cls != 0x03 || (ven != 0x1002 && ven != 0x8086)) {
+#else
             if (cls != 0x03 || (sub != 0x00 && sub != 0x02) || ven != 0x10de || dev < 0x0020) {
+#endif
                 ALOG("%04x:%04x class %02x.%02x is not an NVIDIA display device we support - not claiming",
                      ven, dev, cls, sub);
                 return NULL;
@@ -539,6 +566,19 @@ public:
     }
     virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE {
         { if (nvrm_driver_off()) return false; }
+#ifdef NMX_ACCEL
+        // NMXGPU decides which AMD/Intel GPUs are driven (nmxamd=1 / nmxintel=1 / nullmoth-gpu); this accelerator only
+        // starts on a device it has claimed, so a GPU macOS drives itself never gets a second accelerator
+        if (IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider)) {
+            unsigned waited = 0;
+            while (pci->getProperty("nmxgpu-claimed") != kOSBooleanTrue && waited < 300) { IOSleep(100); waited++; }
+            if (pci->getProperty("nmxgpu-claimed") != kOSBooleanTrue) {
+                ALOG("NMXGPU did not claim %04x:%04x in 30 s - not starting", pci->configRead16(0x00), pci->configRead16(0x02));
+                return false;
+            }
+            ALOG("NMXGPU drives %04x:%04x (waited %u ms) - starting", pci->configRead16(0x00), pci->configRead16(0x02), waited * 100);
+        }
+#else
         uint32_t gate = 0;
         if (!PE_parse_boot_argn("nvaccel", &gate, sizeof gate) || !gate) { ALOG("boot-arg nvaccel=1 absent: NOT starting (boot-loop guard)"); return false; }
         if (IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider)) {
@@ -551,6 +591,7 @@ public:
             }
             ALOG("NVRM owns %04x:%04x (waited %u ms) - starting", pci->configRead16(0x00), pci->configRead16(0x02), waited * 100);
         }
+#endif
         ALOG("start(%s): calling IOGraphicsAccelerator2::start — the family's own bring-up", provider ? provider->getName() : "?");
         bool r = IOGraphicsAccelerator2::start(provider);
         ALOG("IOGraphicsAccelerator2::start -> %d", r);
@@ -574,7 +615,17 @@ public:
             fRegLock = IOLockAlloc();
             ALOG("multi-head: up to %u heads, registration lock %p%s", kNvMaxFB, fRegLock,
                  fRegLock ? "" : " -- NULL: two sysctl writers could interleave a registration");
+#ifdef NMX_ACCEL
+            // AMD/Intel: the Metal device is for apps; WindowServer draws into NMXGPU's framebuffer, and the plugin copies
+            // finished frames into the IOSurfaces it reads (the headless path NVIDIA laptops use)
+            nvaccelInstallSysctl();
+            gNvHeadless = 1;
+            setProperty("NMXAccelHeadless", kOSBooleanTrue);
+            ALOG("AMD/Intel accelerator up: Metal device for apps, frames copied to the framebuffer WindowServer draws");
+            OSDictionary *fbm = nullptr;
+#else
             OSDictionary *fbm = serviceMatching("NVRMNVDAFramebuffer");
+#endif
             if (fbm) {
                 fFBNote = addMatchingNotification(gIOFirstPublishNotification, fbm, &NVAccel::fbPublished, this, nullptr, 0);
                 fbm->release();
@@ -1012,6 +1063,11 @@ static bool gSysctlInstalled = false;
 static void nvaccelInstallSysctl(void)
 {
     if (gSysctlInstalled) return;
+#ifdef NMX_ACCEL
+    // only this one: the NVIDIA accelerator may be loaded too, and owns the debug.nvaccel* names
+    sysctl_register_oid(&sysctl__debug_nmxaccel_headless);
+    gSysctlInstalled = true;
+#else
     sysctl_register_oid(&sysctl__debug_nvaccelfb);
     sysctl_register_oid(&sysctl__debug_nvaccel_headless);
     sysctl_register_oid(&sysctl__debug_nvaccel_vm_alloc);       sysctl_register_oid(&sysctl__debug_nvaccel_vm_alloc_bytes);
@@ -1040,6 +1096,7 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_heads_piped);
     gSysctlInstalled = true;
     ALOG("sysctl debug.nvaccelfb installed -- `sudo sysctl -w debug.nvaccelfb=1` registers the framebuffer");
+#endif
 }
 
 static inline void nvAccelZero(void *p, unsigned long n)
