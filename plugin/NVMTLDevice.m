@@ -295,6 +295,12 @@ static bool nvmtl_process_is_allowed(void)
 {
     const char *me = getprogname();
     if (!me) return false;
+    // A headless NVIDIA GPU (the display is on the Intel or AMD GPU) is a Metal device for apps only: WindowServer stays
+    // on the GPU that owns the display, as on Apple's two-GPU Macs. The list below cannot express this: "*" matches
+    // WindowServer before its "!WindowServer" line is reached.
+    { int hv = 0; size_t hn = sizeof hv;
+      if (!strcmp(me, "WindowServer") && sysctlbyname("debug.nvaccel_headless", &hv, &hn, NULL, 0) == 0 && hv) {
+          nvlog("  headless GPU: no device for WindowServer (it composites on the GPU that owns the display)"); return false; } }
     if (getenv("NVMTL_ENABLE")) return true;
     if (!strcmp(me, "mtlprobe") || !strcmp(me, "nvmtltest") || !strcmp(me, "nvmtlrender")) return true;
     FILE *f = fopen("/Library/GPUBundles/nvmtl-allow.txt", "r");
