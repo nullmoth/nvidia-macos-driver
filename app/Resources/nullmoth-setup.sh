@@ -330,12 +330,24 @@ if [ $REMOVE = 1 ]; then
   elif [ "$EFI" != auto ]; then
     mount_efi "$EFI" || stop "could not mount the selected OpenCore partition - nothing changed"; MP=$MOUNT_POINT
     C="$MP/${OCREL:-EFI/OC}/config.plist"
-  elif [ -n "${EFI_UUID:-}" ]; then
-    mount_efi "$EFI_UUID" || stop "could not mount the recorded OpenCore partition; attach the original boot disk or select its replacement - nothing changed"; MP=$MOUNT_POINT
-    C="$MP/${OCREL:-EFI/OC}/config.plist"
-  elif [ -n "${CONFIG_PATH:-}" ]; then
-    C=$CONFIG_PATH; [ -f "$C" ] || stop "the recorded config is missing - nothing changed"
+  elif [ -n "${EFI_UUID:-}" ] && mount_efi "$EFI_UUID"; then
+    MP=$MOUNT_POINT; C="$MP/${OCREL:-EFI/OC}/config.plist"
+  elif [ -n "${CONFIG_PATH:-}" ] && [ -f "$CONFIG_PATH" ]; then
+    C=$CONFIG_PATH
     MP=$(cd "$(dirname "$C")/../.." && pwd) || stop "cannot resolve the recorded OpenCore partition"
+  fi
+  # The boot picker's "Remove driver" runs this at the next start, before anything has mounted the EFI partition, so a
+  # record holding only a config path (/Volumes/EFI/...) or a partition that is no longer attached stopped here and the
+  # driver stayed off but installed, start after start (1.6-1.9 recover logs: "the recorded config is missing", "could
+  # not mount the recorded OpenCore partition"; Discord 10-11). The partition OpenCore started this Mac from is the one
+  # whose picker asked for the removal, so it is used instead.
+  if [ -z "$C" ] && [ -z "$CFG" ] && [ "$EFI" = auto ] && { [ -n "${EFI_UUID:-}" ] || [ -n "${CONFIG_PATH:-}" ]; }; then
+    note "the recorded OpenCore config was not found; using the partition this Mac started from"
+    d=$(booted_part) || d=$(boot_esp)
+    [ -n "$d" ] || stop "the recorded OpenCore config is missing and the partition this Mac started from was not found; select its config.plist - nothing changed"
+    mount_efi "$d" || stop "could not mount the OpenCore partition $d - nothing changed"
+    r=$(ocrel_in "$MOUNT_POINT"); [ -n "$r" ] || stop "no OpenCore config on $d; select its config.plist - nothing changed"
+    MP=$MOUNT_POINT; C="$MP/$r/config.plist"; OCREL=$r
   fi
   [ -n "$C" ] || stop "the install record has no OpenCore partition; select the original config - nothing changed"
   if [ -n "$C" ]; then
