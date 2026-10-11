@@ -1,5 +1,5 @@
 # gen_flags.py <drm-kmod> <out>: amdgpu compile flags for the macOS port, read from drm-kmod's own Makefiles so they track
-# upstream. KCONFIG is drm-kmod's amd64 set minus the features this first, render-only stage must not build on macOS.
+# upstream. KCONFIG is drm-kmod's amd64 set minus the features that must not be built on macOS.
 import re, sys, pathlib
 dk = pathlib.Path(sys.argv[1]); out = pathlib.Path(sys.argv[2])
 EXCLUDE = {
@@ -8,7 +8,6 @@ EXCLUDE = {
     "COMPAT",                                       # 32-bit ioctls: macOS 15 runs 64-bit processes only
     "FB", "DRM_FBDEV_EMULATION", "DRM_FBDEV_OVERALLOC", "DRM_CLIENT_DEFAULT_FBDEV", "DRM_CLIENT_DEFAULT",
     "DRM_CLIENT", "DRM_CLIENT_SETUP", "VIDEO_CMDLINE",  # in-kernel fbdev clients: macOS uses IOFramebuffer
-    "DRM_AMD_DC", "DRM_AMD_DC_SI", "DRM_AMD_DC_FP", "DRM_AMD_DC_DCN", "DRM_AMD_DC_DCN3_0",  # display core: a later stage
     "DRM_MIPI_DSI", "DRM_PANEL_ORIENTATION_QUIRKS", "DRM_PANEL_BACKLIGHT_QUIRKS", "DRM_DISPLAY_DP_TUNNEL",
 }
 txt = (dk / "kconfig.mk").read_text()

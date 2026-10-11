@@ -8,7 +8,8 @@ K=$NULLMOTH_BUILD_ROOT/build/gpu-src/kpi
 cd "$X" || exit 1
 mkdir -p logs && rm -f logs/*.log logs/*.failed
 
-EXCLUDE="drm_gem_ttm_helper.c drm_writeback.c drm_hdcp_helper.c sync_file.c dma-fence-unwrap.c dma-buf.c dma-buf-kmod.c linux_fb.c vt_drmfb.c drm_os_freebsd.c"
+# amdgpu_dm_crc.c: CRC capture is a debugfs feature (no debugfs on macOS; its header stubs the hooks to NULL)
+EXCLUDE="amdgpu_dm_crc.c drm_gem_ttm_helper.c drm_writeback.c drm_hdcp_helper.c sync_file.c dma-fence-unwrap.c dma-buf.c dma-buf-kmod.c linux_fb.c vt_drmfb.c drm_os_freebsd.c"
 /opt/homebrew/bin/python3 srclist.py "$K/drm-kmod" amd.flags amd/amdgpu drm ttm dmabuf 2>/dev/null > srcs.all
 : > srcs.txt
 while read -r f; do

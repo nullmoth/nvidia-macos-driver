@@ -18,6 +18,8 @@
 #include <drm/drm_gem.h>
 #include <drm/drm_gem_ttm_helper.h>
 #include <drm/drm_writeback.h>
+#include <drm/drm_utils.h>
+#include <drm/display/drm_hdcp_helper.h>
 #include <drm/ttm/ttm_bo.h>
 #include <drm_os_freebsd.h>
 
@@ -101,7 +103,46 @@ int drm_gem_ttm_mmap(struct drm_gem_object *gem, struct vm_area_struct *vma)
     return 0;
 }
 
-/* ---- writeback connectors: none are created on macOS, so no job ever reaches these ---------------------------------- */
+/* ---- writeback connectors: none are created on macOS (amdgpu logs the refusal and continues) ------------------------ */
+
+int drm_writeback_connector_init(struct drm_device *dev, struct drm_writeback_connector *wb_connector,
+                                 const struct drm_connector_funcs *con_funcs,
+                                 const struct drm_encoder_helper_funcs *enc_helper_funcs,
+                                 const u32 *formats, int n_formats, u32 possible_crtcs)
+{
+    return -ENODEV;
+}
+
+void drm_writeback_queue_job(struct drm_writeback_connector *wb_connector, struct drm_connector_state *conn_state)
+{
+}
+
+void drm_writeback_signal_completion(struct drm_writeback_connector *wb_connector, int status)
+{
+}
+
+/*
+ * Panel quirk table for minimum backlight (drm_panel_backlight_quirks.c is GPL and is not used): no panel has a
+ * quirk, which amdgpu reads as "keep the panel's own minimum" (a negative answer).
+ */
+int drm_get_panel_min_brightness_quirk(const struct drm_edid *edid)
+{
+    return -ENODATA;
+}
+
+/*
+ * HDCP (drm_hdcp_helper.c is GPL and is not used): the content-protection property is not offered, so no client can
+ * ask for protected output and the driver never has a state change to report.
+ */
+int drm_connector_attach_content_protection_property(struct drm_connector *connector, bool hdcp_content_type)
+{
+    return 0;
+}
+
+void drm_hdcp_update_content_protection(struct drm_connector *connector, u64 val)
+{
+}
+
 
 int drm_writeback_set_fb(struct drm_connector_state *cs, struct drm_framebuffer *fb)
 {
@@ -137,6 +178,12 @@ struct dentry *debugfs_create_file(const char *name, umode_t mode, struct dentry
 
 void debugfs_create_atomic_t(const char *name, umode_t mode, struct dentry *parent, atomic_t *value)
 {
+}
+
+struct dentry *debugfs_create_file_unsafe(const char *name, umode_t mode, struct dentry *parent, void *data,
+                                          const struct file_operations *fops)
+{
+    return ERR_PTR(-ENODEV);
 }
 
 void debugfs_remove(struct dentry *dentry)

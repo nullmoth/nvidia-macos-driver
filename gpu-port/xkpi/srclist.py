@@ -1,7 +1,6 @@
 # srclist.py <drm-kmod> <amd.flags> <module...>: the sources drm-kmod's Makefile for each module builds, evaluated
 # against the same KCONFIG set as the compile flags. Handles the BSD make subset these Makefiles use: SRCS=/+=,
 # .PATH:, .if/.elif !empty(KCONFIG:M...) / empty(...), .else, .endif, '#' comments, backslash continuation.
-# The amdgpu display core (display/) is skipped in this first, render-only stage.
 import re, sys, pathlib
 dk = pathlib.Path(sys.argv[1])
 kcfg = {l.strip()[len("-DCONFIG_"):].split("=")[0] for l in open(sys.argv[2]) if l.startswith("-DCONFIG_")}
@@ -33,6 +32,7 @@ for mod in sys.argv[3:]:
     mk = dk / mod / "Makefile"
     text = mk.read_text()
     srcs, paths, stack = [], [], [True]
+    mkvars = {}
     for line in logical_lines(text):
         s = line.strip()
         if s.startswith(".if"):
@@ -46,9 +46,15 @@ for mod in sys.argv[3:]:
         elif not all(stack):
             continue
         elif s.startswith(".PATH:"):
-            for t in s[6:].split():
+            # lowercase make variables (e.g. _dml, the display math directories) expand to their words
+            body = re.sub(r"\$\{(_?[a-z][a-z0-9_]*)\}", lambda m: " ".join(mkvars.get(m.group(1), [])), s[6:])
+            for t in body.split():
                 t = t.replace("${SRCDIR}", "SRCDIR").replace("${DRM}", "DRM")
                 paths.append(t)
+        elif re.match(r"_?[a-z][a-z0-9_]*\s*\+?=", s):
+            name, _, val = re.split(r"\s*(\+?=)\s*", s, maxsplit=1)
+            words = val.split()
+            mkvars[name] = (mkvars.get(name, []) + words) if s.split("=", 1)[0].endswith("+") else words
         elif re.match(r"SRCS\s*\+?=", s):
             srcs += [w for w in re.split(r"\s+", s.split("=", 1)[1]) if w.endswith(".c")]
     curdir = mk.parent
@@ -66,5 +72,4 @@ for mod in sys.argv[3:]:
     for s in dict.fromkeys(srcs):
         hit = next((c / s for c in cand if (c / s).exists()), None)
         if hit is None: print("#MISSING", mod, s, file=sys.stderr); continue
-        if "/amd/display/" in str(hit): continue
         print(hit)
