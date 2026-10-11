@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.nullmoth.NMDRM</string>
+  <key>CFBundleName</key><string>NMDRM</string>
+  <key>CFBundleExecutable</key><string>NMDRM</string>
+  <key>CFBundlePackageType</key><string>KEXT</string>
+  <key>CFBundleVersion</key><string>1.0.0</string>
+  <key>CFBundleShortVersionString</key><string>1.0.0</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>IOKitPersonalities</key><dict>
+    <key>NMDRMDevice</key><dict>
+      <key>CFBundleIdentifier</key><string>com.nullmoth.NMDRM</string>
+      <key>IOClass</key><string>NMDRMDevice</string>
+      <key>IOProviderClass</key><string>IOPCIDevice</string>
+      <!-- every display-class device (VGA 0x0300 and 3D 0x0302 controllers, display 0x0380) -->
+      <key>IOPCIClassMatch</key><string>0x03000000&amp;0xff000000</string>
+      <!-- its own category: attaches beside the device's real driver instead of competing with it -->
+      <key>IOMatchCategory</key><string>NMDRM</string>
+    </dict>
+  </dict>
+  <key>OSBundleLibraries</key><dict>
+    <key>com.apple.kpi.bsd</key><string>8.0</string>
+    <key>com.apple.kpi.iokit</key><string>8.0</string>
+    <key>com.apple.kpi.libkern</key><string>8.0</string>
+    <key>com.apple.kpi.mach</key><string>8.0</string>
+    <key>com.apple.kpi.unsupported</key><string>8.0</string>
+    <key>com.apple.iokit.IOPCIFamily</key><string>1.0.0</string>
+  </dict>
+</dict></plist>
