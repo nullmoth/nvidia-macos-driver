@@ -52,6 +52,7 @@ static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return 
 }
 - (nvk_image *)nvi;
 - (void *)nvview;
+- (void *)nvsampleview;
 - (void)nvmtlSurfaceIn;
 - (BOOL)nvmtlSurfaceOut;
 @end
@@ -229,7 +230,7 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
   BOOL _texSeen;
 } @end
 @interface NVMTLTexture () { @public NSString *_label; MTLResourceOptions _ropt; BOOL _shareable; BOOL _fbo;
-  MTLTextureSwizzleChannels _swz; BOOL _hasSwz;
+  MTLTextureSwizzleChannels _swz; BOOL _hasSwz; void *_swzView;
   void *_tbView, *_tbAlias; BOOL _tbStorage;
   int _resRefs;
   int _nviews;
@@ -238,6 +239,7 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
   int _lruReg, _wantOn;
   uint64_t _useEp;
 } @end
+void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 #include <os/lock.h>
 @interface NVMTLResSet : NSMutableSet { @public NSMutableSet *_s; os_unfair_lock _lk; } @end
 @interface NVMTLFunction () { @public NSString *_label; } @end
