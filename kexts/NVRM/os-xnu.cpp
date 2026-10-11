@@ -206,7 +206,9 @@ void nv_xnu_register_pci(IOPCIDevice *pci, NvU32 domain, NvU8 bus, NvU8 slot, Nv
             return; // already registered
         }
     }
-    if (nv_xnu_nslots < NV_XNU_MAX_PCI) { nv_xnu_slots[nv_xnu_nslots++] = { pci, domain, bus, slot, function }; }
+    // Retained: RM keeps these handles for config-space access for as long as the driver runs, and a device behind
+    // Thunderbolt or a dock can be terminated meanwhile. The table lives as long as the kext.
+    if (nv_xnu_nslots < NV_XNU_MAX_PCI) { pci->retain(); nv_xnu_slots[nv_xnu_nslots++] = { pci, domain, bus, slot, function }; }
 }
 
 // The RM enumerates the whole PCI tree through os_pci_init_handle to find the

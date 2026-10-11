@@ -862,7 +862,9 @@ bool NVRM::placeLargeBar1()
     // Firmware can leave unused subordinate bus numbers reserved (for example, GPU bus 1 with range 1-5).
     // Accept that range only when no other PCI function occupies it: changing the root port's window would
     // otherwise stop forwarding the sibling's BARs.
-    if (sub > mybus && nvrmBusRangeHasOtherDevices(sec, sub, fPCI)) {
+    // Only the buses BELOW ours: the GPU's own bus also carries its HDMI audio (and USB-C) functions, which sit behind
+    // this window today and always did - counting them refused every card whose firmware reserved spare bus numbers.
+    if (sub > mybus && nvrmBusRangeHasOtherDevices(mybus + 1, sub, fPCI)) {
         LOG("bar1: root port range %u-%u has other PCI devices — not placing", sec, sub);
         return false;
     }
