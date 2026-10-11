@@ -28,5 +28,6 @@
     <key>com.apple.kpi.unsupported</key><string>8.0</string>
     <key>com.apple.iokit.IOPCIFamily</key><string>1.0.0</string>
     <key>com.apple.iokit.IOACPIFamily</key><string>1.0.0</string>
+    <key>com.apple.iokit.IOGraphicsFamily</key><string>1.0.0</string>
   </dict>
 </dict></plist>
