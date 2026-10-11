@@ -91,6 +91,12 @@ pass, and every release that carries NMXNPU publishes that archive beside the pa
 - **Firmware**: `intel/vpu/vpu_*_v1.bin` (API 3.37/3.41, the same major as the driver) and `amdnpu/*/npu*.sbin`, with
   linux-firmware's links made by setup after the checksums pass.
 - **Opt-in**: `nmxnpu=1` or the `nullmoth-npu` device property; setup --gpu-test installs it when an NPU is present.
+- **Userland** (`npu-user/`): the Level Zero loader and Intel's NPU user driver (linux-npu-driver, MIT), built for
+  macOS x86_64 and installed in `/Library/NullMoth/npu/lib`. `patch_level_zero.py` (dylib names, discovery by path) and
+  `patch_npu_umd.py` (buffers mapped through the node ioctls, ELF-only flags, macOS type widths) hold every change;
+  `compat/` supplies the Linux userland names. Intel's unit tests on the mock NPU: 60/60 and 138/138 runnable (22 need
+  a model blob, 4 the optional compiler library). The loader loads the driver and reports no device without an NPU.
+  Not yet: Intel's NPU model compiler (models must arrive precompiled), OpenVINO's NPU plugin for macOS, AMD's XRT.
 
 Not done yet:
 
