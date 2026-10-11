@@ -51,6 +51,14 @@ device_t pci_find_device(uint16_t vendor, uint16_t device);
 device_t pci_find_class(uint8_t cls, uint8_t subcls);
 device_t pci_find_class_from(uint8_t cls, uint8_t subcls, device_t from);
 int pci_get_id(device_t dev, int type, uintptr_t *id);
+#define PCI_GET_ID(bus, child, type, id) pci_get_id((child), (type), (id))
+device_t pci_find_base_class_from(uint8_t cls, device_t from);
+/* a BAR the device does not have has no resource list entry; nothing can be reserved for it */
+struct resource *pci_reserve_map(device_t dev, device_t child, int type, int rid, rman_res_t start, rman_res_t end,
+                                 rman_res_t count, u_int num, u_int flags);
+/* the expansion ROM (VBIOS) of a display device, as a kernel copy */
+void *vga_pci_map_bios(device_t dev, size_t *size);
+void vga_pci_unmap_bios(device_t dev, void *bios);
 int pcie_get_max_completion_timeout(device_t dev);
 uint32_t pcie_read_config(device_t dev, int reg, int width);
 void pcie_write_config(device_t dev, int reg, uint32_t value, int width);
@@ -78,8 +86,19 @@ typedef struct pcicfg {
     uint32_t domain;
     uint8_t bus, slot, func;
     struct { int pcie_location; uint8_t pcie_type; uint16_t pcie_flags; } pcie;
+    struct pcicfg_msi {
+        uint16_t msi_ctrl;           /* message control */
+        uint8_t msi_location;        /* offset of the MSI capability */
+        int msi_alloc;               /* messages allocated */
+        uint64_t msi_addr;           /* address register as programmed */
+        uint16_t msi_data;           /* data register as programmed */
+        u_int msi_handlers;
+    } msi;
 } pcicfgregs;
-struct pci_devinfo { pcicfgregs cfg; };
+struct pci_devinfo {
+    pcicfgregs cfg;
+    struct resource_list resources;
+};
 struct pci_devinfo *nmx_pci_devinfo(device_t dev);
 struct pci_map { pci_addr_t pm_value; pci_addr_t pm_size; uint16_t pm_reg; STAILQ_ENTRY(pci_map) pm_link; };
 struct pci_map *pci_find_bar(device_t dev, int reg);

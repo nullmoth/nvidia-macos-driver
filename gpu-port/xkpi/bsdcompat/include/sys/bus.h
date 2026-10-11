@@ -1,7 +1,11 @@
 /*
  * FreeBSD newbus on xnu, as far as LinuxKPI uses it. A device_t is the port's record for one IOService (the matched
- * IOPCIDevice, or a child the drivers create): it carries the softc, unit, parent and children. Driver attachment
- * itself is IOKit matching, so DRIVER_MODULE and the method tables only record what a driver offers.
+ * IOPCIDevice, or a child the drivers create): it carries the softc, unit, parent and children.
+ *
+ * Attachment is a small newbus: drivers register with a bus class (devclass_add_driver: LinuxKPI puts DRM drivers
+ * on "vgapci"), the kext registers each IOPCIDevice it matched with its class (nmx_bus_add_device), and every
+ * driver of the class is offered the device as FreeBSD's vgapci does: a child is added, probed through the driver's
+ * device_probe method and attached through device_attach. Methods are found by name in the driver's table.
  */
 #ifndef NMXKPI_SYS_BUS_H
 #define NMXKPI_SYS_BUS_H
@@ -24,6 +28,12 @@ typedef struct driver { const char *name; device_method_t *methods; size_t size;
 #define BUS_PROBE_DEFAULT (-20)
 #define BUS_PROBE_GENERIC (-100)
 #define BUS_PROBE_NOWILDCARD (-2000000000)
+typedef int device_probe_t(device_t dev);
+typedef int device_attach_t(device_t dev);
+typedef int device_detach_t(device_t dev);
+typedef int device_suspend_t(device_t dev);
+typedef int device_resume_t(device_t dev);
+typedef int device_shutdown_t(device_t dev);
 typedef enum device_state { DS_NOTPRESENT = 10, DS_ALIVE = 20, DS_ATTACHING = 25, DS_ATTACHED = 30 } device_state_t;
 void *device_get_softc(device_t dev);
 void device_set_softc(device_t dev, void *softc);
@@ -40,6 +50,7 @@ int device_is_attached(device_t dev);
 int device_printf(device_t dev, const char *fmt, ...) __printflike(2, 3);
 int device_print_prettyname(device_t dev);
 struct cdev;
+extern device_t root_bus;
 const char *devtoname(struct cdev *cdev);
 int dev2udev(struct cdev *x);
 int device_get_children(device_t dev, device_t **listp, int *countp);
@@ -63,8 +74,39 @@ int bus_generic_attach(device_t dev);
 int bus_generic_detach(device_t dev);
 void bus_attach_children(device_t dev);
 #define BUS_RESCAN(dev) 0
+device_t bus_generic_add_child(device_t dev, u_int order, const char *name, int unit);
+int devclass_add_driver(devclass_t dc, driver_t *driver, int pass, devclass_t *dcp);
+int devclass_delete_driver(devclass_t busclass, driver_t *driver);
+/* true while the hardware still answers (config space does not read all ones) */
+int bus_child_present(device_t child);
+/* x86 has one address space for CPU and bus: translation is the identity */
+int bus_translate_resource(device_t dev, int type, rman_res_t start, rman_res_t *newstart);
+/* the kext's side of attachment (see the comment at the top) */
+/* the record for an IOPCIDevice (made on first use), its IOPCIDevice (NULL for a device with no PCI function), and
+ * dropping the record when the IOPCIDevice goes away */
+device_t nmx_device_for_pci(void *iopci);
+void *nmx_device_xnu(device_t dev);
+void nmx_device_forget(device_t dev);
+int nmx_bus_add_device(device_t dev, const char *classname);
+void nmx_bus_remove_device(device_t dev);
+/* runs a device method ("device_suspend", "device_resume", "device_shutdown") on the attached children of dev */
+int nmx_bus_call_children(device_t dev, const char *method);
+void *nmx_device_method(device_t dev, const char *name);
 struct resource;
 struct resource_spec { int type; int rid; int flags; };
+/* the resources a PCI function offers: one entry per BAR and interrupt line (FreeBSD's resource_list) */
+struct resource_list_entry {
+    STAILQ_ENTRY(resource_list_entry) link;
+    int type;
+    int rid;
+    int flags;
+    struct resource *res;           /* the allocated resource while a driver holds it */
+    rman_res_t start;
+    rman_res_t end;
+    rman_res_t count;
+};
+STAILQ_HEAD(resource_list, resource_list_entry);
+struct resource_list_entry *resource_list_find(struct resource_list *rl, int type, int rid);
 struct resource *bus_alloc_resource_any(device_t dev, int type, int *rid, u_int flags);
 int bus_release_resource(device_t dev, int type, int rid, struct resource *r);
 int bus_setup_intr(device_t dev, struct resource *r, int flags, int (*filter)(void *), void (*handler)(void *), void *arg, void **cookiep);

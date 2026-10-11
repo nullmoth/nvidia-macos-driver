@@ -18,6 +18,7 @@
 #include <vm/vm.h>
 #include <vm/vm_page.h>
 #include <vm/vm_object.h>
+#include <vm/vm_pager.h>
 #include <vm/pmap.h>
 #include <vm/vm_extern.h>
 #include <machine/cpufunc.h>
@@ -269,16 +270,142 @@ void vm_page_wire(vm_page_t m)
     __atomic_fetch_add(&m->ref_count, 1, __ATOMIC_SEQ_CST);
 }
 
-/* drops one wiring; true when it was the last, so the caller frees the page */
+/*
+ * drops one wiring; true when it was the last and the page belongs to no object, so the caller frees it. A page in
+ * an object stays with the object at zero wirings, as in FreeBSD; the object frees it.
+ */
 bool vm_page_unwire_noq(vm_page_t m)
 {
-    return __atomic_sub_fetch(&m->ref_count, 1, __ATOMIC_SEQ_CST) == 0;
+    return __atomic_sub_fetch(&m->ref_count, 1, __ATOMIC_SEQ_CST) == 0 && m->object == NULL;
 }
 
 void vm_page_unwire(vm_page_t m, uint8_t queue)
 {
     if (vm_page_unwire_noq(m))
         vm_page_free(m);
+}
+
+/*
+ * ---- VM objects: anonymous page containers (LinuxKPI shmem files, which TTM swaps buffers out to) ----------------------
+ * A page array indexed by page number, filled on demand with zeroed pages. There is no pager behind it: the pages
+ * stay in memory for the object's life. The object lock (VM_OBJECT_WLOCK) guards the array.
+ */
+vm_object_t vm_object_allocate(objtype_t type, vm_pindex_t size)
+{
+    struct vm_object *o = malloc(sizeof(*o), M_NMXPAGE, M_WAITOK | M_ZERO);
+    if (o == NULL)
+        return NULL;
+    if (size > 0) {
+        o->nmx_pages = malloc(sizeof(vm_page_t) * (size_t)size, M_NMXPAGE, M_WAITOK | M_ZERO);
+        if (o->nmx_pages == NULL) {
+            free(o, M_NMXPAGE);
+            return NULL;
+        }
+    }
+    mtx_init(&o->lock, "vm object", NULL, MTX_DEF);
+    o->type = type;
+    o->size = size;
+    o->ref_count = 1;
+    return o;
+}
+
+vm_object_t vm_pager_allocate(objtype_t type, void *handle, vm_ooffset_t size, vm_prot_t prot, vm_ooffset_t off,
+                              struct ucred *cred)
+{
+    return vm_object_allocate(type, atop(round_page(size)));
+}
+
+void vm_object_reference(vm_object_t o)
+{
+    if (o != NULL)
+        __atomic_fetch_add(&o->ref_count, 1, __ATOMIC_SEQ_CST);
+}
+
+/* detaches the page at i; frees it unless someone still holds a wiring (they free it at their last unwire) */
+static void object_drop_page_locked(vm_object_t o, vm_pindex_t i)
+{
+    vm_page_t *pages = o->nmx_pages;
+    vm_page_t m = pages[i];
+    if (m == NULL)
+        return;
+    pages[i] = NULL;
+    o->resident_page_count--;
+    m->object = NULL;
+    if (__atomic_load_n(&m->ref_count, __ATOMIC_SEQ_CST) == 0)
+        vm_page_free(m);
+}
+
+void vm_object_deallocate(vm_object_t o)
+{
+    if (o == NULL || __atomic_sub_fetch(&o->ref_count, 1, __ATOMIC_SEQ_CST) != 0)
+        return;
+    VM_OBJECT_WLOCK(o);
+    for (vm_pindex_t i = 0; i < o->size; i++)
+        object_drop_page_locked(o, i);
+    VM_OBJECT_WUNLOCK(o);
+    mtx_destroy(&o->lock);
+    free(o->nmx_pages, M_NMXPAGE);
+    free(o, M_NMXPAGE);
+}
+
+vm_page_t vm_page_lookup(vm_object_t o, vm_pindex_t pindex)
+{
+    if (o == NULL || pindex >= o->size)
+        return NULL;
+    return ((vm_page_t *)o->nmx_pages)[pindex];
+}
+
+vm_page_t vm_page_grab(vm_object_t o, vm_pindex_t pindex, int allocflags)
+{
+    if (o == NULL || pindex >= o->size)
+        return NULL;
+    vm_page_t *pages = o->nmx_pages;
+    vm_page_t m = pages[pindex];
+    if (m == NULL) {
+        if (allocflags & VM_ALLOC_NOCREAT)
+            return NULL;
+        m = vm_page_alloc_noobj(VM_ALLOC_ZERO);         /* comes back with one wiring */
+        if (m == NULL)
+            return NULL;
+        m->object = o;
+        m->pindex = pindex;
+        pages[pindex] = m;
+        o->resident_page_count++;
+        if (!(allocflags & VM_ALLOC_WIRED))
+            __atomic_fetch_sub(&m->ref_count, 1, __ATOMIC_SEQ_CST);  /* the object owns it unwired */
+        return m;
+    }
+    if (allocflags & VM_ALLOC_WIRED)
+        vm_page_wire(m);
+    return m;
+}
+
+int vm_page_grab_valid(vm_page_t *mp, vm_object_t o, vm_pindex_t pindex, int allocflags)
+{
+    *mp = vm_page_grab(o, pindex, allocflags & ~VM_ALLOC_NOCREAT);
+    return *mp ? VM_PAGER_OK : VM_PAGER_FAIL;
+}
+
+int vm_page_grab_valid_unlocked(vm_page_t *mp, vm_object_t o, vm_pindex_t pindex, int allocflags)
+{
+    VM_OBJECT_WLOCK(o);
+    int r = vm_page_grab_valid(mp, o, pindex, allocflags);
+    VM_OBJECT_WUNLOCK(o);
+    return r;
+}
+
+/*
+ * Removes pages [start, end) (end 0 = to the end). OBJPR_CLEANONLY asks for clean pages only; with no record of
+ * which pages were written, every page is treated as dirty and kept, so no data is ever dropped.
+ */
+void vm_object_page_remove(vm_object_t o, vm_pindex_t start, vm_pindex_t end, int options)
+{
+    if (o == NULL || (options & OBJPR_CLEANONLY))
+        return;
+    if (end == 0 || end > o->size)
+        end = o->size;
+    for (vm_pindex_t i = start; i < end; i++)
+        object_drop_page_locked(o, i);
 }
 
 /* ---- physical <-> page <-> kernel address ------------------------------------------------------------------------- */

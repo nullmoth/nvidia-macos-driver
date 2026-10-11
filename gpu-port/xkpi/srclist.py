@@ -15,8 +15,13 @@ def logical_lines(text):
 def cond(expr):
     expr = expr.strip()
     out = expr
-    for neg, name in re.findall(r"(!?)empty\(KCONFIG:M([A-Z0-9_]+)\)", expr):
-        val = (name in kcfg) if neg == "!" else (name not in kcfg)
+    # a pattern may end in '*' (BSD make :M glob): it matches any option with that prefix
+    for neg, name in re.findall(r"(!?)empty\(KCONFIG:M([A-Z0-9_]+\*?)\)", expr):
+        if name.endswith("*"):
+            present = any(k.startswith(name[:-1]) for k in kcfg)
+        else:
+            present = name in kcfg
+        val = present if neg == "!" else not present
         out = out.replace(f"{neg}empty(KCONFIG:M{name})", "True" if val else "False", 1)
     out = re.sub(r'\$\{MACHINE_CPUARCH\}\s*==\s*"amd64"', "True", out)
     out = re.sub(r'\$\{MACHINE_CPUARCH\}\s*==\s*"[a-z0-9]+"', "False", out)

@@ -19,6 +19,7 @@ static inline int flsl(long mask) { return (mask == 0 ? 0 : (int)(sizeof(mask) *
 uint32_t arc4random(void);
 uint32_t arc4random_uniform(uint32_t upper_bound);
 void arc4random_buf(void *ptr, size_t len);
+void qsort_r(void *base, size_t nmemb, size_t size, int (*compar)(const void *, const void *, void *), void *thunk);
 u_long nmx_random(void);
 #define random() nmx_random()
 char *strsep(char **stringp, const char *delim);

@@ -11,6 +11,12 @@
 #ifndef NMXKPI_PRELUDE_H
 #define NMXKPI_PRELUDE_H
 
+/*
+ * xnu declares scnprintf/vscnprintf extern; LinuxKPI defines them static inline. Seen in that order, every object
+ * got its own global copy (duplicate symbols at link). xnu's declarations are taken under other names here.
+ */
+#define scnprintf nmx_xnu_scnprintf
+#define vscnprintf nmx_xnu_vscnprintf
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -43,6 +49,8 @@
 #include <miscfs/devfs/devfs.h>
 #include <pexpert/pexpert.h>
 #include <sys/kauth.h>
+#undef scnprintf
+#undef vscnprintf
 
 /* xnu's strcpy macro deliberately takes three arguments to break two-argument callers; use the checked builtin */
 #undef strcpy

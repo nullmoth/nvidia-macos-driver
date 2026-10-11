@@ -23,7 +23,12 @@ NMX_BS_RW(2, uint16_t)
 NMX_BS_RW(4, uint32_t)
 NMX_BS_RW(8, uint64_t)
 #undef NMX_BS_RW
-/* bus_dma: a DMA tag/map describe a buffer the device reaches through IODMACommand (src/nmx_busdma.cpp) */
+/*
+ * bus_dma(9): a tag describes what a device can reach (address limit, alignment, boundary, segments); a map holds the
+ * device-visible mappings of the buffers loaded into it, made through IODMACommand when the IOMMU is active and
+ * identical to physical addresses when it is not (src/nmx_busdma.c over xnu/nmx_dma.cpp). Buffers the device
+ * cannot reach are refused with EFBIG, never bounced: no GPU path loads memory outside its own DMA mask.
+ */
 typedef struct bus_dma_tag *bus_dma_tag_t;
 typedef struct bus_dmamap *bus_dmamap_t;
 typedef struct bus_dma_segment { bus_addr_t ds_addr; bus_size_t ds_len; } bus_dma_segment_t;
@@ -39,4 +44,25 @@ typedef int bus_dmasync_op_t;
 #define BUS_DMA_ZERO 0x08
 #define BUS_DMA_NOCACHE 0x100
 typedef void bus_dmamap_callback_t(void *, bus_dma_segment_t *, int, int);
+typedef int bus_dma_filter_t(void *, bus_addr_t);
+typedef enum { BUS_DMA_LOCK, BUS_DMA_UNLOCK } bus_dma_lock_op_t;
+typedef void bus_dma_lock_t(void *, bus_dma_lock_op_t);
+struct nmx_device;
+bus_dma_tag_t bus_get_dma_tag(struct nmx_device *dev);
+int bus_dma_tag_create(bus_dma_tag_t parent, bus_size_t alignment, bus_addr_t boundary, bus_addr_t lowaddr,
+                       bus_addr_t highaddr, bus_dma_filter_t *filter, void *filterarg, bus_size_t maxsize,
+                       int nsegments, bus_size_t maxsegsz, int flags, bus_dma_lock_t *lockfunc, void *lockfuncarg,
+                       bus_dma_tag_t *dmat);
+int bus_dma_tag_destroy(bus_dma_tag_t dmat);
+bool bus_dma_id_mapped(bus_dma_tag_t dmat, vm_paddr_t buf, bus_size_t buflen);
+int bus_dmamap_create(bus_dma_tag_t dmat, int flags, bus_dmamap_t *mapp);
+int bus_dmamap_destroy(bus_dma_tag_t dmat, bus_dmamap_t map);
+int _bus_dmamap_load_phys(bus_dma_tag_t dmat, bus_dmamap_t map, vm_paddr_t buf, bus_size_t buflen, int flags,
+                          bus_dma_segment_t *segs, int *segp);
+int bus_dmamap_load(bus_dma_tag_t dmat, bus_dmamap_t map, void *buf, bus_size_t buflen,
+                    bus_dmamap_callback_t *callback, void *callback_arg, int flags);
+void bus_dmamap_unload(bus_dma_tag_t dmat, bus_dmamap_t map);
+void bus_dmamap_sync(bus_dma_tag_t dmat, bus_dmamap_t map, bus_dmasync_op_t op);
+int bus_dmamem_alloc(bus_dma_tag_t dmat, void **vaddr, int flags, bus_dmamap_t *mapp);
+void bus_dmamem_free(bus_dma_tag_t dmat, void *vaddr, bus_dmamap_t map);
 #endif

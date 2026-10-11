@@ -17,6 +17,9 @@ typedef struct vm_page *vm_page_t;
 typedef u_char objtype_t;
 #define OBJT_DEFAULT 0
 #define OBJT_SWAP 1
+/* byte offset <-> page index within an object */
+#define OFF_TO_IDX(off) ((vm_pindex_t)(((vm_ooffset_t)(off)) >> PAGE_SHIFT))
+#define IDX_TO_OFF(idx) (((vm_ooffset_t)(idx)) << PAGE_SHIFT)
 #define OBJT_VNODE 2
 #define OBJT_DEVICE 3
 #define OBJT_PHYS 4

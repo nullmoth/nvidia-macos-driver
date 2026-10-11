@@ -65,6 +65,12 @@ int nmx_ticks(void)
     return (int)(abs_to_ns(mach_absolute_time() - nmx_boot_abs) / (1000000000ULL / (uint64_t)hz));
 }
 
+/* LinuxKPI's jiffies: the same clock, 64 bits wide so it never wraps */
+unsigned long nmx_jiffies(void)
+{
+    return (unsigned long)(abs_to_ns(mach_absolute_time() - nmx_boot_abs) / (1000000000ULL / (uint64_t)hz));
+}
+
 /* ---- per-thread and per-process records ---------------------------------------------------------------------------- */
 
 #define NMX_THREAD_BUCKETS 256
@@ -395,16 +401,17 @@ static void sysinit_sorted(const struct sysinit **out, int n, int uninit)
 
 int nmx_sysinit_ran;
 
-void nmx_sysinit_run(void)
+int nmx_sysinit_run(void)
 {
     int n = sysinit_count();
     if (n <= 0) {
-        /* a missing set means every module_init and static lock silently did nothing: refuse to continue */
-        panic("NullMoth xkpi: SYSINIT set is empty (%d) - the build lost its initialisers", n);
+        /* a missing set means every module_init and static lock silently did nothing: refuse to start */
+        printf("NullMoth xkpi: SYSINIT set is empty (%d) - the build lost its initialisers; not starting\n", n);
+        return ENOEXEC;
     }
     const struct sysinit **v = IOMallocZero(sizeof(*v) * (size_t)n);
     if (v == NULL)
-        panic("NullMoth xkpi: no memory to sort %d SYSINITs", n);
+        return ENOMEM;
     sysinit_sorted(v, n, 0);
     for (int i = 0; i < n && v[i]; i++) {
         v[i]->func(v[i]->udata);
@@ -412,6 +419,7 @@ void nmx_sysinit_run(void)
     }
     IOFree(v, sizeof(*v) * (size_t)n);
     printf("NullMoth xkpi: ran %d SYSINITs\n", nmx_sysinit_ran);
+    return 0;
 }
 
 void nmx_sysuninit_run(void)
@@ -526,4 +534,70 @@ void tdsignal(struct thread *td, int sig)
 {
     if (td && td->td_proc && td->td_proc->nmx_xnu)
         proc_signal(td->td_proc->p_pid, sig);
+}
+
+/* ---- helpers for LinuxKPI's per-thread state (the linux_current fork) ---------------------------------------------- */
+
+/* xnu's proc_find/proc_exiting/proc_rele (declared by xnu with its own proc_t); the pointer is only a key here */
+
+int linux_alloc_current_noop(struct thread *td, int flags)
+{
+    return 0;
+}
+
+/* the port's record for a running process, or NULL; looked up through xnu so a stale pid finds nothing */
+struct proc *nmx_proc_find(pid_t pid)
+{
+    void *xp = (void *)proc_find(pid);
+    if (xp == NULL)
+        return NULL;
+    struct proc *p = nmx_proc_for(xp);
+    proc_rele((proc_t)xp);
+    return p;
+}
+
+bool nmx_proc_exiting(struct proc *p)
+{
+    if (p == NULL || p->nmx_xnu == NULL)
+        return false;
+    void *xp = (void *)proc_find(p->p_pid);
+    if (xp == NULL)
+        return true;            /* already gone */
+    bool exiting = proc_exiting((proc_t)xp) != 0;
+    proc_rele((proc_t)xp);
+    return exiting;
+}
+
+/* any thread of the process that has Linux state; with 'get' its task_struct gains a reference under the lock */
+struct task_struct *nmx_proc_any_task(struct proc *p, bool get)
+{
+    extern void nmx_task_get(struct task_struct *ts);
+    struct task_struct *ts = NULL;
+    lck_spin_lock(nmx_thread_lock);
+    for (unsigned b = 0; b < NMX_THREAD_BUCKETS && ts == NULL; b++)
+        for (struct nmx_thread_rec *r = nmx_threads[b]; r; r = r->next)
+            if (r->td.td_proc == p && r->td.td_lkpi_task != NULL) {
+                ts = r->td.td_lkpi_task;
+                if (get)
+                    nmx_task_get(ts);
+                break;
+            }
+    lck_spin_unlock(nmx_thread_lock);
+    return ts;
+}
+
+/* detaches every thread's Linux state and releases it outside the registry lock (unload) */
+void nmx_threads_release_all(void (*release)(struct thread *))
+{
+    for (;;) {
+        struct thread *td = NULL;
+        lck_spin_lock(nmx_thread_lock);
+        for (unsigned b = 0; b < NMX_THREAD_BUCKETS && td == NULL; b++)
+            for (struct nmx_thread_rec *r = nmx_threads[b]; r; r = r->next)
+                if (r->td.td_lkpi_task != NULL) { td = &r->td; break; }
+        lck_spin_unlock(nmx_thread_lock);
+        if (td == NULL)
+            return;
+        release(td);            /* clears td_lkpi_task */
+    }
 }

@@ -238,6 +238,9 @@ struct uma_zone {
     uma_init init;
     uma_fini fini;
     uint32_t flags;
+    uma_import import;              /* cache zones: items come from the creator, not from the allocator */
+    uma_release release;
+    void *arg;
 };
 
 MALLOC_DEFINE(M_UMA, "uma", "UMA zone items");
@@ -259,6 +262,31 @@ uma_zone_t uma_zcreate(const char *name, size_t size, uma_ctor ctor, uma_dtor dt
     return z;
 }
 
+/*
+ * A cache zone owns no memory: every item is obtained through import() and handed back through release(). FreeBSD
+ * keeps released items in per-CPU buckets; here each allocation imports one item, which gives the same results.
+ */
+uma_zone_t uma_zcache_create(const char *name, int size, uma_ctor ctor, uma_dtor dtor, uma_init zinit, uma_fini zfini,
+                             uma_import zimport, uma_release zrelease, void *arg, int flags)
+{
+    if (zimport == NULL || zrelease == NULL)
+        return NULL;
+    struct uma_zone *z = malloc(sizeof(*z), M_UMA, M_WAITOK | M_ZERO);
+    if (z == NULL)
+        return NULL;
+    z->name = name;
+    z->size = size < 0 ? 0 : (size_t)size;
+    z->ctor = ctor;
+    z->dtor = dtor;
+    z->init = zinit;
+    z->fini = zfini;
+    z->import = zimport;
+    z->release = zrelease;
+    z->arg = arg;
+    z->flags = (uint32_t)flags;
+    return z;
+}
+
 void uma_zdestroy(uma_zone_t z)
 {
     free(z, M_UMA);
@@ -266,6 +294,16 @@ void uma_zdestroy(uma_zone_t z)
 
 void *uma_zalloc_arg(uma_zone_t z, void *arg, int flags)
 {
+    if (z->import) {
+        void *it = NULL;
+        if (z->import(z->arg, &it, 1, -1, flags) != 1 || it == NULL)
+            return NULL;
+        if (z->ctor && z->ctor(it, (int)z->size, arg, flags) != 0) {
+            z->release(z->arg, &it, 1);
+            return NULL;
+        }
+        return it;
+    }
     size_t align = (size_t)z->align + 1;
     void *item = (align > 16) ? malloc_aligned(z->size, align, M_UMA, flags) : malloc(z->size, M_UMA, flags);
     if (item == NULL)
@@ -291,6 +329,10 @@ void uma_zfree_arg(uma_zone_t z, void *item, void *arg)
         return;
     if (z->dtor)
         z->dtor(item, (int)z->size, arg);
+    if (z->import) {
+        z->release(z->arg, &item, 1);
+        return;
+    }
     if (z->fini)
         z->fini(item, (int)z->size);
     free(item, M_UMA);
