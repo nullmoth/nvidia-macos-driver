@@ -845,7 +845,10 @@ for k in boot-args csr-active-config; do echo "$del" | grep -q "<string>$k</stri
 # login, and "nvram -d" did not help), so the flag came back at every boot, kept the kexts off and ran the removal again.
 # OpenCore writes through the firmware before macOS starts, so it clears the flag there. The picker tool still works on
 # these machines when macOS is chosen in the same picker session, because the tool runs after OpenCore's delete.
-if nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove >/dev/null 2>&1 && ! echo "$del" | grep -q "<string>nullmoth-remove</string>"; then
+# Booter > Quirks > DisableVariableWrite (1401 1.14 sets it on Ryzen 7000/8000/9000 desktops, which froze 19 minutes into
+# the install) blocks every NVRAM write from macOS, so on those machines the flag is cleared by OpenCore from the start.
+if { nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove >/dev/null 2>&1 || [ "$(get Booter.Quirks.DisableVariableWrite)" = true ]; } \
+   && ! echo "$del" | grep -q "<string>nullmoth-remove</string>"; then
   DELADD+=("nullmoth-remove"); echo "CHANGE NVRAM Delete: add nullmoth-remove (a leftover remove flag this Mac cannot clear from macOS)"
 fi
 NEEDTOOL=0; [ -z "$(tool_index)" ] && { NEEDTOOL=1; echo "CHANGE boot picker: add \"$TOOL_NAME\" (the way back if the driver ever stops macOS starting)"; }
@@ -1036,6 +1039,9 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 [ -e /Library/NullMoth/no-wsreset ] && exit 0
 MARK=/var/run/nullmoth-wsreset.done
 [ -e "$MARK" ] && exit 0
+# 1401 issue #108: launchd starts this before the kexts are listed, and a single check ended the run for the whole
+# boot (no display-trace directory, no capture). Wait up to 60 s for the driver, then decide.
+for i in $(seq 1 60); do kextstat 2>/dev/null | grep -q com.nullmoth.NVAccel && break; sleep 1; done
 kextstat 2>/dev/null | grep -q com.nullmoth.NVAccel || exit 0
 nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove >/dev/null 2>&1 && exit 0
 LOG=/Library/NullMoth/wsreset.log
@@ -1110,6 +1116,9 @@ ok "flicker stopgap armed (restarts WindowServer once per boot; opt out with /Li
 cat > /Library/NullMoth/nullmoth-displaytrace.sh <<'DT'
 #!/bin/bash
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
+# 1401 issue #108: launchd starts this before the kexts are listed, and a single check ended the run for the whole
+# boot (no display-trace directory, no capture). Wait up to 60 s for the driver, then decide.
+for i in $(seq 1 60); do kextstat 2>/dev/null | grep -q com.nullmoth.NVAccel && break; sleep 1; done
 kextstat 2>/dev/null | grep -q com.nullmoth.NVAccel || exit 0
 D=/Library/NullMoth/display-trace; mkdir -p "$D"; chmod 755 "$D"
 T=$D/trace.txt; K=$D/kernel.txt; W=$D/ws.txt; CAP=8388608

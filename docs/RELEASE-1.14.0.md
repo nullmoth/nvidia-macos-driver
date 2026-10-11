@@ -12,6 +12,11 @@ Every fix below came from the logs, chats and GitHub issues you sent. For each: 
 - **4K at 120 Hz and other fast modes black or offline** (#77). Modes faster than DisplayPort 1.4 can carry need
   compression (DSC). The driver now tells macOS the compression settings, so macOS stops judging those modes impossible.
 - **The monitor kept the last frame when the display slept** (#90). The display now turns off, and on again on wake.
+- **No picture after switching the monitor to another input and back** (#110). The driver only brought up displays it had
+  never seen; a known display that comes back now gets its picture again.
+- **Black screen after about 100 seconds on older Intel boards without Resizable BAR** (B150 and similar). Their firmware
+  does not list a 64-bit PCI range, so the driver found no room for the card's memory window. On Intel CPUs it now uses
+  the range every Intel board from 6th gen on decodes (fix found and tested by a community member).
 - **Small-BAR cards refusing graphics memory** (#27, #28). The memory the driver hands out grows with the BAR window instead
   of a fixed 192 MB, and the boot screen's region no longer blocks the last megabyte.
 - **The NullMoth boot logo** replaces the Apple logo while macOS starts and stays through the hand-over to the driver. On by
@@ -36,6 +41,8 @@ Every fix below came from the logs, chats and GitHub issues you sent. For each: 
 - **Start once without the driver**: a new boot-picker entry starts macOS or Recovery one time without the driver.
 - **The app updates itself**: Updates → Check for updates finds a newer app too, and Update the app replaces it in place.
 - **Send logs** now records every GPU of any brand (gpu-all.txt), so GPUs the driver does not cover yet can be built.
+- **The display recorder never started** (#108), so Send logs and Record the flicker had no display trace. It now waits
+  for the driver at start-up. The kernel log in Send logs is no longer filled by one line repeated every frame (1401 #16).
 
 ## Still open
 - HDMI and DisplayPort audio from the NVIDIA card.

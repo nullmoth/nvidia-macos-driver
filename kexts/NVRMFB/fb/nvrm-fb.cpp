@@ -82,6 +82,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     struct NvKmsKapiDisplayMode fMode = {};
     struct NvKmsKapiMemory *fMem = nullptr; struct NvKmsKapiSurface *fSurf = nullptr;
     void *fKva = nullptr; NvU64 fPhys = 0, fSize = 0; NvU32 fPitch = 0, fW = 0, fH = 0;
+    NvU64 fScanLogPhys = 0; NvU32 fScanLogW = 0, fScanLogH = 0, fScanLogPitch = 0;  // last nvScanoutInfo answer logged
     IODeviceMemory *fConsMem = nullptr; IOMemoryMap *fConsMap = nullptr;
     void *fConsKva = nullptr; NvU64 fConsPhys = 0, fConsSize = 0; NvU32 fConsPitch = 0;
     // The centre of the boot image (the logo the firmware screen showed: NullMoth's, or Apple's when it is turned off),
@@ -175,6 +176,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     bool reflip();
     bool headOff();
     bool fHeadSlept = false;
+    bool fDpyLost = false;   // hot-plug saw this framebuffer's display disconnected; light it again when it returns
     static void eventCallback(const struct NvKmsKapiEvent *event) {
         // only display changes are logged: the routine events arrive every minute for as long as the Mac is up, and
         // in sent logs they pushed every boot line past the collector's 512 KB limit
@@ -820,6 +822,8 @@ IOReturn NVRMNVDAFramebuffer::open()
 }
 
 static NVRMNVDAFramebuffer *gFB = nullptr;
+// Every started framebuffer, so hot-plug can find the one driving a display that went away and came back.
+static NVRMNVDAFramebuffer *gFBs[16];
 // Displays connected after boot. At boot every display NVKMS reports connected gets an index; the nubs past that count
 // had nothing to drive and their framebuffers did not start, so a monitor switched on or plugged in later stayed dark
 // until a restart (the event arrived and was only logged). Apple's drivers bring such a display up as a new
@@ -843,14 +847,29 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
     struct NvKmsKapiDynamicDisplayParams *dd = (struct NvKmsKapiDynamicDisplayParams *)IOMalloc(sizeof *dd);
     if (!dd) return;
     int added = 0;
+    NVRMNVDAFramebuffer *relight[16]; unsigned nrelight = 0;
     IORecursiveLock *sl = startLock();
     if (sl) IORecursiveLockLock(sl);
     for (NvU32 i = 0; i < n; i++) {
         bool known = false;
         for (int k = 0; k < gNDpy; k++) if (gDpy[k].handle == handles[i]) { known = true; break; }
-        if (known) continue;
         nvu_zero(dd, sizeof *dd); dd->handle = handles[i];
-        if (!me->fKms->getDynamicDisplayInfo(me->fDev, dd) || !dd->connected) continue;
+        bool dynOk = me->fKms->getDynamicDisplayInfo(me->fDev, dd);
+        if (known) {
+            // 1401/driver issue #110: switching the monitor to another input and back left it with no picture. The link
+            // drops, the head stops scanning out, and this path skipped every display it already knew. A known display
+            // that was seen disconnected and is connected again gets its head lit with the same full mode set the
+            // display-wake path uses (reflip). Only on that transition, so other display events cause no modeset.
+            if (!dynOk) continue;
+            for (unsigned f = 0; f < sizeof gFBs / sizeof gFBs[0]; f++) {
+                NVRMNVDAFramebuffer *fb = gFBs[f];
+                if (!fb || fb->fDisplay != handles[i]) continue;
+                if (!dd->connected) { if (!fb->fDpyLost) FBLOG("hot-plug: display 0x%x went away (fb %u)", handles[i], fb->fIndex); fb->fDpyLost = true; }
+                else if (fb->fDpyLost && nrelight < sizeof relight / sizeof relight[0]) { fb->fDpyLost = false; fb->retain(); relight[nrelight++] = fb; }
+            }
+            continue;
+        }
+        if (!dynOk || !dd->connected) continue;
         struct NvKmsKapiStaticDisplayInfo si = {};
         if (!me->fKms->getStaticDisplayInfo(me->fDev, handles[i], &si)) continue;
         if (gNDpy >= (int)(sizeof gDpy / sizeof gDpy[0])) break;
@@ -864,6 +883,13 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
     }
     if (sl) IORecursiveLockUnlock(sl);
     IOFree(dd, sizeof *dd);
+    for (unsigned f = 0; f < nrelight; f++) {
+        NVRMNVDAFramebuffer *fb = relight[f];
+        bool ok = !OSAddAtomic(0, &fb->fStopping) && !fb->fHeadSlept && fb->reflip();
+        FBLOG("hot-plug: display 0x%x is back (fb %u): head %u lit again -> ok %u rc %d",
+              fb->fDisplay, fb->fIndex, fb->fHead, (unsigned)ok, fb->fReflipRc);
+        fb->release();
+    }
     if (!added) return;
     IOService *nub0 = me->getProvider(), *gpu = nub0 ? nub0->getProvider() : nullptr;
     OSIterator *it = gpu ? gpu->getChildIterator(gIOServicePlane) : nullptr;
@@ -1441,6 +1467,12 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
           (unsigned long long)(nvrmVramBudget(fBarLen) >> 20));
     if (fIndex == 0 && gFB != this) { retain(); gFB = this; }
     if (fIndex == 0 && !gHotplug) gHotplug = thread_call_allocate(hotplugFire, nullptr);
+    if (fIndex < sizeof gFBs / sizeof gFBs[0]) {
+        IORecursiveLock *sl = startLock();
+        if (sl) IORecursiveLockLock(sl);
+        if (gFBs[fIndex] != this) { retain(); if (gFBs[fIndex]) gFBs[fIndex]->release(); gFBs[fIndex] = this; }
+        if (sl) IORecursiveLockUnlock(sl);
+    }
     fPhysForVa = (nvrm_phys_for_va_t)(uintptr_t)propU64(provider, "phys-for-va");
     if (!fKms || !fPhysForVa || !fKms->getFlipPendingStatus || !fKms->dupMemory) { FBLOG("nub lacks nvkms-kapi/phys-for-va properties"); return false; }
     setProperty("IOFBDependentID", (unsigned long long)0x4E56524D00000001ull, 64);
@@ -1515,6 +1547,14 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
     }
     if (fHwVblCb && fKms && fDev) {
         fKms->unregisterVblankIntrCallback(fDev, fHead, fHwVblCb); fHwVblCb = nullptr;
+    }
+    if (fIndex < sizeof gFBs / sizeof gFBs[0]) {
+        IORecursiveLock *sl = startLock();
+        if (sl) IORecursiveLockLock(sl);
+        bool mine = gFBs[fIndex] == this;
+        if (mine) gFBs[fIndex] = nullptr;
+        if (sl) IORecursiveLockUnlock(sl);
+        if (mine) release();
     }
     thread_call_t *calls[] = {&fHwVblCall, &fReflip, &fBars, &fVblTimer, &fSampler, &fHeadProbe};
     for (unsigned i = 0; i < sizeof calls / sizeof calls[0]; ++i) {
@@ -2182,8 +2222,13 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
         r->actualSize = (unsigned long long)fPitch * fH;
         r->width = fW; r->height = fH; r->pitch = fPitch;
         r->handle = fMem;
-        FBLOG("nvScanoutInfo -> phys 0x%llx %ux%u pitch %u (%llu bytes)",
-              (unsigned long long)fPhys, fW, fH, fPitch, (unsigned long long)r->actualSize);
+        // Asked once per frame: logging every answer was 92% of a 512 KiB Send-logs kernel log (1401 issue #16), about
+        // 67 s of history. Log only when the answer changes.
+        if (fPhys != fScanLogPhys || fW != fScanLogW || fH != fScanLogH || fPitch != fScanLogPitch) {
+            fScanLogPhys = fPhys; fScanLogW = fW; fScanLogH = fH; fScanLogPitch = fPitch;
+            FBLOG("nvScanoutInfo -> phys 0x%llx %ux%u pitch %u (%llu bytes)",
+                  (unsigned long long)fPhys, fW, fH, fPitch, (unsigned long long)r->actualSize);
+        }
         return kIOReturnSuccess;
     }
     if (functionName && functionName->isEqualTo(NVRM_GPUVA_FN_HANDLES)) {

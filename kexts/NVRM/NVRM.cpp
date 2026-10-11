@@ -712,6 +712,27 @@ static bool nvrmRangeBusy(UInt64 lo, UInt64 hi, IOPCIDevice *self, IOPCIDevice *
     return busy;
 }
 
+// 10-11 (community fix, Discord #general, i5-6500 on B150): Intel's reference _CRS leaves out the 64-bit window when the
+// firmware sets M64L to 0, which this board does even with Above 4G Decoding on. The fallback above then clipped to an
+// empty window at the CPU's 39-bit top ("cannot hold 8224 MB — not placing"), then the 100 s timeout and a black screen.
+// An SSDT giving the same window through _CRS placed BAR1 at 0x7c00000000 and ran the desktop. Every Intel 6th-14th gen
+// probe reports PCI 64-bit space ending at 0x7fffffffff, so the 256-512 GB range is used, but only when the firmware has
+// already put BAR1 above 4 GB (it decodes 64-bit there), the CPU is Intel and reaches 39 bits, and RAM + 4 GB stays below
+// 256 GB. Otherwise the reason is returned and the old window is kept; AMD is unchanged.
+static const UInt64 kIntel39Min = 0x4000000000ULL, kIntel39Max = 0x7fffffffffULL;
+static const char *nvrmIntel39Window(unsigned physBits, UInt64 fwBar1)
+{
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0u), "c"(0u));
+    if (!(b == 0x756e6547u && d == 0x49656e69u && c == 0x6c65746eu)) return "not an Intel CPU";
+    if (physBits < 39) return "CPU reaches fewer than 39 bits";
+    if (fwBar1 < (4ULL << 30)) return "firmware left BAR1 below 4 GB";
+    UInt64 memsize = 0; size_t l = sizeof memsize;
+    if (sysctlbyname("hw.memsize", &memsize, &l, NULL, 0) != 0 || !memsize) return "hw.memsize unreadable";
+    if (memsize + (4ULL << 30) >= kIntel39Min) return "RAM reaches into 256 GB";
+    return NULL;
+}
+
 bool NVRM::placeLargeBar1()
 {
     static const UInt64 kBigBase = 0x10000000000ULL;
@@ -767,9 +788,12 @@ bool NVRM::placeLargeBar1()
     const UInt64 physTop = physBits >= 63 ? ~0ULL : (1ULL << physBits) - 1;
     if (nvrmHostWindow(fPCI, &wMin, &wMax)) {
         LOG("bar1: host bridge 64-bit window 0x%llx-0x%llx (ACPI _CRS), CPU reaches %u bits", wMin, wMax, physBits);
-    } else {
+    } else if (const char *why = nvrmIntel39Window(physBits, ((UInt64)old18 << 32) | (lo14 & ~0xFULL))) {
         wMin = kBigBase; wMax = kHostWindowEnd;   // the pre-10-07 placement, kept only where the CPU can reach it
-        LOG("bar1: no 64-bit window in the host bridge's _CRS — using 0x%llx-0x%llx (CPU reaches %u bits)", wMin, wMax, physBits);
+        LOG("bar1: no 64-bit window in the host bridge's _CRS (%s) — using 0x%llx-0x%llx (CPU reaches %u bits)", why, wMin, wMax, physBits);
+    } else {
+        wMin = kIntel39Min; wMax = kIntel39Max;
+        LOG("bar1: no 64-bit window in the host bridge's _CRS — using Intel's 256-512 GB PCI range 0x%llx-0x%llx (CPU reaches %u bits)", wMin, wMax, physBits);
     }
     if (wMax > physTop) wMax = physTop;
     const UInt64 total = bar1Size + bar3Size;
@@ -795,10 +819,13 @@ bool NVRM::placeLargeBar1()
     if (sec != mybus || sub != mybus) { LOG("bar1: root port spans buses %u-%u, not only ours (%u) — not placing", sec, sub, mybus); return false; }
     UInt32 rp24 = rp->configRead32(0x24), rp28 = rp->configRead32(0x28), rp2c = rp->configRead32(0x2c);
     if ((rp24 & 0xf) != 1) { LOG("bar1: root port prefetchable window is not 64-bit (0x%x) — not placing", rp24); return false; }
+    // The top slot can be taken by another device (a second GPU, an NVMe's 64-bit BAR); try the slots below it.
+    for (unsigned tries = 1; nvrmRangeBusy(bar1Base, winEnd, fPCI, rp); tries++) {
+        if (tries >= 16 || bar1Base < wMin + bar1Size) { LOG("bar1: destination is in use — not placing"); return false; }
+        bar1Base -= bar1Size; bar3Base = bar1Base + bar1Size; winEnd = bar3Base + bar3Size - 1;
+    }
     LOG("bar1: placing BAR1 %llu MB @0x%llx, BAR3 %llu MB @0x%llx, root port window 0x%llx-0x%llx (was 0x%08x %08x/%08x)",
         bar1Size >> 20, bar1Base, bar3Size >> 20, bar3Base, bar1Base, winEnd, rp24, rp28, rp2c);
-
-    if (nvrmRangeBusy(bar1Base, winEnd, fPCI, rp)) { LOG("bar1: destination is in use — not placing"); return false; }
 
     UInt16 cmd = fPCI->configRead16(0x04);
     fPCI->configWrite16(0x04, cmd & ~0x2);
