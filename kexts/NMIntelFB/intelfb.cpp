@@ -19,6 +19,7 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 #include <kern/thread_call.h>
+#include <sys/sysctl.h>
 
 #define IFBLOG(fmt, ...) IOLog("NMIntelFB: " fmt "\n", ##__VA_ARGS__)
 
@@ -53,6 +54,13 @@ constexpr uint32_t PLANE_SURF(int p)   { return 0x7019Cu + (uint32_t)p * 0x1000u
 constexpr uint32_t TRANSCONF(int p)    { return 0x70008u + (uint32_t)p * 0x1000u; }
 constexpr uint32_t HTOTAL(int t)       { return 0x60000u + (uint32_t)t * 0x1000u; }
 constexpr uint32_t VTOTAL(int t)       { return 0x6000Cu + (uint32_t)t * 0x1000u; }
+constexpr uint32_t HBLANK(int t)       { return 0x60004u + (uint32_t)t * 0x1000u; }
+constexpr uint32_t HSYNC(int t)        { return 0x60008u + (uint32_t)t * 0x1000u; }
+constexpr uint32_t VBLANK(int t)       { return 0x60010u + (uint32_t)t * 0x1000u; }
+constexpr uint32_t VSYNC(int t)        { return 0x60014u + (uint32_t)t * 0x1000u; }
+// one count per vblank (Linux PIPE_FRMCOUNT_G4X, 0x70040 + pipe): counting it is how the real refresh is known without
+// reading the PLL and M/N values back
+constexpr uint32_t FRMCOUNT(int p)     { return 0x70040u + (uint32_t)p * 0x1000u; }
 
 // PLANE_CTL (display 11+): enable bit 31, format bits 27:23 (8 = XRGB 8:8:8:8, Linux PLANE_CTL_FORMAT_XRGB_8888 on
 // ICL+), tiling bits 12:10 (0 = linear)
@@ -78,14 +86,14 @@ class NMIntelFB : public IOFramebuffer {
         NMIntelFB *me = (NMIntelFB *)p0;
         if (me->fStopping) return;
         if (me->fVbl.proc) { me->fVbl.proc(me->fVbl.target, me->fVbl.ref); me->fVblCalls++; }
-        uint64_t period; nanoseconds_to_absolutetime(16666667ull, &period);
+        uint64_t period; nanoseconds_to_absolutetime(me->fFrameNs, &period);
         uint64_t now = mach_absolute_time();
         me->fVblNext = (me->fVblNext && me->fVblNext + period > now) ? me->fVblNext + period : now + period;
         thread_call_enter_delayed(me->fVblTimer, me->fVblNext);
     }
     void armVbl() {
         fVblTimer = thread_call_allocate(vblFire, this);
-        if (fVblTimer) { uint64_t d; clock_interval_to_deadline(16667, kMicrosecondScale, &d); fVblNext = d; thread_call_enter_delayed(fVblTimer, d); }
+        if (fVblTimer) { uint64_t d; clock_interval_to_deadline((uint32_t)(fFrameNs / 1000), kMicrosecondScale, &d); fVblNext = d; thread_call_enter_delayed(fVblTimer, d); }
         IFBLOG("vbl timer %s", fVblTimer ? "armed (60 Hz)" : "ALLOCATE FAILED");
     }
 #ifdef NMINTELFB_VIRTUAL
@@ -93,21 +101,29 @@ class NMIntelFB : public IOFramebuffer {
     IOTimerEventSource *fTimer = nullptr;
     unsigned fSamples = 0;
     // 64 pixels across the buffer: how many are non-black and how many differ from the first, published in the registry
-    void sample() {
-        if (!fSurfMap) return;
+public:
+    // 64 pixels across the buffer, read on demand through sysctl debug.nmintelfb_sample (the registry property the
+    // timer set never showed up on studio, 10-10)
+    void sampleInto(char *b, size_t n) {
+        if (!fSurfMap) { snprintf(b, n, "no surface"); return; }
         const volatile uint32_t *px = (const volatile uint32_t *)fSurfMap->getVirtualAddress();
         unsigned nz = 0, varied = 0; uint32_t first = px[0] & 0xFFFFFF;
         for (unsigned i = 0; i < 8; i++) for (unsigned j = 0; j < 8; j++) {
             uint32_t v = px[(fHeight * (2 * i + 1) / 16) * (fRowBytes / 4) + fWidth * (2 * j + 1) / 16] & 0xFFFFFF;
             if (v) nz++; if (v != first) varied++; }
-        char b[96]; snprintf(b, sizeof b, "sample %u: nonzero %u/64 varied %u/64 first 0x%06x", ++fSamples, nz, varied, first);
-        setProperty("NMIntelFBSample", b);
+        snprintf(b, n, "sample %u: nonzero %u/64 varied %u/64 first 0x%06x", ++fSamples, nz, varied, first);
     }
+    void sample() { char b[96]; sampleInto(b, sizeof b); setProperty("NMIntelFBSample", b); }
+private:
 #endif   // write-combined CPU view of the scan-out surface (NVIDIA frames land here)
     volatile uint8_t *fRegs = nullptr;
     IOPhysicalAddress fApertureBase = 0;
     IOPhysicalLength fApertureLen = 0;
     uint32_t fWidth = 0, fHeight = 0, fRowBytes = 0, fSurf = 0, fRefresh16 = 60 << 16;
+    uint64_t fFrameNs = 16666667ull;   // vblank period; measured from the pipe's frame counter on real hardware
+    // transcoder timing (active, total, sync start/end) for getTimingInfoForDisplayMode
+    uint32_t fHT = 0, fVT = 0, fHSS = 0, fHSE = 0, fVSS = 0, fVSE = 0;
+    uint64_t fPclk = 0;
     int fPipe = -1;
     uint8_t fVer = 0;
 
@@ -130,6 +146,21 @@ public:
     IOReturn getPixelInformation(IODisplayModeID mode, IOIndex depth, IOPixelAperture aperture, IOPixelInformation *pi) override;
     IOReturn getCurrentDisplayMode(IODisplayModeID *mode, IOIndex *depth) override { *mode = 1; *depth = 0; return kIOReturnSuccess; }
     IOReturn getStartupDisplayMode(IODisplayModeID *mode, IOIndex *depth) override { return getCurrentDisplayMode(mode, depth); }
+    // WindowServer showed the panel at 0.00 Hz without this (studio virtual panel, 10-10)
+    IOReturn getTimingInfoForDisplayMode(IODisplayModeID mode, IOTimingInformation *info) override {
+        if (mode != 1 || !info) return kIOReturnUnsupportedMode;
+        bzero(info, sizeof(*info));
+        info->appleTimingID = kIOTimingIDInvalid;
+        if (!fPclk || fHT <= fWidth || fVT <= fHeight) return kIOReturnSuccess;
+        IODetailedTimingInformationV2 &d = info->detailedInfo.v2;
+        d.pixelClock = d.minPixelClock = d.maxPixelClock = fPclk;
+        d.horizontalActive = fWidth; d.horizontalBlanking = fHT - fWidth;
+        d.horizontalSyncOffset = fHSS > fWidth ? fHSS - fWidth : 0; d.horizontalSyncPulseWidth = fHSE > fHSS ? fHSE - fHSS : 0;
+        d.verticalActive = fHeight; d.verticalBlanking = fVT - fHeight;
+        d.verticalSyncOffset = fVSS > fHeight ? fVSS - fHeight : 0; d.verticalSyncPulseWidth = fVSE > fVSS ? fVSE - fVSS : 0;
+        info->flags = kIODetailedTimingValid;
+        return kIOReturnSuccess;
+    }
     IOReturn setDisplayMode(IODisplayModeID mode, IOIndex depth) override { return (mode == 1 && depth == 0) ? kIOReturnSuccess : kIOReturnUnsupported; }
     IOItemCount getConnectionCount() override { return 1; }
     IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) override;
@@ -153,10 +184,22 @@ public:
 };
 
 OSDefineMetaClassAndStructors(NMIntelFB, IOFramebuffer)
+#ifdef NMINTELFB_VIRTUAL
+static NMIntelFB *gVirt;
+static int nmintelfb_sample_sysctl SYSCTL_HANDLER_ARGS
+{
+    char b[128] = "no panel";
+    if (gVirt) gVirt->sampleInto(b, sizeof b);
+    return sysctl_handle_string(oidp, b, sizeof b, req);
+}
+SYSCTL_PROC(_debug, OID_AUTO, nmintelfb_sample, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, nullptr, 0,
+            nmintelfb_sample_sysctl, "A", "64 pixels of the virtual panel: non-black and varied counts");
+#endif
 
 IOService *NMIntelFB::probe(IOService *provider, SInt32 *score)
 {
 #ifdef NMINTELFB_VIRTUAL
+    if (!provider->getProperty("nm-intel-panel")) return nullptr;   // only the nub the loader published
     // test build: a virtual 1920x1080 "panel" in system memory, so the NVIDIA -> Intel frame path can be proven on a
     // machine with no Intel GPU (frames composited on the NVIDIA card must arrive in this buffer)
     fVer = 0xFF; return IOFramebuffer::probe(provider, score);
@@ -189,11 +232,26 @@ bool NMIntelFB::adoptFirmwareMode()
         if ((uint64_t)fSurf + (uint64_t)fRowBytes * fHeight > fApertureLen) {
             IFBLOG("pipe %c: surface at 0x%x is past the %llu MiB aperture", 'A' + p, fSurf, (unsigned long long)(fApertureLen >> 20)); return false;
         }
-        // refresh from the transcoder timings; the pixel clock lives in the PLL, so use the panel's standard 60 Hz
-        // unless the totals say otherwise later (phase 2 reads the DPLL)
-        uint32_t ht = (rd(HTOTAL(p)) >> 16) + 1, vt = (rd(VTOTAL(p)) >> 16) + 1;
+        // the transcoder that feeds pipe p is p on these display versions (eDP on transcoder A in every recording)
+        fHT = (rd(HTOTAL(p)) >> 16) + 1; fVT = (rd(VTOTAL(p)) >> 16) + 1;
+        fHSS = (rd(HSYNC(p)) & 0xFFFF) + 1; fHSE = (rd(HSYNC(p)) >> 16) + 1;
+        fVSS = (rd(VSYNC(p)) & 0xFFFF) + 1; fVSE = (rd(VSYNC(p)) >> 16) + 1;
+        // refresh: count vblanks for 250 ms (a 30-240 Hz panel gives 7-60 counts); fall back to 60 Hz if it does not move
+        uint32_t f0 = rd(FRMCOUNT(p)); uint64_t t0 = mach_absolute_time();
+        IOSleep(250);
+        uint32_t f1 = rd(FRMCOUNT(p)); uint64_t t1 = mach_absolute_time(), ns = 0;
+        absolutetime_to_nanoseconds(t1 - t0, &ns);
+        uint32_t frames = f1 - f0;
+        if (frames >= 5 && frames <= 100 && ns) {
+            fFrameNs = ns / frames;
+            uint64_t mhz = (uint64_t)frames * 1000000000000ull / ns;   // refresh in milli-Hz
+            fRefresh16 = (uint32_t)((mhz << 16) / 1000);
+            fPclk = (uint64_t)fHT * fVT * mhz / 1000;
+        } else fPclk = (uint64_t)fHT * fVT * 60;
         fPipe = p;
-        IFBLOG("pipe %c: %ux%u stride %u surface 0x%x (totals %ux%u)", 'A' + p, fWidth, fHeight, fRowBytes, fSurf, ht, vt);
+        IFBLOG("pipe %c: %ux%u stride %u surface 0x%x totals %ux%u, %u vblanks in %llu ms -> %u.%02u Hz, pclk %llu", 'A' + p,
+               fWidth, fHeight, fRowBytes, fSurf, fHT, fVT, frames, (unsigned long long)(ns / 1000000),
+               fRefresh16 >> 16, ((fRefresh16 & 0xFFFF) * 100) >> 16, (unsigned long long)fPclk);
         return true;
     }
     IFBLOG("no pipe is scanning out - the firmware left the panel off; leaving it to the firmware framebuffer");
@@ -204,6 +262,7 @@ bool NMIntelFB::start(IOService *provider)
 {
 #ifdef NMINTELFB_VIRTUAL
     fWidth = 1920; fHeight = 1080; fRowBytes = 7680; fSurf = 0; fPipe = 0;
+    fHT = 2200; fVT = 1125; fHSS = 2008; fHSE = 2052; fVSS = 1084; fVSE = 1089; fPclk = 148500000ull;   // CEA 1080p60
     fVBuf = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous,
                                                              (mach_vm_size_t)fRowBytes * fHeight, 0xFFFFFFFFFFFFF000ull);
     if (!fVBuf || fVBuf->prepare() != kIOReturnSuccess) { IFBLOG("virtual: no contiguous buffer"); OSSafeReleaseNULL(fVBuf); return false; }
@@ -219,6 +278,7 @@ bool NMIntelFB::start(IOService *provider)
         if (fTimer && wl->addEventSource(fTimer) == kIOReturnSuccess) fTimer->setTimeoutMS(2000);
     }
     armVbl();
+    gVirt = this; sysctl_register_oid(&sysctl__debug_nmintelfb_sample);
     IFBLOG("virtual panel published (1920x1080 at phys 0x%llx)", (unsigned long long)fApertureBase);
     return true;
 #endif
@@ -252,7 +312,11 @@ bool NMIntelFB::start(IOService *provider)
 void NMIntelFB::stop(IOService *provider)
 {
     fStopping = true;
-    if (fVblTimer) { thread_call_cancel_wait(fVblTimer); thread_call_free(fVblTimer); fVblTimer = nullptr; }
+#ifdef NMINTELFB_VIRTUAL
+    if (gVirt == this) { sysctl_unregister_oid(&sysctl__debug_nmintelfb_sample); gVirt = nullptr; }
+#endif
+    // thread_call_cancel_wait is not exported to kexts: cancel and retry the free until the callback is out (as NVRMFB)
+    if (fVblTimer) { thread_call_cancel(fVblTimer); while (!thread_call_free(fVblTimer)) { thread_call_cancel(fVblTimer); IOSleep(5); } fVblTimer = nullptr; }
     OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr;
     IOFramebuffer::stop(provider);
 }
@@ -315,3 +379,66 @@ IOReturn NMIntelFB::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1
     }
     return IOFramebuffer::callPlatformFunction(fn, wait, p1, p2, p3, p4);
 }
+
+#ifdef NMINTELFB_VIRTUAL
+// Test loader: attaches a virtual panel under the NVIDIA PCI device on demand, the way the real driver will place the
+// Intel panel so WindowServer composites it on the NVIDIA accelerator.
+class NMIntelFBLoader : public IOService {
+    OSDeclareDefaultStructors(NMIntelFBLoader)
+public:
+    bool start(IOService *provider) override;
+    void stop(IOService *provider) override;
+};
+OSDefineMetaClassAndStructors(NMIntelFBLoader, IOService)
+static int gAttach = 0;
+static int nmintelfb_attach_sysctl SYSCTL_HANDLER_ARGS
+{
+    int v = gAttach, err = sysctl_handle_int(oidp, &v, 0, req);
+    if (err || !req->newptr || v != 1 || gAttach == 1) return err;
+    // A spare NVRMDisplay nub under NVRM (NVRM's own class), marked as the Intel panel: NMIntelFB claims it ahead of
+    // NVRMFB, so the panel sits where NVRMFB does (GPU -> NVRM -> NVRMDisplay -> framebuffer). Starting a framebuffer
+    // directly on the NVIDIA PCI device hung the kernel (studio 10-10).
+    IOService *nub0 = nullptr, *nvrm = nullptr;
+    if (OSDictionary *m = IOService::serviceMatching("NVRMDisplay")) {
+        if (OSIterator *it = IOService::getMatchingServices(m)) {
+            while (OSObject *o = it->getNextObject()) {
+                IOService *n = OSDynamicCast(IOService, o);
+                OSNumber *fi = n ? OSDynamicCast(OSNumber, n->getProperty("fb-index")) : nullptr;
+                if (fi && fi->unsigned32BitValue() == 0) { nub0 = n; nub0->retain(); break; }
+            }
+            it->release();
+        }
+        m->release();
+    }
+    if (nub0) { nvrm = nub0->getProvider(); if (nvrm) nvrm->retain(); }
+    if (!nub0 || !nvrm) { OSSafeReleaseNULL(nub0); OSSafeReleaseNULL(nvrm); IFBLOG("attach: no NVRMDisplay 0 / NVRM"); return ENODEV; }
+    IOService *nub = OSDynamicCast(IOService, OSMetaClass::allocClassWithName("NVRMDisplay"));
+    if (!nub || !nub->init()) { OSSafeReleaseNULL(nub); nub0->release(); nvrm->release(); return ENOMEM; }
+    static const char *const kCopy[] = {"nvkms-kapi", "gpu-id", "phys-for-va"};
+    for (const char *k : kCopy) if (OSObject *v = nub0->getProperty(k)) nub->setProperty(k, v);
+    nub->setProperty("fb-index", 4ull, 32);
+    nub->setProperty("nm-intel-panel", kOSBooleanTrue);
+    nub0->release();
+    if (!nub->attach(nvrm)) { nub->release(); nvrm->release(); return EIO; }
+    nvrm->release();
+    nub->registerService();
+    nub->release();
+    gAttach = 1;
+    IFBLOG("attach: Intel-panel NVRMDisplay nub published under NVRM");
+    return 0;
+}
+SYSCTL_PROC(_debug, OID_AUTO, nmintelfb_attach, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, nullptr, 0,
+            nmintelfb_attach_sysctl, "I", "1 = attach the virtual panel under the NVIDIA display device (test build)");
+bool NMIntelFBLoader::start(IOService *provider)
+{
+    if (!IOService::start(provider)) return false;
+    sysctl_register_oid(&sysctl__debug_nmintelfb_attach);
+    IFBLOG("loader idle until debug.nmintelfb_attach=1");
+    return true;
+}
+void NMIntelFBLoader::stop(IOService *provider)
+{
+    sysctl_unregister_oid(&sysctl__debug_nmintelfb_attach);
+    IOService::stop(provider);
+}
+#endif

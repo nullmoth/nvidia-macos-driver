@@ -252,7 +252,9 @@ public:
                      slotted ? "its extra reference returned" : "NOT slotted: keeping its reference rather than risk a reader");
                 if (slotted) old->release();
             }
-        } else if (!OSCompareAndSwapPtr(nullptr, newService, (void *volatile *)&me->fFB)) newService->release();
+        // only head 0 may become the primary framebuffer: an Intel panel (index 4) publishing first became fFB (10-10 log:
+        // "head 0 displaced NMIntelFB, which published first"), and on a laptop with nothing on the NVIDIA ports it stays
+        } else if (idx != 0 || !OSCompareAndSwapPtr(nullptr, newService, (void *volatile *)&me->fFB)) newService->release();
         unsigned before = me->fDM ? me->fDM->getFramebufferCount() : 0xFFFFFFFFu;
         ALOG("%s published -- display machine framebuffer count = %u (index %u %s)", newService->getName(), before, idx, what);
         if (gNvAccelArmed)
