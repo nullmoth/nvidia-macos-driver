@@ -182,7 +182,10 @@ static inline void nvmtl_resref(id o, int d) {
 static BOOL nvmtl_purge_eligible(NVMTLTexture *t) {
     return !t->_parent && !t->_viewParent && !t->_backBuf && !t->_heap && !t->_subHeap && !t->_surf && !t->_vramOn && !t->_ownView
         && !t->_shareable && !t->_resid && !__atomic_load_n(&t->_nviews, __ATOMIC_ACQUIRE) && t->_i.img && !t->_i.placed
-        && t->_i.usage && !t->_i.vpair && t->_i.samples <= 1 && !(t->_i.usage & 0x20u );
+        && t->_i.usage && !t->_i.vpair && t->_i.samples <= 1 && !(t->_i.usage & 0x20u )
+        // a swizzled sampling view (MTLTextureDescriptor.swizzle) is made against this VkImage; re-homing the memory
+        // recreates the image and would leave that view pointing at the destroyed one
+        && !t->_swzView;
 }
 static uint64_t nvmtl_purge_reclaim(uint64_t need) {
     NSArray *all = nil;
@@ -883,16 +886,19 @@ static void *nvmtl_storage_view_for(NVMTLCommandBuffer *cb, NVMTLTexture *t, BOO
     nvk_image *im = [t nvi];
     if (!im || !im->img || !im->w || !im->h || (im->mips ? im->mips : 1) > 1 || (im->layers ? im->layers : 1) > 1
         || im->mtl_type != 2 || (im->samples ? im->samples : 1) > 1 || im->bw > 1) return NULL;
-    if (!t->_stTwin.img) {
-        if (t->_stTwinTried) return NULL;
-        t->_stTwinTried = YES;
-        if (nvmtl_vk_image_create_typed(im->w, im->h, im->fmt, im->bpp, 0, 1, 1, 2, 1, &t->_stTwin) || !t->_stTwin.storage) {
-            if (t->_stTwin.img) nvmtl_vk_image_destroy(&t->_stTwin);
-            memset(&t->_stTwin, 0, sizeof t->_stTwin);
-            nvlog("storage twin: VkFormat %u %ux%u cannot be a storage image in optimal tiling either - shader writes to it are LOST", im->fmt, im->w, im->h);
-            return NULL;
+    // Created once per texture; two command buffers may encode the same texture on different threads at once.
+    @synchronized (t) {
+        if (!t->_stTwin.img) {
+            if (t->_stTwinTried) return NULL;
+            t->_stTwinTried = YES;
+            if (nvmtl_vk_image_create_typed(im->w, im->h, im->fmt, im->bpp, 0, 1, 1, 2, 1, &t->_stTwin) || !t->_stTwin.storage) {
+                if (t->_stTwin.img) nvmtl_vk_image_destroy(&t->_stTwin);
+                memset(&t->_stTwin, 0, sizeof t->_stTwin);
+                nvlog("storage twin: VkFormat %u %ux%u cannot be a storage image in optimal tiling either - shader writes to it are LOST", im->fmt, im->w, im->h);
+                return NULL;
+            }
+            static int said; if (said++ < 4) nvlog("storage twin: %ux%u VkFormat %u%s is written through an optimal-tiled storage copy", im->w, im->h, im->fmt, t->_surf ? " (IOSurface)" : "");
         }
-        static int said; if (said++ < 4) nvlog("storage twin: %ux%u VkFormat %u%s is written through an optimal-tiled storage copy", im->w, im->h, im->fmt, t->_surf ? " (IOSurface)" : "");
     }
     if (!cb->_stTwins) cb->_stTwins = [NSMutableSet new];
     if (![cb->_stTwins containsObject:t]) {

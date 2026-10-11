@@ -1425,7 +1425,8 @@ static void nvmtl_air_argbuf_walk(NSDictionary *nodes, NSString *node, NSUIntege
         NSString *child = nil; NSUInteger j = i;
         if ([tok[j] isEqualToString:@"!\"air.struct_type_info\""] && j + 1 < tok.count) { child = tok[j + 1]; j += 2; }
         if (j + 6 >= tok.count || ![tok[j] hasPrefix:@"i32 "] || ![tok[j + 1] hasPrefix:@"i32 "] || ![tok[j + 2] hasPrefix:@"i32 "]
-            || ![tok[j + 3] hasPrefix:@"!\""] || ![tok[j + 4] hasPrefix:@"!\""] || ![tok[j + 5] isEqualToString:@"!\"air.indirect_argument\""]) {
+            || ![tok[j + 3] hasPrefix:@"!\""] || ![tok[j + 4] hasPrefix:@"!\""] || tok[j + 4].length < 3 || ![tok[j + 4] hasSuffix:@"\""]
+            || ![tok[j + 5] isEqualToString:@"!\"air.indirect_argument\""]) {
             i++; continue;
         }
         const NSUInteger off = (NSUInteger)[[tok[j] substringFromIndex:4] integerValue], size = (NSUInteger)[[tok[j + 1] substringFromIndex:4] integerValue];
