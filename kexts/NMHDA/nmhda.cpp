@@ -92,7 +92,25 @@ static IOService *wrapProbe(IOService *self, IOService *provider, SInt32 *score)
 }
 static bool wrapStart(IOService *self, IOService *provider) {
     bool r = FunctionCast(wrapStart, orgStart)(self, provider);
-    if (isNvidiaAudio(provider)) report("start", "start %s -> %s", provider->getName(), r ? "ok" : "FAILED");
+    if (isNvidiaAudio(provider)) {
+        report("start", "start %s -> %s", provider->getName(), r ? "ok" : "FAILED");
+        // On a GPU audio link (hda-gfx) the controller keeps the codec link down until the GPU's audio driver announces
+        // itself with iokit_vendor_specific_msg(0) (0xE3FF8000, sender = that driver); AppleGFXHDA does this for AMD and
+        // Intel, and nothing does it for NVIDIA. The GPU function (function 0 of the same slot) stands in as the sender.
+        if (r) {
+            IOService *gpu = nullptr;
+            if (auto parent = provider->getParentEntry(gIOServicePlane))
+                if (auto it = parent->getChildIterator(gIOServicePlane)) {
+                    while (auto o = it->getNextObject()) {
+                        auto pci = OSDynamicCast(IOPCIDevice, o);
+                        if (pci && (readU32(pci, "vendor-id") & 0xFFFF) == 0x10DE && (readU32(pci, "class-code") & 0xFF0000) == 0x030000) { gpu = pci; break; }
+                    }
+                    it->release();
+                }
+            IOReturn m = gpu ? self->message(0xE3FF8000, gpu, nullptr) : kIOReturnNotFound;
+            report("link", "graphics link announce via %s -> 0x%x", gpu ? gpu->getName() : "(no GPU found)", m);
+        }
+    }
     return r;
 }
 
