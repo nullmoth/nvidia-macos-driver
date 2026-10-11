@@ -1,0 +1,15 @@
+/* FreeBSD <sys/_callout.h> on xnu: a callout is an xnu thread_call (see sys/callout.h). */
+#pragma once
+#include <sys/types.h>
+struct lock_object;
+struct callout {
+    void *c_call;                       /* thread_call_t */
+    void (*c_func)(void *);
+    void *c_arg;
+    struct lock_object *c_lock;         /* taken around c_func when set (callout_init_mtx/rw) */
+    volatile int c_flags;               /* CALLOUT_* */
+    volatile uint32_t c_gen;            /* bumped by stop/reset so a stale firing does nothing */
+    volatile int c_running;             /* c_func executing now */
+    int c_cpu;
+    uint64_t c_deadline;                /* mach absolute time */
+};
