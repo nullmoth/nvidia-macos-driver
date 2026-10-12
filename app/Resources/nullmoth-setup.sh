@@ -1106,7 +1106,26 @@ for k in boot-args csr-active-config; do echo "$del" | grep -q "<string>$k</stri
 # these machines when macOS is chosen in the same picker session, because the tool runs after OpenCore's delete.
 # Booter > Quirks > DisableVariableWrite (1401 1.14 sets it on Ryzen 7000/8000/9000 desktops, which froze 19 minutes into
 # the install) blocks every NVRAM write from macOS, so on those machines the flag is cleared by OpenCore from the start.
-if { nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove >/dev/null 2>&1 || [ "$(get Booter.Quirks.DisableVariableWrite)" = true ]; } \
+# Ryzen 7000/8000/9000 (Zen 4/5, AM5 and their laptops): 1401 1.14 turns DisableVariableWrite on for new EFIs, but 173 of
+# 175 Ryzen EFIs uploaded before it had it off, and those installs kept letting macOS write the firmware's NVRAM through a
+# rewritten memory map. On a TUF B650M a restart from macOS froze and the board needed an RMA (chat 10-12). Existing EFIs
+# get the same setting here, the moment the driver is installed or updated. It needs OpenRuntime.efi (it is the quirk's
+# host); without it nothing is changed and the reason is said. Pattern = 1401 policy.py _ZEN45_NAME.
+DVW_NEW=0
+CPUB=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)
+if printf '%s' "$CPUB" | grep -Eiq 'Ryzen AI([^A-Za-z0-9]|$)|Ryzen [3579] ([79][0-9][0-9]0(X3D|X|F)?|8[0-9][0-9]0[FG])([^A-Za-z0-9]|$)|Ryzen [3579] [78][0-9][45][0-9](HX3D|HX|HS|H|U)([^A-Za-z0-9]|$)' \
+   && [ "$(get Booter.Quirks.DisableVariableWrite)" != true ]; then
+  ort=0; i=0
+  while p=$(plutil -extract UEFI.Drivers.$i.Path raw -o - "$C" 2>/dev/null); do
+    [ "$p" = OpenRuntime.efi ] && [ "$(get UEFI.Drivers.$i.Enabled)" != false ] && ort=1; i=$((i+1)); done
+  if [ $ort = 1 ]; then
+    DVW_NEW=1; EDITS+=("Booter.Quirks.DisableVariableWrite|-bool|true")
+    echo "CHANGE Booter -> Quirks: DisableVariableWrite on ($CPUB: macOS NVRAM writes through the firmware froze AM5 boards)"
+  else
+    note "$CPUB: DisableVariableWrite should be on, but OpenRuntime.efi is not loaded - left as is; rebuild the EFI with 1401 1.14"
+  fi
+fi
+if { nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove >/dev/null 2>&1 || [ "$(get Booter.Quirks.DisableVariableWrite)" = true ] || [ $DVW_NEW = 1 ]; } \
    && ! echo "$del" | grep -q "<string>nullmoth-remove</string>"; then
   DELADD+=("nullmoth-remove"); echo "CHANGE NVRAM Delete: add nullmoth-remove (a leftover remove flag this Mac cannot clear from macOS)"
 fi
