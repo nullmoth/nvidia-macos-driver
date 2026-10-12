@@ -10314,8 +10314,8 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +   case 100:
 +      return 32;
 +   default:
-+      assert(!"unkown SM version");
-+      return 8;
++      fprintf(stderr, "nvrm: GPU reported an unknown SM version %u; not using it\n", (unsigned)sm);
++      return 0;
 +   }
 +}
 +
@@ -10588,7 +10588,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +    .bar_size_B  = bar1Size
 +   };
 +
-+   pdev->base.dev_info.max_blocks_per_mp = nvrm_max_blocks_per_mp_for_sm(pdev->base.dev_info.sm);
++   if (!(pdev->base.dev_info.max_blocks_per_mp = nvrm_max_blocks_per_mp_for_sm(pdev->base.dev_info.sm))) { vkRes = vk_error(log_obj, VK_ERROR_INITIALIZATION_FAILED); goto error; } /* an unknown SM aborted SecurityAgent and Installer (1.13 crash reports, RTX 40); no device instead, the app falls back */
 +   nvrm_init_shared_mem_sizes(&pdev->base.dev_info);
 +
 +   pdev->base.dev_info.nc_atom_size_B = util_cache_granularity();
