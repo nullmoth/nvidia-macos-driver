@@ -12,6 +12,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
+#include <IOKit/IONVRAM.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <libkern/c++/OSBoolean.h>
 #include <libkern/c++/OSData.h>
@@ -112,6 +113,61 @@ void NMXNPU::attachThread(void *arg, wait_result_t)
     self->release();
 }
 
+/*
+ * Boot guard. The first attach on a real Arrow Lake NPU panicked 7 s into boot, and with nmxnpu=1 in the boot
+ * arguments every start panicked again until the arguments were removed from Linux (10-11). Before attaching, the
+ * driver sets an NVRAM marker and writes it out; it clears it once the attach returns. A start that finds the marker
+ * still set follows an attach that never returned (a panic or a hang), so it leaves the NPU alone and says so. Turning
+ * the test driver off and on again in the app clears the marker (setup deletes it).
+ */
+static const char *const kAttachMarker = "nullmoth-npu-attaching";
+
+static IODTNVRAM *nmx_nvram()
+{
+    IORegistryEntry *e = IORegistryEntry::fromPath("/options", gIODTPlane);
+    IODTNVRAM *n = OSDynamicCast(IODTNVRAM, e);
+    if (n == nullptr && e != nullptr)
+        e->release();
+    return n;
+}
+
+static bool nmx_marker_set()
+{
+    IODTNVRAM *n = nmx_nvram();
+    if (n == nullptr)
+        return false;
+    OSObject *v = n->copyProperty(kAttachMarker);
+    bool set = v != nullptr;
+    if (v)
+        v->release();
+    n->release();
+    return set;
+}
+
+static void nmx_marker_write(bool on)
+{
+    IODTNVRAM *n = nmx_nvram();
+    if (n == nullptr) {
+        IOLog("NullMoth NPU: no NVRAM; the boot guard is off\n");
+        return;
+    }
+    const OSSymbol *k = OSSymbol::withCString(kAttachMarker);
+    if (k != nullptr) {
+        if (on) {
+            OSData *d = OSData::withBytes("1", 1);
+            if (d == nullptr || !n->setProperty(k, d))
+                IOLog("NullMoth NPU: could not set the boot guard\n");
+            if (d)
+                d->release();
+        } else {
+            n->removeProperty(k);
+        }
+        k->release();
+    }
+    n->sync();
+    n->release();
+}
+
 void NMXNPU::attachNow()
 {
     int err = nmx_xnu_wait_firmware_root(300);
@@ -120,7 +176,17 @@ void NMXNPU::attachNow()
         attach_ = -1;
         return;
     }
+    if (nmx_marker_set()) {
+        IOLog("NullMoth NPU: the last attach of %04x:%04x never returned (the Mac stopped or restarted); the NPU stays "
+              "off. Send logs, then turn the test driver off and on to try again\n",
+              pci_->configRead16(kIOPCIConfigVendorID), pci_->configRead16(kIOPCIConfigDeviceID));
+        setProperty("nullmoth-npu-state", "parked: the last attach never returned");
+        attach_ = -1;
+        return;
+    }
+    nmx_marker_write(true);
     dev_ = nmx_port_attach_pci(pci_);
+    nmx_marker_write(false);
     if (dev_ == nullptr) {
         IOLog("NullMoth NPU: no driver took %04x:%04x\n", pci_->configRead16(kIOPCIConfigVendorID),
               pci_->configRead16(kIOPCIConfigDeviceID));

@@ -14,6 +14,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
+#include <IOKit/IONVRAM.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <libkern/c++/OSBoolean.h>
 #include <libkern/c++/OSData.h>
@@ -128,6 +129,60 @@ void NMXGPU::attachThread(void *arg, wait_result_t)
     self->release();
 }
 
+/*
+ * Boot guard, as in NMXNPU: the NPU kext on this layer panicked 7 s into every start until its boot argument was
+ * removed from Linux (10-11). The attach, the modeset and the hand-over to macOS run between setting an NVRAM marker
+ * and clearing it; a start that finds the marker still set follows an attach that never returned (a panic or a hang),
+ * so this GPU stays with macOS and the driver says so. Turning the test driver off and on in the app clears it.
+ */
+static const char *const kAttachMarker = "nullmoth-gpu-attaching";
+
+static IODTNVRAM *nmx_nvram()
+{
+    IORegistryEntry *e = IORegistryEntry::fromPath("/options", gIODTPlane);
+    IODTNVRAM *n = OSDynamicCast(IODTNVRAM, e);
+    if (n == nullptr && e != nullptr)
+        e->release();
+    return n;
+}
+
+static bool nmx_marker_set()
+{
+    IODTNVRAM *n = nmx_nvram();
+    if (n == nullptr)
+        return false;
+    OSObject *v = n->copyProperty(kAttachMarker);
+    bool set = v != nullptr;
+    if (v)
+        v->release();
+    n->release();
+    return set;
+}
+
+static void nmx_marker_write(bool on)
+{
+    IODTNVRAM *n = nmx_nvram();
+    if (n == nullptr) {
+        IOLog("NullMoth GPU: no NVRAM; the boot guard is off\n");
+        return;
+    }
+    const OSSymbol *k = OSSymbol::withCString(kAttachMarker);
+    if (k != nullptr) {
+        if (on) {
+            OSData *d = OSData::withBytes("1", 1);
+            if (d == nullptr || !n->setProperty(k, d))
+                IOLog("NullMoth GPU: could not set the boot guard\n");
+            if (d)
+                d->release();
+        } else {
+            n->removeProperty(k);
+        }
+        k->release();
+    }
+    n->sync();
+    n->release();
+}
+
 void NMXGPU::attachNow()
 {
     int err = nmx_xnu_wait_firmware_root(300);
@@ -136,8 +191,18 @@ void NMXGPU::attachNow()
         attach_ = -1;
         return;
     }
+    if (nmx_marker_set()) {
+        IOLog("NullMoth GPU: the last attach of %04x:%04x never returned (the Mac stopped or restarted); this GPU stays "
+              "with macOS. Send logs, then turn the test driver off and on to try again\n",
+              pci_->configRead16(kIOPCIConfigVendorID), pci_->configRead16(kIOPCIConfigDeviceID));
+        setProperty("nullmoth-gpu-state", "parked: the last attach never returned");
+        attach_ = -1;
+        return;
+    }
+    nmx_marker_write(true);
     dev_ = nmx_port_attach(pci_);
     if (dev_ == nullptr) {
+        nmx_marker_write(false);
         IOLog("NullMoth GPU: no driver took %04x:%04x\n", pci_->configRead16(kIOPCIConfigVendorID),
               pci_->configRead16(kIOPCIConfigDeviceID));
         attach_ = -1;
@@ -159,6 +224,7 @@ void NMXGPU::attachNow()
     pci_->registerService();
     /* light the outputs and hand them to macOS; without it the device still renders, with no screen of its own */
     fb_ = nmx_fb_publish(this, dev_);
+    nmx_marker_write(false);
     IOLog("NullMoth GPU: driving %04x:%04x\n", pci_->configRead16(kIOPCIConfigVendorID),
           pci_->configRead16(kIOPCIConfigDeviceID));
     OSSynchronizeIO();
