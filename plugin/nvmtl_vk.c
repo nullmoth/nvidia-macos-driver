@@ -4282,7 +4282,10 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
             if (img->samples != p->samples) { nvlog("begin_render: pipeline has %u samples but the colour target has %u — pass REFUSED", p->samples, img->samples); return -1; }
             if ((rmask & (1u << i)) && resolve && (resolve->samples > 1 || ps->resw[i] != ps->colw[i] || ps->resh[i] != ps->colh[i])) { nvlog("begin_render: resolve texture must be 1-sample and the same size — pass REFUSED"); return -1; }
         } else if (img->samples > 1) { nvlog("begin_render: a 1-sample pipeline on a %u-sample target — pass REFUSED", img->samples); return -1; }
-        if ((ps->colfmt[i] ? ps->colfmt[i] : img->fmt) != cf[i]) { static int said; if (said++ < 4) nvlog("begin_render: apps2 colour %u: the pipeline's format %u draws into a format-%u image (census: the image format; a format-view texture attaches in its view format since gl3)", i, cf[i], img->fmt); }
+        // The render pass is built in the pipeline's format and the attachment view is in the texture's: Vulkan's render
+        // pass begin asserts they are equal, and that assert aborted the app (1.13 crash report, iOS Simulator). WAS a
+        // census line only. The pass is refused instead, like the sample-count mismatches above.
+        if ((ps->colfmt[i] ? ps->colfmt[i] : img->fmt) != cf[i]) { static int said; if (said++ < 4) nvlog("begin_render: colour %u: the pipeline's format %u draws into a format-%u attachment - pass REFUSED", i, cf[i], ps->colfmt[i] ? ps->colfmt[i] : img->fmt); return -1; }
     }
     if (p->has_depth && !ps->dsview) { nvlog("begin_render: pipeline has a depth attachment but the encoder has no depth texture — pass REFUSED"); return -1; }
     if (p->has_depth && ps->ds) {
@@ -4855,9 +4858,20 @@ void nvmtl_vk_cmd_set_cull(nvk_cmdbuf *c, int mode)
     pvkCmdSetCullMode(c->cb, m == 1 ? VK_CULL_MODE_FRONT_BIT : m == 2 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE);
     pvkCmdSetFrontFace(c->cb, (mode & 4) ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
 }
+// An index offset at or past the end of the index buffer: Vulkan's whole-size bind then underflows to a range over
+// 4 GB and NVK's assert aborted the app (1.13 crash report, a video app drawing through OpenGL). Metal treats such a draw
+// as invalid; it is skipped here and logged once.
+static int nvmtl_index_range_ok(const nvk_buffer *idx, size_t offset)
+{
+    if (idx && idx->buf && offset < idx->size && idx->size - offset <= 0xffffffffull) return 1;
+    static int told; if (!told++) nvlog("draw: index offset %zu outside its %llu-byte buffer - draw skipped", offset,
+                                        (unsigned long long)(idx ? idx->size : 0));
+    return 0;
+}
 void nvmtl_vk_cmd_draw_indexed(nvk_cmdbuf *c, nvk_buffer *idx, size_t offset, uint32_t count, int is32,
                                uint32_t instances, int32_t baseVertex, uint32_t baseInstance)
 {
+    if (!nvmtl_index_range_ok(idx, offset)) return;
     pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, offset, is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
     if (c->nobind) return;
     pvkCmdDrawIndexed(c->cb, count, instances ? instances : 1, 0, baseVertex, baseInstance);
@@ -5741,6 +5755,7 @@ int nvmtl_vk_cmd_draw_patches(nvk_cmdbuf *c, const nvk_pipeline *p, uint64_t fac
 }
 void nvmtl_vk_cmd_draw_indexed_indirect(nvk_cmdbuf *c, nvk_buffer *idx, size_t idxOff, int is32, nvk_buffer *b, size_t off)
 {
+    if (!nvmtl_index_range_ok(idx, idxOff)) return;
     pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, idxOff, is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
     if (c->nobind) return;
     pvkCmdDrawIndexedIndirect(c->cb, (VkBuffer)b->buf, off, 1, 0);
