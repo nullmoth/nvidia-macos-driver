@@ -2775,7 +2775,10 @@ int nvmtl_vk_bind_sampler(nvk_cmdbuf *c, uint32_t set, uint32_t index, nvk_sampl
 int nvmtl_vk_sample_positions_backend(void) { return nvmtl_vk_init() == 0 && g_sample_locations; }
 int nvmtl_vk_sample_positions_default(uint32_t count, nvmtl_sample_pattern *out)
 {
-    if (!nvmtl_vk_sample_positions_backend() || !(g_sample_props.sampleLocationSampleCounts & count)) return -1;
+    /* Without the programmable-position backend the hardware still draws the standard pattern, which is Metal's default.
+       Apps read these positions and pass them back to setSamplePositions; returning nothing left their array
+       uninitialised, the pass then failed validation and drew nothing (Chess). */
+    if (nvmtl_vk_sample_positions_backend() && !(g_sample_props.sampleLocationSampleCounts & count)) return -1;
     return nvmtl_sample_default(count, out);
 }
 static VkSampleLocationsInfoEXT nvmtl_sample_info(const nvmtl_sample_pattern *p, VkSampleLocationEXT vk[8])
@@ -4259,8 +4262,17 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
     if (!nvmtl_sample_pattern_valid(&pattern) || pattern.count != (p->samples > 1 ? p->samples : 1)) {
         nvlog("sample positions: count/pattern incompatible with render pipeline"); return -1;
     }
-    if (ps->sample_pattern.count && !g_sample_locations) { nvlog("sample positions: backend unavailable"); return -1; }
     if (nvmtl_sample_pattern_quantize(&pattern, &pattern)) return -1;
+    if (ps->sample_pattern.count && !g_sample_locations) {
+        /* No programmable-position backend: the pass draws at the standard positions. A pass asking for exactly those
+           (what getDefaultSamplePositions returns) is plain MSAA. Any other pattern is drawn at the standard positions
+           too, said once, instead of refusing the pass: refusing it left Chess's 4x MSAA passes black. */
+        nvmtl_sample_pattern std;
+        int same = !nvmtl_sample_default(pattern.count, &std) && !nvmtl_sample_pattern_quantize(&std, &std) &&
+                   !memcmp(std.position, pattern.position, pattern.count * sizeof pattern.position[0]);
+        static int said;
+        if (!same && said++ < 4) nvlog("sample positions: backend unavailable; custom %u-sample pattern drawn at the standard positions", pattern.count);
+    }
     uint32_t cf[NVMTL_NCOL], rmask, ncol = nvmtl_rt_shape(p, cf, &rmask);
     for (uint32_t i = 0; i < ncol; i++) {
         if (!cf[i]) continue;
