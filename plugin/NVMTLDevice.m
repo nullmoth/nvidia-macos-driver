@@ -293,14 +293,13 @@ static void nvmtl_nvenc_hevc_register(void)
               st ? "NOT registered" : "REGISTERED", me, (int)st, path);
     });
 }
-// Chrome, Edge and Electron apps (Discord, VS Code, Slack, Figma) draw WebGL through ANGLE, whose Metal backend refuses
-// every GPU whose PCI vendor is NVIDIA ("disableMetalOnNvidia", anglebug 42266609, written for Apple's own pre-2017 NVIDIA
-// drivers). ANGLE then has no renderer and WebGL is gone. Measured 10-12 on an RTX 5060: Electron's ANGLE initializes its
-// Metal backend on this driver only with that rule off. ANGLE reads ANGLE_FEATURE_OVERRIDES_DISABLED after it creates the
-// Metal device, which is when this bundle loads, so the rule is switched off here, in this process only. A value the
-// user already set is kept.
+// Explicit diagnostic opt-in for ANGLE's NVIDIA Metal path. Default browser policy stays intact:
+// partial redraw corruption was reported on both Ampere and Blackwell after automatic enablement.
+// Preserve any existing override; no sandbox setting is changed.
 __attribute__((constructor)) static void nvmtl_angle_allow_nvidia(void)
 {
+    const char *opt = getenv("NVMTL_ANGLE_METAL");
+    if (!opt || strcmp(opt, "1")) return;
     const char *key = "ANGLE_FEATURE_OVERRIDES_DISABLED", *rule = "disableMetalOnNvidia";
     const char *cur = getenv(key);
     if (cur && strstr(cur, rule)) return;
