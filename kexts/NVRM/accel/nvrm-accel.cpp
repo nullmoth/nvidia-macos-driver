@@ -702,7 +702,6 @@ IOAccelMemory *NVDisplayPipe::initFramebufferResource(unsigned int index, IOAcce
         return nullptr;
     }
     m->fScanout = true;
-    m->fScanHead = head;
     m->fPhys    = r.phys;
     m->fBytes   = r.actualSize;
     *(volatile unsigned long long *)((unsigned char *)m + 0xc8) = r.phys;
@@ -767,23 +766,7 @@ void NVResource::free()
 bool NVVidMemory::allocPhysical()
 {
     if (fScanout) {
-        if (!fPhys || !fBytes) {
-            // Re-backed after a mode change: it is still that head's screen. Ask the head for its scanout as it is now
-            // (it may have moved or grown). WAS: the free cleared fScanout, so this call allocated and mapped fresh VRAM
-            // (16 MB on a 1.14.2 user's machine, 8 MB on 1.13) and the pipe's framebuffer stopped being the screen; with
-            // the Intel panel added it ran under the registration lock and froze the test Mac at os_map_kernel_space (10-10).
-            NVAccel *a = NVAccel::gAccel;
-            IOService *fb = (a && fScanHead < kNvMaxFB) ? a->fFBs[fScanHead] : nullptr;
-            struct NVRMVramRequest r;
-            for (unsigned i = 0; i < sizeof r; i++) ((volatile unsigned char *)&r)[i] = 0;
-            r.version = NVRM_VRAM_ABI_VERSION;
-            if (!fb || a->askFramebufferForScanout(&r, fb) != kIOReturnSuccess || !r.phys || !r.actualSize) {
-                ALOG("NVVidMemory::allocPhysical(%p): scanout of head %u could not be described again -- refused, no VRAM taken",
-                     this, fScanHead);
-                return false;
-            }
-            fPhys = r.phys; fBytes = r.actualSize;
-        }
+        if (!fPhys || !fBytes) { ALOG("NVVidMemory::allocPhysical(%p): scanout with no address", this); return false; }
         *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = fPhys;
         ALOG("NVVidMemory::allocPhysical(%p): SCANOUT phys 0x%llx (%llu bytes) -- already backed, nothing allocated",
              this, fPhys, fBytes);
@@ -820,8 +803,8 @@ bool NVVidMemory::allocPhysical()
 void NVVidMemory::deallocPhysical()
 {
     if (fScanout) {
-        ALOG("NVVidMemory::deallocPhysical(%p): SCANOUT -- not ours to free, only forgetting its address", this);
-        fPhys = 0; fBytes = 0;   // stays a scanout: the next allocPhysical asks its head again
+        ALOG("NVVidMemory::deallocPhysical(%p): SCANOUT -- not ours to free, only forgetting it", this);
+        fPhys = 0; fBytes = 0; fScanout = false;
         *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = 0;
         return;
     }
