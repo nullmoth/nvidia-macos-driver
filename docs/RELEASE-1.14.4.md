@@ -9,9 +9,6 @@ A fix release for 1.14.3. Everything in [1.14.3](RELEASE-1.14.3.md) is included.
   GPU's memory, the copy sometimes took the picture before the GPU had finished drawing it, and a blank or stale frame
   went to the screen: up to every other frame on some 60 Hz and 240 Hz setups. The copy now waits for the finished
   picture, and if it is not ready the previous frame stays on screen.
-- **Black screen after changing the resolution or refresh rate.** After a display change the driver stopped treating
-  the screen's memory as the screen and gave it ordinary video memory instead. The screen's memory is now looked up
-  again from the display after every change.
 - **Send logs now includes the AMD / Intel test driver.** Its messages were not collected before, so reports from
   machines that turned it on could not show what happened. If you tried it, send logs again with 1.14.4.
 
