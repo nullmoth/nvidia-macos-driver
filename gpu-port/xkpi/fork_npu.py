@@ -61,6 +61,43 @@ edit("ivpu/ivpu_fw.c", [
     ('\t{ IVPU_HW_IP_40XX, "intel/vpu/vpu_40xx_v0.0.bin" },\n', '\t{ IVPU_HW_IP_40XX, "intel/vpu/vpu_40xx_v1.bin" },\n\t{ IVPU_HW_IP_40XX, "intel/vpu/vpu_40xx_v0.0.bin" },\n'),
     ('\t{ IVPU_HW_IP_50XX, "intel/vpu/vpu_50xx_v0.0.bin" },\n', '\t{ IVPU_HW_IP_50XX, "intel/vpu/vpu_50xx_v1.bin" },\n\t{ IVPU_HW_IP_50XX, "intel/vpu/vpu_50xx_v0.0.bin" },\n'),
 ])
+# First Arrow Lake attach (10-11): the SHAVE firmware buffer found no room in context 0 (-ENOSPC) although the range
+# is 2 GB. A failed placement now prints the range, the size and every hole of the context, and the firmware layout
+# is printed at load, so the next start names which side is wrong.
+edit("ivpu/ivpu_mmu_context.c", [
+    ("""	ret = drm_mm_insert_node_in_range(&ctx->mm, node, size, IVPU_MMU_PAGE_SIZE, 0,
+					  range->start, range->end, DRM_MM_INSERT_BEST);
+unlock:
+""", """	ret = drm_mm_insert_node_in_range(&ctx->mm, node, size, IVPU_MMU_PAGE_SIZE, 0,
+					  range->start, range->end, DRM_MM_INSERT_BEST);
+	if (ret) {
+		struct drm_mm_node *h;
+		u64 hs, he;
+		int n = 0;
+
+		pr_err("NullMoth ivpu: ctx %u: no room for 0x%llx bytes in [0x%llx, 0x%llx) (%d); mm [0x%llx, +0x%llx)\\n",
+		       ctx->id, (unsigned long long)size, (unsigned long long)range->start,
+		       (unsigned long long)range->end, ret, (unsigned long long)ctx->mm.head_node.start + ctx->mm.head_node.size,
+		       (unsigned long long)-ctx->mm.head_node.size);
+		drm_mm_for_each_hole(h, &ctx->mm, hs, he) {
+			pr_err("NullMoth ivpu:   hole [0x%llx, 0x%llx) size 0x%llx\\n", (unsigned long long)hs,
+			       (unsigned long long)he, (unsigned long long)(he - hs));
+			if (++n == 24)
+				break;
+		}
+		pr_err("NullMoth ivpu:   %d holes listed\\n", n);
+	}
+unlock:
+"""),
+])
+edit("ivpu/ivpu_fw.c", [
+    ("""	ivpu_dbg(vdev, FW_BOOT, "Size: file %lu image %u runtime %u shavenn %u\\n",""",
+     """	pr_info("NullMoth ivpu: firmware runtime 0x%llx +0x%llx, load 0x%llx, image %u, shavenn %u, ro 0x%llx +%u\\n",
+	       (unsigned long long)fw->runtime_addr, (unsigned long long)fw->runtime_size,
+	       (unsigned long long)image_load_addr, (unsigned)fw->image_size, (unsigned)fw->shave_nn_size,
+	       (unsigned long long)fw->read_only_addr, (unsigned)fw->read_only_size);
+	ivpu_dbg(vdev, FW_BOOT, "Size: file %lu image %u runtime %u shavenn %u\\n","""),
+])
 if os.path.isdir(os.path.join(dst, "amdxdna")):
     edit("amdxdna/aie2_pci.h", [('#include "amdxdna_mailbox.h"\n', '#include "amdxdna_mailbox.h"\n#include "nmx_xdna_sched.h"\n')])
     edit("amdxdna/aie2_ctx.c", [
