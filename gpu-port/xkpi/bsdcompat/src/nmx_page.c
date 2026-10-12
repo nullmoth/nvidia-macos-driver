@@ -20,6 +20,9 @@
 #include <vm/vm_object.h>
 #include <vm/vm_pager.h>
 #include <vm/pmap.h>
+
+int nmx_malloc_note_contig(void *addr, size_t size, struct malloc_type *type);
+void nmx_malloc_forget_contig(void *addr);
 #include <vm/vm_extern.h>
 #include <machine/cpufunc.h>
 #include "nmx_xnu.h"
@@ -625,11 +628,20 @@ void kmem_free(void *addr, vm_size_t size)
 void *contigmalloc(unsigned long size, struct malloc_type *type, int flags, vm_paddr_t low, vm_paddr_t high,
                    unsigned long alignment, vm_paddr_t boundary)
 {
-    return kmem_alloc_contig(size, flags, low, high, alignment, boundary, VM_MEMATTR_DEFAULT);
+    void *p = kmem_alloc_contig(size, flags, low, high, alignment, boundary, VM_MEMATTR_DEFAULT);
+    /* recorded so free() takes it back as FreeBSD's does (LinuxKPI kfree of a kmalloc above a page) */
+    if (p != NULL && nmx_malloc_note_contig(p, size, type) != 0) {
+        kmem_free(p, size);
+        return NULL;
+    }
+    return p;
 }
 
 void contigfree(void *addr, unsigned long size, struct malloc_type *type)
 {
+    if (addr == NULL)
+        return;
+    nmx_malloc_forget_contig(addr);
     kmem_free(addr, size);
 }
 
