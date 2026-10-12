@@ -70,6 +70,7 @@ public:
     unsigned long long fPhys     = 0;
     unsigned long long fBytes    = 0;
     bool fScanout = false;
+    unsigned fScanHead = ~0u;   // which head's live scanout this is: a re-back after a mode change asks that head again
 
     bool allocPhysical() APPLE_KEXT_OVERRIDE;
     void deallocPhysical() APPLE_KEXT_OVERRIDE;
