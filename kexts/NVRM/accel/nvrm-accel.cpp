@@ -878,6 +878,7 @@ bool NVDisplayPipe::isTransactionComplete(IOAccelDisplayPipeTransaction2 *)
 }
 
 static void nvAccelSurfScanoutSync(IOSurface *s);
+static bool nvAccelSurfCopyReady(IOSurface *s, unsigned head);
 static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe);
 static void nvAccelIopHome(IOService *fb, unsigned head);
 IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
@@ -920,7 +921,11 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         OSAddAtomic64(1, &gCntIopSrcSurf); OSAddAtomic64(1, &gCntIopOk); OSAddAtomic64(1, &gCntIopOkHead[head]);
         return kIOReturnSuccess;
     } else if (s) {
-        nvAccelSurfScanoutSync(s);
+        // A copied frame must come from the surface's newest pixels. Copying while they were still only in VRAM put a
+        // stale, one-colour buffer on the panel every other frame: full-screen flicker, 5 of 40 flicker recordings
+        // (1.13-1.14.1), nvaccel_iop_blank about half of every copied frame, never on machines whose frames all flip.
+        // Such a frame now keeps the previous picture on the panel instead.
+        if (!nvAccelSurfCopyReady(s, head)) return kIOReturnSuccess;
         const unsigned fmt = s->getPixelFormat();
         if (fmt != 0x42475241u) NVIOP_FAIL(kIOReturnUnsupported, "surface 0x%x format 0x%08x is not BGRA", s->getSurfaceID(), fmt);
         const unsigned long long W = s->getWidth(), H = s->getHeight(), P = s->getBytesPerRow();
@@ -1038,6 +1043,8 @@ NVACCEL_CNT(nvaccel_iop_empty,        gCntIopEmpty,       "K3: transactions with
 NVACCEL_CNT(nvaccel_iop_src_res,      gCntIopSrcRes,      "K3: frames sourced from our VRAM resource");
 NVACCEL_CNT(nvaccel_iop_src_surf,     gCntIopSrcSurf,     "K3: frames sourced from the IOSurface memory");
 NVACCEL_CNT(nvaccel_iop_blank,        gCntIopBlank,       "K6: frames copied whose 64 samples were all ONE colour (a blank frame)");
+static SInt64 gCntIopCopySkip;
+NVACCEL_CNT(nvaccel_iop_copy_skip,    gCntIopCopySkip,    "frames kept on the panel because the surface's newest pixels were not yet in system memory");
 static int    gIopFlip = 0;
 static SInt64 gCntIopFlip, gCntIopFlipHome, gCntIopFlipNo[8];
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_flip, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopFlip, 0, "1 = scan the composited IOSurface out of its own VRAM (no copy)");
@@ -1082,7 +1089,7 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok);         sysctl_register_oid(&sysctl__debug_nvaccel_iop_fail);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_empty);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_src_res);    sysctl_register_oid(&sysctl__debug_nvaccel_iop_src_surf);
-    sysctl_register_oid(&sysctl__debug_nvaccel_iop_blank);
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_blank);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_skip);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip);       sysctl_register_oid(&sysctl__debug_nvaccel_iop_flips);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_home);  sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_lock);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_novram); sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_stale);
@@ -1617,6 +1624,38 @@ static void nvAccelSurfScanoutSync(IOSurface *s)
     if (!out) nvSVPend(_ZNK9IOSurface12getSurfaceIDEv((void *)s), 0);
     if (cache) ((OSObject *)cache)->release();
     nvFamUnlock(a);
+}
+// True when the surface's system memory holds its newest pixels, after moving them there if the GPU drew them into VRAM.
+// Unlike nvAccelSurfScanoutSync it waits a few ms for the accelerator lock and does not clear the pending mark when the
+// page-off fails. At most 4 frames in a row are held back per head: a surface that never syncs is copied as before
+// rather than freezing the panel.
+static unsigned gIopCopyHeld[kNvMaxFB];
+static bool nvAccelSurfCopyReady(IOSurface *s, unsigned head)
+{
+    NVAccel *a = NVAccel::gAccel;
+    if (!s || !a) return true;
+    const unsigned id = _ZNK9IOSurface12getSurfaceIDEv((void *)s);
+    bool ready = !nvSVPend(id, 2);
+    if (!ready) {
+        bool locked = false;
+        for (unsigned i = 0; i < 8 && !(locked = nvFamLock(a, true)); i++) IOSleep(1);
+        if (locked) {
+            void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, (void *)s, 0);
+            OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
+            NVResource *res = OSDynamicCast(NVResource, ctx);
+            volatile unsigned short *valid = res ? *(unsigned short *volatile *)((volatile unsigned char *)res + 0x30) : nullptr;
+            if (!res || !valid || (valid[0] & 1u)) ready = true;
+            else { bool out = false; res->pageoff(nullptr, true, &out, 0); ready = out || (valid[0] & 1u); }
+            if (ready) nvSVPend(id, 0);
+            if (cache) ((OSObject *)cache)->release();
+            nvFamUnlock(a);
+        }
+    }
+    if (head >= kNvMaxFB) return true;
+    if (ready) { gIopCopyHeld[head] = 0; return true; }
+    if (++gIopCopyHeld[head] > 4) { gIopCopyHeld[head] = 0; return true; }
+    OSAddAtomic64(1, &gCntIopCopySkip);
+    return false;
 }
 
 static unsigned nvVaAllocLogged, nvVaMapLogged;
