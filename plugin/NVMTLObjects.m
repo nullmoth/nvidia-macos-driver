@@ -991,10 +991,15 @@ static void nvmtl_surface_overwrite_recorded(NVMTLCommandBuffer *cb, NVMTLTextur
     if (!cb->_surfOverwrites) cb->_surfOverwrites = [NSMutableSet new];
     [cb->_surfOverwrites addObject:r];
 }
+static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t);
 static void nvmtl_surface_in_for_cb(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     if (!t) return;
     NVMTLTexture *r = t->_parent ? t->_parent : t;
     if (cb && r->_surf && [cb->_surfOverwrites containsObject:r]) return;
+    // A prior committed buffer defines this GPU backing's contents.
+    // Importing the old CPU surface here would run ahead of this buffer and
+    // overwrite that earlier GPU write. Queue order or the application's event supplies the dependency.
+    if (nvmtl_surface_pending_write(cb, r)) return;
     [t nvmtlSurfaceIn];
 }
 static unsigned nvmtl_surf_id(NVMTLTexture *t) { NVMTLTexture *r = (t && t->_parent) ? t->_parent : t; return (r && r->_surf) ? (unsigned)IOSurfaceGetID(r->_surf) : 0u; }
@@ -1143,9 +1148,28 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
         (void *)_surf, (unsigned long)_plane, _i.w, _i.h, _i.bpp, IOSurfaceGetBytesPerElementOfPlane(_surf, (uint32_t)_plane));
     return NO;
 }
+// IOSurface locking wires memory and updates its seed; it does not serialize
+// this process's GPU readback and CPU import. Every wrapper of one plane must
+// use the same monitor, including wrappers of shared family VRAM.
+static id nvmtl_surface_sync(NVMTLTexture *t) {
+    static char key;
+    static NSMapTable *monitors;
+    @synchronized ([NVMTLTexture class]) {
+        id monitor = objc_getAssociatedObject(t, &key);
+        if (!monitor) {
+            if (!monitors) monitors = [NSMapTable strongToWeakObjectsMapTable];
+            NSArray *surface = @[@(IOSurfaceGetID(t->_surf)), @(t->_plane)];
+            monitor = [monitors objectForKey:surface];
+            if (!monitor) { monitor = [NSObject new]; [monitors setObject:monitor forKey:surface]; }
+            objc_setAssociatedObject(t, &key, monitor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        return monitor;
+    }
+}
 - (void)nvmtlSurfaceIn {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return;
+    @synchronized (nvmtl_surface_sync(r)) {
     const uint32_t vgen = r->_vramOn ? 0 : nvmtl_vram_gen(r->_surf, r->_plane);
     if (r->_surfSynced && IOSurfaceGetSeed(r->_surf) == r->_surfSeed && (r->_vramOn || vgen == r->_surfGen)) return;
     if (![r nvmtlSurfaceCopyable]) return;
@@ -1165,10 +1189,12 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
     r->_surfSeed = seed; r->_surfSynced = YES; r->_surfGen = vgen;
     g_surfin_copy++; if (r->_vramOn) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-in #%u: %ux%u surface %p seed %u uploaded", n, r->_i.w, r->_i.h, (void *)r->_surf, seed);
+    }
 }
 - (BOOL)nvmtlSurfaceOut {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
+    @synchronized (nvmtl_surface_sync(r)) {
     if (![r nvmtlSurfaceCopyable]) return NO;
     if (r->_vramOn && !nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane)) {
         uint32_t seed = IOSurfaceGetSeed(r->_surf);
@@ -1192,6 +1218,7 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-out #%u: %ux%u surface %p seed %u, %.2f ms", n, r->_i.w, r->_i.h,
         (void *)r->_surf, seed, (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6);
     return YES;
+    }
 }
 - (NSUInteger)width  { return MAX(1u, [self nvi]->w >> _baseLevel); }
 - (NSUInteger)height { return MAX(1u, [self nvi]->h >> _baseLevel); }
