@@ -108,6 +108,12 @@ The macOS **installer** needs the opposite BAR settings (`ResizeAppleGpuBars` `0
 not excluded): it has no NVIDIA driver and runs on the firmware's screen. 1401 builds installers that way, and the 1401
 Mac app switches to the values above when it installs the driver.
 
+Laptops whose built-in panel is on an Intel GPU macOS has no driver for (Tiger Lake and newer, with no `disable-gpu` or
+`AAPL,ig-platform-id` for it), and machines whose NVIDIA GPU has no display outputs, keep the installer's BAR values
+(`ResizeGpuBars` `-1`, `ResizeAppleGpuBars` `0`) with the driver installed: that panel only has the firmware's screen,
+and `ResizeAppleGpuBars` `-1` left it unusable (#119). IONDRVSupport is not excluded wherever such an Intel GPU is on.
+The 1401 Mac app sets this itself.
+
 Also required:
 - **BIOS:** Above 4G Decoding ON (the card maps memory above 4 GB), CSM OFF.
 - **SMBIOS:** a Mac model that runs macOS 15 with a discrete GPU (tested: `iMacPro1,1`, which 1401 uses).

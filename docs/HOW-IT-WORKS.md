@@ -92,6 +92,12 @@ screen, which only survives macOS's PCI setup with a small BAR: `ResizeAppleGpuB
 `IONDRVSupport` not excluded. 1401 builds the installer that way. The 1401 Mac app switches to the table above when it
 installs the driver.
 
+Laptops whose built-in panel is on an Intel GPU macOS has no driver for (Tiger Lake and newer, with no `disable-gpu` or
+`AAPL,ig-platform-id` for it), and machines whose NVIDIA GPU has no display outputs, keep the installer's BAR values
+(`ResizeGpuBars` `-1`, `ResizeAppleGpuBars` `0`) with the driver installed: that panel only has the firmware's screen,
+and `ResizeAppleGpuBars` `-1` left it unusable (#119). IONDRVSupport is not excluded wherever such an Intel GPU is on.
+The 1401 Mac app sets this itself.
+
 ## 5. The 1401 Mac app (installs the driver)
 
 `app/` builds **1401.app** (Swift + WebKit). The window is HTML/JS (`app/Resources/`). Every change to the system is

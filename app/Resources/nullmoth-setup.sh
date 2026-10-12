@@ -4,15 +4,18 @@ B=7C436110-AB2A-4BBB-A880-FE41995C9F82
 # ipc_control_port_options=0: with AMFI relaxed, Firefox and other hardened apps crash at launch on their task control
 # port (10-10 chat: Firefox "instant crash", fixed by this argument); OpenCore Legacy Patcher sets it for the same reason.
 WANT_ARGS="nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80 ipc_control_port_options=0"
-# The NVIDIA display card's PCI device id (4 hex digits), read from the registry.
+# The NVIDIA GPU's PCI device id (4 hex digits), read from the registry: the first display (VGA) controller, else the
+# first 3D or other display-class one. A muxless laptop's GPU has no outputs and is a 3D controller (class 0302: the
+# P14s Gen 2's T500, #119's GA107M), so with VGA alone it was never found and a Turing one never got nvrmsettle.
 nv_device_id() {
   ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | LC_ALL=C awk '
-    function emit() { if (v && c && d != "") { print substr(d,3,2) substr(d,1,2); found=1; exit } }
+    function emit() { if (v && c && d != "") { id = substr(d,3,2) substr(d,1,2); if (c == 1 && vga == "") vga = id; if (c == 2 && other == "") other = id } }
     /\+-o / { emit(); v=0; c=0; d="" }
     /"vendor-id" = <de100000>/ { v=1 }
     /"class-code" = <00000300>/ { c=1 }
+    /"class-code" = <00(02|80)0300>/ { c=2 }
     /"device-id" = </ { if (match($0, /<[0-9a-f]+>/)) d=substr($0, RSTART+1, 4) }
-    END { if (!found) emit() }'
+    END { emit(); if (vga != "") print vga; else if (other != "") print other }'
 }
 # Turing (TU102/104/106/117 = 1E00-1FFF, TU116 = 2180-21FF) needs longer for GSP to settle before the display arms:
 # a GTX 1660 SUPER stuck at boot on the 0.5 s default and started with nvrmsettle=10000, as an RTX 2070 SUPER had
@@ -132,6 +135,32 @@ boot_esp() {    # the EFI partition on the physical disk this macOS runs from
 on_usb() {      # true when the partition is on an external or removable disk (a 1401 stick)
   diskutil info "$1" 2>/dev/null | grep -q -E 'Removable Media: *(Removable|Yes)|Device Location: *External|Protocol: *USB'; }
 bidx() { local i=0 p; while p=$(plutil -extract Kernel.Block.$i.Identifier raw -o - "$C" 2>/dev/null); do [ "$p" = com.apple.iokit.IONDRVSupport ] && { echo $i; return; }; i=$((i+1)); done; }
+# Where the screen is; setup and the update's finish step use the same answer. INTELPANEL=1: an Intel display GPU is on
+# with no disable-gpu and no framebuffer properties, so macOS has no driver for it and only the firmware framebuffer can
+# show anything on it (1401 1.12 keeps Tiger Lake and newer on that way). PANELBARS=1: that framebuffer is also the
+# screen this Mac is used on - a laptop (ACPI lid or battery device; firmware tables, no kext needed), or the NVIDIA GPU
+# is a 3D controller with no display outputs - so the GPU BARs keep the installer's sizes (issue #119). A desktop that
+# only left its iGPU on, with the monitor on the NVIDIA card, is neither and keeps the full BAR the driver was measured on.
+intel_panel() {
+  local igpu="PciRoot(0x0)/Pci(0x2,0x0)" iv nv no
+  INTELPANEL=0; PANELBARS=0; PANELWHY=""
+  # LC_ALL=C: ioreg prints raw bytes, and awk in a UTF-8 locale stops on them (measured on studio256)
+  read -r iv nv no <<<"$(ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | LC_ALL=C awk '
+    function fin() { if (v == "intel" && c == "vga") iv=1; if (v == "nv" && c == "vga") nv=1; if (v == "nv" && c == "noout") no=1 }
+    /\+-o / { fin(); v=""; c="" }
+    /"vendor-id" = <86800000>/ { v="intel" }
+    /"vendor-id" = <de100000>/ { v="nv" }
+    /"class-code" = <00000300>/ { c="vga" }
+    /"class-code" = <00(02|80)0300>/ { c="noout" }
+    END { fin(); print iv+0, nv+0, no+0 }')"
+  [ "$iv" = 1 ] && ! has "DeviceProperties.Add.$igpu.disable-gpu" && ! has "DeviceProperties.Add.$igpu.AAPL,ig-platform-id" || return 0
+  INTELPANEL=1
+  if [ "$no" = 1 ] && [ "$nv" != 1 ]; then PANELWHY="the NVIDIA GPU has no display outputs"
+  elif ioreg -r -c IOACPIPlatformDevice -l -w0 2>/dev/null | LC_ALL=C awk '/"(name|compatible)" = <[^>]*"PNP0C0[AD]"/{f=1} END{exit !f}'; then
+    PANELWHY="a laptop: ACPI lid or battery"
+  else return 0; fi
+  PANELBARS=1
+}
 
 # Copy newest files without splitting volume or file names at whitespace.
 collect_recent_logs() {
@@ -916,8 +945,14 @@ PL
     else
       cp -p "$BKC" "$C"; stop "this driver has no kexts for macOS $MAJ - it stays parked; install a driver that supports macOS $MAJ"
     fi
-    setq UEFI.Quirks.ResizeGpuBars 13; setq Booter.Quirks.ResizeAppleGpuBars -1
-    bi=$(bidx); [ -n "$bi" ] && plutil -replace Kernel.Block.$bi.Enabled -bool true "$C"
+    # The BAR and IONDRVSupport settings setup itself writes (intel_panel). WAS: 13/-1 and the exclude back on for every
+    # Mac, so a laptop whose panel is on the Intel GPU went dark again at the first start after each macOS update (#119).
+    intel_panel
+    if [ $PANELBARS = 1 ]; then
+      setq UEFI.Quirks.ResizeGpuBars -1; setq Booter.Quirks.ResizeAppleGpuBars 0
+      note "the screen runs on the Intel GPU's firmware framebuffer ($PANELWHY): the GPU BARs keep the installer's sizes"
+    else setq UEFI.Quirks.ResizeGpuBars 13; setq Booter.Quirks.ResizeAppleGpuBars -1; fi
+    bi=$(bidx); if [ -n "$bi" ]; then [ $INTELPANEL = 1 ] && on=false || on=true; plutil -replace Kernel.Block.$bi.Enabled -bool $on "$C"; fi
     args_set del -nvoff
     plutil -lint "$C" >/dev/null || { cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; }
     rm -f "$PEND" /Library/LaunchDaemons/com.nullmoth.osupdate.plist
@@ -1048,9 +1083,20 @@ fi
 # The macOS installer boots with a small GPU BAR (ResizeAppleGpuBars 0, so its fallback screen survives PCI setup); the
 # driver was tested with the card's full 8 GB BAR, so the installed system gets that back.
 bar=$(get UEFI.Quirks.ResizeGpuBars); abar=$(get Booter.Quirks.ResizeAppleGpuBars)
-# 13 = 8 GB: the full BAR of an 8 GB card, measured 10-07 on the RTX 5060 (NVRM moves BAR1 out of the console, display armed).
-[ "$bar" != 13 ] && { echo "CHANGE ResizeGpuBars: ${bar:-unset} -> 13 (8 GB BAR, full memory bandwidth)"; EDITS+=("UEFI.Quirks.ResizeGpuBars|-integer|13"); }
-[ "$abar" != -1 ] && { echo "CHANGE ResizeAppleGpuBars: ${abar:-unset} -> -1 (macOS sees the full BAR)"; EDITS+=("Booter.Quirks.ResizeAppleGpuBars|-integer|-1"); }
+intel_panel
+if [ $PANELBARS = 1 ]; then
+  # Except where that fallback screen is the only one: the built-in panel on an Intel GPU macOS has no driver for. Issue
+  # #119 (Inspiron 16 7610, Tiger Lake-H + RTX 3050 Laptop, no MUX): with ResizeAppleGpuBars -1 nothing usable showed on
+  # the panel; ResizeGpuBars -1 with ResizeAppleGpuBars 0, the installer's pair, kept it lit.
+  note "the screen runs on the Intel GPU's firmware framebuffer ($PANELWHY): IONDRVSupport stays on and the GPU BARs keep the installer's sizes"
+  [ "$bar" != -1 ] && { echo "CHANGE ResizeGpuBars: ${bar:-unset} -> -1 (with ResizeAppleGpuBars 0, the pair that kept the built-in screen on the Intel GPU lit in issue #119)"; EDITS+=("UEFI.Quirks.ResizeGpuBars|-integer|-1"); }
+  [ "$abar" != 0 ] && { echo "CHANGE ResizeAppleGpuBars: ${abar:-unset} -> 0 (-1 left the built-in screen on the Intel GPU dark, issue #119)"; EDITS+=("Booter.Quirks.ResizeAppleGpuBars|-integer|0"); }
+else
+  [ $INTELPANEL = 1 ] && note "an Intel GPU macOS has no driver for is on, but there is no laptop lid or battery and no NVIDIA GPU without display outputs: IONDRVSupport stays on and the NVIDIA card gets its full BAR"
+  # 13 = 8 GB: the full BAR of an 8 GB card, measured 10-07 on the RTX 5060 (NVRM moves BAR1 out of the console, display armed).
+  [ "$bar" != 13 ] && { echo "CHANGE ResizeGpuBars: ${bar:-unset} -> 13 (8 GB BAR, full memory bandwidth)"; EDITS+=("UEFI.Quirks.ResizeGpuBars|-integer|13"); }
+  [ "$abar" != -1 ] && { echo "CHANGE ResizeAppleGpuBars: ${abar:-unset} -> -1 (macOS sees the full BAR)"; EDITS+=("Booter.Quirks.ResizeAppleGpuBars|-integer|-1"); }
+fi
 # boot.efi stops with STOP 0x16 (no room in low memory for the kernel) on some boards even with a valid custom slide, and
 # the full BAR set above moves memory around. AllowRelocationBlock loads the kernel through a scratch block in the lower
 # 4 GB and is used only when no slide fits (OpenCore Configuration, Booter > Quirks); it needs ProvideCustomSlide and
@@ -1064,12 +1110,7 @@ NEEDBLOCK=0; bi=$(bidx)
 # Laptops whose built-in panel is wired to an iGPU macOS has no driver for (Intel Tiger Lake and newer): 1401 1.12 keeps
 # that GPU on (no disable-gpu, no framebuffer properties) so the panel shows macOS through the firmware framebuffer.
 # Excluding IONDRVSupport there leaves the built-in screen dark (10-10: 86 of 184 scans had the panel on the Intel GPU).
-IGPU="PciRoot(0x0)/Pci(0x2,0x0)"; INTELPANEL=0
-# LC_ALL=C: ioreg prints raw bytes, and awk in a UTF-8 locale stops on them (measured on studio256)
-if ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | LC_ALL=C awk '/\+-o /{v=0;c=0} /"vendor-id" = <86800000>/{v=1} /"class-code" = <00000300>/{c=1} v&&c{f=1} END{exit !f}' \
-   && ! has "DeviceProperties.Add.$IGPU.disable-gpu" && ! has "DeviceProperties.Add.$IGPU.AAPL,ig-platform-id"; then
-  INTELPANEL=1; note "the built-in screen runs on the Intel GPU through the firmware framebuffer; IONDRVSupport stays on"
-fi
+# INTELPANEL comes from intel_panel, above the BAR settings.
 if [ $INTELPANEL = 1 ]; then
   [ -n "$bi" ] && [ "$(get Kernel.Block.$bi.Enabled)" = true ] && { EDITS+=("Kernel.Block.$bi.Enabled|-bool|false"); echo "CHANGE Kernel -> Block: turn the IONDRVSupport exclude off (it would leave the built-in screen dark)"; }
 elif [ -z "$bi" ]; then NEEDBLOCK=1; echo "CHANGE Kernel -> Block: exclude IONDRVSupport (the firmware framebuffer would take NVRMFB's display)"
