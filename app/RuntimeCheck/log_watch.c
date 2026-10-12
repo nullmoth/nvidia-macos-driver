@@ -32,7 +32,8 @@ int main(int argc, char **argv) {
         if (result == child) return WIFEXITED(status) ? WEXITSTATUS(status) : 75;
         if (result < 0 && errno != EINTR) return 74;
         double current = now();
-        if (current < 0 || current - started >= 180.0) break;
+        /* every log query in the collector has its own cap (sum about 300 s worst case); 180 s killed the kernel log */
+        if (current < 0 || current - started >= 360.0) break;
         nanosleep(&pause, 0);
     }
     kill(-child, SIGTERM);
