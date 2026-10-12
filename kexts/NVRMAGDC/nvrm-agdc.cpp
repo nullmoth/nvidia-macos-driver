@@ -9,6 +9,7 @@
 #include <IOKit/IOLib.h>
 #include <sys/sysctl.h>
 #include <kern/thread_call.h>
+#include <kern/clock.h>          // clock_get_uptime/nanoseconds_to_absolutetime: the 0x980 rescan throttle
 #include <libkern/OSAtomic.h>
 #define FBLOG(fmt, ...) IOLog("NVRM-agdc: " fmt "\n", ##__VA_ARGS__)
 #include <mach/kmod.h>
@@ -45,6 +46,8 @@ static int    gAgdcK5Why = 0;
 static SInt64 gAgdcCmds = 0, gAgdcUnsupported = 0;
 static int    gAgdcLastRefused = 0;
 static int    gAgdcLogged = 0;
+// Slot-table rescans done while answering 0x980 (see nvdaAgdcRescanForReply).
+static SInt64 gAgdcRescans = 0;
 
 enum { kAgdcMaxFB = 4 };
 static IOService *gAgdcFB[kAgdcMaxFB];
@@ -91,6 +94,29 @@ static IOReturn nvdaK5Answer(IOService *fb, unsigned int cmd, unsigned long *in,
     return r == NVK5_R_BADARG ? kIOReturnBadArgument : kIOReturnNotFound;
 }
 
+static void nvdaAgdcScan(IOService *pci);
+// WindowServer reads AGDC command 0x980 when it (re)starts and builds one display pipe per entry in the reply. The
+// slot table used to be scanned only once, when AGDC came up, so a framebuffer that started later -- a monitor
+// plugged in after boot -- was never in the answer: WindowServer then built a single display pipe, the second
+// display's composited frames had no pipe to go to, and the panel showed only its cursor while `screencapture -D 2`
+// showed a full desktop (iop_ok_h0 grew, iop_ok_h1 stayed 0). Re-scan before answering, at most once a second and
+// logging only when the count changes, so the reply is never stale. This runs in the vendor-call context, which
+// holds no registry lock, and nvdaAgdcScan only matches services and reads their properties.
+static void nvdaAgdcRescanForReply(IOService *pci)
+{
+    if (!pci) return;
+    static uint64_t last = 0;
+    uint64_t now = 0; clock_get_uptime(&now);
+    uint64_t per = 0; nanoseconds_to_absolutetime(1000000000ull, &per);
+    if (last && now - last < per) return;
+    last = now;
+    const unsigned before = gAgdcNFB;
+    nvdaAgdcScan(pci);
+    OSAddAtomic64(1, &gAgdcRescans);
+    if (gAgdcNFB != before)
+        FBLOG("AGDC: 0x980 rescan -> %u framebuffer slot(s) (was %u)", gAgdcNFB, before);
+}
+
 IOReturn NVDADeviceControl::vendor_doDeviceAttribute(unsigned int cmd, unsigned long *in, unsigned long inSize,
                                                      unsigned long *out, unsigned long *outSize, IOExternalMethodArguments *args)
 {
@@ -103,6 +129,7 @@ IOReturn NVDADeviceControl::vendor_doDeviceAttribute(unsigned int cmd, unsigned 
     }
     if (cmd == 0x980) {
         if (!out || !outSize || *outSize != sizeof(NVAGDCGPUCapability)) return kIOReturnBadArgument;
+        nvdaAgdcRescanForReply(fPci);   // a framebuffer that started after boot has to be in this reply
         NVAGDCGPUCapability *c = (NVAGDCGPUCapability *)out; bzero(c, sizeof *c);
         unsigned n = gAgdcNFB;
         if (n == 0 || n > kAgdcMaxFB) {
@@ -233,6 +260,7 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_agdc_k5_link, CTLFLAG_RD | CTLFLAG_LOCKED, 
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_agdc_k5_caps, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcK5Caps,    "K5: plane-scaler capability queries answered");
 SYSCTL_INT (_debug, OID_AUTO, nvrmfb_agdc_k5_why,  CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcK5Why,  0, "K5: why the last K5 query was not answered");
 SYSCTL_STRING(_debug, OID_AUTO, nvrmfb_agdc_fbmap, CTLFLAG_RD | CTLFLAG_LOCKED, gAgdcFBMap, sizeof gAgdcFBMap, "the slot table our 0x980 reports: n, then [i]id per IOFBDependentIndex");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_agdc_rescans, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcRescans, "slot-table rescans done while answering 0x980 (a framebuffer that started after boot)");
 SYSCTL_INT (_debug, OID_AUTO, nvrmfb_agdc_maxfb,   CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcMaxFBOut, 0, "maxFramebuffers in our last 0x980 reply (0 = never asked)");
 SYSCTL_INT (_debug, OID_AUTO, nvrmfb_agdc_k5_asked, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcK5Asked, 0, "bit i = a 0x921/0x711 named index i");
 SYSCTL_INT (_debug, OID_AUTO, nvrmfb_agdc_k5_link_mask, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcK5LinkMask, 0, "bit i = kAGDCLinkConfig answered for index i");
@@ -245,6 +273,7 @@ static void nvdaAgdcRemoveSysctl(void)
     sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_k5); sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_k5_link);
     sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_k5_caps); sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_k5_why);
     sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_fbmap); sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_maxfb);
+    sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_rescans);
     sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_k5_asked); sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_k5_link_mask);
     sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_k5_caps_mask); sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_k5_last_refused_idx);
 }
@@ -255,6 +284,7 @@ static void nvdaAgdcInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_k5); sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_k5_link);
     sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_k5_caps); sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_k5_why);
     sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_fbmap); sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_maxfb);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_rescans);
     sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_k5_asked); sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_k5_link_mask);
     sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_k5_caps_mask); sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_k5_last_refused_idx);
 }

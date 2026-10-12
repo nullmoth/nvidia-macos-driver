@@ -264,6 +264,10 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     unsigned fHudFrames = 0;
     NvU32 fNumHeads = 0, fNumConnectors = 0;
     struct { IOFBInterruptProc proc; OSObject *target; void *ref; } fVbl = {}, fConnect = {};
+    // This instance exists because a display appeared after boot (see gNDpyBoot), and its connect handler has already
+    // been fired once -- see connectNotifyFire and enableController.
+    bool fHotplugBorn = false, fConnectFired = false;
+    static void connectNotifyFire(thread_call_param_t p0, thread_call_param_t);
     volatile SInt32 fStopping = 0;
     void scheduleCall(thread_call_t call, uint64_t deadline);
     thread_call_t fSampler = nullptr; unsigned fSamples = 0;
@@ -410,6 +414,10 @@ struct nvrm_dpy_rec {
 static struct NvKmsKapiDevice *gDev;
 static struct nvrm_dpy_rec gDpy[NVKMS_KAPI_MAX_CONNECTORS * 2];
 static int gNDpy = -1;
+// How many displays the boot enumeration found. A framebuffer whose display index is >= this exists because a display
+// appeared after boot (hotplugFire adds it to gDpy and re-registers the idle nub), and that instance is the one that
+// has to tell the framework its connection is new -- see connectNotifyFire/enableController.
+static int gNDpyBoot = -1;
 static int gBootHead = -2;
 static NvKmsKapiDisplay gBootDpy = 0;
 static struct NvKmsKapiDisplayMode gBootMode;
@@ -729,6 +737,9 @@ bool NVRMNVDAFramebuffer::kapiInit()
               br[1], rr, matches, matches == 99 ? " (head not in its mask)" : "",
               gBootHead >= 0 ? "RESERVED for display" : "no reservation, display", (unsigned)gBootDpy, gBootHead);
     }
+    // The boot enumeration is done: remember its size. Any framebuffer that starts later (a display plugged in after
+    // boot) has fIndex >= gNDpyBoot, which is how it knows it is the new one.
+    if (gNDpyBoot < 0) gNDpyBoot = gNDpy;
     if (gNDpy <= 0 || fIndex >= (unsigned)gNDpy) {
         FBLOG("index %u: only %d display(s) connected -- nothing to drive, not starting", fIndex, gNDpy);
         return false;
@@ -1130,6 +1141,22 @@ static NVRMNVDAFramebuffer *gFBs[16];
 // framebuffer; this does the same: the display is added to the table and the idle nubs are matched again, so the next
 // framebuffer starts exactly as it would have at boot with the monitor already on.
 static thread_call_t gHotplug = nullptr;
+// A framebuffer whose display appeared after boot has to tell the framework its connection is new, through the handler
+// the framework registered for kIOFBConnectInterruptType (fConnect). iOService::registerForInterruptType does keep that
+// handler, but nothing ever invoked it: CoreDisplay's connect-change path (IOFBInterestCallback ->
+// IOFBProcessConnectChange) then never runs, CoreGraphics keeps listing the displays it saw at startup, and the new
+// display gets no display pipe. The mode set has to be done first (WindowServer re-probes a framebuffer that has a
+// mode), so this is a delayed call.
+static thread_call_t gConnectNotify = nullptr;
+void NVRMNVDAFramebuffer::connectNotifyFire(thread_call_param_t p0, thread_call_param_t)
+{
+    NVRMNVDAFramebuffer *me = (NVRMNVDAFramebuffer *)p0;
+    if (!me || OSAddAtomic(0, &me->fStopping)) return;
+    if (!me->fConnect.proc) { FBLOG("fb%u connect notify: nothing registered yet", me->fIndex); return; }
+    me->fConnectFired = true;
+    FBLOG("fb%u -> connect interrupt (the framework's registered handler)", me->fIndex);
+    me->fConnect.proc(me->fConnect.target, me->fConnect.ref);
+}
 void NVRMNVDAFramebuffer::hotplugKick()
 {
     if (!gHotplug) return;
@@ -1791,6 +1818,12 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
         if (gFBs[fIndex] != this) { retain(); if (gFBs[fIndex]) gFBs[fIndex]->release(); gFBs[fIndex] = this; }
         if (sl) IORecursiveLockUnlock(sl);
     }
+    // A display index at or past the boot enumeration means this display appeared after boot (hotplugFire added it to
+    // gDpy and re-registered the idle nub). Such an instance has to fire the framework's connect handler once its head
+    // has a mode -- see connectNotifyFire and enableController.
+    fHotplugBorn = (gNDpyBoot >= 0 && (int)fIndex >= gNDpyBoot);
+    if (fHotplugBorn && !gConnectNotify) gConnectNotify = thread_call_allocate(connectNotifyFire, nullptr);
+    if (fHotplugBorn) FBLOG("fb%u: a display appeared after boot -- the connect interrupt will be fired once the head has a mode", fIndex);
     fPhysForVa = (nvrm_phys_for_va_t)(uintptr_t)propU64(provider, "phys-for-va");
     if (!fKms || !fPhysForVa || !fKms->getFlipPendingStatus || !fKms->dupMemory) { FBLOG("nub lacks nvkms-kapi/phys-for-va properties"); return false; }
     setProperty("IOFBDependentID", (unsigned long long)0x4E56524D00000001ull, 64);
@@ -1930,7 +1963,16 @@ void NVRMNVDAFramebuffer::free()
 IOReturn NVRMNVDAFramebuffer::enableController()
 {
     FBLOG("enableController");
-    return applyMode() ? kIOReturnSuccess : kIOReturnError;
+    const bool ok = applyMode();
+    // A display that appeared after boot: tell the framework, through the connect handler it registered (fConnect),
+    // that this connection is new. It has to happen after the mode set -- WindowServer re-probes a framebuffer that
+    // has a mode, and firing it earlier leaves the display undetected -- so it is a delayed call.
+    if (ok && fHotplugBorn && !fConnectFired && gConnectNotify) {
+        uint64_t d; clock_interval_to_deadline(1500, kMillisecondScale, &d);
+        thread_call_enter1_delayed(gConnectNotify, this, d);
+        FBLOG("fb%u: connect interrupt scheduled (1.5 s after the mode set)", fIndex);
+    }
+    return ok ? kIOReturnSuccess : kIOReturnError;
 }
 IOReturn NVRMNVDAFramebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth)
 {
