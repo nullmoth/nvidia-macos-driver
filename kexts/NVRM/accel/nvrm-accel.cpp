@@ -756,8 +756,11 @@ void *NVResource::getApertureMemoryDescriptor(unsigned long long *a0)
     return fApDesc;
 }
 
+static void nvSVForgetResource(NVResource *resource);
+
 void NVResource::free()
 {
+    nvSVForgetResource(this);
     if (fApDesc) { fApDesc->release(); fApDesc = nullptr; }
     OSAddAtomic64(1, &gCntResFree);
     IOAccelResource2::free();
@@ -1222,21 +1225,39 @@ static void nvFamUnlock(NVAccel *a)
 static unsigned gNVSVLockMiss;
 enum { kNVSVPend = 512 };
 static unsigned gNVSVPendId[kNVSVPend];
+static NVResource *gNVSVPendResource[kNVSVPend];
 static IOSimpleLock *gNVSVPendLock;
-static bool nvSVPend(unsigned id, int op)
+static bool nvSVPend(unsigned id, int op, NVResource *resource = nullptr)
 {
     if (!id) return op == 1 ? false : false;
     if (!gNVSVPendLock) return op == 1 ? false : false;
     bool r = false; int freeSlot = -1;
     IOSimpleLockLock(gNVSVPendLock);
     for (int i = 0; i < kNVSVPend; i++) {
-        if (gNVSVPendId[i] == id) { r = true; if (op == 0) gNVSVPendId[i] = 0; break; }
+        if (gNVSVPendId[i] == id) {
+            r = true;
+            if (op == 0) { gNVSVPendId[i] = 0; gNVSVPendResource[i] = nullptr; }
+            else if (op == 1) gNVSVPendResource[i] = resource;
+            break;
+        }
         if (!gNVSVPendId[i] && freeSlot < 0) freeSlot = i;
     }
-    if (op == 1 && !r) { if (freeSlot >= 0) { gNVSVPendId[freeSlot] = id; r = true; } }
+    if (op == 1 && !r) { if (freeSlot >= 0) { gNVSVPendId[freeSlot] = id; gNVSVPendResource[freeSlot] = resource; r = true; } }
     else if (op == 1) r = true;
     IOSimpleLockUnlock(gNVSVPendLock);
     return r;
+}
+// A pending mark belongs to the resource that last dirtied the surface. Never
+// dereference a device cache during destruction, or clear a newer owner's mark.
+static void nvSVForgetResource(NVResource *resource)
+{
+    if (!resource || !gNVSVPendLock) return;
+    IOSimpleLockLock(gNVSVPendLock);
+    for (unsigned i = 0; i < kNVSVPend; i++) if (gNVSVPendResource[i] == resource) {
+        gNVSVPendId[i] = 0;
+        gNVSVPendResource[i] = nullptr;
+    }
+    IOSimpleLockUnlock(gNVSVPendLock);
 }
 static void    *gNVSVRoot;
 static unsigned gNVSVOk, gNVSVRefused;
@@ -1251,7 +1272,7 @@ static unsigned nvAccelSurfDirty(void *cache, NVResource *res, unsigned plane)
     volatile unsigned short *valid = *(unsigned short *volatile *)(r + 0x30);
     if (type != 0xc0 || (fl & 0x8000) || !valid || plane > 15) return NVRM_SS_NO_CACHE;
     if (!gNVSVPendLock) gNVSVPendLock = IOSimpleLockAlloc();
-    if (!nvSVPend(_ZNK9IOSurface12getSurfaceIDEv(*(void *volatile *)((unsigned char *)cache + 0x10)), 1)) return NVRM_SS_NO_CACHE;
+    if (!nvSVPend(_ZNK9IOSurface12getSurfaceIDEv(*(void *volatile *)((unsigned char *)cache + 0x10)), 1, res)) return NVRM_SS_NO_CACHE;
     _ZN20IOSurfaceDeviceCache10setCurrentEv(cache);
     valid[6] |= (unsigned short)(1u << plane);
     valid[0] &= (unsigned short)~(1u << plane);

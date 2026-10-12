@@ -354,6 +354,7 @@ public:
     IOReturn getAttributeForConnection(IOIndex connectIndex, IOSelect attribute, uintptr_t *value) override;
     IOReturn getAppleSense(IOIndex connectIndex, UInt32 *senseType, UInt32 *primary, UInt32 *extended, UInt32 *displayType) override;
     IOReturn setAttribute(IOSelect attribute, uintptr_t value) override;
+    bool setHeadPower(bool awake);
     IOReturn setPowerState(unsigned long ordinal, IOService *device) override;
     IOReturn setCursorImage(void *cursorImage) override;
     IOReturn setCursorState(SInt32 x, SInt32 y, bool visible) override;
@@ -2815,28 +2816,38 @@ bool NVRMNVDAFramebuffer::headOff()
     hr->modeSetConfig.bActive = NV_FALSE;
     hr->modeSetConfig.numDisplays = 0;
     hr->flags.activeChanged = hr->flags.displaysChanged = NV_TRUE;
-    NvBool ok = fKms->applyModeSetConfig(fDev, cfg, rep, NV_TRUE);
+    NvBool ok = submitConfig(cfg, rep, NV_TRUE);
     IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
     return ok ? true : false;
+}
+bool NVRMNVDAFramebuffer::setHeadPower(bool awake)
+{
+    NVRMDisplayGate gate; if (!gate.valid()) return false;
+    char nb[8] = { 0 };
+    if (PE_parse_boot_argn("-nvrmnodpms", nb, sizeof nb)) return true;
+    if (OSAddAtomic(0, &fStopping)) return false;
+    if (awake) {
+        if (!fHeadSlept) return true;
+        const bool ok = reflip();
+        // A rejected wake must remain retryable on the next power request.
+        if (ok) fHeadSlept = false;
+        FBLOG("display wake: head %u mode and surface committed again -> %s (rc %d)", fHead, ok ? "ok" : "FAILED", fReflipRc);
+        return ok;
+    }
+    if (!fModeSet || !fSurf || fHeadSlept) return true;
+    const bool ok = headOff();
+    if (ok) fHeadSlept = true;
+    FBLOG("display sleep: head %u off -> %s", fHead, ok ? "ok (monitor goes to standby)" : "FAILED (last frame stays)");
+    return ok;
 }
 IOReturn NVRMNVDAFramebuffer::setPowerState(unsigned long ordinal, IOService *device)
 {
     FBLOG("setPowerState %lu", (unsigned long)ordinal);
-    char nb[8] = { 0 };
-    const bool dpms = !PE_parse_boot_argn("-nvrmnodpms", nb, sizeof nb);
     if (ordinal) {
-        if (dpms && fHeadSlept) {
-            fHeadSlept = false;
-            bool ok = reflip();
-            FBLOG("display wake: head %u mode and surface committed again -> %s (rc %d)", fHead, ok ? "ok" : "FAILED", fReflipRc);
-        }
-        handleEvent(kIOFBNotifyDidPowerOn);
+        if (setHeadPower(true)) handleEvent(kIOFBNotifyDidPowerOn);
     } else {
         handleEvent(kIOFBNotifyWillPowerOff);
-        if (dpms && fModeSet && fSurf && !fHeadSlept && !OSAddAtomic(0, &fStopping)) {
-            bool ok = headOff(); fHeadSlept = ok;
-            FBLOG("display sleep: head %u off -> %s", fHead, ok ? "ok (monitor goes to standby)" : "FAILED (last frame stays)");
-        }
+        (void)setHeadPower(false);
     }
     return kIOPMAckImplied;
 }
@@ -2865,7 +2876,12 @@ IOReturn NVRMNVDAFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
 IOReturn NVRMNVDAFramebuffer::setAttributeForConnection(IOIndex connectIndex, IOSelect attribute, uintptr_t value)
 {
     FBSEL(attribute);
-    if (attribute == kConnectionPower) { FBLOG("setAFC '%s' POWER %lu -> success", _s, (unsigned long)value); return kIOReturnSuccess; }
+    if (attribute == kConnectionPower) {
+        if (connectIndex != 0) return kIOReturnBadArgument;
+        const bool ok = setHeadPower(value != 0);
+        FBLOG("setAFC '%s' POWER %lu -> %s", _s, (unsigned long)value, ok ? "ok" : "FAILED");
+        return ok ? kIOReturnSuccess : kIOReturnIOError;
+    }
     switch (attribute) {
     case kConnectionColorModesSupported:
     case kConnectionColorDepthsSupported:
