@@ -10,7 +10,7 @@ use super::ir::{
     TypedValue,
 };
 use super::parse::{
-    fcmp_predicate, float_compare_result_type, icmp_predicate, int_compare_result_type,
+    fcmp_ordering_predicate, fcmp_predicate, float_compare_result_type, icmp_predicate, int_compare_result_type,
     is_ignored_call_line, matching_paren, parse_type, parse_typed_value, parse_value,
     split_top_level, split_top_level_whitespace, strip_call_prefix, switch_literal_operand, LlCall,
     LlLoad,

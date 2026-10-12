@@ -899,6 +899,50 @@ attributes #1 = { convergent nobuiltin nounwind "no-builtins" }
 }
 
 #[test]
+fn native_fcmp_ord_and_uno_lower_to_is_nan() {
+    // World of Warcraft's vertex shaders test a float2 with `fcmp ord` before feeding `air.all`.
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+define void @k(ptr addrspace(1) %out, <2 x i32> %id) {
+entry:
+  %v = uitofp <2 x i32> %id to <2 x float>
+  %x = extractelement <2 x float> %v, i64 0
+  %s = fdiv float %x, 3.000000e+00
+  %ord = fcmp reassoc nsz arcp contract afn ord <2 x float> %v, zeroinitializer
+  %all = tail call i1 @air.all.v2i1(<2 x i1> %ord)
+  %uno = fcmp uno float %s, 1.000000e+00
+  %both = and i1 %all, %uno
+  %bits = zext i1 %both to i32
+  store i32 %bits, ptr addrspace(1) %out, align 4
+  ret void
+}
+
+declare i1 @air.all.v2i1(<2 x i1>)
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3, !4}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint*", !"air.arg_name", !"out"}
+!4 = !{i32 1, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint2", !"air.arg_name", !"id"}
+"#;
+    let tmp = std::env::temp_dir().join(format!("metal2vulkan_fcmp_ord_uno_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert_eq!(asm.matches("OpIsNan").count(), 4, "{asm}");
+    assert!(asm.contains("OpLogicalNot"), "{asm}");
+    assert!(asm.contains("OpAll"), "{asm}");
+    if std::process::Command::new("spirv-val")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
+    }
+}
+
+#[test]
 fn native_visible_function_table_value_call_reports_indirect_function_pointer() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
