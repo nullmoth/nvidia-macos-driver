@@ -6,7 +6,7 @@ The driver implements NVIDIA-backed display and Metal interfaces. Feature availa
 
 Made by **NullMoth Systems**.
 
-**Latest update:** [1401 and NVIDIA driver 1.14.0](docs/RELEASE-1.14.0.md). See the changes, validation and qualification scope before updating.
+**Latest update:** [1401 and NVIDIA driver 1.14.5](docs/RELEASE-1.14.5.md). See the changes, validation and qualification scope before updating.
 
 **Something not working?** [Why a machine does not work, and how to fix it](docs/TROUBLESHOOTING.md) - every known problem, where it stops, why, and the fix.
 
