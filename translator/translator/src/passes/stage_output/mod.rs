@@ -671,8 +671,21 @@ pub(in crate::passes) fn rewrite_return(
         }
     }
 
+    // Input layout and local-pointer materialization can clone a buffer record
+    // also used by the entry's return aggregate. Resolve the current type IDs,
+    // including deferred globals, before constructing the output interface.
+    let mut output_defs = defs.clone();
+    for instruction in ctx.module.types_global_values.iter().chain(ctx.new_globals.iter()) {
+        if let Some(id) = instruction.result_id {
+            output_defs.insert(id, instruction.clone());
+        }
+    }
+    let defs = &output_defs;
     let mut outputs: Vec<OutputWrite> = vec![];
     let rdef = defs.get(&ret_ty).cloned();
+    if rdef.is_none() && matches!(stage, Stage::Vertex | Stage::Fragment) {
+        return Err(format!("stage output return type {ret_ty} has no current definition"));
+    }
 
     let unmodelled = match stage {
         Stage::Fragment => frag.map(|meta| meta.unmodelled_output_members.as_slice()),
