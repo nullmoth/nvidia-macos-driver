@@ -4568,10 +4568,11 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 #pragma mark - command buffer / queue
 #import "NVMTLEventSync.m"
 @implementation NVMTLCommandBuffer
+// Never a lock on the command buffer itself: apps may hold @synchronized(commandBuffer) around -waitUntilCompleted
+// (Unity 6 does), and this runs on the execution queue that completes it. Vampire Survivors hung on its first frame
+// (1.14.2-1.14.4, sample from a user: the execution queue in objc_sync_enter here, Unity's thread in waitUntilCompleted).
 - (void)nvmtlReleaseCapacity {
-    @synchronized (self) {
-        if (_capacityHeld) { _capacityHeld = NO; dispatch_semaphore_signal(_queue->_capacity); }
-    }
+    if (__atomic_exchange_n(&_capacityHeld, NO, __ATOMIC_ACQ_REL)) dispatch_semaphore_signal(_queue->_capacity);
 }
 - (void)nvmtlRecordEncodingError:(NSError *)error { if (!_cbError) _cbError = error; }
 - (void)setProtectionOptions:(unsigned long long)o { if (o) { static int said; if (!said++) nvlog("setProtectionOptions: 0x%llx asked - no protected-content path; protectionOptions stays 0 (said once)", o); } }
@@ -4590,7 +4591,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 - (void)useResidencySet:(id<MTLResidencySet>)r {}
 - (void)useResidencySets:(const id<MTLResidencySet> __unsafe_unretained [])r count:(NSUInteger)n {}
 - (NSMutableDictionary *)userDictionary {
-    @synchronized (self) { if (!_userDictionary) _userDictionary = [NSMutableDictionary new]; return _userDictionary; }
+    @synchronized ([NVMTLCommandBuffer class]) { if (!_userDictionary) _userDictionary = [NSMutableDictionary new]; return _userDictionary; }
 }
 - (id<MTLParallelRenderCommandEncoder>)parallelRenderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)d {
     nvmtl_g79_flush(self);
@@ -4815,7 +4816,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 - (id<MTLCommandBuffer>)commandBuffer {
     dispatch_semaphore_t cap = nil;
     if (nvmtl_async_commit_on()) {
-        @synchronized (self) { if (!_capacity) _capacity = dispatch_semaphore_create(_capacityCount ? _capacityCount : 64); cap = _capacity; }
+        @synchronized ([NVMTLCommandQueue class]) { if (!_capacity) _capacity = dispatch_semaphore_create(_capacityCount ? _capacityCount : 64); cap = _capacity; }
         dispatch_semaphore_wait(cap, DISPATCH_TIME_FOREVER);
     }
     NVMTLCommandBuffer *cb = [NVMTLCommandBuffer new];

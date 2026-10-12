@@ -126,7 +126,8 @@ static int nvmtl_skip_empty_on(void) {
     if (!handlers.count) return;
     dispatch_queue_t order;
     dispatch_queue_t target;
-    @synchronized (_queue) {
+    // the class, not the queue: apps may hold @synchronized(queue) while they wait for this command buffer
+    @synchronized ([NVMTLCommandQueue class]) {
         if (!_queue->_callbackOrderQueue)
             _queue->_callbackOrderQueue = dispatch_queue_create("com.nvmtl.command-callbacks", DISPATCH_QUEUE_SERIAL);
         order = _queue->_callbackOrderQueue;
