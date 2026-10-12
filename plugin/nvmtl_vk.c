@@ -5601,6 +5601,41 @@ static nvmtl_upstage *nvmtl_upstage_get(size_t size)
     return st;
 }
 
+// Streaming loads avoid serial PCIe reads from write-combining IOSurface pages.
+// Ordinary memory, unaligned sources, short rows, and other CPUs retain memcpy.
+#if defined(__x86_64__)
+#include <immintrin.h>
+__attribute__((target("sse4.1")))
+static void nvmtl_copy_surface_stream(void *dst, const void *src, size_t n)
+{
+    const __m128i *s = (const __m128i *)src;
+    char *d = (char *)dst;
+    const size_t blocks = n / 64;
+    _mm_mfence();
+    for (size_t i = 0; i < blocks; i++, s += 4, d += 64) {
+        const __m128i a = _mm_stream_load_si128((__m128i *)s);
+        const __m128i b = _mm_stream_load_si128((__m128i *)s + 1);
+        const __m128i c = _mm_stream_load_si128((__m128i *)s + 2);
+        const __m128i e = _mm_stream_load_si128((__m128i *)s + 3);
+        _mm_storeu_si128((__m128i *)d, a);
+        _mm_storeu_si128((__m128i *)(d + 16), b);
+        _mm_storeu_si128((__m128i *)(d + 32), c);
+        _mm_storeu_si128((__m128i *)(d + 48), e);
+    }
+    _mm_mfence();
+    memcpy(d, s, n - blocks * 64);
+}
+#endif
+static void nvmtl_copy_from_surface(void *dst, const void *src, size_t n)
+{
+#if defined(__x86_64__)
+    if (n >= 4096 && !((uintptr_t)src & 15) && __builtin_cpu_supports("sse4.1")) {
+        nvmtl_copy_surface_stream(dst, src, n); return;
+    }
+#endif
+    memcpy(dst, src, n);
+}
+
 int nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes)
 {
     const size_t bpp = img->bpp ? img->bpp : 4;
@@ -5610,9 +5645,9 @@ int nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t r
     nvmtl_upstage *sl = nvmtl_upstage_get(tight * (size_t)rows);
     if (!sl) return -1;
     uint8_t *dst = (uint8_t *)sl->buf.map;
-    if (row_bytes == tight) memcpy(dst, src, tight * (size_t)rows);   /* a 4K surface is 2160 rows of 15 KB: one pass, not 2160 calls */
+    if (row_bytes == tight) nvmtl_copy_from_surface(dst, src, tight * (size_t)rows);   /* a 4K surface is 2160 rows of 15 KB: one pass, not 2160 calls */
     else for (uint32_t y = 0; y < rows; y++)
-        memcpy(dst + (size_t)y * tight, (const uint8_t *)src + (size_t)y * row_bytes, tight);
+        nvmtl_copy_from_surface(dst + (size_t)y * tight, (const uint8_t *)src + (size_t)y * row_bytes, tight);
     nvk_cmdbuf *const c = &sl->cb;
     if (nvmtl_vk_cmd_begin(q, c)) return -1;
     VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };

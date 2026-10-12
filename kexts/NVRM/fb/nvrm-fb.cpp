@@ -1572,7 +1572,7 @@ IOReturn NVRMNVDAFramebuffer::getAttributeForConnection(IOIndex connectIndex, IO
     case kConnectionControllerDepthsSupported: if (value) *value = 0x00000002; return kIOReturnSuccess;
     case kConnectionColorMode:                 if (value) *value = 0x00000001; return kIOReturnSuccess;
     case kConnectionCheckEnable:               if (value) *value = 1; return kIOReturnSuccess;
-    case kConnectionDisplayFlags:              if (value) *value = 1; return kIOReturnSuccess;
+    case kConnectionDisplayFlags:              if (value) *value = 0; return kIOReturnSuccess;
     case kConnectionSupportsHLDDCSense: return fEdidSize >= 128 ? kIOReturnSuccess : kIOReturnUnsupported;
     case kConnectionSupportsAppleSense: case kConnectionSupportsLLDDCSense: case kConnectionDisplayParameterCount: case kConnectionDisplayParameters:
         return kIOReturnUnsupported;
