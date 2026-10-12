@@ -71,7 +71,9 @@ with tempfile.TemporaryDirectory(prefix="nullmoth-card-log-tests-") as directory
     (saved / "state").write_text(record)
     (saved / "install.log").write_text("fixture install log\n")
     script = tmp / "collect.sh"
-    script.write_text('COLLECT="$1"; ST="$2"\n' + body)
+    bounded = 'lshow() {' + source.split('lshow() {', 1)[1].split('# Copy newest files', 1)[0]
+    bounded = bounded.replace('/usr/bin/log show', 'log show')
+    script.write_text(bounded + '\nCOLLECT="$1"; ST="$2"\n' + body)
     env = dict(os.environ, PATH=str(commands) + ":" + os.environ["PATH"])
     subprocess.run(["/bin/bash", str(script), str(collection), str(saved)], env=env, check=True)
     state = (collection / "driver-state.txt").read_text()

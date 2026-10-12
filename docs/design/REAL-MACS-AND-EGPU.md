@@ -41,6 +41,6 @@ Everything after that is today's setup, unchanged: it finds this OpenCore as "th
   the Thunderbolt case needs an enclosure.
 
 ## What blocks testing
-- A real Mac to try it on: a test Mac Pro (MacPro6,1, OCLP) is ours but has only Thunderbolt 2 and the maintainer's go is needed before
+- A real Mac to try it on: the available MacPro6,1 with OCLP has only Thunderbolt 2 and authorization is needed before
   rebooting it; a T2 Mac or a 2019 Mac Pro has to be borrowed or bought.
 - An NVIDIA card in a Thunderbolt enclosure for the eGPU path.

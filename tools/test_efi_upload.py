@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 SETUP = pathlib.Path(__file__).resolve().parents[1] / "app/Resources/nullmoth-setup.sh"
-START = '    for cf in "$mp"/EFI/OC/config.plist'
+START = '    cfs=("$mp"/EFI/OC/config.plist)'
 END = '  { echo; echo "== NullMoth NVRAM flags'
 
 
@@ -25,11 +25,20 @@ class EfiUpload(unittest.TestCase):
             plistlib.dump({"PlatformInfo": {"Generic": {"SystemProductName": "iMacPro1,1", "SystemSerialNumber": "C02SECRET",
                                                         "MLB": "C02BOARDSECRET", "SystemUUID": "UUID-SECRET", "ROM": b"\x11\x22"}},
                            "Kernel": {"Patch": [{"Comment": "algrey | Fix PAT", "Enabled": True}]}}, f)
+        config = pathlib.Path(mp) / 'EFI/OC/config.plist'
+        for i in range(40):
+            backup = config.with_name(config.name + '.nullmoth-' + str(i))
+            backup.write_bytes(config.read_bytes())
+            os.utime(backup, (1000 + i, 1000 + i))
         body = s[s.index(START):s.index(END)]
         r = subprocess.run(["/bin/bash", "-c", f'mp="{mp}"; COLLECT="{col}"; n=0; collection_errors=0\nfor d in disk9s1; do\n{body}\necho "n=$n"'],
                            capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("n=1", r.stdout)
+        self.assertIn("n=3", r.stdout)
+        backup_names = sorted(pathlib.Path(col).glob('disk9s1-efi-config.plist.nullmoth-*.txt'))
+        self.assertEqual([p.name for p in backup_names], ['disk9s1-efi-config.plist.nullmoth-38.txt', 'disk9s1-efi-config.plist.nullmoth-39.txt'])
+        for p in backup_names:
+            self.assertNotIn(b'C02SECRET', p.read_bytes())
         up = open(os.path.join(col, "disk9s1-efi-config.plist.txt"), "rb").read()
         for secret in (b"C02SECRET", b"C02BOARDSECRET", b"UUID-SECRET", b"ESI="):
             self.assertNotIn(secret, up)
