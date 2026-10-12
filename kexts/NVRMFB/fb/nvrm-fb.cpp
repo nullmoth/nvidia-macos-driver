@@ -425,6 +425,86 @@ public:
 };
 OSDefineMetaClassAndStructors(NVRMFBClaim, IOService)
 
+// With the driver off ("Start once without NVIDIA driver", "Remove NVIDIA driver") the claim above steps aside, but the
+// install excludes IONDRVSupport in OpenCore so Apple's firmware framebuffer never takes this display: nothing lit the
+// screen and both driver-off starts came up black (1.14.0/1.14.1 reports). This is what IONDRVFramebuffer does for a card
+// without an NDRV: one fixed mode on the firmware's (GOP) framebuffer, drawn by the CPU. It only matches with the driver
+// off, and only when the firmware's framebuffer lies inside this card's BARs (a panel on the iGPU is not ours).
+class NVRMBootFB : public IOFramebuffer
+{
+    OSDeclareDefaultStructors(NVRMBootFB)
+    PE_Video fV;
+    IODeviceMemory *fAp;
+public:
+    IOService *probe(IOService *provider, SInt32 *score) override
+    {
+        if (!nvrm_driver_off() || !provider) return NULL;
+        PE_Video v; nvu_zero(&v, sizeof v);
+        if (!getPlatform() || getPlatform()->getConsoleInfo(&v) != kIOReturnSuccess) return NULL;
+        if (!v.v_baseAddr || !v.v_rowBytes || !v.v_width || !v.v_height || v.v_depth != 32) return NULL;
+        const NvU64 base = (NvU64)v.v_baseAddr & ~3ull, bytes = (NvU64)v.v_rowBytes * v.v_height;
+        for (IOItemCount i = 0; i < provider->getDeviceMemoryCount(); i++) {
+            IOMemoryDescriptor *m = provider->getDeviceMemoryWithIndex(i);
+            if (!m) continue;
+            const NvU64 pa = (NvU64)m->getPhysicalSegment(0, 0, kIOMemoryMapperNone), len = m->getLength();
+            if (base < pa || bytes > len || base - pa > len - bytes) continue;
+            IOMemoryDescriptor *sub = IOSubMemoryDescriptor::withSubRange(m, (IOByteCount)(base - pa), (IOByteCount)bytes,
+                                                                          kIODirectionNone);
+            if (!sub) return NULL;
+            OSSafeReleaseNULL(fAp);
+            fAp = (IODeviceMemory *)sub; fV = v;
+            IOLog("NVRMFB: driver off - firmware framebuffer %lux%lu rowbytes %lu in BAR%u lights the screen\n",
+                  (unsigned long)v.v_width, (unsigned long)v.v_height, (unsigned long)v.v_rowBytes, (unsigned)i);
+            return this;
+        }
+        IOLog("NVRMFB: driver off - the firmware framebuffer is not on this card, not starting\n");
+        return NULL;
+    }
+    void free() override { OSSafeReleaseNULL(fAp); IOFramebuffer::free(); }
+    IOReturn enableController() override { return kIOReturnSuccess; }
+    bool isConsoleDevice() override { return true; }
+    const char *getPixelFormats() override { return IO32BitDirectPixels "\0"; }
+    IOItemCount getDisplayModeCount() override { return 1; }
+    IOReturn getDisplayModes(IODisplayModeID *m) override { if (m) *m = 1; return kIOReturnSuccess; }
+    IOReturn getCurrentDisplayMode(IODisplayModeID *m, IOIndex *d) override { if (m) *m = 1; if (d) *d = 0; return kIOReturnSuccess; }
+    IOReturn getStartupDisplayMode(IODisplayModeID *m, IOIndex *d) override { return getCurrentDisplayMode(m, d); }
+    UInt64 getPixelFormatsForDisplayMode(IODisplayModeID, IOIndex) override { return 0; }
+    IOItemCount getConnectionCount() override { return 1; }
+    IODeviceMemory *getApertureRange(IOPixelAperture a) override
+    {
+        if (a != kIOFBSystemAperture || !fAp) return NULL;
+        fAp->retain(); return fAp;
+    }
+    IOReturn getInformationForDisplayMode(IODisplayModeID mode, IODisplayModeInformation *info) override
+    {
+        if (!info || mode != 1) return kIOReturnBadArgument;
+        nvu_zero(info, sizeof *info);
+        info->nominalWidth = (UInt32)fV.v_width; info->nominalHeight = (UInt32)fV.v_height;
+        info->refreshRate = 60u << 16; info->maxDepthIndex = 0;
+        info->flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeDefaultFlag;
+        return kIOReturnSuccess;
+    }
+    IOReturn getPixelInformation(IODisplayModeID mode, IOIndex depth, IOPixelAperture ap, IOPixelInformation *pi) override
+    {
+        if (!pi || mode != 1 || depth != 0 || ap != kIOFBSystemAperture) return kIOReturnBadArgument;
+        nvu_zero(pi, sizeof *pi);
+        pi->bytesPerRow = (UInt32)fV.v_rowBytes; pi->activeWidth = (UInt32)fV.v_width; pi->activeHeight = (UInt32)fV.v_height;
+        pi->bitsPerPixel = 32; pi->pixelType = kIORGBDirectPixels; pi->componentCount = 3; pi->bitsPerComponent = 8;
+        pi->componentMasks[0] = 0x00ff0000; pi->componentMasks[1] = 0x0000ff00; pi->componentMasks[2] = 0x000000ff;
+        strlcpy(pi->pixelFormat, IO32BitDirectPixels, sizeof pi->pixelFormat);
+        return kIOReturnSuccess;
+    }
+    IOReturn getAttributeForConnection(IOIndex ci, IOSelect attribute, uintptr_t *value) override
+    {
+        switch (attribute) {
+        case kConnectionEnable: case kConnectionCheckEnable: if (value) *value = 1; return kIOReturnSuccess;
+        case kConnectionFlags: if (value) *value = 0; return kIOReturnSuccess;
+        default: return IOFramebuffer::getAttributeForConnection(ci, attribute, value);
+        }
+    }
+};
+OSDefineMetaClassAndStructors(NVRMBootFB, IOFramebuffer)
+
 #define super IOFramebuffer
 
 // The firmware can leave a display lit on a head we do not use (studio: HDMI-0 on head 2, while this driver drives it
@@ -1908,7 +1988,12 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
         // memory and the scaler. Without this, rasters that exist only in the EDID's DisplayID extension (most 100-240 Hz
         // modes, issue #29) and every raster above a 1080p firmware raster (a 4K monitor stuck at 1920x1080, issue #49)
         // were never listed. switchMode re-checks the memory, and NVKMS validates the commit itself.
-        if (!raster && !have && fMemBytes && k.hVisible <= fScalerMaxW && k.vVisible <= fScalerMaxH) {
+        // Only rasters LARGER than the boot raster: 1.14.0 offered every smaller NVKMS raster too (1280x1024, 1680x1050,
+        // 720x576 ... on a 2560x1440 panel) and the login window came up black on a 2560x1440@180 DisplayPort monitor
+        // until the user logged in blind; with this block removed it showed again on that machine. Smaller desktops still
+        // come from macOS's own scaled modes on the native raster.
+        const bool larger = fBootW && k.hVisible >= fBootW && k.vVisible >= fBootH && (k.hVisible > fBootW || k.vVisible > fBootH);
+        if (!raster && !have && larger && fMemBytes && k.hVisible <= fScalerMaxW && k.vVisible <= fScalerMaxH) {
             NvU32 pitch = 0;
             if (nvrmCheckedPitch(k.hVisible, fPitchAlign, &pitch) && (NvU64)pitch * k.vVisible <= fMemBytes) raster = true;
         }

@@ -39,6 +39,18 @@
 			<key>IOMatchCategory</key><string>IOFramebuffer</string>
 			<key>IOProbeScore</key><integer>30000</integer>
 		</dict>
+		<!-- Driver off only: the firmware framebuffer on this card, since IONDRVSupport is excluded.
+		     NVRMFBClaim (30000) steps aside first; probe() declines whenever the driver is on. -->
+		<key>NVRMBootFB</key>
+		<dict>
+			<key>CFBundleIdentifier</key><string>com.nullmoth.NVRMFB</string>
+			<key>IOClass</key><string>NVRMBootFB</string>
+			<key>IOProviderClass</key><string>IOPCIDevice</string>
+			<key>IOPCIMatch</key><string>0x000010de&amp;0x0000ffff</string>
+			<key>IOPCIClassMatch</key><string>0x03000000&amp;0xff000000</string>
+			<key>IOMatchCategory</key><string>IOFramebuffer</string>
+			<key>IOProbeScore</key><integer>25000</integer>
+		</dict>
 	</dict>
 </dict>
 </plist>
