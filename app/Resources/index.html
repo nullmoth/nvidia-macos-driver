@@ -41,7 +41,7 @@
 <div class="panel"><p class="sh">Startup text (verbose mode)</p>
 <p>Shows what macOS is doing while it starts instead of the Apple logo. Useful if a start hangs. Takes effect at the next restart.</p>
 <p><button type="button" class="b" id="vbon">Turn verbose on</button> <button type="button" class="b" id="vboff">Turn verbose off</button></p>
-<p>The NullMoth boot logo replaces the Apple logo while macOS starts. It is on by default.</p>
+<p>The optional NullMoth boot logo replaces the Apple logo while macOS starts. Driver installation turns it off because it can stop some systems from booting. Enable it only for a deliberate test.</p>
 <p><button type="button" class="b" id="logoon">Boot logo on</button> <button type="button" class="b" id="logooff">Boot logo off</button></p></div>
 <div class="panel"><p class="sh">AMD / Intel GPU and NPU driver (test)</p>
 <p>For the AMD and Intel GPUs macOS has no driver for (Ryzen APUs, Radeon RX 7000/9000, Intel Iris Xe / Arc graphics), and for the NPU in Intel Core Ultra (Meteor Lake, Arrow Lake, Lunar Lake) and AMD Ryzen AI processors. This is an early test build: your Send logs are how it gets fixed. It downloads only the firmware your Mac's GPU and NPU need from linux-firmware (every file checked) and takes effect at the next restart.</p>
