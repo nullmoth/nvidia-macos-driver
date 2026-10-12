@@ -757,10 +757,23 @@ if [ -n "${GPUTEST:-}" ]; then
     step "Downloading the GPU firmware (linux-firmware, every file checked)"
     COMMIT=$(awk 'NR==2{print}' "$MAN" | grep -oE 'raw/[0-9a-f]{40}' | cut -d/ -f2); [ -n "$COMMIT" ] || stop "the GPU firmware list names no commit"
     FT="$GFW.new"; rm -rf "$FT"; mkdir -p "$FT" || stop "cannot create $FT"
-    grep -v '^#' "$MAN" | awk '{print $2}' | while read -r f; do echo "$f"; done | \
-      xargs -P 8 -I{} sh -c 'mkdir -p "$(dirname "$0/{}")" && curl -fsSL --retry 3 -o "$0/{}" "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/$1/{}"' "$FT" "$COMMIT" \
-      || { rm -rf "$FT"; stop "downloading the GPU firmware failed (network?) - nothing was changed"; }
-    (cd "$FT" && grep -v '^#' "$MAN" | shasum -a 256 -c --quiet) >/dev/null 2>&1 || { rm -rf "$FT"; stop "a GPU firmware file did not match its checksum - nothing was changed"; }
+    # Only this Mac's hardware's firmware (the list holds every vendor's: 699 AMD GPU files alone). 1.14 test, 10-11: all
+    # 847 files 8 at a time drew HTTP 429 from GitLab on an NPU-only Mac that needed 3 of them.
+    FWDIRS="LICENSES/"
+    for v in $VENDORS; do case $v in 1002) FWDIRS="$FWDIRS amdgpu/";; 8086) FWDIRS="$FWDIRS i915/ xe/";; esac; done
+    for v in $NPUS; do case $v in 8086) FWDIRS="$FWDIRS intel/vpu/";; 1022) FWDIRS="$FWDIRS amdnpu/";; esac; done
+    # shasum -c reads "<sha>  <path>" (two spaces); the list has one. WAS: the list was fed as is, so every check failed
+    # and --gpu-test on could never finish (1.14 test on an NPU-only Mac, 10-11)
+    FWLIST="$FT.list"
+    { grep -v '^#' "$MAN" | awk -v dirs="$FWDIRS" 'BEGIN{n=split(dirs,d," ")} {for(i=1;i<=n;i++) if (index($2,d[i])==1) {print $1 "  " $2; next}}' > "$FWLIST" \
+      && [ -s "$FWLIST" ]; } || { rm -rf "$FT" "$FWLIST"; stop "the GPU firmware list has nothing for this Mac's hardware"; }
+    # each file from GitLab, else from kernel.org's mirror of the same commit; curl's retries back off on 429 and 5xx
+    # the file is the script's $2 (macOS xargs -I refuses a command over 255 bytes, so no {} substitution)
+    awk '{print $2}' "$FWLIST" | xargs -P 4 -n 1 sh -c 'mkdir -p "$(dirname "$0/$2")" &&
+      { curl -fsSL --retry 5 --retry-delay 2 -o "$0/$2" "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/$1/$2" ||
+        curl -fsSL --retry 5 --retry-delay 2 -o "$0/$2" "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/$2?id=$1"; }' "$FT" "$COMMIT" \
+      || { rm -rf "$FT" "$FWLIST"; stop "downloading the GPU firmware failed (network?) - nothing was changed"; }
+    (cd "$FT" && shasum -a 256 -c --quiet < "$FWLIST") >/dev/null 2>&1 || { rm -rf "$FT" "$FWLIST"; stop "a GPU firmware file did not match its checksum - nothing was changed"; }
     # the names drivers ask for that linux-firmware publishes as links (WHENCE "Link:"), within one directory only
     grep '^#link ' "$MAN" | while read -r _ n _ tgt; do
       case "$n/$tgt" in *..*|/*|*//*) continue;; esac
@@ -768,7 +781,7 @@ if [ -n "${GPUTEST:-}" ]; then
       [ -f "$FT/$(dirname "$n")/$tgt" ] && ln -sfh "$tgt" "$FT/$n"
     done
     rm -rf "$GFW" && mv "$FT" "$GFW" && chown -R root:wheel "$GFW" && chmod -R go-w,a+rX "$GFW" || stop "cannot install the GPU firmware"
-    ok "GPU firmware installed ($(grep -vc '^#' "$MAN") files, $(du -sh "$GFW" | cut -f1))"
+    ok "GPU firmware installed ($(wc -l < "$FWLIST" | tr -d ' ') files for this Mac, $(du -sh "$GFW" | cut -f1))"; rm -f "$FWLIST"
     step "Installing the AMD/Intel GPU driver"
     rm -rf "$EXT/NMXGPU.kext" && ditto "$GK" "$EXT/NMXGPU.kext" && chown -R root:wheel "$EXT/NMXGPU.kext" && chmod -R 755 "$EXT/NMXGPU.kext" || stop "cannot copy NMXGPU.kext"
     # Metal on the AMD/Intel GPU: its accelerator (NMXAccel) and the Vulkan drivers the Metal plugin runs on it (RADV, ANV)

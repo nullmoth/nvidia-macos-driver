@@ -17,11 +17,18 @@
 #include <libkern/c++/OSData.h>
 #include <mach/kmod.h>
 #include <pexpert/pexpert.h>
+#include <kern/thread.h>
 #include "nmx_port.h"
+#include "nmx_xnu.h"
 
 class NMXNPU : public IOService {
     OSDeclareDefaultStructors(NMXNPU)
     void *dev_;
+    IOPCIDevice *pci_;
+    volatile int attach_;   /* 0 = attach pending on its thread, 1 = attached, -1 = not attached */
+    bool pm_;
+    static void attachThread(void *arg, wait_result_t);
+    void attachNow();
 public:
     IOService *probe(IOService *provider, SInt32 *score) override;
     bool start(IOService *provider) override;
@@ -77,32 +84,72 @@ bool NMXNPU::start(IOService *provider)
     g_devices++;
     IOLockUnlock(g_lock);
 
-    dev_ = nmx_port_attach_pci(pci);
+    /*
+     * The driver loads the NPU's firmware while it attaches. During boot matching that read would come before the root
+     * and Data volumes are mounted - and mounting waits for matching to settle, so the Mac stopped at the logo (first
+     * boot with ivpu attaching, Arrow Lake, 10-11). The attach runs on its own thread once the firmware folder exists.
+     */
+    pci_ = pci;
+    dev_ = nullptr;
+    pm_ = false;
+    attach_ = 0;
+    retain();
+    thread_t t = THREAD_NULL;
+    if (kernel_thread_start(&NMXNPU::attachThread, this, &t) != KERN_SUCCESS) {
+        IOLog("NullMoth NPU: could not start the attach thread\n");
+        attach_ = -1;
+        release();
+        return true;
+    }
+    thread_deallocate(t);
+    return true;
+}
+
+void NMXNPU::attachThread(void *arg, wait_result_t)
+{
+    NMXNPU *self = (NMXNPU *)arg;
+    self->attachNow();
+    self->release();
+}
+
+void NMXNPU::attachNow()
+{
+    int err = nmx_xnu_wait_firmware_root(300);
+    if (err) {
+        IOLog("NullMoth NPU: the firmware folder never appeared (%d); the NPU stays off\n", err);
+        attach_ = -1;
+        return;
+    }
+    dev_ = nmx_port_attach_pci(pci_);
     if (dev_ == nullptr) {
-        IOLog("NullMoth NPU: no driver took %04x:%04x\n", pci->configRead16(kIOPCIConfigVendorID),
-              pci->configRead16(kIOPCIConfigDeviceID));
-        IOLockLock(g_lock);
-        g_devices--;
-        IOLockUnlock(g_lock);
-        IOService::stop(provider);
-        return false;
+        IOLog("NullMoth NPU: no driver took %04x:%04x\n", pci_->configRead16(kIOPCIConfigVendorID),
+              pci_->configRead16(kIOPCIConfigDeviceID));
+        attach_ = -1;
+        return;
     }
     static IOPMPowerState states[2] = {
         { kIOPMPowerStateVersion1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
         { kIOPMPowerStateVersion1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 },
     };
     PMinit();
-    provider->joinPMtree(this);
+    pci_->joinPMtree(this);
     registerPowerDriver(this, states, 2);
+    pm_ = true;
     registerService();
-    IOLog("NullMoth NPU: driving %04x:%04x\n", pci->configRead16(kIOPCIConfigVendorID),
-          pci->configRead16(kIOPCIConfigDeviceID));
-    return true;
+    IOLog("NullMoth NPU: driving %04x:%04x\n", pci_->configRead16(kIOPCIConfigVendorID),
+          pci_->configRead16(kIOPCIConfigDeviceID));
+    OSSynchronizeIO();
+    attach_ = 1;
 }
 
 void NMXNPU::stop(IOService *provider)
 {
-    PMstop();
+    /* an attach still running on its thread finishes first (it holds a reference on this object meanwhile) */
+    for (int i = 0; attach_ == 0 && i < 6000; i++)
+        IOSleep(100);
+    if (pm_)
+        PMstop();
+    pm_ = false;
     nmx_port_detach(dev_);
     dev_ = nullptr;
     IOLockLock(g_lock);

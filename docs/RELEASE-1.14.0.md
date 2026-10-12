@@ -44,6 +44,50 @@ Every fix below came from the logs, chats and GitHub issues you sent. For each: 
 - **The display recorder never started** (#108), so Send logs and Record the flicker had no display trace. It now waits
   for the driver at start-up. The kernel log in Send logs is no longer filled by one line repeated every frame (1401 #16).
 
+- **Hardware video encoding checked end to end**: apps that encode through VideoToolbox (Final Cut, OBS, Screen Sharing)
+  get the card's H.264 and HEVC encoders, in hardware.
+
+## AMD and Intel GPUs, and NPUs (test)
+New in 1.14, off unless you turn it on.
+
+**What it is.** A second driver, NMXGPU, runs Linux's own drivers for AMD and Intel graphics (amdgpu, i915, xe) on
+macOS, with Metal on top through the same Vulkan path the NVIDIA driver uses. It is for the GPUs macOS has no driver
+for: Ryzen APUs, Radeon RX 7000/9000, Intel Iris Xe and Arc. A third, NMXNPU, runs Linux's NPU drivers (Intel's ivpu for
+Core Ultra: Meteor Lake, Arrow Lake, Lunar Lake; AMD's amdxdna for Ryzen AI), so apps can run AI models on the NPU.
+
+**How to turn it on.** Mac app → *AMD / Intel GPU and NPU driver (test)* → **Turn the test driver on**, then restart.
+It downloads only the firmware your GPU and NPU need (an NPU-only PC needs 8 files, an AMD GPU about 700), each one
+checked against linux-firmware's published hash. **Turn it off** in the same place. If a GPU it takes over drives your
+screen and the screen stays dark, pick **1401: Start once without NVIDIA driver** in the boot picker, then turn it off.
+
+**Using the NPU.** Everything installs in `/Library/NullMoth/npu`:
+- Intel NPU: OpenVINO with its NPU plugin, Intel's NPU compiler and user-mode driver.
+  `/Library/NullMoth/npu/openvino/bin/hello_query_device` lists `NPU` when it works;
+  `benchmark_app -m model.xml -d NPU` runs a model on it.
+- AMD Ryzen AI: AMD's runtime (XRT) with its NPU plug-in.
+  `/Library/NullMoth/npu/xrt/bin/xrt-smi examine` shows the NPU, and `xrt-smi validate` runs AMD's own NPU tests.
+- `/Library/NullMoth/npu/bin/nmx-npu-probe` shows what the kernel driver reports for each NPU.
+
+**Status, honestly.** None of this has run on an AMD or Intel GPU yet. On the NPU side, Intel's NPU compiler built for
+macOS compiles models for Meteor/Arrow Lake and Lunar Lake NPUs, and Intel's driver tests pass (164 of 164) against
+their simulated NPU. The first run on a real Arrow Lake NPU found problems in the driver layer, fixed in this release
+(see below). If you turn it on, **Send logs** now includes `npu.txt`: every layer from the PCI device to the runtimes,
+with their debug logging on, so a failure on your machine names the layer that broke.
+
+**Why it took fixes in the driver layer it runs on** (found before and during the first hardware run):
+- **No GPU device for Vulkan, no NPU device at all.** The layer created none of the device files the user-side drivers
+  open (`/dev/dri/renderD128`, `/dev/accel/accel0`), and used up every device slot at start-up. Devices are now created
+  one per GPU or NPU under the names Linux uses, readable by apps as on Linux.
+- **The NPU drivers never registered.** They registered with a PCI bus class that did not exist yet at that point in
+  start-up, and the error was dropped. The class is now created on demand, and a driver that fails to register says so.
+- **Start-up stopped at the boot logo with the test driver on.** The drivers read their firmware while macOS was still
+  finding its disks, and finding the disks waits for the drivers. They now attach a moment later, once the disks are
+  mounted; the screen stays on the boot display until then.
+- **Turning the test driver on always failed** with "a GPU firmware file did not match its checksum": the check was
+  given a list format it does not read. The download also asked for every vendor's files at once and GitLab refused it
+  ("429 Too Many Requests"); it now fetches only what your hardware needs, retries, and falls back to kernel.org's copy
+  of the same files.
+
 ## Still open
 - HDMI and DisplayPort audio from the NVIDIA card.
-- Intel Iris Xe / Arc and AMD Ryzen AI / RX 7000+ acceleration: run 1401 Probe 2.1 on those machines to help.
+- AMD and Intel GPU acceleration has not run on those GPUs yet: turn the test driver on and Send logs to help.

@@ -1252,11 +1252,21 @@ linux_pci_register_driver(struct pci_driver *pdrv)
 {
 	devclass_t dc;
 
+	int error;
+
 	pdrv->isdrm = strcmp(pdrv->name, "drmn") == 0;
-	dc = pdrv->isdrm ? devclass_create("vgapci") : devclass_find("pci");
-	if (dc == NULL)
-		return (-ENXIO);
-	return (_linux_pci_register_driver(pdrv, dc));
+	/*
+	 * macOS port: the "pci" class is created here like "vgapci", not looked up. On FreeBSD the kernel's PCI bus made it
+	 * long before any module loads; in the port it first exists when a device attaches, which is after the drivers'
+	 * module init - so the lookup failed and the NPU drivers (ivpu, amdxdna) never registered (first NMXNPU load on an
+	 * Arrow Lake NPU, 10-11: "no driver took 8086:ad1d").
+	 */
+	dc = devclass_create(pdrv->isdrm ? "vgapci" : "pci");
+	error = dc == NULL ? -ENXIO : _linux_pci_register_driver(pdrv, dc);
+	/* LKPI_DRIVER_MODULE drops its init's return value: a driver that failed to register says so here */
+	if (error != 0)
+		printf("NullMoth xkpi: PCI driver %s did not register (%d)\n", pdrv->name, error);
+	return (error);
 }
 
 static struct resource_list_entry *

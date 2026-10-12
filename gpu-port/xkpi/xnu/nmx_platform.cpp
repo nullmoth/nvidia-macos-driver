@@ -21,6 +21,7 @@
 #include <libkern/c++/OSString.h>
 #include <libkern/c++/OSBoolean.h>
 #include <sys/vnode.h>
+#include <sys/mount.h>
 #include <sys/fcntl.h>
 #include <sys/uio.h>
 #include <sys/errno.h>
@@ -31,6 +32,29 @@
 
 #define FIRMWARE_ROOT "/Library/NullMoth/firmware/"
 #define FIRMWARE_MAX (64u << 20)    /* the largest GPU firmware file is a few MB; anything bigger is not one */
+
+extern "C" int nmx_xnu_wait_firmware_root(int max_secs)
+{
+    for (int i = 0; i < max_secs * 2; i++) {
+        /* no path lookup at all until a root vnode exists: before that, a lookup has nothing to start from */
+        vnode_t root = vfs_rootvnode();
+        if (root != NULLVP) {
+            vnode_put(root);
+            vfs_context_t ctx = vfs_context_create(nullptr);
+            if (ctx != nullptr) {
+                vnode_t vp = NULLVP;
+                int err = vnode_lookup(FIRMWARE_ROOT, 0, &vp, ctx);
+                if (err == 0)
+                    vnode_put(vp);
+                vfs_context_rele(ctx);
+                if (err == 0)
+                    return 0;
+            }
+        }
+        IOSleep(500);
+    }
+    return ETIMEDOUT;
+}
 
 extern "C" int nmx_xnu_firmware_load(const char *name, void **data, size_t *size)
 {

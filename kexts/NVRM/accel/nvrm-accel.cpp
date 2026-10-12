@@ -569,14 +569,16 @@ public:
 #ifdef NMX_ACCEL
         // NMXGPU decides which AMD/Intel GPUs are driven (nmxamd=1 / nmxintel=1 / nullmoth-gpu); this accelerator only
         // starts on a device it has claimed, so a GPU macOS drives itself never gets a second accelerator
+        // No waiting here: NMXGPU attaches from a thread once the disks with its firmware are mounted, and mounting waits
+        // for matching to settle - a start() that blocked matching for the claim would hold the boot at the logo. NMXGPU
+        // re-runs matching on the device (registerService) after it sets nmxgpu-claimed, which offers it here again.
         if (IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider)) {
-            unsigned waited = 0;
-            while (pci->getProperty("nmxgpu-claimed") != kOSBooleanTrue && waited < 300) { IOSleep(100); waited++; }
             if (pci->getProperty("nmxgpu-claimed") != kOSBooleanTrue) {
-                ALOG("NMXGPU did not claim %04x:%04x in 30 s - not starting", pci->configRead16(0x00), pci->configRead16(0x02));
+                ALOG("NMXGPU has not claimed %04x:%04x yet - not starting now; offered again when it does",
+                     pci->configRead16(0x00), pci->configRead16(0x02));
                 return false;
             }
-            ALOG("NMXGPU drives %04x:%04x (waited %u ms) - starting", pci->configRead16(0x00), pci->configRead16(0x02), waited * 100);
+            ALOG("NMXGPU drives %04x:%04x - starting", pci->configRead16(0x00), pci->configRead16(0x02));
         }
 #else
         uint32_t gate = 0;

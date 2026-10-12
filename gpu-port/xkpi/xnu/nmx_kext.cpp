@@ -19,7 +19,9 @@
 #include <libkern/c++/OSData.h>
 #include <mach/kmod.h>
 #include <pexpert/pexpert.h>
+#include <kern/thread.h>
 #include "nmx_port.h"
+#include "nmx_xnu.h"
 
 #define AMD_VENDOR 0x1002
 #define INTEL_VENDOR 0x8086
@@ -32,6 +34,11 @@ class NMXGPU : public IOService {
     OSDeclareDefaultStructors(NMXGPU)
     void *dev_;
     IOService *fb_;
+    IOPCIDevice *pci_;
+    volatile int attach_;   /* 0 = attach pending on its thread, 1 = attached, -1 = not attached */
+    bool pm_;
+    static void attachThread(void *arg, wait_result_t);
+    void attachNow();
 public:
     IOService *probe(IOService *provider, SInt32 *score) override;
     bool start(IOService *provider) override;
@@ -91,15 +98,50 @@ bool NMXGPU::start(IOService *provider)
     g_devices++;
     IOLockUnlock(g_lock);
 
-    dev_ = nmx_port_attach(pci);
+    /*
+     * amdgpu, i915 and xe load firmware while they attach. During boot matching that read would come before the root and
+     * Data volumes are mounted, and mounting waits for matching to settle: the Mac would stop at the logo (seen with the
+     * NPU kext on the same layer, 10-11). The attach runs on its own thread once the firmware folder exists; the firmware
+     * framebuffer keeps the screen until then.
+     */
+    pci_ = pci;
+    dev_ = nullptr;
+    fb_ = nullptr;
+    pm_ = false;
+    attach_ = 0;
+    retain();
+    thread_t t = THREAD_NULL;
+    if (kernel_thread_start(&NMXGPU::attachThread, this, &t) != KERN_SUCCESS) {
+        IOLog("NullMoth GPU: could not start the attach thread\n");
+        attach_ = -1;
+        release();
+        return true;
+    }
+    thread_deallocate(t);
+    return true;
+}
+
+void NMXGPU::attachThread(void *arg, wait_result_t)
+{
+    NMXGPU *self = (NMXGPU *)arg;
+    self->attachNow();
+    self->release();
+}
+
+void NMXGPU::attachNow()
+{
+    int err = nmx_xnu_wait_firmware_root(300);
+    if (err) {
+        IOLog("NullMoth GPU: the firmware folder never appeared (%d); this GPU stays with macOS\n", err);
+        attach_ = -1;
+        return;
+    }
+    dev_ = nmx_port_attach(pci_);
     if (dev_ == nullptr) {
-        IOLog("NullMoth GPU: no driver took %04x:%04x\n", pci->configRead16(kIOPCIConfigVendorID),
-              pci->configRead16(kIOPCIConfigDeviceID));
-        IOLockLock(g_lock);
-        g_devices--;
-        IOLockUnlock(g_lock);
-        IOService::stop(provider);
-        return false;
+        IOLog("NullMoth GPU: no driver took %04x:%04x\n", pci_->configRead16(kIOPCIConfigVendorID),
+              pci_->configRead16(kIOPCIConfigDeviceID));
+        attach_ = -1;
+        return;
     }
 
     static IOPMPowerState states[2] = {
@@ -107,24 +149,34 @@ bool NMXGPU::start(IOService *provider)
         { kIOPMPowerStateVersion1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 },
     };
     PMinit();
-    provider->joinPMtree(this);
+    pci_->joinPMtree(this);
     registerPowerDriver(this, states, 2);
+    pm_ = true;
     registerService();
-    /* NMXAccel (the Metal accelerator for this GPU) starts only on a device this driver has claimed */
-    pci->setProperty("nmxgpu-claimed", kOSBooleanTrue);
+    /* NMXAccel (the Metal accelerator for this GPU) starts only on a device this driver has claimed; it declined while
+       the claim was pending, so matching on the device runs again now that it is set */
+    pci_->setProperty("nmxgpu-claimed", kOSBooleanTrue);
+    pci_->registerService();
     /* light the outputs and hand them to macOS; without it the device still renders, with no screen of its own */
     fb_ = nmx_fb_publish(this, dev_);
-    IOLog("NullMoth GPU: driving %04x:%04x\n", pci->configRead16(kIOPCIConfigVendorID),
-          pci->configRead16(kIOPCIConfigDeviceID));
-    return true;
+    IOLog("NullMoth GPU: driving %04x:%04x\n", pci_->configRead16(kIOPCIConfigVendorID),
+          pci_->configRead16(kIOPCIConfigDeviceID));
+    OSSynchronizeIO();
+    attach_ = 1;
 }
 
 void NMXGPU::stop(IOService *provider)
 {
+    /* an attach still running on its thread finishes first (it holds a reference on this object meanwhile) */
+    for (int i = 0; attach_ == 0 && i < 6000; i++)
+        IOSleep(100);
     provider->removeProperty("nmxgpu-claimed");
-    nmx_fb_unpublish(fb_, this, dev_);
+    if (fb_ != nullptr)
+        nmx_fb_unpublish(fb_, this, dev_);
     fb_ = nullptr;
-    PMstop();
+    if (pm_)
+        PMstop();
+    pm_ = false;
     nmx_port_detach(dev_);
     dev_ = nullptr;
     IOLockLock(g_lock);

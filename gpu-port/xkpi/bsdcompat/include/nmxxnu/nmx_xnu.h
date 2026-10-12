@@ -92,6 +92,13 @@ size_t nmx_xnu_pci_rom(void *pci, void *buf, size_t max);
 /* loads a GPU firmware file by its Linux name (e.g. "amdgpu/psp_13_0_4_toc.bin"); caller frees with nmx_xnu_firmware_free */
 int nmx_xnu_firmware_load(const char *name, void **data, size_t *size);
 void nmx_xnu_firmware_free(void *data, size_t size);
+/*
+ * Waits, up to max_secs, until the firmware folder can be looked up. A driver that attaches during boot matching
+ * runs before the root and Data volumes are mounted, and mounting them waits for matching to settle: a firmware
+ * read at that point never returns and the Mac stops at the boot logo (first NMXNPU boot on an Arrow Lake NPU,
+ * 10-11). Attach from a thread after this returns 0; ETIMEDOUT when the folder never appears.
+ */
+int nmx_xnu_wait_firmware_root(int max_secs);
 
 /* ---- ACPI (nmx_acpi.cpp) ------------------------------------------------------------------------------------------ */
 
