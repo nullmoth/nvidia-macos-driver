@@ -6,6 +6,9 @@
 
 #include <dlfcn.h>
 #include <mach-o/loader.h>
+#include <mach-o/nlist.h>
+#include <mach/mach.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -237,6 +240,75 @@ static uint32_t g_dsr_depth_modes, g_dsr_stencil_modes, g_dsr_indep, g_dsr_indep
 static void *nvmtl_rp_shape_variant(nvk_pipeline *p, uint32_t load, uint32_t prm, uint32_t dmode, uint32_t smode);
 #define DECL(f) static PFN_##f p##f;
 static PFN_vkGetInstanceProcAddr pvkGetInstanceProcAddr; static PFN_vkCreateInstance pvkCreateInstance;
+// Chrome's GPU process (and other sandboxed renderers) may not read sysctl hw.memsize, so the driver's
+// sysconf(_SC_PHYS_PAGES) returns -1 there; NVK then fails "Failed to query total system memory", the device never comes
+// up and the app has no Metal device (measured 10-12: Chrome on an RTX 5060 had no WebGL with its GPU sandbox on, and
+// WebGL on the GPU with it off). The kernel's host_info answers the same number through a Mach call sandboxes allow.
+static long nvmtl_sysconf(int name)
+{
+    long v = sysconf(name);
+    if (v > 0 || name != _SC_PHYS_PAGES) return v;
+    static mach_port_t host;
+    if (!host) host = mach_host_self();
+    host_basic_info_data_t hi; mach_msg_type_number_t n = HOST_BASIC_INFO_COUNT;
+    if (host_info(host, HOST_BASIC_INFO, (host_info_t)&hi, &n) != KERN_SUCCESS || !hi.max_mem) return v;
+    long page = getpagesize();
+    return page > 0 ? (long)(hi.max_mem / (uint64_t)page) : v;
+}
+// Point one imported symbol of the image that holds `inside` at `repl` (its lazy and non-lazy pointers). Returns how
+// many pointers were changed. The driver's own dylib only: nothing else in the process is touched.
+static int nvmtl_rebind_import(const void *inside, const char *symbol, void *repl)
+{
+    Dl_info di;
+    if (!dladdr(inside, &di) || !di.dli_fbase) return -1;
+    const struct mach_header_64 *mh = (const struct mach_header_64 *)di.dli_fbase;
+    if (mh->magic != MH_MAGIC_64) return -1;
+    const struct segment_command_64 *text = NULL, *linkedit = NULL;
+    const struct symtab_command *st = NULL; const struct dysymtab_command *dst = NULL;
+    const uint8_t *lc = (const uint8_t *)(mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++, lc += ((const struct load_command *)lc)->cmdsize) {
+        const struct load_command *c = (const struct load_command *)lc;
+        if (c->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *sg = (const struct segment_command_64 *)c;
+            if (!strcmp(sg->segname, SEG_TEXT)) text = sg;
+            else if (!strcmp(sg->segname, SEG_LINKEDIT)) linkedit = sg;
+        } else if (c->cmd == LC_SYMTAB) st = (const struct symtab_command *)c;
+        else if (c->cmd == LC_DYSYMTAB) dst = (const struct dysymtab_command *)c;
+    }
+    if (!text || !linkedit || !st || !dst || !dst->nindirectsyms) return -1;
+    const intptr_t slide = (intptr_t)mh - (intptr_t)text->vmaddr;
+    const uint8_t *lebase = (const uint8_t *)(slide + linkedit->vmaddr - linkedit->fileoff);
+    const struct nlist_64 *syms = (const struct nlist_64 *)(lebase + st->symoff);
+    const char *strs = (const char *)(lebase + st->stroff);
+    const uint32_t *ind = (const uint32_t *)(lebase + dst->indirectsymoff);
+    int changed = 0;
+    lc = (const uint8_t *)(mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++, lc += ((const struct load_command *)lc)->cmdsize) {
+        const struct load_command *c = (const struct load_command *)lc;
+        if (c->cmd != LC_SEGMENT_64) continue;
+        const struct segment_command_64 *sg = (const struct segment_command_64 *)c;
+        if (strncmp(sg->segname, "__DATA", 6)) continue;
+        const struct section_64 *sec = (const struct section_64 *)(sg + 1);
+        for (uint32_t k = 0; k < sg->nsects; k++, sec++) {
+            const uint32_t type = sec->flags & SECTION_TYPE;
+            if (type != S_LAZY_SYMBOL_POINTERS && type != S_NON_LAZY_SYMBOL_POINTERS) continue;
+            void **slots = (void **)(slide + sec->addr);
+            for (uint64_t e = 0; e < sec->size / sizeof(void *); e++) {
+                const uint32_t si = ind[sec->reserved1 + e];
+                if (si == INDIRECT_SYMBOL_ABS || si == INDIRECT_SYMBOL_LOCAL || (si & INDIRECT_SYMBOL_ABS) || si >= st->nsyms) continue;
+                if (strcmp(strs + syms[si].n_un.n_strx, symbol)) continue;
+                vm_address_t page = (vm_address_t)&slots[e] & ~(vm_address_t)(getpagesize() - 1);
+                // __DATA_CONST is read-only after binding: open the one page, write, close it again
+                if (vm_protect(mach_task_self(), page, getpagesize(), 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS) continue;
+                slots[e] = repl;
+                if (!strcmp(sg->segname, "__DATA_CONST")) vm_protect(mach_task_self(), page, getpagesize(), 0, VM_PROT_READ);
+                changed++;
+            }
+        }
+    }
+    return changed;
+}
+
 INSTANCE_FNS(DECL) DEVICE_FNS(DECL)
 #undef DECL
 #define LOAD_I(f) do { p##f = (PFN_##f)pvkGetInstanceProcAddr(g_inst, #f); if (!p##f) { nvlog("vk: missing %s", #f); return -1; } } while (0);
@@ -626,6 +698,8 @@ static int nvmtl_vk_initialize(void)
         if (pvkGetInstanceProcAddr) {
             char vid[1200];
             nvlog("vk: driver opened directly: %s (image %s)", NVMTL_ICD_LIB, nvmtl_image_ident((const void *)pvkGetInstanceProcAddr, vid, sizeof vid));
+            { int rb = nvmtl_rebind_import((const void *)pvkGetInstanceProcAddr, "_sysconf", (void *)nvmtl_sysconf);
+              if (rb <= 0) nvlog("vk: memory-size fallback missing: _sysconf not rebound in %s (%d) -- sandboxed apps may have no device", NVMTL_ICD_LIB, rb); }
             pnvk_stage_import = (void (*)(const nvmtl_vram_rec *))dlsym(g_lib, "nvmtl_nvk_stage_import");
             pnvk_surface_dirty = (uint32_t (*)(VkDevice, uint32_t, uint32_t))dlsym(g_lib, "nvmtl_nvk_surface_dirty");
             pnvk_sample_depth_contract = (VkResult (*)(VkDevice, uint32_t *, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_contract_v1");
