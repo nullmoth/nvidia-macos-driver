@@ -1376,26 +1376,53 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
     if (r && *r) nvmtl_gl_tag_reflection(*r, d);
     return ps;
 }
-static dispatch_queue_t nvmtl_pipeline_compile_queue(void) {
-    static dispatch_queue_t queue; static dispatch_once_t once;
-    dispatch_once(&once, ^{ queue = dispatch_queue_create("nvmtl.pipeline.compile", DISPATCH_QUEUE_SERIAL); });
+// Asynchronous pipeline builds share a bounded pool. A serial queue made an app that creates its pipelines up front
+// (games, a browser's GPU process) wait for them one after another on one core.
+// Width: one less than the physical cores (the performance cores on a CPU with two kinds), 1 to 8, and at most half
+// the memory in GB: translating a large kernel alone peaks near 300 MB. NVMTL_PIPELINE_THREADS sets it; 1 is the old
+// serial behaviour.
+static int nvmtl_sysctl_int(const char *name) {
+    int value = 0; size_t size = sizeof value;
+    return sysctlbyname(name, &value, &size, NULL, 0) == 0 && size == sizeof value ? value : 0;
+}
+static NSInteger nvmtl_pipeline_compile_width(void) {
+    const char *e = getenv("NVMTL_PIPELINE_THREADS");
+    if (e && *e) { const long v = strtol(e, NULL, 10); if (v >= 1 && v <= 64) return v; }
+    int cores = nvmtl_sysctl_int("hw.nperflevels") > 1 ? nvmtl_sysctl_int("hw.perflevel0.physicalcpu") : 0;
+    if (cores <= 0) cores = nvmtl_sysctl_int("hw.physicalcpu");
+    if (cores <= 0) cores = (int)NSProcessInfo.processInfo.activeProcessorCount;
+    NSInteger width = cores > 1 ? cores - 1 : 1;
+    if (width > 8) width = 8;
+    const NSInteger byMemory = (NSInteger)(NSProcessInfo.processInfo.physicalMemory >> 31);
+    if (byMemory >= 1 && width > byMemory) width = byMemory;
+    return width;
+}
+static NSOperationQueue *nvmtl_pipeline_compile_queue(void) {
+    static NSOperationQueue *queue; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = [NSOperationQueue new];
+        queue.name = @"nvmtl.pipeline.compile";
+        queue.qualityOfService = NSQualityOfServiceUserInitiated;   // what the completion handlers run at
+        queue.maxConcurrentOperationCount = nvmtl_pipeline_compile_width();
+        nvlog("pipeline compile: %ld asynchronous builds at a time", (long)queue.maxConcurrentOperationCount);
+    });
     return queue;
 }
 - (void)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d completionHandler:(MTLNewRenderPipelineStateCompletionHandler)h {
     MTLRenderPipelineDescriptor *snapshot = [d copy];
-    dispatch_async(nvmtl_pipeline_compile_queue(), ^{ @autoreleasepool {
+    [nvmtl_pipeline_compile_queue() addOperationWithBlock:^{ @autoreleasepool {
         NSError *e = nil; id<MTLRenderPipelineState> ps = [self newRenderPipelineStateWithDescriptor:snapshot error:&e];
         if (h) dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ h(ps, e); });
-    }});
+    }}];
 }
 - (void)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d options:(MTLPipelineOption)o
                            completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)h {
     MTLRenderPipelineDescriptor *snapshot = [d copy];
-    dispatch_async(nvmtl_pipeline_compile_queue(), ^{ @autoreleasepool {
+    [nvmtl_pipeline_compile_queue() addOperationWithBlock:^{ @autoreleasepool {
         NSError *e = nil; MTLRenderPipelineReflection *reflection = nil;
         id<MTLRenderPipelineState> ps = [self newRenderPipelineStateWithDescriptor:snapshot options:o reflection:&reflection error:&e];
         if (h) dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ h(ps, reflection, e); });
-    }});
+    }}];
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)fn options:(MTLPipelineOption)o
                                                         reflection:(MTLAutoreleasedComputePipelineReflection *)r error:(NSError **)err {
@@ -1404,18 +1431,18 @@ static dispatch_queue_t nvmtl_pipeline_compile_queue(void) {
     return ps;
 }
 - (void)newComputePipelineStateWithFunction:(id<MTLFunction>)fn completionHandler:(MTLNewComputePipelineStateCompletionHandler)h {
-    dispatch_async(nvmtl_pipeline_compile_queue(), ^{ @autoreleasepool {
+    [nvmtl_pipeline_compile_queue() addOperationWithBlock:^{ @autoreleasepool {
         NSError *e = nil; id<MTLComputePipelineState> ps = [self newComputePipelineStateWithFunction:fn error:&e];
         if (h) dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ h(ps, e); });
-    }});
+    }}];
 }
 - (void)newComputePipelineStateWithFunction:(id<MTLFunction>)fn options:(MTLPipelineOption)o
                           completionHandler:(MTLNewComputePipelineStateWithReflectionCompletionHandler)h {
-    dispatch_async(nvmtl_pipeline_compile_queue(), ^{ @autoreleasepool {
+    [nvmtl_pipeline_compile_queue() addOperationWithBlock:^{ @autoreleasepool {
         NSError *e = nil; MTLComputePipelineReflection *reflection = nil;
         id<MTLComputePipelineState> ps = [self newComputePipelineStateWithFunction:fn options:o reflection:&reflection error:&e];
         if (h) dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ h(ps, reflection, e); });
-    }});
+    }}];
 }
 
 static NSString *nvmtl_tg_mismatch(id fn, NSUInteger ask, const char *who) {
@@ -1462,11 +1489,11 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 - (void)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)d options:(MTLPipelineOption)o
                             completionHandler:(MTLNewComputePipelineStateWithReflectionCompletionHandler)h {
     MTLComputePipelineDescriptor *snapshot = [d copy];
-    dispatch_async(nvmtl_pipeline_compile_queue(), ^{ @autoreleasepool {
+    [nvmtl_pipeline_compile_queue() addOperationWithBlock:^{ @autoreleasepool {
         NSError *e = nil; MTLComputePipelineReflection *reflection = nil;
         id<MTLComputePipelineState> ps = [self newComputePipelineStateWithDescriptor:snapshot options:o reflection:&reflection error:&e];
         if (h) dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ h(ps, reflection, e); });
-    }});
+    }}];
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)d error:(NSError **)err {
     nvlog("cpdesc: withDescriptor:error: -> options route");
@@ -1475,10 +1502,10 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 - (void)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)d
                             completionHandler:(MTLNewComputePipelineStateCompletionHandler)h {
     MTLComputePipelineDescriptor *snapshot = [d copy];
-    dispatch_async(nvmtl_pipeline_compile_queue(), ^{ @autoreleasepool {
+    [nvmtl_pipeline_compile_queue() addOperationWithBlock:^{ @autoreleasepool {
         NSError *e = nil; id<MTLComputePipelineState> ps = [self newComputePipelineStateWithDescriptor:snapshot options:MTLPipelineOptionNone reflection:nil error:&e];
         if (h) dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ h(ps, e); });
-    }});
+    }}];
 }
 - (BOOL)supportsFunctionPointers { return YES; }
 - (BOOL)supportsFunctionPointersFromRender { return YES; }
