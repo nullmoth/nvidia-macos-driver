@@ -9,10 +9,10 @@ import WebKit
 import UniformTypeIdentifiers
 
 struct Package {
-    static let version = "1.14.3"
-    static let name = "nullmoth-nvidia-1.14.3.tar.gz"
-    static let url = URL(string: "https://github.com/nullmoth/nvidia-macos-driver/releases/download/v1.14.3/nullmoth-nvidia-1.14.3.tar.gz")!
-    static let sha256 = "f2f8ce6078e71d637132542435343d8529e68d2f58ca0975084fa884b3dab251"
+    static let version = "1.14.4"
+    static let name = "nullmoth-nvidia-1.14.4.tar.gz"
+    static let url = URL(string: "https://github.com/nullmoth/nvidia-macos-driver/releases/download/v1.14.4/nullmoth-nvidia-1.14.4.tar.gz")!
+    static let sha256 = "72c7a3ea1250c9765981968ca4e2c8edf427e4d5a879e54d5e69a74f09329b37"
 }
 let uploadPage = URL(string: "https://nullmothsystems.com/#send")!
 let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("NullMoth")
