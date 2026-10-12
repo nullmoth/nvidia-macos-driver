@@ -31,6 +31,9 @@ Every fix below came from the logs, chats and GitHub issues you sent. For each: 
   were marked up to date before the GPU drew them (community patch, #98). 3D-texture copies now copy every layer (#84).
 - **Photos face detection crashing (mediaanalysisd)** (#107). A Metal object was released after it was freed.
 - **"Your browser does not support WebGL"**. Shaders that read the sample count failed to translate.
+- **Chess showed nothing** (and other apps that set their own anti-aliasing sample positions). The driver refused
+  any pass that asked for sample positions, and gave apps an empty list when they asked for the standard ones.
+  It now returns the standard positions and draws those passes with them.
 - **Hardware video encoding on RTX 5070 Ti and similar cards** (#105). The encoder only tried the card's first encoder
   engine, which those cards do not have; it now uses the first one the card has.
 
