@@ -11645,7 +11645,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --exclude=__pycache__ --exclude=*.bak* --exclude=*.orig --exclude=.git --exclude=open-gpu-kernel-modules --strip-trailing-cr upmesa/mesa-17ca6174/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c rebase263/mesa/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c	1969-12-31 16:00:00
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c	2026-10-06 08:34:31
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,202 @@
 +#include "../../nvmtl_cfg.h"
 +#include "nvrm_xnu.h"
 +#include <IOKit/IOKitLib.h>
@@ -11835,8 +11835,12 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +            IOConnectCallScalarMethod(conn, SEL_BINDFD, &in, 1, NULL, NULL);
 +        }
 +        if (!live) {
++            // Detach before publishing to the pool: another thread can take a
++            // pooled connection immediately, and the fd will soon be reused.
++            uint64_t unbound = (uint64_t)(int64_t)-2;
++            kern_return_t kr = IOConnectCallScalarMethod(conn, SEL_BINDFD, &unbound, 1, NULL, NULL);
 +            pthread_mutex_lock(&gLock);
-+            int pooled = pool_put(conn, gConnType[fd]);
++            int pooled = kr == KERN_SUCCESS && pool_put(conn, gConnType[fd]);
 +            if (pooled) gPoolPut++; else gPoolDrop++;
 +            pthread_mutex_unlock(&gLock);
 +            if (!pooled) IOServiceClose(conn);
