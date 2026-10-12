@@ -120,4 +120,25 @@ static inline void nmx_drmm_wq_release(struct drm_device *dev, void *wq) { destr
 	_wq; })
 struct amdxdna_dev;
 void nmx_xdna_carveout_setup(struct amdxdna_dev *xdna);	/* nmx_xdna_glue.c */
+
+/* ---- newer-kernel interfaces Intel's ivpu (Linux 7.3) uses on the 6.14 layer ---- */
+/* runtime PM is never enabled here (see pm_runtime_status_suspended above) */
+#define pm_runtime_enabled(dev) false
+#ifndef in_range
+#define in_range(val, start, len) ((val) >= (start) && (val) - (start) < (len))
+#endif
+/* 6.14's drm_gem_shmem_vmap/vunmap already require the reservation lock: they are the later _locked forms */
+#define drm_gem_shmem_vmap_locked(shmem, map) drm_gem_shmem_vmap((shmem), (map))
+#define drm_gem_shmem_vunmap_locked(shmem, map) drm_gem_shmem_vunmap((shmem), (map))
+#define drm_gem_is_imported(obj) ((obj)->import_attach != NULL)
+/* LinuxKPI has no disabled-work state: cancel and wait is the nearest form (the callers never queue it again) */
+#define disable_work_sync(w) cancel_work_sync(w)
+#define system_dfl_wq system_unbound_wq
+/* the ECC capability MSR is read only for 50xx NPUs; an unreadable MSR means "no ECC", which the driver handles */
+#ifndef MSR_INTEGRITY_CAPS
+#define MSR_INTEGRITY_CAPS 0x2d9
+#endif
+#define rdmsrq_safe(msr, p) (-EIO)
+/* the opener's uid, logged with each client; the port's files carry no Linux credentials */
+#define current_uid() ((struct { uid_t val; }){ .val = 0 })
 #endif
