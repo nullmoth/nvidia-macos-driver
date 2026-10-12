@@ -2,7 +2,7 @@
 const $ = (id) => document.getElementById(id);
 const post = (m) => window.webkit.messageHandlers.nm.postMessage(m);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const S = { mac: null, pkg: "", previewed: false, installed: false };
+const S = { mac: null, pkg: "", previewed: false, installed: false, driverUpdate: false };
 
 function row(k, v) { return `<tr><th>${esc(k)}</th><td>${v}</td></tr>`; }
 function step(n, state) { const li = $("s" + n); li.classList.toggle("done", state === "done"); li.classList.toggle("now", state === "now"); }
@@ -17,6 +17,7 @@ function render(m) {
     row("Processor", m.arch === "x86_64" && !m.translated ? "x86_64" : '<span class="bad">Apple silicon - this driver is for Intel Macs and PCs</span>') +
     row("Graphics", m.gpus.length ? m.gpus.map((g) => esc(g.name) + (g.supported ? (g.tested ? ' <span class="good">listed device, model tested</span>' : ' <span class="warn">listed by NVIDIA, model not tested yet</span>') : g.vendor === "10DE" ? ' <span class="bad">not supported (needs RTX 20 series or newer)</span>' : "")).join("<br>") : "none found") +
     row("OpenCore", m.opencore ? esc(m.opencore) : '<span class="warn">not detected</span>') +
+    row("Installed driver package", m.installedDriverVersion ? esc(m.installedDriverVersion) : "No version record") +
     row("NullMoth driver", on ? '<span class="good">running</span> (' + esc(m.metal.join(", ")) + ")" : m.files ? '<span class="warn">installed, not running yet</span>' : "not installed");
 
   let why = "";
@@ -64,8 +65,15 @@ const NM = {
       if (data.state === "progress" && data.total > 0) $("dlp").textContent = Math.floor((100 * data.done) / data.total) + "%";
       if (data.state === "start") ["dl", "updchk", "upddrv"].forEach((b) => ($(b).disabled = true));
       if (data.state === "error" || data.state === "done") ["dl", "updchk", "upddrv"].forEach((b) => ($(b).disabled = false));
-      if (data.state === "error") $("dlp").innerHTML = `<span class="bad">${esc(data.why)}</span>`;
-      if (data.state === "done") { $("dlp").textContent = "done, checksum OK"; post({ act: "scan" }); }
+      if (data.state === "error") {
+        $("dlp").innerHTML = `<span class="bad">${esc(data.why)}</span>`;
+        if (S.driverUpdate) { S.driverUpdate = false; $("updr").innerHTML = `<span class="bad">${esc(data.why)}</span>`; }
+      }
+      if (data.state === "done") {
+        $("dlp").textContent = "done, checksum OK";
+        if (S.driverUpdate) { $("updr").textContent = "Download checked. Installing the driver..."; $("upddrv").disabled = true; }
+        post({ act: "scan" });
+      }
     }
     if (event === "upd") {
       if (data.state === "error") { $("updr").innerHTML = `<span class="bad">${esc(data.why)}</span>`; $("upddrv").hidden = true; }
@@ -89,7 +97,18 @@ const NM = {
       ["dry", "go", "rm", "dl", "updchk", "upddrv"].forEach((b) => ($(b).disabled = busy));
       if (busy) { $("logwrap").hidden = false; $("log").textContent = ""; return; }
       if (data.why) { $("logwrap").hidden = false; logLine(data.why); }
-      if (data.state === "cancelled") { logLine("NOTE cancelled - nothing was changed"); post({ act: "scan" }); return; }
+      if (data.state === "cancelled") {
+        if (S.driverUpdate) { S.driverUpdate = false; $("updr").textContent = "Driver update cancelled."; }
+        logLine("NOTE cancelled - nothing was changed"); post({ act: "scan" }); return;
+      }
+      if (S.driverUpdate && data.mode === "install") {
+        S.driverUpdate = false;
+        if (data.ok) {
+          $("updr").textContent = "Driver installed. Restart to load it.";
+          $("upddrv").hidden = true;
+          $("upddrv").disabled = true;
+        } else { $("updr").textContent = "Driver update stopped. Review the setup log below."; }
+      }
       if (data.mode === "dry" && data.ok) { S.previewed = true; step(2, "done"); step(3, "now"); }
       if (data.mode === "install" && data.ok) { S.installed = true; step(3, "done"); step(4, "now"); $("rs").disabled = false; }
       post({ act: "scan" });
@@ -107,7 +126,7 @@ $("efi").onchange = () => {
 $("dl").onclick = () => post({ act: "download" });
 $("updchk").onclick = () => { $("updr").textContent = "Checking..."; post({ act: "checkUpdate" }); };
 $("updapp").onclick = () => { $("updapp").disabled = true; post({ act: "updateApp" }); };
-$("upddrv").onclick = () => { $("upddrv").disabled = true; $("updr").textContent = "Downloading the newest driver..."; post({ act: "updateDriver", efi: efi() }); };
+$("upddrv").onclick = () => { S.driverUpdate = true; $("upddrv").disabled = true; $("updr").textContent = "Downloading the newest driver..."; post({ act: "updateDriver", efi: efi() }); };
 $("ocg").onclick = (e) => { e.preventDefault(); post({ act: "open", url: "https://dortania.github.io/OpenCore-Install-Guide/" }); };
 $("dry").onclick = () => post({ act: "run", mode: "dry", pkg: S.pkg, efi: efi() });
 $("go").onclick = () => post({ act: "run", mode: "install", pkg: S.pkg, efi: efi() });

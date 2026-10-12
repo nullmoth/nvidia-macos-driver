@@ -9,10 +9,10 @@ import WebKit
 import UniformTypeIdentifiers
 
 struct Package {
-    static let version = "1.14.6"
-    static let name = "nullmoth-nvidia-1.14.6.tar.gz"
-    static let url = URL(string: "https://github.com/nullmoth/nvidia-macos-driver/releases/download/v1.14.6/nullmoth-nvidia-1.14.6.tar.gz")!
-    static let sha256 = "3b6056fe1125939f6e25ca9513da31c0a84d3c1248707938c32ef5dcf7f9f3f8"
+    static let version = "1.14.7"
+    static let name = "nullmoth-nvidia-1.14.7.tar.gz"
+    static let url = URL(string: "https://github.com/nullmoth/nvidia-macos-driver/releases/download/v1.14.7/nullmoth-nvidia-1.14.7.tar.gz")!
+    static let sha256 = "8e6ae5a235506acf9c4c5da77fd162002bc96202c05c8eec89574ba9c9b2fd82"
 }
 let uploadPage = URL(string: "https://nullmothsystems.com/#send")!
 let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("NullMoth")
@@ -416,6 +416,11 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
     }
 
     func scan() -> [String: Any] { App.scanMac(table) }
+    static func loadedDriverComponentCount(_ listing: String) -> Int {
+        let expected: Set<String> = ["com.nullmoth.NVRM", "com.nullmoth.NVRMFB", "com.nullmoth.NVAccel", "com.nullmoth.NVRMAGDC"]
+        let words = Set(listing.split(whereSeparator: { $0.isWhitespace }).map(String.init))
+        return expected.intersection(words).count
+    }
     static func scanMac(_ table: [String: Any]) -> [String: Any] {
         let ids = table["ids"] as? [String: String] ?? [:], tested = table["tested"] as? [String] ?? []
         let gpus: [[String: Any]] = pciDisplays().map { g in
@@ -428,7 +433,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         let os = ProcessInfo.processInfo.operatingSystemVersion
         let oc = sh("/usr/sbin/nvram", ["4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:opencore-version"])
             .split(separator: "\t").dropFirst().first.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
-        let kexts = sh("/usr/bin/kmutil", ["showloaded", "--list-only"]).split(separator: "\n").filter { $0.contains("com.nullmoth.") }.count
+        let kexts = loadedDriverComponentCount(sh("/usr/bin/kmutil", ["showloaded", "--list-only"]))
         let fm = FileManager.default
         let files = fm.fileExists(atPath: "/Library/GPUBundles/NVMTLDriver.bundle") && fm.fileExists(atPath: "/Library/Extensions/NVRM.kext")
         var arch = "x86_64"
@@ -438,7 +443,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         let safe = sh("/usr/sbin/nvram", ["boot-args"]).split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" }).contains("-nvoff")
         return ["macos": "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)", "major": os.majorVersion, "arch": arch,
                 "gpus": gpus, "opencore": oc, "kexts": kexts, "files": files, "metal": MTLCopyAllDevices().map { $0.name },
-                "packages": findPackages(), "version": Package.version, "safemode": safe,
+                "packages": findPackages(), "version": Package.version, "installedDriverVersion": recordedDriverVersion(), "safemode": safe,
                 "record": fm.fileExists(atPath: "/Library/NullMoth/state"), "crashes": driverCrashes().map(\.lastPathComponent),
                 "translated": sysctl("sysctl.proc_translated") == "1",
                 "profile": { var p = machineProfile(gpus); p["rules"] = Profile.select(rules(), p).ids; return p }()]
@@ -521,9 +526,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         for i in 0..<max(x.count, y.count) { let p = i < x.count ? x[i] : 0, q = i < y.count ? y[i] : 0; if p != q { return p > q } }
         return false
     }
-    func installedDriverVersion() -> String {
+    static func recordedDriverVersion() -> String {
         (try? String(contentsOfFile: "/Library/NullMoth/driver-version", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
+    func installedDriverVersion() -> String { App.recordedDriverVersion() }
     func checkUpdate() {
         let api = URL(string: "https://api.github.com/repos/nullmoth/nvidia-macos-driver/releases/latest")!
         var rq = URLRequest(url: api); rq.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept"); rq.timeoutInterval = 30

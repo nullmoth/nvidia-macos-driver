@@ -57,7 +57,9 @@ stick made by an old 1401 keeps the old problem until you make it again.
 - **Start once without the driver:** pick **1401: Start once without NVIDIA driver** in the OpenCore picker, press Y,
   then choose macOS or Recovery. The driver is back at the next start. (1.14)
 - **Remove the driver:** pick **1401: Remove NVIDIA driver**, press Y, then choose macOS. It removes itself and restarts.
-- **Boot logo:** on by default. Mac app → **Boot logo off**, or add `-nmlogooff` to boot-args for one start.
+- **Boot logo:** disabled by default. Driver installation and updates disable an existing logo entry because it can
+  prevent firmware from reaching the picker. Enable it only for a deliberate test. If the picker never appears, disable
+  `NullMothLogo.efi` in the EFI configuration from another operating system; a boot argument cannot repair a pre-picker hang.
 
 ## 5. GPUs the driver does not cover yet
 

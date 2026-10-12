@@ -13,7 +13,7 @@ import hashlib
 
 SETUP = pathlib.Path(__file__).resolve().parents[1] / "app/Resources/nullmoth-setup.sh"
 START = "# AMFIPass (a Lilu plugin) is what lets WindowServer"
-END = "# The macOS installer boots with a small GPU BAR"
+END = "# Existing BAR and kernel-placement settings"
 
 
 def kext(name, enabled=True):

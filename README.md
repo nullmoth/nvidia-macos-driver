@@ -99,14 +99,16 @@ Add every key you set to `NVRAM → Delete` as well, so the values are rewritten
 
 | Setting | Value | Why |
 |---|---|---|
-| `UEFI → Quirks → ResizeGpuBars` | `13` | 8 GB BAR: full memory bandwidth (tested on the RTX 5060) |
-| `Booter → Quirks → ResizeAppleGpuBars` | `-1` | macOS sees the full BAR |
+| `UEFI → Quirks → ResizeGpuBars` | keep the existing value | Forced resizing can stop firmware before the picker; `-1` preserves firmware sizing |
+| `Booter → Quirks → ResizeAppleGpuBars` | keep the existing value | Large firmware BARs can stop PCI configuration; `0` is the installer-safe small-BAR setting |
 | `Kernel → Block` | `com.apple.iokit.IONDRVSupport`, Strategy `Exclude` | otherwise the firmware framebuffer takes display index 0 from NVRMFB |
 | `Misc → Security → SecureBootModel` | `Disabled` | Apple Secure Boot refuses kexts Apple did not sign |
 
-The macOS **installer** needs the opposite BAR settings (`ResizeAppleGpuBars` `0`, `ResizeGpuBars` `-1`, IONDRVSupport
-not excluded): it has no NVIDIA driver and runs on the firmware's screen. 1401 builds installers that way, and the 1401
-Mac app switches to the values above when it installs the driver.
+The macOS **installer** uses `ResizeAppleGpuBars` `0`, `ResizeGpuBars` `-1`, and IONDRVSupport
+not excluded: it runs on the firmware framebuffer. The Mac app preserves existing BAR and kernel-placement settings
+during driver installation and updates. Do not replace a working configuration with fixed BAR values from another
+board. The NVIDIA driver places a supported BAR after macOS starts; boot and display qualification remain specific
+to the machine.
 
 Also required:
 - **BIOS:** Above 4G Decoding ON (the card maps memory above 4 GB), CSM OFF.

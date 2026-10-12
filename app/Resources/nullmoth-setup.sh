@@ -26,8 +26,9 @@ TOOL_NAME="1401: Remove NVIDIA driver"; TOOL_FILE=NullMothSafe.efi
 # the same tool with Arguments "once": macOS starts one time without the driver (to reach Recovery, or to get past a bad
 # start), and the driver is back after that - OpenCore rewrites boot-args at every start. Asked for on Discord 10-11.
 ONCE_NAME="1401: Start once without NVIDIA driver"
-# the NullMoth boot logo (an OpenCore driver that draws it where boot.efi draws the Apple logo). On unless --logo off.
-LOGO=on; LOGO_FILE=NullMothLogo.efi
+# Optional cosmetic EFI driver; default installations keep the standard boot display.
+# Reported firmware hangs make this an explicit opt-in rather than an installation prerequisite.
+LOGO=off; LOGO_FILE=NullMothLogo.efi
 ST=${NULLMOTH_STATE_DIR:-/Library/NullMoth}; STATE=$ST/state
 AGENT=/Library/LaunchAgents/com.nullmoth.crashcheck.plist
 RECOVER=/Library/LaunchDaemons/com.nullmoth.recover.plist
@@ -1062,19 +1063,11 @@ if [ "$UPD" = prepare ]; then
       fi ;;
   esac
 fi
-# The macOS installer boots with a small GPU BAR (ResizeAppleGpuBars 0, so its fallback screen survives PCI setup); the
-# driver was tested with the card's full 8 GB BAR, so the installed system gets that back.
+# Existing BAR and kernel-placement settings belong to the EFI that started this system.
+# A fixed 8 GB resize hung reported firmware before the picker, and updates must not
+# replace a working firmware configuration with one tested on a different board.
 bar=$(get UEFI.Quirks.ResizeGpuBars); abar=$(get Booter.Quirks.ResizeAppleGpuBars)
-# 13 = 8 GB: the full BAR of an 8 GB card, measured 10-07 on the RTX 5060 (NVRM moves BAR1 out of the console, display armed).
-[ "$bar" != 13 ] && { echo "CHANGE ResizeGpuBars: ${bar:-unset} -> 13 (8 GB BAR, full memory bandwidth)"; EDITS+=("UEFI.Quirks.ResizeGpuBars|-integer|13"); }
-[ "$abar" != -1 ] && { echo "CHANGE ResizeAppleGpuBars: ${abar:-unset} -> -1 (macOS sees the full BAR)"; EDITS+=("Booter.Quirks.ResizeAppleGpuBars|-integer|-1"); }
-# boot.efi stops with STOP 0x16 (no room in low memory for the kernel) on some boards even with a valid custom slide, and
-# the full BAR set above moves memory around. AllowRelocationBlock loads the kernel through a scratch block in the lower
-# 4 GB and is used only when no slide fits (OpenCore Configuration, Booter > Quirks); it needs ProvideCustomSlide and
-# AvoidRuntimeDefrag, so it is only turned on where both are on.
-if [ "$(get Booter.Quirks.ProvideCustomSlide)" = true ] && [ "$(get Booter.Quirks.AvoidRuntimeDefrag)" = true ] && [ "$(get Booter.Quirks.AllowRelocationBlock)" != true ]; then
-  echo "CHANGE AllowRelocationBlock: on (boot.efi can still place the kernel when low memory is full)"; EDITS+=("Booter.Quirks.AllowRelocationBlock|-bool|true")
-fi
+note "preserving this OpenCore config's GPU BAR and kernel-placement settings"
 # The installer runs on the firmware framebuffer (IONDRVSupport); once the driver is in, that framebuffer would take
 # display index 0 from NVRMFB, so the installed system excludes it (as on the tested RTX 5060 setup).
 NEEDBLOCK=0; bi=$(bidx)

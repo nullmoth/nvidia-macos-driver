@@ -12,7 +12,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 source = (ROOT / "app/Resources/nullmoth-setup.sh").read_text()
 start = source.index('if [ "$UPD" = prepare ]; then\n  MK=""')
-end = source.index("\n# The macOS installer boots", start)
+end = source.index("\n# Existing BAR and kernel-placement settings", start)
 BLOCK = source[start:end]
 
 HARNESS = r'''
