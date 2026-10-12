@@ -1024,8 +1024,21 @@ if [ "$UPD" = prepare ]; then
     *)
       case "$MODEL" in MacBook*) stop "this Mac is set up as $MODEL, which macOS 26 does not support; make a new EFI with 1401 1.14 (it picks a laptop model macOS 26 runs), then prepare again";; esac
       [ -n "$MK" ] || stop "the OpenCore config sets no Mac model (PlatformInfo); macOS 26 needs MacPro7,1 here - make a new EFI with 1401 1.14"
-      echo "CHANGE PlatformInfo: $MODEL -> MacPro7,1 (macOS 26 does not run $MODEL; MacPro7,1 runs macOS 15 and 26)"
-      EDITS+=("$MK|-string|MacPro7,1")
+      # Every section that names the model changes, not only the first: with PlatformInfo.Automatic off, macOS reads the
+      # SMBIOS/DataHub sections, and 1.14.1 changed Generic alone - the Mac stayed iMacPro1,1 (chat 10-12, botn0ught).
+      # Those sections also carry the board ID the installer checks, so it follows the model.
+      for k in PlatformInfo.Generic.SystemProductName PlatformInfo.SMBIOS.SystemProductName PlatformInfo.DataHub.SystemProductName; do
+        has "$k" || continue
+        v=$(get "$k"); [ "$v" = MacPro7,1 ] && continue
+        echo "CHANGE $k: $v -> MacPro7,1 (macOS 26 does not run $v; MacPro7,1 runs macOS 15 and 26)"
+        EDITS+=("$k|-string|MacPro7,1")
+      done
+      for k in PlatformInfo.SMBIOS.BoardProduct PlatformInfo.DataHub.BoardProduct; do
+        has "$k" || continue
+        v=$(get "$k"); [ "$v" = Mac-27AD2F918AE68F61 ] && continue
+        echo "CHANGE $k: $v -> Mac-27AD2F918AE68F61 (MacPro7,1's board)"
+        EDITS+=("$k|-string|Mac-27AD2F918AE68F61")
+      done
       if [ -z "$(kpos RestrictEvents.kext)" ]; then
         [ -d "$KX/RestrictEvents.kext" ] || { fetch_kext RestrictEvents.kext "$KX"; FETCH+=(RestrictEvents.kext); }
         ADDK+=(RestrictEvents.kext); echo "CHANGE Kernel -> Add: add RestrictEvents.kext (MacPro7,1's memory and PCI pages)"
