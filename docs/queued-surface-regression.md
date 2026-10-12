@@ -49,3 +49,11 @@ publication test fails when synchronization is removed.
 These checks establish the reproduced queue/import fixes. They do not establish
 high-refresh display modes, small-BAR kernel reclamation, sleep/wake, or successful
 boot on other hardware.
+
+## Kernel resource lifetime and display power
+
+Pending dirty-surface entries now identify their resource owner. Resource destruction removes only that owner's entries, without dereferencing a device cache or clearing a newer owner's mark. The production-destructor test covers 10000 lifetimes, full-table recovery, pointer reuse, and concurrent owners. Removing the cleanup reproduces the failure.
+
+Display power requests now share the display gate. A rejected wake keeps the sleeping state so the next request can retry, and an unsuccessful wake emits no successful-power-on notification. Connection-power requests perform the same transition and report failure when it is rejected. Head-off commits use the tracked submission path, completing earlier primary work before disabling the head. The production-transition test covers failed sleep, failed wake and retry, repeated requests, shutdown, and the existing DPMS opt-out.
+
+The accelerator builds for both supported OS layouts, and the framebuffer builds for macOS 15. These kernel changes still require boot and display-power qualification on hardware before a binary release.
