@@ -280,10 +280,13 @@ pub(in crate::passes) fn lower_sample(
 
     let mut coord_for_sample = build_sample_coord(ctx, dim, arrayed, coord, args, &mut out)?;
     let spatial = sample_spatial_dims(dim);
-    let grad3 = match spatial {
-        Some(spatial) => sample_gradient_pair(ctx, name, arrayed, args, spatial)?,
-        None => sample_gradient_pair(ctx, name, arrayed, args, 0)?,
+    // `sample_spatial_dims` leaves cube maps out because they take no texel offset, but their explicit
+    // gradients are 3-component direction vectors (SPIR-V Grad operands on a Cube image carry 3 lanes).
+    let gradient_lanes = match dim {
+        Dim::DimCube => 3,
+        _ => spatial.unwrap_or(0),
     };
+    let grad3 = sample_gradient_pair(ctx, name, arrayed, args, gradient_lanes)?;
     let min_lod = grad3.and_then(|(_, _, clamp)| clamp);
     let grad = grad3.map(|(dx, dy, _)| (dx, dy));
     if min_lod.is_some() {

@@ -7056,6 +7056,106 @@ declare void @air.write_texture_cube.v4f32(ptr addrspace(1), <2 x i32>, i32, <4 
 }
 
 #[test]
+fn native_fragment_cube_sample_grad_carries_three_lane_derivatives() {
+    // World of Warcraft's sky / reflection fragment shaders: texturecube.sample(s, dir, gradientcube(dx, dy)).
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+define <4 x float> @f(ptr addrspace(1) %tex, ptr addrspace(2) %smp, <3 x float> %dir, <3 x float> %dx, <3 x float> %dy) {
+entry:
+  %s = tail call { <4 x float>, i8 } @air.sample_texture_cube_grad.v4f32(ptr addrspace(1) %tex, ptr addrspace(2) %smp, <3 x float> %dir, <3 x float> %dx, <3 x float> %dy, float 0.000000e+00, i32 0)
+  %c = extractvalue { <4 x float>, i8 } %s, 0
+  ret <4 x float> %c
+}
+
+declare { <4 x float>, i8 } @air.sample_texture_cube_grad.v4f32(ptr addrspace(1), ptr addrspace(2), <3 x float>, <3 x float>, <3 x float>, float, i32)
+
+!air.fragment = !{!0}
+!0 = !{ptr @f, !1, !2}
+!1 = !{!3}
+!2 = !{!4, !5, !6, !7, !8}
+!3 = !{i32 0, !"air.render_target", i32 0, i32 0, !"air.arg_type_name", !"float4", !"air.arg_name", !"out"}
+!4 = !{i32 0, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"texturecube<float, sample>", !"air.arg_name", !"tex"}
+!5 = !{i32 1, !"air.sampler", !"air.location_index", i32 0, i32 1, !"air.arg_type_name", !"sampler", !"air.arg_name", !"smp"}
+!6 = !{i32 2, !"air.fragment_input", !"user(locn0)", !"air.center", !"air.perspective", !"air.arg_type_name", !"float3", !"air.arg_name", !"dir"}
+!7 = !{i32 3, !"air.fragment_input", !"user(locn1)", !"air.center", !"air.perspective", !"air.arg_type_name", !"float3", !"air.arg_name", !"dx"}
+!8 = !{i32 4, !"air.fragment_input", !"user(locn2)", !"air.center", !"air.perspective", !"air.arg_type_name", !"float3", !"air.arg_name", !"dy"}
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_fragment_cube_sample_grad_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let spv = crate::translate_sanitized_native(ll, Stage::Fragment, &tmp).expect("translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert!(asm.contains("Cube 0 0 0 1 Unknown"), "{asm}");
+    assert!(asm.contains("OpImageSampleExplicitLod"), "{asm}");
+    assert!(asm.contains("Grad"), "{asm}");
+    if std::process::Command::new("spirv-val")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
+    }
+}
+
+#[test]
+fn native_kernel_cube_array_write_texture_folds_slice_and_face_into_layer() {
+    // World of Warcraft's texture-clear kernel: texturecube_array<float, write>.write(texel, xy, face, slice).
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+define void @k(ptr addrspace(1) %dst, <2 x i32> %xy) {
+entry:
+  %x = extractelement <2 x i32> %xy, i64 0
+  %y = extractelement <2 x i32> %xy, i64 1
+  %face = and i32 %x, 5
+  %slice = lshr i32 %y, 3
+  %v0 = insertelement <4 x float> poison, float 2.500000e-01, i64 0
+  %v1 = insertelement <4 x float> %v0, float 5.000000e-01, i64 1
+  %v2 = insertelement <4 x float> %v1, float 7.500000e-01, i64 2
+  %color = insertelement <4 x float> %v2, float 1.000000e+00, i64 3
+  %w = tail call i32 @air.get_width_texture_cube_array(ptr addrspace(1) %dst, i32 0)
+  %n = tail call i32 @air.get_array_size_texture_cube_array(ptr addrspace(1) %dst)
+  tail call void @air.write_texture_cube_array.v4f32(ptr addrspace(1) %dst, <2 x i32> %xy, i32 %face, i32 %slice, <4 x float> %color, i32 0, i32 2)
+  ret void
+}
+
+declare i32 @air.get_width_texture_cube_array(ptr addrspace(1), i32)
+declare i32 @air.get_array_size_texture_cube_array(ptr addrspace(1))
+declare void @air.write_texture_cube_array.v4f32(ptr addrspace(1), <2 x i32>, i32, i32, <4 x float>, i32, i32)
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3, !4}
+!3 = !{i32 0, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.write", !"air.arg_type_name", !"texturecube_array<float, write>", !"air.arg_name", !"dst"}
+!4 = !{i32 1, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint2", !"air.arg_name", !"xy"}
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_kernel_cube_array_write_texture_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert!(asm.contains("OpCapability ImageCubeArray"), "{asm}");
+    assert!(asm.contains("Cube 0 1 0 2 R32f"), "{asm}");
+    assert!(asm.contains("OpIMul"), "{asm}");
+    assert!(asm.contains("OpIAdd"), "{asm}");
+    assert!(asm.contains("OpCompositeConstruct"), "{asm}");
+    assert!(asm.contains("OpImageWrite"), "{asm}");
+    assert!(asm.contains("OpImageQuerySize"), "{asm}");
+    assert!(asm.contains("Binding 480"), "{asm}");
+    if std::process::Command::new("spirv-val")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
+    }
+}
+
+#[test]
 fn native_kernel_read_texture_array_widens_narrow_coord_before_layer_combine() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
@@ -8002,8 +8102,11 @@ declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr a
     let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
     let asm = disassemble(&spv).expect("disassemble");
     let mut module = load_bytes(&spv).expect("load native spv");
-    assert_eq!(asm.matches("OpImageSampleExplicitLod").count(), 2, "{asm}");
+    // Both table entries live in one descriptor array, so the choice folds into the *index* and a
+    // single sample remains; the image-typed select itself (which NVK traps on) must be gone.
+    assert_eq!(asm.matches("OpImageSampleExplicitLod").count(), 1, "{asm}");
     assert!(asm.contains("OpSelect"), "{asm}");
+    assert!(!asm.contains("OpSelect  %image"), "{asm}");
     assert!(
         !crate::native::construct_opaque_image_selects_module(&mut module),
         "final resource construction must leave no sampled-image selection closure"

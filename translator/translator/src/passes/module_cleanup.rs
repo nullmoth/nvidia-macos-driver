@@ -415,16 +415,26 @@ pub(super) fn drop_unused_variable_pointer_capabilities(ctx: &mut Ctx) -> (bool,
 pub(super) fn add_needed_capabilities(ctx: &mut Ctx, variable_pointer_requirements: (bool, bool)) {
     use spirv::Capability;
     let mut want: Vec<Capability> = vec![];
-    let formatless_storage_types: HashSet<Word> = ctx.module.types_global_values.iter()
-        .filter(|i| i.class.opcode == Op::TypeImage
-            && i.operands.get(5) == Some(&Operand::LiteralBit32(2))
-            && i.operands.get(6) == Some(&Operand::ImageFormat(spirv::ImageFormat::Unknown)))
+    let formatless_storage_types: HashSet<Word> = ctx
+        .module
+        .types_global_values
+        .iter()
+        .filter(|i| {
+            i.class.opcode == Op::TypeImage
+                && i.operands.get(5) == Some(&Operand::LiteralBit32(2))
+                && i.operands.get(6) == Some(&Operand::ImageFormat(spirv::ImageFormat::Unknown))
+        })
         .filter_map(|i| i.result_id)
         .collect();
-    let value_types: HashMap<Word, Word> = ctx.module.all_inst_iter()
+    let value_types: HashMap<Word, Word> = ctx
+        .module
+        .all_inst_iter()
         .filter_map(|i| Some((i.result_id?, i.result_type?)))
         .collect();
-    for instruction in ctx.module.functions.iter()
+    for instruction in ctx
+        .module
+        .functions
+        .iter()
         .flat_map(|f| &f.blocks)
         .flat_map(|b| &b.instructions)
     {
@@ -433,8 +443,12 @@ pub(super) fn add_needed_capabilities(ctx: &mut Ctx, variable_pointer_requiremen
             Op::ImageWrite => Capability::StorageImageWriteWithoutFormat,
             _ => continue,
         };
-        let Some(Operand::IdRef(image)) = instruction.operands.first() else { continue; };
-        if value_types.get(image).is_some_and(|ty| formatless_storage_types.contains(ty))
+        let Some(Operand::IdRef(image)) = instruction.operands.first() else {
+            continue;
+        };
+        if value_types
+            .get(image)
+            .is_some_and(|ty| formatless_storage_types.contains(ty))
             && !want.contains(&capability)
         {
             want.push(capability);
@@ -481,6 +495,20 @@ pub(super) fn add_needed_capabilities(ctx: &mut Ctx, variable_pointer_requiremen
     }
     if image_dim(Dim::DimBuffer, true) {
         want.push(Capability::ImageBuffer);
+    }
+    let cube_array = |storage: bool| {
+        ctx.module.types_global_values.iter().any(|i| {
+            i.class.opcode == Op::TypeImage
+                && i.operands.get(1) == Some(&Operand::Dim(Dim::DimCube))
+                && i.operands.get(3) == Some(&Operand::LiteralBit32(1))
+                && (i.operands.get(5) == Some(&Operand::LiteralBit32(2))) == storage
+        })
+    };
+    if cube_array(false) {
+        want.push(Capability::SampledCubeArray);
+    }
+    if cube_array(true) {
+        want.push(Capability::ImageCubeArray);
     }
     let has_input_attachment_type = ctx.module.types_global_values.iter().any(|i| {
         i.class.opcode == Op::TypeImage
@@ -592,7 +620,8 @@ pub(super) fn add_needed_capabilities(ctx: &mut Ctx, variable_pointer_requiremen
             && instruction.operands.get(1) == Some(&Operand::Decoration(Decoration::BuiltIn))
             && matches!(
                 instruction.operands.get(2),
-                Some(&Operand::BuiltIn(BuiltIn::BaseVertex)) | Some(&Operand::BuiltIn(BuiltIn::BaseInstance))
+                Some(&Operand::BuiltIn(BuiltIn::BaseVertex))
+                    | Some(&Operand::BuiltIn(BuiltIn::BaseInstance))
             )
     });
     if has_draw_parameters {
@@ -743,8 +772,7 @@ pub(super) fn add_needed_capabilities(ctx: &mut Ctx, variable_pointer_requiremen
                     | Op::GroupNonUniformBitwiseAnd
                     | Op::GroupNonUniformBitwiseOr
                     | Op::GroupNonUniformBitwiseXor
-            )
-            && !i.operands.iter().any(|o| {
+            ) && !i.operands.iter().any(|o| {
                 matches!(
                     o,
                     Operand::GroupOperation(spirv::GroupOperation::ClusteredReduce)

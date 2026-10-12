@@ -459,6 +459,19 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
+/// `fcmp ord` / `fcmp uno`: Some(true) when both operands must be numbers, Some(false) when either
+/// may be NaN. Vulkan SPIR-V has no OpOrdered/OpUnordered (they need the Kernel capability), so the
+/// emitter builds them from OpIsNan.
+pub(super) fn fcmp_ordering_predicate(s: &str) -> Option<bool> {
+    split_top_level_whitespace(s)
+        .into_iter()
+        .find_map(|tok| match tok {
+            "ord" => Some(true),
+            "uno" => Some(false),
+            _ => None,
+        })
+}
+
 pub(super) fn fcmp_predicate(s: &str) -> Option<Op> {
     let pred = split_top_level_whitespace(s).into_iter().find(|tok| {
         matches!(

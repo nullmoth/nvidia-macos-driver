@@ -41,7 +41,19 @@ pub(in crate::passes) fn lower_write(
             .collect();
         eprintln!("WRITE-TEX img {img} dim {dim:?} arrayed {arrayed} args {tys:?}");
     }
-    let (coord, layer, texel) = if dim == Dim::DimCube && !arrayed {
+    let (coord, layer, texel) = if dim == Dim::DimCube && arrayed {
+        if args.len() < 5 {
+            return Err("air.write_texture cube array write missing face/slice/texel".into());
+        }
+        let layer = combine_cube_array_layer(
+            ctx,
+            args[2],
+            args[3],
+            &mut out,
+            "air.write_texture cube array layer",
+        )?;
+        (args[1], Some(layer), args[4])
+    } else if dim == Dim::DimCube && !arrayed {
         if args.len() < 4 {
             return Err("air.write_texture cube write missing face/texel".into());
         }
@@ -72,8 +84,12 @@ pub(in crate::passes) fn lower_write(
             }
             _ => {
                 let ty = value_result_type(ctx, texel);
-                let ty_def = ty.and_then(|t| crate::passes::value_queries::type_def_of(ctx, t)).map(|d| format!("{:?} {:?}", d.class.opcode, d.operands));
-                let elem_def = vector_shape(ctx, texel).and_then(|(e, _)| crate::passes::value_queries::type_def_of(ctx, e)).map(|d| format!("{:?} {:?}", d.class.opcode, d.operands));
+                let ty_def = ty
+                    .and_then(|t| crate::passes::value_queries::type_def_of(ctx, t))
+                    .map(|d| format!("{:?} {:?}", d.class.opcode, d.operands));
+                let elem_def = vector_shape(ctx, texel)
+                    .and_then(|(e, _)| crate::passes::value_queries::type_def_of(ctx, e))
+                    .map(|d| format!("{:?} {:?}", d.class.opcode, d.operands));
                 return Err(format!(
                     "air.write_texture: unsupported texel shape id {texel} type {ty:?} = {ty_def:?} elem {elem_def:?} ({})",
                     describe_value(ctx, texel)
@@ -272,7 +288,76 @@ pub(in crate::passes) fn lower_read(
         .copied()
         .unwrap_or((Dim::Dim2D, false));
     let cube = dim == Dim::DimCube && !arrayed;
-    let (coord, layer, lod) = if value_is_int_or_intvec(ctx, args[1]) {
+    let cube_array = dim == Dim::DimCube && arrayed;
+    if cube_array && !image_is_storage(ctx, img) {
+        return Err("air.read_texture on a sampled cube array texture is unsupported".into());
+    }
+    let (coord, layer, lod, slice) = if cube_array {
+        let base = if value_is_int_or_intvec(ctx, args[1]) {
+            1
+        } else {
+            2
+        };
+        let lod_at = if base == 2 && args.len() >= 8 {
+            base + 4
+        } else {
+            base + 3
+        };
+        (
+            *args.get(base).ok_or("air.read_texture missing coord")?,
+            args.get(base + 1).copied(),
+            args.get(lod_at).copied(),
+            Some(
+                *args
+                    .get(base + 2)
+                    .ok_or("air.read_texture cube array read missing slice")?,
+            ),
+        )
+    } else {
+        let (coord, layer, lod) = read_operands(ctx, args, arrayed, cube)?;
+        (coord, layer, lod, None)
+    };
+    let mut out = vec![];
+    let layer = match (layer, slice) {
+        (Some(face), Some(slice)) => Some(combine_cube_array_layer(
+            ctx,
+            face,
+            slice,
+            &mut out,
+            "air.read_texture cube array layer",
+        )?),
+        (layer, _) => layer,
+    };
+    let fetch_v4 = image_fetch_v4(ctx, img, v4);
+    let color = ctx.module.fresh_id();
+    if cube && !image_is_storage(ctx, img) {
+        let face = layer.ok_or("air.read_texture cube read missing face")?;
+        let sampler_arg = (!value_is_int_or_intvec(ctx, args[1])).then_some(args[1]);
+        cube_fetch_as_center_sample(
+            ctx,
+            &mut out,
+            img,
+            coord,
+            face,
+            fetch_v4,
+            color,
+            sampler_arg,
+        )?;
+    } else {
+        let coord32 = build_fetch_coord(ctx, dim, arrayed, coord, layer, &mut out)?;
+        read_rest(ctx, &mut out, img, dim, coord32, lod, fetch_v4, color)?;
+    }
+    finish_read(ctx, out, res, rty, v4, fetch_v4, color)
+}
+
+/// The (coord, layer, lod) operands of every non-cube-array `air.read_texture` shape.
+fn read_operands(
+    ctx: &Ctx,
+    args: &[Word],
+    arrayed: bool,
+    cube: bool,
+) -> Result<(Word, Option<Word>, Option<Word>), String> {
+    Ok(if value_is_int_or_intvec(ctx, args[1]) {
         if arrayed || cube {
             (args[1], args.get(2).copied(), args.get(3).copied())
         } else {
@@ -297,53 +382,56 @@ pub(in crate::passes) fn lower_read(
             None,
             args.get(4).copied(),
         )
+    })
+}
+
+/// Emits the OpImageRead / OpImageFetch of a read whose coordinate is already combined.
+#[allow(clippy::too_many_arguments)]
+fn read_rest(
+    ctx: &mut Ctx,
+    out: &mut Vec<Instruction>,
+    img: Word,
+    dim: Dim,
+    coord32: Word,
+    lod: Option<Word>,
+    fetch_v4: Word,
+    color: Word,
+) -> Result<(), String> {
+    let lod32 = match lod {
+        Some(lod) => Some(coerce_image_coord32(ctx, lod, out, "air.read_texture lod")?),
+        None => None,
     };
-    let mut out = vec![];
-    let fetch_v4 = image_fetch_v4(ctx, img, v4);
-    let color = ctx.module.fresh_id();
-    if cube && !image_is_storage(ctx, img) {
-        let face = layer.ok_or("air.read_texture cube read missing face")?;
-        let sampler_arg = (!value_is_int_or_intvec(ctx, args[1])).then_some(args[1]);
-        cube_fetch_as_center_sample(
-            ctx,
-            &mut out,
-            img,
-            coord,
-            face,
-            fetch_v4,
-            color,
-            sampler_arg,
-        )?;
+    let mut ops = vec![Operand::IdRef(img), Operand::IdRef(coord32)];
+    let op = if image_is_storage(ctx, img) {
+        Op::ImageRead
     } else {
-        let coord32 = build_fetch_coord(ctx, dim, arrayed, coord, layer, &mut out)?;
-        let lod32 = match lod {
-            Some(lod) => Some(coerce_image_coord32(
-                ctx,
-                lod,
-                &mut out,
-                "air.read_texture lod",
-            )?),
-            None => None,
-        };
-        let mut ops = vec![Operand::IdRef(img), Operand::IdRef(coord32)];
-        let op = if image_is_storage(ctx, img) {
-            Op::ImageRead
-        } else {
-            if image_value_is_multisampled(ctx, img) {
-                if let Some(sample) = lod32 {
-                    ops.push(Operand::ImageOperands(spirv::ImageOperands::SAMPLE));
-                    ops.push(Operand::IdRef(sample));
-                }
-            } else if dim != Dim::DimBuffer {
-                if let Some(lod) = lod32 {
-                    ops.push(Operand::ImageOperands(spirv::ImageOperands::LOD));
-                    ops.push(Operand::IdRef(lod));
-                }
+        if image_value_is_multisampled(ctx, img) {
+            if let Some(sample) = lod32 {
+                ops.push(Operand::ImageOperands(spirv::ImageOperands::SAMPLE));
+                ops.push(Operand::IdRef(sample));
             }
-            Op::ImageFetch
-        };
-        out.push(Instruction::new(op, Some(fetch_v4), Some(color), ops));
-    }
+        } else if dim != Dim::DimBuffer {
+            if let Some(lod) = lod32 {
+                ops.push(Operand::ImageOperands(spirv::ImageOperands::LOD));
+                ops.push(Operand::IdRef(lod));
+            }
+        }
+        Op::ImageFetch
+    };
+    out.push(Instruction::new(op, Some(fetch_v4), Some(color), ops));
+    Ok(())
+}
+
+/// Converts the fetched v4 into the intrinsic result shape (struct, half vector, integer, or v4).
+fn finish_read(
+    ctx: &mut Ctx,
+    mut out: Vec<Instruction>,
+    res: Word,
+    rty: Word,
+    v4: Word,
+    fetch_v4: Word,
+    color: Word,
+) -> Result<Vec<Instruction>, String> {
     let rdef = type_def_of(ctx, rty);
     let is_struct = rdef
         .as_ref()

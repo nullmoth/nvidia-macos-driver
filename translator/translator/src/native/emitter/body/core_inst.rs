@@ -128,6 +128,16 @@ impl Emitter {
                             let (lhs, rhs, name) = (lhs.clone(), rhs.clone(), name.clone());
                             return self.emit_fcmp_resolved(pred, lhs, rhs, name, instructions);
                         }
+                        if let Some(ordered) = fcmp_ordering_predicate(tok) {
+                            let (lhs, rhs, name) = (lhs.clone(), rhs.clone(), name.clone());
+                            return self.emit_fcmp_ordering_resolved(
+                                ordered,
+                                lhs,
+                                rhs,
+                                name,
+                                instructions,
+                            );
+                        }
                     }
                 }
             } else if inst.opcode == "icmp" {
