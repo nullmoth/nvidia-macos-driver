@@ -22,7 +22,8 @@ At the boot picker choose **1401: Start once without NVIDIA driver**, log in, th
 
 ## Still open
 - **"Start once without NVIDIA driver" can leave the screen dark** on some PCs (being checked). With 1.14.1 the start
-  that needed it works again; if your PC still stops, choose **1401: Remove NVIDIA driver** instead.
+  that needed it works again; if your PC still stops, choose **1401: Remove NVIDIA driver** instead. It works
+  even if the screen stays dark: give it a few minutes, it restarts by itself when the driver is removed.
 - HDMI and DisplayPort audio from the NVIDIA card.
 - WebGL in Chrome (Safari works): Chrome turns its Metal path off on NVIDIA GPUs.
 - AMD and Intel GPU acceleration has not run on those GPUs yet; the Intel NPU does not start yet.
