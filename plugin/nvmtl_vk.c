@@ -244,6 +244,7 @@ static PFN_vkGetInstanceProcAddr pvkGetInstanceProcAddr; static PFN_vkCreateInst
 // sysconf(_SC_PHYS_PAGES) returns -1 there; NVK then fails "Failed to query total system memory", the device never comes
 // up and the app has no Metal device (measured 10-12: Chrome on an RTX 5060 had no WebGL with its GPU sandbox on, and
 // WebGL on the GPU with it off). The kernel's host_info answers the same number through a Mach call sandboxes allow.
+#include "nvmtl_fd_token.h"
 static long nvmtl_sysconf(int name)
 {
     long v = sysconf(name);
@@ -700,6 +701,8 @@ static int nvmtl_vk_initialize(void)
             nvlog("vk: driver opened directly: %s (image %s)", NVMTL_ICD_LIB, nvmtl_image_ident((const void *)pvkGetInstanceProcAddr, vid, sizeof vid));
             { int rb = nvmtl_rebind_import((const void *)pvkGetInstanceProcAddr, "_sysconf", (void *)nvmtl_sysconf);
               if (rb <= 0) nvlog("vk: memory-size fallback missing: _sysconf not rebound in %s (%d) -- sandboxed apps may have no device", NVMTL_ICD_LIB, rb); }
+            if (nvmtl_vk_vendor() == 0x10de) { int rb = nvmtl_rebind_import((const void *)pvkGetInstanceProcAddr, "_open", (void *)nvmtl_icd_open);
+              if (rb <= 0) nvlog("vk: owned handle fallback missing: _open not rebound in %s (%d)", NVMTL_ICD_LIB, rb); }
             pnvk_stage_import = (void (*)(const nvmtl_vram_rec *))dlsym(g_lib, "nvmtl_nvk_stage_import");
             pnvk_surface_dirty = (uint32_t (*)(VkDevice, uint32_t, uint32_t))dlsym(g_lib, "nvmtl_nvk_surface_dirty");
             pnvk_sample_depth_contract = (VkResult (*)(VkDevice, uint32_t *, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_contract_v1");
