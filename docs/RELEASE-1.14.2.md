@@ -20,6 +20,9 @@ A fix release for 1.14.1. Everything in [1.14.1](RELEASE-1.14.1.md) and [1.14.0]
 - **More apps no longer quit on a GPU check.** Safari and the photo analysis service (on PCs that also have an AMD GPU),
   a video app drawing through OpenGL, and the iOS Simulator each stopped on an internal check in the Vulkan layer.
   Each case now draws safely (an empty texture, or the one bad draw or pass skipped) and logs it once.
+- **Preparing for Tahoe left the Mac as an iMac Pro on some EFIs.** 1.14.1 changed the model in one place of the
+  OpenCore config; EFIs that also set it in the SMBIOS section (with automatic SMBIOS off) kept iMacPro1,1, so the
+  macOS 26 installer still refused the Mac. Every place that names the model, and the board ID beside it, changes now.
 
 ## If you are on 1.14.0 and your PC does not start
 1.14.1 and 1.14.2 fix that, but 1.14.0 has to be replaced first. At the boot picker choose **1401: Remove NVIDIA driver**
