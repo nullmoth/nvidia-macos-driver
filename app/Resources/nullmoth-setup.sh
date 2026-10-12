@@ -553,7 +553,9 @@ fi
 
 # "--update prepare" with a package is the one-button Tahoe path: install or update the driver first, then prepare.
 INSTALL_THEN_PREPARE=0; [ "$UPD" = prepare ] && [ -n "$PKG" ] && INSTALL_THEN_PREPARE=1
-if [ -z "$USBMAP" ] && [ -z "$VERB" ] && { [ -z "$UPD" ] || [ $INSTALL_THEN_PREPARE = 1 ]; }; then
+# the app's boot-logo and test-driver switches run setup without a package; 1.14 sent them through the package check
+# ("STOP package not found:", 4 uploads in the first hour of 1.14), so neither switch worked
+if [ -z "$USBMAP" ] && [ -z "$VERB" ] && [ -z "${SETLOGO:-}" ] && [ -z "${GPUTEST:-}" ] && { [ -z "$UPD" ] || [ $INSTALL_THEN_PREPARE = 1 ]; }; then
 step "Checking the driver package"
 [ -f "$PKG" ] || stop "package not found: $PKG"
 # the app's copy is writable by the user: hash and unpack a root-owned copy, so it cannot be swapped after the check
