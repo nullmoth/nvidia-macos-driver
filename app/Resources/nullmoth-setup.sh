@@ -773,9 +773,22 @@ if [ -n "${GPUTEST:-}" ]; then
     FWLIST="$FT.list"
     { grep -v '^#' "$MAN" | awk -v dirs="$FWDIRS" 'BEGIN{n=split(dirs,d," ")} {for(i=1;i<=n;i++) if (index($2,d[i])==1) {print $1 "  " $2; next}}' > "$FWLIST" \
       && [ -s "$FWLIST" ]; } || { rm -rf "$FT" "$FWLIST"; stop "the GPU firmware list has nothing for this Mac's hardware"; }
-    # each file from GitLab, else from kernel.org's mirror of the same commit; curl's retries back off on 429 and 5xx
-    # the file is the script's $2 (macOS xargs -I refuses a command over 255 bytes, so no {} substitution)
-    awk '{print $2}' "$FWLIST" | xargs -P 4 -n 1 sh -c 'mkdir -p "$(dirname "$0/$2")" &&
+    # One archive per folder first: fetching hundreds of files one by one drew HTTP 429 from GitLab and 503 from
+    # kernel.org on every try (1.14.1 reports NM-PN3THF98 and five more, an AMD GPU needs ~700 files). Only the listed
+    # files are kept from an archive, and every file is still checked against the list below.
+    FA="$FT.arc"
+    for d in $FWDIRS; do
+      rm -rf "$FA"; mkdir -p "$FA" || break
+      curl -fsSL --retry 4 --retry-delay 5 "https://gitlab.com/kernel-firmware/linux-firmware/-/archive/$COMMIT/linux-firmware-$COMMIT.tar.gz?path=${d%/}" \
+        | tar -xzf - -C "$FA" --strip-components 1 2>/dev/null || { note "folder archive for $d not available, fetching its files one by one"; continue; }
+      awk -v d="$d" 'index($2,d)==1{print $2}' "$FWLIST" | while IFS= read -r p; do
+        [ -f "$FA/$p" ] && mkdir -p "$(dirname "$FT/$p")" && mv -f "$FA/$p" "$FT/$p"; done
+    done
+    rm -rf "$FA"
+    # what is still missing: each file from GitLab, else from kernel.org's mirror of the same commit, 2 at a time;
+    # curl's retries back off on 429 and 5xx. The file is the script's $2 (macOS xargs -I refuses a command over
+    # 255 bytes, so no {} substitution)
+    awk '{print $2}' "$FWLIST" | while IFS= read -r p; do [ -f "$FT/$p" ] || printf '%s\n' "$p"; done | xargs -P 2 -n 1 sh -c 'mkdir -p "$(dirname "$0/$2")" &&
       { curl -fsSL --retry 5 --retry-delay 2 -o "$0/$2" "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/$1/$2" ||
         curl -fsSL --retry 5 --retry-delay 2 -o "$0/$2" "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/$2?id=$1"; }' "$FT" "$COMMIT" \
       || { rm -rf "$FT" "$FWLIST"; stop "downloading the GPU firmware failed (network?) - nothing was changed"; }
