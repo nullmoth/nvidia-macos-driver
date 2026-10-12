@@ -679,6 +679,16 @@ IOAccelMemory *NVDisplayPipe::initFramebufferResource(unsigned int index, IOAcce
     for (unsigned i = 0; i < sizeof r; i++) ((volatile unsigned char *)&r)[i] = 0;
     r.version = NVRM_VRAM_ABI_VERSION;
     IOReturn ret = a->askFramebufferForScanout(&r, fb);
+    if (ret == kIOReturnSuccess && r.kva && !r.phys) {
+        // Another GPU's panel (NMIntelFB on a laptop without a MUX): its scanout is Intel memory with a CPU mapping and
+        // no NVIDIA VRAM address. No vidmem may stand for it (addToAperture/getApertureMemoryDescriptor would hand
+        // BAR1 offset 0 to the GPU), and none may be allocated in its place (fresh VRAM mapped here is the 10-10
+        // os_map_kernel_space hang shape). NULL is the family's own default: frames reach this panel only through
+        // performTransaction's copy into kva (debug.nvaccel_iop_ok_h4 counts them).
+        ALOG("NVDisplayPipe::initFramebufferResource(head %u, index %u): CPU-only scanout %u x %u pitch %u (another GPU's "
+             "panel) -- no framebuffer resource, frames are copied", head, index, r.width, r.height, r.pitch);
+        return nullptr;
+    }
     if (ret != kIOReturnSuccess || !r.phys || !r.actualSize) {
         ALOG("NVDisplayPipe::initFramebufferResource: framebuffer would not describe its scanout (0x%x)", (unsigned)ret);
         return nullptr;
