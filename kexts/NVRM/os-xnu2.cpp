@@ -1244,9 +1244,22 @@ static NV_STATUS nv_xnu_acpi_extract(OSObject *o, NvU8 *buf, NvU32 cap, NvU32 *s
     return NV_ERR_NOT_SUPPORTED;
 }
 
+// Opt-in (boot-arg nvrmacpibl=1). 1.14 ran these for every GPU and PCs stopped booting right after the GPU's _DSM
+// call (10-12: RTX 2060 desktop, RTX 4060 laptop - the last line on screen is macOS ACPI warning that argument 4
+// is a Buffer where ACPI wants a Package). On desktops that _DSM is not the backlight table, and on laptops the
+// same method often switches GPU power; calling it while RM brings the GPU up hung the start. Off, RM gets
+// "not supported" as in 1.13; on, the laptop backlight works for the panels it was written for.
+static bool nv_xnu_acpi_backlight_on(void)
+{
+    static int on = -1;
+    if (on < 0) { int v = 0; on = (PE_parse_boot_argn("nvrmacpibl", &v, sizeof(v)) && v) ? 1 : 0; }
+    return on == 1;
+}
+
 NV_STATUS NV_API_CALL nv_acpi_dod_method(nv_state_t *nv, NvU32 *pOutData, NvU32 *pSize)
 {
     TRC;
+    if (!nv_xnu_acpi_backlight_on()) return NV_ERR_NOT_SUPPORTED;
     IOACPIPlatformDevice *acpi = nv_xnu_gpu_acpi(nv);
     if (!acpi || !pOutData || !pSize) return NV_ERR_INVALID_ARGUMENT;
     NvU32 count = *pSize / sizeof(NvU32);
@@ -1272,6 +1285,7 @@ NV_STATUS NV_API_CALL nv_acpi_dsm_method(nv_state_t *nv, NvU8 *pAcpiDsmGuid, NvU
                                          void *pOutData, NvU16 *pSize)
 {
     TRC;
+    if (!nv_xnu_acpi_backlight_on()) return NV_ERR_NOT_SUPPORTED;
     if (!pAcpiDsmGuid || !pInParams || inParamSize > NV_XNU_MAX_ACPI_DSM_PARAM_SIZE || !pOutData || !pSize)
         return NV_ERR_INVALID_ARGUMENT;
     if (acpiNvpcfDsmFunction || memcmp(pAcpiDsmGuid, nv_xnu_nbci_guid, sizeof nv_xnu_nbci_guid) != 0 ||
