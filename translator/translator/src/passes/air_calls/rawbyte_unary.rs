@@ -804,9 +804,10 @@ pub(in crate::passes) fn lower_fast_ldexp(
     rty: Word,
     args: &[Word],
 ) -> Result<Vec<Instruction>, String> {
-    if !is_f32_scalar(ctx, rty) {
-        return Err(format!("{name} currently supports scalar f32 results"));
+    if !is_f32_scalar_or_vector(ctx, rty) {
+        return Err(format!("{name} currently supports f32 scalar or vector results"));
     }
+    let lanes = vector_type_shape(ctx, rty).map(|(_, lanes)| lanes);
     let mantissa_ty =
         value_result_type(ctx, args[0]).ok_or_else(|| format!("{name} mantissa has no type"))?;
     if mantissa_ty != rty {
@@ -814,11 +815,31 @@ pub(in crate::passes) fn lower_fast_ldexp(
     }
     let exponent_ty =
         value_result_type(ctx, args[1]).ok_or_else(|| format!("{name} exponent has no type"))?;
-    if !is_int_scalar_width(ctx, exponent_ty, 32) {
-        return Err(format!("{name} exponent is not scalar i32"));
-    }
+    let mut out = Vec::new();
+    // GLSL Ldexp wants the exponent shaped like the mantissa: a scalar i32 for a scalar, a
+    // 32-bit integer vector of the same lane count for a vector (a scalar exponent is splatted).
+    let exponent = match (lanes, int_vector_width(ctx, exponent_ty)) {
+        (None, None) if is_int_scalar_width(ctx, exponent_ty, 32) => args[1],
+        (Some(n), Some((lanes, 32))) if lanes == n => args[1],
+        (Some(n), None) if is_int_scalar_width(ctx, exponent_ty, 32) => {
+            let vector_ty = ctx.get_or_create(
+                Op::TypeVector,
+                None,
+                vec![Operand::IdRef(exponent_ty), Operand::LiteralBit32(n)],
+            );
+            let splat = ctx.module.fresh_id();
+            out.push(Instruction::new(
+                Op::CompositeConstruct,
+                Some(vector_ty),
+                Some(splat),
+                (0..n).map(|_| Operand::IdRef(args[1])).collect(),
+            ));
+            splat
+        }
+        _ => return Err(format!("{name} exponent is not a 32-bit integer shaped like the mantissa")),
+    };
     let ext = ctx.glsl();
-    Ok(vec![Instruction::new(
+    out.push(Instruction::new(
         Op::ExtInst,
         Some(rty),
         Some(res),
@@ -826,9 +847,10 @@ pub(in crate::passes) fn lower_fast_ldexp(
             Operand::IdRef(ext),
             Operand::LiteralExtInstInteger(GLSLstd450::Ldexp as u32),
             Operand::IdRef(args[0]),
-            Operand::IdRef(args[1]),
+            Operand::IdRef(exponent),
         ],
-    )])
+    ));
+    Ok(out)
 }
 
 pub(in crate::passes) fn float_equivalent(ctx: &mut Ctx, ty: Word) -> Word {
