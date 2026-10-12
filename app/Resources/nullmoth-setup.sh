@@ -283,6 +283,9 @@ if [ -n "$COLLECT" ]; then
     echo; echo "== what attached to them (NMXNPU is the NPU driver)"
     ioreg -r -c NMXNPU -l -w0 2>/dev/null | head -60 || true
     echo; echo "== NPU boot arguments"; nvram boot-args 2>/dev/null | tr ' \t' '\n\n' | grep -E 'nmx|npu' || echo "(none)"
+    echo; echo "== boot guards (set = the last attach never returned; the driver stays parked)"
+    nvram nullmoth-npu-attaching 2>/dev/null || echo "nullmoth-npu-attaching (not set)"
+    nvram nullmoth-gpu-attaching 2>/dev/null || echo "nullmoth-gpu-attaching (not set)"
     echo; echo "== NMXNPU kext: loaded, in the auxiliary collection, installed file"
     kmutil showloaded --list-only 2>/dev/null | grep -i nmxnpu || echo "(not loaded)"
     kmutil inspect -a x86_64 -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -i nmxnpu || echo "(not in the auxiliary collection)"
@@ -821,9 +824,12 @@ if [ -n "${GPUTEST:-}" ]; then
       rm -rf "$EXT/NMXGPU.kext" "$EXT/NMXAccel.kext" "$EXT/NMXNPU.kext"; auxkc; cp -p "$BKC" "$C"; stop "the kernel collection did not take NMXGPU/NMXAccel/NMXNPU (log: $ST/gputest-kmutil.log) - removed again"
     fi
     for a in $WANT; do ga add "${a#-}=1"; done
+    # the drivers' boot guards: an attach that never returned parks the driver until on/off clears this
+    nvram -d nullmoth-npu-attaching 2>/dev/null; nvram -d nullmoth-gpu-attaching 2>/dev/null
   else
     step "Removing the AMD/Intel GPU driver"
     ga del nmxamd=1; ga del nmxintel=1; ga del nmxnpu=1
+    nvram -d nullmoth-npu-attaching 2>/dev/null; nvram -d nullmoth-gpu-attaching 2>/dev/null
     if [ -d "$EXT/NMXGPU.kext" ] || [ -d "$EXT/NMXAccel.kext" ] || [ -d "$EXT/NMXNPU.kext" ]; then
       rm -rf "$EXT/NMXGPU.kext" "$EXT/NMXAccel.kext" "$EXT/NMXNPU.kext" && auxkc || note "the kernel collection rebuild reported an error (log: $ST/gputest-kmutil.log)"
     fi
