@@ -86,6 +86,7 @@ kurl() { case $1 in
   Lilu.kext) echo "https://github.com/dortania/build-repo/releases/download/Lilu-0515f40/Lilu-1.7.3-RELEASE.zip 261aebb9dc83adb6515c96405653f53c3c50b09c89babdb91fb41f7b33a1cd2a";;
   AMFIPass.kext) echo "https://github.com/dortania/OpenCore-Legacy-Patcher/raw/main/payloads/Kexts/Acidanthera/AMFIPass-v1.4.1-RELEASE.zip 07b266145906db41f4b13a7938fbb173ea28888cc1fa65f84417f8820adc961e";;
   USBToolBox.kext) echo "https://github.com/USBToolBox/kext/releases/download/1.2.0/USBToolBox-1.2.0-RELEASE.zip c315a3a5acfd496dd97d0d19b4fbd1d487103d2fd541c5651583d4c9cebcfe07";;
+  RestrictEvents.kext) echo "https://github.com/dortania/build-repo/releases/download/RestrictEvents-9265e78/RestrictEvents-1.1.7-RELEASE.zip e5a8c15adeba9251be2709899214fe7fd847f6d38fca6c09adb65e9b2af64f0a";;
 esac; }
 # Downloads $1 into $KT/$1.x (checked against its SHA-256) before anything is changed; stops on any failure. $2 = where it goes.
 fetch_kext() {
@@ -994,6 +995,28 @@ for k in "${FETCH[@]+"${FETCH[@]}"}"; do fetch_kext $k "$KX"; done
 lp=$(kpos Lilu.kext); ap=$(kpos AMFIPass.kext)
 [ -n "$ap" ] && [ -n "$lp" ] && [ "$ap" -lt "$lp" ] && stop "AMFIPass.kext loads before Lilu.kext in Kernel -> Add; move it below Lilu in the config, then try again"
 NEEDAMFIPASS=$(( ${#ADDK[@]} + ${#FETCH[@]} ))
+# Tahoe preparation: macOS 26 refuses Mac models it dropped ("This version of Mac OS X is not supported on this platform").
+# Every desktop 1401 built before 1.14 is iMacPro1,1, one of them, so the update stopped there on every such PC (10-12, the
+# studio itself). Desktops take MacPro7,1, which runs macOS 15 and 26, with RestrictEvents (its memory and PCI slot pages),
+# as 1401 1.14 builds them; a laptop on a dropped model is told to rebuild its EFI with 1401 1.14 (its model needs the
+# laptop's own SMBIOS choice). The serial numbers stay: macOS does not check them against the model.
+if [ "$UPD" = prepare ]; then
+  MK=""; for k in PlatformInfo.Generic.SystemProductName PlatformInfo.SMBIOS.SystemProductName PlatformInfo.DataHub.SystemProductName; do
+    has "$k" && { MK=$k; break; }; done
+  MODEL=$( [ -n "$MK" ] && get "$MK" ); [ -n "$MODEL" ] || MODEL=$(sysctl -n hw.model)
+  case " iMac20,1 iMac20,2 MacPro7,1 MacBookPro16,1 MacBookPro16,2 MacBookPro16,4 " in
+    *" $MODEL "*) ok "Mac model $MODEL runs macOS 26" ;;
+    *)
+      case "$MODEL" in MacBook*) stop "this Mac is set up as $MODEL, which macOS 26 does not support; make a new EFI with 1401 1.14 (it picks a laptop model macOS 26 runs), then prepare again";; esac
+      [ -n "$MK" ] || stop "the OpenCore config sets no Mac model (PlatformInfo); macOS 26 needs MacPro7,1 here - make a new EFI with 1401 1.14"
+      echo "CHANGE PlatformInfo: $MODEL -> MacPro7,1 (macOS 26 does not run $MODEL; MacPro7,1 runs macOS 15 and 26)"
+      EDITS+=("$MK|-string|MacPro7,1")
+      if [ -z "$(kpos RestrictEvents.kext)" ]; then
+        [ -d "$KX/RestrictEvents.kext" ] || { fetch_kext RestrictEvents.kext "$KX"; FETCH+=(RestrictEvents.kext); }
+        ADDK+=(RestrictEvents.kext); echo "CHANGE Kernel -> Add: add RestrictEvents.kext (MacPro7,1's memory and PCI pages)"
+      fi ;;
+  esac
+fi
 # The macOS installer boots with a small GPU BAR (ResizeAppleGpuBars 0, so its fallback screen survives PCI setup); the
 # driver was tested with the card's full 8 GB BAR, so the installed system gets that back.
 bar=$(get UEFI.Quirks.ResizeGpuBars); abar=$(get Booter.Quirks.ResizeAppleGpuBars)
