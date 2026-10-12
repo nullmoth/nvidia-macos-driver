@@ -5510,6 +5510,8 @@ static nvmtl_upstage *nvmtl_upstage_get(size_t size)
     return st;
 }
 
+#include "nvmtl_upload_copy.h"
+
 int nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes)
 {
     const size_t bpp = img->bpp ? img->bpp : 4;
@@ -5519,9 +5521,7 @@ int nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t r
     nvmtl_upstage *sl = nvmtl_upstage_get(tight * (size_t)rows);
     if (!sl) return -1;
     uint8_t *dst = (uint8_t *)sl->buf.map;
-    if (row_bytes == tight) memcpy(dst, src, tight * (size_t)rows);   /* a 4K surface is 2160 rows of 15 KB: one pass, not 2160 calls */
-    else for (uint32_t y = 0; y < rows; y++)
-        memcpy(dst + (size_t)y * tight, (const uint8_t *)src + (size_t)y * row_bytes, tight);
+    nvmtl_upload_copy(dst, src, tight, row_bytes, rows);
     nvk_cmdbuf *const c = &sl->cb;
     if (nvmtl_vk_cmd_begin(q, c)) return -1;
     VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };
