@@ -12,6 +12,31 @@ pub(crate) fn structure_selected_functions(
     module: &mut Module,
     selected: &HashSet<Word>,
 ) -> HashSet<Word> {
+    // METAL2VULKAN_NEST: unset = every stage; "0" = never nest; otherwise a comma list of
+    // kernel,fragment,vertex naming the stages that may nest (the rest keep the raw relooper).
+    if let Some(allowed) = std::env::var_os("METAL2VULKAN_NEST") {
+        let allowed = allowed.to_string_lossy().to_ascii_lowercase();
+        let model = module.entry_points.first().and_then(|ep| match ep.operands.first() {
+            Some(crate::spirv_module::Operand::ExecutionModel(model)) => Some(*model),
+            _ => None,
+        });
+        let stage = match model {
+            Some(spirv::ExecutionModel::GLCompute) => "kernel",
+            Some(spirv::ExecutionModel::Fragment) => "fragment",
+            Some(spirv::ExecutionModel::Vertex) => "vertex",
+            _ => "other",
+        };
+        if allowed.trim() == "0"
+            || !allowed
+                .split(',')
+                .any(|a| a.trim() == stage || a.trim() == "all")
+        {
+            if crate::env_vars::reloop_why() {
+                eprintln!("NEST-SKIP stage={stage} METAL2VULKAN_NEST={allowed}");
+            }
+            return HashSet::new();
+        }
+    }
     let mut next_id = module
         .header
         .as_ref()

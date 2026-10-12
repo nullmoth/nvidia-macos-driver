@@ -21,6 +21,11 @@ pub const REGISTRY: &[EnvVar] = &[
         effect: "requested relooper cases per dispatch group (hard maximum: 1024)",
     },
     EnvVar {
+        name: "METAL2VULKAN_NEST",
+        default: "unset",
+        effect: "stages the nest relooper may structure: unset = all, 0 = none, or a comma list of kernel,fragment,vertex",
+    },
+    EnvVar {
         name: "METAL2VULKAN_REPRO_DIR",
         default: "$TMPDIR/metal2vulkan-repros",
         effect: "base directory for FALLBACK repro bundles",

@@ -104,6 +104,7 @@ pub(super) fn structure_function(
     emitter.emit(shape, &mut Vec::new())?;
     emitter.recover_dominating_edge_values(entry_label)?;
     emitter.promote_phi_slots();
+    emitter.repair_dominance(entry_label)?;
 
     let prologue_label = emitter.tc.fresh();
     let mut prologue = Block::new();
@@ -1218,6 +1219,267 @@ impl Emitter<'_, '_> {
                 .is_some_and(|id| removed_slots.contains(&id))
         });
         Ok(())
+    }
+
+    /// Nesting routes some edges through dispatch headers that other arms also reach, so a value
+    /// defined on the source block of such an edge no longer dominates the block that used it
+    /// (the original branch was direct). Carry every such value through a function variable:
+    /// one store after its definition, one load before the first use in each offending block
+    /// (or at the end of the offending phi predecessor).
+    fn repair_dominance(&mut self, entry: Word) -> Result<(), String> {
+        for _round in 0..16 {
+            let index = self
+                .out
+                .iter()
+                .enumerate()
+                .filter_map(|(position, block)| Some((block_label(block)?, position + 1)))
+                .collect::<HashMap<_, _>>();
+            let mut successors = vec![Vec::new(); self.out.len() + 1];
+            successors[0].push(*index.get(&entry).ok_or("missing nested entry")?);
+            for (position, block) in self.out.iter().enumerate() {
+                let term = block
+                    .instructions
+                    .last()
+                    .and_then(decode_term)
+                    .ok_or("missing nested terminator")?;
+                let targets = match term {
+                    Term::Branch(target) => vec![target],
+                    Term::BranchCond(_, yes, no) => vec![yes, no],
+                    Term::Switch(_, default, cases) => {
+                        let mut targets = vec![default];
+                        targets.extend(cases.into_iter().map(|(_, label)| label));
+                        targets
+                    }
+                    Term::Return | Term::ReturnValue(_) | Term::Unreachable | Term::Kill(_) => {
+                        vec![]
+                    }
+                };
+                for target in targets {
+                    successors[position + 1]
+                        .push(*index.get(&target).ok_or("missing nested target")?);
+                }
+            }
+            let (_, intervals, _) = dominance(&successors, &build_predecessors(&successors));
+            let mut definitions = HashMap::new();
+            for (position, block) in self.out.iter().enumerate() {
+                for (at, instruction) in block.instructions.iter().enumerate() {
+                    if let Some(id) = instruction.result_id {
+                        definitions.insert(id, (position + 1, at, instruction.result_type));
+                    }
+                }
+            }
+            // (use block position, instruction index, value, phi predecessor)
+            let mut violations: Vec<(usize, usize, Word, Option<Word>)> = Vec::new();
+            for (position, block) in self.out.iter().enumerate() {
+                for (at, instruction) in block.instructions.iter().enumerate() {
+                    if instruction.class.opcode == Op::Phi {
+                        let mut k = 0;
+                        while k + 1 < instruction.operands.len() {
+                            if let (Operand::IdRef(value), Operand::IdRef(pred)) =
+                                (&instruction.operands[k], &instruction.operands[k + 1])
+                            {
+                                if let (Some(&(dp, _, _)), Some(&pp)) =
+                                    (definitions.get(value), index.get(pred))
+                                {
+                                    if !dominates_interval(&intervals, dp, pp) {
+                                        violations.push((position, at, *value, Some(*pred)));
+                                    }
+                                }
+                            }
+                            k += 2;
+                        }
+                        continue;
+                    }
+                    for operand in &instruction.operands {
+                        let Operand::IdRef(id) = operand else { continue };
+                        let Some(&(dp, _, _)) = definitions.get(id) else { continue };
+                        if dp != position + 1 && !dominates_interval(&intervals, dp, position + 1) {
+                            violations.push((position, at, *id, None));
+                        }
+                    }
+                }
+            }
+            if violations.is_empty() {
+                return Ok(());
+            }
+            let mut slots: HashMap<Word, Word> = HashMap::new();
+            // (block position, instruction index, instruction) in collection order
+            let mut insertions: Vec<(usize, usize, Instruction)> = Vec::new();
+            let is_merge = |instruction: &Instruction| {
+                matches!(instruction.class.opcode, Op::LoopMerge | Op::SelectionMerge)
+            };
+            let slot_for = |value: Word,
+                                slots: &mut HashMap<Word, Word>,
+                                insertions: &mut Vec<(usize, usize, Instruction)>,
+                                tc: &mut TypeCtx<'_>,
+                                variables: &mut Vec<Instruction>,
+                                out: &[Block]|
+             -> Result<(Word, Word), String> {
+                let &(dp, di, ty) = definitions
+                    .get(&value)
+                    .ok_or("dominance repair lost a definition")?;
+                let ty = ty.ok_or("dominance repair on a value without a type")?;
+                if let Some(&var) = slots.get(&value) {
+                    return Ok((var, ty));
+                }
+                if !matches!(
+                    tc.type_opcode(ty),
+                    Some(
+                        Op::TypeBool
+                            | Op::TypeInt
+                            | Op::TypeFloat
+                            | Op::TypeVector
+                            | Op::TypeMatrix
+                            | Op::TypeArray
+                            | Op::TypeStruct
+                    )
+                ) {
+                    return Err(format!(
+                        "nesting broke the dominance of %{value}, which cannot live in a variable"
+                    ));
+                }
+                let pointer = tc.ptr_function(ty);
+                let var = tc.fresh();
+                variables.push(Instruction::new(
+                    Op::Variable,
+                    Some(pointer),
+                    Some(var),
+                    vec![Operand::StorageClass(StorageClass::Function)],
+                ));
+                let block = &out[dp - 1];
+                let mut store_at = di + 1;
+                if block.instructions[di].class.opcode == Op::Phi {
+                    while store_at < block.instructions.len()
+                        && block.instructions[store_at].class.opcode == Op::Phi
+                    {
+                        store_at += 1;
+                    }
+                }
+                insertions.push((
+                    dp - 1,
+                    store_at,
+                    Instruction::new(
+                        Op::Store,
+                        None,
+                        None,
+                        vec![Operand::IdRef(var), Operand::IdRef(value)],
+                    ),
+                ));
+                slots.insert(value, var);
+                Ok((var, ty))
+            };
+            // Ordinary uses: one load per (block, value) before the first use.
+            let mut loaded: HashMap<(usize, Word), Word> = HashMap::new();
+            let mut phi_loaded: HashMap<(Word, Word), Word> = HashMap::new();
+            let mut rewrites: Vec<(usize, usize, Word, Option<Word>, Word)> = Vec::new();
+            for &(position, at, value, pred) in &violations {
+                let (var, ty) = slot_for(
+                    value,
+                    &mut slots,
+                    &mut insertions,
+                    self.tc,
+                    &mut self.variables,
+                    &self.out,
+                )?;
+                match pred {
+                    None => {
+                        let id = if let Some(&id) = loaded.get(&(position, value)) {
+                            id
+                        } else {
+                            let id = self.tc.fresh();
+                            let mut load_at = at;
+                            if load_at > 0 && is_merge(&self.out[position].instructions[load_at - 1]) {
+                                load_at -= 1;
+                            }
+                            insertions.push((
+                                position,
+                                load_at,
+                                Instruction::new(
+                                    Op::Load,
+                                    Some(ty),
+                                    Some(id),
+                                    vec![Operand::IdRef(var)],
+                                ),
+                            ));
+                            loaded.insert((position, value), id);
+                            id
+                        };
+                        rewrites.push((position, at, value, None, id));
+                    }
+                    Some(pred) => {
+                        let id = if let Some(&id) = phi_loaded.get(&(pred, value)) {
+                            id
+                        } else {
+                            let id = self.tc.fresh();
+                            let pp = *index.get(&pred).ok_or("missing phi predecessor")? - 1;
+                            let block = &self.out[pp];
+                            let mut load_at = block.instructions.len() - 1;
+                            if load_at > 0 && is_merge(&block.instructions[load_at - 1]) {
+                                load_at -= 1;
+                            }
+                            insertions.push((
+                                pp,
+                                load_at,
+                                Instruction::new(
+                                    Op::Load,
+                                    Some(ty),
+                                    Some(id),
+                                    vec![Operand::IdRef(var)],
+                                ),
+                            ));
+                            phi_loaded.insert((pred, value), id);
+                            id
+                        };
+                        rewrites.push((position, at, value, Some(pred), id));
+                    }
+                }
+            }
+            for &(position, at, value, pred, id) in &rewrites {
+                let instruction = &mut self.out[position].instructions[at];
+                match pred {
+                    None => {
+                        for operand in &mut instruction.operands {
+                            if *operand == Operand::IdRef(value) {
+                                *operand = Operand::IdRef(id);
+                            }
+                        }
+                    }
+                    Some(pred) => {
+                        let mut k = 0;
+                        while k + 1 < instruction.operands.len() {
+                            if instruction.operands[k] == Operand::IdRef(value)
+                                && instruction.operands[k + 1] == Operand::IdRef(pred)
+                            {
+                                instruction.operands[k] = Operand::IdRef(id);
+                            }
+                            k += 2;
+                        }
+                    }
+                }
+            }
+            let mut by_block: HashMap<usize, Vec<(usize, Instruction)>> = HashMap::new();
+            for (position, at, instruction) in insertions {
+                by_block.entry(position).or_default().push((at, instruction));
+            }
+            for (position, mut list) in by_block {
+                // Insert from the back so earlier indices stay valid; equal indices keep collection order.
+                list.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+                let mut k = 0;
+                while k < list.len() {
+                    let at = list[k].0;
+                    let mut end = k;
+                    while end < list.len() && list[end].0 == at {
+                        end += 1;
+                    }
+                    for j in (k..end).rev() {
+                        let instruction = list[j].1.clone();
+                        self.out[position].instructions.insert(at, instruction);
+                    }
+                    k = end;
+                }
+            }
+        }
+        Err("nesting could not repair SSA dominance".to_string())
     }
 
     fn promote_phi_slots(&mut self) {
