@@ -21,6 +21,8 @@ A fix release for 1.14.0. Everything in [1.14.0](RELEASE-1.14.0.md) is included.
 At the boot picker choose **1401: Start once without NVIDIA driver**, log in, then Mac app → **Check for updates** → **Update driver**. Restart.
 
 ## Still open
+- **"Start once without NVIDIA driver" can leave the screen dark** on some PCs (being checked). With 1.14.1 the start
+  that needed it works again; if your PC still stops, choose **1401: Remove NVIDIA driver** instead.
 - HDMI and DisplayPort audio from the NVIDIA card.
 - WebGL in Chrome (Safari works): Chrome turns its Metal path off on NVIDIA GPUs.
 - AMD and Intel GPU acceleration has not run on those GPUs yet; the Intel NPU does not start yet.
