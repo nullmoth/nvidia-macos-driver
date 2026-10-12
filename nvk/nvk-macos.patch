@@ -4026,7 +4026,44 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
  
  #include "nvk_buffer.h"
  #include "nvk_buffer_view.h"
-@@ -299,7 +300,21 @@
+@@ -148,14 +149,31 @@
+ 
+       *plane_count = view->plane_count;
+       for (uint8_t plane = 0; plane < *plane_count; plane++) {
+-         assert(view->planes[plane].sampled.desc_index > 0);
+-         assert(view->planes[plane].sampled.desc_index < (1 << 20));
+-         desc[plane].image_index = view->planes[plane].sampled.desc_index;
++         /* A view with no sampled descriptor (index 0, the null image) used
++          * to abort the app here. Index 0 is the null descriptor and reads as
++          * zero, so bind that and warn once instead.
++          */
++         uint32_t di = view->planes[plane].sampled.desc_index;
++         if (di == 0 || di >= (1 << 20)) {
++            static bool warned;
++            if (!warned) {
++               warned = true;
++               mesa_logw("nvk: image view plane %u has no sampled descriptor (%u); binding the null image", plane, di);
++            }
++            di = 0;
++         }
++         desc[plane].image_index = di;
+       }
+    }
+ 
+-   if (descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLER ||
+-       descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
++   /* A texture bound with no sampler at that slot arrives as a combined
++    * image sampler whose sampler is VK_NULL_HANDLE; reading its plane count
++    * faulted. Leave the sampler index at 0, as a null image view leaves the
++    * image index.
++    */
++   if ((descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLER ||
++        descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) &&
++       info && info->sampler != VK_NULL_HANDLE) {
+       VK_FROM_HANDLE(nvk_sampler, sampler, info->sampler);
+ 
+       *plane_count = MAX2(*plane_count, sampler->plane_count);
+@@ -299,7 +317,21 @@
     write_desc(w, binding, elem, &desc, sizeof(desc));
  }
  
@@ -4048,24 +4085,26 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
  write_dynamic_ssbo_desc(struct nvk_descriptor_writer *w,
                          const VkDescriptorBufferInfo *const info,
                          uint32_t binding, uint32_t elem)
-@@ -434,6 +449,16 @@
-          }
-          break;
- 
+@@ -431,8 +463,18 @@
+             write_ssbo_desc(&w, write->pBufferInfo + j,
+                             write->dstBinding,
+                             write->dstArrayElement + j);
++         }
++         break;
++
 +      case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR: {
 +         const VkWriteDescriptorSetAccelerationStructureKHR *write_as =
 +            vk_find_struct_const(write->pNext, WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR);
 +         for (uint32_t j = 0; j < write->descriptorCount; j++) {
 +            write_accel_struct_desc(&w, write_as->pAccelerationStructures[j],
 +                                    write->dstBinding, write->dstArrayElement + j);
-+         }
-+         break;
+          }
+          break;
 +      }
-+
+ 
        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
           for (uint32_t j = 0; j < write->descriptorCount; j++) {
-             write_dynamic_ubo_desc(&w, write->pBufferInfo + j,
-@@ -573,6 +598,16 @@
+@@ -573,6 +615,16 @@
           }
           break;
  
@@ -4082,7 +4121,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
        default:
           break;
        }
-@@ -643,6 +678,9 @@
+@@ -643,6 +695,9 @@
        return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
  
     list_inithead(&pool->sets);
@@ -4092,7 +4131,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
  
     const VkMutableDescriptorTypeCreateInfoEXT *mutable_info =
        vk_find_struct_const(pCreateInfo->pNext,
-@@ -994,6 +1032,16 @@
+@@ -994,6 +1049,16 @@
           }
           break;
  
@@ -4109,24 +4148,24 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
           for (uint32_t j = 0; j < entry->array_count; j++) {
              const VkDescriptorBufferInfo *info =
-@@ -1166,6 +1214,17 @@
-          };
-       }
-       union nvk_buffer_descriptor desc = nvk_ssbo_descriptor(pdev, addr_range);
-+      assert(sizeof(desc) <= dataSize);
-+      memcpy(pDescriptor, &desc, sizeof(desc));
-+      break;
-+   }
-+
+@@ -1171,6 +1236,17 @@
+       break;
+    }
+ 
 +   case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR: {
 +      const VkDeviceAddress as_addr = pDescriptorInfo->data.accelerationStructure;
 +      const union nvk_buffer_descriptor desc = { .addr = {
 +         .base_addr = as_addr,
 +         .size = as_addr ? UINT32_MAX : 0,
 +      }};
-       assert(sizeof(desc) <= dataSize);
-       memcpy(pDescriptor, &desc, sizeof(desc));
-       break;
++      assert(sizeof(desc) <= dataSize);
++      memcpy(pDescriptor, &desc, sizeof(desc));
++      break;
++   }
++
+    case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT: {
+       uint8_t plane_count;
+       struct nvk_sampled_image_descriptor desc = {};
 diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --exclude=__pycache__ --exclude=*.bak* --exclude=*.orig --exclude=.git --exclude=open-gpu-kernel-modules --strip-trailing-cr upmesa/mesa-17ca6174/src/nouveau/vulkan/nvk_descriptor_set_layout.c rebase263/mesa/src/nouveau/vulkan/nvk_descriptor_set_layout.c
 --- a/src/nouveau/vulkan/nvk_descriptor_set_layout.c	2026-10-05 06:47:14
 +++ b/src/nouveau/vulkan/nvk_descriptor_set_layout.c	2026-10-05 07:44:54
@@ -9548,7 +9587,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --exclude=__pycache__ --exclude=*.bak* --exclude=*.orig --exclude=.git --exclude=open-gpu-kernel-modules --strip-trailing-cr upmesa/mesa-17ca6174/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c rebase263/mesa/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c	1969-12-31 16:00:00
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c	2026-10-05 13:15:54
-@@ -0,0 +1,489 @@
+@@ -0,0 +1,493 @@
 +
 +
 +
@@ -9952,7 +9991,11 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +   if (mapping == NULL)
 +      return vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
 +
-+   NV_STATUS nvRes = nvRmApiMapMemory(&rm, pdev->hSubdevice, mem->hMemoryPhys, 0, mem->base.size_B, mem->isSystemMem, 0, mapping);
++   /* System memory is mapped directly only when the caller asks for it (flag bit 15); without it every CPU map
++    * failed with NV_ERR_NOT_SUPPORTED and vkCreateDevice returned VK_ERROR_OUT_OF_DEVICE_MEMORY on RTX 20 / GTX 16.
++    * Ampere and later already map these directly, so the flag only states what they do. */
++   const NvU32 map_flags_os33 = mem->isSystemMem ? (1u << 15) : 0;
++   NV_STATUS nvRes = nvRmApiMapMemory(&rm, pdev->hSubdevice, mem->hMemoryPhys, 0, mem->base.size_B, mem->isSystemMem, map_flags_os33, mapping);
 +   if (nvRes != NV_OK) {
 +      fprintf(stderr, "[!] nvRes: %#x\n", nvRes);
 +      free(mapping);
@@ -11602,7 +11645,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --exclude=__pycache__ --exclude=*.bak* --exclude=*.orig --exclude=.git --exclude=open-gpu-kernel-modules --strip-trailing-cr upmesa/mesa-17ca6174/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c rebase263/mesa/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c	1969-12-31 16:00:00
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c	2026-10-06 08:34:31
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,198 @@
 +#include "../../nvmtl_cfg.h"
 +#include "nvrm_xnu.h"
 +#include <IOKit/IOKitLib.h>
