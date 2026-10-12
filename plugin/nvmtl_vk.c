@@ -901,6 +901,12 @@ static int nvmtl_vk_initialize(void)
     enabled.occlusionQueryPrecise = supported.occlusionQueryPrecise;
     g_occlusion_precise = supported.occlusionQueryPrecise == VK_TRUE;
     enabled.samplerAnisotropy = supported.samplerAnisotropy;
+    enabled.imageCubeArray = supported.imageCubeArray;   // texturecube_array storage writes / sampled cube arrays (ImageCubeArray, SampledCubeArray)
+    // Metal apps read past buffer ends and Apple GPUs tolerate it; on NVK an unchecked load off the end of a
+    // mapping is an MMU FAULT_PTE that kills the channel (WoW at the login screen). Bounds-checked buffer and
+    // vertex-fetch access turns those reads into zeros instead.
+    enabled.robustBufferAccess = supported.robustBufferAccess;
+    nvlog("vk: robustBufferAccess %s", supported.robustBufferAccess ? "ON (out-of-range buffer reads return zeros)" : "ABSENT - out-of-range buffer reads can fault the channel");
     g_sampler_anisotropy = supported.samplerAnisotropy == VK_TRUE;
     nvlog("vk: sampler anisotropy %d (max %g), mirror-clamp-to-edge %d", g_sampler_anisotropy,
           (double)g_lim.maxSamplerAnisotropy, g_sampler_mirror_clamp);
