@@ -74,8 +74,9 @@ screen and the screen stays dark, pick **1401: Start once without NVIDIA driver*
 
 **Status, honestly.** None of this has run on an AMD or Intel GPU yet. On the NPU side, Intel's NPU compiler built for
 macOS compiles models for Meteor/Arrow Lake and Lunar Lake NPUs, and Intel's driver tests pass (164 of 164) against
-their simulated NPU. The first run on a real Arrow Lake NPU found problems in the driver layer, fixed in this release
-(see below). If you turn it on, **Send logs** now includes `npu.txt`: every layer from the PCI device to the runtimes,
+their simulated NPU. On a real Arrow Lake NPU the driver now loads, finds the NPU and loads its firmware, but the NPU's
+firmware does not report ready yet, so the NPU is not usable in this release; Linux on the same PC starts it, and the
+remaining difference is being traced. If you turn it on, **Send logs** now includes `npu.txt`: every layer from the PCI device to the runtimes,
 with their debug logging on, so a failure on your machine names the layer that broke.
 
 **Why it took fixes in the driver layer it runs on** (found before and during the first hardware run):
@@ -84,9 +85,17 @@ with their debug logging on, so a failure on your machine names the layer that b
   one per GPU or NPU under the names Linux uses, readable by apps as on Linux.
 - **The NPU drivers never registered.** They registered with a PCI bus class that did not exist yet at that point in
   start-up, and the error was dropped. The class is now created on demand, and a driver that fails to register says so.
-- **Start-up stopped at the boot logo with the test driver on.** The drivers read their firmware while macOS was still
-  finding its disks, and finding the disks waits for the drivers. They now attach a moment later, once the disks are
-  mounted; the screen stays on the boot display until then.
+- **Start-up stopped at the boot logo with the NPU on (a kernel panic 7 seconds in, every start).** Memory the Linux
+  drivers allocate in blocks larger than a page was freed through the wrong allocator. Fixed. The drivers also attach a
+  moment later now, once the disks are mounted.
+- **A crash or hang can no longer repeat at every start.** Before attaching, each test driver writes a marker to NVRAM
+  and clears it once the attach returns. If a start finds the marker, the last attach never finished, so the driver
+  leaves the GPU or NPU alone and says so in Send logs. Turning the test driver off and on clears it.
+- **Every memory range of 2 GB or more was wrong.** The 2 GB size constant overflowed to minus 2 GB in the layer the
+  Linux drivers run on, which broke the NPU's address space and would have broken large ranges in amdgpu, i915 and xe.
+- **Memory the NPU reads could be stale.** Pages switched to write-combining were not flushed from the CPU's caches
+  first; the NPU reads them without looking in those caches. They are flushed now, as on Linux.
+- **The NPU now starts from a reset** (function level reset before the driver attaches), as Linux does.
 - **Turning the test driver on always failed** with "a GPU firmware file did not match its checksum": the check was
   given a list format it does not read. The download also asked for every vendor's files at once and GitLab refused it
   ("429 Too Many Requests"); it now fetches only what your hardware needs, retries, and falls back to kernel.org's copy
@@ -95,3 +104,5 @@ with their debug logging on, so a failure on your machine names the layer that b
 ## Still open
 - HDMI and DisplayPort audio from the NVIDIA card.
 - AMD and Intel GPU acceleration has not run on those GPUs yet: turn the test driver on and Send logs to help.
+- The Intel NPU's firmware does not start yet (see above).
+- Plugging in a monitor the driver has not seen before while macOS runs.

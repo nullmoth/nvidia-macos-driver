@@ -5,7 +5,13 @@ import os, shutil, sys
 src, dst = sys.argv[1], sys.argv[2]
 if os.path.exists(dst):
     shutil.rmtree(dst)
-shutil.copytree(os.path.join(src, "drivers/accel/ivpu"), os.path.join(dst, "ivpu"))
+# Intel's ivpu from the newer tree when given (argv[3]): Linux 6.18+ boots the current linux-firmware NPU image on
+# Arrow Lake (boot API 3.37) where 6.14's driver (expects 3.26) timed out waiting for the ready message (10-11)
+IVPU_SRC = sys.argv[3] if len(sys.argv) > 3 and os.environ.get("NMX_IVPU_614") != "1" else src
+shutil.copytree(os.path.join(IVPU_SRC, "drivers/accel/ivpu"), os.path.join(dst, "ivpu"))
+# its UAPI header, found as <uapi/drm/ivpu_accel.h> through cc-npu.sh's -I npu-src/uapi ahead of the 6.14 copy
+os.makedirs(os.path.join(dst, "uapi/uapi/drm"), exist_ok=True)
+shutil.copy2(os.path.join(IVPU_SRC, "include/uapi/drm/ivpu_accel.h"), os.path.join(dst, "uapi/uapi/drm"))
 shutil.copy2(os.path.join(src, "drivers/accel/drm_accel.c"), dst)
 shutil.copy2(os.path.join(src, "drivers/gpu/drm/drm_gem_shmem_helper.c"), dst)
 # AMD XDNA from the newer Intel/AMD tree (argv[3], Linux 7.3): only it can run without IOMMU SVA (carveout memory)
@@ -62,8 +68,8 @@ edit("ivpu/ivpu_fw.c", [
     ('\t{ IVPU_HW_IP_50XX, "intel/vpu/vpu_50xx_v0.0.bin" },\n', '\t{ IVPU_HW_IP_50XX, "intel/vpu/vpu_50xx_v1.bin" },\n\t{ IVPU_HW_IP_50XX, "intel/vpu/vpu_50xx_v0.0.bin" },\n'),
 ])
 # First Arrow Lake attach (10-11): the SHAVE firmware buffer found no room in context 0 (-ENOSPC) although the range
-# is 2 GB. A failed placement now prints the range, the size and every hole of the context, and the firmware layout
-# is printed at load, so the next start names which side is wrong.
+# is 2 GB (SZ_2G was -2 GB; see override/include/linux/sizes.h). A failed placement prints the range, the size and
+# every hole of the context.
 edit("ivpu/ivpu_mmu_context.c", [
     ("""	ret = drm_mm_insert_node_in_range(&ctx->mm, node, size, IVPU_MMU_PAGE_SIZE, 0,
 					  range->start, range->end, DRM_MM_INSERT_BEST);
@@ -90,14 +96,81 @@ unlock:
 unlock:
 """),
 ])
-edit("ivpu/ivpu_fw.c", [
-    ("""	ivpu_dbg(vdev, FW_BOOT, "Size: file %lu image %u runtime %u shavenn %u\\n",""",
-     """	pr_info("NullMoth ivpu: firmware runtime 0x%llx +0x%llx, load 0x%llx, image %u, shavenn %u, ro 0x%llx +%u\\n",
-	       (unsigned long long)fw->runtime_addr, (unsigned long long)fw->runtime_size,
-	       (unsigned long long)image_load_addr, (unsigned)fw->image_size, (unsigned)fw->shave_nn_size,
-	       (unsigned long long)fw->read_only_addr, (unsigned)fw->read_only_size);
-	ivpu_dbg(vdev, FW_BOOT, "Size: file %lu image %u runtime %u shavenn %u\\n","""),
+# A failed firmware boot (the NPU never sent its ready message, 10-11) prints the firmware's own log buffers.
+edit("ivpu/ivpu_drv.c", [
+    ("""err_diagnose_failure:
+	ivpu_hw_diagnose_failure(vdev);
+	ivpu_mmu_evtq_dump(vdev);
+""", """err_diagnose_failure:
+	ivpu_hw_diagnose_failure(vdev);
+	ivpu_mmu_evtq_dump(vdev);
+	{
+		struct drm_printer p = drm_info_printer(vdev->drm.dev);
+
+		ivpu_fw_log_print(vdev, false, &p);
+	}
+"""),
 ])
+# NMX_IVPU_TRACE=1 also checks, after a failed firmware boot, that the NPU sees what the CPU wrote: for the boot
+# parameters page and the firmware entry page, the NPU page-table entry against the page's physical address, and the
+# CPU's write-combined view against an uncached read of the same RAM.
+if os.environ.get("NMX_IVPU_TRACE") == "1":
+    p = os.path.join(dst, "ivpu/ivpu_mmu_context.c")
+    t = open(p).read() + r'''
+#include "ivpu_gem.h"
+void nmx_ivpu_check(struct ivpu_device *vdev, struct ivpu_bo *bo, u64 off)
+{
+	struct ivpu_mmu_context *ctx = &vdev->gctx;
+	u64 va = bo->vpu_addr + off, e = 0, a, b, c, d;
+	int pgd = FIELD_GET(IVPU_MMU_PGD_INDEX_MASK, va), pud = FIELD_GET(IVPU_MMU_PUD_INDEX_MASK, va);
+	int pmd = FIELD_GET(IVPU_MMU_PMD_INDEX_MASK, va), pte = FIELD_GET(IVPU_MMU_PTE_INDEX_MASK, va);
+	struct page *pg = bo->base.pages ? bo->base.pages[off >> PAGE_SHIFT] : NULL;
+	phys_addr_t pa = pg ? page_to_phys(pg) : 0;
+	u8 *cpu = (u8 *)ivpu_bo_vaddr(bo);
+	void __iomem *uc;
+	int i, diff = 0;
+
+	if (ctx->pgtable.pte_ptrs[pgd] && ctx->pgtable.pte_ptrs[pgd][pud] && ctx->pgtable.pte_ptrs[pgd][pud][pmd])
+		e = ctx->pgtable.pte_ptrs[pgd][pud][pmd][pte];
+	if (!cpu || !pa) {
+		pr_err("NullMoth ivpu check: va 0x%llx pte 0x%llx: no CPU map or page\n", va, e);
+		return;
+	}
+	cpu += off;
+	uc = ioremap(pa, PAGE_SIZE);
+	if (!uc) {
+		pr_err("NullMoth ivpu check: va 0x%llx: ioremap failed\n", va);
+		return;
+	}
+	for (i = 0; i < PAGE_SIZE; i += 8)
+		if (readq(uc + i) != *(u64 *)(cpu + i))
+			diff++;
+	a = *(u64 *)cpu; b = *(u64 *)(cpu + 8); c = readq(uc); d = readq(uc + 8);
+	pr_err("NullMoth ivpu check: va 0x%llx pte 0x%llx (page 0x%llx) phys 0x%llx | cpu %016llx %016llx ram %016llx %016llx | %d/512 qwords differ\n",
+	       va, e, e & ~(u64)0xfff & ~BIT_ULL(52), (u64)pa, a, b, c, d, diff);
+	iounmap(uc);
+}
+'''
+    open(p + ".tmp", "w").write(t); os.replace(p + ".tmp", p)
+    edit("ivpu/ivpu_drv.c", [("""		ivpu_fw_log_print(vdev, false, &p);
+	}
+""", """		ivpu_fw_log_print(vdev, false, &p);
+	}
+	{
+		extern void nmx_ivpu_check(struct ivpu_device *, struct ivpu_bo *, u64);
+
+		nmx_ivpu_check(vdev, vdev->fw->mem, 0);
+		nmx_ivpu_check(vdev, vdev->fw->mem, 0x3000);
+		nmx_ivpu_check(vdev, vdev->fw->mem, 0x10000);
+	}
+""")])
+# NMX_IVPU_TRACE=1 (bring-up builds only): Intel's debug trace for firmware boot, power, MMU, IPC and misc goes to the
+# kernel log (LinuxKPI's dev_dbg prints nothing).
+if os.environ.get("NMX_IVPU_TRACE") == "1":
+    edit("ivpu/ivpu_drv.h", [("\t\tdev_dbg((vdev)->drm.dev, \"[%s] \" fmt, #type, ##args);",
+                              "\t\tdev_info((vdev)->drm.dev, \"[%s] \" fmt, #type, ##args);")])
+    edit("ivpu/ivpu_drv.c", [("int ivpu_dbg_mask;\n",
+                              "int ivpu_dbg_mask = IVPU_DBG_FW_BOOT | IVPU_DBG_PM | IVPU_DBG_MMU | IVPU_DBG_IPC | IVPU_DBG_MISC" + (" | IVPU_DBG_REG" if os.environ.get("NMX_IVPU_REG") == "1" else "") + ";\n")])
 if os.path.isdir(os.path.join(dst, "amdxdna")):
     edit("amdxdna/aie2_pci.h", [('#include "amdxdna_mailbox.h"\n', '#include "amdxdna_mailbox.h"\n#include "nmx_xdna_sched.h"\n')])
     edit("amdxdna/aie2_ctx.c", [

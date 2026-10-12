@@ -168,6 +168,34 @@ static void nmx_marker_write(bool on)
     n->release();
 }
 
+/*
+ * Function Level Reset before the driver touches the NPU, as Linux's reset path does (its reset_method for the Arrow
+ * Lake NPU is "flr"). Under macOS the NPU's always-on registers were not at their reset values when ivpu started
+ * (VPU idle generation off, a power island already on), so power-up failed its NOC handshake or the firmware never
+ * answered; Linux on the same machine sees reset values and boots it in 67 ms (10-11). Config space is saved and
+ * restored around the reset, which clears BARs and the command register.
+ */
+static void nmx_npu_flr(IOPCIDevice *pci)
+{
+    UInt8 cap = 0;
+    if (pci->findPCICapability(kIOPCIPCIExpressCapability, &cap) == 0 || cap == 0) {
+        IOLog("NullMoth NPU: no PCI Express capability; no reset before attach\n");
+        return;
+    }
+    if (!(pci->configRead32((UInt8)(cap + 0x04)) & (1u << 28))) {   /* Device Capabilities: Function Level Reset */
+        IOLog("NullMoth NPU: the device has no Function Level Reset; attaching as found\n");
+        return;
+    }
+    /* wait (up to 100 ms) for outstanding transactions, as the PCIe spec asks before an FLR */
+    for (int i = 0; i < 10 && (pci->configRead16((UInt8)(cap + 0x0a)) & (1u << 5)); i++)
+        IOSleep(10);
+    pci->saveDeviceState();
+    pci->configWrite16((UInt8)(cap + 0x08), (UInt16)(pci->configRead16((UInt8)(cap + 0x08)) | (1u << 15)));
+    IOSleep(100);
+    pci->restoreDeviceState();
+    IOLog("NullMoth NPU: function level reset done (vendor %04x)\n", pci->configRead16(kIOPCIConfigVendorID));
+}
+
 void NMXNPU::attachNow()
 {
     int err = nmx_xnu_wait_firmware_root(300);
@@ -185,6 +213,7 @@ void NMXNPU::attachNow()
         return;
     }
     nmx_marker_write(true);
+    nmx_npu_flr(pci_);
     dev_ = nmx_port_attach_pci(pci_);
     nmx_marker_write(false);
     if (dev_ == nullptr) {
