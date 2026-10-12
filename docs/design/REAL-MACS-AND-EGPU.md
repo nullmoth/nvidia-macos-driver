@@ -28,7 +28,17 @@ Everything after that is today's setup, unchanged: it finds this OpenCore as "th
 - NVRM must attach to a GPU behind a Thunderbolt bridge: check probe matching does not require a root-port parent.
 - BAR1 behind Thunderbolt is usually 256 MB (no Resizable BAR): the small-BAR path from 1.14 applies.
 - Hot unplug: RM must survive surprise removal (NVRM's fallen-off-the-bus path; no flips into a gone device).
-- 10-11 report (leetftw, iGPU + eGPU RTX 3070): only the iGPU's displays came up. Needs that boot's kernel log first.
+- 10-11 report (leetftw, iGPU + eGPU RTX 3070, NM-PMDXQX4Y / NM-H364M4RV): NVRM claimed the card, but BAR1 behind
+  Thunderbolt was 32 MB and 0 heads published. The kernel log shows the general limit: NVRMFB maps EVERY VRAM
+  allocation through BAR1, and once that window is full each nvAllocVram is "REFUSED - BAR1 budget spent" (192 MB budget
+  exhausted on that machine's other boot).
+- **The change that unlocks eGPUs and every no-ReBAR board: VRAM without a BAR1 mapping.** GPU-only allocations
+  (render targets, textures the CPU never touches, NVK's device-local heaps) get VRAM with no CPU mapping; only
+  CPU-visible memory (staging, the shared pairs, scanout reads by the CPU copy path) spends BAR1. NVK already separates
+  DEVICE_LOCAL from HOST_VISIBLE memory types, so the userland mostly asks correctly; the kernel ABI (nvAllocVram /
+  NVRMVramRequest) needs a "no CPU mapping" flag, and the accelerator's paths that read `fKva` must handle its absence.
+  Test machine: any desktop with Resizable BAR turned off in the BIOS shows the same refusals (no new hardware needed);
+  the Thunderbolt case needs an enclosure.
 
 ## What blocks testing
 - A real Mac to try it on: a test Mac Pro (MacPro6,1, OCLP) is ours but has only Thunderbolt 2 and the maintainer's go is needed before
