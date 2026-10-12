@@ -1958,8 +1958,8 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
 {
     if (!fKms || !fDev || !fDisplay) return n;
     const unsigned cap = sizeof fDT / sizeof fDT[0], fromMac = n;
-    // n == 0: nothing from macOS yet - offer the boot raster (the display's own) at every other refresh rate.
-    const NvU32 bootHz = (fBootMode.timings.refreshRate + 500) / 1000;
+    // Publish a desktop timing for the boot raster too; the basic boot mode
+    // alone is not a desktop-capable detailed timing.
     unsigned added = 0;
     for (NvU32 i = 0; i < 256 && n < cap; i++) {
         struct NvKmsKapiDisplayMode m = {}; NvBool valid = NV_FALSE, pref = NV_FALSE;
@@ -1984,7 +1984,6 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
             if (dhz + 1 >= hz && dhz <= hz + 1) { have = true; break; }
             if (tmpl < 0 && j < fromMac && !d.horizontalScaled && !d.verticalScaled) tmpl = (int)j;
         }
-        if (!fromMac) raster = fBootW && k.hVisible == fBootW && k.vVisible == fBootH && hz != bootHz && hz + 1 != bootHz && hz != bootHz + 1;
         // A raster macOS never proposed is offered too when NVKMS validated it for this display and it fits the scanout
         // memory and the scaler. Without this, rasters that exist only in the EDID's DisplayID extension (most 100-240 Hz
         // modes, issue #29) and every raster above a 1080p firmware raster (a 4K monitor stuck at 1920x1080, issue #49)
@@ -1994,7 +1993,8 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
         // until the user logged in blind; with this block removed it showed again on that machine. Smaller desktops still
         // come from macOS's own scaled modes on the native raster.
         const bool larger = fBootW && k.hVisible >= fBootW && k.vVisible >= fBootH && (k.hVisible > fBootW || k.vVisible > fBootH);
-        if (!raster && !have && larger && fMemBytes && k.hVisible <= fScalerMaxW && k.vVisible <= fScalerMaxH) {
+        const bool bootRaster = fBootW && k.hVisible == fBootW && k.vVisible == fBootH;
+        if (!raster && !have && (bootRaster || larger) && fMemBytes && k.hVisible <= fScalerMaxW && k.vVisible <= fScalerMaxH) {
             NvU32 pitch = 0;
             if (nvrmCheckedPitch(k.hVisible, fPitchAlign, &pitch) && (NvU64)pitch * k.vVisible <= fMemBytes) raster = true;
         }
@@ -2786,7 +2786,7 @@ IOReturn NVRMNVDAFramebuffer::getAttributeForConnection(IOIndex connectIndex, IO
     case kConnectionControllerDepthsSupported: if (value) *value = 0x00000002; return kIOReturnSuccess;
     case kConnectionColorMode:                 if (value) *value = 0x00000001; return kIOReturnSuccess;
     case kConnectionCheckEnable:               if (value) *value = 1; return kIOReturnSuccess;
-    case kConnectionDisplayFlags:              if (value) *value = 1; return kIOReturnSuccess;
+    case kConnectionDisplayFlags:              if (value) *value = 0; return kIOReturnSuccess;
     case kConnectionSupportsHLDDCSense:
         FBLOG("fb%u getAFC HLDDCSense -> %s (EDID %u B)", fIndex, fEdidSize >= 128 ? "YES" : "no", (unsigned)fEdidSize);
         return fEdidSize >= 128 ? kIOReturnSuccess : kIOReturnUnsupported;

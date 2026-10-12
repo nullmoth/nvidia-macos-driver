@@ -57,3 +57,11 @@ Pending dirty-surface entries now identify their resource owner. Resource destru
 Display power requests now share the display gate. A rejected wake keeps the sleeping state so the next request can retry, and an unsuccessful wake emits no successful-power-on notification. Connection-power requests perform the same transition and report failure when it is rejected. Head-off commits use the tracked submission path, completing earlier primary work before disabling the head. The production-transition test covers failed sleep, failed wake and retry, repeated requests, shutdown, and the existing DPMS opt-out.
 
 The accelerator builds for both supported OS layouts, and the framebuffer builds for macOS 15. These kernel changes still require boot and display-power qualification on hardware before a binary release.
+
+## Boot raster publication and surface upload
+
+Initial timing publication now includes a desktop detailed timing at the boot raster's own refresh rate. It retains the restriction against smaller rasters macOS did not propose, checks scanout capacity, and avoids duplicate or scaled-only suppression. The production mode builder reproduces a missing 2560x1600 at 165 Hz timing without this fix; the corrected builder publishes stable ID 0x10100.
+
+Monitor connection flags no longer unconditionally request CEA underscan. The flag value zero leaves ordinary monitors on their normal display policy.
+
+On x86 CPUs with SSE4.1, aligned large surface imports use streaming loads for write-combining pages. Unaligned sources, short copies, other CPUs, and unsupported features retain memcpy. Alignment, tails, destination guards, and protected read boundaries passed on ARM and x86. On the qualification rig, five byte-verified copies of a 33177600-byte write-combining IOSurface averaged 134.074 ms with memcpy and 3.689 ms with streaming loads. This is a copy benchmark, not a measured desktop frame-rate result. The updated release plugin passed the eleven 100-frame surface modes.
