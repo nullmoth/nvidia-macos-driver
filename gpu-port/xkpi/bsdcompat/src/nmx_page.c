@@ -687,15 +687,26 @@ void pmap_unmapdev(void *va, vm_size_t size)
 /*
  * Cache attributes: a kext cannot change the cache type of an existing kernel mapping on macOS. The attribute is
  * recorded on the page and applied when the page is mapped (vmap, user mappings); system memory stays cached in
- * the kernel's own view, which is coherent for the GPU because PCIe accesses to system RAM snoop the CPU caches.
+ * the kernel's own view, which is coherent for a discrete GPU because PCIe accesses to system RAM snoop the CPU
+ * caches (an integrated NPU's need not: see pmap_page_set_memattr).
  */
 int pmap_change_attr(void *va, vm_size_t size, int mode)
 {
     return 0;
 }
 
+/*
+ * A page leaving write-back is written out of the CPU caches first, as FreeBSD's pmap and Linux's set_pages_array_wc
+ * do. "PCIe snoops" above holds for a discrete GPU, not for the NPU: an integrated NPU reads write-combined and
+ * uncached buffers without snooping, so a line still in the cache (the page was zeroed through the cached view) is
+ * invisible to it and can later be written back over what was written through the WC view. The first Arrow Lake NPU
+ * firmware boot never answered (10-11), its firmware and log buffers being exactly such pages.
+ */
+void pmap_invalidate_cache_range(vm_offset_t sva, vm_offset_t eva);
 void pmap_page_set_memattr(vm_page_t m, vm_memattr_t ma)
 {
+    if (ma != VM_MEMATTR_WRITE_BACK && m->md.pat_mode != ma && m->nmx_kva)
+        pmap_invalidate_cache_range((vm_offset_t)m->nmx_kva, (vm_offset_t)m->nmx_kva + PAGE_SIZE);
     m->md.pat_mode = ma;
 }
 
