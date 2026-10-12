@@ -13,6 +13,8 @@
 #include <sys/systm.h>
 #include <sys/malloc.h>
 #include <vm/uma.h>
+#include <vm/vm.h>
+#include <vm/vm_extern.h>
 #include <kern/locks.h>
 
 MALLOC_DEFINE(M_TEMP, "temp", "misc temporary data buffers");
@@ -34,6 +36,7 @@ struct big_rec {
     void *addr;
     size_t size;
     struct malloc_type *type;
+    int contig;                 /* from contigmalloc: pages of the page pool, not IOMallocAligned */
     struct big_rec *next;
 };
 static struct big_rec *big_table[BIG_BUCKETS];
@@ -82,6 +85,7 @@ void *malloc(size_t size, struct malloc_type *type, int flags)
         rec->addr = p;
         rec->size = rounded;
         rec->type = type;
+        rec->contig = 0;
         unsigned b = big_bucket(p);
         lck_spin_lock(big_lock);
         rec->next = big_table[b];
@@ -143,7 +147,10 @@ void free(void *addr, struct malloc_type *type)
         struct big_rec *r = big_take(addr);
         if (r) {
             account(r->type, -(int64_t)r->size);
-            IOFreeAligned(r->addr, r->size);
+            if (r->contig)
+                kmem_free(r->addr, r->size);
+            else
+                IOFreeAligned(r->addr, r->size);
             IOFree(r, sizeof(*r));
             return;
         }
@@ -156,6 +163,39 @@ void free(void *addr, struct malloc_type *type)
     h->magic = 0;
     account(h->type, -(int64_t)h->size);
     IOFree(h->raw, h->rawsize);
+}
+
+/*
+ * contigmalloc blocks are recorded here too. FreeBSD's free() accepts them, and LinuxKPI relies on that: kmalloc of
+ * more than a page is contigmalloc, kfree is free(). Without the record, freeing one panicked ("memory malloc() did
+ * not return"): ivpu's firmware buffer vmap freed its page list that way at boot, on every start with the NPU on.
+ */
+int nmx_malloc_note_contig(void *addr, size_t size, struct malloc_type *type)
+{
+    struct big_rec *rec = IOMalloc(sizeof(*rec));
+    if (rec == NULL)
+        return ENOMEM;
+    rec->addr = addr;
+    rec->size = round_page(size);
+    rec->type = type;
+    rec->contig = 1;
+    unsigned b = big_bucket(addr);
+    lck_spin_lock(big_lock);
+    rec->next = big_table[b];
+    big_table[b] = rec;
+    lck_spin_unlock(big_lock);
+    account(type, (int64_t)rec->size);
+    return 0;
+}
+
+/* contigfree: drops the record if there is one; the caller returns the pages */
+void nmx_malloc_forget_contig(void *addr)
+{
+    struct big_rec *r = big_take(addr);
+    if (r) {
+        account(r->type, -(int64_t)r->size);
+        IOFree(r, sizeof(*r));
+    }
 }
 
 void zfree(void *addr, struct malloc_type *type)
