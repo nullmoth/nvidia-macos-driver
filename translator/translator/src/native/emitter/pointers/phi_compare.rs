@@ -600,6 +600,70 @@ impl Emitter {
         Ok(())
     }
 
+    /// `fcmp ord a, b` is "neither operand is NaN"; `fcmp uno` is "either is NaN". Both are built
+    /// from OpIsNan on each operand (lane-wise for vectors), since Vulkan has no OpOrdered/OpUnordered.
+    pub(in crate::native::emitter) fn emit_fcmp_ordering_resolved(
+        &mut self,
+        ordered: bool,
+        lhs: TypedValue,
+        rhs: TypedValue,
+        name: String,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<(), String> {
+        let operand_ty = self.resolve_type(&lhs.ty)?;
+        let rhs_ty = self.resolve_type(&rhs.ty)?;
+        if operand_ty != rhs_ty {
+            return Err(format!(
+                "native emitter: fcmp operand type mismatch {operand_ty:?} vs {rhs_ty:?}"
+            ));
+        }
+        if bfloat_lanes(&operand_ty).is_some() {
+            return Err("native emitter: fcmp ord/uno on bfloat operands is unsupported".into());
+        }
+        let result_ty = float_compare_result_type(&operand_ty)?;
+        let result_type = self.type_id(&result_ty)?;
+        let result = self.result_id(&name, &result_ty)?;
+        let lhs_id = self.value_id_in(&lhs.value, &lhs.ty, instructions)?;
+        let rhs_id = self.value_id_in(&rhs.value, &rhs.ty, instructions)?;
+        let lhs_nan = self.fresh();
+        instructions.push(Self::inst(
+            Op::IsNan,
+            Some(result_type),
+            Some(lhs_nan),
+            vec![Operand::IdRef(lhs_id)],
+        ));
+        let rhs_nan = self.fresh();
+        instructions.push(Self::inst(
+            Op::IsNan,
+            Some(result_type),
+            Some(rhs_nan),
+            vec![Operand::IdRef(rhs_id)],
+        ));
+        if ordered {
+            let any_nan = self.fresh();
+            instructions.push(Self::inst(
+                Op::LogicalOr,
+                Some(result_type),
+                Some(any_nan),
+                vec![Operand::IdRef(lhs_nan), Operand::IdRef(rhs_nan)],
+            ));
+            instructions.push(Self::inst(
+                Op::LogicalNot,
+                Some(result_type),
+                Some(result),
+                vec![Operand::IdRef(any_nan)],
+            ));
+        } else {
+            instructions.push(Self::inst(
+                Op::LogicalOr,
+                Some(result_type),
+                Some(result),
+                vec![Operand::IdRef(lhs_nan), Operand::IdRef(rhs_nan)],
+            ));
+        }
+        Ok(())
+    }
+
     pub(in crate::native::emitter) fn emit_icmp_ptr_resolved(
         &mut self,
         pred: Op,

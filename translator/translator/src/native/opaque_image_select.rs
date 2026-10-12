@@ -1,7 +1,7 @@
 use crate::spirv_module::Instruction;
 use crate::spirv_module::Module;
 use crate::spirv_module::Operand;
-use spirv::{Op, Word};
+use spirv::{Decoration, Op, Word};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -53,6 +53,288 @@ struct NestedPhiPlan {
 }
 
 pub(super) fn construct_opaque_image_selects(module: &mut Module) -> bool {
+    let array_changed = rewrite_runtime_array_image_selects(module);
+    construct_opaque_image_merges(module) || array_changed
+}
+
+/// One arm of an image select that resolves to `OpLoad (OpAccessChain base indices...)`.
+struct ArrayImageLeaf {
+    base: Word,
+    pointer_ty: Word,
+    indices: Vec<Word>,
+    nonuniform: bool,
+}
+
+/// Rewrites an image-typed `OpSelect` whose arms all load through access chains into the same
+/// descriptor array (a dynamically indexed texture table) as a select of the *indices* followed by
+/// one access chain and one load. Vulkan allows `OpSelect` only on scalars, composites and pointers;
+/// NVK's SPIR-V front end traps on an image-typed one. Selecting the index keeps a single texture
+/// fetch where replaying the sample per candidate would multiply it by the table size.
+fn rewrite_runtime_array_image_selects(module: &mut Module) -> bool {
+    let type_defs: HashMap<Word, Instruction> = module
+        .types_global_values
+        .iter()
+        .filter_map(|instruction| instruction.result_id.map(|id| (id, instruction.clone())))
+        .collect();
+    let mut value_types: HashMap<Word, Word> = module
+        .types_global_values
+        .iter()
+        .filter_map(|instruction| Some((instruction.result_id?, instruction.result_type?)))
+        .collect();
+    let nonuniform_ids: HashSet<Word> = module
+        .annotations
+        .iter()
+        .filter(|instruction| {
+            instruction.class.opcode == Op::Decorate
+                && instruction.operands.get(1) == Some(&Operand::Decoration(Decoration::NonUniform))
+        })
+        .filter_map(|instruction| match instruction.operands.first() {
+            Some(Operand::IdRef(id)) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    let mut next_id = module
+        .header
+        .as_ref()
+        .map(|header| header.bound)
+        .unwrap_or(0);
+    let mut new_nonuniform: Vec<Word> = Vec::new();
+    let mut changed = false;
+    for func in module.functions.iter_mut() {
+        let mut defs: HashMap<Word, Instruction> = type_defs.clone();
+        for parameter in &func.parameters {
+            if let (Some(id), Some(ty)) = (parameter.result_id, parameter.result_type) {
+                value_types.insert(id, ty);
+            }
+        }
+        for instruction in func
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+        {
+            if let Some(id) = instruction.result_id {
+                defs.insert(id, instruction.clone());
+                if let Some(ty) = instruction.result_type {
+                    value_types.insert(id, ty);
+                }
+            }
+        }
+        for block in func.blocks.iter_mut() {
+            let mut index = 0;
+            while index < block.instructions.len() {
+                let instruction = &block.instructions[index];
+                let image_select = instruction.class.opcode == Op::Select
+                    && instruction
+                        .result_type
+                        .is_some_and(|ty| is_image_type(&type_defs, ty));
+                let (Some(result), Some(image_ty), true) =
+                    (instruction.result_id, instruction.result_type, image_select)
+                else {
+                    index += 1;
+                    continue;
+                };
+                let mut out = Vec::new();
+                let mut visiting = HashSet::new();
+                let Some(leaf) = fold_array_image_select(
+                    result,
+                    &type_defs,
+                    &defs,
+                    &value_types,
+                    &nonuniform_ids,
+                    &mut visiting,
+                    &mut next_id,
+                    &mut out,
+                    &mut new_nonuniform,
+                ) else {
+                    index += 1;
+                    continue;
+                };
+                let chain = fresh(&mut next_id);
+                let mut operands = vec![Operand::IdRef(leaf.base)];
+                operands.extend(leaf.indices.iter().map(|id| Operand::IdRef(*id)));
+                out.push(Instruction::new(
+                    Op::AccessChain,
+                    Some(leaf.pointer_ty),
+                    Some(chain),
+                    operands,
+                ));
+                out.push(Instruction::new(
+                    Op::Load,
+                    Some(image_ty),
+                    Some(result),
+                    vec![Operand::IdRef(chain)],
+                ));
+                if leaf.nonuniform {
+                    new_nonuniform.push(chain);
+                    new_nonuniform.push(result);
+                }
+                for emitted in &out {
+                    if let Some(id) = emitted.result_id {
+                        defs.insert(id, emitted.clone());
+                        if let Some(ty) = emitted.result_type {
+                            value_types.insert(id, ty);
+                        }
+                    }
+                }
+                let emitted = out.len();
+                block.instructions.splice(index..index + 1, out);
+                index += emitted;
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        return false;
+    }
+    for id in new_nonuniform {
+        module.annotations.push(Instruction::new(
+            Op::Decorate,
+            None,
+            None,
+            vec![
+                Operand::IdRef(id),
+                Operand::Decoration(Decoration::NonUniform),
+            ],
+        ));
+    }
+    if let Some(header) = module.header.as_mut() {
+        header.bound = next_id;
+    }
+    // A nested select that only fed the rewritten one is dead now; an image-typed select must not
+    // survive, used or not.
+    super::constfold::dce_preserving(module, &HashSet::new());
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fold_array_image_select(
+    value: Word,
+    type_defs: &HashMap<Word, Instruction>,
+    defs: &HashMap<Word, Instruction>,
+    value_types: &HashMap<Word, Word>,
+    nonuniform_ids: &HashSet<Word>,
+    visiting: &mut HashSet<Word>,
+    next_id: &mut Word,
+    out: &mut Vec<Instruction>,
+    new_nonuniform: &mut Vec<Word>,
+) -> Option<ArrayImageLeaf> {
+    let def = defs.get(&value)?;
+    match def.class.opcode {
+        Op::Load => {
+            let Operand::IdRef(pointer) = def.operands.first()? else {
+                return None;
+            };
+            let chain = defs.get(pointer)?;
+            if chain.class.opcode != Op::AccessChain {
+                return None;
+            }
+            let Operand::IdRef(base) = chain.operands.first()? else {
+                return None;
+            };
+            if type_defs.get(base)?.class.opcode != Op::Variable {
+                return None;
+            }
+            let indices = chain.operands[1..]
+                .iter()
+                .map(|operand| match operand {
+                    Operand::IdRef(id) => Some(*id),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            if indices.is_empty() {
+                return None;
+            }
+            Some(ArrayImageLeaf {
+                base: *base,
+                pointer_ty: chain.result_type?,
+                indices,
+                nonuniform: nonuniform_ids.contains(&value) || nonuniform_ids.contains(pointer),
+            })
+        }
+        Op::Select => {
+            if !visiting.insert(value) {
+                return None;
+            }
+            let [Operand::IdRef(condition), Operand::IdRef(true_value), Operand::IdRef(false_value)] =
+                def.operands[..]
+            else {
+                return None;
+            };
+            let scalar_bool = value_types
+                .get(&condition)
+                .and_then(|ty| type_defs.get(ty))
+                .is_some_and(|ty| ty.class.opcode == Op::TypeBool);
+            if !scalar_bool {
+                return None;
+            }
+            let true_leaf = fold_array_image_select(
+                true_value,
+                type_defs,
+                defs,
+                value_types,
+                nonuniform_ids,
+                visiting,
+                next_id,
+                out,
+                new_nonuniform,
+            )?;
+            let false_leaf = fold_array_image_select(
+                false_value,
+                type_defs,
+                defs,
+                value_types,
+                nonuniform_ids,
+                visiting,
+                next_id,
+                out,
+                new_nonuniform,
+            )?;
+            visiting.remove(&value);
+            if true_leaf.base != false_leaf.base
+                || true_leaf.pointer_ty != false_leaf.pointer_ty
+                || true_leaf.indices.len() != false_leaf.indices.len()
+            {
+                return None;
+            }
+            let nonuniform = true_leaf.nonuniform || false_leaf.nonuniform;
+            let mut indices = Vec::with_capacity(true_leaf.indices.len());
+            for (a, b) in true_leaf.indices.iter().zip(false_leaf.indices.iter()) {
+                if a == b {
+                    indices.push(*a);
+                    continue;
+                }
+                let ty = *value_types.get(a)?;
+                if value_types.get(b) != Some(&ty) {
+                    return None;
+                }
+                let selected = fresh(next_id);
+                out.push(Instruction::new(
+                    Op::Select,
+                    Some(ty),
+                    Some(selected),
+                    vec![
+                        Operand::IdRef(condition),
+                        Operand::IdRef(*a),
+                        Operand::IdRef(*b),
+                    ],
+                ));
+                if nonuniform {
+                    new_nonuniform.push(selected);
+                }
+                indices.push(selected);
+            }
+            Some(ArrayImageLeaf {
+                base: true_leaf.base,
+                pointer_ty: true_leaf.pointer_ty,
+                indices,
+                nonuniform,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn construct_opaque_image_merges(module: &mut Module) -> bool {
     if !has_opaque_image_merge_consumer(module) {
         return false;
     }
@@ -1785,7 +2067,16 @@ fn is_direct_image_value_op(op: Op) -> bool {
 }
 
 fn is_sampled_image_value_op(op: Op) -> bool {
-    matches!(op, Op::ImageSampleExplicitLod | Op::ImageQueryLod)
+    matches!(
+        op,
+        Op::ImageSampleExplicitLod
+            | Op::ImageSampleImplicitLod
+            | Op::ImageSampleDrefExplicitLod
+            | Op::ImageSampleDrefImplicitLod
+            | Op::ImageGather
+            | Op::ImageDrefGather
+            | Op::ImageQueryLod
+    )
 }
 
 fn select_tree_image_type(

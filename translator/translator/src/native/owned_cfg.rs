@@ -3293,10 +3293,16 @@ fn owned_texel_access_error(
     };
     let image = image_operand_shape(instruction.operands.first(), definitions, value_types);
     let coordinate_lanes = |image: ImageTypeShape| {
+        // OpImageRead / OpImageWrite address a Cube image, arrayed or not, as (x, y, layer-face): the face
+        // and the array layer share one component (SPIRV-Tools GetMinCoordSize; GLSL's imageCubeArray
+        // takes an ivec3 whose z is `layer * 6 + face`).
+        if image.dim == spirv::Dim::DimCube {
+            return Some(3);
+        }
         match image.dim {
             spirv::Dim::Dim1D | spirv::Dim::DimBuffer => Some(1),
             spirv::Dim::Dim2D | spirv::Dim::DimRect | spirv::Dim::DimSubpassData => Some(2),
-            spirv::Dim::Dim3D | spirv::Dim::DimCube => Some(3),
+            spirv::Dim::Dim3D => Some(3),
             _ => None,
         }
         .map(|lanes| lanes + u32::from(image.arrayed))

@@ -15,7 +15,14 @@ pub(in crate::passes) fn coerce_image_coord32_typed(
     out: &mut Vec<Instruction>,
     what: &str,
 ) -> Result<(Word, Word), String> {
-    let Some(ty) = value_result_type(ctx, coord) else {
+    // The coordinate may be a value this lowering just emitted (a cube array's combined layer), so look
+    // through the pending instructions before the module.
+    let pending_ty = out
+        .iter()
+        .rev()
+        .find(|inst| inst.result_id == Some(coord))
+        .and_then(|inst| inst.result_type);
+    let Some(ty) = pending_ty.or_else(|| value_result_type(ctx, coord)) else {
         return Err(format!("{what}: coord has no type"));
     };
     let Some(def) = type_def_of(ctx, ty) else {
@@ -56,6 +63,37 @@ pub(in crate::passes) fn coerce_image_coord32_typed(
         vec![Operand::IdRef(coord)],
     ));
     Ok((c, dst))
+}
+
+/// Metal addresses a `texturecube_array` texel by (xy, face, slice). SPIR-V's Cube + Arrayed storage
+/// coordinate is `(x, y, layer)` with one combined layer-face index, so the slice and face fold into
+/// `slice * 6 + face` before `build_fetch_coord` appends it as the array layer.
+pub(in crate::passes) fn combine_cube_array_layer(
+    ctx: &mut Ctx,
+    face: Word,
+    slice: Word,
+    out: &mut Vec<Instruction>,
+    what: &str,
+) -> Result<Word, String> {
+    let face32 = coerce_image_coord32(ctx, face, out, what)?;
+    let slice32 = coerce_image_coord32(ctx, slice, out, what)?;
+    let uint = ctx.ty_uint();
+    let six = ctx.const_uint(6);
+    let scaled = ctx.module.fresh_id();
+    out.push(Instruction::new(
+        Op::IMul,
+        Some(uint),
+        Some(scaled),
+        vec![Operand::IdRef(slice32), Operand::IdRef(six)],
+    ));
+    let combined = ctx.module.fresh_id();
+    out.push(Instruction::new(
+        Op::IAdd,
+        Some(uint),
+        Some(combined),
+        vec![Operand::IdRef(scaled), Operand::IdRef(face32)],
+    ));
+    Ok(combined)
 }
 
 pub(in crate::passes) fn build_fetch_coord(
@@ -112,7 +150,8 @@ pub(in crate::passes) fn build_fetch_coord(
     let coord_def = type_def_of(ctx, coord_ty).ok_or("air.read_texture coord type is undefined")?;
     let out_ty = match dim {
         Dim::Dim1D => ctx.ty_vec_uint(2),
-        Dim::Dim2D => ctx.ty_vec_uint(3),
+        // A cube array's layer operand is the combined `slice * 6 + face` index.
+        Dim::Dim2D | Dim::DimCube => ctx.ty_vec_uint(3),
         _ => return Err("air.read_texture unsupported arrayed dimension".into()),
     };
     let mut comps = Vec::new();
