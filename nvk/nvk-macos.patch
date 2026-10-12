@@ -12181,3 +12181,32 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
  struct wsi_wayland;
  
  struct wsi_wl_format {
+diff --git a/src/nouveau/vulkan/nvk_cmd_draw.c b/src/nouveau/vulkan/nvk_cmd_draw.c
+--- a/src/nouveau/vulkan/nvk_cmd_draw.c
++++ b/src/nouveau/vulkan/nvk_cmd_draw.c
+@@ -3732,9 +3732,23 @@
+       } else {
+          /* Multisample information MAY be missing (rasterizationSamples == 0)
+           * if rasterizer discard is enabled.
++          *
++          * The render already set the sample layout for its attachments. A
++          * different count here is stale state from an earlier pass (an
++          * internal copy draw after a 4x MSAA pass in the same command buffer
++          * reached this with 4 against a 1-sample image and aborted the app).
++          * Draw with the render's layout and say so once.
+           */
+-         assert(dyn->ms.rasterization_samples == 0 ||
+-                dyn->ms.rasterization_samples == render->samples);
++         if (dyn->ms.rasterization_samples != 0 &&
++             dyn->ms.rasterization_samples != render->samples) {
++            static bool warned;
++            if (!warned) {
++               warned = true;
++               mesa_logw("nvk: rasterization samples %u differ from the "
++                         "render's %u; using the render's",
++                         dyn->ms.rasterization_samples, render->samples);
++            }
++         }
+       }
+    }
+ 
