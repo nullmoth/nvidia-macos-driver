@@ -215,6 +215,9 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     NvU32 fRasterW = 0, fRasterH = 0;
     NvU32 fPitchAlign = 256;
     NvU32 fScalerMaxW = 0, fScalerMaxH = 0;
+    // Widest raster offered when it fits the scanout memory. Separate from the scaler limit: a 5120x1440 monitor whose
+    // firmware started at 2560x1440 has a 3840-wide scaler limit, yet 5120x1440 needs less memory than 3840x2160.
+    NvU32 fRasterMaxW = 0;
     NvU64 fAllocSize = 0, fMemBytes = 0;
     unsigned fModeSwitches = 0, fValidateCalls = 0, fValidateOk = 0;
     bool fBootInDT = false;
@@ -764,6 +767,8 @@ bool NVRMNVDAFramebuffer::kapiInit()
         if (mw < fW) mw = fW;
         if (mh < fH) mh = fH;
         fScalerMaxW = mw; fScalerMaxH = mh;
+        fRasterMaxW = fW * 2 > 7680 ? 7680 : fW * 2;
+        if (fRasterMaxW < fW) fRasterMaxW = fW;
         const NvU64 mp_ = ((NvU64)mw * 4 + pitchAlign - 1) & ~((NvU64)pitchAlign - 1);
         fAllocSize = (mp_ * mh + 0xffff) & ~0xffffull;
         if (fAllocSize < fSize) fAllocSize = fSize;
@@ -813,7 +818,7 @@ bool NVRMNVDAFramebuffer::kapiInit()
         if (!fMem && mp.size != fSize) {
             FBLOG("%s: allocateMemory(%llu) for scaled modes failed -- falling back to the boot size %llu (no mode above %ux%u)",
                   what, (unsigned long long)mp.size, fSize, fW, fH);
-            fAllocSize = fSize; fScalerMaxW = fW; fScalerMaxH = fH; mp.size = fSize;
+            fAllocSize = fSize; fScalerMaxW = fW; fScalerMaxH = fH; fRasterMaxW = fW; mp.size = fSize;
             fMem = fKms->allocateMemory(fDev, &mp);
         }
         if (!fMem) { FBLOG("%s: allocateMemory(%llu) failed", what, fSize); continue; }
@@ -1994,7 +1999,7 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
         // come from macOS's own scaled modes on the native raster.
         const bool larger = fBootW && k.hVisible >= fBootW && k.vVisible >= fBootH && (k.hVisible > fBootW || k.vVisible > fBootH);
         const bool bootRaster = fBootW && k.hVisible == fBootW && k.vVisible == fBootH;
-        if (!raster && !have && (bootRaster || larger) && fMemBytes && k.hVisible <= fScalerMaxW && k.vVisible <= fScalerMaxH) {
+        if (!raster && !have && (bootRaster || larger) && fMemBytes && k.hVisible <= fRasterMaxW && k.vVisible <= fScalerMaxH) {
             NvU32 pitch = 0;
             if (nvrmCheckedPitch(k.hVisible, fPitchAlign, &pitch) && (NvU64)pitch * k.vVisible <= fMemBytes) raster = true;
         }
