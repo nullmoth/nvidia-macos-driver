@@ -2486,9 +2486,42 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
                 gNParkedForever++;
                 OSAddAtomic64((SInt64)want, &gVramParkedBytes);
             } else {
-                FBLOG("nvAllocVram: park ceiling reached (%lld bytes over %d slots) — releasing the reject",
-                      (long long)gVramParkedBytes, gNParkedForever);
                 fKms->unmapMemory(fDev, m, NVKMS_KAPI_MAPPING_TYPE_KERNEL, k); fKms->freeMemory(fDev, m);
+                // A surface larger than the park ceiling (a 3840x2560 desktop is 37.5 MB, the ceiling on a 256 MB BAR1
+                // is 32 MB) was never parked, so the same address came back on every attempt. Hold only the part of
+                // the range that overlaps instead: a guard block from this address to the end of the console or
+                // scanout, which the allocator hands out at the address just freed.
+                const NvU64 rEnd = onScanout ? fPhys + fSize : fConsPhys + fConsSize;
+                const NvU64 g = (p && rEnd > p) ? ((rEnd - p) + 0x1FFFFFull) & ~0x1FFFFFull : 0;
+                bool guarded = false;
+                if (g && g < want && gNParkedForever < (int)(sizeof gParkedForever / sizeof gParkedForever[0]) &&
+                    gVramParkedBytes + (SInt64)g <= nvrmParkCeiling(fBarLen)) {
+                    struct NvKmsKapiAllocateMemoryParams gp; nvu_zero(&gp, sizeof gp);
+                    NvU8 gc = 0;
+                    gp.layout = NvKmsSurfaceMemoryLayoutPitch; gp.type = NVKMS_KAPI_ALLOCATION_TYPE_SCANOUT;
+                    gp.size = g; gp.useVideoMemory = NV_TRUE; gp.compressible = &gc;
+                    struct NvKmsKapiMemory *gm = fKms->allocateMemory(fDev, &gp);
+                    void *gk = nullptr;
+                    if (gm && fKms->mapMemory(fDev, gm, NVKMS_KAPI_MAPPING_TYPE_KERNEL, &gk) && gk) {
+                        const NvU64 gpa = fPhysForVa ? fPhysForVa(gk) : 0;
+                        const NvU64 rStart = onScanout ? fPhys : fConsPhys;
+                        if (gpa && gpa < rEnd && gpa + g > rStart) {
+                            gParkedForever[gNParkedForever].m = gm;
+                            gParkedForever[gNParkedForever].k = gk;
+                            gParkedForever[gNParkedForever].n = g;
+                            gNParkedForever++;
+                            OSAddAtomic64((SInt64)g, &gVramParkedBytes);
+                            guarded = true;
+                        } else {
+                            fKms->unmapMemory(fDev, gm, NVKMS_KAPI_MAPPING_TYPE_KERNEL, gk); fKms->freeMemory(fDev, gm);
+                        }
+                    } else if (gm) {
+                        fKms->freeMemory(fDev, gm);
+                    }
+                }
+                FBLOG("nvAllocVram: %llu bytes cannot be parked (%lld bytes parked over %d slots) — %s",
+                      (unsigned long long)want, (long long)gVramParkedBytes, gNParkedForever,
+                      guarded ? "holding a guard block over the overlap instead" : "released, no guard block placed");
             }
             continue;
         }
