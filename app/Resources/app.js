@@ -43,8 +43,16 @@ function render(m) {
   if (good) { S.pkg = good.path; $("s1t").innerHTML = `Found on ${esc(good.where)}, checksum OK.`; $("dl").hidden = true; step(1, "done"); }
   else { $("s1t").textContent = m.packages.length ? "A copy was found but its checksum is wrong. Download a fresh one." : "Not on this Mac yet."; $("dl").hidden = false; step(1, "now"); }
   $("dry").disabled = !S.pkg;
-  $("go").disabled = !S.pkg || !S.previewed;
+  goState();
   if (S.pkg && !S.previewed) step(2, "now");
+}
+
+// A greyed-out button with no reason sent users to Discord (10-13: "Install Driver is greyed out, what do I do"): the
+// button says which step comes first.
+function goState() {
+  $("go").disabled = !S.pkg || !S.previewed;
+  $("go").textContent = !S.pkg ? "Install the driver (get the driver first)" : !S.previewed ? "Install the driver (press Show me the changes first)" : "Install the driver";
+  $("go").title = !S.pkg ? "Step 1 has not found the driver yet." : !S.previewed ? "Step 2 lists every change first; then this button turns on." : "";
 }
 
 function logLine(l) {
@@ -126,7 +134,7 @@ window.NM = NM;
 const efi = () => ($("efirow").hidden ? "auto" : $("efi").value);
 $("efi").onchange = () => {
   S.previewed = false;
-  $("go").disabled = true;
+  goState();
   step(2, "now"); step(3, "waiting");
 };
 $("dl").onclick = () => post({ act: "download" });
