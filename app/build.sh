@@ -14,6 +14,9 @@ xcrun clang -O2 -Wall -Wextra -Werror -target x86_64-apple-macos15.0 -isysroot "
 codesign --force --runtime-version 15.0.0 --options runtime,library -s - "$APP/Contents/Resources/nullmoth-log-watch"
 chmod 755 "$APP/Contents/Resources/nullmoth-runtime-check.sh"
 chmod 755 "$APP/Contents/Resources/nullmoth-setup.sh"
+# setup runs the installers only when they are executable ([ -x ]); a source file that lost its mode made every app
+# install stop with "the audited installer is missing from the app" (1.15 review), so the bundle sets it here
+chmod 755 "$APP/Contents/Resources/nullmoth-install.sh" "$APP/Contents/Resources/nullmoth-uninstall.sh"
 xcrun clang -fobjc-arc -O1 -Wno-deprecated-declarations -target x86_64-apple-macos15.0 -isysroot "$SDK" \
   -ffile-prefix-map="$(pwd)/DiagnosticsNative=/src/diagnostics" -fdebug-prefix-map="$(pwd)/DiagnosticsNative=/src/diagnostics" \
   DiagnosticsNative/preflight.m DiagnosticsNative/authority/NDSecurityState.m DiagnosticsNative/authority/NDAuthorityPolicy.m \
