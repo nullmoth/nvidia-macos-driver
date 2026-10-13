@@ -176,6 +176,15 @@ static inline void nvmtl_resref(id o, int d) {
 - (id)copyWithZone:(NSZone *)z { atomic_fetch_add(&gRes2Tick, 1);
     NSArray *a = [self nvmtlSnapshot]; NVMTLResSet *c = [[NVMTLResSet alloc] initWithCapacity:a.count]; for (id o in a) [c addObject:o]; return c; }
 - (id)mutableCopyWithZone:(NSZone *)z { return [self copyWithZone:z]; }
+// Moves every member into a new set and empties this one in a single locked step. Sealing a submission part used to
+// copy and then clear in two steps, so a resource another thread bound in between was released by the clear without
+// being in the part: the command buffer stopped holding it while the GPU work still used it.
+- (NVMTLResSet *)nvmtlTakeAll { atomic_fetch_add(&gRes2Tick, 1);
+    os_unfair_lock_lock(&_lk); NSArray *a = _s.allObjects; [_s removeAllObjects]; os_unfair_lock_unlock(&_lk);
+    NVMTLResSet *c = [[NVMTLResSet alloc] initWithCapacity:a.count];
+    for (id o in a) [c addObject:o];
+    for (id o in a) nvmtl_resref(o, -1);
+    return c; }
 - (void)dealloc { for (id o in _s) nvmtl_resref(o, -1); }
 @end
 
@@ -4611,6 +4620,10 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 - (instancetype)init {
     if ((self = [super init])) {
         _completionCondition = [NSCondition new];
+        // Made here, never lazily: two threads encoding into one command buffer could each find it nil and store
+        // their own set, and the set that lost was freed with the resources only it held (and under the other
+        // thread's addObject:).
+        _resources = [NVMTLResSet new];
         _callbackGroup = dispatch_group_create(); _scheduledGroup = dispatch_group_create();
     }
     return self;

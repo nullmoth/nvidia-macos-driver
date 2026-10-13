@@ -10,6 +10,8 @@ Driver
 - Tahoe: ship the macOS 26 accelerator built from this release (1.15 carried an older one: black screen on Tahoe)
 - Chrome, Edge and Electron apps draw on the CPU again by default, which ends the artifacts, stutter and voice-call
   crashes in Discord on several cards; `NVMTL_ANGLE_METAL=1` turns their GPU path on
+- Fix crashes in video wallpapers, Maps, Notification Center, Music and Photos: a command buffer could let go of a
+  texture, buffer or sampler it was still using when two threads encoded into it, or when it was split at an event
 
 Mac app
 - Finish a macOS update the update helper never finished, and keep this Mac's own BAR settings afterwards
