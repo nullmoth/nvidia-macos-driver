@@ -61,6 +61,22 @@ static inline uint64_t nvrmVramBudget(uint64_t barLen)
     return b > NVRM_VRAM_BAR1_BUDGET ? b : NVRM_VRAM_BAR1_BUDGET;
 }
 
+// EDID base block bytes 21 and 22 hold the panel's physical size in centimetres. macOS wants it in
+// millimetres, per mode, through IODisplayModeInformation.imageWidth/imageHeight -- IOGraphicsTypes.h
+// calls them "physical width/height of active image if known, in millimeters, otherwise zero", and
+// IOFramebuffer passes the two fields straight through (they appear nowhere in IOFramebuffer.cpp).
+// Left at zero, Core Graphics has no size for the display: CGDisplayScreenSize() returns the bounds
+// at 25.4/72 mm per pixel, every mode carries kDisplayModeTelevisionFlag, and a 21.5" 1920x1080
+// panel is reported as a 30-inch TV in About This Mac. Issue #126.
+static void nvrmEdidPanelSizeMm(const NvU8 *edid, NvU16 size, NvU16 *mmW, NvU16 *mmH)
+{
+    *mmW = 0; *mmH = 0;
+    if (size < 128) return;
+    if (!edid[21] || !edid[22]) return;   // unknown size, or the EDID 1.4 aspect-ratio encoding
+    *mmW = (NvU16)(edid[21] * 10);
+    *mmH = (NvU16)(edid[22] * 10);
+}
+
 typedef NvU64 (*nvrm_phys_for_va_t)(const void *va);
 #include <mach/kmod.h>
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
@@ -209,6 +225,9 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     bool fConsoleAperture = false;
     NvU64 fBar1Base = 0;
     NvU8 fEdid[NVKMS_KAPI_EDID_BUFFER_SIZE]; NvU16 fEdidSize = 0;
+    // The panel's physical size in millimetres, from the EDID's base block. Reported per mode as
+    // IODisplayModeInformation.imageWidth/imageHeight; see nvrmEdidPanelSizeMm().
+    NvU16 fEdidMmW = 0, fEdidMmH = 0;
     bool fModeSet = false;
     unsigned fHomePure = 0;
     IODetailedTimingInformationV2 fDT[128]; unsigned fNDT = 0;
@@ -720,6 +739,9 @@ bool NVRMNVDAFramebuffer::kapiInit()
         if (fInternal) FBLOG("fb%u: display 0x%x is internal -- reporting kIOConnectionBuiltIn", fIndex, fDisplay);
         fEdidSize = (NvU16)(r->edidSize > sizeof fEdid ? sizeof fEdid : r->edidSize);
         nvu_copy(fEdid, r->edid, fEdidSize);
+        nvrmEdidPanelSizeMm(fEdid, fEdidSize, &fEdidMmW, &fEdidMmH);
+        FBLOG("fb%u: EDID %u B, panel %ux%u mm (imageWidth/imageHeight)", fIndex, (unsigned)fEdidSize,
+              (unsigned)fEdidMmW, (unsigned)fEdidMmH);
         NvU32 avail = r->headMask & ~gHeadsTaken;
         if (gBootHead >= 0) {
             if (fDisplay == gBootDpy && (avail & (1u << gBootHead))) avail = 1u << gBootHead;
@@ -2237,6 +2259,7 @@ IOReturn NVRMNVDAFramebuffer::getInformationForDisplayMode(IODisplayModeID mode,
         info->maxDepthIndex = 0;
         info->flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | (scaled ? kDisplayModeNotPresetFlag : 0);
         if (!scaled && d.horizontalActive == fBootW && d.verticalActive == fBootH) info->flags |= kDisplayModeNativeFlag;
+        info->imageWidth = fEdidMmW; info->imageHeight = fEdidMmH;
         return kIOReturnSuccess;
     }
     nvu_zero(info, sizeof *info);
@@ -2244,6 +2267,7 @@ IOReturn NVRMNVDAFramebuffer::getInformationForDisplayMode(IODisplayModeID mode,
     const NvU32 rr = fBootW ? fBootMode.timings.refreshRate : fMode.timings.refreshRate;
     info->refreshRate = rr ? (UInt32)(((UInt64)rr << 16) / 1000) : (60u << 16);
     info->flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeDefaultFlag;
+    info->imageWidth = fEdidMmW; info->imageHeight = fEdidMmH;
     return kIOReturnSuccess;
 }
 IOReturn NVRMNVDAFramebuffer::getTimingInfoForDisplayMode(IODisplayModeID mode, IOTimingInformation *info)
