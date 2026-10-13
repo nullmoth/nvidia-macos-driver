@@ -62,7 +62,13 @@ const NM = {
     if (event === "scan") render(data);
     if (event === "lines") data.forEach(logLine);
     if (event === "dl") {
-      if (data.state === "progress" && data.total > 0) $("dlp").textContent = Math.floor((100 * data.done) / data.total) + "%";
+      if (data.state === "progress") {
+        // Update driver shows its own line; without this the progress went to step 1 and the update looked stuck.
+        const mb = (n) => (n / 1048576).toFixed(1);
+        const t = data.total > 0 ? `${Math.floor((100 * data.done) / data.total)}% (${mb(data.done)} of ${mb(data.total)} MB)` : `${mb(data.done)} MB`;
+        $("dlp").textContent = t;
+        if (S.driverUpdate) $("updr").textContent = `Downloading the newest driver: ${t}`;
+      }
       if (data.state === "start") ["dl", "updchk", "upddrv"].forEach((b) => ($(b).disabled = true));
       if (data.state === "error" || data.state === "done") ["dl", "updchk", "upddrv"].forEach((b) => ($(b).disabled = false));
       if (data.state === "error") {
