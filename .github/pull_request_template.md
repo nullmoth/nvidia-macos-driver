@@ -9,4 +9,6 @@
 
 Fixes #
 
-<!-- Please read CONTRIBUTING.md. Write this yourself; generated descriptions are closed without review. -->
+- [ ] I wrote this change and this description myself (not an AI tool), and I can explain every line.
+
+<!-- Please read CONTRIBUTING.md. AI-written pull requests are closed without review. -->
