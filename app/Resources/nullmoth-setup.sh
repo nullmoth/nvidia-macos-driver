@@ -901,6 +901,15 @@ if [ -n "${GPUTEST:-}" ]; then
   ok "AMD/Intel GPU driver $GPUTEST - takes effect at the next restart"; cleanup; echo "RESULT ok"; exit 0
 fi
 
+# Macs prepared for macOS 26 by 1.13 to 1.15 never ran "finish": the helper's launchd file could not be read, so the
+# driver stayed parked (-nvoff) on the new macOS. Any setup run on the new macOS finishes that update first.
+if [ -z "$UPD" ] && [ $DRY = 0 ] && [ -f "$ST/update-pending" ]; then
+  from0=$(sed -n 's/^FROM=//p' "$ST/update-pending"); now0=$(sw_vers -productVersion); now0=${now0%%.*}
+  if [ -n "$from0" ] && [ "$from0" != "$now0" ]; then
+    note "this Mac was updated from macOS $from0 to $now0 but the driver was never set up for it - doing that first"
+    UPD=finish
+  fi
+fi
 if [ -n "$UPD" ]; then
   # A macOS upgrade boots Apple's installer and then the new macOS before our driver matches it. Measured 10-07 on the
   # RTX 5060: the installer's screen freezes with the full BAR, and with the driver loaded on the small BAR the screen
