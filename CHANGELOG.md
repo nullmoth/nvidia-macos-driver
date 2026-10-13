@@ -13,10 +13,15 @@ Driver
 - Fix monitors shown as a 30-inch TV in About This Mac
 - Fix 165 Hz mode missing on some monitors (since 1.14.2)
 - Retry a display that stays dark after sleep on the next wake
+- Fix Chrome, Edge and Electron apps drawing everything on the CPU (no WebGL, slow scrolling); their GPU path is on
+  by default again and `NVMTL_ANGLE_METAL=0` turns it off
 - Allow Chrome, Edge and Electron apps to use the GPU with their sandbox on
+- Fix 5120x1440 and other ultrawide modes missing when the firmware started at a smaller resolution
+- Fix green lines in Photos and other VideoToolbox scaling (#179, #180, thanks @modesttao)
 - Add T400, T600, T1000 and T-series laptop GPUs (#132, thanks @TararaDotJoshua)
 
 Mac app
+- Show download progress in Update driver, which looked stuck at "Downloading the newest driver..."
 - Ask for access to USB sticks instead of failing with "no OpenCore config"
 - Say when the boot stick is unplugged
 - Recover from an interrupted install instead of stopping at "installer guard already exists"
@@ -32,10 +37,9 @@ Other
 - Release notes moved into this file; add CONTRIBUTING.md and a pull request template
 
 Known issues
-- WebGL in Chromium browsers runs on the CPU by default (it corrupted pages on some RTX 30 cards in 1.14.5). Start the
-  app with `NVMTL_ANGLE_METAL=1` to try the GPU path.
+- If Chrome pages show corrupted areas on your card, start it with `NVMTL_ANGLE_METAL=0` and send logs
 - Ghost or black areas after windows overlap with a BAR of 4 GB or more (#127)
-- Chrome decodes video on the CPU while its GPU sandbox is on (#175)
+- Chrome decodes video on the CPU while its GPU sandbox is on: VideoToolbox picks a decoder before the driver loads (#175)
 - Thunderbolt eGPUs: no display
 - Laptops with the screen on the Intel GPU: the built-in screen is not accelerated
 - No HDMI/DisplayPort audio
