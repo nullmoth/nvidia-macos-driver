@@ -1150,9 +1150,23 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
     size_t rowBytes = (size_t)_i.w * _i.bpp;
     size_t surfaceBytes = IOSurfaceGetWidthOfPlane(_surf, (uint32_t)_plane)
                         * IOSurfaceGetBytesPerElementOfPlane(_surf, (uint32_t)_plane);
+    // The copy must also end inside the surface's allocation. Two Tahoe machines crashed in the row copy at a page
+    // boundary while width, height and bytes per row all passed; the plane's rows can describe more memory than the
+    // surface owns.
+    const size_t bpr = IOSurfaceGetBytesPerRowOfPlane(_surf, (uint32_t)_plane);
+    const uintptr_t b0 = (uintptr_t)IOSurfaceGetBaseAddress(_surf), bp = (uintptr_t)IOSurfaceGetBaseAddressOfPlane(_surf, (uint32_t)_plane);
+    const size_t alloc = IOSurfaceGetAllocSize(_surf);
+    const BOOL inAlloc = b0 && bp >= b0 && _i.h && bp - b0 <= alloc
+        && (size_t)(_i.h - 1) <= (alloc - (bp - b0) - MIN(rowBytes, alloc - (bp - b0))) / (bpr ? bpr : 1)
+        && rowBytes <= alloc - (bp - b0);
     if (_i.bpp && rowBytes <= surfaceBytes
         && IOSurfaceGetHeightOfPlane(_surf, (uint32_t)_plane) >= _i.h
-        && IOSurfaceGetBytesPerRowOfPlane(_surf, (uint32_t)_plane) >= rowBytes) return YES;
+        && bpr >= rowBytes && inAlloc) return YES;
+    if (_i.bpp && !inAlloc) {
+        static int saidAlloc; if (saidAlloc++ < 4) nvlog("G13 surface %p plane %lu NOT synced: %u rows of %zu B from plane offset %zu pass the surface's %zu-byte allocation",
+            (void *)_surf, (unsigned long)_plane, _i.h, bpr, (size_t)(bp - b0), alloc);
+        return NO;
+    }
     static int said; if (said++ < 4) nvlog("G13 surface %p plane %lu NOT synced: image %ux%u bpp %u, surface bytesPerElement %zu — its pixels stay on one side",
         (void *)_surf, (unsigned long)_plane, _i.w, _i.h, _i.bpp, IOSurfaceGetBytesPerElementOfPlane(_surf, (uint32_t)_plane));
     return NO;
