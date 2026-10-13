@@ -2359,6 +2359,12 @@ static volatile SInt64 gVramMappedBytes = 0;
 // 25 MB, so the last MB could never be parked and every allocation landing there was refused, about once a second
 // (issue #28). 64 MB / 64 slots covers a 5K console (59 MB).
 #define NVRM_VRAM_PARK_CEILING (64ull * 1024ull * 1024ull)
+// A 256 MB BAR1 cannot spare 64 MB of parked mappings (surfaces were refused and the screen stayed black with a cursor).
+// 32 MB still covers a 2560x1440 console (25 MB, issue #28). Larger BAR1s keep 64 MB, enough for a 5K console.
+static inline SInt64 nvrmParkCeiling(NvU64 barLen)
+{
+    return (SInt64)(barLen && barLen < (1ull << 30) ? 32ull * 1024ull * 1024ull : NVRM_VRAM_PARK_CEILING);
+}
 static struct { struct NvKmsKapiMemory *m; void *k; NvU64 n; } gParkedForever[64];
 static int      gNParkedForever   = 0;
 static volatile SInt64 gVramParkedBytes = 0;
@@ -2434,11 +2440,9 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
 
     const SInt64 budget = (SInt64)nvrmVramBudget(fBarLen);
     gVramBudgetBytes = budget;
-    // Parked blocks hold VRAM but no BAR1 mapping (unmapped when parked), so they no longer count here. WAS: parked bytes
-    // counted against the budget; 1.14 raised the park ceiling from 24 to 64 MB, and on a 256 MB BAR1 (every GTX 16,
-    // boards without Resizable BAR) surfaces were left as little as 128 MB of the 192 MB budget: GTX 16 reports on
-    // 1.14.x logged 24 to 1062 "BAR1 budget spent" refusals and black screens with a cursor; on 1.13, 0 on five of six.
-    SInt64 before = OSAddAtomic64((SInt64)want, &gVramMappedBytes);
+    // Parked blocks keep their BAR1 mapping (see below), so they count against the budget. On a 256 MB BAR1 (every
+    // GTX 16, boards without Resizable BAR) the park ceiling is the smaller one, so surfaces keep most of the budget.
+    SInt64 before = OSAddAtomic64((SInt64)want, &gVramMappedBytes) + gVramParkedBytes;
     if (before + (SInt64)want > budget) {
         OSAddAtomic64(-(SInt64)want, &gVramMappedBytes);
         FBLOG("nvAllocVram(%llu): REFUSED — BAR1 budget spent (%lld of %llu bytes). "
@@ -2472,11 +2476,12 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
                   attempt, (unsigned long long)p,
                   !p ? "has no physical address" : onScanout ? "OVERLAPS THE SCANOUT" : "OVERLAPS THE CONSOLE");
             if (gNParkedForever < (int)(sizeof gParkedForever / sizeof gParkedForever[0]) &&
-                gVramParkedBytes + (SInt64)want <= (SInt64)NVRM_VRAM_PARK_CEILING) {
-                // kept allocated so NVKMS cannot place a surface there again, but unmapped: nothing ever reads it
-                fKms->unmapMemory(fDev, m, NVKMS_KAPI_MAPPING_TYPE_KERNEL, k);
+                gVramParkedBytes + (SInt64)want <= nvrmParkCeiling(fBarLen)) {
+                // kept allocated AND mapped: the overlap is judged by the BAR1 address of this mapping, so unmapping
+                // it hands that address straight back and the next allocation lands on the console again (one machine
+                // logged the same address 600 times, every attempt refused: black screen with a cursor)
                 gParkedForever[gNParkedForever].m = m;
-                gParkedForever[gNParkedForever].k = nullptr;
+                gParkedForever[gNParkedForever].k = k;
                 gParkedForever[gNParkedForever].n = want;
                 gNParkedForever++;
                 OSAddAtomic64((SInt64)want, &gVramParkedBytes);
