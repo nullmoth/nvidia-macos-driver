@@ -1,7 +1,7 @@
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::{Instruction, Module, Operand};
 use spirv::{Op, StorageClass, Word};
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
 struct AccessChainDef {
@@ -40,7 +40,7 @@ pub(crate) fn lower_zero_base_storage_buffer_ptr_access_chains(module: &mut Modu
     }
 
     let mut next_id = module.header.as_ref().map(|h| h.bound).unwrap_or(0);
-    let mut rewrites: HashMap<Word, Rewrite> = HashMap::new();
+    let mut rewrites: HashMap<Word, Rewrite> = HashMap::default();
     for inst in module
         .functions
         .iter()
@@ -230,7 +230,7 @@ pub(crate) fn rewrite_storage_buffer_atomic_scopes(module: &mut Module) -> usize
     }
 
     let mut next_id = module.header.as_ref().map(|h| h.bound).unwrap_or(0);
-    let mut constants = HashMap::new();
+    let mut constants = HashMap::default();
     for (_, _, _, _, scope_ty, semantics_tys) in &rewrites {
         let device = get_or_create_integer_constant(module, &mut defs, &mut next_id, *scope_ty, 1);
         constants.insert((*scope_ty, 1), device);
@@ -588,7 +588,7 @@ fn walk_access_chain_pointee(
     root_pointee: Word,
     indices: &[Word],
 ) -> Option<Word> {
-    walk_access_chain_with_parent(defs, root_pointee, indices, &HashSet::new())
+    walk_access_chain_with_parent(defs, root_pointee, indices, &HashSet::default())
         .map(|(_, pointee)| pointee)
 }
 
@@ -713,7 +713,7 @@ fn collect_pointer_phi_groups(
     if phis.is_empty() {
         return None;
     }
-    let mut component: HashMap<Word, usize> = HashMap::new();
+    let mut component: HashMap<Word, usize> = HashMap::default();
     for (index, phi) in phis.iter().enumerate() {
         component.insert(*phi, index);
     }
@@ -740,7 +740,7 @@ fn collect_pointer_phi_groups(
             }
         }
     }
-    let mut networks: HashMap<usize, Vec<Word>> = HashMap::new();
+    let mut networks: HashMap<usize, Vec<Word>> = HashMap::default();
     for phi in &phis {
         networks.entry(component[phi]).or_default().push(*phi);
     }
@@ -769,7 +769,7 @@ fn build_pointer_phi_group(
         return None;
     }
 
-    let mut steps: HashMap<Word, (Word, Word)> = HashMap::new();
+    let mut steps: HashMap<Word, (Word, Word)> = HashMap::default();
     for inst in function.blocks.iter().flat_map(|block| &block.instructions) {
         if !matches!(
             inst.class.opcode,
@@ -792,7 +792,7 @@ fn build_pointer_phi_group(
         steps.insert(result, (*base, *delta));
     }
 
-    let mut entries: HashMap<Word, Word> = HashMap::new();
+    let mut entries: HashMap<Word, Word> = HashMap::default();
     let mut root_and_leading: Option<(Word, Vec<Word>)> = None;
     for phi in &phis {
         let inst = defs.get(phi)?;
@@ -938,7 +938,7 @@ fn apply_pointer_phi_group(
         (group.phis.len() + group.steps.len() + leaves + widened_entries + widened_deltas) as Word,
     );
     let mut fresh = || ids.next().expect("reserved id");
-    let mut index_of: HashMap<Word, Word> = HashMap::new();
+    let mut index_of: HashMap<Word, Word> = HashMap::default();
     for phi in &group.phis {
         index_of.insert(*phi, fresh());
     }

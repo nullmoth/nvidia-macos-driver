@@ -1,7 +1,8 @@
 use super::*;
+use crate::fxhash::{HashMap, HashSet};
 use crate::native::cfg::BodyBlock;
 use crate::native::tir::{TirFunction, TirOpcode, TirOperand, TirTerminator};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 fn ordinary_cfg_shape_key(blocks: &[BodyBlock]) -> String {
     let labels = blocks
@@ -67,7 +68,7 @@ fn bda_forward_address_values(
         (dependencies, literal_anchor, supported)
     };
 
-    let mut nodes = HashMap::<String, Node>::new();
+    let mut nodes = HashMap::<String, Node>::default();
     for inst in tir.blocks.iter().flat_map(|block| &block.insts) {
         let Some(result) = &inst.result else {
             continue;
@@ -227,7 +228,7 @@ fn is_air_texture_operation(callee: &str) -> bool {
 }
 
 fn sampler_operand_values(function: &LlFunction) -> HashSet<String> {
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     for instruction in function.carrier_insts() {
         let Some(call) = instruction.call().as_deref() else {
             continue;
@@ -252,7 +253,7 @@ pub(in crate::native) fn opaque_resource_pointer_values_by_function(
         .iter()
         .map(|function| (function.name.as_str(), function))
         .collect::<HashMap<_, _>>();
-    let mut opaque_params = HashSet::<(String, usize)>::new();
+    let mut opaque_params = HashSet::<(String, usize)>::default();
 
     for function in &ir.functions {
         let params = function
@@ -316,7 +317,7 @@ pub(in crate::native) fn opaque_resource_pointer_values_by_function(
     ir.functions
         .iter()
         .map(|function| {
-            let mut opaque = HashSet::new();
+            let mut opaque = HashSet::default();
             for instruction in function.carrier_insts() {
                 let Some(call) = instruction.call().as_deref() else {
                     continue;
@@ -495,7 +496,7 @@ impl Emitter {
                 &buffer_params,
             );
         let mut canonical_roots = BTreeMap::new();
-        let mut shared_raw_roots = HashMap::new();
+        let mut shared_raw_roots = HashMap::default();
         for (name, _) in &f.params {
             if !reinterpret_mix_roots.contains(name) {
                 continue;
@@ -1119,7 +1120,7 @@ impl Emitter {
         let tir = crate::native::tir::build_from_blocks(&body_blocks)?;
         {
             let tir = &tir;
-            let mut fast_products = HashMap::new();
+            let mut fast_products = HashMap::default();
             for inst in tir.blocks.iter().flat_map(|block| &block.insts) {
                 if !inst.fast_math() || inst.opcode != "fmul" {
                     continue;
@@ -1133,7 +1134,7 @@ impl Emitter {
                     fast_products.insert(result.clone(), (lhs.clone(), rhs.clone()));
                 }
             }
-            let mut product_users = HashMap::<String, usize>::new();
+            let mut product_users = HashMap::<String, usize>::default();
             for inst in tir.blocks.iter().flat_map(|block| &block.insts) {
                 inst.visit_uses(|name| {
                     if fast_products.contains_key(name) {
@@ -1168,7 +1169,7 @@ impl Emitter {
             for result in fast_add_operands.keys() {
                 let mut chain = Vec::new();
                 let mut current = result.as_str();
-                let mut visited = HashSet::new();
+                let mut visited = HashSet::default();
                 while visited.insert(current.to_string()) {
                     let Some((lhs, rhs)) = fast_add_operands.get(current) else {
                         break;
@@ -1231,8 +1232,8 @@ impl Emitter {
                 }
             }
             self.tir_use_pointees = tir.use_pointees.clone();
-            let mut direct_load_pointers = HashSet::new();
-            let mut other_pointer_uses = HashSet::new();
+            let mut direct_load_pointers = HashSet::default();
+            let mut other_pointer_uses = HashSet::default();
             for block in &tir.blocks {
                 for inst in &block.insts {
                     let load_pointer =
@@ -1355,7 +1356,7 @@ impl Emitter {
                 .chain(self.bda_inttoptr_sources.keys().cloned())
                 .chain(self.bda_direct_addresses.keys().cloned())
                 .collect::<HashSet<_>>();
-            let mut origin = HashMap::<String, String>::new();
+            let mut origin = HashMap::<String, String>::default();
             for inst in tir.blocks.iter().flat_map(|block| &block.insts) {
                 if inst.opcode == TirOpcode::Load && matches!(inst.result_ty, Some(LlType::Ptr(0)))
                 {
@@ -1373,8 +1374,8 @@ impl Emitter {
                         _ => None,
                     })
             };
-            let mut table_yes = HashSet::<String>::new();
-            let mut table_no = HashSet::<String>::new();
+            let mut table_yes = HashSet::<String>::default();
+            let mut table_no = HashSet::<String>::default();
             for _ in 0..2 {
                 for inst in tir.blocks.iter().flat_map(|block| &block.insts) {
                     let base = base_of(inst)
@@ -1422,7 +1423,7 @@ impl Emitter {
                     &self.opaque_resource_pointers,
                 ));
         }
-        let mut use_counts = HashMap::<String, usize>::new();
+        let mut use_counts = HashMap::<String, usize>::default();
         for inst in tir.blocks.iter().flat_map(|block| &block.insts) {
             inst.visit_uses(|name| *use_counts.entry(name.to_string()).or_default() += 1);
         }
@@ -1637,7 +1638,7 @@ impl Emitter {
             &self.ir.types,
             &self.pointer_storage,
         );
-        let empty_pointees = HashMap::new();
+        let empty_pointees = HashMap::default();
         for network in analyze_pointer_networks(body_blocks, &empty_pointees) {
             let storages = network
                 .members
@@ -1666,7 +1667,7 @@ impl Emitter {
             return Ok(());
         }
 
-        let mut value_types = HashMap::new();
+        let mut value_types = HashMap::default();
         for instruction in self
             .module
             .types_global_values
@@ -1851,7 +1852,7 @@ impl Emitter {
         let mut finalized = Vec::new();
         let mut selections_sharing_loop_merge = Vec::new();
         let source_labels = self.block_labels.values().copied().collect::<HashSet<_>>();
-        let mut source_exit_labels = HashMap::new();
+        let mut source_exit_labels = HashMap::default();
         for source in source_blocks {
             let has_embedded_label = source
                 .instructions
@@ -2309,7 +2310,7 @@ impl Emitter {
             analyze_networks_by_access, analyze_pointer_networks, NetworkClass,
         };
         let use_implied = self.use_implied_pointees();
-        let carrier_class: std::collections::HashMap<Vec<String>, NetworkClass> =
+        let carrier_class: crate::fxhash::HashMap<Vec<String>, NetworkClass> =
             analyze_pointer_networks(body_blocks, &use_implied)
                 .into_iter()
                 .map(|n| (n.members, n.class))
@@ -2339,8 +2340,8 @@ impl Emitter {
         functions: &[LlFunction],
     ) -> HashSet<String> {
         let global_names: HashSet<&str> = globals.iter().map(|g| g.name.as_str()).collect();
-        let mut int_atomic = HashSet::new();
-        let mut float_atomic = HashSet::new();
+        let mut int_atomic = HashSet::default();
+        let mut float_atomic = HashSet::default();
         for function in functions {
             for block in &function.blocks {
                 let Some(carrier) = &block.typed else {
@@ -2398,7 +2399,7 @@ impl Emitter {
     pub(super) fn scan_byte_view_reinterpret_globals(&mut self) -> Result<HashSet<String>, String> {
         let globals = self.ir.globals.clone();
         let functions = self.ir.functions.clone();
-        let mut reinterpreted = HashSet::new();
+        let mut reinterpreted = HashSet::default();
         let declared: HashMap<&str, &LlType> =
             globals.iter().map(|g| (g.name.as_str(), &g.ty)).collect();
         for function in &functions {
@@ -2430,7 +2431,7 @@ impl Emitter {
     ) -> Result<HashMap<String, LlType>, String> {
         let globals = self.ir.globals.clone();
         let functions = self.ir.functions.clone();
-        let mut reinterpreted = HashMap::new();
+        let mut reinterpreted = HashMap::default();
         let declared: HashMap<&str, &LlType> =
             globals.iter().map(|g| (g.name.as_str(), &g.ty)).collect();
         let functions_by_name: HashMap<&str, &LlFunction> =
@@ -2983,7 +2984,7 @@ fn retire_dead_local_pointer_table_projections(
         candidates.extend(additions);
     }
 
-    let mut removed = HashSet::new();
+    let mut removed = HashSet::default();
     loop {
         let mut used = blocks
             .iter()
@@ -3067,7 +3068,7 @@ fn resolve_inline_substitution(
     substitutions: &HashMap<Word, Word>,
 ) -> Result<Word, String> {
     let mut replacement = id;
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     while let Some(next) = substitutions.get(&replacement) {
         if !visited.insert(replacement) {
             return Err("native emitter: inline parameter substitution cycle".to_string());
@@ -3085,7 +3086,7 @@ fn reorder_forward_local_def_blocks(
         return Ok(());
     }
 
-    let mut seen_orders = HashSet::new();
+    let mut seen_orders = HashSet::default();
     let max_moves = body_blocks.len() * body_blocks.len();
     let mut moves = 0;
     loop {
@@ -3099,7 +3100,7 @@ fn reorder_forward_local_def_blocks(
             ));
         }
 
-        let mut use_indices_by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut use_indices_by_name: HashMap<&str, Vec<usize>> = HashMap::default();
         for (idx, block) in body_blocks.iter().enumerate().skip(1) {
             if let Some(uses) = defuse.uses_by_block.get(&block.name) {
                 for name in uses {
@@ -3159,11 +3160,11 @@ struct ReorderDefUse {
 impl ReorderDefUse {
     fn from_blocks(body_blocks: &[BodyBlock]) -> Result<Self, String> {
         let tir = crate::native::tir::build_from_blocks(body_blocks)?;
-        let mut defs_by_block = HashMap::new();
-        let mut uses_by_block = HashMap::new();
+        let mut defs_by_block = HashMap::default();
+        let mut uses_by_block = HashMap::default();
         for block in &tir.blocks {
             let mut defs = Vec::new();
-            let mut uses = HashSet::new();
+            let mut uses = HashSet::default();
             for inst in &block.insts {
                 if let Some(result) = &inst.result {
                     let scalar_ptr_phi =
@@ -3286,7 +3287,7 @@ fn typed_ssa_is_closed(
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<HashSet<_>>();
-    let mut definition_sites = HashMap::<String, (usize, usize)>::new();
+    let mut definition_sites = HashMap::<String, (usize, usize)>::default();
     for (block_index, block) in blocks.iter().enumerate() {
         let Some(carrier) = block.typed.as_ref() else {
             return false;
@@ -3315,7 +3316,7 @@ fn typed_ssa_is_closed(
     let all_blocks = (0..blocks.len()).collect::<HashSet<_>>();
     let mut dominators = vec![all_blocks; blocks.len()];
     if !dominators.is_empty() {
-        dominators[0] = HashSet::from([0]);
+        dominators[0] = crate::fxhash::set_from([0]);
     }
     loop {
         let mut changed = false;
@@ -3405,7 +3406,7 @@ mod tests {
 
     fn block(name: &str, lines: &[&str]) -> BodyBlock {
         let lines: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
-        let typed = crate::native::tir::lower_block_carrier(name, &lines, &HashMap::new());
+        let typed = crate::native::tir::lower_block_carrier(name, &lines, &HashMap::default());
         BodyBlock {
             name: name.to_string(),
             role: crate::native::cfg::BlockRole::Normal,
@@ -3431,11 +3432,11 @@ mod tests {
         .into_iter()
         .map(str::to_string)
         .collect::<Vec<_>>();
-        let tir = crate::native::tir::build(&lines, "%entry", &HashMap::new()).expect("tir");
+        let tir = crate::native::tir::build(&lines, "%entry", &HashMap::default()).expect("tir");
         let addresses = bda_forward_address_values(
             &tir,
-            &HashSet::from(["%root".to_string()]),
-            &HashSet::new(),
+            &crate::fxhash::set_from(["%root".to_string()]),
+            &HashSet::default(),
         );
 
         for expected in ["%root", "%slot", "%next", "%child"] {
@@ -3537,8 +3538,11 @@ mod tests {
             ],
         }];
 
-        apply_inline_parameter_substitutions(&mut blocks, &HashMap::from([(10, 8), (8, 7)]))
-            .unwrap();
+        apply_inline_parameter_substitutions(
+            &mut blocks,
+            &crate::fxhash::map_from([(10, 8), (8, 7)]),
+        )
+        .unwrap();
 
         assert_eq!(blocks[0].instructions[0].result_id, Some(20));
         assert_eq!(blocks[0].instructions[0].operands, vec![Operand::IdRef(7)]);
@@ -3599,8 +3603,8 @@ mod tests {
 
         retire_dead_local_pointer_table_projections(
             &mut blocks,
-            &HashSet::from([10]),
-            &HashSet::new(),
+            &crate::fxhash::set_from([10]),
+            &HashSet::default(),
             &mut debug_names,
             &mut annotations,
         );

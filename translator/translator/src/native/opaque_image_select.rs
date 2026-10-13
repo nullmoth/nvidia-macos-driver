@@ -1,8 +1,9 @@
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::Instruction;
 use crate::spirv_module::Module;
 use crate::spirv_module::Operand;
 use spirv::{Op, Word};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Site {
@@ -78,9 +79,9 @@ pub(super) fn construct_opaque_image_selects(module: &mut Module) -> bool {
         .iter()
         .filter_map(|inst| inst.result_id)
         .collect();
-    let mut positions: HashMap<Word, Site> = HashMap::new();
-    let mut parameter_function: HashMap<Word, usize> = HashMap::new();
-    let mut uses: HashMap<Word, Vec<UseSite>> = HashMap::new();
+    let mut positions: HashMap<Word, Site> = HashMap::default();
+    let mut parameter_function: HashMap<Word, usize> = HashMap::default();
+    let mut uses: HashMap<Word, Vec<UseSite>> = HashMap::default();
 
     for (function, func) in module.functions.iter().enumerate() {
         for parameter in &func.parameters {
@@ -145,10 +146,10 @@ pub(super) fn construct_opaque_image_selects(module: &mut Module) -> bool {
         .as_ref()
         .map(|header| header.bound)
         .unwrap_or(0);
-    let mut processed_selects = HashSet::new();
-    let mut select_ids_to_delete = HashSet::new();
-    let mut sampled_image_ids_to_delete = HashSet::new();
-    let mut replacements: HashMap<Site, Vec<Instruction>> = HashMap::new();
+    let mut processed_selects = HashSet::default();
+    let mut select_ids_to_delete = HashSet::default();
+    let mut sampled_image_ids_to_delete = HashSet::default();
+    let mut replacements: HashMap<Site, Vec<Instruction>> = HashMap::default();
 
     for (_, root) in candidates {
         if processed_selects.contains(&root) {
@@ -184,7 +185,7 @@ pub(super) fn construct_opaque_image_selects(module: &mut Module) -> bool {
     if replacements.is_empty() {
         let changed = direct_changed || nested_phi_changed || phi_changed;
         if changed {
-            super::constfold::dce_preserving(module, &HashSet::new());
+            super::constfold::dce_preserving(module, &HashSet::default());
         }
         return changed;
     }
@@ -224,7 +225,7 @@ pub(super) fn construct_opaque_image_selects(module: &mut Module) -> bool {
     if let Some(header) = module.header.as_mut() {
         header.bound = next_id;
     }
-    super::constfold::dce_preserving(module, &HashSet::new());
+    super::constfold::dce_preserving(module, &HashSet::default());
     true
 }
 
@@ -274,9 +275,9 @@ fn rewrite_opaque_image_direct_selects(module: &mut Module) -> bool {
         .iter()
         .filter_map(|instruction| instruction.result_id)
         .collect::<HashSet<_>>();
-    let mut positions = HashMap::new();
-    let mut parameter_function = HashMap::new();
-    let mut uses: HashMap<Word, Vec<UseSite>> = HashMap::new();
+    let mut positions = HashMap::default();
+    let mut parameter_function = HashMap::default();
+    let mut uses: HashMap<Word, Vec<UseSite>> = HashMap::default();
     let mut candidates = BTreeSet::new();
     for (function, func) in module.functions.iter().enumerate() {
         for parameter in &func.parameters {
@@ -330,14 +331,14 @@ fn rewrite_opaque_image_direct_selects(module: &mut Module) -> bool {
         .as_ref()
         .map(|header| header.bound)
         .unwrap_or(0);
-    let mut processed = HashSet::new();
-    let mut delete = HashSet::new();
-    let mut replacements = HashMap::<Site, Vec<Instruction>>::new();
+    let mut processed = HashSet::default();
+    let mut delete = HashSet::default();
+    let mut replacements = HashMap::<Site, Vec<Instruction>>::default();
     for root in candidates {
         if processed.contains(&root) {
             continue;
         }
-        let mut image_visiting = HashSet::new();
+        let mut image_visiting = HashSet::default();
         let Some(image_ty) = select_tree_image_type(
             root,
             &type_defs,
@@ -348,7 +349,7 @@ fn rewrite_opaque_image_direct_selects(module: &mut Module) -> bool {
             continue;
         };
         let mut select_ids = BTreeSet::new();
-        let mut visiting = HashSet::new();
+        let mut visiting = HashSet::default();
         if collect_select_tree(
             root,
             image_ty,
@@ -416,7 +417,7 @@ fn rewrite_opaque_image_direct_selects(module: &mut Module) -> bool {
                 break;
             };
             let mut replacement = Vec::new();
-            let mut replay_visiting = HashSet::new();
+            let mut replay_visiting = HashSet::default();
             if replay_selected_direct_image(
                 selected_image,
                 image_ty,
@@ -596,8 +597,8 @@ fn rewrite_nested_opaque_image_phis(module: &mut Module) -> bool {
         .iter()
         .filter_map(|inst| inst.result_id)
         .collect();
-    let mut positions = HashMap::new();
-    let mut uses: HashMap<Word, Vec<UseSite>> = HashMap::new();
+    let mut positions = HashMap::default();
+    let mut uses: HashMap<Word, Vec<UseSite>> = HashMap::default();
     for (function, func) in module.functions.iter().enumerate() {
         for (block, blk) in func.blocks.iter().enumerate() {
             for (instruction, inst) in blk.instructions.iter().enumerate() {
@@ -683,15 +684,15 @@ fn rewrite_nested_opaque_image_phis(module: &mut Module) -> bool {
         .collect::<BTreeSet<_>>();
 
     let mut plans = Vec::new();
-    let mut processed = HashSet::new();
+    let mut processed = HashSet::default();
     for (root, function) in candidates {
         if processed.contains(&root) {
             continue;
         }
         let mut nodes = Vec::new();
         let mut leaves = Vec::new();
-        let mut visiting = HashSet::new();
-        let mut image_types = HashMap::new();
+        let mut visiting = HashSet::default();
+        let mut image_types = HashMap::default();
         let Some(image_ty) = collect_nested_phi_tree(
             root,
             function,
@@ -815,7 +816,7 @@ fn rewrite_nested_opaque_image_phis(module: &mut Module) -> bool {
         .map(|plan| plan.leaves.len())
         .max()
         .unwrap_or(0);
-    let mut constants = HashMap::new();
+    let mut constants = HashMap::default();
     for ordinal in 0..max_leaves as u32 {
         let id = module
             .types_global_values
@@ -868,8 +869,8 @@ fn rewrite_nested_opaque_image_phis(module: &mut Module) -> bool {
             })?
         })
         .collect::<HashMap<_, _>>();
-    let mut replacements = HashMap::<Site, Vec<Instruction>>::new();
-    let mut removed_ids = HashSet::new();
+    let mut replacements = HashMap::<Site, Vec<Instruction>>::default();
+    let mut removed_ids = HashSet::default();
     for plan in plans {
         let tag_by_result = plan
             .nodes
@@ -1071,8 +1072,8 @@ fn rewrite_opaque_image_phis(module: &mut Module) -> bool {
         .iter()
         .filter_map(|inst| inst.result_id)
         .collect();
-    let mut positions = HashMap::new();
-    let mut uses: HashMap<Word, Vec<UseSite>> = HashMap::new();
+    let mut positions = HashMap::default();
+    let mut uses: HashMap<Word, Vec<UseSite>> = HashMap::default();
     for (function, func) in module.functions.iter().enumerate() {
         for (block, blk) in func.blocks.iter().enumerate() {
             for (instruction, inst) in blk.instructions.iter().enumerate() {
@@ -1311,7 +1312,7 @@ fn rewrite_opaque_image_phis(module: &mut Module) -> bool {
                 .flatten()
         })
         .collect::<HashMap<_, _>>();
-    let mut new_sampled_types = HashMap::new();
+    let mut new_sampled_types = HashMap::default();
     for image_ty in plans.iter().map(|plan| plan.image_ty) {
         sampled_type_by_image.entry(image_ty).or_insert_with(|| {
             let id = fresh(&mut next_id);
@@ -1330,7 +1331,7 @@ fn rewrite_opaque_image_phis(module: &mut Module) -> bool {
     let mut new_sampled_types = new_sampled_types.into_values().collect::<Vec<_>>();
     new_sampled_types.sort_by_key(|instruction| instruction.result_id);
     module.types_global_values.extend(new_sampled_types);
-    let mut constants = HashMap::new();
+    let mut constants = HashMap::default();
     for plan in &plans {
         for ordinal in 0..plan.arms.len() as u32 {
             constants.entry(ordinal).or_insert_with(|| {
@@ -1375,8 +1376,8 @@ fn rewrite_opaque_image_phis(module: &mut Module) -> bool {
         .types_global_values
         .splice(first_variable..first_variable, new_constants);
 
-    let mut replacements = HashMap::<Site, Vec<Instruction>>::new();
-    let mut removed_ids = HashSet::new();
+    let mut replacements = HashMap::<Site, Vec<Instruction>>::default();
+    let mut removed_ids = HashSet::default();
     for plan in plans {
         let tag = fresh(&mut next_id);
         let mut phi_operands = Vec::with_capacity(plan.arms.len() * 2);
@@ -1572,7 +1573,7 @@ fn block_dominator_indices(function: &crate::spirv_module::Function) -> Vec<Hash
     if dominators.is_empty() {
         return dominators;
     }
-    dominators[0] = HashSet::from([0]);
+    dominators[0] = crate::fxhash::set_from([0]);
     loop {
         let mut changed = false;
         for block in 1..function.blocks.len() {
@@ -1619,7 +1620,7 @@ fn plan_tree(
     }
 
     let mut select_ids = BTreeSet::new();
-    let mut visiting = HashSet::new();
+    let mut visiting = HashSet::default();
     collect_select_tree(
         root,
         image_ty,
@@ -1661,7 +1662,7 @@ fn plan_tree(
         return None;
     }
 
-    let mut replacements = HashMap::new();
+    let mut replacements = HashMap::default();
     for (&sampled_id, &(sampled_ty, sampler, selected_image)) in &sampled_images {
         let sample_uses = uses.get(&sampled_id)?;
         if sample_uses.is_empty() {
@@ -1694,7 +1695,7 @@ fn plan_tree(
                 return None;
             }
             let mut replacement = Vec::new();
-            let mut replay_visiting = HashSet::new();
+            let mut replay_visiting = HashSet::default();
             replay_selected_image(
                 selected_image,
                 image_ty,

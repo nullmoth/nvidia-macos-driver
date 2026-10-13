@@ -99,7 +99,7 @@ pub(in crate::native) fn split_phi_overlap(
         let mut blk = crate::native::tir::lower_block_carrier(
             &new_name,
             &[format!("br label {exit}")],
-            &std::collections::HashMap::new(),
+            &crate::fxhash::HashMap::default(),
         )?;
         for (merged, ty, typed_red) in &passthrough_merges {
             blk.push_value_phi(merged, ty, typed_red);

@@ -1,7 +1,7 @@
 use super::*;
 
 pub(in crate::native) fn predecessors(blocks: &[BodyBlock]) -> HashMap<String, Vec<String>> {
-    let mut preds: HashMap<String, Vec<String>> = HashMap::new();
+    let mut preds: HashMap<String, Vec<String>> = HashMap::default();
     for b in blocks {
         for s in block_successors(b) {
             preds.entry(s).or_default().push(b.name.clone());

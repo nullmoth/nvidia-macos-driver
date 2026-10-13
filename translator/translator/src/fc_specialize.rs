@@ -20,11 +20,11 @@ fn fc_defined_index(name: &str) -> Option<u32> {
 
 fn fc_defined_marker_indices(
     module: &crate::spirv_module::Module,
-) -> std::collections::HashMap<u32, u32> {
+) -> crate::fxhash::HashMap<u32, u32> {
     use crate::spirv_module::Operand;
     use spirv::Op;
 
-    let mut out = std::collections::HashMap::new();
+    let mut out = crate::fxhash::HashMap::default();
     for inst in &module.debug_names {
         if inst.class.opcode != Op::Name {
             continue;
@@ -40,11 +40,11 @@ fn fc_defined_marker_indices(
     out
 }
 
-fn fc_init_indices(module: &crate::spirv_module::Module) -> std::collections::HashSet<u32> {
+fn fc_init_indices(module: &crate::spirv_module::Module) -> crate::fxhash::HashSet<u32> {
     use crate::spirv_module::Operand;
     use spirv::Op;
 
-    let mut out = std::collections::HashSet::new();
+    let mut out = crate::fxhash::HashSet::default();
     for inst in &module.debug_names {
         if inst.class.opcode != Op::Name {
             continue;
@@ -62,7 +62,7 @@ fn bool_constant_for(
     module: &mut crate::spirv_module::Module,
     bool_ty: u32,
     value: bool,
-    const_for: &mut std::collections::HashMap<(u32, bool), u32>,
+    const_for: &mut crate::fxhash::HashMap<(u32, bool), u32>,
 ) -> u32 {
     use crate::spirv_module::Instruction;
     use spirv::Op;
@@ -94,7 +94,7 @@ fn bool_constant_for(
 
 fn specialize_fc_definedness(
     module: &mut crate::spirv_module::Module,
-    defined_indices: &std::collections::HashSet<u32>,
+    defined_indices: &crate::fxhash::HashSet<u32>,
 ) -> bool {
     use crate::spirv_module::Operand;
     use spirv::Op;
@@ -135,7 +135,7 @@ fn specialize_fc_definedness(
         return false;
     }
 
-    let mut const_for = std::collections::HashMap::new();
+    let mut const_for = crate::fxhash::HashMap::default();
     let mut changed = false;
     for (function_idx, block_idx, inst_idx, bool_ty, value) in edits {
         let const_id = bool_constant_for(module, bool_ty, value, &mut const_for);
@@ -152,7 +152,7 @@ fn materialize_zero_fc_initializers(module: &mut crate::spirv_module::Module) ->
     use crate::spirv_module::{Instruction, Operand};
     use spirv::Op;
 
-    let mut fc_init_vars: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut fc_init_vars: crate::fxhash::HashSet<u32> = crate::fxhash::HashSet::default();
     for inst in &module.debug_names {
         if inst.class.opcode != Op::Name {
             continue;
@@ -166,10 +166,10 @@ fn materialize_zero_fc_initializers(module: &mut crate::spirv_module::Module) ->
         }
     }
 
-    let mut pointee: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-    let mut int_types: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    let mut int_vectors: std::collections::HashMap<u32, (u32, u32)> =
-        std::collections::HashMap::new();
+    let mut pointee: crate::fxhash::HashMap<u32, u32> = crate::fxhash::HashMap::default();
+    let mut int_types: crate::fxhash::HashSet<u32> = crate::fxhash::HashSet::default();
+    let mut int_vectors: crate::fxhash::HashMap<u32, (u32, u32)> =
+        crate::fxhash::HashMap::default();
     for inst in &module.types_global_values {
         match inst.class.opcode {
             Op::TypePointer => {
@@ -200,10 +200,10 @@ fn materialize_zero_fc_initializers(module: &mut crate::spirv_module::Module) ->
     int_vectors.retain(|_, (component_ty, _)| int_types.contains(component_ty));
 
     let mut next_id = module.header.as_ref().map(|h| h.bound).unwrap_or(1);
-    let mut scalar_zero_for: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-    let mut vector_zero_for: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-    let mut new_consts: std::collections::HashMap<u32, Instruction> =
-        std::collections::HashMap::new();
+    let mut scalar_zero_for: crate::fxhash::HashMap<u32, u32> = crate::fxhash::HashMap::default();
+    let mut vector_zero_for: crate::fxhash::HashMap<u32, u32> = crate::fxhash::HashMap::default();
+    let mut new_consts: crate::fxhash::HashMap<u32, Instruction> =
+        crate::fxhash::HashMap::default();
     let mut edits: Vec<(usize, Vec<u32>, u32)> = vec![];
 
     for (vi, inst) in module.types_global_values.iter().enumerate() {
@@ -279,7 +279,7 @@ fn materialize_zero_fc_initializers(module: &mut crate::spirv_module::Module) ->
         return false;
     }
 
-    let var_to_consts: std::collections::HashMap<u32, (Vec<u32>, u32)> = edits
+    let var_to_consts: crate::fxhash::HashMap<u32, (Vec<u32>, u32)> = edits
         .iter()
         .filter_map(|(vi, consts, initializer)| {
             module.types_global_values[*vi]
@@ -288,7 +288,7 @@ fn materialize_zero_fc_initializers(module: &mut crate::spirv_module::Module) ->
         })
         .collect();
     let mut rebuilt = Vec::with_capacity(module.types_global_values.len() + new_consts.len());
-    let mut emitted = std::collections::HashSet::new();
+    let mut emitted = crate::fxhash::HashSet::default();
     for mut inst in module.types_global_values.clone() {
         if inst.class.opcode == Op::Variable {
             if let Some((consts, initializer)) =
@@ -342,8 +342,8 @@ fn int_constant_id(
     width: u32,
     value: u64,
     next_id: &mut u32,
-    const_for: &mut std::collections::HashMap<(u32, u64), u32>,
-    new_consts: &mut std::collections::HashMap<u32, crate::spirv_module::Instruction>,
+    const_for: &mut crate::fxhash::HashMap<(u32, u64), u32>,
+    new_consts: &mut crate::fxhash::HashMap<u32, crate::spirv_module::Instruction>,
 ) -> u32 {
     use crate::spirv_module::{Instruction, Operand};
     use spirv::Op;
@@ -415,13 +415,13 @@ fn specialize_function_constant_bytes_impl(
     if values.is_empty() {
         return Ok(spv.to_vec());
     }
-    let want: std::collections::HashMap<u32, &[u8]> = values
+    let want: crate::fxhash::HashMap<u32, &[u8]> = values
         .iter()
         .map(|(index, bytes)| (*index, bytes.as_slice()))
         .collect();
     let mut module = load_bytes(spv).map_err(|e| format!("SPIR-V load: {e:?}"))?;
 
-    let mut var_index: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    let mut var_index: crate::fxhash::HashMap<u32, u32> = crate::fxhash::HashMap::default();
     for inst in &module.debug_names {
         if inst.class.opcode != Op::Name {
             continue;
@@ -435,10 +435,10 @@ fn specialize_function_constant_bytes_impl(
         }
     }
 
-    let mut pointee: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-    let mut scalar_width: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-    let mut numeric_vectors: std::collections::HashMap<u32, (u32, u32)> =
-        std::collections::HashMap::new();
+    let mut pointee: crate::fxhash::HashMap<u32, u32> = crate::fxhash::HashMap::default();
+    let mut scalar_width: crate::fxhash::HashMap<u32, u32> = crate::fxhash::HashMap::default();
+    let mut numeric_vectors: crate::fxhash::HashMap<u32, (u32, u32)> =
+        crate::fxhash::HashMap::default();
     for inst in &module.types_global_values {
         match inst.class.opcode {
             Op::TypePointer => {
@@ -470,12 +470,11 @@ fn specialize_function_constant_bytes_impl(
     numeric_vectors.retain(|_, (component_ty, _)| scalar_width.contains_key(component_ty));
 
     let mut next_id = module.header.as_ref().map(|h| h.bound).unwrap_or(1);
-    let mut const_for: std::collections::HashMap<(u32, u64), u32> =
-        std::collections::HashMap::new();
-    let mut composite_for: std::collections::HashMap<(u32, Vec<u64>), u32> =
-        std::collections::HashMap::new();
-    let mut new_consts: std::collections::HashMap<u32, Instruction> =
-        std::collections::HashMap::new();
+    let mut const_for: crate::fxhash::HashMap<(u32, u64), u32> = crate::fxhash::HashMap::default();
+    let mut composite_for: crate::fxhash::HashMap<(u32, Vec<u64>), u32> =
+        crate::fxhash::HashMap::default();
+    let mut new_consts: crate::fxhash::HashMap<u32, Instruction> =
+        crate::fxhash::HashMap::default();
     let mut edits: Vec<(usize, Vec<u32>, u32)> = vec![];
     for (vi, inst) in module.types_global_values.iter().enumerate() {
         if inst.class.opcode != Op::Variable {
@@ -559,8 +558,8 @@ fn specialize_function_constant_bytes_impl(
         edits.push((vi, const_ids, composite_id));
     }
 
-    let requested: std::collections::HashSet<u32> = want.keys().copied().collect();
-    let mut applied: std::collections::HashSet<u32> = edits
+    let requested: crate::fxhash::HashSet<u32> = want.keys().copied().collect();
+    let mut applied: crate::fxhash::HashSet<u32> = edits
         .iter()
         .filter_map(|(vi, _, _)| module.types_global_values[*vi].result_id)
         .filter_map(|vid| var_index.get(&vid).copied())
@@ -578,11 +577,11 @@ fn specialize_function_constant_bytes_impl(
         return Err(format!(
             "specialize_function_constants: no MTL_FC_INIT global for FC index(es) {missing:?} \
              (module has indices {:?})",
-            var_index.values().collect::<std::collections::HashSet<_>>()
+            var_index.values().collect::<crate::fxhash::HashSet<_>>()
         ));
     }
 
-    let var_to_consts: std::collections::HashMap<u32, (Vec<u32>, u32)> = edits
+    let var_to_consts: crate::fxhash::HashMap<u32, (Vec<u32>, u32)> = edits
         .iter()
         .filter_map(|(vi, consts, initializer)| {
             module.types_global_values[*vi]
@@ -592,7 +591,7 @@ fn specialize_function_constant_bytes_impl(
         .collect();
 
     let mut rebuilt: Vec<Instruction> = Vec::with_capacity(module.types_global_values.len() + 1);
-    let mut emitted: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut emitted: crate::fxhash::HashSet<u32> = crate::fxhash::HashSet::default();
     for mut inst in module.types_global_values.clone() {
         if inst.class.opcode == Op::Variable {
             if let Some((consts, initializer)) =
@@ -653,11 +652,11 @@ fn rewrite_thread_local_scalar_byte_subslot_stores(
     use crate::spirv_module::{Instruction, Operand};
     use spirv::{Op, StorageClass, Word};
 
-    let mut type_defs: std::collections::HashMap<Word, Instruction> =
-        std::collections::HashMap::new();
-    let mut ptr_info: std::collections::HashMap<Word, (StorageClass, Word)> =
-        std::collections::HashMap::new();
-    let mut result_type: std::collections::HashMap<Word, Word> = std::collections::HashMap::new();
+    let mut type_defs: crate::fxhash::HashMap<Word, Instruction> =
+        crate::fxhash::HashMap::default();
+    let mut ptr_info: crate::fxhash::HashMap<Word, (StorageClass, Word)> =
+        crate::fxhash::HashMap::default();
+    let mut result_type: crate::fxhash::HashMap<Word, Word> = crate::fxhash::HashMap::default();
     for inst in module.all_inst_iter() {
         if let Some(id) = inst.result_id {
             if let Some(ty) = inst.result_type {
@@ -729,10 +728,8 @@ fn rewrite_thread_local_scalar_byte_subslot_stores(
         offset_bits: u32,
     }
 
-    let mut chain_base: std::collections::HashMap<
-        Word,
-        (usize, usize, usize, Word, Word, u32, u32),
-    > = std::collections::HashMap::new();
+    let mut chain_base: crate::fxhash::HashMap<Word, (usize, usize, usize, Word, Word, u32, u32)> =
+        crate::fxhash::HashMap::default();
     for (fi, function) in module.functions.iter().enumerate() {
         for (bi, block) in function.blocks.iter().enumerate() {
             for (ii, inst) in block.instructions.iter().enumerate() {
@@ -781,9 +778,9 @@ fn rewrite_thread_local_scalar_byte_subslot_stores(
         return false;
     }
 
-    let mut uses: std::collections::HashMap<Word, Vec<(usize, usize, usize)>> =
-        std::collections::HashMap::new();
-    let mut disqualified = std::collections::HashSet::new();
+    let mut uses: crate::fxhash::HashMap<Word, Vec<(usize, usize, usize)>> =
+        crate::fxhash::HashMap::default();
+    let mut disqualified = crate::fxhash::HashSet::default();
     for (fi, function) in module.functions.iter().enumerate() {
         for (bi, block) in function.blocks.iter().enumerate() {
             for (ii, inst) in block.instructions.iter().enumerate() {
@@ -854,7 +851,7 @@ fn rewrite_thread_local_scalar_byte_subslot_stores(
     }
 
     let mut next_id = module.header.as_ref().map(|h| h.bound).unwrap_or(1);
-    let mut unsigned_int_for_width: std::collections::HashMap<u32, Word> = type_defs
+    let mut unsigned_int_for_width: crate::fxhash::HashMap<u32, Word> = type_defs
         .iter()
         .filter_map(|(&id, inst)| {
             if inst.class.opcode == Op::TypeInt {
@@ -867,8 +864,8 @@ fn rewrite_thread_local_scalar_byte_subslot_stores(
             None
         })
         .collect();
-    let mut const_for: std::collections::HashMap<(Word, u64), Word> =
-        std::collections::HashMap::new();
+    let mut const_for: crate::fxhash::HashMap<(Word, u64), Word> =
+        crate::fxhash::HashMap::default();
     for inst in &module.types_global_values {
         if inst.class.opcode != Op::Constant {
             continue;
@@ -883,7 +880,7 @@ fn rewrite_thread_local_scalar_byte_subslot_stores(
         };
         const_for.insert((ty, value), id);
     }
-    let mut new_defs = std::collections::HashMap::new();
+    let mut new_defs = crate::fxhash::HashMap::default();
 
     for plan in &plans {
         for width in [plan.base_bits, plan.object_bits] {
@@ -901,10 +898,10 @@ fn rewrite_thread_local_scalar_byte_subslot_stores(
         }
     }
 
-    let mut chain_sites: std::collections::HashSet<(usize, usize, usize)> =
-        std::collections::HashSet::new();
-    let mut store_plan: std::collections::HashMap<(usize, usize, usize), Plan> =
-        std::collections::HashMap::new();
+    let mut chain_sites: crate::fxhash::HashSet<(usize, usize, usize)> =
+        crate::fxhash::HashSet::default();
+    let mut store_plan: crate::fxhash::HashMap<(usize, usize, usize), Plan> =
+        crate::fxhash::HashMap::default();
     for plan in plans {
         chain_sites.insert((plan.chain_fi, plan.chain_bi, plan.chain_ii));
         store_plan.insert((plan.store_fi, plan.store_bi, plan.store_ii), plan);
@@ -1092,9 +1089,9 @@ fn restore_loop_merges_removed_by_fc_prune(
     before: &crate::spirv_module::Module,
     after: &mut crate::spirv_module::Module,
 ) {
+    use crate::fxhash::{HashMap, HashSet};
     use crate::spirv_module::{Block, Function, Instruction, Operand};
     use spirv::Op;
-    use std::collections::{HashMap, HashSet};
 
     fn function_id(function: &Function) -> Option<u32> {
         function.def.as_ref().and_then(|def| def.result_id)
@@ -1136,7 +1133,7 @@ fn restore_loop_merges_removed_by_fc_prune(
             .iter()
             .filter_map(block_id)
             .collect::<HashSet<_>>();
-        let mut synthesized_merges = HashSet::new();
+        let mut synthesized_merges = HashSet::default();
         for block in &mut function.blocks {
             if loop_merge(block).is_some() {
                 continue;
@@ -1605,13 +1602,13 @@ mod tests {
                 Operand::IdRef(id) => Some(*id),
                 _ => None,
             })
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fxhash::HashSet<_>>();
         let variables = m
             .types_global_values
             .iter()
             .filter(|inst| inst.class.opcode == Op::Variable)
             .filter_map(|inst| inst.result_id)
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fxhash::HashSet<_>>();
 
         assert!(
             entry_interface.contains(&9),
@@ -1856,7 +1853,7 @@ mod tests {
                 };
                 Some((id, *value))
             })
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<crate::fxhash::HashMap<_, _>>();
         let lane_values = vector_const
             .operands
             .iter()
@@ -2434,13 +2431,13 @@ mod tests {
                 Operand::IdRef(id) => Some(*id),
                 _ => None,
             })
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fxhash::HashSet<_>>();
         let variables = m
             .types_global_values
             .iter()
             .filter(|inst| inst.class.opcode == Op::Variable)
             .filter_map(|inst| inst.result_id)
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fxhash::HashSet<_>>();
 
         assert!(
             entry_interface.contains(&9),

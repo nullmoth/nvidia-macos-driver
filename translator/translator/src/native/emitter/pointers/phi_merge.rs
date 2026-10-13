@@ -14,7 +14,7 @@ impl Emitter {
         let address_ty = LlType::Int(64);
         let result_type = self.type_id(&address_ty)?;
         let mut ops = Vec::new();
-        let mut seen_incoming: HashMap<Word, Word> = HashMap::new();
+        let mut seen_incoming: HashMap<Word, Word> = HashMap::default();
         for (value, label) in incoming {
             let label_id = self.label_id(label)?;
             let mut edge_instructions = Vec::new();
@@ -59,7 +59,7 @@ impl Emitter {
             self.phi_result_instructions
                 .retain(|instruction| instruction.result_id != Some(logical_result));
             self.emit_sidecar
-                .remap_ids(&HashMap::from([(logical_result, result)]));
+                .remap_ids(&crate::fxhash::map_from([(logical_result, result)]));
         }
         let mut raw = RawBufferOffset::root(format!(".bda_phi_{name}"), *addrspace);
         raw.device_addr_base = Some(result);
@@ -73,7 +73,7 @@ impl Emitter {
     }
 
     pub(in crate::native::emitter) fn bda_phi_value_is_addressable(&self, value: &LlValue) -> bool {
-        self.bda_phi_value_is_addressable_inner(value, &mut HashSet::new())
+        self.bda_phi_value_is_addressable_inner(value, &mut HashSet::default())
     }
 
     fn bda_phi_value_is_addressable_inner(
@@ -459,7 +459,7 @@ impl Emitter {
         incoming: &[(LlValue, String)],
         template: &RawBufferOffset,
     ) -> bool {
-        let mut proving = HashSet::from([name.to_string()]);
+        let mut proving = crate::fxhash::set_from([name.to_string()]);
         incoming
             .iter()
             .all(|(value, _)| self.raw_induction_arm(name, value, template, &mut proving))
@@ -551,7 +551,7 @@ impl Emitter {
         let result = self.result_id(&index_name, &index_ty)?;
         let result_type = self.type_id(&index_ty)?;
         let mut ops = Vec::new();
-        let mut seen_incoming: HashMap<Word, Word> = HashMap::new();
+        let mut seen_incoming: HashMap<Word, Word> = HashMap::default();
         let mut pending_edges = Vec::new();
         for (value, label) in incoming {
             let mut edge_instructions = Vec::new();
@@ -839,7 +839,7 @@ impl Emitter {
             let result = self.result_id(&index_name, &template_index.ty)?;
             let result_type = self.type_id(&template_index.ty)?;
             let mut ops = Vec::new();
-            let mut seen_incoming: HashMap<Word, Word> = HashMap::new();
+            let mut seen_incoming: HashMap<Word, Word> = HashMap::default();
             let mut pending_edges = Vec::new();
             for (provenance, label) in &resolved_provenances {
                 let index = &provenance.indices[position];

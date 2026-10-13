@@ -161,7 +161,7 @@ pub(in crate::native) fn normalize_continue_selection_merge_targets(
                         &mut candidate,
                         &predecessors,
                         &info.continue_target,
-                        &HashSet::new(),
+                        &HashSet::default(),
                         &mut counter,
                     )
                 } else {
@@ -169,7 +169,7 @@ pub(in crate::native) fn normalize_continue_selection_merge_targets(
                         &mut candidate,
                         &predecessors,
                         &info.continue_target,
-                        &HashSet::new(),
+                        &HashSet::default(),
                         &mut counter,
                     )
                 };
@@ -270,8 +270,8 @@ fn all_typed_paths_reach_without(
         start,
         target,
         forbidden,
-        &mut HashSet::new(),
-        &mut HashMap::new(),
+        &mut HashSet::default(),
+        &mut HashMap::default(),
     )
 }
 
@@ -280,7 +280,7 @@ fn typed_reachable_before(blocks: &[BodyBlock], start: &str, target: &str) -> Ha
         .iter()
         .map(|block| (block.name.as_str(), block))
         .collect::<HashMap<_, _>>();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut pending = vec![start.to_string()];
     while let Some(label) = pending.pop() {
         if label == target || !seen.insert(label.clone()) {
@@ -387,7 +387,7 @@ fn next_loop_continue_external_predecessor_plan(
             continue;
         }
 
-        let mut splits = HashMap::<String, ContinuePhiSplit>::new();
+        let mut splits = HashMap::<String, ContinuePhiSplit>::default();
         let mut continue_updates = Vec::new();
         let mut admissible = true;
         for inst in continue_typed.insts.iter().take_while(|inst| inst.is_phi()) {
@@ -477,7 +477,7 @@ fn next_loop_continue_external_predecessor_plan(
 #[cfg(test)]
 fn dominator_serialization_violations(blocks: &[BodyBlock]) -> HashSet<(String, String)> {
     let Some(cfg) = super::super::graph::Cfg::from_blocks(blocks) else {
-        return HashSet::new();
+        return HashSet::default();
     };
     let dominators = cfg.dominators();
     let positions = blocks
@@ -726,7 +726,7 @@ pub(in crate::native) fn privatize_emitted_shared_direct_selection_arms(
         branch_merges_header_only,
         switch_merges,
     );
-    let mut eligible_headers = HashSet::new();
+    let mut eligible_headers = HashSet::default();
     for claim in claims {
         match claim.kind {
             EmittedMergeKind::Loop => {}
@@ -789,7 +789,7 @@ fn has_emitted_selection_merge_bypass(
         switch_merges,
     );
     let forest = analyze(blocks);
-    let mut predecessors = HashMap::<String, HashSet<String>>::new();
+    let mut predecessors = HashMap::<String, HashSet<String>>::default();
     for block in blocks {
         for successor in block_successors(block) {
             predecessors
@@ -852,7 +852,7 @@ pub(in crate::native) fn funnel_emitted_selection_merge_bypasses(
     let mut changed = false;
     loop {
         let forest = analyze(blocks);
-        let mut predecessors = HashMap::<String, Vec<String>>::new();
+        let mut predecessors = HashMap::<String, Vec<String>>::default();
         for block in blocks.iter() {
             for successor in block_successors(block) {
                 let entry = predecessors.entry(successor).or_default();
@@ -927,7 +927,7 @@ pub(in crate::native) fn funnel_emitted_selection_merge_bypasses(
             {
                 continue;
             }
-            let mut mapped_merge_phis = HashSet::new();
+            let mut mapped_merge_phis = HashSet::default();
             let mut merge_phi_additions = Vec::new();
             let mut target_phi_updates = Vec::new();
             let mut used_results = blocks
@@ -1110,7 +1110,7 @@ pub(in crate::native) fn privatize_reused_emitted_merge_targets(
         switch_merges,
     );
 
-    let claim_counts = claims.iter().fold(HashMap::new(), |mut counts, claim| {
+    let claim_counts = claims.iter().fold(HashMap::default(), |mut counts, claim| {
         *counts.entry(claim.target.clone()).or_insert(0usize) += 1;
         counts
     });
@@ -1159,7 +1159,7 @@ pub(in crate::native) fn privatize_reused_emitted_merge_targets(
                 blocks,
                 &predecessors,
                 &claim.target,
-                &HashSet::new(),
+                &HashSet::default(),
                 &mut counter,
             )
         } else {
@@ -1167,7 +1167,7 @@ pub(in crate::native) fn privatize_reused_emitted_merge_targets(
                 blocks,
                 &predecessors,
                 &claim.target,
-                &HashSet::new(),
+                &HashSet::default(),
                 &mut counter,
             )
         };
@@ -1254,7 +1254,7 @@ pub(in crate::native) fn loop_role_targets_with_passthroughs(
         .iter()
         .map(|block| (block.name.as_str(), block))
         .collect::<HashMap<_, _>>();
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     for info in loop_merges.values() {
         add_loop_role_target_with_passthroughs(&by_name, &mut out, &info.merge);
         add_loop_role_target_with_passthroughs(&by_name, &mut out, &info.continue_target);
@@ -1346,7 +1346,7 @@ pub(in crate::native) fn forest_loop_merges(
         .collect::<Vec<_>>();
     loop_headers.sort();
     let mut out_blocks = RewriteBlocks::new(blocks.to_vec());
-    let mut merges = HashMap::new();
+    let mut merges = HashMap::default();
     let mut split_counter = 0usize;
     let mut forest_cache = AnalysisCache::default();
     let mut selection_cache = AnalysisCache::default();
@@ -1649,7 +1649,7 @@ pub(in crate::native) fn synth_noexit_self_latch(
     let cont_typed = crate::native::tir::lower_block_carrier(
         &continue_target,
         &[format!("br label {header}")],
-        &std::collections::HashMap::new(),
+        &crate::fxhash::HashMap::default(),
     );
     blocks.insert(
         header_idx + 2,
@@ -1662,7 +1662,7 @@ pub(in crate::native) fn synth_noexit_self_latch(
     let merge_typed = crate::native::tir::lower_block_carrier(
         &merge,
         &["unreachable".to_string()],
-        &std::collections::HashMap::new(),
+        &crate::fxhash::HashMap::default(),
     );
     blocks.push(BodyBlock {
         name: merge.clone(),
@@ -1703,7 +1703,7 @@ pub(in crate::native) fn unique_selection_merges_with_loop_exit(
         loop_merges,
         break_aware,
         loop_exit_selection,
-        &HashMap::new(),
+        &HashMap::default(),
     )
 }
 
@@ -1829,7 +1829,7 @@ fn unique_selection_merges_with_loop_exit_and_forced_inner(
     }
     let loop_headers: HashSet<&str> = forest.loops.iter().map(|l| l.header.as_str()).collect();
     let loop_roles = loop_role_targets_with_passthroughs(blocks, loop_merges);
-    let mut claims: HashMap<&str, usize> = HashMap::new();
+    let mut claims: HashMap<&str, usize> = HashMap::default();
     for m in sel.values() {
         *claims.entry(m.as_str()).or_default() += 1;
     }
@@ -1839,16 +1839,16 @@ fn unique_selection_merges_with_loop_exit_and_forced_inner(
         .then(|| pure_enclosing_selection_owners(blocks, &forest, &source_selection_merges));
 
     let mut out = blocks.to_vec();
-    let mut branch = HashMap::new();
-    let mut switch = HashMap::new();
-    let mut header_merges: HashMap<String, String> = HashMap::new();
+    let mut branch = HashMap::default();
+    let mut switch = HashMap::default();
+    let mut header_merges: HashMap<String, String> = HashMap::default();
     let mut counter = if construct_tree_owned {
         next_selection_merge_suffix(&out)
     } else {
         0usize
     };
 
-    let mut break_continue_blocks: HashSet<String> = HashSet::new();
+    let mut break_continue_blocks: HashSet<String> = HashSet::default();
     for b in blocks {
         if loop_headers.contains(b.name.as_str()) {
             continue;
@@ -1931,8 +1931,8 @@ fn unique_selection_merges_with_loop_exit_and_forced_inner(
         block: String,
         origins: Vec<String>,
     }
-    let mut ct_owned_preds: HashMap<(String, String), Vec<CtOwnedPred>> = HashMap::new();
-    let mut construct_tree_bare_loop_role_headers = HashSet::new();
+    let mut ct_owned_preds: HashMap<(String, String), Vec<CtOwnedPred>> = HashMap::default();
+    let mut construct_tree_bare_loop_role_headers = HashSet::default();
     let mut stopped_for_growth = false;
     for b in headers.iter().copied() {
         if let Some(mut merge) = forced_terminal_merges.get(&b.name).cloned() {
@@ -2112,7 +2112,7 @@ fn unique_selection_merges_with_loop_exit_and_forced_inner(
             let routes_into_natural = if construct_tree_owned && !route_reclaimed_preds.is_empty() {
                 construct_tree_routes_into_natural(&out, &natural)
             } else {
-                HashSet::new()
+                HashSet::default()
             };
             let carried = if construct_tree_owned {
                 Vec::new()
@@ -2316,7 +2316,7 @@ pub(in crate::native) fn repair_construct_tree_nondominated_selection_merges(
 ) {
     for _ in 0..8 {
         let forest = analyze(blocks);
-        let mut merge_of = HashMap::new();
+        let mut merge_of = HashMap::default();
         for (header, info) in loop_merges {
             merge_of.insert(header.clone(), info.merge.clone());
         }
@@ -2388,7 +2388,7 @@ pub(in crate::native) fn repair_construct_tree_nondominated_selection_merges(
                 repair_preds.extend(reclaimed);
                 construct_tree_routes_into_natural(blocks, &merge)
             } else {
-                HashSet::new()
+                HashSet::default()
             };
             repair_preds.sort();
             repair_preds.dedup();
@@ -2425,7 +2425,7 @@ pub(in crate::native) fn repair_construct_tree_passthrough_selection_merges(
     let loop_roles = loop_role_targets_with_passthroughs(blocks, loop_merges);
     let mut claims = header_merges
         .values()
-        .fold(HashMap::new(), |mut claims, merge| {
+        .fold(HashMap::default(), |mut claims, merge| {
             *claims.entry(merge.clone()).or_insert(0usize) += 1;
             claims
         });
@@ -2506,7 +2506,7 @@ pub(in crate::native) fn repair_construct_tree_bypassed_passthrough_merges(
             if merge_block.role != BlockRole::LMerge {
                 continue;
             }
-            let mut chain = HashSet::new();
+            let mut chain = HashSet::default();
             let mut current = merge.clone();
             let successor = loop {
                 if !chain.insert(current.clone()) {
@@ -2619,7 +2619,7 @@ mod tests {
             typed: crate::native::tir::lower_block_carrier(
                 name,
                 &["ret void".to_string()],
-                &HashMap::new(),
+                &HashMap::default(),
             )
             .map(Into::into),
         }

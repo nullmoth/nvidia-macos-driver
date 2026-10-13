@@ -4,8 +4,8 @@ use super::construct_tree::{
     ConstructTreePlan, OriginalEdge as Edge,
 };
 use super::{BlockRole, BodyBlock};
+use crate::fxhash::HashMap;
 use crate::native::tir;
-use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Shape {
@@ -188,7 +188,7 @@ fn typed_blocks(fixture: &Fixture) -> Vec<BodyBlock> {
             BodyBlock {
                 name: labels[index].clone(),
                 role: BlockRole::Normal,
-                typed: tir::lower_block_carrier(&labels[index], &lines, &HashMap::new())
+                typed: tir::lower_block_carrier(&labels[index], &lines, &HashMap::default())
                     .map(Into::into),
             }
         })

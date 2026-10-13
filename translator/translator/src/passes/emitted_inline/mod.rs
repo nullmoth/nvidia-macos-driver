@@ -138,7 +138,7 @@ pub(super) fn inline_selected_helpers(
 ) -> Result<InlineStats, String> {
     let air_ids: HashSet<Word> = air_names(&ctx.module).keys().copied().collect();
     let mut stats = InlineStats::default();
-    let mut processed_helpers = HashSet::new();
+    let mut processed_helpers = HashSet::default();
     let mut pointer_types = collect_pointer_types(ctx);
     let mut guard = 0;
     loop {
@@ -192,7 +192,7 @@ pub(super) fn prune_unreferenced_functions(ctx: &mut Ctx, entry_idx: usize) {
         .def
         .as_ref()
         .and_then(|d| d.result_id);
-    let mut called: HashSet<Word> = HashSet::new();
+    let mut called: HashSet<Word> = HashSet::default();
     for blk in &ctx.module.functions[entry_idx].blocks {
         for inst in &blk.instructions {
             if inst.class.opcode == Op::FunctionCall {
@@ -445,7 +445,7 @@ fn plan_byte_view_reinterprets(
     remap: &HashMap<Word, Word>,
     result_types: &HashMap<Word, Word>,
 ) -> HashMap<Word, ByteViewPlan> {
-    let mut plan = HashMap::new();
+    let mut plan = HashMap::default();
     let defs = type_defs_with_new_globals(ctx);
     for blk in &callee.blocks {
         for inst in &blk.instructions {
@@ -815,7 +815,7 @@ pub(super) fn compose_chained_access_chains(ctx: &mut Ctx, entry_idx: usize) {
         }
         let defs = type_defs_with_new_globals(ctx);
         let result_types = collect_result_types(ctx);
-        let mut chains: HashMap<Word, Instruction> = HashMap::new();
+        let mut chains: HashMap<Word, Instruction> = HashMap::default();
         for blk in &ctx.module.functions[entry_idx].blocks {
             for inst in &blk.instructions {
                 if is_member_access_chain(inst.class.opcode) {
@@ -1019,7 +1019,7 @@ fn inline_one_call(
         (inst.result_id, args)
     };
 
-    let mut remap: HashMap<Word, Word> = HashMap::new();
+    let mut remap: HashMap<Word, Word> = HashMap::default();
     for (p, a) in callee.parameters.iter().zip(args.iter()) {
         if let Some(pid) = p.result_id {
             remap.insert(pid, *a);
@@ -1049,7 +1049,7 @@ fn inline_one_call(
             Some((result, resolve_copy_object_source(*source, &definitions)))
         })
         .collect::<HashMap<_, _>>();
-    let mut elided_aggregate_extracts = HashSet::new();
+    let mut elided_aggregate_extracts = HashSet::default();
     for instruction in callee.blocks.iter().flat_map(|block| &block.instructions) {
         if instruction.class.opcode != Op::CompositeExtract {
             continue;
@@ -1247,7 +1247,7 @@ fn resolve_inserted_object(
     mut path: &[u32],
     definitions: &HashMap<Word, &Instruction>,
 ) -> Option<Word> {
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     while visited.insert(aggregate) {
         let definition = definitions.get(&aggregate)?;
         match definition.class.opcode {
@@ -1287,7 +1287,7 @@ fn resolve_inserted_object(
 }
 
 fn resolve_copy_object_source(mut value: Word, definitions: &HashMap<Word, &Instruction>) -> Word {
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     while visited.insert(value) {
         let Some(definition) = definitions.get(&value) else {
             break;
@@ -1633,7 +1633,7 @@ fn split_inlined_selection_merge(ctx: &mut Ctx, entry_idx: usize, header_id: Wor
         return;
     };
 
-    let mut redirected_preds = HashSet::new();
+    let mut redirected_preds = HashSet::default();
     {
         let func = &mut ctx.module.functions[entry_idx];
         for block in &mut func.blocks {
@@ -1751,7 +1751,7 @@ fn block_index_by_label(blocks: &[Block], label_id: Word) -> Option<usize> {
 
 fn construct_label_ids(blocks: &[Block], header_id: Word, merge_id: Word) -> HashSet<Word> {
     let successors = block_successors_by_label(blocks);
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut stack = vec![header_id];
     while let Some(label) = stack.pop() {
         if label == merge_id || !seen.insert(label) {
@@ -1827,7 +1827,7 @@ fn redirect_terminator_target(block: &mut Block, from: Word, to: Word) -> bool {
 }
 
 fn collect_result_types(ctx: &Ctx) -> HashMap<Word, Word> {
-    let mut result_types = HashMap::new();
+    let mut result_types = HashMap::default();
     for inst in ctx
         .module
         .ext_inst_imports

@@ -1209,7 +1209,7 @@ mod tests {
     fn scalar_bool_fragment_output_uses_uint_interface_and_select() {
         let mut ctx = Ctx::new(Module::new());
         let bool_ty = ctx.ty_bool();
-        let defs = combined_type_defs(&ctx, &HashMap::new());
+        let defs = combined_type_defs(&ctx, &HashMap::default());
 
         let output_ty = fragment_output_type(&mut ctx, None, 0, bool_ty, &defs);
         assert_eq!(output_ty, ctx.ty_uint());

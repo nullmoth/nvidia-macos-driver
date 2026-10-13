@@ -1,7 +1,8 @@
 use super::*;
+use crate::fxhash::{HashMap, HashSet};
 use crate::native::ir::{LlType, LlValue, TypedValue};
 use crate::native::tir;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
 
 const PREFIX: &str = "%metal2vulkan.ct.";
 const PRE: &str = "%metal2vulkan.ct.pre";
@@ -61,7 +62,7 @@ fn pointer_free_composite_component(ty: &LlType) -> bool {
 }
 
 fn opaque_image_dependencies(blocks: &[BodyBlock]) -> HashSet<String> {
-    let mut values = HashSet::new();
+    let mut values = HashSet::default();
     for block in blocks.iter().filter_map(|block| block.typed.as_ref()) {
         for inst in &block.insts {
             let Some(call) = inst.call().as_ref() else {
@@ -118,7 +119,7 @@ fn dominating_pointer_derivations(
     function_variables: &HashSet<String>,
     defined_values: &HashSet<String>,
 ) -> (HashSet<String>, Vec<tir::TirInst>) {
-    let mut names = HashSet::new();
+    let mut names = HashSet::default();
     let mut instructions = Vec::new();
     loop {
         let mut added = false;
@@ -188,7 +189,7 @@ fn carrier_with_phis(
     role: BlockRole,
 ) -> Result<BodyBlock, String> {
     let mut carrier =
-        tir::lower_block_carrier(name, &[format!("br label {target}")], &HashMap::new())
+        tir::lower_block_carrier(name, &[format!("br label {target}")], &HashMap::default())
             .ok_or_else(|| format!("construct-tree:gateway-carrier name={name}"))?;
     for (result, ty, incoming) in phis {
         carrier.push_value_phi(result, ty, incoming);
@@ -346,7 +347,7 @@ pub(in crate::native) fn materialize_construct_tree_roles(
     }
 
     let mut slots = Vec::new();
-    let mut rename = HashMap::new();
+    let mut rename = HashMap::default();
     for (host, block) in blocks.iter().enumerate() {
         let carrier = block.typed.as_ref().expect("checked above");
         for inst in &carrier.insts {
@@ -361,7 +362,7 @@ pub(in crate::native) fn materialize_construct_tree_roles(
             let current = format!("{PREFIX}slot.{slot_index}");
             let next = format!("{PREFIX}nextslot.{slot_index}");
             rename.insert(result.clone(), current.clone());
-            let mut routed = HashMap::new();
+            let mut routed = HashMap::default();
             for (value, predecessor) in incoming {
                 let Some(&source) = names.get(predecessor.as_str()) else {
                     return Err(format!(
@@ -406,9 +407,9 @@ pub(in crate::native) fn materialize_construct_tree_roles(
         }
     }
 
-    let mut def_block = HashMap::new();
-    let mut defined_values = HashSet::new();
-    let mut function_variables = HashSet::new();
+    let mut def_block = HashMap::default();
+    let mut defined_values = HashSet::default();
+    let mut function_variables = HashSet::default();
     for (index, block) in blocks.iter().enumerate() {
         for inst in &block.typed.as_ref().expect("checked above").insts {
             if let Some(result) = &inst.result {
@@ -689,14 +690,14 @@ pub(in crate::native) fn materialize_construct_tree_roles(
                     || dominating_pointer_derivations.contains(result)
             })
         });
-        let mut used_names = HashSet::new();
+        let mut used_names = HashSet::default();
         for inst in carrier.insts.iter().filter(|inst| !inst.is_phi()) {
             inst.visit_uses(|name| {
                 used_names.insert(name.to_string());
             });
         }
         used_names.extend(terminator_value_uses(&carrier.terminator));
-        let mut substitutions = HashMap::new();
+        let mut substitutions = HashMap::default();
         for name in used_names {
             let Some(slot) = value_slot_by_name.get(name.as_str()) else {
                 continue;

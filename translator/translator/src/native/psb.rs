@@ -1,8 +1,9 @@
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::Instruction;
 use crate::spirv_module::Module;
 use crate::spirv_module::Operand;
 use spirv::{Capability, Decoration, MemoryModel, Op, StorageClass, Word};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 
 struct Leaf {
     id: Word,
@@ -178,8 +179,8 @@ fn discover_cross_binding_psb(module: &Module) -> Option<PsbDiscovery> {
     let is_buffer_var =
         |id: Word| -> bool { var_storage.get(&id) == Some(&StorageClass::StorageBuffer) };
 
-    let mut value_def: HashMap<Word, Instruction> = HashMap::new();
-    let mut value_type: HashMap<Word, Word> = HashMap::new();
+    let mut value_def: HashMap<Word, Instruction> = HashMap::default();
+    let mut value_type: HashMap<Word, Word> = HashMap::default();
     for function in &module.functions {
         for block in &function.blocks {
             for inst in &block.instructions {
@@ -267,7 +268,7 @@ fn discover_cross_binding_psb(module: &Module) -> Option<PsbDiscovery> {
         .filter(|(id, _)| is_sb_pointer(**id))
         .map(|(id, definition)| (*id, pointer_operands(definition)))
         .collect::<HashMap<_, _>>();
-    let mut dependents = HashMap::<Word, Vec<Word>>::new();
+    let mut dependents = HashMap::<Word, Vec<Word>>::default();
     for (&value, operands) in &dependencies {
         for &operand in operands {
             dependents.entry(operand).or_default().push(value);
@@ -311,8 +312,8 @@ fn discover_cross_binding_psb(module: &Module) -> Option<PsbDiscovery> {
         return None;
     }
 
-    let mut children: HashMap<Word, Vec<Word>> = HashMap::new();
-    let mut parents: HashMap<Word, Vec<Word>> = HashMap::new();
+    let mut children: HashMap<Word, Vec<Word>> = HashMap::default();
+    let mut parents: HashMap<Word, Vec<Word>> = HashMap::default();
     for (id, def) in &value_def {
         if !is_sb_pointer(*id) {
             continue;
@@ -326,7 +327,7 @@ fn discover_cross_binding_psb(module: &Module) -> Option<PsbDiscovery> {
             }
         }
     }
-    let mut closure: HashSet<Word> = HashSet::new();
+    let mut closure: HashSet<Word> = HashSet::default();
     let mut stack: Vec<Word> = cross_binding_merges.clone();
     while let Some(v) = stack.pop() {
         if !closure.insert(v) {
@@ -357,7 +358,7 @@ fn discover_cross_binding_psb(module: &Module) -> Option<PsbDiscovery> {
         .collect();
 
     let mut leaves: Vec<Leaf> = Vec::new();
-    let mut buffer_slot: HashMap<Word, u32> = HashMap::new();
+    let mut buffer_slot: HashMap<Word, u32> = HashMap::default();
     for &v in &closure_values {
         if is_buffer_var(v) {
             let &pointee = var_pointee.get(&v)?;
@@ -450,7 +451,7 @@ fn discover_cross_binding_psb(module: &Module) -> Option<PsbDiscovery> {
         )
     };
 
-    let mut load_store_ptr_uses: HashSet<Word> = HashSet::new();
+    let mut load_store_ptr_uses: HashSet<Word> = HashSet::default();
     for function in &module.functions {
         for block in &function.blocks {
             for inst in &block.instructions {
@@ -712,7 +713,7 @@ fn rewrite_cross_binding_pointer_merges_inner(
         id
     };
 
-    let mut psb_ptr: HashMap<Word, Word> = HashMap::new();
+    let mut psb_ptr: HashMap<Word, Word> = HashMap::default();
     for leaf in &leaves {
         if psb_ptr.contains_key(&leaf.pointee) {
             continue;
@@ -741,7 +742,7 @@ fn rewrite_cross_binding_pointer_merges_inner(
         }
         psb_ptr.insert(leaf.pointee, id);
     }
-    let mut retype: HashMap<Word, Word> = HashMap::new();
+    let mut retype: HashMap<Word, Word> = HashMap::default();
     for &v in &closure_values {
         if is_buffer_var(v) {
             continue;
@@ -876,7 +877,7 @@ fn rewrite_cross_binding_pointer_merges_inner(
         .sort_unstable_by_key(|(function, source, ty)| (*function, *source, *ty));
     nullish_retype_requests.dedup();
     let uint_zero = uint_const(module, &mut fresh, 0);
-    let mut nullish_retypes = HashMap::new();
+    let mut nullish_retypes = HashMap::default();
     let mut nullish_conversions = vec![Vec::new(); module.functions.len()];
     let mut nullish_zero_addresses = vec![None; module.functions.len()];
     for (function_index, source, new_type) in nullish_retype_requests {
@@ -1033,7 +1034,7 @@ fn rewrite_cross_binding_pointer_merges_inner(
     let mut slots: Vec<u32> = buffer_slot.values().copied().collect();
     slots.sort_unstable();
     slots.dedup();
-    let mut slot_consts: HashMap<u32, Word> = HashMap::new();
+    let mut slot_consts: HashMap<u32, Word> = HashMap::default();
     for slot in slots {
         slot_consts
             .entry(slot)
@@ -1041,7 +1042,7 @@ fn rewrite_cross_binding_pointer_merges_inner(
     }
     let leaf_map: HashMap<Word, &Leaf> = leaves.iter().map(|l| (l.id, l)).collect();
 
-    let mut var_base: HashMap<Word, Word> = HashMap::new();
+    let mut var_base: HashMap<Word, Word> = HashMap::default();
     let whole_buffer_leaves: Vec<Word> = leaves
         .iter()
         .filter(|l| is_buffer_var(l.id))
@@ -1466,7 +1467,7 @@ mod tests {
         let ptr_uchar = 4;
         let ptr_ushort = 5;
         let ushort = 6;
-        let type_defs = HashMap::from([
+        let type_defs = crate::fxhash::map_from([
             (
                 uchar,
                 inst(
@@ -1517,9 +1518,9 @@ mod tests {
             Some(chain),
             vec![Operand::IdRef(base), Operand::IdRef(index)],
         );
-        let value_defs = HashMap::from([(chain, chain_inst.clone())]);
-        let value_type = HashMap::from([(base, ptr_uchar), (chain, ptr_uchar)]);
-        let all_value_types = HashMap::from([(index, ulong)]);
+        let value_defs = crate::fxhash::map_from([(chain, chain_inst.clone())]);
+        let value_type = crate::fxhash::map_from([(base, ptr_uchar), (chain, ptr_uchar)]);
+        let all_value_types = crate::fxhash::map_from([(index, ulong)]);
         assert_eq!(
             byte_element_step(
                 chain,
@@ -1532,7 +1533,7 @@ mod tests {
             Some((base, index))
         );
 
-        let wide_type = HashMap::from([(base, ptr_ushort), (chain, ptr_uchar)]);
+        let wide_type = crate::fxhash::map_from([(base, ptr_ushort), (chain, ptr_uchar)]);
         assert_eq!(
             byte_element_step(
                 chain,
@@ -1544,7 +1545,7 @@ mod tests {
             ),
             None
         );
-        let narrow_index = HashMap::from([(index, uint)]);
+        let narrow_index = crate::fxhash::map_from([(index, uint)]);
         assert_eq!(
             byte_element_step(
                 chain,
@@ -1557,7 +1558,7 @@ mod tests {
             None
         );
 
-        let load = HashMap::from([(
+        let load = crate::fxhash::map_from([(
             chain,
             inst(
                 Op::Load,

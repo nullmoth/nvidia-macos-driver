@@ -1,8 +1,8 @@
+use crate::fxhash::HashMap;
 use crate::spirv_module::Module;
 use crate::spirv_module::Operand;
 use crate::spirv_module::{Block, Function, Instruction};
 use spirv::{Op, StorageClass, Word};
-use std::collections::HashMap;
 
 pub const DEFAULT_LOOP_BUDGET: u32 = 1 << 16;
 
@@ -114,7 +114,7 @@ impl ConstantPool {
                 .iter()
                 .find(|inst| inst.class.opcode == Op::TypeVoid)
                 .and_then(|inst| inst.result_id),
-            undef_by_type: HashMap::new(),
+            undef_by_type: HashMap::default(),
             additions: Vec::new(),
         };
         pool.uint = pool.find_or_create(module, Op::TypeInt, None, || {

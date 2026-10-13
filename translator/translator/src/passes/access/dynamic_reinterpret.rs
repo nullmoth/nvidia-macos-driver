@@ -4,7 +4,7 @@ pub(in crate::passes) fn rewrite_dynamic_struct_index_reinterpret(
     ctx: &mut Ctx,
     entry_idx: usize,
 ) -> Result<(), String> {
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -108,8 +108,8 @@ pub(in crate::passes) fn rewrite_dynamic_struct_index_reinterpret(
         return Ok(());
     }
 
-    let mut use_sites: HashMap<Word, Vec<(usize, usize, bool)>> = HashMap::new();
-    let mut disqualified: HashSet<Word> = HashSet::new();
+    let mut use_sites: HashMap<Word, Vec<(usize, usize, bool)>> = HashMap::default();
+    let mut disqualified: HashSet<Word> = HashSet::default();
     let plan_ids: HashSet<Word> = plans.iter().map(|p| p.ac_id).collect();
     let result_pointee_of: HashMap<Word, Word> =
         plans.iter().map(|p| (p.ac_id, p.result_pointee)).collect();
@@ -168,7 +168,7 @@ pub(in crate::passes) fn rewrite_dynamic_struct_index_reinterpret(
     }
 
     let member0 = ctx.const_uint(0);
-    let mut new_ptr_ty: HashMap<(StorageClass, Word), Word> = HashMap::new();
+    let mut new_ptr_ty: HashMap<(StorageClass, Word), Word> = HashMap::default();
     for p in &plans {
         new_ptr_ty
             .entry((p.sc, p.elem_ty))
@@ -305,7 +305,7 @@ struct DynamicBlockView {
 }
 
 fn pointer_storage_and_pointee(ctx: &Ctx) -> HashMap<Word, (StorageClass, Word)> {
-    let mut info = HashMap::new();
+    let mut info = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -397,8 +397,8 @@ fn exact_block_view_uses(
 ) -> HashMap<Word, Vec<(usize, usize)>> {
     let view_of: HashMap<Word, DynamicBlockView> =
         views.iter().map(|view| (view.ac_id, *view)).collect();
-    let mut uses: HashMap<Word, Vec<(usize, usize)>> = HashMap::new();
-    let mut disqualified: HashSet<Word> = HashSet::new();
+    let mut uses: HashMap<Word, Vec<(usize, usize)>> = HashMap::default();
+    let mut disqualified: HashSet<Word> = HashSet::default();
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             if inst.result_id.is_some_and(|id| view_of.contains_key(&id))
@@ -1026,7 +1026,7 @@ pub(in crate::passes) fn rewrite_dynamic_struct_index_vector_reinterpret(
     }
 
     let member0 = ctx.const_uint(0);
-    let mut elem_ptr_ty = HashMap::new();
+    let mut elem_ptr_ty = HashMap::default();
     for view in &views {
         elem_ptr_ty
             .entry((view.sc, view.elem_ty))
@@ -1130,7 +1130,7 @@ pub(in crate::passes) fn rewrite_dynamic_homogeneous_struct_index_load(
     entry_idx: usize,
 ) -> Result<(), String> {
     let value_types = function_value_types(ctx, entry_idx);
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -1275,8 +1275,8 @@ pub(in crate::passes) fn rewrite_dynamic_homogeneous_struct_index_load(
     }
 
     let plan_ids: HashSet<Word> = plans.iter().map(|plan| plan.chain_id).collect();
-    let mut use_sites: HashMap<Word, Vec<(usize, usize)>> = HashMap::new();
-    let mut disqualified = HashSet::new();
+    let mut use_sites: HashMap<Word, Vec<(usize, usize)>> = HashMap::default();
+    let mut disqualified = HashSet::default();
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             if inst.result_id.is_some_and(|id| plan_ids.contains(&id))
@@ -1456,7 +1456,7 @@ pub(in crate::passes) fn rewrite_chained_element_reinterpret(
     ctx: &mut Ctx,
     entry_idx: usize,
 ) -> Result<(), String> {
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -1471,7 +1471,7 @@ pub(in crate::passes) fn rewrite_chained_element_reinterpret(
         }
     }
 
-    let mut chain_def: HashMap<Word, Instruction> = HashMap::new();
+    let mut chain_def: HashMap<Word, Instruction> = HashMap::default();
     for block in &ctx.module.functions[entry_idx].blocks {
         for inst in &block.instructions {
             if matches!(inst.class.opcode, Op::InBoundsAccessChain | Op::AccessChain) {
@@ -1579,8 +1579,8 @@ pub(in crate::passes) fn rewrite_chained_element_reinterpret(
     let plan_ids: HashSet<Word> = plans.iter().map(|p| p.ac_id).collect();
     let result_pointee_of: HashMap<Word, Word> =
         plans.iter().map(|p| (p.ac_id, p.result_pointee)).collect();
-    let mut use_sites: HashMap<Word, Vec<(usize, usize, bool)>> = HashMap::new();
-    let mut disqualified: HashSet<Word> = HashSet::new();
+    let mut use_sites: HashMap<Word, Vec<(usize, usize, bool)>> = HashMap::default();
+    let mut disqualified: HashSet<Word> = HashSet::default();
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             if inst
@@ -1637,8 +1637,8 @@ pub(in crate::passes) fn rewrite_chained_element_reinterpret(
 
     let member0 = ctx.const_uint(0);
     let uint_ty = ctx.ty_uint();
-    let mut new_ptr_ty: HashMap<(StorageClass, Word), Word> = HashMap::new();
-    let mut sum_id: HashMap<Word, Word> = HashMap::new();
+    let mut new_ptr_ty: HashMap<(StorageClass, Word), Word> = HashMap::default();
+    let mut sum_id: HashMap<Word, Word> = HashMap::default();
     for p in &plans {
         new_ptr_ty
             .entry((p.sc, p.elem_ty))
@@ -1759,7 +1759,7 @@ pub(in crate::passes) fn rewrite_byte_buffer_chained_reinterpret(
     ctx: &mut Ctx,
     entry_idx: usize,
 ) -> Result<(), String> {
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -1796,7 +1796,7 @@ pub(in crate::passes) fn rewrite_byte_buffer_chained_reinterpret(
         })
         .collect();
 
-    let mut chain_def: HashMap<Word, Instruction> = HashMap::new();
+    let mut chain_def: HashMap<Word, Instruction> = HashMap::default();
     for block in &ctx.module.functions[entry_idx].blocks {
         for inst in &block.instructions {
             if matches!(inst.class.opcode, Op::InBoundsAccessChain | Op::AccessChain) {
@@ -1933,8 +1933,8 @@ pub(in crate::passes) fn rewrite_byte_buffer_chained_reinterpret(
     let plan_ids: HashSet<Word> = plans.iter().map(|p| p.ac_id).collect();
     let result_pointee_of: HashMap<Word, Word> =
         plans.iter().map(|p| (p.ac_id, p.result_pointee)).collect();
-    let mut use_sites: HashMap<Word, Vec<(usize, usize, bool)>> = HashMap::new();
-    let mut disqualified: HashSet<Word> = HashSet::new();
+    let mut use_sites: HashMap<Word, Vec<(usize, usize, bool)>> = HashMap::default();
+    let mut disqualified: HashSet<Word> = HashSet::default();
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             if inst
@@ -1990,9 +1990,9 @@ pub(in crate::passes) fn rewrite_byte_buffer_chained_reinterpret(
     }
 
     let uint_ty = ctx.ty_uint();
-    let mut elem_ptr_ty: HashMap<Word, Word> = HashMap::new();
-    let mut sum_id: HashMap<Word, Word> = HashMap::new();
-    let mut ratio_const: HashMap<u32, Word> = HashMap::new();
+    let mut elem_ptr_ty: HashMap<Word, Word> = HashMap::default();
+    let mut sum_id: HashMap<Word, Word> = HashMap::default();
+    let mut ratio_const: HashMap<u32, Word> = HashMap::default();
     for p in &plans {
         elem_ptr_ty
             .entry(p.elem_ty)

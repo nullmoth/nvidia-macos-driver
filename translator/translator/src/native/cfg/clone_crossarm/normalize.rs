@@ -95,7 +95,7 @@ fn unify_return_like_exits(
         ]
     };
     let role = role_for_name(&exit);
-    let typed = crate::native::tir::lower_block_carrier(&exit, &exit_lines, &HashMap::new());
+    let typed = crate::native::tir::lower_block_carrier(&exit, &exit_lines, &HashMap::default());
     out.push(BodyBlock {
         name: exit,
         role,

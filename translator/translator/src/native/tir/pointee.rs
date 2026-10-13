@@ -1,8 +1,8 @@
 use super::*;
+use crate::fxhash::{HashMap, HashSet};
 use crate::native::ir::{LlType, LlValue};
 use crate::native::lex::strip_comment;
 use crate::native::parse::{parse_type, split_top_level};
-use std::collections::{HashMap, HashSet};
 
 pub(in crate::native) fn resolve_alloca_ty(line: &str) -> Option<LlType> {
     let line = strip_comment(line).trim();
@@ -40,9 +40,9 @@ pub(in crate::native) fn resolve_gep_pointee(
 pub(in crate::native) fn infer_use_pointees<B: AsRef<TirBlock>>(
     blocks: &[B],
 ) -> (HashMap<String, LlType>, usize, HashSet<String>) {
-    let mut map: HashMap<String, LlType> = HashMap::new();
+    let mut map: HashMap<String, LlType> = HashMap::default();
     let mut conflicts = 0usize;
-    let mut byte_viewed: HashSet<String> = HashSet::new();
+    let mut byte_viewed: HashSet<String> = HashSet::default();
     for tb in blocks {
         let tb = tb.as_ref();
         for inst in &tb.insts {

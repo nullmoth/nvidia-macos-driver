@@ -1,6 +1,6 @@
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::{Instruction, Module, Operand};
 use spirv::{MemoryAccess, Op, StorageClass, Word};
-use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -387,7 +387,7 @@ mod tests {
 
     fn ssa_order_holds(module: &Module) -> bool {
         let defined: HashSet<Word> = body(module).iter().filter_map(|i| i.result_id).collect();
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         body(module).iter().all(|i| {
             let ok = id_operands(i).all(|id| !defined.contains(&id) || seen.contains(&id));
             seen.extend(i.result_id);

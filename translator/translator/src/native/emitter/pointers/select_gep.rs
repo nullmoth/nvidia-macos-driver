@@ -27,7 +27,7 @@ impl Emitter {
                 selected,
                 source_ty,
                 indices,
-                &mut HashSet::new(),
+                &mut HashSet::default(),
                 instructions,
             )?;
             self.selected_access_trees.insert(name.to_string(), tree);

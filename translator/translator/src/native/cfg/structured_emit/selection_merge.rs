@@ -281,7 +281,7 @@ fn block_reaches(blocks: &[BodyBlock], start: &str, target: &str) -> bool {
         .iter()
         .map(|block| (block.name.as_str(), block))
         .collect::<HashMap<_, _>>();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut pending = vec![start.to_string()];
     while let Some(current) = pending.pop() {
         if current == target {
@@ -372,7 +372,7 @@ fn loop_entry_arm_reaches_merge_or_structured_exit(
         || start == info.continue_target
         || block_ends_in_void_return(blocks, start)
         || block_ends_in_unreachable(blocks, start);
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut stack = vec![start.to_string()];
     while let Some(node) = stack.pop() {
         if node == candidate {
@@ -459,7 +459,7 @@ pub(in crate::native) fn loop_exit_selection_convergence(
         let mut reaching_arms = 0usize;
         for arm in &arms {
             let mut reached = false;
-            let mut seen: HashSet<String> = HashSet::new();
+            let mut seen: HashSet<String> = HashSet::default();
             let mut stack = vec![arm.clone()];
             while let Some(node) = stack.pop() {
                 if node == candidate {
@@ -557,7 +557,7 @@ pub(in crate::native) fn synth_unique_selection_merge_phi(
     counter: &mut usize,
 ) -> Option<String> {
     let preds = header_owned_merge_predecessors(blocks, forest, header, natural);
-    synth_unique_selection_merge_phi_explicit(blocks, &preds, natural, &HashSet::new(), counter)
+    synth_unique_selection_merge_phi_explicit(blocks, &preds, natural, &HashSet::default(), counter)
 }
 
 pub(in crate::native) fn header_owned_merge_predecessors(
@@ -612,7 +612,7 @@ pub(in crate::native) fn synth_unique_selection_merge_phi_explicit(
             .iter()
             .filter(|(_, target)| target != natural)
             .fold(
-                HashMap::<&str, Vec<&str>>::new(),
+                HashMap::<&str, Vec<&str>>::default(),
                 |mut map, (pred, route)| {
                     map.entry(route.as_str()).or_default().push(pred.as_str());
                     map
@@ -691,7 +691,7 @@ pub(in crate::native) fn synth_unique_selection_merge_phi_explicit(
         let mut blk = crate::native::tir::lower_block_carrier(
             &new_name,
             &[format!("br label {natural}")],
-            &std::collections::HashMap::new(),
+            &crate::fxhash::HashMap::default(),
         )?;
         for (merged, ty, typed_red) in &passthrough_merges {
             blk.push_value_phi(merged, ty, typed_red);
@@ -1082,7 +1082,7 @@ fn first_enclosing_selection_region_exit(
         .enumerate()
         .map(|(index, block)| (block.name.clone(), index))
         .collect::<HashMap<_, _>>();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut stack = vec![target.to_string()];
     while let Some(node) = stack.pop() {
         if !seen.insert(node.clone()) {
@@ -1177,7 +1177,7 @@ pub(in crate::native) fn ordinary_selection_enclosing_boundary_target(
         return None;
     }
 
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut stack = header_successors
         .into_iter()
         .filter(|target| target != merge)
@@ -1254,7 +1254,7 @@ pub(in crate::native) fn pure_enclosing_selection_owners(
         .iter()
         .map(|block| (block.name.as_str(), block))
         .collect::<HashMap<_, _>>();
-    let mut dependents_by_owner: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut dependents_by_owner: HashMap<String, HashSet<String>> = HashMap::default();
     for (header, merge) in source_selection_merges {
         let Some((left, right)) = by_name
             .get(header.as_str())
@@ -1294,7 +1294,7 @@ pub(in crate::native) fn materialize_pure_enclosing_selection_routes_for_owner(
     };
     let mut dependents = dependents.clone();
     let mut changed = false;
-    let mut declined = HashSet::new();
+    let mut declined = HashSet::default();
     loop {
         let forest = analyze(blocks);
         let by_name = blocks

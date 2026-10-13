@@ -37,7 +37,7 @@ pub(in crate::passes) fn narrow_access_chain_indices(ctx: &mut Ctx, entry_idx: u
     let wg_narrow = std::env::var_os("NVMTL_NO_WG_NARROW").is_none();
     let n_blocks = ctx.module.functions[entry_idx].blocks.len();
     for bi in 0..n_blocks {
-        let mut memo: HashMap<Word, Word> = HashMap::new();
+        let mut memo: HashMap<Word, Word> = HashMap::default();
         let mut new_insts: Vec<Instruction> = vec![];
         let insts = ctx.module.functions[entry_idx].blocks[bi]
             .instructions
@@ -224,7 +224,7 @@ pub(in crate::passes) fn lower_scalar_i64_arithmetic_to_u32_halves(ctx: &mut Ctx
             ctx.module.set_id_bound(staged_bound);
         }
     }
-    let mut int_types: HashMap<Word, (u32, u32)> = HashMap::new();
+    let mut int_types: HashMap<Word, (u32, u32)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -241,7 +241,7 @@ pub(in crate::passes) fn lower_scalar_i64_arithmetic_to_u32_halves(ctx: &mut Ctx
         int_types.insert(id, (*width, *signed));
     }
 
-    let mut value_types: HashMap<Word, Word> = HashMap::new();
+    let mut value_types: HashMap<Word, Word> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -759,7 +759,7 @@ pub(in crate::passes) fn rewrite_scalar_pointer_arithmetic_access_chains(
     ctx: &mut Ctx,
     entry_idx: usize,
 ) {
-    let mut pointer_storage = HashMap::new();
+    let mut pointer_storage = HashMap::default();
     let aggregate_types = ctx
         .new_globals
         .iter()
@@ -772,7 +772,7 @@ pub(in crate::passes) fn rewrite_scalar_pointer_arithmetic_access_chains(
         })
         .filter_map(|inst| inst.result_id)
         .collect::<HashSet<_>>();
-    let mut pointer_pointees = HashMap::new();
+    let mut pointer_pointees = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -791,7 +791,7 @@ pub(in crate::passes) fn rewrite_scalar_pointer_arithmetic_access_chains(
         }
     }
 
-    let mut id_types = HashMap::new();
+    let mut id_types = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -1070,7 +1070,7 @@ pub(in crate::passes) fn decorate_ptr_access_chain_base_strides(ctx: &mut Ctx) {
             .result_type = Some(pointer_type);
     }
 
-    let mut defs: HashMap<Word, Instruction> = HashMap::new();
+    let mut defs: HashMap<Word, Instruction> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -1081,7 +1081,7 @@ pub(in crate::passes) fn decorate_ptr_access_chain_base_strides(ctx: &mut Ctx) {
         }
     }
 
-    let mut already: HashSet<Word> = HashSet::new();
+    let mut already: HashSet<Word> = HashSet::default();
     for ann in &ctx.module.annotations {
         if ann.class.opcode == Op::Decorate
             && ann.operands.get(1) == Some(&Operand::Decoration(Decoration::ArrayStride))
@@ -1236,7 +1236,7 @@ pub(in crate::passes) fn walk_into_type_partial(
 
 pub(in crate::passes) fn drop_overindexed_zero_tail(ctx: &mut Ctx, entry_idx: usize) {
     let value_types = function_value_types(ctx, entry_idx);
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -1254,7 +1254,7 @@ pub(in crate::passes) fn drop_overindexed_zero_tail(ctx: &mut Ctx, entry_idx: us
     let mut edits: Vec<(usize, usize, usize)> = Vec::new();
     let mut reinterpret_edits: Vec<(usize, usize, usize, Word, StorageClass, Word)> = Vec::new();
     let mut identities: Vec<(Word, Word)> = Vec::new();
-    let mut uses = HashMap::<Word, Vec<(usize, usize)>>::new();
+    let mut uses = HashMap::<Word, Vec<(usize, usize)>>::default();
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, instruction) in block.instructions.iter().enumerate() {
             for operand in &instruction.operands {
@@ -1417,7 +1417,7 @@ pub(in crate::passes) fn drop_overindexed_zero_tail(ctx: &mut Ctx, entry_idx: us
 
 pub(in crate::passes) fn lower_private_low_byte_word_load(ctx: &mut Ctx, function_idx: usize) {
     let value_types = function_value_types(ctx, function_idx);
-    let mut ptr_info = HashMap::<Word, (StorageClass, Word)>::new();
+    let mut ptr_info = HashMap::<Word, (StorageClass, Word)>::default();
     for instruction in ctx
         .module
         .types_global_values
@@ -1435,8 +1435,8 @@ pub(in crate::passes) fn lower_private_low_byte_word_load(ctx: &mut Ctx, functio
         }
     }
     let function = &ctx.module.functions[function_idx];
-    let mut definitions = HashMap::<Word, (usize, usize)>::new();
-    let mut users = HashMap::<Word, Vec<(usize, usize)>>::new();
+    let mut definitions = HashMap::<Word, (usize, usize)>::default();
+    let mut users = HashMap::<Word, Vec<(usize, usize)>>::default();
     for (block_index, block) in function.blocks.iter().enumerate() {
         for (instruction_index, instruction) in block.instructions.iter().enumerate() {
             if let Some(id) = instruction.result_id {
@@ -1510,7 +1510,7 @@ pub(in crate::passes) fn lower_private_low_byte_word_load(ctx: &mut Ctx, functio
                 continue;
             }
             let mut extracts = Vec::new();
-            let mut dead = HashSet::from([chain_id]);
+            let mut dead = crate::fxhash::set_from([chain_id]);
             let mut valid = true;
             for &(load_block, load_index) in chain_users {
                 let load = &function.blocks[load_block].instructions[load_index];
@@ -1629,7 +1629,7 @@ pub(in crate::passes) fn lower_private_low_byte_word_load(ctx: &mut Ctx, functio
 
 pub(in crate::passes) fn reroot_demoted_array_element_overindex(ctx: &mut Ctx, entry_idx: usize) {
     let value_types = function_value_types(ctx, entry_idx);
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()

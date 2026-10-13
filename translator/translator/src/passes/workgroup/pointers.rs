@@ -82,7 +82,7 @@ pub(in crate::passes) fn rewrite_workgroup_root_access(
     }
 
     let u0 = ctx.const_uint(0);
-    let mut leaf_chain: HashMap<Word, Word> = HashMap::new();
+    let mut leaf_chain: HashMap<Word, Word> = HashMap::default();
     let mut injected: Vec<Instruction> = vec![];
     for target in want {
         let (pointee, path) = if let Some(path) = path_to_leaf(&types, array_ty, target) {
@@ -394,7 +394,7 @@ pub(in crate::passes) fn rewrite_collapsed_buffer(
             }
         }
     }
-    let mut leaf_chain: HashMap<Word, Word> = HashMap::new();
+    let mut leaf_chain: HashMap<Word, Word> = HashMap::default();
     let mut injected: Vec<Instruction> = vec![];
     for t in want {
         if let Some(alias) = typed_aliases
@@ -500,7 +500,7 @@ pub(in crate::passes) fn rewrite_collapsed_buffer(
         }
         if sidecar_used {
             ctx.emit_sidecar
-                .remap_local_pointer_field_store_sources(&HashMap::from([(pid, id)]));
+                .remap_local_pointer_field_store_sources(&crate::fxhash::map_from([(pid, id)]));
         }
     }
 }
@@ -527,12 +527,12 @@ pub(in crate::passes) fn rewrite_pointer_storage(
         .collect();
     let mut roots = direct_roots.clone();
     let mut changed = true;
-    let mut new_ptr_types: HashMap<(Word, Word), Word> = HashMap::new();
+    let mut new_ptr_types: HashMap<(Word, Word), Word> = HashMap::default();
     let mut value_types = combined_value_types(ctx, entry_idx);
     let desired_pointees = pointer_leaf_use_types(ctx, entry_idx, &value_types);
     let mut value_defs = combined_value_defs(ctx, entry_idx);
     let types = combined_type_defs(ctx, defs);
-    let mut scaled_vector_strides = HashSet::new();
+    let mut scaled_vector_strides = HashSet::default();
     let mut vector_stride_plans = vec![];
 
     while changed {

@@ -1,11 +1,11 @@
+use crate::fxhash::HashMap;
+#[cfg(test)]
+use crate::fxhash::HashSet;
 #[cfg(test)]
 use crate::spirv_module::{Function, Module, Operand};
 #[cfg(test)]
 use spirv::Op;
 use spirv::Word;
-use std::collections::HashMap;
-#[cfg(test)]
-use std::collections::HashSet;
 
 pub(in crate::native) struct EmittedDominators {
     index: HashMap<Word, usize>,
@@ -469,7 +469,7 @@ mod tests {
         ]);
         assert_eq!(
             functions_violating_constructed_cfg(&module),
-            HashSet::from([100])
+            crate::fxhash::set_from([100])
         );
     }
 
@@ -568,7 +568,7 @@ mod tests {
         ]);
         assert_eq!(
             functions_violating_constructed_cfg(&module),
-            HashSet::from([100])
+            crate::fxhash::set_from([100])
         );
     }
 
@@ -602,7 +602,7 @@ mod tests {
         ]);
         assert_eq!(
             functions_violating_constructed_cfg(&module),
-            HashSet::from([100])
+            crate::fxhash::set_from([100])
         );
     }
 
@@ -687,7 +687,7 @@ mod tests {
         ]);
         assert_eq!(
             functions_violating_constructed_cfg(&module),
-            HashSet::from([100])
+            crate::fxhash::set_from([100])
         );
     }
 
@@ -716,7 +716,7 @@ mod tests {
         ]);
         assert_eq!(
             functions_violating_constructed_cfg(&module),
-            HashSet::from([100])
+            crate::fxhash::set_from([100])
         );
     }
 
@@ -730,7 +730,7 @@ mod tests {
         ]);
         assert_eq!(
             functions_violating_constructed_cfg(&module),
-            HashSet::from([100])
+            crate::fxhash::set_from([100])
         );
     }
 
@@ -768,7 +768,7 @@ mod tests {
         ]);
         assert_eq!(
             functions_violating_constructed_cfg(&module),
-            HashSet::from([100])
+            crate::fxhash::set_from([100])
         );
     }
 
@@ -781,7 +781,7 @@ mod tests {
         ]);
         assert_eq!(
             functions_violating_constructed_cfg(&module),
-            HashSet::from([100])
+            crate::fxhash::set_from([100])
         );
     }
 
@@ -814,7 +814,7 @@ mod tests {
         ]);
         assert_eq!(
             functions_violating_constructed_cfg(&module),
-            HashSet::from([100])
+            crate::fxhash::set_from([100])
         );
     }
 }

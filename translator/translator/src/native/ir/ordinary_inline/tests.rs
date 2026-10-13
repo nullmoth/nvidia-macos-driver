@@ -136,7 +136,7 @@ define void @main() {
 
     assert_eq!(
         module.preinlined_helper_type_capabilities,
-        HashSet::from([LlTypeCapability::Float16, LlTypeCapability::Int64,])
+        crate::fxhash::set_from([LlTypeCapability::Float16, LlTypeCapability::Int64,])
     );
 
     let mut pointer_module = parsed(
@@ -154,7 +154,7 @@ define void @main(ptr %pointer) {
     pointer_module.inline_ordinary_leaf_helpers();
     assert_eq!(
         pointer_module.preinlined_helper_type_capabilities,
-        HashSet::from([LlTypeCapability::Int8])
+        crate::fxhash::set_from([LlTypeCapability::Int8])
     );
 }
 

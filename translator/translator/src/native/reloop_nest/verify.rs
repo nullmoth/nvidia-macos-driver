@@ -1,7 +1,7 @@
 use super::super::relooper::block_label;
+use crate::fxhash::HashMap;
 use crate::spirv_module::{Block, Operand};
 use spirv::{Op, Word};
-use std::collections::HashMap;
 
 pub(super) fn reads_the_flow_variable_unwritten(
     blocks: &[Block],

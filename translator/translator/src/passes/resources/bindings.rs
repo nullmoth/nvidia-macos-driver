@@ -167,8 +167,8 @@ pub(in crate::passes) fn validate_descriptor_binding_classes_with_ray_table(
         .iter()
         .filter_map(|instruction| instruction.result_id.map(|result| (result, instruction)))
         .collect::<HashMap<_, _>>();
-    let mut sets = HashMap::<Word, u32>::new();
-    let mut bindings = HashMap::<Word, u32>::new();
+    let mut sets = HashMap::<Word, u32>::default();
+    let mut bindings = HashMap::<Word, u32>::default();
     for annotation in &module.annotations {
         if annotation.class.opcode != Op::Decorate {
             continue;

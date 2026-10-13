@@ -14,7 +14,7 @@ pub(in crate::passes) fn validate_wg_flatword(
     uint_ty: Word,
 ) -> Option<Vec<(usize, usize)>> {
     let mut chains: Vec<(usize, usize)> = Vec::new();
-    let mut chain_ids: HashSet<Word> = HashSet::new();
+    let mut chain_ids: HashSet<Word> = HashSet::default();
     for (bi, block) in func.blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             let mentions = inst
@@ -89,8 +89,8 @@ pub(in crate::passes) fn validate_wg_flatword(
 pub(in crate::passes) fn remodel_workgroup_flatword_aggregate(ctx: &mut Ctx, entry_idx: usize) {
     let uint_ty = ctx.ty_uint();
 
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
-    let mut defs: HashMap<Word, Instruction> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
+    let mut defs: HashMap<Word, Instruction> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -192,8 +192,8 @@ pub(in crate::passes) fn remodel_workgroup_single_field_struct_array(
     ctx: &mut Ctx,
     entry_idx: usize,
 ) {
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
-    let mut defs: HashMap<Word, Instruction> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
+    let mut defs: HashMap<Word, Instruction> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -314,7 +314,7 @@ fn validate_single_field_struct_array_uses(
     ptr_info: &HashMap<Word, (StorageClass, Word)>,
 ) -> Option<Vec<(usize, usize)>> {
     let mut chains = Vec::new();
-    let mut chain_ids = HashSet::new();
+    let mut chain_ids = HashSet::default();
     for (bi, block) in func.blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             let mentions_var = inst
@@ -441,8 +441,8 @@ pub(in crate::passes) fn remodel_workgroup_floatarray_atomic_as_uint(
         return Ok(());
     };
 
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
-    let mut defs: HashMap<Word, Instruction> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
+    let mut defs: HashMap<Word, Instruction> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -636,7 +636,7 @@ pub(in crate::passes) fn validate_wg_float_atomic(
     ptr_info: &HashMap<Word, (StorageClass, Word)>,
 ) -> Option<WgFloatAtomicPlan> {
     let mut chains: Vec<(usize, usize)> = Vec::new();
-    let mut chain_ids: HashSet<Word> = HashSet::new();
+    let mut chain_ids: HashSet<Word> = HashSet::default();
     for (bi, block) in func.blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             let mentions_var = inst
@@ -664,8 +664,8 @@ pub(in crate::passes) fn validate_wg_float_atomic(
         return None;
     }
 
-    let mut bitcast_ids: HashSet<Word> = HashSet::new();
-    let mut bitcast_to_chain: HashMap<Word, Word> = HashMap::new();
+    let mut bitcast_ids: HashSet<Word> = HashSet::default();
+    let mut bitcast_to_chain: HashMap<Word, Word> = HashMap::default();
     let mut int_ty: Option<Word> = None;
     for block in &func.blocks {
         for inst in &block.instructions {

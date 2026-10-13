@@ -1,6 +1,6 @@
+use crate::fxhash::{HashMap, HashSet};
 use super::ir::{LlGep, LlType, LlValue, TypedValue};
 use super::parse::{LlCall, LlLoad};
-use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -27,7 +27,7 @@ pub(in crate::native) fn canonicalize_single_predecessor_phis(
         .iter()
         .map(|block| block.name.as_str())
         .collect::<HashSet<_>>();
-    let mut predecessors: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut predecessors: HashMap<String, HashSet<String>> = HashMap::default();
     for block in blocks.iter() {
         let Some(typed) = block.typed.as_ref() else {
             continue;
@@ -82,7 +82,7 @@ pub(in crate::native) fn canonicalize_single_predecessor_phis(
             .expect("identity phi came from a typed carrier")
             .insts
             .remove(inst_index);
-        let substitutions = HashMap::from([(result, replacement)]);
+        let substitutions = crate::fxhash::map_from([(result, replacement)]);
         for block in blocks.iter_mut() {
             if let Some(typed) = block.typed_mut() {
                 typed.substitute_values(&substitutions);
@@ -98,7 +98,7 @@ pub(in crate::native) fn prune_literal_branch_dead_blocks(
         return blocks;
     }
 
-    let mut declined = HashSet::new();
+    let mut declined = HashSet::default();
     loop {
         let candidate = blocks.iter().find_map(|block| {
             if declined.contains(&block.name) {
@@ -131,7 +131,7 @@ pub(in crate::native) fn prune_unused_geps(
     mut blocks: Vec<crate::native::cfg::BodyBlock>,
 ) -> Vec<crate::native::cfg::BodyBlock> {
     loop {
-        let mut used = HashSet::<String>::new();
+        let mut used = HashSet::<String>::default();
         for block in &blocks {
             let Some(typed) = block.typed.as_ref() else {
                 return blocks;
@@ -192,7 +192,7 @@ fn prune_one_literal_edge(
         .enumerate()
         .map(|(index, block)| (block.name.as_str(), index))
         .collect::<HashMap<_, _>>();
-    let mut reachable = HashSet::new();
+    let mut reachable = HashSet::default();
     let mut pending = vec![0usize];
     while let Some(index) = pending.pop() {
         let block = &blocks[index];
@@ -215,7 +215,7 @@ fn prune_one_literal_edge(
                 .filter_map(|successor| block_indices.get(successor).copied()),
         );
     }
-    let mut predecessors = HashMap::<String, HashSet<String>>::new();
+    let mut predecessors = HashMap::<String, HashSet<String>>::default();
     for block in blocks
         .iter()
         .filter(|block| reachable.contains(&block.name))
@@ -1205,7 +1205,7 @@ mod tests {
     #[test]
     fn build_from_blocks_shares_the_existing_carrier() {
         let carrier = Arc::new(
-            lower_block_carrier("%entry", &["ret void"], &HashMap::new()).expect("carrier"),
+            lower_block_carrier("%entry", &["ret void"], &HashMap::default()).expect("carrier"),
         );
         let blocks = [crate::native::cfg::BodyBlock {
             name: "%entry".to_string(),
@@ -1218,9 +1218,9 @@ mod tests {
 
     #[test]
     fn unused_geps_are_omitted_to_a_fixpoint_before_emission() {
-        let types = HashMap::new();
-        let mut value_types = HashMap::new();
-        let mut pointees = HashMap::new();
+        let types = HashMap::default();
+        let mut value_types = HashMap::default();
+        let mut pointees = HashMap::default();
         let block = crate::native::cfg::BodyBlock {
             name: "%entry".to_string(),
             role: crate::native::cfg::BlockRole::Normal,
@@ -1260,9 +1260,9 @@ mod tests {
 
     #[test]
     fn finalized_pointer_identity_is_substituted_before_emission() {
-        let types = HashMap::new();
-        let mut value_types = HashMap::new();
-        let mut pointees = HashMap::new();
+        let types = HashMap::default();
+        let mut value_types = HashMap::default();
+        let mut pointees = HashMap::default();
         let mut block = |name: &str, lines: &[&str]| crate::native::cfg::BodyBlock {
             name: name.to_string(),
             role: crate::native::cfg::BlockRole::Normal,
@@ -1300,9 +1300,9 @@ mod tests {
 
     #[test]
     fn literal_branch_pruning_removes_dead_blocks_and_canonicalizes_phis() {
-        let types = HashMap::new();
-        let mut value_types = HashMap::new();
-        let mut pointees = HashMap::new();
+        let types = HashMap::default();
+        let mut value_types = HashMap::default();
+        let mut pointees = HashMap::default();
         let mut block = |name: &str, lines: &[&str]| crate::native::cfg::BodyBlock {
             name: name.to_string(),
             role: crate::native::cfg::BlockRole::Normal,
@@ -1350,9 +1350,9 @@ mod tests {
 
     #[test]
     fn literal_branch_pruning_declines_uneditable_phi_carriers() {
-        let types = HashMap::new();
-        let mut value_types = HashMap::new();
-        let mut pointees = HashMap::new();
+        let types = HashMap::default();
+        let mut value_types = HashMap::default();
+        let mut pointees = HashMap::default();
         let mut block = |name: &str, lines: &[&str]| crate::native::cfg::BodyBlock {
             name: name.to_string(),
             role: crate::native::cfg::BlockRole::Normal,
@@ -1385,9 +1385,9 @@ mod tests {
 
     #[test]
     fn literal_branch_pruning_ignores_unaffected_aggregate_phi() {
-        let types = HashMap::new();
-        let mut value_types = HashMap::new();
-        let mut pointees = HashMap::new();
+        let types = HashMap::default();
+        let mut value_types = HashMap::default();
+        let mut pointees = HashMap::default();
         let mut block = |name: &str, lines: &[&str]| crate::native::cfg::BodyBlock {
             name: name.to_string(),
             role: crate::native::cfg::BlockRole::Normal,
@@ -1427,9 +1427,9 @@ mod tests {
 
     #[test]
     fn an_uneditable_phi_blocks_only_its_own_literal_edge() {
-        let types = HashMap::new();
-        let mut value_types = HashMap::new();
-        let mut pointees = HashMap::new();
+        let types = HashMap::default();
+        let mut value_types = HashMap::default();
+        let mut pointees = HashMap::default();
         let mut block = |name: &str, lines: &[&str]| crate::native::cfg::BodyBlock {
             name: name.to_string(),
             role: crate::native::cfg::BlockRole::Normal,
@@ -1480,9 +1480,9 @@ mod tests {
 
     #[test]
     fn literal_branch_pruning_repairs_a_still_reachable_target_phi() {
-        let types = HashMap::new();
-        let mut value_types = HashMap::new();
-        let mut pointees = HashMap::new();
+        let types = HashMap::default();
+        let mut value_types = HashMap::default();
+        let mut pointees = HashMap::default();
         let mut block = |name: &str, lines: &[&str]| crate::native::cfg::BodyBlock {
             name: name.to_string(),
             role: crate::native::cfg::BlockRole::Normal,
@@ -1522,9 +1522,9 @@ mod tests {
 
     #[test]
     fn phi_canonicalization_rejects_partial_and_conflicting_shapes() {
-        let types = HashMap::new();
-        let mut value_types = HashMap::new();
-        let mut pointees = HashMap::new();
+        let types = HashMap::default();
+        let mut value_types = HashMap::default();
+        let mut pointees = HashMap::default();
         let mut block = |name: &str, lines: &[&str]| crate::native::cfg::BodyBlock {
             name: name.to_string(),
             role: crate::native::cfg::BlockRole::Normal,
@@ -1602,8 +1602,8 @@ mod tests {
             "%root = alloca i32, align 4",
             "ret void",
         ]);
-        let tir = build(&function, "%entry", &HashMap::new()).expect("build");
-        let storage = derive_pointer_storage(&tir, &[], &HashMap::new());
+        let tir = build(&function, "%entry", &HashMap::default()).expect("build");
+        let storage = derive_pointer_storage(&tir, &[], &HashMap::default());
 
         assert_eq!(storage.get("%root"), Some(&StorageClass::Function));
         assert_eq!(storage.get("%next"), Some(&StorageClass::Function));
@@ -1620,9 +1620,9 @@ mod tests {
             "%element = getelementptr [4 x i32], ptr addrspace(2) @table, i64 0, i64 1",
             "ret void",
         ]);
-        let tir = build(&function, "%entry", &HashMap::new()).expect("build");
-        let seeds = HashMap::from([("@table".to_string(), StorageClass::Private)]);
-        let storage = derive_pointer_storage_from(&tir, &[], &HashMap::new(), &seeds);
+        let tir = build(&function, "%entry", &HashMap::default()).expect("build");
+        let seeds = crate::fxhash::map_from([("@table".to_string(), StorageClass::Private)]);
+        let storage = derive_pointer_storage_from(&tir, &[], &HashMap::default(), &seeds);
 
         assert_eq!(storage.get("%element"), Some(&StorageClass::Private));
         assert_eq!(storage.get("%next"), Some(&StorageClass::Private));
@@ -1631,7 +1631,7 @@ mod tests {
 
     #[test]
     fn redirect_successor_matches_relowered_lines() {
-        let types = HashMap::new();
+        let types = HashMap::default();
         let cases: &[&[&str]] = &[
             &["br label %old"],
             &["br i1 %c, label %old, label %keep"],
@@ -1656,7 +1656,7 @@ mod tests {
 
     #[test]
     fn rewrite_phi_predecessor_matches_relowered_lines() {
-        let types = HashMap::new();
+        let types = HashMap::default();
         let cases: &[&[&str]] = &[
             &["%r = phi i32 [ %a, %old ], [ %b, %keep ]", "br label %x"],
             &["%r = phi i32 [ %a, %keep ], [ %b, %old ]", "br label %x"],
@@ -1682,7 +1682,7 @@ mod tests {
 
     #[test]
     fn set_unconditional_branch_matches_relowered_lines() {
-        let types = HashMap::new();
+        let types = HashMap::default();
         let cases: &[&[&str]] = &[
             &["%c = icmp eq i32 %a, %b", "br i1 %c, label %t, label %f"],
             &["ret i32 %v"],
@@ -1707,7 +1707,7 @@ mod tests {
 
     #[test]
     fn set_terminator_line_matches_relowered_lines() {
-        let types = HashMap::new();
+        let types = HashMap::default();
         let cases: &[(&[&str], &str)] = &[
             (&["%a = add i32 %x, %y", "unreachable"], "ret void"),
             (&["%a = add i32 %x, %y", "unreachable"], "ret i32 undef"),
@@ -1733,7 +1733,7 @@ mod tests {
 
     #[test]
     fn terminator_only_block_matches_relowered_line() {
-        let types = HashMap::new();
+        let types = HashMap::default();
         let cases: &[(&[&str], &str)] = &[
             (
                 &["%c = icmp eq i32 %a, %b", "br i1 %c, label %t, label %f"],
@@ -1844,7 +1844,7 @@ mod tests {
             "%g = extractelement <4 x float> %b, i32 0",
             "ret void",
         ]);
-        let tir = build(&f, "%entry", &HashMap::new()).expect("build");
+        let tir = build(&f, "%entry", &HashMap::default()).expect("build");
         let vt = &tir.value_types;
         assert_eq!(vt.get("%a"), Some(&LlType::Int(32)));
         assert_eq!(
@@ -1872,7 +1872,7 @@ mod tests {
             "%d = call i32 @air.foo(i32 %x)",
             "ret void",
         ]);
-        let tir = build(&f, "%entry", &HashMap::new()).unwrap();
+        let tir = build(&f, "%entry", &HashMap::default()).unwrap();
         let vt = &tir.value_types;
         assert_eq!(vt.get("%n"), Some(&LlType::Float));
         assert_eq!(vt.get("%z"), Some(&LlType::Int(32)));
@@ -1896,7 +1896,7 @@ mod tests {
             "%c = extractvalue { i32, { float, i32 } } %n, 1, 0",
             "ret void",
         ]);
-        let tir = build(&f, "%entry", &HashMap::new()).unwrap();
+        let tir = build(&f, "%entry", &HashMap::default()).unwrap();
         let vt = &tir.value_types;
         assert_eq!(vt.get("%a"), Some(&LlType::Int(32)));
         assert_eq!(vt.get("%b"), Some(&LlType::Float));
@@ -1906,7 +1906,7 @@ mod tests {
     #[test]
     fn extractvalue_resolves_named_struct_via_type_table() {
         let f = func(&["%a = extractvalue %struct.Foo %v, 1", "ret void"]);
-        let mut types = HashMap::new();
+        let mut types = HashMap::default();
         types.insert(
             "%struct.Foo".to_string(),
             LlType::Struct(vec![LlType::Float, LlType::Int(32)]),
@@ -1916,7 +1916,7 @@ mod tests {
             Some(&LlType::Int(32))
         );
         assert_eq!(
-            build(&f, "%entry", &HashMap::new())
+            build(&f, "%entry", &HashMap::default())
                 .unwrap()
                 .value_types
                 .get("%a"),
@@ -1927,14 +1927,14 @@ mod tests {
     #[test]
     fn fcmp_with_flags_resolves_to_bool() {
         let f = func(&["%c = fcmp fast olt float %a, %b", "ret void"]);
-        let tir = build(&f, "%entry", &HashMap::new()).unwrap();
+        let tir = build(&f, "%entry", &HashMap::default()).unwrap();
         assert_eq!(tir.value_types.get("%c"), Some(&LlType::Bool));
     }
 
     #[test]
     fn icmp_on_vector_yields_bool_vector() {
         let f = func(&["%c = icmp eq <4 x i32> %a, %a", "ret void"]);
-        let tir = build(&f, "%entry", &HashMap::new()).unwrap();
+        let tir = build(&f, "%entry", &HashMap::default()).unwrap();
         assert_eq!(
             tir.value_types.get("%c"),
             Some(&LlType::Vector(Box::new(LlType::Bool), 4))
@@ -1950,7 +1950,7 @@ mod tests {
             "%old = atomicrmw add ptr %dst, i32 %a seq_cst",
             "ret void",
         ]);
-        let tir = build(&f, "%entry", &HashMap::new()).unwrap();
+        let tir = build(&f, "%entry", &HashMap::default()).unwrap();
         let inst = |r: &str| {
             tir.blocks[0]
                 .insts
@@ -2004,7 +2004,7 @@ mod tests {
         let direct = build(
             &func(&["%r = call i32 @foo(i32 %x)", "ret void"]),
             "%entry",
-            &HashMap::new(),
+            &HashMap::default(),
         )
         .expect("direct call");
         let inst = &direct.blocks[0].insts[0];
@@ -2023,7 +2023,7 @@ mod tests {
         let musttail = build(
             &func(&["%r = musttail call i32 @foo(i32 %x)", "ret void"]),
             "%entry",
-            &HashMap::new(),
+            &HashMap::default(),
         )
         .expect("musttail call");
         let inst = &musttail.blocks[0].insts[0];
@@ -2034,7 +2034,7 @@ mod tests {
         let malformed = build(
             &func(&["%r = call i32 @foo(", "ret void"]),
             "%entry",
-            &HashMap::new(),
+            &HashMap::default(),
         )
         .expect("malformed call carrier");
         let inst = &malformed.blocks[0].insts[0];
@@ -2048,7 +2048,7 @@ mod tests {
             "%r = call float @air.atomic.global.add.f.f32(ptr addrspace(1) %p, float %v, i32 0)",
             "ret void",
         ]);
-        let tir = build(&f, "%entry", &HashMap::new()).expect("build");
+        let tir = build(&f, "%entry", &HashMap::default()).expect("build");
         let inst = tir.blocks[0]
             .insts
             .iter()
@@ -2066,7 +2066,7 @@ mod tests {
             "call void @air.atomic.global.store.f.f32(ptr addrspace(1) %q, float %w, i32 0)",
             "ret void",
         ]);
-        let tir2 = build(&f2, "%entry", &HashMap::new()).expect("build");
+        let tir2 = build(&f2, "%entry", &HashMap::default()).expect("build");
         let store = tir2.blocks[0]
             .insts
             .iter()
@@ -2077,7 +2077,7 @@ mod tests {
             vec![("%q".to_string(), LlType::Float)]
         );
         let f3 = func(&["%s = call i32 @ordinary(ptr addrspace(1) %z)", "ret void"]);
-        let tir3 = build(&f3, "%entry", &HashMap::new()).expect("build");
+        let tir3 = build(&f3, "%entry", &HashMap::default()).expect("build");
         let other = tir3.blocks[0]
             .insts
             .iter()
@@ -2138,7 +2138,7 @@ mod tests {
             "%i2 = add i32 %i, 1",
             "ret void",
         ]);
-        let tir = build(&f, "%entry", &HashMap::new()).expect("build");
+        let tir = build(&f, "%entry", &HashMap::default()).expect("build");
         let phi = tir.blocks[0]
             .insts
             .iter()
@@ -2175,7 +2175,7 @@ mod tests {
             "a:",
             "ret void",
         ]);
-        let tir = build(&f, "%entry", &HashMap::new()).expect("build");
+        let tir = build(&f, "%entry", &HashMap::default()).expect("build");
         let sw = tir.blocks[0]
             .switch
             .as_ref()
@@ -2187,7 +2187,7 @@ mod tests {
     #[test]
     fn body_carries_ret_emit_on_the_block() {
         let f = func(&["%a = add i32 0, 1", "ret i32 %a"]);
-        let tir = build(&f, "%entry", &HashMap::new()).expect("build");
+        let tir = build(&f, "%entry", &HashMap::default()).expect("build");
         assert!(matches!(
             tir.blocks[0].ret,
             RetEmit::Value(TypedValue {
@@ -2196,7 +2196,7 @@ mod tests {
             })
         ));
         let v = func(&["ret void"]);
-        let tir = build(&v, "%entry", &HashMap::new()).expect("build");
+        let tir = build(&v, "%entry", &HashMap::default()).expect("build");
         assert!(matches!(tir.blocks[0].ret, RetEmit::Void));
     }
 
@@ -2212,7 +2212,7 @@ mod tests {
             "done:",
             "ret void",
         ]);
-        let tir = build(&f, "%entry", &HashMap::new()).expect("build");
+        let tir = build(&f, "%entry", &HashMap::default()).expect("build");
         assert_eq!(tir.blocks.len(), 3);
         assert_eq!(tir.blocks[0].label, "%entry");
         assert_eq!(tir.blocks[0].terminator, TirTerminator::Br("%loop".into()));
@@ -2237,14 +2237,14 @@ mod tests {
             "%q = getelementptr inbounds i8, ptr %local, i64 2",
             "ret void",
         ]);
-        let tir = build(&f, "%entry", &HashMap::new()).unwrap();
+        let tir = build(&f, "%entry", &HashMap::default()).unwrap();
         assert_eq!(tir.value_types.get("%p"), Some(&LlType::Ptr(1)));
         assert_eq!(tir.value_types.get("%q"), Some(&LlType::Ptr(0)));
     }
 
     #[test]
     fn getelementptr_resolves_nested_struct_pointee() {
-        let mut named = HashMap::new();
+        let mut named = HashMap::default();
         named.insert(
             "%struct.S".to_string(),
             LlType::Struct(vec![
@@ -2380,7 +2380,7 @@ mod tests {
                 "ret void",
             ]),
             "%entry",
-            &HashMap::new(),
+            &HashMap::default(),
         )
         .expect("build");
         assert_eq!(tir.use_pointees.get("%p"), Some(&LlType::Float));
@@ -2402,7 +2402,7 @@ mod tests {
                     "ret void",
                 ]),
                 "%entry",
-                &HashMap::new(),
+                &HashMap::default(),
             )
             .expect("build")
             .blocks,
@@ -2421,7 +2421,7 @@ mod tests {
             &build(
                 &func(&["%b = load half, ptr %p", "ret void"]),
                 "%entry",
-                &HashMap::new(),
+                &HashMap::default(),
             )
             .expect("build")
             .blocks,
@@ -2442,7 +2442,7 @@ mod tests {
                     "ret void",
                 ]),
                 "%entry",
-                &HashMap::new(),
+                &HashMap::default(),
             )
             .expect("build")
             .blocks,
@@ -2464,7 +2464,7 @@ mod tests {
                 "ret void",
             ]),
             "%entry",
-            &HashMap::new(),
+            &HashMap::default(),
         )
         .expect("build");
         assert_eq!(tir.use_pointees.get("%p"), Some(&LlType::Int(32)));
@@ -2485,7 +2485,7 @@ mod tests {
                 "ret void",
             ]),
             "%entry",
-            &HashMap::new(),
+            &HashMap::default(),
         )
         .expect("build");
         assert_eq!(tir.use_pointees.get("%a"), Some(&LlType::Float));

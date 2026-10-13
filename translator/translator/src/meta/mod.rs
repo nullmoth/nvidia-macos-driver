@@ -1,5 +1,5 @@
+use crate::fxhash::HashMap;
 use crate::passes::Stage;
-use std::collections::HashMap;
 
 mod embedded;
 mod function_constants;
@@ -582,7 +582,7 @@ impl KernMeta {
             .roles
             .iter()
             .filter_map(|(_, role)| role.buffer_table_slot())
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fxhash::HashSet<_>>();
         let mut stage_inputs = self
             .roles
             .iter()
@@ -591,7 +591,7 @@ impl KernMeta {
             .collect::<Vec<_>>();
         stage_inputs.sort_unstable();
         let mut next = 0u32;
-        let mut bindings = HashMap::new();
+        let mut bindings = HashMap::default();
         for param_index in stage_inputs {
             while occupied.contains(&next) {
                 next = next.saturating_add(1);
@@ -651,17 +651,17 @@ fn parse_air_kernel_meta_with_nodes(
     let mut roles = vec![];
     let mut unmodelled_input_params: Vec<(u32, String)> = vec![];
     let mut aliased_implicit_imageblock_params: Vec<u32> = vec![];
-    let mut function_constant_buffer_locations = HashMap::new();
-    let mut buffer_layouts = HashMap::new();
-    let mut imageblock_layouts = HashMap::new();
-    let mut buffer_address_spaces = HashMap::new();
-    let mut buffer_type_sizes = HashMap::new();
-    let mut buffer_object_sizes = HashMap::new();
-    let mut buffer_type_names = HashMap::new();
-    let mut buffer_accesses = HashMap::new();
-    let mut texture_type_names = HashMap::new();
-    let mut declared_descriptor_counts = HashMap::new();
-    let mut stage_input_type_names = HashMap::new();
+    let mut function_constant_buffer_locations = HashMap::default();
+    let mut buffer_layouts = HashMap::default();
+    let mut imageblock_layouts = HashMap::default();
+    let mut buffer_address_spaces = HashMap::default();
+    let mut buffer_type_sizes = HashMap::default();
+    let mut buffer_object_sizes = HashMap::default();
+    let mut buffer_type_names = HashMap::default();
+    let mut buffer_accesses = HashMap::default();
+    let mut texture_type_names = HashMap::default();
+    let mut declared_descriptor_counts = HashMap::default();
+    let mut stage_input_type_names = HashMap::default();
     let mut top_level_texture_locations: Vec<u32> = vec![];
     let mut indirect_buffer_struct_refs: Vec<(u32, u32, u32)> = vec![];
     for r in refs_in(nodes.get(&in_ref)?) {
@@ -810,7 +810,7 @@ fn parse_air_kernel_meta_with_nodes(
     let embedded_arguments = detect_embedded_arguments(nodes, &argument_buffers);
     let unsurfaced = unsurfaced_embedded_resources(nodes, &argument_buffers);
     let mut implicit_imageblock_attachments = detect_implicit_imageblock_attachments(ll)?;
-    let mut aliased_implicit_imageblock_planes = HashMap::new();
+    let mut aliased_implicit_imageblock_planes = HashMap::default();
     for param in &aliased_implicit_imageblock_params {
         let Some(layout) = imageblock_layouts.get(param) else {
             continue;
@@ -973,7 +973,7 @@ pub fn air_intersection_calls_are_supported(ll: &str) -> bool {
 fn collect_nodes(ll: &str) -> HashMap<u32, String> {
     #[cfg(test)]
     AIR_META_PARSE_COUNT.with(|count| count.set(count.get() + 1));
-    let mut nodes = HashMap::new();
+    let mut nodes = HashMap::default();
     for l in ll.lines() {
         let l = l.trim();
         let Some(rest) = l.strip_prefix('!') else {
@@ -1085,7 +1085,7 @@ fn quoted_symbol_name(s: &str) -> Option<String> {
 
 fn function_param_pointer_address_spaces(ll: &str, name: &str) -> Option<HashMap<u32, u32>> {
     let params = function_param_list(ll, name)?;
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     for (idx, param) in split_top_level_commas(&params).into_iter().enumerate() {
         let param = param.trim_start();
         if !param.starts_with("ptr") {
@@ -2117,22 +2117,22 @@ fn parse_air_fragment_meta_with_nodes(
         .unwrap_or_default();
 
     let mut roles = vec![];
-    let mut input_type_names = HashMap::new();
+    let mut input_type_names = HashMap::default();
     let mut unmodelled_input_params: Vec<(u32, String)> = vec![];
-    let mut buffer_layouts = HashMap::new();
-    let mut varying_types = HashMap::new();
-    let mut varying_names = HashMap::new();
-    let mut varying_user_semantics = HashMap::new();
-    let mut varying_interpolation = HashMap::new();
-    let mut texture_type_names = HashMap::new();
-    let mut declared_descriptor_counts = HashMap::new();
-    let mut color_input_type_names = HashMap::new();
+    let mut buffer_layouts = HashMap::default();
+    let mut varying_types = HashMap::default();
+    let mut varying_names = HashMap::default();
+    let mut varying_user_semantics = HashMap::default();
+    let mut varying_interpolation = HashMap::default();
+    let mut texture_type_names = HashMap::default();
+    let mut declared_descriptor_counts = HashMap::default();
+    let mut color_input_type_names = HashMap::default();
     let mut varying_loc = 0u32;
-    let mut buffer_address_spaces = HashMap::new();
-    let mut buffer_type_sizes = HashMap::new();
-    let mut buffer_object_sizes = HashMap::new();
-    let mut buffer_type_names = HashMap::new();
-    let mut buffer_accesses = HashMap::new();
+    let mut buffer_address_spaces = HashMap::default();
+    let mut buffer_type_sizes = HashMap::default();
+    let mut buffer_object_sizes = HashMap::default();
+    let mut buffer_type_names = HashMap::default();
+    let mut buffer_accesses = HashMap::default();
     let mut indirect_buffer_struct_refs: Vec<(u32, u32, u32)> = Vec::new();
     let param_address_spaces = entry
         .and_then(|name| function_param_pointer_address_spaces(ll, name))
@@ -2388,9 +2388,9 @@ fn parse_air_vertex_meta_with_nodes(
     let mut output_roles = vec![];
     let mut invariant_outputs = vec![];
     let mut unmodelled_output_members = vec![];
-    let mut output_varying_types = HashMap::new();
-    let mut output_varying_names = HashMap::new();
-    let mut output_varying_user_semantics = HashMap::new();
+    let mut output_varying_types = HashMap::default();
+    let mut output_varying_names = HashMap::default();
+    let mut output_varying_user_semantics = HashMap::default();
     let mut out_loc = 0u32;
     for r in refs_in(nodes.get(&out_ref)?) {
         let Some(node) = nodes.get(&r) else { continue };
@@ -2439,19 +2439,19 @@ fn parse_air_vertex_meta_with_nodes(
 
     let mut roles = vec![];
     let mut unmodelled_input_params: Vec<(u32, String)> = vec![];
-    let mut parameter_type_names = HashMap::new();
-    let mut vertex_input_types = HashMap::new();
-    let mut vertex_input_names = HashMap::new();
-    let mut patch_input_types = HashMap::new();
-    let mut patch_input_names = HashMap::new();
-    let mut buffer_layouts = HashMap::new();
-    let mut buffer_address_spaces = HashMap::new();
-    let mut buffer_type_sizes = HashMap::new();
-    let mut buffer_object_sizes = HashMap::new();
-    let mut buffer_type_names = HashMap::new();
-    let mut buffer_accesses = HashMap::new();
-    let mut texture_type_names = HashMap::new();
-    let mut declared_descriptor_counts = HashMap::new();
+    let mut parameter_type_names = HashMap::default();
+    let mut vertex_input_types = HashMap::default();
+    let mut vertex_input_names = HashMap::default();
+    let mut patch_input_types = HashMap::default();
+    let mut patch_input_names = HashMap::default();
+    let mut buffer_layouts = HashMap::default();
+    let mut buffer_address_spaces = HashMap::default();
+    let mut buffer_type_sizes = HashMap::default();
+    let mut buffer_object_sizes = HashMap::default();
+    let mut buffer_type_names = HashMap::default();
+    let mut buffer_accesses = HashMap::default();
+    let mut texture_type_names = HashMap::default();
+    let mut declared_descriptor_counts = HashMap::default();
     let mut indirect_buffer_struct_refs = Vec::new();
     let mut patch_control_point = None;
     let param_address_spaces = entry

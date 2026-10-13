@@ -36,8 +36,8 @@ impl LlModule {
         kern: Option<&meta::KernMeta>,
         entry_name: Option<&str>,
     ) -> Result<Self, String> {
-        let mut types = HashMap::new();
-        let mut loop_metadata: HashMap<String, String> = HashMap::new();
+        let mut types = HashMap::default();
+        let mut loop_metadata: HashMap<String, String> = HashMap::default();
         for raw_line in ll.lines() {
             let line = strip_comment(raw_line).trim();
             if line.starts_with('!')
@@ -116,7 +116,7 @@ impl LlModule {
             return Err("native emitter: no function definitions found".into());
         }
         let entry_functions = entry_name
-            .map(|name| HashSet::from([name.to_string()]))
+            .map(|name| crate::fxhash::set_from([name.to_string()]))
             .unwrap_or_else(|| infer_entry_functions(ll));
         let metadata_byte_buffer_params =
             infer_metadata_byte_buffer_params(kern, entry_name, &functions);
@@ -196,27 +196,27 @@ impl LlModule {
             globals,
             static_init_globals: meta::static_init_foldable_global_values(ll),
             entry_name: entry_name.map(str::to_string),
-            preinlined_static_initializers: HashSet::new(),
-            preinlined_helper_pointer_loads: HashSet::new(),
-            preinlined_helper_type_capabilities: HashSet::new(),
+            preinlined_static_initializers: HashSet::default(),
+            preinlined_helper_pointer_loads: HashSet::default(),
+            preinlined_helper_type_capabilities: HashSet::default(),
             entry_functions,
-            ptr_pointees: HashMap::new(),
-            local_alloca_pointees: HashMap::new(),
+            ptr_pointees: HashMap::default(),
+            local_alloca_pointees: HashMap::default(),
             imageblock_data_pointee,
             imageblock_dimensions,
             imageblock_shared_cells,
             aliased_imageblock_planes,
             imageblock_threads_per_threadgroup_param,
             imageblock_cell_scale,
-            metadata_pointee_params: HashSet::new(),
-            metadata_pointee_sizes: HashMap::new(),
+            metadata_pointee_params: HashSet::default(),
+            metadata_pointee_sizes: HashMap::default(),
             metadata_byte_buffer_params,
             metadata_data_buffer_params,
             metadata_primitive_buffer_pointees,
             metadata_fc_buffer_locations,
-            raw_buffer_params: HashSet::new(),
-            call_connected_raw_params: HashSet::new(),
-            param_connected_raw_params: HashSet::new(),
+            raw_buffer_params: HashSet::default(),
+            call_connected_raw_params: HashSet::default(),
+            param_connected_raw_params: HashSet::default(),
         };
         module.infer_metadata_buffer_pointees(kern, entry_name);
         module.infer_pointer_pointees();
@@ -654,11 +654,11 @@ fn source_loop_controls(
     blocks: &[crate::native::cfg::BodyBlock],
     loop_metadata: &HashMap<String, String>,
 ) -> HashMap<String, (spirv::LoopControl, Option<u32>)> {
-    let mut controls = HashMap::new();
+    let mut controls = HashMap::default();
     if loop_metadata.is_empty() {
         return controls;
     }
-    let mut latch_hints: HashMap<String, (spirv::LoopControl, Option<u32>)> = HashMap::new();
+    let mut latch_hints: HashMap<String, (spirv::LoopControl, Option<u32>)> = HashMap::default();
     let mut current = entry_label.to_string();
     for raw in body {
         let line = strip_comment(raw).trim();

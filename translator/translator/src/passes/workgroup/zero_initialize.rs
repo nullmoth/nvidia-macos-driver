@@ -18,7 +18,7 @@ pub(in crate::passes) fn zero_initialize_workgroup_memory(ctx: &mut Ctx, entry_i
 
     let shader_initialized_atomic_vars =
         shader_initialized_atomic_workgroup_vars(ctx, entry_idx, &vars);
-    let mut null_by_pointee: HashMap<Word, Word> = HashMap::new();
+    let mut null_by_pointee: HashMap<Word, Word> = HashMap::default();
     let mut prologue = Vec::new();
     let cooperative =
         std::env::var_os("NVMTL_WG_ZERO_ALL").is_none() && entry_label(ctx, entry_idx).is_some();
@@ -407,8 +407,8 @@ fn shader_initialized_atomic_workgroup_vars(
 ) -> HashSet<Word> {
     let workgroup_vars: HashSet<Word> = vars.iter().map(|(var, _)| *var).collect();
     let pointer_sources = pointer_source_map(ctx, entry_idx);
-    let mut prebarrier_stores = HashSet::new();
-    let mut atomic_uses = HashSet::new();
+    let mut prebarrier_stores = HashSet::default();
+    let mut atomic_uses = HashSet::default();
     let mut before_first_barrier = true;
 
     for block in &ctx.module.functions[entry_idx].blocks {
@@ -444,7 +444,7 @@ fn shader_initialized_atomic_workgroup_vars(
 }
 
 fn pointer_source_map(ctx: &Ctx, entry_idx: usize) -> HashMap<Word, Word> {
-    let mut sources = HashMap::new();
+    let mut sources = HashMap::default();
     for block in &ctx.module.functions[entry_idx].blocks {
         for inst in &block.instructions {
             if matches!(
@@ -466,7 +466,7 @@ fn pointer_source_map(ctx: &Ctx, entry_idx: usize) -> HashMap<Word, Word> {
 
 fn pointer_root(ptr: Word, sources: &HashMap<Word, Word>) -> Option<Word> {
     let mut cur = ptr;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while seen.insert(cur) {
         match sources.get(&cur).copied() {
             Some(next) => cur = next,

@@ -8,13 +8,13 @@ use super::super::emitter::Emitter;
 use super::super::ir::{LlType, LlValue};
 use super::super::parse::{parse_type, parse_typed_value};
 use super::*;
+use crate::fxhash::{HashMap, HashSet};
 use crate::passes::{self, Stage};
 use crate::spirv_module::load_bytes;
 use crate::spirv_module::Operand;
 use crate::spirv_module::{Block, Instruction};
 use crate::{disassemble, meta, tools};
 use spirv::{BuiltIn, Capability, Decoration, Op, Scope, SelectionControl, StorageClass, Word};
-use std::collections::{HashMap, HashSet};
 
 fn shifted_descriptor_layout(set: u32, shift: u32) -> crate::reflect::DescriptorLayout {
     let shift_range =
@@ -163,8 +163,8 @@ entry:
     let vertex_locations = descriptor_locations(&load_bytes(&vertex_spv).expect("vertex SPIR-V"));
     let fragment_locations =
         descriptor_locations(&load_bytes(&fragment_spv).expect("fragment SPIR-V"));
-    assert_eq!(vertex_locations, HashSet::from([(2, 0)]));
-    assert_eq!(fragment_locations, HashSet::from([(2, 1000)]));
+    assert_eq!(vertex_locations, crate::fxhash::set_from([(2, 0)]));
+    assert_eq!(fragment_locations, crate::fxhash::set_from([(2, 1000)]));
     assert!(vertex_locations.is_disjoint(&fragment_locations));
 
     let (shifted_vertex_spv, shifted_vertex_reflection) =
@@ -2020,7 +2020,7 @@ entry:
         }
     };
     let reaches = |from: usize, to: usize| {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut pending = vec![from];
         while let Some(block) = pending.pop() {
             if block == to {
@@ -2185,7 +2185,7 @@ target triple = "spirv-unknown-vulkan1.2"
     .collect::<Vec<_>>();
     let asm = disassemble(&out).expect("disassemble transformed");
     assert!(!asm.contains("OpUndef"), "{asm}");
-    let mut constants = std::collections::HashMap::new();
+    let mut constants = crate::fxhash::HashMap::default();
     for line in asm.lines().map(str::trim) {
         let Some((id, rest)) = line.split_once(" = Op") else {
             continue;

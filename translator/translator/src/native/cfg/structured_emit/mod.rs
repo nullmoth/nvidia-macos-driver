@@ -8,7 +8,7 @@ use super::loopforest::{
 use super::structured_order::{structured_order, structured_order_terminal};
 use super::{blocks, clone_crossarm, loopforest};
 use super::{BlockRole, BodyBlock, LoopMergeInfo};
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{HashMap, HashSet};
 
 mod plan;
 pub(in crate::native) use plan::*;
@@ -418,14 +418,14 @@ mod tests {
             bb("%exit", &["unreachable"]),
         ];
         let forest = analyze(&blocks);
-        let loop_merges = HashMap::from([(
+        let loop_merges = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
                 continue_target: "%continue".to_string(),
             },
         )]);
-        let mut selections = HashMap::new();
+        let mut selections = HashMap::default();
         refine_loop_entry_terminal_selection_merges(
             &blocks,
             &forest,
@@ -449,14 +449,14 @@ mod tests {
             bb("%exit", &["unreachable"]),
         ];
         let forest = analyze(&blocks);
-        let loop_merges = HashMap::from([(
+        let loop_merges = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
                 continue_target: "%continue".to_string(),
             },
         )]);
-        let mut selections = HashMap::new();
+        let mut selections = HashMap::default();
         refine_loop_entry_terminal_selection_merges(
             &blocks,
             &forest,
@@ -481,19 +481,19 @@ mod tests {
             bb("%exit", &["unreachable"]),
         ];
         let forest = analyze(&blocks);
-        let loop_merges = HashMap::from([(
+        let loop_merges = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
                 continue_target: "%continue".to_string(),
             },
         )]);
-        let mut selections = HashMap::new();
+        let mut selections = HashMap::default();
         refine_nested_terminal_selection_merges(
             &blocks,
             &forest,
             &loop_merges,
-            &HashMap::new(),
+            &HashMap::default(),
             &mut selections,
         );
         assert_eq!(selections.get("%selection"), Some(&"%join".to_string()));
@@ -513,19 +513,19 @@ mod tests {
             bb("%exit", &["unreachable"]),
         ];
         let forest = analyze(&blocks);
-        let loop_merges = HashMap::from([(
+        let loop_merges = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
                 continue_target: "%continue".to_string(),
             },
         )]);
-        let mut selections = HashMap::new();
+        let mut selections = HashMap::default();
         refine_nested_terminal_selection_merges(
             &blocks,
             &forest,
             &loop_merges,
-            &HashMap::new(),
+            &HashMap::default(),
             &mut selections,
         );
         assert_eq!(selections.get("%selection"), Some(&"%join".to_string()));
@@ -550,7 +550,7 @@ mod tests {
             bb("%outer_exit", &["ret void"]),
         ];
         let forest = analyze(&blocks);
-        let loop_merges = HashMap::from([
+        let loop_merges = crate::fxhash::map_from([
             (
                 "%inner_header".to_string(),
                 LoopMergeInfo {
@@ -566,12 +566,12 @@ mod tests {
                 },
             ),
         ]);
-        let mut selections = HashMap::new();
+        let mut selections = HashMap::default();
         refine_nested_terminal_selection_merges(
             &blocks,
             &forest,
             &loop_merges,
-            &HashMap::new(),
+            &HashMap::default(),
             &mut selections,
         );
         assert_eq!(selections.get("%selection"), Some(&"%work".to_string()));
@@ -595,19 +595,19 @@ mod tests {
             bb("%exit", &["unreachable"]),
         ];
         let forest = analyze(&blocks);
-        let loop_merges = HashMap::from([(
+        let loop_merges = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
                 continue_target: "%continue".to_string(),
             },
         )]);
-        let mut selections = HashMap::new();
+        let mut selections = HashMap::default();
         refine_nested_terminal_selection_merges(
             &blocks,
             &forest,
             &loop_merges,
-            &HashMap::new(),
+            &HashMap::default(),
             &mut selections,
         );
         assert_eq!(selections.get("%switch"), Some(&"%join".to_string()));
@@ -633,12 +633,12 @@ mod tests {
             bb("%trap", &["unreachable"]),
         ];
         let forest = analyze(&blocks);
-        let mut selections = HashMap::new();
+        let mut selections = HashMap::default();
         refine_nested_terminal_selection_merges(
             &blocks,
             &forest,
-            &HashMap::new(),
-            &HashMap::new(),
+            &HashMap::default(),
+            &HashMap::default(),
             &mut selections,
         );
         assert_eq!(selections.get("%selection"), Some(&"%join".to_string()));
@@ -655,12 +655,12 @@ mod tests {
             bb("%ret", &["ret void"]),
         ];
         let forest = analyze(&blocks);
-        let mut selections = HashMap::new();
+        let mut selections = HashMap::default();
         refine_nested_terminal_selection_merges(
             &blocks,
             &forest,
-            &HashMap::new(),
-            &HashMap::new(),
+            &HashMap::default(),
+            &HashMap::default(),
             &mut selections,
         );
         assert!(!selections.contains_key("%guard"));
@@ -713,12 +713,12 @@ mod tests {
             bb("%trap", &["unreachable"]),
         ];
         let forest = analyze(&blocks);
-        let mut selections = HashMap::new();
+        let mut selections = HashMap::default();
         refine_nested_terminal_selection_merges(
             &blocks,
             &forest,
-            &HashMap::new(),
-            &HashMap::new(),
+            &HashMap::default(),
+            &HashMap::default(),
             &mut selections,
         );
         assert_eq!(selections.get("%switch"), Some(&"%join".to_string()));
@@ -736,12 +736,12 @@ mod tests {
             bb("%ret", &["ret void"]),
         ];
         let forest = analyze(&blocks);
-        let mut selections = HashMap::new();
+        let mut selections = HashMap::default();
         refine_nested_terminal_selection_merges(
             &blocks,
             &forest,
-            &HashMap::new(),
-            &HashMap::new(),
+            &HashMap::default(),
+            &HashMap::default(),
             &mut selections,
         );
         assert_eq!(selections.get("%selection"), Some(&"%join".to_string()));
@@ -767,14 +767,14 @@ mod tests {
         }
         assert!(blocks.len() > LOOP_EXIT_SELECTION_MAX_BLOCKS);
         let forest = analyze(&blocks);
-        let loop_merges = HashMap::from([(
+        let loop_merges = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
                 continue_target: "%continue".to_string(),
             },
         )]);
-        let mut selections = HashMap::new();
+        let mut selections = HashMap::default();
         refine_loop_entry_terminal_selection_merges(
             &blocks,
             &forest,
@@ -878,7 +878,7 @@ mod tests {
         let forest = analyze(&blocks);
         let mut merges = selection_merges(&blocks, &forest);
         assert_eq!(merges.get("%a"), Some(&"%exit".to_string()));
-        let loop_merges = HashMap::from([(
+        let loop_merges = crate::fxhash::map_from([(
             "%head".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
@@ -1485,7 +1485,7 @@ mod tests {
             bb("%b", &["br label %m"]),
             bb("%m", &["ret void"]),
         ];
-        let (out, branch, switch) = unique_selection_merges(&blocks, &HashMap::new(), false);
+        let (out, branch, switch) = unique_selection_merges(&blocks, &HashMap::default(), false);
         assert_eq!(out.len(), 4, "no block synthesized for a unique merge");
         assert!(switch.is_empty());
         assert_eq!(
@@ -1504,7 +1504,7 @@ mod tests {
             bb("%b", &["br label %m"]),
             bb("%m", &["ret void"]),
         ];
-        let (out, branch, _switch) = unique_selection_merges(&blocks, &HashMap::new(), false);
+        let (out, branch, _switch) = unique_selection_merges(&blocks, &HashMap::default(), false);
         let entry_merge = branch.get(&("%a".to_string(), "%b".to_string())).unwrap();
         let inner_merge = branch.get(&("%c".to_string(), "%d".to_string())).unwrap();
         assert_ne!(
@@ -1531,7 +1531,7 @@ mod tests {
             bb("%s", &["br label %r"]),
             bb("%r", &["ret void"]),
         ];
-        let (out, _branch, _switch) = unique_selection_merges(&blocks, &HashMap::new(), false);
+        let (out, _branch, _switch) = unique_selection_merges(&blocks, &HashMap::default(), false);
         let preds = out
             .iter()
             .filter(|b| block_successors(b).iter().any(|s| s == "%r"))
@@ -1624,7 +1624,7 @@ mod tests {
             bb("%latch", &["br label %h"]),
             bb("%exit", &["ret void"]),
         ];
-        let loop_merges = HashMap::from([(
+        let loop_merges = crate::fxhash::map_from([(
             "%h".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
@@ -1663,7 +1663,7 @@ mod tests {
             bb("%body", &["br label %continue"]),
             bb("%exit", &["ret void"]),
         ];
-        let loop_merges = HashMap::from([(
+        let loop_merges = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
@@ -1736,14 +1736,14 @@ mod tests {
             bb("%loop_exit", &["br label %done"]),
             bb("%done", &["ret void"]),
         ];
-        let loops = HashMap::from([(
+        let loops = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%loop_exit".to_string(),
                 continue_target: "%continue".to_string(),
             },
         )]);
-        let mut merges = HashMap::from([("%entry".to_string(), "%continue".to_string())]);
+        let mut merges = crate::fxhash::map_from([("%entry".to_string(), "%continue".to_string())]);
 
         assert!(normalize_continue_selection_merge_targets(
             &mut blocks,
@@ -1761,14 +1761,14 @@ mod tests {
             bb("%boundary", &["br label %header"]),
             bb("%done", &["ret void"]),
         ];
-        let loops = HashMap::from([(
+        let loops = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%boundary".to_string(),
                 continue_target: "%boundary".to_string(),
             },
         )]);
-        let mut merges = HashMap::from([("%entry".to_string(), "%boundary".to_string())]);
+        let mut merges = crate::fxhash::map_from([("%entry".to_string(), "%boundary".to_string())]);
 
         assert!(!normalize_continue_selection_merge_targets(
             &mut blocks,
@@ -1789,14 +1789,15 @@ mod tests {
             bb("%continue", &["br label %header"]),
             bb("%exit", &["ret void"]),
         ];
-        let loops = HashMap::from([(
+        let loops = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
                 continue_target: "%continue".to_string(),
             },
         )]);
-        let mut merges = HashMap::from([("%selection".to_string(), "%continue".to_string())]);
+        let mut merges =
+            crate::fxhash::map_from([("%selection".to_string(), "%continue".to_string())]);
 
         assert!(normalize_continue_selection_merge_targets(
             &mut blocks,
@@ -1879,14 +1880,15 @@ mod tests {
             ),
             bb("%exit", &["ret void"]),
         ];
-        let loops = HashMap::from([(
+        let loops = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
                 continue_target: "%continue".to_string(),
             },
         )]);
-        let mut merges = HashMap::from([("%selection".to_string(), "%continue".to_string())]);
+        let mut merges =
+            crate::fxhash::map_from([("%selection".to_string(), "%continue".to_string())]);
 
         assert!(normalize_continue_selection_merge_targets(
             &mut blocks,
@@ -1930,13 +1932,13 @@ mod tests {
                 ],
             ),
         ];
-        let mut loop_merges = HashMap::new();
-        let branch_merges = HashMap::new();
-        let mut branch_merges_by_header = HashMap::from([
+        let mut loop_merges = HashMap::default();
+        let branch_merges = HashMap::default();
+        let mut branch_merges_by_header = crate::fxhash::map_from([
             ("%outer".to_string(), "%join".to_string()),
             ("%inner".to_string(), "%join".to_string()),
         ]);
-        let mut switch_merges = HashMap::new();
+        let mut switch_merges = HashMap::default();
 
         assert!(privatize_reused_emitted_merge_targets(
             &mut blocks,
@@ -1989,14 +1991,14 @@ mod tests {
             bb("%body", &["br label %loop"]),
             bb("%exit", &["ret void"]),
         ];
-        let mut loop_merges = HashMap::from([(
+        let mut loop_merges = crate::fxhash::map_from([(
             "%loop".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
                 continue_target: "%body".to_string(),
             },
         )]);
-        let mut branch_merges_by_header = HashMap::from([
+        let mut branch_merges_by_header = crate::fxhash::map_from([
             ("%outer".to_string(), "%loop".to_string()),
             ("%inner".to_string(), "%loop".to_string()),
         ]);
@@ -2004,10 +2006,10 @@ mod tests {
         assert!(privatize_reused_emitted_merge_targets(
             &mut blocks,
             &mut loop_merges,
-            &HashMap::new(),
+            &HashMap::default(),
             &mut branch_merges_by_header,
             true,
-            &mut HashMap::new(),
+            &mut HashMap::default(),
         ));
 
         assert_ne!(branch_merges_by_header["%outer"], "%loop");
@@ -2038,7 +2040,7 @@ mod tests {
             ),
             bb("%exit", &["ret void"]),
         ];
-        let mut loops = HashMap::from([
+        let mut loops = crate::fxhash::map_from([
             (
                 "%outer".to_string(),
                 LoopMergeInfo {
@@ -2058,10 +2060,10 @@ mod tests {
         assert!(privatize_reused_emitted_merge_targets(
             &mut blocks,
             &mut loops,
-            &HashMap::new(),
-            &mut HashMap::new(),
+            &HashMap::default(),
+            &mut HashMap::default(),
             true,
-            &mut HashMap::new(),
+            &mut HashMap::default(),
         ));
         let private = &loops["%inner"].merge;
         assert_ne!(private, "%outer_continue");
@@ -2084,7 +2086,7 @@ mod tests {
             bb("%header", &["br label %exit"]),
             bb("%exit", &["ret void"]),
         ];
-        let mut loops = HashMap::from([(
+        let mut loops = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
@@ -2095,8 +2097,8 @@ mod tests {
         assert!(normalize_stale_emitted_loop_claims(
             &blocks,
             &mut loops,
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HashMap::default(),
+            &mut HashMap::default(),
         ));
         assert!(loops.is_empty());
     }
@@ -2109,20 +2111,20 @@ mod tests {
             bb("%body", &["br label %exit"]),
             bb("%exit", &["ret void"]),
         ];
-        let mut loops = HashMap::from([(
+        let mut loops = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
                 continue_target: "%header".to_string(),
             },
         )]);
-        let mut branch_merges = HashMap::new();
+        let mut branch_merges = HashMap::default();
 
         assert!(normalize_stale_emitted_loop_claims(
             &blocks,
             &mut loops,
             &mut branch_merges,
-            &mut HashMap::new(),
+            &mut HashMap::default(),
         ));
         assert!(loops.is_empty());
         assert_eq!(branch_merges["%header"], "%exit");
@@ -2141,15 +2143,15 @@ mod tests {
             bb("%exit", &["ret void"]),
         ];
         let mut branch_merges_by_header =
-            HashMap::from([("%header".to_string(), "%exit".to_string())]);
+            crate::fxhash::map_from([("%header".to_string(), "%exit".to_string())]);
 
         assert!(privatize_reused_emitted_merge_targets(
             &mut blocks,
-            &mut HashMap::new(),
-            &HashMap::new(),
+            &mut HashMap::default(),
+            &HashMap::default(),
             &mut branch_merges_by_header,
             true,
-            &mut HashMap::new(),
+            &mut HashMap::default(),
         ));
         let private = &branch_merges_by_header["%header"];
         assert_ne!(private, "%exit");
@@ -2193,15 +2195,15 @@ mod tests {
             ),
         ];
         let branch_merges_by_header =
-            HashMap::from([("%header".to_string(), "%merge".to_string())]);
+            crate::fxhash::map_from([("%header".to_string(), "%merge".to_string())]);
 
         assert!(funnel_emitted_selection_merge_bypasses(
             &mut blocks,
-            &HashMap::new(),
-            &HashMap::new(),
+            &HashMap::default(),
+            &HashMap::default(),
             &branch_merges_by_header,
             true,
-            &HashMap::new(),
+            &HashMap::default(),
         ));
 
         assert_eq!(
@@ -2230,11 +2232,11 @@ mod tests {
         );
         assert!(!funnel_emitted_selection_merge_bypasses(
             &mut blocks,
-            &HashMap::new(),
-            &HashMap::new(),
+            &HashMap::default(),
+            &HashMap::default(),
             &branch_merges_by_header,
             true,
-            &HashMap::new(),
+            &HashMap::default(),
         ));
     }
 
@@ -2266,15 +2268,15 @@ mod tests {
             ),
         ];
         let mut branch_merges_by_header =
-            HashMap::from([("%inner".to_string(), "%merge".to_string())]);
+            crate::fxhash::map_from([("%inner".to_string(), "%merge".to_string())]);
 
         assert!(privatize_emitted_shared_direct_selection_arms(
             &mut blocks,
-            &HashMap::new(),
-            &HashMap::new(),
+            &HashMap::default(),
+            &HashMap::default(),
             &mut branch_merges_by_header,
             true,
-            &HashMap::new(),
+            &HashMap::default(),
         ));
         let clone = blocks
             .iter()
@@ -2289,11 +2291,11 @@ mod tests {
 
         assert!(!funnel_emitted_selection_merge_bypasses(
             &mut blocks,
-            &HashMap::new(),
-            &HashMap::new(),
+            &HashMap::default(),
+            &HashMap::default(),
             &branch_merges_by_header,
             true,
-            &HashMap::new(),
+            &HashMap::default(),
         ));
         assert_eq!(
             block_successors(blocks.iter().find(|block| block.name == clone).unwrap()),
@@ -2799,7 +2801,7 @@ mod tests {
             bb("%outside", &["br label %outer_merge"]),
             bb("%outer_merge", &["ret void"]),
         ];
-        let loop_merges = HashMap::from([(
+        let loop_merges = crate::fxhash::map_from([(
             "%head".to_string(),
             LoopMergeInfo {
                 merge: "%loop_merge".to_string(),
@@ -2904,7 +2906,7 @@ mod tests {
             bb_role("%lm", BlockRole::LMerge, &["br label %ret"]),
             bb("%ret", &["ret void"]),
         ];
-        let loop_merges = HashMap::from([(
+        let loop_merges = crate::fxhash::map_from([(
             "%h".to_string(),
             LoopMergeInfo {
                 merge: "%lm".to_string(),
@@ -2918,7 +2920,7 @@ mod tests {
                 &loop_merges,
                 false,
                 false,
-                &HashMap::new(),
+                &HashMap::default(),
             );
 
         let entry = out.iter().find(|block| block.name == "%entry").unwrap();
@@ -2950,10 +2952,10 @@ mod tests {
         let (out, branch, _branch_by_header, _) =
             unique_selection_merges_with_construct_tree_ownership(
                 &blocks,
-                &HashMap::new(),
+                &HashMap::default(),
                 false,
                 false,
-                &HashMap::new(),
+                &HashMap::default(),
             );
 
         let entry = out.iter().find(|block| block.name == "%entry").unwrap();
@@ -2985,10 +2987,10 @@ mod tests {
         let (_out, branch, branch_by_header, _) =
             unique_selection_merges_with_construct_tree_ownership(
                 &blocks,
-                &HashMap::new(),
+                &HashMap::default(),
                 false,
                 false,
-                &HashMap::new(),
+                &HashMap::default(),
             );
 
         assert_eq!(
@@ -3020,11 +3022,12 @@ mod tests {
                 &["%j = phi i32 [ %p, %pass ], [ 1, %route ]", "ret void"],
             ),
         ];
-        let mut header_merges = HashMap::from([("%header".to_string(), "%pass".to_string())]);
+        let mut header_merges =
+            crate::fxhash::map_from([("%header".to_string(), "%pass".to_string())]);
 
         repair_construct_tree_passthrough_selection_merges(
             &blocks,
-            &HashMap::new(),
+            &HashMap::default(),
             &mut header_merges,
         );
 
@@ -3043,14 +3046,14 @@ mod tests {
             bb_role("%pass", BlockRole::LMerge, &["br label %join"]),
             bb("%join", &["ret void"]),
         ];
-        let mut header_merges = HashMap::from([
+        let mut header_merges = crate::fxhash::map_from([
             ("%outer".to_string(), "%join".to_string()),
             ("%inner".to_string(), "%pass".to_string()),
         ]);
 
         repair_construct_tree_passthrough_selection_merges(
             &blocks,
-            &HashMap::new(),
+            &HashMap::default(),
             &mut header_merges,
         );
 
@@ -3075,7 +3078,7 @@ mod tests {
             bb("%ret", &["ret void"]),
         ];
 
-        let plan = direct_terminal_exit_selection_merges(&blocks, &HashMap::new())
+        let plan = direct_terminal_exit_selection_merges(&blocks, &HashMap::default())
             .expect("both direct terminal guards should be owned");
         for (header, successor) in [("%outer", "%inner"), ("%inner", "%continuation")] {
             let merge = plan
@@ -3132,7 +3135,8 @@ mod tests {
             bb("%shared_return", &["ret void"]),
         ];
 
-        let already_owned = HashMap::from([("%entry".to_string(), "%outside".to_string())]);
+        let already_owned =
+            crate::fxhash::map_from([("%entry".to_string(), "%outside".to_string())]);
         let plan = direct_terminal_exit_selection_merges(&blocks, &already_owned)
             .expect("the proved linear terminal tail is owned before selection construction");
         let merge = plan.merges.get("%header").expect("header owns a merge");
@@ -3178,7 +3182,7 @@ mod tests {
             bb("%exit", &["%value = add i32 1, 2", "ret void"]),
         ];
 
-        assert!(direct_terminal_exit_selection_merges(&blocks, &HashMap::new()).is_none());
+        assert!(direct_terminal_exit_selection_merges(&blocks, &HashMap::default()).is_none());
     }
 
     #[test]
@@ -3192,16 +3196,20 @@ mod tests {
             bb_role("%local", BlockRole::LMerge, &["br label %join"]),
             bb("%join", &["ret void"]),
         ];
-        let mut merges = HashMap::from([("%header".to_string(), "%local".to_string())]);
+        let mut merges = crate::fxhash::map_from([("%header".to_string(), "%local".to_string())]);
         let mut counter = 0usize;
 
         repair_construct_tree_nondominated_selection_merges(
             &mut blocks,
-            &HashMap::new(),
+            &HashMap::default(),
             &mut merges,
             &mut counter,
         );
-        repair_construct_tree_passthrough_selection_merges(&blocks, &HashMap::new(), &mut merges);
+        repair_construct_tree_passthrough_selection_merges(
+            &blocks,
+            &HashMap::default(),
+            &mut merges,
+        );
         assert!(!repair_construct_tree_bypassed_passthrough_merges(
             &mut blocks,
             &mut merges,
@@ -3230,7 +3238,7 @@ mod tests {
             bb("%shared", &["br label %outer_merge"]),
             bb("%outer_merge", &["ret void"]),
         ];
-        let mut merges = HashMap::from([
+        let mut merges = crate::fxhash::map_from([
             ("%outer".to_string(), "%outer_merge".to_string()),
             ("%route".to_string(), "%private".to_string()),
         ]);
@@ -3239,7 +3247,7 @@ mod tests {
 
         assert!(materialize_pure_enclosing_selection_routes_for_owner(
             &mut blocks,
-            &HashMap::new(),
+            &HashMap::default(),
             &mut merges,
             &indexed,
             "%outer",
@@ -3287,7 +3295,7 @@ mod tests {
             bb("%nested_merge", &["br label %outer_merge"]),
             bb("%outer_merge", &["ret void"]),
         ];
-        let mut merges = HashMap::from([
+        let mut merges = crate::fxhash::map_from([
             ("%outer".to_string(), "%outer_merge".to_string()),
             ("%route".to_string(), "%private".to_string()),
             ("%nested".to_string(), "%nested_merge".to_string()),
@@ -3297,7 +3305,7 @@ mod tests {
 
         assert!(materialize_pure_enclosing_selection_routes_for_owner(
             &mut blocks,
-            &HashMap::new(),
+            &HashMap::default(),
             &mut merges,
             &indexed,
             "%outer",
@@ -3346,7 +3354,7 @@ mod tests {
                 ],
             ),
         ];
-        let mut loops = HashMap::from([(
+        let mut loops = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
@@ -3398,10 +3406,10 @@ mod tests {
         ];
         let (planned, _, header_merges, _) = unique_selection_merges_with_construct_tree_ownership(
             &blocks,
-            &HashMap::new(),
+            &HashMap::default(),
             false,
             false,
-            &HashMap::new(),
+            &HashMap::default(),
         );
 
         for header in ["%header", "%left", "%right"] {
@@ -3446,10 +3454,10 @@ mod tests {
         ];
         let (planned, _, merges, _) = unique_selection_merges_with_construct_tree_ownership(
             &blocks,
-            &HashMap::new(),
+            &HashMap::default(),
             false,
             false,
-            &HashMap::new(),
+            &HashMap::default(),
         );
         let outer_merge = merges
             .get("%header")
@@ -3508,14 +3516,14 @@ mod tests {
             bb("%downstream", &["br label %shared_return"]),
             bb("%shared_return", &["ret void"]),
         ];
-        let mut merges = HashMap::new();
+        let mut merges = HashMap::default();
         let mut counter = 0usize;
 
         assert!(complete_construct_tree_terminal_convergences(
             &blocks,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
+            &HashMap::default(),
+            &HashMap::default(),
+            &HashMap::default(),
             &mut merges,
         ));
         assert_eq!(merges.get("%header").map(String::as_str), Some("%merge"));
@@ -3629,7 +3637,7 @@ mod tests {
             ),
             bb("%final", &["ret void"]),
         ];
-        let mut merges = HashMap::from([
+        let mut merges = crate::fxhash::map_from([
             ("%parent".to_string(), "%parent_return".to_string()),
             ("%child".to_string(), "%child_merge".to_string()),
         ]);
@@ -3678,7 +3686,7 @@ mod tests {
             bb("%shared", &["ret void"]),
             bb("%return", &["ret void"]),
         ];
-        let mut merges = HashMap::from([("%header".to_string(), "%stale".to_string())]);
+        let mut merges = crate::fxhash::map_from([("%header".to_string(), "%stale".to_string())]);
         let mut counter = 0usize;
 
         assert!(finalize_direct_terminal_guard_merges(
@@ -3721,7 +3729,7 @@ mod tests {
             bb("%return", &["ret void"]),
             bb_role("%stale", BlockRole::LMerge, &["br label %shared"]),
         ];
-        let mut merges = HashMap::from([("%switch".to_string(), "%stale".to_string())]);
+        let mut merges = crate::fxhash::map_from([("%switch".to_string(), "%stale".to_string())]);
         let mut counter = 0usize;
 
         assert!(finalize_fully_terminal_switches(
@@ -3776,10 +3784,10 @@ mod tests {
             bb("%external", &["br label %shared_return"]),
             bb("%shared_return", &["ret void"]),
         ];
-        let forced = HashMap::from([("%header".to_string(), "%merge".to_string())]);
+        let forced = crate::fxhash::map_from([("%header".to_string(), "%merge".to_string())]);
         let (blocks, _, merges, _) = unique_selection_merges_with_construct_tree_ownership(
             &blocks,
-            &HashMap::new(),
+            &HashMap::default(),
             false,
             false,
             &forced,
@@ -3829,7 +3837,7 @@ mod tests {
                 ],
             ),
         ];
-        let mut merges = HashMap::from([("%header".to_string(), "%old".to_string())]);
+        let mut merges = crate::fxhash::map_from([("%header".to_string(), "%old".to_string())]);
         let mut counter = 0usize;
 
         assert!(repair_construct_tree_bypassed_passthrough_merges(
@@ -3898,7 +3906,7 @@ mod tests {
                 ],
             ),
         ];
-        let mut merges = HashMap::from([("%header".to_string(), "%old".to_string())]);
+        let mut merges = crate::fxhash::map_from([("%header".to_string(), "%old".to_string())]);
         let mut counter = 0usize;
 
         assert!(repair_construct_tree_bypassed_passthrough_merges(
@@ -3959,7 +3967,7 @@ mod tests {
             &mut blocks,
             &["%left".to_string(), "%right".to_string()],
             "%join",
-            &HashSet::from(["%left_route".to_string(), "%right_route".to_string()]),
+            &crate::fxhash::set_from(["%left_route".to_string(), "%right_route".to_string()]),
             &mut counter,
         )
         .expect("owned route predecessors receive a phi-aware private merge");
@@ -3997,7 +4005,7 @@ mod tests {
                 .iter()
                 .map(|(_, predecessor)| predecessor.as_str())
                 .collect::<HashSet<_>>(),
-            HashSet::from(["%left", "%right"])
+            crate::fxhash::set_from(["%left", "%right"])
         );
         let join_phi = blocks
             .iter()
@@ -4012,7 +4020,7 @@ mod tests {
                 .iter()
                 .map(|(_, predecessor)| predecessor.as_str())
                 .collect::<HashSet<_>>(),
-            HashSet::from(["%left_route", private.as_str()])
+            crate::fxhash::set_from(["%left_route", private.as_str()])
         );
     }
 
@@ -4029,10 +4037,10 @@ mod tests {
         let (out, branch, branch_by_header, _) =
             unique_selection_merges_with_construct_tree_ownership(
                 &blocks,
-                &HashMap::new(),
+                &HashMap::default(),
                 false,
                 false,
-                &HashMap::new(),
+                &HashMap::default(),
             );
 
         let private = branch_by_header
@@ -4050,7 +4058,7 @@ mod tests {
             assert_eq!(block_successors(block), vec![private.clone()]);
         }
         let mut cursor = private.clone();
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         while cursor != "%old" {
             assert!(
                 seen.insert(cursor.clone()),
@@ -4188,7 +4196,7 @@ mod tests {
         ];
 
         let (out, branch, by_header, _) =
-            unique_selection_merges_with_loop_exit(&blocks, &HashMap::new(), false, false);
+            unique_selection_merges_with_loop_exit(&blocks, &HashMap::default(), false, false);
         let private = by_header
             .get("%inner")
             .expect("deep enclosing-region exit receives its boundary during construction");
@@ -4225,7 +4233,7 @@ mod tests {
             bb("%outer_merge", &["ret void"]),
         ];
         let forest = analyze(&blocks);
-        let source_merges = HashMap::from([
+        let source_merges = crate::fxhash::map_from([
             ("%outer".to_string(), "%outer_merge".to_string()),
             ("%inner".to_string(), "%outer_merge".to_string()),
             ("%sibling".to_string(), "%outer_merge".to_string()),
@@ -4234,7 +4242,7 @@ mod tests {
         assert!(enclosing_selection_region_exit_target(
             &blocks,
             &forest,
-            &HashMap::new(),
+            &HashMap::default(),
             &source_merges,
             "%inner",
             "%left",
@@ -4246,7 +4254,7 @@ mod tests {
             ordinary_selection_enclosing_boundary_target(
                 &blocks,
                 &forest,
-                &HashMap::new(),
+                &HashMap::default(),
                 &source_merges,
                 "%inner",
                 "%outer_merge",
@@ -4264,12 +4272,12 @@ mod tests {
             bb("%ext", &["br label %old"]),
             bb("%old", &["ret void"]),
         ];
-        let mut header_merges = HashMap::from([("%h".to_string(), "%old".to_string())]);
+        let mut header_merges = crate::fxhash::map_from([("%h".to_string(), "%old".to_string())]);
         let mut counter = 0usize;
 
         repair_construct_tree_nondominated_selection_merges(
             &mut blocks,
-            &HashMap::new(),
+            &HashMap::default(),
             &mut header_merges,
             &mut counter,
         );
@@ -4318,12 +4326,12 @@ mod tests {
             bb("%ext", &["br label %old"]),
             bb("%old", &["ret void"]),
         ];
-        let mut header_merges = HashMap::from([("%h".to_string(), "%old".to_string())]);
+        let mut header_merges = crate::fxhash::map_from([("%h".to_string(), "%old".to_string())]);
         let mut counter = 0usize;
 
         repair_construct_tree_nondominated_selection_merges(
             &mut blocks,
-            &HashMap::new(),
+            &HashMap::default(),
             &mut header_merges,
             &mut counter,
         );
@@ -4732,7 +4740,7 @@ mod tests {
         let outer_targets = block_successors(outer_dispatch);
         assert_eq!(
             outer_targets.into_iter().collect::<HashSet<_>>(),
-            HashSet::from(["%exit.a".to_string(), "%exit.b".to_string()])
+            crate::fxhash::set_from(["%exit.a".to_string(), "%exit.b".to_string()])
         );
     }
 

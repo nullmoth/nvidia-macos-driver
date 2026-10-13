@@ -10,18 +10,18 @@ use super::super::emitter::Emitter;
 use super::super::ir::{LlType, LlValue};
 use super::super::parse::{parse_type, parse_typed_value};
 use super::*;
+use crate::fxhash::{HashMap, HashSet};
 use crate::passes::{self, Stage};
 use crate::spirv_module::load_bytes;
 use crate::spirv_module::Operand;
 use crate::spirv_module::{Block, Instruction};
 use crate::{disassemble, meta, tools};
 use spirv::{Capability, Decoration, Op, Scope, SelectionControl, StorageClass, Word};
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 fn carriered_block(name: &str, lines: &[&str]) -> BodyBlock {
     let lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-    let typed = crate::native::tir::lower_block_carrier(name, &lines, &HashMap::new());
+    let typed = crate::native::tir::lower_block_carrier(name, &lines, &HashMap::default());
     BodyBlock {
         name: name.to_string(),
         role: crate::native::cfg::BlockRole::Normal,
@@ -93,7 +93,7 @@ exit:
         .expect("construct-tree emission remains an owned intermediate");
     assert_eq!(
         emitted.sidecar.ownership_plan_rejected_functions,
-        HashSet::from(["k".to_string()])
+        crate::fxhash::set_from(["k".to_string()])
     );
 }
 
@@ -638,11 +638,11 @@ b:
     );
     assert_eq!(
         failure.rejected.ordinary_plan_functions,
-        HashSet::from(["k".to_string()])
+        crate::fxhash::set_from(["k".to_string()])
     );
     assert_eq!(
         failure.rejected.ownership_plan_functions,
-        HashSet::from(["k".to_string()])
+        crate::fxhash::set_from(["k".to_string()])
     );
 }
 
@@ -2160,7 +2160,7 @@ merge:
     let parsed = super::super::ir::LlModule::parse(ll).expect("parse AIR");
     assert_eq!(
         parsed.metadata_fc_buffer_locations,
-        HashMap::from([
+        crate::fxhash::map_from([
             (("k".to_string(), "%floats".to_string()), 29),
             (("k".to_string(), "%halves".to_string()), 29),
         ])
@@ -2384,7 +2384,7 @@ merge:
     let spv = emit_vulkan_spirv(ll).expect("native emit");
     let module = load_bytes(&spv).expect("load native spv");
     let function = module.functions.first().expect("function");
-    let mut definitions = HashMap::new();
+    let mut definitions = HashMap::default();
     for block in &function.blocks {
         let label = block
             .label
@@ -3936,7 +3936,7 @@ exit:
     let blocks = split_body_blocks(
         &lines,
         "entry".to_string(),
-        &std::collections::HashMap::new(),
+        &crate::fxhash::HashMap::default(),
     );
     let merges = infer_branch_merges(&blocks);
     assert_eq!(

@@ -1,8 +1,8 @@
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::Instruction;
 use crate::spirv_module::Module;
 use crate::spirv_module::Operand;
 use spirv::{Op, Word};
-use std::collections::{HashMap, HashSet};
 
 pub(in crate::native) fn block_id(blk: &crate::spirv_module::Block) -> Option<Word> {
     blk.label.as_ref().and_then(|l| l.result_id)
@@ -93,7 +93,7 @@ pub(in crate::native) fn prune_unreachable(f: &mut crate::spirv_module::Function
             Some((id, successors(term)))
         })
         .collect();
-    let mut reach: HashSet<Word> = HashSet::new();
+    let mut reach: HashSet<Word> = HashSet::default();
     let mut stack = vec![entry];
     while let Some(b) = stack.pop() {
         if !reach.insert(b) {
@@ -139,7 +139,7 @@ pub(in crate::native) fn prune_unreachable(f: &mut crate::spirv_module::Function
         }
     }
 
-    let mut preds: HashMap<Word, HashSet<Word>> = HashMap::new();
+    let mut preds: HashMap<Word, HashSet<Word>> = HashMap::default();
     for b in &f.blocks {
         let Some(id) = block_id(b) else { continue };
         if let Some(term) = b.instructions.last() {
@@ -176,7 +176,7 @@ pub(in crate::native) fn prune_unreachable(f: &mut crate::spirv_module::Function
 }
 
 pub(in crate::native) fn collapse_trivial_phis(f: &mut crate::spirv_module::Function) -> bool {
-    let mut predecessors: HashMap<Word, HashSet<Word>> = HashMap::new();
+    let mut predecessors: HashMap<Word, HashSet<Word>> = HashMap::default();
     for block in &f.blocks {
         let Some(parent) = block_id(block) else {
             continue;
@@ -187,7 +187,7 @@ pub(in crate::native) fn collapse_trivial_phis(f: &mut crate::spirv_module::Func
             }
         }
     }
-    let mut repl: HashMap<Word, Word> = HashMap::new();
+    let mut repl: HashMap<Word, Word> = HashMap::default();
     for b in &f.blocks {
         let Some(block) = block_id(b) else { continue };
         for inst in &b.instructions {
@@ -199,7 +199,7 @@ pub(in crate::native) fn collapse_trivial_phis(f: &mut crate::spirv_module::Func
             }
             let Some(rid) = inst.result_id else { continue };
             let mut only_value: Option<Word> = None;
-            let mut parents: HashSet<Word> = HashSet::new();
+            let mut parents: HashSet<Word> = HashSet::default();
             let identity = inst.operands.chunks_exact(2).all(|pair| {
                 let (Some(Operand::IdRef(value)), Some(Operand::IdRef(parent))) =
                     (pair.first(), pair.get(1))
@@ -257,7 +257,7 @@ pub(in crate::native) fn collapse_constant_selects(
     vals: &HashMap<Word, i128>,
     lane_conditions: &HashSet<Word>,
 ) -> bool {
-    let mut repl: HashMap<Word, Word> = HashMap::new();
+    let mut repl: HashMap<Word, Word> = HashMap::default();
     for b in &f.blocks {
         for inst in &b.instructions {
             if inst.class.opcode != Op::Select {
@@ -372,14 +372,14 @@ pub(in crate::native) fn is_pure(op: Op) -> bool {
 
 #[cfg(test)]
 pub(in crate::native) fn dce(module: &mut Module) -> bool {
-    dce_preserving(module, &HashSet::new())
+    dce_preserving(module, &HashSet::default())
 }
 
 pub(in crate::native) fn dce_preserving(
     module: &mut Module,
     preserved_global_ids: &HashSet<Word>,
 ) -> bool {
-    let mut pure_def: HashMap<Word, Vec<Word>> = HashMap::new();
+    let mut pure_def: HashMap<Word, Vec<Word>> = HashMap::default();
     for f in &module.functions {
         for b in &f.blocks {
             for inst in &b.instructions {
@@ -433,7 +433,7 @@ pub(in crate::native) fn dce_preserving(
         }
     }
 
-    let mut live = HashSet::new();
+    let mut live = HashSet::default();
     while let Some(id) = work.pop() {
         if !live.insert(id) {
             continue;
@@ -594,7 +594,10 @@ mod tests {
             Instruction::new(Op::ConstantNull, Some(ulong), Some(dead), vec![]),
         ];
 
-        assert!(dce_preserving(&mut module, &HashSet::from([sentinel])));
+        assert!(dce_preserving(
+            &mut module,
+            &crate::fxhash::set_from([sentinel])
+        ));
 
         let ids = module
             .types_global_values

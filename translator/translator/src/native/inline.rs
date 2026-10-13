@@ -1,5 +1,5 @@
+use crate::fxhash::{HashMap, HashSet};
 use super::lex::split_top_level;
-use std::collections::{HashMap, HashSet};
 
 pub(super) fn inline_direct_function_pointer_consumers(
     san_ll: &str,
@@ -38,7 +38,7 @@ pub(super) fn inline_direct_function_pointer_consumers(
         let Some((consumer, function)) = selected else {
             return source;
         };
-        let targets = HashSet::from([consumer]);
+        let targets = crate::fxhash::set_from([consumer]);
         let Some(inlined) = try_inline(&source, Some((&targets, &function, None))) else {
             return source;
         };
@@ -125,7 +125,7 @@ pub(super) fn inline_pointer_select_consumers(
     let mut source = san_ll.to_string();
     let mut changed = false;
     for (selected, consumer) in selected_consumers {
-        let targets = HashSet::from([consumer]);
+        let targets = crate::fxhash::set_from([consumer]);
         if let Some(inlined) = try_inline(&source, Some((&targets, selected.as_str(), entry_name)))
         {
             changed |= inlined != source;
@@ -147,7 +147,7 @@ pub(super) fn inline_cursor_call_sites(
     let mut source = san_ll.to_string();
     let mut changed = false;
     for (callee, argument) in ordered {
-        let targets = HashSet::from([format!("@{}", callee.trim_start_matches('@'))]);
+        let targets = crate::fxhash::set_from([format!("@{}", callee.trim_start_matches('@'))]);
         if let Some(inlined) = try_inline(&source, Some((&targets, argument.as_str(), None))) {
             changed |= inlined != source;
             source = inlined;
@@ -632,7 +632,7 @@ fn try_inline(
 ) -> Option<String> {
     let items = parse_items(san_ll)?;
 
-    let mut internal: HashMap<String, (DefSig, Vec<String>)> = HashMap::new();
+    let mut internal: HashMap<String, (DefSig, Vec<String>)> = HashMap::default();
     let mut has_any_func = false;
     for it in &items {
         if let Item::Func(f) = it {
@@ -750,7 +750,7 @@ fn drop_dead_internal_functions(items: Vec<Item>) -> Vec<Item> {
             Item::Func(f) => symbol_runs(&f.body),
         })
         .collect();
-    let mut live: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut live: crate::fxhash::HashSet<String> = crate::fxhash::HashSet::default();
     loop {
         let mut changed = false;
         for (item_index, it) in items.iter().enumerate() {
@@ -813,7 +813,7 @@ fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
 }
 
 fn symbol_runs(lines: &[String]) -> HashSet<&str> {
-    let mut runs = HashSet::new();
+    let mut runs = HashSet::default();
     for line in lines {
         let bytes = line.as_bytes();
         let mut i = 0;
@@ -911,7 +911,7 @@ fn render(items: &[Item], trailing_newline: bool) -> String {
 }
 
 fn internal_callgraph_has_cycle(internal: &HashMap<String, (DefSig, Vec<String>)>) -> bool {
-    let mut edges: HashMap<&str, Vec<String>> = HashMap::new();
+    let mut edges: HashMap<&str, Vec<String>> = HashMap::default();
     for (name, (_, body)) in internal {
         let mut callees = Vec::new();
         for line in body {
@@ -1028,7 +1028,7 @@ fn inline_one(
 
     let (local_values, local_labels) = collect_callee_locals(callee_body)?;
 
-    let mut value_map: HashMap<String, String> = HashMap::new();
+    let mut value_map: HashMap<String, String> = HashMap::default();
     for (p, a) in sig.params.iter().zip(call.args.iter()) {
         value_map.insert(p.clone(), a.clone());
     }
@@ -1043,7 +1043,7 @@ fn inline_one(
         value_map.insert(p.clone(), a.clone());
     }
 
-    let mut label_map: HashMap<String, String> = HashMap::new();
+    let mut label_map: HashMap<String, String> = HashMap::default();
     for l in &local_labels {
         label_map.insert(l.clone(), format!("{prefix}.{l}"));
     }
@@ -1114,10 +1114,10 @@ fn inline_one(
             return None;
         }
         if non_void.len() == 1 {
-            let mut return_value = HashMap::new();
+            let mut return_value = HashMap::default();
             return_value.insert(result.clone(), non_void[0].0.clone());
             for line in &mut after_relabeled {
-                *line = rename_line(line, &return_value, &HashMap::new());
+                *line = rename_line(line, &return_value, &HashMap::default());
             }
         } else {
             let ret_ty = if !call.ret_ty.is_empty() {
@@ -1154,7 +1154,7 @@ fn inline_single_block_leaf(
     let prefix = format!(".inl{}", *counter);
     *counter += 1;
     let (local_values, _) = collect_callee_locals(callee_body)?;
-    let mut value_map = HashMap::new();
+    let mut value_map = HashMap::default();
     for (parameter, argument) in sig.params.iter().zip(&call.args) {
         value_map.insert(parameter.clone(), argument.clone());
     }
@@ -1178,7 +1178,7 @@ fn inline_single_block_leaf(
             });
             continue;
         }
-        replacement.push(rename_line(line, &value_map, &HashMap::new()));
+        replacement.push(rename_line(line, &value_map, &HashMap::default()));
     }
     let returned = returned?;
     let mut after = body[idx + 1..].to_vec();
@@ -1186,9 +1186,9 @@ fn inline_single_block_leaf(
         if returned.is_empty() {
             return None;
         }
-        let result_map = HashMap::from([(result.clone(), returned)]);
+        let result_map = crate::fxhash::map_from([(result.clone(), returned)]);
         for line in &mut after {
-            *line = rename_line(line, &result_map, &HashMap::new());
+            *line = rename_line(line, &result_map, &HashMap::default());
         }
     }
     let mut new_body = Vec::with_capacity(body.len() + replacement.len());
@@ -1270,8 +1270,8 @@ fn block_label_id(line: &str) -> Option<&str> {
 fn collect_callee_locals(body: &[String]) -> Option<(Vec<String>, Vec<String>)> {
     let mut values: Vec<String> = Vec::new();
     let mut labels: Vec<String> = Vec::new();
-    let mut seen_v: HashSet<String> = HashSet::new();
-    let mut seen_l: HashSet<String> = HashSet::new();
+    let mut seen_v: HashSet<String> = HashSet::default();
+    let mut seen_l: HashSet<String> = HashSet::default();
     for line in body {
         if let Some(bare) = block_label_id(line) {
             if seen_l.insert(bare.to_string()) {
@@ -1390,19 +1390,19 @@ mod tests {
 
     #[test]
     fn rename_is_token_accurate() {
-        let mut vm = HashMap::new();
+        let mut vm = HashMap::default();
         vm.insert("%1".to_string(), "%.inl0.1".to_string());
         let line = "  %10 = add i32 %1, %11";
-        let out = rename_line(line, &vm, &HashMap::new());
+        let out = rename_line(line, &vm, &HashMap::default());
         assert_eq!(out, "  %10 = add i32 %.inl0.1, %11", "got: {out}");
     }
 
     #[test]
     fn rename_maps_label_positions() {
-        let mut lm = HashMap::new();
+        let mut lm = HashMap::default();
         lm.insert("5".to_string(), ".inl0.5".to_string());
         let line = "  br label %5";
-        let out = rename_line(line, &HashMap::new(), &lm);
+        let out = rename_line(line, &HashMap::default(), &lm);
         assert_eq!(out, "  br label %.inl0.5", "got: {out}");
     }
 
@@ -1569,7 +1569,7 @@ define i32 @main(i32 %0) {
             !out.contains("call i32 @inner"),
             "inner call remains:\n{out}"
         );
-        let prefixes: std::collections::HashSet<&str> = out
+        let prefixes: crate::fxhash::HashSet<&str> = out
             .match_indices(".inl")
             .filter_map(|(i, _)| out[i..].split('.').nth(1))
             .collect();
@@ -1933,7 +1933,7 @@ pub(crate) fn forward_builder_pointer_fields(san_ll: &str) -> std::borrow::Cow<'
     let Some(mut items) = parse_items(san_ll) else {
         return std::borrow::Cow::Borrowed(san_ll);
     };
-    let mut builders: HashMap<String, Vec<(Vec<String>, usize)>> = HashMap::new();
+    let mut builders: HashMap<String, Vec<(Vec<String>, usize)>> = HashMap::default();
     for item in &items {
         if let Item::Func(f) = item {
             if let Some((name, fields)) = builder_pointer_fields(f) {
@@ -1947,7 +1947,7 @@ pub(crate) fn forward_builder_pointer_fields(san_ll: &str) -> std::borrow::Cow<'
     let mut changed = false;
     for item in &mut items {
         let Item::Func(f) = item else { continue };
-        let mut results: HashMap<String, (&Vec<(Vec<String>, usize)>, Vec<String>)> = HashMap::new();
+        let mut results: HashMap<String, (&Vec<(Vec<String>, usize)>, Vec<String>)> = HashMap::default();
         for line in &f.body {
             if let Some(call) = parse_call(line) {
                 if let (Some(result), Some(fields)) = (call.result, builders.get(&call.callee)) {
@@ -1958,7 +1958,7 @@ pub(crate) fn forward_builder_pointer_fields(san_ll: &str) -> std::borrow::Cow<'
         if results.is_empty() {
             continue;
         }
-        let mut value_map: HashMap<String, String> = HashMap::new();
+        let mut value_map: HashMap<String, String> = HashMap::default();
         let mut drop = Vec::new();
         for (n, line) in f.body.iter().enumerate() {
             let Some((dst, agg, path)) = parse_extractvalue(line) else { continue };
@@ -1975,7 +1975,7 @@ pub(crate) fn forward_builder_pointer_fields(san_ll: &str) -> std::borrow::Cow<'
         if value_map.is_empty() {
             continue;
         }
-        let empty = HashMap::new();
+        let empty = HashMap::default();
         let body = std::mem::take(&mut f.body);
         f.body = body
             .into_iter()
@@ -2016,7 +2016,7 @@ fn builder_pointer_fields(f: &FuncBlock) -> Option<(String, Vec<(Vec<String>, us
     if !sig.internal {
         return None;
     }
-    let mut chain: HashMap<String, (String, Vec<String>, String)> = HashMap::new();
+    let mut chain: HashMap<String, (String, Vec<String>, String)> = HashMap::default();
     let mut ret = None;
     for line in &f.body {
         let t = line.trim();

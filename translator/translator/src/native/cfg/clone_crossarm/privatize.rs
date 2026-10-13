@@ -57,8 +57,8 @@ pub(in crate::native) fn dominated_region_clone_witness(
         };
     }
 
-    let mut region: HashSet<String> = HashSet::new();
-    let mut boundary: HashSet<String> = HashSet::new();
+    let mut region: HashSet<String> = HashSet::default();
+    let mut boundary: HashSet<String> = HashSet::default();
     let mut stack = vec![arm.to_string()];
     while let Some(n) = stack.pop() {
         if !region.insert(n.clone()) {
@@ -201,7 +201,7 @@ pub(in crate::native) fn privatize_region(
     let preds = predecessors(blocks);
     let by_name: HashMap<&str, &BodyBlock> = blocks.iter().map(|b| (b.name.as_str(), b)).collect();
 
-    let mut region: HashSet<String> = HashSet::new();
+    let mut region: HashSet<String> = HashSet::default();
     let mut stack = vec![arm.to_string()];
     while let Some(n) = stack.pop() {
         if !region.insert(n.clone()) {
@@ -253,7 +253,7 @@ pub(in crate::native) fn privatize_region(
 
     let id = *counter;
     *counter += 1;
-    let mut rename: HashMap<String, String> = HashMap::new();
+    let mut rename: HashMap<String, String> = HashMap::default();
     let ordered_region: Vec<&BodyBlock> = blocks
         .iter()
         .filter(|block| region.contains(&block.name))
@@ -331,8 +331,8 @@ pub(in crate::native) fn privatize_dominated_region_with_renames(
     let by_name: HashMap<&str, &BodyBlock> = blocks.iter().map(|b| (b.name.as_str(), b)).collect();
     let names: HashSet<&str> = blocks.iter().map(|b| b.name.as_str()).collect();
 
-    let mut region: HashSet<String> = HashSet::new();
-    let mut boundary: HashSet<String> = HashSet::new();
+    let mut region: HashSet<String> = HashSet::default();
+    let mut boundary: HashSet<String> = HashSet::default();
     let mut stack = vec![arm.to_string()];
     while let Some(n) = stack.pop() {
         if !region.insert(n.clone()) {
@@ -398,7 +398,7 @@ pub(in crate::native) fn privatize_dominated_region_with_renames(
 
     let id = *counter;
     *counter += 1;
-    let mut rename: HashMap<String, String> = HashMap::new();
+    let mut rename: HashMap<String, String> = HashMap::default();
     let ordered_region: Vec<&BodyBlock> = blocks
         .iter()
         .filter(|block| region.contains(&block.name))
@@ -644,7 +644,7 @@ pub(in crate::native) fn privatize_shared_phi_exit_predecessors(
         }
         let forest = analyze(&cur);
         let selection = selection_merges(&cur, &forest);
-        let mut claims: HashMap<&str, usize> = HashMap::new();
+        let mut claims: HashMap<&str, usize> = HashMap::default();
         for merge in selection.values() {
             *claims.entry(merge.as_str()).or_default() += 1;
         }

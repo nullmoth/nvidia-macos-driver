@@ -8,13 +8,13 @@ use super::super::emitter::Emitter;
 use super::super::ir::{LlType, LlValue};
 use super::super::parse::{parse_type, parse_typed_value};
 use super::*;
+use crate::fxhash::{HashMap, HashSet};
 use crate::passes::{self, Stage};
 use crate::spirv_module::load_bytes;
 use crate::spirv_module::Operand;
 use crate::spirv_module::{Block, Instruction};
 use crate::{disassemble, meta, tools};
 use spirv::{Decoration, Op, Scope, SelectionControl, StorageClass, Word};
-use std::collections::{HashMap, HashSet};
 
 fn translate_one_cell_tile(
     san_ll: &str,
@@ -6173,7 +6173,7 @@ declare void @air.write_imageblock_slice_to_texture_2d.v4f16(ptr addrspace(1), p
             (Op::Constant, Some(Operand::LiteralBit32(value))) => Some((inst.result_id?, *value)),
             _ => None,
         })
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fxhash::HashMap<_, _>>();
     let second_operand_constant = |inst: &Instruction| {
         constants
             .get(&id_ref_operand(inst.operands.get(1)?)?)

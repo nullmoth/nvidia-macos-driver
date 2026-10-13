@@ -1,6 +1,6 @@
+use crate::fxhash::HashMap;
 use crate::spirv_module::{Instruction, Operand};
 use spirv::{Op, Word};
-use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
 pub(super) enum ScalarType {

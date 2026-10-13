@@ -1,9 +1,9 @@
 use super::block_split::{labelled_block, CallSiteSplit};
+use crate::fxhash::HashMap;
 use crate::passes::value_queries::type_def_of;
 use crate::passes::Ctx;
 use crate::spirv_module::{Instruction, Operand};
 use spirv::{Capability, Decoration, LoopControl, Op, SelectionControl, StorageClass, Word};
-use std::collections::HashMap;
 
 const RAY_FLAG_OPAQUE: u32 = 0x1;
 const RAY_FLAG_NO_OPAQUE: u32 = 0x2;
@@ -70,7 +70,7 @@ fn tags_are_carried(name: &str) -> bool {
 }
 
 fn air_function_names(ctx: &Ctx) -> HashMap<Word, String> {
-    let mut names = HashMap::new();
+    let mut names = HashMap::default();
     for inst in &ctx.module.debug_names {
         if inst.class.opcode != Op::Name {
             continue;
@@ -136,10 +136,10 @@ impl Lowering {
             bool_ty,
             c0,
             c1,
-            queries: HashMap::new(),
-            structures: HashMap::new(),
+            queries: HashMap::default(),
+            structures: HashMap::default(),
             dead_chains: Vec::new(),
-            query_sides: HashMap::new(),
+            query_sides: HashMap::default(),
             side: None,
         }
     }

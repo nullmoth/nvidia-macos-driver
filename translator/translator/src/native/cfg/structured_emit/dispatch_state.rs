@@ -1,7 +1,7 @@
 use super::*;
+use crate::fxhash::HashMap;
 use crate::native::ir::{LlType, LlValue};
 use crate::native::tir;
-use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub(in crate::native) struct ValueSlot {

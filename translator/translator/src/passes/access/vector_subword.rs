@@ -164,7 +164,7 @@ pub(in crate::passes) fn rewrite_flat_scalar_ptr_access_through_vector_array(
 
 pub(in crate::passes) fn drop_writeonly_dead_local_array_stores(ctx: &mut Ctx, entry_idx: usize) {
     let value_types = function_value_types(ctx, entry_idx);
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -218,7 +218,7 @@ pub(in crate::passes) fn drop_writeonly_dead_local_array_stores(ctx: &mut Ctx, e
         .collect::<HashMap<_, _>>();
     for result in chain_parents.keys().copied() {
         let mut current = result;
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         while seen.insert(current) {
             let Some(parent) = chain_parents.get(&current).copied() else {
                 break;
@@ -336,7 +336,7 @@ pub(in crate::passes) fn drop_writeonly_dead_local_array_stores(ctx: &mut Ctx, e
 
 pub(in crate::passes) fn lower_cross_member_subword_store(ctx: &mut Ctx, entry_idx: usize) {
     let value_types = function_value_types(ctx, entry_idx);
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -350,7 +350,7 @@ pub(in crate::passes) fn lower_cross_member_subword_store(ctx: &mut Ctx, entry_i
             }
         }
     }
-    let mut member_offset: HashMap<(Word, u32), u32> = HashMap::new();
+    let mut member_offset: HashMap<(Word, u32), u32> = HashMap::default();
     for inst in &ctx.module.annotations {
         if inst.class.opcode == Op::MemberDecorate {
             if let (
@@ -368,7 +368,7 @@ pub(in crate::passes) fn lower_cross_member_subword_store(ctx: &mut Ctx, entry_i
             }
         }
     }
-    let mut chain_defs: HashMap<Word, Instruction> = HashMap::new();
+    let mut chain_defs: HashMap<Word, Instruction> = HashMap::default();
     for block in &ctx.module.functions[entry_idx].blocks {
         for inst in &block.instructions {
             if matches!(inst.class.opcode, Op::AccessChain | Op::InBoundsAccessChain) {
@@ -508,7 +508,7 @@ pub(in crate::passes) fn lower_cross_member_subword_store(ctx: &mut Ctx, entry_i
         return;
     }
 
-    let mut by_block: HashMap<usize, Vec<StorePlan>> = HashMap::new();
+    let mut by_block: HashMap<usize, Vec<StorePlan>> = HashMap::default();
     for plan in plans {
         by_block.entry(plan.bi).or_default().push(plan);
     }
@@ -613,7 +613,7 @@ pub(in crate::passes) fn lower_subword_scalar_store(ctx: &mut Ctx, entry_idx: us
         .flat_map(|block| &block.instructions)
         .filter_map(|instruction| Some((instruction.result_id?, instruction.clone())))
         .collect::<HashMap<_, _>>();
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -702,7 +702,7 @@ pub(in crate::passes) fn lower_subword_scalar_store(ctx: &mut Ctx, entry_idx: us
         return;
     }
 
-    let mut by_block: HashMap<usize, Vec<StorePlan>> = HashMap::new();
+    let mut by_block: HashMap<usize, Vec<StorePlan>> = HashMap::default();
     for plan in plans {
         by_block.entry(plan.bi).or_default().push(plan);
     }
@@ -939,7 +939,7 @@ pub(in crate::passes) fn lower_cross_member_subword_load(
     ctx: &mut Ctx,
     entry_idx: usize,
 ) -> Result<(), String> {
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -953,7 +953,7 @@ pub(in crate::passes) fn lower_cross_member_subword_load(
             }
         }
     }
-    let mut member_offset: HashMap<(Word, u32), u32> = HashMap::new();
+    let mut member_offset: HashMap<(Word, u32), u32> = HashMap::default();
     for inst in &ctx.module.annotations {
         if inst.class.opcode == Op::MemberDecorate {
             if let (
@@ -971,7 +971,7 @@ pub(in crate::passes) fn lower_cross_member_subword_load(
             }
         }
     }
-    let mut chain_defs: HashMap<Word, Instruction> = HashMap::new();
+    let mut chain_defs: HashMap<Word, Instruction> = HashMap::default();
     for block in &ctx.module.functions[entry_idx].blocks {
         for inst in &block.instructions {
             if matches!(inst.class.opcode, Op::AccessChain | Op::InBoundsAccessChain) {
@@ -981,7 +981,7 @@ pub(in crate::passes) fn lower_cross_member_subword_load(
             }
         }
     }
-    let types = crate::passes::resources::rewrites::combined_type_defs(ctx, &HashMap::new());
+    let types = crate::passes::resources::rewrites::combined_type_defs(ctx, &HashMap::default());
     let value_types = crate::passes::resources::rewrites::combined_value_types(ctx, entry_idx);
     let exact_offsets = ctx
         .emit_sidecar
@@ -1126,7 +1126,7 @@ pub(in crate::passes) fn lower_cross_member_subword_load(
                     &chain_defs,
                     &types,
                     &value_types,
-                    &mut HashSet::new(),
+                    &mut HashSet::default(),
                 ),
                 addressed_member_offset: read_lo,
                 source_pointer: *ptr,
@@ -1142,7 +1142,7 @@ pub(in crate::passes) fn lower_cross_member_subword_load(
         .iter()
         .map(|plan| plan.source_pointer)
         .collect::<Vec<_>>();
-    let mut by_block: HashMap<usize, Vec<SubwordPlan>> = HashMap::new();
+    let mut by_block: HashMap<usize, Vec<SubwordPlan>> = HashMap::default();
     for plan in plans {
         by_block.entry(plan.bi).or_default().push(plan);
     }

@@ -1,6 +1,6 @@
+use crate::fxhash::HashMap;
 use crate::spirv_module::{Block, Function, Module, Operand};
 use spirv::{Op, Word};
-use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LatchTrampoline {
@@ -21,7 +21,7 @@ fn id_of(operand: Option<&Operand>) -> Option<Word> {
 }
 
 fn operand_references(module: &Module) -> HashMap<Word, usize> {
-    let mut counts = HashMap::new();
+    let mut counts = HashMap::default();
     for instruction in module.all_inst_iter() {
         for operand in &instruction.operands {
             if let Operand::IdRef(id) | Operand::IdScope(id) | Operand::IdMemorySemantics(id) =

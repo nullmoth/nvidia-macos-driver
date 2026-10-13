@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::fxhash::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

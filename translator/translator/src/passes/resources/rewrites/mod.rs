@@ -86,7 +86,7 @@ mod tests {
             ),
         ];
         let defs = defs_from_module(&module);
-        let value_types = HashMap::from([(7, 2)]);
+        let value_types = crate::fxhash::map_from([(7, 2)]);
 
         let default_ctx = Ctx::new(module.clone());
         assert_eq!(
@@ -2125,7 +2125,7 @@ mod tests {
         assert_eq!(direct_indices, vec![Operand::IdRef(14)]);
         assert_eq!(direct_pointee, 9);
 
-        remap_nested_air_struct_accesses(&mut ctx, 0, &HashSet::from([50]), &defs);
+        remap_nested_air_struct_accesses(&mut ctx, 0, &crate::fxhash::set_from([50]), &defs);
         let chain = &ctx.module.functions[0].blocks[0].instructions[0];
         assert_eq!(chain.operands[1], Operand::IdRef(14));
         assert_eq!(chain.result_type, Some(12));

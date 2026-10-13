@@ -1,7 +1,7 @@
 use super::*;
+use crate::fxhash::HashMap;
 use crate::spirv_module::Operand;
 use spirv::{Op, Word};
-use std::collections::HashMap;
 
 pub(in crate::native) fn forward_eval(
     f: &crate::spirv_module::Function,

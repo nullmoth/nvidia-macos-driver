@@ -443,7 +443,7 @@ mod tests {
         let byte_ty = 1;
         let inner_ty = 2;
         let outer_ty = 3;
-        let defs = HashMap::from([
+        let defs = crate::fxhash::map_from([
             (
                 byte_ty,
                 Instruction::new(

@@ -1,9 +1,9 @@
 use super::*;
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::Instruction;
 use crate::spirv_module::Module;
 use crate::spirv_module::Operand;
 use spirv::{Op, Word};
-use std::collections::{HashMap, HashSet};
 
 pub(in crate::native) fn scalar_int_bool_types(module: &Module) -> HashSet<Word> {
     module
@@ -18,7 +18,7 @@ pub(in crate::native) fn module_scalar_constants(
     module: &Module,
     int_types: &HashSet<Word>,
 ) -> HashMap<Word, i128> {
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     for inst in &module.types_global_values {
         let Some(rid) = inst.result_id else { continue };
         match inst.class.opcode {
@@ -50,7 +50,7 @@ pub(in crate::native) fn module_scalar_constants(
 }
 
 pub(in crate::native) fn value_int_widths(module: &Module) -> HashMap<Word, u32> {
-    let mut type_width: HashMap<Word, u32> = HashMap::new();
+    let mut type_width: HashMap<Word, u32> = HashMap::default();
     for inst in &module.types_global_values {
         if inst.class.opcode == Op::TypeInt {
             if let (Some(rid), Some(Operand::LiteralBit32(w))) =
@@ -60,7 +60,7 @@ pub(in crate::native) fn value_int_widths(module: &Module) -> HashMap<Word, u32>
             }
         }
     }
-    let mut out: HashMap<Word, u32> = HashMap::new();
+    let mut out: HashMap<Word, u32> = HashMap::default();
     for inst in module.types_global_values.iter().chain(
         module
             .functions
@@ -93,8 +93,8 @@ pub(in crate::native) fn compute_global_consts(
     widths: &HashMap<Word, u32>,
     vec_globals: &HashMap<Word, Vec<i128>>,
 ) -> HashMap<Word, i128> {
-    let mut global_vars: HashSet<Word> = HashSet::new();
-    let mut initializer: HashMap<Word, Word> = HashMap::new();
+    let mut global_vars: HashSet<Word> = HashSet::default();
+    let mut initializer: HashMap<Word, Word> = HashMap::default();
     for inst in &module.types_global_values {
         if inst.class.opcode != Op::Variable {
             continue;
@@ -106,9 +106,9 @@ pub(in crate::native) fn compute_global_consts(
         }
     }
 
-    let mut store_count: HashMap<Word, usize> = HashMap::new();
-    let mut single_store: HashMap<Word, (usize, usize, usize, Word)> = HashMap::new();
-    let mut load_functions: HashMap<Word, HashSet<usize>> = HashMap::new();
+    let mut store_count: HashMap<Word, usize> = HashMap::default();
+    let mut single_store: HashMap<Word, (usize, usize, usize, Word)> = HashMap::default();
+    let mut load_functions: HashMap<Word, HashSet<usize>> = HashMap::default();
     for (fi, f) in module.functions.iter().enumerate() {
         for (bi, blk) in f.blocks.iter().enumerate() {
             for (ii, inst) in blk.instructions.iter().enumerate() {
@@ -132,7 +132,7 @@ pub(in crate::native) fn compute_global_consts(
         }
     }
 
-    let mut gc: HashMap<Word, i128> = HashMap::new();
+    let mut gc: HashMap<Word, i128> = HashMap::default();
     for g in &global_vars {
         if store_count.get(g).copied().unwrap_or(0) == 0 {
             if let Some(init) = initializer.get(g) {
@@ -185,7 +185,7 @@ pub(in crate::native) fn compute_global_consts(
                         consts,
                         &gc,
                         widths,
-                        &HashMap::new(),
+                        &HashMap::default(),
                         vec_globals,
                     ),
                 )
@@ -210,7 +210,7 @@ pub(in crate::native) fn module_composite_constants(
     int_types: &HashSet<Word>,
     consts: &HashMap<Word, i128>,
 ) -> HashMap<Word, Vec<i128>> {
-    let mut vec_len: HashMap<Word, u32> = HashMap::new();
+    let mut vec_len: HashMap<Word, u32> = HashMap::default();
     for inst in &module.types_global_values {
         if inst.class.opcode == Op::TypeVector {
             if let (Some(rid), Some(Operand::IdRef(elem)), Some(Operand::LiteralBit32(n))) =
@@ -222,7 +222,7 @@ pub(in crate::native) fn module_composite_constants(
             }
         }
     }
-    let mut out: HashMap<Word, Vec<i128>> = HashMap::new();
+    let mut out: HashMap<Word, Vec<i128>> = HashMap::default();
     for inst in &module.types_global_values {
         let Some(rid) = inst.result_id else { continue };
         let Some(ty) = inst.result_type else { continue };
@@ -256,8 +256,8 @@ pub(in crate::native) fn compute_vector_global_consts(
     module: &Module,
     composites: &HashMap<Word, Vec<i128>>,
 ) -> HashMap<Word, Vec<i128>> {
-    let mut global_vars: HashSet<Word> = HashSet::new();
-    let mut initializer: HashMap<Word, Word> = HashMap::new();
+    let mut global_vars: HashSet<Word> = HashSet::default();
+    let mut initializer: HashMap<Word, Word> = HashMap::default();
     for inst in &module.types_global_values {
         if inst.class.opcode != Op::Variable {
             continue;
@@ -269,8 +269,8 @@ pub(in crate::native) fn compute_vector_global_consts(
         }
     }
 
-    let mut store_count: HashMap<Word, usize> = HashMap::new();
-    let mut single_store: HashMap<Word, (usize, usize, usize, Word)> = HashMap::new();
+    let mut store_count: HashMap<Word, usize> = HashMap::default();
+    let mut single_store: HashMap<Word, (usize, usize, usize, Word)> = HashMap::default();
     for (fi, f) in module.functions.iter().enumerate() {
         for (bi, blk) in f.blocks.iter().enumerate() {
             for (ii, inst) in blk.instructions.iter().enumerate() {
@@ -287,7 +287,7 @@ pub(in crate::native) fn compute_vector_global_consts(
         }
     }
 
-    let mut gc: HashMap<Word, Vec<i128>> = HashMap::new();
+    let mut gc: HashMap<Word, Vec<i128>> = HashMap::default();
     for g in &global_vars {
         if store_count.get(g).copied().unwrap_or(0) == 0 {
             if let Some(init) = initializer.get(g) {
@@ -298,7 +298,7 @@ pub(in crate::native) fn compute_vector_global_consts(
         }
     }
 
-    let mut def: HashMap<Word, &Instruction> = HashMap::new();
+    let mut def: HashMap<Word, &Instruction> = HashMap::default();
     for f in &module.functions {
         for b in &f.blocks {
             for inst in &b.instructions {

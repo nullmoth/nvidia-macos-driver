@@ -130,7 +130,7 @@ impl Emitter {
         if let Some(template) = self.pointer_phi_forward_template_provenance(name, incoming)? {
             return Ok(Some(template));
         }
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
         let values = incoming
             .iter()
             .map(|(value, _)| value.clone())
@@ -268,7 +268,7 @@ impl Emitter {
 
     fn forward_gep_chain_rooted_at(&self, value: &str, root: &str) -> Option<LlGep> {
         let mut current = value;
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fxhash::HashSet::default();
         loop {
             if !seen.insert(current) {
                 return None;
@@ -655,7 +655,7 @@ impl Emitter {
         let result_type = self.type_id(&bool_ty)?;
         let result = self.result_id(&pointer_null_name(name), &bool_ty)?;
         let mut ops = Vec::new();
-        let mut seen_incoming: HashMap<Word, Word> = HashMap::new();
+        let mut seen_incoming: HashMap<Word, Word> = HashMap::default();
         for (value, label) in incoming {
             let value_id = self.pointer_nullness_phi_value_id(value)?;
             let label_id = self.label_id(label)?;

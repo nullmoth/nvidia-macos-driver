@@ -25,7 +25,7 @@ pub(in crate::native) fn assert_construction_preserves_semantics(
     let mut constructed = module;
     crate::native::rewrites::construct_cfg_functions_module(
         &mut constructed,
-        &std::collections::HashSet::new(),
+        &crate::fxhash::HashSet::default(),
     )
     .expect("construction");
 
@@ -46,7 +46,7 @@ pub(in crate::native) fn nests(module: &Module) -> bool {
         .functions
         .iter()
         .filter_map(|function| function.def.as_ref().and_then(|def| def.result_id))
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fxhash::HashSet<_>>();
     !crate::native::reloop_nest::structure_selected_functions(&mut module, &functions).is_empty()
 }
 

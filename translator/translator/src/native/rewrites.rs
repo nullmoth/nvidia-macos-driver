@@ -188,7 +188,7 @@ pub(crate) fn close_inlined_bda_pointer_tables_module(module: &mut Module) -> bo
 
     let mut candidates = Vec::new();
     for (function_index, function) in module.functions.iter().enumerate() {
-        let mut uses = HashMap::<Word, Vec<(usize, usize)>>::new();
+        let mut uses = HashMap::<Word, Vec<(usize, usize)>>::default();
         for (block_index, block) in function.blocks.iter().enumerate() {
             for (instruction_index, instruction) in block.instructions.iter().enumerate() {
                 for operand in &instruction.operands {
@@ -467,7 +467,7 @@ pub(crate) fn construct_physical_atomic_pointer_lvalues_module(module: &mut Modu
             ));
             zero
         });
-    let mut wrapper_pointer_types = HashMap::<Word, Word>::new();
+    let mut wrapper_pointer_types = HashMap::<Word, Word>::default();
     for pointer_type in candidate_pointer_types {
         let pointee = pointer_pointees[&pointer_type];
         let wrapper = next_id;
@@ -586,7 +586,7 @@ pub(crate) fn prune_constant_cfg_module_if_changed(module: &mut Module) -> bool 
 }
 
 pub(crate) fn prune_unused_null_and_undef_constants_module(module: &mut Module) -> bool {
-    let mut referenced = HashSet::new();
+    let mut referenced = HashSet::default();
     for instruction in module
         .entry_points
         .iter()
@@ -702,7 +702,7 @@ pub(crate) fn lower_unobserved_bda_aggregate_pointer_fields_module(
             target
         };
 
-    let mut candidates = HashSet::new();
+    let mut candidates = HashSet::default();
     for function in &module.functions {
         for inst in function.all_inst_iter() {
             if inst.class.opcode != Op::CompositeInsert {
@@ -1005,7 +1005,7 @@ pub(crate) fn blocks_have_unowned_selection_header(blocks: &[crate::spirv_module
 pub(crate) fn unowned_selection_header_labels(
     blocks: &[crate::spirv_module::Block],
 ) -> Vec<Option<Word>> {
-    let mut declared_boundaries = HashSet::new();
+    let mut declared_boundaries = HashSet::default();
     for instruction in blocks.iter().flat_map(|block| &block.instructions) {
         let boundary_count = match instruction.class.opcode {
             Op::SelectionMerge => 1,
@@ -1804,7 +1804,7 @@ mod tests {
 
         assert!(!finish_id_deleting_rewrite(
             &mut module,
-            HashSet::new(),
+            HashSet::default(),
             false
         ));
         assert_eq!(module.debug_names.len(), 1);
@@ -1870,8 +1870,11 @@ mod tests {
         ];
         module.functions.push(function);
 
-        construct_cfg_functions_module(&mut module, &HashSet::from(["inlined_helper".to_string()]))
-            .expect("unselected module remains unchanged");
+        construct_cfg_functions_module(
+            &mut module,
+            &crate::fxhash::set_from(["inlined_helper".to_string()]),
+        )
+        .expect("unselected module remains unchanged");
         assert_eq!(module.functions[0].blocks.len(), 2);
     }
 
@@ -1896,8 +1899,11 @@ mod tests {
             ],
         ));
 
-        construct_cfg_functions_module(&mut module, &HashSet::from(["folded_helper".to_string()]))
-            .expect("a single returning block is already structured");
+        construct_cfg_functions_module(
+            &mut module,
+            &crate::fxhash::set_from(["folded_helper".to_string()]),
+        )
+        .expect("a single returning block is already structured");
         assert_eq!(module.functions[0].blocks.len(), 1);
     }
 
@@ -1922,9 +1928,11 @@ mod tests {
             ],
         ));
 
-        let error =
-            construct_cfg_functions_module(&mut module, &HashSet::from(["self_loop".to_string()]))
-                .expect_err("a self-branching block is not already structured");
+        let error = construct_cfg_functions_module(
+            &mut module,
+            &crate::fxhash::set_from(["self_loop".to_string()]),
+        )
+        .expect_err("a self-branching block is not already structured");
         assert!(
             error.contains("cannot be constructed"),
             "expected the selection to survive to the decline, got {error}"
@@ -1958,7 +1966,7 @@ mod tests {
         ];
         module.functions.push(function);
 
-        construct_cfg_functions_module(&mut module, &HashSet::new())
+        construct_cfg_functions_module(&mut module, &HashSet::default())
             .expect("unowned header construction");
         assert_ne!(module.functions[0].blocks.len(), 3);
     }
@@ -2005,7 +2013,7 @@ mod tests {
         ];
         module.functions.push(function);
 
-        construct_cfg_functions_module(&mut module, &HashSet::new())
+        construct_cfg_functions_module(&mut module, &HashSet::default())
             .expect("unowned backedge construction");
         assert_ne!(module.functions[0].blocks.len(), 4);
     }
@@ -2210,7 +2218,7 @@ mod tests {
         const DIAMONDS: u32 = 16;
         let mut module = loop_of_unstructured_diamonds(DIAMONDS);
         let before = module.functions[0].blocks.len();
-        construct_cfg_functions_module(&mut module, &HashSet::new()).expect("construction");
+        construct_cfg_functions_module(&mut module, &HashSet::default()).expect("construction");
 
         let (blocks, loop_merges, switch_cases, function_variables) =
             emitted_shape(&module.functions[0]);
@@ -2238,7 +2246,7 @@ mod tests {
     #[test]
     fn a_larger_reducible_function_still_nests_instead_of_flattening() {
         let mut module = loop_of_unstructured_diamonds(64);
-        construct_cfg_functions_module(&mut module, &HashSet::new()).expect("construction");
+        construct_cfg_functions_module(&mut module, &HashSet::default()).expect("construction");
         let (blocks, loop_merges, switch_cases, function_variables) =
             emitted_shape(&module.functions[0]);
         assert!(loop_merges >= 1, "{blocks} blocks, no loop construct");

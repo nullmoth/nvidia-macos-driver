@@ -1,16 +1,16 @@
 use super::*;
+use crate::fxhash::HashSet;
 use crate::spirv_module::Instruction;
 use crate::spirv_module::Module;
 use crate::spirv_module::Operand;
 use spirv::{Op, Word};
-use std::collections::HashSet;
 
 pub(in crate::native) fn prune_constant_branches(module: &mut Module) -> bool {
-    prune_constant_branches_impl(module, &HashSet::new(), true)
+    prune_constant_branches_impl(module, &HashSet::default(), true)
 }
 
 pub(in crate::native) fn prune_constant_cfg(module: &mut Module) -> bool {
-    prune_constant_branches_impl(module, &HashSet::new(), false)
+    prune_constant_branches_impl(module, &HashSet::default(), false)
 }
 
 fn prune_constant_branches_impl(
@@ -86,7 +86,7 @@ fn prune_constant_branches_impl(
 pub(in crate::native) fn sweep_uncalled_functions(module: &mut Module) -> bool {
     let fn_id = |f: &crate::spirv_module::Function| -> Option<Word> { f.def.as_ref()?.result_id };
 
-    let mut live: HashSet<Word> = HashSet::new();
+    let mut live: HashSet<Word> = HashSet::default();
     for ep in &module.entry_points {
         if let Some(Operand::IdRef(id)) = ep.operands.get(1) {
             live.insert(*id);
@@ -116,7 +116,7 @@ pub(in crate::native) fn sweep_uncalled_functions(module: &mut Module) -> bool {
         }
     }
 
-    let mut removed_ids: HashSet<Word> = HashSet::new();
+    let mut removed_ids: HashSet<Word> = HashSet::default();
     for f in &module.functions {
         let Some(id) = fn_id(f) else { continue };
         if live.contains(&id) {
