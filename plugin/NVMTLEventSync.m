@@ -59,14 +59,18 @@ static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t)
     }
 }
 static void nvmtl_surface_register_writes(NVMTLCommandBuffer *cb) {
-    if (!nvmtl_surface_writers) nvmtl_surface_writers = [NSMapTable weakToStrongObjectsMapTable];
-    NSMutableDictionary *writes = [nvmtl_surface_writers objectForKey:cb->_queue];
-    for (NVMTLSubmissionPart *part in cb->_parts) for (NVMTLTexture *t in part->surfaces) {
-        if (!t->_surf) continue;
-        if (!writes) { writes = [NSMutableDictionary new]; [nvmtl_surface_writers setObject:writes forKey:cb->_queue]; }
-        NVMTLPendingSurfaceWrite *write = [NVMTLPendingSurfaceWrite new];
-        write->buffer = cb; write->texture = t; write->seed = IOSurfaceGetSeed(t->_surf);
-        writes[nvmtl_surface_writer_key(t)] = write;
+    // The same lock as pending_write and finish_writes, taken here too: the map is shared with the completion thread, and
+    // its one caller holding this (recursive) lock today must not be what keeps WindowServer's heap intact.
+    @synchronized ([NVMTLCommandBuffer class]) {
+        if (!nvmtl_surface_writers) nvmtl_surface_writers = [NSMapTable weakToStrongObjectsMapTable];
+        NSMutableDictionary *writes = [nvmtl_surface_writers objectForKey:cb->_queue];
+        for (NVMTLSubmissionPart *part in cb->_parts) for (NVMTLTexture *t in part->surfaces) {
+            if (!t->_surf) continue;
+            if (!writes) { writes = [NSMutableDictionary new]; [nvmtl_surface_writers setObject:writes forKey:cb->_queue]; }
+            NVMTLPendingSurfaceWrite *write = [NVMTLPendingSurfaceWrite new];
+            write->buffer = cb; write->texture = t; write->seed = IOSurfaceGetSeed(t->_surf);
+            writes[nvmtl_surface_writer_key(t)] = write;
+        }
     }
 }
 static void nvmtl_surface_finish_writes(NVMTLCommandBuffer *cb) {

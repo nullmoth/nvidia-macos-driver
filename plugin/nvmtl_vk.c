@@ -295,8 +295,10 @@ static int nvmtl_rebind_import(const void *inside, const char *symbol, void *rep
             if (type != S_LAZY_SYMBOL_POINTERS && type != S_NON_LAZY_SYMBOL_POINTERS) continue;
             void **slots = (void **)(slide + sec->addr);
             for (uint64_t e = 0; e < sec->size / sizeof(void *); e++) {
+                if ((uint64_t)sec->reserved1 + e >= dst->nindirectsyms) break;   // a malformed table ends the section
                 const uint32_t si = ind[sec->reserved1 + e];
                 if (si == INDIRECT_SYMBOL_ABS || si == INDIRECT_SYMBOL_LOCAL || (si & INDIRECT_SYMBOL_ABS) || si >= st->nsyms) continue;
+                if (syms[si].n_un.n_strx >= st->strsize) continue;
                 if (strcmp(strs + syms[si].n_un.n_strx, symbol)) continue;
                 vm_address_t page = (vm_address_t)&slots[e] & ~(vm_address_t)(getpagesize() - 1);
                 // __DATA_CONST is read-only after binding: open the one page, write, close it again
