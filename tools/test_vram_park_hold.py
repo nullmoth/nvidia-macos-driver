@@ -81,5 +81,11 @@ print(f'replay of 4 3840x2560 surfaces over an 8 MB console, 32 MB ceiling: capp
       f'with guard {with_guard} granted')
 assert capped_only == 0, 'negative control: parking only what fits under the ceiling must loop on this machine'
 assert guarded and with_guard == 4, 'surfaces larger than the park ceiling must be granted once a guard holds the overlap'
+nophys = grant[grant.index('if (!p) {'):grant.index('if (onScanout || onConsole) {')] if 'if (!p) {' in grant else ''
+print('a block with no physical address is released, not parked:', bool(nophys) and 'freeMemory' in nophys and 'break;' in nophys
+      and 'gParkedForever' not in nophys)
+assert nophys and 'freeMemory' in nophys and 'break;' in nophys and 'gParkedForever' not in nophys, (
+    'a block with no physical address (RM mapping table full: RTX 3050 / RTX 5070 at ~20 min) must be released and the '
+    'request refused - parking it held one more mapping per attempt')
 print('PASS: parked VRAM keeps its BAR1 mapping; requests are granted once the console range is held, '
       'including surfaces larger than the park ceiling')
