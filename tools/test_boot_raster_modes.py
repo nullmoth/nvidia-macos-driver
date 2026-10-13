@@ -39,7 +39,7 @@ struct Kms {
 };
 struct NVRMNVDAFramebuffer {
     Kms *fKms=nullptr;void *fDev=this;unsigned fDisplay=1,fIndex=0;
-    unsigned fBootW=2560,fBootH=1600,fScalerMaxW=3840,fScalerMaxH=2160,fPitchAlign=256;
+    unsigned fBootW=2560,fBootH=1600,fScalerMaxW=3840,fScalerMaxH=2160,fRasterMaxW=5120,fPitchAlign=256;
     NvU64 fMemBytes=64ULL<<20;NvKmsKapiDisplayMode fBootMode;
     IODetailedTimingInformationV2 fDT[16];
     void setProperty(const char *,unsigned long long,unsigned) {}
@@ -68,7 +68,14 @@ int main() {
     kms.modes[1].timings.flags.interlaced=true;
     NVRMNVDAFramebuffer bad;bad.fKms=&kms;bad.fBootMode=f.fBootMode;
     assert(bad.addKmsRefreshModes(0)==1);
-    puts("PASS: boot 165 Hz desktop timing, stable IDs, no duplicate, scaled mode coexistence, smaller-raster exclusion, memory and timing guards");
+    // a 5120x1440 monitor that the firmware started at 2560x1440: wider than the scaler limit, but it fits the memory
+    Kms wide;wide.modes={mode(2560,1440,60),mode(5120,1440,60),mode(7680,2160,60)};
+    NVRMNVDAFramebuffer uw;uw.fKms=&wide;uw.fBootW=2560;uw.fBootH=1440;uw.fBootMode=wide.modes[0];
+    assert(uw.addKmsRefreshModes(0)==2 && uw.fDT[1].horizontalActive==5120);
+    NVRMNVDAFramebuffer uwSmall;uwSmall.fKms=&wide;uwSmall.fBootW=2560;uwSmall.fBootH=1440;uwSmall.fBootMode=wide.modes[0];
+    uwSmall.fMemBytes=16ULL<<20;
+    assert(uwSmall.addKmsRefreshModes(0)==1);
+    puts("PASS: boot 165 Hz desktop timing, stable IDs, no duplicate, scaled mode coexistence, smaller-raster exclusion, memory and timing guards, ultrawide wider than the scaler but not past the raster limit or memory");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
