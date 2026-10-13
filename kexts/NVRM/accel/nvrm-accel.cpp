@@ -766,6 +766,10 @@ void NVResource::free()
     IOAccelResource2::free();
 }
 
+// 1 = a surface keeps its VRAM across the family's deallocPhysical/allocPhysical (see deallocPhysical).
+static int gVmSticky = 1;
+static SInt64 gCntVmParked, gCntVmUnparked, gCntVmParkReleased;
+
 bool NVVidMemory::allocPhysical()
 {
     if (fScanout) {
@@ -783,6 +787,16 @@ bool NVVidMemory::allocPhysical()
     const unsigned long long want = *(const volatile unsigned long long *)((const unsigned char *)this + 0x40);
     if (!want) { ALOG("NVVidMemory::allocPhysical(%p): length at +0x40 is 0 -- nothing to back", this); return false; }
     if (!NVAccel::gAccel) { ALOG("NVVidMemory::allocPhysical(%p): no accelerator", this); return false; }
+    if (fParkHandle) {
+        if (fParkBytes >= want) {
+            fRmHandle = fParkHandle; fKva = fParkKva; fPhys = fParkPhys; fBytes = fParkBytes; fAllocationCookie = fParkCookie;
+            fParkHandle = nullptr; fParkKva = nullptr; fParkPhys = fParkBytes = fParkCookie = 0;
+            *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = fPhys;
+            OSAddAtomic64(1, &gCntVmUnparked);
+            return true;
+        }
+        releaseParked();   // the resource grew: its old VRAM cannot hold it
+    }
 
     struct NVRMVramRequest r;
     for (unsigned i = 0; i < sizeof r; i++) ((volatile unsigned char *)&r)[i] = 0;
@@ -813,13 +827,47 @@ void NVVidMemory::deallocPhysical()
     }
     if (!fRmHandle) return;
     OSAddAtomic64(1, &gCntVmDealloc); OSAddAtomic64((SInt64)fBytes, &gCntVmDeallocBytes);
+    // The family frees a surface's VRAM after copying it back for the CPU, and backs the surface with new VRAM when the
+    // GPU needs it again. The Metal plugin imported the old VRAM once and keeps drawing into it, so from then on the
+    // display and every copy-back read new, never-written VRAM: black frames, and windows black until a drag made
+    // WindowServer import the surface again. Parked instead, this VRAM is what the next allocPhysical hands back, so the
+    // surface keeps the memory the plugin draws into. It is released when the resource goes away or outgrows it.
+    if (gVmSticky) {
+        releaseParked();
+        fParkHandle = fRmHandle; fParkKva = fKva; fParkPhys = fPhys; fParkBytes = fBytes; fParkCookie = fAllocationCookie;
+        OSAddAtomic64(1, &gCntVmParked);
+    } else {
+        releaseVram(fRmHandle, fKva, fBytes, fAllocationCookie);
+    }
+    fRmHandle = nullptr; fKva = nullptr; fPhys = 0; fBytes = 0; fAllocationCookie = 0;
+    *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = 0;
+}
+
+void NVVidMemory::releaseVram(void *handle, void *kva, unsigned long long bytes, unsigned long long cookie)
+{
     struct NVRMVramRequest r;
     for (unsigned i = 0; i < sizeof r; i++) ((volatile unsigned char *)&r)[i] = 0;
     r.version = NVRM_VRAM_ABI_VERSION;
-    r.handle = fRmHandle; r.kva = fKva; r.actualSize = fBytes; r.allocationCookie = fAllocationCookie;
+    r.handle = handle; r.kva = kva; r.actualSize = bytes; r.allocationCookie = cookie;
     if (NVAccel::gAccel) NVAccel::gAccel->askFramebufferForVram(&r, false);
-    fRmHandle = nullptr; fKva = nullptr; fPhys = 0; fBytes = 0; fAllocationCookie = 0;
-    *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = 0;
+}
+
+void NVVidMemory::releaseParked()
+{
+    if (!fParkHandle) return;
+    releaseVram(fParkHandle, fParkKva, fParkBytes, fParkCookie);
+    fParkHandle = nullptr; fParkKva = nullptr; fParkPhys = fParkBytes = fParkCookie = 0;
+    OSAddAtomic64(1, &gCntVmParkReleased);
+}
+
+void NVVidMemory::free()
+{
+    if (fRmHandle && !fScanout) {
+        releaseVram(fRmHandle, fKva, fBytes, fAllocationCookie);
+        fRmHandle = nullptr; fKva = nullptr; fPhys = 0; fBytes = 0; fAllocationCookie = 0;
+    }
+    releaseParked();
+    IOAccelVidMemory::free();
 }
 
 class IOSurface {
@@ -1033,6 +1081,10 @@ NVACCEL_CNT(nvaccel_vm_alloc_bytes,   gCntVmAllocBytes,   "bytes of VRAM granted
 NVACCEL_CNT(nvaccel_vm_dealloc,       gCntVmDealloc,      "NVVidMemory::deallocPhysical calls with a handle");
 NVACCEL_CNT(nvaccel_vm_dealloc_bytes, gCntVmDeallocBytes, "bytes of VRAM given back by NVVidMemory");
 NVACCEL_CNT(nvaccel_vm_refused,       gCntVmRefused,      "allocPhysical refused by the framebuffer");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_vm_sticky, CTLFLAG_RW | CTLFLAG_LOCKED, &gVmSticky, 0, "1 = a surface keeps its VRAM across the family's dealloc/alloc (the memory the plugin draws into)");
+NVACCEL_CNT(nvaccel_vm_parked,        gCntVmParked,       "VRAM kept when the family freed a surface's VRAM");
+NVACCEL_CNT(nvaccel_vm_unparked,      gCntVmUnparked,     "allocations answered with the surface's kept VRAM");
+NVACCEL_CNT(nvaccel_vm_park_released, gCntVmParkReleased, "kept VRAM released (resource freed or grown)");
 NVACCEL_CNT(nvaccel_res_new,          gCntResNew,         "NVResource objects created");
 NVACCEL_CNT(nvaccel_res_free,         gCntResFree,        "NVResource objects freed");
 NVACCEL_CNT(nvaccel_map_commit,       gCntMapCommit,      "GPU page-table commits (MAP_MEMORY_DMA ok)");
@@ -1095,6 +1147,9 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_vm_alloc);       sysctl_register_oid(&sysctl__debug_nvaccel_vm_alloc_bytes);
     sysctl_register_oid(&sysctl__debug_nvaccel_vm_dealloc);     sysctl_register_oid(&sysctl__debug_nvaccel_vm_dealloc_bytes);
     sysctl_register_oid(&sysctl__debug_nvaccel_vm_refused);
+    sysctl_register_oid(&sysctl__debug_nvaccel_vm_sticky);
+    sysctl_register_oid(&sysctl__debug_nvaccel_vm_parked);      sysctl_register_oid(&sysctl__debug_nvaccel_vm_unparked);
+    sysctl_register_oid(&sysctl__debug_nvaccel_vm_park_released);
     sysctl_register_oid(&sysctl__debug_nvaccel_res_new);        sysctl_register_oid(&sysctl__debug_nvaccel_res_free);
     sysctl_register_oid(&sysctl__debug_nvaccel_map_commit);     sysctl_register_oid(&sysctl__debug_nvaccel_map_release);
     sysctl_register_oid(&sysctl__debug_nvaccel_map_free);

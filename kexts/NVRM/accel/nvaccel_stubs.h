@@ -70,9 +70,16 @@ public:
     unsigned long long fPhys     = 0;
     unsigned long long fBytes    = 0;
     bool fScanout = false;
+    // VRAM kept across deallocPhysical/allocPhysical (debug.nvaccel_vm_sticky): see NVVidMemory::deallocPhysical
+    void              *fParkHandle = nullptr;
+    void              *fParkKva    = nullptr;
+    unsigned long long fParkPhys = 0, fParkBytes = 0, fParkCookie = 0;
+    void releaseVram(void *handle, void *kva, unsigned long long bytes, unsigned long long cookie);
+    void releaseParked();
 
     bool allocPhysical() APPLE_KEXT_OVERRIDE;
     void deallocPhysical() APPLE_KEXT_OVERRIDE;
+    void free() APPLE_KEXT_OVERRIDE;
 
     uint64_t getPhysicalSegment(unsigned long long a0, unsigned long long* a1) APPLE_KEXT_OVERRIDE {
         const unsigned long long total = *(const volatile unsigned long long *)((const unsigned char *)this + 0x40);
