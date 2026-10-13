@@ -1,10 +1,10 @@
-use std::collections::HashSet;
+use crate::fxhash::HashSet;
 use std::hash::Hash;
 
 pub(crate) fn dedup_in_encounter_order<T: Copy + Eq + Hash>(
     items: impl IntoIterator<Item = T>,
 ) -> Vec<T> {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     items
         .into_iter()
         .filter(|item| seen.insert(*item))

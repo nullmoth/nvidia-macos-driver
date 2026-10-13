@@ -1,9 +1,9 @@
+use crate::fxhash::{HashMap, HashSet};
 use super::cfg::{graph::spirv_block_successors_by_label, EmittedDominators};
 use crate::spirv_module::Instruction;
 use crate::spirv_module::Module;
 use crate::spirv_module::Operand;
 use spirv::{Decoration, Op, StorageClass, Word};
-use std::collections::{HashMap, HashSet};
 
 const MAX_VALUE_STORE_REPLAY_NODES: usize = 4096;
 
@@ -67,8 +67,8 @@ fn discover_value_select(module: &Module) -> Option<Discovery> {
     let is_buffer_var =
         |id: Word| -> bool { var_storage.get(&id) == Some(&StorageClass::StorageBuffer) };
 
-    let mut value_def: HashMap<Word, Instruction> = HashMap::new();
-    let mut value_type: HashMap<Word, Word> = HashMap::new();
+    let mut value_def: HashMap<Word, Instruction> = HashMap::default();
+    let mut value_type: HashMap<Word, Word> = HashMap::default();
     for function in &module.functions {
         for block in &function.blocks {
             for inst in &block.instructions {
@@ -156,8 +156,8 @@ fn discover_value_select(module: &Module) -> Option<Discovery> {
         return None;
     }
 
-    let mut children: HashMap<Word, Vec<Word>> = HashMap::new();
-    let mut parents: HashMap<Word, Vec<Word>> = HashMap::new();
+    let mut children: HashMap<Word, Vec<Word>> = HashMap::default();
+    let mut parents: HashMap<Word, Vec<Word>> = HashMap::default();
     for (id, def) in &value_def {
         if !is_sb_pointer(*id) {
             continue;
@@ -169,7 +169,7 @@ fn discover_value_select(module: &Module) -> Option<Discovery> {
             }
         }
     }
-    let mut closure: HashSet<Word> = HashSet::new();
+    let mut closure: HashSet<Word> = HashSet::default();
     let mut stack: Vec<Word> = cross_binding_merges.clone();
     while let Some(v) = stack.pop() {
         if !closure.insert(v) {
@@ -263,9 +263,9 @@ fn discover_value_select(module: &Module) -> Option<Discovery> {
 }
 
 fn rewrite_scalar_ptr_byte_loads(module: &mut Module) -> bool {
-    let mut type_defs: HashMap<Word, Instruction> = HashMap::new();
-    let mut value_type: HashMap<Word, Word> = HashMap::new();
-    let mut const_by_ty_value: HashMap<(Word, u64), Word> = HashMap::new();
+    let mut type_defs: HashMap<Word, Instruction> = HashMap::default();
+    let mut value_type: HashMap<Word, Word> = HashMap::default();
+    let mut const_by_ty_value: HashMap<(Word, u64), Word> = HashMap::default();
     for inst in &module.types_global_values {
         if let Some(result) = inst.result_id {
             type_defs.insert(result, inst.clone());
@@ -320,7 +320,7 @@ fn rewrite_scalar_ptr_byte_loads(module: &mut Module) -> bool {
         }
     };
 
-    let mut ptr_array_stride: HashMap<Word, u32> = HashMap::new();
+    let mut ptr_array_stride: HashMap<Word, u32> = HashMap::default();
     for ann in &module.annotations {
         if ann.class.opcode == Op::Decorate
             && ann.operands.get(1) == Some(&Operand::Decoration(Decoration::ArrayStride))
@@ -333,7 +333,7 @@ fn rewrite_scalar_ptr_byte_loads(module: &mut Module) -> bool {
         }
     }
 
-    let mut use_count: HashMap<Word, usize> = HashMap::new();
+    let mut use_count: HashMap<Word, usize> = HashMap::default();
     for function in &module.functions {
         for block in &function.blocks {
             for inst in &block.instructions {
@@ -345,7 +345,7 @@ fn rewrite_scalar_ptr_byte_loads(module: &mut Module) -> bool {
             }
         }
     }
-    let mut byte_select_use: HashMap<Word, Word> = HashMap::new();
+    let mut byte_select_use: HashMap<Word, Word> = HashMap::default();
     for function in &module.functions {
         for block in &function.blocks {
             for inst in &block.instructions {
@@ -381,10 +381,10 @@ fn rewrite_scalar_ptr_byte_loads(module: &mut Module) -> bool {
         load_tail: Vec<Operand>,
     }
 
-    let mut candidates: HashMap<(usize, usize, usize), Candidate> = HashMap::new();
+    let mut candidates: HashMap<(usize, usize, usize), Candidate> = HashMap::default();
     for (fi, function) in module.functions.iter().enumerate() {
         for (bi, block) in function.blocks.iter().enumerate() {
-            let mut load_by_ptr: HashMap<Word, (usize, Word, Word, Vec<Operand>)> = HashMap::new();
+            let mut load_by_ptr: HashMap<Word, (usize, Word, Word, Vec<Operand>)> = HashMap::default();
             for (ii, inst) in block.instructions.iter().enumerate() {
                 if inst.class.opcode != Op::Load {
                     continue;
@@ -558,7 +558,7 @@ fn rewrite_scalar_ptr_byte_loads(module: &mut Module) -> bool {
                 continue;
             }
 
-            let mut load_rewrites: HashMap<usize, (Candidate, Word, Word)> = HashMap::new();
+            let mut load_rewrites: HashMap<usize, (Candidate, Word, Word)> = HashMap::default();
             let mut rewritten = Vec::<Instruction>::new();
             for (ii, inst) in block.instructions.iter().cloned().enumerate() {
                 if let Some(candidate) = block_candidates.get(&ii) {
@@ -746,7 +746,7 @@ fn store_arm_varies_by_invocation(
     var_storage: &HashMap<Word, StorageClass>,
     varying: &HashSet<Word>,
 ) -> bool {
-    let mut seen: HashSet<Word> = HashSet::new();
+    let mut seen: HashSet<Word> = HashSet::default();
     let mut work = vec![ptr];
     while let Some(id) = work.pop() {
         if !seen.insert(id) || var_storage.contains_key(&id) {
@@ -809,7 +809,7 @@ pub(super) fn rewrite_cross_binding_pointer_merges_to_values(module: &mut Module
         id
     };
 
-    let mut ptr_type_for: HashMap<Word, Word> = HashMap::new();
+    let mut ptr_type_for: HashMap<Word, Word> = HashMap::default();
     for i in &module.types_global_values {
         if i.class.opcode == Op::TypePointer {
             if let (
@@ -1008,8 +1008,8 @@ pub(super) fn rewrite_cross_binding_pointer_merges_to_values(module: &mut Module
         Some(cur)
     }
 
-    let mut def_block: HashMap<Word, (usize, usize)> = HashMap::new();
-    let mut block_of_label: HashMap<Word, (usize, usize)> = HashMap::new();
+    let mut def_block: HashMap<Word, (usize, usize)> = HashMap::default();
+    let mut block_of_label: HashMap<Word, (usize, usize)> = HashMap::default();
     for (fi, function) in module.functions.iter().enumerate() {
         for (bi, block) in function.blocks.iter().enumerate() {
             if let Some(lbl) = block.label.as_ref().and_then(|l| l.result_id) {
@@ -1064,10 +1064,10 @@ pub(super) fn rewrite_cross_binding_pointer_merges_to_values(module: &mut Module
             .is_some_and(|tree| tree.dominates(def_label, target_label))
     };
 
-    let mut block_appends: HashMap<(usize, usize), Vec<Instruction>> = HashMap::new();
-    let mut block_phis: HashMap<(usize, usize), Vec<Instruction>> = HashMap::new();
+    let mut block_appends: HashMap<(usize, usize), Vec<Instruction>> = HashMap::default();
+    let mut block_phis: HashMap<(usize, usize), Vec<Instruction>> = HashMap::default();
 
-    let mut memo_phi: HashMap<(Word, Vec<(u32, Vec<Word>)>), Word> = HashMap::new();
+    let mut memo_phi: HashMap<(Word, Vec<(u32, Vec<Word>)>), Word> = HashMap::default();
 
     #[allow(clippy::too_many_arguments)]
     fn vreplay(
@@ -1623,11 +1623,11 @@ pub(super) fn rewrite_cross_binding_pointer_merges_to_values(module: &mut Module
         }
     }
 
-    let mut load_remap: HashMap<Word, Word> = HashMap::new();
-    let mut loads_to_delete: HashSet<Word> = HashSet::new();
-    let mut load_replay_insts: HashMap<Word, Vec<Instruction>> = HashMap::new();
-    let mut stores_to_delete: HashSet<(usize, usize, usize)> = HashSet::new();
-    let mut store_replay_insts: HashMap<(usize, usize, usize), Vec<Instruction>> = HashMap::new();
+    let mut load_remap: HashMap<Word, Word> = HashMap::default();
+    let mut loads_to_delete: HashSet<Word> = HashSet::default();
+    let mut load_replay_insts: HashMap<Word, Vec<Instruction>> = HashMap::default();
+    let mut stores_to_delete: HashSet<(usize, usize, usize)> = HashSet::default();
+    let mut store_replay_insts: HashMap<(usize, usize, usize), Vec<Instruction>> = HashMap::default();
     {
         let mut loads: Vec<(Word, Word, (usize, usize))> = Vec::new();
         let mut stores: Vec<(usize, usize, usize, Word, Word, Vec<Operand>)> = Vec::new();
@@ -1681,7 +1681,7 @@ pub(super) fn rewrite_cross_binding_pointer_merges_to_values(module: &mut Module
                 &value_def,
                 &block_of_label,
                 &value_available_at,
-                &mut HashSet::new(),
+                &mut HashSet::default(),
             ) {
                 return false;
             }
@@ -1839,7 +1839,7 @@ fn apply_value_domain_rewrite(
                 | Op::EmitMeshTasksEXT
         )
     };
-    let mut referenced_by_new: HashSet<Word> = HashSet::new();
+    let mut referenced_by_new: HashSet<Word> = HashSet::default();
     for insts in block_phis
         .values()
         .chain(block_appends.values())

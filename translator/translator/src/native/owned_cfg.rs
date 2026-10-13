@@ -1,7 +1,7 @@
 use crate::dominators::{build_predecessors, dominance, dominates_interval};
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::{is_block_terminator, Function, Instruction, Operand};
 use spirv::{Op, Word};
-use std::collections::{HashMap, HashSet};
 
 pub(crate) enum OwnedModuleFailure {
     Invalid(String),
@@ -73,8 +73,8 @@ impl OwnedCfg {
         let mut successors = Vec::with_capacity(function.blocks.len());
         let mut structural_successors = Vec::with_capacity(function.blocks.len());
         let mut constructs = Vec::new();
-        let mut switches = HashMap::new();
-        let mut merge_owner = HashMap::<usize, usize>::new();
+        let mut switches = HashMap::default();
+        let mut merge_owner = HashMap::<usize, usize>::default();
         for (header, block) in function.blocks.iter().enumerate() {
             let terminator = block
                 .instructions
@@ -267,7 +267,7 @@ impl OwnedCfg {
             .filter(|construct| matches!(construct.kind, MergeKind::Loop { .. }))
             .map(|construct| construct.header)
             .collect::<HashSet<_>>();
-        let mut backedges = HashMap::<usize, Vec<usize>>::new();
+        let mut backedges = HashMap::<usize, Vec<usize>>::default();
         for (source, targets) in self.successors.iter().enumerate() {
             if !self.reachable[source] {
                 continue;
@@ -500,7 +500,7 @@ impl OwnedCfg {
         {
             return Err("native emitter: owned OpPhi has malformed incoming pairs".to_string());
         }
-        let mut parents = HashSet::new();
+        let mut parents = HashSet::default();
         for pair in instruction.operands.chunks_exact(2) {
             let (Operand::IdRef(value), Operand::IdRef(parent_label)) = (&pair[0], &pair[1]) else {
                 return Err(
@@ -642,9 +642,9 @@ impl OwnedCfg {
                 }
             }
 
-            let mut closed_targets = HashSet::new();
+            let mut closed_targets = HashSet::default();
             let mut previous = None;
-            let mut positions = HashMap::<usize, (usize, usize)>::new();
+            let mut positions = HashMap::<usize, (usize, usize)>::default();
             for (position, target) in info.targets.iter().copied().enumerate() {
                 if previous.is_some_and(|previous| previous != target) {
                     closed_targets.insert(previous.expect("changed switch target exists"));
@@ -662,7 +662,7 @@ impl OwnedCfg {
                 previous = Some(target);
             }
 
-            let mut case_edges = HashSet::new();
+            let mut case_edges = HashSet::default();
             for (source, targets) in self.successors.iter().enumerate() {
                 let Some(source_case) = case_owner[source] else {
                     continue;
@@ -676,8 +676,8 @@ impl OwnedCfg {
                     }
                 }
             }
-            let mut outgoing = HashMap::<usize, HashSet<usize>>::new();
-            let mut incoming = HashMap::<usize, HashSet<usize>>::new();
+            let mut outgoing = HashMap::<usize, HashSet<usize>>::default();
+            let mut incoming = HashMap::<usize, HashSet<usize>>::default();
             for (source, target) in &case_edges {
                 outgoing.entry(*source).or_default().insert(*target);
                 incoming.entry(*target).or_default().insert(*source);
@@ -1009,7 +1009,7 @@ fn switch_info(operands: &[Operand], labels: &HashMap<Word, usize>) -> Result<Sw
 }
 
 fn definition_sites(function: &Function) -> Result<HashMap<Word, DefinitionSite>, String> {
-    let mut sites = HashMap::new();
+    let mut sites = HashMap::default();
     for (block, instructions) in function.blocks.iter().enumerate() {
         for (instruction, definition) in instructions.instructions.iter().enumerate() {
             let Some(id) = definition.result_id else {
@@ -1050,7 +1050,7 @@ pub(super) fn rematerialize_nondominating_pure_uses(
         if !cfg.flow_reachable[block] {
             continue;
         }
-        let mut local = HashMap::<Word, Word>::new();
+        let mut local = HashMap::<Word, Word>::default();
         let mut index = 0;
         while index < function.blocks[block].instructions.len() {
             if function.blocks[block].instructions[index].class.opcode == Op::Phi {
@@ -1599,12 +1599,12 @@ fn owned_block_layout_error(
     module: &crate::spirv_module::Module,
     definitions: &HashMap<Word, &Instruction>,
 ) -> Option<String> {
-    let mut block_roots = HashSet::new();
-    let mut array_strides = HashSet::new();
-    let mut member_offsets = HashSet::new();
-    let mut matrix_strides = HashSet::new();
-    let mut row_major = HashSet::new();
-    let mut col_major = HashSet::new();
+    let mut block_roots = HashSet::default();
+    let mut array_strides = HashSet::default();
+    let mut member_offsets = HashSet::default();
+    let mut matrix_strides = HashSet::default();
+    let mut row_major = HashSet::default();
+    let mut col_major = HashSet::default();
     for annotation in &module.annotations {
         match annotation.operands.as_slice() {
             [Operand::IdRef(target), Operand::Decoration(spirv::Decoration::Block | spirv::Decoration::BufferBlock)]
@@ -1739,7 +1739,7 @@ fn owned_block_layout_error(
         row_major: &row_major,
         col_major: &col_major,
     };
-    let mut checked = HashSet::new();
+    let mut checked = HashSet::default();
     block_roots
         .into_iter()
         .find_map(|root| check_type(root, definitions, &decorations, &mut checked))
@@ -2836,7 +2836,7 @@ fn type_contains_pointer(
 }
 
 fn pointer_root(mut id: Word, definitions: &HashMap<Word, &Instruction>) -> Option<Word> {
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     loop {
         if !visited.insert(id) {
             return None;
@@ -2986,7 +2986,7 @@ fn owned_pointer_construction_error(
                 .and_then(|ty| pointer_type_shape(ty, definitions))
                 .map(|(_, pointee)| pointee);
             if pointee.is_some_and(|pointee| {
-                type_contains_pointer(pointee, definitions, &mut HashSet::new())
+                type_contains_pointer(pointee, definitions, &mut HashSet::default())
             }) {
                 return Some(
                     "native emitter: missing pointer storage for pointer-valued Logical variable"
@@ -4916,8 +4916,8 @@ fn owned_module_linkage_error(
         })
         .filter_map(|instruction| instruction.result_id.map(|id| (id, instruction)))
         .collect::<HashMap<_, _>>();
-    let mut entry_ids = HashSet::new();
-    let mut entry_names = HashSet::new();
+    let mut entry_ids = HashSet::default();
+    let mut entry_names = HashSet::default();
     let version = module
         .header
         .as_ref()
@@ -4963,7 +4963,7 @@ fn owned_module_linkage_error(
         }
         entry_ids.insert(*function_id);
 
-        let mut interface_ids = HashSet::new();
+        let mut interface_ids = HashSet::default();
         for operand in interface {
             let Operand::IdRef(id) = operand else {
                 return Err(
@@ -4997,8 +4997,8 @@ fn owned_module_linkage_error(
         }
 
         let mut pending = vec![*function_id];
-        let mut visited = HashSet::new();
-        let mut required_interface = HashSet::new();
+        let mut visited = HashSet::default();
+        let mut required_interface = HashSet::default();
         while let Some(current) = pending.pop() {
             if !visited.insert(current) {
                 continue;
@@ -5333,8 +5333,8 @@ pub(crate) fn owned_module_failures(
     if let Some(error) = owned_module_layout_error(module) {
         return invalid(error);
     }
-    let mut definitions = HashMap::new();
-    let mut value_types = HashMap::new();
+    let mut definitions = HashMap::default();
+    let mut value_types = HashMap::default();
     for instruction in module.all_inst_iter() {
         let Some((expects_result_type, expects_result_id)) =
             crate::spirv_binary::instruction_result_shape(instruction.class.opcode)
@@ -5534,7 +5534,7 @@ pub(crate) fn owned_module_failures(
         record_invalid!(error);
     }
 
-    let mut local_owners = HashMap::new();
+    let mut local_owners = HashMap::default();
     for (function_index, function) in module.functions.iter().enumerate() {
         for id in function
             .parameters
@@ -10858,8 +10858,8 @@ mod tests {
             kind: MergeKind::Loop { continue_target: 3 },
             is_switch: false,
         };
-        let same_backedge = HashMap::from([(1, vec![3])]);
-        let distinct_backedge = HashMap::from([(1, vec![2])]);
+        let same_backedge = crate::fxhash::map_from([(1, vec![3])]);
+        let distinct_backedge = crate::fxhash::map_from([(1, vec![2])]);
 
         assert!(!needs_post_dominance(&[], &distinct_backedge));
         assert!(!needs_post_dominance(&[construct], &same_backedge));

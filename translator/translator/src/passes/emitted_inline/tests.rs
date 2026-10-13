@@ -219,7 +219,7 @@ fn selected_multiblock_splice_preserves_chained_call_order_without_pruning() {
     });
     let mut ctx = Ctx::new(module_with(vec![entry, first, second]));
 
-    let stats = inline_selected_helpers(&mut ctx, 0, &HashSet::from([20, 30]))
+    let stats = inline_selected_helpers(&mut ctx, 0, &crate::fxhash::set_from([20, 30]))
         .expect("selected emitted splice");
 
     assert_eq!(
@@ -1565,7 +1565,7 @@ fn byte_view_reinterpret_recognized_and_reassembled_little_endian() {
 
     let mut ctx = Ctx::new(module);
     let result_types = collect_result_types(&ctx);
-    let mut remap: HashMap<Word, Word> = HashMap::new();
+    let mut remap: HashMap<Word, Word> = HashMap::default();
     remap.insert(helper_param, arr);
     let callee = ctx.module.functions[1].clone();
     let plan = plan_byte_view_reinterprets(&ctx, &callee, &remap, &result_types);

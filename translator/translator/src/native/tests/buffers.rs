@@ -8,13 +8,13 @@ use super::super::emitter::Emitter;
 use super::super::ir::{LlType, LlValue};
 use super::super::parse::{parse_type, parse_typed_value};
 use super::*;
+use crate::fxhash::{HashMap, HashSet};
 use crate::passes::{self, Stage};
 use crate::spirv_module::load_bytes;
 use crate::spirv_module::Operand;
 use crate::spirv_module::{Block, Instruction};
 use crate::{disassemble, meta, tools};
 use spirv::{Capability, Decoration, Op, Scope, SelectionControl, StorageClass, Word};
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 #[test]
@@ -577,12 +577,12 @@ entry:
         matches!(instruction.operands.first(), Some(Operand::LiteralBit32(7)))
     });
     let nulls = ids(Op::ConstantNull, &|_| true);
-    let mut address_of = HashMap::<Word, Word>::new();
-    let mut loaded_from = HashMap::<Word, Word>::new();
+    let mut address_of = HashMap::<Word, Word>::default();
+    let mut loaded_from = HashMap::<Word, Word>::default();
     let zeros = ids(Op::Constant, &|instruction| {
         matches!(instruction.operands.first(), Some(Operand::LiteralBit32(0)))
     });
-    let mut converted_ty = HashMap::<Word, Word>::new();
+    let mut converted_ty = HashMap::<Word, Word>::default();
     let mut b78_wrapper_types = Vec::<Word>::new();
     for instruction in module.all_inst_iter() {
         match (
@@ -1600,8 +1600,8 @@ entry:
         kern.as_ref(),
         entry_name.as_deref(),
         kern.as_ref().map(|meta| &meta.buffer_layouts),
-        &HashSet::new(),
-        &HashSet::new(),
+        &HashSet::default(),
+        &HashSet::default(),
     )
     .expect("emit raw-buffer tier with typed sidecar");
     let mut address_words = emitted
@@ -4221,7 +4221,7 @@ entry:
     let store_targets = stores
         .iter()
         .filter_map(|inst| inst.operands.first().cloned())
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fxhash::HashSet<_>>();
     assert!(
         !body.iter().any(|inst| inst.class.opcode == Op::Load
             && inst
@@ -4240,7 +4240,7 @@ entry:
     let stored_values = stores
         .iter()
         .filter_map(|inst| inst.operands.get(1).cloned())
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fxhash::HashSet<_>>();
     assert_eq!(
         stored_values.len(),
         1,
@@ -8202,13 +8202,13 @@ entry:
         .types_global_values
         .iter()
         .filter_map(|instruction| instruction.result_id.map(|id| (id, instruction)))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fxhash::HashMap<_, _>>();
     let pointer_types = type_defs
         .iter()
         .filter_map(|(id, instruction)| {
             (instruction.class.opcode == Op::TypePointer).then_some(*id)
         })
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fxhash::HashSet<_>>();
 
     assert!(module.types_global_values.iter().all(|instruction| {
         instruction.class.opcode != Op::TypeStruct
@@ -13679,9 +13679,9 @@ exit:
 
     // The address phi is the loop header's: a selection-merge phi elsewhere (the null-checked load helper's)
     // also has two 64-bit incoming values, and picking among `defs.values()` made this test depend on hash order.
-    let mut defs: HashMap<String, (String, String, Vec<String>)> = HashMap::new();
-    let mut type_decl: HashMap<String, String> = HashMap::new();
-    let mut returns: HashMap<String, Vec<String>> = HashMap::new();
+    let mut defs: HashMap<String, (String, String, Vec<String>)> = HashMap::default();
+    let mut type_decl: HashMap<String, String> = HashMap::default();
+    let mut returns: HashMap<String, Vec<String>> = HashMap::default();
     let mut header_phis: Vec<String> = Vec::new();
     let (mut function, mut block_phis) = (String::new(), Vec::new());
     for line in asm.lines() {
@@ -13744,7 +13744,7 @@ exit:
 
     // Follow the backedge value down to the load, into the helpers it calls.
     let mut pending = vec![backedge];
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::default();
     let mut loaded_address = false;
     while let Some(id) = pending.pop() {
         if !seen.insert(id.clone()) {

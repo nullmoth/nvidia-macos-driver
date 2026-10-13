@@ -81,7 +81,7 @@ pub(in crate::passes) fn split_explicit_layout_type_aliases(
         })
         .collect::<Vec<_>>();
 
-    let mut resolved = HashMap::new();
+    let mut resolved = HashMap::default();
     let mut cloned_types = vec![];
     for root in unlaid_roots {
         clone_unlaid_layout_conflicts(
@@ -173,7 +173,7 @@ fn split_nested_block_root_aliases(
         if root_def.class.opcode != Op::TypeStruct {
             continue;
         }
-        let mut resolved = HashMap::new();
+        let mut resolved = HashMap::default();
         let mut cloned_types = Vec::new();
         let mut operands = root_def.operands.clone();
         let mut changed = false;
@@ -409,7 +409,7 @@ pub(in crate::passes) fn layout_types_reachable_from(
     roots: &HashSet<Word>,
     defs: &HashMap<Word, Instruction>,
 ) -> HashSet<Word> {
-    let mut seen: HashSet<Word> = HashSet::new();
+    let mut seen: HashSet<Word> = HashSet::default();
     let mut stack: Vec<Word> = roots.iter().copied().collect();
     while let Some(ty) = stack.pop() {
         let Some(def) = defs.get(&ty) else { continue };

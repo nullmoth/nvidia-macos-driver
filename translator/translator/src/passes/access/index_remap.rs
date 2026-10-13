@@ -8,7 +8,7 @@ pub(in crate::passes) fn trace_to_array_element_zero(
     sc: StorageClass,
     ptr_info: &HashMap<Word, (StorageClass, Word)>,
 ) -> Option<Word> {
-    let mut visited: HashSet<Word> = HashSet::new();
+    let mut visited: HashSet<Word> = HashSet::default();
     let mut stack = vec![base];
     let mut found: Option<Word> = None;
     while let Some(id) = stack.pop() {
@@ -63,7 +63,7 @@ pub(in crate::passes) fn trace_to_array_element_zero(
 
 pub(in crate::passes) fn remap_word_index_to_struct_member(ctx: &mut Ctx, entry_idx: usize) {
     let value_types = function_value_types(ctx, entry_idx);
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -77,7 +77,7 @@ pub(in crate::passes) fn remap_word_index_to_struct_member(ctx: &mut Ctx, entry_
             }
         }
     }
-    let mut member_offset: HashMap<(Word, u32), u32> = HashMap::new();
+    let mut member_offset: HashMap<(Word, u32), u32> = HashMap::default();
     for inst in &ctx.module.annotations {
         if inst.class.opcode == Op::MemberDecorate {
             if let (
@@ -188,7 +188,7 @@ pub(in crate::passes) fn remap_overflow_word_index_to_outer_member(
     entry_idx: usize,
 ) {
     let value_types = function_value_types(ctx, entry_idx);
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -202,8 +202,8 @@ pub(in crate::passes) fn remap_overflow_word_index_to_outer_member(
             }
         }
     }
-    let mut member_offset: HashMap<(Word, u32), u32> = HashMap::new();
-    let mut array_stride: HashMap<Word, u32> = HashMap::new();
+    let mut member_offset: HashMap<(Word, u32), u32> = HashMap::default();
+    let mut array_stride: HashMap<Word, u32> = HashMap::default();
     for inst in &ctx.module.annotations {
         match inst.class.opcode {
             Op::MemberDecorate => {
@@ -351,7 +351,7 @@ pub(in crate::passes) fn remap_overflow_word_index_to_outer_member(
 
 pub(in crate::passes) fn remap_dynamic_word_index_to_array_member(ctx: &mut Ctx, entry_idx: usize) {
     let value_types = function_value_types(ctx, entry_idx);
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -365,8 +365,8 @@ pub(in crate::passes) fn remap_dynamic_word_index_to_array_member(ctx: &mut Ctx,
             }
         }
     }
-    let mut member_offset: HashMap<(Word, u32), u32> = HashMap::new();
-    let mut array_stride: HashMap<Word, u32> = HashMap::new();
+    let mut member_offset: HashMap<(Word, u32), u32> = HashMap::default();
+    let mut array_stride: HashMap<Word, u32> = HashMap::default();
     for inst in &ctx.module.annotations {
         match inst.class.opcode {
             Op::MemberDecorate => {
@@ -413,7 +413,7 @@ pub(in crate::passes) fn remap_dynamic_word_index_to_array_member(ctx: &mut Ctx,
         }
     };
 
-    let mut value_def: HashMap<Word, (Op, Vec<Operand>)> = HashMap::new();
+    let mut value_def: HashMap<Word, (Op, Vec<Operand>)> = HashMap::default();
     for block in &ctx.module.functions[entry_idx].blocks {
         for inst in &block.instructions {
             if let Some(id) = inst.result_id {
@@ -653,7 +653,7 @@ pub(in crate::passes) fn remap_dynamic_word_index_to_array_struct_field(
     entry_idx: usize,
 ) {
     let value_types = function_value_types(ctx, entry_idx);
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -667,8 +667,8 @@ pub(in crate::passes) fn remap_dynamic_word_index_to_array_struct_field(
             }
         }
     }
-    let mut member_offset: HashMap<(Word, u32), u32> = HashMap::new();
-    let mut array_stride: HashMap<Word, u32> = HashMap::new();
+    let mut member_offset: HashMap<(Word, u32), u32> = HashMap::default();
+    let mut array_stride: HashMap<Word, u32> = HashMap::default();
     for inst in &ctx.module.annotations {
         match inst.class.opcode {
             Op::MemberDecorate => {
@@ -715,7 +715,7 @@ pub(in crate::passes) fn remap_dynamic_word_index_to_array_struct_field(
         }
     };
 
-    let mut value_def: HashMap<Word, (Op, Vec<Operand>)> = HashMap::new();
+    let mut value_def: HashMap<Word, (Op, Vec<Operand>)> = HashMap::default();
     for block in &ctx.module.functions[entry_idx].blocks {
         for inst in &block.instructions {
             if let Some(id) = inst.result_id {
@@ -783,7 +783,7 @@ pub(in crate::passes) fn remap_dynamic_word_index_to_array_struct_field(
         Some(byte)
     };
 
-    let mut uses: HashMap<Word, Vec<(usize, usize, Op)>> = HashMap::new();
+    let mut uses: HashMap<Word, Vec<(usize, usize, Op)>> = HashMap::default();
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             for op in &inst.operands {
@@ -949,7 +949,7 @@ pub(in crate::passes) fn remap_dynamic_word_index_to_array_struct_field(
     }
 
     let cid_field: HashMap<Word, Word> = edits.iter().map(|e| (e.cid, e.field_ty)).collect();
-    let mut load_splits: HashMap<(usize, usize), (Word, Word)> = HashMap::new();
+    let mut load_splits: HashMap<(usize, usize), (Word, Word)> = HashMap::default();
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             if inst.class.opcode != Op::Load {
@@ -996,7 +996,7 @@ pub(in crate::passes) fn remap_dynamic_word_index_to_array_struct_field(
             .extend(field_ids.into_iter().map(Operand::IdRef));
     }
 
-    let mut by_block: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut by_block: HashMap<usize, Vec<usize>> = HashMap::default();
     for &(bi, ii) in load_splits.keys() {
         by_block.entry(bi).or_default().push(ii);
     }

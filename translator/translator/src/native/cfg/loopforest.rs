@@ -1,7 +1,7 @@
 use super::blocks::block_successors;
 use super::graph::{Cfg, Dominators};
 use super::BodyBlock;
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::native) struct NaturalLoop {
@@ -36,7 +36,7 @@ impl LoopForest {
     }
 
     pub(in crate::native) fn structured_plan(&self) -> Vec<LoopPlan> {
-        self.structured_plan_ignoring_exits(&HashSet::new())
+        self.structured_plan_ignoring_exits(&HashSet::default())
     }
 
     pub(in crate::native) fn structured_plan_ignoring_exits(
@@ -116,7 +116,7 @@ pub(in crate::native) fn analyze(blocks: &[BodyBlock]) -> LoopForest {
         doms,
     };
 
-    let mut latches_by_header: HashMap<String, Vec<String>> = HashMap::new();
+    let mut latches_by_header: HashMap<String, Vec<String>> = HashMap::default();
     for b in blocks {
         for t in cfg.successors.get(&b.name).into_iter().flatten() {
             if cfg.contains(t) && forest.dominates(t, &b.name) {
@@ -207,7 +207,7 @@ fn natural_loop_body(
     latches: &[String],
     predecessors: &HashMap<String, Vec<String>>,
 ) -> Vec<String> {
-    let mut body: HashSet<String> = HashSet::from([header.to_string()]);
+    let mut body: HashSet<String> = crate::fxhash::set_from([header.to_string()]);
     let mut stack: Vec<String> = latches.to_vec();
     for l in latches {
         body.insert(l.clone());
@@ -241,7 +241,7 @@ pub(in crate::native) fn irreducible_regions(blocks: &[BodyBlock]) -> Vec<Irredu
     let succ = &cfg.successors;
     let reachable = cfg.reachable_from(&cfg.entry);
 
-    let mut preds: HashMap<String, Vec<String>> = HashMap::new();
+    let mut preds: HashMap<String, Vec<String>> = HashMap::default();
     for n in &reachable {
         for t in succ.get(n).into_iter().flatten() {
             if reachable.contains(t) {
@@ -250,7 +250,7 @@ pub(in crate::native) fn irreducible_regions(blocks: &[BodyBlock]) -> Vec<Irredu
         }
     }
 
-    let mut visited: HashSet<String> = HashSet::new();
+    let mut visited: HashSet<String> = HashSet::default();
     let mut finish_order: Vec<String> = Vec::new();
     for start in blocks
         .iter()
@@ -281,7 +281,7 @@ pub(in crate::native) fn irreducible_regions(blocks: &[BodyBlock]) -> Vec<Irredu
         }
     }
 
-    let mut assigned: HashSet<String> = HashSet::new();
+    let mut assigned: HashSet<String> = HashSet::default();
     let mut regions: Vec<IrreducibleRegion> = Vec::new();
     for root in finish_order.iter().rev() {
         if assigned.contains(root) {
@@ -334,13 +334,13 @@ pub(in crate::native) fn irreducible_regions(blocks: &[BodyBlock]) -> Vec<Irredu
 const VIRTUAL_EXIT: &str = "@@virtual_exit";
 
 pub(in crate::native) fn post_idom(blocks: &[BodyBlock]) -> HashMap<String, String> {
-    post_idom_cut(blocks, &HashSet::new())
+    post_idom_cut(blocks, &HashSet::default())
 }
 
 fn post_idom_cut(blocks: &[BodyBlock], cut: &HashSet<(String, String)>) -> HashMap<String, String> {
     let cfg = match Cfg::from_blocks(blocks) {
         Some(cfg) => cfg,
-        None => return HashMap::new(),
+        None => return HashMap::default(),
     };
     let fsucc: HashMap<String, Vec<String>> = cfg
         .successors
@@ -355,7 +355,7 @@ fn post_idom_cut(blocks: &[BodyBlock], cut: &HashSet<(String, String)>) -> HashM
         })
         .collect();
 
-    let mut reachable: HashSet<String> = HashSet::new();
+    let mut reachable: HashSet<String> = HashSet::default();
     let mut stack = vec![cfg.entry.clone()];
     reachable.insert(cfg.entry.clone());
     while let Some(n) = stack.pop() {
@@ -372,10 +372,10 @@ fn post_idom_cut(blocks: &[BodyBlock], cut: &HashSet<(String, String)>) -> HashM
         .cloned()
         .collect();
     if exits.is_empty() {
-        return HashMap::new();
+        return HashMap::default();
     }
 
-    let mut rsucc: HashMap<String, Vec<String>> = HashMap::new();
+    let mut rsucc: HashMap<String, Vec<String>> = HashMap::default();
     rsucc.insert(VIRTUAL_EXIT.to_string(), exits.clone());
     for n in &reachable {
         for t in fsucc.get(n).into_iter().flatten() {
@@ -425,7 +425,7 @@ pub(in crate::native) fn selection_merges(
         })
         .map(|block| block.name.as_str())
         .collect();
-    let mut terminal_switch_edges = HashSet::new();
+    let mut terminal_switch_edges = HashSet::default();
     for block in blocks {
         let is_switch = block.typed.as_ref().is_some_and(|typed| {
             matches!(
@@ -457,9 +457,9 @@ pub(in crate::native) fn break_aware_selection_merges(
 ) -> HashMap<String, String> {
     let cfg = match Cfg::from_blocks(blocks) {
         Some(cfg) => cfg,
-        None => return HashMap::new(),
+        None => return HashMap::default(),
     };
-    let mut cut: HashSet<(String, String)> = HashSet::new();
+    let mut cut: HashSet<(String, String)> = HashSet::default();
     for l in &forest.loops {
         let Some(info) = loop_merges.get(&l.header) else {
             continue;
@@ -497,7 +497,7 @@ fn selection_merges_from_pidom(
 ) -> HashMap<String, String> {
     let loop_headers: HashSet<&str> = forest.loops.iter().map(|l| l.header.as_str()).collect();
     let block_names: HashSet<&str> = blocks.iter().map(|b| b.name.as_str()).collect();
-    let mut merges = HashMap::new();
+    let mut merges = HashMap::default();
     for b in blocks {
         if loop_headers.contains(b.name.as_str()) {
             continue;
@@ -525,7 +525,7 @@ mod tests {
         let typed = crate::native::tir::lower_block_carrier(
             &name,
             &[term.to_string()],
-            &std::collections::HashMap::new(),
+            &crate::fxhash::HashMap::default(),
         );
         BodyBlock {
             name,
@@ -840,7 +840,7 @@ mod tests {
             Some("%m"),
             "plain: {plain:?}"
         );
-        let mut loop_merges = HashMap::new();
+        let mut loop_merges = HashMap::default();
         loop_merges.insert(
             "%h".to_string(),
             super::super::LoopMergeInfo {

@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
+use crate::fxhash::HashMap;
+use crate::fxhash::HashSet;
 
 use crate::spirv_module::Instruction;
 use crate::spirv_module::Operand;
@@ -13,7 +13,7 @@ pub(crate) fn materialize_texture_array_loads(ctx: &mut Ctx, entry_idx: usize) {
     }
     let names = air_names(&ctx.module);
 
-    let mut defs: HashMap<Word, Instruction> = HashMap::new();
+    let mut defs: HashMap<Word, Instruction> = HashMap::default();
     for blk in &ctx.module.functions[entry_idx].blocks {
         for inst in &blk.instructions {
             if let Some(rid) = inst.result_id {
@@ -59,7 +59,7 @@ pub(crate) fn materialize_texture_array_loads(ctx: &mut Ctx, entry_idx: usize) {
             alias = *source;
         }
     }
-    let mut local_table_handles = HashMap::new();
+    let mut local_table_handles = HashMap::default();
     for fact in &ctx.emit_sidecar.local_pointer_dynamic_field_loads {
         let resolved = local_table_array_elements(ctx, &defs, fact, &fixed_handles);
         if let Some(resolved) = resolved {
@@ -98,10 +98,10 @@ pub(crate) fn materialize_texture_array_loads(ctx: &mut Ctx, entry_idx: usize) {
 
     let mut candidates: Vec<(Word, Word)> = Vec::new();
     let mut table_candidates = Vec::new();
-    let mut handles: HashMap<Word, (Word, Word)> = HashMap::new();
+    let mut handles: HashMap<Word, (Word, Word)> = HashMap::default();
     let mut handle_order: Vec<Word> = Vec::new();
-    let mut handle_preludes: HashMap<Word, Vec<Instruction>> = HashMap::new();
-    let mut seen: std::collections::HashSet<Word> = std::collections::HashSet::new();
+    let mut handle_preludes: HashMap<Word, Vec<Instruction>> = HashMap::default();
+    let mut seen: crate::fxhash::HashSet<Word> = crate::fxhash::HashSet::default();
     let device_texture_slots: HashMap<Word, Word> = ctx
         .emit_sidecar
         .device_handle_heap_loads
@@ -251,8 +251,8 @@ pub(crate) fn materialize_texture_array_loads(ctx: &mut Ctx, entry_idx: usize) {
         return;
     }
 
-    let mut new_access_chains: HashMap<Word, Instruction> = HashMap::new();
-    let mut retyped_load_ptr: HashMap<Word, (Word, Word)> = HashMap::new();
+    let mut new_access_chains: HashMap<Word, Instruction> = HashMap::default();
+    let mut retyped_load_ptr: HashMap<Word, (Word, Word)> = HashMap::default();
     let mut dead_roots: Vec<Word> = Vec::new();
     for &handle in &handle_order {
         let (arrayvar, idx) = handles[&handle];
@@ -297,7 +297,7 @@ pub(crate) fn materialize_texture_array_loads(ctx: &mut Ctx, entry_idx: usize) {
     dead_roots.extend(handle_order.iter().map(|handle| handles[handle].0));
 
     let mut placeholder_uses: HashMap<(usize, usize), (Instruction, Instruction, Word)> =
-        HashMap::new();
+        HashMap::default();
     let mut placeholder_specs = Vec::new();
     for (block_idx, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (inst_idx, inst) in block.instructions.iter().enumerate() {
@@ -396,8 +396,8 @@ pub(crate) fn sink_loop_header_texture_array_loads(ctx: &mut Ctx, entry_idx: usi
     }
 
     let function = &ctx.module.functions[entry_idx];
-    let mut defs: HashMap<Word, (usize, usize, Instruction)> = HashMap::new();
-    let mut uses: HashMap<Word, Vec<(usize, usize)>> = HashMap::new();
+    let mut defs: HashMap<Word, (usize, usize, Instruction)> = HashMap::default();
+    let mut uses: HashMap<Word, Vec<(usize, usize)>> = HashMap::default();
     for (block_idx, block) in function.blocks.iter().enumerate() {
         for (inst_idx, inst) in block.instructions.iter().enumerate() {
             if let Some(id) = inst.result_id {
@@ -423,8 +423,8 @@ pub(crate) fn sink_loop_header_texture_array_loads(ctx: &mut Ctx, entry_idx: usi
         })
         .map(|(block_idx, _)| block_idx)
         .collect();
-    let mut insertions: HashMap<(usize, usize), Vec<Instruction>> = HashMap::new();
-    let mut removals = HashSet::new();
+    let mut insertions: HashMap<(usize, usize), Vec<Instruction>> = HashMap::default();
+    let mut removals = HashSet::default();
 
     for (&load_id, &(load_block, _, ref load)) in &defs {
         if load.class.opcode != Op::Load || load.operands.len() != 1 {
@@ -768,7 +768,7 @@ pub(in crate::passes) fn retire_dead_pointer_projections(
         )
     };
     let mut candidates = roots.into_iter().collect::<HashSet<_>>();
-    let mut removed = HashSet::new();
+    let mut removed = HashSet::default();
     loop {
         let additions = ctx.module.functions[entry_idx]
             .blocks
@@ -790,7 +790,7 @@ pub(in crate::passes) fn retire_dead_pointer_projections(
         candidates.extend(additions);
     }
     loop {
-        let mut used: std::collections::HashSet<Word> = std::collections::HashSet::new();
+        let mut used: crate::fxhash::HashSet<Word> = crate::fxhash::HashSet::default();
         for f in &ctx.module.functions {
             for blk in &f.blocks {
                 for inst in &blk.instructions {
@@ -938,7 +938,7 @@ mod tests {
         let poison = ctx.module.fresh_id();
         let aggregate = ctx.module.fresh_id();
         let extracted = ctx.module.fresh_id();
-        let defs = HashMap::from([
+        let defs = crate::fxhash::map_from([
             (
                 alias,
                 Instruction::new(Op::Bitcast, None, Some(alias), vec![Operand::IdRef(root)]),

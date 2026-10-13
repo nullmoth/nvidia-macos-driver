@@ -165,7 +165,7 @@ pub(in crate::passes) fn lower_buffer_address_facts(
         return Ok(());
     }
     let kern = kern.ok_or("buffer-address facts require kernel metadata")?;
-    let mut locations = HashMap::new();
+    let mut locations = HashMap::default();
     for (id, (param_index, component)) in &address_words {
         let location = match kern.role_of(*param_index) {
             Some(

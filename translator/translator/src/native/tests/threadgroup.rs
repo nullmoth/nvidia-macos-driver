@@ -8,13 +8,13 @@ use super::super::emitter::Emitter;
 use super::super::ir::{LlType, LlValue};
 use super::super::parse::{parse_type, parse_typed_value};
 use super::*;
+use crate::fxhash::{HashMap, HashSet};
 use crate::passes::{self, Stage};
 use crate::spirv_module::load_bytes;
 use crate::spirv_module::Operand;
 use crate::spirv_module::{Block, Instruction};
 use crate::{disassemble, meta, tools};
 use spirv::{Decoration, Op, Scope, SelectionControl, StorageClass, Word};
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 #[test]
@@ -672,7 +672,7 @@ declare half @air.simd_shuffle_and_fill_up.f16(half, half, i16, i16)
     let defs = module
         .all_inst_iter()
         .filter_map(|inst| inst.result_id.map(|id| (id, inst)))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fxhash::HashMap<_, _>>();
     let operand = |inst: &Instruction, index: usize| match inst.operands.get(index) {
         Some(Operand::IdRef(id)) => Some(*id),
         _ => None,
@@ -2162,7 +2162,7 @@ entry:
                 }
                 _ => None,
             })
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<crate::fxhash::HashMap<_, _>>();
         module
             .types_global_values
             .iter()
@@ -2249,12 +2249,12 @@ entry:
                 }
                 _ => None,
             })
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<crate::fxhash::HashMap<_, _>>();
         let types = module
             .types_global_values
             .iter()
             .filter_map(|inst| Some((inst.result_id?, inst)))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<crate::fxhash::HashMap<_, _>>();
         let pointer = module
             .types_global_values
             .iter()
@@ -2353,7 +2353,7 @@ entry:
                 }
                 _ => None,
             })
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<crate::fxhash::HashMap<_, _>>();
         module
             .types_global_values
             .iter()

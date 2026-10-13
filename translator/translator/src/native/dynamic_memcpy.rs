@@ -1,6 +1,6 @@
 use super::air_text::{call_arguments, last_token, split_args, LineBuffer};
+use crate::fxhash::HashMap;
 use std::borrow::Cow;
-use std::collections::HashMap;
 
 struct DynamicMemcpy {
     dst_ty: String,
@@ -53,7 +53,7 @@ pub(crate) fn lower_dynamic_length_memcpy_owned(san_ll: String) -> String {
 }
 
 fn plan_splits(san_ll: &str) -> HashMap<String, String> {
-    let mut splits = HashMap::new();
+    let mut splits = HashMap::default();
     let mut label: Option<&str> = None;
     let mut original: Option<String> = None;
     let mut next = 0usize;

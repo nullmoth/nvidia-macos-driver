@@ -740,7 +740,7 @@ impl Emitter {
                 .get(composite_name)
                 .cloned()
                 .unwrap_or_default(),
-            _ => HashMap::new(),
+            _ => HashMap::default(),
         };
         pointer_values.retain(|path, _| !path.starts_with(indices));
         if matches!(object.ty, LlType::Ptr(_)) {
@@ -778,7 +778,7 @@ impl Emitter {
                     .get(composite_name)
                     .cloned()
                     .unwrap_or_default(),
-                _ => HashMap::new(),
+                _ => HashMap::default(),
             };
             addresses.retain(|path, _| !path.starts_with(indices));
             if let LlValue::Local(object_name) = &object.value {

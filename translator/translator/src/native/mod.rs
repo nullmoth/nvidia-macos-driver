@@ -100,7 +100,7 @@ use ir::LlModule;
 
 pub(crate) fn inline_direct_function_pointer_consumers(
     san_ll: &str,
-    direct_functions: &std::collections::HashSet<String>,
+    direct_functions: &crate::fxhash::HashSet<String>,
 ) -> String {
     inline::inline_direct_function_pointer_consumers(san_ll, direct_functions)
 }
@@ -125,9 +125,9 @@ pub(crate) use rewrites::{
     prune_constant_cfg_module_if_changed, prune_unused_null_and_undef_constants_module,
     unowned_selection_header_labels,
 };
+use crate::fxhash::{HashMap, HashSet};
 pub use rewrites::{BOUNDED_RELOOPER_MAX_BLOCKS, CFG_EMIT_RELOOPER_MAX_BLOCKS};
 use spirv::{Capability, Op, StorageClass, Word};
-use std::collections::{HashMap, HashSet};
 
 fn add_native_module_capabilities(module: &mut Module) {
     crate::spirv_variable_ptr::lower_storage_buffer_pointer_phis(module);

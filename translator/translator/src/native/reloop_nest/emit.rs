@@ -1,9 +1,10 @@
 use super::super::relooper::{block_label, decode_term, Term, TypeCtx};
+use crate::fxhash::{HashMap, HashSet};
 use super::shape::{Graph, Shape};
 use crate::dominators::{build_predecessors, dominance, dominates_interval};
 use crate::spirv_module::{Block, Function, Instruction, Operand};
 use spirv::{LoopControl, Op, SelectionControl, StorageClass, Word};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
 
 struct Action {
     label: Word,
@@ -75,22 +76,22 @@ pub(super) fn structure_function(
     let flow_ty = tc.i32_ty();
     let mut emitter = Emitter {
         tc,
-        blocks: HashMap::new(),
+        blocks: HashMap::default(),
         block_order: Vec::new(),
-        terms: HashMap::new(),
-        phi_loads: HashMap::new(),
-        edge_values: HashMap::new(),
+        terms: HashMap::default(),
+        phi_loads: HashMap::default(),
+        edge_values: HashMap::default(),
         phi_slots: Vec::new(),
-        phi_stores: HashMap::new(),
+        phi_stores: HashMap::default(),
         flow_var: None,
         flow_ty,
-        flow_id: HashMap::new(),
-        facts: HashMap::new(),
-        head: HashMap::new(),
-        merge: HashMap::new(),
-        merge_flow: HashSet::new(),
-        fused: HashSet::new(),
-        forced_dispatch: HashSet::new(),
+        flow_id: HashMap::default(),
+        facts: HashMap::default(),
+        head: HashMap::default(),
+        merge: HashMap::default(),
+        merge_flow: HashSet::default(),
+        fused: HashSet::default(),
+        forced_dispatch: HashSet::default(),
         variables: Vec::new(),
         out: Vec::new(),
     };
@@ -482,7 +483,7 @@ impl Emitter<'_, '_> {
 
     fn demote_phis(&mut self, graph: &Graph) -> Result<(), String> {
         let labels = self.block_order.clone();
-        let mut edge_sources = HashSet::new();
+        let mut edge_sources = HashSet::default();
         for label in labels {
             let phis = self
                 .blocks
@@ -910,7 +911,7 @@ impl Emitter<'_, '_> {
     }
 
     fn write_edge_stores(&mut self, stores: &[(Word, Word)], flow: Option<u64>, block: &mut Block) {
-        let mut reads = HashMap::new();
+        let mut reads = HashMap::default();
         for (_, value) in stores {
             if reads.contains_key(value) {
                 continue;
@@ -1121,7 +1122,7 @@ impl Emitter<'_, '_> {
             .collect::<HashMap<_, _>>();
         let mut successors = vec![Vec::new(); self.out.len() + 1];
         successors[0].push(*index.get(&entry).ok_or("missing nested entry")?);
-        let mut definitions = HashMap::new();
+        let mut definitions = HashMap::default();
         for (position, block) in self.out.iter().enumerate() {
             for (instruction_position, instruction) in block.instructions.iter().enumerate() {
                 if let Some(id) = instruction.result_id {
@@ -1158,8 +1159,8 @@ impl Emitter<'_, '_> {
             .iter()
             .map(|(_, _, slot)| *slot)
             .collect::<HashSet<_>>();
-        let mut replacements = HashMap::new();
-        let mut retained_slots = HashSet::new();
+        let mut replacements = HashMap::default();
+        let mut retained_slots = HashSet::default();
         for (position, block) in self.out.iter().enumerate() {
             for (instruction_position, instruction) in block.instructions.iter().enumerate() {
                 if instruction.class.opcode != Op::Load {
@@ -1221,7 +1222,7 @@ impl Emitter<'_, '_> {
     }
 
     fn promote_phi_slots(&mut self) {
-        let mut predecessors: HashMap<Word, Vec<Word>> = HashMap::new();
+        let mut predecessors: HashMap<Word, Vec<Word>> = HashMap::default();
         for block in &self.out {
             let Some(label) = block_label(block) else {
                 continue;
@@ -1253,7 +1254,7 @@ impl Emitter<'_, '_> {
             .filter_map(|(position, block)| Some((block_label(block)?, position)))
             .collect::<HashMap<_, _>>();
 
-        let mut load_counts = HashMap::<Word, usize>::new();
+        let mut load_counts = HashMap::<Word, usize>::default();
         for instruction in self.out.iter().flat_map(|block| &block.instructions) {
             if instruction.class.opcode == Op::Load {
                 if let Some(Operand::IdRef(slot)) = instruction.operands.first() {
@@ -1261,7 +1262,7 @@ impl Emitter<'_, '_> {
                 }
             }
         }
-        let mut promoted = HashSet::new();
+        let mut promoted = HashSet::default();
         for &(loaded_in, result, var) in &self.phi_slots {
             if load_counts.get(&var) != Some(&1) {
                 continue;

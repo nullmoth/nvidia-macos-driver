@@ -165,7 +165,7 @@ pub(in crate::passes) fn neutralize_private_placeholder_access_chains(
             dependencies.push((result, deps));
         }
     }
-    let mut waiting = HashMap::<Word, Vec<usize>>::new();
+    let mut waiting = HashMap::<Word, Vec<usize>>::default();
     let mut remaining = Vec::with_capacity(dependencies.len());
     let mut ready = Vec::new();
     for (candidate, (result, deps)) in dependencies.iter().enumerate() {

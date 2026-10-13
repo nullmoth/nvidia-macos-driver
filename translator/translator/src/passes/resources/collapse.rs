@@ -12,12 +12,12 @@ pub(in crate::passes) fn apply_bindings(
 ) -> Result<(), String> {
     let mut loads: Vec<Instruction> = vec![];
     let mut splices: Vec<(Word, Word)> = vec![];
-    let mut resource_values: HashSet<Word> = HashSet::new();
+    let mut resource_values: HashSet<Word> = HashSet::default();
     let mut buffer_param_ids: Vec<Word> = vec![];
     let mut buffer_root_splices: Vec<(Word, Word)> = vec![];
     let mut collapsed_buffers: Vec<(Word, Word, Word, bool, Vec<(Word, Word)>)> = vec![];
     let mut record_array_buffers: Vec<(Word, Word, Word, Word)> = vec![];
-    let mut nested_air_ordinal_roots = HashSet::new();
+    let mut nested_air_ordinal_roots = HashSet::default();
     let mut zero_pointer_vars: Vec<Word> = vec![];
     let mut workgroup_vars: Vec<Word> = vec![];
 
@@ -1115,7 +1115,7 @@ fn local_copy_destination_is_write_only(
     destination: Word,
     memcpy: Word,
 ) -> bool {
-    let mut region = HashSet::from([destination]);
+    let mut region = crate::fxhash::set_from([destination]);
     let mut changed = true;
     while changed {
         changed = false;
@@ -1434,8 +1434,8 @@ pub(in crate::passes) fn collapse_resource_wrappers(
     }
 
     let func = &ctx.module.functions[entry_idx];
-    let mut paths: HashMap<Word, HashMap<Vec<u32>, Word>> = HashMap::new();
-    let mut inserts: HashMap<Word, (Word, Vec<u32>)> = HashMap::new();
+    let mut paths: HashMap<Word, HashMap<Vec<u32>, Word>> = HashMap::default();
+    let mut inserts: HashMap<Word, (Word, Vec<u32>)> = HashMap::default();
     let mut extract_bases: Vec<(Word, Word)> = vec![];
     let mut replacements: Vec<(Word, Word)> = vec![];
     let mut direct_resource_inserts: Vec<(Word, Word, Word)> = vec![];
@@ -1480,7 +1480,7 @@ pub(in crate::passes) fn collapse_resource_wrappers(
                     }
                 }
                 Op::CompositeConstruct => {
-                    let mut result_paths = HashMap::new();
+                    let mut result_paths = HashMap::default();
                     for (idx, operand) in inst.operands.iter().enumerate() {
                         let Operand::IdRef(object) = operand else {
                             continue;
@@ -1504,7 +1504,7 @@ pub(in crate::passes) fn collapse_resource_wrappers(
                     if let Some(source_paths) = paths.get(source).cloned() {
                         paths.insert(result, source_paths);
                     } else if resource_values.contains(source) {
-                        let mut result_paths = HashMap::new();
+                        let mut result_paths = HashMap::default();
                         result_paths.insert(vec![], *source);
                         paths.insert(result, result_paths);
                     }
@@ -1535,7 +1535,7 @@ pub(in crate::passes) fn collapse_resource_wrappers(
                         replacements.push((result, resource));
                         continue;
                     }
-                    let mut result_paths = HashMap::new();
+                    let mut result_paths = HashMap::default();
                     for (resource_path, resource) in composite_paths {
                         if let Some(suffix) = path_suffix(resource_path, &path) {
                             result_paths.insert(suffix.to_vec(), *resource);
@@ -1602,7 +1602,7 @@ pub(in crate::passes) fn collapse_late_pointer_and_opaque_wrappers(
     ctx: &mut Ctx,
     entry_idx: usize,
 ) -> Result<(), String> {
-    let type_defs = combined_type_defs(ctx, &HashMap::new());
+    let type_defs = combined_type_defs(ctx, &HashMap::default());
     let resource_values = ctx
         .new_globals
         .iter()
@@ -1760,7 +1760,7 @@ pub(in crate::passes) fn remove_dead_resource_wrapper_ops(
     resource_values: &HashSet<Word>,
 ) {
     let value_types = function_value_types(ctx, entry_idx);
-    let type_defs = combined_type_defs(ctx, &HashMap::new());
+    let type_defs = combined_type_defs(ctx, &HashMap::default());
     let resource_projection_roots = resource_values
         .iter()
         .copied()
@@ -1768,7 +1768,7 @@ pub(in crate::passes) fn remove_dead_resource_wrapper_ops(
             value_types
                 .get(value)
                 .copied()
-                .is_some_and(|ty| opaque_resource_type(&type_defs, ty, &mut HashSet::new()))
+                .is_some_and(|ty| opaque_resource_type(&type_defs, ty, &mut HashSet::default()))
         })
         .collect::<HashSet<_>>();
     loop {
@@ -1869,7 +1869,7 @@ fn opaque_resource_type(
 }
 
 pub(in crate::passes) fn function_used_ids(func: &Function) -> HashSet<Word> {
-    let mut used = HashSet::new();
+    let mut used = HashSet::default();
     for param in &func.parameters {
         for operand in &param.operands {
             collect_operand_id_refs(operand, &mut used);
@@ -1964,7 +1964,7 @@ mod tests {
             },
         );
 
-        let _ = collapse_resource_wrappers(&mut ctx, 0, &HashSet::from([resource]));
+        let _ = collapse_resource_wrappers(&mut ctx, 0, &crate::fxhash::set_from([resource]));
 
         assert_eq!(
             ctx.emit_sidecar.local_pointer_dynamic_field_loads[0].root,
@@ -2051,7 +2051,7 @@ mod tests {
         });
         let mut ctx = Ctx::new(module);
 
-        remove_dead_resource_wrapper_ops(&mut ctx, 0, &HashSet::from([image]));
+        remove_dead_resource_wrapper_ops(&mut ctx, 0, &crate::fxhash::set_from([image]));
 
         let instructions = &ctx.module.functions[0].blocks[0].instructions;
         assert!(instructions
@@ -2159,7 +2159,11 @@ mod tests {
         });
         let mut ctx = Ctx::new(module);
 
-        remove_dead_resource_wrapper_ops(&mut ctx, 0, &HashSet::from([image_array_variable]));
+        remove_dead_resource_wrapper_ops(
+            &mut ctx,
+            0,
+            &crate::fxhash::set_from([image_array_variable]),
+        );
 
         assert!(ctx.module.functions[0].blocks[0]
             .instructions
@@ -2221,7 +2225,7 @@ mod tests {
         });
         let mut ctx = Ctx::new(module);
 
-        let _ = collapse_resource_wrappers(&mut ctx, 0, &HashSet::from([resource]));
+        let _ = collapse_resource_wrappers(&mut ctx, 0, &crate::fxhash::set_from([resource]));
 
         let instructions = &ctx.module.functions[0].blocks[0].instructions;
         assert!(!instructions.iter().any(|inst| {

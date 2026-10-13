@@ -15,6 +15,7 @@ use super::parse::{
     split_top_level, split_top_level_whitespace, strip_call_prefix, switch_literal_operand, LlCall,
     LlLoad,
 };
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::Operand;
 use crate::spirv_module::{
     is_block_terminator, Block, Function, Instruction, Module, ModuleHeader,
@@ -24,7 +25,6 @@ use spirv::{
     AddressingModel, Capability, FunctionControl, GlslStd450Op, LoopControl, MemoryAccess,
     MemoryModel, MemorySemantics, Op, Scope, SelectionControl, SourceLanguage, StorageClass, Word,
 };
-use std::collections::{HashMap, HashSet};
 
 mod air_struct_offsets;
 mod body;
@@ -135,7 +135,7 @@ pub(super) struct Emitter {
     tir_gep_source_types: HashMap<String, crate::native::ir::LlType>,
     tir_use_pointees: HashMap<String, crate::native::ir::LlType>,
     tir_direct_load_pointers: HashSet<String>,
-    byte_view_pointers: std::collections::HashSet<String>,
+    byte_view_pointers: crate::fxhash::HashSet<String>,
     network_pointees: HashMap<String, crate::native::ir::LlType>,
     null_rooted_pointer_values: HashSet<String>,
     null_rooted_pointer_peers: HashMap<String, Vec<String>>,
@@ -362,98 +362,98 @@ impl Emitter {
             air_data_layout,
             interner: TypeInterner::new(),
             glsl_ext: None,
-            values: HashMap::new(),
-            fast_float_products: HashMap::new(),
-            fast_contract_adds: HashSet::new(),
-            fast_uncontracted_sums: HashSet::new(),
-            global_values: HashMap::new(),
-            int_atomic_reinterpret_globals: HashSet::new(),
-            byte_view_reinterpret_globals: HashSet::new(),
-            flat_scalar_reinterpret_globals: HashMap::new(),
-            gep_provenance: HashMap::new(),
-            workgroup_padding_byte_pointers: HashMap::new(),
-            selected_pointers: HashMap::new(),
-            selected_load_pointers: HashMap::new(),
-            selected_access_trees: HashMap::new(),
-            vector_word_roots: HashMap::new(),
-            vector_word_pointers: HashMap::new(),
-            local_pointer_fields: HashMap::new(),
-            pointer_forward_values: HashMap::new(),
-            raw_memcpy_shadows: HashMap::new(),
+            values: HashMap::default(),
+            fast_float_products: HashMap::default(),
+            fast_contract_adds: HashSet::default(),
+            fast_uncontracted_sums: HashSet::default(),
+            global_values: HashMap::default(),
+            int_atomic_reinterpret_globals: HashSet::default(),
+            byte_view_reinterpret_globals: HashSet::default(),
+            flat_scalar_reinterpret_globals: HashMap::default(),
+            gep_provenance: HashMap::default(),
+            workgroup_padding_byte_pointers: HashMap::default(),
+            selected_pointers: HashMap::default(),
+            selected_load_pointers: HashMap::default(),
+            selected_access_trees: HashMap::default(),
+            vector_word_roots: HashMap::default(),
+            vector_word_pointers: HashMap::default(),
+            local_pointer_fields: HashMap::default(),
+            pointer_forward_values: HashMap::default(),
+            raw_memcpy_shadows: HashMap::default(),
             imageblock_data_scratch: None,
-            dynamic_pointer_tables: HashMap::new(),
-            forward_geps: HashMap::new(),
-            forward_pointer_selects: HashMap::new(),
-            forward_pointer_select_conditions: HashMap::new(),
-            pointer_storage: HashMap::new(),
-            pointer_pointees: HashMap::new(),
-            local_alloca_pointees: HashMap::new(),
-            pointer_nullness: HashMap::new(),
-            bda_inttoptr_sources: HashMap::new(),
-            opaque_resource_payload_loads: HashMap::new(),
-            bda_forward_sources: HashMap::new(),
-            bda_address_loads: HashSet::new(),
-            bda_forward_addresses: HashSet::new(),
-            bda_pointer_tables: HashSet::new(),
-            bda_direct_addresses: HashMap::new(),
-            bda_address_values: HashSet::new(),
-            bda_pointer_addresses: HashMap::new(),
-            bda_aggregate_addresses: HashMap::new(),
-            aggregate_pointer_values: HashMap::new(),
+            dynamic_pointer_tables: HashMap::default(),
+            forward_geps: HashMap::default(),
+            forward_pointer_selects: HashMap::default(),
+            forward_pointer_select_conditions: HashMap::default(),
+            pointer_storage: HashMap::default(),
+            pointer_pointees: HashMap::default(),
+            local_alloca_pointees: HashMap::default(),
+            pointer_nullness: HashMap::default(),
+            bda_inttoptr_sources: HashMap::default(),
+            opaque_resource_payload_loads: HashMap::default(),
+            bda_forward_sources: HashMap::default(),
+            bda_address_loads: HashSet::default(),
+            bda_forward_addresses: HashSet::default(),
+            bda_pointer_tables: HashSet::default(),
+            bda_direct_addresses: HashMap::default(),
+            bda_address_values: HashSet::default(),
+            bda_pointer_addresses: HashMap::default(),
+            bda_aggregate_addresses: HashMap::default(),
+            aggregate_pointer_values: HashMap::default(),
             opaque_resource_pointer_values,
-            opaque_resource_pointers: HashSet::new(),
-            opaque_sampler_pointers: HashSet::new(),
-            opaque_resource_ids: HashSet::new(),
-            pointer_payload_words: HashMap::new(),
-            pointer_payload_values: HashSet::new(),
-            pointer_phi_values: HashSet::new(),
-            pointer_phi_incoming_values: HashSet::new(),
-            tir_phi_incomings: HashMap::new(),
-            function_param_pointees: HashMap::new(),
-            function_param_nonnull: HashSet::new(),
-            function_param_nullness: HashSet::new(),
-            direct_param_values: HashSet::new(),
-            direct_param_indices: HashMap::new(),
-            param_values: HashSet::new(),
-            current_parameter_types: HashMap::new(),
+            opaque_resource_pointers: HashSet::default(),
+            opaque_sampler_pointers: HashSet::default(),
+            opaque_resource_ids: HashSet::default(),
+            pointer_payload_words: HashMap::default(),
+            pointer_payload_values: HashSet::default(),
+            pointer_phi_values: HashSet::default(),
+            pointer_phi_incoming_values: HashSet::default(),
+            tir_phi_incomings: HashMap::default(),
+            function_param_pointees: HashMap::default(),
+            function_param_nonnull: HashSet::default(),
+            function_param_nullness: HashSet::default(),
+            direct_param_values: HashSet::default(),
+            direct_param_indices: HashMap::default(),
+            param_values: HashSet::default(),
+            current_parameter_types: HashMap::default(),
             raw_buffer_layout_required: false,
             inline_parameter_substitutions: Vec::new(),
-            raw_buffer_params: HashSet::new(),
-            raw_call_param_offsets: HashMap::new(),
-            cursor_call_sites: HashSet::new(),
+            raw_buffer_params: HashSet::default(),
+            raw_call_param_offsets: HashMap::default(),
+            cursor_call_sites: HashSet::default(),
             agreeing_constant_call_cursors: None,
-            data_buffer_params: HashSet::new(),
-            raw_offsets: HashMap::new(),
-            symbolic_buffer_addresses: HashMap::new(),
-            int_alignments: HashMap::new(),
-            unmodeled_pointers: HashSet::new(),
-            workgroup_i32_addresses: HashMap::new(),
-            null_texture_values: HashSet::new(),
-            function_ids: HashMap::new(),
-            block_labels: HashMap::new(),
-            branch_merges: HashMap::new(),
-            branch_merges_by_header: HashMap::new(),
+            data_buffer_params: HashSet::default(),
+            raw_offsets: HashMap::default(),
+            symbolic_buffer_addresses: HashMap::default(),
+            int_alignments: HashMap::default(),
+            unmodeled_pointers: HashSet::default(),
+            workgroup_i32_addresses: HashMap::default(),
+            null_texture_values: HashSet::default(),
+            function_ids: HashMap::default(),
+            block_labels: HashMap::default(),
+            branch_merges: HashMap::default(),
+            branch_merges_by_header: HashMap::default(),
             branch_merges_header_only: false,
-            loop_merges: HashMap::new(),
-            switch_merges: HashMap::new(),
+            loop_merges: HashMap::default(),
+            switch_merges: HashMap::default(),
             current_block: None,
-            loop_controls: HashMap::new(),
-            phi_edge_instructions: HashMap::new(),
+            loop_controls: HashMap::default(),
+            phi_edge_instructions: HashMap::default(),
             phi_result_instructions: Vec::new(),
-            tir_result_types: HashMap::new(),
-            tir_predicates: HashMap::new(),
-            tir_aligns: HashMap::new(),
-            tir_gep_source_types: HashMap::new(),
-            tir_use_pointees: HashMap::new(),
-            tir_direct_load_pointers: HashSet::new(),
-            network_pointees: HashMap::new(),
-            null_rooted_pointer_values: HashSet::new(),
-            null_rooted_pointer_peers: HashMap::new(),
-            byte_view_pointers: std::collections::HashSet::new(),
+            tir_result_types: HashMap::default(),
+            tir_predicates: HashMap::default(),
+            tir_aligns: HashMap::default(),
+            tir_gep_source_types: HashMap::default(),
+            tir_use_pointees: HashMap::default(),
+            tir_direct_load_pointers: HashSet::default(),
+            network_pointees: HashMap::default(),
+            null_rooted_pointer_values: HashSet::default(),
+            null_rooted_pointer_peers: HashMap::default(),
+            byte_view_pointers: crate::fxhash::HashSet::default(),
             construct_tree_active: false,
-            known_ordinary_plan_rejections: HashSet::new(),
-            ordinary_plan_rejected_shapes: HashSet::new(),
-            known_ownership_plan_rejections: HashSet::new(),
+            known_ordinary_plan_rejections: HashSet::default(),
+            ordinary_plan_rejected_shapes: HashSet::default(),
+            known_ownership_plan_rejections: HashSet::default(),
             relooper_feed: false,
             capture_storage: false,
             storage_snapshots: Vec::new(),
@@ -461,8 +461,8 @@ impl Emitter {
             pointee_snapshots: Vec::new(),
             bda_device_pointers: false,
             constant_space_load: false,
-            nonwritable_psb_wrappers: HashMap::new(),
-            null_bda_load_helpers: HashMap::new(),
+            nonwritable_psb_wrappers: HashMap::default(),
+            null_bda_load_helpers: HashMap::default(),
             used_device_address: false,
         }
     }
@@ -516,8 +516,8 @@ impl Emitter {
             .iter()
             .map(|function| (function.name.clone(), function))
             .collect();
-        let mut inferred = HashMap::new();
-        let mut ambiguous = HashSet::new();
+        let mut inferred = HashMap::default();
+        let mut ambiguous = HashSet::default();
         for function in functions {
             let local_pointees = self.local_call_arg_pointees(function)?;
             for inst in function.carrier_insts() {
@@ -576,9 +576,9 @@ impl Emitter {
             .iter()
             .map(|function| (function.name.clone(), function))
             .collect();
-        let mut all_nonnull = HashSet::new();
-        let mut seen = HashSet::new();
-        let mut rejected = HashSet::new();
+        let mut all_nonnull = HashSet::default();
+        let mut seen = HashSet::default();
+        let mut rejected = HashSet::default();
         for function in functions {
             let local_nonnull = self.local_call_arg_nonnull_values(function)?;
             for inst in function.carrier_insts() {
@@ -619,7 +619,7 @@ impl Emitter {
         functions: &[LlFunction],
     ) -> Result<HashSet<(String, usize)>, String> {
         let function_param_nonnull = self.infer_function_param_nonnull(functions)?;
-        let mut required = HashSet::new();
+        let mut required = HashSet::default();
         for function in functions {
             for inst in function.carrier_insts() {
                 if !matches!(inst.cmp_predicate().as_deref(), Some("eq" | "ne")) {
@@ -691,7 +691,7 @@ impl Emitter {
         &self,
         function: &LlFunction,
     ) -> Result<HashSet<String>, String> {
-        let mut nonnull = HashSet::new();
+        let mut nonnull = HashSet::default();
         if self.ir.entry_functions.contains(&function.name) {
             for (param, ty) in &function.params {
                 if matches!(self.resolve_type(ty)?, LlType::Ptr(_)) {
@@ -768,7 +768,7 @@ impl Emitter {
         &self,
         function: &LlFunction,
     ) -> Result<HashMap<String, LlType>, String> {
-        let mut pointees = HashMap::new();
+        let mut pointees = HashMap::default();
         for (param, ty) in &function.params {
             if !matches!(ty, LlType::Ptr(_)) {
                 continue;
@@ -888,7 +888,7 @@ impl Emitter {
     }
 
     fn remove_dead_empty_functions(&mut self) {
-        let mut called: HashSet<Word> = HashSet::new();
+        let mut called: HashSet<Word> = HashSet::default();
         for f in &self.module.functions {
             for b in &f.blocks {
                 for inst in &b.instructions {
@@ -900,7 +900,7 @@ impl Emitter {
                 }
             }
         }
-        let mut removed: HashSet<Word> = HashSet::new();
+        let mut removed: HashSet<Word> = HashSet::default();
         self.module.functions.retain(|f| {
             if !f.blocks.is_empty() {
                 return true;
@@ -1013,7 +1013,7 @@ impl Emitter {
             return;
         }
 
-        let mut pointer_alignment: HashMap<Word, u32> = HashMap::new();
+        let mut pointer_alignment: HashMap<Word, u32> = HashMap::default();
         for function in &self.module.functions {
             for parameter in &function.parameters {
                 if let (Some(result), Some(ty)) = (parameter.result_id, parameter.result_type) {
@@ -1364,7 +1364,7 @@ impl Emitter {
         if reachable.is_empty() {
             return;
         }
-        let mut removed = HashSet::new();
+        let mut removed = HashSet::default();
         self.module.functions.retain(|function| {
             let Some(id) = function
                 .def
@@ -1389,7 +1389,7 @@ impl Emitter {
         if !self.bda_device_pointers {
             return Ok(false);
         }
-        let mut value_types = HashMap::new();
+        let mut value_types = HashMap::default();
         for instruction in
             self.module
                 .types_global_values
@@ -1515,7 +1515,7 @@ impl Emitter {
         }
         candidates.reverse();
         let changed = !candidates.is_empty();
-        let mut physical_access_alignments = HashMap::new();
+        let mut physical_access_alignments = HashMap::default();
         for (function_index, block_index, instruction_index, base, index, pointee) in candidates {
             let storage_pointee = if matches!(pointee, LlType::Ptr(_)) {
                 LlType::Int(64)
@@ -1636,8 +1636,8 @@ impl Emitter {
             .iter()
             .filter_map(|inst| inst.result_id.map(|id| (id, inst.clone())))
             .collect::<HashMap<_, _>>();
-        let mut fields_by_null: HashMap<Word, Vec<(Word, usize)>> = HashMap::new();
-        let mut unsupported_use = HashSet::new();
+        let mut fields_by_null: HashMap<Word, Vec<(Word, usize)>> = HashMap::default();
+        let mut unsupported_use = HashSet::default();
         for function in &self.module.functions {
             for inst in function
                 .blocks
@@ -1748,7 +1748,7 @@ impl Emitter {
                 lowered_fields.insert(target);
             }
         }
-        let mut mixed_pointer_fields = HashSet::new();
+        let mut mixed_pointer_fields = HashSet::default();
         for instruction in self
             .module
             .functions
@@ -1900,7 +1900,7 @@ impl Emitter {
                 break;
             }
         }
-        let mut late_mixed_fields = HashSet::new();
+        let mut late_mixed_fields = HashSet::default();
         for instruction in self
             .module
             .functions
@@ -2082,15 +2082,15 @@ impl Emitter {
             }))
             .filter_map(|instruction| Some((instruction.result_id?, instruction.result_type?)))
             .collect::<HashMap<_, _>>();
-        let mut handled = HashSet::new();
-        let mut type_cache = HashMap::new();
+        let mut handled = HashSet::default();
+        let mut type_cache = HashMap::default();
         for seed in sites.iter().filter(|site| {
             address_values.contains(&site.object) && mixed_fields.contains(&site.target)
         }) {
             if handled.contains(&seed.result) {
                 continue;
             }
-            let mut component = HashSet::from([seed.result]);
+            let mut component = crate::fxhash::set_from([seed.result]);
             let mut cursor = seed.composite;
             while let Some(index) = site_by_result.get(&cursor).copied() {
                 let site = &sites[index];
@@ -2209,7 +2209,7 @@ impl Emitter {
                     })?
                 })
                 .collect::<HashSet<_>>();
-            let mut unobserved_pointer_paths = HashSet::new();
+            let mut unobserved_pointer_paths = HashSet::default();
             for pointer_path in aggregate_pointer_leaf_paths(seed.result_type, type_defs) {
                 let observed = extracted_paths
                     .iter()
@@ -2239,7 +2239,7 @@ impl Emitter {
             )?;
             let component_results = component.clone();
             let mut aggregate_values = component_results.clone();
-            let mut storage_pointers = HashSet::new();
+            let mut storage_pointers = HashSet::default();
             let mut storage_pointer_order: Vec<Word> = Vec::new();
             loop {
                 let mut changed = false;
@@ -2311,7 +2311,7 @@ impl Emitter {
                 }))
                 .filter_map(|instruction| Some((instruction.result_id?, instruction.result_type?)))
                 .collect::<HashMap<_, _>>();
-            let mut specialized_pointer_types = HashMap::new();
+            let mut specialized_pointer_types = HashMap::default();
             for pointer in &storage_pointer_order {
                 let Some(pointer_type) = value_types.get(pointer).copied() else {
                     continue;
@@ -2380,7 +2380,7 @@ impl Emitter {
                     _ => {}
                 }
             }
-            let mut external_composites = HashMap::new();
+            let mut external_composites = HashMap::default();
             for site in &component_sites {
                 if component_results.contains(&site.composite) {
                     continue;
@@ -2648,7 +2648,7 @@ impl Emitter {
     }
 
     fn rewrite_scalar_pointer_arithmetic_access_chains(&mut self) {
-        let mut pointer_storage = HashMap::new();
+        let mut pointer_storage = HashMap::default();
         let aggregate_types = self
             .module
             .types_global_values
@@ -2661,7 +2661,7 @@ impl Emitter {
             })
             .filter_map(|inst| inst.result_id)
             .collect::<HashSet<_>>();
-        let mut pointer_pointees = HashMap::new();
+        let mut pointer_pointees = HashMap::default();
         for inst in &self.module.types_global_values {
             if inst.class.opcode == Op::TypePointer {
                 if let (
@@ -2676,7 +2676,7 @@ impl Emitter {
             }
         }
 
-        let mut id_types = HashMap::new();
+        let mut id_types = HashMap::default();
         for inst in &self.module.types_global_values {
             if let (Some(result), Some(result_type)) = (inst.result_id, inst.result_type) {
                 id_types.insert(result, result_type);
@@ -2742,7 +2742,7 @@ impl Emitter {
     }
 
     fn rewrite_private_scalar_offset_access_chains(&mut self) {
-        let mut defs = HashMap::new();
+        let mut defs = HashMap::default();
         for inst in &self.module.types_global_values {
             if let Some(id) = inst.result_id {
                 defs.insert(id, inst.clone());
@@ -2768,7 +2768,7 @@ impl Emitter {
             }
         }
 
-        let mut pointer_info = HashMap::new();
+        let mut pointer_info = HashMap::default();
         for inst in &self.module.types_global_values {
             if inst.class.opcode == Op::TypePointer {
                 let (
@@ -3153,7 +3153,7 @@ fn raw_cursor_callees_after_callers(ir: &LlModule, functions: Vec<LlFunction>) -
         return functions;
     }
     let count = functions.len();
-    let mut callers: Vec<HashSet<usize>> = vec![HashSet::new(); count];
+    let mut callers: Vec<HashSet<usize>> = vec![HashSet::default(); count];
     for (caller, function) in functions.iter().enumerate() {
         for inst in function.carrier_insts() {
             let Some(call) = inst.call().as_deref() else {

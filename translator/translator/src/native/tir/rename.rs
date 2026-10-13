@@ -1,7 +1,7 @@
 use super::*;
+use crate::fxhash::HashMap;
 use crate::native::ir::{LlGep, LlValue, TypedValue};
 use crate::native::parse::{LlCall, LlSwitch};
-use std::collections::HashMap;
 
 type Map = HashMap<String, String>;
 
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn rename_matches_relowered_lines() {
-        let types = HashMap::new();
+        let types = HashMap::default();
         let m = map(&[
             ("%a", "%a.c"),
             ("%b", "%b.c"),

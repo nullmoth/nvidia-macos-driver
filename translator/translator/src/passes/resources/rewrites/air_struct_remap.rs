@@ -42,7 +42,7 @@ pub(in crate::passes) fn rewrite_record_array_buffer(
     defs: &HashMap<Word, Instruction>,
 ) -> HashSet<Word> {
     let u0 = ctx.const_uint(0);
-    let mut nested_air_ordinal_roots = HashSet::new();
+    let mut nested_air_ordinal_roots = HashSet::default();
 
     let mut types = defs.clone();
     for g in &ctx.new_globals {
@@ -208,7 +208,7 @@ pub(in crate::passes) fn rewrite_record_array_buffer(
             }
         }
     }
-    let mut direct_root_chain: HashMap<Word, Word> = HashMap::new();
+    let mut direct_root_chain: HashMap<Word, Word> = HashMap::default();
     let mut injected: Vec<Instruction> = vec![];
     for t in want {
         let path = if t == elem_ty {
@@ -398,7 +398,7 @@ fn flattened_record_array_index_plan(
         .buffer_access_affine_offsets
         .iter()
         .find(|fact| fact.id == result)?;
-    let mut affine_stride = HashMap::new();
+    let mut affine_stride = HashMap::default();
     for &(index, stride) in &affine.terms {
         if affine_stride.insert(index, stride).is_some() {
             return None;
@@ -506,7 +506,7 @@ pub(in crate::passes) fn remap_nested_air_struct_accesses(
     let types = combined_type_defs(ctx, defs);
     let mut value_types = combined_value_types(ctx, entry_idx);
     let mut roots = seeds.clone();
-    let mut processed = HashSet::new();
+    let mut processed = HashSet::default();
     let mut changed = true;
 
     while changed {
@@ -961,7 +961,7 @@ pub(in crate::passes) fn types_match_with_elided_air_padding(
             })
     }
 
-    inner(ctx, types, compact, padded, &mut HashSet::new())
+    inner(ctx, types, compact, padded, &mut HashSet::default())
 }
 
 pub(in crate::passes) fn remap_air_struct_member_index(

@@ -1,8 +1,8 @@
+use crate::fxhash::HashSet;
 use crate::spirv_module::Module;
 use crate::spirv_module::Operand;
 use crate::spirv_module::{Block, Function};
 use spirv::{Op, Word};
-use std::collections::HashSet;
 
 pub fn prune_unreachable_blocks(module: &mut Module) {
     for function in &mut module.functions {
@@ -40,7 +40,7 @@ fn prune_function(function: &mut Function) {
         return;
     };
     let labels: HashSet<Word> = function.blocks.iter().filter_map(block_label).collect();
-    let mut reachable: HashSet<Word> = HashSet::new();
+    let mut reachable: HashSet<Word> = HashSet::default();
     let mut work = vec![entry];
     while let Some(id) = work.pop() {
         if !reachable.insert(id) {

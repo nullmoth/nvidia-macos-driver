@@ -1,6 +1,6 @@
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::{Function, Instruction, Module, Operand};
 use spirv::{Decoration, MemoryAccess, Op, StorageClass, Word};
-use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
 enum Ty {
@@ -23,7 +23,7 @@ struct Types {
 
 impl Types {
     fn read(module: &Module) -> Self {
-        let mut konst = HashMap::new();
+        let mut konst = HashMap::default();
         for i in &module.types_global_values {
             if let (Op::Constant, Some(id)) = (i.class.opcode, i.result_id) {
                 match i.operands.as_slice() {
@@ -37,8 +37,8 @@ impl Types {
                 }
             }
         }
-        let mut ty = HashMap::new();
-        let mut ptr = HashMap::new();
+        let mut ty = HashMap::default();
+        let mut ptr = HashMap::default();
         for i in &module.types_global_values {
             let Some(id) = i.result_id else { continue };
             match (i.class.opcode, i.operands.as_slice()) {
@@ -165,7 +165,7 @@ fn rewrite_function(
     let Some(entry) = function.blocks.first() else {
         return 0;
     };
-    let mut vars = HashMap::<Word, u64>::new();
+    let mut vars = HashMap::<Word, u64>::default();
     for i in &entry.instructions {
         if i.class.opcode != Op::Variable
             || i.operands != [Operand::StorageClass(StorageClass::Function)]
@@ -202,12 +202,12 @@ fn rewrite_function(
         Ty::Int(w) => Some(*w),
         _ => None,
     };
-    let mut derived = HashMap::<Word, (Word, Offset, Word)>::new();
+    let mut derived = HashMap::<Word, (Word, Offset, Word)>::default();
     for &var in vars.keys() {
         let pty = value_types[&var];
         derived.insert(var, (var, Offset::default(), types.ptr[&pty].1));
     }
-    let mut bad = HashSet::<Word>::new();
+    let mut bad = HashSet::<Word>::default();
     for i in function.blocks.iter().flat_map(|b| b.instructions.iter()) {
         let op = i.class.opcode;
         if op == Op::Variable && i.result_id.is_some_and(|id| vars.contains_key(&id)) {
@@ -278,7 +278,7 @@ fn rewrite_function(
     derived.retain(|_, (v, _, _)| vars.contains_key(v));
 
     let ptr_uint = pointer(module, types, StorageClass::Function, uint);
-    let mut var_ptr = HashMap::<Word, Word>::new();
+    let mut var_ptr = HashMap::<Word, Word>::default();
     for (&var, &size) in &vars {
         let arr = word_array(module, uint, size / 4);
         var_ptr.insert(var, pointer(module, types, StorageClass::Function, arr));
@@ -290,7 +290,7 @@ fn rewrite_function(
             .map(|d| d.2)
     };
 
-    let mut removed = HashSet::<Word>::new();
+    let mut removed = HashSet::<Word>::default();
     for block in &mut function.blocks {
         let old = std::mem::take(&mut block.instructions);
         let mut out = Vec::with_capacity(old.len());

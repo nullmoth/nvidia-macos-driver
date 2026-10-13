@@ -1,8 +1,8 @@
+use crate::fxhash::{HashMap, HashSet};
 use crate::meta::{BufferAccess, KernMeta, KernRole};
 use crate::reflect::{DescriptorLayout, SYNTHETIC_BINDING_BASE};
 use crate::spirv_module::{Instruction, Module, Operand};
 use spirv::{Decoration, MemoryAccess, Op, StorageClass, Word};
-use std::collections::{HashMap, HashSet};
 
 const TABLE_SELF_BASE: u64 = 32;
 
@@ -92,7 +92,7 @@ fn provable_address_aligns(
     };
     let consts = int_constants(module);
     let strides = decorations_of(module, Decoration::ArrayStride);
-    let mut member_offsets: HashMap<(Word, u32), u32> = HashMap::new();
+    let mut member_offsets: HashMap<(Word, u32), u32> = HashMap::default();
     for a in &module.annotations {
         if a.class.opcode != Op::MemberDecorate {
             continue;
@@ -111,8 +111,8 @@ fn provable_address_aligns(
             member_offsets.insert((*s, *m), *o);
         }
     }
-    let mut types: HashMap<Word, Word> = HashMap::new();
-    let mut al: HashMap<Word, u8> = HashMap::new();
+    let mut types: HashMap<Word, Word> = HashMap::default();
+    let mut al: HashMap<Word, u8> = HashMap::default();
     for i in module.all_inst_iter() {
         if let (Some(n), Some(t)) = (i.result_id, i.result_type) {
             types.insert(n, t);
@@ -138,8 +138,8 @@ fn provable_address_aligns(
                 )
             })
     };
-    let mut root: HashMap<Word, (Word, Vec<u32>)> = HashMap::new();
-    let mut params: HashMap<Word, Vec<Word>> = HashMap::new();
+    let mut root: HashMap<Word, (Word, Vec<u32>)> = HashMap::default();
+    let mut params: HashMap<Word, Vec<Word>> = HashMap::default();
     let mut calls: Vec<(Word, Vec<Word>)> = Vec::new();
     for f in &module.functions {
         if let Some(fid) = f.def.as_ref().and_then(|d| d.result_id) {
@@ -202,7 +202,7 @@ fn provable_address_aligns(
             }
         }
     }
-    let mut escaped: HashSet<Word> = HashSet::new();
+    let mut escaped: HashSet<Word> = HashSet::default();
     for i in module
         .functions
         .iter()
@@ -222,7 +222,7 @@ fn provable_address_aligns(
             }
         }
     }
-    let mut stores: HashMap<Word, Vec<(Vec<u32>, Word)>> = HashMap::new();
+    let mut stores: HashMap<Word, Vec<(Vec<u32>, Word)>> = HashMap::default();
     for i in module
         .functions
         .iter()
@@ -463,7 +463,7 @@ pub(crate) fn apply_air_access_aligns(
     let defs = global_defs(module);
     let proven = provable_address_aligns(module, &defs);
     let mut capped = 0;
-    let mut value_types = HashMap::new();
+    let mut value_types = HashMap::default();
     for i in module.all_inst_iter() {
         if let (Some(n), Some(t)) = (i.result_id, i.result_type) {
             value_types.insert(n, t);
@@ -582,7 +582,7 @@ fn written_or_escaped(module: &Module, vars: &HashSet<Word>) -> HashSet<Word> {
             break;
         }
     }
-    let mut refused = HashSet::new();
+    let mut refused = HashSet::default();
     for f in &module.functions {
         for b in &f.blocks {
             for i in &b.instructions {
@@ -724,9 +724,9 @@ fn table_self_derived(
     table_vars: &HashSet<Word>,
 ) -> Result<HashSet<Word>, String> {
     let consts = int_constants(module);
-    let mut defs: HashMap<Word, &Instruction> = HashMap::new();
-    let mut uses: HashMap<Word, Vec<(&Instruction, usize)>> = HashMap::new();
-    let mut fn_vars = HashSet::new();
+    let mut defs: HashMap<Word, &Instruction> = HashMap::default();
+    let mut uses: HashMap<Word, Vec<(&Instruction, usize)>> = HashMap::default();
+    let mut fn_vars = HashSet::default();
     for f in &module.functions {
         for b in &f.blocks {
             for i in &b.instructions {
@@ -771,10 +771,10 @@ fn table_self_derived(
         }
         None
     };
-    let mut poisoned: HashSet<Word> = HashSet::new();
-    let mut stores: HashMap<(Word, Vec<u64>), Vec<Word>> = HashMap::new();
-    let mut field_loads: HashMap<Word, (Word, Vec<u64>)> = HashMap::new();
-    let mut paths: HashMap<Word, HashSet<Vec<u64>>> = HashMap::new();
+    let mut poisoned: HashSet<Word> = HashSet::default();
+    let mut stores: HashMap<(Word, Vec<u64>), Vec<Word>> = HashMap::default();
+    let mut field_loads: HashMap<Word, (Word, Vec<u64>)> = HashMap::default();
+    let mut paths: HashMap<Word, HashSet<Vec<u64>>> = HashMap::default();
     for (&v, &d) in &defs {
         if fn_vars.contains(&v) && d.operands.len() > 1 {
             poisoned.insert(v);
@@ -961,7 +961,7 @@ fn table_self_derived(
             derived.remove(&n);
         }
     }
-    let mut grounded: HashSet<Word> = HashSet::new();
+    let mut grounded: HashSet<Word> = HashSet::default();
     loop {
         let add: Vec<Word> = derived
             .iter()
@@ -974,7 +974,7 @@ fn table_self_derived(
         grounded.extend(add);
     }
     let derived = grounded;
-    let mut wrap = HashSet::new();
+    let mut wrap = HashSet::default();
     for n in &derived {
         for (u, k) in uses.get(n).map(|v| v.as_slice()).unwrap_or(&[]) {
             let op = u.class.opcode;
@@ -1070,7 +1070,7 @@ fn wrap_nonwritable(module: &mut Module, wrap: &HashSet<Word>) -> usize {
         ));
         n
     });
-    let mut wrappers: HashMap<Word, Word> = HashMap::new();
+    let mut wrappers: HashMap<Word, Word> = HashMap::default();
     let mut changed = 0;
     for fi in 0..module.functions.len() {
         for bi in 0..module.functions[fi].blocks.len() {

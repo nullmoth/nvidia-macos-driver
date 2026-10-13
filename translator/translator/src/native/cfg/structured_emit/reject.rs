@@ -5,7 +5,7 @@ pub(in crate::native) fn plan_self_check_reason(
     header_merge: &HashMap<String, String>,
     loop_merges: &HashMap<String, LoopMergeInfo>,
 ) -> Option<&'static str> {
-    let mut merge_owner = HashMap::<&str, &str>::new();
+    let mut merge_owner = HashMap::<&str, &str>::default();
     for (header, info) in loop_merges {
         merge_owner.insert(info.merge.as_str(), header.as_str());
     }
@@ -344,13 +344,13 @@ pub(in crate::native) fn construct_tree_gate_witness_lines(blocks: &[BodyBlock])
             &loop_merges,
             false,
             false,
-            &HashMap::new(),
+            &HashMap::default(),
         );
     let forest = analyze(&sblocks);
     let loop_headers: HashSet<&str> = forest.loops.iter().map(|l| l.header.as_str()).collect();
     let names: HashSet<&str> = sblocks.iter().map(|block| block.name.as_str()).collect();
     let natural_merges = selection_merges(&lblocks, &lforest);
-    let mut header_merge: HashMap<String, String> = HashMap::new();
+    let mut header_merge: HashMap<String, String> = HashMap::default();
     for (header, info) in &loop_merges {
         header_merge.insert(header.clone(), info.merge.clone());
     }
@@ -948,7 +948,7 @@ fn phi_summary(blocks: &[BodyBlock], name: &str) -> (usize, Vec<String>) {
 
 fn single_successor_chain(blocks: &[BodyBlock], start: &str, limit: usize) -> Option<Vec<String>> {
     let mut out = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut current = start.to_string();
     for _ in 0..limit {
         let block = blocks.iter().find(|block| block.name == current)?;
@@ -1127,7 +1127,7 @@ pub(in crate::native) fn reject_reason_inner(blocks: &[BodyBlock]) -> Option<Str
         }
     }
 
-    let mut header_merge: HashMap<String, String> = HashMap::new();
+    let mut header_merge: HashMap<String, String> = HashMap::default();
     for (h, info) in &loop_merges {
         header_merge.insert(h.clone(), info.merge.clone());
     }
@@ -1189,13 +1189,13 @@ mod tests {
             bb("%work", BlockRole::Normal, &["br label %merge"]),
             bb("%merge", BlockRole::Normal, &["ret void"]),
         ];
-        let header_merges = HashMap::from([
+        let header_merges = crate::fxhash::map_from([
             ("%outer".to_string(), "%merge".to_string()),
             ("%inner".to_string(), "%merge".to_string()),
         ]);
 
         assert_eq!(
-            plan_self_check_reason(&blocks, &header_merges, &HashMap::new()),
+            plan_self_check_reason(&blocks, &header_merges, &HashMap::default()),
             Some("selection:merge-reused")
         );
     }
@@ -1224,14 +1224,14 @@ mod tests {
             bb("%live", BlockRole::Normal, &["br label %done"]),
             bb("%done", BlockRole::Normal, &["ret void"]),
         ];
-        let header_merges = HashMap::from([
+        let header_merges = crate::fxhash::map_from([
             ("%outer".to_string(), "%done".to_string()),
             ("%nested".to_string(), "%nested_merge".to_string()),
             ("%inner".to_string(), "%inner_merge".to_string()),
         ]);
 
         assert_eq!(
-            plan_self_check_reason(&blocks, &header_merges, &HashMap::new()),
+            plan_self_check_reason(&blocks, &header_merges, &HashMap::default()),
             Some("selection:nested-exit-bypass")
         );
     }
@@ -1250,7 +1250,7 @@ mod tests {
         ];
 
         assert_eq!(
-            plan_self_check_reason(&blocks, &HashMap::new(), &HashMap::new()),
+            plan_self_check_reason(&blocks, &HashMap::default(), &HashMap::default()),
             Some("loop:backedge-target-unowned")
         );
     }

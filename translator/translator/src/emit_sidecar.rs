@@ -1,5 +1,5 @@
+use crate::fxhash::{HashMap, HashSet};
 use spirv::Word;
-use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct EmitSidecar {
@@ -464,7 +464,7 @@ mod b78_tcg_dw3d_tests {
             ..EmitSidecar::default()
         };
         for (arg, root) in [(101, 120), (201, 220)] {
-            let remap = HashMap::from([(10, arg), (20, root)]);
+            let remap = crate::fxhash::map_from([(10, arg), (20, root)]);
             sidecar.clone_inlined_facts(&remap);
             if old {
                 sidecar.remap_local_pointer_field_store_sources(&remap);
@@ -514,9 +514,9 @@ mod tests {
     #[test]
     fn inlining_clones_load_facts_and_remaps_store_sources() {
         let mut sidecar = EmitSidecar {
-            ordinary_plan_rejected_functions: HashSet::new(),
-            ownership_plan_rejected_functions: HashSet::new(),
-            post_lowering_cfg_construction_functions: HashSet::new(),
+            ordinary_plan_rejected_functions: HashSet::default(),
+            ownership_plan_rejected_functions: HashSet::default(),
+            post_lowering_cfg_construction_functions: HashSet::default(),
             buffer_access_offsets: vec![BufferAccessOffset {
                 id: 82,
                 root: 92,
@@ -553,7 +553,7 @@ mod tests {
             }],
             ..EmitSidecar::default()
         };
-        let remap = HashMap::from([
+        let remap = crate::fxhash::map_from([
             (20, 120),
             (30, 130),
             (40, 140),
@@ -677,17 +677,17 @@ mod tests {
         let mut sidecar = EmitSidecar {
             all_device_buffers_raw: false,
             construct_cross_binding_addresses: false,
-            ordinary_plan_rejected_functions: HashSet::new(),
-            ownership_plan_rejected_functions: HashSet::new(),
-            post_lowering_cfg_construction_functions: HashSet::new(),
+            ordinary_plan_rejected_functions: HashSet::default(),
+            ownership_plan_rejected_functions: HashSet::default(),
+            post_lowering_cfg_construction_functions: HashSet::default(),
             air_data_layout: None,
-            air_struct_offsets: HashMap::from([(5, vec![0, 16])]),
+            air_struct_offsets: crate::fxhash::map_from([(5, vec![0, 16])]),
             air_struct_layout_mappings: vec![AirStructLayoutMapping {
                 param_index: 2,
                 struct_ty: Some(5),
                 status: AirStructLayoutMappingStatus::MappedNatural,
             }],
-            flat_raw_buffer_params: HashSet::from([2]),
+            flat_raw_buffer_params: crate::fxhash::set_from([2]),
             buffer_address_words: vec![BufferAddressWord {
                 id: 10,
                 param_index: 2,
@@ -704,7 +704,7 @@ mod tests {
                 constant: 32,
                 terms: vec![(25, 48)],
             }],
-            buffer_root_source_types: HashMap::from([(18, 19)]),
+            buffer_root_source_types: crate::fxhash::map_from([(18, 19)]),
             buffer_pointer_field_loads: vec![BufferPointerFieldLoad {
                 id: 11,
                 root: 12,
@@ -751,9 +751,9 @@ mod tests {
                 indices: vec![1, 0],
             }],
             aliased_imageblock_staging: Some(51),
-            air_access_aligns: HashMap::new(),
+            air_access_aligns: HashMap::default(),
         };
-        let remap = HashMap::from([
+        let remap = crate::fxhash::map_from([
             (10, 110),
             (11, 111),
             (12, 112),
@@ -796,7 +796,7 @@ mod tests {
         );
         assert_eq!(
             sidecar.buffer_root_source_types,
-            HashMap::from([(118, 119)])
+            crate::fxhash::map_from([(118, 119)])
         );
 
         assert_eq!(sidecar.air_struct_offsets.get(&105), Some(&vec![0, 16]));

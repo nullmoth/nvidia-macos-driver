@@ -127,7 +127,7 @@ struct AgxMemorySite {
 fn find_next_agx_emask_memory_call(
     ctx: &Ctx,
     entry_idx: usize,
-    names: &std::collections::HashMap<Word, String>,
+    names: &crate::fxhash::HashMap<Word, String>,
 ) -> Option<AgxMemorySite> {
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {

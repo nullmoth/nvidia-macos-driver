@@ -76,7 +76,7 @@ pub(in crate::passes) fn finalize(
     ];
     let referenced_from_functions = function_referenced_ids(&ctx.module);
     let mut interface = Vec::new();
-    let mut interface_ids = HashSet::new();
+    let mut interface_ids = HashSet::default();
     for &id in &ctx.interface {
         if referenced_from_functions.contains(&id) && interface_ids.insert(id) {
             interface.push(id);
@@ -379,7 +379,7 @@ fn exact_narrowing_float_conversions(ctx: &mut Ctx) {
             },
         )
         .collect();
-    let narrowing: std::collections::HashSet<Word> = conversions
+    let narrowing: crate::fxhash::HashSet<Word> = conversions
         .iter()
         .filter(|(_, result_ty, source)| {
             match (
@@ -395,7 +395,7 @@ fn exact_narrowing_float_conversions(ctx: &mut Ctx) {
     if narrowing.is_empty() {
         return;
     }
-    let already: std::collections::HashSet<Word> = ctx
+    let already: crate::fxhash::HashSet<Word> = ctx
         .module
         .annotations
         .iter()

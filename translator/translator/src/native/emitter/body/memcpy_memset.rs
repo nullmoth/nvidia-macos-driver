@@ -360,7 +360,7 @@ impl Emitter {
         let Some(shadow) = self.raw_memcpy_shadows.get(src_name) else {
             return Ok(None);
         };
-        let mut by_offset = HashMap::new();
+        let mut by_offset = HashMap::default();
         for (offset, word) in words {
             if offset % 4 != 0 || offset >= len {
                 return Ok(None);

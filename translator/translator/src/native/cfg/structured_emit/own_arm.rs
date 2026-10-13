@@ -3,9 +3,9 @@ use super::construct_tree::{
     OriginalEdge,
 };
 use super::*;
+use crate::fxhash::{HashMap, HashSet};
 use crate::native::ir::{LlType, LlValue};
 use crate::native::tir;
-use std::collections::{HashMap, HashSet};
 
 const PREFIX: &str = "%metal2vulkan.ct.oa.";
 const OUTER_MERGE: &str = "%metal2vulkan.ct.oa.outer.merge";
@@ -37,7 +37,7 @@ fn carrier_with_phis(
     phis: &[(String, LlType, Vec<(LlValue, String)>)],
 ) -> Result<BodyBlock, String> {
     let mut carrier =
-        tir::lower_block_carrier(name, &[format!("br label {target}")], &HashMap::new())
+        tir::lower_block_carrier(name, &[format!("br label {target}")], &HashMap::default())
             .ok_or_else(|| format!("construct-tree:own-arm-gateway-carrier name={name}"))?;
     for (result, ty, incoming) in phis {
         carrier.push_value_phi(result, ty, incoming);
@@ -148,8 +148,8 @@ fn build_source_witness(blocks: &[BodyBlock], witness_names: [String; 5]) -> Opt
     let natural = *names.get(natural_name.as_str())?;
     let (outer_t, outer_f) = conditional_branch_targets(&lblocks[outer])?;
     let outer_targets =
-        HashSet::from([*names.get(outer_t.as_str())?, *names.get(outer_f.as_str())?]);
-    if outer_targets != HashSet::from([header, shared]) {
+        crate::fxhash::set_from([*names.get(outer_t.as_str())?, *names.get(outer_f.as_str())?]);
+    if outer_targets != crate::fxhash::set_from([header, shared]) {
         return None;
     }
 
@@ -174,7 +174,7 @@ fn build_source_witness(blocks: &[BodyBlock], witness_names: [String; 5]) -> Opt
                 .filter(|target| !region.contains(target))
         })
         .collect();
-    if exits != HashSet::from([natural]) {
+    if exits != crate::fxhash::set_from([natural]) {
         return None;
     }
 
@@ -411,7 +411,7 @@ fn regional_candidate(witness: Witness) -> Result<Vec<BodyBlock>, String> {
         .copied()
         .filter(|index| source_forest.dominates(&blocks[work].name, &blocks[*index].name))
         .collect();
-    let mut work_uses = HashSet::new();
+    let mut work_uses = HashSet::default();
     for index in &work_nodes {
         for inst in &blocks[*index].typed.as_ref().expect("carrier").insts {
             inst.visit_uses(|name| {

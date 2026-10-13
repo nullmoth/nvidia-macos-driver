@@ -108,7 +108,7 @@ pub(in crate::native) fn terminal_exit_selection_merges(
 ) -> Option<TerminalExitSelectionPlan> {
     let mut out = blocks.to_vec();
     let natural_loops = analyze(&out).loops;
-    let mut merges = HashMap::new();
+    let mut merges = HashMap::default();
     let mut counter = TERMINAL_EXIT_COUNTER_START;
     let mut changed = false;
     loop {
@@ -322,7 +322,7 @@ pub(in crate::native) fn direct_terminal_exit_selection_merges(
     guards.sort_by(|left, right| right.4.cmp(&left.4).then(left.0.cmp(&right.0)));
 
     let mut out = blocks.to_vec();
-    let mut merges = HashMap::new();
+    let mut merges = HashMap::default();
     let mut counter = TERMINAL_EXIT_COUNTER_START;
     for (header, continuation, exit_arm, return_arm, _) in guards {
         let mut candidate = out.clone();
@@ -393,7 +393,7 @@ pub(in crate::native) fn coalesce_sibling_conditional_dispatches(
             .iter()
             .flat_map(|loop_info| loop_info.body.iter().map(String::as_str))
             .collect::<HashSet<_>>();
-        let mut predecessors = HashMap::<String, Vec<String>>::new();
+        let mut predecessors = HashMap::<String, Vec<String>>::default();
         for block in blocks.iter() {
             for successor in block_successors(block) {
                 predecessors
@@ -596,7 +596,7 @@ pub(in crate::native) fn coalesce_sibling_conditional_dispatches(
             &[format!(
                 "br i1 {selector}, label {true_target}, label {false_target}"
             )],
-            &HashMap::new(),
+            &HashMap::default(),
         )
         .expect("synthetic conditional carrier is always parseable");
         for (result, ty, incoming) in &value_phis {
@@ -729,7 +729,7 @@ pub(in crate::native) fn complete_terminal_parent_ownership(
     counter: &mut usize,
 ) -> Vec<String> {
     let mut pending = vec![owner.to_string()];
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     let mut completed = Vec::new();
     while let Some(child) = pending.pop() {
         if !visited.insert(child.clone()) {
@@ -878,7 +878,7 @@ pub(in crate::native) fn finalize_fully_terminal_switch(
     let header_block = by_name[header];
     let terminal_chain = |start: &str| {
         let mut current = start.to_string();
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         while seen.insert(current.clone()) {
             let block = *by_name.get(current.as_str())?;
             if is_bare_ret_void(block) {
@@ -916,7 +916,7 @@ pub(in crate::native) fn finalize_fully_terminal_switch(
     if current_is_owned_reconvergence {
         return false;
     }
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut stack = block_successors(header_block)
         .into_iter()
         .map(|target| (header.to_string(), target))
@@ -1057,8 +1057,8 @@ pub(in crate::native) fn privatize_direct_arm_terminal_return(
         .iter()
         .map(|block| (block.name.as_str(), block))
         .collect::<HashMap<_, _>>();
-    let mut region = HashSet::new();
-    let mut returns = HashSet::new();
+    let mut region = HashSet::default();
+    let mut returns = HashSet::default();
     let mut stack = vec![terminal_arm.clone()];
     let mut valid = true;
     while let Some(node) = stack.pop() {
@@ -1187,7 +1187,7 @@ pub(in crate::native) fn terminal_unreachable_selection_merges(
         return None;
     }
     let mut out = blocks.to_vec();
-    let mut merges = HashMap::new();
+    let mut merges = HashMap::default();
     let mut counter = TERMINAL_EXIT_COUNTER_START;
     let mut changed = false;
     loop {
@@ -1353,7 +1353,7 @@ pub(in crate::native) fn terminal_exit_arm(
         return None;
     }
     let mut current = arm.to_string();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while seen.insert(current.clone()) {
         let block = blocks.iter().find(|block| block.name == current)?;
         if is_bare_ret_void(block) {
@@ -1508,8 +1508,8 @@ fn arm_void_return_targets(
         .iter()
         .map(|block| (block.name.as_str(), block))
         .collect::<HashMap<_, _>>();
-    let mut returns = HashSet::new();
-    let mut seen = HashSet::new();
+    let mut returns = HashSet::default();
+    let mut seen = HashSet::default();
     let mut stack = vec![arm.to_string()];
     while let Some(node) = stack.pop() {
         if !seen.insert(node.clone()) {
@@ -1585,7 +1585,7 @@ pub(in crate::native) fn terminal_exit_convergence(
         .iter()
         .map(|block| (block.name.as_str(), block))
         .collect::<HashMap<_, _>>();
-    let mut predecessors = HashMap::<String, Vec<&str>>::new();
+    let mut predecessors = HashMap::<String, Vec<&str>>::default();
     for block in blocks {
         for successor in block_successors(block) {
             predecessors
@@ -1610,7 +1610,7 @@ pub(in crate::native) fn terminal_exit_convergence(
     };
 
     let reachable = |arm: &str| -> Option<(HashSet<String>, bool)> {
-        let mut nodes = HashSet::new();
+        let mut nodes = HashSet::default();
         let mut saw_terminal = false;
         let mut stack = vec![arm.to_string()];
         while let Some(node) = stack.pop() {
@@ -1637,7 +1637,7 @@ pub(in crate::native) fn terminal_exit_convergence(
         .iter()
         .map(|arm| reachable(arm))
         .collect::<Option<Vec<_>>>()?;
-    let mut coverage = HashMap::<&str, usize>::new();
+    let mut coverage = HashMap::<&str, usize>::default();
     for (region, _) in &arm_regions {
         for node in region {
             *coverage.entry(node.as_str()).or_default() += 1;
@@ -1680,11 +1680,11 @@ pub(in crate::native) fn terminal_exit_convergence(
 
     for (candidate, _, _) in candidates {
         let mut valid = true;
-        let mut owned_region = HashSet::new();
+        let mut owned_region = HashSet::default();
         for arm in &arms {
             let mut reached = false;
             let mut saw_terminal = false;
-            let mut seen = HashSet::new();
+            let mut seen = HashSet::default();
             let mut stack = vec![arm.clone()];
             while let Some(node) = stack.pop() {
                 if node == candidate {
