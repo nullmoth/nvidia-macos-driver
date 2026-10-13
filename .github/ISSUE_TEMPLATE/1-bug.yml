@@ -38,6 +38,13 @@ body:
       description: What you see, and the last line on screen if it stops. A photo of the screen helps.
     validations:
       required: true
+  - type: checkboxes
+    id: own-words
+    attributes:
+      label: Written by you
+      options:
+        - label: I wrote this report myself. AI-written issues are closed without review (see CONTRIBUTING.md).
+          required: true
   - type: input
     id: app
     attributes:
