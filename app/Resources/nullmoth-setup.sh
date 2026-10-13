@@ -767,6 +767,9 @@ if [ -n "${SETLOGO:-}" ]; then
   BKC="$C.nullmoth-logo-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C"
   LOGOSRC="$(dirname "${TOOL:-/nonexistent}")/$LOGO_FILE"; li=$(logo_index); fail=0
   if [ "$SETLOGO" = on ]; then
+    ocl=$(ls -t "$MP"/opencore-*.txt 2>/dev/null | head -n 1)
+    [ -n "$ocl" ] && grep -qE "NullMothLogo\.efi at [0-9]+ cannot be loaded" "$ocl" && \
+      stop "this PC's firmware refused the boot logo driver at the last start (OpenCore's log on this EFI), so it stays off"
     # also when an entry exists: enabling it without the file left OpenCore pointing at a driver that was not there
     [ -f "$LOGOSRC" ] || stop "this copy of the app has no boot logo file"
     if [ -z "$li" ]; then
@@ -1201,7 +1204,16 @@ ti=$(tool_index); if [ -n "$ti" ] && [ "$(get Misc.Tools.$ti.TextMode)" != true 
 REFRESHTOOL=0; [ -n "$ti" ] && [ -f "$TOOL" ] && ! cmp -s "$TOOL" "$(dirname "$C")/Tools/$TOOL_FILE" && REFRESHTOOL=1
 NEEDONCE=0; [ -z "$(once_index)" ] && { NEEDONCE=1; echo "CHANGE boot picker: add \"$ONCE_NAME\" (start macOS or Recovery one time without the driver)"; }
 LOGOSRC="$(dirname "${TOOL:-/nonexistent}")/$LOGO_FILE"; NEEDLOGO=0; REFRESHLOGO=0; li=$(logo_index)
-if [ "$LOGO" != off ] && [ -f "$LOGOSRC" ]; then
+# The logo driver is refused by some firmware: a Gigabyte AORUS board logged "NullMothLogo.efi at 3 cannot be loaded -
+# Unsupported!" and OpenCore went no further until the entry was turned off by hand (chat 10-13). OpenCore's own log on
+# this EFI decides: a logo that failed to load or was not found at the last start is turned off and not turned on again.
+LOGOREFUSED=0; ocl=$(ls -t "$MP"/opencore-*.txt 2>/dev/null | head -n 1)
+[ -n "$ocl" ] && grep -qE "NullMothLogo\.efi at [0-9]+ cannot be (loaded|found)" "$ocl" && LOGOREFUSED=1
+if [ $LOGOREFUSED = 1 ] && [ -n "$li" ] && [ "$(get UEFI.Drivers.$li.Enabled)" = true ]; then
+  echo "CHANGE boot logo: turn the NullMoth boot logo off (this PC's firmware refused it at the last start)"; EDITS+=("UEFI.Drivers.$li.Enabled|-bool|false")
+elif [ $LOGOREFUSED = 1 ]; then
+  :
+elif [ "$LOGO" != off ] && [ -f "$LOGOSRC" ]; then
   if [ -z "$li" ]; then NEEDLOGO=1; echo "CHANGE boot logo: add the NullMoth boot logo (turn it off in the app, or with -nmlogooff)"
   else
     [ "$(get UEFI.Drivers.$li.Enabled)" = true ] || { echo "CHANGE boot logo: turn the NullMoth boot logo on"; EDITS+=("UEFI.Drivers.$li.Enabled|-bool|true"); }
