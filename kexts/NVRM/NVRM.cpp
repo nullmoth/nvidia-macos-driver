@@ -520,7 +520,7 @@ void NVRM::autoGo(void *p0, wait_result_t)
     // A card whose BAR1 could not be placed outside the boot screen (Resizable BAR off: 256 MB) waits 100 s here with
     // the registry held busy, so the verbose screen showed only "busy timeout ... 'NVRM'" for two minutes and users
     // reset machines that were still starting (7 reports, RTX 2070 SUPER/3050/3060/3070, GTX 1660 SUPER, Quadro T2000,
-    // 2026-10-07/08). Say what is happening and how to avoid it, every 15 s, on the same screen.
+    // in 1.12). Say what is happening and how to avoid it, every 15 s, on the same screen.
     if (s->fAutoGoSettleMs > 5000) {
         LOG("starting the NVIDIA card: waiting %u s before it takes over the screen, because its memory window (BAR1) "
             "is too small to move off the boot screen. This is not a freeze. To start in about a second instead, enable "

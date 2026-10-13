@@ -1,7 +1,5 @@
 # 1401 and NVIDIA driver 1.3.0
 
-**Something not working? [nullmothsystems.com/help](https://nullmothsystems.com/help) lists every known problem and exactly what to do.**
-
 ## Mac app
 - **Send logs no longer freezes the app.** Collecting runs in the background (a few minutes); the app keeps working. In 1.2.0 the whole app hung while it collected, so most people could not send logs at all.
 - **Installing no longer sits at "Finding the OpenCore partition."** The password prompt runs in its own process and always shows.

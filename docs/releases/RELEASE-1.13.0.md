@@ -1,7 +1,5 @@
 # 1401 and NVIDIA driver 1.13.0
 
-**Something not working? [nullmothsystems.com/help](https://nullmothsystems.com/help) lists every known problem and exactly what to do.**
-
 ## What was wrong in 1.12, and what changed
 
 - **GTX 16 / RTX 20 (Turing) cards stuck at startup after updating.**

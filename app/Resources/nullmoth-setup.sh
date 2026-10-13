@@ -151,7 +151,7 @@ lshow() {  # <seconds> <log show arguments...>
 }
 # Keeps the first $1 and the last $2 lines of its input, with a marker between: a boot's start (where a GPU driver
 # says whether it started) and its end (what the user saw last). WAS a plain tail: on an RX 7900 XTX + RTX 2060 machine
-# (10-12) per-allocation lines filled the 512 KB upload, and the test driver's start-up lines were gone.
+# Per-allocation lines filled the 512 KB upload, and the test driver's start-up lines were gone.
 headtail() { awk -v h="$1" -v t="$2" 'NR <= h { print; next } { r[NR % t] = $0 }
   END { if (NR > h) { s = (NR - t > h) ? NR - t + 1 : h + 1; if (s > h + 1) printf "... %d lines left out ...\n", s - h - 1
         for (i = s; i <= NR; i++) print r[i % t] } }'; }
@@ -436,10 +436,10 @@ if [ -n "$COLLECT" ]; then
     mount_efi "$d" || continue; mp=$MOUNT_POINT
     collect_recent_logs "$d" 3 "$mp"/opencore-*.txt
     collect_recent_logs "$d" 5 "$mp"/panic-*.txt
-    # The EFI itself (10-09): most machines that fail run their own OpenCore config, and without it every fix was a
+    # The EFI itself: most machines that fail run their own OpenCore config, and without it every fix was a
     # guess from symptoms. The config goes up with the machine's identity removed (serial, board serial, UUID, ROM),
     # plus the list of kexts, drivers and ACPI files beside it, so the working and the broken EFIs can be compared.
-    # The live config and its two newest backups only: every install leaves a backup, and 35 of them (studio, 10-12)
+    # The live config and its two newest backups only: every install leaves a backup, and 35 of them on one test machine
     # filled the report's 48 file slots before the panics, crash reports and GPU logs were reached.
     cfs=("$mp"/EFI/OC/config.plist)   # a volume name can hold spaces ("NO NAME"): read paths line by line, never split them
     while IFS= read -r cf; do cfs+=("$cf"); done < <(ls -t "$mp"/EFI/OC/config.plist.nullmoth-* 2>/dev/null | head -n 2)
@@ -1056,7 +1056,7 @@ lp=$(kpos Lilu.kext); ap=$(kpos AMFIPass.kext)
 NEEDAMFIPASS=$(( ${#ADDK[@]} + ${#FETCH[@]} ))
 # Tahoe preparation: macOS 26 refuses Mac models it dropped ("This version of Mac OS X is not supported on this platform").
 # Every desktop 1401 built before 1.14 is iMacPro1,1, one of them, so the update stopped there on every such PC (10-12, the
-# studio itself). Desktops take MacPro7,1, which runs macOS 15 and 26, with RestrictEvents (its memory and PCI slot pages),
+# the test machine). Desktops take MacPro7,1, which runs macOS 15 and 26, with RestrictEvents (its memory and PCI slot pages),
 # as 1401 1.14 builds them; a laptop on a dropped model is told to rebuild its EFI with 1401 1.14 (its model needs the
 # laptop's own SMBIOS choice). The serial numbers stay: macOS does not check them against the model.
 if [ "$UPD" = prepare ]; then
@@ -1101,7 +1101,7 @@ NEEDBLOCK=0; bi=$(bidx)
 # that GPU on (no disable-gpu, no framebuffer properties) so the panel shows macOS through the firmware framebuffer.
 # Excluding IONDRVSupport there leaves the built-in screen dark (10-10: 86 of 184 scans had the panel on the Intel GPU).
 IGPU="PciRoot(0x0)/Pci(0x2,0x0)"; INTELPANEL=0
-# LC_ALL=C: ioreg prints raw bytes, and awk in a UTF-8 locale stops on them (measured on the test Mac)
+# LC_ALL=C: ioreg prints raw bytes, and awk in a UTF-8 locale stops on them
 if ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | LC_ALL=C awk '/\+-o /{v=0;c=0} /"vendor-id" = <86800000>/{v=1} /"class-code" = <00000300>/{c=1} v&&c{f=1} END{exit !f}' \
    && ! has "DeviceProperties.Add.$IGPU.disable-gpu" && ! has "DeviceProperties.Add.$IGPU.AAPL,ig-platform-id"; then
   INTELPANEL=1; note "the built-in screen runs on the Intel GPU through the firmware framebuffer; IONDRVSupport stays on"
@@ -1395,7 +1395,7 @@ SINCE=$(date -r "$(sysctl -n kern.boottime | sed -E 's/.*\{ sec = ([0-9]+),.*/\1
 capture "BEFORE restart"
 SINCE=$(date '+%Y-%m-%d %H:%M:%S')
 : > "$MARK"   # claim the single shot BEFORE touching WindowServer, so a respawn can never loop
-# Only ever at the login window. 1.9.0 (10-10): with auto-login the session already existed when this fired, so the
+# Only ever at the login window. In 1.9.0, with auto-login the session already existed when this fired, so the
 # restart logged the user out to the password screen. A restart under a logged-in user ends their session; never do it.
 CONSOLE=$(stat -f%Su /dev/console 2>/dev/null)
 if [ -n "$(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null)" ]; then
@@ -1479,7 +1479,7 @@ while :; do
   cur="$(sysctl $CTRS 2>/dev/null | sed -E 's/^debug\.(nvaccel_|nvrmfb_)?//; s/: /=/' | tr '\n' ' ')$(hz)"
   if [ "$cur" != "$PREV" ] || [ $((i % 30)) = 0 ]; then echo "$(date -u +%H:%M:%S) ws=$w $cur" >> "$T"; PREV=$cur; fi
   i=$((i + 1))
-  # every second for the first 15 minutes after boot (the handoff and login), then every 5 s
+  # every second for the first 15 minutes after boot (display hand-over and login), then every 5 s
   if [ $(( $(date +%s) - BOOT )) -lt 900 ]; then sleep 1; else sleep 5; fi
   [ $((i % 300)) = 0 ] && { rot "$T"; for f in "$K" "$W"; do s=$(stat -f%z "$f" 2>/dev/null || echo 0); [ "$s" -gt $CAP ] && { cp "$f" "$f.1"; : > "$f"; }; done; }
 done

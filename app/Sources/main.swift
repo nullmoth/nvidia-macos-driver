@@ -284,7 +284,7 @@ func makeReport(_ crashes: [URL]) -> String {
     var r = ""
     for u in crashes.suffix(3) {
         // The date and "before this install" ride in the header: 1.12 reports carried mediaanalysisd crashes from a 1.9
-        // plugin (the return address fits only 1.3-1.9's drawPrimitives) and read as a 1.12 regression (10-11).
+        // plugin (the return address fits only 1.3-1.9's drawPrimitives) and read as a 1.12 regression.
         let fmc = FileManager.default
         let when = (try? fmc.attributesOfItem(atPath: u.path))?[.modificationDate] as? Date
         let installed = (try? fmc.attributesOfItem(atPath: "/Library/NullMoth/state"))?[.modificationDate] as? Date

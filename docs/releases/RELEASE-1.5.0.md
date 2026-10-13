@@ -1,7 +1,5 @@
 # 1401 and NVIDIA driver 1.5.0
 
-**Something not working? [nullmothsystems.com/help](https://nullmothsystems.com/help) lists every known problem and exactly what to do.**
-
 ## Windows (1401 1.5.0)
 - **The macOS download finishes on networks that cut it off.** On some networks the first connection got exactly 1 MB and every retry got nothing ("after 9 resumed connections, 8 in a row with no progress"). 1401 now fetches the rest in small pieces that get under the limit, waits longer between failed tries, and still checks every piece against Apple's signed list.
 

@@ -1,7 +1,5 @@
 # 1401 and NVIDIA driver 1.10.0
 
-**Something not working? [nullmothsystems.com/help](https://nullmothsystems.com/help) lists every known problem and exactly what to do.**
-
 ## Windows (1401 1.10.0)
 - Ryzen 7000, 8000 and 9000 PCs (AM5 and Zen 4/5 laptops) stuck at the prohibited sign / `EB.MM.AKM`: the first build now uses the memory settings these CPUs boot with. Build the stick again with 1.10 — rebooting an old stick changes nothing.
 - Intel Core Ultra: VT-d's DMAR table is dropped for macOS, which every Core Ultra that booted needed.

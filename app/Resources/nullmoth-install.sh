@@ -144,7 +144,7 @@ NV_IDS=$(ioreg -r -c IOPCIDevice -d 1 | awk '/"vendor-id" = <de100000>/{nv=1} /"
   /^\+-o|^ *\}/{ if (nv && d != "") print toupper(substr(d,3,2) substr(d,1,2)); nv=0; d="" }' | sort -u)
 CARD=""; for i in $NV_IDS; do case " $(echo $SUPPORTED_IDS) " in *" $i "*) CARD=$i;; esac; done
 # Every device id from 1E00 up is Turing or newer (TU102 is 1E02; Volta and older sit below it), which RM drives through GSP.
-# The list above names the GeForce/RTX ids measured so far; a Quadro T1200 laptop (1FBC) was refused as "older" (10-11).
+# The list above names the GeForce/RTX ids measured so far; a Quadro T1200 laptop (1FBC) was refused as "older".
 [ -n "$CARD" ] || for i in $NV_IDS; do case $i in *[!0-9A-F]*|"") ;; *) [ $((16#$i)) -ge $((16#1E00)) ] && CARD=$i;; esac; done
 [ -n "$CARD" ] || die "this NVIDIA card (device $(echo $NV_IDS)) is older than the driver supports (RTX 20 / Turing and newer); macOS keeps running on it in basic display, with no changes made"
 ok "macOS $v, x86_64, NVIDIA GPU present"

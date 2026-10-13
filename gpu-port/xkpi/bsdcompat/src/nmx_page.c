@@ -700,7 +700,7 @@ int pmap_change_attr(void *va, vm_size_t size, int mode)
  * do. "PCIe snoops" above holds for a discrete GPU, not for the NPU: an integrated NPU reads write-combined and
  * uncached buffers without snooping, so a line still in the cache (the page was zeroed through the cached view) is
  * invisible to it and can later be written back over what was written through the WC view. The first Arrow Lake NPU
- * firmware boot never answered (10-11), its firmware and log buffers being exactly such pages.
+ * firmware boot never answered, its firmware and log buffers being exactly such pages.
  */
 void pmap_invalidate_cache_range(vm_offset_t sva, vm_offset_t eva);
 void pmap_page_set_memattr(vm_page_t m, vm_memattr_t ma)

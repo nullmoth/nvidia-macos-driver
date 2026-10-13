@@ -73,7 +73,7 @@ static unsigned gNvHeadsPublished = 0, gNvHeadsRegistered = 0;
 static unsigned gNvHeadsPiped = 0;
 // The Intel built-in panel (head 4) joins only when this is 1. Off by default while the path is proven: a write at run
 // time (then debug.nvaccelfb=3 and a WindowServer restart) can be undone by a reboot, so a hang never needs hands
-// (10-10: the first virtual-panel test froze studio at boot and needed a power cycle).
+// (the first virtual-panel test froze the machine at boot and needed a power cycle).
 static int gNvIgpu = 0;
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_igpu, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gNvIgpu, 0,
            "1 = give an Intel built-in panel (NMIntelFB, head 4) a display pipe on this accelerator");
@@ -367,7 +367,7 @@ public:
         for (unsigned i = 0; i < kNvMaxFB; i++) {
             IOService *fb = fFBs[i];
             if (!fb) {
-                // The Intel panel (index 4, NMIntelFB) does not wait for NVIDIA heads that never publish: studio with one
+                // The Intel panel (index 4, NMIntelFB) does not wait for NVIDIA heads that never publish: a machine with one
                 // monitor publishes only head 0, and the walk stopped there, so the Intel head got no pipe (measured 10-10,
                 // published 0x11 registered 0x1). Pipes are found by their framebuffer pointer, not their number.
                 if (gNvIgpu && i < 4 && ((gNvHeadsPublished >> 4) & 1)) { i = 3; continue; }

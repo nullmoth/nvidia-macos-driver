@@ -1,7 +1,5 @@
 # 1401 and NVIDIA driver 1.12.0
 
-**Something not working? [nullmothsystems.com/help](https://nullmothsystems.com/help) lists every known problem and exactly what to do.**
-
 ## Dual GPU laptops (Optimus / MUXless)
 - **The NVIDIA GPU now works on laptops whose screen is wired to the Intel GPU.** It becomes a second Metal device, the way the discrete GPU works on Apple's own two-GPU MacBook Pros: the Intel GPU drives the screen and WindowServer, and apps that want the fast GPU render on the NVIDIA card while macOS copies their frames to the screen. Before, the driver hid the card from Metal when no monitor was connected to it.
 - Intel UHD/Iris from 6th to 10th generation (Skylake through Comet Lake) and Ice Lake are accelerated by macOS's own Intel driver, so these laptops get both GPUs fully accelerated.
