@@ -19,7 +19,7 @@ pub(super) use structured_emit::{
     renest_loop_exit_sibling, renest_straddle_loop_merge, renest_whole_cfg_dispatch,
     requires_loop_exit_sibling_dispatch, requires_shared_loop_entry_ownership,
     straddle_witness_lines, structured_plan, structured_plan_construct_tree,
-    structured_reject_reason, CROSS_ARM_EDGE_MAX_BLOCKS,
+    structured_reject_reason, PlanCacheScope, CROSS_ARM_EDGE_MAX_BLOCKS,
 };
 
 pub(super) use blocks::{

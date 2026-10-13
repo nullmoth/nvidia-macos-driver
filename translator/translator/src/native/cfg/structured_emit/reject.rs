@@ -203,6 +203,7 @@ pub(in crate::native) fn block_ends_in_void_return(blocks: &[BodyBlock], name: &
 }
 
 pub(in crate::native) fn structured_reject_reason(blocks: &[BodyBlock]) -> Option<String> {
+    let _plan_cache = super::plan_cache::Scope::enter();
     let deep_shared = super::privatize_shared_continuations_for_ladder(blocks);
     if deep_shared.len() != blocks.len() && structured_plan(&deep_shared).is_some() {
         return None;

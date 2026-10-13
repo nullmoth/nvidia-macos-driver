@@ -365,6 +365,7 @@ pub(in crate::native) fn opaque_resource_pointer_values_by_function(
 
 impl Emitter {
     pub(super) fn emit_function(&mut self, f: &LlFunction) -> Result<(), String> {
+        let _plan_cache = crate::native::cfg::PlanCacheScope::enter();
         self.values.clear();
         self.loop_controls = f.loop_controls.clone();
         self.fast_float_products.clear();
