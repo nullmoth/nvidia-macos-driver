@@ -17,7 +17,6 @@
 #include <sys/fcntl.h>
 #include <sys/uio.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
-#include <IOKit/IOMultiMemoryDescriptor.h>
 #include <IOKit/acpi/IOACPIPlatformDevice.h>
 #include <sys/proc.h>
 #include <sys/kauth.h>
@@ -49,7 +48,7 @@ NvBool NV_API_CALL nv_requires_dma_remap(nv_state_t *nv) { TRC; return NV_FALSE;
 static NvU32 nv_xnu_dma_bits = 64;
 void   NV_API_CALL nv_set_dma_address_size(nv_state_t *nv, NvU32 bits) { TRC; nv_xnu_dma_bits = bits; kprintf("NVRM-xnu:   dma address size %u bits\n", bits); }
 
-struct nv_xnu_alloc { IOMemoryDescriptor *md; IOMemoryMap *kmap; void *va; NvU64 page_size; NvU64 bytes; NvU32 page_count; NvBool contig; NvU32 cache;
+struct nv_xnu_alloc { IOBufferMemoryDescriptor *md; void *va; NvU64 page_size; NvU64 bytes; NvU32 page_count; NvBool contig; NvU32 cache;
                       NvU64 *ptes; NvU32 nptes; SInt32 kmaps; NvBool freed, pinned; struct nv_xnu_alloc *prev, *next; };
 static nv_xnu_alloc *nv_xnu_live[512]; static int nv_xnu_live_n = 0;
 extern "C" int nv_xnu_kmap_overlap(NvU64 phys, NvU64 len);
@@ -237,7 +236,6 @@ static void nv_q_reap_retained(void)
         IOLockLock(nv_q_lock);
         nv_q_retained--; nv_q_retained_pages -= nv_q_allocation_pages(a); nv_q_retain_released++;
         IOLockUnlock(nv_q_lock);
-        if (a->kmap) a->kmap->release();
         a->md->release(); if (a->ptes) kern_os_free(a->ptes); kern_os_free(a);
     }
 }
@@ -245,7 +243,6 @@ static void nv_q_release(nv_xnu_alloc *a)
 {
     a->md->complete();
     if (nv_q_retain_check(a)) return;
-    if (a->kmap) a->kmap->release();
     a->md->release(); if (a->ptes) kern_os_free(a->ptes); kern_os_free(a);
 }
 static void nv_q_free_snap(NvU64 *snap, NvU64 n) { if (snap) IOFree(snap, (vm_size_t)(n * 8)); }
@@ -495,7 +492,7 @@ extern "C" void nv_pm_foreign(NvU64 start, NvU64 size, NvU32 mode, void *caller)
 extern "C" IOMemoryDescriptor *nv_pm_ram_submd(NvU64 start, NvU64 size)
 {
     if (!nv_pm_ok()) return NULL;
-    NvU64 off = 0; IOMemoryDescriptor *md = NULL;
+    NvU64 off = 0; IOBufferMemoryDescriptor *md = NULL;
     IOSimpleLockLock(nv_pm_lock);
     nv_xnu_alloc *a = nv_pm_find(start, size, &off);
     if (a) { md = a->md; md->retain(); }
@@ -1024,45 +1021,6 @@ static void nv_pv_start(void)
     kprintf("NVRM-xnu: PV-SENTINEL armed: pages 0x%x managed %llu detect-only\n", nv_pv_last, nv_pv_managed_n);
 }
 
-// RM asks for system memory in big pages (64 KB, 2 MB) without needing the whole allocation contiguous: each GPU page must
-// be contiguous and aligned, not the buffer. One contiguous block of a frame's size (8100 KB = 1920x1080x4, 9800 KB,
-// 10240 KB) fails once RAM is fragmented: three 1.14.5-1.14.7 machines logged 35, 183 and 927 "inTaskWithPhysicalMask
-// FAILED" and their apps got NV_ERR_NO_MEMORY. When that block is refused, the buffer is built from page-size chunks
-// (each contiguous and aligned to its size) joined into one descriptor with one kernel mapping. The first attempt is
-// unchanged, so a machine that never ran short takes no new path. debug.nvrm_chunk_force=1 takes the chunked path for
-// every eligible allocation, to exercise it on a machine that is not short of memory.
-static int nv_chunk_force = 0;
-static SInt64 nv_chunk_allocs = 0, nv_chunk_failed = 0;
-SYSCTL_INT(_debug, OID_AUTO, nvrm_chunk_force, CTLFLAG_RW | CTLFLAG_LOCKED, &nv_chunk_force, 0,
-           "1 = build every big-page system allocation from page-size chunks (test the fragmented-memory path)");
-SYSCTL_QUAD(_debug, OID_AUTO, nvrm_chunk_allocs, CTLFLAG_RD | CTLFLAG_LOCKED, &nv_chunk_allocs, "allocations built from chunks");
-SYSCTL_QUAD(_debug, OID_AUTO, nvrm_chunk_failed, CTLFLAG_RD | CTLFLAG_LOCKED, &nv_chunk_failed, "chunked allocations that still failed");
-static bool nv_chunk_registered = false;
-static IOMemoryDescriptor *nv_alloc_chunked(IOOptionBits opts, NvU64 bytes, NvU64 chunk, uint64_t mask, IOMemoryMap **out_map)
-{
-    const NvU64 n = bytes / chunk;
-    IOMemoryDescriptor **parts = (IOMemoryDescriptor **)kern_os_malloc((size_t)n * sizeof(IOMemoryDescriptor *));
-    if (!parts) return NULL;
-    NvU64 got = 0;
-    for (; got < n; got++) {
-        // the mask's low bits clear = the chunk's alignment: a 64 KB GPU page needs 64 KB alignment
-        parts[got] = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, opts | kIOMemoryPhysicallyContiguous,
-                                                                     (mach_vm_size_t)chunk, mask & ~(chunk - 1));
-        if (!parts[got]) break;
-    }
-    IOMemoryDescriptor *md = NULL;
-    if (got == n) md = IOMultiMemoryDescriptor::withDescriptors(parts, (UInt32)n, kIODirectionInOut, false);
-    for (NvU64 i = 0; i < got; i++) parts[i]->release();   // the multi descriptor holds its own references
-    kern_os_free(parts);
-    if (!md) return NULL;
-    IOOptionBits mo = kIOMapAnywhere;
-    if (opts & kIOMapInhibitCache) mo |= kIOMapInhibitCache; else if (opts & kIOMapWriteCombineCache) mo |= kIOMapWriteCombineCache;
-    IOMemoryMap *m = md->createMappingInTask(kernel_task, 0, mo);
-    if (!m) { md->release(); return NULL; }
-    *out_map = m;
-    return md;
-}
-
 NV_STATUS NV_API_CALL nv_alloc_pages(nv_state_t *nv, NvU32 page_count, NvU64 page_size, NvBool contiguous, NvU32 cache_type,
                                      NvBool zeroed, NvBool unencrypted, NvS32 node_id, NvU64 *pte_array, void **priv_data)
 {
@@ -1074,40 +1032,22 @@ NV_STATUS NV_API_CALL nv_alloc_pages(nv_state_t *nv, NvU32 page_count, NvU64 pag
     if (cache_type == NV_MEMORY_UNCACHED) opts |= kIOMapInhibitCache;
     else if (cache_type == NV_MEMORY_WRITECOMBINED) opts |= kIOMapWriteCombineCache;
     uint64_t mask = (nv_xnu_dma_bits >= 64) ? 0xFFFFFFFFFFFFF000ULL : ((1ULL << nv_xnu_dma_bits) - 1) & ~0xFFFULL;
-    if (!nv_chunk_registered) {
-        nv_chunk_registered = true;
-        sysctl_register_oid(&sysctl__debug_nvrm_chunk_force); sysctl_register_oid(&sysctl__debug_nvrm_chunk_allocs);
-        sysctl_register_oid(&sysctl__debug_nvrm_chunk_failed);
-    }
-    const bool chunkable = !contiguous && page_size > PAGE_SIZE && (page_size & (page_size - 1)) == 0 &&
-                           bytes % page_size == 0 && bytes / page_size >= 2 && bytes / page_size <= 65536;
-    IOBufferMemoryDescriptor *bmd = (chunkable && nv_chunk_force) ? NULL :
-        IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, opts, (mach_vm_size_t)bytes, mask);
-    IOMemoryDescriptor *md = bmd; IOMemoryMap *kmap = NULL;
-    if (!md && chunkable) {
-        md = nv_alloc_chunked(opts & ~(IOOptionBits)kIOMemoryPhysicallyContiguous, bytes, page_size, mask, &kmap);
-        if (md) OSIncrementAtomic64(&nv_chunk_allocs); else OSIncrementAtomic64(&nv_chunk_failed);
-        if (md && nv_chunk_allocs <= 8)
-            kprintf("NVRM-xnu:   %llu KB in %llu KB pages built from chunks (one contiguous block was %s)\n",
-                    bytes >> 10, page_size >> 10, nv_chunk_force ? "skipped: debug.nvrm_chunk_force" : "refused");
-    }
+    IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, opts, (mach_vm_size_t)bytes, mask);
     if (!md) { kprintf("NVRM-xnu:   inTaskWithPhysicalMask FAILED (%llu KB)\n", bytes >> 10); return NV_ERR_NO_MEMORY; }
-    if (md->prepare() != kIOReturnSuccess) {
-        kprintf("NVRM-xnu:   prepare FAILED\n"); if (kmap) kmap->release(); md->release(); return NV_ERR_NO_MEMORY;
-    }
-    void *va = bmd ? bmd->getBytesNoCopy() : (void *)(uintptr_t)kmap->getVirtualAddress();
+    if (md->prepare() != kIOReturnSuccess) { kprintf("NVRM-xnu:   prepare FAILED\n"); md->release(); return NV_ERR_NO_MEMORY; }
+    void *va = md->getBytesNoCopy();
     if (zeroed && va) nvx2_memset(va, 0, (size_t)bytes);
     NvU32 n = contiguous ? 1 : page_count;
     for (NvU32 i = 0; i < n; i++) {
         IOByteCount len = 0;
         addr64_t phys = md->getPhysicalSegment((IOByteCount)((NvU64)i * PAGE_SIZE), &len, kIOMemoryMapperNone);
-        if (phys == 0) { kprintf("NVRM-xnu:   getPhysicalSegment(page %u) FAILED\n", i); md->complete(); if (kmap) kmap->release(); md->release(); return NV_ERR_NO_MEMORY; }
+        if (phys == 0) { kprintf("NVRM-xnu:   getPhysicalSegment(page %u) FAILED\n", i); md->complete(); md->release(); return NV_ERR_NO_MEMORY; }
         pte_array[i] = phys;
     }
     nv_xnu_alloc *a = (nv_xnu_alloc *)kern_os_malloc(sizeof *a);
-    if (!a) { md->complete(); if (kmap) kmap->release(); md->release(); return NV_ERR_NO_MEMORY; }
+    if (!a) { md->complete(); md->release(); return NV_ERR_NO_MEMORY; }
     nvx2_memset(a, 0, sizeof *a);
-    a->md = md; a->kmap = kmap; a->va = va; a->page_size = page_size; a->bytes = bytes; a->page_count = page_count; a->contig = contiguous; a->cache = cache_type;
+    a->md = md; a->va = va; a->page_size = page_size; a->bytes = bytes; a->page_count = page_count; a->contig = contiguous; a->cache = cache_type;
     a->ptes = (NvU64 *)kern_os_malloc((size_t)n * sizeof(NvU64));
     if (a->ptes) { for (NvU32 i = 0; i < n; i++) a->ptes[i] = pte_array[i]; a->nptes = n; }
     nv_pm_init();
