@@ -16,7 +16,7 @@ def between(s, start, end, include_end=True):
     return s[a:b]
 
 
-def run(cfg, logo=None, stage="install"):
+def run(cfg, logo=None, stage="install", app_logo=True, efi_logo=True):
     s = SETUP.read_text()
     funcs = between(s, "has() {", "\nget() {", False) + "\n" + between(s, "get() {", "; }\n") + "\n"
     funcs += between(s, "tool_index() {", "logo_index() {", False) + between(s, "logo_index() {", "i=$((i+1)); done; }")
@@ -33,9 +33,11 @@ def run(cfg, logo=None, stage="install"):
             plistlib.dump(cfg, fh)
     app = os.path.join(t, "app"); os.makedirs(app)
     for n, b in (("NullMothSafe.efi", b"tool"), ("NullMothLogo.efi", b"logo")):
+        if n == "NullMothLogo.efi" and not app_logo:
+            continue
         pathlib.Path(app, n).write_bytes(b)
     # a config from an earlier run comes with the EFI files that run copied (each run gets a fresh folder here)
-    if any(d.get("Path") == "NullMothLogo.efi" for d in cfg.get("UEFI", {}).get("Drivers", [])):
+    if efi_logo and any(d.get("Path") == "NullMothLogo.efi" for d in cfg.get("UEFI", {}).get("Drivers", [])):
         pathlib.Path(oc, "Drivers", "NullMothLogo.efi").write_bytes(b"logo")
     if any(x.get("Path") == "NullMothSafe.efi" for x in cfg.get("Misc", {}).get("Tools", [])):
         pathlib.Path(oc, "Tools", "NullMothSafe.efi").write_bytes(b"tool")
@@ -108,6 +110,22 @@ class LogoAndOnce(unittest.TestCase):
         _, after, _ = run(cfg, stage="remove")
         self.assertFalse([x for x in after["Misc"]["Tools"] if x.get("Arguments") == "once"])
         self.assertTrue([d for d in after["UEFI"]["Drivers"] if d["Path"] == "NullMothLogo.efi"])
+
+
+class LogoFileMissing(unittest.TestCase):
+    """Two OpenCore logs ended at "NullMothLogo.efi at 3 cannot be found!": an enabled entry with no file on the EFI."""
+
+    def test_an_enabled_entry_without_its_file_is_turned_off_when_the_app_has_none(self):
+        _, cfg, _ = run(BASE, logo="on")
+        out, after, _ = run(cfg, logo="on", app_logo=False, efi_logo=False)
+        self.assertFalse(next(d for d in after["UEFI"]["Drivers"] if d["Path"] == "NullMothLogo.efi")["Enabled"])
+        self.assertIn("its driver file is missing from this EFI", out)
+
+    def test_an_enabled_entry_without_its_file_gets_the_file_when_the_app_has_it(self):
+        _, cfg, _ = run(BASE, logo="on")
+        out, after, t = run(cfg, logo="on", efi_logo=False)
+        self.assertTrue(next(d for d in after["UEFI"]["Drivers"] if d["Path"] == "NullMothLogo.efi")["Enabled"])
+        self.assertTrue(os.path.isfile(os.path.join(t, "EFI/OC/Drivers/NullMothLogo.efi")))
 
 
 if __name__ == "__main__":
