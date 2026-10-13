@@ -57,10 +57,14 @@ Download `nullmoth-nvidia-<version>.tar.gz` from **Releases**, then:
 
 ```bash
 tar -xzf nullmoth-nvidia-*.tar.gz && cd pkgroot
-shasum -a 256 -c SHA256SUMS          # every file must say OK
-sudo ./install.sh                    # copies the files, rebuilds the Auxiliary Kernel Collection
-sudo shutdown -r now                 # a reboot is required: logout does not load the driver
+shasum -a 256 -c SHA256SUMS
+sudo ./install.sh
+sudo shutdown -r now
 ```
+
+Every file must say OK in the check. `install.sh` copies the files and rebuilds the Auxiliary Kernel Collection; the
+restart is required, because logging out does not load the driver. (Paste the lines without anything after them: the
+Terminal on macOS does not treat `#` as a comment, so a pasted comment becomes part of the command.)
 
 macOS asks you to **allow the extensions** in System Settings → Privacy & Security the first time. Allow, then reboot again.
 
@@ -125,9 +129,11 @@ Also required:
 Verify after the reboot:
 
 ```bash
-kmutil showloaded --list-only | grep nullmoth      # 4 lines
-system_profiler SPDisplaysDataType | head -20      # your GeForce, Metal: supported
+kmutil showloaded --list-only | grep nullmoth
+system_profiler SPDisplaysDataType | head -20
 ```
+
+The first shows 4 lines; the second shows your GeForce with Metal: supported.
 
 ## Dual boot
 
@@ -145,12 +151,16 @@ sudo ./uninstall.sh && sudo shutdown -r now
 Requires Xcode 16, Rust (stable), Meson/Ninja, and NVIDIA's `open-gpu-kernel-modules` at tag `610.57.04`.
 
 ```bash
-build/build_xlate.sh       # translator  -> libnvmtl_translate.dylib
-RELEASE=1 build/build_plugin.sh   # plugin -> NVMTLDriver.bundle (RELEASE=1 strips every diagnostic)
-build/build263.sh          # NVK: apply nvk/nvk-macos.patch to Mesa 17ca6174 first
-build/accel_build.sh <src> <out>  # kexts
-build/accel_build_all.sh kexts/NVRM <out>  # NVAccel for macOS 15 and 26 (NM_TAHOE=1) -> <out>/{15,26}
+build/build_xlate.sh
+RELEASE=1 build/build_plugin.sh
+build/build263.sh
+build/accel_build.sh <src> <out>
+build/accel_build_all.sh kexts/NVRM <out>
 ```
+
+In order: the translator (`libnvmtl_translate.dylib`); the plugin (`NVMTLDriver.bundle`; `RELEASE=1` strips every
+diagnostic); NVK (apply `nvk/nvk-macos.patch` to Mesa `17ca6174` first); the kexts; and NVAccel for macOS 15 and 26
+(`NM_TAHOE=1`), written to `<out>/15` and `<out>/26`.
 
 Rebuild both accelerators whenever `nvrm_vram_abi.h` or `nvrm_gpuva_abi.h` changes: an accelerator built against an
 older ABI loads, but NVRMFB refuses all its VRAM requests and the desktop stays black.
