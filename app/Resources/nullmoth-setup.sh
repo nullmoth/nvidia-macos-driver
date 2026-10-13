@@ -933,10 +933,14 @@ if [ -n "$UPD" ]; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>com.nullmoth.osupdate</string>
-<key>ProgramArguments</key><array><string>/bin/bash</string><string>-c</string><string>/bin/bash $ST/nullmoth-setup.sh --update finish >> $ST/osupdate.log 2>&1</string></array>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>-c</string><string>/bin/bash $ST/nullmoth-setup.sh --update finish &gt;&gt; $ST/osupdate.log 2&gt;&amp;1</string></array>
 <key>RunAtLoad</key><true/>
 </dict></plist>
 PL
+    # a plist launchd cannot parse never runs, and the driver would stay parked on the new macOS
+    plutil -lint /Library/LaunchDaemons/com.nullmoth.osupdate.plist >/dev/null || {
+      cp -p "$BKC" "$C"; rm -f "$PEND" /Library/LaunchDaemons/com.nullmoth.osupdate.plist; args_set del -nvoff
+      stop "the update helper's launchd file is not valid; the config is restored and nothing was changed for the update"; }
     chmod 644 /Library/LaunchDaemons/com.nullmoth.osupdate.plist; chown root:wheel /Library/LaunchDaemons/com.nullmoth.osupdate.plist
     cp "$0" "$ST/nullmoth-setup.sh" 2>/dev/null; chmod 755 "$ST/nullmoth-setup.sh"
     ok "driver parked (-nvoff), installer screen settings set - now update macOS from System Settings"
