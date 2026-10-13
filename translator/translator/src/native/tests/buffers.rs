@@ -13677,13 +13677,32 @@ exit:
     let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
     let asm = disassemble(&spv).expect("disassemble");
 
+    // The address phi is the loop header's: a selection-merge phi elsewhere (the null-checked load helper's)
+    // also has two 64-bit incoming values, and picking among `defs.values()` made this test depend on hash order.
     let mut defs: HashMap<String, (String, String, Vec<String>)> = HashMap::new();
     let mut type_decl: HashMap<String, String> = HashMap::new();
+    let mut returns: HashMap<String, Vec<String>> = HashMap::new();
+    let mut header_phis: Vec<String> = Vec::new();
+    let (mut function, mut block_phis) = (String::new(), Vec::new());
     for line in asm.lines() {
         let words: Vec<&str> = line.split_whitespace().collect();
+        match words.as_slice() {
+            ["OpLoopMerge", ..] => header_phis.append(&mut block_phis),
+            ["OpReturnValue", value] => returns
+                .entry(function.clone())
+                .or_default()
+                .push(value.to_string()),
+            _ => {}
+        }
         let [result, "=", opcode, rest @ ..] = words.as_slice() else {
             continue;
         };
+        match *opcode {
+            "OpFunction" => function = result.to_string(),
+            "OpLabel" => block_phis.clear(),
+            "OpPhi" => block_phis.push(result.to_string()),
+            _ => {}
+        }
         if opcode.starts_with("OpType") {
             type_decl.insert(result.to_string(), format!("{opcode} {}", rest.join(" ")));
             continue;
@@ -13707,14 +13726,23 @@ exit:
         .map(|(id, _)| id.clone())
         .expect("a 64-bit integer type");
 
-    let backedge = defs
-        .values()
-        .find(|(opcode, ty, operands)| {
-            opcode == "OpPhi" && *ty == address_type && operands.len() == 4
+    let address_phis: Vec<&String> = header_phis
+        .iter()
+        .filter(|id| {
+            defs.get(*id).is_some_and(|(opcode, ty, operands)| {
+                opcode == "OpPhi" && *ty == address_type && operands.len() == 4
+            })
         })
-        .map(|(_, _, operands)| operands[2].clone())
-        .expect("a 64-bit loop-carried address phi");
+        .collect();
+    assert_eq!(
+        address_phis.len(),
+        1,
+        "one 64-bit loop-carried address phi: {address_phis:?}"
+    );
+    let address_phi = address_phis[0].clone();
+    let backedge = defs[&address_phi].2[2].clone();
 
+    // Follow the backedge value down to the load, into the helpers it calls.
     let mut pending = vec![backedge];
     let mut seen: HashSet<String> = HashSet::new();
     let mut loaded_address = false;
@@ -13739,7 +13767,13 @@ exit:
             loaded_address = true;
             continue;
         }
-        if opcode == "OpPhi" {
+        if id == address_phi {
+            continue;
+        }
+        if opcode == "OpFunctionCall" {
+            let (callee, arguments) = operands.split_first().expect("a callee");
+            pending.extend(returns.get(callee).into_iter().flatten().cloned());
+            pending.extend(arguments.iter().cloned());
             continue;
         }
         pending.extend(operands.iter().cloned());
