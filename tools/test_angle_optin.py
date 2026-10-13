@@ -15,8 +15,8 @@ with tempfile.TemporaryDirectory() as directory:
     exe = pathlib.Path(directory) / 'policy'
     file.write_text('#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n' + constructor + '\nint main(void) { const char *v = getenv("ANGLE_FEATURE_OVERRIDES_DISABLED"); puts(v ? v : "<unset>"); return 0; }\n')
     subprocess.run(['cc', str(file), '-o', str(exe)], check=True)
-    cases = [(None, None, '<unset>'), ('0', None, '<unset>'), (None, 'otherRule', 'otherRule'),
-             ('1', None, 'disableMetalOnNvidia'), ('1', 'otherRule', 'otherRule:disableMetalOnNvidia'),
+    cases = [(None, None, 'disableMetalOnNvidia'), ('0', None, '<unset>'), ('0', 'otherRule', 'otherRule'),
+             (None, 'otherRule', 'otherRule:disableMetalOnNvidia'), ('1', None, 'disableMetalOnNvidia'),
              ('1', 'otherRule:disableMetalOnNvidia', 'otherRule:disableMetalOnNvidia')]
     for opt, override, expected in cases:
         env = dict(os.environ)
@@ -26,4 +26,4 @@ with tempfile.TemporaryDirectory() as directory:
                 env[key] = value
         actual = subprocess.check_output([str(exe)], env=env, text=True).strip()
         assert actual == expected, (opt, override, actual, expected)
-print('ANGLE policy: defaults untouched; diagnostic opt-in and existing overrides preserved in six cases.')
+print('ANGLE policy: on by default, off with NVMTL_ANGLE_METAL=0, existing overrides kept, in six cases.')
