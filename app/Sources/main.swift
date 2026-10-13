@@ -913,6 +913,17 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
             send("run", ["state": "end", "mode": mode, "ok": false, "why": "Could not save a local report: \(error.localizedDescription)"])
             return
         }
+        // macOS checks its Removable Volumes privacy setting against this app even for the root shell that runs setup, so
+        // a USB stick's OpenCore config could not be opened there ("Code=257", seven Macs on 1.10 to 1.14.5, reported as
+        // "no OpenCore config"). Opening it here first lets macOS ask the user in 1401's name before setup needs it.
+        for volume in FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeIsInternalKey], options: [.skipHiddenVolumes]) ?? [] {
+            if (try? volume.resourceValues(forKeys: [.volumeIsInternalKey]).volumeIsInternal) == true { continue }
+            for rel in ["EFI/OC/config.plist", "EFI/BOOT/config.plist"] {
+                let file = volume.appendingPathComponent(rel)
+                guard FileManager.default.fileExists(atPath: file.path), let handle = FileHandle(forReadingAtPath: file.path) else { continue }
+                _ = handle.readData(ofLength: 1); handle.closeFile()
+            }
+        }
         let res = Bundle.main.resourceURL!
         var args: [String]
         switch mode {
