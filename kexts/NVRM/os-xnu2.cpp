@@ -1033,7 +1033,10 @@ NV_STATUS NV_API_CALL nv_alloc_pages(nv_state_t *nv, NvU32 page_count, NvU64 pag
     else if (cache_type == NV_MEMORY_WRITECOMBINED) opts |= kIOMapWriteCombineCache;
     uint64_t mask = (nv_xnu_dma_bits >= 64) ? 0xFFFFFFFFFFFFF000ULL : ((1ULL << nv_xnu_dma_bits) - 1) & ~0xFFFULL;
     IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, opts, (mach_vm_size_t)bytes, mask);
-    if (!md) { kprintf("NVRM-xnu:   inTaskWithPhysicalMask FAILED (%llu KB)\n", bytes >> 10); return NV_ERR_NO_MEMORY; }
+    // the request's shape rides in the failure line: 1.14.5-1.14.7 reports logged hundreds of these (8100, 9800, 10240 KB)
+    // after the boot-time allocation log had stopped, so no report said whether RM asked for contiguous memory
+    if (!md) { kprintf("NVRM-xnu:   inTaskWithPhysicalMask FAILED (%llu KB, page 0x%llx, contig %u, cache %u)\n",
+                       bytes >> 10, page_size, (unsigned)contiguous, cache_type); return NV_ERR_NO_MEMORY; }
     if (md->prepare() != kIOReturnSuccess) { kprintf("NVRM-xnu:   prepare FAILED\n"); md->release(); return NV_ERR_NO_MEMORY; }
     void *va = md->getBytesNoCopy();
     if (zeroed && va) nvx2_memset(va, 0, (size_t)bytes);
