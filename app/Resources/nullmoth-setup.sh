@@ -921,11 +921,13 @@ if [ -n "$UPD" ]; then
     step "Preparing this Mac for the macOS 26 Tahoe update"
     ls /Library/NullMoth/kexts/*/NVAccel.kext >/dev/null 2>&1 || stop "this Mac still has driver 1.0, which has no macOS 26 kexts"
     backup
+    # finish puts back this machine's own BAR settings, not fixed values: a fixed resize hung some firmware (1.14.7)
+    bar0=$(get UEFI.Quirks.ResizeGpuBars); abar0=$(get Booter.Quirks.ResizeAppleGpuBars)
     setq UEFI.Quirks.ResizeGpuBars -1; setq Booter.Quirks.ResizeAppleGpuBars 0
     bi=$(bidx); [ -n "$bi" ] && plutil -replace Kernel.Block.$bi.Enabled -bool false "$C"
     args_set add -nvoff
     plutil -lint "$C" >/dev/null || { cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; }
-    echo "FROM=$MAJ" > "$PEND"
+    printf 'FROM=%s\nBAR0=%s\nABAR0=%s\n' "$MAJ" "$bar0" "$abar0" > "$PEND"
     cat > /Library/LaunchDaemons/com.nullmoth.osupdate.plist <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -960,7 +962,7 @@ PL
     else
       cp -p "$BKC" "$C"; stop "this driver has no kexts for macOS $MAJ - it stays parked; install a driver that supports macOS $MAJ"
     fi
-    setq UEFI.Quirks.ResizeGpuBars 13; setq Booter.Quirks.ResizeAppleGpuBars -1
+    setq UEFI.Quirks.ResizeGpuBars "${BAR0:-13}"; setq Booter.Quirks.ResizeAppleGpuBars "${ABAR0:--1}"
     bi=$(bidx); [ -n "$bi" ] && plutil -replace Kernel.Block.$bi.Enabled -bool true "$C"
     args_set del -nvoff
     plutil -lint "$C" >/dev/null || { cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; }
