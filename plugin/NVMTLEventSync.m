@@ -133,12 +133,12 @@ static int nvmtl_skip_empty_on(void) {
     NVMTLSubmissionPart *part = [NVMTLSubmissionPart new];
     part->commands = _c;
     memset(&_c, 0, sizeof(_c));
-    part->resources = [_resources copy]; part->surfaces = [_surfDirty copy];
+    part->resources = [(NVMTLResSet *)_resources nvmtlTakeAll]; part->surfaces = [_surfDirty copy];
     part->scratch = [_scratch copy]; part->signalEvent = event; part->value = value;
     part->encoders = _nEnc - _nEncSealed; _nEncSealed = _nEnc;
     if (_g79Sig.count) { part->signals = [_g79Sig copy]; [_g79Sig removeAllObjects]; }
     [_parts addObject:part];
-    [_resources removeAllObjects]; [_surfDirty removeAllObjects]; [_scratch removeAllObjects];
+    [_surfDirty removeAllObjects]; [_scratch removeAllObjects];
     if (restart && nvmtl_vk_cmd_begin(&_queue->_q, &_c)) {
         _cbError = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorOutOfMemory
             userInfo:@{NSLocalizedDescriptionKey:@"Could not allocate recording after event boundary"}];
