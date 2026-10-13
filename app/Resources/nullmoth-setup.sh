@@ -595,7 +595,16 @@ if [ -z "$USBMAP" ] && [ -z "$VERB" ] && [ -z "${SETLOGO:-}" ] && [ -z "${GPUTES
 step "Checking the driver package"
 [ -f "$PKG" ] || stop "package not found: $PKG"
 # the app's copy is writable by the user: hash and unpack a root-owned copy, so it cannot be swapped after the check
-PKGDIR=$(mktemp -d /var/tmp/nullmoth-pkg.XXXX) && cp "$PKG" "$PKGDIR/" || stop "could not copy the package for checking"
+PKGDIR=$(mktemp -d /var/tmp/nullmoth-pkg.XXXX) || stop "could not make a folder to check the package in"
+if ! cperr=$(cp "$PKG" "$PKGDIR/" 2>&1); then
+  # nine 1.13-1.15 uploads: the app (and its package) sat on an external drive and macOS's privacy protection for
+  # removable volumes refused the read ("Operation not permitted"); the stop said "checksum does not match, download it
+  # again", which could never help
+  case "$cperr" in *"Operation not permitted"*)
+    stop "macOS did not let the installer read the driver package on $(df "$PKG" 2>/dev/null | awk 'NR==2{print $NF}') (privacy protection for external drives). Move the 1401 app to the Applications folder on this Mac and try again" ;;
+  esac
+  stop "could not copy the package for checking: $cperr"
+fi
 PKG=$PKGDIR/$(basename "$PKG")
 got=$(shasum -a 256 "$PKG" | awk '{print $1}')
 [ "$got" = "$SHA" ] || stop "package checksum $got does not match $SHA - download it again"
