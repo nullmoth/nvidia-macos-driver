@@ -7,7 +7,7 @@ Supported cards are Turing and newer: GTX 16, RTX 20, 30, 40 and 50, TITAN RTX, 
 testing is done on an RTX 5060, so other cards may have problems that haven't been found yet. See
 [card support](docs/CARD-SUPPORT.md) for what has been reported working.
 
-- Latest release: [1.15.0](docs/releases/RELEASE-1.15.0.md) ([all releases](docs/releases))
+- Changes: [CHANGELOG.md](CHANGELOG.md), downloads on the [releases page](https://github.com/nullmoth/nvidia-macos-driver/releases)
 - Problems: [troubleshooting](docs/TROUBLESHOOTING.md), then Send logs from the 1401 app
 - Installing macOS from Windows: [1401](https://github.com/nullmoth/1401)
 - How it works: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)
