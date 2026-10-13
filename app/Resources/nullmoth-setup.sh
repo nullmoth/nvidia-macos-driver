@@ -201,6 +201,42 @@ if [ -n "$COLLECT" ]; then
       echo; echo "== driver kernel messages during the sample"; tail -c 200000 "$COLLECT/.flicker-kmsg"; rm -f "$COLLECT/.flicker-kmsg"
     } > "$COLLECT/display-flicker-sample.txt" 2>&1
   fi
+  # Plain file copies first: the collection is stopped at 360 s and the log queries below can use most of it. 72 1.15
+  # uploads hit that limit and arrived without the panics, crash reports, EFI configs and the previous boot, which
+  # were collected last.
+  n=0; collection_errors=0
+  collect_recent_logs macos 3 /Library/Logs/DiagnosticReports/*.panic /Library/Logs/DiagnosticReports/Retired/*.panic
+  # the display tracker (every boot, from the first second): current and previous file, newest 3 MB of each
+  for f in trace.txt trace.txt.1 kernel.txt kernel.txt.1 ws.txt ws.txt.1; do
+    [ -f "/Library/NullMoth/display-trace/$f" ] && tail -c 3145728 "/Library/NullMoth/display-trace/$f" > "$COLLECT/display-$f"
+  done
+  # WindowServer can fail outside a driver frame. Include the complete recent reports
+  # during an explicit Send logs request; automatic crash notifications stay selective.
+  collect_recent_logs macos 3 /Library/Logs/DiagnosticReports/WindowServer*.ips /Library/Logs/DiagnosticReports/Retired/WindowServer*.ips
+  collect_recent_logs macos 1 /Library/Logs/DiagnosticReports/firefox*.ips /Library/Logs/DiagnosticReports/Firefox*.ips /Library/Logs/DiagnosticReports/Retired/firefox*.ips /Library/Logs/DiagnosticReports/Retired/Firefox*.ips
+  collect_recent_logs macos 1 /Library/Logs/DiagnosticReports/plugin-container*.ips /Library/Logs/DiagnosticReports/Retired/plugin-container*.ips
+  collect_recent_logs macos 1 /Library/Logs/DiagnosticReports/Blender*.ips /Library/Logs/DiagnosticReports/Retired/Blender*.ips
+  for d in $(diskutil list | awk '/ EFI | DOS_FAT_32 | Windows_FAT_32 | Microsoft Basic Data /{print $NF}' | grep -E '^disk[0-9]+s[0-9]+$'); do
+    mount_efi "$d" || continue; mp=$MOUNT_POINT
+    collect_recent_logs "$d" 3 "$mp"/opencore-*.txt
+    collect_recent_logs "$d" 5 "$mp"/panic-*.txt
+    # The EFI itself: most machines that fail run their own OpenCore config, and without it every fix was a
+    # guess from symptoms. The config goes up with the machine's identity removed (serial, board serial, UUID, ROM),
+    # plus the list of kexts, drivers and ACPI files beside it, so the working and the broken EFIs can be compared.
+    # The live config and its two newest backups only: every install leaves a backup, and 35 of them on one test machine
+    # filled the report's 48 file slots before the panics, crash reports and GPU logs were reached.
+    cfs=("$mp"/EFI/OC/config.plist)   # a volume name can hold spaces ("NO NAME"): read paths line by line, never split them
+    while IFS= read -r cf; do cfs+=("$cf"); done < <(ls -t "$mp"/EFI/OC/config.plist.nullmoth-* 2>/dev/null | head -n 2)
+    for cf in "${cfs[@]}"; do
+      [ -f "$cf" ] || continue
+      out="$COLLECT/$d-efi-$(basename "$cf").txt"
+      cp "$cf" "$out.plist" || { collection_errors=$((collection_errors+1)); continue; }
+      for k in SystemSerialNumber MLB SystemUUID ROM; do plutil -remove "PlatformInfo.Generic.$k" "$out.plist" >/dev/null 2>&1; done
+      plutil -convert xml1 -o "$out" "$out.plist" 2>/dev/null || mv "$out.plist" "$out"; rm -f "$out.plist"
+      n=$((n+1))
+    done
+    [ -d "$mp/EFI/OC" ] && { echo "== $d EFI/OC"; (cd "$mp/EFI/OC" && ls -1 Kexts Drivers ACPI Tools 2>/dev/null; ls -la OpenCore.efi 2>/dev/null); } >> "$COLLECT/$d-efi-files.txt"
+  done
   for f in "$ST"/*.log "$ST/state"; do [ -f "$f" ] && cp "$f" "$COLLECT/driver-$(basename "$f").txt"; done
   { echo "macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion))   model $(sysctl -n hw.model)"
     echo "boot-args: $(nvram boot-args 2>/dev/null | cut -f2-)"; echo "SIP: $(csrutil status 2>/dev/null)"
@@ -250,6 +286,20 @@ if [ -n "$COLLECT" ]; then
       --predicate 'process == "kernel" AND (eventMessage CONTAINS "NVRM-fb" OR eventMessage CONTAINS "nvkms")' 2>&1 \
       | grep -v -e 'kapi event type 5$' -e 'flipToMemory #' | head -n 4000
   } > "$COLLECT/driver-display.txt" 2>&1
+  # A boot that hung or went black never writes a panic: its kernel messages are only in the log store. Users could not
+  # send them (10-10 chat: "the logs from the kernel don't get saved to a file"), so keep the whole kernel log of the boots
+  # before this one, up to this boot's start: the tail is how the last failed boot ended.
+  { boot=$(sysctl -n kern.boottime | sed -E 's/.*sec = ([0-9]+),.*/\1/')
+    echo "== kernel messages before this boot (started $(date -r "$boot" '+%Y-%m-%d %H:%M:%S'))"
+    lshow 45 --start "$(date -r $((boot - 43200)) '+%Y-%m-%d %H:%M:%S')" --end "$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')" \
+      --style compact --predicate 'process == "kernel"' 2>&1 \
+      | grep -v -e 'NVRM-fb: kapi event type 5$' -e 'NVRM-xnu: >os_map_kernel_space' -e 'NVRM-fb: flipToMemory #' \
+      | awk -v end="$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')" '
+          # log show runs past --end (measured 10-10: this file ended in the current boot), so cut at the boot time here;
+          # a line without a timestamp belongs to the line above it
+          /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] / { keep = ($1 " " substr($2, 1, 8)) < end }
+          keep' | tail -n 8000
+  } > "$COLLECT/previous-boot-kernel-log.txt" 2>&1
   # Every GPU and the processor, whatever the vendor and age, supported by NullMoth or not (requested broad hardware coverage). The sections above only name NVIDIA; Intel iGPUs (HD to Xe and Arc), Radeon cards and Ryzen iGPUs
   # need the same facts: what macOS bound to them, whether Metal sees them, and what the boot loader injected.
   { echo "== every display device (any vendor)"
@@ -406,53 +456,6 @@ if [ -n "$COLLECT" ]; then
       echo "log show exit: ${PIPESTATUS[0]}"
     done
   } > "$COLLECT/driver-crash-window.txt" 2>&1
-  n=0; collection_errors=0
-  collect_recent_logs macos 3 /Library/Logs/DiagnosticReports/*.panic /Library/Logs/DiagnosticReports/Retired/*.panic
-  # the display tracker (every boot, from the first second): current and previous file, newest 3 MB of each
-  for f in trace.txt trace.txt.1 kernel.txt kernel.txt.1 ws.txt ws.txt.1; do
-    [ -f "/Library/NullMoth/display-trace/$f" ] && tail -c 3145728 "/Library/NullMoth/display-trace/$f" > "$COLLECT/display-$f"
-  done
-  # A boot that hung or went black never writes a panic: its kernel messages are only in the log store. Users could not
-  # send them (10-10 chat: "the logs from the kernel don't get saved to a file"), so keep the whole kernel log of the boots
-  # before this one, up to this boot's start: the tail is how the last failed boot ended.
-  { boot=$(sysctl -n kern.boottime | sed -E 's/.*sec = ([0-9]+),.*/\1/')
-    echo "== kernel messages before this boot (started $(date -r "$boot" '+%Y-%m-%d %H:%M:%S'))"
-    lshow 45 --start "$(date -r $((boot - 43200)) '+%Y-%m-%d %H:%M:%S')" --end "$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')" \
-      --style compact --predicate 'process == "kernel"' 2>&1 \
-      | grep -v -e 'NVRM-fb: kapi event type 5$' -e 'NVRM-xnu: >os_map_kernel_space' -e 'NVRM-fb: flipToMemory #' \
-      | awk -v end="$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')" '
-          # log show runs past --end (measured 10-10: this file ended in the current boot), so cut at the boot time here;
-          # a line without a timestamp belongs to the line above it
-          /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] / { keep = ($1 " " substr($2, 1, 8)) < end }
-          keep' | tail -n 8000
-  } > "$COLLECT/previous-boot-kernel-log.txt" 2>&1
-  # WindowServer can fail outside a driver frame. Include the complete recent reports
-  # during an explicit Send logs request; automatic crash notifications stay selective.
-  collect_recent_logs macos 3 /Library/Logs/DiagnosticReports/WindowServer*.ips /Library/Logs/DiagnosticReports/Retired/WindowServer*.ips
-  collect_recent_logs macos 1 /Library/Logs/DiagnosticReports/firefox*.ips /Library/Logs/DiagnosticReports/Firefox*.ips /Library/Logs/DiagnosticReports/Retired/firefox*.ips /Library/Logs/DiagnosticReports/Retired/Firefox*.ips
-  collect_recent_logs macos 1 /Library/Logs/DiagnosticReports/plugin-container*.ips /Library/Logs/DiagnosticReports/Retired/plugin-container*.ips
-  collect_recent_logs macos 1 /Library/Logs/DiagnosticReports/Blender*.ips /Library/Logs/DiagnosticReports/Retired/Blender*.ips
-  for d in $(diskutil list | awk '/ EFI | DOS_FAT_32 | Windows_FAT_32 | Microsoft Basic Data /{print $NF}' | grep -E '^disk[0-9]+s[0-9]+$'); do
-    mount_efi "$d" || continue; mp=$MOUNT_POINT
-    collect_recent_logs "$d" 3 "$mp"/opencore-*.txt
-    collect_recent_logs "$d" 5 "$mp"/panic-*.txt
-    # The EFI itself: most machines that fail run their own OpenCore config, and without it every fix was a
-    # guess from symptoms. The config goes up with the machine's identity removed (serial, board serial, UUID, ROM),
-    # plus the list of kexts, drivers and ACPI files beside it, so the working and the broken EFIs can be compared.
-    # The live config and its two newest backups only: every install leaves a backup, and 35 of them on one test machine
-    # filled the report's 48 file slots before the panics, crash reports and GPU logs were reached.
-    cfs=("$mp"/EFI/OC/config.plist)   # a volume name can hold spaces ("NO NAME"): read paths line by line, never split them
-    while IFS= read -r cf; do cfs+=("$cf"); done < <(ls -t "$mp"/EFI/OC/config.plist.nullmoth-* 2>/dev/null | head -n 2)
-    for cf in "${cfs[@]}"; do
-      [ -f "$cf" ] || continue
-      out="$COLLECT/$d-efi-$(basename "$cf").txt"
-      cp "$cf" "$out.plist" || { collection_errors=$((collection_errors+1)); continue; }
-      for k in SystemSerialNumber MLB SystemUUID ROM; do plutil -remove "PlatformInfo.Generic.$k" "$out.plist" >/dev/null 2>&1; done
-      plutil -convert xml1 -o "$out" "$out.plist" 2>/dev/null || mv "$out.plist" "$out"; rm -f "$out.plist"
-      n=$((n+1))
-    done
-    [ -d "$mp/EFI/OC" ] && { echo "== $d EFI/OC"; (cd "$mp/EFI/OC" && ls -1 Kexts Drivers ACPI Tools 2>/dev/null; ls -la OpenCore.efi 2>/dev/null); } >> "$COLLECT/$d-efi-files.txt"
-  done
   { echo; echo "== NullMoth NVRAM flags (a remove flag that survives every boot removes the driver at login)"
     nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove 2>&1; } >> "$COLLECT/driver-state.txt"
   chmod -R a+rX "$COLLECT"; ok "collected driver state and $n diagnostic log(s)"; cleanup
