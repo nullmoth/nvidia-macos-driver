@@ -767,8 +767,9 @@ if [ -n "${SETLOGO:-}" ]; then
   BKC="$C.nullmoth-logo-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C"
   LOGOSRC="$(dirname "${TOOL:-/nonexistent}")/$LOGO_FILE"; li=$(logo_index); fail=0
   if [ "$SETLOGO" = on ]; then
+    # also when an entry exists: enabling it without the file left OpenCore pointing at a driver that was not there
+    [ -f "$LOGOSRC" ] || stop "this copy of the app has no boot logo file"
     if [ -z "$li" ]; then
-      [ -f "$LOGOSRC" ] || stop "this copy of the app has no boot logo file"
       has UEFI.Drivers || plutil -insert UEFI.Drivers -array "$C" || fail=1
       hv=""; plutil -extract UEFI.Drivers.0.HideVerbose raw -o - "$C" >/dev/null 2>&1 && hv=',"HideVerbose":false'
       plutil -insert UEFI.Drivers -json "{\"Arguments\":\"\",\"Comment\":\"NullMoth boot logo\",\"Enabled\":true,\"LoadEarly\":false,\"Path\":\"$LOGO_FILE\"$hv}" -append "$C" || fail=1
@@ -1208,6 +1209,10 @@ if [ "$LOGO" != off ] && [ -f "$LOGOSRC" ]; then
   fi
 elif [ "$LOGO" = off ] && [ -n "$li" ] && [ "$(get UEFI.Drivers.$li.Enabled)" = true ]; then
   echo "CHANGE boot logo: turn the NullMoth boot logo off (the Apple logo shows again)"; EDITS+=("UEFI.Drivers.$li.Enabled|-bool|false")
+elif [ -n "$li" ] && [ "$(get UEFI.Drivers.$li.Enabled)" = true ] && [ ! -f "$(dirname "$C")/Drivers/$LOGO_FILE" ]; then
+  # two OpenCore logs (1.14.3, 1.15) end at "NullMothLogo.efi at 3 cannot be found!": an enabled entry whose file was
+  # never copied to this EFI, and this app has no file to put there
+  echo "CHANGE boot logo: turn the NullMoth boot logo off (its driver file is missing from this EFI)"; EDITS+=("UEFI.Drivers.$li.Enabled|-bool|false")
 fi
 [ ${#EDITS[@]} = 0 ] && [ ${#DELADD[@]} = 0 ] && [ $NEEDTOOL = 0 ] && [ $NEEDONCE = 0 ] && [ $NEEDLOGO = 0 ] && [ $NEEDBLOCK = 0 ] && [ $NEEDAMFIPASS = 0 ] && ok "OpenCore already has every setting the driver needs"
 
