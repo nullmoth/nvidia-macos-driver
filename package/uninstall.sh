@@ -34,6 +34,13 @@ trap 'die "uninstaller interrupted (signal HUP)"' HUP
 trap 'die "uninstaller interrupted (signal INT)"' INT
 trap 'die "uninstaller interrupted (signal TERM)"' TERM
 [ "$(id -u)" -eq 0 ] || die "run with sudo"
+# SIP's filesystem protection makes the driver's files and the kernel collection read-only even for root: removal then
+# failed half-way ("Operation not permitted" on every bundle, then kmutil). The driver cannot load in that state either,
+# so stop before anything is touched and say how to get out of it.
+SIPS=$(csrutil status 2>/dev/null)
+if printf '%s\n' "$SIPS" | grep -q 'status: enabled\.' || printf '%s\n' "$SIPS" | grep -q 'Filesystem Protections: enabled'; then
+  die "System Integrity Protection is on, so macOS will not let the driver be removed (and the driver cannot load while it is on). Restart once so OpenCore applies its SIP setting again, then remove the driver again. Nothing was changed."
+fi
 BK=${1:-}
 [ -z "$BK" ] || [ -d "$BK" ] || die "no backup at $BK"
 BUILD=$(sw_vers -buildVersion)
