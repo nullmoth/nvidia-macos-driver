@@ -265,8 +265,24 @@ func failurePart(_ u: URL) -> String {
             var parts: [String] = []
             if let ex = j["exception"] { parts.append("exception: \(ex)") }
             if let te = j["termination"] { parts.append("termination: \(te)") }
+            // Which memory the bad address fell in (a surface, a staging buffer, freed heap) and which plugin build
+            // was loaded: the header names the package installed now, which may not be the one that crashed.
+            if let vm = j["vmRegionInfo"] as? String { parts.append("vm region: \(vm.prefix(600))") }
+            if let imgs = j["usedImages"] as? [[String: Any]] {
+                for im in imgs where ["NVMTLDriver", "libvulkan_nouveau.dylib", "libnvmtl_translate.dylib"].contains(im["name"] as? String ?? "") {
+                    parts.append("loaded \(im["name"] as? String ?? "?") uuid \(im["uuid"] as? String ?? "?")")
+                }
+            }
             if let fi = j["faultingThread"] as? Int, let th = j["threads"] as? [[String: Any]], fi < th.count,
                let fr = th[fi]["frames"] as? [[String: Any]], let imgs = j["usedImages"] as? [[String: Any]] {
+                if let ts = th[fi]["threadState"] as? [String: Any] {
+                    let names = ["rip", "rdi", "rsi", "rdx", "rcx", "rax", "rbx", "r8", "r9", "cr2", "x0", "x1", "x2", "x3", "pc", "far"]
+                    let regs = names.compactMap { n -> String? in
+                        guard let v = (ts[n] as? [String: Any])?["value"] as? NSNumber else { return nil }
+                        return "\(n)=0x" + String(v.uint64Value, radix: 16)
+                    }
+                    if !regs.isEmpty { parts.append("registers: " + regs.joined(separator: " ")) }
+                }
                 parts.append("crashed thread \(fi):")
                 for (i, f) in fr.prefix(40).enumerated() {
                     let ii = f["imageIndex"] as? Int ?? -1
