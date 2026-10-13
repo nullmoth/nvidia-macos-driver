@@ -634,6 +634,9 @@ else
         mount_efi "$d" || continue; mp=$MOUNT_POINT
         for c in "$mp/EFI/OC/config.plist" "$mp/EFI/BOOT/config.plist"; do
           [ -e "$c" ] && ! head -c 1 "$c" >/dev/null 2>&1 && { denied="$denied $d"; break; }; done; done
+      # six of the 10-12 reports: OpenCore's boot path was a USB device (the 1401 stick) that was no longer connected
+      nvram 4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:boot-path 2>/dev/null | grep -q 'USB(' && [ -z "$denied" ] && \
+        stop "this Mac started OpenCore from a USB stick that is not connected now - plug that stick back in (the one you start the Mac from), then try again"
       [ -n "$denied" ] && stop "macOS is not letting 1401 read the OpenCore config on$denied. Open System Settings > Privacy & Security > Files & Folders, turn on Removable Volumes for 1401 (or add 1401 under Full Disk Access), then try again"
       stop "no OpenCore config for this Mac ($(sysctl -n hw.model)) on any connected disk - plug in the disk or USB stick OpenCore started from, then try again (the NOTE lines above show what each partition holds)"
     fi
