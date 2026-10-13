@@ -23,6 +23,7 @@ release_install_lock() {
       echo "   NOTE: installer guard identity changed; its current path is retained for review." >&2
       return
     fi
+    rm -f "$LOCKDIR/owner" "$LOCKDIR/installing"
     rmdir "$LOCKDIR" || echo "   NOTE: installer lock could not be released; review it before another install." >&2
     LOCK_HELD=0
   elif [ "$LOCK_HELD" = 1 ]; then
@@ -51,11 +52,39 @@ rollback_install() {
   return "$failed"
 }
 step() { echo; echo "== $*"; }; ok() { echo "   ok  $*"; }
+boot_sec() { sysctl -n kern.boottime 2>/dev/null | sed -E 's/.*sec = ([0-9]+),.*/\1/'; }
+# A guard left by an install that was killed outright (power loss, a forced quit, a restart mid-install) stopped every
+# later install with "installer guard already exists" until someone removed it by hand (3 reports and chat, 10-12).
+# The guard now records its owner (pid, boot) and, once files start changing, the backup it can be restored from.
+# A guard whose owner is gone is recovered: rolled back from that backup if it had started changing files, then cleared.
+# A live install, or one whose own restore failed (restore-incomplete), still stops.
+recover_stale_guard() {
+  local g=$LOCKDIR o=$LOCKDIR/owner pid="" boot="" bk=""
+  [ -d "$g" ] && [ ! -L "$g" ] && [ "$(stat -f '%u' "$g" 2>/dev/null)" = 0 ] || return 0
+  [ ! -e "$g/restore-incomplete" ] || die "the last install could not restore the previous driver (its backup is kept in /Library/NullMoth); use Remove NVIDIA driver, then install again, or send logs (no driver changes made)"
+  if [ -f "$o" ] && [ ! -L "$o" ]; then
+    pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$o" | head -1); boot=$(sed -n 's/^boot=\([0-9][0-9]*\)$/\1/p' "$o" | head -1)
+    bk=$(sed -n 's/^bk=\(.*\)$/\1/p' "$o" | head -1)
+    if [ -n "$pid" ] && [ "$boot" = "$(boot_sec)" ] && kill -0 "$pid" 2>/dev/null; then return 0; fi
+  else
+    # a guard from 1.14.7 or earlier has no owner record: an install cannot outlive a restart, so one older than this boot is stale
+    [ "$(stat -f '%m' "$g" 2>/dev/null || echo 0)" -lt "$(boot_sec)" ] || return 0
+  fi
+  echo "   NOTE: an earlier install was interrupted and left its guard behind; recovering it"
+  if [ -e "$g/installing" ]; then
+    case "$bk" in /Library/NullMoth/backup-*) ;; *) die "an interrupted install had changed driver files and its backup is not recorded; use Remove NVIDIA driver, then install again (no driver changes made)";; esac
+    [ -d "$bk" ] && [ ! -L "$bk" ] || die "the interrupted install's backup $bk is missing; use Remove NVIDIA driver, then install again (no driver changes made)"
+    BK=$bk
+    if ! rollback_install; then : > "$g/restore-incomplete"; die "restoring the interrupted install failed; its backup is kept at $bk"; fi
+    echo "   ok  the interrupted install was rolled back from $bk"; BK=""
+  fi
+  rm -f "$o" "$g/installing"; rmdir "$g" 2>/dev/null || die "could not clear the interrupted install's guard"
+}
 die() {
   echo "   STOP: $*" >&2
   if [ "$INSTALLING" = 1 ]; then
     if rollback_install; then echo "   Previous installation restored; backup retained at $BK." >&2
-    else LOCK_RELEASE_OK=0; echo "   Restore incomplete; recovery files remain at $BK." >&2; fi
+    else LOCK_RELEASE_OK=0; : > "$LOCKDIR/restore-incomplete" 2>/dev/null; echo "   Restore incomplete; recovery files remain at $BK." >&2; fi
   fi
   exit 1
 }
@@ -148,8 +177,12 @@ if [ "${CHECK:-0}" != 1 ]; then
     mkdir -m 755 /Library/NullMoth || die "create installer state directory"
   fi
   require_install_directory /Library/NullMoth
-  mkdir -m 700 "$LOCKDIR" 2>/dev/null || die "installer guard already exists; another install is active or an interrupted guard needs review (no driver changes made)"
+  if ! mkdir -m 700 "$LOCKDIR" 2>/dev/null; then
+    recover_stale_guard
+    mkdir -m 700 "$LOCKDIR" 2>/dev/null || die "installer guard already exists; another install is active right now (no driver changes made)"
+  fi
   LOCK_HELD=1
+  printf 'pid=%s\nboot=%s\n' "$$" "$(boot_sec)" > "$LOCKDIR/owner" || die "cannot record the installer guard's owner"
   LOCK_ID=$(stat -f '%d:%i' "$LOCKDIR" 2>/dev/null) || die "cannot record installer guard identity"
   printf '%s\n' "$LOCK_ID" | grep -Eq '^[0-9]+:[0-9]+$' || die "installer guard identity is unavailable"
 fi
@@ -168,6 +201,7 @@ ok "test collection holds all four kexts"
 [ "${CHECK:-0}" = 1 ] && { rm -rf "$T"; echo; echo "CHECK PASS (nothing changed)"; exit 0; }
 
 BK=$(mktemp -d "/Library/NullMoth/backup-$(date +%Y%m%d-%H%M%S).XXXXXX") && [ -n "$BK" ] && [ -d "$BK" ] || die "create unique backup directory"
+[ "${CHECK:-0}" = 1 ] || printf 'bk=%s\n' "$BK" >> "$LOCKDIR/owner" || die "cannot record the backup in the installer guard"
 step "4. back up what is there now -> $BK"
 printf '%s\n' "$BUILD" > "$BK/macos-build" || die "record backup macOS build"
 # ditto, not cp -Rp: cp re-applies file flags through symlinks and stopped on nvmtl/libvulkan.dylib with "chflags: Too
@@ -181,7 +215,7 @@ for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do [ ! -e
 ok "backup written"
 
 step "5. install"
-INSTALLING=1
+INSTALLING=1; [ "${CHECK:-0}" = 1 ] || : > "$LOCKDIR/installing"
 for k in $KEXTS; do rm -rf "$EXT/$k.kext" && ditto "$(kpath $k)" "$EXT/$k.kext" || die "copy $k (restore from $BK)"; done
 # both NVAccel builds stay on disk, so the first start after a macOS upgrade can switch to the matching one
 mkdir -p /Library/NullMoth && rm -rf /Library/NullMoth/kexts && ditto "$HERE/Library/NullMoth/kexts" /Library/NullMoth/kexts || die "copy per-macOS accelerators (restore from $BK)"
