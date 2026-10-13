@@ -149,6 +149,12 @@ lshow() {  # <seconds> <log show arguments...>
   kill "$w" 2>/dev/null; wait "$w" 2>/dev/null
   return $rc
 }
+# Keeps the first $1 and the last $2 lines of its input, with a marker between: a boot's start (where a GPU driver
+# says whether it started) and its end (what the user saw last). WAS a plain tail: on an RX 7900 XTX + RTX 2060 machine
+# (10-12) per-allocation lines filled the 512 KB upload, and the test driver's start-up lines were gone.
+headtail() { awk -v h="$1" -v t="$2" 'NR <= h { print; next } { r[NR % t] = $0 }
+  END { if (NR > h) { s = (NR - t > h) ? NR - t + 1 : h + 1; if (s > h + 1) printf "... %d lines left out ...\n", s - h - 1
+        for (i = s; i <= NR; i++) print r[i % t] } }'; }
 # Copy newest files without splitting volume or file names at whitespace.
 collect_recent_logs() {
   local prefix=$1 limit=$2 f i; shift 2
@@ -228,7 +234,8 @@ if [ -n "$COLLECT" ]; then
   boot=$(sysctl -n kern.boottime | sed -E 's/.*sec = ([0-9]+),.*/\1/')
   lshow 45 --start "$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')" --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "nvrm" OR eventMessage CONTAINS[c] "nvaccel" OR eventMessage CONTAINS[c] "nvidia" OR eventMessage CONTAINS[c] "nullmoth" OR eventMessage CONTAINS[c] "gsp" OR eventMessage CONTAINS[c] "nmx" OR eventMessage CONTAINS[c] "amdgpu" OR eventMessage CONTAINS[c] "i915" OR eventMessage CONTAINS "[drm]" OR eventMessage CONTAINS "xe " OR sender == "NMXGPU" OR sender == "NMXAccel" OR sender == "NMXNPU" OR sender == "NMIntelFB")' 2>&1 \
     | grep -v -e 'NVRM-fb: kapi event type 5$' -e 'NVRM-xnu: >os_map_kernel_space' -e 'NVRM-fb: flipToMemory #' \
-    | tail -n 6000 > "$COLLECT/driver-kernel-log.txt"
+             -e 'NVAccel: newVidMemory -> ' -e 'NVVidMemory::allocPhysical(.*bytes of REAL VRAM' \
+    | headtail 1500 1500 > "$COLLECT/driver-kernel-log.txt"
   log_status=${PIPESTATUS[0]}; echo "log show exit: $log_status" >> "$COLLECT/driver-kernel-log.txt"
   # 1.9.0 report (10-10, 2K 165 Hz monitor stuck at 1080p 60 Hz): the 6000-line tail above was all os_map_kernel_space
   # and flipToMemory lines, so the boot-time mode list, the EDID and why each mode was or was not offered were gone.
@@ -266,7 +273,7 @@ if [ -n "$COLLECT" ]; then
       --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "igfx" OR eventMessage CONTAINS[c] "IntelAccel" OR eventMessage CONTAINS[c] "AppleIntel" OR eventMessage CONTAINS[c] "AMDRadeon" OR eventMessage CONTAINS[c] "ATIController" OR eventMessage CONTAINS[c] "AMDFramebuffer" OR eventMessage CONTAINS[c] "NMIntelFB" OR eventMessage CONTAINS[c] "WhateverGreen" OR eventMessage CONTAINS[c] "IOAccel")' 2>&1 | head -n 3000
   } > "$COLLECT/gpu-all.txt" 2>&1
   # The current kernel message ring can retain early GSP/BAR failures absent from the log store.
-  { echo; echo "== current kernel message ring"; dmesg 2>&1 | grep -iE 'nvrm|nvaccel|nvidia|nullmoth|gsp|nmx|amdgpu|i915|\[drm\]' | tail -n 2000; } >> "$COLLECT/driver-kernel-log.txt"
+  { echo; echo "== current kernel message ring"; dmesg 2>&1 | grep -iE 'nvrm|nvaccel|nvidia|nullmoth|gsp|nmx|amdgpu|i915|\[drm\]' | grep -v -e 'newVidMemory -> ' -e 'bytes of REAL VRAM' | headtail 300 300; } >> "$COLLECT/driver-kernel-log.txt"
   # Keep update/snapshot context separate so APFS traffic cannot crowd out GPU errors.
   lshow 20 --last 1d --style compact --predicate '(process == "kernel" AND eventMessage CONTAINS[c] "apfs") OR process == "MobileSoftwareUpdate" OR process == "softwareupdated"' 2>&1 \
     | tail -n 2000 > "$COLLECT/driver-update-log.txt"
