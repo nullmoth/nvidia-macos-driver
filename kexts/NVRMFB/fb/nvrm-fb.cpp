@@ -51,10 +51,13 @@ extern "C" {
 
 // Surfaces may use half of a resizable BAR1 (>= 4 GB) and three quarters of a smaller one. WAS: a fixed 192 MB below
 // 4 GB, which is 3/4 of the 256 MB firmware window but left a 512 MB or 1 GB BAR1 no better off (issue #27).
+// A BAR1 under 256 MB (64 MB on some RTX 2060 boards) gets three quarters of itself too: the 192 MB floor promised
+// three times the window, so allocations failed inside mapMemory instead of being budgeted. Unknown (0) keeps 192 MB.
 static inline uint64_t nvrmVramBudget(uint64_t barLen)
 {
     if (barLen >= (4ull << 30)) return barLen / 2;
     uint64_t b = barLen / 4 * 3;
+    if (barLen && barLen < (256ull << 20)) return b;
     return b > NVRM_VRAM_BAR1_BUDGET ? b : NVRM_VRAM_BAR1_BUDGET;
 }
 
@@ -1724,13 +1727,17 @@ static void nvrmDiscoverBar1(IOService *provider, NvU64 *length, NvU64 *base)
     *length = 0; *base = 0;
     for (IOService *nub = provider; nub; nub = nub->getProvider()) {
         if (!nub->metaCast("IOPCIDevice")) continue;
+        // BAR1 is the largest range after BAR0 (the registers). WAS: the first range of at least 256 MB, so a 64 or
+        // 128 MB BAR1 read as 0 and got the budget and park ceiling of an unknown window.
         const IOItemCount count = nub->getDeviceMemoryCount();
-        for (IOItemCount i = 0; i < count; i++) {
+        IOMemoryDescriptor *best = nullptr;
+        for (IOItemCount i = 1; i < count; i++) {
             IOMemoryDescriptor *memory = nub->getDeviceMemoryWithIndex(i);
-            if (!memory || memory->getLength() < 0x10000000ull) continue;
-            *length = memory->getLength();
-            *base = memory->getPhysicalSegment(0, 0, kIOMemoryMapperNone);
-            return;
+            if (memory && memory->getLength() >= (32ull << 20) && (!best || memory->getLength() > best->getLength())) best = memory;
+        }
+        if (best) {
+            *length = best->getLength();
+            *base = best->getPhysicalSegment(0, 0, kIOMemoryMapperNone);
         }
         return;
     }
@@ -2363,6 +2370,7 @@ static volatile SInt64 gVramMappedBytes = 0;
 // 32 MB still covers a 2560x1440 console (25 MB, issue #28). Larger BAR1s keep 64 MB, enough for a 5K console.
 static inline SInt64 nvrmParkCeiling(NvU64 barLen)
 {
+    if (barLen && barLen < (256ull << 20)) return (SInt64)(barLen / 4);   // 64 MB BAR1: 16 MB, not half the window
     return (SInt64)(barLen && barLen < (1ull << 30) ? 32ull * 1024ull * 1024ull : NVRM_VRAM_PARK_CEILING);
 }
 static struct { struct NvKmsKapiMemory *m; void *k; NvU64 n; } gParkedForever[64];
@@ -2471,7 +2479,15 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
         NvU64 p = fPhysForVa ? fPhysForVa(k) : 0;
         bool onScanout = p && fPhys  && fSize     && p < (fPhys + fSize)         && (p + want) > fPhys;
         bool onConsole = p && fConsPhys && fConsSize && p < (fConsPhys + fConsSize) && (p + want) > fConsPhys;
-        if (!p || onScanout || onConsole) {
+        if (!p) {
+            // No physical address means RM's mapping table could not record this mapping. Parking it would hold one
+            // more mapping per attempt and the next attempt fails the same way: release it and refuse this request.
+            FBLOG("nvAllocVram(%llu): attempt %d has no physical address — released, request refused (RM mapping table full?)",
+                  (unsigned long long)want, attempt);
+            fKms->unmapMemory(fDev, m, NVKMS_KAPI_MAPPING_TYPE_KERNEL, k); fKms->freeMemory(fDev, m);
+            break;
+        }
+        if (onScanout || onConsole) {
             FBLOG("nvAllocVram: attempt %d phys 0x%llx %s — parking it and rolling again",
                   attempt, (unsigned long long)p,
                   !p ? "has no physical address" : onScanout ? "OVERLAPS THE SCANOUT" : "OVERLAPS THE CONSOLE");
