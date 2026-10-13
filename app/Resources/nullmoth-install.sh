@@ -329,7 +329,7 @@ step "6. boot-args"
 # again means the driver is wanted, so the flag goes; the boot picker sets it again when it is chosen.
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove 2>/dev/null || true
 ba=$(nvram boot-args 2>/dev/null | cut -f2-)
-for a in nvfb=1 nvaccel=1; do case " $ba " in *" $a "*) ;; *) echo "   NOTE: boot-args lack '$a' — add it in your OpenCore config.plist (see README)";; esac; done
+for a in nvfb=1 nvaccel=1; do case " $ba " in *" $a "*) ;; *) echo "   NOTE: boot-args lack '$a' — add it in your OpenCore config.plist (README: Install — by hand), or let the 1401 Mac app set OpenCore up";; esac; done
 
 echo; echo "Done. Reboot now: sudo shutdown -r now"
 echo "If macOS asks, allow the extensions in System Settings > Privacy & Security, then reboot once more."

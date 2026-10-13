@@ -42,7 +42,16 @@ Metal app ─► NVMTLDriver.bundle ─► translator (Apple AIR → SPIR-V) ─
 The kernel side runs NVIDIA's own open GPU kernel modules (r610) under macOS. NVRMFB is the display framebuffer,
 NVAccel the accelerator WindowServer composites through, NVRMAGDC the display-policy shim.
 
-## Install — prebuilt (recommended)
+## Install — by hand
+
+Use the 1401 Mac app below unless you manage your OpenCore config yourself. `install.sh` installs the driver files but
+does not change OpenCore, and the driver does not start until OpenCore has these settings:
+
+- `boot-args` include `nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80
+  ipc_control_port_options=0`, and not `nv_disable=1` or `-wegnoegpu` (both hide the NVIDIA card)
+- `csr-active-config` includes the bits `0x0A43`
+- `Misc > Security > SecureBootModel` is `Disabled`
+- `Lilu.kext` and `AMFIPass.kext` are in `Kernel > Add` and enabled
 
 Download `nullmoth-nvidia-<version>.tar.gz` from **Releases**, then:
 
@@ -55,7 +64,7 @@ sudo shutdown -r now                 # a reboot is required: logout does not loa
 
 macOS asks you to **allow the extensions** in System Settings → Privacy & Security the first time. Allow, then reboot again.
 
-## 1401 Mac app (easiest)
+## 1401 Mac app (recommended)
 
 Download the latest `1401-Mac-<version>.dmg` from **Releases**, open it, and run **1401** (the driver package is inside the disk
 image, so nothing else to download). Follow its steps. A supported setup must use a verified or explicitly selected OpenCore partition. The app finds the OpenCore that started your Mac (in `EFI/OC` or `EFI/BOOT`, on an
