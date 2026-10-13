@@ -1,0 +1,34 @@
+# Outside pull requests must be written by their author (CONTRIBUTING.md, "No AI-written contributions").
+# Fails when the "I wrote this" box is not ticked; closes the pull request when its description or commits carry an
+# AI tool's own signature. Owners, members and collaborators are not checked.
+name: Contribution policy
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+permissions:
+  pull-requests: write
+  issues: write
+jobs:
+  policy:
+    if: ${{ !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7.0.1
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr.body || "";
+            const commits = await github.paginate(github.rest.pulls.listCommits,
+              { owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number });
+            const text = [body, ...commits.map(c => c.commit.message)].join("\n");
+            const signature = /(generated with \[?(claude|codex|copilot|chatgpt|cursor|gemini)|co-authored-by:[^\n]*(claude|codex|copilot|chatgpt|openai|anthropic|cursor|gemini)|as an ai language model)/i;
+            if (signature.test(text)) {
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: pr.number,
+                body: "Closed: this pull request carries an AI tool's signature. AI-written contributions are not reviewed here; see CONTRIBUTING.md." });
+              await github.rest.pulls.update({ owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number, state: "closed" });
+              core.setFailed("AI tool signature in the pull request");
+              return;
+            }
+            if (!/- \[[xX]\] I wrote this change and this description myself/.test(body)) {
+              core.setFailed("Tick the 'I wrote this change and this description myself' box in the pull request description (CONTRIBUTING.md).");
+            }
