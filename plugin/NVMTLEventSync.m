@@ -300,6 +300,28 @@ static void nvmtl_gsub_census(void) {
           (unsigned long long)s[1], (unsigned long long)s[2], (unsigned long long)s[3], (unsigned long long)s[4],
           (unsigned long long)s[5], (unsigned long long)s[6], (unsigned long long)s[7], (unsigned long long)s[8]);
 }
+// A buffer whose pages the driver could not import is a COPY of the caller's memory: it has to be refreshed before the
+// GPU reads it and written back after the GPU writes it. A texture made over such a buffer
+// (newTextureWithDescriptor:offset:bytesPerRow:, how an image decoder hands its pixels over) reads the same copy, so the
+// copy belongs to every submission that uses the texture, not only to those that bind the buffer itself. A texture is
+// written back only when the GPU can write it: copying a read-only view back would overwrite pixels the CPU wrote while
+// the work ran.
+static NSArray<NVMTLBuffer *> *nvmtl_host_copies(id resources, BOOL writtenOnly) {
+    NSMutableArray<NVMTLBuffer *> *out = nil;
+    for (id resource in resources) {
+        NVMTLBuffer *b = nil;
+        if ([resource isKindOfClass:[NVMTLBuffer class]]) b = resource;
+        else if ([resource isKindOfClass:[NVMTLTexture class]]) {
+            NVMTLTexture *t = resource;
+            if (writtenOnly && !(t->_usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget))) continue;
+            b = t->_backBuf ? t->_backBuf : (t->_parent ? t->_parent->_backBuf : nil);
+        }
+        if (!b || !b->_hostPtr) continue;
+        if (!out) out = [NSMutableArray new];
+        if (![out containsObject:b]) [out addObject:b];
+    }
+    return out;
+}
 - (BOOL)nvmtlSubmitAhead {
     if (_executionDone || _cbError || !_committed) return NO;
     if (_nextSubmit < _nextPart) _nextSubmit = _nextPart;
@@ -326,11 +348,10 @@ static void nvmtl_gsub_census(void) {
         {
             static int hold = -1;
             if (hold < 0) { const char *e = getenv("NVMTL_GSUB_HOSTPTR_LIFT"); hold = (e && *e && *e != '0') ? 0 : 1; }
-            if (hold) {
-                for (id resource in part->resources)
-                    if ([resource isKindOfClass:[NVMTLBuffer class]] && ((NVMTLBuffer *)resource)->_hostPtr) return NO;
-            }
+            if (hold && nvmtl_host_copies(part->resources, NO)) return NO;
         }
+        // Submitted ahead, the work starts now and the commit path below never sees these: refresh the copies first.
+        for (NVMTLBuffer *copy in nvmtl_host_copies(part->resources, NO)) nvmtl_buffer_sync_in(copy);
         nvmtl_inflight *f = nvmtl_vk_inflight_new();
         if (!f) return NO;
         [self nvmtlMarkScheduled];
@@ -401,8 +422,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
         if (part->inflight) result = nvmtl_gsub_finish(part);
         else if (part->aheadFailed) result = part->aheadFailed;
         else {
-            for (id resource in part->resources)
-                if ([resource isKindOfClass:[NVMTLBuffer class]]) nvmtl_buffer_sync_in(resource);
+            for (NVMTLBuffer *copy in nvmtl_host_copies(part->resources, NO)) nvmtl_buffer_sync_in(copy);
             result = nvmtl_vk_submit_wait(&part->commands);
         }
         if (result == -2) {
@@ -413,8 +433,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
         BOOL published = result == 0;
         if (published) {
             for (NVMTLTexture *texture in part->surfaces) if (![texture nvmtlSurfaceOut]) published = NO;
-            for (id resource in part->resources)
-                if ([resource isKindOfClass:[NVMTLBuffer class]]) nvmtl_buffer_sync_out(resource);
+            for (NVMTLBuffer *copy in nvmtl_host_copies(part->resources, YES)) nvmtl_buffer_sync_out(copy);
         }
         if (!published) {
             [self nvmtlFinishExecution:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
