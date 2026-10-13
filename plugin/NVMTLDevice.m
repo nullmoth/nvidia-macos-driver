@@ -293,13 +293,14 @@ static void nvmtl_nvenc_hevc_register(void)
               st ? "NOT registered" : "REGISTERED", me, (int)st, path);
     });
 }
-// Explicit diagnostic opt-in for ANGLE's NVIDIA Metal path. Default browser policy stays intact:
-// partial redraw corruption was reported on both Ampere and Blackwell after automatic enablement.
-// Preserve any existing override; no sandbox setting is changed.
+// ANGLE refuses Metal on NVIDIA (disableMetalOnNvidia), and Chromium on macOS has no other GL backend, so without this
+// the GPU process exits at start-up and Chrome, Edge and Electron apps draw everything on the CPU. 1.14.6 made this
+// opt-in after partial-redraw corruption on Ampere and Blackwell; that corruption was stale surface content, fixed in
+// 1.15. NVMTL_ANGLE_METAL=0 turns it off. An existing override is kept; no sandbox setting is changed.
 __attribute__((constructor)) static void nvmtl_angle_allow_nvidia(void)
 {
     const char *opt = getenv("NVMTL_ANGLE_METAL");
-    if (!opt || strcmp(opt, "1")) return;
+    if (opt && !strcmp(opt, "0")) return;
     const char *key = "ANGLE_FEATURE_OVERRIDES_DISABLED", *rule = "disableMetalOnNvidia";
     const char *cur = getenv(key);
     if (cur && strstr(cur, rule)) return;
