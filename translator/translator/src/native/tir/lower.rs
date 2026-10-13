@@ -1,10 +1,10 @@
 use super::*;
+use crate::fxhash::{HashMap, HashSet};
 use crate::native::ir::{LlGep, LlType, LlValue};
 use crate::native::parse::{
     parse_call, parse_phi, parse_switch, parse_typed_value, strip_call_prefix, strip_comment,
     LlSwitch,
 };
-use std::collections::{HashMap, HashSet};
 
 pub(in crate::native) fn ret_emit(terminator_text: &str) -> RetEmit {
     let cleaned = strip_comment(terminator_text).trim();
@@ -49,7 +49,7 @@ pub(in crate::native) fn phi_incoming_parse(
 pub(in crate::native) fn collect_forward_geps<B: AsRef<TirBlock>>(
     blocks: &[B],
 ) -> HashMap<String, LlGep> {
-    let mut geps = HashMap::new();
+    let mut geps = HashMap::default();
     for block in blocks {
         let block = block.as_ref();
         for inst in &block.insts {
@@ -64,8 +64,8 @@ pub(in crate::native) fn collect_forward_geps<B: AsRef<TirBlock>>(
 pub(in crate::native) fn collect_pointer_phi_sets<B: AsRef<TirBlock>>(
     blocks: &[B],
 ) -> (HashSet<String>, HashSet<String>) {
-    let mut results = HashSet::new();
-    let mut incoming = HashSet::new();
+    let mut results = HashSet::default();
+    let mut incoming = HashSet::default();
     for block in blocks {
         let block = block.as_ref();
         for inst in &block.insts {
@@ -99,8 +99,8 @@ pub(in crate::native) fn build(
     named_types: &HashMap<String, LlType>,
 ) -> Result<TirFunction, String> {
     let mut blocks: Vec<TirBlock> = Vec::new();
-    let mut value_types: HashMap<String, LlType> = HashMap::new();
-    let mut pointer_pointees: HashMap<String, LlType> = HashMap::new();
+    let mut value_types: HashMap<String, LlType> = HashMap::default();
+    let mut pointer_pointees: HashMap<String, LlType> = HashMap::default();
 
     let mut cur_label = entry_label.to_string();
     let mut cur_insts: Vec<TirInst> = Vec::new();
@@ -185,8 +185,8 @@ pub(in crate::native) fn build_from_blocks(
     blocks: &[crate::native::cfg::BodyBlock],
 ) -> Result<TirFunction, String> {
     let mut tir_blocks: Vec<std::sync::Arc<TirBlock>> = Vec::new();
-    let mut value_types: HashMap<String, LlType> = HashMap::new();
-    let mut pointer_pointees: HashMap<String, LlType> = HashMap::new();
+    let mut value_types: HashMap<String, LlType> = HashMap::default();
+    let mut pointer_pointees: HashMap<String, LlType> = HashMap::default();
 
     for bb in blocks {
         let Some(carrier) = &bb.typed else {
@@ -265,8 +265,8 @@ pub(in crate::native) fn lower_block_carrier<S: AsRef<str>>(
     lines: &[S],
     named_types: &HashMap<String, LlType>,
 ) -> Option<TirBlock> {
-    let mut value_types = HashMap::new();
-    let mut pointer_pointees = HashMap::new();
+    let mut value_types = HashMap::default();
+    let mut pointer_pointees = HashMap::default();
     lower_block(
         name,
         lines,
@@ -282,7 +282,7 @@ pub(in crate::native) fn lower_block_carrier_with_prefix(
     prefix: &TirBlock,
     tail_lines: &[String],
 ) -> Option<TirBlock> {
-    let tail = lower_block_carrier(name, tail_lines, &HashMap::new())?;
+    let tail = lower_block_carrier(name, tail_lines, &HashMap::default())?;
     let mut insts = prefix.insts.clone();
     insts.extend(tail.insts);
     Some(TirBlock {
@@ -304,7 +304,7 @@ pub(in crate::native) fn lower_block_carrier_from_suffix(
     let term = lower_block_carrier(
         name,
         std::slice::from_ref(&terminator_line.to_string()),
-        &HashMap::new(),
+        &HashMap::default(),
     )?;
     Some(TirBlock {
         label: name.to_string(),
@@ -325,7 +325,7 @@ pub(in crate::native) fn lower_block_carrier_prefix(
     let term = lower_block_carrier(
         name,
         std::slice::from_ref(&terminator_line.to_string()),
-        &HashMap::new(),
+        &HashMap::default(),
     )?;
     Some(TirBlock {
         label: name.to_string(),

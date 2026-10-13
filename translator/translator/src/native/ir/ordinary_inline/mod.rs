@@ -106,7 +106,7 @@ fn reachable_functions(
     entry_name: &str,
     bodied_functions: &HashSet<String>,
 ) -> HashSet<String> {
-    let mut reachable = HashSet::from([entry_name.to_string()]);
+    let mut reachable = crate::fxhash::set_from([entry_name.to_string()]);
     let mut pending = vec![entry_name.to_string()];
     for function in &module.functions {
         if function.name != entry_name
@@ -239,8 +239,8 @@ fn function_type_capabilities(
     ptr_pointees: &HashMap<(String, String), LlType>,
     raw_buffer_params: &HashSet<(String, String)>,
 ) -> HashSet<LlTypeCapability> {
-    let mut capabilities = HashSet::new();
-    let mut visiting = HashSet::new();
+    let mut capabilities = HashSet::default();
+    let mut visiting = HashSet::default();
     if matches!(function.ret, LlType::Ptr(_)) {
         capabilities.insert(LlTypeCapability::Int8);
     }
@@ -420,7 +420,7 @@ impl LlModule {
         let mut cloned_raw_buffers = Vec::new();
         let mut cloned_data_buffers = Vec::new();
         let mut cloned_pointer_loads = Vec::new();
-        let mut processed_helpers = HashSet::new();
+        let mut processed_helpers = HashSet::default();
         let mut stats = TypedInlineStats::default();
         let mut site = first_site;
         for function_index in 0..self.functions.len() {
@@ -500,7 +500,7 @@ impl LlModule {
                         continue;
                     };
 
-                    let mut local_rename = HashMap::new();
+                    let mut local_rename = HashMap::default();
                     let mut parameter_bindings = Vec::with_capacity(arguments.len());
                     for (index, ((parameter, parameter_type), argument)) in
                         helper.params.iter().zip(arguments).enumerate()
@@ -590,7 +590,7 @@ impl LlModule {
                     };
                     let result_substitution = match (call_result, returned) {
                         (None, None) => None,
-                        (Some(result), Some(returned)) => Some(HashMap::from([(result, returned)])),
+                        (Some(result), Some(returned)) => Some(crate::fxhash::map_from([(result, returned)])),
                         _ => {
                             instruction_index += 1;
                             continue;

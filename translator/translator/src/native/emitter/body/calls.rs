@@ -1059,7 +1059,7 @@ fn decayed_global_call_arg_indices(
 }
 
 fn agreeing_constant_call_cursors(ir: &LlModule) -> HashSet<(String, usize)> {
-    let mut sites: HashMap<&str, Vec<(&str, &LlCall)>> = HashMap::new();
+    let mut sites: HashMap<&str, Vec<(&str, &LlCall)>> = HashMap::default();
     for function in &ir.functions {
         for instruction in function.carrier_insts() {
             if let Some(call) = instruction.alias_call() {
@@ -1070,7 +1070,7 @@ fn agreeing_constant_call_cursors(ir: &LlModule) -> HashSet<(String, usize)> {
             }
         }
     }
-    let mut agreeing = HashSet::new();
+    let mut agreeing = HashSet::default();
     for (callee, calls) in sites {
         let arity = calls
             .iter()
@@ -1088,7 +1088,7 @@ fn agreeing_constant_call_cursors(ir: &LlModule) -> HashSet<(String, usize)> {
         let Some(caller) = ir.functions.iter().find(|f| f.name == first_caller) else {
             continue;
         };
-        let mut definitions: HashMap<&str, &LlGep> = HashMap::new();
+        let mut definitions: HashMap<&str, &LlGep> = HashMap::default();
         for instruction in caller.carrier_insts() {
             if let (Some(result), Some(gep)) = (&instruction.result, instruction.gep().as_deref()) {
                 definitions.insert(result.as_str(), gep);

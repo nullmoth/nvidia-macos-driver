@@ -787,7 +787,7 @@ pub(in crate::passes) fn plan_mat8_fusion(
     }
     let blocks = &ctx.module.functions[entry_idx].blocks;
     let cm_env = mat8_cm_env(&ctx.module, &ctx.new_globals, blocks);
-    let mut uses: HashMap<Word, usize> = HashMap::new();
+    let mut uses: HashMap<Word, usize> = HashMap::default();
     for block in blocks {
         for inst in &block.instructions {
             for op in &inst.operands {
@@ -800,8 +800,8 @@ pub(in crate::passes) fn plan_mat8_fusion(
     let mut roles: Vec<(Word, Mat8FuseRole)> = Vec::new();
     for block in blocks {
         let mut macs: Vec<Mac> = Vec::new();
-        let mut use_pos: HashMap<Word, Vec<usize>> = HashMap::new();
-        let mut loads: HashMap<Word, usize> = HashMap::new();
+        let mut use_pos: HashMap<Word, Vec<usize>> = HashMap::default();
+        let mut loads: HashMap<Word, usize> = HashMap::default();
         let mut hazards: Vec<usize> = Vec::new();
         for (pos, inst) in block.instructions.iter().enumerate() {
             if inst.class.opcode != Op::Phi {
@@ -863,7 +863,7 @@ pub(in crate::passes) fn plan_mat8_fusion(
         let by_res: HashMap<Word, usize> =
             macs.iter().enumerate().map(|(i, m)| (m.res, i)).collect();
         let mut taken = vec![false; macs.len()];
-        let mut k_of: HashMap<usize, usize> = HashMap::new();
+        let mut k_of: HashMap<usize, usize> = HashMap::default();
         for y in 0..macs.len() {
             let Some(&x) = by_res.get(&macs[y].c) else {
                 continue;
@@ -1025,7 +1025,7 @@ fn mat8_cm_env<'a>(
     new_globals: &'a [Instruction],
     blocks: &'a [Block],
 ) -> Mat8CmEnv<'a> {
-    let mut defs: HashMap<Word, &'a Instruction> = HashMap::new();
+    let mut defs: HashMap<Word, &'a Instruction> = HashMap::default();
     for inst in module.types_global_values.iter().chain(new_globals.iter()) {
         if let Some(id) = inst.result_id {
             defs.insert(id, inst);
@@ -1038,7 +1038,7 @@ fn mat8_cm_env<'a>(
             }
         }
     }
-    let mut aligned = HashSet::new();
+    let mut aligned = HashSet::default();
     let mut offset_ok = true;
     for inst in &module.types_global_values {
         if inst.class.opcode != Op::Variable
@@ -1438,11 +1438,11 @@ pub(in crate::passes) fn plan_mat8_nv_phis(
     if std::env::var_os("NVMTL_MATRIX8_NO_CARRY").is_some() {
         return;
     }
-    let mut c_of: HashMap<Word, Option<(Matrix16Element, bool)>> = HashMap::new();
-    let mut read_by_phi: HashSet<Word> = HashSet::new();
+    let mut c_of: HashMap<Word, Option<(Matrix16Element, bool)>> = HashMap::default();
+    let mut read_by_phi: HashSet<Word> = HashSet::default();
     let mut phis: Vec<(usize, Word, Word)> = Vec::new();
-    let mut mac_result: HashMap<Word, (Matrix16Element, bool)> = HashMap::new();
-    let mut incoming_of: HashMap<Word, Vec<Word>> = HashMap::new();
+    let mut mac_result: HashMap<Word, (Matrix16Element, bool)> = HashMap::default();
+    let mut incoming_of: HashMap<Word, Vec<Word>> = HashMap::default();
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for inst in &block.instructions {
             match inst.class.opcode {
@@ -1709,7 +1709,7 @@ fn cmphi_cell_count(ctx: &Ctx, ty: Word) -> Option<usize> {
 }
 
 fn cmphi_defs(blocks: &[Block]) -> HashMap<Word, (usize, usize)> {
-    let mut defs = HashMap::new();
+    let mut defs = HashMap::default();
     for (bi, block) in blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             if let Some(id) = inst.result_id {
@@ -1827,7 +1827,7 @@ fn cmphi_edges(
 }
 
 fn cmphi_sweep(blocks: &mut [Block], mut dead: Vec<Word>) -> HashSet<Word> {
-    let mut swept = HashSet::new();
+    let mut swept = HashSet::default();
     loop {
         let read: HashSet<Word> = blocks
             .iter()
@@ -1903,7 +1903,7 @@ pub(in crate::passes) fn fuse_mat8_coopmat_phis(
         let blocks = &ctx.module.functions[entry_idx].blocks;
         let defs = cmphi_defs(blocks);
         let mut groups: Vec<Group> = Vec::new();
-        let mut owner: HashMap<Word, usize> = HashMap::new();
+        let mut owner: HashMap<Word, usize> = HashMap::default();
         let mut sites: Vec<(usize, usize, usize, Vec<Word>)> = Vec::new();
         for (bi, block) in blocks.iter().enumerate() {
             for (ii, inst) in block.instructions.iter().enumerate() {
@@ -1986,7 +1986,7 @@ pub(in crate::passes) fn fuse_mat8_coopmat_phis(
         .enumerate()
         .filter_map(|(i, b)| Some((b.label.as_ref()?.result_id?, i)))
         .collect();
-    let mut replace: HashMap<Word, Word> = HashMap::new();
+    let mut replace: HashMap<Word, Word> = HashMap::default();
     for (g, group) in groups.iter().enumerate() {
         let p = p_ids[g];
         let mut ops = Vec::with_capacity(2 * group.edges.len());

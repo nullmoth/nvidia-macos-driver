@@ -4,7 +4,7 @@ pub(in crate::passes) fn combined_value_defs(
     ctx: &Ctx,
     entry_idx: usize,
 ) -> HashMap<Word, Instruction> {
-    let mut value_defs = HashMap::new();
+    let mut value_defs = HashMap::default();
     for inst in ctx
         .module
         .types_global_values
@@ -188,7 +188,7 @@ pub(in crate::passes) fn pointer_leaf_use_types(
     entry_idx: usize,
     value_types: &HashMap<Word, Word>,
 ) -> HashMap<Word, Option<Word>> {
-    let mut desired = HashMap::new();
+    let mut desired = HashMap::default();
     for block in &ctx.module.functions[entry_idx].blocks {
         for inst in &block.instructions {
             match inst.class.opcode {
@@ -598,7 +598,7 @@ pub(in crate::passes) fn types_structurally_match(
         }
     }
 
-    inner(ctx, defs, a, b, &mut HashSet::new())
+    inner(ctx, defs, a, b, &mut HashSet::default())
 }
 
 pub(in crate::passes) fn type_def_including_new(

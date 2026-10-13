@@ -69,7 +69,7 @@ pub(super) fn parse_function_header(head: &str) -> Result<LlFunction, String> {
         byval_param_pointees,
         is_static_initializer,
         blocks: Vec::new(),
-        loop_controls: std::collections::HashMap::new(),
+        loop_controls: crate::fxhash::HashMap::default(),
     })
 }
 

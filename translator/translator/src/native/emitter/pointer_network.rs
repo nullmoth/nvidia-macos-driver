@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use crate::fxhash::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::native::cfg::BodyBlock;
 use crate::native::ir::{LlType, LlValue};
@@ -313,9 +314,9 @@ pub(in crate::native) fn reinterpret_mix_buffer_params(
     blocks: &[BodyBlock],
     buffer_params: &BTreeMap<String, u32>,
 ) -> BTreeSet<String> {
-    let mut sources = HashMap::<String, Vec<LlValue>>::new();
-    let mut phi_results = HashSet::new();
-    let mut select_results = HashSet::new();
+    let mut sources = HashMap::<String, Vec<LlValue>>::default();
+    let mut phi_results = HashSet::default();
+    let mut select_results = HashSet::default();
     for block in blocks {
         let Some(carrier) = &block.typed else {
             continue;
@@ -401,7 +402,7 @@ pub(in crate::native) fn reinterpret_mix_buffer_params(
             buffer_params,
             &sources,
             &select_results,
-            &mut HashSet::new(),
+            &mut HashSet::default(),
             &mut members,
             &mut saw_select,
         ) else {
@@ -450,7 +451,7 @@ pub(in crate::native) fn reinterpret_mix_buffer_params(
 fn access_pointees(blocks: &[BodyBlock]) -> HashMap<String, Vec<LlType>> {
     use crate::native::emitter::helpers::gep_pointee;
 
-    let mut map: HashMap<String, Vec<LlType>> = HashMap::new();
+    let mut map: HashMap<String, Vec<LlType>> = HashMap::default();
     let mut record = |name: &str, ty: LlType| {
         let entry = map.entry(name.to_string()).or_default();
         if !entry.contains(&ty) {
@@ -508,8 +509,8 @@ pub(in crate::native) fn cross_member_widening_load_roots(
 ) -> BTreeSet<String> {
     use crate::native::emitter::helpers::{bitcast_width, gep_parent_before_last, gep_pointee};
 
-    let mut sources = HashMap::<String, Vec<String>>::new();
-    let mut cross_member_gep_pointee_bits = HashMap::<String, u32>::new();
+    let mut sources = HashMap::<String, Vec<String>>::default();
+    let mut cross_member_gep_pointee_bits = HashMap::<String, u32>::default();
     let mut loads = Vec::<(String, LlType)>::new();
     fn resolve_type(
         ty: &LlType,
@@ -560,7 +561,7 @@ pub(in crate::native) fn cross_member_widening_load_roots(
                 continue;
             };
             let operands = if let Some(gep) = inst.gep().as_deref() {
-                let source_ty = resolve_type(&gep.source_ty, named_types, &mut HashSet::new());
+                let source_ty = resolve_type(&gep.source_ty, named_types, &mut HashSet::default());
                 if matches!(
                     source_ty
                         .as_ref()
@@ -643,7 +644,7 @@ pub(in crate::native) fn cross_member_widening_load_roots(
             continue;
         };
         let mut stack = vec![pointer.clone()];
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut crosses = false;
         while let Some(name) = stack.pop() {
             if !seen.insert(name.clone()) {
@@ -665,7 +666,7 @@ pub(in crate::native) fn cross_member_widening_load_roots(
                 &pointer,
                 &sources,
                 buffer_params,
-                &mut HashSet::new(),
+                &mut HashSet::default(),
                 &mut roots,
             );
         }
@@ -708,7 +709,7 @@ mod tests {
     fn block(lines: &[&str]) -> BodyBlock {
         let mut lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         lines.push("ret void".to_string());
-        let typed = crate::native::tir::lower_block_carrier("entry", &lines, &HashMap::new());
+        let typed = crate::native::tir::lower_block_carrier("entry", &lines, &HashMap::default());
         assert!(typed.is_some(), "fixture must lower: {lines:?}");
         BodyBlock {
             name: "entry".to_string(),
@@ -777,7 +778,7 @@ mod tests {
 
         assert_eq!(
             null_rooted_pointer_network_members(&blocks),
-            HashSet::from(["%cursor".to_string(), "%next".to_string()])
+            crate::fxhash::set_from(["%cursor".to_string(), "%next".to_string()])
         );
     }
 
@@ -928,7 +929,7 @@ mod tests {
             "%142 = getelementptr float, ptr %129, i64 %140",
             "%147 = load <4 x float>, ptr %144",
         ])];
-        let mut pointees = HashMap::new();
+        let mut pointees = HashMap::default();
         pointees.insert(
             "%144".to_string(),
             LlType::Vector(Box::new(LlType::Float), 4),
@@ -997,8 +998,8 @@ mod tests {
             "%alias = bitcast ptr addrspace(2) %field to ptr addrspace(2)",
             "%value = load <3 x float>, ptr addrspace(2) %alias",
         ])];
-        let params = HashSet::from(["%buffer".to_string()]);
-        let named_types = HashMap::from([(
+        let params = crate::fxhash::set_from(["%buffer".to_string()]);
+        let named_types = crate::fxhash::map_from([(
             "%Payload".to_string(),
             LlType::Struct(vec![LlType::Int(32), LlType::Float, LlType::Int(32)]),
         )]);
@@ -1014,8 +1015,8 @@ mod tests {
             "%element = getelementptr [4 x float], ptr addrspace(2) %buffer, i64 0, i64 1",
             "%value = load <3 x float>, ptr addrspace(2) %element",
         ])];
-        let params = HashSet::from(["%buffer".to_string()]);
-        assert!(cross_member_widening_load_roots(&blocks, &params, &HashMap::new()).is_empty());
+        let params = crate::fxhash::set_from(["%buffer".to_string()]);
+        assert!(cross_member_widening_load_roots(&blocks, &params, &HashMap::default()).is_empty());
     }
 
     #[test]
@@ -1023,7 +1024,7 @@ mod tests {
         let blocks = [block(&[
             "%m = select i1 %c, ptr addrspace(1) %pa, ptr addrspace(1) %pb",
         ])];
-        let mut pointees = HashMap::new();
+        let mut pointees = HashMap::default();
         pointees.insert("%pa".to_string(), LlType::Float);
         pointees.insert("%pb".to_string(), LlType::Float);
         let nets = analyze_pointer_networks(&blocks, &pointees);
@@ -1039,7 +1040,7 @@ mod tests {
             "%a = phi ptr [ %b, %x ], [ %c, %y ]",
             "%d = phi ptr [ %a, %z ], [ %e, %w ]",
         ])];
-        let pointees = HashMap::new();
+        let pointees = HashMap::default();
         let nets = analyze_pointer_networks(&blocks, &pointees);
         let net = net_containing(&nets, "%e");
         for name in ["%a", "%b", "%c", "%d", "%e"] {
@@ -1059,7 +1060,7 @@ mod tests {
             "%a = phi ptr [ %b, %x ], [ %c, %y ]",
             "%p = phi ptr [ %q, %x ], [ %r, %y ]",
         ])];
-        let pointees = HashMap::new();
+        let pointees = HashMap::default();
         let nets = analyze_pointer_networks(&blocks, &pointees);
         let na = net_containing(&nets, "%a");
         let np = net_containing(&nets, "%p");

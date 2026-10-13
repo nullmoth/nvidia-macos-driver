@@ -2,9 +2,10 @@ use super::{
     BufferByteRange, BufferFootprint, BufferIndexSource, BufferStrideTerm, BufferStridedAccess,
     DescriptorLocation, ResourceAccess, ResourceBinding, ResourceKind, ShaderReflection,
 };
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::{Instruction, Module, Operand};
 use spirv::{BuiltIn, Decoration, Op, Word};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_ADDRESS_ALTERNATIVES_PER_POINTER: usize = 4096;
 const MAX_FOOTPRINT_RECORDS_PER_BINDING: usize = 16_384;
@@ -294,8 +295,8 @@ impl<'a> Analyzer<'a> {
             decorations,
             roots,
             pointer_addresses,
-            scalar_memo: HashMap::new(),
-            scalar_visiting: HashSet::new(),
+            scalar_memo: HashMap::default(),
+            scalar_visiting: HashSet::default(),
         }
     }
 
@@ -486,7 +487,7 @@ impl<'a> Analyzer<'a> {
                     .array_strides
                     .get(&base_ty)
                     .copied()
-                    .or_else(|| self.type_span(pointee, &mut HashSet::new()))
+                    .or_else(|| self.type_span(pointee, &mut HashSet::default()))
                 else {
                     return self.unknown_addresses_from(*base);
                 };
@@ -603,7 +604,7 @@ impl<'a> Analyzer<'a> {
                 }
                 Op::TypeVector => {
                     let element = definition.operands.first().and_then(id_ref)?;
-                    let stride = self.type_span(element, &mut HashSet::new())?;
+                    let stride = self.type_span(element, &mut HashSet::default())?;
                     offset = offset.checked_add(&index.checked_mul(stride)?)?;
                     ty = element;
                 }
@@ -1023,9 +1024,9 @@ impl<'a> Analyzer<'a> {
     }
 
     fn access_type_span(&self, pointer: Word, ty: Word) -> Option<u64> {
-        self.type_span(ty, &mut HashSet::new()).or_else(|| {
-            let layout = self.pointer_matrix_layout(pointer, &mut HashSet::new())?;
-            self.type_span_with_matrix_layout(ty, Some(layout), &mut HashSet::new())
+        self.type_span(ty, &mut HashSet::default()).or_else(|| {
+            let layout = self.pointer_matrix_layout(pointer, &mut HashSet::default())?;
+            self.type_span_with_matrix_layout(ty, Some(layout), &mut HashSet::default())
         })
     }
 

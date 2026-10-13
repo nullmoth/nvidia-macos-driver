@@ -1,6 +1,6 @@
+use crate::fxhash::HashMap;
 use crate::spirv_module::{Instruction, Module, Operand};
 use spirv::{Op, Word};
-use std::collections::HashMap;
 
 pub(crate) fn widen_masked_shifts(module: &mut Module) -> usize {
     let ints: HashMap<Word, (u32, u32)> = module

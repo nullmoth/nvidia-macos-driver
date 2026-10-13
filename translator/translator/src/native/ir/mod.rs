@@ -2,8 +2,8 @@ use super::parse::{
     is_ignored_intrinsic, parse_declaration, parse_function_header, parse_global, parse_type,
     strip_comment,
 };
+use crate::fxhash::{HashMap, HashSet};
 use crate::meta::{self, AirScalar, AirType, KernRole};
-use std::collections::{HashMap, HashSet};
 
 mod alloca;
 mod metadata_pointees;
@@ -184,16 +184,16 @@ fn infer_metadata_fc_buffer_locations(
     functions: &[LlFunction],
 ) -> HashMap<(String, String), u32> {
     let Some(kern) = kern else {
-        return HashMap::new();
+        return HashMap::default();
     };
     let Some(entry_name) = entry_name else {
-        return HashMap::new();
+        return HashMap::default();
     };
     let Some(entry) = functions
         .iter()
         .find(|function| function.name == entry_name)
     else {
-        return HashMap::new();
+        return HashMap::default();
     };
     kern.function_constant_buffer_locations
         .iter()
@@ -294,7 +294,7 @@ fn cross_buffer_pointer_phi_gep_sources(f: &LlFunction) -> HashMap<String, HashS
         .params
         .iter()
         .filter(|&(_name, ty)| matches!(ty, LlType::Ptr(_)))
-        .map(|(name, _ty)| (name.clone(), HashSet::from([name.clone()])))
+        .map(|(name, _ty)| (name.clone(), crate::fxhash::set_from([name.clone()])))
         .collect();
     let mut contains_phi: HashMap<String, bool> =
         roots.keys().cloned().map(|name| (name, false)).collect();
@@ -342,7 +342,7 @@ fn cross_buffer_pointer_phi_gep_sources(f: &LlFunction) -> HashMap<String, HashS
             }
 
             let (merge_roots, result_has_phi) = if let Some(incoming) = inst.phi_values() {
-                let mut merged = HashSet::new();
+                let mut merged = HashSet::default();
                 let mut complete = true;
                 for value in incoming {
                     let LlValue::Local(name) = value else {
@@ -398,7 +398,7 @@ fn cross_buffer_pointer_phi_gep_sources(f: &LlFunction) -> HashMap<String, HashS
         }
     }
 
-    let mut sources: HashMap<String, HashSet<LlType>> = HashMap::new();
+    let mut sources: HashMap<String, HashSet<LlType>> = HashMap::default();
     for inst in f.carrier_insts() {
         let Some(gep) = &inst.gep() else {
             continue;
@@ -437,7 +437,7 @@ fn infer_metadata_byte_buffer_params(
     entry_name: Option<&str>,
     functions: &[LlFunction],
 ) -> HashSet<(String, String)> {
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     let Some(kern) = kern else {
         return out;
     };
@@ -466,7 +466,7 @@ fn infer_metadata_data_buffer_params(
     entry_name: Option<&str>,
     functions: &[LlFunction],
 ) -> HashSet<(String, String)> {
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     let Some(kern) = kern else {
         return out;
     };
@@ -503,7 +503,7 @@ fn infer_metadata_primitive_buffer_pointees(
     entry_name: Option<&str>,
     functions: &[LlFunction],
 ) -> HashMap<(String, String), LlType> {
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     let (Some(kern), Some(entry_name)) = (kern, entry_name) else {
         return out;
     };
@@ -588,7 +588,7 @@ fn tile_coordinate_scale(
     let Some(inst) = defs.get(name) else {
         return Some(1);
     };
-    if !reaches_thread_position(defs, name, &mut HashSet::new()) {
+    if !reaches_thread_position(defs, name, &mut HashSet::default()) {
         return Some(0);
     }
     use crate::native::tir::TirOpcode;
@@ -687,7 +687,7 @@ fn infer_cross_coordinate_imageblock(
         .iter()
         .filter(|function| entry_functions.contains(&function.name))
     {
-        let mut coordinates = HashSet::new();
+        let mut coordinates = HashSet::default();
         for inst in function.carrier_insts() {
             let Some(call) = inst.alias_call() else {
                 continue;
@@ -742,7 +742,7 @@ fn infer_imageblock_nonzero_byte_field(
         .iter()
         .filter(|function| reachable.contains(&function.name))
     {
-        let mut roots = HashSet::new();
+        let mut roots = HashSet::default();
         let mut changed = true;
         while changed {
             changed = false;
@@ -826,13 +826,13 @@ declare ptr addrspace(4) @air.imageblock_data(<2 x i16>, i32, i16)
         let reachable = module(true);
         assert!(infer_imageblock_nonzero_byte_field(
             &reachable.functions,
-            &HashSet::from(["entry".to_string()])
+            &crate::fxhash::set_from(["entry".to_string()])
         ));
 
         let unreachable = module(false);
         assert!(!infer_imageblock_nonzero_byte_field(
             &unreachable.functions,
-            &HashSet::from(["entry".to_string()])
+            &crate::fxhash::set_from(["entry".to_string()])
         ));
     }
 }

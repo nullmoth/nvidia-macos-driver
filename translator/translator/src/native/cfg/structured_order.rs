@@ -1,6 +1,6 @@
 use super::loopforest::LoopForest;
 use super::BodyBlock;
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{HashMap, HashSet};
 
 pub(in crate::native) fn structured_order(
     blocks: &[BodyBlock],
@@ -30,7 +30,7 @@ fn structured_order_with_loop_merges_last(
         .map(|(i, b)| (b.name.as_str(), i))
         .collect();
 
-    let mut children: HashMap<String, Vec<String>> = HashMap::new();
+    let mut children: HashMap<String, Vec<String>> = HashMap::default();
     for b in blocks {
         if let Some(d) = forest.idom(&b.name) {
             children
@@ -43,8 +43,8 @@ fn structured_order_with_loop_merges_last(
         kids.sort_by_key(|n| pos.get(n.as_str()).copied().unwrap_or(usize::MAX));
     }
 
-    let mut defer_at: HashMap<String, Vec<String>> = HashMap::new();
-    let mut loop_merges = HashSet::new();
+    let mut defer_at: HashMap<String, Vec<String>> = HashMap::default();
+    let mut loop_merges = HashSet::default();
     for b in blocks {
         if let Some(m) = merge_of(&b.name) {
             if forest.loop_for_header(&b.name).is_some() {
@@ -76,7 +76,7 @@ fn structured_order_with_loop_merges_last(
     };
 
     let mut order = Vec::with_capacity(blocks.len());
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     let mut stack = vec![entry];
     while let Some(b) = stack.pop() {
         if !visited.insert(b.clone()) {
@@ -115,7 +115,7 @@ mod tests {
         let typed = crate::native::tir::lower_block_carrier(
             &name,
             &[term.to_string()],
-            &std::collections::HashMap::new(),
+            &crate::fxhash::HashMap::default(),
         );
         BodyBlock {
             name,

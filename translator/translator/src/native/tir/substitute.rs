@@ -1,7 +1,7 @@
 use super::*;
+use crate::fxhash::HashMap;
 use crate::native::ir::{LlGep, LlValue, TypedValue};
 use crate::native::parse::{LlCall, LlSwitch};
-use std::collections::HashMap;
 
 type Substitutions = HashMap<String, TypedValue>;
 
@@ -374,8 +374,8 @@ mod b52_equiv_tests {
 
     #[test]
     fn lookup_answers_what_get_answers_for_zero_one_and_two_entries() {
-        let empty = Substitutions::new();
-        let one = HashMap::from([("%a".to_string(), int(LlValue::Int(1)))]);
+        let empty = Substitutions::default();
+        let one = crate::fxhash::map_from([("%a".to_string(), int(LlValue::Int(1)))]);
         let mut two = one.clone();
         two.insert("%b".to_string(), int(LlValue::Int(2)));
         for map in [&empty, &one, &two] {
@@ -391,7 +391,7 @@ mod b52_equiv_tests {
 
     #[test]
     fn operand_fast_path_equals_the_round_trip_and_const_local_still_becomes_a_value() {
-        let one = HashMap::from([("%a".to_string(), int(LlValue::Int(7)))]);
+        let one = crate::fxhash::map_from([("%a".to_string(), int(LlValue::Int(7)))]);
         let mut two = one.clone();
         two.insert("%b".to_string(), int(LlValue::Local("%c".to_string())));
         let i32t = LlType::Int(32);
@@ -452,7 +452,7 @@ mod b52_equiv_tests {
 
     #[test]
     fn mentions_key_is_exactly_whether_substitute_value_changes_the_value() {
-        let map = HashMap::from([("%a".to_string(), int(LlValue::Int(9)))]);
+        let map = crate::fxhash::map_from([("%a".to_string(), int(LlValue::Int(9)))]);
         let values = vec![
             LlValue::Local("%a".into()),
             LlValue::Local("%b".into()),
@@ -483,7 +483,7 @@ mod b52_equiv_tests {
 
     #[test]
     fn rename_in_place_equals_rename_tokens_and_a_non_ascii_line_still_takes_the_full_path() {
-        let tokens = HashMap::from([("%a".to_string(), "7".to_string())]);
+        let tokens = crate::fxhash::map_from([("%a".to_string(), "7".to_string())]);
         let lines = [
             "icmp eq i32 %a, 1",
             "icmp eq i32 %ab, 1",

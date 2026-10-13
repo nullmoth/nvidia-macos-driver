@@ -3,7 +3,7 @@ use super::{
     route_passthrough, substitute_cross_slot_value, synthetic_block, BlockRole, BodyBlock,
     StructuredPlan, ValueSlot, CROSS_ARM_EDGE_MAX_BLOCKS,
 };
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{HashMap, HashSet};
 
 pub(in crate::native) mod renest;
 
@@ -31,7 +31,7 @@ pub(in crate::native) fn requires_loop_exit_sibling_dispatch(blocks: &[BodyBlock
                                 && !natural_loop.body.iter().any(|block| block == sibling)
                                 && natural_loop.exits.iter().any(|exit| {
                                     let mut current = exit.clone();
-                                    let mut seen = HashSet::new();
+                                    let mut seen = HashSet::default();
                                     loop {
                                         if &current == sibling {
                                             break true;
@@ -110,7 +110,7 @@ pub(in crate::native) fn renest_whole_cfg_dispatch(
         .map(|(index, block)| (block.name.as_str(), index))
         .collect::<HashMap<_, _>>();
     let mut edges = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for (from, block) in blocks.iter().enumerate() {
         for target in block_successors(block) {
             let Some(&to) = by_name.get(target.as_str()) else {
@@ -331,7 +331,7 @@ pub(in crate::native) fn materialize_construct_routes(
             plan.owners.len()
         ));
     }
-    let mut names = HashSet::with_capacity(blocks.len());
+    let mut names = HashSet::with_capacity_and_hasher(blocks.len(), Default::default());
     for block in blocks {
         if !names.insert(block.name.as_str()) {
             return Err(format!(
@@ -347,7 +347,7 @@ pub(in crate::native) fn materialize_construct_routes(
         }
     }
 
-    let mut seen_edges = HashSet::with_capacity(plan.routes.len());
+    let mut seen_edges = HashSet::with_capacity_and_hasher(plan.routes.len(), Default::default());
     for route in &plan.routes {
         let edge = route.edge;
         if edge.from >= blocks.len() || edge.to >= blocks.len() {

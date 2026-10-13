@@ -1,6 +1,7 @@
 use super::lex::split_top_level;
+use crate::fxhash::{HashMap, HashSet};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub(super) fn lower_vector_scalar_pointer_merge(san_ll: &str) -> Cow<'_, str> {
     lower_impl(san_ll, true)
@@ -194,11 +195,11 @@ fn select_arm_values(rest: &str) -> Vec<String> {
 }
 
 fn classify(defs: &BTreeMap<String, Def>) -> (HashMap<String, Pointee>, HashSet<String>) {
-    let mut pointees: HashMap<String, Pointee> = HashMap::new();
-    let mut mismatches: HashSet<String> = HashSet::new();
+    let mut pointees: HashMap<String, Pointee> = HashMap::default();
+    let mut mismatches: HashSet<String> = HashSet::default();
     for _ in 0..=defs.len() {
         let mut changed = false;
-        let mut round_mismatch = HashSet::new();
+        let mut round_mismatch = HashSet::default();
         for (name, def) in defs {
             let p = compute_pointee(def, &pointees, &mut round_mismatch, name);
             if pointees.get(name) != Some(&p) {
@@ -252,7 +253,7 @@ fn merge_arms(
     mismatches: &mut HashSet<String>,
     name: &str,
 ) -> Pointee {
-    let mut elems: HashSet<String> = HashSet::new();
+    let mut elems: HashSet<String> = HashSet::default();
     let mut saw_scalar = false;
     let mut vec_lanes: Option<usize> = None;
     let mut consistent_vec = true;
@@ -300,7 +301,7 @@ fn pointer_adjacency(defs: &BTreeMap<String, Def>) -> BTreeMap<String, Vec<Strin
 
 fn component(defs: &BTreeMap<String, Def>, seeds: &HashSet<String>) -> HashSet<String> {
     let adj = pointer_adjacency(defs);
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::default();
     let mut queue: VecDeque<String> = seeds.iter().cloned().collect();
     for s in seeds {
         seen.insert(s.clone());
@@ -326,7 +327,7 @@ struct UseWidths {
 }
 
 fn memory_reloaded_pointers(body: &[&str]) -> HashSet<String> {
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     for line in body {
         if let Some(def) = parse_def(line) {
             if def.opcode == "load" {
@@ -361,7 +362,7 @@ fn scalar_byte_width(elem: &str) -> Option<usize> {
 }
 
 fn use_widths(body: &[&str]) -> HashMap<String, UseWidths> {
-    let mut map: HashMap<String, UseWidths> = HashMap::new();
+    let mut map: HashMap<String, UseWidths> = HashMap::default();
     let mut observe = |name: &str, ty: &str, ptr_prefix: &str| {
         let entry = map.entry(name.to_string()).or_default();
         if let Some((elem, _)) = vec_elem_lanes(ty) {
@@ -416,13 +417,13 @@ fn widen_targets(body: &[&str], defs: &BTreeMap<String, Def>) -> Vec<(HashSet<St
     let mut nodes: BTreeSet<String> = adj.keys().cloned().collect();
     nodes.extend(widths.keys().cloned());
 
-    let mut visited: HashSet<String> = HashSet::new();
+    let mut visited: HashSet<String> = HashSet::default();
     let mut targets: Vec<(HashSet<String>, String)> = Vec::new();
     for start in &nodes {
         if !visited.insert(start.clone()) {
             continue;
         }
-        let mut members: HashSet<String> = HashSet::new();
+        let mut members: HashSet<String> = HashSet::default();
         let mut queue: VecDeque<String> = VecDeque::new();
         queue.push_back(start.clone());
         members.insert(start.clone());
@@ -436,7 +437,7 @@ fn widen_targets(body: &[&str], defs: &BTreeMap<String, Def>) -> Vec<(HashSet<St
                 }
             }
         }
-        let mut elems: HashSet<String> = HashSet::new();
+        let mut elems: HashSet<String> = HashSet::default();
         let (mut has_scalar, mut has_vector, mut other, mut logical) = (false, false, false, false);
         let mut memory_ptr = false;
         for m in &members {
@@ -619,7 +620,7 @@ fn rewrite_function_body(body: &[&str], widen: bool) -> Option<Vec<String>> {
         .map(|d| (d.name.to_string(), d))
         .collect();
 
-    let mut comp_elem: HashMap<String, String> = HashMap::new();
+    let mut comp_elem: HashMap<String, String> = HashMap::default();
 
     let (pointees, mismatches) = classify(&defs);
     if let Some(elem) = unify_mismatch_elem(&mismatches, &pointees) {

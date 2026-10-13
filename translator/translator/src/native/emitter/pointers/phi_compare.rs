@@ -187,7 +187,7 @@ impl Emitter {
         let result_type = self.pointer_aware_type_id(&result_ty, pointer_meta.as_ref())?;
         let result = self.result_id(&name, &result_ty)?;
         let mut ops = Vec::new();
-        let mut seen_incoming: HashMap<Word, Word> = HashMap::new();
+        let mut seen_incoming: HashMap<Word, Word> = HashMap::default();
         for (value, label) in incoming {
             let mut edge_instructions = Vec::new();
             let value_id = if let Some(meta) = pointer_meta.as_ref() {
@@ -229,7 +229,7 @@ impl Emitter {
 
     fn forwarded_pointer_value(&self, value: &LlValue) -> LlValue {
         let mut value = value.clone();
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
         while let LlValue::Local(name) = &value {
             if !visited.insert(name.clone()) {
                 break;
@@ -276,7 +276,7 @@ impl Emitter {
                         &selected,
                         &pointee,
                         &[],
-                        &mut HashSet::new(),
+                        &mut HashSet::default(),
                         instructions,
                     )?
                 } else {

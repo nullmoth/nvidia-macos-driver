@@ -24,7 +24,7 @@ pub(in crate::passes) fn rewrite_raw_word_alias_chains(
         return Ok(());
     }
     let mut types = combined_type_defs(ctx, defs);
-    let mut exact_raw_facts = HashMap::new();
+    let mut exact_raw_facts = HashMap::default();
     for fact in &ctx.emit_sidecar.buffer_access_offsets {
         let Some(block) = buffer_types.get(&fact.root) else {
             continue;
@@ -62,8 +62,8 @@ pub(in crate::passes) fn rewrite_raw_word_alias_chains(
         })
         .collect::<HashMap<_, _>>();
 
-    let mut raw_alias_vars: HashMap<Word, Word> = HashMap::new();
-    let mut paths: HashMap<Word, BufferAccessPath> = HashMap::new();
+    let mut raw_alias_vars: HashMap<Word, Word> = HashMap::default();
+    let mut paths: HashMap<Word, BufferAccessPath> = HashMap::default();
     let mut value_types = combined_value_types(ctx, entry_idx);
 
     let n_blocks = ctx.module.functions[entry_idx].blocks.len();
@@ -1340,7 +1340,7 @@ fn exact_raw_word_fact(
     ptr: Word,
 ) -> Option<(Word, u32)> {
     let mut fact_ptr = ptr;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     loop {
         if !seen.insert(fact_ptr) {
             return None;
@@ -1445,7 +1445,7 @@ pub(in crate::passes) fn raw_word_load_at_const_index(
 pub(in crate::passes) fn rewrite_exact_raw_word_loads(ctx: &mut Ctx, entry_idx: usize) {
     let byte_ty = ctx.ty_int8();
     let uint = ctx.ty_uint();
-    let types = combined_type_defs(ctx, &HashMap::new());
+    let types = combined_type_defs(ctx, &HashMap::default());
     let mut value_types = combined_value_types(ctx, entry_idx);
     let definitions = ctx.module.functions[entry_idx]
         .blocks
@@ -1464,7 +1464,7 @@ pub(in crate::passes) fn rewrite_exact_raw_word_loads(ctx: &mut Ctx, entry_idx: 
             (fact.id, (root, fact.byte_offset))
         })
         .collect::<HashMap<_, _>>();
-    let mut replaced_pointers = HashSet::new();
+    let mut replaced_pointers = HashSet::default();
 
     for bi in 0..ctx.module.functions[entry_idx].blocks.len() {
         let old = ctx.module.functions[entry_idx].blocks[bi]
@@ -1586,7 +1586,7 @@ pub(in crate::passes) fn rewrite_exact_raw_word_loads(ctx: &mut Ctx, entry_idx: 
 
 pub(in crate::passes) fn rewrite_affine_raw_word_loads(ctx: &mut Ctx, entry_idx: usize) {
     let uint = ctx.ty_uint();
-    let types = combined_type_defs(ctx, &HashMap::new());
+    let types = combined_type_defs(ctx, &HashMap::default());
     let mut value_types = combined_value_types(ctx, entry_idx);
     let definitions = ctx.module.functions[entry_idx]
         .blocks
@@ -1622,8 +1622,8 @@ pub(in crate::passes) fn rewrite_affine_raw_word_loads(ctx: &mut Ctx, entry_idx:
     if affine_offsets.is_empty() {
         return;
     }
-    let mut replaced_pointers = HashSet::new();
-    let mut replaced_fact_roots = HashSet::new();
+    let mut replaced_pointers = HashSet::default();
+    let mut replaced_fact_roots = HashSet::default();
 
     for bi in 0..ctx.module.functions[entry_idx].blocks.len() {
         let old = ctx.module.functions[entry_idx].blocks[bi]
@@ -1650,7 +1650,7 @@ pub(in crate::passes) fn rewrite_affine_raw_word_loads(ctx: &mut Ctx, entry_idx:
                 &definitions,
                 &types,
                 &value_types,
-                &mut HashSet::new(),
+                &mut HashSet::default(),
             ) else {
                 rewritten.push(instruction);
                 continue;
@@ -1993,7 +1993,7 @@ fn zero_offset_raw_word_root(
     root: Word,
 ) -> Option<Word> {
     let mut current = root;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     loop {
         if !seen.insert(current) {
             return None;

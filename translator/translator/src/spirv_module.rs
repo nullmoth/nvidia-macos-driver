@@ -1,6 +1,6 @@
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_binary::{self, Error as ParseError};
 use spirv::{Decoration, Op, Word};
-use std::collections::{HashMap, HashSet};
 
 pub(crate) use crate::spirv_operand::Operand;
 use crate::spirv_operand::{Assemble, Disassemble};
@@ -558,7 +558,7 @@ impl SpirvModule {
     }
 
     pub(crate) fn disassemble(&self) -> String {
-        let mut extended_sets = HashMap::new();
+        let mut extended_sets = HashMap::default();
         for instruction in &self.ext_inst_imports {
             let (Some(id), [Operand::LiteralString(name)]) =
                 (instruction.result_id, instruction.operands.as_slice())

@@ -1,3 +1,4 @@
+use crate::fxhash::{HashMap, HashSet};
 use crate::meta::{
     AirScalar, AirType, FragMeta, FragRole, KernMeta, KernRole, VertMeta, VertOutRole, VertRole,
 };
@@ -11,7 +12,7 @@ use spirv::{
     BuiltIn, Decoration, Dim, FunctionControl, ImageFormat, MemorySemantics, Op, Scope,
     StorageClass, Word,
 };
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stage {
@@ -375,21 +376,21 @@ impl Ctx {
             glsl_ext: None,
             interface: vec![],
             new_globals: vec![],
-            synth_cache: HashMap::new(),
-            singleton_types: HashMap::new(),
-            struct_cache: HashMap::new(),
+            synth_cache: HashMap::default(),
+            singleton_types: HashMap::default(),
+            struct_cache: HashMap::default(),
             phase_value_types: None,
             phase_type_positions: None,
-            image_dims: HashMap::new(),
-            image_comp: HashMap::new(),
-            image_multisampled: HashSet::new(),
-            image_storage: HashSet::new(),
-            image_array_vars: HashMap::new(),
-            bindless_heap_vars: HashMap::new(),
+            image_dims: HashMap::default(),
+            image_comp: HashMap::default(),
+            image_multisampled: HashSet::default(),
+            image_storage: HashSet::default(),
+            image_array_vars: HashMap::default(),
+            bindless_heap_vars: HashMap::default(),
             address_table: None,
-            bound_buffer_vars: HashSet::new(),
-            null_image_values: HashSet::new(),
-            laid_out: HashSet::new(),
+            bound_buffer_vars: HashSet::default(),
+            null_image_values: HashSet::default(),
+            laid_out: HashSet::default(),
             air_struct_offsets,
             air_data_layout,
             descriptor_layout: options.descriptor_layout,
@@ -404,26 +405,26 @@ impl Ctx {
             runtime_sampler_states: options.runtime_sampler_states,
             runtime_storage_image_states: options.runtime_storage_image_states,
             threadgroup_memory_lengths: options.threadgroup_memory_lengths,
-            runtime_storage_image_values: HashMap::new(),
-            applied_runtime_storage_image_indices: HashSet::new(),
+            runtime_storage_image_values: HashMap::default(),
+            applied_runtime_storage_image_indices: HashSet::default(),
             default_sampler_var: None,
-            read_sampler_values: HashSet::new(),
+            read_sampler_values: HashSet::default(),
             air_call_body: None,
             air_call_block: 0,
-            mat8_nv: HashMap::new(),
+            mat8_nv: HashMap::default(),
             mat8_nv_phis: Vec::new(),
-            mat8_fuse: HashMap::new(),
-            mat8_cm: HashMap::new(),
+            mat8_fuse: HashMap::default(),
+            mat8_cm: HashMap::default(),
             unsurfaced_embedded_resources: Vec::new(),
-            variant_absent_texture_values: HashSet::new(),
-            sampler_states: HashMap::new(),
-            specialized_runtime_sampler_values: HashSet::new(),
-            ambiguous_sampler_states: HashSet::new(),
-            default_null_image_vars: HashMap::new(),
-            placeholder_descriptor_vars: HashMap::new(),
+            variant_absent_texture_values: HashSet::default(),
+            sampler_states: HashMap::default(),
+            specialized_runtime_sampler_values: HashSet::default(),
+            ambiguous_sampler_states: HashSet::default(),
+            default_null_image_vars: HashMap::default(),
+            placeholder_descriptor_vars: HashMap::default(),
             ray_instance_user_id_table: None,
-            implicit_imageblock_vars: HashMap::new(),
-            fragment_imageblock_vars: HashMap::new(),
+            implicit_imageblock_vars: HashMap::default(),
+            fragment_imageblock_vars: HashMap::default(),
             fragment_sample_positions_var: None,
             uses_fragment_imageblock: false,
             fragment_imageblock_coord_var: None,
@@ -559,7 +560,7 @@ impl Ctx {
 
     fn runtime_storage_image_origins(&self, image: Word) -> Vec<(u32, RuntimeStorageImageState)> {
         let mut pending = vec![image];
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
         let mut origins = Vec::new();
         while let Some(value) = pending.pop() {
             if !visited.insert(value) {
@@ -740,7 +741,7 @@ fn propagate_sampler_state_aliases(ctx: &mut Ctx, entry_idx: usize) {
             (!sources.is_empty()).then_some((result, sources))
         })
         .collect::<Vec<_>>();
-    let mut dependents = HashMap::<Word, Vec<usize>>::new();
+    let mut dependents = HashMap::<Word, Vec<usize>>::default();
     for (index, (_, sources)) in aliases.iter().enumerate() {
         for source in sources {
             dependents.entry(*source).or_default().push(index);
@@ -867,7 +868,7 @@ mod sampler_state_alias_tests {
 }
 
 fn type_defs(module: &Module) -> HashMap<Word, Instruction> {
-    let mut m = HashMap::new();
+    let mut m = HashMap::default();
     for inst in &module.types_global_values {
         if let Some(rid) = inst.result_id {
             m.insert(rid, inst.clone());
@@ -1494,7 +1495,7 @@ use value_queries::*;
 use workgroup::*;
 
 fn air_names(module: &Module) -> HashMap<Word, String> {
-    let mut m = HashMap::new();
+    let mut m = HashMap::default();
     for inst in &module.debug_names {
         if inst.class.opcode == Op::Name {
             if let (Some(Operand::IdRef(id)), Some(Operand::LiteralString(s))) =
@@ -1717,7 +1718,7 @@ fn canonicalize_ids_and_collect_remap(
     module: &mut Module,
     tracked_ids: &mut [Word],
 ) -> HashMap<Word, Word> {
-    let mut remap: HashMap<Word, Word> = HashMap::new();
+    let mut remap: HashMap<Word, Word> = HashMap::default();
     let mut next: Word = 1;
     for inst in module.all_inst_iter() {
         if let Some(result_id) = inst.result_id {
@@ -1919,7 +1920,7 @@ mod emitted_inline_tests {
             module,
             crate::emit_sidecar::EmitSidecar::default(),
             Some("main"),
-            &HashSet::new(),
+            &HashSet::default(),
         )
         .expect("invalid intermediate follows the historical retry route");
 
@@ -1969,7 +1970,7 @@ mod emitted_inline_tests {
             module,
             crate::emit_sidecar::EmitSidecar::default(),
             Some("main"),
-            &HashSet::new(),
+            &HashSet::default(),
         )
         .expect("complete emitted closure");
 
@@ -2024,7 +2025,7 @@ mod emitted_inline_tests {
             module,
             crate::emit_sidecar::EmitSidecar::default(),
             Some("main"),
-            &HashSet::new(),
+            &HashSet::default(),
         )
         .expect("complete emitted closure");
 
@@ -2075,7 +2076,7 @@ mod emitted_inline_tests {
             module,
             crate::emit_sidecar::EmitSidecar::default(),
             Some("main"),
-            &HashSet::from([20]),
+            &crate::fxhash::set_from([20]),
         )
         .expect("preserve lowered leaf while splicing AIR helper");
         let calls = module.functions[0]
@@ -2132,7 +2133,7 @@ mod emitted_inline_tests {
     }
 
     fn phi_parents_are_predecessors(function: &Function) -> Vec<(Word, Word, bool)> {
-        let mut predecessors: HashMap<Word, HashSet<Word>> = HashMap::new();
+        let mut predecessors: HashMap<Word, HashSet<Word>> = HashMap::default();
         for (from, successors) in crate::spirv_module::block_successors_by_label(&function.blocks) {
             for to in successors {
                 predecessors.entry(to).or_default().insert(from);
@@ -2143,7 +2144,7 @@ mod emitted_inline_tests {
             let Some(here) = block.label.as_ref().and_then(|label| label.result_id) else {
                 continue;
             };
-            let empty = HashSet::new();
+            let empty = HashSet::default();
             let here_predecessors = predecessors.get(&here).unwrap_or(&empty);
             for instruction in &block.instructions {
                 if instruction.class.opcode != Op::Phi {
@@ -2246,7 +2247,7 @@ mod emitted_inline_tests {
             module,
             crate::emit_sidecar::EmitSidecar::default(),
             Some("main"),
-            &HashSet::new(),
+            &HashSet::default(),
         )
         .expect("complete emitted closure");
 

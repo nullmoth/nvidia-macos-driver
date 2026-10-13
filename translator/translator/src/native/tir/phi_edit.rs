@@ -180,7 +180,7 @@ mod tests {
     use crate::native::tir::lower_block_carrier;
 
     fn types() -> HashMap<String, LlType> {
-        HashMap::new()
+        HashMap::default()
     }
 
     #[test]

@@ -1,6 +1,6 @@
+use crate::fxhash::HashSet;
 use crate::spirv_module::{Block, Function, Instruction, Operand};
 use spirv::{Op, Word};
-use std::collections::HashSet;
 
 pub(in crate::passes) struct CallSiteSplit {
     pub(in crate::passes) prefix: Vec<Instruction>,
@@ -184,7 +184,7 @@ impl CallSiteSplit {
             .blocks
             .splice(block + 1..block + 1, blocks);
         if let Some((private_merge, merge_target)) = loop_exit_passthrough {
-            let merge_successor = HashSet::from([merge_target]);
+            let merge_successor = crate::fxhash::set_from([merge_target]);
             rewrite_successor_phi_predecessors(
                 &mut ctx.module.functions[entry_idx],
                 &merge_successor,
@@ -229,7 +229,7 @@ fn leading_variable_count(instructions: &[Instruction]) -> usize {
 }
 
 fn terminator_successors(inst: &Instruction) -> HashSet<Word> {
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     match inst.class.opcode {
         Op::Branch => {
             if let Some(Operand::IdRef(label)) = inst.operands.first() {

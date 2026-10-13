@@ -1,7 +1,7 @@
 use super::Ctx;
+use crate::fxhash::HashMap;
 use crate::spirv_module::{Instruction, Operand};
 use spirv::{Op, StorageClass, Word};
-use std::collections::HashMap;
 
 fn is_subgroup_op(opcode: Op) -> bool {
     matches!(
@@ -94,7 +94,7 @@ pub(in crate::passes) fn materialize_selected_subgroup_results(ctx: &mut Ctx) {
 
 fn materialize_in_function(ctx: &mut Ctx, function_idx: usize) {
     let function = &ctx.module.functions[function_idx];
-    let mut reads: HashMap<Word, usize> = HashMap::new();
+    let mut reads: HashMap<Word, usize> = HashMap::default();
     for block in &function.blocks {
         for inst in &block.instructions {
             for operand in &inst.operands {
@@ -128,7 +128,7 @@ fn materialize_in_function(ctx: &mut Ctx, function_idx: usize) {
                 _ => None,
             })
             .collect();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fxhash::HashSet::default();
         while let Some(id) = queue.pop() {
             if !seen.insert(id) || reads.get(&id).copied().unwrap_or(0) != 1 {
                 continue;
@@ -159,7 +159,7 @@ fn materialize_in_function(ctx: &mut Ctx, function_idx: usize) {
     }
 
     let mut variables = Vec::new();
-    let mut edits: HashMap<usize, Vec<(usize, Word, Word, Word)>> = HashMap::new();
+    let mut edits: HashMap<usize, Vec<(usize, Word, Word, Word)>> = HashMap::default();
     for (block_idx, index, result, result_type) in spill {
         let ptr_type = ctx.ty_ptr(StorageClass::Function, result_type);
         let variable = ctx.module.fresh_id();
