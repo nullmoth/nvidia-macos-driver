@@ -6,7 +6,7 @@ src, dst = sys.argv[1], sys.argv[2]
 if os.path.exists(dst):
     shutil.rmtree(dst)
 # Intel's ivpu from the newer tree when given (argv[3]): Linux 6.18+ boots the current linux-firmware NPU image on
-# Arrow Lake (boot API 3.37) where 6.14's driver (expects 3.26) timed out waiting for the ready message (10-11)
+# Arrow Lake (boot API 3.37) where 6.14's driver (expects 3.26) timed out waiting for the ready message
 IVPU_SRC = sys.argv[3] if len(sys.argv) > 3 and os.environ.get("NMX_IVPU_614") != "1" else src
 shutil.copytree(os.path.join(IVPU_SRC, "drivers/accel/ivpu"), os.path.join(dst, "ivpu"))
 # its UAPI header, found as <uapi/drm/ivpu_accel.h> through cc-npu.sh's -I npu-src/uapi ahead of the 6.14 copy
@@ -67,7 +67,7 @@ edit("ivpu/ivpu_fw.c", [
     ('\t{ IVPU_HW_IP_40XX, "intel/vpu/vpu_40xx_v0.0.bin" },\n', '\t{ IVPU_HW_IP_40XX, "intel/vpu/vpu_40xx_v1.bin" },\n\t{ IVPU_HW_IP_40XX, "intel/vpu/vpu_40xx_v0.0.bin" },\n'),
     ('\t{ IVPU_HW_IP_50XX, "intel/vpu/vpu_50xx_v0.0.bin" },\n', '\t{ IVPU_HW_IP_50XX, "intel/vpu/vpu_50xx_v1.bin" },\n\t{ IVPU_HW_IP_50XX, "intel/vpu/vpu_50xx_v0.0.bin" },\n'),
 ])
-# First Arrow Lake attach (10-11): the SHAVE firmware buffer found no room in context 0 (-ENOSPC) although the range
+# First Arrow Lake attach: the SHAVE firmware buffer found no room in context 0 (-ENOSPC) although the range
 # is 2 GB (SZ_2G was -2 GB; see override/include/linux/sizes.h). A failed placement prints the range, the size and
 # every hole of the context.
 edit("ivpu/ivpu_mmu_context.c", [

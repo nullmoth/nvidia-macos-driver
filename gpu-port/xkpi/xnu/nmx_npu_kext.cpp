@@ -115,7 +115,7 @@ void NMXNPU::attachThread(void *arg, wait_result_t)
 
 /*
  * Boot guard. The first attach on a real Arrow Lake NPU panicked 7 s into boot, and with nmxnpu=1 in the boot
- * arguments every start panicked again until the arguments were removed from Linux (10-11). Before attaching, the
+ * arguments every start panicked again until the arguments were removed from Linux. Before attaching, the
  * driver sets an NVRAM marker and writes it out; it clears it once the attach returns. A start that finds the marker
  * still set follows an attach that never returned (a panic or a hang), so it leaves the NPU alone and says so. Turning
  * the test driver off and on again in the app clears the marker (setup deletes it).
@@ -172,7 +172,7 @@ static void nmx_marker_write(bool on)
  * Function Level Reset before the driver touches the NPU, as Linux's reset path does (its reset_method for the Arrow
  * Lake NPU is "flr"). Under macOS the NPU's always-on registers were not at their reset values when ivpu started
  * (VPU idle generation off, a power island already on), so power-up failed its NOC handshake or the firmware never
- * answered; Linux on the same machine sees reset values and boots it in 67 ms (10-11). Config space is saved and
+ * answered; Linux on the same machine sees reset values and boots it in 67 ms. Config space is saved and
  * restored around the reset, which clears BARs and the command register.
  */
 static void nmx_npu_flr(IOPCIDevice *pci)

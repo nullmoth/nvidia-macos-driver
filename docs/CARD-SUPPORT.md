@@ -5,8 +5,8 @@ The driver uses NVIDIA's r610 open RM, HAL, and GSP stack. That stack targets Tu
 The installer carries 245 distinct display-card PCI device IDs from NVIDIA's 610.57.04 table in
 [`nvidia_gsp_ids.json`](../app/Resources/nvidia_gsp_ids.json). The kernel matches NVIDIA display
 and 3D-controller PCI classes, then asks NVIDIA's own supported-device gates to accept the card.
-A device-table match does not establish that a particular laptop's display routing, firmware,
-BAR placement, or macOS installation works.
+A card being in the table doesn't mean a given laptop works: its display wiring, firmware and BAR
+setup still have to cooperate.
 
 | Family | Examples covered by the device table | Physical validation in this release |
 | --- | --- | --- |
@@ -30,8 +30,8 @@ bring-up 40 seconds. The actual settling delay is exposed as `nvrm-autogo-settle
 An RTX 5060 passed a guarded boot with a deliberately forced 100-second settling delay, then
 passed a second boot with the production 500 ms delay. Both runs armed the display, loaded all
 four kexts, and kept WindowServer stable for 60 seconds without a new desktop/kernel crash.
-This reproduces and validates the timing mechanism; it does not establish physical small-BAR
-operation on another card. The existing ReBAR setup remains the validated configuration.
+That shows the timing fix works, but it was not a physical small-BAR card. Resizable BAR on
+is still the tested setup.
 
 ## Desktop presentation
 

@@ -288,7 +288,7 @@ static NSImage *mothImage(void) {
         }
     });
 }
-// 10-11 (studio): hiding only ordered our window out; the boot progress space with the window server's boot window
+// Hiding only ordered our window out; the boot progress space with the window server's boot window
 // stayed on top and the login window never appeared (black screen with cursor) until the job was stopped. Undo the space
 // the way it was made: hide it, take the windows out, destroy it, release the boot windows.
 - (void)tearDownSpace {
@@ -321,7 +321,7 @@ static NSImage *mothImage(void) {
 }
 @end
 
-// 10-11 (studio): launchd starts this before the window server has checked in. Its port com.apple.windowserver.active
+// launchd starts this before the window server has checked in. Its port com.apple.windowserver.active
 // is HideUntilCheckIn, so the first connection attempt fell back to launching the window server, which SkyLight refuses
 // before login for anything but Apple's own programs ("This program is not permitted to connect to or launch Window
 // Server before login") - no screens, no boot windows, nothing drawn. Installer Progress logged the same lookup error

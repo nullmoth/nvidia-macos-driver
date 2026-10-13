@@ -284,7 +284,7 @@ NVGL_ZERO_NET(NVMTLGLPointerType)
     return (MTLPointerType *)p;
 }
 - (id)dataTypeDescription { return _type == MTLBindingTypeBuffer ? (id)[self bufferPointerType] : nil; }
-// 10-07 (studio, Screen Sharing "Both Displays" = tiled garbage): these getters answered real-looking values (2D, length 1,
+// (Screen Sharing "Both Displays" = tiled garbage): these getters answered real-looking values (2D, length 1,
 // stride = size, Pointer/Texture, the binding index) and Apple's GL/OpenCL layer laid out its clImage*Scale kernel arguments
 // from them. The working build never implemented them: its forwarding net answered ZERO. They stay implemented (no abort)
 // and answer exactly that zero.
@@ -335,7 +335,7 @@ NVGL_ZERO_NET(NVMTLGLBinding)
 - (BOOL)isDepthTexture { return NO; }
 - (BOOL)depthTexture { return NO; }
 - (NSUInteger)arrayLength { return 1; }
-// same older getters as NVMTLGLBinding (10-07), with what MTLArgument gives for a texture
+// same older getters as NVMTLGLBinding, with what MTLArgument gives for a texture
 - (NSUInteger)alignment { return 0; }
 - (NSUInteger)dataSize { return 0; }
 - (NSArray *)members { return nil; }
@@ -348,7 +348,7 @@ NVGL_ZERO_NET(NVMTLGLBinding)
 - (MTLDataType)bufferDataType { return MTLDataTypeNone; }
 - (NSUInteger)threadgroupMemoryAlignment { return 0; }
 - (NSUInteger)threadgroupMemoryDataSize { return 0; }
-// same four getters as NVMTLGLBinding (10-07): a texture is MTLDataTypeTexture at offset 0, at its own index
+// same four getters as NVMTLGLBinding: a texture is MTLDataTypeTexture at offset 0, at its own index
 - (MTLDataType)dataType { return MTLDataTypeNone; }
 - (NSUInteger)offset { return 0; }
 - (NSUInteger)stride { return 0; }
@@ -429,7 +429,7 @@ static NSArray *nvmtl_gl_cl_bindings(NSString *ll) {
     // Apple's OpenCL builds its argument table from this reflection (GLDComputeProgramRec::buildComputeProgram reads
     // reflectionWithOptions: -> arguments). It answered nil whenever the function already had SPIR-V - which is always,
     // since library entries translate when they are made - or had no air.constant argument, so OpenCL saw 0 arguments:
-    // every clSetKernelArg returned -49 and Geekbench's OpenCL run stopped at its first workload (studio, 10-10).
+    // every clSetKernelArg returned -49 and Geekbench's OpenCL run stopped at its first workload.
     if (getenv("NVMTL_CL_REFL_TRACE")) nvlog("GL: reflectionWithOptions: %s options 0x%lx spirv %lu B air %lu B kernel-list %d", _fname.UTF8String, (unsigned long)o, (unsigned long)_spirv.length, (unsigned long)_air.length, [_air containsString:@"!air.kernel"]);
     // A kernel is translated when its library entry is made, so _spirv is always set by now; only the AIR decides.
     if (!_air.length || ![_air containsString:@"!air.kernel"]) return nil;

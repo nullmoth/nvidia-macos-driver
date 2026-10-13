@@ -1,6 +1,6 @@
 /*
  * LinuxKPI's sizes.h computes SZ_2G..SZ_32G in int arithmetic ((1024 * 1024 * 1024 * 2) overflows to -2 GB, SZ_4G to 0).
- * Linux defines them as unsigned long long. The first Arrow Lake NPU attach (10-11) failed on exactly this: ivpu's
+ * Linux defines them as unsigned long long. The first Arrow Lake NPU attach failed on exactly this: ivpu's
  * SHAVE range [0x180000000, +SZ_2G) came out as [0x180000000, 0x100000000), end below start, so its firmware buffer
  * found no room (-ENOSPC). Every range of 2 GB or more in amdgpu, i915, xe and the NPU drivers had the same error.
  * Here they take Linux's values and type.

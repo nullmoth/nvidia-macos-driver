@@ -80,7 +80,7 @@ class NMIntelFB : public IOFramebuffer {
     IOMemoryMap *fMMIO = nullptr;
     IOMemoryMap *fSurfMap = nullptr;   // write-combined CPU view of the scan-out surface (NVIDIA frames land here)
     // WindowServer paces an accelerated display on its VBL interrupt: the NVIDIA display pipe completes each frame on it.
-    // Without one the first frame never completed and WindowServer stalled every display (studio test 10-10, the
+    // Without one the first frame never completed and WindowServer stalled every display (in testing, the
     // virtual panel froze the Mac). A 60 Hz timer is the VBL, as NVRMFB's fallback is.
     struct Irq { IOFBInterruptProc proc = nullptr; OSObject *target = nullptr; void *ref = nullptr; };
     Irq fVbl, fConnect;
@@ -108,7 +108,7 @@ class NMIntelFB : public IOFramebuffer {
     // 64 pixels across the buffer: how many are non-black and how many differ from the first, published in the registry
 public:
     // 64 pixels across the buffer, read on demand through sysctl debug.nmintelfb_sample (the registry property the
-    // timer set never showed up on studio, 10-10)
+    // timer set never showed up)
     void sampleInto(char *b, size_t n) {
         if (!fSurfMap) { snprintf(b, n, "no surface"); return; }
         const volatile uint32_t *px = (const volatile uint32_t *)fSurfMap->getVirtualAddress();
@@ -151,7 +151,7 @@ public:
     IOReturn getPixelInformation(IODisplayModeID mode, IOIndex depth, IOPixelAperture aperture, IOPixelInformation *pi) override;
     IOReturn getCurrentDisplayMode(IODisplayModeID *mode, IOIndex *depth) override { *mode = 1; *depth = 0; return kIOReturnSuccess; }
     IOReturn getStartupDisplayMode(IODisplayModeID *mode, IOIndex *depth) override { return getCurrentDisplayMode(mode, depth); }
-    // WindowServer showed the panel at 0.00 Hz without this (studio virtual panel, 10-10)
+    // WindowServer showed the panel at 0.00 Hz without this (virtual panel)
     IOReturn getTimingInfoForDisplayMode(IODisplayModeID mode, IOTimingInformation *info) override {
         if (mode != 1 || !info) return kIOReturnUnsupportedMode;
         bzero(info, sizeof(*info));
@@ -184,7 +184,7 @@ public:
     // Power and connection handling copied from NVRMFB, which shares this controller (same IOFBDependentID). Left to
     // IOFramebuffer's base class, a power change queues on the shared controller thread and waits for an acknowledge
     // (IOFramebuffer::setPowerState returns a 45 s timeout, checkPowerWork -> setAttribute(kIOPowerStateAttribute));
-    // NVRMFB acknowledges at once and answers the power attributes itself. Studio 10-10: with NMIntelFB under NVRM the
+    // NVRMFB acknowledges at once and answers the power attributes itself. With NMIntelFB under NVRM the
     // first WindowServer restart froze every display.
     IOReturn setPowerState(unsigned long ordinal, IOService *) override {
         handleEvent(ordinal ? kIOFBNotifyDidPowerOn : kIOFBNotifyWillPowerOff);
@@ -438,7 +438,7 @@ static int nmintelfb_attach_sysctl SYSCTL_HANDLER_ARGS
     if (err || !req->newptr || v != 1 || gAttach == 1) return err;
     // A spare NVRMDisplay nub under NVRM (NVRM's own class), marked as the Intel panel: NMIntelFB claims it ahead of
     // NVRMFB, so the panel sits where NVRMFB does (GPU -> NVRM -> NVRMDisplay -> framebuffer). Starting a framebuffer
-    // directly on the NVIDIA PCI device hung the kernel (studio 10-10).
+    // directly on the NVIDIA PCI device hung the kernel.
     IOService *nub0 = nullptr, *nvrm = nullptr;
     if (OSDictionary *m = IOService::serviceMatching("NVRMDisplay")) {
         if (OSIterator *it = IOService::getMatchingServices(m)) {

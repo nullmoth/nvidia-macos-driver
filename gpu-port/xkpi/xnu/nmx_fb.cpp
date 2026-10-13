@@ -5,7 +5,7 @@
  *
  * The IOFramebuffer behaviour (one fixed mode, timing, power acknowledged at once, the colour answers WindowServer
  * asks, a 60 Hz timer as the VBL until the display interrupt is wired) is the same as NMIntelFB's, which met the
- * same WindowServer on studio.
+ * same WindowServer.
  */
 #include <IOKit/IOLib.h>
 #include <IOKit/graphics/IOFramebuffer.h>
@@ -125,7 +125,7 @@ public:
         *mode = 1; *depth = 0; return kIOReturnSuccess;
     }
     IOReturn getStartupDisplayMode(IODisplayModeID *mode, IOIndex *depth) override { return getCurrentDisplayMode(mode, depth); }
-    /* without a timing, WindowServer shows the display at 0.00 Hz (NMIntelFB on studio, 10-10) */
+    /* without a timing, WindowServer shows the display at 0.00 Hz (seen with NMIntelFB) */
     IOReturn getTimingInfoForDisplayMode(IODisplayModeID mode, IOTimingInformation *info) override {
         if (mode != 1 || !info) return kIOReturnUnsupportedMode;
         bzero(info, sizeof(*info));
@@ -162,7 +162,7 @@ public:
     IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnSuccess; }
     IOReturn setApertureEnable(IOPixelAperture, IOOptionBits) override { return kIOReturnSuccess; }
     IOReturn setStartupDisplayMode(IODisplayModeID, IOIndex) override { return kIOReturnSuccess; }
-    /* power acknowledged at once; left to IOFramebuffer it waits on a shared thread (NVRMFB, studio 10-10) */
+    /* power acknowledged at once; left to IOFramebuffer it waits on a shared thread (seen with NVRMFB) */
     IOReturn setPowerState(unsigned long ordinal, IOService *) override {
         handleEvent(ordinal ? kIOFBNotifyDidPowerOn : kIOFBNotifyWillPowerOff);
         return kIOPMAckImplied;

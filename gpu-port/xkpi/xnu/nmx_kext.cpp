@@ -131,7 +131,7 @@ void NMXGPU::attachThread(void *arg, wait_result_t)
 
 /*
  * Boot guard, as in NMXNPU: the NPU kext on this layer panicked 7 s into every start until its boot argument was
- * removed from Linux (10-11). The attach, the modeset and the hand-over to macOS run between setting an NVRAM marker
+ * removed from Linux. The attach, the modeset and the hand-over to macOS run between setting an NVRAM marker
  * and clearing it; a start that finds the marker still set follows an attach that never returned (a panic or a hang),
  * so this GPU stays with macOS and the driver says so. Turning the test driver off and on in the app clears it.
  */

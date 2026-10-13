@@ -1,7 +1,5 @@
 # 1401 and NVIDIA driver 1.11.0
 
-**Something not working? [nullmothsystems.com/help](https://nullmothsystems.com/help) lists every known problem and exactly what to do.**
-
 ## Mac app
 - "AMFIPass.kext is not in this OpenCore EFI" no longer stops an install or update. Setup downloads Lilu and AMFIPass itself, from the same files 1401 builds with, checks each SHA-256 before changing anything, copies them into the EFI and adds them to the config.
 - Firefox (and other apps that crashed at launch with AMFI relaxed) open: setup adds the `ipc_control_port_options=0` boot argument.

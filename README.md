@@ -1,29 +1,27 @@
 # NullMoth NVIDIA Driver for macOS
 
-A Metal driver for NVIDIA Turing-and-later cards on Intel Macs and OpenCore systems running **macOS 15 Sequoia**.
-The device table includes GTX 16, RTX 20/30/40/50, TITAN RTX, supported Quadro/RTX workstation cards, and the NVIDIA T-series (T400/T600/T1000; T500/T550/T600/T1200 laptop).
-The driver implements NVIDIA-backed display and Metal interfaces. Feature availability and application behavior depend on the card, operating-system version and installed components; device-table coverage is not runtime qualification.
+A Metal driver for NVIDIA GeForce cards on macOS 15 Sequoia (Intel Macs and OpenCore PCs). It is open source; the
+kernel extensions, the Metal plugin, the shader translator and the Mac app are all in this repository.
 
-Made by **NullMoth Systems**.
+Supported cards are Turing and newer: GTX 16, RTX 20, 30, 40 and 50, TITAN RTX, Quadro RTX and the T-series. Most
+testing is done on an RTX 5060, so other cards may have problems that haven't been found yet. See
+[card support](docs/CARD-SUPPORT.md) for what has been reported working.
 
-**Latest update:** [1401 and NVIDIA driver 1.14.5](docs/releases/RELEASE-1.14.5.md). See the changes, validation and qualification scope before updating.
+- Latest release: [1.15.0](docs/releases/RELEASE-1.15.0.md) ([all releases](docs/releases))
+- Problems: [troubleshooting](docs/TROUBLESHOOTING.md), then Send logs from the 1401 app
+- Installing macOS from Windows: [1401](https://github.com/nullmoth/1401)
+- How it works: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)
+- Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
 
-**Something not working?** [Why a machine does not work, and how to fix it](docs/TROUBLESHOOTING.md) - every known problem, where it stops, why, and the fix.
-
-Installing macOS from Windows? Use **1401**: https://github.com/nullmoth/1401
-
-> **This driver is new and may not work on every PC.** It is tested on an RTX 5060 under macOS 15.7.x and 15.8.1. Device-table coverage is broader than physical hardware validation; see [card support](docs/CARD-SUPPORT.md). If your PC does
-> not boot macOS with OpenCore yet, set that up first with the
-> [OpenCore Install Guide](https://dortania.github.io/OpenCore-Install-Guide/)
-> ([OpenCore releases](https://github.com/acidanthera/OpenCorePkg/releases)), then install the driver.
-> The full write-up of how the driver works is in [`docs/HOW-IT-WORKS.md`](docs/HOW-IT-WORKS.md).
+If your PC doesn't boot macOS with OpenCore yet, set that up first with the
+[OpenCore Install Guide](https://dortania.github.io/OpenCore-Install-Guide/), then install the driver.
 
 Support the work: https://buymeacoffee.com/nullmoth
 
 | | |
 |---|---|
 | macOS | 15 Sequoia (tested 15.7.x and 15.8.1), x86_64 |
-| GPUs | NVIDIA Turing and later from the GSP device table; physical validation: RTX 5060 |
+| GPUs | NVIDIA Turing and later; developed on an RTX 5060 |
 | Metal | Metal 3: argument buffers tier 2, ray tracing, mesh shaders, MPS, MetalFX path |
 | Also | OpenGL (through Apple's GL-on-Metal), OpenCL, Core Image, Core ML |
 
@@ -67,13 +65,13 @@ puts the Mac back exactly as it was before the install, OpenCore config included
 maps your USB ports and, if the driver ever crashes the Mac, offers to make a crash report you can upload yourself
 (it never sends anything on its own).
 
-**Something not working?** Open 1401 > Crash report > **Send logs to NullMoth**. It sends what 1401 did, the driver's
-state, driver crash reports, recent WindowServer crash reports and OpenCore's startup logs (names, serial numbers and addresses removed), each
-with a SHA-256 the site checks, and shows a report ID to quote in the NullMoth Discord.
+If something goes wrong, open 1401 > Crash report > Send logs to NullMoth. It uploads what 1401 did, the driver's
+state, crash reports and OpenCore's startup log, with names, serial numbers and addresses removed, and gives you a
+report ID to put in your issue or in Discord.
 
-**Keep the USB stick or disk OpenCore started your Mac from plugged in** while the app runs: that is the config it
-changes. A shared SMBIOS model alone does not establish the startup partition. Automatic USB-to-internal copying is disabled, preserving Windows and vendor boot files. Driver installation uses the selected startup partition. Keep the OpenCore stick attached for every restart until the internal boot setup is reviewed. After the install,
-restart; the first start with the driver pauses for up to a minute at "PCI configuration end" while the GPU comes up.
+Keep the USB stick or disk that OpenCore started from plugged in while the app runs, and for every restart after:
+that is the config the app changes. The app never copies OpenCore to your internal disk. The first start with the
+driver pauses for up to a minute at "PCI configuration end" while the GPU comes up.
 
 ## Wiring into an existing OpenCore setup
 
@@ -105,10 +103,9 @@ Add every key you set to `NVRAM → Delete` as well, so the values are rewritten
 | `Misc → Security → SecureBootModel` | `Disabled` | Apple Secure Boot refuses kexts Apple did not sign |
 
 The macOS **installer** uses `ResizeAppleGpuBars` `0`, `ResizeGpuBars` `-1`, and IONDRVSupport
-not excluded: it runs on the firmware framebuffer. The Mac app preserves existing BAR and kernel-placement settings
-during driver installation and updates. Do not replace a working configuration with fixed BAR values from another
-board. The NVIDIA driver places a supported BAR after macOS starts; boot and display qualification remain specific
-to the machine.
+not excluded: it runs on the firmware framebuffer. The Mac app keeps your existing BAR settings when it installs or
+updates the driver, and the driver sets up the BAR itself after macOS starts, so don't copy BAR values from someone
+else's board.
 
 Also required:
 - **BIOS:** Above 4G Decoding ON (the card maps memory above 4 GB), CSM OFF.
