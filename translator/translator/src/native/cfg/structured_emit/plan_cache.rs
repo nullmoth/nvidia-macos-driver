@@ -2,18 +2,21 @@
 //!
 //! `structured_plan` tries one plan after another (`structured_plan_ladder` with and without a bare exit, on the original blocks
 //! and on privatized copies, again after `finalize_loop_role_switches`), and `structured_reject_reason` walks the same ladder
-//! once more. Every attempt used to start from scratch with `forest_loop_merges` and the selection synthesis. The result of each
-//! of those two steps depends only on the blocks and a few of the attempt's flags, so attempts that differ in the other flags
-//! computed the same thing again: on one 232-block kernel 56 attempts spent 55% and 43% of their time in those two steps while
-//! only 7 and 12 of them had distinct inputs.
+//! once more. Each attempt needs `forest_loop_merges` and the selection synthesis, and both depend only on the blocks and a few
+//! of the attempt's flags, so attempts that differ in the other flags compute the same thing again. This module caches those two
+//! results for the duration of one planner call and returns a clone of a stored value for an equal input.
 //!
-//! An entry remembers its input blocks and is found again only for blocks that are equal to them. Blocks hold their body in an
-//! `Arc` that is never changed in place while it is shared, so two blocks with the same name, role and `Arc` are equal; blocks
-//! with different `Arc`s (a privatized copy made again) are compared by their debug text, as `block_body_changed` does. The cache
-//! lives only while a `Scope` is held on this thread; outside one it is off. A hit returns a clone of what was computed first.
+//! An entry remembers its whole input: the blocks, the flags that affect the step, and the merge tables the selection synthesis
+//! reads. Blocks hold their body in an `Arc` that is never changed in place while it is shared, so two blocks with the same name,
+//! role and `Arc` are equal; blocks with different `Arc`s (a privatized copy made again) are compared by their debug text, as
+//! `block_body_changed` does. The key keeps full values rather than a hash, so a collision cannot serve a stale result.
+//!
+//! The cache lives only while a `Scope` is held on this thread; outside one it is off. Each table is capped at `MAX_ENTRIES`: a
+//! lookup that misses while the table is full is computed but not stored, which bounds the linear scan. A later `Scope` starts
+//! empty because dropping the outermost one clears both tables.
 use super::*;
 use std::cell::RefCell;
-use std::fmt::Write as _;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 pub(super) type LoopMerges = (Vec<BodyBlock>, HashMap<String, LoopMergeInfo>);
@@ -23,6 +26,10 @@ pub(super) type Selection = (
     HashMap<String, String>,
     HashMap<String, String>,
 );
+
+/// Exact structural key of the two merge tables: sorted `(key, value)` terminal merges and sorted
+/// `(header, merge, continue_target)` loop merges. Every field is kept, so distinct tables never compare equal.
+type MapsKey = (Vec<(String, String)>, Vec<(String, String, String)>);
 
 const MAX_ENTRIES: usize = 24;
 
@@ -40,7 +47,7 @@ struct LoopMergesEntry {
 
 struct SelectionEntry {
     flags: [bool; 3],
-    maps: String,
+    maps: MapsKey,
     input: Vec<BodyBlock>,
     value: Selection,
 }
@@ -57,12 +64,19 @@ thread_local! {
 }
 
 /// Held by a caller of the planner for as long as it runs; the cache is emptied when the outermost one is dropped.
-pub(in crate::native) struct Scope;
+///
+/// The cache behind it is thread-local, so a `Scope` must stay on the thread that entered it. The `PhantomData` of a raw
+/// pointer makes the type `!Send`/`!Sync`; nothing ever reads the field.
+pub(in crate::native) struct Scope {
+    _not_send: PhantomData<*const ()>,
+}
 
 impl Scope {
     pub(in crate::native) fn enter() -> Scope {
         CACHE.with(|cache| cache.borrow_mut().depth += 1);
-        Scope
+        Scope {
+            _not_send: PhantomData,
+        }
     }
 }
 
@@ -100,20 +114,24 @@ fn same_blocks(left: &[BodyBlock], right: &[BodyBlock]) -> bool {
 fn maps_key(
     loop_merges: &HashMap<String, LoopMergeInfo>,
     terminal_merges: &HashMap<String, String>,
-) -> String {
-    let mut out = String::new();
-    let mut terminal: Vec<_> = terminal_merges.iter().collect();
+) -> MapsKey {
+    let mut terminal: Vec<(String, String)> = terminal_merges
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
     terminal.sort();
-    for (key, value) in terminal {
-        let _ = write!(out, "{key}=>{value};");
-    }
-    out.push('\n');
-    let mut loops: Vec<_> = loop_merges.iter().collect();
-    loops.sort_by(|a, b| a.0.cmp(b.0));
-    for (header, info) in loops {
-        let _ = write!(out, "{header}=>{}|{};", info.merge, info.continue_target);
-    }
-    out
+    let mut loops: Vec<(String, String, String)> = loop_merges
+        .iter()
+        .map(|(header, info)| {
+            (
+                header.clone(),
+                info.merge.clone(),
+                info.continue_target.clone(),
+            )
+        })
+        .collect();
+    loops.sort();
+    (terminal, loops)
 }
 
 pub(super) fn forest_loop_merges_cached(
@@ -236,6 +254,201 @@ mod tests {
             .collect();
         loops.sort();
         format!("{:?}\n{loops:?}", plan.blocks)
+    }
+
+    /// A selection whose terminal-merges entry carries `tag`, so a caller can tell which compute produced it.
+    fn dummy_selection(tag: &str) -> Selection {
+        let mut terminal = HashMap::new();
+        terminal.insert("tag".to_string(), tag.to_string());
+        (Vec::new(), HashMap::new(), terminal, HashMap::new())
+    }
+
+    fn tag_of(selection: &Selection) -> Option<&str> {
+        selection.2.get("tag").map(String::as_str)
+    }
+
+    #[test]
+    fn selection_key_distinguishes_different_inputs() {
+        reset_hits();
+        let _scope = Scope::enter();
+        let lblocks = self_loop(1);
+        let mut loop_merges = HashMap::new();
+        loop_merges.insert(
+            "%loop".to_string(),
+            LoopMergeInfo {
+                merge: "%merge".to_string(),
+                continue_target: "%loop".to_string(),
+            },
+        );
+        let mut other_loop_merges = HashMap::new();
+        other_loop_merges.insert(
+            "%loop".to_string(),
+            LoopMergeInfo {
+                merge: "%other".to_string(),
+                continue_target: "%loop".to_string(),
+            },
+        );
+        let terminal_merges = HashMap::new();
+        let mut other_terminal_merges = HashMap::new();
+        other_terminal_merges.insert("%merge".to_string(), "%exit".to_string());
+
+        let first = selection_cached(
+            &lblocks,
+            &loop_merges,
+            &terminal_merges,
+            false,
+            false,
+            false,
+            || dummy_selection("first"),
+        );
+        assert_eq!(hits(), 0);
+        assert_eq!(tag_of(&first), Some("first"));
+
+        // The same key is found and the body is not computed again.
+        let second = selection_cached(
+            &lblocks,
+            &loop_merges,
+            &terminal_merges,
+            false,
+            false,
+            false,
+            || panic!("an identical key must not compute"),
+        );
+        assert_eq!(hits(), 1);
+        assert_eq!(tag_of(&second), Some("first"));
+
+        // A different flag, a different loop-merge table and a different terminal-merge table all miss.
+        let by_flag = selection_cached(
+            &lblocks,
+            &loop_merges,
+            &terminal_merges,
+            true,
+            false,
+            false,
+            || dummy_selection("flag"),
+        );
+        let by_loop = selection_cached(
+            &lblocks,
+            &other_loop_merges,
+            &terminal_merges,
+            false,
+            false,
+            false,
+            || dummy_selection("loops"),
+        );
+        let by_terminal = selection_cached(
+            &lblocks,
+            &loop_merges,
+            &other_terminal_merges,
+            false,
+            false,
+            false,
+            || dummy_selection("terminal"),
+        );
+        assert_eq!(tag_of(&by_flag), Some("flag"));
+        assert_eq!(tag_of(&by_loop), Some("loops"));
+        assert_eq!(tag_of(&by_terminal), Some("terminal"));
+        assert_eq!(hits(), 1, "only the identical lookup hit");
+    }
+
+    #[test]
+    fn equal_body_text_in_different_arcs_still_hits() {
+        reset_hits();
+        let _scope = Scope::enter();
+        let first_input = self_loop(1);
+        let second_input = self_loop(1);
+        // Distinct allocations with identical text: `same_blocks` must fall back to the text comparison.
+        assert!(!Arc::ptr_eq(
+            first_input[1].typed.as_ref().expect("typed block"),
+            second_input[1].typed.as_ref().expect("typed block"),
+        ));
+        assert_eq!(
+            format!("{:?}", first_input[1].typed),
+            format!("{:?}", second_input[1].typed),
+        );
+
+        let loop_merges = HashMap::new();
+        let terminal_merges = HashMap::new();
+        let first = selection_cached(
+            &first_input,
+            &loop_merges,
+            &terminal_merges,
+            false,
+            false,
+            false,
+            || dummy_selection("first"),
+        );
+        assert_eq!(hits(), 0);
+        let second = selection_cached(
+            &second_input,
+            &loop_merges,
+            &terminal_merges,
+            false,
+            false,
+            false,
+            || panic!("equal text in a fresh `Arc` must hit"),
+        );
+        assert_eq!(hits(), 1);
+        assert_eq!(tag_of(&second), Some("first"));
+        assert_eq!(format!("{:?}", first.0), format!("{:?}", second.0));
+    }
+
+    #[test]
+    fn a_changed_block_set_misses() {
+        reset_hits();
+        let _scope = Scope::enter();
+        let loop_merges = HashMap::new();
+        let terminal_merges = HashMap::new();
+        let first = selection_cached(
+            &self_loop(1),
+            &loop_merges,
+            &terminal_merges,
+            false,
+            false,
+            false,
+            || dummy_selection("first"),
+        );
+        assert_eq!(hits(), 0);
+        assert_eq!(tag_of(&first), Some("first"));
+
+        // One block fewer.
+        let shorter = self_loop(1);
+        let by_length = selection_cached(
+            &shorter[..1],
+            &loop_merges,
+            &terminal_merges,
+            false,
+            false,
+            false,
+            || dummy_selection("shorter"),
+        );
+        // Same length, one body line different.
+        let by_body = selection_cached(
+            &self_loop(2),
+            &loop_merges,
+            &terminal_merges,
+            false,
+            false,
+            false,
+            || dummy_selection("body"),
+        );
+        // Same length, one block name different.
+        let mut renamed = self_loop(1);
+        renamed[1].name = "%other".to_string();
+        let by_name = selection_cached(
+            &renamed,
+            &loop_merges,
+            &terminal_merges,
+            false,
+            false,
+            false,
+            || dummy_selection("name"),
+        );
+
+        assert_eq!(tag_of(&by_length), Some("shorter"));
+        assert_eq!(tag_of(&by_body), Some("body"));
+        assert_eq!(tag_of(&by_name), Some("name"));
+        assert_eq!(hits(), 0, "none of the changed block sets hit");
     }
 
     #[test]
