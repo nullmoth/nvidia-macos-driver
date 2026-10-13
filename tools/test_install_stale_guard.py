@@ -18,7 +18,7 @@ SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "app/Resources/nullmot
 
 def functions(tmp):
     text = SCRIPT.read_text()
-    boot = re.search(r"^boot_sec\(\) \{.*$", text, re.M).group(0)
+    boot = "\n".join(re.search(r"^%s\(\) \{.*$" % f, text, re.M).group(0) for f in ("boot_sec", "same_boot", "is_installer_pid"))
     body = re.search(r"^recover_stale_guard\(\) \{.*?^\}", text, re.M | re.S).group(0)
     # the guard must be root's on a real Mac; here it is the test user's
     body = body.replace('"$(stat -f \'%u\' "$g" 2>/dev/null)" = 0', '"$(stat -f %u "$g")" = "$(id -u)"')
@@ -37,16 +37,31 @@ def run_case(prepare):
             'die() { echo "STOP: $*"; exit 1; }',
             'rollback_install() { echo "ROLLBACK from $BK"; return 0; }',
             f"LOCKDIR={guard}", f"TMP={tmp}", "B=$(boot_sec)",
+            # a stand-in live installer: a process whose command line names install.sh
+            f"printf 'sleep 20\\n' > {tmp}/install.sh", f"/bin/bash {tmp}/install.sh >/dev/null 2>&1 & INST=$!", "/bin/sleep 20 >/dev/null 2>&1 & OTHER=$!", "sleep 0.3",
             prepare,
             '( recover_stale_guard; [ -d "$LOCKDIR" ] && echo "guard KEPT" || echo "guard CLEARED" )',
+            "kill $INST $OTHER 2>/dev/null",
         ])
         return subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=30).stdout
 
 
 class StaleGuard(unittest.TestCase):
     def test_a_live_install_keeps_its_guard(self):
-        out = run_case("printf 'pid=%s\\nboot=%s\\n' $$ $B > $LOCKDIR/owner")
+        out = run_case("printf 'pid=%s\\nboot=%s\\n' $INST $B > $LOCKDIR/owner")
         self.assertIn("guard KEPT", out, out)
+
+    def test_a_live_install_survives_boot_time_drift(self):
+        out = run_case("printf 'pid=%s\\nboot=%s\\n' $INST $((B - 30)) > $LOCKDIR/owner")
+        self.assertIn("guard KEPT", out, out)
+
+    def test_a_reused_pid_that_is_not_the_installer_is_stale(self):
+        out = run_case("printf 'pid=%s\\nboot=%s\\n' $OTHER $B > $LOCKDIR/owner")
+        self.assertIn("guard CLEARED", out, out)
+
+    def test_an_installer_pid_from_an_earlier_boot_is_stale(self):
+        out = run_case("printf 'pid=%s\\nboot=%s\\n' $INST $((B - 7200)) > $LOCKDIR/owner")
+        self.assertIn("guard CLEARED", out, out)
 
     def test_a_dead_owner_is_cleared_without_a_rollback(self):
         out = run_case("printf 'pid=99999\\nboot=%s\\n' $B > $LOCKDIR/owner")

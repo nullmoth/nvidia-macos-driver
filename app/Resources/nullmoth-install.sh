@@ -53,6 +53,11 @@ rollback_install() {
 }
 step() { echo; echo "== $*"; }; ok() { echo "   ok  $*"; }
 boot_sec() { sysctl -n kern.boottime 2>/dev/null | sed -E 's/.*sec = ([0-9]+),.*/\1/'; }
+# kern.boottime is derived from the clock and moves when the clock is corrected after boot, so "the same boot" allows
+# 60 s of drift (review: an exact match could take a live install for a dead one and roll its files back mid-install).
+same_boot() { local a=$1 b; b=$(boot_sec); [ -n "$a" ] && [ -n "$b" ] && [ $((a > b ? a - b : b - a)) -le 60 ]; }
+# the pid is still the installer (pid numbers are reused): its command line names this script
+is_installer_pid() { ps -o command= -p "$1" 2>/dev/null | grep -Eq '(nullmoth-install|/install)\.sh'; }
 # A guard left by an install that was killed outright (power loss, a forced quit, a restart mid-install) stopped every
 # later install with "installer guard already exists" until someone removed it by hand (3 reports and chat, 10-12).
 # The guard now records its owner (pid, boot) and, once files start changing, the backup it can be restored from.
@@ -65,10 +70,10 @@ recover_stale_guard() {
   if [ -f "$o" ] && [ ! -L "$o" ]; then
     pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$o" | head -1); boot=$(sed -n 's/^boot=\([0-9][0-9]*\)$/\1/p' "$o" | head -1)
     bk=$(sed -n 's/^bk=\(.*\)$/\1/p' "$o" | head -1)
-    if [ -n "$pid" ] && [ "$boot" = "$(boot_sec)" ] && kill -0 "$pid" 2>/dev/null; then return 0; fi
+    if [ -n "$pid" ] && same_boot "$boot" && kill -0 "$pid" 2>/dev/null && is_installer_pid "$pid"; then return 0; fi
   else
     # a guard from 1.14.7 or earlier has no owner record: an install cannot outlive a restart, so one older than this boot is stale
-    [ "$(stat -f '%m' "$g" 2>/dev/null || echo 0)" -lt "$(boot_sec)" ] || return 0
+    [ "$(stat -f '%m' "$g" 2>/dev/null || echo 0)" -lt $(( $(boot_sec) - 60 )) ] || return 0
   fi
   echo "   NOTE: an earlier install was interrupted and left its guard behind; recovering it"
   if [ -e "$g/installing" ]; then
