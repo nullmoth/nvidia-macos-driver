@@ -11,11 +11,16 @@ gets a real review.
 
 One problem per issue. If you found the cause, say how you know: what you ran and what it printed.
 
+## No AI-written contributions
+
+Pull requests, issues and review comments must be written by a person who understands them. AI-written code,
+descriptions and bug reports are closed without review.
+
 ## Pull requests
 
-- Write it yourself and understand it. You may use whatever tools you like, but you have to be able to explain
-  every line and answer review questions about it. PRs that are pasted model output (long generated descriptions,
-  "say the word and I will add it", changes the author can't explain) will be closed without review.
+- Write it yourself and understand it. You have to be able to explain every line and answer review questions about
+  it. PRs that are pasted tool output (long generated descriptions, "say the word and I will add it", changes the
+  author can't explain) are closed without review.
 - One change per PR. A fix, a feature or a cleanup, not all three. Small PRs get merged; 2,000-line PRs sit.
 - Say what you tested. Your card, macOS version, and what you did to check it. "Builds" is not tested.
 - Keep the description short: what was wrong, what you changed, how you tested it. Link the issue.
