@@ -12,7 +12,9 @@ head_off = source[source.index('bool NVRMNVDAFramebuffer::headOff()'):start]
 assert 'submitConfig(cfg, rep, NV_TRUE)' in head_off
 assert 'fKms->applyModeSetConfig' not in head_off
 connection = source[source.index('IOReturn NVRMNVDAFramebuffer::setAttributeForConnection('):]
-assert 'setHeadPower(value != 0)' in connection
+# per-connection power stays the 1.14.7 no-op success: head power follows setPowerState only
+connection_power = connection[:connection.index('switch (attribute)')]
+assert 'return kIOReturnSuccess' in connection_power and 'setHeadPower' not in connection_power
 fixture = r'''
 #include <cassert>
 #include <cstdio>
@@ -50,9 +52,10 @@ int main() {
     f.sleepOK=true; assert(f.setHeadPower(false) && f.fHeadSlept);
     unsigned sleeps=f.sleeps; assert(f.setHeadPower(false) && f.sleeps==sleeps);
     f.wakeOK=false; f.setPowerState(1,nullptr);
-    assert(f.fHeadSlept && f.wakes==1 && !f.notifications);
+    // a failed wake stays retryable, and WindowServer is still told the display is on (1.14.7 behaviour)
+    assert(f.fHeadSlept && f.wakes==1 && f.notifications==1);
     f.wakeOK=true; f.setPowerState(1,nullptr);
-    assert(!f.fHeadSlept && f.wakes==2 && f.notifications==1);
+    assert(!f.fHeadSlept && f.wakes==2 && f.notifications==2);
     f.setPowerState(1,nullptr); assert(f.wakes==2);
     f.setPowerState(0,nullptr); assert(f.fHeadSlept);
     disabled=true; unsigned wakes=f.wakes;
@@ -61,7 +64,7 @@ int main() {
     lockAvailable=false; assert(!f.setHeadPower(true)); lockAvailable=true;
     assert(f.setHeadPower(true) && !f.fHeadSlept);
     f.fModeSet=false; assert(f.setHeadPower(false) && !f.fHeadSlept);
-    puts("PASS: failed sleep, failed wake retry, notifications, repeated requests, opt-out, shutdown, unavailable gate");
+    puts("PASS: failed sleep, failed wake retry with notification, connection power no-op, repeated requests, opt-out, shutdown, unavailable gate");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
