@@ -610,7 +610,7 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
             }
         }
         if used==0{return translate_one(ll,st)}
-        metal2vulkan::translate_native_no_retry_constructed_with_options(ll,st,apply_rsc(opts))
+        metal2vulkan::translate_native_no_retry_constructed_with_options(ll,st,apply_tg(opts))
     })();
     match result {
         Ok(bytes)=>{let mut b=bytes.into_boxed_slice();*out=b.as_mut_ptr();*out_len=b.len();std::mem::forget(b);0}
@@ -678,5 +678,80 @@ mod threadgroup_configuration_tests {
         rendezvous.wait();
         for handle in handles { handle.join().expect("worker configuration"); }
         assert!(main_lengths.is_empty());
+    }
+
+    // A kernel that binds a sampler takes the sampler path, which used to drop the threadgroup lengths: the Workgroup
+    // array kept its 512-element default, so a kernel asking for 16384 bytes of float4 (VideoToolbox's scaler) got half.
+    const SAMPLER_AND_THREADGROUP_KERNEL: &str = r#"
+target triple = "spirv-unknown-vulkan1.2"
+
+define void @k(ptr addrspace(1) %texture, ptr addrspace(2) %sampler, ptr addrspace(3) %temp, ptr addrspace(1) %out, i32 %i) {
+entry:
+  %sample = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %texture, ptr addrspace(2) %sampler, <2 x float> zeroinitializer, i1 false, <2 x i32> zeroinitializer, i1 false, float 0.000000e+00, float 0.000000e+00, i32 0)
+  %color = extractvalue { <4 x float>, i8 } %sample, 0
+  %idx = zext i32 %i to i64
+  %slot = getelementptr inbounds <4 x float>, ptr addrspace(3) %temp, i64 %idx
+  store <4 x float> %color, ptr addrspace(3) %slot, align 16
+  %back = load <4 x float>, ptr addrspace(3) %slot, align 16
+  store <4 x float> %back, ptr addrspace(1) %out, align 16
+  ret void
+}
+
+declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr addrspace(2), <2 x float>, i1, <2 x i32>, i1, float, float, i32)
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5, !6, !7}
+!3 = !{i32 0, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"texture2d<float, sample>", !"air.arg_name", !"texture"}
+!4 = !{i32 1, !"air.sampler", !"air.location_index", i32 0, i32 1, !"air.arg_type_name", !"sampler", !"air.arg_name", !"sampler"}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 3, !"air.arg_type_size", i32 16, !"air.arg_type_align_size", i32 16, !"air.arg_type_name", !"float4", !"air.arg_name", !"temp"}
+!6 = !{i32 3, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.write", !"air.address_space", i32 1, !"air.arg_type_size", i32 16, !"air.arg_type_align_size", i32 16, !"air.arg_type_name", !"float4", !"air.arg_name", !"out"}
+!7 = !{i32 4, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"uint", !"air.arg_name", !"i"}
+"#;
+
+    fn workgroup_array_elements_after_sampler_translation(tg_bytes: Option<u32>) -> u32 {
+        match tg_bytes {
+            Some(bytes) => nvmtl_translate_set_threadgroup_lengths(&bytes, 1),
+            None => nvmtl_translate_set_threadgroup_lengths(std::ptr::null(), 0),
+        }
+        let ll = std::ffi::CString::new(SAMPLER_AND_THREADGROUP_KERNEL).unwrap();
+        let stage = std::ffi::CString::new("kernel").unwrap();
+        let state = serde_json::json!({"min_filter":"Nearest","mag_filter":"Nearest","mip_filter":"None","address_mode_s":"ClampToEdge","address_mode_t":"ClampToEdge","address_mode_r":"ClampToEdge","coordinates":"Normalized","compare_function":"None","max_anisotropy":1,"lod_min_clamp":0.0,"lod_max_clamp":1000.0,"border_color":"TransparentBlack","reduction":"WeightedAverage","lod_bias":0.0});
+        let json = std::ffi::CString::new(serde_json::json!({"samplers":{"0":state},"constants":{}}).to_string()).unwrap();
+        let (mut out, mut len) = (std::ptr::null_mut(), 0usize);
+        let mut err = [0 as c_char; 2048];
+        let rc = unsafe { nvmtl_translate_samplers(ll.as_ptr(), stage.as_ptr(), json.as_ptr(), &mut out, &mut len, err.as_mut_ptr(), err.len()) };
+        nvmtl_translate_set_threadgroup_lengths(std::ptr::null(), 0);
+        assert_eq!(rc, 0, "{}", unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy());
+        let spv = unsafe { std::slice::from_raw_parts(out, len) }.to_vec();
+        nvmtl_translate_free(out, len);
+        let module = rspirv::dr::load_bytes(&spv).expect("load spv");
+        let constants: std::collections::HashMap<u32, u32> = module.types_global_values.iter()
+            .filter(|i| i.class.opcode == rspirv::spirv::Op::Constant)
+            .filter_map(|i| match (i.result_id, i.operands.first()) {
+                (Some(id), Some(rspirv::dr::Operand::LiteralBit32(v))) => Some((id, *v)),
+                _ => None,
+            }).collect();
+        // the Workgroup variable's pointee array, found through the variable rather than by "the only array"
+        let workgroup_pointee = module.types_global_values.iter().find_map(|i| {
+            (i.class.opcode == rspirv::spirv::Op::Variable
+                && i.operands.first() == Some(&rspirv::dr::Operand::StorageClass(rspirv::spirv::StorageClass::Workgroup)))
+                .then(|| i.result_type)
+        }).flatten().expect("a Workgroup variable");
+        let array = module.types_global_values.iter().find(|i| i.result_id == Some(workgroup_pointee))
+            .and_then(|ptr| match ptr.operands.get(1) { Some(rspirv::dr::Operand::IdRef(t)) => Some(*t), _ => None })
+            .expect("the pointer's pointee");
+        let length_id = module.types_global_values.iter().find(|i| i.result_id == Some(array))
+            .and_then(|a| match a.operands.get(1) { Some(rspirv::dr::Operand::IdRef(c)) => Some(*c), _ => None })
+            .expect("an array type");
+        constants[&length_id]
+    }
+
+    #[test]
+    fn sampler_specialization_keeps_the_threadgroup_length() {
+        assert_eq!(workgroup_array_elements_after_sampler_translation(None), 512, "no length: the default");
+        assert_eq!(workgroup_array_elements_after_sampler_translation(Some(16384)), 1024, "16384 bytes of float4");
+        assert_eq!(workgroup_array_elements_after_sampler_translation(Some(4096)), 256, "4096 bytes of float4");
     }
 }
