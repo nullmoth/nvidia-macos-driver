@@ -569,7 +569,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         }.resume()
     }
     func startDownload(name: String, sha: String, url: URL, efi: String?) {
-        guard pendingDownload == nil, !runningSetup else { return }
+        // A click while busy used to return silently, leaving "Downloading the newest driver..." on screen for good.
+        if pendingDownload != nil { send("dl", ["state": "error", "why": "a download is already running; wait for it to finish"]); return }
+        if runningSetup { send("dl", ["state": "error", "why": "setup is still running; try again when it has finished"]); return }
         do { try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true) }
         catch { send("dl", ["state": "error", "why": error.localizedDescription]); return }
         let task = downloadSession.downloadTask(with: url)
