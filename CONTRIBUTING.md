@@ -13,15 +13,8 @@ One problem per issue. If you found the cause, say how you know: what you ran an
 
 ## No AI-written contributions
 
-Pull requests, issues and review comments must be written by a person who understands them. Code, descriptions or
-bug reports written by an AI tool are closed without review, and so are issues whose "analysis" the author cannot
-back with logs they produced themselves. This keeps review time for people who did the work.
-
-- The pull request template has a box saying you wrote the change yourself. A pull request without it ticked fails
-  the contribution check and is not reviewed.
-- A pull request whose description or commits carry an AI tool's signature (its "generated with" footer or its
-  co-author line) is closed automatically.
-- Repeated AI-written submissions get the account blocked from the repository.
+Pull requests, issues and review comments must be written by a person who understands them. AI-written code,
+descriptions and bug reports are closed without review.
 
 ## Pull requests
 
