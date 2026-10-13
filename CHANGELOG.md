@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.0.0
+
+macOS 15 Sequoia and macOS 26 Tahoe.
+
+Driver
+- Fix black screen with only a cursor after updating to 1.15 (video memory reserved over the boot screen was handed
+  out again, so the desktop's surfaces were refused)
+- Tahoe: ship the macOS 26 accelerator built from this release (1.15 carried an older one: black screen on Tahoe)
+- Chrome, Edge and Electron apps draw on the CPU again by default, which ends the artifacts, stutter and voice-call
+  crashes in Discord on several cards; `NVMTL_ANGLE_METAL=1` turns their GPU path on
+
+Mac app
+- Finish a macOS update the update helper never finished, and keep this Mac's own BAR settings afterwards
+- "Remove NVIDIA driver" stops with an explanation, instead of failing half-way, when System Integrity Protection is on
+
+1401 for Windows
+- Pick macOS 15 Sequoia or macOS 26 Tahoe before the build
+- Tahoe builds on boards with a Realtek 2.5G/5G port and Intel or Broadcom Wi-Fi no longer stop at the Apple logo
+- Sticks that Windows could not format after the erase are erased again with diskpart
+- Intel PCs that froze right after OpenCore with "No slide values are usable" get the matching memory-map setting
+
+Known issues
+- Preview not showing pictures and lost window transparency on some macOS 15 setups
+- Chrome decodes video on the CPU while its GPU sandbox is on (#175)
+- Thunderbolt eGPUs: no display
+- Laptops with the screen on the Intel GPU: the built-in screen is not accelerated
+- No HDMI/DisplayPort audio
+
 ## 1.15.0
 
 The last release for macOS 15 Sequoia.
