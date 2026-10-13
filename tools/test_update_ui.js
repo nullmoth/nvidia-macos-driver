@@ -52,3 +52,15 @@ element('efi').onchange();
 assert.equal(element('go').disabled,true);
 assert.equal(vm.runInContext('S.previewed',sandbox),false);
 console.log('Changing the selected EFI requires a fresh preview before install.');
+
+// The install button says why it is greyed out (10-13: "Install Driver is greyed out, what do I do").
+const fresh = () => Object.assign(machine(15), {kexts:0, metal:[], files:false});
+event('scan', fresh());
+assert.equal(element('go').disabled, true);
+assert(element('go').textContent.includes('Show me the changes first'), element('go').textContent);
+event('run', {state:'start', mode:'dry'});
+event('run', {state:'done', mode:'dry', ok:true});
+event('scan', fresh());
+assert.equal(element('go').disabled, false);
+assert.equal(element('go').textContent, 'Install the driver');
+console.log('Install button names the step that comes first, and reads plainly once it is ready.');
