@@ -23,6 +23,11 @@ emit() {
     [ -e "$file" ] || return 0
     [ -f "$file" ] && [ ! -L "$file" ] || { warn invalid-file; return 0; }
     name=${file##*/}
+    # Crash reports keep their app's name ("Google Chrome Helper (GPU)-....ips"): spaces and brackets made ten 1.15
+    # uploads drop exactly those files as "refused". The name is made safe instead; the result must still match.
+    name=$(printf '%s' "$name" | LC_ALL=C /usr/bin/tr -c 'A-Za-z0-9._-' '_')
+    case "$name" in [A-Za-z0-9]*) ;; *) name="f$name";; esac
+    name=${name:0:200}
     [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$ ]] || { warn invalid-file; return 0; }
     [ "$COUNT" -lt 48 ] || {
         if [ "$LIMIT_REPORTED" = 0 ]; then echo "NMCOLLECT_TRUNCATED file-count"; LIMIT_REPORTED=1; fi
