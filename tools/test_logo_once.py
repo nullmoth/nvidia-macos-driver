@@ -16,7 +16,7 @@ def between(s, start, end, include_end=True):
     return s[a:b]
 
 
-def run(cfg, logo=None, stage="install", app_logo=True, efi_logo=True):
+def run(cfg, logo=None, stage="install", app_logo=True, efi_logo=True, oclog=None):
     s = SETUP.read_text()
     funcs = between(s, "has() {", "\nget() {", False) + "\n" + between(s, "get() {", "; }\n") + "\n"
     funcs += between(s, "tool_index() {", "logo_index() {", False) + between(s, "logo_index() {", "i=$((i+1)); done; }")
@@ -31,6 +31,8 @@ def run(cfg, logo=None, stage="install", app_logo=True, efi_logo=True):
     if not os.path.exists(c):
         with open(c, "wb") as fh:
             plistlib.dump(cfg, fh)
+    if oclog is not None:
+        pathlib.Path(t, "opencore-2026-10-13-120000.txt").write_text(oclog)
     app = os.path.join(t, "app"); os.makedirs(app)
     for n, b in (("NullMothSafe.efi", b"tool"), ("NullMothLogo.efi", b"logo")):
         if n == "NullMothLogo.efi" and not app_logo:
@@ -110,6 +112,28 @@ class LogoAndOnce(unittest.TestCase):
         _, after, _ = run(cfg, stage="remove")
         self.assertFalse([x for x in after["Misc"]["Tools"] if x.get("Arguments") == "once"])
         self.assertTrue([d for d in after["UEFI"]["Drivers"] if d["Path"] == "NullMothLogo.efi"])
+
+
+REFUSED = "23:209 00:016 OC: Driver NullMothLogo.efi at 3 cannot be loaded - Unsupported!\n"
+
+
+class LogoRefusedByFirmware(unittest.TestCase):
+    """A Gigabyte AORUS board refused the logo driver ("cannot be loaded - Unsupported!") and OpenCore stopped there."""
+
+    def test_a_refused_logo_is_turned_off(self):
+        _, cfg, _ = run(BASE, logo="on")
+        out, after, _ = run(cfg, logo="on", oclog=REFUSED)
+        self.assertFalse(next(d for d in after["UEFI"]["Drivers"] if d["Path"] == "NullMothLogo.efi")["Enabled"])
+        self.assertIn("refused it at the last start", out)
+
+    def test_a_refused_logo_is_not_added_again(self):
+        out, after, _ = run(BASE, logo="on", oclog=REFUSED)
+        self.assertFalse(any(d.get("Path") == "NullMothLogo.efi" for d in after["UEFI"]["Drivers"]))
+
+    def test_a_clean_log_leaves_the_logo_on(self):
+        _, cfg, _ = run(BASE, logo="on")
+        out, after, _ = run(cfg, logo="on", oclog="OC: Driver NullMothLogo.efi at 3 is successfully loaded!\n")
+        self.assertTrue(next(d for d in after["UEFI"]["Drivers"] if d["Path"] == "NullMothLogo.efi")["Enabled"])
 
 
 class LogoFileMissing(unittest.TestCase):
