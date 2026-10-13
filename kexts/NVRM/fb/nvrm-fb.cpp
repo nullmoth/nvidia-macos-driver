@@ -1258,7 +1258,8 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
 
     const SInt64 budget = (SInt64)(fBarLen >= (4ull << 30) ? fBarLen / 2 : NVRM_VRAM_BAR1_BUDGET);
     gVramBudgetBytes = budget;
-    SInt64 before = OSAddAtomic64((SInt64)want, &gVramMappedBytes) + gVramParkedBytes;
+    // parked blocks are unmapped when parked and no longer count against the BAR1 budget (see NVRMFB)
+    SInt64 before = OSAddAtomic64((SInt64)want, &gVramMappedBytes);
     if (before + (SInt64)want > budget) {
         OSAddAtomic64(-(SInt64)want, &gVramMappedBytes);
         FBLOG("nvAllocVram(%llu): REFUSED — BAR1 budget spent (%lld of %llu bytes). "
@@ -1294,7 +1295,8 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
             if (gNParkedForever < (int)(sizeof gParkedForever / sizeof gParkedForever[0]) &&
                 gVramParkedBytes + (SInt64)want <= (SInt64)NVRM_VRAM_PARK_CEILING) {
                 gParkedForever[gNParkedForever].m = m;
-                gParkedForever[gNParkedForever].k = k;
+                fKms->unmapMemory(fDev, m, NVKMS_KAPI_MAPPING_TYPE_KERNEL, k);
+                gParkedForever[gNParkedForever].k = nullptr;
                 gParkedForever[gNParkedForever].n = want;
                 gNParkedForever++;
                 OSAddAtomic64((SInt64)want, &gVramParkedBytes);

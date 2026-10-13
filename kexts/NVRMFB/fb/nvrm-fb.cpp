@@ -2429,7 +2429,11 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
 
     const SInt64 budget = (SInt64)nvrmVramBudget(fBarLen);
     gVramBudgetBytes = budget;
-    SInt64 before = OSAddAtomic64((SInt64)want, &gVramMappedBytes) + gVramParkedBytes;
+    // Parked blocks hold VRAM but no BAR1 mapping (unmapped when parked), so they no longer count here. WAS: parked bytes
+    // counted against the budget; 1.14 raised the park ceiling from 24 to 64 MB, and on a 256 MB BAR1 (every GTX 16,
+    // boards without Resizable BAR) surfaces were left as little as 128 MB of the 192 MB budget: GTX 16 reports on
+    // 1.14.x logged 24 to 1062 "BAR1 budget spent" refusals and black screens with a cursor; on 1.13, 0 on five of six.
+    SInt64 before = OSAddAtomic64((SInt64)want, &gVramMappedBytes);
     if (before + (SInt64)want > budget) {
         OSAddAtomic64(-(SInt64)want, &gVramMappedBytes);
         FBLOG("nvAllocVram(%llu): REFUSED — BAR1 budget spent (%lld of %llu bytes). "
@@ -2464,8 +2468,10 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
                   !p ? "has no physical address" : onScanout ? "OVERLAPS THE SCANOUT" : "OVERLAPS THE CONSOLE");
             if (gNParkedForever < (int)(sizeof gParkedForever / sizeof gParkedForever[0]) &&
                 gVramParkedBytes + (SInt64)want <= (SInt64)NVRM_VRAM_PARK_CEILING) {
+                // kept allocated so NVKMS cannot place a surface there again, but unmapped: nothing ever reads it
+                fKms->unmapMemory(fDev, m, NVKMS_KAPI_MAPPING_TYPE_KERNEL, k);
                 gParkedForever[gNParkedForever].m = m;
-                gParkedForever[gNParkedForever].k = k;
+                gParkedForever[gNParkedForever].k = nullptr;
                 gParkedForever[gNParkedForever].n = want;
                 gNParkedForever++;
                 OSAddAtomic64((SInt64)want, &gVramParkedBytes);
