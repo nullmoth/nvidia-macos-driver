@@ -94,8 +94,12 @@ fetch_kext() {
   local k=$1 u s
   [ -n "$KT" ] || KT=$(mktemp -d) || stop "could not create a download folder"
   read -r u s <<<"$(kurl $k)"
-  curl -fsSL --max-time 180 -o "$KT/$k.zip" "$u" \
-    || stop "$k could not be downloaded ($u). Check the internet connection and try again, or put $k in $2"
+  # GitHub first, then the same bytes from nullmothsystems.com/mirror/<sha256> (the mirror 1401 uses). Four 1.14.7 setups
+  # stopped on "curl: (56) Recv failure: Operation timed out" at raw.githubusercontent.com, which some networks block.
+  # The SHA-256 below is checked whichever source answered.
+  curl -fsSL --connect-timeout 20 --max-time 120 --retry 2 --retry-delay 3 -o "$KT/$k.zip" "$u" \
+    || curl -fsSL --connect-timeout 20 --max-time 180 --retry 3 --retry-delay 3 -o "$KT/$k.zip" "https://nullmothsystems.com/mirror/$s" \
+    || stop "$k could not be downloaded ($u, or the NullMoth mirror). Check the internet connection and try again, or put $k in $2"
   [ "$(shasum -a 256 "$KT/$k.zip" | awk '{print $1}')" = "$s" ] || stop "$k download did not match its SHA-256; nothing was changed. Try again"
   ditto -x -k "$KT/$k.zip" "$KT/$k.x" && [ -f "$KT/$k.x/$k/Contents/Info.plist" ] || stop "$k download could not be unpacked; nothing was changed"
 }
