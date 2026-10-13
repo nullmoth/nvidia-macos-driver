@@ -1,5 +1,5 @@
 {
- "source": "NVIDIA open-gpu-kernel-modules 610.57.04 README, supported GPU table (GeForce / RTX / Quadro / TITAN rows)",
+ "source": "NVIDIA open-gpu-kernel-modules 610.57.04 README, supported GPU table (GeForce / RTX / Quadro / TITAN rows, and the NVIDIA T-series rows)",
  "tested": [
   "2D05"
  ],
@@ -59,9 +59,19 @@
   "1F9D": "NVIDIA GeForce GTX 1650",
   "1F9F": "NVIDIA GeForce MX550",
   "1FA0": "NVIDIA GeForce MX550",
+  "1FB0": "NVIDIA T1000",
+  "1FB1": "NVIDIA T600",
+  "1FB2": "NVIDIA T400",
+  "1FB6": "NVIDIA T600 Laptop GPU",
+  "1FB7": "NVIDIA T550 Laptop GPU",
   "1FB8": "Quadro T2000",
   "1FB9": "Quadro T1000",
+  "1FBA": "NVIDIA T600 Laptop GPU",
+  "1FBB": "NVIDIA T500",
+  "1FBC": "NVIDIA T1200 Laptop GPU",
   "1FDD": "NVIDIA GeForce GTX 1650",
+  "1FF0": "NVIDIA T1000 8GB",
+  "1FF2": "NVIDIA T400 4GB",
   "1FF9": "Quadro T1000",
   "2182": "NVIDIA GeForce GTX 1660 Ti",
   "2184": "NVIDIA GeForce GTX 1660",

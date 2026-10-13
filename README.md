@@ -1,7 +1,7 @@
 # NullMoth NVIDIA Driver for macOS
 
 A Metal driver for NVIDIA Turing-and-later cards on Intel Macs and OpenCore systems running **macOS 15 Sequoia**.
-The device table includes GTX 16, RTX 20/30/40/50, TITAN RTX, and supported Quadro/RTX workstation cards.
+The device table includes GTX 16, RTX 20/30/40/50, TITAN RTX, supported Quadro/RTX workstation cards, and the NVIDIA T-series (T400/T600/T1000; T500/T550/T600/T1200 laptop).
 The driver implements NVIDIA-backed display and Metal interfaces. Feature availability and application behavior depend on the card, operating-system version and installed components; device-table coverage is not runtime qualification.
 
 Made by **NullMoth Systems**.

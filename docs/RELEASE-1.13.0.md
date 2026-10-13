@@ -18,7 +18,7 @@
 
 - **Crash reports showed crashes from before you updated.**
   *Cause:* the report includes recent crash files, and some were from an older driver. A Live Text crash fixed in 1.12 showed up in 1.12 reports and looked like it was still there.
-  *Fix:* every crash in a report now carries its date and says when it happened before the current driver install.
+  *Fix:* every crash in a report now carries its date and says whether it happened before the current driver install.
 
 ## Still open
 - Black screen or flicker above 60 Hz on some monitors: please send logs from the **1.12 or newer** Mac app (it records the display from every boot). Logs from older apps do not include this.

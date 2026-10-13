@@ -129,6 +129,11 @@ class Install(unittest.TestCase):
         self.assertFalse((self.root/'creates').exists())
         for path,expected in self.old.items():self.assertEqual(path.read_bytes(),expected)
 
+    def test_turing_laptop_t500_is_accepted(self):
+        # Quadro T500 laptop (10DE:1FBB, TU117, PCI class 03:02): NVIDIA's 610.57.04 table names it "NVIDIA T500"
+        r=self.run_install(FAKE_NV_DEVICE='bb1f0000');self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+        self.assertNotIn('older than the driver supports',r.stdout+r.stderr)
+
     def test_older_runtime_host_is_refused_before_collection_or_backup(self):
         r=self.run_install(FAKE_OS_VERSION='15.4.9')
         self.assertNotEqual(r.returncode,0,r.stdout+r.stderr)
