@@ -916,14 +916,21 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         // macOS checks its Removable Volumes privacy setting against this app even for the root shell that runs setup, so
         // a USB stick's OpenCore config could not be opened there ("Code=257", seven Macs on 1.10 to 1.14.5, reported as
         // "no OpenCore config"). Opening it here first lets macOS ask the user in 1401's name before setup needs it.
-        for volume in FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeIsInternalKey], options: [.skipHiddenVolumes]) ?? [] {
-            if (try? volume.resourceValues(forKeys: [.volumeIsInternalKey]).volumeIsInternal) == true { continue }
-            for rel in ["EFI/OC/config.plist", "EFI/BOOT/config.plist"] {
-                let file = volume.appendingPathComponent(rel)
-                guard FileManager.default.fileExists(atPath: file.path), let handle = FileHandle(forReadingAtPath: file.path) else { continue }
-                _ = handle.readData(ofLength: 1); handle.closeFile()
+        // Off the main thread and bounded: a stalled stick or a spun-down disk must not freeze the window (1.15 review).
+        // Network volumes are skipped: OpenCore never starts from them, and an unreachable share would only add a wait.
+        let preread = DispatchGroup()
+        DispatchQueue.global(qos: .userInitiated).async(group: preread) {
+            for volume in FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeIsInternalKey, .volumeIsLocalKey], options: [.skipHiddenVolumes]) ?? [] {
+                let values = try? volume.resourceValues(forKeys: [.volumeIsInternalKey, .volumeIsLocalKey])
+                if values?.volumeIsInternal == true || values?.volumeIsLocal == false { continue }
+                for rel in ["EFI/OC/config.plist", "EFI/BOOT/config.plist"] {
+                    let file = volume.appendingPathComponent(rel)
+                    guard FileManager.default.fileExists(atPath: file.path), let handle = FileHandle(forReadingAtPath: file.path) else { continue }
+                    _ = handle.readData(ofLength: 1); handle.closeFile()
+                }
             }
         }
+        _ = preread.wait(timeout: .now() + 3)
         let res = Bundle.main.resourceURL!
         var args: [String]
         switch mode {
