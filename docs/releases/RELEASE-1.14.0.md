@@ -1,6 +1,6 @@
 # NullMoth NVIDIA driver and Mac app 1.14.0
 
-**Something not working? [Why a machine does not work, and how to fix it](TROUBLESHOOTING.md) lists every known problem.**
+**Something not working? [Why a machine does not work, and how to fix it](../TROUBLESHOOTING.md) lists every known problem.**
 
 Every fix below came from the logs, chats and GitHub issues you sent. For each: what was wrong, and what changed.
 
