@@ -2850,7 +2850,10 @@ IOReturn NVRMNVDAFramebuffer::setPowerState(unsigned long ordinal, IOService *de
 {
     FBLOG("setPowerState %lu", (unsigned long)ordinal);
     if (ordinal) {
-        if (setHeadPower(true)) handleEvent(kIOFBNotifyDidPowerOn);
+        // a failed wake stays retryable (fHeadSlept kept) but WindowServer is still told the display is on, as 1.14.7 did:
+        // without the notification it never redraws, and the head can sit black with nothing left to retry it (review)
+        (void)setHeadPower(true);
+        handleEvent(kIOFBNotifyDidPowerOn);
     } else {
         handleEvent(kIOFBNotifyWillPowerOff);
         (void)setHeadPower(false);
@@ -2882,12 +2885,9 @@ IOReturn NVRMNVDAFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
 IOReturn NVRMNVDAFramebuffer::setAttributeForConnection(IOIndex connectIndex, IOSelect attribute, uintptr_t value)
 {
     FBSEL(attribute);
-    if (attribute == kConnectionPower) {
-        if (connectIndex != 0) return kIOReturnBadArgument;
-        const bool ok = setHeadPower(value != 0);
-        FBLOG("setAFC '%s' POWER %lu -> %s", _s, (unsigned long)value, ok ? "ok" : "FAILED");
-        return ok ? kIOReturnSuccess : kIOReturnIOError;
-    }
+    // Head power follows setPowerState only, the one path that has shipped; a second path here was new on every monitor
+    // with no report asking for it, and its errors were new to callers that always got success (1.15 review).
+    if (attribute == kConnectionPower) { FBLOG("setAFC '%s' POWER %lu -> success", _s, (unsigned long)value); return kIOReturnSuccess; }
     switch (attribute) {
     case kConnectionColorModesSupported:
     case kConnectionColorDepthsSupported:
