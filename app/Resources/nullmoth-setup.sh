@@ -627,6 +627,14 @@ else
       diskutil list 2>&1 | grep -E '^ +[0-9]+:|^/dev/' | head -n 40 | sed 's/^/NOTE disks: /'
       [ -n "$clover" ] && ! nvram 4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:opencore-version >/dev/null 2>&1 && \
         stop "this Mac starts with Clover, not OpenCore - the NVIDIA driver's settings are made for OpenCore. Make an OpenCore setup (1401 on Windows builds one), start from it, then run this again"
+      # 10-12 (seven Macs, 1401 Mac 1.10 to 1.14.5): the stick's config was there and plutil answered "Code=257" (no
+      # permission). macOS checks its Removable Volumes privacy setting against the 1401 app even for this root shell,
+      # so a stick's files cannot be opened until the user allows it. Say that, not "no OpenCore config".
+      denied=""; for d in $(diskutil list | awk '/ EFI | DOS_FAT_32 | Windows_FAT_32 | Microsoft Basic Data /{print $NF}' | grep -E '^disk[0-9]+s[0-9]+$'); do
+        mount_efi "$d" || continue; mp=$MOUNT_POINT
+        for c in "$mp/EFI/OC/config.plist" "$mp/EFI/BOOT/config.plist"; do
+          [ -e "$c" ] && ! head -c 1 "$c" >/dev/null 2>&1 && { denied="$denied $d"; break; }; done; done
+      [ -n "$denied" ] && stop "macOS is not letting 1401 read the OpenCore config on$denied. Open System Settings > Privacy & Security > Files & Folders, turn on Removable Volumes for 1401 (or add 1401 under Full Disk Access), then try again"
       stop "no OpenCore config for this Mac ($(sysctl -n hw.model)) on any connected disk - plug in the disk or USB stick OpenCore started from, then try again (the NOTE lines above show what each partition holds)"
     fi
     # A shared SMBIOS model or the macOS disk does not identify the booted EFI.

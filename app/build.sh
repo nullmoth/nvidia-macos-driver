@@ -44,6 +44,7 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>LSMinimumSystemVersion</key><string>15.0</string>
 <key>NSHumanReadableCopyright</key><string>© 2026 NullMoth Systems</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSRemovableVolumesUsageDescription</key><string>1401 reads the OpenCore settings on your USB stick or disk to install the driver there.</string>
 <key>NSAppleEventsUsageDescription</key><string>1401 asks macOS for your password to install the driver, and to restart when you click Restart.</string>
 </dict></plist>
 PL
