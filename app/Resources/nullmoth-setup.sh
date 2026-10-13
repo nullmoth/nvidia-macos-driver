@@ -288,17 +288,21 @@ if [ -n "$COLLECT" ]; then
   }
   console_user=$(stat -f %Su /dev/console 2>/dev/null)
   NPUDIR=/Library/NullMoth/npu
-  {
-    echo "== NPU PCI functions (Intel class 12xxxx, AMD signal-processing 1180xx) and their properties"
-    # ioreg lists a device's properties alphabetically (class-code before vendor-id), so each device is judged at its end
-    ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | LC_ALL=C awk '
+  # The runtime probes below (compiler check, OpenVINO, XRT) and the userland hashes ran on every Mac with the NPU
+  # userland installed, NPU or not, and alone could outlast the whole collection limit: 7 of 28 1.14.7 reports came
+  # back without their kernel log (status 124). They now run only where an NPU PCI function exists, each bounded short.
+  npu_pci=$(ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | LC_ALL=C awk '
       function out() { if ((cls=="12" && v=="intel") || (cls=="1180" && v=="amd")) print block "\n" }
       /\+-o / { out(); block=$0; cls=""; v=""; next }
       /"vendor-id" = <8680/ { v="intel" } /"vendor-id" = <2210/ { v="amd" }
       /"class-code" = <[0-9a-f][0-9a-f][0-9a-f][0-9a-f]1200>/ { cls="12" }
       /"class-code" = <[0-9a-f][0-9a-f]801100>/ { cls="1180" }
       /"(vendor-id|device-id|subsystem-vendor-id|subsystem-id|revision-id|class-code|IOName|IOPCIExpressLinkStatus|IOPCIResourced|assigned-addresses|acpi-path)"/ { block=block "\n" $0 }
-      END { out() }'
+      END { out() }')
+  {
+    echo "== NPU PCI functions (Intel class 12xxxx, AMD signal-processing 1180xx) and their properties"
+    # ioreg lists a device's properties alphabetically (class-code before vendor-id), so each device is judged at its end
+    if [ -n "$npu_pci" ]; then printf '%s\n' "$npu_pci"; else echo "(no NPU PCI function: runtime probes skipped)"; fi
     echo; echo "== what attached to them (NMXNPU is the NPU driver)"
     ioreg -r -c NMXNPU -l -w0 2>/dev/null | head -60 || true
     echo; echo "== NPU boot arguments"; nvram boot-args 2>/dev/null | tr ' \t' '\n\n' | grep -E 'nmx|npu' || echo "(none)"
@@ -312,20 +316,20 @@ if [ -n "$COLLECT" ]; then
     echo; echo "== NPU firmware"; ls -la /Library/NullMoth/firmware/intel/vpu /Library/NullMoth/firmware/amdnpu/* 2>&1 | head -40
     echo; echo "== device nodes"; ls -la /dev/accel 2>&1
     echo; echo "== each node: driver, PCI identity, driver attributes (nmx-npu-probe)"
-    if [ -x "$NPUDIR/bin/nmx-npu-probe" ]; then npu_run 20 "$NPUDIR/bin/nmx-npu-probe"; else echo "(nmx-npu-probe not installed)"; fi
+    if [ -n "$npu_pci" ] && [ -x "$NPUDIR/bin/nmx-npu-probe" ]; then npu_run 20 "$NPUDIR/bin/nmx-npu-probe"; else echo "(nmx-npu-probe not installed)"; fi
     echo; echo "== NPU userland installed (sha256)"
-    if [ -d "$NPUDIR" ]; then find "$NPUDIR" -type f ! -name '*.a' -exec shasum -a 256 {} + 2>&1 | sed "s|$NPUDIR/||" | head -200; ls -la "$NPUDIR/xrt/share/amdxdna/bins" 2>&1
+    if [ -d "$NPUDIR" ]; then find "$NPUDIR" -type f ! -name '*.a' 2>/dev/null | head -200 | tr '\n' '\0' | xargs -0 shasum -a 256 2>&1 | sed "s|$NPUDIR/||"; ls -la "$NPUDIR/xrt/share/amdxdna/bins" 2>&1
     else echo "(no $NPUDIR)"; fi
     echo; echo "== Intel: the NPU compiler on a small network (Meteor/Arrow Lake 3720, Lunar Lake 4000; needs no NPU)"
-    if [ -x "$NPUDIR/bin/nmx-npu-compile-check" ]; then npu_run 300 "$NPUDIR/bin/nmx-npu-compile-check"
+    if [ -n "$npu_pci" ] && [ -x "$NPUDIR/bin/nmx-npu-compile-check" ]; then npu_run 60 "$NPUDIR/bin/nmx-npu-compile-check"
     else echo "(nmx-npu-compile-check not installed)"; fi
     echo; echo "== Intel: OpenVINO devices with Level Zero, the NPU driver and the NPU plugin logging"
-    if [ -x "$NPUDIR/openvino/bin/hello_query_device" ]; then
-      npu_run 90 env ZE_ENABLE_LOADER_DEBUG_TRACE=1 ZE_INTEL_NPU_LOGLEVEL=INFO OV_NPU_LOG_LEVEL=LOG_INFO \
+    if [ -n "$npu_pci" ] && [ -x "$NPUDIR/openvino/bin/hello_query_device" ]; then
+      npu_run 45 env ZE_ENABLE_LOADER_DEBUG_TRACE=1 ZE_INTEL_NPU_LOGLEVEL=INFO OV_NPU_LOG_LEVEL=LOG_INFO \
         "$NPUDIR/openvino/bin/hello_query_device"
-    else echo "(OpenVINO not installed)"; fi
+    else echo "(no NPU, or OpenVINO not installed)"; fi
     echo; echo "== AMD: xrt-smi examine, then examine and validate on each AMD NPU, with XRT's runtime log on"
-    if [ -x "$NPUDIR/xrt/bin/xrt-smi" ]; then
+    if [ -n "$npu_pci" ] && [ -x "$NPUDIR/xrt/bin/xrt-smi" ]; then
       ini=$(sudo -u "$console_user" mktemp -d /tmp/nullmoth-xrt.XXXXXX 2>/dev/null)/xrt.ini
       if [ -n "$console_user" ] && [ "$ini" != /xrt.ini ]; then
         printf '[Runtime]\nverbosity=7\nruntime_log=console\n' | sudo -u "$console_user" tee "$ini" > /dev/null
@@ -333,7 +337,7 @@ if [ -n "$COLLECT" ]; then
       npu_run 60 env XRT_INI_PATH="$ini" "$NPUDIR/xrt/bin/xrt-smi" examine
       for bdf in $("$NPUDIR/bin/nmx-npu-probe" 2>/dev/null | awk '/^  driver amdxdna/ {a=1} a && /^  pci / {print $2; a=0}'); do
         echo; echo "-- examine -d $bdf -r all"; npu_run 60 env XRT_INI_PATH="$ini" "$NPUDIR/xrt/bin/xrt-smi" examine -d "$bdf" -r all
-        echo; echo "-- validate -d $bdf"; npu_run 240 env XRT_INI_PATH="$ini" "$NPUDIR/xrt/bin/xrt-smi" validate -d "$bdf"
+        echo; echo "-- validate -d $bdf"; npu_run 60 env XRT_INI_PATH="$ini" "$NPUDIR/xrt/bin/xrt-smi" validate -d "$bdf"
       done
       [ "$ini" = /xrt.ini ] || rm -rf "$(dirname "$ini")"
     else echo "(XRT not installed)"; fi
