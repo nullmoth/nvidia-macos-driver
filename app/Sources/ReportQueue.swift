@@ -8,6 +8,27 @@ enum ReportQueue {
         let old: Bool, critical: Bool, date: Date
     }
     struct Prepared { var entries: [Entry] = []; var warnings: [String] = [] }
+    // "Already sent" markers live in a private folder of their own. WAS: beside the sent file, so for the setup logs in
+    // ~/Library/Logs/NullMoth (a 0755 folder) SavedReports.create refused every marker ("confirmed, but its local retry
+    // marker could not be updated", 1401 #16) and the same files went up again in every batch from 1.6 to 1.13.
+    static func sentMarkers() throws -> URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("NullMoth/SentLogs", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        }
+        try SavedReports.directory(dir)
+        return dir
+    }
+    static func alreadySent(_ sourceSHA: String, besides file: URL) -> Bool {
+        let name = "confirmed-source-" + sourceSHA + ".json"
+        for dir in [try? sentMarkers(), file.deletingLastPathComponent()].compactMap({ $0 }) {
+            if let saved = try? read(dir.appendingPathComponent(name), privateFile: true),
+               let receipt = try? JSONSerialization.jsonObject(with: saved) as? [String: String],
+               receipt["source_sha256"] == sourceSHA, !(receipt["id"] ?? "").isEmpty { return true }
+        }
+        return false
+    }
     static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     static func read(_ url: URL, privateFile: Bool) throws -> Data {
         let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
@@ -48,10 +69,11 @@ enum ReportQueue {
                 if old { try SavedReports.directory(file.deletingLastPathComponent()) }
                 let raw = try read(file, privateFile: old)
                 let sourceSHA = hash(raw)
-                let marker = file.deletingLastPathComponent().appendingPathComponent("confirmed-source-" + sourceSHA + ".json")
-                if !old, let saved = try? read(marker, privateFile: true),
-                   let receipt = try? JSONSerialization.jsonObject(with: saved) as? [String: String],
-                   receipt["source_sha256"] == sourceSHA, !(receipt["id"] ?? "").isEmpty { continue }
+                if alreadySent(sourceSHA, besides: file) {
+                    // an old pending copy of a file whose original is already confirmed is retired, not sent again
+                    if old { try? FileManager.default.moveItem(at: file, to: file.deletingLastPathComponent().appendingPathComponent("confirmed-" + file.lastPathComponent)) }
+                    continue
+                }
                 let bytes = old ? raw : redact(raw)
                 guard !bytes.isEmpty, bytes.count <= 2 * 1024 * 1024, total + bytes.count <= 32 * 1024 * 1024 else {
                     result.warnings.append("A report is empty or exceeds the queue limit; its original remains local."); continue
@@ -96,10 +118,10 @@ enum ReportQueue {
         }
         let receipt = try JSONSerialization.data(withJSONObject: ["id": id, "sha256": entry.sha, "name": entry.name], options: [.sortedKeys])
         _ = try SavedReports.create(receipt, in: session, name: "confirmed-" + UUID().uuidString + ".json")
-        if let source = entry.source, let sha = entry.sourceSHA, hash(try read(source, privateFile: false)) == sha {
-            let marker = source.deletingLastPathComponent().appendingPathComponent("confirmed-source-" + sha + ".json")
+        if let sha = entry.sourceSHA {
+            let markers = try sentMarkers(), name = "confirmed-source-" + sha + ".json"
             let sourceReceipt = try JSONSerialization.data(withJSONObject: ["id": id, "sha256": entry.sha, "source_sha256": sha], options: [.sortedKeys])
-            if !FileManager.default.fileExists(atPath: marker.path) { _ = try SavedReports.create(sourceReceipt, in: source.deletingLastPathComponent(), name: marker.lastPathComponent) }
+            if !FileManager.default.fileExists(atPath: markers.appendingPathComponent(name).path) { _ = try SavedReports.create(sourceReceipt, in: markers, name: name) }
         }
         try FileManager.default.moveItem(at: entry.pending, to: entry.pending.deletingLastPathComponent().appendingPathComponent("confirmed-" + entry.pending.lastPathComponent))
     }
