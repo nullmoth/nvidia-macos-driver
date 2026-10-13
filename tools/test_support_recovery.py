@@ -12,6 +12,7 @@ name=Path(sys.argv[0]).name;a=sys.argv[1:];r=Path(os.environ['FIXTURE_ROOT'])
 with (r/'calls.jsonl').open('a') as f:f.write(json.dumps([name]+a)+'\n')
 if name=='id':print(0)
 elif name=='sw_vers':print('25G241')
+elif name=='csrutil':print('System Integrity Protection status: unknown (Custom Configuration).\n\nConfiguration:\n\tFilesystem Protections: disabled')
 elif name=='kmutil':
  path=Path(a[a.index('-A')+1])
  if a[0]=='create':
@@ -44,7 +45,7 @@ else:sys.exit(99)
 class Recovery(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name);self.bin=self.root/'bin';self.bin.mkdir()
-        for name in ['id','sw_vers','kmutil','nvram','sleep','shutdown','rm']:
+        for name in ['id','sw_vers','csrutil','kmutil','nvram','sleep','shutdown','rm']:
             p=self.bin/name;p.write_text('#!'+sys.executable+'\n'+MOCK);p.chmod(0o755)
         self.env=dict(os.environ,PATH=str(self.bin)+':/usr/bin:/bin:/usr/sbin:/sbin',FIXTURE_ROOT=str(self.root))
         self.ext=self.root/'Library/Extensions';self.ext.mkdir(parents=True)
