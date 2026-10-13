@@ -38,7 +38,25 @@ static inline void nvmtl_resref(id o, int d) { atomic_fetch_add(&gRefs, d); }
 ''' + iface + '\n' + impl + r'''
 @interface Tok : NSObject @end
 @implementation Tok @end
+@interface CB : NSObject { @public NVMTLResSet *_resources; } @end
+@implementation CB @end
+static long lazyRace(int eager) {
+    /* two encoder threads giving one new command buffer its first resources at the same moment, 20000 times */
+    long lost = 0;
+    for (int k = 0; k < 20000; k++) @autoreleasepool {
+        CB *cb = [CB new]; if (eager) cb->_resources = [NVMTLResSet new];
+        Tok *x = [Tok new], *y = [Tok new];
+        dispatch_group_t g = dispatch_group_create();
+        dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+        dispatch_group_async(g, q, ^{ if (!cb->_resources) cb->_resources = [NVMTLResSet new]; [cb->_resources addObject:x]; });
+        dispatch_group_async(g, q, ^{ if (!cb->_resources) cb->_resources = [NVMTLResSet new]; [cb->_resources addObject:y]; });
+        dispatch_group_wait(g, DISPATCH_TIME_FOREVER);
+        lost += 2 - (long)cb->_resources.count;
+    }
+    return lost;
+}
 int main(int argc, char **argv) {
+    if (argv[1][0] == 'l' || argv[1][0] == 'e') { printf("%ld\n", lazyRace(argv[1][0] == 'e')); return 0; }
     const int useNew = argv[1][0] == 'n', threads = 4, per = 40000;
     NVMTLResSet *live = [NVMTLResSet new];
     NSMutableArray *parts = [NSMutableArray new];
@@ -83,6 +101,16 @@ with tempfile.TemporaryDirectory() as d:
     oadded, oheld, _, _ = runs['old']
     check('negative control: the old copy-then-clear seal loses resources under the same race', oheld < oadded,
           f'{oheld} held of {oadded} added')
+
+    lazy = subprocess.run([str(exe), 'lazy'], capture_output=True, text=True, timeout=300)
+    eager = subprocess.run([str(exe), 'eager'], capture_output=True, text=True, timeout=300)
+    lazy_lost = int(lazy.stdout.split()[0]) if lazy.returncode == 0 and lazy.stdout.split() else -1
+    eager_lost = int(eager.stdout.split()[0]) if eager.returncode == 0 and eager.stdout.split() else -1
+    check('negative control: a set made lazily by two encoder threads loses resources or crashes',
+          lazy.returncode != 0 or lazy_lost > 0,
+          f'exit {lazy.returncode}, {lazy_lost} lost in 20000 command buffers' if lazy.returncode == 0 else f'crashed, exit {lazy.returncode}')
+    check('a set made with the command buffer keeps both threads\' resources', eager.returncode == 0 and eager_lost == 0,
+          f'exit {eager.returncode}, {eager_lost} lost in 20000 command buffers')
 
 init = objects[objects.index('@implementation NVMTLCommandBuffer'):]
 init = init[init.index('- (instancetype)init {'):]
