@@ -761,6 +761,10 @@ bool NVRM::placeLargeBar1()
 {
     static const UInt64 kBigBase = 0x10000000000ULL;
     static const UInt64 kHostWindowEnd = 0x3ffbfffffffULL;
+    // -nvrmsmallbar: leave BAR1 where the firmware put it, as on a card without Resizable BAR (every GTX 16). Lets a
+    // ReBAR card run the small-BAR paths (surface budget, copy path, private surface images) for testing and diagnosis.
+    { char nb[8] = { 0 };
+      if (PE_parse_boot_argn("-nvrmsmallbar", nb, sizeof nb)) { LOG("bar1: -nvrmsmallbar set — BAR1 left as IOPCIFamily placed it"); return false; } }
     UInt32 cap = 0;
     for (UInt32 off = 0x100, n = 0; off >= 0x100 && off < 0x1000 && n < 64; n++) {
         UInt32 h = fPCI->extendedConfigRead32(off);
