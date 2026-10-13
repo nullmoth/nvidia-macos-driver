@@ -123,7 +123,8 @@ private:
     bool interruptFilter(IOFilterInterruptEventSource *src);
     void interruptOccurred(IOInterruptEventSource *src, int count);
 };
-extern "C" { extern volatile int nv_xnu_in_isr; extern volatile thread_t nv_xnu_isr_thread; void nv_xnu_dump_live_allocs(void); }
+extern "C" { extern volatile int nv_xnu_in_isr; extern volatile thread_t nv_xnu_isr_thread; void nv_xnu_dump_live_allocs(void);
+             void nv_xnu_mux_panel_to_dgpu(nv_state_t *nv); }
 static volatile unsigned long gNvIsrCount = 0, gNvIsrHandled = 0;
 
 static inline void nvu_memset(void *d, int c, size_t n) { __asm__ __volatile__("rep stosb" : "+D"(d), "+c"(n) : "a"(c) : "memory"); }
@@ -1047,6 +1048,7 @@ IOReturn NVRM::go(uint32_t pass)
                     (unsigned)qst, (unsigned)ramKb);
             }
         }
+        nv_xnu_mux_panel_to_dgpu(nv);
         if (nvkms_xnu_load()) nvrm_display_publish(this, fNv.gpu_id);
     }
     return kIOReturnSuccess;

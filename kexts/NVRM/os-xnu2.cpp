@@ -1312,6 +1312,85 @@ NV_STATUS NV_API_CALL nv_acpi_dsm_method(nv_state_t *nv, NvU8 *pAcpiDsmGuid, NvU
     if (logged < 8) { logged++; kprintf("NVRM-xnu: NBCI _DSM 0x%x -> 0x%x (%u B)\n", acpiDsmSubFunction, st, (unsigned)*pSize); }
     return st;
 }
+
+// Laptop display mux (Advanced Optimus / dynamic display switching). The firmware puts NVIDIA's mux methods on the
+// panel's ACPI device under the GPU node (e.g. PEG1.PEGP.LCD0, whose _ADR is listed in the GPU's _DOD):
+//   MXDS  Arg0[3:0] = 0: which GPU drives the panel (1 = iGPU, 2 = dGPU); = 1: switch it, Arg0[4] = 1 selects the dGPU
+//   MXDM  Arg0[2:0] = 0: mux mode (1 iGPU only, 2 dGPU only, 3 hybrid, 4 dynamic)    (NV0073_CTRL_DFP_DISP_MUX_*)
+// The GPU node often has an MXDS of its own that does nothing; only the display child's one moves the panel.
+static IOACPIPlatformDevice *nv_xnu_acpi_mux_child(IOACPIPlatformDevice *gpu, bool byAdr, NvU32 adr)
+{
+    const IORegistryPlane *plane = IORegistryEntry::getPlane("IOACPIPlane");
+    OSIterator *it = plane ? gpu->getChildIterator(plane) : NULL;
+    IOACPIPlatformDevice *found = NULL;
+    OSObject *o;
+    while (it && !found && (o = it->getNextObject())) {
+        IOACPIPlatformDevice *c = OSDynamicCast(IOACPIPlatformDevice, o);
+        if (!c) continue;
+        UInt32 a = 0;
+        if (byAdr ? (c->evaluateInteger("_ADR", &a) == kIOReturnSuccess && a == adr)
+                  : (c->validateObject("MXDS") == kIOReturnSuccess)) { found = c; found->retain(); }
+    }
+    OSSafeReleaseNULL(it);
+    return found;
+}
+
+static NV_STATUS nv_xnu_acpi_mux_eval(IOACPIPlatformDevice *dev, const char *method, NvU32 *pInOut)
+{
+    OSObject *arg = OSNumber::withNumber(*pInOut, 32), *o = NULL;
+    if (!arg) return NV_ERR_NO_MEMORY;
+    IOReturn r = dev->evaluateObject(method, &o, &arg, 1);
+    arg->release();
+    OSNumber *n = OSDynamicCast(OSNumber, o);
+    NV_STATUS st = (r == kIOReturnSuccess && n) ? NV_OK : NV_ERR_GENERIC;
+    if (st == NV_OK) *pInOut = n->unsigned32BitValue();
+    OSSafeReleaseNULL(o);
+    return st;
+}
+
+NV_STATUS NV_API_CALL nv_acpi_mux_method(nv_state_t *nv, NvU32 *pInOut, NvU32 muxAcpiId, const char *pMethodName)
+{
+    TRC;
+    if (!pInOut || !pMethodName || (strcmp(pMethodName, "MXDS") != 0 && strcmp(pMethodName, "MXDM") != 0))
+        return NV_ERR_NOT_SUPPORTED;
+    IOACPIPlatformDevice *acpi = nv_xnu_gpu_acpi(nv);
+    if (!acpi) return NV_ERR_INVALID_ARGUMENT;
+    IOACPIPlatformDevice *dev = nv_xnu_acpi_mux_child(acpi, true, muxAcpiId);
+    if (!dev) return NV_ERR_GENERIC;
+    NvU32 in = *pInOut;
+    NV_STATUS st = nv_xnu_acpi_mux_eval(dev, pMethodName, pInOut);
+    kprintf("NVRM-xnu: %s(0x%x) on display 0x%x -> 0x%x, 0x%x\n", pMethodName, in, muxAcpiId, st, *pInOut);
+    dev->release();
+    return st;
+}
+
+// Opt-in (boot-arg nvrmmux=1). On a laptop with a display mux the firmware hands the built-in panel to the Intel GPU
+// at every start, and on Advanced Optimus machines (no "dGPU only" firmware setting) nothing moves it: NVKMS then
+// finds no internal display. Called once RM is up and before NVKMS enumerates displays, so the panel is dark only
+// from here to the first modeset (an ACPI patch doing the same at table load leaves it dark for most of the boot).
+// Off by default: a machine that already starts on the dGPU, or has no mux, never gets here with MXDS == 1.
+extern "C" void nv_xnu_mux_panel_to_dgpu(nv_state_t *nv)
+{
+    int v = 0;
+    if (!PE_parse_boot_argn("nvrmmux", &v, sizeof(v)) || !v) return;
+    IOACPIPlatformDevice *acpi = nv_xnu_gpu_acpi(nv);
+    IOACPIPlatformDevice *dev = acpi ? nv_xnu_acpi_mux_child(acpi, false, 0) : NULL;
+    if (!dev) { kprintf("NVRM-xnu: nvrmmux: no display with MXDS under the GPU's ACPI node - nothing to switch\n"); return; }
+    UInt32 adr = 0;
+    dev->evaluateInteger("_ADR", &adr);
+    NvU32 state = 0;
+    NV_STATUS st = nv_xnu_acpi_mux_eval(dev, "MXDS", &state);
+    if (st == NV_OK && state == 1) {
+        NvU32 sw = 0x11;   // set, dGPU
+        st = nv_xnu_acpi_mux_eval(dev, "MXDS", &sw);
+        IOSleep(100);      // DP AUX settle before link training (nvkms-rm.c, DFP_MUX_AUX_SETTLE_DELAY_MS_DEFAULT)
+        state = 0;
+        if (st == NV_OK) st = nv_xnu_acpi_mux_eval(dev, "MXDS", &state);
+    }
+    kprintf("NVRM-xnu: nvrmmux: display 0x%x (%s) MXDS -> 0x%x, panel on %s\n", (unsigned)adr, dev->getName(), st,
+            state == 2 ? "the NVIDIA GPU" : state == 1 ? "the integrated GPU" : "unknown");
+    dev->release();
+}
 void  NV_API_CALL nv_get_screen_info(nv_state_t *nv, NvU64 *pa, NvU32 *w, NvU32 *h, NvU32 *depth, NvU32 *pitch, NvU64 *size)
 {
     TRC;
