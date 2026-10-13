@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 
 mod plan;
 pub(in crate::native) use plan::*;
+mod plan_cache;
+pub(in crate::native) use plan_cache::Scope as PlanCacheScope;
 mod straddle;
 pub(in crate::native) use straddle::*;
 mod reject;

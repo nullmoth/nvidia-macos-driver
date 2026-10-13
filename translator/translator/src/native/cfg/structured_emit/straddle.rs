@@ -300,7 +300,7 @@ pub(in crate::native) fn structured_plan_inner8(
         .map(|plan| plan.blocks.as_slice())
         .unwrap_or(terminal_input);
     let (base_lblocks, mut loop_merges) =
-        forest_loop_merges(terminal_blocks, converge_inloop, multi_exit_clone);
+        super::plan_cache::forest_loop_merges_cached(terminal_blocks, converge_inloop, multi_exit_clone);
     let terminal_dispatch = if terminal_exit_selection {
         terminal_unreachable_selection_merges(&base_lblocks)
     } else {
@@ -342,46 +342,58 @@ pub(in crate::native) fn structured_plan_inner8(
             return None;
         }
     }
-    let (mut sblocks, mut branch, mut branch_merges_by_header, switch) = if construct_tree_owned {
-        unique_selection_merges_with_construct_tree_ownership(
+    let (sblocks, mut branch, mut branch_merges_by_header, switch) =
+        super::plan_cache::selection_cached(
             &lblocks,
             &loop_merges,
+            &terminal_merges,
             break_aware,
             loop_exit_selection,
-            &terminal_merges,
-        )
-    } else {
-        unique_selection_merges_with_loop_exit_and_forced(
-            &lblocks,
+            construct_tree_owned,
+            || {
+        let (mut sblocks, mut branch, mut branch_merges_by_header, switch) = if construct_tree_owned {
+            unique_selection_merges_with_construct_tree_ownership(
+                &lblocks,
+                &loop_merges,
+                break_aware,
+                loop_exit_selection,
+                &terminal_merges,
+            )
+        } else {
+            unique_selection_merges_with_loop_exit_and_forced(
+                &lblocks,
+                &loop_merges,
+                break_aware,
+                loop_exit_selection,
+                &terminal_merges,
+            )
+        };
+        if !construct_tree_owned {
+            index_branch_merges_by_header(
+                &sblocks,
+                &loop_merges,
+                &branch,
+                &mut branch_merges_by_header,
+            );
+        }
+        normalize_continue_selection_merge_targets(
+            &mut sblocks,
             &loop_merges,
-            break_aware,
-            loop_exit_selection,
-            &terminal_merges,
-        )
-    };
-    if !construct_tree_owned {
-        index_branch_merges_by_header(
-            &sblocks,
-            &loop_merges,
-            &branch,
             &mut branch_merges_by_header,
         );
-    }
-    normalize_continue_selection_merge_targets(
-        &mut sblocks,
-        &loop_merges,
-        &mut branch_merges_by_header,
-    );
-    if !construct_tree_owned {
-        branch = sblocks
-            .iter()
-            .filter_map(|block| {
-                let (true_target, false_target) = conditional_branch_targets(block)?;
-                let merge = branch_merges_by_header.get(&block.name)?;
-                Some(((true_target, false_target), merge.clone()))
-            })
-            .collect();
-    }
+        if !construct_tree_owned {
+            branch = sblocks
+                .iter()
+                .filter_map(|block| {
+                    let (true_target, false_target) = conditional_branch_targets(block)?;
+                    let merge = branch_merges_by_header.get(&block.name)?;
+                    Some(((true_target, false_target), merge.clone()))
+                })
+                .collect();
+        }
+        (sblocks, branch, branch_merges_by_header, switch)
+            },
+        );
     if selection_synth_growth_exceeds_ladder_cap(lblocks.len(), sblocks.len()) {
         spi_reject!(format!(
             "selection-synth-growth nblk={} from={}",

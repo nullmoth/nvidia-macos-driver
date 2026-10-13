@@ -136,6 +136,7 @@ pub(in crate::native) fn structured_plan(blocks: &[BodyBlock]) -> Option<Structu
     if blocks.len() > STRUCTURED_PLAN_MAX_BLOCKS {
         return None;
     }
+    let _plan_cache = super::plan_cache::Scope::enter();
     let deep_shared = privatize_shared_continuations_for_ladder(blocks);
     if deep_shared.len() != blocks.len() {
         if let Some(plan) = structured_plan_ladder(&deep_shared, false) {
