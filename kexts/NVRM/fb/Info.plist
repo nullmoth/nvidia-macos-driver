@@ -53,7 +53,7 @@
 			<key>CFBundleIdentifier</key><string>com.nullmoth.NVRMFB</string>
 			<key>IOClass</key><string>NVRMBootFB</string>
 			<key>IOProviderClass</key><string>IOPCIDevice</string>
-			<key>IOPCIMatch</key><string>0x000010de&amp;0x0000ffff</string>
+			<key>IOPCIPrimaryMatch</key><string>0x000010de&amp;0x0000ffff</string>
 			<key>IOPCIClassMatch</key><string>0x03000000&amp;0xff000000</string>
 			<key>IOMatchCategory</key><string>IOFramebuffer</string>
 			<key>IOProbeScore</key><integer>25000</integer>
