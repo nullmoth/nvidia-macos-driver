@@ -8361,12 +8361,12 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +   }
 +   const int64_t seen = nvrm_xnu_wait_event(fd, 0, 0);
 +   if (seen < 0) {
-+      if (on) fprintf(stderr, "nvrm: b73 event wait OFF (the kext has no selector 6) - polling\n");
++      if (on) fprintf(stderr, "nvrm: event wait OFF (the kext has no selector 6) - polling\n");
 +      on = 0;
 +      nvkmd_nvrm_wait_backoff(waited_ns);
 +      return;
 +   }
-+   { static int said; if (!said++) fprintf(stderr, "nvrm: b73 event wait ON - waits sleep on graphics completion events (fd %d)\n", fd); }
++   { static int said; if (!said++ && nvkmd_nvrm_diag_on()) fprintf(stderr, "nvrm: event wait ON - waits sleep on graphics completion events (fd %d)\n", fd); }
 +   if (!nvrm_evwait_pending(n, slot, gen, want, &fd) || fd < 0)
 +      return;
 +   (void)nvrm_xnu_wait_event(fd, (uint32_t)seen, 2000);
@@ -8391,7 +8391,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +   }
 +   if (__atomic_load_n(sem, __ATOMIC_ACQUIRE) >= want)
 +      return true;
-+   { static int said; if (!said++) fprintf(stderr, "nvrm: b73 flush waits sleep on the device's graphics event (fd %d)\n", fd); }
++   { static int said; if (!said++ && nvkmd_nvrm_diag_on()) fprintf(stderr, "nvrm: flush waits sleep on the device's graphics event (fd %d)\n", fd); }
 +   (void)nvrm_xnu_wait_event(fd, (uint32_t)seen, 2000);
 +   return true;
 +}
@@ -8780,11 +8780,11 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +         if (cs == NV_OK) {
 +            chanParent = ctx->hTsg;
 +         } else {
-+            fprintf(stderr, "nvrm: b81 ctxshare refused rc 0x%x - bare channel (b80 shape)\n", (unsigned)cs);
++            fprintf(stderr, "nvrm: ctxshare refused rc 0x%x - bare channel\n", (unsigned)cs);
 +            nvRmApiFree(&rm, ctx->hTsg); ctx->hTsg = 0; ctx->hCtxShare = 0;
 +         }
 +      } else {
-+         fprintf(stderr, "nvrm: b81 TSG refused rc 0x%x - bare channel (b80 shape)\n", (unsigned)ts);
++         fprintf(stderr, "nvrm: TSG refused rc 0x%x - bare channel\n", (unsigned)ts);
 +         ctx->hTsg = 0;
 +      }
 +   }
@@ -8802,12 +8802,12 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +   {
 +      NV_STATUS chs = nvRmApiAlloc(&rm, chanParent, &ctx->hChannel, pdev->channelClass, &createChannelParams);
 +      if (chs != NV_OK && createChannelParams.flags) {
-+         fprintf(stderr, "nvrm: b81 PRIVILEGED channel refused rc 0x%x - retried unprivileged\n", (unsigned)chs);
++         fprintf(stderr, "nvrm: PRIVILEGED channel refused rc 0x%x - retried unprivileged\n", (unsigned)chs);
 +         createChannelParams.flags = 0; ctx->hChannel = 0;
 +         chs = nvRmApiAlloc(&rm, chanParent, &ctx->hChannel, pdev->channelClass, &createChannelParams);
 +      }
 +      if (chs != NV_OK && ctx->ceOnly) {
-+         fprintf(stderr, "nvrm: b81 COPY4 channel refused rc 0x%x - graphics channel for the upload queue (b80 shape)\n", (unsigned)chs);
++         fprintf(stderr, "nvrm: COPY4 channel refused rc 0x%x - graphics channel for the upload queue\n", (unsigned)chs);
 +         ctx->ceOnly = false; engineType = NV2080_ENGINE_TYPE_GRAPHICS; createChannelParams.engineType = engineType; ctx->hChannel = 0;
 +         chs = nvRmApiAlloc(&rm, chanParent, &ctx->hChannel, pdev->channelClass, &createChannelParams);
 +      }
@@ -8931,14 +8931,14 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +      NV2080_CTRL_GR_GET_CTXSW_MODES_PARAMS after = { .hChannel = ctx->hChannel };
 +      NV_STATUS gs = nvRmApiControl(&rm, pdev->hSubdevice, NV2080_CTRL_CMD_GR_GET_CTXSW_MODES, &after, sizeof after);
 +      if (ps != NV_OK || gs != NV_OK || after.cilpPreemptMode != NV2080_CTRL_SET_CTXSW_PREEMPTION_MODE_COMPUTE_CTA || nvmtl_cfg_getenv("NVK_PREEMPT_LOG"))
-+         fprintf(stderr, "nvrm: b81 preemption CILP_SET cta/wfi on %s rc 0x%x -> cilp %u gfxp %u (rc 0x%x)\n",
++         fprintf(stderr, "nvrm: preemption CILP_SET cta/wfi on %s rc 0x%x -> cilp %u gfxp %u (rc 0x%x)\n",
 +                 ctx->hTsg ? "TSG" : "channel", (unsigned)ps, (unsigned)after.cilpPreemptMode, (unsigned)after.gfxpPreemptMode, (unsigned)gs);
 +   }
 +   if (!ctx->ceOnly && nvrm610_on("LGPROMO")) {
 +      NV0090_CTRL_SET_LG_SECTOR_PROMOTION_PARAMS lp = { .promoType = NV0090_CTRL_SET_LG_SECTOR_PROMOTION_64B };
 +      NV_STATUS ls = nvRmApiControl(&rm, ctx->hChannel, NV0090_CTRL_CMD_SET_LG_SECTOR_PROMOTION, &lp, sizeof lp);
-+      if (ls != NV_OK || nvmtl_cfg_getenv("NVK_PREEMPT_LOG"))
-+         fprintf(stderr, "nvrm: b81 SET_LG_SECTOR_PROMOTION 64B rc 0x%x\n", (unsigned)ls);
++      if ((ls != NV_OK && nvkmd_nvrm_diag_on()) || nvmtl_cfg_getenv("NVK_PREEMPT_LOG"))
++         fprintf(stderr, "nvrm: SET_LG_SECTOR_PROMOTION 64B rc 0x%x\n", (unsigned)ls);
 +   }
 +   if (!ctx->ceOnly && nvrm610_on("ZCULL")) {
 +
@@ -8952,14 +8952,14 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +                                                          .zcullMode = NV2080_CTRL_CTXSW_ZCULL_MODE_SEPARATE_BUFFER };
 +            NV_STATUS bs = nvRmApiControl(&rm, pdev->hSubdevice, NV2080_CTRL_CMD_GR_CTXSW_ZCULL_BIND, &zb, sizeof zb);
 +            if (bs != NV_OK || nvmtl_cfg_getenv("NVK_PREEMPT_LOG"))
-+               fprintf(stderr, "nvrm: b81 ZCULL_BIND %u B SEPARATE rc 0x%x\n", (unsigned)zp.size, (unsigned)bs);
++               fprintf(stderr, "nvrm: ZCULL_BIND %u B SEPARATE rc 0x%x\n", (unsigned)zp.size, (unsigned)bs);
 +         }
 +      } else if (nvmtl_cfg_getenv("NVK_PREEMPT_LOG")) {
-+         fprintf(stderr, "nvrm: b81 zcull context properties rc 0x%x size %u - not bound\n", (unsigned)zs, (unsigned)zp.size);
++         fprintf(stderr, "nvrm: zcull context properties rc 0x%x size %u - not bound\n", (unsigned)zs, (unsigned)zp.size);
 +      }
 +   }
 +   if (nvmtl_cfg_getenv("NVK_PREEMPT_LOG"))
-+      fprintf(stderr, "nvrm: b81 channel 0x%x %s: tsg 0x%x ctxshare 0x%x engineType %u\n", (unsigned)ctx->hChannel,
++      fprintf(stderr, "nvrm: channel 0x%x %s: tsg 0x%x ctxshare 0x%x engineType %u\n", (unsigned)ctx->hChannel,
 +              ctx->ceOnly ? "COPY-ENGINE" : "graphics", (unsigned)ctx->hTsg, (unsigned)ctx->hCtxShare, (unsigned)engineType);
 +
 +
@@ -8989,7 +8989,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +{
 +   VkResult r = nvkmd_nvrm_create_exec_ctx_on(_dev, log_obj, engines, true, ctx_out);
 +   if (r != VK_SUCCESS && engines == NVKMD_ENGINE_COPY && nvrm610_on("CECHAN")) {
-+      fprintf(stderr, "nvrm: copy-engine queue could not be built on this GPU (VkResult %d) - copy queue on a graphics channel\n", (int)r);
++      if (nvkmd_nvrm_diag_on()) fprintf(stderr, "nvrm: copy-engine queue could not be built on this GPU (VkResult %d) - copy queue on a graphics channel\n", (int)r);
 +      r = nvkmd_nvrm_create_exec_ctx_on(_dev, log_obj, engines, false, ctx_out);
 +   }
 +   return r;
@@ -9512,7 +9512,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +         };
 +         if (nvRmApiAllocOsEvent(&rmOsEvent, dev->osEvent) != NV_OK ||
 +             nvRmApiAlloc(&rm, pdev->hSubdevice, &dev->hEvent, NV01_EVENT_OS_EVENT, &eventParams) != NV_OK) {
-+            fprintf(stderr, "nvrm: b73 device event NOT allocated - waits keep polling\n");
++            fprintf(stderr, "nvrm: device event NOT allocated - waits keep polling\n");
 +            NVRM_CLOSE(dev->osEvent);
 +            dev->osEvent = -1;
 +            dev->hEvent = 0;
@@ -9626,8 +9626,8 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +      const char *e = nvmtl_cfg_getenv("NVK_LOCAL_MAP_SYSMEM");
 +      const bool bar_covers_vram = pdev->base.dev_info.bar_size_B >= pdev->base.dev_info.vram_size_B;
 +      on = (e && e[0] == '0') && bar_covers_vram;
-+      fprintf(stderr, "nvrm: b80 LOCAL+mapped memory -> %s (BAR1 %llu MB, VRAM %llu MB%s)\n",
-+              on ? "VRAM through BAR1" : "system RAM (b79 placement)",
++      if (nvkmd_nvrm_diag_on()) fprintf(stderr, "nvrm: LOCAL+mapped memory -> %s (BAR1 %llu MB, VRAM %llu MB%s)\n",
++              on ? "VRAM through BAR1" : "system RAM",
 +              (unsigned long long)(pdev->base.dev_info.bar_size_B >> 20),
 +              (unsigned long long)(pdev->base.dev_info.vram_size_B >> 20),
 +              e && e[0] == '0' ? ", NVK_LOCAL_MAP_SYSMEM=0" : ", default");
@@ -9935,8 +9935,8 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +   if (r != VK_SUCCESS)
 +      return r;
 +   nvkmd_nvrm_mem(mem)->hostPtr = host_ptr;
-+   { static uint64_t n; if (n++ == 0 || (n & 0x3ff) == 0)
-+        fprintf(stderr, "nvrm: b72 host pointer IMPORTED #%llu: %p, %llu KB, zero copy (handle %#x)\n",
++   { static uint64_t n; if ((n++ == 0 || (n & 0x3ff) == 0) && nvkmd_nvrm_diag_on())
++        fprintf(stderr, "nvrm: host pointer IMPORTED #%llu: %p, %llu KB, zero copy (handle %#x)\n",
 +                (unsigned long long)n, host_ptr, (unsigned long long)(size_B >> 10), h); }
 +   *mem_out = mem;
 +   return VK_SUCCESS;
@@ -10669,7 +10669,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +            if (us != NV_OK) { nvRmApiFree(&rm, pdev->hUsermode); pdev->hUsermode = 0; }
 +         }
 +         if (us != NV_OK)
-+            fprintf(stderr, "nvrm: b81 HOPPER_USERMODE_A rc 0x%x - falling back to class 0x%x\n", (unsigned)us, usermodeClass);
++            fprintf(stderr, "nvrm: HOPPER_USERMODE_A rc 0x%x - falling back to class 0x%x\n", (unsigned)us, usermodeClass);
 +      }
 +      if (us != NV_OK) {
 +         NV_CHECK(nvRmApiAlloc(&rm, pdev->hSubdevice, &pdev->hUsermode, usermodeClass, NULL));
@@ -10699,7 +10699,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +         .duration = NV2080_CTRL_PERF_BOOST_DURATION_INFINITE,
 +      };
 +      NV_STATUS bs = nvRmApiControl(&rm, pdev->hSubdevice, NV2080_CTRL_CMD_PERF_BOOST, &bp, sizeof bp);
-+      fprintf(stderr, "nvrm: b81 PERF_BOOST flags 0x%x INFINITE rc 0x%x\n", (unsigned)bp.flags, (unsigned)bs);
++      if (nvkmd_nvrm_diag_on()) fprintf(stderr, "nvrm: PERF_BOOST flags 0x%x INFINITE rc 0x%x\n", (unsigned)bp.flags, (unsigned)bs);
 +   }
 +
 +
@@ -10725,7 +10725,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +         }
 +      }
 +      pdev->base.kmd_info.has_host_import = hs == NV_OK;
-+      fprintf(stderr, "nvrm: b72 host-pointer import %s (probe NV_STATUS %#x%s)\n", hs == NV_OK ? "ON" : "OFF",
++      if (nvkmd_nvrm_diag_on()) fprintf(stderr, "nvrm: host-pointer import %s (probe NV_STATUS %#x%s)\n", hs == NV_OK ? "ON" : "OFF",
 +              (unsigned)hs, he && he[0] == '0' ? ", NVK_HOST_IMPORT=0" : "");
 +   }
 +
