@@ -1577,13 +1577,13 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
             @"newComputePipelineState: REFUSED - this function is not ours: %s", object_getClassName(fn)]);
     NVMTLFunction *f = (NVMTLFunction *)fn;
     if (f && f->_needsLink) { NSError *le = nil; id<MTLFunction> lk = nvmtl_link_stage(fn, nil, nil, &le); if (!lk) { if (err) *err = le; return nil; } f = (NVMTLFunction *)lk; fn = lk; }
-    // Machine code compiled ahead of time (NVMTLSass.m): from the linker, or looked up for this function.
-    // It runs first; the Vulkan pipeline, when there is one, stays as the fallback for a refused dispatch.
+    // Machine code compiled ahead of time (NVMTLSass.m), from the linker or looked up for this function, runs
+    // instead of a Vulkan pipeline, which is then never built for it.
     id sass = f ? (f->_sassKernel ?: nvmtl_sass_kernel_for_function(f)) : nil;
-    if (sass && !f->_spirv && f.functionType == MTLFunctionTypeKernel) {
+    if (sass && f.functionType == MTLFunctionTypeKernel) {
         NVMTLComputePipelineState *ps = [NVMTLComputePipelineState new];
         ps->_function = f; ps->_attrT = nvmtl_air_max_tg(f); ps->_sassKernel = sass; ps->_sassOnly = YES;
-        nvlog("newComputePipelineStateWithFunction: %s -> %p from compiled machine code only (no SPIR-V)",
+        nvlog("newComputePipelineStateWithFunction: %s -> %p from compiled machine code",
               f->_fname.UTF8String, (__bridge void *)ps);
         return ps;
     }
@@ -1602,7 +1602,6 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
         return nvmtl_fail(err, @"newComputePipelineState: vkCreateComputePipelines FAILED"); }
     nvlog("newComputePipelineStateWithFunction: %s -> %p (%lu B of SPIR-V)",
           f->_fname.UTF8String, (__bridge void *)ps, (unsigned long)f->_spirv.length);
-    if (sass) { ps->_sassKernel = sass; return ps; }
     nvmtl_vendor_attach_sass(self, ps, f);
     { id apple = nvmtl_vendor_apple_pipeline(self, f); if (apple) return apple; }
     return ps; }

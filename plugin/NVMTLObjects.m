@@ -4111,6 +4111,7 @@ static int nvmtl_zprobe_on(void);
 - (void)setBuffer:(id<MTLBuffer>)b offset:(NSUInteger)off atIndex:(NSUInteger)i {
     NVMTLBuffer *nb = (NVMTLBuffer *)b;
     if (!nb) {
+        [_bufAt removeObjectForKey:@(i)];   // the binding table must not keep the previous resource
         size_t zoff = 0;
         NVMTLBuffer *zb = nvmtl_bytes_ring(_cb, 16, &zoff);
         const BOOL zring = zb != nil;
@@ -4159,6 +4160,10 @@ static int nvmtl_zprobe_on(void);
     const BOOL dupable = _cb && bytes && len && len <= NVMTL_G79_DUPMAX && i < NVMTL_G79_DUPIDX && nvmtl_g79_on(NVMTL_G79_DUP);
     if (dupable && _cb->_g79BRing[i] && _cb->_g79BLen[i] == len && !memcmp(_cb->_g79B[i], bytes, len)) {
         if (nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, &_cb->_g79BRing[i]->_b, _cb->_g79BOff[i])) nvlog("compute setBytes: bind FAILED");
+        // The binding table follows the binding: kernels run from compiled machine code read their buffer
+        // addresses from it, and a stale entry hands the GPU an address that belongs to nothing.
+        if (!_bufAt) _bufAt = [NSMutableDictionary new];
+        _bufAt[@(i)] = @[_cb->_g79BRing[i], @(_cb->_g79BOff[i]), @(len), @(_cb->_g79BOff[i])];
         nvmtl_g79_count(G79C_BYTESDUP);
         return;
     }
@@ -4174,6 +4179,8 @@ static int nvmtl_zprobe_on(void);
         _cb->_g79BRing[i] = ring && nb->_b.map ? nb : nil; _cb->_g79BOff[i] = roff; _cb->_g79BLen[i] = (uint32_t)len;
         memcpy(_cb->_g79B[i], bytes, len);
     }
+    if (!_bufAt) _bufAt = [NSMutableDictionary new];
+    _bufAt[@(i)] = @[nb, @(roff), @(len), @(roff)];   // buffer, offset, inline length, base
     if (nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, &nb->_b, roff)) nvlog("compute setBytes: bind FAILED");
     if (nvmtl_zprobe_on()) {
         const uint32_t *zw = (const uint32_t *)bytes; char zb[220]; int zo = 0;
