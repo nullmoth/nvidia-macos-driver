@@ -2470,10 +2470,16 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
         mp.useVideoMemory = NV_TRUE;
         mp.compressible   = &compressible;
         struct NvKmsKapiMemory *m = fKms->allocateMemory(fDev, &mp);
-        if (!m) { FBLOG("nvAllocVram(%llu): allocateMemory failed", (unsigned long long)want); break; }
+        // Both failures print what the budget counted at that moment: the real BAR1 limit of a 256 MB window is
+        // somewhere under the budget, and only these lines can show where.
+        if (!m) { FBLOG("nvAllocVram(%llu): allocateMemory failed (mapped %lld + parked %lld of %lld budget, BAR1 %llu)",
+                        (unsigned long long)want, (long long)gVramMappedBytes, (long long)gVramParkedBytes, (long long)budget,
+                        (unsigned long long)fBarLen); break; }
         void *k = nullptr;
         if (!fKms->mapMemory(fDev, m, NVKMS_KAPI_MAPPING_TYPE_KERNEL, &k) || !k) {
-            FBLOG("nvAllocVram(%llu): mapMemory(KERNEL) failed", (unsigned long long)want);
+            FBLOG("nvAllocVram(%llu): mapMemory(KERNEL) failed (mapped %lld + parked %lld of %lld budget, BAR1 %llu)",
+                  (unsigned long long)want, (long long)gVramMappedBytes, (long long)gVramParkedBytes, (long long)budget,
+                  (unsigned long long)fBarLen);
             fKms->freeMemory(fDev, m); break;
         }
         NvU64 p = fPhysForVa ? fPhysForVa(k) : 0;
