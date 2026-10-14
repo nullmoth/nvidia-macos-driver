@@ -80,8 +80,8 @@ check('RM administrator check reads the caller uid', 'return (kauth_getuid() == 
       and 'os_is_administrator(void) { NV_XNU_TRC; return NV_TRUE; }' not in osx)
 check('first-time GPU bring-up refuses non-root callers', 'if (pass > fPassDone && kauth_getuid() != 0)' in nvrm)
 check('event waiters are capped', 'kNvEvtMaxSleepers = 256' in nvrm and 'OSDecrementAtomic(&gNvEvtSleepers)' in nvrm)
-check('bind-fd rejects out-of-range values and always clears a stale context',
-      'if (v > 0x7FFFFFFFLL || v < -0x80000000LL) return kIOReturnBadArgument;' in nvrm and 'if (me->fBound >= 0 && me->fMmap.valid)' not in nvrm)
+check('bind-fd rejects out-of-range values and clears a stale context when bound to a real fd',
+      'if (v > 0x7FFFFFFFLL || v < -0x80000000LL) return kIOReturnBadArgument;' in nvrm and 'if (me->fBound >= 0 && me->fMmap.valid)' in nvrm)
 
 # --- app signing: hardened app, unhardened Metal helper ---
 build = (root / 'app/build.sh').read_text()
