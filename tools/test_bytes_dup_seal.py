@@ -8,7 +8,7 @@ compute encoder's binding table released it later (mediaanalysisd crashes in end
 
 Checks the source: the cache is declared unretained (so this rule is needed at all), the seal hands the scratch list
 over and clears the cache in the same method, and the finished command buffer clears it too. Negative control: the
-committed tree before this fix must fail the seal check."""
+v1.15.0 release, which shipped without it, must fail the seal check."""
 import pathlib
 import re
 import subprocess
@@ -50,15 +50,18 @@ if r is None:
     sys.exit('nvmtlSealPartWithSignal not found - check is UNKNOWN, not clean')
 check('sealing a part hands the scratch list over', r[0])
 check('sealing a part clears the setBytes cache in the same step', r[1])
+seal = method(eventsync, '- (void)nvmtlSealPartWithSignal:')
+HOLD = 'if (restart) for (id o in (NVMTLResSet *)part->resources) [(NVMTLResSet *)_resources addObject:o];'
+check('a seal that goes on recording keeps holding what the binding tables still name', HOLD in seal)
 fin = method(eventsync, '- (void)nvmtlFinishExecution:')
 check('a finished command buffer clears the setBytes cache', fin is not None and 'memset(_g79BRing, 0, sizeof _g79BRing)' in fin)
 
-old = subprocess.run(['git', '-C', str(root), 'show', 'HEAD:plugin/NVMTLEventSync.m'], capture_output=True, text=True)
+old = subprocess.run(['git', '-C', str(root), 'show', 'v1.15.0:plugin/NVMTLEventSync.m'], capture_output=True, text=True)
 if old.returncode:
-    sys.exit('could not read the committed NVMTLEventSync.m - negative control is UNKNOWN, not clean')
+    sys.exit('could not read NVMTLEventSync.m at v1.15.0 - negative control is UNKNOWN, not clean')
 if old.stdout == eventsync:
-    print('note: the committed tree already holds this change - the negative control compares it with itself')
+    print('note: v1.15.0 already holds this change - the negative control compares it with itself')
 ro = seal_clears(old.stdout)
-check('negative control: the committed seal leaves the cache pointing at chunks it handed away',
+check('negative control: the v1.15.0 seal leaves the cache pointing at chunks it handed away',
       ro is not None and ro[0] and not ro[1])
 sys.exit(1 if fails else 0)

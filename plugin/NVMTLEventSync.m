@@ -144,6 +144,12 @@ static int nvmtl_skip_empty_on(void) {
     // outlived its chunk was bound and retained again by the next identical setBytes, and the compute encoder's binding
     // table later released a freed object (mediaanalysisd under MPS convolution, endEncoding / .cxx_destruct).
     memset(_g79BRing, 0, sizeof _g79BRing); memset(_g79BLen, 0, sizeof _g79BLen);
+    // Recording goes on after this seal, and the encoders' binding tables still name these resources by raw Vulkan
+    // handle: a later dispatch snapshots them again without rebinding. The command buffer keeps holding them until it
+    // completes, as Metal's do. WAS: only the part held them, so a texture the app had released died when that part
+    // completed and the next dispatch wrote its destroyed image view (NVK abort in get_sampled_image_view_desc under
+    // nvk_UpdateDescriptorSets: mediaanalysisd, Safari, wallpapers).
+    if (restart) for (id o in (NVMTLResSet *)part->resources) [(NVMTLResSet *)_resources addObject:o];
     if (restart && nvmtl_vk_cmd_begin(&_queue->_q, &_c)) {
         _cbError = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorOutOfMemory
             userInfo:@{NSLocalizedDescriptionKey:@"Could not allocate recording after event boundary"}];
