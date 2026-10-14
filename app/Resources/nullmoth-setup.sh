@@ -47,6 +47,13 @@ stop() { echo "STOP $*"; cleanup; echo "RESULT stop"; exit 1; }
 has() { plutil -extract "$1" raw -o - "$C" >/dev/null 2>&1; }
 get() { plutil -extract "$1" raw -o - "$C" 2>/dev/null; }
 mnt() { diskutil info "$1" 2>/dev/null | awk -F': *' '/Mount Point/{print $2}'; }
+ro_why() {      # $1 = a file; explains a failed write when macOS mounted its partition read-only
+  # 1.14.7 setup log (10-14): "cp: ... Read-only file system", and the stop said only "could not back up". macOS mounts a
+  # FAT partition read-only when its repair check fails (left unclean by Windows Fast Startup or a forced power-off) or
+  # when the stick is write-locked.
+  local m; m=$(df -P "$(dirname "$1")" 2>/dev/null | awk 'NR==2{print $NF}')
+  [ -n "$m" ] && mount | grep -F " on $m (" | grep -q "read-only" || return 0
+  echo " - macOS mounted $m read-only, so nothing on it can be changed. Run First Aid on that partition in Disk Utility (if it was left unclean by Windows, turn off Fast Startup there and shut Windows down once), check the stick's write-lock switch, then try again"; }
 mount_efi() {   # $1 = device or partition UUID; sets MOUNT_POINT in this shell
   local mp; mp=$(mnt "$1")
   if [ -z "$mp" ]; then diskutil mount "$1" >/dev/null 2>&1 || return 1; MOUNTED="$MOUNTED $1"; mp=$(mnt "$1"); fi
@@ -744,7 +751,7 @@ if [ -n "$VERB" ]; then
   # lists it) AND in NVRAM now (a config without that Delete entry keeps whatever NVRAM already holds).
   case "$VERB" in on|off) ;; *) stop "--verbose takes on or off";; esac
   step "Turning verbose startup $VERB"
-  BKC="$C.nullmoth-verbose-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C"
+  BKC="$C.nullmoth-verbose-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C$(ro_why "$C")"
   args=$(get NVRAM.Add.$B.boot-args); new=""
   for a in $args; do [ "$a" = -v ] || new="$new $a"; done
   [ "$VERB" = on ] && new="$new -v"; new=${new# }
@@ -764,7 +771,7 @@ if [ -n "${SETLOGO:-}" ]; then
   # -nmlogooff in boot-args turns it off for one start without touching the config.
   case "$SETLOGO" in on|off) ;; *) stop "--set-logo takes on or off";; esac
   step "Turning the NullMoth boot logo $SETLOGO"
-  BKC="$C.nullmoth-logo-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C"
+  BKC="$C.nullmoth-logo-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C$(ro_why "$C")"
   LOGOSRC="$(dirname "${TOOL:-/nonexistent}")/$LOGO_FILE"; li=$(logo_index); fail=0
   if [ "$SETLOGO" = on ]; then
     ocl=$(ls -t "$MP"/opencore-*.txt 2>/dev/null | head -n 1)
@@ -803,7 +810,7 @@ if [ -n "${GPUTEST:-}" ]; then
   NPUS=$(ioreg -r -c IOPCIDevice -l -w0 | LC_ALL=C awk -F'<|>' 'function out(){if ((c=="12" && v=="8086") || (c=="11" && s=="80" && v=="1022")) print v}
     /\+-o /{out(); c=""; s=""; v=""} /"vendor-id" =/{v=substr($2,3,2) substr($2,1,2)} /"class-code" =/{c=substr($2,5,2); s=substr($2,3,2)} END{out()}' | sort -u)
   [ -n "$NPUS" ] && [ -d "$GN" ] && WANT="$WANT -nmxnpu"
-  BKC="$C.nullmoth-gputest-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C"
+  BKC="$C.nullmoth-gputest-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C$(ro_why "$C")"
   ga() {  # $1 = add|del, $2 = boot argument; the config and NVRAM together
     local a new="" nv=""
     for a in $(get NVRAM.Add.$B.boot-args); do [ "$a" = "$2" ] || new="$new $a"; done
@@ -941,7 +948,7 @@ if [ -n "$UPD" ]; then
     cur=$(nvram boot-args 2>/dev/null | cut -f2-); for a in $cur; do [ "$a" = "$2" ] || nv="$nv $a"; done
     [ "$1" = add ] && nv="$nv $2"; nvram boot-args="${nv# }" || note "could not write NVRAM boot-args"; }
   setq() { if has "$1"; then plutil -replace "$1" -integer "$2" "$C"; else plutil -insert "$1" -integer "$2" "$C"; fi; }
-  backup() { BKC="$C.nullmoth-update-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C"; }
+  backup() { BKC="$C.nullmoth-update-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C$(ro_why "$C")"; }
   do_prepare() {
     step "Preparing this Mac for the macOS 26 Tahoe update"
     ls /Library/NullMoth/kexts/*/NVAccel.kext >/dev/null 2>&1 || stop "this Mac still has driver 1.0, which has no macOS 26 kexts"
@@ -1015,7 +1022,7 @@ if [ -n "$USBMAP" ]; then
   kidx() { local i=0 p; while p=$(plutil -extract Kernel.Add.$i.BundlePath raw -o - "$C" 2>/dev/null); do [ "$p" = "$1" ] && { echo $i; return; }; i=$((i+1)); done; }
   # The map is a USBToolBox map. 1.10 stopped when the EFI had no USBToolBox (10-10, an EFI not built by 1401); fetch it.
   NEEDUTB=0; [ -d "$KD/USBToolBox.kext" ] || { fetch_kext USBToolBox.kext "$KD"; NEEDUTB=1; echo "CHANGE Kexts: add USBToolBox.kext (downloaded, SHA-256 checked)"; }
-  BKC="$C.nullmoth-usb-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C"; ok "backed up the config to $BKC"
+  BKC="$C.nullmoth-usb-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C$(ro_why "$C")"; ok "backed up the config to $BKC"
   [ $NEEDUTB = 0 ] || ditto "$KT/USBToolBox.kext.x/USBToolBox.kext" "$KD/USBToolBox.kext" || stop "could not copy USBToolBox.kext"
   [ -n "$(kidx USBToolBox.kext)" ] || { plutil -insert Kernel.Add -json '{"Arch":"Any","BundlePath":"USBToolBox.kext","Comment":"USBToolBox (NullMoth USB map)","Enabled":true,"ExecutablePath":"Contents/MacOS/USBToolBox","MaxKernel":"","MinKernel":"","PlistPath":"Contents/Info.plist"}' -append "$C" \
     || { cp -p "$BKC" "$C"; stop "could not add USBToolBox.kext to the config"; }; echo "CHANGE Kernel -> Add: USBToolBox.kext"; }
@@ -1243,7 +1250,7 @@ if [ $DRY = 0 ]; then
     for a in $inherited; do case " $ADDED " in *" $a "*) ;; *) ADDED="$ADDED $a";; esac; done
   fi
   BKC="$C.nullmoth-$(date +%Y%m%d-%H%M%S)"
-  cp -p "$C" "$BKC" || stop "could not back up $C"
+  cp -p "$C" "$BKC" || stop "could not back up $C$(ro_why "$C")"
   ok "backed up the config to $BKC"
   fail=0
   for e in "${EDITS[@]}"; do IFS='|' read -r k t v <<<"$e"
