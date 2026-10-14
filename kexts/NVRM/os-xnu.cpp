@@ -257,7 +257,10 @@ NV_STATUS NV_API_CALL os_pci_write_dword(void *h, NvU32 off, NvU32 v) { NV_XNU_T
 struct nv_xnu_map { IOMemoryDescriptor *md; IOMemoryMap *map; void *va; NvU64 phys; NvU64 size; void *alias; };
 extern "C" { void *nv_pm_alias(NvU64, NvU64, void **); void nv_pm_alias_drop(void *); bool nv_pm_is_gpu(NvU64, NvU64);
              void nv_pm_foreign(NvU64, NvU64, NvU32, void *); }
-#define NV_XNU_MAX_MAPS 1024
+// Every kernel mapping RM makes is tracked here (VA -> physical for the framebuffer's overlap and aperture checks).
+// WAS 1024: a resizable BAR1 has a 4 GB surface budget and the accelerator maps each allocation, so an RTX 3050 and
+// an RTX 5070 filled the table after ~20 minutes; every later surface then had no physical address and was refused.
+#define NV_XNU_MAX_MAPS 8192
 static nv_xnu_map nv_xnu_maps[NV_XNU_MAX_MAPS];
 static unsigned nv_xnu_maps_high;
 void *NV_API_CALL os_map_kernel_space(NvU64 start, NvU64 size, NvU32 mode)
@@ -267,7 +270,11 @@ void *NV_API_CALL os_map_kernel_space(NvU64 start, NvU64 size, NvU32 mode)
     if (!nv_pm_is_gpu(start, size)) {
         void *cookie = NULL; void *ava = nv_pm_alias(start, size, &cookie);
         if (ava) {
-            for (int i = 0; i < NV_XNU_MAX_MAPS; i++) if (nv_xnu_maps[i].va == NULL) { nv_xnu_maps[i] = { NULL, NULL, ava, start, size, cookie }; return ava; }
+            for (int i = 0; i < NV_XNU_MAX_MAPS; i++) if (nv_xnu_maps[i].va == NULL) {
+                nv_xnu_maps[i] = { NULL, NULL, ava, start, size, cookie };
+                if ((unsigned)i + 1 > nv_xnu_maps_high) nv_xnu_maps_high = (unsigned)i + 1;
+                return ava;
+            }
             return ava;
         }
         nv_pm_foreign(start, size, mode, __builtin_return_address(0));
@@ -297,13 +304,15 @@ void *NV_API_CALL os_map_kernel_space(NvU64 start, NvU64 size, NvU32 mode)
 }
 NvU64 nv_xnu_phys_for_kernel_va(const void *va)
 {
-    for (int i = 0; i < NV_XNU_MAX_MAPS; i++) if (nv_xnu_maps[i].va && (const char *)va >= (const char *)nv_xnu_maps[i].va && (const char *)va < (const char *)nv_xnu_maps[i].va + nv_xnu_maps[i].size)
+    // Lookups stop at the high-water mark (every slot ever filled is below it), so a larger table costs nothing
+    // until it is actually used.
+    for (unsigned i = 0; i < nv_xnu_maps_high; i++) if (nv_xnu_maps[i].va && (const char *)va >= (const char *)nv_xnu_maps[i].va && (const char *)va < (const char *)nv_xnu_maps[i].va + nv_xnu_maps[i].size)
         return nv_xnu_maps[i].phys + ((const char *)va - (const char *)nv_xnu_maps[i].va);
     return 0;
 }
 void NV_API_CALL os_unmap_kernel_space(void *va, NvU64 size)
 { NV_XNU_TRC;
-    for (int i = 0; i < NV_XNU_MAX_MAPS; i++) if (nv_xnu_maps[i].va == va) {
+    for (unsigned i = 0; i < nv_xnu_maps_high; i++) if (nv_xnu_maps[i].va == va) {
         if (nv_xnu_maps[i].alias) nv_pm_alias_drop(nv_xnu_maps[i].alias);
         else { nv_xnu_maps[i].map->release(); nv_xnu_maps[i].md->release(); }
         nv_xnu_maps[i] = { NULL, NULL, NULL, 0, 0, NULL }; return;
@@ -311,7 +320,7 @@ void NV_API_CALL os_unmap_kernel_space(void *va, NvU64 size)
 }
 int nv_xnu_kmap_overlap(NvU64 phys, NvU64 len)
 {
-    for (int i = 0; i < NV_XNU_MAX_MAPS; i++)
+    for (unsigned i = 0; i < nv_xnu_maps_high; i++)
         if (nv_xnu_maps[i].va && !nv_xnu_maps[i].alias && phys < nv_xnu_maps[i].phys + nv_xnu_maps[i].size && nv_xnu_maps[i].phys < phys + len) return 1;
     return 0;
 }
