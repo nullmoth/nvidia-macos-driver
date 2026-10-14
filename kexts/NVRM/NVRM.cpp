@@ -1382,9 +1382,11 @@ IOReturn NVRMUserClient::sBindFd(OSObject *target, void *reference, IOExternalMe
     if (v > 0x7FFFFFFFLL || v < -0x80000000LL) return kIOReturnBadArgument;
     me->fBound = (int)v;
     me->fEverBound = true;
-    // Was gated on fBound >= 0, so a negative value skipped the clear and kept
-    // a mapping context across a rebind that was supposed to drop it.
-    if (me->fMmap.valid) {
+    // A stale mapping context is cleared when the connection is bound to a real fd, the only point where it
+    // could be used for a new mapping. Not on detach (a negative value): the userland driver detaches a
+    // connection it keeps alive for mappings that are still live, and clearing the context there left those
+    // mappings unreleasable, so VRAM filled up and stayed full after the process exited.
+    if (me->fBound >= 0 && me->fMmap.valid) {
         kprintf("NVRM-xnu: client %d re-bound to fd %d with a stale mapping context - cleared\n", me->fFd, me->fBound);
         nvMmapContextClear(&me->fMmap);
     }
