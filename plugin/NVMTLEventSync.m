@@ -139,6 +139,11 @@ static int nvmtl_skip_empty_on(void) {
     if (_g79Sig.count) { part->signals = [_g79Sig copy]; [_g79Sig removeAllObjects]; }
     [_parts addObject:part];
     [_surfDirty removeAllObjects]; [_scratch removeAllObjects];
+    // The repeated-setBytes cache points at ring chunks without owning them; the part now owns those chunks and frees
+    // them when it completes, which can happen while this command buffer is still being encoded. A cache entry that
+    // outlived its chunk was bound and retained again by the next identical setBytes, and the compute encoder's binding
+    // table later released a freed object (mediaanalysisd under MPS convolution, endEncoding / .cxx_destruct).
+    memset(_g79BRing, 0, sizeof _g79BRing); memset(_g79BLen, 0, sizeof _g79BLen);
     if (restart && nvmtl_vk_cmd_begin(&_queue->_q, &_c)) {
         _cbError = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorOutOfMemory
             userInfo:@{NSLocalizedDescriptionKey:@"Could not allocate recording after event boundary"}];
