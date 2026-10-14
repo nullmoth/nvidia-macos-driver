@@ -244,6 +244,12 @@ static int nvmtl_skip_empty_on(void) {
     _executionDone = YES;
     [_completionCondition unlock];
     [_parts removeAllObjects];
+    // A finished command buffer lets go of everything only its GPU work needed: the setBytes ring and the scratch
+    // buffers it filled, and any resources still listed on it. Apple's command buffers do the same. An app's
+    // autorelease pool can keep thousands of finished command buffers alive during a long loop (Geekbench 7 does),
+    // and holding these until the command buffer itself died filled VRAM until allocations were refused.
+    [_scratch removeAllObjects]; _e78Ring = nil; _e78RingOff = 0; memset(_g79BRing, 0, sizeof _g79BRing);
+    [(NVMTLResSet *)_resources removeAllObjects]; [_stTwins removeAllObjects];
     // Applications may retain completed command buffers. Pending overwrite
     // bookkeeping must not keep their IOSurfaces and VRAM alive indefinitely.
     [_surfOverwrites removeAllObjects]; _surfOverwrites = nil;
