@@ -762,7 +762,7 @@ bool NVRM::placeLargeBar1()
 {
     static const UInt64 kBigBase = 0x10000000000ULL;
     static const UInt64 kHostWindowEnd = 0x3ffbfffffffULL;
-    // -nvrmsmallbar: leave BAR1 where the firmware put it, as on a card without Resizable BAR (every GTX 16). Lets a
+    // -nvrmsmallbar: leave BAR1 where the firmware put it, as on a card without Resizable BAR (most GTX 16). Lets a
     // ReBAR card run the small-BAR paths (surface budget, copy path, private surface images) for testing and diagnosis.
     { char nb[8] = { 0 };
       if (PE_parse_boot_argn("-nvrmsmallbar", nb, sizeof nb)) { LOG("bar1: -nvrmsmallbar set — BAR1 left as IOPCIFamily placed it"); return false; } }
@@ -793,7 +793,14 @@ bool NVRM::placeLargeBar1()
     UInt64 newSize = 0;
     if (bar1Size < (4ULL << 30)) {
         for (int k = 13; k >= 12; k--) if (rbCtlOff && (rbSupported >> k) & 1) { newSize = 1ULL << (20 + k); break; }
-        if (!newSize) { LOG("bar1: BAR1 is %llu MB and the card offers no 4-8 GB size — not placing", bar1Size >> 20); return false; }
+        // Turing cards offer 64-256 MB only (sizes mask 0x1c0), and some firmware leaves them at 64 MB: a GTX 1630, a
+        // GTX 1660 SUPER and an RTX 2060 in user logs, against 66 Turing boots at 256 MB. 64 MB holds four 1440p
+        // surfaces, and the GTX 1630 at 64 MB parked console-overlapping VRAM until the park ceiling and then failed
+        // mapMemory. Take the largest size the card offers that is bigger than the current one; the placement below is
+        // the same path that moves 64 MB cards to 8 GB.
+        for (int k = 11; !newSize && k >= 0; k--)
+            if (rbCtlOff && ((rbSupported >> k) & 1) && (1ULL << (20 + k)) > bar1Size) newSize = 1ULL << (20 + k);
+        if (!newSize) { LOG("bar1: BAR1 is %llu MB and the card offers no larger size — not placing", bar1Size >> 20); return false; }
         LOG("bar1: BAR1 is %llu MB; will resize it to %llu MB", bar1Size >> 20, newSize >> 20);
         bar1Size = newSize;
     }
