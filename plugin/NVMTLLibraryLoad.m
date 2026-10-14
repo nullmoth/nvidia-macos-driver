@@ -1970,6 +1970,16 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     free(idx); free(sz); free(bytes); free(pay);
     if (!spv && dumpDir)
         [(te ?: @"(no reason)") writeToFile:[dumpDir stringByAppendingFormat:@"/%@.err.txt", fn->_fname] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    // Machine code compiled ahead of time for exactly this link (kernel AIR, chosen bodies, constants).
+    id sass = nvmtl_sass_kernel_for_linked(fn, mods, fc);
+    if (!spv && sass) {
+        NVMTLFunction *mf = [NVMTLFunction new];
+        mf->_fname = fn->_fname; mf->_stage = fn->_stage; mf->_air = linked; mf->_fc = [fc copy];
+        mf->_lib = fn->_lib; mf->_fcv = fn->_fcv; mf->_specName = fn->_specName; mf->_sassKernel = sass;
+        nvlog("link: \"%s\" did not translate (%s); it runs from its compiled machine code", fn->_fname.UTF8String,
+              te.UTF8String ?: "no reason given");
+        return mf;
+    }
     if (!spv) { if (err) *err = nvmtl_link_err([NSString stringWithFormat:@"\"%@\" linked (%lu B AIR) but did not translate: %@", fn->_fname, (unsigned long)linked.length, te]); return nil; }
     if (dumpDir)
         [spv writeToFile:[dumpDir stringByAppendingFormat:@"/%@.spv", fn->_fname] atomically:YES];
@@ -1977,7 +1987,7 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
           (unsigned long)fn->_air.length, (unsigned long)linked.length, k2, (unsigned long)spv.length);
     NVMTLFunction *nf = [NVMTLFunction new];
     nf->_spirv = spv; nf->_fname = fn->_fname; nf->_stage = fn->_stage; nf->_air = linked; nf->_fc = [fc copy];
-    nf->_lib = fn->_lib; nf->_fcv = fn->_fcv; nf->_specName = fn->_specName;
+    nf->_lib = fn->_lib; nf->_fcv = fn->_fcv; nf->_specName = fn->_specName; nf->_sassKernel = sass;
     if (usesTable) objc_setAssociatedObject(nf, &kNVMTLTableFns, [tc copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return nf;
 }

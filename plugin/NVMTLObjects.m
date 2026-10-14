@@ -4235,6 +4235,10 @@ static void nvmtl_zprobe_drain(void) {
 }
 - (void)setTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i {
     NVMTLTexture *nt = (NVMTLTexture *)t;
+    if (nvmtl_sass_tables_wanted()) {
+        if (!_sassTextures) _sassTextures = [NSMutableDictionary new];
+        if (nt) _sassTextures[@(i)] = nt; else [_sassTextures removeObjectForKey:@(i)];
+    }
     if (!nt) { nvlog("compute setTexture: nil at %lu", (unsigned long)i); return; }
     nvmtl_zprobe_record(nt, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, (unsigned)i, nt->_stex ? 1u : 0u);
     nvmtl_retain_resource(_cb, nt);
@@ -4268,6 +4272,10 @@ static void nvmtl_zprobe_drain(void) {
     if (_e78Concurrent) nvmtl_enc78_count(E78C_CONC, 1);
 }
 - (void)dispatchThreadgroups:(MTLSize)grid threadsPerThreadgroup:(MTLSize)tg {
+    if (_ps && _ps->_sassKernel) {
+        int ran = nvmtl_sass_dispatch(self, grid, tg, 0, !_ps->_sassOnly);
+        if (ran) { if (ran > 0 && _cb->_stTwins.count) nvmtl_storage_twins_out(_cb); return; }
+    }
     if (!_nvcIn && nvmtl_nvconv_try(self, grid, tg)) return;
     NVMTLComputePipelineState *selected = [self nvmtlSamplerPipeline];
     if (!selected) { nvlog("dispatch with no valid compute sampler pipeline"); return; }
@@ -4283,6 +4291,10 @@ static void nvmtl_zprobe_drain(void) {
     if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
 }
 - (void)dispatchThreads:(MTLSize)threads threadsPerThreadgroup:(MTLSize)tg {
+    if (_ps && _ps->_sassKernel) {
+        int ran = nvmtl_sass_dispatch(self, threads, tg, 1, !_ps->_sassOnly);
+        if (ran) { if (ran > 0 && _cb->_stTwins.count) nvmtl_storage_twins_out(_cb); return; }
+    }
     NVMTLComputePipelineState *selected = [self nvmtlSamplerPipeline];
     if (!selected) { nvlog("dispatch with no valid compute sampler pipeline"); return; }
     uint32_t l[3] = { (uint32_t)tg.width, (uint32_t)tg.height, (uint32_t)tg.depth };
@@ -4325,6 +4337,10 @@ static void nvmtl_zprobe_drain(void) {
 }
 - (void)setSamplerState:(id<MTLSamplerState>)ss atIndex:(NSUInteger)i {
     NVMTLSamplerState *ns = (NVMTLSamplerState *)ss;
+    if (nvmtl_sass_tables_wanted()) {
+        if (!_sassSamplers) _sassSamplers = [NSMutableDictionary new];
+        if (ns) _sassSamplers[@(i)] = ns; else [_sassSamplers removeObjectForKey:@(i)];
+    }
     if (!_samplers) _samplers = [NSMutableDictionary new];
     NSString *key = [NSString stringWithFormat:@"%lu", (unsigned long)i];
     id was = _samplers[key], now = ns ? ns->_pixelState : nil;
@@ -4351,6 +4367,12 @@ static void nvmtl_zprobe_drain(void) {
     NVMTLBuffer *nb = (NVMTLBuffer *)buf;
     if (!nb) { nvlog("dispatchThreadgroupsWithIndirectBuffer: nil"); return; }
     nvmtl_retain_resource(_cb, nb);
+    // a pipeline with only compiled machine code has no Vulkan pipeline to run an indirect dispatch on
+    if (_ps && _ps->_sassOnly) {
+        [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
+            userInfo:@{ NSLocalizedDescriptionKey: @"Indirect dispatch is not available for this kernel" }]];
+        return;
+    }
     NVMTLComputePipelineState *selected = [self nvmtlSamplerPipeline];
     if (!selected) { nvlog("indirect dispatch with no valid compute sampler pipeline"); return; }
     uint32_t l[3] = { (uint32_t)tg.width, (uint32_t)tg.height, (uint32_t)tg.depth };
