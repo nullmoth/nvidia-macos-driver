@@ -79,18 +79,20 @@ def run(label, objects, header, d):
 
 new_obj = (root / 'plugin/NVMTLObjects.m').read_text()
 new_hdr = (root / 'plugin/NVMTLObjects.h').read_text()
-git = lambda p: subprocess.run(['git', '-C', str(root), 'show', f'HEAD:{p}'], capture_output=True, text=True)
+# the set as it stood just before the fix (the commit that made sealing a one-step take, 20cac6b, had the leak)
+BEFORE = '20cac6b'
+git = lambda p: subprocess.run(['git', '-C', str(root), 'show', f'{BEFORE}:{p}'], capture_output=True, text=True)
 old_obj, old_hdr = git('plugin/NVMTLObjects.m'), git('plugin/NVMTLObjects.h')
 if old_obj.returncode or old_hdr.returncode:
-    sys.exit('could not read the committed NVMTLResSet - negative control is UNKNOWN, not clean')
+    sys.exit('could not read the NVMTLResSet before the fix - negative control is UNKNOWN, not clean')
 
 with tempfile.TemporaryDirectory() as d:
     made, gone, refs, after = run('new', new_obj, new_hdr, d)
     check('every resource is deallocated before the app\'s pool drains', gone == made, f'{gone} of {made} gone before the drain')
     check('residency counts return to 0 before the drain', refs == 0, f'{refs} left')
     if old_obj.stdout == new_obj:
-        print('note: the committed tree already holds this NVMTLResSet - the negative control below compares it with itself')
+        print(f'note: {BEFORE} already holds this NVMTLResSet - the negative control below compares it with itself')
     omade, ogone, _, oafter = run('old', old_obj.stdout, old_hdr.stdout, d)
-    check('negative control: the committed set leaves resources alive in the undrained pool', ogone < omade,
+    check(f'negative control: the set at {BEFORE} leaves resources alive in the undrained pool', ogone < omade,
           f'{ogone} of {omade} gone before the drain, {oafter} after it')
 sys.exit(1 if fails else 0)
