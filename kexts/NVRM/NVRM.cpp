@@ -1373,14 +1373,14 @@ IOReturn NVRMUserClient::sBindFd(OSObject *target, void *reference, IOExternalMe
 {
     NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);
     if (!me) return kIOReturnNotAttached;
-    // The value is a file descriptor number. Anything outside the range a
-    // descriptor can take is a caller error, not something to store and look
-    // up later. Was: any 32-bit value was accepted and cast to int, so a value
-    // with the top bit set became a negative descriptor.
-    // 0x7FFFFFFF rather than INT_MAX: limits.h is not included here and the
-    // rest of this file uses explicit constants.
-    if (args->scalarInput[0] > 0x7FFFFFFFULL) return kIOReturnBadArgument;
-    me->fBound = (int)args->scalarInput[0];
+    // The value is a file descriptor number, or a negative number meaning "detached": the userland driver
+    // detaches a connection it is about to pool or keep alive by binding it to -2, sign-extended to 64 bits.
+    // Anything else outside the 32-bit signed range is a caller error, not something to store and look up
+    // later. Refusing the detach value left the connection bound to an fd number the process then reused, so
+    // two connections answered for one fd and the Vulkan device in WindowServer could not be created.
+    const int64_t v = (int64_t)args->scalarInput[0];
+    if (v > 0x7FFFFFFFLL || v < -0x80000000LL) return kIOReturnBadArgument;
+    me->fBound = (int)v;
     me->fEverBound = true;
     // Was gated on fBound >= 0, so a negative value skipped the clear and kept
     // a mapping context across a rebind that was supposed to drop it.
