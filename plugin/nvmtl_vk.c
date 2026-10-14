@@ -2475,7 +2475,10 @@ static int nvmtl_wit_ready(void)
 static uint32_t nvmtl_wit_read(uint32_t s) { return ((volatile uint32_t *)g_wit.map)[s % NVMTL_WIT_SLOTS]; }
 static uint32_t nvmtl_wit_record(nvk_cmdbuf *c)
 {
-    if (c->in_rp || !nvmtl_wit_ready()) { __atomic_add_fetch(&g_wit_blind, 1, __ATOMIC_RELAXED); return NVMTL_WSEQ_BLIND; }
+    /* A command buffer that ran compiled machine code is never certified for reuse: the program, its
+     * constant bank and its launch descriptor come from this pool's upload memory outside what the
+     * witness proves finished, so a kept pool could be overwritten while the GPU still reads them. */
+    if (c->in_rp || c->direct_sass || !nvmtl_wit_ready()) { __atomic_add_fetch(&g_wit_blind, 1, __ATOMIC_RELAXED); return NVMTL_WSEQ_BLIND; }
     uint32_t s;
     do s = __atomic_add_fetch(&g_wit_seq, 1, __ATOMIC_RELAXED); while (s == 0 || s == NVMTL_WSEQ_BLIND);
     VkMemoryBarrier toT = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT };

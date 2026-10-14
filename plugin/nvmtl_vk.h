@@ -62,6 +62,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  unsigned nobind, skipped;
                  void *dcache[32]; void *dcachepool; unsigned ndcache;
                  unsigned in_rp, occlusion_reset; uint32_t wseq;
+                 unsigned direct_sass;   /* recorded a dispatch of compiled machine code: never reuse this pool */
                  void *occlusion_pages; uint32_t occlusion_count;
                  void *timing_pool; nvmtl_gpu_interval timing;
                  void *pt_pool; unsigned pt_n, pt_open; uint32_t pt_w[128], pt_h[128], pt_f[128]; uint32_t pt_fs[128][4];
