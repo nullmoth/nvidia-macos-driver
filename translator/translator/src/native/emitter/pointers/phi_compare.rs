@@ -742,6 +742,14 @@ impl Emitter {
         name: String,
         instructions: &mut Vec<Instruction>,
     ) -> Result<(), String> {
+        let is_bool = match &operand_ty {
+            LlType::Bool => true,
+            LlType::Vector(elem, _) => matches!(elem.as_ref(), LlType::Bool),
+            _ => false,
+        };
+        if is_bool {
+            return self.emit_icmp_bool(pred, lhs, rhs, operand_ty, name, instructions);
+        }
         let result_ty = int_compare_result_type(&operand_ty)?;
         let result_type = self.type_id(&result_ty)?;
         let result = self.result_id(&name, &result_ty)?;
@@ -752,6 +760,69 @@ impl Emitter {
             Some(result_type),
             Some(result),
             vec![Operand::IdRef(lhs_id), Operand::IdRef(rhs_id)],
+        ));
+        Ok(())
+    }
+
+    /// `icmp` on `i1` or `<N x i1>` (Apple's GL compiler emits it for GLSL `bvec` equality, e.g. in WebRender's
+    /// fragment shaders). SPIR-V has no integer compare on booleans, so equality maps to OpLogical(Not)Equal and the
+    /// ordered predicates to their boolean truth tables (i1 is unsigned 0/1, or signed 0/-1).
+    fn emit_icmp_bool(
+        &mut self,
+        pred: Op,
+        lhs: TypedValue,
+        rhs: TypedValue,
+        operand_ty: LlType,
+        name: String,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<(), String> {
+        let result_type = self.type_id(&operand_ty)?;
+        let result = self.result_id(&name, &operand_ty)?;
+        let lhs_id = self.value_id_in(&lhs.value, &lhs.ty, instructions)?;
+        let rhs_id = self.value_id_in(&rhs.value, &rhs.ty, instructions)?;
+        let direct = match pred {
+            Op::IEqual => Some(Op::LogicalEqual),
+            Op::INotEqual => Some(Op::LogicalNotEqual),
+            _ => None,
+        };
+        if let Some(op) = direct {
+            instructions.push(Self::inst(
+                op,
+                Some(result_type),
+                Some(result),
+                vec![Operand::IdRef(lhs_id), Operand::IdRef(rhs_id)],
+            ));
+            return Ok(());
+        }
+        // (negate lhs, negate rhs, combine): unsigned 1 > 0, signed -1 < 0
+        let (neg_lhs, neg_rhs, combine) = match pred {
+            Op::UGreaterThan | Op::SLessThan => (false, true, Op::LogicalAnd),
+            Op::UGreaterThanEqual | Op::SLessThanEqual => (false, true, Op::LogicalOr),
+            Op::ULessThan | Op::SGreaterThan => (true, false, Op::LogicalAnd),
+            Op::ULessThanEqual | Op::SGreaterThanEqual => (true, false, Op::LogicalOr),
+            other => {
+                return Err(format!(
+                    "native emitter: icmp predicate {other:?} on booleans is not carried"
+                ))
+            }
+        };
+        let not = |emitter: &mut Self, id, instructions: &mut Vec<Instruction>| {
+            let out = emitter.fresh();
+            instructions.push(Self::inst(
+                Op::LogicalNot,
+                Some(result_type),
+                Some(out),
+                vec![Operand::IdRef(id)],
+            ));
+            out
+        };
+        let a = if neg_lhs { not(self, lhs_id, instructions) } else { lhs_id };
+        let b = if neg_rhs { not(self, rhs_id, instructions) } else { rhs_id };
+        instructions.push(Self::inst(
+            combine,
+            Some(result_type),
+            Some(result),
+            vec![Operand::IdRef(a), Operand::IdRef(b)],
         ));
         Ok(())
     }
