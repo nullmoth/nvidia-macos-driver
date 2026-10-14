@@ -1,5 +1,9 @@
 #!/bin/bash
 set -u
+# This script runs as root and calls cp, rm, mv and kmutil by name. Without a
+# fixed PATH those resolve through whatever the caller exported, and kmutil
+# rebuilds the auxiliary kernel collection.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 # NMXGPU, NMXAccel and NMXNPU: the opt-in AMD/Intel GPU driver, its Metal accelerator and the NPU driver, when turned on
 KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NMXGPU NMXAccel NMXNPU"; EXT=/Library/Extensions; GB=/Library/GPUBundles
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc

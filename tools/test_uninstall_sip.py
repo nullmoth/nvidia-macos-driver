@@ -26,7 +26,10 @@ def run(script, csr):
             (b / name).write_text(f'#!/bin/sh\n{body}\n'); os.chmod(b / name, 0o755)
         (b / 'csr.txt').write_text(csr)
         env = dict(os.environ, PATH=f'{b}:/usr/bin:/bin', CSR_FILE=str(b / 'csr.txt'), CALLS=str(b / 'calls'))
-        r = subprocess.run(['/bin/bash', str(script)], capture_output=True, text=True, env=env, timeout=60)
+        # package/uninstall.sh fixes PATH for root; the stand-in commands only take effect on a copy without that line
+        body = script.read_text().replace('PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH', '')
+        (b / 'under-test.sh').write_text(body)
+        r = subprocess.run(['/bin/bash', str(b / 'under-test.sh')], capture_output=True, text=True, env=env, timeout=60)
         return r.returncode, r.stderr, (b / 'calls').exists()
 
 

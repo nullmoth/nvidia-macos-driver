@@ -12,6 +12,11 @@ xcrun clang -O2 -Wall -Wextra -Werror -target x86_64-apple-macos15.0 -isysroot "
 codesign --force --runtime-version 15.0.0 --options runtime,library -s - "$APP/Contents/Resources/nullmoth-runtime-check"
 xcrun clang -O2 -Wall -Wextra -Werror -target x86_64-apple-macos15.0 -isysroot "$SDK" RuntimeCheck/log_watch.c -o "$APP/Contents/Resources/nullmoth-log-watch"
 codesign --force --runtime-version 15.0.0 --options runtime,library -s - "$APP/Contents/Resources/nullmoth-log-watch"
+# Plain ad-hoc, deliberately without the hardened runtime: it has to load the NVIDIA Metal plugin, which is ad-hoc signed
+# and which library validation refuses (see RuntimeCheck/metal_devices.m).
+xcrun clang -fobjc-arc -O2 -Wall -Wextra -Werror -target x86_64-apple-macos15.0 -isysroot "$SDK" RuntimeCheck/metal_devices.m \
+  -framework Foundation -framework Metal -o "$APP/Contents/Resources/nullmoth-metal-devices"
+codesign --force -s - "$APP/Contents/Resources/nullmoth-metal-devices"
 chmod 755 "$APP/Contents/Resources/nullmoth-runtime-check.sh"
 chmod 755 "$APP/Contents/Resources/nullmoth-setup.sh"
 # setup runs the installers only when they are executable ([ -x ]); a source file that lost its mode made every app
@@ -51,5 +56,19 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>NSAppleEventsUsageDescription</key><string>1401 asks macOS for your password to install the driver, and to restart when you click Restart.</string>
 </dict></plist>
 PL
-codesign --force --deep -s - "$APP"
+# --options runtime,library: library validation, so only code signed by the
+# same identity loads into the bundle. Was a bare ad-hoc signature, which let
+# any dropped-in library load into the process that asks for the password.
+# The helper binaries above were already signed this way.
+# The hardened runtime blocks Apple Events the app sends itself (Restart asks System Events) unless the signature
+# carries this entitlement. The Metal device list runs in nullmoth-metal-devices for the same reason the app is hardened.
+ENT=$(mktemp -d)/1401.entitlements
+cat > "$ENT" <<PL
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.security.automation.apple-events</key><true/>
+</dict></plist>
+PL
+codesign --force --runtime-version 15.0.0 --options runtime,library --entitlements "$ENT" -s - "$APP"
 echo "built $APP ($(du -sh "$APP" | cut -f1))"
