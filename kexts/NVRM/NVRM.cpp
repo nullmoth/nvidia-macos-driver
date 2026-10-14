@@ -23,6 +23,7 @@
 extern "C" {
 #include <mach/mach_types.h>
 #include <sys/proc.h>
+#include <sys/kauth.h>
 
 #include "nvrm_gpuva_abi.h"
 #define NVRM_SS_KERNEL_ABI 1
@@ -970,6 +971,15 @@ void NVRM::readBARs()
 
 IOReturn NVRM::go(uint32_t pass)
 {
+    // Bringing up the GPU and the RM for the first time is an administrator
+    // operation. Was: any process that could open the user client could call
+    // sGo with any pass number. Repeating a pass that is already done is a
+    // no-op, and the userland driver runs as the logged-in user, so that path
+    // stays open deliberately.
+    if (pass > fPassDone && kauth_getuid() != 0) {
+        kprintf("NVRM-xnu: go(%u) refused: caller is not an administrator (fPassDone %d)\n", pass, fPassDone);
+        return kIOReturnNotPermitted;
+    }
     static bool gGoBusy;
     { IOLockLock(gNvClientsLock); bool busy = gGoBusy; if (!busy) gGoBusy = true; IOLockUnlock(gNvClientsLock); if (busy) { kprintf("NVRM-xnu: go(%u) refused: another go is running\n", pass); return kIOReturnBusy; } }
     struct Unbusy { ~Unbusy() { IOLockLock(gNvClientsLock); gGoBusy = false; IOLockUnlock(gNvClientsLock); } } unbusy;
@@ -1308,6 +1318,12 @@ NVRMUserClient *NVRMUserClient::fromNvfp(nv_file_private_t *p)
 }
 #pragma clang diagnostic pop
 static volatile SInt64 gNvEvtPosts = 0, gNvEvtMatched = 0, gNvEvtWaits = 0, gNvEvtSlept = 0;
+// Live count of callers parked in sWaitEvent, and the ceiling. Was: no cap,
+// so N processes parked N kernel threads. 256 is far above what the driver
+// itself uses (one waiter per active client) and far below a thread count
+// that matters to the system.
+static volatile SInt32 gNvEvtSleepers = 0;
+static const SInt32 kNvEvtMaxSleepers = 256;
 extern "C" void NV_API_CALL nv_post_event(nv_event_t *event, NvHandle hEvent, NvU32 index, NvU32 info32, NvU16 info16, NvBool data_valid)
 {
     const SInt64 k = OSIncrementAtomic64(&gNvEvtPosts);
@@ -1329,10 +1345,19 @@ IOReturn NVRMUserClient::sWaitEvent(OSObject *target, void *reference, IOExterna
     uint64_t us = args->scalarInput[1]; if (us > 100000) us = 100000;
     OSIncrementAtomic64(&gNvEvtWaits);
     if (us && me->fEvtSeq == seen) {
-        assert_wait_timeout((event_t)&me->fEvtSeq, THREAD_ABORTSAFE, (uint32_t)us, NSEC_PER_USEC);
-        if (me->fEvtSeq != seen) thread_wakeup((event_t)&me->fEvtSeq);
-        OSIncrementAtomic64(&gNvEvtSlept);
-        (void)thread_block(THREAD_CONTINUE_NULL);
+        // OSIncrementAtomic returns the value before the increment.
+        if (OSIncrementAtomic(&gNvEvtSleepers) >= kNvEvtMaxSleepers) {
+            // At the ceiling: return the current sequence without parking. This
+            // is the same answer a timeout gives, so no caller can observe a
+            // result it could not already have seen.
+            OSDecrementAtomic(&gNvEvtSleepers);
+        } else {
+            assert_wait_timeout((event_t)&me->fEvtSeq, THREAD_ABORTSAFE, (uint32_t)us, NSEC_PER_USEC);
+            if (me->fEvtSeq != seen) thread_wakeup((event_t)&me->fEvtSeq);
+            OSIncrementAtomic64(&gNvEvtSlept);
+            (void)thread_block(THREAD_CONTINUE_NULL);
+            OSDecrementAtomic(&gNvEvtSleepers);
+        }
     }
     args->scalarOutput[0] = me->fEvtSeq;
     return kIOReturnSuccess;
@@ -1341,9 +1366,18 @@ IOReturn NVRMUserClient::sBindFd(OSObject *target, void *reference, IOExternalMe
 {
     NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);
     if (!me) return kIOReturnNotAttached;
+    // The value is a file descriptor number. Anything outside the range a
+    // descriptor can take is a caller error, not something to store and look
+    // up later. Was: any 32-bit value was accepted and cast to int, so a value
+    // with the top bit set became a negative descriptor.
+    // 0x7FFFFFFF rather than INT_MAX: limits.h is not included here and the
+    // rest of this file uses explicit constants.
+    if (args->scalarInput[0] > 0x7FFFFFFFULL) return kIOReturnBadArgument;
     me->fBound = (int)args->scalarInput[0];
     me->fEverBound = true;
-    if (me->fBound >= 0 && me->fMmap.valid) {
+    // Was gated on fBound >= 0, so a negative value skipped the clear and kept
+    // a mapping context across a rebind that was supposed to drop it.
+    if (me->fMmap.valid) {
         kprintf("NVRM-xnu: client %d re-bound to fd %d with a stale mapping context - cleared\n", me->fFd, me->fBound);
         nvMmapContextClear(&me->fMmap);
     }

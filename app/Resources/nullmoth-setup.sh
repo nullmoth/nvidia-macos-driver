@@ -465,7 +465,11 @@ if [ -n "$COLLECT" ]; then
   } > "$COLLECT/driver-crash-window.txt" 2>&1
   { echo; echo "== NullMoth NVRAM flags (a remove flag that survives every boot removes the driver at login)"
     nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove 2>&1; } >> "$COLLECT/driver-state.txt"
-  chmod -R a+rX "$COLLECT"; ok "collected driver state and $n diagnostic log(s)"; cleanup
+  # -h: act on a symbolic link itself, never on what it points at. Without it
+  # root followed any link planted in the collection directory and made the
+  # target world readable. The directory comes from --collect-logs, so it is
+  # the caller's choice of path.
+  chmod -R -h a+rX "$COLLECT"; ok "collected driver state and $n diagnostic log(s)"; cleanup
   if [ "$collection_errors" -gt 0 ]; then note "$collection_errors diagnostic log(s) could not be copied"; echo "RESULT partial"; exit 1; fi
   echo "RESULT ok"; exit 0
 fi
@@ -1354,6 +1358,48 @@ fi
 DV=$(basename "$PKG" | sed -n 's/^nullmoth-nvidia-\([0-9][0-9.]*\)\.tar\.gz$/\1/p')
 [ -n "$DV" ] && { echo "$DV" > "$ST/driver-version.tmp" && chmod 644 "$ST/driver-version.tmp" && mv "$ST/driver-version.tmp" "$ST/driver-version"; }
 ok "install record written to $STATE"
+# A LaunchAgent runs its program at every login. If any directory on the way to
+# that program is world writable, any local user can replace what runs. Was: the
+# path from --app was written in unchecked, so an app launched from its own
+# staging directory under /var/tmp put a world-writable path into a login item,
+# and the agent outlived the directory.
+# /Applications is group-admin writable by Apple's convention, so the test is
+# world-write only, not group-write.
+agent_path_is_safe() {
+  local p=$1
+  case "$p" in /*) ;; *) return 1 ;; esac
+  # a regular file, not a directory and not a dangling path: the 1.14.7 agents
+  # point at a program that no longer exists, and those must fail here
+  [ -f "$p" ] || return 1
+  # Resolve to a physical path before walking. stat does not follow symlinks, so
+  # a symlinked component pointing into a world-writable directory would
+  # otherwise read as the link's own mode and pass.
+  local d; d=$(cd "$(/usr/bin/dirname "$p")" 2>/dev/null && pwd -P) || return 1
+  while :; do
+    local mode; mode=$(/usr/bin/stat -f %Lp "$d" 2>/dev/null) || return 1
+    # last octal digit is the "other" field; 2, 3, 6 and 7 all carry write
+    case "$mode" in *[2367]) return 1 ;; esac
+    [ "$d" = / ] && break
+    d=$(/usr/bin/dirname "$d")
+  done
+  return 0
+}
+
+# Repair an agent an earlier version wrote. Upgrading does not rewrite this file,
+# so without this every machine that ever installed from a temporary directory
+# keeps its bad agent forever.
+if [ -f "$AGENT" ]; then
+  existing=$(/usr/bin/plutil -extract ProgramArguments.0 raw -o - "$AGENT" 2>/dev/null) || existing=""
+  if [ -z "$existing" ] || ! agent_path_is_safe "$existing"; then
+    rm -f "$AGENT"
+    note "removed a crash-check login item that pointed somewhere unsafe ($existing)"
+  fi
+fi
+
+if [ -n "$APPBIN" ] && [ -x "$APPBIN" ] && ! agent_path_is_safe "$APPBIN"; then
+  note "crash check not added: $APPBIN is not in a protected location"
+  APPBIN=""
+fi
 if [ -n "$APPBIN" ] && [ -x "$APPBIN" ]; then
   cat > "$AGENT" <<PL
 <?xml version="1.0" encoding="UTF-8"?>

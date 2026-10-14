@@ -2,6 +2,9 @@
 set -u
 set -o pipefail
 umask 077
+# Runs as root. Every binary below is called by absolute path; this keeps that
+# safe if a bare call is ever added.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 HERE=$(cd "$(/usr/bin/dirname "$0")" && pwd -P) || exit 1
 [ "$(/usr/bin/id -u)" = 0 ] || { echo "NMCOLLECT_STATUS 77"; exit 0; }
 TASK=$(/usr/bin/mktemp -d /private/var/root/1401-operation.XXXXXXXX) || { echo "NMCOLLECT_STATUS 73"; exit 0; }

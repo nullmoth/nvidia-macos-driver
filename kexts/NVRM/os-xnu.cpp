@@ -171,7 +171,7 @@ NvBool NV_API_CALL os_semaphore_may_sleep(void) { NV_XNU_TRC; return NV_TRUE; }
 volatile thread_t nv_xnu_isr_thread = NULL;
 volatile int nv_xnu_in_isr = 0;
 NvBool NV_API_CALL os_is_isr(void) { return (nv_xnu_isr_thread != NULL && nv_xnu_isr_thread == current_thread()) ? NV_TRUE : NV_FALSE; }
-NvBool NV_API_CALL os_is_administrator(void) { NV_XNU_TRC; return NV_TRUE; }
+NvBool NV_API_CALL os_is_administrator(void) { NV_XNU_TRC; return (kauth_getuid() == 0) ? NV_TRUE : NV_FALSE; }
 NV_STATUS NV_API_CALL os_get_euid(NvU32 *pSecToken) { NV_XNU_TRC; if (!pSecToken) return NV_ERR_INVALID_ARGUMENT; *pSecToken = (NvU32)kauth_getuid(); return NV_OK; }
 
 NvU64 NV_API_CALL os_get_monotonic_time_ns(void)    { NV_XNU_TRC; uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns; }

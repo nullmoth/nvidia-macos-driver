@@ -457,12 +457,40 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         arch = "arm64"
         #endif
         let safe = sh("/usr/sbin/nvram", ["boot-args"]).split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" }).contains("-nvoff")
+        let metal = metalDevices()
         return ["macos": "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)", "major": os.majorVersion, "arch": arch,
-                "gpus": gpus, "opencore": oc, "kexts": kexts, "files": files, "metal": MTLCopyAllDevices().map { $0.name },
+                "gpus": gpus, "opencore": oc, "kexts": kexts, "files": files, "metal": metal.names, "metalSource": metal.source,
                 "packages": findPackages(), "version": Package.version, "installedDriverVersion": recordedDriverVersion(), "safemode": safe,
                 "record": fm.fileExists(atPath: "/Library/NullMoth/state"), "crashes": driverCrashes().map(\.lastPathComponent),
                 "translated": sysctl("sysctl.proc_translated") == "1",
                 "profile": { var p = machineProfile(gpus); p["rules"] = Profile.select(rules(), p).ids; return p }()]
+    }
+
+    /// Metal device names, listed by nullmoth-metal-devices: this app runs with library validation, which refuses the
+    /// ad-hoc signed NVIDIA Metal plugin, so a list taken in this process would leave the card out and the window would
+    /// say the driver is not running. Bounded at 10 s. If the helper cannot run, the in-process list is used and
+    /// "metalSource" says so in the report.
+    static func metalDevices() -> (names: [String], source: String) {
+        let p = Process()
+        p.executableURL = Bundle.main.resourceURL!.appendingPathComponent("nullmoth-metal-devices")
+        let o = Pipe(); p.standardOutput = o; p.standardError = Pipe()
+        let done = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in done.signal() }
+        var out = Data()
+        let reader = DispatchQueue.global(qos: .userInitiated)
+        let read = DispatchGroup()
+        do { try p.run() } catch { return (MTLCopyAllDevices().map { $0.name }, "in-process (helper did not start)") }
+        reader.async(group: read) { out = o.fileHandleForReading.readDataToEndOfFile() }
+        if done.wait(timeout: .now() + 10) == .timedOut {
+            p.terminate()
+            return (MTLCopyAllDevices().map { $0.name }, "in-process (helper timed out)")
+        }
+        _ = read.wait(timeout: .now() + 2)
+        guard p.terminationStatus == 0 else {
+            return (MTLCopyAllDevices().map { $0.name }, "in-process (helper exited \(p.terminationStatus))")
+        }
+        let names = String(decoding: out, as: UTF8.self).split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+        return (names, "helper")
     }
 
     static func rules() -> [String: Any] {

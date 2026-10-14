@@ -55,7 +55,9 @@ class Recovery(unittest.TestCase):
         self.version=self.root/'Library/NullMoth/driver-version';self.version.parent.mkdir(parents=True);self.version.write_text('1.0.7')
         self.backup=self.root/'backup';self.backup.mkdir();(self.backup/'AuxiliaryKernelExtensions.kc').write_bytes(b'PREVIOUS_SAFE')
         (self.backup/'macos-build').write_text('24H32')
-        source=(ROOT/'package/uninstall.sh').read_text()
+        # the script fixes PATH for root; the stand-in commands here only take effect without that line
+        source=(ROOT/'package/uninstall.sh').read_text();assert source.count('PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH')==1
+        source=source.replace('PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH','')
         for prefix in ['/Library/','/System/']:source=source.replace(prefix,str(self.root)+prefix)
         self.script=self.root/'uninstall.sh';self.script.write_text(source)
     def tearDown(self):self.temp.cleanup()
