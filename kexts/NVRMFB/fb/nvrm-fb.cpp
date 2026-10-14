@@ -149,25 +149,21 @@ bool NVRMBacklightHandler::setDisplay(IODisplay *display)
 
 // User changes arrive with the parameter's own { min, max, value } (IODisplay::setForKey stores the value);
 // AppleBacklightDisplay's power states (dim, display sleep, lid) pass the whole IODisplayParameters.
-bool NVRMBacklightHandler::doIntegerSet(OSDictionary *, const OSSymbol *paramName, UInt32 value)
+bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *paramName, UInt32 value)
 {
     if (paramName != gIODisplayBrightnessKey && paramName != gIODisplayLinearBrightnessKey) return false;
+    BLLOG("backlight: doIntegerSet '%s' -> %u%%", paramName ? paramName->getCStringNoCopy() : "null", (unsigned)value);
+    if (params && paramName == gIODisplayLinearBrightnessKey) {
+        // User changed brightness via Control Center / System Settings slider;
+        // synchronize master 'brightness' parameter so AppleBacklightDisplay
+        // saves and restores the user's brightness on wake from idle dim!
+        IODisplay::setParameter(params, gIODisplayBrightnessKey, value);
+    }
     fPending = value > 100 ? 100 : (SInt32)value;
     thread_call_enter(fApply);
     return true;
 }
 
-void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
-{
-    NVRMBacklightHandler *me = (NVRMBacklightHandler *)p;
-    SInt32 v;
-    do { v = me->fPending; } while (!OSCompareAndSwap((UInt32)v, (UInt32)-1, (volatile UInt32 *)&me->fPending));
-    if (v < 0) return;
-    NvU32 percent = (NvU32)(v < kNVRMMinBacklight ? kNVRMMinBacklight : v);
-    IOReturn r = me->fRM->callPlatformFunction(me->fFn, false, &percent, (void *)1, NULL, NULL);
-    if (r == kIOReturnSuccess) me->fLevel = v;
-    else BLLOG("backlight: setting %u%% failed (0x%x)", (unsigned)percent, r);
-}
 
 class NVRMNVDAFramebuffer : public IOFramebuffer {
     OSDeclareDefaultStructors(NVRMNVDAFramebuffer)
@@ -269,6 +265,12 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     unsigned fRejected = 0;     // commits NVKMS refused on this head, for NVRMRejectedCommits
     NvBool submitConfig(struct NvKmsKapiRequestedModeSetConfig *cfg, struct NvKmsKapiModeSetReplyConfig *rep, NvBool commit,
                         bool bootstrap = false, bool cursorOnly = false);
+    NvU32 fBrightness = 100;
+    bool fLutValid = false;
+    struct NvKmsLutRamps fBaseLut = {};
+    struct NvKmsLutRamps fLutRamps = {};
+    bool commitBrightnessLut();
+    void nvrmHeadConfigBaseline(struct NvKmsKapiHeadRequestedConfig *hr);
     thread_call_t fReflip = nullptr;
     unsigned fReflips = 0; int fReflipRc = -99;
     unsigned fVblReg = 0;
@@ -362,8 +364,9 @@ public:
     IOReturn setCursorImage(void *cursorImage) override;
     IOReturn setCursorState(SInt32 x, SInt32 y, bool visible) override;
     bool isConsoleDevice(void) override { return fBootConsole; }
-    IOReturn setGammaTable(UInt32, UInt32, UInt32, void *) override { return kIOReturnSuccess; }
-    IOReturn setGammaTable(UInt32, UInt32, UInt32, void *, bool) override { return kIOReturnSuccess; }
+    IOReturn setGammaTable(UInt32 channelCount, UInt32 dataCount, UInt32 dataWidth, void *data) override;
+    IOReturn setGammaTable(UInt32 channelCount, UInt32 dataCount, UInt32 dataWidth, void *data, bool syncToVBL) override;
+    void setBrightnessLevel(NvU32 percent);
     IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnSuccess; }
     IOReturn setApertureEnable(IOPixelAperture, IOOptionBits) override { return kIOReturnSuccess; }
     IOReturn setStartupDisplayMode(IODisplayModeID, IOIndex) override { return kIOReturnSuccess; }
@@ -528,10 +531,15 @@ static void nvrmUnownedHeadsOff(struct NvKmsKapiRequestedModeSetConfig *cfg)
         hr->flags.activeChanged = hr->flags.displaysChanged = NV_TRUE;
     }
 }
-static void nvrmHeadConfigBaseline(struct NvKmsKapiHeadRequestedConfig *hr)
+void NVRMNVDAFramebuffer::nvrmHeadConfigBaseline(struct NvKmsKapiHeadRequestedConfig *hr)
 {
     hr->modeSetConfig.olutFpNormScale = NVKMS_OLUT_FP_NORM_SCALE_DEFAULT;
     hr->flags.olutFpNormScaleChanged = NV_TRUE;
+    if (fLutValid) {
+        hr->modeSetConfig.lut.output.enabled = NV_TRUE;
+        hr->modeSetConfig.lut.output.pRamps = &fLutRamps;
+        hr->flags.legacyOlutChanged = NV_TRUE;
+    }
     for (unsigned i = 0; i < NVKMS_KAPI_LAYER_MAX; i++) {
         struct NvKmsKapiLayerRequestedConfig *lr = &hr->layerRequestedConfig[i];
         nvu_zero(&lr->config.csc, sizeof lr->config.csc);
@@ -615,6 +623,17 @@ bool NVRMNVDAFramebuffer::kapiInit()
               (unsigned)ri->caps.contiguousPhysicalMappings);
     }
     IOFree(ri, sizeof *ri);
+    for (unsigned i = 0; i < NVKMS_LUT_ARRAY_SIZE; i++) {
+        NvU16 v = (NvU16)((i * 65535ULL) / (NVKMS_LUT_ARRAY_SIZE - 1));
+        fBaseLut.red[i] = v;
+        fBaseLut.green[i] = v;
+        fBaseLut.blue[i] = v;
+        fLutRamps.red[i] = v;
+        fLutRamps.green[i] = v;
+        fLutRamps.blue[i] = v;
+    }
+    fLutValid = true;
+    fBrightness = 100;
     if (!fKms->declareEventInterest(fDev,
             (1u << NVKMS_EVENT_TYPE_DPY_CHANGED) |
             (1u << NVKMS_EVENT_TYPE_DYNAMIC_DPY_CONNECTED) |
@@ -1870,7 +1889,7 @@ void NVRMNVDAFramebuffer::publishBacklight()
     NvU32 level = 0;
     IOReturn r = (rm && fn) ? rm->callPlatformFunction(fn, false, &level, NULL, NULL, NULL) : kIOReturnNotFound;
     OSSafeReleaseNULL(fn);
-    if (r != kIOReturnSuccess) { FBLOG("fb%u: internal panel, but NVKMS registered no backlight (0x%x) -- no brightness control", fIndex, r); return; }
+    if (r != kIOReturnSuccess) { FBLOG("fb%u: internal OLED panel, using driver software/LUT fallback", fIndex, r); level=100; }
     fBacklight = NVRMBacklightHandler::withRM(rm, level);
     if (!fBacklight) { FBLOG("fb%u: backlight handler allocation failed", fIndex); return; }
     fBacklight->setName("backlight");
@@ -2932,3 +2951,126 @@ IOReturn NVRMNVDAFramebuffer::registerForInterruptType(IOSelect type, IOFBInterr
     FBLOG("registerForInterruptType '%s' -> REFUSED (unsupported)", t);
     return kIOReturnUnsupported;
 }
+
+void NVRMNVDAFramebuffer::setBrightnessLevel(NvU32 percent)
+{
+    if (percent > 100) percent = 100;
+    fBrightness = percent;
+    for (unsigned i = 0; i < NVKMS_LUT_ARRAY_SIZE; i++) {
+        fLutRamps.red[i]   = (NvU16)(((NvU32)fBaseLut.red[i]   * fBrightness) / 100);
+        fLutRamps.green[i] = (NvU16)(((NvU32)fBaseLut.green[i] * fBrightness) / 100);
+        fLutRamps.blue[i]  = (NvU16)(((NvU32)fBaseLut.blue[i]  * fBrightness) / 100);
+    }
+    fLutValid = true;
+    commitBrightnessLut();
+}
+
+void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
+{
+    NVRMBacklightHandler *me = (NVRMBacklightHandler *)p;
+    SInt32 v;
+    do { v = me->fPending; } while (!OSCompareAndSwap((UInt32)v, (UInt32)-1, (volatile UInt32 *)&me->fPending));
+    if (v < 0) return;
+    NvU32 percent = (NvU32)(v < kNVRMMinBacklight ? kNVRMMinBacklight : v);
+    IOReturn r = me->fRM->callPlatformFunction(me->fFn, false, &percent, (void *)1, NULL, NULL);
+    if (r == kIOReturnSuccess) {
+        me->fLevel = v;
+    } else {
+        me->fLevel = v;
+        NVRMNVDAFramebuffer *fb = OSDynamicCast(NVRMNVDAFramebuffer, me->getProvider());
+        if (fb) {
+            fb->setBrightnessLevel(percent);
+        }
+        BLLOG("backlight: applied OLED LUT Scaling to %u%%", (unsigned)percent);
+    }
+}
+
+bool NVRMNVDAFramebuffer::commitBrightnessLut()
+{
+    NVRMDisplayGate gate; if (!gate.valid()) return false;
+    if (!fKms || !fDev || !fSurf || !fModeSet) return false;
+    struct NvKmsKapiSurface *front = fFrontSurf ? fFrontSurf : fSurf;
+
+    struct NvKmsKapiRequestedModeSetConfig *cfg =
+        (struct NvKmsKapiRequestedModeSetConfig *)IOMalloc(sizeof *cfg);
+    struct NvKmsKapiModeSetReplyConfig *rep =
+        (struct NvKmsKapiModeSetReplyConfig *)IOMalloc(sizeof *rep);
+    if (!cfg || !rep) {
+        if (cfg) IOFree(cfg, sizeof *cfg);
+        if (rep) IOFree(rep, sizeof *rep);
+        return false;
+    }
+    nvu_zero(cfg, sizeof *cfg);
+    nvu_zero(rep, sizeof *rep);
+
+    cfg->headsMask = 1u << fHead;
+    struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
+    nvrmHeadConfigBaseline(hr);
+    hr->modeSetConfig.bActive = NV_TRUE;
+    hr->modeSetConfig.numDisplays = 1;
+    hr->modeSetConfig.displays[0] = fDisplay;
+    hr->modeSetConfig.mode = fMode;
+
+    // Attach output LUT explicitly
+    hr->modeSetConfig.lut.output.enabled = NV_TRUE;
+    hr->modeSetConfig.lut.output.pRamps = &fLutRamps;
+    hr->flags.legacyOlutChanged = NV_TRUE;
+
+    struct NvKmsKapiLayerRequestedConfig *lr = &hr->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX];
+    lr->config.surface = front;
+    lr->config.srcWidth = fW;
+    lr->config.srcHeight = fH;
+    lr->config.dstWidth = fRasterW;
+    lr->config.dstHeight = fRasterH;
+    lr->config.compParams.compMode = NVKMS_COMPOSITION_BLENDING_MODE_OPAQUE;
+    lr->config.minPresentInterval = 0;
+    lr->config.tearing = NV_FALSE;
+    lr->flags.surfaceChanged = NV_TRUE;
+    lr->flags.srcXYChanged = lr->flags.srcWHChanged = lr->flags.dstXYChanged = lr->flags.dstWHChanged = NV_TRUE;
+
+    NvBool ok = submitConfig(cfg, rep, NV_TRUE);
+    int rc = ok ? (int)rep->flipResult : -1;
+    FBLOG("commitBrightnessLut: applied OLUT (%u%%) -> ok %u (flipResult %d)", (unsigned)fBrightness, (unsigned)ok, rc);
+    IOFree(cfg, sizeof *cfg);
+    IOFree(rep, sizeof *rep);
+    return ok && rc == NV_KMS_FLIP_RESULT_SUCCESS;
+}
+
+IOReturn NVRMNVDAFramebuffer::setGammaTable(UInt32 channelCount, UInt32 dataCount, UInt32 dataWidth, void *data)
+{
+    return setGammaTable(channelCount, dataCount, dataWidth, data, true);
+}
+
+IOReturn NVRMNVDAFramebuffer::setGammaTable(UInt32 channelCount, UInt32 dataCount, UInt32 dataWidth, void *data, bool)
+{
+    if (!data || channelCount < 1 || dataCount < 2) return kIOReturnBadArgument;
+    const UInt16 *src16 = (const UInt16 *)data;
+    const UInt8 *src8 = (const UInt8 *)data;
+
+    for (unsigned i = 0; i < NVKMS_LUT_ARRAY_SIZE; i++) {
+        unsigned idx = (i * (dataCount - 1)) / (NVKMS_LUT_ARRAY_SIZE - 1);
+        unsigned next_idx = (idx + 1 < dataCount) ? idx + 1 : idx;
+        unsigned frac = ((i * (dataCount - 1)) % (NVKMS_LUT_ARRAY_SIZE - 1)) * 256 / (NVKMS_LUT_ARRAY_SIZE - 1);
+
+        for (unsigned ch = 0; ch < 3; ch++) {
+            unsigned c = (ch < channelCount) ? ch : 0;
+            NvU32 v0, v1;
+            if (dataWidth == 16) {
+                v0 = src16[c * dataCount + idx];
+                v1 = src16[c * dataCount + next_idx];
+            } else {
+                v0 = (NvU32)src8[c * dataCount + idx] * 257;
+                v1 = (NvU32)src8[c * dataCount + next_idx] * 257;
+            }
+            NvU32 val = v0 + (((v1 - v0) * frac) >> 8);
+            if (val > 65535) val = 65535;
+
+            if (ch == 0) fBaseLut.red[i] = (NvU16)val;
+            else if (ch == 1) fBaseLut.green[i] = (NvU16)val;
+            else fBaseLut.blue[i] = (NvU16)val;
+        }
+    }
+    setBrightnessLevel(fBrightness);
+    return kIOReturnSuccess;
+}
+
