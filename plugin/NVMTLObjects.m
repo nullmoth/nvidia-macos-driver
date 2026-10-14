@@ -171,20 +171,28 @@ static inline void nvmtl_resref(id o, int d) {
     os_unfair_lock_unlock(&_lk); if (!had) nvmtl_resref(o, 1); }
 - (void)removeObject:(id)o { if (!o) return; os_unfair_lock_lock(&_lk); BOOL had = [_s member:o] != nil; if (had) [_s removeObject:o];
     os_unfair_lock_unlock(&_lk); if (had) nvmtl_resref(o, -1); }
-- (void)removeAllObjects { os_unfair_lock_lock(&_lk); NSArray *a = _s.allObjects; [_s removeAllObjects]; os_unfair_lock_unlock(&_lk);
-    for (id o in a) nvmtl_resref(o, -1); }
+// Clearing, copying and sealing never go through -allObjects. That array is autoreleased into the CALLER's pool, and
+// these run on the app's own commit thread: Geekbench 7 never drains that pool, so every resource a command buffer had
+// ever touched stayed alive, and Super Resolution filled VRAM with 9 MB MPS buffers until allocations were refused.
+// The sets below are owned (+1) and released at the end of scope.
+- (void)removeAllObjects { NSMutableSet *fresh = [NSMutableSet new], *old;
+    os_unfair_lock_lock(&_lk); old = _s; _s = fresh; os_unfair_lock_unlock(&_lk);
+    for (id o in old) nvmtl_resref(o, -1); }
 - (id)copyWithZone:(NSZone *)z { atomic_fetch_add(&gRes2Tick, 1);
-    NSArray *a = [self nvmtlSnapshot]; NVMTLResSet *c = [[NVMTLResSet alloc] initWithCapacity:a.count]; for (id o in a) [c addObject:o]; return c; }
+    NVMTLResSet *c = [NVMTLResSet new];
+    os_unfair_lock_lock(&_lk); NSMutableSet *m = [_s mutableCopy]; os_unfair_lock_unlock(&_lk);
+    c->_s = m;
+    for (id o in m) nvmtl_resref(o, 1);
+    return c; }
 - (id)mutableCopyWithZone:(NSZone *)z { return [self copyWithZone:z]; }
 // Moves every member into a new set and empties this one in a single locked step. Sealing a submission part used to
 // copy and then clear in two steps, so a resource another thread bound in between was released by the clear without
-// being in the part: the command buffer stopped holding it while the GPU work still used it.
+// being in the part: the command buffer stopped holding it while the GPU work still used it. Membership moves to one
+// new owner, so each resource's residency count is unchanged; the new set's -dealloc gives it back.
 - (NVMTLResSet *)nvmtlTakeAll { atomic_fetch_add(&gRes2Tick, 1);
-    os_unfair_lock_lock(&_lk); NSArray *a = _s.allObjects; [_s removeAllObjects]; os_unfair_lock_unlock(&_lk);
-    NVMTLResSet *c = [[NVMTLResSet alloc] initWithCapacity:a.count];
-    for (id o in a) [c addObject:o];
-    for (id o in a) nvmtl_resref(o, -1);
-    return c; }
+    NVMTLResSet *taken = [NVMTLResSet new]; NSMutableSet *empty = taken->_s;
+    os_unfair_lock_lock(&_lk); taken->_s = _s; _s = empty; os_unfair_lock_unlock(&_lk);
+    return taken; }
 - (void)dealloc { for (id o in _s) nvmtl_resref(o, -1); }
 @end
 
@@ -4638,7 +4646,10 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     }
 }
 - (void)synchronizeTexture:(id<MTLTexture>)t slice:(NSUInteger)s level:(NSUInteger)l { [self synchronizeResource:t]; }
-- (void)endEncoding { _cb->_nEnd++; }
+// The encoder lets go of its command buffer when encoding ends, as Metal's own encoders do. An app's autorelease pool
+// can keep an ended encoder alive for a long time (a benchmark loop that never drains), and a strong reference here kept
+// every such command buffer, and every buffer it used, alive with it: VRAM filled until allocations were refused.
+- (void)endEncoding { if (_cb) { _cb->_nEnd++; _cb = nil; } }
 - (void)setLabel:(NSString *)l { _label = [l copy]; }
 - (NSString *)label { return _label; }
 - (id<MTLDevice>)device { id<MTLDevice> d = _cb ? [_cb device] : nil; return d ? d : (id<MTLDevice>)gNVMTLMainDevice; }
@@ -5305,7 +5316,7 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
 - (id<MTLDevice>)device { return _cb->_queue->_dev; }
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)l { _label = [l copy]; }
-- (void)endEncoding { _cb->_nEnd++; }
+- (void)endEncoding { if (_cb) { _cb->_nEnd++; _cb = nil; } }   // lets go of the command buffer, as the blit encoder does
 - (void)nvmtlTrack:(id)r { if (!r) return; if (!_cb->_resources) _cb->_resources = [NVMTLResSet new]; [_cb->_resources addObject:r]; }
 - (void)buildAccelerationStructure:(id<MTLAccelerationStructure>)as descriptor:(MTLAccelerationStructureDescriptor *)desc
                      scratchBuffer:(id<MTLBuffer>)scratch scratchBufferOffset:(NSUInteger)soff {
