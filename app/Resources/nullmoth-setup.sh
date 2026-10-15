@@ -43,7 +43,7 @@ KNOBS=(); PROFILE=""; COLLECT=""; UPD=""; VERB=""; PKG=""; SHA=""; CFG=""; EFI=a
 while [ $# -gt 0 ]; do case "$1" in
   --pkg) PKG=$2; shift;; --sha) SHA=$2; shift;; --config) CFG=$2; shift;; --efi) EFI=$2; shift;;
   --tool) TOOL=$2; shift;; --usbmap) USBMAP=$2; shift;; --app) APPBIN=$2; shift;; --dry) DRY=1;; --remove) REMOVE=1;; --verbose) VERB=$2; shift;; --update) UPD=$2; shift;; --collect-logs) COLLECT=$2; shift;;
-  --knob) KNOBS+=("$2"); shift;; --profile) PROFILE=$2; shift;; --logo) LOGO=$2; shift;; --set-logo) SETLOGO=$2; shift;; --gpu-test) GPUTEST=$2; shift;;
+  --knob) KNOBS+=("$2"); shift;; --profile) PROFILE=$2; shift;; --logo) LOGO=$2; shift;; --set-logo) SETLOGO=$2; shift;; --gpu-test) GPUTEST=$2; shift;; --backlight) BACKLIGHT=$2; shift;;
   *) echo "STOP unknown option $1"; echo "RESULT stop"; exit 2;; esac; shift; done
 step() { echo "STEP $*"; }; ok() { echo "OK $*"; }; note() { echo "NOTE $*"; }
 KT=""
@@ -854,6 +854,24 @@ if [ -n "${SETLOGO:-}" ]; then
   elif [ -n "$li" ]; then plutil -replace UEFI.Drivers.$li.Enabled -bool false "$C" || fail=1; fi
   if [ $fail = 1 ] || ! plutil -lint "$C" >/dev/null; then cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; fi
   ok "boot logo $SETLOGO - takes effect at the next restart"; cleanup; echo "RESULT ok"; exit 0
+fi
+
+if [ -n "${BACKLIGHT:-}" ]; then
+  # The app's "Built-in screen brightness": boot-arg nvrmacpibl=1 lets RM read the laptop panel's backlight through the
+  # GPU's ACPI _DSM. It stays opt-in because that call hung GPU start on some PCs in 1.14; if it does, the boot picker's
+  # "Start once without NVIDIA driver" entry starts macOS without the driver so this can be turned off again.
+  case "$BACKLIGHT" in on|off) ;; *) stop "--backlight takes on or off";; esac
+  step "Turning built-in screen brightness $BACKLIGHT"
+  BKC="$C.nullmoth-backlight-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C$(ro_why "$C")"
+  new=""; for a in $(get NVRAM.Add.$B.boot-args); do [ "$a" = nvrmacpibl=1 ] || new="$new $a"; done
+  [ "$BACKLIGHT" = on ] && new="$new nvrmacpibl=1"; new=${new# }
+  if has NVRAM.Add.$B.boot-args; then plutil -replace NVRAM.Add.$B.boot-args -string "$new" "$C"
+  else plutil -insert NVRAM.Add.$B.boot-args -string "$new" "$C"; fi
+  plutil -lint "$C" >/dev/null || { cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; }
+  nv=""; for a in $(nvram boot-args 2>/dev/null | cut -f2-); do [ "$a" = nvrmacpibl=1 ] || nv="$nv $a"; done
+  [ "$BACKLIGHT" = on ] && nv="$nv nvrmacpibl=1"
+  nvram boot-args="${nv# }" || note "could not write NVRAM boot-args; the config change still applies"
+  ok "built-in screen brightness $BACKLIGHT - takes effect at the next restart"; cleanup; echo "RESULT ok"; exit 0
 fi
 
 if [ -n "${GPUTEST:-}" ]; then

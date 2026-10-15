@@ -23,6 +23,9 @@ function render(m) {
   let why = "";
   if (m.arch !== "x86_64" || m.translated) why = "This Mac has Apple silicon. Its own graphics are already Apple's.";
   else if (![15, 26].includes(m.major)) why = `The driver is built for macOS 15 Sequoia and macOS 26 Tahoe (beta); this Mac runs ${esc(m.macos)}.`;
+  else if (!card && (m.gpuHiding || []).length) why = `No NVIDIA card is visible because this Mac starts with ${esc(m.gpuHiding.join(" "))}, which hides discrete GPUs. Remove it from boot-args in OpenCore's config.plist, restart, and open 1401 again.`;
+  else if (!card && (m.hiddenNvidia || []).length) why = `The NVIDIA card (${esc(m.hiddenNvidia.join(", "))}) is on the bus but switched off for macOS, usually by a disable-gpu property in OpenCore's DeviceProperties. Remove it, restart, and open 1401 again.`;
+  else if (!card && /^MacBook/.test(m.hwModel || "")) why = "No NVIDIA card was found. On a laptop the card is often switched off before macOS starts: by the BIOS graphics mode (choose Hybrid/MSHybrid or Discrete, not iGPU only) or by a dGPU-off SSDT in OpenCore's ACPI folder. Fix that, restart, and open 1401 again.";
   else if (!card || !card.supported) why = "No supported NVIDIA card was found. The driver needs a GeForce RTX 20 series or newer.";
   else if (!m.opencore) why = "This Mac does not report OpenCore. The driver's settings live in OpenCore's config, so 1401 will not install without it.";
 
@@ -150,6 +153,8 @@ $("vbon").onclick = () => post({ act: "verbose", on: true, efi: efi() });
 $("vboff").onclick = () => post({ act: "verbose", on: false, efi: efi() });
 $("logoon").onclick = () => post({ act: "logo", on: true, efi: efi() });
 $("logooff").onclick = () => post({ act: "logo", on: false, efi: efi() });
+$("blon").onclick = () => post({ act: "backlight", on: true, efi: efi() });
+$("bloff").onclick = () => post({ act: "backlight", on: false, efi: efi() });
 $("gpuon").onclick = () => post({ act: "gputest", on: true, efi: efi() });
 $("gpuoff").onclick = () => post({ act: "gputest", on: false, efi: efi() });
 $("priv").onclick = (e) => { e.preventDefault(); post({ act: "privacy" }); };
