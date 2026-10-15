@@ -14,6 +14,24 @@ enum Privileged {
         let cancelled: Bool      // the user pressed Cancel at the password prompt
     }
 
+    /// A command that runs one of this app's own scripts as root, refusing first if anyone but the owner could have
+    /// changed it. The scripts run from the app bundle, wherever the user keeps the app; if that folder or any folder
+    /// above it is writable by other users, another account could replace the script between launch and the password
+    /// prompt and have it run as root. The check runs inside the root shell, immediately before the script, so nothing
+    /// can change between the check and the run. /Applications is group-admin writable by Apple's convention, so only
+    /// the world-write bit is refused, the same rule the crash-check login item uses (nullmoth-setup.sh).
+    static func bundleScript(_ script: String, _ args: [String], env: String = "") -> String {
+        let q = { (s: String) in "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        let guardShell = "p=\(q(script)); "
+            + "d=$(cd \"$(/usr/bin/dirname \"$p\")\" 2>/dev/null && pwd -P) || { echo \"STOP: cannot find $p\"; exit 97; }; "
+            + "m=$(/usr/bin/stat -f %Lp \"$d/$(/usr/bin/basename \"$p\")\") || exit 97; "
+            + "case \"$m\" in *[2367]) echo \"STOP: $p can be changed by other users; move 1401 into Applications\"; exit 97;; esac; "
+            + "while :; do m=$(/usr/bin/stat -f %Lp \"$d\") || exit 97; "
+            + "case \"$m\" in *[2367]) echo \"STOP: $d can be changed by other users; move 1401 into Applications\"; exit 97;; esac; "
+            + "[ \"$d\" = / ] && break; d=$(/usr/bin/dirname \"$d\"); done; "
+        return guardShell + env + "/bin/bash \(q(script)) " + args.map(q).joined(separator: " ")
+    }
+
     static func run(_ command: String, timeout: TimeInterval, admin: Bool = true) -> Result {
         let fm = FileManager.default
         let dir = fm.temporaryDirectory.appendingPathComponent("1401-run-" + UUID().uuidString)

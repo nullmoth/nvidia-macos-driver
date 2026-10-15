@@ -822,8 +822,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
                 return
             }
             let script = Bundle.main.resourceURL!.appendingPathComponent("nullmoth-log-capture.sh").path
-            let q = { (x: String) in "'" + x.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-            let cmd = (sample.isEmpty ? "" : "NULLMOTH_SAMPLE=\(sample) ") + "/bin/bash \(q(script))"
+            let cmd = Privileged.bundleScript(script, [], env: sample.isEmpty ? "" : "NULLMOTH_SAMPLE=\(sample) ")
             var collectionErrors: [String] = []
             DispatchQueue.main.async {
                 self.send("logsStatus", ["text": "Waiting for your Mac password (a macOS window asks for it). Collecting takes a few minutes; 1401 keeps working."])
@@ -1026,8 +1025,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
             args += extra
         }
         if efi != "auto", !efi.isEmpty { args += ["--efi", efi] }
-        let q = { (s: String) in "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-        let cmd = "/bin/bash \(q(res.appendingPathComponent("nullmoth-operation-capture.sh").path)) \(args.map(q).joined(separator: " "))"
+        let cmd = Privileged.bundleScript(res.appendingPathComponent("nullmoth-operation-capture.sh").path, args)
         send("run", ["state": "start", "mode": mode, "log": log.path])
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.global().async {
