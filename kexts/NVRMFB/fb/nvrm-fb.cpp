@@ -61,6 +61,27 @@ static inline uint64_t nvrmVramBudget(uint64_t barLen)
     return b > NVRM_VRAM_BAR1_BUDGET ? b : NVRM_VRAM_BAR1_BUDGET;
 }
 
+// The framebuffer's own scanout and cursor sit in BAR1 (useVideoMemory), yet the accel budget above never counted them,
+// so the blind 3/4 fraction both wasted the BAR1 the display was not using on a small display and over-promised it on a
+// large one. An RTX 2070 Super (256 MB BAR1, no larger size offered, 3840x2560) spent its 192 MB budget while ~40 MB of
+// scanout went uncounted: WindowServer's surfaces were refused and the desktop stayed black with a cursor (user logs
+// 2026-10-11, "BAR1 budget spent (200015872 of 201326592 bytes)" with NVAccel allocPhysical REFUSED). The budget is now
+// the BAR1 the display is not holding, less a margin for RM's own mappings (which are not in gVramMappedBytes); a large
+// display lowers it instead of overflowing the aperture. gVramDisplayBytes is the measured scanout+cursor; 0 means the
+// scanout is not mapped yet, so the conservative policy stands until it is.
+static volatile SInt64 gVramDisplayBytes = 0;
+static int gVramDisplayAware = 1;
+static inline uint64_t nvrmSurfaceBudget(uint64_t barLen, SInt64 displayBytes)
+{
+    if (barLen >= (4ull << 30)) return barLen / 2;        // resizable BAR: half, the display is a rounding error
+    if (!gVramDisplayAware || displayBytes <= 0)
+        return nvrmVramBudget(barLen);                     // display not measured yet -- keep the conservative policy
+    const uint64_t margin = 16ull << 20;                   // RM's own BAR1 mappings are not tracked in gVramMappedBytes
+    const uint64_t reserve = (uint64_t)displayBytes + margin;
+    if (reserve >= barLen) return nvrmVramBudget(barLen);  // pathological (display fills the window) -- fall back
+    return barLen - reserve;
+}
+
 // EDID base block bytes 21 and 22 hold the panel's physical size in centimetres. macOS wants it in
 // millimetres, per mode, through IODisplayModeInformation.imageWidth/imageHeight -- IOGraphicsTypes.h
 // calls them "physical width/height of active image if known, in millimeters, otherwise zero", and
@@ -241,6 +262,8 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     // firmware started at 2560x1440 has a 3840-wide scaler limit, yet 5120x1440 needs less memory than 3840x2160.
     NvU32 fRasterMaxW = 0;
     NvU64 fAllocSize = 0, fMemBytes = 0;
+    // The scanout and cursor bytes this head mapped into BAR1 (video memory only), counted once into gVramDisplayBytes.
+    NvU64 fScanoutBarBytes = 0, fCursorBarBytes = 0;
     unsigned fModeSwitches = 0, fValidateCalls = 0, fValidateOk = 0;
     bool fBootInDT = false;
     int dtIndex(IODisplayModeID id) const;
@@ -892,7 +915,15 @@ bool NVRMNVDAFramebuffer::kapiInit()
         } else if (userPhys && userPhys != kernelPhys && verifyAperture(userPhys, "userPhys")) {
             fPhys = userPhys; haveAperture = true;
         }
-        if (haveAperture) { FBLOG("%s ACCEPTED -- aperture 0x%llx", what, fPhys); break; }
+        if (haveAperture) {
+            // Count a video-memory scanout against the BAR1 the accel budget may hand out. A system-memory scanout
+            // does not sit in BAR1, so it is not counted.
+            if (kTryOrder[t] && !fScanoutBarBytes) {
+                fScanoutBarBytes = fMemBytes;
+                OSAddAtomic64((SInt64)fScanoutBarBytes, &gVramDisplayBytes);
+            }
+            FBLOG("%s ACCEPTED -- aperture 0x%llx", what, fPhys); break;
+        }
         FBLOG("%s rejected -- no CPU-writable aperture; freeing and trying the other pool", what);
         if (fKva)      fKms->unmapMemory(fDev, fMem, NVKMS_KAPI_MAPPING_TYPE_KERNEL, fKva);
         if (fUserPhys) fKms->unmapMemory(fDev, fMem, NVKMS_KAPI_MAPPING_TYPE_USER, fUserPhys);
@@ -925,6 +956,7 @@ bool NVRMNVDAFramebuffer::kapiInit()
     fSurf = fKms->createSurface(fDev, &sp);
     if (!fSurf) {
         FBLOG("createSurface failed");
+        if (fScanoutBarBytes) { OSAddAtomic64(-(SInt64)fScanoutBarBytes, &gVramDisplayBytes); fScanoutBarBytes = 0; }
         if (consoleSilenced && getPlatform()) getPlatform()->setConsoleInfo(0, kPEEnableScreen);
         return false;
     }
@@ -1484,6 +1516,11 @@ bool NVRMNVDAFramebuffer::cursorInit()
         fKms->freeMemory(fDev, fCurMem); fCurMem = nullptr; fCurKva = nullptr; return false;
     }
     fCurDim = dim;
+    // The cursor plane is video memory too, so it counts against the BAR1 the accel budget may use.
+    if (!fCursorBarBytes) {
+        fCursorBarBytes = sz;
+        OSAddAtomic64((SInt64)fCursorBarBytes, &gVramDisplayBytes);
+    }
     FBLOG("cursor plane READY: %ux%u A8R8G8B8 pitch %u (device maxCursorSizeInPixels %u, validCompModes 0x%x)",
           dim, dim, dim * 4, fCurMaxPx, fCurCompModes);
     return true;
@@ -2450,6 +2487,8 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_release_bytes, CTLFLAG_RD | CTLFLAG_LO
 static volatile SInt64 gVramBudgetBytes = 0;
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_budget_bytes, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gVramBudgetBytes, "the BAR1 grant budget in force");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_mapped_bytes,  CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gVramMappedBytes,  "the BAR1 budget counter, live");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_display_bytes, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gVramDisplayBytes, "scanout+cursor the framebuffer itself maps into BAR1");
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_vram_display_aware, CTLFLAG_RW | CTLFLAG_LOCKED, &gVramDisplayAware, 0, "1 = the accel budget reserves the BAR1 the display holds; 0 = the old fixed fraction");
 static struct NVRMVramRequest gVramTest[256]; static int gVramTestN; static int gVramTestMode;
 static int nvrmfb_vramtest_sysctl SYSCTL_HANDLER_ARGS
 {
@@ -2495,6 +2534,7 @@ static void nvrmfbInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvrmfb_vram_grants);   sysctl_register_oid(&sysctl__debug_nvrmfb_vram_grant_bytes);
     sysctl_register_oid(&sysctl__debug_nvrmfb_vram_releases); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_release_bytes);
     sysctl_register_oid(&sysctl__debug_nvrmfb_vram_mapped_bytes); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_budget_bytes);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_vram_display_bytes); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_display_aware);
     sysctl_register_oid(&sysctl__debug_nvrmfb_vramtest); sysctl_register_oid(&sysctl__debug_nvrmfb_vramtest_mode);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_interval); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_us_sum);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_n); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_us_max);
@@ -2512,7 +2552,7 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
     NvU64 want = (r->size + 0xFFFFull) & ~0xFFFFull;
     if (!want) return false;
 
-    const SInt64 budget = (SInt64)nvrmVramBudget(fBarLen);
+    const SInt64 budget = (SInt64)nvrmSurfaceBudget(fBarLen, gVramDisplayBytes);
     gVramBudgetBytes = budget;
     // Parked blocks keep their BAR1 mapping (see below), so they count against the budget. On a 256 MB BAR1 (every
     // GTX 16, boards without Resizable BAR) the park ceiling is the smaller one, so surfaces keep most of the budget.
