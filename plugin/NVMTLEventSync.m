@@ -19,6 +19,8 @@
     int aheadFailed;
     BOOL waitFolded;
     BOOL aheadEmpty;
+    NSArray<NVMTLBuffer *> *copyInputs;
+    BOOL copyInputsPrepared, hasHostCopies;
 }
 @end
 static _Atomic unsigned gsub_inflight;
@@ -326,7 +328,7 @@ static void nvmtl_gsub_census(void) {
 // A texture over a copy-backed buffer must refresh the same bytes as a direct
 // buffer binding. Keep direct managed-buffer writeback and copy each backing once.
 static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL writtenOnly) {
-    NSMutableArray<NVMTLBuffer *> *copies = nil;
+    NSMutableSet<NVMTLBuffer *> *copies = nil;
     for (id resource in resources) {
         NVMTLBuffer *buffer = nil;
         if ([resource isKindOfClass:[NVMTLBuffer class]]) buffer = resource;
@@ -337,10 +339,21 @@ static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL wr
             buffer = texture->_backBuf ?: (texture->_parent ? texture->_parent->_backBuf : nil);
         }
         if (!buffer || (!buffer->_hostPtr && !buffer->_shadow.map)) continue;
-        if (!copies) copies = [NSMutableArray new];
-        if (![copies containsObject:buffer]) [copies addObject:buffer];
+        if (!copies) copies = [NSMutableSet new];
+        [copies addObject:buffer];
     }
-    return copies;
+    return copies.allObjects;
+}
+static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
+    if (part->copyInputsPrepared) return;
+    // A sealed part's membership and its buffers' backing modes do not change.
+    // The ahead pass can retry a held part many times: discover its upload
+    // backings once, but refresh their bytes only when it actually submits.
+    part->copyInputs = nvmtl_submission_copies(part->resources, NO);
+    for (NVMTLBuffer *buffer in part->copyInputs) {
+        if (buffer->_hostPtr) { part->hasHostCopies = YES; break; }
+    }
+    part->copyInputsPrepared = YES;
 }
 - (BOOL)nvmtlSubmitAhead {
     if (_executionDone || _cbError || !_committed) return NO;
@@ -365,17 +378,15 @@ static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL wr
             nvmtl_evfold_census(&gEvFoldEmpty, "empty split parts retired by the ahead pass");
             continue;
         }
+        nvmtl_prepare_submission_copies(part);
         {
             static int hold = -1;
             if (hold < 0) { const char *e = getenv("NVMTL_GSUB_HOSTPTR_LIFT"); hold = (e && *e && *e != '0') ? 0 : 1; }
-            if (hold) {
-                for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, NO))
-                    if (buffer->_hostPtr) return NO;
-            }
+            if (hold && part->hasHostCopies) return NO;
         }
         nvmtl_inflight *f = nvmtl_vk_inflight_new();
         if (!f) return NO;
-        for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, NO)) nvmtl_buffer_sync_in(buffer);
+        for (NVMTLBuffer *buffer in part->copyInputs) nvmtl_buffer_sync_in(buffer);
         [self nvmtlMarkScheduled];
         if (!_legacyKernelStart) _legacyKernelStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
         const int r = nvmtl_vk_submit_begin(&part->commands, f);
@@ -444,7 +455,8 @@ static void nvmtl_gsub_ahead_pass1(void) {
         if (part->inflight) result = nvmtl_gsub_finish(part);
         else if (part->aheadFailed) result = part->aheadFailed;
         else {
-            for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, NO)) nvmtl_buffer_sync_in(buffer);
+            nvmtl_prepare_submission_copies(part);
+            for (NVMTLBuffer *buffer in part->copyInputs) nvmtl_buffer_sync_in(buffer);
             result = nvmtl_vk_submit_wait(&part->commands);
         }
         if (result == -2) {

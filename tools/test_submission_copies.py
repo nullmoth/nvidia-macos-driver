@@ -8,7 +8,9 @@ import tempfile
 root = pathlib.Path(__file__).resolve().parents[1]
 events = (root / 'plugin/NVMTLEventSync.m').read_text()
 start = events.index('static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(')
-helper = events[start:events.index('- (BOOL)nvmtlSubmitAhead', start)]
+prepare_start = events.index('static void nvmtl_prepare_submission_copies(', start)
+helper = events[start:prepare_start]
+prepare = events[prepare_start:events.index('- (BOOL)nvmtlSubmitAhead', prepare_start)]
 ahead = events[events.index('- (BOOL)nvmtlSubmitAhead'):events.index('static void nvmtl_gsub_ahead_pass1(void);')]
 advance = events[events.index('- (BOOL)nvmtlAdvancePart'):events.index('- (void)nvmtlSubmitWithEvents')]
 objects = (root / 'plugin/NVMTLObjects.m').read_text()
@@ -90,6 +92,7 @@ typedef struct { int unused; } nvmtl_inflight;
     id waitEvent, signalEvent; uint64_t value;
     BOOL waitFolded, aheadEmpty; int aheadFailed; unsigned encoders;
     nvmtl_inflight *inflight;
+    NSArray<NVMTLBuffer *> *copyInputs; BOOL copyInputsPrepared, hasHostCopies;
 } @end
 @implementation NVMTLSubmissionPart @end
 @interface NVMTLTexture (Publication)
@@ -198,7 +201,7 @@ with tempfile.TemporaryDirectory() as directory:
                     '-framework', 'Metal', str(path / 'test.m'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)
 
-    (path / 'submission.m').write_text(fixture + helper + sync + submission_fixture + ahead + advance + submission_checks)
+    (path / 'submission.m').write_text(fixture + helper + sync + submission_fixture + prepare + ahead + advance + submission_checks)
     subprocess.run(['clang', '-fobjc-arc', '-framework', 'Foundation',
                     '-framework', 'Metal', str(path / 'submission.m'), '-o', str(path / 'submission')], check=True)
     env = dict(os.environ)
