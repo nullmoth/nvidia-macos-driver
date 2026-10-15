@@ -377,7 +377,8 @@ static const char *nv_pm_selftest = "not run";
 // owner is the pid captured when the allocation is created; refuse a device map
 // only when both owner and caller are real, distinct user processes. owner 0 is
 // kernel/RM-internal and stays shareable, so a legitimate kernel-created buffer
-// is never refused. Default is observe-and-count; boot-arg nvrmmapowner=1 enforces.
+// is never refused. Enforced by default; boot-arg nvrmmapowner=0 falls back to
+// observe-and-count (allow but log) as a field recovery valve.
 static inline bool nv_pm_owner_blocks(int owner, int caller) { return owner > 0 && caller > 0 && owner != caller; }
 static bool nv_pm_owner_enforce(void);
 struct nv_pm_ev { NvU64 t_s, phys, size, extra; NvU32 kind; };
@@ -507,7 +508,7 @@ extern "C" IOMemoryDescriptor *nv_pm_ram_submd(NvU64 start, NvU64 size, int call
     if (a) {
         owner = a->owner_pid;
         mismatch = nv_pm_owner_blocks(owner, caller_pid);
-        // observe-and-count by default; only a boot-arg turns a cross-owner map into a refusal
+        // a cross-owner map is refused by default; nvrmmapowner=0 downgrades to observe-and-count
         if (!(mismatch && nv_pm_owner_enforce())) { md = a->md; md->retain(); }
     }
     IOSimpleLockUnlock(nv_pm_lock);
@@ -555,7 +556,8 @@ static bool nv_pm_registered = false;
 static bool nv_pm_owner_enforce(void)
 {
     static int on = -1;
-    if (on < 0) { int v = 0; on = (PE_parse_boot_argn("nvrmmapowner", &v, sizeof(v)) && v) ? 1 : 0; }
+    // enforce unless explicitly disabled with nvrmmapowner=0 (a no-rebuild recovery valve)
+    if (on < 0) { int v = 1; PE_parse_boot_argn("nvrmmapowner", &v, sizeof(v)); on = v ? 1 : 0; }
     return on != 0;
 }
 static const uint64_t kKdkKprintf = 0xffffff8000b94da0ULL, kKdkPvHead = 0xffffff80011bd8c8ULL, kKdkAttr = 0xffffff80012de470ULL,
