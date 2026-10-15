@@ -1291,7 +1291,14 @@ for k in boot-args csr-active-config; do echo "$del" | grep -q "<string>$k</stri
 # host); without it nothing is changed and the reason is said. Pattern = 1401 policy.py _ZEN45_NAME.
 DVW_NEW=0
 CPUB=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)
-if printf '%s' "$CPUB" | grep -Eiq 'Ryzen AI([^A-Za-z0-9]|$)|Ryzen [3579] ([79][0-9][0-9]0(X3D|X|F)?|8[0-9][0-9]0[FG])([^A-Za-z0-9]|$)|Ryzen [3579] [78][0-9][45][0-9](HX3D|HX|HS|H|U)([^A-Za-z0-9]|$)' \
+# The risk is not the CPU's name but macOS writing NVRAM through a rewritten firmware memory map: an AMD config with
+# SetupVirtualMap or DevirtualiseMmio on. Boards that stopped POSTing (chat 10-10..10-15: AM5 X870/B650, an AM4 5600X)
+# all ran such configs without this quirk. Zen 4/5 by name stays covered, and so does every remapped AMD config.
+AMD_REMAP=0
+if printf '%s' "$CPUB" | grep -q AMD && { [ "$(get Booter.Quirks.SetupVirtualMap)" = true ] || [ "$(get Booter.Quirks.DevirtualiseMmio)" = true ]; }; then
+  AMD_REMAP=1; fi
+if { printf '%s' "$CPUB" | grep -Eiq 'Ryzen AI([^A-Za-z0-9]|$)|Ryzen [3579] ([79][0-9][0-9]0(X3D|X|F)?|8[0-9][0-9]0[FG])([^A-Za-z0-9]|$)|Ryzen [3579] [78][0-9][45][0-9](HX3D|HX|HS|H|U)([^A-Za-z0-9]|$)' \
+     || [ $AMD_REMAP = 1 ]; } \
    && [ "$(get Booter.Quirks.DisableVariableWrite)" != true ]; then
   ort=0; i=0
   while p=$(plutil -extract UEFI.Drivers.$i.Path raw -o - "$C" 2>/dev/null); do

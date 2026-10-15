@@ -23,8 +23,10 @@ echo "DVW_NEW=$DVW_NEW"
 '''
 
 
-def run(cpu, quirk=None, drivers=("OpenRuntime.efi",)):
+def run(cpu, quirk=None, drivers=("OpenRuntime.efi",), svm=None, devirt=None):
     cfg = {"Booter": {"Quirks": {}}, "UEFI": {"Drivers": [{"Path": d, "Enabled": True} for d in drivers]}}
+    if svm is not None: cfg["Booter"]["Quirks"]["SetupVirtualMap"] = svm
+    if devirt is not None: cfg["Booter"]["Quirks"]["DevirtualiseMmio"] = devirt
     if quirk is not None: cfg["Booter"]["Quirks"]["DisableVariableWrite"] = quirk
     with tempfile.TemporaryDirectory() as td:
         c = pathlib.Path(td) / "config.plist"; c.write_bytes(plistlib.dumps(cfg))
@@ -52,6 +54,15 @@ class Zen45VariableWrite(unittest.TestCase):
             out = run(cpu)
             self.assertNotIn("DisableVariableWrite|", out, cpu)
             self.assertIn("DVW_NEW=0", out, cpu)
+
+    def test_a_zen3_board_with_the_memory_map_rewritten_gets_it(self):
+        # an AM4 5600X stopped POSTing after macOS on 1.9 (chat 10-10); the risk is the remapped NVRAM write, not Zen 4
+        for kw in ({"svm": True}, {"devirt": True}):
+            out = run("AMD Ryzen 5 5600X 6-Core Processor", **kw)
+            self.assertIn("DisableVariableWrite|-bool|true", out, kw)
+
+    def test_intel_with_the_memory_map_rewritten_is_still_left_alone(self):
+        self.assertNotIn("DisableVariableWrite|", run("Intel(R) Core(TM) i5-14400F", svm=True, devirt=True))
 
     def test_already_on_is_not_edited_again(self):
         self.assertNotIn("DisableVariableWrite|", run("AMD Ryzen 7 9800X3D 8-Core Processor", quirk=True))
