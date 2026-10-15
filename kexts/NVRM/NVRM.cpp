@@ -1046,6 +1046,10 @@ IOReturn NVRM::go(uint32_t pass)
             LOG("event locks created for the control device and the GPU");
             rm_write_registry_string(NULL, NULL, "RmMsg", ":", 1);
             rm_write_registry_dword(NULL, NULL, "ResmanDebugLevel", 0);
+            // Save ALL video memory across system sleep (NVIDIA's NVreg_PreserveVideoMemoryAllocations=1). Without it RM
+            // keeps only "select allocations"; WindowServer's surfaces and channels came back from the first sleep empty,
+            // its GPU work never finished, and the Mac froze (the test Mac, 10-15). RM saves into os_open_temporary_file.
+            rm_write_registry_dword(NULL, NULL, "PreserveVideoMemoryAllocations", 1);
             LOG("registry: RmMsg=\":\" ResmanDebugLevel=0 (verbose RM)");
         }
         {
@@ -1178,12 +1182,18 @@ IOReturn NVRM::setPowerState(unsigned long ordinal, IOService *device)
         IOLockUnlock(gNvPmLock);
         // Every step below either completes or backs out. A sleep that cannot suspend the GPU leaves it running, as
         // every driver before this one did; a sleep that waits forever takes the whole machine down with it.
+        // NVIDIA's order (nv_suspend_devices + nvidia_suspend in nv.c): display engine, then the user channels are
+        // stopped (nv_preempt_user_channels), then RM saves the GPU with all video memory. Wake runs it backwards.
         const char *skip = busy ? "calls still inside RM after 10 s" : nullptr;
         if (!skip && !nvkms_xnu_suspend(fNv.gpu_id)) skip = "the display engine (NVKMS) is busy";
         NV_STATUS st = NV_OK;
         if (!skip) {
+            st = rm_stop_user_channels(NULL, &fNv);
+            if (st != NV_OK) { nvkms_xnu_resume(fNv.gpu_id); skip = "user channels would not stop"; }
+        }
+        if (!skip) {
             st = rm_power_management(NULL, &fNv, NV_PM_ACTION_STANDBY);
-            if (st != NV_OK) { nvkms_xnu_resume(fNv.gpu_id); skip = "RM standby failed"; }
+            if (st != NV_OK) { rm_restart_user_channels(NULL, &fNv); nvkms_xnu_resume(fNv.gpu_id); skip = "RM standby failed"; }
         }
         if (skip) {
             IOLockLock(gNvPmLock);
@@ -1199,7 +1209,9 @@ IOReturn NVRM::setPowerState(unsigned long ordinal, IOService *device)
     } else if (ordinal == 1 && fGpuSuspended) {
         if (fIntSrc) fIntSrc->enable();
         const NV_STATUS st = rm_power_management(NULL, &fNv, NV_PM_ACTION_RESUME);
+        const NV_STATUS ch = st == NV_OK ? rm_restart_user_channels(NULL, &fNv) : st;
         if (st == NV_OK) nvkms_xnu_resume(fNv.gpu_id);
+        if (ch != NV_OK) LOG("power: wake -> user channels did not restart (0x%x)", (unsigned)ch);
         fGpuSuspended = false;
         IOLockLock(gNvPmLock);
         gNvPmSuspended = false;
