@@ -4,33 +4,71 @@
 
 macOS 15 Sequoia and macOS 26 Tahoe.
 
+Security
+- Fixes for every finding in the security report by @Mahasvan (#214). Thank you for reporting them to us first.
+- The driver's administrator check now reads the caller's real user id; it used to answer yes for everyone
+- Copies between NVKMS and a process can no longer reach kernel memory, and the NVKMS entry point is root-only
+- First-time GPU bring-up requires root
+- A process cannot map memory that belongs to another process
+- Unknown client types are refused, the bind call checks its range and always drops a stale mapping, waits on GPU
+  events are capped, and one process can no longer fill the client table (slots are kept for the system)
+- The kernel-address check refuses to arm on any macOS build it was not made for
+- The Mac app verifies a signature on its own updates before unpacking them, runs with the hardened runtime, and
+  refuses to run its root scripts from a folder other users can write to
+
 Driver
-- Fix black screen with only a cursor after updating to 1.15 (video memory reserved over the boot screen was handed
-  out again, so the desktop's surfaces were refused)
+- GeForce RTX 50 series: compute kernels compiled by NVIDIA's own compiler now run on the card
+- Fix the black screen with only a cursor after updating to 1.15 (video memory reserved over the boot screen was handed
+  out again), including displays larger than the boot screen's reserved memory, such as 3840x2560 on cards with a
+  256 MB memory window
+- Fix flicker caused by a reused buffer showing an old frame
+- A second monitor keeps its high refresh rates, and panels faster than 240 Hz are paced correctly
+- Ultrawide, 4K and HiDPI modes are no longer capped at twice the boot resolution
+- Cards with a small memory window: the display's own share is counted, so the desktop stops running out of space;
+  a Turing card left at 64 MB is resized to the largest size it offers
+- A display connected after startup comes up without a restart (#142, thanks @lsCoding666)
+- macOS learns the panel's physical size, so scaling is right instead of assuming 72 dpi (#199, thanks @GeekAudio)
+- Laptops with the screen on the Intel GPU: the driver no longer takes the Intel GPU's display slot (#131, #119, thanks
+  @TararaDotJoshua), and muxless Turing GPUs get the startup settle they need
 - Tahoe: ship the macOS 26 accelerator built from this release (1.15 carried an older one: black screen on Tahoe)
+- Fix crashes in Photos and media analysis, in apps that split a command buffer at an event, in Chess, and in apps
+  that free Vulkan memory (thanks @Exop63)
+- Fix memory running out during Super Resolution and other long machine-learning work
+- A texture copied for display stays in step on every submission (thanks @KolliasG7); work is reported as scheduled
+  only after IOSurface writes finish (#147, thanks @imyago9); a surface keeps its video memory across page-off (#200,
+  thanks @imbrahiam)
+- World of Warcraft Classic and other Metal games: cube-map arrays, bounds-checked buffer reads and several shader fixes
+  (#171, thanks @razvanccr); Firefox WebRender shaders translate (thanks @advokat11); MSAA sample positions on cards
+  without programmable 1x positions (#136, thanks @eisda)
+- Faster pipeline builds: built in parallel, one hash per shader module, planner results reused, and one private image
+  per IOSurface (#173, #177, #181, #188, #189, thanks @modesttao)
 - Chrome, Edge and Electron apps draw on the CPU again by default, which ends the artifacts, stutter and voice-call
   crashes in Discord on several cards; `NVMTL_ANGLE_METAL=1` turns their GPU path on
-- A command buffer could let go of a texture, buffer or sampler it was still using when two threads encoded into it,
-  or when it was split at an event
-- Fix the black screen with a cursor on 1.15 for displays whose desktop is larger than the boot screen's reserved
-  memory (for example 3840x2560 on cards with a 256 MB memory window)
+- Optional asynchronous texture uploads, off by default (`NVMTL_ASYNC_TEX_UPLOAD=1`)
+- Multi-GPU display selection workaround documented in docs/MULTI-GPU.md (#197, thanks @is-pan)
+
+Experimental, off unless you turn it on
+- AMD and Intel GPU support (NMXGPU) and the NPU driver, for macOS 15 and 26: Setup > "AMD / Intel GPU driver (test)"
 
 Mac app
 - Finish a macOS update the update helper never finished, and keep this Mac's own BAR settings afterwards
 - "Remove NVIDIA driver" stops with an explanation, instead of failing half-way, when System Integrity Protection is on
+- The Remove NVIDIA driver startup entry is always visible, and removing the driver keeps the screen on
+- Warn when the Mac starts OpenCore only from the USB stick and the internal disk has none
+- Explain a failed config backup on a read-only OpenCore partition, and say which step comes first when Install is
+  greyed out
+- Send logs copies files before running log queries and includes crash reports under any name
 
 1401 for Windows
-- Pick macOS 15 Sequoia or macOS 26 Tahoe before the build
-- Tahoe builds on boards with a Realtek 2.5G/5G port and Intel or Broadcom Wi-Fi no longer stop at the Apple logo
-- Sticks that Windows could not format after the erase are erased again with diskpart
-- Intel PCs that froze right after OpenCore with "No slide values are usable" get the matching memory-map setting
+- Pick macOS 15 Sequoia or macOS 26 Tahoe before the build; see the 1401 changelog for the full list
 
 Known issues
 - Preview not showing pictures and lost window transparency on some macOS 15 setups
 - Chrome decodes video on the CPU while its GPU sandbox is on (#175)
 - Thunderbolt eGPUs: no display
 - Laptops with the screen on the Intel GPU: the built-in screen is not accelerated
-- No HDMI/DisplayPort audio
+- HDMI/DisplayPort audio: the display now reports its audio formats to macOS, but sound over HDMI/DisplayPort is not
+  working yet
 
 ## 1.15.0
 
