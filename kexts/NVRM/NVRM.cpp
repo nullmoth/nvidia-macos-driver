@@ -48,7 +48,7 @@ __private_extern__ int _kext_apple_cc = __APPLE_CC__;
 struct nvkms_per_open;
 extern "C" { NvBool nvkms_xnu_load(void); struct nvkms_per_open *nvkms_xnu_open(int pid); void nvkms_xnu_close(struct nvkms_per_open *);
              int nvkms_xnu_ioctl(struct nvkms_per_open *, NvU32 cmd, void *params, size_t size); int nvkms_xnu_events_available(struct nvkms_per_open *);
-             void nvkms_xnu_suspend(NvU32 gpuId); void nvkms_xnu_resume(NvU32 gpuId); }
+             NvBool nvkms_xnu_suspend(NvU32 gpuId); void nvkms_xnu_resume(NvU32 gpuId); }
 
 // System sleep gate, the macOS stand-in for nv_system_pm_lock: macOS does not freeze user space before sleep, so calls
 // that reach RM wait here from the moment the GPU starts suspending until it has resumed. Sleep waits (bounded) for the
@@ -1176,9 +1176,23 @@ IOReturn NVRM::setPowerState(unsigned long ordinal, IOService *device)
             if (IOLockSleepDeadline(gNvPmLock, &gNvPmBusy, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) break;
         const int busy = gNvPmBusy;
         IOLockUnlock(gNvPmLock);
-        if (busy) LOG("power: %d call(s) still inside RM after 10 s; suspending anyway (RM's own lock orders them)", busy);
-        nvkms_xnu_suspend(fNv.gpu_id);
-        const NV_STATUS st = rm_power_management(NULL, &fNv, NV_PM_ACTION_STANDBY);
+        // Every step below either completes or backs out. A sleep that cannot suspend the GPU leaves it running, as
+        // every driver before this one did; a sleep that waits forever takes the whole machine down with it.
+        const char *skip = busy ? "calls still inside RM after 10 s" : nullptr;
+        if (!skip && !nvkms_xnu_suspend(fNv.gpu_id)) skip = "the display engine (NVKMS) is busy";
+        NV_STATUS st = NV_OK;
+        if (!skip) {
+            st = rm_power_management(NULL, &fNv, NV_PM_ACTION_STANDBY);
+            if (st != NV_OK) { nvkms_xnu_resume(fNv.gpu_id); skip = "RM standby failed"; }
+        }
+        if (skip) {
+            IOLockLock(gNvPmLock);
+            gNvPmSuspended = false;
+            IOLockWakeup(gNvPmLock, &gNvPmSuspended, false);
+            IOLockUnlock(gNvPmLock);
+            LOG("power: sleep -> GPU left running (%s; RM status 0x%x, %d busy)", skip, (unsigned)st, busy);
+            return kIOPMAckImplied;
+        }
         if (fIntSrc) fIntSrc->disable();
         fGpuSuspended = true;
         LOG("power: sleep -> RM standby status 0x%x", (unsigned)st);
