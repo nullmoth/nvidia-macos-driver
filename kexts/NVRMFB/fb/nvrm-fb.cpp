@@ -2845,9 +2845,13 @@ bool NVRMNVDAFramebuffer::flipToMemory(struct NvKmsKapiMemory *mem, unsigned w, 
     const bool cacheable = mem && epoch != (UInt64)kFlipEpochLimit;
     if (cacheable) {
         IOInterruptState state = IOSimpleLockLockDisableInterrupt(fFlipCacheLock);
+        // The epoch is part of the match. The key is the NvKmsKapiMemory pointer, which a buffer allocated after a free
+        // can reuse at the same address; matching an entry recorded in an older epoch would scan out its stale surface
+        // over the reallocated memory, which strobes the panel black every other frame after a refresh or resolution
+        // change. Requiring the current epoch makes a reused address always take a fresh surface.
         for (unsigned i = 0; i < fFlipCacheN; i++)
-            if (fFlipCache[i].cookie == cookie && fFlipCache[i].mem == mem && fFlipCache[i].pitch == pitch &&
-                fFlipCache[i].w == w && fFlipCache[i].h == h) { surf = fFlipCache[i].surf; break; }
+            if (fFlipCache[i].epoch == epoch && fFlipCache[i].cookie == cookie && fFlipCache[i].mem == mem &&
+                fFlipCache[i].pitch == pitch && fFlipCache[i].w == w && fFlipCache[i].h == h) { surf = fFlipCache[i].surf; break; }
         IOSimpleLockUnlockEnableInterrupt(fFlipCacheLock, state);
     }
     if (!surf) {
