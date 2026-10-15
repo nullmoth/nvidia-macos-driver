@@ -15,6 +15,7 @@ fixture = r'''
 #include <mutex>
 #include <thread>
 using IOSimpleLock = std::mutex;
+typedef long long SInt64;  // a kernel type the extracted destructor now uses
 static void IOSimpleLockLock(IOSimpleLock *lock) { lock->lock(); }
 static void IOSimpleLockUnlock(IOSimpleLock *lock) { lock->unlock(); }
 struct Descriptor { unsigned releases=0; void release() { releases++; } };
