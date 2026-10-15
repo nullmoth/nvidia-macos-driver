@@ -4916,6 +4916,13 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     NVMTLCommandBuffer *cb = [NVMTLCommandBuffer new];
     if (!cb) { if (cap) dispatch_semaphore_signal(cap); return nil; }
     cb->_queue = self; cb->_capacityHeld = cap != nil;
+    // The resource set exists from the start. Every encoder used to create it on first use
+    // (`if (!cb->_resources) cb->_resources = [NVMTLResSet new]`), and encoders of one command buffer run on several
+    // threads (parallel render encoders, CoreAnimation's async render queue): two threads both saw nil, the second
+    // store released the set the first was adding to, and the app died in -[NVMTLResSet addObject:] (__rehash on a freed
+    // member) or in its -dealloc - about 14 Macs from 1.15 to 2.0.1 (NotificationCenter, Music, mediaanalysisd, games).
+    // The set itself takes a lock for every operation; only its creation was unguarded. The first-use checks now never fire.
+    cb->_resources = [NVMTLResSet new];
     if (nvmtl_vk_cmd_begin(&_q, &cb->_c)) { nvlog("queue: command buffer begin FAILED"); return nil; }
     return cb;
 }
