@@ -43,6 +43,9 @@
 <p><button type="button" class="b" id="vbon">Turn verbose on</button> <button type="button" class="b" id="vboff">Turn verbose off</button></p>
 <p>The optional NullMoth boot logo replaces the Apple logo while macOS starts. Driver installation turns it off because it can stop some systems from booting. Enable it only for a deliberate test.</p>
 <p><button type="button" class="b" id="logoon">Boot logo on</button> <button type="button" class="b" id="logooff">Boot logo off</button></p></div>
+<div class="panel"><p class="sh">Built-in screen brightness (laptops)</p>
+<p>For a laptop whose built-in screen is wired to the NVIDIA GPU (MUX set to Discrete or dGPU). It lets the driver read the panel's brightness controls from the laptop's firmware. It is off by default because that firmware call stopped some PCs at GPU start. If yours stops there, choose <b>1401: Start once without NVIDIA driver</b> in the boot picker and turn it off here.</p>
+<p><button type="button" class="b" id="blon">Turn brightness control on</button> <button type="button" class="b" id="bloff">Turn it off</button></p></div>
 <div class="panel"><p class="sh">AMD / Intel GPU and NPU driver (test)</p>
 <p>For the AMD and Intel GPUs macOS has no driver for (Ryzen APUs, Radeon RX 7000/9000, Intel Iris Xe / Arc graphics), and for the NPU in Intel Core Ultra (Meteor Lake, Arrow Lake, Lunar Lake) and AMD Ryzen AI processors. This is an early test build: your Send logs are how it gets fixed. It downloads only the firmware your Mac's GPU and NPU need from linux-firmware (every file checked) and takes effect at the next restart.</p>
 <p>If that GPU drives your screen, the screen can stay dark. Then choose <b>1401: Start once without NVIDIA driver</b> in the boot picker (it parks this driver too) and turn it off here.</p>

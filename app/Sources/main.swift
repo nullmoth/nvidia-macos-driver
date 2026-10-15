@@ -437,6 +437,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         case "logo": run(mode: "verbose", pkg: "", efi: b["efi"] as? String ?? "auto",
                          extra: ["--set-logo", (b["on"] as? Bool ?? true) ? "on" : "off",
                                  "--tool", Bundle.main.resourceURL!.appendingPathComponent("NullMothSafe.efi").path])
+        case "backlight": run(mode: "verbose", pkg: "", efi: b["efi"] as? String ?? "auto",
+                              extra: ["--backlight", (b["on"] as? Bool ?? false) ? "on" : "off"])
         // the opt-in AMD/Intel GPU driver (setup --gpu-test); --tool tells setup where the firmware list sits
         case "gputest": run(mode: "verbose", pkg: "", efi: b["efi"] as? String ?? "auto",
                             extra: ["--gpu-test", (b["on"] as? Bool ?? false) ? "on" : "off",
@@ -472,11 +474,23 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         #endif
         let safe = sh("/usr/sbin/nvram", ["boot-args"]).split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" }).contains("-nvoff")
         let metal = metalDevices()
+        // Why no NVIDIA card shows up, when that is the case. Users on hybrid laptops copy -wegnoegpu / -wegonogpu from
+        // laptop guides (it hides every discrete GPU, NVIDIA included), and a disable-gpu property or a dGPU-off SSDT
+        // does the same: the card is then on the bus with another class code, or not on the bus at all.
+        let hiding = sysctl("kern.bootargs").split(separator: " ").map(String.init)
+            .filter { ["-wegnoegpu", "-wegonogpu", "-nvoff"].contains($0) }
+        let hiddenNvidia = services("IOPCIDevice").compactMap { s -> String? in
+            defer { IOObjectRelease(s) }
+            guard u32(s, "vendor-id").map({ $0 & 0xffff }) == 0x10DE, let cls = u32(s, "class-code"), cls >> 16 != 0x03,
+                  cls >> 16 != 0x04, let d = u32(s, "device-id") else { return nil }
+            return String(format: "10DE:%04X", d & 0xffff)
+        }
         return ["macos": "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)", "major": os.majorVersion, "arch": arch,
                 "gpus": gpus, "opencore": oc, "kexts": kexts, "files": files, "metal": metal.names, "metalSource": metal.source,
                 "packages": findPackages(), "version": Package.version, "installedDriverVersion": recordedDriverVersion(), "safemode": safe,
                 "record": fm.fileExists(atPath: "/Library/NullMoth/state"), "crashes": driverCrashes().map(\.lastPathComponent),
-                "translated": sysctl("sysctl.proc_translated") == "1",
+                "translated": sysctl("sysctl.proc_translated") == "1", "gpuHiding": hiding, "hiddenNvidia": hiddenNvidia,
+                "hwModel": sysctl("hw.model"),
                 "profile": { var p = machineProfile(gpus); p["rules"] = Profile.select(rules(), p).ids; return p }()]
     }
 
