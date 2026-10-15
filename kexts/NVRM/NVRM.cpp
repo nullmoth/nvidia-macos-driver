@@ -246,7 +246,7 @@ extern "C" nv_alloc_mapping_context_t *nv_xnu_mmap_context(void *priv)
     return c ? c->mmapContext() : NULL;
 }
 extern "C" IOMemoryDescriptor *nv_xnu_alloc_md(void *priv, NvU64 *bytes, NvU32 *cache);
-extern "C" { IOMemoryDescriptor *nv_pm_ram_submd(NvU64, NvU64); bool nv_pm_is_gpu(NvU64, NvU64); void nv_pm_dev_refused(NvU64, NvU64); bool nv_xnu_chat(void); }
+extern "C" { IOMemoryDescriptor *nv_pm_ram_submd(NvU64, NvU64, int); bool nv_pm_is_gpu(NvU64, NvU64); void nv_pm_dev_refused(NvU64, NvU64); bool nv_xnu_chat(void); }
 
 #define super IOService
 OSDefineMetaClassAndStructors(NVRM, IOService)
@@ -1261,7 +1261,7 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
     } else {
         NvU64 n = c->memArea.numRanges;
         if (n == 1 && !nv_pm_is_gpu(c->memArea.pRanges[0].start, c->memArea.pRanges[0].size)) {
-            md = nv_pm_ram_submd(c->memArea.pRanges[0].start, c->memArea.pRanges[0].size);
+            md = nv_pm_ram_submd(c->memArea.pRanges[0].start, c->memArea.pRanges[0].size, fPid);
             if (!md) return kIOReturnNotPermitted;
         } else if (n == 1) {
             md = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)c->memArea.pRanges[0].start, (IOByteCount)c->memArea.pRanges[0].size, kIODirectionInOut);
