@@ -49,7 +49,7 @@ static NvU32 nv_xnu_dma_bits = 64;
 void   NV_API_CALL nv_set_dma_address_size(nv_state_t *nv, NvU32 bits) { TRC; nv_xnu_dma_bits = bits; kprintf("NVRM-xnu:   dma address size %u bits\n", bits); }
 
 struct nv_xnu_alloc { IOBufferMemoryDescriptor *md; void *va; NvU64 page_size; NvU64 bytes; NvU32 page_count; NvBool contig; NvU32 cache;
-                      NvU64 *ptes; NvU32 nptes; SInt32 kmaps; NvBool freed, pinned; struct nv_xnu_alloc *prev, *next; };
+                      NvU64 *ptes; NvU32 nptes; SInt32 kmaps; NvBool freed, pinned; int owner_pid; struct nv_xnu_alloc *prev, *next; };
 static nv_xnu_alloc *nv_xnu_live[512]; static int nv_xnu_live_n = 0;
 extern "C" int nv_xnu_kmap_overlap(NvU64 phys, NvU64 len);
 extern "C" bool nv_xnu_chat(void);
@@ -370,12 +370,21 @@ static IOSimpleLock *nv_pm_lock = NULL;
 static nv_xnu_alloc *nv_pm_head = NULL;
 static SInt64 nv_pm_alias_n = 0, nv_pm_alias_live = 0, nv_pm_foreign_n = 0, nv_pm_deferred_n = 0, nv_pm_deferred_rel = 0,
               nv_pm_pinned_n = 0, nv_pm_pinned_bytes = 0, nv_pm_dev_alias_n = 0, nv_pm_dev_refused_n = 0, nv_pm_stale_n = 0,
-              nv_pm_nolist_n = 0, nv_pm_chat_n = 0, nv_pm_chat_dropped = 0;
+              nv_pm_nolist_n = 0, nv_pm_chat_n = 0, nv_pm_chat_dropped = 0, nv_pm_owner_mismatch_n = 0;
 static const char *nv_pm_selftest = "not run";
+// A RAM allocation is keyed on its physical range alone; a client that presents
+// another client's range would otherwise resolve to that client's buffer. The
+// owner is the pid captured when the allocation is created; refuse a device map
+// only when both owner and caller are real, distinct user processes. owner 0 is
+// kernel/RM-internal and stays shareable, so a legitimate kernel-created buffer
+// is never refused. Default is observe-and-count; boot-arg nvrmmapowner=1 enforces.
+static inline bool nv_pm_owner_blocks(int owner, int caller) { return owner > 0 && caller > 0 && owner != caller; }
+static bool nv_pm_owner_enforce(void);
 struct nv_pm_ev { NvU64 t_s, phys, size, extra; NvU32 kind; };
 static nv_pm_ev nv_pm_ring[48]; static unsigned nv_pm_ring_n = 0;
 static const char *const nv_pm_kind[] = { "?", "ALIAS(first 8)", "FOREIGN-KMAP", "FREE-DEFERRED", "FREE-PINNED(leaked)",
-                                          "DEVMAP-RAM-ALIASED", "DEVMAP-REFUSED", "STALE-CTX-REFUSED", "DEFERRED-RELEASED" };
+                                          "DEVMAP-RAM-ALIASED", "DEVMAP-REFUSED", "STALE-CTX-REFUSED", "DEFERRED-RELEASED",
+                                          "MAP-OWNER-MISMATCH" };
 static void nv_pm_note(NvU32 kind, NvU64 phys, NvU64 size, NvU64 extra)
 {
     NvU64 ns = 0; absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
@@ -383,7 +392,7 @@ static void nv_pm_note(NvU32 kind, NvU64 phys, NvU64 size, NvU64 extra)
     nv_pm_ev &e = nv_pm_ring[nv_pm_ring_n % 48]; nv_pm_ring_n++;
     e.t_s = ns / 1000000000ULL; e.phys = phys; e.size = size; e.extra = extra; e.kind = kind;
     if (nv_pm_lock) IOSimpleLockUnlock(nv_pm_lock);
-    kprintf("NVRM-xnu: PHYSMAP %s phys 0x%llx +0x%llx extra 0x%llx\n", kind < 9 ? nv_pm_kind[kind] : "?", phys, size, extra);
+    kprintf("NVRM-xnu: PHYSMAP %s phys 0x%llx +0x%llx extra 0x%llx\n", kind < 10 ? nv_pm_kind[kind] : "?", phys, size, extra);
 }
 static bool nv_pm_match(const nv_xnu_alloc *a, NvU64 start, NvU64 size, NvU64 *off)
 {
@@ -489,14 +498,21 @@ extern "C" void nv_pm_foreign(NvU64 start, NvU64 size, NvU32 mode, void *caller)
     OSIncrementAtomic64((volatile SInt64 *)&nv_pm_foreign_n);
     nv_pm_note(2, start, size, (NvU64)((uintptr_t)caller - (uintptr_t)&nv_pm_foreign));
 }
-extern "C" IOMemoryDescriptor *nv_pm_ram_submd(NvU64 start, NvU64 size)
+extern "C" IOMemoryDescriptor *nv_pm_ram_submd(NvU64 start, NvU64 size, int caller_pid)
 {
     if (!nv_pm_ok()) return NULL;
-    NvU64 off = 0; IOBufferMemoryDescriptor *md = NULL;
+    NvU64 off = 0; IOBufferMemoryDescriptor *md = NULL; int owner = 0; bool mismatch = false;
     IOSimpleLockLock(nv_pm_lock);
     nv_xnu_alloc *a = nv_pm_find(start, size, &off);
-    if (a) { md = a->md; md->retain(); }
+    if (a) {
+        owner = a->owner_pid;
+        mismatch = nv_pm_owner_blocks(owner, caller_pid);
+        // observe-and-count by default; only a boot-arg turns a cross-owner map into a refusal
+        if (!(mismatch && nv_pm_owner_enforce())) { md = a->md; md->retain(); }
+    }
     IOSimpleLockUnlock(nv_pm_lock);
+    if (mismatch) { OSIncrementAtomic64((volatile SInt64 *)&nv_pm_owner_mismatch_n);
+                    nv_pm_note(9, start, size, ((NvU64)(NvU32)owner << 32) | (NvU32)caller_pid); }
     if (!md) { OSIncrementAtomic64((volatile SInt64 *)&nv_pm_dev_refused_n); nv_pm_note(6, start, size, 0); return NULL; }
     IOMemoryDescriptor *s = IOSubMemoryDescriptor::withSubRange(md, (IOByteCount)off, (IOByteCount)size, kIODirectionInOut);
     md->release();
@@ -514,16 +530,16 @@ static int nv_pm_sysctl SYSCTL_HANDLER_ARGS
     const size_t cap = 8192; char *buf = (char *)IOMalloc(cap); if (!buf) return ENOMEM;
     size_t h = 0; int w;
     w = snprintf(buf, cap, "selftest %s\nkernel-alias %lld (live %lld) | FOREIGN-KMAP %lld | FREE-DEFERRED %lld (released %lld) | "
-                 "FREE-PINNED %lld (%lld KB leaked) | DEVMAP-RAM-ALIASED %lld | DEVMAP-REFUSED %lld | STALE-CTX %lld | unlisted-free %lld | "
-                 "kprintf dropped %lld\nevents (%u):\n", nv_pm_selftest, nv_pm_alias_n, nv_pm_alias_live, nv_pm_foreign_n, nv_pm_deferred_n,
+                 "FREE-PINNED %lld (%lld KB leaked) | DEVMAP-RAM-ALIASED %lld | DEVMAP-REFUSED %lld | STALE-CTX %lld | MAP-OWNER-MISMATCH %lld | "
+                 "unlisted-free %lld | kprintf dropped %lld\nevents (%u):\n", nv_pm_selftest, nv_pm_alias_n, nv_pm_alias_live, nv_pm_foreign_n, nv_pm_deferred_n,
                  nv_pm_deferred_rel, nv_pm_pinned_n, nv_pm_pinned_bytes >> 10, nv_pm_dev_alias_n, nv_pm_dev_refused_n, nv_pm_stale_n,
-                 nv_pm_nolist_n, nv_pm_chat_dropped, nv_pm_ring_n);
+                 nv_pm_owner_mismatch_n, nv_pm_nolist_n, nv_pm_chat_dropped, nv_pm_ring_n);
     if (w > 0) h = (size_t)w < cap ? (size_t)w : cap - 1;
     if (nv_pm_lock) IOSimpleLockLock(nv_pm_lock);
     unsigned n = nv_pm_ring_n < 48 ? nv_pm_ring_n : 48;
     for (unsigned i = 0; i < n && h < cap - 160; i++) {
         const nv_pm_ev &e = nv_pm_ring[(nv_pm_ring_n - n + i) % 48];
-        w = snprintf(buf + h, cap - h, "  t+%llus %s phys 0x%llx +0x%llx extra 0x%llx\n", e.t_s, e.kind < 9 ? nv_pm_kind[e.kind] : "?", e.phys, e.size, e.extra);
+        w = snprintf(buf + h, cap - h, "  t+%llus %s phys 0x%llx +0x%llx extra 0x%llx\n", e.t_s, e.kind < 10 ? nv_pm_kind[e.kind] : "?", e.phys, e.size, e.extra);
         if (w > 0) h += (size_t)w;
     }
     if (nv_pm_lock) IOSimpleLockUnlock(nv_pm_lock);
@@ -536,6 +552,12 @@ SYSCTL_PROC(_debug, OID_AUTO, nvrm_physmap, CTLTYPE_STRING | CTLFLAG_RD | CTLFLA
 static bool nv_pm_registered = false;
 
 #include <pexpert/pexpert.h>
+static bool nv_pm_owner_enforce(void)
+{
+    static int on = -1;
+    if (on < 0) { int v = 0; on = (PE_parse_boot_argn("nvrmmapowner", &v, sizeof(v)) && v) ? 1 : 0; }
+    return on != 0;
+}
 static const uint64_t kKdkKprintf = 0xffffff8000b94da0ULL, kKdkPvHead = 0xffffff80011bd8c8ULL, kKdkAttr = 0xffffff80012de470ULL,
                       kKdkLastManaged = 0xffffff80012de468ULL, kKdkPmapInit = 0xffffff80011bd358ULL,
                       kKdkKernelPmap = 0xffffff8000266460ULL, kKdkVerifyFree = 0xffffff8000512880ULL;
@@ -1051,6 +1073,7 @@ NV_STATUS NV_API_CALL nv_alloc_pages(nv_state_t *nv, NvU32 page_count, NvU64 pag
     if (!a) { md->complete(); md->release(); return NV_ERR_NO_MEMORY; }
     nvx2_memset(a, 0, sizeof *a);
     a->md = md; a->va = va; a->page_size = page_size; a->bytes = bytes; a->page_count = page_count; a->contig = contiguous; a->cache = cache_type;
+    a->owner_pid = proc_selfpid();  // the client whose escape triggered this allocation; 0 for a kernel-thread (RM-internal) allocation
     a->ptes = (NvU64 *)kern_os_malloc((size_t)n * sizeof(NvU64));
     if (a->ptes) { for (NvU32 i = 0; i < n; i++) a->ptes[i] = pte_array[i]; a->nptes = n; }
     nv_pm_init();
