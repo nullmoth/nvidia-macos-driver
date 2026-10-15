@@ -34,12 +34,16 @@ static int OSAddAtomic(int n,int *value) { int old=*value;*value+=n;return old; 
 #define FBLOG(...) ((void)0)
 struct NVRMNVDAFramebuffer {
     bool fHeadSlept=false, fModeSet=true, sleepOK=true, wakeOK=true;
+    bool fPowerOn=true, pagingState=true, fSysSlept=false, gpuReady=true;
+    unsigned familyWakes=0;
     void *fSurf=this;
     unsigned fHead=0, sleeps=0, wakes=0, notifications=0;
     int fStopping=0, fReflipRc=0;
     bool headOff() { sleeps++; return sleepOK; }
     bool reflip() { wakes++; return wakeOK; }
     void handleEvent(int event) { if(event==kIOFBNotifyDidPowerOn) notifications++; }
+    bool rmGpuReady() { return gpuReady; }
+    void familyDidWake() { familyWakes++; notifications++; pagingState=true; }
     bool setHeadPower(bool awake);
     IOReturn setPowerState(unsigned long ordinal,IOService *device);
 };
@@ -58,13 +62,29 @@ int main() {
     assert(!f.fHeadSlept && f.wakes==2 && f.notifications==2);
     f.setPowerState(1,nullptr); assert(f.wakes==2);
     f.setPowerState(0,nullptr); assert(f.fHeadSlept);
+    // -nvrmnodpms: display sleep leaves the head on, but a head that is off (GPU standby) is still lit again
     disabled=true; unsigned wakes=f.wakes;
-    assert(f.setHeadPower(true) && f.fHeadSlept && f.wakes==wakes);
+    assert(f.setHeadPower(true) && !f.fHeadSlept && f.wakes==wakes+1);
+    sleeps=f.sleeps; assert(f.setHeadPower(false) && !f.fHeadSlept && f.sleeps==sleeps);
+    wakes=f.wakes;
     disabled=false; f.fStopping=1; assert(!f.setHeadPower(true)); f.fStopping=0;
     lockAvailable=false; assert(!f.setHeadPower(true)); lockAvailable=true;
     assert(f.setHeadPower(true) && !f.fHeadSlept);
     f.fModeSet=false; assert(f.setHeadPower(false) && !f.fHeadSlept);
-    puts("PASS: failed sleep, failed wake retry with notification, connection power no-op, repeated requests, opt-out, shutdown, unavailable gate");
+    f.fModeSet=true;
+    // system sleep: NVRM already put the GPU in standby, so the head counts as off without a push to NVKMS
+    f.gpuReady=false; sleeps=f.sleeps; f.setPowerState(0,nullptr);
+    assert(f.fHeadSlept && f.sleeps==sleeps && !f.fPowerOn);
+    // a display wake before NVRM resumed the GPU pushes nothing and leaves the head for NVRM's resume to light
+    wakes=f.wakes; unsigned notes=f.notifications; f.setPowerState(1,nullptr);
+    assert(f.fHeadSlept && f.wakes==wakes && f.fPowerOn && f.notifications==notes+1 && !f.familyWakes);
+    // the first power-on after a system sleep lights the head and does the family's wake work once
+    f.setPowerState(0,nullptr); f.gpuReady=true; f.fSysSlept=true; f.pagingState=false;
+    notes=f.notifications; f.setPowerState(1,nullptr);
+    assert(!f.fHeadSlept && f.wakes==wakes+1 && f.familyWakes==1 && !f.fSysSlept && f.pagingState);
+    assert(f.notifications==notes+1);
+    f.setPowerState(1,nullptr); assert(f.familyWakes==1 && f.notifications==notes+2);
+    puts("PASS: failed sleep, failed wake retry with notification, connection power no-op, repeated requests, opt-out, shutdown, unavailable gate, GPU standby, wake before resume, system wake");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:

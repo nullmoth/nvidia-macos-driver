@@ -780,6 +780,7 @@ static const char *nv_pv_arm(void)
 static const char *nv_pv_arm(void) { return "REFUSED: the page-table sentinel is only in NVRM_PANIC_HUNT=1 builds"; }
 #endif
 
+
 static int nv_pv_sysctl SYSCTL_HANDLER_ARGS
 {
     NV_DIAG_ROOT_ONLY();
@@ -1208,11 +1209,19 @@ void NV_API_CALL os_wait_uninterruptible(os_wait_queue *wq) { TRC; IOLockLock(wq
 void NV_API_CALL os_wait_interruptible(os_wait_queue *wq)   { TRC; IOLockLock(wq->lock); IOLockSleep(wq->lock, wq, THREAD_INTERRUPTIBLE); IOLockUnlock(wq->lock); }
 void NV_API_CALL os_wake_up(os_wait_queue *wq)              { TRC; IOLockLock(wq->lock); IOLockWakeup(wq->lock, wq, false); IOLockUnlock(wq->lock); }
 
-// Each work item runs on its own kernel thread; the count of items still running is what os_flush_work_queue waits
-// for. RM flushes before system sleep (os_flush_work_queue from its power-management path) so no queued work touches
-// the GPU after it is suspended. Up to 2.0.2 the flush was a stub that answered "not supported" and waited for nothing.
+// Each work item runs on its own thread. rm_power_management() flushes the queue before suspend/resume
+// (nv_kthread_q_flush on Linux), so count the items still running and let os_flush_work_queue() wait for them.
 static IOLock *nv_xnu_work_lock;
 static int nv_xnu_work_running;
+static bool nv_xnu_work_flushing;
+static IOLock *nv_xnu_work_lock_get(void)
+{
+    if (!nv_xnu_work_lock) {
+        IOLock *l = IOLockAlloc();
+        if (l && !OSCompareAndSwapPtr(NULL, l, (void * volatile *)&nv_xnu_work_lock)) IOLockFree(l);
+    }
+    return nv_xnu_work_lock;
+}
 static void nv_xnu_work_thread(void *item, wait_result_t)
 {
     kprintf("NVRM-xnu: work item %p running\n", item);
@@ -1225,11 +1234,7 @@ static void nv_xnu_work_thread(void *item, wait_result_t)
 NV_STATUS NV_API_CALL os_queue_work_item(struct os_work_queue *queue, void *item)
 {
     TRC; thread_t t;
-    if (!nv_xnu_work_lock) {
-        IOLock *l = IOLockAlloc();
-        if (!l) return NV_ERR_NO_MEMORY;
-        if (!OSCompareAndSwapPtr(NULL, l, (void * volatile *)&nv_xnu_work_lock)) IOLockFree(l);
-    }
+    if (!nv_xnu_work_lock_get()) return NV_ERR_NO_MEMORY;
     IOLockLock(nv_xnu_work_lock); nv_xnu_work_running++; IOLockUnlock(nv_xnu_work_lock);
     if (kernel_thread_start(nv_xnu_work_thread, item, &t) != KERN_SUCCESS) {
         IOLockLock(nv_xnu_work_lock); nv_xnu_work_running--; IOLockUnlock(nv_xnu_work_lock);
@@ -1237,83 +1242,106 @@ NV_STATUS NV_API_CALL os_queue_work_item(struct os_work_queue *queue, void *item
     }
     thread_deallocate(t); return NV_OK;
 }
-// The "temporary file" RM saves video memory into across system sleep (FBSR file mode, which RM uses when
-// PreserveVideoMemoryAllocations is on). Linux backs it with an O_TMPFILE; here it is pageable kernel memory in 64 MB
-// pieces, allocated as RM writes them, so it costs only what RM actually saves (the used part of VRAM) and can be paged
-// out under pressure. Without it RM keeps only "select allocations", and WindowServer's surfaces and channels came back
-// from sleep empty: its GPU work never finished and the Mac froze (the test Mac, 10-15).
-#define NV_XNU_TMPF_CHUNK (64ull << 20)
-#define NV_XNU_TMPF_MAX   1024            // 64 GB: more than any card's VRAM
-struct nv_xnu_tmpfile { IOLock *lock; NvU64 size; void *chunk[NV_XNU_TMPF_MAX]; };
+NV_STATUS NV_API_CALL os_flush_work_queue(struct os_work_queue *queue, NvBool is_unload)
+{
+    TRC;
+    if (!nv_xnu_work_lock) return NV_OK;
+    IOLockLock(nv_xnu_work_lock);
+    nv_xnu_work_flushing = true;
+    while (nv_xnu_work_running > 0) IOLockSleep(nv_xnu_work_lock, &nv_xnu_work_running, THREAD_UNINT);
+    nv_xnu_work_flushing = false;
+    IOLockUnlock(nv_xnu_work_lock);
+    return NV_OK;
+}
+NvBool NV_API_CALL os_is_queue_flush_ongoing(struct os_work_queue *queue) { return nv_xnu_work_flushing ? NV_TRUE : NV_FALSE; }
+
+// RM's "temporary file" (FBSR_TYPE_FILE). With PreserveVideoMemoryAllocations, rm_power_management(STANDBY) copies every
+// VRAM allocation out through a small pinned buffer and os_write_file, and RESUME reads it back with os_read_file - on
+// Linux into a file under NVreg_TemporaryFilePath. Here the "file" is kernel memory in 4 MB chunks: pageable first, so
+// the VM can compress it on a machine short of RAM (the reason Linux uses a file rather than one wired buffer); wired
+// when the pageable maps are full. RAM keeps power in S3, and no disk is touched while the system goes to sleep.
+#define NV_XNU_TMPF_CHUNK (4ull << 20)
+struct nv_xnu_tmpfile { void **chunk; bool *pageable; NvU64 cap, used, bytes, wired; };
 NV_STATUS NV_API_CALL os_open_temporary_file(void **ppFile)
 {
     TRC;
-    if (!ppFile) return NV_ERR_INVALID_ARGUMENT;
-    struct nv_xnu_tmpfile *f = (struct nv_xnu_tmpfile *)IOMallocZero(sizeof *f);
+    nv_xnu_tmpfile *f = (nv_xnu_tmpfile *)IOMallocZero(sizeof *f);
     if (!f) return NV_ERR_NO_MEMORY;
-    f->lock = IOLockAlloc();
-    if (!f->lock) { IOFree(f, sizeof *f); return NV_ERR_NO_MEMORY; }
     *ppFile = f;
-    kprintf("NVRM-xnu: power: video memory save store opened\n");
+    return NV_OK;
+}
+static NV_STATUS nv_xnu_tmpf_grow(nv_xnu_tmpfile *f, NvU64 need)
+{
+    if (need <= f->cap) return NV_OK;
+    NvU64 cap = f->cap ? f->cap : 64;
+    while (cap < need) cap *= 2;
+    void **chunk = (void **)IOMallocZero((vm_size_t)(cap * sizeof(void *)));
+    bool *pageable = (bool *)IOMallocZero((vm_size_t)(cap * sizeof(bool)));
+    if (!chunk || !pageable) {
+        if (chunk) IOFree(chunk, (vm_size_t)(cap * sizeof(void *)));
+        if (pageable) IOFree(pageable, (vm_size_t)(cap * sizeof(bool)));
+        return NV_ERR_NO_MEMORY;
+    }
+    for (NvU64 i = 0; i < f->cap; i++) { chunk[i] = f->chunk[i]; pageable[i] = f->pageable[i]; }
+    if (f->chunk) IOFree(f->chunk, (vm_size_t)(f->cap * sizeof(void *)));
+    if (f->pageable) IOFree(f->pageable, (vm_size_t)(f->cap * sizeof(bool)));
+    f->chunk = chunk; f->pageable = pageable; f->cap = cap;
+    return NV_OK;
+}
+NV_STATUS NV_API_CALL os_write_file(void *pFile, NvU8 *buf, NvU64 size, NvU64 offset)
+{
+    nv_xnu_tmpfile *f = (nv_xnu_tmpfile *)pFile;
+    if (!f || (!buf && size)) return NV_ERR_INVALID_ARGUMENT;
+    while (size) {
+        const NvU64 idx = offset / NV_XNU_TMPF_CHUNK, in = offset % NV_XNU_TMPF_CHUNK;
+        const NvU64 n = (size < NV_XNU_TMPF_CHUNK - in) ? size : NV_XNU_TMPF_CHUNK - in;
+        if (nv_xnu_tmpf_grow(f, idx + 1) != NV_OK) return NV_ERR_NO_MEMORY;
+        if (!f->chunk[idx]) {
+            void *c = IOMallocPageable((vm_size_t)NV_XNU_TMPF_CHUNK, PAGE_SIZE);
+            bool pg = c != NULL;
+            if (!c) { c = IOMallocAligned((vm_size_t)NV_XNU_TMPF_CHUNK, PAGE_SIZE); f->wired += c ? NV_XNU_TMPF_CHUNK : 0; }
+            if (!c) {
+                kprintf("NVRM-xnu: VRAM save file: no memory for chunk %llu (%llu MB stored)\n", idx, f->bytes >> 20);
+                return NV_ERR_NO_MEMORY;
+            }
+            f->chunk[idx] = c; f->pageable[idx] = pg;
+            if (idx + 1 > f->used) f->used = idx + 1;
+            f->bytes += NV_XNU_TMPF_CHUNK;
+        }
+        memcpy((NvU8 *)f->chunk[idx] + in, buf, (size_t)n);
+        buf += n; offset += n; size -= n;
+    }
+    return NV_OK;
+}
+NV_STATUS NV_API_CALL os_read_file(void *pFile, NvU8 *buf, NvU64 size, NvU64 offset)
+{
+    nv_xnu_tmpfile *f = (nv_xnu_tmpfile *)pFile;
+    if (!f || (!buf && size)) return NV_ERR_INVALID_ARGUMENT;
+    while (size) {
+        const NvU64 idx = offset / NV_XNU_TMPF_CHUNK, in = offset % NV_XNU_TMPF_CHUNK;
+        const NvU64 n = (size < NV_XNU_TMPF_CHUNK - in) ? size : NV_XNU_TMPF_CHUNK - in;
+        if (idx < f->cap && f->chunk[idx]) memcpy(buf, (const NvU8 *)f->chunk[idx] + in, (size_t)n);
+        else memset(buf, 0, (size_t)n);
+        buf += n; offset += n; size -= n;
+    }
     return NV_OK;
 }
 void NV_API_CALL os_close_file(void *pFile)
 {
-    TRC;
-    struct nv_xnu_tmpfile *f = (struct nv_xnu_tmpfile *)pFile;
+    nv_xnu_tmpfile *f = (nv_xnu_tmpfile *)pFile;
     if (!f) return;
-    unsigned n = 0;
-    for (unsigned i = 0; i < NV_XNU_TMPF_MAX; i++) if (f->chunk[i]) { IOFreePageable(f->chunk[i], NV_XNU_TMPF_CHUNK); n++; }
-    kprintf("NVRM-xnu: power: video memory save store closed (%llu MB written, %u MB held)\n",
-            (unsigned long long)(f->size >> 20), n * 64);
-    IOLockFree(f->lock);
-    IOFree(f, sizeof *f);
-}
-static NV_STATUS nv_xnu_tmpfile_io(void *pFile, NvU8 *buf, NvU64 size, NvU64 offset, bool write)
-{
-    struct nv_xnu_tmpfile *f = (struct nv_xnu_tmpfile *)pFile;
-    if (!f || (!buf && size)) return NV_ERR_INVALID_ARGUMENT;
-    if (offset + size < offset || offset + size > NV_XNU_TMPF_CHUNK * NV_XNU_TMPF_MAX) return NV_ERR_INVALID_ARGUMENT;
-    IOLockLock(f->lock);
-    if (!write && offset + size > f->size) { IOLockUnlock(f->lock); return NV_ERR_OPERATING_SYSTEM; }   // short read, as Linux
-    NV_STATUS st = NV_OK;
-    while (size) {
-        const NvU64 idx = offset / NV_XNU_TMPF_CHUNK, in = offset % NV_XNU_TMPF_CHUNK;
-        const NvU64 n = (size < NV_XNU_TMPF_CHUNK - in) ? size : NV_XNU_TMPF_CHUNK - in;
-        if (!f->chunk[idx]) {
-            if (!write) { memset(buf, 0, n); goto next; }      // a hole RM never wrote reads as zeros, as a sparse file does
-            f->chunk[idx] = IOMallocPageable(NV_XNU_TMPF_CHUNK, PAGE_SIZE);
-            if (!f->chunk[idx]) { st = NV_ERR_NO_MEMORY; break; }
-        }
-        if (write) memcpy((NvU8 *)f->chunk[idx] + in, buf, n);
-        else       memcpy(buf, (NvU8 *)f->chunk[idx] + in, n);
-    next:
-        buf += n; offset += n; size -= n;
+    kprintf("NVRM-xnu: VRAM save file closed: %llu MB held (%llu MB pageable, %llu MB wired)\n",
+            f->bytes >> 20, (f->bytes - f->wired) >> 20, f->wired >> 20);
+    IOLog("NVRM-xnu: VRAM save file closed: %llu MB held (%llu MB pageable, %llu MB wired)\n",
+          f->bytes >> 20, (f->bytes - f->wired) >> 20, f->wired >> 20);
+    for (NvU64 i = 0; i < f->used; i++) {
+        if (!f->chunk[i]) continue;
+        if (f->pageable[i]) IOFreePageable(f->chunk[i], (vm_size_t)NV_XNU_TMPF_CHUNK);
+        else IOFreeAligned(f->chunk[i], (vm_size_t)NV_XNU_TMPF_CHUNK);
     }
-    if (write && st == NV_OK && offset > f->size) f->size = offset;
-    IOLockUnlock(f->lock);
-    if (st != NV_OK) kprintf("NVRM-xnu: power: video memory save store %s failed at %llu MB (0x%x)\n",
-                             write ? "write" : "read", (unsigned long long)(offset >> 20), (unsigned)st);
-    return st;
-}
-NV_STATUS NV_API_CALL os_write_file(void *pFile, NvU8 *pBuffer, NvU64 size, NvU64 offset) { TRC; return nv_xnu_tmpfile_io(pFile, pBuffer, size, offset, true); }
-NV_STATUS NV_API_CALL os_read_file(void *pFile, NvU8 *pBuffer, NvU64 size, NvU64 offset)  { TRC; return nv_xnu_tmpfile_io(pFile, pBuffer, size, offset, false); }
-
-// kernel-open/nvidia/os-interface.c: wait until the queued work has run; refuse from interrupt context.
-NV_STATUS NV_API_CALL os_flush_work_queue(struct os_work_queue *queue, NvBool is_unload)
-{
-    TRC;
-    // our interrupt "bottom half" runs on the work-loop thread (NVRM::interruptOccurred); waiting there would stall it
-    if (os_is_isr()) return NV_ERR_ILLEGAL_ACTION;
-    if (!nv_xnu_work_lock) return NV_OK;
-    uint64_t deadline; clock_interval_to_deadline(30, kSecondScale, &deadline);
-    IOLockLock(nv_xnu_work_lock);
-    while (nv_xnu_work_running > 0)
-        if (IOLockSleepDeadline(nv_xnu_work_lock, &nv_xnu_work_running, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) break;
-    const int left = nv_xnu_work_running;
-    IOLockUnlock(nv_xnu_work_lock);
-    if (left) { kprintf("NVRM-xnu: work queue flush: %d item(s) still running after 30 s\n", left); return NV_ERR_TIMEOUT; }
-    return NV_OK;
+    if (f->chunk) IOFree(f->chunk, (vm_size_t)(f->cap * sizeof(void *)));
+    if (f->pageable) IOFree(f->pageable, (vm_size_t)(f->cap * sizeof(bool)));
+    IOFree(f, sizeof *f);
 }
 NV_STATUS NV_API_CALL os_schedule(void) { IOSleep(1); return NV_OK; }
 

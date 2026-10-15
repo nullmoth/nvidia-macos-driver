@@ -105,6 +105,7 @@ Optional boot arguments, for troubleshooting:
 | `-nvrmnoflip` | keeps the composited frame on the copy path: NVRM never turns on zero-copy scan-out (`debug.nvaccel_iop_flip`), so the display reads a finished copy instead of the surface the GPU may still be drawing. Try it first when the desktop flashes or tears while the cursor moves. |
 | `-nvrmnogo` | the driver idles until `nvrmctl go <pass>` instead of starting the GPU itself. |
 | `-nvrmnobootscreen` | do not snapshot the boot screen. |
+| `-nvrmnopm` | turns off system sleep support: NVRM stays out of the power tree, as before it had one. A Mac that sleeps then comes back without the GPU. See [docs/SLEEP-WAKE.md](docs/SLEEP-WAKE.md). |
 
 Add every key you set to `NVRAM → Delete` as well, so the values are rewritten each boot.
 

@@ -10,6 +10,7 @@
 #define detailedTimingModeID __reservedA[0]
 #endif
 #include <IOKit/IOService.h>
+#include <IOKit/IOCommandGate.h>
 #include <IOKit/IOLib.h>
 #include <sys/sysctl.h>
 #include <kern/thread_call.h>
@@ -337,6 +338,23 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     bool reflip();
     bool headOff();
     bool fHeadSlept = false;
+    // System sleep: NVRM puts the GPU in standby (NVKMS turns every head off) and resumes it on wake, telling each
+    // framebuffer through callPlatformFunction("NVRMGpuPower"). The head is lit again only once the GPU is back.
+    bool fPowerOn = true;                 // this framebuffer's own power state (display sleep / system sleep)
+    bool fSysSlept = false;               // NVRM put the GPU in standby since this framebuffer last powered on
+
+    thread_call_t fGpuWake = nullptr;
+    static void gpuWakeFire(thread_call_param_t p0, thread_call_param_t);
+    bool rmGpuReady();
+    void familyDidWake();
+    IOReturn familyDidWakeGated(void *, void *, void *, void *);
+    IOCommandGate *fWakeGate = nullptr;
+    // WillSleep(false) deliveries since the last full wake. IOGraphics sends one per system sleep, also when the sleep
+    // starts from a dark wake, and IOGraphicsAccelerator2 counts each as a display mode change in progress; the
+    // accelerator is enabled again only when as many DidWake(false) have arrived.
+    IONotifier *fSleepTap = nullptr;
+    volatile SInt32 fWillSleepOff = 0;
+    static IOReturn sleepTap(OSObject *self, void *, IOFramebuffer *, IOIndex event, void *info);
     bool fDpyLost = false;   // hot-plug saw this framebuffer's display disconnected; light it again when it returns
     static void eventCallback(const struct NvKmsKapiEvent *event) {
         // only display changes are logged: the routine events arrive every minute for as long as the Mac is up, and
@@ -1925,6 +1943,8 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
         NVRMDisplayGate gate; if (gate.valid() && fOwnsHead) { gHeadsTaken &= ~(1u << fHead); fOwnsHead = false; }
         FBLOG("super::start failed after kapiInit succeeded"); return false;
     }
+    fSleepTap = addFramebufferNotification(&NVRMNVDAFramebuffer::sleepTap, this, nullptr);
+    if (!fSleepTap) FBLOG("sleep/wake notification tap not registered - a wake after dark wakes may leave the accelerator off");
     fVblTimer = thread_call_allocate(vblFire, this);
     if (fVblTimer) { uint64_t d; clock_interval_to_deadline(16667, kMicrosecondScale, &d); scheduleCall(fVblTimer, d); }
     FBLOG("vbl timer %s", fVblTimer ? "armed (fallback)" : "ALLOCATE FAILED");
@@ -1934,6 +1954,7 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     FBLOG("hw vblank on head %u: %s", fHead, !hwvblArg ? "OFF (boot-arg nvhwvbl=0) - the timer is the VBL"
                                        : fHwVblWanted ? "deferred until NVKMS latches a flip on this head" : "not available - the timer stays the VBL");
     fReflip = thread_call_allocate(reflipFire, this);
+    fGpuWake = thread_call_allocate(gpuWakeFire, this);
     FBLOG("reflip keep-alive NOT armed: enableController's modeset owns the head, no boot-time re-syncs");
     fBars = thread_call_allocate(barsFire, this);
     uint32_t hudGate = 0;
@@ -1988,7 +2009,7 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
         if (sl) IORecursiveLockUnlock(sl);
         if (mine) release();
     }
-    thread_call_t *calls[] = {&fHwVblCall, &fReflip, &fBars, &fVblTimer, &fSampler, &fHeadProbe, &fLogoWatch};
+    thread_call_t *calls[] = {&fHwVblCall, &fReflip, &fGpuWake, &fBars, &fVblTimer, &fSampler, &fHeadProbe, &fLogoWatch};
     for (unsigned i = 0; i < sizeof calls / sizeof calls[0]; ++i) {
         thread_call_t call = *calls[i];
         if (!call) continue;
@@ -2000,6 +2021,8 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
         *calls[i] = nullptr;
     }
     if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
+    if (fWakeGate) { if (IOWorkLoop *wl = getWorkLoop()) wl->removeEventSource(fWakeGate); OSSafeReleaseNULL(fWakeGate); }
+    if (fSleepTap) { fSleepTap->remove(); fSleepTap = nullptr; }
     super::stop(provider);
 }
 
@@ -2788,6 +2811,19 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
 {
     bool isAlloc = functionName && functionName->isEqualTo(NVRM_VRAM_FN_ALLOC);
     bool isFree  = functionName && functionName->isEqualTo(NVRM_VRAM_FN_FREE);
+    if (functionName && functionName->isEqualTo("NVRMGpuPower")) {   // from NVRM: 0 standby, 1 resumed, 2 lost
+        const uintptr_t st = (uintptr_t)param1;
+        if (st == 0) {
+            if (fModeSet && fSurf) fHeadSlept = true;   // nvKmsSuspend shuts every head down
+            fSysSlept = true;                            // the next power-on is a system wake (familyDidWake)
+            FBLOG("GPU going to standby: head %u off with it", fHead);
+        } else if (st == 1) {
+            if (fGpuWake) scheduleCall(fGpuWake, 0);
+        } else {
+            FBLOG("GPU lost on wake: head %u stays dark (restart needed)", fHead);
+        }
+        return kIOReturnSuccess;
+    }
     if (functionName && functionName->isEqualTo(NVRM_VRAM_FN_SCANOUT)) {
         struct NVRMVramRequest *r = (struct NVRMVramRequest *)param1;
         if (!r || r->version != NVRM_VRAM_ABI_VERSION) return kIOReturnBadArgument;
@@ -3082,17 +3118,30 @@ bool NVRMNVDAFramebuffer::setHeadPower(bool awake)
 {
     NVRMDisplayGate gate; if (!gate.valid()) return false;
     char nb[8] = { 0 };
-    if (PE_parse_boot_argn("-nvrmnodpms", nb, sizeof nb)) return true;
+    const bool dpms = !PE_parse_boot_argn("-nvrmnodpms", nb, sizeof nb);
     if (OSAddAtomic(0, &fStopping)) return false;
     if (awake) {
+        // fHeadSlept is set by display sleep (DPMS) and by a GPU standby, so it is honoured with -nvrmnodpms too.
         if (!fHeadSlept) return true;
+        // On a system wake this framebuffer and NVRM are both power children of the GPU's PCI device and macOS may
+        // wake either first: while NVRM has not resumed the GPU, never push to NVKMS here.
+        // NVRM's "NVRMGpuPower" 1 lights the head once the GPU is back.
+        if (!rmGpuReady()) {
+            FBLOG("display wake: GPU not resumed yet - head %u is lit when NVRM resumes it", fHead);
+            return true;
+        }
         const bool ok = reflip();
         // A rejected wake must remain retryable on the next power request.
         if (ok) fHeadSlept = false;
         FBLOG("display wake: head %u mode and surface committed again -> %s (rc %d)", fHead, ok ? "ok" : "FAILED", fReflipRc);
         return ok;
     }
-    if (!fModeSet || !fSurf || fHeadSlept) return true;
+    if (!dpms || !fModeSet || !fSurf || fHeadSlept) return true;
+    if (!rmGpuReady()) {   // NVRM already put the GPU in standby, and NVKMS turned every head off with it
+        fHeadSlept = true;
+        FBLOG("display sleep: GPU already in standby - NVKMS turned head %u off", fHead);
+        return true;
+    }
     const bool ok = headOff();
     if (ok) fHeadSlept = true;
     FBLOG("display sleep: head %u off -> %s", fHead, ok ? "ok (monitor goes to standby)" : "FAILED (last frame stays)");
@@ -3102,12 +3151,22 @@ IOReturn NVRMNVDAFramebuffer::setPowerState(unsigned long ordinal, IOService *de
 {
     FBLOG("setPowerState %lu", (unsigned long)ordinal);
     if (ordinal) {
+        fPowerOn = true;
         // a failed wake stays retryable (fHeadSlept kept) but WindowServer is still told the display is on, as 1.14.7 did:
         // without the notification it never redraws, and the head can sit black with nothing left to retry it (review)
         (void)setHeadPower(true);
-        handleEvent(kIOFBNotifyDidPowerOn);
+        // A system sleep cleared pagingState (IOGraphics' system work, with kIOFBNotifyWillSleep to every client).
+        // This override replaces IOFramebuffer::setPowerState, so the family's wake work never runs, and
+        // handleEvent() does nothing off the controller's power thread - so no client ever saw kIOFBNotifyDidWake,
+        // and WindowServer's wake acknowledgement waited for pagingState forever (spindump + iogdiagnose:
+        // PS 0, every client's last event 3 = WillSleep). Do the family's wake work here instead; it delivers
+        // DidPowerOn too. Only after a real system sleep: at start pagingState is still clear too, and the wake work
+        // then sent every client a DidWake at boot.
+        if (!pagingState && fSysSlept) { fSysSlept = false; familyDidWake(); }
+        else handleEvent(kIOFBNotifyDidPowerOn);
     } else {
         handleEvent(kIOFBNotifyWillPowerOff);
+        fPowerOn = false;
         (void)setHeadPower(false);
     }
     return kIOPMAckImplied;
@@ -3133,6 +3192,80 @@ IOReturn NVRMNVDAFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
     IOReturn r = super::setAttribute(attribute, value);
     FBLOG("setAttribute '%s' value %lu -> 0x%x", c, (unsigned long)value, r);
     return r;
+}
+// What IOGraphics does when a framebuffer powers on after system sleep (IOFBController::computeState, then
+// IOFramebuffer::handleEvent(kIOFBNotifyDidWake) in IOGraphics-599): tell the clients (NVAccel's NVDisplayPipe,
+// AppleDisplay, ...) the framebuffer woke, set pagingState and wake WindowServer, which sleeps in _extEntry on
+// fServerConnect until pagingState is set. Under the framebuffer gate, so WindowServer cannot miss the wakeup.
+void NVRMNVDAFramebuffer::familyDidWake()
+{
+    IOWorkLoop *wl = getWorkLoop();
+    if (!fWakeGate && wl) {   // a command gate on the framebuffer's own IOGraphics workloop (the one WindowServer sleeps on)
+        fWakeGate = IOCommandGate::commandGate(this);
+        if (fWakeGate && wl->addEventSource(fWakeGate) != kIOReturnSuccess) OSSafeReleaseNULL(fWakeGate);
+    }
+    if (!fWakeGate) {
+        FBLOG("system wake: no command gate on the framebuffer workloop - WindowServer stays waiting for paging");
+        return;
+    }
+    IOReturn r = fWakeGate->runAction(OSMemberFunctionCast(IOCommandGate::Action, this, &NVRMNVDAFramebuffer::familyDidWakeGated));
+    FBLOG("system wake: family wake work -> 0x%x", r);
+}
+IOReturn NVRMNVDAFramebuffer::sleepTap(OSObject *self, void *, IOFramebuffer *, IOIndex event, void *info)
+{
+    NVRMNVDAFramebuffer *fb = OSDynamicCast(NVRMNVDAFramebuffer, self);
+    if (!fb || info) return kIOReturnSuccess;
+    if (event == kIOFBNotifyWillSleep) OSIncrementAtomic(&fb->fWillSleepOff);
+    else if (event == kIOFBNotifyDidWake && fb->fWillSleepOff > 0) OSDecrementAtomic(&fb->fWillSleepOff);
+    return kIOReturnSuccess;
+}
+IOReturn NVRMNVDAFramebuffer::familyDidWakeGated(void *, void *, void *, void *)
+{
+    // handleEvent(kIOFBNotifyDidWake, true) delivers DidWake twice: info true from its case, then info false at its
+    // end. The second one re-enables the accelerators that WillSleep(0) disabled at sleep: without it
+    // IOGraphicsAccelerator2 stayed disabled (no displayModeDidChange after wake), so every IOSurface lock/purge waited
+    // in acceleratorWaitEnabled - Terminal hung, moved windows left black areas, restart stalled.
+    // IOGraphicsAccelerator2 counts WillSleep(false) as a mode change in progress, and a sleep that starts from a dark
+    // wake sends another one without a DidWake in between: after four maintenance dark wakes one DidWake(false) left
+    // the count at 4 and the accelerator off. Send as many DidWake(false) as WillSleep(false) arrived.
+    const SInt32 owed = fWillSleepOff;
+    IOReturn r1 = deliverFramebufferNotification(kIOFBNotifyDidWake, (void *)true);
+    IOReturn r2 = deliverFramebufferNotification(kIOFBNotifyDidWake, (void *)false);
+    for (SInt32 i = 1; i < owed; ++i)
+        r2 = deliverFramebufferNotification(kIOFBNotifyDidWake, (void *)false);
+    IOReturn r3 = deliverFramebufferNotification(kIOFBNotifyDidPowerOn, (void *)false);
+    pagingState = true;
+    fWakeGate->commandWakeup(&fServerConnect, false);   // IOGraphicsWorkLoop::wakeupGate, as handleEvent(DidWake) does
+    FBLOG("system wake: clients told DidWake true and %d x false (0x%x/0x%x) for %d sleep(s), DidPowerOn (0x%x), "
+          "paging on, WindowServer woken", owed > 1 ? (int)owed : 1, r1, r2, (int)owed, r3);
+    fWillSleepOff = 0;
+    return kIOReturnSuccess;
+}
+// NVRM answers "NVRMGpuReady" with NotReady while the GPU is in system sleep or lost. An NVRM without power
+// management does not know the call: treat that as ready, the behaviour before.
+bool NVRMNVDAFramebuffer::rmGpuReady()
+{
+    IOService *rm = getProvider();
+    while (rm && strcmp(rm->getMetaClass()->getClassName(), "NVRM") != 0) rm = rm->getProvider();
+    const OSSymbol *fn = OSSymbol::withCString("NVRMGpuReady");
+    IOReturn r = (rm && fn) ? rm->callPlatformFunction(fn, false, NULL, NULL, NULL, NULL) : kIOReturnUnsupported;
+    OSSafeReleaseNULL(fn);
+    return r != kIOReturnNotReady;
+}
+// After NVRM resumed the GPU: commit the mode and the front surface again (NVKMS shut every head down for the
+// standby), unless the display itself is still asleep - then setPowerState(1) does it.
+void NVRMNVDAFramebuffer::gpuWakeFire(thread_call_param_t p0, thread_call_param_t)
+{
+    NVRMNVDAFramebuffer *me = (NVRMNVDAFramebuffer *)p0;
+    NVRMCallReference callReference(me);
+    if (OSAddAtomic(0, &me->fStopping)) return;
+    NVRMDisplayGate gate; if (!gate.valid()) return;
+    if (!me->fHeadSlept || !me->fPowerOn || !me->fModeSet || !me->fSurf) {
+        FBLOG("GPU back: head %u left as is (slept %u, power %u)", me->fHead, (unsigned)me->fHeadSlept, (unsigned)me->fPowerOn);
+        return;
+    }
+    const bool ok = me->setHeadPower(true);   // a rejected wake stays retryable on the next power request
+    FBLOG("GPU back: head %u re-lit -> %s", me->fHead, ok ? "ok" : "FAILED");
 }
 IOReturn NVRMNVDAFramebuffer::setAttributeForConnection(IOIndex connectIndex, IOSelect attribute, uintptr_t value)
 {
