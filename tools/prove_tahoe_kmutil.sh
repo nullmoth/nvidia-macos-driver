@@ -8,7 +8,7 @@
 #   kexts-dir defaults to ./kexts26 (NMXGPU.kext, NMXAccel.kext, NMXNPU.kext built/staged for 26).
 #
 # WHY inspect and not trust kmutil's exit code: without root:wheel + --repository + --explicit-only, kmutil create
-# returns 0 and silently leaves a kext out (measured 2026-10-11). So this asserts each bundle id is IN the result KC.
+# returns 0 and silently leaves a kext out (measured on macOS 26.7.1). So this asserts each bundle id is IN the result KC.
 set -uo pipefail
 KDIR=${1:-./kexts26}
 MAJ=$(sw_vers -productVersion); MAJ=${MAJ%%.*}

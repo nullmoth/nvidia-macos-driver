@@ -16,7 +16,7 @@ attempts. C2 reached `RmInitAdapter succeeded`, but display setup failed. NVRM's
 `gNVRMService` and NVAccel's `gAccel` are single global owners, so allowing several
 instances is a suspect when the adapter that initialized and the display adapter
 disagree. Restricting both drivers to the connected card resolved this machine's
-startup/display failure. This does not establish a cause for every multi-GPU failure.
+startup/display failure. Other multi-GPU failures can have other causes.
 
 If **none** of the four components loads, investigate the kernel collection and
 installation first. Changing the GPU selector cannot fix a collection that is not loaded.
