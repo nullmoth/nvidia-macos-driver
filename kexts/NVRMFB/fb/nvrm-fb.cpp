@@ -812,14 +812,27 @@ bool NVRMNVDAFramebuffer::kapiInit()
               fIndex, fDisplay, (unsigned)fConnector, (unsigned)r->headMask, fHead,
               (unsigned)gHeadsTaken);
     }
-    bool have = false;
+    // This mode becomes the head's boot raster (fBootW/fBootH below), which decides the scaler and
+    // raster ceilings and which refresh rates addKmsRefreshModes() can publish. A NVKMS-preferred mode
+    // is the EDID native timing and wins outright. When no mode is flagged preferred -- common on a
+    // second monitor, whose head never runs the firmware's console detection -- the largest validated
+    // raster is the panel's native resolution. Taking the first validated mode instead made the boot
+    // raster depend on NVKMS enumeration order: a small raster landing first capped fRasterMaxW below
+    // the native resolution (so its high-refresh modes were never offered) and let the intermediate
+    // rasters flood the mode table, which is why a second high-refresh display came up at 60/75 Hz or
+    // black on some boots and correctly on others. Ties keep the higher pixel clock so the boot mode is
+    // the native raster's top rate.
+    bool have = false; NvU64 bestArea = 0; NvU32 bestClock = 0;
     for (NvU32 i = 0; i < 256; i++) {
         struct NvKmsKapiDisplayMode m = {}; NvBool valid = NV_FALSE, preferred = NV_FALSE;
         int r = fKms->getDisplayMode(fDev, fDisplay, i, &m, &valid, &preferred);
         if (r < 0) break;
         if (r == 0 || !valid) continue;
-        if (!have || preferred) { fMode = m; have = true; }
-        if (preferred) break;
+        if (preferred) { fMode = m; have = true; break; }
+        const NvU64 area = (NvU64)m.timings.hVisible * m.timings.vVisible;
+        if (!have || area > bestArea || (area == bestArea && m.timings.pixelClockHz > bestClock)) {
+            fMode = m; bestArea = area; bestClock = m.timings.pixelClockHz; have = true;
+        }
     }
     if (!have) { FBLOG("no valid mode"); return false; }
     if (gBootHead < 0 && fIndex == 0) fBootConsole = true;
