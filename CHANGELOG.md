@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.1
+
+1401 for Windows
+- PCs with an NVIDIA card can build for macOS 26 Tahoe. 2.0.0 offered only macOS 15 for them, so picking
+  Tahoe stopped the build
+
+No changes to the driver or the Mac app since 2.0.0.
+
 ## 2.0.0
 
 macOS 15 Sequoia and macOS 26 Tahoe.
