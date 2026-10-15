@@ -3,13 +3,18 @@
 ## 2.0.3
 
 Driver
-- System sleep: the driver now saves the GPU's state before the Mac sleeps and restores it on wake, the way NVIDIA's own
-  driver does. Before, the GPU lost its state in sleep and the driver could crash on wake (reported on hybrid laptops)
-- Before sleep, the driver waits for work it has already queued on the GPU to finish
-- Security: diagnostic sysctls that let any user read physical addresses and memory are gone from normal builds
-  (they exist only with the nvrmdiag=1 boot argument, and only root can read them)
+- System sleep and wake (PR #182, thanks danlt150): the GPU's memory is kept across sleep, the PCI setup and
+  Resizable BAR are restored on wake, and the display driver does the wake steps macOS expects. Before, the GPU
+  lost its state in sleep and the desktop could freeze on wake
+- The Metal driver finds a submission's copy buffers once instead of on every check (PR #223, thanks HighDelay)
+- The display driver no longer fills the log with the same "hdcs" line many times a second (#216)
+- Security (#214): diagnostic sysctls that let any user read physical addresses and memory are gone from normal
+  builds (they exist only with the nvrmdiag=1 boot argument, and only root can read them); starting the GPU by
+  hand is root-only; the kernel addresses used for debugging are left out of shipped builds
 
 Mac app
+- AMD boards (AM4 and AM5) whose OpenCore config rewrites the firmware memory map get DisableVariableWrite, so
+  macOS cannot write NVRAM through that map (boards that stopped starting after an install)
 - When no NVIDIA card is visible, the app says why: -wegnoegpu or -wegonogpu in boot-args, a disable-gpu property,
   or a laptop BIOS set to integrated graphics only
 - Macs with only an AMD or Intel GPU can turn on the experimental AMD / Intel GPU driver; it installs from the
@@ -19,6 +24,11 @@ Mac app
 1401 for Windows
 - Intel PCs (12th gen and newer) that stop at EB.MM.AKM because no kernel slide fit: rebuilding with the stick
   plugged in reads its startup log and turns on DevirtualiseMmio for the next start
+- AMD PCs get the same NVRAM write guard as the Mac app (DisableVariableWrite when the memory map is rewritten)
+- A stick whose disk number changes during the write is found again instead of stopping the build; a volume that
+  disappears is skipped
+- When Apple's download server resets the connection, the stop message says what to try on the network
+- When Windows cannot format the stick, its own error is now in the log before the fallback
 
 ## 2.0.2
 
