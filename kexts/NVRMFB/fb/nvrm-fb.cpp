@@ -1322,6 +1322,12 @@ static IORecursiveLock *startLock()
     }
     return gL;
 }
+// Flip completion-wait controls, surfaced through the debug.nvrmfb_flip_latch* sysctls registered
+// below. gFlipLatch gates the wait (default 1; 0 is a debug bypass that lets a surface retire before
+// its flip latches, i.e. reintroduces the strobe). The counters report the real wait the compositor
+// path takes, which is what an on-machine flicker check reads.
+static int gFlipLatch = 1;
+static int gFlipLatchWaits = 0, gFlipLatchTimeouts = 0, gFlipLatchMaxUs = 0;
 NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig *cfg,
                                             struct NvKmsKapiModeSetReplyConfig *rep, NvBool commit, bool bootstrap,
                                             bool cursorOnly)
@@ -1382,14 +1388,21 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
     if (!tracked) { fSubmissionSeen = false; return NV_TRUE; }
     fSubmissionSeen = true;
     // Initial acceptance permits console handoff, never surface retirement. The owned boot surface remains pinned.
-    if (bootstrap) return NV_TRUE;
+    if (bootstrap || !gFlipLatch) return NV_TRUE;
+    OSIncrementAtomic((volatile SInt32 *)&gFlipLatchWaits);
+    const uint64_t latch0 = mach_absolute_time();
     for (unsigned i = 0; i < 100; ++i) {
         NvBool pending = NV_TRUE;
         if (!fKms->getFlipPendingStatus(fDev, fHead, NVKMS_KAPI_LAYER_PRIMARY_IDX, &pending)) break;
-        if (!pending) return NV_TRUE;
+        if (!pending) {
+            const int us = (int)((mach_absolute_time() - latch0) / 1000);
+            if (us > gFlipLatchMaxUs) gFlipLatchMaxUs = us;
+            return NV_TRUE;
+        }
         IOSleep(1);
     }
     // Keep both the old front and submitted surface alive until a proven recovery/reboot.
+    OSIncrementAtomic((volatile SInt32 *)&gFlipLatchTimeouts);
     FBLOG("presentation blocked: submitted completion unavailable on head %u", fHead);
     fSubmissionFaulted = true; return NV_FALSE;
 }
@@ -2579,12 +2592,11 @@ SYSCTL_PROC(_debug, OID_AUTO, nvrmfb_vramtest, CTLTYPE_INT | CTLFLAG_RW | CTLFLA
             "grant N x 8 MB of VRAM through vramGrant (0 = release all)");
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_vramtest_mode, CTLFLAG_RW | CTLFLAG_LOCKED, &gVramTestMode, 0, "1 = release without the kernel unmap");
 static int gFlipInterval = 1;
-static int gFlipLatch = 1;
-SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch, CTLFLAG_RW | CTLFLAG_LOCKED, &gFlipLatch, 0, "fliplatch: pure flip waits for FLIP_OCCURRED");
-static int gFlipLatchWaits = 0, gFlipLatchTimeouts = 0, gFlipLatchMaxUs = 0, gFlipLatchRun = 0;
-SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_waits, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchWaits, 0, "pure flips that waited for the latch");
-SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_timeouts, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchTimeouts, 0, "pure flips whose FLIP_OCCURRED never came within 50 ms");
-SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchMaxUs, 0, "longest accept-to-latch wait (us)");
+// gFlipLatch and the counters are defined above submitConfig, where the completion wait drives them.
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch, CTLFLAG_RW | CTLFLAG_LOCKED, &gFlipLatch, 0, "1 = a committed flip waits for its completion before a surface retires (0 = debug bypass)");
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_waits, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchWaits, 0, "flips that waited for completion");
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_timeouts, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchTimeouts, 0, "flips whose completion never arrived within the wait");
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchMaxUs, 0, "longest submit-to-completion wait (us)");
 static int gFlipLean = 1;
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_lean, CTLFLAG_RW | CTLFLAG_LOCKED, &gFlipLean, 0, "1 = lean pure flip (surface only)");
 static SInt64 gFlipUsSum, gFlipN, gFlipUsMax;
