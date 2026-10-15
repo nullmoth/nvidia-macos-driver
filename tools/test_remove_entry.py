@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """The "Remove NVIDIA driver" boot entry stays reachable: setup makes the OpenCore picker show it on install, and
-removal puts the picker back and clears the stale display settings. Negative controls run the pre-fix code (bc8baa7),
+removal puts the picker back and clears the stale display settings. Negative controls run the pre-fix code (4ba580e),
 which had none of this, and show the entry left hidden and the display settings left in place."""
 import os, plistlib, re, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BOOT = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
-OLD_REV = 'bc8baa7'
+OLD_REV = '4ba580e'
 
 
 def old_source():
@@ -44,7 +44,7 @@ class PickerVisibility(unittest.TestCase):
         return [l for l in res.stdout.splitlines() if l]
 
     def old_edits(self, config):
-        # The pre-fix visibility step: tool_index() plus the one TextMode flip. It is the whole of what bc8baa7 did for
+        # The pre-fix visibility step: tool_index() plus the one TextMode flip. It is the whole of what 4ba580e did for
         # the picker entry - no ShowPicker, no HideAuxiliary, no Auxiliary. Run it and collect the EDITS it would apply.
         old = old_source()
         tool_index = extract(old, 'tool_index() {', 'i=$((i+1)); done; }')
