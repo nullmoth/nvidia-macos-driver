@@ -258,9 +258,13 @@ static void kms_timer_execute(struct nvkms_timer_t *t)
     if (freeIt) kms_timer_release(t);
     OSAddAtomic64(1, &gKmsTimerExecuted);
 }
+// NVKMS timers touch the display engine. While the GPU is suspended for system sleep they wait in the queue, and
+// nvkms_xnu_resume drains them after RM has resumed; running one against a powered-down GPU is a hang or a lost GPU.
+static volatile bool gKmsSuspended;
 static void kms_timer_drain(thread_call_param_t, thread_call_param_t)
 {
     for (;;) {
+        if (gKmsSuspended) return;
         IOSimpleLockLock(gKmsTimerQueueLock);
         nvkms_timer_t *t = gKmsTimerHead;
         if (t) {
@@ -389,21 +393,37 @@ NvBool nvkms_xnu_backlight(NvBool set, NvU32 *percent)
 void nvKmsSuspend(NvU32 gpuId);
 void nvKmsResume(NvU32 gpuId);
 void nvKmsKapiSuspendResume(NvBool suspend);
-void nvkms_xnu_suspend(NvU32 gpuId)
+// Returns false, with nothing changed, when the NVKMS lock is not free within 5 s: a flip or ioctl that holds it while
+// waiting on the GPU would otherwise hold system sleep forever (10-15: the test Mac never came back from its second sleep,
+// with the machine already off the network, which is what a sleep stuck halfway looks like). The caller then leaves the
+// GPU running for that sleep, which is how every driver before this one slept.
+NvBool nvkms_xnu_suspend(NvU32 gpuId)
 {
-    if (!gKmsLoaded) return;
+    if (!gKmsLoaded) return NV_TRUE;
+    uint64_t now, deadline; clock_interval_to_deadline(5, kSecondScale, &deadline);
+    for (;;) {
+        if (IOLockTryLock(gKmsLock)) break;
+        clock_get_uptime(&now);
+        if (now >= deadline) { kprintf("NVRM-xnu: power: NVKMS lock still held after 5 s; the GPU stays up for this sleep\n"); return NV_FALSE; }
+        IOSleep(10);
+    }
+    IOLockUnlock(gKmsLock);
     nvKmsKapiSuspendResume(NV_TRUE);
     IOLockLock(gKmsLock);
     nvKmsSuspend(gpuId);
+    gKmsSuspended = true;
     IOLockUnlock(gKmsLock);
+    return NV_TRUE;
 }
 void nvkms_xnu_resume(NvU32 gpuId)
 {
     if (!gKmsLoaded) return;
     IOLockLock(gKmsLock);
+    gKmsSuspended = false;
     nvKmsResume(gpuId);
     IOLockUnlock(gKmsLock);
     nvKmsKapiSuspendResume(NV_FALSE);
+    if (gKmsTimerWorker) thread_call_enter(gKmsTimerWorker);   // the timers that waited out the sleep
 }
 
 struct nvkms_per_open *nvkms_open_from_kapi(struct NvKmsKapiDevice *device) { return kms_open_common(NVKMS_CLIENT_KERNEL_SPACE, device, 0); }
