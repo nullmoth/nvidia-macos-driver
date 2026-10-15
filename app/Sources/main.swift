@@ -26,6 +26,20 @@ func sh(_ path: String, _ args: [String]) -> String {
     return String(decoding: d, as: UTF8.self)
 }
 func sysctl(_ k: String) -> String { sh("/usr/sbin/sysctl", ["-n", k]).trimmingCharacters(in: .whitespacesAndNewlines) }
+// A small, bounded https GET used to fetch an update's detached signature before unpacking it. Returns nil on any
+// non-200, non-https, timeout, or transport error. Runs off the main thread (the updater's completion handlers do).
+func syncGet(_ url: URL, timeout: TimeInterval) -> Data? {
+    guard url.scheme == "https" else { return nil }
+    var out: Data? = nil
+    let sem = DispatchSemaphore(value: 0)
+    var rq = URLRequest(url: url); rq.timeoutInterval = timeout
+    URLSession.shared.dataTask(with: rq) { d, resp, _ in
+        if (resp as? HTTPURLResponse)?.statusCode == 200 { out = d }
+        sem.signal()
+    }.resume()
+    _ = sem.wait(timeout: .now() + timeout + 5)
+    return out
+}
 func sha256(_ url: URL) -> String? {
     guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
     defer { try? h.close() }
@@ -554,7 +568,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
     var runningSetup = false
     lazy var downloadSession = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
     var latest: (version: String, name: String, url: URL, sha: String)? = nil
-    var latestApp: (version: String, name: String, url: URL, sha: String)? = nil
+    var latestApp: (version: String, name: String, url: URL, sha: String, sig: URL?)? = nil
     static func releaseAppVersion(_ name: String) -> String? {
         guard let match = name.range(of: #"^1401-Mac-([0-9]+\.[0-9]+(?:\.[0-9]+)?)\.zip$"#, options: .regularExpression) else { return nil }
         return String(name[match].dropFirst("1401-Mac-".count).dropLast(".zip".count))
@@ -600,9 +614,15 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
                 let shaOf: (String) -> String = { name in txt.split(separator: "\n").compactMap { l -> String? in
                     let f = l.split(whereSeparator: { $0 == " " || $0 == "\t" }); return f.count >= 2 && f.last.map(String.init) == name ? String(f[0]).lowercased() : nil }.first ?? "" }
                 let appSha = appz.map { shaOf($0.1) } ?? ""
+                // The release carries a detached Ed25519 signature named "<app zip>.sig" beside the app zip; its URL
+                // is remembered so updateApp() can verify it against the compiled-in release key before unpacking.
+                let appSig: URL? = appz.flatMap { a in assets.compactMap { x -> URL? in
+                    guard let n = x["name"] as? String, n == a.1 + ".sig",
+                          let u = (x["browser_download_url"] as? String).flatMap(URL.init(string:)), u.scheme == "https" else { return nil }
+                    return u }.first }
                 DispatchQueue.main.async {
                     self.latest = (pkg.0, pkg.1, pkg.2, sha)
-                    if let a = appz, appSha.count == 64 { self.latestApp = (a.0, a.1, a.2, appSha) }
+                    if let a = appz, appSha.count == 64 { self.latestApp = (a.0, a.1, a.2, appSha, appSig) }
                 }
                 let have = self.installedDriverVersion()
                 let appNewer = appz.map { appSha.count == 64 && App.newer($0.0, than: self.appVersion) } ?? false
@@ -650,6 +670,14 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
             guard sha256(loc) == l.sha else { return fail("the download does not match its SHA-256, so it was thrown away") }
             let zip = work.appendingPathComponent(l.name), out = work.appendingPathComponent("unpacked")
             do { try FileManager.default.moveItem(at: loc, to: zip) } catch { return fail(error.localizedDescription) }
+            // The SHA-256 above only proves the download matches what the release page lists; an attacker who controls
+            // that page controls both. Refuse to unpack unless a detached Ed25519 signature over the exact zip bytes
+            // verifies against the compiled-in NullMoth release key (R2).
+            guard let sigURL = l.sig else { return fail("this release is not signed by NullMoth, so it was not installed") }
+            guard let sigData = syncGet(sigURL, timeout: 30), let sigText = String(data: sigData, encoding: .utf8) else {
+                return fail("could not download the update's signature, so it was not installed") }
+            guard ReleaseSignature.verify(zip: zip, signatureBase64: sigText) else {
+                return fail("the update's signature is not from NullMoth, so it was not installed") }
             _ = sh("/usr/bin/ditto", ["-x", "-k", zip.path, out.path])
             guard let new = (try? FileManager.default.contentsOfDirectory(at: out, includingPropertiesForKeys: nil))?.first(where: { $0.pathExtension == "app" }),
                   let info = NSDictionary(contentsOf: new.appendingPathComponent("Contents/Info.plist")),

@@ -6,7 +6,7 @@ OUT=${1:-build}; APP=$OUT/1401.app
 SDK=$(xcrun --sdk macosx --show-sdk-path)
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 xcrun swiftc -O -target x86_64-apple-macos15.0 -sdk "$SDK" -framework WebKit -framework Metal -framework IOKit \
-  Sources/main.swift Sources/profile.swift Sources/redaction.swift Sources/actions.swift Sources/diagnostics.swift Sources/HardwareMap.swift Sources/HardwareMapWorker.swift Sources/NativePeripheralFacts.swift Sources/SavedReports.swift Sources/ReportQueue.swift Sources/Privileged.swift -o "$APP/Contents/MacOS/1401"
+  Sources/main.swift Sources/profile.swift Sources/redaction.swift Sources/actions.swift Sources/diagnostics.swift Sources/HardwareMap.swift Sources/HardwareMapWorker.swift Sources/NativePeripheralFacts.swift Sources/SavedReports.swift Sources/ReportQueue.swift Sources/Privileged.swift Sources/ReleaseSignature.swift -o "$APP/Contents/MacOS/1401"
 cp Resources/* "$APP/Contents/Resources/"
 xcrun clang -O2 -Wall -Wextra -Werror -target x86_64-apple-macos15.0 -isysroot "$SDK" RuntimeCheck/main.c -o "$APP/Contents/Resources/nullmoth-runtime-check"
 codesign --force --runtime-version 15.0.0 --options runtime,library -s - "$APP/Contents/Resources/nullmoth-runtime-check"
