@@ -573,10 +573,15 @@ static bool nv_pm_owner_enforce(void)
     if (on < 0) { int v = 1; PE_parse_boot_argn("nvrmmapowner", &v, sizeof(v)); on = v ? 1 : 0; }
     return on != 0;
 }
+// Kernel addresses of one macOS build (24G830), used only by the class-F panic hunt's page-table sentinel. Shipped
+// builds leave them out: on any other build they point at unrelated memory, and in the binary they are a ready-made
+// address book for anyone attacking the kernel (security report #214, finding 7).
+#if NVRM_PANIC_HUNT
 static const uint64_t kKdkKprintf = 0xffffff8000b94da0ULL, kKdkPvHead = 0xffffff80011bd8c8ULL, kKdkAttr = 0xffffff80012de470ULL,
                       kKdkLastManaged = 0xffffff80012de468ULL, kKdkPmapInit = 0xffffff80011bd358ULL,
                       kKdkKernelPmap = 0xffffff8000266460ULL, kKdkVerifyFree = 0xffffff8000512880ULL;
 static const uint8_t  kKdkVerifyBytes[16] = { 0x83,0x3d,0xd1,0xaa,0xca,0x00,0x00,0x0f,0x94,0xc0,0x83,0xff,0xfe,0x0f,0x94,0xc1 };
+#endif
 static const char *nv_pv_state = "not started";
 static volatile uint8_t *nv_pv_head = NULL, *nv_pv_attr = NULL;
 static uint32_t nv_pv_last = 0; static uint64_t nv_pv_kpmap = 0; static uint8_t *nv_pv_managed = NULL;
@@ -699,6 +704,7 @@ static void nv_pv_thread(void *, wait_result_t)
     }
 }
 
+#if NVRM_PANIC_HUNT
 static const char *nv_pv_arm(void)
 {
     const uint64_t slide = (uint64_t)(uintptr_t)&kprintf - kKdkKprintf;
@@ -770,6 +776,9 @@ static const char *nv_pv_arm(void)
     nv_wm_boot_taken = true;
     return NULL;
 }
+#else
+static const char *nv_pv_arm(void) { return "REFUSED: the page-table sentinel is only in NVRM_PANIC_HUNT=1 builds"; }
+#endif
 
 static int nv_pv_sysctl SYSCTL_HANDLER_ARGS
 {

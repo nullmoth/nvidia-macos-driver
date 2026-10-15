@@ -1635,6 +1635,9 @@ IOReturn NVRMUserClient::sGo(OSObject *target, void *reference, IOExternalMethod
 {
     NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);
     if (!me || !me->fOwner) return kIOReturnNotAttached;
+    // Starting the GPU's passes by hand is for root only (security report #214, finding 5: any process could force a
+    // GPU re-init). The driver starts itself at boot (autoGo); nothing a user runs needs this.
+    if (!kauth_cred_issuser(kauth_cred_get())) return kIOReturnNotPrivileged;
     return me->fOwner->go((uint32_t)args->scalarInput[0]);
 }
 
