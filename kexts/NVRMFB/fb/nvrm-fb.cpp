@@ -23,7 +23,9 @@
 #include <IOKit/ndrvsupport/IOMacOSVideo.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
+#include <libkern/c++/OSData.h>
 #include <libkern/OSAtomic.h>
+#include "../nvrm_eld.h"
 #include "nvrm-hud.h"
 #include "nvrm-fb-safety.h"
 #include "nvrm-allocation-table.h"
@@ -777,6 +779,23 @@ bool NVRMNVDAFramebuffer::kapiInit()
         nvrmEdidPanelSizeMm(fEdid, fEdidSize, &fEdidMmW, &fEdidMmH);
         FBLOG("fb%u: EDID %u B, panel %ux%u mm (imageWidth/imageHeight)", fIndex, (unsigned)fEdidSize,
               (unsigned)fEdidMmW, (unsigned)fEdidMmH);
+        // HDMI/DisplayPort audio: build the sink's ELD from its EDID and publish it with the hda-gfx pairing, the same
+        // two properties AMD and Intel framebuffers expose, so the card's audio function (NMHDA + AppleHDAController)
+        // has the Short Audio Descriptors a codec needs. External connectors only -- an internal eDP panel has no
+        // audio. The connector-type guess is HDMI (the common case and what the reports describe); an HDMI VSDB in the
+        // EDID confirms it, and NVKMS must still enable the audio stream on the head for a codec to actually appear.
+        if (!fInternal && fEdidSize >= 128) {
+            uint8_t eld[NVRM_ELD_MAX];
+            size_t eldn = nvrm_build_eld(fEdid, fEdidSize, NVRM_ELD_CONN_HDMI, eld);
+            if (eldn) {
+                if (OSData *d = OSData::withBytes(eld, (unsigned)eldn)) { setProperty("nvda-eld", d); d->release(); }
+                setProperty("hda-gfx", "onboard-1");
+                FBLOG("fb%u: published %lu-byte ELD and hda-gfx=onboard-1 for display audio",
+                      fIndex, (unsigned long)eldn);
+            } else
+                FBLOG("fb%u: EDID %u B yielded no ELD; no display-audio properties published",
+                      fIndex, (unsigned)fEdidSize);
+        }
         NvU32 avail = r->headMask & ~gHeadsTaken;
         if (gBootHead >= 0) {
             if (fDisplay == gBootDpy && (avail & (1u << gBootHead))) avail = 1u << gBootHead;
