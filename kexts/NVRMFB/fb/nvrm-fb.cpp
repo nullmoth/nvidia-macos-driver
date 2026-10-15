@@ -1629,7 +1629,12 @@ uint64_t NVRMNVDAFramebuffer::vblPeriodAbs()
     uint64_t ns = 16666667ull;
     if (t.pixelClockHz && t.hTotal && t.vTotal) {
         const uint64_t q = (uint64_t)t.hTotal * t.vTotal * 1000000000ull / t.pixelClockHz;
-        if (q >= 4000000ull && q <= 50000000ull) ns = q;
+        // 2 ms..50 ms is 500 Hz..20 Hz. When NVKMS refuses the hardware vblank this period paces the
+        // software fallback that drives WindowServer, so the window has to reach the real panel rate:
+        // a 4 ms floor (250 Hz) dropped 280/300/360 Hz panels back to the 60 Hz default and the frame
+        // delivery beat against the scan-out. A sub-2 ms period only comes from an implausible pixel
+        // clock, so it still falls back to 60 Hz rather than spinning the timer.
+        if (q >= 2000000ull && q <= 50000000ull) ns = q;
     }
     uint64_t abs = 0; nanoseconds_to_absolutetime(ns, &abs); return abs;
 }
