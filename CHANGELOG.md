@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.0.3
+
+Driver
+- System sleep: the driver now saves the GPU's state before the Mac sleeps and restores it on wake, the way NVIDIA's own
+  driver does. Before, the GPU lost its state in sleep and the driver could crash on wake (reported on hybrid laptops)
+- Before sleep, the driver waits for work it has already queued on the GPU to finish
+- Security: diagnostic sysctls that let any user read physical addresses and memory are gone from normal builds
+  (they exist only with the nvrmdiag=1 boot argument, and only root can read them)
+
+Mac app
+- When no NVIDIA card is visible, the app says why: -wegnoegpu or -wegonogpu in boot-args, a disable-gpu property,
+  or a laptop BIOS set to integrated graphics only
+- Macs with only an AMD or Intel GPU can turn on the experimental AMD / Intel GPU driver; it installs from the
+  downloaded driver package, without the NVIDIA driver
+- Laptops whose built-in screen is wired to the NVIDIA GPU get an opt-in switch for brightness control
+
+1401 for Windows
+- Intel PCs (12th gen and newer) that stop at EB.MM.AKM because no kernel slide fit: rebuilding with the stick
+  plugged in reads its startup log and turns on DevirtualiseMmio for the next start
+
 ## 2.0.2
 
 1401 for Windows
