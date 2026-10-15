@@ -246,6 +246,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     int dtIndex(IODisplayModeID id) const;
     bool edidModeFor(const IODetailedTimingInformationV2 *d, struct NvKmsKapiDisplayMode *m);
     unsigned addKmsRefreshModes(unsigned n);
+    void computeScanoutCaps(NvU32 pitchAlign);
     unsigned fEdidHits = 0;
     static void dtToKapi(const IODetailedTimingInformationV2 *d, struct NvKmsKapiDisplayMode *m);
     IOReturn switchMode(IODisplayModeID id, const struct NvKmsKapiDisplayMode &m, NvU32 w, NvU32 h);
@@ -799,17 +800,9 @@ bool NVRMNVDAFramebuffer::kapiInit()
     fSize = ((NvU64)fPitch * fH + 0xffff) & ~0xffffull;
     {
         fBootMode = fMode; fBootW = fW; fBootH = fH; fBootPitch = fPitch; fRasterW = fW; fRasterH = fH; fPitchAlign = pitchAlign;
-        NvU32 mw = fW * 2 > 3840 ? 3840 : fW * 2, mh = fH * 2 > 2160 ? 2160 : fH * 2;
-        if (mw < fW) mw = fW;
-        if (mh < fH) mh = fH;
-        fScalerMaxW = mw; fScalerMaxH = mh;
-        fRasterMaxW = fW * 2 > 7680 ? 7680 : fW * 2;
-        if (fRasterMaxW < fW) fRasterMaxW = fW;
-        const NvU64 mp_ = ((NvU64)mw * 4 + pitchAlign - 1) & ~((NvU64)pitchAlign - 1);
-        fAllocSize = (mp_ * mh + 0xffff) & ~0xffffull;
-        if (fAllocSize < fSize) fAllocSize = fSize;
+        computeScanoutCaps(pitchAlign);
         FBLOG("fbmodes: boot raster %ux%u pitch %u; scanout allocation sized for %ux%u (%llu KB, boot needs %llu KB)",
-              fW, fH, fPitch, mw, mh, fAllocSize / 1024, fSize / 1024);
+              fW, fH, fPitch, fScalerMaxW, fScalerMaxH, fAllocSize / 1024, fSize / 1024);
     }
     FBLOG("display 0x%x head %u connector 0x%x mode %ux%u @%u pitch %u size %llu KB", fDisplay, fHead, fConnector, fW, fH, fMode.timings.refreshRate, fPitch, fSize / 1024);
     NvU64 consBase = 0, consEnd = 0;
@@ -2022,6 +2015,41 @@ bool NVRMNVDAFramebuffer::edidModeFor(const IODetailedTimingInformationV2 *d, st
         return true;
     }
     return false;
+}
+// The scanout allocation, and the scaler and raster ceilings that gate which modes reach the user, have to cover the
+// LARGEST raster this panel can drive -- a HiDPI desktop is backed by a surface the full size of the raster it sits on,
+// and an unscaled native raster is scanned out of a surface its own size. Sizing those from the boot raster (the old
+// 2x-boot, capped at 3840x2160 / 7680 wide) stranded every panel whose native raster was wider or taller than twice the
+// mode the firmware happened to light: a 32:9 ultrawide (5120x1440, 7680x2160) that booted at 1920x1080 or 2560x1440 was
+// capped at 3840 wide and offered only 16:9 rasters, and 5K/6K panels lost their native height. The ceilings now follow
+// the panel's own NVKMS-validated mode list, bounded by the 8K scanout limit; the boot raster is the floor, and the
+// 2x-boot heuristic is kept only as a fallback when the mode list reports nothing (so a panel with an unreadable mode
+// list still gets one scaled step up). A size NVRAM/BAR cannot satisfy is retried smaller by the allocation loop.
+void NVRMNVDAFramebuffer::computeScanoutCaps(NvU32 pitchAlign)
+{
+    NvU32 pmw = 0, pmh = 0;
+    if (fKms && fDev && fDisplay) {
+        for (NvU32 i = 0; i < 256; i++) {
+            struct NvKmsKapiDisplayMode m = {}; NvBool valid = NV_FALSE, pref = NV_FALSE;
+            int r = fKms->getDisplayMode(fDev, fDisplay, i, &m, &valid, &pref);
+            if (r < 0) break;
+            if (r == 0 || !valid) continue;
+            const struct NvKmsKapiDisplayModeTimings &k = m.timings;
+            if (k.flags.interlaced || k.flags.doubleScan || !k.pixelClockHz) continue;
+            if (k.hVisible > pmw) pmw = k.hVisible;
+            if (k.vVisible > pmh) pmh = k.vVisible;
+        }
+    }
+    NvU32 mw = pmw ? pmw : fW * 2;   // the panel's widest validated raster, or one step up when the list is empty
+    NvU32 mh = pmh ? pmh : fH * 2;
+    if (mw < fW) mw = fW;
+    if (mh < fH) mh = fH;
+    if (mw > 7680) mw = 7680;        // Blackwell/Ada scanout ceiling; above this NVKMS validates nothing anyway
+    if (mh > 4320) mh = 4320;
+    fScalerMaxW = mw; fScalerMaxH = mh; fRasterMaxW = mw;
+    const NvU64 mp_ = ((NvU64)mw * 4 + pitchAlign - 1) & ~((NvU64)pitchAlign - 1);
+    fAllocSize = (mp_ * mh + 0xffff) & ~0xffffull;
+    if (fAllocSize < fSize) fAllocSize = fSize;
 }
 // Users on HDMI and DisplayPort (RTX 3050/3060/4060, 144-240 Hz panels) saw only 60 Hz: macOS's EDID parse handed
 // validateDetailedTiming nothing above 60 Hz for those panels, while NVKMS parses the same EDID (CTA-861 and DisplayID
