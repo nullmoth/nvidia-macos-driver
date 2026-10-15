@@ -1187,9 +1187,32 @@ bool NVRMUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 ty
     nvu_memset(&fNvfp, 0, sizeof fNvfp);
     fNvfp.ctl_nvfp_priv = this;
     if (!gNvClientsLock) gNvClientsLock = IOLockAlloc();
+    // One table serves every process, so one process (or one user's processes) could fill it and leave WindowServer
+    // unable to open a client. Two limits: a process holds at most kNvClientsPerPid (the busiest process measured on
+    // a desktop held 154: Maps; Firefox's GPU process 96, WindowServer 78), and the last kNvClientsReserved slots
+    // are kept for system accounts (uid < 500: root and _windowserver), so the desktop can always open one.
+    static const int kNvClientsPerPid = 4096, kNvClientsReserved = 4096;
+    const int pid = proc_selfpid();
+    const bool systemCaller = kauth_getuid() < 500;
+    int used = 0, mine = 0, slot = -1;
     IOLockLock(gNvClientsLock);
-    for (int i = 0; i < NV_XNU_MAX_CLIENTS; i++) if (!gNvClients[i]) { gNvClients[i] = this; fFd = i; break; }
+    for (int i = 0; i < NV_XNU_MAX_CLIENTS; i++) {
+        NVRMUserClient *k = gNvClients[i];
+        if (!k) { if (slot < 0) slot = i; continue; }
+        used++;
+        if (k->fPid == pid) mine++;
+    }
+    const bool overPid = mine >= kNvClientsPerPid;
+    const bool overShared = !systemCaller && used >= NV_XNU_MAX_CLIENTS - kNvClientsReserved;
+    if (slot >= 0 && !overPid && !overShared) { gNvClients[slot] = this; fFd = slot; }
     IOLockUnlock(gNvClientsLock);
+    if (overPid || overShared) {
+        static unsigned quotaLogged;
+        if (quotaLogged < 8) { quotaLogged++;
+            kprintf("NVRM-xnu: client refused for pid %d: %s (%d held by this process, %d of %d in use)\n", pid,
+                    overPid ? "per-process limit" : "slots reserved for system accounts", mine, used, NV_XNU_MAX_CLIENTS); }
+        return false;
+    }
     if (fFd < 0) {
         static unsigned tableFullLogged;
         if (tableFullLogged < 8) { tableFullLogged++;
@@ -1283,6 +1306,11 @@ IOReturn NVRMUserClient::sKms(OSObject *target, void *reference, IOExternalMetho
 {
     NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);
     if (!me || !me->fOwner) return kIOReturnNotAttached;
+    // The session this opens is an NVKMS kernel-space client, and NVKMS trusts a kernel client's embedded pointers
+    // (flip heads, LUT ramps, clip lists) as kernel addresses. Nothing the driver ships calls this: the display path
+    // reaches NVKMS through its in-kernel API and the Vulkan driver never uses this selector. So it is root-only;
+    // an unprivileged caller would otherwise hand NVKMS pointers it dereferences in the kernel.
+    if (kauth_getuid() != 0) return kIOReturnNotPrivileged;
     uint32_t cmd = (uint32_t)args->scalarInput[0];
     uint32_t size = args->structureInputDescriptor ? (uint32_t)args->structureInputDescriptor->getLength() : args->structureInputSize;
     if (size == 0 || size > (1u << 20)) return kIOReturnBadArgument;
@@ -1312,6 +1340,7 @@ IOReturn NVRMUserClient::sKmsEvents(OSObject *target, void *reference, IOExterna
 {
     NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);
     if (!me) return kIOReturnNotAttached;
+    if (kauth_getuid() != 0) return kIOReturnNotPrivileged;   // the NVKMS session sKms opens is root-only
     args->scalarOutput[0] = nvkms_xnu_events_available(me->fKms);
     return kIOReturnSuccess;
 }
