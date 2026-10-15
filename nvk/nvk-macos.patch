@@ -8123,7 +8123,7 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --exclude=__pycache__ --exclude=*.bak* --exclude=*.orig --exclude=.git --exclude=open-gpu-kernel-modules --strip-trailing-cr upmesa/mesa-17ca6174/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c rebase263/mesa/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c	1969-12-31 16:00:00
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c	2026-10-05 15:58:51
-@@ -0,0 +1,1322 @@
+@@ -0,0 +1,1328 @@
 +
 +
 +
@@ -8854,13 +8854,19 @@ diff -ruN --exclude=subprojects --exclude=ci --exclude=build* --exclude=*.pyc --
 +   if (cs != NV_OK && !ctx->ceOnly) {
 +      NV2080_CTRL_GPU_GET_ENGINE_PARTNERLIST_PARAMS pl = { .engineType = NV2080_ENGINE_TYPE_GRAPHICS,
 +                                                           .partnershipClassId = pdev->base.dev_info.cls_copy, .runqueue = 0 };
++      const NV_STATUS first = cs;
 +      NV_STATUS ps = nvRmApiControl(&rm, pdev->hSubdevice, NV2080_CTRL_CMD_GPU_GET_ENGINE_PARTNERLIST, &pl, sizeof(pl));
-+      fprintf(stderr, "nvrm: copy object on the graphics channel refused rc 0x%x - partner CE lookup rc 0x%x, %u partner(s)\n",
-+              (unsigned)cs, (unsigned)ps, (unsigned)pl.numPartners);
-+      if (ps == NV_OK && pl.numPartners >= 1) {
-+         NVB0B5_ALLOCATION_PARAMETERS ceParams = { .version = NVB0B5_ALLOCATION_PARAMETERS_VERSION_1, .engineType = pl.partnerList[0] };
++      const NvU32 ceEngine = (ps == NV_OK && pl.numPartners >= 1) ? pl.partnerList[0] : 0;
++      if (ceEngine) {
++         NVB0B5_ALLOCATION_PARAMETERS ceParams = { .version = NVB0B5_ALLOCATION_PARAMETERS_VERSION_1, .engineType = ceEngine };
 +         cs = nvRmApiAlloc(&rm, ctx->hChannel, &ctx->subchannels.hCopy, pdev->base.dev_info.cls_copy, &ceParams);
 +      }
++      /* The one piece of field evidence for why a non-Turing copy queue did or did not come up on the graphics
++       * channel. vk_logw reaches the plugin's debug messenger, which writes it to nvmtl.log as an "nvk-reason:"
++       * line that Send logs collects; the old stderr line reached neither nvmtl.log nor the kernel log. */
++      vk_logw(VK_LOG_OBJS(log_obj),
++              "nvrm copy-engine retry: class 0x%x refused on the graphics channel rc 0x%x; partner lookup rc 0x%x, %u partner(s), engine 0x%x; retry rc 0x%x",
++              (unsigned)pdev->base.dev_info.cls_copy, (unsigned)first, (unsigned)ps, (unsigned)pl.numPartners, (unsigned)ceEngine, (unsigned)cs);
 +   }
 +   NV_CHECK(cs);
 +   if (!ctx->ceOnly) {
