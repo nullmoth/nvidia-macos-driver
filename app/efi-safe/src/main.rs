@@ -67,9 +67,24 @@ fn confirmed(once: bool) -> bool {
     false
 }
 
+// After a refresh-rate change some firmware leaves the console in a resolution the monitor cannot show, so the tool's
+// question never appears and selecting it looks like a dead black screen ("remove driver" / "start without driver" go
+// to black, Discord). Switch to the UEFI standard 80x25 text mode (mode 0, which every firmware must provide and whose
+// GOP resolution a monitor can always sync) and clear it, so the prompt is always visible. Best effort: ignored if the
+// firmware refuses, in which case nothing is worse than before.
+fn safe_console() {
+    let _ = uefi::system::with_stdout(|stdout| {
+        if let Some(mode) = stdout.modes().find(|m| m.index() == 0) {
+            let _ = stdout.set_mode(mode);
+        }
+        let _ = stdout.clear();
+    });
+}
+
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().unwrap();
+    safe_console();
     let _ = uefi::system::with_stdin(|stdin| stdin.reset(false));
     let once = once_mode();
     if !confirmed(once) {

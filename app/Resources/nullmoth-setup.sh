@@ -128,6 +128,31 @@ once_index() {  # index of the start-once entry in Misc.Tools, or nothing
   while p=$(plutil -extract Misc.Tools.$i.Path raw -o - "$C" 2>/dev/null); do
     [ "$p" = "$TOOL_FILE" ] && [ "$(plutil -extract Misc.Tools.$i.Arguments raw -o - "$C" 2>/dev/null)" = once ] && { echo $i; return; }
     i=$((i+1)); done; }
+picker_edits() {  # $1 = config.plist. Prints one "key|type|value" edit per setting that is keeping the "Remove NVIDIA
+  # driver" boot entry out of reach, so the way back is always visible even on a Mac the driver stopped lighting a screen
+  # on. The caller adds each to EDITS and shows a CHANGE line; nothing is printed for a setting already correct.
+  local c=$1 tool=${TOOL_FILE:-NullMothSafe.efi} i=0 p
+  # The picker must appear on its own. With ShowPicker off, OpenCore boots the default entry straight away and the user
+  # has to know to hold a key to reach the Remove entry - which a user staring at a black desktop does not (30 reports,
+  # N10). OCLP builds leave it on; some configs turn it off.
+  [ "$(plutil -extract Misc.Boot.ShowPicker raw -o - "$c" 2>/dev/null)" = true ] || echo "Misc.Boot.ShowPicker|-bool|true"
+  # Apple's own picker (PickerMode Apple) lists only bootable OSes, never OpenCore tools, so the Remove entry cannot show
+  # in it at all ("remove nvidia driver doesnt exist even when i press space"). Builtin and External (OpenCanopy) both
+  # list tools; only Apple is forced off, to the always-available Builtin text picker.
+  [ "$(plutil -extract Misc.Boot.PickerMode raw -o - "$c" 2>/dev/null)" = Apple ] && echo "Misc.Boot.PickerMode|-string|Builtin"
+  # HideAuxiliary keeps auxiliary entries hidden until Space is pressed. Several users recovered only after setting it
+  # false by hand (chat: "Make HideAuxiliary false", "god knows why hideauxilary is set to true"). The Remove and
+  # start-once entries are forced non-auxiliary below so they show regardless, but turning the hiding off is the setting
+  # people actually reach for, and it also unhides Reset NVRAM and Recovery for the same user who is already stuck.
+  [ "$(plutil -extract Misc.Boot.HideAuxiliary raw -o - "$c" 2>/dev/null)" = true ] && echo "Misc.Boot.HideAuxiliary|-bool|false"
+  # Both NullMoth tool entries must be shown (Auxiliary false) and readable (TextMode true) whatever an earlier install or
+  # a 1401 base config set. An entry left Auxiliary true is hidden under HideAuxiliary even when its file is present.
+  while p=$(plutil -extract Misc.Tools.$i.Path raw -o - "$c" 2>/dev/null); do
+    if [ "$p" = "$tool" ]; then
+      [ "$(plutil -extract Misc.Tools.$i.Auxiliary raw -o - "$c" 2>/dev/null)" = false ] || echo "Misc.Tools.$i.Auxiliary|-bool|false"
+      [ "$(plutil -extract Misc.Tools.$i.TextMode raw -o - "$c" 2>/dev/null)" = true ] || echo "Misc.Tools.$i.TextMode|-bool|true"
+    fi
+    i=$((i+1)); done; }
 logo_index() {  # index of the boot-logo driver in UEFI.Drivers, or nothing
   local i=0 p
   while p=$(plutil -extract UEFI.Drivers.$i.Path raw -o - "$C" 2>/dev/null); do
@@ -564,6 +589,16 @@ if [ $REMOVE = 1 ]; then
       i=$(tool_index); if [ -n "$i" ]; then plutil -remove Misc.Tools.$i "$C" || stop "could not stage removal of the picker tool - nothing changed"; fi
       # the start-once entry goes with the driver (it only switches the driver off); the boot logo stays, it is not the driver's
       i=$(once_index); if [ -n "$i" ]; then plutil -remove Misc.Tools.$i "$C" || stop "could not stage removal of the start-once entry - nothing changed"; fi
+      # put the boot picker back the way it was before install, when this install changed it (SET_*) and nothing has
+      # changed it away from our value since. An empty recorded value means the key was absent before, so remove it.
+      restore_boot() {  # $1 key, $2 type, $3 our-target, $4 owned(0/1), $5 recorded-old
+        [ "$4" = 1 ] || return 0
+        [ "$(plutil -extract "$1" raw -o - "$C" 2>/dev/null)" = "$3" ] || return 0
+        if [ -n "$5" ]; then plutil -replace "$1" "$2" "$5" "$C" 2>/dev/null || plutil -insert "$1" "$2" "$5" "$C"
+        else plutil -remove "$1" "$C" 2>/dev/null || true; fi; }
+      restore_boot Misc.Boot.ShowPicker   -bool   true    "${SET_SHOWPICKER:-0}"  "${OLD_SHOWPICKER:-}"  || stop "could not stage the recorded picker setting - nothing changed"
+      restore_boot Misc.Boot.HideAuxiliary -bool  false   "${SET_HIDEAUX:-0}"     "${OLD_HIDEAUX:-}"     || stop "could not stage the recorded auxiliary setting - nothing changed"
+      restore_boot Misc.Boot.PickerMode   -string Builtin "${SET_PICKERMODE:-0}"  "${OLD_PICKERMODE:-}"  || stop "could not stage the recorded picker mode - nothing changed"
       # back to the installer-safe settings 1401 wrote: small BAR for macOS, firmware framebuffer allowed
       plutil -replace UEFI.Quirks.ResizeGpuBars -integer -1 "$C" && plutil -replace Booter.Quirks.ResizeAppleGpuBars -integer 0 "$C" || stop "could not stage installer-safe BAR settings - nothing changed"
       bi=$(bidx 2>/dev/null); if [ -n "$bi" ]; then plutil -replace Kernel.Block.$bi.Enabled -bool false "$C" || stop "could not stage firmware display support - nothing changed"; fi
@@ -579,6 +614,18 @@ if [ $REMOVE = 1 ]; then
     "$UN" "${DRIVER_BACKUP:-}" 2>&1 | sed 's/^/NOTE /'
     rc=${PIPESTATUS[0]}; [ "$rc" = 0 ] || stop "the driver uninstaller failed (exit $rc)"
     ok "driver files removed and the kernel collection rebuilt"
+    # With the driver gone the Mac falls back to the Intel iGPU or the firmware framebuffer, but WindowServer still has
+    # the resolution, refresh rate and arrangement it saved while the NVIDIA card drove the screen; re-applying a mode
+    # the fallback cannot show left the boot after "remove driver" at a black screen (a GTX 1650 after a refresh-rate
+    # change, chat). Move those preferences aside so macOS rebuilds them at a safe default on the next start.
+    # Kept as a dated backup so nothing is lost; never fatal - the driver is already out.
+    bak="$ST/display-prefs-$(date +%Y%m%d-%H%M%S)"; moved=0
+    for f in /Library/Preferences/com.apple.windowserver*.plist /Library/Preferences/ByHost/com.apple.windowserver*.plist; do
+      [ -e "$f" ] || continue
+      [ "$moved" = 0 ] && { mkdir -p "$bak" || { note "could not back up the saved display settings; left them in place"; break; }; }
+      mv "$f" "$bak/" 2>/dev/null && moved=1
+    done
+    [ "$moved" = 1 ] && ok "cleared the saved display settings so macOS starts at a safe screen mode (backup in $bak)"
   fi
   if [ -n "$C" ]; then
     mv -f "$C" "$ORIGINAL_CONFIG" || stop "could not publish OpenCore removal settings; recovery remains available"
@@ -1208,10 +1255,35 @@ if { nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove >/dev/null 2>&1 
   DELADD+=("nullmoth-remove"); echo "CHANGE NVRAM Delete: add nullmoth-remove (a leftover remove flag this Mac cannot clear from macOS)"
 fi
 NEEDTOOL=0; [ -z "$(tool_index)" ] && { NEEDTOOL=1; echo "CHANGE boot picker: add \"$TOOL_NAME\" (the way back if the driver ever stops macOS starting)"; }
-# The tool asks for Y on screen. Run in graphics mode its text never showed, so it sat waiting for a key nobody could see
-# ("Remove driver hangs", Discord 10-11); text mode shows it. Existing entries are switched too.
-ti=$(tool_index); if [ -n "$ti" ] && [ "$(get Misc.Tools.$ti.TextMode)" != true ]; then
-  echo "CHANGE boot picker: show \"$TOOL_NAME\" in text mode, so its question is visible"; EDITS+=("Misc.Tools.$ti.TextMode|-bool|true"); fi
+# Make the Remove entry reachable no matter how this config was built: the picker is shown (ShowPicker), it is a
+# picker that lists tools (not Apple's), nothing is hidden behind Space (HideAuxiliary), and both NullMoth entries are
+# non-auxiliary and in text mode so their on-screen question is visible. picker_edits prints only what needs changing.
+# The prior ShowPicker/HideAuxiliary/PickerMode values are recorded so removal can put the user's boot picker back.
+OLD_SHOWPICKER=$(get Misc.Boot.ShowPicker); OLD_HIDEAUX=$(get Misc.Boot.HideAuxiliary); OLD_PICKERMODE=$(get Misc.Boot.PickerMode)
+SET_SHOWPICKER=0; SET_HIDEAUX=0; SET_PICKERMODE=0
+while IFS= read -r e; do
+  [ -n "$e" ] || continue
+  EDITS+=("$e")
+  case "$e" in
+    Misc.Boot.ShowPicker\|*)   SET_SHOWPICKER=1; echo "CHANGE boot picker: show the OpenCore picker, so \"$TOOL_NAME\" can be chosen";;
+    Misc.Boot.PickerMode\|*)   SET_PICKERMODE=1; echo "CHANGE boot picker: use the Builtin picker (Apple's picker never lists OpenCore tools like \"$TOOL_NAME\")";;
+    Misc.Boot.HideAuxiliary\|*) SET_HIDEAUX=1; echo "CHANGE boot picker: stop hiding auxiliary entries, so \"$TOOL_NAME\" is not hidden behind Space";;
+    Misc.Tools.*.Auxiliary\|*)  echo "CHANGE boot picker: always show \"$TOOL_NAME\" (not only after pressing Space)";;
+    Misc.Tools.*.TextMode\|*)   echo "CHANGE boot picker: show \"$TOOL_NAME\" in text mode, so its question is visible";;
+  esac
+done < <(picker_edits "$C")
+# Carry picker ownership across re-runs: a later install or update finds ShowPicker/HideAuxiliary/PickerMode already at
+# our value and changes nothing, but the earlier run's record still owns the user's original - inherit it so removal can
+# still put it back. The prior record is read in a subshell so only these values reach this shell.
+eval "$(
+  [ -f "$STATE" ] && . "$STATE" 2>/dev/null
+  printf 'P_SET_SHOWPICKER=%q P_OLD_SHOWPICKER=%q P_SET_HIDEAUX=%q P_OLD_HIDEAUX=%q P_SET_PICKERMODE=%q P_OLD_PICKERMODE=%q\n' \
+    "${SET_SHOWPICKER:-0}" "${OLD_SHOWPICKER:-}" "${SET_HIDEAUX:-0}" "${OLD_HIDEAUX:-}" "${SET_PICKERMODE:-0}" "${OLD_PICKERMODE:-}"
+)"
+[ "$SET_SHOWPICKER" = 0 ] && [ "${P_SET_SHOWPICKER:-0}" = 1 ] && { SET_SHOWPICKER=1; OLD_SHOWPICKER=$P_OLD_SHOWPICKER; }
+[ "$SET_HIDEAUX" = 0 ] && [ "${P_SET_HIDEAUX:-0}" = 1 ] && { SET_HIDEAUX=1; OLD_HIDEAUX=$P_OLD_HIDEAUX; }
+[ "$SET_PICKERMODE" = 0 ] && [ "${P_SET_PICKERMODE:-0}" = 1 ] && { SET_PICKERMODE=1; OLD_PICKERMODE=$P_OLD_PICKERMODE; }
+ti=$(tool_index)
 REFRESHTOOL=0; [ -n "$ti" ] && [ -f "$TOOL" ] && ! cmp -s "$TOOL" "$(dirname "$C")/Tools/$TOOL_FILE" && REFRESHTOOL=1
 NEEDONCE=0; [ -z "$(once_index)" ] && { NEEDONCE=1; echo "CHANGE boot picker: add \"$ONCE_NAME\" (start macOS or Recovery one time without the driver)"; }
 LOGOSRC="$(dirname "${TOOL:-/nonexistent}")/$LOGO_FILE"; NEEDLOGO=0; REFRESHLOGO=0; li=$(logo_index)
@@ -1301,7 +1373,10 @@ if [ $DRY = 0 ]; then
   { printf '# NullMoth install record %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf '%s=%q\n' EFI_UUID "$UUID" CONFIG_PATH "$C" OCREL "$OCREL" CONFIG_BACKUP_REL "$OCREL/$(basename "$BKC")" CONFIG_BACKUP "$BKC" \
       CONFIG_SHA_AFTER "$(shasum -a 256 "$C" | awk '{print $1}')" ADDED_ARGS "${ADDED# }" REMOVED_ARGS "${REMOVED# }" \
-      OLD_CSR "$cur" NEW_CSR "$want" OLD_SBM "$OLDSBM"
+      OLD_CSR "$cur" NEW_CSR "$want" OLD_SBM "$OLDSBM" \
+      SET_SHOWPICKER "${SET_SHOWPICKER:-0}" OLD_SHOWPICKER "${OLD_SHOWPICKER:-}" \
+      SET_HIDEAUX "${SET_HIDEAUX:-0}" OLD_HIDEAUX "${OLD_HIDEAUX:-}" \
+      SET_PICKERMODE "${SET_PICKERMODE:-0}" OLD_PICKERMODE "${OLD_PICKERMODE:-}"
   } > "$STATE.tmp" && chmod 600 "$STATE.tmp" && mv "$STATE.tmp" "$STATE" || {
     cp -p "$BKC" "$C"
     [ "$HAD_STATE" != 1 ] || cp -p "$OLD_STATE" "$STATE"
