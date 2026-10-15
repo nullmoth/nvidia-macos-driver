@@ -1228,6 +1228,68 @@ NV_STATUS NV_API_CALL os_queue_work_item(struct os_work_queue *queue, void *item
     }
     thread_deallocate(t); return NV_OK;
 }
+// The "temporary file" RM saves video memory into across system sleep (FBSR file mode, which RM uses when
+// PreserveVideoMemoryAllocations is on). Linux backs it with an O_TMPFILE; here it is pageable kernel memory in 64 MB
+// pieces, allocated as RM writes them, so it costs only what RM actually saves (the used part of VRAM) and can be paged
+// out under pressure. Without it RM keeps only "select allocations", and WindowServer's surfaces and channels came back
+// from sleep empty: its GPU work never finished and the Mac froze (the test Mac, 10-15).
+#define NV_XNU_TMPF_CHUNK (64ull << 20)
+#define NV_XNU_TMPF_MAX   1024            // 64 GB: more than any card's VRAM
+struct nv_xnu_tmpfile { IOLock *lock; NvU64 size; void *chunk[NV_XNU_TMPF_MAX]; };
+NV_STATUS NV_API_CALL os_open_temporary_file(void **ppFile)
+{
+    TRC;
+    if (!ppFile) return NV_ERR_INVALID_ARGUMENT;
+    struct nv_xnu_tmpfile *f = (struct nv_xnu_tmpfile *)IOMallocZero(sizeof *f);
+    if (!f) return NV_ERR_NO_MEMORY;
+    f->lock = IOLockAlloc();
+    if (!f->lock) { IOFree(f, sizeof *f); return NV_ERR_NO_MEMORY; }
+    *ppFile = f;
+    kprintf("NVRM-xnu: power: video memory save store opened\n");
+    return NV_OK;
+}
+void NV_API_CALL os_close_file(void *pFile)
+{
+    TRC;
+    struct nv_xnu_tmpfile *f = (struct nv_xnu_tmpfile *)pFile;
+    if (!f) return;
+    unsigned n = 0;
+    for (unsigned i = 0; i < NV_XNU_TMPF_MAX; i++) if (f->chunk[i]) { IOFreePageable(f->chunk[i], NV_XNU_TMPF_CHUNK); n++; }
+    kprintf("NVRM-xnu: power: video memory save store closed (%llu MB written, %u MB held)\n",
+            (unsigned long long)(f->size >> 20), n * 64);
+    IOLockFree(f->lock);
+    IOFree(f, sizeof *f);
+}
+static NV_STATUS nv_xnu_tmpfile_io(void *pFile, NvU8 *buf, NvU64 size, NvU64 offset, bool write)
+{
+    struct nv_xnu_tmpfile *f = (struct nv_xnu_tmpfile *)pFile;
+    if (!f || (!buf && size)) return NV_ERR_INVALID_ARGUMENT;
+    if (offset + size < offset || offset + size > NV_XNU_TMPF_CHUNK * NV_XNU_TMPF_MAX) return NV_ERR_INVALID_ARGUMENT;
+    IOLockLock(f->lock);
+    if (!write && offset + size > f->size) { IOLockUnlock(f->lock); return NV_ERR_OPERATING_SYSTEM; }   // short read, as Linux
+    NV_STATUS st = NV_OK;
+    while (size) {
+        const NvU64 idx = offset / NV_XNU_TMPF_CHUNK, in = offset % NV_XNU_TMPF_CHUNK;
+        const NvU64 n = (size < NV_XNU_TMPF_CHUNK - in) ? size : NV_XNU_TMPF_CHUNK - in;
+        if (!f->chunk[idx]) {
+            if (!write) { memset(buf, 0, n); goto next; }      // a hole RM never wrote reads as zeros, as a sparse file does
+            f->chunk[idx] = IOMallocPageable(NV_XNU_TMPF_CHUNK, PAGE_SIZE);
+            if (!f->chunk[idx]) { st = NV_ERR_NO_MEMORY; break; }
+        }
+        if (write) memcpy((NvU8 *)f->chunk[idx] + in, buf, n);
+        else       memcpy(buf, (NvU8 *)f->chunk[idx] + in, n);
+    next:
+        buf += n; offset += n; size -= n;
+    }
+    if (write && st == NV_OK && offset > f->size) f->size = offset;
+    IOLockUnlock(f->lock);
+    if (st != NV_OK) kprintf("NVRM-xnu: power: video memory save store %s failed at %llu MB (0x%x)\n",
+                             write ? "write" : "read", (unsigned long long)(offset >> 20), (unsigned)st);
+    return st;
+}
+NV_STATUS NV_API_CALL os_write_file(void *pFile, NvU8 *pBuffer, NvU64 size, NvU64 offset) { TRC; return nv_xnu_tmpfile_io(pFile, pBuffer, size, offset, true); }
+NV_STATUS NV_API_CALL os_read_file(void *pFile, NvU8 *pBuffer, NvU64 size, NvU64 offset)  { TRC; return nv_xnu_tmpfile_io(pFile, pBuffer, size, offset, false); }
+
 // kernel-open/nvidia/os-interface.c: wait until the queued work has run; refuse from interrupt context.
 NV_STATUS NV_API_CALL os_flush_work_queue(struct os_work_queue *queue, NvBool is_unload)
 {
