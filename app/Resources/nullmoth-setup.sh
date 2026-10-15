@@ -801,9 +801,12 @@ if [ -n "${GPUTEST:-}" ]; then
   # checked to contain it; the boot argument. Off undoes each step. The "Start once without NVIDIA driver" entry
   # (-nvoff) parks this driver too, and taking a GPU that lights the screen resets that screen, so it stays opt-in.
   case "$GPUTEST" in on|off) ;; *) stop "--gpu-test takes on or off";; esac
-  GK=/Library/NullMoth/kexts/15/NMXGPU.kext; GFW=/Library/NullMoth/firmware; EXT=/Library/Extensions
-  GA=/Library/NullMoth/kexts/15/NMXAccel.kext; GU=/Library/NullMoth/gpu-userland; GB=/Library/GPUBundles
-  GN=/Library/NullMoth/kexts/15/NMXNPU.kext
+  # the cached kexts live under the running macOS; NMXAccel is built per-OS (Tahoe privatised IOAcceleratorFamily2),
+  # NMXGPU and NMXNPU are the same binaries on 15 and 26. A driver with no kexts for this macOS stops below.
+  KMAJ=$(sw_vers -productVersion); KMAJ=${KMAJ%%.*}; KD=/Library/NullMoth/kexts/$KMAJ
+  GK=$KD/NMXGPU.kext; GFW=/Library/NullMoth/firmware; EXT=/Library/Extensions
+  GA=$KD/NMXAccel.kext; GU=/Library/NullMoth/gpu-userland; GB=/Library/GPUBundles
+  GN=$KD/NMXNPU.kext
   MAN="$(dirname "${TOOL:-/nonexistent}")/nullmoth-gpu-firmware.txt"; [ -f "$MAN" ] || MAN="$(dirname "$0")/nullmoth-gpu-firmware.txt"
   # vendors of the display-class PCI functions present (class 03xxxx; ioreg prints vendor-id/class-code little-endian)
   # (the two keys come in either order, so each device's pair is printed when the next device starts)
