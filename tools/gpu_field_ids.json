@@ -1,0 +1,349 @@
+{
+ "_source": "1401 scan-evidence + macOS hardware-map across fresh-incoming uploads (read-only census 2026-10-14)",
+ "amd_gpu": {
+  "1002:1114": {
+   "machines": 2,
+   "name": "AMD Radeon(TM) Graphics"
+  },
+  "1002:13c0": {
+   "machines": 57,
+   "name": "AMD Radeon(TM) 610M"
+  },
+  "1002:150e": {
+   "machines": 1,
+   "name": "AMD Radeon(TM) 890M Graphics"
+  },
+  "1002:15bf": {
+   "machines": 11,
+   "name": "AMD Radeon 780M Graphics"
+  },
+  "1002:15d8": {
+   "machines": 4,
+   "name": "AMD Radeon(TM) RX Vega 10 Graphics"
+  },
+  "1002:1636": {
+   "machines": 10,
+   "name": "AMD Radeon(TM) Graphics"
+  },
+  "1002:1638": {
+   "machines": 26,
+   "name": "AMD Radeon(TM) Graphics"
+  },
+  "1002:164e": {
+   "machines": 84,
+   "name": "AMD Radeon(TM) 610M"
+  },
+  "1002:1681": {
+   "machines": 19,
+   "name": "AMD Radeon(TM) Graphics"
+  },
+  "1002:1900": {
+   "machines": 15,
+   "name": "AMD Radeon 760M Graphics"
+  },
+  "1002:6660": {
+   "machines": 1,
+   "name": "AMD Radeon (TM) R5 M330"
+  },
+  "1002:67df": {
+   "machines": 2,
+   "name": "ioreg/class030000"
+  },
+  "1002:67ef": {
+   "machines": 1,
+   "name": "Radeon(TM) RX 460 Graphics"
+  },
+  "1002:683f": {
+   "machines": 1,
+   "name": "AMD Radeon R7 350 Series"
+  },
+  "1002:731f": {
+   "machines": 6,
+   "name": "AMD Radeon RX 5600 XT"
+  },
+  "1002:7340": {
+   "machines": 1,
+   "name": "AMD Radeon Pro 5500M"
+  },
+  "1002:73bf": {
+   "machines": 4,
+   "name": "AMD Radeon RX 6800"
+  },
+  "1002:73df": {
+   "machines": 1,
+   "name": "AMD Radeon RX 6750 GRE 12GB"
+  },
+  "1002:73ef": {
+   "machines": 2,
+   "name": "AMD Radeon RX 6650 XT"
+  },
+  "1002:73ff": {
+   "machines": 2,
+   "name": "AMD Radeon RX 6600 XT"
+  },
+  "1002:744c": {
+   "machines": 7,
+   "name": "ioreg/class030000"
+  },
+  "1002:747e": {
+   "machines": 2,
+   "name": "AMD Radeon RX 7700 XT"
+  },
+  "1002:7480": {
+   "machines": 4,
+   "name": "AMD Radeon RX 7600"
+  }
+ },
+ "intel_gpu": {
+  "8086:0046": {
+   "machines": 1,
+   "name": "Intel(R) HD Graphics"
+  },
+  "8086:0166": {
+   "machines": 3,
+   "name": "Intel(R) HD Graphics 4000"
+  },
+  "8086:0412": {
+   "machines": 1,
+   "name": "Intel(R) HD Graphics 4600"
+  },
+  "8086:0416": {
+   "machines": 4,
+   "name": "Intel(R) HD Graphics 4600"
+  },
+  "8086:041a": {
+   "machines": 1,
+   "name": "Intel(R) HD Graphics P4600/P4700"
+  },
+  "8086:1616": {
+   "machines": 1,
+   "name": "Intel(R) HD Graphics 5500"
+  },
+  "8086:1912": {
+   "machines": 1,
+   "name": "Intel(R) HD Graphics 530"
+  },
+  "8086:1916": {
+   "machines": 1,
+   "name": "Intel(R) HD Graphics 520"
+  },
+  "8086:191b": {
+   "machines": 1,
+   "name": "Intel(R) HD Graphics 530"
+  },
+  "8086:3184": {
+   "machines": 1,
+   "name": "Intel(R) UHD Graphics 605"
+  },
+  "8086:3e92": {
+   "machines": 5,
+   "name": "Intel(R) UHD Graphics 630"
+  },
+  "8086:3e96": {
+   "machines": 1,
+   "name": "Intel(R) UHD Graphics P630"
+  },
+  "8086:3e98": {
+   "machines": 4,
+   "name": "CoffeeLake-S GT2 [UHD Graphics 630]"
+  },
+  "8086:3e9b": {
+   "machines": 46,
+   "name": "Intel(R) UHD Graphics 630"
+  },
+  "8086:3ea0": {
+   "machines": 10,
+   "name": "Intel(R) UHD Graphics 620"
+  },
+  "8086:4626": {
+   "machines": 11,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:4628": {
+   "machines": 1,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:4680": {
+   "machines": 17,
+   "name": "AlderLake-S GT1"
+  },
+  "8086:4688": {
+   "machines": 1,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:468b": {
+   "machines": 5,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:4692": {
+   "machines": 7,
+   "name": "Intel(R) UHD Graphics 730"
+  },
+  "8086:46a1": {
+   "machines": 1,
+   "name": "Intel(R) Iris(R) Xe Graphics"
+  },
+  "8086:46a3": {
+   "machines": 27,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:46a6": {
+   "machines": 90,
+   "name": "Intel(R) Iris(R) Xe Graphics"
+  },
+  "8086:46a8": {
+   "machines": 3,
+   "name": "Intel(R) Iris(R) Xe Graphics"
+  },
+  "8086:4c8b": {
+   "machines": 2,
+   "name": "Intel(R) UHD Graphics 730"
+  },
+  "8086:4e61": {
+   "machines": 1,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:5902": {
+   "machines": 1,
+   "name": "Intel(R) HD Graphics 610"
+  },
+  "8086:5912": {
+   "machines": 1,
+   "name": "Intel(R) HD Graphics 630"
+  },
+  "8086:5916": {
+   "machines": 4,
+   "name": "Intel(R) HD Graphics 620"
+  },
+  "8086:5917": {
+   "machines": 3,
+   "name": "Intel(R) UHD Graphics 620"
+  },
+  "8086:591b": {
+   "machines": 3,
+   "name": "Intel(R) HD Graphics 630"
+  },
+  "8086:5a85": {
+   "machines": 1,
+   "name": "Intel(R) HD Graphics 500"
+  },
+  "8086:64a0": {
+   "machines": 1,
+   "name": "Intel(R) Arc(TM) 140V GPU (16GB)"
+  },
+  "8086:7d41": {
+   "machines": 1,
+   "name": "Intel(R) Graphics"
+  },
+  "8086:7d51": {
+   "machines": 13,
+   "name": "Intel(R) Arc(TM) 130T GPU (16GB)"
+  },
+  "8086:7d55": {
+   "machines": 12,
+   "name": "Intel(R) Arc(TM) Graphics"
+  },
+  "8086:7d67": {
+   "machines": 28,
+   "name": "Intel(R) Graphics"
+  },
+  "8086:7dd1": {
+   "machines": 2,
+   "name": "Intel(R) Graphics"
+  },
+  "8086:9a49": {
+   "machines": 19,
+   "name": "Intel(R) Iris(R) Xe Graphics"
+  },
+  "8086:9a60": {
+   "machines": 24,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:9a68": {
+   "machines": 20,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:9a78": {
+   "machines": 1,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:9b41": {
+   "machines": 5,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:9ba4": {
+   "machines": 1,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:9bc4": {
+   "machines": 20,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:9bc5": {
+   "machines": 9,
+   "name": "Intel(R) UHD Graphics 630"
+  },
+  "8086:9bc8": {
+   "machines": 8,
+   "name": "CometLake-S GT2 [UHD Graphics 630]"
+  },
+  "8086:a720": {
+   "machines": 2,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:a780": {
+   "machines": 29,
+   "name": "Intel(R) UHD Graphics 770"
+  },
+  "8086:a782": {
+   "machines": 1,
+   "name": "Intel(R) UHD Graphics 730"
+  },
+  "8086:a788": {
+   "machines": 37,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:a78b": {
+   "machines": 38,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:a7a0": {
+   "machines": 24,
+   "name": "Intel(R) Iris(R) Xe Graphics"
+  },
+  "8086:a7a1": {
+   "machines": 1,
+   "name": "Intel(R) Iris(R) Xe Graphics"
+  },
+  "8086:a7a8": {
+   "machines": 23,
+   "name": "Intel(R) UHD Graphics"
+  },
+  "8086:a7ab": {
+   "machines": 4,
+   "name": "Intel(R) Graphics"
+  },
+  "8086:b0a0": {
+   "machines": 3,
+   "name": "Intel(R) Graphics"
+  },
+  "8086:fd80": {
+   "machines": 1,
+   "name": "Intel(R) Graphics"
+  }
+ },
+ "npu": {
+  "1022:1502": {
+   "machines": 3,
+   "name": "ioreg/class118000"
+  },
+  "1022:17f0": {
+   "machines": 1,
+   "name": "ioreg/class118000"
+  },
+  "8086:ad1d": {
+   "machines": 3,
+   "name": "ioreg/class120000"
+  }
+ }
+}
