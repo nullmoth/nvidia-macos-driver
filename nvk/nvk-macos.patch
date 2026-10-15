@@ -12269,7 +12269,7 @@ diff --git a/src/nouveau/headers/nv_push.h b/src/nouveau/headers/nv_push.h
 @@ -122,7 +122,21 @@ __push_verify(struct nv_push *push)
     if (NVDEF_TEST(push->last_hdr_dw, NV906F, DMA, SEC_OP, ==, IMMD_DATA_METHOD))
        return;
-
+ 
 -   ASSERTED uint32_t last_count =
 -      NVVAL_GET(push->last_hdr_dw, NV906F, DMA, METHOD_COUNT);
 -   assert(last_count);
