@@ -192,14 +192,19 @@ size_t nvkms_strlen(const char *s) { return strlen(s); }
 int    nvkms_strcmp(const char *s1, const char *s2) { return strcmp(s1, s2); }
 void   nvkms_usleep(NvU64 usec) { if (usec < 1000) IODelay((unsigned)usec); else IOSleep((unsigned)((usec + 999) / 1000)); }
 NvU64  nvkms_get_usec(void) { uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns / 1000; }
+// These copy between the kernel and the calling process only, like NVIDIA's own copy_from_user/copy_to_user versions.
+// Was: an address with the top bit set was treated as a kernel pointer and copied with memcpy, so any value a caller
+// placed in an NVKMS request became an arbitrary kernel read or write. NVKMS calls these only from its user-space
+// client hooks (prepUser/doneUser and the clientType == USER_SPACE branches); kernel clients use nvkms_memcpy, so
+// nothing legitimate ever passes a kernel address here.
 int nvkms_copyin(void *kptr, NvU64 uaddr, size_t n)
 {
-    if (uaddr >> 63) { nvu_memcpy(kptr, (const void *)(uintptr_t)uaddr, n); return 0; }
+    if (uaddr >> 63) return -14;
     return copyin((user_addr_t)uaddr, kptr, n) ? -14 : 0;
 }
 int nvkms_copyout(NvU64 uaddr, const void *kptr, size_t n)
 {
-    if (uaddr >> 63) { nvu_memcpy((void *)(uintptr_t)uaddr, kptr, n); return 0; }
+    if (uaddr >> 63) return -14;
     return copyout(kptr, (user_addr_t)uaddr, n) ? -14 : 0;
 }
 void nvkms_yield(void) { IOSleep(1); }
