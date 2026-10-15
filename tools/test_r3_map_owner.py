@@ -6,8 +6,8 @@ to the same buffer, so one user could map another user's RAM. The allocation now
 it, and nv_pm_owner_blocks decides when a device map crosses an owner boundary: only when owner and caller are
 both real, distinct user processes. A kernel/RM-internal allocation (owner 0) stays shareable and a caller with
 no pid is never refused, so a legitimate map is never blocked. The predicate is compiled here from the kext's
-own source line and run as C, then the audit/enforce modes are modelled on top of it. nvrmmapowner=1 enforces;
-the default observes and counts."""
+own source line and run as C, then the enforce/observe modes are modelled on top of it. A cross-owner map is refused by default;
+nvrmmapowner=0 downgrades to observe-and-count as a recovery valve."""
 import os, re, subprocess, tempfile, unittest
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
