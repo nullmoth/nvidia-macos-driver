@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""The copy-engine class NVK selects is one the chip actually offers, for every supported architecture.
+
+User logs show "chandesConstruct_IMPL: bad class 0xc7b5" on Ampere and Ada (RTX 3050 Mobile GA107 10de:25a2, RTX 3060 Ti
+GA104, Ada laptops). 0xc7b5 is AMPERE_DMA_COPY_B. The resource manager's own per-chip class tables
+(open-gpu-kernel-modules, src/nvidia/generated/g_gpu_class_list.c, gpuGetNoEngClassList_<CHIP>) show every one of those
+chips DOES offer that class, so it is not an unoffered-class bug: the first copy-object allocation is made with no
+allocation params on a graphics channel, RM resolves the engine to GRAPHICS and a copy class is not a graphics class,
+so it logs "bad class" once; the partner-copy-engine retry then names the engine and succeeds. This test proves the one
+thing that is ours to get right -- the class SELECTION -- by replaying the driver's preference list
+(sSubchannelCopyClasses in nvk/nvk-macos.patch) against RM's per-chip offerings and asserting the picked class is always
+offered.
+
+Negative control: selecting the first preference unconditionally (no "is this class in the chip's list" check, the
+nvkmd_nvrm_pdev_is_class_supported guard removed) requests BLACKWELL_DMA_COPY_B on chips that do not offer it (Turing,
+Ampere, Ada, Hopper, datacenter Blackwell) -- exactly the "bad class" RM rejects. The guard is load-bearing.
+"""
+import os
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1])
+patch = (root / 'nvk/nvk-macos.patch').read_text()
+fails = 0
+
+
+def check(name, ok, detail=''):
+    global fails
+    print(('ok   ' if ok else 'FAIL ') + name + (f' ({detail})' if detail else ''))
+    fails += not ok
+
+
+# The driver's copy-class preference, newest first, read from the live patch (added '+' lines of the array literal).
+m = re.search(r'sSubchannelCopyClasses\[\]\s*=\s*\{(.+?)\}', patch, re.S)
+if not m:
+    print('FAIL sSubchannelCopyClasses not found in nvk/nvk-macos.patch')
+    print('FAILED')
+    sys.exit(1)
+preference = re.findall(r'\b([A-Z0-9]+_DMA_COPY_[AB])\b', m.group(1).replace('+', ''))
+
+# RM's per-chip copy classes, from open-gpu-kernel-modules src/nvidia/generated/g_gpu_class_list.c
+# (gpuGetNoEngClassList_<CHIP>). Snapshot generated 2026-10-14 by:
+#   python3 -c "...re.findall(r'[A-Z0-9]+_DMA_COPY_[AB]', block)..."  over each gpuGetNoEngClassList_ block.
+# Re-verified against ~/ogkm610 at run time below when that tree is present, so the snapshot cannot drift silently.
+CHIP_COPY_CLASSES = {
+    'TU102': {'TURING_DMA_COPY_A'}, 'TU104': {'TURING_DMA_COPY_A'}, 'TU106': {'TURING_DMA_COPY_A'},
+    'TU116': {'TURING_DMA_COPY_A'}, 'TU117': {'TURING_DMA_COPY_A'},
+    'GA100': {'AMPERE_DMA_COPY_A'},
+    'GA102': {'AMPERE_DMA_COPY_B'}, 'GA103': {'AMPERE_DMA_COPY_B'}, 'GA104': {'AMPERE_DMA_COPY_B'},
+    'GA106': {'AMPERE_DMA_COPY_B'}, 'GA107': {'AMPERE_DMA_COPY_B'},
+    'AD102': {'AMPERE_DMA_COPY_B'}, 'AD103': {'AMPERE_DMA_COPY_B'}, 'AD104': {'AMPERE_DMA_COPY_B'},
+    'AD106': {'AMPERE_DMA_COPY_B'}, 'AD107': {'AMPERE_DMA_COPY_B'},
+    'GH100': {'HOPPER_DMA_COPY_A'},
+    'GB100': {'BLACKWELL_DMA_COPY_A'}, 'GB102': {'BLACKWELL_DMA_COPY_A'}, 'GB10B': {'BLACKWELL_DMA_COPY_A'},
+    'GB110': {'BLACKWELL_DMA_COPY_A'}, 'GB112': {'BLACKWELL_DMA_COPY_A'},
+    'GR100': {'BLACKWELL_DMA_COPY_A'}, 'GR102': {'BLACKWELL_DMA_COPY_A'},
+    'GB202': {'BLACKWELL_DMA_COPY_B'}, 'GB203': {'BLACKWELL_DMA_COPY_B'}, 'GB205': {'BLACKWELL_DMA_COPY_B'},
+    'GB206': {'BLACKWELL_DMA_COPY_B'}, 'GB207': {'BLACKWELL_DMA_COPY_B'},
+    'GB20B': {'BLACKWELL_DMA_COPY_A', 'BLACKWELL_DMA_COPY_B'},
+    'GB20C': {'BLACKWELL_DMA_COPY_A', 'BLACKWELL_DMA_COPY_B'},
+}
+
+# Drift guard: re-parse RM's tables when the tree is present and require the snapshot to match exactly.
+ogkm = pathlib.Path(os.path.expanduser('~/ogkm610')) / 'src/nvidia/generated/g_gpu_class_list.c'
+if ogkm.exists():
+    live = {}
+    for b in re.split(r'\ngpuGetNoEngClassList_', ogkm.read_text())[1:]:
+        chip = b[:b.index('(')]
+        copies = set(re.findall(r'\b([A-Z0-9]+_DMA_COPY_[AB])\b', b))
+        if copies:
+            live[chip] = copies
+    check('snapshot of RM copy classes matches ~/ogkm610 g_gpu_class_list.c', live == CHIP_COPY_CLASSES,
+          'drift: ' + str({k: (CHIP_COPY_CLASSES.get(k), live.get(k)) for k in set(live) ^ set(CHIP_COPY_CLASSES)
+                           or [k for k in live if live[k] != CHIP_COPY_CLASSES.get(k)]})[:300])
+else:
+    print('note: ~/ogkm610 not present -- running on the embedded snapshot only (no drift re-check)')
+
+
+def select(offered):
+    """nvkmd_nvrm_pdev_find_supported_class: the first preference the chip offers; 0 (None) if none."""
+    for p in preference:
+        if p in offered:
+            return p
+    return None
+
+
+# 1. every supported chip selects a class it offers.
+bad = [c for c, off in CHIP_COPY_CLASSES.items() if select(off) not in off]
+check('every supported chip selects a copy class RM says it offers', not bad, 'offenders: ' + ','.join(bad))
+
+# 2. the machines that logged "bad class 0xc7b5": the selected class is in fact offered (so selection is not the fault).
+for chip in ('GA107', 'GA104', 'AD102', 'AD104'):
+    check(f'{chip} selects AMPERE_DMA_COPY_B (0xc7b5), which RM offers on {chip}',
+          select(CHIP_COPY_CLASSES[chip]) == 'AMPERE_DMA_COPY_B', select(CHIP_COPY_CLASSES[chip]))
+
+# 3. the B/A split the membership check exists for: consumer Blackwell gets B, datacenter Blackwell and Hopper fall back.
+check('consumer Blackwell GB202 selects BLACKWELL_DMA_COPY_B', select(CHIP_COPY_CLASSES['GB202']) == 'BLACKWELL_DMA_COPY_B')
+check('datacenter Blackwell GB100 falls back to the offered BLACKWELL_DMA_COPY_A',
+      select(CHIP_COPY_CLASSES['GB100']) == 'BLACKWELL_DMA_COPY_A', select(CHIP_COPY_CLASSES['GB100']))
+check('Turing TU117 selects TURING_DMA_COPY_A', select(CHIP_COPY_CLASSES['TU117']) == 'TURING_DMA_COPY_A')
+
+# 4. negative control: dropping the "is this class offered" guard (take preference[0] always) requests an unoffered
+#    class on real chips -- the "bad class" RM rejects. This must FIRE on every non-Blackwell-B chip.
+naive = preference[0]  # BLACKWELL_DMA_COPY_B
+would_fail = [c for c, off in CHIP_COPY_CLASSES.items() if naive not in off]
+check('negative control: an unguarded first-preference pick requests an unoffered class on real chips',
+      {'GA107', 'AD102', 'TU117', 'GH100', 'GB100'} <= set(would_fail),
+      f'{naive} unoffered on {len(would_fail)} chips incl ' + ','.join(sorted(would_fail)[:5]))
+
+# 5. none offered -> no class (matches the source returning 0).
+check('negative control: a chip offering no copy class selects nothing', select(set()) is None)
+
+print('FAILED' if fails else 'PASS')
+sys.exit(1 if fails else 0)
