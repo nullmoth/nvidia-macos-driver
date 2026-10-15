@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.2
+
+1401 for Windows
+- A PC with no network adapter that works in the macOS installer gets its stick written, with a note to connect a
+  supported Ethernet or Wi-Fi adapter before installing
+- A stick that Windows gives a new disk number just before the erase is found again and written
+
+No changes to the driver or the Mac app since 2.0.0.
+
 ## 2.0.1
 
 1401 for Windows
