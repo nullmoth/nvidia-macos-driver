@@ -3065,7 +3065,18 @@ IOReturn NVRMNVDAFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
         return kIOReturnSuccess;
     }
     IOReturn r = super::getAttribute(attribute, value);
-    FBLOG("getAttribute '%s' -> 0x%x val %lu", _s, r, value ? (unsigned long)*value : 0ul);
+    // WindowServer polls some attributes many times a second ('hdcs', HDCP state: 2,019 of 2,703 framebuffer lines in
+    // one report, issue #216), which buried every real error. An attribute is logged again only when its answer changes.
+    static struct { IOSelect a; IOReturn r; uintptr_t v; } seen[16];
+    static unsigned nseen;
+    const uintptr_t v = value ? *value : 0;
+    unsigned i = 0;
+    while (i < nseen && seen[i].a != attribute) i++;
+    if (i == nseen || seen[i].r != r || seen[i].v != v) {
+        FBLOG("getAttribute '%s' -> 0x%x val %lu", _s, r, (unsigned long)v);
+        if (i == nseen && nseen < 16) nseen++;
+        if (i < 16) { seen[i].a = attribute; seen[i].r = r; seen[i].v = v; }
+    }
     return r;
 }
 IOReturn NVRMNVDAFramebuffer::getAttributeForConnection(IOIndex connectIndex, IOSelect attribute, uintptr_t *value)
