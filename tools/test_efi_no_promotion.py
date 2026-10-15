@@ -17,18 +17,36 @@ ok() { echo "OK $*"; }
 note() { echo "NOTE $*"; }
 stop() { echo "STOP $*"; exit 19; }
 forbidden() { echo "FORBIDDEN $1"; exit 77; }
-boot_esp() { forbidden boot_esp; }
+# Reading the internal EFI to detect the stranding case is allowed (a mount and a lookup); migrating to it is not, so
+# every write primitive below stays forbidden and the stranding stubs only read.
+boot_esp() { echo internal-esp; }
 mount_efi() {
-  [ "$1" = selected-source ] || forbidden target-mount
-  MOUNT_POINT=$FIXTURE_SOURCE
   printf '%s\n' "$1" >> "$FIXTURE_CALLS"
-  if [ "${FIXTURE_APPEAR:-0}" = 1 ]; then
-    /bin/mkdir -p "$FIXTURE_TARGET/EFI/Microsoft/Boot"
-    printf 'concurrent foreign boot bytes' > "$FIXTURE_TARGET/EFI/Microsoft/Boot/BCD"
-  fi
+  case "$1" in
+    selected-source)
+      MOUNT_POINT=$FIXTURE_SOURCE
+      if [ "${FIXTURE_APPEAR:-0}" = 1 ]; then
+        /bin/mkdir -p "$FIXTURE_TARGET/EFI/Microsoft/Boot"
+        printf 'concurrent foreign boot bytes' > "$FIXTURE_TARGET/EFI/Microsoft/Boot/BCD"
+      fi ;;
+    internal-esp) MOUNT_POINT=$FIXTURE_TARGET ;;
+    *) forbidden target-mount ;;
+  esac
 }
-ocrel_in() { [ "$1" = "$FIXTURE_SOURCE" ] || forbidden target-discovery; echo "${FIXTURE_OCREL:-EFI/OC}"; }
-on_usb() { [ "$1" = selected-source ] || forbidden other-usb-check; [ "${FIXTURE_USB:-1}" = 1 ]; }
+ocrel_in() {
+  case "$1" in
+    "$FIXTURE_SOURCE") echo "${FIXTURE_OCREL:-EFI/OC}" ;;
+    "$FIXTURE_TARGET") [ -f "$FIXTURE_TARGET/EFI/OC/config.plist" ] && echo EFI/OC || true ;;
+    *) forbidden target-discovery ;;
+  esac
+}
+on_usb() {
+  case "$1" in
+    selected-source) [ "${FIXTURE_USB:-1}" = 1 ] ;;
+    internal-esp) return 1 ;;
+    *) forbidden other-usb-check ;;
+  esac
+}
 mv() { forbidden mv; }
 cp() { forbidden cp; }
 rm() { forbidden rm; }
@@ -61,7 +79,8 @@ class SelectedEfi(unittest.TestCase):
         before=self.snapshot(); result=self.execute(**(options or {}))
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertEqual(self.snapshot(),before)
-        self.assertEqual(self.calls.read_text(),'selected-source\n')
+        # on a USB-booted install the internal EFI is read (never written) to detect stranding; otherwise it is not touched
+        self.assertEqual(self.calls.read_text(),'selected-source\n'+('internal-esp\n' if guidance else ''))
         self.assertNotIn('FORBIDDEN',result.stdout)
         self.assertIn('CONTINUE selected-source '+str(self.source / 'EFI/OC/config.plist'),result.stdout)
         self.assertEqual('Keep it attached for every restart' in result.stdout,guidance)
@@ -92,6 +111,26 @@ class SelectedEfi(unittest.TestCase):
         self.assertEqual((self.source/'EFI/OC/config.plist').read_bytes(),b'selected source config')
         self.assertFalse((self.target/'EFI/OC').exists())
         self.assertNotIn('FORBIDDEN',result.stdout)
+    def test_stranded_internal_without_opencore_gets_one_exact_instruction(self):
+        # booted from the stick, internal disk has no OpenCore: warn, name the Install Guide, and still write nothing
+        before=self.snapshot();result=self.execute()
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertEqual(self.snapshot(),before)
+        self.assertIn('has no OpenCore',result.stdout)
+        self.assertIn('OpenCore Install Guide',result.stdout)
+        self.assertNotIn('FORBIDDEN',result.stdout)
+    def test_internal_with_opencore_gets_no_stranding_instruction(self):
+        # negative control: the internal disk already has its own OpenCore, so it is not stranded and gets no warning
+        p=self.target/'EFI/OC/config.plist';p.parent.mkdir(parents=True);p.write_bytes(b'internal oc')
+        result=self.execute()
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertNotIn('has no OpenCore',result.stdout)
+    def test_internal_not_examined_for_stranding_when_not_usb_booted(self):
+        # negative control: an internal OpenCore boot is not stranded, so the internal EFI is never even looked at
+        result=self.execute(FIXTURE_USB='0')
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertNotIn('has no OpenCore',result.stdout)
+        self.assertEqual(self.calls.read_text(),'selected-source\n')
     def test_explicit_source_fallback_config_continues_unchanged(self):
         p=self.source/'EFI/BOOT/config.plist';p.write_bytes(b'explicit fallback config')
         before=self.snapshot();result=self.execute(FIXTURE_OCREL='EFI/BOOT')
