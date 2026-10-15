@@ -1199,17 +1199,50 @@ void NV_API_CALL os_wait_uninterruptible(os_wait_queue *wq) { TRC; IOLockLock(wq
 void NV_API_CALL os_wait_interruptible(os_wait_queue *wq)   { TRC; IOLockLock(wq->lock); IOLockSleep(wq->lock, wq, THREAD_INTERRUPTIBLE); IOLockUnlock(wq->lock); }
 void NV_API_CALL os_wake_up(os_wait_queue *wq)              { TRC; IOLockLock(wq->lock); IOLockWakeup(wq->lock, wq, false); IOLockUnlock(wq->lock); }
 
+// Each work item runs on its own kernel thread; the count of items still running is what os_flush_work_queue waits
+// for. RM flushes before system sleep (os_flush_work_queue from its power-management path) so no queued work touches
+// the GPU after it is suspended. Up to 2.0.2 the flush was a stub that answered "not supported" and waited for nothing.
+static IOLock *nv_xnu_work_lock;
+static int nv_xnu_work_running;
 static void nv_xnu_work_thread(void *item, wait_result_t)
 {
     kprintf("NVRM-xnu: work item %p running\n", item);
     rm_execute_work_item(NULL, item);
+    IOLockLock(nv_xnu_work_lock);
+    if (--nv_xnu_work_running == 0) IOLockWakeup(nv_xnu_work_lock, &nv_xnu_work_running, false);
+    IOLockUnlock(nv_xnu_work_lock);
     thread_terminate(current_thread());
 }
 NV_STATUS NV_API_CALL os_queue_work_item(struct os_work_queue *queue, void *item)
 {
     TRC; thread_t t;
-    if (kernel_thread_start(nv_xnu_work_thread, item, &t) != KERN_SUCCESS) return NV_ERR_NO_MEMORY;
+    if (!nv_xnu_work_lock) {
+        IOLock *l = IOLockAlloc();
+        if (!l) return NV_ERR_NO_MEMORY;
+        if (!OSCompareAndSwapPtr(NULL, l, (void * volatile *)&nv_xnu_work_lock)) IOLockFree(l);
+    }
+    IOLockLock(nv_xnu_work_lock); nv_xnu_work_running++; IOLockUnlock(nv_xnu_work_lock);
+    if (kernel_thread_start(nv_xnu_work_thread, item, &t) != KERN_SUCCESS) {
+        IOLockLock(nv_xnu_work_lock); nv_xnu_work_running--; IOLockUnlock(nv_xnu_work_lock);
+        return NV_ERR_NO_MEMORY;
+    }
     thread_deallocate(t); return NV_OK;
+}
+// kernel-open/nvidia/os-interface.c: wait until the queued work has run; refuse from interrupt context.
+NV_STATUS NV_API_CALL os_flush_work_queue(struct os_work_queue *queue, NvBool is_unload)
+{
+    TRC;
+    // our interrupt "bottom half" runs on the work-loop thread (NVRM::interruptOccurred); waiting there would stall it
+    if (os_is_isr()) return NV_ERR_ILLEGAL_ACTION;
+    if (!nv_xnu_work_lock) return NV_OK;
+    uint64_t deadline; clock_interval_to_deadline(30, kSecondScale, &deadline);
+    IOLockLock(nv_xnu_work_lock);
+    while (nv_xnu_work_running > 0)
+        if (IOLockSleepDeadline(nv_xnu_work_lock, &nv_xnu_work_running, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) break;
+    const int left = nv_xnu_work_running;
+    IOLockUnlock(nv_xnu_work_lock);
+    if (left) { kprintf("NVRM-xnu: work queue flush: %d item(s) still running after 30 s\n", left); return NV_ERR_TIMEOUT; }
+    return NV_OK;
 }
 NV_STATUS NV_API_CALL os_schedule(void) { IOSleep(1); return NV_OK; }
 

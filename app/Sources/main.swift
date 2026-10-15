@@ -440,9 +440,14 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         case "backlight": run(mode: "verbose", pkg: "", efi: b["efi"] as? String ?? "auto",
                               extra: ["--backlight", (b["on"] as? Bool ?? false) ? "on" : "off"])
         // the opt-in AMD/Intel GPU driver (setup --gpu-test); --tool tells setup where the firmware list sits
-        case "gputest": run(mode: "verbose", pkg: "", efi: b["efi"] as? String ?? "auto",
-                            extra: ["--gpu-test", (b["on"] as? Bool ?? false) ? "on" : "off",
-                                    "--tool", Bundle.main.resourceURL!.appendingPathComponent("NullMothSafe.efi").path])
+        // a Mac with no NVIDIA card has no driver install behind it: the checked package rides along so setup can take
+        // the AMD/Intel test driver from it (setup verifies the SHA-256 again on a root-owned copy)
+        case "gputest":
+            let pk = (b["pkg"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            run(mode: "verbose", pkg: "", efi: b["efi"] as? String ?? "auto",
+                extra: ["--gpu-test", (b["on"] as? Bool ?? false) ? "on" : "off",
+                        "--tool", Bundle.main.resourceURL!.appendingPathComponent("NullMothSafe.efi").path]
+                    + (pk.map { ["--pkg", $0, "--sha", Package.sha256] } ?? []))
         default: break
         }
     }
