@@ -32,11 +32,13 @@ AUX="$SCRATCH/aux.kc"
 echo "linking $WANT against Tahoe KC into $AUX (scratch only) ..."
 sudo kmutil create -n aux --volume-root / "${KA[@]}" \
   -B "$KCDIR/BootKernelExtensions.kc" -S "$KCDIR/SystemKernelExtensions.kc" \
-  --repository "$REPO" --explicit-only -A "$AUX" -z > "$SCRATCH/kmutil.log" 2>&1
+  --repository "$REPO" --explicit-only \
+  --bundle-path "$REPO/NMXGPU.kext" --bundle-path "$REPO/NMXAccel.kext" --bundle-path "$REPO/NMXNPU.kext" \
+  -A "$AUX" -z > "$SCRATCH/kmutil.log" 2>&1   # --explicit-only builds only the bundles named here
 RC=$?
 if [ $RC -ne 0 ]; then echo "FAIL: kmutil create rc=$RC"; sed -n '1,40p' "$SCRATCH/kmutil.log"; echo "(scratch: $SCRATCH)"; exit 1; fi
 
-INSPECT=$(sudo kmutil inspect -k "$AUX" 2>/dev/null)
+INSPECT=$(sudo kmutil inspect -B "$KCDIR/BootKernelExtensions.kc" -S "$KCDIR/SystemKernelExtensions.kc" -A "$AUX" 2>/dev/null)   # inspect has no -k; an aux KC is read with its boot and system KCs
 miss=0
 for id in $WANT; do
   if printf '%s\n' "$INSPECT" | grep -q "$id"; then echo "ok   $id links into the Tahoe auxiliary KC"
