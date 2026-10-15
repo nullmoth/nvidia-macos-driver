@@ -383,6 +383,29 @@ NvBool nvkms_xnu_backlight(NvBool set, NvU32 *percent)
     return ok;
 }
 
+// System sleep, in the order of nvkms_suspend()/nvkms_resume() in nvidia-modeset-linux.c: kapi clients hear first, then
+// NVKMS shuts every head down and drops its per-open surface DMA state under the NVKMS lock, before RM saves the GPU.
+// Resume is the mirror image and runs after RM has resumed; the framebuffers re-commit their modes on their own wake.
+void nvKmsSuspend(NvU32 gpuId);
+void nvKmsResume(NvU32 gpuId);
+void nvKmsKapiSuspendResume(NvBool suspend);
+void nvkms_xnu_suspend(NvU32 gpuId)
+{
+    if (!gKmsLoaded) return;
+    nvKmsKapiSuspendResume(NV_TRUE);
+    IOLockLock(gKmsLock);
+    nvKmsSuspend(gpuId);
+    IOLockUnlock(gKmsLock);
+}
+void nvkms_xnu_resume(NvU32 gpuId)
+{
+    if (!gKmsLoaded) return;
+    IOLockLock(gKmsLock);
+    nvKmsResume(gpuId);
+    IOLockUnlock(gKmsLock);
+    nvKmsKapiSuspendResume(NV_FALSE);
+}
+
 struct nvkms_per_open *nvkms_open_from_kapi(struct NvKmsKapiDevice *device) { return kms_open_common(NVKMS_CLIENT_KERNEL_SPACE, device, 0); }
 void nvkms_close_from_kapi(struct nvkms_per_open *popen) { kms_close_common(popen); }
 NvBool nvkms_ioctl_from_kapi(struct nvkms_per_open *popen, NvU32 cmd, void *params, const size_t size)
