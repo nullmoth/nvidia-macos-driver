@@ -24,6 +24,10 @@ HARNESS = r'''
 #define nvlog(...) (fprintf(stderr, __VA_ARGS__), fputc('\n', stderr))
 static NSString *nvmtl_aircache_dir(void) { return @(getenv("TEST_AIRCACHE")); }
 #define NSTemporaryDirectory() (@(getenv("TEST_TMP")))
+#include <CommonCrypto/CommonDigest.h>
+// defined elsewhere in NVMTLLibraryLoad.m, outside the extracted functions
+static char gXlateTag[80] = "test";
+static void nvmtl_spvcache_trim_async(NSString *dir) { (void)dir; }
 ''' + funcs + r'''
 int main(void) { NSString *d = nvmtl_spvcache_dir(); printf("%s\n", d ? d.UTF8String : "(none)"); return 0; }
 '''
