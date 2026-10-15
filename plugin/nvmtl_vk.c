@@ -18,6 +18,7 @@
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
 #include "nvmtl_vk.h"
+#include "nvmtl_tex_upload.h"
 #include "nvmtl_sampler_state.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
 static int g_scalar_layout;
@@ -5366,6 +5367,7 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b)
 void nvmtl_vk_image_destroy(nvk_image *i)
 {
     if (g_state != 1 || !i || !i->img) return;
+    nvmtl_vk_image_upload_barrier(i);   // an async upload must finish before we free this image's memory (#96)
     g_img_gone++;
     if (i->view) pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL);
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
@@ -5380,6 +5382,7 @@ int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
 {
     if (g_state != 1 || !i || !i->img || i->placed || !i->usage || i->vpair || i->samples > 1 || i->mtl_type == 4 || i->mtl_type > 7
         || (i->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) return -1;
+    nvmtl_vk_image_upload_barrier(i);   // migrating the image recreates its memory: drain a pending upload first
     if (!to_sysmem == !i->sysmem) return 1;
     const uint32_t t = i->mtl_type;
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, (VkImageCreateFlags)i->vkflags,
@@ -5693,6 +5696,7 @@ int nvmtl_vk_copy_buffer(nvk_queue *q, nvk_buffer *src, size_t srcOff, nvk_buffe
 
 int nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes)
 {
+    nvmtl_vk_image_upload_barrier(img);   // a readback must observe a pending async upload: finish it first
     const size_t bpp = img->bpp ? img->bpp : 4;
     const uint32_t cols = nvmtl_blocks(img->w, img->bw), rows = nvmtl_blocks(img->h, img->bh);
     if (row_bytes < (size_t)cols * bpp) { nvlog("image_read: bytesPerRow %zu < %u blocks * %zu B", row_bytes, cols, bpp); return -1; }
@@ -5762,6 +5766,59 @@ int nvmtl_vk_cmd_prepare_sampled_image(nvk_cmdbuf *c, nvk_image *img, int storag
     return 0;
 }
 
+// Asynchronous texture upload (NVMTL_ASYNC_TEX_UPLOAD, default OFF). replaceRegion otherwise submits a copy
+// and drains the GPU before returning, so a GL app that uploads many textures per frame stalls once per
+// upload. With the flag on, a region upload gets its OWN staging buffer and command buffer, is submitted
+// without waiting, and its handle is kept on the image (nvk_image.up_token). The handle is finished (fence
+// waited, staging freed) before anything overwrites, reads back or frees that image's memory -- see
+// plugin/nvmtl_tex_upload.h for the invariants (unit-tested in tools/test_tex_upload.c). An earlier attempt
+// (community PR #96) deferred the wait without this lifetime guard and corrupted IOSurface textures that are
+// uploaded then destroyed; the guard below is what makes it safe, and it is a no-op on the synchronous path
+// because up_token is only ever set here.
+static int nvmtl_async_tex_upload(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_ASYNC_TEX_UPLOAD");
+        on = e && e[0] == '1';
+        nvlog("vk: async texture upload %s (NVMTL_ASYNC_TEX_UPLOAD)", on ? "ON" : "OFF (default)");
+    }
+    return on;
+}
+typedef struct { nvmtl_inflight infl; nvk_buffer stage; nvk_cmdbuf cb; } nvmtl_asyncup;
+static pthread_mutex_t g_asyncup_mutex = PTHREAD_MUTEX_INITIALIZER;
+// Atomically read and clear an image's pending async-upload handle (the consume/finish-first decision).
+static uint64_t nvmtl_asyncup_take(nvk_image *img)
+{
+    if (!img) return 0;
+    pthread_mutex_lock(&g_asyncup_mutex);
+    nvmtl_up_state s = { img->up_token };
+    const uint64_t token = nvmtl_up_before_consume(&s);
+    img->up_token = 0;
+    pthread_mutex_unlock(&g_asyncup_mutex);
+    return token;
+}
+static void nvmtl_asyncup_store(nvk_image *img, uint64_t token)
+{
+    pthread_mutex_lock(&g_asyncup_mutex);
+    nvmtl_up_state s = { img->up_token };
+    nvmtl_up_set(&s, token);
+    img->up_token = s.infl;
+    pthread_mutex_unlock(&g_asyncup_mutex);
+}
+// Finish (fence-wait) and free a handle taken from an image. Called OUTSIDE the lock so one image's wait
+// never blocks uploads to another; a no-op on 0 (which is every call on the synchronous path).
+static void nvmtl_asyncup_finish(uint64_t token)
+{
+    if (!token) return;
+    nvmtl_asyncup *au = (nvmtl_asyncup *)(uintptr_t)token;
+    nvmtl_vk_submit_finish(&au->infl);
+    nvmtl_vk_buffer_destroy(&au->stage);
+    free(au);
+}
+// Public guard for the consumers (readback, surface-out, migration, destroy): finish a pending upload first.
+void nvmtl_vk_image_upload_barrier(nvk_image *img) { nvmtl_asyncup_finish(nvmtl_asyncup_take(img)); }
+
 int nvmtl_vk_image_write_region_level(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes,
                                       uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level)
 { return nvmtl_vk_image_write_region_level_layer(q, img, src, row_bytes, x, y, w, h, level, 0); }
@@ -5775,18 +5832,43 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
     const uint32_t cols = nvmtl_blocks(w, img->bw), rows = nvmtl_blocks(h, img->bh);
     if (img->bw > 1 && ((x % img->bw) || (y % img->bh))) { nvlog("image_write_region: origin (%u,%u) is not block-aligned (%ux%u blocks)", x, y, img->bw, img->bh); return -1; }
     if (row_bytes < (size_t)cols * bpp) { nvlog("image_write_region: bytesPerRow %zu < %u blocks * %zu B", row_bytes, cols, bpp); return -1; }
-    nvk_buffer stage;
-    if (nvmtl_vk_stage(q, (size_t)cols * rows * bpp, &stage)) return -1;
-    uint8_t *dst = (uint8_t *)stage.map;
+    const size_t bytes = (size_t)cols * rows * bpp;
+    // Decide sync vs async. Async gives the upload its own staging buffer + command buffer so the submission
+    // can be left in flight; sync keeps the shared per-thread staging buffer and waits (the default path).
+    nvmtl_up_state upst = { img->up_token };
+    uint64_t finish_first = 0;
+    const nvmtl_up_submit mode = nvmtl_up_before_upload(&upst, nvmtl_async_tex_upload(), &finish_first);
+    nvmtl_asyncup *au = NULL;
+    nvk_buffer *stageb, stage_sync;
+    nvk_cmdbuf local_cb, *c;
+    if (mode == NVMTL_UP_SUBMIT_ASYNC) {
+        // a prior async upload to THIS image must land before we overwrite the texture or its staging
+        if (finish_first) nvmtl_asyncup_finish(nvmtl_asyncup_take(img));
+        au = (nvmtl_asyncup *)calloc(1, sizeof *au);
+        if (!au || nvmtl_vk_buffer_create(bytes, 1, &au->stage)) { free(au); au = NULL; }   // fall back to sync
+    }
+    if (au) { stageb = &au->stage; c = &au->cb; }
+    else {
+        if (nvmtl_vk_stage(q, bytes, &stage_sync)) return -1;
+        stageb = &stage_sync; c = &local_cb;
+    }
+    uint8_t *dst = (uint8_t *)stageb->map;
     for (uint32_t r = 0; r < rows; r++) memcpy(dst + (size_t)r * cols * bpp, (const uint8_t *)src + (size_t)r * row_bytes, (size_t)cols * bpp);
-    nvk_cmdbuf c; if (nvmtl_vk_cmd_begin(q, &c)) return -1;
-    img_to(&c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+    if (nvmtl_vk_cmd_begin(q, c)) { if (au) { nvmtl_vk_buffer_destroy(&au->stage); free(au); } return -1; }
+    img_to(c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     VkBufferImageCopy bic = { 0, 0, 0, { nvmtl_copy_aspect(img), level, img->mtl_type == 7 ? 0u : layer, 1 }, { (int32_t)x, (int32_t)y, img->mtl_type == 7 ? (int32_t)layer : 0 }, { w, h, 1 } };
-    pvkCmdCopyBufferToImage(c.cb, (VkBuffer)stage.buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
-    img_to(&c, img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+    pvkCmdCopyBufferToImage(c->cb, (VkBuffer)stageb->buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    img_to(c, img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    return nvmtl_vk_submit_wait(&c);
+    if (au) {
+        // submit without waiting; queue order + the SHADER_READ barrier above order the copy before any later
+        // draw that samples this image, and the handle is finished before a readback, destroy or re-upload.
+        if (nvmtl_vk_submit_begin_at(c, &au->infl, "tex upload async")) { nvmtl_vk_buffer_destroy(&au->stage); free(au); return -1; }
+        nvmtl_asyncup_store(img, (uint64_t)(uintptr_t)au);
+        return 0;
+    }
+    return nvmtl_vk_submit_wait(c);
 }
 
 int nvmtl_vk_image_read_region_level(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes,
@@ -5795,6 +5877,7 @@ int nvmtl_vk_image_read_region_level(nvk_queue *q, nvk_image *img, void *dst, si
 int nvmtl_vk_image_read_region_level_layer(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes,
                                      uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level, uint32_t layer)
 {
+    nvmtl_vk_image_upload_barrier(img);   // a readback must observe a pending async upload: finish it first
     if (layer >= (img->layers ? img->layers : 1)) { nvlog("image_read_region: layer %u — this image has %u", layer, img->layers ? img->layers : 1); return -1; }
     { const uint32_t lw = img->w >> level ? img->w >> level : 1, lh = img->h >> level ? img->h >> level : 1;
       if (!w || !h || x + w > lw || y + h > lh) { nvlog("image_read_region: %ux%u at (%u,%u) is outside %ux%u (level %u)", w, h, x, y, lw, lh, level); return -1; } }
