@@ -323,6 +323,25 @@ static void nvmtl_gsub_census(void) {
           (unsigned long long)s[1], (unsigned long long)s[2], (unsigned long long)s[3], (unsigned long long)s[4],
           (unsigned long long)s[5], (unsigned long long)s[6], (unsigned long long)s[7], (unsigned long long)s[8]);
 }
+// A texture over a copy-backed buffer must refresh the same bytes as a direct
+// buffer binding. Keep direct managed-buffer writeback and copy each backing once.
+static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL writtenOnly) {
+    NSMutableArray<NVMTLBuffer *> *copies = nil;
+    for (id resource in resources) {
+        NVMTLBuffer *buffer = nil;
+        if ([resource isKindOfClass:[NVMTLBuffer class]]) buffer = resource;
+        else if ([resource isKindOfClass:[NVMTLTexture class]]) {
+            NVMTLTexture *texture = resource;
+            if (writtenOnly && texture->_usage != MTLTextureUsageUnknown &&
+                !(texture->_usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget))) continue;
+            buffer = texture->_backBuf ?: (texture->_parent ? texture->_parent->_backBuf : nil);
+        }
+        if (!buffer || (!buffer->_hostPtr && !buffer->_shadow.map)) continue;
+        if (!copies) copies = [NSMutableArray new];
+        if (![copies containsObject:buffer]) [copies addObject:buffer];
+    }
+    return copies;
+}
 - (BOOL)nvmtlSubmitAhead {
     if (_executionDone || _cbError || !_committed) return NO;
     if (_nextSubmit < _nextPart) _nextSubmit = _nextPart;
@@ -350,12 +369,13 @@ static void nvmtl_gsub_census(void) {
             static int hold = -1;
             if (hold < 0) { const char *e = getenv("NVMTL_GSUB_HOSTPTR_LIFT"); hold = (e && *e && *e != '0') ? 0 : 1; }
             if (hold) {
-                for (id resource in part->resources)
-                    if ([resource isKindOfClass:[NVMTLBuffer class]] && ((NVMTLBuffer *)resource)->_hostPtr) return NO;
+                for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, NO))
+                    if (buffer->_hostPtr) return NO;
             }
         }
         nvmtl_inflight *f = nvmtl_vk_inflight_new();
         if (!f) return NO;
+        for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, NO)) nvmtl_buffer_sync_in(buffer);
         [self nvmtlMarkScheduled];
         if (!_legacyKernelStart) _legacyKernelStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
         const int r = nvmtl_vk_submit_begin(&part->commands, f);
@@ -424,8 +444,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
         if (part->inflight) result = nvmtl_gsub_finish(part);
         else if (part->aheadFailed) result = part->aheadFailed;
         else {
-            for (id resource in part->resources)
-                if ([resource isKindOfClass:[NVMTLBuffer class]]) nvmtl_buffer_sync_in(resource);
+            for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, NO)) nvmtl_buffer_sync_in(buffer);
             result = nvmtl_vk_submit_wait(&part->commands);
         }
         if (result == -2) {
@@ -436,8 +455,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
         BOOL published = result == 0;
         if (published) {
             for (NVMTLTexture *texture in part->surfaces) if (![texture nvmtlSurfaceOut]) published = NO;
-            for (id resource in part->resources)
-                if ([resource isKindOfClass:[NVMTLBuffer class]]) nvmtl_buffer_sync_out(resource);
+            for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, YES)) nvmtl_buffer_sync_out(buffer);
         }
         if (!published) {
             [self nvmtlFinishExecution:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal

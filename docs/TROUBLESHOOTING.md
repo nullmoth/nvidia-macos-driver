@@ -52,6 +52,13 @@ stick made by an old 1401 keeps the old problem until you make it again.
 | "Quadro T1200 / T-series … is older than the driver supports" | The installer's list did not include every Turing workstation card. | Fixed in 1.14: every Turing or newer card is accepted. |
 | The app edits the wrong OpenCore partition | Two OpenCore partitions on the macOS disk. | Fixed in 1.14 (the boot arguments decide which one started the Mac). |
 
+### Several NVIDIA cards
+
+If several NVIDIA cards attempt startup, or a custom kernel collection loads none of
+the driver components, see [selecting one GPU](MULTI-GPU.md). The workaround was boot-tested
+on four RTX 4090s with 1.14.7 and macOS 15.8.1; it restricts NVRM/NVAccel to the display card
+and rebuilds the final collection from permanent installation paths.
+
 ## 4. Getting back in
 
 - **Start once without the driver:** pick **1401: Start once without NVIDIA driver** in the OpenCore picker, press Y,

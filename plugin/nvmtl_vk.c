@@ -336,7 +336,7 @@ static VkResult nvmtl_opaque_AllocateMemory(VkDevice dev, const VkMemoryAllocate
 _Static_assert(sizeof(VkImage) == sizeof(void *) && _Alignof(VkImage) == _Alignof(void *), "VkImage bridge ABI");
 static VkImageCreateFlags nvmtl_sample_depth_flags(const VkImageCreateInfo *info)
 {
-    if (!g_sample_locations || info->tiling != VK_IMAGE_TILING_OPTIMAL ||
+    if (!g_sample_locations || info->samples <= VK_SAMPLE_COUNT_1_BIT || info->tiling != VK_IMAGE_TILING_OPTIMAL ||
         !(info->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) return info->flags;
     switch (info->format) {
     case VK_FORMAT_D16_UNORM: case VK_FORMAT_X8_D24_UNORM_PACK32: case VK_FORMAT_D32_SFLOAT:
@@ -779,6 +779,7 @@ static int nvmtl_vk_initialize(void)
                     if (!have[w] && !strcmp(props[i].extensionName, kWant[w])) { have[w] = 1; exts[next++] = kWant[w]; }
         free(props);
     }
+    /* Single-sample rendering uses its fixed center; only MSAA needs this extension. */
     if (have[12]) {
         PFN_vkGetPhysicalDeviceProperties2 props2 = (PFN_vkGetPhysicalDeviceProperties2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceProperties2");
         g_sample_props = (VkPhysicalDeviceSampleLocationsPropertiesEXT){ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLE_LOCATIONS_PROPERTIES_EXT };
@@ -786,7 +787,7 @@ static int nvmtl_vk_initialize(void)
         if (props2) props2(g_pdev, &pp);
         g_sample_locations = props2 && g_lim.maxPushConstantsSize >= NVMTL_SAMPLE_POSITION_OFFSET + NVMTL_SAMPLE_POSITION_BYTES && g_sample_props.variableSampleLocations &&
             g_sample_props.maxSampleLocationGridSize.width >= 1 && g_sample_props.maxSampleLocationGridSize.height >= 1 &&
-            (g_sample_props.sampleLocationSampleCounts & 15u) == 15u && g_sample_props.sampleLocationSubPixelBits == 4 &&
+            (g_sample_props.sampleLocationSampleCounts & (VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT | VK_SAMPLE_COUNT_8_BIT)) == (VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT | VK_SAMPLE_COUNT_8_BIT) && g_sample_props.sampleLocationSubPixelBits == 4 &&
             g_sample_props.sampleLocationCoordinateRange[0] <= 0 && g_sample_props.sampleLocationCoordinateRange[1] >= 0.9375f;
     }
     g_dyn3 = have[0]; g_clip = have[0] && have[1]; g_budget_ext = have[2]; g_rt = have[3] && have[4] && have[5];
@@ -2866,7 +2867,7 @@ int nvmtl_vk_sample_positions_default(uint32_t count, nvmtl_sample_pattern *out)
     /* Without the programmable-position backend the hardware still draws the standard pattern, which is Metal's default.
        Apps read these positions and pass them back to setSamplePositions; returning nothing left their array
        uninitialised, the pass then failed validation and drew nothing (Chess). */
-    if (nvmtl_vk_sample_positions_backend() && !(g_sample_props.sampleLocationSampleCounts & count)) return -1;
+    if (nvmtl_vk_sample_positions_backend() && count != 1 && !(g_sample_props.sampleLocationSampleCounts & count)) return -1;
     return nvmtl_sample_default(count, out);
 }
 static VkSampleLocationsInfoEXT nvmtl_sample_info(const nvmtl_sample_pattern *p, VkSampleLocationEXT vk[8])
@@ -3745,7 +3746,7 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
         dsci.pDynamicStates = dynl; dsci.dynamicStateCount = nl;
     }
     VkDynamicState dynsample[22];
-    if (g_sample_locations) {
+    if (g_sample_locations && samples > 1) {
         for (uint32_t i = 0; i < dsci.dynamicStateCount; ++i) dynsample[i] = dsci.pDynamicStates[i];
         dynsample[dsci.dynamicStateCount++] = VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_EXT;
         dsci.pDynamicStates = dynsample;
@@ -3759,7 +3760,7 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     nvmtl_sample_pattern default_sample;
     VkSampleLocationEXT default_vk[8];
     VkPipelineSampleLocationsStateCreateInfoEXT sample_state = { VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT };
-    if (g_sample_locations) {
+    if (g_sample_locations && samples > 1) {
         if (nvmtl_sample_default(samples > 1 ? samples : 1, &default_sample)) goto pipeline_failed;
         sample_state.sampleLocationsEnable = VK_TRUE;
         sample_state.sampleLocationsInfo = nvmtl_sample_info(&default_sample, default_vk);
@@ -4447,7 +4448,7 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
         if (ps->colview[i] == img->view && img->samples <= 1) { if (nvmtl_vk_cmd_clear_image(c, img, ps->clear[i])) nvlog("begin_render: apps2 colour %u clear FAILED", i); }
         else { static int said; if (said++ < 4) nvlog("begin_render: apps2 colour %u is not drawn by this pipeline and is a level/slice/multisample view — its Clear is NOT applied", i); }
     }
-    if (p->has_depth && ps->ds && g_sample_locations &&
+    if (p->has_depth && ps->ds && ps->ds->samples > 1 && g_sample_locations &&
         (ps->load & (NVMTL_LOAD_DEPTH | NVMTL_LOAD_STENCIL)))
         nvmtl_private_depth_layout(c, ps->ds, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     VkImageView views[2 * NVMTL_NCOL + 2]; uint32_t nviews = 0, was = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; int first = 1;
@@ -4505,7 +4506,7 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
         VK_STRUCTURE_TYPE_RENDER_PASS_SAMPLE_LOCATIONS_BEGIN_INFO_EXT, NULL,
         p->has_depth ? 1u : 0u, p->has_depth ? &attachment : NULL,
         p->has_depth ? 1u : 0u, p->has_depth ? &subpass : NULL };
-    if (g_sample_locations) {
+    if (g_sample_locations && pattern.count > 1) {
 
         rbi.pNext = &location_begin;
         pvkCmdSetSampleLocationsEXT(c->cb, &locations);
@@ -5727,7 +5728,7 @@ static void img_to(nvk_cmdbuf *c, nvk_image *img, VkImageLayout to,
         (VkImageLayout)img->layout, to, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, r };
     nvmtl_sample_pattern pattern = c->sample_pattern;
     VkSampleLocationEXT positions[8]; VkSampleLocationsInfoEXT locations;
-    if (g_sample_locations && (r.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)) {
+    if (g_sample_locations && img->samples > 1 && (r.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)) {
         if (pattern.count != img->samples) nvmtl_sample_default(img->samples, &pattern);
         locations = nvmtl_sample_info(&pattern, positions);
 
@@ -5754,7 +5755,7 @@ int nvmtl_vk_cmd_prepare_sampled_image(nvk_cmdbuf *c, nvk_image *img, int storag
 {
     if (!c || !img || c->in_rp) return -1;
     const VkImageLayout to = storage ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    if (g_sample_locations && (nvmtl_barrier_aspect(img) & VK_IMAGE_ASPECT_DEPTH_BIT))
+    if (g_sample_locations && img->samples > 1 && (nvmtl_barrier_aspect(img) & VK_IMAGE_ASPECT_DEPTH_BIT))
         nvmtl_private_depth_layout(c, img, to);
     else img_to(c, img, to, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
                 VK_ACCESS_SHADER_READ_BIT | (storage ? VK_ACCESS_SHADER_WRITE_BIT : 0),
