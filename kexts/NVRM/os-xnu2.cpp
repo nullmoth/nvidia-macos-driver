@@ -12,6 +12,7 @@
 #include <kern/thread.h>
 #include <kern/thread_call.h>
 #include <kern/clock.h>
+#include <sys/kauth.h>
 #include <kern/task.h>
 #include <sys/vnode.h>
 #include <sys/fcntl.h>
@@ -321,8 +322,19 @@ static void nv_q_init(void)
     kprintf("NVRM-xnu: QUARANTINE armed, selftest %s\n", nv_q_selftest);
 }
 
+// The panic-hunt diagnostics below print physical addresses of RM allocations and, for nvrm_winraw, the bytes of a
+// physical memory window. Up to 2.0.2 they were registered on every machine and readable by any user. They now exist
+// only with boot-arg nvrmdiag=1, and even then only root may read them.
+static bool nv_diag_on(void)
+{
+    static int on = -1;
+    if (on < 0) { int v = 0; on = (PE_parse_boot_argn("nvrmdiag", &v, sizeof(v)) && v) ? 1 : 0; }
+    return on == 1;
+}
+#define NV_DIAG_ROOT_ONLY() do { if (!kauth_cred_issuser(kauth_cred_get())) return EPERM; } while (0)
 static int nv_watch_sysctl SYSCTL_HANDLER_ARGS
 {
+    NV_DIAG_ROOT_ONLY();
     char *buf = (char *)IOMalloc(sizeof nv_watch_text + 512);
     if (!buf) return ENOMEM;
     IOSimpleLockLock(nv_watch_lock);
@@ -350,7 +362,7 @@ static void nv_watch_init(void)
     bool neg = nv_watch_hit(0x4132a000ULL, 0x1000ULL) == 0;
     bool two = nv_watch_hit(0x0132b000ULL + PAGE_SIZE, kNvWatchSlot) == 0x4132b000ULL;
     nv_watch_selftest = (pos && neg && two) ? "ok (hit/miss/next-slot)" : "FAILED — events below are not trustworthy";
-    sysctl_register_oid(&sysctl__debug_nvrm_watchpage);
+    if (nv_diag_on()) sysctl_register_oid(&sysctl__debug_nvrm_watchpage);
     kprintf("NVRM-xnu: WATCHPAGE armed, selftest %s\n", nv_watch_selftest);
 }
 extern "C" void nv_xnu_dump_live_allocs(void)
@@ -528,6 +540,7 @@ extern "C" bool nv_xnu_chat(void)
 }
 static int nv_pm_sysctl SYSCTL_HANDLER_ARGS
 {
+    NV_DIAG_ROOT_ONLY();
     const size_t cap = 8192; char *buf = (char *)IOMalloc(cap); if (!buf) return ENOMEM;
     size_t h = 0; int w;
     w = snprintf(buf, cap, "selftest %s\nkernel-alias %lld (live %lld) | FOREIGN-KMAP %lld | FREE-DEFERRED %lld (released %lld) | "
@@ -760,6 +773,7 @@ static const char *nv_pv_arm(void)
 
 static int nv_pv_sysctl SYSCTL_HANDLER_ARGS
 {
+    NV_DIAG_ROOT_ONLY();
     const size_t cap = 16384; char *buf = (char *)IOMalloc(cap); if (!buf) return ENOMEM;
     size_t h = 0; int w;
     w = snprintf(buf, cap, "state %s | pages 0x%x managed %llu | passes %llu (full every 5 s) | repair %s | slide 2MB-aligned %s\n",
@@ -830,6 +844,7 @@ static size_t nv_wm_unarmed(char *buf, size_t cap)
 
 static int nv_wm_why_sysctl SYSCTL_HANDLER_ARGS
 {
+    NV_DIAG_ROOT_ONLY();
     const size_t cap = 160 * 1024;
     char *buf = (char *)IOMalloc(cap);
     if (!buf) return ENOMEM;
@@ -922,6 +937,7 @@ SYSCTL_PROC(_debug, OID_AUTO, nvrm_winwhy, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG
 static const NvU64 kPvcMaxPages = 262144;
 static int nv_pvchain_sysctl SYSCTL_HANDLER_ARGS
 {
+    NV_DIAG_ROOT_ONLY();
     const size_t cap = 64 * 1024;
     char *buf = (char *)IOMalloc(cap);
     if (!buf) return ENOMEM;
@@ -994,6 +1010,7 @@ SYSCTL_PROC(_debug, OID_AUTO, nvrm_pvchain, CTLTYPE_STRING | CTLFLAG_RD | CTLFLA
 
 static int nv_wm_raw_sysctl SYSCTL_HANDLER_ARGS
 {
+    NV_DIAG_ROOT_ONLY();
     const size_t cap = 96 * 1024;
     char *buf = (char *)IOMalloc(cap);
     if (!buf) return ENOMEM;
@@ -1079,9 +1096,9 @@ NV_STATUS NV_API_CALL nv_alloc_pages(nv_state_t *nv, NvU32 page_count, NvU64 pag
     a->ptes = (NvU64 *)kern_os_malloc((size_t)n * sizeof(NvU64));
     if (a->ptes) { for (NvU32 i = 0; i < n; i++) a->ptes[i] = pte_array[i]; a->nptes = n; }
     nv_pm_init();
-    if (!nv_pm_registered && nv_pm_lock) { nv_pm_registered = true; sysctl_register_oid(&sysctl__debug_nvrm_physmap); }
+    if (!nv_pm_registered && nv_pm_lock && nv_diag_on()) { nv_pm_registered = true; sysctl_register_oid(&sysctl__debug_nvrm_physmap); }
     nv_pm_link(a);
-    nv_pv_start();
+    if (nv_diag_on()) nv_pv_start();   // detect-only page sentinel thread from the class-F panic hunt
     *priv_data = a;
     if (nv_xnu_live_n < 512) nv_xnu_live[nv_xnu_live_n++] = a;
     nv_watch_init(); nv_q_init(); OSIncrementAtomic64((volatile SInt64 *)&nv_watch_allocs); OSAddAtomic64((SInt64)bytes, (volatile SInt64 *)&nv_watch_bytes_seen);
