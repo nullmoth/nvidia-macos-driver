@@ -799,6 +799,14 @@ else
   if [ $DRY = 0 ] && [ -z "$VERB" ] && [ "${UPD:-}" != finish ] && on_usb "$EFI"; then
     note "OpenCore remains on the selected startup stick. Keep it attached for every restart; automatic copying onto another EFI partition is disabled"
     note "Existing internal Windows and vendor boot files were left untouched. Review the internal boot setup separately before removing the stick"
+    # The stranding case: this Mac started OpenCore from the removable stick, and the internal disk macOS runs from has
+    # no OpenCore of its own. Without the stick it will not start at all, so the "Remove NVIDIA driver" entry is gone the
+    # moment the stick is unplugged. An automatic copy onto the internal EFI left Macs unbootable, so it stays disabled;
+    # instead, say the one exact thing to do. Reading the internal EFI is a mount and a lookup, never a write.
+    iesp=$(boot_esp)
+    if [ -n "$iesp" ] && ! on_usb "$iesp" && mount_efi "$iesp"; then
+      [ -n "$(ocrel_in "$MOUNT_POINT")" ] || note "This Mac starts OpenCore only from the stick ($EFI); its internal disk ($iesp) has no OpenCore, so without the stick it will not start and \"$TOOL_NAME\" will not appear. Keep the stick plugged in for every restart. To start from the internal disk on its own, copy the EFI folder from the stick to the internal disk's EFI partition and set it to boot by following the OpenCore Install Guide (dortania.github.io/OpenCore-Install-Guide); this app does not copy it for you, because an automatic copy has left Macs unbootable."
+    fi
   fi
 
 fi
