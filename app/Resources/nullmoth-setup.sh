@@ -656,7 +656,7 @@ fi
 INSTALL_THEN_PREPARE=0; [ "$UPD" = prepare ] && [ -n "$PKG" ] && INSTALL_THEN_PREPARE=1
 # the app's boot-logo and test-driver switches run setup without a package; 1.14 sent them through the package check
 # ("STOP package not found:", 4 uploads in the first hour of 1.14), so neither switch worked
-if [ -z "$USBMAP" ] && [ -z "$VERB" ] && [ -z "${SETLOGO:-}" ] && [ -z "${GPUTEST:-}" ] && { [ -z "$UPD" ] || [ $INSTALL_THEN_PREPARE = 1 ]; }; then
+if [ -z "$USBMAP" ] && [ -z "$VERB" ] && [ -z "${SETLOGO:-}" ] && [ -z "${GPUTEST:-}" ] && [ -z "${BACKLIGHT:-}" ] && { [ -z "$UPD" ] || [ $INSTALL_THEN_PREPARE = 1 ]; }; then
 step "Checking the driver package"
 [ -f "$PKG" ] || stop "package not found: $PKG"
 # the app's copy is writable by the user: hash and unpack a root-owned copy, so it cannot be swapped after the check
@@ -912,7 +912,24 @@ if [ -n "${GPUTEST:-}" ]; then
       -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc -z > "$ST/gputest-kmutil.log" 2>&1; }
   if [ "$GPUTEST" = on ]; then
     [ -n "$WANT" ] || stop "this Mac has no AMD or Intel GPU for this driver"
-    [ -d "$GK" ] || stop "this driver package has no AMD/Intel GPU driver (NMXGPU) - update the driver first"
+    # A Mac with only an AMD or Intel GPU never ran the NVIDIA install (it stops at "no NVIDIA GPU"), so the test driver
+    # was never on disk and this switch could not work for the very Macs it is for. The app passes the downloaded,
+    # checksum-verified package: its AMD/Intel kexts, GPU userland and NPU files are taken from a root-owned copy.
+    if [ ! -d "$GK" ] && [ -n "$PKG" ] && [ -n "$SHA" ] && [ -f "$PKG" ]; then
+      step "Taking the AMD/Intel test driver from the downloaded package"
+      PKGDIR=$(mktemp -d /var/tmp/nullmoth-pkg.XXXX) || stop "could not make a folder to check the package in"
+      cp "$PKG" "$PKGDIR/" || stop "could not copy the package for checking"
+      PK=$PKGDIR/$(basename "$PKG")
+      [ "$(shasum -a 256 "$PK" | awk '{print $1}')" = "$SHA" ] || stop "package checksum does not match - download it again"
+      tar -xzf "$PK" -C "$PKGDIR" || stop "could not unpack the package"
+      PR="$PKGDIR/pkgroot"; (cd "$PR" && shasum -a 256 -c SHA256SUMS --quiet) || stop "the package's files do not match its SHA256SUMS"
+      [ -d "$PR/Library/NullMoth/kexts/$KMAJ/NMXGPU.kext" ] || stop "this driver package has no AMD/Intel GPU driver for macOS $KMAJ"
+      mkdir -p /Library/NullMoth
+      for d in kexts gpu-userland npu; do [ ! -d "$PR/Library/NullMoth/$d" ] || ditto "$PR/Library/NullMoth/$d" "/Library/NullMoth/$d" || stop "could not copy $d"; done
+      chown -R root:wheel /Library/NullMoth/kexts && chmod -R go-w /Library/NullMoth/kexts
+      ok "AMD/Intel test driver taken from the package (no NVIDIA driver installed)"
+    fi
+    [ -d "$GK" ] || stop "this driver package has no AMD/Intel GPU driver (NMXGPU) - download the driver package first"
     [ -f "$MAN" ] || stop "this copy of the app has no GPU firmware list"
     step "Downloading the GPU firmware (linux-firmware, every file checked)"
     COMMIT=$(awk 'NR==2{print}' "$MAN" | grep -oE 'raw/[0-9a-f]{40}' | cut -d/ -f2); [ -n "$COMMIT" ] || stop "the GPU firmware list names no commit"

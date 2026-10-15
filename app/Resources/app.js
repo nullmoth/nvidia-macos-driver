@@ -35,6 +35,15 @@ function render(m) {
     $("verdict").innerHTML = `<p class="good">NullMoth components are loaded and an NVIDIA Metal device is visible.</p><p>Use Check for a newer driver to update the driver. To remove the driver, use Remove the driver below.</p>`;
     $("steps").hidden = true; return;
   }
+  // No NVIDIA card but an AMD or Intel GPU: the NVIDIA steps do not apply, the AMD/Intel test driver below does. It needs
+  // the driver package (that is where the test driver ships), so the download stays offered.
+  const other = !card && m.arch === "x86_64" && !m.translated && [15, 26].includes(m.major) && m.gpus.some((g) => g.vendor === "1002" || g.vendor === "8086");
+  if (why && other) {
+    const pk2 = m.packages.find((p) => p.ok === "yes"); if (pk2) S.pkg = pk2.path;
+    $("verdict").innerHTML = `<p class="warn">No NVIDIA card, so the NVIDIA driver does not apply here.</p><p>This Mac's ${esc(m.gpus.filter((g) => g.vendor !== "10DE").map((g) => g.name).join(", "))} can try the experimental AMD / Intel GPU driver: see <b>AMD / Intel GPU and NPU driver (test)</b> below. ${S.pkg ? "The driver package is here and checked." : "Get the driver package first (it carries the test driver):"}</p>` + (S.pkg ? "" : '<p><button type="button" class="b" id="dl2">Download the driver package</button></p>');
+    const d2 = $("dl2"); if (d2) d2.onclick = () => $("dl").click();
+    $("steps").hidden = true; return;
+  }
   if (why) { $("verdict").innerHTML = `<p class="bad">Can't install here.</p><p>${why}</p>`; $("steps").hidden = true; return; }
   if (m.files && !S.installed) {
     $("verdict").innerHTML = '<p class="warn">The driver is installed but not running.</p><p>Restart. If macOS blocked a system extension, allow it in Privacy &amp; Security, then restart once more.</p>';
@@ -155,7 +164,7 @@ $("logoon").onclick = () => post({ act: "logo", on: true, efi: efi() });
 $("logooff").onclick = () => post({ act: "logo", on: false, efi: efi() });
 $("blon").onclick = () => post({ act: "backlight", on: true, efi: efi() });
 $("bloff").onclick = () => post({ act: "backlight", on: false, efi: efi() });
-$("gpuon").onclick = () => post({ act: "gputest", on: true, efi: efi() });
+$("gpuon").onclick = () => post({ act: "gputest", on: true, efi: efi(), pkg: S.pkg });
 $("gpuoff").onclick = () => post({ act: "gputest", on: false, efi: efi() });
 $("priv").onclick = (e) => { e.preventDefault(); post({ act: "privacy" }); };
 $("logs").onclick = (e) => { e.preventDefault(); post({ act: "logs" }); };
