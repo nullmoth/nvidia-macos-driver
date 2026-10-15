@@ -55,7 +55,7 @@ has() { plutil -extract "$1" raw -o - "$C" >/dev/null 2>&1; }
 get() { plutil -extract "$1" raw -o - "$C" 2>/dev/null; }
 mnt() { diskutil info "$1" 2>/dev/null | awk -F': *' '/Mount Point/{print $2}'; }
 ro_why() {      # $1 = a file; explains a failed write when macOS mounted its partition read-only
-  # 1.14.7 setup log (10-14): "cp: ... Read-only file system", and the stop said only "could not back up". macOS mounts a
+  # A 1.14.7 setup log showed "cp: ... Read-only file system", and the stop said only "could not back up". macOS mounts a
   # FAT partition read-only when its repair check fails (left unclean by Windows Fast Startup or a forced power-off) or
   # when the stick is write-locked.
   local m; m=$(df -P "$(dirname "$1")" 2>/dev/null | awk 'NR==2{print $NF}')

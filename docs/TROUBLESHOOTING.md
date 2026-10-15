@@ -61,22 +61,22 @@ and rebuilds the final collection from permanent installation paths.
 
 ## 4. Getting back in
 
-- **Start once without the driver:** pick **1401: Start once without NVIDIA driver** in the OpenCore picker, press Y,
+- Start once without the driver: pick **1401: Start once without NVIDIA driver** in the OpenCore picker, press Y,
   then choose macOS or Recovery. The driver is back at the next start. (1.14)
-- **Remove the driver:** pick **1401: Remove NVIDIA driver**, press Y, then choose macOS. It removes itself and restarts.
+- Remove the driver: pick **1401: Remove NVIDIA driver**, press Y, then choose macOS. It removes itself and restarts.
   Removal also puts the saved screen resolution and refresh rate back to a safe default, so the Mac comes up with a
   picture even if the driver had been set to a mode the built-in graphics cannot show.
-- **If you cannot see the entry:** the installer and every update make the OpenCore picker show it — the picker appears
+- If you cannot see the entry: the installer and every update make the OpenCore picker show it — the picker appears
   on start-up, uses the Builtin picker (Apple's own picker never lists these entries), stops hiding entries behind the
   spacebar, and lists both NullMoth entries without pressing Space. Re-run the 1401 app (Install or Repair) once from a
   working start to apply this to a picker built before 1.15. If the entry still does not appear, the app was editing an
   OpenCore partition other than the one that starts the Mac — keep the disk or USB stick the Mac starts from attached,
   and choose its `config.plist` in the app.
-- **If the screen is black even at the picker, or the Mac starts only from a USB stick you no longer have:** boot into
+- If the screen is black even at the picker, or the Mac starts only from a USB stick you no longer have: boot into
   macOS Recovery (the driver cannot run there), open **Terminal**, run
   `nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove=1`, then restart into macOS. The Mac removes the driver by
   itself, with no picture needed, and restarts clean. This is the same removal the picker entry runs.
-- **Boot logo:** disabled by default. Driver installation and updates disable an existing logo entry because it can
+- Boot logo: disabled by default. Driver installation and updates disable an existing logo entry because it can
   prevent firmware from reaching the picker. Enable it only for a deliberate test. If the picker never appears, disable
   `NullMothLogo.efi` in the EFI configuration from another operating system; a boot argument cannot repair a pre-picker hang.
 

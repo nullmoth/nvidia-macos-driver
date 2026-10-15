@@ -66,8 +66,8 @@ static inline uint64_t nvrmVramBudget(uint64_t barLen)
 // The framebuffer's own scanout and cursor sit in BAR1 (useVideoMemory), yet the accel budget above never counted them,
 // so the blind 3/4 fraction both wasted the BAR1 the display was not using on a small display and over-promised it on a
 // large one. An RTX 2070 Super (256 MB BAR1, no larger size offered, 3840x2560) spent its 192 MB budget while ~40 MB of
-// scanout went uncounted: WindowServer's surfaces were refused and the desktop stayed black with a cursor (user logs
-// 2026-10-11, "BAR1 budget spent (200015872 of 201326592 bytes)" with NVAccel allocPhysical REFUSED). The budget is now
+// scanout went uncounted: WindowServer's surfaces were refused and the desktop stayed black with a cursor (user logs:
+// "BAR1 budget spent (200015872 of 201326592 bytes)" with NVAccel allocPhysical REFUSED). The budget is now
 // the BAR1 the display is not holding, less a margin for RM's own mappings (which are not in gVramMappedBytes); a large
 // display lowers it instead of overflowing the aperture. gVramDisplayBytes is the measured scanout+cursor; 0 means the
 // scanout is not mapped yet, so the conservative policy stands until it is.

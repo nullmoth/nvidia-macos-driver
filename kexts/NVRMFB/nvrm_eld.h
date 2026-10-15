@@ -35,7 +35,7 @@ static inline size_t nvrm_build_eld(const uint8_t *edid, size_t edid_len, int co
 {
     if (!edid || !out || edid_len < 128) return 0;             // no base block, nothing to describe
 
-    // --- base block: manufacturer name (bytes 8-9), product code (10-11), monitor name (0xFC descriptor) ---
+    // --- base block: manufacturer name (bytes 8 and 9), product code (bytes 10 and 11), monitor name (0xFC descriptor) ---
     uint8_t mfr0 = edid[8], mfr1 = edid[9], prod0 = edid[10], prod1 = edid[11];
 
     // The four 18-byte descriptors live at 54, 72, 90, 108. A display-product-name descriptor has the 5-byte prefix
