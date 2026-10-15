@@ -12257,3 +12257,31 @@ diff --git a/src/nouveau/vulkan/nvk_cmd_draw.c b/src/nouveau/vulkan/nvk_cmd_draw
        }
     }
  
+diff --git a/src/nouveau/headers/nv_push.h b/src/nouveau/headers/nv_push.h
+--- a/src/nouveau/headers/nv_push.h
++++ b/src/nouveau/headers/nv_push.h
+@@ -122,7 +122,21 @@ __push_verify(struct nv_push *push)
+    if (NVDEF_TEST(push->last_hdr_dw, NV906F, DMA, SEC_OP, ==, IMMD_DATA_METHOD))
+       return;
+
+-   ASSERTED uint32_t last_count =
+-      NVVAL_GET(push->last_hdr_dw, NV906F, DMA, METHOD_COUNT);
+-   assert(last_count);
++   uint32_t last_count =
++      NVVAL_GET(push->last_hdr_dw, NV906F, DMA, METHOD_COUNT);
++   /* A non-immediate method header left with a zero data count is a no-op to
++    * the hardware: it advances past the method, writing nothing.  NVK keeps the
++    * assert as a developer sanity check, but a driver that ships with assertions
++    * on (debugoptimized) must not abort an application over a benign empty
++    * method.  Internal copy and meta draws (vk_meta_copy_memory_to_image,
++    * vk_meta_draw_volume) reached here with an empty method and aborted Chess,
++    * mediaanalysisd and several video apps.  Warn once and continue, as the
++    * stale rasterization-samples assert in nvk_cmd_draw.c was downgraded. */
++   if (last_count == 0) {
++      static int warned;
++      if (!warned) {
++         warned = 1;
++         fprintf(stderr, "nvk: empty push method header (count 0); continuing\n");
++      }
++   }
+ }
