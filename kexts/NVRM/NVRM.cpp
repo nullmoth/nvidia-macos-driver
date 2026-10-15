@@ -1176,6 +1176,13 @@ bool NVRMUserClient::start(IOService *provider)
 bool NVRMUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type, OSDictionary *properties)
 {
     if (!super::initWithTask(owningTask, securityID, type, properties)) return false;
+    // The user-client type came from user space and anything non-zero silently became a device
+    // client, so a bogus type (0x4841, etc.) opened a working device client. Only two types exist:
+    // 0 = ctl (escalated RM state), 1 = device. Refuse anything else rather than treating it as a
+    // device client. The ctl client stays open to unprivileged callers on purpose -- the Vulkan
+    // userland opens it as the logged-in user -- and the escalated operations behind it are gated
+    // by the real-privilege check in _os_is_administrator and the root requirement on first init.
+    if (type > 1) return false;
     fIsCtl = (type == 0);
     nvu_memset(&fNvfp, 0, sizeof fNvfp);
     fNvfp.ctl_nvfp_priv = this;
