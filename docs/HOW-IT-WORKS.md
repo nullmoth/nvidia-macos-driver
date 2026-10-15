@@ -46,6 +46,10 @@ Linux's. At start it:
 
 The boot argument `-nvoff` makes NVRM leave the card alone. The recovery path below uses it.
 
+NVRM is also a power child of the GPU's PCI device: on system sleep it suspends NVKMS and puts RM in standby with all of
+video memory preserved, and on wake it restores the PCI state and resumes both. NVRMFB then does the wake work
+IOGraphics expects. [SLEEP-WAKE.md](SLEEP-WAKE.md) has the details.
+
 **NVRMFB.kext** is the macOS framebuffer (an `IOFramebuffer`). It publishes each NVKMS head as a display, reads real
 mode timings and EDIDs, and drives vblank from the GPU. **NVAccel.kext** is the `IOAccelerator` that WindowServer and
 IOSurface use for the shared surfaces the plugin renders into. **NVRMAGDC.kext** answers Apple's graphics-device-control

@@ -33,6 +33,31 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_kms_timer_max_depth, CTLFLAG_RD, &gKmsTimerMa
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_kms_timer_executed, CTLFLAG_RD, &gKmsTimerExecuted, "completed NVKMS timer callbacks");
 static void kms_timer_drain(thread_call_param_t, thread_call_param_t);
 
+// System sleep, the part nvkms_pm_lock does in nvidia-modeset-linux.c. nvkms_xnu_suspend() moves NVKMS to SUSPENDED
+// under gKmsLock before RM puts the GPU in standby, and nvkms_xnu_resume() moves it back once RM has resumed it (LOST
+// when the resume failed). While NVKMS is not RUNNING nothing may reach the display engine: a push to the core channel
+// of a GPU that lost power spins in nvEvoMakeRoom forever.
+enum { kKmsPmRunning = 0, kKmsPmSuspended = 1, kKmsPmLost = 2 };
+static int gKmsPmState = kKmsPmRunning;
+static const uint32_t kKmsPmWaitMs = 30000;
+static const char *const kKmsPmName[] = { "running", "suspended", "lost" };
+
+// Called with gKmsLock held. True once NVKMS may touch the GPU. tryOnly fails at once while suspended (the flips,
+// like nvkms_ioctl_from_kapi_try_pmlock); otherwise wait up to waitMs for the resume (0 = no limit). LOST never waits.
+static bool kms_pm_wait_locked(bool tryOnly, uint32_t waitMs)
+{
+    if (gKmsPmState == kKmsPmRunning) return true;
+    if (tryOnly || gKmsPmState == kKmsPmLost) return false;
+    uint64_t deadline = 0;
+    if (waitMs) clock_interval_to_deadline(waitMs, kMillisecondScale, &deadline);
+    while (gKmsPmState == kKmsPmSuspended) {
+        int wr = waitMs ? IOLockSleepDeadline(gKmsLock, &gKmsPmState, deadline, THREAD_UNINT)
+                        : IOLockSleep(gKmsLock, &gKmsPmState, THREAD_UNINT);
+        if (wr == THREAD_TIMED_OUT) break;
+    }
+    return gKmsPmState == kKmsPmRunning;
+}
+
 struct nvkms_per_open {
     void *data;
     enum NvKmsClientType type;
@@ -80,7 +105,8 @@ static struct nvkms_per_open *kms_open_common(enum NvKmsClientType type, struct 
 static void kms_close_common(struct nvkms_per_open *popen)
 {
     IOLockLock(gKmsLock);
-    nvKmsClose(popen->data);
+    if (kms_pm_wait_locked(false, kKmsPmWaitMs)) nvKmsClose(popen->data);
+    else kprintf("NVRM-xnu: NVKMS close while the GPU is %s: per-open state left allocated\n", kKmsPmName[gKmsPmState]);
     popen->data = NULL;
     popen->closing = true;
     if (popen->eventCall && popen->eventBusy) {
@@ -92,11 +118,11 @@ static void kms_close_common(struct nvkms_per_open *popen)
     nvkms_free(popen, sizeof *popen);
 }
 
-static NvBool kms_ioctl_common(struct nvkms_per_open *popen, NvU32 cmd, NvU64 address, size_t size)
+static NvBool kms_ioctl_common(struct nvkms_per_open *popen, NvU32 cmd, NvU64 address, size_t size, bool tryPm = false)
 {
     NvBool ret = NV_FALSE;
     IOLockLock(gKmsLock);
-    if (popen->data) ret = nvKmsIoctl(popen->data, cmd, address, size);
+    if (popen->data && kms_pm_wait_locked(tryPm, kKmsPmWaitMs)) ret = nvKmsIoctl(popen->data, cmd, address, size);
     IOLockUnlock(gKmsLock);
     return ret;
 }
@@ -125,6 +151,31 @@ NvBool nvkms_xnu_load(void)
     nv_gpu_info_t info[1];
     if (nvkms_enumerate_gpus(info) == 1) { nvKmsKapiProbe(&info[0]); kprintf("NVRM-xnu: nvKmsKapiProbe gpu_id 0x%x\n", info[0].gpu_id); }
     return NV_TRUE;
+}
+// nvkms_suspend() / nvkms_resume() of nvidia-modeset-linux.c. Suspend runs before rm_power_management(STANDBY) and
+// shuts every head down while the GPU still answers; resume runs after rm_power_management(RESUME). gpuOk false
+// leaves NVKMS LOST: every later ioctl and timer is refused instead of pushing to a core channel nobody serves.
+void nvkms_xnu_suspend(NvU32 gpuId)
+{
+    if (!gKmsLoaded) return;
+    nvKmsKapiSuspendResume(NV_TRUE);
+    IOLockLock(gKmsLock);
+    const bool wasRunning = gKmsPmState == kKmsPmRunning;
+    gKmsPmState = kKmsPmSuspended;
+    if (wasRunning) nvKmsSuspend(gpuId);
+    IOLockUnlock(gKmsLock);
+    kprintf("NVRM-xnu: NVKMS suspended (gpu 0x%x, was %s)\n", gpuId, wasRunning ? "running" : "not running");
+}
+void nvkms_xnu_resume(NvU32 gpuId, NvBool gpuOk)
+{
+    if (!gKmsLoaded) return;
+    IOLockLock(gKmsLock);
+    if (gpuOk && gKmsPmState == kKmsPmSuspended) nvKmsResume(gpuId);
+    gKmsPmState = gpuOk ? kKmsPmRunning : kKmsPmLost;
+    IOLockWakeup(gKmsLock, &gKmsPmState, false);
+    IOLockUnlock(gKmsLock);
+    if (gpuOk) nvKmsKapiSuspendResume(NV_FALSE);
+    kprintf("NVRM-xnu: NVKMS %s (gpu 0x%x)\n", gpuOk ? "resumed" : "left LOST: the GPU did not resume", gpuId);
 }
 struct nvkms_per_open *nvkms_xnu_open(int pid) { return gKmsLoaded ? kms_open_common(NVKMS_CLIENT_KERNEL_SPACE, NULL, pid) : NULL; }
 void nvkms_xnu_close(struct nvkms_per_open *popen) { if (popen) kms_close_common(popen); }
@@ -161,7 +212,12 @@ static bool gKmsTraceRm = true;
 void nvkms_call_rm(void *ops)
 {
     nvidia_kernel_rmapi_ops_t *o = (nvidia_kernel_rmapi_ops_t *)ops;
-    rm_kernel_rmapi_op(NULL, ops);
+    {
+        // KAPI allocations for NVRMFB/NVAccel (WindowServer) reach RM here without an NVKMS ioctl: hold them while the
+        // GPU is in standby. NVKMS's own suspend and resume run on the PM thread, which the gate lets through.
+        NvXnuPmUse pmUse;
+        rm_kernel_rmapi_op(NULL, ops);
+    }
     if (!gKmsTraceRm) return;
     switch (o->op) {
     case NV04_ALLOC:          if (o->params.alloc.status) kprintf("NVKMS-rm: ALLOC class 0x%x parent 0x%x -> status 0x%x\n", o->params.alloc.hClass, o->params.alloc.hObjectParent, o->params.alloc.status); break;
@@ -250,21 +306,21 @@ static void kms_timer_execute(struct nvkms_timer_t *t)
 {
     void *dataPtr;
     IOLockLock(gKmsLock);
+    // As nvkms_kthread_q_callback: hold timers (DP IRQs, hot-plug) until the resume. On a GPU that never came back
+    // the callback is skipped but the timer completes as usual: NVKMS still owns a plain timer's handle and frees it
+    // with nvkms_free_timer(), so it must not be treated as cancelled (and freed) here.
+    const bool gpuUp = kms_pm_wait_locked(false, 0);
     if (t->isRefPtr) { dataPtr = nvkms_dec_ref((struct nvkms_ref_ptr *)t->dataPtr); if (!dataPtr) t->cancel = NV_TRUE; }
     else dataPtr = t->dataPtr;
-    if (!t->cancel) { t->proc(dataPtr, t->dataU32); t->complete = NV_TRUE; }
+    if (!t->cancel) { if (gpuUp) t->proc(dataPtr, t->dataU32); t->complete = NV_TRUE; }
     NvBool freeIt = t->isRefPtr || t->cancel;
     IOLockUnlock(gKmsLock);
     if (freeIt) kms_timer_release(t);
     OSAddAtomic64(1, &gKmsTimerExecuted);
 }
-// NVKMS timers touch the display engine. While the GPU is suspended for system sleep they wait in the queue, and
-// nvkms_xnu_resume drains them after RM has resumed; running one against a powered-down GPU is a hang or a lost GPU.
-static volatile bool gKmsSuspended;
 static void kms_timer_drain(thread_call_param_t, thread_call_param_t)
 {
     for (;;) {
-        if (gKmsSuspended) return;
         IOSimpleLockLock(gKmsTimerQueueLock);
         nvkms_timer_t *t = gKmsTimerHead;
         if (t) {
@@ -380,50 +436,11 @@ NvBool nvkms_xnu_backlight(NvBool set, NvU32 *percent)
     if (!percent || !gKmsLock) return NV_FALSE;
     if (set && *percent > 100) *percent = 100;   // NVKMS takes percent; never pass more than full brightness
     IOLockLock(gKmsLock);
-    NvBool ok = gKmsBacklightRegistered &&
+    NvBool ok = gKmsBacklightRegistered && kms_pm_wait_locked(true, 0) &&
                 (set ? nvKmsSetBacklight(gKmsBacklight.display_id, gKmsBacklight.drv_priv, *percent)
                      : nvKmsGetBacklight(gKmsBacklight.display_id, gKmsBacklight.drv_priv, percent));
     IOLockUnlock(gKmsLock);
     return ok;
-}
-
-// System sleep, in the order of nvkms_suspend()/nvkms_resume() in nvidia-modeset-linux.c: kapi clients hear first, then
-// NVKMS shuts every head down and drops its per-open surface DMA state under the NVKMS lock, before RM saves the GPU.
-// Resume is the mirror image and runs after RM has resumed; the framebuffers re-commit their modes on their own wake.
-void nvKmsSuspend(NvU32 gpuId);
-void nvKmsResume(NvU32 gpuId);
-void nvKmsKapiSuspendResume(NvBool suspend);
-// Returns false, with nothing changed, when the NVKMS lock is not free within 5 s: a flip or ioctl that holds it while
-// waiting on the GPU would otherwise hold system sleep forever (10-15: the test Mac never came back from its second sleep,
-// with the machine already off the network, which is what a sleep stuck halfway looks like). The caller then leaves the
-// GPU running for that sleep, which is how every driver before this one slept.
-NvBool nvkms_xnu_suspend(NvU32 gpuId)
-{
-    if (!gKmsLoaded) return NV_TRUE;
-    uint64_t now, deadline; clock_interval_to_deadline(5, kSecondScale, &deadline);
-    for (;;) {
-        if (IOLockTryLock(gKmsLock)) break;
-        clock_get_uptime(&now);
-        if (now >= deadline) { kprintf("NVRM-xnu: power: NVKMS lock still held after 5 s; the GPU stays up for this sleep\n"); return NV_FALSE; }
-        IOSleep(10);
-    }
-    IOLockUnlock(gKmsLock);
-    nvKmsKapiSuspendResume(NV_TRUE);
-    IOLockLock(gKmsLock);
-    nvKmsSuspend(gpuId);
-    gKmsSuspended = true;
-    IOLockUnlock(gKmsLock);
-    return NV_TRUE;
-}
-void nvkms_xnu_resume(NvU32 gpuId)
-{
-    if (!gKmsLoaded) return;
-    IOLockLock(gKmsLock);
-    gKmsSuspended = false;
-    nvKmsResume(gpuId);
-    IOLockUnlock(gKmsLock);
-    nvKmsKapiSuspendResume(NV_FALSE);
-    if (gKmsTimerWorker) thread_call_enter(gKmsTimerWorker);   // the timers that waited out the sleep
 }
 
 struct nvkms_per_open *nvkms_open_from_kapi(struct NvKmsKapiDevice *device) { return kms_open_common(NVKMS_CLIENT_KERNEL_SPACE, device, 0); }
@@ -434,7 +451,7 @@ NvBool nvkms_ioctl_from_kapi(struct nvkms_per_open *popen, NvU32 cmd, void *para
 }
 NvBool nvkms_ioctl_from_kapi_try_pmlock(struct nvkms_per_open *popen, NvU32 cmd, void *params, const size_t size)
 {
-    return kms_ioctl_common(popen, cmd, (NvU64)(uintptr_t)params, size);
+    return kms_ioctl_common(popen, cmd, (NvU64)(uintptr_t)params, size, true);
 }
 
 nvkms_sema_handle_t *nvkms_sema_alloc(void)
