@@ -1,5 +1,7 @@
 #!/bin/bash
 set -u
+# runs as root: tools resolve through a fixed PATH, never one the caller exported
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 HERE=$(cd "$(dirname "$0")" && pwd)
 if [ "${1:-}" = --payload ]; then
   [ "$#" = 2 ] && [ -d "$2" ] || { echo "STOP: --payload requires an existing package directory" >&2; exit 2; }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every SHA256SUMS check in the installer and setup is strict: shasum -c without --strict skips a malformed line and
+"""Every SHA256SUMS check in the driver installer is strict: shasum -c without --strict skips a malformed line and
 still exits 0, so a list with a bad line verified nothing for that file."""
 import pathlib
 import re
@@ -17,7 +17,7 @@ def arm(name, ok, detail=""):
     fails += not ok
 
 
-for rel in ("package/install.sh", "app/Resources/nullmoth-install.sh", "app/Resources/nullmoth-setup.sh"):
+for rel in ("package/install.sh",):  # 1401 checks its own setup script (mac/tools)
     src = (ROOT / rel).read_text()
     checks = re.findall(r"shasum -a 256[^\n|;)]*-c\b[^\n]*", src)
     lax = [c for c in checks if "--strict" not in c]
