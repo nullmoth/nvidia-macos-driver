@@ -1131,9 +1131,9 @@ PL
     else do_prepare; cleanup; echo "RESULT ok"; exit 0; fi;;
   finish|cancel)
     . "$PEND" 2>/dev/null
-    # Change back the config "prepare" changed. Measured on the test Mac (10-15, 2.0.4 test): with the 1401 stick plugged in
-    # next to the internal EFI, prepare parked the driver in the internal config, cancel's detection a minute later
-    # picked the stick, reported success, and the next start came up with the driver parked.
+    # Change back the config "prepare" changed. Prepare's install step can switch the model (iMacPro1,1 to MacPro7,1)
+    # while the running Mac still reports the old one, so detection run before the next restart can reject the internal
+    # config and pick a 1401 stick instead: cancel then reports success and the driver stays parked.
     if [ -n "${CFGPART:-}" ] && [ -n "${CFGREL:-}" ]; then
       if mount_efi "$CFGPART" && [ -f "$MOUNT_POINT/$CFGREL/config.plist" ]; then
         [ "$MOUNT_POINT/$CFGREL/config.plist" = "$C" ] || note "using the OpenCore config the Tahoe preparation changed ($MOUNT_POINT/$CFGREL), not $C"

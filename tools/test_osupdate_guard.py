@@ -41,8 +41,8 @@ class UpgradeGuard(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), 'wait' if waiting else 'finish')
 
-    # the test Mac 10-15: prepare parked the driver in the internal EFI's config, cancel's detection picked the 1401 stick,
-    # and the next start came up parked. Cancel and finish must change back the config prepare recorded.
+    # Prepare parks the driver in one config; detection on a later run can pick another (a 1401 stick next to the
+    # internal EFI). Cancel and finish must change back the config prepare recorded.
     def test_prepare_records_the_config_it_changed(self):
         prep = source[source.index('  do_prepare() {'):source.index('  case "$UPD" in\n  prepare)')]
         self.assertIn('CFGPART=%s\\nCFGREL=%s', prep)
