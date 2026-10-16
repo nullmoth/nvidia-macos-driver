@@ -7,7 +7,8 @@ cd "$X" || exit 1
 mkdir -p obj-i915 logs-i915 && rm -f logs-i915/*.log logs-i915/*.failed
 # intel_ggtt_gmch.c: pre-Gen6 GTT through FreeBSD agp(4); override/i915/nmx_i915_gmch.c answers for it
 # i915_gem_mman.c: forked by fork_i915_gem_mman.py into override/i915
-EXCLUDE="intel_ggtt_gmch.c i915_gem_mman.c"
+# i915_module.c: forked by fork_i915_module.py into override/i915 (prints each init step's result)
+EXCLUDE="intel_ggtt_gmch.c i915_gem_mman.c i915_module.c"
 /opt/homebrew/bin/python3 srclist.py "$K/drm-kmod" amd.flags i915 2>/dev/null > srcs-i915.all
 : > srcs-i915.txt
 while read -r f; do
@@ -17,6 +18,7 @@ while read -r f; do
     esac
 done < srcs-i915.all
 /opt/homebrew/bin/python3 fork_i915_gem_mman.py "$K/drm-kmod" override/i915/i915_gem_mman.c >/dev/null
+/opt/homebrew/bin/python3 fork_i915_module.py "$K/drm-kmod" override/i915/i915_module.c >/dev/null
 for f in "$X"/override/i915/*.c; do echo "$f" >> srcs-i915.txt; done
 n=$(wc -l < srcs-i915.txt | tr -d ' ')
 one() { b=$(basename "$1" .c); rm -f logs-i915/$b.failed; ./cc-i915.sh "$1" > logs-i915/$b.log 2>&1 || touch logs-i915/$b.failed; }

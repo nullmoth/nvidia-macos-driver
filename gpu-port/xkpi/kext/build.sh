@@ -12,9 +12,11 @@ cd "$X"
 : > xe.exp
 xcrun ld -r -arch x86_64 obj-xe/*.o -exported_symbols_list xe.exp -o xe_all.o
 K="$OUT/NMXGPU.kext/Contents"
+# rt.sh compiles every xnu/*.cpp, so NMXNPU's kext glue (its own kmod_info) is in xnuobj too: never part of this link
+XNU=$(ls xnuobj/*.o | grep -v "/nmx_npu_kext\.o$")
 mkdir -p "$K/MacOS"
 xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xlinker -kext \
-  obj/*.o obj-i915/*.o xe_all.o lkobj/*.o srcobj/*.o xnuobj/*.o -lkmodc++ -lkmod -lcc_kext -o "$K/MacOS/NMXGPU" 2> link.log || {
+  obj/*.o obj-i915/*.o xe_all.o lkobj/*.o srcobj/*.o $XNU -lkmodc++ -lkmod -lcc_kext -o "$K/MacOS/NMXGPU" 2> link.log || {
     grep -E "error|Undefined|duplicate" link.log | head -40; exit 1; }
 cp kext/Info.plist "$K/Info.plist"
 echo "NMXGPU $(shasum -a 256 "$K/MacOS/NMXGPU" | cut -c1-8) $(stat -f %z "$K/MacOS/NMXGPU") B"
