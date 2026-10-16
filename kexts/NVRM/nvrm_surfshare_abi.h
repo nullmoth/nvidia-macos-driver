@@ -8,6 +8,8 @@
 #define NVRM_ESC_SURF_VRAM     0xE2u
 #define NVRM_ESC_SURF_DIRTY    0xE3u
 #define NVRM_SURFSHARE_VERSION 2u
+/* NVRM_ESC_SURF_DIRTY with this plane bit is a WindowServer completion mark (bit 0: 1 pending, 0 ready), not a dirty plane */
+#define NVRM_SS_PLANE_GPU_MARK 0x80000000u
 #define NVRM_SS_BAD_VERSION   0x80000001u
 #define NVRM_SS_OFF           0x80000002u
 #define NVRM_SS_NO_SURFACE    0x80000003u

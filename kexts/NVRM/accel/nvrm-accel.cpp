@@ -51,6 +51,9 @@ extern "C" {   // kern/thread_call.h and kern/clock.h clash with the family head
 struct thread_call *thread_call_allocate(void (*func)(void *, void *), void *param0);
 int thread_call_enter_delayed(struct thread_call *call, uint64_t deadline);
 void clock_interval_to_deadline(uint32_t interval, uint32_t scale_factor, uint64_t *result);
+uint64_t mach_absolute_time(void);
+void absolutetime_to_nanoseconds(uint64_t abstime, uint64_t *result);
+void proc_selfname(char *buf, int size);
 }
 static volatile SInt64 gCntVmAlloc, gCntVmAllocBytes, gCntVmDealloc, gCntVmDeallocBytes, gCntVmRefused,
                        gCntResNew, gCntResFree, gCntMapCommit, gCntMapRelease, gCntMapFree;
@@ -941,6 +944,7 @@ bool NVDisplayPipe::isTransactionComplete(IOAccelDisplayPipeTransaction2 *)
 static void nvAccelSurfScanoutSync(IOSurface *s);
 static bool nvAccelSurfCopyReady(IOSurface *s, unsigned head);
 static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe);
+static bool nvSurfWaitReady(unsigned int id);
 static void nvAccelIopHome(IOService *fb, unsigned head);
 IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
 {
@@ -986,6 +990,7 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         // stale, one-colour buffer on the panel every other frame: full-screen flicker, 5 of 40 flicker recordings
         // (1.13-1.14.1), nvaccel_iop_blank about half of every copied frame, never on machines whose frames all flip.
         // Such a frame now keeps the previous picture on the panel instead.
+        nvSurfWaitReady(s->getSurfaceID());   // a copied frame is read here, so its GPU work must be done first
         if (!nvAccelSurfCopyReady(s, head)) return kIOReturnSuccess;
         const unsigned fmt = s->getPixelFormat();
         if (fmt != 0x42475241u) NVIOP_FAIL(kIOReturnUnsupported, "surface 0x%x format 0x%08x is not BGRA", s->getSurfaceID(), fmt);
@@ -1123,6 +1128,80 @@ static SInt64 gCntIopFlipHit, gCntIopFlipMiss;
 NVACCEL_CNT(nvaccel_iop_flip_hit,     gCntIopFlipHit,     "swaps resolved from the cache (no accelerator lock)");
 NVACCEL_CNT(nvaccel_iop_flip_miss,    gCntIopFlipMiss,    "swaps that resolved under the accelerator lock");
 static int    gIopAsync = 1;
+
+/*
+ * Frame completion off WindowServer's thread. NVIDIA's display path never makes the compositor wait for the GPU: a flip
+ * completes on the display engine's flip event, and a flip ordered behind a fence waits for it in a worker
+ * (nvidia-drm-modeset.c:636/692). Here WindowServer waited for every composite to finish on the GPU before swapping
+ * (issue #196: ~1.3 ms of each 6.9 ms frame at 144 Hz, ~95-105 presents/s). Now the plugin marks the surfaces a
+ * WindowServer command buffer renders as pending when it commits and ready when the GPU has finished them, and the swap
+ * waits for that here: on the async flip thread for a zero-copy flip, before reading for a copied frame. A mark answers
+ * 0 while this is on; the plugin keeps WindowServer's own wait when it answers anything else.
+ */
+static int gSurfGpuOn = 1;
+static SInt64 gCntSurfMarks, gCntSurfWaits, gCntSurfTimeouts;
+static int gSurfWaitMaxUs;
+static const unsigned kSurfGpuWaitMs = 100;   // a GPU that has not finished a composite in 100 ms is hung; flip anyway
+struct NVSurfPending { unsigned int id; unsigned int seq; };
+static NVSurfPending gSurfPend[32];
+static unsigned int gSurfPendSeq;
+static IOLock *gSurfPendLock;
+static IOLock *nvSurfLock()
+{
+    if (!gSurfPendLock) { IOLock *l = IOLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gSurfPendLock)) IOLockFree(l); }
+    return gSurfPendLock;
+}
+static void nvSurfMark(unsigned int id, bool pending)
+{
+    IOLock *l = nvSurfLock();
+    if (!l || !id) return;
+    IOLockLock(l);
+    unsigned slot = 32, oldest = 0;
+    for (unsigned i = 0; i < 32; i++) {
+        if (gSurfPend[i].id == id) { slot = i; break; }
+        if (slot == 32 && !gSurfPend[i].id) slot = i;
+        if (gSurfPend[i].seq < gSurfPend[oldest].seq) oldest = i;
+    }
+    if (pending) {
+        if (slot == 32) slot = oldest;   // 32 surfaces in flight at once is not a compositor; the oldest mark goes
+        gSurfPend[slot].id = id; gSurfPend[slot].seq = ++gSurfPendSeq;
+    } else if (slot < 32 && gSurfPend[slot].id == id) {
+        gSurfPend[slot].id = 0;
+        IOLockWakeup(l, gSurfPend, false);
+    }
+    IOLockUnlock(l);
+    OSAddAtomic64(1, &gCntSurfMarks);
+}
+static bool nvSurfWaitReady(unsigned int id)
+{
+    IOLock *l = gSurfPendLock;
+    if (!l || !id || !gSurfGpuOn) return true;   // switched off: marks left from before never hold a swap
+    uint64_t start = mach_absolute_time(), deadline = 0;
+    clock_interval_to_deadline(kSurfGpuWaitMs, kMillisecondScale, &deadline);
+    bool waited = false, ready = true;
+    IOLockLock(l);
+    for (;;) {
+        unsigned i = 0;
+        while (i < 32 && gSurfPend[i].id != id) i++;
+        if (i == 32) break;
+        if (mach_absolute_time() >= deadline) { gSurfPend[i].id = 0; ready = false; break; }
+        waited = true;
+        IOLockSleepDeadline(l, gSurfPend, deadline, THREAD_UNINT);
+    }
+    IOLockUnlock(l);
+    if (waited) {
+        uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - start, &ns);
+        if ((int)(ns / 1000) > gSurfWaitMaxUs) gSurfWaitMaxUs = (int)(ns / 1000);
+        OSAddAtomic64(1, ready ? &gCntSurfWaits : &gCntSurfTimeouts);
+    }
+    return ready;
+}
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_surface_gpu, CTLFLAG_RD | CTLFLAG_LOCKED, &gSurfGpuOn, 0, "1 = WindowServer swaps wait for GPU completion here (same value as nvaccel_surface_gpu_on)");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_surface_gpu_on, CTLFLAG_RW | CTLFLAG_LOCKED, &gSurfGpuOn, 0, "0 = WindowServer waits for its own composites again (the plugin re-asks every second)");
+NVACCEL_CNT(nvaccel_surface_gpu_marks,    gCntSurfMarks,    "pending/ready marks from WindowServer");
+NVACCEL_CNT(nvaccel_surface_gpu_waits,    gCntSurfWaits,    "swaps that waited here for their composite to finish");
+NVACCEL_CNT(nvaccel_surface_gpu_timeouts, gCntSurfTimeouts, "swaps whose composite did not finish within 100 ms");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_surface_gpu_wait_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gSurfWaitMaxUs, 0, "longest swap wait for a composite, us");
 static SInt64 gCntIopAsync, gCntIopAsyncRefused, gCntIopAsyncDrop;
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_async, CTLFLAG_RW | CTLFLAG_LOCKED, &gIopAsync, 0, "1 = the swap runs on a thread call and completes through signalTransactionInterrupt (Apple's shape); 0 = the earlier synchronous flip");
 NVACCEL_CNT(nvaccel_iop_async_flips,   gCntIopAsync,        "swaps completed asynchronously");
@@ -1165,6 +1244,9 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_crc_head);       sysctl_register_oid(&sysctl__debug_nvaccel_crc);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_hit);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_miss);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_async);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_flips);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu);    sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_on);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_marks); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_waits);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_timeouts); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_wait_max_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_refused); sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_drop);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h0);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h1);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h2);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h3);
@@ -1333,8 +1415,24 @@ static unsigned nvAccelSurfDirty(void *cache, NVResource *res, unsigned plane)
     valid[0] &= (unsigned short)~(1u << plane);
     return 0;
 }
+// The marks arrive through NVK's surface escape (NVRM_ESC_SURF_DIRTY with plane NVRM_SS_PLANE_GPU_MARK | pending): the
+// WindowServer sandbox denies sysctl writes. Only WindowServer's own marks are taken, so no other process can hold a swap.
+static unsigned nvSurfGpuEscape(const struct NVRMSurfShareEsc *p)
+{
+    if (!gSurfGpuOn) return NVRM_SS_OFF;
+    char nm[32] = { 0 };
+    proc_selfname(nm, sizeof nm);
+    if (strcmp(nm, "WindowServer")) return NVRM_SS_OFF;
+    if (p->surfaceID) nvSurfMark(p->surfaceID, (p->plane & 1u) != 0);
+    return 0;
+}
 static IOReturn nvAccelSurfVram(struct NVRMSurfShareEsc *p, task_t task, unsigned cmd)
 {
+    if (p->version == NVRM_SURFSHARE_VERSION && cmd == NVRM_ESC_SURF_DIRTY && (p->plane & NVRM_SS_PLANE_GPU_MARK)) {
+        p->hSrcClient = p->hSrcMemory = 0;
+        p->status = nvSurfGpuEscape(p);
+        return kIOReturnSuccess;
+    }
     p->hSrcClient = p->hSrcMemory = 0;
     if (p->version != NVRM_SURFSHARE_VERSION) { p->status = NVRM_SS_BAD_VERSION; return kIOReturnSuccess; }
     NVAccel *a = NVAccel::gAccel;
@@ -1572,6 +1670,7 @@ static void nvAccelIopAsyncRun(void *p0, void *)
     NVIopAsync *e = (NVIopAsync *)p0;
     const unsigned head = (unsigned)(e - gIopAs);
     IOSurface *s = e->s; e->s = nullptr;
+    nvSurfWaitReady(s->getSurfaceID());   // WindowServer did not wait for this composite; the flip does, off its thread
     const OSSymbol *sym = OSSymbol::withCStringNoCopy("nvFlipToSurfacePure");
     IOReturn rr = sym ? e->fb->callPlatformFunction(sym, false, &e->f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
@@ -1646,6 +1745,7 @@ static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pip
     struct NVRMFlipRequest f; nvSVZero(&f, sizeof f);
     f.version = NVRM_FLIP_ABI_VERSION; f.kapiMemory = kmem; f.allocationCookie = vm->fAllocationCookie; f.width = (unsigned)W; f.height = (unsigned)H; f.pitch = (unsigned)P;
     if (gIopAsync && pipe) return nvAccelIopAsyncStart(pipe, fb, head, s, &f);
+    nvSurfWaitReady(s->getSurfaceID());
     const OSSymbol *sym = OSSymbol::withCStringNoCopy("nvFlipToSurfacePure");
     IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
