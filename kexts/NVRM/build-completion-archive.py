@@ -9,8 +9,9 @@ if base.exists() and any(base.iterdir()):raise SystemExit('Output directory must
 base.mkdir(parents=True,exist_ok=True)
 source=vendor/'kapi/src/nvkms-kapi.c'
 (base/'nvkms-kapi.c').write_bytes(source.read_bytes())
-patch=Path(__file__).resolve().parent/'patches/610-display-completion.patch'
-subprocess.run(['patch','--batch','--forward',str(base/'nvkms-kapi.c'),str(patch)],check=True)
+for name in ['610-display-completion.patch','610-setmode-reason.patch']:
+    patch=Path(__file__).resolve().parent/'patches'/name
+    subprocess.run(['patch','--batch','--forward',str(base/'nvkms-kapi.c'),str(patch)],check=True)
 lines=(vendor/'_out/Darwin_x86_64/compile_cmds.sh').read_text().splitlines()
 line=next(x for x in lines if ' -c kapi/src/nvkms-kapi.c ' in x)
 args=shlex.split(line.split(' && ')[0])

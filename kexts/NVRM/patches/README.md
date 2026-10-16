@@ -4,6 +4,8 @@ The framebuffer and accelerator allocation interface changes must be built and i
 
 `610-display-completion.patch` implements the mapped flip notifier query and resets the selected slot for each committed surface. NVIDIA modeset treats the BEGUN notifier state as the latched flip; FINISHED is also accepted. Invalid or unavailable notifier state keeps the transaction pending.
 
+`610-setmode-reason.patch` applies after it. A refused mode set logged only "commit rejected" in release builds (the reason lines are debug-only), so a WindowServer that could not set its first mode stopped with no cause on record. The patch logs one warning with the set-mode status, the display status, and each head's status.
+
 With the original NVIDIA 610.57.04 Darwin modeset archive and compile commands already built, run:
 
 ```
