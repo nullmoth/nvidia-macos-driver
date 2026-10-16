@@ -98,7 +98,8 @@ installs the driver.
 
 ## 5. The 1401 Mac app (installs the driver)
 
-`app/` builds **1401.app** (Swift + WebKit). The window is HTML/JS (`app/Resources/`). Every change to the system is
+**1401.app** lives in the [1401](https://github.com/nullmoth/1401) repository (`mac/`, Swift + WebKit; the window is
+HTML/JS in `mac/Resources/`). It installs a driver package with that package's own `install.sh`. Every change to the system is
 made by one root script, `nullmoth-setup.sh`, which the app runs through macOS's administrator prompt.
 
 **Finding OpenCore.** The script reads OpenCore's `boot-path` NVRAM variable, which names the partition OpenCore started
@@ -124,7 +125,7 @@ boot picker entry, and asks for a restart; the second run installs the driver an
 edits are undone. Then `uninstall.sh` removes the files and rebuilds the kernel collection.
 
 **The way back if the driver stops macOS starting.** Choosing *1401: Remove NVIDIA driver* in the boot picker runs
-`NullMothSafe.efi` (`app/efi-safe/`, Rust UEFI). It adds `-nvoff` to the boot arguments for the next start and sets the
+`NullMothSafe.efi` (1401's `mac/efi-safe/`, Rust UEFI). It adds `-nvoff` to the boot arguments for the next start and sets the
 NVRAM flag `nullmoth-remove=1`. macOS then starts without the driver, the LaunchDaemon `com.nullmoth.recover` sees the
 flag, runs `nullmoth-setup.sh --remove`, and restarts.
 
