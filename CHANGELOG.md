@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.1 (draft, not released)
+## 2.1.0
 
 Driver
 - Each GPU generation (GTX 16, RTX 20, 30, 40 and 50) is now described by the card itself: the driver reads the
