@@ -273,8 +273,8 @@ static void nvmtl_nvdec_hevc_register(void)
               st ? "NOT registered" : "REGISTERED", me, (int)st, path);
     });
 }
-// GH #175: with Chrome's GPU sandbox on, decoding runs in VTDecoderXPCService. Metal maps this bundle there (measured
-// on the test Mac 10-16: 25 mappings, no Metal device ever created), but the decoders were registered only when a Metal
+// GH #175: with Chrome's GPU sandbox on, decoding runs in VTDecoderXPCService. Metal maps this bundle there (the
+// process holds the bundle's mappings but never creates a Metal device), but the decoders were registered only when a Metal
 // device came up, so that process never had them and H.264 fell to AppleH264SW. The decoder libraries open NVRM
 // themselves (IOKit; nothing from the Vulkan device), as NVIDIA's own decoder is a per-process capability needing no
 // render device. So in that one process register them at load, telling Blackwell apart by the GPU's PCI device id
