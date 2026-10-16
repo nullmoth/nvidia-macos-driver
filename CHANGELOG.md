@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.2.1
+
+Fixes
+- Terminal and other apps that draw text with programmable blending: text no longer comes out missing or garbled
+  (GTX 16 and others). Draws that read colour from a pass without every attachment were skipped; they are now drawn,
+  and overlapping triangles in one draw read each other's colour in order (thanks pengubow)
+- Above 60 Hz: the display and the accelerator woke up once per millisecond to check for a finished flip, which
+  measured about 56 flips a second on a 143 Hz panel while windows moved. They now wake on the flip itself
+- When a display's mode set is refused, the driver now tries the mode the firmware is already running before giving
+  up, and the log says why the mode was refused (reports of a black screen at login on some RTX 3060 boards)
+- Draws the Metal driver had to drop are now in the logs that Send logs collects
+
+AMD / Intel test program
+- 1401 can join the AMD and Intel GPU test program (AMD/Intel panel, Join). Testers get the newest signed test build
+  of the AMD/Intel driver, and after every restart 1401 sends what the driver did, so a start that hangs or panics
+  still reaches us. Leave the program from the same panel at any time
+
 ## 2.2.0
 
 This release makes the driver do one thing: drive NVIDIA GPUs. Everything else it used to carry is now its own
