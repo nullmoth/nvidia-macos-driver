@@ -49,6 +49,13 @@ pub(super) fn inline_direct_function_pointer_consumers(
     }
 }
 
+/// Every non-recursive internal call inlined into its caller, for the last emission attempt: a pointer the entry stores into
+/// a field of a local object and a helper loads back (Blender's MTLShaderComputeImpl: a threadgroup array's address in a
+/// member, read in `main`) only resolves once the store and the load are in one function. None when nothing changes.
+pub(super) fn inline_all_internal_calls(san_ll: &str) -> Option<String> {
+    try_inline(san_ll, None).filter(|out| out != san_ll)
+}
+
 #[cfg(test)]
 pub(super) fn inline_nonrecursive_internal_calls(san_ll: &str) -> String {
     match try_inline(san_ll, None) {

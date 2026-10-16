@@ -199,7 +199,7 @@ fn bda_forward_address_values(
     anchored
 }
 
-fn is_air_texture_operation(callee: &str) -> bool {
+pub(in crate::native::emitter) fn is_air_texture_operation(callee: &str) -> bool {
     callee.starts_with("air.sample_texture")
         || callee.starts_with("air.sample_depth")
         || callee.starts_with("air.sample_compare_depth")

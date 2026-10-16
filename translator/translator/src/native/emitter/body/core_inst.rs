@@ -2124,12 +2124,17 @@ impl Emitter {
                 return Ok(());
             }
             if let Some(raw) = self.raw_offsets.get(ptr_name).cloned() {
-                if raw.device_addr_base.is_some()
+                // A sampler an argument buffer holds is its gpuResourceID, whose low word is the sampler-heap slot, whether
+                // the buffer is reached through a device address or bound directly (Blender binds its 17-sampler argument
+                // buffer directly; refusing it left the pipeline unbuilt and crashed Blender). Textures keep the
+                // device-address requirement: a directly bound buffer's texture fields have their own bindings.
+                let sampler_field = matches!(result_ty, LlType::Ptr(2)) && self.opaque_sampler_pointers.contains(&name)
+                    && matches!(std::env::var("NVMTL_ARGBUF_SAMPLERS").as_deref(), Ok("1"));
+                if (raw.device_addr_base.is_some() || sampler_field)
                     && crate::reflect::bindless_fixed_fields_on()
                     && ((matches!(result_ty, LlType::Ptr(1))
                         && self.opaque_resource_pointers.contains(&name))
-                        || (matches!(result_ty, LlType::Ptr(2))
-                            && self.opaque_sampler_pointers.contains(&name)))
+                        || sampler_field)
                 {
                     let sampler = matches!(result_ty, LlType::Ptr(2));
                     let low =
