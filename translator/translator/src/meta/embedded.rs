@@ -190,6 +190,11 @@ pub(super) fn detect_embedded_arguments(
                     let elements = match node {
                         Some(node) if expressible_embedded_texture(&member, node).is_some() => 1,
                         Some(node) if member.repeats_a_handle(node) => member.array_len,
+                        // a metal::array<sampler, N> member: the struct type info gives no C array length, the
+                        // field's own location_index pair carries N (Blender: array<sampler, 17>)
+                        Some(node) if member.array_len == 0 && member.repeats_a_handle_by_location(node).is_some() => {
+                            member.repeats_a_handle_by_location(node).unwrap_or(1)
+                        }
                         _ => 1,
                     };
                     (0..elements).filter_map(move |element| {
@@ -292,6 +297,12 @@ impl ArgumentMember {
     fn argument_index(&self, node: &str) -> u32 {
         self.argument_base
             .saturating_add(super::location_index(node, self.field_ordinal))
+    }
+
+    fn repeats_a_handle_by_location(&self, node: &str) -> Option<u32> {
+        // samplers only for now: texture and buffer arrays in argument buffers keep the layout they shipped with
+        let count = super::declared_descriptor_count(node)?;
+        role_strings(node).iter().any(|role| role == "sampler").then_some(count)
     }
 
     fn repeats_a_handle(&self, node: &str) -> bool {

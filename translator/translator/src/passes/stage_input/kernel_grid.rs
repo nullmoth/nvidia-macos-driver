@@ -82,7 +82,71 @@ pub(in crate::passes) fn load_kernel_dispatch_component(
         Some(value),
         vec![Operand::IdRef(pointer)],
     ));
-    value
+    // An indirect dispatch's grid is written by the GPU, so the driver cannot push it: it pushes 0x80000000 | the
+    // threadgroup size per axis for threads_per_grid (members 0-2) and 0x80000000 for threadgroups_per_grid (9-11), and
+    // the shader takes them from NumWorkgroups, which is what Metal defines for dispatchThreadgroups(indirectBuffer:).
+    // Eevee's light culling sizes its dispatches on the GPU; its threads_per_grid read 0 and every surface lit black.
+    // a shape compiled for one fixed grid is never dispatched indirectly, and stays without the fallback
+    if matches!(ctx.kernel_dispatch, crate::reflect::KernelDispatch::ThreadsFixed { .. }) {
+        return value;
+    }
+    let lane = match member {
+        0..=2 => member,
+        9..=11 => member - 9,
+        _ => return value,
+    };
+    let flag_bit = ctx.const_uint(0x8000_0000);
+    let low_mask = ctx.const_uint(0x7fff_ffff);
+    let zero = ctx.const_uint(0);
+    let bool_ty = ctx.ty_bool();
+    let v3u = ctx.ty_vec_uint(3);
+    let nw_var = num_workgroups_var(ctx);
+    let flag = ctx.module.fresh_id();
+    instructions.push(Instruction::new(Op::BitwiseAnd, Some(uint_ty), Some(flag), vec![Operand::IdRef(value), Operand::IdRef(flag_bit)]));
+    let indirect = ctx.module.fresh_id();
+    instructions.push(Instruction::new(Op::INotEqual, Some(bool_ty), Some(indirect), vec![Operand::IdRef(flag), Operand::IdRef(zero)]));
+    let nw = ctx.module.fresh_id();
+    instructions.push(Instruction::new(Op::Load, Some(v3u), Some(nw), vec![Operand::IdRef(nw_var)]));
+    let groups = ctx.module.fresh_id();
+    instructions.push(Instruction::new(Op::CompositeExtract, Some(uint_ty), Some(groups), vec![Operand::IdRef(nw), Operand::LiteralBit32(lane)]));
+    let from_gpu = if member <= 2 {
+        let size = ctx.module.fresh_id();
+        instructions.push(Instruction::new(Op::BitwiseAnd, Some(uint_ty), Some(size), vec![Operand::IdRef(value), Operand::IdRef(low_mask)]));
+        let threads = ctx.module.fresh_id();
+        instructions.push(Instruction::new(Op::IMul, Some(uint_ty), Some(threads), vec![Operand::IdRef(groups), Operand::IdRef(size)]));
+        threads
+    } else {
+        groups
+    };
+    let chosen = ctx.module.fresh_id();
+    instructions.push(Instruction::new(
+        Op::Select,
+        Some(uint_ty),
+        Some(chosen),
+        vec![Operand::IdRef(indirect), Operand::IdRef(from_gpu), Operand::IdRef(value)],
+    ));
+    chosen
+}
+
+/// The module's NumWorkgroups input, made once: two variables with one BuiltIn are invalid.
+fn num_workgroups_var(ctx: &mut Ctx) -> Word {
+    let existing = ctx.module.annotations.iter().find_map(|inst| {
+        (inst.class.opcode == Op::Decorate
+            && inst.operands.get(1) == Some(&Operand::Decoration(spirv::Decoration::BuiltIn))
+            && inst.operands.get(2) == Some(&Operand::BuiltIn(BuiltIn::NumWorkgroups)))
+        .then(|| match inst.operands.first() {
+            Some(Operand::IdRef(id)) => Some(*id),
+            _ => None,
+        })
+        .flatten()
+    });
+    if let Some(var) = existing {
+        if !ctx.interface.contains(&var) {
+            ctx.interface.push(var);
+        }
+        return var;
+    }
+    bind_kernel_v3uint_builtin(ctx, BuiltIn::NumWorkgroups)
 }
 
 pub(in crate::passes) fn materialize_kernel_dispatch_field(

@@ -923,7 +923,19 @@ impl Ctx {
     fn get_or_create(&mut self, op: Op, result_type: Option<Word>, operands: Vec<Operand>) -> Word {
         let key = (op, result_type, operands.clone());
         if let Some(&id) = self.struct_cache.get(&key) {
-            return id;
+            // A cleanup between passes can drop an unused global this cache still names (a ConstantNull the NaN-to-zero
+            // conversion then selected: "owned Select references undefined id", Blender's light-probe kernel). Hand an id
+            // out only while it is still defined.
+            if self
+                .module
+                .types_global_values
+                .iter()
+                .chain(self.new_globals.iter())
+                .any(|inst| inst.result_id == Some(id))
+            {
+                return id;
+            }
+            self.struct_cache.remove(&key);
         }
         let mut highest_definition = 0;
         let mut existing = None;

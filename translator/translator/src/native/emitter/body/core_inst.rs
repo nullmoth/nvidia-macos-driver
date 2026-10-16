@@ -2129,7 +2129,7 @@ impl Emitter {
                 // buffer directly; refusing it left the pipeline unbuilt and crashed Blender). Textures keep the
                 // device-address requirement: a directly bound buffer's texture fields have their own bindings.
                 let sampler_field = matches!(result_ty, LlType::Ptr(2)) && self.opaque_sampler_pointers.contains(&name)
-                    && matches!(std::env::var("NVMTL_ARGBUF_SAMPLERS").as_deref(), Ok("1"));
+                    && crate::argument_buffer_samplers_on();
                 if (raw.device_addr_base.is_some() || sampler_field)
                     && crate::reflect::bindless_fixed_fields_on()
                     && ((matches!(result_ty, LlType::Ptr(1))

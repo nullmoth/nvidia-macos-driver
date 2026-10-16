@@ -53,7 +53,32 @@ pub(super) fn inline_direct_function_pointer_consumers(
 /// a field of a local object and a helper loads back (Blender's MTLShaderComputeImpl: a threadgroup array's address in a
 /// member, read in `main`) only resolves once the store and the load are in one function. None when nothing changes.
 pub(super) fn inline_all_internal_calls(san_ll: &str) -> Option<String> {
+    if !entry_stores_qualified_pointer_argument(san_ll) {
+        return None;
+    }
     try_inline(san_ll, None).filter(|out| out != san_ll)
+}
+
+/// The shape the inline retry is for: an entry function storing one of its own buffer/threadgroup/constant pointers (an
+/// address-space-qualified parameter or global) into a local object's field for a helper to read. A table pointer the
+/// helper reads a device address out of, and also writes, is not that shape and stays refused
+/// (tests::buffers::native_device_buffer_table_the_helper_also_writes_is_still_refused).
+fn entry_stores_qualified_pointer_argument(san_ll: &str) -> bool {
+    let Some(items) = parse_items(san_ll) else { return false };
+    items.iter().any(|item| {
+        let Item::Func(f) = item else { return false };
+        let Some(sig) = parse_def_header(&f.header) else { return false };
+        if sig.internal {
+            return false;
+        }
+        f.body.iter().any(|line| {
+            let t = line.trim();
+            let Some(rest) = t.strip_prefix("store ptr addrspace(") else { return false };
+            let Some((_, rest)) = rest.split_once(") ") else { return false };
+            let value = rest.split(',').next().unwrap_or("").trim();
+            value.starts_with('@') || sig.params.iter().any(|p| p == value)
+        })
+    })
 }
 
 #[cfg(test)]
@@ -1931,6 +1956,195 @@ mod b52_equiv_tests {
             );
         }
     }
+}
+
+/// Inline every internal call, then forward pointer fields of local objects: a field of an `alloca` written once in the
+/// entry block with a pointer and only read afterwards has each read replaced by that pointer. This is what an optimizer's
+/// scalar replacement does, and what lets the address of a sampler in an argument buffer (Blender stores one per texture in
+/// its MTLShaderFragmentImpl object and reads it in `main`) reach the sample call as the buffer address it is. None when
+/// nothing changes. Only used to retry a module that failed as written.
+pub(crate) fn inline_and_forward_object_fields(san_ll: &str) -> Option<String> {
+    let inlined = try_inline(san_ll, None).unwrap_or_else(|| san_ll.to_string());
+    let mut items = parse_items(&inlined)?;
+    let mut changed = inlined != san_ll;
+    for item in &mut items {
+        let Item::Func(f) = item else { continue };
+        if forward_object_fields_in(f) {
+            changed = true;
+        }
+    }
+    if !changed {
+        return None;
+    }
+    let mut out = String::with_capacity(inlined.len());
+    for item in items {
+        match item {
+            Item::Raw(lines) => {
+                for line in lines {
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+            }
+            Item::Func(f) => {
+                out.push_str(&f.header);
+                out.push('\n');
+                for line in f.body {
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+                out.push_str("}\n");
+            }
+        }
+    }
+    Some(out)
+}
+
+fn forward_object_fields_in(f: &mut FuncBlock) -> bool {
+    let first_label = f
+        .body
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, l)| {
+            !l.starts_with(' ') && !l.starts_with('\t') && l.split_whitespace().next().is_some_and(|w| w.ends_with(':'))
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(f.body.len());
+    let mut allocas: HashSet<String> = HashSet::new();
+    for line in &f.body {
+        let t = line.trim();
+        if let Some((name, rest)) = t.split_once(" = ") {
+            if rest.starts_with("alloca ") && name.starts_with('%') {
+                allocas.insert(name.to_string());
+            }
+        }
+    }
+    if allocas.is_empty() {
+        return false;
+    }
+    // field pointers: %g = getelementptr inbounds <T>, ptr %alloca, <indices>  ->  (alloca, indices)
+    let mut field_of: HashMap<String, (String, String)> = HashMap::new();
+    for line in &f.body {
+        let t = line.trim();
+        let Some((name, rest)) = t.split_once(" = ") else { continue };
+        let Some(rest) = rest.strip_prefix("getelementptr inbounds ").or_else(|| rest.strip_prefix("getelementptr ")) else { continue };
+        let Some(pos) = rest.find(", ptr %") else { continue };
+        let after = &rest[pos + 6..];
+        let (base, indices) = after.split_once(',').map(|(b, i)| (b.trim(), i.trim())).unwrap_or((after.trim(), ""));
+        if allocas.contains(base) && !indices.contains('%') {
+            field_of.insert(name.to_string(), (base.to_string(), indices.to_string()));
+        }
+    }
+    // escapes: an alloca or one of its fields handed to anything but a store/load address or a lifetime marker
+    let mut escaped: HashSet<String> = HashSet::new();
+    for line in &f.body {
+        let t = line.trim();
+        if t.contains("call ") && !t.contains("@llvm.lifetime.") {
+            for a in &allocas {
+                if mentions(t, a) {
+                    escaped.insert(a.clone());
+                }
+            }
+            for (g, (a, _)) in &field_of {
+                if mentions(t, g) {
+                    escaped.insert(a.clone());
+                }
+            }
+        }
+        if let Some(stored) = t.strip_prefix("store ") {
+            // the alloca or a field pointer stored as a value escapes
+            if let Some((value, _)) = stored.split_once(", ptr ") {
+                for a in &allocas {
+                    if mentions(value, a) {
+                        escaped.insert(a.clone());
+                    }
+                }
+                for (g, (a, _)) in &field_of {
+                    if mentions(value, g) {
+                        escaped.insert(a.clone());
+                    }
+                }
+            }
+        }
+    }
+    // stores of pointers into fields: key -> (value, line)
+    let mut stores: HashMap<(String, String), Vec<(String, usize)>> = HashMap::new();
+    let mut any_store: HashMap<(String, String), usize> = HashMap::new();
+    for (i, line) in f.body.iter().enumerate() {
+        let t = line.trim();
+        let Some(stored) = t.strip_prefix("store ") else { continue };
+        let Some((value, addr)) = stored.rsplit_once(", ptr ") else { continue };
+        let addr = addr.split(',').next().unwrap_or("").trim();
+        let Some(key) = field_of.get(addr).cloned() else { continue };
+        *any_store.entry(key.clone()).or_default() += 1;
+        if let Some(v) = value.strip_prefix("ptr ").or_else(|| value.split_once(") ").and_then(|(ty, v)| ty.starts_with("ptr addrspace(").then_some(v))) {
+            if v.starts_with('%') || v.starts_with('@') {
+                stores.entry(key).or_default().push((v.trim().to_string(), i));
+            }
+        }
+    }
+    let mut value_map: HashMap<String, String> = HashMap::new();
+    let mut drop: HashSet<usize> = HashSet::new();
+    for (i, line) in f.body.iter().enumerate() {
+        let t = line.trim();
+        let Some((name, rest)) = t.split_once(" = ") else { continue };
+        let Some(rest) = rest.strip_prefix("load ") else { continue };
+        if !rest.starts_with("ptr") {
+            continue;
+        }
+        let Some(pos) = rest.find(", ptr ") else { continue };
+        let addr = rest[pos + 6..].split(',').next().unwrap_or("").trim();
+        let Some(key) = field_of.get(addr) else { continue };
+        if escaped.contains(&key.0) || any_store.get(key) != Some(&1) {
+            continue;
+        }
+        let Some([(value, at)]) = stores.get(key).map(|v| v.as_slice()) else { continue };
+        if *at >= first_label || *at >= i {
+            continue;
+        }
+        value_map.insert(name.to_string(), value.clone());
+        drop.insert(i);
+    }
+    if value_map.is_empty() {
+        return false;
+    }
+    // a forwarded value may itself have been forwarded
+    let resolved: HashMap<String, String> = value_map
+        .keys()
+        .map(|k| {
+            let mut v = value_map[k].clone();
+            for _ in 0..8 {
+                match value_map.get(&v) {
+                    Some(n) => v = n.clone(),
+                    None => break,
+                }
+            }
+            (k.clone(), v)
+        })
+        .collect();
+    let empty = HashMap::new();
+    let body = std::mem::take(&mut f.body);
+    f.body = body
+        .into_iter()
+        .enumerate()
+        .filter(|(n, _)| !drop.contains(n))
+        .map(|(_, line)| rename_line(&line, &resolved, &empty))
+        .collect();
+    true
+}
+
+/// `text` names the value `name` (not just a longer name starting with it)
+fn mentions(text: &str, name: &str) -> bool {
+    let mut from = 0;
+    while let Some(p) = text[from..].find(name) {
+        let end = from + p + name.len();
+        let next = text[end..].chars().next();
+        if !next.is_some_and(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') {
+            return true;
+        }
+        from = end;
+    }
+    false
 }
 
 pub(crate) fn forward_builder_pointer_fields(san_ll: &str) -> std::borrow::Cow<'_, str> {
