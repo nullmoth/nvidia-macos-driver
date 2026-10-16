@@ -36,6 +36,8 @@ typedef struct { void *rp; void *pipe; void *layout; int has_depth; uint32_t dfm
     uint32_t lin;
     uint64_t tbm[2][4]; uint32_t tbany;
     uint32_t fetch_mask;   /* colour attachments the fragment shader reads ([[color(n)]], set 3 binding 192+n) */
+    uint32_t stencil_emu;  /* the fragment shader's stencil export was lowered to a per-bit discard (push constant 160) */
+    uint32_t skip_draws;   /* NVMTL_SKIP_FS names this fragment shader: its draws are not recorded (hang bisection) */
 } nvk_pipeline;
 void nvmtl_vk_pipeline_destroy(nvk_pipeline *p);
 typedef struct { void *pool; nvk_buffer stage; } nvk_queue;
@@ -64,6 +66,10 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  void *dcache[32]; void *dcachepool; unsigned ndcache;
                  unsigned in_rp, occlusion_reset; uint32_t wseq;
                  void *fetchview[NVMTL_NCOL];   /* the open pass's colour views, read by [[color(n)]] framebuffer fetch */
+                 /* stencil export emulation (nvmtl_semu_draw): the bound pipeline's layout when it exports stencil, and the
+                    stencil reference / write masks / depth write last set, which each per-bit pass changes and restores */
+                 void *semu_layout; uint32_t st_ref[2], st_wmask[2]; int depth_write;
+                 int skip_group;   /* inside a debug group NVMTL_SKIP_GROUP names: draws are not recorded (hang bisection) */
                  unsigned direct_sass;   /* recorded a dispatch of compiled machine code: never reuse this pool */
                  void *occlusion_pages; uint32_t occlusion_count;
                  void *timing_pool; nvmtl_gpu_interval timing;

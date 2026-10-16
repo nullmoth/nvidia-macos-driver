@@ -1123,10 +1123,16 @@ fn inline_one(
         renamed.push(rename_line(line, &value_map, &label_map));
     }
 
-    let before: Vec<String> = body[..idx].to_vec();
+    let bcall_label = enclosing_block_label(&body[..idx]);
+    // The call's block ends in the continuation block now, so every edge it had leaves from there: phis naming it as a
+    // predecessor are relabelled wherever they are, including loop headers above the call (a loop whose body was a
+    // call kept its back-edge value under the old label, the emitter dropped it, and the loop never advanced: Blender
+    // Eevee's light loop hung the GPU). The call's own block keeps its label for the lines before the call.
+    let before: Vec<String> = body[..idx]
+        .iter()
+        .map(|l| relabel_phi_preds(l, bcall_label.as_deref(), &cont_label))
+        .collect();
     let after: Vec<String> = body[idx + 1..].to_vec();
-
-    let bcall_label = enclosing_block_label(&before);
 
     let mut after_relabeled: Vec<String> = after
         .iter()
@@ -1727,6 +1733,116 @@ define i32 @main(i32 %0) {
     }
 
     #[test]
+    fn loop_header_phi_above_the_call_is_relabelled_to_cont() {
+        let ll = r#"
+define void @k(i32 %n) {
+entry:
+  br label %head
+
+head:
+  %i = phi i32 [ 0, %entry ], [ %next, %body ]
+  %done = icmp eq i32 %i, %n
+  br i1 %done, label %exit, label %body
+
+body:
+  %next = add i32 %i, 1
+  call void @f(i32 %i)
+  br label %head
+
+exit:
+  ret void
+}
+
+define internal void @f(i32 %x) {
+entry:
+  ret void
+}
+"#;
+        let out = inline_nonrecursive_internal_calls(ll);
+        assert!(!out.contains("[ %next, %body ]"), "the back-edge value still names the split block:\n{out}");
+        assert!(out.contains(".cont ]"), "the back edge comes from the continuation block:\n{out}");
+    }
+
+    #[test]
+    fn a_switch_becomes_an_else_if_chain_and_one_with_a_phi_target_stays() {
+        let mut f = FuncBlock {
+            header: "define void @k(i32 %t) {".to_string(),
+            body: "entry:
+  switch i32 %t, label %out [
+    i32 12, label %hit
+    i32 10, label %hit
+  ]
+hit:
+  switch i32 %t, label %out [
+    i32 3, label %merge
+    i32 4, label %merge
+  ]
+merge:
+  %p = phi i32 [ 0, %hit ], [ 0, %hit ]
+  br label %out
+out:
+  ret void"
+                .lines()
+                .map(str::to_string)
+                .collect(),
+        };
+        assert!(fold_switches_to_branches_in(&mut f));
+        let text = f.body.join("\n");
+        assert!(text.contains("icmp eq i32 %t, 12") && text.contains("icmp eq i32 %t, 10"), "{text}");
+        assert!(text.contains("label %hit, label %out"), "the folded branch keeps both targets:\n{text}");
+        assert_eq!(text.matches("switch ").count(), 1, "the switch into a phi block is left alone:\n{text}");
+
+        let mut g = FuncBlock {
+            header: "define void @k(i32 %t) {".to_string(),
+            body: "entry:
+  switch i32 %t, label %out [
+    i32 12, label %a
+    i32 10, label %a
+    i32 13, label %b
+  ]
+a:
+  br label %out
+b:
+  br label %out
+out:
+  ret void"
+                .lines()
+                .map(str::to_string)
+                .collect(),
+        };
+        assert!(fold_switches_to_branches_in(&mut g));
+        let text = g.body.join("\n");
+        assert!(!text.contains("switch "), "{text}");
+        assert!(text.contains("label %a, label %.swf1.n1") && text.contains(".swf1.n1:"), "{text}");
+        assert!(text.contains("icmp eq i32 %t, 13") && text.contains("label %b, label %out"), "{text}");
+    }
+
+    #[test]
+    fn a_phi_of_one_value_from_every_edge_becomes_that_value_and_a_real_merge_stays() {
+        let mut f = FuncBlock {
+            header: "define void @k(ptr addrspace(2) %buf, i32 %n) {".to_string(),
+            body: "entry:
+  br label %loop
+loop:
+  %i = phi i32 [ 0, %entry ], [ %next, %loop ]
+  %p = phi ptr addrspace(2) [ %buf, %entry ], [ %buf, %loop ]
+  %next = add i32 %i, 1
+  %done = icmp eq i32 %next, %n
+  br i1 %done, label %out, label %loop
+out:
+  %v = load i32, ptr addrspace(2) %p, align 4
+  ret void"
+                .lines()
+                .map(str::to_string)
+                .collect(),
+        };
+        assert!(fold_single_value_phis_in(&mut f));
+        let text = f.body.join("\n");
+        assert!(!text.contains("%p = phi") && text.contains("load i32, ptr addrspace(2) %buf"), "{text}");
+        assert!(text.contains("%i = phi i32 [ 0, %entry ], [ %next, %loop ]"), "the counter is a real merge:\n{text}");
+    }
+
+    #[test]
     fn caller_phi_pred_relabeled_to_cont() {
         let src = "\
 define internal i32 @id(i32 %0) {
@@ -1972,6 +2088,12 @@ pub(crate) fn inline_and_forward_object_fields(san_ll: &str) -> Option<String> {
         if forward_object_fields_in(f) {
             changed = true;
         }
+        if fold_switches_to_branches_in(f) {
+            changed = true;
+        }
+        if fold_single_value_phis_in(f) {
+            changed = true;
+        }
     }
     if !changed {
         return None;
@@ -1997,6 +2119,136 @@ pub(crate) fn inline_and_forward_object_fields(san_ll: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// A switch becomes an if/else-if chain, one test block per distinct case target (`if (t == A || t == B) ... else if
+/// (t == C) ...` as clang emits it). Once a helper is inlined, the arm that returned no longer ends the function, and the
+/// structurizer found no merge for the switch (Blender's Eevee light loop, the inlined light-attenuation helper); the
+/// two-way branch is the shape it already merges. A case target opening with a phi keeps its switch (the phi has one entry
+/// per case edge), and so does a phi default when the chain would move its edge to a new block.
+fn fold_switches_to_branches_in(f: &mut FuncBlock) -> bool {
+    let target_has_phi = |body: &[String], target: &str| {
+        let Some(at) = body.iter().position(|l| block_label_id(l) == Some(target)) else { return true };
+        body[at + 1..].iter().map(|l| l.trim()).find(|l| !l.is_empty() && !l.starts_with(';')).is_some_and(|l| l.contains(" = phi "))
+    };
+    let mut changed = false;
+    let mut i = 0;
+    while i < f.body.len() {
+        let line = f.body[i].trim();
+        let Some(head) = line.strip_prefix("switch ").and_then(|r| r.strip_suffix('[')) else {
+            i += 1;
+            continue;
+        };
+        // `switch i32 %sel, label %default [`
+        let parsed = head.split_once(", label %").and_then(|(ty_sel, default)| {
+            let (ty, sel) = ty_sel.trim().split_once(' ')?;
+            Some((ty.to_string(), sel.trim().to_string(), default.trim().to_string()))
+        });
+        let Some(end) = f.body[i + 1..].iter().position(|l| l.trim() == "]").map(|p| i + 1 + p) else { break };
+        let cases: Option<Vec<(String, String)>> = f.body[i + 1..end]
+            .iter()
+            .map(|l| {
+                let (value, target) = l.trim().split_once(", label %")?;
+                let value = value.trim().split_once(' ')?.1.trim().to_string();
+                Some((value, target.trim().to_string()))
+            })
+            .collect();
+        let (Some((ty, sel, default)), Some(cases)) = (parsed, cases) else {
+            i = end + 1;
+            continue;
+        };
+        let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+        for (value, target) in &cases {
+            match groups.iter_mut().find(|g| &g.0 == target) {
+                Some(g) => g.1.push(value.clone()),
+                None => groups.push((target.clone(), vec![value.clone()])),
+            }
+        }
+        if groups.is_empty()
+            || groups.iter().any(|g| g.0 == default || target_has_phi(&f.body, &g.0))
+            || (groups.len() > 1 && target_has_phi(&f.body, &default))
+        {
+            i = end + 1;
+            continue;
+        }
+        let indent = leading_ws(&f.body[i]).to_string();
+        let tag = format!(".swf{i}");
+        let mut lines = Vec::new();
+        for (g, (target, values)) in groups.iter().enumerate() {
+            if g > 0 {
+                lines.push(format!("{tag}.n{g}:"));
+            }
+            let mut acc = String::new();
+            for (k, value) in values.iter().enumerate() {
+                let c = format!("%{tag}.g{g}c{k}");
+                lines.push(format!("{indent}{c} = icmp eq {ty} {sel}, {value}"));
+                if k == 0 {
+                    acc = c;
+                } else {
+                    let o = format!("%{tag}.g{g}o{k}");
+                    lines.push(format!("{indent}{o} = or i1 {acc}, {c}"));
+                    acc = o;
+                }
+            }
+            let otherwise = if g + 1 < groups.len() { format!("{tag}.n{}", g + 1) } else { default.clone() };
+            lines.push(format!("{indent}br i1 {acc}, label %{target}, label %{otherwise}"));
+        }
+        let n = lines.len();
+        f.body.splice(i..=end, lines);
+        i += n;
+        changed = true;
+    }
+    changed
+}
+
+/// A phi whose every incoming value is the same value is that value. Forwarding leaves these behind for buffer pointers
+/// (a loop's exit phi of `light_cull_buf` re-read on each path), and a phi of buffer pointers needs variable pointers on
+/// the GPU: Blender Eevee's deferred light shader read its light-culling data through one and lit nothing, black even
+/// with no lamp in the scene (the test Mac 10-16: relabelled correctly, the cube went black; the same phi folded, lit).
+fn fold_single_value_phis_in(f: &mut FuncBlock) -> bool {
+    let mut changed = false;
+    for _ in 0..8 {
+        let mut map: HashMap<String, String> = HashMap::new();
+        let mut drop: HashSet<usize> = HashSet::new();
+        for (i, line) in f.body.iter().enumerate() {
+            if !is_phi_line(line) {
+                continue;
+            }
+            let t = line.trim();
+            let Some((name, rhs)) = t.split_once(" = ") else { continue };
+            let mut values = Vec::new();
+            let mut rest = rhs;
+            while let Some(open) = rest.find('[') {
+                let Some(close) = rest[open..].find(']') else { break };
+                let inner = &rest[open + 1..open + close];
+                let parts = split_top_level(inner, ',');
+                if parts.len() != 2 {
+                    values.clear();
+                    break;
+                }
+                values.push(parts[0].trim().to_string());
+                rest = &rest[open + close + 1..];
+            }
+            let Some(first) = values.first() else { continue };
+            if first != name && (first.starts_with('%') || first.starts_with('@')) && values.iter().all(|v| v == first) {
+                map.insert(name.to_string(), first.clone());
+                drop.insert(i);
+            }
+        }
+        if map.is_empty() {
+            break;
+        }
+        let empty = HashMap::new();
+        let body = std::mem::take(&mut f.body);
+        f.body = body
+            .into_iter()
+            .enumerate()
+            .filter(|(n, _)| !drop.contains(n))
+            .map(|(_, line)| rename_line(&line, &map, &empty))
+            .collect();
+        changed = true;
+    }
+    changed
 }
 
 fn forward_object_fields_in(f: &mut FuncBlock) -> bool {
@@ -2077,7 +2329,11 @@ fn forward_object_fields_in(f: &mut FuncBlock) -> bool {
         let addr = addr.split(',').next().unwrap_or("").trim();
         let Some(key) = field_of.get(addr).cloned() else { continue };
         *any_store.entry(key.clone()).or_default() += 1;
-        if let Some(v) = value.strip_prefix("ptr ").or_else(|| value.split_once(") ").and_then(|(ty, v)| ty.starts_with("ptr addrspace(").then_some(v))) {
+        // `ptr addrspace(N) %v` first: "ptr " also prefixes it, and read that way the value was "addrspace(2) %v", so a
+        // buffer pointer kept in an object field was never forwarded (Blender Eevee's light_cull_buf, re-read in the light loop)
+        let value = value.trim();
+        let addrspace = value.split_once(") ").and_then(|(ty, v)| ty.starts_with("ptr addrspace(").then_some(v));
+        if let Some(v) = addrspace.or_else(|| value.strip_prefix("ptr ")) {
             if v.starts_with('%') || v.starts_with('@') {
                 stores.entry(key).or_default().push((v.trim().to_string(), i));
             }

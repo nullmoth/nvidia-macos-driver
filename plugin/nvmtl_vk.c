@@ -2957,6 +2957,20 @@ static int nvmtl_fbfetch_on(void)
     }
     return on;
 }
+#define NVMTL_STENCIL_EMU_OFFSET 160u   /* the translator's native::stencil_export::STENCIL_EXPORT_PUSH_OFFSET */
+/* the translator's stencil-export lowering: a push-constant block member at offset 160 (stencil emulation, see NVMTL_SEMU_DRAW) */
+uint32_t nvmtl_spirv_stencil_emu(const void *code, size_t bytes)
+{
+    const uint32_t *w = (const uint32_t *)code; const size_t nw = bytes / 4;
+    if (nw < 5 || w[0] != 0x07230203u) return 0;
+    for (size_t i = 5; i < nw; ) {
+        uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
+        if (!wc || i + wc > nw) break;
+        if (op == 72 && wc == 5 && w[i + 3] == 35 && w[i + 4] == 160u) return 1;   // OpMemberDecorate .. Offset 160
+        i += wc;
+    }
+    return 0;
+}
 uint32_t nvmtl_spirv_fetch_mask(const void *code, size_t bytes)
 {
     const uint32_t *w = (const uint32_t *)code; const size_t nw = bytes / 4; uint32_t m = 0;
@@ -3031,6 +3045,8 @@ void nvmtl_vk_cmd_bind_set(nvk_cmdbuf *c, nvk_pipeline *p)
         pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_SAMPLE_POSITION_OFFSET,
                            NVMTL_SAMPLE_POSITION_BYTES, c->sample_pattern.position);
     pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipelineLayout)p->layout, 0, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, g_dyn_zero);
+    c->semu_layout = p->stencil_emu ? p->layout : NULL;
+    if (p->skip_draws) { c->nobind = 1; return; }
     if (p->fetch_mask && c->in_rp) {
         VkDescriptorSet fs = nvmtl_fetch_set(c, p->fetch_mask);
         if (!fs) { static int said; if (said++ < 4) nvlog("vk: framebuffer fetch set could not be made (mask 0x%x) - this draw is skipped", p->fetch_mask); c->nobind = 1; return; }
@@ -3092,6 +3108,7 @@ static int nvmtl_vk_depth_create_full_lifetime_body(uint32_t w, uint32_t h, uint
 
 void nvmtl_vk_cmd_set_depth(nvk_cmdbuf *c, int test, int write, int compare)
 {
+    c->depth_write = write;
     pvkCmdSetDepthTestEnable(c->cb, test ? VK_TRUE : VK_FALSE);
     pvkCmdSetDepthWriteEnable(c->cb, write ? VK_TRUE : VK_FALSE);
     pvkCmdSetDepthCompareOp(c->cb, (VkCompareOp)compare);
@@ -3879,7 +3896,15 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     }
     VkPushConstantRange pc[2]; uint32_t npc = 0;
     if (td) pc[npc++] = (VkPushConstantRange){ VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 0, NVMTL_TESS_PC_BYTES };
-    if (g_sample_locations) pc[npc++] = (VkPushConstantRange){ VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_SAMPLE_POSITION_OFFSET, NVMTL_SAMPLE_POSITION_BYTES };
+    out->stencil_emu = nvmtl_spirv_stencil_emu(fs, fn);
+    // NVMTL_SKIP_FS=<hex>[,<hex>...]: draws with a fragment shader of that FNV-1a hash (the trace's "fs %08x") are skipped,
+    // to find which shader hangs the GPU. A diagnostic only; unset, nothing is skipped.
+    { const char *sk = getenv("NVMTL_SKIP_FS"); out->skip_draws = 0;
+      if (sk && *sk) { uint32_t hh = 2166136261u; const uint8_t *bb = (const uint8_t *)fs; for (size_t i = 0; i < fn; i++) { hh ^= bb[i]; hh *= 16777619u; }
+          char want[16]; snprintf(want, sizeof want, "%08x", hh); if (strstr(sk, want)) { out->skip_draws = 1; nvlog("NVMTL_SKIP_FS: fragment shader %s - its draws are skipped", want); } } }
+    if (g_sample_locations) pc[npc++] = (VkPushConstantRange){ VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_SAMPLE_POSITION_OFFSET,
+        out->stencil_emu ? NVMTL_STENCIL_EMU_OFFSET + 4u - NVMTL_SAMPLE_POSITION_OFFSET : NVMTL_SAMPLE_POSITION_BYTES };
+    else if (out->stencil_emu) pc[npc++] = (VkPushConstantRange){ VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_STENCIL_EMU_OFFSET, 4u };
     VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, nsl, sl2, npc, npc ? pc : NULL };
     NVMTL_PIPELINE_STAGE(nvmtl_opaque_CreatePipelineLayout(g_dev, &plci, NULL, &out->layout), "vkCreatePipelineLayout");
 
@@ -5090,8 +5115,37 @@ int nvmtl_vk_cmd_clear_image(nvk_cmdbuf *c, nvk_image *img, const float clear[4]
     return 0;
 }
 
+/*
+ * Stencil export ([[stencil]] fragment output) on hardware without it. NVIDIA GPUs cannot export stencil from a fragment
+ * shader (NVIDIA's own drivers expose neither GL_ARB_ nor VK_EXT_shader_stencil_export), but Metal guarantees it and
+ * apps rely on it: Blender's Metal backend hard-codes it, and Eevee classifies its G-buffer with it, so every lit
+ * surface rendered black (#152). The translator turns the export into "discard unless (value & bit)", the bit pushed at
+ * offset 160; a draw is then replayed the way Blender itself does where export is missing: once with reference 0 (which
+ * clears the write-masked bits, and writes colour and depth as the draw would), then once per write-mask bit, with only
+ * that bit writable, that bit as the reference, and depth writes off.
+ */
+#define NVMTL_SEMU_DRAW(c, DRAW) do { \
+    if ((c)->skip_group) break; \
+    if (!(c)->semu_layout) { DRAW; break; } \
+    uint32_t z_ = 0; const uint32_t m_ = (c)->st_wmask[0] | (c)->st_wmask[1]; \
+    pvkCmdPushConstants((c)->cb, (VkPipelineLayout)(c)->semu_layout, VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_STENCIL_EMU_OFFSET, 4, &z_); \
+    pvkCmdSetStencilReference((c)->cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0); \
+    DRAW; \
+    if (m_) { pvkCmdSetDepthWriteEnable((c)->cb, VK_FALSE); \
+        for (uint32_t b_ = 1; b_ <= 0x80u; b_ <<= 1) { if (!(m_ & b_)) continue; \
+            pvkCmdPushConstants((c)->cb, (VkPipelineLayout)(c)->semu_layout, VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_STENCIL_EMU_OFFSET, 4, &b_); \
+            pvkCmdSetStencilWriteMask((c)->cb, VK_STENCIL_FACE_FRONT_BIT, (c)->st_wmask[0] & b_); \
+            pvkCmdSetStencilWriteMask((c)->cb, VK_STENCIL_FACE_BACK_BIT, (c)->st_wmask[1] & b_); \
+            pvkCmdSetStencilReference((c)->cb, VK_STENCIL_FACE_FRONT_AND_BACK, b_); \
+            DRAW; } \
+        pvkCmdSetStencilWriteMask((c)->cb, VK_STENCIL_FACE_FRONT_BIT, (c)->st_wmask[0]); \
+        pvkCmdSetStencilWriteMask((c)->cb, VK_STENCIL_FACE_BACK_BIT, (c)->st_wmask[1]); \
+        pvkCmdSetDepthWriteEnable((c)->cb, (c)->depth_write ? VK_TRUE : VK_FALSE); } \
+    pvkCmdSetStencilReference((c)->cb, VK_STENCIL_FACE_FRONT_BIT, (c)->st_ref[0]); \
+    pvkCmdSetStencilReference((c)->cb, VK_STENCIL_FACE_BACK_BIT, (c)->st_ref[1]); \
+} while (0)
 void nvmtl_vk_cmd_draw(nvk_cmdbuf *c, uint32_t first, uint32_t count, uint32_t instances, uint32_t baseInstance)
-{ if (c->nobind) return; pvkCmdDraw(c->cb, count, instances ? instances : 1, first, baseInstance); }
+{ if (c->nobind) return; NVMTL_SEMU_DRAW(c, pvkCmdDraw(c->cb, count, instances ? instances : 1, first, baseInstance)); }
 void nvmtl_vk_cmd_set_scissor(nvk_cmdbuf *c, int32_t x, int32_t y, uint32_t w, uint32_t h)
 { VkRect2D r = { { x, y }, { w, h } }; pvkCmdSetScissor(c->cb, 0, 1, &r); }
 void nvmtl_vk_cmd_bind_pipeline(nvk_cmdbuf *c, nvk_pipeline *p) { pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipeline)p->pipe); }
@@ -5151,12 +5205,13 @@ void nvmtl_vk_cmd_draw_indexed(nvk_cmdbuf *c, nvk_buffer *idx, size_t offset, ui
     if (!nvmtl_index_range_ok(idx, offset)) return;
     pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, offset, is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
     if (c->nobind) return;
-    pvkCmdDrawIndexed(c->cb, count, instances ? instances : 1, 0, baseVertex, baseInstance);
+    NVMTL_SEMU_DRAW(c, pvkCmdDrawIndexed(c->cb, count, instances ? instances : 1, 0, baseVertex, baseInstance));
 }
 
 void nvmtl_vk_cmd_set_blend_color(nvk_cmdbuf *c, const float rgba[4]) { pvkCmdSetBlendConstants(c->cb, rgba); }
 void nvmtl_vk_cmd_set_stencil_ref(nvk_cmdbuf *c, uint32_t front, uint32_t back)
 {
+    c->st_ref[0] = front; c->st_ref[1] = back;
     pvkCmdSetStencilReference(c->cb, VK_STENCIL_FACE_FRONT_BIT, front);
     pvkCmdSetStencilReference(c->cb, VK_STENCIL_FACE_BACK_BIT, back);
 }
@@ -5168,6 +5223,7 @@ void nvmtl_vk_cmd_set_stencil(nvk_cmdbuf *c, int enable, const uint32_t *f, cons
         pvkCmdSetStencilOp(c->cb, face[i], (VkStencilOp)o[i][1], (VkStencilOp)o[i][3], (VkStencilOp)o[i][2], (VkCompareOp)o[i][0]);
         pvkCmdSetStencilCompareMask(c->cb, face[i], o[i][4]);
         pvkCmdSetStencilWriteMask(c->cb, face[i], o[i][5]);
+        c->st_wmask[i] = enable ? o[i][5] : 0;
     }
 }
 void nvmtl_vk_cmd_set_depth_bias(nvk_cmdbuf *c, float constant, float slope, float clamp)
@@ -6121,7 +6177,7 @@ int nvmtl_vk_copy_image_to_buffer_layer(nvk_queue *q, nvk_image *img, uint32_t x
 }
 
 void nvmtl_vk_cmd_draw_indirect(nvk_cmdbuf *c, nvk_buffer *b, size_t off)
-{ if (c->nobind) return; pvkCmdDrawIndirect(c->cb, (VkBuffer)b->buf, off, 1, 0); }
+{ if (c->nobind) return; NVMTL_SEMU_DRAW(c, pvkCmdDrawIndirect(c->cb, (VkBuffer)b->buf, off, 1, 0)); }
 int nvmtl_vk_cmd_draw_patches(nvk_cmdbuf *c, const nvk_pipeline *p, uint64_t fac, uint32_t istride, float scale, uint64_t cpx, uint64_t pix,
                               uint32_t start, uint32_t count, uint32_t instances, uint32_t baseInstance, nvk_buffer *ind, size_t indoff)
 {
@@ -6152,7 +6208,7 @@ void nvmtl_vk_cmd_draw_indexed_indirect(nvk_cmdbuf *c, nvk_buffer *idx, size_t i
     if (!nvmtl_index_range_ok(idx, idxOff)) return;
     pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, idxOff, is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
     if (c->nobind) return;
-    pvkCmdDrawIndexedIndirect(c->cb, (VkBuffer)b->buf, off, 1, 0);
+    NVMTL_SEMU_DRAW(c, pvkCmdDrawIndexedIndirect(c->cb, (VkBuffer)b->buf, off, 1, 0));
 }
 void nvmtl_vk_cmd_dispatch_indirect(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *b, size_t off)
 {

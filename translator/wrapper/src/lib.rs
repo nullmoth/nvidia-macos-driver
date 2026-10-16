@@ -87,6 +87,10 @@ fn translate_one(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
             || e.contains("missing pointer storage") =>
         {
             let Some(retry) = metal2vulkan::inline_and_forward_object_fields(ll) else { return Err(e) };
+            // NVMTL_DUMP_RETRY_LL=<file>: the retry's input text, to inspect what inlining and forwarding produced
+            if let Some(path) = std::env::var_os("NVMTL_DUMP_RETRY_LL") {
+                let _ = std::fs::write(path, &retry);
+            }
             metal2vulkan::with_argument_buffer_samplers(|| translate_one_as_written(&retry, st))
                 .map_err(|e2| format!("{e}; retry with helpers inlined and object fields forwarded: {e2}"))
         }

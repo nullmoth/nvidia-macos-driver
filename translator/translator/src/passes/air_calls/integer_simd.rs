@@ -919,6 +919,31 @@ fn lower_quad_vote(
     ])
 }
 
+/// The subgroup lane of the first ACTIVE lane in this lane's 32-lane Metal SIMD-group. simd_broadcast_first and
+/// simd_is_first are defined over active lanes; taking the cluster's lane 0 read an inactive lane wherever lane 0 was not
+/// running (outside the primitive, a discarded pixel, a branch it did not take) and broadcast garbage: Eevee's light loop
+/// took its word range from it and ran for ~10^8 iterations per pixel until the channel timed out.
+fn metal_simd_first_active_lane_u32(ctx: &mut Ctx, lane: Word, insts: &mut Vec<Instruction>) -> Word {
+    let uint = ctx.ty_uint();
+    let bool_ty = ctx.ty_bool();
+    let truth = ctx.const_bool_of(bool_ty, true);
+    let simd_lane = metal_simd_lane_local_u32(ctx, lane, insts);
+    let base = metal_simd_lane_base_u32(ctx, lane, simd_lane, insts);
+    // the cluster's 32 bits are one word of the ballot, because clusters are 32-lane aligned
+    let word = subgroup_partition_ballot_word(ctx, insts, lane, truth);
+    let ext = ctx.glsl();
+    let first_bit = ctx.module.fresh_id();
+    insts.push(Instruction::new(
+        Op::ExtInst,
+        Some(uint),
+        Some(first_bit),
+        vec![Operand::IdRef(ext), Operand::LiteralExtInstInteger(GLSLstd450::FindILsb as u32), Operand::IdRef(word)],
+    ));
+    let first = ctx.module.fresh_id();
+    insts.push(Instruction::new(Op::IAdd, Some(uint), Some(first), vec![Operand::IdRef(base), Operand::IdRef(first_bit)]));
+    first
+}
+
 fn subgroup_partition_ballot_word(
     ctx: &mut Ctx,
     insts: &mut Vec<Instruction>,
@@ -1152,12 +1177,12 @@ pub(in crate::passes) fn lower_simd_op(
         }
         let mut insts = Vec::new();
         let lane = subgroup_lane_index_u32(ctx, &mut insts);
-        let simd_lane = metal_simd_lane_local_u32(ctx, lane, &mut insts);
+        let first = metal_simd_first_active_lane_u32(ctx, lane, &mut insts);
         insts.push(Instruction::new(
             Op::IEqual,
             Some(rty),
             Some(res),
-            vec![Operand::IdRef(simd_lane), Operand::IdRef(ctx.const_uint(0))],
+            vec![Operand::IdRef(lane), Operand::IdRef(first)],
         ));
         return Ok(Some(insts));
     }
@@ -1165,8 +1190,7 @@ pub(in crate::passes) fn lower_simd_op(
         let scope = ctx.const_uint(Scope::Subgroup as u32);
         let mut insts = Vec::new();
         let lane = subgroup_lane_index_u32(ctx, &mut insts);
-        let simd_lane = metal_simd_lane_local_u32(ctx, lane, &mut insts);
-        let base_lane = metal_simd_lane_base_u32(ctx, lane, simd_lane, &mut insts);
+        let first = metal_simd_first_active_lane_u32(ctx, lane, &mut insts);
         insts.push(Instruction::new(
             Op::GroupNonUniformShuffle,
             Some(rty),
@@ -1174,7 +1198,7 @@ pub(in crate::passes) fn lower_simd_op(
             vec![
                 Operand::IdScope(scope),
                 Operand::IdRef(args[0]),
-                Operand::IdRef(base_lane),
+                Operand::IdRef(first),
             ],
         ));
         return Ok(Some(insts));
