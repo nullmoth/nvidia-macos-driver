@@ -259,6 +259,12 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     struct NvKmsKapiDisplayMode fBootMode = {};
     NvU32 fBootW = 0, fBootH = 0, fBootPitch = 0;
     NvU32 fRasterW = 0, fRasterH = 0;
+    // The gamma table WindowServer last set (Night Shift, True Tone, ColorSync calibration, fades), in NVKMS's output-LUT
+    // form. Every modeset carries it so a mode change does not drop it; setGammaTable commits it on its own.
+    struct NvKmsLutRamps *fGamma = nullptr;
+    bool fGammaOn = false;
+    unsigned fGammaCommits = 0, fGammaFails = 0;
+    IOReturn nvrmSetGamma(UInt32 channels, UInt32 count, UInt32 width, const void *data);
     NvU32 fPitchAlign = 256;
     NvU32 fScalerMaxW = 0, fScalerMaxH = 0;
     // Widest raster offered when it fits the scanout memory. Separate from the scaler limit: a 5120x1440 monitor whose
@@ -432,8 +438,9 @@ public:
     IOReturn setCursorImage(void *cursorImage) override;
     IOReturn setCursorState(SInt32 x, SInt32 y, bool visible) override;
     bool isConsoleDevice(void) override { return fBootConsole; }
-    IOReturn setGammaTable(UInt32, UInt32, UInt32, void *) override { return kIOReturnSuccess; }
-    IOReturn setGammaTable(UInt32, UInt32, UInt32, void *, bool) override { return kIOReturnSuccess; }
+    // WAS: both returned success and did nothing, so Night Shift, True Tone and calibration changed nothing on screen.
+    IOReturn setGammaTable(UInt32 ch, UInt32 n, UInt32 w, void *d) override { return nvrmSetGamma(ch, n, w, d); }
+    IOReturn setGammaTable(UInt32 ch, UInt32 n, UInt32 w, void *d, bool) override { return nvrmSetGamma(ch, n, w, d); }
     IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnSuccess; }
     IOReturn setApertureEnable(IOPixelAperture, IOOptionBits) override { return kIOReturnSuccess; }
     IOReturn setStartupDisplayMode(IODisplayModeID, IOIndex) override { return kIOReturnSuccess; }
@@ -602,10 +609,16 @@ static void nvrmUnownedHeadsOff(struct NvKmsKapiRequestedModeSetConfig *cfg)
         hr->flags.activeChanged = hr->flags.displaysChanged = NV_TRUE;
     }
 }
-static void nvrmHeadConfigBaseline(struct NvKmsKapiHeadRequestedConfig *hr)
+static void nvrmHeadConfigBaseline(struct NvKmsKapiHeadRequestedConfig *hr, struct NvKmsLutRamps *gamma = NULL)
 {
     hr->modeSetConfig.olutFpNormScale = NVKMS_OLUT_FP_NORM_SCALE_DEFAULT;
     hr->flags.olutFpNormScaleChanged = NV_TRUE;
+    // the output LUT the way nvidia-drm sets a CRTC's gamma (legacy ramps, flags.legacyOlutChanged)
+    if (gamma) {
+        hr->modeSetConfig.lut.output.enabled = NV_TRUE;
+        hr->modeSetConfig.lut.output.pRamps = gamma;
+        hr->flags.legacyOlutChanged = NV_TRUE;
+    }
     for (unsigned i = 0; i < NVKMS_KAPI_LAYER_MAX; i++) {
         struct NvKmsKapiLayerRequestedConfig *lr = &hr->layerRequestedConfig[i];
         nvu_zero(&lr->config.csc, sizeof lr->config.csc);
@@ -1466,7 +1479,7 @@ bool NVRMNVDAFramebuffer::reflip()
     nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
     cfg->headsMask = 1u << fHead;
     struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
-    nvrmHeadConfigBaseline(hr);
+    nvrmHeadConfigBaseline(hr, fGammaOn ? fGamma : NULL);
     hr->modeSetConfig.bActive = NV_TRUE;
     hr->modeSetConfig.numDisplays = 1;
     hr->modeSetConfig.displays[0] = fDisplay;
@@ -1484,6 +1497,61 @@ bool NVRMNVDAFramebuffer::reflip()
     fReflipRc = ok ? (int)rep->flipResult : -1;
     IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
     return ok ? true : false;
+}
+// setGammaTable: WindowServer's CLUT (1 or 3 channels, planar, `count` entries of `width` bits; 8-bit entries are bytes,
+// wider ones 16-bit words, as IOGraphics passes them) resampled to NVKMS's 1024-entry 16-bit ramps and committed as the
+// head's output LUT on its own: no mode change and no flip wait, so Night Shift's gradual changes cannot blank or stall
+// the screen. A failed commit keeps the previous LUT; -nvrmnogamma keeps the old behaviour (accepted, not applied).
+IOReturn NVRMNVDAFramebuffer::nvrmSetGamma(UInt32 channels, UInt32 count, UInt32 width, const void *data)
+{
+    char nb[8] = { 0 };
+    if (PE_parse_boot_argn("-nvrmnogamma", nb, sizeof nb)) return kIOReturnSuccess;
+    if (!data || (channels != 1 && channels != 3) || count < 2 || count > 4096 || width < 1 || width > 16) {
+        FBLOG("gamma: refused a table (%u channels, %u entries, %u bits)", channels, count, width);
+        return kIOReturnBadArgument;
+    }
+    if (!fGamma) {
+        fGamma = (struct NvKmsLutRamps *)IOMalloc(sizeof *fGamma);
+        if (!fGamma) return kIOReturnNoMemory;
+    }
+    const UInt32 maxIn = (1u << width) - 1, N = NVKMS_LUT_ARRAY_SIZE;
+    NvU16 *out[3] = { fGamma->red, fGamma->green, fGamma->blue };
+    for (unsigned c = 0; c < 3; c++) {
+        const unsigned src = channels == 3 ? c : 0;
+        for (UInt32 i = 0; i < N; i++) {
+            const uint64_t pos = (uint64_t)i * (count - 1) * 65536 / (N - 1);   // 16.16 position in the source table
+            const UInt32 k = (UInt32)(pos >> 16), f = (UInt32)(pos & 0xffff);
+            const UInt32 k1 = k + 1 < count ? k + 1 : k;
+            const UInt32 a = width <= 8 ? ((const UInt8 *)data)[src * count + k] : ((const UInt16 *)data)[src * count + k];
+            const UInt32 b = width <= 8 ? ((const UInt8 *)data)[src * count + k1] : ((const UInt16 *)data)[src * count + k1];
+            const uint64_t v = ((uint64_t)a * (65536 - f) + (uint64_t)b * f) >> 16;   // in the source's range
+            out[c][i] = (NvU16)((v > maxIn ? maxIn : v) * 65535 / maxIn);
+        }
+    }
+    fGammaOn = true;
+    // Not lit yet (boot, display sleep, GPU in standby, console aperture): the next modeset carries the table.
+    if (!fModeSet || !fSurf || fHeadSlept || fConsoleAperture || !rmGpuReady()) return kIOReturnSuccess;
+    NVRMDisplayGate gate; if (!gate.valid() || !fKms || !fDev) return kIOReturnSuccess;
+    struct NvKmsKapiRequestedModeSetConfig *cfg = (struct NvKmsKapiRequestedModeSetConfig *)IOMalloc(sizeof *cfg);
+    struct NvKmsKapiModeSetReplyConfig *rep = (struct NvKmsKapiModeSetReplyConfig *)IOMalloc(sizeof *rep);
+    if (!cfg || !rep) { if (cfg) IOFree(cfg, sizeof *cfg); if (rep) IOFree(rep, sizeof *rep); return kIOReturnSuccess; }
+    nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
+    cfg->headsMask = 1u << fHead;
+    struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
+    // the head's current state with only the LUT flagged as changed (unflagged fields are not applied)
+    hr->modeSetConfig.bActive = NV_TRUE; hr->modeSetConfig.numDisplays = 1; hr->modeSetConfig.displays[0] = fDisplay;
+    hr->modeSetConfig.mode = fMode;
+    hr->modeSetConfig.olutFpNormScale = NVKMS_OLUT_FP_NORM_SCALE_DEFAULT;
+    hr->modeSetConfig.lut.output.enabled = NV_TRUE;
+    hr->modeSetConfig.lut.output.pRamps = fGamma;
+    hr->flags.legacyOlutChanged = NV_TRUE;
+    const NvBool ok = submitConfig(cfg, rep, NV_TRUE, false, true);
+    if (ok) fGammaCommits++; else fGammaFails++;
+    if (fGammaCommits + fGammaFails <= 3 || !ok)
+        FBLOG("gamma: %u-channel %u x %u-bit table on head %u -> %s (flipResult %d; %u applied, %u failed)", channels, count,
+              width, fHead, ok ? "applied" : "NOT applied, previous LUT kept", (int)rep->flipResult, fGammaCommits, fGammaFails);
+    IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
+    return kIOReturnSuccess;
 }
 void NVRMNVDAFramebuffer::reflipFire(thread_call_param_t p0, thread_call_param_t)
 {
@@ -1786,7 +1854,7 @@ bool NVRMNVDAFramebuffer::setHeadActive(bool active)
     nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
     cfg->headsMask = 1u << fHead;
     struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
-    nvrmHeadConfigBaseline(hr);
+    nvrmHeadConfigBaseline(hr, active && fGammaOn ? fGamma : NULL);
     hr->modeSetConfig.bActive = active ? NV_TRUE : NV_FALSE;
     hr->flags.activeChanged = NV_TRUE;
     if (active) {
@@ -1840,7 +1908,7 @@ bool NVRMNVDAFramebuffer::applyMode()
     nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
     cfg->headsMask = 1u << fHead;
     struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
-    nvrmHeadConfigBaseline(hr);
+    nvrmHeadConfigBaseline(hr, fGammaOn ? fGamma : NULL);
     hr->modeSetConfig.bActive = NV_TRUE; hr->modeSetConfig.numDisplays = 1; hr->modeSetConfig.displays[0] = fDisplay; hr->modeSetConfig.mode = fMode;
     hr->flags.activeChanged = hr->flags.displaysChanged = hr->flags.modeChanged = NV_TRUE;
     struct NvKmsKapiLayerRequestedConfig *lr = &hr->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX];
@@ -2021,6 +2089,7 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
         *calls[i] = nullptr;
     }
     if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
+    if (fGamma) { IOFree(fGamma, sizeof *fGamma); fGamma = nullptr; fGammaOn = false; }
     if (fWakeGate) { if (IOWorkLoop *wl = getWorkLoop()) wl->removeEventSource(fWakeGate); OSSafeReleaseNULL(fWakeGate); }
     if (fSleepTap) { fSleepTap->remove(); fSleepTap = nullptr; }
     super::stop(provider);
@@ -2157,8 +2226,20 @@ void NVRMNVDAFramebuffer::computeScanoutCaps(NvU32 pitchAlign)
     if (mw > 7680) mw = 7680;        // Blackwell/Ada scanout ceiling; above this NVKMS validates nothing anyway
     if (mh > 4320) mh = 4320;
     fScalerMaxW = mw; fScalerMaxH = mh; fRasterMaxW = mw;
-    const NvU64 mp_ = ((NvU64)mw * 4 + pitchAlign - 1) & ~((NvU64)pitchAlign - 1);
-    fAllocSize = (mp_ * mh + 0xffff) & ~0xffffull;
+    // nvfbhidpi=1 (opt-in, 2.0.5): HiDPI "looks like" modes are backed by a desktop up to twice the panel's raster
+    // (2560x1600 panel, looks like 1440x900 -> 2880x1800 desktop) that NVKMS scales down to the raster, the way NVIDIA's
+    // driver separates ViewportIn from ViewportOut. Capped at the largest raster, every such desktop was refused as
+    // "larger than the scanout allocation" and custom HiDPI modes reverted (GH #221). It reserves more video memory for
+    // scanout, so it stays opt-in until owners of HiDPI panels report it; a reserve that cannot be allocated falls back
+    // to the boot size below.
+    { uint32_t hidpi = 0;
+      if (PE_parse_boot_argn("nvfbhidpi", &hidpi, sizeof hidpi) && hidpi) {
+          fScalerMaxW = mw * 2 > 7680 ? 7680 : mw * 2;
+          fScalerMaxH = mh * 2 > 4320 ? 4320 : mh * 2;
+          FBLOG("nvfbhidpi: scaled desktops up to %ux%u on a %ux%u raster", fScalerMaxW, fScalerMaxH, mw, mh);
+      } }
+    const NvU64 mp_ = ((NvU64)fScalerMaxW * 4 + pitchAlign - 1) & ~((NvU64)pitchAlign - 1);
+    fAllocSize = (mp_ * fScalerMaxH + 0xffff) & ~0xffffull;
     if (fAllocSize < fSize) fAllocSize = fSize;
 }
 // Users on HDMI and DisplayPort (RTX 3050/3060/4060, 144-240 Hz panels) saw only 60 Hz: macOS's EDID parse handed
@@ -2273,7 +2354,7 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
         nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
         cfg->headsMask = 1u << fHead;
         struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
-        nvrmHeadConfigBaseline(hr);
+        nvrmHeadConfigBaseline(hr, fGammaOn ? fGamma : NULL);
         hr->modeSetConfig.bActive = NV_TRUE; hr->modeSetConfig.numDisplays = 1; hr->modeSetConfig.displays[0] = fDisplay;
         hr->modeSetConfig.mode = m;
         hr->flags.activeChanged = hr->flags.displaysChanged = hr->flags.modeChanged = NV_TRUE;
