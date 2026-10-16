@@ -360,8 +360,10 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
         if (event->type == NVKMS_EVENT_TYPE_DPY_CHANGED || event->type == NVKMS_EVENT_TYPE_DYNAMIC_DPY_CONNECTED)
             FBLOG("kapi event type %d (display change)", (int)event->type);
         if (event->type == NVKMS_EVENT_TYPE_FLIP_OCCURRED && event->u.flipOccurred.head < 8
-            && event->u.flipOccurred.layer == NVKMS_KAPI_LAYER_PRIMARY_IDX)
+            && event->u.flipOccurred.layer == NVKMS_KAPI_LAYER_PRIMARY_IDX) {
             OSIncrementAtomic(&sFlipLatched[event->u.flipOccurred.head]);
+            flipWake(event->u.flipOccurred.head);
+        }
         // A display connected (or a connector changed) after boot: look for it off this context, after a short
         // settle (EDID reads follow the hot-plug interrupt).
         if (event->type == NVKMS_EVENT_TYPE_DPY_CHANGED || event->type == NVKMS_EVENT_TYPE_DYNAMIC_DPY_CONNECTED)
@@ -369,6 +371,8 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     }
     static void hotplugKick();
     static void hotplugFire(thread_call_param_t p0, thread_call_param_t);
+    static void flipWake(unsigned head);
+    bool waitFlipDone(unsigned limitMs);
     bool kapiInit();
     bool applyMode();
     void hudDraw();
@@ -1249,6 +1253,35 @@ static IORecursiveLock *startLock()
     }
     return gL;
 }
+// Waiting for a flip to complete. Polling NVKMS's pending flag with IOSleep(1) overslept each check by a millisecond or
+// more, and a frame went through two such waits: harmless in a 16.7 ms frame, but at 144 Hz (6.9 ms) the flip landed a
+// vblank late and the desktop ran near half the panel rate while the hardware cursor stayed smooth (1401 "Record
+// flicker" on a 143 Hz panel: 56 flips/s median; 540 Hz: 192/s). The flip-occurred event now wakes the waiter, and the
+// pending flag (still the truth) is re-read at least every 250 us; the 100 ms bound is unchanged.
+static IOLock *sFlipWaitLock;
+static volatile SInt32 sFlipWakeEv[8];
+void NVRMNVDAFramebuffer::flipWake(unsigned head)
+{
+    if (head < 8 && sFlipWaitLock) IOLockWakeup(sFlipWaitLock, (event_t)&sFlipWakeEv[head], false);
+}
+bool NVRMNVDAFramebuffer::waitFlipDone(unsigned limitMs)
+{
+    if (!sFlipWaitLock) { IOLock *l = IOLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&sFlipWaitLock)) IOLockFree(l); }
+    uint64_t end = 0; clock_interval_to_deadline(limitMs, kMillisecondScale, &end);
+    for (;;) {
+        NvBool pending = NV_TRUE;
+        if (!fKms->getFlipPendingStatus(fDev, fHead, NVKMS_KAPI_LAYER_PRIMARY_IDX, &pending)) return false;
+        if (!pending) return true;
+        uint64_t now = mach_absolute_time();
+        if (now >= end) return false;
+        uint64_t next = 0; clock_interval_to_deadline(250, kMicrosecondScale, &next);
+        if (next > end) next = end;
+        if (!sFlipWaitLock) { IOSleep(1); continue; }
+        IOLockLock(sFlipWaitLock);
+        IOLockSleepDeadline(sFlipWaitLock, (event_t)&sFlipWakeEv[fHead < 8 ? fHead : 0], next, THREAD_UNINT);
+        IOLockUnlock(sFlipWaitLock);
+    }
+}
 // Flip completion-wait controls, surfaced through the debug.nvrmfb_flip_latch* sysctls registered
 // below. gFlipLatch gates the wait (default 1; 0 is a debug bypass that lets a surface retire before
 // its flip latches, i.e. reintroduces the strobe). The counters report the real wait the compositor
@@ -1270,13 +1303,7 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
     if (fSubmissionSeen) {
         // Initial console acceptance is asynchronous. A still-pending prior flip
         // must receive the same bounded completion wait as a newly committed flip.
-        bool complete = false;
-        for (unsigned i = 0; i < 100; ++i) {
-            NvBool pending = NV_TRUE;
-            if (!fKms->getFlipPendingStatus(fDev, fHead, NVKMS_KAPI_LAYER_PRIMARY_IDX, &pending)) break;
-            if (!pending) { complete = true; break; }
-            IOSleep(1);
-        }
+        const bool complete = waitFlipDone(100);
         if (!complete) {
             FBLOG("presentation blocked: prior completion unavailable on head %u", fHead);
             fSubmissionFaulted = true; return NV_FALSE;
@@ -1318,15 +1345,11 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
     if (bootstrap || !gFlipLatch) return NV_TRUE;
     OSIncrementAtomic((volatile SInt32 *)&gFlipLatchWaits);
     const uint64_t latch0 = mach_absolute_time();
-    for (unsigned i = 0; i < 100; ++i) {
-        NvBool pending = NV_TRUE;
-        if (!fKms->getFlipPendingStatus(fDev, fHead, NVKMS_KAPI_LAYER_PRIMARY_IDX, &pending)) break;
-        if (!pending) {
-            const int us = (int)((mach_absolute_time() - latch0) / 1000);
-            if (us > gFlipLatchMaxUs) gFlipLatchMaxUs = us;
-            return NV_TRUE;
-        }
-        IOSleep(1);
+    if (waitFlipDone(100)) {
+        uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - latch0, &ns);
+        const int us = (int)(ns / 1000);
+        if (us > gFlipLatchMaxUs) gFlipLatchMaxUs = us;
+        return NV_TRUE;
     }
     // Keep both the old front and submitted surface alive until a proven recovery/reboot.
     OSIncrementAtomic((volatile SInt32 *)&gFlipLatchTimeouts);
@@ -1813,9 +1836,9 @@ bool NVRMNVDAFramebuffer::applyMode()
     lr->flags.surfaceChanged = lr->flags.srcXYChanged = lr->flags.srcWHChanged = lr->flags.dstXYChanged = lr->flags.dstWHChanged = NV_TRUE;
     nvrmUnownedHeadsOff(cfg);
     NvBool ok = submitConfig(cfg, rep, NV_TRUE, true);
-    // The firmware's boot timing is not always one NVKMS validates for the display (seen on an RTX 3060 at 1920x1080: the
-    // GOP's 2200x1125 raster refused, every commit rejected, CoreDisplay asserted in CGXMappedDisplayStart and
-    // WindowServer crash-looped). The mode NVKMS validated for the same raster scans out the same surface, so retry with it.
+    // A refused first mode set leaves WindowServer asserting in CGXMappedDisplayStart and crash-looping (an RTX 3060 at
+    // 1920x1080, 2.1.0 and 2.2.0). First retry with the mode NVKMS validated for the same raster, when it differs from the
+    // firmware's timing (it scans out the same surface).
     if (!ok && fHaveKmsMode && memcmp(&fMode, &fKmsMode, sizeof fMode) != 0 &&
         fKmsMode.timings.hVisible == fRasterW && fKmsMode.timings.vVisible == fRasterH) {
         FBLOG("applyMode: firmware timing pclk %u %ux%u refused; retrying with NVKMS's validated mode pclk %u %ux%u @%u",
@@ -1825,6 +1848,25 @@ bool NVRMNVDAFramebuffer::applyMode()
         nvu_zero(rep, sizeof *rep);
         ok = submitConfig(cfg, rep, NV_TRUE, true);
         if (ok) fMode = fKmsMode;
+    }
+    // Then keep the mode the firmware is already scanning out and only put our surface on the head: a flip, no mode set.
+    // KAPI takes the flip path only when no head in the request changes mode, activity or displays, so the request holds
+    // this head alone. The 2.2.0 log of that RTX 3060 shows the validated mode equals the firmware's, so the refusal is
+    // not the timing; NVKMS now logs its reason codes ("[kapi] set mode refused").
+    if (!ok) {
+        nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
+        cfg->headsMask = 1u << fHead;
+        nvrmHeadConfigBaseline(hr, fGammaOn ? fGamma : NULL);
+        hr->modeSetConfig.bActive = NV_TRUE; hr->modeSetConfig.numDisplays = 1; hr->modeSetConfig.displays[0] = fDisplay;
+        hr->modeSetConfig.mode = fMode;
+        lr->config.surface = fSurf; lr->config.srcWidth = fW; lr->config.srcHeight = fH;
+        lr->config.dstWidth = fRasterW; lr->config.dstHeight = fRasterH;
+        lr->config.compParams.compMode = NVKMS_COMPOSITION_BLENDING_MODE_OPAQUE; lr->config.minPresentInterval = 1;
+        lr->flags.surfaceChanged = lr->flags.srcXYChanged = lr->flags.srcWHChanged = lr->flags.dstXYChanged =
+            lr->flags.dstWHChanged = NV_TRUE;
+        ok = submitConfig(cfg, rep, NV_TRUE, true);
+        FBLOG("applyMode: mode set refused; flip onto the firmware's running %ux%u mode on head %u -> %u (flipResult %d)",
+              fRasterW, fRasterH, fHead, (unsigned)ok, (int)rep->flipResult);
     }
     fLastOk = (unsigned)ok; fFlipResult = (int)rep->flipResult;
     FBLOG("applyModeSetConfig -> %u (flipResult %d)", ok, (int)rep->flipResult);
