@@ -75,7 +75,50 @@ static void nvmtl_surface_register_writes(NVMTLCommandBuffer *cb) {
         }
     }
 }
+// WindowServer frame completion, with NVAccel's nvSurfGpuEscape: each surface a WindowServer command buffer renders is
+// marked pending when it commits and ready when the GPU has finished it, and the swap waits for that in the kernel, off
+// WindowServer's thread (NVIDIA completes flips on the display's flip event, never in the compositor). The marks go
+// through NVK's surface escape because WindowServer's sandbox denies sysctl writes. A mark the kernel does not take (an
+// older NVAccel, debug.nvaccel_surface_gpu_on=0) keeps WindowServer's own wait; that answer is re-read every second.
+static _Atomic int nvmtl_ws_marks_on = -1;
+static _Atomic uint64_t nvmtl_ws_marks_checked;
+static BOOL nvmtl_ws_kernel_waits(void) {
+    static int ws = -1;
+    if (ws < 0) ws = getprogname() && !strcmp(getprogname(), "WindowServer") && !getenv("NVMTL_WS_WAIT_COMPLETION");
+    if (!ws) return NO;
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (atomic_load(&nvmtl_ws_marks_on) < 0 || now - atomic_load(&nvmtl_ws_marks_checked) > 1000000000ull) {
+        const int on = nvmtl_vk_surface_gpu_mark(0, 0) == 0;   // surface 0: a probe the kernel answers and ignores
+        if (on != atomic_exchange(&nvmtl_ws_marks_on, on))
+            nvlog("WindowServer frame completion: %s", on ? "the swap waits in NVAccel (no composite wait here)" : "waiting for each composite here");
+        atomic_store(&nvmtl_ws_marks_checked, now);
+    }
+    return atomic_load(&nvmtl_ws_marks_on) == 1;
+}
+static const void *const nvmtl_ws_marks_key = &nvmtl_ws_marks_key;
+static void nvmtl_ws_mark(uint32_t sid, BOOL pending) { (void)nvmtl_vk_surface_gpu_mark(sid, pending); }
+static void nvmtl_ws_mark_pending(NVMTLCommandBuffer *cb) {
+    if (!nvmtl_ws_kernel_waits()) return;
+    NSMutableSet *ids = nil;
+    for (NVMTLSubmissionPart *part in cb->_parts) {
+        if (![part isKindOfClass:[NVMTLSubmissionPart class]]) continue;
+        for (NVMTLTexture *t in part->surfaces) if (t->_surf) {
+            if (!ids) ids = [NSMutableSet new];
+            [ids addObject:@(IOSurfaceGetID(t->_surf))];
+        }
+    }
+    if (!ids) return;
+    for (NSNumber *n in ids) nvmtl_ws_mark(n.unsignedIntValue, YES);
+    objc_setAssociatedObject(cb, nvmtl_ws_marks_key, ids, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+static void nvmtl_ws_mark_ready(NVMTLCommandBuffer *cb) {
+    NSSet *ids = objc_getAssociatedObject(cb, nvmtl_ws_marks_key);
+    if (!ids) return;
+    for (NSNumber *n in ids) nvmtl_ws_mark(n.unsignedIntValue, NO);
+    objc_setAssociatedObject(cb, nvmtl_ws_marks_key, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
 static void nvmtl_surface_finish_writes(NVMTLCommandBuffer *cb) {
+    nvmtl_ws_mark_ready(cb);
     @synchronized ([NVMTLCommandBuffer class]) {
         NSMutableDictionary *writes = [nvmtl_surface_writers objectForKey:cb->_queue];
         for (NSString *key in [writes.allKeys copy]) {
@@ -505,6 +548,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
         [_completionCondition lock]; _cbstatus = MTLCommandBufferStatusCommitted; [_completionCondition unlock];
         [self nvmtlSealPartWithSignal:nil value:0 restart:NO];
         nvmtl_surface_register_writes(self);
+        nvmtl_ws_mark_pending(self);   // before commit returns, so WindowServer's swap that follows finds the marks
         if (!nvmtl_pending_buffers) nvmtl_pending_buffers = [NSMutableArray new];
         [nvmtl_pending_buffers addObject:self];
         nvmtl_pump_buffers();

@@ -1863,6 +1863,12 @@ int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane)
     if (st) { static unsigned n; if (n++ < 8 || n % 2000 == 0) nvlog("surface %u dirty refused (%#x) - copy-out (%u so far)", surfaceID, st, n); }
     return st ? -1 : 0;
 }
+// WindowServer completion mark (NVAccel nvSurfGpuEscape), on NVK's surface escape: 0 = the kernel took it
+uint32_t nvmtl_vk_surface_gpu_mark(uint32_t surfaceID, int pending)
+{
+    if (!pnvk_surface_dirty || !g_dev) return 0x80000002u;
+    return pnvk_surface_dirty(g_dev, surfaceID, 0x80000000u | (pending ? 1u : 0u));
+}
 int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_buffer *out)
 {
     memset(out, 0, sizeof *out);
