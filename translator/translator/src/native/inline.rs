@@ -2202,9 +2202,8 @@ fn fold_switches_to_branches_in(f: &mut FuncBlock) -> bool {
 }
 
 /// A phi whose every incoming value is the same value is that value. Forwarding leaves these behind for buffer pointers
-/// (a loop's exit phi of `light_cull_buf` re-read on each path), and a phi of buffer pointers needs variable pointers on
-/// the GPU: Blender Eevee's deferred light shader read its light-culling data through one and lit nothing, black even
-/// with no lamp in the scene (the test Mac 10-16: relabelled correctly, the cube went black; the same phi folded, lit).
+/// (a loop's exit phi of `light_cull_buf` re-read on each path of Blender Eevee's light loop), and the emitter refuses a
+/// pointer phi whose incoming pointees it cannot reconcile.
 fn fold_single_value_phis_in(f: &mut FuncBlock) -> bool {
     let mut changed = false;
     for _ in 0..8 {
