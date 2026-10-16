@@ -594,8 +594,10 @@ static void offer(device_t bus, driver_t *driver)
         if (c->driver == driver)
             return;             /* already attached by this driver */
     c = device_add_child(bus, driver->name, -1);
-    if (c == NULL)
+    if (c == NULL) {
+        printf("NullMoth xkpi: %s: no child unit for driver %s\n", device_get_nameunit(bus), driver->name);
         return;
+    }
     c->ivars = bus->ivars;
     if (probe_with(c, driver) != 0) {
         device_delete_child(bus, c);
@@ -672,8 +674,15 @@ int nmx_bus_add_device(device_t dev, const char *classname)
     int err = dev->devclass == dc ? 0 : devclass_join(dc, dev, -1);
     if (err == 0) {
         struct driverlink *dl;
-        TAILQ_FOREACH(dl, &dc->drivers, link)
+        int n = 0;
+        TAILQ_FOREACH(dl, &dc->drivers, link) {
             offer(dev, dl->driver);
+            n++;
+        }
+        /* a device no driver even probed left no line at all (an Intel iGPU: "no driver attached (0)" and nothing
+         * before it); the count says whether the class had drivers to offer */
+        if (TAILQ_EMPTY(&dev->children))
+            printf("NullMoth xkpi: %s: %d %s driver(s) offered, none took it\n", device_get_nameunit(dev), n, classname);
     }
     bus_topo_unlock();
     return err;
