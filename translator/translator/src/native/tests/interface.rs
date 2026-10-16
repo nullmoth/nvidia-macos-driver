@@ -349,7 +349,7 @@ attributes #0 = { nounwind }
 }
 
 #[test]
-fn native_fragment_stencil_return_declares_the_replacing_execution_mode() {
+fn native_fragment_stencil_return_is_lowered_to_a_per_bit_discard() {
     let ll = r#"
 source_filename = "synth_stencil"
 target datalayout = "e-p:64:64:64"
@@ -379,13 +379,14 @@ attributes #0 = { nounwind }
     let out = crate::translate_sanitized_native(ll, Stage::Fragment, &tmp).expect("translate");
     let asm = disassemble(&out).expect("disassemble transformed");
     let _ = std::fs::remove_dir_all(&tmp);
-    assert!(asm.contains("BuiltIn FragStencilRefEXT"), "{asm}");
-    assert!(asm.contains("OpCapability StencilExportEXT"), "{asm}");
-    assert!(
-        asm.contains(r#"OpExtension "SPV_EXT_shader_stencil_export""#),
-        "{asm}"
-    );
-    assert!(asm.contains("StencilRefReplacingEXT"), "{asm}");
+    // NVIDIA GPUs cannot export stencil: the value is kept, the shader discards unless (value & the pushed bit), and the
+    // driver replays the draw per write-mask bit (native::stencil_export). No stencil-export capability may remain.
+    assert!(!asm.contains("FragStencilRefEXT"), "{asm}");
+    assert!(!asm.contains("StencilExportEXT"), "{asm}");
+    assert!(!asm.contains("StencilRefReplacingEXT"), "{asm}");
+    assert!(asm.contains("Offset 160"), "the stencil bit is pushed at offset 160: {asm}");
+    assert!(asm.contains("PushConstant"), "{asm}");
+    assert!(asm.contains("OpKill"), "{asm}");
 }
 
 #[test]

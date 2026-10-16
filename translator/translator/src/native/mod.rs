@@ -27,6 +27,7 @@ mod rewrites;
 mod vec_scalar_merge;
 mod atomic_image_format;
 mod copy_memory_logical;
+mod stencil_export;
 mod wg_atomic;
 
 mod tir;
@@ -190,4 +191,9 @@ pub(crate) fn requires_device_address_model_for_source(
 /// See inline::inline_and_forward_object_fields: the retry form of a module that failed as written.
 pub(crate) fn inline_and_forward_object_fields(san_ll: &str) -> Option<String> {
     inline::inline_and_forward_object_fields(san_ll)
+}
+
+/// See stencil_export: a fragment stencil export lowered to a per-bit discard the driver replays.
+pub(crate) fn lower_stencil_export_module(module: &mut crate::spirv_module::Module) -> bool {
+    stencil_export::lower_stencil_export(module)
 }

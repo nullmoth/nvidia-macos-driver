@@ -837,6 +837,13 @@ pub fn translate_native_no_retry_constructed_with_options(
             Err(failure.error)
         }
     };
+    // the inline retry builds its buffers raw first: on Blender Eevee's deferred light shader the typed construction of
+    // the inlined module validated and rendered black, the raw one lit the cube as Apple does (the test Mac 10-16)
+    if raw_buffers_first_on() {
+        if let Ok(finished) = rc.construct_raw() {
+            return Ok(finished.bytes);
+        }
+    }
     let constructed = match primary {
         Ok(finished) => finished,
         Err(emit_err) if rc.needs_raw_construction() => {
@@ -1119,6 +1126,7 @@ fn finish_module(
         .map_err(FinishFailure::cfg)?;
     native::construct_physical_atomic_pointer_lvalues_module(&mut out);
     native::split_mismatched_copy_memory_module(&mut out);
+    native::lower_stencil_export_module(&mut out);
     passes::drop_unreferenced_global_variables(&mut out);
     native::prune_unused_null_and_undef_constants_module(&mut out);
     if construction == FinishConstruction::RawRelooper {
@@ -1750,9 +1758,21 @@ thread_local! {
 /// already translated another way (the test Mac corpus, 10-16).
 pub fn with_argument_buffer_samplers<R>(f: impl FnOnce() -> R) -> R {
     ARGBUF_SAMPLERS.with(|c| c.set(true));
+    RAW_BUFFERS_FIRST.with(|c| c.set(true));
     let r = f();
     ARGBUF_SAMPLERS.with(|c| c.set(false));
+    RAW_BUFFERS_FIRST.with(|c| c.set(false));
     r
+}
+
+thread_local! {
+    static RAW_BUFFERS_FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Inside the inline retry (with_argument_buffer_samplers), every buffer is built raw before the typed construction is
+/// tried; outside it the typed construction comes first, as it always has.
+pub(crate) fn raw_buffers_first_on() -> bool {
+    RAW_BUFFERS_FIRST.with(|c| c.get())
 }
 
 pub(crate) fn argument_buffer_samplers_on() -> bool {
