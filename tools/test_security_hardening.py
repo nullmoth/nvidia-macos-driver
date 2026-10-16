@@ -28,42 +28,13 @@ def check(name, ok, detail=''):
     fails += not ok
 
 
-# --- login item path check, run from the setup script itself ---
-start = setup.index('agent_path_is_safe() {')
-end = setup.index('\n}\n', start) + 3
-snippet = setup[start:end]
-
-
-def safe(path):
-    r = subprocess.run(['/bin/bash', '-c', snippet + 'agent_path_is_safe "$1" && echo SAFE || echo UNSAFE', '_', str(path)],
-                       capture_output=True, text=True, timeout=30)
-    return r.stdout.strip()
-
-
-with tempfile.TemporaryDirectory() as t:
-    t = pathlib.Path(os.path.realpath(t))
-    os.chmod(t, 0o755)
-    good = t / 'Apps/1401.app/Contents/MacOS'
-    good.mkdir(parents=True)
-    os.chmod(t / 'Apps', 0o775)            # group-writable like /Applications: allowed
-    (good / '1401').write_text('#!/bin/sh\n')
-    open_dir = t / 'staging'
-    open_dir.mkdir()
-    os.chmod(open_dir, 0o777)              # world-writable like /var/tmp
-    bad = open_dir / '1401.app/Contents/MacOS'
-    bad.mkdir(parents=True)
-    (bad / '1401').write_text('#!/bin/sh\n')
-    link = t / 'linked'
-    link.symlink_to(open_dir)
-    check('a program under directories closed to other users is a safe login item', safe(good / '1401') == 'SAFE', safe(good / '1401'))
-    check('a program under a world-writable directory is refused', safe(bad / '1401') == 'UNSAFE', safe(bad / '1401'))
-    check('a path that reaches a world-writable directory through a symbolic link is refused',
-          safe(link / '1401.app/Contents/MacOS/1401') == 'UNSAFE')
-    check('a program that no longer exists is refused (repairs old login items)', safe(good / 'gone') == 'UNSAFE')
-    check('a relative path is refused', safe('Apps/1401.app/Contents/MacOS/1401') == 'UNSAFE')
-
-check('an existing login item pointing somewhere unsafe is removed on install',
-      'if [ -z "$existing" ] || ! agent_path_is_safe "$existing"; then' in setup and 'rm -f "$AGENT"' in setup)
+# --- no login item or background job: setup writes none and removes the ones earlier versions left ---
+check('setup installs no login item', 'cat > "$AGENT"' not in setup and 'com.nullmoth.crashcheck</string>' not in setup)
+check('setup installs no WindowServer restart or display tracker',
+      'com.nullmoth.wsreset</string>' not in setup and 'com.nullmoth.displaytrace</string>' not in setup)
+check('an install removes the jobs an earlier version left',
+      'for j in /Library/LaunchAgents/com.nullmoth.crashcheck.plist /Library/LaunchDaemons/com.nullmoth.wsreset.plist' in setup
+      and 'launchctl bootout system "$j"' in setup)
 check('log collection relaxes permissions without following links', 'chmod -R -h a+rX "$COLLECT"' in setup
       and 'chmod -R a+rX "$COLLECT"' not in setup)
 for f in ('package/uninstall.sh', 'app/Resources/nullmoth-log-capture.sh', 'app/Resources/nullmoth-operation-capture.sh'):

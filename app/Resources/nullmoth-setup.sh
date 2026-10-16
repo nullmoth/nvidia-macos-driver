@@ -223,8 +223,6 @@ if [ -n "$COLLECT" ]; then
   # kernel messages, WindowServer's CPU and the refresh rate. Flicker never shows on a 60 Hz single-display test Mac,
   # so the users' own machines are the measurement.
   if [ "${NULLMOTH_SAMPLE:-}" = flicker ]; then
-    # mark the moment in the display tracker, so its timeline shows where the user saw the flicker
-    [ -d /Library/NullMoth/display-trace ] && echo "== USER: flicker seen now $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /Library/NullMoth/display-trace/trace.txt
     { echo "== display timing sample, $(date -u +%Y-%m-%dT%H:%M:%SZ), 20 s at 0.25 s"
       system_profiler SPDisplaysDataType 2>/dev/null | grep -E "Resolution|Refresh|UI Looks|Display Type|Connection Type|Online"
       /usr/bin/log stream --style compact --predicate 'sender == "NVRMFB" OR sender == "NVRM" OR sender == "NVAccel"' > "$COLLECT/.flicker-kmsg" 2>&1 &
@@ -245,10 +243,6 @@ if [ -n "$COLLECT" ]; then
   # were collected last.
   n=0; collection_errors=0
   collect_recent_logs macos 3 /Library/Logs/DiagnosticReports/*.panic /Library/Logs/DiagnosticReports/Retired/*.panic
-  # the display tracker (every boot, from the first second): current and previous file, newest 3 MB of each
-  for f in trace.txt trace.txt.1 kernel.txt kernel.txt.1 ws.txt ws.txt.1; do
-    [ -f "/Library/NullMoth/display-trace/$f" ] && tail -c 3145728 "/Library/NullMoth/display-trace/$f" > "$COLLECT/display-$f"
-  done
   # WindowServer can fail outside a driver frame. Include the complete recent reports
   # during an explicit Send logs request; automatic crash notifications stay selective.
   collect_recent_logs macos 3 /Library/Logs/DiagnosticReports/WindowServer*.ips /Library/Logs/DiagnosticReports/Retired/WindowServer*.ips
@@ -644,6 +638,9 @@ if [ $REMOVE = 1 ]; then
   fi
   if [ -f "$STATE" ]; then mv "$STATE" "$STATE.removed-$(date +%Y%m%d-%H%M%S)" || stop "could not archive the install record"; fi
   rm -f "$AGENT" "$RECOVER" "$ST/nullmoth-recover.sh"
+  for j in /Library/LaunchDaemons/com.nullmoth.wsreset.plist /Library/LaunchDaemons/com.nullmoth.displaytrace.plist; do
+    [ -f "$j" ] && { launchctl bootout system "$j" >/dev/null 2>&1; rm -f "$j"; }
+  done
   ok "done - restart to finish"; cleanup; echo "RESULT ok"; exit 0
 fi
 
@@ -1502,61 +1499,6 @@ fi
 DV=$(basename "$PKG" | sed -n 's/^nullmoth-nvidia-\([0-9][0-9.]*\)\.tar\.gz$/\1/p')
 [ -n "$DV" ] && { echo "$DV" > "$ST/driver-version.tmp" && chmod 644 "$ST/driver-version.tmp" && mv "$ST/driver-version.tmp" "$ST/driver-version"; }
 ok "install record written to $STATE"
-# A LaunchAgent runs its program at every login. If any directory on the way to
-# that program is world writable, any local user can replace what runs. Was: the
-# path from --app was written in unchecked, so an app launched from its own
-# staging directory under /var/tmp put a world-writable path into a login item,
-# and the agent outlived the directory.
-# /Applications is group-admin writable by Apple's convention, so the test is
-# world-write only, not group-write.
-agent_path_is_safe() {
-  local p=$1
-  case "$p" in /*) ;; *) return 1 ;; esac
-  # a regular file, not a directory and not a dangling path: the 1.14.7 agents
-  # point at a program that no longer exists, and those must fail here
-  [ -f "$p" ] || return 1
-  # Resolve to a physical path before walking. stat does not follow symlinks, so
-  # a symlinked component pointing into a world-writable directory would
-  # otherwise read as the link's own mode and pass.
-  local d; d=$(cd "$(/usr/bin/dirname "$p")" 2>/dev/null && pwd -P) || return 1
-  while :; do
-    local mode; mode=$(/usr/bin/stat -f %Lp "$d" 2>/dev/null) || return 1
-    # last octal digit is the "other" field; 2, 3, 6 and 7 all carry write
-    case "$mode" in *[2367]) return 1 ;; esac
-    [ "$d" = / ] && break
-    d=$(/usr/bin/dirname "$d")
-  done
-  return 0
-}
-
-# Repair an agent an earlier version wrote. Upgrading does not rewrite this file,
-# so without this every machine that ever installed from a temporary directory
-# keeps its bad agent forever.
-if [ -f "$AGENT" ]; then
-  existing=$(/usr/bin/plutil -extract ProgramArguments.0 raw -o - "$AGENT" 2>/dev/null) || existing=""
-  if [ -z "$existing" ] || ! agent_path_is_safe "$existing"; then
-    rm -f "$AGENT"
-    note "removed a crash-check login item that pointed somewhere unsafe ($existing)"
-  fi
-fi
-
-if [ -n "$APPBIN" ] && [ -x "$APPBIN" ] && ! agent_path_is_safe "$APPBIN"; then
-  note "crash check not added: $APPBIN is not in a protected location"
-  APPBIN=""
-fi
-if [ -n "$APPBIN" ] && [ -x "$APPBIN" ]; then
-  cat > "$AGENT" <<PL
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>Label</key><string>com.nullmoth.crashcheck</string>
-<key>ProgramArguments</key><array><string>$APPBIN</string><string>--crash-check</string></array>
-<key>RunAtLoad</key><true/>
-<key>ProcessType</key><string>Background</string>
-</dict></plist>
-PL
-  chmod 644 "$AGENT"; ok "crash check added (asks before sending anything)"
-fi
 cp "$0" "$ST/nullmoth-setup.sh" && chmod 755 "$ST/nullmoth-setup.sh"
 cat > "$ST/nullmoth-recover.sh" <<'RS'
 #!/bin/bash
@@ -1580,165 +1522,16 @@ cat > "$RECOVER" <<PL
 PL
 chmod 644 "$RECOVER"; chown root:wheel "$RECOVER"
 ok "boot picker way back armed (NullMoth: Remove driver)"
-# Flicker stopgap (1.4): the first WindowServer of a boot composes against the driver's boot-console handoff and
-# strobes for many users; a WindowServer restart clears it ("sudo killall WindowServer after login" is the workaround
-# people share). This restarts it ONCE per boot, early, so the user logs into a clean compositor. The marker lives on a
-# tmpfs that is empty every boot, so it fires once and never loops. Opt out by creating /Library/NullMoth/no-wsreset.
-# This is a stopgap; the real fix is the boot->WindowServer surface/vblank handoff, chased with a >60 Hz/2nd display.
-cat > /Library/NullMoth/nullmoth-wsreset.sh <<'WS'
-#!/bin/bash
-# Flicker stopgap + evidence: the first WindowServer of a boot composes against the driver's boot handoff and strobes
-# for many; a restart clears it. We capture the display/driver state the flickering WindowServer leaves behind, restart
-# WindowServer once, then capture the clean state. The before/after lands in wsreset.log, which "Send logs" uploads, so
-# the strobe can be root-caused from a real >60 Hz / multi-monitor machine (it does not reproduce on the dev box).
-PATH=/usr/bin:/bin:/usr/sbin:/sbin
-[ -e /Library/NullMoth/no-wsreset ] && exit 0
-MARK=/var/run/nullmoth-wsreset.done
-[ -e "$MARK" ] && exit 0
-# 1401 issue #108: launchd starts this before the kexts are listed, and a single check ended the run for the whole
-# boot (no display-trace directory, no capture). Wait up to 60 s for the driver, then decide.
-for i in $(seq 1 60); do kextstat 2>/dev/null | grep -q com.nullmoth.NVAccel && break; sleep 1; done
-kextstat 2>/dev/null | grep -q com.nullmoth.NVAccel || exit 0
-nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove >/dev/null 2>&1 && exit 0
-LOG=/Library/NullMoth/wsreset.log
-capture() {
-  { echo "===== $1 $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
-    echo "WindowServer: pid $(pgrep -x WindowServer | tr '\n' ' ')  uptime $(ps -o etime= -p "$(pgrep -x WindowServer | head -1)" 2>/dev/null | tr -d ' ')"
-    # current refresh per framebuffer, straight from the registry (pixelClock / pixelCount = Hz) - never ages out, so it
-    # always shows the >60 Hz / multi-monitor condition even if the boot log lines have scrolled off
-    echo "-- current mode per framebuffer (fb: WxH? pclk/total = Hz) --"
-    ioreg -r -c NVRMNVDAFramebuffer -w0 2>/dev/null | /usr/bin/awk '
-      /"IOFBDependentIndex" =/    { if (match($0, /= [0-9]+/)) idx = substr($0, RSTART+2, RLENGTH-2) }
-      /"IOFBCurrentPixelCount" =/ { if (match($0, /= [0-9]+/)) cnt = substr($0, RSTART+2, RLENGTH-2) }
-      /"IOFBCurrentPixelClock" =/ { if (match($0, /= [0-9]+/)) { clk = substr($0, RSTART+2, RLENGTH-2);
-        if (cnt+0 > 0) printf "   fb%s: %.2f Hz (pclk %s / total %s)\n", idx, clk/cnt, clk, cnt; cnt="" } }'
-    # displays, their mode, heads and connectors, from the fb boot log (wide window: the daemon runs seconds after boot)
-    echo "-- displays / heads (newest first) --"
-    log show --start "$SINCE" --style compact --predicate 'process == "kernel" AND eventMessage CONTAINS "NVRM-fb"' 2>/dev/null \
-      | grep -aE 'ENUMERATED|dpy [0-9]|head [0-9].*mode|connected [0-9].*edid|boot pair|hw vblank|TAKEOVER|SHUTDOWN|refresh rate from NVKMS' \
-      | uniq | tail -24 | sed 's/^[0-9-]* //'
-    # flip / vblank / modeset activity = what strobes; drop the once-a-minute keepalive noise
-    echo "-- flip / vblank / modeset (last 90s) --"
-    log show --start "$SINCE" --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS "NVRM-fb" OR eventMessage CONTAINS "nvkms")' 2>/dev/null \
-      | grep -aviE 'kapi event type 5|sample [0-9]' | grep -aiE 'flip|vbl|modeset|present|home|reflip|commit|latch|head' | uniq -c | tail -30 | sed 's/^[0-9-]* //'
-    # the driver's own in-registry trace + any counters it publishes
-    echo "-- NVRMFB registry --"
-    ioreg -r -c NVRMNVDAFramebuffer -w0 2>/dev/null | grep -oaE '"(NVRMTrace|NVRMTraceCount|reflips|fVblCalls|fBarPaints)" = [^,}]{0,200}' | tail -8
-    echo
-  } >> "$LOG" 2>&1
-}
-# keep the log to the last few boots
-[ -f "$LOG" ] && tail -c 262144 "$LOG" > "$LOG.keep" 2>/dev/null && mv "$LOG.keep" "$LOG"
-for i in $(seq 1 40); do pgrep -x WindowServer >/dev/null 2>&1 && break; sleep 1; done
-pgrep -x WindowServer >/dev/null 2>&1 || exit 0
-sleep 8   # let the first WindowServer settle into the (possibly flickering) steady state before we photograph it
-SINCE=$(date -r "$(sysctl -n kern.boottime | sed -E 's/.*\{ sec = ([0-9]+),.*/\1/')" '+%Y-%m-%d %H:%M:%S')
-capture "BEFORE restart"
-SINCE=$(date '+%Y-%m-%d %H:%M:%S')
-: > "$MARK"   # claim the single shot BEFORE touching WindowServer, so a respawn can never loop
-# Only ever at the login window. In 1.9.0, with auto-login the session already existed when this fired, so the
-# restart logged the user out to the password screen. A restart under a logged-in user ends their session; never do it.
-CONSOLE=$(stat -f%Su /dev/console 2>/dev/null)
-if [ -n "$(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null)" ]; then
-  echo "$(date) skipped the restart: auto-login is on (a restart would end the automatic session)" >> "$LOG" 2>&1; exit 0
-fi
-if [ -n "$CONSOLE" ] && [ "$CONSOLE" != root ]; then
-  echo "$(date) skipped the restart: $CONSOLE is already logged in" >> "$LOG" 2>&1; exit 0
-fi
-P=$(pgrep -x WindowServer); [ -n "$P" ] && { kill -TERM $P 2>/dev/null; sleep 2; pgrep -x WindowServer >/dev/null 2>&1 && kill -9 $P 2>/dev/null; }
-for i in $(seq 1 30); do pgrep -x WindowServer >/dev/null 2>&1 && break; sleep 1; done
-sleep 8
-capture "AFTER restart (should be clean)"
-echo "$(date) restarted WindowServer once; before/after captured above" >> "$LOG" 2>&1
-WS
-chmod 755 /Library/NullMoth/nullmoth-wsreset.sh; chown root:wheel /Library/NullMoth/nullmoth-wsreset.sh
-cat > /Library/LaunchDaemons/com.nullmoth.wsreset.plist <<'PL'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>Label</key><string>com.nullmoth.wsreset</string>
-<key>ProgramArguments</key><array><string>/bin/bash</string><string>/Library/NullMoth/nullmoth-wsreset.sh</string></array>
-<key>RunAtLoad</key><true/>
-<key>ProcessType</key><string>Background</string>
-</dict></plist>
-PL
-chmod 644 /Library/LaunchDaemons/com.nullmoth.wsreset.plist; chown root:wheel /Library/LaunchDaemons/com.nullmoth.wsreset.plist
-ok "flicker stopgap armed (restarts WindowServer once per boot; opt out with /Library/NullMoth/no-wsreset)"
-# Display tracker: flicker and black screens only happen on monitors we do not have (>60 Hz DisplayPort, two displays),
-# and a "Send logs" afterwards only photographs the end state. This records from boot: the driver's flip/scan-out/AGDC
-# counters every second (only lines that changed, plus a heartbeat), the refresh rate of each framebuffer, every
-# WindowServer start or restart with a full snapshot, and the driver's kernel messages (repeated flip lines counted per
-# second instead of dropped). Bounded: each file rotates at 8 MB, one old copy kept. "Send logs" uploads both.
-cat > /Library/NullMoth/nullmoth-displaytrace.sh <<'DT'
-#!/bin/bash
-PATH=/usr/bin:/bin:/usr/sbin:/sbin
-# 1401 issue #108: launchd starts this before the kexts are listed, and a single check ended the run for the whole
-# boot (no display-trace directory, no capture). Wait up to 60 s for the driver, then decide.
-for i in $(seq 1 60); do kextstat 2>/dev/null | grep -q com.nullmoth.NVAccel && break; sleep 1; done
-kextstat 2>/dev/null | grep -q com.nullmoth.NVAccel || exit 0
-D=/Library/NullMoth/display-trace; mkdir -p "$D"; chmod 755 "$D"
-T=$D/trace.txt; K=$D/kernel.txt; W=$D/ws.txt; CAP=8388608
-rot() { local s; s=$(stat -f%z "$1" 2>/dev/null || echo 0); [ "$s" -gt $CAP ] && mv -f "$1" "$1.1"; }
-rot "$T"; rot "$K"; rot "$W"
-CTRS="debug.nvaccel_iop_ok debug.nvaccel_iop_fail debug.nvaccel_iop_empty debug.nvaccel_iop_blank debug.nvaccel_iop_flips debug.nvaccel_iop_flip_hit debug.nvaccel_iop_flip_miss debug.nvaccel_iop_flip_stale debug.nvaccel_iop_flip_refused debug.nvaccel_iop_flip_novram debug.nvaccel_iop_flip_lock debug.nvaccel_iop_flip_home debug.nvaccel_iop_async_flips debug.nvaccel_iop_async_refused debug.nvaccel_iop_async_drop debug.nvaccel_iop_ok_h0 debug.nvaccel_iop_ok_h1 debug.nvaccel_iop_ok_h2 debug.nvaccel_iop_ok_h3 debug.nvaccel_heads_published debug.nvaccel_heads_piped debug.nvrmfb_agdc_cmds debug.nvrmfb_agdc_refused debug.nvrmfb_agdc_last_refused debug.nvrmfb_agdc_k5_link debug.nvrmfb_agdc_k5_caps debug.nvrmfb_agdc_fbmap"
-hz() { ioreg -r -c NVRMNVDAFramebuffer -w0 2>/dev/null | LC_ALL=C awk '
-  /"IOFBDependentIndex" =/    { if (match($0, /= [0-9]+/)) idx = substr($0, RSTART+2, RLENGTH-2) }
-  /"IOFBCurrentPixelCount" =/ { if (match($0, /= [0-9]+/)) cnt = substr($0, RSTART+2, RLENGTH-2) }
-  /"IOFBCurrentPixelClock" =/ { if (match($0, /= [0-9]+/)) { clk = substr($0, RSTART+2, RLENGTH-2);
-    if (cnt+0 > 0) printf "fb%s=%.2fHz ", idx, clk/cnt; cnt="" } }'; }
-snapshot() {
-  { echo "== $1 $(date -u +%Y-%m-%dT%H:%M:%SZ) up=$(($(date +%s) - BOOT))s"
-    echo "boot-args: $(nvram boot-args 2>/dev/null | cut -f2-)"
-    sysctl debug 2>/dev/null | grep -E '^debug\.(nvaccel|nvrmfb)' | grep -v -E 'nvaccel_vm_|nvaccel_res_|nvaccel_map_'
-    ioreg -r -c NVRMNVDAFramebuffer -w0 2>/dev/null | grep -oaE '"(IOFB[A-Za-z]*(Mode|Timing|Pixel)[A-Za-z]*|IOFBDependentIndex|NVRMTrace|NVRMTraceCount|reflips|fVblCalls|fBarPaints)" = [^,}]{0,240}'
-    echo "displays: $(hz)"
-    # The monitor's own list of timings: a rate that goes black is checked against what the panel says it accepts
-    ioreg -l -r -c AppleDisplay -w0 2>/dev/null | grep -oaE '"IODisplayEDID" = <[0-9a-f]+>' | sort -u
-    echo
-  } >> "$T" 2>&1; }
-BOOT=$(sysctl -n kern.boottime | sed -E 's/.*sec = ([0-9]+),.*/\1/')
-echo "#### boot $(date -r "$BOOT" -u +%Y-%m-%dT%H:%M:%SZ), tracker start $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$T"
-# kernel messages: the flip/vblank lines repeat many times a second, so identical lines become "Nx <line>" per second
-/usr/bin/log stream --style compact --predicate 'sender == "NVRMFB" OR sender == "NVRM" OR sender == "NVAccel"' 2>/dev/null \
-  | awk '{ s = substr($0, 1, 19); m = $0; sub(/^[^ ]+ [^ ]+ +[^ ]+ +[^ ]+ +/, "", m); gsub(/[0-9]+/, "#", m)
-           if (s != ls || m != lm) { if (n) print (n > 1 ? n "x " : "") last; n = 0 }
-           ls = s; lm = m; last = $0; n++; fflush() }' >> "$K" &
-LS=$!
-# WindowServer's side of a mode change (the ">60 Hz goes black" reports): our kexts log a successful commit at every
-# rate, so the black is after the modeset and only WindowServer/CoreDisplay say what happened next. Same per-second
-# folding, own file so it cannot crowd out the kernel lines.
-/usr/bin/log stream --style compact --predicate 'process == "WindowServer" AND (eventMessage CONTAINS[c] "mode" OR eventMessage CONTAINS[c] "refresh" OR eventMessage CONTAINS[c] "reconfig" OR eventMessage CONTAINS[c] "blank" OR eventMessage CONTAINS[c] "online" OR eventMessage CONTAINS[c] "timing" OR eventMessage CONTAINS[c] "revert" OR eventMessage CONTAINS[c] "edid") AND NOT eventMessage CONTAINS "RunLoopMode"' 2>/dev/null \
-  | awk '{ s = substr($0, 1, 19); m = $0; sub(/^[^ ]+ [^ ]+ +[^ ]+ +[^ ]+ +/, "", m); gsub(/[0-9]+/, "#", m)
-           if (s != ls || m != lm) { if (n) print (n > 1 ? n "x " : "") last; n = 0 }
-           ls = s; lm = m; last = $0; n++; fflush() }' >> "$W" &
-LW=$!
-trap 'kill $LS $LW 2>/dev/null' EXIT
-WS=""; PREV=""; i=0
-while :; do
-  w=$(pgrep -x WindowServer | head -1)
-  if [ "$w" != "$WS" ]; then snapshot "WindowServer ${WS:+restarted ($WS -> )}${w:-gone}"; WS=$w; fi
-  cur="$(sysctl $CTRS 2>/dev/null | sed -E 's/^debug\.(nvaccel_|nvrmfb_)?//; s/: /=/' | tr '\n' ' ')$(hz)"
-  if [ "$cur" != "$PREV" ] || [ $((i % 30)) = 0 ]; then echo "$(date -u +%H:%M:%S) ws=$w $cur" >> "$T"; PREV=$cur; fi
-  i=$((i + 1))
-  # every second for the first 15 minutes after boot (display hand-over and login), then every 5 s
-  if [ $(( $(date +%s) - BOOT )) -lt 900 ]; then sleep 1; else sleep 5; fi
-  [ $((i % 300)) = 0 ] && { rot "$T"; for f in "$K" "$W"; do s=$(stat -f%z "$f" 2>/dev/null || echo 0); [ "$s" -gt $CAP ] && { cp "$f" "$f.1"; : > "$f"; }; done; }
+# Earlier versions ran three background jobs beside the driver: a crash-check login item, a WindowServer restart at
+# every boot (a flicker workaround) and a display tracker that streamed the driver's log all the time. The driver needs
+# none of them; logs are collected when the user asks. Remove what an earlier install left.
+for j in /Library/LaunchAgents/com.nullmoth.crashcheck.plist /Library/LaunchDaemons/com.nullmoth.wsreset.plist \
+         /Library/LaunchDaemons/com.nullmoth.displaytrace.plist; do
+  [ -f "$j" ] || continue
+  case $j in */LaunchDaemons/*) launchctl bootout system "$j" >/dev/null 2>&1;; esac
+  rm -f "$j"
 done
-DT
-chmod 755 /Library/NullMoth/nullmoth-displaytrace.sh; chown root:wheel /Library/NullMoth/nullmoth-displaytrace.sh
-cat > /Library/LaunchDaemons/com.nullmoth.displaytrace.plist <<'PL'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>Label</key><string>com.nullmoth.displaytrace</string>
-<key>ProgramArguments</key><array><string>/bin/bash</string><string>/Library/NullMoth/nullmoth-displaytrace.sh</string></array>
-<key>RunAtLoad</key><true/>
-<key>ProcessType</key><string>Background</string>
-<key>LowPriorityIO</key><true/>
-<key>Nice</key><integer>10</integer>
-</dict></plist>
-PL
-chmod 644 /Library/LaunchDaemons/com.nullmoth.displaytrace.plist; chown root:wheel /Library/LaunchDaemons/com.nullmoth.displaytrace.plist
-ok "display tracker armed (records the driver's display state from every boot; Send logs uploads it)"
+rm -rf /Library/NullMoth/nullmoth-wsreset.sh /Library/NullMoth/nullmoth-displaytrace.sh /Library/NullMoth/display-trace \
+       /Library/NullMoth/wsreset.log /Library/NullMoth/no-wsreset
 if [ $INSTALL_THEN_PREPARE = 1 ]; then do_prepare; else ok "driver installed - restart to load it"; fi
 cleanup; echo "RESULT ok"
