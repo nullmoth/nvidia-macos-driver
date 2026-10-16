@@ -34,6 +34,9 @@ void nmx_chan_set_engine(struct pcm_channel *c, void *engine);
 int nmx_pcm_nchan(struct snddev_info *sc);
 struct pcm_channel *nmx_pcm_chan(struct snddev_info *sc, int i);
 const char *nmx_pcm_name(struct snddev_info *sc);	/* "Realtek ALC897 (Analog)" etc. */
+/* where the PCM device sits, stable across boots: the controller's PCI address, then the device's position under its
+ * codec. Unit numbers are not stable (two controllers attach in parallel), and names repeat (four identical HDMI pins) */
+void nmx_pcm_location(struct snddev_info *sc, char *buf, size_t len);
 uint32_t nmx_pcm_mixer_devs(struct snddev_info *sc);	/* SOUND_MASK_* the codec has */
 int nmx_pcm_mixer_set(struct snddev_info *sc, unsigned dev, unsigned left, unsigned right);	/* 0..100 */
 
