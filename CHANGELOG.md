@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.4
+
+Mac app
+- Prepare this Mac for Tahoe is back: on macOS 15 one button installs or updates the driver (it carries the Tahoe
+  driver too), parks it and sets the installer's GPU settings, then opens Software Update. After the update the
+  first start sets the driver up for Tahoe and restarts once by itself. Cancel puts everything back
+
 ## 2.0.3
 
 Driver
