@@ -492,7 +492,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         // laptop guides (it hides every discrete GPU, NVIDIA included), and a disable-gpu property or a dGPU-off SSDT
         // does the same: the card is then on the bus with another class code, or not on the bus at all.
         let hiding = sysctl("kern.bootargs").split(separator: " ").map(String.init)
-            .filter { ["-wegnoegpu", "-wegonogpu", "-nvoff"].contains($0) }
+            .filter { ["-wegnoegpu", "-wegonogpu", "-nvoff", "-wegnoigpu"].contains($0) }
         let hiddenNvidia = services("IOPCIDevice").compactMap { s -> String? in
             defer { IOObjectRelease(s) }
             guard u32(s, "vendor-id").map({ $0 & 0xffff }) == 0x10DE, let cls = u32(s, "class-code"), cls >> 16 != 0x03,
