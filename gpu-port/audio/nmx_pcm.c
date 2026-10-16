@@ -9,6 +9,7 @@
 #include <sys/malloc.h>
 #include <sys/kernel.h>
 #include <dev/sound/pcm/sound.h>
+#include <dev/pci/pcivar.h>
 #include "channel_if.h"
 #include "mixer_if.h"
 #include "nmx_pcm.h"
@@ -341,6 +342,33 @@ void nmx_chan_set_engine(struct pcm_channel *c, void *engine) { c->engine = engi
 int nmx_pcm_nchan(struct snddev_info *sc) { return sc->nchan; }
 struct pcm_channel *nmx_pcm_chan(struct snddev_info *sc, int i) { return i >= 0 && i < sc->nchan ? sc->chan[i] : NULL; }
 const char *nmx_pcm_name(struct snddev_info *sc) { return device_get_desc(sc->dev); }
+
+static int child_index(device_t dev)
+{
+	device_t *kids = NULL;
+	int n = 0, at = -1;
+	if (device_get_children(device_get_parent(dev), &kids, &n) == 0) {
+		for (int i = 0; i < n; i++)
+			if (kids[i] == dev)
+				at = i;
+		free(kids, M_TEMP);
+	}
+	return at;
+}
+
+void nmx_pcm_location(struct snddev_info *sc, char *buf, size_t len)
+{
+	/* pcm -> hdaa -> hdacc -> hdac; each level's position under its parent, the hdac by PCI address */
+	int path[3] = { -1, -1, -1 };
+	device_t d = sc->dev;
+	for (int i = 0; i < 3 && d != NULL && strcmp(device_get_name(d), "hdac") != 0; i++, d = device_get_parent(d))
+		path[i] = child_index(d);
+	if (d != NULL && strcmp(device_get_name(d), "hdac") == 0)
+		snprintf(buf, len, "%02x:%02x.%x/%d.%d.%d", pci_get_bus(d), pci_get_slot(d), pci_get_function(d),
+		    path[2], path[1], path[0]);
+	else
+		snprintf(buf, len, "%s", device_get_nameunit(sc->dev));
+}
 uint32_t nmx_pcm_mixer_devs(struct snddev_info *sc) { return sc->mixer ? sc->mixer->devs : 0; }
 
 int nmx_pcm_mixer_set(struct snddev_info *sc, unsigned dev, unsigned left, unsigned right)

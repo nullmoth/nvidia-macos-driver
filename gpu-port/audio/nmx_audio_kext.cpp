@@ -17,6 +17,8 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/pci/IOPCIDevice.h>
+#include <IOKit/IONVRAM.h>
+#include <libkern/c++/OSData.h>
 #include <IOKit/audio/IOAudioDevice.h>
 #include <IOKit/audio/IOAudioEngine.h>
 #include <IOKit/audio/IOAudioStream.h>
@@ -75,8 +77,20 @@ public:
     IOReturn convertInputSamples(const void *sampleBuf, void *destBuf, UInt32 firstSampleFrame, UInt32 numSampleFrames,
                                  const IOAudioStreamFormat *streamFormat, IOAudioStream *audioStream) override;
     void blockDone();
+    OSString *getGlobalUniqueID() override;
 };
 OSDefineMetaClassAndStructors(NMXAudioEngine, IOAudioEngine)
+
+// CoreAudio keys a device by this ID, so it must differ per engine and survive reboots (saved volume and default
+// device follow it). IOAudioEngine's own is "<class>:<index on the device>", the same for every PCM device, and
+// CoreAudio kept only the last engine it saw with each ID: one of six outputs showed up.
+OSString *NMXAudioEngine::getGlobalUniqueID()
+{
+    char loc[48], id[96];
+    nmx_pcm_location(sc_, loc, sizeof(loc));
+    snprintf(id, sizeof(id), "NMXAudio:%s:%s", loc, output_ ? "out" : "in");
+    return OSString::withCString(id);
+}
 
 bool NMXAudioEngine::initFor(struct snddev_info *sc, struct pcm_channel *ch)
 {
@@ -401,10 +415,83 @@ bool NMXAudio::start(IOService *provider)
     return true;
 }
 
+/*
+ * Boot guard, as NMXNPU's. A driver that panics while it attaches at boot would panic again on every boot. Before the
+ * first attach of a boot the kext sets an NVRAM marker and writes it out; it clears it two minutes after the devices are
+ * up (attach, engines, first interrupts). A boot that finds the marker set follows one that did not get there - a panic
+ * or a hang - so NMXAudio stays off for that boot and says so; the boot after that tries again.
+ */
+static const char *const kAttachMarker = "nullmoth-audio-attaching";
+
+static IODTNVRAM *nmx_nvram()
+{
+    IORegistryEntry *e = IORegistryEntry::fromPath("/options", gIODTPlane);
+    IODTNVRAM *n = OSDynamicCast(IODTNVRAM, e);
+    if (n == nullptr && e != nullptr)
+        e->release();
+    return n;
+}
+
+static bool nmx_marker_set()
+{
+    IODTNVRAM *n = nmx_nvram();
+    if (n == nullptr)
+        return false;
+    OSObject *v = n->copyProperty(kAttachMarker);
+    bool set = v != nullptr;
+    if (v)
+        v->release();
+    n->release();
+    return set;
+}
+
+static void nmx_marker_write(bool on)
+{
+    IODTNVRAM *n = nmx_nvram();
+    if (n == nullptr) {
+        IOLog("NMXAudio: no NVRAM; the boot guard is off\n");
+        return;
+    }
+    const OSSymbol *k = OSSymbol::withCString(kAttachMarker);
+    if (k != nullptr) {
+        if (on) {
+            OSData *d = OSData::withBytes("1", 1);
+            if (d == nullptr || !n->setProperty(k, d))
+                IOLog("NMXAudio: could not set the boot guard\n");
+            if (d)
+                d->release();
+        } else {
+            n->removeProperty(k);
+        }
+        k->release();
+    }
+    n->sync();
+    n->release();
+}
+
+static int g_guard;     /* 0 = not checked this boot, 1 = armed by this boot, -1 = the last boot never cleared it */
+
 void NMXAudio::attachThread(void *arg, wait_result_t)
 {
     NMXAudio *self = (NMXAudio *)arg;
     IOLockLock(g_lock);
+    if (g_guard == 0) {
+        if (nmx_marker_set()) {
+            g_guard = -1;
+            nmx_marker_write(false);     /* the next boot tries again */
+        } else {
+            g_guard = 1;
+            nmx_marker_write(true);
+        }
+    }
+    if (g_guard < 0) {
+        IOLockUnlock(g_lock);
+        IOLog("NMXAudio: the last boot stopped while audio was starting; audio stays off this boot\n");
+        self->setProperty("nullmoth-audio-state", "parked: the last boot stopped while audio was starting");
+        self->attach_ = -1;
+        self->release();
+        return;
+    }
     g_attaching = self;
     self->dev_ = nmx_port_attach_pci(self->pci_);
     g_attaching = nullptr;
@@ -423,6 +510,13 @@ void NMXAudio::attachThread(void *arg, wait_result_t)
         self->registerPowerDriver(self, states, 2);
         self->registerService();
         self->attach_ = 1;
+    }
+    /* the guard comes off once audio has run for two minutes (the first controller's thread does it) */
+    static volatile SInt32 clearing;
+    if (g_guard > 0 && OSCompareAndSwap(0, 1, &clearing)) {
+        IOSleep(120 * 1000);
+        nmx_marker_write(false);
+        IOLog("NMXAudio: up for two minutes; boot guard cleared\n");
     }
     self->release();
 }

@@ -39,6 +39,11 @@ void config_intrhook_disestablish(struct intr_config_hook *hook);
 
 #define BUS_IVARS_PRIVATE 0x1000
 int device_delete_children(device_t dev);
+/* FreeBSD's bus_get_dma_tag(dev) asks the parent bus (BUS_GET_DMA_TAG), and a bus without the method passes the
+ * question up; hdac answers its codec children with its single-segment channel tag. bsdcompat answers for PCI devices
+ * only (NULL for hdacc/hdaa), so the sound port asks the nearest ancestor with the method first */
+bus_dma_tag_t nmx_snd_bus_get_dma_tag(device_t dev);
+#define bus_get_dma_tag(dev) nmx_snd_bus_get_dma_tag(dev)
 /* FreeBSD registers drivers with DRIVER_MODULE at module load; here each line leaves a record the kext registers with
  * the bus class at start (nmx_audio_kext.cpp): hdac on pci, hdacc on hdac, hdaa on hdacc, pcm on hdaa */
 struct nmx_drvmod { const char *bus; driver_t *driver; };

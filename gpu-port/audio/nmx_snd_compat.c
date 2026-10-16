@@ -121,3 +121,15 @@ int device_delete_children(device_t dev)
 	free(kids, M_TEMP);
 	return error;
 }
+
+#undef bus_get_dma_tag
+bus_dma_tag_t nmx_snd_bus_get_dma_tag(device_t dev)
+{
+	typedef bus_dma_tag_t get_dma_tag_t(device_t, device_t);
+	for (device_t child = dev, p = device_get_parent(dev); p != NULL; child = p, p = device_get_parent(p)) {
+		get_dma_tag_t *f = (get_dma_tag_t *)nmx_device_method(p, "bus_get_dma_tag");
+		if (f != NULL)
+			return f(p, child);
+	}
+	return bus_get_dma_tag(dev);
+}
