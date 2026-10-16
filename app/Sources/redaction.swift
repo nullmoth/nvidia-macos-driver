@@ -30,7 +30,20 @@ func redactSupportText(_ source: String, homes: [String], identities: [String: S
         (#"(?i)"(crashReporterKey|deviceIdentifierForVendor|sessionID|userID|incident|bootSessionUUID|sleepWakeUUID|serial[A-Za-z]*)"\s*:\s*"[^"]*""#, "\"$1\":\"[removed]\""),
         (#"(?i)(serial number|system serial|hardware uuid|provisioning udid)[^\n]*"#, "$1: [removed]"),
     ]
+    // A crash report's binary-image UUIDs name the build of each library or kext in its stack ("uuid" : "..." in
+    // usedImages, ["...", base, "K"] in a stackshot), not the machine; without them no frame can be resolved (2.1.0
+    // WindowServer watchdog reports arrived with every image as [uuid]). They are set aside before the UUID rule and
+    // put back after it. Machine identities (crashReporterKey, bootSessionUUID, hardware UUID) are matched by key above.
+    var kept: [String] = []
+    let image = try! NSRegularExpression(pattern: #"("uuid"\s*:\s*"|\[")([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})(?=",)"#)
+    let ins = text as NSString
+    for match in image.matches(in: text, range: NSRange(location: 0, length: ins.length)).reversed() {
+        guard let range = Range(match.range(at: 2), in: text) else { continue }
+        kept.append(String(text[range]))
+        text.replaceSubrange(range, with: "\u{1}IMG\(kept.count - 1)\u{1}")
+    }
     for (pattern, replacement) in rules { text = text.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression) }
+    for (i, uuid) in kept.enumerated() { text = text.replacingOccurrences(of: "\u{1}IMG\(i)\u{1}", with: uuid) }
     return text
 }
 

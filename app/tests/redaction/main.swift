@@ -18,6 +18,13 @@ let safeAddresses = redactSupportText(addresses, homes: [], identities: [:])
 assert(safeAddresses == "[ip] [ip] [ip] [[ip]]:443 [ip] [mac]")
 let keys = redactSupportText("{\"USERID\":\"secret\",\"SerialNumber\":\"secret\"}\nSystem Serial: secret", homes: [], identities: [:])
 assert(!keys.contains("secret"))
+// crash report image UUIDs survive (they name a library build); identity UUIDs in the same report do not
+let img = "11111111-2222-3333-4444-555555555555", hw = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+let ips = "{\"usedImages\":[{\"uuid\" : \"\(img)\",\"base\":4096}],\"binaryImages\":[[\"\(img)\", 18446743523956785152, \"K\"]],"
+    + "\"bootSessionUUID\":\"\(hw)\"} Hardware UUID: \(hw) loose \(hw)"
+let ipsOut = redactSupportText(ips, homes: [], identities: [:])
+assert(ipsOut.components(separatedBy: img).count - 1 == 2, ipsOut)
+assert(!ipsOut.contains(hw), ipsOut)
 // Negative control demonstrates why raw substring replacement is unsafe.
 assert(technical.replacingOccurrences(of: "apple", with: "user") != technical)
 print("Full identity/path/address redaction preserves PCI/ACPI, framework and CPU symbols.")
