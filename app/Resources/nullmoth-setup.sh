@@ -1639,6 +1639,8 @@ cat > /Library/NullMoth/nullmoth-wsreset.sh <<'WS'
 # the strobe can be root-caused from a real >60 Hz / multi-monitor machine (it does not reproduce on the dev box).
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 [ -e /Library/NullMoth/no-wsreset ] && exit 0
+# A compositor restart disrupts startup; reserve this workaround for explicit diagnosis.
+[ -e /Library/NullMoth/enable-wsreset ] || exit 0
 MARK=/var/run/nullmoth-wsreset.done
 [ -e "$MARK" ] && exit 0
 # 1401 issue #108: launchd starts this before the kexts are listed, and a single check ended the run for the whole
@@ -1709,7 +1711,7 @@ cat > /Library/LaunchDaemons/com.nullmoth.wsreset.plist <<'PL'
 </dict></plist>
 PL
 chmod 644 /Library/LaunchDaemons/com.nullmoth.wsreset.plist; chown root:wheel /Library/LaunchDaemons/com.nullmoth.wsreset.plist
-ok "flicker stopgap armed (restarts WindowServer once per boot; opt out with /Library/NullMoth/no-wsreset)"
+ok "startup restart workaround installed (opt in with /Library/NullMoth/enable-wsreset; opt out with /Library/NullMoth/no-wsreset)"
 # Display tracker: flicker and black screens only happen on monitors we do not have (>60 Hz DisplayPort, two displays),
 # and a "Send logs" afterwards only photographs the end state. This records from boot: the driver's flip/scan-out/AGDC
 # counters every second (only lines that changed, plus a heartbeat), the refresh rate of each framebuffer, every
