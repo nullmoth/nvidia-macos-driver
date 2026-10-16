@@ -194,9 +194,20 @@ impl Emitter {
             pointee.clone()
         };
         if *lanes > 1 && !self.can_emit_gep_provenance_lane_ptrs(ptr_value, &slot_ty)? {
-            return self.emit_scalar_pointer_vector_load(
+            if self.emit_scalar_pointer_vector_load(
                 result,
                 &elem,
+                *lanes,
+                ptr_value,
+                ptr,
+                instructions,
+            )? {
+                return Ok(true);
+            }
+            return self.emit_scalar_to_vector_load_by_lane_geps(
+                result,
+                &elem,
+                &slot_ty,
                 *lanes,
                 ptr_value,
                 ptr,
@@ -251,6 +262,50 @@ impl Emitter {
             Some(result),
             lane_ids,
         ));
+        Ok(true)
+    }
+
+    /// Lane pointers as explicit GEPs for a vector load whose base has no provenance (an index-0 GEP on a
+    /// parameter); lanes are reinterpreted to the element type when the slot type differs.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_scalar_to_vector_load_by_lane_geps(
+        &mut self,
+        result: Word,
+        elem: &LlType,
+        slot_ty: &LlType,
+        lanes: u32,
+        ptr_value: &TypedValue,
+        ptr: Word,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<bool, String> {
+        let LlValue::Local(base_name) = &ptr_value.value else {
+            return Ok(false);
+        };
+        let base_ty = self.resolve_type(&ptr_value.ty)?;
+        if !matches!(base_ty, LlType::Ptr(_)) {
+            return Ok(false);
+        }
+        let mut lane_ptrs = vec![ptr];
+        for lane in 1..lanes {
+            let gep = LlGep {
+                inbounds: true,
+                source_ty: slot_ty.clone(),
+                base: TypedValue {
+                    ty: base_ty.clone(),
+                    value: ptr_value.value.clone(),
+                },
+                indices: vec![TypedValue {
+                    ty: LlType::Int(32),
+                    value: LlValue::Int(lane as u64),
+                }],
+            };
+            let name = format!("{base_name}.m2v_lane{lane}");
+            match self.emit_gep_result(&name, &gep, instructions)? {
+                Some(id) => lane_ptrs.push(id),
+                None => return Ok(false),
+            }
+        }
+        self.emit_vector_from_lane_ptrs(result, elem, slot_ty, &lane_ptrs, instructions)?;
         Ok(true)
     }
 
@@ -709,32 +764,56 @@ impl Emitter {
         }
 
         let ptr_type = self.ptr_type_id(storage, elem)?;
+        let mut lane_ptrs = vec![ptr];
+        for lane in 1..lanes {
+            let lane_index = self.const_uint(lane)?;
+            let lane_ptr = self.fresh();
+            instructions.push(Self::inst(
+                Op::PtrAccessChain,
+                Some(ptr_type),
+                Some(lane_ptr),
+                vec![Operand::IdRef(ptr), Operand::IdRef(lane_index)],
+            ));
+            lane_ptrs.push(lane_ptr);
+        }
+        self.emit_vector_from_lane_ptrs(result, elem, elem, &lane_ptrs, instructions)?;
+        Ok(true)
+    }
+
+    /// Loads one `slot_ty` value per lane pointer, reinterpreted to `elem` when the types differ, and
+    /// assembles the vector.
+    fn emit_vector_from_lane_ptrs(
+        &mut self,
+        result: Word,
+        elem: &LlType,
+        slot_ty: &LlType,
+        lane_ptrs: &[Word],
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<(), String> {
         let elem_type = self.type_id(elem)?;
-        let mut lane_ids = Vec::with_capacity(lanes as usize);
-        for lane in 0..lanes {
-            let lane_ptr = if lane == 0 {
-                ptr
-            } else {
-                let lane_index = self.const_uint(lane)?;
-                let lane_ptr = self.fresh();
-                instructions.push(Self::inst(
-                    Op::PtrAccessChain,
-                    Some(ptr_type),
-                    Some(lane_ptr),
-                    vec![Operand::IdRef(ptr), Operand::IdRef(lane_index)],
-                ));
-                lane_ptr
-            };
-            let lane_id = self.fresh();
+        let slot_type = self.type_id(slot_ty)?;
+        let mut lane_ids = Vec::with_capacity(lane_ptrs.len());
+        for &lane_ptr in lane_ptrs {
+            let mut lane_id = self.fresh();
             instructions.push(Self::inst(
                 Op::Load,
-                Some(elem_type),
+                Some(slot_type),
                 Some(lane_id),
                 vec![Operand::IdRef(lane_ptr)],
             ));
+            if slot_type != elem_type {
+                let reinterpreted = self.fresh();
+                instructions.push(Self::inst(
+                    Op::Bitcast,
+                    Some(elem_type),
+                    Some(reinterpreted),
+                    vec![Operand::IdRef(lane_id)],
+                ));
+                lane_id = reinterpreted;
+            }
             lane_ids.push(Operand::IdRef(lane_id));
         }
-
+        let lanes = lane_ptrs.len() as u32;
         let result_type = self.type_id(&LlType::Vector(Box::new(elem.clone()), lanes))?;
         instructions.push(Self::inst(
             Op::CompositeConstruct,
@@ -742,7 +821,7 @@ impl Emitter {
             Some(result),
             lane_ids,
         ));
-        Ok(true)
+        Ok(())
     }
 
     pub(in crate::native::emitter) fn can_emit_gep_provenance_lane_ptrs(

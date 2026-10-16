@@ -238,7 +238,7 @@ pub(in crate::passes) fn lower_pixel_gather_2d(
             const_offset,
             dynamic_offset,
             texel_offset,
-             false,
+            false,
             &mut out,
         )?;
         let fetch = build_pixel_fetch_coord_from_parts(
@@ -406,6 +406,10 @@ pub(in crate::passes) fn valid_sampler_value(
         return Err("air.sample_texture sampler operand is not a sampler".into());
     }
 
+    if sampler_join_of_sampler_values(ctx, samp, sty) {
+        // A phi/select of samplers is carried as is; the sample is replayed per arm later.
+        return Ok(samp);
+    }
     if !ctx.read_sampler_values.contains(&samp) {
         return Err(
             "sampler operand is a pointer whose exact sampler state was not recovered".into(),
@@ -420,6 +424,22 @@ pub(in crate::passes) fn valid_sampler_value(
         vec![Operand::IdRef(var)],
     ));
     Ok(loaded)
+}
+
+fn sampler_join_of_sampler_values(ctx: &Ctx, samp: Word, sty: Word) -> bool {
+    let Some(inst) = value_inst(ctx, samp) else {
+        return false;
+    };
+    let (skip, step) = match inst.class.opcode {
+        Op::Phi => (0, 2),
+        Op::Select => (1, 1),
+        _ => return false,
+    };
+    let mut arms = inst.operands.iter().skip(skip).step_by(step).peekable();
+    arms.peek().is_some()
+        && arms.all(
+            |arm| matches!(arm, Operand::IdRef(id) if value_result_type(ctx, *id) == Some(sty)),
+        )
 }
 
 pub(in crate::passes) fn validate_runtime_sampler_specialization(

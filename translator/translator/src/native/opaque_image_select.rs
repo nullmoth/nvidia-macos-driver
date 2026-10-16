@@ -528,9 +528,11 @@ fn has_opaque_image_merge_consumer(module: &Module) -> bool {
         .flat_map(|function| &function.blocks)
         .flat_map(|block| &block.instructions)
         .any(|instruction| {
-            (is_direct_image_value_op(instruction.class.opcode)
+            ((is_direct_image_value_op(instruction.class.opcode)
                 || instruction.class.opcode == Op::SampledImage)
-                && matches!(instruction.operands.first(), Some(Operand::IdRef(id)) if merge_ids.contains(id))
+                && matches!(instruction.operands.first(), Some(Operand::IdRef(id)) if merge_ids.contains(id)))
+                || (instruction.class.opcode == Op::SampledImage
+                    && matches!(instruction.operands.get(1), Some(Operand::IdRef(id)) if merge_ids.contains(id)))
         })
 }
 
@@ -1420,73 +1422,155 @@ fn rewrite_opaque_image_phis(module: &mut Module) -> bool {
         return false;
     };
 
+    /// A sampler phi joined in the same block over the same labels as an image phi; `arms` by ordinal.
+    #[derive(Clone)]
+    struct PairedSamplerPhi {
+        site: Site,
+        result: Word,
+        arms: Vec<Word>,
+    }
+
     #[derive(Clone)]
     enum PhiConsumer {
         Direct(UseSite),
         Sampled {
             sampled_site: Site,
             sample_uses: Vec<UseSite>,
+            paired_sampler: Option<PairedSamplerPhi>,
         },
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum PhiKind {
+        Image,
+        Sampler,
     }
 
     #[derive(Clone)]
     struct PhiPlan {
         site: Site,
         result: Word,
-        image_ty: Word,
+        kind: PhiKind,
+        image_ty: Option<Word>,
         arms: Vec<(Word, Word)>,
         consumers: Vec<PhiConsumer>,
     }
 
+    // A phi of samplers is planned like a phi of images; one paired with an image phi is dropped again below.
+    let phi_arms = |inst: &Instruction| -> Option<(PhiKind, Option<Word>, Vec<(Word, Word)>)> {
+        if inst.class.opcode != Op::Phi
+            || !inst
+                .result_type
+                .is_some_and(|ty| is_pointer_type(&type_defs, ty))
+            || inst.operands.len() < 4
+            || !inst.operands.len().is_multiple_of(2)
+        {
+            return None;
+        }
+        let mut arms = Vec::new();
+        let mut kind = None;
+        let mut image_ty = None;
+        for pair in inst.operands.chunks_exact(2) {
+            let (Operand::IdRef(value), Operand::IdRef(label)) = (&pair[0], &pair[1]) else {
+                return None;
+            };
+            let ty = *value_types.get(value)?;
+            let arm_kind = if is_image_type(&type_defs, ty) {
+                PhiKind::Image
+            } else if is_sampler_type(&type_defs, ty) {
+                PhiKind::Sampler
+            } else {
+                return None;
+            };
+            if kind.is_some_and(|expected| expected != arm_kind)
+                || image_ty.is_some_and(|expected| expected != ty)
+            {
+                return None;
+            }
+            kind = Some(arm_kind);
+            if arm_kind == PhiKind::Image {
+                image_ty = Some(ty);
+            }
+            arms.push((*value, *label));
+        }
+        Some((kind?, image_ty, arms))
+    };
+
     let mut plans = Vec::new();
+    let mut paired_sampler_phis = HashSet::new();
     for (function, func) in module.functions.iter().enumerate() {
         for (block, blk) in func.blocks.iter().enumerate() {
             for (instruction, inst) in blk.instructions.iter().enumerate() {
-                if inst.class.opcode != Op::Phi
-                    || !inst
-                        .result_type
-                        .is_some_and(|ty| is_pointer_type(&type_defs, ty))
-                {
+                let Some((kind, image_ty, arms)) = phi_arms(inst) else {
                     continue;
-                }
+                };
                 let Some(result) = inst.result_id else {
                     continue;
                 };
-                let mut arms = Vec::new();
-                let mut image_ty = None;
-                let mut valid = inst.operands.len() >= 4 && inst.operands.len().is_multiple_of(2);
-                for pair in inst.operands.chunks_exact(2) {
-                    let (Operand::IdRef(value), Operand::IdRef(label)) = (&pair[0], &pair[1])
-                    else {
-                        valid = false;
-                        break;
-                    };
-                    let Some(&ty) = value_types.get(value) else {
-                        valid = false;
-                        break;
-                    };
-                    if !is_image_type(&type_defs, ty)
-                        || image_ty.is_some_and(|expected| expected != ty)
-                    {
-                        valid = false;
-                        break;
-                    }
-                    image_ty = Some(ty);
-                    arms.push((*value, *label));
-                }
-                if !valid {
-                    continue;
-                }
                 let Some(result_uses) = uses.get(&result) else {
                     continue;
                 };
                 let mut consumers = Vec::new();
                 let mut consumers_valid = !result_uses.is_empty();
+                let mut claimed_sampler_phis = Vec::new();
                 for use_site in result_uses {
                     let Some(consumer) = instruction_at(module, use_site.site) else {
                         consumers_valid = false;
                         break;
                     };
+                    if kind == PhiKind::Sampler {
+                        if use_site.operand != 1 || consumer.class.opcode != Op::SampledImage {
+                            consumers_valid = false;
+                            break;
+                        }
+                        let image = consumer.operands.first().and_then(|operand| match operand {
+                            Operand::IdRef(id) => Some(*id),
+                            _ => None,
+                        });
+                        let Some(image) = image else {
+                            consumers_valid = false;
+                            break;
+                        };
+                        let Some(sampled_id) = consumer.result_id else {
+                            consumers_valid = false;
+                            break;
+                        };
+                        let Some(sample_uses) = uses.get(&sampled_id).cloned() else {
+                            consumers_valid = false;
+                            break;
+                        };
+                        if value_defs
+                            .get(&image)
+                            .is_some_and(|def| matches!(def.class.opcode, Op::Phi | Op::Select))
+                            || sample_uses.is_empty()
+                            || sample_uses.iter().any(|sample_use| {
+                                sample_use.operand != 0
+                                    || instruction_at(module, sample_use.site).is_none_or(
+                                        |sample| {
+                                            !is_sampled_image_value_op(sample.class.opcode)
+                                                || sample.result_id.is_none()
+                                                || sample.result_type.is_none()
+                                                || sample.result_type.is_some_and(|ty| {
+                                                    is_opaque_type(&type_defs, ty)
+                                                })
+                                        },
+                                    )
+                                    || arms.iter().any(|(value, _)| {
+                                        !image_available_at_site(*value, sample_use.site)
+                                    })
+                                    || !image_available_at_site(image, sample_use.site)
+                            })
+                        {
+                            consumers_valid = false;
+                            break;
+                        }
+                        consumers.push(PhiConsumer::Sampled {
+                            sampled_site: use_site.site,
+                            sample_uses,
+                            paired_sampler: None,
+                        });
+                        continue;
+                    }
                     if use_site.operand != 0 {
                         consumers_valid = false;
                         break;
@@ -1522,6 +1606,49 @@ fn rewrite_opaque_image_phis(module: &mut Module) -> bool {
                         Operand::IdRef(id) => Some(*id),
                         _ => None,
                     });
+                    // A sampler phi is paired when it joins here over the same labels and feeds
+                    // only this image.
+                    let mut paired_sampler = None;
+                    if let Some(sampler_id) = sampler {
+                        if let Some(sampler_def) = value_defs.get(&sampler_id) {
+                            if let Some((PhiKind::Sampler, _, sampler_arms)) = phi_arms(sampler_def)
+                            {
+                                let same_labels = sampler_arms.len() == arms.len()
+                                    && sampler_arms
+                                        .iter()
+                                        .zip(arms.iter())
+                                        .all(|((_, a), (_, b))| a == b);
+                                let same_block = positions.get(&sampler_id).is_some_and(|site| {
+                                    site.function == function && site.block == block
+                                });
+                                let only_this_image =
+                                    uses.get(&sampler_id).is_some_and(|sampler_uses| {
+                                        sampler_uses.iter().all(|sampler_use| {
+                                            sampler_use.operand == 1
+                                                && instruction_at(module, sampler_use.site)
+                                                    .is_some_and(|user| {
+                                                        user.class.opcode == Op::SampledImage
+                                                            && user.operands.first()
+                                                                == Some(&Operand::IdRef(result))
+                                                    })
+                                        })
+                                    });
+                                if same_labels && same_block && only_this_image {
+                                    paired_sampler = Some(PairedSamplerPhi {
+                                        site: positions[&sampler_id],
+                                        result: sampler_id,
+                                        arms: sampler_arms
+                                            .iter()
+                                            .map(|(value, _)| *value)
+                                            .collect(),
+                                    });
+                                } else {
+                                    consumers_valid = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     if sample_uses.is_empty()
                         || sampler.is_none()
                         || sample_uses.iter().any(|sample_use| {
@@ -1537,23 +1664,33 @@ fn rewrite_opaque_image_phis(module: &mut Module) -> bool {
                                 || arms.iter().any(|(value, _)| {
                                     !image_available_at_site(*value, sample_use.site)
                                 })
-                                || !value_dominates_site(
-                                    sampler.expect("sampled-image sampler was gated"),
-                                    sample_use.site,
-                                )
+                                || match &paired_sampler {
+                                    Some(paired) => paired.arms.iter().any(|value| {
+                                        !image_available_at_site(*value, sample_use.site)
+                                    }),
+                                    None => !value_dominates_site(
+                                        sampler.expect("sampled-image sampler was gated"),
+                                        sample_use.site,
+                                    ),
+                                }
                         })
                     {
                         consumers_valid = false;
                         break;
                     }
+                    if let Some(paired) = &paired_sampler {
+                        claimed_sampler_phis.push(paired.result);
+                    }
                     consumers.push(PhiConsumer::Sampled {
                         sampled_site: use_site.site,
                         sample_uses,
+                        paired_sampler,
                     });
                 }
                 if !consumers_valid {
                     continue;
                 }
+                paired_sampler_phis.extend(claimed_sampler_phis);
                 plans.push(PhiPlan {
                     site: Site {
                         function,
@@ -1561,13 +1698,17 @@ fn rewrite_opaque_image_phis(module: &mut Module) -> bool {
                         instruction,
                     },
                     result,
-                    image_ty: image_ty.expect("valid image phi has an image type"),
+                    kind,
+                    image_ty,
                     arms,
                     consumers,
                 });
             }
         }
     }
+    plans.retain(|plan| {
+        plan.kind != PhiKind::Sampler || !paired_sampler_phis.contains(&plan.result)
+    });
     if plans.is_empty() {
         return false;
     }
@@ -1594,7 +1735,7 @@ fn rewrite_opaque_image_phis(module: &mut Module) -> bool {
         })
         .collect::<HashMap<_, _>>();
     let mut new_sampled_types = HashMap::new();
-    for image_ty in plans.iter().map(|plan| plan.image_ty) {
+    for image_ty in plans.iter().filter_map(|plan| plan.image_ty) {
         sampled_type_by_image.entry(image_ty).or_insert_with(|| {
             let id = fresh(&mut next_id);
             new_sampled_types.insert(
@@ -1689,6 +1830,7 @@ fn rewrite_opaque_image_phis(module: &mut Module) -> bool {
                 PhiConsumer::Sampled {
                     sampled_site,
                     sample_uses,
+                    paired_sampler,
                 } => {
                     let sampled = instruction_at(module, sampled_site)
                         .expect("opaque image phi sampled-image consumer disappeared")
@@ -1697,7 +1839,11 @@ fn rewrite_opaque_image_phis(module: &mut Module) -> bool {
                     if let Some(id) = sampled.result_id {
                         removed_ids.insert(id);
                     }
-                    (sampled, sample_uses, Some(sampled_site))
+                    if let Some(paired) = &paired_sampler {
+                        replacements.insert(paired.site, Vec::new());
+                        removed_ids.insert(paired.result);
+                    }
+                    (sampled, sample_uses, Some((sampled_site, paired_sampler)))
                 }
             };
             for use_site in use_sites {
@@ -1716,18 +1862,27 @@ fn rewrite_opaque_image_phis(module: &mut Module) -> bool {
                     .expect("gated image consumer result");
                 let mut out = Vec::new();
                 let mut arm_results = Vec::with_capacity(plan.arms.len());
-                for (image, _) in &plan.arms {
-                    let image = if value_dominates_site(*image, use_site.site) {
-                        *image
-                    } else {
-                        let mut load = value_defs
-                            .get(image)
-                            .expect("non-dominating image arm was gated as a replayable load")
-                            .clone();
-                        let replayed = fresh(&mut next_id);
-                        load.result_id = Some(replayed);
-                        out.push(load);
-                        replayed
+                for (ordinal, (arm, _)) in plan.arms.iter().enumerate() {
+                    let mut materialize = |value: Word, out: &mut Vec<Instruction>| -> Word {
+                        if value_dominates_site(value, use_site.site) {
+                            value
+                        } else {
+                            let mut load = value_defs
+                                .get(&value)
+                                .expect("non-dominating opaque arm was gated as a replayable load")
+                                .clone();
+                            let replayed = fresh(&mut next_id);
+                            load.result_id = Some(replayed);
+                            out.push(load);
+                            replayed
+                        }
+                    };
+                    let arm = materialize(*arm, &mut out);
+                    let paired_arm = match &sampled_template {
+                        Some((_, Some(paired))) => {
+                            Some(materialize(paired.arms[ordinal], &mut out))
+                        }
+                        _ => None,
                     };
                     let result = fresh(&mut next_id);
                     let mut cloned = value_consumer.clone();
@@ -1736,12 +1891,24 @@ fn rewrite_opaque_image_phis(module: &mut Module) -> bool {
                         let sampled_result = fresh(&mut next_id);
                         let mut sampled = consumer.clone();
                         sampled.result_id = Some(sampled_result);
-                        sampled.result_type = Some(sampled_type_by_image[&plan.image_ty]);
-                        sampled.operands[0] = Operand::IdRef(image);
+                        match plan.kind {
+                            PhiKind::Image => {
+                                let image_ty =
+                                    plan.image_ty.expect("image phi plan has an image type");
+                                sampled.result_type = Some(sampled_type_by_image[&image_ty]);
+                                sampled.operands[0] = Operand::IdRef(arm);
+                                if let Some(paired_arm) = paired_arm {
+                                    sampled.operands[1] = Operand::IdRef(paired_arm);
+                                }
+                            }
+                            PhiKind::Sampler => {
+                                sampled.operands[1] = Operand::IdRef(arm);
+                            }
+                        }
                         out.push(sampled);
                         cloned.operands[0] = Operand::IdRef(sampled_result);
                     } else {
-                        cloned.operands[0] = Operand::IdRef(image);
+                        cloned.operands[0] = Operand::IdRef(arm);
                     }
                     out.push(cloned);
                     arm_results.push(result);
@@ -2312,6 +2479,12 @@ fn is_image_type(type_defs: &HashMap<Word, Instruction>, ty: Word) -> bool {
     type_defs
         .get(&ty)
         .is_some_and(|def| def.class.opcode == Op::TypeImage)
+}
+
+fn is_sampler_type(type_defs: &HashMap<Word, Instruction>, ty: Word) -> bool {
+    type_defs
+        .get(&ty)
+        .is_some_and(|def| def.class.opcode == Op::TypeSampler)
 }
 
 fn is_pointer_type(type_defs: &HashMap<Word, Instruction>, ty: Word) -> bool {
