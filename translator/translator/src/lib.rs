@@ -838,7 +838,7 @@ pub fn translate_native_no_retry_constructed_with_options(
         }
     };
     // the inline retry builds its buffers raw first: on Blender Eevee's deferred light shader the typed construction of
-    // the inlined module validated and rendered black, the raw one lit the cube as Apple does (the test Mac 10-16)
+    // the inlined module validated and rendered black, the raw one lit the scene as the reference GPU does
     if raw_buffers_first_on() {
         if let Ok(finished) = rc.construct_raw() {
             return Ok(finished.bytes);
