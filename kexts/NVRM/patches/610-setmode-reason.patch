@@ -1,0 +1,21 @@
+--- a/kapi/src/nvkms-kapi.c
++++ b/kapi/src/nvkms-kapi.c
+@@ -3512,6 +3512,18 @@
+     if (params->reply.status != NVKMS_SET_MODE_STATUS_SUCCESS)
+     {
+         int i;
++
++        /*
++         * A refused mode set left only "commit rejected" in the log: the debug lines below are compiled out of release
++         * builds, and a WindowServer that could not set its first mode then asserted in CGXMappedDisplayStart with no
++         * reason anywhere. One warning line carries the reason codes (NVKMS_SET_MODE_STATUS_* and per head
++         * NVKMS_SET_MODE_ONE_HEAD_STATUS_*: 1 invalid mode, 2 invalid dpy, 7 permissions, 8 head surface, ...).
++         */
++        nvEvoLog(EVO_LOG_WARN,
++                 "[kapi] set mode refused (commit %d): status %d disp0 %d heads %d %d %d %d",
++                 commit, params->reply.status, params->reply.disp[0].status,
++                 params->reply.disp[0].head[0].status, params->reply.disp[0].head[1].status,
++                 params->reply.disp[0].head[2].status, params->reply.disp[0].head[3].status);
+ 
+         nvKmsKapiLogDeviceDebug(
+             device,
