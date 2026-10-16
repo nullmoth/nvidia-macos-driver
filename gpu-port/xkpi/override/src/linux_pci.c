@@ -591,16 +591,38 @@ lkpi_pci_get_slot(struct pci_bus *pbus, unsigned int devfn)
 	return (pdev);
 }
 
+/* the vendor of a registered LinuxKPI driver's first id, for the probe log; 0 for a driver that is not one */
+static uint16_t
+nmx_pci_driver_vendor(driver_t *drv)
+{
+	struct pci_driver *pdrv;
+	uint16_t v = 0;
+
+	spin_lock(&pci_lock);
+	list_for_each_entry(pdrv, &pci_drivers, node)
+		if (&pdrv->bsddriver == drv)
+			v = pdrv->id_table[0].vendor;
+	spin_unlock(&pci_lock);
+	return (v);
+}
+
 static int
 linux_pci_probe(device_t dev)
 {
 	const struct pci_device_id *id;
 	struct pci_driver *pdrv;
 
-	if ((pdrv = linux_pci_find(dev, &id)) == NULL)
+	if ((pdrv = linux_pci_find(dev, &id)) == NULL) {
+		/* every driver shares the name "drmn", so the first id of its table says which one this is */
+		printf("NullMoth xkpi: %04x:%04x: no driver's id table has it (offered by %s/%04x)\n",
+		    pci_get_vendor(dev), pci_get_device(dev), device_get_driver(dev)->name,
+		    nmx_pci_driver_vendor(device_get_driver(dev)));
 		return (ENXIO);
+	}
 	if (device_get_driver(dev) != &pdrv->bsddriver)
 		return (ENXIO);
+	printf("NullMoth xkpi: %04x:%04x: matched by %s/%04x\n", pci_get_vendor(dev), pci_get_device(dev),
+	    pdrv->name, pdrv->id_table[0].vendor);
 	device_set_desc(dev, pdrv->name);
 
 	/* Assume BSS initialized (should never return BUS_PROBE_SPECIFIC). */
@@ -1266,6 +1288,9 @@ linux_pci_register_driver(struct pci_driver *pdrv)
 	/* LKPI_DRIVER_MODULE drops its init's return value: a driver that failed to register says so here */
 	if (error != 0)
 		printf("NullMoth xkpi: PCI driver %s did not register (%d)\n", pdrv->name, error);
+	else
+		printf("NullMoth xkpi: PCI driver %s/%04x registered on %s\n", pdrv->name, pdrv->id_table[0].vendor,
+		    pdrv->isdrm ? "vgapci" : "pci");
 	return (error);
 }
 
