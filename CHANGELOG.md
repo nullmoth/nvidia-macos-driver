@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.1 (draft, not released)
+
+Driver
+- Each GPU generation (GTX 16, RTX 20, 30, 40 and 50) is now described by the card itself: the driver reads the
+  architecture and the newest engine classes from the GPU and publishes them, and the Metal driver picks the video
+  decoder and the scan-out model from that instead of a table of device IDs
+- Cards with a small BAR1 (Resizable BAR off, or a board that does not offer it): the driver moves BAR1 away from the
+  boot screen at its own size, so GTX 16 / Turing cards get the same zero-copy display path as the others. A BAR1 that
+  macOS left unassigned is reported instead of failing with no reason
+- The desktop no longer waits for the GPU on every frame (#196): each window the compositor draws is marked when the
+  GPU finishes it, and the display waits only for that mark
+- A BAR1 the firmware already placed large is left as it is, and the old setup comes back if a resize fails
+- Gamma tables are applied; HiDPI desktop modes can be turned on with nvfbhidpi
+- The installer keeps your own settings block in nvrm610.conf
+
+Metal
+- Blender: Eevee renders lit scenes. NVIDIA GPUs cannot write the stencil value from a shader, which Blender's Metal
+  backend relies on to sort its lighting; the driver now rebuilds that value by drawing once per stencil bit. Also
+  fixed: a light loop that hung the GPU (the first active SIMD lane, and loop values lost when helpers were inlined),
+  render passes with no attachments, layered 3D colour targets, framebuffer fetch, samplers held in argument buffers,
+  and image atomics in helper functions. Blender's shadow pages no longer crash it
+- Indirect compute dispatches read their grid size on the GPU instead of stopping to read it on the CPU
+- Hardware video decoders are registered with macOS's decode service (#175)
+
+AMD / Intel test driver
+- The log now says which driver started, which PCI drivers registered and which device each one matched, so a GPU
+  no driver took can be traced from a user's log
+
+Mac app
+- Map my GPU (experimental, opt-in)
+
 ## 2.0.4
 
 Mac app
