@@ -7,7 +7,8 @@ Fixes
   (GTX 16 and others). Draws that read colour from a pass without every attachment were skipped; they are now drawn,
   and overlapping triangles in one draw read each other's colour in order (thanks pengubow)
 - Above 60 Hz: the display and the accelerator woke up once per millisecond to check for a finished flip, which
-  users' flicker recordings showed as about 56 flips a second on a 143 Hz panel while windows moved. They now wake on the flip itself
+  users' flicker recordings showed as about 56 flips a second on a 143 Hz panel while windows moved. They now wake on
+  the flip itself (the display on macOS 15 and 26, the accelerator on macOS 26)
 - When a display's mode set is refused, the driver now tries the mode the firmware is already running before giving
   up, and the log says why the mode was refused (reports of a black screen at login on some RTX 3060 boards)
 - Draws the Metal driver had to drop are now in the logs that Send logs collects
