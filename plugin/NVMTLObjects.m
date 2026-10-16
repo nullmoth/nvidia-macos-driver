@@ -2718,8 +2718,16 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
         if (sa.texture && nvmtl_load_keeps(sa.loadAction)) load |= NVMTL_LOAD_STENCIL;
     }
     _pass.clear_depth = (float)da.clearDepth; _pass.clear_stencil = sa.clearStencil;
-    if (!any) { nvlog("encoder: apps2 a render pass with no attachments (%lux%lu) is not carried yet — nothing is drawn",
-                      (unsigned long)d.renderTargetWidth, (unsigned long)d.renderTargetHeight); return NO; }
+    if (!any) {
+        // A pass with no attachments: the fragment shader writes through images or buffers only, sized by the descriptor's
+        // renderTargetWidth/Height (Blender Eevee's shadow pages, 8192x8192 with image atomics). Vulkan draws it as a render
+        // pass with no attachments and a framebuffer of that size. Refusing it crashed Blender on its first shadowed frame
+        // (#152). Metal requires the size for such a pass, so a pass without one is still refused.
+        if (!d.renderTargetWidth || !d.renderTargetHeight) {
+            nvlog("encoder: apps2 a render pass with no attachments and no renderTargetWidth/Height — pass REFUSED"); return NO; }
+        w = (uint32_t)d.renderTargetWidth; h = (uint32_t)d.renderTargetHeight;
+        static int said; if (said++ < 4) nvlog("encoder: render pass with no attachments, %ux%u (writes through images/buffers only)", w, h);
+    }
     if (d.renderTargetWidth && d.renderTargetWidth < w) w = (uint32_t)d.renderTargetWidth;
     if (d.renderTargetHeight && d.renderTargetHeight < h) h = (uint32_t)d.renderTargetHeight;
     _pass.load = _load = load; _pass.w = w; _pass.h = h; _pass.layers = NL;

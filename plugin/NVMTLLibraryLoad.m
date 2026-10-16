@@ -1115,6 +1115,22 @@ NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *i
     uint8_t *out = NULL; size_t out_len = 0; char e[512] = {0};
     if (xlate_fc(ll.UTF8String, stage.UTF8String, idx, sizes, payloads, n, &out, &out_len, e, sizeof e) != 0) {
         nvlog("function constants: re-translate FAILED: %s", e);
+        // NVMTL_FC_FAIL_DUMP=<dir>: keep the refused module (AIR text, stage, constant values, error) so the refusal can be
+        // replayed offline against the translator; nothing is written unless the variable is set.
+        const char *dd = getenv("NVMTL_FC_FAIL_DUMP");
+        if (dd && *dd) {
+            NSString *dir = @(dd); static _Atomic unsigned seq;
+            [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+            NSString *base = [dir stringByAppendingFormat:@"/fc-%d-%u", getpid(), atomic_fetch_add(&seq, 1)];
+            [ll writeToFile:[base stringByAppendingString:@".ll"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            NSMutableString *meta = [NSMutableString stringWithFormat:@"stage %@\nerror %s\n", stage, e];
+            for (size_t i = 0; i < n; i++) {
+                [meta appendFormat:@"fc %u size %u bytes", idx[i], sizes[i]];
+                for (uint32_t b = 0; b < sizes[i] && payloads[i]; b++) [meta appendFormat:@" %02x", payloads[i][b]];
+                [meta appendString:@"\n"];
+            }
+            [meta writeToFile:[base stringByAppendingString:@".txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
         if (err) *err = [NSString stringWithUTF8String:e[0] ? e : "specialization failed"];
         return nil;
     }
