@@ -35,6 +35,9 @@
 <div class="panel"><p class="sh">Updates</p>
 <p>Already installed? 1401 checks for the newest NullMoth driver and the newest 1401 app. The app updates itself in place and reopens. For the driver, 1401 downloads it, checks it against the published SHA-256, and installs it the same way as above (your OpenCore config is backed up first). Restart when it is done.</p>
 <p><button type="button" class="b" id="updchk">Check for updates</button> <button type="button" class="b" id="upddrv" hidden>Update driver</button> <button type="button" class="b" id="updapp" hidden>Update the app</button> <span id="updr"></span></p></div>
+<div class="panel"><p class="sh">Update to macOS 26 Tahoe</p>
+<p>From macOS 15: <b>Prepare this Mac for Tahoe</b> installs or updates the NVIDIA driver to this version (it carries the Tahoe driver too), then gets the Mac ready for the update: the driver is parked and the installer gets the small GPU BAR it needs, so the installer screens show. Then install macOS 26 from Software Update. After the update, the first start sets the driver up for Tahoe and restarts once by itself. Changed your mind before updating? <b>Cancel the Tahoe preparation</b> puts everything back.</p>
+<p><button type="button" class="b" id="upd" disabled>Prepare this Mac for Tahoe</button> <button type="button" class="b" id="swu" hidden>Open Software Update</button> <button type="button" class="b" id="updc">Cancel the Tahoe preparation</button> <span id="updt"></span></p></div>
 <div class="panel"><p class="sh">If something goes wrong after you restart</p>
 <p>Restart, and in the OpenCore boot picker choose <b>1401: Remove NVIDIA driver</b>, then your macOS disk. 1401 removes the driver by itself and restarts; this Mac comes back exactly as it was before the install, OpenCore config included. The screen may stay dark until that second restart.</p>
 <p><button type="button" class="b" id="rm">Remove the driver</button></p></div>

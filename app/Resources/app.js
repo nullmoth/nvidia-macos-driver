@@ -31,8 +31,14 @@ function render(m) {
 
   // Keep the checked package available when the driver is already running.
   const pk = m.packages.find((p) => p.ok === "yes"); if (pk) S.pkg = pk.path;
+  // Tahoe: only from macOS 15, on a Mac the driver can be installed on, with the checked package (it carries both drivers)
+  // (this scan's package, not S.pkg: an ejected disk image must not leave the button pointing at a path that is gone)
+  $("upd").disabled = !pk || m.major !== 15 || !!why;
+  $("updt").innerHTML = m.major === 26 ? "This Mac already runs macOS 26." : why ? "" : pk ? "" :
+    'Needs the driver package: <button type="button" class="b" id="dl3">Download the driver package</button>';
+  const d3 = $("dl3"); if (d3) d3.onclick = () => post({ act: "download" });
   if (on) {
-    $("verdict").innerHTML = `<p class="good">NullMoth components are loaded and an NVIDIA Metal device is visible.</p><p>Use Check for a newer driver to update the driver. To remove the driver, use Remove the driver below.</p>`;
+    $("verdict").innerHTML = `<p class="good">NullMoth components are loaded and an NVIDIA Metal device is visible.</p><p>Use Check for a newer driver to update the driver. To remove the driver, use Remove the driver below.${m.major === 15 ? " To move to macOS 26 Tahoe, use <b>Prepare this Mac for Tahoe</b> below." : ""}</p>`;
     $("steps").hidden = true; return;
   }
   // No NVIDIA card but an AMD or Intel GPU: the NVIDIA steps do not apply, the AMD/Intel test driver below does. It needs
@@ -120,7 +126,7 @@ const NM = {
     }
     if (event === "run") {
       const busy = data.state === "start";
-      ["dry", "go", "rm", "dl", "updchk", "upddrv"].forEach((b) => ($(b).disabled = busy));
+      ["dry", "go", "rm", "dl", "updchk", "upddrv", "upd", "updc"].forEach((b) => ($(b).disabled = busy));
       if (busy) { $("logwrap").hidden = false; $("log").textContent = ""; return; }
       if (data.why) { $("logwrap").hidden = false; logLine(data.why); }
       if (data.state === "cancelled") {
@@ -137,6 +143,11 @@ const NM = {
       }
       if (data.mode === "dry" && data.ok) { S.previewed = true; step(2, "done"); step(3, "now"); }
       if (data.mode === "install" && data.ok) { S.installed = true; step(3, "done"); step(4, "now"); $("rs").disabled = false; }
+      if (data.mode === "tahoe") {
+        if (data.ok) { $("swu").hidden = false; $("updt").textContent = "Ready for Tahoe. Open Software Update and install macOS 26."; logLine("OK ready for Tahoe - click Open Software Update and install macOS 26"); }
+        else $("updt").textContent = "Tahoe preparation stopped. Review the setup log above.";
+      }
+      if (data.mode === "tahoecancel") { $("swu").hidden = true; $("updt").textContent = data.ok ? "Tahoe preparation cancelled: the driver and the installer settings are back." : "Cancel stopped. Review the setup log above."; }
       post({ act: "scan" });
     }
   },
@@ -150,6 +161,9 @@ $("efi").onchange = () => {
   step(2, "now"); step(3, "waiting");
 };
 $("dl").onclick = () => post({ act: "download" });
+$("upd").onclick = () => post({ act: "osupdate", cancel: false, pkg: S.pkg, efi: efi() });
+$("swu").onclick = () => post({ act: "swupdate" });
+$("updc").onclick = () => post({ act: "osupdate", cancel: true, efi: efi() });
 $("updchk").onclick = () => { $("updr").textContent = "Checking..."; post({ act: "checkUpdate" }); };
 $("updapp").onclick = () => { $("updapp").disabled = true; post({ act: "updateApp" }); };
 $("upddrv").onclick = () => { S.driverUpdate = true; $("upddrv").disabled = true; $("updr").textContent = "Downloading the newest driver..."; post({ act: "updateDriver", efi: efi() }); };

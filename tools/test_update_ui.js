@@ -30,21 +30,42 @@ const machine = (major) => ({version:'1.1', macos:String(major), major, arch:'x8
   gpus:[{vendor:'10DE', name:'NVIDIA RTX 5060', supported:true, tested:true}],
   kexts:4, metal:['NVIDIA RTX 5060'], opencore:'1.0.6', files:true,
   packages:[{ok:'yes',path:'/tmp/driver.tar.gz'}]});
-for (const major of [15,26]) {
-  event('scan',machine(major));
-  assert(element('verdict').innerHTML.includes('Check for a newer driver'));
-  assert(!element('verdict').innerHTML.includes('Prepare'));
-}
-for (const name of ['upd','swu','updc']) assert.equal(elements.has(name),false);
+// The Tahoe button (back in 2.0.4, now that Tahoe is released): offered on macOS 15 with the checked package only
+event('scan',machine(15));
+assert(element('verdict').innerHTML.includes('Check for a newer driver'));
+assert(element('verdict').innerHTML.includes('Prepare this Mac for Tahoe'));
+assert.equal(element('upd').disabled,false);
+event('scan',machine(26));
+assert(!element('verdict').innerHTML.includes('Prepare'));
+assert.equal(element('upd').disabled,true);
+assert(element('updt').innerHTML.includes('already runs macOS 26'));
+const nopkg = machine(15); nopkg.packages = [];
+event('scan',nopkg);
+assert.equal(element('upd').disabled,true);
+assert(element('updt').innerHTML.includes('Download the driver package'));
+event('scan',machine(15));
+element('upd').onclick();
+assert.deepEqual({act:sent.at(-1).act, cancel:sent.at(-1).cancel, pkg:sent.at(-1).pkg}, {act:'osupdate', cancel:false, pkg:'/tmp/driver.tar.gz'});
+element('updc').onclick();
+assert.deepEqual({act:sent.at(-1).act, cancel:sent.at(-1).cancel}, {act:'osupdate', cancel:true});
+event('run',{state:'start', mode:'tahoe'});
+assert.equal(element('upd').disabled,true);
+event('run',{state:'end', mode:'tahoe', ok:true});
+assert.equal(element('swu').hidden,false);
+element('swu').onclick();
+assert.equal(sent.at(-1).act,'swupdate');
+event('run',{state:'end', mode:'tahoe', ok:false});
+assert(element('updt').textContent.includes('stopped'));
 const html=fs.readFileSync(__dirname+'/../app/Resources/index.html','utf8');
-for (const name of ['upd','swu','updc']) assert(!html.includes('id="'+name+'"'));
+for (const name of ['upd','swu','updc']) assert(html.includes('id="'+name+'"'));
 const native=fs.readFileSync(__dirname+'/../app/Sources/main.swift','utf8');
-assert(!native.includes('case "osupdate":'));
-assert(!native.includes('case "swupdate":'));
-assert(!native.includes('["--update", "prepare"]'));
-assert(!native.includes('["--update", "cancel"]'));
+assert(native.includes('case "osupdate":'));
+assert(native.includes('case "swupdate":'));
+assert(native.includes('extra: ["--update", "prepare"]'));
+assert(native.includes('extra: ["--update", "cancel"]'));
+assert(native.includes('"tahoe", "tahoecancel"].contains(mode)'));
 assert(native.includes('AppActions.directRunMode(b["mode"])'));
-console.log('Preparation UI and native actions removed; normal driver updates remain.');
+console.log('Tahoe preparation: offered on macOS 15 with the package, refused on 26 and without it, prepare/cancel/Software Update wired.');
 
 event('run',{state:'done', mode:'dry', ok:true});
 element('efi').value='disk2s1';

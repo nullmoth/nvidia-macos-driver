@@ -448,6 +448,15 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
                 extra: ["--gpu-test", (b["on"] as? Bool ?? false) ? "on" : "off",
                         "--tool", Bundle.main.resourceURL!.appendingPathComponent("NullMothSafe.efi").path]
                     + (pk.map { ["--pkg", $0, "--sha", Package.sha256] } ?? []))
+        // macOS 15 -> 26: setup's one-button path ("--update prepare" with the package) installs or updates the driver,
+        // then parks it and sets the installer's small BAR; "--update cancel" puts it all back before the update
+        case "osupdate":
+            if b["cancel"] as? Bool ?? false {
+                run(mode: "tahoecancel", pkg: "", efi: b["efi"] as? String ?? "auto", extra: ["--update", "cancel"])
+            } else if let pk = b["pkg"] as? String, !pk.isEmpty {
+                run(mode: "tahoe", pkg: pk, efi: b["efi"] as? String ?? "auto", extra: ["--update", "prepare"])
+            }
+        case "swupdate": NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Software-Update-Settings.extension")!)
         default: break
         }
     }
@@ -990,7 +999,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
     }
 
     func run(mode: String, pkg: String, efi: String, extra: [String], expectedSha: String? = nil) {
-        guard ["dry", "install", "remove", "usbmap", "verbose"].contains(mode),
+        guard ["dry", "install", "remove", "usbmap", "verbose", "tahoe", "tahoecancel"].contains(mode),
               !runningSetup, pendingDownload == nil else { return }
         runningSetup = true
         let log: URL
@@ -1027,7 +1036,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         var args: [String]
         switch mode {
         case "remove": args = ["--remove"]
-        case "usbmap", "verbose": args = extra
+        case "usbmap", "verbose", "tahoecancel": args = extra
         default:
             args = ["--pkg", pkg, "--sha", expectedSha ?? Package.sha256, "--tool", res.appendingPathComponent("NullMothSafe.efi").path,
                     "--app", Bundle.main.executablePath ?? ""]
