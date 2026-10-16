@@ -39,6 +39,14 @@ void config_intrhook_disestablish(struct intr_config_hook *hook);
 
 #define BUS_IVARS_PRIVATE 0x1000
 int device_delete_children(device_t dev);
+/* FreeBSD registers drivers with DRIVER_MODULE at module load; here each line leaves a record the kext registers with
+ * the bus class at start (nmx_audio_kext.cpp): hdac on pci, hdacc on hdac, hdaa on hdacc, pcm on hdaa */
+struct nmx_drvmod { const char *bus; driver_t *driver; };
+#undef DRIVER_MODULE
+#undef DRIVER_MODULE_ORDERED
+#define DRIVER_MODULE(name, busname, driver, evh, arg) \
+	struct nmx_drvmod nmx_drvmod_ ## name ## _ ## busname = { #busname, &driver };
+#define DRIVER_MODULE_ORDERED(name, busname, driver, evh, arg, order) DRIVER_MODULE(name, busname, driver, evh, arg)
 /* module metadata: the kext is one module, so FreeBSD's module dependencies have nothing to say */
 #ifndef MODULE_DEPEND
 #define MODULE_DEPEND(mod, dep, min, pref, max)

@@ -16,5 +16,5 @@ exec xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -ffile-prefix-map=$NULLM
   -D_KERNEL -DKERNEL -DKERNEL_PRIVATE -DNMXKPI=1 \
   -include $X/bsdcompat/include/nmxkpi_prelude.h \
   -include $A/include/nmx_snd_compat.h \
-  -I$A/include -I$A/gen -I$X/bsdcompat/include -I$KF -idirafter $F \
+  -I$A/include -I$A/xnuinc -I$A/gen -I$X/bsdcompat/include -I$KF -idirafter $F \
   "$@" -c "$src" -o ${NMX_OBJ:-$A/obj/$(basename "${src%.c}").o}
