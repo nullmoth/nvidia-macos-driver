@@ -17,6 +17,10 @@ codesign --force --runtime-version 15.0.0 --options runtime,library -s - "$APP/C
 xcrun clang -fobjc-arc -O2 -Wall -Wextra -Werror -target x86_64-apple-macos15.0 -isysroot "$SDK" RuntimeCheck/metal_devices.m \
   -framework Foundation -framework Metal -o "$APP/Contents/Resources/nullmoth-metal-devices"
 codesign --force -s - "$APP/Contents/Resources/nullmoth-metal-devices"
+# "Map my GPU": the same separate-process reason as nullmoth-metal-devices (RuntimeCheck/gpumap.m)
+xcrun clang -fobjc-arc -O2 -Wall -Wextra -Werror -target x86_64-apple-macos15.0 -isysroot "$SDK" RuntimeCheck/gpumap.m \
+  -framework Foundation -framework Metal -o "$APP/Contents/Resources/nullmoth-gpumap"
+codesign --force -s - "$APP/Contents/Resources/nullmoth-gpumap"
 chmod 755 "$APP/Contents/Resources/nullmoth-runtime-check.sh"
 chmod 755 "$APP/Contents/Resources/nullmoth-setup.sh"
 # setup runs the installers only when they are executable ([ -x ]); a source file that lost its mode made every app
