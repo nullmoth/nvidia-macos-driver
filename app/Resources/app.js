@@ -191,6 +191,7 @@ $("blon").onclick = () => post({ act: "backlight", on: true, efi: efi() });
 $("bloff").onclick = () => post({ act: "backlight", on: false, efi: efi() });
 $("gpuon").onclick = () => post({ act: "gputest", on: true, efi: efi(), pkg: S.pkg });
 $("gpuoff").onclick = () => post({ act: "gputest", on: false, efi: efi() });
+$("gpumap").onclick = () => { $("gpumap").disabled = true; $("gpumapr").textContent = "Starting..."; post({ act: "gpumap" }); };
 $("priv").onclick = (e) => { e.preventDefault(); post({ act: "privacy" }); };
 $("logs").onclick = (e) => { e.preventDefault(); post({ act: "logs" }); };
 $("src").onclick = (e) => { e.preventDefault(); post({ act: "open", url: "https://github.com/nullmoth/nvidia-macos-driver" }); };
@@ -253,6 +254,7 @@ NM.on = (m) => {
   }
   if (m.event === "usbErr") { $("uerr").textContent = m.data; return; }
   if (m.event === "logsStatus") { $("slr").textContent = m.data.text; return; }
+  if (m.event === "gpumapStatus") { $("gpumapr").textContent = m.data.text; if (m.data.done) $("gpumap").disabled = false; return; }
   if (m.event === "logsDone") {
     const d = m.data;
     $("sl").disabled = false; $("fl").disabled = false;
