@@ -5,6 +5,7 @@
  */
 
 #import <Foundation/Foundation.h>
+#import <IOKit/IOKitLib.h>   // the decode service finds the GPU in the I/O registry (#175)
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -185,8 +186,11 @@ static bool nvmtl_accel_armed(void)
 // rows and a green stripe, and both encoders produced torn pictures. The decoder's only difference is its untiling mode
 // (1 = Blackwell, 0 = classic), so earlier GPUs load libnvdec_h264_t2d.dylib, the same library with mode 0 (51 dB on
 // GA104). The encoders are not registered on them, so apps use Apple's encoder until they are fixed for those GPUs.
+// Set from the I/O registry where no Metal device (and so no Vulkan device name) exists: -1 = unknown, use the name.
+static int g_video_blackwell = -1;
 static bool nvmtl_video_is_blackwell(void)
 {
+    if (g_video_blackwell >= 0) return g_video_blackwell == 1;
     return strstr(nvmtl_vk_device_name(), "NVK GB") != NULL;
 }
 static void nvmtl_nvdec_register(void)
@@ -267,6 +271,43 @@ static void nvmtl_nvdec_hevc_register(void)
         int32_t st = reg('hvc1', (__bridge CFDictionaryRef)info, fac);
         nvlog("nvdec: HEVC decoder %s in %s (VTRegisterVideoDecoderWithInfo -> %d, rating 1000, %s)",
               st ? "NOT registered" : "REGISTERED", me, (int)st, path);
+    });
+}
+// GH #175: with Chrome's GPU sandbox on, decoding runs in VTDecoderXPCService. Metal maps this bundle there (measured
+// on the test Mac 10-16: 25 mappings, no Metal device ever created), but the decoders were registered only when a Metal
+// device came up, so that process never had them and H.264 fell to AppleH264SW. The decoder libraries open NVRM
+// themselves (IOKit; nothing from the Vulkan device), as NVIDIA's own decoder is a per-process capability needing no
+// render device. So in that one process register them at load, telling Blackwell apart by the GPU's PCI device id
+// instead of the Vulkan device name.
+static void nvmtl_nvdec_hevc_register(void);
+__attribute__((constructor)) static void nvmtl_nvdec_in_decode_service(void)
+{
+    const char *me = getprogname();
+    if (!me || strcmp(me, "VTDecoderXPCService") || getenv("NVMTL_NO_NVDEC")) return;
+    // off the loader's thread: the registration dlopens the decoder library
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        uint32_t dev = 0;
+        io_iterator_t it = IO_OBJECT_NULL;
+        if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOPCIDevice"), &it) == KERN_SUCCESS) {
+            for (io_object_t o; !dev && (o = IOIteratorNext(it)); IOObjectRelease(o)) {
+                CFDataRef v = IORegistryEntryCreateCFProperty(o, CFSTR("vendor-id"), kCFAllocatorDefault, 0);
+                CFDataRef c = IORegistryEntryCreateCFProperty(o, CFSTR("class-code"), kCFAllocatorDefault, 0);
+                CFDataRef d = IORegistryEntryCreateCFProperty(o, CFSTR("device-id"), kCFAllocatorDefault, 0);
+                uint32_t vv = 0, cc = 0, dd = 0;
+                if (v && CFDataGetLength(v) >= 4) CFDataGetBytes(v, CFRangeMake(0, 4), (UInt8 *)&vv);
+                if (c && CFDataGetLength(c) >= 4) CFDataGetBytes(c, CFRangeMake(0, 4), (UInt8 *)&cc);
+                if (d && CFDataGetLength(d) >= 4) CFDataGetBytes(d, CFRangeMake(0, 4), (UInt8 *)&dd);
+                if ((vv & 0xffff) == 0x10de && (cc >> 16) == 0x03) dev = dd & 0xffff;
+                if (v) CFRelease(v); if (c) CFRelease(c); if (d) CFRelease(d);
+            }
+            IOObjectRelease(it);
+        }
+        if (!dev) { nvlog("nvdec: no NVIDIA GPU in the I/O registry - not registering in %s", me); return; }
+        g_video_blackwell = dev >= 0x2b00 && dev < 0x3000;   // the GB20x device-id block (RTX 5060 0x2D05, RTX 5080 0x2C02)
+        nvlog("nvdec: decode service, GPU 10de:%04x (%s): registering the decoders at load", dev,
+              g_video_blackwell ? "Blackwell" : "before Blackwell");
+        nvmtl_nvdec_register();
+        nvmtl_nvdec_hevc_register();
     });
 }
 static void nvmtl_nvenc_hevc_register(void)
