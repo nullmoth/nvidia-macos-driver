@@ -186,3 +186,8 @@ pub(crate) fn requires_device_address_model_for_source(
     ir::LlModule::parse_with_stage_meta(&san_ll, kern, entry)
         .is_ok_and(|parsed| emit_tiers::requires_device_address_model(&parsed))
 }
+
+/// See inline::inline_and_forward_object_fields: the retry form of a module that failed as written.
+pub(crate) fn inline_and_forward_object_fields(san_ll: &str) -> Option<String> {
+    inline::inline_and_forward_object_fields(san_ll)
+}

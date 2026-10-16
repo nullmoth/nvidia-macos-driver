@@ -310,7 +310,8 @@ pub(in crate::passes) fn validate_descriptor_binding_classes_with_ray_table(
                 || (binding == crate::reflect::BINDLESS_STORAGE_BINDING && class == DescriptorClass::StorageImage)
                 || (binding == crate::reflect::BINDLESS_UTEXEL_BINDING && class == DescriptorClass::UniformTexelBuffer)
                 || (binding == crate::reflect::BINDLESS_STEXEL_BINDING && class == DescriptorClass::StorageTexelBuffer));
-        if !bindless_heap && (set != layout.set || !allowed) {
+        let input_attachment = set == crate::reflect::INPUT_ATTACHMENT_SET && class == DescriptorClass::InputAttachment && allowed;
+        if !bindless_heap && !input_attachment && (set != layout.set || !allowed) {
             return Err(format!(
                 "descriptor variable {} has class {class:?} at set {set} binding {binding}, outside its ABI band",
                 label(id)

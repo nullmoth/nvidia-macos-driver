@@ -2928,6 +2928,14 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     else {
     if (nvmtl_vk_bind_texture_view(&_cb->_c, NVMTL_SET_FRAGMENT, (uint32_t)i, [nt nvsampleview])) nvlog("setFragmentTexture: bind FAILED");
     nvmtl_vk_bind_storage_view(&_cb->_c, NVMTL_SET_FRAGMENT, (uint32_t)i, nt->_stex ? [nt nvview] : NULL);
+    if (!nt->_stex && (nt.usage & MTLTextureUsageShaderWrite)) {
+        // a fragment shader writing a texture that has no storage view writes the dummy: say which texture, once per shape
+        static NSMutableSet *seen; static os_unfair_lock sl = OS_UNFAIR_LOCK_INIT;
+        NSString *k = [NSString stringWithFormat:@"%lu/%lu/%lu", (unsigned long)nt.pixelFormat, (unsigned long)nt.usage, (unsigned long)nt.textureType];
+        os_unfair_lock_lock(&sl); if (!seen) seen = [NSMutableSet new]; BOOL fresh = ![seen containsObject:k]; if (fresh) [seen addObject:k]; os_unfair_lock_unlock(&sl);
+        if (fresh) nvlog("setFragmentTexture: texture %lu is ShaderWrite but has no storage view (pixelFormat %lu, usage 0x%lx, type %lu, image storage %u) - a fragment write to it goes to the dummy",
+                         (unsigned long)i, (unsigned long)nt.pixelFormat, (unsigned long)nt.usage, (unsigned long)nt.textureType, [nt nvi]->storage);
+    }
     }
 }
 - (void)drawPrimitives:(MTLPrimitiveType)type vertexStart:(NSUInteger)start vertexCount:(NSUInteger)count

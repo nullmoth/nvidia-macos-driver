@@ -188,6 +188,8 @@ pub const BINDLESS_HEAP_SET: u32 = 2;
 pub const BINDLESS_HEAP_BINDING: u32 = 0;
 pub const BINDLESS_SAMPLER_BINDING: u32 = 1;
 pub const BINDLESS_SAMPLER_SLOTS: u32 = 2048;
+/// Descriptor set of [[color(n)]] framebuffer-fetch input attachments (binding 192 + n), apart from the resource sets.
+pub const INPUT_ATTACHMENT_SET: u32 = 3;
 pub const BINDLESS_STORAGE_BINDING: u32 = 2;
 pub const BINDLESS_UTEXEL_BINDING: u32 = 3;
 pub const BINDLESS_STEXEL_BINDING: u32 = 4;

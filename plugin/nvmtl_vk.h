@@ -35,6 +35,7 @@ typedef struct { void *rp; void *pipe; void *layout; int has_depth; uint32_t dfm
     uint64_t shape_identity;
     uint32_t lin;
     uint64_t tbm[2][4]; uint32_t tbany;
+    uint32_t fetch_mask;   /* colour attachments the fragment shader reads ([[color(n)]], set 3 binding 192+n) */
 } nvk_pipeline;
 void nvmtl_vk_pipeline_destroy(nvk_pipeline *p);
 typedef struct { void *pool; nvk_buffer stage; } nvk_queue;
@@ -62,6 +63,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  unsigned nobind, skipped;
                  void *dcache[32]; void *dcachepool; unsigned ndcache;
                  unsigned in_rp, occlusion_reset; uint32_t wseq;
+                 void *fetchview[NVMTL_NCOL];   /* the open pass's colour views, read by [[color(n)]] framebuffer fetch */
                  unsigned direct_sass;   /* recorded a dispatch of compiled machine code: never reuse this pool */
                  void *occlusion_pages; uint32_t occlusion_count;
                  void *timing_pool; nvmtl_gpu_interval timing;

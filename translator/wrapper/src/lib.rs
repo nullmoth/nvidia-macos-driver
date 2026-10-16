@@ -77,6 +77,24 @@ fn formatless_options(ll: &str, st: Stage, caps: u32) -> Option<metal2vulkan::pa
     Some(o)
 }
 fn translate_one(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
+    match translate_one_as_written(ll, st) {
+        Ok(v) => Ok(v),
+        // A module whose pointers (a sampler's address in an argument buffer, a threadgroup array's address) reach their use
+        // only through a local object's fields gets one retry with its helpers inlined and those fields forwarded, and
+        // samplers in argument buffers read from the sampler heap. Only a failure gets here, so a module that translates as
+        // written never changes.
+        Err(e) if e.contains("sampler operand is a pointer") || e.contains("pointer placeholder")
+            || e.contains("missing pointer storage") =>
+        {
+            let Some(retry) = metal2vulkan::inline_and_forward_object_fields(ll) else { return Err(e) };
+            metal2vulkan::with_argument_buffer_samplers(|| translate_one_as_written(&retry, st))
+                .map_err(|e2| format!("{e}; retry with helpers inlined and object fields forwarded: {e2}"))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn translate_one_as_written(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
     let caps = CAPS.load(Ordering::Relaxed);
     if let Some(o) = if caps != 0 { formatless_options(ll, st, caps) } else { None } {
         match metal2vulkan::translate_native_no_retry_constructed_with_options(ll, st, apply_tg(o)) {

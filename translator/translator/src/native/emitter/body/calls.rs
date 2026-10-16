@@ -484,8 +484,8 @@ impl Emitter {
         let (LlValue::Local(name), LlType::Ptr(2)) = (&arg.value, &arg.ty) else {
             return Ok(None);
         };
-        // Opt-in (NVMTL_ARGBUF_SAMPLERS=1) until the helper-inlining half lands: on by default it took over sampler
-        // operands three app modules already translated another way (the test Mac corpus, 10-16: 3 OK -> FAIL).
+        // Only in the retry of a module that failed (crate::with_argument_buffer_samplers) or with NVMTL_ARGBUF_SAMPLERS=1:
+        // on by default it took over sampler operands three app modules already translated another way (the test Mac, 10-16).
         if !crate::reflect::bindless_fixed_fields_on() || !argbuf_samplers_on() {
             return Ok(None);
         }
@@ -1185,6 +1185,5 @@ fn constant_cursor_key(name: &str, definitions: &HashMap<&str, &LlGep>) -> Strin
 }
 
 fn argbuf_samplers_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| matches!(std::env::var("NVMTL_ARGBUF_SAMPLERS").as_deref(), Ok("1")))
+    crate::argument_buffer_samplers_on()
 }

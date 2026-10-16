@@ -850,7 +850,9 @@ pub(super) fn build_stage_input(
                 vec![Operand::StorageClass(StorageClass::UniformConstant)],
             ));
             let binding = required_resource_binding(*pid, resource_binding)?;
-            decorate_binding(&mut ctx.module, var, descriptor_layout.set, binding);
+            // set 3: the driver binds the open pass's colour views there for each fetching draw, apart from the per-draw
+            // resource sets 0/1, so every pipeline of a pass keeps compatible layouts for sets 0-2
+            decorate_binding(&mut ctx.module, var, crate::reflect::INPUT_ATTACHMENT_SET, binding);
             decorate_input_attachment_index(&mut ctx.module, var, color_index);
             ctx.interface_buffer_var(var);
             bindings.push((

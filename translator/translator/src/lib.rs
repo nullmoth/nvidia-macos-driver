@@ -1734,3 +1734,28 @@ entry:
         );
     }
 }
+
+/// The retry form of an AIR module that failed as written: every internal call inlined and pointer fields of local objects
+/// forwarded (see native::inline). None when it would not change the module.
+pub fn inline_and_forward_object_fields(ll: &str) -> Option<String> {
+    native::inline_and_forward_object_fields(ll)
+}
+
+thread_local! {
+    static ARGBUF_SAMPLERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with samplers held in argument buffers read through the sampler heap (the plugin's binding 1), as the retry of
+/// a module that failed without it does. Off otherwise: on by default it took over sampler operands three app modules
+/// already translated another way (the test Mac corpus, 10-16).
+pub fn with_argument_buffer_samplers<R>(f: impl FnOnce() -> R) -> R {
+    ARGBUF_SAMPLERS.with(|c| c.set(true));
+    let r = f();
+    ARGBUF_SAMPLERS.with(|c| c.set(false));
+    r
+}
+
+pub(crate) fn argument_buffer_samplers_on() -> bool {
+    ARGBUF_SAMPLERS.with(|c| c.get())
+        || matches!(std::env::var("NVMTL_ARGBUF_SAMPLERS").as_deref(), Ok("1"))
+}
