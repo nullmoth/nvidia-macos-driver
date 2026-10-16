@@ -1659,6 +1659,11 @@ int thread_call_enter(struct thread_call *call);
 struct NVIopAsync { void *pipe; IOService *fb; IOSurface *s; struct NVRMFlipRequest f; volatile SInt32 busy; struct thread_call *call; };
 static NVIopAsync gIopAs[kNvMaxFB];
 static SInt32 gIopAsyncRefuseRun;
+// WindowServer's next present waits here while the previous asynchronous flip is still on its way to the panel. It
+// waited in IOSleep(1) steps, each overshooting by a millisecond or more - a large slice of a 6.9 ms frame at 144 Hz,
+// where the desktop then ran near half the panel rate. The flip's worker now wakes the waiter when it finishes; the
+// busy flag is still re-read at least every 250 us and the 50 ms bound is unchanged.
+static IOLock *gIopAsLock;
 static bool nvAccelIopAsyncBusy(const void *pipe)
 {
     for (unsigned h = 0; h < kNvMaxFB; h++)
@@ -1693,12 +1698,25 @@ static void nvAccelIopAsyncRun(void *p0, void *)
         ((OSObject *)s)->release();
     }
     __atomic_store_n(&e->busy, 0, __ATOMIC_RELEASE);
+    if (gIopAsLock) { IOLockLock(gIopAsLock); IOLockWakeup(gIopAsLock, (event_t)&e->busy, false); IOLockUnlock(gIopAsLock); }
     _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(e->pipe, nullptr);
 }
 static bool nvAccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSurface *s, const struct NVRMFlipRequest *f)
 {
     NVIopAsync *e = &gIopAs[head];
-    for (unsigned i = 0; i < 50 && __atomic_load_n(&e->busy, __ATOMIC_ACQUIRE); i++) IOSleep(1);
+    if (!gIopAsLock) { IOLock *l = IOLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gIopAsLock)) IOLockFree(l); }
+    if (__atomic_load_n(&e->busy, __ATOMIC_ACQUIRE)) {
+        uint64_t end = 0; clock_interval_to_deadline(50, kMillisecondScale, &end);
+        while (__atomic_load_n(&e->busy, __ATOMIC_ACQUIRE) && mach_absolute_time() < end) {
+            if (!gIopAsLock) { IOSleep(1); continue; }
+            uint64_t next = 0; clock_interval_to_deadline(250, kMicrosecondScale, &next);
+            if (next > end) next = end;
+            IOLockLock(gIopAsLock);
+            if (__atomic_load_n(&e->busy, __ATOMIC_ACQUIRE))
+                IOLockSleepDeadline(gIopAsLock, (event_t)&e->busy, next, THREAD_UNINT);
+            IOLockUnlock(gIopAsLock);
+        }
+    }
     if (__atomic_load_n(&e->busy, __ATOMIC_ACQUIRE)) {
         OSAddAtomic64(1, &gCntIopAsyncDrop);
         return true;
