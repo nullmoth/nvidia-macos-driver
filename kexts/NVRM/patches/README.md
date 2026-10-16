@@ -12,7 +12,7 @@ With the original NVIDIA 610.57.04 Darwin modeset archive and compile commands a
 python3 kexts/NVRM/build-completion-archive.py --vendor /build/vendor/src/nvidia-modeset --output /build/paired-completion
 ```
 
-Link NVRM against the resulting `libnvkms.a`, not the original archive. The script preserves the original archive and replaces only the completion object and release build metadata. Build NVAccel with the matching allocation cookie interface. The release qualification covers macOS 15; macOS 26 requires separate accelerator and runtime qualification.
+Link NVRM against the resulting `libnvkms.a`, not the original archive. The script preserves the original archive and replaces only the completion object and release build metadata. Build NVAccel with the matching allocation cookie interface, once for macOS 15 and once for macOS 26.
 
 ## RM boot-failure cleanup
 
