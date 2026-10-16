@@ -2015,7 +2015,9 @@ static nvk_buffer            g_dummyBuf;
 static nvk_image             g_dummyImg;
 #define NVMTL_BINDLESS_SLOTS      131072
 #define NVMTL_BINDLESS_QUARANTINE 1024
+#define NVMTL_BINDLESS_SAMPLER_SLOTS 2048   /* the translator's reflect::BINDLESS_SAMPLER_SLOTS; slot 0 stays the dummy */
 static VkDescriptorSetLayout g_heapLayout; static VkDescriptorPool g_heapPool; static VkDescriptorSet g_heapSet;
+static int g_heap_sampler_binding;   /* 1 = binding 1 holds samplers (NVMTL_ARGBUF_SAMPLERS=1) */
 static pthread_mutex_t g_heap_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t g_heap_next = 1;
 static uint32_t g_heap_fifo[NVMTL_BINDLESS_SLOTS]; static uint32_t g_heap_fifo_head, g_heap_fifo_n, g_heap_live;
@@ -2254,13 +2256,20 @@ static int ensure_descriptors_locked(void)
     if (g_bindless) {
         VkDescriptorBindingFlags hf = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
                                       VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
-        VkDescriptorSetLayoutBindingFlagsCreateInfo hfi = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO, NULL, 1, &hf };
-        VkDescriptorSetLayoutBinding hb = { 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NVMTL_BINDLESS_SLOTS, VK_SHADER_STAGE_ALL, NULL };
+        // binding 0: sampled images; binding 1: samplers, the translator's BINDLESS_SAMPLER_BINDING (a sampler an argument
+        // buffer holds is read as the slot in the low word of its gpuResourceID, nvmtl_vk_bindless_sampler_slot)
+        // Opt-in (NVMTL_ARGBUF_SAMPLERS=1): the extra binding is not yet proven on every NVK device's update-after-bind
+        // sampler limit, and a heap that fails to create turns every bindless texture off.
+        const char *abs_ = getenv("NVMTL_ARGBUF_SAMPLERS"); const uint32_t hnb = (abs_ && abs_[0] == '1') ? 2u : 1u;
+        const VkDescriptorBindingFlags hfs[2] = { hf, hf };
+        VkDescriptorSetLayoutBindingFlagsCreateInfo hfi = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO, NULL, hnb, hfs };
+        VkDescriptorSetLayoutBinding hb[2] = { { 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NVMTL_BINDLESS_SLOTS, VK_SHADER_STAGE_ALL, NULL },
+                                               { 1, VK_DESCRIPTOR_TYPE_SAMPLER, NVMTL_BINDLESS_SAMPLER_SLOTS, VK_SHADER_STAGE_ALL, NULL } };
         VkDescriptorSetLayoutCreateInfo hli = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, &hfi,
-                                                VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT, 1, &hb };
-        VkDescriptorPoolSize hs = { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NVMTL_BINDLESS_SLOTS };
+                                                VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT, hnb, hb };
+        VkDescriptorPoolSize hs[2] = { { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NVMTL_BINDLESS_SLOTS }, { VK_DESCRIPTOR_TYPE_SAMPLER, NVMTL_BINDLESS_SAMPLER_SLOTS } };
         VkDescriptorPoolCreateInfo hpi = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL,
-                                           VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT, 1, 1, &hs };
+                                           VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT, 1, hnb, hs };
         VkDescriptorSetLayout hl = VK_NULL_HANDLE; VkDescriptorPool hp = VK_NULL_HANDLE; VkDescriptorSet hset = VK_NULL_HANDLE;
         VkResult hr = pvkCreateDescriptorSetLayout(g_dev, &hli, NULL, &hl);
         if (hr == VK_SUCCESS) hr = pvkCreateDescriptorPool(g_dev, &hpi, NULL, &hp);
@@ -2273,6 +2282,12 @@ static int ensure_descriptors_locked(void)
             VkWriteDescriptorSet hw = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, hset, 0, 0, NVMTL_BINDLESS_SLOTS,
                                         VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, fill, NULL, NULL };
             pvkUpdateDescriptorSets(g_dev, 1, &hw, 0, NULL);
+            static VkDescriptorImageInfo sfill[NVMTL_BINDLESS_SAMPLER_SLOTS];
+            for (uint32_t k = 0; k < NVMTL_BINDLESS_SAMPLER_SLOTS; k++)
+                sfill[k] = (VkDescriptorImageInfo){ (VkSampler)g_dummySampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+            VkWriteDescriptorSet sw = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, hset, 1, 0, NVMTL_BINDLESS_SAMPLER_SLOTS,
+                                        VK_DESCRIPTOR_TYPE_SAMPLER, sfill, NULL, NULL };
+            if (hnb == 2) { pvkUpdateDescriptorSets(g_dev, 1, &sw, 0, NULL); g_heap_sampler_binding = 1; }
             g_heapLayout = hl; g_heapPool = hp; g_heapSet = hset;
             nvlog("vk: BINDLESS heap ready - set 2, %d sampled images, every slot the dummy until a texture asks for its gpuResourceID", NVMTL_BINDLESS_SLOTS);
         } else {
@@ -2302,6 +2317,26 @@ static void nvmtl_heap_write_locked(uint32_t slot, void *view)
     VkDescriptorImageInfo ii = { VK_NULL_HANDLE, (VkImageView)view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 0, slot, 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ii, NULL, NULL };
     pvkUpdateDescriptorSets(g_dev, 1, &w, 0, NULL);
+}
+// A heap slot for a sampler an argument buffer carries (Metal argument buffers hold samplers by gpuResourceID). Samplers
+// come from nvmtl_sampler_acquire's cache, so one VkSampler per distinct state: slots are kept for the process and shared
+// by every sampler object with that state. 0 = no slot (no heap, or 2047 distinct states already placed).
+static void *g_heap_samplers[NVMTL_BINDLESS_SAMPLER_SLOTS]; static uint32_t g_heap_sampler_n = 1;
+uint32_t nvmtl_vk_bindless_sampler_slot(void *vksampler)
+{
+    if (!vksampler || ensure_descriptors() || !g_heapSet || !g_heap_sampler_binding) return 0;
+    uint32_t slot = 0;
+    pthread_mutex_lock(&g_heap_lock);
+    for (uint32_t k = 1; k < g_heap_sampler_n; k++) if (g_heap_samplers[k] == vksampler) { slot = k; break; }
+    if (!slot && g_heap_sampler_n < NVMTL_BINDLESS_SAMPLER_SLOTS) {
+        slot = g_heap_sampler_n++; g_heap_samplers[slot] = vksampler;
+        VkDescriptorImageInfo ii = { (VkSampler)vksampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+        VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 1, slot, 1, VK_DESCRIPTOR_TYPE_SAMPLER, &ii, NULL, NULL };
+        pvkUpdateDescriptorSets(g_dev, 1, &w, 0, NULL);
+    }
+    pthread_mutex_unlock(&g_heap_lock);
+    if (!slot) { static int said; if (!said++) nvlog("vk: BINDLESS sampler heap FULL (%d states) - an argument-buffer sampler reads the default", NVMTL_BINDLESS_SAMPLER_SLOTS - 1); }
+    return slot;
 }
 uint32_t nvmtl_vk_bindless_put(void *view)
 {
@@ -4619,7 +4654,11 @@ int nvmtl_vk_cmd_attachment_view_n(nvk_cmdbuf *c, nvk_image *img, int depth, uin
     if (level >= mips || slice + nlayers > layers) {
         nvlog("encoder: par1 attachment level %u slices [%u,%u) is outside the image (%u level(s), %u slice(s)) — pass REFUSED", level, slice, slice + nlayers, mips, layers);
         return -1; }
-    if (img->mtl_type == 7) { nvlog("encoder: par1 a %s 3D attachment is not carried — pass REFUSED", nlayers > 1 ? "layered" : "depth"); return -1; }
+    // A layered colour attachment over a 3D texture's depth planes (Metal renderTargetArrayLength > 1 on a 3D texture; Blender
+    // Eevee's volume passes) is a 2D-array view of the 3D image's level 0, which Vulkan allows for an image created
+    // 2D_ARRAY_COMPATIBLE (all our 3D colour images, nvmtl_vk_image_create). Other levels have fewer planes than `layers`.
+    const int vol_layers = img->mtl_type == 7 && !depth && !level && (img->vkflags & VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT);
+    if (img->mtl_type == 7 && !vol_layers) { nvlog("encoder: par1 a %s 3D attachment is not carried — pass REFUSED", depth ? "depth" : level ? "non-zero-level layered" : "layered (not 2D_ARRAY_COMPATIBLE)"); return -1; }
     *w = img->w >> level ? img->w >> level : 1u; *h = img->h >> level ? img->h >> level : 1u;
     void *v = NULL;
     if (depth) {
