@@ -890,7 +890,7 @@ bool NVRM::placeLargeBar1()
     // -nvrmsmallbar: a 256 MB BAR1, as on a card without Resizable BAR (every GTX 16 and most Turing boards), placed by
     // the same path as a large one. Lets a ReBAR card run the small-BAR paths (surface budget, copy path, scan-out model)
     // for testing. It used to leave BAR1 to IOPCIFamily, which on a ReBAR card can leave BAR1 with no address at all
-    // (the test Mac, 10-16: the nub held BAR0 and BAR3 only), so the switch never showed a small BAR1.
+    // (measured on an RTX 5060: the nub held BAR0 and BAR3 only), so the switch never showed a small BAR1.
     bool smallBar = false;
     { char nb[8] = { 0 }; smallBar = PE_parse_boot_argn("-nvrmsmallbar", nb, sizeof nb); }
     UInt32 cap = 0;
@@ -936,7 +936,7 @@ bool NVRM::placeLargeBar1()
             // A 256 MB Turing / GTX 16 BAR1 the firmware placed over the boot screen: nothing to resize, but it still moves,
             // at its own size, by the path below. Left in place it kept the copy path (no zero-copy flip, tearing,
             // WindowServer waits; #215 #122 #196) and its VRAM shared addresses with the console. The same placement at
-            // 256 MB runs zero-copy flips (the test Mac with -nvrmsmallbar, 10-16: 1,058 flips, none refused for VRAM).
+            // 256 MB runs zero-copy flips (an RTX 5060 with -nvrmsmallbar: 1,058 flips, none refused for VRAM).
             const UInt64 cur = ((UInt64)fPCI->configRead32(0x18) << 32) | (fPCI->configRead32(0x14) & ~0xFULL);
             PE_Video cv; bzero(&cv, sizeof cv);
             const UInt64 con = (getPlatform() && getPlatform()->getConsoleInfo(&cv) == kIOReturnSuccess) ? ((UInt64)cv.v_baseAddr & ~3ull) : 0;
