@@ -41,5 +41,44 @@ class UpgradeGuard(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), 'wait' if waiting else 'finish')
 
+    # the test Mac 10-15: prepare parked the driver in the internal EFI's config, cancel's detection picked the 1401 stick,
+    # and the next start came up parked. Cancel and finish must change back the config prepare recorded.
+    def test_prepare_records_the_config_it_changed(self):
+        prep = source[source.index('  do_prepare() {'):source.index('  case "$UPD" in\n  prepare)')]
+        self.assertIn('CFGPART=%s\\nCFGREL=%s', prep)
+        self.assertIn('"$cpart" "$OCREL" > "$PEND"', prep)
+
+    def back_block(self):
+        a = source.index('    if [ -n "${CFGPART:-}" ] && [ -n "${CFGREL:-}" ]; then')
+        return source[a:source.index('    if [ "$UPD" = finish ] && [ "${FROM:-}" = "$MAJ" ]', a)]
+
+    def run_back(self, cfgpart, mounted):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / 'EFI/BOOT').mkdir(parents=True); (Path(t) / 'EFI/BOOT/config.plist').write_text('x')
+            script = ('note() { echo "NOTE $*"; }; stop() { echo "STOP $*"; exit 1; }\n'
+                      f'mount_efi() {{ [ "$1" = PART-INTERNAL ] && [ {int(mounted)} = 1 ] && MOUNT_POINT="{t}"; }}\n'
+                      f'C=/Volumes/1401/EFI/OC/config.plist; CFGPART={cfgpart}; CFGREL=EFI/BOOT\n'
+                      + self.back_block() + 'echo "C=$C"\n')
+            r = subprocess.run(['/bin/bash', '-c', script], capture_output=True, text=True)
+            return r.returncode, r.stdout.replace(t, '<internal>')
+
+    def test_cancel_uses_the_recorded_config_not_detection(self):
+        rc, out = self.run_back('PART-INTERNAL', True)
+        self.assertEqual(rc, 0, out)
+        self.assertIn('C=<internal>/EFI/BOOT/config.plist', out)
+        self.assertIn('not /Volumes/1401/EFI/OC/config.plist', out)
+
+    def test_cancel_stops_when_that_partition_is_gone(self):
+        rc, out = self.run_back('PART-INTERNAL', False)
+        self.assertNotEqual(rc, 0)
+        self.assertIn('STOP the OpenCore partition the Tahoe preparation changed', out)
+        self.assertNotIn('C=', out)
+
+    def test_an_old_record_without_the_partition_keeps_detection(self):
+        rc, out = self.run_back('', True)
+        self.assertEqual(rc, 0)
+        self.assertIn('C=/Volumes/1401/EFI/OC/config.plist', out)
+
 if __name__ == '__main__':
     unittest.main()
