@@ -1118,6 +1118,7 @@ fn finish_module(
     native::construct_cfg_functions_module(&mut out, &cfg_construction_functions)
         .map_err(FinishFailure::cfg)?;
     native::construct_physical_atomic_pointer_lvalues_module(&mut out);
+    native::split_mismatched_copy_memory_module(&mut out);
     passes::drop_unreferenced_global_variables(&mut out);
     native::prune_unused_null_and_undef_constants_module(&mut out);
     if construction == FinishConstruction::RawRelooper {

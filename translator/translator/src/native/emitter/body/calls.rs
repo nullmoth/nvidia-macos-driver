@@ -472,6 +472,46 @@ impl Emitter {
         Ok(())
     }
 
+    /// A sampler operand that is the address of a sampler inside a bound buffer (a Metal argument buffer holding samplers,
+    /// `array<sampler, N>` in a struct: Blender binds 17 that way). The sampler there is its gpuResourceID, whose low word
+    /// is the sampler-heap slot (the plugin's nvmtl_resid_for_sampler), so the operand becomes a heap load the passes
+    /// resolve (`device_handle_heap_loads`). None for every other operand.
+    fn argument_buffer_sampler_arg_id(
+        &mut self,
+        arg: &TypedValue,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<Option<Word>, String> {
+        let (LlValue::Local(name), LlType::Ptr(2)) = (&arg.value, &arg.ty) else {
+            return Ok(None);
+        };
+        // Opt-in (NVMTL_ARGBUF_SAMPLERS=1) until the helper-inlining half lands: on by default it took over sampler
+        // operands three app modules already translated another way (the test Mac corpus, 10-16: 3 OK -> FAIL).
+        if !crate::reflect::bindless_fixed_fields_on() || !argbuf_samplers_on() {
+            return Ok(None);
+        }
+        let Some(raw) = self.raw_offsets.get(name).cloned() else {
+            return Ok(None);
+        };
+        let low = self.emit_raw_word_load_for_access(&raw, 0, Some(8), instructions)?;
+        let mask = self.const_uint(crate::reflect::BINDLESS_SAMPLER_SLOTS - 1)?;
+        let u32_ty = self.type_id(&LlType::Int(32))?;
+        let slot = self.fresh();
+        instructions.push(Self::inst(
+            Op::BitwiseAnd,
+            Some(u32_ty),
+            Some(slot),
+            vec![Operand::IdRef(low), Operand::IdRef(mask)],
+        ));
+        let sampler_ptr_ty = self.type_id(&arg.ty)?;
+        let id = self.fresh();
+        // a placeholder of the operand's type; the passes replace every use of `id` with the heap sampler
+        instructions.push(Self::inst(Op::Undef, Some(sampler_ptr_ty), Some(id), vec![]));
+        self.emit_sidecar
+            .device_handle_heap_loads
+            .push(crate::emit_sidecar::DeviceHandleHeapLoad { id, slot, sampler: true });
+        Ok(Some(id))
+    }
+
     pub(in crate::native::emitter) fn function_call_arg_ids(
         &mut self,
         call: &LlCall,
@@ -485,8 +525,15 @@ impl Emitter {
             .map(|function| function.params.clone())
             .unwrap_or_default();
         if callee_params.is_empty() {
+            let texture_op = super::super::functions::is_air_texture_operation(&call.callee);
             let mut ids = Vec::with_capacity(call.args.len());
             for arg in &call.args {
+                if texture_op {
+                    if let Some(id) = self.argument_buffer_sampler_arg_id(arg, instructions)? {
+                        ids.push(id);
+                        continue;
+                    }
+                }
                 ids.push(self.value_id_in(&arg.value, &arg.ty, instructions)?);
             }
             return Ok(ids);
@@ -1135,4 +1182,9 @@ fn constant_cursor_key(name: &str, definitions: &HashMap<&str, &LlGep>) -> Strin
             .map(|index| &index.value)
             .collect::<Vec<_>>()
     )
+}
+
+fn argbuf_samplers_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| matches!(std::env::var("NVMTL_ARGBUF_SAMPLERS").as_deref(), Ok("1")))
 }

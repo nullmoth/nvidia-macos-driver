@@ -150,6 +150,18 @@ pub(crate) fn construct_opaque_image_selects_module(module: &mut Module) -> bool
     changed
 }
 
+pub(crate) fn split_mismatched_copy_memory_module(module: &mut Module) -> bool {
+    copy_memory_logical::split_mismatched_copy_memory(module)
+}
+
+pub(crate) fn construct_atomic_storage_image_formats_module(module: &mut Module) -> bool {
+    let changed = atomic_image_format::construct_atomic_storage_image_formats(module);
+    if changed {
+        add_native_module_capabilities(module);
+    }
+    changed
+}
+
 pub(crate) fn construct_workgroup_atomic_floats_module(module: &mut Module) -> bool {
     let changed = wg_atomic::construct_workgroup_atomic_floats(module);
     if changed {

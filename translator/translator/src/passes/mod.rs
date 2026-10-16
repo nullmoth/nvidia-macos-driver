@@ -2934,6 +2934,7 @@ pub(crate) fn transform_with_options_and_sidecar(
         .collect::<HashSet<_>>();
     crate::native::eliminate_dead_pointer_values_module(&mut ctx.module, &preserved_pointer_facts);
     crate::native::construct_workgroup_atomic_floats_module(&mut ctx.module);
+    crate::native::construct_atomic_storage_image_formats_module(&mut ctx.module);
     crate::native::close_private_vector_word_views_module(&mut ctx.module);
     if let Some(address_table) =
         crate::native::construct_interface_cross_binding_pointer_phis_module(

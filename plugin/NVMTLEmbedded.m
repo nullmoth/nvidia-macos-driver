@@ -44,7 +44,21 @@ static id nvmtl_resid_lookup(uint64_t token)
 }
 
 uint64_t nvmtl_resid_for_texture(id t) { return nvmtl_resid_assign(t, 0, nvmtl_vk_bindless_put([(NVMTLTexture *)t nvsampleview])); }
-uint64_t nvmtl_resid_for_sampler(id s) { return nvmtl_resid_assign(s, NVMTL_RESID_SAMPLER, 0); }
+// A sampler's gpuResourceID carries its bindless heap slot in the low 32 bits (what a shader reading an argument buffer
+// indexes the sampler heap with) and a sequence number above them, so every sampler object keeps a unique token.
+uint64_t nvmtl_resid_for_sampler(id s)
+{
+    const uint32_t slot = nvmtl_vk_bindless_sampler_slot(((NVMTLSamplerState *)s)->_s.s);
+    if (!slot) return nvmtl_resid_assign(s, NVMTL_RESID_SAMPLER, 0);
+    os_unfair_lock_lock(&nvmtl_resid_lock);
+    if (!nvmtl_resid_map) nvmtl_resid_map = [[NSMapTable alloc]
+        initWithKeyOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsIntegerPersonality
+        valueOptions:NSPointerFunctionsWeakMemory capacity:0];
+    const uint64_t token = NVMTL_RESID_SAMPLER | ((++nvmtl_resid_seq & 0x3fffffffull) << 32) | slot;
+    [nvmtl_resid_map setObject:s forKey:(__bridge id)(void *)(uintptr_t)token];
+    os_unfair_lock_unlock(&nvmtl_resid_lock);
+    return token;
+}
 void nvmtl_resid_texture_gone(uint64_t token) { if (token & NVMTL_RESID_HEAP) nvmtl_vk_bindless_drop((uint32_t)(token & 0xffffffffu)); }
 
 static NSUInteger nvmtl_ss_enum(NSDictionary *st, NSString *key, NSDictionary<NSString *, NSNumber *> *map, NSUInteger fallback, BOOL *bad)

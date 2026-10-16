@@ -92,6 +92,7 @@ fn emit_vulkan_spirv_inner(
     let mut source = san_ll;
     let mut spliced_calls = 0usize;
     let mut first_failure = None;
+    let mut inlined_all = false;
     for _ in 0..MAX_CURSOR_CALL_SPLICES {
         let failure = match emit_lowered_air_text(
             &source,
@@ -104,7 +105,13 @@ fn emit_vulkan_spirv_inner(
             Ok(emitted) => return Ok(emitted),
             Err(failure) => failure,
         };
-        let Some(spliced) = (if failure.rejected.cursor_call_sites.is_empty() {
+        let whole_inline = failure.rejected.cursor_call_sites.is_empty()
+            && !inlined_all
+            && failure.error.contains("an unmodeled pointer placeholder");
+        let Some(spliced) = (if whole_inline {
+            inlined_all = true;
+            inline::inline_all_internal_calls(&source)
+        } else if failure.rejected.cursor_call_sites.is_empty() {
             None
         } else {
             inline::inline_cursor_call_sites(&source, &failure.rejected.cursor_call_sites)
@@ -120,7 +127,7 @@ fn emit_vulkan_spirv_inner(
                 },
             });
         };
-        spliced_calls += failure.rejected.cursor_call_sites.len();
+        spliced_calls += failure.rejected.cursor_call_sites.len().max(usize::from(whole_inline));
         first_failure.get_or_insert(failure.error);
         if retry_debug {
             eprintln!(
