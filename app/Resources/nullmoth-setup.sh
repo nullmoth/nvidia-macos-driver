@@ -673,14 +673,15 @@ PKG=$PKGDIR/$(basename "$PKG")
 got=$(shasum -a 256 "$PKG" | awk '{print $1}')
 [ "$got" = "$SHA" ] || stop "package checksum $got does not match $SHA - download it again"
 ok "package matches its SHA-256"
-INSTALLER="$(cd "$(dirname "$0")" && pwd)/nullmoth-install.sh"
-[ -x "$INSTALLER" ] || stop "the audited installer is missing from the app"
+# The driver installs with the package's own install.sh, uninstall.sh and runtime checker: the package is the one
+# whose SHA-256 was just checked against the pin, so they are exactly the driver's own, for this driver version (an app
+# that carried its own copies was tied to one driver version).
 [ -n "$TOOL" ] && [ -f "$TOOL" ] || stop "the boot-picker tool is missing from the app"
 # This must precede EFI discovery/copy, SIP edits and driver staging.
 T=$(mktemp -d /var/tmp/nullmoth.XXXX) || stop "could not create runtime preflight directory"
 tar -xzf "$PKG" -C "$T" || stop "could not unpack the package for runtime compatibility checking"
-RUNTIME_PREFLIGHT="$(dirname "$INSTALLER")/nullmoth-runtime-check.sh"
-[ -x "$RUNTIME_PREFLIGHT" ] || stop "the runtime compatibility checker is missing from the app"
+RUNTIME_PREFLIGHT="$T/pkgroot/nullmoth-runtime-check.sh"
+[ -x "$RUNTIME_PREFLIGHT" ] || stop "the package has no runtime compatibility checker"
 /bin/bash "$RUNTIME_PREFLIGHT" "$T/pkgroot" "$(sw_vers -productVersion)" || stop "the userland runtime cannot load on this macOS version; EFI and driver files were not changed"
 rm -rf "$T"; T=""
 fi
@@ -1179,7 +1180,7 @@ if [ $DRY = 0 ]; then
   T=$(mktemp -d /var/tmp/nullmoth.XXXX)
   tar -xzf "$PKG" -C "$T" || stop "could not unpack the package"
   [ -x "$T/pkgroot/install.sh" ] || stop "the package has no install.sh"
-  out=$(CHECK=1 /bin/bash "$INSTALLER" --payload "$T/pkgroot" 2>&1); rc=$?
+  out=$(CHECK=1 /bin/bash "$T/pkgroot/install.sh" --payload "$T/pkgroot" 2>&1); rc=$?
   echo "$out" | sed -E '/^$/d;s/^== /NOTE /;s/^   ok  /NOTE /;s/^   STOP: /STOP /;s/^   NOTE: /NOTE /'
   [ "$rc" = 0 ] || stop "the driver test build failed (exit $rc) - OpenCore and macOS were not changed"
   rm -rf "$T"; T=""
@@ -1459,8 +1460,8 @@ step "Installing the driver"
 T=$(mktemp -d /var/tmp/nullmoth.XXXX)
 tar -xzf "$PKG" -C "$T" || stop "could not unpack the package"
 [ -x "$T/pkgroot/install.sh" ] || stop "the package has no install.sh"
-if [ $DRY = 1 ]; then out=$(CHECK=1 /bin/bash "$INSTALLER" --payload "$T/pkgroot" 2>&1); rc=$?
-else out=$(/bin/bash "$INSTALLER" --payload "$T/pkgroot" 2>&1); rc=$?; fi
+if [ $DRY = 1 ]; then out=$(CHECK=1 /bin/bash "$T/pkgroot/install.sh" --payload "$T/pkgroot" 2>&1); rc=$?
+else out=$(/bin/bash "$T/pkgroot/install.sh" --payload "$T/pkgroot" 2>&1); rc=$?; fi
 echo "$out" | sed -E '/^$/d;s/^== /NOTE /;s/^   ok  /NOTE /;s/^   STOP: /STOP /;s/^   NOTE: /NOTE /'
 if [ "$rc" != 0 ]; then
   [ $DRY = 0 ] && [ -n "${BKC:-}" ] && [ -f "$BKC" ] && cp -p "$BKC" "$C" && note "OpenCore config put back as it was before"
@@ -1472,7 +1473,7 @@ if [ "$rc" != 0 ]; then
 fi
 if [ $DRY = 1 ]; then ok "dry run: the driver would install cleanly (nothing was changed)"; cleanup; echo "RESULT ok"; exit 0; fi
 
-UNINSTALLER="$(dirname "$INSTALLER")/nullmoth-uninstall.sh"
+UNINSTALLER="$T/pkgroot/uninstall.sh"
 [ -x "$UNINSTALLER" ] && mkdir -p "$ST" && cp "$UNINSTALLER" "$ST/uninstall.sh" && chmod 755 "$ST/uninstall.sh" || stop "could not save the audited recovery uninstaller"
 DBK=$(echo "$out" | sed -n 's/^Undo: sudo .\/uninstall.sh //p' | tail -1)
 printf '%s=%q\n' DRIVER_BACKUP "$DBK" >> "$STATE" || stop "could not record the driver backup"
