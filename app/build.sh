@@ -47,8 +47,8 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>CFBundleName</key><string>1401</string>
 <key>CFBundleDisplayName</key><string>1401</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>2.0.3</string>
-<key>CFBundleVersion</key><string>83</string>
+<key>CFBundleShortVersionString</key><string>2.0.4</string>
+<key>CFBundleVersion</key><string>87</string>
 <key>LSMinimumSystemVersion</key><string>15.0</string>
 <key>NSHumanReadableCopyright</key><string>© 2026 NullMoth Systems</string>
 <key>NSHighResolutionCapable</key><true/>
