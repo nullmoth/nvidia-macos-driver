@@ -231,17 +231,6 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     NvU64 fScanLogPhys = 0; NvU32 fScanLogW = 0, fScanLogH = 0, fScanLogPitch = 0;  // last nvScanoutInfo answer logged
     IODeviceMemory *fConsMem = nullptr; IOMemoryMap *fConsMap = nullptr;
     void *fConsKva = nullptr; NvU64 fConsPhys = 0, fConsSize = 0; NvU32 fConsPitch = 0;
-    // The centre of the boot image (the logo the firmware screen showed: NullMoth's, or Apple's when it is turned off),
-    // kept so it can be painted again after IOFramebuffer's own boot drawing (IOFramebufferBootInitFB, from postOpen and
-    // doSetup) puts its built-in Apple logo on this surface. Freed once WindowServer owns the screen.
-    uint32_t *fLogoKeep = nullptr; uint32_t fLogoX = 0, fLogoY = 0, fLogoW = 0, fLogoH = 0;
-    // 10-11 logo hunt: the logo area's colours, from the image taken over and from the live screen after open (3 s, 8 s,
-    // 20 s), so the log says whether the white Apple logo arrived before the takeover or was drawn over the moth later.
-    thread_call_t fLogoWatch = nullptr; unsigned fLogoWatchN = 0; unsigned long fLogoLastWhite = ~0ul; uint32_t fLogoWX = 0, fLogoWY = 0, fLogoWW = 0, fLogoWH = 0;
-    void logoStats(const char *when, const volatile uint32_t *base, uint32_t pitchPx, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h);
-    static void logoWatchFire(thread_call_param_t p0, thread_call_param_t);
-    void keepBootLogo(const uint32_t *img, uint32_t iw, uint32_t ih, uint32_t ipitch, uint32_t dx, uint32_t dy, uint32_t sx, uint32_t sy);
-    void repaintBootLogo(const char *why);
     NvU64 fVtFbBase = 0, fVtFbSize = 0;
     void *fUserPhys = nullptr;
     IOService *fPciNub = nullptr;
@@ -386,22 +375,8 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
 public:
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
-    // Setting IOFBNeedsRefresh false in open() did not hold - by the time WindowServer
-    // read it ("device_preserves_framebuffer: needs_refresh = YES", 0.3 s later) it was Yes again and WindowServer drew
-    // the white Apple logo over the NullMoth one. While the boot image is held, every write of Yes is turned into No here,
-    // where all of IORegistryEntry's setProperty forms end up.
-    using IOFramebuffer::setProperty;
-    bool setProperty(const OSSymbol *key, OSObject *value) override {
-        if (fLogoKeep && key && value == kOSBooleanTrue && key->isEqualTo(kIOFBNeedsRefreshKey)) {
-            if (!fRefreshHeld++) FBLOG("boot screen: IOFBNeedsRefresh = Yes held at No (the boot image is on screen)");
-            value = kOSBooleanFalse;
-        }
-        return IOFramebuffer::setProperty(key, value);
-    }
-    unsigned fRefreshHeld = 0;
     void free() override;
     IOReturn enableController() override;
-    IOReturn open() override;
     const char *getPixelFormats() override { return kPixelFormats; }
     // macOS builds its mode list from getDisplayModes BEFORE it calls setDetailedTimings, and never re-reads it: a
     // mode added only in setDetailedTimings never reached WindowServer (36 added, 0 shown). So the
@@ -1129,7 +1104,6 @@ bool NVRMNVDAFramebuffer::kapiInit()
                 for (uint32_t x = dx + cw; x < pitchPx; x++) row[x] = bg;
             }
             painted = true;
-            keepBootLogo((const uint32_t *)img, dims[0], dims[1], dims[2], dx, dy, sx, sy);
             FBLOG("boot screen: head 0 painted the %ux%u boot image (pitch %u) centred on %ux%u", dims[0], dims[1], dims[2], fW, fH);
         } else {
             FBLOG("boot screen: NVRM had none (0x%x, provider NVRM %s) — black takeover", r, rm ? "found" : "NOT found");
@@ -1141,102 +1115,6 @@ bool NVRMNVDAFramebuffer::kapiInit()
     return true;
 }
 
-void NVRMNVDAFramebuffer::logoStats(const char *when, const volatile uint32_t *base, uint32_t pitchPx, uint32_t x0,
-                                    uint32_t y0, uint32_t w, uint32_t h)
-{
-    // white = all three channels >= 0xE0; colour = any channel differs from the corner by > 0x20 and not white
-    if (!base || !w || !h) return;
-    const uint32_t bg = base[(size_t)y0 * pitchPx + x0] & 0xffffff;
-    unsigned long white = 0, colour = 0, n = 0; unsigned long long sr = 0, sg = 0, sb = 0;
-    for (uint32_t y = 0; y < h; y += 2) for (uint32_t x = 0; x < w; x += 2) {
-        const uint32_t v = base[(size_t)(y0 + y) * pitchPx + x0 + x] & 0xffffff;
-        const uint32_t r = (v >> 16) & 0xff, g = (v >> 8) & 0xff, b = v & 0xff;
-        n++; sr += r; sg += g; sb += b;
-        if (r >= 0xE0 && g >= 0xE0 && b >= 0xE0) white++;
-        else { int dr = (int)r - (int)((bg >> 16) & 0xff), dg = (int)g - (int)((bg >> 8) & 0xff), db = (int)b - (int)(bg & 0xff);
-               if (dr > 0x20 || dr < -0x20 || dg > 0x20 || dg < -0x20 || db > 0x20 || db < -0x20) colour++; }
-    }
-    FBLOG("logo area %s: %ux%u at %u,%u bg 0x%06x | white %lu colour %lu of %lu samples | mean rgb %llu,%llu,%llu",
-          when, w, h, x0, y0, bg, white, colour, n, n ? sr / n : 0, n ? sg / n : 0, n ? sb / n : 0);
-}
-void NVRMNVDAFramebuffer::logoWatchFire(thread_call_param_t p0, thread_call_param_t)
-{
-    NVRMNVDAFramebuffer *me = (NVRMNVDAFramebuffer *)p0;
-    NVRMCallReference callReference(me);
-    if (OSAddAtomic(0, &me->fStopping) || !me->fKva || !me->fPitch) return;
-    // 25 samples 200 ms apart (0.2-5 s after open), each logged only when the logo area changed, then 8 s and 20 s
-    const unsigned n = me->fLogoWatchN;
-    const unsigned ms = n < 25 ? (n + 1) * 200 : (n == 25 ? 8000 : 20000);
-    const volatile uint32_t *base = (const volatile uint32_t *)me->fKva; const uint32_t pp = me->fPitch / 4;
-    unsigned long white = 0;
-    for (uint32_t y = 0; y < me->fLogoWH; y += 2) for (uint32_t x = 0; x < me->fLogoWW; x += 2) {
-        const uint32_t v = base[(size_t)(me->fLogoWY + y) * pp + me->fLogoWX + x];
-        if ((v & 0xE0E0E0) == 0xE0E0E0) white++;
-    }
-    if (n == 0 || white != me->fLogoLastWhite || n >= 25) {
-        char when[40]; snprintf(when, sizeof when, "live %u ms after open", ms);
-        me->logoStats(when, base, pp, me->fLogoWX, me->fLogoWY, me->fLogoWW, me->fLogoWH);
-    }
-    me->fLogoLastWhite = white;
-    if (++me->fLogoWatchN >= 27) return;
-    const unsigned next = me->fLogoWatchN < 25 ? 200 : (me->fLogoWatchN == 25 ? 3000 : 12000);
-    uint64_t d; clock_interval_to_deadline(next, kMillisecondScale, &d);
-    me->scheduleCall(me->fLogoWatch, d);
-}
-void NVRMNVDAFramebuffer::keepBootLogo(const uint32_t *img, uint32_t iw, uint32_t ih, uint32_t ipitch,
-                                       uint32_t dx, uint32_t dy, uint32_t sx, uint32_t sy)
-{
-    // the middle of the boot image, at most 512x512: every boot logo (Apple's 84x103/168x206, NullMoth's 144x180/288x360)
-    const uint32_t cw = iw < fW ? iw : fW, ch = ih < fH ? ih : fH;
-    const uint32_t w = cw < 512 ? cw : 512, h = ch < 512 ? ch : 512;
-    if (!w || !h) return;
-    uint32_t *keep = IONew(uint32_t, (size_t)w * h);
-    if (!keep) return;
-    const uint32_t ox = (cw - w) / 2, oy = (ch - h) / 2;
-    for (uint32_t y = 0; y < h; y++) {
-        const uint32_t *srow = (const uint32_t *)((const uint8_t *)img + (NvU64)(sy + oy + y) * ipitch) + sx + ox;
-        for (uint32_t x = 0; x < w; x++) keep[(size_t)y * w + x] = srow[x];
-    }
-    if (fLogoKeep) IODelete(fLogoKeep, uint32_t, (size_t)fLogoW * fLogoH);
-    fLogoKeep = keep; fLogoW = w; fLogoH = h; fLogoX = dx + ox; fLogoY = dy + oy;
-    fLogoWX = fLogoX; fLogoWY = fLogoY; fLogoWW = w; fLogoWH = h;
-    logoStats("taken over (the screen at the driver's takeover)", keep, w, 0, 0, w, h);
-}
-void NVRMNVDAFramebuffer::repaintBootLogo(const char *why)
-{
-    if (!fLogoKeep || !fKva || !fPitch) return;
-    volatile uint32_t *px = (volatile uint32_t *)fKva;
-    const uint32_t pitchPx = fPitch / 4;
-    for (uint32_t y = 0; y < fLogoH; y++) {
-        if ((NvU64)(fLogoY + y + 1) * fPitch > fSize) break;
-        volatile uint32_t *row = px + (NvU64)(fLogoY + y) * pitchPx + fLogoX;
-        for (uint32_t x = 0; x < fLogoW; x++) row[x] = fLogoKeep[(size_t)y * fLogoW + x];
-    }
-    FBLOG("boot screen: logo %ux%u repainted at %u,%u after %s", fLogoW, fLogoH, fLogoX, fLogoY, why);
-}
-IOReturn NVRMNVDAFramebuffer::open()
-{
-    // postOpen reads IOFBNeedsRefresh: false makes needsInit 2, and initFB then leaves the screen alone instead of
-    // clearing it and drawing IOFramebuffer's built-in Apple logo (and arming kPERefreshBootGraphics). The boot screen
-    // already painted, logo included, stays. A repaint after open() alone lost: the screen still turned white.
-    if (fLogoKeep) setProperty(kIOFBNeedsRefreshKey, false);
-    IOReturn r = super::open();   // runs postOpen -> initFB
-    repaintBootLogo("IOFramebuffer::open");
-    if (fKva && fPitch && fLogoWW) {
-        logoStats("live right after open", (const volatile uint32_t *)fKva, fPitch / 4, fLogoWX, fLogoWY, fLogoWW, fLogoWH);
-        if (!fLogoWatch) fLogoWatch = thread_call_allocate(logoWatchFire, this);
-        if (fLogoWatch && !fLogoWatchN) { uint64_t d; clock_interval_to_deadline(200, kMillisecondScale, &d); scheduleCall(fLogoWatch, d); }
-    }
-    // IOFramebuffer left IOFBNeedsRefresh = Yes after open, WindowServer read it 0.3 s later
-    // ("device_preserves_framebuffer: needs_refresh = YES") and drew its own boot screen - the white Apple logo over the
-    // NullMoth one. The screen does hold the boot image, so say so again for WindowServer.
-    if (fLogoKeep) {
-        FBLOG("boot screen: IOFBNeedsRefresh after open = %s; set to false (the boot image is on screen)",
-              getProperty(kIOFBNeedsRefreshKey) == kOSBooleanTrue ? "Yes" : "No");
-        setProperty(kIOFBNeedsRefreshKey, false);
-    }
-    return r;
-}
 
 static NVRMNVDAFramebuffer *gFB = nullptr;
 // Every started framebuffer, so hot-plug can find the one driving a display that went away and came back.
@@ -2108,7 +1986,7 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
         if (sl) IORecursiveLockUnlock(sl);
         if (mine) release();
     }
-    thread_call_t *calls[] = {&fHwVblCall, &fReflip, &fGpuWake, &fBars, &fVblTimer, &fSampler, &fHeadProbe, &fLogoWatch};
+    thread_call_t *calls[] = {&fHwVblCall, &fReflip, &fGpuWake, &fBars, &fVblTimer, &fSampler, &fHeadProbe};
     for (unsigned i = 0; i < sizeof calls / sizeof calls[0]; ++i) {
         thread_call_t call = *calls[i];
         if (!call) continue;
@@ -2159,7 +2037,6 @@ IOReturn NVRMNVDAFramebuffer::getAppleSense(IOIndex connectIndex, UInt32 *senseT
 void NVRMNVDAFramebuffer::free()
 {
     if (fFlipCacheLock) { IOSimpleLockFree(fFlipCacheLock); fFlipCacheLock = nullptr; }
-    if (fLogoKeep) { IODelete(fLogoKeep, uint32_t, (size_t)fLogoW * fLogoH); fLogoKeep = nullptr; }
     super::free();
 }
 
@@ -3299,7 +3176,6 @@ IOReturn NVRMNVDAFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
     char c[5] = { (char)(attribute >> 24), (char)(attribute >> 16), (char)(attribute >> 8), (char)attribute, 0 };
     if (attribute == kIOWindowServerActiveAttribute) {
         FBLOG("setAttribute 'wsrv' %lu -> success", (unsigned long)value);
-        if (value && fLogoKeep) { IODelete(fLogoKeep, uint32_t, (size_t)fLogoW * fLogoH); fLogoKeep = nullptr; }   // WindowServer owns the screen now
         return kIOReturnSuccess; }
     if (attribute == kIOPowerAttribute) {
         FBLOG("setAttribute POWER '%s' -> %lu", c, (unsigned long)value);

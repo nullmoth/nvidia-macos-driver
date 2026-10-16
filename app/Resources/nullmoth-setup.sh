@@ -33,9 +33,9 @@ TOOL_NAME="1401: Remove NVIDIA driver"; TOOL_FILE=NullMothSafe.efi
 # the same tool with Arguments "once": macOS starts one time without the driver (to reach Recovery, or to get past a bad
 # start), and the driver is back after that - OpenCore rewrites boot-args at every start. Asked for on Discord 10-11.
 ONCE_NAME="1401: Start once without NVIDIA driver"
-# Optional cosmetic EFI driver; default installations keep the standard boot display.
-# Reported firmware hangs make this an explicit opt-in rather than an installation prerequisite.
-LOGO=off; LOGO_FILE=NullMothLogo.efi
+# Earlier versions could add a cosmetic boot logo driver (NullMothLogo.efi) to OpenCore. It is gone: an install or
+# update removes its entry and file, so the boot looks the way OpenCore and macOS draw it.
+LOGO_FILE=NullMothLogo.efi
 ST=${NULLMOTH_STATE_DIR:-/Library/NullMoth}; STATE=$ST/state
 AGENT=/Library/LaunchAgents/com.nullmoth.crashcheck.plist
 RECOVER=/Library/LaunchDaemons/com.nullmoth.recover.plist
@@ -43,7 +43,7 @@ KNOBS=(); PROFILE=""; COLLECT=""; UPD=""; VERB=""; PKG=""; SHA=""; CFG=""; EFI=a
 while [ $# -gt 0 ]; do case "$1" in
   --pkg) PKG=$2; shift;; --sha) SHA=$2; shift;; --config) CFG=$2; shift;; --efi) EFI=$2; shift;;
   --tool) TOOL=$2; shift;; --usbmap) USBMAP=$2; shift;; --app) APPBIN=$2; shift;; --dry) DRY=1;; --remove) REMOVE=1;; --verbose) VERB=$2; shift;; --update) UPD=$2; shift;; --collect-logs) COLLECT=$2; shift;;
-  --knob) KNOBS+=("$2"); shift;; --profile) PROFILE=$2; shift;; --logo) LOGO=$2; shift;; --set-logo) SETLOGO=$2; shift;; --gpu-test) GPUTEST=$2; shift;; --backlight) BACKLIGHT=$2; shift;;
+  --knob) KNOBS+=("$2"); shift;; --profile) PROFILE=$2; shift;; --gpu-test) GPUTEST=$2; shift;; --backlight) BACKLIGHT=$2; shift;;
   *) echo "STOP unknown option $1"; echo "RESULT stop"; exit 2;; esac; shift; done
 step() { echo "STEP $*"; }; ok() { echo "OK $*"; }; note() { echo "NOTE $*"; }
 KT=""
@@ -594,8 +594,10 @@ if [ $REMOVE = 1 ]; then
       if [ "$(csr_of)" = "${NEW_CSR:-x}" ]; then plutil -replace NVRAM.Add.$B.csr-active-config -data "$(csr_data "$OLD_CSR")" "$C" || stop "could not stage the recorded SIP setting - nothing changed"; fi
       if [ -n "${OLD_SBM:-}" ] && [ "$(get Misc.Security.SecureBootModel)" = Disabled ]; then plutil -replace Misc.Security.SecureBootModel -string "$OLD_SBM" "$C" || stop "could not stage SecureBootModel - nothing changed"; fi
       i=$(tool_index); if [ -n "$i" ]; then plutil -remove Misc.Tools.$i "$C" || stop "could not stage removal of the picker tool - nothing changed"; fi
-      # the start-once entry goes with the driver (it only switches the driver off); the boot logo stays, it is not the driver's
+      # the start-once entry goes with the driver (it only switches the driver off), and so does a boot logo entry an
+      # earlier version added
       i=$(once_index); if [ -n "$i" ]; then plutil -remove Misc.Tools.$i "$C" || stop "could not stage removal of the start-once entry - nothing changed"; fi
+      i=$(logo_index); if [ -n "$i" ]; then plutil -remove UEFI.Drivers.$i "$C" || stop "could not stage removal of the boot logo entry - nothing changed"; rm -f "$MP/$OCREL/Drivers/$LOGO_FILE"; fi
       # put the boot picker back the way it was before install, when this install changed it (SET_*) and nothing has
       # changed it away from our value since. An empty recorded value means the key was absent before, so remove it.
       restore_boot() {  # $1 key, $2 type, $3 our-target, $4 owned(0/1), $5 recorded-old
@@ -654,9 +656,9 @@ fi
 
 # "--update prepare" with a package is the one-button Tahoe path: install or update the driver first, then prepare.
 INSTALL_THEN_PREPARE=0; [ "$UPD" = prepare ] && [ -n "$PKG" ] && INSTALL_THEN_PREPARE=1
-# the app's boot-logo and test-driver switches run setup without a package; 1.14 sent them through the package check
-# ("STOP package not found:", 4 uploads in the first hour of 1.14), so neither switch worked
-if [ -z "$USBMAP" ] && [ -z "$VERB" ] && [ -z "${SETLOGO:-}" ] && [ -z "${GPUTEST:-}" ] && [ -z "${BACKLIGHT:-}" ] && { [ -z "$UPD" ] || [ $INSTALL_THEN_PREPARE = 1 ]; }; then
+# the app's test-driver switch runs setup without a package; 1.14 sent it through the package check
+# ("STOP package not found:", 4 uploads in the first hour of 1.14), so the switch did not work
+if [ -z "$USBMAP" ] && [ -z "$VERB" ] && [ -z "${GPUTEST:-}" ] && [ -z "${BACKLIGHT:-}" ] && { [ -z "$UPD" ] || [ $INSTALL_THEN_PREPARE = 1 ]; }; then
 step "Checking the driver package"
 [ -f "$PKG" ] || stop "package not found: $PKG"
 # the app's copy is writable by the user: hash and unpack a root-owned copy, so it cannot be swapped after the check
@@ -832,29 +834,6 @@ if [ -n "$VERB" ]; then
   ok "verbose startup $VERB - takes effect at the next restart"; cleanup; echo "RESULT ok"; exit 0
 fi
 
-if [ -n "${SETLOGO:-}" ]; then
-  # The app's "Boot logo on/off": only the logo driver's entry changes (backup first, restored on any failure).
-  # -nmlogooff in boot-args turns it off for one start without touching the config.
-  case "$SETLOGO" in on|off) ;; *) stop "--set-logo takes on or off";; esac
-  step "Turning the NullMoth boot logo $SETLOGO"
-  BKC="$C.nullmoth-logo-$(date +%Y%m%d-%H%M%S)"; cp -p "$C" "$BKC" || stop "could not back up $C$(ro_why "$C")"
-  LOGOSRC="$(dirname "${TOOL:-/nonexistent}")/$LOGO_FILE"; li=$(logo_index); fail=0
-  if [ "$SETLOGO" = on ]; then
-    ocl=$(ls -t "$MP"/opencore-*.txt 2>/dev/null | head -n 1)
-    [ -n "$ocl" ] && grep -qE "NullMothLogo\.efi at [0-9]+ cannot be loaded" "$ocl" && \
-      stop "this PC's firmware refused the boot logo driver at the last start (OpenCore's log on this EFI), so it stays off"
-    # also when an entry exists: enabling it without the file left OpenCore pointing at a driver that was not there
-    [ -f "$LOGOSRC" ] || stop "this copy of the app has no boot logo file"
-    if [ -z "$li" ]; then
-      has UEFI.Drivers || plutil -insert UEFI.Drivers -array "$C" || fail=1
-      hv=""; plutil -extract UEFI.Drivers.0.HideVerbose raw -o - "$C" >/dev/null 2>&1 && hv=',"HideVerbose":false'
-      plutil -insert UEFI.Drivers -json "{\"Arguments\":\"\",\"Comment\":\"NullMoth boot logo\",\"Enabled\":true,\"LoadEarly\":false,\"Path\":\"$LOGO_FILE\"$hv}" -append "$C" || fail=1
-    else plutil -replace UEFI.Drivers.$li.Enabled -bool true "$C" || fail=1; fi
-    [ ! -f "$LOGOSRC" ] || { mkdir -p "$MP/$OCREL/Drivers" && cp "$LOGOSRC" "$MP/$OCREL/Drivers/$LOGO_FILE"; } || fail=1
-  elif [ -n "$li" ]; then plutil -replace UEFI.Drivers.$li.Enabled -bool false "$C" || fail=1; fi
-  if [ $fail = 1 ] || ! plutil -lint "$C" >/dev/null; then cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; fi
-  ok "boot logo $SETLOGO - takes effect at the next restart"; cleanup; echo "RESULT ok"; exit 0
-fi
 
 if [ -n "${BACKLIGHT:-}" ]; then
   # The app's "Built-in screen brightness": boot-arg nvrmacpibl=1 lets RM read the laptop panel's backlight through the
@@ -1401,30 +1380,9 @@ eval "$(
 ti=$(tool_index)
 REFRESHTOOL=0; [ -n "$ti" ] && [ -f "$TOOL" ] && ! cmp -s "$TOOL" "$(dirname "$C")/Tools/$TOOL_FILE" && REFRESHTOOL=1
 NEEDONCE=0; [ -z "$(once_index)" ] && { NEEDONCE=1; echo "CHANGE boot picker: add \"$ONCE_NAME\" (start macOS or Recovery one time without the driver)"; }
-LOGOSRC="$(dirname "${TOOL:-/nonexistent}")/$LOGO_FILE"; NEEDLOGO=0; REFRESHLOGO=0; li=$(logo_index)
-# The logo driver is refused by some firmware: a Gigabyte AORUS board logged "NullMothLogo.efi at 3 cannot be loaded -
-# Unsupported!" and OpenCore went no further until the entry was turned off by hand (chat 10-13). OpenCore's own log on
-# this EFI decides: a logo that failed to load or was not found at the last start is turned off and not turned on again.
-LOGOREFUSED=0; ocl=$(ls -t "$MP"/opencore-*.txt 2>/dev/null | head -n 1)
-[ -n "$ocl" ] && grep -qE "NullMothLogo\.efi at [0-9]+ cannot be (loaded|found)" "$ocl" && LOGOREFUSED=1
-if [ $LOGOREFUSED = 1 ] && [ -n "$li" ] && [ "$(get UEFI.Drivers.$li.Enabled)" = true ]; then
-  echo "CHANGE boot logo: turn the NullMoth boot logo off (this PC's firmware refused it at the last start)"; EDITS+=("UEFI.Drivers.$li.Enabled|-bool|false")
-elif [ $LOGOREFUSED = 1 ]; then
-  :
-elif [ "$LOGO" != off ] && [ -f "$LOGOSRC" ]; then
-  if [ -z "$li" ]; then NEEDLOGO=1; echo "CHANGE boot logo: add the NullMoth boot logo (turn it off in the app, or with -nmlogooff)"
-  else
-    [ "$(get UEFI.Drivers.$li.Enabled)" = true ] || { echo "CHANGE boot logo: turn the NullMoth boot logo on"; EDITS+=("UEFI.Drivers.$li.Enabled|-bool|true"); }
-    cmp -s "$LOGOSRC" "$(dirname "$C")/Drivers/$LOGO_FILE" || { REFRESHLOGO=1; echo "CHANGE boot logo: update the NullMoth boot logo driver to this version"; }
-  fi
-elif [ "$LOGO" = off ] && [ -n "$li" ] && [ "$(get UEFI.Drivers.$li.Enabled)" = true ]; then
-  echo "CHANGE boot logo: turn the NullMoth boot logo off (the Apple logo shows again)"; EDITS+=("UEFI.Drivers.$li.Enabled|-bool|false")
-elif [ -n "$li" ] && [ "$(get UEFI.Drivers.$li.Enabled)" = true ] && [ ! -f "$(dirname "$C")/Drivers/$LOGO_FILE" ]; then
-  # two OpenCore logs (1.14.3, 1.15) end at "NullMothLogo.efi at 3 cannot be found!": an enabled entry whose file was
-  # never copied to this EFI, and this app has no file to put there
-  echo "CHANGE boot logo: turn the NullMoth boot logo off (its driver file is missing from this EFI)"; EDITS+=("UEFI.Drivers.$li.Enabled|-bool|false")
-fi
-[ ${#EDITS[@]} = 0 ] && [ ${#DELADD[@]} = 0 ] && [ $NEEDTOOL = 0 ] && [ $NEEDONCE = 0 ] && [ $NEEDLOGO = 0 ] && [ $NEEDBLOCK = 0 ] && [ $NEEDAMFIPASS = 0 ] && ok "OpenCore already has every setting the driver needs"
+DROPLOGO=0; li=$(logo_index)
+[ -n "$li" ] && { DROPLOGO=1; echo "CHANGE boot logo: remove the NullMoth boot logo driver (no longer part of the driver)"; }
+[ ${#EDITS[@]} = 0 ] && [ ${#DELADD[@]} = 0 ] && [ $NEEDTOOL = 0 ] && [ $NEEDONCE = 0 ] && [ $DROPLOGO = 0 ] && [ $NEEDBLOCK = 0 ] && [ $NEEDAMFIPASS = 0 ] && ok "OpenCore already has every setting the driver needs"
 
 if [ $SIPON = 1 ]; then
   note "SIP is still fully on in this boot: only SIP, Secure Boot, boot arguments and the boot picker entry change now"
@@ -1474,14 +1432,10 @@ if [ $DRY = 0 ]; then
     plutil -insert Misc.Tools -json "{\"Arguments\":\"once\",\"Auxiliary\":false,\"Comment\":\"NullMoth: start macOS once without the NVIDIA driver\",\"Enabled\":true,\"Flavour\":\"Auto\",\"FullNvramAccess\":true,\"Name\":\"$ONCE_NAME\",\"Path\":\"$TOOL_FILE\",\"RealPath\":false,\"TextMode\":true}" -append "$C" || fail=1
     [ -f "$MP/$OCREL/Tools/$TOOL_FILE" ] || { mkdir -p "$MP/$OCREL/Tools" && cp "$TOOL" "$MP/$OCREL/Tools/$TOOL_FILE"; } || fail=1
   fi
-  if [ $NEEDLOGO = 1 ]; then
-    has UEFI.Drivers || plutil -insert UEFI.Drivers -array "$C" || fail=1
-    # the entry carries the keys this config's own driver entries carry, so an older OpenCore never meets a key it lacks
-    hv=""; plutil -extract UEFI.Drivers.0.HideVerbose raw -o - "$C" >/dev/null 2>&1 && hv=',"HideVerbose":false'
-    plutil -insert UEFI.Drivers -json "{\"Arguments\":\"\",\"Comment\":\"NullMoth boot logo\",\"Enabled\":true,\"LoadEarly\":false,\"Path\":\"$LOGO_FILE\"$hv}" -append "$C" || fail=1
-    mkdir -p "$MP/$OCREL/Drivers" && cp "$LOGOSRC" "$MP/$OCREL/Drivers/$LOGO_FILE" || fail=1
+  if [ $DROPLOGO = 1 ]; then
+    li=$(logo_index); [ -z "$li" ] || plutil -remove UEFI.Drivers.$li "$C" || fail=1
+    rm -f "$MP/$OCREL/Drivers/$LOGO_FILE" || fail=1
   fi
-  [ "${REFRESHLOGO:-0}" = 1 ] && { cp "$LOGOSRC" "$MP/$OCREL/Drivers/$LOGO_FILE" || fail=1; }
   if [ $fail = 1 ] || ! plutil -lint "$C" >/dev/null; then cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; fi
   ok "OpenCore config updated"
   mkdir -p "$ST"
