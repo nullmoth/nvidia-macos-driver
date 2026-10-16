@@ -919,7 +919,7 @@ if [ -n "${GPUTEST:-}" ]; then
       PK=$PKGDIR/$(basename "$PKG")
       [ "$(shasum -a 256 "$PK" | awk '{print $1}')" = "$SHA" ] || stop "package checksum does not match - download it again"
       tar -xzf "$PK" -C "$PKGDIR" || stop "could not unpack the package"
-      PR="$PKGDIR/pkgroot"; (cd "$PR" && shasum -a 256 -c SHA256SUMS --quiet) || stop "the package's files do not match its SHA256SUMS"
+      PR="$PKGDIR/pkgroot"; (cd "$PR" && shasum -a 256 --strict -c SHA256SUMS --quiet) || stop "the package's files do not match its SHA256SUMS"
       [ -d "$PR/Library/NullMoth/kexts/$KMAJ/NMXGPU.kext" ] || stop "this driver package has no AMD/Intel GPU driver for macOS $KMAJ"
       mkdir -p /Library/NullMoth
       for d in kexts gpu-userland npu; do [ ! -d "$PR/Library/NullMoth/$d" ] || ditto "$PR/Library/NullMoth/$d" "/Library/NullMoth/$d" || stop "could not copy $d"; done
@@ -960,7 +960,7 @@ if [ -n "${GPUTEST:-}" ]; then
       { curl -fsSL --retry 5 --retry-delay 2 -o "$0/$2" "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/$1/$2" ||
         curl -fsSL --retry 5 --retry-delay 2 -o "$0/$2" "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/$2?id=$1"; }' "$FT" "$COMMIT" \
       || { rm -rf "$FT" "$FWLIST"; stop "downloading the GPU firmware failed (network?) - nothing was changed"; }
-    (cd "$FT" && shasum -a 256 -c --quiet < "$FWLIST") >/dev/null 2>&1 || { rm -rf "$FT" "$FWLIST"; stop "a GPU firmware file did not match its checksum - nothing was changed"; }
+    (cd "$FT" && shasum -a 256 --strict -c --quiet < "$FWLIST") >/dev/null 2>&1 || { rm -rf "$FT" "$FWLIST"; stop "a GPU firmware file did not match its checksum - nothing was changed"; }
     # the names drivers ask for that linux-firmware publishes as links (WHENCE "Link:"), within one directory only
     grep '^#link ' "$MAN" | while read -r _ n _ tgt; do
       case "$n/$tgt" in *..*|/*|*//*) continue;; esac
