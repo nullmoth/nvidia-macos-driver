@@ -212,20 +212,22 @@ arm("turning it off clears the NPU opt-in", "ga del nmxnpu=1" in src)
 # turns it back on and "off" puts back exactly what was removed (2.0.3, Core Ultra laptop, chat photo 10-16).
 def seg(start, end):
     a = src.index(start); return src[a:src.index(end, a)]
-decide = seg('  IGPU="PciRoot(0x0)/Pci(0x2,0x0)"; REEN=', '  if [ "$GPUTEST" = on ]; then\n    [ -n "$WANT" ]')
+decide = seg('  REEN=/Library/NullMoth/gputest-reenabled; IGOFF=""', '  if [ "$GPUTEST" = on ]; then\n    [ -n "$WANT" ]')
 apply_ = seg('    if [ -n "$IGOFF" ]; then\n      mkdir', "    # the drivers' boot guards")
-undo = seg('    # an Intel GPU that "on" turned back on', '    if [ -d "$EXT/NMXGPU.kext" ]')
+undo = seg('    # an Intel or AMD GPU that "on" turned back on', '    if [ -d "$EXT/NMXGPU.kext" ]')
 BASE = """<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>DeviceProperties</key><dict><key>Add</key><dict><key>PciRoot(0x0)/Pci(0x2,0x0)</key><dict>%s</dict></dict></dict>
+<plist version="1.0"><dict><key>DeviceProperties</key><dict><key>Add</key><dict><key>%s</key><dict>%s</dict></dict></dict>
 <key>NVRAM</key><dict><key>Add</key><dict><key>7C436110-AB2A-4BBB-A880-FE41995C9F82</key><dict><key>boot-args</key><string>%s</string></dict></dict></dict></dict></plist>"""
 
 
-def run(cpu, props, bootargs, vendors=""):
+INTEL, AMD = "PciRoot(0x0)/Pci(0x2,0x0)", "PciRoot(0x0)/Pci(0x8,0x1)/Pci(0x0,0x0)"
+
+
+def run(cpu, props, bootargs, vendors="", want="", path=INTEL):
     with tempfile.TemporaryDirectory() as t:
-        c = os.path.join(t, "config.plist"); open(c, "w").write(BASE % (props, bootargs))
+        c = os.path.join(t, "config.plist"); open(c, "w").write(BASE % (path, props, bootargs))
         bkc = c + ".bak"; open(bkc, "w").write(open(c).read())
-        harness = f'''C="{c}"; B=7C436110-AB2A-4BBB-A880-FE41995C9F82; BKC="{bkc}"; WANT=""; VENDORS="{vendors}"
-[ -n "$VENDORS" ] && WANT=" -nmxintel"
+        harness = f'''C="{c}"; B=7C436110-AB2A-4BBB-A880-FE41995C9F82; BKC="{bkc}"; WANT="{want}"; VENDORS="{vendors}"
 has() {{ plutil -extract "$1" raw -o - "$C" >/dev/null 2>&1; }}; get() {{ plutil -extract "$1" raw -o - "$C" 2>/dev/null; }}
 note() {{ echo "NOTE $*"; }}; ok() {{ echo "OK $*"; }}; stop() {{ echo "STOP $*"; exit 1; }}
 sysctl() {{ echo {cpu}; }}; nvram() {{ :; }}
@@ -255,9 +257,24 @@ arm("'off' puts the config back exactly as it was", same and not left, out[-300:
 out, on, same, left = run("GenuineIntel", "", "-v -wegnoigpu")
 arm("-wegnoigpu counts as a switched-off Intel GPU", "IGOFF=[-wegnoigpu]" in out)
 arm("'on' removes -wegnoigpu and 'off' adds it back", "-wegnoigpu" not in bootargs(on) and same, bootargs(on))
-out, on, same, left = run("AuthenticAMD", "<key>disable-gpu</key><data>AQAAAA==</data>", "-v")
-arm("an AMD Mac is not guessed at (the iGPU address is Intel's)", "WANT=[]" in out and "disable-gpu" in on)
-out, on, same, left = run("GenuineIntel", "<key>disable-gpu</key><data>AQAAAA==</data>", "-v", vendors="8086")
+out, on, same, left = run("AuthenticAMD", "<key>disable-gpu</key><data>AQAAAA==</data>", "-v", path=AMD)
+arm("an AMD APU GPU off by disable-gpu (behind 00:08.1) is wanted and turned back on", "WANT=[ -nmxamd]" in out and "VENDORS=[ 1002]" in out and "disable-gpu" not in on, out.splitlines()[0] if out else "")
+arm("'off' switches the AMD GPU off again exactly as it was", same and not left)
+out, on, same, left = run("AuthenticAMD", "<key>disable-gpu</key><data>AQAAAA==</data>", "-v", path=INTEL)
+arm("an AMD Mac does not touch a disable-gpu at Intel's address", "WANT=[]" in out and "disable-gpu" in on)
+out, on, same, left = run("AuthenticAMD", "", "-v -wegnoigpu", path=AMD)
+arm("-wegnoigpu is Intel's switch and is left alone on AMD", "WANT=[]" in out and "-wegnoigpu" in bootargs(on))
+out, on, same, left = run("GenuineIntel", "<key>disable-gpu</key><data>AQAAAA==</data>", "-v", want=" -nmxnpu")
+arm("an NPU does not hide a switched-off Intel GPU (Core Ultra 135U)", "WANT=[ -nmxnpu -nmxintel]" in out and "disable-gpu" not in on, out.splitlines()[0] if out else "")
+out, on, same, left = run("GenuineIntel", "<key>disable-gpu</key><data>AQAAAA==</data>", "-v", vendors=" 8086", want=" -nmxintel")
 arm("a visible Intel GPU leaves the config alone", "IGOFF=[]" in out and "disable-gpu" in on)
+# the whole script must parse in the bash it runs under (/bin/bash 3.2): the pieces above run alone, so a quote opened in
+# a stop message (2.0.4 draft: "${IGPU:-the CPU's GPU}") passed every arm while setup could not start at all
+for sh in ("/bin/bash", "bash"):
+    r = subprocess.run([sh, "-n", str(SETUP)], capture_output=True, text=True)
+    arm(f"setup parses in {sh}", r.returncode == 0, r.stderr.strip()[:160])
+bad = src.replace('${IGPU:-the processor GPU}', "${IGPU:-the CPU's GPU}")
+r = subprocess.run(["/bin/bash", "-n"], input=bad, capture_output=True, text=True)
+arm("negative control: the apostrophe version does not parse", r.returncode != 0)
 print(f"{len(fails)} failed")
 sys.exit(1 if fails else 0)
