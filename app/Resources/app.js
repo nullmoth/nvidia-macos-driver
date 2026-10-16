@@ -185,8 +185,6 @@ $("rm").onclick = () => { if (confirm("Remove the NullMoth driver and put your O
 $("rs").onclick = () => post({ act: "restart" });
 $("vbon").onclick = () => post({ act: "verbose", on: true, efi: efi() });
 $("vboff").onclick = () => post({ act: "verbose", on: false, efi: efi() });
-$("logoon").onclick = () => post({ act: "logo", on: true, efi: efi() });
-$("logooff").onclick = () => post({ act: "logo", on: false, efi: efi() });
 $("blon").onclick = () => post({ act: "backlight", on: true, efi: efi() });
 $("bloff").onclick = () => post({ act: "backlight", on: false, efi: efi() });
 $("gpuon").onclick = () => post({ act: "gputest", on: true, efi: efi(), pkg: S.pkg });

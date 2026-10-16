@@ -435,9 +435,6 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDe
         case "optionalDiagnostics": optionalDiagnostics()
         case "importDiagnosticReceipt": importDiagnosticReceipt()
         case "verbose": run(mode: "verbose", pkg: "", efi: b["efi"] as? String ?? "auto", extra: ["--verbose", (b["on"] as? Bool ?? false) ? "on" : "off"])
-        case "logo": run(mode: "verbose", pkg: "", efi: b["efi"] as? String ?? "auto",
-                         extra: ["--set-logo", (b["on"] as? Bool ?? true) ? "on" : "off",
-                                 "--tool", Bundle.main.resourceURL!.appendingPathComponent("NullMothSafe.efi").path])
         case "backlight": run(mode: "verbose", pkg: "", efi: b["efi"] as? String ?? "auto",
                               extra: ["--backlight", (b["on"] as? Bool ?? false) ? "on" : "off"])
         // the opt-in AMD/Intel GPU driver (setup --gpu-test); --tool tells setup where the firmware list sits
