@@ -23,6 +23,7 @@ fixture = r'''
 using NvU32=uint32_t;using NvU64=uint64_t;using NvBool=bool;
 enum { NV_TRUE=1,NV_FALSE=0 };
 #define FBLOG(...) ((void)0)
+static bool PE_parse_boot_argn(const char *,void *,int) { return false; }
 struct NvKmsKapiDisplayModeTimings {
     NvU32 pixelClockHz,hVisible,hSyncStart,hSyncEnd,hTotal,vVisible,vSyncStart,vSyncEnd,vTotal,refreshRate;
     struct { bool interlaced=false,doubleScan=false,hSyncPos=true,vSyncPos=true; } flags;
