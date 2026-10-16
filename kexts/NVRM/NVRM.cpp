@@ -940,6 +940,30 @@ bool NVRM::placeLargeBar1()
         if (m->getPhysicalAddress() == bar3Old) bar3Size = m->getLength();
         if (m->getPhysicalAddress() == (lo10 & ~0xFULL)) bar0 = m;
     }
+    // A BAR1 the firmware already sized (>= 4 GB, nothing to resize) and placed above 4 GB - so not over the boot screen,
+    // which sits below 4 GB - with that aperture already in the nub is left exactly where it is. NVIDIA's own driver does
+    // the same: nv_resize_pcie_bars() returns without a config write when the BAR is already the requested size, and it
+    // never picks a base address itself. Moving such a BAR1 to the top of the host window broke RTX 4060/4070 laptops
+    // (GH #185, #205): the aperture list for the new address could not be built, RM saw a BAR0-only table and
+    // kbusVerifyBar2 failed (RmInitAdapter 0x24:0x72:1281).
+    if (!newSize) {
+        const UInt64 cur1 = ((UInt64)old18 << 32) | (lo14 & ~0xFULL);
+        bool inNub = false;
+        for (unsigned i = 0; mem && i < mem->getCount(); i++) {
+            IOMemoryDescriptor *m = OSDynamicCast(IOMemoryDescriptor, mem->getObject(i));
+            if (m && m->getPhysicalAddress() == cur1 && m->getLength() >= bar1Size) { inNub = true; break; }
+        }
+        // Only when the boot console is not inside this BAR1 (a hybrid laptop's boot screen on the iGPU, or no console):
+        // a console inside BAR1 is why the move exists - RM's VRAM would overlap what macOS still scans out (STABILITY S9).
+        PE_Video v; bzero(&v, sizeof v);
+        const UInt64 con = (getPlatform() && getPlatform()->getConsoleInfo(&v) == kIOReturnSuccess) ? ((UInt64)v.v_baseAddr & ~3ull) : 0;
+        const bool conInside = con && con >= cur1 && con < cur1 + bar1Size;
+        if (cur1 >= (4ULL << 30) && inNub && !conInside) {
+            LOG("bar1: BAR1 already %llu MB at 0x%llx (above 4 GB, in the nub, console 0x%llx outside it) - left in place, as NVIDIA's driver does",
+                bar1Size >> 20, cur1, con);
+            return true;
+        }
+    }
     // 10-09 (RTX 5050, MacPro7,1 + npci=0x3000): the nub's apertures can be stale — they sit at 0x100000000+ while
     // config space and assigned-addresses agree on BAR0 0x40000000 / BAR3 0x46000000 — so neither lookup above hits
     // and BAR1 is never placed. Take the missing BAR0/BAR3 from assigned-addresses, only where it agrees with the
@@ -1049,7 +1073,18 @@ bool NVRM::placeLargeBar1()
     OSArray *arr = OSArray::withCapacity(memCount + 3);
     IODeviceMemory *m1 = IODeviceMemory::withRange(bar1Base, bar1Size), *m3 = IODeviceMemory::withRange(bar3Base, bar3Size);
     IODeviceMemory *m0 = bar0 ? NULL : IODeviceMemory::withRange(lo10 & ~0xFULL, bar0Size);
-    if (!arr || !m1 || !m3 || (!bar0 && !m0)) { LOG("bar1: placed in hardware but the aperture list could not be built (no memory)"); OSSafeReleaseNULL(arr); OSSafeReleaseNULL(m1); OSSafeReleaseNULL(m3); OSSafeReleaseNULL(m0); return false; }
+    if (!arr || !m1 || !m3 || (!bar0 && !m0)) {
+        // Put the hardware back as the read-back path above does: returning with BAR1/BAR3 moved but the nub's apertures
+        // unchanged left RM a table that no longer matched the card (NVIDIA's driver restores on every failure path).
+        LOG("bar1: placed in hardware but the aperture list could not be built (no memory) - restoring what IOPCIFamily left");
+        OSSafeReleaseNULL(arr); OSSafeReleaseNULL(m1); OSSafeReleaseNULL(m3); OSSafeReleaseNULL(m0);
+        fPCI->configWrite16(0x04, cmd & ~0x2);
+        rp->configWrite32(0x24, 0x0000fff0); rp->configWrite32(0x28, rp28); rp->configWrite32(0x2c, rp2c); rp->configWrite32(0x24, rp24);
+        if (newSize) fPCI->extendedConfigWrite32(rbCtlOff, rbCtlOld);
+        fPCI->configWrite32(0x14, lo14); fPCI->configWrite32(0x18, old18); fPCI->configWrite32(0x1c, lo1c); fPCI->configWrite32(0x20, hi20);
+        fPCI->configWrite16(0x04, cmd);
+        return false;
+    }
     arr->setObject(bar0 ? bar0 : m0); arr->setObject(m1); arr->setObject(m3);
     OSSafeReleaseNULL(m0);
     for (unsigned i = 0; i < memCount; i++) {
