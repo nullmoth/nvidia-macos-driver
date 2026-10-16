@@ -23,6 +23,10 @@ static inline int nvmtl_log_failure(const char *text)
                     nvmtl_log_fault_word(text, "FAULT") || strstr(text, "-> -") ||
                     strstr(text, "missing") || strstr(text, "cannot") ||
                     strstr(text, "unsupported") || strstr(text, "refused") ||
+                    /* a draw the plugin dropped leaves the window blank or garbled with nothing else in the log
+                     * (GTX 16 Terminal text on 2.2.0 was framebuffer fetch draws dropped this way) */
+                    strstr(text, "draw is skipped") || strstr(text, "draw skipped") ||
+                    strstr(text, "draws are being skipped") ||
                     /* a process denied a device: for WindowServer that is the "Failed to create MetalDevice" abort,
                      * and /tmp/nvmtl.log is gone after the reboot that rescues the machine */
                     strstr(text, "no device"));

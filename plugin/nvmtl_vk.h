@@ -66,6 +66,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  void *dcache[32]; void *dcachepool; unsigned ndcache;
                  unsigned in_rp, occlusion_reset; uint32_t wseq;
                  void *fetchview[NVMTL_NCOL];   /* the open pass's colour views, read by [[color(n)]] framebuffer fetch */
+                 unsigned fetch_draw, topo;   /* the bound pipeline reads [[color(n)]] in this pass; last MTLPrimitiveType set */
                  /* stencil export emulation (nvmtl_semu_draw): the bound pipeline's layout when it exports stencil, and the
                     stencil reference / write masks / depth write last set, which each per-bit pass changes and restores */
                  void *semu_layout; uint32_t st_ref[2], st_wmask[2]; int depth_write;

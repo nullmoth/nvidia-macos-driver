@@ -62,14 +62,15 @@ LOG = r'''
 #include <assert.h>
 #include <stdio.h>
 int main(void){
- const char *errors[]={"vk: vkCreateDevice -> -8","vk: missing vkCreateBuffer","vendor: cannot load plugin","unsupported memory type","sampler refused","GPU fault","FAILED pipeline","REFUSED allocation"};
+ const char *errors[]={"vk: vkCreateDevice -> -8","vk: missing vkCreateBuffer","vendor: cannot load plugin","unsupported memory type","sampler refused","GPU fault","FAILED pipeline","REFUSED allocation","vk: framebuffer fetch set could not be made (mask 0x7) - this draw is skipped","draw: index offset 64 outside its 32-byte buffer - draw skipped","vk: descriptor pool CEILING: 64 pools x 256 sets all live in one frame - draws are being skipped"};
  for(unsigned i=0;i<sizeof(errors)/sizeof(errors[0]);i++)assert(nvmtl_log_failure(errors[i]));
  assert(!nvmtl_log_failure("device RTX 3060, buffers live 8"));
  assert(!nvmtl_log_failure("vk: initialized successfully"));
  assert(!nvmtl_log_failure("library default.metallib loaded"));
  assert(!nvmtl_log_failure("library DEFAULT.metallib loaded"));
+ assert(!nvmtl_log_failure("library key memo: hit 3 (12 B mem) - whole-library hash skipped; misses 0 stale 0 stored 3"));
  assert(nvmtl_log_failure("GPU_FAULT"));assert(!nvmtl_log_failure(0));
- puts("PASS 8 release failure messages retained, normal chatter and null excluded");}
+ puts("PASS 11 release failure messages retained (dropped draws included), normal chatter and null excluded");}
 '''
 UPLOAD = r'''
 import Foundation

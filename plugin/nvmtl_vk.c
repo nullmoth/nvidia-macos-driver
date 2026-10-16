@@ -2996,6 +2996,13 @@ static int nvmtl_fetch_layouts_locked(void)
     if (pvkCreateDescriptorSetLayout(g_dev, &eli, NULL, &g_emptyLayout) != VK_SUCCESS) { g_emptyLayout = VK_NULL_HANDLE; return -1; }
     return 0;
 }
+static void nvmtl_fetch_barrier(nvk_cmdbuf *c)
+{
+    // what the earlier draws (or triangles) of this pass wrote is what the next one reads (the pass's self-dependency)
+    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT };
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                          VK_DEPENDENCY_BY_REGION_BIT, 1, &mb, 0, NULL, 0, NULL);
+}
 static VkDescriptorSet nvmtl_fetch_set(nvk_cmdbuf *c, uint32_t mask)
 {
     VkDescriptorSet set = VK_NULL_HANDLE; VkDescriptorPool pool = VK_NULL_HANDLE;
@@ -3026,8 +3033,14 @@ static VkDescriptorSet nvmtl_fetch_set(nvk_cmdbuf *c, uint32_t mask)
     VkDescriptorImageInfo ii[NVMTL_NCOL]; VkWriteDescriptorSet w[NVMTL_NCOL]; uint32_t nw = 0;
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
         if (!(mask & (1u << i))) continue;
-        if (!c->fetchview[i]) return VK_NULL_HANDLE;   // the pipeline reads a colour attachment the pass does not have
-        ii[nw] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, (VkImageView)c->fetchview[i], VK_IMAGE_LAYOUT_GENERAL };
+        // A [[color(n)]] the pass has no attachment for reads the zeroed dummy image (Metal leaves that read undefined).
+        // Core Animation's fragment shaders declare color(0), color(1) and color(2) and draw in passes with one colour
+        // attachment: refusing those draws dropped every background fill, so in Terminal cleared screens, erased lines
+        // and backspaced letters stayed on screen (2.1.0, which added framebuffer fetch).
+        void *view = c->fetchview[i] ? c->fetchview[i] : g_dummyImg.view;
+        if (!view) return VK_NULL_HANDLE;
+        ii[nw] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, (VkImageView)view,
+                                          c->fetchview[i] ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         w[nw] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, NVMTL_FETCH_BINDING + i, 0, 1,
                                         VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, &ii[nw], NULL, NULL };
         nw++;
@@ -3046,15 +3059,14 @@ void nvmtl_vk_cmd_bind_set(nvk_cmdbuf *c, nvk_pipeline *p)
                            NVMTL_SAMPLE_POSITION_BYTES, c->sample_pattern.position);
     pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipelineLayout)p->layout, 0, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, g_dyn_zero);
     c->semu_layout = p->stencil_emu ? p->layout : NULL;
+    c->fetch_draw = 0;
     if (p->skip_draws) { c->nobind = 1; return; }
     if (p->fetch_mask && c->in_rp) {
         VkDescriptorSet fs = nvmtl_fetch_set(c, p->fetch_mask);
         if (!fs) { static int said; if (said++ < 4) nvlog("vk: framebuffer fetch set could not be made (mask 0x%x) - this draw is skipped", p->fetch_mask); c->nobind = 1; return; }
         pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipelineLayout)p->layout, NVMTL_FETCH_SET, 1, &fs, 0, NULL);
-        // what the earlier draws of this pass wrote is what this one reads (the pass's self-dependency allows it)
-        VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT };
-        pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                              VK_DEPENDENCY_BY_REGION_BIT, 1, &mb, 0, NULL, 0, NULL);
+        nvmtl_fetch_barrier(c);
+        c->fetch_draw = 1;
     }
 }
 
@@ -5144,8 +5156,48 @@ int nvmtl_vk_cmd_clear_image(nvk_cmdbuf *c, nvk_image *img, const float clear[4]
     pvkCmdSetStencilReference((c)->cb, VK_STENCIL_FACE_FRONT_BIT, (c)->st_ref[0]); \
     pvkCmdSetStencilReference((c)->cb, VK_STENCIL_FACE_BACK_BIT, (c)->st_ref[1]); \
 } while (0)
+/*
+ * Metal orders [[color(n)]] reads per pixel between the primitives of one draw: a fragment reads what every earlier
+ * triangle of the same draw wrote there. An input attachment read here is not ordered within a draw, and NVK has neither
+ * rasterization-order attachment access nor fragment shader interlock. Core Animation draws a text cell's background, its
+ * glyph and the cursor in one draw, so a later triangle could read the pixel before the erase landed and put the old
+ * cursor's edge back (a one-pixel line left in Terminal). Small triangle-list draws whose pipeline reads the attachments
+ * are drawn one triangle (and instance) at a time behind the same by-region barrier used between draws. Draws over
+ * NVMTL_FETCH_SPLIT_MAX triangles (default 256; a game's full-screen blend) stay whole: splitting them would cost far more
+ * than the ordering is worth there. NVMTL_FETCH_UNORDERED=1 draws every one whole.
+ */
+static int nvmtl_fetch_split(nvk_cmdbuf *c, uint32_t count, uint32_t instances)
+{
+    static int unordered = -1, maxTris = -1;
+    if (unordered < 0) { const char *e = getenv("NVMTL_FETCH_UNORDERED"); unordered = e && e[0] == '1'; }
+    if (maxTris < 0) { const char *e = getenv("NVMTL_FETCH_SPLIT_MAX"); maxTris = e ? atoi(e) : 256; if (maxTris < 0) maxTris = 0; }
+    if (!c->fetch_draw || unordered) return 0;
+    if (c->topo != 3) {
+        static int said; if (said++ < 2) nvlog("vk: framebuffer fetch draw of MTLPrimitiveType %u is drawn whole - "
+                                               "overlapping primitives in it can read stale colour", c->topo);
+        return 0;
+    }
+    const uint64_t tris = (uint64_t)(count / 3) * instances;
+    if (tris > (uint64_t)maxTris) {
+        static int said2; if (said2++ < 2) nvlog("vk: framebuffer fetch draw of %llu triangles drawn whole (split limit %d)",
+                                                 (unsigned long long)tris, maxTris);
+        return 0;
+    }
+    return count > 3 || instances > 1;
+}
 void nvmtl_vk_cmd_draw(nvk_cmdbuf *c, uint32_t first, uint32_t count, uint32_t instances, uint32_t baseInstance)
-{ if (c->nobind) return; NVMTL_SEMU_DRAW(c, pvkCmdDraw(c->cb, count, instances ? instances : 1, first, baseInstance)); }
+{
+    if (c->nobind) return;
+    const uint32_t n = instances ? instances : 1;
+    if (nvmtl_fetch_split(c, count, n)) {
+        for (uint32_t k = 0; k < n; k++) for (uint32_t i = 0; i + 3 <= count; i += 3) {
+            if (k || i) nvmtl_fetch_barrier(c);
+            NVMTL_SEMU_DRAW(c, pvkCmdDraw(c->cb, 3, 1, first + i, baseInstance + k));
+        }
+        return;
+    }
+    NVMTL_SEMU_DRAW(c, pvkCmdDraw(c->cb, count, n, first, baseInstance));
+}
 void nvmtl_vk_cmd_set_scissor(nvk_cmdbuf *c, int32_t x, int32_t y, uint32_t w, uint32_t h)
 { VkRect2D r = { { x, y }, { w, h } }; pvkCmdSetScissor(c->cb, 0, 1, &r); }
 void nvmtl_vk_cmd_bind_pipeline(nvk_cmdbuf *c, nvk_pipeline *p) { pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipeline)p->pipe); }
@@ -5156,6 +5208,7 @@ int nvmtl_vk_cmd_set_topology(nvk_cmdbuf *c, unsigned mtlType) {
     if (mtlType > 4) { static int said; if (said++ < 4) nvlog("G14 draw: unknown MTLPrimitiveType %u — NOT drawn", mtlType); return -1; }
     if (mtlType < 3 && !g_topo_any) { static int said2; if (said2++ < 4) nvlog("G14 draw: point/line primitives need "
         "dynamicPrimitiveTopologyUnrestricted, which this device does not report — NOT drawn (was: rasterised as triangles)"); return -1; }
+    c->topo = mtlType;
     pvkCmdSetPrimitiveTopology(c->cb, map[mtlType]);
     pvkCmdSetPrimitiveRestartEnable(c->cb, (mtlType == 2 || mtlType == 4) ? VK_TRUE : VK_FALSE);
     if (mtlType != 3) { static int told[5]; if (!told[mtlType]++) nvlog("G14 first draw of MTLPrimitiveType %u in this process", mtlType); }
@@ -5205,7 +5258,15 @@ void nvmtl_vk_cmd_draw_indexed(nvk_cmdbuf *c, nvk_buffer *idx, size_t offset, ui
     if (!nvmtl_index_range_ok(idx, offset)) return;
     pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, offset, is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
     if (c->nobind) return;
-    NVMTL_SEMU_DRAW(c, pvkCmdDrawIndexed(c->cb, count, instances ? instances : 1, 0, baseVertex, baseInstance));
+    const uint32_t n = instances ? instances : 1;
+    if (nvmtl_fetch_split(c, count, n)) {
+        for (uint32_t k = 0; k < n; k++) for (uint32_t i = 0; i + 3 <= count; i += 3) {
+            if (k || i) nvmtl_fetch_barrier(c);
+            NVMTL_SEMU_DRAW(c, pvkCmdDrawIndexed(c->cb, 3, 1, i, baseVertex, baseInstance + k));
+        }
+        return;
+    }
+    NVMTL_SEMU_DRAW(c, pvkCmdDrawIndexed(c->cb, count, n, 0, baseVertex, baseInstance));
 }
 
 void nvmtl_vk_cmd_set_blend_color(nvk_cmdbuf *c, const float rgba[4]) { pvkCmdSetBlendConstants(c->cb, rgba); }
