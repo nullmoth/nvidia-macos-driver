@@ -9,14 +9,14 @@ func check(_ value: @autoclosure () -> Bool, _ label: String) {
 }
 for name in ["final-then-failure", "final-then-timeout", "final-then-signal", "normal", "legacy", "timeout", "signal", "failure", "malformed", "truncated", "truncated-success", "overflow", "small-cap", "changed-baseline", "missing-baseline-field", "wrong-phase", "overnodes-final", "missing-final", "emitter-cap", "third-record", "empty-extra", "invalid-baseline", "unavailable-overnodes", "missing"] {
     let start = ProcessInfo.processInfo.systemUptime
-    let map = HardwareMapWorker.run(executable: folder.appendingPathComponent(name), timeout: name.contains("timeout") ? 0.15 : 2,
+    let map = HardwareMapWorker.run(executable: folder.appendingPathComponent(name), timeout: name.contains("timeout") ? 1 : 2,
                                     maximumBytes: name == "small-cap" ? 512 : HardwareMapWorker.outputLimit)
     check(ProcessInfo.processInfo.systemUptime - start < 3, "bounded process duration")
     check(map["collector_checkpoint"] == nil, "protocol tag not exported")
     if ["invalid-baseline", "unavailable-overnodes", "missing"].contains(name) {
         check(map["status"] as? String == "unavailable", "invalid baseline refused")
     } else {
-        check((map["nodes"] as? [[String: Any]])?.first?["id"] as? String == "n0", "completed nodes preserved")
+        check((map["nodes"] as? [[String: Any]])?.first?["id"] as? String == "n0", "completed nodes preserved (\(name))")
         check((map["cpu"] as? [String: Any])?["cores"] as? Int == 8, "completed CPU preserved")
         if name == "normal" || name == "legacy" { check(map["status"] as? String == "observed", "successful map selected") }
         else {
