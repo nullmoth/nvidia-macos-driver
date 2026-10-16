@@ -1,2 +1,0 @@
-# The NPU user driver exports only its Level Zero entry points (ze*), as ze.exports does on Linux (ld64 patterns).
-_ze*

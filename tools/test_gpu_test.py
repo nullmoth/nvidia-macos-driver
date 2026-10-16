@@ -184,27 +184,13 @@ arm("the log report lists the Intel and both AMD NPUs, not AMD audio or an Intel
     all(n in col for n in ("NPU0@b", "PHX@0", "STX@0")) and "HDEF@0" not in col and "SIO@0" not in col)
 arm("the log report runs the NPU probes as the logged-in user, each bounded in time",
     'sudo -u "$console_user" "$@" 2>&1 & p=$!' in src and 'kill -9 "$p"' in src and '> "$COLLECT/npu.txt"' in src)
-# install replaces the NPU userland but keeps the validation archives setup fetched for this Mac
+# the AMD/Intel, NPU and audio drivers are separate products: the NVIDIA installer and uninstaller touch none of them
 inst = (ROOT / "package/install.sh").read_text()
-npu_inst = re.search(r"(if \[ -d \"\$HERE/Library/NullMoth/npu\" \]; then\n.*?\nfi\n)", inst, re.S)
-with tempfile.TemporaryDirectory() as d:
-    d = pathlib.Path(d)
-    live, pkg = d / "live", d / "pkg"
-    (live / "npu/xrt/share/amdxdna/bins").mkdir(parents=True)
-    (live / "npu/xrt/share/amdxdna/bins/xrt_smi_phx.a").write_text("fetched")
-    (live / "npu/lib").mkdir(); (live / "npu/lib/old.dylib").write_text("old")
-    (pkg / "Library/NullMoth/npu/lib").mkdir(parents=True); (pkg / "Library/NullMoth/npu/lib/new.dylib").write_text("new")
-    # the live tree moves into the sandbox; the package source ($HERE/Library/NullMoth) keeps its layout
-    block = (npu_inst.group(1).replace("$HERE/Library/NullMoth", "@PKG@").replace("/Library/NullMoth", str(live))
-             .replace("@PKG@", "$HERE/Library/NullMoth").replace("/private/var/tmp", str(d))) if npu_inst else "exit 9"
-    r = subprocess.run(["bash", "-c", "die() { echo \"DIE $*\"; exit 1; }\n" + block], capture_output=True, text=True,
-                       env={"HERE": str(pkg), "BK": "bk", "PATH": "/usr/bin:/bin"})
-    kept = (live / "npu/xrt/share/amdxdna/bins/xrt_smi_phx.a").is_file()
-    arm("an update replaces the NPU userland and keeps the fetched validation archives",
-        r.returncode == 0 and kept and (live / "npu/lib/new.dylib").is_file() and not (live / "npu/lib/old.dylib").exists(),
-        r.stdout + r.stderr)
 unin = (ROOT / "package/uninstall.sh").read_text()
-arm("uninstall removes the NPU driver too", 'KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NMXGPU NMXAccel NMXNPU"' in unin)
+arm("the NVIDIA installer installs no NPU userland and no AMD/Intel kexts",
+    "Library/NullMoth/npu" not in inst and "NMXNPU" not in inst and "NMXAccel" not in inst)
+arm("the NVIDIA uninstaller removes the NVIDIA driver only", 'KEXTS="NVRM NVAccel NVRMFB NVRMAGDC";' in unin
+    and "NMXGPU" not in unin and "/Library/NullMoth/npu" not in unin)
 arm("turning it off clears the NPU opt-in", "ga del nmxnpu=1" in src)
 
 

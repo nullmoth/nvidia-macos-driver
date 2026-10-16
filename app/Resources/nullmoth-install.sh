@@ -225,50 +225,12 @@ INSTALLING=1; [ "${CHECK:-0}" = 1 ] || : > "$LOCKDIR/installing"
 for k in $KEXTS; do rm -rf "$EXT/$k.kext" && ditto "$(kpath $k)" "$EXT/$k.kext" || die "copy $k (restore from $BK)"; done
 # both NVAccel builds stay on disk, so the first start after a macOS upgrade can switch to the matching one
 mkdir -p /Library/NullMoth && rm -rf /Library/NullMoth/kexts && ditto "$HERE/Library/NullMoth/kexts" /Library/NullMoth/kexts || die "copy per-macOS accelerators (restore from $BK)"
-# the AMD/Intel Vulkan drivers under the Metal plugin (RADV, ANV, libdrm), cached for setup --gpu-test like NMXGPU
-if [ -d "$HERE/Library/NullMoth/gpu-userland" ]; then
-  rm -rf /Library/NullMoth/gpu-userland && ditto "$HERE/Library/NullMoth/gpu-userland" /Library/NullMoth/gpu-userland || die "copy the AMD/Intel Vulkan drivers (restore from $BK)"
-fi
-# the NPU userland (Level Zero + Intel's NPU driver and compiler, OpenVINO, AMD's XRT), loaded from /Library/NullMoth/npu
-# by apps. AMD's validation archives in xrt/share/amdxdna/bins were fetched by setup for this Mac's NPU and are not in
-# the package, so they are carried over the replacement.
-if [ -d "$HERE/Library/NullMoth/npu" ]; then
-  NPUKEEP=""
-  if [ -d /Library/NullMoth/npu/xrt/share/amdxdna/bins ]; then
-    NPUKEEP=$(mktemp -d /private/var/tmp/nullmoth-npu-bins.XXXXXX) && ditto /Library/NullMoth/npu/xrt/share/amdxdna/bins "$NPUKEEP" \
-      || die "keep the NPU validation archives (restore from $BK)"
-  fi
-  rm -rf /Library/NullMoth/npu && ditto "$HERE/Library/NullMoth/npu" /Library/NullMoth/npu && chmod -R go-w,a+rX /Library/NullMoth/npu \
-    || die "copy the NPU userland (restore from $BK)"
-  if [ -n "$NPUKEEP" ]; then
-    mkdir -p /Library/NullMoth/npu/xrt/share/amdxdna && ditto "$NPUKEEP" /Library/NullMoth/npu/xrt/share/amdxdna/bins \
-      && chmod -R go-w,a+rX /Library/NullMoth/npu/xrt/share/amdxdna/bins && rm -rf "$NPUKEEP" \
-      || die "restore the NPU validation archives from $NPUKEEP"
-  fi
-fi
 for target in 15 26; do
   dir=/Library/NullMoth/kexts/$target
   [ -f "$dir/NVAccel.kext/Contents/MacOS/NVAccel" ] && [ -f "$dir/NVAccel.kext/Contents/Info.plist" ] || die "missing macOS $target accelerator (restore from $BK)"
   (cd "$dir" && find NVAccel.kext -type f -exec shasum -a 256 '{}' \;) > "$dir/SHA256SUMS" || die "cache manifest for macOS $target"
 done
 chown -R root:wheel /Library/NullMoth/kexts && chmod -R go-w /Library/NullMoth/kexts || die "cached accelerator permissions"
-# the AMD/Intel GPU driver (opt-in, setup --gpu-test): when it is on, an update brings its new build along. The cached
-# copy is under the running macOS: NMXGPU and NMXNPU are the same binaries on 15 and 26 (like NVRM), but NMXAccel is
-# built per-OS (it inherits IOAcceleratorFamily2, which Tahoe privatised - see kexts/NVRM/accel/gen_tahoe_fwd.py).
-if [ -d "$EXT/NMXGPU.kext" ] && [ -d /Library/NullMoth/kexts/$MAJ/NMXGPU.kext ]; then
-  rm -rf "$EXT/NMXGPU.kext" && ditto /Library/NullMoth/kexts/$MAJ/NMXGPU.kext "$EXT/NMXGPU.kext" && chown -R root:wheel "$EXT/NMXGPU.kext" \
-    && chmod -R 755 "$EXT/NMXGPU.kext" || die "refresh the AMD/Intel GPU driver (restore from $BK)"
-  # and its Metal accelerator
-  if [ -d /Library/NullMoth/kexts/$MAJ/NMXAccel.kext ]; then
-    rm -rf "$EXT/NMXAccel.kext" && ditto /Library/NullMoth/kexts/$MAJ/NMXAccel.kext "$EXT/NMXAccel.kext" && chown -R root:wheel "$EXT/NMXAccel.kext" \
-      && chmod -R 755 "$EXT/NMXAccel.kext" || die "refresh the AMD/Intel Metal accelerator (restore from $BK)"
-  fi
-  # and the NPU driver, where it was turned on
-  if [ -d "$EXT/NMXNPU.kext" ] && [ -d /Library/NullMoth/kexts/$MAJ/NMXNPU.kext ]; then
-    rm -rf "$EXT/NMXNPU.kext" && ditto /Library/NullMoth/kexts/$MAJ/NMXNPU.kext "$EXT/NMXNPU.kext" && chown -R root:wheel "$EXT/NMXNPU.kext" \
-      && chmod -R 755 "$EXT/NMXNPU.kext" || die "refresh the NPU driver (restore from $BK)"
-  fi
-fi
 echo "$MAJ" > /Library/NullMoth/os-major || die "record selected OS"
 mkdir -p "$GB" "$FW" || die "create bundle and firmware directories"
 # $GB/nvmtl is replaced wholesale below, so move the shared shader caches aside first. NVMTLLibraryLoad.m
@@ -290,7 +252,8 @@ if [ -s "$T/my-conf" ] && [ -f "$GB/nvmtl/nvrm610.conf" ]; then
   cat "$T/my-conf" >> "$GB/nvmtl/nvrm610.conf" || die "keep your settings in nvrm610.conf (restore from $BK)"
   ok "kept your settings in nvrm610.conf ($(grep -cvE '^#' "$T/my-conf") line(s))"
 fi
-# nvmtl was just replaced wholesale: with the AMD/Intel driver on, its Vulkan drivers go back in beside NVK
+# nvmtl was just replaced wholesale: when the separate AMD/Intel driver is installed, its Vulkan drivers (which its
+# own installer put in /Library/NullMoth/gpu-userland) go back in beside NVK
 if [ -d "$EXT/NMXGPU.kext" ] && [ -d /Library/NullMoth/gpu-userland ]; then
   ditto /Library/NullMoth/gpu-userland "$GB/nvmtl" || die "copy the AMD/Intel Vulkan drivers (restore from $BK)"
 fi
