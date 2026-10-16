@@ -188,9 +188,34 @@ static bool nvmtl_accel_armed(void)
 // GA104). The encoders are not registered on them, so apps use Apple's encoder until they are fixed for those GPUs.
 // Set from the I/O registry where no Metal device (and so no Vulkan device name) exists: -1 = unknown, use the name.
 static int g_video_blackwell = -1;
+// One string from the per-generation profile NVRM publishes on the GPU's PCI device ("nvrm-gpu-profile": chip,
+// generation, engine classes, scan-out model, video layout). False when the driver is older than the profile or the key
+// is missing; callers then keep their previous rule.
+static bool nvmtl_gpu_profile_string(CFStringRef key, char *out, size_t n)
+{
+    bool ok = false;
+    io_iterator_t it = IO_OBJECT_NULL;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOPCIDevice"), &it) != KERN_SUCCESS) return false;
+    for (io_object_t o; !ok && (o = IOIteratorNext(it)); IOObjectRelease(o)) {
+        CFTypeRef d = IORegistryEntryCreateCFProperty(o, CFSTR("nvrm-gpu-profile"), kCFAllocatorDefault, 0);
+        if (!d) continue;
+        if (CFGetTypeID(d) == CFDictionaryGetTypeID()) {
+            CFTypeRef v = CFDictionaryGetValue((CFDictionaryRef)d, key);
+            if (v && CFGetTypeID(v) == CFStringGetTypeID()) ok = CFStringGetCString((CFStringRef)v, out, (CFIndex)n, kCFStringEncodingUTF8);
+        }
+        CFRelease(d);
+    }
+    IOObjectRelease(it);
+    return ok;
+}
 static bool nvmtl_video_is_blackwell(void)
 {
     if (g_video_blackwell >= 0) return g_video_blackwell == 1;
+    char layout[32];
+    if (nvmtl_gpu_profile_string(CFSTR("video-layout"), layout, sizeof layout)) {
+        g_video_blackwell = !strcmp(layout, "blackwell");
+        return g_video_blackwell == 1;
+    }
     return strstr(nvmtl_vk_device_name(), "NVK GB") != NULL;
 }
 static void nvmtl_nvdec_register(void)
@@ -303,7 +328,9 @@ __attribute__((constructor)) static void nvmtl_nvdec_in_decode_service(void)
             IOObjectRelease(it);
         }
         if (!dev) { nvlog("nvdec: no NVIDIA GPU in the I/O registry - not registering in %s", me); return; }
-        g_video_blackwell = dev >= 0x2b00 && dev < 0x3000;   // the GB20x device-id block (RTX 5060 0x2D05, RTX 5080 0x2C02)
+        char layout[32];
+        if (nvmtl_gpu_profile_string(CFSTR("video-layout"), layout, sizeof layout)) g_video_blackwell = !strcmp(layout, "blackwell");
+        else g_video_blackwell = dev >= 0x2b00 && dev < 0x3000;   // no profile (older NVRM): the GB20x device-id block
         nvlog("nvdec: decode service, GPU 10de:%04x (%s): registering the decoders at load", dev,
               g_video_blackwell ? "Blackwell" : "before Blackwell");
         nvmtl_nvdec_register();

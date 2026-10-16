@@ -36,6 +36,8 @@ extern "C" int nvrm_gpuva_alloc(struct NVRMGpuVaRequest *);
 extern "C" int nvrm_gpuva_map(struct NVRMGpuVaRequest *);
 extern "C" int nvrm_gpuva_free(struct NVRMGpuVaRequest *);
 extern "C" bool nvrm_query_vram_kb(NvU32 gpuId, NvU32 *pRamKb, NvU32 *pTotalKb, NvU32 *pStatus);
+extern "C" bool nvrm_query_gpu_profile(NvU32 gpuId, NvU32 *pArch, NvU32 *pImpl, NvU32 *pCls3d, NvU32 *pClsCompute,
+                                       NvU32 *pClsCopy, NvU32 *pClsEnc, NvU32 *pClsDec, NvU32 *pStatus);
 kern_return_t _start(kmod_info_t *ki, void *data);
 kern_return_t _stop(kmod_info_t *ki, void *data);
 KMOD_EXPLICIT_DECL(com.nullmoth.NVRM, "0.1", _start, _stop)
@@ -139,6 +141,7 @@ private:
     IOWorkLoop  *fWorkLoop = NULL;
     IOFilterInterruptEventSource *fIntSrc = NULL;
     void readBARs();
+    void publishGpuProfile();
     bool placeLargeBar1();
     bool interruptFilter(IOFilterInterruptEventSource *src);
     void interruptOccurred(IOInterruptEventSource *src, int count);
@@ -1101,6 +1104,58 @@ bool NVRM::placeLargeBar1()
     return true;
 }
 
+/*
+ * One per-generation profile for the whole macOS layer, published on the PCI device as "nvrm-gpu-profile" (NVIDIA's HAL
+ * idea: one driver, the chip's implementation chosen once at start). The plugin, the Vulkan driver's copy engine, the
+ * video libraries and the scan-out path read it instead of guessing from a device-id range, so behaviour proven on one
+ * generation is never carried onto another by accident.
+ *   scanout "static-bar1": BAR1 covers all of VRAM, so VRAM is mapped once (kbusIsStaticBar1Supported);
+ *           "by-handle":   a small BAR1 (Turing / GTX 16 / Ampere without Resizable BAR), so scan-out surfaces are read
+ *                          by the display engine by handle and the CPU maps only what it touches (nvidia-drm-fb.c).
+ */
+void NVRM::publishGpuProfile()
+{
+    NvU32 arch = 0, impl = 0, c3d = 0, ccomp = 0, ccopy = 0, cenc = 0, cdec = 0, st = 0;
+    if (!nvrm_query_gpu_profile(fNv.gpu_id, &arch, &impl, &c3d, &ccomp, &ccopy, &cenc, &cdec, &st)) {
+        LOG("gpu profile: the RM did not answer (status 0x%x) - no profile published, users fall back to device ids", (unsigned)st);
+        return;
+    }
+    const char *gen = "unknown", *pfx = "";
+    switch (arch) {
+        case 0x160: gen = (impl == 7 || impl == 8) ? "Turing GTX 16" : "Turing"; pfx = "TU"; break;
+        case 0x170: gen = "Ampere"; pfx = "GA"; break;
+        case 0x180: gen = "Hopper"; pfx = "GH"; break;
+        case 0x190: gen = "Ada"; pfx = "AD"; break;
+        case 0x1A0: case 0x1B0: gen = "Blackwell"; pfx = "GB"; break;
+    }
+    char chip[16];
+    /* TU116 = impl 8 and TU117 = impl 7; every other chip is <prefix>1<arch digit 0-2>0<impl> (GA106, AD104, GB206) */
+    if (arch == 0x160 && impl == 8) snprintf(chip, sizeof chip, "TU116");
+    else if (arch == 0x160 && impl == 7) snprintf(chip, sizeof chip, "TU117");
+    else snprintf(chip, sizeof chip, "%s%x%02x", pfx, arch == 0x1B0 ? 2 : 1, (unsigned)impl);
+    const UInt64 bar1 = fNv.bars[NV_GPU_BAR_INDEX_FB].size;
+    UInt64 vram = 0;
+    if (OSNumber *n = OSDynamicCast(OSNumber, fPCI->getProperty("VRAM,totalsize"))) vram = n->unsigned64BitValue();
+    const bool staticBar1 = vram && bar1 >= vram;
+    OSDictionary *d = OSDictionary::withCapacity(16);
+    if (!d) return;
+    auto num = [&](const char *k, UInt64 v, int bits) { if (OSNumber *o = OSNumber::withNumber(v, bits)) { d->setObject(k, o); o->release(); } };
+    auto str = [&](const char *k, const char *v) { if (OSString *o = OSString::withCString(v)) { d->setObject(k, o); o->release(); } };
+    num("arch", arch, 32); num("impl", impl, 32);
+    str("chip", chip); str("generation", gen);
+    num("class-3d", c3d, 32); num("class-compute", ccomp, 32); num("class-copy", ccopy, 32);
+    num("class-nvenc", cenc, 32); num("class-nvdec", cdec, 32);
+    num("bar1-mb", bar1 >> 20, 32); num("vram-mb", vram >> 20, 32);
+    str("scanout", staticBar1 ? "static-bar1" : "by-handle");
+    str("video-layout", arch >= 0x1A0 ? "blackwell" : "classic");
+    str("native-shaders", arch == 0x1B0 ? "sm_120" : "none");
+    fPCI->setProperty("nvrm-gpu-profile", d);
+    d->release();
+    LOG("gpu profile: %s %s, 3d 0x%x copy 0x%x nvenc 0x%x nvdec 0x%x, BAR1 %llu MB of %llu MB VRAM -> scanout %s",
+        gen, chip, (unsigned)c3d, (unsigned)ccopy, (unsigned)cenc, (unsigned)cdec, bar1 >> 20, vram >> 20,
+        staticBar1 ? "static-bar1" : "by-handle");
+}
+
 void NVRM::readBARs()
 {
     nv_state_t *nv = &fNv;
@@ -1234,6 +1289,7 @@ IOReturn NVRM::go(uint32_t pass)
                     (unsigned)qst, (unsigned)ramKb);
             }
         }
+        publishGpuProfile();
         if (nvkms_xnu_load()) nvrm_display_publish(this, fNv.gpu_id);
     }
     return kIOReturnSuccess;
