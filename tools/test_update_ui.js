@@ -56,6 +56,18 @@ element('swu').onclick();
 assert.equal(sent.at(-1).act,'swupdate');
 event('run',{state:'end', mode:'tahoe', ok:false});
 assert(element('updt').textContent.includes('stopped'));
+// A Mac whose only GPU OpenCore switched off has an empty GPU list (Core Ultra laptop, 2.0.3): it is pointed at the
+// test driver, not told to look for an NVIDIA card; -wegnoegpu (which hides the NVIDIA card) keeps its own advice.
+const bare = (extra) => Object.assign(machine(15), {gpus:[], kexts:0, metal:[], files:false, hwModel:'MacBookPro16,2', gpuHiding:[], hiddenNvidia:[]}, extra);
+event('scan',bare({}));
+assert(element('verdict').innerHTML.includes('sees no GPU at all'));
+assert(!element('verdict').innerHTML.includes('No NVIDIA card was found'));
+event('scan',bare({gpuHiding:['-wegnoigpu']}));
+assert(element('verdict').innerHTML.includes('-wegnoigpu in boot-args'));
+event('scan',bare({gpuHiding:['-wegnoegpu']}));
+assert(!element('verdict').innerHTML.includes('sees no GPU at all'));
+assert(element('verdict').innerHTML.includes('-wegnoegpu'));
+console.log('A Mac with no visible GPU is offered the test driver; NVIDIA-hiding boot-args keep their advice.');
 const html=fs.readFileSync(__dirname+'/../app/Resources/index.html','utf8');
 for (const name of ['upd','swu','updc']) assert(html.includes('id="'+name+'"'));
 const native=fs.readFileSync(__dirname+'/../app/Sources/main.swift','utf8');

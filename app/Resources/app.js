@@ -23,7 +23,7 @@ function render(m) {
   let why = "";
   if (m.arch !== "x86_64" || m.translated) why = "This Mac has Apple silicon. Its own graphics are already Apple's.";
   else if (![15, 26].includes(m.major)) why = `The driver is built for macOS 15 Sequoia and macOS 26 Tahoe (beta); this Mac runs ${esc(m.macos)}.`;
-  else if (!card && (m.gpuHiding || []).length) why = `No NVIDIA card is visible because this Mac starts with ${esc(m.gpuHiding.join(" "))}, which hides discrete GPUs. Remove it from boot-args in OpenCore's config.plist, restart, and open 1401 again.`;
+  else if (!card && (m.gpuHiding || []).some((a) => a !== "-wegnoigpu")) why = `No NVIDIA card is visible because this Mac starts with ${esc(m.gpuHiding.filter((a) => a !== "-wegnoigpu").join(" "))}, which hides discrete GPUs. Remove it from boot-args in OpenCore's config.plist, restart, and open 1401 again.`;
   else if (!card && (m.hiddenNvidia || []).length) why = `The NVIDIA card (${esc(m.hiddenNvidia.join(", "))}) is on the bus but switched off for macOS, usually by a disable-gpu property in OpenCore's DeviceProperties. Remove it, restart, and open 1401 again.`;
   else if (!card && /^MacBook/.test(m.hwModel || "")) why = "No NVIDIA card was found. On a laptop the card is often switched off before macOS starts: by the BIOS graphics mode (choose Hybrid/MSHybrid or Discrete, not iGPU only) or by a dGPU-off SSDT in OpenCore's ACPI folder. Fix that, restart, and open 1401 again.";
   else if (!card || !card.supported) why = "No supported NVIDIA card was found. The driver needs a GeForce RTX 20 series or newer.";
@@ -44,6 +44,17 @@ function render(m) {
   // No NVIDIA card but an AMD or Intel GPU: the NVIDIA steps do not apply, the AMD/Intel test driver below does. It needs
   // the driver package (that is where the test driver ships), so the download stays offered.
   const other = !card && m.arch === "x86_64" && !m.translated && [15, 26].includes(m.major) && m.gpus.some((g) => g.vendor === "1002" || g.vendor === "8086");
+  // No GPU at all on an Intel-type Mac: OpenCore switched it off (disable-gpu or -wegnoigpu), and Lilu then takes it off
+  // macOS's PCI list entirely, so the table says "none found" (2.0.3, a Core Ultra laptop, chat photo 10-16). The test
+  // driver's setup turns an Intel GPU at the usual address back on, so it is offered here instead of the NVIDIA advice.
+  const hiddenOwn = !card && m.arch === "x86_64" && !m.translated && [15, 26].includes(m.major) && !m.gpus.length && !(m.hiddenNvidia || []).length
+    && !(m.gpuHiding || []).some((a) => a !== "-wegnoigpu");   // -wegnoegpu & co. hide the NVIDIA card: their advice stays
+  if (hiddenOwn) {
+    const pk3 = m.packages.find((p) => p.ok === "yes"); if (pk3) S.pkg = pk3.path;
+    $("verdict").innerHTML = `<p class="warn">macOS sees no GPU at all on this Mac.</p><p>OpenCore most likely switches it off (a disable-gpu property${(m.gpuHiding || []).includes("-wegnoigpu") ? ", and -wegnoigpu in boot-args" : ""}). If it is an Intel GPU, <b>AMD / Intel GPU and NPU driver (test)</b> below turns it back on with the test driver, and <b>Turn it off</b> switches it off again. ${S.pkg ? "The driver package is here and checked." : "Get the driver package first (it carries the test driver):"}</p>` + (S.pkg ? "" : '<p><button type="button" class="b" id="dl4">Download the driver package</button></p>');
+    const d4 = $("dl4"); if (d4) d4.onclick = () => $("dl").click();
+    $("steps").hidden = true; return;
+  }
   if (why && other) {
     const pk2 = m.packages.find((p) => p.ok === "yes"); if (pk2) S.pkg = pk2.path;
     $("verdict").innerHTML = `<p class="warn">No NVIDIA card, so the NVIDIA driver does not apply here.</p><p>This Mac's ${esc(m.gpus.filter((g) => g.vendor !== "10DE").map((g) => g.name).join(", "))} can try the experimental AMD / Intel GPU driver: see <b>AMD / Intel GPU and NPU driver (test)</b> below. ${S.pkg ? "The driver package is here and checked." : "Get the driver package first (it carries the test driver):"}</p>` + (S.pkg ? "" : '<p><button type="button" class="b" id="dl2">Download the driver package</button></p>');
