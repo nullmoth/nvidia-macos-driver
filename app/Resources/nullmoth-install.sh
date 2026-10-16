@@ -121,7 +121,10 @@ case $MAJ in 15|26) ;; *) die "This driver is built for macOS 15 and 26 (this is
 # NVAccel is the one kext built per macOS: Tahoe made the IOAcceleratorFamily2 methods it inherits private (see
 # kexts/NVRM/accel/gen_tahoe_fwd.py). The other three kexts are the same binaries on 15 and 26.
 VAR="$HERE/Library/NullMoth/kexts/$MAJ"; [ -d "$VAR/NVAccel.kext" ] || die "this package has no NVAccel for macOS $MAJ"
-kpath() { [ "$1" = NVAccel ] && echo "$VAR/NVAccel.kext" || echo "$HERE/Library/Extensions/$1.kext"; }
+kpath() { case $1 in NVAccel|NMXAudio) echo "$VAR/$1.kext";; *) echo "$HERE/Library/Extensions/$1.kext";; esac; }
+# macOS 26 ships no HD Audio driver (AppleHDA is gone), so a PC has no sound device at all and players that need one
+# (Safari/YouTube) fail. NMXAudio drives the onboard codec and GPU HDMI/DP audio; macOS 15 keeps its own.
+[ "$MAJ" -ge 26 ] && [ -d "$VAR/NMXAudio.kext" ] && KEXTS="$KEXTS NMXAudio"
 ioreg -r -c IOPCIDevice -d 1 | grep -q '"vendor-id" = <de100000>' || die "no NVIDIA GPU found on PCI"
 # The driver runs the cards NVIDIA's GSP firmware supports (Turing and later). The same list the Windows builder uses
 # (open-gpu-kernel-modules 610.57.04, p1401/nvidia_gsp_ids.json). Installing it for an older card (GTX 10 and before)

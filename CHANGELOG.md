@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.1.1
+
+Audio (macOS 26)
+- macOS 26 ships no HD Audio driver, so a PC on Tahoe had no sound device at all, and Safari/YouTube refused to play
+  ("an error occurred"). New: NMXAudio, a real HD Audio driver for the onboard codec (Realtek and others) and the GPU's
+  HDMI/DisplayPort audio, with output, input, volume and mute. Every jack and HDMI/DP port shows up as its own device
+  in Sound settings
+
+Driver
+- A display whose firmware boot timing NVIDIA's display code does not accept (seen on an RTX 3060 at 1920x1080) now
+  switches to the validated timing for the same resolution instead of crashing WindowServer at login
+
+AMD / Intel test driver
+- The log says how many drivers were offered a GPU that none of them took
+
 ## 2.1.0
 
 Driver

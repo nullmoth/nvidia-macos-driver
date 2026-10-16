@@ -223,6 +223,9 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     NVRMBacklightHandler *fBacklight = nullptr;   // the panel's brightness control, see NVRMBacklightHandler
     void publishBacklight();
     struct NvKmsKapiDisplayMode fMode = {};
+    // the mode NVKMS validated for this display, kept when the boot pair takes the firmware's timing instead (applyMode)
+    struct NvKmsKapiDisplayMode fKmsMode = {};
+    bool fHaveKmsMode = false;
     struct NvKmsKapiMemory *fMem = nullptr; struct NvKmsKapiSurface *fSurf = nullptr;
     void *fKva = nullptr; NvU64 fPhys = 0, fSize = 0; NvU32 fPitch = 0, fW = 0, fH = 0;
     NvU64 fScanLogPhys = 0; NvU32 fScanLogW = 0, fScanLogH = 0, fScanLogPitch = 0;  // last nvScanoutInfo answer logged
@@ -867,7 +870,22 @@ bool NVRMNVDAFramebuffer::kapiInit()
     }
     if (!have) { FBLOG("no valid mode"); return false; }
     if (gBootHead < 0 && fIndex == 0) fBootConsole = true;
+    fKmsMode = fMode; fHaveKmsMode = true;
     if (gBootHead >= 0 && fDisplay == gBootDpy && (int)fHead == gBootHead) {
+        // the fallback for a refused firmware timing must be the same raster (it scans out the same surface): the
+        // validated mode at the boot size whose refresh is closest to the firmware's
+        bool same = false; NvU32 bestGap = 0;
+        for (NvU32 i = 0; i < 256; i++) {
+            struct NvKmsKapiDisplayMode m = {}; NvBool valid = NV_FALSE, preferred = NV_FALSE;
+            int r = fKms->getDisplayMode(fDev, fDisplay, i, &m, &valid, &preferred);
+            if (r < 0) break;
+            if (r == 0 || !valid || m.timings.hVisible != gBootMode.timings.hVisible ||
+                m.timings.vVisible != gBootMode.timings.vVisible) continue;
+            const NvU32 gap = m.timings.refreshRate > gBootMode.timings.refreshRate ?
+                m.timings.refreshRate - gBootMode.timings.refreshRate : gBootMode.timings.refreshRate - m.timings.refreshRate;
+            if (!same || gap < bestGap) { fKmsMode = m; bestGap = gap; same = true; }
+        }
+        fHaveKmsMode = same;
         fMode = gBootMode;
         fBootConsole = true;
         FBLOG("boot pair: display 0x%x keeps the firmware's mode %ux%u @%u on head %u", fDisplay,
@@ -1917,6 +1935,19 @@ bool NVRMNVDAFramebuffer::applyMode()
     lr->flags.surfaceChanged = lr->flags.srcXYChanged = lr->flags.srcWHChanged = lr->flags.dstXYChanged = lr->flags.dstWHChanged = NV_TRUE;
     nvrmUnownedHeadsOff(cfg);
     NvBool ok = submitConfig(cfg, rep, NV_TRUE, true);
+    // The firmware's boot timing is not always one NVKMS validates for the display (seen on an RTX 3060 at 1920x1080: the
+    // GOP's 2200x1125 raster refused, every commit rejected, CoreDisplay asserted in CGXMappedDisplayStart and
+    // WindowServer crash-looped). The mode NVKMS validated for the same raster scans out the same surface, so retry with it.
+    if (!ok && fHaveKmsMode && memcmp(&fMode, &fKmsMode, sizeof fMode) != 0 &&
+        fKmsMode.timings.hVisible == fRasterW && fKmsMode.timings.vVisible == fRasterH) {
+        FBLOG("applyMode: firmware timing pclk %u %ux%u refused; retrying with NVKMS's validated mode pclk %u %ux%u @%u",
+              fMode.timings.pixelClockHz, fMode.timings.hTotal, fMode.timings.vTotal, fKmsMode.timings.pixelClockHz,
+              fKmsMode.timings.hTotal, fKmsMode.timings.vTotal, fKmsMode.timings.refreshRate);
+        hr->modeSetConfig.mode = fKmsMode;
+        nvu_zero(rep, sizeof *rep);
+        ok = submitConfig(cfg, rep, NV_TRUE, true);
+        if (ok) fMode = fKmsMode;
+    }
     fLastOk = (unsigned)ok; fFlipResult = (int)rep->flipResult;
     FBLOG("applyModeSetConfig -> %u (flipResult %d)", ok, (int)rep->flipResult);
     if (ok && fKms->framebufferConsoleDisabled) {

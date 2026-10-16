@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u
 # NMXGPU, NMXAccel and NMXNPU: the opt-in AMD/Intel GPU driver, its Metal accelerator and the NPU driver, when turned on
-KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NMXGPU NMXAccel NMXNPU"; EXT=/Library/Extensions; GB=/Library/GPUBundles
+KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NMXGPU NMXAccel NMXNPU NMXAudio"; EXT=/Library/Extensions; GB=/Library/GPUBundles
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 K=/System/Library/Kernels/kernel
 KARG=(--allow-missing-kdk); [ -f "$K" ] && KARG+=(--kernel "$K")   # without a matching Kernel Debug Kit, kmutil needs --allow-missing-kdk
