@@ -92,6 +92,8 @@ static const char *program;
 static const char *fixture_program(void) { return program; }
 #define getprogname fixture_program
 #define MTLCommandBufferStatusError 5
+// an NVAccel without frame marks: WindowServer keeps its own wait for each composite
+static BOOL nvmtl_ws_kernel_waits(void) { return NO; }
 @interface Command : NSObject
 @property int status;
 @property int completed, scheduled, commits;
@@ -155,7 +157,7 @@ with tempfile.TemporaryDirectory(prefix="nullmoth-card-tests-") as directory:
     (tmp / "log.c").write_text(LOG)
     run("xcrun", "clang", "-I" + str(ROOT / "plugin"), str(tmp / "log.c"), "-o", str(tmp / "log"))
     print(run(str(tmp / "log")))
-    submit = snippet("plugin/NVMTLObjects.m", "- (BOOL)commitAndWaitUntilSubmitted {", "- (void)commit { [self nvmtlSubmitWithEvents]; }")
+    submit = snippet("plugin/NVMTLObjects.m", "- (BOOL)commitAndWaitUntilSubmitted {", "- (void)commit {\n    [self nvmtlSubmitWithEvents];")
     (tmp / "submit.m").write_text(SUBMIT.replace("PRODUCTION", submit))
     run("xcrun", "clang", "-fobjc-arc", str(tmp / "submit.m"), "-framework", "Foundation", "-o", str(tmp / "submit"))
     for program in ("WindowServer", "mediaanalysisd", ""):

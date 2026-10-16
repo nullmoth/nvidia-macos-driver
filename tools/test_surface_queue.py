@@ -10,6 +10,14 @@ fixture=r'''
 #import <Foundation/Foundation.h>
 #include <assert.h>
 #include <stdint.h>
+#include <stdatomic.h>
+#include <objc/runtime.h>
+#include <string.h>
+#include <stdlib.h>
+#include <time.h>
+// not WindowServer here: the kernel frame marks are never taken
+static int nvmtl_vk_surface_gpu_mark(uint32_t sid,int pending){(void)sid;(void)pending;return -1;}
+static void nvlog(const char *f,...){(void)f;}
 struct __IOSurface {unsigned id,seed;};
 static unsigned IOSurfaceGetID(IOSurfaceRef s){return s->id;}
 static unsigned IOSurfaceGetSeed(IOSurfaceRef s){return s->seed;}
