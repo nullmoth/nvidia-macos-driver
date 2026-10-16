@@ -1095,7 +1095,10 @@ if [ -n "$UPD" ]; then
     bi=$(bidx); [ -n "$bi" ] && plutil -replace Kernel.Block.$bi.Enabled -bool false "$C"
     args_set add -nvoff
     plutil -lint "$C" >/dev/null || { cp -p "$BKC" "$C"; stop "editing the config failed - the original is restored"; }
-    printf 'FROM=%s\nBAR0=%s\nABAR0=%s\n' "$MAJ" "$bar0" "$abar0" > "$PEND"
+    # the partition (by its UUID, which survives disk renumbering) and folder of the config changed here: finish and
+    # cancel must change back this one, not whatever detection picks on that run
+    cpart=$(diskutil info "$EFI" 2>/dev/null | awk -F': *' '/Partition UUID/{print $2}')
+    printf 'FROM=%s\nBAR0=%s\nABAR0=%s\nCFGPART=%s\nCFGREL=%s\n' "$MAJ" "$bar0" "$abar0" "$cpart" "$OCREL" > "$PEND"
     cat > /Library/LaunchDaemons/com.nullmoth.osupdate.plist <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1119,6 +1122,17 @@ PL
     else do_prepare; cleanup; echo "RESULT ok"; exit 0; fi;;
   finish|cancel)
     . "$PEND" 2>/dev/null
+    # Change back the config "prepare" changed. Measured on the test Mac (10-15, 2.0.4 test): with the 1401 stick plugged in
+    # next to the internal EFI, prepare parked the driver in the internal config, cancel's detection a minute later
+    # picked the stick, reported success, and the next start came up with the driver parked.
+    if [ -n "${CFGPART:-}" ] && [ -n "${CFGREL:-}" ]; then
+      if mount_efi "$CFGPART" && [ -f "$MOUNT_POINT/$CFGREL/config.plist" ]; then
+        [ "$MOUNT_POINT/$CFGREL/config.plist" = "$C" ] || note "using the OpenCore config the Tahoe preparation changed ($MOUNT_POINT/$CFGREL), not $C"
+        C="$MOUNT_POINT/$CFGREL/config.plist"
+      else
+        stop "the OpenCore partition the Tahoe preparation changed (partition $CFGPART) is not connected - plug in the disk or stick it is on, then try again"
+      fi
+    fi
     if [ "$UPD" = finish ] && [ "${FROM:-}" = "$MAJ" ] && [ "$MAJ" = 15 ]; then echo "$(date) still on macOS $MAJ - waiting for the update"; cleanup; echo "RESULT ok"; exit 0; fi
     step "Setting the driver up for macOS $MAJ"; backup   # only once the update has happened: no backup per waiting boot
     if [ -d "/Library/NullMoth/kexts/$MAJ/NVAccel.kext" ]; then
