@@ -325,7 +325,8 @@ if [ -d "$BK/NVRM.kext" ]; then
 # Written by the NVIDIA driver install: restores the driver in $BK if the installed one cannot start.
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 BK='$BK'; LOG=/Library/NullMoth/lastgood.log; V=7C436110-AB2A-4BBB-A880-FE41995C9F82
-done_job() { launchctl bootout system/com.nullmoth.lastgood 2>/dev/null; rm -f /Library/LaunchDaemons/com.nullmoth.lastgood.plist /Library/NullMoth/lastgood.sh; }
+# no launchctl bootout here: booting out the running job kills this script before it can restart the Mac (10-17 test)
+done_job() { rm -f /Library/LaunchDaemons/com.nullmoth.lastgood.plist /Library/NullMoth/lastgood.sh; }
 if nvram \$V:nullmoth-nv-ok >/dev/null 2>&1; then echo "\$(date) the new driver brought its display up; keeping it" >> \$LOG; done_job; exit 0; fi
 v=\$(nvram \$V:nullmoth-nv-starts 2>/dev/null | cut -f2)
 case "\$v" in %0[2-9a-f]|%[1-9a-f]?) ;; *) exit 0;; esac
