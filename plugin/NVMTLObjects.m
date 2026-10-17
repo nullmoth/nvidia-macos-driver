@@ -956,7 +956,7 @@ static int nvmtl_trace_on(void) {
     static int cap = 2500;
     if (now >= next) { next = now + 250000000ull; int was = on; on = access("/tmp/nvmtl-trace-request", F_OK) == 0;
         g_trace_bigonly = on && access("/tmp/nvmtl-trace-big", F_OK) == 0; if (!g_trace_bigonly) g_trace_mute = 0;
-        if (on && !was) { g_trace_lines = 0; cap = access("/tmp/nvmtl-trace-long", F_OK) == 0 ? 20000 : 2500; } }
+        if (on && !was) { g_trace_lines = 0; cap = access("/tmp/nvmtl-trace-huge", F_OK) == 0 ? 600000 : access("/tmp/nvmtl-trace-long", F_OK) == 0 ? 20000 : 2500; } }
     return on && !g_trace_mute && g_trace_lines < cap;
 }
 static int nvtrace_scope(uint32_t w, uint32_t h) { int was = g_trace_mute; g_trace_mute = 0; (void)nvmtl_trace_on();
@@ -1226,7 +1226,9 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
     @synchronized (nvmtl_surface_sync(r)) {
-    if (![r nvmtlSurfaceCopyable]) return NO;
+    if (![r nvmtlSurfaceCopyable]) { nvtrace("SURFOUT surf %u %ux%u NOT copyable", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h); return NO; }
+    nvtrace("SURFOUT surf %u %ux%u vramOn %d t=%llu", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h, (int)r->_vramOn,
+            (unsigned long long)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000));
     if (r->_vramOn && !nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane)) {
         uint32_t seed = IOSurfaceGetSeed(r->_surf);
         r->_surfSeed = seed; r->_surfSynced = YES;
