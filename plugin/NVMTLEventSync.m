@@ -60,6 +60,7 @@ static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t)
         return NO;
     }
 }
+static void nvtrace(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void nvmtl_surface_register_writes(NVMTLCommandBuffer *cb) {
     // The same lock as pending_write and finish_writes, taken here too: the map is shared with the completion thread, and
     // its one caller holding this (recursive) lock today must not be what keeps WindowServer's heap intact.
@@ -109,6 +110,15 @@ static void nvmtl_ws_mark_pending(NVMTLCommandBuffer *cb) {
     }
     if (!ids) return;
     for (NSNumber *n in ids) nvmtl_ws_mark(n.unsignedIntValue, YES);
+    // A normal IOSurfaceLock waits for GPU work still in flight on the surface (only kIOSurfaceLockAvoidSync skips that),
+    // and WindowServer relies on it: a window capture locks the surface it is still drawing (SkyLight's
+    // do_finish_and_clear_capture_state). The VRAM copy was marked newest only after the GPU finished, so a lock that came
+    // first found the system copy current and read zeros (black screenshots, blank Dock thumbnails, black lock screen).
+    // Marked here, at commit, the lock pages the surface off, and the page-off waits for the pending mark above to clear.
+    for (NVMTLSubmissionPart *part in cb->_parts) {
+        if (![part isKindOfClass:[NVMTLSubmissionPart class]]) continue;
+        for (NVMTLTexture *t in part->surfaces) if (t->_surf && t->_vramOn) (void)nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(t->_surf), (uint32_t)t->_plane);
+    }
     objc_setAssociatedObject(cb, nvmtl_ws_marks_key, ids, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 static void nvmtl_ws_mark_ready(NVMTLCommandBuffer *cb) {
@@ -508,6 +518,11 @@ static void nvmtl_gsub_ahead_pass1(void) {
         }
         if (result == 0) [self nvmtlCollectDeviceTiming:&part->commands];
         BOOL published = result == 0;
+        // the GPU has finished this part: release the pending marks on its surfaces before the surface work below, which
+        // takes the surface's own lock. A CPU lock that is waiting in the page-off for these marks holds that lock, so
+        // marking them after it made every such lock sit out the full 100 ms bound.
+        if (published && nvmtl_ws_kernel_waits())
+            for (NVMTLTexture *texture in part->surfaces) if (texture->_surf) nvmtl_ws_mark((uint32_t)IOSurfaceGetID(texture->_surf), NO);
         if (published) {
             for (NVMTLTexture *texture in part->surfaces) if (![texture nvmtlSurfaceOut]) published = NO;
             for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, YES)) nvmtl_buffer_sync_out(buffer);
@@ -536,7 +551,8 @@ static void nvmtl_gsub_ahead_pass1(void) {
         ((void(*)(id,SEL,uint64_t))objc_msgSend)(event, @selector(setSignaledValue:), [s[1] unsignedLongLongValue]);
     }
     _parts[_nextPart++] = [NSNull null];
-    if (_nextPart == _parts.count) [self nvmtlFinishExecution:nil];
+    if (_nextPart == _parts.count) { nvtrace("COMPLETE cb %p t=%llu", (__bridge void *)self, (unsigned long long)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000));
+        [self nvmtlFinishExecution:nil]; }
     return YES;
 }
 - (void)nvmtlSubmitWithEvents {
