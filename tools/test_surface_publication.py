@@ -45,6 +45,10 @@ static int nvmtl_vk_surface_dirty(unsigned s, unsigned p) { return 1; }
 static int nvmtl_noseed(void) { return 0; }
 static void nvmtl_frame_dump(const char *tag, void *base, size_t row, unsigned w, unsigned h) {}
 #define nvlog(...) ((void)0)
+// helpers the capture path calls (NVMTLEventSync.m); WindowServer kernel marks are off here
+static BOOL nvmtl_ws_kernel_waits(void){return NO;}
+static void nvmtl_ws_mark(uint32_t sid,BOOL pending){(void)sid;(void)pending;}
+static void nvtrace(const char *f,...){(void)f;}
 static int nvmtl_vk_image_write(void *q, Image *i, void *base, size_t row) {
     memcpy(i->gpu,base,4); uploads++; return 0;
 }
