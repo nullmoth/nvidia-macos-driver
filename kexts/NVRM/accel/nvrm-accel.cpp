@@ -338,6 +338,9 @@ public:
             gNvHeadless = 1;
             ALOG("headless check: no NVIDIA display head after %u s -- MetalPluginName restored WITHOUT arming: apps get "
                  "the NVIDIA Metal device, WindowServer stays on the display's GPU (%s)", kHeadlessDeadlineSec, owner);
+            // Not a good start for the boot guard: a card whose connectors carry no display clears the guard in the
+            // framebuffer's own enumeration (nvrm-fb.cpp), with the connector list as evidence. Reaching this deadline
+            // without that means the framebuffer never enumerated at all, which is a failure the guard must keep counting.
         }
         if (me->fRegLock) IOLockUnlock(me->fRegLock);
     }

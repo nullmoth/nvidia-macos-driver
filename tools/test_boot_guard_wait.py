@@ -146,10 +146,19 @@ r = boots(exe, ['wait-twoworkers-dark', 'wait-twoworkers-dark', 'good'])
 check('...and two dark boots with two workers still trip the guard (no count lost to the other worker)', r[2][0] == 1, r)
 r = boots(exe, ['wait-byhand', 'good'])
 check('a display brought up by hand during the wait leaves no strike behind', r[0][1] == 0 and r[0][2] == 1 and r[1][0] == 0, r)
+# the accelerator's 60 s headless fallback is NOT a good start: a card whose connectors carry no display clears the guard
+# in the framebuffer's enumeration (connector list as evidence); reaching the deadline without it means the framebuffer
+# never enumerated, which the guard must keep counting
+accel = (root / 'kexts/NVRM/accel/nvrm-accel.cpp').read_text()
+h0 = accel.index('static void headlessCheck(')
+headless = accel[h0:accel.index('void deliverModeChange()', h0)]
+check('the headless fallback does not clear the guard', 'nvrm_guard_display_up(' not in headless)
+fb = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
+check('the framebuffer clears it on a connector list with no display', 'if (n > 0 && gNDpy == 0) fbGuardCleared(' in fb)
 # negative control: the guard without the wait exemption switches the Mac off after two resets during the wait
 control = body.replace('nvrm_guard_pause_for_wait(unsigned ms)\n{', 'nvrm_guard_pause_for_wait(unsigned ms)\n{ (void)ms; return;')
 assert control != body
 r = boots(build(control), ['wait-reset-in-wait', 'wait-reset-in-wait', 'wait'])
 check('negative control: without the exemption two resets in the wait switch the driver off', r[2][0] == 1, r)
-print(f'boot guard wait: {13 - fails} of 13 arms')
+print(f'boot guard wait: {15 - fails} of 15 arms')
 raise SystemExit(1 if fails else 0)
