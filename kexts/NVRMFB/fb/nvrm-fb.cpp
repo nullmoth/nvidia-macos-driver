@@ -2854,7 +2854,19 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
         }
         mem = m; kva = k; phys = p;
     }
-    if (!mem) { OSAddAtomic64(-(SInt64)want, &gVramMappedBytes); return false; }
+    if (!mem) {
+        OSAddAtomic64(-(SInt64)want, &gVramMappedBytes);
+        // Who holds the window, once per boot: a 256 MB BAR1 that fills up cannot be told apart from a leak by the
+        // failure lines alone; grants against releases can.
+        static volatile SInt32 said = 0;
+        if (OSCompareAndSwap(0, 1, &said))
+            FBLOG("BAR1 full: %lld grants (%lld bytes) vs %lld releases (%lld bytes); live %lld, console parks %lld bytes "
+                  "in %d slots, display %lld, budget %lld, BAR1 %llu",
+                  (long long)gCntGrant, (long long)gCntGrantBytes, (long long)gCntRelease, (long long)gCntReleaseBytes,
+                  (long long)gVramMappedBytes, (long long)gVramParkedBytes, gNParkedForever, (long long)gVramDisplayBytes,
+                  (long long)budget, (unsigned long long)fBarLen);
+        return false;
+    }
 
     nvu_zero_wide(kva, (size_t)want);
     volatile NvU64 *q = (volatile NvU64 *)kva;
