@@ -375,6 +375,7 @@ IOService *NVRM::probe(IOService *provider, SInt32 *score)
 bool NVRM::start(IOService *provider)
 {
     { if (nvrm_driver_off()) return false; }
+    nvrm_guard_count_start();
     if (!super::start(provider)) return false;
     fPCI = OSDynamicCast(IOPCIDevice, provider);
     if (!fPCI) return false;

@@ -306,6 +306,56 @@ step "6. boot-args"
 # A remove flag left by a boot-picker removal that did not finish keeps every NullMoth kext off at boot. Installing
 # again means the driver is wanted, so the flag goes; the boot picker sets it again when it is chosen.
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove 2>/dev/null || true
+
+step "6b. falling back to the previous driver if this one cannot start"
+# The kernel's boot guard (nvrm_off.h) turns the driver off after two starts in a row that never brought the display
+# up, so the Mac reaches a desktop on the firmware's framebuffer. This one-shot job then puts the previous driver back
+# from this install's backup and restarts once. It removes itself as soon as the new driver has shown its display
+# (nullmoth-nv-ok), so nothing keeps running on a Mac where the update worked. A fresh install has no previous driver to
+# go back to: the guard still keeps the Mac usable, and nothing is restored.
+nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-starts 2>/dev/null || true
+nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-ok 2>/dev/null || true
+LG=/Library/NullMoth/lastgood.sh; LGP=/Library/LaunchDaemons/com.nullmoth.lastgood.plist
+launchctl bootout system/com.nullmoth.lastgood 2>/dev/null || true
+rm -f "$LG" "$LGP"
+if [ -d "$BK/NVRM.kext" ]; then
+  cat > "$LG.tmp" <<EOF || die "write the fallback job"
+#!/bin/bash
+# Written by the NVIDIA driver install: restores the driver in $BK if the installed one cannot start.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+BK='$BK'; LOG=/Library/NullMoth/lastgood.log; V=7C436110-AB2A-4BBB-A880-FE41995C9F82
+done_job() { launchctl bootout system/com.nullmoth.lastgood 2>/dev/null; rm -f /Library/LaunchDaemons/com.nullmoth.lastgood.plist /Library/NullMoth/lastgood.sh; }
+if nvram \$V:nullmoth-nv-ok >/dev/null 2>&1; then echo "\$(date) the new driver brought its display up; keeping it" >> \$LOG; done_job; exit 0; fi
+v=\$(nvram \$V:nullmoth-nv-starts 2>/dev/null | cut -f2)
+case "\$v" in %0[2-9a-f]|%[1-9a-f]?) ;; *) exit 0;; esac
+[ -d "\$BK/NVRM.kext" ] || { echo "\$(date) the driver turned itself off but its backup \$BK is gone" >> \$LOG; done_job; exit 0; }
+echo "\$(date) the new driver did not bring the display up twice; restoring the previous driver from \$BK" >> \$LOG
+for k in $KEXTS; do rm -rf "$EXT/\$k.kext"; [ ! -e "\$BK/\$k.kext" ] || ditto "\$BK/\$k.kext" "$EXT/\$k.kext"; done
+for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do rm -rf "$GB/\$b"; [ ! -e "\$BK/\$b" ] || ditto "\$BK/\$b" "$GB/\$b"; done
+rm -rf /Library/NullMoth/kexts "$FW"
+[ ! -d "\$BK/kexts" ] || ditto "\$BK/kexts" /Library/NullMoth/kexts
+[ ! -d "\$BK/nvfw" ] || ditto "\$BK/nvfw" "$FW"
+if [ -f "\$BK/AuxiliaryKernelExtensions.kc" ]; then cp -p "\$BK/AuxiliaryKernelExtensions.kc" "$KC"; else rm -f "$KC"; fi
+[ ! -f "\$BK/os-major" ] || cp -p "\$BK/os-major" /Library/NullMoth/os-major
+nvram -d \$V:nullmoth-nv-starts 2>/dev/null
+echo "previous" > /Library/NullMoth/driver-restored
+done_job
+echo "\$(date) previous driver restored; restarting" >> \$LOG
+shutdown -r now
+EOF
+  chmod 755 "$LG.tmp" && chown root:wheel "$LG.tmp" && mv -f "$LG.tmp" "$LG" || die "install the fallback job"
+  cat > "$LGP" <<EOF || die "write the fallback job's plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Label</key><string>com.nullmoth.lastgood</string>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>$LG</string></array>
+<key>RunAtLoad</key><true/></dict></plist>
+EOF
+  chmod 644 "$LGP" && chown root:wheel "$LGP" || die "fallback job permissions"
+  ok "previous driver kept as the fallback ($BK)"
+else
+  ok "no previous driver to fall back to (first install)"
+fi
 ba=$(nvram boot-args 2>/dev/null | cut -f2-)
 for a in nvfb=1 nvaccel=1; do case " $ba " in *" $a "*) ;; *) echo "   NOTE: boot-args lack '$a' — add it in your OpenCore config.plist (README: Install — by hand), or let the 1401 Mac app set OpenCore up";; esac; done
 
