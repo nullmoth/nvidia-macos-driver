@@ -319,6 +319,7 @@ LG=/Library/NullMoth/lastgood.sh; LGP=/Library/LaunchDaemons/com.nullmoth.lastgo
 launchctl bootout system/com.nullmoth.lastgood 2>/dev/null || true
 rm -f "$LG" "$LGP"
 if [ -d "$BK/NVRM.kext" ]; then
+  mkdir -p /Library/NullMoth /Library/LaunchDaemons || die "create the fallback job's folders"
   cat > "$LG.tmp" <<EOF || die "write the fallback job"
 #!/bin/bash
 # Written by the NVIDIA driver install: restores the driver in $BK if the installed one cannot start.
