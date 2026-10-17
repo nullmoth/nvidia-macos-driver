@@ -1485,8 +1485,18 @@ NV_STATUS NV_API_CALL nv_acpi_dsm_method(nv_state_t *nv, NvU8 *pAcpiDsmGuid, NvU
         *pSize = (NvU16)len;
     }
     OSSafeReleaseNULL(o);
-    static unsigned logged;
-    if (logged < 8) { logged++; kprintf("NVRM-xnu: NBCI _DSM 0x%x -> 0x%x (%u B)\n", acpiDsmSubFunction, st, (unsigned)*pSize); }
+    // One line per subfunction, every GETBACKLIGHT call. A flat cap of 8 lines was spent by the support query and
+    // the GETOBJBYTYPE fetches at GPU start, so a laptop log never showed whether the backlight table was asked for.
+    // For the support query the first word is the firmware's subfunction bitmask (bit 0x14 = GETBACKLIGHT).
+    static NvU32 loggedMask;
+    const NvU32 bit = 1u << (acpiDsmSubFunction & 31);
+    if (acpiDsmSubFunction == NV_NBCI_FUNC_GETBACKLIGHT || !(loggedMask & bit)) {
+        loggedMask |= bit;
+        NvU32 word = 0;
+        if (st == NV_OK && *pSize >= sizeof(word)) memcpy(&word, pOutData, sizeof(word));
+        kprintf("NVRM-xnu: NBCI _DSM 0x%x -> 0x%x (%u B%s0x%x)\n", acpiDsmSubFunction, st, (unsigned)*pSize,
+                acpiDsmSubFunction == NV_NBCI_FUNC_GETBACKLIGHT ? ", backlight table, first word " : ", first word ", word);
+    }
     return st;
 }
 void  NV_API_CALL nv_get_screen_info(nv_state_t *nv, NvU64 *pa, NvU32 *w, NvU32 *h, NvU32 *depth, NvU32 *pitch, NvU64 *size)
