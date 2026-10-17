@@ -1,0 +1,52 @@
+--- a/src/nvkms-rm.c
++++ b/src/nvkms-rm.c
+@@ -5738,13 +5738,25 @@
+     NV0073_CTRL_SYSTEM_GET_INTERNAL_DISPLAYS_PARAMS dispParams = { 0 };
+     NvU32 displayMask, displayId;
+     NvU32 brightness;
++
++    NV_STATUS internalStatus;
+ 
+     nvAssert(pDispEvo->backlightDevice == NULL);
+ 
+-    if (nvRmApiControl(nvEvoGlobal.clientHandle,
+-                       pDevEvo->displayCommonHandle,
+-                       NV0073_CTRL_CMD_SYSTEM_GET_INTERNAL_DISPLAYS,
+-                       &dispParams, sizeof(dispParams)) != NV_OK) {
++    /*
++     * A laptop whose panel hangs off this GPU gets no brightness control when no backlight is registered here, and
++     * nothing recorded why: the internal display mask and the brightness query are both answered by the GPU
++     * firmware. One line per step so a kernel log says which answer stopped the registration.
++     */
++    internalStatus = nvRmApiControl(nvEvoGlobal.clientHandle,
++                                    pDevEvo->displayCommonHandle,
++                                    NV0073_CTRL_CMD_SYSTEM_GET_INTERNAL_DISPLAYS,
++                                    &dispParams, sizeof(dispParams));
++    nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                 "backlight: internal displays status 0x%x, mask 0x%x, available mask 0x%x",
++                 internalStatus, dispParams.internalDisplaysMask,
++                 dispParams.availableInternalDisplaysMask);
++    if (internalStatus != NV_OK) {
+         return;
+     }
+ 
+@@ -5765,6 +5777,10 @@
+                                 NV0073_CTRL_CMD_SPECIFIC_GET_BACKLIGHT_BRIGHTNESS,
+                                 &params, sizeof(params));
+ 
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                     "backlight: display 0x%x brightness query status 0x%x, level %u",
++                     displayId, status, params.brightness);
++
+         if (status == NV_OK)
+         {
+             brightness = params.brightness;
+@@ -5775,6 +5791,8 @@
+     if (displayMask == 0)
+     {
+         /* No internal display has backlight */
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                     "backlight: no internal display answered the brightness query, none registered");
+         return;
+     }
+ 
