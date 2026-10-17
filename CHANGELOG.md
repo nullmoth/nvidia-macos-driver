@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.5
+
+Stability
+- The login screen no longer stays black for a minute after the display comes up. The driver waited 60 seconds before
+  letting the compositor's frames reach the panel, on the assumption that the screen was already showing them another
+  way; on macOS 26 it was not, so every boot sat on a black login screen for exactly that minute
+
 ## 2.3.4
 
 Pre-release for the early-updates testers; it becomes the general release only after every GPU generation passes the
