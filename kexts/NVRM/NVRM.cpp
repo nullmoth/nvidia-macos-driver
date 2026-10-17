@@ -791,7 +791,7 @@ void NVRM::autoGo(void *p0, wait_result_t)
                 s->release(); thread_terminate(current_thread()); return;
             }
             int f = -99; nvrmSysW("debug.nvaccel_iop_flip", 1); nvrmSysR("debug.nvaccel_iop_flip", &f);
-            LOG("auto-go: flip debug.nvaccel_iop_flip=%d (60 s after the release)", f);
+            LOG("auto-go: flip debug.nvaccel_iop_flip=%d (right after the release)", f);
             s->setProperty("nvrm-flip", f == 1 ? "on" : "FAILED");
         }
     }
