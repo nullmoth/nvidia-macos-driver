@@ -9,6 +9,7 @@
 #import <Metal/Metal.h>
 #import <IOSurface/IOSurface.h>
 #include "nvmtl_vk.h"
+#include "nvmtl_cmd_refusal.h"
 
 static inline NSMutableData *nvmtl_fc_storage(NSUInteger count) {
     const NSUInteger stride = 2 * sizeof(uint32_t) + sizeof(void *) + 16;

@@ -343,6 +343,15 @@ extern "C" { IOMemoryDescriptor *nv_pm_ram_submd(NvU64, NvU64, int); bool nv_pm_
 OSDefineMetaClassAndStructors(NVRM, IOService)
 static bool gRmInitDone = false;
 
+// Turing (TU102/TU104/TU106/TU117 = 0x1E00-0x1FFF, TU116 = 0x2180-0x21FF) needs about ten seconds after the BAR1 move
+// before the display can be armed: its GSP firmware is still settling, and arming earlier left a GTX 1660 SUPER and an
+// RTX 2070 SUPER stuck at boot. The installer used to be the only place that asked for this (nvrmsettle=10000), and it
+// matched only display-class (0300) cards, so a muxless laptop card (class 0302) or a machine whose boot arguments were
+// rewritten started with the 0.5 s default. The driver now knows the family itself; the boot argument still overrides.
+static inline bool nvrmIsTuringDeviceId(unsigned int id)
+{
+    return (id >= 0x1E00 && id <= 0x1FFF) || (id >= 0x2180 && id <= 0x21FF);
+}
 static inline bool nvrmNameIsUnknown(const char *s)
 {
     static const char u[] = "Unknown";
@@ -381,6 +390,13 @@ bool NVRM::start(IOService *provider)
     if (!fPCI) return false;
     gNVRMService = this;
     nv_xnu_log_init();
+    // Say which build is running, first thing. A machine reported "2.3.2" from the app while the kernel collection still
+    // held a kext from before 2.1.0 (its BAR1 line used wording that version had replaced), and nothing in the log said
+    // so: the installed bundle and the loaded kext can differ, and only the loaded one knows what it is. The loader
+    // stamps this kext's kmod_info with the bundle version before start; the OSKextGetCurrent* helpers would say the
+    // same but live in libkmod's c_start.o next to a second _start, which this kext already defines.
+    LOG("NVRM kext %s (%s) starting", kmod_info.version, kmod_info.name);
+    setProperty("nvrm-kext-version", kmod_info.version);
     {
         static bool sysctlsUp;
         if (!sysctlsUp) {
@@ -427,7 +443,7 @@ bool NVRM::start(IOService *provider)
     {
         char nogo[8] = { 0 };
         thread_t th = THREAD_NULL;
-        fAutoGoSettleMs = bar1Placed ? 500 : 100000;
+        fAutoGoSettleMs = bar1Placed ? (nvrmIsTuringDeviceId(nv->pci_info.device_id) ? 10000 : 500) : 100000;
         { uint32_t ms = 0; if (PE_parse_boot_argn("nvrmsettle", &ms, sizeof(ms))) fAutoGoSettleMs = ms; }
         if (PE_parse_boot_argn("-nvrmnogo", nogo, sizeof(nogo))) {
             setProperty("nvrm-autogo", "off (-nvrmnogo)"); LOG("auto-go OFF (-nvrmnogo): idle until `nvrmctl go <pass>`");
@@ -686,9 +702,13 @@ void NVRM::autoGo(void *p0, wait_result_t)
     // reset machines that were still starting (7 reports, RTX 2070 SUPER/3050/3060/3070, GTX 1660 SUPER, Quadro T2000,
     // in 1.12). Say what is happening and how to avoid it, every 15 s, on the same screen.
     if (s->fAutoGoSettleMs > 5000) {
-        LOG("starting the NVIDIA card: waiting %u s before it takes over the screen, because its memory window (BAR1) "
-            "is too small to move off the boot screen. This is not a freeze. To start in about a second instead, enable "
-            "\"Above 4G Decoding\" and \"Resizable BAR\" in the BIOS.", s->fAutoGoSettleMs / 1000);
+        if (s->fBar1Placed)
+            LOG("starting the NVIDIA card: waiting %u s for the card's firmware to settle before it takes over the "
+                "screen. This is not a freeze.", s->fAutoGoSettleMs / 1000);
+        else
+            LOG("starting the NVIDIA card: waiting %u s before it takes over the screen, because its memory window (BAR1) "
+                "is too small to move off the boot screen. This is not a freeze. To start in about a second instead, enable "
+                "\"Above 4G Decoding\" and \"Resizable BAR\" in the BIOS.", s->fAutoGoSettleMs / 1000);
         for (uint32_t left = s->fAutoGoSettleMs; left > 0;) {
             const uint32_t step = left > 15000 ? 15000 : left;
             IOSleep(step); left -= step;

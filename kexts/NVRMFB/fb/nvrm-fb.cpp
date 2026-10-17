@@ -237,6 +237,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     IOService *pciNub();
     IOMemoryDescriptor *fBarMem = nullptr; IOMemoryMap *fBarMap = nullptr;
     void *fBarKva = nullptr; NvU64 fBarLen = 0;
+    bool fSpareIndex = false;   // kapiInit stopped because this index has no display to drive (expected, not a failure)
     void surveyBar1();
     bool fConsoleAperture = false;
     NvU64 fBar1Base = 0;
@@ -386,6 +387,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     static void hotplugFire(thread_call_param_t p0, thread_call_param_t);
     static void flipWake(unsigned head);
     bool waitFlipDone(uint64_t limitUs);
+    void flipFaultLog(const char *why);
     bool kapiInit();
     bool applyMode();
     void hudDraw();
@@ -803,6 +805,7 @@ bool NVRMNVDAFramebuffer::kapiInit()
     if (gNDpyBoot < 0) gNDpyBoot = gNDpy;
     if (gNDpy <= 0 || fIndex >= (unsigned)gNDpy) {
         FBLOG("index %u: only %d display(s) connected -- nothing to drive, not starting", fIndex, gNDpy);
+        fSpareIndex = gNDpy > 0;
         return false;
     }
     {
@@ -1371,6 +1374,54 @@ static int gFlipLatchWaits = 0, gFlipLatchTimeouts = 0, gFlipLatchMaxUs = 0, gFl
 // A flip still pending this long after its submit is a display that is not flipping (the head is faulted, as before).
 // Inside it, a pending flip is only late: the frame path skips one present and the mode-set path waits on.
 static const uint64_t kFlipStuckUs = 100000;
+// What the compositor's presents did over a window of activity, one line per head, so a "windows stutter, cursor smooth"
+// report is decided by the log alone: flips per second against the panel rate, how many missed their vblank, how many
+// presents were skipped for a flip still on its way, and the longest completion wait. A window opens at the first
+// frame-path present after the previous one closed and closes after 10 s; quiet windows (an idle desktop) print
+// nothing, and the number of lines is capped so a long session cannot flood the log. A pause of more than two seconds
+// between presents starts the window over: five seconds of smooth dragging, a minute of nothing, then one present would
+// otherwise close as "13 flips/s" and read as starvation.
+struct NVPresentWindow { uint64_t t0Abs, lastAbs; uint32_t flips, over, late, maxUs; };
+static NVPresentWindow gPresentWin[8];
+static uint32_t gPresentLines[8];
+static const uint64_t kPresentWindowNs = 10000000000ull;
+static const uint64_t kPresentIdleNs = 2000000000ull;
+static char gPresentMsg[240];
+// True when the window closed with a line to print, in gPresentMsg. The caller prints it with IOLog and kprintf only: FBLOG's
+// trace allocates, and this runs on the present path under the display gate.
+#define PRESENT_STATS_LOG() do { IOLog("NVRM-fb: %s\n", gPresentMsg); kprintf("NVRM-fb: %s\n", gPresentMsg); } while (0)
+static bool presentStatsNote(unsigned head, uint64_t boundUs, bool flipped, bool over, bool late, uint32_t waitUs)
+{
+    if (head >= 8) return false;
+    NVPresentWindow &w = gPresentWin[head];
+    const uint64_t now = mach_absolute_time();
+    if (w.lastAbs) {
+        uint64_t idle = 0; absolutetime_to_nanoseconds(now - w.lastAbs, &idle);
+        if (idle > kPresentIdleNs) w = NVPresentWindow();
+    }
+    w.lastAbs = now;
+    if (!w.t0Abs) w.t0Abs = now;
+    if (flipped) w.flips++;
+    if (over) w.over++;
+    if (late) w.late++;
+    if (waitUs > w.maxUs) w.maxUs = waitUs;
+    uint64_t ns = 0; absolutetime_to_nanoseconds(now - w.t0Abs, &ns);
+    if (ns < kPresentWindowNs) return false;
+    const uint32_t perSec = (uint32_t)(((uint64_t)w.flips * 1000000000ull + ns / 2) / ns);
+    // flipWaitUs() is one refresh period and a quarter, so the period is four fifths of the bound
+    const uint64_t periodUs = boundUs * 4 / 5;
+    const uint32_t panelHz = periodUs ? (uint32_t)((1000000ull + periodUs / 2) / periodUs) : 0;
+    // 60 flips in a window is an animating desktop, whatever its rate; a few per window is the clock or a cursor blink
+    const bool busy = w.flips >= 60 || w.over || w.late;
+    const bool print = busy && (gPresentLines[head] < 40 || (gPresentLines[head] % 10) == 0);
+    if (print)
+        snprintf(gPresentMsg, sizeof gPresentMsg, "present stats head %u: %u flips in %llu ms (%u/s, panel %u Hz), %u not on the "
+                 "panel within a refresh period and a quarter, %u presents skipped for a flip still pending, longest completion wait %u us",
+                 head, w.flips, (unsigned long long)(ns / 1000000ull), perSec, panelHz, w.over, w.late, w.maxUs);
+    if (busy) gPresentLines[head]++;
+    w = NVPresentWindow();
+    return print;
+}
 // How long a committed flip can take to reach the panel: it latches at the next vblank, so one refresh period from the
 // mode's raster and pixel clock, plus a quarter period for the completion write and the 250 us re-read. A constant
 // 100 ms here held WindowServer's frame for six 60 Hz periods, or sixteen at 165 Hz, whenever a flip ran late.
@@ -1399,6 +1450,14 @@ void NVRMNVDAFramebuffer::publishFlipWait()
 {
     setProperty("NVRMFlipWaitUs", (unsigned long long)flipWaitUs(), 64);
 }
+// The line a head fault leaves in the kernel log: how long the flip had been pending and what the latch counters read,
+// so a log that ends in a display failure says whether the head faulted and after how long.
+void NVRMNVDAFramebuffer::flipFaultLog(const char *why)
+{
+    uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - fFlipSubmitAbs, &ns);
+    FBLOG("presentation blocked: %s on head %u (%llu us since its submit; latch waits %d timeouts %d late %d max %d us)",
+          why, fHead, (unsigned long long)(ns / 1000), gFlipLatchWaits, gFlipLatchTimeouts, gFlipLatchLate, gFlipLatchMaxUs);
+}
 NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig *cfg,
                                             struct NvKmsKapiModeSetReplyConfig *rep, NvBool commit, bool bootstrap,
                                             bool cursorOnly, bool frame)
@@ -1418,11 +1477,12 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
         int prior = priorFlipState();
         while (prior == kPriorLate && !frame) prior = priorFlipState();
         if (prior == kPriorStuck) {
-            FBLOG("presentation blocked: prior completion unavailable on head %u", fHead);
+            flipFaultLog("prior completion unavailable");
             fSubmissionFaulted = true; return NV_FALSE;
         }
         if (prior == kPriorLate) {
             OSIncrementAtomic((volatile SInt32 *)&gFlipLatchLate);
+            if (frame && presentStatsNote(fHead, flipWaitUs(), false, false, true, 0)) PRESENT_STATS_LOG();
             rep->flipResult = NV_KMS_FLIP_RESULT_IN_PROGRESS; return NV_FALSE;
         }
     }
@@ -1468,6 +1528,7 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
         uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - latch0, &ns);
         const int us = (int)(ns / 1000);
         if (us > gFlipLatchMaxUs) gFlipLatchMaxUs = us;
+        if (frame && presentStatsNote(fHead, flipWaitUs(), true, false, false, (uint32_t)us)) PRESENT_STATS_LOG();
         return NV_TRUE;
     }
     OSIncrementAtomic((volatile SInt32 *)&gFlipLatchTimeouts);
@@ -1480,11 +1541,16 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
         FBLOG("flip on head %u not on the panel within %llu us (#%u) - waiting for it to land",
               fHead, (unsigned long long)flipWaitUs(), fLatchLateLogs);
     for (;;) {
-        if (waitFlipDone(flipWaitUs())) return NV_TRUE;
+        if (waitFlipDone(flipWaitUs())) {
+            // a late flip is reported with the whole wait it took, not the period it first missed
+            uint64_t late = 0; absolutetime_to_nanoseconds(mach_absolute_time() - latch0, &late);
+            if (frame && presentStatsNote(fHead, flipWaitUs(), true, true, false, (uint32_t)(late / 1000))) PRESENT_STATS_LOG();
+            return NV_TRUE;
+        }
         uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - submit0, &ns);
         if (ns / 1000 >= kFlipStuckUs) break;
     }
-    FBLOG("presentation blocked: submitted completion unavailable on head %u", fHead);
+    flipFaultLog("submitted completion unavailable");
     fSubmissionFaulted = true; return NV_FALSE;
 }
 
@@ -2126,8 +2192,13 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     if (!kapiOk && fOwnsHead) { gHeadsTaken &= ~(1u << fHead); fOwnsHead = false; }
     IORecursiveLockUnlock(sl);
     if (!kapiOk) {
-        FBLOG("kapiInit failed -- refusing to start. super::start() was NOT called, so there is "
-              "nothing half-registered to unwind and the machine stays up without a display.");
+        // nvfbheads=4 starts four framebuffer instances; the ones past the connected displays have nothing to drive and
+        // stop here on every healthy boot. Say so, so a log with one lit head is not read as a refused framebuffer.
+        if (fSpareIndex)
+            FBLOG("index %u: spare framebuffer instance (a display-less index) -- not started, expected", fIndex);
+        else
+            FBLOG("kapiInit failed -- refusing to start. super::start() was NOT called, so there is "
+                  "nothing half-registered to unwind and the machine stays up without a display.");
         return false;
     }
     setName("NVRMFramebuffer");
@@ -2888,9 +2959,22 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
     SInt64 before = OSAddAtomic64((SInt64)want, &gVramMappedBytes) + gVramParkedBytes;
     if (before + (SInt64)want > budget) {
         OSAddAtomic64(-(SInt64)want, &gVramMappedBytes);
-        FBLOG("nvAllocVram(%llu): REFUSED — BAR1 budget spent (%lld of %llu bytes). "
-              "This is the resizable-BAR ceiling, not a VRAM shortage.",
-              (unsigned long long)want, (long long)before, (unsigned long long)budget);
+        // A full 256 MB window is refused thousands of times in a session (one size, retried every frame: 1,413 lines in
+        // one user log), and each line costs a kernel log write on the path that is already out of room. Log the first
+        // eight, then every 256th with the running count, and say once who holds the window: grants against releases
+        // tell a working set from a leak.
+        static volatile SInt32 refused = 0;
+        const SInt32 nRefused = OSIncrementAtomic(&refused) + 1;
+        if (nRefused <= 8 || (nRefused & 255) == 0)
+            FBLOG("nvAllocVram(%llu): REFUSED (#%d) — BAR1 budget spent (%lld of %llu bytes). "
+                  "This is the resizable-BAR ceiling, not a VRAM shortage.",
+                  (unsigned long long)want, (int)nRefused, (long long)before, (unsigned long long)budget);
+        if (nRefused == 1)
+            FBLOG("BAR1 full: %lld grants (%lld bytes) vs %lld releases (%lld bytes); live %lld, console parks %lld bytes "
+                  "in %d slots, display %lld, budget %lld, BAR1 %llu",
+                  (long long)gCntGrant, (long long)gCntGrantBytes, (long long)gCntRelease, (long long)gCntReleaseBytes,
+                  (long long)gVramMappedBytes, (long long)gVramParkedBytes, gNParkedForever, (long long)gVramDisplayBytes,
+                  (long long)budget, (unsigned long long)fBarLen);
         return false;
     }
 
@@ -3176,7 +3260,7 @@ bool NVRMNVDAFramebuffer::flipToMemory(struct NvKmsKapiMemory *mem, unsigned w, 
             const int prior = priorFlipState();
             if (prior != kPriorDone) {
                 if (prior == kPriorStuck) {
-                    FBLOG("presentation blocked: prior completion unavailable on head %u (surface reuse)", fHead);
+                    flipFaultLog("prior completion unavailable (surface reuse)");
                     fSubmissionFaulted = true;
                 }
                 if (prior == kPriorLate) OSIncrementAtomic((volatile SInt32 *)&gFlipLatchLate);

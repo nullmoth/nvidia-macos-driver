@@ -5026,7 +5026,12 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     // member) or in its -dealloc - about 14 Macs from 1.15 to 2.0.1 (NotificationCenter, Music, mediaanalysisd, games).
     // The set itself takes a lock for every operation; only its creation was unguarded. The first-use checks now never fire.
     cb->_resources = [NVMTLResSet new];
-    if (nvmtl_vk_cmd_begin(&_q, &cb->_c)) { nvlog("queue: command buffer begin FAILED"); return nil; }
+    if (nvmtl_vk_cmd_begin(&_q, &cb->_c)) {
+        // WindowServer asserts on this nil ("Failed to get a MTLCommandBuffer"); the cause is the "vk: command buffer
+        // refused" line just above, and for a disabled backend the "disabling backend" line before it.
+        nvlog("queue: command buffer begin FAILED in %s - the caller gets nil", getprogname());
+        return nil;
+    }
     return cb;
 }
 - (id<MTLCommandBuffer>)commandBufferWithUnretainedReferences { return [self commandBuffer]; }
