@@ -292,6 +292,9 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     // This instance exists because a display appeared after boot (see gNDpyBoot), and its connect handler has already
     // been fired once -- see connectNotifyFire and enableController.
     bool fHotplugBorn = false, fConnectFired = false;
+    // A different monitor was plugged into this framebuffer's connector (its EDID changed): see adoptSwappedDisplay.
+    bool fEdidSwapped = false;
+    void adoptSwappedDisplay();
     static void connectNotifyFire(thread_call_param_t p0, thread_call_param_t);
     volatile SInt32 fStopping = 0;
     void scheduleCall(thread_call_t call, uint64_t deadline);
@@ -1145,6 +1148,37 @@ void NVRMNVDAFramebuffer::connectNotifyFire(thread_call_param_t p0, thread_call_
     FBLOG("fb%u -> connect interrupt (the framework's registered handler)", me->fIndex);
     me->fConnect.proc(me->fConnect.target, me->fConnect.ref);
 }
+// A different monitor on this framebuffer's connector: take its EDID (what getDDCBlock hands macOS), its physical size,
+// its display-audio ELD, and the scaler/raster ceilings its own mode list allows. The scanout allocation made at start
+// is kept: it backs the surface WindowServer is drawing into, and it cannot be replaced under it. A new monitor whose
+// largest raster needs more than that allocation is offered what fits (the mode check refuses the rest as larger than
+// the scanout allocation) and gets its full size at the next start; the log says so.
+void NVRMNVDAFramebuffer::adoptSwappedDisplay()
+{
+    if (fIndex >= (unsigned)gNDpy) return;
+    const struct nvrm_dpy_rec *r = &gDpy[fIndex];
+    fEdidSize = (NvU16)(r->edidSize > sizeof fEdid ? sizeof fEdid : r->edidSize);
+    nvu_copy(fEdid, r->edid, fEdidSize);
+    nvrmEdidPanelSizeMm(fEdid, fEdidSize, &fEdidMmW, &fEdidMmH);
+    if (!fInternal && fEdidSize >= 128) {
+        uint8_t eld[NVRM_ELD_MAX];
+        size_t eldn = nvrm_build_eld(fEdid, fEdidSize, NVRM_ELD_CONN_HDMI, eld);
+        if (eldn) { if (OSData *d = OSData::withBytes(eld, (unsigned)eldn)) { setProperty("nvda-eld", d); d->release(); } }
+        else removeProperty("nvda-eld");
+    }
+    const NvU64 keepAlloc = fAllocSize;
+    const NvU32 oldW = fScalerMaxW, oldH = fScalerMaxH;
+    computeScanoutCaps(fPitchAlign);
+    const bool short_ = fAllocSize > keepAlloc;
+    fAllocSize = keepAlloc;
+    // ceilings past the allocation would let a desktop scan out beyond the end of its memory: keep the ones that fit
+    if (short_) { fScalerMaxW = oldW; fScalerMaxH = oldH; fRasterMaxW = oldW; }
+    fEdidHits = 0;
+    FBLOG("fb%u: adopted the new monitor's EDID (%u B, panel %ux%u mm); ceilings %ux%u -> %ux%u%s", fIndex,
+          (unsigned)fEdidSize, (unsigned)fEdidMmW, (unsigned)fEdidMmH, (unsigned)oldW, (unsigned)oldH,
+          (unsigned)fScalerMaxW, (unsigned)fScalerMaxH,
+          short_ ? "; its largest modes need more scanout memory than this start reserved - full size after a restart" : "");
+}
 void NVRMNVDAFramebuffer::hotplugKick()
 {
     if (!gHotplug) return;
@@ -1166,8 +1200,8 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
     IORecursiveLock *sl = startLock();
     if (sl) IORecursiveLockLock(sl);
     for (NvU32 i = 0; i < n; i++) {
-        bool known = false;
-        for (int k = 0; k < gNDpy; k++) if (gDpy[k].handle == handles[i]) { known = true; break; }
+        bool known = false; int kdpy = -1;
+        for (int k = 0; k < gNDpy; k++) if (gDpy[k].handle == handles[i]) { known = true; kdpy = k; break; }
         nvu_zero(dd, sizeof *dd); dd->handle = handles[i];
         bool dynOk = me->fKms->getDynamicDisplayInfo(me->fDev, dd);
         if (known) {
@@ -1176,11 +1210,26 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
             // that was seen disconnected and is connected again gets its head lit with the same full mode set the
             // display-wake path uses (reflip). Only on that transition, so other display events cause no modeset.
             if (!dynOk) continue;
+            // NVKMS names a display by its connector, so a DIFFERENT monitor plugged into the same port comes back as
+            // the same handle. Its EDID is what tells them apart: the old EDID stayed published, and macOS kept the
+            // previous monitor's name, size and modes (a new monitor still listed as the one it replaced).
+            bool swapped = false;
+            if (dd->connected && kdpy >= 0 && dd->edid.bufferSize >= 128) {
+                const NvU32 sz = dd->edid.bufferSize > sizeof gDpy[kdpy].edid ? (NvU32)sizeof gDpy[kdpy].edid : dd->edid.bufferSize;
+                if (sz != gDpy[kdpy].edidSize || memcmp(gDpy[kdpy].edid, dd->edid.buffer, sz) != 0) {
+                    nvu_copy(gDpy[kdpy].edid, dd->edid.buffer, sz); gDpy[kdpy].edidSize = sz;
+                    swapped = true;
+                    FBLOG("hot-plug: display 0x%x has a different monitor now (EDID %u B, maker %02x%02x product %02x%02x)",
+                          handles[i], (unsigned)sz, dd->edid.buffer[8], dd->edid.buffer[9], dd->edid.buffer[11], dd->edid.buffer[10]);
+                }
+            }
             for (unsigned f = 0; f < sizeof gFBs / sizeof gFBs[0]; f++) {
                 NVRMNVDAFramebuffer *fb = gFBs[f];
                 if (!fb || fb->fDisplay != handles[i]) continue;
                 if (!dd->connected) { if (!fb->fDpyLost) FBLOG("hot-plug: display 0x%x went away (fb %u)", handles[i], fb->fIndex); fb->fDpyLost = true; }
-                else if (fb->fDpyLost && nrelight < sizeof relight / sizeof relight[0]) { fb->fDpyLost = false; fb->retain(); relight[nrelight++] = fb; }
+                else if ((fb->fDpyLost || swapped) && nrelight < sizeof relight / sizeof relight[0]) {
+                    fb->fDpyLost = false; if (swapped) fb->fEdidSwapped = true; fb->retain(); relight[nrelight++] = fb;
+                }
             }
             continue;
         }
@@ -1203,6 +1252,15 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
         bool ok = !OSAddAtomic(0, &fb->fStopping) && !fb->fHeadSlept && fb->reflip();
         FBLOG("hot-plug: display 0x%x is back (fb %u): head %u lit again -> ok %u rc %d",
               fb->fDisplay, fb->fIndex, fb->fHead, (unsigned)ok, fb->fReflipRc);
+        if (fb->fEdidSwapped && !OSAddAtomic(0, &fb->fStopping)) {
+            fb->fEdidSwapped = false;
+            fb->adoptSwappedDisplay();
+            // the framework's connect-change path re-reads the EDID (getDDCBlock), the modes and the display's name,
+            // as it does when a monitor is plugged into a real Mac; the head is lit first so it re-probes a live display
+            if (!gConnectNotify) gConnectNotify = thread_call_allocate(connectNotifyFire, nullptr);
+            uint64_t d; clock_interval_to_deadline(500, kMillisecondScale, &d);
+            if (gConnectNotify) thread_call_enter1_delayed(gConnectNotify, fb, d);
+        }
         fb->release();
     }
     if (!added) return;
