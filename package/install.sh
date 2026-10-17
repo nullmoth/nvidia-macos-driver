@@ -51,6 +51,9 @@ rollback_install() {
   else rm -f "$KC" || failed=1; fi
   if [ -f "$BK/os-major" ]; then cp -p "$BK/os-major" /Library/NullMoth/os-major || failed=1
   else rm -f /Library/NullMoth/os-major || failed=1; fi
+  # the version record follows the files it describes, or Send logs names a version that is not installed
+  if [ -f "$BK/driver-version" ]; then cp -p "$BK/driver-version" /Library/NullMoth/driver-version || failed=1
+  else rm -f /Library/NullMoth/driver-version || failed=1; fi
   return "$failed"
 }
 step() { echo; echo "== $*"; }; ok() { echo "   ok  $*"; }
@@ -220,6 +223,7 @@ for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do [ ! -e
 [ ! -f "$KC" ] || backup_copy "kernel collection" cp -p "$KC" "$BK/AuxiliaryKernelExtensions.kc"
 [ ! -d /Library/NullMoth/kexts ] || backup_copy "cached accelerators" ditto /Library/NullMoth/kexts "$BK/kexts"
 [ ! -f /Library/NullMoth/os-major ] || backup_copy "OS record" cp -p /Library/NullMoth/os-major "$BK/os-major"
+[ ! -f /Library/NullMoth/driver-version ] || backup_copy "version record" cp -p /Library/NullMoth/driver-version "$BK/driver-version"
 [ ! -d "$FW" ] || backup_copy firmware ditto "$FW" "$BK/nvfw"
 ok "backup written"
 
@@ -339,6 +343,7 @@ rm -rf /Library/NullMoth/kexts "$FW"
 [ ! -d "\$BK/nvfw" ] || ditto "\$BK/nvfw" "$FW"
 if [ -f "\$BK/AuxiliaryKernelExtensions.kc" ]; then cp -p "\$BK/AuxiliaryKernelExtensions.kc" "$KC"; else rm -f "$KC"; fi
 [ ! -f "\$BK/os-major" ] || cp -p "\$BK/os-major" /Library/NullMoth/os-major
+if [ -f "\$BK/driver-version" ]; then cp -p "\$BK/driver-version" /Library/NullMoth/driver-version; else rm -f /Library/NullMoth/driver-version; fi
 nvram -d \$V:nullmoth-nv-starts 2>/dev/null
 echo "previous" > /Library/NullMoth/driver-restored
 done_job
