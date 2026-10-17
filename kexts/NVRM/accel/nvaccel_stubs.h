@@ -52,6 +52,13 @@ public:
     void pageoff(IOAccelEvent *, bool, bool *, unsigned long long) APPLE_KEXT_OVERRIDE;
     unsigned int fApLogged = 0;
     IOMemoryDescriptor *fApDesc = nullptr;
+    // Set by the plugin's surface-dirty escape: the allocation cookie of the VRAM the GPU wrote for this resource. The
+    // family's own "VRAM newest" bit can be set on a VRAM copy nothing ever rendered into (freshly allocated,
+    // zero-filled); a zero-copy flip of that copy, or a page-off from it, puts a black frame on the panel while the real
+    // pixels sit in the surface's system memory. The display pipe compares this with the current allocation's cookie
+    // before trusting the family bit, so VRAM re-allocated under the same resource counts as unwritten again (a parked
+    // allocation that comes back keeps its cookie, and so its record). 0 = never written.
+    unsigned long long fPluginWroteCookie = 0;
 };
 OSDefineMetaClassAndStructors(NVResource, IOAccelResource2)
 class NVSysMemory : public IOAccelSysMemory {

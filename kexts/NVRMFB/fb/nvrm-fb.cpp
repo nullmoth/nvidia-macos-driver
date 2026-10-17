@@ -267,6 +267,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     NvU64 fScanoutBarBytes = 0, fCursorBarBytes = 0;
     unsigned fModeSwitches = 0, fValidateCalls = 0, fValidateOk = 0;
     bool fBootInDT = false;
+    bool fKmsModesLogged = false;   // the per-mode NVKMS listing is printed once, on the first enumeration
     int dtIndex(IODisplayModeID id) const;
     bool edidModeFor(const IODetailedTimingInformationV2 *d, struct NvKmsKapiDisplayMode *m);
     unsigned addKmsRefreshModes(unsigned n);
@@ -2278,12 +2279,18 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
         struct NvKmsKapiDisplayMode m = {}; NvBool valid = NV_FALSE, pref = NV_FALSE;
         int r = fKms->getDisplayMode(fDev, fDisplay, i, &m, &valid, &pref);
         if (r < 0) break;
-        if (r == 0 || !valid) continue;
         const struct NvKmsKapiDisplayModeTimings &k = m.timings;
+        const NvU64 tot = (NvU64)k.hTotal * k.vTotal;
+        const NvU32 hz = tot ? (NvU32)((k.pixelClockHz + tot / 2) / tot) : 0;
+        // The first pass (before macOS proposes anything) lists every mode NVKMS enumerated and what became of it, so
+        // a report with one refresh rate shows whether the panel's EDID offered another or NVKMS dropped it.
+        if (!fromMac && !fKmsModesLogged)
+            FBLOG("fb%u NVKMS mode %u: %ux%u @%u Hz pclk %u valid %u preferred %u%s%s", fIndex, i, k.hVisible, k.vVisible, hz,
+                  k.pixelClockHz, (unsigned)valid, (unsigned)pref, r == 0 ? " (empty slot)" : "",
+                  (k.flags.interlaced || k.flags.doubleScan) ? " interlaced/doublescan" : "");
+        if (r == 0 || !valid) continue;
         if (k.flags.interlaced || k.flags.doubleScan || !k.pixelClockHz || k.hTotal <= k.hVisible || k.vTotal <= k.vVisible ||
             k.hSyncStart < k.hVisible || k.hSyncEnd < k.hSyncStart || k.vSyncStart < k.vVisible || k.vSyncEnd < k.vSyncStart) continue;
-        const NvU64 tot = (NvU64)k.hTotal * k.vTotal;
-        const NvU32 hz = (NvU32)((k.pixelClockHz + tot / 2) / tot);
         int tmpl = -1; bool have = false, raster = false;
         for (unsigned j = 0; j < n; j++) {
             const IODetailedTimingInformationV2 &d = fDT[j];
@@ -2311,7 +2318,13 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
             NvU32 pitch = 0;
             if (nvrmCheckedPitch(k.hVisible, fPitchAlign, &pitch) && (NvU64)pitch * k.vVisible <= fMemBytes) raster = true;
         }
-        if (have || !raster) continue;
+        if (have || !raster) {
+            if (!fromMac && !fKmsModesLogged)
+                FBLOG("fb%u NVKMS mode %u: not offered (%s)", fIndex, i, have ? "already listed at this rate"
+                      : !fBootW ? "no boot raster yet" : (!bootRaster && !larger) ? "smaller than the boot raster (desktops that size come from macOS's scaled modes)"
+                      : "does not fit the scanout memory or the scaler");
+            continue;
+        }
         IODetailedTimingInformationV2 b;
         if (tmpl >= 0) b = fDT[tmpl];
         else { nvu_zero(&b, sizeof b); b.horizontalActive = k.hVisible; b.verticalActive = k.vVisible; b.signalConfig = kIODigitalSignal; }
@@ -2339,6 +2352,7 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
         FBLOG("fb%u refresh rate from NVKMS: %ux%u @%u Hz (pclk %u) as dt 0x%x", fIndex, k.hVisible, k.vVisible, hz,
               k.pixelClockHz, b.detailedTimingModeID);
     }
+    if (!fromMac) fKmsModesLogged = true;
     setProperty("NVRMRefreshModesAdded", (unsigned long long)added, 32);
     return n;
 }
