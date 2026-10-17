@@ -555,15 +555,17 @@ public:
             const unsigned cls = pci->configRead8(0x0B), sub = pci->configRead8(0x0A);
             const unsigned ven = pci->configRead16(0x00), dev = pci->configRead16(0x02);
 #ifdef NMX_ACCEL
+            static const char *const kind = "AMD/Intel";
             if (cls != 0x03 || (ven != 0x1002 && ven != 0x8086)) {
 #else
+            static const char *const kind = "NVIDIA";
             if (cls != 0x03 || (sub != 0x00 && sub != 0x02) || ven != 0x10de || dev < 0x0020) {
 #endif
-                ALOG("%04x:%04x class %02x.%02x is not an NVIDIA display device we support - not claiming",
-                     ven, dev, cls, sub);
+                ALOG("%04x:%04x class %02x.%02x is not an %s display device we support - not claiming",
+                     ven, dev, cls, sub, kind);
                 return NULL;
             }
-            ALOG("NVIDIA display device %04x:%04x class %02x.%02x - claiming", ven, dev, cls, sub);
+            ALOG("%s display device %04x:%04x class %02x.%02x - claiming", kind, ven, dev, cls, sub);
         }
         return IOGraphicsAccelerator2::probe(provider, score);
     }
