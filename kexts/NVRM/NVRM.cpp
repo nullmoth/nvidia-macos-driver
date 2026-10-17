@@ -48,9 +48,7 @@ __private_extern__ int _kext_apple_cc = __APPLE_CC__;
 
 #define LOG(fmt, ...) do { kprintf("NVRM-xnu: " fmt "\n", ##__VA_ARGS__); IOLog("NVRM-xnu: " fmt "\n", ##__VA_ARGS__); } while (0)
 
-struct nvkms_per_open;
-extern "C" { NvBool nvkms_xnu_load(void); struct nvkms_per_open *nvkms_xnu_open(int pid); void nvkms_xnu_close(struct nvkms_per_open *);
-             int nvkms_xnu_ioctl(struct nvkms_per_open *, NvU32 cmd, void *params, size_t size); int nvkms_xnu_events_available(struct nvkms_per_open *); }
+extern "C" { NvBool nvkms_xnu_load(void); }
 static class NVRM *gNVRMService;
 extern "C" nv_state_t *nv_xnu_gpu_state(void);
 extern "C" void nv_xnu_log_init(void);
@@ -294,14 +292,12 @@ private:
     bool fEverBound = false;
     int  fBound = -1;
     bool fCleaned = false;
-    struct nvkms_per_open *fKms = nullptr;
     IOReturn esc(uint32_t cmd, void *data, uint32_t size);
     static IOReturn sGo(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sEsc(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sGetFd(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sBindFd(OSObject *target, void *reference, IOExternalMethodArguments *args);
-    static IOReturn sKms(OSObject *target, void *reference, IOExternalMethodArguments *args);
-    static IOReturn sKmsEvents(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sRetired(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sWaitEvent(OSObject *target, void *reference, IOExternalMethodArguments *args);
 public:
     volatile UInt32 fEvtSeq = 0;
@@ -1665,7 +1661,6 @@ IOReturn NVRMUserClient::clientClose(void)
     if (!fCleaned) {
         fCleaned = true;
         if (gNvClientsLock && fFd >= 0) { IOLockLock(gNvClientsLock); gNvClients[fFd] = NULL; nv_pm_close(fPm); IOLockUnlock(gNvClientsLock); }
-        if (fKms) { nvkms_xnu_close(fKms); fKms = nullptr; }
         if (fOwner) { NvXnuPmUse pmUse; rm_cleanup_file_private(NULL, nvState(), &fNvfp); }
         if (fMmap.memArea.pRanges) { kern_os_free(fMmap.memArea.pRanges); fMmap.memArea.pRanges = NULL; }
         if (nv_xnu_chat()) kprintf("NVRM-xnu: client fd %d closed\n", fFd);
@@ -1724,8 +1719,9 @@ IOReturn NVRMUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
         { sEsc,   1, kIOUCVariableStructureSize, 0, kIOUCVariableStructureSize },
         { sGetFd, 0, 0, 1, 0 },
         { sBindFd, 1, 0, 0, 0 },
-        { sKms,   1, kIOUCVariableStructureSize, 0, kIOUCVariableStructureSize },
-        { sKmsEvents, 0, 0, 1, 0 },
+        // 4 and 5 opened an NVKMS kernel-space session from user space; retired, kept so sWaitEvent stays 6
+        { sRetired, 0, 0, 0, 0 },
+        { sRetired, 0, 0, 0, 0 },
         { sWaitEvent, 2, 0, 1, 0 },
     };
     if (selector >= sizeof tbl / sizeof tbl[0]) return kIOReturnBadArgument;
@@ -1735,48 +1731,10 @@ IOReturn NVRMUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 extern "C" nv_state_t *nv_xnu_gpu_state(void) { return gNVRMService ? &gNVRMService->fNv : NULL; }
 extern "C" void *nv_xnu_gpu_os_device(void) { return gNVRMService; }
 
-IOReturn NVRMUserClient::sKms(OSObject *target, void *reference, IOExternalMethodArguments *args)
-{
-    NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);
-    if (!me || !me->fOwner) return kIOReturnNotAttached;
-    // The session this opens is an NVKMS kernel-space client, and NVKMS trusts a kernel client's embedded pointers
-    // (flip heads, LUT ramps, clip lists) as kernel addresses. Nothing the driver ships calls this: the display path
-    // reaches NVKMS through its in-kernel API and the Vulkan driver never uses this selector. So it is root-only;
-    // an unprivileged caller would otherwise hand NVKMS pointers it dereferences in the kernel.
-    if (kauth_getuid() != 0) return kIOReturnNotPrivileged;
-    uint32_t cmd = (uint32_t)args->scalarInput[0];
-    uint32_t size = args->structureInputDescriptor ? (uint32_t)args->structureInputDescriptor->getLength() : args->structureInputSize;
-    if (size == 0 || size > (1u << 20)) return kIOReturnBadArgument;
-    if (!me->fKms) { me->fKms = nvkms_xnu_open(me->fPid); if (!me->fKms) { kprintf("NVRM-xnu: nvkms open failed (loaded? pass 2 done?)\n"); return kIOReturnNotReady; } }
-    void *buf = kern_os_malloc(size);
-    if (!buf) return kIOReturnNoMemory;
-    if (args->structureInputDescriptor) {
-        if (args->structureInputDescriptor->prepare() != kIOReturnSuccess) { kern_os_free(buf); return kIOReturnVMError; }
-        args->structureInputDescriptor->readBytes(0, buf, size);
-        args->structureInputDescriptor->complete();
-    } else nvu_memcpy(buf, args->structureInput, size);
-    int rc = nvkms_xnu_ioctl(me->fKms, cmd, buf, size);
-    if (rc) kprintf("NVRM-xnu: nvkms ioctl cmd %u size %u -> FALSE\n", cmd, size);
-    if (args->structureOutputDescriptor) {
-        if (args->structureOutputDescriptor->prepare() == kIOReturnSuccess) {
-            args->structureOutputDescriptor->writeBytes(0, buf, size);
-            args->structureOutputDescriptor->complete();
-        }
-    } else if (args->structureOutput && args->structureOutputSize >= size) {
-        nvu_memcpy(args->structureOutput, buf, size);
-        args->structureOutputSize = size;
-    }
-    kern_os_free(buf);
-    return rc == 0 ? kIOReturnSuccess : kIOReturnError;
-}
-IOReturn NVRMUserClient::sKmsEvents(OSObject *target, void *reference, IOExternalMethodArguments *args)
-{
-    NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);
-    if (!me) return kIOReturnNotAttached;
-    if (kauth_getuid() != 0) return kIOReturnNotPrivileged;   // the NVKMS session sKms opens is root-only
-    args->scalarOutput[0] = nvkms_xnu_events_available(me->fKms);
-    return kIOReturnSuccess;
-}
+// Selectors 4 and 5 handed a caller's buffer to NVKMS as a kernel-space client, which trusts the pointers inside it
+// (flip heads, LUT ramps, clip lists) as kernel addresses: root could make the kernel read and write where it chose.
+// Nothing the driver ships used them; the display path reaches NVKMS through its in-kernel API.
+IOReturn NVRMUserClient::sRetired(OSObject *, void *, IOExternalMethodArguments *) { return kIOReturnUnsupported; }
 IOReturn NVRMUserClient::sGetFd(OSObject *target, void *reference, IOExternalMethodArguments *args)
 {
     NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);

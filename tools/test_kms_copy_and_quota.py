@@ -4,8 +4,9 @@ client table (security report #214, findings 2 and 4).
 
 Finding 2: nvkms_copyin/nvkms_copyout treated an address with the top bit set as a kernel pointer and copied it with
 memcpy, so a value placed in an NVKMS request became an arbitrary kernel read or write. They now refuse such an
-address and only ever copy to or from the calling process. The user-facing NVKMS entry (sKms, sKmsEvents) opens a
-kernel-space NVKMS client, whose embedded pointers NVKMS trusts, so it is root-only.
+address and only ever copy to or from the calling process. The user-facing NVKMS entry (sKms, sKmsEvents) opened a
+kernel-space NVKMS client, whose embedded pointers NVKMS trusts. It was made root-only, and since nothing the driver
+ships called it, selectors 4 and 5 are now retired: no process, root included, can open that session.
 
 Finding 4: one global client table, no per-process limit. A process now holds at most kNvClientsPerPid clients and the
 last kNvClientsReserved slots are kept for system accounts, so WindowServer can always open one.
@@ -41,15 +42,17 @@ def copies_safe(kms):
     return True
 
 
-def kms_root_only(nvrm):
-    """sKms and sKmsEvents both refuse a non-root caller before doing anything else."""
-    for sig in ("IOReturn NVRMUserClient::sKms(", "IOReturn NVRMUserClient::sKmsEvents("):
-        b = body(nvrm, sig)
-        gate = b.find("kauth_getuid() != 0) return kIOReturnNotPrivileged")
-        work = max(b.find("nvkms_xnu_open"), b.find("nvkms_xnu_events_available"))
-        if gate < 0 or (work >= 0 and gate > work):
-            return False
-    return True
+def selectors(nvrm):
+    """The user client's dispatch table, in selector order."""
+    b = body(nvrm, "IOReturn NVRMUserClient::externalMethod(")
+    return re.findall(r"^\s*\{ (\w+),", b[b.index("tbl[] = {"):b.index("};")], re.M)
+
+
+def kms_unreachable(nvrm):
+    """Selectors 4 and 5 are retired stubs, sWaitEvent stays 6 (NVK calls it by number), nothing opens a session."""
+    t = selectors(nvrm)
+    return (t[4:7] == ["sRetired", "sRetired", "sWaitEvent"] and "nvkms_xnu_open" not in nvrm
+            and "return kIOReturnUnsupported;" in body(nvrm, "IOReturn NVRMUserClient::sRetired("))
 
 
 def quota(nvrm):
@@ -67,7 +70,9 @@ kms = (root / "kexts/NVRM/os-nvkms-xnu.cpp").read_text()
 nvrm = (root / "kexts/NVRM/NVRM.cpp").read_text()
 
 check("nvkms_copyin/copyout refuse a kernel-range address and never memcpy", copies_safe(kms))
-check("sKms and sKmsEvents are root-only, gated before the NVKMS session is touched", kms_root_only(nvrm))
+check("selectors 4 and 5 are retired; nothing in user space can open a kernel-space NVKMS session", kms_unreachable(nvrm),
+      str(selectors(nvrm)))
+check("NVKMS has no entry left that opens a session for a user client", "nvkms_xnu_open" not in kms)
 q = quota(nvrm)
 check("a process is limited and system slots are reserved, before a slot is taken", q is not None, str(q))
 if q:
@@ -85,6 +90,6 @@ def old(path):
 
 okms, onvrm = old("kexts/NVRM/os-nvkms-xnu.cpp"), old("kexts/NVRM/NVRM.cpp")
 check("negative control: 1.15.0 memcpys a top-bit address in nvkms_copyin", not copies_safe(okms))
-check("negative control: 1.15.0 lets any caller reach sKms", not kms_root_only(onvrm))
+check("negative control: 1.15.0 dispatches selector 4 to sKms", not kms_unreachable(onvrm) and selectors(onvrm)[4] == "sKms")
 check("negative control: 1.15.0 has no client quota", quota(onvrm) is None)
 sys.exit(1 if fails else 0)
