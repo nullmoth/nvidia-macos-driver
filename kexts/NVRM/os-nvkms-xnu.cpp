@@ -118,12 +118,49 @@ static void kms_close_common(struct nvkms_per_open *popen)
     nvkms_free(popen, sizeof *popen);
 }
 
+// Where an ioctl from the kernel client was refused. NVKMS reports a rejected request through the reply status, and
+// the KAPI layer turns that status into a flip result: a refusal that happens BEFORE NVKMS writes a status (no open
+// device, the GPU not running, a failure inside the ioctl after validation) leaves the status at "success" and shows
+// up one layer up as "accepted 0, flipResult 0". This names that case.
+// Positions in enum NvKmsIoctlCommand: NVKMS_IOCTL_SET_MODE is 9, NVKMS_IOCTL_FLIP is 15.
+enum { kKmsCmdSetMode = 9, kKmsCmdFlip = 15 };
+enum { kKmsRefuseNone = 0, kKmsRefuseNoOpen, kKmsRefusePmTry, kKmsRefusePmWait, kKmsRefuseIoctl };
+static int kms_ioctl_refusal(bool haveOpen, bool pmReady, bool tryPm, bool ioctlOk)
+{
+    if (!haveOpen) return kKmsRefuseNoOpen;
+    if (!pmReady) return tryPm ? kKmsRefusePmTry : kKmsRefusePmWait;
+    return ioctlOk ? kKmsRefuseNone : kKmsRefuseIoctl;
+}
+static const char *const kKmsRefuseName[] = {
+    "ok", "no open NVKMS device", "GPU not running (try-lock: refused at once)", "GPU not running (waited for the resume)",
+    "NVKMS ioctl returned false"
+};
+// The first 8 refusals, then every 64th: a flip refused in a loop must not fill the log.
+static bool kms_refusal_logworthy(unsigned n) { return n <= 8 || (n % 64) == 0; }
+
 static NvBool kms_ioctl_common(struct nvkms_per_open *popen, NvU32 cmd, NvU64 address, size_t size, bool tryPm = false)
 {
     NvBool ret = NV_FALSE;
+    bool haveOpen = false, pmReady = false;
+    int pmState = kKmsPmRunning;
+    const uint64_t t0 = mach_absolute_time();
     IOLockLock(gKmsLock);
-    if (popen->data && kms_pm_wait_locked(tryPm, kKmsPmWaitMs)) ret = nvKmsIoctl(popen->data, cmd, address, size);
+    haveOpen = popen->data != NULL;
+    if (haveOpen && (pmReady = kms_pm_wait_locked(tryPm, kKmsPmWaitMs))) ret = nvKmsIoctl(popen->data, cmd, address, size);
+    pmState = gKmsPmState;
     IOLockUnlock(gKmsLock);
+    if (!ret) {
+        // Mode sets count apart: a flood of refused flips or cursor images must not use up the lines for the one
+        // refusal that leaves WindowServer without a display.
+        static volatile SInt32 refused[2];
+        const unsigned n = (unsigned)OSIncrementAtomic(&refused[cmd == kKmsCmdSetMode ? 0 : 1]) + 1;
+        if (kms_refusal_logworthy(n)) {
+            uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+            kprintf("NVRM-xnu: NVKMS ioctl %u refused (#%u): %s; pm %s; after %llu us\n", (unsigned)cmd, n,
+                    kKmsRefuseName[kms_ioctl_refusal(haveOpen, pmReady, tryPm, false)],
+                    kKmsPmName[pmState], (unsigned long long)(ns / 1000));
+        }
+    }
     return ret;
 }
 

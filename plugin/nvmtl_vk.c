@@ -19,6 +19,7 @@
 #include <vulkan/vulkan.h>
 #include "nvmtl_vk.h"
 #include "nvmtl_tex_upload.h"
+#include "nvmtl_cmd_refusal.h"
 #include "nvmtl_sampler_state.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
 static int g_scalar_layout;
@@ -4476,26 +4477,39 @@ static void nvmtl_tspool_push(VkQueryPool q) {
     pthread_mutex_unlock(&g_tspool_lock);
     if (!kept) pvkDestroyQueryPool(g_dev, q, NULL);
 }
+// Every caller of nvmtl_vk_cmd_begin sees only -1, and the queue's nil for WindowServer used to carry no cause. The
+// reason is logged here with the Vulkan result where there is one. One call site per cause: nvlog throttles by format.
+static int nvmtl_cmd_refused(nvmtl_refusal why, int vkresult)
+{
+    switch (why) {
+    case NVMTL_REFUSE_BACKEND_DOWN: nvlog("vk: command buffer refused in %s: " NVMTL_REFUSE_TEXT_BACKEND_DOWN, getprogname()); break;
+    case NVMTL_REFUSE_POOL:  nvlog("vk: command buffer refused in %s: " NVMTL_REFUSE_TEXT_POOL " (VkResult %d)", getprogname(), vkresult); break;
+    case NVMTL_REFUSE_ALLOC: nvlog("vk: command buffer refused in %s: " NVMTL_REFUSE_TEXT_ALLOC " (VkResult %d)", getprogname(), vkresult); break;
+    case NVMTL_REFUSE_BEGIN: nvlog("vk: command buffer refused in %s: " NVMTL_REFUSE_TEXT_BEGIN " (VkResult %d)", getprogname(), vkresult); break;
+    default: break;
+    }
+    return -1;
+}
 int nvmtl_vk_cmd_begin(nvk_queue *q, nvk_cmdbuf *out)
 {
     (void)q;
-    if (nvmtl_vk_init()) return -1;
+    if (nvmtl_vk_init()) return nvmtl_cmd_refused(NVMTL_REFUSE_BACKEND_DOWN, 0);
     const uint64_t b0 = nvmtl_perf_now();
     memset(out, 0, sizeof *out);
     VkCommandPool pool = nvmtl_keep_pool_pop();
     VkCommandPoolCreateInfo cpci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL,
         VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, g_qfam };
     VkResult result = pool != VK_NULL_HANDLE ? VK_SUCCESS : pvkCreateCommandPool(g_dev, &cpci, NULL, &pool);
-    if (result != VK_SUCCESS) { nvlog("vk: recording pool creation -> %d", result); return -1; }
+    if (result != VK_SUCCESS) { nvlog("vk: recording pool creation -> %d", result); return nvmtl_cmd_refused(NVMTL_REFUSE_POOL, result); }
     out->pool = pool;
     VkCommandBufferAllocateInfo ai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, pool,
         VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1 };
     result = nvmtl_opaque_AllocateCommandBuffers(g_dev, &ai, &out->cb);
-    if (result != VK_SUCCESS) { pvkDestroyCommandPool(g_dev, pool, NULL); memset(out, 0, sizeof *out); return -1; }
+    if (result != VK_SUCCESS) { pvkDestroyCommandPool(g_dev, pool, NULL); memset(out, 0, sizeof *out); return nvmtl_cmd_refused(NVMTL_REFUSE_ALLOC, result); }
     VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL,
         VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL };
     result = pvkBeginCommandBuffer(out->cb, &bi);
-    if (result != VK_SUCCESS) { pvkDestroyCommandPool(g_dev, pool, NULL); memset(out, 0, sizeof *out); return -1; }
+    if (result != VK_SUCCESS) { pvkDestroyCommandPool(g_dev, pool, NULL); memset(out, 0, sizeof *out); return nvmtl_cmd_refused(NVMTL_REFUSE_BEGIN, result); }
     if (pvkGetCalibratedTimestampsEXT && g_timestamp_bits) {
         VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, 2, 0 };
         VkQueryPool timing = nvmtl_tspool_pop();

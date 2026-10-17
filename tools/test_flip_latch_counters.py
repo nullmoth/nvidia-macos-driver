@@ -103,6 +103,9 @@ static int IOLockSleepDeadline(IOLock *l, event_t, uint64_t deadline, int) {
     gSleeps++; if ((int64_t)deadline > gClock) gClock = (int64_t)deadline; return 0; }
 STATICS
 
+static char gPresentMsg[8];
+#define PRESENT_STATS_LOG() ((void)0)
+static bool presentStatsNote(unsigned, uint64_t, bool, bool, bool, uint32_t) { return false; }   // exercised by test_present_stats.py
 static int gFlipLatch = 1;
 static int gFlipLatchWaits = 0, gFlipLatchTimeouts = 0, gFlipLatchMaxUs = 0, gFlipLatchLate = 0;
 STUCK_LINE
@@ -121,6 +124,8 @@ struct Rep { NvKmsFlipResult flipResult = NV_KMS_FLIP_RESULT_SUCCESS; };
 struct FB {
     Kms *fKms=nullptr; void *fDev=this; unsigned fHead=0; bool fSubmissionFaulted=false, fSubmissionSeen=false;
     uint64_t fFlipSubmitAbs = 0; unsigned fLatchLateLogs = 0;
+    int faultLogs = 0; const char *faultWhy = "";
+    void flipFaultLog(const char *why) { faultLogs++; faultWhy = why; }
     enum { kPriorDone = 0, kPriorLate = 1, kPriorStuck = 2 };
     struct { NvKmsKapiDisplayModeTimings timings; } fMode;
     void mode(uint32_t pclk, uint32_t ht, uint32_t vt) { fMode.timings.pixelClockHz = pclk; fMode.timings.hTotal = ht; fMode.timings.vTotal = vt; }
@@ -180,6 +185,7 @@ int main() {
       printf("late flip on the frame path: returned after %lld us, %d polls (landed at poll %d)\n", (long long)(took / 1000), k.polls, k.lateFor + 1);
       assert(k.polls > k.lateFor && "the frame path returned while its flip was still pending: the old surface may still be on the panel");
       assert(gFlipLatchTimeouts == 1 && !f.fSubmissionFaulted && "a late flip counts once as late");
+      assert(f.faultLogs == 0 && "a late flip that lands is not a head fault and leaves no fault line");
       assert(gLongestSleep <= 250000 && "a sleep longer than 250 us between pending checks"); }
     // A flip that never lands faults at the 100 ms stuck limit, on the frame path and on a mode set alike.
     for (int frame = 0; frame < 2; frame++) {
@@ -189,6 +195,7 @@ int main() {
       const int64_t took = gClock - t0;
       printf("stuck flip (%s): faulted after %lld us\n", frame ? "frame" : "mode set", (long long)(took / 1000));
       assert(gFlipLatchTimeouts == 1 && f.fSubmissionFaulted);
+      assert(f.faultLogs == 1 && f.faultWhy[0] == 's' && "the fault leaves exactly one line, naming the submitted flip");
       assert(took >= 100000000 && took < 125000000 && "a stuck flip faults at the stuck limit, not before"); }
     // A prior flip still landing: this present is skipped as IN_PROGRESS within one period, the head is not faulted.
     { Kms k; k.mode=STUCK; FB f; f.fKms=&k; f.mode(405000000, 2200, 1115); reset();
@@ -204,7 +211,8 @@ int main() {
     { Kms k; k.mode=STUCK; FB f; f.fKms=&k; f.mode(148500000, 2200, 1125); reset();
       f.fSubmissionSeen = true; f.fFlipSubmitAbs = mach_absolute_time() - 150000000ull; Rep rep;
       assert(f.priorWait(&rep, true) == NV_FALSE);
-      assert(f.fSubmissionFaulted && gFlipLatchLate == 0 && "a flip pending 150 ms after its submit faults, it is not merely late"); }
+      assert(f.fSubmissionFaulted && gFlipLatchLate == 0 && "a flip pending 150 ms after its submit faults, it is not merely late");
+      assert(f.faultLogs == 1 && f.faultWhy[0] == 'p' && "the fault leaves exactly one line, naming the prior flip"); }
     // A prior flip that lands late is waited for by a mode set (no present to skip) and then accepted.
     { Kms k; k.mode=LATE; k.lateFor = 200; FB f; f.fKms=&k; f.mode(148500000, 2200, 1125); reset();
       f.fSubmissionSeen = true; f.fFlipSubmitAbs = mach_absolute_time(); Rep rep;
@@ -248,4 +256,12 @@ print('negative control (constant 100 ms region): FAILS as required')
 r = build_and_run(early_control)
 assert r.returncode != 0, 'negative control passed -- the test does not detect a frame completed before its flip landed'
 print('negative control (frame let go before its flip landed): FAILS as required')
+# The fault line carries what a log reader needs to tell a stuck head from a late one: the time since the submit and the
+# latch counters. A line that names only the head cannot say whether the 100 ms limit was reached.
+helper = source[source.index('void NVRMNVDAFramebuffer::flipFaultLog'):]
+helper = helper[:helper.index('\n}\n')]
+for needle in ('us since its submit', 'latch waits %d timeouts %d late %d max %d us', 'gFlipLatchTimeouts', 'gFlipLatchMaxUs'):
+    assert needle in helper, f'the head-fault line lost {needle!r}'
+assert source.count('presentation blocked') == 1, 'a head fault logs outside flipFaultLog'
+print('head-fault line: carries time since submit and the latch counters')
 print('PASS')

@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.3.4
+
+Pre-release for the early-updates testers; it becomes the general release only after every GPU generation passes the
+field gate.
+
+Stability
+- Window dragging, Launchpad and games stutter less: each screen update waits at most one refresh period for the
+  previous one, instead of a fixed tenth of a second; the wait wakes on the display's own event
+- macOS Sequoia screenshots and window captures: the capture ordering fix from 2.3.2 returns, and it now follows what the
+  installed kernel driver supports, so a Metal driver and a kernel driver from different versions never mismatch again
+- Turing (GTX 16 and RTX 20): the login screen no longer stays black with a cursor when the first frame has not been
+  drawn yet; the driver only shows video memory the Metal driver has written
+- Turing: the ten-second start wait the installer used to add is now the driver's own default, so a laptop card or a Mac
+  whose boot arguments were rewritten gets it too (a value you set yourself still wins)
+- Laptops with a hybrid display: the driver no longer copies the boot screen from another card's memory, which could
+  stop the Mac during startup. When WhateverGreen is present next to the driver, the installer notes the gfxrst setting it needs
+- Every kernel driver now carries the package version. A Mac that still runs an older kernel driver after an update
+  (the kernel collection was not rebuilt) is named in Send logs and in the "reached the desktop" report instead of
+  counting as the new version
+
+Logging (so a report says what happened)
+- The kernel driver logs its own version at start
+- A full video-memory window logs the first refusals and then every 256th, with one line saying who holds the window
+- Spare framebuffer instances (more instances than displays) say so instead of reporting a failure
+- A display that stops flipping logs how long the frame had been pending and the flip counters
+- Every ten seconds of screen activity, one line per display records the flip rate against the panel rate, missed
+  refreshes and skipped frames
+- A refused mode set or flip in the kernel names the stage that refused it
+- The Metal driver says why it could not begin a command buffer (a lost GPU, a failed allocation), the line
+  WindowServer crashes without
+
 ## 2.3.3
 
 Stability
