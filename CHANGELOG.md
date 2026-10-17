@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.3.2 (not released yet)
+## 2.3.2
 
 Fixes
 - macOS Sequoia: installing or updating to 2.3.0 or 2.3.1 stopped with "runtime payload requires macOS 26.0.0". The
@@ -10,6 +10,12 @@ Fixes
   after drawing it, and the driver now finishes the drawing first, as Apple's drivers do
 - Send logs now includes how much of the card's video memory window is in use, so a black screen with only a
   cursor can be told apart from a leak
+- After an update was rolled back, Send logs still named the new version. The installed version now follows the files
+  that are actually installed, so reports say what your Mac is really running
+- The Metal driver never hands the GPU a missing texture or sampler; it uses an empty one and logs it (a cause of
+  Safari crashes in older versions)
+- Laptops with the screen on the NVIDIA GPU: every step of the brightness setup is logged, so brightness that stays
+  greyed out can be traced from Send logs
 
 AMD / Intel test program
 - A test driver that fails to start no longer panics the Mac: memory still mapped when the start gave up is kept
