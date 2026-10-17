@@ -812,6 +812,12 @@ bool NVVidMemory::allocPhysical()
         OSAddAtomic64(1, &gCntVmRefused);
         ALOG("NVVidMemory::allocPhysical(%p): %llu bytes REFUSED by the framebuffer (0x%x)",
              this, want, (unsigned)ret);
+        // once per boot: how much of the window this side holds as sticky parks (kept across the family's dealloc)
+        static volatile SInt32 said = 0;
+        if (OSCompareAndSwap(0, 1, &said))
+            ALOG("VRAM refused: %lld allocs (%lld bytes), %lld deallocs (%lld bytes), %lld parked now",
+                 (long long)gCntVmAlloc, (long long)gCntVmAllocBytes, (long long)gCntVmDealloc, (long long)gCntVmDeallocBytes,
+                 (long long)(gCntVmParked - gCntVmUnparked - gCntVmParkReleased));
         return false;
     }
     fRmHandle = r.handle; fKva = r.kva; fPhys = r.phys; fBytes = r.actualSize; fAllocationCookie = r.allocationCookie;
