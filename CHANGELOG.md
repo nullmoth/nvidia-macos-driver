@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.3.1
+
+Safer updates
+- If an update cannot bring your display up, your Mac no longer stays on a black screen. After two starts in a row
+  that never reached the display, the driver turns itself off so macOS still starts, and the driver you had before the
+  update is put back automatically with one restart. Nothing stays running once an update has worked
+- Releases now also have to pass app checks on the new Metal driver (Terminal text, window capture) and may not do
+  worse than the release before
+
 ## 2.3.0
 
 Fixes
