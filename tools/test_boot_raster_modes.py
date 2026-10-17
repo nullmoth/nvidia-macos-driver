@@ -40,7 +40,7 @@ struct Kms {
 struct NVRMNVDAFramebuffer {
     Kms *fKms=nullptr;void *fDev=this;unsigned fDisplay=1,fIndex=0;
     unsigned fBootW=2560,fBootH=1600,fScalerMaxW=3840,fScalerMaxH=2160,fRasterMaxW=5120,fPitchAlign=256;
-    NvU64 fMemBytes=64ULL<<20;NvKmsKapiDisplayMode fBootMode;
+    NvU64 fMemBytes=64ULL<<20;NvKmsKapiDisplayMode fBootMode;bool fKmsModesLogged=false;
     IODetailedTimingInformationV2 fDT[16];
     void setProperty(const char *,unsigned long long,unsigned) {}
     unsigned addKmsRefreshModes(unsigned n);

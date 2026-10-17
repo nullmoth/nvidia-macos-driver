@@ -1132,6 +1132,22 @@ NVACCEL_CNT(nvaccel_iop_flip_lock,    gCntIopFlipNo[3],   "copied because the ac
 NVACCEL_CNT(nvaccel_iop_flip_novram,  gCntIopFlipNo[4],   "copied because the surface has no RM VRAM");
 NVACCEL_CNT(nvaccel_iop_flip_stale,   gCntIopFlipNo[5],   "copied because system memory holds the newest copy");
 NVACCEL_CNT(nvaccel_iop_flip_refused, gCntIopFlipNo[7],   "copied because the framebuffer refused the flip");
+static SInt64 gCntIopUnwritten, gCntIopCopyUnwritten;
+NVACCEL_CNT(nvaccel_iop_flip_unwritten, gCntIopUnwritten,     "copied because the family marked VRAM newest on a copy the plugin never wrote");
+NVACCEL_CNT(nvaccel_iop_copy_unwritten, gCntIopCopyUnwritten, "copied frames that skipped the page-off because the plugin never wrote the VRAM copy");
+// The two decisions the display pipe makes from the family's validity bits, kept as pure functions so they can be
+// exercised outside the kernel (tools/test_iop_flip_gate.py). vramNewest is the family's bit (valid[6] & plane);
+// sysmemCurrent is valid[0] & plane; pluginWrote is nvAccelPluginWrote(): the resource's recorded write cookie equals the
+// allocation cookie of the VRAM it holds now.
+// A zero-copy flip scans VRAM out directly, so it needs a VRAM copy that holds a frame: the family's bit alone is not
+// enough, the plugin must have written it (its dirty escape sets both).
+static inline bool nvAccelIopVramFlippable(bool vramNewest, bool pluginWrote) { return vramNewest && pluginWrote; }
+// A copied frame is read from system memory. When the family says that copy is stale, the resource is paged off VRAM
+// first; a VRAM copy the plugin never wrote holds nothing worth paging, and paging it would overwrite the pixels the
+// plugin copied out. Such a surface is read as it is.
+static inline bool nvAccelIopCopyNeedsPageoff(bool sysmemCurrent, bool pluginWrote) { return !sysmemCurrent && pluginWrote; }
+static inline bool nvAccelPluginWrote(unsigned long long wroteCookie, unsigned long long allocCookie) { return wroteCookie != 0 && wroteCookie == allocCookie; }
+static bool nvAccelResPluginWrote(NVResource *res) { NVVidMemory *vm = res ? nvres_vidmem(res) : nullptr; return vm && nvAccelPluginWrote(res->fPluginWroteCookie, vm->fAllocationCookie); }
 static SInt64 gCntIopFlipHit, gCntIopFlipMiss;
 NVACCEL_CNT(nvaccel_iop_flip_hit,     gCntIopFlipHit,     "swaps resolved from the cache (no accelerator lock)");
 NVACCEL_CNT(nvaccel_iop_flip_miss,    gCntIopFlipMiss,    "swaps that resolved under the accelerator lock");
@@ -1248,6 +1264,7 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip);       sysctl_register_oid(&sysctl__debug_nvaccel_iop_flips);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_home);  sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_lock);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_novram); sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_stale);
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_unwritten); sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_unwritten);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_refused);
     sysctl_register_oid(&sysctl__debug_nvaccel_crc_head);       sysctl_register_oid(&sysctl__debug_nvaccel_crc);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_hit);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_miss);
@@ -1426,6 +1443,7 @@ static unsigned nvAccelSurfDirty(void *cache, NVResource *res, unsigned plane)
     _ZN20IOSurfaceDeviceCache10setCurrentEv(cache);
     valid[6] |= (unsigned short)(1u << plane);
     valid[0] &= (unsigned short)~(1u << plane);
+    { NVVidMemory *vm = nvres_vidmem(res); res->fPluginWroteCookie = vm ? vm->fAllocationCookie : 0; }
     return 0;
 }
 // The marks arrive through NVK's surface escape (NVRM_ESC_SURF_DIRTY with plane NVRM_SS_PLANE_GPU_MARK | pending): the
@@ -1781,6 +1799,15 @@ static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pip
     const bool vramNewest = valid && (valid[6] & 1u);
     if (!kmem) return nvAccelIopFlipNo(4);
     if (!vramNewest) return nvAccelIopFlipNo(5);
+    // Checked against the allocation this flip submits (vm, resolved above and cached), not re-resolved from the
+    // resource: this runs outside the family lock, and the record must describe the VRAM that is about to be scanned.
+    if (!nvAccelIopVramFlippable(vramNewest, nvAccelPluginWrote(res->fPluginWroteCookie, vm->fAllocationCookie))) {
+        const SInt64 n = OSAddAtomic64(1, &gCntIopUnwritten);
+        if (n < 4 || (n & 0xfff) == 0)
+            ALOG("iop: surface 0x%x: VRAM marked newest but the plugin never wrote it -- copying its system memory instead of flipping (%lld so far)",
+                 s->getSurfaceID(), (long long)n + 1);
+        return false;
+    }
     const unsigned long long W = s->getWidth(), H = s->getHeight(), P = s->getBytesPerRow();
     if (!W || !H || P < 4 * W || H * P > bytes) return nvAccelIopFlipNo(6);
     struct NVRMFlipRequest f; nvSVZero(&f, sizeof f);
@@ -1872,6 +1899,7 @@ static bool nvAccelSurfCopyReady(IOSurface *s, unsigned head)
             NVResource *res = OSDynamicCast(NVResource, ctx);
             volatile unsigned short *valid = res ? *(unsigned short *volatile *)((volatile unsigned char *)res + 0x30) : nullptr;
             if (!res || !valid || (valid[0] & 1u)) ready = true;
+            else if (!nvAccelIopCopyNeedsPageoff(false, nvAccelResPluginWrote(res))) { ready = true; OSAddAtomic64(1, &gCntIopCopyUnwritten); }
             else { bool out = false; res->pageoff(nullptr, true, &out, 0); ready = out || (valid[0] & 1u); }
             if (ready) nvSVPend(id, 0);
             if (cache) ((OSObject *)cache)->release();
