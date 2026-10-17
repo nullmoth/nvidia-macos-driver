@@ -625,13 +625,15 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
         let reflection=metal2vulkan::reflect_sanitized(ll,st,metal2vulkan::passes::TransformOptions::default())?;
         let states:std::collections::BTreeMap<u32,metal2vulkan::reflect::RuntimeSamplerState>=serde_json::from_value(j["samplers"].clone()).map_err(|e|e.to_string())?;
         let mut opts=formatless_options(ll,st,CAPS.load(Ordering::Relaxed)).unwrap_or_default();
+        let a8=j["a8_targets"].as_u64().unwrap_or(0) as u32;   // Metal A8Unorm colour attachments, bit per location
+        opts=opts.with_a8_render_targets(a8);
         let mut used=0;
         for (idx,state) in states {
             if reflection.bindings.iter().any(|b| b.kind==metal2vulkan::reflect::ResourceKind::Sampler && b.metal_index==idx) {
                 opts=opts.with_runtime_sampler(idx,state)?;used+=1;
             }
         }
-        if used==0{return translate_one(ll,st)}
+        if used==0 && a8==0{return translate_one(ll,st)}
         metal2vulkan::translate_native_no_retry_constructed_with_options(ll,st,apply_tg(opts))
     })();
     match result {

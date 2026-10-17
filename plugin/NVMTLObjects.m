@@ -1521,7 +1521,7 @@ NSData *nvmtl_translate_with_fc_cached(NSString *air, NSString *stage, NSString 
 #pragma mark - library / function
 id gNVMTLMainDevice = nil;
 
-extern NSData *nvmtl_translate_samplers(NVMTLFunction *, NSDictionary *, NSString **);
+extern NSData *nvmtl_translate_samplers(NVMTLFunction *, NSDictionary *, uint32_t, NSString **);
 extern NSData *nvmtl_translate_variant(NVMTLFunction *, NSDictionary *, NSDictionary *, NSString **);
 @interface NVMTLCIBinding : NSObject { @public NSString *_name; NVMTLType *_t; } @end
 @implementation NVMTLCIBinding
@@ -2627,7 +2627,7 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
                 NVMTLFunction *vf=_ps->_linkedVert?:(id)_ps->_descriptor.vertexFunction,*ff=_ps->_linkedFrag?:(id)_ps->_descriptor.fragmentFunction;
                 NSString *why=nil;
                 NSString *gk=nvmtl_sampvar_key(_ps->_descriptor,vf,ff,key); selected=nvmtl_sampvar_get(gk);
-                NSData *v=selected?nil:nvmtl_translate_samplers(vf,vS,&why),*f=(selected||!v)?nil:(ff?nvmtl_translate_samplers(ff,fS,&why):[NSData data]);
+                NSData *v=selected?nil:nvmtl_translate_samplers(vf,vS,0,&why),*f=(selected||!v)?nil:(ff?nvmtl_translate_samplers(ff,fS,_ps->_a8mask,&why):[NSData data]);
                 if(v && f) {
                     NVMTLFunction *vs=[NVMTLFunction new],*fs=ff?[NVMTLFunction new]:nil;
                     vs->_spirv=v;vs->_fname=vf->_fname;vs->_stage=vf->_stage;
@@ -2697,8 +2697,8 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
         _pass.col[i] = [t nvi]; _pass.colw[i] = cw; _pass.colh[i] = ch;
         _pass.col_level[i] = t->_baseLevel + (uint32_t)ca.level; _pass.col_layer[i] = t->_baseSlice + zslice;
         _pass.colfmt[i] = tvk;
-        MTLClearColor cc = ca.clearColor;
-        _pass.clear[i][0] = (float)cc.red; _pass.clear[i][1] = (float)cc.green; _pass.clear[i][2] = (float)cc.blue; _pass.clear[i][3] = (float)cc.alpha;
+        MTLClearColor cc = ca.clearColor;   // an A8 target keeps Metal's alpha in its red lane, its clear too
+        _pass.clear[i][0] = ta8 ? (float)cc.alpha : (float)cc.red; _pass.clear[i][1] = (float)cc.green; _pass.clear[i][2] = (float)cc.blue; _pass.clear[i][3] = (float)cc.alpha;
         if (nvmtl_load_keeps(ca.loadAction)) load |= NVMTL_LOAD_COLOUR(i);
         if (cw < w) w = cw;
         if (ch < h) h = ch;
@@ -4824,7 +4824,8 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     (void)nvmtl_vk_cmd_set_depth_clip(&_c, 1);
     e->_visBuf = (NVMTLBuffer *)d.visibilityResultBuffer;
     MTLClearColor cc = d.colorAttachments[0].clearColor;
-    e->_clear[0] = (float)cc.red; e->_clear[1] = (float)cc.green; e->_clear[2] = (float)cc.blue; e->_clear[3] = (float)cc.alpha;
+    BOOL ca8 = d.colorAttachments[0].texture && d.colorAttachments[0].texture.pixelFormat == MTLPixelFormatA8Unorm;   // alpha lives in the red lane
+    e->_clear[0] = ca8 ? (float)cc.alpha : (float)cc.red; e->_clear[1] = (float)cc.green; e->_clear[2] = (float)cc.blue; e->_clear[3] = (float)cc.alpha;
     if (![e nvmtlBuildPass:d]) e->_refused = YES;
     return e;
 }

@@ -105,7 +105,7 @@ extern id gNVMTLMainDevice;
   NSData *_raw; id _appleTwin; BOOL _twinTried; NSString *_rawPath; } @end
 @interface NVMTLRenderPipelineState : NSObject <MTLRenderPipelineState> { @public nvk_pipeline _p;
   NSString *_vname, *_fname, *_blend, *_vdesc; MTLRenderPipelineDescriptor *_descriptor; NSMutableDictionary *_samplerVariants;
-  NVMTLFunction *_linkedVert, *_linkedFrag; } @end
+  NVMTLFunction *_linkedVert, *_linkedFrag; uint32_t _a8mask; } @end
 @interface NVMTLCommandQueue : NSObject <MTLCommandQueue> {
   @public nvk_queue _q; id _dev; id _completionQueue; dispatch_queue_t _callbackOrderQueue; NSMutableArray *_reservations; dispatch_semaphore_t _capacity; NSUInteger _capacityCount;
 } @end
