@@ -212,6 +212,11 @@ void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
     else BLLOG("backlight: setting %u%% failed (0x%x)", (unsigned)percent, r);
 }
 
+// 1 once this boot's guard clear happened (a head lit, or nothing to light): NVRM reads it (debug.nvrmfb_guard_cleared)
+// before putting its start count back after a settle wait, so a display brought up by hand during the wait is not
+// counted as a failed start (nvrm_off.h).
+static int gGuardCleared;
+static void fbGuardCleared(const char *why);
 class NVRMNVDAFramebuffer : public IOFramebuffer {
     OSDeclareDefaultStructors(NVRMNVDAFramebuffer)
     struct NvKmsKapiFunctionsTable *fKms = nullptr; NvU32 fGpuId = 0; nvrm_phys_for_va_t fPhysForVa = nullptr;
@@ -747,7 +752,7 @@ bool NVRMNVDAFramebuffer::kapiInit()
               gNDpy, n, fNumHeads);
         // NVKMS answered and nothing is plugged into this card (its displays are on another GPU): the driver is up as
         // far as it will go, so this start counts as good for the boot guard (nvrm_off.h)
-        if (n > 0 && gNDpy == 0) nvrm_guard_display_up("NVKMS lists this card's connectors and none has a display");
+        if (n > 0 && gNDpy == 0) fbGuardCleared("NVKMS lists this card's connectors and none has a display");
     }
 
     if (gBootHead == -2) {
@@ -2242,7 +2247,7 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     registerPowerDriver(this, kFBPowerStates, 2);
     FBLOG("registerPowerDriver(2 states) done");
     FBLOG("started on %s", provider->getName());
-    nvrm_guard_display_up("the framebuffer has its scanout memory and a display mode");
+    fbGuardCleared("the framebuffer has its scanout memory and a display mode");
     return true;
 }
 void NVRMNVDAFramebuffer::scheduleCall(thread_call_t call, uint64_t deadline)
@@ -2916,6 +2921,16 @@ static int gFlipInterval = 1;
 // gFlipLatch and the counters are defined above submitConfig, where the completion wait drives them.
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch, CTLFLAG_RW | CTLFLAG_LOCKED, &gFlipLatch, 0, "1 = a committed flip waits for its completion before a surface retires (0 = debug bypass)");
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_waits, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchWaits, 0, "flips that waited for completion");
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_guard_cleared, CTLFLAG_RD | CTLFLAG_LOCKED, &gGuardCleared, 0, "1 once the boot guard was cleared this boot");
+// Registered here and not with the other counters: those are registered from the first video-memory grant, which a
+// card with no display to light never makes, and the headless clear is exactly the case NVRM has to be able to read.
+static void fbGuardCleared(const char *why)
+{
+    static volatile SInt32 once;
+    if (OSCompareAndSwap(0, 1, &once)) sysctl_register_oid(&sysctl__debug_nvrmfb_guard_cleared);
+    nvrm_guard_display_up(why);
+    gGuardCleared = 1;
+}
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_timeouts, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchTimeouts, 0, "flips not on the panel within a refresh period and a quarter of their submit (waited on to the stuck limit)");
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchMaxUs, 0, "longest submit-to-completion wait (us)");
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_late, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchLate, 0, "presents skipped because the previous flip was still on its way to the panel");

@@ -5594,12 +5594,29 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     nvmtl_prologue *const pre = &f->pre;
     const long budget_ms = nvmtl_gpu_wait_budget_ms();
     const uint64_t w0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-    VkResult wr; long waited_ms = 0;
+    VkResult wr; long waited_ms = 0, said_ms = 0;
+    // A fence that is late is a GPU that is busy, not a GPU that is gone. Giving up at the budget used to disable the
+    // backend for the rest of the process; in WindowServer every later command buffer was then refused and CoreDisplay
+    // aborted the session, which is what three Macs on macOS 26 reported as a crash. The wait now runs on past the
+    // budget, in calls twice as long as the budget: the Vulkan driver's own no-progress detector is armed per call
+    // with a five-second threshold, checked after the call's own deadline, so it turns a stalled channel into
+    // VK_ERROR_DEVICE_LOST only when a single call outlasts that threshold. A fence that neither signals nor errors
+    // for ten budgets (50 s in WindowServer, ten minutes elsewhere) is given up as lost, so a stall nothing reports still ends.
+    const long give_up_ms = budget_ms * 10;
     for (;;) {
-        wr = pvkWaitForFences(g_dev, 1, &fence, VK_TRUE, 250ull * 1000 * 1000);
+        const long slice_ms = budget_ms < 250 ? 500 : budget_ms * 2;
+        wr = pvkWaitForFences(g_dev, 1, &fence, VK_TRUE, (uint64_t)slice_ms * 1000 * 1000);
         waited_ms = (long)((clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - w0) / 1000000ull);
         if (wr != VK_TIMEOUT) break;
-        if (waited_ms >= budget_ms) break;
+        if (g_state != 1) break;
+        if (waited_ms >= give_up_ms) {
+            nvlog("vk: fence still pending after %ld ms in %s with no error from the device; giving it up as lost", waited_ms, getprogname());
+            break;
+        }
+        if (waited_ms >= budget_ms && waited_ms - said_ms >= budget_ms) {
+            said_ms = waited_ms;
+            nvlog("vk: fence still pending after %ld ms (budget %ld ms) in %s - waiting on, the device has not reported a loss", waited_ms, budget_ms, getprogname());
+        }
     }
     pt[5] = nvmtl_perf_now();
     atomic_fetch_add(&g_submit_wait_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - w0);
@@ -5611,7 +5628,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     }
     if (wr != VK_SUCCESS || g_state != 1) {
         g_state = -1;
-        nvlog("vk: fence wait -> %d after %ld ms (budget %ld ms); disabling backend without retiring in-flight resources", wr, waited_ms, budget_ms);
+        nvlog("vk: fence wait -> %d after %ld ms (budget %ld ms); the device is lost, disabling backend without retiring in-flight resources", wr, waited_ms, budget_ms);
         return -2;
     }
     if (c->wseq && c->wseq != NVMTL_WSEQ_BLIND) {
