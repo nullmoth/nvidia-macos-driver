@@ -366,16 +366,29 @@ static void nvmtl_nvenc_hevc_register(void)
     });
 }
 // ANGLE refuses Metal on NVIDIA (disableMetalOnNvidia), and Chromium on macOS has no other GL backend, so without this
-// the GPU process exits at start-up and Chrome, Edge and Electron apps draw everything on the CPU. It is opt-in
-// (NVMTL_ANGLE_METAL=1): with it on by default, Electron apps showed artifacts, stutter and lost transparency on
-// several cards. An existing override is kept; no sandbox setting is changed.
+// the GPU process exits at start-up and the app draws everything on the CPU. Chrome and Chromium get it by default:
+// without it their GPU process cannot start. Electron stays opt-in (NVMTL_ANGLE_METAL=1) because it showed artifacts,
+// stutter and lost transparency on several cards. NVMTL_ANGLE_METAL=0 turns the rule off in every process. An existing
+// ANGLE override is kept; no sandbox setting is changed.
+static bool nvmtl_angle_chrome_family(void)
+{
+    const char *me = getprogname();
+    if (!me) return false;
+    return strncmp(me, "Google Chrome", 13) == 0 || strncmp(me, "Chromium", 8) == 0;
+}
 __attribute__((constructor)) static void nvmtl_angle_allow_nvidia(void)
 {
     const char *opt = getenv("NVMTL_ANGLE_METAL");
-    if (!opt || strcmp(opt, "1")) return;
+    if (opt && !strcmp(opt, "0")) return;
+    const char *me = getprogname();
+    if (!(opt && !strcmp(opt, "1")) && !nvmtl_angle_chrome_family()) return;
     const char *key = "ANGLE_FEATURE_OVERRIDES_DISABLED", *rule = "disableMetalOnNvidia";
     const char *cur = getenv(key);
     if (cur && strstr(cur, rule)) return;
+    // One line per process, outside nvlog's release failure filter: a field report must show whether the rule was
+    // active in this process.
+    syslog(LOG_NOTICE, "NullMoth: angle: Metal allowed in %s (%s; NVMTL_ANGLE_METAL=0 disables)", me ? me : "?",
+           (opt && !strcmp(opt, "1")) ? "NVMTL_ANGLE_METAL=1" : "Chrome family");
     char v[1024];
     if (cur && *cur) snprintf(v, sizeof v, "%s:%s", cur, rule); else snprintf(v, sizeof v, "%s", rule);
     setenv(key, v, 1);
