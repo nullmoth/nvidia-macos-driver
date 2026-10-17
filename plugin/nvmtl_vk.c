@@ -2809,12 +2809,22 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
                 continue;
             }
             if (NVMTL_COPY_HAS(copym, i)) { cp[ncp++] = (VkCopyDescriptorSet){ VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET, NULL, from, NVMTL_BINDING_NUMBER(i), 0, set, NVMTL_BINDING_NUMBER(i), 0, 1 }; continue; }
-            if (sl && sl->kind == NVMTL_SLOT_TEX) { ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, (VkImageView)sl->h, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL }; pi = &ii[i]; }
-            else pi = &dummyI;
+            // A texture slot whose sampled view could not be built is recorded with a null handle. The descriptor
+            // written for it is the dummy image, never the null handle: a null view reads as zero in NVK, and a
+            // debug NVK asserts on any handle that is not a live image view.
+            if (sl && sl->kind == NVMTL_SLOT_TEX && sl->h) { ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, (VkImageView)sl->h, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL }; pi = &ii[i]; }
+            else {
+                if (sl && sl->kind == NVMTL_SLOT_TEX) { static int said; if (!said++) nvlog("vk: texture slot %u is bound to a texture with no sampled view - the dummy image is bound instead (said once)", i - NVMTL_NBUF); }
+                pi = &dummyI;
+            }
         } else {
             if (NVMTL_COPY_HAS(copym, i)) { cp[ncp++] = (VkCopyDescriptorSet){ VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET, NULL, from, NVMTL_BINDING_NUMBER(i), 0, set, NVMTL_BINDING_NUMBER(i), 0, 1 }; continue; }
-            if (sl && sl->kind == NVMTL_SLOT_SAMP) { ii[i] = (VkDescriptorImageInfo){ (VkSampler)sl->h, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED }; pi = &ii[i]; }
-            else pi = &dummyS;
+            // Same for a sampler slot: a sampler state whose VkSampler was never created binds the dummy sampler.
+            if (sl && sl->kind == NVMTL_SLOT_SAMP && sl->h) { ii[i] = (VkDescriptorImageInfo){ (VkSampler)sl->h, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED }; pi = &ii[i]; }
+            else {
+                if (sl && sl->kind == NVMTL_SLOT_SAMP) { static int said; if (!said++) nvlog("vk: sampler slot %u is bound to a sampler state with no VkSampler - the dummy sampler is bound instead (said once)", i - NVMTL_NBUF - NVMTL_NTEX); }
+                pi = &dummyS;
+            }
         }
         w[nw++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, NVMTL_BINDING_NUMBER(i), 0, 1, ty, pi, pb, NULL };
     }
