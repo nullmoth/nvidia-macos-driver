@@ -16,6 +16,12 @@ Stability
   whose boot arguments were rewritten gets it too (a value you set yourself still wins)
 - Laptops with a hybrid display: the driver no longer copies the boot screen from another card's memory, which could
   stop the Mac during startup. When WhateverGreen is present next to the driver, the installer notes the gfxrst setting it needs
+- A Mac reset during the driver's own start-up wait (the ten-second Turing settle, the 100-second wait when the card's
+  memory window cannot be moved) no longer counts toward switching the driver off. Two such resets used to leave a
+  working Mac on the fallback driver, reported at the next login as "driver loaded: no"
+- A GPU that is busy is not a GPU that is gone: the Metal driver keeps waiting for a late frame instead of disabling
+  itself for the rest of the process. In WindowServer that disablement meant every later command buffer was refused
+  and the session restarted ("Failed to get a MTLCommandBuffer")
 - Every kernel driver now carries the package version. A Mac that still runs an older kernel driver after an update
   (the kernel collection was not rebuilt) is named in Send logs and in the "reached the desktop" report instead of
   counting as the new version

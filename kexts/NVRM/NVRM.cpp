@@ -709,11 +709,15 @@ void NVRM::autoGo(void *p0, wait_result_t)
             LOG("starting the NVIDIA card: waiting %u s before it takes over the screen, because its memory window (BAR1) "
                 "is too small to move off the boot screen. This is not a freeze. To start in about a second instead, enable "
                 "\"Above 4G Decoding\" and \"Resizable BAR\" in the BIOS.", s->fAutoGoSettleMs / 1000);
+        nvrm_guard_pause_for_wait(s->fAutoGoSettleMs);
         for (uint32_t left = s->fAutoGoSettleMs; left > 0;) {
             const uint32_t step = left > 15000 ? 15000 : left;
             IOSleep(step); left -= step;
             if (left) LOG("starting the NVIDIA card: %u s left (not a freeze)", left / 1000);
         }
+        // the framebuffer says whether it already cleared the guard this boot (a display lit, or a card with nothing
+        // to light, after a hand-run go during the wait): counting again then would leave a strike behind a good boot
+        { int cleared = 0; if (nvrmSysR("debug.nvrmfb_guard_cleared", &cleared) != 0) cleared = 0; nvrm_guard_resume_after_wait(cleared > 0); }
     } else {
         IOSleep(s->fAutoGoSettleMs);
     }
