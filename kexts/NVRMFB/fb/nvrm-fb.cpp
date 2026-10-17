@@ -727,6 +727,9 @@ bool NVRMNVDAFramebuffer::kapiInit()
         if (getProvider()) getProvider()->setProperty("connected-displays", (unsigned long long)gNDpy, 32);
         FBLOG("ENUMERATED: %d connected display(s) of %u handle(s), %u heads available",
               gNDpy, n, fNumHeads);
+        // NVKMS answered and nothing is plugged into this card (its displays are on another GPU): the driver is up as
+        // far as it will go, so this start counts as good for the boot guard (nvrm_off.h)
+        if (n > 0 && gNDpy == 0) nvrm_guard_display_up("NVKMS lists this card's connectors and none has a display");
     }
 
     if (gBootHead == -2) {
@@ -2055,6 +2058,7 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     registerPowerDriver(this, kFBPowerStates, 2);
     FBLOG("registerPowerDriver(2 states) done");
     FBLOG("started on %s", provider->getName());
+    nvrm_guard_display_up("the framebuffer has its scanout memory and a display mode");
     return true;
 }
 void NVRMNVDAFramebuffer::scheduleCall(thread_call_t call, uint64_t deadline)
