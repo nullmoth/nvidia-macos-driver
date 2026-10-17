@@ -3077,6 +3077,45 @@ static VkDescriptorSet nvmtl_fetch_set(nvk_cmdbuf *c, uint32_t mask)
     return set;
 }
 
+/* With framebuffer fetch off (the WindowServer default) a fragment shader that reads [[color(n)]] still has the input
+ * attachment descriptors at set 3, and nothing was bound there: the read was undefined. Core Animation's uber fragment
+ * shader reads color(0..2) at its entry, so every compositor pass that uses it depends on that read. One set, made once,
+ * points every binding at the zeroed dummy image, the same image a fetch pass uses for an attachment it does not have. */
+static VkDescriptorSet nvmtl_fetch_zero_set(void)
+{
+    static VkDescriptorSet zero;
+    if (zero) return zero;
+    if (!g_dummyImg.view) return VK_NULL_HANDLE;
+    pthread_mutex_lock(&g_desc_lock);
+    if (!zero && !nvmtl_fetch_layouts_locked()) {
+        VkDescriptorSet set = VK_NULL_HANDLE; VkResult r = VK_ERROR_OUT_OF_POOL_MEMORY;
+        for (unsigned k = g_nfetchPools; k-- > 0 && r != VK_SUCCESS;) {
+            VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, g_fetchPools[k], 1, &g_fetchLayout };
+            r = pvkAllocateDescriptorSets(g_dev, &ai, &set);
+        }
+        if (r != VK_SUCCESS && g_nfetchPools < 64) {
+            VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, NVMTL_NCOL * 1024 };
+            VkDescriptorPoolCreateInfo pci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 1024, 1, &ps };
+            if (pvkCreateDescriptorPool(g_dev, &pci, NULL, &g_fetchPools[g_nfetchPools]) == VK_SUCCESS) {
+                VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, g_fetchPools[g_nfetchPools++], 1, &g_fetchLayout };
+                r = pvkAllocateDescriptorSets(g_dev, &ai, &set);
+            }
+        }
+        if (r == VK_SUCCESS) {
+            VkDescriptorImageInfo ii[NVMTL_NCOL]; VkWriteDescriptorSet w[NVMTL_NCOL];
+            for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
+                ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, (VkImageView)g_dummyImg.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                w[i] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, NVMTL_FETCH_BINDING + i, 0, 1, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, &ii[i], NULL, NULL };
+            }
+            pvkUpdateDescriptorSets(g_dev, NVMTL_NCOL, w, 0, NULL);
+            zero = set;
+            nvlog("vk: framebuffer fetch is off and a pipeline reads [[color(n)]] - those reads see the dummy image, not an unbound descriptor");
+        }
+    }
+    pthread_mutex_unlock(&g_desc_lock);
+    return zero;
+}
+
 void nvmtl_vk_cmd_bind_set(nvk_cmdbuf *c, nvk_pipeline *p)
 {
     VkDescriptorSet s[3] = { nvmtl_snapshot_set_c(c, 0, p), nvmtl_snapshot_set_c(c, 1, p), g_heapSet };
@@ -3089,6 +3128,11 @@ void nvmtl_vk_cmd_bind_set(nvk_cmdbuf *c, nvk_pipeline *p)
     c->semu_layout = p->stencil_emu ? p->layout : NULL;
     c->fetch_draw = 0;
     if (p->skip_draws) { c->nobind = 1; return; }
+    if (p->fetch_zero) {
+        VkDescriptorSet zs = nvmtl_fetch_zero_set();
+        if (zs) pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipelineLayout)p->layout, NVMTL_FETCH_SET, 1, &zs, 0, NULL);
+        else { static int said; if (said++ < 4) nvlog("vk: no descriptor set for the [[color(n)]] reads of a pipeline with fetch off - they stay undefined"); }
+    }
     if (p->fetch_mask && c->in_rp) {
         VkDescriptorSet fs = nvmtl_fetch_set(c, p->fetch_mask);
         if (!fs) { static int said; if (said++ < 4) nvlog("vk: framebuffer fetch set could not be made (mask 0x%x) - this draw is skipped", p->fetch_mask); c->nobind = 1; return; }
@@ -3928,7 +3972,8 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     VkDescriptorSetLayout sl2[4] = { g_setLayout, g_setLayout, g_heapLayout, VK_NULL_HANDLE };
     uint32_t nsl = g_heapSet ? 3 : 2;
     out->fetch_mask = nvmtl_fbfetch_on() ? nvmtl_spirv_fetch_mask(fs, fn) : 0;
-    if (out->fetch_mask) {
+    out->fetch_zero = nvmtl_fbfetch_on() ? 0 : nvmtl_spirv_fetch_mask(fs, fn);
+    if (out->fetch_mask || out->fetch_zero) {
         pthread_mutex_lock(&g_desc_lock); const int fl = nvmtl_fetch_layouts_locked(); pthread_mutex_unlock(&g_desc_lock);
         if (fl) { nvlog("vk: framebuffer fetch layouts could not be made - pipeline refused"); return -1; }
         if (!g_heapSet) sl2[2] = g_emptyLayout;
