@@ -527,7 +527,13 @@ public:
                   (unsigned long)v.v_width, (unsigned long)v.v_height, (unsigned long)v.v_rowBytes, (unsigned)i);
             return this;
         }
-        IOLog("NVRMFB: driver off - the firmware framebuffer is not on this card, not starting\n");
+        // the addresses, so a screen that stays dark with the driver off can be traced: macOS can move the card's VRAM
+        // window after the firmware drew into it (10-17: the firmware's window was gone on a Resizable BAR card)
+        IOLog("NVRMFB: driver off - the firmware framebuffer 0x%llx (+%llu) is not in this card's windows, not starting\n", base, bytes);
+        for (IOItemCount i = 0; i < provider->getDeviceMemoryCount(); i++)
+            if (IOMemoryDescriptor *m = provider->getDeviceMemoryWithIndex(i))
+                IOLog("NVRMFB:   window %u at 0x%llx (%llu B)\n", (unsigned)i,
+                      (unsigned long long)m->getPhysicalSegment(0, 0, kIOMemoryMapperNone), (unsigned long long)m->getLength());
         return NULL;
     }
     void free() override { OSSafeReleaseNULL(fAp); IOFramebuffer::free(); }
