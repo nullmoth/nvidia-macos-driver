@@ -41,7 +41,11 @@ static uint32_t nvmtl_vram_gen(IOSurfaceRef s, NSUInteger p) { return 1; }
 static int nvmtl_vram_tag_current(IOSurfaceRef s, NSUInteger p, unsigned seed) { return gpu_seed == seed; }
 static void nvmtl_vram_tag_set(IOSurfaceRef s, NSUInteger p, unsigned seed) { gpu_seed=seed; }
 static unsigned nvmtl_vram_tag_bump(IOSurfaceRef s, NSUInteger p, unsigned seed) { return 1; }
-static int nvmtl_vk_surface_dirty(unsigned s, unsigned p) { return 1; }
+// the kernel's VRAM mark: dirtyAnswer for the blocking one (1 = refused, the copy path), tryAnswer for the try that never
+// waits for the accelerator lock (1 = the lock was taken, -1 = refused); each call counted
+static int dirtyAnswer=1, tryAnswer=-1; static unsigned blockingDirties, tries;
+static int nvmtl_vk_surface_dirty(unsigned s, unsigned p) { blockingDirties++; return dirtyAnswer; }
+static int nvmtl_vk_surface_dirty_try(unsigned s, unsigned p) { tries++; return tryAnswer; }
 static int nvmtl_noseed(void) { return 0; }
 static void nvmtl_frame_dump(const char *tag, void *base, size_t row, unsigned w, unsigned h) {}
 #define nvlog(...) ((void)0)
@@ -64,6 +68,7 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) {
 - (BOOL)nvmtlSurfaceCopyable;
 - (void)nvmtlSurfaceIn;
 - (BOOL)nvmtlSurfaceOut;
+- (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied;
 @end
 @implementation NVMTLTexture
 - (BOOL)nvmtlSurfaceCopyable { return YES; }
@@ -95,7 +100,33 @@ int main(int argc, char **argv) { @autoreleasepool {
     // A later CPU edit must still be imported once publication has finished.
     s.seed++; memset(s.cpu,71,4); [alias nvmtlSurfaceIn];
     assert(uploads==1); assert(!memcmp((argc>1?alias:t)->_i.gpu,s.cpu,4));
-    puts("PASS: overlapping publication preserves GPU pixels; later CPU edits import");
+    // Publication after the commit's VRAM mark (WindowServer, an NVAccel whose page-off waits) runs on the thread that
+    // releases the pending marks, so it never waits for the accelerator lock: busy, the commit's mark stands and nothing
+    // is copied (a copy would block in the read stub and fail); free, the surface is marked again.
+    Surface ws={.seed=9}; NVMTLTexture *w=[NVMTLTexture new]; w->_surf=&ws; w->_vramOn=YES; w->_i=(Image){.w=1,.h=1,.bpp=4};
+    blockingDirties=0; tries=0; tryAnswer=-1;
+    assert([w nvmtlSurfaceOutDirtied:YES] && tries==1 && !blockingDirties && w->_surfSynced && w->_surfSeed==9);
+    tryAnswer=0;
+    assert([w nvmtlSurfaceOutDirtied:YES] && tries==2 && !blockingDirties);
+    // the lock was taken: this thread goes on, and the re-mark is retried off it, again only as tries (a mark that
+    // waited for the lock could land after a newer CPU write), until one takes; a page-off that slipped in between the
+    // commit's marks must not leave its copy current
+    tryAnswer=1;
+    assert([w nvmtlSurfaceOutDirtied:YES] && tries==3);
+    for (int i=0; i<200 && tries<6; i++) [NSThread sleepForTimeInterval:0.002];
+    assert(tries>=6 && !blockingDirties);
+    tryAnswer=0; const unsigned settledTries=tries;
+    for (int i=0; i<200 && tries==settledTries; i++) [NSThread sleepForTimeInterval:0.002];
+    [NSThread sleepForTimeInterval:0.02];
+    const unsigned after=tries; [NSThread sleepForTimeInterval:0.02];
+    assert(after>settledTries && tries==after && !blockingDirties);   // it took, and the retries stopped
+    tryAnswer=-1; tries=2;
+    // any other publication asks with the blocking mark, as before
+    dirtyAnswer=0;
+    assert([w nvmtlSurfaceOut] && tries==2 && blockingDirties==1);
+    dirtyAnswer=1;
+    puts("PASS: overlapping publication preserves GPU pixels; later CPU edits import; a publication after the commit's "
+         "VRAM mark never waits for the accelerator lock and retries a busy re-mark off its thread");
 } return 0; }
 '''
 with tempfile.TemporaryDirectory() as directory:

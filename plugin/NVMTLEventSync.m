@@ -98,6 +98,98 @@ static BOOL nvmtl_ws_kernel_waits(void) {
 }
 static const void *const nvmtl_ws_marks_key = &nvmtl_ws_marks_key;
 static void nvmtl_ws_mark(uint32_t sid, BOOL pending) { (void)nvmtl_vk_surface_gpu_mark(sid, pending); }
+// Marking WindowServer's surfaces newest in VRAM at commit is only safe when NVAccel's page-off waits for a pending
+// surface (NVAccelSurfaceWait). Without that wait a CPU lock or a copied present pages the surface off while the GPU
+// is still drawing it: blank window panes, a torn band, a Dock without its icons. Such an accelerator (a package that
+// pairs this plugin with an older one) keeps the ordering it was built for: the surface is marked newest after the GPU
+// has finished, and the pending marks are released when the whole command buffer has. Read once per process.
+static BOOL nvmtl_ws_surface_wait(void) {
+    static int on = -1;
+    if (on < 0) {
+        on = nvmtl_vk_accel_surface_wait() ? 1 : 0;
+        nvlog("WindowServer surfaces: %s", on ? "marked newest in VRAM at commit (NVAccel's page-off waits for the GPU)"
+                                              : "marked newest after the GPU finishes (NVAccel's page-off does not wait)");
+    }
+    return on == 1;
+}
+// What one WindowServer command buffer holds: the surfaces it marked pending in the kernel, and the textures whose shared
+// VRAM its commit marked newest. early is fixed at commit (nvmtl_ws_surface_wait): the marks are released part by part.
+@interface NVMTLSurfaceHolds : NSObject { @public NSMutableSet *ids; NSSet *dirtied; BOOL early; } @end
+@implementation NVMTLSurfaceHolds @end
+// A texture whose part has landed while its surface is still held, published by the holder that releases it last.
+// dirtied: the commit marked its VRAM newest, so publication is bookkeeping only (nvmtlSurfaceOutDirtied:).
+@interface NVMTLDeferredPublication : NSObject { @public NVMTLTexture *texture; BOOL dirtied; __weak NVMTLCommandBuffer *owner; } @end
+@implementation NVMTLDeferredPublication @end
+// The kernel keeps one pending bit per surface, with no owner. WindowServer commits overlapping command buffers that
+// write the same surface, so the holders are counted here and the kernel mark is released only when the last of them has
+// finished with it; an older command buffer finishing first would otherwise release a surface the newer one still writes.
+// With the early ordering nothing is published while its surface is still held. A dirtied texture's bookkeeping would
+// call the surface current with another write in flight; a full publication (a private copy, or a texture whose commit
+// mark was refused) locks the surface, and that lock's page-off would wait for a mark only this completion thread can
+// release. Those textures wait in nvmtl_ws_deferred for the holder that releases the surface last.
+// The lock is its own, never the command-buffer class lock, and nothing that can wait for the accelerator runs under it:
+// a page-off waiting for a mark holds the accelerator lock, and the release it waits for must always get through.
+static NSCountedSet *nvmtl_ws_pending_holds;
+static NSMutableDictionary<NSNumber *, NSMutableArray<NVMTLDeferredPublication *> *> *nvmtl_ws_deferred;
+static NSObject *nvmtl_ws_lock(void) {
+    static NSObject *lock; static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [NSObject new]; });
+    return lock;
+}
+static void nvmtl_ws_defer(NVMTLCommandBuffer *owner, NVMTLTexture *t, BOOL dirtied, uint32_t sid) {
+    @synchronized (nvmtl_ws_lock()) {
+        if (!nvmtl_ws_deferred) nvmtl_ws_deferred = [NSMutableDictionary new];
+        NSMutableArray *waiting = nvmtl_ws_deferred[@(sid)];
+        if (!waiting) nvmtl_ws_deferred[@(sid)] = waiting = [NSMutableArray new];
+        // a texture written again keeps only its latest place in the order: published at its earlier place, a private
+        // copy written between the two would be copied out after it and leave the older pixels current
+        for (NSUInteger i = 0; i < waiting.count; i++) if (((NVMTLDeferredPublication *)waiting[i])->texture == t) { [waiting removeObjectAtIndex:i]; break; }
+        NVMTLDeferredPublication *d = [NVMTLDeferredPublication new];
+        d->texture = t; d->dirtied = dirtied; d->owner = owner;
+        [waiting addObject:d];
+    }
+}
+// One holder lets go of a surface. The last one releases the kernel mark and moves the textures waiting for it to settled.
+static void nvmtl_ws_release(NVMTLSurfaceHolds *holds, uint32_t sid, NSMutableArray *settled) {
+    NSNumber *n = @(sid);
+    @synchronized (nvmtl_ws_lock()) {
+        if (![holds->ids containsObject:n]) return;
+        [holds->ids removeObject:n];
+        [nvmtl_ws_pending_holds removeObject:n];
+        if ([nvmtl_ws_pending_holds countForObject:n]) return;
+        nvmtl_ws_mark(sid, NO);
+        NSArray *waiting = nvmtl_ws_deferred[n];
+        if (waiting) { [settled addObjectsFromArray:waiting]; [nvmtl_ws_deferred removeObjectForKey:n]; }
+    }
+}
+// Publishes what was waiting, after the marks are released. Returns NO when one of cb's own textures could not be
+// published (its command buffer fails, as before); another command buffer's has already completed, so that is logged.
+static BOOL nvmtl_ws_publish_settled(NSArray *settled, NVMTLCommandBuffer *cb) {
+    BOOL ok = YES;
+    for (NVMTLDeferredPublication *d in settled) {
+        if (d->dirtied ? [d->texture nvmtlSurfaceOutDirtied:YES] : [d->texture nvmtlSurfaceOut]) continue;
+        if (cb && d->owner == cb) ok = NO;
+        else nvlog("WindowServer surface %u: publication after its last write refused", (unsigned)IOSurfaceGetID(d->texture->_surf));
+    }
+    return ok;
+}
+// Commit, OUTSIDE the command-buffer class lock and before the pending-write records are stamped: the surfaces this
+// command buffer writes are marked pending in the kernel before commit returns, so WindowServer's swap that follows finds
+// the marks; with the early ordering their shared VRAM is first marked newest.
+// A normal IOSurfaceLock waits for GPU work still in flight on the surface (only kIOSurfaceLockAvoidSync skips that),
+// and WindowServer relies on it: a window capture locks the surface it is still drawing (SkyLight's
+// do_finish_and_clear_capture_state). The VRAM copy was marked newest only after the GPU finished, so a lock that came
+// first found the system copy current and read zeros (black screenshots, blank Dock thumbnails, black lock screen).
+// Marked here, the lock pages the surface off, and the page-off waits for the pending mark to clear.
+// The VRAM mark takes the accelerator lock, which a page-off waiting for a pending surface holds until the completion
+// thread releases that surface. So it runs outside the class lock (the completion thread takes that one between command
+// buffers), and before this command buffer's own pending marks: with those in first, a page-off of a surface this
+// command buffer writes would wait for it, and it cannot complete while its commit waits here. Either way only the
+// kernel's 100 ms bound would end the wait, and the page-off would then copy unfinished pixels.
+// The VRAM mark moves the IOSurface seed, so the pending-write records are stamped after it
+// (nvmtl_surface_register_writes): a record stamped before the move matched nothing, every frame's read of the surface
+// still in flight took the CPU path (page-off, wait, 8 MB upload) on the compositor's thread, and a 144 Hz desktop ran
+// at 90 frames a second.
 static void nvmtl_ws_mark_pending(NVMTLCommandBuffer *cb) {
     if (!nvmtl_ws_kernel_waits()) return;
     NSMutableSet *ids = nil;
@@ -109,23 +201,60 @@ static void nvmtl_ws_mark_pending(NVMTLCommandBuffer *cb) {
         }
     }
     if (!ids) return;
-    for (NSNumber *n in ids) nvmtl_ws_mark(n.unsignedIntValue, YES);
-    // A normal IOSurfaceLock waits for GPU work still in flight on the surface (only kIOSurfaceLockAvoidSync skips that),
-    // and WindowServer relies on it: a window capture locks the surface it is still drawing (SkyLight's
-    // do_finish_and_clear_capture_state). The VRAM copy was marked newest only after the GPU finished, so a lock that came
-    // first found the system copy current and read zeros (black screenshots, blank Dock thumbnails, black lock screen).
-    // Marked here, at commit, the lock pages the surface off, and the page-off waits for the pending mark above to clear.
-    for (NVMTLSubmissionPart *part in cb->_parts) {
-        if (![part isKindOfClass:[NVMTLSubmissionPart class]]) continue;
-        for (NVMTLTexture *t in part->surfaces) if (t->_surf && t->_vramOn) (void)nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(t->_surf), (uint32_t)t->_plane);
+    NVMTLSurfaceHolds *holds = [NVMTLSurfaceHolds new];
+    holds->ids = ids; holds->early = nvmtl_ws_surface_wait();
+    if (holds->early) {
+        NSMutableSet *dirtied = [NSMutableSet new];
+        for (NVMTLSubmissionPart *part in cb->_parts) {
+            if (![part isKindOfClass:[NVMTLSubmissionPart class]]) continue;
+            for (NVMTLTexture *t in part->surfaces)
+                if (t->_surf && t->_vramOn && !nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(t->_surf), (uint32_t)t->_plane)) [dirtied addObject:t];
+        }
+        holds->dirtied = dirtied;
     }
-    objc_setAssociatedObject(cb, nvmtl_ws_marks_key, ids, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    @synchronized (nvmtl_ws_lock()) {
+        if (!nvmtl_ws_pending_holds) nvmtl_ws_pending_holds = [NSCountedSet new];
+        for (NSNumber *n in ids) { [nvmtl_ws_pending_holds addObject:n]; nvmtl_ws_mark(n.unsignedIntValue, YES); }
+    }
+    objc_setAssociatedObject(cb, nvmtl_ws_marks_key, holds, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
+// The GPU has finished part index of cb. Without the early ordering, returns every texture of the part for nvmtlSurfaceOut
+// and keeps the marks until the end of the command buffer (nvmtl_ws_mark_ready), as before. With it, returns nothing:
+// this command buffer's mark on a surface is released after the last of its parts that writes the surface, and settled
+// receives what the releases freed, to be published after them (a CPU lock waiting in the page-off for a mark holds the
+// surface's lock, which publication takes). Released earlier, the swap or a capture would read the surface with a later
+// part's write still in flight.
+static NSArray *nvmtl_ws_part_landed(NVMTLCommandBuffer *cb, NSUInteger index, NSMutableArray *settled) {
+    NVMTLSubmissionPart *part = cb->_parts[index];
+    NVMTLSurfaceHolds *holds = objc_getAssociatedObject(cb, nvmtl_ws_marks_key);
+    NSMutableArray *publish = [NSMutableArray new];
+    if (!holds || !holds->early) { for (NVMTLTexture *t in part->surfaces) [publish addObject:t]; return publish; }
+    NSMutableArray *last = [NSMutableArray new];
+    for (NVMTLTexture *t in part->surfaces) {
+        if (!t->_surf) { [publish addObject:t]; continue; }
+        const uint32_t sid = (uint32_t)IOSurfaceGetID(t->_surf);
+        // deferred before the release below, so the release that turns out to be the last one publishes it
+        nvmtl_ws_defer(cb, t, [holds->dirtied containsObject:t], sid);
+        BOOL later = NO;
+        for (NSUInteger i = index + 1; i < cb->_parts.count && !later; i++) {
+            NVMTLSubmissionPart *next = cb->_parts[i];
+            if (![next isKindOfClass:[NVMTLSubmissionPart class]]) continue;
+            for (NVMTLTexture *other in next->surfaces) if (other->_surf && (uint32_t)IOSurfaceGetID(other->_surf) == sid) { later = YES; break; }
+        }
+        if (!later) [last addObject:@(sid)];
+    }
+    for (NSNumber *n in last) nvmtl_ws_release(holds, n.unsignedIntValue, settled);
+    return publish;
+}
+// The command buffer has finished (or failed): every hold it still has is released, and what was waiting is published.
 static void nvmtl_ws_mark_ready(NVMTLCommandBuffer *cb) {
-    NSSet *ids = objc_getAssociatedObject(cb, nvmtl_ws_marks_key);
-    if (!ids) return;
-    for (NSNumber *n in ids) nvmtl_ws_mark(n.unsignedIntValue, NO);
+    NVMTLSurfaceHolds *holds = objc_getAssociatedObject(cb, nvmtl_ws_marks_key);
+    if (!holds) return;
+    NSArray *ids; @synchronized (nvmtl_ws_lock()) { ids = holds->ids.allObjects; }
+    NSMutableArray *settled = [NSMutableArray new];
+    for (NSNumber *n in ids) nvmtl_ws_release(holds, n.unsignedIntValue, settled);
     objc_setAssociatedObject(cb, nvmtl_ws_marks_key, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    (void)nvmtl_ws_publish_settled(settled, nil);
 }
 static void nvmtl_surface_finish_writes(NVMTLCommandBuffer *cb) {
     nvmtl_ws_mark_ready(cb);
@@ -409,7 +538,8 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
     part->copyInputsPrepared = YES;
 }
 - (BOOL)nvmtlSubmitAhead {
-    if (_executionDone || _cbError || !_committed) return NO;
+    // a commit still putting its kernel marks in (nvmtlSubmitWithEvents) must not reach the GPU before them
+    if (_executionDone || _cbError || !_committed || _commitMarking) return NO;
     if (_nextSubmit < _nextPart) _nextSubmit = _nextPart;
     while (_nextSubmit < _parts.count) {
         if (atomic_load(&gsub_inflight) >= nvmtl_gsub_cap()) return NO;
@@ -518,13 +648,12 @@ static void nvmtl_gsub_ahead_pass1(void) {
         }
         if (result == 0) [self nvmtlCollectDeviceTiming:&part->commands];
         BOOL published = result == 0;
-        // the GPU has finished this part: release the pending marks on its surfaces before the surface work below, which
-        // takes the surface's own lock. A CPU lock that is waiting in the page-off for these marks holds that lock, so
-        // marking them after it made every such lock sit out the full 100 ms bound.
-        if (published && nvmtl_ws_kernel_waits())
-            for (NVMTLTexture *texture in part->surfaces) if (texture->_surf) nvmtl_ws_mark((uint32_t)IOSurfaceGetID(texture->_surf), NO);
         if (published) {
-            for (NVMTLTexture *texture in part->surfaces) if (![texture nvmtlSurfaceOut]) published = NO;
+            // the GPU has finished this part: its surfaces' kernel marks are released (nvmtl_ws_part_landed) before the
+            // surface work below, which takes the surface's own lock
+            NSMutableArray *settled = [NSMutableArray new];
+            for (NVMTLTexture *texture in nvmtl_ws_part_landed(self, _nextPart, settled)) if (![texture nvmtlSurfaceOut]) published = NO;
+            if (!nvmtl_ws_publish_settled(settled, self)) published = NO;
             for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, YES)) nvmtl_buffer_sync_out(buffer);
         }
         if (!published) {
@@ -559,12 +688,18 @@ static void nvmtl_gsub_ahead_pass1(void) {
     @synchronized ([NVMTLCommandBuffer class]) {
         if (_committed) return;
         [self nvmtlReserveQueue];
-        _committed = YES;
+        _committed = YES; _commitMarking = YES;
         if (!__atomic_load_n(&_rep, __ATOMIC_ACQUIRE)) __atomic_store_n(&_rep, nvmtl_ep_enter(), __ATOMIC_RELEASE);
         [_completionCondition lock]; _cbstatus = MTLCommandBufferStatusCommitted; [_completionCondition unlock];
         [self nvmtlSealPartWithSignal:nil value:0 restart:NO];
+    }
+    // the commit's kernel marks can wait for the accelerator lock, so they go in outside the class lock (see
+    // nvmtl_ws_mark_pending). This command buffer is committed and holds its queue reservation, but nothing submits it
+    // (_commitMarking stops the submit-ahead pass) or completes it (it is not pending yet) before its marks are in.
+    nvmtl_ws_mark_pending(self);
+    @synchronized ([NVMTLCommandBuffer class]) {
+        _commitMarking = NO;
         nvmtl_surface_register_writes(self);
-        nvmtl_ws_mark_pending(self);   // before commit returns, so WindowServer's swap that follows finds the marks
         if (!nvmtl_pending_buffers) nvmtl_pending_buffers = [NSMutableArray new];
         [nvmtl_pending_buffers addObject:self];
         nvmtl_pump_buffers();

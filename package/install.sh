@@ -365,6 +365,11 @@ else
 fi
 ba=$(nvram boot-args 2>/dev/null | cut -f2-)
 for a in nvfb=1 nvaccel=1; do case " $ba " in *" $a "*) ;; *) echo "   NOTE: boot-args lack '$a' — add it in your OpenCore config.plist (README: Install — by hand), or let the 1401 Mac app set OpenCore up";; esac; done
+# WhateverGreen's boot screen copy (on unless gfxrst=4) reads a console mapping macOS may already have freed when this
+# driver's display first opens, and the Mac panics in IOFramebuffer::postOpen.
+if kmutil showloaded --list-only --bundle-identifier as.vit9696.WhateverGreen 2>/dev/null | grep -q WhateverGreen; then
+  case " $ba " in *" gfxrst=4 "*) ;; *) echo "   NOTE: WhateverGreen is loaded and boot-args lack 'gfxrst=4' — add it in your OpenCore config.plist, or the Mac can panic when the NVIDIA display first opens";; esac
+fi
 
 echo; echo "Done. Reboot now: sudo shutdown -r now"
 echo "If macOS asks, allow the extensions in System Settings > Privacy & Security, then reboot once more."
