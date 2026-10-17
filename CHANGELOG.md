@@ -1,8 +1,10 @@
 # Changelog
 
-## 2.2.1
+## 2.3.0
 
 Fixes
+- Plugging a different monitor into the same port: macOS sees the new monitor (its name, size and modes) instead
+  of keeping the one it replaced
 - Terminal and other apps that draw text with programmable blending: text no longer comes out missing or garbled
   (GTX 16 and others). Draws that read colour from a pass without every attachment were skipped; they are now drawn,
   and overlapping triangles in one draw read each other's colour in order (thanks pengubow)
