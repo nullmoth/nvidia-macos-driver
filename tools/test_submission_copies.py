@@ -29,6 +29,7 @@ typedef struct { void *map; size_t size; } Buffer;
 @implementation NVMTLBuffer @end
 @interface NVMTLTexture : NSObject { @public
     NVMTLBuffer *_backBuf; NVMTLTexture *_parent; MTLTextureUsage _usage;
+    IOSurfaceRef _surf; NSUInteger _plane;
 } @end
 @implementation NVMTLTexture @end
 static unsigned uploads, downloads, managedCopies;
@@ -43,6 +44,11 @@ static int nvmtl_vk_copy_buffer(void *q, Buffer *from, size_t off,
     memcpy((char *)to->map + dst, (char *)from->map + off, size); managedCopies++; return 0;
 }
 #define nvlog(...) ((void)0)
+// helpers the capture path calls (NVMTLEventSync.m); WindowServer kernel marks are off here
+static int nvmtl_vk_surface_dirty(uint32_t s,uint32_t p){(void)s;(void)p;return 0;}
+static BOOL nvmtl_ws_kernel_waits(void){return NO;}
+static void nvmtl_ws_mark(uint32_t sid,BOOL pending){(void)sid;(void)pending;}
+static void nvtrace(const char *f,...){(void)f;}
 '''
 checks = r'''
 int main(void) { @autoreleasepool {
@@ -202,7 +208,7 @@ with tempfile.TemporaryDirectory() as directory:
     subprocess.run([str(path / 'test')], check=True)
 
     (path / 'submission.m').write_text(fixture + helper + sync + submission_fixture + prepare + ahead + advance + submission_checks)
-    subprocess.run(['clang', '-fobjc-arc', '-framework', 'Foundation',
+    subprocess.run(['clang', '-fobjc-arc', '-framework', 'Foundation', '-framework', 'IOSurface',
                     '-framework', 'Metal', str(path / 'submission.m'), '-o', str(path / 'submission')], check=True)
     env = dict(os.environ)
     env.pop('NVMTL_GSUB_HOSTPTR_LIFT', None)
