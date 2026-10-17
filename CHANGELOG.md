@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.3.3
+
+Stability
+- 2.3.2 made some Macs worse: blank or torn windows and a Dock missing its apps on macOS Sequoia, WindowServer
+  crashes on some Tahoe desktops. Its display changes (screenshots and the lock screen, the brightness and video-memory
+  logging, the Turing flip change) are withdrawn from the package until they pass a staged test with the testers.
+  2.3.3 ships the 2.3.1 driver, which has the longest clean record in the field, on both macOS 15 and macOS 26
+- macOS Sequoia: installing and updating works again (the 2.3.2 fix is kept: the Metal driver is built for macOS 15)
+- After a rollback, the installed version record follows the files that are really installed (kept from 2.3.2)
+
 ## 2.3.2
 
 Fixes
