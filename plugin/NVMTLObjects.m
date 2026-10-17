@@ -1222,17 +1222,50 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-in #%u: %ux%u surface %p seed %u uploaded", n, r->_i.w, r->_i.h, (void *)r->_surf, seed);
     }
 }
-- (BOOL)nvmtlSurfaceOut {
+- (BOOL)nvmtlSurfaceOut { return [self nvmtlSurfaceOutDirtied:NO]; }
+// A re-mark after the commit's (nvmtlSurfaceOutDirtied:) that found the accelerator lock taken is retried here, off the
+// completion thread: a CPU lock that paged the surface off between the commit's two marks would otherwise leave its
+// unfinished copy current until the surface is drawn again. Each retry is again a try that never waits for the lock,
+// right after checking that the seed has not moved (a CPU write, or a newer commit marked it again): a mark that waited
+// for the lock could land after a CPU write that came in meanwhile and make the older VRAM current over it. 50 tries,
+// 2 ms apart; the texture then follows the seed the mark left.
+static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
+    static dispatch_queue_t queue; static dispatch_once_t once;
+    dispatch_once(&once, ^{ queue = dispatch_queue_create("nvmtl.surface-remark", DISPATCH_QUEUE_SERIAL); });
+    dispatch_async(queue, ^{
+        int marked = 1;
+        for (int i = 0; i < 50 && marked > 0; i++) {
+            if (i) usleep(2000);
+            if (IOSurfaceGetSeed(r->_surf) != seed) return;
+            marked = nvmtl_vk_surface_dirty_try((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane);
+        }
+        if (marked) return;
+        @synchronized (nvmtl_surface_sync(r)) {
+            if (r->_surfSeed != seed) return;
+            const uint32_t now = IOSurfaceGetSeed(r->_surf);
+            r->_surfSeed = now; r->_surfGen = nvmtl_vram_tag_bump(r->_surf, r->_plane, now);
+        }
+    });
+}
+// dirtied: the commit already marked this surface's shared VRAM newest in the kernel (WindowServer, with an accelerator
+// whose page-off waits for the GPU). It is marked again in case a CPU lock paged it off since, but only if the accelerator
+// lock is free: a page-off waiting for another surface's pending GPU write holds that lock until the write is released,
+// by the same completion thread that would be blocked here. Taken, the commit's mark stands and the re-mark is retried
+// off this thread (nvmtl_surface_remark_later).
+- (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
     @synchronized (nvmtl_surface_sync(r)) {
     if (![r nvmtlSurfaceCopyable]) { nvtrace("SURFOUT surf %u %ux%u NOT copyable", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h); return NO; }
     nvtrace("SURFOUT surf %u %ux%u vramOn %d t=%llu", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h, (int)r->_vramOn,
             (unsigned long long)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000));
-    if (r->_vramOn && !nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane)) {
+    const int marked = !r->_vramOn ? -1 : dirtied ? nvmtl_vk_surface_dirty_try((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane)
+                                                   : nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane);
+    if (r->_vramOn && (dirtied || !marked)) {
         uint32_t seed = IOSurfaceGetSeed(r->_surf);
         r->_surfSeed = seed; r->_surfSynced = YES;
         r->_surfGen = nvmtl_vram_tag_bump(r->_surf, r->_plane, seed);
+        if (dirtied && marked > 0) nvmtl_surface_remark_later(r, seed);
         static unsigned nd; if (nd++ < 6 || nd % 5000 == 0) nvlog("surface-out -> dirty, no copy (%ux%u surface %u seed %u, #%u)", r->_i.w, r->_i.h, (unsigned)IOSurfaceGetID(r->_surf), seed, nd);
         return YES;
     }

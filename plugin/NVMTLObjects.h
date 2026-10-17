@@ -55,6 +55,7 @@ static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return 
 - (void *)nvsampleview;
 - (void)nvmtlSurfaceIn;
 - (BOOL)nvmtlSurfaceOut;
+- (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied;
 @end
 @interface NVMTLFunction : NSObject <MTLFunction> { @public NSData *_spirv; NSString *_fname; NSString *_stage; NSString *_air; NSDictionary *_fc; NSArray *_embedded; unsigned char _bcHash[32]; BOOL _bcHashed;
   NSDictionary *_refl; NSDictionary *_airNames; NSArray *_arguments;
@@ -110,7 +111,7 @@ extern id gNVMTLMainDevice;
 @interface NVMTLCommandBuffer : NSObject <MTLCommandBuffer> {
   NSError *_cbError;
   NSMutableDictionary *_userDictionary;
-  @public nvk_cmdbuf _c; NVMTLCommandQueue *_queue; BOOL _committed; BOOL _capacityHeld; MTLCommandBufferStatus _cbstatus;
+  @public nvk_cmdbuf _c; NVMTLCommandQueue *_queue; BOOL _committed, _commitMarking; BOOL _capacityHeld; MTLCommandBufferStatus _cbstatus;
   NVMTLTexture *_present;
   NSMutableArray *_presentations;
   NSMutableArray *_handlers;

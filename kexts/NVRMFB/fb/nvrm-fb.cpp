@@ -308,6 +308,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     volatile unsigned long long fHwVblCalls = 0;
     unsigned fModeSetTicks = 0;
     bool fHwVblWanted = false;
+    unsigned fHwVblTries = 0, fHwVblTickAtTry = 0, fVblTicks = 0;
     static void hwVblIntr(NvU64 param, NvU64 timestamp);
     static void hwVblDeliver(thread_call_param_t p0, thread_call_param_t);
     uint64_t vblPeriodAbs();
@@ -321,9 +322,17 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     static inline volatile SInt32 sFlipLatched[8] = {};
     bool flipToMemory(struct NvKmsKapiMemory *mem, unsigned w, unsigned h, unsigned pitch, int *rcOut, bool pure = false, UInt64 cookie = 0);
     bool fSubmissionSeen = false, fSubmissionFaulted = false;
+    // When the tracked flip was committed, so a flip still pending can be told late (another period will do) from
+    // stuck (kFlipStuckUs since its submit, the head is faulted).
+    uint64_t fFlipSubmitAbs = 0;
+    unsigned fLatchLateLogs = 0;
+    enum { kPriorDone = 0, kPriorLate = 1, kPriorStuck = 2 };
+    uint64_t flipWaitUs();
+    int priorFlipState();
+    void publishFlipWait();
     unsigned fRejected = 0;     // commits NVKMS refused on this head, for NVRMRejectedCommits
     NvBool submitConfig(struct NvKmsKapiRequestedModeSetConfig *cfg, struct NvKmsKapiModeSetReplyConfig *rep, NvBool commit,
-                        bool bootstrap = false, bool cursorOnly = false);
+                        bool bootstrap = false, bool cursorOnly = false, bool frame = false);
     thread_call_t fReflip = nullptr;
     unsigned fReflips = 0; int fReflipRc = -99;
     unsigned fVblReg = 0;
@@ -376,7 +385,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     static void hotplugKick();
     static void hotplugFire(thread_call_param_t p0, thread_call_param_t);
     static void flipWake(unsigned head);
-    bool waitFlipDone(unsigned limitMs);
+    bool waitFlipDone(uint64_t limitUs);
     bool kapiInit();
     bool applyMode();
     void hudDraw();
@@ -1081,8 +1090,10 @@ bool NVRMNVDAFramebuffer::kapiInit()
                                                         (IOByteCount)fConsSize, kIODirectionNone);
             }
         }
-        if (!cm) cm = IOMemoryDescriptor::withAddressRange(fConsPhys, (IOByteCount)fConsSize,
-                                                          kIODirectionNone | kIOMemoryMapperNone, NULL);
+        // A console outside this card's windows belongs to another GPU (the Intel GPU on a laptop): it is not mapped,
+        // so nothing here reads or writes that GPU's memory.
+        if (!cm) FBLOG("console probe: 0x%llx (+%llu) is not in this card's windows (another GPU's console) - not mapped",
+                       fConsPhys, fConsSize);
         fConsMem = (IODeviceMemory *)cm;
         if (fConsMem) { fConsMap = fConsMem->map(kIOMapInhibitCache); if (fConsMap) fConsKva = (void *)fConsMap->getVirtualAddress(); }
     }
@@ -1324,18 +1335,19 @@ static IORecursiveLock *startLock()
 // Waiting for a flip to complete. Polling NVKMS's pending flag with IOSleep(1) overslept each check by a millisecond or
 // more, and a frame went through two such waits: harmless in a 16.7 ms frame, but at 144 Hz (6.9 ms) the flip landed a
 // vblank late and the desktop ran near half the panel rate while the hardware cursor stayed smooth (1401 "Record
-// flicker" on a 143 Hz panel: 56 flips/s median; 540 Hz: 192/s). The flip-occurred event now wakes the waiter, and the
-// pending flag (still the truth) is re-read at least every 250 us; the 100 ms bound is unchanged.
+// flicker" on a 143 Hz panel: 56 flips/s median; 540 Hz: 192/s). The flip-occurred event wakes the waiter, and the
+// pending flag (still the truth) is re-read at least every 250 us. The bound is the caller's, in microseconds: the
+// frame path passes one refresh period and a quarter (flipWaitUs), the old 100 ms is kept only as the stuck limit.
 static IOLock *sFlipWaitLock;
 static volatile SInt32 sFlipWakeEv[8];
 void NVRMNVDAFramebuffer::flipWake(unsigned head)
 {
     if (head < 8 && sFlipWaitLock) IOLockWakeup(sFlipWaitLock, (event_t)&sFlipWakeEv[head], false);
 }
-bool NVRMNVDAFramebuffer::waitFlipDone(unsigned limitMs)
+bool NVRMNVDAFramebuffer::waitFlipDone(uint64_t limitUs)
 {
     if (!sFlipWaitLock) { IOLock *l = IOLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&sFlipWaitLock)) IOLockFree(l); }
-    uint64_t end = 0; clock_interval_to_deadline(limitMs, kMillisecondScale, &end);
+    uint64_t end = 0; clock_interval_to_deadline(limitUs > 0xffffffffull ? 0xffffffffu : (uint32_t)limitUs, kMicrosecondScale, &end);
     for (;;) {
         NvBool pending = NV_TRUE;
         if (!fKms->getFlipPendingStatus(fDev, fHead, NVKMS_KAPI_LAYER_PRIMARY_IDX, &pending)) return false;
@@ -1355,10 +1367,41 @@ bool NVRMNVDAFramebuffer::waitFlipDone(unsigned limitMs)
 // its flip latches, i.e. reintroduces the strobe). The counters report the real wait the compositor
 // path takes, which is what an on-machine flicker check reads.
 static int gFlipLatch = 1;
-static int gFlipLatchWaits = 0, gFlipLatchTimeouts = 0, gFlipLatchMaxUs = 0;
+static int gFlipLatchWaits = 0, gFlipLatchTimeouts = 0, gFlipLatchMaxUs = 0, gFlipLatchLate = 0;
+// A flip still pending this long after its submit is a display that is not flipping (the head is faulted, as before).
+// Inside it, a pending flip is only late: the frame path skips one present and the mode-set path waits on.
+static const uint64_t kFlipStuckUs = 100000;
+// How long a committed flip can take to reach the panel: it latches at the next vblank, so one refresh period from the
+// mode's raster and pixel clock, plus a quarter period for the completion write and the 250 us re-read. A constant
+// 100 ms here held WindowServer's frame for six 60 Hz periods, or sixteen at 165 Hz, whenever a flip ran late.
+// The period comes from the raster directly: vblPeriodAbs floors it at 2 ms for the fallback timer, which would make a
+// 540 Hz panel's bound eleven periods. Under 1 ms (over 1000 Hz) or over 50 ms the timings are not trusted.
+uint64_t NVRMNVDAFramebuffer::flipWaitUs()
+{
+    const struct NvKmsKapiDisplayModeTimings &t = fMode.timings;
+    uint64_t ns = 0;
+    if (t.pixelClockHz && t.hTotal && t.vTotal) ns = (uint64_t)t.hTotal * t.vTotal * 1000000000ull / t.pixelClockHz;
+    if (ns < 1000000ull || ns > 50000000ull) absolutetime_to_nanoseconds(vblPeriodAbs(), &ns);
+    return (ns + ns / 4) / 1000;
+}
+// The flip before this one has to be on the panel before the surface it replaced may go away. One period covers a
+// flip in flight; past kFlipStuckUs since its submit the display is stuck.
+int NVRMNVDAFramebuffer::priorFlipState()
+{
+    if (!fSubmissionSeen) return kPriorDone;
+    if (waitFlipDone(flipWaitUs())) return kPriorDone;
+    uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - fFlipSubmitAbs, &ns);
+    if (ns / 1000 >= kFlipStuckUs) return kPriorStuck;
+    return kPriorLate;
+}
+// The accelerator bounds its own wait for a flip in flight by the same period (NVAccel reads this when it has to wait).
+void NVRMNVDAFramebuffer::publishFlipWait()
+{
+    setProperty("NVRMFlipWaitUs", (unsigned long long)flipWaitUs(), 64);
+}
 NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig *cfg,
                                             struct NvKmsKapiModeSetReplyConfig *rep, NvBool commit, bool bootstrap,
-                                            bool cursorOnly)
+                                            bool cursorOnly, bool frame)
 {
     if (!fKms || !fDev || !cfg || !rep || fHead >= 8 || fSubmissionFaulted) return NV_FALSE;
     if (!commit) return fKms->applyModeSetConfig(fDev, cfg, rep, NV_FALSE);
@@ -1369,16 +1412,23 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
         return ok && rep->flipResult == NV_KMS_FLIP_RESULT_SUCCESS;
     }
     if (fSubmissionSeen) {
-        // Initial console acceptance is asynchronous. A still-pending prior flip
-        // must receive the same bounded completion wait as a newly committed flip.
-        const bool complete = waitFlipDone(100);
-        if (!complete) {
+        // Initial console acceptance is asynchronous. A still-pending prior flip gets the same one-period wait as a
+        // newly committed flip. On the frame path a flip that is merely late costs this present (IN_PROGRESS: the
+        // caller keeps the frame on the panel and the next one follows); a mode set waits on until the stuck limit.
+        int prior = priorFlipState();
+        while (prior == kPriorLate && !frame) prior = priorFlipState();
+        if (prior == kPriorStuck) {
             FBLOG("presentation blocked: prior completion unavailable on head %u", fHead);
             fSubmissionFaulted = true; return NV_FALSE;
+        }
+        if (prior == kPriorLate) {
+            OSIncrementAtomic((volatile SInt32 *)&gFlipLatchLate);
+            rep->flipResult = NV_KMS_FLIP_RESULT_IN_PROGRESS; return NV_FALSE;
         }
     }
     const bool tracked = cfg->headRequestedConfig[fHead].modeSetConfig.bActive &&
         cfg->headRequestedConfig[fHead].layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX].config.surface;
+    const uint64_t submit0 = mach_absolute_time();
     const NvBool accepted = fKms->applyModeSetConfig(fDev, cfg, rep, NV_TRUE);
     if (!accepted || rep->flipResult != NV_KMS_FLIP_RESULT_SUCCESS) {
         // A rejected request queued nothing (INVALID_PARAMS fails validation, IN_PROGRESS refuses before queuing), so
@@ -1409,18 +1459,31 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
     if (cursorOnly) return NV_TRUE;
     if (!tracked) { fSubmissionSeen = false; return NV_TRUE; }
     fSubmissionSeen = true;
+    fFlipSubmitAbs = submit0;
     // Initial acceptance permits console handoff, never surface retirement. The owned boot surface remains pinned.
     if (bootstrap || !gFlipLatch) return NV_TRUE;
     OSIncrementAtomic((volatile SInt32 *)&gFlipLatchWaits);
     const uint64_t latch0 = mach_absolute_time();
-    if (waitFlipDone(100)) {
+    if (waitFlipDone(flipWaitUs())) {
         uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - latch0, &ns);
         const int us = (int)(ns / 1000);
         if (us > gFlipLatchMaxUs) gFlipLatchMaxUs = us;
         return NV_TRUE;
     }
-    // Keep both the old front and submitted surface alive until a proven recovery/reboot.
     OSIncrementAtomic((volatile SInt32 *)&gFlipLatchTimeouts);
+    // Past one period the flip is late, not lost, and the wait goes on: until it lands the panel may still scan the
+    // surface it replaces, and the caller completes the transaction (WindowServer then reuses that surface) as soon as
+    // this returns. On the frame path the caller is the accelerator's swap worker, which WindowServer does not wait on
+    // past its own one-period bound. Past the stuck limit both the old front and the submitted surface stay alive until
+    // a proven recovery or reboot.
+    if (frame && (++fLatchLateLogs <= 8 || (fLatchLateLogs % 64) == 0))
+        FBLOG("flip on head %u not on the panel within %llu us (#%u) - waiting for it to land",
+              fHead, (unsigned long long)flipWaitUs(), fLatchLateLogs);
+    for (;;) {
+        if (waitFlipDone(flipWaitUs())) return NV_TRUE;
+        uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - submit0, &ns);
+        if (ns / 1000 >= kFlipStuckUs) break;
+    }
     FBLOG("presentation blocked: submitted completion unavailable on head %u", fHead);
     fSubmissionFaulted = true; return NV_FALSE;
 }
@@ -1431,24 +1494,34 @@ void NVRMNVDAFramebuffer::sampleFire(thread_call_param_t p0, thread_call_param_t
     NVRMCallReference callReference(me);
     if (OSAddAtomic(0, &me->fStopping)) return;
     if (!me->fKva) return;
-    volatile uint32_t *px = (volatile uint32_t *)((me->fConsoleAperture && me->fConsKva) ? me->fConsKva : me->fKva);
-    unsigned w = me->fW, h = me->fH, ppr = me->fPitch / 4;
+    // Every read stays inside the mapping it uses: the console window is only as large as the firmware's screen, which
+    // can be smaller than the current mode, and the fixed sample points can lie past a small mode.
+    const bool onCons = me->fConsoleAperture && me->fConsKva;
+    volatile uint32_t *px = (volatile uint32_t *)(onCons ? me->fConsKva : me->fKva);
+    unsigned ppr = me->fPitch / 4;
+    if (!ppr) return;
+    const unsigned rows = (unsigned)((onCons ? me->fConsSize : me->fSize) / me->fPitch);
+    unsigned w = me->fW < ppr ? me->fW : ppr, h = me->fH < rows ? me->fH : rows;
+    auto at = [](volatile uint32_t *b, unsigned pp, unsigned bw, unsigned bh, unsigned x, unsigned y) -> uint32_t {
+        return (x < bw && y < bh) ? b[(size_t)y * pp + x] : 0; };
     uint32_t sum = 0; unsigned notGrey = 0, n = 0;
-    for (unsigned y = 0; y < h; y += 8) for (unsigned x = 0; x < w; x += 8) { uint32_t v = px[y * ppr + x] & 0xffffff; sum = sum * 33 + v; if (v != 0x303030) notGrey++; n++; }
+    for (unsigned y = 0; y < h; y += 8) for (unsigned x = 0; x < w; x += 8) { uint32_t v = px[(size_t)y * ppr + x] & 0xffffff; sum = sum * 33 + v; if (v != 0x303030) notGrey++; n++; }
     FBLOG("sample %u: sum 0x%08x not-grey %u/%u px(100,100)=0x%08x px(960,540)=0x%08x px(1800,1000)=0x%08x modeset %u | phys 0x%llx size %llu pitch %u %ux%u ok %u flip %d | disp 0x%x head %u conn 0x%x heads %u conns %u reflips %u rc %d",
           me->fSamples, sum, notGrey, n,
-          px[100 * ppr + 100], px[540 * ppr + 960], px[1000 * ppr + 1800], me->fModeSet,
+          at(px, ppr, w, h, 100, 100), at(px, ppr, w, h, 960, 540), at(px, ppr, w, h, 1800, 1000), me->fModeSet,
           me->fPhys, me->fSize, me->fPitch, me->fW, me->fH, me->fLastOk, me->fFlipResult,
           me->fDisplay, me->fHead, me->fConnector, me->fNumHeads, me->fNumConnectors,
           me->fReflips, me->fReflipRc);
     FBLOG("  vblreg %u vblcalls %llu", me->fVblReg, me->fVblCalls);
     if (me->fConsKva && me->fConsPitch >= 4) {
         volatile uint32_t *cp = (volatile uint32_t *)me->fConsKva;
-        unsigned cppr = me->fConsPitch / 4; uint32_t csum = 0;
-        for (unsigned y = 0; y < h; y += 8) for (unsigned x = 0; x < w; x += 8) csum = csum * 33 + (cp[y * cppr + x] & 0xffffff);
+        const unsigned cppr = me->fConsPitch / 4, crows = (unsigned)(me->fConsSize / me->fConsPitch);
+        const unsigned cw = me->fW < cppr ? me->fW : cppr, ch = me->fH < crows ? me->fH : crows;
+        uint32_t csum = 0;
+        for (unsigned y = 0; y < ch; y += 8) for (unsigned x = 0; x < cw; x += 8) csum = csum * 33 + (cp[(size_t)y * cppr + x] & 0xffffff);
         FBLOG("  cons@0x%llx: sum 0x%08x px(100,100)=0x%06x px(960,540)=0x%06x px(1800,1000)=0x%06x",
-              me->fConsPhys, csum, cp[100 * cppr + 100] & 0xffffff,
-              cp[540 * cppr + 960] & 0xffffff, cp[1000 * cppr + 1800] & 0xffffff);
+              me->fConsPhys, csum, at(cp, cppr, cw, ch, 100, 100) & 0xffffff,
+              at(cp, cppr, cw, ch, 960, 540) & 0xffffff, at(cp, cppr, cw, ch, 1800, 1000) & 0xffffff);
     }
     me->fSamples++;
     uint64_t deadline; clock_interval_to_deadline(10, kSecondScale, &deadline); me->scheduleCall(me->fSampler, deadline);
@@ -1786,6 +1859,13 @@ uint64_t NVRMNVDAFramebuffer::vblPeriodAbs()
     }
     uint64_t abs = 0; nanoseconds_to_absolutetime(ns, &abs); return abs;
 }
+// The hardware vblank registration is retried every kHwVblRetryTicks ticks of the fallback timer (5 s at 60 Hz, 2 s at
+// 144 Hz), a dozen times per mode set; a refusal that holds that long is taken as final and the timer stays the VBL.
+static const unsigned kHwVblRetryTicks = 300, kHwVblMaxTries = 12;
+static bool hwVblRetryDue(unsigned tries, unsigned ticksSinceTry)
+{
+    return tries < kHwVblMaxTries && ticksSinceTry >= kHwVblRetryTicks;
+}
 void NVRMNVDAFramebuffer::hwVblIntr(NvU64 param, NvU64)
 {
     NVRMNVDAFramebuffer *me = (NVRMNVDAFramebuffer *)(uintptr_t)param;
@@ -1814,11 +1894,19 @@ void NVRMNVDAFramebuffer::vblFire(thread_call_param_t p0, thread_call_param_t)
     // with a non-zero pixel clock, held for ~1 s of ticks, is that condition stated directly.
     if (me->fModeSet && !me->fConsoleAperture && me->fMode.timings.pixelClockHz) { if (me->fModeSetTicks < 1000) me->fModeSetTicks++; }
     else me->fModeSetTicks = 0;
-    if (me->fHwVblWanted && !me->fHwVblCb && (sFlipLatched[me->fHead] > 0 || me->fModeSetTicks >= 60)) {
-        me->fHwVblWanted = false;
+    // A refused registration is tried again (hwVblRetryDue): one try at 60 mode ticks left a display whose head was
+    // still settling on the free-running timer for the whole session, its frames beating against the real scan-out.
+    // A new mode set starts the tries over.
+    me->fVblTicks++;
+    if (me->fModeSetTicks == 0) me->fHwVblTries = 0;
+    if (me->fHwVblWanted && !me->fHwVblCb && (sFlipLatched[me->fHead] > 0 || me->fModeSetTicks >= 60) &&
+        (me->fHwVblTries == 0 || hwVblRetryDue(me->fHwVblTries, me->fVblTicks - me->fHwVblTickAtTry))) {
+        me->fHwVblTries++; me->fHwVblTickAtTry = me->fVblTicks;
         me->fHwVblCb = me->fKms->registerVblankIntrCallback(me->fDev, me->fHead, hwVblIntr, (NvU64)(uintptr_t)me);
-        FBLOG("hw vblank on head %u: %s after %d latched flips, %u mode ticks", me->fHead, me->fHwVblCb ? "REGISTERED" : "REFUSED by NVKMS - timer stays",
-              (int)sFlipLatched[me->fHead], me->fModeSetTicks);
+        if (me->fHwVblCb) me->fHwVblWanted = false;
+        FBLOG("hw vblank on head %u: %s after %d latched flips, %u mode ticks (try %u)", me->fHead,
+              me->fHwVblCb ? "REGISTERED" : hwVblRetryDue(me->fHwVblTries, kHwVblRetryTicks) ? "REFUSED by NVKMS - timer stays, trying again" : "REFUSED by NVKMS - timer stays",
+              (int)sFlipLatched[me->fHead], me->fModeSetTicks, me->fHwVblTries);
     }
     {   uint64_t nowv = 0; clock_get_uptime(&nowv); const uint64_t per = me->vblPeriodAbs();
         const bool hwLive = me->fHwVblLast && nowv - me->fHwVblLast < 2 * per;
@@ -1944,6 +2032,8 @@ bool NVRMNVDAFramebuffer::applyMode()
     }
     IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
     fModeSet = ok;
+    publishFlipWait();
+    fHwVblTries = 0;
     return ok;
 }
 
@@ -1997,6 +2087,22 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
           (unsigned long long)(nvrmVramBudget(fBarLen) >> 20));
     if (fIndex == 0 && gFB != this) { retain(); gFB = this; }
     if (fIndex == 0 && !gHotplug) gHotplug = thread_call_allocate(hotplugFire, nullptr);
+    // WhateverGreen (with Lilu) replaces IOFramebuffer::initFB. Unless boot-arg gfxrst=4 is set, the first initFB of any
+    // framebuffer copies the boot console from the address WhateverGreen saved at boot. macOS frees that mapping when
+    // the console moves (to a framebuffer, or to a new PCI window), and the copy then faults: a kernel panic in
+    // WindowServer's IOFramebuffer::open (postOpen) as this display opens. This driver cannot repair the saved address;
+    // gfxrst=4 turns the copy off, and this driver draws its own takeover screen.
+    // Its class is looked up rather than its service: a Lilu plugin's service is started but never registered, so a
+    // service match does not find it.
+    if (fIndex == 0) {
+        const OSSymbol *name = OSSymbol::withCStringNoCopy("WhateverGreen");
+        const bool weg = name && OSMetaClass::getMetaClassWithName(name);
+        OSSafeReleaseNULL(name);
+        int gfxrst = -1;
+        if (weg && !(PE_parse_boot_argn("gfxrst", &gfxrst, sizeof gfxrst) && gfxrst == 4))
+            FBLOG("WhateverGreen is loaded without boot-arg gfxrst=4: its boot screen copy can read freed memory when "
+                  "this display opens (kernel panic in IOFramebuffer::postOpen). Add gfxrst=4 to boot-args.");
+    }
     if (fIndex < sizeof gFBs / sizeof gFBs[0]) {
         IORecursiveLock *sl = startLock();
         if (sl) IORecursiveLockLock(sl);
@@ -2108,6 +2214,11 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
         }
         *calls[i] = nullptr;
     }
+    // vblFire retries a refused registration; one that passed its stopping check before fStopping was set can register
+    // after the unregister above. The timer is drained now, so a callback registered that way is removed here.
+    if (fHwVblCb && fKms && fDev) {
+        fKms->unregisterVblankIntrCallback(fDev, fHead, fHwVblCb); fHwVblCb = nullptr;
+    }
     if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
     if (fGamma) { IOFree(fGamma, sizeof *fGamma); fGamma = nullptr; fGammaOn = false; }
     if (fWakeGate) { if (IOWorkLoop *wl = getWorkLoop()) wl->removeEventSource(fWakeGate); OSSafeReleaseNULL(fWakeGate); }
@@ -2148,6 +2259,7 @@ IOReturn NVRMNVDAFramebuffer::getAppleSense(IOIndex connectIndex, UInt32 *senseT
 void NVRMNVDAFramebuffer::free()
 {
     if (fFlipCacheLock) { IOSimpleLockFree(fFlipCacheLock); fFlipCacheLock = nullptr; }
+    fConsKva = nullptr; OSSafeReleaseNULL(fConsMap); OSSafeReleaseNULL(fConsMem);
     super::free();
 }
 
@@ -2407,6 +2519,8 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
     struct NvKmsKapiSurface *old = fSurf;
     fSurf = ns; fFrontSurf = ns; fMode = m; fW = w; fH = h; fPitch = pitch;
     fRasterW = m.timings.hVisible; fRasterH = m.timings.vVisible; fCurId = id; fModeSet = true; fModeSwitches++;
+    publishFlipWait();
+    fHwVblTries = 0;   // a new mode gets its own hardware-vblank tries (fModeSet stays set, so vblFire would not reset them)
     if (old && old != ns) fKms->destroySurface(fDev, old);
     {
         const struct NvKmsKapiDisplayModeTimings &k5t = fMode.timings;
@@ -2731,8 +2845,9 @@ static int gFlipInterval = 1;
 // gFlipLatch and the counters are defined above submitConfig, where the completion wait drives them.
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch, CTLFLAG_RW | CTLFLAG_LOCKED, &gFlipLatch, 0, "1 = a committed flip waits for its completion before a surface retires (0 = debug bypass)");
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_waits, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchWaits, 0, "flips that waited for completion");
-SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_timeouts, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchTimeouts, 0, "flips whose completion never arrived within the wait");
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_timeouts, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchTimeouts, 0, "flips not on the panel within a refresh period and a quarter of their submit (waited on to the stuck limit)");
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchMaxUs, 0, "longest submit-to-completion wait (us)");
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_late, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchLate, 0, "presents skipped because the previous flip was still on its way to the panel");
 static int gFlipLean = 1;
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_lean, CTLFLAG_RW | CTLFLAG_LOCKED, &gFlipLean, 0, "1 = lean pure flip (surface only)");
 static SInt64 gFlipUsSum, gFlipN, gFlipUsMax;
@@ -2754,6 +2869,7 @@ static void nvrmfbInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_lean);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_waits);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_timeouts); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_max_us);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_late);
 }
 
 bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
@@ -2986,7 +3102,8 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
         bool ok = flipToMemory(home ? nullptr : (struct NvKmsKapiMemory *)f->kapiMemory,
                                f->width, f->height, f->pitch, &rc, !home || pureHome, f->allocationCookie);
         f->flipResult = rc;
-        return ok ? kIOReturnSuccess : kIOReturnIOError;
+        // Busy: the previous flip is still on its way to the panel; the caller keeps its frame and presents the next.
+        return ok ? kIOReturnSuccess : rc == (int)NV_KMS_FLIP_RESULT_IN_PROGRESS ? kIOReturnBusy : kIOReturnIOError;
     }
     if (functionName && functionName->isEqualTo(NVRM_FLIP_FN)) {
         struct NVRMFlipRequest *f = (struct NVRMFlipRequest *)param1;
@@ -2995,7 +3112,7 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
         bool ok = flipToMemory((struct NvKmsKapiMemory *)f->kapiMemory,
                                f->width, f->height, f->pitch, &rc, false, f->allocationCookie);
         f->flipResult = rc;
-        return ok ? kIOReturnSuccess : kIOReturnIOError;
+        return ok ? kIOReturnSuccess : rc == (int)NV_KMS_FLIP_RESULT_IN_PROGRESS ? kIOReturnBusy : kIOReturnIOError;
     }
     const char *name = functionName ? functionName->getCStringNoCopy() : "(null)";
     if (!isAlloc && !isFree)
@@ -3054,6 +3171,18 @@ bool NVRMNVDAFramebuffer::flipToMemory(struct NvKmsKapiMemory *mem, unsigned w, 
         if (slot == 16 || !cacheable) return false;
         NVFlipEntry &entry = fFlipCache[slot];
         if (entry.surf) {
+            // Until the latest flip has landed, the panel may still be scanning the front before it, which is one of
+            // these non-front slots. A late flip costs this present (the caller keeps the frame); a stuck one faults.
+            const int prior = priorFlipState();
+            if (prior != kPriorDone) {
+                if (prior == kPriorStuck) {
+                    FBLOG("presentation blocked: prior completion unavailable on head %u (surface reuse)", fHead);
+                    fSubmissionFaulted = true;
+                }
+                if (prior == kPriorLate) OSIncrementAtomic((volatile SInt32 *)&gFlipLatchLate);
+                if (rcOut) *rcOut = prior == kPriorLate ? (int)NV_KMS_FLIP_RESULT_IN_PROGRESS : -1;
+                return false;
+            }
             fKms->destroySurface(fDev, entry.surf);
             if (entry.pin) fKms->freeMemory(fDev, entry.pin);
             entry = {};
@@ -3099,10 +3228,12 @@ bool NVRMNVDAFramebuffer::flipToMemory(struct NvKmsKapiMemory *mem, unsigned w, 
     if (!lean)
         lr->flags.srcXYChanged = lr->flags.srcWHChanged = lr->flags.dstXYChanged = lr->flags.dstWHChanged = NV_TRUE;
     const uint64_t ft0 = mach_absolute_time();
-    NvBool ok = submitConfig(cfg, rep, NV_TRUE);
+    NvBool ok = submitConfig(cfg, rep, NV_TRUE, false, false, true);
     if (pure) { const SInt64 us = (SInt64)((mach_absolute_time() - ft0) / 1000);
         OSAddAtomic64(us, &gFlipUsSum); OSAddAtomic64(1, &gFlipN); if (us > gFlipUsMax) gFlipUsMax = us; }
-    int rc = ok ? (int)rep->flipResult : -1;
+    // IN_PROGRESS on a refusal is the previous flip still on its way (submitConfig's late path, or NVKMS's own answer
+    // to a flip over an outstanding one): the caller keeps its frame and presents the next.
+    int rc = ok ? (int)rep->flipResult : rep->flipResult == NV_KMS_FLIP_RESULT_IN_PROGRESS ? (int)NV_KMS_FLIP_RESULT_IN_PROGRESS : -1;
     IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
     if (rcOut) *rcOut = rc;
     const bool accepted = ok && rc == NV_KMS_FLIP_RESULT_SUCCESS;

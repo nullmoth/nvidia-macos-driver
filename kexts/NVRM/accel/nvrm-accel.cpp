@@ -603,6 +603,11 @@ public:
         bool r = IOGraphicsAccelerator2::start(provider);
         ALOG("IOGraphicsAccelerator2::start -> %d", r);
         if (r) {
+            // Tells the Metal plugin that NVResource::pageoff waits for a surface WindowServer's GPU is still writing
+            // (nvSurfWaitReady). Only then does the plugin mark WindowServer's surfaces newest in VRAM at commit; with an
+            // accelerator that does not wait, that mark would let a CPU lock or a copied present read a surface before
+            // its pixels landed, so the plugin keeps marking them after the GPU finishes.
+            setProperty("NVAccelSurfaceWait", 1ULL, 32);
             registerService(); ALOG("registerService() called — Metal can now find MetalPluginName=%s", "NVMTLDriver");
             gAccel = this; gEnableAccel = &NVAccel::enableFromHook;
             for (unsigned i = 0; i < NV_CARRIERS; i++) {
@@ -1230,7 +1235,9 @@ static SInt64 gCntIopAsync, gCntIopAsyncRefused, gCntIopAsyncDrop;
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_async, CTLFLAG_RW | CTLFLAG_LOCKED, &gIopAsync, 0, "1 = the swap runs on a thread call and completes through signalTransactionInterrupt (Apple's shape); 0 = the earlier synchronous flip");
 NVACCEL_CNT(nvaccel_iop_async_flips,   gCntIopAsync,        "swaps completed asynchronously");
 NVACCEL_CNT(nvaccel_iop_async_refused, gCntIopAsyncRefused, "async swaps NVKMS refused (that frame stayed off the panel)");
-NVACCEL_CNT(nvaccel_iop_async_drop,    gCntIopAsyncDrop,    "frames dropped because a flip was still in flight (never expected)");
+NVACCEL_CNT(nvaccel_iop_async_drop,    gCntIopAsyncDrop,    "frames dropped because a flip was still in flight past a refresh period");
+static SInt64 gCntIopLate;
+NVACCEL_CNT(nvaccel_iop_late,          gCntIopLate,         "frames kept on the panel because the previous flip had not reached it yet (framebuffer answered busy)");
 static int gCrcHead = 0;
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_crc_head, CTLFLAG_RW | CTLFLAG_LOCKED, &gCrcHead, 0, "b85k-crc: which head debug.nvaccel_crc reads");
 static int nvaccel_crc_sysctl SYSCTL_HANDLER_ARGS;
@@ -1274,6 +1281,7 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_marks); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_waits);
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_timeouts); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_wait_max_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_refused); sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_drop);
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_late);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h0);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h1);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h2);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h3);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h4);      sysctl_register_oid(&sysctl__debug_nvaccel_igpu);
@@ -1466,6 +1474,11 @@ static IOReturn nvAccelSurfVram(struct NVRMSurfShareEsc *p, task_t task, unsigne
     }
     p->hSrcClient = p->hSrcMemory = 0;
     if (p->version != NVRM_SURFSHARE_VERSION) { p->status = NVRM_SS_BAD_VERSION; return kIOReturnSuccess; }
+    // The plugin re-marks a surface after its last GPU write on the thread that releases the pending marks. A page-off
+    // waiting for one of those marks holds the accelerator lock, so that re-mark must not wait for the lock: it is
+    // dropped instead, and the mark taken at commit stands.
+    const bool tryOnly = cmd == NVRM_ESC_SURF_DIRTY && (p->plane & NVRM_SS_PLANE_TRYLOCK);
+    p->plane &= ~NVRM_SS_PLANE_TRYLOCK;
     NVAccel *a = NVAccel::gAccel;
     struct NVRMRmHandles h; nvSVZero(&h, sizeof h);
     if (!task || !a || !nvAccelRmHandles(&h)) { p->status = NVRM_SS_OFF; return kIOReturnSuccess; }
@@ -1476,7 +1489,7 @@ static IOReturn nvAccelSurfVram(struct NVRMSurfShareEsc *p, task_t task, unsigne
     }
     void *surf = _ZN13IOSurfaceRoot13lookupSurfaceEjP4task(gNVSVRoot, p->surfaceID, task);
     if (!surf) { p->status = NVRM_SS_NO_SURFACE; gNVSVRefused++; return kIOReturnSuccess; }
-    if (!nvFamLock(a, false)) { ((OSObject *)surf)->release(); p->status = NVRM_SS_OFF; return kIOReturnSuccess; }
+    if (!nvFamLock(a, tryOnly)) { ((OSObject *)surf)->release(); p->status = tryOnly ? NVRM_SS_BUSY : NVRM_SS_OFF; return kIOReturnSuccess; }
     void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, surf, p->plane);
     OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
     NVResource *res = OSDynamicCast(NVResource, ctx);
@@ -1697,14 +1710,35 @@ void _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(void *pipe, void *ar
 struct thread_call *thread_call_allocate(void (*func)(void *, void *), void *param0);
 int thread_call_enter(struct thread_call *call);
 }
-struct NVIopAsync { void *pipe; IOService *fb; IOSurface *s; struct NVRMFlipRequest f; volatile SInt32 busy; struct thread_call *call; };
+// next/nextF: one frame WindowServer presented while the previous flip was still in flight past the bound, taken by
+// the worker as soon as that flip lands (guarded by gIopAsLock, like busy's clearing).
+struct NVIopAsync { void *pipe; IOService *fb; IOSurface *s; struct NVRMFlipRequest f; volatile SInt32 busy; struct thread_call *call;
+                    IOSurface *next; struct NVRMFlipRequest nextF; };
 static NVIopAsync gIopAs[kNvMaxFB];
 static SInt32 gIopAsyncRefuseRun;
 // WindowServer's next present waits here while the previous asynchronous flip is still on its way to the panel. It
 // waited in IOSleep(1) steps, each overshooting by a millisecond or more - a large slice of a 6.9 ms frame at 144 Hz,
-// where the desktop then ran near half the panel rate. The flip's worker now wakes the waiter when it finishes; the
-// busy flag is still re-read at least every 250 us and the 50 ms bound is unchanged.
+// where the desktop then ran near half the panel rate. The flip's worker wakes the waiter when it finishes; the busy
+// flag is still re-read at least every 250 us. The bound is one refresh period and a quarter, published by the
+// framebuffer from its mode (NVRMFlipWaitUs): a flip in flight lands at the next vblank, so a wait past that only
+// holds WindowServer's thread; the frame is dropped instead and the next one follows the flip.
 static IOLock *gIopAsLock;
+static uint64_t nvAccelFlipWaitUs(IOService *fb)
+{
+    // A retained copy: a mode switch republishes the property, which releases the number getProperty would return.
+    OSObject *o = fb ? fb->copyProperty("NVRMFlipWaitUs") : nullptr;
+    OSNumber *n = OSDynamicCast(OSNumber, o);
+    const uint64_t us = n ? n->unsigned64BitValue() : 0;
+    if (o) o->release();
+    return us ? us : 50000;   // before the framebuffer has a mode, the old 50 ms
+}
+// What the framebuffer's answer to a flip means for the frame: on the panel, kept (busy: the flip before it is still
+// landing, the next present follows it), or refused (copied, and three in a row turn the asynchronous swap off).
+enum { kNvFlipShown = 0, kNvFlipKept = 1, kNvFlipRefused = 2 };
+static int nvAccelFlipOutcome(IOReturn rr)
+{
+    return rr == kIOReturnSuccess ? kNvFlipShown : rr == kIOReturnBusy ? kNvFlipKept : kNvFlipRefused;
+}
 static bool nvAccelIopAsyncBusy(const void *pipe)
 {
     for (unsigned h = 0; h < kNvMaxFB; h++)
@@ -1716,11 +1750,13 @@ static void nvAccelIopAsyncRun(void *p0, void *)
     NVIopAsync *e = (NVIopAsync *)p0;
     const unsigned head = (unsigned)(e - gIopAs);
     IOSurface *s = e->s; e->s = nullptr;
+  again:
     nvSurfWaitReady(s->getSurfaceID());   // WindowServer did not wait for this composite; the flip does, off its thread
     const OSSymbol *sym = OSSymbol::withCStringNoCopy("nvFlipToSurfacePure");
     IOReturn rr = sym ? e->fb->callPlatformFunction(sym, false, &e->f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
-    if (rr == kIOReturnSuccess) {
+    const int outcome = nvAccelFlipOutcome(rr);
+    if (outcome == kNvFlipShown) {
         gIopAsyncRefuseRun = 0;
         if (gIopFlipPrev[head]) ((OSObject *)gIopFlipPrev[head])->release();
         gIopFlipPrev[head] = gIopFlipFront[head]; gIopFlipFront[head] = s; gIopFlipped[head] = true;
@@ -1728,6 +1764,9 @@ static void nvAccelIopAsyncRun(void *p0, void *)
         if (n < 4 || n == 600 || (n & 0xffff) == 0)
             ALOG("iop: ASYNC swap #%lld head %u: surface 0x%x %ux%u pitch %u scanned out of its own VRAM (flipResult %d)",
                  (long long)n + 1, head, s->getSurfaceID(), e->f.width, e->f.height, e->f.pitch, e->f.flipResult);
+    } else if (outcome == kNvFlipKept) {
+        OSAddAtomic64(1, &gCntIopLate);
+        ((OSObject *)s)->release();
     } else {
         OSAddAtomic64(1, &gCntIopAsyncRefused); OSAddAtomic64(1, &gCntIopFlipNo[7]);
         if (gIopFlipLogs < 8) { gIopFlipLogs++; ALOG("iop: async flip REFUSED (0x%x, flipResult %d) head %u -- that frame is not on the panel",
@@ -1738,16 +1777,26 @@ static void nvAccelIopAsyncRun(void *p0, void *)
         }
         ((OSObject *)s)->release();
     }
-    __atomic_store_n(&e->busy, 0, __ATOMIC_RELEASE);
-    if (gIopAsLock) { IOLockLock(gIopAsLock); IOLockWakeup(gIopAsLock, (event_t)&e->busy, false); IOLockUnlock(gIopAsLock); }
+    // A frame queued behind this flip follows it at once; otherwise the worker is free and the waiter is woken.
+    IOSurface *queued = nullptr;
+    if (gIopAsLock) {
+        IOLockLock(gIopAsLock);
+        queued = e->next; e->next = nullptr;
+        if (queued) { for (unsigned i = 0; i < sizeof e->f; i++) ((volatile unsigned char *)&e->f)[i] = ((const volatile unsigned char *)&e->nextF)[i]; }
+        else { __atomic_store_n(&e->busy, 0, __ATOMIC_RELEASE); IOLockWakeup(gIopAsLock, (event_t)&e->busy, false); }
+        IOLockUnlock(gIopAsLock);
+    } else {
+        __atomic_store_n(&e->busy, 0, __ATOMIC_RELEASE);
+    }
     _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(e->pipe, nullptr);
+    if (queued) { s = queued; goto again; }
 }
 static bool nvAccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSurface *s, const struct NVRMFlipRequest *f)
 {
     NVIopAsync *e = &gIopAs[head];
     if (!gIopAsLock) { IOLock *l = IOLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gIopAsLock)) IOLockFree(l); }
     if (__atomic_load_n(&e->busy, __ATOMIC_ACQUIRE)) {
-        uint64_t end = 0; clock_interval_to_deadline(50, kMillisecondScale, &end);
+        uint64_t end = 0; clock_interval_to_deadline((uint32_t)nvAccelFlipWaitUs(fb), kMicrosecondScale, &end);
         while (__atomic_load_n(&e->busy, __ATOMIC_ACQUIRE) && mach_absolute_time() < end) {
             if (!gIopAsLock) { IOSleep(1); continue; }
             uint64_t next = 0; clock_interval_to_deadline(250, kMicrosecondScale, &next);
@@ -1757,6 +1806,21 @@ static bool nvAccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSur
                 IOLockSleepDeadline(gIopAsLock, (event_t)&e->busy, next, THREAD_UNINT);
             IOLockUnlock(gIopAsLock);
         }
+    }
+    if (__atomic_load_n(&e->busy, __ATOMIC_ACQUIRE) && gIopAsLock) {
+        // Still in flight past the bound: this frame is queued for the worker instead of holding WindowServer any
+        // longer, replacing an older queued frame (that one is the dropped frame the counter names).
+        IOLockLock(gIopAsLock);
+        if (__atomic_load_n(&e->busy, __ATOMIC_ACQUIRE) && e->pipe == pipe && e->fb == fb) {
+            IOSurface *old = e->next;
+            ((OSObject *)s)->retain();
+            e->next = s;
+            for (unsigned i = 0; i < sizeof *f; i++) ((volatile unsigned char *)&e->nextF)[i] = ((const unsigned char *)f)[i];
+            IOLockUnlock(gIopAsLock);
+            if (old) { OSAddAtomic64(1, &gCntIopAsyncDrop); ((OSObject *)old)->release(); }
+            return true;
+        }
+        IOLockUnlock(gIopAsLock);
     }
     if (__atomic_load_n(&e->busy, __ATOMIC_ACQUIRE)) {
         OSAddAtomic64(1, &gCntIopAsyncDrop);
@@ -1817,6 +1881,7 @@ static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pip
     const OSSymbol *sym = OSSymbol::withCStringNoCopy("nvFlipToSurfacePure");
     IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
+    if (nvAccelFlipOutcome(rr) == kNvFlipKept) { OSAddAtomic64(1, &gCntIopLate); return true; }   // the frame on the panel stays
     if (rr != kIOReturnSuccess) {
         if (gIopFlipLogs < 8) { gIopFlipLogs++; ALOG("iop: flip REFUSED (0x%x, flipResult %d) head %u %llux%llu pitch %llu -- copying",
                                                      (unsigned)rr, f.flipResult, head, W, H, P); }
@@ -1857,6 +1922,9 @@ static void nvAccelIopHome(IOService *fb, unsigned head)
     IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
     OSAddAtomic64(1, &gCntIopFlipHome);
+    // Busy: the flip before HOME is still landing and HOME was not submitted, so the panel is not home yet and the
+    // next copied frame tries again. Clearing the flag here left every later copy offscreen behind that flip.
+    if (rr == kIOReturnBusy) return;
     if (rr != kIOReturnSuccess && gIopFlipLogs < 8) { gIopFlipLogs++; ALOG("iop: HOME flip refused (0x%x) head %u", (unsigned)rr, head); }
     gIopFlipped[head] = false;
 }

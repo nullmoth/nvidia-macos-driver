@@ -10,12 +10,16 @@
 #define NVRM_SURFSHARE_VERSION 2u
 /* NVRM_ESC_SURF_DIRTY with this plane bit is a WindowServer completion mark (bit 0: 1 pending, 0 ready), not a dirty plane */
 #define NVRM_SS_PLANE_GPU_MARK 0x80000000u
+/* NVRM_ESC_SURF_DIRTY with this plane bit gives up with NVRM_SS_BUSY instead of waiting for the accelerator lock
+ * (accelerators that publish NVAccelSurfaceWait) */
+#define NVRM_SS_PLANE_TRYLOCK  0x40000000u
 #define NVRM_SS_BAD_VERSION   0x80000001u
 #define NVRM_SS_OFF           0x80000002u
 #define NVRM_SS_NO_SURFACE    0x80000003u
 #define NVRM_SS_NO_CACHE      0x80000004u
 #define NVRM_SS_NO_VRAM       0x80000005u
 #define NVRM_SS_TOO_SMALL     0x80000006u
+#define NVRM_SS_BUSY          0x80000007u
 struct NVRMSurfShareEsc {
     unsigned int version;
     unsigned int surfaceID;

@@ -53,6 +53,7 @@ stick made by an old 1401 keeps the old problem until you make it again.
 | Photos / face detection keeps crashing (mediaanalysisd) | A Metal object was freed twice in our driver. | Fixed in 1.14. |
 | Hardware video encoding off on RTX 5070 Ti and similar cards | The card has no first encoder engine, and the encoder only tried that one. | Fixed in the encoder (it uses the first engine the card has). |
 | "Quadro T1200 / T-series … is older than the driver supports" | The installer's list did not include every Turing workstation card. | Fixed in 1.14: every Turing or newer card is accepted. |
+| Kernel panic as the login screen appears (WindowServer, `IOFramebuffer::postOpen`, page fault in `memcpy`), with WhateverGreen installed | WhateverGreen copies the boot screen on the first framebuffer start from an address it saved at boot. macOS can free that mapping before the NVIDIA display opens (seen on a laptop whose boot screen is on the Intel GPU). | Add `gfxrst=4` to boot-args. It turns that copy off; the driver draws its own start-up screen. |
 | The app edits the wrong OpenCore partition | Two OpenCore partitions on the macOS disk. | Fixed in 1.14 (the boot arguments decide which one started the Mac). |
 
 ### Several NVIDIA cards

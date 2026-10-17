@@ -491,6 +491,35 @@ static int nvrmSysW(const char *n, int v) { return sysctlbyname(n, NULL, NULL, &
 static int nvrmSysR(const char *n, int *v) { size_t l = sizeof *v; *v = -99; return sysctlbyname(n, v, &l, NULL, 0); }
 static unsigned nvrmPop(unsigned m) { unsigned c = 0; for (; m; m &= m - 1) c++; return c; }
 
+// The name of another display-class PCI device whose memory windows hold [phys, phys + size), or NULL. The name points
+// into a static buffer, so the caller logs it before calling again.
+static const char *otherDisplayHolding(IOPCIDevice *self, uint64_t phys, uint64_t size)
+{
+    static char name[64];
+    OSDictionary *match = IOService::serviceMatching("IOPCIDevice");
+    OSIterator *it = match ? IOService::getMatchingServices(match) : NULL;
+    OSSafeReleaseNULL(match);
+    const char *found = NULL;
+    while (OSObject *o = it ? it->getNextObject() : NULL) {
+        IOPCIDevice *d = OSDynamicCast(IOPCIDevice, o);
+        if (!d || d == self) continue;
+        OSData *cc = OSDynamicCast(OSData, d->getProperty("class-code"));
+        if (!cc || cc->getLength() < 3 || ((const uint8_t *)cc->getBytesNoCopy())[2] != 0x03) continue;
+        for (unsigned i = 0, n = d->getDeviceMemoryCount(); i < n && !found; i++) {
+            IODeviceMemory *dm = d->getDeviceMemoryWithIndex(i);
+            if (!dm) continue;
+            const uint64_t pa = dm->getPhysicalAddress(), len = dm->getLength();
+            if (phys >= pa && size <= len && phys - pa <= len - size) {
+                strlcpy(name, d->getName(), sizeof name);
+                found = name;
+            }
+        }
+        if (found) break;
+    }
+    OSSafeReleaseNULL(it);
+    return found;
+}
+
 void NVRM::snapshotBootScreen()
 {
     char nb[8] = { 0 };
@@ -504,6 +533,14 @@ void NVRM::snapshotBootScreen()
     const uint64_t phys = (uint64_t)v.v_baseAddr & ~3ull;
     const uint64_t size = (uint64_t)v.v_rowBytes * v.v_height;
     if (size > (64ull << 20)) { LOG("boot screen: %llu B is not a console — not copying", size); return; }
+    // On a laptop with an Intel GPU the firmware console lives on that GPU, not on this card. Its memory is not ours to
+    // read, and the takeover then starts black, which is what that panel shows anyway. Only a console another display
+    // device's window holds is skipped: this card's own window list can be out of date before BAR1 is placed, so a
+    // console missing from it is still copied.
+    if (const char *other = otherDisplayHolding(fPCI, phys, size)) {
+        LOG("boot screen: the console at 0x%llx (+%llu) is in %s's window, not this card's — not copying", phys, size, other);
+        return;
+    }
     IOMemoryDescriptor *src = IOMemoryDescriptor::withAddressRange(phys, size, kIODirectionIn | kIOMemoryMapperNone, NULL);
     IOMemoryMap *map = src ? src->map(kIOMapInhibitCache) : NULL;
     IOBufferMemoryDescriptor *dst = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut, size, page_size);

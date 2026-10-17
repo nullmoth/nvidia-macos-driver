@@ -126,6 +126,8 @@ Also required:
 - **BIOS:** Above 4G Decoding ON (the card maps memory above 4 GB), CSM OFF.
 - **SMBIOS:** a Mac model that runs macOS 15 with a discrete GPU (tested: `iMacPro1,1`, which 1401 uses).
 - **Remove** any `nv_disable=1`, WhateverGreen NVIDIA patches, or `agdpmod=pikera` for this card.
+- **With WhateverGreen installed** (for an Intel or AMD GPU), add `gfxrst=4` to boot-args. Without it, WhateverGreen's
+  boot screen copy can read freed memory when the NVIDIA display opens, and the Mac panics.
 - **No `DeviceProperties`** are needed for the NVIDIA card.
 
 Verify after the reboot:
