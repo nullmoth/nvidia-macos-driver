@@ -19,9 +19,16 @@ def problems(text):
         after = text[ins.end():ins.end() + 200]
         if "nv_xnu_maps_high" not in after.split("return")[0]:
             out.append("an insert does not raise the high-water mark: " + ins.group(0)[:60])
-    # the three lookups must stop at the high-water mark
+    # the three lookups must stop at the high-water mark. Anchor on the DEFINITION, which starts a line
+    # with its return type: searching for the bare name finds the first mention of it anywhere, and a
+    # comment above the table that names these functions made this read the wrong body and report a
+    # lookup as unbounded when it was not.
     for fn in ("nv_xnu_phys_for_kernel_va", "os_unmap_kernel_space", "nv_xnu_kmap_overlap"):
-        body = text[text.find(fn):]
+        d = re.search(r"^[A-Za-z_][^\n/]*\b%s\s*\(" % re.escape(fn), text, re.M)
+        if not d:
+            out.append(fn + " has no definition in this file")
+            continue
+        body = text[d.start():]
         body = body[:body.find("\n}\n")]
         if "i < nv_xnu_maps_high" not in body:
             out.append(fn + " scans the whole table")
