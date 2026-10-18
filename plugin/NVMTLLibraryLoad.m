@@ -2133,6 +2133,18 @@ BOOL nvmtl_needs_visible_link(NSString *air, NSString *why)
                 || [why rangeOfString:@".MTL_UNRESOLVED_VISIBLE_FN"].location != NSNotFound);
 }
 
+// A link that failed (the linker or the translation refused it) fails the same way for the same inputs. Since a refused
+// visible-function module is deferred to the pipeline link (nvmtl_needs_visible_link), a module that really is broken would otherwise be
+// linked and translated again for every pipeline that uses it. The key holds the inputs themselves: equal strings compare
+// by pointer first, so a lookup costs no AIR comparison when the library hands out the same objects.
+static NSCache *nvmtl_link_failures(void) {
+    static NSCache *c; static dispatch_once_t once;
+    dispatch_once(&once, ^{ c = [NSCache new]; c.countLimit = 256; });
+    return c;
+}
+static id nvmtl_link_failure_key(NVMTLFunction *fn, NSDictionary *mods, NSArray *tc, NSDictionary *fc) {
+    return @[fn->_air ?: @"", fn->_stage ?: @"", mods ?: @{}, tc ?: @[], fc ?: @{}];
+}
 id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, NSArray *dylibs, NSError **err)
 {
     if (err) *err = nil;
@@ -2202,6 +2214,13 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     for (size_t i = 0; i < n; i++) { syms[i] = [keys[i] UTF8String]; mls[i] = [mods[keys[i]] UTF8String]; }
     BOOL usesTable = [fn->_air rangeOfString:@"!\"air.visible_function_table\""].location != NSNotFound
                   || [fn->_air rangeOfString:@"!\"air.intersection_function_table\""].location != NSNotFound;
+    id failKey = nvmtl_link_failure_key(fn, mods, usesTable ? (lf.functions ?: @[]) : @[], fc);
+    NSString *known = [nvmtl_link_failures() objectForKey:failKey];
+    if (known) {
+        free(syms); free(mls);
+        if (err) *err = nvmtl_link_err(known);
+        return nil;
+    }
     NSMutableArray *tc = [NSMutableArray new];
     int rc;
     if (usesTable) {
@@ -2229,7 +2248,9 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     rc = xlate_link(fn->_air.UTF8String, fn->_stage.UTF8String, syms, mls, n, &out, &len, e, sizeof e);
     free(syms); free(mls);
     if (rc != 0 || !out) {
-        if (err) *err = nvmtl_link_err([NSString stringWithFormat:@"\"%@\": %s", fn->_fname, e[0] ? e : "link failed"]);
+        NSString *why = [NSString stringWithFormat:@"\"%@\": %s", fn->_fname, e[0] ? e : "link failed"];
+        [nvmtl_link_failures() setObject:why forKey:failKey];
+        if (err) *err = nvmtl_link_err(why);
         return nil;
     }
     NSString *linked = [[NSString alloc] initWithBytes:out length:(len && out[len-1] == 0) ? len - 1 : len encoding:NSUTF8StringEncoding];
@@ -2287,7 +2308,12 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     free(idx); free(sz); free(bytes); free(pay);
     if (!spv && dumpDir)
         [(te ?: @"(no reason)") writeToFile:[dumpDir stringByAppendingFormat:@"/%@.err.txt", fn->_fname] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-    if (!spv) { if (err) *err = nvmtl_link_err([NSString stringWithFormat:@"\"%@\" linked (%lu B AIR) but did not translate: %@", fn->_fname, (unsigned long)linked.length, te]); return nil; }
+    if (!spv) {
+        NSString *why = [NSString stringWithFormat:@"\"%@\" linked (%lu B AIR) but did not translate: %@", fn->_fname, (unsigned long)linked.length, te];
+        [nvmtl_link_failures() setObject:why forKey:failKey];
+        if (err) *err = nvmtl_link_err(why);
+        return nil;
+    }
     if (dumpDir)
         [spv writeToFile:[dumpDir stringByAppendingFormat:@"/%@.spv", fn->_fname] atomically:YES];
     nvlog("link: \"%s\" linked %lu -> %lu B AIR, %zu constant(s) -> %lu B SPIR-V", fn->_fname.UTF8String,
