@@ -3383,7 +3383,20 @@ static void nvmtl_fetch_barrier(nvk_cmdbuf *c)
     pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                           VK_DEPENDENCY_BY_REGION_BIT, 1, &mb, 0, NULL, 0, NULL);
 }
+static VkDescriptorSet nvmtl_fetch_set_make(nvk_cmdbuf *c, uint32_t mask);
 static VkDescriptorSet nvmtl_fetch_set(nvk_cmdbuf *c, uint32_t mask)
+{
+    // One set per pass and mask, not one per draw: the set only names the pass's colour views, which do not change
+    // between the draws of a pass, and allocating and writing it for each draw cost WindowServer about a millisecond
+    // per frame of window drag.
+    if (c->fetch_last_set && c->fetch_last_mask == mask && !memcmp(c->fetch_last_view, c->fetchview, sizeof c->fetchview))
+        return (VkDescriptorSet)c->fetch_last_set;
+    VkDescriptorSet set = nvmtl_fetch_set_make(c, mask);
+    c->fetch_last_set = (void *)set; c->fetch_last_mask = mask;
+    memcpy(c->fetch_last_view, c->fetchview, sizeof c->fetchview);
+    return set;
+}
+static VkDescriptorSet nvmtl_fetch_set_make(nvk_cmdbuf *c, uint32_t mask)
 {
     VkDescriptorSet set = VK_NULL_HANDLE; VkDescriptorPool pool = VK_NULL_HANDLE;
     pthread_mutex_lock(&g_desc_lock);
@@ -5872,6 +5885,7 @@ static void nvmtl_cmd_retire(nvk_cmdbuf *c)
         pthread_mutex_unlock(&g_desc_lock);
     }
     free(c->sets); c->sets = NULL; c->nsets = c->capsets = 0; c->nobind = 0; c->skipped = 0;
+    c->fetch_last_set = NULL;   // freed with the sets above
     free(c->table); c->table = NULL;
     nvmtl_address_page *page = c->address_pages;
     const int keep = nvmtl_keep_verdict(c->wseq);
