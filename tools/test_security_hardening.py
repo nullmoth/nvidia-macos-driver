@@ -118,5 +118,29 @@ check('the installer refuses a firmware directory it did not make',
 check('uninstall removes the firmware from both locations',
       '/Library/NullMoth/nvfw' in uninst and '/Users/Shared/nvfw' in uninst)
 
+lib = (root / 'plugin/NVMTLLibraryLoad.m').read_text()
+obj = (root / 'plugin/NVMTLObjects.m').read_text()
+
+# A shader library is attacker bytes and LLVM's bitcode reader is not written to withstand them.
+check('shader bitcode is capped before the in-process reader sees it',
+      'NVMTL_AIR_MAX_BYTES' in lib and 'air.length > NVMTL_AIR_MAX_BYTES' in lib)
+# The handler used to only log, so a module the reader rejected was compiled anyway. It must key off
+# severity: the same handler carries warnings, and failing on those would refuse working shaders.
+check('a reader error refuses the module, and only an error does',
+      'gAirError' in lib and 'GetDiagInfoSeverity' in lib
+      and '&& !gAirError)' in lib)
+check('the severity entry point is optional, so its absence does not disable the reader',
+      'dlsym(library, "LLVMGetDiagInfoSeverity")' in lib
+      and 'NV_LLVM_LOAD(LLVMGetDiagInfoSeverity)' not in lib)
+# The binding path has always checked this; the encoder path builds an address for a shader to dereference.
+check('the argument encoder bounds the offset against the buffer length',
+      'off > nb->_b.size' in obj)
+
+# Moving the firmware broke the way out. Both restore paths are gated on $BK/nvfw, and on an upgrade
+# the new location does not exist yet, so a backup that only looked there saved nothing and the
+# boot-guard fallback restored the previous driver with no firmware at all - a dark Mac, no recovery.
+check('the firmware backup falls back to the old location on an upgrade',
+      'elif [ -d "$FWOLD" ]; then backup_copy firmware ditto "$FWOLD" "$BK/nvfw"' in inst)
+
 print('FAILED' if fails else 'PASS')
 sys.exit(1 if fails else 0)
