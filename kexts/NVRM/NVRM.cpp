@@ -54,6 +54,7 @@ extern "C" { NvBool nvkms_xnu_load(void); struct nvkms_per_open *nvkms_xnu_open(
 static class NVRM *gNVRMService;
 extern "C" nv_state_t *nv_xnu_gpu_state(void);
 extern "C" void nv_xnu_log_init(void);
+extern "C" bool nv_xnu_maps_init(void);
 extern "C" void *nvkms_xnu_kapi_table(void);
 extern "C" NvU64 nv_xnu_phys_for_kernel_va(const void *va);
 class NVRMDisplay : public IOService { OSDeclareDefaultStructors(NVRMDisplay) };
@@ -400,6 +401,8 @@ bool NVRM::start(IOService *provider)
     if (!fPCI) return false;
     gNVRMService = this;
     nv_xnu_log_init();
+    // The kernel mapping table is serialised, so its lock has to exist before RM maps anything.
+    if (!nv_xnu_maps_init()) { LOG("IOLockAlloc FAILED for the kernel mapping table"); return false; }
     // Say which build is running, first thing. A machine reported "2.3.2" from the app while the kernel collection still
     // held a kext from before 2.1.0 (its BAR1 line used wording that version had replaced), and nothing in the log said
     // so: the installed bundle and the loaded kext can differ, and only the loaded one knows what it is. The loader
