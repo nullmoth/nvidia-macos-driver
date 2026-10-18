@@ -1050,12 +1050,13 @@ static int nvmtl_noseed(void) { static uint64_t next; static int on; uint64_t no
         if (!on && was) nvlog("G17 experiment off: surface-out bumps the seed again"); }
     return on; }
 static void nvmtl_census(const char *what, uint32_t w, uint32_t h, int surf) {
-    static struct { const char *what; uint32_t w, h; int surf; } seen[48]; static int n;
-    @synchronized([NSObject class]) {
-        for (int i = 0; i < n; i++) if (seen[i].what == what && seen[i].w == w && seen[i].h == h && seen[i].surf == surf) return;
-        if (n == 48) return;
-        seen[n].what = what; seen[n].w = w; seen[n].h = h; seen[n].surf = surf; n++;
-    }
+    static struct { const char *what; uint32_t w, h; int surf; } seen[48]; static int n; static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
+    if (__atomic_load_n(&n, __ATOMIC_RELAXED) == 48) return;   // full: every later pass skips the lock
+    os_unfair_lock_lock(&lk);
+    for (int i = 0; i < n; i++) if (seen[i].what == what && seen[i].w == w && seen[i].h == h && seen[i].surf == surf) { os_unfair_lock_unlock(&lk); return; }
+    if (n == 48) { os_unfair_lock_unlock(&lk); return; }
+    seen[n].what = what; seen[n].w = w; seen[n].h = h; seen[n].surf = surf; __atomic_store_n(&n, n + 1, __ATOMIC_RELAXED);
+    os_unfair_lock_unlock(&lk);
     nvlog("G14 census: %s %ux%u iosurface=%d (first time in this process)", what, w, h, surf);
 }
 static void nvmtl_frame_dump(const char *tag, const void *base, size_t row, uint32_t w, uint32_t h);

@@ -43,13 +43,14 @@ static int nvmtl_gsub_finish(NVMTLSubmissionPart *part) {
 // Queue keys and command-buffer references are weak. An abandoned recording is
 // never registered; completion removes committed entries without retaining VRAM.
 static NSMapTable *nvmtl_surface_writers;
-static NSString *nvmtl_surface_writer_key(NVMTLTexture *t) {
-    return [NSString stringWithFormat:@"%u:%lu", (unsigned)IOSurfaceGetID(t->_surf), (unsigned long)t->_plane];
+// surface id and plane in one tagged NSNumber: no allocation on the per-bind path (it was a formatted string)
+static id nvmtl_surface_writer_key(NVMTLTexture *t) {
+    return @(((unsigned long long)IOSurfaceGetID(t->_surf) << 8) | ((unsigned long long)t->_plane & 0xff));
 }
 static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     if (!cb || !t || !t->_surf) return NO;
     @synchronized ([NVMTLCommandBuffer class]) {
-        NSString *key = nvmtl_surface_writer_key(t);
+        id key = nvmtl_surface_writer_key(t);
         for (id queue in nvmtl_surface_writers.keyEnumerator) {
             NSDictionary *writes = [nvmtl_surface_writers objectForKey:queue];
             NVMTLPendingSurfaceWrite *write = writes[key];
@@ -260,7 +261,7 @@ static void nvmtl_surface_finish_writes(NVMTLCommandBuffer *cb) {
     nvmtl_ws_mark_ready(cb);
     @synchronized ([NVMTLCommandBuffer class]) {
         NSMutableDictionary *writes = [nvmtl_surface_writers objectForKey:cb->_queue];
-        for (NSString *key in [writes.allKeys copy]) {
+        for (id key in [writes.allKeys copy]) {
             NVMTLPendingSurfaceWrite *write = writes[key];
             if (!write->buffer || write->buffer == cb) [writes removeObjectForKey:key];
         }
