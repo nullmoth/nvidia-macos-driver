@@ -481,8 +481,15 @@ static int nvmtl_llvm_walk_load(nvmtl_llvm_walk *w, void *library) {
 }
 static nvmtl_llvm_walk gLLVMWalk;
 
+// Set only when the reader reports an ERROR about a module - it used to only log, so a module the reader
+// had rejected was still compiled. Severity matters: the same handler carries warnings, remarks and notes,
+// and treating those as fatal would refuse shaders that compile perfectly well today. The severity symbol
+// is loaded optionally, so a libLLVM without it keeps the old behaviour rather than disabling the reader.
+static int (*nvLLVMGetDiagInfoSeverity)(void *);
+static _Thread_local int gAirError;
 static void nvmtl_llvm_diagnostic(void *diagnostic, void *context) {
     (void)context;
+    if (nvLLVMGetDiagInfoSeverity && nvLLVMGetDiagInfoSeverity(diagnostic) == 0) gAirError = 1;   // LLVMDSError
     char *message = nvLLVMGetDiagInfoDescription(diagnostic);
     if (message) { nvlog("library: bitcode reader: %s", message); nvLLVMDisposeMessage(message); }
 }
@@ -506,6 +513,9 @@ static BOOL nvmtl_bitcode_reader_ready(void) {
         NV_LLVM_LOAD(LLVMDisposeModule);
         NV_LLVM_LOAD(LLVMDisposeMessage);
         NV_LLVM_LOAD(LLVMGetDiagInfoDescription);
+        // optional: absent in some builds, and its absence must not disable the reader
+        nvLLVMGetDiagInfoSeverity = (int (*)(void *))dlsym(library, "LLVMGetDiagInfoSeverity");
+        if (!nvLLVMGetDiagInfoSeverity) nvlog("library: bitcode reader has no LLVMGetDiagInfoSeverity - reader errors are logged only");
 #undef NV_LLVM_LOAD
         nvLLVMRunPasses = dlsym(library, "LLVMRunPasses"); nvLLVMCreatePassBuilderOptions = dlsym(library, "LLVMCreatePassBuilderOptions");
         nvLLVMDisposePassBuilderOptions = dlsym(library, "LLVMDisposePassBuilderOptions");
@@ -525,14 +535,25 @@ static BOOL nvmtl_air_unroll_wanted(NSData *air) {
     static const char needle[] = "air.simdgroup_matrix_8x8";
     return !off && air.length && memmem(air.bytes, air.length, needle, sizeof needle - 1) != NULL;
 }
+// The largest shader library measured in a real app is a few megabytes. The reader we hand this to is
+// LLVM's, which its own documentation declines to call hardened against malicious input, so cap the blob
+// before it gets there: a library over the cap falls through to the out-of-process path below, where a
+// crash costs a failed translation instead of the app.
+#define NVMTL_AIR_MAX_BYTES (64u * 1024u * 1024u)
 static NSString *nvmtl_air_in_memory(NSData *air) {
     if (!nvmtl_bitcode_reader_ready()) return nil;
+    if (air.length < 4 || air.length > NVMTL_AIR_MAX_BYTES) {
+        nvlog("library: bitcode blob is %lu bytes - outside [4, %u], not read in process",
+              (unsigned long)air.length, NVMTL_AIR_MAX_BYTES);
+        return nil;
+    }
     void *context = nvLLVMContextCreate();
     if (!context) return nil;
     nvLLVMContextSetDiagnosticHandler(context, nvmtl_llvm_diagnostic, NULL);
     void *buffer = nvLLVMCreateMemoryBufferWithMemoryRangeCopy(air.bytes, air.length, "nvmtl-air");
     void *module = NULL; NSString *result = nil;
-    if (buffer && !nvLLVMParseBitcodeInContext2(context, buffer, &module) && module) {
+    gAirError = 0;
+    if (buffer && !nvLLVMParseBitcodeInContext2(context, buffer, &module) && module && !gAirError) {
         if (nvLLVMRunPasses && nvmtl_air_unroll_wanted(air)) {
             void *opts = nvLLVMCreatePassBuilderOptions();
             void *err = nvLLVMRunPasses(module, NVMTL_AIR_UNROLL_PIPELINE, NULL, opts);

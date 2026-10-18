@@ -2193,6 +2193,13 @@ NSDictionary *nvmtl_index_argument_fields(NSArray *fields) {
     if (!_dst || !nvmtl_buf_cpu(_dst)) { nvlog("argument encoder: no argument buffer set (or it is not host-visible)"); return; }
     NSDictionary *f = [self nvmtlFieldAt:index];
     if (!f) { nvlog("argument encoder: this function has no [[id(%lu)]] field — REFUSED", (unsigned long)index); return; }
+    // The binding path checks the offset against the buffer length (nvmtl_vk_bind_buffer); this path
+    // computes an address the shader will dereference, so it has to check the same thing.
+    if (nb && off > nb->_b.size) {
+        nvlog("argument encoder: offset %lu is past the %zu-byte buffer at [[id(%lu)]] - REFUSED",
+              (unsigned long)off, nb->_b.size, (unsigned long)index);
+        return;
+    }
     uint64_t addr = nb ? nvmtl_vk_buffer_address(&nb->_b) + off : 0;
     const NSUInteger fieldOffset = [f[@"field_offset"] unsignedLongValue];
     const size_t size = _dst->_b.size;
