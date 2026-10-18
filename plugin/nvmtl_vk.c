@@ -6548,8 +6548,32 @@ int nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t r
     nvmtl_vk_buffer_destroy(&hb);
     return rc;
 }
+
+// A CPU-written IOSurface is uploaded at bind time (nvmtlSurfaceIn). Waiting for that copy put one GPU round trip
+// into every bind of a changed surface: Chromium with CPU raster binds a fresh tile surface per draw and its GPU
+// process spent its scroll frames in these waits (Discord DM list, 2026-10-18). The copy now takes the async region
+// path: it has its own staging buffer, queue order and its SHADER_READ barrier put it before the draw that samples
+// the image, and the handle is finished before a readback, destroy or re-upload. Apps only: WindowServer's surfaces
+// keep the synchronous upload. NVMTL_ASYNC_SURFACE_UPLOAD=0 turns it off.
+static __thread int g_up_force_async;   // set by nvmtl_vk_image_write for one surface upload
+static int nvmtl_async_surface_upload(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_ASYNC_SURFACE_UPLOAD"), *me = getprogname();
+        on = e ? e[0] == '1' : !(me && !strcmp(me, "WindowServer"));
+        nvlog("vk: async surface upload %s (NVMTL_ASYNC_SURFACE_UPLOAD=%s)", on ? "ON" : "OFF", e ? e : "unset");
+    }
+    return on;
+}
 int nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes)
 {
+    if (nvmtl_async_surface_upload() && img->bw <= 1 && img->bh <= 1 && (img->layers ? img->layers : 1) == 1) {
+        g_up_force_async = 1;
+        const int rc = nvmtl_vk_image_write_region_level_layer(q, img, src, row_bytes, 0, 0, img->w, img->h, 0, 0);
+        g_up_force_async = 0;
+        return rc;
+    }
     const size_t bpp = img->bpp ? img->bpp : 4;
     const uint32_t cols = nvmtl_blocks(img->w, img->bw), rows = nvmtl_blocks(img->h, img->bh);
     if (row_bytes < (size_t)cols * bpp) { nvlog("image_write: bytesPerRow %zu < %u blocks * %zu B", row_bytes, cols, bpp); return -1; }
@@ -6735,7 +6759,7 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
     // can be left in flight; sync keeps the shared per-thread staging buffer and waits (the default path).
     nvmtl_up_state upst = { img->up_token };
     uint64_t finish_first = 0;
-    const nvmtl_up_submit mode = nvmtl_up_before_upload(&upst, nvmtl_async_tex_upload(), &finish_first);
+    const nvmtl_up_submit mode = nvmtl_up_before_upload(&upst, nvmtl_async_tex_upload() || g_up_force_async, &finish_first);
     nvmtl_asyncup *au = NULL;
     nvk_buffer *stageb, stage_sync;
     nvk_cmdbuf local_cb, *c;
