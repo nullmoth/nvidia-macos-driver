@@ -206,6 +206,13 @@ check('the expected first attempt is not logged as a failure, and only on the pa
       'static __thread int g_fc_expect_link;' in lib
       and obj.count('nvmtl_fc_expect_link(1);') == 1 and obj.count('nvmtl_fc_expect_link(0);') == 1)
 
+# The installer checks and installs a root-owned private copy of the package, so a kext swapped in the user's folder
+# after the check cannot reach /Library/Extensions. The accelerator's path is computed before that copy exists, so it
+# has to be recomputed after the redirect or that one kernel extension still comes from the unchecked folder.
+_redirect = inst.find('HERE="$STAGE/pkgroot"')
+check('every kext, the accelerator included, is installed from the checked private copy',
+      _redirect > 0 and inst.find('VAR="$HERE/Library/NullMoth/kexts/$MAJ"', _redirect) > _redirect)
+
 # Moving the firmware broke the way out. Both restore paths are gated on $BK/nvfw, and on an upgrade
 # the new location does not exist yet, so a backup that only looked there saved nothing and the
 # boot-guard fallback restored the previous driver with no firmware at all - a dark Mac, no recovery.
