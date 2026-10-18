@@ -245,6 +245,9 @@ impl LlModule {
         if self.type_contains_pointer(&original) || self.type_contains_pointer(&candidate) {
             return false;
         }
+        if matches!(&original, LlType::Struct(fields) if fields.as_slice() == std::slice::from_ref(&candidate)) {
+            return false;
+        }
         let Some((original_size, _)) = self.native_memcpy_type_size_align(&original) else {
             return false;
         };
