@@ -72,7 +72,6 @@ static void nvmtl_translator_cache_tag(const char *path, char *tag, size_t capac
         nvlog("translator cache: content read failed; using process-private identity");
     }
 }
-static void nvtrace(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 typedef int (*nvmtl_sampler_fn)(const char *, const char *, const char *, uint8_t **, size_t *, char *, size_t);
 static nvmtl_sampler_fn xlate_sampler;
 typedef void (*nvmtl_tglen_fn)(const uint32_t *, uint32_t);
@@ -1696,10 +1695,12 @@ NSData *nvmtl_translate_variant(NVMTLFunction *fn, NSDictionary *states, NSDicti
     return result;
 }
 
-NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, NSString **err) {
-    if (!states.count) return fn->_spirv;
+// a8: Metal A8Unorm colour attachments (bit per location); the variant writes the output's alpha into the R8 lane.
+NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, NSString **err) {
+    if (!states.count && !a8) return fn->_spirv;
+    if (!fn->_air && !states.count) return fn->_spirv;   // already a specialised variant (no AIR kept): nothing more to apply
     if (!fn->_air || !nvmtl_xlate_ready() || !xlate_sampler) { if(err)*err=@"sampler specialization has no AIR or translator";return nil; }
-    NSData *json=[NSJSONSerialization dataWithJSONObject:@{@"samplers":states,@"constants":fn->_fc ?: @{}} options:NSJSONWritingSortedKeys error:NULL];
+    NSData *json=[NSJSONSerialization dataWithJSONObject:@{@"samplers":states ?: @{},@"constants":fn->_fc ?: @{},@"a8_targets":@(a8)} options:NSJSONWritingSortedKeys error:NULL];
     NSString *s=[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
     uint8_t *out=NULL;size_t len=0;char e[1024]={0};
     if(xlate_sampler(fn->_air.UTF8String,fn->_stage.UTF8String,s.UTF8String,&out,&len,e,sizeof e)) {if(err)*err=@(e);return nil;}
@@ -2711,7 +2712,7 @@ NVMTL_MESH_BINDERS(Object, YES, NO)
     nvmtl_mesh_replay(self, mb ? mb->_obj : nil);
     nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, 29, &sb->_b, 0);
     nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, 30, &sb->_b, 0);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX, mi->_o->_function, _vbufAt);
+    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX, mi->_o->_function, _vbufAt, _vbufOff);
     uint32_t ol[3] = { (uint32_t)ot.width, (uint32_t)ot.height, (uint32_t)ot.depth };
     uint32_t tt[3] = { (uint32_t)(g.width * ot.width), (uint32_t)(g.height * ot.height), (uint32_t)(g.depth * ot.depth) };
     nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &mi->_o->_p, tt, ol);
@@ -2719,7 +2720,7 @@ NVMTL_MESH_BINDERS(Object, YES, NO)
     nvmtl_mesh_replay(self, mb ? mb->_mesh : nil);
     nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, 29, &sb->_b, 0);
     nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, 30, &sb->_b, 0);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX, mi->_k->_function, _vbufAt);
+    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX, mi->_k->_function, _vbufAt, _vbufOff);
     uint32_t ml[3] = { (uint32_t)mt.width, (uint32_t)mt.height, (uint32_t)mt.depth };
     nvmtl_vk_cmd_dispatch_indirect_tg(&_cb->_c, &mi->_k->_p, &sb->_b, 0, ml);
     nvmtl_vk_cmd_barrier(&_cb->_c);
@@ -2746,7 +2747,7 @@ NVMTL_MESH_BINDERS(Object, YES, NO)
     if (nvmtl_vk_cmd_fill_buffer(&_cb->_c, &sb->_b, 0, (size_t)bytes, 0)) nvlog("mesh: scratch clear FAILED - counts may be stale");
     nvmtl_vk_cmd_barrier(&_cb->_c);
     nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, 30, &sb->_b, 0);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX, mi->_k->_function, _vbufAt);
+    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX, mi->_k->_function, _vbufAt, _vbufOff);
     uint32_t l[3] = { (uint32_t)mt.width, (uint32_t)mt.height, (uint32_t)mt.depth };
     uint32_t t[3] = { (uint32_t)(g.width * mt.width), (uint32_t)(g.height * mt.height), (uint32_t)(g.depth * mt.depth) };
     nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &mi->_k->_p, t, l);
@@ -2789,7 +2790,7 @@ NVMTL_MESH_BINDERS(Object, YES, NO)
     nvmtl_vk_cmd_barrier(&_cb->_c);
     [_cb->_resources addObject:mi->_ki]; [_cb->_resources addObject:mi->_psi];
     nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, 30, &sb->_b, 0);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX, mi->_ki->_function, _vbufAt);
+    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX, mi->_ki->_function, _vbufAt, _vbufOff);
     uint32_t ml[3] = { (uint32_t)mt.width, (uint32_t)mt.height, (uint32_t)mt.depth };
     nvmtl_vk_cmd_dispatch_indirect_tg(&_cb->_c, &mi->_ki->_p, &ab->_b, off, ml);
     nvmtl_vk_cmd_barrier(&_cb->_c);

@@ -254,7 +254,10 @@ OpFunctionEnd
             .filter(|i| i.class.opcode == Op::Load).collect();
         let wide = loads.iter().filter(|i| vector(i.result_type) && i.operands.get(1) == Some(&Operand::MemoryAccess(MemoryAccess::ALIGNED)))
             .filter_map(|i| match i.operands.get(2) { Some(Operand::LiteralBit32(a)) => Some(*a), _ => None }).filter(|a| *a >= 8).collect();
-        let words = loads.iter().filter(|i| i.operands.get(2) == Some(&Operand::LiteralBit32(4))).count();
+        // A scalar word may keep the first load's stated alignment of 8. Count scalar uint loads by type, not by
+        // alignment 4; otherwise every correctly unmerged hinted pair is misreported as a single load.
+        let words = loads.iter().filter(|i| i.result_type.and_then(|t| types.get(&t)).is_some_and(|t|
+            t.class.opcode == Op::TypeInt && t.operands == [Operand::LiteralBit32(32), Operand::LiteralBit32(0)])).count();
         (wide, words)
     }
     #[test] fn a_hinted_pair_whose_offsets_differ_by_four_is_one_aligned_8_load() {

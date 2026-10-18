@@ -60,7 +60,6 @@ static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t)
         return NO;
     }
 }
-static void nvtrace(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void nvmtl_surface_register_writes(NVMTLCommandBuffer *cb) {
     // The same lock as pending_write and finish_writes, taken here too: the map is shared with the completion thread, and
     // its one caller holding this (recursive) lock today must not be what keeps WindowServer's heap intact.

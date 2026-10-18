@@ -173,7 +173,82 @@ static BOOL nvmtl_sel1_idle(int *r) { return __atomic_load_n(r, __ATOMIC_ACQUIRE
 - (void)setLineWidth:(float)w { nvmtl_vk_cmd_set_line_width(&_cb->_c, w); }
 - (void)setDepthCleared {}
 - (void)setStencilCleared {}
+// Apple's GL renderer turns primitive restart off (GL's default) through this call, at the start of each render pass.
+// Restart is per-draw dynamic state here already (strips only; Vulkan list topologies never restart), so this records
+// GL's choice for the strips. Vulkan restarts only at the all-ones index of the bound index type.
+- (void)setPrimitiveRestartEnabled:(BOOL)enabled index:(NSUInteger)index {
+    _cb->_c.restart_off = !enabled;
+    if (enabled && index != 0xffffu && index != 0xffffffffu) {
+        static int said; if (!said++) nvlog("GL: primitive restart index 0x%lx requested - Vulkan restarts only at the all-ones index", (unsigned long)index);
+    }
+}
+// Apple's GL renderer sends this (1 = GL's last-vertex convention, 0 = first) at the start of each render pass, once
+// its device profile says the encoder takes it; see nvmtl_gl_caps_enable below.
+- (void)setProvokingVertexMode:(NSUInteger)mode {
+    if (mode > 1) { static int said; if (!said++) nvlog("GL: setProvokingVertexMode:%lu is not first (0) or last (1) - first used", (unsigned long)mode); }
+    nvmtl_vk_cmd_set_provoking_last(&_cb->_c, mode == 1);
+}
 @end
+
+// Apple's GL renderer (GLDDeviceRec::initWithDisplayMask) takes a device profile by vendor name; "NVIDIA" gets the
+// table written for the Kepler Macs, whose first byte lacks 0x8: "the render encoder takes setProvokingVertexMode:".
+// Without that bit the renderer emulates GL's last-vertex convention itself, rewriting the index buffer of every
+// indexed draw with its fixIndexBuffer compute kernel: a compute dispatch (and its descriptor sets) per draw call.
+// Once the Vulkan device can make the last vertex provoke, the bit is set in that table, in this process only. The
+// renderer copies the table after it has created its Metal device (this plugin's device init); a renderer loaded
+// later is caught by the dyld callback. A table that does not hold the bytes it held on macOS 15.8.1 is left alone.
+#include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#include <mach-o/nlist.h>
+#include <mach/mach.h>
+static const char kGLRendererSuffix[] = "/AppleMetalOpenGLRenderer.bundle/Contents/MacOS/AppleMetalOpenGLRenderer";
+static const char kGLNvidiaCaps[] = "__ZZN12GLDDeviceRec19initWithDisplayMaskEjE6nvidia";
+static const uint8_t kGLNvidiaCaps1581[20] = { 0x40, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0x42, 0, 0, 0x80, 0x41, 0, 0, 0, 0 };
+enum { NVMTL_GL_CAP_PROVOKING_VERTEX = 0x08 };
+
+static uint8_t *nvmtl_gl_local_symbol(const struct mach_header_64 *mh, const char *name) {
+    const struct load_command *lc = (const struct load_command *)(mh + 1);
+    const struct segment_command_64 *text = NULL, *linkedit = NULL; const struct symtab_command *st = NULL;
+    for (uint32_t i = 0; i < mh->ncmds; i++, lc = (const struct load_command *)((const char *)lc + lc->cmdsize)) {
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
+            if (!strcmp(sg->segname, SEG_TEXT)) text = sg;
+            else if (!strcmp(sg->segname, SEG_LINKEDIT)) linkedit = sg;
+        } else if (lc->cmd == LC_SYMTAB) st = (const struct symtab_command *)lc;
+    }
+    if (!text || !linkedit || !st) return NULL;
+    const intptr_t slide = (intptr_t)mh - (intptr_t)text->vmaddr;
+    const char *base = (const char *)(slide + linkedit->vmaddr - linkedit->fileoff);
+    const struct nlist_64 *sym = (const struct nlist_64 *)(base + st->symoff);
+    const char *strs = base + st->stroff;
+    for (uint32_t i = 0; i < st->nsyms; i++)
+        if (!(sym[i].n_type & N_STAB) && sym[i].n_value && !strcmp(strs + sym[i].n_un.n_strx, name))
+            return (uint8_t *)(sym[i].n_value + slide);
+    return NULL;
+}
+static void nvmtl_gl_caps_patch(const struct mach_header *mh) {
+    Dl_info info; const char *path = dladdr(mh, &info) ? info.dli_fname : NULL;
+    size_t n = path ? strlen(path) : 0, k = sizeof kGLRendererSuffix - 1;
+    if (n < k || strcmp(path + n - k, kGLRendererSuffix) || mh->magic != MH_MAGIC_64) return;
+    uint8_t *caps = nvmtl_gl_local_symbol((const struct mach_header_64 *)mh, kGLNvidiaCaps);
+    if (!caps) { nvlog("GL: renderer has no %s - provoking vertex left to its index rewrite", kGLNvidiaCaps); return; }
+    if (caps[0] & NVMTL_GL_CAP_PROVOKING_VERTEX) return;
+    if (memcmp(caps, kGLNvidiaCaps1581, sizeof kGLNvidiaCaps1581)) {
+        nvlog("GL: the renderer's NVIDIA profile is not the macOS 15.8.1 one - provoking vertex left to its index rewrite"); return;
+    }
+    const vm_address_t page = (vm_address_t)caps & ~(vm_address_t)(vm_page_size - 1);
+    kern_return_t kr = vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) { nvlog("GL: profile page not writable (%d) - provoking vertex left to its index rewrite", kr); return; }
+    caps[0] |= NVMTL_GL_CAP_PROVOKING_VERTEX;
+    vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ);   // data only on this page (__TEXT,__const)
+}
+static void nvmtl_gl_image_added(const struct mach_header *mh, intptr_t slide) { (void)slide; nvmtl_gl_caps_patch(mh); }
+void nvmtl_gl_caps_enable(void) {
+    if (!nvmtl_vk_have_provoking_last()) return;
+    static dispatch_once_t once;   // the callback also runs at once for every image already loaded
+    dispatch_once(&once, ^{ _dyld_register_func_for_add_image(nvmtl_gl_image_added); });
+}
 @implementation NVMTLFunction (NVMTLSel1)
 - (NSArray *)importedLibraries { return nil; }
 @end

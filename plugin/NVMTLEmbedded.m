@@ -144,7 +144,6 @@ static int nvmtl_static_samplers_on(void)
     uint32_t slot;
     NSUInteger ownerIndex, fieldOffset;
     uint32_t dset, dbinding;
-    NSNumber *ownerKey;
     NSString *bindingText;
 }
 @end
@@ -190,7 +189,6 @@ static NSArray<NVMTLEmbeddedPlan *> *nvmtl_embedded_plan(NVMTLFunction *fn) {
             plan->slot = (uint32_t)slotNum.unsignedLongValue;
             plan->ownerIndex = [src[@"buffer_index"] unsignedLongValue];
             plan->fieldOffset = [src[@"field_offset"] unsignedLongValue];
-            plan->ownerKey = @(plan->ownerIndex);
             id binding = entry[@"descriptor"][@"binding"];
             plan->bindingText = binding ? [[binding description] copy] : @"(absent)";
             { id ds = entry[@"descriptor"][@"set"];
@@ -221,7 +219,7 @@ static void nvmtl_clear_embedded_slot(NVMTLCommandBuffer *cb, uint32_t set, uint
         nvmtl_vk_bind_storage_view(&cb->_c, set, slot, NULL);
     }
 }
-void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NSDictionary *bufferAtIndex)
+void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NVMTLBuffer *__strong const *bufAt, const NSUInteger *offAt)
 {
     if (!cb || !fn) return;
     if (nvmtl_static_samplers_on()) {
@@ -238,12 +236,10 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
     extern void nvmtl_vk_emb_note(nvk_cmdbuf *, uint32_t, const void *, const uint64_t *, uint32_t);
     uint64_t embKey[480]; uint32_t embN = 0; BOOL embKeyed = embedded.count * 3 <= 480, embSurf = NO;
     if (embKeyed) {
-        NSNumber *lastKey = nil; NSArray *lastBound = nil;
         for (NVMTLEmbeddedPlan *plan in embedded) {
-            NSArray *bound = (plan->ownerKey == lastKey) ? lastBound : bufferAtIndex[plan->ownerKey];
-            lastKey = plan->ownerKey; lastBound = bound;
-            if (!bound) { embKeyed = NO; break; }
-            NVMTLBuffer *owner = bound[0]; NSUInteger base = [bound[1] unsignedLongValue]; size_t msize = owner->_b.size;
+            NVMTLBuffer *owner = plan->ownerIndex < NVMTL_NBUFAT ? bufAt[plan->ownerIndex] : nil;
+            if (!owner) { embKeyed = NO; break; }
+            NSUInteger base = offAt[plan->ownerIndex]; size_t msize = owner->_b.size;
             if (!owner->_b.map || base > msize || plan->fieldOffset > msize - base || sizeof(uint64_t) > msize - base - plan->fieldOffset) { embKeyed = NO; break; }
             uint64_t h = 0; memcpy(&h, (const uint8_t *)owner->_b.map + base + plan->fieldOffset, sizeof h);
             embKey[embN++] = (uint64_t)(uintptr_t)(__bridge void *)owner; embKey[embN++] = base; embKey[embN++] = h;
@@ -258,14 +254,13 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
         NSUInteger ownerIndex = plan->ownerIndex;
         NSUInteger fieldOffset = plan->fieldOffset;
 
-        NSArray *bound = bufferAtIndex[plan->ownerKey];
-        if (!bound) {
+        NVMTLBuffer *owner = ownerIndex < NVMTL_NBUFAT ? bufAt[ownerIndex] : nil;
+        if (!owner) {
             nvlog("embedded %s slot %u: buffer(%lu) is not bound on this encoder — NOT BOUND",
                   what, slot, (unsigned long)ownerIndex);
             nvmtl_clear_embedded_slot(cb, set, slot, wantSampler); continue;
         }
-        NVMTLBuffer *owner = bound[0];
-        NSUInteger base = [bound[1] unsignedLongValue];
+        NSUInteger base = offAt[ownerIndex];
         size_t msize = owner->_b.size;
         if (!owner->_b.map || base > msize || fieldOffset > msize - base ||
             sizeof(uint64_t) > msize - base - fieldOffset) {
@@ -317,4 +312,16 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
         }
     }
     nvmtl_vk_emb_note(&cb->_c, set, (embKeyed && !embSurf) ? (__bridge void *)fn : NULL, embKey, embN);
+}
+// the compute encoder keeps its bindings as index -> (buffer, offset, ...) arrays; the tables are built only for a
+// kernel that has embedded arguments
+void nvmtl_bind_embedded_dict(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NSDictionary *bufferAtIndex)
+{
+    NVMTLBuffer *bufs[NVMTL_NBUFAT] = { nil }; NSUInteger offs[NVMTL_NBUFAT] = { 0 };
+    if (fn && nvmtl_embedded_plan(fn).count)
+        for (NSNumber *k in bufferAtIndex) {
+            NSUInteger i = k.unsignedIntegerValue; NSArray *e = bufferAtIndex[k];
+            if (i < NVMTL_NBUFAT && e.count >= 2) { bufs[i] = e[0]; offs[i] = [e[1] unsignedLongValue]; }
+        }
+    nvmtl_bind_embedded(cb, set, fn, bufs, offs);
 }

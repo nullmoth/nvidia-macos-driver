@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.3.6
+
+Desktop and windows
+- Dragging and scrolling windows: a surface whose video memory had been set aside is put back before its update is
+  recorded, so the driver no longer copies the whole window back to system memory on every frame (PR #245, thanks
+  HighDelay; #253 measured the same readback on an RTX 5070 Ti at 4K)
+- Moving the mouse no longer stalls the compositor: the cursor position is applied on its own thread instead of under
+  the system's cursor lock, and OpenGL apps wait for the display's real refresh rate instead of 60 Hz on faster
+  panels (thanks pengubow)
+- Core Animation passes that read the colour attachment with framebuffer fetch off now read a defined image instead of an
+  unbound descriptor, which could put garbage on screen inside WindowServer (PR #270, thanks watchthelight)
+- Text and badge masks drawn into A8 targets land in the right lane, and Dock badges show their numbers again (PRs #271
+  and #274, thanks watchthelight)
+
+Apps and games
+- OpenGL: Minecraft's vertex shaders translate, the draw path no longer allocates per draw, texel-buffer descriptors and
+  unchanged bindings are reused, depth bias and per-instance step rates take effect, samplers work inside argument buffers
+  (thanks HighDelay)
+- Chrome and Chromium use Metal through ANGLE by default, so their GPU process starts; Electron apps stay opt-in with
+  NVMTL_ANGLE_METAL=1, and NVMTL_ANGLE_METAL=0 turns it off everywhere (PR #263, thanks Hi-Jiajun)
+- Shaders with `[[visible]]` function references that function constants turn off are no longer refused, which lost
+  pipelines in the login window, Spotlight, icon services and the Dock
+- Metal reports the card's whole video memory as its working set, as a Mac does (8 GB cards said 5.9 GB, 12 GB cards 8.9 GB)
+
 ## 2.3.5
 
 Stability

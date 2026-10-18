@@ -559,6 +559,20 @@ fn rewrite_visible_reference_stubs<'a>(
         {
             continue;
         }
+        // The nodes that list indexed have to go with it. Renaming the stub inside one leaves a
+        //    metadata line still naming a global, and when the caller's function constants have already
+        //    folded that global's `declare` away the emitter reports "unknown global value
+        //    @X.MTL_UNRESOLVED_VISIBLE_FN" -- a message about our own rename, on a module that was going
+        //    to be refused anyway. Measured in the icon service's log 10-17: 2 of 22 refusals. It needs
+        //    supplied constants to appear at all, which is why a 667-module corpus run with none shows
+        //    zero. Nothing else points at these nodes once the list is gone.
+        if line
+            .trim_start()
+            .starts_with('!')
+            && line.contains("= !{!\"air.visible_function_reference\"")
+        {
+            continue;
+        }
         let mut line = line.to_string();
         for (stub, target) in &replacements {
             line = line.replace(stub, target);

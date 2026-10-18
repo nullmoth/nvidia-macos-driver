@@ -39,6 +39,7 @@ static inline FILE *nvmtl_rel_fopen(const char *p, const char *m) { return nvmtl
 #define fopen(p, m) nvmtl_rel_fopen(p, m)
 #endif
 int nvmtl_vk_init(void);
+void nvmtl_gl_caps_enable(void);
 uint16_t nvmtl_vk_set_accelerator(mach_port_t accelerator);
 uint16_t nvmtl_vk_vendor(void);
 const char *nvmtl_vk_device_name(void);
@@ -366,16 +367,29 @@ static void nvmtl_nvenc_hevc_register(void)
     });
 }
 // ANGLE refuses Metal on NVIDIA (disableMetalOnNvidia), and Chromium on macOS has no other GL backend, so without this
-// the GPU process exits at start-up and Chrome, Edge and Electron apps draw everything on the CPU. It is opt-in
-// (NVMTL_ANGLE_METAL=1): with it on by default, Electron apps showed artifacts, stutter and lost transparency on
-// several cards. An existing override is kept; no sandbox setting is changed.
+// the GPU process exits at start-up and the app draws everything on the CPU. Chrome and Chromium get it by default:
+// without it their GPU process cannot start. Electron stays opt-in (NVMTL_ANGLE_METAL=1) because it showed artifacts,
+// stutter and lost transparency on several cards. NVMTL_ANGLE_METAL=0 turns the rule off in every process. An existing
+// ANGLE override is kept; no sandbox setting is changed.
+static bool nvmtl_angle_chrome_family(void)
+{
+    const char *me = getprogname();
+    if (!me) return false;
+    return strncmp(me, "Google Chrome", 13) == 0 || strncmp(me, "Chromium", 8) == 0;
+}
 __attribute__((constructor)) static void nvmtl_angle_allow_nvidia(void)
 {
     const char *opt = getenv("NVMTL_ANGLE_METAL");
-    if (!opt || strcmp(opt, "1")) return;
+    if (opt && !strcmp(opt, "0")) return;
+    const char *me = getprogname();
+    if (!(opt && !strcmp(opt, "1")) && !nvmtl_angle_chrome_family()) return;
     const char *key = "ANGLE_FEATURE_OVERRIDES_DISABLED", *rule = "disableMetalOnNvidia";
     const char *cur = getenv(key);
     if (cur && strstr(cur, rule)) return;
+    // One line per process, outside nvlog's release failure filter: a field report must show whether the rule was
+    // active in this process.
+    syslog(LOG_NOTICE, "NullMoth: angle: Metal allowed in %s (%s; NVMTL_ANGLE_METAL=0 disables)", me ? me : "?",
+           (opt && !strcmp(opt, "1")) ? "NVMTL_ANGLE_METAL=1" : "Chrome family");
     char v[1024];
     if (cur && *cur) snprintf(v, sizeof v, "%s:%s", cur, rule); else snprintf(v, sizeof v, "%s", rule);
     setenv(key, v, 1);
@@ -470,6 +484,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
         nvlog("  NVK did not come up in this process - refusing to be the Metal device for %s", getprogname());
         return nil;
     }
+    nvmtl_gl_caps_enable();
     if (nvmtl_vk_vendor() == 0x10de) {   /* NVDEC/NVENC are NVIDIA engines reached through NVRM */
         nvmtl_nvdec_register();
         nvmtl_nvenc_register();
@@ -1284,11 +1299,24 @@ static int nvmtl_blend_op(MTLBlendOperation op, uint32_t *v) {
             nvlog("blend: operation %lu is not a value this driver knows", (unsigned long)op); return -1;
     }
 }
-static int nvmtl_blend_from(MTLRenderPipelineColorAttachmentDescriptor *ca, int noWrite, nvk_blend_state *b) {
+// An A8Unorm attachment is an R8 image on Vulkan whose red lane holds Metal's alpha (the shader variant broadcasts alpha
+// to every lane). A factor that reads the destination's alpha must read its colour instead: R8 has no alpha to read.
+static uint32_t nvmtl_a8_factor(uint32_t f) {
+    switch (f) {
+    case VK_BLEND_FACTOR_DST_ALPHA: return VK_BLEND_FACTOR_DST_COLOR;
+    case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+    case VK_BLEND_FACTOR_SRC1_ALPHA: return VK_BLEND_FACTOR_SRC1_COLOR;
+    case VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
+    default: return f;
+    }
+}
+static int nvmtl_blend_from(MTLRenderPipelineColorAttachmentDescriptor *ca, int noWrite, int a8, nvk_blend_state *b) {
     *b = (nvk_blend_state){ .enabled = ca.blendingEnabled,
         .src_rgb = VK_BLEND_FACTOR_ONE, .dst_rgb = VK_BLEND_FACTOR_ZERO, .op_rgb = VK_BLEND_OP_ADD,
         .src_alpha = VK_BLEND_FACTOR_ONE, .dst_alpha = VK_BLEND_FACTOR_ZERO, .op_alpha = VK_BLEND_OP_ADD };
-    if (!noWrite) {
+    if (!noWrite && a8) {
+        if (ca.writeMask & MTLColorWriteMaskAlpha) b->write_mask |= VK_COLOR_COMPONENT_R_BIT;
+    } else if (!noWrite) {
         if (ca.writeMask & MTLColorWriteMaskRed) b->write_mask |= VK_COLOR_COMPONENT_R_BIT;
         if (ca.writeMask & MTLColorWriteMaskGreen) b->write_mask |= VK_COLOR_COMPONENT_G_BIT;
         if (ca.writeMask & MTLColorWriteMaskBlue) b->write_mask |= VK_COLOR_COMPONENT_B_BIT;
@@ -1316,9 +1344,14 @@ static NVMTLFunction *nvmtl_empty_fragment(void) {
     return fn;
 }
 MTLRenderPipelineDescriptor *nvmtl_gl_rewrite_descriptor(MTLRenderPipelineDescriptor *d, NSError **err);
+NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, NSString **err);
 void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)err {
     if (err) *err = nil;
+    // Work on a copy: some descriptor getters (vertexLinkedFunctions, ...) create their object on first read, and the
+    // caller's descriptor then no longer equals a fresh one. Apple's GL keys its built-in (blit) pipelines by the
+    // descriptor it passed here, so every blit missed and built a new pipeline.
+    d = [d copy];
     d = nvmtl_gl_rewrite_descriptor(d, err); if (!d) return nil;
     if (nvmtl_vk_init()) return nvmtl_fail(err, @"pipeline: Vulkan is not up in this process");
     id<MTLFunction> vfn = d.vertexFunction, ffn = d.fragmentFunction;
@@ -1342,15 +1375,21 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
     if ([samplePayload isKindOfClass:[NSDictionary class]] && !nvmtl_vk_sample_positions_backend())
         return nvmtl_fail(err, @"pipeline: fragment sample positions require the checked NVIDIA runtime payload contract");
     NVMTLRenderPipelineState *ps = [NVMTLRenderPipelineState new];
-    nvk_rt rt; memset(&rt, 0, sizeof rt);
+    nvk_rt rt; memset(&rt, 0, sizeof rt); uint32_t a8mask = 0;
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
         MTLRenderPipelineColorAttachmentDescriptor *ca = d.colorAttachments[i];
         if (ca.pixelFormat == MTLPixelFormatInvalid) continue;
         uint32_t svk = 0, sbpp = 0; int sa8 = 0;
         if (nvmtl_pixfmt(ca.pixelFormat, &svk, &sbpp, &sa8))
             return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: colour attachment %u pixel format %lu not carried by this driver", i, (unsigned long)ca.pixelFormat]);
-        if (nvmtl_blend_from(ca, noFrag, &rt.blend[i]))
+        if (nvmtl_blend_from(ca, noFrag, sa8, &rt.blend[i]))
             return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: colour attachment %u has a blend factor or operation this driver cannot translate (the reason is the preceding \"blend:\" log line)", i]);
+        if (sa8) {
+            a8mask |= 1u << i;
+            if (rt.blend[i].enabled) {   // the red lane is Metal's alpha: blend it with the alpha factors and operation
+                rt.blend[i].src_rgb = nvmtl_a8_factor(rt.blend[i].src_alpha); rt.blend[i].dst_rgb = nvmtl_a8_factor(rt.blend[i].dst_alpha);
+                rt.blend[i].op_rgb = rt.blend[i].op_alpha; }
+        }
         rt.cfmt[i] = svk; rt.ncol = i + 1;
     }
     for (uint32_t i = 0; i < rt.ncol; i++) {
@@ -1401,8 +1440,20 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
             @"pipeline: REFUSED — %@ is a visible function, not an entry point (vertex %lu B, fragment %lu B)",
             !vf->_spirv.length ? vf->_fname : ff->_fname,
             (unsigned long)vf->_spirv.length, (unsigned long)ff->_spirv.length]);
+    NVMTLFunction *ffx = ff;   // the fragment stage as built: an A8-target variant when a colour attachment is A8Unorm
+    ps->_a8mask = a8mask;
+    if (a8mask && !noFrag) {
+        NSString *why = nil; NSData *fa = nvmtl_translate_samplers(ff, nil, a8mask, &why);
+        if (!fa) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: A8 target variant of %@ REFUSED: %@", ff->_fname, why ?: @"?"]);
+        if (fa != ff->_spirv) {
+            ffx = [NVMTLFunction new]; ffx->_spirv = fa; ffx->_fname = ff->_fname; ffx->_stage = ff->_stage; ffx->_fc = ff->_fc;
+            ffx->_refl = ff->_refl; ffx->_airNames = ff->_airNames; ffx->_arguments = ff->_arguments; ffx->_embedded = ff->_embedded;
+            static _Atomic unsigned na8; if (atomic_fetch_add(&na8, 1) < 8)
+                nvlog("pipeline: %s writes alpha into A8 target(s) mask %#x (%lu B variant)", ff->_fname.UTF8String, a8mask, (unsigned long)fa.length);
+        }
+    }
     uint32_t rsc = (uint32_t)([d respondsToSelector:@selector(rasterSampleCount)] ? d.rasterSampleCount : d.sampleCount); if (!rsc) rsc = 1;
-    NSData *flk = nvmtl_varying_link(vf, ff); const void *fsb = flk ? flk.bytes : ff->_spirv.bytes; size_t fsl = flk ? flk.length : ff->_spirv.length;
+    NSData *flk = nvmtl_varying_link(vf, ffx); const void *fsb = flk ? flk.bytes : ffx->_spirv.bytes; size_t fsl = flk ? flk.length : ffx->_spirv.length;
     uint32_t tpt = 0, tcps = 0; int prc;
     if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps)) {
         if (d.tessellationFactorFormat != MTLTessellationFactorFormatHalf)
@@ -1974,6 +2025,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 #import "NVMTLForward.m"
 #import "NVMTLLibraryLoad.m"
 #import "NVMTLGL.m"
+#import "NVMTLGLVBlank.m"
 #import "NVMTLEmbedded.m"
 #import "NVMTLVendorCompiler.m"
 #include "nvmtl_vk.c"

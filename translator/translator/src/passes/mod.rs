@@ -32,6 +32,9 @@ pub struct TransformOptions {
         [Option<RuntimeStorageImageState>; TEXTURE_ARGUMENT_COUNT_USIZE],
     pub vertex_amplification_count: u32,
     pub threadgroup_memory_lengths: [Option<u32>; THREADGROUP_BUFFER_ARGUMENT_COUNT_USIZE],
+    /// Colour attachments bound as Metal A8Unorm (bit per location). Vulkan has no A8 format, so the plugin backs
+    /// them with R8 and the fragment output's alpha is written to every lane; the red lane is what the target keeps.
+    pub a8_render_target_mask: u32,
 }
 
 impl Default for TransformOptions {
@@ -46,6 +49,7 @@ impl Default for TransformOptions {
             runtime_sampler_states: [None; SAMPLER_ARGUMENT_COUNT_USIZE],
             runtime_storage_image_states: [None; TEXTURE_ARGUMENT_COUNT_USIZE],
             threadgroup_memory_lengths: [None; THREADGROUP_BUFFER_ARGUMENT_COUNT_USIZE],
+            a8_render_target_mask: 0,
         }
     }
 }
@@ -67,6 +71,11 @@ impl TransformOptions {
         layout.validate()?;
         self.descriptor_layout = layout;
         Ok(self)
+    }
+
+    pub fn with_a8_render_targets(mut self, mask: u32) -> Self {
+        self.a8_render_target_mask = mask;
+        self
     }
 
     pub fn with_runtime_sampler(
@@ -316,6 +325,8 @@ struct Ctx {
     runtime_sampler_states: [Option<RuntimeSamplerState>; SAMPLER_ARGUMENT_COUNT_USIZE],
     runtime_storage_image_states: [Option<RuntimeStorageImageState>; TEXTURE_ARGUMENT_COUNT_USIZE],
     threadgroup_memory_lengths: [Option<u32>; THREADGROUP_BUFFER_ARGUMENT_COUNT_USIZE],
+    a8_render_target_mask: u32,
+    a8_output_vars: HashSet<Word>,
     runtime_storage_image_values: HashMap<Word, (u32, RuntimeStorageImageState)>,
     applied_runtime_storage_image_indices: HashSet<u32>,
     default_sampler_var: Option<Word>,
@@ -404,6 +415,8 @@ impl Ctx {
             runtime_sampler_states: options.runtime_sampler_states,
             runtime_storage_image_states: options.runtime_storage_image_states,
             threadgroup_memory_lengths: options.threadgroup_memory_lengths,
+            a8_render_target_mask: options.a8_render_target_mask,
+            a8_output_vars: HashSet::new(),
             runtime_storage_image_values: HashMap::new(),
             applied_runtime_storage_image_indices: HashSet::new(),
             default_sampler_var: None,
@@ -1452,6 +1465,7 @@ pub(crate) use module_cleanup::{
 };
 mod byte_words;
 mod prune;
+mod resource_phi_fold;
 mod resources;
 mod spirv_cfg;
 mod stage_input;
@@ -2789,6 +2803,7 @@ pub(crate) fn transform_with_options_and_sidecar(
     recover_inlined_local_pointer_fields(&mut ctx, entry_idx);
     resources::materialize_texture_array_loads(&mut ctx, entry_idx);
     neutralize_private_placeholder_access_chains(&mut ctx, entry_idx)?;
+    resource_phi_fold::fold_constant_resource_phis(&mut ctx, entry_idx);
     propagate_sampler_state_aliases(&mut ctx, entry_idx);
 
     lower_ray_queries(&mut ctx, entry_idx)?;
