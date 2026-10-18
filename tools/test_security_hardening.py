@@ -140,6 +140,23 @@ check('the severity entry point is optional, so its absence does not disable the
 check('the argument encoder bounds the offset against the buffer length',
       'off > nb->_b.size' in obj)
 
+# An opt-in external encoder is dlopened into every app that encodes, so the library and the directory
+# holding it must be root-owned and not group/other-writable. Measured on the test Mac in both
+# directions: absent REFUSE, user-owned REFUSE, user-owned inside the root dir REFUSE, root-owned
+# go-w-clear ALLOW, root-owned group-writable REFUSE.
+dev = (root / 'plugin/NVMTLDevice.m').read_text()
+_nvcvt = dev.split('static void nvmtl_nvencvt_register')[1].split('\n}\n')[0] if 'nvmtl_nvencvt_register' in dev else ''
+_guard = dev.split('static bool nvmtl_loadable_root_only')[1].split('\n}\n')[0] if 'nvmtl_loadable_root_only' in dev else ''
+check('the external encoder loads only from a root-owned, non-writable path',
+      bool(_guard) and _guard.count('lstat(') == 2          # the file AND its directory
+      and 'st.st_uid != 0' in _guard and 'ds.st_uid == 0' in _guard
+      and _guard.count('S_IWGRP | S_IWOTH') == 2
+      and 'S_ISREG' in _guard and 'S_ISDIR' in _guard)
+check('the external encoder is off unless a conf knob names the process',
+      bool(_nvcvt) and 'getenv("NVMTL_NVENCVT")' in _nvcvt and 'return;' in _nvcvt)
+check('the external encoder stays out of WindowServer, like the other codec registrars',
+      bool(_nvcvt) and 'strcmp(me, "WindowServer")' in _nvcvt)
+
 # Moving the firmware broke the way out. Both restore paths are gated on $BK/nvfw, and on an upgrade
 # the new location does not exist yet, so a backup that only looked there saved nothing and the
 # boot-guard fallback restored the previous driver with no firmware at all - a dark Mac, no recovery.
