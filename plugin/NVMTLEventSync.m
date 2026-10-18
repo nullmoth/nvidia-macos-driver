@@ -462,6 +462,9 @@ static int nvmtl_skip_empty_on(void) {
     }
 }
 - (void)nvmtlFinishExecution:(NSError *)error {
+    // The ahead pass can run on another thread (nvmtl_ahead_kick). Close the parts to it first, so it cannot submit a
+    // part this loop has already passed: that part's fence and its in-flight slot would never come back.
+    @synchronized ([NVMTLCommandBuffer class]) { _partsRetiring = YES; }
     if (_scheduleAfterPublish) { _scheduleAfterPublish = NO; [self nvmtlMarkScheduled]; }
     for (NSUInteger i = _nextPart; i < _parts.count; i++) {
         NVMTLSubmissionPart *p = _parts[i];
@@ -489,7 +492,7 @@ static int nvmtl_skip_empty_on(void) {
     _cbError = error; _cbstatus = error ? MTLCommandBufferStatusError : MTLCommandBufferStatusCompleted;
     _executionDone = YES;
     [_completionCondition unlock];
-    [_parts removeAllObjects];
+    @synchronized ([NVMTLCommandBuffer class]) { [_parts removeAllObjects]; }
     // A finished command buffer lets go of everything only its GPU work needed: the setBytes ring and the scratch
     // buffers it filled, and any resources still listed on it. Apple's command buffers do the same. An app's
     // autorelease pool can keep thousands of finished command buffers alive during a long loop (Geekbench 7 does),
@@ -584,7 +587,7 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
 }
 - (BOOL)nvmtlSubmitAhead {
     // a commit still putting its kernel marks in (nvmtlSubmitWithEvents) must not reach the GPU before them
-    if (_executionDone || _cbError || !_committed || _commitMarking) return NO;
+    if (_executionDone || _partsRetiring || _cbError || !_committed || _commitMarking) return NO;
     if (_nextSubmit < _nextPart) _nextSubmit = _nextPart;
     while (_nextSubmit < _parts.count) {
         if (atomic_load(&gsub_inflight) >= nvmtl_gsub_cap()) return NO;
@@ -726,7 +729,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
         }
         ((void(*)(id,SEL,uint64_t))objc_msgSend)(event, @selector(setSignaledValue:), [s[1] unsignedLongLongValue]);
     }
-    _parts[_nextPart++] = [NSNull null];
+    @synchronized ([NVMTLCommandBuffer class]) { _parts[_nextPart++] = [NSNull null]; }
     if (_nextPart == _parts.count) { nvtrace("COMPLETE cb %p t=%llu", (__bridge void *)self, (unsigned long long)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000));
         [self nvmtlFinishExecution:nil]; }
     return YES;
@@ -786,6 +789,24 @@ static BOOL nvmtl_commit_ahead_on(void) {
         nvlog("commit: submit-ahead %s (NVMTL_COMMIT_AHEAD=%s)", on ? "also runs at commit while the worker waits" : "runs on the worker only", e ? e : "unset"); }
     return on;
 }
+// The commit-time ahead pass submits (host copies in, vkQueueSubmit) with the class lock held. On the committing thread
+// that stalled WindowServer's window drags on the 2.3.6 kexts within a few thousand flips (I-069, N-160 against N-166),
+// so a commit only asks for a pass and returns; one pass at a time runs on nvmtl.ahead. A request that arrives while a
+// pass runs makes it run once more, so no commit is left waiting for the worker.
+static atomic_int nvmtl_ahead_state; // 0 idle, 1 running, 2 running and asked again
+static void nvmtl_ahead_kick(void) {
+    static dispatch_once_t once; static dispatch_queue_t ahead;
+    dispatch_once(&once, ^{ ahead = dispatch_queue_create("nvmtl.ahead", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0)); });
+    if (atomic_exchange(&nvmtl_ahead_state, 2) != 0) return;
+    dispatch_async(ahead, ^{
+        do {
+            atomic_store(&nvmtl_ahead_state, 1);
+            @autoreleasepool { @synchronized ([NVMTLCommandBuffer class]) { if (nvmtl_pumping) nvmtl_gsub_ahead_pass(); } }
+            int running = 1;
+            if (atomic_compare_exchange_strong(&nvmtl_ahead_state, &running, 0)) break;
+        } while (1);
+    });
+}
 static void nvmtl_pump_buffers(void) {
     static dispatch_once_t once; static dispatch_queue_t worker;
     const BOOL async = nvmtl_async_commit_on();
@@ -796,7 +817,7 @@ static void nvmtl_pump_buffers(void) {
         ++nvmtl_pump_generation;
         if (nvmtl_pumping) {
             // the worker may be blocked on an earlier part; without this the commit is scheduled only after that wait
-            if (nvmtl_commit_ahead_on() && nvmtl_gsub_ahead_on()) nvmtl_gsub_ahead_pass();
+            if (nvmtl_commit_ahead_on() && nvmtl_gsub_ahead_on()) nvmtl_ahead_kick();
             return;
         }
         nvmtl_pumping = YES;
