@@ -1785,20 +1785,22 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
     } else {
         NvU64 n = c->memArea.numRanges;
         // A range that is not card memory goes down the system-RAM path below, which checks the owner.
-        // A range that IS card memory is mapped straight to the process, so it has to be the framebuffer
-        // aperture and nothing else: nv_pm_is_gpu would also accept the register file and IMEM.
+        // A range that IS card memory must still land inside one of this card's bars, which is what stops
+        // a caller handing us an arbitrary physical address and getting it mapped.
+        // ⛔ This was narrowed to the framebuffer bar alone, on the reasoning that a user process has no
+        // business holding a writable mapping of the register file. The display stack disagrees: measured
+        // on the test Mac, CoreDisplay maps phys 0x80bb0000 +0x10000 and +0x1000, which live in bar0, and
+        // refusing them made WindowServer abort in CoreDisplay_CreateDisplayForCGXDisplayDevice and
+        // crash-loop every ten seconds from 21 s after boot (7 reports, 23 refusals). Keeping the bar bound
+        // and nothing tighter is therefore the shipping behaviour; narrowing it needs a way to tell the
+        // display path's own mapping from a caller's, which we do not have here.
         if (n == 1 && !nv_pm_is_gpu(c->memArea.pRanges[0].start, c->memArea.pRanges[0].size)) {
             md = nv_pm_ram_submd(c->memArea.pRanges[0].start, c->memArea.pRanges[0].size, fPid);
             if (!md) return kIOReturnNotPermitted;
         } else if (n == 1) {
-            if (!nv_pm_is_gpu_fb(c->memArea.pRanges[0].start, c->memArea.pRanges[0].size)) {
-                nv_pm_dev_refused(c->memArea.pRanges[0].start, c->memArea.pRanges[0].size);
-                kprintf("NVRM-xnu: map fd %d refused: card range is outside the framebuffer aperture\n", fFd);
-                return kIOReturnNotPermitted;
-            }
             md = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)c->memArea.pRanges[0].start, (IOByteCount)c->memArea.pRanges[0].size, kIODirectionInOut);
         } else {
-            for (NvU64 i = 0; i < n; i++) if (!nv_pm_is_gpu_fb(c->memArea.pRanges[i].start, c->memArea.pRanges[i].size)) {
+            for (NvU64 i = 0; i < n; i++) if (!nv_pm_is_gpu(c->memArea.pRanges[i].start, c->memArea.pRanges[i].size)) {
                 nv_pm_dev_refused(c->memArea.pRanges[i].start, c->memArea.pRanges[i].size); return kIOReturnNotPermitted; }
             IOAddressRange *r = (IOAddressRange *)kern_os_malloc((size_t)(sizeof(IOAddressRange) * n));
             if (!r) return kIOReturnNoMemory;
