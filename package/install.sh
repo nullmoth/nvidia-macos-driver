@@ -170,6 +170,9 @@ while IFS= read -r -d '' link; do
 done < <(find "$STAGE/pkgroot" -type l -print0)
 [ "$SELF" = "$HERE" ] && SELF="$STAGE/pkgroot"
 HERE="$STAGE/pkgroot"
+# VAR was set from the original folder before this step, and kpath reads the accelerator kext through it. Point it
+# at the private copy too, or that one kernel extension is still taken from the folder the check no longer covers.
+VAR="$HERE/Library/NullMoth/kexts/$MAJ"
 # --strict: without it shasum skips a malformed line and still reports success
 (cd "$HERE" && shasum -a 256 --strict -c SHA256SUMS --quiet) || die "SHA256SUMS mismatch: re-download the package"
 for target in 15 26; do
