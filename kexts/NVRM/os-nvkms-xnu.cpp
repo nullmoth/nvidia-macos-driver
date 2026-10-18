@@ -214,13 +214,6 @@ void nvkms_xnu_resume(NvU32 gpuId, NvBool gpuOk)
     if (gpuOk) nvKmsKapiSuspendResume(NV_FALSE);
     kprintf("NVRM-xnu: NVKMS %s (gpu 0x%x)\n", gpuOk ? "resumed" : "left LOST: the GPU did not resume", gpuId);
 }
-struct nvkms_per_open *nvkms_xnu_open(int pid) { return gKmsLoaded ? kms_open_common(NVKMS_CLIENT_KERNEL_SPACE, NULL, pid) : NULL; }
-void nvkms_xnu_close(struct nvkms_per_open *popen) { if (popen) kms_close_common(popen); }
-int nvkms_xnu_ioctl(struct nvkms_per_open *popen, NvU32 cmd, void *params, size_t size)
-{
-    return kms_ioctl_common(popen, cmd, (NvU64)(uintptr_t)params, size) ? 0 : -1;
-}
-int nvkms_xnu_events_available(struct nvkms_per_open *popen) { return popen ? popen->eventsAvailable : 0; }
 static struct NvKmsKapiFunctionsTable gKapiTable;
 void *nvkms_xnu_kapi_table(void)
 {
