@@ -92,14 +92,18 @@ check('the mapping ranges are released in free(), not in clientClose',
       and 'kern_os_free(fMmap.memArea.pRanges)' in nvrm.split('void NVRMUserClient::free(void)')[1]
       and 'kern_os_free(fMmap.memArea.pRanges)' not in nvrm.split('IOReturn NVRMUserClient::clientClose')[1].split('terminate();')[0])
 
-# A card range mapped into a process must be the framebuffer aperture. nv_pm_is_gpu answers for every
-# bar, so it would also have accepted BAR0, the register file.
-# Cut the window at the end of the function: a wider slice runs into nv_pm_is_gpu below, which loops
-# every bar on purpose, and an earlier version of this arm failed on that instead of on the code.
-_fb_body = osx2.split('bool nv_pm_is_gpu_fb')[1].split('\n}\n')[0] if 'bool nv_pm_is_gpu_fb' in osx2 else ''
-check('a device client maps only the framebuffer aperture',
-      'nv_pm_is_gpu_fb' in nvrm and bool(_fb_body)
-      and 'NV_GPU_BAR_INDEX_FB' in _fb_body and 'NV_GPU_NUM_BARS' not in _fb_body)
+# A card range mapped into a process must at least land inside one of this card's bars, so a caller
+# cannot hand over an arbitrary physical address and have it mapped.
+# This arm used to require the framebuffer bar ALONE. That shipped to the test Mac and WindowServer
+# crash-looped: CoreDisplay maps phys 0x80bb0000 out of bar0 and aborted in
+# CoreDisplay_CreateDisplayForCGXDisplayDevice when it was refused. The bar bound is the real check;
+# asserting anything tighter here asserts a driver that cannot drive a display.
+_dev_branch = nvrm.split('NvU64 n = c->memArea.numRanges;')[1].split('IOAddressRange *r')[0]
+check('a device client maps only inside this card\'s bars',
+      'nv_pm_is_gpu(' in _dev_branch and 'nv_pm_dev_refused' in _dev_branch)
+check('the framebuffer-only refusal is gone (it broke CoreDisplay on real hardware)',
+      'nv_pm_is_gpu_fb' not in _dev_branch
+      and 'outside the framebuffer aperture' not in nvrm)
 
 # The kernel read these images from /Users/Shared, which every user can write, and checked nothing.
 check('the firmware is read from a root-only directory',
