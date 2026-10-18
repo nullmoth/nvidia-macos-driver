@@ -227,7 +227,14 @@ for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do [ ! -e
 [ ! -d /Library/NullMoth/kexts ] || backup_copy "cached accelerators" ditto /Library/NullMoth/kexts "$BK/kexts"
 [ ! -f /Library/NullMoth/os-major ] || backup_copy "OS record" cp -p /Library/NullMoth/os-major "$BK/os-major"
 [ ! -f /Library/NullMoth/driver-version ] || backup_copy "version record" cp -p /Library/NullMoth/driver-version "$BK/driver-version"
-[ ! -d "$FW" ] || backup_copy firmware ditto "$FW" "$BK/nvfw"
+# Back up the firmware from wherever it actually is. This version reads it from $FW, but a release
+# before the move kept it in $FWOLD, so on an upgrade $FW does not exist yet and backing up only $FW
+# saved nothing. Both restore paths (rollback_install and the boot-guard fallback) are gated on
+# $BK/nvfw, so an empty backup made them no-ops: the fallback put the previous driver back with NO
+# firmware at all and the Mac came up with no display and no way out. Measured on the test Mac.
+if [ -d "$FW" ]; then backup_copy firmware ditto "$FW" "$BK/nvfw"
+elif [ -d "$FWOLD" ]; then backup_copy firmware ditto "$FWOLD" "$BK/nvfw"
+fi
 ok "backup written"
 
 step "5. install"
