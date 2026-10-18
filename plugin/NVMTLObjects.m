@@ -1627,6 +1627,10 @@ id gNVMTLMainDevice = nil;
 
 extern NSData *nvmtl_translate_samplers(NVMTLFunction *, NSDictionary *, uint32_t, NSString **);
 extern NSData *nvmtl_translate_variant(NVMTLFunction *, NSDictionary *, NSDictionary *, NSString **);
+// facts about a module's text that newFunctionWithName asks for on every call; kept on the text (NVMTLLibraryLoad.m)
+enum { NVMTL_AIRF_KNOWN = 1, NVMTL_AIRF_DYLD_TABLE = 2, NVMTL_AIRF_ISECT_TABLE = 4 };
+uint32_t nvmtl_air_text_flags(NSString *ll);
+static char gNVMTLEntrySpvAssoc;
 @interface NVMTLCIBinding : NSObject { @public NSString *_name; NVMTLType *_t; } @end
 @implementation NVMTLCIBinding
 - (NSString *)name { return _name ?: @""; }
@@ -2336,13 +2340,17 @@ extern NSData *nvmtl_compile_library_entry(NSData *, NSString *, NSString *, NSS
 
     NSData *air = _fns[name];
     NSString *ll = _airs[name], *stage = _stages[name];
+    // The library index hands every library made from the same file the same bitcode objects, so the entry's SPIR-V is
+    // kept on its bitcode: a library made again (VideoToolbox makes one per transfer) neither hashes nor reads it again.
+    NSData *known = air ? objc_getAssociatedObject(air, &gNVMTLEntrySpvAssoc) : nil;
     NSString *why = nil;
-    NSData *spv = nvmtl_compile_library_entry(air, ll, stage, name, &why);
+    NSData *spv = known ?: nvmtl_compile_library_entry(air, ll, stage, name, &why);
     if (!spv) {
         if (error) *error = [NSError errorWithDomain:@"NVMTL" code:3
                                            userInfo:@{NSLocalizedDescriptionKey:why ?: @"entry translation failed"}];
         return nil;
     }
+    if (!known && air) objc_setAssociatedObject(air, &gNVMTLEntrySpvAssoc, spv, OBJC_ASSOCIATION_RETAIN);
 
     @synchronized(self) {
         NSData *won = _compiledFns[name];
@@ -2360,12 +2368,13 @@ extern NSData *nvmtl_compile_library_entry(NSData *, NSString *, NSString *, NSS
         NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = nil; f->_fname = name; f->_stage = _stages[name];
         f->_air = _airs[name]; f->_lib = self; return f;
     }
-    if (spv && [_airs[name] rangeOfString:@"@air.dyld_lib_table"].location != NSNotFound) {
+    const uint32_t af = spv ? nvmtl_air_text_flags(_airs[name]) : 0;
+    if (spv && (af & NVMTL_AIRF_DYLD_TABLE)) {
         nvlog("library: \"%s\" was compiled against a dynamic library - DEFERRED to pipeline creation", name.UTF8String);
         NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = nil; f->_fname = name; f->_stage = (_stages[name] ?: @"");
         f->_air = _airs[name]; f->_lib = self; f->_needsLink = YES; return f;
     }
-    if (spv && [_airs[name] rangeOfString:@"!\"air.intersection_function_table\""].location != NSNotFound) {
+    if (spv && (af & NVMTL_AIRF_ISECT_TABLE)) {
         nvlog("library: \"%s\" takes an intersection function table - DEFERRED to pipeline creation", name.UTF8String);
         NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = nil; f->_fname = name; f->_stage = (_stages[name] ?: @"");
         f->_air = _airs[name]; f->_lib = self; f->_needsLink = YES; return f;
