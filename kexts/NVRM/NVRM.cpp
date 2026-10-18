@@ -275,6 +275,7 @@ class NVRMUserClient : public IOUserClient {
 public:
     bool start(IOService *provider) override;
     IOReturn clientClose(void) override;
+    void free(void) override;
     IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
                             IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) override;
     bool initWithTask(task_t owningTask, void *securityID, UInt32 type, OSDictionary *properties) override;
@@ -293,8 +294,17 @@ private:
     int  fPid = 0;
     bool fEverBound = false;
     int  fBound = -1;
-    bool fCleaned = false;
+    SInt32 fCleaned = 0;
+    IOLock *fGate = nullptr;      // serialises this client's methods against its own teardown
     struct nvkms_per_open *fKms = nullptr;
+    // Held across esc() and clientMemoryForType() and across the teardown in clientClose. The RM
+    // callbacks below it (nv_add_mapping_context_to_file and friends) must NOT take it: they run
+    // nested inside esc() for this same client and IOLock is not recursive.
+    struct Gate {
+        IOLock *l;
+        explicit Gate(IOLock *g) : l(g) { if (l) IOLockLock(l); }
+        ~Gate() { if (l) IOLockUnlock(l); }
+    };
     IOReturn esc(uint32_t cmd, void *data, uint32_t size);
     static IOReturn sGo(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sEsc(OSObject *target, void *reference, IOExternalMethodArguments *args);
@@ -337,7 +347,7 @@ extern "C" nv_alloc_mapping_context_t *nv_xnu_mmap_context(void *priv)
     return c ? c->mmapContext() : NULL;
 }
 extern "C" IOMemoryDescriptor *nv_xnu_alloc_md(void *priv, NvU64 *bytes, NvU32 *cache);
-extern "C" { IOMemoryDescriptor *nv_pm_ram_submd(NvU64, NvU64, int); bool nv_pm_is_gpu(NvU64, NvU64); void nv_pm_dev_refused(NvU64, NvU64); bool nv_xnu_chat(void); }
+extern "C" { IOMemoryDescriptor *nv_pm_ram_submd(NvU64, NvU64, int); bool nv_pm_is_gpu(NvU64, NvU64); bool nv_pm_is_gpu_fb(NvU64, NvU64); void nv_pm_dev_refused(NvU64, NvU64); bool nv_xnu_chat(void); }
 
 #define super IOService
 OSDefineMetaClassAndStructors(NVRM, IOService)
@@ -1680,6 +1690,8 @@ bool NVRMUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 ty
     // by the real-privilege check in _os_is_administrator and the root requirement on first init.
     if (type > 1) return false;
     fIsCtl = (type == 0);
+    fGate = IOLockAlloc();
+    if (!fGate) return false;
     nvu_memset(&fNvfp, 0, sizeof fNvfp);
     fNvfp.ctl_nvfp_priv = this;
     if (!gNvClientsLock) gNvClientsLock = IOLockAlloc();
@@ -1725,19 +1737,32 @@ bool NVRMUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 ty
 nv_state_t *NVRMUserClient::nvState() { return fIsCtl ? nv_get_ctl_state() : &fOwner->fNv; }
 IOReturn NVRMUserClient::clientClose(void)
 {
-    if (!fCleaned) {
-        fCleaned = true;
+    // One winner only: this was a plain bool test-and-set, so two closes could both run the teardown.
+    if (OSCompareAndSwap(0, 1, &fCleaned)) {
+        Gate g(fGate);
         if (gNvClientsLock && fFd >= 0) { IOLockLock(gNvClientsLock); gNvClients[fFd] = NULL; nv_pm_close(fPm); IOLockUnlock(gNvClientsLock); }
         if (fKms) { nvkms_xnu_close(fKms); fKms = nullptr; }
         if (fOwner) { NvXnuPmUse pmUse; rm_cleanup_file_private(NULL, nvState(), &fNvfp); }
-        if (fMmap.memArea.pRanges) { kern_os_free(fMmap.memArea.pRanges); fMmap.memArea.pRanges = NULL; }
+        // The ranges are NOT freed here. clientClose can run while another thread is inside
+        // clientMemoryForType, which reads this array and hands its entries to
+        // IOMemoryDescriptor::withPhysicalAddress - so freeing it here let a process map whatever
+        // landed in the reused block. Marking the context dead is enough; free() does the release,
+        // and IOKit only gets there once no method can still be running.
+        fMmap.valid = NV_FALSE;
         if (nv_xnu_chat()) kprintf("NVRM-xnu: client fd %d closed\n", fFd);
     }
     terminate();
     return kIOReturnSuccess;
 }
+void NVRMUserClient::free(void)
+{
+    if (fMmap.memArea.pRanges) { kern_os_free(fMmap.memArea.pRanges); fMmap.memArea.pRanges = NULL; }
+    if (fGate) { IOLockFree(fGate); fGate = nullptr; }
+    super::free();
+}
 IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
 {
+    Gate g(fGate);
     nv_alloc_mapping_context_t *c = &fMmap;
     if (!c->valid) { kprintf("NVRM-xnu: map on fd %d with no mapping context\n", fFd); return kIOReturnBadArgument; }
     IOMemoryDescriptor *md = NULL;
@@ -1759,13 +1784,21 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
         if (nv_xnu_chat()) kprintf("NVRM-xnu: map fd %d: sysmem +0x%llx len 0x%llx cache %u\n", fFd, off, len, caching);
     } else {
         NvU64 n = c->memArea.numRanges;
+        // A range that is not card memory goes down the system-RAM path below, which checks the owner.
+        // A range that IS card memory is mapped straight to the process, so it has to be the framebuffer
+        // aperture and nothing else: nv_pm_is_gpu would also accept the register file and IMEM.
         if (n == 1 && !nv_pm_is_gpu(c->memArea.pRanges[0].start, c->memArea.pRanges[0].size)) {
             md = nv_pm_ram_submd(c->memArea.pRanges[0].start, c->memArea.pRanges[0].size, fPid);
             if (!md) return kIOReturnNotPermitted;
         } else if (n == 1) {
+            if (!nv_pm_is_gpu_fb(c->memArea.pRanges[0].start, c->memArea.pRanges[0].size)) {
+                nv_pm_dev_refused(c->memArea.pRanges[0].start, c->memArea.pRanges[0].size);
+                kprintf("NVRM-xnu: map fd %d refused: card range is outside the framebuffer aperture\n", fFd);
+                return kIOReturnNotPermitted;
+            }
             md = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)c->memArea.pRanges[0].start, (IOByteCount)c->memArea.pRanges[0].size, kIODirectionInOut);
         } else {
-            for (NvU64 i = 0; i < n; i++) if (!nv_pm_is_gpu(c->memArea.pRanges[i].start, c->memArea.pRanges[i].size)) {
+            for (NvU64 i = 0; i < n; i++) if (!nv_pm_is_gpu_fb(c->memArea.pRanges[i].start, c->memArea.pRanges[i].size)) {
                 nv_pm_dev_refused(c->memArea.pRanges[i].start, c->memArea.pRanges[i].size); return kIOReturnNotPermitted; }
             IOAddressRange *r = (IOAddressRange *)kern_os_malloc((size_t)(sizeof(IOAddressRange) * n));
             if (!r) return kIOReturnNoMemory;
@@ -1956,6 +1989,7 @@ IOReturn NVRMUserClient::sEsc(OSObject *target, void *reference, IOExternalMetho
 }
 IOReturn NVRMUserClient::esc(uint32_t cmd, void *data, uint32_t size)
 {
+    Gate g(fGate);
     if (!fOwner || fOwner->fPassDone < 2) { static bool once; if (!once) { once = true; kprintf("NVRM-xnu: esc 0x%x refused: adapter not up (run nvrmctl go 2)\n", cmd); } return kIOReturnNotReady; }
     nv_state_t *nv = nvState();
     NvXnuPmUse pmUse;

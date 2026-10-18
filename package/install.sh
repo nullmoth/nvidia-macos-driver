@@ -8,7 +8,7 @@ if [ "${1:-}" = --payload ]; then
   HERE=$(cd "$2" && pwd) || exit 2
 elif [ "$#" != 0 ]; then echo "STOP: expected --payload directory or no arguments" >&2; exit 2; fi
 KEXTS="NVRM NVAccel NVRMFB NVRMAGDC"
-EXT=/Library/Extensions; GB=/Library/GPUBundles; FW=/Users/Shared/nvfw
+EXT=/Library/Extensions; GB=/Library/GPUBundles; FW=/Library/NullMoth/nvfw; FWOLD=/Users/Shared/nvfw
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 K=/System/Library/Kernels/kernel
 # macOS 13+ kmutil refuses to build any kernel collection without a Kernel Debug Kit matching the build unless it is told
@@ -46,7 +46,10 @@ rollback_install() {
   done
   rm -rf /Library/NullMoth/kexts "$FW" || failed=1
   [ ! -d "$BK/kexts" ] || ditto "$BK/kexts" /Library/NullMoth/kexts || failed=1
+  # Restore the firmware to both locations: a driver older than this one looks for it in /Users/Shared,
+  # and root writing that directory is harmless (root-owned, inside a sticky parent).
   [ ! -d "$BK/nvfw" ] || ditto "$BK/nvfw" "$FW" || failed=1
+  [ ! -d "$BK/nvfw" ] || { mkdir -p "$FWOLD" && ditto "$BK/nvfw" "$FWOLD"; } || failed=1
   if [ -f "$BK/AuxiliaryKernelExtensions.kc" ]; then cp -p "$BK/AuxiliaryKernelExtensions.kc" "$KC" || failed=1
   else rm -f "$KC" || failed=1; fi
   if [ -f "$BK/os-major" ]; then cp -p "$BK/os-major" /Library/NullMoth/os-major || failed=1
@@ -239,7 +242,16 @@ for target in 15 26; do
 done
 chown -R root:wheel /Library/NullMoth/kexts && chmod -R go-w /Library/NullMoth/kexts || die "cached accelerator permissions"
 echo "$MAJ" > /Library/NullMoth/os-major || die "record selected OS"
-mkdir -p "$GB" "$FW" || die "create bundle and firmware directories"
+mkdir -p "$GB" || die "create the bundle directory"
+# The card runs these images and the kernel reads them, so this directory must be ours. It used to live in
+# /Users/Shared, which is world-writable (1777): a directory left there by anyone else was adopted as-is,
+# because the only permission step was a chmod that adds read bits and never takes write away. Refuse
+# anything we did not make, the way the shader caches already refuse a cache someone else could have written.
+if [ -e "$FW" ] && [ -n "$(find "$FW" -maxdepth 0 \( ! -user root -o -perm -o+w -o -perm -g+w \) -print -quit 2>/dev/null)" ]; then
+  rm -rf "$FW" || die "clear a firmware directory that was not root-owned"
+  echo "   note: the firmware folder was writable by other users; it has been replaced"
+fi
+mkdir -p "$FW" || die "create the firmware directory"
 # $GB/nvmtl is replaced wholesale below, so move the shared shader caches aside first. NVMTLLibraryLoad.m
 # reads them from NVMTL_AIRCACHE_DIR (/Library/GPUBundles/nvmtl/aircache) and uses that path whenever it is
 # writable, which is what lets every process - WindowServer included - share one persistent cache instead of
@@ -266,8 +278,11 @@ if [ -d "$EXT/NMXGPU.kext" ] && [ -d /Library/NullMoth/gpu-userland ]; then
 fi
 cp "$HERE/Library/GPUBundles/nvmtl-allow.txt" "$GB/" || die "copy bundle allow list"
 ditto "$HERE/Users/Shared/nvfw" "$FW" || die "copy firmware"
+chown -R root:wheel "$FW" && chmod -R go-w,a+rX "$FW" || die "firmware permissions"
+# nothing reads the old location any more; leaving it behind leaves a writable folder with our name on it
+rm -rf "$FWOLD" 2>/dev/null || true
 for k in $KEXTS; do chown -R root:wheel "$EXT/$k.kext" && chmod -R 755 "$EXT/$k.kext" || die "permissions for $k"; done
-chown -R root:wheel "$GB/NVMTLDriver.bundle" "$GB/NVIDIAShared.bundle" "$GB/nvmtl" "$GB/nvmtl-allow.txt" && chmod -R a+rX "$FW" || die "bundle or firmware permissions"
+chown -R root:wheel "$GB/NVMTLDriver.bundle" "$GB/NVIDIAShared.bundle" "$GB/nvmtl" "$GB/nvmtl-allow.txt" || die "bundle permissions"
 # WindowServer runs as _windowserver and must read the bundles and the allow list. WAS: cp under the app's privileged
 # helper (umask 077) left nvmtl-allow.txt at 0600, WindowServer got no Metal device, and CoreDisplay aborted
 # ("Failed to create MetalDevice") on every start: the crash loop after install on many machines.
@@ -341,6 +356,8 @@ for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do rm -rf
 rm -rf /Library/NullMoth/kexts "$FW"
 [ ! -d "\$BK/kexts" ] || ditto "\$BK/kexts" /Library/NullMoth/kexts
 [ ! -d "\$BK/nvfw" ] || ditto "\$BK/nvfw" "$FW"
+# the previous driver may be one that reads the old location
+[ ! -d "\$BK/nvfw" ] || { mkdir -p "$FWOLD" && ditto "\$BK/nvfw" "$FWOLD"; }
 if [ -f "\$BK/AuxiliaryKernelExtensions.kc" ]; then cp -p "\$BK/AuxiliaryKernelExtensions.kc" "$KC"; else rm -f "$KC"; fi
 [ ! -f "\$BK/os-major" ] || cp -p "\$BK/os-major" /Library/NullMoth/os-major
 if [ -f "\$BK/driver-version" ]; then cp -p "\$BK/driver-version" /Library/NullMoth/driver-version; else rm -f /Library/NullMoth/driver-version; fi

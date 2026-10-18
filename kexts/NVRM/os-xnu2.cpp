@@ -21,10 +21,15 @@
 #include <IOKit/acpi/IOACPIPlatformDevice.h>
 #include <sys/proc.h>
 #include <sys/kauth.h>
+#include <libkern/crypto/sha1.h>
 
-// A GSP firmware image is a few megabytes; this only has to be generous, not exact.
-#define NV_XNU_FW_MAX_BYTES (64u * 1024u * 1024u)
-#define NV_FIRMWARE_FOR_NAME(name) "/Users/Shared/nvfw/nvidia/610.57.04/" name ".bin"
+// The firmware moved out of /Users/Shared, which every user can write: the kernel reads these images and
+// the card runs them. /Library/NullMoth is where the installer already keeps the cached accelerators
+// root-owned and not group- or world-writable.
+#define NV_XNU_FW_DIR "/Library/NullMoth/nvfw/nvidia/610.57.04/"
+// The largest image we ship is the Ampere GSP at 84 MB (measured); the cap only has to be generous.
+#define NV_XNU_FW_MAX_BYTES (256u * 1024u * 1024u)
+#define NV_FIRMWARE_FOR_NAME(name) NV_XNU_FW_DIR name ".bin"
 extern "C" {
 #include "nv-firmware.h"
 }
@@ -498,6 +503,16 @@ extern "C" void nv_pm_alias_drop(void *cookie)
     IOSimpleLockUnlock(nv_pm_lock);
     OSDecrementAtomic64((volatile SInt64 *)&nv_pm_alias_live);
     if (release) { OSIncrementAtomic64((volatile SInt64 *)&nv_pm_deferred_rel); nv_pm_note(8, a->ptes ? a->ptes[0] : 0, a->bytes, 0); nv_q_put(a); }
+}
+// Only the framebuffer aperture. nv_pm_is_gpu below answers for every bar, which is what its other
+// callers want, but a range handed to a user process must never be the register file: a writable mapping
+// of BAR0 is the command and copy engines, and that is the whole machine. Apple keeps register apertures
+// to privileged clients for the same reason.
+extern "C" bool nv_pm_is_gpu_fb(NvU64 start, NvU64 size)
+{
+    nv_state_t *nv = nv_xnu_gpu_state(); if (!nv) return false;
+    const NvU64 b = nv->bars[NV_GPU_BAR_INDEX_FB].cpu_address, s = nv->bars[NV_GPU_BAR_INDEX_FB].size;
+    return b && s && start >= b && start + size <= b + s && start + size >= start;
 }
 extern "C" bool nv_pm_is_gpu(NvU64 start, NvU64 size)
 {
@@ -1175,6 +1190,34 @@ NV_STATUS NV_API_CALL nv_dma_map_alloc(nv_dma_device_t *dev, NvU64 page_count, N
 }
 NV_STATUS NV_API_CALL nv_dma_unmap_alloc(nv_dma_device_t *dev, NvU64 page_count, NvU64 *va_array, void **priv) { TRC; return NV_OK; }
 
+// What we shipped, by name. The card verifies the signature on a GSP image itself, so this is not an
+// authorisation check; it is how the driver notices that the image on disk is not the one the package
+// installed - a partial download, a half-finished update, local corruption, or a substitution. Digests
+// are SHA-1 because that is what the kernel SDK exposes (there is no sha2.h): it settles identity, and
+// the card's own secure boot is what decides whether an image may run.
+struct nv_xnu_fw_expected { const char *name; NvU64 bytes; const char *sha1; };
+static const nv_xnu_fw_expected nv_xnu_fw_set[] = {
+    { "gsp_ga10x.bin",    84310168ull, "f11971026ccd86a7ea09ba525548c2e0615565ce" },
+    { "gsp_tu10x.bin",    29381504ull, "f20b8dc50f3576ec18c395c1b3b1cccc36bac194" },
+    { "ucodes_ga10x.bin",    31744ull, "1daf70f4f9a256212dead6f1ba88c694c5ae3af9" },
+    { "ucodes_tu10x.bin",    12032ull, "fe009104df714ad3d4233566aa0abb664614f8e9" },
+};
+static const nv_xnu_fw_expected *nv_xnu_fw_expect(const char *path)
+{
+    const char *base = path; for (const char *q = path; *q; q++) if (*q == '/') base = q + 1;
+    for (unsigned i = 0; i < sizeof nv_xnu_fw_set / sizeof nv_xnu_fw_set[0]; i++)
+        if (!strcmp(base, nv_xnu_fw_set[i].name)) return &nv_xnu_fw_set[i];
+    return NULL;   // a name we do not ship: nothing to compare against, so nothing is claimed
+}
+static bool nv_xnu_fw_digest_ok(const nv_xnu_fw_expected *e, const void *buf, size_t len)
+{
+    SHA1_CTX c; unsigned char d[20]; char hex[41];
+    static const char k[] = "0123456789abcdef";
+    SHA1Init(&c); SHA1Update(&c, buf, (unsigned int)len); SHA1Final(d, &c);
+    for (int i = 0; i < 20; i++) { hex[2*i] = k[d[i] >> 4]; hex[2*i+1] = k[d[i] & 15]; }
+    hex[40] = 0;
+    return !strcmp(hex, e->sha1);
+}
 const void *NV_API_CALL nv_get_firmware(nv_state_t *nv, nv_firmware_type_t fw_type, nv_firmware_chip_family_t fw_chip_family, const void **fw_buf, NvU32 *fw_size)
 {
     const char *path = nv_xnu_fw_path(fw_type, fw_chip_family);
@@ -1200,6 +1243,15 @@ const void *NV_API_CALL nv_get_firmware(nv_state_t *nv, nv_firmware_type_t fw_ty
     err = vn_rdwr(UIO_READ, vp, (caddr_t)buf, (int)size, 0, UIO_SYSSPACE, IO_NODELOCKED, vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
     vnode_close(vp, FREAD, ctx);
     if (err || resid != 0) { kprintf("NVRM-xnu:   vn_rdwr err=%d resid=%d\n", err, resid); kern_os_free(buf); return NULL; }
+    {
+        const nv_xnu_fw_expected *e = nv_xnu_fw_expect(path);
+        if (e && (e->bytes != (NvU64)size || !nv_xnu_fw_digest_ok(e, buf, size))) {
+            kprintf("NVRM-xnu:   firmware %s is not the image this driver shipped (%llu bytes on disk, "
+                    "%llu expected) - refusing it; reinstall the driver\n", path,
+                    (unsigned long long)size, (unsigned long long)e->bytes);
+            kern_os_free(buf); return NULL;
+        }
+    }
     *fw_buf = buf; *fw_size = (NvU32)size;
     kprintf("NVRM-xnu:   firmware loaded: %zu bytes\n", size);
     return buf;
