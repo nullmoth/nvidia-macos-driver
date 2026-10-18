@@ -157,6 +157,38 @@ check('the external encoder is off unless a conf knob names the process',
 check('the external encoder stays out of WindowServer, like the other codec registrars',
       bool(_nvcvt) and 'strcmp(me, "WindowServer")' in _nvcvt)
 
+# Metal's region fields are 64-bit and the copy path takes 32-bit, so a value that does not fit used to be
+# narrowed into a different, valid-looking region: an origin of 2^32 read as 0 and the copy landed at the
+# start of the texture instead of being refused.
+_fits = obj.split('static BOOL nvmtl_region_fits')[1].split('\n}\n')[0] if 'nvmtl_region_fits' in obj else ''
+check('a region that does not fit the copy path is refused before anything is narrowed',
+      bool(_fits) and _fits.count('UINT32_MAX') == 8          # 3 origin + 3 size + level + slice
+      and obj.count('if (!nvmtl_region_fits(') == 4)          # both getBytes and both replaceRegion
+check('the texture-buffer region is bounded by subtraction, not by adding origin and width',
+      obj.count('region.size.width > _i.w - region.origin.x') == 2
+      and 'region.origin.x + region.size.width > _i.w' not in obj)
+
+# Two mappings could take the same slot, and a release could clear an entry a lookup was reading.
+_mapfn = osx.split('void *NV_API_CALL os_map_kernel_space')[1].split('NvU64 nv_xnu_phys_for_kernel_va')[0]
+_unmapfn = osx.split('void NV_API_CALL os_unmap_kernel_space')[1].split('int nv_xnu_kmap_overlap')[0]
+check('the kernel mapping table serialises the paths that allocate and clear a slot',
+      'nv_xnu_maps_lock = IOLockAlloc()' in osx
+      and _mapfn.count('IOLockLock(nv_xnu_maps_lock)') == 2      # the alias path and the mapped path
+      and _mapfn.count('IOLockUnlock(nv_xnu_maps_lock)') == 3    # one per return path out of each loop
+      and 'IOLockLock(nv_xnu_maps_lock)' in _unmapfn)
+check('the driver refuses to start if that lock cannot be allocated',
+      'if (!nv_xnu_maps_init())' in nvrm)
+check('a slot publishes its address last and clears it first, so a lookup never sees a partial entry',
+      '__atomic_store_n(&m->va, va, __ATOMIC_RELEASE)' in osx
+      and '__atomic_store_n(&nv_xnu_maps[i].va, (void *)NULL, __ATOMIC_RELEASE)' in _unmapfn)
+# The other direction, and the reason the readers are ordered rather than locked: they are also reached from
+# the framebuffer's interrupt path, where taking a mutex is not allowed.
+_lookup = osx.split('NvU64 nv_xnu_phys_for_kernel_va')[1].split('void NV_API_CALL os_unmap_kernel_space')[0]
+_overlap = osx.split('int nv_xnu_kmap_overlap')[1].split('\n}\n')[0]
+check('the two lookups take no mutex (they run in the interrupt path) and read the address with acquire',
+      'IOLock' not in _lookup and 'IOLock' not in _overlap
+      and _lookup.count('__ATOMIC_ACQUIRE') == 1 and _overlap.count('__ATOMIC_ACQUIRE') == 1)
+
 # Moving the firmware broke the way out. Both restore paths are gated on $BK/nvfw, and on an upgrade
 # the new location does not exist yet, so a backup that only looked there saved nothing and the
 # boot-guard fallback restored the previous driver with no firmware at all - a dark Mac, no recovery.
