@@ -105,7 +105,7 @@ extern id gNVMTLMainDevice;
   NSData *_raw; id _appleTwin; BOOL _twinTried; NSString *_rawPath; } @end
 @interface NVMTLRenderPipelineState : NSObject <MTLRenderPipelineState> { @public nvk_pipeline _p;
   NSString *_vname, *_fname, *_blend, *_vdesc; MTLRenderPipelineDescriptor *_descriptor; NSMutableDictionary *_samplerVariants;
-  NVMTLFunction *_linkedVert, *_linkedFrag; } @end
+  NVMTLFunction *_linkedVert, *_linkedFrag; uint32_t _a8mask; } @end
 @interface NVMTLCommandQueue : NSObject <MTLCommandQueue> {
   @public nvk_queue _q; id _dev; id _completionQueue; dispatch_queue_t _callbackOrderQueue; NSMutableArray *_reservations; dispatch_semaphore_t _capacity; NSUInteger _capacityCount;
 } @end
@@ -190,13 +190,18 @@ extern id gNVMTLMainDevice;
 @interface NVMTLAccelerationStructure : NVMTLBuffer <MTLAccelerationStructure> { @public nvk_accel _as; nvk_buffer _uid; uint32_t _iftAdd; } @end
 @interface NVMTLAccelerationStructureCommandEncoder : NSObject <MTLAccelerationStructureCommandEncoder> { @public NVMTLCommandBuffer *_cb; } @end
 uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int *instance, uint32_t *instance_count, NSMutableSet *track);
+#define NVMTL_NBUFAT 32   /* buffer argument indices an encoder tracks (Metal has 31) */
 @interface NVMTLRenderCommandEncoder : NSObject <MTLRenderCommandEncoder> {
   @public NVMTLCommandBuffer *_cb; NVMTLTexture *_target; float _clear[4]; BOOL _begun;
   NVMTLTexture *_resolve; uint32_t _passSamples;
   int _cull; uint32_t _passFmt; int _passDepth;
   uint32_t _load; BOOL _hasVP, _hasSC; float _vp[6]; uint32_t _sc[4];
   NSMutableDictionary *_vertexSamplers, *_fragmentSamplers;
-  NSMutableDictionary *_vbufAt, *_fbufAt;
+  NSData *_pixelSamplerKey; // sampler specialization depends on values, not the draw or pipeline
+  NSMutableArray *_pixelSamplerKeys; // at most eight recent value snapshots, owned by this encoder
+  // the buffer and offset bound at each vertex/fragment index, read by embedded argument binding; plain arrays because
+  // Apple's GL rebinds buffers for every draw, and a dictionary of (buffer, offset) arrays allocated on each one
+  NVMTLBuffer *_vbufAt[NVMTL_NBUFAT], *_fbufAt[NVMTL_NBUFAT]; NSUInteger _vbufOff[NVMTL_NBUFAT], _fbufOff[NVMTL_NBUFAT];
   NVMTLRenderPipelineState *_ps;
   NSMutableArray *_scratch;
   NVMTLDepthStencilState *_ds;
@@ -214,7 +219,8 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
 @end
 
 NSArray<NSDictionary *> *nvmtl_embedded_bindings(NVMTLFunction *function);
-void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NSDictionary *bufferAtIndex);
+void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NVMTLBuffer *__strong const *bufAt, const NSUInteger *offAt);
+void nvmtl_bind_embedded_dict(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NSDictionary *bufferAtIndex);
 uint64_t nvmtl_resid_for_texture(id t);
 uint64_t nvmtl_resid_for_sampler(id s);
 
@@ -244,7 +250,7 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
 } @end
 void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 #include <os/lock.h>
-@interface NVMTLResSet : NSMutableSet { @public NSMutableSet *_s; os_unfair_lock _lk; }
+@interface NVMTLResSet : NSMutableSet { @public NSMutableSet *_s; os_unfair_lock _lk; const void *_mru[8]; unsigned _mruNext; }
 - (NVMTLResSet *)nvmtlTakeAll;
 @end
 @interface NVMTLFunction () { @public NSString *_label; } @end
@@ -254,7 +260,7 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 @interface NVMTLCommandQueue () { @public NSString *_label; } @end
 @interface NVMTLCommandBuffer () { @public NSString *_label; uint64_t _rep; } @end
 @interface NVMTLCommandBuffer () { @public NSMutableSet *_stTwins; } @end
-@interface NVMTLTexture () { @public nvk_image _stTwin; BOOL _stTwinTried; } @end
+@interface NVMTLTexture () { @public nvk_image _stTwin; BOOL _stTwinTried; BOOL _mipsWritten; } @end
 @interface NVMTLDepthStencilState () { @public NSString *_label; } @end
 @interface NVMTLSamplerState () { @public NSString *_label; } @end
 @interface NVMTLComputePipelineState () { @public NSString *_label; } @end

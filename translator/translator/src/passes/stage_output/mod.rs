@@ -195,6 +195,29 @@ fn value_for_store(
     bitcast_for_store(ctx, stores, value, src_ty, dst_ty)
 }
 
+/// An A8Unorm colour attachment is an R8 image on Vulkan: broadcast the output's alpha to every lane so the red lane,
+/// the only one the target keeps, holds the alpha Metal would have stored. Scalar and non-float outputs pass through.
+fn a8_splat_alpha(ctx: &mut Ctx, stores: &mut Vec<Instruction>, value: Word, ty: Word) -> Word {
+    if float_component_shape_live(ctx, ty) != Some((32, 4)) {
+        return value;
+    }
+    let splat = ctx.module.fresh_id();
+    stores.push(Instruction::new(
+        Op::VectorShuffle,
+        Some(ty),
+        Some(splat),
+        vec![
+            Operand::IdRef(value),
+            Operand::IdRef(value),
+            Operand::LiteralBit32(3),
+            Operand::LiteralBit32(3),
+            Operand::LiteralBit32(3),
+            Operand::LiteralBit32(3),
+        ],
+    ));
+    splat
+}
+
 fn float_component_shape_live(ctx: &Ctx, ty: Word) -> Option<(u32, u32)> {
     let def = type_def_of(ctx, ty)?;
     let (scalar_ty, lanes) = if def.class.opcode == Op::TypeVector {
@@ -661,6 +684,11 @@ pub(in crate::passes) fn rewrite_return(
                 }
             };
             let value = value_for_store(ctx, &mut stores, value, src_ty, dst_ty);
+            let value = if ctx.a8_output_vars.contains(&var) {
+                a8_splat_alpha(ctx, &mut stores, value, dst_ty)
+            } else {
+                value
+            };
             stores.push(Instruction::new(
                 Op::Store,
                 None,
@@ -811,6 +839,12 @@ pub(in crate::passes) fn rewrite_return(
                         match kind {
                             OutKind::Location(location) => {
                                 decorate_location(&mut ctx.module, var, location);
+                                if location < 32
+                                    && (ctx.a8_render_target_mask >> location) & 1 == 1
+                                    && !frag.is_some_and(|meta| meta.is_dual_source_member(mi as u32))
+                                {
+                                    ctx.a8_output_vars.insert(var);
+                                }
                                 if frag.is_some_and(|meta| meta.is_dual_source_member(mi as u32)) {
                                     ctx.module.annotations.push(Instruction::new(
                                         Op::Decorate,
@@ -887,6 +921,9 @@ pub(in crate::passes) fn rewrite_return(
                         let output_ty = fragment_output_type(ctx, frag, 0, ret_ty, defs);
                         let var = make_output_var(ctx, output_ty);
                         decorate_location(&mut ctx.module, var, location);
+                        if location < 32 && (ctx.a8_render_target_mask >> location) & 1 == 1 {
+                            ctx.a8_output_vars.insert(var);
+                        }
                         ctx.interface.push(var);
                         outputs.push(OutputWrite::Direct {
                             var,

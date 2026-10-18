@@ -14,7 +14,10 @@ void nvlog(const char *fmt, ...);
 #import <objc/runtime.h>
 #import <objc/message.h>
 static int nvmtl_trace_on(void);
-static void nvtrace(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void nvtrace_emit(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+// Guard the call site: converting NSString arguments on every draw is expensive
+// even when the trace writer immediately returns without emitting anything.
+#define nvtrace(...) do { if (nvmtl_trace_on()) nvtrace_emit(__VA_ARGS__); } while (0)
 static unsigned long long nvmtl_global_trace_id(id o) {
     static char key; static unsigned long long next = 1;
     @synchronized (o) {
@@ -167,16 +170,26 @@ static inline void nvmtl_resref(id o, int d) {
 // for-in runs only over a command buffer part's own copy (one thread), never over a set still being encoded into
 - (NSUInteger)countByEnumeratingWithState:(NSFastEnumerationState *)st objects:(id __unsafe_unretained [])b count:(NSUInteger)n {
     return [_s countByEnumeratingWithState:st objects:b count:n]; }
-- (void)addObject:(id)o { if (!o) return; os_unfair_lock_lock(&_lk); BOOL had = [_s member:o] != nil; if (!had) [_s addObject:o];
+// _mru: objects added lately, each in the set until it is removed (the set retains it, so its address cannot be reused
+// while it is listed). Encoders add the same few buffers, pipelines and samplers draw after draw (Apple's GL rebinds its
+// vertex, index and uniform buffers for every draw), and a hit skips the set's hash lookup.
+- (void)addObject:(id)o { if (!o) return; const void *p = (__bridge const void *)o; os_unfair_lock_lock(&_lk);
+    for (unsigned k = 0; k < 8; k++) if (_mru[k] == p) { os_unfair_lock_unlock(&_lk); return; }
+    id member = [_s member:o]; BOOL had = member != nil;
+    if (!had) { [_s addObject:o]; member = o; }
+    // An equal object need not be the object retained by NSMutableSet. Cache only the retained member's address.
+    _mru[_mruNext++ & 7] = (__bridge const void *)member;
     os_unfair_lock_unlock(&_lk); if (!had) nvmtl_resref(o, 1); }
-- (void)removeObject:(id)o { if (!o) return; os_unfair_lock_lock(&_lk); BOOL had = [_s member:o] != nil; if (had) [_s removeObject:o];
-    os_unfair_lock_unlock(&_lk); if (had) nvmtl_resref(o, -1); }
+- (void)removeObject:(id)o { if (!o) return; os_unfair_lock_lock(&_lk); id member = [_s member:o];
+    if (member) [_s removeObject:member];
+    for (unsigned k = 0; k < 8; k++) if (_mru[k] == (__bridge const void *)member) _mru[k] = NULL;
+    os_unfair_lock_unlock(&_lk); if (member) nvmtl_resref(member, -1); }
 // Clearing, copying and sealing never go through -allObjects. That array is autoreleased into the CALLER's pool, and
 // these run on the app's own commit thread: Geekbench 7 never drains that pool, so every resource a command buffer had
 // ever touched stayed alive, and Super Resolution filled VRAM with 9 MB MPS buffers until allocations were refused.
 // The sets below are owned (+1) and released at the end of scope.
 - (void)removeAllObjects { NSMutableSet *fresh = [NSMutableSet new], *old;
-    os_unfair_lock_lock(&_lk); old = _s; _s = fresh; os_unfair_lock_unlock(&_lk);
+    os_unfair_lock_lock(&_lk); old = _s; _s = fresh; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
     for (id o in old) nvmtl_resref(o, -1); }
 - (id)copyWithZone:(NSZone *)z { atomic_fetch_add(&gRes2Tick, 1);
     NVMTLResSet *c = [NVMTLResSet new];
@@ -191,7 +204,7 @@ static inline void nvmtl_resref(id o, int d) {
 // new owner, so each resource's residency count is unchanged; the new set's -dealloc gives it back.
 - (NVMTLResSet *)nvmtlTakeAll { atomic_fetch_add(&gRes2Tick, 1);
     NVMTLResSet *taken = [NVMTLResSet new]; NSMutableSet *empty = taken->_s;
-    os_unfair_lock_lock(&_lk); taken->_s = _s; _s = empty; os_unfair_lock_unlock(&_lk);
+    os_unfair_lock_lock(&_lk); taken->_s = _s; _s = empty; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
     return taken; }
 - (void)dealloc { for (id o in _s) nvmtl_resref(o, -1); }
 @end
@@ -951,6 +964,9 @@ static void nvmtl_storage_twins_out(NVMTLCommandBuffer *cb) {
 static int g_trace_lines;
 static int g_trace_bigonly, g_trace_mute;
 static int nvmtl_trace_on(void) {
+#if NVMTL_RELEASE
+    return 0;   // the request files are refused in release builds (nvmtl_rel_access), so tracing never turns on
+#endif
     static uint64_t next; static int on;
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     static int cap = 2500;
@@ -961,8 +977,7 @@ static int nvmtl_trace_on(void) {
 }
 static int nvtrace_scope(uint32_t w, uint32_t h) { int was = g_trace_mute; g_trace_mute = 0; (void)nvmtl_trace_on();
     g_trace_mute = g_trace_bigonly && (w < 1000 || h < 100); return was; }
-static void nvtrace(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-static void nvtrace(const char *fmt, ...) {
+static void nvtrace_emit(const char *fmt, ...) {
     if (!nvmtl_trace_on()) return;
     char p[96]; snprintf(p, sizeof p, "/tmp/nvmtl-trace-%d.txt", (int)getpid());
     int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0600);
@@ -1384,6 +1399,37 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
                                                     (uint32_t)region.size.width, (uint32_t)region.size.height, (uint32_t)level + _baseLevel, (uint32_t)(vol ? region.origin.z + zi : slice + _baseSlice));
     if (rc) nvlog("texture getBytes:slice: readback FAILED");
 }
+// CoreAnimation uploads only level 0 of the mipmapped texture it draws a Dock badge digit into and samples it trilinear,
+// so the levels nobody wrote need filling; a write to a higher level or generateMipmaps sets _mipsWritten and ends that.
+static void nvmtl_mip_autofill(NVMTLTexture *t, const void *bytes, size_t row, MTLRegion region, NSUInteger level) {
+    NVMTLTexture *r = t->_parent ?: t;
+    if (level + t->_baseLevel > 0) { r->_mipsWritten = YES; return; }
+    NSUInteger mips = t.mipmapLevelCount; if (mips <= 1 || r->_mipsWritten || t->_parent || !bytes || !row) return;
+    nvk_image *im = [t nvi]; if (!im) return; uint32_t w = im->w, h = im->h;
+    if (im->mtl_type != 2 || im->bw > 1 || (im->layers ? im->layers : 1) > 1 || w > 2048 || h > 2048) return;
+    if (region.origin.x || region.origin.y || region.size.width != w || region.size.height != h) return;
+    unsigned bpp; switch (t.pixelFormat) {
+        case MTLPixelFormatA8Unorm: case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Unorm_sRGB: bpp = 1; break;
+        case MTLPixelFormatRG8Unorm: case MTLPixelFormatRG8Unorm_sRGB: bpp = 2; break;
+        case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatRGBA8Unorm_sRGB: case MTLPixelFormatBGRA8Unorm: case MTLPixelFormatBGRA8Unorm_sRGB: bpp = 4; break;
+        default: return; }
+    if (bpp != im->bpp) return;
+    size_t cap = (size_t)((w + 1) / 2) * ((h + 1) / 2) * bpp; uint8_t *cur = malloc(cap), *nxt = malloc(cap);
+    if (!cur || !nxt) { free(cur); free(nxt); return; }
+    const uint8_t *src = bytes; size_t srow = row; uint32_t sw = w, sh = h;
+    for (NSUInteger l = 1; l < mips; l++) {
+        uint32_t dw = sw > 1 ? sw / 2 : 1, dh = sh > 1 ? sh / 2 : 1;
+        for (uint32_t y = 0; y < dh; y++) for (uint32_t x = 0; x < dw; x++) {
+            uint32_t x0 = 2 * x, x1 = 2 * x + 1 < sw ? 2 * x + 1 : x0, y0 = 2 * y, y1 = 2 * y + 1 < sh ? 2 * y + 1 : y0;
+            const uint8_t *p00 = src + (size_t)y0 * srow + (size_t)x0 * bpp, *p01 = src + (size_t)y0 * srow + (size_t)x1 * bpp;
+            const uint8_t *p10 = src + (size_t)y1 * srow + (size_t)x0 * bpp, *p11 = src + (size_t)y1 * srow + (size_t)x1 * bpp;
+            uint8_t *d = nxt + ((size_t)y * dw + x) * bpp;
+            for (unsigned c = 0; c < bpp; c++) d[c] = (uint8_t)((p00[c] + p01[c] + p10[c] + p11[c] + 2) / 4); }
+        if (nvmtl_vk_image_write_region_level_layer(t->_q, im, nxt, (size_t)dw * bpp, 0, 0, dw, dh, (uint32_t)l, t->_baseSlice)) break;
+        uint8_t *tmp = cur; cur = nxt; nxt = tmp; src = cur; srow = (size_t)dw * bpp; sw = dw; sh = dh;
+    }
+    free(cur); free(nxt);
+}
 - (void)replaceRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level withBytes:(const void *)bytes bytesPerRow:(NSUInteger)row {
     if (level >= [self mipmapLevelCount]) { nvlog("replaceRegion: mip level %lu — this texture has %lu", (unsigned long)level, (unsigned long)[self mipmapLevelCount]); return; }
     if (region.size.depth > 1 || region.origin.z) { [self replaceRegion:region mipmapLevel:level slice:0 withBytes:bytes bytesPerRow:row bytesPerImage:row * region.size.height]; return; }
@@ -1398,7 +1444,7 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
     if (nvmtl_vk_image_write_region_level_layer(_q, [self nvi], (const uint8_t *)bytes, row, (uint32_t)region.origin.x, (uint32_t)region.origin.y,
                                                 (uint32_t)region.size.width, (uint32_t)region.size.height, (uint32_t)level + _baseLevel, _baseSlice))
         nvlog("replaceRegion: upload FAILED");
-    else [self nvmtlSurfaceOut];
+    else { [self nvmtlSurfaceOut]; nvmtl_mip_autofill(self, bytes, row, region, level); }
 }
 - (void)replaceRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice
             withBytes:(const void *)bytes bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)img {
@@ -1417,10 +1463,23 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
         rc = nvmtl_vk_image_write_region_level_layer(_q, im, (const uint8_t *)bytes + zi * per, row, (uint32_t)region.origin.x, (uint32_t)region.origin.y,
                                                      (uint32_t)region.size.width, (uint32_t)region.size.height, (uint32_t)level + _baseLevel, (uint32_t)(vol ? region.origin.z + zi : slice + _baseSlice));
     if (rc) nvlog("replaceRegion:slice: upload FAILED");
-    else [self nvmtlSurfaceOut];
+    else { [self nvmtlSurfaceOut]; if (!vol) nvmtl_mip_autofill(self, bytes, row, region, level); }
+}
+// A view of a texture buffer is another texel-buffer view of the same bytes. Apple's GL asks for one whenever a buffer
+// texture is sampled through a sampler of another type (Minecraft 26's R8Sint/R32Float buffer textures), every draw
+// until it gets one.
+static NVMTLTexture *nvmtl_texbuf_view(NVMTLTexture *t, MTLPixelFormat f) {
+    extern int nvmtl_pixfmt_public(MTLPixelFormat f, uint32_t *vk, uint32_t *bpp, int *a8);
+    uint32_t vkf = 0, bpp = 0; int a8 = 0;
+    if (!t->_backBuf || nvmtl_pixfmt_public(f, &vkf, &bpp, &a8) || a8 || !bpp || !t->_backBPR || t->_backBPR % bpp) {
+        nvlog("newTextureView: texture-buffer view as format %lu is not carried -> nil", (unsigned long)f); return nil; }
+    MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:f width:t->_backBPR / bpp
+                                                                            resourceOptions:[t->_backBuf resourceOptions] usage:t->_usage];
+    return nvmtl_texbuf_make(t->_backBuf, d, t->_backOff);
 }
 - (id<MTLTexture>)nvmtlViewWithFormat:(MTLPixelFormat)f levels:(NSRange)levels {
     if (!levels.length || levels.location >= self.mipmapLevelCount || levels.length > self.mipmapLevelCount - levels.location) return nil;
+    if ([self nvi]->mtl_type == 9) return nvmtl_texbuf_view(self, f);
     NVMTLTexture *v = [NVMTLTexture new];
     { NVMTLTexture *vp_ = _parent ? _parent : self; __atomic_fetch_add(&vp_->_nviews, 1, __ATOMIC_ACQ_REL); }  v->_parent = _parent ? _parent : self; v->_usage = [self usage];
     v->_q = _q; v->_fmt = f; v->_surf = _surf; v->_plane = _plane;
@@ -1466,6 +1525,8 @@ static uint32_t nvmtl_tex_attach_vkfmt(NVMTLTexture *t, int *a8) {
         !slices.length || slices.location >= availableSlices || slices.length > availableSlices - slices.location) return nil;
     if (tt == MTLTextureType2D && !slices.location && slices.length <= 1 && [self nvi]->mtl_type == 2) return [self nvmtlViewWithFormat:f levels:levels];
     if (tt == MTLTextureType2DMultisample && !slices.location && slices.length <= 1 && [self nvi]->mtl_type == 4) return [self nvmtlViewWithFormat:f levels:levels];
+    if (tt == MTLTextureTypeTextureBuffer || [self nvi]->mtl_type == 9)
+        return tt == MTLTextureTypeTextureBuffer && [self nvi]->mtl_type == 9 ? nvmtl_texbuf_view(self, f) : nil;
     if (tt == MTLTextureType3D && [self nvi]->mtl_type == 7 && !slices.location) slices = NSMakeRange(0, 1);
     if (((tt == MTLTextureType1D || tt == MTLTextureType1DArray) && [self nvi]->mtl_type != (uint32_t)tt) || (tt == MTLTextureType2DMultisample && ([self nvi]->mtl_type != 4 && [self nvi]->mtl_type != 8)) || (tt == MTLTextureType2DMultisampleArray && [self nvi]->mtl_type != 8) || (([self nvi]->mtl_type == 4 || [self nvi]->mtl_type == 8) && tt != MTLTextureType2DMultisample && tt != MTLTextureType2DMultisampleArray) || (tt == MTLTextureType3D && [self nvi]->mtl_type != 7)) { nvlog("newTextureView: textureType %lu of a %u-typed texture — not carried", (unsigned long)tt, [self nvi]->mtl_type); return nil; }
     NVMTLTexture *v = [NVMTLTexture new];
@@ -1493,8 +1554,12 @@ static uint32_t nvmtl_tex_attach_vkfmt(NVMTLTexture *t, int *a8) {
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)f textureType:(MTLTextureType)tt
                                          levels:(NSRange)levels slices:(NSRange)slices
                                         swizzle:(MTLTextureSwizzleChannels)sw {
+    const BOOL identity = sw.red == MTLTextureSwizzleRed && sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha;
+    if (!identity && [self nvi]->mtl_type == 9) {   // a Vulkan texel buffer has no component mapping
+        static int said; if (!said++) nvlog("newTextureView:swizzle: a texture buffer cannot be swizzled -> nil (said once)");
+        return nil; }
     NVMTLTexture *v = (NVMTLTexture *)[self newTextureViewWithPixelFormat:f textureType:tt levels:levels slices:slices];
-    if (!v || (sw.red == MTLTextureSwizzleRed && sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha)) return v;
+    if (!v || identity) return v;
     extern int nvmtl_pixfmt_public(MTLPixelFormat f, uint32_t *vk, uint32_t *bpp, int *a8);
     uint32_t vkf = 0, bpp = 0; int a8 = 0; void *nv = NULL;
     const uint8_t s4[4] = { (uint8_t)sw.red, (uint8_t)sw.green, (uint8_t)sw.blue, (uint8_t)sw.alpha };
@@ -1521,7 +1586,7 @@ NSData *nvmtl_translate_with_fc_cached(NSString *air, NSString *stage, NSString 
 #pragma mark - library / function
 id gNVMTLMainDevice = nil;
 
-extern NSData *nvmtl_translate_samplers(NVMTLFunction *, NSDictionary *, NSString **);
+extern NSData *nvmtl_translate_samplers(NVMTLFunction *, NSDictionary *, uint32_t, NSString **);
 extern NSData *nvmtl_translate_variant(NVMTLFunction *, NSDictionary *, NSDictionary *, NSString **);
 @interface NVMTLCIBinding : NSObject { @public NSString *_name; NVMTLType *_t; } @end
 @implementation NVMTLCIBinding
@@ -2612,22 +2677,43 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
     for (NSString *k in m) { NSMutableDictionary *st = [m[k] mutableCopy]; st[@"lod_max_clamp"] = @65504.0f; o[k] = st; }
     return o;
 }
-- (BOOL)nvmtlBindSamplerPipeline {
-    if (!_ps) return NO;
+static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *index, NSDictionary *state) {
+    NSDictionary *old = states[index];
+    if (old == state || [old isEqual:state]) return NO;
+    if (state) states[index] = state; else [states removeObjectForKey:index];
+    return YES;
+}
+- (NVMTLRenderPipelineState *)nvmtlSamplerPipeline {
     NVMTLRenderPipelineState *selected=_ps;
-    if(_vertexSamplers.count || _fragmentSamplers.count) {
-        NSDictionary *vS=nvmtl_pixel_sampler_norm(_vertexSamplers),*fS=nvmtl_pixel_sampler_norm(_fragmentSamplers);
-        NSData *key=[NSJSONSerialization dataWithJSONObject:@[vS,fS] options:NSJSONWritingSortedKeys error:NULL];
+    {
+        NSDictionary *vS=nil,*fS=nil;
+        if (!_pixelSamplerKey) {
+            NSDictionary *vertex=_vertexSamplers ?: @{}, *fragment=_fragmentSamplers ?: @{};
+            for (NSArray *entry in _pixelSamplerKeys) {
+                if ([entry[0] isEqual:vertex] && [entry[1] isEqual:fragment]) { _pixelSamplerKey=entry[2]; break; }
+            }
+            if (!_pixelSamplerKey) {
+                vS=nvmtl_pixel_sampler_norm(vertex); fS=nvmtl_pixel_sampler_norm(fragment);
+                _pixelSamplerKey=[NSJSONSerialization dataWithJSONObject:@[vS,fS] options:NSJSONWritingSortedKeys error:NULL];
+                if (!_pixelSamplerKeys) _pixelSamplerKeys=[NSMutableArray new];
+                if (_pixelSamplerKeys.count == 8) [_pixelSamplerKeys removeObjectAtIndex:0];
+                [_pixelSamplerKeys addObject:@[[vertex copy],[fragment copy],_pixelSamplerKey]];
+            }
+        }
+        NSData *key=_pixelSamplerKey;
         @synchronized(_ps) {
             if(!_ps->_samplerVariants) _ps->_samplerVariants=[NSMutableDictionary new];
             id cached=_ps->_samplerVariants[key];
-            if(cached==[NSNull null]) return NO;
+            if(cached==[NSNull null]) return nil;
             selected=cached;
             if(!selected) {
+                // Reusing the key across pipelines still performs each pipeline's own variant lookup.
+                if (!vS) vS=nvmtl_pixel_sampler_norm(_vertexSamplers);
+                if (!fS) fS=nvmtl_pixel_sampler_norm(_fragmentSamplers);
                 NVMTLFunction *vf=_ps->_linkedVert?:(id)_ps->_descriptor.vertexFunction,*ff=_ps->_linkedFrag?:(id)_ps->_descriptor.fragmentFunction;
                 NSString *why=nil;
                 NSString *gk=nvmtl_sampvar_key(_ps->_descriptor,vf,ff,key); selected=nvmtl_sampvar_get(gk);
-                NSData *v=selected?nil:nvmtl_translate_samplers(vf,vS,&why),*f=(selected||!v)?nil:(ff?nvmtl_translate_samplers(ff,fS,&why):[NSData data]);
+                NSData *v=selected?nil:nvmtl_translate_samplers(vf,vS,0,&why),*f=(selected||!v)?nil:(ff?nvmtl_translate_samplers(ff,fS,_ps->_a8mask,&why):[NSData data]);
                 if(v && f) {
                     NVMTLFunction *vs=[NVMTLFunction new],*fs=ff?[NVMTLFunction new]:nil;
                     vs->_spirv=v;vs->_fname=vf->_fname;vs->_stage=vf->_stage;
@@ -2637,16 +2723,25 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
                     if(!selected)why=error.description;
                     else nvmtl_sampvar_put(gk,selected,vf,ff);
                 }
-                if(!selected){nvlog("pixel sampler specialization REFUSED %s: %s",_ps->_fname.UTF8String,why.UTF8String);_ps->_samplerVariants[key]=[NSNull null];return NO;}
+                if(!selected){nvlog("pixel sampler specialization REFUSED %s: %s",_ps->_fname.UTF8String,why.UTF8String);_ps->_samplerVariants[key]=[NSNull null];return nil;}
                 _ps->_samplerVariants[key]=selected;
                 nvlog("pixel sampler variant built: %s / %s",_ps->_vname.UTF8String,_ps->_fname.UTF8String);
             }
         }
     }
+    return selected;
+}
+- (BOOL)nvmtlBindSamplerPipeline {
+    if (!_ps) return NO;
+    NVMTLRenderPipelineState *selected=_ps;
+    if (_vertexSamplers.count || _fragmentSamplers.count) {
+        selected=[self nvmtlSamplerPipeline];
+        if (!selected) return NO;
+    }
     if(!_cb->_resources)_cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:selected];
     nvmtl_vk_cmd_bind_pipeline(&_cb->_c,&selected->_p);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX,   (NVMTLFunction *)_ps->_descriptor.vertexFunction,   _vbufAt);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, (NVMTLFunction *)_ps->_descriptor.fragmentFunction, _fbufAt);
+    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX,   (NVMTLFunction *)_ps->_descriptor.vertexFunction,   _vbufAt, _vbufOff);
+    nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, (NVMTLFunction *)_ps->_descriptor.fragmentFunction, _fbufAt, _fbufOff);
     nvmtl_vk_cmd_bind_set(&_cb->_c,&selected->_p);
     return YES;
 }
@@ -2696,9 +2791,10 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
         if (nvmtl_vk_cmd_attachment_view_n(&cb->_c, [t nvi], 0, t->_baseLevel + (uint32_t)ca.level, t->_baseSlice + zslice, NL, tvk, ta8, &_pass.colview[i], &cw, &ch)) return NO;
         _pass.col[i] = [t nvi]; _pass.colw[i] = cw; _pass.colh[i] = ch;
         _pass.col_level[i] = t->_baseLevel + (uint32_t)ca.level; _pass.col_layer[i] = t->_baseSlice + zslice;
+        if (_pass.col_level[i]) (t->_parent ?: t)->_mipsWritten = YES;
         _pass.colfmt[i] = tvk;
-        MTLClearColor cc = ca.clearColor;
-        _pass.clear[i][0] = (float)cc.red; _pass.clear[i][1] = (float)cc.green; _pass.clear[i][2] = (float)cc.blue; _pass.clear[i][3] = (float)cc.alpha;
+        MTLClearColor cc = ca.clearColor;   // an A8 target keeps Metal's alpha in its red lane, its clear too
+        _pass.clear[i][0] = ta8 ? (float)cc.alpha : (float)cc.red; _pass.clear[i][1] = (float)cc.green; _pass.clear[i][2] = (float)cc.blue; _pass.clear[i][3] = (float)cc.alpha;
         if (nvmtl_load_keeps(ca.loadAction)) load |= NVMTL_LOAD_COLOUR(i);
         if (cw < w) w = cw;
         if (ch < h) h = ch;
@@ -2887,8 +2983,7 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
     if (!nb) { nvlog("setVertexBuffer: nil at index %lu", (unsigned long)i); return; }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
     [_cb->_resources addObject:nb];
-    if (!_vbufAt) _vbufAt = [NSMutableDictionary new];
-    _vbufAt[@(i)] = @[nb, @(off)];
+    if (i < NVMTL_NBUFAT) { _vbufAt[i] = nb; _vbufOff[i] = off; }
     nvtrace_floats("VB", (unsigned long)i, (unsigned long)off, nb->_b.map, 24);
     if (nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, &nb->_b, off)) nvlog("setVertexBuffer: bind FAILED");
 }
@@ -2903,8 +2998,7 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
     if (!nb) { nvlog("setFragmentBuffer: nil at index %lu", (unsigned long)i); return; }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
     [_cb->_resources addObject:nb];
-    if (!_fbufAt) _fbufAt = [NSMutableDictionary new];
-    _fbufAt[@(i)] = @[nb, @(off)];
+    if (i < NVMTL_NBUFAT) { _fbufAt[i] = nb; _fbufOff[i] = off; }
     nvtrace_floats("FB", (unsigned long)i, (unsigned long)off, nb->_b.map, 16);
     if (nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_FRAGMENT, (uint32_t)i, &nb->_b, off)) nvlog("setFragmentBuffer: bind FAILED");
 }
@@ -2924,8 +3018,8 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
         if (!_cb->_scratch) _cb->_scratch = [NSMutableArray new];
         [_cb->_scratch addObject:nb];
     }
-    if (set == NVMTL_SET_VERTEX)        { if (!_vbufAt) _vbufAt = [NSMutableDictionary new]; _vbufAt[@(i)] = @[nb, @(roff)]; }
-    else if (set == NVMTL_SET_FRAGMENT) { if (!_fbufAt) _fbufAt = [NSMutableDictionary new]; _fbufAt[@(i)] = @[nb, @(roff)]; }
+    if (i < NVMTL_NBUFAT && set == NVMTL_SET_VERTEX)        { _vbufAt[i] = nb; _vbufOff[i] = roff; }
+    else if (i < NVMTL_NBUFAT && set == NVMTL_SET_FRAGMENT) { _fbufAt[i] = nb; _fbufOff[i] = roff; }
 }
 - (void)setVertexBytes:(const void *)b length:(NSUInteger)l atIndex:(NSUInteger)i { [self nvmtlBindBytes:b length:l atIndex:i set:NVMTL_SET_VERTEX]; }
 - (void)setFragmentBytes:(const void *)b length:(NSUInteger)l atIndex:(NSUInteger)i { [self nvmtlBindBytes:b length:l atIndex:i set:NVMTL_SET_FRAGMENT]; }
@@ -2947,7 +3041,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     }
     if (!_fragmentSamplers) _fragmentSamplers=[NSMutableDictionary new];
     NSString *key=[@(i) stringValue];
-    if(ns && ns->_pixelState) _fragmentSamplers[key]=ns->_pixelState;else [_fragmentSamplers removeObjectForKey:key];
+    if (nvmtl_pixel_sampler_update(_fragmentSamplers,key,ns ? ns->_pixelState : nil)) _pixelSamplerKey=nil;
     nvtrace("FRAGMENT SAMPLER[%lu] pixel=%d bound=%d",(unsigned long)i,ns && ns->_pixelState!=nil,ns!=nil);
     if(ns) { if (!_cb->_resources) _cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:ns]; }
 }
@@ -2958,7 +3052,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     }
     if (!_vertexSamplers) _vertexSamplers=[NSMutableDictionary new];
     NSString *key=[@(i) stringValue];
-    if(ns && ns->_pixelState) _vertexSamplers[key]=ns->_pixelState;else [_vertexSamplers removeObjectForKey:key];
+    if (nvmtl_pixel_sampler_update(_vertexSamplers,key,ns ? ns->_pixelState : nil)) _pixelSamplerKey=nil;
     nvtrace("VERTEX SAMPLER[%lu] pixel=%d bound=%d",(unsigned long)i,ns && ns->_pixelState!=nil,ns!=nil);
     if(ns) { if (!_cb->_resources) _cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:ns]; }
 }
@@ -3272,7 +3366,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 }
 - (void)setVertexBufferOffset:(NSUInteger)off atIndex:(NSUInteger)i {
     nvtrace("VBOFF[%lu] -> %lu", (unsigned long)i, (unsigned long)off);
-    { NSArray *b = _vbufAt[@(i)]; if (b) _vbufAt[@(i)] = @[b[0], @(off)]; }
+    if (i < NVMTL_NBUFAT && _vbufAt[i]) _vbufOff[i] = off;
     if (nvmtl_vk_bind_buffer_offset(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, off))
         nvlog("setVertexBufferOffset: nothing bound at vertex index %lu", (unsigned long)i);
 }
@@ -3296,7 +3390,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     [self setVertexBytes:b length:l atIndex:i]; [self nvmtlVertexStride:st atIndex:i]; }
 - (void)setFragmentBufferOffset:(NSUInteger)off atIndex:(NSUInteger)i {
     nvtrace("FBOFF[%lu] -> %lu", (unsigned long)i, (unsigned long)off);
-    { NSArray *b = _fbufAt[@(i)]; if (b) _fbufAt[@(i)] = @[b[0], @(off)]; }
+    if (i < NVMTL_NBUFAT && _fbufAt[i]) _fbufOff[i] = off;
     if (nvmtl_vk_bind_buffer_offset(&_cb->_c, NVMTL_SET_FRAGMENT, (uint32_t)i, off))
         nvlog("setFragmentBufferOffset: nothing bound at fragment index %lu", (unsigned long)i);
 }
@@ -3323,7 +3417,8 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     NSString *key=[@(i) stringValue];
     if(_fragmentSamplers[key]) {
         NSMutableDictionary *state=[_fragmentSamplers[key] mutableCopy];
-        state[@"lod_min_clamp"]=@(lo);state[@"lod_max_clamp"]=@(hi);_fragmentSamplers[key]=state;
+        state[@"lod_min_clamp"]=@(lo);state[@"lod_max_clamp"]=@(hi);
+        if (nvmtl_pixel_sampler_update(_fragmentSamplers,key,state)) _pixelSamplerKey=nil;
     }
 }
 - (void)setVertexSamplerState:(id<MTLSamplerState>)ss lodMinClamp:(float)lo lodMaxClamp:(float)hi atIndex:(NSUInteger)i {
@@ -3331,7 +3426,8 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     NSString *key=[@(i) stringValue];
     if(_vertexSamplers[key]) {
         NSMutableDictionary *state=[_vertexSamplers[key] mutableCopy];
-        state[@"lod_min_clamp"]=@(lo);state[@"lod_max_clamp"]=@(hi);_vertexSamplers[key]=state;
+        state[@"lod_min_clamp"]=@(lo);state[@"lod_max_clamp"]=@(hi);
+        if (nvmtl_pixel_sampler_update(_vertexSamplers,key,state)) _pixelSamplerKey=nil;
     }
 }
 - (void)setFragmentSamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])ss lodMinClamps:(const float *)lo lodMaxClamps:(const float *)hi withRange:(NSRange)r {
@@ -3393,7 +3489,8 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 }
 - (void)nvmtlDumpBoundFragmentBuffers {
     {
-        NSDictionary *bound = [_fbufAt copy]; NSString *name = _dumpName;
+        NSMutableDictionary *bound = [NSMutableDictionary new]; NSString *name = _dumpName;
+        for (NSUInteger i = 0; i < NVMTL_NBUFAT; i++) if (_fbufAt[i]) bound[@(i)] = @[_fbufAt[i], @(_fbufOff[i])];
         [_cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                 id<MTLDevice> dev = done.device; id<MTLCommandQueue> q = [dev newCommandQueue]; id<MTLCommandBuffer> cb = [q commandBuffer];
@@ -4200,7 +4297,7 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
         _e78VarFor = _ps; _e78VarSel = selected;
     }
     nvmtl_retain_resource(_cb, selected);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX, _ps->_function, _bufAt);
+    nvmtl_bind_embedded_dict(_cb, NVMTL_SET_VERTEX, _ps->_function, _bufAt);
     return selected;
 }
 static int nvmtl_zprobe_on(void);
@@ -4350,6 +4447,7 @@ static void nvmtl_zprobe_drain(void) {
         if (nt) _sassTextures[@(i)] = nt; else [_sassTextures removeObjectForKey:@(i)];
     }
     if (!nt) { nvlog("compute setTexture: nil at %lu", (unsigned long)i); return; }
+    if (nt->_parent && nt->_baseLevel) nt->_parent->_mipsWritten = YES;
     nvmtl_zprobe_record(nt, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, (unsigned)i, nt->_stex ? 1u : 0u);
     nvmtl_retain_resource(_cb, nt);
     nvmtl_surface_in_for_cb(_cb, nt); if (nt->_stex) nvmtl_surf_dirty(_cb, nt);
@@ -4549,6 +4647,7 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
            sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)size toTexture:(id<MTLTexture>)dst
        destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dof {
     NVMTLTexture *s = (NVMTLTexture *)src, *d = (NVMTLTexture *)dst;
+    if (d && dl + d->_baseLevel > 0) (d->_parent ?: d)->_mipsWritten = YES;
     if (!s || !d) { nvlog("blit copyFromTexture: nil"); return; }
     if (sl >= s.mipmapLevelCount || dl >= d.mipmapLevelCount || ss >= nvmtl_texture_slice_count(s) || ds >= nvmtl_texture_slice_count(d)) {
         nvlog("blit copyFromTexture: subresource outside view"); return;
@@ -4593,6 +4692,7 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
     [_cb->_resources addObject:t];
     { int was = nvtrace_scope([t nvi]->w, [t nvi]->h); nvtrace("MIPS tex %ux%u surf %u", [t nvi]->w, [t nvi]->h, nvmtl_surf_id(t)); g_trace_mute = was; }
+    (t->_parent ?: t)->_mipsWritten = YES;
     nvmtl_surface_in_for_cb(_cb, t); nvmtl_surf_dirty(_cb, t);
     if (nvmtl_vk_cmd_image_gen_mipmaps(&_cb->_c, [t nvi])) nvlog("generateMipmapsForTexture: FAILED");
 }
@@ -4662,7 +4762,11 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
           rc = nvmtl_vk_cmd_copy_buffer_to_image_level_layer(&_cb->_c, &b->_b, so + zi * per, (uint32_t)row, [t nvi],
                                       (uint32_t)dof.x, (uint32_t)dof.y, (uint32_t)size.width, (uint32_t)size.height, (uint32_t)dl + t->_baseLevel, (uint32_t)(vol ? dof.z + zi : ds + t->_baseSlice));
       if (rc) nvlog("blit copyFromBuffer:toTexture: FAILED (level %lu slice %lu)", (unsigned long)dl, (unsigned long)ds);
-      else if (overwrite) nvmtl_surface_overwrite_recorded(_cb, t); }
+      else if (overwrite) nvmtl_surface_overwrite_recorded(_cb, t);
+      { NVMTLTexture *r = t->_parent ?: t;
+        if (dl + t->_baseLevel > 0) r->_mipsWritten = YES;
+        else if (!rc && !vol && !t->_parent && !r->_mipsWritten && t.mipmapLevelCount > 1 && !dof.x && !dof.y && size.width == [t nvi]->w && size.height == [t nvi]->h && [t nvi]->bw <= 1
+                 && nvmtl_vk_cmd_image_gen_mipmaps(&_cb->_c, [t nvi])) nvlog("blit copyFromBuffer:toTexture: mip generation FAILED"); } }
 }
 - (void)copyFromBuffer:(id<MTLBuffer>)src sourceOffset:(NSUInteger)so sourceBytesPerRow:(NSUInteger)row
    sourceBytesPerImage:(NSUInteger)img sourceSize:(MTLSize)size toTexture:(id<MTLTexture>)dst
@@ -4821,10 +4925,15 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     nvmtl_vk_cmd_set_blend_color(&_c, defaultBlend);
     nvmtl_vk_cmd_set_line_width(&_c, 1.0f);
     (void)nvmtl_vk_cmd_set_polygon_mode(&_c, 0);
+    // Metal encoder state starts fresh even when the command buffer also contains an earlier GL render pass.
+    _c.restart_off = 0;
+    nvmtl_vk_cmd_set_depth_bias(&_c, 0.0f, 0.0f, 0.0f);
+    nvmtl_vk_cmd_set_provoking_last(&_c, 0);
     (void)nvmtl_vk_cmd_set_depth_clip(&_c, 1);
     e->_visBuf = (NVMTLBuffer *)d.visibilityResultBuffer;
     MTLClearColor cc = d.colorAttachments[0].clearColor;
-    e->_clear[0] = (float)cc.red; e->_clear[1] = (float)cc.green; e->_clear[2] = (float)cc.blue; e->_clear[3] = (float)cc.alpha;
+    BOOL ca8 = d.colorAttachments[0].texture && d.colorAttachments[0].texture.pixelFormat == MTLPixelFormatA8Unorm;   // alpha lives in the red lane
+    e->_clear[0] = ca8 ? (float)cc.alpha : (float)cc.red; e->_clear[1] = (float)cc.green; e->_clear[2] = (float)cc.blue; e->_clear[3] = (float)cc.alpha;
     if (![e nvmtlBuildPass:d]) e->_refused = YES;
     return e;
 }

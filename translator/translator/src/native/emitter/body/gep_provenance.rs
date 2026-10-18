@@ -303,9 +303,18 @@ impl Emitter {
                             self.record_pointer_nullness(name.to_string(), is_null);
                         }
                     }
-                    if let Some(prev) = provenance {
-                        self.gep_provenance.insert(name.to_string(), prev);
-                    }
+                    // The GEP names the parameter itself, but a wider load through it (Apple's GL loads an ivec3
+                    // uniform at offset 0 through `getelementptr float, ptr %ubo, i32 0`) needs the slots after it:
+                    // keep the GEP as its provenance, as a nonzero first index would have.
+                    let prev = provenance.unwrap_or_else(|| GepProvenance {
+                        root: base,
+                        addrspace,
+                        source_ty: source_ty.clone(),
+                        indices: indices.clone(),
+                        root_indices: None,
+                        root_is_indexed_container: self.is_indexed_container_root(base, None),
+                    });
+                    self.gep_provenance.insert(name.to_string(), prev);
                     return Ok(Some(base));
                 }
             }

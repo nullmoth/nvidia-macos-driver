@@ -289,9 +289,22 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     NvU32 fCurMaxPx = 0, fCurCompModes = 0;
     SInt32 fCurX = 0, fCurY = 0; bool fCurVisible = false; bool fCurHaveImage = false;
     unsigned fCurApplies = 0; int fCurRc = 0;
+    // What the head's cursor shows since the last cursorApply that named its surface (fCurSurf or none). Unknown after a
+    // failed apply and after a mode set, whose request names no cursor; the next apply then names it again.
+    struct NvKmsKapiSurface *fCurShown = nullptr; bool fCurShownKnown = false;
+    // setCursorState only records the position and visibility (under fCurStateLock) and has fCursorCall apply them.
+    // WindowServer calls it for every mouse event from its cursor queue while holding CoreDisplay's cursor mutex,
+    // which its main thread takes for every event too, so an NVKMS cursor flip (about 0.3 ms, under the display gate)
+    // done there stalls the compositor while the mouse moves. A move that arrives while one is queued is applied with
+    // it. cursorApply and setCursorImage take turns on the display gate alone: a lock of the cursor's own taken before
+    // the gate would deadlock with any thread that holds the gate and reaches setCursorImage.
+    thread_call_t fCursorCall = nullptr;
+    IOSimpleLock *fCurStateLock = nullptr;
+    static void cursorFire(thread_call_param_t p0, thread_call_param_t);
     bool fCursorEnabled = false;
     bool cursorInit();
-    bool cursorApply();
+    bool cursorApply(bool imageChanged = false);
+    IOReturn setCursorImageLocked(void *cursorImage);
     uint64_t fVblNext = 0;
     unsigned fHudFrames = 0;
     NvU32 fNumHeads = 0, fNumConnectors = 0;
@@ -1743,6 +1756,9 @@ bool NVRMNVDAFramebuffer::cursorInit()
         FBLOG("cursor unsupported caps: max %u composition 0x%x", fCurMaxPx, fCurCompModes);
         return false;
     }
+    if (!fCurStateLock) fCurStateLock = IOSimpleLockAlloc();
+    if (!fCursorCall) fCursorCall = thread_call_allocate(cursorFire, this);
+    if (!fCurStateLock || !fCursorCall) { FBLOG("cursor: lock or thread call allocation FAILED"); return false; }
     NvU32 dim = fCurMaxPx;
     if (dim > 256) dim = 256;
     NvU64 sz = (NvU64)dim * (NvU64)dim * 4ull;
@@ -1780,7 +1796,7 @@ bool NVRMNVDAFramebuffer::cursorInit()
           dim, dim, dim * 4, fCurMaxPx, fCurCompModes);
     return true;
 }
-bool NVRMNVDAFramebuffer::cursorApply()
+bool NVRMNVDAFramebuffer::cursorApply(bool imageChanged)
 {
     NVRMDisplayGate gate; if (!gate.valid()) return false;
     if (!fKms || !fDev || !fCurSurf || !fModeSet) return false;
@@ -1798,17 +1814,36 @@ bool NVRMNVDAFramebuffer::cursorApply()
     // ordering), so every cursor move was also a primary flip: paced to vsync, and when a zero-copy flip latched a newer
     // frame between that read and this commit, the older frame went back on the panel until the next flip - the flash
     // users saw on mouse movement once zero-copy scan-out starts, gone with -nvrmnoflip. (Same finding as PR #40.)
+    // The surface only when a new image arrived or whether one shows changes; a move sends the position alone. NVKMS
+    // moves the cursor at once through its immediate channel (nvEvoMoveCursorInternal), while naming the surface
+    // reprograms it through the core channel, an update that latches at the next vblank and holds back the compositor's
+    // flips while the mouse moves.
     struct NvKmsKapiCursorRequestedConfig *cr = &cfg->headRequestedConfig[fHead].cursorRequestedConfig;
-    cr->surface = (fCurVisible && fCurHaveImage) ? fCurSurf : nullptr;
-    cr->compParams.compMode    = NVKMS_COMPOSITION_BLENDING_MODE_PREMULT_ALPHA;
-    cr->compParams.surfaceAlpha = 0;
-    cr->dstX = (NvS16)fCurX; cr->dstY = (NvS16)fCurY;
-    cr->flags.surfaceChanged = NV_TRUE; cr->flags.dstXYChanged = NV_TRUE;
+    SInt32 x, y; bool visible;
+    {
+        IOInterruptState state = IOSimpleLockLockDisableInterrupt(fCurStateLock);
+        x = fCurX; y = fCurY; visible = fCurVisible;
+        IOSimpleLockUnlockEnableInterrupt(fCurStateLock, state);
+    }
+    struct NvKmsKapiSurface *want = (visible && fCurHaveImage) ? fCurSurf : nullptr;
+    const bool nameSurface = imageChanged || !fCurShownKnown || want != fCurShown;
+    if (nameSurface) {
+        cr->surface = want;
+        cr->compParams.compMode    = NVKMS_COMPOSITION_BLENDING_MODE_PREMULT_ALPHA;
+        cr->compParams.surfaceAlpha = 0;
+        cr->flags.surfaceChanged = NV_TRUE;
+    }
+    cr->dstX = (NvS16)x; cr->dstY = (NvS16)y;
+    cr->flags.dstXYChanged = NV_TRUE;
     NvBool ok = submitConfig(cfg, rep, NV_TRUE, false, true);
     fCurRc = ok ? (int)rep->flipResult : -1;
+    if (nameSurface) {
+        fCurShownKnown = ok && rep->flipResult == NV_KMS_FLIP_RESULT_SUCCESS;
+        fCurShown = want;
+    }
     if (fCurApplies < 3 || (fCurApplies % 1000) == 0)
         FBLOG("cursor apply %u: ok %u rc %d at %d,%d visible %u",
-              fCurApplies, (unsigned)ok, fCurRc, (int)fCurX, (int)fCurY, (unsigned)fCurVisible);
+              fCurApplies, (unsigned)ok, fCurRc, (int)x, (int)y, (unsigned)visible);
     fCurApplies++;
     bool success = ok && rep->flipResult == NV_KMS_FLIP_RESULT_SUCCESS;
     IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
@@ -1834,6 +1869,11 @@ static bool nvrmPackCursor(UInt32 *dst, unsigned dim, const UInt32 *src,
 IOReturn NVRMNVDAFramebuffer::setCursorImage(void *cursorImage)
 {
     if (!fCurKva || !fCurSurf) return kIOReturnUnsupported;
+    NVRMDisplayGate gate; if (!gate.valid()) return kIOReturnUnsupported;
+    return setCursorImageLocked(cursorImage);
+}
+IOReturn NVRMNVDAFramebuffer::setCursorImageLocked(void *cursorImage)
+{
     size_t bytes = (size_t)fCurDim * fCurDim * sizeof(UInt32);
     UInt32 *staging = (UInt32 *)IOMalloc(bytes);
     if (!staging) return kIOReturnNoMemory;
@@ -1866,16 +1906,25 @@ IOReturn NVRMNVDAFramebuffer::setCursorImage(void *cursorImage)
     if (++images <= 4) FBLOG("K8 cursor image %u: %ux%u hot %u,%u plane %u",
         images, (unsigned)ci.cursorWidth, (unsigned)ci.cursorHeight,
         (unsigned)ci.cursorHotSpotX, (unsigned)ci.cursorHotSpotY, fCurDim);
-    if (!cursorApply()) { fCurHaveImage = false; cursorApply(); return kIOReturnUnsupported; }
+    if (!cursorApply(true)) { fCurHaveImage = false; cursorApply(); return kIOReturnUnsupported; }
     return kIOReturnSuccess;
 }
 IOReturn NVRMNVDAFramebuffer::setCursorState(SInt32 x, SInt32 y, bool visible)
 {
-    if (!fCurSurf) return kIOReturnUnsupported;
-    if (x == fCurX && y == fCurY && visible == fCurVisible && fCurRc == NV_KMS_FLIP_RESULT_SUCCESS)
-        return kIOReturnSuccess;
+    if (!fCurSurf || !fCursorCall || !fCurStateLock) return kIOReturnUnsupported;
+    IOInterruptState state = IOSimpleLockLockDisableInterrupt(fCurStateLock);
+    const bool same = x == fCurX && y == fCurY && visible == fCurVisible && fCurRc == NV_KMS_FLIP_RESULT_SUCCESS;
     fCurX = x; fCurY = y; fCurVisible = visible;
-    return cursorApply() ? kIOReturnSuccess : kIOReturnError;
+    IOSimpleLockUnlockEnableInterrupt(fCurStateLock, state);
+    if (!same) scheduleCall(fCursorCall, 0);
+    return kIOReturnSuccess;
+}
+void NVRMNVDAFramebuffer::cursorFire(thread_call_param_t p0, thread_call_param_t)
+{
+    NVRMNVDAFramebuffer *me = (NVRMNVDAFramebuffer *)p0;
+    NVRMCallReference callReference(me);
+    if (OSAddAtomic(0, &me->fStopping)) return;
+    me->cursorApply();   // takes the display gate
 }
 void NVRMNVDAFramebuffer::barsFire(thread_call_param_t p0, thread_call_param_t)
 {
@@ -2103,6 +2152,7 @@ bool NVRMNVDAFramebuffer::applyMode()
     }
     IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
     fModeSet = ok;
+    fCurShownKnown = false;   // the mode set named no cursor
     publishFlipWait();
     fHwVblTries = 0;
     return ok;
@@ -2279,7 +2329,7 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
         if (sl) IORecursiveLockUnlock(sl);
         if (mine) release();
     }
-    thread_call_t *calls[] = {&fHwVblCall, &fReflip, &fGpuWake, &fBars, &fVblTimer, &fSampler, &fHeadProbe};
+    thread_call_t *calls[] = {&fHwVblCall, &fReflip, &fGpuWake, &fBars, &fVblTimer, &fSampler, &fHeadProbe, &fCursorCall};
     for (unsigned i = 0; i < sizeof calls / sizeof calls[0]; ++i) {
         thread_call_t call = *calls[i];
         if (!call) continue;
@@ -2335,6 +2385,7 @@ IOReturn NVRMNVDAFramebuffer::getAppleSense(IOIndex connectIndex, UInt32 *senseT
 void NVRMNVDAFramebuffer::free()
 {
     if (fFlipCacheLock) { IOSimpleLockFree(fFlipCacheLock); fFlipCacheLock = nullptr; }
+    if (fCurStateLock) { IOSimpleLockFree(fCurStateLock); fCurStateLock = nullptr; }
     fConsKva = nullptr; OSSafeReleaseNULL(fConsMap); OSSafeReleaseNULL(fConsMem);
     super::free();
 }
@@ -2595,6 +2646,7 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
     struct NvKmsKapiSurface *old = fSurf;
     fSurf = ns; fFrontSurf = ns; fMode = m; fW = w; fH = h; fPitch = pitch;
     fRasterW = m.timings.hVisible; fRasterH = m.timings.vVisible; fCurId = id; fModeSet = true; fModeSwitches++;
+    fCurShownKnown = false;   // the mode set named no cursor
     publishFlipWait();
     fHwVblTries = 0;   // a new mode gets its own hardware-vblank tries (fModeSet stays set, so vblFire would not reset them)
     if (old && old != ns) fKms->destroySurface(fDev, old);

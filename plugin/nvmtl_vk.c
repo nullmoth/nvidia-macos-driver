@@ -206,8 +206,12 @@ void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, siz
     X(vkQueueSubmit) X(vkQueueBindSparse) X(vkCreateFence) X(vkWaitForFences) X(vkResetFences) X(vkDestroyFence) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyBuffer) \
     X(vkCmdPipelineBarrier) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkDeviceWaitIdle) X(vkFreeCommandBuffers) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetPrimitiveTopology) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdBindVertexBuffers) X(vkCreateDescriptorSetLayout) X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkDestroyDescriptorSetLayout) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets) X(vkCreateSampler) X(vkDestroySampler) X(vkFreeDescriptorSets) X(vkCmdSetBlendConstants) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdFillBuffer) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkGetBufferDeviceAddress) X(vkCmdWriteTimestamp) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdBeginQuery) X(vkCmdEndQuery) X(vkCmdCopyQueryPoolResults) X(vkGetQueryPoolResults) X(vkDestroyQueryPool) X(vkResetQueryPool) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatchIndirect) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) \
     X(vkDestroyBuffer) X(vkFreeMemory) X(vkDestroyImage) X(vkDestroyImageView) X(vkDestroyFramebuffer) X(vkDestroyCommandPool) \
-    X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask)
+    X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetDepthBiasEnable)
 static int g_dyn3;
+static int g_provoking;   /* provoking vertex is per-draw dynamic state, and the last vertex can provoke */
+static int g_divisor;     /* per-instance step rates (VK_KHR_vertex_attribute_divisor), up to g_max_divisor */
+static uint32_t g_max_divisor;
+static PFN_vkCmdSetProvokingVertexModeEXT pvkCmdSetProvokingVertexModeEXT;
 static int g_tess;
 static int g_indep;
 static int g_a2one;
@@ -767,20 +771,21 @@ static int nvmtl_vk_initialize(void)
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, g_qfam, 1, &prio };
 
-    static const char *kWant[14] = { "VK_EXT_extended_dynamic_state3", "VK_EXT_depth_clip_enable", "VK_EXT_memory_budget",
+    static const char *kWant[16] = { "VK_EXT_extended_dynamic_state3", "VK_EXT_depth_clip_enable", "VK_EXT_memory_budget",
                                     "VK_KHR_acceleration_structure", "VK_KHR_ray_query", "VK_KHR_deferred_host_operations",
                                     "VK_EXT_external_memory_host",
                                     "VK_EXT_image_drm_format_modifier",
                                     "VK_KHR_external_memory_fd",
-                                    "VK_EXT_mutable_descriptor_type", "VK_KHR_cooperative_matrix", "VK_EXT_calibrated_timestamps", "VK_EXT_sample_locations", "VK_KHR_pipeline_executable_properties"  };
-    const char *exts[14]; uint32_t next = 0; int have[14] = {0};
+                                    "VK_EXT_mutable_descriptor_type", "VK_KHR_cooperative_matrix", "VK_EXT_calibrated_timestamps", "VK_EXT_sample_locations", "VK_KHR_pipeline_executable_properties",
+                                    "VK_EXT_provoking_vertex", "VK_KHR_vertex_attribute_divisor" };
+    const char *exts[16]; uint32_t next = 0; int have[16] = {0};
     uint32_t na = 0;
     if (pvkEnumerateDeviceExtensionProperties &&
         pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, NULL) == VK_SUCCESS && na) {
         VkExtensionProperties *props = calloc(na, sizeof *props);
         if (props && pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, props) == VK_SUCCESS)
             for (uint32_t i = 0; i < na; i++)
-                for (int w = 0; w < 14; w++)
+                for (int w = 0; w < 16; w++)
                     if (!have[w] && !strcmp(props[i].extensionName, kWant[w])) { have[w] = 1; exts[next++] = kWant[w]; }
         free(props);
     }
@@ -824,7 +829,41 @@ static int nvmtl_vk_initialize(void)
     VkPhysicalDeviceExtendedDynamicState3FeaturesEXT dyn3 = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT, g_clip ? (void *)&clipf : (void *)&v11 };
     dyn3.extendedDynamicState3PolygonMode = VK_TRUE;
+    static VkPhysicalDeviceProvokingVertexFeaturesEXT pvf;
+    if (g_dyn3 && have[14]) {
+        PFN_vkGetPhysicalDeviceFeatures2 gpf = (PFN_vkGetPhysicalDeviceFeatures2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFeatures2");
+        VkPhysicalDeviceProvokingVertexFeaturesEXT qpv = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT };
+        VkPhysicalDeviceExtendedDynamicState3FeaturesEXT q3 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT, &qpv };
+        VkPhysicalDeviceFeatures2 qf2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &q3 };
+        if (gpf) gpf(g_pdev, &qf2);
+        g_provoking = qpv.provokingVertexLast && q3.extendedDynamicState3ProvokingVertexMode;
+        if (g_provoking) {
+            dyn3.extendedDynamicState3ProvokingVertexMode = VK_TRUE;
+            pvf = (VkPhysicalDeviceProvokingVertexFeaturesEXT){ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT, dyn3.pNext, VK_TRUE, VK_FALSE };
+            dyn3.pNext = &pvf;
+        }
+    }
     if (g_clip) dyn3.extendedDynamicState3DepthClipEnable = VK_TRUE;
+    /* MTLVertexStepFunctionPerInstance with a stepRate other than 1 is a binding divisor; Metal's base instance is
+       Vulkan's firstInstance, so non-zero first instances must work with it too. */
+    static VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR divf;
+    if (have[15]) {
+        PFN_vkGetPhysicalDeviceFeatures2 gpf = (PFN_vkGetPhysicalDeviceFeatures2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFeatures2");
+        PFN_vkGetPhysicalDeviceProperties2 gpp = (PFN_vkGetPhysicalDeviceProperties2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceProperties2");
+        VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR qd = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR };
+        VkPhysicalDeviceFeatures2 qf2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &qd };
+        VkPhysicalDeviceVertexAttributeDivisorPropertiesKHR dp = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_KHR };
+        VkPhysicalDeviceProperties2 pp = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &dp };
+        if (gpf && gpp) { gpf(g_pdev, &qf2); gpp(g_pdev, &pp); }
+        g_divisor = qd.vertexAttributeInstanceRateDivisor && dp.supportsNonZeroFirstInstance;
+        g_max_divisor = dp.maxVertexAttribDivisor;
+        if (g_divisor) {
+            divf = (VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR){ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR,
+                                                                        v12.pNext, VK_TRUE, VK_FALSE };
+            v12.pNext = &divf;
+        }
+    }
+    nvlog("vk: vertex step rates %s", g_divisor ? "ON (binding divisors)" : "OFF - per-instance data steps once per instance");
     {
         PFN_vkGetPhysicalDeviceFeatures2 gpf2 = (PFN_vkGetPhysicalDeviceFeatures2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFeatures2");
         VkPhysicalDeviceVulkan12Features q12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
@@ -1003,6 +1042,11 @@ static int nvmtl_vk_initialize(void)
         pvkCmdSetPolygonModeEXT = (PFN_vkCmdSetPolygonModeEXT)pvkGetDeviceProcAddr(g_dev, "vkCmdSetPolygonModeEXT");
         if (!pvkCmdSetPolygonModeEXT) { nvlog("vk: the extension is enabled but vkCmdSetPolygonModeEXT is missing — fill mode stays static"); g_dyn3 = 0; }
     }
+    if (g_provoking) {
+        pvkCmdSetProvokingVertexModeEXT = (PFN_vkCmdSetProvokingVertexModeEXT)pvkGetDeviceProcAddr(g_dev, "vkCmdSetProvokingVertexModeEXT");
+        if (!pvkCmdSetProvokingVertexModeEXT) g_provoking = 0;
+    }
+    nvlog("vk: provoking vertex %s", g_provoking ? "dynamic, first or last (Apple GL's setProvokingVertexMode:)" : "first only");
     if (g_clip) {
         pvkCmdSetDepthClipEnableEXT = (PFN_vkCmdSetDepthClipEnableEXT)pvkGetDeviceProcAddr(g_dev, "vkCmdSetDepthClipEnableEXT");
         if (!pvkCmdSetDepthClipEnableEXT) { nvlog("vk: vkCmdSetDepthClipEnableEXT is missing — depth clip mode stays static"); g_clip = 0; }
@@ -1999,18 +2043,30 @@ static int nvmtl_spirv_bmask(const void *p, size_t n, uint64_t out[4])
     const uint32_t *w = (const uint32_t *)p; size_t nw = n / 4;
     memset(out, 0, 4 * sizeof *out);
     if (!p || nw < 5 || w[0] != 0x07230203u) return 0;
+    // the bindless texture heap (set 2, bound once per command buffer) has bindings of its own: its binding 0 is not
+    // the stage's buffer 0, and counting it put every textured draw on the slow descriptor path
+    const uint32_t bound = w[3];
+    uint8_t *heap = bound && bound < (1u << 24) ? (uint8_t *)calloc(bound, 1) : NULL;
+    if (!heap) return 0;
     for (size_t i = 5; i < nw; ) {
         uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
-        if (!wc || i + wc > nw) return 0;
-        if (op == 71 && wc == 4 && w[i + 2] == 33) {
+        if (!wc || i + wc > nw) { free(heap); return 0; }
+        if (op == 71 && wc == 4 && w[i + 2] == 34 && w[i + 3] == 2 && w[i + 1] < bound) heap[w[i + 1]] = 1;
+        i += wc;
+    }
+    int ok = 1;
+    for (size_t i = 5; i < nw; ) {
+        uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
+        if (op == 71 && wc == 4 && w[i + 2] == 33 && !(w[i + 1] < bound && heap[w[i + 1]])) {
             uint32_t b = w[i + 3];
             if (b == NVMTL_ADDRESS_BINDING_NUMBER) out[NVMTL_ADDRESS_BINDING >> 6] |= 1ull << (NVMTL_ADDRESS_BINDING & 63);
             else if (b < NVMTL_ADDRESS_BINDING) out[b >> 6] |= 1ull << (b & 63);
-            else if (!(b >= NVMTL_STEX_BINDING_NUMBER && b < NVMTL_STEX_BINDING_NUMBER + NVMTL_NSTEX)) return 0;
+            else if (!(b >= NVMTL_STEX_BINDING_NUMBER && b < NVMTL_STEX_BINDING_NUMBER + NVMTL_NSTEX)) { ok = 0; break; }
         }
         i += wc;
     }
-    return 1;
+    free(heap);
+    return ok;
 }
 enum { NVMTL_SLOT_NONE = 0, NVMTL_SLOT_BUF, NVMTL_SLOT_TEX, NVMTL_SLOT_SAMP, NVMTL_SLOT_TEXBUF  };
 typedef struct { uint8_t kind; void *h; size_t off; size_t size; uint64_t address; } nvmtl_slot;
@@ -2025,7 +2081,9 @@ static int nvmtl_dirty_only_on(void)
 typedef struct { nvmtl_slot s[2][NVMTL_NBIND];
                  uint8_t dirty[2]; VkDescriptorSet last[2]; unsigned last_idx[2]; uint32_t last_hi[2]; uint64_t lastw[2][4];
                  uint64_t chg[2][4]; uint64_t texgen[2]; const void *emb_fn[2]; uint64_t emb_gen[2]; uint32_t emb_n[2];
-                 uint64_t emb_key[2][NVMTL_EMB_KEYMAX]; } nvmtl_bindtable;
+                 uint64_t emb_key[2][NVMTL_EMB_KEYMAX];
+                 uint32_t lastdyn[2]; void *lasttab[2];
+                 uint64_t lasttb[2][4]; } nvmtl_bindtable;   /* the texel-buffer mask the last set was written with */
 
 static VkDescriptorSetLayout g_setLayout;
 #define NVMTL_MAX_POOLS 64
@@ -2186,6 +2244,7 @@ static void nvmtl_sampler_release(VkSampler handle)
     pthread_mutex_unlock(&g_sampler_intern_lock);
 }
 
+
 static int nvmtl_table_ubo(void)
 {
     static int v = -1;
@@ -2199,7 +2258,6 @@ static int nvmtl_table_ubo(void)
     }
     return v;
 }
-static const uint32_t g_dyn_zero[2] = { 0, 0 };
 static VkDescriptorType binding_type(uint32_t i)
 {
     if (i == NVMTL_ADDRESS_BINDING && nvmtl_table_ubo()) return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
@@ -2481,7 +2539,7 @@ int nvmtl_vk_bind_buffer_offset(nvk_cmdbuf *c, uint32_t set, uint32_t index, siz
     nvmtl_bindtable *t = (nvmtl_bindtable *)c->table;
     if (t->s[set][index].kind != NVMTL_SLOT_BUF) return -1;
     if (offset >= t->s[set][index].size) { nvlog("buffer offset %zu exceeds buffer length %zu", offset, t->s[set][index].size); return -1; }
-    if (t->s[set][index].off != offset) t->dirty[set] = 1;
+    if (t->s[set][index].off != offset) { t->dirty[set] = 1; t->chg[set][index >> 6] |= 1ull << (index & 63); }
     t->s[set][index].off = offset;
     return 0;
 }
@@ -2800,7 +2858,14 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
     VkBufferView tv[NVMTL_NBIND];
     VkDescriptorBufferInfo addressInfo;
     if (!g_mutable) tb = NULL;
-    if (NVMTL_E78_HAS(mask, NVMTL_ADDRESS_BINDING) && nvmtl_address_snapshot(c, which, &addressInfo)) { c->skipped++; return VK_NULL_HANDLE; }
+    uint32_t dyn = 0; void *tab = NULL;
+    if (NVMTL_E78_HAS(mask, NVMTL_ADDRESS_BINDING)) {
+        if (nvmtl_address_snapshot(c, which, &addressInfo)) { c->skipped++; return VK_NULL_HANDLE; }
+        // A dynamic-offset table is described from its page start and located per bind, so a set whose other
+        // descriptors still hold can be bound again with a newer table on the same page (nvmtl_snapshot_set_c).
+        if (nvmtl_table_ubo()) { dyn = (uint32_t)addressInfo.offset; tab = (void *)addressInfo.buffer; addressInfo.offset = 0; }
+    }
+    if (which < 2) { c->dyn_out[which] = dyn; c->tab_out[which] = tab; }
     VkDescriptorBufferInfo dummyB = { (VkBuffer)g_dummyBuf.buf, 0, VK_WHOLE_SIZE };
     VkDescriptorImageInfo  dummyI = { VK_NULL_HANDLE, (VkImageView)g_dummyImg.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkDescriptorImageInfo  dummyS = { g_dummySampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
@@ -2870,16 +2935,48 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
 static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const nvk_pipeline *p)
 {
     nvmtl_bindtable *t = (nvmtl_bindtable *)c->table;
-    if (!t || which > 1 || !nvmtl_enc78_on(NVMTL_E78_H3) || p->tbany) return nvmtl_snapshot_set_t(c, which, p->stex_hi[which], p->tbany ? p->tbm[which] : NULL);
+    if (!t || which > 1 || !nvmtl_enc78_on(NVMTL_E78_H3)) return nvmtl_snapshot_set_t(c, which, p->stex_hi[which], p->tbany ? p->tbm[which] : NULL);
     const uint64_t all[4] = { ~0ull, ~0ull, ~0ull, ~0ull };
     const uint64_t *pm = p->bmask_ok ? p->bmask : (p->gmask_ok && which < 2) ? p->gmask[which] : all;
     uint32_t hi = p->stex_hi[which];
-    int live = t->last[which] && !t->dirty[which] && t->last_idx[which] < c->nsets
+    // A texture binding holds an image or, for a shader that reads a texel buffer there, a texel buffer (the layout's
+    // descriptors are mutable). The last set can be bound again, or copied from, only by a pipeline that reads the same
+    // bindings as texel buffers. WAS: any texel-buffer pipeline rebuilt its whole set for every draw (Sodium's terrain:
+    // ~60k sets a second).
+    static const uint64_t notb[4] = { 0, 0, 0, 0 };
+    const uint64_t *tb = p->tbany ? p->tbm[which] : notb;
+    const int sametb = !memcmp(t->lasttb[which], tb, sizeof notb);
+    int live = sametb && t->last[which] && !t->dirty[which] && t->last_idx[which] < c->nsets
                && (VkDescriptorSet)c->sets[t->last_idx[which]].set == t->last[which];
     if (live && hi <= t->last_hi[which]) {
         int covered = 1;
         for (int k = 0; k < 4; k++) if (pm[k] & ~t->lastw[which][k]) covered = 0;
-        if (covered) { nvmtl_enc78_count(E78C_SETREUSE, 1); return t->last[which]; }
+        if (covered) {
+            c->dyn_out[which] = t->lastdyn[which]; c->tab_out[which] = t->lasttab[which];
+            nvmtl_enc78_count(E78C_SETREUSE, 1); return t->last[which];
+        }
+    }
+    // Only buffer slots changed (Apple's GL rebinds its uniform bytes for every draw). A pipeline that reaches every
+    // buffer through the address table (no buffer binding in its mask) still has all its descriptors in the last set;
+    // what changed is the table. On the same table page that is a new dynamic offset, not a new set.
+    const int was = sametb && t->last[which] && t->dirty[which] && t->last_idx[which] < c->nsets
+                    && (VkDescriptorSet)c->sets[t->last_idx[which]].set == t->last[which];
+    if (was && nvmtl_table_ubo() && hi <= t->last_hi[which] && !(pm[0] & 0xffffffffull)
+        && !(t->chg[which][0] >> 32) && !t->chg[which][1] && !t->chg[which][2] && !t->chg[which][3]) {
+        int covered = 1;
+        for (int k = 0; k < 4; k++) if (pm[k] & ~t->lastw[which][k]) covered = 0;
+        const int table = NVMTL_E78_HAS(pm, NVMTL_ADDRESS_BINDING);
+        const nvmtl_address_page *page = (const nvmtl_address_page *)c->address_pages;
+        const int samePage = !table || (t->lasttab[which] && page && (c->address_count % NVMTL_TABLES_PER_PAGE) != 0
+                                        && (void *)page->buffer.buf == t->lasttab[which]);
+        VkDescriptorBufferInfo ai;
+        if (covered && samePage && (!table || !nvmtl_address_snapshot(c, which, &ai))) {
+            if (table) t->lastdyn[which] = (uint32_t)ai.offset;
+            t->dirty[which] = 0; memset(t->chg[which], 0, sizeof t->chg[which]);
+            c->dyn_out[which] = t->lastdyn[which]; c->tab_out[which] = t->lasttab[which];
+            nvmtl_enc78_count(E78C_SETREUSE, 1);
+            return t->last[which];
+        }
     }
     uint64_t m[4];
     for (int k = 0; k < 4; k++) m[k] = pm[k] | (live ? t->lastw[which][k] : 0);
@@ -2894,9 +2991,11 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
         }
         for (int k = 0; k < 4; k++) cm[k] &= ~t->chg[which][k];
     }
-    VkDescriptorSet s = nvmtl_snapshot_set_md(c, which, hi, m, NULL, from, from ? cm : NULL);
+    VkDescriptorSet s = nvmtl_snapshot_set_md(c, which, hi, m, p->tbany ? tb : NULL, from, from ? cm : NULL);
     if (!s) return s;
     t->last[which] = s; t->last_idx[which] = c->nsets - 1; t->last_hi[which] = hi; t->dirty[which] = 0;
+    memcpy(t->lasttb[which], tb, sizeof notb);
+    t->lastdyn[which] = c->dyn_out[which]; t->lasttab[which] = c->tab_out[which];
     memset(t->chg[which], 0, sizeof t->chg[which]);
     memcpy(t->lastw[which], m, sizeof m);
     nvmtl_enc78_count(E78C_SETNEW, 1);
@@ -3077,6 +3176,59 @@ static VkDescriptorSet nvmtl_fetch_set(nvk_cmdbuf *c, uint32_t mask)
     return set;
 }
 
+/* With framebuffer fetch off (the WindowServer default) a fragment shader that reads [[color(n)]] still has the input
+ * attachment descriptors at set 3, and nothing was bound there: the read was undefined. Core Animation's uber fragment
+ * shader reads color(0..2) at its entry, so every compositor pass that uses it depends on that read. One set, made once,
+ * points every binding at the zeroed dummy image, the same image a fetch pass uses for an attachment it does not have. */
+static VkDescriptorSet nvmtl_fetch_zero_set(void)
+{
+    static VkDescriptorSet zero;
+    if (zero) return zero;
+    if (!g_dummyImg.view) return VK_NULL_HANDLE;
+    pthread_mutex_lock(&g_desc_lock);
+    if (!zero && !nvmtl_fetch_layouts_locked()) {
+        VkDescriptorSet set = VK_NULL_HANDLE; VkResult r = VK_ERROR_OUT_OF_POOL_MEMORY;
+        for (unsigned k = g_nfetchPools; k-- > 0 && r != VK_SUCCESS;) {
+            VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, g_fetchPools[k], 1, &g_fetchLayout };
+            r = pvkAllocateDescriptorSets(g_dev, &ai, &set);
+        }
+        if (r != VK_SUCCESS && g_nfetchPools < 64) {
+            VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, NVMTL_NCOL * 1024 };
+            VkDescriptorPoolCreateInfo pci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 1024, 1, &ps };
+            if (pvkCreateDescriptorPool(g_dev, &pci, NULL, &g_fetchPools[g_nfetchPools]) == VK_SUCCESS) {
+                VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, g_fetchPools[g_nfetchPools++], 1, &g_fetchLayout };
+                r = pvkAllocateDescriptorSets(g_dev, &ai, &set);
+            }
+        }
+        if (r == VK_SUCCESS) {
+            VkDescriptorImageInfo ii[NVMTL_NCOL]; VkWriteDescriptorSet w[NVMTL_NCOL];
+            for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
+                ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, (VkImageView)g_dummyImg.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                w[i] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, NVMTL_FETCH_BINDING + i, 0, 1, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, &ii[i], NULL, NULL };
+            }
+            pvkUpdateDescriptorSets(g_dev, NVMTL_NCOL, w, 0, NULL);
+            zero = set;
+            nvlog("vk: framebuffer fetch is off and a pipeline reads [[color(n)]] - those reads see the dummy image, not an unbound descriptor");
+        }
+    }
+    pthread_mutex_unlock(&g_desc_lock);
+    return zero;
+}
+
+static void nvmtl_bind_graphics_sets(nvk_cmdbuf *c, VkPipelineLayout layout, uint32_t count,
+                                    const VkDescriptorSet *sets, uint32_t offset_count, const uint32_t *offsets)
+{
+    int same = c->graphics_layout == (void *)layout && c->graphics_set_count == count
+        && c->graphics_offset_count == offset_count;
+    for (uint32_t i = 0; same && i < count; i++) same = c->graphics_sets[i] == (void *)sets[i];
+    for (uint32_t i = 0; same && i < offset_count; i++) same = c->graphics_offsets[i] == offsets[i];
+    if (same) return;
+    pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, count, sets, offset_count, offsets);
+    c->graphics_layout = (void *)layout; c->graphics_set_count = count; c->graphics_offset_count = offset_count;
+    for (uint32_t i = 0; i < count; i++) c->graphics_sets[i] = (void *)sets[i];
+    for (uint32_t i = 0; i < offset_count; i++) c->graphics_offsets[i] = offsets[i];
+}
+
 void nvmtl_vk_cmd_bind_set(nvk_cmdbuf *c, nvk_pipeline *p)
 {
     VkDescriptorSet s[3] = { nvmtl_snapshot_set_c(c, 0, p), nvmtl_snapshot_set_c(c, 1, p), g_heapSet };
@@ -3085,10 +3237,15 @@ void nvmtl_vk_cmd_bind_set(nvk_cmdbuf *c, nvk_pipeline *p)
     if (g_sample_locations && c->sample_pattern.count)
         pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_SAMPLE_POSITION_OFFSET,
                            NVMTL_SAMPLE_POSITION_BYTES, c->sample_pattern.position);
-    pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipelineLayout)p->layout, 0, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, g_dyn_zero);
+    nvmtl_bind_graphics_sets(c, (VkPipelineLayout)p->layout, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, c->dyn_out);
     c->semu_layout = p->stencil_emu ? p->layout : NULL;
     c->fetch_draw = 0;
     if (p->skip_draws) { c->nobind = 1; return; }
+    if (p->fetch_zero) {
+        VkDescriptorSet zs = nvmtl_fetch_zero_set();
+        if (zs) pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipelineLayout)p->layout, NVMTL_FETCH_SET, 1, &zs, 0, NULL);
+        else { static int said; if (said++ < 4) nvlog("vk: no descriptor set for the [[color(n)]] reads of a pipeline with fetch off - they stay undefined"); }
+    }
     if (p->fetch_mask && c->in_rp) {
         VkDescriptorSet fs = nvmtl_fetch_set(c, p->fetch_mask);
         if (!fs) { static int said; if (said++ < 4) nvlog("vk: framebuffer fetch set could not be made (mask 0x%x) - this draw is skipped", p->fetch_mask); c->nobind = 1; return; }
@@ -3328,9 +3485,10 @@ static VkFormat nvmtl_vertex_vkformat(uint32_t mtl, int kind)
     return v;
 }
 static int nvmtl_vertex_input_build(const nvk_vertex_input *vin, const void *vs, size_t vn, VkVertexInputBindingDescription *vib, uint32_t *nvib,
-                                    VkVertexInputAttributeDescription *via, uint32_t *nvia, uint32_t *mask, uint32_t *dyn, uint32_t stv[32])
+                                    VkVertexInputAttributeDescription *via, uint32_t *nvia, VkVertexInputBindingDivisorDescriptionKHR *vdiv,
+                                    uint32_t *ndiv, uint32_t *mask, uint32_t *dyn, uint32_t stv[32])
 {
-    *nvib = *nvia = *mask = *dyn = 0; memset(stv, 0, 32 * sizeof *stv);
+    *nvib = *nvia = *ndiv = *mask = *dyn = 0; memset(stv, 0, 32 * sizeof *stv);
     uint8_t kind[32]; nvmtl_spv_input_kinds(vs, vn, kind);
     uint32_t described = 0;
     for (uint32_t k = 0; vin && k < vin->nattr && k < NVMTL_NVIN; k++) {
@@ -3347,8 +3505,12 @@ static int nvmtl_vertex_input_build(const nvk_vertex_input *vin, const void *vs,
         if (stride == NVMTL_STRIDE_DYNAMIC) { *dyn |= 1u << buf; stride = 0; }
         stv[buf] = stride;
         if (step > 2) { nvlog("G16 pipeline: vertex step function %u (per patch) is tessellation — not carried", step); return -1; }
-        if (step == 2 && vin->layout[buf].rate != 1) { static int said; if (said++ < 4) nvlog("G16 pipeline: per-instance step rate %u needs "
-            "VK_EXT_vertex_attribute_divisor, which is not wired — stepping once per instance", vin->layout[buf].rate); }
+        const uint32_t rate = vin->layout[buf].rate;
+        if (step == 2 && rate != 1) {
+            if (g_divisor && rate && rate <= g_max_divisor) vdiv[(*ndiv)++] = (VkVertexInputBindingDivisorDescriptionKHR){ buf, rate };
+            else { static int said; if (said++ < 4) nvlog("G16 pipeline: per-instance step rate %u needs VK_KHR_vertex_attribute_divisor "
+                "(%s) — stepping once per instance", rate, g_divisor ? "beyond its limit" : "absent"); }
+        }
         vib[*nvib] = (VkVertexInputBindingDescription){ buf, stride, step == 2 ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX }; (*nvib)++;
     }
     for (uint32_t l = 0; l < NVMTL_NVIN; l++) if (kind[l] && !(described & (1u << l))) { static int said; if (said++ < 8)
@@ -3880,8 +4042,9 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
               td->stepfn, td->scale_en, td->cpidx, (double)td->maxf, nvb, (int)pidloc, (int)td->inst_loc);
     }
     VkVertexInputBindingDescription vib[NVMTL_NVIN]; VkVertexInputAttributeDescription via[NVMTL_NVIN]; uint32_t nvib = 0, nvia = 0;
+    VkVertexInputBindingDivisorDescriptionKHR vdiv[NVMTL_NVIN]; uint32_t ndiv = 0;
     out->vin_dyn = 0;
-    if (!td && nvmtl_vertex_input_build(vin, vs, vn, vib, &nvib, via, &nvia, &out->vin_mask, &out->vin_dyn, out->vin_stride)) return -1;
+    if (!td && nvmtl_vertex_input_build(vin, vs, vn, vib, &nvib, via, &nvia, vdiv, &ndiv, &out->vin_mask, &out->vin_dyn, out->vin_stride)) return -1;
     if (out->vin_dyn && !pvkCmdBindVertexBuffers2) { nvlog("apps-dyn pipeline: layout(s) %#x are MTLBufferLayoutStrideDynamic and "
         "vkCmdBindVertexBuffers2 is not loaded — REFUSED", out->vin_dyn); return -1; }
     int hasDepth = rt->dfmt != 0;
@@ -3928,7 +4091,8 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     VkDescriptorSetLayout sl2[4] = { g_setLayout, g_setLayout, g_heapLayout, VK_NULL_HANDLE };
     uint32_t nsl = g_heapSet ? 3 : 2;
     out->fetch_mask = nvmtl_fbfetch_on() ? nvmtl_spirv_fetch_mask(fs, fn) : 0;
-    if (out->fetch_mask) {
+    out->fetch_zero = nvmtl_fbfetch_on() ? 0 : nvmtl_spirv_fetch_mask(fs, fn);
+    if (out->fetch_mask || out->fetch_zero) {
         pthread_mutex_lock(&g_desc_lock); const int fl = nvmtl_fetch_layouts_locked(); pthread_mutex_unlock(&g_desc_lock);
         if (fl) { nvlog("vk: framebuffer fetch layouts could not be made - pipeline refused"); return -1; }
         if (!g_heapSet) sl2[2] = g_emptyLayout;
@@ -3948,46 +4112,31 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, nsl, sl2, npc, npc ? pc : NULL };
     NVMTL_PIPELINE_STAGE(nvmtl_opaque_CreatePipelineLayout(g_dev, &plci, NULL, &out->layout), "vkCreatePipelineLayout");
 
-    VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, NULL, 0, nvib, vib, nvia, via };
+    VkPipelineVertexInputDivisorStateCreateInfoKHR vdi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_KHR, NULL, ndiv, vdiv };
+    VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, ndiv ? &vdi : NULL, 0, nvib, vib, nvia, via };
     VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, NULL, 0,
         td ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_FALSE };
     VkPipelineTessellationStateCreateInfo tss = { VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO, NULL, 0, 1 };
     VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, NULL, 0, 1, NULL, 1, NULL };
-    VkDynamicState dyn[16] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE,
+    // At most 23 states with stencil, dynamic vertex stride, line width, sample locations and dynamic-state3.
+    VkDynamicState dyn[24] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE,
         VK_DYNAMIC_STATE_BLEND_CONSTANTS, VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_DEPTH_BIAS,
         VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY, VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE, VK_DYNAMIC_STATE_FRONT_FACE,
         VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE, VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
         VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_OP, VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK };
-    VkPipelineDynamicStateCreateInfo dsci = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, NULL, 0,
-        hasDepth ? (out->has_stencil ? 16u : 12u) : 9u, dyn };
-    VkDynamicState dyn3s[18];
+    uint32_t ndyn = hasDepth ? (out->has_stencil ? 16u : 12u) : 9u;
+    dyn[ndyn++] = VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE; // core Vulkan 1.3, like primitive-restart enable
     if (g_dyn3) {
-        uint32_t n3 = 0;
-        for (uint32_t i = 0; i < (hasDepth ? (out->has_stencil ? 16u : 12u) : 9u); i++) dyn3s[n3++] = dyn[i];
-        dyn3s[n3++] = VK_DYNAMIC_STATE_POLYGON_MODE_EXT;
-        if (g_clip) dyn3s[n3++] = VK_DYNAMIC_STATE_DEPTH_CLIP_ENABLE_EXT;
-        dsci.pDynamicStates = dyn3s; dsci.dynamicStateCount = n3;
+        dyn[ndyn++] = VK_DYNAMIC_STATE_POLYGON_MODE_EXT;
+        if (g_provoking) dyn[ndyn++] = VK_DYNAMIC_STATE_PROVOKING_VERTEX_MODE_EXT;
+        if (g_clip) dyn[ndyn++] = VK_DYNAMIC_STATE_DEPTH_CLIP_ENABLE_EXT;
     }
-    VkDynamicState dynv[20];
-    if (out->vin_dyn) {
-        uint32_t nv = 0;
-        for (uint32_t i = 0; i < dsci.dynamicStateCount; i++) dynv[nv++] = dsci.pDynamicStates[i];
-        dynv[nv++] = VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE;
-        dsci.pDynamicStates = dynv; dsci.dynamicStateCount = nv;
-    }
-    VkDynamicState dynl[21];
-    if (g_wide) {
-        uint32_t nl = 0;
-        for (uint32_t i = 0; i < dsci.dynamicStateCount; i++) dynl[nl++] = dsci.pDynamicStates[i];
-        dynl[nl++] = VK_DYNAMIC_STATE_LINE_WIDTH;
-        dsci.pDynamicStates = dynl; dsci.dynamicStateCount = nl;
-    }
-    VkDynamicState dynsample[22];
-    if (g_sample_locations && samples > 1) {
-        for (uint32_t i = 0; i < dsci.dynamicStateCount; ++i) dynsample[i] = dsci.pDynamicStates[i];
-        dynsample[dsci.dynamicStateCount++] = VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_EXT;
-        dsci.pDynamicStates = dynsample;
-    }
+    if (out->vin_dyn) dyn[ndyn++] = VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE;
+    if (g_wide) dyn[ndyn++] = VK_DYNAMIC_STATE_LINE_WIDTH;
+    if (g_sample_locations && samples > 1) dyn[ndyn++] = VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_EXT;
+    VkPipelineDynamicStateCreateInfo dsci = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, NULL, 0, ndyn, dyn };
+    // Metal has no depth-bias enable switch. Enable it dynamically for nonzero bias, keeping the ordinary zero-bias
+    // path disabled rather than making every pipeline use depth bias, and reset it for every new Metal encoder.
     VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, NULL, 0,
         VK_FALSE, rt->discard ? VK_TRUE : VK_FALSE, VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE, VK_FALSE, 0, 0, 0, 1.0f };
     if (rt->a2one && !g_a2one) { nvlog("pipeline REFUSED: alphaToOneEnabled and this device has no alphaToOne feature"); goto pipeline_failed; }
@@ -4308,7 +4457,7 @@ void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_
         VkPipeline vp = nvmtl_compute_variant(p, local);
         if (!vp) { c->skipped++; continue; }
         pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, vp);
-        if (!bound) { pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipelineLayout)p->layout, 0, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, g_dyn_zero); bound = 1; }
+        if (!bound) { pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipelineLayout)p->layout, 0, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, c->dyn_out); bound = 1; }
         // Metal allows any group count per axis; Vulkan caps it (NVK: 0x7fffffff x 65535 x 65535, the width of the QMD
         // grid fields). Geekbench's OpenCL Face Detection dispatched past 65535 on y and NAK's nak_fill_qmd aborted the
         // process. Split into chunks and advance thread_base/threadgroup_base, which the translated kernel adds to
@@ -4345,7 +4494,7 @@ void nvmtl_vk_cmd_dispatch_indirect_tg(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffe
     c->nobind = 0;
     (void)g;   // the grid is the GPU's to write: never read at record time (it was stale or 0, Eevee's light culling)
     pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, vp);
-    pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipelineLayout)p->layout, 0, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, g_dyn_zero);
+    pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipelineLayout)p->layout, 0, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, c->dyn_out);
     // 0x80000000 | threadgroup size: the shader takes threads_per_grid and threadgroups_per_grid from NumWorkgroups
     // (translator stage_input/kernel_grid.rs), the grid the GPU actually dispatched
     const uint32_t F = 0x80000000u;
@@ -4360,7 +4509,7 @@ void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t
                              nvmtl_snapshot_set_t(c, 1, p->stex_hi[1], p->tbany ? p->tbm[1] : NULL), g_heapSet };
     if (!s[0] || !s[1]) { c->nobind = 1; return; }
     c->nobind = 0;
-    pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipelineLayout)p->layout, 0, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, g_dyn_zero);
+    pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipelineLayout)p->layout, 0, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, c->dyn_out);
     // This path reads WorkgroupId raw (no base push constants), so it cannot be chunked. Past the device's group
     // count NAK aborts the whole app inside nak_fill_qmd; refuse the one dispatch loudly instead.
     if ((g_lim.maxComputeWorkGroupCount[1] && gy > g_lim.maxComputeWorkGroupCount[1]) ||
@@ -4774,7 +4923,7 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
     pvkCmdBeginRenderPass(c->cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     c->in_rp = 1;
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) c->fetchview[i] = (i < ncol && cf[i]) ? ps->colview[i] : NULL;
-    if (p->pipe) pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p->pipe);
+    if (p->pipe) nvmtl_vk_cmd_bind_pipeline(c, p);
     VkViewport vp = { 0, (float)ps->h, (float)ps->w, -(float)ps->h, 0, 1 }; VkRect2D sc = { { 0, 0 }, { ps->w, ps->h } };
     pvkCmdSetViewport(c->cb, 0, 1, &vp); pvkCmdSetScissor(c->cb, 0, 1, &sc);
     return 0;
@@ -5241,7 +5390,11 @@ void nvmtl_vk_cmd_draw(nvk_cmdbuf *c, uint32_t first, uint32_t count, uint32_t i
 }
 void nvmtl_vk_cmd_set_scissor(nvk_cmdbuf *c, int32_t x, int32_t y, uint32_t w, uint32_t h)
 { VkRect2D r = { { x, y }, { w, h } }; pvkCmdSetScissor(c->cb, 0, 1, &r); }
-void nvmtl_vk_cmd_bind_pipeline(nvk_cmdbuf *c, nvk_pipeline *p) { pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipeline)p->pipe); }
+void nvmtl_vk_cmd_bind_pipeline(nvk_cmdbuf *c, nvk_pipeline *p) {
+    if (p->pipe && c->graphics_pipeline == p->pipe) return;
+    pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipeline)p->pipe);
+    c->graphics_pipeline = p->pipe;
+}
 int nvmtl_vk_cmd_set_topology(nvk_cmdbuf *c, unsigned mtlType) {
     static const VkPrimitiveTopology map[5] = { VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
         VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP };
@@ -5251,7 +5404,7 @@ int nvmtl_vk_cmd_set_topology(nvk_cmdbuf *c, unsigned mtlType) {
         "dynamicPrimitiveTopologyUnrestricted, which this device does not report — NOT drawn (was: rasterised as triangles)"); return -1; }
     c->topo = mtlType;
     pvkCmdSetPrimitiveTopology(c->cb, map[mtlType]);
-    pvkCmdSetPrimitiveRestartEnable(c->cb, (mtlType == 2 || mtlType == 4) ? VK_TRUE : VK_FALSE);
+    pvkCmdSetPrimitiveRestartEnable(c->cb, (mtlType == 2 || mtlType == 4) && !c->restart_off ? VK_TRUE : VK_FALSE);
     if (mtlType != 3) { static int told[5]; if (!told[mtlType]++) nvlog("G14 first draw of MTLPrimitiveType %u in this process", mtlType); }
     return 0;
 }
@@ -5329,7 +5482,10 @@ void nvmtl_vk_cmd_set_stencil(nvk_cmdbuf *c, int enable, const uint32_t *f, cons
     }
 }
 void nvmtl_vk_cmd_set_depth_bias(nvk_cmdbuf *c, float constant, float slope, float clamp)
-{ pvkCmdSetDepthBias(c->cb, constant, clamp, slope); }
+{
+    pvkCmdSetDepthBiasEnable(c->cb, constant != 0.0f || slope != 0.0f);
+    pvkCmdSetDepthBias(c->cb, constant, clamp, slope);
+}
 void nvmtl_vk_cmd_set_line_width(nvk_cmdbuf *c, float w)
 {
     if (!g_wide) return;
@@ -6616,6 +6772,12 @@ int nvmtl_vk_bind_storage_view(nvk_cmdbuf *c, uint32_t set, uint32_t index, void
 }
 
 int nvmtl_vk_have_polygon_mode(void) { return g_dyn3; }
+int nvmtl_vk_have_provoking_last(void) { return g_provoking; }
+void nvmtl_vk_cmd_set_provoking_last(nvk_cmdbuf *c, int last)
+{
+    if (g_provoking)
+        pvkCmdSetProvokingVertexModeEXT(c->cb, last ? VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT : VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT);
+}
 int nvmtl_vk_cmd_set_polygon_mode(nvk_cmdbuf *c, int line)
 {
     if (!g_dyn3 || !pvkCmdSetPolygonModeEXT) return -1;

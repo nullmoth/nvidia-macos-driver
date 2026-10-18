@@ -1457,6 +1457,29 @@ static unsigned nvAccelSurfDirty(void *cache, NVResource *res, unsigned plane)
     { NVVidMemory *vm = nvres_vidmem(res); res->fPluginWroteCookie = vm ? vm->fAllocationCookie : 0; }
     return 0;
 }
+// The caller holds the accelerator family lock. The plugin can still write a
+// retained allocation after the family unwires it; make that same backing active
+// before marking the GPU copy current. Never allocate fresh memory for this case.
+static bool nvAccelRestoreParkedForDirty(NVResource *res, NVVidMemory *vm, unsigned plane)
+{
+    if (!res || !vm || vm->fRmHandle || !vm->fParkHandle) return true;
+    const volatile unsigned char *r = (const volatile unsigned char *)res;
+    const unsigned flags = *(const volatile unsigned *)(r + 0xc);
+    const volatile unsigned short *valid = *(unsigned short *volatile const *)(r + 0x30);
+    const unsigned long long want = *(const volatile unsigned long long *)((const unsigned char *)vm + 0x40);
+    if (vm->fScanout || r[0x14] != 0xc0 || (flags & 0x8000) || !valid || plane > 15 ||
+        !want || vm->fParkBytes < want || !vm->fParkPhys || !vm->fParkKva)
+        return true;  // Preserve the original refusal and CPU-copy fallback.
+    void *const handle = vm->fParkHandle;
+    void *const mapping = vm->fParkKva;
+    const unsigned long long bytes = vm->fParkBytes, phys = vm->fParkPhys, cookie = vm->fParkCookie;
+    // IOAccelVidMemory::wire calls allocPhysical and updates family accounting;
+    // it does not page CPU pixels in. The size check above selects allocPhysical's
+    // retained-allocation branch, which moves the existing backing without copying.
+    _ZN16IOAccelVidMemory4wireEv(vm);
+    return vm->fRmHandle == handle && vm->fKva == mapping && vm->fPhys == phys &&
+        vm->fBytes == bytes && vm->fAllocationCookie == cookie && !vm->fParkHandle;
+}
 // The marks arrive through NVK's surface escape (NVRM_ESC_SURF_DIRTY with plane NVRM_SS_PLANE_GPU_MARK | pending): the
 // WindowServer sandbox denies sysctl writes. Only WindowServer's own marks are taken, so no other process can hold a swap.
 static unsigned nvSurfGpuEscape(const struct NVRMSurfShareEsc *p)
@@ -1498,7 +1521,9 @@ static IOReturn nvAccelSurfVram(struct NVRMSurfShareEsc *p, task_t task, unsigne
     NVResource *res = OSDynamicCast(NVResource, ctx);
     NVVidMemory *vm = res ? nvres_vidmem(res) : nullptr;
     if (cmd == NVRM_ESC_SURF_DIRTY) {
-        p->status = (cache && res && vm && vm->fRmHandle) ? nvAccelSurfDirty(cache, res, p->plane) : NVRM_SS_NO_CACHE;
+        const bool sameBacking = nvAccelRestoreParkedForDirty(res, vm, p->plane);
+        p->status = (sameBacking && cache && res && vm && vm->fRmHandle)
+            ? nvAccelSurfDirty(cache, res, p->plane) : NVRM_SS_NO_CACHE;
         if (p->status == 0) gNVSVDirty++; else gNVSVDirtyRefused++;
         if (nvSVDiag()) ALOG("SVDIAG dirty surface %u plane %u -> %#x (cache %d res %d vm %d)", p->surfaceID, p->plane, p->status,
                              cache ? 1 : 0, res ? 1 : 0, (vm && vm->fRmHandle) ? 1 : 0);
