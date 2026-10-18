@@ -263,6 +263,25 @@ extern "C" { void *nv_pm_alias(NvU64, NvU64, void **); void nv_pm_alias_drop(voi
 #define NV_XNU_MAX_MAPS 8192
 static nv_xnu_map nv_xnu_maps[NV_XNU_MAX_MAPS];
 static unsigned nv_xnu_maps_high;
+// Two writers used to be able to pick the same free slot, and a release could clear an entry while a lookup
+// was reading it, which is a double release of the same map or a lookup over a freed one. The writers
+// (os_map_kernel_space, os_unmap_kernel_space) are the only paths that allocate or clear a slot and both run
+// in thread context, so a mutex serialises them. The lookups, by contrast, are also reached from the
+// framebuffer's interrupt path, where a mutex is not allowed, so they stay lock-free and are made safe by
+// ordering instead: a slot's va is published LAST with a release store and cleared FIRST on teardown, so a
+// lookup that sees a va sees the rest of that entry fully written, and never reads an entry being freed.
+static IOLock *nv_xnu_maps_lock;
+extern "C" bool nv_xnu_maps_init(void)
+{
+    if (!nv_xnu_maps_lock) nv_xnu_maps_lock = IOLockAlloc();
+    return nv_xnu_maps_lock != NULL;
+}
+static inline void nv_xnu_map_publish(nv_xnu_map *m, IOMemoryDescriptor *md, IOMemoryMap *map,
+                                      void *va, NvU64 phys, NvU64 size, void *alias)
+{
+    m->md = md; m->map = map; m->phys = phys; m->size = size; m->alias = alias;
+    __atomic_store_n(&m->va, va, __ATOMIC_RELEASE);
+}
 void *NV_API_CALL os_map_kernel_space(NvU64 start, NvU64 size, NvU32 mode)
 {
     IOOptionBits cache = (mode == NV_MEMORY_CACHED) ? kIOMapDefaultCache : (mode == NV_MEMORY_WRITECOMBINED ? kIOMapWriteCombineCache : kIOMapInhibitCache);
@@ -270,11 +289,13 @@ void *NV_API_CALL os_map_kernel_space(NvU64 start, NvU64 size, NvU32 mode)
     if (!nv_pm_is_gpu(start, size)) {
         void *cookie = NULL; void *ava = nv_pm_alias(start, size, &cookie);
         if (ava) {
+            IOLockLock(nv_xnu_maps_lock);
             for (int i = 0; i < NV_XNU_MAX_MAPS; i++) if (nv_xnu_maps[i].va == NULL) {
-                nv_xnu_maps[i] = { NULL, NULL, ava, start, size, cookie };
+                nv_xnu_map_publish(&nv_xnu_maps[i], NULL, NULL, ava, start, size, cookie);
                 if ((unsigned)i + 1 > nv_xnu_maps_high) nv_xnu_maps_high = (unsigned)i + 1;
-                return ava;
+                break;
             }
+            IOLockUnlock(nv_xnu_maps_lock);
             return ava;
         }
         nv_pm_foreign(start, size, mode, __builtin_return_address(0));
@@ -285,13 +306,17 @@ void *NV_API_CALL os_map_kernel_space(NvU64 start, NvU64 size, NvU32 mode)
     if (md && !map) { kprintf("NVRM-xnu:   md->map(cache=0x%x) FAILED\n", (unsigned)cache); md->release(); md = NULL; }
     void *va = map ? (void *)map->getVirtualAddress() : NULL;
     if (!va) return NULL;
+    IOLockLock(nv_xnu_maps_lock);
     for (int i = 0; i < NV_XNU_MAX_MAPS; i++) if (nv_xnu_maps[i].va == NULL) {
-        nv_xnu_maps[i] = { md, map, va, start, size };
+        nv_xnu_map_publish(&nv_xnu_maps[i], md, map, va, start, size, NULL);
         if ((unsigned)i + 1 > nv_xnu_maps_high) nv_xnu_maps_high = (unsigned)i + 1;
+        const unsigned high = nv_xnu_maps_high;
+        IOLockUnlock(nv_xnu_maps_lock);
         kprintf("NVRM-xnu:   mapped -> 0x%llx (slot %d, high water %u/%u)\n",
-                (unsigned long long)(uintptr_t)va, i, nv_xnu_maps_high, (unsigned)NV_XNU_MAX_MAPS);
+                (unsigned long long)(uintptr_t)va, i, high, (unsigned)NV_XNU_MAX_MAPS);
         return va;
     }
+    IOLockUnlock(nv_xnu_maps_lock);
     {
         static bool warned;
         if (!warned) { warned = true;
@@ -306,22 +331,36 @@ NvU64 nv_xnu_phys_for_kernel_va(const void *va)
 {
     // Lookups stop at the high-water mark (every slot ever filled is below it), so a larger table costs nothing
     // until it is actually used.
-    for (unsigned i = 0; i < nv_xnu_maps_high; i++) if (nv_xnu_maps[i].va && (const char *)va >= (const char *)nv_xnu_maps[i].va && (const char *)va < (const char *)nv_xnu_maps[i].va + nv_xnu_maps[i].size)
-        return nv_xnu_maps[i].phys + ((const char *)va - (const char *)nv_xnu_maps[i].va);
+    for (unsigned i = 0; i < nv_xnu_maps_high; i++) {
+        const char *base = (const char *)__atomic_load_n(&nv_xnu_maps[i].va, __ATOMIC_ACQUIRE);
+        if (base && (const char *)va >= base && (const char *)va < base + nv_xnu_maps[i].size)
+            return nv_xnu_maps[i].phys + ((const char *)va - base);
+    }
     return 0;
 }
 void NV_API_CALL os_unmap_kernel_space(void *va, NvU64 size)
 { NV_XNU_TRC;
+    IOLockLock(nv_xnu_maps_lock);
     for (unsigned i = 0; i < nv_xnu_maps_high; i++) if (nv_xnu_maps[i].va == va) {
-        if (nv_xnu_maps[i].alias) nv_pm_alias_drop(nv_xnu_maps[i].alias);
-        else { nv_xnu_maps[i].map->release(); nv_xnu_maps[i].md->release(); }
-        nv_xnu_maps[i] = { NULL, NULL, NULL, 0, 0, NULL }; return;
+        // The va goes first, so a lookup running beside this never walks into an entry being torn down.
+        __atomic_store_n(&nv_xnu_maps[i].va, (void *)NULL, __ATOMIC_RELEASE);
+        IOMemoryDescriptor *md = nv_xnu_maps[i].md; IOMemoryMap *map = nv_xnu_maps[i].map;
+        void *alias = nv_xnu_maps[i].alias;
+        nv_xnu_maps[i].md = NULL; nv_xnu_maps[i].map = NULL; nv_xnu_maps[i].alias = NULL;
+        nv_xnu_maps[i].phys = 0; nv_xnu_maps[i].size = 0;
+        IOLockUnlock(nv_xnu_maps_lock);
+        if (alias) nv_pm_alias_drop(alias);
+        else { if (map) map->release(); if (md) md->release(); }
+        return;
     }
+    IOLockUnlock(nv_xnu_maps_lock);
 }
 int nv_xnu_kmap_overlap(NvU64 phys, NvU64 len)
 {
-    for (unsigned i = 0; i < nv_xnu_maps_high; i++)
-        if (nv_xnu_maps[i].va && !nv_xnu_maps[i].alias && phys < nv_xnu_maps[i].phys + nv_xnu_maps[i].size && nv_xnu_maps[i].phys < phys + len) return 1;
+    for (unsigned i = 0; i < nv_xnu_maps_high; i++) {
+        if (!__atomic_load_n(&nv_xnu_maps[i].va, __ATOMIC_ACQUIRE) || nv_xnu_maps[i].alias) continue;
+        if (phys < nv_xnu_maps[i].phys + nv_xnu_maps[i].size && nv_xnu_maps[i].phys < phys + len) return 1;
+    }
     return 0;
 }
 void  NV_API_CALL os_io_write_byte(NvU32 addr, NvU8 v)   { NV_XNU_TRC; __asm__ __volatile__("outb %0, %1" :: "a"(v), "d"((NvU16)addr)); }
