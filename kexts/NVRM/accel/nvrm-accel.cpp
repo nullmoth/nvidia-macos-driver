@@ -1504,7 +1504,10 @@ static IOReturn nvAccelSurfVram(struct NVRMSurfShareEsc *p, task_t task, unsigne
     // waiting for one of those marks holds the accelerator lock, so that re-mark must not wait for the lock: it is
     // dropped instead, and the mark taken at commit stands.
     const bool tryOnly = cmd == NVRM_ESC_SURF_DIRTY && (p->plane & NVRM_SS_PLANE_TRYLOCK);
-    p->plane &= ~NVRM_SS_PLANE_TRYLOCK;
+    p->plane &= ~(NVRM_SS_PLANE_TRYLOCK | NVRM_SS_PLANE_GPU_MARK);
+    // plane is a full uint32 from the caller and reaches IOGraphicsAccelerator2::deviceCacheForIOSurface
+    // below. The plane > 15 refusals further down run after that call, and only on the dirty path.
+    if (p->plane > 15) { p->status = NVRM_SS_NO_CACHE; return kIOReturnSuccess; }
     NVAccel *a = NVAccel::gAccel;
     struct NVRMRmHandles h; nvSVZero(&h, sizeof h);
     if (!task || !a || !nvAccelRmHandles(&h)) { p->status = NVRM_SS_OFF; return kIOReturnSuccess; }
