@@ -189,6 +189,23 @@ check('the two lookups take no mutex (they run in the interrupt path) and read t
       'IOLock' not in _lookup and 'IOLock' not in _overlap
       and _lookup.count('__ATOMIC_ACQUIRE') == 1 and _overlap.count('__ATOMIC_ACQUIRE') == 1)
 
+# Whether a function needs its linked visible functions was decided by reading the translator's error text.
+# The translator's wording changed, nothing matched, the function came back nil, and the system's icon and
+# glass shaders drew nothing. The decision now asks the translator for the references, with the old wordings
+# only as a fallback for a translator that cannot answer.
+_vl = lib.split('BOOL nvmtl_needs_visible_link(NSString *air, NSString *why)\n{')[1].split('\n}\n')[0] \
+      if 'BOOL nvmtl_needs_visible_link(NSString *air, NSString *why)\n{' in lib else ''
+check('deferring a function to pipeline creation asks the translator for its visible references first',
+      bool(_vl) and _vl.index('xlate_vrefs(') < _vl.index('rangeOfString:')
+      and 'no linked function supplies it' in _vl)
+check('no caller decides it from the error text any more',
+      obj.count('nvmtl_needs_visible_link(_airs[name]') == 2
+      and 'rangeOfString:@"visible function reference"' not in obj
+      and 'rangeOfString:@"Metal visible function table"' not in obj)
+check('the expected first attempt is not logged as a failure, and only on the path that defers',
+      'static __thread int g_fc_expect_link;' in lib
+      and obj.count('nvmtl_fc_expect_link(1);') == 1 and obj.count('nvmtl_fc_expect_link(0);') == 1)
+
 # Moving the firmware broke the way out. Both restore paths are gated on $BK/nvfw, and on an upgrade
 # the new location does not exist yet, so a backup that only looked there saved nothing and the
 # boot-guard fallback restored the previous driver with no firmware at all - a dark Mac, no recovery.

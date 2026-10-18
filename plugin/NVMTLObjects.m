@@ -1592,6 +1592,8 @@ static uint32_t nvmtl_tex_attach_vkfmt(NVMTLTexture *t, int *a8) {
 
 NSArray<NSDictionary *> *nvmtl_argbuf_fields(NVMTLFunction *function, NSUInteger ownerBufferIndex);
 NSArray<NSDictionary *> *nvmtl_air_argbuf_layout(NVMTLFunction *fn, NSUInteger bufferIndex, NSUInteger *size, NSUInteger *align);
+BOOL nvmtl_needs_visible_link(NSString *air, NSString *why);
+void nvmtl_fc_expect_link(int on);
 NSData *nvmtl_translate_with_fc(NSString *air, NSString *stage, const uint32_t *idx, const uint32_t *sizes,
                                 const uint8_t *const *payloads, size_t n, NSString **err);
 NSData *nvmtl_translate_with_fc_cached(NSString *air, NSString *stage, NSString *name, NSDictionary *constants,
@@ -2347,8 +2349,7 @@ extern NSData *nvmtl_compile_library_entry(NSData *, NSString *, NSString *, NSS
         f->_air = _airs[name]; f->_lib = self; f->_needsLink = YES; return f;
     }
     if (spv) { NSError *te = nil; NSData *es = [self nvmtlEntrySpirv:name error:&te];
-        if (!es && _airs[name] && ([te.localizedDescription rangeOfString:@"Metal visible function table"].location != NSNotFound
-                                   || [te.localizedDescription rangeOfString:@"visible function reference"].location != NSNotFound)) {
+        if (!es && _airs[name] && nvmtl_needs_visible_link(_airs[name], te.localizedDescription)) {
             nvlog("library: \"%s\" calls a visible function (by reference or table) - DEFERRED to pipeline creation", name.UTF8String);
             NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = nil; f->_fname = name; f->_stage = (_stages[name] ?: @"");
             f->_air = _airs[name]; f->_lib = self; f->_needsLink = YES; return f;
@@ -2472,8 +2473,10 @@ static size_t nvmtl_fc_width(NSUInteger dataType)
         NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = nil; f->_fc = [constants copy]; f->_fname = name; f->_stage = _stages[name];
         f->_air = _airs[name]; f->_lib = self; f->_fcv = cv; return f;
     }
+    nvmtl_fc_expect_link(1);
     NSData *spec = nvmtl_translate_with_fc_cached(_airs[name], _stages[name], name, constants, idx, sz, pay, n, &e);
-    if (!spec && ([e rangeOfString:@"visible function reference"].location != NSNotFound || [e rangeOfString:@"Metal visible function table"].location != NSNotFound) && _airs[name]) {
+    nvmtl_fc_expect_link(0);
+    if (!spec && _airs[name] && nvmtl_needs_visible_link(_airs[name], e)) {
         nvlog("newFunctionWithName:constantValues: \"%s\" has visible-function references - DEFERRED to pipeline creation (%zu constant(s))", name.UTF8String, n);
         if (error) *error = nil;
         NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = nil; f->_fc = [constants copy]; f->_fname = name; f->_stage = (_stages[name] ?: @"");
