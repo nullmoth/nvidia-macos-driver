@@ -42,7 +42,6 @@ extern "C" int nvrm_kapi_dev_handles(const void *dev, unsigned int *c, unsigned 
 
 static bool nvGpuVaResolve(struct NVRMGpuVaRequest *r)
 {
-    if (r->hClient && r->hDevice) return true;
     unsigned int c = 0, d = 0, sd = 0;
     if (!nvrm_kapi_dev_handles(r->kapiDevice, &c, &d, &sd) || !c || !d) {
         GVLOG("no RM handles: kapiDevice %p", r->kapiDevice);

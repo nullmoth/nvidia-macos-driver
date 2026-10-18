@@ -988,8 +988,8 @@ bool NVRMNVDAFramebuffer::kapiInit()
         NvU64 userPhys   = 0;
         if (fKms->mapMemory(fDev, fMem, NVKMS_KAPI_MAPPING_TYPE_USER, &fUserPhys) && fUserPhys)
             userPhys = (NvU64)(uintptr_t)fUserPhys;
-        FBLOG("%s: kva %p contiguous %u kernelPhys 0x%llx userPhys 0x%llx %s",
-              what, fKva, (unsigned)contig, kernelPhys, userPhys,
+        FBLOG("%s: kva %s contiguous %u kernelPhys <phys> userPhys <phys> %s",
+              what, fKva ? "set" : "null", (unsigned)contig,
               (kernelPhys == userPhys) ? "(same)" : "(different)");
         bool onConsole = (consEnd > consBase) && kernelPhys
                          && (kernelPhys < consEnd) && ((kernelPhys + fMemBytes) > consBase);
@@ -1118,8 +1118,8 @@ bool NVRMNVDAFramebuffer::kapiInit()
         fConsMem = (IODeviceMemory *)cm;
         if (fConsMem) { fConsMap = fConsMem->map(kIOMapInhibitCache); if (fConsMap) fConsKva = (void *)fConsMap->getVirtualAddress(); }
     }
-    FBLOG("console probe phys 0x%llx pitch %u size %llu kva %p | SURFACE phys 0x%llx pitch %u size %llu",
-          fConsPhys, fConsPitch, fConsSize, fConsKva, fPhys, fPitch, fSize);
+    FBLOG("console probe phys <phys> pitch %u size %llu kva %s | SURFACE phys <phys> pitch %u size %llu",
+          fConsPitch, fConsSize, fConsKva ? "set" : "null", fPitch, fSize);
     volatile uint32_t *px = (volatile uint32_t *)fKva;
     bool painted = false;
     if (gBootHead >= 0 ? (fDisplay == gBootDpy && (int)fHead == gBootHead) : (fIndex == 0)) {
@@ -1321,6 +1321,18 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
     FBLOG("hot-plug: %d display(s) added, %u idle nub(s) matched again", added, matched);
 }
 static char gTrace[32768]; static volatile SInt32 gTraceLen = 0, gTraceN = 0, gTraceFull = 0;
+// The trace was published as the registry property "NVRMTrace" on every log line. Registry properties
+// carry no privilege, so `ioreg` handed any process the whole 32 KB - including the pointers logged in
+// the boot path: the VBL IOFBInterruptProc (a kext text address, i.e. the KASLR slide), NVKMS heap
+// pointers, and the kernel virtual and physical addresses of the console and VRAM mappings. Measured
+// 2026-10-18 as an ordinary user: 440 lines, 2 text pointers, 3 kernel VAs, 6 physical addresses.
+// Publishing is now opt-in, and the %p specifiers below are gone in their own right.
+static int nvfbTracePublish(void)
+{
+    static int on = -1;
+    if (on < 0) { uint32_t g = 0; on = PE_parse_boot_argn("nvfbtrace", &g, sizeof g) && g; }
+    return on;
+}
 void NVRMNVDAFramebuffer::trace(const char *s)
 {
     if (gTraceFull || gTraceN >= (SInt32)kTraceMax) return;
@@ -1330,7 +1342,7 @@ void NVRMNVDAFramebuffer::trace(const char *s)
     memcpy(gTrace + off, s, n); gTrace[off + n] = '\n';
     OSIncrementAtomic(&gTraceN);
     NVRMNVDAFramebuffer *me = gFB;
-    if (!me) return;
+    if (!me || !nvfbTracePublish()) return;
     SInt32 len = OSAddAtomic(0, &gTraceLen);
     if (len < 0) return;
     if ((size_t)len >= sizeof gTrace) len = (SInt32)sizeof gTrace - 1;
@@ -1704,8 +1716,8 @@ void NVRMNVDAFramebuffer::reflipFire(thread_call_param_t p0, thread_call_param_t
     if (OSAddAtomic(0, &me->fStopping)) return;
     if (!me->fReflip) return;
     bool rok = me->reflip(); me->fReflips++;
-    FBLOG("reflip %u -> ok %u rc %d (head %u display 0x%x surface %p)",
-          me->fReflips, (unsigned)rok, me->fReflipRc, me->fHead, me->fDisplay, me->fSurf);
+    FBLOG("reflip %u -> ok %u rc %d (head %u display 0x%x surface %s)",
+          me->fReflips, (unsigned)rok, me->fReflipRc, me->fHead, me->fDisplay, me->fSurf ? "set" : "null");
     static const unsigned kGap[8] = { 12, 12, 12, 12, 12, 15, 15, 30 };
     if (me->fReflips >= 8) { return; }
     uint64_t deadline; clock_interval_to_deadline(kGap[me->fReflips], kSecondScale, &deadline);
@@ -3155,9 +3167,9 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
     NvU64 back = q[0];
     q[0] = 0;
     if (back != 0x5A5AA5A5C0FFEE01ull) {
-        FBLOG("nvAllocVram(%llu): kva %p phys 0x%llx WROTE 0x5A5AA5A5C0FFEE01 AND READ 0x%llx — "
+        FBLOG("nvAllocVram(%llu): kva %s phys <phys> WROTE 0x5A5AA5A5C0FFEE01 AND READ 0x%llx — "
               "the aperture is not live; refusing to hand this out",
-              (unsigned long long)want, kva, (unsigned long long)phys, (unsigned long long)back);
+              (unsigned long long)want, kva ? "set" : "null", (unsigned long long)back);
         fKms->unmapMemory(fDev, mem, NVKMS_KAPI_MAPPING_TYPE_KERNEL, kva);
         fKms->freeMemory(fDev, mem);
         OSAddAtomic64(-(SInt64)want, &gVramMappedBytes);
@@ -3177,8 +3189,8 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
     fVramGrants++;
     OSAddAtomic64(1, &gCntGrant); OSAddAtomic64((SInt64)want, &gCntGrantBytes);
     if (fVramGrantLogged < 16) { fVramGrantLogged++;
-        FBLOG("nvAllocVram #%u: %llu bytes REAL VRAM — kva %p phys 0x%llx  [BAR1 %llu / %llu]",
-              fVramGrants, (unsigned long long)want, kva, (unsigned long long)phys,
+        FBLOG("nvAllocVram #%u: %llu bytes REAL VRAM — kva %s phys <phys>  [BAR1 %llu / %llu]",
+              fVramGrants, (unsigned long long)want, kva ? "set" : "null",
               r->mappedTotal, (unsigned long long)budget); }
     return true;
 }
@@ -3240,7 +3252,7 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
         if (!fDev) { FBLOG("nvRmHandles: no kapi device yet"); return kIOReturnNotReady; }
         h->kapiDevice = fDev;
         h->hClient = 0; h->hDevice = 0; h->hSubDevice = 0;
-        FBLOG("nvRmHandles -> kapiDevice %p", fDev);
+        FBLOG("nvRmHandles -> kapiDevice %s", fDev ? "set" : "null");
         return kIOReturnSuccess;
     }
     if (functionName && functionName->isEqualTo("nvFlipToSurfacePure")) {
@@ -3391,8 +3403,8 @@ bool NVRMNVDAFramebuffer::flipToMemory(struct NvKmsKapiMemory *mem, unsigned w, 
     if (accepted) fFrontSurf = surf;
     fFlipCount++;
     if (fFlipCount <= 8 || (fFlipCount % 600) == 0)
-        FBLOG("flipToMemory #%u -> ok %u rc %d (surface %p memory %p)",
-              fFlipCount, (unsigned)ok, rc, surf, mem);
+        FBLOG("flipToMemory #%u -> ok %u rc %d (surface %s memory %s)",
+              fFlipCount, (unsigned)ok, rc, surf ? "set" : "null", mem ? "set" : "null");
     return accepted;
 }
 
@@ -3718,7 +3730,7 @@ IOReturn NVRMNVDAFramebuffer::registerForInterruptType(IOSelect type, IOFBInterr
     char t[5] = { (char)(type >> 24), (char)(type >> 16), (char)(type >> 8), (char)type, 0 };
     if (type == kIOFBVBLInterruptType) {
         fVbl = { proc, target, ref }; if (interruptRef) *interruptRef = &fVbl; fVblReg++;
-        FBLOG("registerForInterruptType '%s' -> VBL REGISTERED (proc %p)", t, proc);
+        FBLOG("registerForInterruptType '%s' -> VBL REGISTERED (proc %s)", t, proc ? "set" : "null");
         return kIOReturnSuccess;
     }
     if (type == kIOFBConnectInterruptType) {

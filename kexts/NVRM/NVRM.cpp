@@ -1748,8 +1748,11 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
         NvU64 off = c->page_index * PAGE_SIZE;
         if (!base) return kIOReturnBadArgument;
         if (off >= bytes) { base->release(); return kIOReturnBadArgument; }
+        // Subtract, never add: access_size arrives verbatim from RM (nv_add_mapping_context_to_file) and a
+        // near-2^64 value made off+len wrap below bytes, skipping this clamp - and IOSubMemoryDescriptor's own
+        // offset+length test wraps identically, so nothing downstream caught it either.
         NvU64 len = c->access_size ? c->access_size : (bytes - off);
-        if (off + len > bytes) len = bytes - off;
+        if (len > bytes - off) { base->release(); return kIOReturnBadArgument; }
         md = IOSubMemoryDescriptor::withSubRange(base, (IOByteCount)off, (IOByteCount)len, kIODirectionInOut);
         base->release();
         caching = cache;

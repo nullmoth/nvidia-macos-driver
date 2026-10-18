@@ -6346,7 +6346,7 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
 {
     if (layer >= (img->layers ? img->layers : 1)) { nvlog("image_write_region: layer %u — this image has %u", layer, img->layers ? img->layers : 1); return -1; }
     { const uint32_t lw = img->w >> level ? img->w >> level : 1, lh = img->h >> level ? img->h >> level : 1;
-      if (!w || !h || x + w > lw || y + h > lh) { nvlog("image_write_region: %ux%u at (%u,%u) is outside %ux%u (level %u)", w, h, x, y, lw, lh, level); return -1; } }
+      if (!w || !h || x > lw || w > lw - x || y > lh || h > lh - y) { nvlog("image_write_region: %ux%u at (%u,%u) is outside %ux%u (level %u)", w, h, x, y, lw, lh, level); return -1; } }
     const size_t bpp = img->bpp ? img->bpp : 4;
     const uint32_t cols = nvmtl_blocks(w, img->bw), rows = nvmtl_blocks(h, img->bh);
     if (img->bw > 1 && ((x % img->bw) || (y % img->bh))) { nvlog("image_write_region: origin (%u,%u) is not block-aligned (%ux%u blocks)", x, y, img->bw, img->bh); return -1; }
@@ -6399,7 +6399,7 @@ int nvmtl_vk_image_read_region_level_layer(nvk_queue *q, nvk_image *img, void *d
     nvmtl_vk_image_upload_barrier(img);   // a readback must observe a pending async upload: finish it first
     if (layer >= (img->layers ? img->layers : 1)) { nvlog("image_read_region: layer %u — this image has %u", layer, img->layers ? img->layers : 1); return -1; }
     { const uint32_t lw = img->w >> level ? img->w >> level : 1, lh = img->h >> level ? img->h >> level : 1;
-      if (!w || !h || x + w > lw || y + h > lh) { nvlog("image_read_region: %ux%u at (%u,%u) is outside %ux%u (level %u)", w, h, x, y, lw, lh, level); return -1; } }
+      if (!w || !h || x > lw || w > lw - x || y > lh || h > lh - y) { nvlog("image_read_region: %ux%u at (%u,%u) is outside %ux%u (level %u)", w, h, x, y, lw, lh, level); return -1; } }
     const size_t bpp = img->bpp ? img->bpp : 4;
     const uint32_t cols = nvmtl_blocks(w, img->bw), rows = nvmtl_blocks(h, img->bh);
     if (img->bw > 1 && ((x % img->bw) || (y % img->bh))) { nvlog("image_read_region: origin (%u,%u) is not block-aligned", x, y); return -1; }

@@ -22,6 +22,8 @@
 #include <sys/proc.h>
 #include <sys/kauth.h>
 
+// A GSP firmware image is a few megabytes; this only has to be generous, not exact.
+#define NV_XNU_FW_MAX_BYTES (64u * 1024u * 1024u)
 #define NV_FIRMWARE_FOR_NAME(name) "/Users/Shared/nvfw/nvidia/610.57.04/" name ".bin"
 extern "C" {
 #include "nv-firmware.h"
@@ -1184,6 +1186,13 @@ const void *NV_API_CALL nv_get_firmware(nv_state_t *nv, nv_firmware_type_t fw_ty
     if (err) { kprintf("NVRM-xnu:   vnode_open failed %d\n", err); return NULL; }
     struct vnode_attr va; VATTR_INIT(&va); VATTR_WANTED(&va, va_data_size);
     if (vnode_getattr(vp, &va, ctx) != 0) { kprintf("NVRM-xnu:   vnode_getattr failed\n"); vnode_close(vp, FREAD, ctx); return NULL; }
+    // The real blobs are a few MB. A 0-byte file gave RM a zero-length firmware, and anything from 2 GiB
+    // up made the (int) cast below negative; the file lives outside the kernel's control, so bound it here.
+    if (va.va_data_size == 0 || va.va_data_size > NV_XNU_FW_MAX_BYTES) {
+        kprintf("NVRM-xnu:   firmware %s is %llu bytes, refusing (limit %u)\n", path,
+                (unsigned long long)va.va_data_size, (unsigned)NV_XNU_FW_MAX_BYTES);
+        vnode_close(vp, FREAD, ctx); return NULL;
+    }
     size_t size = (size_t)va.va_data_size;
     void *buf = kern_os_malloc(size);
     if (!buf) { kprintf("NVRM-xnu:   no memory for %zu bytes\n", size); vnode_close(vp, FREAD, ctx); return NULL; }
