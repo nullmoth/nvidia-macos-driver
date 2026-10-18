@@ -19,6 +19,7 @@
     int aheadFailed;
     BOOL waitFolded;
     BOOL aheadEmpty;
+    BOOL claimed;
     NSArray<NVMTLBuffer *> *copyInputs;
     BOOL copyInputsPrepared, hasHostCopies;
 }
@@ -544,6 +545,7 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
         if (atomic_load(&gsub_inflight) >= nvmtl_gsub_cap()) return NO;
         NVMTLSubmissionPart *part = _parts[_nextSubmit];
         if (![part isKindOfClass:[NVMTLSubmissionPart class]]) return NO;
+        if (part->claimed) return NO;
         if (part->waitEvent) {
             if (!nvmtl_evfold_on() || nvmtl_evfold_promised(part->waitEvent) < part->value) return NO;
             part->waitFolded = YES; _nextSubmit++; nvmtl_evfold_census(&gEvFold, "event waits ordered by the channel (no CPU hold)");
@@ -613,7 +615,8 @@ static void nvmtl_gsub_ahead_pass1(void) {
     if (_cbError) { [self nvmtlFinishExecution:_cbError]; return YES; }
     if (_nextPart >= _parts.count) { [self nvmtlFinishExecution:nil]; return YES; }
     NVMTLSubmissionPart *part = _parts[_nextPart];
-    const BOOL ahead = part->inflight || part->aheadFailed;
+    BOOL ahead;   // claimed under the class lock: the commit-time pass stops at a claimed part
+    @synchronized ([NVMTLCommandBuffer class]) { ahead = part->inflight || part->aheadFailed; part->claimed = YES; }
     if (part->waitEvent && !ahead && !part->waitFolded) {
         if (![part->waitEvent respondsToSelector:@selector(signaledValue)]) {
             [self nvmtlFinishExecution:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
@@ -621,7 +624,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
             return YES;
         }
         uint64_t have = ((uint64_t(*)(id,SEL))objc_msgSend)(part->waitEvent,@selector(signaledValue));
-        if (have < part->value) return NO;
+        if (have < part->value) { @synchronized ([NVMTLCommandBuffer class]) { part->claimed = NO; } return NO; }
     }
     if (!ahead && part->commands.cb && !part->encoders && !part->resources.count && !part->surfaces.count && !part->scratch.count && nvmtl_skip_empty_on()) {
         [self nvmtlMarkScheduled];
@@ -731,6 +734,12 @@ static void nvmtl_pump_buffers_sync(void) {
 }
 
 static uint64_t nvmtl_pump_generation;
+static BOOL nvmtl_commit_ahead_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_COMMIT_AHEAD"); on = !(e && e[0] == '0');
+        nvlog("commit: submit-ahead %s (NVMTL_COMMIT_AHEAD=%s)", on ? "also runs at commit while the worker waits" : "runs on the worker only", e ? e : "unset"); }
+    return on;
+}
 static void nvmtl_pump_buffers(void) {
     static dispatch_once_t once; static dispatch_queue_t worker;
     const BOOL async = nvmtl_async_commit_on();
@@ -739,7 +748,11 @@ static void nvmtl_pump_buffers(void) {
     @synchronized ([NVMTLCommandBuffer class]) {
         if (!nvmtl_pending_buffers.count) return;
         ++nvmtl_pump_generation;
-        if (nvmtl_pumping) return;
+        if (nvmtl_pumping) {
+            // the worker may be blocked on an earlier part; without this the commit is scheduled only after that wait
+            if (nvmtl_commit_ahead_on() && nvmtl_gsub_ahead_on()) nvmtl_gsub_ahead_pass();
+            return;
+        }
         nvmtl_pumping = YES;
         dispatch_async(worker, ^{
             for (;;) { @autoreleasepool {
