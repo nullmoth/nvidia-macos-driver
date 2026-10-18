@@ -1126,6 +1126,13 @@ static NSString *nvmtl_link_dump_dir(void) {
     NSString *root = (v[0] == '/') ? [NSString stringWithUTF8String:v] : @"/tmp";
     return root ? [root stringByAppendingFormat:@"/nvmtl-link-%d", getpid()] : nil;
 }
+// Set by a caller that defers a function needing linked visible functions to pipeline creation. On that path a
+// first specialization that stops at an unlinked call is expected, and logging it as a failure put a false
+// failure in every report from a Mac drawing the system's icons. Everywhere else the line stays a failure,
+// because a caller that is not deferring has no second chance and the refusal is real.
+static __thread int g_fc_expect_link;
+void nvmtl_fc_expect_link(int on) { g_fc_expect_link = on; }
+BOOL nvmtl_needs_visible_link(NSString *air, NSString *why);
 NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *idx, const uint32_t *sizes,
                                 const uint8_t *const *payloads, size_t n, NSString **err)
 {
@@ -1134,7 +1141,9 @@ NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *i
     if (!ll || !stage.length) { if (err) *err = @"no AIR kept for this function"; return nil; }
     uint8_t *out = NULL; size_t out_len = 0; char e[512] = {0};
     if (xlate_fc(ll.UTF8String, stage.UTF8String, idx, sizes, payloads, n, &out, &out_len, e, sizeof e) != 0) {
-        nvlog("function constants: re-translate FAILED: %s", e);
+        if (g_fc_expect_link && nvmtl_needs_visible_link(ll, @(e)))
+            nvlog("function constants: this function calls linked visible functions; it is specialized when its pipeline is created");
+        else nvlog("function constants: re-translate FAILED: %s", e);
         // NVMTL_FC_FAIL_DUMP=<dir>: keep the refused module (AIR text, stage, constant values, error) so the refusal can be
         // replayed offline against the translator; nothing is written unless the variable is set.
         const char *dd = getenv("NVMTL_FC_FAIL_DUMP");
@@ -1922,6 +1931,30 @@ static NVMTLFunction *nvmtl_link_dylibs(NVMTLFunction *fn, NSArray *dylibs, NSEr
     df->_spirv = nil; df->_fname = fn->_fname; df->_stage = fn->_stage; df->_air = linked; df->_fc = fn->_fc;
     df->_lib = fn->_lib; df->_fcv = fn->_fcv; df->_specName = fn->_specName; df->_needsLink = YES;
     return df;
+}
+
+// Whether a function needs linking before it can be translated: it calls visible functions it does not define,
+// so the pipeline's linked functions have to supply them. This used to be decided by reading the translator's
+// error text, and when the translator stopped refusing every visible-function reference outright, its message for
+// this case changed ("is called on a live path but no linked function supplies it"). Nothing matched the new text,
+// so the function was never deferred to pipeline creation; it came back nil and the caller drew nothing. On macOS
+// 26 that is the system's icon and Liquid Glass shaders: icons missing pieces, glass menus drawn as a flat tint.
+// The translator lists the references itself, so ask it. The known messages stay as a fallback for a translator
+// that cannot answer, so a query that cannot run never reads as "no references".
+BOOL nvmtl_needs_visible_link(NSString *air, NSString *why)
+{
+    if (air.length && nvmtl_xlate_ready() && xlate_vrefs) {
+        uint8_t *out = NULL; size_t len = 0; char e[256] = {0};
+        if (xlate_vrefs(air.UTF8String, &out, &len, e, sizeof e) == 0) {
+            id refs = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:out length:len] options:0 error:NULL];
+            xlate_free(out, len);
+            if ([refs isKindOfClass:[NSArray class]]) return [(NSArray *)refs count] > 0;
+        }
+    }
+    return why && ([why rangeOfString:@"visible function reference"].location != NSNotFound
+                || [why rangeOfString:@"Metal visible function table"].location != NSNotFound
+                || [why rangeOfString:@"no linked function supplies it"].location != NSNotFound
+                || [why rangeOfString:@".MTL_UNRESOLVED_VISIBLE_FN"].location != NSNotFound);
 }
 
 id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, NSArray *dylibs, NSError **err)
