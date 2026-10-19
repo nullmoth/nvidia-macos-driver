@@ -219,6 +219,23 @@ static bool nvmtl_video_is_blackwell(void)
     }
     return strstr(nvmtl_vk_device_name(), "NVK GB") != NULL;
 }
+// The H.264 encoder library built for this card's generation, or NULL when we ship none for it (then the app keeps
+// Apple's encoder, which is what every non-Blackwell card got before these libraries existed).
+// The setup a card's NVENC expects differs per generation: Turing and Ampere write the same picture setup apart from
+// the class byte, and Blackwell differs in the plane offsets, the input layout and the padding. Each library is
+// checked byte-for-byte against NVIDIA's own output on that generation before it ships.
+static const char *nvmtl_nvenc_library_for_this_gpu(void)
+{
+    char gen[32];
+    if (!nvmtl_gpu_profile_string(CFSTR("generation"), gen, sizeof gen)) {
+        // No profile: fall back to the name test, which only recognises Blackwell.
+        return nvmtl_video_is_blackwell() ? "libnvenc_h264.dylib" : NULL;
+    }
+    if (!strcmp(gen, "Blackwell")) return "libnvenc_h264.dylib";
+    if (!strcmp(gen, "Ampere")) return "libnvenc_h264_ga10x.dylib";
+    if (!strcmp(gen, "Turing")) return "libnvenc_h264_tu10x.dylib";
+    return NULL;
+}
 static void nvmtl_nvdec_register(void)
 {
     static dispatch_once_t once;
@@ -251,7 +268,8 @@ static void nvmtl_nvenc_register(void)
     dispatch_once(&once, ^{
         const char *me = getprogname();
         if (getenv("NVMTL_NO_NVENC")) { nvlog("nvenc: NVMTL_NO_NVENC set - not registering in %s", me); return; }
-        if (!nvmtl_video_is_blackwell()) { nvlog("nvenc: %s is not Blackwell - H.264 encode stays on Apple's encoder", nvmtl_vk_device_name()); return; }
+        const char *lib = nvmtl_nvenc_library_for_this_gpu();
+        if (!lib) { nvlog("nvenc: no encoder library for %s - H.264 encode stays on Apple's encoder", nvmtl_vk_device_name()); return; }
         if (!strcmp(me, "WindowServer")) return;
         typedef int32_t (*RegFn)(uint32_t, CFDictionaryRef, void *);
         RegFn reg = (RegFn)dlsym(RTLD_DEFAULT, "VTRegisterVideoEncoderWithInfo");
@@ -260,7 +278,7 @@ static void nvmtl_nvenc_register(void)
         if (!dladdr((const void *)nvmtl_nvenc_register, &di) || !di.dli_fname) { nvlog("nvenc: dladdr failed - not registering"); return; }
         char dir[1024], path[1200];
         strlcpy(dir, di.dli_fname, sizeof dir);
-        snprintf(path, sizeof path, "%s/libnvenc_h264.dylib", dirname(dir));
+        snprintf(path, sizeof path, "%s/%s", dirname(dir), lib);
         void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
         if (!h) { nvlog("nvenc: dlopen %s FAILED: %s", path, dlerror()); return; }
         void *fac = dlsym(h, "NVEncH264_CreateInstance");
