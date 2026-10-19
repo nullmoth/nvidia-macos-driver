@@ -224,6 +224,19 @@ static bool nvmtl_video_is_blackwell(void)
 // The setup a card's NVENC expects differs per generation: Turing and Ampere write the same picture setup apart from
 // the class byte, and Blackwell differs in the plane offsets, the input layout and the padding. Each library is
 // checked byte-for-byte against NVIDIA's own output on that generation before it ships.
+// The HEVC encoder library for this card's generation. Turing and Ampere write the same HEVC setup apart from the
+// class byte, checked byte-for-byte against NVIDIA's own output on each; Blackwell differs in the layout as it does
+// for H.264.
+static const char *nvmtl_nvenc_hevc_library_for_this_gpu(void)
+{
+    char gen[32];
+    if (!nvmtl_gpu_profile_string(CFSTR("generation"), gen, sizeof gen))
+        return nvmtl_video_is_blackwell() ? "libnvenc_hevc.dylib" : NULL;
+    if (!strcmp(gen, "Blackwell")) return "libnvenc_hevc.dylib";
+    if (!strcmp(gen, "Ampere")) return "libnvenc_hevc_ga10x.dylib";
+    if (!strcmp(gen, "Turing")) return "libnvenc_hevc_tu10x.dylib";
+    return NULL;
+}
 static const char *nvmtl_nvenc_library_for_this_gpu(void)
 {
     char gen[32];
@@ -419,7 +432,8 @@ static void nvmtl_nvenc_hevc_register(void)
     dispatch_once(&once, ^{
         const char *me = getprogname();
         if (getenv("NVMTL_NO_NVENC_HEVC")) { nvlog("nvenc: NVMTL_NO_NVENC_HEVC set - not registering HEVC in %s", me); return; }
-        if (!nvmtl_video_is_blackwell()) { nvlog("nvenc: %s is not Blackwell - HEVC encode stays on Apple's encoder", nvmtl_vk_device_name()); return; }
+        const char *lib = nvmtl_nvenc_hevc_library_for_this_gpu();
+        if (!lib) { nvlog("nvenc: no HEVC encoder library for %s - HEVC encode stays on Apple's encoder", nvmtl_vk_device_name()); return; }
         if (!strcmp(me, "WindowServer")) return;
         typedef int32_t (*RegFn)(uint32_t, CFDictionaryRef, void *);
         RegFn reg = (RegFn)dlsym(RTLD_DEFAULT, "VTRegisterVideoEncoderWithInfo");
@@ -428,7 +442,7 @@ static void nvmtl_nvenc_hevc_register(void)
         if (!dladdr((const void *)nvmtl_nvenc_hevc_register, &di) || !di.dli_fname) { nvlog("nvenc: dladdr failed - not registering HEVC"); return; }
         char dir[1024], path[1200];
         strlcpy(dir, di.dli_fname, sizeof dir);
-        snprintf(path, sizeof path, "%s/libnvenc_hevc.dylib", dirname(dir));
+        snprintf(path, sizeof path, "%s/%s", dirname(dir), lib);
         void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
         if (!h) { nvlog("nvenc: dlopen %s FAILED: %s", path, dlerror()); return; }
         void *fac = dlsym(h, "NVEncHEVC_CreateInstance");
