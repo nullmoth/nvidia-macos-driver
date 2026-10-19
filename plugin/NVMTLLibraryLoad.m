@@ -345,19 +345,24 @@ static NSString *nvmtl_spvcache_dir(void) {
         if (nvmtl_dir_writable(beside)) dir = beside;
         else if (nvmtl_dir_writable(tmp)) { dir = tmp; nvlog("spvcache: %s is not writable here - caching in %s", beside.UTF8String, tmp.UTF8String); }
         else nvlog("spvcache: no writable folder in this process (%s, %s) - translated shaders are not cached", beside.UTF8String, tmp.UTF8String);
-        if (dir && !getenv("NVMTL_SPVCACHE_KEEP_STALE")) {
-            NSString *chosen = dir;
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                char dirc[1024];
-                if ([chosen getFileSystemRepresentation:dirc maxLength:sizeof dirc]) nvmtl_spvcache_drop_stale(dirc);
-            });
-        }
     });
     return dir;
 }
 static NSString *nvmtl_spvcache_path_digest(const unsigned char h[CC_SHA256_DIGEST_LENGTH], NSString *stage) {
     NSString *d = nvmtl_spvcache_dir();
     if (!d) return nil;
+    // Sweep the folder clear of other builds' entries once, here rather than where the folder is chosen: a process
+    // that picks its folder before the translator is open does not know the build yet and would skip the sweep for
+    // good. The window server does exactly that, so its cache kept seven builds' entries. By the time a path is
+    // being built the build tag is real, because the name below is made from it.
+    static dispatch_once_t sweepOnce;
+    if (!getenv("NVMTL_SPVCACHE_KEEP_STALE")) dispatch_once(&sweepOnce, ^{
+        NSString *chosen = d;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            char dirc[1024];
+            if ([chosen getFileSystemRepresentation:dirc maxLength:sizeof dirc]) nvmtl_spvcache_drop_stale(dirc);
+        });
+    });
     char hex[2 * CC_SHA256_DIGEST_LENGTH + 1];
     for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) snprintf(hex + 2 * i, 3, "%02x", h[i]);
     nvmtl_spvcache_trim_async(d);
