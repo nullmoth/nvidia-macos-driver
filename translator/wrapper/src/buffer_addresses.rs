@@ -20,6 +20,79 @@ fn scalar_align(ty: u32, defs: &HashMap<u32, Instruction>, depth: usize) -> Resu
     }
 }
 
+fn holds_runtime_array(ty: u32, defs: &HashMap<u32, Instruction>, depth: usize) -> bool {
+    let Some(t) = defs.get(&ty).filter(|_| depth < 32) else { return true };
+    match t.class.opcode {
+        Op::TypeRuntimeArray => true,
+        Op::TypeArray | Op::TypeStruct => t.operands.iter().filter_map(id).any(|e| holds_runtime_array(e, defs, depth + 1)),
+        _ => false,
+    }
+}
+/// Whether a value depends on data read from memory or an image, as opposed to constants, built-ins, vertex inputs
+/// and arithmetic on them.
+fn data_dependent(v: u32, local: &HashMap<u32, &Instruction>, defs: &HashMap<u32, Instruction>, value_types: &HashMap<u32, u32>, seen: &mut HashSet<u32>, budget: &mut u32) -> bool {
+    if !seen.insert(v) { return false; }
+    if *budget == 0 { return true; }
+    *budget -= 1;
+    let Some(d) = local.get(&v) else { return false };
+    match d.class.opcode {
+        Op::Load => d.operands.first().and_then(id).and_then(|p| value_types.get(&p)).and_then(|t| defs.get(t))
+            .and_then(|t| t.operands.first()) != Some(&Operand::StorageClass(StorageClass::Input)),
+        Op::ImageRead | Op::ImageFetch | Op::ImageSampleImplicitLod | Op::ImageSampleExplicitLod | Op::ImageSampleDrefImplicitLod
+        | Op::ImageSampleDrefExplicitLod | Op::ImageGather | Op::ImageDrefGather | Op::AtomicLoad | Op::FunctionCall => true,
+        Op::Phi => d.operands.iter().step_by(2).filter_map(id).any(|o| data_dependent(o, local, defs, value_types, seen, budget)),
+        _ => d.operands.iter().filter_map(id).any(|o| data_dependent(o, local, defs, value_types, seen, budget)),
+    }
+}
+/// The buffers that stay descriptors: roots whose block holds a runtime array that an access chain indexes with a
+/// data-dependent value, and whose pointers reach nothing but access chains, loads, stores and OpArrayLength (a call
+/// or a pointer used as a value would need the pointer in both forms, so such a root is lowered as before). Returns
+/// the kept roots and every pointer derived from them.
+fn kept_roots(m: &rspirv::dr::Module, defs: &HashMap<u32, Instruction>, sb_types: &HashMap<u32, u32>, roots: &[(u32, u32, u32)], value_types: &HashMap<u32, u32>) -> (HashSet<u32>, HashSet<u32>) {
+    let local: HashMap<u32, &Instruction> = m.functions.iter().flat_map(|f| f.blocks.iter()).flat_map(|b| b.instructions.iter()).filter_map(|i| Some((i.result_id?, i))).collect();
+    let mut owner: HashMap<u32, u32> = roots.iter().filter(|r| sb_types.get(&r.1).is_some_and(|&p| holds_runtime_array(p, defs, 0))).map(|r| (r.0, r.0)).collect();
+    let (mut needs, mut bad) = (HashSet::new(), HashSet::new());
+    for i in m.functions.iter().flat_map(|f| f.blocks.iter()).flat_map(|b| b.instructions.iter()) {
+        let Some(&root) = i.operands.first().and_then(id).and_then(|v| owner.get(&v)) else {
+            bad.extend(i.operands.iter().filter_map(id).filter_map(|v| owner.get(&v).copied())); continue };
+        if i.operands.iter().skip(1).filter_map(id).any(|v| owner.contains_key(&v)) { bad.insert(root); }
+        match i.class.opcode {
+            Op::AccessChain | Op::InBoundsAccessChain | Op::PtrAccessChain | Op::CopyObject => {
+                if let Some(r) = i.result_id { owner.insert(r, root); }
+                let (mut seen, mut budget) = (HashSet::new(), 96u32);
+                if i.operands.iter().skip(1).filter_map(id).any(|x| data_dependent(x, &local, defs, value_types, &mut seen, &mut budget)) { needs.insert(root); }
+            }
+            Op::Load | Op::Store | Op::ArrayLength => {}
+            _ => { bad.insert(root); }
+        }
+    }
+    let kept: HashSet<u32> = needs.difference(&bad).copied().collect();
+    let derived = owner.into_iter().filter(|(_, o)| kept.contains(o)).map(|(v, _)| v).collect();
+    (kept, derived)
+}
+/// Gives the variables in `seeds`, which stay StorageBuffer, and every pointer derived from them their own pointer
+/// types, so the types they shared with lowered buffers can become PhysicalStorageBuffer. Each new type is placed right
+/// after the one it copies.
+fn keep_on_storage_buffer(m: &mut rspirv::dr::Module, seeds: &[u32], sb_types: &HashMap<u32, u32>, value_types: &mut HashMap<u32, u32>, fresh: &mut dyn FnMut() -> u32) {
+    let mut dup: HashMap<u32, u32> = HashMap::new(); let mut derived: HashSet<u32> = seeds.iter().copied().collect();
+    for v in &mut m.types_global_values {
+        if v.class.opcode == Op::Variable && v.result_id.is_some_and(|n| derived.contains(&n)) {
+            if let Some(t) = v.result_type.filter(|t| sb_types.contains_key(t)) { let n = *dup.entry(t).or_insert_with(&mut *fresh); v.result_type = Some(n); value_types.insert(v.result_id.unwrap(), n); }
+        }
+    }
+    for i in m.functions.iter_mut().flat_map(|f| f.blocks.iter_mut()).flat_map(|b| b.instructions.iter_mut()) {
+        if !matches!(i.class.opcode, Op::AccessChain | Op::InBoundsAccessChain | Op::PtrAccessChain | Op::CopyObject) { continue; }
+        if !i.operands.first().and_then(id).is_some_and(|v| derived.contains(&v)) { continue; }
+        let (Some(r), Some(t)) = (i.result_id, i.result_type) else { continue };
+        derived.insert(r);
+        if sb_types.contains_key(&t) { let n = *dup.entry(t).or_insert_with(&mut *fresh); i.result_type = Some(n); value_types.insert(r, n); }
+    }
+    let mut places: Vec<(usize, Instruction)> = dup.iter().map(|(&t, &n)| (m.types_global_values.iter().position(|i| i.result_id == Some(t)).unwrap() + 1,
+        inst(Op::TypePointer, None, Some(n), vec![Operand::StorageClass(StorageClass::StorageBuffer), Operand::IdRef(sb_types[&t])]))).collect();
+    places.sort_by(|a, b| b.0.cmp(&a.0));
+    for (pos, t) in places { m.types_global_values.insert(pos, t); }
+}
+
 fn keep_stated_align(scalar: u32, stated: Option<&Operand>) -> u32 {
     if std::env::var_os("NVMTL_NO_AIR_ALIGN").is_some() { return scalar; }
     match stated { Some(Operand::LiteralBit32(a)) if a.is_power_of_two() && *a <= 16 => scalar.max(*a), _ => scalar }
@@ -86,16 +159,21 @@ fn lower_addresses(bytes: &[u8]) -> Result<Vec<u8>, String> {
         Some(tv) => match existing_table(&defs, &m, tv, &sets) { Some(t) => Some(t), None => return Ok(bytes.to_vec()) },
     };
     let roots: Vec<(u32,u32,u32)> = roots.into_iter().filter(|r| Some(r.0) != table_var).collect();
+    // A buffer whose block holds a runtime array is read wherever its data points (a light list, a froxel grid) and
+    // past its end whenever the data says so. Apple's GPUs return garbage for such a read; through a physical address
+    // it is an MMU fault that takes the device away. These buffers keep their descriptor, which the device
+    // bounds-checks with robustBufferAccess; fixed-size blocks still move to addresses.
+    let mut value_types = HashMap::new();
+    for i in m.all_inst_iter() { if let (Some(n),Some(t)) = (i.result_id,i.result_type) { value_types.insert(n,t); } }
+    let (kept, kept_derived) = kept_roots(&m, &defs, &sb_types, &roots, &value_types);
+    let roots: Vec<(u32,u32,u32)> = roots.into_iter().filter(|r| !kept.contains(&r.0)).collect();
     if roots.is_empty() { return Ok(bytes.to_vec()); }
     for &(n,_,b) in &roots {
         if b >= 32 || sets.get(&n) != Some(&0) { return Err(format!("unsupported source buffer descriptor {n}, binding {b}")); }
     }
     let root_ids: HashSet<_> = roots.iter().map(|r|r.0).collect();
-    let mut value_types = HashMap::new();
-    for i in m.all_inst_iter() { if let (Some(n),Some(t)) = (i.result_id,i.result_type) { value_types.insert(n,t); } }
-    let wide_hints = crate::wide_loads::hints(&m, &defs, &sb_types, &value_types);
     for i in m.all_inst_iter() {
-        if matches!(i.class.opcode, Op::ArrayLength | Op::PtrEqual | Op::PtrNotEqual | Op::PtrDiff | Op::CopyMemory | Op::CopyMemorySized) && i.operands.iter().filter_map(id).any(|n|value_types.get(&n).is_some_and(|t|sb_types.contains_key(t))) {
+        if matches!(i.class.opcode, Op::ArrayLength | Op::PtrEqual | Op::PtrNotEqual | Op::PtrDiff | Op::CopyMemory | Op::CopyMemorySized) && i.operands.iter().filter_map(id).any(|n| !kept_derived.contains(&n) && value_types.get(&n).is_some_and(|t|sb_types.contains_key(t))) {
             return Err(format!("buffer address lowering does not yet support {:?}",i.class.opcode));
         }
         if i.class.opcode == Op::ConstantNull && i.result_type.is_some_and(|t|sb_types.contains_key(&t)) { return Err("logical null buffer pointer requires explicit lowering".into()); }
@@ -107,34 +185,16 @@ fn lower_addresses(bytes: &[u8]) -> Result<Vec<u8>, String> {
     for t in &mut m.types_global_values {
         if t.result_id.is_some_and(|n|sb_types.contains_key(&n)) { t.operands[0]=Operand::StorageClass(StorageClass::PhysicalStorageBuffer); }
     }
+    let seeds: Vec<u32> = kept.iter().copied().chain(table_var).collect();
+    keep_on_storage_buffer(&mut m, &seeds, &sb_types, &mut value_types, &mut fresh);
+    let wide_hints = crate::wide_loads::hints(&m, &defs, &sb_types, &value_types);
     m.types_global_values.retain(|i|!i.result_id.is_some_and(|n|root_ids.contains(&n)));
     m.annotations.retain(|i| !i.operands.first().and_then(id).is_some_and(|n|root_ids.contains(&n)));
     m.debug_names.retain(|i| !i.operands.first().and_then(id).is_some_and(|n|root_ids.contains(&n)));
-    let (table, ptr_ulong, elem_uvec2) = if let (Some(tv), Some((block, elem, uvec2))) = (table_var, existing) {
-        // fresh StorageBuffer pointer types for the table and everything derived from it: the shared ones become
-        // PhysicalStorageBuffer below
-        let (ptr_tab, ptr_elem) = (fresh(), fresh());
-        let vpos = m.types_global_values.iter().position(|i| i.result_id == Some(tv)).ok_or("table variable missing")?;
-        let mut var = m.types_global_values.remove(vpos);
-        var.result_type = Some(ptr_tab);
-        m.types_global_values.extend([
-            inst(Op::TypePointer,None,Some(ptr_tab),vec![Operand::StorageClass(StorageClass::StorageBuffer),Operand::IdRef(block)]),
-            inst(Op::TypePointer,None,Some(ptr_elem),vec![Operand::StorageClass(StorageClass::StorageBuffer),Operand::IdRef(elem)]),
-        ]);
-        m.types_global_values.push(var);
-        let mut dup: HashMap<u32,u32> = HashMap::new(); let mut derived: HashSet<u32> = HashSet::from([tv]); let mut dup_types = Vec::new();
-        for f in &mut m.functions { for b in &mut f.blocks { for i in &mut b.instructions {
-            if !matches!(i.class.opcode, Op::AccessChain | Op::InBoundsAccessChain | Op::PtrAccessChain | Op::CopyObject) { continue; }
-            if !i.operands.first().and_then(id).is_some_and(|v| derived.contains(&v)) { continue; }
-            let (Some(r), Some(t)) = (i.result_id, i.result_type) else { continue };
-            derived.insert(r);
-            if let Some(&pointee) = sb_types.get(&t) {
-                let n = *dup.entry(t).or_insert_with(|| { let n = fresh(); dup_types.push(inst(Op::TypePointer,None,Some(n),vec![Operand::StorageClass(StorageClass::StorageBuffer),Operand::IdRef(pointee)])); n });
-                i.result_type = Some(n); value_types.insert(r, n);
-            }
-        }}}
-        let vpos = m.types_global_values.iter().position(|i| i.result_id == Some(tv)).unwrap();
-        for (k, t) in dup_types.into_iter().enumerate() { m.types_global_values.insert(vpos + k, t); }
+    let (table, ptr_ulong, elem_uvec2) = if let (Some(tv), Some((_, elem, uvec2))) = (table_var, existing) {
+        // the table keeps its StorageBuffer types (keep_on_storage_buffer above); its entries are read through this one
+        let ptr_elem = fresh();
+        m.types_global_values.push(inst(Op::TypePointer,None,Some(ptr_elem),vec![Operand::StorageClass(StorageClass::StorageBuffer),Operand::IdRef(elem)]));
         (tv, ptr_elem, uvec2)
     } else {
     let arr=fresh(); let block=fresh(); let ptr_block=fresh(); let ptr_ulong=fresh(); let table=fresh();
