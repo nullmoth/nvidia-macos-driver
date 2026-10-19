@@ -402,6 +402,45 @@ EOF
 else
   ok "no previous driver to fall back to (first install)"
 fi
+step "6c. counting a start as good once the desktop is up"
+# The kernel's guard only counts a start as good when the framebuffer lights a head, or when the card reports that none
+# of its connectors has a display. A laptop whose panel hangs off the integrated GPU reaches that report late and does
+# not always reach it: two boots that missed it switched a healthy driver off, leaving the Mac with no NVIDIA card in
+# Metal at all. A desktop that comes up and stays up is also a good start, so this job says so. A boot that never
+# reaches a desktop keeps its count, which is what the guard is for.
+BG=/Library/NullMoth/bootguard.sh; BGP=/Library/LaunchDaemons/com.nullmoth.bootguard.plist
+launchctl bootout system/com.nullmoth.bootguard 2>/dev/null || true
+mkdir -p /Library/NullMoth /Library/LaunchDaemons || die "create the boot-guard job's folders"
+cat > "$BG.tmp" <<'EOF' || die "write the boot-guard job"
+#!/bin/bash
+# Written by the NVIDIA driver install: the desktop came up, so this start counts as good.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+V=7C436110-AB2A-4BBB-A880-FE41995C9F82; LOG=/Library/NullMoth/bootguard.log
+n=0
+while [ "$n" -lt 48 ]; do
+  if pgrep -x WindowServer >/dev/null 2>&1; then
+    sleep 45
+    pgrep -x WindowServer >/dev/null 2>&1 || { n=$((n + 1)); continue; }
+    nvram -d $V:nullmoth-nv-starts 2>/dev/null
+    nvram $V:nullmoth-nv-ok=1 2>/dev/null
+    echo "$(date) the desktop came up and stayed up; this start counts as good" >> $LOG
+    exit 0
+  fi
+  n=$((n + 1)); sleep 5
+done
+echo "$(date) no desktop within four minutes; the start keeps its count" >> $LOG
+EOF
+chmod 755 "$BG.tmp" && chown root:wheel "$BG.tmp" && mv -f "$BG.tmp" "$BG" || die "install the boot-guard job"
+cat > "$BGP" <<EOF || die "write the boot-guard job's plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Label</key><string>com.nullmoth.bootguard</string>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>$BG</string></array>
+<key>RunAtLoad</key><true/></dict></plist>
+EOF
+chmod 644 "$BGP" && chown root:wheel "$BGP" || die "boot-guard job permissions"
+ok "a start counts as good once the desktop is up"
+
 ba=$(nvram boot-args 2>/dev/null | cut -f2-)
 for a in nvfb=1 nvaccel=1; do case " $ba " in *" $a "*) ;; *) echo "   NOTE: boot-args lack '$a' — add it in your OpenCore config.plist (README: Install — by hand), or let the 1401 Mac app set OpenCore up";; esac; done
 # WhateverGreen's boot screen copy (on unless gfxrst=4) reads a console mapping macOS may already have freed when this
