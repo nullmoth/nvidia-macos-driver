@@ -21,6 +21,9 @@ funcs = src[start:end]
 HARNESS = r'''
 #import <Foundation/Foundation.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <errno.h>
+#include <sys/stat.h>
 #define nvlog(...) (fprintf(stderr, __VA_ARGS__), fputc('\n', stderr))
 static NSString *nvmtl_aircache_dir(void) { return @(getenv("TEST_AIRCACHE")); }
 #define NSTemporaryDirectory() (@(getenv("TEST_TMP")))
