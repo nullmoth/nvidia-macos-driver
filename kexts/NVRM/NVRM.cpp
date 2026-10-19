@@ -1789,7 +1789,7 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
         // A range that is not card memory goes down the system-RAM path below, which checks the owner.
         // A range that IS card memory must still land inside one of this card's bars, which is what stops
         // a caller handing us an arbitrary physical address and getting it mapped.
-        // ⛔ This was narrowed to the framebuffer bar alone, on the reasoning that a user process has no
+        // This was narrowed to the framebuffer bar alone, on the reasoning that a user process has no
         // business holding a writable mapping of the register file. The display stack disagrees: measured
         // on the test Mac, CoreDisplay maps phys 0x80bb0000 +0x10000 and +0x1000, which live in bar0, and
         // refusing them made WindowServer abort in CoreDisplay_CreateDisplayForCGXDisplayDevice and

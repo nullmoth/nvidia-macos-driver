@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.4
+
+- Hardware H.264 and HEVC video encode on RTX 20 (Turing) and RTX 30 (Ampere) cards, selected automatically per card; earlier builds used the hardware encoder on RTX 50 only.
+- Security hardening: caller values are bounded, each client is serialised, and kernel addresses, registers and firmware stay private.
+- macOS 26: the system icons and the glass menus and panels draw correctly again.
+- Install from a root-owned copy of the package, with the previous driver kept as an automatic fallback.
+- The kernel driver reads the power source (battery or mains) and reports it to the GPU firmware.
+- Clear a stale shader cache left by an earlier build, which could show a black screen at login after an update.
+- A boot counts as good once the desktop is up.
+
 ## 2.3.6
 
 Desktop and windows
