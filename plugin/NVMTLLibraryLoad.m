@@ -296,6 +296,47 @@ static BOOL nvmtl_dir_writable(NSString *d) {
     if (ok) unlink(probe.fileSystemRepresentation);
     return ok;
 }
+// A cache entry's name carries the build of the translator that made it, so after a driver update none of the older
+// entries can ever be found again: they are dead weight, and the first login after an update pays to translate
+// everything from scratch while they sit there. The folder is swept once per process, on a background queue, so no
+// frame waits for it.
+// Measured on one machine: the window server's cache held 2,672 entries from seven translator builds (709 MB together
+// with the AIR cache) of which 372 were usable, and the login after an update spent 107 s at 79% CPU in translation
+// with nothing on screen. The size cap had never noticed, because the total stayed below it.
+// The sweep must not run before the translator has been opened. Until then the build tag is "untagged", nothing would
+// match it, and a cache the running driver can use would be deleted.
+static void nvmtl_spvcache_drop_stale(const char *dirc) {
+    if (!dirc || !strcmp(gXlateTag, "untagged")) {
+        nvlog("spvcache: stale-tag sweep SKIPPED - the translator has no cache tag yet; nothing was deleted");
+        return;
+    }
+    char suffix[128];
+    snprintf(suffix, sizeof suffix, ".%s.c3.spv", gXlateTag);
+    const size_t sn = strlen(suffix);
+    DIR *eh = opendir(dirc);
+    if (!eh) {
+        nvlog("spvcache: stale-tag sweep CANNOT READ %s: %s - entries from older drivers are left in place",
+              dirc, strerror(errno));
+        return;
+    }
+    unsigned long gone = 0, kept = 0, failed = 0;
+    unsigned long long freed = 0;
+    const struct dirent *de;
+    while ((de = readdir(eh)) != NULL) {
+        const size_t n = strlen(de->d_name);
+        if (n < 7 || strcmp(de->d_name + n - 7, ".c3.spv") != 0) continue;   /* not one of ours */
+        if (n >= sn && strcmp(de->d_name + n - sn, suffix) == 0) { kept++; continue; }
+        char full[1200];
+        if (snprintf(full, sizeof full, "%s/%s", dirc, de->d_name) >= (int)sizeof full) continue;
+        struct stat st;
+        const unsigned long long sz = (stat(full, &st) == 0) ? (unsigned long long)st.st_size : 0;
+        if (unlink(full) == 0) { gone++; freed += sz; } else failed++;
+    }
+    closedir(eh);
+    if (gone || failed)
+        nvlog("spvcache: dropped %lu entries / %llu MiB left by earlier drivers (%lu match %s, %lu could not be removed)",
+              gone, freed >> 20, kept, gXlateTag, failed);
+}
 static NSString *nvmtl_spvcache_dir(void) {
     static NSString *dir; static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -304,6 +345,13 @@ static NSString *nvmtl_spvcache_dir(void) {
         if (nvmtl_dir_writable(beside)) dir = beside;
         else if (nvmtl_dir_writable(tmp)) { dir = tmp; nvlog("spvcache: %s is not writable here - caching in %s", beside.UTF8String, tmp.UTF8String); }
         else nvlog("spvcache: no writable folder in this process (%s, %s) - translated shaders are not cached", beside.UTF8String, tmp.UTF8String);
+        if (dir && !getenv("NVMTL_SPVCACHE_KEEP_STALE")) {
+            NSString *chosen = dir;
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                char dirc[1024];
+                if ([chosen getFileSystemRepresentation:dirc maxLength:sizeof dirc]) nvmtl_spvcache_drop_stale(dirc);
+            });
+        }
     });
     return dir;
 }
