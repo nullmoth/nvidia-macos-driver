@@ -309,7 +309,7 @@ static void nvmtl_nvenc_register(void)
 // at about 5 ms where the library we ship takes about 12, and it runs on Turing, Ampere and Ada,
 // which nvmtl_nvenc_register above turns away for not being Blackwell.
 // Off unless NVMTL_NVENCVT names this process (or is 1), from nvrm610.conf or the environment.
-// ⛔ This loads code into every app that encodes, so the library and the directory holding it must be
+// This loads code into every app that encodes, so the library and the directory holding it must be
 // ours and nobody else's. The firmware taught this: it used to sit in /Users/Shared, which is mode
 // 1777, and the only permission step was a chmod that adds read bits and never takes write away, so
 // a directory left there by any user was adopted as-is. A path anyone can write is not a path you can
