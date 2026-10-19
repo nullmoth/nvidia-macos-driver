@@ -8,6 +8,9 @@
 extern "C" {
 #include "nvlink_os.h"
 }
+#include <IOKit/IOLib.h>
+
+extern "C" void nv_xnu_power_state(bool *acPlugged, bool *haveBattery);   // nv_xnu_power.cpp
 
 extern "C" {
 
@@ -35,10 +38,17 @@ __attribute__((weak)) NV_STATUS NV_API_CALL nv_acpi_dsm_method(nv_state_t *, NvU
     return NV_ERR_NOT_SUPPORTED;
 }
 
-__attribute__((weak)) NV_STATUS NV_API_CALL nv_acpi_get_powersource(NvU32 *)
+// Answered for real in nv_xnu_power.cpp: a mobile GPU picks its clock and power policy from this, and it used to be
+// told "not supported" on every start and every wake.
+NV_STATUS NV_API_CALL nv_acpi_get_powersource(NvU32 *ac_plugged)
 {
-    NV_XNU_STUB_HIT("nv_acpi_get_powersource");
-    return NV_ERR_NOT_SUPPORTED;
+    if (!ac_plugged) return NV_ERR_INVALID_ARGUMENT;
+    // A read of what the last registry walk found. The firmware asks this with its own locks held, so nothing here
+    // may take another lock, allocate, or touch the registry.
+    bool ac = true, haveBattery = false;
+    nv_xnu_power_state(&ac, &haveBattery);
+    *ac_plugged = ac ? 1 : 0;
+    return NV_OK;
 }
 
 __attribute__((weak)) NvBool NV_API_CALL nv_acpi_is_battery_present(void)
