@@ -102,7 +102,7 @@ typedef struct { int unused; } nvmtl_inflight;
 @interface NVMTLSubmissionPart : NSObject { @public
     Commands commands; NSSet *resources; NSArray *surfaces, *scratch, *signals;
     id waitEvent, signalEvent; uint64_t value;
-    BOOL waitFolded, aheadEmpty; int aheadFailed; unsigned encoders;
+    BOOL waitFolded, aheadEmpty, claimed; int aheadFailed; unsigned encoders;
     nvmtl_inflight *inflight;
     NSArray<NVMTLBuffer *> *copyInputs; BOOL copyInputsPrepared, hasHostCopies;
 } @end
