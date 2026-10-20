@@ -20,6 +20,32 @@
 #define NVRM_GUARD_VAR "nullmoth-nv-starts"
 #define NVRM_GUARD_OK_VAR "nullmoth-nv-ok"
 #define NVRM_GUARD_LIMIT 2
+#define NVRM_BACKLIGHT_VAR "nullmoth-backlight"
+
+static inline bool nvrm_backlight_read(IORegistryEntry *options, unsigned char *level)
+{
+    if (!options || !level) return false;
+    OSObject *o = options->copyProperty(NVRM_BACKLIGHT_VAR);
+    OSData *d = OSDynamicCast(OSData, o);
+    bool valid = d && d->getLength() == 1;
+    unsigned char value = valid ? *(const unsigned char *)d->getBytesNoCopy() : 0;
+    if (o) o->release();
+    if (!valid || value > 100) return false;
+    *level = value;
+    return true;
+}
+
+static inline bool nvrm_backlight_write(IORegistryEntry *options, unsigned char level)
+{
+    if (!options || level > 100) return false;
+    unsigned char current;
+    if (nvrm_backlight_read(options, &current) && current == level) return true;
+    OSData *d = OSData::withBytes(&level, 1);
+    if (!d) return false;
+    bool ok = options->setProperty(NVRM_BACKLIGHT_VAR, d);
+    d->release();
+    return ok;
+}
 
 static inline unsigned nvrm_guard_starts(IORegistryEntry *options)
 {
