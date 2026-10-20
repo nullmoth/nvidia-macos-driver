@@ -27,6 +27,15 @@
 #include <libkern/c++/OSData.h>
 #include <libkern/OSAtomic.h>
 #include "../nvrm_eld.h"
+
+// Every callback this driver schedules runs one at a time. A plain thread_call that is entered again while it is still
+// running starts again on another thread, so a vblank or cursor callback stuck behind the display gate began a new
+// thread on every vblank until the 'high' thread_call group reached its 500-thread cap and the kernel panicked (#295).
+// THREAD_CALL_OPTIONS_ONCE folds those entries into one more run after the current one returns.
+static inline thread_call_t nvrmfbCall(thread_call_func_t fn, thread_call_param_t param)
+{
+    return thread_call_allocate_with_options(fn, param, THREAD_CALL_PRIORITY_HIGH, THREAD_CALL_OPTIONS_ONCE);
+}
 #include "nvrm-hud.h"
 #include "nvrm-fb-safety.h"
 #include "nvrm-allocation-table.h"
@@ -156,7 +165,7 @@ NVRMBacklightHandler *NVRMBacklightHandler::withRM(IOService *rm, NvU32 level)
     if (!h || !h->init()) { OSSafeReleaseNULL(h); return nullptr; }
     h->fRM = rm; rm->retain();
     h->fFn = OSSymbol::withCStringNoCopy("NVRMBacklight");
-    h->fApply = thread_call_allocate(applyFire, h);
+    h->fApply = nvrmfbCall(applyFire, h);
     h->fLevel = level <= 100 ? (SInt32)level : 100;
     if (!h->fFn || !h->fApply) { h->release(); return nullptr; }
     return h;
@@ -1299,7 +1308,7 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
             fb->adoptSwappedDisplay();
             // the framework's connect-change path re-reads the EDID (getDDCBlock), the modes and the display's name,
             // as it does when a monitor is plugged into a real Mac; the head is lit first so it re-probes a live display
-            if (!gConnectNotify) gConnectNotify = thread_call_allocate(connectNotifyFire, nullptr);
+            if (!gConnectNotify) gConnectNotify = nvrmfbCall(connectNotifyFire, nullptr);
             uint64_t d; clock_interval_to_deadline(500, kMillisecondScale, &d);
             if (gConnectNotify) thread_call_enter1_delayed(gConnectNotify, fb, d);
         }
@@ -1769,7 +1778,7 @@ bool NVRMNVDAFramebuffer::cursorInit()
         return false;
     }
     if (!fCurStateLock) fCurStateLock = IOSimpleLockAlloc();
-    if (!fCursorCall) fCursorCall = thread_call_allocate(cursorFire, this);
+    if (!fCursorCall) fCursorCall = nvrmfbCall(cursorFire, this);
     if (!fCurStateLock || !fCursorCall) { FBLOG("cursor: lock or thread call allocation FAILED"); return false; }
     NvU32 dim = fCurMaxPx;
     if (dim > 256) dim = 256;
@@ -2219,7 +2228,7 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
           (unsigned long long)(fBarLen >> 20), (unsigned long long)fBar1Base,
           (unsigned long long)(nvrmVramBudget(fBarLen) >> 20));
     if (fIndex == 0 && gFB != this) { retain(); gFB = this; }
-    if (fIndex == 0 && !gHotplug) gHotplug = thread_call_allocate(hotplugFire, nullptr);
+    if (fIndex == 0 && !gHotplug) gHotplug = nvrmfbCall(hotplugFire, nullptr);
     // WhateverGreen (with Lilu) replaces IOFramebuffer::initFB. Unless boot-arg gfxrst=4 is set, the first initFB of any
     // framebuffer copies the boot console from the address WhateverGreen saved at boot. macOS frees that mapping when
     // the console moves (to a framebuffer, or to a new PCI window), and the copy then faults: a kernel panic in
@@ -2246,7 +2255,7 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     // gDpy and re-registered the idle nub). Such an instance has to fire the framework's connect handler once its head
     // has a mode -- see connectNotifyFire and enableController.
     fHotplugBorn = (gNDpyBoot >= 0 && (int)fIndex >= gNDpyBoot);
-    if (fHotplugBorn && !gConnectNotify) gConnectNotify = thread_call_allocate(connectNotifyFire, nullptr);
+    if (fHotplugBorn && !gConnectNotify) gConnectNotify = nvrmfbCall(connectNotifyFire, nullptr);
     if (fHotplugBorn) FBLOG("fb%u: a display appeared after boot -- the connect interrupt will be fired once the head has a mode", fIndex);
     fPhysForVa = (nvrm_phys_for_va_t)(uintptr_t)propU64(provider, "phys-for-va");
     if (!fKms || !fPhysForVa || !fKms->getFlipPendingStatus || !fKms->dupMemory) { FBLOG("nub lacks nvkms-kapi/phys-for-va properties"); return false; }
@@ -2276,18 +2285,18 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     }
     fSleepTap = addFramebufferNotification(&NVRMNVDAFramebuffer::sleepTap, this, nullptr);
     if (!fSleepTap) FBLOG("sleep/wake notification tap not registered - a wake after dark wakes may leave the accelerator off");
-    fVblTimer = thread_call_allocate(vblFire, this);
+    fVblTimer = nvrmfbCall(vblFire, this);
     if (fVblTimer) { uint64_t d; clock_interval_to_deadline(16667, kMicrosecondScale, &d); scheduleCall(fVblTimer, d); }
     FBLOG("vbl timer %s", fVblTimer ? "armed (fallback)" : "ALLOCATE FAILED");
-    fHwVblCall = thread_call_allocate(hwVblDeliver, this);
+    fHwVblCall = nvrmfbCall(hwVblDeliver, this);
     UInt32 hwvblArg = 1; PE_parse_boot_argn("nvhwvbl", &hwvblArg, sizeof hwvblArg);
     fHwVblWanted = hwvblArg && fHwVblCall && fKms && fDev && fKms->registerVblankIntrCallback && fHead < 8;
     FBLOG("hw vblank on head %u: %s", fHead, !hwvblArg ? "OFF (boot-arg nvhwvbl=0) - the timer is the VBL"
                                        : fHwVblWanted ? "deferred until NVKMS latches a flip on this head" : "not available - the timer stays the VBL");
-    fReflip = thread_call_allocate(reflipFire, this);
-    fGpuWake = thread_call_allocate(gpuWakeFire, this);
+    fReflip = nvrmfbCall(reflipFire, this);
+    fGpuWake = nvrmfbCall(gpuWakeFire, this);
     FBLOG("reflip keep-alive NOT armed: enableController's modeset owns the head, no boot-time re-syncs");
-    fBars = thread_call_allocate(barsFire, this);
+    fBars = nvrmfbCall(barsFire, this);
     uint32_t hudGate = 0;
     if (fBars && PE_parse_boot_argn("nvhud", &hudGate, sizeof hudGate) && hudGate) {
         uint64_t d; clock_interval_to_deadline(45, kSecondScale, &d);
@@ -2296,11 +2305,11 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     } else {
         FBLOG("probe grid + HUD OFF -- macOS only (add nvhud=1 to boot-args to show them)");
     }
-    fHeadProbe = thread_call_allocate(headProbeFire, this);
+    fHeadProbe = nvrmfbCall(headProbeFire, this);
     FBLOG("head probe retired (answered: we own head %u)", fHead);
     uint32_t sampleGate = 0;
     if (PE_parse_boot_argn("nvfbsample", &sampleGate, sizeof sampleGate) && sampleGate) {
-        fSampler = thread_call_allocate(sampleFire, this);
+        fSampler = nvrmfbCall(sampleFire, this);
         if (fSampler) { uint64_t deadline; clock_interval_to_deadline(10, kSecondScale, &deadline); scheduleCall(fSampler, deadline); }
         FBLOG("pixel sampler ARMED (boot-arg nvfbsample=1): every 10 s");
     } else {
