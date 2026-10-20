@@ -148,6 +148,7 @@ class NVRMBacklightHandler : public IODisplayParameterHandler {
     thread_call_t fApply = nullptr;
     volatile SInt32 fPending = -1;
     SInt32 fLevel = 100;
+    volatile SInt32 fUserLevel = 100;
     static void applyFire(thread_call_param_t me, thread_call_param_t);
 public:
     static NVRMBacklightHandler *withRM(IOService *rm, NvU32 level);
@@ -167,6 +168,7 @@ NVRMBacklightHandler *NVRMBacklightHandler::withRM(IOService *rm, NvU32 level)
     h->fFn = OSSymbol::withCStringNoCopy("NVRMBacklight");
     h->fApply = nvrmfbCall(applyFire, h);
     h->fLevel = level <= 100 ? (SInt32)level : 100;
+    h->fUserLevel = h->fLevel;
     if (!h->fFn || !h->fApply) { h->release(); return nullptr; }
     return h;
 }
@@ -201,10 +203,16 @@ bool NVRMBacklightHandler::setDisplay(IODisplay *display)
 
 // User changes arrive with the parameter's own { min, max, value } (IODisplay::setForKey stores the value);
 // AppleBacklightDisplay's power states (dim, display sleep, lid) pass the whole IODisplayParameters.
-bool NVRMBacklightHandler::doIntegerSet(OSDictionary *, const OSSymbol *paramName, UInt32 value)
+bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *paramName, UInt32 value)
 {
     if (paramName != gIODisplayBrightnessKey && paramName != gIODisplayLinearBrightnessKey) return false;
-    fPending = value > 100 ? 100 : (SInt32)value;
+    SInt32 level = value > 100 ? 100 : (SInt32)value;
+    if (params && params->getObject(gIODisplayValueKey)) __atomic_store_n(&fUserLevel, level, __ATOMIC_SEQ_CST);
+    else {
+        SInt32 target = OSAddAtomic(0, &fUserLevel);
+        if (level > target) level = target;
+    }
+    fPending = level;
     thread_call_enter(fApply);
     return true;
 }
