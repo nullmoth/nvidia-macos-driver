@@ -2006,7 +2006,12 @@ BOOL nvmtl_needs_visible_link(NSString *air, NSString *why)
         if (xlate_vrefs(air.UTF8String, &out, &len, e, sizeof e) == 0) {
             id refs = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:out length:len] options:0 error:NULL];
             xlate_free(out, len);
-            if ([refs isKindOfClass:[NSArray class]]) return [(NSArray *)refs count] > 0;
+            // the query lists direct references only; a function that calls through a visible or intersection
+            // function table has none, and nvmtl_link_stage links it from the table candidates
+            if ([refs isKindOfClass:[NSArray class]])
+                return [(NSArray *)refs count] > 0
+                    || [air rangeOfString:@"!\"air.visible_function_table\""].location != NSNotFound
+                    || [air rangeOfString:@"!\"air.intersection_function_table\""].location != NSNotFound;
         }
     }
     return why && ([why rangeOfString:@"visible function reference"].location != NSNotFound
