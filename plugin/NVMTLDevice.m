@@ -209,6 +209,31 @@ static bool nvmtl_gpu_profile_string(CFStringRef key, char *out, size_t n)
     IOObjectRelease(it);
     return ok;
 }
+// One number from the same profile (the engine classes); 0 when the profile or the key is missing.
+static unsigned nvmtl_gpu_profile_number(CFStringRef key)
+{
+    unsigned out = 0;
+    io_iterator_t it = IO_OBJECT_NULL;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOPCIDevice"), &it) != KERN_SUCCESS) return 0;
+    for (io_object_t o; !out && (o = IOIteratorNext(it)); IOObjectRelease(o)) {
+        CFTypeRef d = IORegistryEntryCreateCFProperty(o, CFSTR("nvrm-gpu-profile"), kCFAllocatorDefault, 0);
+        if (!d) continue;
+        if (CFGetTypeID(d) == CFDictionaryGetTypeID()) {
+            CFTypeRef v = CFDictionaryGetValue((CFDictionaryRef)d, key);
+            if (v && CFGetTypeID(v) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)v, kCFNumberIntType, &out);
+        }
+        CFRelease(d);
+    }
+    IOObjectRelease(it);
+    return out;
+}
+// GTX 16 cards come in two encoder kinds. TU116 (GTX 1660, 1660 SUPER, 1660 Ti, 1650 SUPER) reports NVENC class 0xC4B7,
+// the same class as the RTX 20 chips, so it takes the Turing libraries. TU117 (GTX 1650) reports no NVENC class at all,
+// so it keeps Apple's encoder.
+static bool nvmtl_gtx16_has_turing_nvenc(void)
+{
+    return nvmtl_gpu_profile_number(CFSTR("class-nvenc")) == 0xC4B7;
+}
 static bool nvmtl_video_is_blackwell(void)
 {
     if (g_video_blackwell >= 0) return g_video_blackwell == 1;
@@ -235,6 +260,7 @@ static const char *nvmtl_nvenc_hevc_library_for_this_gpu(void)
     if (!strcmp(gen, "Blackwell")) return "libnvenc_hevc.dylib";
     if (!strcmp(gen, "Ampere")) return "libnvenc_hevc_ga10x.dylib";
     if (!strcmp(gen, "Turing")) return "libnvenc_hevc_tu10x.dylib";
+    if (!strcmp(gen, "Turing GTX 16") && nvmtl_gtx16_has_turing_nvenc()) return "libnvenc_hevc_tu10x.dylib";
     return NULL;
 }
 static const char *nvmtl_nvenc_library_for_this_gpu(void)
@@ -247,6 +273,7 @@ static const char *nvmtl_nvenc_library_for_this_gpu(void)
     if (!strcmp(gen, "Blackwell")) return "libnvenc_h264.dylib";
     if (!strcmp(gen, "Ampere")) return "libnvenc_h264_ga10x.dylib";
     if (!strcmp(gen, "Turing")) return "libnvenc_h264_tu10x.dylib";
+    if (!strcmp(gen, "Turing GTX 16") && nvmtl_gtx16_has_turing_nvenc()) return "libnvenc_h264_tu10x.dylib";
     return NULL;
 }
 static void nvmtl_nvdec_register(void)
