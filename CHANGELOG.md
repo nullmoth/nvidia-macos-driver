@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.4
+
+- Hardware H.264 and HEVC encode on GTX 16 cards with the Turing encoder: GTX 1660, 1660 SUPER, 1660 Ti and 1650 SUPER use the same encoders as RTX 20. The GTX 1650 reports no hardware encoder to the driver and keeps Apple's.
+- Shaders that call functions through a visible or intersection function table load again; they returned nothing since 2.3.6 (PR #318, thanks watchthelight).
+
 ## 2.4.3
 
 - Fix a desktop freeze followed by a kernel panic ("thread_call group 'high' reached max thread cap") a few seconds to a few minutes after logging in (#295). The display driver started a new kernel thread for every vblank and every cursor move while an earlier one was still waiting; each of its callbacks now runs one at a time.
