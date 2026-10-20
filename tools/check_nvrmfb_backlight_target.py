@@ -19,6 +19,7 @@ assert 'h->fUserLevel = h->fLevel;' in source
 fixture = r'''
 #include <cassert>
 #include <cstdint>
+#include <map>
 using SInt32 = int32_t;
 using UInt32 = uint32_t;
 struct OSSymbol {};
@@ -26,7 +27,13 @@ struct Call { unsigned entered = 0; };
 using thread_call_t = Call *;
 struct OSDictionary {
     bool hasValue = false;
+    std::map<const OSSymbol *, UInt32> values;
     const OSSymbol *getObject(const OSSymbol *) { return hasValue ? (const OSSymbol *)this : nullptr; }
+};
+struct IODisplay {
+    static bool setParameter(OSDictionary *params, const OSSymbol *key, SInt32 value) {
+        params->values[key] = (UInt32)value; return true;
+    }
 };
 static OSSymbol brightnessKey, linearKey, otherKey, valueKey;
 static const OSSymbol *gIODisplayBrightnessKey = &brightnessKey;
@@ -42,6 +49,7 @@ struct NVRMBacklightHandler {
     volatile SInt32 fPending = -1;
     volatile SInt32 fUserLevel = 100;
     volatile SInt32 fPersistPending = -1;
+    OSDictionary *fParameters = nullptr;
     bool doIntegerSet(OSDictionary *, const OSSymbol *, UInt32);
 };
 const OSSymbol *NVRMBacklightHandler::sBrightnessProbe = &probeKey;
@@ -50,7 +58,10 @@ const OSSymbol *NVRMBacklightHandler::sLinearBrightnessProbe = &linearProbeKey;
 checks = r'''
 int main() {
     NVRMBacklightHandler h;
-    OSDictionary user{true}, power{false};
+    OSDictionary user, power;
+    user.hasValue = true;
+    OSDictionary parameters;
+    h.fParameters = &parameters;
     assert(h.doIntegerSet(&user, gIODisplayLinearBrightnessKey, 35));
     assert(h.fUserLevel == 35 && h.fPersistPending == 35 && h.fPending == 35 && h.call.entered == 1);
     assert(h.doIntegerSet(&power, gIODisplayBrightnessKey, 100));
@@ -60,8 +71,21 @@ int main() {
     assert(h.doIntegerSet(&user, gIODisplayBrightnessKey, 64));
     assert(h.fUserLevel == 64 && h.fPersistPending == 64 && h.fPending == 64 && h.call.entered == 4);
     assert(!h.doIntegerSet(&user, &otherKey, 80) && h.fPending == 64 && h.call.entered == 4);
-    assert(h.doIntegerSet(&power, NVRMBacklightHandler::sLinearBrightnessProbe, 40));
-    assert(h.fUserLevel == 40 && h.fPersistPending == 40 && h.fPending == 40 && h.call.entered == 5);
+    // GetUserBrightness writes a conversion probe with a potentially stale value (18 on the affected laptop).
+    assert(h.doIntegerSet(&user, NVRMBacklightHandler::sLinearBrightnessProbe, 18));
+    assert(parameters.values[NVRMBacklightHandler::sBrightnessProbe] == 18);
+    assert(h.fUserLevel == 64 && h.fPersistPending == 64 && h.fPending == 64 && h.call.entered == 4);
+    // RefreshUserBrightness converts in the other direction before sending the actual linear request.
+    assert(h.doIntegerSet(&user, NVRMBacklightHandler::sBrightnessProbe, 83));
+    assert(parameters.values[NVRMBacklightHandler::sLinearBrightnessProbe] == 83);
+    assert(h.fUserLevel == 64 && h.fPending == 64 && h.call.entered == 4);
+    assert(h.doIntegerSet(&user, gIODisplayLinearBrightnessKey, 83));
+    assert(h.fUserLevel == 83 && h.fPersistPending == 83 && h.fPending == 83 && h.call.entered == 5);
+    assert(h.doIntegerSet(&user, NVRMBacklightHandler::sLinearBrightnessProbe, 18));
+    assert(h.fUserLevel == 83 && h.fPersistPending == 83 && h.fPending == 83 && h.call.entered == 5);
+    assert(h.doIntegerSet(&power, gIODisplayBrightnessKey, 100) && h.fPending == 83);
+    assert(h.doIntegerSet(&user, NVRMBacklightHandler::sBrightnessProbe, 500));
+    assert(parameters.values[NVRMBacklightHandler::sLinearBrightnessProbe] == 100 && h.fUserLevel == 83);
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
@@ -70,4 +94,4 @@ with tempfile.TemporaryDirectory() as directory:
     test.write_text(fixture + method + checks, encoding='utf-8')
     subprocess.run(['clang++', '-std=c++17', '-Wall', '-Wextra', str(test), '-o', str(path / 'check')], check=True)
     subprocess.run([str(path / 'check')], check=True)
-print('PASS: production doIntegerSet preserves the user target, bounds temporary power requests, accepts probe writes as the user target, and queues asynchronously; the 5% floor remains in applyFire')
+print('PASS: conversion probes update their counterpart without changing the pending/user/persisted target; real requests remain asynchronous and power requests bounded; 5% floor unchanged')
