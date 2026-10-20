@@ -39,6 +39,7 @@ struct NVRMBacklightHandler {
     thread_call_t fApply = &call;
     volatile SInt32 fPending = -1;
     volatile SInt32 fUserLevel = 100;
+    volatile SInt32 fPersistPending = -1;
     bool doIntegerSet(OSDictionary *, const OSSymbol *, UInt32);
 };
 '''
@@ -47,13 +48,13 @@ int main() {
     NVRMBacklightHandler h;
     OSDictionary user{true}, power{false};
     assert(h.doIntegerSet(&user, gIODisplayLinearBrightnessKey, 35));
-    assert(h.fUserLevel == 35 && h.fPending == 35 && h.call.entered == 1);
+    assert(h.fUserLevel == 35 && h.fPersistPending == 35 && h.fPending == 35 && h.call.entered == 1);
     assert(h.doIntegerSet(&power, gIODisplayBrightnessKey, 100));
-    assert(h.fUserLevel == 35 && h.fPending == 35 && h.call.entered == 2);
+    assert(h.fUserLevel == 35 && h.fPersistPending == 35 && h.fPending == 35 && h.call.entered == 2);
     assert(h.doIntegerSet(&power, gIODisplayBrightnessKey, 12));
-    assert(h.fUserLevel == 35 && h.fPending == 12 && h.call.entered == 3);
+    assert(h.fUserLevel == 35 && h.fPersistPending == 35 && h.fPending == 12 && h.call.entered == 3);
     assert(h.doIntegerSet(&user, gIODisplayBrightnessKey, 64));
-    assert(h.fUserLevel == 64 && h.fPending == 64 && h.call.entered == 4);
+    assert(h.fUserLevel == 64 && h.fPersistPending == 64 && h.fPending == 64 && h.call.entered == 4);
     assert(!h.doIntegerSet(&user, &otherKey, 80) && h.fPending == 64 && h.call.entered == 4);
 }
 '''

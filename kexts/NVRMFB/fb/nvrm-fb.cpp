@@ -149,6 +149,8 @@ class NVRMBacklightHandler : public IODisplayParameterHandler {
     volatile SInt32 fPending = -1;
     SInt32 fLevel = 100;
     volatile SInt32 fUserLevel = 100;
+    volatile SInt32 fPersistPending = -1;
+    SInt32 fRestoreLevel = -1;
     static void applyFire(thread_call_param_t me, thread_call_param_t);
 public:
     static NVRMBacklightHandler *withRM(IOService *rm, NvU32 level);
@@ -168,7 +170,15 @@ NVRMBacklightHandler *NVRMBacklightHandler::withRM(IOService *rm, NvU32 level)
     h->fFn = OSSymbol::withCStringNoCopy("NVRMBacklight");
     h->fApply = nvrmfbCall(applyFire, h);
     h->fLevel = level <= 100 ? (SInt32)level : 100;
-    h->fUserLevel = h->fLevel;
+    unsigned char saved;
+    IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
+    if (options && nvrm_backlight_read(options, &saved)) {
+        h->fUserLevel = saved;
+        h->fRestoreLevel = saved;
+    } else {
+        h->fUserLevel = h->fLevel;
+    }
+    OSSafeReleaseNULL(options);
     if (!h->fFn || !h->fApply) { h->release(); return nullptr; }
     return h;
 }
@@ -192,11 +202,17 @@ bool NVRMBacklightHandler::setDisplay(IODisplay *display)
     OSSafeReleaseNULL(old);
     if (!params) return false;
     IODisplay::addParameter(params, gIODisplayBrightnessKey, 0, 100);
-    IODisplay::setParameter(params, gIODisplayBrightnessKey, fLevel);
+    SInt32 initial = fRestoreLevel >= 0 ? fRestoreLevel : fLevel;
+    IODisplay::setParameter(params, gIODisplayBrightnessKey, initial);
     IODisplay::addParameter(params, gIODisplayLinearBrightnessKey, 0, 100);
-    IODisplay::setParameter(params, gIODisplayLinearBrightnessKey, fLevel);
+    IODisplay::setParameter(params, gIODisplayLinearBrightnessKey, initial);
     display->setProperty(gIODisplayParametersKey, params);
     params->release();
+    if (fRestoreLevel >= 0) {
+        fPending = fRestoreLevel;
+        fRestoreLevel = -1;
+        thread_call_enter(fApply);
+    }
     BLLOG("backlight: brightness parameters on %s, panel at %d%%", display->getName(), (int)fLevel);
     return true;
 }
@@ -207,7 +223,10 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
 {
     if (paramName != gIODisplayBrightnessKey && paramName != gIODisplayLinearBrightnessKey) return false;
     SInt32 level = value > 100 ? 100 : (SInt32)value;
-    if (params && params->getObject(gIODisplayValueKey)) __atomic_store_n(&fUserLevel, level, __ATOMIC_SEQ_CST);
+    if (params && params->getObject(gIODisplayValueKey)) {
+        __atomic_store_n(&fUserLevel, level, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&fPersistPending, level, __ATOMIC_SEQ_CST);
+    }
     else {
         SInt32 target = OSAddAtomic(0, &fUserLevel);
         if (level > target) level = target;
@@ -225,8 +244,17 @@ void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
     if (v < 0) return;
     NvU32 percent = (NvU32)(v < kNVRMMinBacklight ? kNVRMMinBacklight : v);
     IOReturn r = me->fRM->callPlatformFunction(me->fFn, false, &percent, (void *)1, NULL, NULL);
-    if (r == kIOReturnSuccess) me->fLevel = v;
-    else BLLOG("backlight: setting %u%% failed (0x%x)", (unsigned)percent, r);
+    if (r == kIOReturnSuccess) {
+        me->fLevel = v;
+        SInt32 target = OSAddAtomic(0, &me->fPersistPending);
+        if (target == v && OSAddAtomic(0, &me->fUserLevel) == target) {
+            IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
+            bool saved = options && nvrm_backlight_write(options, (unsigned char)target);
+            OSSafeReleaseNULL(options);
+            if (saved) OSCompareAndSwap((UInt32)target, (UInt32)-1, (volatile UInt32 *)&me->fPersistPending);
+            else BLLOG("backlight: saving %d%% target failed", (int)target);
+        }
+    } else BLLOG("backlight: setting %u%% failed (0x%x)", (unsigned)percent, r);
 }
 
 // 1 once this boot's guard clear happened (a head lit, or nothing to light): NVRM reads it (debug.nvrmfb_guard_cleared)
