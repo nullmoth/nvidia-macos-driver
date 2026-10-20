@@ -384,11 +384,16 @@ static NSString *nvmtl_spvcache_path(NSData *air, NSString *stage) {
 @implementation NVMTLAirDigest
 @end
 static const void *NVMTL_AIRDIGEST_KEY = &NVMTL_AIRDIGEST_KEY;
+static const void *NVMTL_AIRTEXT_KEY = &NVMTL_AIRTEXT_KEY;
+// Marks text nvmtl_air_to_text made; it is never edited, so state can be kept on it.
+static NSString *nvmtl_air_text_made(NSString *s) {
+    if (s.length >= 4096) objc_setAssociatedObject(s, NVMTL_AIRTEXT_KEY, @YES, OBJC_ASSOCIATION_RETAIN);
+    return s;
+}
 static NVMTLAirDigest *nvmtl_air_state(NSString *ll) {
     if (!ll) return nil;
-    // Keep the state only on long strings that cannot change: for a short one the hash costs less than the lookup (and a
-    // tagged-pointer string cannot hold an associated object), and a state kept on a mutable string would go stale.
-    const BOOL cacheable = ll.length >= 4096 && ![ll isKindOfClass:[NSMutableString class]];
+    // Only long strings we marked: every CF-backed string is a kind of NSMutableString, so a class test keeps nothing.
+    const BOOL cacheable = ll.length >= 4096 && objc_getAssociatedObject(ll, NVMTL_AIRTEXT_KEY) != nil;
     NVMTLAirDigest *d = cacheable ? objc_getAssociatedObject(ll, NVMTL_AIRDIGEST_KEY) : nil;
     if (d) return d;
     NSData *air = [ll dataUsingEncoding:NSUTF8StringEncoding];
@@ -627,12 +632,12 @@ static NSString *nvmtl_air_in_memory(NSData *air) {
 static NSString *nvmtl_air_to_text(NSData *air) {
     NSString *cache = nvmtl_aircache_path(air);
     NSString *hit = [NSString stringWithContentsOfFile:cache encoding:NSUTF8StringEncoding error:nil];
-    if (hit.length) { gAirHit++; return hit; }
+    if (hit.length) { gAirHit++; return nvmtl_air_text_made(hit); }
     gAirMiss++;
     NSString *memoryIR = nvmtl_air_in_memory(air);
     if (memoryIR.length) {
         if ([memoryIR writeToFile:cache atomically:YES encoding:NSUTF8StringEncoding error:nil]) gAirStored++;
-        return memoryIR;
+        return nvmtl_air_text_made(memoryIR);
     }
 
     NSString *dir = NSTemporaryDirectory();
@@ -650,7 +655,7 @@ static NSString *nvmtl_air_to_text(NSData *air) {
                                   withIntermediateDirectories:YES attributes:nil error:&mkerr];
         if ([ll writeToFile:cache atomically:YES encoding:NSUTF8StringEncoding error:nil]) gAirStored++;
     }
-    return ll;
+    return nvmtl_air_text_made(ll);
 }
 
 static BOOL nvmtl_entry_of(NSString *ll, NSString **name, NSString **stage) {
