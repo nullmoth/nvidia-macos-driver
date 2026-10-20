@@ -209,30 +209,14 @@ static bool nvmtl_gpu_profile_string(CFStringRef key, char *out, size_t n)
     IOObjectRelease(it);
     return ok;
 }
-// One number from the same profile (the engine classes); 0 when the profile or the key is missing.
-static unsigned nvmtl_gpu_profile_number(CFStringRef key)
+// True when the generation the driver published is this one, whatever family follows it. The TU11x cards publish
+// "Turing GTX 16" where the TU10x ones publish plain "Turing", so an exact compare left every GTX 16 card without a
+// hardware encoder. Both GTX 16 chips encode on the Turing libraries: measured on a GTX 1650 (TU117), H.264 and HEVC
+// 5 of 5 frames with no errors, although its profile lists no encoder class (the library allocates the class itself).
+static bool nvmtl_gen_is(const char *gen, const char *name)
 {
-    unsigned out = 0;
-    io_iterator_t it = IO_OBJECT_NULL;
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOPCIDevice"), &it) != KERN_SUCCESS) return 0;
-    for (io_object_t o; !out && (o = IOIteratorNext(it)); IOObjectRelease(o)) {
-        CFTypeRef d = IORegistryEntryCreateCFProperty(o, CFSTR("nvrm-gpu-profile"), kCFAllocatorDefault, 0);
-        if (!d) continue;
-        if (CFGetTypeID(d) == CFDictionaryGetTypeID()) {
-            CFTypeRef v = CFDictionaryGetValue((CFDictionaryRef)d, key);
-            if (v && CFGetTypeID(v) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)v, kCFNumberIntType, &out);
-        }
-        CFRelease(d);
-    }
-    IOObjectRelease(it);
-    return out;
-}
-// GTX 16 cards come in two encoder kinds. TU116 (GTX 1660, 1660 SUPER, 1660 Ti, 1650 SUPER) reports NVENC class 0xC4B7,
-// the same class as the RTX 20 chips, so it takes the Turing libraries. TU117 (GTX 1650) reports no NVENC class at all,
-// so it keeps Apple's encoder.
-static bool nvmtl_gtx16_has_turing_nvenc(void)
-{
-    return nvmtl_gpu_profile_number(CFSTR("class-nvenc")) == 0xC4B7;
+    size_t n = strlen(name);
+    return !strncmp(gen, name, n) && (gen[n] == '\0' || gen[n] == ' ');
 }
 static bool nvmtl_video_is_blackwell(void)
 {
@@ -257,10 +241,9 @@ static const char *nvmtl_nvenc_hevc_library_for_this_gpu(void)
     char gen[32];
     if (!nvmtl_gpu_profile_string(CFSTR("generation"), gen, sizeof gen))
         return nvmtl_video_is_blackwell() ? "libnvenc_hevc.dylib" : NULL;
-    if (!strcmp(gen, "Blackwell")) return "libnvenc_hevc.dylib";
-    if (!strcmp(gen, "Ampere")) return "libnvenc_hevc_ga10x.dylib";
-    if (!strcmp(gen, "Turing")) return "libnvenc_hevc_tu10x.dylib";
-    if (!strcmp(gen, "Turing GTX 16") && nvmtl_gtx16_has_turing_nvenc()) return "libnvenc_hevc_tu10x.dylib";
+    if (nvmtl_gen_is(gen, "Blackwell")) return "libnvenc_hevc.dylib";
+    if (nvmtl_gen_is(gen, "Ampere")) return "libnvenc_hevc_ga10x.dylib";
+    if (nvmtl_gen_is(gen, "Turing")) return "libnvenc_hevc_tu10x.dylib";
     return NULL;
 }
 static const char *nvmtl_nvenc_library_for_this_gpu(void)
@@ -270,10 +253,9 @@ static const char *nvmtl_nvenc_library_for_this_gpu(void)
         // No profile: fall back to the name test, which only recognises Blackwell.
         return nvmtl_video_is_blackwell() ? "libnvenc_h264.dylib" : NULL;
     }
-    if (!strcmp(gen, "Blackwell")) return "libnvenc_h264.dylib";
-    if (!strcmp(gen, "Ampere")) return "libnvenc_h264_ga10x.dylib";
-    if (!strcmp(gen, "Turing")) return "libnvenc_h264_tu10x.dylib";
-    if (!strcmp(gen, "Turing GTX 16") && nvmtl_gtx16_has_turing_nvenc()) return "libnvenc_h264_tu10x.dylib";
+    if (nvmtl_gen_is(gen, "Blackwell")) return "libnvenc_h264.dylib";
+    if (nvmtl_gen_is(gen, "Ampere")) return "libnvenc_h264_ga10x.dylib";
+    if (nvmtl_gen_is(gen, "Turing")) return "libnvenc_h264_tu10x.dylib";
     return NULL;
 }
 static void nvmtl_nvdec_register(void)

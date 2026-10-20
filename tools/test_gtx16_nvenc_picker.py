@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Which encoder library a GTX 16 card gets. NVRM names every GTX 16 "Turing GTX 16", so the plain "Turing" match never
-reaches it. TU116 reports NVENC class 0xC4B7 (the RTX 20 class) and takes the Turing libraries; TU117 reports no NVENC
-class and keeps Apple's encoder. The profile line in field logs: TU116 "nvenc 0xc4b7" on 52 boots, TU117 "nvenc 0x0" on 38."""
+"""Which encoder library a GTX 16 card gets. NVRM names every GTX 16 "Turing GTX 16", so an exact "Turing" match never
+reaches it. Both GTX 16 chips take the Turing libraries: on a GTX 1650 (TU117) H.264 and HEVC encoded 5 of 5 frames with
+no errors through them, although that card's profile lists no encoder class. Generations match on their first word."""
 import pathlib
 import re
 import sys
@@ -23,17 +23,15 @@ def body(fn):
     return src[i:src.index('\n}\n', i)]
 
 
-check('NVRM names TU116 and TU117 "Turing GTX 16" and publishes the NVENC class',
-      '"Turing GTX 16" : "Turing"' in nvrm and 'num("class-nvenc", cenc, 32)' in nvrm)
-check('a GTX 16 card qualifies only on NVENC class 0xC4B7',
-      re.search(r'nvmtl_gtx16_has_turing_nvenc\(void\)\s*\{\s*return nvmtl_gpu_profile_number\(CFSTR\("class-nvenc"\)\) == 0xC4B7;', src)
-      is not None)
+check('NVRM names TU116 and TU117 "Turing GTX 16"', '"Turing GTX 16" : "Turing"' in nvrm)
+m = re.search(r'static bool nvmtl_gen_is\(const char \*gen, const char \*name\)\s*\{(.*?)\n\}', src, re.S)
+check('generations match on their first word', m is not None and "gen[n] == ' '" in m.group(1) and "gen[n] == '\\0'" in m.group(1))
+check('no encoder-class gate keeps a TU117 on Apple\'s encoder', 'class-nvenc' not in src)
 for fn, lib in (('nvmtl_nvenc_library_for_this_gpu', 'libnvenc_h264_tu10x.dylib'),
                 ('nvmtl_nvenc_hevc_library_for_this_gpu', 'libnvenc_hevc_tu10x.dylib')):
     b = body(fn)
-    check(f'{fn}: GTX 16 with the Turing class gets {lib}',
-          f'if (!strcmp(gen, "Turing GTX 16") && nvmtl_gtx16_has_turing_nvenc()) return "{lib}";' in b)
-    check(f'{fn}: the RTX 20 match stays exact, so it cannot catch a TU117', 'if (!strcmp(gen, "Turing")) return' in b
-          and 'strncmp(gen, "Turing"' not in b and 'strstr(gen, "Turing")' not in b)
-    check(f'{fn}: anything else falls through to Apple\'s encoder', b.rstrip().endswith('return NULL;'))
+    check(f'{fn}: "Turing" and "Turing GTX 16" both get {lib}', f'if (nvmtl_gen_is(gen, "Turing")) return "{lib}";' in b)
+    check(f'{fn}: no exact compare left on a generation', 'strcmp(gen' not in b)
+    check(f'{fn}: a generation with no library (Ada) falls through to Apple\'s encoder', b.rstrip().endswith('return NULL;')
+          and '"Ada"' not in b)
 sys.exit(1 if fails else 0)
