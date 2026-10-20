@@ -107,7 +107,7 @@ struct IODisplay : IOService {
     bool setProperty(const OSSymbol *, OSDictionary *value) { value->retain(); parameters = value; return true; }
     const char *getName() { return "display"; }
     static void addParameter(OSDictionary *, const OSSymbol *, int, int) {}
-    static void setParameter(OSDictionary *dict, const OSSymbol *key, SInt32 value) { dict->values[key] = (UInt32)value; }
+    static bool setParameter(OSDictionary *dict, const OSSymbol *key, SInt32 value) { dict->values[key] = (UInt32)value; return true; }
 };
 struct IODisplayParameterHandler : OSObject { virtual bool setDisplay(IODisplay *) { return false; } virtual void free() {} };
 using thread_call_t = Call *;
@@ -136,6 +136,7 @@ struct NVRMBacklightHandler : IODisplayParameterHandler {
     volatile SInt32 fUserLevel = 100;
     volatile SInt32 fPersistPending = -1;
     SInt32 fRestoreLevel = -1;
+    OSDictionary *fParameters = nullptr;
     static const OSSymbol *sBrightnessProbe, *sLinearBrightnessProbe;
     bool init() { return true; }
     void release() override { delete this; }
@@ -221,15 +222,33 @@ int main() {
     assert(savedValue() == 46 && hardwareFailure->fPersistPending == 55);
     setSaved(60); resetWrites(); rm.result = kIOReturnSuccess;
     auto probeDriven = NVRMBacklightHandler::withRM(&rm, 60);
+    IODisplay probeDisplay;
+    assert(probeDriven->setDisplay(&probeDisplay));
+    NVRMBacklightHandler::applyFire(probeDriven, nullptr);
     OSDictionary probeParams;
     assert(NVRMBacklightHandler::sLinearBrightnessProbe && NVRMBacklightHandler::sBrightnessProbe);
-    assert(probeDriven->doIntegerSet(&probeParams, NVRMBacklightHandler::sLinearBrightnessProbe, 33));
+    unsigned enters = probeDriven->fApply->enters;
+    assert(probeDriven->doIntegerSet(&probeParams, NVRMBacklightHandler::sLinearBrightnessProbe, 18));
     NVRMBacklightHandler::applyFire(probeDriven, nullptr);
-    assert(rm.lastPercent == 33 && savedValue() == 33 && probeDriven->fUserLevel == 33 && gWrites == 1);
+    assert(probeDisplay.parameters->values[NVRMBacklightHandler::sBrightnessProbe] == 18);
+    assert(rm.lastPercent == 60 && savedValue() == 60 && probeDriven->fUserLevel == 60 && gWrites == 0);
+    assert(probeDriven->fApply->enters == enters && probeDriven->fPersistPending == -1);
     assert(probeDriven->doIntegerSet(&probeParams, NVRMBacklightHandler::sBrightnessProbe, 77));
+    assert(probeDisplay.parameters->values[NVRMBacklightHandler::sLinearBrightnessProbe] == 77);
+    assert(probeDriven->doIntegerSet(&user, gIODisplayLinearBrightnessKey,
+        probeDisplay.parameters->values[NVRMBacklightHandler::sLinearBrightnessProbe]));
     NVRMBacklightHandler::applyFire(probeDriven, nullptr);
-    assert(rm.lastPercent == 77 && savedValue() == 77 && probeDriven->fUserLevel == 77 && gWrites == 2);
-    puts("PASS: extracted withRM/setDisplay/applyFire restore saved targets, preserve temp dim, enforce 0->5 floor, and retain failed writes for retry; probe writes drive the user target.");
+    assert(rm.lastPercent == 77 && savedValue() == 77 && probeDriven->fUserLevel == 77 && gWrites == 1);
+    assert(probeDriven->doIntegerSet(&probeParams, NVRMBacklightHandler::sLinearBrightnessProbe, 18));
+    NVRMBacklightHandler::applyFire(probeDriven, nullptr);
+    assert(rm.lastPercent == 77 && savedValue() == 77 && probeDriven->fUserLevel == 77 && gWrites == 1);
+    auto afterProbeRestart = NVRMBacklightHandler::withRM(&rm, 100);
+    IODisplay afterProbeDisplay;
+    assert(afterProbeRestart->setDisplay(&afterProbeDisplay));
+    assert(afterProbeDisplay.parameters->values[gIODisplayLinearBrightnessKey] == 77);
+    NVRMBacklightHandler::applyFire(afterProbeRestart, nullptr);
+    assert(rm.lastPercent == 77 && gWrites == 1);
+    puts("PASS: extracted restore/apply paths preserve saved targets, temporary dimming, 0->5 floor and failed-write retry; conversion probes neither apply nor persist and do not corrupt restart restoration.");
 }
 '''
 

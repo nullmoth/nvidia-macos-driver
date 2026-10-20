@@ -151,6 +151,7 @@ class NVRMBacklightHandler : public IODisplayParameterHandler {
     volatile SInt32 fUserLevel = 100;
     volatile SInt32 fPersistPending = -1;
     SInt32 fRestoreLevel = -1;
+    OSDictionary *fParameters = nullptr;
     static void applyFire(thread_call_param_t me, thread_call_param_t);
     static const OSSymbol *sBrightnessProbe, *sLinearBrightnessProbe;
 public:
@@ -193,6 +194,7 @@ void NVRMBacklightHandler::free()
     if (fApply) { thread_call_cancel(fApply); while (!thread_call_free(fApply)) { thread_call_cancel(fApply); IOSleep(1); } fApply = nullptr; }
     OSSafeReleaseNULL(fFn);
     OSSafeReleaseNULL(fRM);
+    OSSafeReleaseNULL(fParameters);
     IODisplayParameterHandler::free();
 }
 
@@ -211,14 +213,14 @@ bool NVRMBacklightHandler::setDisplay(IODisplay *display)
     IODisplay::setParameter(params, gIODisplayBrightnessKey, initial);
     IODisplay::addParameter(params, gIODisplayLinearBrightnessKey, 0, 100);
     IODisplay::setParameter(params, gIODisplayLinearBrightnessKey, initial);
-    // CoreDisplay's GetUserBrightness reads the user brightness through these probe parameters; it also drives the
-    // brightness through them once the probe succeeds, so they must exist and behave like a brightness request.
+    // CoreDisplay converts between user and linear brightness by writing one probe and reading the other.
     IODisplay::addParameter(params, sBrightnessProbe, 0, 100);
     IODisplay::setParameter(params, sBrightnessProbe, initial);
     IODisplay::addParameter(params, sLinearBrightnessProbe, 0, 100);
     IODisplay::setParameter(params, sLinearBrightnessProbe, initial);
     display->setProperty(gIODisplayParametersKey, params);
-    params->release();
+    OSSafeReleaseNULL(fParameters);
+    fParameters = params;
     if (fRestoreLevel >= 0) {
         fPending = fRestoreLevel;
         fRestoreLevel = -1;
@@ -236,11 +238,9 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
     if (!probe && paramName != gIODisplayBrightnessKey && paramName != gIODisplayLinearBrightnessKey) return false;
     SInt32 level = value > 100 ? 100 : (SInt32)value;
     if (probe) {
-        __atomic_store_n(&fUserLevel, level, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&fPersistPending, level, __ATOMIC_SEQ_CST);
-        fPending = level;
-        thread_call_enter(fApply);
-        return true;
+        // Both scales use PWM percent here. Conversion must not change the panel or the saved user target.
+        return fParameters && IODisplay::setParameter(fParameters,
+            paramName == sBrightnessProbe ? sLinearBrightnessProbe : sBrightnessProbe, level);
     }
     if (params && params->getObject(gIODisplayValueKey)) {
         __atomic_store_n(&fUserLevel, level, __ATOMIC_SEQ_CST);
