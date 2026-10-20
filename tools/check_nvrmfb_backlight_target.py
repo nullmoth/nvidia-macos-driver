@@ -34,7 +34,9 @@ static const OSSymbol *gIODisplayLinearBrightnessKey = &linearKey;
 static const OSSymbol *gIODisplayValueKey = &valueKey;
 static void thread_call_enter(thread_call_t call) { ++call->entered; }
 static SInt32 OSAddAtomic(SInt32 delta, volatile SInt32 *value) { return __atomic_add_fetch(value, delta, __ATOMIC_SEQ_CST) - delta; }
+static OSSymbol probeKey, linearProbeKey;
 struct NVRMBacklightHandler {
+    static const OSSymbol *sBrightnessProbe, *sLinearBrightnessProbe;
     Call call;
     thread_call_t fApply = &call;
     volatile SInt32 fPending = -1;
@@ -42,6 +44,8 @@ struct NVRMBacklightHandler {
     volatile SInt32 fPersistPending = -1;
     bool doIntegerSet(OSDictionary *, const OSSymbol *, UInt32);
 };
+const OSSymbol *NVRMBacklightHandler::sBrightnessProbe = &probeKey;
+const OSSymbol *NVRMBacklightHandler::sLinearBrightnessProbe = &linearProbeKey;
 '''
 checks = r'''
 int main() {
@@ -56,6 +60,8 @@ int main() {
     assert(h.doIntegerSet(&user, gIODisplayBrightnessKey, 64));
     assert(h.fUserLevel == 64 && h.fPersistPending == 64 && h.fPending == 64 && h.call.entered == 4);
     assert(!h.doIntegerSet(&user, &otherKey, 80) && h.fPending == 64 && h.call.entered == 4);
+    assert(h.doIntegerSet(&power, NVRMBacklightHandler::sLinearBrightnessProbe, 40));
+    assert(h.fUserLevel == 40 && h.fPersistPending == 40 && h.fPending == 40 && h.call.entered == 5);
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
@@ -64,4 +70,4 @@ with tempfile.TemporaryDirectory() as directory:
     test.write_text(fixture + method + checks, encoding='utf-8')
     subprocess.run(['clang++', '-std=c++17', '-Wall', '-Wextra', str(test), '-o', str(path / 'check')], check=True)
     subprocess.run([str(path / 'check')], check=True)
-print('PASS: production doIntegerSet preserves the user target, bounds temporary power requests, and queues asynchronously; the 5% floor remains in applyFire')
+print('PASS: production doIntegerSet preserves the user target, bounds temporary power requests, accepts probe writes as the user target, and queues asynchronously; the 5% floor remains in applyFire')

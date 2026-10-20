@@ -136,6 +136,7 @@ struct NVRMBacklightHandler : IODisplayParameterHandler {
     volatile SInt32 fUserLevel = 100;
     volatile SInt32 fPersistPending = -1;
     SInt32 fRestoreLevel = -1;
+    static const OSSymbol *sBrightnessProbe, *sLinearBrightnessProbe;
     bool init() { return true; }
     void release() override { delete this; }
     static NVRMBacklightHandler *withRM(IOService *, NvU32);
@@ -143,6 +144,8 @@ struct NVRMBacklightHandler : IODisplayParameterHandler {
     bool doIntegerSet(OSDictionary *, const OSSymbol *, UInt32);
     static void applyFire(thread_call_param_t, thread_call_param_t);
 };
+const OSSymbol *NVRMBacklightHandler::sBrightnessProbe = nullptr;
+const OSSymbol *NVRMBacklightHandler::sLinearBrightnessProbe = nullptr;
 '''
 
 
@@ -216,7 +219,17 @@ int main() {
     rm.result = -1;
     NVRMBacklightHandler::applyFire(hardwareFailure, nullptr);
     assert(savedValue() == 46 && hardwareFailure->fPersistPending == 55);
-    puts("PASS: extracted withRM/setDisplay/applyFire restore saved targets, preserve temp dim, enforce 0->5 floor, and retain failed writes for retry.");
+    setSaved(60); resetWrites(); rm.result = kIOReturnSuccess;
+    auto probeDriven = NVRMBacklightHandler::withRM(&rm, 60);
+    OSDictionary probeParams;
+    assert(NVRMBacklightHandler::sLinearBrightnessProbe && NVRMBacklightHandler::sBrightnessProbe);
+    assert(probeDriven->doIntegerSet(&probeParams, NVRMBacklightHandler::sLinearBrightnessProbe, 33));
+    NVRMBacklightHandler::applyFire(probeDriven, nullptr);
+    assert(rm.lastPercent == 33 && savedValue() == 33 && probeDriven->fUserLevel == 33 && gWrites == 1);
+    assert(probeDriven->doIntegerSet(&probeParams, NVRMBacklightHandler::sBrightnessProbe, 77));
+    NVRMBacklightHandler::applyFire(probeDriven, nullptr);
+    assert(rm.lastPercent == 77 && savedValue() == 77 && probeDriven->fUserLevel == 77 && gWrites == 2);
+    puts("PASS: extracted withRM/setDisplay/applyFire restore saved targets, preserve temp dim, enforce 0->5 floor, and retain failed writes for retry; probe writes drive the user target.");
 }
 '''
 

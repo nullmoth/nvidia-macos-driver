@@ -152,6 +152,7 @@ class NVRMBacklightHandler : public IODisplayParameterHandler {
     volatile SInt32 fPersistPending = -1;
     SInt32 fRestoreLevel = -1;
     static void applyFire(thread_call_param_t me, thread_call_param_t);
+    static const OSSymbol *sBrightnessProbe, *sLinearBrightnessProbe;
 public:
     static NVRMBacklightHandler *withRM(IOService *rm, NvU32 level);
     bool setDisplay(IODisplay *display) override;
@@ -161,6 +162,8 @@ public:
     void free() override;
 };
 OSDefineMetaClassAndStructors(NVRMBacklightHandler, IODisplayParameterHandler)
+const OSSymbol *NVRMBacklightHandler::sBrightnessProbe = nullptr;
+const OSSymbol *NVRMBacklightHandler::sLinearBrightnessProbe = nullptr;
 
 NVRMBacklightHandler *NVRMBacklightHandler::withRM(IOService *rm, NvU32 level)
 {
@@ -168,6 +171,8 @@ NVRMBacklightHandler *NVRMBacklightHandler::withRM(IOService *rm, NvU32 level)
     if (!h || !h->init()) { OSSafeReleaseNULL(h); return nullptr; }
     h->fRM = rm; rm->retain();
     h->fFn = OSSymbol::withCStringNoCopy("NVRMBacklight");
+    if (!sBrightnessProbe) sBrightnessProbe = OSSymbol::withCStringNoCopy("brightness-probe");
+    if (!sLinearBrightnessProbe) sLinearBrightnessProbe = OSSymbol::withCStringNoCopy("linear-brightness-probe");
     h->fApply = nvrmfbCall(applyFire, h);
     h->fLevel = level <= 100 ? (SInt32)level : 100;
     unsigned char saved;
@@ -206,6 +211,12 @@ bool NVRMBacklightHandler::setDisplay(IODisplay *display)
     IODisplay::setParameter(params, gIODisplayBrightnessKey, initial);
     IODisplay::addParameter(params, gIODisplayLinearBrightnessKey, 0, 100);
     IODisplay::setParameter(params, gIODisplayLinearBrightnessKey, initial);
+    // CoreDisplay's GetUserBrightness reads the user brightness through these probe parameters; it also drives the
+    // brightness through them once the probe succeeds, so they must exist and behave like a brightness request.
+    IODisplay::addParameter(params, sBrightnessProbe, 0, 100);
+    IODisplay::setParameter(params, sBrightnessProbe, initial);
+    IODisplay::addParameter(params, sLinearBrightnessProbe, 0, 100);
+    IODisplay::setParameter(params, sLinearBrightnessProbe, initial);
     display->setProperty(gIODisplayParametersKey, params);
     params->release();
     if (fRestoreLevel >= 0) {
@@ -221,8 +232,16 @@ bool NVRMBacklightHandler::setDisplay(IODisplay *display)
 // AppleBacklightDisplay's power states (dim, display sleep, lid) pass the whole IODisplayParameters.
 bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *paramName, UInt32 value)
 {
-    if (paramName != gIODisplayBrightnessKey && paramName != gIODisplayLinearBrightnessKey) return false;
+    const bool probe = paramName == sBrightnessProbe || paramName == sLinearBrightnessProbe;
+    if (!probe && paramName != gIODisplayBrightnessKey && paramName != gIODisplayLinearBrightnessKey) return false;
     SInt32 level = value > 100 ? 100 : (SInt32)value;
+    if (probe) {
+        __atomic_store_n(&fUserLevel, level, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&fPersistPending, level, __ATOMIC_SEQ_CST);
+        fPending = level;
+        thread_call_enter(fApply);
+        return true;
+    }
     if (params && params->getObject(gIODisplayValueKey)) {
         __atomic_store_n(&fUserLevel, level, __ATOMIC_SEQ_CST);
         __atomic_store_n(&fPersistPending, level, __ATOMIC_SEQ_CST);
