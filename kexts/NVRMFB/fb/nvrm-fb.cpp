@@ -1272,7 +1272,14 @@ void NVRMNVDAFramebuffer::publishDisplayAudioProperties()
     if (pairing) { setProperty("hda-gfx", pairing); pairing->release(); }
     else setProperty("hda-gfx", "onboard-1");
 
+    // A configured NVRMFBDisplayAudioCodecInfo names the codec pin for this machine. Without one the first display pin,
+    // codec 0 pin widget 4, is used: measured on an RTX 5060 desktop (#284). Other boards wire the display to another
+    // pin (pin 5 on an RTX 5080 Laptop, #313) and set the property; a malformed one publishes no association.
     OSObject *codecInfoObject = copyProperty("NVRMFBDisplayAudioCodecInfo");
+    if (!codecInfoObject) {
+        static const NvU8 kDefaultCodecInfo[4] = { 0x00, 0x01, 0x04, 0x00 };
+        codecInfoObject = OSData::withBytes(kDefaultCodecInfo, sizeof kDefaultCodecInfo);
+    }
     OSData *codecInfo = OSDynamicCast(OSData, codecInfoObject);
     const NvU8 *bytes = codecInfo ? (const NvU8 *)codecInfo->getBytesNoCopy() : nullptr;
     if (!bytes || codecInfo->getLength() != 4 || !bytes[1] || !bytes[2]) {
