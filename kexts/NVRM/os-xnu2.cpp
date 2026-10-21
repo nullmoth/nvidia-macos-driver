@@ -26,8 +26,8 @@
 // The firmware moved out of /Users/Shared, which every user can write: the kernel reads these images and
 // the card runs them. /Library/NullMoth is where the installer already keeps the cached accelerators
 // root-owned and not group- or world-writable.
-#define NV_XNU_FW_DIR "/Library/NullMoth/nvfw/nvidia/615.71.10/"
-// The largest image we ship is the Ampere ucodes at 58 MB (615.71.10, measured); the cap only has to be generous.
+#define NV_XNU_FW_DIR "/Library/NullMoth/nvfw/nvidia/615.78.08/"
+// The largest image we ship is the Ampere ucodes at 58 MB (615.78.08, measured); the cap only has to be generous.
 #define NV_XNU_FW_MAX_BYTES (256u * 1024u * 1024u)
 #define NV_FIRMWARE_FOR_NAME(name) NV_XNU_FW_DIR name ".bin"
 extern "C" {
@@ -1197,10 +1197,10 @@ NV_STATUS NV_API_CALL nv_dma_unmap_alloc(nv_dma_device_t *dev, NvU64 page_count,
 // the card's own secure boot is what decides whether an image may run.
 struct nv_xnu_fw_expected { const char *name; NvU64 bytes; const char *sha1; };
 static const nv_xnu_fw_expected nv_xnu_fw_set[] = {
-    { "gsp_ga10x.bin",    27043992ull, "8b19157b68477b7e96405ad6001670e92a38e7cd" },
-    { "gsp_tu10x.bin",    22901632ull, "db67543202fb4f38c216e2a1b5a3a180338b476e" },
-    { "ucodes_ga10x.bin", 58215936ull, "aafac2cbd37bdec84f86088f3269934d1dfa5067" },
-    { "ucodes_tu10x.bin",  8837632ull, "64c60572150fe28e7e9d8aad67245f0d1962ee3c" },
+    { "gsp_ga10x.bin",    27043992ull, "2a4840509e4a8a51436c0550e444e22d4304e519" },
+    { "gsp_tu10x.bin",    22901632ull, "44efed1a8c98dc54039c714547785cce67293de3" },
+    { "ucodes_ga10x.bin", 58215936ull, "f9bf8077ad46314eebec97b195bad40ee0a7771c" },
+    { "ucodes_tu10x.bin",  8837632ull, "81b4f1593cc0ba9313680ad68dc46b867393ca80" },
 };
 static const nv_xnu_fw_expected *nv_xnu_fw_expect(const char *path)
 {

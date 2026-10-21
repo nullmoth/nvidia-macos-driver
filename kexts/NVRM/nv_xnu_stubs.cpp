@@ -891,13 +891,6 @@ __attribute__((weak)) NV_STATUS NV_API_CALL os_call_vgpu_vfio(void *, NvU32)
     return NV_ERR_NOT_SUPPORTED;
 }
 
-// The GPU's PDI from its PCIe DVSEC capability seeds the UUID on new boards. NOT_SUPPORTED sends RM to the PBI
-// UUID read, which is what 610 always did.
-NV_STATUS NV_API_CALL nv_pci_read_gpu_pdi_from_dvsec(nv_state_t *, NvU64 *)
-{
-    return NV_ERR_NOT_SUPPORTED;
-}
-
 // NVLink fabric memory windows (multi-GPU servers); no Mac has a fabric.
 NV_STATUS NV_API_CALL nv_dma_init_sysmem_window_for_fabric_access(nv_state_t *, NvU64, NvU64 *, NvU64 *, NvBool *)
 {

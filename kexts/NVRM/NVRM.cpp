@@ -1325,6 +1325,14 @@ IOReturn NVRM::go(uint32_t pass)
             LOG("event locks created for the control device and the GPU");
             rm_write_registry_string(NULL, NULL, "RmMsg", ":", 1);
             rm_write_registry_dword(NULL, NULL, "ResmanDebugLevel", 0);
+            {   // NVIDIA's registry options, as NVreg_RegistryDwords: nvregdwords=Key=Value;Key2=Value2
+                static char regdw[256];
+                if (PE_parse_boot_argn("nvregdwords", regdw, sizeof regdw) && regdw[0]) {
+                    regdw[sizeof regdw - 1] = 0;
+                    rm_parse_option_string(NULL, regdw);
+                    LOG("registry options from nvregdwords: %s", regdw);
+                }
+            }
             LOG("registry: RmMsg=\":\" ResmanDebugLevel=0 (verbose RM)");
             if (!PE_parse_boot_argn("-nvrmnopm", nopmArg, sizeof nopmArg)) {
                 // Keep every video memory allocation over system sleep, not only RM's own: WindowServer's GPU
