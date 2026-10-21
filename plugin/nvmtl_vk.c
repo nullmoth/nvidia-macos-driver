@@ -3418,11 +3418,25 @@ static NSData *nvmtl_address_shader_g(const void *data, size_t len, uint32_t fla
     pthread_mutex_unlock(&lk);
     return d;
 }
+static _Atomic unsigned long long g_g1_descriptors;
 static NSData *nvmtl_address_shader_g_uncached(const void *data, size_t len, uint32_t flags, uint32_t *info) {
     NSData *d = nvmtl_address_shader_g0(data, len, flags, info);
     if (d && nvmtl_table_ubo() && nvmtl_spirv_ssbo_table(d.bytes, d.length)) {
+        // Address lowering refused this module, so its buffers are still descriptors and its table at 640 is still a
+        // storage buffer. The descriptor path serves such a module as it did before the table became a Uniform block;
+        // only the table has to move with it.
+        uint8_t *out = NULL; size_t n = 0; char err[512] = {0};
+        if (xlate_to_uniform && !xlate_to_uniform(d.bytes, d.length, &out, &n, err, sizeof err)) {
+            NSData *moved = [NSData dataWithBytes:out length:n]; xlate_free(out, n);
+            if (!nvmtl_spirv_ssbo_table(moved.bytes, moved.length)) {
+                const unsigned long long k = atomic_fetch_add(&g_g1_descriptors, 1) + 1;
+                if (k <= 16 || !(k & (k - 1))) nvlog("G1: a module address lowering refused keeps its buffer descriptors; its table at 640 moved to a Uniform block (%llu so far)", k);
+                return moved;
+            }
+        }
         const unsigned long long k = atomic_fetch_add(&g_g1_refused, 1) + 1;
-        if (k <= 16 || !(k & (k - 1))) nvlog("G1: a module still declares a STORAGE-buffer table at 640 while the table is Uniform - REFUSED (%llu so far; NVMTL_TABLE_SSBO=1 restores it)", k);
+        if (k <= 16 || !(k & (k - 1))) nvlog("G1: a module still declares a STORAGE-buffer table at 640 while the table is Uniform - REFUSED (%llu so far; %s; NVMTL_TABLE_SSBO=1 restores it)", k,
+                                             xlate_to_uniform ? (err[0] ? err : "the table did not move") : "the translator has no nvmtl_table_to_uniform");
         return nil;
     }
     return d;

@@ -621,6 +621,17 @@ pub unsafe extern "C" fn nvmtl_lower_buffer_addresses(
     }
 }
 #[no_mangle]
+pub unsafe extern "C" fn nvmtl_table_to_uniform(
+    data: *const u8, len: usize, out: *mut *mut u8, out_len: *mut usize,
+    err: *mut c_char, err_len: usize,
+) -> i32 {
+    if data.is_null() || out.is_null() || out_len.is_null() { return -1; }
+    match table_ubo::convert(std::slice::from_raw_parts(data,len)) {
+        Ok(v) => { let mut b=v.into_boxed_slice(); *out=b.as_mut_ptr(); *out_len=b.len(); std::mem::forget(b); 0 }
+        Err(e) => { if !err.is_null() && err_len>0 { let n=e.len().min(err_len-1); std::ptr::copy_nonoverlapping(e.as_ptr(),err.cast(),n); *err.add(n)=0; } -1 }
+    }
+}
+#[no_mangle]
 pub unsafe extern "C" fn nvmtl_lower_buffer_addresses_ex(
     data: *const u8, len: usize, flags: u32, out: *mut *mut u8, out_len: *mut usize, info: *mut u32,
     err: *mut c_char, err_len: usize,
