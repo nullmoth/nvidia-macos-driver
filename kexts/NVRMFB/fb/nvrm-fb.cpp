@@ -270,6 +270,13 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     // form. Every modeset carries it so a mode change does not drop it; setGammaTable commits it on its own.
     struct NvKmsLutRamps *fGamma = nullptr;
     bool fGammaOn = false;
+    // NVKMS 615 takes the output LUT as a surface (the legacy ramp array is gone). Two surfaces, written alternately:
+    // the one the head is scanning through is never rewritten underneath it. They live as long as the framebuffer.
+    struct NvKmsKapiMemory *fOlutMem[2] = {};
+    struct NvKmsKapiSurface *fOlutSurf[2] = {};
+    void *fOlutKva[2] = {};
+    unsigned fOlutNext = 0;
+    struct NvKmsKapiSurface *olutFromGamma();
     unsigned fGammaCommits = 0, fGammaFails = 0;
     IOReturn nvrmSetGamma(UInt32 channels, UInt32 count, UInt32 width, const void *data);
     NvU32 fPitchAlign = 256;
@@ -639,16 +646,21 @@ static void nvrmUnownedHeadsOff(struct NvKmsKapiRequestedModeSetConfig *cfg)
         hr->flags.activeChanged = hr->flags.displaysChanged = NV_TRUE;
     }
 }
-static void nvrmHeadConfigBaseline(struct NvKmsKapiHeadRequestedConfig *hr, struct NvKmsLutRamps *gamma = NULL)
+// The output LUT the way nvidia-drm 615 sets a CRTC's gamma: a 1025-entry UNORM16 surface, no VSS segments.
+static void nvrmHeadOlut(struct NvKmsKapiHeadRequestedConfig *hr, struct NvKmsKapiSurface *olut)
+{
+    hr->modeSetConfig.olut.enabled = olut ? NV_TRUE : NV_FALSE;
+    hr->modeSetConfig.olut.lutSurface = olut;
+    hr->modeSetConfig.olut.offset = 0;
+    hr->modeSetConfig.olut.vssSegments = 0;
+    hr->modeSetConfig.olut.lutEntries = olut ? NVKMS_LUT_ARRAY_SIZE + 1 : 0;
+    hr->flags.olutChanged = NV_TRUE;
+}
+static void nvrmHeadConfigBaseline(struct NvKmsKapiHeadRequestedConfig *hr, struct NvKmsKapiSurface *olut = NULL)
 {
     hr->modeSetConfig.olutFpNormScale = NVKMS_OLUT_FP_NORM_SCALE_DEFAULT;
     hr->flags.olutFpNormScaleChanged = NV_TRUE;
-    // the output LUT the way nvidia-drm sets a CRTC's gamma (legacy ramps, flags.legacyOlutChanged)
-    if (gamma) {
-        hr->modeSetConfig.lut.output.enabled = NV_TRUE;
-        hr->modeSetConfig.lut.output.pRamps = gamma;
-        hr->flags.legacyOlutChanged = NV_TRUE;
-    }
+    if (olut) nvrmHeadOlut(hr, olut);
     for (unsigned i = 0; i < NVKMS_KAPI_LAYER_MAX; i++) {
         struct NvKmsKapiLayerRequestedConfig *lr = &hr->layerRequestedConfig[i];
         nvu_zero(&lr->config.csc, sizeof lr->config.csc);
@@ -1644,7 +1656,7 @@ bool NVRMNVDAFramebuffer::reflip()
     nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
     cfg->headsMask = 1u << fHead;
     struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
-    nvrmHeadConfigBaseline(hr, fGammaOn ? fGamma : NULL);
+    nvrmHeadConfigBaseline(hr, fGammaOn && fGamma ? olutFromGamma() : NULL);
     hr->modeSetConfig.bActive = NV_TRUE;
     hr->modeSetConfig.numDisplays = 1;
     hr->modeSetConfig.displays[0] = fDisplay;
@@ -1667,6 +1679,52 @@ bool NVRMNVDAFramebuffer::reflip()
 // wider ones 16-bit words, as IOGraphics passes them) resampled to NVKMS's 1024-entry 16-bit ramps and committed as the
 // head's output LUT on its own: no mode change and no flip wait, so Night Shift's gradual changes cannot blank or stall
 // the screen. A failed commit keeps the previous LUT; -nvrmnogamma keeps the old behaviour (accepted, not applied).
+// Builds the next output-LUT surface from fGamma, in nvidia-drm 615's layout (create_drm_olut_surface_vss, non-VSS):
+// R16G16B16A16, one row; a VSS header of NVKMS_LUT_VSS_HEADER_SIZE bytes left zero, then NVKMS_LUT_ARRAY_SIZE + 1
+// entries of UNORM16 red, green, blue (alpha 0), the last a copy of the one before it. Pitch-linear scanout memory,
+// video memory first as nvidia-drm does on a GPU with VRAM, system memory if that fails. NULL when it cannot be made.
+struct NvKmsKapiSurface *NVRMNVDAFramebuffer::olutFromGamma()
+{
+    if (!fGamma || !fKms || !fDev) return nullptr;
+    const unsigned slot = fOlutNext & 1;
+    const NvU32 hdr = NVKMS_LUT_VSS_HEADER_SIZE / NVKMS_LUT_CAPS_LUT_ENTRY_SIZE, n = NVKMS_LUT_ARRAY_SIZE + 1;
+    const NvU64 bytes = (((NvU64)(hdr + n) * NVKMS_LUT_CAPS_LUT_ENTRY_SIZE) + 255) & ~(NvU64)255;
+    if (!fOlutSurf[slot]) {
+        for (int vid = 1; vid >= 0 && !fOlutSurf[slot]; vid--) {
+            struct NvKmsKapiAllocateMemoryParams mp = {}; NvU8 compressible = 0;
+            mp.layout = NvKmsSurfaceMemoryLayoutPitch;
+            mp.type = NVKMS_KAPI_ALLOCATION_TYPE_SCANOUT;
+            mp.size = bytes;
+            mp.useVideoMemory = vid ? NV_TRUE : NV_FALSE;
+            mp.compressible = &compressible;
+            struct NvKmsKapiMemory *m = fKms->allocateMemory(fDev, &mp);
+            if (!m) continue;
+            void *k = nullptr;
+            if (!fKms->mapMemory(fDev, m, NVKMS_KAPI_MAPPING_TYPE_KERNEL, &k) || !k) { fKms->freeMemory(fDev, m); continue; }
+            struct NvKmsKapiCreateSurfaceParams sp = {};
+            sp.format = NvKmsSurfaceMemoryFormatR16G16B16A16;
+            sp.width = hdr + n; sp.height = 1;
+            sp.planes[0].memory = m; sp.planes[0].offset = 0; sp.planes[0].pitch = (NvU32)bytes;
+            struct NvKmsKapiSurface *surf = fKms->createSurface(fDev, &sp);
+            if (!surf) { fKms->unmapMemory(fDev, m, NVKMS_KAPI_MAPPING_TYPE_KERNEL, k); fKms->freeMemory(fDev, m); continue; }
+            fOlutMem[slot] = m; fOlutKva[slot] = k; fOlutSurf[slot] = surf;
+            FBLOG("gamma: output-LUT surface %u in %s (%llu bytes)", slot, vid ? "video memory" : "system memory",
+                  (unsigned long long)bytes);
+        }
+        if (!fOlutSurf[slot]) { FBLOG("gamma: could not make an output-LUT surface"); return nullptr; }
+    }
+    volatile NvU16 *lut = (volatile NvU16 *)fOlutKva[slot];
+    for (NvU32 i = 0; i < hdr * 4; i++) lut[i] = 0;
+    for (NvU32 i = 0; i < NVKMS_LUT_ARRAY_SIZE; i++) {
+        volatile NvU16 *e = lut + (size_t)(hdr + i) * 4;
+        e[0] = fGamma->red[i]; e[1] = fGamma->green[i]; e[2] = fGamma->blue[i]; e[3] = 0;
+    }
+    volatile NvU16 *last = lut + (size_t)(hdr + n - 1) * 4, *prev = last - 4;
+    for (int c = 0; c < 4; c++) last[c] = prev[c];
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);   // the table is in memory before NVKMS is told to read it
+    fOlutNext = slot ^ 1;
+    return fOlutSurf[slot];
+}
 IOReturn NVRMNVDAFramebuffer::nvrmSetGamma(UInt32 channels, UInt32 count, UInt32 width, const void *data)
 {
     char nb[8] = { 0 };
@@ -1707,9 +1765,13 @@ IOReturn NVRMNVDAFramebuffer::nvrmSetGamma(UInt32 channels, UInt32 count, UInt32
     hr->modeSetConfig.bActive = NV_TRUE; hr->modeSetConfig.numDisplays = 1; hr->modeSetConfig.displays[0] = fDisplay;
     hr->modeSetConfig.mode = fMode;
     hr->modeSetConfig.olutFpNormScale = NVKMS_OLUT_FP_NORM_SCALE_DEFAULT;
-    hr->modeSetConfig.lut.output.enabled = NV_TRUE;
-    hr->modeSetConfig.lut.output.pRamps = fGamma;
-    hr->flags.legacyOlutChanged = NV_TRUE;
+    struct NvKmsKapiSurface *olut = olutFromGamma();
+    if (!olut) {
+        FBLOG("gamma: no output-LUT surface on head %u; previous LUT kept", fHead);
+        IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
+        return kIOReturnSuccess;
+    }
+    nvrmHeadOlut(hr, olut);
     const NvBool ok = submitConfig(cfg, rep, NV_TRUE, false, true);
     if (ok) fGammaCommits++; else fGammaFails++;
     if (fGammaCommits + fGammaFails <= 3 || !ok)
@@ -2070,7 +2132,7 @@ bool NVRMNVDAFramebuffer::setHeadActive(bool active)
     nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
     cfg->headsMask = 1u << fHead;
     struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
-    nvrmHeadConfigBaseline(hr, active && fGammaOn ? fGamma : NULL);
+    nvrmHeadConfigBaseline(hr, active && fGammaOn && fGamma ? olutFromGamma() : NULL);
     hr->modeSetConfig.bActive = active ? NV_TRUE : NV_FALSE;
     hr->flags.activeChanged = NV_TRUE;
     if (active) {
@@ -2124,7 +2186,7 @@ bool NVRMNVDAFramebuffer::applyMode()
     nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
     cfg->headsMask = 1u << fHead;
     struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
-    nvrmHeadConfigBaseline(hr, fGammaOn ? fGamma : NULL);
+    nvrmHeadConfigBaseline(hr, fGammaOn && fGamma ? olutFromGamma() : NULL);
     hr->modeSetConfig.bActive = NV_TRUE; hr->modeSetConfig.numDisplays = 1; hr->modeSetConfig.displays[0] = fDisplay; hr->modeSetConfig.mode = fMode;
     hr->flags.activeChanged = hr->flags.displaysChanged = hr->flags.modeChanged = NV_TRUE;
     struct NvKmsKapiLayerRequestedConfig *lr = &hr->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX];
@@ -2153,7 +2215,7 @@ bool NVRMNVDAFramebuffer::applyMode()
     if (!ok) {
         nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
         cfg->headsMask = 1u << fHead;
-        nvrmHeadConfigBaseline(hr, fGammaOn ? fGamma : NULL);
+        nvrmHeadConfigBaseline(hr, fGammaOn && fGamma ? olutFromGamma() : NULL);
         hr->modeSetConfig.bActive = NV_TRUE; hr->modeSetConfig.numDisplays = 1; hr->modeSetConfig.displays[0] = fDisplay;
         hr->modeSetConfig.mode = fMode;
         lr->config.surface = fSurf; lr->config.srcWidth = fW; lr->config.srcHeight = fH;
@@ -2646,7 +2708,7 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
         nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
         cfg->headsMask = 1u << fHead;
         struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
-        nvrmHeadConfigBaseline(hr, fGammaOn ? fGamma : NULL);
+        nvrmHeadConfigBaseline(hr, fGammaOn && fGamma ? olutFromGamma() : NULL);
         hr->modeSetConfig.bActive = NV_TRUE; hr->modeSetConfig.numDisplays = 1; hr->modeSetConfig.displays[0] = fDisplay;
         hr->modeSetConfig.mode = m;
         hr->flags.activeChanged = hr->flags.displaysChanged = hr->flags.modeChanged = NV_TRUE;
