@@ -2,7 +2,9 @@
 
 ## 2.4.4
 
-- Hardware H.264 and HEVC encode on GTX 16 cards with the Turing encoder: GTX 1660, 1660 SUPER, 1660 Ti and 1650 SUPER use the same encoders as RTX 20. The GTX 1650 reports no hardware encoder to the driver and keeps Apple's.
+- Hardware H.264 and HEVC encode on every GTX 16 card: GTX 1650, 1650 SUPER, 1660, 1660 SUPER and 1660 Ti use the same encoders as RTX 20.
+- HEVC encode on GTX 16 and RTX 20 cards keeps going past the second frame; it stopped with an error from frame 2 on.
+- An app no longer freezes for good when one finished GPU job is missing its completion mark (#322): Terminal and iTerm2 printing fast stopped redrawing and taking input until force-quit.
 - Shaders that call functions through a visible or intersection function table load again; they returned nothing since 2.3.6 (PR #318, thanks watchthelight).
 
 ## 2.4.3
