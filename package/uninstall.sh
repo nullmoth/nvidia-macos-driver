@@ -6,7 +6,7 @@ set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 # the NVIDIA driver only: the AMD/Intel GPU driver, the NPU driver and the audio driver are separate products with
 # their own uninstallers
-KEXTS="NVRM NVAccel NVRMFB NVRMAGDC"; EXT=/Library/Extensions; GB=/Library/GPUBundles
+KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NVPrimarySelector"; EXT=/Library/Extensions; GB=/Library/GPUBundles
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 K=/System/Library/Kernels/kernel
 KARG=(--allow-missing-kdk); [ -f "$K" ] && KARG+=(--kernel "$K")   # without a matching Kernel Debug Kit, kmutil needs --allow-missing-kdk
@@ -70,7 +70,7 @@ else
   kmutil create -n aux --volume-root / ${KARG[@]+"${KARG[@]}"} -B $KB -S $KS --repository "$RB/repo" -A "$NEWKC" -z >/dev/null 2>&1 || die "kmutil could not rebuild the collection"
   [ -s "$NEWKC" ] || die "kmutil produced no removal collection"
   INS=$(kmutil inspect -a x86_64 -A "$NEWKC" 2>/dev/null) || die "cannot inspect the removal collection"
-  printf '%s\n' "$INS" | grep -q com.nullmoth && die "the removal collection still lists the NVIDIA driver"
+  printf '%s\n' "$INS" | grep -Eq 'com\.nullmoth|org\.hackintosh\.experimental\.NVPrimarySelector' && die "the removal collection still lists the NVIDIA driver or selector"
   # Other processes can move or delete files in /Library/KernelCollections between this check and the publish below.
   # A private copy of the verified collection lets the publish go ahead when the candidate there is gone.
   cp -p "$NEWKC" "$RB/removal-candidate.kc" || die "cannot keep a copy of the removal collection"
@@ -106,7 +106,7 @@ else
 fi
 if [ -f "$KC" ]; then
   FINAL_INS=$(kmutil inspect -a x86_64 -A "$KC" 2>/dev/null) || die "cannot verify the published removal collection"
-  printf '%s\n' "$FINAL_INS" | grep -q com.nullmoth && die "the kernel collection still lists the NVIDIA driver"
+  printf '%s\n' "$FINAL_INS" | grep -Eq 'com\.nullmoth|org\.hackintosh\.experimental\.NVPrimarySelector' && die "the kernel collection still lists the NVIDIA driver or selector"
 fi
 REMOVING=0
 rm -rf "$RB"
