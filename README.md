@@ -21,7 +21,7 @@ Support the work: https://buymeacoffee.com/nullmoth
 
 | | |
 |---|---|
-| macOS | 15 Sequoia (tested 15.7.x and 15.8.1), x86_64 |
+| macOS | 15.5 Sequoia or later (tested 15.7.x and 15.8.1), or 26 Tahoe, x86_64 |
 | GPUs | NVIDIA Turing and later; developed on an RTX 5060 |
 | Metal | Metal 3: argument buffers tier 2, ray tracing, mesh shaders, MPS, MetalFX path |
 | Also | OpenGL (through Apple's GL-on-Metal), OpenCL, Core Image, Core ML |
