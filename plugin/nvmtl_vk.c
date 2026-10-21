@@ -6701,6 +6701,27 @@ static int nvmtl_async_surface_upload(void)
     }
     return on;
 }
+// Fills a family VRAM buffer with a whole IOSurface allocation (fork: multi-plane surfaces share one import, and the
+// kernel pages the whole allocation off, so every byte of it has to be current before any plane is marked newer).
+// From the surface's own pages when they can be imported (the copy engine reads them), else through a staging buffer.
+// The caller holds the surface lock.
+int nvmtl_vk_buffer_fill_from_surface(nvk_queue *q, nvk_buffer *dst, const void *base, size_t bytes)
+{
+    if (!dst || !dst->buf || !base || !bytes || bytes > dst->size) return -1;
+    if (g_host_import && g_host_align && bytes <= SIZE_MAX - (g_host_align - 1)
+        && !((uintptr_t)base & (g_host_align - 1))) {
+        nvk_buffer hb;
+        if (!nvmtl_vk_buffer_import_host((void *)base, (bytes + g_host_align - 1) & ~(g_host_align - 1), &hb)) {
+            const int rc = nvmtl_vk_copy_buffer(q, &hb, 0, dst, 0, bytes);
+            nvmtl_vk_buffer_destroy(&hb);
+            if (!rc) return 0;
+        }
+    }
+    nvk_buffer stage;
+    if (nvmtl_vk_stage(q, bytes, &stage)) return -1;
+    memcpy(stage.map, base, bytes);
+    return nvmtl_vk_copy_buffer(q, &stage, 0, dst, 0, bytes);
+}
 int nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes)
 {
     if (nvmtl_async_surface_upload() && img->bw <= 1 && img->bh <= 1 && (img->layers ? img->layers : 1) == 1) {
