@@ -15,6 +15,7 @@ def between(source, start, end):
 
 
 fixture = r'''#include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -93,6 +94,7 @@ struct IOService : IORegistryEntry {
 };
 struct OSDictionary : OSObject {
     bool userValue = false;
+    std::map<const OSSymbol *, std::pair<int, int>> ranges;
     std::map<const OSSymbol *, UInt32> values;
     static OSDictionary *withCapacity(unsigned) { return new OSDictionary; }
     static OSDictionary *withDictionary(OSDictionary *other) {
@@ -106,7 +108,7 @@ struct IODisplay : IOService {
     OSObject *copyProperty(const OSSymbol *) { return nullptr; }
     bool setProperty(const OSSymbol *, OSDictionary *value) { value->retain(); parameters = value; return true; }
     const char *getName() { return "display"; }
-    static void addParameter(OSDictionary *, const OSSymbol *, int, int) {}
+    static void addParameter(OSDictionary *dict, const OSSymbol *key, int min, int max) { dict->ranges[key] = {min, max}; }
     static bool setParameter(OSDictionary *dict, const OSSymbol *key, SInt32 value) { dict->values[key] = (UInt32)value; return true; }
 };
 struct IODisplayParameterHandler : OSObject { virtual bool setDisplay(IODisplay *) { return false; } virtual void free() {} };
@@ -121,11 +123,7 @@ static unsigned char setSaved(unsigned char value) {
     auto data = OSData::withBytes(&value, 1);
     IORegistryEntry::options->setProperty("nullmoth-backlight", data); data->release(); return value;
 }
-static unsigned char savedValue() {
-    auto data = OSDynamicCast(OSData, IORegistryEntry::options->copyProperty("nullmoth-backlight"));
-    if (!data || data->getLength() != 1) { if (data) data->release(); return 255; }
-    auto value = *(const unsigned char *)data->getBytesNoCopy(); data->release(); return value;
-}
+static UInt32 savedValue();
 static void nvrm_backlight_dummy();
 struct NVRMBacklightHandler : IODisplayParameterHandler {
     IOService *fRM = nullptr;
@@ -150,111 +148,116 @@ const OSSymbol *NVRMBacklightHandler::sLinearBrightnessProbe = nullptr;
 '''
 
 
-checks = r'''static void resetWrites() { gWrites = 0; }
+checks = r'''
+static UInt32 savedValue() {
+    UInt32 value;
+    assert(nvrm_backlight_read(IORegistryEntry::options, &value));
+    return value;
+}
 int main() {
     IOService rm;
+    OSDictionary userForProbe;
     IODisplay display;
-    setSaved(37); resetWrites();
+    setSaved(37); gWrites = 0;
     auto restored = NVRMBacklightHandler::withRM(&rm, 92);
-    assert(restored && restored->fLevel == 92 && restored->fUserLevel == 37 && restored->fRestoreLevel == 37);
+    assert(restored->fLevel == (SInt32)nvrm_backlight_from_percent(92));
+    assert(restored->fUserLevel == (SInt32)nvrm_backlight_from_percent(37));
     assert(restored->setDisplay(&display));
-    assert(display.parameters->values[gIODisplayBrightnessKey] == 37);
-    assert(display.parameters->values[gIODisplayLinearBrightnessKey] == 37 && restored->fApply->enters == 1);
+    for (auto key : {gIODisplayBrightnessKey, gIODisplayLinearBrightnessKey,
+                    NVRMBacklightHandler::sBrightnessProbe, NVRMBacklightHandler::sLinearBrightnessProbe}) {
+        auto range = display.parameters->ranges[key];
+        assert(range.first == 0 && range.second == 65535);
+    }
+    // IODisplay's documented float normalization must not round-trip through whole percent.
+    for (unsigned i = 0; i <= 97; ++i) {
+        float normalized = i / 97.0f;
+        UInt32 logical = (UInt32)roundf(normalized * 65535.0f);
+        assert(restored->doIntegerSet(&userForProbe, NVRMBacklightHandler::sBrightnessProbe, logical));
+        float result = display.parameters->values[NVRMBacklightHandler::sLinearBrightnessProbe] / 65535.0f;
+        assert(fabsf(result - normalized) <= 0.5f / 65535.0f + 1e-7f);
+    }
+    assert(display.parameters->values[gIODisplayBrightnessKey] == nvrm_backlight_from_percent(37));
+    assert(display.parameters->values[gIODisplayLinearBrightnessKey] == nvrm_backlight_from_percent(37));
     NVRMBacklightHandler::applyFire(restored, nullptr);
-    assert(rm.lastPercent == 37 && savedValue() == 37 && gWrites == 0);
+    assert(rm.lastPercent == 37 && gWrites == 0);
 
     OSDictionary user; user.userValue = true;
-    auto zero = NVRMBacklightHandler::withRM(&rm, 100);
-    assert(zero->doIntegerSet(&user, gIODisplayBrightnessKey, 0));
-    NVRMBacklightHandler::applyFire(zero, nullptr);
-    assert(rm.lastPercent == 5 && savedValue() == 0 && zero->fUserLevel == 0 && gWrites == 1);
-    auto zeroAfterRestart = NVRMBacklightHandler::withRM(&rm, 85);
-    assert(zeroAfterRestart->fUserLevel == 0 && zeroAfterRestart->fRestoreLevel == 0);
-    IODisplay zeroDisplay;
-    assert(zeroAfterRestart->setDisplay(&zeroDisplay) && zeroDisplay.parameters->values[gIODisplayBrightnessKey] == 0);
-    NVRMBacklightHandler::applyFire(zeroAfterRestart, nullptr);
-    assert(rm.lastPercent == 5 && savedValue() == 0 && gWrites == 1);
-
-    auto hundred = NVRMBacklightHandler::withRM(&rm, 5);
-    assert(hundred->doIntegerSet(&user, gIODisplayLinearBrightnessKey, 100));
-    NVRMBacklightHandler::applyFire(hundred, nullptr);
-    assert(savedValue() == 100 && hundred->fUserLevel == 100);
-    auto hundredAfterRestart = NVRMBacklightHandler::withRM(&rm, 5);
-    assert(hundredAfterRestart->fUserLevel == 100 && hundredAfterRestart->fRestoreLevel == 100);
-    IODisplay hundredDisplay;
-    assert(hundredAfterRestart->setDisplay(&hundredDisplay) && hundredDisplay.parameters->values[gIODisplayBrightnessKey] == 100);
-    NVRMBacklightHandler::applyFire(hundredAfterRestart, nullptr);
-    assert(rm.lastPercent == 100 && savedValue() == 100 && gWrites == 2);
-
-    unsigned char invalid = 101;
-    auto invalidData = OSData::withBytes(&invalid, 1);
-    IORegistryEntry::options->setProperty("nullmoth-backlight", invalidData); invalidData->release();
-    auto invalidValue = NVRMBacklightHandler::withRM(&rm, 63);
-    assert(invalidValue->fUserLevel == 63 && invalidValue->fRestoreLevel == -1);
-    unsigned char malformed[] = {45, 0};
-    auto malformedData = OSData::withBytes(malformed, sizeof(malformed));
-    IORegistryEntry::options->setProperty("nullmoth-backlight", malformedData); malformedData->release();
-    auto malformedValue = NVRMBacklightHandler::withRM(&rm, 64);
-    assert(malformedValue->fUserLevel == 64 && malformedValue->fRestoreLevel == -1);
-    IORegistryEntry::options->values.erase("nullmoth-backlight");
-    auto missing = NVRMBacklightHandler::withRM(&rm, 71);
-    assert(missing->fUserLevel == 71 && missing->fRestoreLevel == -1);
-
-    setSaved(70); resetWrites();
-    auto dimmed = NVRMBacklightHandler::withRM(&rm, 70);
     OSDictionary power;
-    assert(dimmed->doIntegerSet(&power, gIODisplayBrightnessKey, 22));
-    NVRMBacklightHandler::applyFire(dimmed, nullptr);
-    assert(rm.lastPercent == 22 && savedValue() == 70 && gWrites == 0);
+    // The target is intentionally between whole hardware-percent levels.
+    constexpr UInt32 target = 20777;
+    assert(restored->doIntegerSet(&user, gIODisplayLinearBrightnessKey, target));
+    NVRMBacklightHandler::applyFire(restored, nullptr);
+    assert(rm.lastPercent == 32 && savedValue() == target && gWrites == 1);
+    const auto &bytes = IORegistryEntry::options->values[NVRM_BACKLIGHT_VAR];
+    assert(bytes == std::vector<unsigned char>({1, 0x29, 0x51}));
+    assert(display.parameters->values[gIODisplayBrightnessKey] == target);
+    assert(restored->fLevel == (SInt32)target && restored->fUserLevel == (SInt32)target);
+    auto restarted = NVRMBacklightHandler::withRM(&rm, 100);
+    IODisplay restartDisplay;
+    assert(restarted->setDisplay(&restartDisplay));
+    assert(restartDisplay.parameters->values[gIODisplayLinearBrightnessKey] == target);
+    NVRMBacklightHandler::applyFire(restarted, nullptr);
+    assert(rm.lastPercent == 32 && savedValue() == target && gWrites == 1);
 
-    auto saveFailure = NVRMBacklightHandler::withRM(&rm, 70);
-    assert(saveFailure->doIntegerSet(&user, gIODisplayBrightnessKey, 46));
-    gWritesFail = true;
-    NVRMBacklightHandler::applyFire(saveFailure, nullptr);
-    assert(rm.lastPercent == 46 && savedValue() == 70 && saveFailure->fPersistPending == 46);
-    gWritesFail = false;
-    assert(nvrm_backlight_write(IORegistryEntry::options, 46) && savedValue() == 46 && gWrites == 1);
+    assert(restored->doIntegerSet(&power, gIODisplayBrightnessKey, nvrm_backlight_from_percent(12)));
+    NVRMBacklightHandler::applyFire(restored, nullptr);
+    assert(rm.lastPercent == 12 && savedValue() == target && gWrites == 1);
+    assert(display.parameters->values[gIODisplayBrightnessKey] == target);
+    unsigned enters = restored->fApply->enters;
+    assert(restored->doIntegerSet(&user, NVRMBacklightHandler::sLinearBrightnessProbe, 4096));
+    NVRMBacklightHandler::applyFire(restored, nullptr);
+    assert(display.parameters->values[NVRMBacklightHandler::sBrightnessProbe] == 4096);
+    assert(restored->fApply->enters == enters && rm.lastPercent == 12 && savedValue() == target);
+    assert(restored->doIntegerSet(&user, NVRMBacklightHandler::sBrightnessProbe, 32768));
+    assert(display.parameters->values[NVRMBacklightHandler::sLinearBrightnessProbe] == 32768);
+    assert(restored->fUserLevel == (SInt32)target && gWrites == 1);
 
-    auto hardwareFailure = NVRMBacklightHandler::withRM(&rm, 46);
-    assert(hardwareFailure->doIntegerSet(&user, gIODisplayBrightnessKey, 55));
     rm.result = -1;
-    NVRMBacklightHandler::applyFire(hardwareFailure, nullptr);
-    assert(savedValue() == 46 && hardwareFailure->fPersistPending == 55);
-    setSaved(60); resetWrites(); rm.result = kIOReturnSuccess;
-    auto probeDriven = NVRMBacklightHandler::withRM(&rm, 60);
-    IODisplay probeDisplay;
-    assert(probeDriven->setDisplay(&probeDisplay));
-    NVRMBacklightHandler::applyFire(probeDriven, nullptr);
-    OSDictionary probeParams;
-    assert(NVRMBacklightHandler::sLinearBrightnessProbe && NVRMBacklightHandler::sBrightnessProbe);
-    unsigned enters = probeDriven->fApply->enters;
-    assert(probeDriven->doIntegerSet(&probeParams, NVRMBacklightHandler::sLinearBrightnessProbe, 18));
-    NVRMBacklightHandler::applyFire(probeDriven, nullptr);
-    assert(probeDisplay.parameters->values[NVRMBacklightHandler::sBrightnessProbe] == 18);
-    assert(rm.lastPercent == 60 && savedValue() == 60 && probeDriven->fUserLevel == 60 && gWrites == 0);
-    assert(probeDriven->fApply->enters == enters && probeDriven->fPersistPending == -1);
-    assert(probeDriven->doIntegerSet(&probeParams, NVRMBacklightHandler::sBrightnessProbe, 77));
-    assert(probeDisplay.parameters->values[NVRMBacklightHandler::sLinearBrightnessProbe] == 77);
-    assert(probeDriven->doIntegerSet(&user, gIODisplayLinearBrightnessKey,
-        probeDisplay.parameters->values[NVRMBacklightHandler::sLinearBrightnessProbe]));
-    NVRMBacklightHandler::applyFire(probeDriven, nullptr);
-    assert(rm.lastPercent == 77 && savedValue() == 77 && probeDriven->fUserLevel == 77 && gWrites == 1);
-    assert(probeDriven->doIntegerSet(&probeParams, NVRMBacklightHandler::sLinearBrightnessProbe, 18));
-    NVRMBacklightHandler::applyFire(probeDriven, nullptr);
-    assert(rm.lastPercent == 77 && savedValue() == 77 && probeDriven->fUserLevel == 77 && gWrites == 1);
-    auto afterProbeRestart = NVRMBacklightHandler::withRM(&rm, 100);
-    IODisplay afterProbeDisplay;
-    assert(afterProbeRestart->setDisplay(&afterProbeDisplay));
-    assert(afterProbeDisplay.parameters->values[gIODisplayLinearBrightnessKey] == 77);
-    NVRMBacklightHandler::applyFire(afterProbeRestart, nullptr);
-    assert(rm.lastPercent == 77 && gWrites == 1);
-    puts("PASS: extracted restore/apply paths preserve saved targets, temporary dimming, 0->5 floor and failed-write retry; conversion probes neither apply nor persist and do not corrupt restart restoration.");
+    assert(restored->doIntegerSet(&user, gIODisplayBrightnessKey, 30001));
+    NVRMBacklightHandler::applyFire(restored, nullptr);
+    assert(savedValue() == target && restored->fPersistPending == 30001 && gWrites == 1);
+    rm.result = kIOReturnSuccess;
+    gWritesFail = true;
+    assert(restored->doIntegerSet(&user, gIODisplayBrightnessKey, 30001));
+    NVRMBacklightHandler::applyFire(restored, nullptr);
+    assert(savedValue() == target && restored->fPersistPending == 30001 && gWrites == 1);
+    gWritesFail = false;
+    assert(restored->doIntegerSet(&user, gIODisplayBrightnessKey, 30001));
+    NVRMBacklightHandler::applyFire(restored, nullptr);
+    assert(savedValue() == 30001 && restored->fPersistPending == -1 && gWrites == 2);
+
+    for (UInt32 level : {0U, 1U, 32768U, 65534U, 65535U}) {
+        assert(restored->doIntegerSet(&user, gIODisplayBrightnessKey, level));
+        NVRMBacklightHandler::applyFire(restored, nullptr);
+        assert(savedValue() == level && restored->fLevel == (SInt32)level);
+        auto next = NVRMBacklightHandler::withRM(&rm, 80);
+        assert(next->fUserLevel == (SInt32)level && next->fRestoreLevel == (SInt32)level);
+        if (level <= 1) assert(rm.lastPercent == 5);
+        if (level >= 65534) assert(rm.lastPercent == 100);
+    }
+    unsigned writes = gWrites;
+    assert(nvrm_backlight_write(IORegistryEntry::options, 65535) && gWrites == writes);
+    assert(!nvrm_backlight_write(IORegistryEntry::options, 65536) && gWrites == writes);
+    for (unsigned percent = 0; percent <= 100; ++percent) {
+        setSaved((unsigned char)percent);
+        assert(savedValue() == nvrm_backlight_from_percent(percent));
+        assert(nvrm_backlight_to_percent(savedValue()) == percent);
+    }
+    for (const auto &malformed : std::vector<std::vector<unsigned char>>{{}, {101}, {45, 0}, {2, 1, 0}, {1, 1, 0, 0}}) {
+        IORegistryEntry::options->values[NVRM_BACKLIGHT_VAR] = malformed;
+        auto invalid = NVRMBacklightHandler::withRM(&rm, 63);
+        assert(invalid->fUserLevel == (SInt32)nvrm_backlight_from_percent(63) && invalid->fRestoreLevel == -1);
+    }
+    IORegistryEntry::options->values.erase(NVRM_BACKLIGHT_VAR);
+    auto missing = NVRMBacklightHandler::withRM(&rm, 71);
+    assert(missing->fUserLevel == (SInt32)nvrm_backlight_from_percent(71) && missing->fRestoreLevel == -1);
+    puts("PASS: fractional targets survive probes, hardware-percent quantization, power requests and restart; legacy storage, endpoints and failed writes are covered.");
 }
 '''
 
 
 code = fixture
-code += between(HEADER, "static inline bool nvrm_backlight_read", "static inline unsigned nvrm_guard_starts")
+code += between(HEADER, "enum { kNVRMBacklightMax", "static inline unsigned nvrm_guard_starts")
 code += between(SOURCE, "NVRMBacklightHandler *NVRMBacklightHandler::withRM", "void NVRMBacklightHandler::free()")
 code += between(SOURCE, "bool NVRMBacklightHandler::setDisplay", "// User changes arrive")
 code += between(SOURCE, "bool NVRMBacklightHandler::doIntegerSet", "void NVRMBacklightHandler::applyFire")
