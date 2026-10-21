@@ -22,7 +22,7 @@ NVK  (Mesa's Vulkan driver for NVIDIA, with the NAK compiler)      [nvk/nvk-maco
 NVRM.kext  (NVIDIA's open GPU kernel modules, r610, ported to XNU) [kexts/NVRM]
         |  talks to the GPU's GSP firmware
         v
-GeForce RTX GPU  (GSP firmware from /Users/Shared/nvfw/nvidia/610.57.04)
+GeForce RTX GPU  (GSP firmware from /Library/NullMoth/nvfw/nvidia/615.78.08)
 ```
 
 Display and compositing run beside that path:
@@ -40,7 +40,7 @@ Linux's. At start it:
 1. claims the PCI device, maps its BARs, and places BAR1 (the GPU-visible window into video memory) outside the firmware
    console;
 2. holds the I/O registry busy so WindowServer does not start on the firmware screen;
-3. on its own thread, loads the GSP firmware from `/Users/Shared/nvfw/nvidia/610.57.04/` and boots the GPU with
+3. on its own thread, loads the GSP firmware from `/Library/NullMoth/nvfw/nvidia/615.78.08/` and boots the GPU with
    `rm_init_adapter()`;
 4. brings up NVKMS (NVIDIA's mode-setting) and releases the hold once the display is armed.
 
@@ -146,5 +146,5 @@ Nothing is sent; you can upload the file on the site yourself.
 
 ## 7. Building
 
-See the README, *Build from source*. The kexts need NVIDIA's `open-gpu-kernel-modules` at tag `610.57.04`; NVK needs
+See the README, *Build from source*. The kexts need NVIDIA's `open-gpu-kernel-modules` at tag `615.78.08`; NVK needs
 Mesa `17ca6174` with `nvk/nvk-macos.patch`.
