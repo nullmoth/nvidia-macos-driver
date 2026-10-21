@@ -2070,6 +2070,27 @@ static int nvmtl_spirv_bmask(const void *p, size_t n, uint64_t out[4])
 }
 enum { NVMTL_SLOT_NONE = 0, NVMTL_SLOT_BUF, NVMTL_SLOT_TEX, NVMTL_SLOT_SAMP, NVMTL_SLOT_TEXBUF  };
 typedef struct { uint8_t kind; void *h; size_t off; size_t size; uint64_t address; } nvmtl_slot;
+// Every handle a slot holds is an NVK object pointer (VkBuffer, VkImageView, VkSampler, VkBufferView), and NVK reads
+// through each one in vkUpdateDescriptorSets. A value that is not an 8-byte-aligned user address cannot be a live
+// object, and NVK faults on it: WindowServer died a few seconds after each start on RTX 3060 machines with a buffer
+// handle of 0x01006000000748c0 and a sampler handle of 0xa3 in a descriptor write. Such a slot binds the dummy instead
+// and the log says whether the handle was bad when it was bound or the slot changed after binding.
+static int nvmtl_handle_plausible(const void *h)
+{
+    const uintptr_t v = (uintptr_t)h;
+    return v >= 0x10000 && v < (1ull << 47) && !(v & 7);
+}
+static const nvmtl_slot *nvmtl_slot_checked(const nvmtl_slot *sl, uint32_t which, uint32_t binding)
+{
+    if (!sl || sl->kind == NVMTL_SLOT_NONE || !sl->h || nvmtl_handle_plausible(sl->h)) return sl;
+    static int said;
+    if (said < 8) {
+        said++;
+        nvlog("vk: binding %u of set %u (kind %u) holds handle 0x%llx after it was bound, which cannot be a live object - "
+              "the dummy is written instead (said up to 8 times)", binding, which, sl->kind, (unsigned long long)(uintptr_t)sl->h);
+    }
+    return NULL;
+}
 #define NVMTL_EMB_KEYMAX 480
 static int nvmtl_dirty_only_on(void)
 {
@@ -2505,6 +2526,15 @@ int nvmtl_vk_bind_buffer_offset(nvk_cmdbuf *c, uint32_t set, uint32_t index, siz
 static int nvmtl_bind_slot(nvk_cmdbuf *c, uint32_t set, uint32_t binding, uint8_t kind, void *h, size_t off)
 {
     if (set > 1 || binding >= NVMTL_NBIND) return -1;
+    if (kind != NVMTL_SLOT_NONE && h && !nvmtl_handle_plausible(h)) {
+        static int said;
+        if (said < 8) {
+            said++;
+            nvlog("vk: binding %u of set %u (kind %u) was given handle 0x%llx, which cannot be a live object - the slot is "
+                  "left empty (said up to 8 times)", binding, set, kind, (unsigned long long)(uintptr_t)h);
+        }
+        kind = NVMTL_SLOT_NONE; h = NULL; off = 0;
+    }
     if (!c->table) {
         c->table = calloc(1, sizeof(nvmtl_bindtable));
         if (!c->table) { nvlog("vk: out of memory for the binding table"); return -1; }
@@ -2887,7 +2917,7 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
     for (uint32_t i = 0; i < NVMTL_STEX_BASE; i++) {
         if (!NVMTL_E78_HAS(mask, i)) continue;
         VkDescriptorType ty = binding_type(i);
-        const nvmtl_slot *sl = t ? &t->s[which][i] : NULL;
+        const nvmtl_slot *sl = nvmtl_slot_checked(t ? &t->s[which][i] : NULL, which, i);
         const VkDescriptorBufferInfo *pb = NULL; const VkDescriptorImageInfo *pi = NULL;
         if (ty == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || ty == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
             if (i == NVMTL_ADDRESS_BINDING) pb = &addressInfo;
@@ -2927,7 +2957,7 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
     if (stex_hi > NVMTL_NSTEX) stex_hi = NVMTL_NSTEX;
     for (uint32_t j = 0; j < stex_hi; j++) {
         uint32_t i = NVMTL_STEX_BASE + j;
-        const nvmtl_slot *sl = t ? &t->s[which][i] : NULL;
+        const nvmtl_slot *sl = nvmtl_slot_checked(t ? &t->s[which][i] : NULL, which, i);
         if (tb && ((tb[2 + (j >> 6)] >> (j & 63)) & 1)) {
             tv[i] = (VkBufferView)(sl && sl->kind == NVMTL_SLOT_TEXBUF && sl->h ? sl->h : g_dummyTexView);
             w[nw++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, NVMTL_BINDING_NUMBER(i), 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NULL, NULL, &tv[i] };
