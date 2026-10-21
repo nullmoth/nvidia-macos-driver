@@ -37,6 +37,10 @@ static IOReturn IOSurfaceUnlock(IOSurfaceRef s, unsigned opts, uint32_t *seed) {
 }
 static void *IOSurfaceGetBaseAddressOfPlane(IOSurfaceRef s, uint32_t p) { return s->cpu; }
 static size_t IOSurfaceGetBytesPerRowOfPlane(IOSurfaceRef s, uint32_t p) { return 4; }
+static void *IOSurfaceGetBaseAddress(IOSurfaceRef s) { return s->cpu; }
+static size_t IOSurfaceGetAllocSize(IOSurfaceRef s) { return sizeof s->cpu; }
+// the imported-pages upload is unavailable here, so every upload takes the CPU copy this test checks
+static int nvmtl_vk_image_write_host(void *q, Image *img, void *base, size_t row, size_t bytes) { return -1; }
 static uint32_t nvmtl_vram_gen(IOSurfaceRef s, NSUInteger p) { return 1; }
 static int nvmtl_vram_tag_current(IOSurfaceRef s, NSUInteger p, unsigned seed) { return gpu_seed == seed; }
 static void nvmtl_vram_tag_set(IOSurfaceRef s, NSUInteger p, unsigned seed) { gpu_seed=seed; }
