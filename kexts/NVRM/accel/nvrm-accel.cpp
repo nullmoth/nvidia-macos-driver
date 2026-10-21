@@ -303,17 +303,64 @@ public:
     // deadline, the plugin name goes back on WITHOUT arming: apps get the NVIDIA device, and WindowServer (allow-listed
     // "!WindowServer" = only when armed) keeps the GPU that owns the display. Nothing here touches a display pipe or a
     // mode change. Boot-arg -nvaccelnoheadless keeps the old behaviour.
+    // The check runs every few seconds rather than once at the deadline: on a laptop whose screen is on the other GPU,
+    // NVKMS has listed this card's connectors, with none connected, about 7 s after start, and every app opened before
+    // the plugin name comes back never sees the NVIDIA device (Ampere and Turing laptops reported "Metal device: no" at
+    // first login while the name came back at 60 s). So the name goes back as soon as both are true: NVKMS reports no
+    // display on any of this card's connectors, and another GPU's framebuffer already shows the desktop. A desktop whose
+    // monitor is slow to wake has no other GPU's framebuffer and still waits for the deadline.
     static constexpr uint32_t kHeadlessDeadlineSec = 60;   // chosen: NVRMFB heads publish within ~20 s of start (#76 log)
+    static constexpr uint32_t kHeadlessPollSec = 2;        // chosen: a small fraction of the ~7 s NVKMS takes to enumerate
     struct thread_call *fHeadlessCall = nullptr;
+    uint32_t fHeadlessWaited = 0;
+    // true when NVKMS enumerated this card's connectors (NVRMFB writes connected-displays on each display nub it
+    // enumerates) and found a display on none of them
+    static bool headlessNoDisplayHere() {
+        bool seen = false, none = true;
+        if (OSIterator *it = getMatchingServices(serviceMatching("NVRMDisplay"))) {
+            while (OSObject *o = it->getNextObject()) {
+                IOService *s = OSDynamicCast(IOService, o);
+                OSNumber *cd = s ? OSDynamicCast(OSNumber, s->getProperty("connected-displays")) : nullptr;
+                if (!cd) continue;
+                seen = true;
+                if (cd->unsigned32BitValue() > 0) none = false;
+            }
+            it->release();
+        }
+        return seen && none;
+    }
+    // the first framebuffer that is not one of this driver's heads; *other is set when it sits on another vendor's GPU
+    static void headlessDisplayOwner(char *owner, size_t len, bool *other) {
+        *other = false;
+        OSIterator *it = getMatchingServices(serviceMatching("IOFramebuffer"));
+        if (!it) return;
+        while (OSObject *o = it->getNextObject()) {
+            IOService *s = OSDynamicCast(IOService, o);
+            if (!s || s->metaCast("NVRMNVDAFramebuffer")) continue;
+            strlcpy(owner, s->getMetaClass()->getClassName(), len);
+            // the Intel panel driver publishes as a head of this accelerator, so it is not another GPU's desktop here
+            if (s->metaCast("NMIntelFB")) break;
+            IORegistryEntry *e = s->getProvider();
+            for (int up = 0; e && up < 8 && !e->metaCast("IOPCIDevice"); up++) e = e->getParentEntry(gIOServicePlane);
+            OSData *v = e ? OSDynamicCast(OSData, e->getProperty("vendor-id")) : nullptr;
+            if (v && v->getLength() >= 2) {
+                const uint8_t *b = (const uint8_t *)v->getBytesNoCopy();
+                *other = (uint16_t)(b[0] | (b[1] << 8)) != 0x10de;
+            }
+            break;
+        }
+        it->release();
+    }
     void armHeadlessCheck() {
         int off = 0;
         if (PE_parse_boot_argn("-nvaccelnoheadless", &off, sizeof off)) { ALOG("headless check: off (-nvaccelnoheadless)"); return; }
         fHeadlessCall = thread_call_allocate(&NVAccel::headlessCheck, this);
         if (!fHeadlessCall) { ALOG("headless check: thread_call_allocate FAILED -- a GPU with no display stays hidden from Metal"); return; }
+        fHeadlessWaited = 0;
         uint64_t when = 0;
-        clock_interval_to_deadline(kHeadlessDeadlineSec, kSecondScale, &when);
+        clock_interval_to_deadline(kHeadlessPollSec, kSecondScale, &when);
         thread_call_enter_delayed(fHeadlessCall, when);
-        ALOG("headless check: armed for %u s from now", kHeadlessDeadlineSec);
+        ALOG("headless check: armed, every %u s for up to %u s", kHeadlessPollSec, kHeadlessDeadlineSec);
     }
     static void headlessCheck(void *p0, void *) {
         NVAccel *me = (NVAccel *)p0;
@@ -321,23 +368,29 @@ public:
         if (me->fRegLock) IOLockLock(me->fRegLock);
         const char *why = me->fFB ? "a display head published" : !me->fMetalPlugin ? "no plugin name to restore"
                         : me->getProperty("MetalPluginName") ? "the plugin name is already back" : nullptr;
+        me->fHeadlessWaited += kHeadlessPollSec;
         if (why) {
             ALOG("headless check: not headless (%s) -- nothing to do", why);
         } else {
             // name the GPU that owns the display, so a log says which driver WindowServer is on
             char owner[64] = "none found";
-            if (OSIterator *it = getMatchingServices(serviceMatching("IOFramebuffer"))) {
-                while (OSObject *o = it->getNextObject()) {
-                    IOService *s = OSDynamicCast(IOService, o);
-                    if (s && !s->metaCast("NVRMNVDAFramebuffer")) { strlcpy(owner, s->getMetaClass()->getClassName(), sizeof owner); break; }
-                }
-                it->release();
+            bool other = false;
+            headlessDisplayOwner(owner, sizeof owner, &other);
+            const bool early = other && headlessNoDisplayHere();
+            if (!early && me->fHeadlessWaited < kHeadlessDeadlineSec) {
+                uint64_t when = 0;
+                clock_interval_to_deadline(kHeadlessPollSec, kSecondScale, &when);
+                thread_call_enter_delayed(me->fHeadlessCall, when);
+                if (me->fRegLock) IOLockUnlock(me->fRegLock);
+                return;
             }
             me->setProperty("MetalPluginName", me->fMetalPlugin);
             me->setProperty("NVAccelHeadless", kOSBooleanTrue);
             gNvHeadless = 1;
-            ALOG("headless check: no NVIDIA display head after %u s -- MetalPluginName restored WITHOUT arming: apps get "
-                 "the NVIDIA Metal device, WindowServer stays on the display's GPU (%s)", kHeadlessDeadlineSec, owner);
+            ALOG("headless check: %s after %u s -- MetalPluginName restored WITHOUT arming: apps get "
+                 "the NVIDIA Metal device, WindowServer stays on the display's GPU (%s)",
+                 early ? "no display on any NVIDIA connector and another GPU shows the desktop" : "no NVIDIA display head",
+                 me->fHeadlessWaited, owner);
             // Not a good start for the boot guard: a card whose connectors carry no display clears the guard in the
             // framebuffer's own enumeration (nvrm-fb.cpp), with the connector list as evidence. Reaching this deadline
             // without that means the framebuffer never enumerated at all, which is a failure the guard must keep counting.
