@@ -233,6 +233,12 @@ NvBool nvkms_output_rounding_fix(void)          { return NV_TRUE; }
 NvBool nvkms_disable_hdmi_frl(void)             { return NV_FALSE; }
 NvBool nvkms_disable_vrr_memclk_switch(void)    { return NV_FALSE; }
 NvBool nvkms_hdmi_deepcolor(void)               { return NV_TRUE; }
+// 615: the most bits per colour NVKMS may send. 10 is Linux's default and what 610 allowed (DisplayPort and HDMI deep
+// colour capped at 10); 12 would turn on 615's new 12-bit HDMI output and change what the monitors scan out.
+NvU32 nvkms_max_output_color_bpc(void)          { return 10; }
+// 615 reports HDMI and HDMI-audio plug state to Linux's extcon framework; macOS has none.
+void nvkms_extcon_report_hdmi(NvBool)            { }
+void nvkms_extcon_report_hdmi_audio(NvBool)      { }
 NvBool nvkms_opportunistic_display_sync(void)   { return NV_TRUE; }
 enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void) { return NVKMS_DEBUG_FORCE_COLOR_SPACE_NONE; }
 NvBool nvkms_enable_overlay_layers(void)        { return NV_TRUE; }

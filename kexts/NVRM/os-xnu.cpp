@@ -69,6 +69,15 @@ int NV_API_CALL nv_printf(NvU32 debuglevel, const char *printf_format, ...)
     IOLog("%s", buf);
     return 0;
 }
+int NV_API_CALL nv_dev_vprintf(struct nv_state_t *nv, NV_LOG_LEVEL level, const char *format, va_list ap)
+{ NV_XNU_TRC;
+    char buf[512];
+    vsnprintf(buf, sizeof buf, format, ap);
+    buf[sizeof buf - 1] = 0;
+    kprintf("%s", buf);
+    IOLog("%s", buf);
+    return 0;
+}
 NV_STATUS NV_API_CALL nv_log_error(nv_state_t *nv, NvU32 error_number, const char *format, va_list ap)
 { NV_XNU_TRC;
     char buf[512];
