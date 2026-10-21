@@ -1,0 +1,37 @@
+--- a/kapi/src/nvkms-kapi.c
++++ b/kapi/src/nvkms-kapi.c
+@@ -3052,6 +3052,13 @@ static NvBool NvKmsKapiPrimaryLayerConfigToKms(
+                 params->layer[NVKMS_MAIN_LAYER].sizeOut.val.width = layerConfig->dstWidth;
+                 params->layer[NVKMS_MAIN_LAYER].sizeOut.val.height = layerConfig->dstHeight;
+                 params->layer[NVKMS_MAIN_LAYER].sizeOut.specified = TRUE;
++
++                /* Keep the primary layer 1:1; scale the desktop at the head viewport. */
++                if (layerConfig->srcWidth != layerConfig->dstWidth ||
++                    layerConfig->srcHeight != layerConfig->dstHeight) {
++                    params->layer[NVKMS_MAIN_LAYER].sizeOut.val.width = layerConfig->srcWidth;
++                    params->layer[NVKMS_MAIN_LAYER].sizeOut.val.height = layerConfig->srcHeight;
++                }
+             }
+         }
+ 
+@@ -3457,6 +3464,21 @@ static NvBool NvKmsKapiRequestedModeSetConfigToKms(
+         paramsHead->viewPortSizeIn.height =
+             headModeSetConfig->mode.timings.vVisible;
+ 
++        /* Scaled desktop modes use the postcomp head scaler. */
++        {
++            const struct NvKmsKapiLayerRequestedConfig *primaryLayerRequestedConfig =
++                &headRequestedConfig->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX];
++            const struct NvKmsKapiLayerConfig *primaryLayerConfig =
++                &primaryLayerRequestedConfig->config;
++
++            if (primaryLayerConfig->surface != NULL &&
++                (primaryLayerConfig->srcWidth != primaryLayerConfig->dstWidth ||
++                 primaryLayerConfig->srcHeight != primaryLayerConfig->dstHeight)) {
++                paramsHead->viewPortSizeIn.width = primaryLayerConfig->srcWidth;
++                paramsHead->viewPortSizeIn.height = primaryLayerConfig->srcHeight;
++            }
++        }
++
+         paramsHead->allowGsync = NV_TRUE;
+         paramsHead->allowAdaptiveSync = NVKMS_ALLOW_ADAPTIVE_SYNC_ALL;
