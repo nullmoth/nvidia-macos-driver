@@ -26,8 +26,8 @@
 // The firmware moved out of /Users/Shared, which every user can write: the kernel reads these images and
 // the card runs them. /Library/NullMoth is where the installer already keeps the cached accelerators
 // root-owned and not group- or world-writable.
-#define NV_XNU_FW_DIR "/Library/NullMoth/nvfw/nvidia/610.57.04/"
-// The largest image we ship is the Ampere GSP at 84 MB (measured); the cap only has to be generous.
+#define NV_XNU_FW_DIR "/Library/NullMoth/nvfw/nvidia/615.71.10/"
+// The largest image we ship is the Ampere ucodes at 58 MB (615.71.10, measured); the cap only has to be generous.
 #define NV_XNU_FW_MAX_BYTES (256u * 1024u * 1024u)
 #define NV_FIRMWARE_FOR_NAME(name) NV_XNU_FW_DIR name ".bin"
 extern "C" {
@@ -1197,10 +1197,10 @@ NV_STATUS NV_API_CALL nv_dma_unmap_alloc(nv_dma_device_t *dev, NvU64 page_count,
 // the card's own secure boot is what decides whether an image may run.
 struct nv_xnu_fw_expected { const char *name; NvU64 bytes; const char *sha1; };
 static const nv_xnu_fw_expected nv_xnu_fw_set[] = {
-    { "gsp_ga10x.bin",    84310168ull, "f11971026ccd86a7ea09ba525548c2e0615565ce" },
-    { "gsp_tu10x.bin",    29381504ull, "f20b8dc50f3576ec18c395c1b3b1cccc36bac194" },
-    { "ucodes_ga10x.bin",    31744ull, "1daf70f4f9a256212dead6f1ba88c694c5ae3af9" },
-    { "ucodes_tu10x.bin",    12032ull, "fe009104df714ad3d4233566aa0abb664614f8e9" },
+    { "gsp_ga10x.bin",    27043992ull, "8b19157b68477b7e96405ad6001670e92a38e7cd" },
+    { "gsp_tu10x.bin",    22901632ull, "db67543202fb4f38c216e2a1b5a3a180338b476e" },
+    { "ucodes_ga10x.bin", 58215936ull, "aafac2cbd37bdec84f86088f3269934d1dfa5067" },
+    { "ucodes_tu10x.bin",  8837632ull, "64c60572150fe28e7e9d8aad67245f0d1962ee3c" },
 };
 static const nv_xnu_fw_expected *nv_xnu_fw_expect(const char *path)
 {
@@ -1323,7 +1323,7 @@ NvBool NV_API_CALL os_is_queue_flush_ongoing(struct os_work_queue *queue) { retu
 // when the pageable maps are full. RAM keeps power in S3, and no disk is touched while the system goes to sleep.
 #define NV_XNU_TMPF_CHUNK (4ull << 20)
 struct nv_xnu_tmpfile { void **chunk; bool *pageable; NvU64 cap, used, bytes, wired; };
-NV_STATUS NV_API_CALL os_open_temporary_file(void **ppFile)
+NV_STATUS NV_API_CALL os_allocate_temporary_file(void **ppFile, NvU64 size)
 {
     TRC;
     nv_xnu_tmpfile *f = (nv_xnu_tmpfile *)IOMallocZero(sizeof *f);
