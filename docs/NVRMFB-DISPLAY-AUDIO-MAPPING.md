@@ -1,8 +1,8 @@
 # NVRMFB display audio mapping
 
-This extends the display-codec association introduced by [Hi-Jiajun in PR #284](https://github.com/nullmoth/nvidia-macos-driver/pull/284). The five AppleHDA properties and shared CEA scan follow that contribution; this extension reads the connector type from NVKMS, copies the owning GPU's `hda-gfx` value without changing its `OSData` or `OSString` type, and requires an explicit codec/pin mapping before publishing the five-property route.
+This extends the display-codec association introduced by [Hi-Jiajun in PR #284](https://github.com/nullmoth/nvidia-macos-driver/pull/284). The five AppleHDA properties and shared CEA scan follow that contribution; this extension reads the connector type from NVKMS, copies the owning GPU's `hda-gfx` value without changing its `OSData` or `OSString` type, and lets a machine name its own codec/pin mapping.
 
-Set `NVRMFBDisplayAudioCodecInfo` as a four-byte `OSData` property on the NVRMFB personality or framebuffer service. The property is passed through as `audio-codec-info`; it must identify the codec and pin used by the GPU. For example, `00 01 05 00` describes the local RTX 5080 Laptop test mapping to pin 05. This is an example only: the driver and generic Info.plist do not supply a default.
+Set `NVRMFBDisplayAudioCodecInfo` as a four-byte `OSData` property on the NVRMFB personality or framebuffer service. The property is passed through as `audio-codec-info`; it must identify the codec and pin used by the GPU. For example, `00 01 05 00` describes the local RTX 5080 Laptop test mapping to pin 05. Without the property the driver uses `00 01 04 00` (codec 0, pin 04), the mapping measured on an RTX 5060 desktop in #284. A board whose display audio is on another pin sets the property; a malformed value publishes no association.
 
 The current mapping describes one external audio display per GPU: one codec/pin value is shared by the framebuffer personality, and `port-number` is zero. Do not apply the same mapping to multiple active external displays unless they are known to share the same codec route. Concurrent multi-display audio and per-connector mapping are not implemented.
 

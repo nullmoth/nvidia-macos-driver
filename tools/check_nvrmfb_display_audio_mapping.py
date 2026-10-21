@@ -24,6 +24,7 @@ connector = extract(fb, 'static NvU32 nvrmHdaConnectorType(')
 publish = extract(fb, 'void NVRMNVDAFramebuffer::publishDisplayAudioProperties()')
 clear = extract(fb, 'void NVRMNVDAFramebuffer::clearDisplayAudioProperties()')
 assert 'NVRMFBDisplayAudioCodecInfo' in publish
+assert '{ 0x00, 0x01, 0x04, 0x00 }' in publish   # the default when no mapping is configured
 assert 'if (!cea.has_audio || !connectorType || !hasPairing)' in publish
 assert 'for (size_t e = 1; e <= edid[126]; e++)' in scan
 assert all(f'"{key}"' in publish for key in ('connector-type', 'port-number', 'av-signal-type', 'audio-codec-info', 'IODisplayEDID'))
@@ -66,4 +67,4 @@ with tempfile.TemporaryDirectory() as directory:
     test.write_text(fixture + scan + connector + checks, encoding='utf-8')
     subprocess.run(['clang++', '-std=c++17', '-Wall', '-Wextra', str(test), '-o', str(path / 'check')], check=True)
     subprocess.run([str(path / 'check')], check=True)
-print('PASS: production connector and CEA helpers; mapping needs explicit config, SADs, real connector type, and GPU pairing; disconnect clears stale properties')
+print('PASS: production connector and CEA helpers; mapping defaults to pin 4 unless configured, needs SADs, real connector type, and GPU pairing; disconnect clears stale properties')
