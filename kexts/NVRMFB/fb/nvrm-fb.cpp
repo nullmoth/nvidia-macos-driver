@@ -135,7 +135,7 @@ static const unsigned kTraceMax = 900;
 // existed when the first framebuffer was opened (gIOFBHaveBacklight, IOFramebuffer::open). On Macs that is
 // the ACPI PNLF device; here it is this handler, published by the panel's framebuffer before super::start().
 // IODisplay finds it below the framebuffer (searchParameterHandlers) and offers "brightness" and
-// "linear-brightness" through it; both are percent of the panel's PWM. The level goes to NVRM
+// "linear-brightness" through it; both use the normalized NVKMS request range. The level goes to NVRM
 // ("NVRMBacklight": nvKmsSetBacklight on the backlight NVKMS registered), from a thread call, because
 // IODisplay calls doIntegerSet() with the framebuffer lock held.
 static const SInt32 kNVRMMinBacklight = 5;   // never 0: some panels switch the backlight off completely
@@ -147,8 +147,8 @@ class NVRMBacklightHandler : public IODisplayParameterHandler {
     const OSSymbol *fFn = nullptr;
     thread_call_t fApply = nullptr;
     volatile SInt32 fPending = -1;
-    SInt32 fLevel = 100;
-    volatile SInt32 fUserLevel = 100;
+    SInt32 fLevel = kNVRMBacklightMax;
+    volatile SInt32 fUserLevel = kNVRMBacklightMax;
     volatile SInt32 fPersistPending = -1;
     SInt32 fRestoreLevel = -1;
     OSDictionary *fParameters = nullptr;
@@ -175,12 +175,12 @@ NVRMBacklightHandler *NVRMBacklightHandler::withRM(IOService *rm, NvU32 level)
     if (!sBrightnessProbe) sBrightnessProbe = OSSymbol::withCStringNoCopy("brightness-probe");
     if (!sLinearBrightnessProbe) sLinearBrightnessProbe = OSSymbol::withCStringNoCopy("linear-brightness-probe");
     h->fApply = nvrmfbCall(applyFire, h);
-    h->fLevel = level <= 100 ? (SInt32)level : 100;
-    unsigned char saved;
+    h->fLevel = (SInt32)nvrm_backlight_from_percent(level <= 100 ? level : 100);
+    UInt32 saved;
     IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
     if (options && nvrm_backlight_read(options, &saved)) {
-        h->fUserLevel = saved;
-        h->fRestoreLevel = saved;
+        h->fUserLevel = (SInt32)saved;
+        h->fRestoreLevel = (SInt32)saved;
     } else {
         h->fUserLevel = h->fLevel;
     }
@@ -208,15 +208,15 @@ bool NVRMBacklightHandler::setDisplay(IODisplay *display)
     OSDictionary *params = cur ? OSDictionary::withDictionary(cur) : OSDictionary::withCapacity(2);
     OSSafeReleaseNULL(old);
     if (!params) return false;
-    IODisplay::addParameter(params, gIODisplayBrightnessKey, 0, 100);
+    IODisplay::addParameter(params, gIODisplayBrightnessKey, 0, kNVRMBacklightMax);
     SInt32 initial = fRestoreLevel >= 0 ? fRestoreLevel : fLevel;
     IODisplay::setParameter(params, gIODisplayBrightnessKey, initial);
-    IODisplay::addParameter(params, gIODisplayLinearBrightnessKey, 0, 100);
+    IODisplay::addParameter(params, gIODisplayLinearBrightnessKey, 0, kNVRMBacklightMax);
     IODisplay::setParameter(params, gIODisplayLinearBrightnessKey, initial);
     // CoreDisplay converts between user and linear brightness by writing one probe and reading the other.
-    IODisplay::addParameter(params, sBrightnessProbe, 0, 100);
+    IODisplay::addParameter(params, sBrightnessProbe, 0, kNVRMBacklightMax);
     IODisplay::setParameter(params, sBrightnessProbe, initial);
-    IODisplay::addParameter(params, sLinearBrightnessProbe, 0, 100);
+    IODisplay::addParameter(params, sLinearBrightnessProbe, 0, kNVRMBacklightMax);
     IODisplay::setParameter(params, sLinearBrightnessProbe, initial);
     display->setProperty(gIODisplayParametersKey, params);
     OSSafeReleaseNULL(fParameters);
@@ -226,7 +226,7 @@ bool NVRMBacklightHandler::setDisplay(IODisplay *display)
         fRestoreLevel = -1;
         thread_call_enter(fApply);
     }
-    BLLOG("backlight: brightness parameters on %s, panel at %d%%", display->getName(), (int)fLevel);
+    BLLOG("backlight: brightness parameters on %s, logical level %d/65535", display->getName(), (int)fLevel);
     return true;
 }
 
@@ -236,15 +236,17 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
 {
     const bool probe = paramName == sBrightnessProbe || paramName == sLinearBrightnessProbe;
     if (!probe && paramName != gIODisplayBrightnessKey && paramName != gIODisplayLinearBrightnessKey) return false;
-    SInt32 level = value > 100 ? 100 : (SInt32)value;
+    SInt32 level = value > kNVRMBacklightMax ? kNVRMBacklightMax : (SInt32)value;
     if (probe) {
-        // Both scales use PWM percent here. Conversion must not change the panel or the saved user target.
+        // No transfer function is reported by NVKMS; preserve the normalized request without applying it.
         return fParameters && IODisplay::setParameter(fParameters,
             paramName == sBrightnessProbe ? sLinearBrightnessProbe : sBrightnessProbe, level);
     }
     if (params && params->getObject(gIODisplayValueKey)) {
         __atomic_store_n(&fUserLevel, level, __ATOMIC_SEQ_CST);
         __atomic_store_n(&fPersistPending, level, __ATOMIC_SEQ_CST);
+        if (fParameters) IODisplay::setParameter(fParameters,
+            paramName == gIODisplayBrightnessKey ? gIODisplayLinearBrightnessKey : gIODisplayBrightnessKey, level);
     }
     else {
         SInt32 target = OSAddAtomic(0, &fUserLevel);
@@ -261,17 +263,18 @@ void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
     SInt32 v;
     do { v = me->fPending; } while (!OSCompareAndSwap((UInt32)v, (UInt32)-1, (volatile UInt32 *)&me->fPending));
     if (v < 0) return;
-    NvU32 percent = (NvU32)(v < kNVRMMinBacklight ? kNVRMMinBacklight : v);
+    NvU32 percent = nvrm_backlight_to_percent((UInt32)v);
+    if (percent < (NvU32)kNVRMMinBacklight) percent = (NvU32)kNVRMMinBacklight;
     IOReturn r = me->fRM->callPlatformFunction(me->fFn, false, &percent, (void *)1, NULL, NULL);
     if (r == kIOReturnSuccess) {
         me->fLevel = v;
         SInt32 target = OSAddAtomic(0, &me->fPersistPending);
         if (target == v && OSAddAtomic(0, &me->fUserLevel) == target) {
             IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
-            bool saved = options && nvrm_backlight_write(options, (unsigned char)target);
+            bool saved = options && nvrm_backlight_write(options, (UInt32)target);
             OSSafeReleaseNULL(options);
             if (saved) OSCompareAndSwap((UInt32)target, (UInt32)-1, (volatile UInt32 *)&me->fPersistPending);
-            else BLLOG("backlight: saving %d%% target failed", (int)target);
+            else BLLOG("backlight: saving logical target %d failed", (int)target);
         }
     } else BLLOG("backlight: setting %u%% failed (0x%x)", (unsigned)percent, r);
 }
