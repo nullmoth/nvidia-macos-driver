@@ -2,7 +2,7 @@
 
 The driver uses NVIDIA's r615 open RM, HAL, and GSP stack. That stack targets Turing and later
 ([upstream compatibility](https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus)).
-The installer carries 244 distinct display-card PCI device IDs from NVIDIA's 615.78.08 table (`SUPPORTED_IDS` in
+The installer carries 247 distinct display-card PCI device IDs from NVIDIA's 615.78.08 table (`SUPPORTED_IDS` in
 [`package/install.sh`](../package/install.sh)). The kernel matches NVIDIA display
 and 3D-controller PCI classes, then asks NVIDIA's own supported-device gates to accept the card.
 A card being in the table doesn't mean a given laptop works: its display wiring, firmware and BAR
