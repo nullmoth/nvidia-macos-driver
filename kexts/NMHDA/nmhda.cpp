@@ -1,14 +1,8 @@
 // NMHDA: HDMI and DisplayPort audio from NVIDIA cards.
 //
-// macOS 15's AppleHDAController attaches only to HD Audio controllers listed in its own table of 48-byte entries
-// (vendor, device, flags, ...). The NVIDIA entries are Fermi and Kepler parts (10DE:0BE3-0BEE, 0E08, 0E0A, 0E0B, 0E1A,
-// 0E1B), so the audio function of any newer card (an RTX 5060 is 10DE:22EB) gets no driver and the card has no sound
-// output. OpenCore cannot patch this kext: it lives in the system kernel collection, and OpenCore's kernel patcher
-// reports "Not Found" for it.
-//
-// When AppleHDAController loads, this plugin reads the device id of each NVIDIA audio function (PCI class 0x0403,
-// vendor 0x10DE) from the I/O Registry and rewrites one Kepler entry per card to that id, keeping the Kepler entry's
-// flags. Nothing else in the controller changes.
+// NMHDA adds NVIDIA HD Audio device IDs to AppleHDAController's table. When
+// AppleALC applies its shared Intel device-ID spoof, AppleHDA's native
+// HwFactoryPrefixTranslation restores the NVIDIA ID before codec probing.
 
 #include <Headers/plugin_start.hpp>
 #include <Headers/kern_api.hpp>
@@ -17,6 +11,8 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <libkern/c++/OSData.h>
+#include <libkern/c++/OSArray.h>
+#include <libkern/c++/OSNumber.h>
 #include <mach/kmod.h>
 #include <stdarg.h>
 #include <sys/sysctl.h>
@@ -78,15 +74,51 @@ static bool isNvidiaAudio(IOService *p) {
     auto pci = OSDynamicCast(IOPCIDevice, p);
     return pci && (readU32(pci, "vendor-id") & 0xFFFF) == 0x10DE && (readU32(pci, "class-code") & 0xFFFF00) == 0x040300;
 }
+static bool setNumber(OSDictionary *dict, const char *key, uint32_t value) {
+    auto number = OSNumber::withNumber(value, 32);
+    if (!number) return false;
+    bool ok = dict->setObject(key, number);
+    number->release();
+    return ok;
+}
+static uint32_t numberValue(OSDictionary *dict, const char *key) {
+    auto number = OSDynamicCast(OSNumber, dict->getObject(key));
+    return number ? number->unsigned32BitValue() : 0xFFFFFFFF;
+}
+static bool restoreNvidiaDeviceId(IOService *self, IOService *provider) {
+    uint32_t layout = readU32(provider, "layout-id");
+    uint32_t device = readU32(provider, "device-id");
+    // Without a layout, the native translation key cannot be built; keep the normal probe path.
+    if (layout == 0xFFFFFFFF) return true;
+    if (device == 0xFFFFFFFF) return false;
+    auto existing = OSDynamicCast(OSArray, self->getProperty("HwFactoryPrefixTranslation"));
+    if (existing) {
+        for (unsigned i = 0; i < existing->getCount(); i++) {
+            auto entry = OSDynamicCast(OSDictionary, existing->getObject(i));
+            if (entry && numberValue(entry, "LayoutID") == layout && numberValue(entry, "VID") == 0x10DE &&
+                numberValue(entry, "SourceDID") == 0x9D70 && numberValue(entry, "StandInDID") == (device & 0xFFFF))
+                return true;
+        }
+    }
+    auto entries = existing ? OSArray::withArray(existing) : OSArray::withCapacity(1);
+    auto entry = OSDictionary::withCapacity(4);
+    bool ok = entries && entry && setNumber(entry, "LayoutID", layout) &&
+        setNumber(entry, "VID", 0x10DE) && setNumber(entry, "SourceDID", 0x9D70) &&
+        setNumber(entry, "StandInDID", device & 0xFFFF) && entries->setObject(entry) &&
+        self->setProperty("HwFactoryPrefixTranslation", entries);
+    if (entry) entry->release();
+    if (entries) entries->release();
+    return ok;
+}
 static IOService *wrapProbe(IOService *self, IOService *provider, SInt32 *score) {
+    if (isNvidiaAudio(provider) && !restoreNvidiaDeviceId(self, provider)) {
+        report("probe", "cannot prepare NVIDIA native device-id translation");
+        return nullptr;
+    }
     auto r = FunctionCast(wrapProbe, orgProbe)(self, provider, score);
     if (isNvidiaAudio(provider)) {
-        // AppleHDAController fields probe fills (macOS 15.8 layout): vendor/device read from config space, the matched
-        // table entry's capability word, and the HDA-GFX flags
-        auto *c = reinterpret_cast<const uint8_t *>(self);
-        report("probe", "probe %s -> %s (ven %04x dev %04x cap %04x eb4 %u gfx %u)", provider->getName(), r ? "accepted" : "REFUSED",
-               *(const uint32_t *)(c + 0xef0) & 0xFFFF, *(const uint32_t *)(c + 0xef4) & 0xFFFF, *(const uint16_t *)(c + 0x2d4),
-               c[0xeb4], c[0x1e60]);
+        report("probe", "probe %s -> %s (10DE:%04x)", provider->getName(), r ? "accepted" : "REFUSED",
+               (unsigned)(readU32(provider, "device-id") & 0xFFFF));
     }
     return r;
 }
@@ -131,15 +163,26 @@ static void rematchNvidiaAudio() {
     report("nmhda-rematch", "matching restarted on %lu NVIDIA audio function(s)", (unsigned long)n);
 }
 
-static void onHdaLoaded(void *, KernelPatcher &patcher, size_t index, mach_vm_address_t, size_t) {
-    report("nmhda-controller", "AppleHDAController loaded (index %lu, ours %lu)", (unsigned long)index, (unsigned long)kHda.loadIndex);
-    if (index != kHda.loadIndex) return;
+static void onHdaLoaded(void *, KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+    if (orgProbe) return;
+    auto probe = patcher.solveSymbol(index, "__ZN18AppleHDAController5probeEP9IOServicePi", address, size);
+    patcher.clearError();
+    if (!probe) {
+        report("nmhda-controller", "could not find AppleHDAController probe in runtime image %lu", (unsigned long)index);
+        return;
+    }
+    report("nmhda-controller", "AppleHDAController runtime image %lu (registered %lu)",
+           (unsigned long)index, (unsigned long)kHda.loadIndex);
+    kHda.loadIndex = index;
     KernelPatcher::RouteRequest routes[] {
         { "__ZN18AppleHDAController5probeEP9IOServicePi", wrapProbe, orgProbe },
         { "__ZN18AppleHDAController5startEP9IOService", wrapStart, orgStart },
     };
-    if (!patcher.routeMultiple(index, routes, arrsize(routes)))
+    if (!patcher.routeMultiple(index, routes, arrsize(routes))) {
         report("route", "could not wrap probe/start (patcher error %d)", patcher.getError());
+        patcher.clearError();
+        return;
+    }
     patcher.clearError();
     uint16_t ids[arrsize(kKepler)] {};
     size_t n = nvidiaAudioIds(ids, arrsize(ids));
@@ -164,20 +207,6 @@ static void onHdaLoaded(void *, KernelPatcher &patcher, size_t index, mach_vm_ad
     // AppleHDAController is usually loaded (for the board's own audio) before Lilu reaches it, so the NVIDIA function was
     // already probed against the unpatched table and refused, and I/O Kit does not probe a device twice by itself. Matching
     // runs again for each NVIDIA audio function now that the table accepts it.
-    // With AppleALC loaded, AppleHDAController's probe reads the NVIDIA function as 10DE:9D70 (an Intel controller id), so
-    // the card's own id never matches; the next free Kepler entry takes that id too (no NVIDIA device uses it). Measured
-    // with this plugin's probe report on an RTX 5060: "ven 10de dev 9d70".
-    if (patched && n < arrsize(kKepler)) {
-        const uint16_t k = kKepler[n];
-        const uint8_t find[8] { 0xDE, 0x10, (uint8_t)(k & 0xFF), (uint8_t)(k >> 8), 0x01, 0x00, 0x00, 0x00 };
-        const uint8_t repl[8] { 0xDE, 0x10, 0x70, 0x9D, 0x01, 0x00, 0x00, 0x00 };
-        KernelPatcher::LookupPatch p { &kHda, find, repl, sizeof(find), 1 };
-        patcher.clearError();
-        patcher.applyLookupPatch(&p);
-        report("nmhda-result", "HD Audio table: 10DE:9D70 %s (in place of Kepler 10DE:%04X)",
-               patcher.getError() == KernelPatcher::Error::NoError ? "accepted" : "NOT added", k);
-        patcher.clearError();
-    }
     if (patched) rematchNvidiaAudio();
 }
 
@@ -198,7 +227,7 @@ PluginConfiguration ADDPR(config) {
     bootargOff, arrsize(bootargOff),
     bootargDebug, arrsize(bootargDebug),
     bootargBeta, arrsize(bootargBeta),
-    KernelVersion::Sequoia, KernelVersion::Sequoia,
+    KernelVersion::Sequoia, KernelVersion::Tahoe,
     pluginStart
 };
 
