@@ -250,7 +250,8 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
         return fParameters && IODisplay::setParameter(fParameters,
             paramName == sBrightnessProbe ? sLinearBrightnessProbe : sBrightnessProbe, level);
     }
-    if (params && params->getObject(gIODisplayValueKey)) {
+    const bool userRequest = params && params->getObject(gIODisplayValueKey);
+    if (userRequest) {
         uint64_t deadline;
         clock_interval_to_deadline(kNVRMBacklightSaveDelaySeconds, kSecondScale, &deadline);
         __atomic_store_n(&fPersistDeadline, deadline, __ATOMIC_SEQ_CST);
@@ -262,6 +263,8 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
         SInt32 target = OSAddAtomic(0, &fUserLevel);
         if (value == kAppleBacklightDefaultMax || level > target) level = target;
     }
+    BLLOG("backlight: %s request logical=%d/65535 user-target=%d/65535",
+        userRequest ? "user" : "power", (int)level, (int)OSAddAtomic(0, &fUserLevel));
     fPending = level;
     thread_call_enter(fApply);
     return true;
@@ -278,6 +281,8 @@ void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
     IOReturn r = me->fRM->callPlatformFunction(me->fFn, false, &percent, (void *)1, NULL, NULL);
     if (r == kIOReturnSuccess) {
         me->fLevel = v;
+        BLLOG("backlight: applied logical=%d/65535 hardware=%u%% user-target=%d/65535",
+            (int)v, (unsigned)percent, (int)OSAddAtomic(0, &me->fUserLevel));
         uint64_t deadline = __atomic_load_n(&me->fPersistDeadline, __ATOMIC_SEQ_CST);
         if (deadline && OSAddAtomic(0, &me->fUserLevel) == v) {
             // Only a successfully applied user target becomes eligible for persistence.
