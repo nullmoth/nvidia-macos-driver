@@ -42,6 +42,10 @@ static void               nvAccelWriteStamp(int index, unsigned int value);
 #define NV_LOG_TAG "NVAccel: "
 #endif
 #define ALOG(fmt, ...) do { kprintf(NV_LOG_TAG fmt "\n", ##__VA_ARGS__); IOLog(NV_LOG_TAG fmt "\n", ##__VA_ARGS__); } while (0)
+// Per-allocation lines: WindowServer and every Metal app create resources continuously, and logging each one filled the
+// system log (#242). They print only with the -nvaccelverbose boot-arg.
+static bool nvaccel_verbose() { static int v = -1; if (v < 0) { int x = 0; v = PE_parse_boot_argn("-nvaccelverbose", &x, sizeof x) ? 1 : 0; } return v == 1; }
+#define ALOGV(fmt, ...) do { if (nvaccel_verbose()) ALOG(fmt, ##__VA_ARGS__); } while (0)
 #include <libkern/c++/OSSymbol.h>
 #include "nvrm_vram_abi.h"
 #include <IOKit/IODeviceMemory.h>
@@ -262,9 +266,9 @@ public:
     OSObject *newSurface() APPLE_KEXT_OVERRIDE { NVSurface *o = OSTypeAlloc(NVSurface); ALOG("newSurface -> %p", o); return o; }
     OSObject *new2DContext() APPLE_KEXT_OVERRIDE { NV2DContext *c = OSTypeAlloc(NV2DContext); ALOG("new2DContext -> %p", c); return c; }
     OSObject *newVideoContext() APPLE_KEXT_OVERRIDE { NVVideoContext *c = OSTypeAlloc(NVVideoContext); ALOG("newVideoContext -> %p", c); return c; }
-    OSObject *newSysMemory() APPLE_KEXT_OVERRIDE { NVSysMemory *m = OSTypeAlloc(NVSysMemory); ALOG("newSysMemory -> %p", m); return m; }
-    OSObject *newVidMemory() APPLE_KEXT_OVERRIDE { NVVidMemory *m = OSTypeAlloc(NVVidMemory); ALOG("newVidMemory -> %p", m); return m; }
-    OSObject *newResource() APPLE_KEXT_OVERRIDE { NVResource *r = OSTypeAlloc(NVResource); OSAddAtomic64(1, &gCntResNew); ALOG("newResource -> %p", r); return r; }
+    OSObject *newSysMemory() APPLE_KEXT_OVERRIDE { NVSysMemory *m = OSTypeAlloc(NVSysMemory); ALOGV("newSysMemory -> %p", m); return m; }
+    OSObject *newVidMemory() APPLE_KEXT_OVERRIDE { NVVidMemory *m = OSTypeAlloc(NVVidMemory); ALOGV("newVidMemory -> %p", m); return m; }
+    OSObject *newResource() APPLE_KEXT_OVERRIDE { NVResource *r = OSTypeAlloc(NVResource); OSAddAtomic64(1, &gCntResNew); ALOGV("newResource -> %p", r); return r; }
     OSObject *newMemoryMap() APPLE_KEXT_OVERRIDE { NVMemoryMap *m = OSTypeAlloc(NVMemoryMap); ALOG("newMemoryMap -> %p", m); return m; }
 
     NVDisplayMachine *fDM = nullptr;
@@ -988,7 +992,7 @@ bool NVVidMemory::allocPhysical()
     fRmHandle = r.handle; fKva = r.kva; fPhys = r.phys; fBytes = r.actualSize; fAllocationCookie = r.allocationCookie;
     OSAddAtomic64(1, &gCntVmAlloc); OSAddAtomic64((SInt64)fBytes, &gCntVmAllocBytes);
     *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = fPhys;
-    ALOG("NVVidMemory::allocPhysical(%p): %llu bytes of REAL VRAM -- phys 0x%llx kva %p [BAR1 %llu]",
+    ALOGV("NVVidMemory::allocPhysical(%p): %llu bytes of REAL VRAM -- phys 0x%llx kva %p [BAR1 %llu]",
          this, fBytes, fPhys, fKva, r.mappedTotal);
     return true;
 }
