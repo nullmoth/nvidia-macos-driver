@@ -1753,7 +1753,12 @@ __attribute__((weak)) long libspdm_x509_get_version(void) { NV_XNU_STUB_HIT("lib
 __attribute__((weak)) long libspdm_x509_set_date_time(void) { NV_XNU_STUB_HIT("libspdm_x509_set_date_time"); return 0; }
 __attribute__((weak)) long libspdm_x509_verify_cert(void) { NV_XNU_STUB_HIT("libspdm_x509_verify_cert"); return 0; }
 __attribute__((weak)) long libspdm_x509_verify_cert_chain(void) { NV_XNU_STUB_HIT("libspdm_x509_verify_cert_chain"); return 0; }
-__attribute__((weak)) long nv_parms(void) { NV_XNU_STUB_HIT("nv_parms"); return 0; }
+// NVIDIA's module-parameter table (nv-reg.h), not a function: rm_parse_option_string() walks it comparing each entry's
+// name until a NULL entry, and an option it does not find becomes an RM registry dword. It was a stub function of the
+// same name, so that walk read the stub's machine code as string pointers and any nvregdwords= boot-arg stopped the
+// boot in strcmp. Empty here, so every nvregdwords option reaches RM's registry.
+struct nv_xnu_parm { const char *name; NvU32 *data; };
+__attribute__((used)) struct nv_xnu_parm nv_parms[] = { { NULL, NULL } };
 __attribute__((weak)) long nvswitch_os_acquire_fabric_mgmt_cap(void) { NV_XNU_STUB_HIT("nvswitch_os_acquire_fabric_mgmt_cap"); return 0; }
 __attribute__((weak)) long nvswitch_os_add_client_event(void) { NV_XNU_STUB_HIT("nvswitch_os_add_client_event"); return 0; }
 __attribute__((weak)) long nvswitch_os_alloc_contig_memory(void) { NV_XNU_STUB_HIT("nvswitch_os_alloc_contig_memory"); return 0; }
