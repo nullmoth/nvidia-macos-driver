@@ -140,13 +140,35 @@ fn privatize_direct_construct_tree_shared_continuations(
 ) -> Option<Vec<BodyBlock>> {
     const DIRECT_SHARED_ROUNDS: usize = 64;
     const DIRECT_SHARED_GROWTH_CAP: usize = 4_000;
+    // Privatizing one continuation must leave fewer shared ones to privatize. On MPS's depthwiseConv_3x3 every clone
+    // exposed more (58 candidates at 318 blocks, 319 at 4,155), each search took seconds at that size, and the
+    // function never finished translating: Vision's barcode reader hung and then aborted its app (#334), and the
+    // Geekbench Background Blur kernel ran past 180 s (#111). Rounds that do not lower the candidate count are not
+    // converging; after this many in a row the strategy keeps the graph from its last improving round (or none, so the
+    // caller's next emission path runs).
+    const DIRECT_SHARED_STALLED_ROUNDS: usize = 4;
     let mut cur = blocks.to_vec();
     let mut changed = false;
     let mut counter = 7_500_000usize;
     let max_blocks = blocks.len().saturating_add(DIRECT_SHARED_GROWTH_CAP);
+    let (mut fewest, mut stalled) = (usize::MAX, 0usize);
+    let mut best: Option<Vec<BodyBlock>> = None;
     for _ in 0..DIRECT_SHARED_ROUNDS {
         let mut next = None;
-        for (header, continuation) in clone_crossarm::find_deep_shared_continuations(&cur) {
+        let candidates = clone_crossarm::find_deep_shared_continuations(&cur);
+        if candidates.len() < fewest {
+            fewest = candidates.len();
+            stalled = 0;
+            if changed {
+                best = Some(cur.clone());
+            }
+        } else {
+            stalled += 1;
+            if stalled >= DIRECT_SHARED_STALLED_ROUNDS {
+                return best;
+            }
+        }
+        for (header, continuation) in candidates {
             let Some(cloned) = clone_crossarm::privatize_dominated_region(
                 &cur,
                 &header,
