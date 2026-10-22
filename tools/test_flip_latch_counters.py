@@ -108,6 +108,7 @@ static char gPresentMsg[8];
 static bool presentStatsNote(unsigned, uint64_t, bool, bool, bool, uint32_t) { return false; }   // exercised by test_present_stats.py
 static int gFlipLatch = 1;
 static int gFlipLatchWaits = 0, gFlipLatchTimeouts = 0, gFlipLatchMaxUs = 0, gFlipLatchLate = 0;
+static int gFlipLatchDeferred = 0;
 STUCK_LINE
 enum Mode { COMPLETE, STUCK, FAIL, LATE };
 struct Kms {
@@ -152,8 +153,12 @@ WAIT_REGION
         return NV_TRUE; // control's path when it falls through (never reached in fixed region)
     }
 };
-static void reset() { gFlipLatchWaits = gFlipLatchTimeouts = gFlipLatchMaxUs = gFlipLatchLate = 0; gFlipLatch = 1; gSleeps = 0; gLongestSleep = 0; }
+static void reset() { gFlipLatchWaits = gFlipLatchTimeouts = gFlipLatchMaxUs = gFlipLatchLate = gFlipLatchDeferred = 0; gFlipLatch = 1; gSleeps = 0; gLongestSleep = 0; }
 int main() {
+    // Deferred (debug.nvrmfb_flip_latch=2, #300): the submit returns without waiting; the next submit verifies the flip.
+    { Kms k; k.mode=COMPLETE; FB f; f.fKms=&k; f.mode(148500000, 2200, 1125); reset(); gFlipLatch = 2;
+      assert(f.waitComplete(false, true) == NV_TRUE);
+      assert(gFlipLatchDeferred == 1 && gFlipLatchWaits == 0 && gSleeps == 0 && "deferred mode must not wait for the flip"); }
     // A completed flip: one wait recorded, no timeout, a duration captured.
     { Kms k; k.mode=COMPLETE; FB f; f.fKms=&k; f.mode(148500000, 2200, 1125); reset();
       assert(f.waitComplete(false, true) == NV_TRUE);
