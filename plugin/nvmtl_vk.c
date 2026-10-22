@@ -23,6 +23,13 @@
 #include "nvmtl_sampler_state.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
 static int g_scalar_layout;
+static uint32_t g_cbuf_limit, g_cbuf_dynamic_limit, g_cbuf_stage_limit;
+static VkDeviceSize g_cbuf_alignment;
+static int g_cbuf_stats;
+enum { CBUF_NONE, CBUF_USED, CBUF_NO_VARIANT, CBUF_NO_TABLE, CBUF_MISSING_BUFFER,
+       CBUF_OFFSET, CBUF_ALIGNMENT, CBUF_SHORT_RANGE, CBUF_RESULT_COUNT };
+static _Atomic uint64_t g_cbuf_draws[CBUF_RESULT_COUNT];
+static _Atomic uint64_t g_cbuf_pipeline_attempts, g_cbuf_pipeline_promoted;
 
 void nvlog(const char *fmt, ...);
 
@@ -751,6 +758,12 @@ static int nvmtl_vk_initialize(void)
     nvlog("vk: pdev %u physical device(s) through this ICD (VkResult %d)", n, (int)er);
     VkPhysicalDevice pds[8]; if (n > 8) n = 8; pvkEnumeratePhysicalDevices(g_inst, &n, pds); g_pdev = pds[0];
     VkPhysicalDeviceProperties pp; pvkGetPhysicalDeviceProperties(g_pdev, &pp);
+    if (pp.vendorID == 0x10de) {
+        g_cbuf_limit = pp.limits.maxUniformBufferRange < 65536u ? pp.limits.maxUniformBufferRange : 65536u;
+        g_cbuf_alignment = pp.limits.minUniformBufferOffsetAlignment;
+        g_cbuf_dynamic_limit = pp.limits.maxDescriptorSetUniformBuffersDynamic;
+        g_cbuf_stage_limit = pp.limits.maxPerStageDescriptorUniformBuffers;
+    }
     snprintf(g_name, sizeof g_name, "%s", pp.deviceName);
     g_lim = pp.limits;
     { VkPhysicalDeviceShaderSMBuiltinsPropertiesNV sm = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SM_BUILTINS_PROPERTIES_NV };
@@ -1979,6 +1992,7 @@ int nvmtl_vk_image_create(uint32_t w, uint32_t h, nvk_image *out) { return nvmtl
 #define NVMTL_NSAMP  32
 #define NVMTL_ADDRESS_BINDING (NVMTL_NBUF + NVMTL_NTEX + NVMTL_NSAMP)
 #define NVMTL_ADDRESS_BINDING_NUMBER 640
+#define NVMTL_GL_UNIFORM_BINDING 641
 #define NVMTL_BINDING_NUMBER(i) ((i) == NVMTL_ADDRESS_BINDING ? NVMTL_ADDRESS_BINDING_NUMBER : \
                                  (i) >= NVMTL_STEX_BASE ? NVMTL_STEX_BINDING_NUMBER + ((i) - NVMTL_STEX_BASE) : (i))
 #define NVMTL_SSBO_ALIGN 16
@@ -2022,7 +2036,7 @@ static int nvmtl_spirv_bands_ok(const void *p, size_t n, const char *what)
         if (op == 71 && wc == 4 && w[i + 2] == 33) {
             uint32_t id = w[i + 1], b = w[i + 3];
             int inheap = heap && id < bound && heap[id];
-            if (!inheap && !(b < NVMTL_ADDRESS_BINDING || b == NVMTL_ADDRESS_BINDING_NUMBER ||
+            if (!inheap && !(b < NVMTL_ADDRESS_BINDING || b == NVMTL_ADDRESS_BINDING_NUMBER || b == NVMTL_GL_UNIFORM_BINDING ||
                              (b >= NVMTL_STEX_BINDING_NUMBER && b < NVMTL_STEX_BINDING_NUMBER + NVMTL_NSTEX))) {
                 const char *band = b >= 192 && b < 200 ? "[[color(n)]] framebuffer fetch (programmable blending)"
                                  : b >= 200 && b < 480 ? "imageblock / tile memory" : "no band this driver builds";
@@ -2061,7 +2075,7 @@ static int nvmtl_spirv_bmask(const void *p, size_t n, uint64_t out[4])
             uint32_t b = w[i + 3];
             if (b == NVMTL_ADDRESS_BINDING_NUMBER) out[NVMTL_ADDRESS_BINDING >> 6] |= 1ull << (NVMTL_ADDRESS_BINDING & 63);
             else if (b < NVMTL_ADDRESS_BINDING) out[b >> 6] |= 1ull << (b & 63);
-            else if (!(b >= NVMTL_STEX_BINDING_NUMBER && b < NVMTL_STEX_BINDING_NUMBER + NVMTL_NSTEX)) { ok = 0; break; }
+            else if (b != NVMTL_GL_UNIFORM_BINDING && !(b >= NVMTL_STEX_BINDING_NUMBER && b < NVMTL_STEX_BINDING_NUMBER + NVMTL_NSTEX)) { ok = 0; break; }
         }
         i += wc;
     }
@@ -2104,9 +2118,12 @@ typedef struct { nvmtl_slot s[2][NVMTL_NBIND];
                  uint64_t chg[2][4]; uint64_t texgen[2]; const void *emb_fn[2]; uint64_t emb_gen[2]; uint32_t emb_n[2];
                  uint64_t emb_key[2][NVMTL_EMB_KEYMAX];
                  uint32_t lastdyn[2]; void *lasttab[2];
-                 uint64_t lasttb[2][4]; } nvmtl_bindtable;   /* the texel-buffer mask the last set was written with */
+                 uint64_t lasttb[2][4];
+                 uint32_t lastgl[2]; VkBuffer lastubuf[2]; VkDeviceSize lasturange[2];
+               } nvmtl_bindtable;   /* the texel-buffer mask the last set was written with */
 
 static VkDescriptorSetLayout g_setLayout;
+static VkDescriptorSetLayout g_glUniformLayout;
 #define NVMTL_MAX_POOLS 64
 static VkDescriptorPool      g_descPools[NVMTL_MAX_POOLS];
 static unsigned              g_ndescPools;
@@ -2279,6 +2296,32 @@ static int nvmtl_table_ubo(void)
     }
     return v;
 }
+static int nvmtl_uniform_cbuf_on(void)
+{
+    const char *e = getenv("NVMTL_UNIFORM_CBUF");
+    return !(e && e[0] == '0') && g_cbuf_limit >= 4 && g_cbuf_alignment
+        && g_cbuf_dynamic_limit >= 4 && g_cbuf_stage_limit >= 4
+        && xlate_promote_uniform && nvmtl_table_ubo();
+}
+static nvk_pipeline *nvmtl_uniform_cbuf_pick(nvk_cmdbuf *c, nvk_pipeline *base)
+{
+    nvk_pipeline *p = base ? base->gl_uniform_alt : NULL;
+    if (!p || !c->table) return base;
+    const nvmtl_bindtable *t = c->table;
+    for (unsigned stage = 0; stage < 2; stage++) {
+        if (!p->gl_uniform_slot[stage]) continue;
+        const nvmtl_slot *s = &t->s[stage][p->gl_uniform_slot[stage] - 1];
+        if (s->kind != NVMTL_SLOT_BUF || !s->h || s->off > UINT32_MAX
+            || s->off % g_cbuf_alignment || s->off > s->size
+            || p->gl_uniform_range[stage] > s->size - s->off) return base;
+    }
+    static _Atomic int logged;
+    if (!atomic_load_explicit(&logged, memory_order_relaxed)
+        && !atomic_exchange_explicit(&logged, 1, memory_order_relaxed))
+        syslog(LOG_NOTICE, "NullMoth: uniform-cbuf: first GL draw uses constant buffers (v%u/%u B, f%u/%u B)",
+               p->gl_uniform_slot[0], p->gl_uniform_range[0], p->gl_uniform_slot[1], p->gl_uniform_range[1]);
+    return p;
+}
 static VkDescriptorType binding_type(uint32_t i)
 {
     if (i == NVMTL_ADDRESS_BINDING && nvmtl_table_ubo()) return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
@@ -2288,6 +2331,47 @@ static VkDescriptorType binding_type(uint32_t i)
     return VK_DESCRIPTOR_TYPE_SAMPLER;
 }
 
+// Diagnostics are opt-in and count commands actually recorded, rather than
+// counting each call to the picker (also used for pipeline binding). Keep the
+// policy in the picker; this only explains an already selected fallback.
+static uint32_t nvmtl_uniform_cbuf_result(nvk_cmdbuf *c, nvk_pipeline *base, nvk_pipeline *selected)
+{
+    if (!base->gl_uniform_tracked) return CBUF_NONE;
+    if (selected != base) return CBUF_USED;
+    nvk_pipeline *p = base->gl_uniform_alt;
+    if (!p) return CBUF_NO_VARIANT;
+    const nvmtl_bindtable *t = c->table;
+    if (!t) return CBUF_NO_TABLE;
+    for (unsigned stage = 0; stage < 2; stage++) {
+        if (!p->gl_uniform_slot[stage]) continue;
+        const nvmtl_slot *s = &t->s[stage][p->gl_uniform_slot[stage] - 1];
+        if (s->kind != NVMTL_SLOT_BUF || !s->h) return CBUF_MISSING_BUFFER;
+        if (s->off > UINT32_MAX) return CBUF_OFFSET;
+        if (s->off % g_cbuf_alignment) return CBUF_ALIGNMENT;
+        if (s->off > s->size || p->gl_uniform_range[stage] > s->size - s->off) return CBUF_SHORT_RANGE;
+    }
+    return CBUF_NONE;
+}
+static void nvmtl_uniform_cbuf_stats_draw(nvk_cmdbuf *c)
+{
+    uint32_t result = c->gl_uniform_result;
+    if (!result || result >= CBUF_RESULT_COUNT) return;
+    atomic_fetch_add_explicit(&g_cbuf_draws[result], 1, memory_order_relaxed);
+    uint64_t total = atomic_fetch_add_explicit(&g_cbuf_draws[CBUF_NONE], 1, memory_order_relaxed) + 1;
+    if (total != 1 && total != 1024 && (total & 65535u)) return;
+    uint64_t values[CBUF_RESULT_COUNT];
+    for (unsigned i = 0; i < CBUF_RESULT_COUNT; i++)
+        values[i] = atomic_load_explicit(&g_cbuf_draws[i], memory_order_relaxed);
+    syslog(LOG_NOTICE, "NullMoth: uniform-cbuf stats: recorded=%llu used=%llu no_variant=%llu no_table=%llu "
+           "missing=%llu offset=%llu misaligned=%llu short=%llu pipelines=%llu promoted=%llu",
+           (unsigned long long)total, (unsigned long long)values[CBUF_USED],
+           (unsigned long long)values[CBUF_NO_VARIANT], (unsigned long long)values[CBUF_NO_TABLE],
+           (unsigned long long)values[CBUF_MISSING_BUFFER], (unsigned long long)values[CBUF_OFFSET],
+           (unsigned long long)values[CBUF_ALIGNMENT], (unsigned long long)values[CBUF_SHORT_RANGE],
+           (unsigned long long)atomic_load_explicit(&g_cbuf_pipeline_attempts, memory_order_relaxed),
+           (unsigned long long)atomic_load_explicit(&g_cbuf_pipeline_promoted, memory_order_relaxed));
+}
+
 static int nvmtl_desc_pool_open(void)
 {
     if (g_ndescPools == NVMTL_MAX_POOLS) {
@@ -2295,7 +2379,7 @@ static int nvmtl_desc_pool_open(void)
         return -1;
     }
     VkDescriptorPoolSize sizes[5] = {
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, NVMTL_MAX_SETS },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, (g_glUniformLayout ? 2u : 1u) * NVMTL_MAX_SETS },
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (NVMTL_NBUF + 1) * NVMTL_MAX_SETS },
         { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  NVMTL_NTEX  * NVMTL_MAX_SETS },
         { VK_DESCRIPTOR_TYPE_SAMPLER,        NVMTL_NSAMP * NVMTL_MAX_SETS },
@@ -2321,7 +2405,9 @@ static int ensure_descriptors_locked(void)
 {
     if (g_descriptor_state) return g_descriptor_state == 1 ? 0 : -1;
     g_descriptor_state = -1;
-    VkDescriptorSetLayoutBinding b[NVMTL_NBIND];
+    const char *cbuf_stats = getenv("NVMTL_UNIFORM_CBUF_STATS");
+    g_cbuf_stats = cbuf_stats && cbuf_stats[0] == '1';
+    VkDescriptorSetLayoutBinding b[NVMTL_NBIND + 1];
     for (uint32_t i = 0; i < NVMTL_NBIND; i++) {
         b[i].binding = NVMTL_BINDING_NUMBER(i); b[i].descriptorType = binding_type(i); b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_ALL; b[i].pImmutableSamplers = NULL;
@@ -2329,7 +2415,7 @@ static int ensure_descriptors_locked(void)
     VkDescriptorSetLayoutCreateInfo lci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, NVMTL_NBIND, b };
     static const VkDescriptorType texTypes[2] = { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER };
     static const VkDescriptorType stexTypes[2] = { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER };
-    static VkMutableDescriptorTypeListEXT mlists[NVMTL_NBIND];
+    static VkMutableDescriptorTypeListEXT mlists[NVMTL_NBIND + 1];
     VkMutableDescriptorTypeCreateInfoEXT mci = { VK_STRUCTURE_TYPE_MUTABLE_DESCRIPTOR_TYPE_CREATE_INFO_EXT, NULL, NVMTL_NBIND, mlists };
     g_mutable_layout = g_mutable;
     if (g_mutable_layout) {
@@ -2341,6 +2427,14 @@ static int ensure_descriptors_locked(void)
         lci.pNext = &mci;
     }
     VKCK(pvkCreateDescriptorSetLayout(g_dev, &lci, NULL, &g_setLayout), "vkCreateDescriptorSetLayout");
+    if (nvmtl_uniform_cbuf_on()) {
+        b[NVMTL_NBIND] = (VkDescriptorSetLayoutBinding){ NVMTL_GL_UNIFORM_BINDING,
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_ALL, NULL };
+        lci.bindingCount = NVMTL_NBIND + 1; mci.mutableDescriptorTypeListCount = NVMTL_NBIND + 1;
+        // Separate layout: ordinary Metal/MoltenVK sets and dynamic-offset counts are unchanged.
+        if (pvkCreateDescriptorSetLayout(g_dev, &lci, NULL, &g_glUniformLayout) != VK_SUCCESS)
+            g_glUniformLayout = VK_NULL_HANDLE;
+    }
     if (nvmtl_desc_pool_open()) return -1;
     if (nvmtl_vk_buffer_create(256, 1, &g_dummyBuf)) return -1;
     if (nvmtl_vk_image_create_fmt(1, 1, 0, &g_dummyImg)) return -1;
@@ -2827,15 +2921,24 @@ static VkDescriptorSet nvmtl_snapshot_set_t(nvk_cmdbuf *c, uint32_t which, uint3
 }
 #define NVMTL_E78_HAS(m, i) (!(m) || (((m)[(i) >> 6] >> ((i) & 63)) & 1))
 static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint32_t stex_hi, const uint64_t *mask, const uint64_t *tb,
-                                             VkDescriptorSet from, const uint64_t *copym);
+                                             VkDescriptorSet from, const uint64_t *copym, const VkDescriptorBufferInfo *uniform);
 static VkDescriptorSet nvmtl_snapshot_set_m(nvk_cmdbuf *c, uint32_t which, uint32_t stex_hi, const uint64_t *mask, const uint64_t *tb)
-{ return nvmtl_snapshot_set_md(c, which, stex_hi, mask, tb, VK_NULL_HANDLE, NULL); }
+{ return nvmtl_snapshot_set_md(c, which, stex_hi, mask, tb, VK_NULL_HANDLE, NULL, NULL); }
 #define NVMTL_COPY_HAS(m, i) ((m) && (((m)[(i) >> 6] >> ((i) & 63)) & 1))
 static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint32_t stex_hi, const uint64_t *mask, const uint64_t *tb,
-                                             VkDescriptorSet from, const uint64_t *copym)
+                                             VkDescriptorSet from, const uint64_t *copym, const VkDescriptorBufferInfo *uniform)
 {
     VkDescriptorSet set = VK_NULL_HANDLE; VkDescriptorPool pool = VK_NULL_HANDLE;
     VkResult r = VK_ERROR_OUT_OF_POOL_MEMORY;
+    const unsigned gl = uniform != NULL;
+    if (c->ndcache && c->dcache_gl_uniform != gl) {
+        VkDescriptorSet back[NVMTL_DESC_BATCH_MAX];
+        for (unsigned k = 0; k < c->ndcache; k++) back[k] = (VkDescriptorSet)c->dcache[k];
+        pthread_mutex_lock(&g_desc_lock);
+        pvkFreeDescriptorSets(g_dev, (VkDescriptorPool)c->dcachepool, c->ndcache, back);
+        pthread_mutex_unlock(&g_desc_lock);
+        c->ndcache = 0; c->dcachepool = NULL;
+    }
     if (c->ndcache) {
         set = (VkDescriptorSet)c->dcache[--c->ndcache];
         pool = (VkDescriptorPool)c->dcachepool;
@@ -2852,7 +2955,7 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
         unsigned n = nvmtl_desc_batch();
         VkDescriptorSetLayout ls[NVMTL_DESC_BATCH_MAX];
         VkDescriptorSet got[NVMTL_DESC_BATCH_MAX];
-        for (unsigned k = 0; k < NVMTL_DESC_BATCH_MAX; k++) ls[k] = g_setLayout;
+        for (unsigned k = 0; k < NVMTL_DESC_BATCH_MAX; k++) ls[k] = gl ? g_glUniformLayout : g_setLayout;
         for (;;) {
             r = VK_ERROR_OUT_OF_POOL_MEMORY;
             for (unsigned k = g_ndescPools; k-- > 0 && r != VK_SUCCESS;) {
@@ -2868,7 +2971,7 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
         }
         if (r == VK_SUCCESS) {
             set = got[0];
-            c->dcachepool = (void *)pool;
+            c->dcachepool = (void *)pool; c->dcache_gl_uniform = gl;
             for (unsigned k = 1; k < n; k++) c->dcache[c->ndcache++] = (void *)got[k];
         }
         if (r == VK_SUCCESS && c->nsets == c->capsets) {
@@ -2893,7 +2996,7 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
         c->skipped++; return VK_NULL_HANDLE;
     }
     c->sets[c->nsets++] = (nvk_setref){ pool, set };
-    VkWriteDescriptorSet w[NVMTL_NBIND];
+    VkWriteDescriptorSet w[NVMTL_NBIND + 1];
     VkCopyDescriptorSet cp[NVMTL_NBIND]; uint32_t ncp = 0;
     if (!from) copym = NULL;
     VkDescriptorBufferInfo bi[NVMTL_NBIND];
@@ -2971,6 +3074,9 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
         ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, (VkImageView)view, VK_IMAGE_LAYOUT_GENERAL };
         w[nw++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, NVMTL_BINDING_NUMBER(i), 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ii[i], NULL, NULL };
     }
+    if (uniform)
+        w[nw++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set,
+            NVMTL_GL_UNIFORM_BINDING, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, NULL, uniform, NULL };
     nvmtl_enc78_count(E78C_WRITES, nw);
     pvkUpdateDescriptorSets(g_dev, nw, w, ncp, cp);
     return set;
@@ -2978,7 +3084,21 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
 static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const nvk_pipeline *p)
 {
     nvmtl_bindtable *t = (nvmtl_bindtable *)c->table;
-    if (!t || which > 1 || !nvmtl_enc78_on(NVMTL_E78_H3)) return nvmtl_snapshot_set_t(c, which, p->stex_hi[which], p->tbany ? p->tbm[which] : NULL);
+    if (which > 1) return VK_NULL_HANDLE;
+    VkDescriptorBufferInfo uniformInfo, *uniform = NULL;
+    if (p->gl_uniform_layout) {
+        uniformInfo = (VkDescriptorBufferInfo){ (VkBuffer)g_dummyBuf.buf, 0, 16 };
+        c->gl_uniform_dyn[which] = 0;
+        if (p->gl_uniform_slot[which] && t) {
+            const nvmtl_slot *sl = &t->s[which][p->gl_uniform_slot[which] - 1];
+            uniformInfo.buffer = (VkBuffer)sl->h; uniformInfo.range = p->gl_uniform_range[which];
+            c->gl_uniform_dyn[which] = (uint32_t)sl->off;
+        }
+        uniform = &uniformInfo;
+    }
+    if (!t || !nvmtl_enc78_on(NVMTL_E78_H3))
+        return nvmtl_snapshot_set_md(c, which, p->stex_hi[which], p->gmask_ok ? p->gmask[which] : NULL,
+            p->tbany ? p->tbm[which] : NULL, VK_NULL_HANDLE, NULL, uniform);
     const uint64_t all[4] = { ~0ull, ~0ull, ~0ull, ~0ull };
     const uint64_t *pm = p->bmask_ok ? p->bmask : (p->gmask_ok && which < 2) ? p->gmask[which] : all;
     uint32_t hi = p->stex_hi[which];
@@ -2988,7 +3108,9 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
     // ~60k sets a second).
     static const uint64_t notb[4] = { 0, 0, 0, 0 };
     const uint64_t *tb = p->tbany ? p->tbm[which] : notb;
-    const int sametb = !memcmp(t->lasttb[which], tb, sizeof notb);
+    const int sametb = !memcmp(t->lasttb[which], tb, sizeof notb)
+        && t->lastgl[which] == p->gl_uniform_layout
+        && (!uniform || (t->lastubuf[which] == uniform->buffer && t->lasturange[which] == uniform->range));
     int live = sametb && t->last[which] && !t->dirty[which] && t->last_idx[which] < c->nsets
                && (VkDescriptorSet)c->sets[t->last_idx[which]].set == t->last[which];
     if (live && hi <= t->last_hi[which]) {
@@ -3034,10 +3156,13 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
         }
         for (int k = 0; k < 4; k++) cm[k] &= ~t->chg[which][k];
     }
-    VkDescriptorSet s = nvmtl_snapshot_set_md(c, which, hi, m, p->tbany ? tb : NULL, from, from ? cm : NULL);
+    VkDescriptorSet s = nvmtl_snapshot_set_md(c, which, hi, m, p->tbany ? tb : NULL, from, from ? cm : NULL, uniform);
     if (!s) return s;
     t->last[which] = s; t->last_idx[which] = c->nsets - 1; t->last_hi[which] = hi; t->dirty[which] = 0;
     memcpy(t->lasttb[which], tb, sizeof notb);
+    t->lastgl[which] = p->gl_uniform_layout;
+    t->lastubuf[which] = uniform ? uniform->buffer : VK_NULL_HANDLE;
+    t->lasturange[which] = uniform ? uniform->range : 0;
     t->lastdyn[which] = c->dyn_out[which]; t->lasttab[which] = c->tab_out[which];
     memset(t->chg[which], 0, sizeof t->chg[which]);
     memcpy(t->lastw[which], m, sizeof m);
@@ -3274,13 +3399,21 @@ static void nvmtl_bind_graphics_sets(nvk_cmdbuf *c, VkPipelineLayout layout, uin
 
 void nvmtl_vk_cmd_bind_set(nvk_cmdbuf *c, nvk_pipeline *p)
 {
+    nvk_pipeline *selected = nvmtl_uniform_cbuf_pick(c, p);
+    c->gl_uniform_result = g_cbuf_stats ? nvmtl_uniform_cbuf_result(c, p, selected) : CBUF_NONE;
+    if (p->gl_uniform_alt) nvmtl_vk_cmd_bind_pipeline(c, selected);
+    p = selected;
     VkDescriptorSet s[3] = { nvmtl_snapshot_set_c(c, 0, p), nvmtl_snapshot_set_c(c, 1, p), g_heapSet };
     if (!s[0] || !s[1]) { c->nobind = 1; return; }
     c->nobind = 0;
     if (g_sample_locations && c->sample_pattern.count)
         pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_SAMPLE_POSITION_OFFSET,
                            NVMTL_SAMPLE_POSITION_BYTES, c->sample_pattern.position);
-    nvmtl_bind_graphics_sets(c, (VkPipelineLayout)p->layout, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, c->dyn_out);
+    if (p->gl_uniform_layout) {
+        const uint32_t offsets[4] = { c->dyn_out[0], c->gl_uniform_dyn[0], c->dyn_out[1], c->gl_uniform_dyn[1] };
+        nvmtl_bind_graphics_sets(c, (VkPipelineLayout)p->layout, g_heapSet ? 3 : 2, s, 4, offsets);
+    } else
+        nvmtl_bind_graphics_sets(c, (VkPipelineLayout)p->layout, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, c->dyn_out);
     c->semu_layout = p->stencil_emu ? p->layout : NULL;
     c->fetch_draw = 0;
     if (p->skip_draws) { c->nobind = 1; return; }
@@ -4047,18 +4180,62 @@ int nvmtl_vk_pipeline_create_rt(const void *vs, size_t vn, const void *fs, size_
     return nvmtl_vk_pipeline_create_impl(vs, vn, fs, fn, rt->ncol ? rt->cfmt[0] : 0u, rt->dfmt, NULL, vin, samples, td, rt, out);
 }
 static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vkfmt, uint32_t depthfmt, const void *blend_,
-                                         const void *vin_, uint32_t samples, const nvk_tess_desc *td, const nvk_rt *rt, void *out_);
+                                         const void *vin_, uint32_t samples, const nvk_tess_desc *td, const nvk_rt *rt, void *out_, int uniform_layout);
 static int nvmtl_vk_pipeline_create_impl(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vkfmt, uint32_t depthfmt, const void *blend_,
                                          const void *vin_, uint32_t samples, const nvk_tess_desc *td, const nvk_rt *rt, void *out_)
 {
     nvk_pipeline pending = {0};
-    int result = nvmtl_vk_pipeline_create_impl_lifetime_body(vs, vn, fs, fn, vkfmt, depthfmt, blend_, vin_, samples, td, rt, &pending);
+    int result = nvmtl_vk_pipeline_create_impl_lifetime_body(vs, vn, fs, fn, vkfmt, depthfmt, blend_, vin_, samples, td, rt, &pending, 0);
     if (result) { nvmtl_failed_pipeline(&pending); memset(out_, 0, sizeof pending); }
     else *(nvk_pipeline *)out_ = pending;
     return result;
 }
+void nvmtl_vk_pipeline_try_gl_uniform(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vi, uint32_t fi,
+                                     const nvk_rt *rt, const void *vin, uint32_t samples, nvk_pipeline *base)
+{
+    if ((vi >= 32 && fi >= 32) || !base || !base->pipe || base->gl_uniform_alt
+        || !nvmtl_uniform_cbuf_on() || !g_glUniformLayout) return;
+    base->gl_uniform_tracked = 1;
+    if (g_cbuf_stats) atomic_fetch_add_explicit(&g_cbuf_pipeline_attempts, 1, memory_order_relaxed);
+    NSData *original[2] = { [NSData dataWithBytes:vs length:vn], [NSData dataWithBytes:fs length:fn] };
+    NSData *modules[2] = { original[0], original[1] };
+    const uint32_t index[2] = { vi, fi };
+    uint32_t extents[2] = { 0, 0 }, slots[2] = { 0, 0 };
+    for (unsigned stage = 0; stage < 2; stage++) {
+        if (index[stage] >= 32) continue;
+        NSData *prepared = nvmtl_preserve_readonly_metadata(original[stage]);
+        uint8_t *bytes = NULL; size_t size = 0; char error[256] = {0};
+        if (!xlate_promote_uniform(prepared.bytes, prepared.length, index[stage], g_cbuf_limit,
+                                  &bytes, &size, &extents[stage], error, sizeof error)) {
+            modules[stage] = [NSData dataWithBytes:bytes length:size]; xlate_free(bytes, size);
+            slots[stage] = index[stage] + 1;
+        } else {
+            nvlog("uniform-cbuf: %s slot %u stays physical: %s", stage ? "fragment" : "vertex", index[stage], error);
+            if (g_cbuf_stats) syslog(LOG_NOTICE, "NullMoth: uniform-cbuf declined: %s slot %u: %s",
+                                    stage ? "fragment" : "vertex", index[stage], error);
+        }
+    }
+    if (!slots[0] && !slots[1]) return;
+    nvk_pipeline *candidate = calloc(1, sizeof *candidate);
+    if (!candidate) return;
+    if (nvmtl_vk_pipeline_create_impl_lifetime_body(modules[0].bytes, modules[0].length,
+            modules[1].bytes, modules[1].length, rt->ncol ? rt->cfmt[0] : 0, rt->dfmt,
+            NULL, vin, samples, NULL, rt, candidate, 1)) {
+        nvmtl_failed_pipeline(candidate); free(candidate);
+        if (g_cbuf_stats) syslog(LOG_NOTICE, "NullMoth: uniform-cbuf: optimized pipeline compilation refused; original kept");
+        nvlog("uniform-cbuf: optimized GL pipeline refused; original kept"); return;
+    }
+    memcpy(candidate->gl_uniform_slot, slots, sizeof slots);
+    memcpy(candidate->gl_uniform_range, extents, sizeof extents);
+    base->gl_uniform_alt = candidate;
+    if (g_cbuf_stats) atomic_fetch_add_explicit(&g_cbuf_pipeline_promoted, 1, memory_order_relaxed);
+    static _Atomic unsigned reported;
+    if (atomic_fetch_add_explicit(&reported, 1, memory_order_relaxed) < 4 || g_cbuf_stats)
+        syslog(LOG_NOTICE, "NullMoth: uniform-cbuf: GL pipeline ready (vertex slot %u, %u B; fragment slot %u, %u B); original retained",
+               vi, extents[0], fi, extents[1]);
+}
 static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vkfmt, uint32_t depthfmt, const void *blend_,
-                                         const void *vin_, uint32_t samples, const nvk_tess_desc *td, const nvk_rt *rt, void *out_)
+                                         const void *vin_, uint32_t samples, const nvk_tess_desc *td, const nvk_rt *rt, void *out_, int uniform_layout)
 {
     const nvk_blend_state *blend = (const nvk_blend_state *)blend_; const nvk_vertex_input *vin = (const nvk_vertex_input *)vin_; nvk_pipeline *out = (nvk_pipeline *)out_;
     nvk_rt lrt;
@@ -4074,6 +4251,7 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     vs = vdata.bytes; vn = vdata.length; fs = fdata.bytes; fn = fdata.length;
     if (nvmtl_vk_init()) return -1;
     memset(out, 0, sizeof *out);
+    out->gl_uniform_layout = (uint32_t)uniform_layout;
     NSData *tvsd = nil, *ttcd = nil;
     if (td) {
         if (!g_tess) { nvlog("tess pipeline REFUSED: this device reports no tessellationShader"); return -1; }
@@ -4145,7 +4323,8 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     }
 
     if (ensure_descriptors()) goto pipeline_failed;
-    VkDescriptorSetLayout sl2[4] = { g_setLayout, g_setLayout, g_heapLayout, VK_NULL_HANDLE };
+    VkDescriptorSetLayout resourceLayout = uniform_layout ? g_glUniformLayout : g_setLayout;
+    VkDescriptorSetLayout sl2[4] = { resourceLayout, resourceLayout, g_heapLayout, VK_NULL_HANDLE };
     uint32_t nsl = g_heapSet ? 3 : 2;
     out->fetch_mask = nvmtl_fbfetch_on() ? nvmtl_spirv_fetch_mask(fs, fn) : 0;
     out->fetch_zero = nvmtl_fbfetch_on() ? 0 : nvmtl_spirv_fetch_mask(fs, fn);
@@ -5385,18 +5564,18 @@ int nvmtl_vk_cmd_clear_image(nvk_cmdbuf *c, nvk_image *img, const float clear[4]
  */
 #define NVMTL_SEMU_DRAW(c, DRAW) do { \
     if ((c)->skip_group) break; \
-    if (!(c)->semu_layout) { DRAW; break; } \
+    if (!(c)->semu_layout) { if (g_cbuf_stats) nvmtl_uniform_cbuf_stats_draw(c); DRAW; break; } \
     uint32_t z_ = 0; const uint32_t m_ = (c)->st_wmask[0] | (c)->st_wmask[1]; \
     pvkCmdPushConstants((c)->cb, (VkPipelineLayout)(c)->semu_layout, VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_STENCIL_EMU_OFFSET, 4, &z_); \
     pvkCmdSetStencilReference((c)->cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0); \
-    DRAW; \
+    if (g_cbuf_stats) nvmtl_uniform_cbuf_stats_draw(c); DRAW; \
     if (m_) { pvkCmdSetDepthWriteEnable((c)->cb, VK_FALSE); \
         for (uint32_t b_ = 1; b_ <= 0x80u; b_ <<= 1) { if (!(m_ & b_)) continue; \
             pvkCmdPushConstants((c)->cb, (VkPipelineLayout)(c)->semu_layout, VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_STENCIL_EMU_OFFSET, 4, &b_); \
             pvkCmdSetStencilWriteMask((c)->cb, VK_STENCIL_FACE_FRONT_BIT, (c)->st_wmask[0] & b_); \
             pvkCmdSetStencilWriteMask((c)->cb, VK_STENCIL_FACE_BACK_BIT, (c)->st_wmask[1] & b_); \
             pvkCmdSetStencilReference((c)->cb, VK_STENCIL_FACE_FRONT_AND_BACK, b_); \
-            DRAW; } \
+            if (g_cbuf_stats) nvmtl_uniform_cbuf_stats_draw(c); DRAW; } \
         pvkCmdSetStencilWriteMask((c)->cb, VK_STENCIL_FACE_FRONT_BIT, (c)->st_wmask[0]); \
         pvkCmdSetStencilWriteMask((c)->cb, VK_STENCIL_FACE_BACK_BIT, (c)->st_wmask[1]); \
         pvkCmdSetDepthWriteEnable((c)->cb, (c)->depth_write ? VK_TRUE : VK_FALSE); } \
@@ -5448,6 +5627,7 @@ void nvmtl_vk_cmd_draw(nvk_cmdbuf *c, uint32_t first, uint32_t count, uint32_t i
 void nvmtl_vk_cmd_set_scissor(nvk_cmdbuf *c, int32_t x, int32_t y, uint32_t w, uint32_t h)
 { VkRect2D r = { { x, y }, { w, h } }; pvkCmdSetScissor(c->cb, 0, 1, &r); }
 void nvmtl_vk_cmd_bind_pipeline(nvk_cmdbuf *c, nvk_pipeline *p) {
+    p = nvmtl_uniform_cbuf_pick(c, p);
     if (p->pipe && c->graphics_pipeline == p->pipe) return;
     pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipeline)p->pipe);
     c->graphics_pipeline = p->pipe;
@@ -7976,6 +8156,8 @@ static void nvmtl_destroy_pipe_once(VkPipeline *seen, uint32_t *nseen, uint32_t 
 void nvmtl_vk_pipeline_destroy(nvk_pipeline *p)
 {
     if (!p || !g_dev) return;
+    nvk_pipeline *uniform = p->gl_uniform_alt; p->gl_uniform_alt = NULL;
+    if (uniform) { nvmtl_vk_pipeline_destroy(uniform); free(uniform); }
     VkPipeline seen[64]; uint32_t nseen = 0;
     pthread_mutex_lock(&g_var_lock);
     for (uint32_t i = 0; i < p->nvar; i++) nvmtl_destroy_pipe_once(seen, &nseen, 64, (VkPipeline)p->var[i].pipe);

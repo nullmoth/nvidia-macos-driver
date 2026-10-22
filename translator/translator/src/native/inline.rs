@@ -1085,15 +1085,25 @@ fn inline_one(
 
     let mut renamed: Vec<String> = Vec::new();
     let mut returns: Vec<(String, String)> = Vec::new();
-    let mut cur_block = entry_label.clone();
-    let has_explicit_entry = callee_body
+    let explicit_entry = callee_body
         .iter()
         .find(|line| {
             let line = line.trim();
             !line.is_empty() && !line.starts_with(';')
         })
-        .is_some_and(|line| block_label_id(line).is_some());
-    if !has_explicit_entry {
+        .and_then(|line| block_label_id(line));
+    // A callee whose first block has its own label (Apple's GL compiler names it allocaBlock) is entered through that
+    // label as renamed; only an unlabelled entry gets the synthesized one. Branching to the synthesized label in both
+    // cases left `br label %.inlN.entry` without a target unless the callee's entry happened to be called `entry`.
+    let entry_target = match explicit_entry {
+        Some(bare) => label_map
+            .get(bare)
+            .cloned()
+            .unwrap_or_else(|| bare.to_string()),
+        None => entry_label.clone(),
+    };
+    let mut cur_block = entry_target.clone();
+    if explicit_entry.is_none() {
         renamed.push(format!("{entry_label}:"));
     }
     for line in callee_body {
@@ -1142,7 +1152,7 @@ fn inline_one(
     let mut new_body: Vec<String> = Vec::with_capacity(body.len() + renamed.len() + 4);
     new_body.extend(before);
     let call_indent = leading_ws(&body[idx]);
-    new_body.push(format!("{call_indent}br label %{entry_label}"));
+    new_body.push(format!("{call_indent}br label %{entry_target}"));
     new_body.extend(renamed);
     new_body.push(format!("{cont_label}:"));
     if let Some(result) = &call.result {
@@ -2094,6 +2104,9 @@ pub(crate) fn inline_and_forward_object_fields(san_ll: &str) -> Option<String> {
         if fold_single_value_phis_in(f) {
             changed = true;
         }
+        if split_sampler_phi_samples_in(f) {
+            changed = true;
+        }
     }
     if !changed {
         return None;
@@ -2246,6 +2259,144 @@ fn fold_single_value_phis_in(f: &mut FuncBlock) -> bool {
             .map(|(_, line)| rename_line(&line, &map, &empty))
             .collect();
         changed = true;
+    }
+    changed
+}
+
+/// A sampler chosen at run time (`%s = phi ptr addrspace(2) [ %a, %x ], [ %b, %y ]`) has no one sampler state for the
+/// sample call to carry, so each call that reads it is made once per incoming sampler and its result picked by an integer
+/// phi over the same edges. Apple's GL front end emits this for `texture(sampler2DShadow, ...)`: the helper picks one of
+/// two samplers by the compare mode it loads (BSL's and Complementary's shadow lookups). A sample has no side effect, so
+/// the extra call only costs a sample. Only samplers that are parameters, globals or entry-block values are taken: those
+/// dominate the call, which a value defined on the edge's own path need not.
+fn split_sampler_phi_samples_in(f: &mut FuncBlock) -> bool {
+    let params = parse_def_header(&f.header).map(|s| s.params).unwrap_or_default();
+    let mut dominating: HashSet<String> = params.into_iter().filter(|p| !p.is_empty()).collect();
+    // Only definitions in the first block dominate every later use.
+    let mut entry_started = false;
+    for line in &f.body {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with(';') {
+            continue;
+        }
+        if block_label_id(line).is_some() {
+            if entry_started { break; }
+            entry_started = true;
+            continue;
+        }
+        entry_started = true;
+        if ["br ", "switch ", "ret ", "unreachable", "indirectbr ", "invoke ", "resume ", "callbr "]
+            .iter().any(|k| t.starts_with(k)) || t.contains(" = invoke ") || t.contains(" = callbr ") {
+            break;
+        }
+        if let Some(lhs) = def_lhs(line) {
+            dominating.insert(lhs.to_string());
+        }
+    }
+    let mut changed = false;
+    let mut i = 0;
+    while i < f.body.len() {
+        let line = f.body[i].trim();
+        let Some((name, rhs)) = line.split_once(" = ") else {
+            i += 1;
+            continue;
+        };
+        let Some(entries) = rhs.strip_prefix("phi ptr addrspace(2) ") else {
+            i += 1;
+            continue;
+        };
+        let mut incoming: Vec<(String, String)> = Vec::new();
+        let mut rest = entries;
+        while let Some(open) = rest.find('[') {
+            let Some(close) = rest[open..].find(']') else { break };
+            let parts = split_top_level(&rest[open + 1..open + close], ',');
+            if parts.len() != 2 {
+                incoming.clear();
+                break;
+            }
+            incoming.push((parts[0].trim().to_string(), parts[1].trim().to_string()));
+            rest = &rest[open + close + 1..];
+        }
+        let mut samplers: Vec<String> = Vec::new();
+        for (v, _) in &incoming {
+            if !samplers.contains(v) {
+                samplers.push(v.clone());
+            }
+        }
+        let name = name.to_string();
+        let operand = format!("ptr addrspace(2) {name}");
+        let uses: Vec<usize> = (0..f.body.len()).filter(|&j| j != i && mentions(&f.body[j], &name)).collect();
+        // Duplicate only texture sampling reads, never arbitrary AIR intrinsics.
+        // Every use must be in this block, with this sampler exactly once.
+        let use_ok = |j: usize| {
+            let l = f.body[j].trim();
+            let Some(parsed) = parse_call(l) else { return false };
+            if parsed.result.is_none() || parsed.ret_ty == "void"
+                || !["@air.sample_", "@air.gather_"].iter().any(|prefix| parsed.callee.starts_with(prefix))
+                || parsed.args.iter().filter(|arg| *arg == &name).count() != 1 {
+                return false;
+            }
+            let Some((_, call)) = l.split_once(" = ") else { return false };
+            let call = call.strip_prefix("tail ").unwrap_or(call);
+            let Some(ty) = call.strip_prefix("call ").and_then(|c| c.split_once(" @air.")).map(|(ty, _)| ty) else {
+                return false;
+            };
+            let once = l.matches(&operand).count() == 1 && l.matches(name.as_str()).count() == 1;
+            let after = l.find(&operand).map(|p| &l[p + operand.len()..]);
+            j > i
+                && f.body[i + 1..=j].iter().all(|b| block_label_id(b).is_none())
+                && (ty.starts_with('{') || ty.starts_with('<') || !ty.contains(' '))
+                && once
+                && after.is_some_and(|a| a.starts_with(',') || a.starts_with(')'))
+        };
+        if incoming.is_empty()
+            || !(2..=8).contains(&samplers.len())
+            || samplers.iter().any(|v| !(v.starts_with('@') || dominating.contains(v)))
+            || uses.is_empty()
+            || !uses.iter().all(|&j| use_ok(j))
+        {
+            i += 1;
+            continue;
+        }
+        let indent = leading_ws(&f.body[i]).to_string();
+        // Retry input may already use our spelling. Keep generated SSA names
+        // distinct even when the pass is applied again to rewritten text.
+        let mut serial = i;
+        let tag = loop {
+            let candidate = format!(".sph{serial}");
+            let prefix = format!("%{candidate}.");
+            if !f.header.contains(&prefix) && !f.body.iter().any(|line| line.contains(&prefix)) {
+                break candidate;
+            }
+            serial += 1;
+        };
+        let pick_entries: Vec<String> = incoming
+            .iter()
+            .map(|(v, l)| format!("[ {}, {l} ]", samplers.iter().position(|s| s == v).unwrap_or(0)))
+            .collect();
+        f.body[i] = format!("{indent}%{tag}.pick = phi i32 {}", pick_entries.join(", "));
+        for &j in uses.iter().rev() {
+            let l = f.body[j].trim().to_string();
+            let use_indent = leading_ws(&f.body[j]).to_string();
+            let (result, call) = l.split_once(" = ").unwrap_or_default();
+            let ty = call.strip_prefix("tail ").unwrap_or(call).strip_prefix("call ").and_then(|c| c.split_once(" @air."));
+            let ty = ty.map(|(ty, _)| ty).unwrap_or_default();
+            let mut lines = Vec::new();
+            for (k, s) in samplers.iter().enumerate() {
+                lines.push(format!("{use_indent}%{tag}.u{j}.s{k} = {}", call.replacen(&operand, &format!("ptr addrspace(2) {s}"), 1)));
+            }
+            let mut acc = format!("%{tag}.u{j}.s0");
+            for k in 1..samplers.len() {
+                let c = format!("%{tag}.u{j}.c{k}");
+                lines.push(format!("{use_indent}{c} = icmp eq i32 %{tag}.pick, {k}"));
+                let m = if k + 1 == samplers.len() { result.to_string() } else { format!("%{tag}.u{j}.m{k}") };
+                lines.push(format!("{use_indent}{m} = select i1 {c}, {ty} %{tag}.u{j}.s{k}, {ty} {acc}"));
+                acc = m;
+            }
+            f.body.splice(j..=j, lines);
+        }
+        changed = true;
+        i += 1;
     }
     changed
 }
