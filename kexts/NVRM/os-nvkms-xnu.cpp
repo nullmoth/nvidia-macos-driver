@@ -233,6 +233,22 @@ NvBool nvkms_output_rounding_fix(void)          { return NV_TRUE; }
 NvBool nvkms_disable_hdmi_frl(void)             { return NV_FALSE; }
 NvBool nvkms_disable_vrr_memclk_switch(void)    { return NV_FALSE; }
 NvBool nvkms_hdmi_deepcolor(void)               { return NV_TRUE; }
+// The most bits per colour NVKMS may send: NVIDIA's max_output_color_depth module parameter, here the boot-arg
+// nvmaxbpc. NVIDIA's default is 10 (DisplayPort and HDMI deep colour up to 10); nvmaxbpc=12 allows 615's 12-bit
+// HDMI deep colour on displays that report it, 8 and 6 cap lower.
+NvU32 nvkms_max_output_color_bpc(void)
+{
+    static NvU32 bpc = 0;
+    if (bpc == 0) {
+        uint32_t want = 10;
+        PE_parse_boot_argn("nvmaxbpc", &want, sizeof want);
+        bpc = (want == 6 || want == 8 || want == 12) ? want : 10;
+    }
+    return bpc;
+}
+// 615 reports HDMI and HDMI-audio plug state to Linux's extcon framework; macOS has none.
+void nvkms_extcon_report_hdmi(NvBool)            { }
+void nvkms_extcon_report_hdmi_audio(NvBool)      { }
 NvBool nvkms_opportunistic_display_sync(void)   { return NV_TRUE; }
 enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void) { return NVKMS_DEBUG_FORCE_COLOR_SPACE_NONE; }
 NvBool nvkms_enable_overlay_layers(void)        { return NV_TRUE; }
@@ -248,16 +264,18 @@ void nvkms_call_rm(void *ops)
         NvXnuPmUse pmUse;
         rm_kernel_rmapi_op(NULL, ops);
     }
+    // Only failures are logged: WindowServer duplicates objects and binds context DMAs for every surface, and logging
+    // the successful ones filled the system log on a busy desktop (#242).
     if (!gKmsTraceRm) return;
     switch (o->op) {
     case NV04_ALLOC:          if (o->params.alloc.status) kprintf("NVKMS-rm: ALLOC class 0x%x parent 0x%x -> status 0x%x\n", o->params.alloc.hClass, o->params.alloc.hObjectParent, o->params.alloc.status); break;
     case NV04_CONTROL:        if (o->params.control.status) kprintf("NVKMS-rm: CONTROL obj 0x%x cmd 0x%x -> status 0x%x\n", o->params.control.hObject, o->params.control.cmd, o->params.control.status); break;
-    case NV04_DUP_OBJECT:     kprintf("NVKMS-rm: DUP_OBJECT src client 0x%x obj 0x%x -> status 0x%x\n", o->params.dupObject.hClientSrc, o->params.dupObject.hObjectSrc, o->params.dupObject.status); break;
+    case NV04_DUP_OBJECT:     if (o->params.dupObject.status) kprintf("NVKMS-rm: DUP_OBJECT src client 0x%x obj 0x%x -> status 0x%x\n", o->params.dupObject.hClientSrc, o->params.dupObject.hObjectSrc, o->params.dupObject.status); break;
     case NV04_MAP_MEMORY_DMA: if (o->params.mapMemoryDma.status) kprintf("NVKMS-rm: MAP_MEMORY_DMA -> status 0x%x\n", o->params.mapMemoryDma.status); break;
     case NV04_MAP_MEMORY:     if (o->params.mapMemory.status) kprintf("NVKMS-rm: MAP_MEMORY -> status 0x%x\n", o->params.mapMemory.status); break;
     case NV01_FREE:           if (o->params.free.status) kprintf("NVKMS-rm: FREE obj 0x%x -> status 0x%x\n", o->params.free.hObjectOld, o->params.free.status); break;
-    case NV04_ALLOC_CONTEXT_DMA: kprintf("NVKMS-rm: ALLOC_CONTEXT_DMA class 0x%x flags 0x%x mem 0x%x limit 0x%llx -> status 0x%x\n", o->params.allocContextDma2.hClass, o->params.allocContextDma2.flags, o->params.allocContextDma2.hMemory, (unsigned long long)o->params.allocContextDma2.limit, o->params.allocContextDma2.status); break;
-    case NV04_BIND_CONTEXT_DMA:  kprintf("NVKMS-rm: BIND_CONTEXT_DMA chan 0x%x dma 0x%x -> status 0x%x\n", o->params.bindContextDma.hChannel, o->params.bindContextDma.hCtxDma, o->params.bindContextDma.status); break;
+    case NV04_ALLOC_CONTEXT_DMA: if (o->params.allocContextDma2.status) kprintf("NVKMS-rm: ALLOC_CONTEXT_DMA class 0x%x flags 0x%x mem 0x%x limit 0x%llx -> status 0x%x\n", o->params.allocContextDma2.hClass, o->params.allocContextDma2.flags, o->params.allocContextDma2.hMemory, (unsigned long long)o->params.allocContextDma2.limit, o->params.allocContextDma2.status); break;
+    case NV04_BIND_CONTEXT_DMA:  if (o->params.bindContextDma.status) kprintf("NVKMS-rm: BIND_CONTEXT_DMA chan 0x%x dma 0x%x -> status 0x%x\n", o->params.bindContextDma.hChannel, o->params.bindContextDma.hCtxDma, o->params.bindContextDma.status); break;
     case NV04_VID_HEAP_CONTROL: if (o->params.pVidHeapControl && o->params.pVidHeapControl->status) kprintf("NVKMS-rm: VID_HEAP_CONTROL fn %u -> status 0x%x\n", o->params.pVidHeapControl->function, o->params.pVidHeapControl->status); break;
     default: break;
     }

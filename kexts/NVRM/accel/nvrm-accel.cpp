@@ -17,6 +17,9 @@
 #include <mach/kmod.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IORangeAllocator.h>
+#include <IOKit/IOWorkLoop.h>
+#include <IOKit/IOTimerEventSource.h>
+#include <IOKit/IOMemoryDescriptor.h>
 #include "IOAccelerator.h"
 #include "IOGraphicsAccelerator2.h"
 #include "IOAccelEventMachineFast2.h"
@@ -39,6 +42,10 @@ static void               nvAccelWriteStamp(int index, unsigned int value);
 #define NV_LOG_TAG "NVAccel: "
 #endif
 #define ALOG(fmt, ...) do { kprintf(NV_LOG_TAG fmt "\n", ##__VA_ARGS__); IOLog(NV_LOG_TAG fmt "\n", ##__VA_ARGS__); } while (0)
+// Per-allocation lines: WindowServer and every Metal app create resources continuously, and logging each one filled the
+// system log (#242). They print only with the -nvaccelverbose boot-arg.
+static bool nvaccel_verbose() { static int v = -1; if (v < 0) { int x = 0; v = PE_parse_boot_argn("-nvaccelverbose", &x, sizeof x) ? 1 : 0; } return v == 1; }
+#define ALOGV(fmt, ...) do { if (nvaccel_verbose()) ALOG(fmt, ##__VA_ARGS__); } while (0)
 #include <libkern/c++/OSSymbol.h>
 #include "nvrm_vram_abi.h"
 #include <IOKit/IODeviceMemory.h>
@@ -47,6 +54,23 @@ static void               nvAccelWriteStamp(int index, unsigned int value);
 #include "nvkms-kapi.h"
 #include <sys/sysctl.h>
 #include <libkern/OSAtomic.h>
+
+// ---- GPU core temperature, published into PerformanceStatistics -------------
+// Same register the out-of-tree NvidiaSensor.kext reads. nouveau's gp100_temp_get() reads
+// 0x020460 as well, but it insists on the "valid" bit (0x20000000) being set and returns
+// -ENODEV otherwise; a GPU whose firmware is GSP-RM never sets it, which is why
+// gp100_therm_new() refuses to attach at all under GSP. Here the range is the judge instead:
+// a value outside 1..125 C is treated as "no reading" rather than published.
+static constexpr UInt32   kNvTsensOffset     = 0x20460;
+static constexpr UInt32   kNvTsensValueMask  = 0x0001fff8u;
+static constexpr unsigned kNvTempMinC        = 1;
+static constexpr unsigned kNvTempMaxC        = 125;
+// The family rewrites PerformanceStatistics 0.25-2 s apart, so a slower writer would be
+// overwritten before iStat reads it; 250 ms keeps our key present essentially always.
+static constexpr unsigned kNvTempIntervalMs  = 250;
+// Nothing touches BAR0 until the GPU has settled: bring-up still runs for a while after start().
+static constexpr unsigned kNvTempFirstMs     = 5000;
+
 extern "C" {   // kern/thread_call.h and kern/clock.h clash with the family headers here, so the KPIs are declared by hand
 struct thread_call *thread_call_allocate(void (*func)(void *, void *), void *param0);
 int thread_call_enter_delayed(struct thread_call *call, uint64_t deadline);
@@ -242,13 +266,20 @@ public:
     OSObject *newSurface() APPLE_KEXT_OVERRIDE { NVSurface *o = OSTypeAlloc(NVSurface); ALOG("newSurface -> %p", o); return o; }
     OSObject *new2DContext() APPLE_KEXT_OVERRIDE { NV2DContext *c = OSTypeAlloc(NV2DContext); ALOG("new2DContext -> %p", c); return c; }
     OSObject *newVideoContext() APPLE_KEXT_OVERRIDE { NVVideoContext *c = OSTypeAlloc(NVVideoContext); ALOG("newVideoContext -> %p", c); return c; }
-    OSObject *newSysMemory() APPLE_KEXT_OVERRIDE { NVSysMemory *m = OSTypeAlloc(NVSysMemory); ALOG("newSysMemory -> %p", m); return m; }
-    OSObject *newVidMemory() APPLE_KEXT_OVERRIDE { NVVidMemory *m = OSTypeAlloc(NVVidMemory); ALOG("newVidMemory -> %p", m); return m; }
-    OSObject *newResource() APPLE_KEXT_OVERRIDE { NVResource *r = OSTypeAlloc(NVResource); OSAddAtomic64(1, &gCntResNew); ALOG("newResource -> %p", r); return r; }
+    OSObject *newSysMemory() APPLE_KEXT_OVERRIDE { NVSysMemory *m = OSTypeAlloc(NVSysMemory); ALOGV("newSysMemory -> %p", m); return m; }
+    OSObject *newVidMemory() APPLE_KEXT_OVERRIDE { NVVidMemory *m = OSTypeAlloc(NVVidMemory); ALOGV("newVidMemory -> %p", m); return m; }
+    OSObject *newResource() APPLE_KEXT_OVERRIDE { NVResource *r = OSTypeAlloc(NVResource); OSAddAtomic64(1, &gCntResNew); ALOGV("newResource -> %p", r); return r; }
     OSObject *newMemoryMap() APPLE_KEXT_OVERRIDE { NVMemoryMap *m = OSTypeAlloc(NVMemoryMap); ALOG("newMemoryMap -> %p", m); return m; }
 
     NVDisplayMachine *fDM = nullptr;
     IOPCIDevice *fPCI = nullptr;
+    // GPU core temperature: BAR0 is mapped lazily on the first tick, never in start().
+    IOMemoryMap        *fTempMap    = nullptr;
+    volatile UInt32    *fTempRegs   = nullptr;
+    IOTimerEventSource *fTempTimer  = nullptr;
+    int                 fTempC      = 0;
+    UInt32              fTempFails  = 0;
+    bool                fTempLogged = false;
     IONotifier *fFBNote = nullptr;
     IONotifier *fIntelNote = nullptr;
     static NVAccel *gAccel;
@@ -303,17 +334,64 @@ public:
     // deadline, the plugin name goes back on WITHOUT arming: apps get the NVIDIA device, and WindowServer (allow-listed
     // "!WindowServer" = only when armed) keeps the GPU that owns the display. Nothing here touches a display pipe or a
     // mode change. Boot-arg -nvaccelnoheadless keeps the old behaviour.
+    // The check runs every few seconds rather than once at the deadline: on a laptop whose screen is on the other GPU,
+    // NVKMS has listed this card's connectors, with none connected, about 7 s after start, and every app opened before
+    // the plugin name comes back never sees the NVIDIA device (Ampere and Turing laptops reported "Metal device: no" at
+    // first login while the name came back at 60 s). So the name goes back as soon as both are true: NVKMS reports no
+    // display on any of this card's connectors, and another GPU's framebuffer already shows the desktop. A desktop whose
+    // monitor is slow to wake has no other GPU's framebuffer and still waits for the deadline.
     static constexpr uint32_t kHeadlessDeadlineSec = 60;   // chosen: NVRMFB heads publish within ~20 s of start (#76 log)
+    static constexpr uint32_t kHeadlessPollSec = 2;        // chosen: a small fraction of the ~7 s NVKMS takes to enumerate
     struct thread_call *fHeadlessCall = nullptr;
+    uint32_t fHeadlessWaited = 0;
+    // true when NVKMS enumerated this card's connectors (NVRMFB writes connected-displays on each display nub it
+    // enumerates) and found a display on none of them
+    static bool headlessNoDisplayHere() {
+        bool seen = false, none = true;
+        if (OSIterator *it = getMatchingServices(serviceMatching("NVRMDisplay"))) {
+            while (OSObject *o = it->getNextObject()) {
+                IOService *s = OSDynamicCast(IOService, o);
+                OSNumber *cd = s ? OSDynamicCast(OSNumber, s->getProperty("connected-displays")) : nullptr;
+                if (!cd) continue;
+                seen = true;
+                if (cd->unsigned32BitValue() > 0) none = false;
+            }
+            it->release();
+        }
+        return seen && none;
+    }
+    // the first framebuffer that is not one of this driver's heads; *other is set when it sits on another vendor's GPU
+    static void headlessDisplayOwner(char *owner, size_t len, bool *other) {
+        *other = false;
+        OSIterator *it = getMatchingServices(serviceMatching("IOFramebuffer"));
+        if (!it) return;
+        while (OSObject *o = it->getNextObject()) {
+            IOService *s = OSDynamicCast(IOService, o);
+            if (!s || s->metaCast("NVRMNVDAFramebuffer")) continue;
+            strlcpy(owner, s->getMetaClass()->getClassName(), len);
+            // the Intel panel driver publishes as a head of this accelerator, so it is not another GPU's desktop here
+            if (s->metaCast("NMIntelFB")) break;
+            IORegistryEntry *e = s->getProvider();
+            for (int up = 0; e && up < 8 && !e->metaCast("IOPCIDevice"); up++) e = e->getParentEntry(gIOServicePlane);
+            OSData *v = e ? OSDynamicCast(OSData, e->getProperty("vendor-id")) : nullptr;
+            if (v && v->getLength() >= 2) {
+                const uint8_t *b = (const uint8_t *)v->getBytesNoCopy();
+                *other = (uint16_t)(b[0] | (b[1] << 8)) != 0x10de;
+            }
+            break;
+        }
+        it->release();
+    }
     void armHeadlessCheck() {
         int off = 0;
         if (PE_parse_boot_argn("-nvaccelnoheadless", &off, sizeof off)) { ALOG("headless check: off (-nvaccelnoheadless)"); return; }
         fHeadlessCall = thread_call_allocate(&NVAccel::headlessCheck, this);
         if (!fHeadlessCall) { ALOG("headless check: thread_call_allocate FAILED -- a GPU with no display stays hidden from Metal"); return; }
+        fHeadlessWaited = 0;
         uint64_t when = 0;
-        clock_interval_to_deadline(kHeadlessDeadlineSec, kSecondScale, &when);
+        clock_interval_to_deadline(kHeadlessPollSec, kSecondScale, &when);
         thread_call_enter_delayed(fHeadlessCall, when);
-        ALOG("headless check: armed for %u s from now", kHeadlessDeadlineSec);
+        ALOG("headless check: armed, every %u s for up to %u s", kHeadlessPollSec, kHeadlessDeadlineSec);
     }
     static void headlessCheck(void *p0, void *) {
         NVAccel *me = (NVAccel *)p0;
@@ -321,23 +399,29 @@ public:
         if (me->fRegLock) IOLockLock(me->fRegLock);
         const char *why = me->fFB ? "a display head published" : !me->fMetalPlugin ? "no plugin name to restore"
                         : me->getProperty("MetalPluginName") ? "the plugin name is already back" : nullptr;
+        me->fHeadlessWaited += kHeadlessPollSec;
         if (why) {
             ALOG("headless check: not headless (%s) -- nothing to do", why);
         } else {
             // name the GPU that owns the display, so a log says which driver WindowServer is on
             char owner[64] = "none found";
-            if (OSIterator *it = getMatchingServices(serviceMatching("IOFramebuffer"))) {
-                while (OSObject *o = it->getNextObject()) {
-                    IOService *s = OSDynamicCast(IOService, o);
-                    if (s && !s->metaCast("NVRMNVDAFramebuffer")) { strlcpy(owner, s->getMetaClass()->getClassName(), sizeof owner); break; }
-                }
-                it->release();
+            bool other = false;
+            headlessDisplayOwner(owner, sizeof owner, &other);
+            const bool early = other && headlessNoDisplayHere();
+            if (!early && me->fHeadlessWaited < kHeadlessDeadlineSec) {
+                uint64_t when = 0;
+                clock_interval_to_deadline(kHeadlessPollSec, kSecondScale, &when);
+                thread_call_enter_delayed(me->fHeadlessCall, when);
+                if (me->fRegLock) IOLockUnlock(me->fRegLock);
+                return;
             }
             me->setProperty("MetalPluginName", me->fMetalPlugin);
             me->setProperty("NVAccelHeadless", kOSBooleanTrue);
             gNvHeadless = 1;
-            ALOG("headless check: no NVIDIA display head after %u s -- MetalPluginName restored WITHOUT arming: apps get "
-                 "the NVIDIA Metal device, WindowServer stays on the display's GPU (%s)", kHeadlessDeadlineSec, owner);
+            ALOG("headless check: %s after %u s -- MetalPluginName restored WITHOUT arming: apps get "
+                 "the NVIDIA Metal device, WindowServer stays on the display's GPU (%s)",
+                 early ? "no display on any NVIDIA connector and another GPU shows the desktop" : "no NVIDIA display head",
+                 me->fHeadlessWaited, owner);
             // Not a good start for the boot guard: a card whose connectors carry no display clears the guard in the
             // framebuffer's own enumeration (nvrm-fb.cpp), with the connector list as evidence. Reaching this deadline
             // without that means the framebuffer never enumerated at all, which is a failure the guard must keep counting.
@@ -626,6 +710,7 @@ public:
                    "IOService::attach starts sleeping)", n, (unsigned)NV_CARRIERS); }
             enableFromHook("start");
             fPCI = OSDynamicCast(IOPCIDevice, provider);
+            startTemperature();
             ALOG("display machine framebuffer count after the family sweep = %u", fDM ? fDM->getFramebufferCount() : 0xFFFFFFFFu);
             fRegLock = IOLockAlloc();
             ALOG("multi-head: up to %u heads, registration lock %p%s", kNvMaxFB, fRegLock,
@@ -664,7 +749,83 @@ public:
         }
         return r;
     }
-    virtual void stop(IOService *provider) APPLE_KEXT_OVERRIDE { ALOG("stop"); IOGraphicsAccelerator2::stop(provider); }
+    // ---- GPU core temperature ------------------------------------------------
+    // Published into our own PerformanceStatistics as "Temperature(C)", the key iStat Menus
+    // shows on the GPU panel. NVAccel already owns the IOPCIDevice, so no second kext and no
+    // helper process are involved: that is the whole point of doing it here.
+    void startTemperature() {
+        if (fTempTimer || !fPCI) return;
+        IOWorkLoop *wl = getWorkLoop();
+        if (!wl) { ALOG("temperature: no work loop -- no temperature will be published"); return; }
+        fTempTimer = IOTimerEventSource::timerEventSource(this, &NVAccel::tempTimerFired);
+        if (!fTempTimer) { ALOG("temperature: timerEventSource FAILED"); return; }
+        if (wl->addEventSource(fTempTimer) != kIOReturnSuccess) {
+            ALOG("temperature: addEventSource FAILED");
+            fTempTimer->release(); fTempTimer = nullptr; return;
+        }
+        fTempTimer->setTimeoutMS(kNvTempFirstMs);
+        ALOG("temperature: will read TSENS 0x%05x every %u ms", kNvTsensOffset, kNvTempIntervalMs);
+    }
+
+    void stopTemperature() {
+        if (fTempTimer) {
+            fTempTimer->cancelTimeout();
+            if (IOWorkLoop *wl = getWorkLoop()) wl->removeEventSource(fTempTimer);
+            fTempTimer->release(); fTempTimer = nullptr;
+        }
+        if (fTempMap) { fTempMap->release(); fTempMap = nullptr; }
+        fTempRegs = nullptr;
+    }
+
+    static void tempTimerFired(OSObject *owner, IOTimerEventSource *sender) {
+        (void)sender;
+        // Registered with `this` as the owner, so the cast cannot fail; OSDynamicCast is not
+        // used because it needs the complete class, and this body sits inside the class.
+        NVAccel *me = (NVAccel *)owner;
+        if (!me) return;
+        me->sampleTemperature();
+        if (me->fTempTimer) me->fTempTimer->setTimeoutMS(kNvTempIntervalMs);
+    }
+
+    void sampleTemperature() {
+        if (!fTempRegs) {
+            fTempMap = fPCI->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0, 0);
+            if (!fTempMap) { ALOG("temperature: BAR0 map FAILED -- giving up"); return; }
+            fTempRegs = (volatile UInt32 *)fTempMap->getVirtualAddress();
+            if (!fTempRegs) { ALOG("temperature: BAR0 has no virtual address -- giving up"); return; }
+        }
+        UInt32 raw = fTempRegs[kNvTsensOffset / 4];
+        unsigned val = (raw & kNvTsensValueMask) >> 8;
+        // A GPU in a low power state can answer 0xffffffff, and 0 means the sensor has not been
+        // clocked yet: both fall outside the range and are left unpublished rather than guessed.
+        if (raw == 0xffffffffu || val < kNvTempMinC || val > kNvTempMaxC) {
+            if (fTempFails++ == 0)
+                ALOG("temperature: TSENS raw=0x%08x outside %u..%u C -- not publishing",
+                     raw, kNvTempMinC, kNvTempMaxC);
+            return;
+        }
+        fTempFails = 0;
+        if (!fTempLogged) { fTempLogged = true; ALOG("temperature: first reading raw=0x%08x -> %u C", raw, val); }
+        fTempC = (int)val;
+        publishTemperature((unsigned)fTempC);
+    }
+
+    // Read-copy-modify-write: the family keeps 70-odd keys in this dictionary and replaces it
+    // wholesale every 0.25-2 s, so the copy is taken from whatever is in it at this moment.
+    void publishTemperature(unsigned c) {
+        OSDictionary *cur = OSDynamicCast(OSDictionary, getProperty("PerformanceStatistics"));
+        OSDictionary *d = cur ? OSDynamicCast(OSDictionary, cur->copyCollection()) : nullptr;
+        if (!d) { d = OSDictionary::withCapacity(8); if (!d) return; }
+        OSNumber *n = OSNumber::withNumber((unsigned long long)c, 32);
+        if (n) { d->setObject("Temperature(C)", n); n->release(); setProperty("PerformanceStatistics", d); }
+        d->release();
+    }
+
+    virtual void stop(IOService *provider) APPLE_KEXT_OVERRIDE {
+        ALOG("stop");
+        stopTemperature();
+        IOGraphicsAccelerator2::stop(provider);
+    }
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) APPLE_KEXT_OVERRIDE;
 };
 OSDefineMetaClassAndStructors(NVAccel, IOGraphicsAccelerator2)
@@ -831,7 +992,7 @@ bool NVVidMemory::allocPhysical()
     fRmHandle = r.handle; fKva = r.kva; fPhys = r.phys; fBytes = r.actualSize; fAllocationCookie = r.allocationCookie;
     OSAddAtomic64(1, &gCntVmAlloc); OSAddAtomic64((SInt64)fBytes, &gCntVmAllocBytes);
     *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = fPhys;
-    ALOG("NVVidMemory::allocPhysical(%p): %llu bytes of REAL VRAM -- phys 0x%llx kva %p [BAR1 %llu]",
+    ALOGV("NVVidMemory::allocPhysical(%p): %llu bytes of REAL VRAM -- phys 0x%llx kva %p [BAR1 %llu]",
          this, fBytes, fPhys, fKva, r.mappedTotal);
     return true;
 }

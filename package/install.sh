@@ -34,9 +34,13 @@ release_install_lock() {
 }
 
 rollback_install() {
-  local failed=0 k b
+  local failed=0 k b restore_kexts="$KEXTS"
+  # A later process recovering a stale guard has not detected PRIMARY yet.
+  if [ -f "$BK/primary-selector-used" ]; then
+    case " $restore_kexts " in *' NVPrimarySelector '*) ;; *) restore_kexts="$restore_kexts NVPrimarySelector";; esac
+  fi
   [ -z "$NEWKC" ] || rm -f "$NEWKC" || failed=1
-  for k in $KEXTS; do
+  for k in $restore_kexts; do
     rm -rf "$EXT/$k.kext" || failed=1
     [ ! -e "$BK/$k.kext" ] || ditto "$BK/$k.kext" "$EXT/$k.kext" || failed=1
   done
@@ -130,24 +134,29 @@ case $MAJ in 15|26) ;; *) die "This driver is built for macOS 15 and 26 (this is
 # NVAccel is the one kext built per macOS: Tahoe made the IOAcceleratorFamily2 methods it inherits private (see
 # kexts/NVRM/accel/gen_tahoe_fwd.py). The other three kexts are the same binaries on 15 and 26.
 VAR="$HERE/Library/NullMoth/kexts/$MAJ"; [ -d "$VAR/NVAccel.kext" ] || die "this package has no NVAccel for macOS $MAJ"
-kpath() { [ "$1" = NVAccel ] && echo "$VAR/NVAccel.kext" || echo "$HERE/Library/Extensions/$1.kext"; }
+kpath() {
+  case "$1" in
+    NVAccel) echo "$VAR/NVAccel.kext";;
+    NVPrimarySelector) echo "$SELECTOR_SOURCE";;
+    *) echo "$HERE/Library/Extensions/$1.kext";;
+  esac
+}
 ioreg -r -c IOPCIDevice -d 1 | grep -q '"vendor-id" = <de100000>' || die "no NVIDIA GPU found on PCI"
 # The driver runs the cards NVIDIA's GSP firmware supports (Turing and later). The same list the Windows builder uses
-# (open-gpu-kernel-modules 610.57.04, p1401/nvidia_gsp_ids.json). Installing it for an older card (GTX 10 and before)
+# (open-gpu-kernel-modules 615.78.08, p1401/nvidia_gsp_ids.json). Installing it for an older card (GTX 10 and before)
 # would switch the firmware screen off and leave nothing to draw: those PCs run macOS in basic display instead.
 SUPPORTED_IDS="
 1E02 1E04 1E07 1E30 1E36 1E78 1E81 1E82 1E84 1E87 1E89 1E90 1E91 1E93 1EB0 1EB1 1EB5 1EB6 1EC2 1EC7 1ED0 1ED1 1ED3
 1EF5 1F02 1F03 1F06 1F07 1F08 1F0A 1F10 1F11 1F12 1F14 1F15 1F36 1F42 1F47 1F50 1F51 1F54 1F55 1F76 1F82 1F83 1F91
 1F95 1F96 1F97 1F98 1F99 1F9C 1F9D 1F9F 1FA0 1FB0 1FB1 1FB2 1FB6 1FB7 1FB8 1FB9 1FBA 1FBB 1FBC 1FDD 1FF0 1FF2 1FF9
-2182 2184 2187 2188 2191 2192 21C4 21D1 2203 2204
-2206 2207 2208 220A 2216 2230 2231 2232 2233 2414 2420 2438 2460 2482 2484 2486 2487 2488 2489 249C 249D 24A0 24B0
-24B1 24B6 24B7 24B8 24B9 24BA 24BB 24C7 24C9 24DC 24DD 24E0 24FA 2503 2504 2507 2508 2520 2521 2523 2531 2544 2560
-2563 2571 2582 2584 25A0 25A2 25A5 25A6 25A7 25A9 25AA 25AB 25AC 25AD 25B0 25B2 25B8 25B9 25BA 25BB 25BC 25BD 25E0
-25E2 25E5 25EC 25ED 25F9 25FA 25FB 2684 2685 2689 26B1 26B2 26B3 2702 2704 2705 2709 2717 2730 2757 2770 2782 2783
-2786 2788 27A0 27B0 27B1 27B2 27BA 27BB 27E0 27FB 2803 2805 2808 2820 2822 2838 2860 2882 28A0 28A1 28A3 28B0 28B8
-28B9 28BA 28BB 28E0 28E1 28E3 28F8 2B85 2B87 2B8C 2BB1 2BB3 2BB4 2BB5 2BB9 2C02 2C05 2C18 2C19 2C31 2C33 2C34 2C38
-2C39 2C3A 2C58 2C59 2C77 2C79 2D04 2D05 2D18 2D19 2D30 2D39 2D58 2D59 2D79 2D83 2D98 2DB8 2DB9 2DD8 2DF9 2E03 2E06
-2F04 2F06 2F18 2F38 2F58
+2182 2184 2187 2188 2191 2192 21C4 21D1 2203 2204 2206 2207 2208 220A 2216 2230 2231 2232 2233 2414 2420 2438 2460
+2482 2484 2486 2487 2488 2489 249C 249D 24A0 24B0 24B1 24B6 24B7 24B8 24B9 24BA 24BB 24C7 24C9 24DC 24DD 24E0 24FA
+2503 2504 2507 2508 2520 2521 2523 2531 2544 2560 2563 2571 2582 2584 25A0 25A2 25A5 25A6 25A7 25A9 25AA 25AB 25AC
+25AD 25B0 25B2 25B8 25B9 25BA 25BB 25BC 25BD 25E0 25E2 25E5 25EC 25ED 25F9 25FA 25FB 2684 2685 2689 26B1 26B2 26B3
+2702 2704 2705 2709 2717 2730 2757 2770 2782 2783 2786 2788 27A0 27B0 27B1 27B2 27BA 27BB 27E0 27FB 2803 2805 2808
+2820 2822 2838 2860 2882 28A0 28A1 28A3 28B0 28B8 28B9 28BA 28BB 28E0 28E1 28E3 28F8 2B85 2B87 2B8C 2BB1 2BB3 2BB4
+2BB5 2BB9 2C02 2C05 2C09 2C18 2C19 2C31 2C33 2C34 2C38 2C39 2C3A 2C58 2C59 2C77 2C79 2D04 2D05 2D18 2D19 2D30 2D39
+2D58 2D59 2D79 2D83 2D98 2DB8 2DB9 2DD8 2DF9 2E03 2E06 2E12 2F04 2F06 2F18 2F38 2F58
 "
 NV_IDS=$(ioreg -r -c IOPCIDevice -d 1 | awk '/"vendor-id" = <de100000>/{nv=1} /"device-id" = </{ if (match($0, /<[0-9a-f]+>/)) d=substr($0, RSTART+1, 4) }
   /^\+-o|^ *\}/{ if (nv && d != "") print toupper(substr(d,3,2) substr(d,1,2)); nv=0; d="" }' | sort -u)
@@ -217,16 +226,68 @@ if [ "${CHECK:-0}" != 1 ]; then
   printf '%s\n' "$LOCK_ID" | grep -Eq '^[0-9]+:[0-9]+$' || die "installer guard identity is unavailable"
 fi
 
+primary_bundle_id() {
+ if [ "$1" = NVPrimarySelector ]; then echo org.hackintosh.experimental.NVPrimarySelector
+ else echo "com.nullmoth.$1"; fi
+}
+primary_marker() {
+ /usr/libexec/PlistBuddy -c "Print :IOKitPersonalities:$2:IOPropertyMatch:nullmoth-auto-primary" "$1/Contents/Info.plist" 2>/dev/null
+}
+primary_apply() {
+ local bundle=$1 name=$2 plist="$1/Contents/Info.plist" existing
+ existing=$(/usr/libexec/PlistBuddy -c "Print :IOKitPersonalities:$name:IOPropertyMatch" "$plist" 2>/dev/null) || existing=''
+ if [ -n "$existing" ]; then
+  # Do not replace a different PCI/ACPI selection or silently widen its scope.
+  [ "$(primary_marker "$bundle" "$name")" = true ] || return 1
+  existing=$(/usr/libexec/PlistBuddy -c "Print :IOKitPersonalities:$name:IOPropertyMatch" "$plist") || return 1
+  [ "$(printf '%s\n' "$existing" | awk '/ = /{n++}END{print n+0}')" = 1 ] || return 1
+ else
+  /usr/libexec/PlistBuddy -c "Add :IOKitPersonalities:$name:IOPropertyMatch dict" "$plist" || return 1
+  /usr/libexec/PlistBuddy -c "Add :IOKitPersonalities:$name:IOPropertyMatch:nullmoth-auto-primary bool true" "$plist" || return 1
+ fi
+ codesign --force --sign - "$bundle" && codesign --verify --strict "$bundle"
+}
+primary_requested() {
+ local rm accel
+ rm=$(primary_marker "$EXT/NVRM.kext" NVRM) || rm=''
+ accel=$(primary_marker "$EXT/NVAccel.kext" NVAccel) || accel=''
+ if [ "$rm" = true ] || [ "$accel" = true ]; then
+  [ "$rm" = true ] && [ "$accel" = true ] || return 2
+  return 0
+ fi
+ [ "${NM_PRIMARY_GPU:-0}" = 1 ]
+}
+
+# An already configured selector is an opt-in that must survive a driver update.
+# NM_PRIMARY_GPU=1 is for a first manual installation with a packaged selector.
+PRIMARY=0
+primary_requested; primary_status=$?
+case "$primary_status" in
+ 0) PRIMARY=1;;
+ 2) die "incomplete primary-GPU matching on installed kexts; no files changed";;
+esac
+SELECTOR_SOURCE=""
+if [ "$PRIMARY" = 1 ]; then
+  SELECTOR_SOURCE="$HERE/Library/Extensions/NVPrimarySelector.kext"
+  [ -d "$SELECTOR_SOURCE" ] || SELECTOR_SOURCE="$EXT/NVPrimarySelector.kext"
+  [ -d "$SELECTOR_SOURCE" ] && [ ! -L "$SELECTOR_SOURCE" ] || die "primary-GPU matching needs NVPrimarySelector.kext; no files changed"
+  codesign --verify --strict "$SELECTOR_SOURCE" || die "primary selector signature invalid; no files changed"
+  KEXTS="$KEXTS NVPrimarySelector"
+fi
 step "3. test kernel collection"
 T=$(mktemp -d /var/tmp/nullmoth.XXXX) && [ -n "$T" ] && mkdir -p "$T/repo" || die "create private preflight directory"
 for x in "$EXT"/*.kext; do [ -d "$x" ] || continue; n=$(basename "$x" .kext); case " $KEXTS " in *" $n "*) ;; *) cp -R "$x" "$T/repo/" || die "stage third-party kext $n";; esac; done
 for k in $KEXTS; do cp -R "$(kpath $k)" "$T/repo/" || die "copy $k"; done
+if [ "$PRIMARY" = 1 ]; then
+  primary_apply "$T/repo/NVRM.kext" NVRM && primary_apply "$T/repo/NVAccel.kext" NVAccel \
+    || die "prepare primary-GPU metadata; no installed files changed"
+fi
 # macOS 26 kmutil silently skips kexts not owned by root ("No binaries or codeless kexts were provided").
 chown -R root:wheel "$T/repo" && chmod -R go-w "$T/repo" || die "preflight kext permissions"
 kmutil create -n aux --volume-root / ${KARG[@]+"${KARG[@]}"} -B $KB -S $KS --repository "$T/repo" -A "$T/aux.kc" -z >"$T/kmutil.log" 2>&1 || { tail -20 "$T/kmutil.log"; die "test kernel collection build failed"; }
 [ -s "$T/aux.kc" ] || die "test kernel collection build produced no output"
 INS=$(kmutil inspect -a x86_64 -A "$T/aux.kc" 2>/dev/null) || die "cannot inspect the test kernel collection"
-for k in $KEXTS; do printf '%s\n' "$INS" | grep -oE 'com\.nullmoth\.[A-Za-z0-9]+' | grep -Fxq "com.nullmoth.$k" || { tail -20 "$T/kmutil.log"; die "kmutil refused com.nullmoth.$k (log above)"; }; done
+for k in $KEXTS; do printf '%s\n' "$INS" | grep -oE '(com\.nullmoth\.[A-Za-z0-9]+|org\.hackintosh\.experimental\.NVPrimarySelector)' | grep -Fxq "$(primary_bundle_id "$k")" || { tail -20 "$T/kmutil.log"; die "kmutil refused com.nullmoth.$k (log above)"; }; done
 ok "test collection holds all four kexts"
 [ "${CHECK:-0}" = 1 ] && { rm -rf "$T"; echo; echo "CHECK PASS (nothing changed)"; exit 0; }
 
@@ -234,6 +295,7 @@ BK=$(mktemp -d "/Library/NullMoth/backup-$(date +%Y%m%d-%H%M%S).XXXXXX") && [ -n
 [ "${CHECK:-0}" = 1 ] || printf 'bk=%s\n' "$BK" >> "$LOCKDIR/owner" || die "cannot record the backup in the installer guard"
 step "4. back up what is there now -> $BK"
 printf '%s\n' "$BUILD" > "$BK/macos-build" || die "record backup macOS build"
+[ "$PRIMARY" != 1 ] || touch "$BK/primary-selector-used" || die "record primary selector backup"
 # ditto, not cp -Rp: cp re-applies file flags through symlinks and stopped on nvmtl/libvulkan.dylib with "chflags: Too
 # many levels of symbolic links" (Mac 1.10 logs 10-10, 2 uploads); ditto keeps links, flags and xattrs, as the restore does.
 for k in $KEXTS; do [ ! -e "$EXT/$k.kext" ] || backup_copy "$k" ditto "$EXT/$k.kext" "$BK/$k.kext"; done
@@ -254,11 +316,18 @@ ok "backup written"
 
 step "5. install"
 INSTALLING=1; [ "${CHECK:-0}" = 1 ] || : > "$LOCKDIR/installing"
-for k in $KEXTS; do rm -rf "$EXT/$k.kext" && ditto "$(kpath $k)" "$EXT/$k.kext" || die "copy $k (restore from $BK)"; done
+for k in $KEXTS; do
+  source=$(kpath "$k")
+  if [ "$PRIMARY" = 1 ]; then source="$T/repo/$k.kext"; fi
+  rm -rf "$EXT/$k.kext" && ditto "$source" "$EXT/$k.kext" || die "copy $k (restore from $BK)"
+done
 # both NVAccel builds stay on disk, so the first start after a macOS upgrade can switch to the matching one
 mkdir -p /Library/NullMoth && rm -rf /Library/NullMoth/kexts && ditto "$HERE/Library/NullMoth/kexts" /Library/NullMoth/kexts || die "copy per-macOS accelerators (restore from $BK)"
 for target in 15 26; do
   dir=/Library/NullMoth/kexts/$target
+  if [ "$PRIMARY" = 1 ]; then
+    primary_apply "$dir/NVAccel.kext" NVAccel || die "primary-GPU cache metadata for $target (restore from $BK)"
+  fi
   [ -f "$dir/NVAccel.kext/Contents/MacOS/NVAccel" ] && [ -f "$dir/NVAccel.kext/Contents/Info.plist" ] || die "missing macOS $target accelerator (restore from $BK)"
   (cd "$dir" && find NVAccel.kext -type f -exec shasum -a 256 '{}' \;) > "$dir/SHA256SUMS" || die "cache manifest for macOS $target"
 done
@@ -333,7 +402,7 @@ NEWKC="$KC.nullmoth-install-new"; rm -f "$NEWKC"
 kmutil create -n aux --volume-root / ${KARG[@]+"${KARG[@]}"} -B $KB -S $KS --repository "$EXT" -A "$NEWKC" -z >"$T/kmutil2.log" 2>&1 || die "live kernel collection build failed (restore from $BK)"
 [ -s "$NEWKC" ] || die "live kernel collection build produced no output (restore from $BK)"
 INS=$(kmutil inspect -a x86_64 -A "$NEWKC" 2>/dev/null) || die "cannot inspect the new kernel collection (restore from $BK)"
-for k in $KEXTS; do printf '%s\n' "$INS" | grep -oE 'com\.nullmoth\.[A-Za-z0-9]+' | grep -Fxq "com.nullmoth.$k" || die "com.nullmoth.$k missing from the new collection (restore from $BK)"; done
+for k in $KEXTS; do printf '%s\n' "$INS" | grep -oE '(com\.nullmoth\.[A-Za-z0-9]+|org\.hackintosh\.experimental\.NVPrimarySelector)' | grep -Fxq "$(primary_bundle_id "$k")" || die "com.nullmoth.$k missing from the new collection (restore from $BK)"; done
 mv -f "$NEWKC" "$KC" || die "cannot publish the new kernel collection (restore from $BK)"
 INSTALLING=0
 rm -rf "$T"

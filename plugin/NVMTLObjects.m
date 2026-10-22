@@ -921,7 +921,11 @@ static void *nvmtl_storage_view_for(NVMTLCommandBuffer *cb, NVMTLTexture *t, BOO
         if (!t->_stTwin.img) {
             if (t->_stTwinTried) return NULL;
             t->_stTwinTried = YES;
-            if (nvmtl_vk_image_create_typed(im->w, im->h, im->fmt, im->bpp, 0, 1, 1, 2, 1, &t->_stTwin) || !t->_stTwin.storage) {
+            // An sRGB format cannot be a storage image in Vulkan at all. Its twin is half float, filled and written back by
+            // blits that decode and encode sRGB, so a kernel writes linear values and the texture ends up sRGB-encoded,
+            // as a write to an sRGB texture does on Apple GPUs (Blender's edit-mode overlay wrote RGBA8Unorm_sRGB).
+            const int srgb = nvmtl_vk_srgb_format(im->fmt);
+            if (nvmtl_vk_image_create_typed(im->w, im->h, srgb ? 97u : im->fmt, srgb ? 8u : im->bpp, 0, 1, 1, 2, 1, &t->_stTwin) || !t->_stTwin.storage) {
                 if (t->_stTwin.img) nvmtl_vk_image_destroy(&t->_stTwin);
                 memset(&t->_stTwin, 0, sizeof t->_stTwin);
                 nvlog("storage twin: VkFormat %u %ux%u cannot be a storage image in optimal tiling either - shader writes to it are LOST", im->fmt, im->w, im->h);
@@ -932,7 +936,8 @@ static void *nvmtl_storage_view_for(NVMTLCommandBuffer *cb, NVMTLTexture *t, BOO
     }
     if (!cb->_stTwins) cb->_stTwins = [NSMutableSet new];
     if (![cb->_stTwins containsObject:t]) {
-        if (nvmtl_vk_cmd_copy_image_sub(&cb->_c, im, 0, 0, 0, 0, &t->_stTwin, 0, 0, 0, 0, im->w, im->h)) return NULL;
+        if (t->_stTwin.fmt != im->fmt ? nvmtl_vk_cmd_blit_image_2d(&cb->_c, im, &t->_stTwin, im->w, im->h)
+                                      : nvmtl_vk_cmd_copy_image_sub(&cb->_c, im, 0, 0, 0, 0, &t->_stTwin, 0, 0, 0, 0, im->w, im->h)) return NULL;
         [cb->_stTwins addObject:t];
         nvmtl_retain_resource(cb, t);
     }
@@ -955,7 +960,8 @@ static BOOL nvmtl_function_writes_texture(NVMTLFunction *fn, NSUInteger index) {
 static void nvmtl_storage_twins_out(NVMTLCommandBuffer *cb) {
     for (NVMTLTexture *t in cb->_stTwins) {
         nvk_image *im = [t nvi];
-        if (nvmtl_vk_cmd_copy_image_sub(&cb->_c, &t->_stTwin, 0, 0, 0, 0, im, 0, 0, 0, 0, im->w, im->h)) {
+        if (t->_stTwin.fmt != im->fmt ? nvmtl_vk_cmd_blit_image_2d(&cb->_c, &t->_stTwin, im, im->w, im->h)
+                                      : nvmtl_vk_cmd_copy_image_sub(&cb->_c, &t->_stTwin, 0, 0, 0, 0, im, 0, 0, 0, 0, im->w, im->h)) {
             nvlog("storage twin: copy back to the %ux%u texture FAILED", im->w, im->h); continue; }
         nvmtl_vk_cmd_prepare_sampled_image(&cb->_c, &t->_stTwin, 1);
         nvmtl_surf_dirty(cb, t);
@@ -1212,6 +1218,12 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
         return monitor;
     }
 }
+// NVMTL_SURFIN_UPLOAD=cpu: surface-in copies with the CPU (nvmtl_vk_image_write) instead of importing the pages
+static bool nvmtl_surfin_import(void) {
+    static int on = -1;
+    if (on < 0) { const char *u = getenv("NVMTL_SURFIN_UPLOAD"); on = !(u && !strcmp(u, "cpu")); }
+    return on;
+}
 - (void)nvmtlSurfaceIn {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return;
@@ -1228,7 +1240,12 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
     if (IOSurfaceLock(r->_surf, kIOSurfaceLockReadOnly, &seed) != kIOReturnSuccess) { nvlog("G13 surface-in: IOSurfaceLock FAILED"); return; }
     void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
     size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);
-    int rc = (base && row) ? nvmtl_vk_image_write(r->_q, &r->_i, base, row) : -1;
+    int rc = -1;
+    if (base && row && nvmtl_surfin_import()) {
+        const size_t off = (size_t)((uint8_t *)base - (uint8_t *)IOSurfaceGetBaseAddress(r->_surf));
+        rc = nvmtl_vk_image_write_host(r->_q, &r->_i, base, row, IOSurfaceGetAllocSize(r->_surf) - off);
+    }
+    if (rc) rc = (base && row) ? nvmtl_vk_image_write(r->_q, &r->_i, base, row) : -1;
     if (!rc && r->_i.bpp == 4) { char tag[24]; snprintf(tag, sizeof tag, "in%u-", (unsigned)IOSurfaceGetID(r->_surf)); nvmtl_frame_dump(tag, base, row, r->_i.w, r->_i.h); }
     IOSurfaceUnlock(r->_surf, kIOSurfaceLockReadOnly, NULL);
     if (rc) { nvlog("G13 surface-in: upload FAILED (%ux%u) — retried at the next use", r->_i.w, r->_i.h); return; }

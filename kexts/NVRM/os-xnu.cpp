@@ -69,6 +69,15 @@ int NV_API_CALL nv_printf(NvU32 debuglevel, const char *printf_format, ...)
     IOLog("%s", buf);
     return 0;
 }
+int NV_API_CALL nv_dev_vprintf(struct nv_state_t *nv, NV_LOG_LEVEL level, const char *format, va_list ap)
+{ NV_XNU_TRC;
+    char buf[512];
+    vsnprintf(buf, sizeof buf, format, ap);
+    buf[sizeof buf - 1] = 0;
+    kprintf("%s", buf);
+    IOLog("%s", buf);
+    return 0;
+}
 NV_STATUS NV_API_CALL nv_log_error(nv_state_t *nv, NvU32 error_number, const char *format, va_list ap)
 { NV_XNU_TRC;
     char buf[512];
@@ -253,6 +262,37 @@ void *NV_API_CALL os_pci_init_handle(NvU32 domain, NvU8 bus, NvU8 slot, NvU8 fun
 #define NV_PCI_H(h) do { if (!(h)) { static bool _w; if (!_w) { _w = true; kprintf("NVRM-xnu: %s: NULL pci handle\n", __func__); } return NV_ERR_INVALID_ARGUMENT; } } while (0)
 NV_STATUS NV_API_CALL os_pci_read_byte(void *h, NvU32 off, NvU8 *v)   { NV_XNU_TRC; NV_PCI_H(h); *v = ((nv_xnu_pci_slot *)h)->pci->configRead8(off);  return NV_OK; }
 NV_STATUS NV_API_CALL os_pci_read_word(void *h, NvU32 off, NvU16 *v)  { NV_XNU_TRC; NV_PCI_H(h); *v = ((nv_xnu_pci_slot *)h)->pci->configRead16(off); return NV_OK; }
+// The GPU's Product Device Identifier lives in NVIDIA's DVSEC 3 in PCIe extended config space; RM builds the GPU UUID
+// from it the way NVIDIA's own driver does (nv-pci.c). A board without that capability answers NOT_SUPPORTED and RM
+// falls back to the PBI read. The walk is bounded the way nv-pci.c bounds it: offsets 0x100..0xfff, DWORD aligned,
+// at most (0x1000 - 0x100) / 8 links, since a malformed chain must not loop.
+NV_STATUS NV_API_CALL nv_pci_read_gpu_pdi_from_dvsec(nv_state_t *nv, NvU64 *pdi)
+{ NV_XNU_TRC;
+    if (!nv || !pdi || !nv->handle) return NV_ERR_INVALID_ARGUMENT;
+    IOPCIDevice *pci = ((nv_xnu_pci_slot *)nv->handle)->pci;
+    if (!pci) return NV_ERR_INVALID_ARGUMENT;
+    NvU32 cap = 0x100;
+    for (NvU32 i = 0; i < (0x1000 - 0x100) / 8; i++) {
+        if (cap < 0x100 || cap >= 0x1000 || (cap & 3)) return NV_ERR_INVALID_OFFSET;
+        const NvU32 hdr0 = pci->extendedConfigRead32(cap);
+        if (hdr0 == 0xffffffffu) return NV_ERR_INVALID_READ;
+        if ((hdr0 & 0xffff) == 0x0023) {                       // DVSEC
+            const NvU32 hdr1 = pci->extendedConfigRead32(cap + 0x4);
+            const NvU32 hdr2 = pci->extendedConfigRead32(cap + 0x8);
+            if ((hdr1 & 0xffff) == 0x10de && (hdr2 & 0xffff) == 0x3) {   // NVIDIA, DVSEC 3 = GPU PDI
+                const NvU32 len = (hdr1 >> 20) & 0xfff;
+                if (len < 0x14 || cap > 0x1000 - 0x14) return NV_ERR_INVALID_DATA;
+                const NvU64 v = ((NvU64)pci->extendedConfigRead32(cap + 0x10) << 32) | pci->extendedConfigRead32(cap + 0xc);
+                if (v == 0 || v == ~0ull) return NV_ERR_NOT_SUPPORTED;
+                *pdi = v;
+                return NV_OK;
+            }
+        }
+        cap = (hdr0 >> 20) & 0xfff;
+        if (cap == 0) return NV_ERR_NOT_SUPPORTED;
+    }
+    return NV_ERR_INVALID_OFFSET;
+}
 NV_STATUS NV_API_CALL os_pci_read_dword(void *h, NvU32 off, NvU32 *v) { NV_XNU_TRC; NV_PCI_H(h); *v = ((nv_xnu_pci_slot *)h)->pci->configRead32(off); return NV_OK; }
 NV_STATUS NV_API_CALL os_pci_write_byte(void *h, NvU32 off, NvU8 v)   { NV_XNU_TRC; NV_PCI_H(h); ((nv_xnu_pci_slot *)h)->pci->configWrite8(off, v);  return NV_OK; }
 NV_STATUS NV_API_CALL os_pci_write_word(void *h, NvU32 off, NvU16 v)  { NV_XNU_TRC; NV_PCI_H(h); ((nv_xnu_pci_slot *)h)->pci->configWrite16(off, v); return NV_OK; }

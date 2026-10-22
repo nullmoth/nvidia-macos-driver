@@ -113,6 +113,15 @@ public:
     uint32_t     fAutoGoSettleMs = 10000;
     bool         fBar1Placed = false;
     volatile UInt32 fBootHold = 0;
+    // <wtl>
+    // A fixed settle + 40 s cap lost the desktop whenever the GSP bring-up ran long (up to 48 s here); while go(2)
+    // runs the cap now waits in 10 s steps, up to nvrmholdcap seconds (default 120). A hung bring-up is still released.
+    volatile UInt32 fBringUp = 0;          // 1 from go(2) until the display is armed or the bring-up gave up
+    uint64_t        fBringUpStartNs = 0;
+    uint32_t        fHoldCapMs = 120000;   // boot-arg nvrmholdcap (seconds)
+    uint32_t        fHoldWaitedMs = 0;     // how long the cap has waited past its first deadline
+    thread_call_t   fHoldCapCall = nullptr;
+    // </wtl>
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait,
                                          void *p1, void *p2, void *p3, void *p4) override;
     virtual IOReturn setPowerState(unsigned long ordinal, IOService *device) override;
@@ -461,6 +470,7 @@ bool NVRM::start(IOService *provider)
             setProperty("nvrm-autogo", "off (-nvrmnogo)"); LOG("auto-go OFF (-nvrmnogo): idle until `nvrmctl go <pass>`");
         } else {
             fBootHold = 1; adjustBusy(1); setProperty("nvrm-boot-hold", "holding");
+            { uint32_t sec = 0; if (PE_parse_boot_argn("nvrmholdcap", &sec, sizeof(sec)) && sec >= 40 && sec <= 600) fHoldCapMs = sec * 1000; }   // <wtl>
             if (thread_call_t cap = thread_call_allocate(&NVRM::bootHoldCap, this)) {
                 // The BAR fallback settles for 100 s. A 40 s timer from start() expired before
                 // autoGo could run, so its display-arm CAS always failed on that path.
@@ -469,6 +479,7 @@ bool NVRM::start(IOService *provider)
                 clock_interval_to_deadline(40000, kMillisecondScale, &dl);
                 clock_interval_to_absolutetime_interval(fAutoGoSettleMs, kMillisecondScale, &settle);
                 dl += settle;
+                fHoldCapCall = cap;   // <wtl> the cap re-arms itself while the bring-up is still running
                 retain(); thread_call_enter_delayed(cap, dl);
             } else { releaseBootHold("no cap timer — not holding"); }
             retain();
@@ -698,9 +709,22 @@ void NVRM::releaseBootHold(const char *why)
 void NVRM::bootHoldCap(thread_call_param_t p0, thread_call_param_t)
 {
     NVRM *s = (NVRM *)p0;
+    // <wtl>
+    // bring-up still running and under the ceiling: look again in 10 s (the arm-time retain stays with the call)
+    if (s->fBootHold == 1 && s->fBringUp == 1 && s->fHoldWaitedMs + 40000 < s->fHoldCapMs && s->fHoldCapCall) {
+        const uint32_t step = 10000;
+        s->fHoldWaitedMs += step;
+        uint64_t dl; clock_interval_to_deadline(step, kMillisecondScale, &dl);
+        char why[96]; snprintf(why, sizeof why, "holding: bring-up still running %u s past the 40 s mark (cap %u s)", s->fHoldWaitedMs / 1000, s->fHoldCapMs / 1000);
+        s->setProperty("nvrm-boot-hold", why);
+        LOG("boot hold: bring-up still running at settle + %u s, holding on (cap settle + %u s)", 40 + s->fHoldWaitedMs / 1000 - step / 1000, s->fHoldCapMs / 1000);
+        thread_call_enter_delayed(s->fHoldCapCall, dl);
+        return;
+    }
+    // </wtl>
     if (OSCompareAndSwap(1, 0, &s->fBootHold)) {
-        s->adjustBusy(-1); s->setProperty("nvrm-boot-hold", "CAP: settle + 40 s — bring-up not finished, NOT arming");
-        LOG("boot hold RELEASED by the settle + 40 s cap — the bring-up will not arm with WindowServer up");
+        s->adjustBusy(-1); s->setProperty("nvrm-boot-hold", "CAP: bring-up not finished in time, NOT arming");
+        LOG("boot hold RELEASED by the settle + %u s cap — the bring-up will not arm with WindowServer up", 40 + s->fHoldWaitedMs / 1000);   // <wtl> the cap is no longer fixed at 40 s
     }
     s->release();
 }
@@ -736,9 +760,18 @@ void NVRM::autoGo(void *p0, wait_result_t)
     s->measureBootRaster();
     { thread_t hw = THREAD_NULL; s->retain();
       if (kernel_thread_start(&NVRM::headWatch, s, &hw) == KERN_SUCCESS) thread_deallocate(hw); else s->release(); }
+    // <wtl>
+    { uint64_t t; clock_get_uptime(&t); absolutetime_to_nanoseconds(t, &s->fBringUpStartNs); }
+    s->fBringUp = 1;
+    // </wtl>
     IOReturn r = s->go(2);
+    // <wtl> how long go(2) took, which says whether the cap was wide enough
+    { uint64_t t, ns = 0; clock_get_uptime(&t); absolutetime_to_nanoseconds(t, &ns);
+      LOG("auto-go: go(2) took %llu ms (hold cap settle + %u s)", (unsigned long long)((ns - s->fBringUpStartNs) / 1000000ULL), s->fHoldCapMs / 1000); }
+    // </wtl>
     kprintf("NVRM-xnu: auto-go: go(2) -> 0x%x (fPassDone %u)\n", r, s->fPassDone);
     if (r != kIOReturnSuccess) {
+        s->fBringUp = 0;   // <wtl>
         s->setProperty("nvrm-autogo", r == kIOReturnBusy ? "busy (a hand-run go is running)" : "go(2) failed");
         s->releaseBootHold("go(2) failed");
     } else {
@@ -757,6 +790,7 @@ void NVRM::autoGo(void *p0, wait_result_t)
             IOSleep(1000);
         }
         LOG("auto-go: heads published mask 0x%x (%u of nvfbheads %d) after %d s", mask, nvrmPop((unsigned)mask), want, i);
+        s->fBringUp = 0;   // <wtl> the cap may fire from here on; the next line decides whether it got there first
         if (!OSCompareAndSwap(1, 2, &s->fBootHold)) {
             LOG("auto-go: the hold was already released (cap) — NOT arming with WindowServer up; heads 0x%x", mask);
             s->setProperty("nvrm-display", "not armed: hold released by the cap first");
@@ -1325,6 +1359,14 @@ IOReturn NVRM::go(uint32_t pass)
             LOG("event locks created for the control device and the GPU");
             rm_write_registry_string(NULL, NULL, "RmMsg", ":", 1);
             rm_write_registry_dword(NULL, NULL, "ResmanDebugLevel", 0);
+            {   // NVIDIA's registry options, as NVreg_RegistryDwords: nvregdwords=Key=Value;Key2=Value2
+                static char regdw[256];
+                if (PE_parse_boot_argn("nvregdwords", regdw, sizeof regdw) && regdw[0]) {
+                    regdw[sizeof regdw - 1] = 0;
+                    rm_parse_option_string(NULL, regdw);
+                    LOG("registry options from nvregdwords: %s", regdw);
+                }
+            }
             LOG("registry: RmMsg=\":\" ResmanDebugLevel=0 (verbose RM)");
             if (!PE_parse_boot_argn("-nvrmnopm", nopmArg, sizeof nopmArg)) {
                 // Keep every video memory allocation over system sleep, not only RM's own: WindowServer's GPU

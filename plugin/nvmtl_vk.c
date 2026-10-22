@@ -2070,6 +2070,27 @@ static int nvmtl_spirv_bmask(const void *p, size_t n, uint64_t out[4])
 }
 enum { NVMTL_SLOT_NONE = 0, NVMTL_SLOT_BUF, NVMTL_SLOT_TEX, NVMTL_SLOT_SAMP, NVMTL_SLOT_TEXBUF  };
 typedef struct { uint8_t kind; void *h; size_t off; size_t size; uint64_t address; } nvmtl_slot;
+// Every handle a slot holds is an NVK object pointer (VkBuffer, VkImageView, VkSampler, VkBufferView), and NVK reads
+// through each one in vkUpdateDescriptorSets. A value that is not an 8-byte-aligned user address cannot be a live
+// object, and NVK faults on it: WindowServer died a few seconds after each start on RTX 3060 machines with a buffer
+// handle of 0x01006000000748c0 and a sampler handle of 0xa3 in a descriptor write. Such a slot binds the dummy instead
+// and the log says whether the handle was bad when it was bound or the slot changed after binding.
+static int nvmtl_handle_plausible(const void *h)
+{
+    const uintptr_t v = (uintptr_t)h;
+    return v >= 0x10000 && v < (1ull << 47) && !(v & 7);
+}
+static const nvmtl_slot *nvmtl_slot_checked(const nvmtl_slot *sl, uint32_t which, uint32_t binding)
+{
+    if (!sl || sl->kind == NVMTL_SLOT_NONE || !sl->h || nvmtl_handle_plausible(sl->h)) return sl;
+    static int said;
+    if (said < 8) {
+        said++;
+        nvlog("vk: binding %u of set %u (kind %u) holds handle 0x%llx after it was bound, which cannot be a live object - "
+              "the dummy is written instead (said up to 8 times)", binding, which, sl->kind, (unsigned long long)(uintptr_t)sl->h);
+    }
+    return NULL;
+}
 #define NVMTL_EMB_KEYMAX 480
 static int nvmtl_dirty_only_on(void)
 {
@@ -2505,6 +2526,15 @@ int nvmtl_vk_bind_buffer_offset(nvk_cmdbuf *c, uint32_t set, uint32_t index, siz
 static int nvmtl_bind_slot(nvk_cmdbuf *c, uint32_t set, uint32_t binding, uint8_t kind, void *h, size_t off)
 {
     if (set > 1 || binding >= NVMTL_NBIND) return -1;
+    if (kind != NVMTL_SLOT_NONE && h && !nvmtl_handle_plausible(h)) {
+        static int said;
+        if (said < 8) {
+            said++;
+            nvlog("vk: binding %u of set %u (kind %u) was given handle 0x%llx, which cannot be a live object - the slot is "
+                  "left empty (said up to 8 times)", binding, set, kind, (unsigned long long)(uintptr_t)h);
+        }
+        kind = NVMTL_SLOT_NONE; h = NULL; off = 0;
+    }
     if (!c->table) {
         c->table = calloc(1, sizeof(nvmtl_bindtable));
         if (!c->table) { nvlog("vk: out of memory for the binding table"); return -1; }
@@ -2551,9 +2581,15 @@ typedef struct nvmtl_address_page { nvk_buffer buffer; struct nvmtl_address_page
 static pthread_mutex_t g_keep_lock = PTHREAD_MUTEX_INITIALIZER;
 static VkCommandPool g_keep_pool[NVMTL_KEEP]; static unsigned g_keep_npool;
 static nvmtl_address_page *g_keep_page[NVMTL_KEEP]; static unsigned g_keep_npage;
+// Set once a process has lost NVMTL_WIT_LOST_MAX witnesses: reuse stops and every pool is destroyed after its fence
+// signals, so a witness that keeps going missing costs speed, never memory. Each lost witness has already cost its
+// submit thread the verdict's wait (1 s), so the cap is small.
+#define NVMTL_WIT_LOST_MAX 8
+static int g_keep_retired;
 static int nvmtl_keep_on(void)
 {
     static int on = -1;
+    if (__atomic_load_n(&g_keep_retired, __ATOMIC_ACQUIRE)) return 0;
     if (on < 0) {
         const char *e = getenv("NVMTL_POOL_REUSE");
         on = (!e || e[0] == '1') && getenv("NVMTL_NO_POOL_REUSE") == NULL;
@@ -2592,9 +2628,12 @@ static int nvmtl_keep_page_push(nvmtl_address_page *p)
 }
 #define NVMTL_WIT_SLOTS 4096u
 #define NVMTL_WSEQ_BLIND 0xFFFFFFFFu
+/* The fence signalled but the witness never landed: the GPU is done with the command buffer, but its pool and address
+ * pages are not certified for reuse, so retire leaks them instead of keeping or destroying them. */
+#define NVMTL_WSEQ_LOST 0xFFFFFFFEu
 static nvk_buffer g_wit; static int g_wit_state;
 static uint32_t g_wit_seq;
-static uint64_t g_wit_ok, g_wit_waited, g_wit_leak, g_wit_blind, g_wit_ctl_run, g_wit_ctl_fired;
+static uint64_t g_wit_ok, g_wit_waited, g_wit_leak, g_wit_blind, g_wit_ctl_run, g_wit_ctl_fired, g_wit_lost;
 static int nvmtl_wit_ready(void)
 {
     int st = __atomic_load_n(&g_wit_state, __ATOMIC_ACQUIRE);
@@ -2618,10 +2657,13 @@ static uint32_t nvmtl_wit_record(nvk_cmdbuf *c)
      * witness proves finished, so a kept pool could be overwritten while the GPU still reads them. */
     if (c->in_rp || c->direct_sass || !nvmtl_wit_ready()) { __atomic_add_fetch(&g_wit_blind, 1, __ATOMIC_RELAXED); return NVMTL_WSEQ_BLIND; }
     uint32_t s;
-    do s = __atomic_add_fetch(&g_wit_seq, 1, __ATOMIC_RELAXED); while (s == 0 || s == NVMTL_WSEQ_BLIND);
+    do s = __atomic_add_fetch(&g_wit_seq, 1, __ATOMIC_RELAXED); while (s == 0 || s >= NVMTL_WSEQ_LOST);
     VkMemoryBarrier toT = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT };
     pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toT, 0, NULL, 0, NULL);
-    pvkCmdFillBuffer(c->cb, (VkBuffer)g_wit.buf, (VkDeviceSize)(s % NVMTL_WIT_SLOTS) * 4, 4, s);
+    // NVMTL_WIT_SKIP_EVERY=N leaves every Nth witness unwritten: the test that a lost witness costs one pool, not the process
+    static long skip_every = -1; if (skip_every < 0) { const char *e = getenv("NVMTL_WIT_SKIP_EVERY"); skip_every = e ? atol(e) : 0; }
+    if (!(skip_every > 0 && s % (uint32_t)skip_every == 0))
+        pvkCmdFillBuffer(c->cb, (VkBuffer)g_wit.buf, (VkDeviceSize)(s % NVMTL_WIT_SLOTS) * 4, 4, s);
     VkMemoryBarrier toH = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT };
     pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toH, 0, NULL, 0, NULL);
     return s;
@@ -2629,7 +2671,7 @@ static uint32_t nvmtl_wit_record(nvk_cmdbuf *c)
 static void nvmtl_wit_control(uint32_t s)
 {
     static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_KEEP_WITNESS_CONTROL"); on = e && e[0] == '1'; }
-    if (!on || s == 0 || s == NVMTL_WSEQ_BLIND) return;
+    if (!on || s == 0 || s >= NVMTL_WSEQ_LOST) return;
     __atomic_add_fetch(&g_wit_ctl_run, 1, __ATOMIC_RELAXED);
     if (nvmtl_wit_read(s) != s) __atomic_add_fetch(&g_wit_ctl_fired, 1, __ATOMIC_RELAXED);
     else nvlog("vk: keep witness CONTROL DID NOT FIRE - slot already held %u before its submit; the witness proves nothing", s);
@@ -2638,6 +2680,7 @@ static int nvmtl_keep_verdict(uint32_t s)
 {
     if (!nvmtl_keep_on() || s == NVMTL_WSEQ_BLIND) return 0;
     if (s == 0) return 1;
+    if (s == NVMTL_WSEQ_LOST) return -1;
     if (g_state != 1 || g_wit_state <= 0) return -1;
     if (nvmtl_wit_read(s) == s) { __atomic_add_fetch(&g_wit_ok, 1, __ATOMIC_RELAXED); return 1; }
     static long wait_ms = -1; if (wait_ms < 0) { const char *e = getenv("NVMTL_WIT_WAIT_MS"); wait_ms = e ? atol(e) : 1000; }
@@ -2874,7 +2917,7 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
     for (uint32_t i = 0; i < NVMTL_STEX_BASE; i++) {
         if (!NVMTL_E78_HAS(mask, i)) continue;
         VkDescriptorType ty = binding_type(i);
-        const nvmtl_slot *sl = t ? &t->s[which][i] : NULL;
+        const nvmtl_slot *sl = nvmtl_slot_checked(t ? &t->s[which][i] : NULL, which, i);
         const VkDescriptorBufferInfo *pb = NULL; const VkDescriptorImageInfo *pi = NULL;
         if (ty == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || ty == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
             if (i == NVMTL_ADDRESS_BINDING) pb = &addressInfo;
@@ -2914,7 +2957,7 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
     if (stex_hi > NVMTL_NSTEX) stex_hi = NVMTL_NSTEX;
     for (uint32_t j = 0; j < stex_hi; j++) {
         uint32_t i = NVMTL_STEX_BASE + j;
-        const nvmtl_slot *sl = t ? &t->s[which][i] : NULL;
+        const nvmtl_slot *sl = nvmtl_slot_checked(t ? &t->s[which][i] : NULL, which, i);
         if (tb && ((tb[2 + (j >> 6)] >> (j & 63)) & 1)) {
             tv[i] = (VkBufferView)(sl && sl->kind == NVMTL_SLOT_TEXBUF && sl->h ? sl->h : g_dummyTexView);
             w[nw++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, NVMTL_BINDING_NUMBER(i), 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NULL, NULL, &tv[i] };
@@ -3375,11 +3418,25 @@ static NSData *nvmtl_address_shader_g(const void *data, size_t len, uint32_t fla
     pthread_mutex_unlock(&lk);
     return d;
 }
+static _Atomic unsigned long long g_g1_descriptors;
 static NSData *nvmtl_address_shader_g_uncached(const void *data, size_t len, uint32_t flags, uint32_t *info) {
     NSData *d = nvmtl_address_shader_g0(data, len, flags, info);
     if (d && nvmtl_table_ubo() && nvmtl_spirv_ssbo_table(d.bytes, d.length)) {
+        // Address lowering refused this module, so its buffers are still descriptors and its table at 640 is still a
+        // storage buffer. The descriptor path serves such a module as it did before the table became a Uniform block;
+        // only the table has to move with it.
+        uint8_t *out = NULL; size_t n = 0; char err[512] = {0};
+        if (xlate_to_uniform && !xlate_to_uniform(d.bytes, d.length, &out, &n, err, sizeof err)) {
+            NSData *moved = [NSData dataWithBytes:out length:n]; xlate_free(out, n);
+            if (!nvmtl_spirv_ssbo_table(moved.bytes, moved.length)) {
+                const unsigned long long k = atomic_fetch_add(&g_g1_descriptors, 1) + 1;
+                if (k <= 16 || !(k & (k - 1))) nvlog("G1: a module address lowering refused keeps its buffer descriptors; its table at 640 moved to a Uniform block (%llu so far)", k);
+                return moved;
+            }
+        }
         const unsigned long long k = atomic_fetch_add(&g_g1_refused, 1) + 1;
-        if (k <= 16 || !(k & (k - 1))) nvlog("G1: a module still declares a STORAGE-buffer table at 640 while the table is Uniform - REFUSED (%llu so far; NVMTL_TABLE_SSBO=1 restores it)", k);
+        if (k <= 16 || !(k & (k - 1))) nvlog("G1: a module still declares a STORAGE-buffer table at 640 while the table is Uniform - REFUSED (%llu so far; %s; NVMTL_TABLE_SSBO=1 restores it)", k,
+                                             xlate_to_uniform ? (err[0] ? err : "the table did not move") : "the translator has no nvmtl_table_to_uniform");
         return nil;
     }
     return d;
@@ -5788,12 +5845,20 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
         return -2;
     }
     if (c->wseq && c->wseq != NVMTL_WSEQ_BLIND) {
+        // The fence has already signalled, so the GPU is finished with this command buffer; the witness only certifies
+        // its pool and address pages for reuse. A missing one used to switch the backend off for the whole process, and
+        // every later command buffer came back nil: a terminal printing fast froze for good with its CoreAnimation commit
+        // waiting forever (issue 322). Now that command buffer's pool and pages are leaked, never reused, and work goes on.
         if (nvmtl_keep_verdict(c->wseq) < 0) {
-            g_state = -1;
-            nvlog("vk: completion witness missing; disabling backend and retaining all in-flight resources");
-            return -2;
-        }
-        c->wseq = 0;
+            const unsigned long long n = __atomic_add_fetch(&g_wit_lost, 1, __ATOMIC_RELAXED);
+            if (n == 1 || (n & 0xFF) == 0)
+                nvlog("vk: completion witness %u missing after its fence signalled (slot holds %u; %llu so far in %s) - "
+                      "its pool and pages are leaked, the backend stays on", c->wseq, nvmtl_wit_read(c->wseq), n, getprogname());
+            c->wseq = NVMTL_WSEQ_LOST;
+            if (n == NVMTL_WIT_LOST_MAX && !__atomic_exchange_n(&g_keep_retired, 1, __ATOMIC_ACQ_REL))
+                nvlog("vk: %d completion witnesses missing in %s - pool reuse is off for this process; pools are destroyed after their fences",
+                      NVMTL_WIT_LOST_MAX, getprogname());
+        } else c->wseq = 0;
     }
     c->timing.host_after_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     if (c->timing_pool && c->timing.clock.valid) {
@@ -6169,6 +6234,41 @@ static void nvmtl_copy_from_surface(void *dst, const void *src, size_t n)
     memcpy(dst, src, n);
 }
 
+// Surface-in from the IOSurface's own pages. nvmtl_vk_image_write reads every byte of the surface with the CPU, and
+// WindowServer lets go of a client's surface after each frame, so for a large window most of that copy is page faults:
+// a full-screen 4K Safari window took ~20 ms per upload against ~7 ms for a 3200x1800 one. Importing the locked pages as
+// host memory (VK_EXT_external_memory_host) lets the copy engine read them, and the CPU never touches them (~8 ms at 4K).
+// The caller holds the surface lock across the call, and the import is released before it returns.
+// Non-zero when the pages cannot be imported (block-compressed format, base or length not a multiple of the import
+// alignment, no host import on this device); the caller then uses nvmtl_vk_image_write.
+int nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes)
+{
+    const size_t bpp = img->bpp ? img->bpp : 4;
+    // bufferRowLength counts texels, so the row pitch has to be a whole number of them
+    if (img->bw > 1 || img->bh > 1 || !row_bytes || row_bytes % bpp || row_bytes < (size_t)img->w * bpp) return -1;
+    if (g_host_align) bytes = (bytes + g_host_align - 1) & ~(g_host_align - 1);
+    if ((size_t)img->h * row_bytes > bytes) return -1;
+    nvk_buffer hb;
+    if (nvmtl_vk_buffer_import_host(base, bytes, &hb)) return -1;
+    nvk_cmdbuf c;
+    if (nvmtl_vk_cmd_begin(q, &c)) { nvmtl_vk_buffer_destroy(&hb); return -1; }
+    VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };
+    VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
+    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst);
+    VkBufferImageCopy bic = { 0, (uint32_t)(row_bytes / bpp), 0, { nvmtl_copy_aspect(img), 0, 0, 1 }, { 0, 0, 0 }, { img->w, img->h, 1 } };
+    pvkCmdCopyBufferToImage(c.cb, (VkBuffer)hb.buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    VkImageMemoryBarrier toRead = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
+    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &toRead);
+    img->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    const int rc = nvmtl_vk_submit_wait_at(&c, "surface upload (imported pages)");
+    nvmtl_vk_buffer_destroy(&hb);
+    return rc;
+}
 int nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes)
 {
     const size_t bpp = img->bpp ? img->bpp : 4;
@@ -7782,6 +7882,35 @@ int nvmtl_vk_cmd_copy_image_sub3(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uin
            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     pvkCmdCopyImage(c->cb, (VkImage)src->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    (VkImage)dst->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, count, regions);
+    img_to(c, dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    nvmtl_vk_cmd_barrier(c);
+    return 0;
+}
+int nvmtl_vk_srgb_format(uint32_t fmt)
+{
+    switch (fmt) {
+    case VK_FORMAT_R8_SRGB: case VK_FORMAT_R8G8_SRGB: case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_B8G8R8A8_SRGB:
+    case VK_FORMAT_A8B8G8R8_SRGB_PACK32: return 1;
+    default: return 0;
+    }
+}
+int nvmtl_vk_cmd_blit_image_2d(nvk_cmdbuf *c, nvk_image *src, nvk_image *dst, uint32_t w, uint32_t h)
+{
+    if (!c || !src || !dst || !src->img || !dst->img || !w || !h || w > src->w || h > src->h || w > dst->w || h > dst->h
+        || (src->samples ? src->samples : 1) > 1 || (dst->samples ? dst->samples : 1) > 1) {
+        nvlog("blit_image_2d: refused (%ux%u, VkFormat %u -> %u)", w, h, src ? src->fmt : 0, dst ? dst->fmt : 0);
+        return -1;
+    }
+    const VkImageBlit r = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { { 0, 0, 0 }, { (int32_t)w, (int32_t)h, 1 } },
+                            { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { { 0, 0, 0 }, { (int32_t)w, (int32_t)h, 1 } } };
+    nvmtl_vk_cmd_barrier(c);
+    img_to(c, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    img_to(c, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    pvkCmdBlitImage(c->cb, (VkImage)src->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    (VkImage)dst->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r, VK_FILTER_NEAREST);
     img_to(c, dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     nvmtl_vk_cmd_barrier(c);
