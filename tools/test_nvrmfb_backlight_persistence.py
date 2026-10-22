@@ -23,6 +23,7 @@ fixture = r'''#include <cassert>
 #include <vector>
 using SInt32 = int32_t;
 using UInt32 = uint32_t;
+using UInt64 = uint64_t;
 using NvU32 = uint32_t;
 using IOReturn = int;
 using thread_call_param_t = void *;
@@ -67,12 +68,21 @@ struct IORegistryEntry : OSObject {
     }
 };
 IORegistryEntry *IORegistryEntry::options = new IORegistryEntry;
-struct Call { unsigned enters = 0; void (*function)(void *, void *) = nullptr; void *parameter = nullptr; };
+static uint64_t gNow;
+static constexpr UInt32 kSecondScale = 1, kNVRMBacklightSaveDelaySeconds = 2;
+static constexpr int THREAD_CALL_PRIORITY_LOW = 0, THREAD_CALL_OPTIONS_ONCE = 1;
+static uint64_t mach_absolute_time() { return gNow; }
+static void clock_interval_to_deadline(UInt32 seconds, UInt32, uint64_t *deadline) { *deadline = gNow + seconds; }
+struct Call { unsigned enters = 0; void (*function)(void *, void *) = nullptr; void *parameter = nullptr; uint64_t deadline = 0; };
 using thread_call_t = Call *;
 static thread_call_t nvrmfbCall(void (*function)(void *, void *), void *parameter) {
     return new Call{0, function, parameter};
 }
 static void thread_call_enter(thread_call_t call) { ++call->enters; }
+static thread_call_t thread_call_allocate_with_options(void (*function)(void *, void *), void *parameter, int, int) {
+    return nvrmfbCall(function, parameter);
+}
+static void thread_call_enter_delayed(thread_call_t call, uint64_t deadline) { ++call->enters; call->deadline = deadline; }
 static SInt32 OSAddAtomic(SInt32 delta, volatile SInt32 *value) {
     return __atomic_add_fetch(value, delta, __ATOMIC_SEQ_CST) - delta;
 }
@@ -130,10 +140,12 @@ struct NVRMBacklightHandler : IODisplayParameterHandler {
     IOService *fRM = nullptr;
     const OSSymbol *fFn = nullptr;
     thread_call_t fApply = nullptr;
+    thread_call_t fPersist = nullptr;
     volatile SInt32 fPending = -1;
     SInt32 fLevel = 100;
     volatile SInt32 fUserLevel = 100;
     volatile SInt32 fPersistPending = -1;
+    volatile UInt64 fPersistDeadline = 0;
     SInt32 fRestoreLevel = -1;
     OSDictionary *fParameters = nullptr;
     static const OSSymbol *sBrightnessProbe, *sLinearBrightnessProbe;
@@ -143,6 +155,7 @@ struct NVRMBacklightHandler : IODisplayParameterHandler {
     bool setDisplay(IODisplay *) override;
     bool doIntegerSet(OSDictionary *, const OSSymbol *, UInt32);
     static void applyFire(thread_call_param_t, thread_call_param_t);
+    static void persistFire(thread_call_param_t, thread_call_param_t);
 };
 const OSSymbol *NVRMBacklightHandler::sBrightnessProbe = nullptr;
 const OSSymbol *NVRMBacklightHandler::sLinearBrightnessProbe = nullptr;
@@ -154,6 +167,12 @@ static UInt32 savedValue() {
     UInt32 value;
     assert(nvrm_backlight_read(IORegistryEntry::options, &value));
     return value;
+}
+static void fireSave(NVRMBacklightHandler *handler) {
+    auto call = handler->fPersist;
+    assert(call->enters > 0);
+    gNow = call->deadline;
+    call->function(call->parameter, nullptr);
 }
 int main() {
     IOService rm;
@@ -188,6 +207,10 @@ int main() {
     constexpr UInt32 target = 20777;
     assert(restored->doIntegerSet(&user, gIODisplayLinearBrightnessKey, target));
     NVRMBacklightHandler::applyFire(restored, nullptr);
+    assert(rm.lastPercent == 32 && savedValue() == nvrm_backlight_from_percent(37) && gWrites == 0);
+    NVRMBacklightHandler::persistFire(restored, nullptr);
+    assert(gWrites == 0);
+    fireSave(restored);
     assert(rm.lastPercent == 32 && savedValue() == target && gWrites == 1);
     const auto &bytes = IORegistryEntry::options->values[NVRM_BACKLIGHT_VAR];
     assert(bytes == std::vector<unsigned char>({1, 0x29, 0x51}));
@@ -216,20 +239,21 @@ int main() {
     rm.result = -1;
     assert(restored->doIntegerSet(&user, gIODisplayBrightnessKey, 30001));
     NVRMBacklightHandler::applyFire(restored, nullptr);
-    assert(savedValue() == target && restored->fPersistPending == 30001 && gWrites == 1);
+    assert(savedValue() == target && restored->fPersistPending == -1 && gWrites == 1);
     rm.result = kIOReturnSuccess;
     gWritesFail = true;
     assert(restored->doIntegerSet(&user, gIODisplayBrightnessKey, 30001));
     NVRMBacklightHandler::applyFire(restored, nullptr);
+    fireSave(restored);
     assert(savedValue() == target && restored->fPersistPending == 30001 && gWrites == 1);
     gWritesFail = false;
-    assert(restored->doIntegerSet(&user, gIODisplayBrightnessKey, 30001));
-    NVRMBacklightHandler::applyFire(restored, nullptr);
+    fireSave(restored);
     assert(savedValue() == 30001 && restored->fPersistPending == -1 && gWrites == 2);
 
     for (UInt32 level : {0U, 1U, 32768U, 65534U, 65535U}) {
         assert(restored->doIntegerSet(&user, gIODisplayBrightnessKey, level));
         NVRMBacklightHandler::applyFire(restored, nullptr);
+        fireSave(restored);
         assert(savedValue() == level && restored->fLevel == (SInt32)level);
         auto next = NVRMBacklightHandler::withRM(&rm, 80);
         assert(next->fUserLevel == (SInt32)level && next->fRestoreLevel == (SInt32)level);
