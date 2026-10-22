@@ -20,6 +20,7 @@ fixture = r'''
 using SInt32 = int32_t;
 using UInt32 = uint32_t;
 enum { kNVRMBacklightMax = 0xFFFF };
+static constexpr SInt32 kAppleBacklightDefaultMax = 255;
 struct OSSymbol {};
 struct Call { unsigned entered = 0; };
 using thread_call_t = Call *;
@@ -64,6 +65,8 @@ int main() {
     assert(h.fUserLevel == 35 && h.fPersistPending == 35 && h.fPending == 35 && h.call.entered == 1);
     assert(h.doIntegerSet(&power, gIODisplayBrightnessKey, 100));
     assert(h.fUserLevel == 35 && h.fPersistPending == 35 && h.fPending == 35 && h.call.entered == 2);
+    assert(h.doIntegerSet(&power, gIODisplayBrightnessKey, kAppleBacklightDefaultMax));
+    assert(h.fPending == 35 && h.fUserLevel == 35);
     assert(h.doIntegerSet(&power, gIODisplayBrightnessKey, 12));
     assert(h.fUserLevel == 35 && h.fPersistPending == 35 && h.fPending == 12 && h.call.entered == 3);
     assert(h.doIntegerSet(&user, gIODisplayBrightnessKey, 64));
