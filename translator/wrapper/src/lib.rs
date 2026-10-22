@@ -545,6 +545,33 @@ mod align_guard;
 mod table_ubo;
 mod g2_inline;
 mod linearize;
+mod uniform_cbuf;
+
+// Pipeline-local GL optimization. The caller identifies the Metal slot from AIR;
+// failure leaves its already compiled physical-address pipeline available.
+#[no_mangle]
+pub unsafe extern "C" fn nvmtl_promote_gl_uniform(
+    data: *const u8, len: usize, binding: u32, limit: u32,
+    out: *mut *mut u8, out_len: *mut usize, extent: *mut u32,
+    err: *mut c_char, err_len: usize,
+) -> i32 {
+    if data.is_null() || out.is_null() || out_len.is_null() || extent.is_null() { return -1; }
+    *out = std::ptr::null_mut(); *out_len = 0; *extent = 0;
+    match uniform_cbuf::promote(std::slice::from_raw_parts(data, len), binding, limit) {
+        Ok((v, size)) => {
+            let mut b = v.into_boxed_slice();
+            *out = b.as_mut_ptr(); *out_len = b.len(); *extent = size;
+            std::mem::forget(b); 0
+        }
+        Err(e) => {
+            if !err.is_null() && err_len > 0 {
+                let n = e.len().min(err_len - 1);
+                std::ptr::copy_nonoverlapping(e.as_ptr(), err.cast(), n); *err.add(n) = 0;
+            }
+            -1
+        }
+    }
+}
 
 #[cfg(test)]
 mod gl_translation_tests {
