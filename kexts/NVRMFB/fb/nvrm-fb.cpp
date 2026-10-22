@@ -138,7 +138,8 @@ static const unsigned kTraceMax = 900;
 // "linear-brightness" through it; both use the normalized NVKMS request range. The level goes to NVRM
 // ("NVRMBacklight": nvKmsSetBacklight on the backlight NVKMS registered), from a thread call, because
 // IODisplay calls doIntegerSet() with the framebuffer lock held.
-static const SInt32 kNVRMMinBacklight = 5;   // never 0: some panels switch the backlight off completely
+// AppleBacklightDisplay's public source uses 0..255 when no power-state range is published.
+static const SInt32 kAppleBacklightDefaultMax = 255;
 #define BLLOG(fmt, ...) do { IOLog("NVRM-fb: " fmt "\n", ##__VA_ARGS__); kprintf("NVRM-fb: " fmt "\n", ##__VA_ARGS__); } while (0)
 
 class NVRMBacklightHandler : public IODisplayParameterHandler {
@@ -250,7 +251,7 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
     }
     else {
         SInt32 target = OSAddAtomic(0, &fUserLevel);
-        if (level > target) level = target;
+        if (value == kAppleBacklightDefaultMax || level > target) level = target;
     }
     fPending = level;
     thread_call_enter(fApply);
@@ -264,7 +265,6 @@ void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
     do { v = me->fPending; } while (!OSCompareAndSwap((UInt32)v, (UInt32)-1, (volatile UInt32 *)&me->fPending));
     if (v < 0) return;
     NvU32 percent = nvrm_backlight_to_percent((UInt32)v);
-    if (percent < (NvU32)kNVRMMinBacklight) percent = (NvU32)kNVRMMinBacklight;
     IOReturn r = me->fRM->callPlatformFunction(me->fFn, false, &percent, (void *)1, NULL, NULL);
     if (r == kIOReturnSuccess) {
         me->fLevel = v;

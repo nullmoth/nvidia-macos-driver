@@ -118,7 +118,7 @@ static const OSSymbol *gIODisplayParametersKey = &parametersKey;
 static const OSSymbol *gIODisplayBrightnessKey = &brightnessKey;
 static const OSSymbol *gIODisplayLinearBrightnessKey = &linearKey;
 static const OSSymbol *gIODisplayValueKey = &valueKey;
-static constexpr SInt32 kNVRMMinBacklight = 5;
+static constexpr SInt32 kAppleBacklightDefaultMax = 255;
 static unsigned char setSaved(unsigned char value) {
     auto data = OSData::withBytes(&value, 1);
     IORegistryEntry::options->setProperty("nullmoth-backlight", data); data->release(); return value;
@@ -232,7 +232,7 @@ int main() {
         assert(savedValue() == level && restored->fLevel == (SInt32)level);
         auto next = NVRMBacklightHandler::withRM(&rm, 80);
         assert(next->fUserLevel == (SInt32)level && next->fRestoreLevel == (SInt32)level);
-        if (level <= 1) assert(rm.lastPercent == 5);
+        if (level <= 1) assert(rm.lastPercent == 0);
         if (level >= 65534) assert(rm.lastPercent == 100);
     }
     unsigned writes = gWrites;
