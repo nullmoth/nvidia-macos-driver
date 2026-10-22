@@ -77,7 +77,15 @@ fn formatless_options(ll: &str, st: Stage, caps: u32) -> Option<metal2vulkan::pa
     Some(o)
 }
 fn translate_one(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
-    match translate_one_as_written(ll, st) {
+    translate_with_pointer_retry(ll, |ll| translate_one_as_written(ll, st))
+}
+
+// Keep the same translation options on both attempts. In particular, the
+// sampler-specialized path must retain pixel coordinates and A8 outputs.
+fn translate_with_pointer_retry(
+    ll: &str, translate: impl Fn(&str) -> Result<Vec<u8>, String>,
+) -> Result<Vec<u8>, String> {
+    match translate(ll) {
         Ok(v) => Ok(v),
         // A module whose pointers (a sampler's address in an argument buffer, a threadgroup array's address) reach their use
         // only through a local object's fields gets one retry with its helpers inlined and those fields forwarded, and
@@ -88,7 +96,8 @@ fn translate_one(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
         // there ("exact sampler state was not recovered"), fails the same way with no helper to inline: it gets the retry
         // on its text as written, its argument-buffer samplers read from the sampler heap.
         Err(e) if e.contains("sampler operand is a pointer") || e.contains("pointer placeholder")
-            || e.contains("missing pointer storage") || e.contains("sampler operand is not a sampler") =>
+            || e.contains("missing pointer storage") || e.contains("sampler operand is not a sampler")
+            || e.contains("runtime sampler specialization cannot recover an exact state after pointer selection") =>
         {
             let inlined = metal2vulkan::inline_and_forward_object_fields(ll);
             if inlined.is_none() && !e.contains("sampler operand") { return Err(e) }
@@ -99,7 +108,7 @@ fn translate_one(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
             }
             let how = if inlined.is_some() { "with helpers inlined and object fields forwarded" }
                       else { "with argument-buffer samplers from the sampler heap" };
-            metal2vulkan::with_argument_buffer_samplers(|| translate_one_as_written(retry, st))
+            metal2vulkan::with_argument_buffer_samplers(|| translate(retry))
                 .map_err(|e2| format!("{e}; retry {how}: {e2}"))
         }
         Err(e) => Err(e),
@@ -720,7 +729,10 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
             }
         }
         if used==0 && a8==0{return translate_one(ll,st)}
-        metal2vulkan::translate_native_no_retry_constructed_with_options(ll,st,apply_tg(opts))
+        let opts=apply_tg(opts);
+        translate_with_pointer_retry(ll, |ll| {
+            metal2vulkan::translate_native_no_retry_constructed_with_options(ll,st,opts)
+        })
     })();
     match result {
         Ok(bytes)=>{let mut b=bytes.into_boxed_slice();*out=b.as_mut_ptr();*out_len=b.len();std::mem::forget(b);0}

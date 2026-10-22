@@ -254,10 +254,16 @@ pub fn promote(bytes: &[u8], binding: u32, limit: u32) -> Result<(Vec<u8>, u32),
         if !grew { break; }
     }
     let mut extent = 0u32;
-    for i in m.functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instructions) {
+    // Check every use before changing a pointer's storage class. A global
+    // initializer can capture the root too; rewriting only function accesses
+    // would leave that alias with the old StorageBuffer pointer type.
+    for i in m.all_inst_iter() {
         for (at, operand) in i.operands.iter().enumerate() {
             let Some(&(kind, off)) = id(operand).and_then(|v| derived.get(&v)) else { continue };
             match i.class.opcode {
+                Op::Name | Op::Decorate | Op::DecorateId if at == 0 => {}
+                Op::EntryPoint if at >= 3 => {}
+                Op::GroupDecorate if at >= 1 => {}
                 Op::AccessChain | Op::InBoundsAccessChain | Op::CopyObject
                     if at == 0 && i.result_id.is_some_and(|n| derived.contains_key(&n)) => {}
                 Op::Load if at == 0 && kind == 2 && i.result_type == Some(elem) => {
@@ -452,6 +458,28 @@ mod tests {
         m.types_global_values.push(inst(Op::Undef, Some(2), Some(22), vec![]));
         m.functions[0].blocks[0].instructions[0].operands[2] = Operand::IdRef(22);
         assert!(promote(&bytes(&m), 7, 65536).unwrap_err().contains("dynamically indexed"));
+    }
+
+    #[test]
+    fn global_pointer_initializers_keep_the_original_path() {
+        let mut m = module(false);
+        m.capabilities.push(inst(Op::Capability, None, None,
+            vec![Operand::Capability(Capability::VariablePointers)]));
+        m.types_global_values.push(inst(Op::TypePointer, None, Some(22),
+            vec![Operand::StorageClass(StorageClass::Private), Operand::IdRef(6)]));
+        m.types_global_values.push(inst(Op::Variable, Some(22), Some(23),
+            vec![Operand::StorageClass(StorageClass::Private), Operand::IdRef(15)]));
+        assert!(promote(&bytes(&m), 7, 65536).unwrap_err().contains("pointer escapes through Variable"));
+    }
+
+    #[test]
+    fn names_and_entry_point_interfaces_do_not_escape_the_pointer() {
+        let mut m = module(false);
+        m.header.as_mut().unwrap().version = 0x00010500;
+        m.debug_names.push(inst(Op::Name, None, None,
+            vec![Operand::IdRef(15), Operand::LiteralString("gl_uniforms".into())]));
+        m.entry_points[0].operands.push(Operand::IdRef(15));
+        assert_eq!(promote(&bytes(&m), 7, 65536).unwrap().1, 16);
     }
 
     #[test]
