@@ -1,5 +1,8 @@
 # Selecting one NVIDIA GPU on a multi-card machine
 
+An opt-in automatic selector is described in [AUTO-PRIMARY-GPU.md](AUTO-PRIMARY-GPU.md),
+including its four-card boot result and the limits of its installer test coverage.
+
 This is a manual workaround verified with driver **1.14.7**, macOS **15.8.1 (24H32)**,
 a Supermicro H12SSL-i, one EPYC 7542, and four RTX 4090s. The monitor was connected
 to `C2:00.0`. It does not add support for accelerating all four cards.

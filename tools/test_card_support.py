@@ -26,11 +26,14 @@ constexpr int kMillisecondScale=1;
 uint64_t now=1000;
 void clock_interval_to_deadline(uint32_t n,int,uint64_t *p){*p=now+n;}
 void clock_interval_to_absolutetime_interval(uint32_t n,int,uint64_t *p){*p=n;}
+// the cap thread call the production snippet records so it can re-arm itself (#317)
+static void *cap = (void *)1; static void *fHoldCapCall = nullptr;
 int main(){for (uint32_t fAutoGoSettleMs : {0u,500u,100000u,120000u,4294967295u}){
 PRODUCTION
 assert(dl-now==(uint64_t)fAutoGoSettleMs+40000);
 assert(now+(uint64_t)fAutoGoSettleMs+1000<dl);
 assert(now+(uint64_t)fAutoGoSettleMs+40001>dl);
+assert(fHoldCapCall==cap && "the cap keeps its thread call to re-arm while the bring-up runs");
 printf("PASS settle %u ms: deadline %llu ms\n",fAutoGoSettleMs,(unsigned long long)(dl-now));
 }
 assert(100000u>40000u); puts("PASS original 100 s settle exceeds original 40 s cap");}

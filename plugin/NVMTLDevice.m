@@ -209,6 +209,15 @@ static bool nvmtl_gpu_profile_string(CFStringRef key, char *out, size_t n)
     IOObjectRelease(it);
     return ok;
 }
+// True when the generation the driver published is this one, whatever family follows it. The TU11x cards publish
+// "Turing GTX 16" where the TU10x ones publish plain "Turing", so an exact compare left every GTX 16 card without a
+// hardware encoder. Both GTX 16 chips encode on the Turing libraries: measured on a GTX 1650 (TU117), H.264 and HEVC
+// 5 of 5 frames with no errors, although its profile lists no encoder class (the library allocates the class itself).
+static bool nvmtl_gen_is(const char *gen, const char *name)
+{
+    size_t n = strlen(name);
+    return !strncmp(gen, name, n) && (gen[n] == '\0' || gen[n] == ' ');
+}
 static bool nvmtl_video_is_blackwell(void)
 {
     if (g_video_blackwell >= 0) return g_video_blackwell == 1;
@@ -232,9 +241,9 @@ static const char *nvmtl_nvenc_hevc_library_for_this_gpu(void)
     char gen[32];
     if (!nvmtl_gpu_profile_string(CFSTR("generation"), gen, sizeof gen))
         return nvmtl_video_is_blackwell() ? "libnvenc_hevc.dylib" : NULL;
-    if (!strcmp(gen, "Blackwell")) return "libnvenc_hevc.dylib";
-    if (!strcmp(gen, "Ampere")) return "libnvenc_hevc_ga10x.dylib";
-    if (!strcmp(gen, "Turing")) return "libnvenc_hevc_tu10x.dylib";
+    if (nvmtl_gen_is(gen, "Blackwell")) return "libnvenc_hevc.dylib";
+    if (nvmtl_gen_is(gen, "Ampere")) return "libnvenc_hevc_ga10x.dylib";
+    if (nvmtl_gen_is(gen, "Turing")) return "libnvenc_hevc_tu10x.dylib";
     return NULL;
 }
 static const char *nvmtl_nvenc_library_for_this_gpu(void)
@@ -244,9 +253,9 @@ static const char *nvmtl_nvenc_library_for_this_gpu(void)
         // No profile: fall back to the name test, which only recognises Blackwell.
         return nvmtl_video_is_blackwell() ? "libnvenc_h264.dylib" : NULL;
     }
-    if (!strcmp(gen, "Blackwell")) return "libnvenc_h264.dylib";
-    if (!strcmp(gen, "Ampere")) return "libnvenc_h264_ga10x.dylib";
-    if (!strcmp(gen, "Turing")) return "libnvenc_h264_tu10x.dylib";
+    if (nvmtl_gen_is(gen, "Blackwell")) return "libnvenc_h264.dylib";
+    if (nvmtl_gen_is(gen, "Ampere")) return "libnvenc_h264_ga10x.dylib";
+    if (nvmtl_gen_is(gen, "Turing")) return "libnvenc_h264_tu10x.dylib";
     return NULL;
 }
 static void nvmtl_nvdec_register(void)
@@ -723,6 +732,15 @@ static int nvmtl_pixfmt(MTLPixelFormat f, uint32_t *vk, uint32_t *bpp, int *a8)
     case MTLPixelFormatRGB10A2Uint:      *vk = 68 ; *bpp = 4; return 0;
     case MTLPixelFormatBGR10A2Unorm:     *vk = 58 ; *bpp = 4; return 0;
     case MTLPixelFormatRG11B10Float:     *vk = 122 ; *bpp = 4; return 0;
+    // Apple's extended-range formats have no Vulkan twin. CoreAnimation renders video and wide-colour layers into them
+    // (PBGRAXb is BGRA10_XR); without them Apple TV aborted on every video (#309). Each maps to a format of the same size
+    // that holds the values this driver's readers expect: the 64-bit ones to half floats (the whole -0.75..1.25 range,
+    // blendable), the 32-bit ones to 10:10:10:2 unorm (10-bit precision, values above 1.0 clamp). The bytes are not
+    // Apple's XR bit layout, which only a CPU reading raw texels would see.
+    case MTLPixelFormatBGRA10_XR:        *vk = 97 ; *bpp = 8; return 0;
+    case MTLPixelFormatBGRA10_XR_sRGB:   *vk = 97 ; *bpp = 8; return 0;
+    case MTLPixelFormatBGR10_XR:         *vk = 58 ; *bpp = 4; return 0;
+    case MTLPixelFormatBGR10_XR_sRGB:    *vk = 58 ; *bpp = 4; return 0;
     case MTLPixelFormatRGB9E5Float:      *vk = 123 ;  *bpp = 4; return 0;
     case MTLPixelFormatRG32Uint:         *vk = 101 ;           *bpp = 8;  return 0;
     case MTLPixelFormatRG32Sint:         *vk = 102 ;           *bpp = 8;  return 0;

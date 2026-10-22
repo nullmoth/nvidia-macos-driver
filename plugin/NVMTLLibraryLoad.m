@@ -45,6 +45,8 @@ typedef int (*nvmtl_lower_fn)(const uint8_t *, size_t, uint8_t **, size_t *, cha
 static nvmtl_lower_fn xlate_lower;
 typedef int (*nvmtl_lower_ex_fn)(const uint8_t *, size_t, uint32_t, uint8_t **, size_t *, uint32_t *, char *, size_t);
 static nvmtl_lower_ex_fn xlate_lower_ex;
+typedef int (*nvmtl_to_uniform_fn)(const uint8_t *, size_t, uint8_t **, size_t *, char *, size_t);
+static nvmtl_to_uniform_fn xlate_to_uniform;   /* the table of an unlowered module moved to a Uniform block */
 static nvmtl_translate_fn xlate;
 static char gXlateTag[80] = "untagged";
 static void nvmtl_translator_cache_tag(const char *path, char *tag, size_t capacity) {
@@ -113,6 +115,8 @@ static int nvmtl_xlate_ready(void) {
                 xlate ? "" : " - it has NO nvmtl_translate"); }
         xlate_lower = (nvmtl_lower_fn)dlsym(h, "nvmtl_lower_buffer_addresses");
         xlate_lower_ex = (nvmtl_lower_ex_fn)dlsym(h, "nvmtl_lower_buffer_addresses_ex");
+        xlate_to_uniform = (nvmtl_to_uniform_fn)dlsym(h, "nvmtl_table_to_uniform");
+        if (!xlate_to_uniform) nvlog("translate: no nvmtl_table_to_uniform in this translator - a module that address lowering refuses is refused outright while the table is Uniform");
         xlate_free = (nvmtl_free_fn)dlsym(h, "nvmtl_translate_free");
         xlate_sampler = (nvmtl_sampler_fn)dlsym(h, "nvmtl_translate_samplers");
         xlate_tglen = (nvmtl_tglen_fn)dlsym(h, "nvmtl_translate_set_threadgroup_lengths");
@@ -1191,6 +1195,24 @@ static NSString *nvmtl_link_dump_dir(void) {
 static __thread int g_fc_expect_link;
 void nvmtl_fc_expect_link(int on) { g_fc_expect_link = on; }
 BOOL nvmtl_needs_visible_link(NSString *air, NSString *why);
+// Writes the module handed to the translator (AIR text after linking, stage, constant values, error) to <dir>/fc-<pid>-<n>,
+// so a translation can be replayed offline with the same input. Nothing is written when dir is unset.
+static void nvmtl_fc_dump(const char *dd, NSString *ll, NSString *stage, const uint32_t *idx, const uint32_t *sizes,
+                          const uint8_t *const *payloads, size_t n, const char *e)
+{
+    if (!dd || !*dd) return;
+    NSString *dir = @(dd); static _Atomic unsigned seq;
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *base = [dir stringByAppendingFormat:@"/fc-%d-%u", getpid(), atomic_fetch_add(&seq, 1)];
+    [ll writeToFile:[base stringByAppendingString:@".ll"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSMutableString *meta = [NSMutableString stringWithFormat:@"stage %@\nerror %s\n", stage, e ? e : ""];
+    for (size_t i = 0; i < n; i++) {
+        [meta appendFormat:@"fc %u size %u bytes", idx[i], sizes[i]];
+        for (uint32_t b = 0; b < sizes[i] && payloads[i]; b++) [meta appendFormat:@" %02x", payloads[i][b]];
+        [meta appendString:@"\n"];
+    }
+    [meta writeToFile:[base stringByAppendingString:@".txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
 NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *idx, const uint32_t *sizes,
                                 const uint8_t *const *payloads, size_t n, NSString **err)
 {
@@ -1198,26 +1220,15 @@ NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *i
     if (!xlate_fc) { if (err) *err = @"this translator has no nvmtl_translate_fc — rebuild nvmtl_translate"; return nil; }
     if (!ll || !stage.length) { if (err) *err = @"no AIR kept for this function"; return nil; }
     uint8_t *out = NULL; size_t out_len = 0; char e[512] = {0};
+    // NVMTL_FC_DUMP_ALL=<dir>: keep every module before it is translated, including one whose translation never returns.
+    nvmtl_fc_dump(getenv("NVMTL_FC_DUMP_ALL"), ll, stage, idx, sizes, payloads, n, NULL);
     if (xlate_fc(ll.UTF8String, stage.UTF8String, idx, sizes, payloads, n, &out, &out_len, e, sizeof e) != 0) {
         if (g_fc_expect_link && nvmtl_needs_visible_link(ll, @(e)))
             nvlog("function constants: this function calls linked visible functions; it is specialized when its pipeline is created");
         else nvlog("function constants: re-translate FAILED: %s", e);
         // NVMTL_FC_FAIL_DUMP=<dir>: keep the refused module (AIR text, stage, constant values, error) so the refusal can be
         // replayed offline against the translator; nothing is written unless the variable is set.
-        const char *dd = getenv("NVMTL_FC_FAIL_DUMP");
-        if (dd && *dd) {
-            NSString *dir = @(dd); static _Atomic unsigned seq;
-            [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-            NSString *base = [dir stringByAppendingFormat:@"/fc-%d-%u", getpid(), atomic_fetch_add(&seq, 1)];
-            [ll writeToFile:[base stringByAppendingString:@".ll"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
-            NSMutableString *meta = [NSMutableString stringWithFormat:@"stage %@\nerror %s\n", stage, e];
-            for (size_t i = 0; i < n; i++) {
-                [meta appendFormat:@"fc %u size %u bytes", idx[i], sizes[i]];
-                for (uint32_t b = 0; b < sizes[i] && payloads[i]; b++) [meta appendFormat:@" %02x", payloads[i][b]];
-                [meta appendString:@"\n"];
-            }
-            [meta writeToFile:[base stringByAppendingString:@".txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        }
+        nvmtl_fc_dump(getenv("NVMTL_FC_FAIL_DUMP"), ll, stage, idx, sizes, payloads, n, e);
         if (err) *err = [NSString stringWithUTF8String:e[0] ? e : "specialization failed"];
         return nil;
     }
@@ -2006,7 +2017,12 @@ BOOL nvmtl_needs_visible_link(NSString *air, NSString *why)
         if (xlate_vrefs(air.UTF8String, &out, &len, e, sizeof e) == 0) {
             id refs = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:out length:len] options:0 error:NULL];
             xlate_free(out, len);
-            if ([refs isKindOfClass:[NSArray class]]) return [(NSArray *)refs count] > 0;
+            // the query lists direct references only; a function that calls through a visible or intersection
+            // function table has none, and nvmtl_link_stage links it from the table candidates
+            if ([refs isKindOfClass:[NSArray class]])
+                return [(NSArray *)refs count] > 0
+                    || [air rangeOfString:@"!\"air.visible_function_table\""].location != NSNotFound
+                    || [air rangeOfString:@"!\"air.intersection_function_table\""].location != NSNotFound;
         }
     }
     return why && ([why rangeOfString:@"visible function reference"].location != NSNotFound

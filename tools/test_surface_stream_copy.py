@@ -7,7 +7,9 @@ import tempfile
 root = pathlib.Path(__file__).resolve().parents[1]
 source = (root / 'plugin/nvmtl_vk.c').read_text()
 start = source.index('#if defined(__x86_64__)\n#include <immintrin.h>')
-helpers = source[start:source.index('int nvmtl_vk_image_write(', start)]
+# the copy helpers end where the image writers begin (the imported-pages writer comes first)
+end = min(i for i in (source.find('int nvmtl_vk_image_write_host(', start), source.index('int nvmtl_vk_image_write(', start)) if i >= 0)
+helpers = source[start:end]
 fixture = r'''
 #include <assert.h>
 #include <stdint.h>
