@@ -1564,6 +1564,9 @@ bool NVRMNVDAFramebuffer::waitFlipDone(uint64_t limitUs)
 // path takes, which is what an on-machine flicker check reads.
 static int gFlipLatch = 1;
 static int gFlipLatchWaits = 0, gFlipLatchTimeouts = 0, gFlipLatchMaxUs = 0, gFlipLatchLate = 0;
+// gFlipLatch == 2 (opt in): priorFlipState() at the head of the next submit verifies the flip instead of this submit
+// waiting for it. The wait costs half a refresh period on the present path (2.08 ms of a 4.17 ms 240 Hz frame, #300).
+static int gFlipLatchDeferred = 0;
 // A flip still pending this long after its submit is a display that is not flipping (the head is faulted, as before).
 // Inside it, a pending flip is only late: the frame path skips one present and the mode-set path waits on.
 static const uint64_t kFlipStuckUs = 100000;
@@ -1715,6 +1718,7 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
     fFlipSubmitAbs = submit0;
     // Initial acceptance permits console handoff, never surface retirement. The owned boot surface remains pinned.
     if (bootstrap || !gFlipLatch) return NV_TRUE;
+    if (gFlipLatch == 2) { OSIncrementAtomic((volatile SInt32 *)&gFlipLatchDeferred); return NV_TRUE; }
     OSIncrementAtomic((volatile SInt32 *)&gFlipLatchWaits);
     const uint64_t latch0 = mach_absolute_time();
     if (waitFlipDone(flipWaitUs())) {
@@ -3213,7 +3217,8 @@ SYSCTL_PROC(_debug, OID_AUTO, nvrmfb_vramtest, CTLTYPE_INT | CTLFLAG_RW | CTLFLA
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_vramtest_mode, CTLFLAG_RW | CTLFLAG_LOCKED, &gVramTestMode, 0, "1 = release without the kernel unmap");
 static int gFlipInterval = 1;
 // gFlipLatch and the counters are defined above submitConfig, where the completion wait drives them.
-SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch, CTLFLAG_RW | CTLFLAG_LOCKED, &gFlipLatch, 0, "1 = a committed flip waits for its completion before a surface retires (0 = debug bypass)");
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch, CTLFLAG_RW | CTLFLAG_LOCKED, &gFlipLatch, 0, "1 = a committed flip waits for its completion before a surface retires (0 = debug bypass, 2 = deferred: the next submit verifies it)");
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_deferred, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchDeferred, 0, "flips verified by the next submit instead of waited for");
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_waits, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchWaits, 0, "flips that waited for completion");
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_guard_cleared, CTLFLAG_RD | CTLFLAG_LOCKED, &gGuardCleared, 0, "1 once the boot guard was cleared this boot");
 // Registered here and not with the other counters: those are registered from the first video-memory grant, which a
@@ -3249,7 +3254,7 @@ static void nvrmfbInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_lean);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_waits);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_timeouts); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_max_us);
-    sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_late);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_late); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_deferred);
 }
 
 bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
