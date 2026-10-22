@@ -141,6 +141,7 @@ static const unsigned kTraceMax = 900;
 static const SInt32 kNVRMMinBacklight = 5;   // never 0: some panels switch the backlight off completely
 // AppleBacklightDisplay's public source uses 0..255 when no power-state range is published.
 static const SInt32 kAppleBacklightDefaultMax = 255;
+static const UInt32 kNVRMBacklightSaveDelaySeconds = 2;
 #define BLLOG(fmt, ...) do { IOLog("NVRM-fb: " fmt "\n", ##__VA_ARGS__); kprintf("NVRM-fb: " fmt "\n", ##__VA_ARGS__); } while (0)
 
 class NVRMBacklightHandler : public IODisplayParameterHandler {
@@ -148,13 +149,16 @@ class NVRMBacklightHandler : public IODisplayParameterHandler {
     IOService *fRM = nullptr;
     const OSSymbol *fFn = nullptr;
     thread_call_t fApply = nullptr;
+    thread_call_t fPersist = nullptr;
     volatile SInt32 fPending = -1;
     SInt32 fLevel = kNVRMBacklightMax;
     volatile SInt32 fUserLevel = kNVRMBacklightMax;
     volatile SInt32 fPersistPending = -1;
+    volatile UInt64 fPersistDeadline = 0;
     SInt32 fRestoreLevel = -1;
     OSDictionary *fParameters = nullptr;
     static void applyFire(thread_call_param_t me, thread_call_param_t);
+    static void persistFire(thread_call_param_t me, thread_call_param_t);
     static const OSSymbol *sBrightnessProbe, *sLinearBrightnessProbe;
 public:
     static NVRMBacklightHandler *withRM(IOService *rm, NvU32 level);
@@ -177,6 +181,7 @@ NVRMBacklightHandler *NVRMBacklightHandler::withRM(IOService *rm, NvU32 level)
     if (!sBrightnessProbe) sBrightnessProbe = OSSymbol::withCStringNoCopy("brightness-probe");
     if (!sLinearBrightnessProbe) sLinearBrightnessProbe = OSSymbol::withCStringNoCopy("linear-brightness-probe");
     h->fApply = nvrmfbCall(applyFire, h);
+    h->fPersist = thread_call_allocate_with_options(persistFire, h, THREAD_CALL_PRIORITY_LOW, THREAD_CALL_OPTIONS_ONCE);
     h->fLevel = (SInt32)nvrm_backlight_from_percent(level <= 100 ? level : 100);
     UInt32 saved;
     IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
@@ -187,13 +192,14 @@ NVRMBacklightHandler *NVRMBacklightHandler::withRM(IOService *rm, NvU32 level)
         h->fUserLevel = h->fLevel;
     }
     OSSafeReleaseNULL(options);
-    if (!h->fFn || !h->fApply) { h->release(); return nullptr; }
+    if (!h->fFn || !h->fApply || !h->fPersist) { h->release(); return nullptr; }
     return h;
 }
 
 void NVRMBacklightHandler::free()
 {
     if (fApply) { thread_call_cancel(fApply); while (!thread_call_free(fApply)) { thread_call_cancel(fApply); IOSleep(1); } fApply = nullptr; }
+    if (fPersist) { thread_call_cancel(fPersist); while (!thread_call_free(fPersist)) { thread_call_cancel(fPersist); IOSleep(1); } fPersist = nullptr; }
     OSSafeReleaseNULL(fFn);
     OSSafeReleaseNULL(fRM);
     OSSafeReleaseNULL(fParameters);
@@ -245,8 +251,10 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
             paramName == sBrightnessProbe ? sLinearBrightnessProbe : sBrightnessProbe, level);
     }
     if (params && params->getObject(gIODisplayValueKey)) {
+        uint64_t deadline;
+        clock_interval_to_deadline(kNVRMBacklightSaveDelaySeconds, kSecondScale, &deadline);
+        __atomic_store_n(&fPersistDeadline, deadline, __ATOMIC_SEQ_CST);
         __atomic_store_n(&fUserLevel, level, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&fPersistPending, level, __ATOMIC_SEQ_CST);
         if (fParameters) IODisplay::setParameter(fParameters,
             paramName == gIODisplayBrightnessKey ? gIODisplayLinearBrightnessKey : gIODisplayBrightnessKey, level);
     }
@@ -270,15 +278,35 @@ void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
     IOReturn r = me->fRM->callPlatformFunction(me->fFn, false, &percent, (void *)1, NULL, NULL);
     if (r == kIOReturnSuccess) {
         me->fLevel = v;
-        SInt32 target = OSAddAtomic(0, &me->fPersistPending);
-        if (target == v && OSAddAtomic(0, &me->fUserLevel) == target) {
-            IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
-            bool saved = options && nvrm_backlight_write(options, (UInt32)target);
-            OSSafeReleaseNULL(options);
-            if (saved) OSCompareAndSwap((UInt32)target, (UInt32)-1, (volatile UInt32 *)&me->fPersistPending);
-            else BLLOG("backlight: saving logical target %d failed", (int)target);
+        uint64_t deadline = __atomic_load_n(&me->fPersistDeadline, __ATOMIC_SEQ_CST);
+        if (deadline && OSAddAtomic(0, &me->fUserLevel) == v) {
+            // Only a successfully applied user target becomes eligible for persistence.
+            __atomic_store_n(&me->fPersistPending, v, __ATOMIC_SEQ_CST);
+            thread_call_enter_delayed(me->fPersist, deadline);
         }
     } else BLLOG("backlight: setting %u%% failed (0x%x)", (unsigned)percent, r);
+}
+
+void NVRMBacklightHandler::persistFire(thread_call_param_t p, thread_call_param_t)
+{
+    NVRMBacklightHandler *me = (NVRMBacklightHandler *)p;
+    SInt32 target = OSAddAtomic(0, &me->fPersistPending);
+    if (target < 0 || OSAddAtomic(0, &me->fUserLevel) != target) return;
+    uint64_t deadline = __atomic_load_n(&me->fPersistDeadline, __ATOMIC_SEQ_CST);
+    if (mach_absolute_time() < deadline) {
+        thread_call_enter_delayed(me->fPersist, deadline);
+        return;
+    }
+    IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
+    bool saved = options && nvrm_backlight_write(options, (UInt32)target);
+    OSSafeReleaseNULL(options);
+    if (saved) {
+        OSCompareAndSwap((UInt32)target, (UInt32)-1, (volatile UInt32 *)&me->fPersistPending);
+    } else {
+        BLLOG("backlight: saving logical target %d failed; retrying", (int)target);
+        clock_interval_to_deadline(kNVRMBacklightSaveDelaySeconds, kSecondScale, &deadline);
+        thread_call_enter_delayed(me->fPersist, deadline);
+    }
 }
 
 // 1 once this boot's guard clear happened (a head lit, or nothing to light): NVRM reads it (debug.nvrmfb_guard_cleared)
