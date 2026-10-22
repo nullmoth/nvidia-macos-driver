@@ -1195,6 +1195,24 @@ static NSString *nvmtl_link_dump_dir(void) {
 static __thread int g_fc_expect_link;
 void nvmtl_fc_expect_link(int on) { g_fc_expect_link = on; }
 BOOL nvmtl_needs_visible_link(NSString *air, NSString *why);
+// Writes the module handed to the translator (AIR text after linking, stage, constant values, error) to <dir>/fc-<pid>-<n>,
+// so a translation can be replayed offline with the same input. Nothing is written when dir is unset.
+static void nvmtl_fc_dump(const char *dd, NSString *ll, NSString *stage, const uint32_t *idx, const uint32_t *sizes,
+                          const uint8_t *const *payloads, size_t n, const char *e)
+{
+    if (!dd || !*dd) return;
+    NSString *dir = @(dd); static _Atomic unsigned seq;
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *base = [dir stringByAppendingFormat:@"/fc-%d-%u", getpid(), atomic_fetch_add(&seq, 1)];
+    [ll writeToFile:[base stringByAppendingString:@".ll"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSMutableString *meta = [NSMutableString stringWithFormat:@"stage %@\nerror %s\n", stage, e ? e : ""];
+    for (size_t i = 0; i < n; i++) {
+        [meta appendFormat:@"fc %u size %u bytes", idx[i], sizes[i]];
+        for (uint32_t b = 0; b < sizes[i] && payloads[i]; b++) [meta appendFormat:@" %02x", payloads[i][b]];
+        [meta appendString:@"\n"];
+    }
+    [meta writeToFile:[base stringByAppendingString:@".txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
 NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *idx, const uint32_t *sizes,
                                 const uint8_t *const *payloads, size_t n, NSString **err)
 {
@@ -1202,26 +1220,15 @@ NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *i
     if (!xlate_fc) { if (err) *err = @"this translator has no nvmtl_translate_fc — rebuild nvmtl_translate"; return nil; }
     if (!ll || !stage.length) { if (err) *err = @"no AIR kept for this function"; return nil; }
     uint8_t *out = NULL; size_t out_len = 0; char e[512] = {0};
+    // NVMTL_FC_DUMP_ALL=<dir>: keep every module before it is translated, including one whose translation never returns.
+    nvmtl_fc_dump(getenv("NVMTL_FC_DUMP_ALL"), ll, stage, idx, sizes, payloads, n, NULL);
     if (xlate_fc(ll.UTF8String, stage.UTF8String, idx, sizes, payloads, n, &out, &out_len, e, sizeof e) != 0) {
         if (g_fc_expect_link && nvmtl_needs_visible_link(ll, @(e)))
             nvlog("function constants: this function calls linked visible functions; it is specialized when its pipeline is created");
         else nvlog("function constants: re-translate FAILED: %s", e);
         // NVMTL_FC_FAIL_DUMP=<dir>: keep the refused module (AIR text, stage, constant values, error) so the refusal can be
         // replayed offline against the translator; nothing is written unless the variable is set.
-        const char *dd = getenv("NVMTL_FC_FAIL_DUMP");
-        if (dd && *dd) {
-            NSString *dir = @(dd); static _Atomic unsigned seq;
-            [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-            NSString *base = [dir stringByAppendingFormat:@"/fc-%d-%u", getpid(), atomic_fetch_add(&seq, 1)];
-            [ll writeToFile:[base stringByAppendingString:@".ll"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
-            NSMutableString *meta = [NSMutableString stringWithFormat:@"stage %@\nerror %s\n", stage, e];
-            for (size_t i = 0; i < n; i++) {
-                [meta appendFormat:@"fc %u size %u bytes", idx[i], sizes[i]];
-                for (uint32_t b = 0; b < sizes[i] && payloads[i]; b++) [meta appendFormat:@" %02x", payloads[i][b]];
-                [meta appendString:@"\n"];
-            }
-            [meta writeToFile:[base stringByAppendingString:@".txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        }
+        nvmtl_fc_dump(getenv("NVMTL_FC_FAIL_DUMP"), ll, stage, idx, sizes, payloads, n, e);
         if (err) *err = [NSString stringWithUTF8String:e[0] ? e : "specialization failed"];
         return nil;
     }
