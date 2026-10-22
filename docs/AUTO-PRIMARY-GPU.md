@@ -63,11 +63,10 @@ The update-preservation changes have private installer fixture coverage; that
 exact upstream installer path has not been used to upgrade the test machine.
 macOS 26 is not hardware-qualified by this report. Raw user logs are not included.
 
-After the upstream 1401 repository split, this change covers the driver's
-`package/install.sh` and `package/uninstall.sh` only. It does not reintroduce
-the removed `app/` directory or change the separate 1401 application. The
-installer fixtures mock runtime qualification and system commands; the actual
-selector build/signature and four-card hardware evidence are separate checks.
+The installer side lives in the driver's `package/install.sh` and
+`package/uninstall.sh`; the 1401 application is unchanged. The installer tests
+below run against mocked system commands. Building and signing the selector,
+and a run on a multi-card machine, are separate checks.
 
 Run the policy and installer tests:
 
