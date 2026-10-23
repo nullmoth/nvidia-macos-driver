@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <time.h>
+#include <os/lock.h>   // <wtl>
 extern char **environ;
 
 void nvlog(const char *fmt, ...);
@@ -192,22 +193,39 @@ static int nvmtl_cache_sync_io(void) {
     if (on < 0) { const char *e = getenv("NVMTL_CACHE_SYNC_IO"); on = (e && *e && *e != '0') ? 1 : 0; }
     return on;
 }
+static dispatch_queue_t gCacheIoQueue;
+// A short-lived process (a tool, a test) can exit with writes still queued; give them up to 2 s to land.
+static void nvmtl_cache_io_drain(void) {
+    if (!gCacheIoQueue) return;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(gCacheIoQueue, ^{ dispatch_semaphore_signal(done); });
+    dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+}
 static dispatch_queue_t nvmtl_cache_io_queue(void) {
-    static dispatch_queue_t q; static dispatch_once_t once;
+    static dispatch_once_t once;
     dispatch_once(&once, ^{
-        q = dispatch_queue_create("nvmtl.cache-io", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+        gCacheIoQueue = dispatch_queue_create("nvmtl.cache-io", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+        atexit(nvmtl_cache_io_drain);
         nvlog("cache io: %s", nvmtl_cache_sync_io() ? "synchronous (NVMTL_CACHE_SYNC_IO)" : "cache writes and touches run on nvmtl.cache-io");
     });
-    return q;
+    return gCacheIoQueue;
 }
 static void nvmtl_cache_io(dispatch_block_t work) {
     if (nvmtl_cache_sync_io()) { work(); return; }
     dispatch_async(nvmtl_cache_io_queue(), work);
 }
+// The touch only keeps the trimmer's age order, so once per file per process is enough; memo hits would otherwise
+// queue a block on every lookup.
 static void nvmtl_cache_touch(NSString *path) {
     if (!path) return;
+    static NSMutableSet<NSString *> *touched; static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
     NSString *p = [path copy];
-    nvmtl_cache_io(^{ utimes(p.fileSystemRepresentation, NULL); });
+    os_unfair_lock_lock(&lock);
+    if (!touched) touched = [NSMutableSet set];
+    const BOOL first = ![touched containsObject:p];
+    if (first) [touched addObject:p];
+    os_unfair_lock_unlock(&lock);
+    if (first) nvmtl_cache_io(^{ utimes(p.fileSystemRepresentation, NULL); });
 }
 // One line after the first 500 function-constant lookups and every 2000 after: a boot log then shows whether the
 // process (WindowServer above all) is translating or reading. Disk hits are the hits the memo did not serve.
