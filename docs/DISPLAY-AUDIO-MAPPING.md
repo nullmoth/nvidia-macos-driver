@@ -1,0 +1,41 @@
+# Display audio mapping
+
+NMHDA reads NVIDIA HDA pins and valid ELD through IOHDAFamily GET verbs.
+NVRMFB requests snapshots from its asynchronous worker outside the display gate.
+The controller must share the GPU's PCI bus/device and parent. Snapshots carry
+an interface version and connection generation; stale results are discarded.
+
+HDMI and DP SST displays match only when EDID-derived and pin ELD identities
+are unique in both directions (manufacturer/product, trimmed name, connection
+type and SAD set). Identical sinks remain ambiguous. No GPU-model pin table is
+used, and DP MST is excluded from automatic selection and default fallback.
+
+Set NVRMFBDisplayAudioOverrides on the framebuffer personality to an array of
+dictionaries containing PhysicalIndex (integer) and CodecInfo (four-byte data:
+codec address, function-group NID, pin NID, zero). Read PhysicalIndex from the
+NVRMFBDisplayAudioPhysicalIndex diagnostic; it is not the framebuffer ordinal or
+AppleHDA port-number. Duplicate physical indices or codec/function/pin targets
+are rejected. Explicitly reserved pins are excluded from automatic selection.
+
+Priority: per-interface override; legacy NVRMFBDisplayAudioCodecInfo for one
+external display; unique automatic match; codec 0/function 1/pin 4 fallback for
+one non-MST external display. Invalid explicit configuration blocks association.
+Multi-display endpoints without a reliable match publish no audio-codec-info.
+SST retains port-number zero. Source, probe availability, generation and physical
+index are exposed as NVRMFBDisplayAudio* diagnostics.
+
+Startup, service/codec readiness, hotplug and successful head wake refresh the
+mapping. Unmatched non-MST endpoints retry at 300 ms, at most six times after
+the initial request. Stop removes readiness notifications and drains the worker.
+
+Portable checks (clang++ with AddressSanitizer and UndefinedBehaviorSanitizer):
+
+    clang++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined tools/test_nvrmfb_audio_match.cpp -o /tmp/nvrmfb-audio-match
+    /tmp/nvrmfb-audio-match
+    python3 tools/test_nvrmfb_audio_config.py
+
+The portable tests use synthetic monitor data and test production matching and
+extracted configuration selection. They do not exercise kernel scheduling or
+HDA transport. Physical loading, automatic pin selection, playback, wake and
+multi-monitor hotplug require hardware validation. Build success is not that
+validation. This change does not modify the backlight handler or PR #312.

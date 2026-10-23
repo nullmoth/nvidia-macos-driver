@@ -27,6 +27,9 @@
 #include <libkern/c++/OSData.h>
 #include <libkern/OSAtomic.h>
 #include "../nvrm_eld.h"
+#include "../nvrm_audio_match.h"
+#include "../../NMHDA/nmhda_topology.h"
+#include <libkern/c++/OSArray.h>
 
 // Every callback this driver schedules runs one at a time. A plain thread_call that is entered again while it is still
 // running starts again on another thread, so a vblank or cursor callback stuck behind the display gate began a new
@@ -332,6 +335,15 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     void adoptSwappedDisplay();
     void clearDisplayAudioProperties();
     void publishDisplayAudioProperties();
+    void publishDisplayAudioPropertiesNow();
+    static void audioFire(thread_call_param_t, thread_call_param_t);
+    thread_call_t fAudioCall = nullptr;
+    IONotifier *fAudioReady = nullptr, *fCodecReady = nullptr;
+    static bool audioReady(void *, void *, IOService *, IONotifier *);
+    uint64_t fAudioGeneration = 0;
+    unsigned fAudioAttempt = 0;
+    bool fAudioValid = false;
+    uint8_t fAudioCodec[4] = {};
     thread_call_t fConnectNotify = nullptr;
     void notifyConnectionChanged(unsigned delayMs);
     static void connectNotifyFire(thread_call_param_t p0, thread_call_param_t);
@@ -498,7 +510,7 @@ public:
 OSDefineMetaClassAndStructors(NVRMNVDAFramebuffer, IOFramebuffer)
 struct nvrm_dpy_rec {
     NvKmsKapiDisplay handle; NvKmsKapiConnector connector; NvU32 headMask; NvBool internal;
-    NvU32 hdaConnectorType; NvU32 edidSize; NvU8 edid[NVKMS_KAPI_EDID_BUFFER_SIZE];
+    NvU32 hdaConnectorType; NvBool mst, connected; NvU32 edidSize; NvU8 edid[NVKMS_KAPI_EDID_BUFFER_SIZE];
 };
 static NvU32 nvrmHdaConnectorType(const struct NvKmsKapiConnectorInfo *info)
 {
@@ -797,6 +809,7 @@ bool NVRMNVDAFramebuffer::kapiInit()
             if (!dd->connected || !gs) continue;
             if (gNDpy >= (int)(sizeof gDpy / sizeof gDpy[0])) { FBLOG("dpy table full at %d", gNDpy); break; }
             struct nvrm_dpy_rec *r = &gDpy[gNDpy++];
+            r->connected = dd->connected; r->mst = si.isDpMST;
             r->handle = handles[i]; r->connector = si.connectorHandle; r->headMask = si.headMask; r->internal = si.internal;
             r->hdaConnectorType = si.internal ? 0 : nvrmQueryHdaConnectorType(fKms, fDev, si.connectorHandle);
             r->edidSize = dd->edid.bufferSize > sizeof r->edid ? (NvU32)sizeof r->edid : dd->edid.bufferSize;
@@ -1243,6 +1256,9 @@ static OSObject *copyGpuHdaGfx(IOService *provider)
 
 void NVRMNVDAFramebuffer::clearDisplayAudioProperties()
 {
+    NVRMDisplayGate gate;
+    ++fAudioGeneration;
+    fAudioValid = false;
     removeProperty("nvda-eld");
     removeProperty("hda-gfx");
     removeProperty("connector-type");
@@ -1252,9 +1268,11 @@ void NVRMNVDAFramebuffer::clearDisplayAudioProperties()
     removeProperty("IODisplayEDID");
 }
 
-void NVRMNVDAFramebuffer::publishDisplayAudioProperties()
+#include "nvrm-audio-auto.inc"
+
+void NVRMNVDAFramebuffer::publishDisplayAudioPropertiesNow()
 {
-    clearDisplayAudioProperties();
+    if (!fAudioValid) { removeProperty("audio-codec-info"); return; }
     if (fInternal || fEdidSize < 128 || fIndex >= (unsigned)gNDpy) return;
 
     const NvU32 connectorType = gDpy[fIndex].hdaConnectorType;
@@ -1272,20 +1290,9 @@ void NVRMNVDAFramebuffer::publishDisplayAudioProperties()
     if (pairing) { setProperty("hda-gfx", pairing); pairing->release(); }
     else setProperty("hda-gfx", "onboard-1");
 
-    // A configured NVRMFBDisplayAudioCodecInfo names the codec pin for this machine. Without one the first display pin,
-    // codec 0 pin widget 4, is used: measured on an RTX 5060 desktop (#284). Other boards wire the display to another
-    // pin (pin 5 on an RTX 5080 Laptop, #313) and set the property; a malformed one publishes no association.
-    OSObject *codecInfoObject = copyProperty("NVRMFBDisplayAudioCodecInfo");
-    if (!codecInfoObject) {
-        static const NvU8 kDefaultCodecInfo[4] = { 0x00, 0x01, 0x04, 0x00 };
-        codecInfoObject = OSData::withBytes(kDefaultCodecInfo, sizeof kDefaultCodecInfo);
-    }
+    OSObject *codecInfoObject = OSData::withBytes(fAudioCodec, sizeof fAudioCodec);
     OSData *codecInfo = OSDynamicCast(OSData, codecInfoObject);
-    const NvU8 *bytes = codecInfo ? (const NvU8 *)codecInfo->getBytesNoCopy() : nullptr;
-    if (!bytes || codecInfo->getLength() != 4 || !bytes[1] || !bytes[2]) {
-        OSSafeReleaseNULL(codecInfoObject);
-        return;
-    }
+    if (!codecInfo) return;
 
     struct nvrm_cea_scan cea;
     nvrm_scan_cea(fEdid, fEdidSize, &cea);
@@ -1363,6 +1370,7 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
             // that was seen disconnected and is connected again gets its head lit with the same full mode set the
             // display-wake path uses (reflip). Only on that transition, so other display events cause no modeset.
             if (!dynOk) continue;
+            gDpy[kdpy].connected = dd->connected;
             bool audioTypeChanged = false;
             if (dd->connected && kdpy >= 0) {
                 NvU32 connectorType = gDpy[kdpy].internal ? 0 :
@@ -1418,7 +1426,8 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
         if (!me->fKms->getStaticDisplayInfo(me->fDev, handles[i], &si)) continue;
         if (gNDpy >= (int)(sizeof gDpy / sizeof gDpy[0])) break;
         struct nvrm_dpy_rec *r = &gDpy[gNDpy];
-        r->handle = handles[i]; r->connector = si.connectorHandle; r->headMask = si.headMask; r->internal = si.internal;
+        r->connected = dd->connected; r->mst = si.isDpMST;
+            r->handle = handles[i]; r->connector = si.connectorHandle; r->headMask = si.headMask; r->internal = si.internal;
         r->hdaConnectorType = si.internal ? 0 : nvrmQueryHdaConnectorType(me->fKms, me->fDev, si.connectorHandle);
         r->edidSize = dd->edid.bufferSize > sizeof r->edid ? (NvU32)sizeof r->edid : dd->edid.bufferSize;
         nvu_copy(r->edid, dd->edid.buffer, r->edidSize);
@@ -1432,6 +1441,7 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
         if (listed) continue;
         nvu_zero(dd, sizeof *dd); dd->handle = gDpy[k].handle;
         if (!me->fKms->getDynamicDisplayInfo(me->fDev, dd) || dd->connected) continue;
+        gDpy[k].connected = false;
         for (unsigned f = 0; f < sizeof gFBs / sizeof gFBs[0]; f++) {
             NVRMNVDAFramebuffer *fb = gFBs[f];
             if (!fb || fb->fDisplay != gDpy[k].handle || fb->fDpyLost) continue;
@@ -1443,6 +1453,8 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
             if (nnotify < sizeof notify / sizeof notify[0]) { fb->retain(); notify[nnotify++] = fb; }
         }
     }
+    for (unsigned i = 0; i < sizeof gFBs / sizeof gFBs[0]; ++i)
+        if (gFBs[i] && !gFBs[i]->fDpyLost) gFBs[i]->publishDisplayAudioProperties();
     if (sl) IORecursiveLockUnlock(sl);
     IOFree(dd, sizeof *dd);
     for (unsigned f = 0; f < nnotify; f++) {
@@ -2560,6 +2572,8 @@ void NVRMNVDAFramebuffer::scheduleCall(thread_call_t call, uint64_t deadline)
 }
 void NVRMNVDAFramebuffer::stop(IOService *provider)
 {
+    if (fAudioReady) { fAudioReady->remove(); fAudioReady = nullptr; }
+    if (fCodecReady) { fCodecReady->remove(); fCodecReady = nullptr; }
     if (fFlipCacheLock) {
         IOInterruptState state = IOSimpleLockLockDisableInterrupt(fFlipCacheLock);
         fStopping = 1;
@@ -2576,7 +2590,7 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
         if (sl) IORecursiveLockUnlock(sl);
         if (mine) release();
     }
-    thread_call_t *calls[] = {&fHwVblCall, &fReflip, &fGpuWake, &fBars, &fVblTimer, &fSampler, &fHeadProbe, &fCursorCall, &fConnectNotify};
+    thread_call_t *calls[] = {&fHwVblCall, &fReflip, &fGpuWake, &fBars, &fVblTimer, &fSampler, &fHeadProbe, &fCursorCall, &fConnectNotify, &fAudioCall};
     for (unsigned i = 0; i < sizeof calls / sizeof calls[0]; ++i) {
         thread_call_t call = *calls[i];
         if (!call) continue;
@@ -3797,7 +3811,7 @@ bool NVRMNVDAFramebuffer::setHeadPower(bool awake)
         }
         const bool ok = reflip();
         // A rejected wake must remain retryable on the next power request.
-        if (ok) fHeadSlept = false;
+        if (ok) { fHeadSlept = false; publishDisplayAudioProperties(); }
         FBLOG("display wake: head %u mode and surface committed again -> %s (rc %d)", fHead, ok ? "ok" : "FAILED", fReflipRc);
         return ok;
     }
