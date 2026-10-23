@@ -31,6 +31,7 @@ typedef struct { void *rp; void *pipe; void *layout; int has_depth; uint32_t dfm
     uint32_t vin_dyn, vin_stride[32];
     uint64_t bmask[4]; uint32_t bmask_ok;
     uint64_t gmask[2][4]; uint32_t gmask_ok;
+    uint64_t gmask2[2][4], bmask2[4]; uint32_t gmask2_ok, bmask2_ok;   /* the same with the framebuffer-fetch set (3) left out like the heap (NVMTL_DESC_MASK) */
     uint32_t ag_mask, ag_req; void *ag_src; size_t ag_srcn; void *ag_safe;
     uint64_t shape_identity;
     uint32_t lin;
