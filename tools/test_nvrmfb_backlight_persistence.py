@@ -128,7 +128,6 @@ static const OSSymbol *gIODisplayParametersKey = &parametersKey;
 static const OSSymbol *gIODisplayBrightnessKey = &brightnessKey;
 static const OSSymbol *gIODisplayLinearBrightnessKey = &linearKey;
 static const OSSymbol *gIODisplayValueKey = &valueKey;
-static constexpr SInt32 kNVRMMinBacklight = 5;
 static constexpr SInt32 kAppleBacklightDefaultMax = 255;
 static unsigned char setSaved(unsigned char value) {
     auto data = OSData::withBytes(&value, 1);
@@ -207,13 +206,13 @@ int main() {
     constexpr UInt32 target = 20777;
     assert(restored->doIntegerSet(&user, gIODisplayLinearBrightnessKey, target));
     NVRMBacklightHandler::applyFire(restored, nullptr);
-    assert(rm.lastPercent == 32 && savedValue() == nvrm_backlight_from_percent(37) && gWrites == 0);
+    assert(rm.lastPercent == 35 && savedValue() == nvrm_backlight_from_percent(37) && gWrites == 0);
     NVRMBacklightHandler::persistFire(restored, nullptr);
     assert(gWrites == 0);
     fireSave(restored);
-    assert(rm.lastPercent == 32 && savedValue() == target && gWrites == 1);
+    assert(rm.lastPercent == 35 && savedValue() == target && gWrites == 1);
     const auto &bytes = IORegistryEntry::options->values[NVRM_BACKLIGHT_VAR];
-    assert(bytes == std::vector<unsigned char>({1, 0x29, 0x51}));
+    assert(bytes == std::vector<unsigned char>({2, 0x29, 0x51}));
     assert(display.parameters->values[gIODisplayBrightnessKey] == target);
     assert(restored->fLevel == (SInt32)target && restored->fUserLevel == (SInt32)target);
     auto restarted = NVRMBacklightHandler::withRM(&rm, 100);
@@ -221,19 +220,24 @@ int main() {
     assert(restarted->setDisplay(&restartDisplay));
     assert(restartDisplay.parameters->values[gIODisplayLinearBrightnessKey] == target);
     NVRMBacklightHandler::applyFire(restarted, nullptr);
-    assert(rm.lastPercent == 32 && savedValue() == target && gWrites == 1);
+    assert(rm.lastPercent == 35 && savedValue() == target && gWrites == 1);
 
     assert(restored->doIntegerSet(&power, gIODisplayBrightnessKey, nvrm_backlight_from_percent(12)));
     NVRMBacklightHandler::applyFire(restored, nullptr);
     assert(rm.lastPercent == 12 && savedValue() == target && gWrites == 1);
     assert(display.parameters->values[gIODisplayBrightnessKey] == target);
+    IODisplay reboundDisplay;
+    assert(restored->setDisplay(&reboundDisplay));
+    assert(reboundDisplay.parameters->values[gIODisplayBrightnessKey] == target);
+    assert(reboundDisplay.parameters->values[gIODisplayLinearBrightnessKey] == target);
+    assert(restored->fLevel == (SInt32)nvrm_backlight_from_percent(12));
     unsigned enters = restored->fApply->enters;
     assert(restored->doIntegerSet(&user, NVRMBacklightHandler::sLinearBrightnessProbe, 4096));
     NVRMBacklightHandler::applyFire(restored, nullptr);
-    assert(display.parameters->values[NVRMBacklightHandler::sBrightnessProbe] == 4096);
+    assert(reboundDisplay.parameters->values[NVRMBacklightHandler::sBrightnessProbe] == 4096);
     assert(restored->fApply->enters == enters && rm.lastPercent == 12 && savedValue() == target);
     assert(restored->doIntegerSet(&user, NVRMBacklightHandler::sBrightnessProbe, 32768));
-    assert(display.parameters->values[NVRMBacklightHandler::sLinearBrightnessProbe] == 32768);
+    assert(reboundDisplay.parameters->values[NVRMBacklightHandler::sLinearBrightnessProbe] == 32768);
     assert(restored->fUserLevel == (SInt32)target && gWrites == 1);
 
     rm.result = -1;
@@ -258,6 +262,7 @@ int main() {
         auto next = NVRMBacklightHandler::withRM(&rm, 80);
         assert(next->fUserLevel == (SInt32)level && next->fRestoreLevel == (SInt32)level);
         if (level <= 1) assert(rm.lastPercent == 5);
+        if (level == 32768) assert(rm.lastPercent == 53);
         if (level >= 65534) assert(rm.lastPercent == 100);
     }
     unsigned writes = gWrites;
@@ -266,9 +271,17 @@ int main() {
     for (unsigned percent = 0; percent <= 100; ++percent) {
         setSaved((unsigned char)percent);
         assert(savedValue() == nvrm_backlight_from_percent(percent));
-        assert(nvrm_backlight_to_percent(savedValue()) == percent);
+        assert(nvrm_backlight_to_percent(savedValue()) == (percent < 5 ? 5 : percent));
     }
-    for (const auto &malformed : std::vector<std::vector<unsigned char>>{{}, {101}, {45, 0}, {2, 1, 0}, {1, 1, 0, 0}}) {
+    for (UInt32 legacy : {0U, 1U, 3277U, 20777U, 32768U, 65535U}) {
+        IORegistryEntry::options->values[NVRM_BACKLIGHT_VAR] = {1, (unsigned char)legacy, (unsigned char)(legacy >> 8)};
+        UInt32 percent = (legacy * 100 + 32767) / 65535;
+        assert(nvrm_backlight_to_percent(savedValue()) == (percent < 5 ? 5 : percent));
+    }
+    assert(nvrm_backlight_to_percent(0) == 5);
+    assert(nvrm_backlight_to_percent(3277) == 10);
+    assert(nvrm_backlight_to_percent(65535) == 100);
+    for (const auto &malformed : std::vector<std::vector<unsigned char>>{{}, {101}, {45, 0}, {3, 1, 0}, {1, 1, 0, 0}}) {
         IORegistryEntry::options->values[NVRM_BACKLIGHT_VAR] = malformed;
         auto invalid = NVRMBacklightHandler::withRM(&rm, 63);
         assert(invalid->fUserLevel == (SInt32)nvrm_backlight_from_percent(63) && invalid->fRestoreLevel == -1);

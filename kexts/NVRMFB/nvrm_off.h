@@ -23,16 +23,19 @@
 #define NVRM_BACKLIGHT_VAR "nullmoth-backlight"
 
 // IODisplay logical precision is independent of NVKMS's integer-percent output.
-enum { kNVRMBacklightMax = 0xFFFF };
+enum { kNVRMBacklightMax = 0xFFFF, kNVRMMinBacklight = 5 };
 
 static inline UInt32 nvrm_backlight_from_percent(UInt32 percent)
 {
-    return (percent * kNVRMBacklightMax + 50) / 100;
+    if (percent <= kNVRMMinBacklight) return 0;
+    return ((percent - kNVRMMinBacklight) * kNVRMBacklightMax + (100 - kNVRMMinBacklight) / 2)
+        / (100 - kNVRMMinBacklight);
 }
 
 static inline UInt32 nvrm_backlight_to_percent(UInt32 level)
 {
-    return (level * 100 + kNVRMBacklightMax / 2) / kNVRMBacklightMax;
+    return kNVRMMinBacklight + (level * (100 - kNVRMMinBacklight) + kNVRMBacklightMax / 2)
+        / kNVRMBacklightMax;
 }
 
 static inline bool nvrm_backlight_read(IORegistryEntry *options, UInt32 *level)
@@ -47,8 +50,11 @@ static inline bool nvrm_backlight_read(IORegistryEntry *options, UInt32 *level)
         if (d->getLength() == 1 && bytes[0] <= 100) {
             value = nvrm_backlight_from_percent(bytes[0]);
             valid = true;
-        } else if (d->getLength() == 3 && bytes[0] == 1) {
+        } else if (d->getLength() == 3 && (bytes[0] == 1 || bytes[0] == 2)) {
             value = (UInt32)bytes[1] | ((UInt32)bytes[2] << 8);
+            // Version 1 used the full 0..100 span; retain its rounded hardware output.
+            if (bytes[0] == 1)
+                value = nvrm_backlight_from_percent((value * 100 + kNVRMBacklightMax / 2) / kNVRMBacklightMax);
             valid = true;
         }
     }
@@ -63,8 +69,8 @@ static inline bool nvrm_backlight_write(IORegistryEntry *options, UInt32 level)
     if (!options || level > kNVRMBacklightMax) return false;
     UInt32 current;
     if (nvrm_backlight_read(options, &current) && current == level) return true;
-    // Version 1 followed by an unsigned little-endian logical target; legacy one-byte percent remains readable.
-    unsigned char bytes[] = {1, (unsigned char)level, (unsigned char)(level >> 8)};
+    // Version 2 uses the 5..100 hardware span; older records are converted when read.
+    unsigned char bytes[] = {2, (unsigned char)level, (unsigned char)(level >> 8)};
     OSData *d = OSData::withBytes(bytes, sizeof bytes);
     if (!d) return false;
     bool ok = options->setProperty(NVRM_BACKLIGHT_VAR, d);
