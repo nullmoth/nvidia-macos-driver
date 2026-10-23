@@ -209,6 +209,15 @@ static void nvmtl_cache_touch(NSString *path) {
     NSString *p = [path copy];
     nvmtl_cache_io(^{ utimes(p.fileSystemRepresentation, NULL); });
 }
+// One line after the first 500 function-constant lookups and every 2000 after: a boot log then shows whether the
+// process (WindowServer above all) is translating or reading. Disk hits are the hits the memo did not serve.
+static void nvmtl_fc_note_lookup(void) {
+    const unsigned long n = atomic_fetch_add(&gFcLookups, 1) + 1;
+    if (n != 500 && !(n > 500 && (n - 500) % 2000 == 0)) return;
+    const unsigned long hit = gFcHit, memo = gFcMemoHit;
+    nvlog("fc cache: %lu lookups: %lu memo hit, %lu disk hit, %lu miss, %lu stored", n, memo, hit > memo ? hit - memo : 0,
+          (unsigned long)gFcMiss, (unsigned long)gFcStored);
+}
 // </wtl>
 
 static _Atomic unsigned long long gSpvAdded;
@@ -1341,7 +1350,7 @@ NSData *nvmtl_translate_with_fc_cached(NSString *ll, NSString *stage, NSString *
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     const BOOL fcCacheOn = !getenv("NVMTL_FCCACHE_OFF");
     NSData *hit = fcCacheOn ? [nvmtl_memo() objectForKey:memoKey] : nil;
-    if (hit) { gFcHit++; gFcMemoHit++; nvmtl_cache_touch(path); return hit; }   // keep the trimmer's age order (<wtl> off the caller)
+    if (hit) { gFcHit++; gFcMemoHit++; nvmtl_cache_touch(path); nvmtl_fc_note_lookup(); return hit; }   // keep the trimmer's age order (<wtl> off the caller)
     if (fcCacheOn && path) hit = [NSData dataWithContentsOfFile:path];
     uint32_t magic = 0;
     if (hit.length >= 20 && hit.length % 4 == 0) {
@@ -1352,6 +1361,7 @@ NSData *nvmtl_translate_with_fc_cached(NSString *ll, NSString *stage, NSString *
             nvlog("fc cache: HIT %s %lu B %.1f ms [%lu hit, %lu miss, %lu stored]", name.UTF8String,
                   (unsigned long)hit.length, (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6,
                   gFcHit, gFcMiss, gFcStored);
+            nvmtl_fc_note_lookup();   // <wtl>
             return hit;
         }
     }
@@ -1367,6 +1377,7 @@ NSData *nvmtl_translate_with_fc_cached(NSString *ll, NSString *stage, NSString *
               (unsigned long)result.length, (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6,
               gFcHit, gFcMiss, gFcStored);
     }
+    nvmtl_fc_note_lookup();   // <wtl>
     return result;
 }
 
