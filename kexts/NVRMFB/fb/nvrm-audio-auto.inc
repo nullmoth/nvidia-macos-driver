@@ -1,3 +1,6 @@
+// Kernel extensions still use IOPCIDevice; PCIDriverKit is a DriverKit API.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #include <IOKit/pci/IOPCIDevice.h>
 static IOPCIDevice *audioGpu(IORegistryEntry *entry)
 {
@@ -212,3 +215,4 @@ void NVRMNVDAFramebuffer::audioFire(thread_call_param_t p0, thread_call_param_t)
     OSSafeReleaseNULL(data);
     if (notify) me->notifyConnectionChanged(0);
 }
+#pragma clang diagnostic pop

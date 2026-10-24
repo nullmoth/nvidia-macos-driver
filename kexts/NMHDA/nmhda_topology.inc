@@ -5,7 +5,8 @@ static NMHDAExecuteVerb gTopologyVerb;
 static bool topologyGet(IOService *codec, unsigned nid, unsigned verb, unsigned param, unsigned &value)
 {
     value = 0xffffffff;
-    return gTopologyVerb && gTopologyVerb(codec, nid, verb, param, &value, true) == kIOReturnSuccess &&
+    return gTopologyVerb && gTopologyVerb(codec, (uint16_t)nid, (uint16_t)verb, (uint16_t)param,
+        &value, true) == kIOReturnSuccess &&
         value != 0xffffffff;
 }
 
@@ -59,7 +60,8 @@ IOReturn NMHDATopologyService::callPlatformFunction(const OSSymbol *name, bool w
                     !(pinCaps & ((1u << 7) | (1u << 24)))) continue;
                 if (snapshot->count == NMHDA_MAX_PINS) { snapshot->truncated = true; continue; }
                 NMHDAPin &pin = snapshot->pins[snapshot->count++];
-                pin.codec = address->unsigned32BitValue(); pin.function = fg; pin.pin = nid;
+                pin.codec = (uint8_t)address->unsigned32BitValue();
+                pin.function = (uint8_t)fg; pin.pin = (uint8_t)nid;
                 if (!topologyGet(codec, nid, 0xf09, 0, sense)) continue;
                 pin.sense = sense;
                 // Do not change MST device selection; only device zero can describe an SST sink.

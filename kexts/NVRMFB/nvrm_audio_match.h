@@ -54,8 +54,8 @@ static inline int nvrm_audio_identity_parse(const uint8_t *eld, size_t size,
         unsigned at = 0;
         for (; at < out->sad_count; ++at) {
             const uint8_t *old = out->sad + at * 3;
-            unsigned a = (sad[0] << 16) | (sad[1] << 8) | sad[2];
-            unsigned b = (old[0] << 16) | (old[1] << 8) | old[2];
+            unsigned a = ((unsigned)sad[0] << 16) | ((unsigned)sad[1] << 8) | sad[2];
+            unsigned b = ((unsigned)old[0] << 16) | ((unsigned)old[1] << 8) | old[2];
             if (a <= b) break;
         }
         if (at < out->sad_count && out->sad[at*3] == sad[0] &&
