@@ -1303,7 +1303,14 @@ void NVRMNVDAFramebuffer::publishDisplayAudioPropertiesNow()
 
     NvU8 connector[4] = { (NvU8)connectorType, (NvU8)(connectorType >> 8),
                           (NvU8)(connectorType >> 16), (NvU8)(connectorType >> 24) };
-    NvU8 port[4] = { 0, 0, 0, 0 };
+    unsigned external = 0;
+    for (int i = 0; i < gNDpy; ++i)
+        if (gDpy[i].connected && !gDpy[i].internal) ++external;
+    NvU8 port[4] = {};
+    if (!nvrm_audio_port_number(fAudioCodec[2], external, &port[0])) {
+        OSSafeReleaseNULL(codecInfoObject);
+        return;
+    }
     NvU8 signal[4] = { 8, 0, 0, 0 };
     bool published = setProperty("connector-type", connector, sizeof connector);
     if (published) published = setProperty("port-number", port, sizeof port);

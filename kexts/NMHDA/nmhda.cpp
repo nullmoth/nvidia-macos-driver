@@ -214,7 +214,7 @@ static void onHdaLoaded(void *, KernelPatcher &patcher, size_t index, mach_vm_ad
 }
 
 static const char *topologyFamilyPaths[] = {
-    "/System/Library/Extensions/IOHDAFamily.kext/Contents/MacOS/IOHDAFamily"
+    "/System/Library/Extensions/AppleHDA.kext/Contents/PlugIns/IOHDAFamily.kext/Contents/MacOS/IOHDAFamily"
 };
 static KernelPatcher::KextInfo topologyFamily {
     "com.apple.iokit.IOHDAFamily", topologyFamilyPaths, 1, {true}, {}, KernelPatcher::KextInfo::Unloaded

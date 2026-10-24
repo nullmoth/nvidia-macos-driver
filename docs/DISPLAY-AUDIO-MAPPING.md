@@ -21,8 +21,11 @@ Priority: per-interface override; legacy NVRMFBDisplayAudioCodecInfo for one
 external display; unique automatic match; codec 0/function 1/pin 4 fallback for
 one non-MST external display. Invalid explicit configuration blocks association.
 Multi-display endpoints without a reliable match publish no audio-codec-info.
-SST retains port-number zero. Source, probe availability, generation and physical
-index are exposed as NVRMFBDisplayAudio* diagnostics.
+Single-display SST keeps port-number zero for compatibility. With multiple
+connected external displays, port-number follows the NVIDIA HDA pin mapping
+(pin NID minus 4), so pins 04/05/06/07 publish ports 0/1/2/3. Source, probe
+availability, generation and physical index are exposed as NVRMFBDisplayAudio*
+diagnostics.
 
 Startup, service/codec readiness, hotplug and successful head wake refresh the
 mapping. Unmatched non-MST endpoints retry at 300 ms, at most six times after

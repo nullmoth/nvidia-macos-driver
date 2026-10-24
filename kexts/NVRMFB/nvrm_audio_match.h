@@ -8,6 +8,15 @@ static inline int nvrm_audio_codec_valid(const uint8_t *data, size_t size)
     return data && size == 4 && data[0] < 16 && data[1] && data[2] && !data[3];
 }
 
+static inline int nvrm_audio_port_number(uint8_t pin, unsigned external, uint8_t *port)
+{
+    if (!port) return 0;
+    if (external <= 1) { *port = 0; return 1; }
+    if (pin < 4) return 0;
+    *port = pin - 4;
+    return 1;
+}
+
 static inline int nvrm_audio_snapshot_current(uint32_t version, uint64_t sampled,
                                               uint64_t current, unsigned unavailable,
                                               unsigned truncated, unsigned count)
