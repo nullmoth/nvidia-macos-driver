@@ -6,6 +6,7 @@
 
 #include "nvrm_off.h"
 #include "nv-xnu.h"
+#include "nvrm_utilization.h"
 
 extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <IOKit/IOService.h>
@@ -101,6 +102,7 @@ public:
     virtual IOService *probe(IOService *provider, SInt32 *score) override;
     virtual bool start(IOService *provider) override;
     virtual void stop(IOService *provider) override;
+    virtual void free() override;
     IOReturn go(uint32_t pass);
     static void autoGo(void *p0, wait_result_t w);
     static void bootHoldCap(thread_call_param_t p0, thread_call_param_t p1);
@@ -147,6 +149,9 @@ private:
     nv_state_t   fNv = {};
     bool         fPrivateState = false;
     bool         fAdapter = false;
+    IOLock      *fUtilizationLock = nullptr;
+    void        *fUtilizationState = nullptr;
+    bool         fUtilizationStopping = false;
     uint32_t     fPassDone = 0;
     IOWorkLoop  *fWorkLoop = NULL;
     IOFilterInterruptEventSource *fIntSrc = NULL;
@@ -194,6 +199,19 @@ extern "C" void nv_xnu_pm_exit(int counted)
     IOLockLock(gNvPmGate);
     if (--gNvPmUsers == 0 && gNvPmClosed) IOLockWakeup(gNvPmGate, &gNvPmUsers, false);
     IOLockUnlock(gNvPmGate);
+}
+// Telemetry is optional: skip a suspended GPU instead of parking its polling
+// thread until wake. Admission and the users count share the PM gate lock, so
+// suspend cannot pass its drain while a successful admission is still in RM.
+static bool nv_xnu_pm_try_enter(int *counted)
+{
+    *counted = 0;
+    if (!gNvPmGate || current_thread() == gNvPmOwner) return true;
+    IOLockLock(gNvPmGate);
+    const bool ready = !gNvPmClosed;
+    if (ready) { gNvPmUsers++; *counted = 1; }
+    IOLockUnlock(gNvPmGate);
+    return ready;
 }
 // Close the gate and wait up to waitMs for the calls already inside RM. Returns how many were still inside.
 static int nv_xnu_pm_close(uint32_t waitMs)
@@ -406,6 +424,8 @@ bool NVRM::start(IOService *provider)
     if (!super::start(provider)) return false;
     fPCI = OSDynamicCast(IOPCIDevice, provider);
     if (!fPCI) return false;
+    // An unavailable telemetry lock disables this optional interface, not the GPU.
+    fUtilizationLock = IOLockAlloc();
     gNVRMService = this;
     nv_xnu_log_init();
     // The kernel mapping table is serialised, so its lock has to exist before RM maps anything.
@@ -1460,12 +1480,35 @@ void NVRM::interruptOccurred(IOInterruptEventSource *src, int count)
 
 void NVRM::stop(IOService *provider)
 {
+    // Keep the lock until free(): another service can retain this object and
+    // call its platform interface after stop(), when it must answer NotReady.
+    if (fUtilizationLock) {
+        IOLockLock(fUtilizationLock);
+        fUtilizationStopping = true;
+        const bool haveState = fUtilizationState != nullptr;
+        IOLockUnlock(fUtilizationLock);
+        if (haveState) {
+            // Match the query lock order: PM admission, then the state lock.
+            // An unload during sleep waits for wake under the existing PM gate
+            // contract; it must not send an RM free to a GPU still in standby.
+            NvXnuPmUse pmUse;
+            IOLockLock(fUtilizationLock);
+            nvrm_free_utilization(&fUtilizationState);
+            IOLockUnlock(fUtilizationLock);
+        }
+    }
     if (fPmJoined) { PMstop(); fPmJoined = false; }
     if (fAdapter) { rm_shutdown_adapter(NULL, &fNv); fAdapter = false; }
     if (fIntSrc) { fIntSrc->disable(); if (fWorkLoop) fWorkLoop->removeEventSource(fIntSrc); fIntSrc->release(); fIntSrc = NULL; }
     if (fWorkLoop) { fWorkLoop->release(); fWorkLoop = NULL; }
     if (fPrivateState) { rm_free_private_state(NULL, &fNv); fPrivateState = false; }
     super::stop(provider);
+}
+
+void NVRM::free()
+{
+    if (fUtilizationLock) { IOLockFree(fUtilizationLock); fUtilizationLock = nullptr; }
+    super::free();
 }
 
 extern "C" { void nvkms_xnu_suspend(NvU32 gpuId); void nvkms_xnu_resume(NvU32 gpuId, NvBool gpuOk); }
@@ -1659,6 +1702,20 @@ OSDefineMetaClassAndStructors(IOAccelNVRMBridge, NVRMUserClient)
 
 IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4)
 {
+    if (fn && fn->isEqualTo(NVRM_UTILIZATION_FN)) {
+        NVRMUtilization *sample = (NVRMUtilization *)p1;
+        if (!sample || sample->version != NVRM_UTILIZATION_ABI_VERSION) return kIOReturnBadArgument;
+        if (!fUtilizationLock || isInactive()) return kIOReturnNotReady;
+        int counted = 0;
+        if (!nv_xnu_pm_try_enter(&counted)) return kIOReturnNotReady;
+        IOLockLock(fUtilizationLock);
+        const bool ready = !fUtilizationStopping && !isInactive() && fAdapter && fPassDone >= 2 &&
+                           OSAddAtomic(0, &fGpuPm) == kGpuPmRunning;
+        const bool ok = ready && nvrm_query_utilization(fNv.gpu_id, &fUtilizationState, sample);
+        IOLockUnlock(fUtilizationLock);
+        nv_xnu_pm_exit(counted);
+        return ok ? kIOReturnSuccess : (ready ? kIOReturnIOError : kIOReturnNotReady);
+    }
     if (fn && fn->isEqualTo("NVRMBootRaster")) {
         uint32_t *o4 = (uint32_t *)p1; if (!o4) return kIOReturnBadArgument;
         if (fBootHead < 0) return kIOReturnNotFound;
