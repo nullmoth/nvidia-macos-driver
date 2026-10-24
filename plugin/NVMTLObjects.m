@@ -92,6 +92,8 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
               // Preserve the GL uniform path's per-process override and diagnostics.
               if (!strncmp(*e, "NVMTL_UNIFORM_CBUF=", 19)
                   || !strncmp(*e, "NVMTL_UNIFORM_CBUF_STATS=", 25)) continue;
+              // Keep the switch that restores inline presents.
+              if (!strncmp(*e, "NVMTL_PRESENT_INLINE=", 21)) continue;
               const char *eq = strchr(*e, '='); if (!eq) continue;
               names[n] = strndup(*e, (size_t)(eq - *e)); if (names[n]) n++; }
       for (unsigned i = 0; i < n; i++) { unsetenv(names[i]); free(names[i]); } }
