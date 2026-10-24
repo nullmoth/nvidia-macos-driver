@@ -67,6 +67,77 @@ fn sample_gradient_pair(
     Ok(Some((dx, dy, min_lod)))
 }
 
+// Cube direction -> (face coordinates vec2, face int) in Metal's face order (+X -X +Y -Y +Z -Z) with the major axis chosen as
+// gld.cube_vector_to_uv does (x on ties with y or z, then y over z): u = sc/|ma|/2 + 1/2, v = tc/|ma|/2 + 1/2.
+fn cube_direction_to_face_uv(ctx: &mut Ctx, coord: Word, out: &mut Vec<Instruction>) -> Result<(Word, Word), String> {
+    let is_vec3f = value_result_type(ctx, coord)
+        .and_then(|ty| vector_type_shape(ctx, ty))
+        .is_some_and(|(elem, lanes)| lanes == 3 && is_f32_scalar(ctx, elem));
+    if !is_vec3f {
+        return Err("air.sample_texture_cube on a 2D-array view: the direction is not a float3".into());
+    }
+    let (f, b, i) = (ctx.ty_float(), ctx.ty_bool(), ctx.ty_sint());
+    let glsl = ctx.glsl();
+    let mut emit = |ctx: &mut Ctx, op: Op, ty: Word, ops: Vec<Operand>| {
+        let id = ctx.module.fresh_id();
+        out.push(Instruction::new(op, Some(ty), Some(id), ops));
+        // later lowering (the 2D-array sample's layer and coordinate) asks for these values' types before they are placed
+        ctx.phase_value_types.get_or_insert_with(Default::default).insert(id, ty);
+        id
+    };
+    let comp = |ctx: &mut Ctx, emit: &mut dyn FnMut(&mut Ctx, Op, Word, Vec<Operand>) -> Word, c: u32| {
+        emit(ctx, Op::CompositeExtract, f, vec![Operand::IdRef(coord), Operand::LiteralBit32(c)])
+    };
+    let (x, y, z) = (comp(ctx, &mut emit, 0), comp(ctx, &mut emit, 1), comp(ctx, &mut emit, 2));
+    let abs = |ctx: &mut Ctx, emit: &mut dyn FnMut(&mut Ctx, Op, Word, Vec<Operand>) -> Word, v: Word| {
+        emit(ctx, Op::ExtInst, f, vec![Operand::IdRef(glsl), Operand::LiteralExtInstInteger(GLSLstd450::FAbs as u32), Operand::IdRef(v)])
+    };
+    let (ax, ay, az) = (abs(ctx, &mut emit, x), abs(ctx, &mut emit, y), abs(ctx, &mut emit, z));
+    let ge_xy = emit(ctx, Op::FOrdGreaterThanEqual, b, vec![Operand::IdRef(ax), Operand::IdRef(ay)]);
+    let ge_xz = emit(ctx, Op::FOrdGreaterThanEqual, b, vec![Operand::IdRef(ax), Operand::IdRef(az)]);
+    let xmaj = emit(ctx, Op::LogicalAnd, b, vec![Operand::IdRef(ge_xy), Operand::IdRef(ge_xz)]);
+    let ymaj = emit(ctx, Op::FOrdGreaterThanEqual, b, vec![Operand::IdRef(ay), Operand::IdRef(az)]);
+    let zero = ctx.const_float(0.0);
+    let neg = |ctx: &mut Ctx, emit: &mut dyn FnMut(&mut Ctx, Op, Word, Vec<Operand>) -> Word, v: Word| {
+        emit(ctx, Op::FOrdLessThan, b, vec![Operand::IdRef(v), Operand::IdRef(zero)])
+    };
+    let (negx, negy, negz) = (neg(ctx, &mut emit, x), neg(ctx, &mut emit, y), neg(ctx, &mut emit, z));
+    let minus = |ctx: &mut Ctx, emit: &mut dyn FnMut(&mut Ctx, Op, Word, Vec<Operand>) -> Word, v: Word| {
+        emit(ctx, Op::FNegate, f, vec![Operand::IdRef(v)])
+    };
+    let (mx, my, mz) = (minus(ctx, &mut emit, x), minus(ctx, &mut emit, y), minus(ctx, &mut emit, z));
+    let sel = |ctx: &mut Ctx, emit: &mut dyn FnMut(&mut Ctx, Op, Word, Vec<Operand>) -> Word, ty: Word, c: Word, t: Word, e: Word| {
+        emit(ctx, Op::Select, ty, vec![Operand::IdRef(c), Operand::IdRef(t), Operand::IdRef(e)])
+    };
+    // x major: sc = -z (+X) / z (-X), tc = -y; y major: sc = x, tc = z (+Y) / -z (-Y); z major: sc = x (+Z) / -x (-Z), tc = -y
+    let sc_x = sel(ctx, &mut emit, f, negx, z, mz);
+    let sc_z = sel(ctx, &mut emit, f, negz, mx, x);
+    let sc_yz = sel(ctx, &mut emit, f, ymaj, x, sc_z);
+    let sc = sel(ctx, &mut emit, f, xmaj, sc_x, sc_yz);
+    let tc_y = sel(ctx, &mut emit, f, negy, mz, z);
+    let tc_yz = sel(ctx, &mut emit, f, ymaj, tc_y, my);
+    let tc = sel(ctx, &mut emit, f, xmaj, my, tc_yz);
+    let ma_yz = sel(ctx, &mut emit, f, ymaj, ay, az);
+    let ma = sel(ctx, &mut emit, f, xmaj, ax, ma_yz);
+    let face_of = |ctx: &mut Ctx, emit: &mut dyn FnMut(&mut Ctx, Op, Word, Vec<Operand>) -> Word, negative: Word, pos: i64| {
+        let (p, n) = (ctx.const_int_of(i, pos), ctx.const_int_of(i, pos + 1));
+        emit(ctx, Op::Select, i, vec![Operand::IdRef(negative), Operand::IdRef(n), Operand::IdRef(p)])
+    };
+    let (fx, fy, fz) = (face_of(ctx, &mut emit, negx, 0), face_of(ctx, &mut emit, negy, 2), face_of(ctx, &mut emit, negz, 4));
+    let face_yz = sel(ctx, &mut emit, i, ymaj, fy, fz);
+    let face = sel(ctx, &mut emit, i, xmaj, fx, face_yz);
+    let half = ctx.const_float(0.5);
+    let to_unit = |ctx: &mut Ctx, emit: &mut dyn FnMut(&mut Ctx, Op, Word, Vec<Operand>) -> Word, s: Word| {
+        let q = emit(ctx, Op::FDiv, f, vec![Operand::IdRef(s), Operand::IdRef(ma)]);
+        let h = emit(ctx, Op::FMul, f, vec![Operand::IdRef(q), Operand::IdRef(half)]);
+        emit(ctx, Op::FAdd, f, vec![Operand::IdRef(h), Operand::IdRef(half)])
+    };
+    let (u, v) = (to_unit(ctx, &mut emit, sc), to_unit(ctx, &mut emit, tc));
+    let v2 = ctx.ty_vecf(2);
+    let uv = emit(ctx, Op::CompositeConstruct, v2, vec![Operand::IdRef(u), Operand::IdRef(v)]);
+    Ok((uv, face))
+}
+
 pub(in crate::passes) fn lower_sample(
     ctx: &mut Ctx,
     name: &str,
@@ -97,6 +168,24 @@ pub(in crate::passes) fn lower_sample(
     let (fallback_dim, fallback_arrayed, fallback_comp) = image_shape_or_recorded(ctx, img);
     let (img_ty, dim, arrayed, comp) =
         sampled_operand_image_info(ctx, img, fallback_dim, fallback_arrayed, fallback_comp);
+    // Apple's OpenGL samples a cube map without seamless filtering through a 2D-array view of it ("cubeAsArray": face and
+    // face coordinates from gld.cube_vector_to_uv, layer = face), and keeps the real cube sample on a branch chosen by a
+    // per-unit mask. A helper that takes the sampler as an argument carries both calls on the same texture, so the texture
+    // is typed as a 2D array and its cube call reached the array path, reading the cube's LOD flag as a layer ("layer is not
+    // scalar int/float"; Stellaris's planet shaders). The cube call becomes the same 2D-array sample of the face it hits.
+    if name.starts_with("air.sample_texture_cube.") && dim == Dim::Dim2D && arrayed && !is_gradient_family(name)
+        && args.len() >= 7
+    {
+        let mut pre = vec![];
+        let (uv, face) = cube_direction_to_face_uv(ctx, coord, &mut pre)?;
+        let bool_ty = ctx.ty_bool();
+        let no_offset = ctx.const_bool_of(bool_ty, false);
+        let offset = const_sint_vec(ctx, &[0, 0]);
+        let array_args = [args[0], args[1], uv, face, no_offset, offset, args[3], args[4], args[5], args[6]];
+        let array_name = name.replacen("sample_texture_cube", "sample_texture_2d_array", 1);
+        pre.extend(lower_sample(ctx, &array_name, Some(res), Some(rty), &array_args, v4)?);
+        return Ok(pre);
+    }
     let sample_v4 = image_fetch_v4(ctx, img, v4);
     let is_int_tex = comp != crate::passes::ImageComp::Float;
 
