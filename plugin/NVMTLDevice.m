@@ -496,6 +496,7 @@ static bool nvmtl_angle_chrome_family(void)
     const char *me = getprogname();
     if (!me) return false;
     return strncmp(me, "Google Chrome", 13) == 0 ||
+           strncmp(me, "Brave Browser", 13) == 0 ||
            strncmp(me, "Chromium", 8) == 0 ||
            strncmp(me, "Discord", 7) == 0;
 }
