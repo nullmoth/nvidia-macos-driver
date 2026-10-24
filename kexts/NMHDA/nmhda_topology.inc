@@ -78,7 +78,8 @@ IOReturn NMHDATopologyService::callPlatformFunction(const OSSymbol *name, bool w
                 }
                 unsigned after;
                 if (!topologyGet(codec, nid, 0xf09, 0, after) || after != sense) pin.eldSize = 0;
-                if (!pin.eldSize) snapshot->unavailable = true;
+                // ELD validity is per pin. Keep this topology usable so another connected SST pin can still match;
+                // NVRMFB will retry after the modeset that commits ELD for this display.
             }
         }
     }

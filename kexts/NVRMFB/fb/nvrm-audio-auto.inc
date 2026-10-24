@@ -59,6 +59,17 @@ void NVRMNVDAFramebuffer::publishDisplayAudioProperties()
     if (fAudioCall) scheduleCall(fAudioCall, 0);
 }
 
+void NVRMNVDAFramebuffer::refreshDisplayAudioProperties()
+{
+    NVRMDisplayGate gate;
+    if (fInternal || fDpyLost || fEdidSize < 128 || OSAddAtomic(0, &fStopping)) return;
+    if (!fAudioCall) fAudioCall = nvrmfbCall(audioFire, this);
+    if (!fAudioCall) return;
+    ++fAudioGeneration;
+    fAudioAttempt = 0;
+    scheduleCall(fAudioCall, 0);
+}
+
 bool NVRMNVDAFramebuffer::audioReady(void *target, void *, IOService *, IONotifier *)
 {
     auto me = static_cast<NVRMNVDAFramebuffer *>(target);

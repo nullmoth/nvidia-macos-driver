@@ -27,9 +27,14 @@ connected external displays, port-number follows the NVIDIA HDA pin mapping
 availability, generation and physical index are exposed as NVRMFBDisplayAudio*
 diagnostics.
 
-Startup, service/codec readiness, hotplug and successful head wake refresh the
-mapping. Unmatched non-MST endpoints retry at 300 ms, at most six times after
-the initial request. Stop removes readiness notifications and drains the worker.
+Startup, service/codec readiness, hotplug, successful NVKMS mode commits and
+successful head wake refresh the mapping. A mode-commit refresh runs on the
+existing asynchronous worker, after NVKMS has had a chance to publish the HDA
+ELD; it does not wait for the next display-connect event. An invalid ELD marks
+that pin unavailable for matching without invalidating other pins in the same
+topology snapshot. Unmatched non-MST endpoints retry at 300 ms, at most six
+times after the initial request. Stop removes readiness notifications and
+drains the worker.
 
 Portable checks (clang++ with AddressSanitizer and UndefinedBehaviorSanitizer):
 
