@@ -491,8 +491,19 @@ static int nvmtl_skip_empty_on(void) {
             [nvmtl_quarantined_parts addObject:p];
         }
     }
-    if (!error) {
-        for (dispatch_block_t action in _presentations) action();
+    if (!error && _presentations.count) {
+        // Present on a serial queue of its own, in order, not on the execution queue: -[CAMetalDrawable present] takes the
+        // layer's lock, which -[CAMetalLayer nextDrawable] holds on the app's thread, and a hook inside nextDrawable (the
+        // Metal HUD creating its font texture) waits for a command buffer queued behind this one. WAS: inline here, a
+        // deadlock (No Man's Sky with MetalForceHudEnabled: white window, main thread in waitUntilCompleted, the execution
+        // queue in present). NVMTL_PRESENT_INLINE=1: the old inline presents.
+        static dispatch_queue_t presentQ; static int inl = -1; static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            const char *e = getenv("NVMTL_PRESENT_INLINE"); inl = e && *e && *e != '0';
+            presentQ = dispatch_queue_create("nvmtl.present", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
+        });
+        if (inl) { for (dispatch_block_t action in _presentations) action(); }
+        else { NSArray *actions = [_presentations copy]; dispatch_async(presentQ, ^{ for (dispatch_block_t action in actions) action(); }); }
     }
     [_presentations removeAllObjects]; _present = nil;
     double deviceStart = 0, deviceEnd = 0;
