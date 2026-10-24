@@ -11,7 +11,8 @@ FLAGS=(-arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -mkernel -nostdinc -I
        -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT -DPRODUCT_NAME=NMHDA -DMODULE_VERSION=1.0.0
        -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common -O2 -Wall -Wno-unused-parameter -g0)
 xcrun clang++ "${FLAGS[@]}" -c nmhda.cpp -o "$OUT/nmhda.o"
-xcrun clang++ "${FLAGS[@]}" -c "$SDK/Library/plugin_start.cpp" -o "$OUT/plugin_start.o"
+# Lilu's bundled startup source carries its own conversion and shadow warnings.
+xcrun clang++ "${FLAGS[@]}" -Wno-sign-conversion -Wno-shadow -c "$SDK/Library/plugin_start.cpp" -o "$OUT/plugin_start.o"
 xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xlinker -kext -L"$MKSDK/Library/x86_64" -lkmodc++ -lkmod -lcc_kext \
   "$OUT/nmhda.o" "$OUT/plugin_start.o" -o "$OUT/NMHDA.kext/Contents/MacOS/NMHDA"
 cp Info.plist "$OUT/NMHDA.kext/Contents/Info.plist"

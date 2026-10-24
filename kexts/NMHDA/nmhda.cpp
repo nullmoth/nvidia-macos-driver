@@ -4,12 +4,20 @@
 // AppleALC applies its shared Intel device-ID spoof, AppleHDA's native
 // HwFactoryPrefixTranslation restores the NVIDIA ID before codec probing.
 
+// Lilu's bundled headers trigger these warnings; NMHDA source remains checked.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wsign-conversion"
+#pragma clang diagnostic ignored "-Wshadow"
 #include <Headers/plugin_start.hpp>
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_util.hpp>
+#pragma clang diagnostic pop
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Woverloaded-virtual"
 #include <IOKit/pci/IOPCIDevice.h>
+#pragma clang diagnostic pop
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSNumber.h>
