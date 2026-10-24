@@ -415,12 +415,24 @@ public:
                 if (me->fRegLock) IOLockUnlock(me->fRegLock);
                 return;
             }
+            // 2.5.3 field logs (desktops whose only GPU is this card): no head by the deadline and no other GPU showing the
+            // desktop. With the name back, CoreDisplay asked this GPU's Metal plugin for WindowServer's device, the plugin
+            // refuses WindowServer on a headless GPU, and WindowServer aborted at start ("Failed to create MetalDevice")
+            // every ten seconds. With no other GPU there is no display to hand frames to, so the name stays withheld:
+            // WindowServer runs unaccelerated on the firmware framebuffer and the desktop comes up, as before the check.
+            if (!other && strcmp(owner, "NMIntelFB") != 0) {
+                ALOG("headless check: no NVIDIA display head after %u s and no other GPU shows the desktop (%s) -- "
+                     "MetalPluginName stays withheld so WindowServer starts on the firmware framebuffer",
+                     me->fHeadlessWaited, owner);
+                if (me->fRegLock) IOLockUnlock(me->fRegLock);
+                return;
+            }
             me->setProperty("MetalPluginName", me->fMetalPlugin);
             me->setProperty("NVAccelHeadless", kOSBooleanTrue);
             gNvHeadless = 1;
             ALOG("headless check: %s after %u s -- MetalPluginName restored WITHOUT arming: apps get "
                  "the NVIDIA Metal device, WindowServer stays on the display's GPU (%s)",
-                 early ? "no display on any NVIDIA connector and another GPU shows the desktop" : "no NVIDIA display head",
+                 early ? "no display on any NVIDIA connector and another GPU shows the desktop" : "no NVIDIA display head, another GPU shows the desktop",
                  me->fHeadlessWaited, owner);
             // Not a good start for the boot guard: a card whose connectors carry no display clears the guard in the
             // framebuffer's own enumeration (nvrm-fb.cpp), with the connector list as evidence. Reaching this deadline
