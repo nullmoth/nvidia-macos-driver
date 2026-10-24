@@ -8332,6 +8332,17 @@ int nvmtl_vk_cmd_copy_image_sub3(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uin
     }
     const uint32_t sw = nvmtl_lvl(src->w, sl), sh = nvmtl_lvl(src->h, sl);
     const uint32_t dw = nvmtl_lvl(dst->w, dl), dh = nvmtl_lvl(dst->h, dl);
+    {   /* Metal sizes a block-compressed copy in whole blocks: the 1x1 and 2x2 mips of a BC texture are copied as 4x4
+         * (Unity's mip chains, Cult of the Lamb's font atlases). Vulkan wants the extent to end at the mip's edge instead;
+         * clamp a region that runs past the edge by less than one block. WAS: "region outside selected mip extent". */
+        uint32_t bw = 1, bh = 1, bb = 0;
+        if (nvmtl_vk_format_block(src->fmt, &bw, &bh, &bb) && (bw > 1 || bh > 1)) {
+            const uint32_t rw = (sw + bw - 1) / bw * bw, rh = (sh + bh - 1) / bh * bh;
+            const uint32_t rdw = (dw + bw - 1) / bw * bw, rdh = (dh + bh - 1) / bh * bh;
+            if (sx < sw && dx < dw && w <= rw - sx && w <= rdw - dx) { if (w > sw - sx) w = sw - sx; if (w > dw - dx) w = dw - dx; }
+            if (sy < sh && dy < dh && h <= rh - sy && h <= rdh - dy) { if (h > sh - sy) h = sh - sy; if (h > dh - dy) h = dh - dy; }
+        }
+    }
     if (sx > sw || w > sw - sx || sy > sh || h > sh - sy
         || dx > dw || w > dw - dx || dy > dh || h > dh - dy) {
         nvlog("copy_image_sub: region outside selected mip extent");
