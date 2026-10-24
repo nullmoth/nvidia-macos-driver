@@ -1,14 +1,22 @@
 NullMoth NVIDIA Metal driver — third-party components
 
+The licence texts below ship in the package's licenses/ folder and are installed to /Library/NullMoth/licenses.
+
 translator/  Based on metal2vulkan, Copyright (C) Anees Iqbal
              https://github.com/steelbrain/metal2vulkan
              Licensed under the GNU Lesser General Public License v3.0 or later
              (translator/LICENSE, translator/COPYING). Modifications by NullMoth Systems
              are released under the same licence.
 
-kexts/       Builds against NVIDIA's open GPU kernel modules (r610), MIT/GPL-2.0,
-             https://github.com/NVIDIA/open-gpu-kernel-modules
+kexts/       Builds against NVIDIA's open GPU kernel modules 615.78.08, MIT (with GPL-2.0 alternatives
+             where noted), https://github.com/NVIDIA/open-gpu-kernel-modules
+             (licenses/NVIDIA-open-gpu-kernel-modules-COPYING.txt).
 
-NVK          Vulkan driver from Mesa (MIT). NullMoth's changes ship as patches.
+NVK          Vulkan driver from Mesa, MIT (licenses/Mesa-license.rst). NullMoth's changes ship as patches.
 
-GSP firmware Redistributed unmodified under NVIDIA's firmware licence.
+GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images from NVIDIA's 615.78.08 driver,
+             redistributed unmodified under NVIDIA's licence (licenses/NVIDIA-firmware-LICENCE.txt), the same
+             terms under which linux-firmware redistributes these images.
+
+air-runtime  LLVM (Apache-2.0 with LLVM exceptions) and Zstandard (BSD-3-Clause); their licence texts are in
+             NVMTLDriver.bundle/Contents/Resources/air-runtime.

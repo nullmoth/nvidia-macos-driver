@@ -194,7 +194,7 @@ RUNTIME_PREFLIGHT="$SELF/nullmoth-runtime-check.sh"
 /bin/bash "$RUNTIME_PREFLIGHT" "$HERE" "$v" || die "userland runtime cannot load on this macOS version"
 
 require_install_directory() {
-  local metadata permissions entry
+  local metadata permissions entry listing grants
   [ ! -L "$1" ] && [ -d "$1" ] || die "installer parent must be a real directory (no driver changes made)"
   metadata=$(stat -f '%u %Lp' "$1" 2>/dev/null) || die "cannot verify installer parent ownership"
   case "$metadata" in
@@ -203,9 +203,17 @@ require_install_directory() {
   esac
   permissions=${metadata#* }
   [ $((8#$permissions & 022)) -eq 0 ] || die "installer parent is writable by another account or group (no driver changes made)"
-  entry=$(ls -lde "$1" 2>/dev/null | head -1 | awk '{print $1}')
+  listing=$(ls -lde "$1" 2>/dev/null)
+  entry=$(printf '%s\n' "$listing" | head -1 | awk '{print $1}')
   [ -n "$entry" ] || die "cannot inspect installer parent access controls"
-  case "$entry" in *+*) die "installer parent has unreviewed access-control entries (no driver changes made)";; esac
+  # A deny entry only takes access away (some Macs carry "group:everyone deny delete" on /Library); an allow entry can
+  # hand another account write access the mode bits above never show, so any allow entry still stops the install and
+  # is named in the log.
+  case "$entry" in *+*)
+    grants=$(printf '%s\n' "$listing" | tail -n +2 | grep -E '^[[:space:]]*[0-9]+:.*[[:space:]]allow[[:space:]]' || true)
+    [ -z "$grants" ] || die "installer parent $1 has access-control entries that allow access ($(printf '%s' "$grants" | tr -s ' \n' ' ')) (no driver changes made)"
+    ;;
+  esac
 }
 
 # The installer owns this guard from preflight through commit/rollback. Never
@@ -274,6 +282,24 @@ if [ "$PRIMARY" = 1 ]; then
   codesign --verify --strict "$SELECTOR_SOURCE" || die "primary selector signature invalid; no files changed"
   KEXTS="$KEXTS NVPrimarySelector"
 fi
+# kmutil builds the auxiliary collection from every kext in /Library/Extensions, so one that names a dependency this
+# macOS lacks stops the build for all of them. 2.5.3 report: a Realtek USB Wi-Fi kext (RtWlanU1827) needed
+# com.apple.iokit.IOUSBFamily, which macOS 15 no longer has, and the stop said only "test kernel collection build
+# failed". This names that kext, where it is, and what to do; it is not one of ours, so it is never moved or changed here.
+kmutil_blocker() {  # <kmutil log> <extensions folder>: prints a sentence for the user, or nothing
+  local log=$1 ext=$2 line id dep path x
+  line=$(grep -m1 -oE "Unable to resolve dependencies: '[^']+' names a dependency on '[^']+'" "$log" 2>/dev/null) || return 0
+  id=$(printf '%s' "$line" | sed -E "s/^Unable to resolve dependencies: '([^']+)'.*/\1/")
+  dep=$(printf '%s' "$line" | sed -E "s/.*names a dependency on '([^']+)'$/\1/")
+  case "$id" in com.nullmoth.*|org.hackintosh.experimental.NVPrimarySelector) return 0;; esac
+  path=""
+  for x in "$ext"/*.kext; do
+    [ -f "$x/Contents/Info.plist" ] || continue
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$x/Contents/Info.plist" 2>/dev/null)" = "$id" ] && { path=$x; break; }
+  done
+  printf '%s needs %s, which this macOS does not have, so macOS cannot build a kernel collection while it is there. It is not part of this driver. Move %s out of %s (or load it from OpenCore instead), then run 1401 again' \
+    "$id" "$dep" "${path:-the kext with that identifier}" "$ext"
+}
 step "3. test kernel collection"
 T=$(mktemp -d /var/tmp/nullmoth.XXXX) && [ -n "$T" ] && mkdir -p "$T/repo" || die "create private preflight directory"
 for x in "$EXT"/*.kext; do [ -d "$x" ] || continue; n=$(basename "$x" .kext); case " $KEXTS " in *" $n "*) ;; *) cp -R "$x" "$T/repo/" || die "stage third-party kext $n";; esac; done
@@ -284,7 +310,7 @@ if [ "$PRIMARY" = 1 ]; then
 fi
 # macOS 26 kmutil silently skips kexts not owned by root ("No binaries or codeless kexts were provided").
 chown -R root:wheel "$T/repo" && chmod -R go-w "$T/repo" || die "preflight kext permissions"
-kmutil create -n aux --volume-root / ${KARG[@]+"${KARG[@]}"} -B $KB -S $KS --repository "$T/repo" -A "$T/aux.kc" -z >"$T/kmutil.log" 2>&1 || { tail -20 "$T/kmutil.log"; die "test kernel collection build failed"; }
+kmutil create -n aux --volume-root / ${KARG[@]+"${KARG[@]}"} -B $KB -S $KS --repository "$T/repo" -A "$T/aux.kc" -z >"$T/kmutil.log" 2>&1 || { tail -20 "$T/kmutil.log"; why=$(kmutil_blocker "$T/kmutil.log" "$EXT"); die "test kernel collection build failed${why:+: $why}"; }
 [ -s "$T/aux.kc" ] || die "test kernel collection build produced no output"
 INS=$(kmutil inspect -a x86_64 -A "$T/aux.kc" 2>/dev/null) || die "cannot inspect the test kernel collection"
 for k in $KEXTS; do printf '%s\n' "$INS" | grep -oE '(com\.nullmoth\.[A-Za-z0-9]+|org\.hackintosh\.experimental\.NVPrimarySelector)' | grep -Fxq "$(primary_bundle_id "$k")" || { tail -20 "$T/kmutil.log"; die "kmutil refused com.nullmoth.$k (log above)"; }; done
@@ -409,6 +435,9 @@ rm -rf "$T"
 ok "installed"
 # Record the version for the app's update check. Only the app's setup wrote it, so installs from the release tar left it
 # empty and the app kept offering the version already installed (10-10 chat, 1.10.0).
+# the licences and notices of everything this package carries, beside the driver they cover
+if [ -d "$HERE/licenses" ]; then rm -rf /Library/NullMoth/licenses && ditto "$HERE/licenses" /Library/NullMoth/licenses \
+  && chmod -R go-w /Library/NullMoth/licenses || echo "   note: the licence texts could not be copied to /Library/NullMoth/licenses"; fi
 if [ -f "$HERE/VERSION" ]; then mkdir -p /Library/NullMoth && tr -cd '0-9.\n' < "$HERE/VERSION" | head -n 1 > /Library/NullMoth/driver-version.tmp \
   && chmod 644 /Library/NullMoth/driver-version.tmp && mv /Library/NullMoth/driver-version.tmp /Library/NullMoth/driver-version; fi
 
