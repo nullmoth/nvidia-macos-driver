@@ -2082,10 +2082,14 @@ mod b52_equiv_tests {
 pub(crate) fn inline_and_forward_object_fields(san_ll: &str) -> Option<String> {
     let inlined = try_inline(san_ll, None).unwrap_or_else(|| san_ll.to_string());
     let mut items = parse_items(&inlined)?;
+    let named_types = inlined.lines().filter_map(|line| {
+        let (name, definition) = line.split_once(" = type ")?;
+        Some((name.to_string(), super::parse::parse_type(definition).ok()?))
+    }).collect::<HashMap<_, _>>();
     let mut changed = inlined != san_ll;
     for item in &mut items {
         let Item::Func(f) = item else { continue };
-        if forward_object_fields_in(f) {
+        if forward_object_fields_in(f, &named_types) {
             changed = true;
         }
         if fold_switches_to_branches_in(f) {
@@ -2250,15 +2254,13 @@ fn fold_single_value_phis_in(f: &mut FuncBlock) -> bool {
     changed
 }
 
-fn forward_object_fields_in(f: &mut FuncBlock) -> bool {
+fn forward_object_fields_in(f: &mut FuncBlock, named_types: &HashMap<String, super::ir::LlType>) -> bool {
     let first_label = f
         .body
         .iter()
         .enumerate()
         .skip(1)
-        .find(|(_, l)| {
-            !l.starts_with(' ') && !l.starts_with('\t') && l.split_whitespace().next().is_some_and(|w| w.ends_with(':'))
-        })
+        .find(|(_, line)| super::lex::strip_comment(line).trim().ends_with(':'))
         .map(|(i, _)| i)
         .unwrap_or(f.body.len());
     let mut allocas: HashSet<String> = HashSet::new();
@@ -2318,9 +2320,103 @@ fn forward_object_fields_in(f: &mut FuncBlock) -> bool {
             }
         }
     }
+    // Extending the entry-only rule needs an alias proof as well as dominance.
+    // Accept only direct, constant-index fields of the same aggregate type.
+    // An address used by anything else can hide a clobber of any field.
+    let mut nonentry_unsafe = escaped.clone();
+    let mut root_types = HashMap::<String, String>::new();
+    let mut field_paths = HashMap::<String, (String, Vec<i64>)>::new();
+    for (field, (root, indices)) in &field_of {
+        let path = indices.split(',').map(|index| {
+            let words = index.split_whitespace().collect::<Vec<_>>();
+            (words.len() == 2 && words[0].starts_with('i'))
+                .then(|| words[1].parse::<i64>().ok()).flatten()
+        }).collect::<Option<Vec<_>>>();
+        if let Some(path) = path.filter(|path| path.first() == Some(&0)) {
+            field_paths.insert(field.clone(), (root.clone(), path));
+        } else {
+            nonentry_unsafe.insert(root.clone());
+        }
+        if !root.trim_start_matches('%').chars().all(is_name_char)
+            || !field.trim_start_matches('%').chars().all(is_name_char)
+        {
+            nonentry_unsafe.insert(root.clone());
+        }
+    }
+    let paths = field_paths.values().collect::<Vec<_>>();
+    for (root, path) in &paths {
+        if paths.iter().any(|(other_root, other)| {
+            other_root == root && other != path
+                && (other.starts_with(path) || path.starts_with(other))
+        }) {
+            nonentry_unsafe.insert(root.clone());
+        }
+    }
+    let mut lifetime_casts = HashSet::new();
+    for line in &f.body {
+        let Some((name, rest)) = line.trim().split_once(" = ") else { continue };
+        if rest.starts_with("bitcast ") && (allocas.iter().any(|root| mentions(rest, root))
+            || field_of.keys().any(|field| mentions(rest, field)))
+            && f.body.iter().filter(|use_line| mentions(use_line, name))
+                .all(|use_line| def_lhs(use_line) == Some(name)
+                    || is_local_lifetime_call(use_line))
+        {
+            lifetime_casts.insert(name.to_string());
+        }
+        let Some((root, _)) = field_of.get(name) else { continue };
+        let Some(gep) = rest.strip_prefix("getelementptr inbounds ")
+            .or_else(|| rest.strip_prefix("getelementptr ")) else { continue };
+        let Some((source_type, _)) = gep.split_once(", ptr ") else { continue };
+        if !field_paths.get(name).is_some_and(|(_, path)| {
+            pointer_field_type(source_type, path, named_types)
+        }) {
+            nonentry_unsafe.insert(root.clone());
+        }
+        if root_types.insert(root.clone(), source_type.to_string())
+            .is_some_and(|previous| previous != source_type)
+        {
+            nonentry_unsafe.insert(root.clone());
+        }
+    }
+    for line in &f.body {
+        let text = line.trim();
+        let lhs = def_lhs(line);
+        let locals = text.split('%').skip(1).map(|tail| {
+            format!("%{}", tail.chars().take_while(|c| is_name_char(*c)).collect::<String>())
+        }).collect::<HashSet<_>>();
+        let used_roots = locals.iter().filter_map(|name| {
+            if allocas.contains(name) { Some(name.as_str()) }
+            else { field_of.get(name).map(|(root, _)| root.as_str()) }
+        }).collect::<HashSet<_>>();
+        for root in used_roots {
+            let root_used = locals.contains(root);
+            let fields = locals.iter().filter(|field| field_of.get(*field).is_some_and(|(owner, _)| owner == root))
+                .map(String::as_str).collect::<Vec<_>>();
+            if !root_used && fields.is_empty() { continue; }
+            let own_alloca = lhs == Some(root) && text.contains(" = alloca ");
+            let field_definition = lhs.is_some_and(|name| field_of.get(name).is_some_and(|(owner, _)| owner == root));
+            let lifetime = is_local_lifetime_call(text)
+                || lhs.is_some_and(|name| lifetime_casts.contains(name));
+            let field_access = !root_used && !text.contains("volatile") && !text.contains("atomic")
+                && fields.iter().all(|field| {
+                    // A field address may only be a load/store destination;
+                    // passing or storing the address itself escapes the object.
+                    let Some((_, address)) = text.rsplit_once(", ptr ") else { return false };
+                    let address = address.split(',').next().unwrap_or("").trim();
+                    address == *field && (text.starts_with("store ptr ")
+                        || text.contains(" = load ptr,") || text.contains(" = load ptr addrspace("))
+                        && !mentions(text.split_once(", ptr ").map(|(prefix, _)| prefix).unwrap_or(text), field)
+                });
+            if !(own_alloca || field_definition || lifetime || field_access) {
+                nonentry_unsafe.insert(root.to_string());
+            }
+        }
+    }
+    let flow = local_field_flow(f);
     // stores of pointers into fields: key -> (value, line)
     let mut stores: HashMap<(String, String), Vec<(String, usize)>> = HashMap::new();
     let mut any_store: HashMap<(String, String), usize> = HashMap::new();
+    let mut canonical_stores = HashMap::<(String, Vec<i64>), usize>::new();
     for (i, line) in f.body.iter().enumerate() {
         let t = line.trim();
         let Some(stored) = t.strip_prefix("store ") else { continue };
@@ -2328,6 +2424,9 @@ fn forward_object_fields_in(f: &mut FuncBlock) -> bool {
         let addr = addr.split(',').next().unwrap_or("").trim();
         let Some(key) = field_of.get(addr).cloned() else { continue };
         *any_store.entry(key.clone()).or_default() += 1;
+        if let Some(path) = field_paths.get(addr) {
+            *canonical_stores.entry(path.clone()).or_default() += 1;
+        }
         // `ptr addrspace(N) %v` first: "ptr " also prefixes it, and read that way the value was "addrspace(2) %v", so a
         // buffer pointer kept in an object field was never forwarded (Blender Eevee's light_cull_buf, re-read in the light loop)
         let value = value.trim();
@@ -2354,9 +2453,17 @@ fn forward_object_fields_in(f: &mut FuncBlock) -> bool {
             continue;
         }
         let Some([(value, at)]) = stores.get(key).map(|v| v.as_slice()) else { continue };
-        if *at >= first_label || *at >= i {
+        if *at >= i {
             continue;
         }
+        if *at >= first_label && (nonentry_unsafe.contains(&key.0)
+            || field_paths.get(addr).and_then(|path| canonical_stores.get(path)) != Some(&1)
+            || !flow.as_ref().is_some_and(|(positions, dominance)| {
+                let from = positions[*at]; let to = positions[i];
+                dominance[from].is_some() && dominance[to].is_some()
+                    && (from == to || crate::dominators::dominates_interval(dominance, from, to))
+            }))
+        { continue; }
         value_map.insert(name.to_string(), value.clone());
         drop.insert(i);
     }
@@ -2386,6 +2493,54 @@ fn forward_object_fields_in(f: &mut FuncBlock) -> bool {
         .map(|(_, line)| rename_line(&line, &resolved, &empty))
         .collect();
     true
+}
+
+fn pointer_field_type(source: &str, path: &[i64], named: &HashMap<String, super::ir::LlType>) -> bool {
+    use super::ir::LlType;
+    let Ok(mut ty) = super::parse::parse_type(source) else { return false };
+    for index in path.iter().skip(1) {
+        let mut seen = HashSet::new();
+        while let LlType::Named(name) = &ty {
+            if !seen.insert(name.clone()) { return false; }
+            let Some(resolved) = named.get(name) else { return false };
+            ty = resolved.clone();
+        }
+        let Ok(index) = usize::try_from(*index) else { return false };
+        ty = match ty {
+            LlType::Struct(fields) => match fields.get(index) { Some(field) => field.clone(), None => return false },
+            LlType::Array(element, count) if index < count as usize => *element,
+            _ => return false,
+        };
+    }
+    matches!(ty, LlType::Ptr(_))
+}
+
+fn local_field_flow(f: &FuncBlock) -> Option<(Vec<usize>, Vec<Option<(usize, usize)>>)> {
+    if f.body.iter().any(|line| super::lex::strip_comment(line).trim().ends_with(':')
+        && block_label_id(line).is_none())
+    { return None; }
+    let lines = f.body.iter().map(String::as_str).collect::<Vec<_>>();
+    let blocks = super::cfg::split_source_body_blocks(&lines, "%m2v.field.entry".to_string(), &HashMap::new()).ok()?;
+    if blocks.iter().any(|block| block.typed.is_none()) { return None; }
+    let names = blocks.iter().enumerate().map(|(index, block)| (block.name.clone(), index)).collect::<HashMap<_, _>>();
+    let successors = blocks.iter().map(|block| {
+        block.typed.as_ref()?.terminator.successors().into_iter()
+            .map(|name| names.get(name).copied()).collect::<Option<Vec<_>>>()
+    }).collect::<Option<Vec<_>>>()?;
+    let predecessors = crate::dominators::build_predecessors(&successors);
+    let (_, dominance, _) = crate::dominators::dominance(&successors, &predecessors);
+    let mut current = 0;
+    let positions = f.body.iter().map(|line| {
+        if let Some(label) = block_label_id(line) { current = *names.get(&format!("%{label}"))?; }
+        Some(current)
+    }).collect::<Option<Vec<_>>>()?;
+    Some((positions, dominance))
+}
+
+fn is_local_lifetime_call(line: &str) -> bool {
+    parse_call(super::lex::strip_comment(line)).is_some_and(|call| matches!(call.callee.as_str(),
+        "@llvm.lifetime.start.p0" | "@llvm.lifetime.end.p0"
+        | "@llvm.lifetime.start.p0i8" | "@llvm.lifetime.end.p0i8"))
 }
 
 /// `text` names the value `name` (not just a longer name starting with it)
