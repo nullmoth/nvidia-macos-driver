@@ -96,6 +96,7 @@ launchctl bootout system/com.nullmoth.bootguard 2>/dev/null || true
 rm -f /Library/LaunchDaemons/com.nullmoth.bootguard.plist /Library/NullMoth/bootguard.sh || die "cannot remove the boot-guard job"
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-starts 2>/dev/null || true
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-ok 2>/dev/null || true
+nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-backlight 2>/dev/null || true
 if [ "$REMOVE_KC" = 1 ]; then
   rm -f "$KC" "$KC.nullmoth-install-new" "$KC.nullmoth-update-new" "$KC.nullmoth-remove-new" || die "cannot remove the auxiliary collection"
 elif [ "$CANDIDATE" = "$NEWKC" ]; then
