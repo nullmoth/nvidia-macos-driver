@@ -5,6 +5,7 @@
  */
 
 #include "nv-xnu.h"
+#include "nvrm_utilization.h"
 #include <IOKit/IOLib.h>
 
 extern "C" {
@@ -14,6 +15,7 @@ extern "C" {
 #include "nv-kernel-rmapi-ops.h"
 #include "class/cl0080.h"
 #include "class/cl2080.h"
+#include "ctrl/ctrl2080/ctrl2080perf.h"
 
 void NV_API_CALL rm_kernel_rmapi_op(nvidia_stack_t *sp, void *ops_cmd);
 }
@@ -87,6 +89,74 @@ static NvV32 fbiFree(NvU32 hRoot, NvU32 hParent, NvU32 hObject)
     ops.params.free.hObjectOld    = hObject;
     rm_kernel_rmapi_op(NULL, &ops);
     return ops.params.free.status;
+}
+
+struct NvrmUtilizationState {
+    NvU32 hClient, hDevice, hSub;
+    NV2080_CTRL_PERF_GET_GPUMON_PERFMON_UTIL_SAMPLES_V2_PARAMS ring;
+};
+
+static void utilizationClose(NvrmUtilizationState *state)
+{
+    // Freeing the root recursively releases the device and subdevice as well.
+    if (state->hClient) fbiFree(state->hClient, state->hClient, state->hClient);
+    state->hClient = state->hDevice = state->hSub = 0;
+}
+
+extern "C" void nvrm_free_utilization(void **opaque)
+{
+    if (!opaque || !*opaque) return;
+    NvrmUtilizationState *state = (NvrmUtilizationState *)*opaque;
+    utilizationClose(state);
+    IOFree(state, sizeof(*state));
+    *opaque = nullptr;
+}
+
+extern "C" bool nvrm_query_utilization(unsigned int gpuId, void **opaque, struct NVRMUtilization *sample)
+{
+    if (!opaque || !sample) return false;
+    NvrmUtilizationState *state = (NvrmUtilizationState *)*opaque;
+    if (!state) {
+        // The PERFMON ring is about 56 KB; it must never be put on a kernel stack.
+        state = (NvrmUtilizationState *)IOMalloc(sizeof(*state));
+        if (!state) return false;
+        fbiZero(state, sizeof(*state));
+        *opaque = state;
+    }
+
+    if (!state->hSub) {
+        FbiAttachIds at;
+        NV0080_ALLOC_PARAMETERS dp;
+        NV2080_ALLOC_PARAMETERS sp;
+        NvV32 st = fbiAlloc(0, 0, kClsRootClient, nullptr, 0, &state->hClient);
+        if (st != 0 || !state->hClient) goto fail;
+        fbiZero(&at, sizeof at);
+        at.gpuIds[0] = gpuId;
+        at.gpuIds[1] = kGpuInvalidId;
+        st = fbiControl(state->hClient, state->hClient, kCmdGpuAttachIds, &at, sizeof at);
+        if (st != 0) goto fail;
+        fbiZero(&dp, sizeof dp);
+        dp.deviceId = 0;
+        dp.hClientShare = state->hClient;
+        st = fbiAlloc(state->hClient, state->hClient, kClsDevice0, &dp, sizeof dp, &state->hDevice);
+        if (st != 0 || !state->hDevice) goto fail;
+        fbiZero(&sp, sizeof sp);
+        st = fbiAlloc(state->hClient, state->hDevice, kClsSubdevice0, &sp, sizeof sp, &state->hSub);
+        if (st != 0 || !state->hSub) goto fail;
+    }
+
+    fbiZero(&state->ring, sizeof(state->ring));
+    state->ring.type = NV2080_CTRL_GPUMON_SAMPLE_TYPE_PERFMON_UTIL;
+    state->ring.bufSize = sizeof(state->ring.samples);
+    if (fbiControl(state->hClient, state->hSub,
+                   NV2080_CTRL_CMD_PERF_GET_GPUMON_PERFMON_UTIL_SAMPLES_V2,
+                   &state->ring, sizeof(state->ring)) != 0) return false;
+    return nvrmUtilizationLatestSample(state->ring, sample);
+
+fail:
+    // Do not leave a partially allocated client behind after setup fails.
+    utilizationClose(state);
+    return false;
 }
 
 extern "C" bool nvrm_query_vram_kb(NvU32 gpuId, NvU32 *pRamKb, NvU32 *pTotalKb, NvU32 *pStatus)

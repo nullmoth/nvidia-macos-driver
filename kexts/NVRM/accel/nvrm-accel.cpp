@@ -27,6 +27,7 @@
 #include "IOAccelTask.h"
 #include "IOAccelMemoryMap.h"
 #include "../nvrm_gpuva_abi.h"
+#include "../nvrm_utilization_abi.h"
 class NVMemoryMap;
 static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
                                            unsigned long long len, unsigned long long align);
@@ -70,12 +71,15 @@ static constexpr unsigned kNvTempMaxC        = 125;
 static constexpr unsigned kNvTempIntervalMs  = 250;
 // Nothing touches BAR0 until the GPU has settled: bring-up still runs for a while after start().
 static constexpr unsigned kNvTempFirstMs     = 5000;
+static constexpr unsigned kNvUtilIntervalMs  = 1000;
+static constexpr uint64_t kNvUtilMaxAgeNs    = 5000000000ULL;
 
 extern "C" {   // kern/thread_call.h and kern/clock.h clash with the family headers here, so the KPIs are declared by hand
 struct thread_call *thread_call_allocate(void (*func)(void *, void *), void *param0);
 int thread_call_enter_delayed(struct thread_call *call, uint64_t deadline);
 void clock_interval_to_deadline(uint32_t interval, uint32_t scale_factor, uint64_t *result);
 uint64_t mach_absolute_time(void);
+uint64_t mach_continuous_time(void);
 void absolutetime_to_nanoseconds(uint64_t abstime, uint64_t *result);
 void proc_selfname(char *buf, int size);
 }
@@ -280,6 +284,15 @@ public:
     int                 fTempC      = 0;
     UInt32              fTempFails  = 0;
     bool                fTempLogged = false;
+    // RM queries can sleep waiting for firmware. Keep them off the graphics work loop;
+    // the temperature timer only copies the most recent result into the registry.
+    IOWorkLoop         *fUtilLoop = nullptr;
+    IOTimerEventSource *fUtilTimer = nullptr;
+    IOService          *fUtilProvider = nullptr;
+    IOLock             *fUtilLock = nullptr;
+    NVRMUtilization     fUtil = {};
+    uint64_t            fUtilUpdated = 0;
+    bool                fUtilValid = false;
     IONotifier *fFBNote = nullptr;
     IONotifier *fIntelNote = nullptr;
     static NVAccel *gAccel;
@@ -723,6 +736,7 @@ public:
             enableFromHook("start");
             fPCI = OSDynamicCast(IOPCIDevice, provider);
             startTemperature();
+            startUtilization();
             ALOG("display machine framebuffer count after the family sweep = %u", fDM ? fDM->getFramebufferCount() : 0xFFFFFFFFu);
             fRegLock = IOLockAlloc();
             ALOG("multi-head: up to %u heads, registration lock %p%s", kNvMaxFB, fRegLock,
@@ -796,6 +810,7 @@ public:
         NVAccel *me = (NVAccel *)owner;
         if (!me) return;
         me->sampleTemperature();
+        me->publishStatistics();
         if (me->fTempTimer) me->fTempTimer->setTimeoutMS(kNvTempIntervalMs);
     }
 
@@ -819,23 +834,137 @@ public:
         fTempFails = 0;
         if (!fTempLogged) { fTempLogged = true; ALOG("temperature: first reading raw=0x%08x -> %u C", raw, val); }
         fTempC = (int)val;
-        publishTemperature((unsigned)fTempC);
+    }
+
+    void startUtilization() {
+#ifndef NMX_ACCEL
+        if (!fPCI || fUtilLoop) return;
+        fUtilLock = IOLockAlloc();
+        fUtilLoop = IOWorkLoop::workLoop();
+        fUtilTimer = IOTimerEventSource::timerEventSource(kIOTimerEventSourceOptionsPriorityWorkLoop,
+                                                        this, &NVAccel::utilTimerFired);
+        if (!fUtilLock || !fUtilLoop || !fUtilTimer ||
+            fUtilLoop->addEventSource(fUtilTimer) != kIOReturnSuccess) {
+            ALOG("utilization: cannot create sampling work loop");
+            stopUtilization();
+            return;
+        }
+        fUtilTimer->setTimeoutMS(kNvTempFirstMs);
+#endif
+    }
+
+    void stopUtilization() {
+        if (fUtilTimer) {
+            fUtilTimer->cancelTimeout();
+            // Removing the source takes the loop gate, so an in-flight RM query finishes
+            // before its provider reference and the cache lock can be released.
+            if (fUtilLoop && fUtilTimer->getWorkLoop()) fUtilLoop->removeEventSource(fUtilTimer);
+            // The callback may have rearmed itself while removal waited for the gate.
+            fUtilTimer->cancelTimeout();
+            fUtilTimer->release(); fUtilTimer = nullptr;
+        }
+        if (fUtilLoop) { fUtilLoop->release(); fUtilLoop = nullptr; }
+        if (fUtilProvider) { fUtilProvider->release(); fUtilProvider = nullptr; }
+        if (fUtilLock) { IOLockFree(fUtilLock); fUtilLock = nullptr; }
+        fUtilValid = false;
+    }
+
+    static void utilTimerFired(OSObject *owner, IOTimerEventSource *sender) {
+        NVAccel *me = (NVAccel *)owner;
+        me->sampleUtilization();
+        sender->setTimeoutMS(kNvUtilIntervalMs);
+    }
+
+    void sampleUtilization() {
+        if (fUtilProvider && fUtilProvider->isInactive()) {
+            fUtilProvider->release(); fUtilProvider = nullptr;
+        }
+        if (!fUtilProvider) {
+            // Match the RM service on this PCI device, rather than a global GPU 0.
+            OSIterator *clients = fPCI->getClientIterator();
+            if (clients) {
+                while (OSObject *o = clients->getNextObject()) {
+                    IOService *service = OSDynamicCast(IOService, o);
+                    if (service && service->metaCast("NVRM") && !service->isInactive()) {
+                        service->retain(); fUtilProvider = service; break;
+                    }
+                }
+                clients->release();
+            }
+        }
+        NVRMUtilization sample = {};
+        sample.version = NVRM_UTILIZATION_ABI_VERSION;
+        IOReturn status = kIOReturnNotAttached;
+        if (fUtilProvider && !fUtilProvider->isInactive()) {
+            const OSSymbol *fn = OSSymbol::withCStringNoCopy(NVRM_UTILIZATION_FN);
+            if (fn) {
+                status = fUtilProvider->callPlatformFunction(fn, false, &sample, nullptr, nullptr, nullptr);
+                fn->release();
+            }
+        }
+        IOLockLock(fUtilLock);
+        if (status == kIOReturnSuccess && sample.version == NVRM_UTILIZATION_ABI_VERSION &&
+            sample.timestamp && sample.gr <= 10000 && sample.fb <= 10000 &&
+            sample.nvenc <= 10000 && sample.nvdec <= 10000) {
+            // A successful query may return the same firmware sample. That must not
+            // indefinitely refresh a cached value after the GPU stops sampling.
+            if (!fUtilUpdated || sample.timestamp != fUtil.timestamp) {
+                fUtil = sample;
+                fUtilUpdated = mach_continuous_time();
+            }
+            fUtilValid = true;
+        } else {
+            fUtilValid = false;
+        }
+        IOLockUnlock(fUtilLock);
     }
 
     // Read-copy-modify-write: the family keeps 70-odd keys in this dictionary and replaces it
     // wholesale every 0.25-2 s, so the copy is taken from whatever is in it at this moment.
-    void publishTemperature(unsigned c) {
-        OSDictionary *cur = OSDynamicCast(OSDictionary, getProperty("PerformanceStatistics"));
+    void publishStatistics() {
+        OSObject *property = copyProperty("PerformanceStatistics");
+        OSDictionary *cur = OSDynamicCast(OSDictionary, property);
         OSDictionary *d = cur ? OSDynamicCast(OSDictionary, cur->copyCollection()) : nullptr;
+        if (property) property->release();
         if (!d) { d = OSDictionary::withCapacity(8); if (!d) return; }
-        OSNumber *n = OSNumber::withNumber((unsigned long long)c, 32);
-        if (n) { d->setObject("Temperature(C)", n); n->release(); setProperty("PerformanceStatistics", d); }
+        if (fTempC) {
+            OSNumber *n = OSNumber::withNumber((unsigned long long)fTempC, 32);
+            if (n) { d->setObject("Temperature(C)", n); n->release(); }
+        }
+#ifndef NMX_ACCEL
+        NVRMUtilization sample = {};
+        bool valid = false;
+        if (fUtilLock) {
+            IOLockLock(fUtilLock);
+            uint64_t age = 0;
+            if (fUtilValid) absolutetime_to_nanoseconds(mach_continuous_time() - fUtilUpdated, &age);
+            valid = fUtilValid && age <= kNvUtilMaxAgeNs;
+            sample = fUtil;
+            IOLockUnlock(fUtilLock);
+        }
+        const char *keys[] = { "Device Utilization %", "GPU Core Utilization %",
+                               "GPU Memory Utilization %", "GPU Video Engine Utilization %",
+                               "GPU Video Decode Utilization %" };
+        const unsigned values[] = { sample.gr, sample.gr, sample.fb, sample.nvenc, sample.nvdec };
+        for (unsigned i = 0; i < sizeof values / sizeof values[0]; i++) {
+            if (valid) {
+                OSNumber *n = OSNumber::withNumber((unsigned long long)((values[i] + 50) / 100), 32);
+                if (n) { d->setObject(keys[i], n); n->release(); }
+            } else {
+                // Missing telemetry is not an idle GPU; remove stale values instead of
+                // turning errors, sleep or an unsupported firmware command into 0%.
+                d->removeObject(keys[i]);
+            }
+        }
+#endif
+        setProperty("PerformanceStatistics", d);
         d->release();
     }
 
     virtual void stop(IOService *provider) APPLE_KEXT_OVERRIDE {
         ALOG("stop");
         stopTemperature();
+        stopUtilization();
         IOGraphicsAccelerator2::stop(provider);
     }
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) APPLE_KEXT_OVERRIDE;
