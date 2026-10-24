@@ -18,13 +18,17 @@ static void nvtrace_emit(const char *fmt, ...) __attribute__((format(printf, 1, 
 // Guard the call site: converting NSString arguments on every draw is expensive
 // even when the trace writer immediately returns without emitting anything.
 #define nvtrace(...) do { if (nvmtl_trace_on()) nvtrace_emit(__VA_ARGS__); } while (0)
+// A private lock, not @synchronized on the object: the object is the app's (a command buffer, an encoder), and an app that
+// holds @synchronized on it while it waits for the scheduled handler deadlocked against the Metal HUD, which asks for the ID
+// from that handler (Unity games with MetalForceHudEnabled: Soulstone Survivors hung on a black screen at start).
 static unsigned long long nvmtl_global_trace_id(id o) {
-    static char key; static unsigned long long next = 1;
-    @synchronized (o) {
-        NSNumber *n = objc_getAssociatedObject(o, &key);
-        if (!n) { n = @(__atomic_fetch_add(&next, 1, __ATOMIC_RELAXED)); objc_setAssociatedObject(o, &key, n, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
-        return n.unsignedLongLongValue;
-    }
+    static char key; static unsigned long long next = 1; static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+    os_unfair_lock_lock(&lock);
+    NSNumber *n = objc_getAssociatedObject(o, &key);
+    if (!n) { n = @(__atomic_fetch_add(&next, 1, __ATOMIC_RELAXED)); objc_setAssociatedObject(o, &key, n, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+    const unsigned long long id = n.unsignedLongLongValue;
+    os_unfair_lock_unlock(&lock);
+    return id;
 }
 @protocol NVMTLFunctionConstantInit
 - (instancetype)initWithName:(NSString *)name type:(NSUInteger)type index:(NSUInteger)index required:(BOOL)required;
