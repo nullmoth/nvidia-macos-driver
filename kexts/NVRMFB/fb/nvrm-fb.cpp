@@ -335,6 +335,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     void adoptSwappedDisplay();
     void clearDisplayAudioProperties();
     void publishDisplayAudioProperties();
+    void refreshDisplayAudioProperties();
     void publishDisplayAudioPropertiesNow();
     static void audioFire(thread_call_param_t, thread_call_param_t);
     thread_call_t fAudioCall = nullptr;
@@ -2662,6 +2663,7 @@ IOReturn NVRMNVDAFramebuffer::enableController()
 {
     FBLOG("enableController");
     const bool ok = applyMode();
+    if (ok) refreshDisplayAudioProperties();
     // A display that appeared after boot: tell the framework, through the connect handler it registered (fConnect),
     // that this connection is new. It has to happen after the mode set -- WindowServer re-probes a framebuffer that
     // has a mode, and firing it earlier leaves the display undetected -- so it is a delayed call.
@@ -2675,18 +2677,26 @@ IOReturn NVRMNVDAFramebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth
 {
     FBLOG("fb%u setDisplayMode 0x%x depth %d (current 0x%x)", fIndex, (unsigned)mode, (int)depth, (unsigned)fCurId);
     if (depth != 0) return kIOReturnUnsupportedMode;
+    IOReturn result;
     if (mode == kModeId) {
-        if (fCurId == kModeId) return applyMode() ? kIOReturnSuccess : kIOReturnError;
-        return switchMode(kModeId, fBootMode, fBootW, fBootH);
+        result = fCurId == kModeId
+            ? (applyMode() ? kIOReturnSuccess : kIOReturnError)
+            : switchMode(kModeId, fBootMode, fBootW, fBootH);
+    } else {
+        int i = dtIndex(mode);
+        if (i < 0) return kIOReturnUnsupportedMode;
+        if (mode == fCurId) {
+            result = fModeSet ? kIOReturnSuccess : (applyMode() ? kIOReturnSuccess : kIOReturnError);
+        } else {
+            struct NvKmsKapiDisplayMode m = {};
+            if (!edidModeFor(&fDT[i], &m)) dtToKapi(&fDT[i], &m);
+            const NvU32 w = fDT[i].horizontalScaled ? fDT[i].horizontalScaled : fDT[i].horizontalActive;
+            const NvU32 h = fDT[i].verticalScaled ? fDT[i].verticalScaled : fDT[i].verticalActive;
+            result = switchMode(mode, m, w, h);
+        }
     }
-    int i = dtIndex(mode);
-    if (i < 0) return kIOReturnUnsupportedMode;
-    if (mode == fCurId) return fModeSet ? kIOReturnSuccess : (applyMode() ? kIOReturnSuccess : kIOReturnError);
-    struct NvKmsKapiDisplayMode m = {};
-    if (!edidModeFor(&fDT[i], &m)) dtToKapi(&fDT[i], &m);
-    const NvU32 w = fDT[i].horizontalScaled ? fDT[i].horizontalScaled : fDT[i].horizontalActive;
-    const NvU32 h = fDT[i].verticalScaled ? fDT[i].verticalScaled : fDT[i].verticalActive;
-    return switchMode(mode, m, w, h);
+    if (result == kIOReturnSuccess) refreshDisplayAudioProperties();
+    return result;
 }
 void NVRMNVDAFramebuffer::dtToKapi(const IODetailedTimingInformationV2 *d, struct NvKmsKapiDisplayMode *m)
 {
