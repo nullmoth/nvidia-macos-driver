@@ -69,6 +69,17 @@ fn a_volatile_pointer_load_remains_observable() {
 }
 
 #[test]
+fn a_pointer_load_in_another_address_space_is_not_the_stored_ssa_value() {
+    let input = DOMINATING
+        .replace("%Capture = type { i32, ptr }", "%Capture = type { i32, ptr addrspace(2) }")
+        .replace("load ptr, ptr %field", "load ptr addrspace(2), ptr %field")
+        .replace("phi ptr [", "phi ptr addrspace(2) [")
+        .replace("load i32, ptr %p", "load i32, ptr addrspace(2) %p");
+    assert_keeps_pointer_load(&input, "%first = load ptr addrspace(2)");
+    assert_keeps_pointer_load(&input, "%later = load ptr addrspace(2)");
+}
+
+#[test]
 fn quoted_address_or_block_names_decline_the_new_alias_proof() {
     let input = DOMINATING.replace("%field", "%\"field\"")
         .replace("  %first = load ptr", "  %alias = bitcast ptr %\"field\" to ptr\n  store ptr %b, ptr %alias, align 8\n  %first = load ptr");

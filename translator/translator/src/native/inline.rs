@@ -2458,6 +2458,14 @@ fn forward_object_fields_in(f: &mut FuncBlock, named_types: &HashMap<String, sup
         }
         if *at >= first_label && (nonentry_unsafe.contains(&key.0)
             || field_paths.get(addr).and_then(|path| canonical_stores.get(path)) != Some(&1)
+            // A memory slot can reinterpret pointer address spaces. Replacing
+            // its load by the stored SSA value requires the same pointer type.
+            || !super::parse::parse_type_prefix(
+                f.body[*at].trim().strip_prefix("store ").unwrap_or("")
+            ).ok().is_some_and(|stored| {
+                matches!(stored, super::ir::LlType::Ptr(_))
+                    && super::parse::parse_type(&rest[..pos]).ok() == Some(stored)
+            })
             || !flow.as_ref().is_some_and(|(positions, dominance)| {
                 let from = positions[*at]; let to = positions[i];
                 dominance[from].is_some() && dominance[to].is_some()
