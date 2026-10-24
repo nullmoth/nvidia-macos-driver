@@ -3610,7 +3610,10 @@ static int nvmtl_vk_depth_create_full_lifetime_body(uint32_t w, uint32_t h, uint
     if (!mips) mips = 1;
     if (mtl_type == 5 && layers != 6) layers = 6;
     const int cube = mtl_type == 5 || mtl_type == 6;
-    memset(out, 0, sizeof *out); out->w = w; out->h = h; out->fmt = vkfmt; out->bpp = 4; out->samples = samples > 1 ? samples : 1;
+    memset(out, 0, sizeof *out); out->w = w; out->h = h; out->fmt = vkfmt; out->samples = samples > 1 ? samples : 1;
+    /* bytes per texel of a buffer copy of this aspect: Depth16 2, Stencil8 1, the 32-bit depths (and D24, packed in 32 bits) 4.
+     * WAS: 4 for all, so a buffer upload to a Depth16 texture had its 8-byte rows refused (Dome Keeper's 4x4 Depth16) */
+    out->bpp = vkfmt == VK_FORMAT_D16_UNORM ? 2 : vkfmt == VK_FORMAT_S8_UINT ? 1 : 4;
     out->mtl_type = mtl_type == 3 || cube || mtl_type == 8 ? mtl_type : (samples > 1 ? 4 : 2); out->layers = layers; out->mips = mips;
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0, VK_IMAGE_TYPE_2D,
         (VkFormat)vkfmt, { w, h, 1 }, mips, layers, (VkSampleCountFlagBits)out->samples, VK_IMAGE_TILING_OPTIMAL,
