@@ -7,6 +7,14 @@
 
 int main()
 {
+    uint8_t port = 255;
+    assert(nvrm_audio_port_number(5, 1, &port) && port == 0);
+    assert(nvrm_audio_port_number(4, 2, &port) && port == 0);
+    assert(nvrm_audio_port_number(5, 2, &port) && port == 1);
+    assert(nvrm_audio_port_number(6, 2, &port) && port == 2);
+    assert(nvrm_audio_port_number(7, 2, &port) && port == 3);
+    assert(!nvrm_audio_port_number(3, 2, &port));
+
     uint8_t field_edid[256] = {};
     field_edid[8]=0x12; field_edid[9]=0x34; field_edid[10]=0x56; field_edid[11]=0x78;
     field_edid[57]=0xfc;
