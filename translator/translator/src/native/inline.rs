@@ -263,7 +263,11 @@ fn parse_def_header(header: &str) -> Option<DefSig> {
     }
     let pre = rest[..at].trim();
     let pre_words: Vec<&str> = pre.split_whitespace().collect();
-    let internal = pre_words.contains(&"internal");
+    // Apple's OpenGL links its helpers (gld.cube_vector_to_uv, gld.compute_lod_texture2d_array_cubeAsArray, ...) into the
+    // shader as external definitions, though nothing outside the module calls them. A descriptor-backed pointer (a texture
+    // unit's state in the GL uniform block) passed to one cannot cross the call, so they must be splice-able like internal
+    // helpers ("byte cursor cannot cross the call"; Stellaris's system view).
+    let internal = pre_words.contains(&"internal") || name.starts_with("@gld.");
     let ret_ty = ret_type_from_pre(pre).unwrap_or_default();
     let close = matching_paren(rest, paren)?;
     let params_str = &rest[paren + 1..close];
