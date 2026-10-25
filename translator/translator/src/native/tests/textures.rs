@@ -4092,6 +4092,167 @@ fn native_gather_depth_2d_array_pixel_sampler_reconstructs_the_footprint() {
     assert!(!asm.contains("OpFunctionCall"), "{asm}");
 }
 
+/// `args` = the operands after the coordinate-space flag, `decl` = their types.
+fn gather_compare_ll(intrinsic: &str, depth_type: &str, args: &str, decl: &str) -> String {
+    format!(
+        r#"
+target triple = "spirv-unknown-vulkan1.2"
+define void @k(ptr addrspace(1) %depth, ptr addrspace(2) %sampler, ptr addrspace(1) %out) {{
+entry:
+  %gather = tail call {{ <4 x float>, i8 }} @{intrinsic}(ptr addrspace(1) %depth, ptr addrspace(2) %sampler, i32 1, {args})
+  %values = extractvalue {{ <4 x float>, i8 }} %gather, 0
+  store <4 x float> %values, ptr addrspace(1) %out, align 16
+  ret void
+}}
+
+declare {{ <4 x float>, i8 }} @{intrinsic}(ptr addrspace(1), ptr addrspace(2), i32, {decl})
+
+!air.kernel = !{{!0}}
+!0 = !{{ptr @k, !1, !2}}
+!1 = !{{}}
+!2 = !{{!3, !4, !5}}
+!3 = !{{i32 0, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"{depth_type}<float, sample>"}}
+!4 = !{{i32 1, !"air.sampler", !"air.location_index", i32 0, i32 1}}
+!5 = !{{i32 2, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.write", !"air.address_space", i32 1, !"air.arg_type_size", i32 16, !"air.arg_type_align_size", i32 16, !"air.arg_type_name", !"float4*"}}
+"#
+    )
+}
+
+fn gather_compare_spv(
+    ll: &str,
+    label: &str,
+    state: Option<crate::reflect::RuntimeSamplerState>,
+) -> (Vec<u8>, String) {
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_gather_compare_{label}_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let mut options = passes::TransformOptions::default();
+    if let Some(state) = state {
+        options = options.with_runtime_sampler(0, state).unwrap();
+    }
+    let spv = crate::translate_sanitized_native_with_options(ll, Stage::Kernel, &tmp, options)
+        .expect("translate gather_compare");
+    let asm = disassemble(&spv).expect("disassemble gather_compare");
+    tools::spirv_val_bytes(&spv, &tmp).expect("gather_compare spirv-val");
+    (spv, asm)
+}
+
+#[test]
+fn native_gather_compare_depth_2d_runtime_sampler_is_a_dref_gather() {
+    let ll = gather_compare_ll(
+        "air.gather_compare_depth_2d.f32",
+        "depth2d",
+        "<2 x float> <float 5.000000e-01, float 2.500000e-01>, float 5.000000e-01, i1 true, <2 x i32> <i32 1, i32 -1>, i32 0",
+        "<2 x float>, float, i1, <2 x i32>, i32",
+    );
+    let (_, asm) = gather_compare_spv(&ll, "2d", None);
+    assert_eq!(asm.matches("OpImageDrefGather").count(), 1, "{asm}");
+    assert!(asm.contains("ConstOffset"), "{asm}");
+    assert!(!asm.contains("OpFunctionCall"), "{asm}");
+}
+
+#[test]
+fn native_gather_compare_depth_2d_array_runtime_sampler_gathers_the_layer() {
+    let ll = gather_compare_ll(
+        "air.gather_compare_depth_2d_array.f32",
+        "depth2d_array",
+        "<2 x float> <float 5.000000e-01, float 2.500000e-01>, i32 3, float 5.000000e-01, i1 true, <2 x i32> zeroinitializer, i32 0",
+        "<2 x float>, i32, float, i1, <2 x i32>, i32",
+    );
+    let (spv, asm) = gather_compare_spv(&ll, "2d_array", None);
+    assert_eq!(asm.matches("OpImageDrefGather").count(), 1, "{asm}");
+    assert!(!asm.contains("ConstOffset"), "a zero offset is dropped:\n{asm}");
+    // The coordinate carries the layer as a third float lane.
+    let module = load_bytes(&spv).expect("load spv");
+    let gather = module
+        .functions
+        .iter()
+        .flat_map(|func| &func.blocks)
+        .flat_map(|block| &block.instructions)
+        .find(|inst| inst.class.opcode == Op::ImageDrefGather)
+        .expect("dref gather");
+    let Some(crate::spirv_module::Operand::IdRef(coord)) = gather.operands.get(1) else {
+        panic!("dref gather coordinate:\n{asm}");
+    };
+    let coord_ty = module
+        .functions
+        .iter()
+        .flat_map(|func| &func.blocks)
+        .flat_map(|block| &block.instructions)
+        .find(|inst| inst.result_id == Some(*coord))
+        .and_then(|inst| inst.result_type)
+        .expect("coordinate type");
+    let vec3 = module
+        .types_global_values
+        .iter()
+        .find(|inst| inst.result_id == Some(coord_ty))
+        .expect("coordinate type definition");
+    assert_eq!(vec3.class.opcode, Op::TypeVector, "{asm}");
+    assert_eq!(
+        vec3.operands.get(1),
+        Some(&crate::spirv_module::Operand::LiteralBit32(3)),
+        "{asm}"
+    );
+}
+
+#[test]
+fn native_gather_compare_depth_cube_runtime_sampler_is_a_dref_gather() {
+    let ll = gather_compare_ll(
+        "air.gather_compare_depth_cube.f32",
+        "depthcube",
+        "<3 x float> <float 1.000000e+00, float 2.500000e-01, float -5.000000e-01>, float 5.000000e-01, i32 0",
+        "<3 x float>, float, i32",
+    );
+    let (_, asm) = gather_compare_spv(&ll, "cube", None);
+    assert_eq!(asm.matches("OpImageDrefGather").count(), 1, "{asm}");
+    assert!(!asm.contains("ConstOffset"), "{asm}");
+}
+
+#[test]
+fn native_gather_compare_depth_2d_known_normalized_sampler_compares_each_lane() {
+    let ll = gather_compare_ll(
+        "air.gather_compare_depth_2d.f32",
+        "depth2d",
+        "<2 x float> <float 5.000000e-01, float 2.500000e-01>, float 5.000000e-01, i1 true, <2 x i32> <i32 -1, i32 1>, i32 0",
+        "<2 x float>, float, i1, <2 x i32>, i32",
+    );
+    let mut state = runtime_sampler_state(
+        crate::reflect::SamplerCoordinates::Normalized,
+        crate::reflect::SamplerFilter::Linear,
+        crate::reflect::SamplerAddressMode::ClampToEdge,
+    );
+    state.compare_function = crate::reflect::SamplerCompareFunction::LessEqual;
+    let (_, asm) = gather_compare_spv(&ll, "normalized", Some(state));
+    assert!(!asm.contains("OpImageDrefGather"), "{asm}");
+    assert_eq!(asm.matches("OpImageGather").count(), 1, "{asm}");
+    assert!(asm.contains("ConstOffset"), "{asm}");
+    assert!(asm.contains("OpFOrdLessThanEqual"), "{asm}");
+    assert!(asm.contains("OpSelect"), "{asm}");
+}
+
+#[test]
+fn native_gather_compare_depth_2d_known_pixel_sampler_fetches_the_footprint_then_compares() {
+    let ll = gather_compare_ll(
+        "air.gather_compare_depth_2d.f32",
+        "depth2d",
+        "<2 x float> <float 2.500000e+00, float 1.500000e+00>, float 5.000000e-01, i1 true, <2 x i32> zeroinitializer, i32 0",
+        "<2 x float>, float, i1, <2 x i32>, i32",
+    );
+    let mut state = runtime_sampler_state(
+        crate::reflect::SamplerCoordinates::Pixel,
+        crate::reflect::SamplerFilter::Nearest,
+        crate::reflect::SamplerAddressMode::ClampToZero,
+    );
+    state.compare_function = crate::reflect::SamplerCompareFunction::Greater;
+    let (spv, asm) = gather_compare_spv(&ll, "pixel", Some(state));
+    let module = load_bytes(&spv).expect("load spv");
+    assert_eq!(image_fetch_count(&module), 4, "{asm}");
+    assert!(!asm.contains("OpImageDrefGather"), "{asm}");
+    assert!(asm.contains("OpFOrdGreaterThan"), "{asm}");
+}
+
 fn image_fetch_count(module: &crate::spirv_module::Module) -> usize {
     module
         .functions

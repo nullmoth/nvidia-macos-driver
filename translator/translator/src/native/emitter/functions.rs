@@ -206,6 +206,7 @@ pub(in crate::native::emitter) fn is_air_texture_operation(callee: &str) -> bool
         || callee.starts_with("air.sample_compare_depth")
         || callee.starts_with("air.gather_texture")
         || callee.starts_with("air.gather_depth")
+        || callee.starts_with("air.gather_compare_depth")
         || callee.starts_with("air.read_texture")
         || callee.starts_with("air.read_depth")
         || callee.starts_with("air.write_texture")

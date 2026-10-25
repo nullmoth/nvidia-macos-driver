@@ -1476,6 +1476,9 @@ pub(in crate::passes) fn lower_one(
     if name.starts_with("air.gather_depth") {
         return lower_gather_depth(ctx, name, res, rty, args, v4);
     }
+    if name.starts_with("air.gather_compare_depth") {
+        return lower_gather_compare_depth(ctx, name, res, rty, args, v4);
+    }
     if name.starts_with("air.sample_compare_depth") {
         return lower_sample_compare_depth(ctx, name, res, rty, args, v4);
     }
