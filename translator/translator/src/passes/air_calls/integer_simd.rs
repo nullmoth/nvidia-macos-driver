@@ -1449,6 +1449,27 @@ pub(in crate::passes) fn lower_one(
                      silently drop what the call does"
                 ))
             }
+            // Rasterization rate maps: the driver reports supportsRasterizationRateMapWithLayerCount: NO
+            // and newRasterizationRateMapWithDescriptor: returns nil, so no map can exist and nothing can
+            // fill a rasterization_rate_map_data buffer. Without a map, physical and screen coordinates are
+            // the same (rate 1 everywhere): both directions are the identity on the coordinate. Shaders
+            // that carry the call for an optional foveation path (Unity URP: Darkest Dungeon II, Imagine
+            // Earth) were refused as a whole. If the driver ever implements rate maps, this must decode
+            // the map data instead. METAL2VULKAN_NO_RRM_IDENTITY restores the refusal.
+            Some(crate::air_intrinsics::AirIntrinsicDisposition::RequiresResourceModel)
+                if crate::air_intrinsics::is_rasterization_rate_map_helper(name)
+                    && !crate::env_vars::no_rrm_identity() =>
+            {
+                let (Some(res), Some(rty), Some(&coord)) = (res, rty, args.first()) else {
+                    return Err(format!("{name}: expected a result and a coordinate operand"));
+                };
+                return Ok(vec![Instruction::new(
+                    Op::CopyObject,
+                    Some(rty),
+                    Some(res),
+                    vec![Operand::IdRef(coord)],
+                )]);
+            }
             Some(crate::air_intrinsics::AirIntrinsicDisposition::RequiresResourceModel) => {
                 return Err(format!(
                     "AIR family {name} requires rasterization-rate-map parameter data decoding; \
