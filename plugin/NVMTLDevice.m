@@ -775,6 +775,10 @@ static int nvmtl_pixfmt(MTLPixelFormat f, uint32_t *vk, uint32_t *bpp, int *a8)
     *a8 = 0;
     switch (f) {
     case MTLPixelFormatA8Unorm:          *vk = 9  ;               *bpp = 1;  *a8 = 1; return 0;
+    // Apple's private ARGB8 format: AppleMetalOpenGLRenderer asks for it when a GL_RGBA8 texture is uploaded as GL_BGRA +
+    // GL_UNSIGNED_INT_8_8_8_8 (bytes A,R,G,B; Unity 5's ARGB32 textures). Stored as RGBA8, the view swizzle reorders it
+    // (a8 = 2). WAS nil, so the GL texture was "unloadable" and sampled as zero: Homeworld: Deserts of Kharak's UI sprites.
+    case (MTLPixelFormat)84:             *vk = 37 ;         *bpp = 4;  *a8 = 2; return 0;
     case MTLPixelFormatR8Unorm:          *vk = 9  ;               *bpp = 1;  return 0;
     case MTLPixelFormatR8Unorm_sRGB:     *vk = 15 ;                *bpp = 1;  return 0;
     case MTLPixelFormatR8Snorm:          *vk = 10 ;               *bpp = 1;  return 0;
