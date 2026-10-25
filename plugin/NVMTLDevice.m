@@ -272,6 +272,17 @@ static bool nvmtl_is_decode_service(const char *me)
 {
     return me && strncmp(me, "VTDecoderXPCService", 19) == 0;
 }
+// Apple's sandboxed apps (Safari's WebKit GPU process, QuickTime Player, Preview) hand decoding to VTDecoderXPCService,
+// where the decoder is registered; inside them the in-process registration fails on the sandbox (#349). Chromium and
+// Electron decode in their own GPU process and ask VideoToolbox for a hardware decoder there, so skipping it left
+// Discord with no H.264 decoder at all and its videos stopped playing on 2.5.4. Only Apple's own processes delegate.
+static bool nvmtl_decode_is_delegated(const char *me)
+{
+    if (!nvmtl_is_sandboxed() || nvmtl_is_decode_service(me)) return false;
+    CFBundleRef main = CFBundleGetMainBundle();
+    CFStringRef ident = main ? CFBundleGetIdentifier(main) : NULL;
+    return ident && CFStringHasPrefix(ident, CFSTR("com.apple."));
+}
 static void nvmtl_nvdec_register(void)
 {
     static dispatch_once_t once;
@@ -279,8 +290,8 @@ static void nvmtl_nvdec_register(void)
         const char *me = getprogname();
         if (getenv("NVMTL_NO_NVDEC")) { nvlog("nvdec: NVMTL_NO_NVDEC set - not registering in %s", me); return; }
         if (!strcmp(me, "WindowServer")) return;
-        if (nvmtl_is_sandboxed() && !nvmtl_is_decode_service(me)) {
-            nvlog("nvdec: %s is sandboxed - not registering in-process H.264 decoder (delegates to VTDecoderXPCService)", me);
+        if (nvmtl_decode_is_delegated(me)) {
+            nvlog("nvdec: %s is a sandboxed Apple process - not registering in-process H.264 decoder (delegates to VTDecoderXPCService)", me);
             return;
         }
         typedef int32_t (*RegFn)(uint32_t, CFDictionaryRef, void *);
@@ -395,8 +406,8 @@ static void nvmtl_nvdec_hevc_register(void)
         const char *me = getprogname();
         if (getenv("NVMTL_NO_NVDEC_HEVC")) { nvlog("nvdec: NVMTL_NO_NVDEC_HEVC set - not registering HEVC in %s", me); return; }
         if (!strcmp(me, "WindowServer")) return;
-        if (nvmtl_is_sandboxed() && !nvmtl_is_decode_service(me)) {
-            nvlog("nvdec: %s is sandboxed - not registering in-process HEVC decoder (delegates to VTDecoderXPCService)", me);
+        if (nvmtl_decode_is_delegated(me)) {
+            nvlog("nvdec: %s is a sandboxed Apple process - not registering in-process HEVC decoder (delegates to VTDecoderXPCService)", me);
             return;
         }
         typedef int32_t (*RegFn)(uint32_t, CFDictionaryRef, void *);
