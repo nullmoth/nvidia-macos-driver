@@ -187,9 +187,9 @@ extern id gNVMTLMainDevice;
   NSMutableSet *_resources;
   NSMutableDictionary *_sassTextures, *_sassSamplers;   // by Metal index, for kernels run from machine code
 } @end
-@interface NVMTLBlitCommandEncoder : NSObject <MTLBlitCommandEncoder> { @public NVMTLCommandBuffer *_cb; } @end
+@interface NVMTLBlitCommandEncoder : NSObject <MTLBlitCommandEncoder> { @public NVMTLCommandBuffer *_cb; __weak NVMTLCommandBuffer *_owner; } @end
 @interface NVMTLAccelerationStructure : NVMTLBuffer <MTLAccelerationStructure> { @public nvk_accel _as; nvk_buffer _uid; uint32_t _iftAdd; } @end
-@interface NVMTLAccelerationStructureCommandEncoder : NSObject <MTLAccelerationStructureCommandEncoder> { @public NVMTLCommandBuffer *_cb; } @end
+@interface NVMTLAccelerationStructureCommandEncoder : NSObject <MTLAccelerationStructureCommandEncoder> { @public NVMTLCommandBuffer *_cb; __weak NVMTLCommandBuffer *_owner; } @end
 uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int *instance, uint32_t *instance_count, NSMutableSet *track);
 #define NVMTL_NBUFAT 32   /* buffer argument indices an encoder tracks (Metal has 31) */
 @interface NVMTLRenderCommandEncoder : NSObject <MTLRenderCommandEncoder> {

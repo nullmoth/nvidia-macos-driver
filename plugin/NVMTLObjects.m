@@ -3600,6 +3600,10 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 - (void)setLabel:(NSString *)l { _label = [l copy]; }
 - (NSString *)label { return _label; }
 - (id<MTLDevice>)device { id<MTLDevice> d = _cb ? [_cb device] : nil; return d ? d : (id<MTLDevice>)gNVMTLMainDevice; }
+// -commandBuffer is SPI on Apple's encoders (_MTLCommandEncoder), not in the MTLCommandEncoder protocol, but apps call it:
+// Hades asks every render encoder for its command buffer each frame; the forwarding stub answered nil and messages to the
+// nil command buffer did nothing. The encoder keeps _cb after endEncoding, so it answers then too, as Apple's does.
+- (id<MTLCommandBuffer>)commandBuffer { return (id<MTLCommandBuffer>)_cb; }
 - (void)setColorStoreAction:(MTLStoreAction)a atIndex:(NSUInteger)i {
     BOOL resolve = a == MTLStoreActionMultisampleResolve || a == MTLStoreActionStoreAndMultisampleResolve;
     BOOL planned = i < NVMTL_NCOL && _pass.res[i] != NULL;
@@ -4714,6 +4718,7 @@ static void nvmtl_zprobe_drain(void) {
 - (void)setLabel:(NSString *)l { _label = [l copy]; }
 - (NSString *)label { return _label; }
 - (id<MTLDevice>)device { id<MTLDevice> d = _cb ? [_cb device] : nil; return d ? d : (id<MTLDevice>)gNVMTLMainDevice; }
+- (id<MTLCommandBuffer>)commandBuffer { return (id<MTLCommandBuffer>)_cb; }   // SPI, see the render encoder
 @end
 
 static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
@@ -4948,6 +4953,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 - (void)setLabel:(NSString *)l { _label = [l copy]; }
 - (NSString *)label { return _label; }
 - (id<MTLDevice>)device { id<MTLDevice> d = _cb ? [_cb device] : nil; return d ? d : (id<MTLDevice>)gNVMTLMainDevice; }
+- (id<MTLCommandBuffer>)commandBuffer { return (id<MTLCommandBuffer>)(_cb ? _cb : _owner); }   // SPI, see the render encoder; _cb is gone after endEncoding
 @end
 
 #pragma mark - command buffer / queue
@@ -5128,11 +5134,11 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 - (id<MTLResourceStateCommandEncoder>)resourceStateCommandEncoderWithDescriptor:(MTLResourceStatePassDescriptor *)d { return nil; }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoder {
     nvmtl_g79_flush(self);
-    NVMTLBlitCommandEncoder *e = [NVMTLBlitCommandEncoder new]; e->_cb = self; _nEnc++; return e;
+    NVMTLBlitCommandEncoder *e = [NVMTLBlitCommandEncoder new]; e->_cb = self; e->_owner = self; _nEnc++; return e;
 }
 - (id<MTLAccelerationStructureCommandEncoder>)accelerationStructureCommandEncoder {
     nvmtl_g79_flush(self);
-    NVMTLAccelerationStructureCommandEncoder *e = [NVMTLAccelerationStructureCommandEncoder new]; e->_cb = self; _nEnc++; return e;
+    NVMTLAccelerationStructureCommandEncoder *e = [NVMTLAccelerationStructureCommandEncoder new]; e->_cb = self; e->_owner = self; _nEnc++; return e;
 }
 - (id<MTLAccelerationStructureCommandEncoder>)accelerationStructureCommandEncoderWithDescriptor:(MTLAccelerationStructurePassDescriptor *)d { return [self accelerationStructureCommandEncoder]; }
 - (void)addCompletedHandler:(MTLCommandBufferHandler)h {
@@ -5449,6 +5455,7 @@ static int nvp_fast_off(void) {
 - (BOOL)conformsToProtocol:(Protocol *)p { return [NVMTLRenderCommandEncoder conformsToProtocol:p]; }
 - (id<MTLDevice>)device { return gNVMTLMainDevice; }
 - (NSString *)label { return _label; }
+- (id<MTLCommandBuffer>)commandBuffer { NVMTLParallelRenderCommandEncoder *p = _owner; return p ? (id<MTLCommandBuffer>)p->_cb : nil; }   // SPI; answered here, not recorded for replay
 - (void)setLabel:(NSString *)l { _label = [l copy]; }
 - (void)setVertexBuffers:(const id<MTLBuffer> __unsafe_unretained [])b offsets:(const NSUInteger *)o withRange:(NSRange)r { for (NSUInteger k = 0; k < r.length; k++) if (b[k]) [(id)self setVertexBuffer:b[k] offset:o ? o[k] : 0 atIndex:r.location + k]; }
 - (void)setVertexBuffers:(const id<MTLBuffer> __unsafe_unretained [])b offsets:(const NSUInteger *)o attributeStrides:(const NSUInteger *)s withRange:(NSRange)r { for (NSUInteger k = 0; k < r.length; k++) if (b[k]) [(id)self setVertexBuffer:b[k] offset:o ? o[k] : 0 attributeStride:s ? s[k] : MTLAttributeStrideStatic atIndex:r.location + k]; }
@@ -5547,6 +5554,7 @@ static int nvp_fast_off(void) {
 }
 - (id<MTLDevice>)device { return gNVMTLMainDevice; }
 - (NSString *)label { return _label; }
+- (id<MTLCommandBuffer>)commandBuffer { return (id<MTLCommandBuffer>)_cb; }   // SPI, see the render encoder
 - (void)setLabel:(NSString *)l { _label = [l copy]; }
 - (void)setColorStoreAction:(MTLStoreAction)a atIndex:(NSUInteger)i { _desc.colorAttachments[i].storeAction = a; }
 - (void)setDepthStoreAction:(MTLStoreAction)a { _desc.depthAttachment.storeAction = a; }
@@ -5634,6 +5642,7 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
 
 @implementation NVMTLAccelerationStructureCommandEncoder
 - (id<MTLDevice>)device { return _cb->_queue->_dev; }
+- (id<MTLCommandBuffer>)commandBuffer { return (id<MTLCommandBuffer>)(_cb ? _cb : _owner); }   // SPI, see the render encoder
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)l { _label = [l copy]; }
 - (void)endEncoding { if (_cb) { _cb->_nEnd++; _cb = nil; } }   // lets go of the command buffer, as the blit encoder does
