@@ -212,7 +212,7 @@ static inline void nvmtl_resref(id o, int d) {
 static BOOL nvmtl_purge_eligible(NVMTLTexture *t) {
     return !t->_parent && !t->_viewParent && !t->_backBuf && !t->_heap && !t->_subHeap && !t->_surf && !t->_vramOn && !t->_ownView
         && !t->_shareable && !t->_resid && !__atomic_load_n(&t->_nviews, __ATOMIC_ACQUIRE) && t->_i.img && !t->_i.placed
-        && t->_i.usage && !t->_i.vpair && t->_i.samples <= 1 && !(t->_i.usage & 0x20u )
+        && t->_i.usage && !t->_i.vfl && t->_i.samples <= 1 && !(t->_i.usage & 0x20u )
         // a swizzled sampling view (MTLTextureDescriptor.swizzle) is made against this VkImage; re-homing the memory
         // recreates the image and would leave that view pointing at the destroyed one
         && !t->_swzView;
@@ -326,7 +326,7 @@ static int nvmtl_res2_on(void) {
 static BOOL nvmtl_res2_movable(NVMTLTexture *t) {
     return !t->_parent && !t->_viewParent && !t->_backBuf && !t->_heap && !t->_subHeap && !t->_surf && !t->_vramOn && !t->_ownView
         && !t->_shareable && !__atomic_load_n(&t->_nviews, __ATOMIC_ACQUIRE) && t->_i.img && !t->_i.placed && t->_i.usage
-        && !t->_i.vpair && t->_i.samples <= 1 && !(t->_i.usage & 0x20u );
+        && !t->_i.vfl && t->_i.samples <= 1 && !(t->_i.usage & 0x20u );
 }
 static os_unfair_lock gRes2RegLock = OS_UNFAIR_LOCK_INIT;
 static NSHashTable *gRes2Reg;

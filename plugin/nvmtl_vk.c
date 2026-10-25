@@ -1487,6 +1487,87 @@ static uint32_t nvmtl_vk_srgb_pair(uint32_t f)
         default: return 0;
     }
 }
+
+/*
+ * The formats a texture may be viewed as, grouped by bytes per pixel.
+ *
+ * Metal allows newTextureViewWithPixelFormat: between any two formats of the same size, for a
+ * buffer-backed texture as much as for an ordinary one, and rejects a format of a different size.
+ * An ordinary image here already carries every such view, because it is created with
+ * VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT and no format list, which permits all compatible formats. A
+ * buffer alias has to name its formats instead, since a DRM-format-modifier image that is mutable
+ * is required to carry a VkImageFormatListCreateInfo. Naming only the format's sRGB counterpart
+ * refused every other view Metal allows, which leaves a client that views a BGRA8Unorm surface as
+ * RGBA8Unorm - screen capture does exactly that - with no texture at all.
+ *
+ * These are the uncompressed formats this driver maps a MTLPixelFormat to. A format it does not
+ * map cannot be asked for, and a buffer alias of a block-compressed format is refused earlier.
+ */
+static const VkFormat nvmtl_vk_view1[] = {
+    VK_FORMAT_R8_UNORM, VK_FORMAT_R8_SRGB, VK_FORMAT_R8_SNORM, VK_FORMAT_R8_UINT, VK_FORMAT_R8_SINT,
+};
+static const VkFormat nvmtl_vk_view2[] = {
+    VK_FORMAT_R16_UNORM, VK_FORMAT_R16_SNORM, VK_FORMAT_R16_UINT, VK_FORMAT_R16_SINT, VK_FORMAT_R16_SFLOAT,
+    VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_SNORM, VK_FORMAT_R8G8_UINT, VK_FORMAT_R8G8_SINT,
+};
+static const VkFormat nvmtl_vk_view4[] = {
+    VK_FORMAT_R32_UINT, VK_FORMAT_R32_SINT, VK_FORMAT_R32_SFLOAT,
+    VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16_SNORM, VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16_SINT,
+    VK_FORMAT_R16G16_SFLOAT,
+    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_SNORM,
+    VK_FORMAT_R8G8B8A8_UINT, VK_FORMAT_R8G8B8A8_SINT,
+    VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_SRGB,
+    VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_A2B10G10R10_UINT_PACK32,
+    VK_FORMAT_A2R10G10B10_UNORM_PACK32,
+    VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32,
+};
+static const VkFormat nvmtl_vk_view8[] = {
+    VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_SINT, VK_FORMAT_R32G32_SFLOAT,
+    VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_R16G16B16A16_SNORM, VK_FORMAT_R16G16B16A16_UINT,
+    VK_FORMAT_R16G16B16A16_SINT, VK_FORMAT_R16G16B16A16_SFLOAT,
+};
+static const VkFormat nvmtl_vk_view16[] = {
+    VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_SINT, VK_FORMAT_R32G32B32A32_SFLOAT,
+};
+
+/* The group a texture of this many bytes per pixel belongs to. The mask kept on an image is
+   relative to the group its own size selects, so 32 bits is always enough for it. */
+static uint32_t nvmtl_vk_view_group(uint32_t bpp, const VkFormat **out)
+{
+    switch (bpp) {
+        case 1:  *out = nvmtl_vk_view1;  return (uint32_t)(sizeof nvmtl_vk_view1  / sizeof *nvmtl_vk_view1);
+        case 2:  *out = nvmtl_vk_view2;  return (uint32_t)(sizeof nvmtl_vk_view2  / sizeof *nvmtl_vk_view2);
+        case 4:  *out = nvmtl_vk_view4;  return (uint32_t)(sizeof nvmtl_vk_view4  / sizeof *nvmtl_vk_view4);
+        case 8:  *out = nvmtl_vk_view8;  return (uint32_t)(sizeof nvmtl_vk_view8  / sizeof *nvmtl_vk_view8);
+        case 16: *out = nvmtl_vk_view16; return (uint32_t)(sizeof nvmtl_vk_view16 / sizeof *nvmtl_vk_view16);
+        default: *out = NULL; return 0;
+    }
+}
+
+/* Every format named in an image's format list has to support what the image itself is used for:
+   naming one that does not makes the whole vkCreateImage fail, which costs the texture rather than
+   one view of it. */
+static VkFormatFeatureFlags nvmtl_vk_usage_features(VkImageUsageFlags u)
+{
+    VkFormatFeatureFlags f = 0;
+    if (u & VK_IMAGE_USAGE_SAMPLED_BIT)          f |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    if (u & VK_IMAGE_USAGE_STORAGE_BIT)          f |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+    if (u & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) f |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+    if (u & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)     f |= VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+    if (u & VK_IMAGE_USAGE_TRANSFER_DST_BIT)     f |= VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    return f;
+}
+
+/* Does the format list this image was created with carry vkfmt? A view of a format absent from the
+   list is undefined, so a format that did not make it in stays refused. */
+static int nvmtl_vk_view_listed(const nvk_image *img, uint32_t vkfmt)
+{
+    const VkFormat *tbl = NULL;
+    const uint32_t n = nvmtl_vk_view_group(img->bpp, &tbl);
+    for (uint32_t i = 0; i < n; i++)
+        if ((uint32_t)tbl[i] == vkfmt) return (int)((img->vfl >> i) & 1u);
+    return 0;
+}
 static int nvmtl_vk_3d_slice_ok(VkFormat fmt, VkImageUsageFlags usage)
 {
     static PFN_vkGetPhysicalDeviceImageFormatProperties2 gif; static int tried;
@@ -1535,8 +1616,9 @@ static int nvmtl_vk_view_guard(const nvk_image *img, uint32_t vkfmt, int a8, VkI
     if (vkfmt == img->fmt) return 0;
     if (!(img->vkflags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) {
         nvlog("%s: view format %u of a format-%u image that is not mutable (depth / buffer texture) refused", who, vkfmt, img->fmt); return -1; }
-    if (img->vpair && vkfmt != img->vpair) {
-        nvlog("%s: view format %u of a buffer texture (format %u) refused - its image lists only its sRGB/linear pair %u", who, vkfmt, img->fmt, img->vpair); return -1; }
+    if (img->vfl && !nvmtl_vk_view_listed(img, vkfmt)) {
+        nvlog("%s: view format %u of a buffer texture (format %u, %u B) refused - its image's format list (mask 0x%x) does not carry it",
+              who, vkfmt, img->fmt, img->bpp, img->vfl); return -1; }
     uint32_t bw = 1, bh = 1, bb = 0;
     if (img->bw > 1 && !nvmtl_vk_format_block(vkfmt, &bw, &bh, &bb) && levelCount != 1) {
         nvlog("%s: uncompressed view of a block-compressed image over %u levels refused (NVK allows 1)", who, levelCount); return -1; }
@@ -5964,7 +6046,7 @@ void nvmtl_vk_res1_stats(uint64_t out[6]) { out[0] = g_res1_off; out[1] = g_res1
     out[3] = g_res1_off_b >> 20; out[4] = g_res1_on_b >> 20; out[5] = g_res1_calls; }
 int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
 {
-    if (g_state != 1 || !i || !i->img || i->placed || !i->usage || i->vpair || i->samples > 1 || i->mtl_type == 4 || i->mtl_type > 7
+    if (g_state != 1 || !i || !i->img || i->placed || !i->usage || i->vfl || i->samples > 1 || i->mtl_type == 4 || i->mtl_type > 7
         || (i->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) return -1;
     nvmtl_vk_image_upload_barrier(i);   // migrating the image recreates its memory: drain a pending upload first
     if (!to_sysmem == !i->sysmem) return 1;
@@ -6043,7 +6125,7 @@ int nvmtl_vk_mig_batch_end(void)
 }
 int nvmtl_vk_image_migrate(nvk_image *i, int to_sysmem, int a8, nvk_image *old_out)
 {
-    if (g_state != 1 || !i || !i->img || i->placed || !i->usage || i->vpair || i->samples > 1 || i->mtl_type == 4 || i->mtl_type > 7
+    if (g_state != 1 || !i || !i->img || i->placed || !i->usage || i->vfl || i->samples > 1 || i->mtl_type == 4 || i->mtl_type > 7
         || (i->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) return -1;
     if (!to_sysmem == !i->sysmem) return 1;
     const uint32_t t = i->mtl_type, mips = i->mips ? i->mips : 1, nl = t == 7 ? 1 : (i->layers ? i->layers : 1);
@@ -7476,28 +7558,53 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
             | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0) | (render ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0),
         VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_PREINITIALIZED };
-    uint32_t vp = a8 ? 0 : nvmtl_vk_srgb_pair(vkfmt);
-    VkFormat vfl[2] = { (VkFormat)vkfmt, (VkFormat)vp };
-    VkImageFormatListCreateInfo fl = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, ici.pNext, 2, vfl };
-    if (vp) {
-        VkFormatProperties pp; memset(&pp, 0, sizeof pp); if (gfp) gfp(g_pdev, (VkFormat)vp, &pp);
+    /* Name every format of this texture's own size that the device will carry for this tiling and
+       usage, so that a view of any of them is legal. A format that cannot be proved supported is
+       left out, because naming it would fail the whole vkCreateImage, and the mask of the ones
+       that made it in is kept on the image so a view of an unlisted format stays refused. */
+    uint32_t vmask = 0;
+    const VkFormat *vtbl = NULL;
+    const uint32_t vtbln = a8 ? 0 : nvmtl_vk_view_group(bpp, &vtbl);
+    VkFormat vlist[32];
+    uint32_t nlist = 0;
+    VkImageFormatListCreateInfo fl = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, ici.pNext, 0, vlist };
+    if (vtbln) {
+        const VkFormatFeatureFlags need = nvmtl_vk_usage_features(ici.usage);
+        int self_listed = 0;
+        for (uint32_t i = 0; i < vtbln && nlist < (uint32_t)(sizeof vlist / sizeof *vlist); i++) {
+            VkFormatProperties pp; memset(&pp, 0, sizeof pp);
+            if (gfp) gfp(g_pdev, vtbl[i], &pp);
+            if ((pp.linearTilingFeatures & need) != need) continue;
+            if ((uint32_t)vtbl[i] == vkfmt) self_listed = 1;
+            vlist[nlist++] = vtbl[i];
+            vmask |= 1u << i;
+        }
+        /* An image has to name its own format. If it did not survive the filter then this size
+           group cannot describe it, so fall through to a single-format image rather than build a
+           list the driver will reject. */
+        if (!self_listed || nlist < 2) {
+            if (nlist) nvlog("buffer texture: VkFormat %u stays single-format - only %u of its %u same-size format(s) are supported LINEAR for usage 0x%x%s",
+                             vkfmt, nlist, vtbln, (unsigned)ici.usage, self_listed ? "" : " and its own format is not among them");
+            vmask = 0; nlist = 0;
+        }
+    }
+    if (nlist) {
         PFN_vkGetPhysicalDeviceImageFormatProperties2 gif = (PFN_vkGetPhysicalDeviceImageFormatProperties2)
             pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceImageFormatProperties2");
-        VkImageFormatListCreateInfo qfl = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, NULL, 2, vfl };
+        VkImageFormatListCreateInfo qfl = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, NULL, nlist, vlist };
         VkPhysicalDeviceImageDrmFormatModifierInfoEXT qmi = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT, &qfl,
             0 , VK_SHARING_MODE_EXCLUSIVE, 0, NULL };
         VkPhysicalDeviceImageFormatInfo2 qi = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2, g_linmod ? (void *)&qmi : (void *)&qfl,
             ici.format, ici.imageType, ici.tiling, ici.usage, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT };
         VkImageFormatProperties2 qo; memset(&qo, 0, sizeof qo); qo.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
-        VkResult qr = !(pp.linearTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) ? VK_ERROR_FORMAT_NOT_SUPPORTED
-                    : gif ? gif(g_pdev, &qi, &qo) : VK_ERROR_EXTENSION_NOT_PRESENT;
-        if (qr == VK_SUCCESS) { ici.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; ici.pNext = &fl; }
-        else { nvlog("buffer texture: VkFormat %u stays single-format - its sRGB/linear view format %u is refused (linear features 0x%x, VkResult %d%s)",
-                     vkfmt, vp, (unsigned)pp.linearTilingFeatures, (int)qr, gif ? "" : ", no vkGetPhysicalDeviceImageFormatProperties2"); vp = 0; }
+        VkResult qr = gif ? gif(g_pdev, &qi, &qo) : VK_ERROR_EXTENSION_NOT_PRESENT;
+        if (qr == VK_SUCCESS) { ici.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; fl.viewFormatCount = nlist; ici.pNext = &fl; }
+        else { nvlog("buffer texture: VkFormat %u stays single-format - a mutable image over its %u same-size format(s) is refused (VkResult %d%s)",
+                     vkfmt, nlist, (int)qr, gif ? "" : ", no vkGetPhysicalDeviceImageFormatProperties2"); vmask = 0; nlist = 0; }
     }
     VKCK(nvmtl_opaque_CreateImage(g_dev, &ici, NULL, &out->img), "vkCreateImage(buffer texture)");
     out->layout = VK_IMAGE_LAYOUT_PREINITIALIZED;
-    out->vkflags = (uint32_t)ici.flags; out->usage = (uint32_t)ici.usage; out->vpair = vp;
+    out->vkflags = (uint32_t)ici.flags; out->usage = (uint32_t)ici.usage; out->vfl = vmask;
     if (!g_linmod) {
         PFN_vkGetImageSubresourceLayout gsl = (PFN_vkGetImageSubresourceLayout)pvkGetInstanceProcAddr(g_inst, "vkGetImageSubresourceLayout");
         VkImageSubresource sr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 }; VkSubresourceLayout got; memset(&got, 0, sizeof got);
@@ -7526,8 +7633,8 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
         (VkFormat)vkfmt, swz, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
     VKCK(nvmtl_opaque_CreateImageView(g_dev, &vci, NULL, &out->view), "vkCreateImageView(buffer texture)");
 
-    nvlog("buffer texture: %ux%u VkFormat %u pitch %zu bound at %zu (%s, align %llu, size %llu, storage %d, render %d, view pair %u)", w, h, vkfmt, row_pitch, at,
-          g_linmod ? "DRM linear" : "LINEAR", (unsigned long long)mr.alignment, (unsigned long long)mr.size, storage, render, out->vpair);
+    nvlog("buffer texture: %ux%u VkFormat %u pitch %zu bound at %zu (%s, align %llu, size %llu, storage %d, render %d, view formats 0x%x)", w, h, vkfmt, row_pitch, at,
+          g_linmod ? "DRM linear" : "LINEAR", (unsigned long long)mr.alignment, (unsigned long long)mr.size, storage, render, out->vfl);
     return 0;
 }
 
