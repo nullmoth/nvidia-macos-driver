@@ -396,6 +396,8 @@ impl Emitter {
             });
         let Some(stored) = stored else {
             self.emit_unmodeled_byte_pointer_copy(result_name, result, *addrspace, instructions)?;
+            self.unresolved_local_field_loads
+                .insert(result_name.to_string(), key.clone());
             self.emit_sidecar.local_pointer_field_loads.push(
                 crate::emit_sidecar::LocalPointerFieldLoad {
                     id: result,
