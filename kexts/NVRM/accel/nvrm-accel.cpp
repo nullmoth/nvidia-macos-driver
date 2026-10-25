@@ -990,9 +990,13 @@ bool NVVidMemory::allocPhysical()
     r.size    = want;
     IOReturn ret = NVAccel::gAccel->askFramebufferForVram(&r, true);
     if (ret != kIOReturnSuccess || !r.handle || !r.phys) {
-        OSAddAtomic64(1, &gCntVmRefused);
-        ALOG("NVVidMemory::allocPhysical(%p): %llu bytes REFUSED by the framebuffer (0x%x)",
-             this, want, (unsigned)ret);
+        // A full BAR1 window refuses every frame (~100/s on a 256 MB BAR1, a third of everything the machine logs:
+        // #387). Same throttle as the framebuffer's nvAllocVram: the first eight, then every 256th with the count;
+        // debug.nvaccel_vm_refused keeps the exact total.
+        const SInt64 nRefused = OSAddAtomic64(1, &gCntVmRefused) + 1;
+        if (nRefused <= 8 || (nRefused & 255) == 0)
+            ALOG("NVVidMemory::allocPhysical(%p): %llu bytes REFUSED by the framebuffer (0x%x, #%lld)",
+                 this, want, (unsigned)ret, (long long)nRefused);
         // once per boot: how much of the window this side holds as sticky parks (kept across the family's dealloc)
         static volatile SInt32 said = 0;
         if (OSCompareAndSwap(0, 1, &said))
