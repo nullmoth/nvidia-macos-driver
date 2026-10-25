@@ -360,6 +360,7 @@ pub(crate) fn air_image_intrinsic(name: &str) -> bool {
                 "air.sample_compare_depth",
                 "air.gather_texture",
                 "air.gather_depth",
+                "air.gather_compare_depth",
                 "air.read_texture",
                 "air.read_depth",
                 "air.write_texture",
@@ -801,6 +802,7 @@ mod tests {
     fn image_handle_families_are_classified_by_the_shared_abi_predicate() {
         assert!(air_image_intrinsic("air.write_texture_2d.i16.v4f32"));
         assert!(air_image_intrinsic("air.sample_compare_depth_2d.f32"));
+        assert!(air_image_intrinsic("air.gather_compare_depth_2d.f32"));
         assert!(air_image_intrinsic(
             "air.calculate_unclamped_lod_texture_2d"
         ));
