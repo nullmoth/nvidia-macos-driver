@@ -1970,6 +1970,16 @@ static NSArray *nvmtl_vertex_attributes_for(NVMTLFunction *fn) {
 - (NSArray *)members { return _members ?: @[]; }
 - (id)memberByName:(NSString *)n { for (NVMTLStructMember *m in _members) if ([m->_name isEqualToString:n]) return m; return nil; }
 @end
+@implementation NVMTLArrayType
+- (MTLDataType)elementType { return _elem; }
+- (NSUInteger)arrayLength { return _len; }
+- (NSUInteger)stride { return _stride; }
+- (NSUInteger)argumentIndexStride { return 0; }
+- (id)elementStructType { return nil; }
+- (id)elementArrayType { return nil; }
+- (id)elementTextureReferenceType { return nil; }
+- (id)elementPointerType { return nil; }
+@end
 @implementation NVMTLPointerType
 - (MTLDataType)elementType { return _elem; }
 - (MTLBindingAccess)access { return _access; }
@@ -1985,7 +1995,7 @@ static NSArray *nvmtl_vertex_attributes_for(NVMTLFunction *fn) {
 - (MTLDataType)dataType { return _dataType; }
 - (NSUInteger)argumentIndex { return _argIndex; }
 - (id)structType { return _struct; }
-- (id)arrayType { return nil; }
+- (id)arrayType { return _arr; }
 - (id)textureReferenceType { return _texRef; }
 - (id)pointerType { return _ptr; }
 - (NSString *)description { return [NSString stringWithFormat:@"<member %@ id %lu off %lu type %lu>", _name, (unsigned long)_argIndex, (unsigned long)_offset, (unsigned long)_dataType]; }
@@ -2115,7 +2125,13 @@ static NVMTLArgument *nvmtl_build_buffer_argument(NVMTLFunction *fn, NSUInteger 
             m->_offset = [am[@"off"] unsignedLongValue]; m->_argIndex = i++; m->_name = am[@"name"];
             m->_dataType = nvmtl_datatype_for_air_name(am[@"type"]);
             if (m->_dataType == MTLDataTypeNone) m->_dataType = MTLDataTypeStruct;
-            NSUInteger e = m->_offset + [am[@"size"] unsignedLongValue]; if (e > end) end = e;
+            // struct_type_info gives the element size and an element count (0 = not an array). An array is reported as
+            // Apple does, MTLDataTypeArray with its MTLArrayType: engines size their uniform copies from it. WAS: the element
+            // alone, so Hades (The Forge) copied one float4x4 of its float4x4[2] and every screen-space sprite read zeros.
+            NSUInteger cnt = [am[@"count"] unsignedLongValue], sz = [am[@"size"] unsignedLongValue];
+            if (cnt > 1) { NVMTLArrayType *at = [NVMTLArrayType new]; at->_dataType = MTLDataTypeArray; at->_elem = m->_dataType; at->_len = cnt; at->_stride = sz;
+                m->_arr = at; m->_dataType = MTLDataTypeArray; }
+            NSUInteger e = m->_offset + sz * (cnt > 1 ? cnt : 1); if (e > end) end = e;
             [members addObject:m];
         }
     }

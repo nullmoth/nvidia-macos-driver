@@ -1601,6 +1601,7 @@ static void nvmtl_air_plain_struct(NSDictionary *nodes, NSString *node, NSIntege
         NSString *a = tok[i], *b = tok[i + 1], *c = tok[i + 2], *t = tok[i + 3], *n = tok[i + 4];
         if ([a hasPrefix:@"i32 "] && [b hasPrefix:@"i32 "] && [c hasPrefix:@"i32 "] && [t hasPrefix:@"!\""] && [n hasPrefix:@"!\""] && t.length > 3 && n.length > 3) {
             [ms addObject:@{ @"off": @([[a substringFromIndex:4] integerValue]), @"size": @([[b substringFromIndex:4] integerValue]),
+                             @"count": @([[c substringFromIndex:4] integerValue]),
                              @"type": [t substringWithRange:NSMakeRange(2, t.length - 3)], @"name": [n substringWithRange:NSMakeRange(2, n.length - 3)] }];
             i += 5;
         } else i++;
