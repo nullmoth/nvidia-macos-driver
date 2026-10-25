@@ -2229,7 +2229,7 @@ target triple = "spirv-unknown-vulkan1.2"
 }
 
 #[test]
-fn native_kernel_raster_rate_map_runtime_data_is_not_replaced_with_identity() {
+fn native_kernel_raster_rate_map_is_the_identity_without_rate_maps() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
 
@@ -2254,18 +2254,33 @@ declare <2 x float> @air.map_screen_to_physical_coordinates.v2f32.p2i8.i32(<2 x 
 !5 = !{i32 2, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint2", !"air.arg_name", !"tid"}
 "#;
     let tmp = std::env::temp_dir().join(format!(
-        "metal2vulkan_rate_map_refusal_{}",
+        "metal2vulkan_rate_map_identity_{}",
         std::process::id()
     ));
     std::fs::create_dir_all(&tmp).expect("create isolated scratch");
+    // The driver has no rasterization rate maps (supportsRasterizationRateMapWithLayerCount: NO), so the
+    // map data can never describe one: both directions return the coordinate unchanged.
     for direction in ["screen_to_physical", "physical_to_screen"] {
         let source = ll.replace("screen_to_physical", direction);
-        let error = crate::translate_sanitized_native(&source, Stage::Kernel, &tmp)
-            .expect_err("runtime map data cannot be assumed to describe a uniform map");
-        assert!(
-            error.contains("rasterization-rate-map parameter data decoding"),
-            "{error}"
-        );
+        let out = crate::translate_sanitized_native(&source, Stage::Kernel, &tmp)
+            .unwrap_or_else(|e| panic!("{direction}: {e}"));
+        let asm = disassemble(&out).expect("disassemble");
+        let id_of = |op: &str| {
+            asm.lines()
+                .find(|l| l.contains(&format!(" = {op} ")))
+                .and_then(|l| l.split_once(" = ").map(|(id, _)| id.trim().to_string()))
+        };
+        let coord = id_of("OpConvertUToF").unwrap_or_else(|| panic!("no coordinate\n{asm}"));
+        let copy = id_of("OpCopyObject");
+        let stored = asm
+            .lines()
+            .filter(|l| l.trim_start().starts_with("OpStore "))
+            .any(|l| {
+                let v = l.split_whitespace().nth(2).unwrap_or("");
+                v == coord || Some(v.to_string()) == copy
+            });
+        assert!(stored, "{direction}: the coordinate is stored unchanged\n{asm}");
+        assert!(!asm.contains("OpFunctionCall"), "{direction}\n{asm}");
     }
     std::fs::remove_dir_all(&tmp).expect("remove isolated scratch");
 }
