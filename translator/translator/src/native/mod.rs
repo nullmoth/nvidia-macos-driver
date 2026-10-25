@@ -28,6 +28,7 @@ mod vec_scalar_merge;
 mod atomic_image_format;
 mod copy_memory_logical;
 mod stencil_export;
+mod short_access_chain;
 mod wg_atomic;
 
 mod tir;
@@ -196,4 +197,9 @@ pub(crate) fn inline_and_forward_object_fields(san_ll: &str) -> Option<String> {
 /// See stencil_export: a fragment stencil export lowered to a per-bit discard the driver replays.
 pub(crate) fn lower_stencil_export_module(module: &mut crate::spirv_module::Module) -> bool {
     stencil_export::lower_stencil_export(module)
+}
+
+/// See short_access_chain: an access chain that stops short of its result pointee by first-member descent only.
+pub(crate) fn decay_short_access_chains_module(module: &mut crate::spirv_module::Module) -> usize {
+    short_access_chain::decay_short_access_chains(module)
 }
