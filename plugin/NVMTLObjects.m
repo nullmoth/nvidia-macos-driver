@@ -2079,6 +2079,14 @@ static MTLTextureType nvmtl_textype_for_shape(id shape) {
     if ([s rangeOfString:@"Multisample"].location != NSNotFound || [s rangeOfString:@"MS"].location != NSNotFound) return MTLTextureType2DMultisample;
     return [s rangeOfString:@"Array"].location != NSNotFound ? MTLTextureType2DArray : MTLTextureType2D;
 }
+// texture2d<uint, sample> -> UInt, <int ...> -> Int, <half ...> -> Half, anything else (float, depth, unknown) -> Float
+static MTLDataType nvmtl_texdatatype_for_air_name(NSString *tn) {
+    if (![tn isKindOfClass:[NSString class]]) return MTLDataTypeFloat;
+    if ([tn rangeOfString:@"<uint"].location != NSNotFound || [tn rangeOfString:@"<ushort"].location != NSNotFound) return MTLDataTypeUInt;
+    if ([tn rangeOfString:@"<int"].location != NSNotFound || [tn rangeOfString:@"<short"].location != NSNotFound) return MTLDataTypeInt;
+    if ([tn rangeOfString:@"<half"].location != NSNotFound) return MTLDataTypeHalf;
+    return MTLDataTypeFloat;
+}
 static BOOL nvmtl_binding_active(NSDictionary *b) { id acc = b[@"access"]; return !([acc isKindOfClass:[NSString class]] && [acc isEqualToString:@"Unused"]); }
 static NVMTLArgument *nvmtl_build_buffer_argument(NVMTLFunction *fn, NSUInteger index, NSDictionary *binding, NSDictionary *refl, NSDictionary *names) {
     NVMTLArgument *a = [NVMTLBufferArgument new];
@@ -2183,7 +2191,14 @@ NSArray<NVMTLArgument *> *nvmtl_arguments_for_function(NVMTLFunction *fn)
                 NVMTLArgument *a = [NVMTLTextureArgument new]; a->_type = MTLArgumentTypeTexture; a->_index = idx; a->_active = nvmtl_binding_active(b);
                 a->_name = names[@"args"][[NSString stringWithFormat:@"texture:%lu", (unsigned long)idx]] ?: [NSString stringWithFormat:@"texture%lu", (unsigned long)idx];
                 a->_access = [kind isEqualToString:@"StorageImage"] ? MTLBindingAccessReadWrite : nvmtl_access_for(b[@"access"]);
-                a->_texType = nvmtl_textype_for_shape(b[@"texture_shape"]); a->_texDataType = MTLDataTypeFloat;
+                a->_texType = nvmtl_textype_for_shape(b[@"texture_shape"]);
+                // The AIR type name says what MTLArgument does: depth2d/depthcube/... is a depth texture, <uint>/<int>/<half>
+                // the component type. Apple's GL picks a texture unit's sampler type from these two: with isDepthTexture NO
+                // a sampler2DShadow unit counts as Float and its shader-side compare swizzle (texInfo) stays all Zero, so
+                // every shadow lookup returned 0 (Unity's screen-space shadows, Northgard's lit ground: black).
+                NSString *ttn = names[@"types"][[NSString stringWithFormat:@"texture:%lu", (unsigned long)idx]];
+                a->_depth = [ttn isKindOfClass:[NSString class]] && [ttn rangeOfString:@"depth"].location != NSNotFound;
+                a->_texDataType = nvmtl_texdatatype_for_air_name(ttn);
                 id loc = b[@"descriptor"]; a->_arrayLength = [loc isKindOfClass:[NSDictionary class]] && [loc[@"count"] unsignedLongValue] > 1 ? [loc[@"count"] unsignedLongValue] : 1;
                 [out addObject:a];
             } else if ([kind isEqualToString:@"Sampler"]) {
