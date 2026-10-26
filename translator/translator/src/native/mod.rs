@@ -19,6 +19,7 @@ mod parse;
 mod private_vector_word;
 mod psb;
 mod ptr_phi_load;
+mod ptr_table_offsets;
 mod psb_value_select;
 pub(crate) mod ray_intersection;
 mod reloop_nest;
@@ -57,6 +58,13 @@ pub(crate) fn lower_air_text(san_ll: &str) -> std::borrow::Cow<'_, str> {
             std::borrow::Cow::Owned(atomicrmw_text::lower_raw_atomicrmw_owned(owned))
         }
     };
+    // a private table of pointers into one buffer cannot live in Function memory, so it keeps indices
+    let lowered = match lowered {
+        std::borrow::Cow::Borrowed(borrowed) => ptr_table_offsets::offset_pointer_tables(borrowed),
+        std::borrow::Cow::Owned(owned) => {
+            std::borrow::Cow::Owned(ptr_table_offsets::offset_pointer_tables_owned(owned))
+        }
+    };
     // a Function-storage pointer phi has no legal form under Logical addressing, so the input is rewritten
     // instead: the phi's single load is hoisted into each predecessor and the phi carries the VALUES
     let lowered = match lowered {
@@ -75,14 +83,14 @@ pub(crate) fn lower_air_text(san_ll: &str) -> std::borrow::Cow<'_, str> {
 }
 
 pub(crate) fn lower_air_text_owned(san_ll: String) -> String {
-    let lowered = ptr_phi_load::sink_pointer_phi_loads_owned(atomicrmw_text::lower_raw_atomicrmw_owned(
+    let lowered = ptr_phi_load::sink_pointer_phi_loads_owned(ptr_table_offsets::offset_pointer_tables_owned(atomicrmw_text::lower_raw_atomicrmw_owned(
         dynamic_memcpy::lower_dynamic_length_memcpy_owned(async_copy::lower_simdgroup_async_copy_owned(
             match cl_constant::lower_cl_constant_args(&san_ll) {
                 std::borrow::Cow::Borrowed(_) => san_ll,
                 std::borrow::Cow::Owned(lowered) => lowered,
             },
         )),
-    ));
+    )));
     match inline::forward_builder_pointer_fields(&lowered) {
         std::borrow::Cow::Borrowed(_) => lowered,
         std::borrow::Cow::Owned(forwarded) => forwarded,
