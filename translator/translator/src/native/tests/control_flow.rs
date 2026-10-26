@@ -2319,9 +2319,13 @@ take_right:
 merge:
   %cursor = phi ptr [ %left, %take_left ], [ %right, %take_right ]
   %value = load float, ptr %cursor, align 4
-  ret float %value
+  %again = load float, ptr %cursor, align 4
+  %sum = fadd float %value, %again
+  ret float %sum
 }
 "#;
+    // Two loads through the phi: ptr_phi_load rewrites only a phi whose single use is one load, so this
+    // shape still reaches the index-phi construction this test exists for.
     let spv = emit_vulkan_spirv(ll).expect("native emit");
     let module = load_bytes(&spv).expect("load native spv");
     let function_pointer_types = module
