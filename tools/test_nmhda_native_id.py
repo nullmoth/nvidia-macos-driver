@@ -213,7 +213,7 @@ def main():
     code = HARNESS
     code += between(source, "static uint32_t readU32", "// NVIDIA audio functions:")
     code += between(source, "static bool isNvidiaAudio", "static bool wrapStart")
-    code += between(source, "static void onHdaLoaded", "static void pluginStart")
+    code += between(source, "static void onHdaLoaded", "static const char *topologyFamilyPaths")
     code += CHECKS
 
     command = os.environ.get("CXX")
