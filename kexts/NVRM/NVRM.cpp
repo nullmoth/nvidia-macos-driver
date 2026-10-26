@@ -1120,9 +1120,14 @@ bool NVRM::placeLargeBar1()
     UInt64 wMin = 0, wMax = 0;
     const unsigned physBits = nvrmPhysBits();
     const UInt64 physTop = physBits >= 63 ? ~0ULL : (1ULL << physBits) - 1;
+    const UInt64 fwBar1 = ((UInt64)old18 << 32) | (lo14 & ~0xFULL);
     if (nvrmHostWindow(fPCI, &wMin, &wMax)) {
         LOG("bar1: host bridge 64-bit window 0x%llx-0x%llx (ACPI _CRS), CPU reaches %u bits", wMin, wMax, physBits);
-    } else if (const char *why = nvrmIntel39Window(physBits, ((UInt64)old18 << 32) | (lo14 & ~0xFULL))) {
+    } else if (fwBar1 < (4ULL << 30)) {
+        // Its BAR1 is fine where it is: with no 64-bit window in _CRS and BAR1 below 4 GB, nothing above 4 GB is routed.
+        LOG("bar1: no 64-bit window in the host bridge's _CRS and the firmware left BAR1 below 4 GB (0x%llx) - not placing", fwBar1);
+        return false;
+    } else if (const char *why = nvrmIntel39Window(physBits, fwBar1)) {
         wMin = kBigBase; wMax = kHostWindowEnd;   // the pre-10-07 placement, kept only where the CPU can reach it
         LOG("bar1: no 64-bit window in the host bridge's _CRS (%s) — using 0x%llx-0x%llx (CPU reaches %u bits)", why, wMin, wMax, physBits);
     } else {
