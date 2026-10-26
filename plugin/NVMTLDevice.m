@@ -23,6 +23,7 @@
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_log_failure.h"
 #include <sys/sysctl.h>
+#import <libproc.h>
 #ifndef NVMTL_RELEASE
 #define NVMTL_RELEASE 0
 #endif
@@ -506,11 +507,48 @@ static bool nvmtl_angle_chrome_family(void)
 {
     const char *me = getprogname();
     if (!me) return false;
-    return strncmp(me, "Google Chrome", 13) == 0 ||
-           strncmp(me, "Brave Browser", 13) == 0 ||
-           strncmp(me, "Microsoft Edge", 14) == 0 ||
-           strncmp(me, "Chromium", 8) == 0 ||
-           strncmp(me, "Discord", 7) == 0;
+
+    // 1. Fast Path: Zero-overhead memory matching based on process name
+    if (strstr(me, "Helper") != NULL ||
+        strstr(me, "Chrome") != NULL ||
+        strstr(me, "Chromium") != NULL ||
+        strstr(me, "Electron") != NULL ||
+        strstr(me, "Brave") != NULL ||
+        strstr(me, "Edge") != NULL ||
+        strstr(me, "Discord") != NULL) {
+        return true;
+    }
+
+    // 2. Deep Path: Precise inspection based on file path features (mapping find command rules)
+    char path[PATH_MAX];
+    if (proc_pidpath(getpid(), path, sizeof(path)) <= 0) {
+        return false;
+    }
+
+    char app_path[PATH_MAX];
+    strlcpy(app_path, path, sizeof(app_path));
+
+    char *p = strstr(app_path, ".app");
+    if (p != NULL) {
+        *(p + 4) = '\0'; // Truncate to the root directory of .app
+
+        char check_buf[PATH_MAX];
+
+        // Corresponding to the full feature checks in the find command
+        snprintf(check_buf, sizeof(check_buf), "%s/Contents/Frameworks/libEGL.dylib", app_path);
+        if (access(check_buf, F_OK) == 0) return true;
+
+        snprintf(check_buf, sizeof(check_buf), "%s/Contents/Frameworks/Chromium Embedded Framework.framework", app_path);
+        if (access(check_buf, F_OK) == 0) return true;
+
+        snprintf(check_buf, sizeof(check_buf), "%s/Contents/Frameworks/Electron Framework.framework", app_path);
+        if (access(check_buf, F_OK) == 0) return true;
+
+        snprintf(check_buf, sizeof(check_buf), "%s/Contents/Frameworks/libffmpeg.dylib", app_path);
+        if (access(check_buf, F_OK) == 0) return true;
+    }
+
+    return false;
 }
 __attribute__((constructor)) static void nvmtl_angle_allow_nvidia(void)
 {
