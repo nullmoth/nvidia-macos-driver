@@ -399,6 +399,24 @@ chown -R root:wheel "$FW" && chmod -R go-w,a+rX "$FW" || die "firmware permissio
 # nothing reads the old location any more; leaving it behind leaves a writable folder with our name on it
 rm -rf "$FWOLD" 2>/dev/null || true
 for k in $KEXTS; do chown -R root:wheel "$EXT/$k.kext" && chmod -R 755 "$EXT/$k.kext" || die "permissions for $k"; done
+# An update replaces kexts the user already allowed. macOS keeps that approval per bundle (kext_policy; these kexts have
+# no team), and separately the code hash of the copy it last loaded from each path (kext_load_history_v3). At the next
+# start a new hash reads as a kext upgrade, the kexts wait for approval in System Settings again, and the update takes a
+# second restart. For a kext the user already allowed at this path, record the new hash now. A kext never allowed is
+# left to macOS. The database is SIP-protected; the driver's SIP setting (0x0A43) allows root to write it. Any failure
+# only means macOS asks again, as before, so nothing here stops the install.
+KPDB=/var/db/SystemPolicyConfiguration/KextPolicy
+if [ -f "$KPDB" ] && [ -x /usr/bin/sqlite3 ]; then
+  for k in $KEXTS; do
+    id=$(primary_bundle_id "$k"); p="$EXT/$k.kext"
+    printf '%s' "$id" | grep -Eq '^[A-Za-z0-9.]+$' || continue
+    ch=$(codesign -dvvv "$p" 2>&1 | awk -F= '/^CDHash=/{print $2; exit}')
+    printf '%s' "$ch" | grep -Eq '^[0-9a-f]{40}$' || continue
+    [ "$(/usr/bin/sqlite3 "$KPDB" "select allowed from kext_policy where ifnull(team_id,'')='' and bundle_id='$id'" 2>/dev/null)" = 1 ] || continue
+    /usr/bin/sqlite3 "$KPDB" "update kext_load_history_v3 set cdhash='$ch' where path='$p' and bundle_id='$id' and ifnull(team_id,'')=''" 2>/dev/null \
+      && echo "   kept the earlier approval for $k" || echo "   note: macOS will ask to allow $k again (its approval record is read-only here)"
+  done
+fi
 chown -R root:wheel "$GB/NVMTLDriver.bundle" "$GB/NVIDIAShared.bundle" "$GB/nvmtl" "$GB/nvmtl-allow.txt" || die "bundle permissions"
 # WindowServer runs as _windowserver and must read the bundles and the allow list. WAS: cp under the app's privileged
 # helper (umask 077) left nvmtl-allow.txt at 0600, WindowServer got no Metal device, and CoreDisplay aborted

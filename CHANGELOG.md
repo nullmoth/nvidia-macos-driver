@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.6.0
+
+- Updating the driver no longer asks you to allow its kexts in System Settings again and restart a second time. macOS keeps your approval of the driver, but it also remembers the exact build it last loaded, and each update looked like a new kext to approve. The installer now records the new build for kexts you already allowed, so an update takes one restart.
+
 ## 2.5.5
 
 - Discord videos play again. 2.5.4 stopped registering the hardware video decoder in every sandboxed process, and Discord decodes inside its own sandboxed GPU process, so its videos did not play at all. Only Apple's sandboxed apps (Safari, QuickTime, Preview) now hand decoding to macOS's video decoding service; Chromium and Electron apps decode in their own process as in 2.5.3.
