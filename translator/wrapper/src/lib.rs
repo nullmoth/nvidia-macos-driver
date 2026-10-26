@@ -79,6 +79,21 @@ fn formatless_options(ll: &str, st: Stage, caps: u32) -> Option<metal2vulkan::pa
 fn translate_one(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
     match translate_one_as_written(ll, st) {
         Ok(v) => Ok(v),
+        // A future loop-edge pointer load can refer to the same immutable local
+        // object field as an earlier load. Before scalar replacement its source
+        // is not yet emitted, so pointer-phi construction cannot recover that
+        // identity. Inline the helpers and forward only fields whose sole store
+        // dominates the reads and whose complete address-use graph is known.
+        Err(e) if e.contains("pointer merge storage mismatch")
+            || (e.contains("pointer phi") && e.contains("differing structural sources")) =>
+        {
+            let Some(inlined) = metal2vulkan::inline_and_forward_object_fields(ll) else { return Err(e) };
+            if let Some(path) = std::env::var_os("NVMTL_DUMP_RETRY_LL") {
+                let _ = std::fs::write(path, &inlined);
+            }
+            translate_one_as_written(&inlined, st)
+                .map_err(|retry| format!("{e}; retry with immutable local pointer fields forwarded: {retry}"))
+        }
         // A module whose pointers (a sampler's address in an argument buffer, a threadgroup array's address) reach their use
         // only through a local object's fields gets one retry with its helpers inlined and those fields forwarded, and
         // samplers in argument buffers read from the sampler heap. Only a failure gets here, so a module that translates as
