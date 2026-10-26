@@ -930,6 +930,11 @@ bool NVRMNVDAFramebuffer::kapiInit()
         int r = fKms->getDisplayMode(fDev, fDisplay, i, &m, &valid, &preferred);
         if (r < 0) break;
         if (r == 0 || !valid) continue;
+        if (!nvrmKmsRasterValid(m.timings.hVisible, m.timings.vVisible)) {
+            FBLOG("skip mode %u with raster %ux%u outside NVKMS layer range", i,
+                  m.timings.hVisible, m.timings.vVisible);
+            continue;
+        }
         if (preferred) { fMode = m; have = true; break; }
         const NvU64 area = (NvU64)m.timings.hVisible * m.timings.vVisible;
         if (!have || area > bestArea || (area == bestArea && m.timings.pixelClockHz > bestClock)) {
@@ -937,14 +942,10 @@ bool NVRMNVDAFramebuffer::kapiInit()
         }
     }
     if (!have) { FBLOG("no valid mode"); return false; }
-    if (!fMode.timings.hVisible || !fMode.timings.vVisible ||
-        fMode.timings.hVisible > 0xffffu || fMode.timings.vVisible > 0xffffu) {
-        FBLOG("mode raster %ux%u exceeds NVKMS layer dimension range", fMode.timings.hVisible, fMode.timings.vVisible);
-        return false;
-    }
     if (gBootHead < 0 && fIndex == 0) fBootConsole = true;
     fKmsMode = fMode; fHaveKmsMode = true;
-    if (gBootHead >= 0 && fDisplay == gBootDpy && (int)fHead == gBootHead) {
+    if (gBootHead >= 0 && fDisplay == gBootDpy && (int)fHead == gBootHead &&
+        nvrmKmsRasterValid(gBootMode.timings.hVisible, gBootMode.timings.vVisible)) {
         // the fallback for a refused firmware timing must be the same raster (it scans out the same surface): the
         // validated mode at the boot size whose refresh is closest to the firmware's
         bool same = false; NvU32 bestGap = 0;
@@ -952,7 +953,8 @@ bool NVRMNVDAFramebuffer::kapiInit()
             struct NvKmsKapiDisplayMode m = {}; NvBool valid = NV_FALSE, preferred = NV_FALSE;
             int r = fKms->getDisplayMode(fDev, fDisplay, i, &m, &valid, &preferred);
             if (r < 0) break;
-            if (r == 0 || !valid || m.timings.hVisible != gBootMode.timings.hVisible ||
+            if (r == 0 || !valid || !nvrmKmsRasterValid(m.timings.hVisible, m.timings.vVisible) ||
+                m.timings.hVisible != gBootMode.timings.hVisible ||
                 m.timings.vVisible != gBootMode.timings.vVisible) continue;
             const NvU32 gap = m.timings.refreshRate > gBootMode.timings.refreshRate ?
                 m.timings.refreshRate - gBootMode.timings.refreshRate : gBootMode.timings.refreshRate - m.timings.refreshRate;
@@ -963,6 +965,11 @@ bool NVRMNVDAFramebuffer::kapiInit()
         fBootConsole = true;
         FBLOG("boot pair: display 0x%x keeps the firmware's mode %ux%u @%u on head %u", fDisplay,
               fMode.timings.hVisible, fMode.timings.vVisible, fMode.timings.refreshRate, fHead);
+    } else if (gBootHead >= 0 && fDisplay == gBootDpy && (int)fHead == gBootHead) {
+        fBootConsole = true;
+        FBLOG("firmware boot raster %ux%u is outside the NVKMS layer range; using selected mode %ux%u",
+              gBootMode.timings.hVisible, gBootMode.timings.vVisible,
+              fMode.timings.hVisible, fMode.timings.vVisible);
     }
     fW = fMode.timings.hVisible; fH = fMode.timings.vVisible;
     {
@@ -2895,8 +2902,7 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
     if (fSubmissionFaulted) return kIOReturnNotReady;
     if (!fKms || !fDev || !fMem || fConsoleAperture) return kIOReturnNotReady;
     NvU32 pitch = 0;
-    if (!w || !h || w > 0xffffu || h > 0xffffu || !m.timings.hVisible || !m.timings.vVisible ||
-        m.timings.hVisible > 0xffffu || m.timings.vVisible > 0xffffu ||
+    if (!nvrmKmsRasterValid(w, h) || !nvrmKmsRasterValid(m.timings.hVisible, m.timings.vVisible) ||
         !nvrmCheckedPitch(w, fPitchAlign, &pitch)) return kIOReturnBadArgument;
     if ((NvU64)pitch * h > fMemBytes) {
         FBLOG("switchMode 0x%x: %ux%u pitch %u needs %llu B, the scanout holds %llu -- REFUSED",
