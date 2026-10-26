@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.6.2
+
+- The same driver as 2.6.0, released with fixes to the 1401 apps for Mac and Windows.
+
 ## 2.6.1
 
 - The same driver as 2.6.0, released with the redesigned 1401 apps for Mac and Windows.
