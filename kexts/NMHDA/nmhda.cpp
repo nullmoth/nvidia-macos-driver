@@ -229,9 +229,15 @@ static KernelPatcher::KextInfo topologyFamily {
 };
 static void topologyFamilyLoaded(void *, KernelPatcher &patcher, size_t index,
                                  mach_vm_address_t address, size_t size) {
-    gTopologyVerb = reinterpret_cast<NMHDAExecuteVerb>(patcher.solveSymbol(index,
-        "__ZN16IOHDACodecDevice11executeVerbEtttPjb", address, size));
+    // Lilu broadcasts all requested images; a later unrelated image must not erase this entry.
+    if (gTopologyVerb) return;
+    auto execute = patcher.solveSymbol(index,
+        "__ZN16IOHDACodecDevice11executeVerbEtttPjb", address, size);
     patcher.clearError();
+    if (!execute) return;
+    gTopologyVerb = reinterpret_cast<NMHDAExecuteVerb>(execute);
+    report("topology-verb", "topology GET ready in runtime image %lu (registered %lu)",
+           (unsigned long)index, (unsigned long)topologyFamily.loadIndex);
 }
 static void pluginStart() {
     sysctl_register_oid(&sysctl__debug_nmhda);

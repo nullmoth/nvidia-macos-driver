@@ -4,6 +4,8 @@ NMHDA reads NVIDIA HDA pins and valid ELD through IOHDAFamily GET verbs.
 NVRMFB requests snapshots from its asynchronous worker outside the display gate.
 The controller must share the GPU's PCI bus/device and parent. Snapshots carry
 an interface version and connection generation; stale results are discarded.
+NMHDA retains the resolved IOHDAFamily GET entry across unrelated Lilu image
+callbacks, so later driver loads cannot clear the topology transport.
 
 HDMI and DP SST displays match only when EDID-derived and pin ELD identities
 are unique in both directions (manufacturer/product, trimmed name, connection
@@ -41,9 +43,12 @@ Portable checks (clang++ with AddressSanitizer and UndefinedBehaviorSanitizer):
     clang++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined tools/test_nvrmfb_audio_match.cpp -o /tmp/nvrmfb-audio-match
     /tmp/nvrmfb-audio-match
     python3 tools/test_nvrmfb_audio_config.py
+    python3 tools/test_nmhda_topology_callback.py
 
-The portable tests use synthetic monitor data and test production matching and
-extracted configuration selection. They do not exercise kernel scheduling or
-HDA transport. Physical loading, automatic pin selection, playback, wake and
-multi-monitor hotplug require hardware validation. Build success is not that
-validation. This change does not modify the backlight handler or PR #312.
+The portable tests use synthetic monitor data and test production matching,
+extracted configuration selection and topology callback ordering. They do not
+exercise kernel scheduling or HDA transport. On RTX 5080 Laptop/macOS 26.7,
+the submitter confirms that Mi Monitor HDMI output appears and plays sound
+after the GET callback correction. Other GPU models, pin 04, DP playback,
+wake and multi-monitor hotplug remain unverified on hardware. This change does
+not modify the backlight handler or PR #312.
