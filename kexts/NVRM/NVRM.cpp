@@ -815,16 +815,14 @@ void NVRM::autoGo(void *p0, wait_result_t)
         LOG("auto-go: display stack: %s", sum);
         s->releaseBootHold(armed == 1 && ag == 1 && iop == 1 ? "display armed" : "display PARTIAL");
         if (armed == 1 && iop == 1 && !PE_parse_boot_argn("-nvrmnoflip", nb, sizeof(nb))) {
-            // Zero-copy scan-out shows only what sits in this GPU's VRAM. Two setups black the screen (cursor only) the
+            // Zero-copy scan-out shows only what sits in this GPU's VRAM. One setup blacks the screen (cursor only) the
             // moment it starts, and every report was fixed by -nvrmnoflip: a second accelerated GPU (Intel/AMD iGPU;
-            // WindowServer composites there, issues #16 #26), and a BAR1 left at its small firmware window (256 MB, no
-            // Resizable BAR; #20 #54 #82). Both keep the copy path, decided below from what is known right now.
-            // This used to sleep 60 s first "so the desktop could come up on the copy path": measured on macOS 26 it
-            // never did - WindowServer presented nothing until the flip path opened, so every boot was a black login
-            // screen for exactly 60 s (72 s on a GTX 1650 SUPER with the login on top). The checks need no wait.
+            // WindowServer composites there, issues #16 #26). The black screens reported for unplaced windows (#54, #82)
+            // also had an iGPU, which the check below covers, so whether BAR1 was moved doesn't decide flipping. That
+            // setup keeps the copy path, decided below from what is known right now.
             const char *why = nullptr;
-            if (!s->fBar1Placed) why = "BAR1 not placed (small firmware window)";
-            else if (OSIterator *it = IOService::getMatchingServices(IOService::serviceMatching("IOAccelerator"))) {
+            if (!s->fBar1Placed) LOG("auto-go: BAR1 not placed (%llu MB) - flip allowed", s->fNv.bars[NV_GPU_BAR_INDEX_FB].size >> 20);
+            if (OSIterator *it = IOService::getMatchingServices(IOService::serviceMatching("IOAccelerator"))) {
                 while (OSObject *o = it->getNextObject()) {
                     const char *cn = o->getMetaClass()->getClassName();
                     if (cn && strncmp(cn, "NV", 2)) { why = "another GPU's accelerator is running"; LOG("auto-go: accelerator %s present", cn); break; }
