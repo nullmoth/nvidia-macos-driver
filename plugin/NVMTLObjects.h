@@ -286,6 +286,8 @@ NSUInteger nvmtl_air_max_tg(NVMTLFunction *fn);
 @interface NVMTLBuffer () { @public BOOL _subPlaced; } @end
 typedef struct { nvk_image img; uint32_t key[12]; NSUInteger off, len; } nvmtl_park_t;
 @interface NVMTLTexture () { @public BOOL _subPlaced, _parkable; uint32_t _pkey[12]; NSUInteger _pkLen; } @end
+@interface NVMTLTexture () { @public BOOL _clientWritten; } @end
+@interface NVMTLCommandBuffer () { @public NSDictionary *_busyMarks; } @end
 @interface NVMTLHeap () { @public nvmtl_park_t *_pk; uint32_t _npk; } @end
 @interface NVMTLBuffer () { @public nvmtl_park_t *_bpk; uint32_t _nbpk; os_unfair_lock _bpl; } @end
 @interface NVMTLTexture () { @public BOOL _bparkable; } @end

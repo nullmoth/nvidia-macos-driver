@@ -993,6 +993,47 @@ static void nvmtl_vram_tag_set(IOSurfaceRef surf, NSUInteger plane, uint32_t see
     CFDataRef d = CFDataCreate(NULL, (const UInt8 *)&t, sizeof t); CFStringRef k = nvmtl_vram_tag_key(plane);
     IOSurfaceSetValue(surf, k, d); CFRelease(k); CFRelease(d);
 }
+typedef struct { uint32_t magic, done; uint64_t stamp_ns, seq; int32_t pid; uint32_t pad; } nvmtl_busy_tag;
+#define NVMTL_BUSY_MAGIC 0x4255535au
+#define NVMTL_BUSY_WAIT_NS  (10ull * 1000 * 1000)
+#define NVMTL_BUSY_STALE_NS (100ull * 1000 * 1000)
+#define NVMTL_BUSY_POLL_US 100
+static CFStringRef nvmtl_busy_key(NSUInteger plane) { return CFStringCreateWithFormat(NULL, NULL, CFSTR("NVMTLBusyAt:p%lu"), (unsigned long)plane); }
+static int nvmtl_busy_read(IOSurfaceRef surf, NSUInteger plane, nvmtl_busy_tag *out)
+{
+    CFStringRef k = nvmtl_busy_key(plane); CFTypeRef v = IOSurfaceCopyValue(surf, k); CFRelease(k);
+    nvmtl_busy_tag t = { 0, 0, 0, 0, 0, 0 };
+    int ok = v && CFGetTypeID(v) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)v) == (CFIndex)sizeof t;
+    if (ok) memcpy(&t, CFDataGetBytePtr((CFDataRef)v), sizeof t);
+    if (v) CFRelease(v);
+    ok = ok && t.magic == NVMTL_BUSY_MAGIC;
+    if (ok && out) *out = t;
+    return ok;
+}
+static void nvmtl_busy_write(IOSurfaceRef surf, NSUInteger plane, uint64_t seq, int done)
+{
+    nvmtl_busy_tag t = { NVMTL_BUSY_MAGIC, (uint32_t)done, clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), seq, getpid(), 0 };
+    CFDataRef d = CFDataCreate(NULL, (const UInt8 *)&t, sizeof t); CFStringRef k = nvmtl_busy_key(plane);
+    IOSurfaceSetValue(surf, k, d); CFRelease(k); CFRelease(d);
+}
+static int nvmtl_busy_foreign(IOSurfaceRef surf, NSUInteger plane)
+{
+    nvmtl_busy_tag t;
+    return nvmtl_busy_read(surf, plane, &t) && t.pid != getpid();
+}
+static void nvmtl_busy_wait(IOSurfaceRef surf, NSUInteger plane)
+{
+    nvmtl_busy_tag t;
+    if (!nvmtl_busy_read(surf, plane, &t) || t.done || t.pid == getpid()) return;
+    const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    if (t.stamp_ns <= t0 && t0 - t.stamp_ns > NVMTL_BUSY_STALE_NS) return;
+    for (;;) {
+        usleep(NVMTL_BUSY_POLL_US);
+        if (!nvmtl_busy_read(surf, plane, &t) || t.done || t.pid == getpid()) return;
+        const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+        if (now - t0 > NVMTL_BUSY_WAIT_NS || (t.stamp_ns <= now && now - t.stamp_ns > NVMTL_BUSY_STALE_NS)) return;
+    }
+}
 static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInteger plane, uint32_t w, uint32_t h,
                                       uint32_t vkf, uint32_t bpp, int a8, int stex)
 {
@@ -1068,7 +1109,7 @@ static char nvmtl_surface_cache_key;
     if (nvmtl_surface_image_create(t, surf, plane, (uint32_t)w, (uint32_t)h, vkf, bpp, a8, wantStex)) {
         nvlog("newTextureWithDescriptor:iosurface:plane: image create FAILED (%zux%zu)", w, h); return nil; }
     t->_q = nvmtl_device_queue();
-    t->_surf = surf; if (surf) { CFRetain(surf); t->_surfOwned = YES; }
+    t->_surf = surf; if (surf) { CFRetain(surf); t->_surfOwned = YES; t->_clientWritten = nvmtl_busy_foreign(surf, plane) != 0; }
     t->_plane = plane;
     t->_fmt = d.pixelFormat;
     t->_stex = t->_i.storage != 0;
