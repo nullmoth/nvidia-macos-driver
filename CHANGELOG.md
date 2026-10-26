@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.6.1
+
+- The same driver as 2.6.0, released with the redesigned 1401 apps for Mac and Windows.
+
 ## 2.6.0
 
 - An update of the driver takes one restart. macOS shows a notice that the extensions were updated while the installer replaces them, and the installer used to answer it with "allow the extensions, then reboot once more"; the new driver already loads on the first restart (measured: every extension approved, none held back), so on an update it now says one restart is enough. A first install still asks you to allow the extensions once.
