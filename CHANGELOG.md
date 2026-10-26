@@ -2,7 +2,7 @@
 
 ## 2.6.0
 
-- Updating the driver no longer asks you to allow its kexts in System Settings again and restart a second time. macOS keeps your approval of the driver, but it also remembers the exact build it last loaded, and each update looked like a new kext to approve. The installer now records the new build for kexts you already allowed, so an update takes one restart.
+- An update of the driver takes one restart. macOS shows a notice that the extensions were updated while the installer replaces them, and the installer used to answer it with "allow the extensions, then reboot once more"; the new driver already loads on the first restart (measured: every extension approved, none held back), so on an update it now says one restart is enough. A first install still asks you to allow the extensions once.
 
 ## 2.5.5
 
