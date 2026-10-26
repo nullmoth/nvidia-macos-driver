@@ -268,6 +268,50 @@ static void nvmtl_surface_finish_writes(NVMTLCommandBuffer *cb) {
     }
 }
 
+static NSMutableDictionary *nvmtl_busy_latest;
+static _Atomic uint64_t nvmtl_busy_seq;
+static NSObject *nvmtl_busy_lock(void) { static NSObject *l; static dispatch_once_t once; dispatch_once(&once, ^{ l = [NSObject new]; }); return l; }
+static BOOL nvmtl_busy_marks_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_SURFACE_BUSY"), *me = getprogname();
+        on = !(e && e[0] == '0') && !(me && !strcmp(me, "WindowServer")); }
+    return on;
+}
+static void nvmtl_busy_mark_commit(NVMTLCommandBuffer *cb) {
+    if (!nvmtl_busy_marks_on()) return;
+    NSMutableDictionary *marks = nil;
+    for (NVMTLSubmissionPart *part in cb->_parts) {
+        if (![part isKindOfClass:[NVMTLSubmissionPart class]]) continue;
+        for (NVMTLTexture *t in part->surfaces) {
+            if (!t->_surf) continue;
+            NSString *key = nvmtl_surface_writer_key(t);
+            if (marks[key]) continue;
+            if (!marks) marks = [NSMutableDictionary new];
+            const uint64_t seq = atomic_fetch_add(&nvmtl_busy_seq, 1) + 1;
+            marks[key] = @[t, @(seq)];
+            @synchronized (nvmtl_busy_lock()) {
+                if (!nvmtl_busy_latest) nvmtl_busy_latest = [NSMutableDictionary new];
+                nvmtl_busy_latest[key] = @(seq);
+                nvmtl_busy_write(t->_surf, t->_plane, seq, 0);
+            }
+        }
+    }
+    cb->_busyMarks = marks;
+}
+static void nvmtl_busy_mark_done(NVMTLCommandBuffer *cb) {
+    NSDictionary *marks = cb->_busyMarks;
+    if (!marks) return;
+    cb->_busyMarks = nil;
+    for (NSString *key in marks) {
+        NSArray *m = marks[key]; NVMTLTexture *t = m[0]; const uint64_t seq = [m[1] unsignedLongLongValue];
+        @synchronized (nvmtl_busy_lock()) {
+            if ([nvmtl_busy_latest[key] unsignedLongLongValue] != seq) continue;
+            [nvmtl_busy_latest removeObjectForKey:key];
+            nvmtl_busy_write(t->_surf, t->_plane, seq, 1);
+        }
+    }
+}
+
 @implementation NVMTLSubmissionPart
 - (void)dealloc {
     if (inflight) {
@@ -438,6 +482,7 @@ static int nvmtl_skip_empty_on(void) {
     if (!error && _gpuTimingSeen && !_gpuTimingInvalid)
         (void)nvmtl_vk_interval_seconds(&_gpuTiming, &deviceStart, &deviceEnd);
     nvmtl_surface_finish_writes(self);
+    nvmtl_busy_mark_done(self);
     [_completionCondition lock];
     _gpuStart = deviceStart; _gpuEnd = deviceEnd;
     _legacyKernelEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
@@ -702,6 +747,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
     @synchronized ([NVMTLCommandBuffer class]) {
         _commitMarking = NO;
         nvmtl_surface_register_writes(self);
+        nvmtl_busy_mark_commit(self);
         if (!nvmtl_pending_buffers) nvmtl_pending_buffers = [NSMutableArray new];
         [nvmtl_pending_buffers addObject:self];
         nvmtl_pump_buffers();
