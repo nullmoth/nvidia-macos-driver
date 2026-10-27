@@ -3407,7 +3407,9 @@ IOReturn NVRMNVDAFramebuffer::getInformationForDisplayMode(IODisplayModeID mode,
         const bool scaled = d.horizontalScaled && d.verticalScaled && !(d.horizontalScaled == rw && d.verticalScaled == rh);
         info->refreshRate = tot ? (UInt32)((d.pixelClock << 16) / tot) : (60u << 16);
         info->maxDepthIndex = 0;
-        info->flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeAcceleratorBackedFlag | (scaled ? kDisplayModeNotPresetFlag : 0);
+        // without ValidForHiRes, scaled modes stay out of the public mode list and HiDPI "looks like" sizes never show (#354)
+        info->flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeAcceleratorBackedFlag
+            | (scaled ? kDisplayModeNotPresetFlag | kDisplayModeValidForHiResFlag : 0);
         if (!scaled && d.horizontalActive == fBootW && d.verticalActive == fBootH)
             info->flags |= (fTransform ? 0 : kDisplayModeNativeFlag) | kDisplayModeDefaultFlag;
         info->imageWidth = fEdidMmW; info->imageHeight = fEdidMmH;
