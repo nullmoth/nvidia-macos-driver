@@ -7,7 +7,8 @@ use crate::native::parse::{
 use std::collections::{HashMap, HashSet};
 
 pub(in crate::native) fn ret_emit(terminator_text: &str) -> RetEmit {
-    let cleaned = strip_comment(terminator_text).trim();
+    let fields = crate::native::lex::split_instruction_operands(terminator_text);
+    let cleaned = fields.first().copied().unwrap_or("").trim();
     let Some(rest) = cleaned.strip_prefix("ret ") else {
         return RetEmit::FromText;
     };
@@ -343,6 +344,10 @@ pub(in crate::native) fn push_inst_line(
     pointer_pointees: &mut HashMap<String, LlType>,
     cur_insts: &mut Vec<TirInst>,
 ) {
+    // Parse operands and result types without treating LLVM attachments as
+    // values (including cast destinations and GEP indices). The module text
+    // remains unchanged for reflection and loop-control metadata readers.
+    let line = crate::native::lex::instruction_without_attachments(line);
     let mut pointer_pointee: Option<LlType> = None;
     let (result, result_ty) = match resolve_result(line, named_types) {
         Some((name, ty)) => {

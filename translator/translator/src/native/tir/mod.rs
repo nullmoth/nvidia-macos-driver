@@ -2105,7 +2105,38 @@ mod tests {
             })
         ));
         assert!(matches!(ret_emit("br label %x"), RetEmit::FromText));
-        assert!(matches!(ret_emit("ret void, !dbg !9"), RetEmit::FromText));
+        assert!(matches!(ret_emit("ret void, !dbg !9"), RetEmit::Void));
+        assert!(matches!(ret_emit("ret i32 7, !dbg !9"), RetEmit::Value(TypedValue { ty: LlType::Int(32), .. })));
+    }
+
+    #[test]
+    fn aggregate_indices_ignore_instruction_metadata() {
+        assert_eq!(
+            resolve_aggregate_indices("%v = extractvalue { <4 x float>, i8 } %sample, 0, !dbg !48", "extractvalue"),
+            Some(vec![0])
+        );
+        assert_eq!(
+            resolve_aggregate_indices("%v = insertvalue { i32, { float, i32 } } %a, i32 %b, 1, 1, !dbg !49, !custom !{i32 1}", "insertvalue"),
+            Some(vec![1, 1])
+        );
+        assert_eq!(
+            resolve_aggregate_indices("%v = extractvalue { i32, i8 } %a, invalid, !dbg !1", "extractvalue"),
+            None
+        );
+    }
+
+    #[test]
+    fn phi_incomings_ignore_instruction_metadata() {
+        let line = "%7 = phi <4 x float> [ zeroinitializer, %3 ], [ %17, %12 ], !dbg !41";
+        let (incoming, error) = phi_incoming_parse(line);
+        assert!(error.is_none(), "{error:?}");
+        let (ty, incoming) = incoming.expect("debug attachment is not a phi incoming");
+        assert_eq!(ty, LlType::Vector(Box::new(LlType::Float), 4));
+        assert_eq!(incoming.len(), 2);
+        assert_eq!(incoming[0].1, "%3");
+        assert_eq!(incoming[1].1, "%12");
+        assert_eq!(resolve_phi_incoming_values(line, "phi").unwrap().len(), 2);
+        assert!(phi_incoming_parse("%r = phi i32 [ %a %entry ], !dbg !1").0.is_none());
     }
 
     #[test]
