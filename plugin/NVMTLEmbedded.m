@@ -213,7 +213,7 @@ static BOOL nvmtl_embedded_info_due(_Atomic uint64_t *counter) {
 }
 static _Atomic uint64_t nvmtl_embedded_empty_count, nvmtl_embedded_bound_count;
 static void nvmtl_clear_embedded_slot(NVMTLCommandBuffer *cb, uint32_t set, uint32_t slot, BOOL sampler) {
-    if (sampler) nvmtl_vk_bind_sampler(&cb->_c, set, slot, NULL);
+    if (sampler) nvmtl_vk_bind_parked_sampler(&cb->_c, set, slot, NULL);
     else {
         nvmtl_vk_bind_texture_view(&cb->_c, set, slot, NULL);
         nvmtl_vk_bind_storage_view(&cb->_c, set, slot, NULL);
@@ -222,15 +222,19 @@ static void nvmtl_clear_embedded_slot(NVMTLCommandBuffer *cb, uint32_t set, uint
 void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NVMTLBuffer *__strong const *bufAt, const NSUInteger *offAt)
 {
     if (!cb || !fn) return;
-    if (nvmtl_static_samplers_on()) {
-        for (NSArray *pair in nvmtl_static_samplers(fn)) {
-            NVMTLSamplerState *s = pair[1];
-            nvmtl_retain_resource(cb, s);
-            if (nvmtl_vk_bind_sampler(&cb->_c, set, [pair[0] unsignedIntValue], &s->_s))
-                nvlog("static sampler slot %@: bind FAILED", pair[0]);
-        }
-    }
+    NSArray<NSArray *> *statics = nvmtl_static_samplers_on() ? nvmtl_static_samplers(fn) : nil;
     NSArray<NVMTLEmbeddedPlan *> *embedded = nvmtl_embedded_plan(fn);
+    // give the app back any sampler slot an earlier shader parked its own sampler in and this one leaves alone
+    uint32_t keep = 0;
+    for (NSArray *pair in statics) { uint32_t i = [pair[0] unsignedIntValue]; if (i < 32) keep |= 1u << i; }
+    for (NVMTLEmbeddedPlan *plan in embedded) if (plan->wantSampler && plan->slot < 32) keep |= 1u << plan->slot;
+    nvmtl_vk_parked_samplers_keep(&cb->_c, set, keep);
+    for (NSArray *pair in statics) {
+        NVMTLSamplerState *s = pair[1];
+        nvmtl_retain_resource(cb, s);
+        if (nvmtl_vk_bind_parked_sampler(&cb->_c, set, [pair[0] unsignedIntValue], &s->_s))
+            nvlog("static sampler slot %@: bind FAILED", pair[0]);
+    }
     if (!embedded.count) return;
     extern int nvmtl_vk_emb_same(nvk_cmdbuf *, uint32_t, const void *, const uint64_t *, uint32_t);
     extern void nvmtl_vk_emb_note(nvk_cmdbuf *, uint32_t, const void *, const uint64_t *, uint32_t);
@@ -297,7 +301,7 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
         if (wantSampler) {
             NVMTLSamplerState *s = resource;
             nvmtl_retain_resource(cb, s);
-            if (nvmtl_vk_bind_sampler(&cb->_c, set, slot, &s->_s))
+            if (nvmtl_vk_bind_parked_sampler(&cb->_c, set, slot, &s->_s))
                 nvlog("embedded sampler slot %u: bind FAILED", slot);
         } else {
             NVMTLTexture *t = resource;
