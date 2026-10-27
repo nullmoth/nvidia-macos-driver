@@ -3907,6 +3907,8 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     _used += len;
     atomic_fetch_add(&gHAPlaced, 1); atomic_fetch_add(&gHALive, len);
     atomic_fetch_add(rec ? &gHTRecycled : &gHTPlaced, 1); nvmtl_heaptex_census(rec ? "recycled" : "placed");
+    // automatic heaps place their textures here, so the descriptor's swizzle is applied here as on every other path
+    nvmtl_texture_desc_swizzle(t, d);
     return t;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
