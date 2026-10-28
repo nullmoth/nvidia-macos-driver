@@ -1828,6 +1828,35 @@ out:
     }
 
     #[test]
+    fn a_switch_whose_default_opens_with_a_phi_folds_and_the_phi_names_the_last_test_block() {
+        // MPS's depthwise convolution: case 7 falls through into case 8, and the default merges with a phi
+        let mut f = FuncBlock {
+            header: "define void @k(i32 %t) {".to_string(),
+            body: "entry:
+  switch i32 %t, label %out [
+    i32 7, label %seven
+    i32 8, label %eight
+  ]
+seven:
+  br label %eight
+eight:
+  br label %out
+out:
+  %p = phi i32 [ 1, %eight ], [ %t, %entry ]
+  ret void"
+                .lines()
+                .map(str::to_string)
+                .collect(),
+        };
+        assert!(fold_switches_to_branches_in(&mut f));
+        let text = f.body.join("\n");
+        assert!(!text.contains("switch "), "{text}");
+        assert!(text.contains("label %eight, label %out"), "the last test block takes the default edge:\n{text}");
+        assert!(text.contains("[ %t, %.swf1.n1 ]"), "the phi names the block the default edge now comes from:\n{text}");
+        assert!(!text.contains("[ %t, %entry ]"), "{text}");
+    }
+
+    #[test]
     fn a_phi_of_one_value_from_every_edge_becomes_that_value_and_a_real_merge_stays() {
         let mut f = FuncBlock {
             header: "define void @k(ptr addrspace(2) %buf, i32 %n) {".to_string(),
@@ -2181,10 +2210,21 @@ fn fold_switches_to_branches_in(f: &mut FuncBlock) -> bool {
                 None => groups.push((target.clone(), vec![value.clone()])),
             }
         }
-        if groups.is_empty()
-            || groups.iter().any(|g| g.0 == default || target_has_phi(&f.body, &g.0))
-            || (groups.len() > 1 && target_has_phi(&f.body, &default))
-        {
+        if groups.is_empty() || groups.iter().any(|g| g.0 == default || target_has_phi(&f.body, &g.0)) {
+            i = end + 1;
+            continue;
+        }
+        // A default that opens with phis takes its edge from the chain's last test block instead of the switch block,
+        // so their entries for the switch block are renamed. MPS's depthwise convolution (Geekbench) inlines a switch
+        // whose case 7 falls through into case 8 and whose default merges with a phi; left a switch, the structurizer
+        // found no merge for it.
+        let switch_block = f.body[..i]
+            .iter()
+            .rev()
+            .find_map(|l| block_label_id(l).map(str::to_string))
+            .or_else(|| (!f.body[..i].iter().any(|l| block_label_id(l).is_some())).then(|| "entry".to_string()));
+        let default_phi_edge = groups.len() > 1 && target_has_phi(&f.body, &default);
+        if default_phi_edge && switch_block.is_none() {
             i = end + 1;
             continue;
         }
@@ -2212,6 +2252,24 @@ fn fold_switches_to_branches_in(f: &mut FuncBlock) -> bool {
         }
         let n = lines.len();
         f.body.splice(i..=end, lines);
+        if default_phi_edge {
+            if let Some(from) = &switch_block {
+                let last = format!("%{tag}.n{}", groups.len() - 1);
+                let from = format!("%{from} ]");
+                if let Some(at) = f.body.iter().position(|l| block_label_id(l) == Some(default.as_str())) {
+                    for line in f.body[at + 1..].iter_mut() {
+                        let t = line.trim();
+                        if t.is_empty() || t.starts_with(';') {
+                            continue;
+                        }
+                        if !t.contains(" = phi ") {
+                            break;
+                        }
+                        *line = line.replace(&from, &format!("{last} ]"));
+                    }
+                }
+            }
+        }
         i += n;
         changed = true;
     }
