@@ -2,7 +2,7 @@ use super::ir::{LlDeclaration, LlFunction, LlGep, LlGlobal, LlType, LlValue, Typ
 pub(super) use super::lex::{
     matching_angle, matching_paren, parse_bfloat_literal, parse_float32_hex_literal,
     parse_float_literal, parse_float_special_literal, parse_half_literal, parse_hex_literal,
-    parse_i64_literal, parse_u32, parse_u64_literal, split_top_level, split_top_level_whitespace,
+    parse_i64_literal, parse_u32, parse_u64_literal, split_instruction_operands, split_top_level, split_top_level_whitespace,
     strip_comment,
 };
 use crate::spirv_module::Operand;
@@ -730,7 +730,7 @@ pub(super) fn parse_memory_alignment(parts: &[&str]) -> Result<Option<u64>, Stri
 
 pub(super) fn parse_phi(rest: &str) -> Result<(LlType, Vec<(LlValue, String)>), String> {
     let (phi_ty, incoming_text) = split_phi_type_and_incoming(rest)?;
-    let incoming = split_top_level(&incoming_text, ',')
+    let incoming = split_instruction_operands(&incoming_text)
         .into_iter()
         .map(|incoming| {
             let incoming = incoming
@@ -916,7 +916,7 @@ pub(super) fn parse_identity_ptr_bitcast(line: &str) -> Option<(String, String)>
 
 pub(super) fn parse_phi_incoming_values(rest: &str) -> Result<Vec<LlValue>, String> {
     let (_, incoming_text) = split_phi_type_and_incoming(rest)?;
-    split_top_level(&incoming_text, ',')
+    split_instruction_operands(&incoming_text)
         .into_iter()
         .map(|incoming| {
             let incoming = incoming
