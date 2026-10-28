@@ -13,6 +13,8 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/graphics/IOFramebuffer.h>
+#include <IOKit/graphics/IODisplay.h>
+#include <IOKit/ndrvsupport/IOMacOSVideo.h>
 #include <libkern/OSAtomic.h>
 #include "nvrm_vram_abi.h"
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -74,6 +76,33 @@ constexpr uint32_t fmtOf(uint32_t ctl)  { return (ctl >> 23) & 0x1F; }
 constexpr uint32_t tileOf(uint32_t ctl) { return (ctl >> 10) & 0x7; }
 }
 
+// Panel brightness through the south display PWM (PCH display versions 12-20: CNP, ICP, TGP, ADP, MTP).
+// Registers from Linux intel_backlight_regs.h (MIT): BXT_BLC_PWM_CTL 0xC8250 (bit 31 enable, bit 29 polarity),
+// BXT_BLC_PWM_FREQ 0xC8254 (period in raw-clock ticks), BXT_BLC_PWM_DUTY 0xC8258. The method (keep the period and
+// polarity the firmware programmed, scale only the duty, 64-bit product so long periods do not overflow, read the
+// duty back) follows WhateverXe's XELP::PanelPWM, BSD-3-Clause (WhateverXe by b00t0x, derived from WhateverGreen, Copyright (c) 2018 vit9696); see NOTICE. Only a PWM the
+// firmware already enabled is used: the period is never invented, so a panel lit another way keeps its brightness
+// and gets no slider.
+static const uint32_t kBlcPwmCtl = 0xC8250, kBlcPwmFreq = 0xC8254, kBlcPwmDuty = 0xC8258;
+static const uint32_t kBlcPwmEnable = 1u << 31;
+static const SInt32 kIntelMinBacklight = 5;   // never 0: some panels switch the backlight off completely
+class NMIntelFB;
+class NMIntelBacklight : public IODisplayParameterHandler {
+    OSDeclareDefaultStructors(NMIntelBacklight)
+    NMIntelFB *fFB = nullptr;
+    thread_call_t fApply = nullptr;
+    volatile SInt32 fPending = -1;
+    SInt32 fLevel = 100;
+    static void applyFire(thread_call_param_t me, thread_call_param_t);
+public:
+    static NMIntelBacklight *withFB(NMIntelFB *fb, SInt32 level);
+    bool setDisplay(IODisplay *display) override;
+    bool doIntegerSet(OSDictionary *params, const OSSymbol *paramName, UInt32 value) override;
+    bool doDataSet(const OSSymbol *, OSData *) override { return false; }
+    bool doUpdate() override { return true; }
+    void free() override;
+};
+
 class NMIntelFB : public IOFramebuffer {
     OSDeclareDefaultStructors(NMIntelFB)
     IOPCIDevice *fPCI = nullptr;
@@ -133,7 +162,14 @@ private:
     uint8_t fVer = 0;
 
     uint32_t rd(uint32_t off) const { return *(volatile uint32_t *)(fRegs + off); }
+    void wr(uint32_t off, uint32_t v) const { *(volatile uint32_t *)(fRegs + off) = v; }
     bool adoptFirmwareMode();
+    uint32_t fPwmPeriod = 0;                     // firmware's PWM period; 0 = no brightness control
+    NMIntelBacklight *fBacklight = nullptr;
+    void publishBacklight();
+public:
+    bool setPanelPercent(uint32_t percent);      // from NMIntelBacklight's thread call; false if the write did not stick
+private:
 
 public:
     IOService *probe(IOService *provider, SInt32 *score) override;
@@ -220,6 +256,7 @@ public:
         return IOFramebuffer::getAttribute(attribute, value);
     }
     IOReturn getAttributeForConnection(IOIndex idx, IOSelect attr, uintptr_t *value) override;
+    IOReturn getAppleSense(IOIndex connectIndex, UInt32 *senseType, UInt32 *primary, UInt32 *extended, UInt32 *displayType) override;
 };
 
 OSDefineMetaClassAndStructors(NMIntelFB, IOFramebuffer)
@@ -331,7 +368,11 @@ bool NMIntelFB::start(IOService *provider)
     fRegs = (volatile uint8_t *)fMMIO->getVirtualAddress();
     fApertureBase = ap->getPhysicalAddress(); fApertureLen = ap->getLength();
     if (!adoptFirmwareMode()) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false; }
-    if (!IOFramebuffer::start(provider)) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false; }
+    publishBacklight();   // before IOFramebuffer::start: IOFramebuffer::open looks for a service named "backlight"
+    if (!IOFramebuffer::start(provider)) {
+        if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
+        OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false;
+    }
     // Head 4 of the NVIDIA accelerator (NVAccel): WindowServer composites this panel on the NVIDIA card and the
     // display pipe copies each frame into fSurfMap. Without NVAccel the panel stays a plain framebuffer.
     if (IODeviceMemory *sm = IODeviceMemory::withRange(fApertureBase + fSurf, (IOPhysicalLength)fRowBytes * fHeight)) {
@@ -358,6 +399,8 @@ void NMIntelFB::stop(IOService *provider)
 #endif
     // thread_call_cancel_wait is not exported to kexts: cancel and retry the free until the callback is out (as NVRMFB)
     if (fVblTimer) { thread_call_cancel(fVblTimer); while (!thread_call_free(fVblTimer)) { thread_call_cancel(fVblTimer); IOSleep(5); } fVblTimer = nullptr; }
+    if (fBacklight) { fBacklight->terminate(kIOServiceSynchronous); fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
+    fPwmPeriod = 0;
     OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr;
     IOFramebuffer::stop(provider);
 }
@@ -386,6 +429,102 @@ IOReturn NMIntelFB::getPixelInformation(IODisplayModeID mode, IOIndex depth, IOP
     pi->componentMasks[0] = 0x00FF0000; pi->componentMasks[1] = 0x0000FF00; pi->componentMasks[2] = 0x000000FF;
     strlcpy(pi->pixelFormat, IO32BitDirectPixels, sizeof(pi->pixelFormat));
     pi->activeWidth = fWidth; pi->activeHeight = fHeight;
+    return kIOReturnSuccess;
+}
+
+OSDefineMetaClassAndStructors(NMIntelBacklight, IODisplayParameterHandler)
+
+NMIntelBacklight *NMIntelBacklight::withFB(NMIntelFB *fb, SInt32 level)
+{
+    NMIntelBacklight *h = OSTypeAlloc(NMIntelBacklight);
+    if (!h || !h->init()) { OSSafeReleaseNULL(h); return nullptr; }
+    h->fFB = fb;   // not retained: the framebuffer owns this handler and terminates it in stop()
+    h->fApply = thread_call_allocate(applyFire, h);
+    h->fLevel = level < 0 ? 0 : level > 100 ? 100 : level;
+    if (!h->fApply) { h->release(); return nullptr; }
+    return h;
+}
+
+void NMIntelBacklight::free()
+{
+    if (fApply) { thread_call_cancel(fApply); while (!thread_call_free(fApply)) { thread_call_cancel(fApply); IOSleep(1); } fApply = nullptr; }
+    IODisplayParameterHandler::free();
+}
+
+// The display may have no IODisplayParameters yet; IODisplay::setProperties() only accepts parameters listed there.
+bool NMIntelBacklight::setDisplay(IODisplay *display)
+{
+    if (!display) return false;
+    OSObject *old = display->copyProperty(gIODisplayParametersKey);
+    OSDictionary *cur = OSDynamicCast(OSDictionary, old);
+    OSDictionary *params = cur ? OSDictionary::withDictionary(cur) : OSDictionary::withCapacity(2);
+    OSSafeReleaseNULL(old);
+    if (!params) return false;
+    IODisplay::addParameter(params, gIODisplayBrightnessKey, 0, 100);
+    IODisplay::setParameter(params, gIODisplayBrightnessKey, fLevel);
+    IODisplay::addParameter(params, gIODisplayLinearBrightnessKey, 0, 100);
+    IODisplay::setParameter(params, gIODisplayLinearBrightnessKey, fLevel);
+    display->setProperty(gIODisplayParametersKey, params);
+    params->release();
+    IFBLOG("backlight: brightness parameters on %s, panel at %d%%", display->getName(), (int)fLevel);
+    return true;
+}
+
+// IODisplay calls this with the framebuffer lock held, so the register write runs from a thread call.
+bool NMIntelBacklight::doIntegerSet(OSDictionary *, const OSSymbol *paramName, UInt32 value)
+{
+    if (paramName != gIODisplayBrightnessKey && paramName != gIODisplayLinearBrightnessKey) return false;
+    fPending = value > 100 ? 100 : (SInt32)value;
+    thread_call_enter(fApply);
+    return true;
+}
+
+void NMIntelBacklight::applyFire(thread_call_param_t p, thread_call_param_t)
+{
+    NMIntelBacklight *me = (NMIntelBacklight *)p;
+    SInt32 v;
+    do { v = me->fPending; } while (!OSCompareAndSwap((UInt32)v, (UInt32)-1, (volatile UInt32 *)&me->fPending));
+    if (v < 0) return;
+    uint32_t percent = (uint32_t)(v < kIntelMinBacklight ? kIntelMinBacklight : v);
+    if (me->fFB->setPanelPercent(percent)) me->fLevel = v;
+    else IFBLOG("backlight: setting %u%% did not stick", percent);
+}
+
+bool NMIntelFB::setPanelPercent(uint32_t percent)
+{
+    if (!fRegs || !fPwmPeriod || fStopping) return false;
+    uint32_t duty = (uint32_t)((uint64_t)fPwmPeriod * percent / 100);
+    wr(kBlcPwmDuty, duty);
+    return rd(kBlcPwmDuty) == duty;
+}
+
+// Brightness only when the firmware enabled the PWM with a usable period; otherwise the panel keeps the level it has.
+void NMIntelFB::publishBacklight()
+{
+    uint32_t ctl = rd(kBlcPwmCtl), period = rd(kBlcPwmFreq), duty = rd(kBlcPwmDuty);
+    if (ctl == ~0u || period == ~0u || !(ctl & kBlcPwmEnable) || !period || duty > period) {
+        IFBLOG("backlight: PWM ctl 0x%08x period %u duty %u - not enabled by the firmware, no brightness control", ctl, period, duty);
+        return;
+    }
+    fPwmPeriod = period;
+    SInt32 level = (SInt32)((uint64_t)duty * 100 / period);
+    fBacklight = NMIntelBacklight::withFB(this, level);
+    if (!fBacklight) { fPwmPeriod = 0; IFBLOG("backlight: handler allocation failed"); return; }
+    fBacklight->setName("backlight");
+    if (!fBacklight->attach(this)) { OSSafeReleaseNULL(fBacklight); fPwmPeriod = 0; IFBLOG("backlight: handler attach failed"); return; }
+    fBacklight->registerService(kIOServiceSynchronous);
+    setProperty("NMIntelFBPwmPeriod", period, 32);
+    IFBLOG("backlight: PWM period %u, panel at %d%% - brightness keys and slider through AppleBacklightDisplay", period, (int)level);
+}
+
+// AppleBacklightDisplay::probe takes only an LCD connection; without a backlight handler the panel stays a plain display.
+IOReturn NMIntelFB::getAppleSense(IOIndex connectIndex, UInt32 *senseType, UInt32 *primary, UInt32 *extended, UInt32 *displayType)
+{
+    if (connectIndex != 0 || !fBacklight) return kIOReturnUnsupported;
+    if (senseType) *senseType = 0;
+    if (primary) *primary = 0;
+    if (extended) *extended = 0;
+    if (displayType) *displayType = kGenericLCD;
     return kIOReturnSuccess;
 }
 

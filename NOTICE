@@ -18,5 +18,10 @@ GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images from NVI
              redistributed unmodified under NVIDIA's licence (licenses/NVIDIA-firmware-LICENCE.txt), the same
              terms under which linux-firmware redistributes these images.
 
+kexts/NMIntelFB  Panel brightness follows the method of WhateverXe's panel PWM (XELP::PanelPWM) by b00t0x,
+             https://github.com/b00t0x/WhateverXe, BSD-3-Clause, Copyright (c) 2018 vit9696
+             (licenses/WhateverXe-LICENSE.txt). Register layout from Linux i915/xe display headers, MIT.
+             No Apple driver code is used or shipped.
+
 air-runtime  LLVM (Apache-2.0 with LLVM exceptions) and Zstandard (BSD-3-Clause); their licence texts are in
              NVMTLDriver.bundle/Contents/Resources/air-runtime.
