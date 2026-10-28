@@ -672,6 +672,13 @@ pub(in crate::passes) fn apply_bindings(
                 resource_values.insert(lid);
                 splices.push((pid, lid));
             }
+            ParamBinding::SamplerArray { var } => {
+                // The parameter is only ever dereferenced: the array itself is spliced in place of
+                // the byval pointer, and `materialize_sampler_array_loads` turns each constant
+                // element load into an `OpAccessChain` plus an `OpLoad` of a sampler value.
+                resource_values.insert(var);
+                splices.push((pid, var));
+            }
             ParamBinding::HeapImage {
                 slot,
                 image_ty,

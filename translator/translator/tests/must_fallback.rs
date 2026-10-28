@@ -586,68 +586,6 @@ declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr a
 }
 
 #[test]
-fn a_sampler_descriptor_array_fallbacks() {
-    const KERNEL: &str = r#"target triple = "spirv-unknown-vulkan1.2"
-
-define void @k(ptr addrspace(1) %tex, SAMPLER_PARAM, ptr addrspace(1) %out) {
-entry:
-SAMPLER_ELEMENT
-  %sample = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %tex, ptr addrspace(2) %s, <2 x float> zeroinitializer, i1 false, <2 x i32> zeroinitializer, i1 false, float 0.000000e+00, float 0.000000e+00, i32 0)
-  %color = extractvalue { <4 x float>, i8 } %sample, 0
-  store <4 x float> %color, ptr addrspace(1) %out, align 16
-  ret void
-}
-declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr addrspace(2), <2 x float>, i1, <2 x i32>, i1, float, float, i32)
-!air.kernel = !{!0}
-!0 = !{ptr @k, !1, !2}
-!1 = !{}
-!2 = !{!3, !4, !5}
-!3 = !{i32 0, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"texture2d<float, sample>", !"air.arg_name", !"tex"}
-!4 = !{i32 1, !"air.sampler", !"air.location_index", i32 0, i32 COUNT, !"air.arg_type_name", !"SAMPLER_TYPE", !"air.arg_name", !"samps"}
-!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.write", !"air.address_space", i32 1, !"air.arg_type_size", i32 16, !"air.arg_type_align_size", i32 16, !"air.arg_type_name", !"float4", !"air.arg_name", !"out"}
-"#;
-
-    let array = KERNEL
-        .replace("i32 COUNT", "i32 8")
-        .replace("SAMPLER_TYPE", "array<sampler, 8>")
-        .replace(
-            "SAMPLER_PARAM",
-            "ptr readonly byval([8 x ptr addrspace(2)]) captures(none) %samps",
-        )
-        .replace(
-            "SAMPLER_ELEMENT",
-            "  %slot = getelementptr inbounds [8 x ptr addrspace(2)], ptr %samps, i32 0, i32 5\n               %s = load ptr addrspace(2), ptr %slot, align 8",
-        );
-    match translate_sanitized_native(&array, Stage::Kernel, &tmp()) {
-        Ok(spv) => panic!(
-            "expected a clean FALLBACK but translate succeeded ({} bytes); a sample through a \
-             default sampler the shader never asked for is a silently wrong module",
-            spv.len()
-        ),
-        Err(e) => {
-            assert!(
-                e.contains("array of 8 samplers"),
-                "the diagnostic should name the declared count; got: {e}"
-            );
-            assert!(
-                e.contains("entry parameter 1"),
-                "and the parameter it sits on; got: {e}"
-            );
-        }
-    }
-
-    let single = KERNEL
-        .replace("i32 COUNT", "i32 1")
-        .replace("SAMPLER_TYPE", "sampler")
-        .replace("SAMPLER_PARAM", "ptr addrspace(2) %s")
-        .replace("SAMPLER_ELEMENT", "");
-    assert!(
-        translate_sanitized_native(&single, Stage::Kernel, &tmp()).is_ok(),
-        "the same kernel with an ordinary single sampler must translate"
-    );
-}
-
-#[test]
 fn a_texture_array_whose_declared_length_contradicts_its_type_name_fallbacks() {
     const KERNEL: &str = r#"target triple = "spirv-unknown-vulkan1.2"
 
