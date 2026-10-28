@@ -153,7 +153,13 @@ impl LlModule {
         let imageblock_shared_cells = cross_coordinate_imageblock
             || !aliased_imageblock_planes.is_empty()
             || calls_imageblock_slice_write(&functions, &entry_functions);
-        let imageblock_cell_scale = infer_imageblock_cell_scale(&functions, &entry_functions);
+        let imageblock_statics = meta::static_init_foldable_global_values(ll);
+        let imageblock_cell_scale = infer_imageblock_cell_scale(
+            &functions,
+            &entry_functions,
+            &imageblock_statics,
+            imageblock_threads_per_threadgroup_param.as_deref(),
+        );
         if imageblock_shared_cells
             && imageblock_dimensions.is_none()
             && imageblock_threads_per_threadgroup_param.is_none()
@@ -212,6 +218,7 @@ impl LlModule {
             metadata_pointee_sizes: HashMap::default(),
             metadata_byte_buffer_params,
             metadata_data_buffer_params,
+            has_kernel_metadata: kern.is_some(),
             metadata_primitive_buffer_pointees,
             metadata_fc_buffer_locations,
             raw_buffer_params: HashSet::default(),

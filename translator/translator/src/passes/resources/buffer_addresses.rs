@@ -150,10 +150,52 @@ fn declare_uvec2_address_table(ctx: &mut Ctx) -> Result<(Word, Word, Option<Word
     Ok((table, uint_ptr_ty, None))
 }
 
+/// Where a stage entry's parameter is bound, for the buffer-address table: a kernel's buffers and the buffers its
+/// function constants locate, and a vertex or fragment function's buffers. Graphics stages reach this table when an
+/// entry passes one of its buffers to a helper that takes a device address (VFX particle and Vista splat shaders).
+pub(in crate::passes) struct BufferAddressRoles<'a> {
+    pub(in crate::passes) kern: Option<&'a KernMeta>,
+    pub(in crate::passes) vert: Option<&'a VertMeta>,
+    pub(in crate::passes) frag: Option<&'a FragMeta>,
+}
+
+impl BufferAddressRoles<'_> {
+    fn location(&self, param_index: u32) -> Option<u32> {
+        if let Some(kern) = self.kern {
+            return match kern.role_of(param_index) {
+                Some(
+                    KernRole::Buffer(location)
+                    | KernRole::AccelerationStructureShadow(location)
+                    | KernRole::PrimitiveAccelerationStructureShadow(location),
+                ) => Some(*location),
+                _ => kern.function_constant_buffer_locations.get(&param_index).copied(),
+            };
+        }
+        if let Some(vert) = self.vert {
+            return match vert.role_of(param_index) {
+                Some(VertRole::Buffer(location)) => Some(*location),
+                _ => None,
+            };
+        }
+        match self.frag?.role_of(param_index) {
+            Some(FragRole::Buffer(location)) => Some(*location),
+            _ => None,
+        }
+    }
+
+    fn type_name(&self, param_index: u32) -> Option<&str> {
+        self.kern
+            .and_then(|meta| meta.buffer_type_names.get(&param_index))
+            .or_else(|| self.vert.and_then(|meta| meta.buffer_type_names.get(&param_index)))
+            .or_else(|| self.frag.and_then(|meta| meta.buffer_type_names.get(&param_index)))
+            .map(String::as_str)
+    }
+}
+
 pub(in crate::passes) fn lower_buffer_address_facts(
     ctx: &mut Ctx,
     entry_idx: usize,
-    kern: Option<&KernMeta>,
+    roles: BufferAddressRoles<'_>,
 ) -> Result<(), String> {
     let address_words = ctx
         .emit_sidecar
@@ -164,28 +206,18 @@ pub(in crate::passes) fn lower_buffer_address_facts(
     if address_words.is_empty() {
         return Ok(());
     }
-    let kern = kern.ok_or("buffer-address facts require kernel metadata")?;
+    if roles.kern.is_none() && roles.vert.is_none() && roles.frag.is_none() {
+        return Err("buffer-address facts require stage metadata".to_string());
+    }
     let mut locations = HashMap::default();
     for (id, (param_index, component)) in &address_words {
-        let location = match kern.role_of(*param_index) {
-            Some(
-                KernRole::Buffer(location)
-                | KernRole::AccelerationStructureShadow(location)
-                | KernRole::PrimitiveAccelerationStructureShadow(location),
-            ) => Some(*location),
-            _ => kern
-                .function_constant_buffer_locations
-                .get(param_index)
-                .copied(),
-        };
-        let Some(location) = location else {
+        let Some(location) = roles.location(*param_index) else {
             return Err(format!(
-                "buffer-address fact {id} references a kernel parameter without a buffer-backed resource {param_index}"
+                "buffer-address fact {id} references a parameter without a buffer-backed resource {param_index}"
             ));
         };
-        let location = if kern
-            .buffer_type_names
-            .get(param_index)
+        let location = if roles
+            .type_name(*param_index)
             .is_some_and(|name| name.starts_with("array_ref<"))
         {
             ADDRESS_TABLE_SELF_BASE + location

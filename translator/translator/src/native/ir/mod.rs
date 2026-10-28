@@ -171,6 +171,8 @@ pub(super) struct LlModule {
     metadata_pointee_sizes: HashMap<(String, String), u64>,
     metadata_byte_buffer_params: HashSet<(String, String)>,
     pub(super) metadata_data_buffer_params: HashSet<(String, String)>,
+    /// The entry carries kernel metadata, so which parameters are buffers is known (metadata_data_buffer_params).
+    pub(super) has_kernel_metadata: bool,
     pub(super) metadata_primitive_buffer_pointees: HashMap<(String, String), LlType>,
     pub(super) metadata_fc_buffer_locations: HashMap<(String, String), u32>,
     pub(super) raw_buffer_params: HashSet<(String, String)>,
@@ -551,16 +553,20 @@ fn calls_imageblock_slice_write(
 fn infer_imageblock_cell_scale(
     functions: &[LlFunction],
     entry_functions: &HashSet<String>,
+    statics: &HashMap<String, meta::StaticIntValue>,
+    threads_per_threadgroup: Option<&str>,
 ) -> Option<u32> {
     let mut scale = 0;
     for function in functions
         .iter()
         .filter(|function| entry_functions.contains(&function.name))
     {
-        let defs = function
-            .carrier_insts()
-            .filter_map(|inst| inst.result.as_deref().map(|result| (result, inst)))
+        let insts = function.carrier_insts().collect::<Vec<_>>();
+        let defs = insts
+            .iter()
+            .filter_map(|inst| inst.result.as_deref().map(|result| (result, *inst)))
             .collect::<HashMap<_, _>>();
+        let tile = TileCoordinates { defs: &defs, insts: &insts, statics, threads_per_threadgroup };
         for coordinate in function
             .carrier_insts()
             .filter_map(|inst| inst.alias_call())
@@ -568,7 +574,7 @@ fn infer_imageblock_cell_scale(
             .filter_map(|call| call.args.first().map(|arg| arg.value.clone()))
         {
             let coordinate_scale = match coordinate {
-                LlValue::Local(name) => tile_coordinate_scale(&defs, &name, 16)?,
+                LlValue::Local(name) => tile.scale(&name, 16)?,
                 _ => 0,
             };
             scale = scale.max(coordinate_scale);
@@ -577,62 +583,221 @@ fn infer_imageblock_cell_scale(
     Some(scale.max(1))
 }
 
-fn tile_coordinate_scale(
-    defs: &HashMap<&str, &crate::native::tir::TirInst>,
-    name: &str,
-    depth: u32,
-) -> Option<u32> {
-    if depth == 0 {
-        return None;
-    }
-    let Some(inst) = defs.get(name) else {
-        return Some(1);
-    };
-    if !reaches_thread_position(defs, name, &mut HashSet::default()) {
-        return Some(0);
-    }
-    use crate::native::tir::TirOpcode;
-    let operand_scale = |operand: &crate::native::tir::TirOperand| match operand {
-        crate::native::tir::TirOperand::Value { name, .. } => {
-            tile_coordinate_scale(defs, name, depth - 1)
+/// What the imageblock coordinate analysis reads: the entry's definitions, and for the strided form
+/// `k * threads_per_threadgroup + thread_position_in_threadgroup` the loop bound of k. MPS's Lanczos kernels write
+/// unroll x unroll cells per thread that way, with unroll a function constant its static initializer copies into a
+/// global; with the constant supplied, k < unroll, so the cells stay inside an unroll-scaled tile (#405, Infuse).
+struct TileCoordinates<'a, 'b> {
+    defs: &'b HashMap<&'a str, &'a crate::native::tir::TirInst>,
+    insts: &'b [&'a crate::native::tir::TirInst],
+    statics: &'b HashMap<String, meta::StaticIntValue>,
+    threads_per_threadgroup: Option<&'b str>,
+}
+
+impl TileCoordinates<'_, '_> {
+    fn scale(&self, name: &str, depth: u32) -> Option<u32> {
+        if depth == 0 {
+            return None;
         }
-        crate::native::tir::TirOperand::Const { .. } => Some(0),
-        crate::native::tir::TirOperand::Unresolved => None,
-    };
-    match inst.opcode {
-        TirOpcode::Shl | TirOpcode::Mul => {
-            let [lhs, rhs] = inst.operands.as_slice() else {
-                return None;
-            };
-            let (value, factor) = match (constant_uniform_int(lhs), constant_uniform_int(rhs)) {
-                (None, Some(factor)) => (lhs, factor),
-                (Some(factor), None) if inst.opcode == TirOpcode::Mul => (rhs, factor),
-                _ => return None,
-            };
-            let factor = if inst.opcode == TirOpcode::Shl {
-                1u32.checked_shl(u32::try_from(factor).ok()?)?
-            } else {
-                u32::try_from(factor).ok()?
-            };
-            operand_scale(value)?.checked_mul(factor)
+        let Some(inst) = self.defs.get(name) else {
+            return Some(1);
+        };
+        if !reaches_thread_position(self.defs, name, &mut HashSet::default()) {
+            return Some(0);
         }
-        TirOpcode::Add | TirOpcode::Or | TirOpcode::Sub => {
-            let [lhs, rhs] = inst.operands.as_slice() else {
-                return None;
-            };
-            operand_scale(lhs)?.checked_add(operand_scale(rhs)?)
-        }
-        _ => {
-            let mut scale = Some(0);
-            inst.visit_uses(|use_name| {
-                scale = match (scale, tile_coordinate_scale(defs, use_name, depth - 1)) {
-                    (Some(0), Some(1)) | (Some(1), Some(1)) => Some(1),
-                    (Some(0), Some(0)) => Some(0),
-                    _ => None,
+        use crate::native::tir::TirOpcode;
+        let operand_scale = |operand: &crate::native::tir::TirOperand| match operand {
+            crate::native::tir::TirOperand::Value { name, .. } => self.scale(name, depth - 1),
+            crate::native::tir::TirOperand::Const { .. } => Some(0),
+            crate::native::tir::TirOperand::Unresolved => None,
+        };
+        match inst.opcode {
+            TirOpcode::Shl | TirOpcode::Mul => {
+                let [lhs, rhs] = inst.operands.as_slice() else {
+                    return None;
                 };
-            });
-            scale
+                let (value, factor) = match (constant_uniform_int(lhs), constant_uniform_int(rhs)) {
+                    (None, Some(factor)) => (lhs, factor),
+                    (Some(factor), None) if inst.opcode == TirOpcode::Mul => (rhs, factor),
+                    _ if inst.opcode == TirOpcode::Mul => return self.strided_term(lhs, rhs, depth),
+                    _ => return None,
+                };
+                let factor = if inst.opcode == TirOpcode::Shl {
+                    1u32.checked_shl(u32::try_from(factor).ok()?)?
+                } else {
+                    u32::try_from(factor).ok()?
+                };
+                operand_scale(value)?.checked_mul(factor)
+            }
+            TirOpcode::Add | TirOpcode::Or | TirOpcode::Sub => {
+                let [lhs, rhs] = inst.operands.as_slice() else {
+                    return None;
+                };
+                operand_scale(lhs)?.checked_add(operand_scale(rhs)?)
+            }
+            _ => {
+                let mut scale = Some(0);
+                inst.visit_uses(|use_name| {
+                    scale = match (scale, self.scale(use_name, depth - 1)) {
+                        (Some(0), Some(1)) | (Some(1), Some(1)) => Some(1),
+                        (Some(0), Some(0)) => Some(0),
+                        _ => None,
+                    };
+                });
+                scale
+            }
         }
+    }
+
+    /// `k * threads_per_threadgroup`, with k bounded by a constant: the term spans k_max whole threadgroups, so it
+    /// adds k_max to the scale (with the thread position's 1, a coordinate stays below (k_max + 1) threadgroups).
+    fn strided_term(
+        &self,
+        lhs: &crate::native::tir::TirOperand,
+        rhs: &crate::native::tir::TirOperand,
+        depth: u32,
+    ) -> Option<u32> {
+        let tptg = self.threads_per_threadgroup?;
+        fn name_of(operand: &crate::native::tir::TirOperand) -> Option<&str> {
+            match operand {
+                crate::native::tir::TirOperand::Value { name, .. } => Some(name.as_str()),
+                _ => None,
+            }
+        }
+        let counter = match (name_of(lhs), name_of(rhs)) {
+            (Some(a), Some(b)) if a == tptg => b,
+            (Some(a), Some(b)) if b == tptg => a,
+            _ => return None,
+        };
+        let max = self.max_value(counter, depth)?;
+        u32::try_from(max).ok()
+    }
+
+    /// The largest value `name` takes: a constant, a folded static global, an insertelement of bounded lanes, or a
+    /// loop counter that starts at 0, steps by 1 and leaves the loop once it reaches a constant bound.
+    fn max_value(&self, name: &str, depth: u32) -> Option<u64> {
+        if depth == 0 {
+            return None;
+        }
+        use crate::native::tir::{TirOpcode, TirOperand};
+        let inst = self.defs.get(name)?;
+        let operand_max = |operand: &TirOperand| match operand {
+            TirOperand::Const { value, .. } => const_lanes_max(value),
+            TirOperand::Value { name, .. } => self.max_value(name, depth - 1),
+            TirOperand::Unresolved => None,
+        };
+        match inst.opcode {
+            TirOpcode::InsertElement => {
+                let [vector, element, ..] = inst.operands.as_slice() else {
+                    return None;
+                };
+                Some(operand_max(vector)?.max(operand_max(element)?))
+            }
+            TirOpcode::ZExt | TirOpcode::Trunc => operand_max(inst.operands.first()?),
+            TirOpcode::Load => self.static_value(name),
+            TirOpcode::Phi => self.loop_counter_max(name, inst),
+            _ => None,
+        }
+    }
+
+    fn static_value(&self, name: &str) -> Option<u64> {
+        let inst = self.defs.get(name)?;
+        let load = inst.load().as_deref()?;
+        let LlValue::Global(global) = &load.ptr.value else {
+            return None;
+        };
+        let key = if global.starts_with('@') { global.clone() } else { format!("@{global}") };
+        match self.statics.get(&key)? {
+            meta::StaticIntValue::Scalar(value) => Some(u64::from(*value)),
+            meta::StaticIntValue::Vector(lanes) => lanes.iter().copied().max().map(u64::from),
+        }
+    }
+
+    fn bound_value(&self, operand: &crate::native::tir::TirOperand, depth: u32) -> Option<u64> {
+        use crate::native::tir::{TirOpcode, TirOperand};
+        match operand {
+            TirOperand::Const { .. } => constant_uniform_int(operand),
+            TirOperand::Value { name, .. } => {
+                let inst = self.defs.get(name.as_str())?;
+                match inst.opcode {
+                    TirOpcode::Load => self.static_value(name),
+                    TirOpcode::ZExt | TirOpcode::Trunc if depth > 0 => {
+                        self.bound_value(inst.operands.first()?, depth - 1)
+                    }
+                    _ => None,
+                }
+            }
+            TirOperand::Unresolved => None,
+        }
+    }
+
+    fn loop_counter_max(&self, phi: &str, inst: &crate::native::tir::TirInst) -> Option<u64> {
+        use crate::native::tir::{TirOpcode, TirOperand};
+        let (_, incoming) = inst.phi_incoming().as_ref()?;
+        let mut start = None;
+        let mut step = None;
+        for (value, _) in incoming {
+            match value {
+                LlValue::Int(0) | LlValue::Zero => start = Some(()),
+                LlValue::Local(next) => step = Some(next.as_str()),
+                _ => return None,
+            }
+        }
+        start?;
+        let step = step?;
+        let step_inst = self.defs.get(step)?;
+        let steps_by_one = step_inst.opcode == TirOpcode::Add
+            && match step_inst.operands.as_slice() {
+                [TirOperand::Value { name, .. }, one] | [one, TirOperand::Value { name, .. }] => {
+                    name == phi && constant_uniform_int(one) == Some(1)
+                }
+                _ => false,
+            };
+        if !steps_by_one {
+            return None;
+        }
+        // the incremented counter, or a zero-extension of it, compared with a constant bound
+        let forms = std::iter::once(step.to_string())
+            .chain(self.insts.iter().filter_map(|other| {
+                (other.opcode == TirOpcode::ZExt
+                    && matches!(other.operands.first(), Some(TirOperand::Value { name, .. }) if name == step))
+                    .then(|| other.result.clone())
+                    .flatten()
+            }))
+            .collect::<Vec<_>>();
+        let names = |operand: &TirOperand| match operand {
+            TirOperand::Value { name, .. } => forms.contains(name),
+            _ => false,
+        };
+        let mut bound = None;
+        for cmp in self.insts.iter().filter(|other| other.opcode == TirOpcode::ICmp) {
+            let [a, b] = cmp.operands.as_slice() else {
+                continue;
+            };
+            let predicate = cmp.cmp_predicate().as_deref().unwrap_or("");
+            // leaves when counter >= bound: "bound ugt counter", "counter ult bound", "counter eq bound"
+            let candidate = match predicate {
+                "ugt" | "sgt" if names(b) => self.bound_value(a, 4),
+                "ult" | "slt" | "eq" | "ne" if names(a) => self.bound_value(b, 4),
+                "eq" | "ne" if names(b) => self.bound_value(a, 4),
+                _ => None,
+            };
+            if let Some(candidate) = candidate {
+                bound = Some(bound.map_or(candidate, |b: u64| b.max(candidate)));
+            }
+        }
+        bound.filter(|bound| *bound >= 1).map(|bound| bound - 1)
+    }
+}
+
+fn const_lanes_max(value: &LlValue) -> Option<u64> {
+    match value {
+        LlValue::Int(value) | LlValue::Hex(value) => Some(*value),
+        LlValue::SignedInt(value) => u64::try_from(*value).ok(),
+        LlValue::Zero | LlValue::Undef => Some(0),
+        LlValue::Splat(element) => const_lanes_max(&element.value),
+        LlValue::Vector(elements) => elements.iter().map(|e| const_lanes_max(&e.value)).try_fold(0, |m, v| Some(m.max(v?))),
+        _ => None,
     }
 }
 
