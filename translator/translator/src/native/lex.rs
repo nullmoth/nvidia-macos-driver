@@ -33,6 +33,31 @@ pub(super) fn split_top_level(s: &str, sep: char) -> Vec<&str> {
     out
 }
 
+// Attachments are not operands. Leave the original instruction and all module
+// metadata intact; only skip attachments in comma-separated operand parsers.
+pub(super) fn split_instruction_operands(s: &str) -> Vec<&str> {
+    split_top_level(instruction_without_attachments(s), ',')
+}
+
+pub(super) fn instruction_without_attachments(s: &str) -> &str {
+    let s = strip_comment(s);
+    for part in split_top_level(s, ',') {
+        let Some((kind, node)) = part.split_once(char::is_whitespace) else {
+            continue;
+        };
+        if kind.starts_with('!')
+            && kind.len() > 1
+            && kind[1..].chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+            && node.trim_start().starts_with('!')
+        {
+            let offset = part.as_ptr() as usize - s.as_ptr() as usize;
+            let prefix = s[..offset].trim_end();
+            return prefix.strip_suffix(',').unwrap_or(prefix).trim_end();
+        }
+    }
+    s
+}
+
 pub(super) fn split_top_level_whitespace(s: &str) -> Vec<&str> {
     let mut depth = 0i32;
     let mut start = None;
@@ -216,6 +241,20 @@ mod tests {
         assert_eq!(parse_float32_hex_literal("f0x1234567"), None);
         assert_eq!(parse_float32_hex_literal("f0x123456789"), None);
         assert_eq!(parse_float32_hex_literal("f0x1234567g"), None);
+    }
+
+    #[test]
+    fn instruction_operands_exclude_only_top_level_attachments() {
+        assert_eq!(
+            split_instruction_operands("[ %a, %entry ], [ %b, %loop ], !dbg !41, !custom !{i32 1}"),
+            vec!["[ %a, %entry ]", "[ %b, %loop ]"]
+        );
+        assert_eq!(
+            split_instruction_operands(r#"{ i32, i8 } %"v, !dbg !41", 1, !dbg !42 ; note"#),
+            vec![r#"{ i32, i8 } %"v, !dbg !41""#, "1"]
+        );
+        assert_eq!(split_instruction_operands("i32 %v, not_an_index"), vec!["i32 %v", "not_an_index"]);
+        assert_eq!(split_instruction_operands("i32 %v, !malformed"), vec!["i32 %v", "!malformed"]);
     }
 
     #[test]
