@@ -4,18 +4,28 @@
 // AppleALC applies its shared Intel device-ID spoof, AppleHDA's native
 // HwFactoryPrefixTranslation restores the NVIDIA ID before codec probing.
 
+// Lilu's bundled headers trigger these warnings; NMHDA source remains checked.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wsign-conversion"
+#pragma clang diagnostic ignored "-Wshadow"
 #include <Headers/plugin_start.hpp>
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_util.hpp>
+#pragma clang diagnostic pop
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Woverloaded-virtual"
 #include <IOKit/pci/IOPCIDevice.h>
+#pragma clang diagnostic pop
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSNumber.h>
 #include <mach/kmod.h>
 #include <stdarg.h>
 #include <sys/sysctl.h>
+
+#include "nmhda_topology.inc"
 
 static const char *kHdaPath[] {
     "/System/Library/Extensions/AppleHDA.kext/Contents/PlugIns/AppleHDAController.kext/Contents/MacOS/AppleHDAController"
@@ -130,6 +140,7 @@ static bool wrapStart(IOService *self, IOService *provider) {
         // itself with iokit_vendor_specific_msg(0) (0xE3FF8000, sender = that driver); AppleGFXHDA does this for AMD and
         // Intel, and nothing does it for NVIDIA. The GPU function (function 0 of the same slot) stands in as the sender.
         if (r) {
+            startTopologyService(self);
             IOService *gpu = nullptr;
             if (auto parent = provider->getParentEntry(gIOServicePlane))
                 if (auto it = parent->getChildIterator(gIOServicePlane)) {
@@ -210,9 +221,28 @@ static void onHdaLoaded(void *, KernelPatcher &patcher, size_t index, mach_vm_ad
     if (patched) rematchNvidiaAudio();
 }
 
+static const char *topologyFamilyPaths[] = {
+    "/System/Library/Extensions/AppleHDA.kext/Contents/PlugIns/IOHDAFamily.kext/Contents/MacOS/IOHDAFamily"
+};
+static KernelPatcher::KextInfo topologyFamily {
+    "com.apple.iokit.IOHDAFamily", topologyFamilyPaths, 1, {true}, {}, KernelPatcher::KextInfo::Unloaded
+};
+static void topologyFamilyLoaded(void *, KernelPatcher &patcher, size_t index,
+                                 mach_vm_address_t address, size_t size) {
+    // Lilu broadcasts all requested images; a later unrelated image must not erase this entry.
+    if (gTopologyVerb) return;
+    auto execute = patcher.solveSymbol(index,
+        "__ZN16IOHDACodecDevice11executeVerbEtttPjb", address, size);
+    patcher.clearError();
+    if (!execute) return;
+    gTopologyVerb = reinterpret_cast<NMHDAExecuteVerb>(execute);
+    report("topology-verb", "topology GET ready in runtime image %lu (registered %lu)",
+           (unsigned long)index, (unsigned long)topologyFamily.loadIndex);
+}
 static void pluginStart() {
     sysctl_register_oid(&sysctl__debug_nmhda);
     report("nmhda-started", "waiting for AppleHDAController");
+    lilu.onKextLoadForce(&topologyFamily, 1, topologyFamilyLoaded);
     lilu.onKextLoadForce(&kHda, 1, onHdaLoaded);
 }
 

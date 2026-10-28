@@ -12,6 +12,10 @@ static inline bool nvrmCheckedPitch(unsigned width, unsigned alignment, unsigned
     *out = (unsigned)pitch;
     return true;
 }
+static inline bool nvrmKmsRasterValid(unsigned width, unsigned height)
+{
+    return width && height && width <= 0xffffu && height <= 0xffffu;
+}
 static inline unsigned long long nvrmApertureBytes(unsigned pitch, unsigned height,
                                                   unsigned long long owned)
 {
