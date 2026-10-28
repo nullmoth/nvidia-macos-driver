@@ -1476,6 +1476,7 @@ impl Emitter {
             }
             let mut instructions = Vec::new();
             if self.bda_device_pointers && block_idx == 0 {
+                let reaching_helpers = self.entry_params_reaching_device_address_helpers(f);
                 let mut direct_buffers = self
                     .raw_offsets
                     .iter()
@@ -1485,6 +1486,12 @@ impl Emitter {
                             && raw.const_off == 0
                             && raw.dyn_terms.is_empty()
                             && (self.data_buffer_params.contains(name)
+                                || (reaching_helpers.contains(name)
+                                    && (!self.ir.has_kernel_metadata
+                                        || self
+                                            .ir
+                                            .metadata_data_buffer_params
+                                            .contains(&(f.name.clone(), name.clone()))))
                                 || self
                                     .ir
                                     .metadata_fc_buffer_locations
@@ -2782,6 +2789,73 @@ impl Emitter {
         }
         self.function_param_concrete_pointee(func, index, name)
             .filter(vector_backed_workgroup_raw_pointee)
+    }
+
+    /// Entry buffer parameters whose pointer reaches (through GEPs, bitcasts and address-space casts) a helper
+    /// parameter that param_type_id lowers to a 64-bit device address. The call site needs the buffer's address for
+    /// it; with no address recorded for the root, raw_device_call_arg_id gave up and the call passed the descriptor
+    /// variable, and the helper's byte-offset arithmetic then added an offset to a pointer (VFX particle and Vista
+    /// splat shaders; Unity WebGL through ANGLE, #406: "owned IAdd ... TypePointer StorageBuffer").
+    fn entry_params_reaching_device_address_helpers(&self, f: &LlFunction) -> HashSet<String> {
+        let mut reaching = HashSet::default();
+        if !self.ir.entry_functions.contains(&f.name) {
+            return reaching;
+        }
+        let mut root_of: HashMap<String, String> = f
+            .params
+            .iter()
+            .filter(|(_, ty)| matches!(ty, LlType::Ptr(1 | 2)))
+            .map(|(name, _)| (name.clone(), name.clone()))
+            .collect();
+        for inst in f.carrier_insts() {
+            let source = match inst.opcode {
+                TirOpcode::GetElementPtr => inst.gep().as_deref().and_then(|gep| match &gep.base.value {
+                    LlValue::Local(name) => Some(name.clone()),
+                    _ => None,
+                }),
+                TirOpcode::Bitcast => inst.bitcast().and_then(|(src, _)| match src.value {
+                    LlValue::Local(name) => Some(name),
+                    _ => None,
+                }),
+                TirOpcode::AddrSpaceCast => match inst.operands.first() {
+                    Some(TirOperand::Value { name, .. }) => Some(name.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let (Some(source), Some(result)) = (source, inst.result.as_ref()) {
+                if let Some(root) = root_of.get(&source).cloned() {
+                    root_of.insert(result.clone(), root);
+                }
+                continue;
+            }
+            let Some(call) = inst.call().as_deref() else {
+                continue;
+            };
+            if self.ir.entry_functions.contains(&call.callee) {
+                continue;
+            }
+            let Some(callee) = self.ir.functions.iter().find(|g| g.name == call.callee) else {
+                continue;
+            };
+            for (arg, (param_name, param_ty)) in call.args.iter().zip(callee.params.iter()) {
+                let LlValue::Local(arg_name) = &arg.value else {
+                    continue;
+                };
+                let Some(root) = root_of.get(arg_name) else {
+                    continue;
+                };
+                if matches!(param_ty, LlType::Ptr(1 | 2))
+                    && self
+                        .ir
+                        .raw_buffer_params
+                        .contains(&(callee.name.clone(), param_name.clone()))
+                {
+                    reaching.insert(root.clone());
+                }
+            }
+        }
+        reaching
     }
 
     pub(super) fn param_type_id(

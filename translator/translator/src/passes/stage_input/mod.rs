@@ -2120,7 +2120,7 @@ pub(super) fn build_stage_input(
         );
     }
     lower_patch_control_point_calls(ctx, entry_idx, vert, &all_defs)?;
-    lower_buffer_address_facts(ctx, entry_idx, kern)?;
+    lower_buffer_address_facts(ctx, entry_idx, BufferAddressRoles { kern, vert, frag })?;
 
     Ok(defs)
 }
