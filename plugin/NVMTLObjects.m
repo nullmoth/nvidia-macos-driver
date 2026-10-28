@@ -107,6 +107,10 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
     if (!f) { if (forgot) nvlog("conf: forgot %u inherited knob(s); no conf file", forgot); return; }
     char line[512];
     unsigned took = 0;
+    // The last line for a key wins: the installer keeps the user's own block ("my settings, kept on update") at the end
+    // of the file, and the first match used to win, so a shipped value of the same key above it silently beat the
+    // user's (#399). Keys set by an earlier line of this file may be replaced; the real environment still wins.
+    char fromFile[64][48]; unsigned nFromFile = 0;
     while (fgets(line, sizeof line, f)) {
         char *p = line;
         while (*p == ' ' || *p == '\t') p++;
@@ -120,12 +124,21 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
         end = val + strlen(val);
         while (end > val && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ' || end[-1] == '\t')) *--end = 0;
         if (strncmp(key, "NVMTL_", 6) && strncmp(key, "NVK_", 4) && strncmp(key, "NVRM_", 5)) continue;
-        if (getenv(key)) continue;
-        if (setenv(key, val, 0) == 0) { took++;
-            int k = snprintf(recbuf + recn, sizeof recbuf - recn, "%s%s=%s", recn ? ";" : "", key, val);
-            if (k > 0 && (size_t)k < sizeof recbuf - recn) recn += (size_t)k; else recbuf[recn] = 0; }
+        bool ours = false;
+        for (unsigned i = 0; i < nFromFile; i++) if (!strcmp(fromFile[i], key)) { ours = true; break; }
+        if (getenv(key) && !ours) continue;
+        if (setenv(key, val, 1) == 0) { if (ours) { nvlog("conf: %s=%s (a later line of the file replaces an earlier one)", key, val); continue; }
+            took++;
+            if (nFromFile < 64 && strlen(key) < sizeof fromFile[0]) strcpy(fromFile[nFromFile++], key); }
     }
     fclose(f);
+    // NVMTL_CONF_SET records the values this file set, as they stand after every line, so a child process forgets
+    // exactly these (an override recorded at its first value would no longer match and be kept as if user-set)
+    for (unsigned i = 0; i < nFromFile; i++) {
+        const char *v = getenv(fromFile[i]); if (!v) continue;
+        int k = snprintf(recbuf + recn, sizeof recbuf - recn, "%s%s=%s", recn ? ";" : "", fromFile[i], v);
+        if (k > 0 && (size_t)k < sizeof recbuf - recn) recn += (size_t)k; else { recbuf[recn] = 0; break; }
+    }
     if (recn) setenv("NVMTL_CONF_SET", recbuf, 1);
     if (took || forgot) nvlog("conf: %u knob(s) read from /Library/GPUBundles/nvmtl/nvrm610.conf, %u inherited conf knob(s) forgotten first (the environment still wins)", took, forgot);
 }
