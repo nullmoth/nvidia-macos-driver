@@ -6636,7 +6636,7 @@ int nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t r
 
 // A CPU-written IOSurface is uploaded at bind time (nvmtlSurfaceIn). Waiting for that copy put one GPU round trip
 // into every bind of a changed surface: Chromium with CPU raster binds a fresh tile surface per draw and its GPU
-// process spent its scroll frames in these waits (Discord DM list, 2026-10-18). The copy now takes the async region
+// process spent its scroll frames in these waits. The copy now takes the async region
 // path: it has its own staging buffer, queue order and its SHADER_READ barrier put it before the draw that samples
 // the image, and the handle is finished before a readback, destroy or re-upload. Apps only: WindowServer's surfaces
 // keep the synchronous upload. NVMTL_ASYNC_SURFACE_UPLOAD=0 turns it off.
