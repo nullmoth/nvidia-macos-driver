@@ -841,8 +841,12 @@ void NVRM::autoGo(void *p0, wait_result_t)
             // also had an iGPU, which the check below covers, so whether BAR1 was moved doesn't decide flipping. That
             // setup keeps the copy path, decided below from what is known right now.
             const char *why = nullptr;
-            if (!s->fBar1Placed) LOG("auto-go: BAR1 not placed (%llu MB) - flip allowed", s->fNv.bars[NV_GPU_BAR_INDEX_FB].size >> 20);
-            if (OSIterator *it = IOService::getMatchingServices(IOService::serviceMatching("IOAccelerator"))) {
+            // An unplaced BAR1 of 512 MB or more holds the scan-out surfaces, so it may flip. A 256 MB firmware window
+            // keeps the copy path: 12 machines in the field run that way with no iGPU, and none has been tested flipping.
+            const uint64_t bar1MB = s->fNv.bars[NV_GPU_BAR_INDEX_FB].size >> 20;
+            if (!s->fBar1Placed && bar1MB < 512) why = "BAR1 not placed and below 512 MB (small firmware window)";
+            else if (!s->fBar1Placed) LOG("auto-go: BAR1 not placed (%llu MB) - flip allowed", bar1MB);
+            if (!why) if (OSIterator *it = IOService::getMatchingServices(IOService::serviceMatching("IOAccelerator"))) {
                 while (OSObject *o = it->getNextObject()) {
                     const char *cn = o->getMetaClass()->getClassName();
                     if (cn && strncmp(cn, "NV", 2)) { why = "another GPU's accelerator is running"; LOG("auto-go: accelerator %s present", cn); break; }
