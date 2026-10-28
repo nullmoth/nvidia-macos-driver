@@ -510,13 +510,13 @@ static bool nvmtl_angle_chrome_family(void)
     const char *me = getprogname();
     if (!me) return false;
 
-    // 1. Fast Path: Zero-overhead memory matching based on process name
-    if (strstr(me, "Helper") != NULL ||
-        strstr(me, "Chrome") != NULL ||
+    // 1. By process name. "Helper" and "Edge" alone also match unrelated apps (every app's own helper tools,
+    // "EdgeView"), so Edge is matched by its full name and helpers through the framework check below.
+    if (strstr(me, "Chrome") != NULL ||
         strstr(me, "Chromium") != NULL ||
         strstr(me, "Electron") != NULL ||
         strstr(me, "Brave") != NULL ||
-        strstr(me, "Edge") != NULL ||
+        strncmp(me, "Microsoft Edge", 14) == 0 ||
         strstr(me, "Discord") != NULL) {
         return true;
     }
