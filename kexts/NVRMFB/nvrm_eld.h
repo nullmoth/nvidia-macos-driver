@@ -90,7 +90,7 @@ static inline size_t nvrm_build_eld(const uint8_t *edid, size_t edid_len, int co
         if (o + 18 > 128) break;
         if (edid[o] == 0 && edid[o+1] == 0 && edid[o+2] == 0 && edid[o+3] == 0xFC && edid[o+4] == 0) {
             for (int i = 0; i < 13; i++) {
-                uint8_t ch = edid[o + 5 + i];
+                uint8_t ch = edid[o + 5 + (size_t)i];
                 if (ch == 0x0A) break;                          // EDID line terminator
                 name[mnl++] = (char)ch;
             }

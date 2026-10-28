@@ -37,6 +37,7 @@ fixture = r'''
 #include <cstdint>
 #include <cstdio>
 #include <vector>
+#include "nvrm-fb-safety.h"
 using NvU32=uint32_t; using NvU64=uint64_t; using NvBool=bool;
 enum { NV_TRUE=1, NV_FALSE=0 };
 #define FBLOG(...) ((void)0)
@@ -81,6 +82,17 @@ int main() {
     { std::vector<Row> p = list; p[2].preferred = true; // 1920x1080 flagged preferred
       Kms k; k.rows=p; FB f; f.fKms=&k; assert(f.pick());
       assert(f.fMode.timings.hVisible==1920 && f.fMode.timings.vVisible==1080); }
+    { Kms k; k.rows = {
+          { mode(65536,1440,60), true, true },
+          { mode(2560,0,60), true, true },
+          { mode(2560,1440,60), true, false } };
+      FB f; f.fKms=&k; assert(f.pick());
+      assert(f.fMode.timings.hVisible==2560 && f.fMode.timings.vVisible==1440); }
+    { Kms k; k.rows = { { mode(0,1440,60), true, true },
+                       { mode(2560,65536,60), true, true } };
+      FB f; f.fKms=&k; assert(!f.pick()); }
+    assert(nvrmKmsRasterValid(1,1) && nvrmKmsRasterValid(65535,65535));
+    assert(!nvrmKmsRasterValid(65536,1) && !nvrmKmsRasterValid(1,0));
     printf("OK\n");
     return 0;
 }
@@ -91,7 +103,8 @@ def build_and_run(selection):
     with tempfile.TemporaryDirectory() as d:
         cpp = pathlib.Path(d) / 'tc.cpp'; binp = pathlib.Path(d) / 'tc'
         cpp.write_text(src)
-        subprocess.run(['c++', '-std=c++17', '-O0', str(cpp), '-o', str(binp)], check=True)
+        subprocess.run(['c++', '-std=c++17', '-O0', '-I', str(root / 'kexts/NVRMFB/fb'),
+                        str(cpp), '-o', str(binp)], check=True)
         return subprocess.run([str(binp)], capture_output=True, text=True)
 
 r = build_and_run(region)
