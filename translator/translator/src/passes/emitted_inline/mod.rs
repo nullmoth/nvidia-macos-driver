@@ -178,6 +178,17 @@ pub(super) fn inline_selected_helpers(
         let Some((bi, ii, callee_id)) = target else {
             break;
         };
+        // A helper that calls itself never runs out of calls to splice: the loop used to spin to its budget (20 s on
+        // MPS's depthwise convolution linked with a visible function that forwards to its own name) and only then fail.
+        if ctx.module.functions.iter().any(|f| {
+            f.def.as_ref().and_then(|d| d.result_id) == Some(callee_id)
+                && f.blocks.iter().flat_map(|b| &b.instructions).any(|i| {
+                    i.class.opcode == Op::FunctionCall
+                        && i.operands.first() == Some(&Operand::IdRef(callee_id))
+                })
+        }) {
+            return Err(format!("inliner: helper %{callee_id} calls itself, so it cannot be inlined"));
+        }
         inline_one_call(ctx, entry_idx, bi, ii, callee_id, &mut pointer_types)?;
         stats.splices += 1;
         processed_helpers.insert(callee_id);
