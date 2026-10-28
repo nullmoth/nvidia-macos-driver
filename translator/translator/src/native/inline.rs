@@ -2128,7 +2128,11 @@ pub(crate) fn inline_and_forward_object_fields(san_ll: &str) -> Option<String> {
     let mut changed = inlined != san_ll;
     for item in &mut items {
         let Item::Func(f) = item else { continue };
-        if forward_object_fields_in(f, &named_types) {
+        // a second round sees the objects the first one emptied of readers (the texture env) as write-only (#419)
+        for _ in 0..4 {
+            if !forward_object_fields_in(f, &named_types) {
+                break;
+            }
             changed = true;
         }
         if fold_switches_to_branches_in(f) {
@@ -2497,6 +2501,52 @@ fn forward_object_fields_in(f: &mut FuncBlock, named_types: &HashMap<String, sup
             field_of.insert(name.to_string(), (base.to_string(), indices.to_string()));
         }
     }
+    // write-only allocas: once the callee is inlined, ANGLE's texture-env object only receives the addresses of the
+    // texture and sampler locals and is never read. Storing an address into such an object is not an escape; counted as
+    // one, the sampler local kept its load, the emitter lost the store of the sampler handle, and the shader read its
+    // sampler index through a null address (a GPU MMU fault in Chrome WebGL2, #419; patch by eisda).
+    let write_only: HashSet<String> = allocas
+        .iter()
+        .filter(|a| {
+            let fields: Vec<&String> = field_of.iter().filter(|(_, (b, _))| b == *a).map(|(g, _)| g).collect();
+            let mut casts: Vec<String> = Vec::new();
+            for line in &f.body {
+                let t = line.trim();
+                if !mentions(t, a) {
+                    continue;
+                }
+                let Some((name, rest)) = t.split_once(" = ") else { return false };
+                if name == a.as_str() && rest.starts_with("alloca ") {
+                    continue;
+                }
+                if field_of.get(name).is_some_and(|(b, _)| b == *a) {
+                    continue;
+                }
+                if rest.starts_with("bitcast ptr ") && rest.ends_with(" to ptr") {
+                    casts.push(name.to_string());
+                    continue;
+                }
+                return false;
+            }
+            f.body.iter().all(|line| {
+                let t = line.trim();
+                let field_ok = fields.iter().all(|g| {
+                    !mentions(t, g)
+                        || t.split_once(" = ").is_some_and(|(n, _)| n == g.as_str())
+                        || t.strip_prefix("store ").and_then(|s| s.rsplit_once(", ptr ")).is_some_and(|(v, addr)| {
+                            !mentions(v, g) && addr.split(',').next().unwrap_or("").trim() == g.as_str()
+                        })
+                });
+                let cast_ok = casts.iter().all(|c| {
+                    !mentions(t, c)
+                        || t.split_once(" = ").is_some_and(|(n, _)| n == c.as_str())
+                        || t.contains("@llvm.lifetime.")
+                });
+                field_ok && cast_ok
+            })
+        })
+        .cloned()
+        .collect();
     // escapes: an alloca or one of its fields handed to anything but a store/load address or a lifetime marker
     let mut escaped: HashSet<String> = HashSet::default();
     for line in &f.body {
@@ -2514,8 +2564,12 @@ fn forward_object_fields_in(f: &mut FuncBlock, named_types: &HashMap<String, sup
             }
         }
         if let Some(stored) = t.strip_prefix("store ") {
-            // the alloca or a field pointer stored as a value escapes
-            if let Some((value, _)) = stored.split_once(", ptr ") {
+            // the alloca or a field pointer stored as a value escapes, unless it lands in a write-only object
+            if let Some((value, addr)) = stored.split_once(", ptr ") {
+                let addr = addr.split(',').next().unwrap_or("").trim();
+                if field_of.get(addr).is_some_and(|(b, _)| write_only.contains(b)) {
+                    continue;
+                }
                 for a in &allocas {
                     if mentions(value, a) {
                         escaped.insert(a.clone());
