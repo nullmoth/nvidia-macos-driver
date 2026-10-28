@@ -2221,7 +2221,11 @@ impl ShaderReflection {
                     static_sampler: None,
                 },
                 FragRole::Texture(n) => texture_binding(*n, Some(idx), &meta.texture_type_names),
-                FragRole::Sampler(n) => sampler_binding(*n, Some(idx)),
+                FragRole::Sampler(n) => sampler_binding(
+                    *n,
+                    Some(idx),
+                    meta.declared_descriptor_count(idx).unwrap_or(1),
+                ),
                 FragRole::AccelerationStructureShadow(n) => ResourceBinding {
                     kind: ResourceKind::AccelerationStructureShadow,
                     metal_index: *n,
@@ -2423,7 +2427,11 @@ impl ShaderReflection {
                     static_sampler: None,
                 },
                 VertRole::Texture(n) => texture_binding(*n, Some(idx), &meta.texture_type_names),
-                VertRole::Sampler(n) => sampler_binding(*n, Some(idx)),
+                VertRole::Sampler(n) => sampler_binding(
+                    *n,
+                    Some(idx),
+                    meta.declared_descriptor_count(idx).unwrap_or(1),
+                ),
                 VertRole::AccelerationStructureShadow(n) => ResourceBinding {
                     kind: ResourceKind::AccelerationStructureShadow,
                     metal_index: *n,
@@ -2620,7 +2628,11 @@ impl ShaderReflection {
                     }
                 }
                 KernRole::Texture(n) => texture_binding(*n, Some(idx), &meta.texture_type_names),
-                KernRole::Sampler(n) => sampler_binding(*n, Some(idx)),
+                KernRole::Sampler(n) => sampler_binding(
+                    *n,
+                    Some(idx),
+                    meta.declared_descriptor_count(idx).unwrap_or(1),
+                ),
                 KernRole::StageInput(location) => {
                     let metal_index = stage_input_bindings
                         .get(&idx)
@@ -3230,11 +3242,17 @@ fn embedded_argument_fields(arguments: &[crate::meta::EmbeddedArgument]) -> Vec<
         .collect()
 }
 
-fn sampler_binding(n: u32, param_index: Option<u32>) -> ResourceBinding {
+fn sampler_binding(n: u32, param_index: Option<u32>, count: u32) -> ResourceBinding {
+    let mut descriptor = ResourceBinding::descriptor_at(sampler_resource_binding(n));
+    if let Some(location) = descriptor.as_mut() {
+        // `array<sampler, N>` occupies N consecutive descriptors of the sampler band, exactly like
+        // a texture array: the consumer has to create an array binding, not one sampler.
+        location.count = count.max(1);
+    }
     ResourceBinding {
         kind: ResourceKind::Sampler,
         metal_index: n,
-        descriptor: ResourceBinding::descriptor_at(sampler_resource_binding(n)),
+        descriptor,
         param_index,
         stage_input_location: None,
         address_space: None,
