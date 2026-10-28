@@ -1,0 +1,34 @@
+; Valid with Vulkan 1.2 VariablePointers and scalar block layout. Promotion must
+; refuse the global alias, whose initializer requires a StorageBuffer pointer.
+OpCapability Shader
+OpCapability VariablePointers
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %buf %saved
+OpExecutionMode %main LocalSize 1 1 1
+OpDecorate %words ArrayStride 4
+OpDecorate %block Block
+OpMemberDecorate %block 0 Offset 0
+OpDecorate %buf DescriptorSet 0
+OpDecorate %buf Binding 7
+OpDecorate %buf NonWritable
+%void = OpTypeVoid
+%uint = OpTypeInt 32 0
+%words = OpTypeRuntimeArray %uint
+%block = OpTypeStruct %words
+%pb = OpTypePointer StorageBuffer %block
+%pu = OpTypePointer StorageBuffer %uint
+%zero = OpConstant %uint 0
+%three = OpConstant %uint 3
+%ft = OpTypeFunction %void
+%private_pointer = OpTypePointer Private %pb
+%buf = OpVariable %pb StorageBuffer
+%saved = OpVariable %private_pointer Private %buf
+%main = OpFunction %void None %ft
+%entry = OpLabel
+%p = OpAccessChain %pu %buf %zero %three
+%v = OpLoad %uint %p
+%copy = OpLoad %pb %saved
+%indirect = OpAccessChain %pu %copy %zero %three
+%another = OpLoad %uint %indirect
+OpReturn
+OpFunctionEnd
