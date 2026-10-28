@@ -15,7 +15,7 @@ constructor = source[start:end]
 with tempfile.TemporaryDirectory() as directory:
     file = pathlib.Path(directory) / 'policy.c'
     exe = pathlib.Path(directory) / 'policy'
-    file.write_text('#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <syslog.h>\n' + constructor + '\nint main(void) { const char *v = getenv("ANGLE_FEATURE_OVERRIDES_DISABLED"); puts(v ? v : "<unset>"); return 0; }\n')
+    file.write_text('#include <libproc.h>\n#include <limits.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <syslog.h>\n#include <unistd.h>\n' + constructor + '\nint main(void) { const char *v = getenv("ANGLE_FEATURE_OVERRIDES_DISABLED"); puts(v ? v : "<unset>"); return 0; }\n')
     subprocess.run(['cc', str(file), '-o', str(exe)], check=True)
     cases = [(None, None, '<unset>'), ('0', None, '<unset>'), ('0', 'otherRule', 'otherRule'),
              (None, 'otherRule', 'otherRule'), ('1', None, 'disableMetalOnNvidia'),

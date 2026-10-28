@@ -30,6 +30,10 @@ struct __IOSurface {unsigned id,seed;};
 static int dirtyBumpsSeed, dirtyCalls; static struct __IOSurface *dirtySurface;
 static int nvmtl_vk_surface_dirty(uint32_t s,uint32_t p){(void)p;dirtyCalls++;if(dirtyBumpsSeed&&dirtySurface&&dirtySurface->id==s)dirtySurface->seed++;return 0;}
 static void nvtrace(const char *f,...){(void)f;}
+// cross-process busy marks (PR #398) are off in WindowServer, which this test runs as; the consumer side is covered
+// by test_surface_publication.py
+static int busyWrites;
+static void nvmtl_busy_write(IOSurfaceRef s,NSUInteger p,uint64_t seq,int done){(void)s;(void)p;(void)seq;(void)done;busyWrites++;}
 static unsigned IOSurfaceGetID(IOSurfaceRef s){return s->id;}
 static unsigned IOSurfaceGetSeed(IOSurfaceRef s){return s->seed;}
 @class NVMTLCommandBuffer;
@@ -38,7 +42,7 @@ static unsigned IOSurfaceGetSeed(IOSurfaceRef s){return s->seed;}
 - (BOOL)nvmtlSurfaceOut{return YES;}
 - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied{(void)dirtied;return YES;}
 @end
-@interface NVMTLCommandBuffer:NSObject{@public id _queue;NSArray *_parts;}@end
+@interface NVMTLCommandBuffer:NSObject{@public id _queue;NSArray *_parts;NSDictionary *_busyMarks;}@end
 @implementation NVMTLCommandBuffer @end
 @interface NVMTLSubmissionPart:NSObject{@public NSSet *surfaces;}@end
 @implementation NVMTLSubmissionPart @end

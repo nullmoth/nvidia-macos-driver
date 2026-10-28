@@ -23,7 +23,7 @@ if not library:
     raise SystemExit('Build the translator first; its spirv dependency is needed by this test.')
 source = ROOT / 'translator/translator/src'
 modules = ''.join('#[path=' + json.dumps(str(source / filename)) + '] mod ' + name + ';\n'
-                  for name, filename in [('float16', 'float16.rs'), ('spirv_operand', 'spirv_operand.rs'),
+                  for name, filename in [('fxhash', 'fxhash.rs'), ('float16', 'float16.rs'), ('spirv_operand', 'spirv_operand.rs'),
                                          ('spirv_binary', 'spirv_binary/mod.rs'), ('spirv_module', 'spirv_module.rs'),
                                          ('dominators', 'dominators.rs')])
 code = '#![allow(dead_code)]\n' + modules + '''

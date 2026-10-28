@@ -40,7 +40,9 @@ static size_t IOSurfaceGetBytesPerRowOfPlane(IOSurfaceRef s, uint32_t p) { retur
 static void *IOSurfaceGetBaseAddress(IOSurfaceRef s) { return s->cpu; }
 static size_t IOSurfaceGetAllocSize(IOSurfaceRef s) { return sizeof s->cpu; }
 // the imported-pages upload is unavailable here, so every upload takes the CPU copy this test checks
-static int nvmtl_vk_image_write_host(void *q, Image *img, void *base, size_t row, size_t bytes) { return -1; }
+// the host-page fast paths (#399) report "not available", so the copies below take the plain path this test checks
+static int nvmtl_vk_image_write_host(void *q, Image *img, void *base, size_t row, size_t bytes, void *cache) { return -1; }
+static int nvmtl_vk_image_read_host(void *q, Image *img, void *base, size_t row, size_t bytes, void *cache) { return -1; }
 static uint32_t nvmtl_vram_gen(IOSurfaceRef s, NSUInteger p) { return 1; }
 static int nvmtl_vram_tag_current(IOSurfaceRef s, NSUInteger p, unsigned seed) { return gpu_seed == seed; }
 static void nvmtl_vram_tag_set(IOSurfaceRef s, NSUInteger p, unsigned seed) { gpu_seed=seed; }
@@ -51,6 +53,10 @@ static int dirtyAnswer=1, tryAnswer=-1; static unsigned blockingDirties, tries;
 static int nvmtl_vk_surface_dirty(unsigned s, unsigned p) { blockingDirties++; return dirtyAnswer; }
 static int nvmtl_vk_surface_dirty_try(unsigned s, unsigned p) { tries++; return tryAnswer; }
 static int nvmtl_noseed(void) { return 0; }
+// cross-process busy marks (PR #398): who wrote the surface last, and the waits for another process's write
+static int busyForeign=0, busyWaits=0;
+static int nvmtl_busy_foreign(IOSurfaceRef s, NSUInteger p) { (void)s; (void)p; return busyForeign; }
+static void nvmtl_busy_wait(IOSurfaceRef s, NSUInteger p) { (void)s; (void)p; busyWaits++; }
 static void nvmtl_frame_dump(const char *tag, void *base, size_t row, unsigned w, unsigned h) {}
 #define nvlog(...) ((void)0)
 // helpers the capture path calls (NVMTLEventSync.m); WindowServer kernel marks are off here
@@ -66,7 +72,7 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) {
     memcpy(base,i->gpu,4); return 0;
 }
 @interface NVMTLTexture : NSObject {
-@public NVMTLTexture *_parent; IOSurfaceRef _surf; BOOL _vramOn, _surfSynced;
+@public NVMTLTexture *_parent; IOSurfaceRef _surf; BOOL _vramOn, _surfSynced, _clientWritten; void *_hostPages;
     uint32_t _surfSeed, _surfGen; NSUInteger _plane; Image _i; void *_q;
 }
 - (BOOL)nvmtlSurfaceCopyable;
@@ -129,8 +135,18 @@ int main(int argc, char **argv) { @autoreleasepool {
     dirtyAnswer=0;
     assert([w nvmtlSurfaceOut] && tries==2 && blockingDirties==1);
     dirtyAnswer=1;
+    // a surface another process is still drawing (PR #398): this process waits for that write before it imports, and
+    // remembers the surface as client-written so every later import waits too; its own writes never wait
+    Surface cs={.seed=3}; NVMTLTexture *c=[NVMTLTexture new]; c->_surf=&cs; c->_i=(Image){.w=1,.h=1,.bpp=4};
+    busyWaits=0; busyForeign=0; [c nvmtlSurfaceIn];
+    assert(busyWaits==0 && !c->_clientWritten);
+    cs.seed++; busyForeign=1; [c nvmtlSurfaceIn];
+    assert(busyWaits==1 && c->_clientWritten);
+    busyForeign=0; cs.seed++; [c nvmtlSurfaceIn];
+    assert(busyWaits==2);
     puts("PASS: overlapping publication preserves GPU pixels; later CPU edits import; a publication after the commit's "
-         "VRAM mark never waits for the accelerator lock and retries a busy re-mark off its thread");
+         "VRAM mark never waits for the accelerator lock and retries a busy re-mark off its thread; another process's "
+         "write is waited for before import");
 } return 0; }
 '''
 with tempfile.TemporaryDirectory() as directory:
