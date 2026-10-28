@@ -701,7 +701,12 @@ pub fn air_intrinsic_disposition(name: &str) -> Option<AirIntrinsicDisposition> 
             "air.clamp",
             "air.saturate",
         ],
-    ) || name.strip_prefix("air.fast_").is_some_and(|tail| {
+    ) || name
+        .strip_prefix("air.fast_")
+        // Metal's native_* math (native_powr, native_exp2, ...) has fast_'s contract: precision is the
+        // implementation's, so it lowers the same way (Geekbench's resolve_radiance used native_powr)
+        .or_else(|| name.strip_prefix("air.native_"))
+        .is_some_and(|tail| {
         [
             "sincos", "cospi", "sinpi", "tanpi", "exp10", "fmod", "log10", "fmax3", "fmin3",
             "fmedian3", "ldexp", "atan2", "asin", "acos", "atan", "fmax", "max", "fmin", "min",

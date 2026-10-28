@@ -2372,6 +2372,47 @@ declare <4 x float> @air.mix.v4f32(<4 x float>, <4 x float>, <4 x float>)
 }
 
 #[test]
+fn native_air_native_math_lowers_like_fast_math() {
+    // Geekbench's resolve_radiance stopped at "unrecognized AIR intrinsic family: air.native_powr.v4f32": Metal's
+    // native_* math has fast_'s contract (implementation precision), so it takes the same lowering.
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+define void @main() {
+entry:
+  %v0 = insertelement <4 x float> poison, float 1.250000e-01, i32 0
+  %v1 = insertelement <4 x float> %v0, float 2.500000e-01, i32 1
+  %v2 = insertelement <4 x float> %v1, float 5.000000e-01, i32 2
+  %v3 = insertelement <4 x float> %v2, float 7.500000e-01, i32 3
+  %powr = tail call fast <4 x float> @air.native_powr.v4f32(<4 x float> %v3, <4 x float> %v3)
+  %exp2 = tail call fast <4 x float> @air.native_exp2.v4f32(<4 x float> %powr)
+  %sin = tail call fast float @air.native_sin.f32(float 5.000000e-01)
+  %lane = extractelement <4 x float> %exp2, i32 0
+  %sum = fadd fast float %lane, %sin
+  %sink = fcmp oge float %sum, 0.000000e+00
+  ret void
+}
+
+declare <4 x float> @air.native_powr.v4f32(<4 x float>, <4 x float>)
+declare <4 x float> @air.native_exp2.v4f32(<4 x float>)
+declare float @air.native_sin.f32(float)
+"#;
+    let module = load_bytes(emit_vulkan_spirv(ll).expect("native emit")).expect("load native spv");
+    let out = passes::transform(module, Stage::Kernel, None, None, None, Some("main"))
+        .expect("interface transform")
+        .assemble()
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect::<Vec<_>>();
+    let asm = disassemble(&out).expect("disassemble transformed");
+    assert!(asm.contains(" Exp2 "), "{asm}");
+    assert!(asm.contains(" Sin "), "{asm}");
+    assert!(!asm.contains("air.native_"), "{asm}");
+    let tmp = std::env::temp_dir().join(format!("metal2vulkan_native_math_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    tools::spirv_val_bytes(&out, &tmp).expect("spirv-val");
+}
+
+#[test]
 fn native_fast_inverse_tanh_log10_powr_vector_lower() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
