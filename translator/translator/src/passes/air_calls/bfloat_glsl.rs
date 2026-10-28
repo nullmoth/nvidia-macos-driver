@@ -216,7 +216,7 @@ fn select_canonical_bfloat_nan_bits(
 
 pub(in crate::passes) fn nan_aware_if_precise(name: &str, op: GLSLstd450) -> GLSLstd450 {
     use spirv::GlslStd450Op::*;
-    if name.starts_with("air.fast_") {
+    if name.starts_with("air.fast_") || name.starts_with("air.native_") {
         return op;
     }
     match op {
@@ -314,7 +314,10 @@ pub(in crate::passes) fn is_air_math(name: &str, stem: &str) -> bool {
     let Some(rest) = name.strip_prefix("air.") else {
         return false;
     };
-    let rest = rest.strip_prefix("fast_").unwrap_or(rest);
+    let rest = rest
+        .strip_prefix("fast_")
+        .or_else(|| rest.strip_prefix("native_"))
+        .unwrap_or(rest);
     rest.starts_with(stem) && rest.as_bytes().get(stem.len()) == Some(&b'.')
 }
 
