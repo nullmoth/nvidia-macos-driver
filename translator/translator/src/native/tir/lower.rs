@@ -347,6 +347,9 @@ pub(in crate::native) fn push_inst_line(
     // Parse operands and result types without treating LLVM attachments as
     // values (including cast destinations and GEP indices). The module text
     // remains unchanged for reflection and loop-control metadata readers.
+    // A void call keeps its full text: `!air.function_groups` on an indirect call is what marks it
+    // as a visible-function group call the emitter drops.
+    let full_line = line;
     let line = crate::native::lex::instruction_without_attachments(line);
     let mut pointer_pointee: Option<LlType> = None;
     let (result, result_ty) = match resolve_result(line, named_types) {
@@ -422,7 +425,7 @@ pub(in crate::native) fn push_inst_line(
     let alias_call = resolve_alias_call(line).map(Box::new);
     let emit_scan_call = resolve_emit_scan_call(line);
     let void_call_line = if matches!(opcode.as_str(), "call" | "tail") && result.is_none() {
-        Some(crate::native::lex::strip_comment(line).trim().to_string())
+        Some(crate::native::lex::strip_comment(full_line).trim().to_string())
     } else {
         None
     };
