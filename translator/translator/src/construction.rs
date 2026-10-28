@@ -1,8 +1,8 @@
+use crate::fxhash::HashMap;
 use crate::{
     finish_module, meta, passes, stage_buffer_layouts, tools, FinishConstruction,
     FinishFailureKind, FinishedModule,
 };
-use std::collections::HashMap;
 use std::path::Path;
 
 pub(crate) struct ConstructionCtx<'a> {
@@ -15,8 +15,8 @@ pub(crate) struct ConstructionCtx<'a> {
     pub(crate) tmp: &'a Path,
     pub(crate) options: passes::TransformOptions,
     pub(crate) air_data_layout: Option<crate::layout::AirDataLayout>,
-    ordinary_plan_rejections: std::cell::RefCell<std::collections::HashSet<String>>,
-    ownership_plan_rejections: std::cell::RefCell<std::collections::HashSet<String>>,
+    ordinary_plan_rejections: std::cell::RefCell<crate::fxhash::HashSet<String>>,
+    ownership_plan_rejections: std::cell::RefCell<crate::fxhash::HashSet<String>>,
     post_lowering_cfg_construction: std::cell::Cell<bool>,
     primary_cfg_construction_failure: std::cell::Cell<bool>,
     primary_raw_buffer_construction_failure: std::cell::Cell<bool>,
@@ -150,7 +150,7 @@ impl<'a> ConstructionCtx<'a> {
 
     pub(crate) fn remember_ordinary_plan_rejection_set(
         &self,
-        rejected: &std::collections::HashSet<String>,
+        rejected: &crate::fxhash::HashSet<String>,
     ) {
         self.ordinary_plan_rejections
             .borrow_mut()
@@ -207,7 +207,7 @@ impl<'a> ConstructionCtx<'a> {
 
     pub(crate) fn remember_ownership_plan_rejection_set(
         &self,
-        rejected: &std::collections::HashSet<String>,
+        rejected: &crate::fxhash::HashSet<String>,
     ) {
         self.ownership_plan_rejections
             .borrow_mut()

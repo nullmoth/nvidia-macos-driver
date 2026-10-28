@@ -198,7 +198,7 @@ impl LlModule {
             return;
         }
         for function in &mut self.functions {
-            let mut substitutions = HashMap::<String, TypedValue>::new();
+            let mut substitutions = HashMap::<String, TypedValue>::default();
             for block in &function.blocks {
                 let Some(typed) = block.typed.as_ref() else {
                     continue;
@@ -741,7 +741,7 @@ define void @main() {
         module.inline_simple_static_initializers();
         assert_eq!(
             module.preinlined_static_initializers,
-            HashSet::from(["_GLOBAL__sub_I_after".to_string()]),
+            crate::fxhash::set_from(["_GLOBAL__sub_I_after".to_string()]),
             "only the straight-line suffix crosses the pre-emission inference boundary"
         );
         let entry = module

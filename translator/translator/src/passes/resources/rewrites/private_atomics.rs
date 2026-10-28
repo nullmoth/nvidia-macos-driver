@@ -19,7 +19,7 @@ pub(in crate::passes) fn rewrite_private_zero_root_loads(ctx: &mut Ctx, roots: &
             ))
         })
         .collect::<HashMap<_, _>>();
-    let mut call_arguments = HashMap::<Word, Vec<Vec<Operand>>>::new();
+    let mut call_arguments = HashMap::<Word, Vec<Vec<Operand>>>::default();
     for instruction in ctx
         .module
         .functions
@@ -125,10 +125,10 @@ pub(in crate::passes) fn rewrite_private_zero_root_loads(ctx: &mut Ctx, roots: &
 }
 
 pub(in crate::passes) fn rewrite_private_pointer_atomics(ctx: &mut Ctx) {
-    let mut result_types: HashMap<Word, Word> = HashMap::new();
-    let mut ptr_storages: HashMap<Word, StorageClass> = HashMap::new();
-    let mut ptr_pointees: HashMap<Word, Word> = HashMap::new();
-    let mut definitions: HashMap<Word, Instruction> = HashMap::new();
+    let mut result_types: HashMap<Word, Word> = HashMap::default();
+    let mut ptr_storages: HashMap<Word, StorageClass> = HashMap::default();
+    let mut ptr_pointees: HashMap<Word, Word> = HashMap::default();
+    let mut definitions: HashMap<Word, Instruction> = HashMap::default();
     for inst in ctx
         .module
         .types_global_values
@@ -172,7 +172,7 @@ pub(in crate::passes) fn rewrite_private_pointer_atomics(ctx: &mut Ctx) {
     };
 
     let bool_ty = ctx.ty_bool();
-    let mut superseded_pointer_bitcasts = HashSet::new();
+    let mut superseded_pointer_bitcasts = HashSet::default();
     for function_index in 0..ctx.module.functions.len() {
         let n_blocks = ctx.module.functions[function_index].blocks.len();
         for bi in 0..n_blocks {
@@ -238,7 +238,7 @@ pub(in crate::passes) fn rewrite_private_pointer_atomics(ctx: &mut Ctx) {
     if superseded_pointer_bitcasts.is_empty() {
         return;
     }
-    let mut used = HashSet::new();
+    let mut used = HashSet::default();
     for instruction in ctx
         .module
         .functions
@@ -773,7 +773,7 @@ pub(in crate::passes) fn combined_type_defs(
 }
 
 pub(in crate::passes) fn combined_value_types(ctx: &Ctx, entry_idx: usize) -> HashMap<Word, Word> {
-    let mut value_types = HashMap::new();
+    let mut value_types = HashMap::default();
     for inst in ctx
         .module
         .types_global_values

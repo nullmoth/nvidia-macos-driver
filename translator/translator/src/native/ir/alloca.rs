@@ -13,7 +13,7 @@ impl LlModule {
                 .map(|name| (name.clone(), name.clone()))
                 .collect();
             let mut alias_roots: HashMap<String, String> = roots.clone();
-            let mut sources: HashMap<String, HashSet<LlType>> = HashMap::new();
+            let mut sources: HashMap<String, HashSet<LlType>> = HashMap::default();
             let mut changed = true;
             while changed {
                 changed = false;
@@ -225,7 +225,7 @@ impl LlModule {
     }
 
     pub(in crate::native) fn local_allocas(&self, f: &LlFunction) -> HashMap<String, LlType> {
-        let mut allocas = HashMap::new();
+        let mut allocas = HashMap::default();
         for inst in f.carrier_insts() {
             let (Some(name), Some(ty)) = (&inst.result, &inst.alloca_ty()) else {
                 continue;

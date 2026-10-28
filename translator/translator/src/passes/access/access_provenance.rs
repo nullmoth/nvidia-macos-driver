@@ -23,10 +23,10 @@ pub(in crate::passes) fn recover_inlined_local_pointer_fields(ctx: &mut Ctx, ent
     if store_markers.is_empty() || load_markers.is_empty() {
         return;
     }
-    let type_defs = combined_type_defs(ctx, &HashMap::new());
+    let type_defs = combined_type_defs(ctx, &HashMap::default());
 
-    let mut access_keys: HashMap<Word, LocalPointerFieldKey> = HashMap::new();
-    let mut stored_fields: HashMap<LocalPointerFieldKey, Word> = HashMap::new();
+    let mut access_keys: HashMap<Word, LocalPointerFieldKey> = HashMap::default();
+    let mut stored_fields: HashMap<LocalPointerFieldKey, Word> = HashMap::default();
     for blk in &ctx.module.functions[entry_idx].blocks {
         for inst in &blk.instructions {
             if let Some((result, key)) = local_pointer_field_access_key(ctx, &access_keys, inst) {
@@ -130,7 +130,7 @@ pub(in crate::passes) fn materialize_inlined_local_pointer_field_stores(
     ctx: &mut Ctx,
     entry_idx: usize,
 ) {
-    let mut sources = HashMap::<(Word, LocalPointerFieldKey), Option<Word>>::new();
+    let mut sources = HashMap::<(Word, LocalPointerFieldKey), Option<Word>>::default();
     for fact in &ctx.emit_sidecar.local_pointer_field_stores {
         let key = (
             fact.id,
@@ -165,7 +165,7 @@ pub(in crate::passes) fn materialize_inlined_local_pointer_field_stores(
         }))
         .filter_map(|instruction| Some((instruction.result_id?, instruction.result_type?)))
         .collect::<HashMap<_, _>>();
-    let mut access_keys = HashMap::<Word, LocalPointerFieldKey>::new();
+    let mut access_keys = HashMap::<Word, LocalPointerFieldKey>::default();
     let mut replacements = Vec::new();
     for (block_index, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (instruction_index, instruction) in block.instructions.iter().enumerate() {
@@ -215,8 +215,8 @@ pub(in crate::passes) fn recover_inlined_local_dynamic_pointer_fields(
         return Ok(());
     }
 
-    let mut access_keys = HashMap::<Word, LocalPointerFieldKey>::new();
-    let mut stored_fields = HashMap::<LocalPointerFieldKey, Word>::new();
+    let mut access_keys = HashMap::<Word, LocalPointerFieldKey>::default();
+    let mut stored_fields = HashMap::<LocalPointerFieldKey, Word>::default();
     for inst in ctx.module.functions[entry_idx]
         .blocks
         .iter()
@@ -320,7 +320,7 @@ pub(in crate::passes) fn recover_inlined_local_dynamic_pointer_fields(
         return Ok(());
     }
 
-    let mut replacements = HashMap::<Word, Vec<Instruction>>::new();
+    let mut replacements = HashMap::<Word, Vec<Instruction>>::default();
     let mut pointer_roots = Vec::<(StorageClass, Word)>::new();
     for fact in facts {
         if replacements.contains_key(&fact.id) {
@@ -476,7 +476,7 @@ pub(in crate::passes) fn recover_unique_local_pointer_field_loads(ctx: &mut Ctx,
     if store_markers.is_empty() {
         return;
     }
-    let mut access_keys = HashMap::<Word, LocalPointerFieldKey>::new();
+    let mut access_keys = HashMap::<Word, LocalPointerFieldKey>::default();
     for inst in ctx.module.functions[entry_idx]
         .blocks
         .iter()
@@ -487,7 +487,8 @@ pub(in crate::passes) fn recover_unique_local_pointer_field_loads(ctx: &mut Ctx,
         }
     }
 
-    let mut unique_stores = HashMap::<LocalPointerFieldKey, Option<(Word, usize, usize)>>::new();
+    let mut unique_stores =
+        HashMap::<LocalPointerFieldKey, Option<(Word, usize, usize)>>::default();
     for (block_index, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (instruction_index, inst) in block.instructions.iter().enumerate() {
             if inst.class.opcode == Op::Store {
@@ -629,7 +630,7 @@ fn dynamic_pointer_field_entries(
 fn local_pointer_field_store_sources(
     ctx: &Ctx,
 ) -> HashMap<(Word, LocalPointerFieldKey), Option<Word>> {
-    let mut sources = HashMap::<(Word, LocalPointerFieldKey), Option<Word>>::new();
+    let mut sources = HashMap::<(Word, LocalPointerFieldKey), Option<Word>>::default();
     for fact in &ctx.emit_sidecar.local_pointer_field_stores {
         let key = LocalPointerFieldKey {
             root: fact.root,
@@ -753,7 +754,7 @@ pub(in crate::passes) fn const_u32(ctx: &Ctx, id: Word) -> Option<u32> {
 }
 
 pub(in crate::passes) fn compose_derived_access_chains(ctx: &mut Ctx, entry_idx: usize) {
-    let mut provenance: HashMap<Word, AccessChainProvenance> = HashMap::new();
+    let mut provenance: HashMap<Word, AccessChainProvenance> = HashMap::default();
     let mut value_types = function_value_types(ctx, entry_idx);
     let n_blocks = ctx.module.functions[entry_idx].blocks.len();
     for bi in 0..n_blocks {

@@ -22,8 +22,8 @@ impl LlModule {
                 .filter(|&(_param, ty)| matches!(ty, LlType::Ptr(_)))
                 .map(|(param, _ty)| param.clone())
                 .collect::<HashSet<_>>();
-            let mut pointer_select_arms: HashMap<String, Vec<String>> = HashMap::new();
-            let mut pointer_identity_aliases: HashMap<String, String> = HashMap::new();
+            let mut pointer_select_arms: HashMap<String, Vec<String>> = HashMap::default();
+            let mut pointer_identity_aliases: HashMap<String, String> = HashMap::default();
             for inst in f.carrier_insts() {
                 if let Some((result, base)) = inst.identity_ptr_bitcast() {
                     pointer_identity_aliases.insert(result.to_string(), base.to_string());
@@ -51,7 +51,7 @@ impl LlModule {
 
             let merge_arm_params = |arms: &[String]| -> Vec<String> {
                 let mut pending = arms.to_vec();
-                let mut visited = HashSet::new();
+                let mut visited = HashSet::default();
                 let mut roots = Vec::new();
                 while let Some(arm) = pending.pop() {
                     if !visited.insert(arm.clone()) {
@@ -238,7 +238,7 @@ impl LlModule {
         let mut changed = true;
         while changed {
             changed = false;
-            let mut candidates: HashMap<(String, String), HashSet<LlType>> = HashMap::new();
+            let mut candidates: HashMap<(String, String), HashSet<LlType>> = HashMap::default();
             for edge in &call_edges {
                 let Some(pointee) = self
                     .ptr_pointees
@@ -326,11 +326,11 @@ impl LlModule {
     ) -> HashMap<String, HashSet<LlType>> {
         type Path = Vec<(LlType, Vec<u64>)>;
         type Slot = (String, Path);
-        let mut table_slots: HashMap<String, (String, Option<Path>)> = HashMap::new();
-        let mut slot_params: HashMap<Slot, HashSet<String>> = HashMap::new();
-        let mut table_params: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut loaded_params: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut sources: HashMap<String, HashSet<LlType>> = HashMap::new();
+        let mut table_slots: HashMap<String, (String, Option<Path>)> = HashMap::default();
+        let mut slot_params: HashMap<Slot, HashSet<String>> = HashMap::default();
+        let mut table_params: HashMap<String, HashSet<String>> = HashMap::default();
+        let mut loaded_params: HashMap<String, HashSet<String>> = HashMap::default();
+        let mut sources: HashMap<String, HashSet<LlType>> = HashMap::default();
 
         for inst in f.carrier_insts() {
             if let Some(res) = &inst.result {

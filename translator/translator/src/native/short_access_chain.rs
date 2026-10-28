@@ -131,14 +131,14 @@ pub(super) fn decay_short_access_chains(module: &mut Module) -> usize {
         .iter()
         .filter_map(|i| i.result_id.map(|id| (id, i.clone())))
         .collect();
-    let mut value_types: HashMap<Word, Word> = HashMap::new();
+    let mut value_types: HashMap<Word, Word> = HashMap::default();
     for instruction in module.all_inst_iter() {
         if let (Some(id), Some(ty)) = (instruction.result_id, instruction.result_type) {
             value_types.insert(id, ty);
         }
     }
 
-    let mut plans: HashMap<Word, usize> = HashMap::new();
+    let mut plans: HashMap<Word, usize> = HashMap::default();
     for function in &module.functions {
         for block in &function.blocks {
             for instruction in &block.instructions {

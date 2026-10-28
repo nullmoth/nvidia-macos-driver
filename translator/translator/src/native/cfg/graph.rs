@@ -1,6 +1,6 @@
 use super::blocks::block_successors;
 use super::BodyBlock;
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{HashMap, HashSet};
 
 #[cfg(test)]
 thread_local! {
@@ -43,7 +43,7 @@ impl Cfg {
                 (b.name.clone(), s)
             })
             .collect();
-        let mut predecessors: HashMap<String, Vec<String>> = HashMap::new();
+        let mut predecessors: HashMap<String, Vec<String>> = HashMap::default();
         for b in blocks {
             for t in successors.get(&b.name).into_iter().flatten() {
                 predecessors
@@ -66,7 +66,7 @@ impl Cfg {
     }
 
     pub(in crate::native) fn reachable_from(&self, start: &str) -> HashSet<String> {
-        let mut reachable: HashSet<String> = HashSet::new();
+        let mut reachable: HashSet<String> = HashSet::default();
         let mut stack = vec![start.to_string()];
         reachable.insert(start.to_string());
         while let Some(n) = stack.pop() {
@@ -86,7 +86,7 @@ impl Cfg {
         Dominators {
             idom,
             intervals,
-            pass_throughs: HashMap::new(),
+            pass_throughs: HashMap::default(),
         }
     }
 }
@@ -194,7 +194,7 @@ pub(super) fn reachable_from(
     start: &str,
     successors: &HashMap<String, Vec<String>>,
 ) -> HashSet<String> {
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: HashSet<&str> = HashSet::default();
     let mut stack: Vec<&str> = vec![start];
     while let Some(block) = stack.pop() {
         if !seen.insert(block) {
@@ -218,7 +218,7 @@ mod tests {
         let typed = crate::native::tir::lower_block_carrier(
             &name,
             &[term.to_string()],
-            &std::collections::HashMap::new(),
+            &crate::fxhash::HashMap::default(),
         );
         BodyBlock {
             name,
@@ -231,7 +231,7 @@ mod tests {
         if dominator == node {
             return true;
         }
-        let mut seen: HashSet<&str> = HashSet::new();
+        let mut seen: HashSet<&str> = HashSet::default();
         let mut stack: Vec<&str> = vec![cfg.entry.as_str()];
         if cfg.entry == dominator {
             return true;
@@ -251,7 +251,7 @@ mod tests {
     }
 
     fn reachable_names(cfg: &Cfg) -> Vec<String> {
-        let mut seen: HashSet<&str> = HashSet::new();
+        let mut seen: HashSet<&str> = HashSet::default();
         let mut stack = vec![cfg.entry.as_str()];
         seen.insert(cfg.entry.as_str());
         while let Some(cur) = stack.pop() {
@@ -365,7 +365,10 @@ mod tests {
         assert!(r.contains("%0"));
         assert!(r.contains("%t") && r.contains("%f") && r.contains("%m"));
         assert!(!r.contains("%dead"));
-        assert_eq!(cfg.reachable_from("%m"), HashSet::from(["%m".to_string()]));
+        assert_eq!(
+            cfg.reachable_from("%m"),
+            crate::fxhash::set_from(["%m".to_string()])
+        );
     }
 
     #[test]

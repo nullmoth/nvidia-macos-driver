@@ -1,6 +1,6 @@
+use crate::fxhash::HashMap;
 use crate::native::ir::LlType;
 use spirv::{StorageClass, Word};
-use std::collections::HashMap;
 
 pub(crate) struct TypeInterner {
     pub(crate) types: HashMap<LlType, Word>,
@@ -20,18 +20,18 @@ pub(crate) struct TypeInterner {
 impl TypeInterner {
     pub(crate) fn new() -> Self {
         Self {
-            types: HashMap::new(),
-            signed_int_types: HashMap::new(),
-            ptr_types: HashMap::new(),
-            function_types: HashMap::new(),
-            uint_constants: HashMap::new(),
-            int_constants: HashMap::new(),
-            bool_constants: HashMap::new(),
-            float32_constants: HashMap::new(),
-            float16_constants: HashMap::new(),
-            null_constants: HashMap::new(),
-            composite_constants: HashMap::new(),
-            undefs: HashMap::new(),
+            types: HashMap::default(),
+            signed_int_types: HashMap::default(),
+            ptr_types: HashMap::default(),
+            function_types: HashMap::default(),
+            uint_constants: HashMap::default(),
+            int_constants: HashMap::default(),
+            bool_constants: HashMap::default(),
+            float32_constants: HashMap::default(),
+            float16_constants: HashMap::default(),
+            null_constants: HashMap::default(),
+            composite_constants: HashMap::default(),
+            undefs: HashMap::default(),
         }
     }
 }

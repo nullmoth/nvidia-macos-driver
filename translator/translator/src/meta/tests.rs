@@ -348,7 +348,7 @@ fn kernel_function_constant_buffer_locations_preserve_shared_bindings() {
     let meta = parse_air_kernel_meta(ll).expect("kernel metadata");
     assert_eq!(
         meta.function_constant_buffer_locations,
-        HashMap::from([(0, 29), (1, 29)])
+        crate::fxhash::map_from([(0, 29), (1, 29)])
     );
 }
 
@@ -1850,7 +1850,7 @@ fn kernel_stage_input_slots_do_not_depend_on_the_argument_list_order() {
     );
     assert_eq!(
         forward.stage_input_bindings(),
-        HashMap::from([(1, 0), (2, 2)]),
+        crate::fxhash::map_from([(1, 0), (2, 2)]),
     );
 }
 

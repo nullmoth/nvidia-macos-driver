@@ -71,9 +71,9 @@ pub(in crate::passes) fn rewrite_resource_query_selects(ctx: &mut Ctx) -> Result
         return Ok(());
     }
 
-    let mut candidates: HashMap<Word, ResourceSelect> = HashMap::new();
+    let mut candidates: HashMap<Word, ResourceSelect> = HashMap::default();
     'seed: for &(seed_id, sel) in &seeds {
-        let mut closure: HashMap<Word, ResourceSelect> = HashMap::new();
+        let mut closure: HashMap<Word, ResourceSelect> = HashMap::default();
         closure.insert(seed_id, sel);
         let mut work = vec![seed_id];
         while let Some(id) = work.pop() {
@@ -120,7 +120,7 @@ pub(in crate::passes) fn rewrite_resource_query_selects(ctx: &mut Ctx) -> Result
         return Ok(());
     }
 
-    let mut rewritten_value_types: HashMap<Word, Word> = HashMap::new();
+    let mut rewritten_value_types: HashMap<Word, Word> = HashMap::default();
     for function_idx in 0..ctx.module.functions.len() {
         for block_idx in 0..ctx.module.functions[function_idx].blocks.len() {
             let old = ctx.module.functions[function_idx].blocks[block_idx]
@@ -281,7 +281,7 @@ fn is_duplicable_resource_use(inst: &Instruction, id: Word) -> bool {
 }
 
 fn value_result_types(module: &Module) -> HashMap<Word, Word> {
-    let mut types = HashMap::new();
+    let mut types = HashMap::default();
     for inst in &module.types_global_values {
         if let (Some(result), Some(result_type)) = (inst.result_id, inst.result_type) {
             types.insert(result, result_type);

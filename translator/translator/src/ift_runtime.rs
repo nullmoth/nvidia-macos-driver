@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use crate::fxhash::HashSet;
 
 pub const OPAQUE_TRIANGLE_ID: u64 = 0x8000_0000_0000_0001;
 pub const TABLE_BUFFERS: u64 = 31;
@@ -30,7 +30,7 @@ enum Role {
     Buffer(u64),
 }
 
-fn metadata_nodes(module: &str) -> std::collections::HashMap<String, String> {
+fn metadata_nodes(module: &str) -> crate::fxhash::HashMap<String, String> {
     module
         .lines()
         .filter_map(|l| {
@@ -301,7 +301,7 @@ pub fn rewrite_runtime_intersection_tables(
         .ok_or("intersection tables: entry body is unterminated")?;
     let mut lines: Vec<String> = ll[def_at..body_end].lines().map(str::to_string).collect();
     let mut declares: Vec<String> = Vec::new();
-    let mut table_params: HashSet<u32> = HashSet::new();
+    let mut table_params: HashSet<u32> = HashSet::default();
     let mut n = 0usize;
     let mut i = 1usize;
     while i < lines.len() {

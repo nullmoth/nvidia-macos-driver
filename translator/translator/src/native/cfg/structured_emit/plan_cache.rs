@@ -258,9 +258,9 @@ mod tests {
 
     /// A selection whose terminal-merges entry carries `tag`, so a caller can tell which compute produced it.
     fn dummy_selection(tag: &str) -> Selection {
-        let mut terminal = HashMap::new();
+        let mut terminal = HashMap::default();
         terminal.insert("tag".to_string(), tag.to_string());
-        (Vec::new(), HashMap::new(), terminal, HashMap::new())
+        (Vec::new(), HashMap::default(), terminal, HashMap::default())
     }
 
     fn tag_of(selection: &Selection) -> Option<&str> {
@@ -272,7 +272,7 @@ mod tests {
         reset_hits();
         let _scope = Scope::enter();
         let lblocks = self_loop(1);
-        let mut loop_merges = HashMap::new();
+        let mut loop_merges = HashMap::default();
         loop_merges.insert(
             "%loop".to_string(),
             LoopMergeInfo {
@@ -280,7 +280,7 @@ mod tests {
                 continue_target: "%loop".to_string(),
             },
         );
-        let mut other_loop_merges = HashMap::new();
+        let mut other_loop_merges = HashMap::default();
         other_loop_merges.insert(
             "%loop".to_string(),
             LoopMergeInfo {
@@ -288,8 +288,8 @@ mod tests {
                 continue_target: "%loop".to_string(),
             },
         );
-        let terminal_merges = HashMap::new();
-        let mut other_terminal_merges = HashMap::new();
+        let terminal_merges = HashMap::default();
+        let mut other_terminal_merges = HashMap::default();
         other_terminal_merges.insert("%merge".to_string(), "%exit".to_string());
 
         let first = selection_cached(
@@ -367,8 +367,8 @@ mod tests {
             format!("{:?}", second_input[1].typed),
         );
 
-        let loop_merges = HashMap::new();
-        let terminal_merges = HashMap::new();
+        let loop_merges = HashMap::default();
+        let terminal_merges = HashMap::default();
         let first = selection_cached(
             &first_input,
             &loop_merges,
@@ -397,8 +397,8 @@ mod tests {
     fn a_changed_block_set_misses() {
         reset_hits();
         let _scope = Scope::enter();
-        let loop_merges = HashMap::new();
-        let terminal_merges = HashMap::new();
+        let loop_merges = HashMap::default();
+        let terminal_merges = HashMap::default();
         let first = selection_cached(
             &self_loop(1),
             &loop_merges,

@@ -1,7 +1,7 @@
 use super::*;
+use crate::fxhash::HashMap;
 use crate::native::ir::{LlGep, LlType, LlValue};
 use spirv::StorageClass;
-use std::collections::HashMap;
 
 pub(in crate::native) fn addrspace_default_storage(addrspace: u32) -> Option<StorageClass> {
     match addrspace {
@@ -17,7 +17,7 @@ pub(in crate::native) fn derive_pointer_storage(
     params: &[(String, LlType)],
     named_types: &HashMap<String, LlType>,
 ) -> HashMap<String, StorageClass> {
-    derive_pointer_storage_from(tir, params, named_types, &HashMap::new())
+    derive_pointer_storage_from(tir, params, named_types, &HashMap::default())
 }
 
 pub(in crate::native) fn derive_pointer_storage_from(

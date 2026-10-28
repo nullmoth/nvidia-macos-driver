@@ -1,5 +1,5 @@
+use crate::fxhash::HashMap;
 use crate::native;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -223,8 +223,8 @@ pub(crate) fn emit_vulkan_spirv_all_buffers_raw_with_sidecar(
     kern: Option<&crate::meta::KernMeta>,
     entry_name: Option<&str>,
     buffer_layouts: Option<&HashMap<u32, crate::meta::AirType>>,
-    known_ordinary_plan_rejections: &std::collections::HashSet<String>,
-    known_ownership_plan_rejections: &std::collections::HashSet<String>,
+    known_ordinary_plan_rejections: &crate::fxhash::HashSet<String>,
+    known_ownership_plan_rejections: &crate::fxhash::HashSet<String>,
 ) -> Result<crate::emit_sidecar::EmittedSpirv, String> {
     native::emit_vulkan_spirv_all_buffers_raw_with_sidecar(
         san_ll,
@@ -249,8 +249,8 @@ pub(crate) fn emit_vulkan_spirv_all_buffers_raw_with_workgroup_sidecar(
     kern: Option<&crate::meta::KernMeta>,
     entry_name: Option<&str>,
     buffer_layouts: Option<&HashMap<u32, crate::meta::AirType>>,
-    known_ordinary_plan_rejections: &std::collections::HashSet<String>,
-    known_ownership_plan_rejections: &std::collections::HashSet<String>,
+    known_ordinary_plan_rejections: &crate::fxhash::HashSet<String>,
+    known_ownership_plan_rejections: &crate::fxhash::HashSet<String>,
 ) -> Result<crate::emit_sidecar::EmittedSpirv, String> {
     native::emit_vulkan_spirv_all_buffers_raw_with_workgroup_sidecar(
         san_ll,
@@ -294,8 +294,8 @@ pub(crate) fn emit_vulkan_spirv_all_buffers_raw_bda_with_sidecar(
     kern: Option<&crate::meta::KernMeta>,
     entry_name: Option<&str>,
     buffer_layouts: Option<&HashMap<u32, crate::meta::AirType>>,
-    known_ordinary_plan_rejections: &std::collections::HashSet<String>,
-    known_ownership_plan_rejections: &std::collections::HashSet<String>,
+    known_ordinary_plan_rejections: &crate::fxhash::HashSet<String>,
+    known_ownership_plan_rejections: &crate::fxhash::HashSet<String>,
 ) -> Result<crate::emit_sidecar::EmittedSpirv, String> {
     native::emit_vulkan_spirv_all_buffers_raw_bda_with_sidecar(
         san_ll,

@@ -339,7 +339,7 @@ pub(in crate::native) fn structured_plan_inner8(
         .as_ref()
         .map(|plan| plan.blocks.clone())
         .unwrap_or(base_lblocks);
-    let mut terminal_merges = HashMap::new();
+    let mut terminal_merges = HashMap::default();
     if let Some(plan) = terminal {
         terminal_merges.extend(plan.merges.clone());
     }
@@ -432,7 +432,7 @@ pub(in crate::native) fn structured_plan_inner8(
     let forest = analyze(&sblocks);
     let loop_headers: HashSet<&str> = forest.loops.iter().map(|l| l.header.as_str()).collect();
     let names: HashSet<&str> = sblocks.iter().map(|b| b.name.as_str()).collect();
-    let mut header_merge: HashMap<String, String> = HashMap::new();
+    let mut header_merge: HashMap<String, String> = HashMap::default();
     for (h, info) in &loop_merges {
         header_merge.insert(h.clone(), info.merge.clone());
     }
@@ -627,7 +627,7 @@ fn conflicting_phi_predecessor_reason(blocks: &[BodyBlock]) -> Option<String> {
             let Some((_, incoming)) = inst.phi_incoming() else {
                 continue;
             };
-            let mut value_by_predecessor = HashMap::new();
+            let mut value_by_predecessor = HashMap::default();
             for (value, predecessor) in incoming {
                 if value_by_predecessor
                     .insert(predecessor.as_str(), value)
@@ -667,7 +667,7 @@ pub(in crate::native) fn restructure_straddle_loop_merges_with(
     let forest = analyze(&sblocks);
     let loop_headers: HashSet<&str> = forest.loops.iter().map(|l| l.header.as_str()).collect();
     let names: HashSet<&str> = sblocks.iter().map(|b| b.name.as_str()).collect();
-    let mut header_merge: HashMap<String, String> = HashMap::new();
+    let mut header_merge: HashMap<String, String> = HashMap::default();
     for (h, info) in &loop_merges {
         header_merge.insert(h.clone(), info.merge.clone());
     }
@@ -929,7 +929,7 @@ fn append_straddle_witness_lines(
         .iter()
         .map(|block| (block.name.as_str(), block))
         .collect();
-    let mut header_merge: HashMap<String, String> = HashMap::new();
+    let mut header_merge: HashMap<String, String> = HashMap::default();
     for (h, info) in &loop_merges {
         header_merge.insert(h.clone(), info.merge.clone());
     }
@@ -1130,7 +1130,7 @@ fn straddle_closure_stats(
     owner_merge: &str,
 ) -> StraddleClosureStats {
     let names: HashSet<&str> = blocks.iter().map(|block| block.name.as_str()).collect();
-    let mut preds: HashMap<String, Vec<String>> = HashMap::new();
+    let mut preds: HashMap<String, Vec<String>> = HashMap::default();
     for block in blocks {
         for succ in block_successors(block) {
             if names.contains(succ.as_str()) {
@@ -1139,7 +1139,7 @@ fn straddle_closure_stats(
         }
     }
 
-    let mut reaches_loop_merge = HashSet::new();
+    let mut reaches_loop_merge = HashSet::default();
     let mut stack = vec![loop_merge.to_string()];
     while let Some(node) = stack.pop() {
         if !reaches_loop_merge.insert(node.clone()) {
@@ -1153,7 +1153,7 @@ fn straddle_closure_stats(
     let loop_body: HashSet<&str> = loop_body.iter().map(String::as_str).collect();
     let mut owner_arm_blocks = 0usize;
     let mut merge_tail_blocks = 0usize;
-    let mut closure = HashSet::new();
+    let mut closure = HashSet::default();
     for block in blocks {
         let name = block.name.as_str();
         let in_owner_arm = forest.dominates(owner, name)
@@ -1438,7 +1438,7 @@ pub(in crate::native) fn find_synthesized_cross_arm_shared(
     let forest = analyze(&sblocks);
     let loop_headers: HashSet<&str> = forest.loops.iter().map(|l| l.header.as_str()).collect();
     let names: HashSet<&str> = sblocks.iter().map(|b| b.name.as_str()).collect();
-    let mut header_merge: HashMap<String, String> = HashMap::new();
+    let mut header_merge: HashMap<String, String> = HashMap::default();
     for (h, info) in &loop_merges {
         header_merge.insert(h.clone(), info.merge.clone());
     }

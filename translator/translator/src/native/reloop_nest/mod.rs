@@ -3,10 +3,11 @@ mod shape;
 mod verify;
 
 use super::relooper::{block_label, decode_term, Term, TypeCtx};
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::{Function, Module};
 use shape::Graph;
 use spirv::Word;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 
 pub(crate) fn structure_selected_functions(
     module: &mut Module,
@@ -34,7 +35,7 @@ pub(crate) fn structure_selected_functions(
             if crate::env_vars::reloop_why() {
                 eprintln!("NEST-SKIP stage={stage} METAL2VULKAN_NEST={allowed}");
             }
-            return HashSet::new();
+            return HashSet::default();
         }
     }
     let mut next_id = module
@@ -47,7 +48,7 @@ pub(crate) fn structure_selected_functions(
         .filter_map(|instruction| Some((instruction.result_id?, instruction.result_type?)))
         .collect::<HashMap<_, _>>();
     let mut tc = TypeCtx::new(module, &mut next_id);
-    let mut structured = HashSet::new();
+    let mut structured = HashSet::default();
     let mut dumped_declines = 0;
     for function in &mut module.functions {
         let Some(id) = function.def.as_ref().and_then(|def| def.result_id) else {
@@ -229,7 +230,7 @@ fn reverse_postorder(blocks: Vec<crate::spirv_module::Block>) -> Vec<crate::spir
     let Some(entry) = order.first().and_then(|(label, _)| *label) else {
         return order.into_iter().map(|(_, block)| block).collect();
     };
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut postorder = Vec::new();
     let mut stack = vec![(entry, 0usize)];
     seen.insert(entry);

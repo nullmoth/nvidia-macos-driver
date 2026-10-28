@@ -177,7 +177,7 @@ pub(in crate::passes) fn append_raw_byte_pointer_component_load(
 
 pub(in crate::passes) fn rewrite_raw_byte_pointer_direct_loads(ctx: &mut Ctx, entry_idx: usize) {
     let value_types = function_value_types(ctx, entry_idx);
-    let mut ptr_info = HashMap::<Word, (StorageClass, Word)>::new();
+    let mut ptr_info = HashMap::<Word, (StorageClass, Word)>::default();
     for instruction in ctx
         .new_globals
         .iter()
@@ -207,7 +207,7 @@ pub(in crate::passes) fn rewrite_raw_byte_pointer_direct_loads(ctx: &mut Ctx, en
         lanes: u32,
     }
 
-    let mut plans = HashMap::<(usize, usize), Plan>::new();
+    let mut plans = HashMap::<(usize, usize), Plan>::default();
     for (block_idx, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (instruction_idx, instruction) in block.instructions.iter().enumerate() {
             if instruction.class.opcode != Op::Load || instruction.operands.len() != 1 {
@@ -454,8 +454,8 @@ pub(in crate::passes) fn rewrite_exact_raw_byte_block_memory(ctx: &mut Ctx, entr
         &types,
         &value_types,
     );
-    let mut plans = HashMap::new();
-    let mut invalid_ancestry = HashMap::new();
+    let mut plans = HashMap::default();
+    let mut invalid_ancestry = HashMap::default();
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             let (pointer, object_ty, operation) = match inst.class.opcode {
@@ -487,7 +487,7 @@ pub(in crate::passes) fn rewrite_exact_raw_byte_block_memory(ctx: &mut Ctx, entr
                 &definitions,
                 &types,
                 &value_types,
-                &mut HashSet::new(),
+                &mut HashSet::default(),
             )
             .and_then(|(root, constant, terms)| {
                 let index_ty = value_types.get(&terms[0].0).copied()?;
@@ -507,7 +507,7 @@ pub(in crate::passes) fn rewrite_exact_raw_byte_block_memory(ctx: &mut Ctx, entr
                 &types,
                 &value_types,
                 &mut invalid_ancestry,
-                &mut HashSet::new(),
+                &mut HashSet::default(),
             );
             if let Some((root, constant, terms, index_ty)) = dynamic_source.filter(|_| invalid) {
                 if let Some((byte_ty, component_ty, lanes, component_bits)) =
@@ -544,7 +544,7 @@ pub(in crate::passes) fn rewrite_exact_raw_byte_block_memory(ctx: &mut Ctx, entr
                 &definitions,
                 &types,
                 &value_types,
-                &mut HashSet::new(),
+                &mut HashSet::default(),
             );
             let Some((root, byte_offset)) = inherited else {
                 continue;
@@ -922,7 +922,7 @@ fn flatten_exact_offset_roots(exact_offsets: &mut HashMap<Word, (Word, u64)>) {
 
     let snapshot = exact_offsets.clone();
     for id in snapshot.keys() {
-        if let Some(resolved) = resolve(*id, &snapshot, &mut HashSet::new()) {
+        if let Some(resolved) = resolve(*id, &snapshot, &mut HashSet::default()) {
             exact_offsets.insert(*id, resolved);
         }
     }
@@ -968,7 +968,7 @@ pub(in crate::passes) fn flatten_affine_offset_roots(
 
     let snapshot = affine_offsets.clone();
     for id in snapshot.keys() {
-        if let Some(resolved) = resolve(*id, &snapshot, exact_offsets, &mut HashSet::new()) {
+        if let Some(resolved) = resolve(*id, &snapshot, exact_offsets, &mut HashSet::default()) {
             affine_offsets.insert(*id, resolved);
         }
     }
@@ -979,7 +979,7 @@ fn persist_exact_offsets(
     exact_offsets: &HashMap<Word, (Word, u64)>,
     inferred_ids: &[Word],
 ) {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     facts.retain_mut(|fact| {
         if !seen.insert(fact.id) {
             return false;
@@ -1095,7 +1095,7 @@ fn propagate_exact_offsets_to_ancestors(
     types: &HashMap<Word, Instruction>,
     value_types: &HashMap<Word, Word>,
 ) {
-    let mut ambiguous = HashSet::new();
+    let mut ambiguous = HashSet::default();
     loop {
         let mut changed = false;
         for (&result, definition) in definitions {
@@ -1271,7 +1271,7 @@ pub(in crate::passes) fn inherited_affine_byte_offset(
 
 pub(in crate::passes) fn rewrite_raw_byte_pointer_wide_loads(ctx: &mut Ctx, entry_idx: usize) {
     let value_types = function_value_types(ctx, entry_idx);
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -1394,8 +1394,8 @@ pub(in crate::passes) fn rewrite_raw_byte_pointer_wide_loads(ctx: &mut Ctx, entr
         .iter()
         .map(|p| (p.chain_id, p.result_pointee))
         .collect();
-    let mut load_sites: HashMap<Word, Vec<(usize, usize)>> = HashMap::new();
-    let mut disqualified: HashSet<Word> = HashSet::new();
+    let mut load_sites: HashMap<Word, Vec<(usize, usize)>> = HashMap::default();
+    let mut disqualified: HashSet<Word> = HashSet::default();
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             if inst.result_id.is_some_and(|id| plan_ids.contains(&id))
@@ -1561,7 +1561,7 @@ pub(in crate::passes) fn rewrite_scalar_slot_array_overindex(
     const ELEM_BITS: u32 = 32;
     let value_types = function_value_types(ctx, entry_idx);
 
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -1665,8 +1665,8 @@ pub(in crate::passes) fn rewrite_scalar_slot_array_overindex(
     let plan_ids: HashSet<Word> = plans.iter().map(|p| p.ac_id).collect();
     let result_pointee_of: HashMap<Word, Word> =
         plans.iter().map(|p| (p.ac_id, p.result_pointee)).collect();
-    let mut use_sites: HashMap<Word, Vec<(usize, usize, bool)>> = HashMap::new();
-    let mut disqualified: HashSet<Word> = HashSet::new();
+    let mut use_sites: HashMap<Word, Vec<(usize, usize, bool)>> = HashMap::default();
+    let mut disqualified: HashSet<Word> = HashSet::default();
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             if inst
@@ -1931,7 +1931,7 @@ pub(in crate::passes) fn rewrite_scalar_slot_array_overindex(
 
 pub(in crate::passes) fn rewrite_reinterpret_scalar_loads(ctx: &mut Ctx, entry_idx: usize) {
     let value_types = function_value_types(ctx, entry_idx);
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -1946,8 +1946,8 @@ pub(in crate::passes) fn rewrite_reinterpret_scalar_loads(ctx: &mut Ctx, entry_i
         }
     }
 
-    let mut member_offset: HashMap<(Word, u32), u32> = HashMap::new();
-    let mut array_stride: HashMap<Word, u32> = HashMap::new();
+    let mut member_offset: HashMap<(Word, u32), u32> = HashMap::default();
+    let mut array_stride: HashMap<Word, u32> = HashMap::default();
     for inst in &ctx.module.annotations {
         match inst.class.opcode {
             Op::MemberDecorate => {
@@ -1993,7 +1993,7 @@ pub(in crate::passes) fn rewrite_reinterpret_scalar_loads(ctx: &mut Ctx, entry_i
             .unwrap_or(false)
     };
 
-    let mut ac_at: HashMap<Word, (usize, usize)> = HashMap::new();
+    let mut ac_at: HashMap<Word, (usize, usize)> = HashMap::default();
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             if matches!(
@@ -2246,7 +2246,7 @@ pub(in crate::passes) fn rewrite_reinterpret_scalar_loads(ctx: &mut Ctx, entry_i
     }
 
     let uint_ty = ctx.ty_uint();
-    let mut replacement: HashMap<(usize, usize), Vec<Instruction>> = HashMap::new();
+    let mut replacement: HashMap<(usize, usize), Vec<Instruction>> = HashMap::default();
     for plan in &plans {
         let pt = plan.pointee_ty;
         let rt = plan.result_ty;
@@ -2398,7 +2398,7 @@ pub(in crate::passes) fn rewrite_reinterpret_scalar_loads(ctx: &mut Ctx, entry_i
 
 pub(in crate::passes) fn rewrite_raw_byte_pointer_wide_stores(ctx: &mut Ctx, entry_idx: usize) {
     let value_types = function_value_types(ctx, entry_idx);
-    let mut ptr_info = HashMap::<Word, (StorageClass, Word)>::new();
+    let mut ptr_info = HashMap::<Word, (StorageClass, Word)>::default();
     for instruction in ctx
         .new_globals
         .iter()
@@ -2425,7 +2425,7 @@ pub(in crate::passes) fn rewrite_raw_byte_pointer_wide_stores(ctx: &mut Ctx, ent
         component_bits: u32,
         lanes: u32,
     }
-    let mut plans = HashMap::<(usize, usize), Plan>::new();
+    let mut plans = HashMap::<(usize, usize), Plan>::default();
     for (block_idx, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (instruction_idx, instruction) in block.instructions.iter().enumerate() {
             if instruction.class.opcode != Op::Store || instruction.operands.len() != 2 {

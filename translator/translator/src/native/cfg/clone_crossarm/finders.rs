@@ -28,7 +28,7 @@ pub(in crate::native) fn find_deep_shared_continuations(
     headers.sort_by_cached_key(|b| std::cmp::Reverse(depth(&b.name)));
 
     let mut found = Vec::new();
-    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let mut seen: HashSet<(String, String)> = HashSet::default();
     for header in headers {
         let Some(natural) = selection.get(&header.name) else {
             continue;
@@ -97,7 +97,7 @@ pub(in crate::native) fn find_switch_case_shared_continuations(
     switches.sort_by_cached_key(|b| std::cmp::Reverse(depth(&b.name)));
 
     let mut found = Vec::new();
-    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let mut seen: HashSet<(String, String)> = HashSet::default();
     for switch in switches {
         let Some(natural) = selection.get(&switch.name) else {
             continue;
@@ -105,7 +105,7 @@ pub(in crate::native) fn find_switch_case_shared_continuations(
         let adjacent_cases = match &switch.typed.as_ref().expect("typed switch").terminator {
             crate::native::tir::TirTerminator::Switch { cases, .. } => {
                 let mut ordered = Vec::new();
-                let mut unique = HashSet::new();
+                let mut unique = HashSet::default();
                 for (_, target) in cases {
                     if unique.insert(target.as_str()) {
                         ordered.push(target.as_str());
@@ -199,7 +199,7 @@ pub(in crate::native) fn shared_clone_is_loop_local(
     }
 
     let names: HashSet<&str> = blocks.iter().map(|block| block.name.as_str()).collect();
-    let mut region = HashSet::new();
+    let mut region = HashSet::default();
     let mut stack = vec![continuation.to_string()];
     while let Some(name) = stack.pop() {
         if !region.insert(name.clone()) {
@@ -239,7 +239,7 @@ pub(in crate::native) fn reverse_reachable(
     names: &HashSet<&str>,
 ) -> HashSet<String> {
     let preds = predecessors(blocks);
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut stack = vec![target.to_string()];
     while let Some(block) = stack.pop() {
         if !seen.insert(block.clone()) {

@@ -1,7 +1,7 @@
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::Instruction;
 use crate::spirv_module::Operand;
 use spirv::{Op, Word};
-use std::collections::{HashMap, HashSet};
 
 pub(in crate::native) fn compute_nonzero(
     f: &crate::spirv_module::Function,
@@ -119,10 +119,10 @@ pub(in crate::native) fn nonzero_self_minus_one_guards(
     numworkgroups: &HashSet<Word>,
 ) -> HashMap<Word, i128> {
     if numworkgroups.is_empty() {
-        return HashMap::new();
+        return HashMap::default();
     }
     let nz = compute_nonzero(f, consts, numworkgroups);
-    let mut def: HashMap<Word, &Instruction> = HashMap::new();
+    let mut def: HashMap<Word, &Instruction> = HashMap::default();
     for b in &f.blocks {
         for inst in &b.instructions {
             if let Some(r) = inst.result_id {
@@ -130,7 +130,7 @@ pub(in crate::native) fn nonzero_self_minus_one_guards(
             }
         }
     }
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     for b in &f.blocks {
         for inst in &b.instructions {
             if inst.class.opcode != Op::UGreaterThan {

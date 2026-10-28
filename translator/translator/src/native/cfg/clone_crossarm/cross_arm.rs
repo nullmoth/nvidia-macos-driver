@@ -190,7 +190,7 @@ pub(in crate::native) fn privatize_trivial(
 
     let by_name: HashMap<&str, &BodyBlock> = blocks.iter().map(|b| (b.name.as_str(), b)).collect();
     let arm_block = by_name.get(arm)?;
-    if cloned_labels_overlap_ssa_values(blocks, &HashSet::from([arm.to_string()])) {
+    if cloned_labels_overlap_ssa_values(blocks, &crate::fxhash::set_from([arm.to_string()])) {
         return None;
     }
     let succ = block_successors(arm_block);
@@ -198,7 +198,7 @@ pub(in crate::native) fn privatize_trivial(
 
     let id = *counter;
     *counter += 1;
-    let mut rename: HashMap<String, String> = HashMap::new();
+    let mut rename: HashMap<String, String> = HashMap::default();
     rename.insert(arm.to_string(), fresh(arm, id));
     for def in block_defs(arm_block) {
         rename.insert(def.clone(), fresh(&def, id));
