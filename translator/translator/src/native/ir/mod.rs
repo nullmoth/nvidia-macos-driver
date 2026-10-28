@@ -166,6 +166,9 @@ pub(super) struct LlModule {
     pub(super) imageblock_shared_cells: bool,
     pub(super) imageblock_threads_per_threadgroup_param: Option<String>,
     pub(super) imageblock_cell_scale: Option<u32>,
+    /// The tile's extent per axis in threadgroups ([x, y]), when every imageblock coordinate's lanes are bounded:
+    /// what a whole-imageblock slice write (size left undef) copies.
+    pub(super) imageblock_cell_scale_xy: Option<[u32; 2]>,
     pub(super) aliased_imageblock_planes: Vec<meta::AliasedImageblockPlane>,
     metadata_pointee_params: HashSet<(String, String)>,
     metadata_pointee_sizes: HashMap<(String, String), u64>,
@@ -583,6 +586,40 @@ fn infer_imageblock_cell_scale(
     Some(scale.max(1))
 }
 
+/// Per axis, the most threadgroups an imageblock coordinate spans (see TileCoordinates::lane_scale); None when a
+/// coordinate's lanes cannot be bounded.
+fn infer_imageblock_lane_scales(
+    functions: &[LlFunction],
+    entry_functions: &HashSet<String>,
+    statics: &HashMap<String, meta::StaticIntValue>,
+    threads_per_threadgroup: Option<&str>,
+) -> Option<[u32; 2]> {
+    let mut scales = [0u32; 2];
+    for function in functions.iter().filter(|function| entry_functions.contains(&function.name)) {
+        let insts = function.carrier_insts().collect::<Vec<_>>();
+        let defs = insts
+            .iter()
+            .filter_map(|inst| inst.result.as_deref().map(|result| (result, *inst)))
+            .collect::<HashMap<_, _>>();
+        let tile = TileCoordinates { defs: &defs, insts: &insts, statics, threads_per_threadgroup };
+        for coordinate in function
+            .carrier_insts()
+            .filter_map(|inst| inst.alias_call())
+            .filter(|call| call.callee == "air.imageblock_data")
+            .filter_map(|call| call.args.first().map(|arg| arg.value.clone()))
+        {
+            for (lane, scale) in scales.iter_mut().enumerate() {
+                let lane_scale = match &coordinate {
+                    LlValue::Local(name) => tile.lane_scale(name, lane as u64, 16)?,
+                    _ => 0,
+                };
+                *scale = (*scale).max(lane_scale);
+            }
+        }
+    }
+    Some([scales[0].max(1), scales[1].max(1)])
+}
+
 /// What the imageblock coordinate analysis reads: the entry's definitions, and for the strided form
 /// `k * threads_per_threadgroup + thread_position_in_threadgroup` the loop bound of k. MPS's Lanczos kernels write
 /// unroll x unroll cells per thread that way, with unroll a function constant its static initializer copies into a
@@ -697,6 +734,90 @@ impl TileCoordinates<'_, '_> {
             TirOpcode::Load => self.static_value(name),
             TirOpcode::Phi => self.loop_counter_max(name, inst),
             _ => None,
+        }
+    }
+
+    /// scale() for one lane of a vector coordinate: an insertelement into that lane, a component-wise product with
+    /// threads_per_threadgroup and a sum of lanes are followed lane by lane.
+    fn lane_scale(&self, name: &str, lane: u64, depth: u32) -> Option<u32> {
+        use crate::native::tir::{TirOpcode, TirOperand};
+        if depth == 0 {
+            return None;
+        }
+        let Some(inst) = self.defs.get(name) else {
+            return Some(1);
+        };
+        if !reaches_thread_position(self.defs, name, &mut HashSet::default()) {
+            return Some(0);
+        }
+        let operand_lane = |operand: &TirOperand| match operand {
+            TirOperand::Value { name, .. } => self.lane_scale(name, lane, depth - 1),
+            TirOperand::Const { .. } => Some(0),
+            TirOperand::Unresolved => None,
+        };
+        match inst.opcode {
+            TirOpcode::Mul => {
+                let [lhs, rhs] = inst.operands.as_slice() else {
+                    return None;
+                };
+                match (constant_uniform_int(lhs), constant_uniform_int(rhs)) {
+                    (None, Some(factor)) => operand_lane(lhs)?.checked_mul(u32::try_from(factor).ok()?),
+                    (Some(factor), None) => operand_lane(rhs)?.checked_mul(u32::try_from(factor).ok()?),
+                    _ => {
+                        let tptg = self.threads_per_threadgroup?;
+                        let counter = match (lhs, rhs) {
+                            (TirOperand::Value { name: a, .. }, TirOperand::Value { name: b, .. }) if a == tptg => b,
+                            (TirOperand::Value { name: a, .. }, TirOperand::Value { name: b, .. }) if b == tptg => a,
+                            _ => return None,
+                        };
+                        u32::try_from(self.lane_max_value(counter, lane, depth - 1)?).ok()
+                    }
+                }
+            }
+            TirOpcode::Add | TirOpcode::Or => {
+                let [lhs, rhs] = inst.operands.as_slice() else {
+                    return None;
+                };
+                operand_lane(lhs)?.checked_add(operand_lane(rhs)?)
+            }
+            TirOpcode::InsertElement => {
+                let [vector, element, index] = inst.operands.as_slice() else {
+                    return None;
+                };
+                if constant_uniform_int(index)? == lane {
+                    match element {
+                        TirOperand::Value { name, .. } => self.scale(name, depth - 1),
+                        TirOperand::Const { .. } => Some(0),
+                        TirOperand::Unresolved => None,
+                    }
+                } else {
+                    operand_lane(vector)
+                }
+            }
+            _ => self.scale(name, depth),
+        }
+    }
+
+    fn lane_max_value(&self, name: &str, lane: u64, depth: u32) -> Option<u64> {
+        use crate::native::tir::{TirOpcode, TirOperand};
+        if depth == 0 {
+            return None;
+        }
+        let inst = self.defs.get(name)?;
+        match inst.opcode {
+            TirOpcode::InsertElement => {
+                let [vector, element, index] = inst.operands.as_slice() else {
+                    return None;
+                };
+                let chosen = if constant_uniform_int(index)? == lane { element } else { vector };
+                match chosen {
+                    TirOperand::Const { value, .. } => const_lanes_max(value),
+                    TirOperand::Value { name, .. } if std::ptr::eq(chosen, element) => self.max_value(name, depth - 1),
+                    TirOperand::Value { name, .. } => self.lane_max_value(name, lane, depth - 1),
+                    TirOperand::Unresolved => None,
+                }
+            }
+            _ => self.max_value(name, depth),
         }
     }
 

@@ -1343,6 +1343,48 @@ pub(in crate::passes) fn lower_imageblock_slice_write(
     let write_texel_ty = imageblock_slice_texel_type(ctx, name, v4).unwrap_or(texel_ty);
     let texel_ptr = if write_texel_ty == texel_ty {
         args[1]
+    } else if let Some((stored_ty, path)) =
+        imageblock_other_float_width_subobject(ctx, texel_ty, write_texel_ty)
+    {
+        // The call name carries the texture's write type (`.v4f32`), but the imageblock may
+        // store its cells at the other float width: MPS Lanczos keeps `half4` cells and writes
+        // them to a float texture. Metal converts the cell to the pixel on the write, so this
+        // loads the cell as stored and widens or narrows it, instead of refusing the view.
+        let mut out = Vec::new();
+        let stored_ptr = if path.is_empty() {
+            args[1]
+        } else {
+            let retyped_ptr_ty = ctx.ty_ptr(storage, stored_ty);
+            let retyped = ctx.module.fresh_id();
+            let mut operands = Vec::with_capacity(path.len() + 1);
+            operands.push(Operand::IdRef(args[1]));
+            operands.extend(
+                path.into_iter()
+                    .map(|index| Operand::IdRef(ctx.const_uint(index))),
+            );
+            out.push(Instruction::new(
+                Op::InBoundsAccessChain,
+                Some(retyped_ptr_ty),
+                Some(retyped),
+                operands,
+            ));
+            retyped
+        };
+        let stored = ctx.module.fresh_id();
+        out.push(Instruction::new(
+            Op::Load,
+            Some(stored_ty),
+            Some(stored),
+            vec![Operand::IdRef(stored_ptr)],
+        ));
+        let texel = ctx.module.fresh_id();
+        out.push(Instruction::new(
+            Op::FConvert,
+            Some(write_texel_ty),
+            Some(texel),
+            vec![Operand::IdRef(stored)],
+        ));
+        return lower_imageblock_slice_write_texel(ctx, name, args, v4, texel, write_texel_ty, out);
     } else {
         let path = imageblock_zero_offset_subobject_path(ctx, texel_ty, write_texel_ty)
             .ok_or_else(|| {
@@ -1382,6 +1424,25 @@ pub(in crate::passes) fn lower_imageblock_slice_write(
         vec![Operand::IdRef(texel_ptr)],
     )];
     lower_imageblock_slice_write_texel(ctx, name, args, v4, texel, write_texel_ty, out)
+}
+
+/// The zero-offset subobject of `source` that has `target`'s lane count at the other float
+/// width (half <-> float), with its access path. None when the shapes are not that pair.
+fn imageblock_other_float_width_subobject(
+    ctx: &mut Ctx,
+    source: Word,
+    target: Word,
+) -> Option<(Word, Vec<u32>)> {
+    let (target_elem, lanes) = vector_type_shape(ctx, target).unwrap_or((target, 1));
+    let other = if is_f32_scalar(ctx, target_elem) {
+        if lanes == 1 { ctx.ty_half() } else { ctx.ty_vech(lanes) }
+    } else if is_half_scalar(ctx, target_elem) {
+        if lanes == 1 { ctx.ty_float() } else { ctx.ty_vecf(lanes) }
+    } else {
+        return None;
+    };
+    let path = imageblock_zero_offset_subobject_path(ctx, source, other)?;
+    Some((other, path))
 }
 
 pub(in crate::passes) fn imageblock_zero_offset_subobject_path(

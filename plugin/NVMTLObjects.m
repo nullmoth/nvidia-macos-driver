@@ -4608,6 +4608,15 @@ static void nvmtl_zprobe_drain(void) {
     if (nvmtl_vk_bind_buffer_offset(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, off))
         nvlog("compute setBufferOffset: nothing bound at index %lu", (unsigned long)i);
 }
+// MPS (Lanczos scale, used by video players) sets an imageblock size on compute encoders.
+// The translator keeps a kernel's imageblock cells in per-thread private memory and derives
+// the block extent from the threadgroup size, so no encoder state is needed; without this
+// method the call is an unrecognized selector and the app aborts.
+- (void)setImageblockWidth:(NSUInteger)w height:(NSUInteger)h {
+    static int logged;
+    if (!logged++) nvlog("compute setImageblockWidth:%lu height:%lu (imageblock lives in thread-private memory)",
+                         (unsigned long)w, (unsigned long)h);
+}
 - (void)setThreadgroupMemoryLength:(NSUInteger)len atIndex:(NSUInteger)i {
     if (!_tgLen) _tgLen = [NSMutableDictionary new];
     if (nvmtl_zprobe_on()) nvlog("ZENC tgMemory   idx %-3lu length %lu", (unsigned long)i, (unsigned long)len);

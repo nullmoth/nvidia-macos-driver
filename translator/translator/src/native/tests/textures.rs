@@ -5385,6 +5385,50 @@ declare ptr addrspace(4) @air.imageblock_data(<2 x i16>, i32, i16)
 }
 
 #[test]
+fn native_kernel_imageblock_half_cells_write_to_a_float_texel_name() {
+    // MPS Lanczos stores half4 cells and writes them with the `.v4f32` slice write; Metal
+    // converts the cell to the pixel, so this must widen the cell, not refuse the view.
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+%"struct.metal::_imageblock_base" = type { ptr addrspace(4) }
+
+define void @k(%"struct.metal::_imageblock_base" %img_blk, ptr addrspace(1) %dst, <2 x i32> %gid, <2 x i16> %tid) {
+entry:
+  %width = tail call i32 @air.get_width_texture_2d(ptr addrspace(1) %dst, i32 0)
+  %ptr = tail call ptr addrspace(4) @air.imageblock_data(<2 x i16> %tid, i32 0, i16 0)
+  store <4 x half> zeroinitializer, ptr addrspace(4) %ptr, align 8
+  tail call void @air.write_imageblock_slice_to_texture_2d.v4f32(ptr addrspace(1) %dst, ptr addrspace(4) %ptr, i1 false, <2 x i16> zeroinitializer, <2 x i16> zeroinitializer, <2 x i32> %gid, i32 0, i1 false, i32 2)
+  ret void
+}
+
+declare i32 @air.get_width_texture_2d(ptr addrspace(1), i32)
+declare ptr addrspace(4) @air.imageblock_data(<2 x i16>, i32, i16)
+declare void @air.write_imageblock_slice_to_texture_2d.v4f32(ptr addrspace(1), ptr addrspace(4), i1, <2 x i16>, <2 x i16>, <2 x i32>, i32, i1, i32)
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3, !5, !6, !7}
+!3 = !{i32 0, !"air.imageblock", !"explicit", !"air.imageblock_data_size", i32 8, !"air.struct_type_info", !4, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"imageblock<ImageBlockData, layout_explicit>", !"air.arg_name", !"imgBlk"}
+!4 = !{i32 0, i32 8, i32 0, !"half4", !"v"}
+!5 = !{i32 1, !"air.texture", !"air.location_index", i32 1, i32 1, !"air.write", !"air.arg_type_name", !"texture2d<float, write>", !"air.arg_name", !"dst"}
+!6 = !{i32 2, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint2", !"air.arg_name", !"gid"}
+!7 = !{i32 3, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"tid"}
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_kernel_imageblock_half_to_float_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let spv = translate_one_cell_tile(ll, Stage::Kernel, &tmp).expect("translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert!(asm.contains("OpFConvert"), "the half cell must be widened: {asm}");
+    assert!(asm.contains("OpImageWrite"), "{asm}");
+    assert!(!asm.contains("OpFunctionCall"), "{asm}");
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[test]
 fn native_kernel_imageblock_slice_write_uses_private_scratch_and_storage_image() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"

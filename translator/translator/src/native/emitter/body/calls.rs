@@ -512,6 +512,44 @@ impl Emitter {
         Ok(Some(id))
     }
 
+    /// A slice write whose size is left undef copies the whole imageblock, whose extent the dispatch sets
+    /// (setImageblockWidth:height:). In the staged tile that is the per-axis threadgroup count the coordinates span,
+    /// times threads_per_threadgroup: MPS's Lanczos kernels write unroll x unroll cells per thread and copy the tile
+    /// with one call (#405, Infuse). None (the undef stays, and the slice writer refuses) when either is unknown.
+    fn whole_imageblock_extent(
+        &mut self,
+        size_ty: &LlType,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<Option<Word>, String> {
+        let (Some([sx, sy]), Some(tptg)) = (
+            self.ir.imageblock_cell_scale_xy,
+            self.ir.imageblock_threads_per_threadgroup_param.clone(),
+        ) else {
+            return Ok(None);
+        };
+        let size_ty = self.resolve_type(size_ty)?;
+        let LlType::Vector(elem, 2) = &size_ty else {
+            return Ok(None);
+        };
+        let Some((tptg_id, tptg_ty)) = self.values.get(&tptg).cloned() else {
+            return Ok(None);
+        };
+        if tptg_ty != size_ty {
+            return Ok(None);
+        }
+        let lane = |v: u32| TypedValue { ty: (**elem).clone(), value: LlValue::Int(u64::from(v)) };
+        let scale = self.value_id_in(&LlValue::Vector(vec![lane(sx), lane(sy)]), &size_ty, instructions)?;
+        let ty = self.type_id(&size_ty)?;
+        let extent = self.fresh();
+        instructions.push(Self::inst(
+            Op::IMul,
+            Some(ty),
+            Some(extent),
+            vec![Operand::IdRef(tptg_id), Operand::IdRef(scale)],
+        ));
+        Ok(Some(extent))
+    }
+
     pub(in crate::native::emitter) fn function_call_arg_ids(
         &mut self,
         call: &LlCall,
@@ -527,7 +565,28 @@ impl Emitter {
         if callee_params.is_empty() {
             let texture_op = super::super::functions::is_air_texture_operation(&call.callee);
             let mut ids = Vec::with_capacity(call.args.len());
-            for arg in &call.args {
+            // a whole-imageblock slice write (size flag false, size undef) gets its extent spelled out and the flag
+            // set, so the slice writer copies that many cells instead of one
+            let whole_extent = if call.callee.starts_with("air.write_imageblock_slice_to_texture")
+                && call.args.len() > 4
+                && matches!(call.args[2].value, LlValue::Bool(false))
+                && matches!(call.args[4].value, LlValue::Undef)
+            {
+                self.whole_imageblock_extent(&call.args[4].ty, instructions)?
+            } else {
+                None
+            };
+            for (index, arg) in call.args.iter().enumerate() {
+                if let Some(extent) = whole_extent {
+                    if index == 2 {
+                        ids.push(self.value_id_in(&LlValue::Bool(true), &arg.ty, instructions)?);
+                        continue;
+                    }
+                    if index == 4 {
+                        ids.push(extent);
+                        continue;
+                    }
+                }
                 if texture_op {
                     if let Some(id) = self.argument_buffer_sampler_arg_id(arg, instructions)? {
                         ids.push(id);
