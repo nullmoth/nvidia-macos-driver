@@ -696,6 +696,14 @@ static int nvmtl_vk_initialize(void)
         setenv("NVRM_FLUSH_TIMEOUT_MS", budget, 1);
         nvlog("vk: GPU wait budget %s ms for %s (WindowServer keeps 5000 - a frozen desktop is worse than a dropped frame)", budget, getprogname());
     }
+    // A cache dir set by another process's plugin is inherited: loginwindow runs as root before login, has no writable
+    // HOME and so gets root's user cache dir below, and every app it opens at login started with that path and could
+    // not write it ("Failed to create ... for shader cache (Permission denied) --- disabling": NAK recompiled every
+    // start). One this process cannot use is dropped, and the rules below choose again.
+    { const char *mc = getenv("MESA_SHADER_CACHE_DIR");
+      if (mc && *mc && access(mc, W_OK) != 0 && mkdir(mc, 0700) != 0) {
+          nvlog("vk: %s inherited MESA_SHADER_CACHE_DIR=%s, which it cannot write - choosing its own", getprogname(), mc);
+          unsetenv("MESA_SHADER_CACHE_DIR"); } }
     if (!getenv("MESA_SHADER_CACHE_DIR") && !getenv("XDG_CACHE_HOME") && !getenv("NVMTL_NO_MESA_CACHE_DIR")) {
         const char *home = getenv("HOME");
         if (!home || access(home, W_OK) != 0) {
@@ -6564,17 +6572,50 @@ static void nvmtl_copy_from_surface(void *dst, const void *src, size_t n)
 // The caller holds the surface lock across the call, and the import is released before it returns.
 // Non-zero when the pages cannot be imported (block-compressed format, base or length not a multiple of the import
 // alignment, no host import on this device); the caller then uses nvmtl_vk_image_write.
-int nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes)
+// Imported surface pages for the host copies below. With a cache (the texture's own), the import is made once and
+// reused while the surface keeps the same pages: importing pins the pages and maps them on the GPU, two RM calls each
+// way, which cost more than the copy itself when it was redone for every frame (a 1080p window, every present).
+// A kept import also keeps the surface's pages wired, so the bytes kept per process are capped (NVMTL_HOST_PAGES_MB,
+// default 256, 0 = never keep); past the cap a copy imports and releases its pages as before.
+static _Atomic uint64_t g_host_pages_kept;
+static uint64_t nvmtl_host_pages_cap(void)
+{
+    static int64_t cap = -1;
+    if (cap < 0) { const char *e = getenv("NVMTL_HOST_PAGES_MB"); cap = (e && *e) ? (int64_t)atoll(e) << 20 : (int64_t)256 << 20; if (cap < 0) cap = 0; }
+    return (uint64_t)cap;
+}
+void nvmtl_vk_host_pages_drop(nvk_buffer *cache)
+{
+    if (!cache) return;
+    if (cache->buf) { atomic_fetch_sub(&g_host_pages_kept, (uint64_t)cache->size); nvmtl_vk_buffer_destroy(cache); }
+    memset(cache, 0, sizeof *cache);
+}
+static nvk_buffer *nvmtl_host_pages(nvk_buffer *cache, void *base, size_t bytes, nvk_buffer *tmp)
+{
+    if (cache && cache->buf && cache->map == base && cache->size == bytes) return cache;
+    if (cache && cache->buf) nvmtl_vk_host_pages_drop(cache);   // the surface's pages moved or it was resized
+    nvk_buffer *b = tmp;
+    if (cache && atomic_fetch_add(&g_host_pages_kept, (uint64_t)bytes) + bytes <= nvmtl_host_pages_cap()) b = cache;
+    else if (cache) atomic_fetch_sub(&g_host_pages_kept, (uint64_t)bytes);
+    if (nvmtl_vk_buffer_import_host(base, bytes, b)) {
+        if (b == cache) atomic_fetch_sub(&g_host_pages_kept, (uint64_t)bytes);
+        memset(b, 0, sizeof *b); return NULL;
+    }
+    return b;
+}
+static void nvmtl_host_pages_done(nvk_buffer *cache, nvk_buffer *hb) { if (hb && hb != cache) nvmtl_vk_buffer_destroy(hb); }
+int nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache)
 {
     const size_t bpp = img->bpp ? img->bpp : 4;
     // bufferRowLength counts texels, so the row pitch has to be a whole number of them
     if (img->bw > 1 || img->bh > 1 || !row_bytes || row_bytes % bpp || row_bytes < (size_t)img->w * bpp) return -1;
     if (g_host_align) bytes = (bytes + g_host_align - 1) & ~(g_host_align - 1);
     if ((size_t)img->h * row_bytes > bytes) return -1;
-    nvk_buffer hb;
-    if (nvmtl_vk_buffer_import_host(base, bytes, &hb)) return -1;
+    nvk_buffer tmp, *hp = nvmtl_host_pages(cache, base, bytes, &tmp);
+    if (!hp) return -1;
+    nvk_buffer hb = *hp;
     nvk_cmdbuf c;
-    if (nvmtl_vk_cmd_begin(q, &c)) { nvmtl_vk_buffer_destroy(&hb); return -1; }
+    if (nvmtl_vk_cmd_begin(q, &c)) { nvmtl_host_pages_done(cache, hp); return -1; }
     VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };
     VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -6589,7 +6630,7 @@ int nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t r
     pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &toRead);
     img->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     const int rc = nvmtl_vk_submit_wait_at(&c, "surface upload (imported pages)");
-    nvmtl_vk_buffer_destroy(&hb);
+    nvmtl_host_pages_done(cache, hp);
     return rc;
 }
 
@@ -6686,6 +6727,38 @@ int nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_byte
     const uint8_t *src = (const uint8_t *)stage.map;
     for (uint32_t y = 0; y < rows; y++) memcpy((uint8_t *)dst + y * row_bytes, src + (size_t)y * cols * bpp, (size_t)cols * bpp);
     return 0;
+}
+// The readback counterpart of nvmtl_vk_image_write_host: the GPU copies the image straight into the surface's own
+// pages (imported as a buffer), so a surface without family VRAM (a 256 MB BAR1 that is full refuses whole windows)
+// costs one copy on the GPU instead of a copy into the staging buffer plus a CPU memcpy of every row.
+int nvmtl_vk_image_read_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache)
+{
+    const size_t bpp = img->bpp ? img->bpp : 4;
+    if (img->bw > 1 || img->bh > 1 || !row_bytes || row_bytes % bpp || row_bytes < (size_t)img->w * bpp) return -1;
+    if (g_host_align) bytes = bytes & ~(g_host_align - 1);   // never import past the surface's allocation
+    if (!img->h || (size_t)(img->h - 1) * row_bytes + (size_t)img->w * bpp > bytes) return -1;
+    nvmtl_vk_image_upload_barrier(img);   // a readback must observe a pending async upload: finish it first
+    nvk_buffer tmp, *hp = nvmtl_host_pages(cache, base, bytes, &tmp);
+    if (!hp) return -1;
+    nvk_buffer hb = *hp;
+    nvk_cmdbuf c;
+    if (nvmtl_vk_cmd_begin(q, &c)) { nvmtl_host_pages_done(cache, hp); return -1; }
+    VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };
+    VkImageMemoryBarrier toSrc = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+        VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+        (VkImageLayout)img->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
+    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, NULL, 0, NULL, 1, &toSrc);
+    img->layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    VkBufferImageCopy bic = { 0, (uint32_t)(row_bytes / bpp), 0, { nvmtl_copy_aspect(img), 0, 0, 1 }, { 0, 0, 0 }, { img->w, img->h, 1 } };
+    pvkCmdCopyImageToBuffer(c.cb, img->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, hb.buf, 1, &bic);
+    // the CPU reads these pages after the fence: make the transfer writes visible to host reads
+    VkMemoryBarrier toHost = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT };
+    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, NULL, 0, NULL);
+    const int rc = nvmtl_vk_submit_wait_at(&c, "surface readback (imported pages)");
+    nvmtl_host_pages_done(cache, hp);
+    return rc;
 }
 
 static void img_to(nvk_cmdbuf *c, nvk_image *img, VkImageLayout to,
