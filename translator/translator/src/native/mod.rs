@@ -11,6 +11,7 @@ mod emitter;
 mod emit_tiers;
 mod imageblock;
 mod inline;
+mod inline_sampler;
 pub(crate) mod ir;
 mod lex;
 mod opaque_image_select;
@@ -40,6 +41,17 @@ use crate::spirv_module::Instruction;
 use crate::spirv_module::Module;
 use crate::spirv_module::Operand;
 pub(crate) fn lower_air_text(san_ll: &str) -> std::borrow::Cow<'_, str> {
+    // first: older toolchains write a constexpr sampler as an integer in the call, which reflection and the sampler pass
+    // only know in the metadata form
+    match inline_sampler::lower_inline_sampler_constants(san_ll) {
+        std::borrow::Cow::Borrowed(borrowed) => lower_air_text_rest(borrowed),
+        std::borrow::Cow::Owned(owned) => {
+            std::borrow::Cow::Owned(lower_air_text_rest(&owned).into_owned())
+        }
+    }
+}
+
+fn lower_air_text_rest(san_ll: &str) -> std::borrow::Cow<'_, str> {
     let lowered = match cl_constant::lower_cl_constant_args(san_ll) {
         std::borrow::Cow::Borrowed(borrowed) => async_copy::lower_simdgroup_async_copy(borrowed),
         std::borrow::Cow::Owned(owned) => std::borrow::Cow::Owned(async_copy::lower_simdgroup_async_copy_owned(owned)),
@@ -83,6 +95,10 @@ pub(crate) fn lower_air_text(san_ll: &str) -> std::borrow::Cow<'_, str> {
 }
 
 pub(crate) fn lower_air_text_owned(san_ll: String) -> String {
+    let san_ll = match inline_sampler::lower_inline_sampler_constants(&san_ll) {
+        std::borrow::Cow::Borrowed(_) => san_ll,
+        std::borrow::Cow::Owned(lowered) => lowered,
+    };
     let lowered = ptr_phi_load::sink_pointer_phi_loads_owned(ptr_table_offsets::offset_pointer_tables_owned(atomicrmw_text::lower_raw_atomicrmw_owned(
         dynamic_memcpy::lower_dynamic_length_memcpy_owned(async_copy::lower_simdgroup_async_copy_owned(
             match cl_constant::lower_cl_constant_args(&san_ll) {

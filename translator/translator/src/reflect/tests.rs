@@ -656,6 +656,64 @@ declare { <4 x float>, i8 } @air.sample_texture_cube.v4f32(ptr addrspace(1), ptr
 }
 
 #[test]
+fn an_inline_integer_sampler_reflects_as_a_static_sampler() {
+    // Older Metal toolchains (here: Apple LLVM 902.14, SDK 10.15.4) write a constexpr sampler's packed state word
+    // straight into the call as an inttoptr constant, with no `!air.sampler_states` entry. 0x8000000000080a92 is
+    // address::repeat with filter::linear.
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+
+define <4 x float> @frag(<4 x float> %position, <2 x float> %coord, ptr addrspace(1) %tex) {
+entry:
+  %sample = tail call <4 x half> @air.sample_texture_2d.v4f16(ptr addrspace(1) %tex, ptr addrspace(2) inttoptr (i64 -9223372036854248814 to ptr addrspace(2)), <2 x float> %coord, i1 true, <2 x i32> zeroinitializer, i1 false, float 0.000000e+00)
+  %value = tail call <4 x float> @air.convert.f.v4f32.f.v4f16(<4 x half> %sample)
+  ret <4 x float> %value
+}
+
+declare <4 x half> @air.sample_texture_2d.v4f16(ptr addrspace(1), ptr addrspace(2), <2 x float>, i1, <2 x i32>, i1, float)
+declare <4 x float> @air.convert.f.v4f32.f.v4f16(<4 x half>)
+
+!air.fragment = !{!0}
+!0 = !{ptr @frag, !1, !3}
+!1 = !{!2}
+!2 = !{!"air.render_target", i32 0, i32 0, !"air.arg_type_name", !"float4"}
+!3 = !{!4, !5, !6}
+!4 = !{i32 0, !"air.position", !"air.center", !"air.arg_type_name", !"float4"}
+!5 = !{i32 1, !"air.fragment_input", !"generated(coord)", !"air.center", !"air.perspective", !"air.arg_type_name", !"float2"}
+!6 = !{i32 2, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"texture2d<half, sample>"}
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_reflect_inline_integer_sampler_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let (_, reflection) = crate::translate_sanitized_native_reflected(
+        ll,
+        crate::passes::Stage::Fragment,
+        &tmp,
+        crate::passes::TransformOptions::default(),
+    )
+    .expect("an inline integer sampler translates");
+    let static_samplers = reflection
+        .bindings
+        .iter()
+        .filter(|binding| binding.kind == ResourceKind::StaticSampler)
+        .collect::<Vec<_>>();
+    assert_eq!(static_samplers.len(), 1);
+    let state = static_samplers[0]
+        .static_sampler
+        .expect("the inline word is reported as the sampler's state");
+    assert_eq!(state.address_mode_s, SamplerAddressMode::Repeat);
+    assert_eq!(state.address_mode_t, SamplerAddressMode::Repeat);
+    assert_eq!(state.address_mode_r, SamplerAddressMode::Repeat);
+    assert_eq!(state.min_filter, SamplerFilter::Linear);
+    assert_eq!(state.mag_filter, SamplerFilter::Linear);
+    assert_eq!(state.mip_filter, SamplerMipFilter::None);
+    assert_eq!(state.coordinates, SamplerCoordinates::Normalized);
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[test]
 fn reflected_static_samplers_stay_in_sampler_band_and_carry_state() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
