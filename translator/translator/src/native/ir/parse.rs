@@ -160,6 +160,12 @@ impl LlModule {
             &imageblock_statics,
             imageblock_threads_per_threadgroup_param.as_deref(),
         );
+        let imageblock_cell_scale_xy = infer_imageblock_lane_scales(
+            &functions,
+            &entry_functions,
+            &imageblock_statics,
+            imageblock_threads_per_threadgroup_param.as_deref(),
+        );
         if imageblock_shared_cells
             && imageblock_dimensions.is_none()
             && imageblock_threads_per_threadgroup_param.is_none()
@@ -214,6 +220,7 @@ impl LlModule {
             aliased_imageblock_planes,
             imageblock_threads_per_threadgroup_param,
             imageblock_cell_scale,
+            imageblock_cell_scale_xy,
             metadata_pointee_params: HashSet::default(),
             metadata_pointee_sizes: HashMap::default(),
             metadata_byte_buffer_params,
