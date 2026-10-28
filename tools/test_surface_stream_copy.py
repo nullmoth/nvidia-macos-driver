@@ -8,7 +8,9 @@ root = pathlib.Path(__file__).resolve().parents[1]
 source = (root / 'plugin/nvmtl_vk.c').read_text()
 start = source.index('#if defined(__x86_64__)\n#include <immintrin.h>')
 # the copy helpers end where the image writers begin (the imported-pages writer comes first)
-end = min(i for i in (source.find('int nvmtl_vk_image_write_host(', start), source.index('int nvmtl_vk_image_write(', start)) if i >= 0)
+# the copy routines end where the host-page cache (#399) begins; older trees end at the image writers
+end = min(i for i in (source.find('static _Atomic uint64_t g_host_pages_kept;', start), source.find('int nvmtl_vk_image_write_host(', start),
+                      source.index('int nvmtl_vk_image_write(', start)) if i >= 0)
 helpers = source[start:end]
 fixture = r'''
 #include <assert.h>

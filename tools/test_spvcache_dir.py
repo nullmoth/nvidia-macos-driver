@@ -27,6 +27,9 @@ HARNESS = r'''
 #define nvlog(...) (fprintf(stderr, __VA_ARGS__), fputc('\n', stderr))
 static NSString *nvmtl_aircache_dir(void) { return @(getenv("TEST_AIRCACHE")); }
 #define NSTemporaryDirectory() (@(getenv("TEST_TMP")))
+// the process's own cache folder (confstr _CS_DARWIN_USER_CACHE_DIR) comes from the test too
+static size_t test_confstr(char *buf, size_t len) { const char *u = getenv("TEST_UCD"); return (size_t)snprintf(buf, len, "%s", u) + 1; }
+#define confstr(name, buf, len) test_confstr(buf, len)
 #include <CommonCrypto/CommonDigest.h>
 // defined elsewhere in NVMTLLibraryLoad.m, outside the extracted functions
 static char gXlateTag[80] = "test";
@@ -64,15 +67,20 @@ with tempfile.TemporaryDirectory() as d:
     tmp_bad.mkdir()
     os.chmod(tmp_bad, stat.S_IRUSR | stat.S_IXUSR)
     try:
-        def run(air, tmpdir):
-            env = dict(os.environ, TEST_AIRCACHE=str(air), TEST_TMP=str(tmpdir))
+        def run(air, tmpdir, ucd):
+            env = dict(os.environ, TEST_AIRCACHE=str(air), TEST_TMP=str(tmpdir), TEST_UCD=str(ucd))
             return subprocess.run([str(exe)], capture_output=True, text=True, env=env, timeout=60).stdout.strip()
-        a = run(good, tmp_ok)
+        ucd_ok = d / 'ucd'
+        ucd_ok.mkdir()
+        a = run(good, tmp_ok, ucd_ok)
         check('the folder beside the AIR cache is used when it can be written', a == str(d / 'good' / 'spvcache'), a)
-        b = run(locked / 'aircache', tmp_ok)
-        check('a sandbox-like unwritable parent falls back to the process temporary folder',
+        o = run(locked / 'aircache', tmp_ok, ucd_ok)
+        check("a sandboxed process (WindowServer) caches in its own named cache folder first",
+              o.startswith(str(ucd_ok)) and o.endswith('nvmtl/spvcache'), o)
+        b = run(locked / 'aircache', tmp_ok, tmp_bad)
+        check('with its own folder refused too, it falls back to the process temporary folder',
               b.startswith(str(tmp_ok)) and b.endswith('nvmtl/spvcache'), b)
-        n = run(locked / 'aircache', tmp_bad)
+        n = run(locked / 'aircache', tmp_bad, tmp_bad)
         check('with no writable folder the cache is off (no path, so no store attempts)', n == '(none)', n)
     finally:
         os.chmod(locked, stat.S_IRWXU)

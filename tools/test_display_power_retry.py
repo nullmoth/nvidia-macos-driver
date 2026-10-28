@@ -37,7 +37,8 @@ struct NVRMNVDAFramebuffer {
     bool fPowerOn=true, pagingState=true, fSysSlept=false, gpuReady=true;
     unsigned familyWakes=0;
     void *fSurf=this;
-    unsigned fHead=0, sleeps=0, wakes=0, notifications=0;
+    unsigned fHead=0, sleeps=0, wakes=0, notifications=0, audioPublishes=0;
+    void publishDisplayAudioProperties() { audioPublishes++; }
     int fStopping=0, fReflipRc=0;
     bool headOff() { sleeps++; return sleepOK; }
     bool reflip() { wakes++; return wakeOK; }
@@ -58,8 +59,10 @@ int main() {
     f.wakeOK=false; f.setPowerState(1,nullptr);
     // a failed wake stays retryable, and WindowServer is still told the display is on (1.14.7 behaviour)
     assert(f.fHeadSlept && f.wakes==1 && f.notifications==1);
+    // the display's audio is published again only once the head really is back (PR #366)
+    assert(f.audioPublishes==0);
     f.wakeOK=true; f.setPowerState(1,nullptr);
-    assert(!f.fHeadSlept && f.wakes==2 && f.notifications==2);
+    assert(!f.fHeadSlept && f.wakes==2 && f.notifications==2 && f.audioPublishes==1);
     f.setPowerState(1,nullptr); assert(f.wakes==2);
     f.setPowerState(0,nullptr); assert(f.fHeadSlept);
     // -nvrmnodpms: display sleep leaves the head on, but a head that is off (GPU standby) is still lit again
@@ -84,7 +87,7 @@ int main() {
     assert(!f.fHeadSlept && f.wakes==wakes+1 && f.familyWakes==1 && !f.fSysSlept && f.pagingState);
     assert(f.notifications==notes+1);
     f.setPowerState(1,nullptr); assert(f.familyWakes==1 && f.notifications==notes+2);
-    puts("PASS: failed sleep, failed wake retry with notification, connection power no-op, repeated requests, opt-out, shutdown, unavailable gate, GPU standby, wake before resume, system wake");
+    puts("PASS: failed sleep, failed wake retry with notification, audio republished only on a real wake, connection power no-op, repeated requests, opt-out, shutdown, unavailable gate, GPU standby, wake before resume, system wake");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:

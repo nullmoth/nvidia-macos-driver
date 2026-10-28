@@ -118,7 +118,7 @@ typedef struct { int unused; } nvmtl_inflight;
 - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied { if (events) [events addObject:[NSString stringWithFormat:@"o%d:%d",_tag,(int)dirtied]]; return YES; }
 @end
 @interface NVMTLCommandBuffer : NSObject { @public
-    BOOL _executionDone, _committed, _commitMarking; NSError *_cbError;
+    BOOL _executionDone, _committed, _commitMarking, _partsRetiring; NSError *_cbError;
     NSUInteger _nextSubmit, _nextPart; NSMutableArray *_parts; double _legacyKernelStart;
 }
 - (BOOL)nvmtlSubmitAhead;
@@ -234,7 +234,10 @@ int main(void) { @autoreleasepool {
         marking->_parts=[NSMutableArray arrayWithObject:p];
         const unsigned before=begins;
         assert(![marking nvmtlSubmitAhead] && begins==before && !p->inflight);
-        marking->_commitMarking=NO;
+        // parts being retired under the class lock are never submitted ahead (#251, #340: a part freed under a running copy)
+        marking->_commitMarking=NO; marking->_partsRetiring=YES;
+        assert(![marking nvmtlSubmitAhead] && begins==before && !p->inflight);
+        marking->_partsRetiring=NO;
         assert([marking nvmtlSubmitAhead] && begins==before+1 && p->inflight);
         assert([marking nvmtlAdvancePart] && marking->_executionDone && !marking->_cbError);
     }
