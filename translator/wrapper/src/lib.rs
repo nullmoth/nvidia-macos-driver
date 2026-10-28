@@ -99,7 +99,7 @@ fn translate_with_pointer_retry(
             if let Some(path) = std::env::var_os("NVMTL_DUMP_RETRY_LL") {
                 let _ = std::fs::write(path, &inlined);
             }
-            translate_one_as_written(&inlined, st)
+            translate(&inlined)
                 .map_err(|retry| format!("{e}; retry with immutable local pointer fields forwarded: {retry}"))
         }
         // A module whose pointers (a sampler's address in an argument buffer, a threadgroup array's address) reach their use
@@ -112,7 +112,11 @@ fn translate_with_pointer_retry(
         // on its text as written, its argument-buffer samplers read from the sampler heap.
         Err(e) if e.contains("sampler operand is a pointer") || e.contains("pointer placeholder")
             || e.contains("missing pointer storage") || e.contains("sampler operand is not a sampler")
-            || e.contains("runtime sampler specialization cannot recover an exact state after pointer selection") =>
+            || e.contains("runtime sampler specialization cannot recover an exact state after pointer selection")
+            // ANGLE's user main left as a call takes the uniform-buffer pointer as an argument, which the emitter types
+            // two ways (#406's "owned IAdd operands", #419; patch by eisda); inlined, the pointer never crosses a call
+            || e.contains("owned OpFunctionCall argument type disagrees") || e.contains("owned IAdd operands do not match")
+            || (e.contains("owned AccessChain") && e.contains("references undefined id")) =>
         {
             let inlined = metal2vulkan::inline_and_forward_object_fields(ll);
             if inlined.is_none() && !e.contains("sampler operand") { return Err(e) }
@@ -123,7 +127,22 @@ fn translate_with_pointer_retry(
             }
             let how = if inlined.is_some() { "with helpers inlined and object fields forwarded" }
                       else { "with argument-buffer samplers from the sampler heap" };
+            // The call-crossing failures hold no argument-buffer sampler; in the sampler-heap mode their inlined
+            // uniform-buffer read came out as a null constant (#419), so the ordinary translation goes first for them.
+            let call_crossing = e.contains("owned OpFunctionCall argument type disagrees")
+                || e.contains("owned IAdd operands do not match") || e.contains("references undefined id");
+            if call_crossing {
+                if let Some(text) = inlined.as_deref() {
+                    if let Ok(v) = translate(text) { return Ok(v); }
+                }
+            }
             metal2vulkan::with_argument_buffer_samplers(|| translate(retry))
+                // Forwarding can hand the entry's own [[sampler]] straight to the sample call, the shape Metal's inliner
+                // leaves; such a module reads no sampler from an argument buffer, so it gets the ordinary translation.
+                .or_else(|e2| match inlined.as_deref() {
+                    Some(text) => translate(text).map_err(|e3| format!("{e2}; as ordinary samplers: {e3}")),
+                    None => Err(e2),
+                })
                 .map_err(|e2| format!("{e}; retry {how}: {e2}"))
         }
         Err(e) => Err(e),
