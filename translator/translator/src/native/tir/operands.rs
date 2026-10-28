@@ -1,4 +1,5 @@
 use super::*;
+use crate::fxhash::HashMap;
 use crate::native::ir::{LlGep, LlType, LlValue, TypedValue};
 use crate::native::lex::{matching_paren, strip_comment};
 use crate::native::parse::{
@@ -6,7 +7,6 @@ use crate::native::parse::{
     parse_phi_incoming_values, parse_type, parse_typed_value, parse_value, parse_vector_i32_values,
     split_top_level, strip_call_prefix, LlCall, LlLoad,
 };
-use std::collections::HashMap;
 
 pub(in crate::native) fn resolve_identity_ptr_bitcast(line: &str) -> Option<(String, String)> {
     parse_identity_ptr_bitcast(strip_comment(line).trim())
@@ -431,7 +431,7 @@ pub(in crate::native) fn collect_value_names(s: &str, out: &mut Vec<String>) {
 }
 
 pub(in crate::native) fn dedup_keep_order(names: Vec<String>, result: Option<&str>) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fxhash::HashSet::default();
     names
         .into_iter()
         .filter(|n| Some(n.as_str()) != result && seen.insert(n.clone()))

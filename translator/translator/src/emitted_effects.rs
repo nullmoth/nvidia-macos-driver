@@ -1,7 +1,7 @@
+use crate::fxhash::HashMap;
 use crate::spirv_module::Module;
 use crate::spirv_operand::Operand;
 use spirv::{Op, StorageClass, Word};
-use std::collections::HashMap;
 
 const AIR_OBSERVABLE_WRITE_MARKERS: &[&str] = &[
     "@air.write_texture",
@@ -52,7 +52,7 @@ pub(crate) fn air_declares_an_imageblock_write(air_ll: &str) -> bool {
 }
 
 pub(crate) fn module_has_an_observable_effect(module: &Module) -> bool {
-    let mut pointer_storage: HashMap<Word, StorageClass> = HashMap::new();
+    let mut pointer_storage: HashMap<Word, StorageClass> = HashMap::default();
     for instruction in module.types_global_values.iter() {
         if instruction.class.opcode != Op::TypePointer {
             continue;
@@ -63,7 +63,7 @@ pub(crate) fn module_has_an_observable_effect(module: &Module) -> bool {
             pointer_storage.insert(id, *storage);
         }
     }
-    let mut value_storage: HashMap<Word, StorageClass> = HashMap::new();
+    let mut value_storage: HashMap<Word, StorageClass> = HashMap::default();
     for instruction in module.all_inst_iter() {
         if let (Some(id), Some(result_type)) = (instruction.result_id, instruction.result_type) {
             if let Some(storage) = pointer_storage.get(&result_type) {

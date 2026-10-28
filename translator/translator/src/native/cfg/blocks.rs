@@ -3,7 +3,7 @@ use super::super::parse::{strip_comment, LlSwitch};
 use super::graph::{reachable_from, Cfg};
 use super::loopforest::{analyze, post_idom};
 use super::{BlockRole, BodyBlock, LoopMergeInfo};
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{HashMap, HashSet};
 
 const SWITCH_BLOCK_PREFIX: &str = "%metal2vulkan_switch_";
 pub(in crate::native) const SWITCH_BYPASS_PREFIX: &str = "%metal2vulkan_switch_bypass_";
@@ -109,7 +109,7 @@ pub(in crate::native) fn synthetic_block(
     role: BlockRole,
 ) -> BodyBlock {
     let typed =
-        crate::native::tir::lower_block_carrier(&name, &lines, &HashMap::new()).map(Into::into);
+        crate::native::tir::lower_block_carrier(&name, &lines, &HashMap::default()).map(Into::into);
     BodyBlock { name, role, typed }
 }
 
@@ -245,7 +245,7 @@ pub(in crate::native) fn infer_branch_merges(
     let reachability = IndexedReachability::new(blocks, &successors);
     let switch_merges = infer_switch_merges(blocks);
     let loop_merges = infer_loop_merges(blocks);
-    let mut merges = HashMap::new();
+    let mut merges = HashMap::default();
     loop {
         let mut changed = false;
         for block in blocks {
@@ -600,8 +600,8 @@ fn all_paths_reach_target(
         start,
         target,
         successors,
-        &mut HashSet::new(),
-        &mut HashMap::new(),
+        &mut HashSet::default(),
+        &mut HashMap::default(),
     )
 }
 
@@ -754,7 +754,7 @@ pub(in crate::native) fn infer_loop_merges(blocks: &[BodyBlock]) -> HashMap<Stri
         .iter()
         .map(|b| (b.name.clone(), block_successors(b)))
         .collect();
-    let mut predecessors: HashMap<String, Vec<String>> = HashMap::new();
+    let mut predecessors: HashMap<String, Vec<String>> = HashMap::default();
     for (block, targets) in &successors {
         for target in targets {
             predecessors
@@ -765,7 +765,7 @@ pub(in crate::native) fn infer_loop_merges(blocks: &[BodyBlock]) -> HashMap<Stri
     }
 
     let doms = Cfg::from_blocks(blocks).map(|cfg| cfg.dominators());
-    let mut merges = HashMap::new();
+    let mut merges = HashMap::default();
     for header in blocks {
         let Some(header_idx) = order.get(&header.name).copied() else {
             continue;
@@ -822,7 +822,7 @@ pub(in crate::native) fn normalize_loop_continue_targets(
         .map(|block| (block.name.as_str(), block))
         .collect::<HashMap<_, _>>();
     for (header, info) in loop_merges {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         while info.continue_target != *header
             && info.continue_target != info.merge
             && seen.insert(info.continue_target.clone())
@@ -856,7 +856,7 @@ fn natural_loop_nodes(
     back_preds: &[String],
     predecessors: &HashMap<String, Vec<String>>,
 ) -> HashSet<String> {
-    let mut nodes = HashSet::from([header.to_string()]);
+    let mut nodes = crate::fxhash::set_from([header.to_string()]);
     let mut stack = back_preds.to_vec();
     while let Some(block) = stack.pop() {
         if !nodes.insert(block.clone()) || block == header {
@@ -906,7 +906,7 @@ fn infer_loop_exit(
     successors: &HashMap<String, Vec<String>>,
     order: &HashMap<String, usize>,
 ) -> Option<String> {
-    let mut exits = HashSet::new();
+    let mut exits = HashSet::default();
     for node in loop_nodes {
         for target in successors.get(node).into_iter().flatten() {
             if !loop_nodes.contains(target) {
@@ -941,7 +941,7 @@ pub(in crate::native) fn infer_switch_merges(blocks: &[BodyBlock]) -> HashMap<St
         .iter()
         .map(|b| (b.name.clone(), block_successors(b)))
         .collect();
-    let mut merges = HashMap::new();
+    let mut merges = HashMap::default();
     for block in blocks {
         let Some(targets) = switch_targets(block) else {
             continue;
@@ -1006,7 +1006,7 @@ pub(in crate::native) fn infer_direct_switch_merges(
         .enumerate()
         .map(|(index, block)| (block.name.as_str(), index))
         .collect::<HashMap<_, _>>();
-    let mut merges = HashMap::new();
+    let mut merges = HashMap::default();
     for block in blocks {
         let Some(targets) = switch_targets(block) else {
             continue;
@@ -1056,7 +1056,7 @@ pub(in crate::native) fn infer_direct_branch_merges(
         .enumerate()
         .map(|(index, block)| (block.name.as_str(), index))
         .collect::<HashMap<_, _>>();
-    let mut merges = HashMap::new();
+    let mut merges = HashMap::default();
     for block in blocks {
         let Some((on_true, on_false)) = conditional_branch_targets(block) else {
             continue;
@@ -1095,7 +1095,7 @@ pub(in crate::native) fn infer_bounded_branch_merges_by_header(
 ) -> HashMap<String, String> {
     let direct = infer_direct_branch_merges(blocks);
     let Some(cfg) = Cfg::from_blocks(blocks) else {
-        return HashMap::new();
+        return HashMap::default();
     };
     let dominators = cfg.dominators();
     let post_dominators = post_idom(blocks);
@@ -1104,7 +1104,7 @@ pub(in crate::native) fn infer_bounded_branch_merges_by_header(
         .enumerate()
         .map(|(index, block)| (block.name.as_str(), index))
         .collect::<HashMap<_, _>>();
-    let mut merges = HashMap::new();
+    let mut merges = HashMap::default();
 
     for block in blocks {
         let Some((on_true, on_false)) = conditional_branch_targets(block) else {
@@ -1232,7 +1232,7 @@ fn funnel_one_shared_branch_dispatch(
             format!("br i1 {predicate}, label {left_true}, label {left_false}"),
         ];
         let Some(join_typed) =
-            crate::native::tir::lower_block_carrier(&join_name, &join_lines, &HashMap::new())
+            crate::native::tir::lower_block_carrier(&join_name, &join_lines, &HashMap::default())
         else {
             continue;
         };
@@ -1415,9 +1415,11 @@ pub(in crate::native) fn refunnel_one_deep_shared_arm(
                 format!("{route} = phi i1 {incoming_text}"),
                 format!("br i1 {route}, label {shared}, label {merge}"),
             ];
-            let Some(mut join_typed) =
-                crate::native::tir::lower_block_carrier(&join_name, &join_lines, &HashMap::new())
-            else {
+            let Some(mut join_typed) = crate::native::tir::lower_block_carrier(
+                &join_name,
+                &join_lines,
+                &HashMap::default(),
+            ) else {
                 continue;
             };
 
@@ -1531,7 +1533,7 @@ fn lower_switches(blocks: &[BodyBlock], force_loop_exit_ladders: bool) -> Vec<Bo
         .map(|b| (b.name.clone(), block_successors(b)))
         .collect();
     let mut lowered = Vec::new();
-    let mut phi_rewrites: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+    let mut phi_rewrites: HashMap<String, HashMap<String, Vec<String>>> = HashMap::default();
     let mut synthetic_index = 0usize;
 
     for block in normalized {
@@ -1588,7 +1590,7 @@ fn lower_switches(blocks: &[BodyBlock], force_loop_exit_ladders: bool) -> Vec<Bo
             continue;
         }
 
-        let mut target_predecessors: HashMap<String, Vec<String>> = HashMap::new();
+        let mut target_predecessors: HashMap<String, Vec<String>> = HashMap::default();
         for (case_index, (case_value, label)) in cases.iter().enumerate() {
             let name = if case_index == 0 {
                 block.name.clone()
@@ -1619,7 +1621,7 @@ fn lower_switches(blocks: &[BodyBlock], force_loop_exit_ladders: bool) -> Vec<Bo
                     crate::native::tir::lower_block_carrier_with_prefix(&name, p, &tail)
                 })
             } else {
-                crate::native::tir::lower_block_carrier(&name, &tail, &HashMap::new())
+                crate::native::tir::lower_block_carrier(&name, &tail, &HashMap::default())
             }
             .map(Into::into);
             let role = if case_index == 0 {
@@ -1633,7 +1635,7 @@ fn lower_switches(blocks: &[BodyBlock], force_loop_exit_ladders: bool) -> Vec<Bo
                 let typed = crate::native::tir::lower_block_carrier(
                     &false_label,
                     &merge_lines,
-                    &HashMap::new(),
+                    &HashMap::default(),
                 )
                 .map(Into::into);
                 lowered.push(BodyBlock {
@@ -1663,7 +1665,7 @@ fn lower_switches(blocks: &[BodyBlock], force_loop_exit_ladders: bool) -> Vec<Bo
 
 fn loop_exit_switch_headers(blocks: &[BodyBlock]) -> HashSet<String> {
     let forest = analyze(blocks);
-    let mut headers = HashSet::new();
+    let mut headers = HashSet::default();
     for loop_info in &forest.loops {
         if loop_info.exits.is_empty() {
             continue;
@@ -1753,8 +1755,8 @@ fn first_reachable_case_targets(
     case_order: &HashMap<String, usize>,
     successors: &HashMap<String, Vec<String>>,
 ) -> HashSet<String> {
-    let mut reached = HashSet::new();
-    let mut seen = HashSet::new();
+    let mut reached = HashSet::default();
+    let mut seen = HashSet::default();
     let mut stack = successors.get(start).cloned().unwrap_or_default();
     while let Some(node) = stack.pop() {
         let is_boundary = merge == Some(node.as_str()) || stop == Some(node.as_str());
@@ -1774,7 +1776,7 @@ fn first_reachable_case_targets(
 
 fn switch_case_targets_in_order(switch: &LlSwitch) -> Vec<String> {
     let mut targets = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for (_, label) in &switch.cases {
         if seen.insert(label.clone()) {
             targets.push(label.clone());
@@ -1962,7 +1964,7 @@ fn rewrite_switch_bypass_merge(
         if merge_phis.is_empty() {
             return false;
         }
-        let mut additions: HashMap<String, Vec<(LlValue, String)>> = HashMap::new();
+        let mut additions: HashMap<String, Vec<(LlValue, String)>> = HashMap::default();
         for merge_phi in merge_phis {
             let Some((_, incoming)) = &merge_phi.phi_incoming() else {
                 return false;
@@ -2013,7 +2015,7 @@ fn rewrite_switch_bypass_merge(
         redirects.push((pred_idx, pred.clone(), synthetic));
     }
 
-    let mut insert_after = HashMap::new();
+    let mut insert_after = HashMap::default();
     for (pred_idx, pred, synthetic) in redirects {
         if let Some(t) = blocks[pred_idx].typed_mut() {
             t.redirect_successor(merge, &synthetic);
@@ -2036,8 +2038,9 @@ fn rewrite_switch_bypass_merge(
             continue;
         };
         let lines = vec![format!("br label {intermediate}")];
-        let typed = crate::native::tir::lower_block_carrier(&synthetic, &lines, &HashMap::new())
-            .map(Into::into);
+        let typed =
+            crate::native::tir::lower_block_carrier(&synthetic, &lines, &HashMap::default())
+                .map(Into::into);
         blocks.insert(
             block_idx + 1,
             BodyBlock {
@@ -2149,7 +2152,7 @@ mod tests {
             block("%pass1", "br label %header"),
             block("%merge", "ret void"),
         ];
-        let mut loop_merges = HashMap::from([(
+        let mut loop_merges = crate::fxhash::map_from([(
             "%header".to_string(),
             LoopMergeInfo {
                 merge: "%merge".to_string(),
@@ -2169,18 +2172,19 @@ mod tests {
             block("%second", "br i1 %c1, label %yes, label %no"),
             block("%loop", "br i1 %c2, label %yes, label %no"),
         ];
-        let branch_merges = HashMap::from([(
+        let branch_merges = crate::fxhash::map_from([(
             ("%yes".to_string(), "%no".to_string()),
             "%shared".to_string(),
         )]);
-        let loop_merges = HashMap::from([(
+        let loop_merges = crate::fxhash::map_from([(
             "%loop".to_string(),
             LoopMergeInfo {
                 merge: "%exit".to_string(),
                 continue_target: "%continue".to_string(),
             },
         )]);
-        let mut by_header = HashMap::from([("%second".to_string(), "%specific".to_string())]);
+        let mut by_header =
+            crate::fxhash::map_from([("%second".to_string(), "%specific".to_string())]);
 
         index_branch_merges_by_header(&blocks, &loop_merges, &branch_merges, &mut by_header);
 
@@ -2202,7 +2206,7 @@ mod tests {
             byval_param_pointees: vec![None; 3],
             is_static_initializer: false,
             blocks: Vec::new(),
-            loop_controls: HashMap::new(),
+            loop_controls: HashMap::default(),
         };
 
         assert_eq!(implicit_entry_block_name(&function), "%7");
@@ -2214,7 +2218,7 @@ mod tests {
             byval_param_pointees: vec![None],
             is_static_initializer: false,
             blocks: Vec::new(),
-            loop_controls: HashMap::new(),
+            loop_controls: HashMap::default(),
         };
 
         assert_eq!(implicit_entry_block_name(&function), "%0");

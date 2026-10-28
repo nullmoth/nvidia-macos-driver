@@ -21,7 +21,7 @@ fn needed_variable_pointer_capabilities(ctx: &Ctx) -> (bool, bool) {
 }
 
 fn defined_ids(module: &Module) -> HashSet<Word> {
-    let mut s = HashSet::new();
+    let mut s = HashSet::default();
     for inst in &module.types_global_values {
         if let Some(id) = inst.result_id {
             s.insert(id);
@@ -56,7 +56,7 @@ fn defined_ids(module: &Module) -> HashSet<Word> {
 }
 
 pub(super) fn function_referenced_ids(module: &Module) -> HashSet<Word> {
-    let mut s = HashSet::new();
+    let mut s = HashSet::default();
     for f in &module.functions {
         for b in &f.blocks {
             for inst in &b.instructions {
@@ -171,7 +171,7 @@ pub(super) fn gc_dead_globals(ctx: &mut Ctx) {
         }
     };
 
-    let mut live = HashSet::new();
+    let mut live = HashSet::default();
     live.extend(
         ctx.emit_sidecar
             .local_pointer_field_stores
@@ -220,7 +220,7 @@ pub(super) fn gc_dead_globals(ctx: &mut Ctx) {
         let Some(definition) = definitions.get(&id) else {
             continue;
         };
-        let mut dependencies = HashSet::new();
+        let mut dependencies = HashSet::default();
         collect(definition, &mut dependencies);
         for dependency in dependencies {
             if live.insert(dependency) {
@@ -286,7 +286,7 @@ pub(crate) fn drop_unreferenced_scalar_types(module: &mut Module) {
     if scalars.is_empty() {
         return;
     }
-    let mut referenced: HashSet<Word> = HashSet::new();
+    let mut referenced: HashSet<Word> = HashSet::default();
     for instruction in module.all_inst_iter() {
         if matches!(
             instruction.class.opcode,
@@ -312,8 +312,8 @@ pub(crate) fn drop_unreferenced_scalar_types(module: &mut Module) {
 }
 
 pub(crate) fn drop_unrequired_capabilities(module: &mut Module) {
-    let mut required: HashSet<spirv::Capability> = HashSet::new();
-    let mut required_extensions: HashSet<&'static str> = HashSet::new();
+    let mut required: HashSet<spirv::Capability> = HashSet::default();
+    let mut required_extensions: HashSet<&'static str> = HashSet::default();
     for instruction in module.all_inst_iter() {
         if matches!(instruction.class.opcode, Op::Capability | Op::Extension) {
             continue;
@@ -1336,7 +1336,7 @@ mod tests {
 
         assert!(drop_unreferenced_global_variables(&mut module));
 
-        assert_eq!(variable_ids(&module), HashSet::from([LIVE_VARIABLE]));
+        assert_eq!(variable_ids(&module), crate::fxhash::set_from([LIVE_VARIABLE]));
         let interface = module.entry_points[0].operands[3..]
             .iter()
             .filter_map(|operand| match operand {
@@ -1344,7 +1344,7 @@ mod tests {
                 _ => None,
             })
             .collect::<HashSet<_>>();
-        assert_eq!(interface, HashSet::from([LIVE_VARIABLE]));
+        assert_eq!(interface, crate::fxhash::set_from([LIVE_VARIABLE]));
         assert!(!ids_named_by(&module.annotations).contains(&STRANDED_VARIABLE));
         assert!(!ids_named_by(&module.debug_names).contains(&STRANDED_VARIABLE));
         assert!(ids_named_by(&module.annotations).contains(&LIVE_VARIABLE));

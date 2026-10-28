@@ -12,7 +12,7 @@ pub(in crate::native) fn bb_role(name: &str, role: BlockRole, lines: &[&str]) ->
         typed: crate::native::tir::lower_block_carrier(
             name,
             &lines,
-            &std::collections::HashMap::new(),
+            &crate::fxhash::HashMap::default(),
         )
         .map(Into::into),
     }

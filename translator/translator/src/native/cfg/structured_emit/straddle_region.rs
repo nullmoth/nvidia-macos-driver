@@ -1,7 +1,8 @@
 use super::*;
+use crate::fxhash::{HashMap, HashSet};
 use crate::native::ir::{LlType, LlValue, TypedValue};
 use crate::native::tir;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
 
 const PREFIX: &str = "%metal2vulkan.ct.sl.";
 const PRE: &str = "%metal2vulkan.ct.sl.pre";
@@ -77,7 +78,7 @@ fn carrier_with_phis(
     role: BlockRole,
 ) -> Result<BodyBlock, String> {
     let mut carrier =
-        tir::lower_block_carrier(name, &[format!("br label {target}")], &HashMap::new())
+        tir::lower_block_carrier(name, &[format!("br label {target}")], &HashMap::default())
             .ok_or_else(|| format!("construct-tree:straddle-gateway-carrier name={name}"))?;
     for (result, ty, incoming) in phis {
         carrier.push_value_phi(result, ty, incoming);
@@ -154,7 +155,7 @@ fn derive_loop_exit_sibling_witness(blocks: &[BodyBlock]) -> Option<Witness> {
                 }
                 let exits_to_sibling = natural_loop.exits.iter().any(|exit| {
                     let mut current = exit.clone();
-                    let mut seen = HashSet::new();
+                    let mut seen = HashSet::default();
                     loop {
                         if &current == sibling {
                             break true;
@@ -203,7 +204,7 @@ fn build_selection_arm_witness(
         .iter()
         .map(|block| block.name.as_str())
         .collect::<HashSet<_>>();
-    let mut predecessors: HashMap<String, Vec<String>> = HashMap::new();
+    let mut predecessors: HashMap<String, Vec<String>> = HashMap::default();
     for block in blocks {
         for successor in block_successors(block) {
             if name_set.contains(successor.as_str()) {
@@ -214,7 +215,7 @@ fn build_selection_arm_witness(
             }
         }
     }
-    let mut reaches_merge = HashSet::new();
+    let mut reaches_merge = HashSet::default();
     let mut stack = vec![owner_merge.to_string()];
     while let Some(node) = stack.pop() {
         if !reaches_merge.insert(node.clone()) {
@@ -294,7 +295,7 @@ fn derive_witness_in_mode(
     let forest = analyze(&sblocks);
     let loop_headers: HashSet<&str> = forest.loops.iter().map(|l| l.header.as_str()).collect();
     let name_set: HashSet<&str> = sblocks.iter().map(|block| block.name.as_str()).collect();
-    let mut header_merge: HashMap<String, String> = HashMap::new();
+    let mut header_merge: HashMap<String, String> = HashMap::default();
     for (header, info) in &loop_merges {
         header_merge.insert(header.clone(), info.merge.clone());
     }
@@ -362,7 +363,7 @@ fn build_witness(
         .map(|(index, block)| (block.name.as_str(), index))
         .collect();
     let name_set: HashSet<&str> = blocks.iter().map(|block| block.name.as_str()).collect();
-    let mut preds: HashMap<String, Vec<String>> = HashMap::new();
+    let mut preds: HashMap<String, Vec<String>> = HashMap::default();
     for block in blocks {
         for succ in block_successors(block) {
             if name_set.contains(succ.as_str()) {
@@ -370,7 +371,7 @@ fn build_witness(
             }
         }
     }
-    let mut reaches_loop_merge = HashSet::new();
+    let mut reaches_loop_merge = HashSet::default();
     let mut stack = vec![loop_merge.to_string()];
     while let Some(node) = stack.pop() {
         if !reaches_loop_merge.insert(node.clone()) {
@@ -381,7 +382,7 @@ fn build_witness(
         }
     }
     let loop_body: HashSet<&str> = loop_body.iter().map(String::as_str).collect();
-    let mut closure_names = HashSet::new();
+    let mut closure_names = HashSet::default();
     for block in blocks {
         let name = block.name.as_str();
         let in_owner_arm = forest.dominates(owner, name)
@@ -515,7 +516,7 @@ fn regional_candidate(
         successors.push(block_successors_local);
     }
 
-    let mut rename = HashMap::new();
+    let mut rename = HashMap::default();
     let mut phi_slots = Vec::new();
     for (host_local, &global) in ordered.iter().enumerate() {
         let carrier = blocks[global].typed.as_ref().expect("checked above");
@@ -533,7 +534,7 @@ fn regional_candidate(
             let current = format!("{PREFIX}slot.{slot_index}");
             let next = format!("{PREFIX}nextslot.{slot_index}");
             rename.insert(result.clone(), current.clone());
-            let mut routed = HashMap::new();
+            let mut routed = HashMap::default();
             let mut initial = None;
             for (value, predecessor) in incoming {
                 let Some(&source) = names.get(predecessor) else {
@@ -570,7 +571,7 @@ fn regional_candidate(
         }
     }
 
-    let mut def_block = HashMap::new();
+    let mut def_block = HashMap::default();
     for (local, &global) in ordered.iter().enumerate() {
         for inst in &blocks[global].typed.as_ref().expect("checked above").insts {
             if !inst.is_phi() {
@@ -1248,7 +1249,8 @@ fn rewrite_entry_and_exit_phis(
         .expect("checked above")
         .redirect_successor(&entry_to_name, PRE);
 
-    let mut payload_by_target_phi: HashMap<(usize, &str), Vec<&ExitPayloadSlot>> = HashMap::new();
+    let mut payload_by_target_phi: HashMap<(usize, &str), Vec<&ExitPayloadSlot>> =
+        HashMap::default();
     for slot in exit_payload_slots {
         payload_by_target_phi
             .entry((slot.target, slot.phi_result.as_str()))

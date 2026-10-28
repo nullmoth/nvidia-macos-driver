@@ -333,13 +333,13 @@ fn constant_folding_preserves_the_one_answer_a_constant_seeded_shape_has() {
                 );
                 let _ = crate::native::rewrites::construct_cfg_functions_module(
                     &mut folded_then_constructed,
-                    &std::collections::HashSet::new(),
+                    &crate::fxhash::HashSet::default(),
                 );
 
                 let mut constructed_then_folded = module;
                 let _ = crate::native::rewrites::construct_cfg_functions_module(
                     &mut constructed_then_folded,
-                    &std::collections::HashSet::new(),
+                    &crate::fxhash::HashSet::default(),
                 );
                 crate::native::rewrites::prune_constant_cfg_module_if_changed(
                     &mut constructed_then_folded,
@@ -396,7 +396,7 @@ fn constructed_shapes_are_valid_spirv() {
                 let (mut module, _) = shapes::author_constant_seeded(&shape, 3);
                 let _ = crate::native::rewrites::construct_cfg_functions_module(
                     &mut module,
-                    &std::collections::HashSet::new(),
+                    &crate::fxhash::HashSet::default(),
                 );
                 let bytes = assemble(&module);
                 crate::tools::spirv_val_bytes(&bytes, &tmp).unwrap_or_else(|error| {
@@ -418,7 +418,7 @@ fn constructed_shapes_survive_a_binary_round_trip_unchanged() {
             let (mut module, slot) = shapes::author_constant_seeded(&shape, 3);
             let _ = crate::native::rewrites::construct_cfg_functions_module(
                 &mut module,
-                &std::collections::HashSet::new(),
+                &crate::fxhash::HashSet::default(),
             );
             let expected = interp::run_module_to_global(&module, slot, STEP_LIMIT)
                 .expect("constructed module runs");
@@ -488,7 +488,7 @@ fn construction_error(module: &crate::spirv_module::Module) -> Option<String> {
     let value_types = module
         .all_inst_iter()
         .filter_map(|instruction| Some((instruction.result_id?, instruction.result_type?)))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fxhash::HashMap<_, _>>();
     module.functions.iter().find_map(|function| {
         crate::native::owned_cfg::owned_function_construction_error(function, &value_types)
     })

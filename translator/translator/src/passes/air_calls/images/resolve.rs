@@ -252,11 +252,11 @@ pub(in crate::passes) fn recovered_image_for_private_operand(
 // the stack overflowed: Geekbench 6's OpenCL Background Blur killed the process (SIGSEGV) instead of reporting why its
 // image operand did not resolve. Each value is described once, three levels deep.
 pub(in crate::passes) fn describe_value(ctx: &Ctx, value: Word) -> String {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fxhash::HashSet::default();
     describe_value_bounded(ctx, value, 3, &mut seen)
 }
 
-fn describe_value_bounded(ctx: &Ctx, value: Word, depth: u32, seen: &mut std::collections::HashSet<Word>) -> String {
+fn describe_value_bounded(ctx: &Ctx, value: Word, depth: u32, seen: &mut crate::fxhash::HashSet<Word>) -> String {
     if !seen.insert(value) {
         return "(described above)".to_string();
     }

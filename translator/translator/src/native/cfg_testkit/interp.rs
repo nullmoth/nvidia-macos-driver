@@ -1,6 +1,6 @@
+use crate::fxhash::HashMap;
 use crate::spirv_module::{Function, Instruction, Module, Operand};
 use spirv::{Op, StorageClass, Word};
-use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::native) enum Value {
@@ -87,7 +87,7 @@ struct Interpreter<'a> {
 
 impl<'a> Interpreter<'a> {
     fn new(module: &Module, function: &'a Function, arguments: &[u32]) -> Result<Self, String> {
-        let mut values = HashMap::new();
+        let mut values = HashMap::default();
         let mut initial_memory = Vec::new();
         for instruction in &module.types_global_values {
             let Some(id) = instruction.result_id else {
@@ -129,7 +129,7 @@ impl<'a> Interpreter<'a> {
                 .ok_or_else(|| "function parameter without a result id".to_string())?;
             values.insert(id, Value::Int(*argument));
         }
-        let mut blocks = HashMap::new();
+        let mut blocks = HashMap::default();
         for (index, block) in function.blocks.iter().enumerate() {
             let label = block
                 .label
@@ -140,7 +140,7 @@ impl<'a> Interpreter<'a> {
                 return Err(format!("label %{label} is defined twice"));
             }
         }
-        let mut memory = HashMap::new();
+        let mut memory = HashMap::default();
         for (slot, initializer) in initial_memory {
             let value = match initializer {
                 Some(operand) => match &operand {

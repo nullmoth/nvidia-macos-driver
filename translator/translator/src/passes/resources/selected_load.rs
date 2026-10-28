@@ -1,6 +1,6 @@
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::{Instruction, Module, Operand};
 use spirv::{Decoration, Op, StorageClass, Word};
-use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy)]
 struct Arm {
@@ -53,7 +53,7 @@ pub(in crate::passes) fn materialize_interface_selected_loads(module: &mut Modul
         .filter_map(|inst| inst.result_id.map(|id| (id, inst)))
         .collect::<HashMap<_, _>>();
     let pointer_root = |mut id: Word| -> Option<Word> {
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
         loop {
             if !visited.insert(id) {
                 return None;
@@ -85,7 +85,7 @@ pub(in crate::passes) fn materialize_interface_selected_loads(module: &mut Modul
         }
     };
 
-    let mut candidates = HashMap::<Word, (Word, Arm, Arm)>::new();
+    let mut candidates = HashMap::<Word, (Word, Arm, Arm)>::default();
     for inst in module
         .functions
         .iter()
@@ -148,7 +148,7 @@ pub(in crate::passes) fn materialize_interface_selected_loads(module: &mut Modul
         );
     }
 
-    let mut plans = HashMap::<Word, Plan>::new();
+    let mut plans = HashMap::<Word, Plan>::default();
     for (select, (condition, true_arm, false_arm)) in candidates {
         let mut value_ty = None;
         let mut load_count = 0usize;
@@ -211,7 +211,7 @@ pub(in crate::passes) fn materialize_interface_selected_loads(module: &mut Modul
         .unwrap_or(1);
     let uint = find_uint(&type_defs);
     let mut new_globals = Vec::new();
-    let mut constants = HashMap::new();
+    let mut constants = HashMap::default();
     let mut unsigned_ints = type_defs
         .iter()
         .filter_map(|(id, inst)| {

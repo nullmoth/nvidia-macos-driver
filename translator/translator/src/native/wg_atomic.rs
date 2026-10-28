@@ -1,8 +1,9 @@
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::Instruction;
 use crate::spirv_module::Module;
 use crate::spirv_module::Operand;
 use spirv::{Op, StorageClass, Word};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 
 pub(super) fn construct_workgroup_atomic_floats(module: &mut Module) -> bool {
     let float_ty = match scalar_type(module, Op::TypeFloat, 32) {
@@ -21,8 +22,8 @@ pub(super) fn construct_workgroup_atomic_floats(module: &mut Module) -> bool {
         return false;
     }
 
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
-    let mut type_defs: HashMap<Word, Instruction> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
+    let mut type_defs: HashMap<Word, Instruction> = HashMap::default();
     for inst in &module.types_global_values {
         if let Some(result) = inst.result_id {
             type_defs.insert(result, inst.clone());
@@ -47,7 +48,7 @@ pub(super) fn construct_workgroup_atomic_floats(module: &mut Module) -> bool {
         let Some(&(StorageClass::Workgroup, pointee)) = ptr_info.get(&ptr_ty) else {
             continue;
         };
-        if tree_contains_float(&type_defs, pointee, float_ty, &mut HashSet::new()) {
+        if tree_contains_float(&type_defs, pointee, float_ty, &mut HashSet::default()) {
             cands.push((var, pointee));
         }
     }
@@ -123,7 +124,7 @@ fn remodel_one(
         *next_id += 1;
         id
     };
-    let mut memo: HashMap<Word, Word> = HashMap::new();
+    let mut memo: HashMap<Word, Word> = HashMap::default();
     let mut new_types: Vec<Instruction> = Vec::new();
     let type_defs: HashMap<Word, Instruction> = module
         .types_global_values
@@ -161,7 +162,7 @@ fn remodel_one(
         }
     };
 
-    let mut wg_ptr_cache: HashMap<Word, Word> = HashMap::new();
+    let mut wg_ptr_cache: HashMap<Word, Word> = HashMap::default();
     let mut wg_ptr_to = |pointee: Word,
                          module: &Module,
                          new_types: &mut Vec<Instruction>,
@@ -188,7 +189,7 @@ fn remodel_one(
     };
 
     let new_var_ptr = wg_ptr_to(new_pointee, module, &mut new_types, &mut fresh);
-    let mut chain_new_ptr: HashMap<Word, Word> = HashMap::new();
+    let mut chain_new_ptr: HashMap<Word, Word> = HashMap::default();
     for (&chain_id, &orig_pointee) in &plan.chain_pointee {
         let new_pointee = cloned_of(orig_pointee);
         let ptr = wg_ptr_to(new_pointee, module, &mut new_types, &mut fresh);
@@ -248,8 +249,8 @@ fn validate(
         .collect();
 
     let mut chain_pointee: BTreeMap<Word, Word> = BTreeMap::new();
-    let mut float_chain_ids: HashSet<Word> = HashSet::new();
-    let mut roots: HashSet<Word> = HashSet::new();
+    let mut float_chain_ids: HashSet<Word> = HashSet::default();
+    let mut roots: HashSet<Word> = HashSet::default();
     roots.insert(var);
     loop {
         let mut added = false;
@@ -322,8 +323,8 @@ fn validate(
         }
     }
 
-    let mut bitcast_ids: HashSet<Word> = HashSet::new();
-    let mut bitcast_to_chain: HashMap<Word, Word> = HashMap::new();
+    let mut bitcast_ids: HashSet<Word> = HashSet::default();
+    let mut bitcast_to_chain: HashMap<Word, Word> = HashMap::default();
     let mut int_ty: Option<Word> = None;
     for func in &module.functions {
         for block in &func.blocks {
@@ -749,7 +750,7 @@ mod tests {
         );
         assert!(crate::native::eliminate_dead_pointer_values_module(
             &mut m,
-            &HashSet::new()
+            &HashSet::default()
         ));
         assert!(construct_workgroup_atomic_floats(&mut m));
         assert!(

@@ -1,7 +1,8 @@
 use super::footprint::{addressing_is_logical, descriptor_keys, Analyzer, DescriptorKey};
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::{Instruction, Module, Operand};
 use spirv::{Decoration, Op, StorageClass, Word};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
 
 pub(crate) fn decorate_unwritten_descriptors(module: &mut Module) {
     decorate_unwritten_storage_buffers(module);

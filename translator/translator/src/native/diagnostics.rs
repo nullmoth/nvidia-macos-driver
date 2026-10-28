@@ -480,7 +480,7 @@ pub fn param_pointee_check(san_ll: &str) -> Result<ParamPointeeStats, String> {
     let use_site = &parsed.ptr_pointees;
     let sidecar = Emitter::new(parsed.clone()).emit_collecting_param_pointees()?;
     let mut stats = ParamPointeeStats::default();
-    let mut fns_counted: HashSet<&str> = HashSet::new();
+    let mut fns_counted: HashSet<&str> = HashSet::default();
     for ((fn_name, idx), call_pointee) in &sidecar {
         let Some(func) = parsed.functions.iter().find(|f| &f.name == fn_name) else {
             continue;

@@ -73,7 +73,7 @@ pub(in crate::native) fn blocks_changed(before: &[BodyBlock], after: &[BodyBlock
 pub(in crate::native) fn requires_shared_loop_entry_ownership(blocks: &[BodyBlock]) -> bool {
     let forest = analyze(blocks);
     let post_idoms = post_idom(blocks);
-    let mut predecessors = HashMap::<String, Vec<&str>>::new();
+    let mut predecessors = HashMap::<String, Vec<&str>>::default();
     for block in blocks {
         for successor in block_successors(block) {
             predecessors

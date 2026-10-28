@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{HashMap, HashSet};
 
 pub(super) fn location_index_with_static(
     body: &str,
@@ -47,8 +47,8 @@ pub(super) fn static_init_int_global_values(ll: &str) -> HashMap<String, u32> {
 
 fn static_init_global_values(ll: &str) -> HashMap<String, StaticValue> {
     let mut globals = parse_static_global_initializers(ll);
-    let mut unknown_stores = HashSet::new();
-    let mut env: HashMap<String, StaticValue> = HashMap::new();
+    let mut unknown_stores = HashSet::default();
+    let mut env: HashMap<String, StaticValue> = HashMap::default();
     let mut in_static_init = false;
 
     for raw in ll.lines() {
@@ -120,7 +120,7 @@ pub(crate) fn static_init_foldable_global_values(ll: &str) -> HashMap<String, St
         })
         .collect::<HashSet<_>>();
     let initializer_globals = derived_globals.clone();
-    let mut derived_locals = HashSet::<String>::new();
+    let mut derived_locals = HashSet::<String>::default();
     let mut in_constructor = false;
     for raw in ll.lines() {
         let line = raw.split(';').next().unwrap_or(raw).trim();
@@ -243,7 +243,7 @@ fn references_symbol(text: &str, symbol: &str) -> bool {
 }
 
 fn parse_static_global_initializers(ll: &str) -> HashMap<String, StaticValue> {
-    let mut globals = HashMap::new();
+    let mut globals = HashMap::default();
     for raw in ll.lines() {
         let line = raw.split(';').next().unwrap_or(raw).trim();
         if !line.starts_with('@') || !(line.contains(" global ") || line.contains(" constant ")) {
@@ -550,7 +550,7 @@ mod tests {
             })
             .collect::<HashSet<_>>();
         let initializer_globals = derived_globals.clone();
-        let mut derived_locals = HashSet::<String>::new();
+        let mut derived_locals = HashSet::<String>::default();
         let mut in_constructor = false;
         for raw in ll.lines() {
             let line = raw.split(';').next().unwrap_or(raw).trim();

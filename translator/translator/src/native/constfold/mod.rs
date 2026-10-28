@@ -12,10 +12,10 @@ pub(in crate::native) use simplify::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fxhash::HashMap;
     use crate::spirv_module::Operand;
     use crate::spirv_module::{Block, Function, Instruction, Module, ModuleHeader};
     use spirv::{Op, StorageClass, Word};
-    use std::collections::HashMap;
 
     fn inst(op: Op, ty: Option<Word>, res: Option<Word>, ops: Vec<Operand>) -> Instruction {
         Instruction::new(op, ty, res, ops)

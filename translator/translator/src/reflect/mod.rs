@@ -1238,7 +1238,7 @@ struct EmittedImage {
 
 impl EmittedImage {
     fn of(
-        types: &std::collections::HashMap<spirv::Word, &crate::spirv_module::Instruction>,
+        types: &crate::fxhash::HashMap<spirv::Word, &crate::spirv_module::Instruction>,
         image: spirv::Word,
     ) -> Option<Self> {
         let instruction = types.get(&image)?;
@@ -1283,7 +1283,7 @@ impl EmittedImage {
 }
 
 fn pointee_of(
-    types: &std::collections::HashMap<spirv::Word, &crate::spirv_module::Instruction>,
+    types: &crate::fxhash::HashMap<spirv::Word, &crate::spirv_module::Instruction>,
     pointer: spirv::Word,
 ) -> Option<spirv::Word> {
     let instruction = types.get(&pointer)?;
@@ -1394,7 +1394,7 @@ pub(crate) fn has_sample_position_payload(module: &Module) -> bool {
         .types_global_values
         .iter()
         .filter_map(|i| i.result_id.map(|id| (id, i)))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fxhash::HashMap<_, _>>();
     let id = |operand: &Operand| match operand {
         Operand::IdRef(id) => Some(*id),
         _ => None,
@@ -1909,8 +1909,8 @@ impl ShaderReflection {
             .types_global_values
             .iter()
             .filter_map(|instruction| Some((instruction.result_id?, instruction)))
-            .collect::<std::collections::HashMap<_, _>>();
-        let mut declared = std::collections::HashMap::<u32, Option<EmittedImage>>::new();
+            .collect::<crate::fxhash::HashMap<_, _>>();
+        let mut declared = crate::fxhash::HashMap::<u32, Option<EmittedImage>>::default();
         for instruction in module
             .types_global_values
             .iter()
@@ -1964,7 +1964,7 @@ impl ShaderReflection {
             .types_global_values
             .iter()
             .filter_map(|instruction| Some((instruction.result_id?, instruction)))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<crate::fxhash::HashMap<_, _>>();
         let bound = module
             .types_global_values
             .iter()
@@ -1996,7 +1996,7 @@ impl ShaderReflection {
             .types_global_values
             .iter()
             .filter_map(|instruction| Some((instruction.result_id?, instruction)))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<crate::fxhash::HashMap<_, _>>();
         let mut null_textures = 0;
         let mut read_samplers = 0;
         for &binding in bindings {
@@ -2928,8 +2928,8 @@ fn llvm_arg_has_attribute(arg: &str, attribute: &str) -> bool {
 }
 
 fn parse_static_sampler_constants(ll: &str) -> Result<Vec<[u64; 2]>, String> {
-    let mut globals = std::collections::HashMap::<String, [u64; 2]>::new();
-    let mut nodes = std::collections::HashMap::<u32, String>::new();
+    let mut globals = crate::fxhash::HashMap::<String, [u64; 2]>::default();
+    let mut nodes = crate::fxhash::HashMap::<u32, String>::default();
     let mut root = None;
 
     for raw in ll.lines() {
@@ -3018,7 +3018,7 @@ fn global_name(body: &str) -> Option<&str> {
 fn texture_binding(
     n: u32,
     param_index: Option<u32>,
-    type_names: &std::collections::HashMap<u32, String>,
+    type_names: &crate::fxhash::HashMap<u32, String>,
 ) -> ResourceBinding {
     let type_name = param_index.and_then(|idx| type_names.get(&idx).cloned());
     let texture_shape = type_name.as_deref().map(texture_shape_from_name);

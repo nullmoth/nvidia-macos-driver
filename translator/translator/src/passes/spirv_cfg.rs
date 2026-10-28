@@ -1,6 +1,6 @@
+use crate::fxhash::HashMap;
 use crate::spirv_module::Block;
 use spirv::Word;
-use std::collections::HashMap;
 
 pub(in crate::passes) use crate::spirv_module::block_successors;
 

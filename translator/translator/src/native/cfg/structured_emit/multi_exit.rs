@@ -76,7 +76,7 @@ pub(in crate::native) fn split_two_target_critical_edges(
                     typed: crate::native::tir::lower_block_carrier(
                         edge,
                         &edge_lines,
-                        &std::collections::HashMap::new(),
+                        &crate::fxhash::HashMap::default(),
                     )
                     .map(Into::into),
                     name: edge.clone(),
@@ -170,7 +170,7 @@ pub(in crate::native) fn synth_two_target_dispatch(
         let merge = merges[0].clone();
 
         let forest = analyze(blocks);
-        let mut definitions = HashMap::new();
+        let mut definitions = HashMap::default();
         for block in blocks.iter() {
             let carrier = block.typed.as_ref()?;
             for instruction in &carrier.insts {
@@ -192,7 +192,7 @@ pub(in crate::native) fn synth_two_target_dispatch(
                 .map(|block| block.name.clone())
                 .collect::<HashSet<_>>();
             let mut used = Vec::new();
-            let mut used_set = HashSet::new();
+            let mut used_set = HashSet::default();
             for block in blocks.iter().filter(|block| region.contains(&block.name)) {
                 let carrier = block.typed.as_ref()?;
                 for instruction in carrier
@@ -221,7 +221,7 @@ pub(in crate::native) fn synth_two_target_dispatch(
                 }
             }
 
-            let mut substitutions = HashMap::new();
+            let mut substitutions = HashMap::default();
             for value in used {
                 let Some((definition_block, ty)) = definitions.get(&value) else {
                     continue;
@@ -357,7 +357,7 @@ pub(in crate::native) fn synth_two_target_dispatch(
             let mut blk = crate::native::tir::lower_block_carrier(
                 &merges[j],
                 &[branch_line],
-                &std::collections::HashMap::new(),
+                &crate::fxhash::HashMap::default(),
             )?;
             if j == 0 {
                 for (mname, ty, merged_typed) in &typed_value_phis {
@@ -485,7 +485,7 @@ pub(in crate::native) fn synth_multi_latch_continue(
             let mut blk = crate::native::tir::lower_block_carrier(
                 &new_latch,
                 &[format!("br label {header}")],
-                &std::collections::HashMap::new(),
+                &crate::fxhash::HashMap::default(),
             )?;
             for (merged, ty, merged_typed) in &typed_value_phis {
                 blk.push_value_phi(merged, ty, merged_typed);
@@ -520,7 +520,7 @@ mod tests {
             bb("%x", &["ret void"]),
         ];
         let before = format!("{blocks:?}");
-        let region = HashSet::from(["%entry".to_string()]);
+        let region = crate::fxhash::set_from(["%entry".to_string()]);
         let exits = vec!["%x".to_string(), "%y".to_string()];
         let mut counter = 0;
 

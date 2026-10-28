@@ -18,8 +18,8 @@ pub(in crate::passes) fn lower_private_byte_aggregate_reinterpret(
     ctx: &mut Ctx,
     entry_idx: usize,
 ) -> Result<(), String> {
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
-    let mut defs: HashMap<Word, Instruction> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
+    let mut defs: HashMap<Word, Instruction> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -37,8 +37,8 @@ pub(in crate::passes) fn lower_private_byte_aggregate_reinterpret(
         }
     }
 
-    let mut def_pos: HashMap<Word, (usize, usize)> = HashMap::new();
-    let mut users: HashMap<Word, Vec<(usize, usize)>> = HashMap::new();
+    let mut def_pos: HashMap<Word, (usize, usize)> = HashMap::default();
+    let mut users: HashMap<Word, Vec<(usize, usize)>> = HashMap::default();
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
             if let Some(r) = inst.result_id {
@@ -53,7 +53,7 @@ pub(in crate::passes) fn lower_private_byte_aggregate_reinterpret(
     }
 
     let mut accesses: Vec<PrivAggAccess> = Vec::new();
-    let mut need_len: HashMap<Word, (u32, Word)> = HashMap::new();
+    let mut need_len: HashMap<Word, (u32, Word)> = HashMap::default();
 
     for (bi, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (ii, inst) in block.instructions.iter().enumerate() {
@@ -340,9 +340,9 @@ pub(in crate::passes) fn lower_private_byte_aggregate_reinterpret(
         }
     }
 
-    let mut remove: HashSet<(usize, usize)> = HashSet::new();
-    let mut store_anchor: HashMap<(usize, usize), usize> = HashMap::new();
-    let mut load_anchor: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut remove: HashSet<(usize, usize)> = HashSet::default();
+    let mut store_anchor: HashMap<(usize, usize), usize> = HashMap::default();
+    let mut load_anchor: HashMap<(usize, usize), usize> = HashMap::default();
     for (ai, acc) in accesses.iter().enumerate() {
         for &r in &acc.remove {
             remove.insert(r);
@@ -453,8 +453,8 @@ pub(in crate::passes) fn lower_private_byte_aggregate_reinterpret(
 }
 
 pub(in crate::passes) fn retype_demoted_copymemory_placeholder(ctx: &mut Ctx, entry_idx: usize) {
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
-    let mut defs: HashMap<Word, Instruction> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
+    let mut defs: HashMap<Word, Instruction> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -472,7 +472,7 @@ pub(in crate::passes) fn retype_demoted_copymemory_placeholder(ctx: &mut Ctx, en
         }
     }
 
-    let mut use_count: HashMap<Word, usize> = HashMap::new();
+    let mut use_count: HashMap<Word, usize> = HashMap::default();
     for block in &ctx.module.functions[entry_idx].blocks {
         for inst in &block.instructions {
             for op in &inst.operands {
@@ -599,7 +599,7 @@ pub(in crate::passes) fn retype_private_direct_memory_placeholders(ctx: &mut Ctx
         .iter()
         .filter_map(|variable| variable.result_id)
         .collect::<HashSet<_>>();
-    let mut uses = HashMap::<Word, Vec<(Instruction, usize)>>::new();
+    let mut uses = HashMap::<Word, Vec<(Instruction, usize)>>::default();
     for instruction in ctx
         .module
         .functions
@@ -607,7 +607,7 @@ pub(in crate::passes) fn retype_private_direct_memory_placeholders(ctx: &mut Ctx
         .flat_map(|function| &function.blocks)
         .flat_map(|block| &block.instructions)
     {
-        let mut references = HashMap::<Word, usize>::new();
+        let mut references = HashMap::<Word, usize>::default();
         for id in instruction
             .operands
             .iter()
@@ -769,7 +769,7 @@ pub(in crate::passes) fn retype_private_direct_memory_placeholders(ctx: &mut Ctx
 }
 
 pub(in crate::passes) fn rewrite_strided_descent_access_chains(ctx: &mut Ctx, entry_idx: usize) {
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -837,7 +837,7 @@ pub(in crate::passes) fn split_workgroup_ptr_access_chain_descent(
     ctx: &mut Ctx,
     _entry_idx: usize,
 ) {
-    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::new();
+    let mut ptr_info: HashMap<Word, (StorageClass, Word)> = HashMap::default();
     for inst in ctx
         .new_globals
         .iter()
@@ -1056,7 +1056,7 @@ pub(in crate::passes) fn rewrite_thread_local_aggregate_prefix_stores(
     function_idx: usize,
 ) {
     let value_types = function_value_types(ctx, function_idx);
-    let mut pointer_types = HashMap::new();
+    let mut pointer_types = HashMap::default();
     for instruction in ctx
         .new_globals
         .iter()
@@ -1113,7 +1113,7 @@ pub(in crate::passes) fn rewrite_thread_local_aggregate_prefix_stores(
         None
     };
 
-    let mut plans = HashMap::new();
+    let mut plans = HashMap::default();
     for (block_idx, block) in ctx.module.functions[function_idx].blocks.iter().enumerate() {
         for (instruction_idx, instruction) in block.instructions.iter().enumerate() {
             if instruction.class.opcode != Op::Store || instruction.operands.len() < 2 {

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{HashMap, HashSet};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LinkedFunctionLinkage {
@@ -118,8 +118,8 @@ pub fn specialize_opaque_triangle_intersection_tables(
     let entry_signature = signatures.get(&entry_global).ok_or_else(|| {
         format!("intersection-table entry function {entry_name:?} is not defined")
     })?;
-    let mut flow = HashMap::<(String, usize), &IntersectionFunctionTable>::new();
-    let mut embedded_roots = HashMap::<String, Vec<&IntersectionFunctionTable>>::new();
+    let mut flow = HashMap::<(String, usize), &IntersectionFunctionTable>::default();
+    let mut embedded_roots = HashMap::<String, Vec<&IntersectionFunctionTable>>::default();
     for table in &linkage.intersection_tables {
         let parameter_index = table.source.parameter_index();
         if table.size == 0 {
@@ -168,8 +168,8 @@ pub fn specialize_opaque_triangle_intersection_tables(
 
     let mut output = String::with_capacity(entry_ll.len());
     let mut current = None::<String>;
-    let mut tables = HashMap::<String, &IntersectionFunctionTable>::new();
-    let mut embedded_pointers = HashMap::<String, &IntersectionFunctionTable>::new();
+    let mut tables = HashMap::<String, &IntersectionFunctionTable>::default();
+    let mut embedded_pointers = HashMap::<String, &IntersectionFunctionTable>::default();
     for line in entry_ll.lines() {
         let trimmed = line.trim_start();
         if let Some(global) = definition_global(trimmed) {
@@ -402,8 +402,8 @@ fn propagate_intersection_table_flow<'a>(
     loop {
         let mut changed = false;
         let mut current = None::<String>;
-        let mut tables = HashMap::<String, &'a IntersectionFunctionTable>::new();
-        let mut embedded_pointers = HashMap::<String, &'a IntersectionFunctionTable>::new();
+        let mut tables = HashMap::<String, &'a IntersectionFunctionTable>::default();
+        let mut embedded_pointers = HashMap::<String, &'a IntersectionFunctionTable>::default();
         for line in ll.lines() {
             let trimmed = line.trim_start();
             if let Some(global) = definition_global(trimmed) {
@@ -489,8 +489,8 @@ pub fn specialize_visible_function_references(
         .iter()
         .map(|reference| (reference.symbol.as_str(), reference))
         .collect::<HashMap<_, _>>();
-    let mut used = HashSet::<&str>::new();
-    let mut appended_modules = HashSet::<&str>::new();
+    let mut used = HashSet::<&str>::default();
+    let mut appended_modules = HashSet::<&str>::default();
     let mut pending = Vec::<&LinkedFunctionReference>::new();
     let mut output = rewrite_visible_reference_stubs(entry_ll, &authored, &mut used, &mut pending)?;
 
@@ -588,7 +588,7 @@ fn air_visible_function_references(
 ) -> Result<Vec<AirVisibleFunctionReference>, String> {
     const MARKER: &str = "!\"air.visible_function_reference\", ptr ";
     let mut references = Vec::new();
-    let mut stubs = HashMap::<String, String>::new();
+    let mut stubs = HashMap::<String, String>::default();
     for line in module.lines() {
         let Some(marker) = line.find(MARKER) else {
             continue;
@@ -689,7 +689,7 @@ pub fn trace_visible_function_table_parameters(
         })
         .collect::<Vec<_>>();
     let (signatures, flow) = visible_table_flow(entry_ll, entry_name, &tables)?;
-    let mut values = HashMap::<String, HashSet<String>>::new();
+    let mut values = HashMap::<String, HashSet<String>>::default();
     for ((function, ordinal), _) in flow.table_parameters {
         let parameter = signatures
             .get(&function)
@@ -763,14 +763,14 @@ pub fn specialize_visible_function_tables(
         argument_types: Vec<String>,
     }
 
-    let mut tables_by_value = HashMap::<String, &LinkedFunctionTable>::new();
-    let mut pointers = HashMap::<String, PointerTrace<'_>>::new();
-    let mut sentinel_integers = HashMap::<String, PointerTrace<'_>>::new();
+    let mut tables_by_value = HashMap::<String, &LinkedFunctionTable>::default();
+    let mut pointers = HashMap::<String, PointerTrace<'_>>::default();
+    let mut sentinel_integers = HashMap::<String, PointerTrace<'_>>::default();
     let mut output = String::with_capacity(entry_ll.len());
     let mut linked_modules = Vec::<&str>::new();
-    let mut linked_module_set = HashSet::<&str>::new();
+    let mut linked_module_set = HashSet::<&str>::default();
     let mut dispatchers = Vec::<Dispatcher<'_>>::new();
-    let mut dispatcher_names = HashMap::<String, String>::new();
+    let mut dispatcher_names = HashMap::<String, String>::default();
     let mut presence_counter = 0usize;
     let mut current_function = None::<String>;
     for line in entry_ll.lines() {
@@ -1262,7 +1262,7 @@ pub fn link_extern_definitions(entry_ll: &str, modules: &[String]) -> Result<Str
             .collect()
     }
     let mut out = strip_dyld_tables(entry_ll)?;
-    let mut appended = HashSet::<usize>::new();
+    let mut appended = HashSet::<usize>::default();
     loop {
         let have = defined(&out);
         let mut pending: Vec<String> = declared(&out)
@@ -1479,8 +1479,8 @@ mod extern_link_tests {
 }
 
 fn validate_linkage(linkage: &LinkedFunctionLinkage) -> Result<(), String> {
-    let mut parameters = HashSet::new();
-    let mut symbols = HashMap::<&str, &str>::new();
+    let mut parameters = HashSet::default();
+    let mut symbols = HashMap::<&str, &str>::default();
     for reference in &linkage.visible_references {
         if !module_defines(&reference.module_ll, &reference.symbol) {
             return Err(format!(
@@ -1546,7 +1546,7 @@ fn validate_linkage(linkage: &LinkedFunctionLinkage) -> Result<(), String> {
 }
 
 fn function_signatures(ll: &str) -> Result<HashMap<String, FunctionSignature>, String> {
-    let mut functions = HashMap::new();
+    let mut functions = HashMap::default();
     let mut signature = String::new();
     let mut collecting = false;
     for line in ll.lines() {
@@ -1680,8 +1680,8 @@ fn propagate_linked_flow<'a>(
     loop {
         let mut changed = false;
         let mut current = None::<String>;
-        let mut tables = HashMap::<String, &'a LinkedFunctionTable>::new();
-        let mut pointers = HashMap::<String, &'a LinkedFunctionTable>::new();
+        let mut tables = HashMap::<String, &'a LinkedFunctionTable>::default();
+        let mut pointers = HashMap::<String, &'a LinkedFunctionTable>::default();
         for line in ll.lines() {
             let trimmed = line.trim_start();
             if let Some(global) = definition_global(trimmed) {
@@ -2767,7 +2767,10 @@ entry:
             intersection_tables: vec![],
         };
         let traced = trace_visible_function_table_parameters(entry, "main", &[1]).unwrap();
-        assert_eq!(traced["@main"], HashSet::from(["%table".to_string()]));
+        assert_eq!(
+            traced["@main"],
+            crate::fxhash::set_from(["%table".to_string()])
+        );
         let specialized = specialize_visible_function_tables(entry, "main", &linked).unwrap();
         assert!(specialized.contains("call i32 @invoke(ptr %typed, i32 41, i32 %slot)"));
         assert!(specialized.contains(
@@ -2795,8 +2798,14 @@ entry:
 }
 "#;
         let traced = trace_visible_function_table_parameters(entry, "main", &[0]).unwrap();
-        assert_eq!(traced["@main"], HashSet::from(["%table".to_string()]));
-        assert_eq!(traced["@invoke"], HashSet::from(["%functions".to_string()]));
+        assert_eq!(
+            traced["@main"],
+            crate::fxhash::set_from(["%table".to_string()])
+        );
+        assert_eq!(
+            traced["@invoke"],
+            crate::fxhash::set_from(["%functions".to_string()])
+        );
     }
 
     #[test]

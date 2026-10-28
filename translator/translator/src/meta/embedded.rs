@@ -1,8 +1,8 @@
 use super::types::{member_tuples, tokenize};
 use super::{arg_type_name, role_strings, texture_shape_from_name, BufferAccess, TextureFormat};
+use crate::fxhash::HashMap;
 use crate::passes::ImageComp;
 use spirv::Dim;
-use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct ArgumentBuffers(Vec<(u32, u32, u32)>);
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn embedded_texture_detection_includes_read_and_write_fields() {
-        let mut nodes = HashMap::new();
+        let mut nodes = HashMap::default();
         nodes.insert(
             10,
             r#"i32 0, i32 8, i32 0, !"texture2d<float, read>", !"input", !"air.indirect_argument", !20, i32 8, i32 8, i32 0, !"texture2d<float, write>", !"output", !"air.indirect_argument", !21"#.to_string(),
@@ -433,7 +433,7 @@ mod tests {
 
     #[test]
     fn embedded_fixed_depth_array_preserves_handle_count_and_image_shape() {
-        let mut nodes = HashMap::new();
+        let mut nodes = HashMap::default();
         nodes.insert(
             10,
             r#"i32 0, i32 16, i32 0, !"array<depth2d_array<float, sample>, 2>", !"depth", !"air.indirect_argument", !20"#.to_string(),
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn embedded_c_array_member_takes_its_length_from_the_member_tuple() {
-        let mut nodes = HashMap::new();
+        let mut nodes = HashMap::default();
         nodes.insert(
             10,
             r#"i32 0, i32 8, i32 32, !"texture2d<float, sample>", !"slices", !"air.indirect_argument", !20"#.to_string(),
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn a_c_array_of_buffer_handles_surfaces_one_resource_per_element() {
-        let mut nodes = HashMap::new();
+        let mut nodes = HashMap::default();
         nodes.insert(
             10,
             r#"i32 0, i32 8, i32 2, !"half4", !"bufs", !"air.indirect_argument", !20, i32 16, i32 4, i32 4, !"uint", !"counts", !"air.indirect_argument", !21"#.to_string(),
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn embedded_argument_detection_classifies_only_nested_buffers_as_device_resources() {
-        let mut nodes = HashMap::new();
+        let mut nodes = HashMap::default();
         nodes.insert(
             10,
             r#"i32 0, i32 4, i32 0, !"uint", !"count", !"air.indirect_argument", !20, i32 8, i32 8, i32 0, !"float", !"values", !"air.indirect_argument", !21"#.to_string(),
@@ -538,7 +538,7 @@ mod tests {
 
     #[test]
     fn a_wrapped_texture_binds_at_the_summed_argument_id() {
-        let nodes = HashMap::from([
+        let nodes = crate::fxhash::map_from([
             (
                 10_u32,
                 r#"!"air.struct_type_info", !11, i32 64, i32 8, i32 0, !"deep", !"d", !"air.indirect_argument", i32 30, i32 72, i32 8, i32 0, !"texture2d<float, sample>", !"flat", !"air.indirect_argument", !14"#.to_string(),
@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn an_arrayed_wrapper_is_refused_rather_than_bound_at_element_zero() {
-        let nodes = HashMap::from([
+        let nodes = crate::fxhash::map_from([
             (
                 10_u32,
                 r#"!"air.struct_type_info", !11, i32 0, i32 48, i32 9, !"MaterialProperty", !"slot", !"air.indirect_argument", i32 0"#.to_string(),
@@ -601,7 +601,7 @@ mod tests {
 
     #[test]
     fn a_wrapped_buffer_is_named_unsurfaced_and_is_not_an_embedded_argument() {
-        let nodes = HashMap::from([
+        let nodes = crate::fxhash::map_from([
             (
                 10_u32,
                 r#"!"air.struct_type_info", !11, i32 16, i32 8, i32 0, !"wrapper", !"w", !"air.indirect_argument", i32 4, i32 24, i32 8, i32 0, !"float", !"values", !"air.indirect_argument", !13"#.to_string(),
@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn an_inline_nested_struct_does_not_shift_its_siblings() {
-        let nodes = HashMap::from([
+        let nodes = crate::fxhash::map_from([
             (
                 10_u32,
                 r#"i32 0, i32 4, i32 0, !"uint", !"count", !"air.indirect_argument", !11, !"air.struct_type_info", !12, i32 8, i32 16, i32 0, !"Params", !"params", i32 24, i32 8, i32 0, !"texture2d<float, sample>", !"tex", !"air.indirect_argument", !13"#.to_string(),
@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn the_synthetic_texture_index_does_not_depend_on_the_argument_list_order() {
-        let nodes = HashMap::from([
+        let nodes = crate::fxhash::map_from([
             (
                 10_u32,
                 r#"i32 0, i32 8, i32 0, !"texture2d<float, sample>", !"first", !"air.indirect_argument", !12"#

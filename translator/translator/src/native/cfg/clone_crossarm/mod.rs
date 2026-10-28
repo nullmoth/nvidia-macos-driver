@@ -2,7 +2,7 @@ use super::blocks::{block_successors, conditional_branch_targets};
 use super::loopforest::{analyze, post_idom, selection_merges};
 use super::structured_emit::role_for_name;
 use super::BodyBlock;
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{HashMap, HashSet};
 
 mod detect;
 pub(in crate::native) use detect::*;
@@ -32,7 +32,7 @@ mod tests {
     fn blk(name: &str, lines: &[&str]) -> BodyBlock {
         let name = format!("%{name}");
         let lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
-        let typed = crate::native::tir::lower_block_carrier(&name, &lines, &HashMap::new());
+        let typed = crate::native::tir::lower_block_carrier(&name, &lines, &HashMap::default());
         BodyBlock {
             name,
             role: crate::native::cfg::BlockRole::Normal,
@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn rename_is_boundary_aware() {
-        let mut map = HashMap::new();
+        let mut map = HashMap::default();
         map.insert("%1".to_string(), "%xa0_1".to_string());
         assert_eq!(
             rename_tokens("  %r = add i32 %1, %10", &map),
@@ -338,7 +338,7 @@ mod tests {
         ];
         assert!(cloned_labels_overlap_ssa_values(
             &blocks,
-            &HashSet::from(["%shared".to_string()])
+            &crate::fxhash::set_from(["%shared".to_string()])
         ));
     }
 

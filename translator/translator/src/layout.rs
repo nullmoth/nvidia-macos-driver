@@ -1,9 +1,9 @@
+use crate::fxhash::HashMap;
 use crate::meta::AirType;
 use crate::native::ir::{ll_type_from_air_type, round_up_u64, LlType};
 use crate::spirv_module::Instruction;
 use crate::spirv_module::Operand;
 use spirv::{Op, Word};
-use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AirDataLayout {
@@ -12,7 +12,7 @@ pub(crate) struct AirDataLayout {
 
 impl AirDataLayout {
     pub(crate) fn parse(layout: &str) -> Result<Self, String> {
-        let mut vector_abi_align_bits = HashMap::new();
+        let mut vector_abi_align_bits = HashMap::default();
         for component in layout.split('-') {
             let Some(rest) = component.strip_prefix('v') else {
                 continue;
@@ -488,7 +488,7 @@ mod tests {
         let byte_ty = 1;
         let vector_ty = 2;
         let struct_ty = 3;
-        let defs = HashMap::from([
+        let defs = crate::fxhash::map_from([
             (
                 byte_ty,
                 Instruction::new(
@@ -533,7 +533,7 @@ mod tests {
         let uint_ty = 1;
         let struct_ty = 2;
         let runtime_array_ty = 3;
-        let mut defs = HashMap::new();
+        let mut defs = HashMap::default();
         defs.insert(
             uint_ty,
             Instruction::new(
@@ -562,7 +562,7 @@ mod tests {
             ),
         );
 
-        let offsets = HashMap::from([(struct_ty, vec![0, 16])]);
+        let offsets = crate::fxhash::map_from([(struct_ty, vec![0, 16])]);
         let rule = SpirvLayout::air_offsets(&offsets, None);
 
         assert_eq!(spirv_size_align(struct_ty, &defs, rule), (20, 4));
@@ -588,7 +588,7 @@ mod tests {
         let vec3_array_ty = 7u32;
         let len2 = 8u32;
         let uint_ty = 9u32;
-        let mut defs = HashMap::new();
+        let mut defs = HashMap::default();
         defs.insert(
             float_ty,
             Instruction::new(
@@ -670,7 +670,7 @@ mod tests {
         let uchar_ty = 1u32;
         let v3uchar_ty = 2u32;
         let struct_ty = 3u32;
-        let mut defs = HashMap::new();
+        let mut defs = HashMap::default();
         defs.insert(
             uchar_ty,
             Instruction::new(
@@ -738,7 +738,7 @@ mod tests {
                         Operand::LiteralBit32(0),
                     ]
                 };
-                let defs = HashMap::from([
+                let defs = crate::fxhash::map_from([
                     (
                         component_ty,
                         Instruction::new(scalar_op, None, Some(component_ty), scalar_operands),

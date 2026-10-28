@@ -1,6 +1,6 @@
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::{Instruction, Module, Operand};
 use spirv::{Op, StorageClass, Word};
-use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy)]
 struct Plan {
@@ -23,13 +23,13 @@ enum Base {
 }
 
 pub(super) fn close_private_vector_word_views(module: &mut Module) -> bool {
-    let mut pointer_info = HashMap::<Word, (StorageClass, Word)>::new();
-    let mut vector_info = HashMap::<Word, (Word, u32)>::new();
-    let mut scalar_bits = HashMap::<Word, u32>::new();
-    let mut constants = HashMap::<Word, u32>::new();
-    let mut constant_ids = HashMap::<(Word, u32), Word>::new();
-    let mut arrays = HashMap::<Word, (Word, Word)>::new();
-    let mut pair_type = HashMap::<Word, Word>::new();
+    let mut pointer_info = HashMap::<Word, (StorageClass, Word)>::default();
+    let mut vector_info = HashMap::<Word, (Word, u32)>::default();
+    let mut scalar_bits = HashMap::<Word, u32>::default();
+    let mut constants = HashMap::<Word, u32>::default();
+    let mut constant_ids = HashMap::<(Word, u32), Word>::default();
+    let mut arrays = HashMap::<Word, (Word, Word)>::default();
+    let mut pair_type = HashMap::<Word, Word>::default();
     for instruction in &module.types_global_values {
         let Some(id) = instruction.result_id else {
             continue;
@@ -96,8 +96,8 @@ pub(super) fn close_private_vector_word_views(module: &mut Module) -> bool {
         }
     }
 
-    let mut uses = HashMap::<Word, Vec<Op>>::new();
-    let mut access_defs = HashMap::<Word, Instruction>::new();
+    let mut uses = HashMap::<Word, Vec<Op>>::default();
+    let mut access_defs = HashMap::<Word, Instruction>::default();
     for function in &module.functions {
         for block in &function.blocks {
             for instruction in &block.instructions {
@@ -125,7 +125,7 @@ pub(super) fn close_private_vector_word_views(module: &mut Module) -> bool {
         .unwrap_or(1);
     let mut new_pair_types = Vec::<(Word, Instruction)>::new();
     let mut new_constants = Vec::<Instruction>::new();
-    let mut plans = HashMap::<Word, Plan>::new();
+    let mut plans = HashMap::<Word, Plan>::default();
     for function in &module.functions {
         for block in &function.blocks {
             for instruction in &block.instructions {

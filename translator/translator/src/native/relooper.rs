@@ -1,8 +1,8 @@
+use crate::fxhash::{HashMap, HashSet};
 use crate::spirv_module::Module;
 use crate::spirv_module::Operand;
 use crate::spirv_module::{Block, Function, Instruction};
 use spirv::{Op, StorageClass, Word};
-use std::collections::{HashMap, HashSet};
 
 pub(super) struct ReloopDecline {
     pub(super) function: Option<Word>,
@@ -90,15 +90,15 @@ pub(super) struct TypeCtx<'a> {
 
 impl<'a> TypeCtx<'a> {
     pub(super) fn new(module: &Module, next_id: &'a mut Word) -> Self {
-        let mut int_types = HashMap::new();
-        let mut int_widths = HashMap::new();
+        let mut int_types = HashMap::default();
+        let mut int_widths = HashMap::default();
         let mut bool_type = None;
-        let mut pointer_types = HashMap::new();
-        let mut int_consts = HashMap::new();
-        let mut type_op = HashMap::new();
-        let mut type_defs = HashMap::new();
-        let mut value_types = HashMap::new();
-        let mut const_values = HashMap::new();
+        let mut pointer_types = HashMap::default();
+        let mut int_consts = HashMap::default();
+        let mut type_op = HashMap::default();
+        let mut type_defs = HashMap::default();
+        let mut value_types = HashMap::default();
+        let mut const_values = HashMap::default();
         for inst in &module.types_global_values {
             let Some(rid) = inst.result_id else { continue };
             type_op.insert(rid, inst.class.opcode);
@@ -268,7 +268,7 @@ impl<'a> TypeCtx<'a> {
 
     fn has_explicit_layout_reachable(&self, ty: Word) -> bool {
         let mut pending = vec![ty];
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         while let Some(current) = pending.pop() {
             if !seen.insert(current) {
                 continue;
@@ -644,7 +644,7 @@ fn rewrite_function(
         entry_term,
         Term::Branch(_) | Term::BranchCond(..) | Term::Switch(..)
     );
-    let mut all_targets: HashSet<Word> = HashSet::new();
+    let mut all_targets: HashSet<Word> = HashSet::default();
     for t in &terms {
         match t {
             Term::Branch(x) => {
@@ -683,12 +683,12 @@ fn rewrite_function(
         return bail("entry-has-phi");
     }
 
-    let mut def_block: HashMap<Word, usize> = HashMap::new();
-    let mut phis: HashMap<Word, (Word, Vec<(Word, Word)>)> = HashMap::new();
-    let mut value_type: HashMap<Word, Word> = HashMap::new();
+    let mut def_block: HashMap<Word, usize> = HashMap::default();
+    let mut phis: HashMap<Word, (Word, Vec<(Word, Word)>)> = HashMap::default();
+    let mut value_type: HashMap<Word, Word> = HashMap::default();
     let mut variables: Vec<Instruction> = Vec::new();
-    let mut variable_ids: HashSet<Word> = HashSet::new();
-    let mut ptr_def: HashMap<Word, Instruction> = HashMap::new();
+    let mut variable_ids: HashSet<Word> = HashSet::default();
+    let mut ptr_def: HashMap<Word, Instruction> = HashMap::default();
 
     for (bi, block) in function.blocks.iter().enumerate() {
         for inst in &block.instructions {
@@ -807,8 +807,8 @@ fn rewrite_function(
             || variable_ids.contains(id)
     };
 
-    let mut remat: HashMap<Word, Instruction> = HashMap::new();
-    let mut remat_scalar_demote: HashSet<Word> = HashSet::new();
+    let mut remat: HashMap<Word, Instruction> = HashMap::default();
+    let mut remat_scalar_demote: HashSet<Word> = HashSet::default();
     loop {
         let mut newly: Vec<(Word, Instruction, Vec<Word>)> = Vec::new();
         for (&v, inst) in &ptr_def {
@@ -905,7 +905,7 @@ fn rewrite_function(
     }
     demote.extend(remat_scalar_demote);
 
-    let mut remat_phi: HashMap<Word, (Word, Vec<(Word, Word)>)> = HashMap::new();
+    let mut remat_phi: HashMap<Word, (Word, Vec<(Word, Word)>)> = HashMap::default();
     loop {
         let mut added = false;
         for (&pid, (pty, incoming)) in &phis {
@@ -933,7 +933,7 @@ fn rewrite_function(
         demote.remove(pid);
     }
 
-    let mut remat_phi_invariant: HashSet<Word> = HashSet::new();
+    let mut remat_phi_invariant: HashSet<Word> = HashSet::default();
     for (&pid, (_, incoming)) in &remat_phi {
         let key_of = |v: Word| -> (u32, Vec<Operand>) {
             match remat.get(&v) {
@@ -1048,7 +1048,7 @@ fn rewrite_function(
 
     let mut demote_order: Vec<Word> = demote.iter().copied().collect();
     demote_order.sort_unstable();
-    let mut spill: HashMap<Word, Spill> = HashMap::new();
+    let mut spill: HashMap<Word, Spill> = HashMap::default();
     let mut spill_vars: Vec<Instruction> = Vec::new();
     for &v in &demote_order {
         let ty = value_type[&v];
@@ -1057,7 +1057,7 @@ fn rewrite_function(
 
     let mut remat_phi_order: Vec<Word> = remat_phi.keys().copied().collect();
     remat_phi_order.sort_unstable();
-    let mut phi_tag: HashMap<Word, Word> = HashMap::new();
+    let mut phi_tag: HashMap<Word, Word> = HashMap::default();
     for &pid in &remat_phi_order {
         let var = tc.fresh();
         spill_vars.push(Instruction::new(
@@ -1147,8 +1147,8 @@ fn rewrite_function(
             group_merges[bi / max_blocks]
         };
         let mut prelude: Vec<Instruction> = Vec::new();
-        let mut local_load: HashMap<Word, Word> = HashMap::new();
-        let mut local_remat: HashMap<Word, Word> = HashMap::new();
+        let mut local_load: HashMap<Word, Word> = HashMap::default();
+        let mut local_remat: HashMap<Word, Word> = HashMap::default();
 
         let mut body: Vec<Instruction> = Vec::new();
         let n = block.instructions.len();
@@ -1814,7 +1814,7 @@ fn block_is_convergent(block: &Block, convergent: &HashSet<Word>) -> bool {
 }
 
 fn convergent_functions(module: &Module) -> HashSet<Word> {
-    let mut convergent = HashSet::new();
+    let mut convergent = HashSet::default();
     loop {
         let before = convergent.len();
         for function in &module.functions {
@@ -2157,8 +2157,11 @@ mod tests {
         assert_eq!(ceiling, MAX_RELOOPER_BLOCKS * MAX_RELOOPER_GROUPS);
 
         let mut module = module_with_block_count(ceiling + 1);
-        let (rewrote, declines) =
-            rewrite_selected_to_relooper(&mut module, MAX_RELOOPER_BLOCKS, &HashSet::from([1]));
+        let (rewrote, declines) = rewrite_selected_to_relooper(
+            &mut module,
+            MAX_RELOOPER_BLOCKS,
+            &crate::fxhash::set_from([1]),
+        );
         assert!(!rewrote);
         assert_eq!(declines.len(), 1);
         assert_eq!(declines[0].reason, TOO_MANY_BLOCKS);
@@ -2166,8 +2169,11 @@ mod tests {
         assert_eq!(declines[0].function, Some(1));
 
         let mut module = module_with_block_count(ceiling);
-        let (_, declines) =
-            rewrite_selected_to_relooper(&mut module, MAX_RELOOPER_BLOCKS, &HashSet::from([1]));
+        let (_, declines) = rewrite_selected_to_relooper(
+            &mut module,
+            MAX_RELOOPER_BLOCKS,
+            &crate::fxhash::set_from([1]),
+        );
         assert_eq!(declines.len(), 1);
         assert_ne!(declines[0].reason, TOO_MANY_BLOCKS);
     }
@@ -2218,7 +2224,7 @@ OpFunctionEnd
         let (rewrote, declines) = rewrite_selected_to_relooper(
             &mut module,
             MAX_RELOOPER_BLOCKS,
-            &HashSet::from([helper_id]),
+            &crate::fxhash::set_from([helper_id]),
         );
         assert!(rewrote);
         assert!(declines.is_empty());
@@ -2395,7 +2401,7 @@ OpExecutionMode %main OriginUpperLeft
     }
 
     fn barrier_iterations(module: &Module, input: u64) -> Vec<Vec<u32>> {
-        let mut values: HashMap<Word, u64> = HashMap::new();
+        let mut values: HashMap<Word, u64> = HashMap::default();
         for instruction in &module.types_global_values {
             let Some(id) = instruction.result_id else {
                 continue;
@@ -2426,7 +2432,7 @@ OpExecutionMode %main OriginUpperLeft
             .filter(|instruction| instruction.class.opcode == Op::Variable)
             .filter_map(|instruction| instruction.result_id)
             .collect();
-        let mut memory: HashMap<Word, u64> = HashMap::new();
+        let mut memory: HashMap<Word, u64> = HashMap::default();
         let mut loops: Vec<(Word, Word, u32)> = Vec::new();
         let mut barriers = Vec::new();
         let mut current = block_id(&function.blocks[0]);
