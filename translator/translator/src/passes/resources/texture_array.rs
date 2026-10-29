@@ -404,7 +404,7 @@ pub(crate) fn route_texture_array_elements_through_heap(ctx: &mut Ctx, entry_idx
     {
         return;
     }
-    let mut sites: Vec<(usize, usize, Word, Word, Word, Word, u32)> = Vec::new();
+    let mut sites: Vec<(usize, usize, Word, Word, Word, Word, u32, u32)> = Vec::new();
     for (block_idx, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
         for (inst_idx, inst) in block.instructions.iter().enumerate() {
             if !matches!(inst.class.opcode, Op::AccessChain | Op::InBoundsAccessChain) {
@@ -413,12 +413,12 @@ pub(crate) fn route_texture_array_elements_through_heap(ctx: &mut Ctx, entry_idx
             let [Operand::IdRef(var), Operand::IdRef(idx)] = inst.operands.as_slice() else {
                 continue;
             };
-            let (Some(&base), Some(result), Some(result_ty)) =
+            let (Some(&(base, count)), Some(result), Some(result_ty)) =
                 (ctx.image_array_base.get(var), inst.result_id, inst.result_type)
             else {
                 continue;
             };
-            sites.push((block_idx, inst_idx, result, result_ty, *var, *idx, base));
+            sites.push((block_idx, inst_idx, result, result_ty, *var, *idx, base, count));
         }
     }
     if sites.is_empty() {
@@ -437,7 +437,7 @@ pub(crate) fn route_texture_array_elements_through_heap(ctx: &mut Ctx, entry_idx
         .filter_map(|inst| Some((inst.result_id?, inst.result_type?)))
         .collect();
     let mut replacements: HashMap<(usize, usize), Vec<Instruction>> = HashMap::default();
-    for (block_idx, inst_idx, result, result_ty, var, idx, base) in sites {
+    for (block_idx, inst_idx, result, result_ty, var, idx, base, count) in sites {
         let &(elem_ty, dims, comp, _) = ctx.image_array_vars.get(&var).unwrap();
         let mut out = Vec::new();
         // the element index as a 32-bit unsigned value: AIR's dynamic indices are 64-bit (a GEP index), a
@@ -463,13 +463,28 @@ pub(crate) fn route_texture_array_elements_through_heap(ctx: &mut Ctx, entry_idx
             }
             _ => continue,
         };
+        // an index past the array reads its last element instead of another table word (a buffer address)
+        let last = ctx.const_uint(count.saturating_sub(1));
+        let clamped = ctx.module.fresh_id();
+        let glsl = ctx.glsl();
+        out.push(Instruction::new(
+            Op::ExtInst,
+            Some(uint_ty),
+            Some(clamped),
+            vec![
+                Operand::IdRef(glsl),
+                Operand::LiteralExtInstInteger(spirv::GlslStd450Op::UMin as u32),
+                Operand::IdRef(index),
+                Operand::IdRef(last),
+            ],
+        ));
         let first = ctx.const_uint(super::TEXTURE_INDEX_BASE + base);
         let cel = ctx.module.fresh_id();
         out.push(Instruction::new(
             Op::IAdd,
             Some(uint_ty),
             Some(cel),
-            vec![Operand::IdRef(first), Operand::IdRef(index)],
+            vec![Operand::IdRef(first), Operand::IdRef(clamped)],
         ));
         let wptr = ctx.module.fresh_id();
         let word = ctx.module.fresh_id();

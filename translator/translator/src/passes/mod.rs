@@ -309,8 +309,8 @@ struct Ctx {
     image_multisampled: HashSet<Word>,
     image_storage: HashSet<Word>,
     image_array_vars: HashMap<Word, (Word, (Dim, bool), ImageComp, bool)>,
-    /// sampled texture-array entry parameters -> the Metal texture index of their element 0
-    image_array_base: HashMap<Word, u32>,
+    /// sampled texture-array entry parameters -> (Metal texture index of element 0, element count)
+    image_array_base: HashMap<Word, (u32, u32)>,
     sampler_array_vars: HashMap<Word, Vec<Word>>,
     bindless_heap_vars: HashMap<Word, Word>,
     address_table: Option<(Word, Word, Option<Word>)>,
