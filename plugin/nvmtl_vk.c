@@ -8341,6 +8341,14 @@ int nvmtl_vk_cmd_copy_image_sub3(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uin
             const uint32_t rdw = (dw + bw - 1) / bw * bw, rdh = (dh + bh - 1) / bh * bh;
             if (sx < sw && dx < dw && w <= rw - sx && w <= rdw - dx) { if (w > sw - sx) w = sw - sx; if (w > dw - dx) w = dw - dx; }
             if (sy < sh && dy < dh && h <= rh - sy && h <= rdh - dy) { if (h > sh - sy) h = sh - sy; if (h > dh - dy) h = dh - dy; }
+            // Cropping at the destination edge must not split a source block. Offsets stay block-aligned;
+            // a partial source block is valid only at the source mip's edge (vkCmdCopyImage-01728/01729).
+            if (sx % bw || dx % bw || sy % bh || dy % bh
+                || (w % bw && (uint64_t)sx + w != sw)
+                || (h % bh && (uint64_t)sy + h != sh)) {
+                nvlog("copy_image_sub: compressed region is not block-aligned or at the source mip edge");
+                return -1;
+            }
         }
     }
     if (sx > sw || w > sw - sx || sy > sh || h > sh - sy
