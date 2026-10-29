@@ -9,6 +9,7 @@ mod alloca;
 mod metadata_pointees;
 mod ordinary_inline;
 mod parse;
+pub(crate) mod parse_cache;
 mod pointer_pointees;
 mod raw_buffer;
 mod static_init;
