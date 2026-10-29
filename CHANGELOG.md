@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.6.4
+
+- three.js scenes with two or more shadow-casting lights render again in Chrome, Brave and other browsers: the shader translator refused a shader's array of samplers, and the page lost its WebGL2 context (#426, patch by Luminous418).
+- Machinarium, and other apps whose shaders were built with older Metal tools, draw their scenes: the translator did not recognise a sampler written directly into the shader code, and refused the shader (patch by daggersinmybackk).
+
 ## 2.6.3
 
 - Infuse and other players that scale video with Apple's Lanczos filter play again: the shader that filter uses was refused, and the app stopped with "Unable to get MPS kernel lanczosVerticalScale" (#405). Its output now matches a real Mac's pixel for pixel.
