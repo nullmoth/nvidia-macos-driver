@@ -40,8 +40,13 @@ pub(crate) fn lower_inline_sampler_constants(san_ll: &str) -> Cow<'_, str> {
             Some(rewritten) => body.push_str(&rewritten),
             None => body.push_str(line),
         }
+        // stop scanning as soon as the cap below is passed: the word search is linear in the words seen
+        if words.len() > 16 {
+            return Cow::Borrowed(san_ll);
+        }
     }
-    if words.is_empty() {
+    // a stage has 16 sampler indices; more distinct words than that is not a shader this rewrite is for
+    if words.is_empty() || words.len() > 16 {
         return Cow::Borrowed(san_ll);
     }
     let Some(globals_at) = first_function_line_offset(&body) else {
@@ -59,7 +64,12 @@ pub(crate) fn lower_inline_sampler_constants(san_ll: &str) -> Cow<'_, str> {
     if !body.ends_with('\n') {
         body.push('\n');
     }
-    let mut node = next_metadata_id(&body);
+    let Some(mut node) = next_metadata_id(&body) else {
+        return Cow::Borrowed(san_ll);
+    };
+    if node.checked_add(words.len() as u64).is_none() {
+        return Cow::Borrowed(san_ll);
+    }
     let mut refs = Vec::with_capacity(words.len());
     let mut nodes = String::new();
     for index in 0..words.len() {
@@ -133,7 +143,8 @@ fn first_function_line_offset(ll: &str) -> Option<usize> {
     None
 }
 
-fn next_metadata_id(ll: &str) -> u64 {
+/// One past the highest numbered metadata node; None when that would not fit (the module is left as it was).
+fn next_metadata_id(ll: &str) -> Option<u64> {
     ll.lines()
         .filter_map(|line| {
             let node = line.trim_start().strip_prefix('!')?;
@@ -144,7 +155,7 @@ fn next_metadata_id(ll: &str) -> u64 {
             digits.parse::<u64>().ok()
         })
         .max()
-        .map_or(0, |max| max + 1)
+        .map_or(Some(0), |max| max.checked_add(1))
 }
 
 #[cfg(test)]
