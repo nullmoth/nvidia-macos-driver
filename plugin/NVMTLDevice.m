@@ -24,6 +24,7 @@
 #include "nvmtl_log_failure.h"
 #include <sys/sysctl.h>
 #import <libproc.h>
+#import <mach-o/dyld.h>
 #ifndef NVMTL_RELEASE
 #define NVMTL_RELEASE 0
 #endif
@@ -505,51 +506,19 @@ static void nvmtl_nvenc_hevc_register(void)
 // get it by default: without it their GPU process cannot start. Electron stays opt-in (NVMTL_ANGLE_METAL=1) because it showed artifacts,
 // stutter and lost transparency on several cards. NVMTL_ANGLE_METAL=0 turns the rule off in every process. An existing
 // ANGLE override is kept; no sandbox setting is changed.
+// Detected by what the process has loaded, not by its name: ANGLE's Metal backend which may stays in libGLESv2.dylib / libEGL.dylib,
+// and it is that code which creates the Metal device and so loads this plugin. Any Chromium-based app (Chrome, Brave, Edge,
+// Vivaldi, Opera, Arc, Electron apps such as Discord, CEF hosts) is matched without a list of names, which is annoying to add manually. So I believe its more good approach. 
 static bool nvmtl_angle_chrome_family(void)
 {
-    const char *me = getprogname();
-    if (!me) return false;
-
-    // 1. By process name. "Helper" and "Edge" alone also match unrelated apps (every app's own helper tools,
-    // "EdgeView"), so Edge is matched by its full name and helpers through the framework check below.
-    if (strstr(me, "Chrome") != NULL ||
-        strstr(me, "Chromium") != NULL ||
-        strstr(me, "Electron") != NULL ||
-        strstr(me, "Brave") != NULL ||
-        strncmp(me, "Microsoft Edge", 14) == 0 ||
-        strstr(me, "Discord") != NULL) {
-        return true;
+    uint32_t n = _dyld_image_count();
+    for (uint32_t i = 0; i < n; i++) {
+        const char *p = _dyld_get_image_name(i);
+        if (!p) continue;
+        const char *b = strrchr(p, '/');
+        b = b ? b + 1 : p;
+        if (!strcmp(b, "libGLESv2.dylib") || !strcmp(b, "libEGL.dylib")) return true;
     }
-
-    // 2. Deep Path: Precise inspection based on file path features (mapping find command rules)
-    char path[PATH_MAX];
-    if (proc_pidpath(getpid(), path, sizeof(path)) <= 0) {
-        return false;
-    }
-
-    char app_path[PATH_MAX];
-    strlcpy(app_path, path, sizeof(app_path));
-
-    char *p = strstr(app_path, ".app");
-    if (p != NULL) {
-        *(p + 4) = '\0'; // Truncate to the root directory of .app
-
-        char check_buf[PATH_MAX];
-
-        // Corresponding to the full feature checks in the find command
-        snprintf(check_buf, sizeof(check_buf), "%s/Contents/Frameworks/libEGL.dylib", app_path);
-        if (access(check_buf, F_OK) == 0) return true;
-
-        snprintf(check_buf, sizeof(check_buf), "%s/Contents/Frameworks/Chromium Embedded Framework.framework", app_path);
-        if (access(check_buf, F_OK) == 0) return true;
-
-        snprintf(check_buf, sizeof(check_buf), "%s/Contents/Frameworks/Electron Framework.framework", app_path);
-        if (access(check_buf, F_OK) == 0) return true;
-
-        snprintf(check_buf, sizeof(check_buf), "%s/Contents/Frameworks/libffmpeg.dylib", app_path);
-        if (access(check_buf, F_OK) == 0) return true;
-    }
-
     return false;
 }
 __attribute__((constructor)) static void nvmtl_angle_allow_nvidia(void)
