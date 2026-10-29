@@ -126,7 +126,11 @@ pub(in crate::native) fn requires_shared_loop_entry_ownership(blocks: &[BodyBloc
 
 fn block_body_changed(left: &BodyBlock, right: &BodyBlock) -> bool {
     match (&left.typed, &right.typed) {
-        (Some(l), Some(r)) => format!("{l:?}") != format!("{r:?}"),
+        // The same `Arc` is the same body; otherwise the debug texts decide, each formatted once per planner call.
+        (Some(l), Some(r)) => {
+            !std::sync::Arc::ptr_eq(l, r)
+                && super::plan_cache::body_text(l) != super::plan_cache::body_text(r)
+        }
         (None, None) => false,
         _ => true,
     }

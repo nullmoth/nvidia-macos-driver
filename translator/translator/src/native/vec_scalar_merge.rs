@@ -4,7 +4,16 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub(super) fn lower_vector_scalar_pointer_merge(san_ll: &str) -> Cow<'_, str> {
-    lower_impl(san_ll, true)
+    // the primary emit, both raw construction tiers and reflection lower the same text: once per translation
+    match crate::native::ir::parse_cache::text_pass("vector_scalar_pointer_merge", san_ll, |text| {
+        match lower_impl(text, true) {
+            Cow::Borrowed(_) => None,
+            Cow::Owned(out) => Some(out),
+        }
+    }) {
+        Some(out) => Cow::Owned(out),
+        None => Cow::Borrowed(san_ll),
+    }
 }
 
 fn lower_impl(san_ll: &str, widen: bool) -> Cow<'_, str> {

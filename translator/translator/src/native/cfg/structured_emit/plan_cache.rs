@@ -59,6 +59,49 @@ struct Cache {
     selection: Vec<SelectionEntry>,
 }
 
+/// Kept apart from `CACHE`: a body's text is asked for while a lookup holds `CACHE` borrowed.
+type Texts = HashMap<usize, (std::sync::Weak<TirBlock>, std::rc::Rc<str>)>;
+
+thread_local! {
+    static TEXTS: RefCell<Texts> = RefCell::new(Texts::default());
+}
+
+type TirBlock = crate::native::tir::TirBlock;
+
+/// Bodies whose debug text is kept per planner call. Measured on Cyberpunk's shaders, formatting the same bodies again
+/// for every comparison was 8% of all translation time; a lookup past the cap formats without storing.
+const MAX_TEXTS: usize = 4096;
+
+/// The debug text of `body`, which is what two bodies with different `Arc`s are compared by. While a `Scope` is held it
+/// is formatted once per body: the entry keeps a `Weak` to the body, which stays upgradable only while that allocation
+/// holds the same value (`Arc::make_mut` on a body nobody else holds moves it to a new allocation and the `Weak` stops
+/// upgrading, and while the `Weak` exists the allocation cannot be reused for another body), so a stored text is never
+/// served for a changed body.
+pub(super) fn body_text(body: &Arc<TirBlock>) -> std::rc::Rc<str> {
+    let key = Arc::as_ptr(body) as usize;
+    if !active() {
+        return std::rc::Rc::from(format!("{body:?}"));
+    }
+    let stored = TEXTS.with(|texts| {
+        texts
+            .borrow()
+            .get(&key)
+            .filter(|(weak, _)| weak.upgrade().is_some_and(|live| Arc::ptr_eq(&live, body)))
+            .map(|(_, text)| text.clone())
+    });
+    if let Some(text) = stored {
+        return text;
+    }
+    let text: std::rc::Rc<str> = std::rc::Rc::from(format!("{body:?}"));
+    TEXTS.with(|texts| {
+        let mut texts = texts.borrow_mut();
+        if texts.len() < MAX_TEXTS || texts.contains_key(&key) {
+            texts.insert(key, (Arc::downgrade(body), text.clone()));
+        }
+    });
+    text
+}
+
 thread_local! {
     static CACHE: RefCell<Cache> = RefCell::new(Cache::default());
 }
@@ -88,6 +131,7 @@ impl Drop for Scope {
             if cache.depth == 0 {
                 cache.loop_merges.clear();
                 cache.selection.clear();
+                TEXTS.with(|texts| texts.borrow_mut().clear());
             }
         });
     }
@@ -103,7 +147,7 @@ fn same_blocks(left: &[BodyBlock], right: &[BodyBlock]) -> bool {
             l.name == r.name
                 && l.role == r.role
                 && match (&l.typed, &r.typed) {
-                    (Some(a), Some(b)) => Arc::ptr_eq(a, b) || format!("{a:?}") == format!("{b:?}"),
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b) || body_text(a) == body_text(b),
                     (None, None) => true,
                     _ => false,
                 }

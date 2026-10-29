@@ -162,6 +162,7 @@ fn options_for_air(
     Ok(options)
 }
 
+#[derive(Clone)]
 struct StageMeta {
     frag: Option<meta::FragMeta>,
     vert: Option<meta::VertMeta>,
@@ -169,7 +170,39 @@ struct StageMeta {
     entry_name: Option<String>,
 }
 
+thread_local! {
+    /// `parse_stage_meta` results for the translation in progress (`with_parse_cache`): reflection and translation read
+    /// the same lowered text, and parsing its metadata again was 3-7% of translation time. Keyed by the whole text.
+    static STAGE_META: std::cell::RefCell<Vec<(String, passes::Stage, StageMeta)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn parse_stage_meta(san_ll: &str, stage: passes::Stage) -> StageMeta {
+    if !native::ir::parse_cache::is_active() {
+        return parse_stage_meta_uncached(san_ll, stage);
+    }
+    let hit = STAGE_META.with(|cache| {
+        cache
+            .borrow()
+            .iter()
+            .find(|(text, s, _)| *s == stage && text == san_ll)
+            .map(|(_, _, m)| m.clone())
+    });
+    if let Some(m) = hit {
+        return m;
+    }
+    let m = parse_stage_meta_uncached(san_ll, stage);
+    STAGE_META.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() == 2 {
+            cache.remove(0);
+        }
+        cache.push((san_ll.to_owned(), stage, m.clone()));
+    });
+    m
+}
+
+fn parse_stage_meta_uncached(san_ll: &str, stage: passes::Stage) -> StageMeta {
     match stage {
         passes::Stage::Fragment => {
             let (frag, entry_name) = meta::parse_air_fragment_meta_with_entry(san_ll);
@@ -1813,6 +1846,23 @@ thread_local! {
 /// tried; outside it the typed construction comes first, as it always has.
 pub(crate) fn raw_buffers_first_on() -> bool {
     RAW_BUFFERS_FIRST.with(|c| c.get())
+}
+
+/// Runs one translation `f` with a parse cache: each text it parses more than once (the module as written, then again by
+/// every construction tier and by reflection) is parsed once on this thread and handed out as a clone. Emptied when `f`
+/// returns, so nothing parsed in one translation reaches the next.
+pub fn with_parse_cache<R>(f: impl FnOnce() -> R) -> R {
+    struct ClearStageMeta;
+    impl Drop for ClearStageMeta {
+        fn drop(&mut self) {
+            if !native::ir::parse_cache::is_active() {
+                STAGE_META.with(|cache| cache.borrow_mut().clear());
+            }
+        }
+    }
+    let _clear = ClearStageMeta;
+    let _scope = native::ir::parse_cache::ParseScope::enter();
+    f()
 }
 
 pub(crate) fn argument_buffer_samplers_on() -> bool {

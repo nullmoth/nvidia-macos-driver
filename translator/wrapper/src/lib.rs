@@ -79,7 +79,8 @@ fn formatless_options(ll: &str, st: Stage, caps: u32) -> Option<metal2vulkan::pa
     Some(o)
 }
 fn translate_one(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
-    translate_with_pointer_retry(ll, |ll| translate_one_as_written(ll, st))
+    // one parse per distinct text for the whole translation, its retries included
+    metal2vulkan::with_parse_cache(|| translate_with_pointer_retry(ll, |ll| translate_one_as_written(ll, st)))
 }
 
 // Keep the same translation options on both attempts. In particular, the
