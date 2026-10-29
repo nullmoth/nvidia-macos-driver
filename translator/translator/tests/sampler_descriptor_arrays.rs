@@ -92,65 +92,46 @@ fn a_sampler_descriptor_array_samples_the_element_the_constant_selects() {
         .map(|(id, _)| *id)
         .expect("the module declares a sampler type");
 
-    // One descriptor array holding both samplers, not two separate bindings.
-    let (array, length) = ops
-        .iter()
-        .find_map(|(id, body)| {
-            let mut operands = body.strip_prefix("OpTypeArray ")?.split_whitespace();
-            let element = operands.next()?;
-            let length = operands.next()?;
-            (bare(element) == sampler).then_some((*id, bare(length)))
-        })
-        .expect("the descriptor is an array of samplers");
-    assert_eq!(
-        constant_value(&ops, length),
-        Some(2),
-        "the array must hold both declared samplers:\n{asm}"
-    );
-
-    // The descriptor array is the UniformConstant variable the shader binds.
-    let var = ops
-        .iter()
-        .filter_map(|(id, body)| {
-            let mut operands = body.strip_prefix("OpVariable ")?.split_whitespace();
-            let pointer = operands.next()?;
-            let storage = operands.next()?;
-            (storage == "UniformConstant").then_some((*id, bare(pointer)))
-        })
-        .find(|(_, pointer)| {
-            operands_of(&ops, pointer, "OpTypePointer ").is_some_and(|operands| {
-                operands.split_whitespace().last().map(bare) == Some(array)
-            })
-        })
-        .map(|(id, _)| id)
-        .expect("the descriptor array is bound as a UniformConstant variable");
-
-    // The shader samples through element 1, the index its GEP states.
-    let chained_index = ops.iter().find_map(|(_, body)| {
-        let mut operands = body.strip_prefix("OpAccessChain ")?.split_whitespace();
-        let _result_type = operands.next()?;
-        if bare(operands.next()?) != var {
-            return None;
-        }
-        let index = operands.next()?;
-        operands.next().is_none().then_some(bare(index))
-    });
-    assert_eq!(
-        chained_index.and_then(|index| constant_value(&ops, index)),
-        Some(1),
-        "the element the constant selects must be the one chained:\n{asm}"
-    );
-
-    // And that chain feeds a real sampler load, not a placeholder or a synthesized default.
+    // One sampler variable per element, at consecutive bindings: the plugin declares every Metal
+    // sampler index as its own count-1 binding, so a [2 x sampler] at the first binding read past
+    // it on the GPU and sampled element 1 with the wrong sampler.
     assert!(
-        ops.iter().any(|(_, body)| {
-            body.strip_prefix("OpLoad ")
-                .and_then(|operands| operands.split_whitespace().next())
-                .map(bare)
-                == Some(sampler)
-        }),
-        "the chained descriptor must be loaded as a sampler value:\n{asm}"
+        !ops.iter().any(|(_, body)| body.starts_with("OpTypeArray ")
+            && body.split_whitespace().nth(1).map(bare) == Some(sampler)),
+        "no sampler array type may be declared:\n{asm}"
     );
+    let pointer = ops
+        .iter()
+        .find(|(_, body)| {
+            body.strip_prefix("OpTypePointer UniformConstant ").map(bare) == Some(sampler)
+        })
+        .map(|(id, _)| *id)
+        .expect("a UniformConstant sampler pointer");
+    let binding_of = |var: &str| {
+        asm.lines().find_map(|line| {
+            let rest = line.trim().strip_prefix("OpDecorate ")?;
+            let mut it = rest.split_whitespace();
+            (bare(it.next()?) == var && it.next()? == "Binding").then(|| it.next()?.parse::<u32>().ok())?
+        })
+    };
+    // The shader samples through element 1, the index its GEP states: the sampler it loads is a
+    // plain sampler variable at the binding after the parameter's own (sampler index 0 + 1).
+    // Element 0 is unused here, so its variable may be stripped.
+    let loaded: Vec<&str> = ops
+        .iter()
+        .filter_map(|(_, body)| {
+            let mut it = body.strip_prefix("OpLoad ")?.split_whitespace();
+            (bare(it.next()?) == sampler).then(|| bare(it.next().unwrap_or("")))
+        })
+        .collect();
+    assert_eq!(loaded.len(), 1, "one sampler load:\n{asm}");
+    assert!(
+        ops.iter().any(|(id, body)| *id == loaded[0]
+            && body.strip_prefix("OpVariable ").and_then(|r| r.split_whitespace().next()).map(bare) == Some(pointer)),
+        "the loaded sampler is a plain sampler variable:\n{asm}"
+    );
+    let first = metal2vulkan::reflect::sampler_resource_binding(0).expect("sampler band");
+    assert_eq!(binding_of(loaded[0]), Some(first + 1), "the constant selects element 1:\n{asm}");
 
     assert!(
         asm.contains("OpImageSampleExplicitLod"),

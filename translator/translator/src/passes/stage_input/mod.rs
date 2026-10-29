@@ -871,8 +871,12 @@ pub(super) fn build_stage_input(
                 Stage::Kernel => kern.and_then(|meta| meta.declared_descriptor_count(idx)),
             };
             // `array<sampler, N>` arrives byval as `[N x ptr addrspace(2)]`: every element is its
-            // own descriptor, so the parameter becomes one descriptor array and the element loads
-            // are retyped to sampler values by the resource pass.
+            // own descriptor, at its own sampler index. The plugin's layout declares one sampler
+            // per binding (count 1), so the elements become N sampler variables at consecutive
+            // bindings, and the resource pass turns each constant element load into a load of its
+            // variable. One `[N x sampler]` variable at the first binding compiled, but on NVK its
+            // element 1 read past that count-1 binding and sampled with the wrong sampler (GPU
+            // probe 10-28: linear sampler in slot 1 returned the nearest result).
             let array_count = declared_count.filter(|count| *count > 1);
             if let Some(count) = array_count {
                 let pointee = ptr_pointee(&defs, *pty).ok_or_else(|| {
@@ -888,24 +892,26 @@ pub(super) fn build_stage_input(
                 }
             }
             let sty = ctx.ty_sampler();
-            let value_ty = match array_count {
-                Some(count) => ctx.ty_array(sty, count),
-                None => sty,
-            };
-            let pptr = ctx.ty_ptr(StorageClass::UniformConstant, value_ty);
-            let var = ctx.module.fresh_id();
-            ctx.new_globals.push(Instruction::new(
-                Op::Variable,
-                Some(pptr),
-                Some(var),
-                vec![Operand::StorageClass(StorageClass::UniformConstant)],
-            ));
+            let pptr = ctx.ty_ptr(StorageClass::UniformConstant, sty);
             let binding = required_resource_binding(*pid, resource_binding)?;
-            decorate_binding(&mut ctx.module, var, descriptor_layout.set, binding);
-            ctx.interface_buffer_var(var);
+            let mut elements = Vec::new();
+            for element in 0..array_count.unwrap_or(1) {
+                let var = ctx.module.fresh_id();
+                ctx.new_globals.push(Instruction::new(
+                    Op::Variable,
+                    Some(pptr),
+                    Some(var),
+                    vec![Operand::StorageClass(StorageClass::UniformConstant)],
+                ));
+                decorate_binding(&mut ctx.module, var, descriptor_layout.set, binding + element);
+                ctx.interface_buffer_var(var);
+                elements.push(var);
+            }
+            let var = elements[0];
             match array_count {
-                Some(count) => {
-                    ctx.sampler_array_vars.insert(var, count);
+                Some(_) => {
+                    // the parameter is spliced to element 0; the element loads name it as their root
+                    ctx.sampler_array_vars.insert(var, elements);
                     bindings.push((*pid, ParamBinding::SamplerArray { var }));
                 }
                 None => {

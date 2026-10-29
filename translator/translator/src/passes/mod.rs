@@ -309,7 +309,7 @@ struct Ctx {
     image_multisampled: HashSet<Word>,
     image_storage: HashSet<Word>,
     image_array_vars: HashMap<Word, (Word, (Dim, bool), ImageComp, bool)>,
-    sampler_array_vars: HashMap<Word, u32>,
+    sampler_array_vars: HashMap<Word, Vec<Word>>,
     bindless_heap_vars: HashMap<Word, Word>,
     address_table: Option<(Word, Word, Option<Word>)>,
     bound_buffer_vars: HashSet<Word>,
