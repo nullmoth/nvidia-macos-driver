@@ -341,9 +341,10 @@ attributes #1 = { convergent nounwind memory(none) }
     let _ = std::fs::create_dir_all(&tmp);
     let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
     let asm = disassemble(&spv).expect("disassemble");
+    // element i reads the texture bound at index i through the per-draw table and the bindless heap
     assert!(
-        asm.contains("OpTypeArray"),
-        "expected image array type:\n{asm}"
+        asm.contains("OpTypeArray") || asm.contains("OpTypeRuntimeArray"),
+        "expected an indexed image array:\n{asm}"
     );
     assert!(
         asm.contains("OpAccessChain") && asm.contains("OpImageQuerySizeLod"),
@@ -3403,7 +3404,8 @@ declare void @air.write_texture_2d.u.v4i32(ptr addrspace(1), <2 x i32>, <4 x i32
     let _ = std::fs::create_dir_all(&tmp);
     let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
     let asm = disassemble(&spv).expect("disassemble");
-    assert!(asm.contains("OpTypeArray"), "{asm}");
+    // element i reads the texture bound at index i through the per-draw table and the bindless heap
+    assert!(asm.contains("OpTypeArray") || asm.contains("OpTypeRuntimeArray"), "{asm}");
     assert!(
         asm.contains("OpAccessChain"),
         "expected indexed descriptor-array access:\n{asm}"

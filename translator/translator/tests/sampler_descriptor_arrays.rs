@@ -166,3 +166,20 @@ fn a_sampler_descriptor_array_whose_declared_length_contradicts_its_type_fallbac
         ),
     }
 }
+
+#[test]
+fn a_sampler_array_past_the_sampler_indices_of_a_stage_fallbacks() {
+    // Each element becomes a variable and a binding of its own, and the count comes from the shader: a
+    // stage has 16 sampler indices, so 17 must be refused rather than declare bindings past the band.
+    let huge = FIXTURE
+        .replace("[2 x ptr addrspace(2)]", "[17 x ptr addrspace(2)]")
+        .replace(
+            "!\"air.location_index\", i32 0, i32 2, !\"air.arg_type_name\", !\"array<sampler, 2>\"",
+            "!\"air.location_index\", i32 0, i32 17, !\"air.arg_type_name\", !\"array<sampler, 17>\"",
+        );
+    assert!(huge.contains("array<sampler, 17>"), "the fixture must carry the count to raise");
+    match translate_sanitized_native(&huge, Stage::Vertex, &tmp()) {
+        Ok(spv) => panic!("an array of 17 samplers translated ({} bytes)", spv.len()),
+        Err(e) => assert!(e.contains("sampler indices a stage has"), "got: {e}"),
+    }
+}

@@ -731,8 +731,10 @@ pub(super) fn build_stage_input(
             decorate_binding(&mut ctx.module, var, descriptor_layout.set, binding);
             ctx.interface_buffer_var(var);
             if !wtex_dims.contains_key(pid) && dim != Dim::DimBuffer {
-                if let Some(base) = metal_texture_index {
-                    ctx.image_array_base.insert(var, base);
+                // the per-draw table holds slots for texture indices 0..128; an array_ref's length is unknown
+                // (its count is that ceiling), so it reaches the indices left from its base
+                if let Some(base) = metal_texture_index.filter(|base| *base < 128) {
+                    ctx.image_array_base.insert(var, (base, descriptor_count.min(128 - base)));
                 }
             }
             bindings.push((
@@ -893,6 +895,15 @@ pub(super) fn build_stage_input(
                         "entry parameter {idx} occupies {count} sampler descriptors per \
                          `air.location_index`, but its type states {llvm_count:?}; emitting the \
                          module would size the descriptor array from an ABI its type contradicts"
+                    ));
+                }
+                // every element is a variable and a binding of its own: the count comes from the shader,
+                // so it is held to the sampler indices a stage has
+                if metal_index.checked_add(count).is_none_or(|end| end > crate::reflect::SAMPLER_ARGUMENT_COUNT) {
+                    return Err(format!(
+                        "entry parameter {idx} is an array of {count} samplers from index {metal_index}, \
+                         past the {} sampler indices a stage has",
+                        crate::reflect::SAMPLER_ARGUMENT_COUNT
                     ));
                 }
             }
