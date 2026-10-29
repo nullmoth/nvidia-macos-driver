@@ -7,6 +7,7 @@
 #include "nvrm_off.h"
 #include "nv-xnu.h"
 #include "nvrm_utilization.h"
+#include "nvrm_bar_limits.h"
 
 extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <IOKit/IOService.h>
@@ -890,7 +891,8 @@ static void nv_xnu_dump_gsp_regs(nv_state_t *nv)
 // bridge's ACPI _CRS 64-bit window, clipped to the CPU's MAXPHYADDR, top-down, away from every other device and bridge.
 
 // The largest 64-bit memory window in the host bridge's _CRS (QWord Address Space descriptors, ACPI 6.5 6.4.3.5.1).
-static bool nvrmHostWindow(IOService *dev, UInt64 *outMin, UInt64 *outMax)
+static bool nvrmHostWindow(IOService *dev, UInt64 *outMin, UInt64 *outMax,
+                           UInt64 addressMax, bool *advertisedWindow)
 {
     IOACPIPlatformDevice *acpi = NULL;
     IOService *s = dev;
@@ -911,8 +913,13 @@ static bool nvrmHostWindow(IOService *dev, UInt64 *outMin, UInt64 *outMax)
                 if (t == 0x8A && len >= 43 && p[i + 3] == 0) {   // QWord Address Space, resource type 0 = memory
                     UInt64 mn, mx, tra;
                     memcpy(&mn, p + i + 14, 8); memcpy(&mx, p + i + 22, 8); memcpy(&tra, p + i + 30, 8);
-                    if (tra == 0 && mn >= (4ULL << 30) && mx > mn && (!found || mx - mn > *outMax - *outMin)) {
-                        *outMin = mn; *outMax = mx; found = true;
+                    if (tra == 0 && mn >= (4ULL << 30) && mx > mn) {
+                        *advertisedWindow = true;
+                        UInt64 clippedMax = 0;
+                        if (nvrmClipBarWindow(mn, mx, addressMax, &clippedMax)
+                            && (!found || clippedMax - mn > *outMax - *outMin)) {
+                            *outMin = mn; *outMax = clippedMax; found = true;
+                        }
                     }
                 }
                 i += 3 + len;
@@ -1134,10 +1141,16 @@ bool NVRM::placeLargeBar1()
     if ((!bar0 && !bar0Size) || !bar3Size) { LOG("bar1: BAR0/BAR3 apertures not found in the nub (bar0 %d bar3 %llu) — not placing", bar0 != NULL, bar3Size); return false; }
     UInt64 wMin = 0, wMax = 0;
     const unsigned physBits = nvrmPhysBits();
-    const UInt64 physTop = physBits >= 63 ? ~0ULL : (1ULL << physBits) - 1;
+    const UInt64 physTop = nvrmBarAddressMax(physBits, PAGE_SHIFT);
     const UInt64 fwBar1 = ((UInt64)old18 << 32) | (lo14 & ~0xFULL);
-    if (nvrmHostWindow(fPCI, &wMin, &wMax)) {
+    bool advertisedWindow = false;
+    if (nvrmHostWindow(fPCI, &wMin, &wMax, physTop, &advertisedWindow)) {
         LOG("bar1: host bridge 64-bit window 0x%llx-0x%llx (ACPI _CRS), CPU reaches %u bits", wMin, wMax, physBits);
+    } else if (advertisedWindow) {
+        // A real _CRS resource existed, but this API cannot describe any of it.
+        // Do not invent an address outside that resource or touch live BARs.
+        LOG("bar1: advertised host windows exceed CPU/IOKit physical range; keeping firmware BARs untouched");
+        return false;
     } else if (fwBar1 < (4ULL << 30)) {
         // Its BAR1 is fine where it is: with no 64-bit window in _CRS and BAR1 below 4 GB, nothing above 4 GB is routed.
         LOG("bar1: no 64-bit window in the host bridge's _CRS and the firmware left BAR1 below 4 GB (0x%llx) - not placing", fwBar1);
@@ -1187,6 +1200,42 @@ bool NVRM::placeLargeBar1()
         if (tries >= 16 || bar1Base < wMin + bar1Size) { LOG("bar1: destination is in use — not placing"); return false; }
         bar1Base -= bar1Size; bar3Base = bar1Base + bar1Size; winEnd = bar3Base + bar3Size - 1;
     }
+    // Fully construct the replacement list before changing any hardware. Every
+    // early return below releases staging without publishing it to IOPCIFamily.
+    struct StagedApertures {
+        OSArray *arr;
+        IODeviceMemory *m1, *m3, *m0;
+        ~StagedApertures() {
+            OSSafeReleaseNULL(arr); OSSafeReleaseNULL(m1);
+            OSSafeReleaseNULL(m3); OSSafeReleaseNULL(m0);
+        }
+    } staged = { OSArray::withCapacity((mem ? mem->getCount() : 0) + 3),
+        IODeviceMemory::withRange(bar1Base, bar1Size),
+        IODeviceMemory::withRange(bar3Base, bar3Size),
+        bar0 ? NULL : IODeviceMemory::withRange(lo10 & ~0xFULL, bar0Size) };
+    if (!staged.arr || !staged.m1 || !staged.m3 || (!bar0 && !staged.m0)) {
+        LOG("bar1: preflight descriptor creation failed (array %d BAR1 %d BAR3 %d BAR0 %d); firmware BARs untouched",
+            staged.arr != NULL, staged.m1 != NULL, staged.m3 != NULL, bar0 != NULL || staged.m0 != NULL);
+        return false;
+    }
+    OSArray *arr = staged.arr;
+    if (!arr->setObject(bar0 ? bar0 : staged.m0)
+        || !arr->setObject(staged.m1) || !arr->setObject(staged.m3)) {
+        LOG("bar1: preflight aperture insertion failed; firmware BARs untouched");
+        return false;
+    }
+    const UInt64 bar1Old = ((UInt64)old18 << 32) | (lo14 & ~0xFULL);
+    for (unsigned i = 0; mem && i < mem->getCount(); i++) {
+        IOMemoryDescriptor *m = OSDynamicCast(IOMemoryDescriptor, mem->getObject(i));
+        if (!m || m == bar0) continue;
+        UInt64 pa = m->getPhysicalAddress();
+        if (pa == bar3Old || pa == bar1Old) continue;
+        if (!arr->setObject(m)) {
+            LOG("bar1: preflight could not retain another aperture; firmware BARs untouched");
+            return false;
+        }
+    }
+    LOG("bar1: preflight ready; descriptors and complete aperture list built before PCI writes");
     LOG("bar1: placing BAR1 %llu MB @0x%llx, BAR3 %llu MB @0x%llx, root port window 0x%llx-0x%llx (was 0x%08x %08x/%08x)",
         bar1Size >> 20, bar1Base, bar3Size >> 20, bar3Base, bar1Base, winEnd, rp24, rp28, rp2c);
 
@@ -1223,33 +1272,7 @@ bool NVRM::placeLargeBar1()
     }
     fPCI->configWrite16(0x04, cmd | 0x2);
 
-    const unsigned memCount = mem ? mem->getCount() : 0;
-    OSArray *arr = OSArray::withCapacity(memCount + 3);
-    IODeviceMemory *m1 = IODeviceMemory::withRange(bar1Base, bar1Size), *m3 = IODeviceMemory::withRange(bar3Base, bar3Size);
-    IODeviceMemory *m0 = bar0 ? NULL : IODeviceMemory::withRange(lo10 & ~0xFULL, bar0Size);
-    if (!arr || !m1 || !m3 || (!bar0 && !m0)) {
-        // Put the hardware back as the read-back path above does: returning with BAR1/BAR3 moved but the nub's apertures
-        // unchanged left RM a table that no longer matched the card (NVIDIA's driver restores on every failure path).
-        LOG("bar1: placed in hardware but the aperture list could not be built (no memory) - restoring what IOPCIFamily left");
-        OSSafeReleaseNULL(arr); OSSafeReleaseNULL(m1); OSSafeReleaseNULL(m3); OSSafeReleaseNULL(m0);
-        fPCI->configWrite16(0x04, cmd & ~0x2);
-        rp->configWrite32(0x24, 0x0000fff0); rp->configWrite32(0x28, rp28); rp->configWrite32(0x2c, rp2c); rp->configWrite32(0x24, rp24);
-        if (newSize) fPCI->extendedConfigWrite32(rbCtlOff, rbCtlOld);
-        fPCI->configWrite32(0x14, lo14); fPCI->configWrite32(0x18, old18); fPCI->configWrite32(0x1c, lo1c); fPCI->configWrite32(0x20, hi20);
-        fPCI->configWrite16(0x04, cmd);
-        return false;
-    }
-    arr->setObject(bar0 ? bar0 : m0); arr->setObject(m1); arr->setObject(m3);
-    OSSafeReleaseNULL(m0);
-    for (unsigned i = 0; i < memCount; i++) {
-        IOMemoryDescriptor *m = OSDynamicCast(IOMemoryDescriptor, mem->getObject(i));
-        if (!m || m == bar0) continue;
-        UInt64 pa = m->getPhysicalAddress();
-        if (pa == bar3Old || pa == (old18 & ~0xFULL)) { LOG("bar1: dropping stale aperture 0x%llx+0x%llx", pa, (UInt64)m->getLength()); continue; }
-        arr->setObject(m);
-    }
     fPCI->setDeviceMemory(arr);
-    m1->release(); m3->release(); arr->release();
     fPCI->setProperty("nvrm-bar1-placed", bar1Base, 64);
     LOG("bar1: PLACED — BAR1 %llu MB live at 0x%llx", bar1Size >> 20, bar1Base);
     return true;
