@@ -390,6 +390,145 @@ pub(crate) fn materialize_texture_array_loads(ctx: &mut Ctx, entry_idx: usize) {
     retire_dead_pointer_projections(ctx, entry_idx, dead_roots.iter().copied());
 }
 
+/// Element `i` of a sampled `array<texture, N>` entry parameter reads the texture bound at Metal index
+/// `base + i` the way a single texture does under bindless-all: its heap slot from the per-draw table,
+/// then the heap. The plugin declares every texture index as its own count-1 binding, so the
+/// `[N x image]` variable at the first binding read element 1 past that binding: a probe sampling two
+/// depth maps through `array<depth2d<float>, 2>` compared element 1 against map 0 (RTX 5060, 10-28;
+/// an M1 Pro reads map 1). The table holds a slot for every index the app bound, constant or dynamic
+/// `i` alike. Runs after every pass that recognises the array variable's own access chains.
+pub(crate) fn route_texture_array_elements_through_heap(ctx: &mut Ctx, entry_idx: usize) {
+    if ctx.image_array_base.is_empty()
+        || !super::bindless_all_on()
+        || !super::address_table_usable(ctx)
+    {
+        return;
+    }
+    let mut sites: Vec<(usize, usize, Word, Word, Word, Word, u32)> = Vec::new();
+    for (block_idx, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
+        for (inst_idx, inst) in block.instructions.iter().enumerate() {
+            if !matches!(inst.class.opcode, Op::AccessChain | Op::InBoundsAccessChain) {
+                continue;
+            }
+            let [Operand::IdRef(var), Operand::IdRef(idx)] = inst.operands.as_slice() else {
+                continue;
+            };
+            let (Some(&base), Some(result), Some(result_ty)) =
+                (ctx.image_array_base.get(var), inst.result_id, inst.result_type)
+            else {
+                continue;
+            };
+            sites.push((block_idx, inst_idx, result, result_ty, *var, *idx, base));
+        }
+    }
+    if sites.is_empty() {
+        return;
+    }
+    let Ok((table, word_ptr_ty, wide)) = super::ensure_address_table(ctx) else {
+        return;
+    };
+    let uint_ty = ctx.ty_uint();
+    let c0 = ctx.const_uint(0);
+    let mask = ctx.const_uint(crate::reflect::BINDLESS_HEAP_SLOTS - 1);
+    let local_types: HashMap<Word, Word> = ctx.module.functions[entry_idx]
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|inst| Some((inst.result_id?, inst.result_type?)))
+        .collect();
+    let mut replacements: HashMap<(usize, usize), Vec<Instruction>> = HashMap::default();
+    for (block_idx, inst_idx, result, result_ty, var, idx, base) in sites {
+        let &(elem_ty, dims, comp, _) = ctx.image_array_vars.get(&var).unwrap();
+        let mut out = Vec::new();
+        // the element index as a 32-bit unsigned value: AIR's dynamic indices are 64-bit (a GEP index), a
+        // signed 32-bit one is reinterpreted; an index whose type cannot be read leaves the chain as it was
+        let index_ty = local_types.get(&idx).copied().or_else(|| value_result_type(ctx, idx));
+        let width = index_ty.and_then(|ty| type_def_of(ctx, ty)).and_then(|def| {
+            (def.class.opcode == Op::TypeInt).then(|| match def.operands.first() {
+                Some(Operand::LiteralBit32(width)) => Some(*width),
+                _ => None,
+            })?
+        });
+        let index = match (index_ty, width) {
+            (Some(ty), _) if ty == uint_ty => idx,
+            (Some(_), Some(32)) => {
+                let cast = ctx.module.fresh_id();
+                out.push(Instruction::new(Op::Bitcast, Some(uint_ty), Some(cast), vec![Operand::IdRef(idx)]));
+                cast
+            }
+            (Some(_), Some(64)) => {
+                let narrow = ctx.module.fresh_id();
+                out.push(Instruction::new(Op::UConvert, Some(uint_ty), Some(narrow), vec![Operand::IdRef(idx)]));
+                narrow
+            }
+            _ => continue,
+        };
+        let first = ctx.const_uint(super::TEXTURE_INDEX_BASE + base);
+        let cel = ctx.module.fresh_id();
+        out.push(Instruction::new(
+            Op::IAdd,
+            Some(uint_ty),
+            Some(cel),
+            vec![Operand::IdRef(first), Operand::IdRef(index)],
+        ));
+        let wptr = ctx.module.fresh_id();
+        let word = ctx.module.fresh_id();
+        if let Some(u64_ty) = wide {
+            out.push(Instruction::new(
+                Op::AccessChain,
+                Some(word_ptr_ty),
+                Some(wptr),
+                vec![Operand::IdRef(table), Operand::IdRef(c0), Operand::IdRef(cel)],
+            ));
+            let wide_v = ctx.module.fresh_id();
+            out.push(Instruction::new(Op::Load, Some(u64_ty), Some(wide_v), vec![Operand::IdRef(wptr)]));
+            out.push(Instruction::new(Op::UConvert, Some(uint_ty), Some(word), vec![Operand::IdRef(wide_v)]));
+        } else {
+            out.push(Instruction::new(
+                Op::AccessChain,
+                Some(word_ptr_ty),
+                Some(wptr),
+                vec![
+                    Operand::IdRef(table),
+                    Operand::IdRef(c0),
+                    Operand::IdRef(cel),
+                    Operand::IdRef(c0),
+                ],
+            ));
+            out.push(Instruction::new(Op::Load, Some(uint_ty), Some(word), vec![Operand::IdRef(wptr)]));
+        }
+        let slot = ctx.module.fresh_id();
+        out.push(Instruction::new(
+            Op::BitwiseAnd,
+            Some(uint_ty),
+            Some(slot),
+            vec![Operand::IdRef(word), Operand::IdRef(mask)],
+        ));
+        let heap = crate::passes::stage_input::bindless_heap_var(ctx, elem_ty, dims, comp);
+        out.push(Instruction::new(
+            Op::AccessChain,
+            Some(result_ty),
+            Some(result),
+            vec![Operand::IdRef(heap), Operand::IdRef(slot)],
+        ));
+        replacements.insert((block_idx, inst_idx), out);
+    }
+    let function = &mut ctx.module.functions[entry_idx];
+    for (block_idx, block) in function.blocks.iter_mut().enumerate() {
+        if !replacements.keys().any(|(b, _)| *b == block_idx) {
+            continue;
+        }
+        let mut rebuilt = Vec::with_capacity(block.instructions.len() + 8);
+        for (inst_idx, inst) in block.instructions.drain(..).enumerate() {
+            match replacements.remove(&(block_idx, inst_idx)) {
+                Some(seq) => rebuilt.extend(seq),
+                None => rebuilt.push(inst),
+            }
+        }
+        block.instructions = rebuilt;
+    }
+}
+
 pub(crate) fn sink_loop_header_texture_array_loads(ctx: &mut Ctx, entry_idx: usize) {
     if ctx.image_array_vars.is_empty() {
         return;

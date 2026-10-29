@@ -730,6 +730,11 @@ pub(super) fn build_stage_input(
             )?;
             decorate_binding(&mut ctx.module, var, descriptor_layout.set, binding);
             ctx.interface_buffer_var(var);
+            if !wtex_dims.contains_key(pid) && dim != Dim::DimBuffer {
+                if let Some(base) = metal_texture_index {
+                    ctx.image_array_base.insert(var, base);
+                }
+            }
             bindings.push((
                 *pid,
                 ParamBinding::ImageArray {

@@ -19,5 +19,5 @@ pub(in crate::passes) use sampler_array::materialize_sampler_array_loads;
 pub(in crate::passes) use selected_load::materialize_interface_selected_loads;
 pub(in crate::passes) use texture_array::{
     materialize_texture_array_loads, retire_dead_pointer_projections,
-    sink_loop_header_texture_array_loads,
+    route_texture_array_elements_through_heap, sink_loop_header_texture_array_loads,
 };
