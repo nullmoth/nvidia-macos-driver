@@ -2,7 +2,7 @@
 
 ## 2.6.4
 
-- three.js scenes with two or more shadow-casting lights render again in Chrome, Brave and other browsers: the shader translator refused a shader's array of samplers, and the page lost its WebGL2 context (#426, patch by Luminous418). Each sampler in the array now reaches the shader with its own state.
+- three.js scenes with two or more shadow-casting lights no longer lose their WebGL2 context in Chrome, Brave and other browsers: the shader translator refused a shader's array of samplers (#426, patch by Luminous418). Each sampler in the array now reaches the shader with its own state. Known: WebGL shadow maps still draw the whole shadowed surface dark, with one light or several (it did in 2.6.3 too); that is the next fix.
 - Arrays of textures read the right texture: every element past the first read the first one, whether the index was fixed or computed in the shader. Shadow maps, texture atlases and material arrays in games and WebGL pages were affected.
 - Machinarium, and other apps whose shaders were built with older Metal tools, draw their scenes: the translator did not recognise a sampler written directly into the shader code, and refused the shader (patch by daggersinmybackk).
 
