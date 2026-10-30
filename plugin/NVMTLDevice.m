@@ -1635,6 +1635,10 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
         uint32_t svk = 0, sbpp = 0; int sa8 = 0;
         if (nvmtl_pixfmt(ca.pixelFormat, &svk, &sbpp, &sa8))
             return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: colour attachment %u pixel format %lu not carried by this driver", i, (unsigned long)ca.pixelFormat]);
+        // ARGB8 (84) is sampled through a reordering view swizzle, which a colour attachment does not get, and the A8
+        // remapping below would treat it as a one-channel target. Refused, as it was before the format was carried.
+        if (sa8 == 2)
+            return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: colour attachment %u pixel format %lu (ARGB8) is not carried as a render target", i, (unsigned long)ca.pixelFormat]);
         if (nvmtl_blend_from(ca, noFrag, sa8, &rt.blend[i]))
             return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: colour attachment %u has a blend factor or operation this driver cannot translate (the reason is the preceding \"blend:\" log line)", i]);
         if (sa8) {
