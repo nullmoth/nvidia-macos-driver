@@ -9,7 +9,12 @@ R=$NULLMOTH_BUILD_ROOT/build/xlate-release
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 git -C "$HERE" archive "$REV" translator | tar x -C "$TMP"
-ssh "$H" "rm -rf $R/src $R/out && mkdir -p $R/src $R/out $R/target"
+# The target directory is emptied before every build. git archive stamps each file with the commit time, and cargo
+# rebuilds only when a source is newer than its last build output, so building a commit made before the previous
+# build reused the previous build's objects and returned that dylib under the new revision.
+# R stays fixed: cargo hashes the source path into symbol names, so the same commit built under another path is a
+# different (equivalent) binary with a different UUID.
+ssh "$H" "rm -rf $R/src $R/out $R/target && mkdir -p $R/src $R/out $R/target"
 rsync -a "$TMP/translator/" "$H:$R/src/"
 ssh "$H" "set -e
   TC=\$HOME/nvmtl-build/rustup-home/toolchains/1.98.1-aarch64-apple-darwin
