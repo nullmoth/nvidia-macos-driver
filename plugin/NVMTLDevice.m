@@ -506,18 +506,60 @@ static void nvmtl_nvenc_hevc_register(void)
 // get it by default: without it their GPU process cannot start. Electron stays opt-in (NVMTL_ANGLE_METAL=1) because it showed artifacts,
 // stutter and lost transparency on several cards. NVMTL_ANGLE_METAL=0 turns the rule off in every process. An existing
 // ANGLE override is kept; no sandbox setting is changed.
-// Detected by what the process has loaded, not by its name: ANGLE's Metal backend which may stays in libGLESv2.dylib / libEGL.dylib,
-// and it is that code which creates the Metal device and so loads this plugin. Any Chromium-based app (Chrome, Brave, Edge,
-// Vivaldi, Opera, Arc, Electron apps such as Discord, CEF hosts) is matched without a list of names, which is annoying to add manually. So I believe its more good approach. 
+// Matched three ways: by process name, by the frameworks in the app bundle, and by ANGLE's own libraries
+// (libGLESv2.dylib, libEGL.dylib) already loaded in the process. The loaded-library check covers Chromium-based apps
+// whose names and bundles the first two miss (Vivaldi, Opera, Arc and other CEF hosts). It is an addition, not a
+// replacement: a process that creates its Metal device before ANGLE is loaded is still matched by the first two.
 static bool nvmtl_angle_chrome_family(void)
 {
-    uint32_t n = _dyld_image_count();
+    const char *me = getprogname();
+    if (!me) return false;
+
+    // 1. By process name. "Helper" and "Edge" alone also match unrelated apps (every app's own helper tools,
+    // "EdgeView"), so Edge is matched by its full name and helpers through the framework check below.
+    if (strstr(me, "Chrome") != NULL ||
+        strstr(me, "Chromium") != NULL ||
+        strstr(me, "Electron") != NULL ||
+        strstr(me, "Brave") != NULL ||
+        strncmp(me, "Microsoft Edge", 14) == 0 ||
+        strstr(me, "Discord") != NULL) {
+        return true;
+    }
+
+    // 2. By the frameworks the app bundle ships.
+    char path[PATH_MAX];
+    if (proc_pidpath(getpid(), path, sizeof(path)) > 0) {
+        char app_path[PATH_MAX];
+        strlcpy(app_path, path, sizeof(app_path));
+
+        char *p = strstr(app_path, ".app");
+        if (p != NULL) {
+            *(p + 4) = '\0'; // Truncate to the root directory of .app
+
+            char check_buf[PATH_MAX];
+
+            snprintf(check_buf, sizeof(check_buf), "%s/Contents/Frameworks/libEGL.dylib", app_path);
+            if (access(check_buf, F_OK) == 0) return true;
+
+            snprintf(check_buf, sizeof(check_buf), "%s/Contents/Frameworks/Chromium Embedded Framework.framework", app_path);
+            if (access(check_buf, F_OK) == 0) return true;
+
+            snprintf(check_buf, sizeof(check_buf), "%s/Contents/Frameworks/Electron Framework.framework", app_path);
+            if (access(check_buf, F_OK) == 0) return true;
+
+            snprintf(check_buf, sizeof(check_buf), "%s/Contents/Frameworks/libffmpeg.dylib", app_path);
+            if (access(check_buf, F_OK) == 0) return true;
+        }
+    }
+
+    // 3. By ANGLE's libraries in the process.
+    const uint32_t n = _dyld_image_count();
     for (uint32_t i = 0; i < n; i++) {
-        const char *p = _dyld_get_image_name(i);
-        if (!p) continue;
-        const char *b = strrchr(p, '/');
-        b = b ? b + 1 : p;
-        if (!strcmp(b, "libGLESv2.dylib") || !strcmp(b, "libEGL.dylib")) return true;
+        const char *img = _dyld_get_image_name(i);
+        if (!img) continue;
+        const char *base = strrchr(img, '/');
+        base = base ? base + 1 : img;
+        if (!strcmp(base, "libGLESv2.dylib") || !strcmp(base, "libEGL.dylib")) return true;
     }
     return false;
 }

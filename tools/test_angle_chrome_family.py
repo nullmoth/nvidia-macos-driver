@@ -17,6 +17,7 @@ region = source[start:end].replace("__attribute__((constructor)) ", "")
 
 fixture = r"""
 #include <climits>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -49,6 +50,10 @@ int setenv(const char *k, const char *v, int) {
     return 0;
 }
 static void syslog(int, const char *, ...) { g_logs++; }
+// the images dyld reports as loaded; empty = none of ANGLE's
+static const char *g_images[4] = {nullptr};
+uint32_t _dyld_image_count(void) { uint32_t n = 0; while (n < 4 && g_images[n]) n++; return n; }
+const char *_dyld_get_image_name(uint32_t i) { return i < 4 ? g_images[i] : nullptr; }
 
 """ + region + r"""
 
@@ -90,6 +95,13 @@ int main(int argc, char **argv) {
     // ...and any app whose bundle carries ANGLE or a Chromium framework (path given by the test on argv[1])
     run("Slack Helper (Renderer)", nullptr, nullptr, "disableMetalOnNvidia", g_app_exe);
     run("Slack Helper (Renderer)", nullptr, nullptr, "", g_plain_exe);
+    // ...and any process that has ANGLE's own libraries loaded, whatever its name or bundle
+    g_images[0] = "/usr/lib/libSystem.B.dylib";
+    run("Vivaldi Helper (GPU)", nullptr, nullptr, "");
+    g_images[1] = "/Applications/Vivaldi.app/Contents/Frameworks/Vivaldi Framework.framework/Libraries/libGLESv2.dylib";
+    run("Vivaldi Helper (GPU)", nullptr, nullptr, "disableMetalOnNvidia");
+    run("Vivaldi Helper (GPU)", "0", nullptr, "");
+    g_images[1] = nullptr;
     // The environment variable still overrides both ways.
     run("Safari", "1", nullptr, "disableMetalOnNvidia");
     run("Google Chrome", "0", nullptr, "");
@@ -115,4 +127,4 @@ with tempfile.TemporaryDirectory() as tmp:
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok", result.stdout
 
-print("ok: ANGLE Chrome/Chromium/Edge/Brave/Electron/Discord matching, app-bundle framework check, opt-in for other apps, NVMTL_ANGLE_METAL overrides")
+print("ok: ANGLE Chrome/Chromium/Edge/Brave/Electron/Discord matching, app-bundle framework check, loaded ANGLE libraries, opt-in for other apps, NVMTL_ANGLE_METAL overrides")
