@@ -10,7 +10,7 @@
 //! Only a constant index is lowered: Metal never emits anything else for a sampler array (WebGL2
 //! rejects "array index for samplers must be constant integral expressions").
 use metal2vulkan::passes::Stage;
-use metal2vulkan::{disassemble, translate_sanitized_native};
+use metal2vulkan::{disassemble, inline_and_forward_object_fields, translate_native_no_retry, translate_sanitized_native};
 use std::path::PathBuf;
 
 fn tmp() -> PathBuf {
@@ -182,4 +182,63 @@ fn a_sampler_array_past_the_sampler_indices_of_a_stage_fallbacks() {
         Ok(spv) => panic!("an array of 17 samplers translated ({} bytes)", spv.len()),
         Err(e) => assert!(e.contains("sampler indices a stage has"), "got: {e}"),
     }
+}
+
+const TEXTURE_ENV: &str = include_str!("fixtures/gl/sampler_array_through_texture_env.ll");
+
+/// The binding of the sampler variable an `OpSampledImage` combines, through its `OpLoad`.
+fn sampler_binding_of(asm: &str, ops: &[(&str, &str)], sampled_image: &str) -> Option<u32> {
+    let mut it = operands_of(ops, sampled_image, "OpSampledImage ")?.split_whitespace();
+    let (_ty, _image, sampler) = (it.next()?, it.next()?, it.next()?);
+    let var = operands_of(ops, sampler, "OpLoad ")?.split_whitespace().nth(1).map(bare)?;
+    asm.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("OpDecorate ")?;
+        let mut it = rest.split_whitespace();
+        (bare(it.next()?) == var && it.next()? == "Binding").then(|| it.next()?.parse::<u32>().ok())?
+    })
+}
+
+#[test]
+fn a_sampler_array_element_reached_through_angles_texture_env_samples_its_own_element() {
+    // #449: the shadow map of light 1 is element 1 of both arrays. As written the helper's sampler is a pointer read out
+    // of the env object, which has no sampler state; the inline retry must forward it, and must also see the element
+    // through the `metal::sampler`/`metal::depth2d` wrappers, or element 1's samples silently fold to zero.
+    if let Ok(spv) = translate_native_no_retry(TEXTURE_ENV, Stage::Fragment) {
+        let asm = disassemble(&spv).expect("disassemble");
+        assert_eq!(
+            asm.matches("OpImageSampleDref").count(),
+            2,
+            "a module that translates as written must still sample both shadow maps:\n{asm}"
+        );
+    }
+    let retry = inline_and_forward_object_fields(TEXTURE_ENV).expect("the helper is inlined");
+    let spv = translate_native_no_retry(&retry, Stage::Fragment)
+        .unwrap_or_else(|e| panic!("the inline retry must translate: {e}\n{retry}"));
+    let asm = disassemble(&spv).expect("disassemble");
+    if std::env::var_os("M2V_SHOW_ASM").is_some() {
+        eprintln!("{asm}");
+    }
+    let ops = operations(&asm);
+    let dref: Vec<&str> = ops
+        .iter()
+        .filter_map(|(_, body)| {
+            body.strip_prefix("OpImageSampleDref")?.split_whitespace().nth(2).map(bare)
+        })
+        .collect();
+    assert_eq!(dref.len(), 2, "one depth compare per light, none folded away:\n{asm}");
+    let first = metal2vulkan::reflect::sampler_resource_binding(0).expect("sampler band");
+    let mut bindings: Vec<Option<u32>> =
+        dref.iter().map(|si| sampler_binding_of(&asm, &ops, si)).collect();
+    bindings.sort();
+    assert_eq!(
+        bindings,
+        vec![Some(first), Some(first + 1)],
+        "light 0 samples with element 0 and light 1 with element 1:\n{asm}"
+    );
+    let images: Vec<&str> = dref
+        .iter()
+        .filter_map(|si| operands_of(&ops, si, "OpSampledImage ")?.split_whitespace().nth(1).map(bare))
+        .collect();
+    assert!(images.len() == 2 && images[0] != images[1], "each light reads its own shadow map:\n{asm}");
+    spirv_val(&spv);
 }
