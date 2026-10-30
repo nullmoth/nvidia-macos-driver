@@ -1092,8 +1092,11 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
 // destination. QuartzCore hands this driver a descriptor whose usage is only ShaderRead for it, so Core Image refuses the
 // texture ("texture usage must include MTLTextureUsageShaderWrite") and Photo Booth's preview stays black. The surface's
 // image is already writable whenever its format allows (see nvmtl_surface_image_create), so say so.
+// WindowServer keeps the usage it asked for: it wraps hundreds of surfaces a second, none of them Core Image targets.
 static NSUInteger nvmtl_surface_usage(NSUInteger usage, BOOL fbo, BOOL storage) {
-    if (!fbo) {
+    static int ws = -1;
+    if (ws < 0) { const char *me = getprogname(); ws = me && !strcmp(me, "WindowServer"); }
+    if (!fbo && !ws) {
         usage |= MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
         if (storage) usage |= MTLTextureUsageShaderWrite;
     }
