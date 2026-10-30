@@ -3226,8 +3226,12 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
         return nvmtl_snapshot_set_md(c, which, p->stex_hi[which], p->gmask_ok ? p->gmask[which] : NULL,
             p->tbany ? p->tbm[which] : NULL, VK_NULL_HANDLE, NULL, uniform);
     const uint64_t all[4] = { ~0ull, ~0ull, ~0ull, ~0ull };
-    const uint64_t *pm = nvmtl_desc_mask_on() ? (p->bmask2_ok ? p->bmask2 : (p->gmask2_ok && which < 2) ? p->gmask2[which] : all)
-                                              : (p->bmask_ok ? p->bmask : (p->gmask_ok && which < 2) ? p->gmask[which] : all);
+    // The masks without the framebuffer-fetch set when they exist; otherwise the masks that count it, which are a
+    // superset and so always safe. Falling straight to "all" would write every descriptor on every draw of a pipeline
+    // that has only the older mask, the per-draw cost these masks exist to remove.
+    const int m2 = nvmtl_desc_mask_on();
+    const uint64_t *pm = (m2 && p->bmask2_ok) ? p->bmask2 : (m2 && p->gmask2_ok && which < 2) ? p->gmask2[which]
+                       : p->bmask_ok ? p->bmask : (p->gmask_ok && which < 2) ? p->gmask[which] : all;
     uint32_t hi = p->stex_hi[which];
     // A texture binding holds an image or, for a shader that reads a texel buffer there, a texel buffer (the layout's
     // descriptors are mutable). The last set can be bound again, or copied from, only by a pipeline that reads the same

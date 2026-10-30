@@ -69,7 +69,9 @@ static VkDescriptorSet nvmtl_snapshot_set_t(nvk_cmdbuf *c, uint32_t which, uint3
     return nvmtl_snapshot_set_md(c,which,hi,NULL,tb,VK_NULL_HANDLE,NULL,NULL);
 }
 '''
-mask = section(vk, 'static int nvmtl_spirv_bmask(', '\nenum { NVMTL_SLOT_NONE')
+# The mask helpers start at nvmtl_spirv_bmask_x's forward declaration: nvmtl_spirv_bmask calls it, and it logs whether
+# the framebuffer-fetch set is skipped, so a no-op nvlog stands in for the plugin's logger here.
+mask = '#define nvlog(...) ((void)0)\n' + section(vk, 'static int nvmtl_spirv_bmask_x(const void *p, size_t n, uint64_t out[4], int skip_fetch);', '\nenum { NVMTL_SLOT_NONE')
 checks = r'''
 int main(void) {
     // Bindless heap binding 0 belongs to set 2, not to the stage's buffer 0. Decoration order is arbitrary.
