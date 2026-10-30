@@ -168,7 +168,7 @@ pub(in crate::passes) fn lower_sample(
     let (fallback_dim, fallback_arrayed, fallback_comp) = image_shape_or_recorded(ctx, img);
     let (img_ty, dim, arrayed, comp) =
         sampled_operand_image_info(ctx, img, fallback_dim, fallback_arrayed, fallback_comp);
-    // Apple's OpenGL samples a cube map without seamless filtering through a 2D-array view of it ("cubeAsArray": face and
+    // Apple's OpenGL samples a cube map one face at a time, with no filtering across faces, through a 2D-array view of it ("cubeAsArray": face and
     // face coordinates from gld.cube_vector_to_uv, layer = face), and keeps the real cube sample on a branch chosen by a
     // per-unit mask. A helper that takes the sampler as an argument carries both calls on the same texture, so the texture
     // is typed as a 2D array and its cube call reached the array path, reading the cube's LOD flag as a layer ("layer is not
