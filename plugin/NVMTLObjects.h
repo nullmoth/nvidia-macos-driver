@@ -47,6 +47,7 @@ static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return 
   uint32_t _surfSeed, _surfGen; BOOL _surfSynced, _surfOwned;
   nvk_buffer _vramBuf; BOOL _vramOn;
   nvk_buffer _hostPages;   // this surface's pages imported for the host copies (nvmtl_host_pages), kept while they hold
+  id _capturePages;       // each recorded copy also retains its import until that submission finishes
   BOOL _stex;
   uint64_t _resid;
   NSUInteger _usage;
@@ -58,6 +59,10 @@ static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return 
 - (void)nvmtlSurfaceIn;
 - (BOOL)nvmtlSurfaceOut;
 - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied;
+- (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied copied:(BOOL)copied;
+@end
+@interface NVMTLTexture (CaptureCopyout)
+- (id)nvmtlRecordCaptureCopy:(nvk_cmdbuf *)commands;
 @end
 @interface NVMTLFunction : NSObject <MTLFunction> { @public NSData *_spirv; NSString *_fname; NSString *_stage; NSString *_air; NSDictionary *_fc; NSArray *_embedded; unsigned char _bcHash[32]; BOOL _bcHashed;
   NSDictionary *_refl; NSDictionary *_airNames; NSArray *_arguments;

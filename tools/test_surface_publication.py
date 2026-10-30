@@ -79,6 +79,7 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) {
 - (void)nvmtlSurfaceIn;
 - (BOOL)nvmtlSurfaceOut;
 - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied;
+- (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied copied:(BOOL)copied;
 @end
 @implementation NVMTLTexture
 - (BOOL)nvmtlSurfaceCopyable { return YES; }
@@ -144,6 +145,12 @@ int main(int argc, char **argv) { @autoreleasepool {
     assert(busyWaits==1 && c->_clientWritten);
     busyForeign=0; cs.seed++; [c nvmtlSurfaceIn];
     assert(busyWaits==2);
+    // A completed capture copy keeps the CPU pixels, advances the seed and never calls either GPU readback path.
+    // The readback stub would block waiting for release_read, which is deliberately not signalled again here.
+    Surface captured={.seed=10,.cpu={17,18,19,20}};
+    NVMTLTexture *capture=[NVMTLTexture new];capture->_surf=&captured;capture->_i=(Image){.w=1,.h=1,.bpp=4,.gpu={0,0,0,0}};
+    assert([capture nvmtlSurfaceOutDirtied:NO copied:YES]);
+    assert(capture->_surfSynced && capture->_surfSeed==11 && captured.cpu[0]==17 && captured.cpu[3]==20);
     puts("PASS: overlapping publication preserves GPU pixels; later CPU edits import; a publication after the commit's "
          "VRAM mark never waits for the accelerator lock and retries a busy re-mark off its thread; another process's "
          "write is waited for before import");
