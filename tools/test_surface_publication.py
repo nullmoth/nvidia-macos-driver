@@ -23,7 +23,13 @@ enum { kIOSurfaceLockReadOnly = 1 };
 typedef struct { unsigned w,h,bpp; unsigned char gpu[4]; } Image;
 static dispatch_semaphore_t entered, release_read;
 static unsigned uploads, gpu_seed;
-static unsigned long long g_surfin_skip, g_surfin_copy;
+static unsigned long long g_surfin_skip, g_surfin_copy, g_surfin_own_skip;
+// Keep plane history off in this single-plane publication fixture. The actual
+// history helpers are exercised separately by test_surface_plane_seed.py.
+static BOOL nvmtl_plane_seed_on(void) { return NO; }
+static BOOL nvmtl_own_bumps_cover(Surface *s, NSUInteger p, uint32_t from, uint32_t to) { return NO; }
+static void nvmtl_own_bump_add(Surface *s, NSUInteger p, uint32_t from, uint32_t to) {}
+static size_t IOSurfaceGetPlaneCount(Surface *s) { return 0; }
 static uint32_t IOSurfaceGetSeed(IOSurfaceRef s) { return s->seed; }
 static unsigned IOSurfaceGetID(IOSurfaceRef s) { return 1; }
 static IOReturn IOSurfaceLock(IOSurfaceRef s, unsigned opts, uint32_t *seed) {
