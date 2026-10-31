@@ -94,6 +94,10 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
                   || !strncmp(*e, "NVMTL_UNIFORM_CBUF_STATS=", 25)) continue;
               // Keep the switch that restores inline presents.
               if (!strncmp(*e, "NVMTL_PRESENT_INLINE=", 21)) continue;
+              if (!strncmp(*e, "NVMTL_PLANE_SEED=", sizeof("NVMTL_PLANE_SEED=") - 1)
+                  || !strncmp(*e, "NVMTL_SURF_IMPORT_CACHE=", sizeof("NVMTL_SURF_IMPORT_CACHE=") - 1)
+                  || !strncmp(*e, "NVMTL_SURF_IMPORT_CACHE_IDLE_MS=", sizeof("NVMTL_SURF_IMPORT_CACHE_IDLE_MS=") - 1)
+                  || !strncmp(*e, "NVMTL_SURF_IMPORT_CACHE_MAX_MB=", sizeof("NVMTL_SURF_IMPORT_CACHE_MAX_MB=") - 1)) continue;
               const char *eq = strchr(*e, '='); if (!eq) continue;
               names[n] = strndup(*e, (size_t)(eq - *e)); if (names[n]) n++; }
       for (unsigned i = 0; i < n; i++) { unsetenv(names[i]); free(names[i]); } }
@@ -1197,7 +1201,7 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
     if (!_parent && _bparkable && _backBuf && _i.img) nvmtl_bpark_put(_backBuf, &_i, _pkey);
     if (!_parent) nvmtl_vk_image_destroy(&_i);
     if (_stTwin.img) nvmtl_vk_image_destroy(&_stTwin);
-    if (!_parent && _vramOn) { nvmtl_vk_buffer_destroy(&_vramBuf); _vramOn = NO; }
+    if (!_parent && _vramOn) { if (!nvmtl_ic_put(&_vramBuf)) nvmtl_vk_buffer_destroy(&_vramBuf); _vramOn = NO; }
     if (!_parent) nvmtl_vk_host_pages_drop(&_hostPages);
     if (_surfOwned && _surf) CFRelease(_surf);
     if (_subHeap) { NVMTLHeap *h = _subHeap; NSUInteger c = _subCharge; _subHeap = nil; _subCharge = 0;
