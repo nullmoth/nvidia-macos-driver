@@ -296,6 +296,17 @@ public:
     IONotifier *fFBNote = nullptr;
     IONotifier *fIntelNote = nullptr;
     static NVAccel *gAccel;
+    // The thread that holds the accelerator lock (fork): the family calls these around its own locking, and nvFamLock /
+    // nvFamUnlock call them too. NVResource::pageoff lets go of the lock for its GPU wait only when the current thread is
+    // the recorded owner (debug.nvaccel_pageoff_unlocked_wait).
+    static void *volatile gLockOwner;
+    static bool lockOwnedByCurrentThread() { return __atomic_load_n(&gLockOwner, __ATOMIC_ACQUIRE) == current_thread(); }
+    void acceleratorDidLock(char const *f, int l) APPLE_KEXT_OVERRIDE { IOGraphicsAccelerator2::acceleratorDidLock(f, l); __atomic_store_n(&gLockOwner, current_thread(), __ATOMIC_RELEASE); }
+    void acceleratorWillUnlock(char const *f, int l) APPLE_KEXT_OVERRIDE {
+        void *owner = current_thread();
+        __atomic_compare_exchange_n(&gLockOwner, &owner, nullptr, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+        IOGraphicsAccelerator2::acceleratorWillUnlock(f, l);
+    }
     IOService *fFB = nullptr;
     IOService *volatile fFBs[kNvMaxFB] = {};
     unsigned fFBRegistered = 0;
@@ -971,6 +982,7 @@ public:
 };
 OSDefineMetaClassAndStructors(NVAccel, IOGraphicsAccelerator2)
 NVAccel *NVAccel::gAccel = nullptr;
+void *volatile NVAccel::gLockOwner = nullptr;
 
 IOAccelMemory *NVDisplayPipe::initFramebufferResource(unsigned int index, IOAccelResource2 *res)
 {
@@ -1534,6 +1546,29 @@ static bool nvSurfWaitReady(unsigned int id)
     }
     return ready;
 }
+// true when a GPU write to this surface is still marked pending (no wait)
+static bool nvSurfIsPending(unsigned int id)
+{
+    IOLock *l = gSurfPendLock;
+    if (!l || !id || !gSurfGpuOn) return false;
+    bool p = false;
+    IOLockLock(l);
+    for (unsigned i = 0; i < 32 && !p; i++) p = gSurfPend[i].id == id;
+    IOLockUnlock(l);
+    return p;
+}
+// Unlocked page-off wait (fork; debug.nvaccel_pageoff_unlocked_wait, 1 = on, the default): a CPU lock of a surface WindowServer's
+// GPU is still writing waits for that write inside NVResource::pageoff, which the family calls with the accelerator lock held,
+// and the wait (up to 100 ms) held that lock: every RM call that needs it (VRAM imports, allocations, dirty marks) queued behind
+// it, and two-plane capture surfaces could not share VRAM without ~100 ms stalls. With this on, the page-off lets go of the
+// lock while it waits, when the current thread is the lock's recorded owner, and takes it back before it copies.
+static int gPoUnlocked = 1;
+static SInt64 gCntPoUnlocked, gCntPoNotOwner;
+static int gPoUnlockedMaxUs;
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_pageoff_unlocked_wait, CTLFLAG_RW | CTLFLAG_LOCKED, &gPoUnlocked, 0, "1 = a page-off waits for the GPU without the accelerator lock (fork)");
+NVACCEL_CNT(nvaccel_pageoff_unlocked_waits,   gCntPoUnlocked, "page-offs that waited for the GPU without the accelerator lock");
+NVACCEL_CNT(nvaccel_pageoff_locked_not_owner, gCntPoNotOwner, "page-offs with a pending surface whose thread was not the lock's recorded owner (waited locked)");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_pageoff_unlocked_wait_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gPoUnlockedMaxUs, 0, "longest unlocked page-off wait, us");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_surface_gpu, CTLFLAG_RD | CTLFLAG_LOCKED, &gSurfGpuOn, 0, "1 = WindowServer swaps wait for GPU completion here (same value as nvaccel_surface_gpu_on)");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_surface_gpu_on, CTLFLAG_RW | CTLFLAG_LOCKED, &gSurfGpuOn, 0, "0 = WindowServer waits for its own composites again (the plugin re-asks every second)");
 NVACCEL_CNT(nvaccel_surface_gpu_marks,    gCntSurfMarks,    "pending/ready marks from WindowServer");
@@ -1589,6 +1624,8 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu);    sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_on);
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_marks); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_waits);
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_timeouts); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_wait_max_us);
+    sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_wait); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_waits);
+    sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_locked_not_owner); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_wait_max_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_refused); sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_drop);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_late);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h0);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h1);
@@ -1917,7 +1954,27 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
     }
     // a CPU lock that arrives while WindowServer's GPU is still writing this surface waits for that write first, as a
     // normal IOSurfaceLock does on Apple's drivers (the commit marked it pending; see nvmtl_ws_mark_pending)
-    nvSurfWaitReady(_ZNK9IOSurface12getSurfaceIDEv(surf));
+    {   const unsigned sid = _ZNK9IOSurface12getSurfaceIDEv(surf);
+        NVAccel *a = NVAccel::gAccel;
+        if (gPoUnlocked && a && nvSurfIsPending(sid) && NVAccel::lockOwnedByCurrentThread()) {
+            // wait without the accelerator lock, then take it back and look at the resource again: while the lock was
+            // free the family may have changed it (a caller still holds its reference)
+            const uint64_t t0 = mach_absolute_time();
+            nvFamUnlock(a);
+            nvSurfWaitReady(sid);
+            nvFamLock(a, false);
+            uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+            if ((int)(ns / 1000) > gPoUnlockedMaxUs) gPoUnlockedMaxUs = (int)(ns / 1000);
+            OSAddAtomic64(1, &gCntPoUnlocked);
+            cache = *(void *volatile *)(r + 0xe0);
+            vm = nvres_vidmem(this);
+            surf = (r[0x14] == 0xc0 && cache) ? *(void *volatile *)((unsigned char *)cache + 0x10) : nullptr;
+            if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(&h)) { IOAccelResource2::pageoff(ev, a1, out, a3); return; }
+        } else {
+            if (gPoUnlocked && a && !NVAccel::lockOwnedByCurrentThread() && nvSurfIsPending(sid)) OSAddAtomic64(1, &gCntPoNotOwner);
+            nvSurfWaitReady(sid);
+        }
+    }
     IOMemoryDescriptor *md = (IOMemoryDescriptor *)_ZNK9IOSurface19getMemoryDescriptorEv(surf);
     if (!md || md->prepare(kIODirectionNone) != kIOReturnSuccess) {
         gNVSVPageoffFail++;
