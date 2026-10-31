@@ -1,21 +1,25 @@
 --- a/kapi/src/nvkms-kapi.c
 +++ b/kapi/src/nvkms-kapi.c
-@@ -3512,6 +3512,18 @@
-     if (params->reply.status != NVKMS_SET_MODE_STATUS_SUCCESS)
-     {
-         int i;
+@@ -3501,6 +3501,22 @@
+         (params->reply.status == NVKMS_SET_MODE_STATUS_SUCCESS) ?
+                                  NV_KMS_FLIP_RESULT_SUCCESS :
+                                  NV_KMS_FLIP_RESULT_INVALID_PARAMS;
 +
-+        /*
-+         * A refused mode set left only "commit rejected" in the log: the debug lines below are compiled out of release
-+         * builds, and a WindowServer that could not set its first mode then asserted in CGXMappedDisplayStart with no
-+         * reason anywhere. One warning line carries the reason codes (NVKMS_SET_MODE_STATUS_* and per head
-+         * NVKMS_SET_MODE_ONE_HEAD_STATUS_*: 1 invalid mode, 2 invalid dpy, 7 permissions, 8 head surface, ...).
-+         */
++    /*
++     * A refused mode set left only "commit rejected" in the log: the debug lines below are compiled out of release
++     * builds, and a WindowServer that could not set its first mode then asserted in CGXMappedDisplayStart with no
++     * reason anywhere. One warning line carries the reason codes (NVKMS_SET_MODE_STATUS_* and per head
++     * NVKMS_SET_MODE_ONE_HEAD_STATUS_*: 1 invalid mode, 2 invalid dpy, 7 permissions, 8 head surface, ...).
++     * It is logged before the ioctl's own result is checked: the SET_MODE ioctl returns false whenever the reply
++     * status is not success, so a line placed after that check never ran on a refusal.
++     */
++    if (params->reply.status != NVKMS_SET_MODE_STATUS_SUCCESS) {
 +        nvEvoLog(EVO_LOG_WARN,
-+                 "[kapi] set mode refused (commit %d): status %d disp0 %d heads %d %d %d %d",
-+                 commit, params->reply.status, params->reply.disp[0].status,
++                 "[kapi] set mode refused (commit %d, ioctl %s): status %d disp0 %d heads %d %d %d %d",
++                 commit, status ? "ok" : "false", params->reply.status, params->reply.disp[0].status,
 +                 params->reply.disp[0].head[0].status, params->reply.disp[0].head[1].status,
 +                 params->reply.disp[0].head[2].status, params->reply.disp[0].head[3].status);
++    }
  
+     if (!status) {
          nvKmsKapiLogDeviceDebug(
-             device,
