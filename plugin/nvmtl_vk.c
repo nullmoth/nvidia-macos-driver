@@ -6811,6 +6811,17 @@ int nvmtl_vk_image_read_host(nvk_queue *q, nvk_image *img, void *base, size_t ro
     return rc;
 }
 
+static int nvmtl_copy_has_image(const char *what, const nvk_image *img)
+{
+    if (img && img->img) return 1;
+    static _Atomic unsigned said;   // the first few name the texture; a per-frame copy must not flood the log
+    if (atomic_fetch_add(&said, 1) >= 16) return 0;
+    if (!img) { nvlog("%s: no texture - not copied", what); return 0; }
+    nvlog("%s: texture %ux%u fmt %u type %u layers %u mips %u usage 0x%x placed %d sysmem %u has no VkImage - not copied",
+          what, img->w, img->h, img->fmt, img->mtl_type, img->layers, img->mips, img->usage, img->placed, img->sysmem);
+    return 0;
+}
+
 static void img_to(nvk_cmdbuf *c, nvk_image *img, VkImageLayout to,
                    VkAccessFlags srcA, VkAccessFlags dstA, VkPipelineStageFlags srcS, VkPipelineStageFlags dstS)
 {
@@ -7714,6 +7725,10 @@ int nvmtl_vk_cmd_copy_buffer_to_image_layer(nvk_cmdbuf *c, nvk_buffer *b, size_t
 int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(nvk_cmdbuf *c, nvk_buffer *b, size_t off, uint32_t row_bytes,
                                   nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level, uint32_t layer)
 {
+    // A texture with no VkImage reached here from RealityKit's texture setup (Logic Pro, Dolby Atmos mixer): the layout
+    // barrier below handed NVK a null image and the app crashed in nvk_CmdPipelineBarrier2 (read at 0x520). Refuse the
+    // copy and name the texture, so the path that left it without an image can be found from the log.
+    if (!nvmtl_copy_has_image("copy_buffer_to_image", img)) return -1;
     if (level >= (img->mips ? img->mips : 1)) { nvlog("copy_buffer_to_image: level %u — this image has %u", level, img->mips ? img->mips : 1); return -1; }
     const uint32_t lw = nvmtl_lvl(img->w, level), lh = nvmtl_lvl(img->h, level);
     const uint32_t bpp = g_copy_bpp_override ? g_copy_bpp_override : (img->bpp ? img->bpp : 4);
@@ -7743,6 +7758,7 @@ int nvmtl_vk_cmd_copy_image_to_buffer_layer(nvk_cmdbuf *c, nvk_image *img, uint3
 int nvmtl_vk_cmd_copy_image_to_buffer_level_layer(nvk_cmdbuf *c, nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                   nvk_buffer *b, size_t off, uint32_t row_bytes, uint32_t level, uint32_t layer)
 {
+    if (!nvmtl_copy_has_image("copy_image_to_buffer", img)) return -1;
     if (level >= (img->mips ? img->mips : 1)) { nvlog("copy_image_to_buffer: level %u — this image has %u", level, img->mips ? img->mips : 1); return -1; }
     const uint32_t lw = nvmtl_lvl(img->w, level), lh = nvmtl_lvl(img->h, level);
     const uint32_t bpp = g_copy_bpp_override ? g_copy_bpp_override : (img->bpp ? img->bpp : 4);
