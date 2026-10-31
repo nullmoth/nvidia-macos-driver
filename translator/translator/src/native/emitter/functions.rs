@@ -392,6 +392,7 @@ impl Emitter {
         self.vector_word_roots.clear();
         self.vector_word_pointers.clear();
         self.local_pointer_fields.clear();
+        self.unresolved_local_field_loads.clear();
         self.pointer_forward_values.clear();
         self.raw_memcpy_shadows.clear();
         self.dynamic_pointer_tables.clear();
