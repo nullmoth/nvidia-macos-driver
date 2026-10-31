@@ -141,7 +141,8 @@ static int nvmtl_xlate_ready(void) {
         xlate_refl = (nvmtl_refl_fn)dlsym(h, "nvmtl_reflect");
         xlate_refl_fc = (nvmtl_refl_fc_fn)dlsym(h, "nvmtl_reflect_fc");
         void (*setcaps)(uint32_t) = (void (*)(uint32_t))dlsym(h, "nvmtl_translate_set_caps");
-        if (setcaps) setcaps(3u); else nvlog("translate: no nvmtl_translate_set_caps in this translator — written textures stay R32f-declared (one channel)");
+        // Bits 0/1: formatless storage images. Bit 2: this plugin has no rasterization rate maps.
+        if (setcaps) setcaps(3u | 4u); else nvlog("translate: no nvmtl_translate_set_caps in this translator — written textures stay R32f-declared (one channel)");
         if (!xlate) { nvlog("translate: no nvmtl_translate symbol"); return; }
         nvlog("translate: in-process AIR->SPIR-V library loaded");
     });
