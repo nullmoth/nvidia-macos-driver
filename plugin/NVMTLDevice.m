@@ -2066,6 +2066,8 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     return [self heapAccelerationStructureSizeAndAlignWithSize:s.accelerationStructureSize];
 }
 - (BOOL)supportsBCTextureCompression { return YES; }
+- (BOOL)supportsRasterizationRateMapWithLayerCount:(NSUInteger)count { return NO; }
+- (id<MTLRasterizationRateMap>)newRasterizationRateMapWithDescriptor:(MTLRasterizationRateMapDescriptor *)descriptor { return nil; }
 - (BOOL)supportsInt64 { return YES; }
 - (BOOL)isQuadDataSharingSupported { return YES; }
 - (BOOL)supportsCounterSampling:(MTLCounterSamplingPoint)p {
