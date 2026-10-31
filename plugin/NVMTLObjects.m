@@ -630,6 +630,7 @@ static void nvmtl_purge_report(const char *why) {
           (unsigned long long)atomic_load(&gPurgeAsks), (unsigned long long)(bemp >> 20));
 }
 static void nvmtl_pre_release(void *held) { @autoreleasepool { (void)CFBridgingRelease(held); } }
+static void nvmtl_zero_flush(void);
 static void nvmtl_managed_flush(void) {
     if (!atomic_load(&gManagedAny) || gManagedInFlush) return;
     gManagedInFlush = 1;
@@ -641,6 +642,10 @@ static void nvmtl_managed_flush(void) {
     }
     [gManagedDirty removeAllObjects]; atomic_store(&gManagedAny, 0);
     os_unfair_lock_unlock(&gManagedLock);
+    // A managed buffer can be created and dirtied after presubmit's first zero
+    // snapshot. Claim its initial clear before uploading this dirty snapshot;
+    // otherwise the next submission can clear data already uploaded here.
+    if (todo.count) nvmtl_zero_flush();
     if (todo.count && nvmtl_vk_pre_open()) {
         for (NSArray *t in todo) {
             NVMTLBuffer *b = t[0]; NSUInteger lo = [t[1] unsignedIntegerValue], n = [t[2] unsignedIntegerValue] - lo;
