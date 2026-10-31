@@ -9,7 +9,7 @@
 @interface NVMTLSubmissionPart : NSObject {
 @public
     nvk_cmdbuf commands;
-    NSSet *resources, *surfaces;
+    NSSet *resources, *surfaces, *copiedSurfaces;
     NSArray *scratch;
     id waitEvent, signalEvent;
     uint64_t value;
@@ -34,6 +34,34 @@ static int nvmtl_gsub_finish(NVMTLSubmissionPart *part) {
     atomic_fetch_sub(&gsub_inflight, 1);
     if (r == 0) nvmtl_vk_inflight_free(f);
     return r;
+}
+// Only the final recorded segment can be extended here: earlier segments' image layouts already feed later ones.
+// Earlier event segments keep their normal publication before signalling the event. Only this segment's successful
+// completion authorizes skipping its readback; nothing is transferred from an earlier segment to this one.
+static void nvmtl_ws_gpu_copyout(NVMTLCommandBuffer *cb) {
+    static BOOL on; static dispatch_once_t once;
+    dispatch_once(&once, ^{ const char *e = getenv("NVMTL_GPU_COPYOUT"); on = !(e && e[0] == '0'); });
+    if (!on || !cb->_scheduleAfterPublish) return;
+    NVMTLSubmissionPart *part = nil;
+    for (NVMTLSubmissionPart *candidate in cb->_parts) {
+        if ([candidate isKindOfClass:[NVMTLSubmissionPart class]] && candidate->commands.cb
+            && (candidate->encoders || candidate->resources.count || candidate->surfaces.count || candidate->scratch.count)) part = candidate;
+    }
+    if (part) {
+        NSMutableSet *seen = [NSMutableSet new], *roots = [NSMutableSet new], *copied = [NSMutableSet new];
+        NSMutableArray *scratch = [part->scratch mutableCopy] ?: [NSMutableArray new];
+        for (NVMTLTexture *t in part->surfaces) {
+            NVMTLTexture *r = t->_parent ?: t;
+            if (![seen containsObject:r]) {
+                [seen addObject:r];
+                id pages = [r nvmtlRecordCaptureCopy:&part->commands];
+                if (pages) { [scratch addObject:pages]; [roots addObject:r]; }
+            }
+            if ([roots containsObject:r]) [copied addObject:t];
+        }
+        part->copiedSurfaces = copied;
+        part->scratch = scratch;
+    }
 }
 @interface NVMTLPendingSurfaceWrite : NSObject {
 @public __weak NVMTLCommandBuffer *buffer; __weak NVMTLTexture *texture; uint32_t seed;
@@ -119,7 +147,7 @@ static BOOL nvmtl_ws_surface_wait(void) {
 @implementation NVMTLSurfaceHolds @end
 // A texture whose part has landed while its surface is still held, published by the holder that releases it last.
 // dirtied: the commit marked its VRAM newest, so publication is bookkeeping only (nvmtlSurfaceOutDirtied:).
-@interface NVMTLDeferredPublication : NSObject { @public NVMTLTexture *texture; BOOL dirtied; __weak NVMTLCommandBuffer *owner; } @end
+@interface NVMTLDeferredPublication : NSObject { @public NVMTLTexture *texture; BOOL dirtied, copied; __weak NVMTLCommandBuffer *owner; } @end
 @implementation NVMTLDeferredPublication @end
 // The kernel keeps one pending bit per surface, with no owner. WindowServer commits overlapping command buffers that
 // write the same surface, so the holders are counted here and the kernel mark is released only when the last of them has
@@ -137,7 +165,7 @@ static NSObject *nvmtl_ws_lock(void) {
     dispatch_once(&once, ^{ lock = [NSObject new]; });
     return lock;
 }
-static void nvmtl_ws_defer(NVMTLCommandBuffer *owner, NVMTLTexture *t, BOOL dirtied, uint32_t sid) {
+static void nvmtl_ws_defer(NVMTLCommandBuffer *owner, NVMTLTexture *t, BOOL dirtied, BOOL copied, uint32_t sid) {
     @synchronized (nvmtl_ws_lock()) {
         if (!nvmtl_ws_deferred) nvmtl_ws_deferred = [NSMutableDictionary new];
         NSMutableArray *waiting = nvmtl_ws_deferred[@(sid)];
@@ -146,7 +174,7 @@ static void nvmtl_ws_defer(NVMTLCommandBuffer *owner, NVMTLTexture *t, BOOL dirt
         // copy written between the two would be copied out after it and leave the older pixels current
         for (NSUInteger i = 0; i < waiting.count; i++) if (((NVMTLDeferredPublication *)waiting[i])->texture == t) { [waiting removeObjectAtIndex:i]; break; }
         NVMTLDeferredPublication *d = [NVMTLDeferredPublication new];
-        d->texture = t; d->dirtied = dirtied; d->owner = owner;
+        d->texture = t; d->dirtied = dirtied; d->copied = copied; d->owner = owner;
         [waiting addObject:d];
     }
 }
@@ -168,7 +196,7 @@ static void nvmtl_ws_release(NVMTLSurfaceHolds *holds, uint32_t sid, NSMutableAr
 static BOOL nvmtl_ws_publish_settled(NSArray *settled, NVMTLCommandBuffer *cb) {
     BOOL ok = YES;
     for (NVMTLDeferredPublication *d in settled) {
-        if (d->dirtied ? [d->texture nvmtlSurfaceOutDirtied:YES] : [d->texture nvmtlSurfaceOut]) continue;
+        if ([d->texture nvmtlSurfaceOutDirtied:d->dirtied copied:d->copied]) continue;
         if (cb && d->owner == cb) ok = NO;
         else nvlog("WindowServer surface %u: publication after its last write refused", (unsigned)IOSurfaceGetID(d->texture->_surf));
     }
@@ -193,6 +221,7 @@ static BOOL nvmtl_ws_publish_settled(NSArray *settled, NVMTLCommandBuffer *cb) {
 // at 90 frames a second.
 static void nvmtl_ws_mark_pending(NVMTLCommandBuffer *cb) {
     if (!nvmtl_ws_kernel_waits()) return;
+    nvmtl_ws_gpu_copyout(cb);
     NSMutableSet *ids = nil;
     for (NVMTLSubmissionPart *part in cb->_parts) {
         if (![part isKindOfClass:[NVMTLSubmissionPart class]]) continue;
@@ -235,7 +264,7 @@ static NSArray *nvmtl_ws_part_landed(NVMTLCommandBuffer *cb, NSUInteger index, N
         if (!t->_surf) { [publish addObject:t]; continue; }
         const uint32_t sid = (uint32_t)IOSurfaceGetID(t->_surf);
         // deferred before the release below, so the release that turns out to be the last one publishes it
-        nvmtl_ws_defer(cb, t, [holds->dirtied containsObject:t], sid);
+        nvmtl_ws_defer(cb, t, [holds->dirtied containsObject:t], [part->copiedSurfaces containsObject:t], sid);
         BOOL later = NO;
         for (NSUInteger i = index + 1; i < cb->_parts.count && !later; i++) {
             NVMTLSubmissionPart *next = cb->_parts[i];
@@ -727,7 +756,8 @@ static void nvmtl_gsub_ahead_pass1(void) {
             // the GPU has finished this part: its surfaces' kernel marks are released (nvmtl_ws_part_landed) before the
             // surface work below, which takes the surface's own lock
             NSMutableArray *settled = [NSMutableArray new];
-            for (NVMTLTexture *texture in nvmtl_ws_part_landed(self, _nextPart, settled)) if (![texture nvmtlSurfaceOut]) published = NO;
+            for (NVMTLTexture *texture in nvmtl_ws_part_landed(self, _nextPart, settled))
+                if (![texture nvmtlSurfaceOutDirtied:NO copied:[part->copiedSurfaces containsObject:texture]]) published = NO;
             if (!nvmtl_ws_publish_settled(settled, self)) published = NO;
             for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, YES)) nvmtl_buffer_sync_out(buffer);
         }

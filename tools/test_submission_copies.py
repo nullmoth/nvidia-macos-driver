@@ -105,17 +105,20 @@ typedef struct { int unused; } nvmtl_inflight;
     BOOL waitFolded, aheadEmpty, claimed; int aheadFailed; unsigned encoders;
     nvmtl_inflight *inflight;
     NSArray<NVMTLBuffer *> *copyInputs; BOOL copyInputsPrepared, hasHostCopies;
+    NSSet *copiedSurfaces;
 } @end
 @implementation NVMTLSubmissionPart @end
 @interface NVMTLTexture (Publication)
 - (BOOL)nvmtlSurfaceOut;
 - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied;
+- (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied copied:(BOOL)copied;
 @end
 // every publication is logged in events as "o<tag>:<dirtied>" (dirtied: the commit's VRAM mark stands, nothing is asked
 // of the kernel again)
 @implementation NVMTLTexture (Publication)
 - (BOOL)nvmtlSurfaceOut { return [self nvmtlSurfaceOutDirtied:NO]; }
 - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied { if (events) [events addObject:[NSString stringWithFormat:@"o%d:%d",_tag,(int)dirtied]]; return YES; }
+- (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied copied:(BOOL)copied { assert(!copied); return [self nvmtlSurfaceOutDirtied:dirtied]; }
 @end
 @interface NVMTLCommandBuffer : NSObject { @public
     BOOL _executionDone, _committed, _commitMarking, _partsRetiring; NSError *_cbError;
@@ -139,6 +142,9 @@ static void nvmtl_evfold_census(void *counter, const char *message) {}
 static void nvmtl_evfold_promise_part(id part) {}
 static void nvmtl_gsub_census(void) {}
 static BOOL nvmtl_skip_empty_on(void) { return NO; }
+// This fixture checks submission ordering without capture copies. The production
+// recorder and its submission-owned copiedSurfaces are covered by test_capture_copyout.py.
+static void nvmtl_ws_gpu_copyout(NVMTLCommandBuffer *cb) {}
 static void nvmtl_vk_cmd_abandon(Commands *cmd) { cmd->cb=NULL; }
 static nvmtl_inflight *nvmtl_vk_inflight_new(void) { return allocationFails ? NULL : calloc(1,sizeof(nvmtl_inflight)); }
 static void nvmtl_vk_inflight_free(nvmtl_inflight *f) { free(f); }

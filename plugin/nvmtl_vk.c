@@ -6631,6 +6631,22 @@ void nvmtl_vk_host_pages_drop(nvk_buffer *cache)
     if (cache->buf) { atomic_fetch_sub(&g_host_pages_kept, (uint64_t)cache->size); nvmtl_vk_buffer_destroy(cache); }
     memset(cache, 0, sizeof *cache);
 }
+// Capture imports share the existing host-page budget. In-flight leases count until their submissions release them.
+int nvmtl_vk_host_pages_hold(void *base, size_t bytes, nvk_buffer *out)
+{
+    if (!base || !bytes || !out || out->buf || out->mem) return -1;
+    const uint64_t cap = nvmtl_host_pages_cap();
+    uint64_t kept = atomic_load(&g_host_pages_kept);
+    do {
+        if ((uint64_t)bytes > cap || kept > cap - bytes) return -1;
+    } while (!atomic_compare_exchange_weak(&g_host_pages_kept, &kept, kept + bytes));
+    if (nvmtl_vk_buffer_import_host(base, bytes, out)) {
+        atomic_fetch_sub(&g_host_pages_kept, (uint64_t)bytes);
+        memset(out, 0, sizeof *out);
+        return -1;
+    }
+    return 0;
+}
 static nvk_buffer *nvmtl_host_pages(nvk_buffer *cache, void *base, size_t bytes, nvk_buffer *tmp)
 {
     if (cache && cache->buf && cache->map == base && cache->size == bytes) return cache;
@@ -6809,6 +6825,40 @@ int nvmtl_vk_image_read_host(nvk_queue *q, nvk_image *img, void *base, size_t ro
     const int rc = nvmtl_vk_submit_wait_at(&c, "surface readback (imported pages)");
     nvmtl_host_pages_done(cache, hp);
     return rc;
+}
+
+// Record a capture-plane copy in the submission that drew it. The caller owns host until that submission completes.
+int nvmtl_vk_record_image_to_host(nvk_cmdbuf *c, nvk_image *img, const nvk_buffer *host, size_t offset, size_t row_bytes)
+{
+    if (!c || !c->cb || c->in_rp || !img || !img->img || !host || !host->buf || !host->imported
+        || !img->w || !img->h || !img->bpp || img->samples > 1 || img->bw > 1 || img->bh > 1
+        || img->mips > 1 || img->layers > 1 || nvmtl_copy_aspect(img) != VK_IMAGE_ASPECT_COLOR_BIT) return -1;
+    const size_t bpp = img->bpp;
+    if ((size_t)img->w > SIZE_MAX / bpp || row_bytes < (size_t)img->w * bpp || row_bytes % bpp
+        || row_bytes / bpp > UINT32_MAX || offset % 4 || offset % bpp || offset > host->size) return -1;
+    const size_t remaining = host->size - offset, last_row = (size_t)img->w * bpp;
+    if (last_row > remaining || (size_t)(img->h - 1) > (remaining - last_row) / row_bytes) return -1;
+    nvmtl_vk_image_upload_barrier(img);
+    const VkImageLayout layout = (VkImageLayout)img->layout;
+    if (layout == VK_IMAGE_LAYOUT_UNDEFINED || layout == VK_IMAGE_LAYOUT_PREINITIALIZED) return -1;
+    VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    VkImageMemoryBarrier toSrc = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+        VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+        layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, NULL, 0, NULL, 1, &toSrc);
+    VkBufferImageCopy copy = { offset, (uint32_t)(row_bytes / bpp), 0, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        { 0, 0, 0 }, { img->w, img->h, 1 } };
+    pvkCmdCopyImageToBuffer(c->cb, img->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, host->buf, 1, &copy);
+    VkMemoryBarrier toHost = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT };
+    VkImageMemoryBarrier restore = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+        VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, layout,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+                         0, 1, &toHost, 0, NULL, 1, &restore);
+    return 0;
 }
 
 static void img_to(nvk_cmdbuf *c, nvk_image *img, VkImageLayout to,
