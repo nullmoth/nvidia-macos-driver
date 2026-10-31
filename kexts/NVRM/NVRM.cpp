@@ -538,6 +538,21 @@ static bool gRmInitDone = false;
 // RTX 2070 SUPER stuck at boot. The installer used to be the only place that asked for this (nvrmsettle=10000), and it
 // matched only display-class (0300) cards, so a muxless laptop card (class 0302) or a machine whose boot arguments were
 // rewritten started with the 0.5 s default. The driver now knows the family itself; the boot argument still overrides.
+// Moving BAR1 takes the boot console with it when the firmware put the console inside BAR1: the root port stops
+// decoding the old address, but the kernel console keeps drawing there until the framebuffer takes over. On a verbose
+// boot (-v) every IOLog line is drawn (and the screen scrolled) through that dead address, and each line then cost
+// about half a second. A GTX 1650 moved from 64 MB at 0xfff80000000 to 256 MB at 0x3ffa0000000 spent 247 s in
+// RmInitAdapter printing its register map, missed the settle + 120 s boot-hold cap, and reached the desktop with no
+// Metal device. The console is silenced at the move only in that case: a verbose boot whose console was inside the
+// old BAR1 and is not inside the new one. The framebuffer silences it at takeover anyway and never turns it back on.
+static inline bool nvrmConsoleLostByMove(unsigned long long con, unsigned long long oldBase, unsigned long long oldSize,
+                                         unsigned long long newBase, unsigned long long newSize, bool verbose)
+{
+    if (!verbose || !con || !oldSize) return false;
+    if (con < oldBase || con - oldBase >= oldSize) return false;                 // the console was never in BAR1
+    return !(newSize && con >= newBase && con - newBase < newSize);              // still decoded where BAR1 now is
+}
+
 static inline bool nvrmIsTuringDeviceId(unsigned int id)
 {
     return (id >= 0x1E00 && id <= 0x1FFF) || (id >= 0x2180 && id <= 0x21FF);
@@ -1195,6 +1210,7 @@ bool NVRM::placeLargeBar1()
         }
     }
     LOG("bar1: Resizable BAR capability @0x%x says BAR1 = %llu MB (sizes supported mask 0x%x)", cap, bar1Size >> 20, rbSupported);
+    const UInt64 fwBar1Size = bar1Size;   // the size the firmware decoded, before any resize below
     // 10-07: with "Resizable BAR" off in the BIOS (or a card the firmware leaves at 256 MB) the firmware places a small
     // BAR1 over the boot screen and the driver had nothing to move. The card itself can resize: take the largest size it
     // supports between 4 GB and 8 GB, written below once the destination is proven free.
@@ -1410,6 +1426,16 @@ bool NVRM::placeLargeBar1()
     m1->release(); m3->release(); arr->release();
     fPCI->setProperty("nvrm-bar1-placed", bar1Base, 64);
     LOG("bar1: PLACED — BAR1 %llu MB live at 0x%llx", bar1Size >> 20, bar1Base);
+    {
+        PE_Video pv; bzero(&pv, sizeof pv);
+        const UInt64 con = (getPlatform() && getPlatform()->getConsoleInfo(&pv) == kIOReturnSuccess) ? ((UInt64)pv.v_baseAddr & ~3ull) : 0;
+        char vb[8] = { 0 };
+        const bool verbose = PE_parse_boot_argn("-v", vb, sizeof vb);
+        if (nvrmConsoleLostByMove(con, fwBar1, fwBar1Size, bar1Base, bar1Size, verbose)) {
+            getPlatform()->setConsoleInfo(0, kPEDisableScreen);
+            LOG("bar1: verbose console at 0x%llx is no longer decoded after the move - silenced until the framebuffer takes over", con);
+        }
+    }
     return true;
 }
 
