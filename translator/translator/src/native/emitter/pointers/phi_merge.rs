@@ -664,8 +664,43 @@ impl Emitter {
             return Ok(false);
         }
         self.emit_pointer_nullness_phi(name, incoming, result_ty, instructions)?;
+        // Every incoming value loads the same local pointer field (Hades' DistanceFieldFancy reloads its uniform
+        // pointer from the shader object after a discard and merges the two loads): the phi is one more load of that
+        // field, resolved with the others after emission. WAS a private zero pointer, so every load through the phi
+        // read 0 (u_OutlineThickness, u_Scale, ...) while loads through the first load got the buffer.
+        if let Some(key) = self.common_unresolved_local_field(incoming) {
+            let result = self.result_id(name, result_ty)?;
+            let mut copy = Vec::new();
+            self.emit_unmodeled_byte_pointer_copy(name, result, *addrspace, &mut copy)?;
+            self.phi_result_instructions.extend(copy);
+            self.unresolved_local_field_loads
+                .insert(name.to_string(), key.clone());
+            self.emit_sidecar.local_pointer_field_loads.push(
+                crate::emit_sidecar::LocalPointerFieldLoad {
+                    id: result,
+                    root: key.root,
+                    indices: key.indices,
+                },
+            );
+            return Ok(true);
+        }
         self.define_unmodeled_pointer_value(name, *addrspace, &LlType::Int(8))?;
         Ok(true)
+    }
+
+    fn common_unresolved_local_field(&self, incoming: &[(LlValue, String)]) -> Option<LocalPointerField> {
+        let mut common: Option<&LocalPointerField> = None;
+        for (value, _) in incoming {
+            let LlValue::Local(incoming_name) = value else {
+                return None;
+            };
+            let key = self.unresolved_local_field_loads.get(incoming_name)?;
+            match common {
+                Some(seen) if seen != key => return None,
+                _ => common = Some(key),
+            }
+        }
+        common.cloned()
     }
 
     pub(in crate::native::emitter) fn forward_gep_base_is_unmodeled(&self, name: &str) -> bool {
