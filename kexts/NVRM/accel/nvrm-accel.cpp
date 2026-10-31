@@ -300,8 +300,13 @@ public:
     // nvFamUnlock call them too. NVResource::pageoff lets go of the lock for its GPU wait only when the current thread is
     // the recorded owner (debug.nvaccel_pageoff_unlocked_wait).
     static void *volatile gLockOwner;
-    void acceleratorDidLock(char const *f, int l) APPLE_KEXT_OVERRIDE { IOGraphicsAccelerator2::acceleratorDidLock(f, l); gLockOwner = current_thread(); }
-    void acceleratorWillUnlock(char const *f, int l) APPLE_KEXT_OVERRIDE { if (gLockOwner == current_thread()) gLockOwner = nullptr; IOGraphicsAccelerator2::acceleratorWillUnlock(f, l); }
+    static bool lockOwnedByCurrentThread() { return __atomic_load_n(&gLockOwner, __ATOMIC_ACQUIRE) == current_thread(); }
+    void acceleratorDidLock(char const *f, int l) APPLE_KEXT_OVERRIDE { IOGraphicsAccelerator2::acceleratorDidLock(f, l); __atomic_store_n(&gLockOwner, current_thread(), __ATOMIC_RELEASE); }
+    void acceleratorWillUnlock(char const *f, int l) APPLE_KEXT_OVERRIDE {
+        void *owner = current_thread();
+        __atomic_compare_exchange_n(&gLockOwner, &owner, nullptr, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+        IOGraphicsAccelerator2::acceleratorWillUnlock(f, l);
+    }
     IOService *fFB = nullptr;
     IOService *volatile fFBs[kNvMaxFB] = {};
     unsigned fFBRegistered = 0;
@@ -1980,7 +1985,7 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
     // normal IOSurfaceLock does on Apple's drivers (the commit marked it pending; see nvmtl_ws_mark_pending)
     {   const unsigned sid = _ZNK9IOSurface12getSurfaceIDEv(surf);
         NVAccel *a = NVAccel::gAccel;
-        if (gPoUnlocked && a && nvSurfIsPending(sid) && NVAccel::gLockOwner == current_thread()) {
+        if (gPoUnlocked && a && nvSurfIsPending(sid) && NVAccel::lockOwnedByCurrentThread()) {
             // wait without the accelerator lock, then take it back and look at the resource again: while the lock was
             // free the family may have changed it (a caller still holds its reference)
             const uint64_t t0 = mach_absolute_time();
@@ -1993,9 +1998,9 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             cache = *(void *volatile *)(r + 0xe0);
             vm = nvres_vidmem(this);
             surf = (r[0x14] == 0xc0 && cache) ? *(void *volatile *)((unsigned char *)cache + 0x10) : nullptr;
-            if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes) { IOAccelResource2::pageoff(ev, a1, out, a3); return; }
+            if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(&h)) { IOAccelResource2::pageoff(ev, a1, out, a3); return; }
         } else {
-            if (gPoUnlocked && a && NVAccel::gLockOwner != current_thread() && nvSurfIsPending(sid)) OSAddAtomic64(1, &gCntPoNotOwner);
+            if (gPoUnlocked && a && !NVAccel::lockOwnedByCurrentThread() && nvSurfIsPending(sid)) OSAddAtomic64(1, &gCntPoNotOwner);
             nvSurfWaitReady(sid);
         }
     }
