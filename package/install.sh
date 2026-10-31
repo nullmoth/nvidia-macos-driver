@@ -562,6 +562,15 @@ ok "a start counts as good once the desktop is up"
 
 ba=$(nvram boot-args 2>/dev/null | cut -f2-)
 for a in nvfb=1 nvaccel=1; do case " $ba " in *" $a "*) ;; *) echo "   NOTE: boot-args lack '$a' — add it in your OpenCore config.plist (README: Install — by hand), or let the 1401 Mac app set OpenCore up";; esac; done
+# WindowServer is a platform binary: with AMFI enforcing it refuses the Metal plugin ("mapping process is a platform
+# binary, but mapped file is not"), reaches the desktop with no Metal device and asserts "Failed to create MetalDevice".
+# Two reports had boot-args with nvfb/nvaccel but neither AMFI argument.
+amfi_note() {
+  case " $1 " in *" amfi_get_out_of_my_way="*|*" amfi="*) ;;
+    *) echo "   NOTE: boot-args lack 'amfi_get_out_of_my_way=0x1 amfi=0x80' — without them WindowServer refuses the NVIDIA Metal plugin and the desktop has no Metal device; add them in your OpenCore config.plist, or let the 1401 Mac app set OpenCore up";;
+  esac
+}
+amfi_note "$ba"
 # WhateverGreen's boot screen copy (on unless gfxrst=4) reads a console mapping macOS may already have freed when this
 # driver's display first opens, and the Mac panics in IOFramebuffer::postOpen.
 if kmutil showloaded --list-only --bundle-identifier as.vit9696.WhateverGreen 2>/dev/null | grep -q WhateverGreen; then
