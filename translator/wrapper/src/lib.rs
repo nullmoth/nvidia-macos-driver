@@ -51,6 +51,8 @@ fn apply_rsc(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::pas
 
 fn apply_tg(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::passes::TransformOptions {
     o = apply_rsc(o);
+    // Bit 2 is an explicit guarantee from the plugin: no rate map can be created or bound.
+    o.no_rasterization_rate_maps = CAPS.load(Ordering::Relaxed) & 4 != 0;
     for (index, length) in threadgroup_lengths() {
         match o.with_threadgroup_memory_length(index, length) {
             Ok(next) => o = next,

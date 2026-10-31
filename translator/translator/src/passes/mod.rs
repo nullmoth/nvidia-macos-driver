@@ -28,6 +28,9 @@ pub struct TransformOptions {
     pub kernel_dispatch: Option<crate::reflect::KernelDispatch>,
     pub denorm_flush_to_zero_f32: bool,
     pub raster_sample_count: Option<u32>,
+    /// The caller guarantees that no rasterization rate map can be bound.
+    /// Generic translation must keep rejecting undecoded runtime map data.
+    pub no_rasterization_rate_maps: bool,
     pub runtime_sampler_states: [Option<RuntimeSamplerState>; SAMPLER_ARGUMENT_COUNT_USIZE],
     pub runtime_storage_image_states:
         [Option<RuntimeStorageImageState>; TEXTURE_ARGUMENT_COUNT_USIZE],
@@ -46,6 +49,7 @@ impl Default for TransformOptions {
             kernel_dispatch: None,
             denorm_flush_to_zero_f32: false,
             raster_sample_count: None,
+            no_rasterization_rate_maps: false,
             vertex_amplification_count: 1,
             runtime_sampler_states: [None; SAMPLER_ARGUMENT_COUNT_USIZE],
             runtime_storage_image_states: [None; TEXTURE_ARGUMENT_COUNT_USIZE],
@@ -325,6 +329,7 @@ struct Ctx {
     kernel_workgroup_size_id: Option<Word>,
     kernel_dispatch: crate::reflect::KernelDispatch,
     raster_sample_count: Option<u32>,
+    no_rasterization_rate_maps: bool,
     vertex_amplification_count: u32,
     runtime_sampler_states: [Option<RuntimeSamplerState>; SAMPLER_ARGUMENT_COUNT_USIZE],
     runtime_storage_image_states: [Option<RuntimeStorageImageState>; TEXTURE_ARGUMENT_COUNT_USIZE],
@@ -417,6 +422,7 @@ impl Ctx {
                 .kernel_dispatch
                 .unwrap_or_else(crate::reflect::KernelDispatch::safe_default),
             raster_sample_count: options.raster_sample_count,
+            no_rasterization_rate_maps: options.no_rasterization_rate_maps,
             vertex_amplification_count: options.vertex_amplification_count,
             runtime_sampler_states: options.runtime_sampler_states,
             runtime_storage_image_states: options.runtime_storage_image_states,
