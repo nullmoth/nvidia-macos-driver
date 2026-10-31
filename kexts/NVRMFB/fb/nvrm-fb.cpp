@@ -13,6 +13,9 @@
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/IOLib.h>
 #include <sys/sysctl.h>
+#include <sys/vnode.h>
+#include <sys/uio.h>
+#include <sys/fcntl.h>
 #include <kern/thread_call.h>
 #include <mach/mach_time.h>
 #include <IOKit/IODeviceMemory.h>
@@ -68,6 +71,7 @@ extern "C" {
 #pragma clang diagnostic pop
 #include <libkern/OSAtomic.h>
 #include "nvrm_vram_abi.h"
+
 
 // Surfaces may use half of a resizable BAR1 (>= 4 GB) and three quarters of a smaller one. WAS: a fixed 192 MB below
 // 4 GB, which is 3/4 of the 256 MB firmware window but left a 512 MB or 1 GB BAR1 no better off (issue #27).
@@ -137,6 +141,83 @@ static const char kPixelFormats[] = IO32BitDirectPixels "\0";
 static const UInt32 kNVRMFBSetTransform = 0x00000400;   // kIOFBSetTransform
 static const IODisplayModeID kModeId = 1;
 static const unsigned kTraceMax = 900;
+
+// EDID override (fork, feature/change-resolution). NVKMS validates modes against the display's EDID only, so a timing the
+// EDID does not list can never be set; an HDMI dummy plug offers 1920x1080 at 60 Hz at most. NVKMS takes a replacement
+// EDID with each dynamic-display query (overrideEdid; it does not keep it, so every query has to carry it), and then
+// validates, lists and publishes that EDID's modes. The file is
+//   /Library/NullMoth/edid-override/<vendor>-<product>.bin   (the display's own EDID IDs, 4 hex digits each, upper case)
+// and is read once per display. It is refused unless it is owned by root, not writable by group or others, a whole number
+// of 128-byte blocks with valid checksums and the EDID header, and the same vendor and product as the display.
+#define OVLOG(fmt, ...) do { IOLog("NVRM-fb: " fmt "\n", ##__VA_ARGS__); kprintf("NVRM-fb: " fmt "\n", ##__VA_ARGS__); } while (0)
+struct nvrm_edid_override { NvKmsKapiDisplay handle; NvU16 size; bool tried; NvU8 buf[NVKMS_KAPI_EDID_BUFFER_SIZE]; };
+static struct nvrm_edid_override gEdidOv[8];
+static bool nvrmEdidOk(const NvU8 *e, NvU32 n)
+{
+    static const NvU8 hdr[8] = { 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0 };
+    if (n < 128 || n % 128 || memcmp(e, hdr, 8) != 0 || (NvU32)(e[126] + 1) * 128 != n) return false;
+    for (NvU32 b = 0; b < n; b += 128) { NvU8 sum = 0; for (NvU32 i = 0; i < 128; i++) sum += e[b + i]; if (sum) return false; }
+    return true;
+}
+static NvU16 nvrmEdidOverrideRead(const NvU8 *real, NvU8 *out, NvU32 cap)
+{
+    char path[96];
+    snprintf(path, sizeof path, "/Library/NullMoth/edid-override/%02X%02X-%02X%02X.bin", real[8], real[9], real[11], real[10]);
+    vfs_context_t ctx = vfs_context_create(NULL); vnode_t vp = NULLVP; NvU16 got = 0;
+    if (vnode_open(path, FREAD, 0, 0, &vp, ctx) == 0) {
+        struct vnode_attr va; VATTR_INIT(&va); VATTR_WANTED(&va, va_data_size); VATTR_WANTED(&va, va_uid); VATTR_WANTED(&va, va_mode);
+        if (vnode_getattr(vp, &va, ctx) != 0) OVLOG("edid override %s: no attributes, ignored", path);
+        else if (va.va_uid != 0 || (va.va_mode & (S_IWGRP | S_IWOTH))) OVLOG("edid override %s: not root-owned or writable by others, ignored", path);
+        else if (va.va_data_size < 128 || va.va_data_size > cap) OVLOG("edid override %s: %llu bytes, ignored", path, (unsigned long long)va.va_data_size);
+        else {
+            uio_t u = uio_create(1, 0, UIO_SYSSPACE, UIO_READ);
+            if (u) {
+                uio_addiov(u, CAST_USER_ADDR_T(out), (user_size_t)va.va_data_size);
+                const int err = VNOP_READ(vp, u, 0, ctx);
+                const NvU32 n = (NvU32)va.va_data_size;
+                if (err || uio_resid(u) != 0) OVLOG("edid override %s: read error %d", path, err);
+                else if (!nvrmEdidOk(out, n) || memcmp(out + 8, real + 8, 4) != 0) OVLOG("edid override %s: not a valid EDID for this display, ignored", path);
+                else { got = (NvU16)n; OVLOG("edid override %s: %u bytes in use", path, n); }
+                uio_free(u);
+            }
+        }
+        vnode_close(vp, FREAD, ctx);
+    }
+    vfs_context_rele(ctx);
+    return got;
+}
+// /Library/NullMoth/nvfb-small (fork, feature/change-resolution): the file's presence turns nvfbsmall on without a boot-arg
+// (OpenCore rewrites boot-args at every boot, an installer cannot set one). Ignored unless root-owned and not writable by
+// group or others. A boot-arg nvfbsmall=0 / =1 overrides it.
+static bool nvrmRootFile(const char *path)
+{
+    vfs_context_t ctx = vfs_context_create(NULL); vnode_t vp = NULLVP; bool ok = false;
+    if (vnode_lookup(path, 0, &vp, ctx) == 0) {
+        struct vnode_attr va; VATTR_INIT(&va); VATTR_WANTED(&va, va_uid); VATTR_WANTED(&va, va_mode);
+        if (vnode_getattr(vp, &va, ctx) == 0) {
+            ok = va.va_uid == 0 && !(va.va_mode & (S_IWGRP | S_IWOTH));
+            if (!ok) OVLOG("%s: not root-owned or writable by others, ignored", path);
+        }
+        vnode_put(vp);
+    }
+    vfs_context_rele(ctx);
+    return ok;
+}
+
+// getDynamicDisplayInfo with the display's EDID override, when there is one
+static NvBool nvrmDynamicDisplayInfo(struct NvKmsKapiFunctionsTable *kms, struct NvKmsKapiDevice *dev, struct NvKmsKapiDynamicDisplayParams *dd)
+{
+    const NvKmsKapiDisplay h = dd->handle;
+    if (!kms->getDynamicDisplayInfo(dev, dd)) return NV_FALSE;
+    if (!dd->connected || dd->edid.bufferSize < 128) return NV_TRUE;
+    struct nvrm_edid_override *o = nullptr;
+    for (auto &e : gEdidOv) if (e.tried && e.handle == h) { o = &e; break; }
+    if (!o) for (auto &e : gEdidOv) if (!e.tried) { o = &e; o->handle = h; o->tried = true; o->size = nvrmEdidOverrideRead(dd->edid.buffer, o->buf, sizeof o->buf); break; }
+    if (!o || !o->size) return NV_TRUE;
+    dd->overrideEdid = NV_TRUE; dd->edid.bufferSize = o->size; nvu_copy(dd->edid.buffer, o->buf, o->size);
+    if (!kms->getDynamicDisplayInfo(dev, dd)) { OVLOG("edid override for display 0x%x: NVKMS refused it", h); return NV_FALSE; }
+    return NV_TRUE;
+}
 
 // Laptop panel brightness. macOS gives the brightness keys and the brightness slider to its built-in
 // display, an AppleBacklightDisplay. IOGraphics creates one (AppleBacklightDisplay::probe) for a connection
@@ -930,7 +1011,7 @@ bool NVRMNVDAFramebuffer::kapiInit()
         gNDpy = 0;
         for (NvU32 i = 0; i < n; i++) {
             nvu_zero(dd, sizeof *dd); dd->handle = handles[i];
-            if (!fKms->getDynamicDisplayInfo(fDev, dd)) {
+            if (!nvrmDynamicDisplayInfo(fKms, fDev, dd)) {
                 FBLOG("dpy %u/%u 0x%x: getDynamicDisplayInfo FAILED", i, n, handles[i]);
                 continue;
             }
@@ -1555,7 +1636,7 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
         bool known = false; int kdpy = -1;
         for (int k = 0; k < gNDpy; k++) if (gDpy[k].handle == handles[i]) { known = true; kdpy = k; break; }
         nvu_zero(dd, sizeof *dd); dd->handle = handles[i];
-        bool dynOk = me->fKms->getDynamicDisplayInfo(me->fDev, dd);
+        bool dynOk = nvrmDynamicDisplayInfo(me->fKms, me->fDev, dd);
         if (known) {
             // 1401/driver issue #110: switching the monitor to another input and back left it with no picture. The link
             // drops, the head stops scanning out, and this path skipped every display it already knew. A known display
@@ -3135,14 +3216,21 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
         // come from macOS's own scaled modes on the native raster.
         const bool larger = fBootW && k.hVisible >= fBootW && k.vVisible >= fBootH && (k.hVisible > fBootW || k.vVisible > fBootH);
         const bool bootRaster = fBootW && k.hVisible == fBootW && k.vVisible == fBootH;
-        if (!raster && !have && (bootRaster || larger) && fMemBytes && k.hVisible <= fRasterMaxW && k.vVisible <= fScalerMaxH) {
+        // nvfbsmall=1 offers the smaller ones as well: where NVKMS refuses macOS's scaled modes on the native raster (a
+        // 4K-only firmware raster on an HDMI dummy plug), they are the only way to a desktop below the boot size.
+        static int small = -1;
+        if (small < 0) { uint32_t v = 0; const bool arg = PE_parse_boot_argn("nvfbsmall", &v, sizeof v);
+                         small = arg ? v != 0 : nvrmRootFile("/Library/NullMoth/nvfb-small");
+                         if (small) FBLOG("nvfbsmall (%s): rasters smaller than the boot raster are offered too", arg ? "boot-arg" : "/Library/NullMoth/nvfb-small"); }
+        const bool smaller = small && fBootW && !bootRaster && !larger;
+        if (!raster && !have && (bootRaster || larger || smaller) && fMemBytes && k.hVisible <= fRasterMaxW && k.vVisible <= fScalerMaxH) {
             NvU32 pitch = 0;
             if (nvrmCheckedPitch(k.hVisible, fPitchAlign, &pitch) && (NvU64)pitch * k.vVisible <= fMemBytes) raster = true;
         }
         if (have || !raster) {
             if (!fromMac && !fKmsModesLogged)
                 FBLOG("fb%u NVKMS mode %u: not offered (%s)", fIndex, i, have ? "already listed at this rate"
-                      : !fBootW ? "no boot raster yet" : (!bootRaster && !larger) ? "smaller than the boot raster (desktops that size come from macOS's scaled modes)"
+                      : !fBootW ? "no boot raster yet" : (!bootRaster && !larger && !smaller) ? "smaller than the boot raster (desktops that size come from macOS's scaled modes; nvfbsmall=1 offers it)"
                       : "does not fit the scanout memory or the scaler");
             continue;
         }
