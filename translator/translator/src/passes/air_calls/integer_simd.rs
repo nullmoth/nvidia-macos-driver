@@ -1449,15 +1449,12 @@ pub(in crate::passes) fn lower_one(
                      silently drop what the call does"
                 ))
             }
-            // Rasterization rate maps: the driver reports supportsRasterizationRateMapWithLayerCount: NO
-            // and newRasterizationRateMapWithDescriptor: returns nil, so no map can exist and nothing can
-            // fill a rasterization_rate_map_data buffer. Without a map, physical and screen coordinates are
-            // the same (rate 1 everywhere): both directions are the identity on the coordinate. Shaders
-            // that carry the call for an optional foveation path (Unity URP: Darkest Dungeon II, Imagine
-            // Earth) were refused as a whole. If the driver ever implements rate maps, this must decode
-            // the map data instead. METAL2VULKAN_NO_RRM_IDENTITY restores the refusal.
+            // Only an explicit target capability may establish that no map can be bound.
+            // A generic translator cannot infer identity from opaque runtime map bytes.
+            // METAL2VULKAN_NO_RRM_IDENTITY restores refusal even for that target.
             Some(crate::air_intrinsics::AirIntrinsicDisposition::RequiresResourceModel)
                 if crate::air_intrinsics::is_rasterization_rate_map_helper(name)
+                    && ctx.no_rasterization_rate_maps
                     && !crate::env_vars::no_rrm_identity() =>
             {
                 let (Some(res), Some(rty), Some(&coord)) = (res, rty, args.first()) else {

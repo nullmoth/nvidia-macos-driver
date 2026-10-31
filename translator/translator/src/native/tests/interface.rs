@@ -2229,7 +2229,7 @@ target triple = "spirv-unknown-vulkan1.2"
 }
 
 #[test]
-fn native_kernel_raster_rate_map_is_the_identity_without_rate_maps() {
+fn native_kernel_raster_rate_map_requires_explicit_no_maps_capability() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
 
@@ -2258,12 +2258,18 @@ declare <2 x float> @air.map_screen_to_physical_coordinates.v2f32.p2i8.i32(<2 x 
         std::process::id()
     ));
     std::fs::create_dir_all(&tmp).expect("create isolated scratch");
-    // The driver has no rasterization rate maps (supportsRasterizationRateMapWithLayerCount: NO), so the
-    // map data can never describe one: both directions return the coordinate unchanged.
     for direction in ["screen_to_physical", "physical_to_screen"] {
         let source = ll.replace("screen_to_physical", direction);
-        let out = crate::translate_sanitized_native(&source, Stage::Kernel, &tmp)
+        let error = crate::translate_sanitized_native(&source, Stage::Kernel, &tmp)
+            .expect_err("opaque runtime map data must still be refused by default");
+        assert!(error.contains("rasterization-rate-map parameter data decoding"), "{error}");
+        let options = crate::passes::TransformOptions {
+            no_rasterization_rate_maps: true,
+            ..Default::default()
+        };
+        let out = crate::translate_sanitized_native_with_options(&source, Stage::Kernel, &tmp, options)
             .unwrap_or_else(|e| panic!("{direction}: {e}"));
+        crate::tools::spirv_val_bytes(&out, &tmp).expect("identity kernel must validate");
         let asm = disassemble(&out).expect("disassemble");
         let id_of = |op: &str| {
             asm.lines()
