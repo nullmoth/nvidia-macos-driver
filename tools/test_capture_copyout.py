@@ -144,14 +144,18 @@ objc_fixture = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <stdatomic.h>
 #include "nvmtl_vk.h"
 struct __IOSurface { uintptr_t base; size_t alloc, off, row; unsigned refs, planes; };
 typedef struct __IOSurface *IOSurfaceRef;
-static unsigned imports, destroys, recordings;
+static _Atomic unsigned imports, destroys, recordings;
 static BOOL importFails, recordFails, useHost=YES;
 static IOSurfaceRef kept;
 size_t nvmtl_vk_host_import_align(void) { return 4096; }
 static unsigned IOSurfaceGetPlaneCount(IOSurfaceRef s) { return s->planes; }
+static unsigned IOSurfaceGetID(IOSurfaceRef s) { return (unsigned)(uintptr_t)s; }
 static size_t IOSurfaceGetAllocSize(IOSurfaceRef s) { return s->alloc; }
 static void *IOSurfaceGetBaseAddress(IOSurfaceRef s) { return (void *)s->base; }
 static void *IOSurfaceGetBaseAddressOfPlane(IOSurfaceRef s,unsigned p) { (void)p; return (void *)(s->base+s->off); }
@@ -172,7 +176,7 @@ int nvmtl_vk_record_image_to_host(nvk_cmdbuf *c,nvk_image *i,const nvk_buffer *b
 }
 @interface NVMTLTexture : NSObject {
 @public NVMTLTexture *_parent; IOSurfaceRef _surf; BOOL _vramOn, uncopyable; NSUInteger _plane;
-    nvk_image _i; id _capturePages;
+    nvk_image _i; id _capturePages, _hostPageLease; nvk_buffer _hostPages;
 }
 - (BOOL)nvmtlSurfaceCopyable;
 @end
@@ -194,6 +198,33 @@ static bool nvmtl_surfout_import(void) { return useHost; }
 @implementation NVMTLCommandBuffer @end
 '''
 objc_checks = r'''
+static int shared_pages_checks(void) {
+    static struct __IOSurface s={.base=0x400000,.alloc=16384,.row=128,.planes=2};
+    NVMTLTexture *a=[NVMTLTexture new], *b=[NVMTLTexture new]; a->_surf=&s; b->_surf=&s;
+    setenv("NVMTL_SURFIN_PAGE_CACHE_EXTRA", "1", 1);
+    prune_release_environment();
+    assert(!getenv("NVMTL_SURFIN_PAGE_CACHE_EXTRA"));
+    nvk_buffer *first=nvmtl_surface_host_pages(a,(void *)s.base,s.alloc);
+    if(getenv("NVMTL_SURFIN_PAGE_CACHE") && !strcmp(getenv("NVMTL_SURFIN_PAGE_CACHE"),"0")) {
+        assert(first==&a->_hostPages && !imports && !a->_hostPageLease);
+        puts("PASS: shared page cache rollback switch"); return 0;
+    }
+    assert(first->buf && imports==1 && s.refs==1);
+    assert(nvmtl_surface_host_pages(b,(void *)s.base,s.alloc)==first && imports==1);
+    assert(nvmtl_surface_host_pages(b,(void *)(s.base+1),s.alloc)==&b->_hostPages);
+    assert(nvmtl_surface_host_pages(b,(void *)s.base,s.alloc-1)==&b->_hostPages);
+    __weak id lease=a->_hostPageLease;
+    @autoreleasepool { a->_hostPageLease=nil; b->_hostPageLease=nil; a=nil; b=nil; }
+    assert(lease && !destroys);
+    for(int i=0;i<500 && lease;i++) usleep(10000);
+    assert(!lease && destroys==1 && s.refs==0 && !nvmtl_page_cache.count);
+    importFails=YES;
+    NVMTLTexture *failed=[NVMTLTexture new]; failed->_surf=&s;
+    assert(nvmtl_surface_host_pages(failed,(void *)s.base,s.alloc)==&failed->_hostPages);
+    assert(!failed->_hostPageLease && !s.refs);
+    puts("PASS: shared wrappers, alignment fallback, import failure and idle timer ownership");
+    return 0;
+}
 static NVMTLSubmissionPart *part(NSSet *surfaces) {
     NVMTLSubmissionPart *p=[NVMTLSubmissionPart new]; p->surfaces=surfaces; p->commands.cb=(void *)1; p->encoders=1; return p;
 }
@@ -201,6 +232,7 @@ static NVMTLCommandBuffer *buffer(NSArray *parts) {
     NVMTLCommandBuffer *b=[NVMTLCommandBuffer new]; b->_parts=parts; b->_scheduleAfterPublish=YES; return b;
 }
 int main(void) { @autoreleasepool {
+    if(getenv("TEST_SHARED_PAGES")) return shared_pages_checks();
     setenv("NVMTL_GPU_COPYOUT_EXTRA","1",1);
     prune_release_environment();
     assert(getenv("NVMTL_GPU_COPYOUT") && !getenv("NVMTL_GPU_COPYOUT_EXTRA"));
@@ -267,3 +299,7 @@ with tempfile.TemporaryDirectory() as directory:
                     "-framework", "Foundation", str(m), "-o", str(path / "ownership")], check=True)
     subprocess.run([str(path / "ownership")], check=True, env=dict(os.environ, NVMTL_GPU_COPYOUT="1"))
     subprocess.run([str(path / "ownership")], check=True, env=dict(os.environ, NVMTL_GPU_COPYOUT="0"))
+    subprocess.run([str(path / "ownership")], check=True,
+                   env=dict(os.environ, TEST_SHARED_PAGES="1", NVMTL_SURFIN_PAGE_CACHE="1"))
+    subprocess.run([str(path / "ownership")], check=True,
+                   env=dict(os.environ, TEST_SHARED_PAGES="1", NVMTL_SURFIN_PAGE_CACHE="0"))

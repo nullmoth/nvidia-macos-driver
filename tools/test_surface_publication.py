@@ -21,6 +21,7 @@ typedef struct __IOSurface { unsigned seed; unsigned char cpu[4]; } Surface;
 typedef int IOReturn;
 enum { kIOSurfaceLockReadOnly = 1 };
 typedef struct { unsigned w,h,bpp; unsigned char gpu[4]; } Image;
+typedef void nvk_buffer;
 static dispatch_semaphore_t entered, release_read;
 static unsigned uploads, gpu_seed;
 static unsigned long long g_surfin_skip, g_surfin_copy;
@@ -84,6 +85,8 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) {
 @implementation NVMTLTexture
 - (BOOL)nvmtlSurfaceCopyable { return YES; }
 '''
+methods = methods.replace('static nvk_buffer *nvmtl_surface_host_pages(NVMTLTexture *r, void *base, size_t bytes);',
+    'static nvk_buffer *nvmtl_surface_host_pages(NVMTLTexture *r, void *base, size_t bytes) { return r->_hostPages; }')
 checks = r'''
 @end
 int main(int argc, char **argv) { @autoreleasepool {
