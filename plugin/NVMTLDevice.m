@@ -1094,6 +1094,10 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
 // image is already writable whenever its format allows (see nvmtl_surface_image_create), so say so.
 // WindowServer keeps the usage it asked for: it wraps hundreds of surfaces a second, none of them Core Image targets.
 static NSUInteger nvmtl_surface_usage(NSUInteger usage, BOOL fbo, BOOL storage) {
+    // Unknown permits shader writes too. Adding only ShaderRead/RenderTarget to a
+    // non-storage surface would forbid its optimal-tiled storage twin below
+    // (ImageIO's RGBA16Unorm outputs), silently sending those writes to a dummy.
+    if (usage == MTLTextureUsageUnknown) return usage;
     static int ws = -1;
     if (ws < 0) { const char *me = getprogname(); ws = me && !strcmp(me, "WindowServer"); }
     if (!fbo && !ws) {
