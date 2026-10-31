@@ -1449,6 +1449,24 @@ pub(in crate::passes) fn lower_one(
                      silently drop what the call does"
                 ))
             }
+            // Only an explicit target capability may establish that no map can be bound.
+            // A generic translator cannot infer identity from opaque runtime map bytes.
+            // METAL2VULKAN_NO_RRM_IDENTITY restores refusal even for that target.
+            Some(crate::air_intrinsics::AirIntrinsicDisposition::RequiresResourceModel)
+                if crate::air_intrinsics::is_rasterization_rate_map_helper(name)
+                    && ctx.no_rasterization_rate_maps
+                    && !crate::env_vars::no_rrm_identity() =>
+            {
+                let (Some(res), Some(rty), Some(&coord)) = (res, rty, args.first()) else {
+                    return Err(format!("{name}: expected a result and a coordinate operand"));
+                };
+                return Ok(vec![Instruction::new(
+                    Op::CopyObject,
+                    Some(rty),
+                    Some(res),
+                    vec![Operand::IdRef(coord)],
+                )]);
+            }
             Some(crate::air_intrinsics::AirIntrinsicDisposition::RequiresResourceModel) => {
                 return Err(format!(
                     "AIR family {name} requires rasterization-rate-map parameter data decoding; \
