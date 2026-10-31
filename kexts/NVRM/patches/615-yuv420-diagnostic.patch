@@ -1,0 +1,188 @@
+--- a/kapi/src/nvkms-kapi.c
++++ b/kapi/src/nvkms-kapi.c
+@@ -2529,6 +2529,9 @@
+     params->overrides = NVKMS_MODE_VALIDATION_NO_RRX1K_CHECK;
+ }
+ 
++extern NvBool nvkms_yuv420_diag_claim(NvU32 display);
++static void Yuv420DiagEnumerate(struct NvKmsKapiDevice *, NvKmsKapiDisplay);
++
+ static int GetDisplayMode
+ (
+     struct NvKmsKapiDevice *device,
+@@ -2577,6 +2580,15 @@
+ 
+     if (preferredMode != NULL) {
+         *preferredMode = paramsValidate.reply.preferredMode;
++    }
++
++    if (!paramsValidate.reply.end &&
++        paramsValidate.reply.mode.timings.hVisible == 3840 &&
++        paramsValidate.reply.mode.timings.vVisible == 2160 &&
++        paramsValidate.reply.mode.timings.RRx1k >= 59000 &&
++        paramsValidate.reply.mode.timings.RRx1k <= 61000 &&
++        nvkms_yuv420_diag_claim(display)) {
++        Yuv420DiagEnumerate(device, display);
+     }
+ 
+     return paramsValidate.reply.end ? 0 : 1;
+@@ -2619,6 +2631,106 @@
+     timings->sizeMM.w = mode->timings.widthMM;
+     timings->sizeMM.h = mode->timings.heightMM;
+ }
++
++/* NullMoth opt-in diagnostic: no modesets and no replacement of client replies. */
++
++#define Y420_LOG(...) do { \
++    char text[512]; \
++    nvkms_snprintf(text, sizeof(text), __VA_ARGS__); \
++    nvkms_log(NVKMS_LOG_LEVEL_INFO, NULL, text); \
++} while (0)
++
++static const char *Yuv420DiagName(enum NvYuv420Mode mode)
++{
++    switch (mode) {
++    case NV_YUV420_MODE_NONE: return "NONE";
++    case NV_YUV420_MODE_SW: return "SW";
++    case NV_YUV420_MODE_HW: return "HW";
++    default: return "UNKNOWN";
++    }
++}
++
++static void Yuv420DiagEnumerate(struct NvKmsKapiDevice *device,
++                                NvKmsKapiDisplay display)
++{
++    struct NvKmsValidateModeIndexParams *p = nvKmsKapiCalloc(1, sizeof(*p));
++    char *info = nvKmsKapiCalloc(1, NVKMS_MODE_VALIDATION_MAX_INFO_STRING_LENGTH);
++    unsigned pass;
++    if (p == NULL || info == NULL) {
++        Y420_LOG("Y420-AB dpy=0x%x ABORT allocation failed", display);
++        goto out;
++    }
++    for (pass = 0; pass < 2; pass++) {
++        NvU32 index, matches = 0;
++        NvBool complete = NV_FALSE;
++        const char label = pass ? 'B' : 'A';
++        Y420_LOG("Y420-AB dpy=0x%x pass=%c BEGIN prefer420=%u", display, label, pass);
++        /* Bound boot-time diagnostic work; reaching the bound is not success. */
++        for (index = 0; index < 512; index++) {
++            const NvModeTimings *t;
++            nvkms_memset(p, 0, sizeof(*p));
++            nvkms_memset(info, 0, NVKMS_MODE_VALIDATION_MAX_INFO_STRING_LENGTH);
++            p->request.deviceHandle = device->hKmsDevice;
++            p->request.dispHandle = device->hKmsDisp;
++            p->request.dpyId = nvNvU32ToDpyId(display);
++            InitNvKmsModeValidationParams(device, &p->request.modeValidation);
++            p->request.modeValidation.preferYUV420 = pass ? NV_TRUE : NV_FALSE;
++            p->request.modeIndex = index;
++            p->request.pInfoString = nvKmsPointerToNvU64(info);
++            p->request.infoStringSize = NVKMS_MODE_VALIDATION_MAX_INFO_STRING_LENGTH;
++            if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
++                    NVKMS_IOCTL_VALIDATE_MODE_INDEX, p, sizeof(*p))) {
++                Y420_LOG("Y420-AB dpy=0x%x pass=%c ABORT ioctl index=%u", display, label, index);
++                break;
++            }
++            if (p->reply.end) {
++                complete = NV_TRUE;
++                break;
++            }
++            t = &p->reply.mode.timings;
++            if (t->hVisible == 3840 && t->vVisible == 2160 &&
++                t->RRx1k >= 59000 && t->RRx1k <= 61000) {
++                struct NvKmsKapiDisplayMode wire;
++                struct NvKmsMode back;
++                NvU32 offset = 0;
++                matches++;
++                NvKmsModeToKapi(&p->reply.mode, &wire);
++                NvKmsKapiDisplayModeToKapi(&wire, &back);
++                Y420_LOG("Y420-AB dpy=0x%x pass=%c index=%u source=%u valid=%u "
++                         "pclkHz=%llu h=%u,%u,%u,%u v=%u,%u,%u,%u rrMilliHz=%u "
++                         "sync=%u,%u,%u,%u interlace=%u doublescan=%u",
++                         display, label, index, p->reply.source, p->reply.valid,
++                         (unsigned long long)t->pixelClockHz, t->hVisible, t->hSyncStart, t->hSyncEnd, t->hTotal,
++                         t->vVisible, t->vSyncStart, t->vSyncEnd, t->vTotal, t->RRx1k,
++                         t->hSyncPos, t->hSyncNeg, t->vSyncPos, t->vSyncNeg,
++                         t->interlaced, t->doubleScan);
++                Y420_LOG("Y420-AB dpy=0x%x pass=%c index=%u yuv420=%s roundtrip=%s lost=%u",
++                         display, label, index, Yuv420DiagName(t->yuv420Mode),
++                         Yuv420DiagName(back.timings.yuv420Mode),
++                         t->yuv420Mode != back.timings.yuv420Mode);
++                info[NVKMS_MODE_VALIDATION_MAX_INFO_STRING_LENGTH - 1] = '\0';
++                while (info[offset]) {
++                    NvU32 n = 0;
++                    while (n < 160 && info[offset + n] && info[offset + n] != '\n') n++;
++                    if (n) Y420_LOG("Y420-AB dpy=0x%x pass=%c index=%u info: %.*s",
++                                   display, label, index, (int)n, info + offset);
++                    offset += n;
++                    if (info[offset] == '\n') offset++;
++                }
++                if (p->reply.infoStringLenWritten >= NVKMS_MODE_VALIDATION_MAX_INFO_STRING_LENGTH)
++                    Y420_LOG("Y420-AB dpy=0x%x pass=%c index=%u INFO_MAY_BE_TRUNCATED", display, label, index);
++            }
++        }
++        Y420_LOG("Y420-AB dpy=0x%x pass=%c %s queried=%u matches=%u",
++                 display, label, complete ? "COMPLETE" : "INCOMPLETE",
++                 index < 512 ? index + 1 : index, matches);
++    }
++out:
++    nvKmsKapiFree(info);
++    nvKmsKapiFree(p);
++}
++
++#undef Y420_LOG
+ 
+ static NvBool ValidateDisplayMode
+ (
+--- a/src/nvkms-modepool.c
++++ b/src/nvkms-modepool.c
+@@ -416,6 +416,19 @@
+ 
+         kmsMode.timings.yuv420Mode = GetYUV420Value(pDpyEvo, pParams, &timing);
+ 
++        if (pInfoString->s != NULL && timing.HVisible == 3840 &&
++            timing.VVisible == 2160 && kmsMode.timings.RRx1k >= 59000 &&
++            kmsMode.timings.RRx1k <= 61000) {
++            nvEvoLogInfoString(pInfoString,
++                "Y420 masks rgb=0x%x y420=0x%x vic=%u prefer=%u selected=%u "
++                "hdmi=%u dp=%u maxPclkKHz=%u singleLinkKHz=%u",
++                timing.etc.rgb444.bpcs, timing.etc.yuv420.bpcs,
++                NVT_GET_CEA_FORMAT(timing.etc.status), pParams->preferYUV420,
++                kmsMode.timings.yuv420Mode, nvDpyIsHdmiEvo(pDpyEvo),
++                nvConnectorUsesDPLib(pDpyEvo->pConnectorEvo),
++                pDpyEvo->maxPixelClockKHz, pDpyEvo->maxSingleLinkPixelClockKHz);
++        }
++
+         /* validate the mode */
+ 
+         pReply->valid = ValidateMode(pDpyEvo,
+@@ -1651,6 +1664,7 @@
+     const NvKmsDpyOutputColorFormatInfo supportedColorFormats =
+         nvDpyGetOutputColorFormatInfo(pDpyEvo);
+     NVDpyAttributeColor dpyColor;
++    NvBool diagColorReady = FALSE;
+ 
+     if (modeName[0] == '\0') {
+         nvBuildModeName(pModeTimings->hVisible, pModeTimings->vVisible,
+@@ -1684,6 +1698,8 @@
+         LogModeValidationEnd(pDispEvo, pInfoString, "Failed to select output color");
+         goto done;
+     }
++
++    diagColorReady = TRUE;
+ 
+     /*
+      * we made it past the rest of mode validation; now construct the
+@@ -1828,6 +1844,13 @@
+     ret = TRUE;
+ 
+ done:
++    if (diagColorReady && pInfoString->s != NULL &&
++        pModeTimings->hVisible == 3840 && pModeTimings->vVisible == 2160 &&
++        pModeTimings->RRx1k >= 59000 && pModeTimings->RRx1k <= 61000) {
++        nvEvoLogInfoString(pInfoString,
++            "Y420 final format=%u bpc=%u range=%u valid=%u",
++            dpyColor.format, dpyColor.bpc, dpyColor.range, ret);
++    }
+     nvPreallocRelease(pDevEvo, PREALLOC_TYPE_VALIDATE_MODE_HW_MODE_TIMINGS);
+     nvPreallocRelease(pDevEvo, PREALLOC_TYPE_VALIDATE_MODE_HDMI_FRL_CONFIG);
+     nvPreallocRelease(pDevEvo, PREALLOC_TYPE_VALIDATE_MODE_DSC_INFO);

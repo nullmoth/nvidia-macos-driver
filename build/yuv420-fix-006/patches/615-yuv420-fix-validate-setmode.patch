@@ -1,0 +1,132 @@
+--- a/kapi/src/nvkms-kapi.c
++++ b/kapi/src/nvkms-kapi.c
+@@ -2798,7 +2798,90 @@
+ #undef Y420_DIAG_4K30_LOG_LIMIT
+ #undef Y420_LOG
+ 
++/*
++ * Recover HW YUV420 from the same, freshly validated EDID timing; no KAPI
++ * ABI change and no user-visible operation on displays without opt-in.
++ */
++#define Y420_FIX_MAX_MODE_INDEX 128
++
++static NvBool Y420FixCandidate(NvKmsKapiDisplay display,
++                              const struct NvKmsKapiDisplayMode *mode)
++{
++    const struct NvKmsKapiDisplayModeTimings *t = &mode->timings;
++    return nvkms_yuv420_fix_enabled(display) &&
++           t->hVisible == 3840 && t->vVisible == 2160 &&
++           t->refreshRate >= 59900 && t->refreshRate <= 60100 &&
++           t->pixelClockHz >= 590000000 && t->pixelClockHz <= 600000000 &&
++           !t->flags.interlaced && !t->flags.doubleScan;
++}
++
++static NvBool Y420FixSameTiming(
++    const struct NvKmsKapiDisplayMode *want, const NvModeTimings *t)
++{
++    const struct NvKmsKapiDisplayModeTimings *w = &want->timings;
++    return w->refreshRate == t->RRx1k &&
++           w->pixelClockHz == t->pixelClockHz &&
++           w->hVisible == t->hVisible &&
++           w->hSyncStart == t->hSyncStart &&
++           w->hSyncEnd == t->hSyncEnd &&
++           w->hTotal == t->hTotal &&
++           w->hSkew == t->hSkew &&
++           w->vVisible == t->vVisible &&
++           w->vSyncStart == t->vSyncStart &&
++           w->vSyncEnd == t->vSyncEnd &&
++           w->vTotal == t->vTotal &&
++           w->flags.interlaced == t->interlaced &&
++           w->flags.doubleScan == t->doubleScan &&
++           w->flags.hSyncPos == t->hSyncPos &&
++           w->flags.hSyncNeg == t->hSyncNeg &&
++           w->flags.vSyncPos == t->vSyncPos &&
++           w->flags.vSyncNeg == t->vSyncNeg;
++}
++
++static NvBool Y420FixRestoreValidatedMode(
++    struct NvKmsKapiDevice *device, NvKmsKapiDisplay display,
++    const struct NvKmsKapiDisplayMode *mode,
++    struct NvKmsModeValidationParams *validation,
++    struct NvKmsMode *kmsMode)
++{
++    struct NvKmsValidateModeIndexParams *p;
++    NvBool found = NV_FALSE;
++    NvU32 i;
++
++    if (!Y420FixCandidate(display, mode)) return NV_FALSE;
++    p = nvKmsKapiCalloc(1, sizeof(*p));
++    if (p == NULL) return NV_FALSE;
++
++    for (i = 0; i < Y420_FIX_MAX_MODE_INDEX; i++) {
++        nvkms_memset(p, 0, sizeof(*p));
++        p->request.deviceHandle = device->hKmsDevice;
++        p->request.dispHandle = device->hKmsDisp;
++        p->request.dpyId = nvNvU32ToDpyId(display);
++        p->request.modeIndex = i;
++        InitNvKmsModeValidationParams(device, &p->request.modeValidation);
++        p->request.modeValidation.preferYUV420 = NV_TRUE;
++        if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
++                                   NVKMS_IOCTL_VALIDATE_MODE_INDEX,
++                                   p, sizeof(*p)) || p->reply.end) {
++            break;
++        }
++        if (!p->reply.valid ||
++            p->reply.source != NvKmsModeSourceEdid ||
++            p->reply.mode.timings.yuv420Mode != NV_YUV420_MODE_HW ||
++            !Y420FixSameTiming(mode, &p->reply.mode.timings)) continue;
++
++        /* The GPU/EDID validator, not this fix, selected HW YUV420. */
++        kmsMode->timings.yuv420Mode = p->reply.mode.timings.yuv420Mode;
++        validation->preferYUV420 = NV_TRUE;
++        found = NV_TRUE;
++        break;
++    }
++    nvKmsKapiFree(p);
++    return found;
++}
++
++#undef Y420_FIX_MAX_MODE_INDEX
+ static NvBool ValidateDisplayMode
+ (
+     struct NvKmsKapiDevice *device,
+     NvKmsKapiDisplay display, const struct NvKmsKapiDisplayMode *mode
+@@ -2839,7 +2922,16 @@
+         return NV_FALSE;
+     }
+ 
++    if (status && !paramsValidate.reply.valid &&
++        Y420FixRestoreValidatedMode(device, display, mode,
++                                    &paramsValidate.request.modeValidation,
++                                    &paramsValidate.request.mode)) {
++        /* Retry only the same EDID-verified HW YUV420 timing. */
++        status = nvkms_ioctl_from_kapi(device->pKmsOpen,
++                                      NVKMS_IOCTL_VALIDATE_MODE,
++                                      &paramsValidate, sizeof(paramsValidate));
++    }
+     return paramsValidate.reply.valid;
+ }
+ 
+ static NvBool AssignSyncObjectConfig(
+@@ -3555,8 +3647,21 @@
+         }
+ 
+         NvKmsKapiDisplayModeToKapi(&headModeSetConfig->mode, &paramsHead->mode);
+ 
++        if (headModeSetConfig->numDisplays == 1 &&
++            Y420FixCandidate(headModeSetConfig->displays[0],
++                             &headModeSetConfig->mode)) {
++            if (!Y420FixRestoreValidatedMode(
++                    device, headModeSetConfig->displays[0],
++                    &headModeSetConfig->mode,
++                    &paramsHead->modeValidationParams, &paramsHead->mode)) {
++                /* Never commit an unvalidated 4K60 signal. */
++                nvKmsKapiLogDeviceDebug(
++                    device, "Y420-FIX: HW mode unavailable for head %u", head);
++                return NV_FALSE;
++            }
++        }
+         if (device->lutCaps.olut.supported) {
+             paramsHead->flip.olut.specified = TRUE;
+             paramsHead->flip.olut.enabled = headModeSetConfig->olut.enabled;
+ 

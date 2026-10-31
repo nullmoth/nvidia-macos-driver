@@ -254,6 +254,33 @@ enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void) { return NVKM
 NvBool nvkms_enable_overlay_layers(void)        { return NV_TRUE; }
 NvBool nvkms_debug_logging(void)                { return NV_FALSE; }
 
+// Opt-in, once per single-bit display ID per boot. IDs must be read from this GPU's logs.
+NvBool nvkms_yuv420_diag_claim(NvU32 display)
+{
+    uint32_t targets = 0;
+    static volatile UInt32 claimed = 0;
+    if (!PE_parse_boot_argn("nvyuv420diag", &targets, sizeof targets) ||
+        !display || (display & (display - 1)) || !(targets & display)) return NV_FALSE;
+    for (;;) {
+        UInt32 seen = OSAddAtomic(0, (volatile SInt32 *)&claimed);
+        if (seen & display) return NV_FALSE;
+        if (OSCompareAndSwap(seen, seen | display, &claimed)) return NV_TRUE;
+    }
+}
+
+// Opt-in for the two hardware-tested displays of one GPU.
+// Only 0x400 and 0x4000 are accepted; display handles are boot-local.
+// Preserve the strict opt-in and leave every other display untouched.
+NvBool nvkms_yuv420_fix_enabled(NvU32 display)
+{
+    const uint32_t allowed = 0x400U | 0x4000U;
+    uint32_t target = 0;
+    return PE_parse_boot_argn("nvyuv420fix", &target, sizeof target) &&
+           target != 0 && (target & ~allowed) == 0 &&
+           (display == 0x400U || display == 0x4000U) &&
+           (target & display) != 0;
+}
+
 static bool gKmsTraceRm = true;
 void nvkms_call_rm(void *ops)
 {
