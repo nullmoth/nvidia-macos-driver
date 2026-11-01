@@ -96,8 +96,12 @@ static inline void nvconv_body(device const float *src ,
             if (epi == 4) { v = v > 0.0f ? v : v * (bias ? bias[co] : 0.0f); }
             else {
                 v += bias ? bias[co] : 0.0f;
-                if (epi == 1) v = max(v, 0.0f); else if (epi == 2) v = clamp(v, 0.0f, 6.0f); else if (epi == 3) v = 1.0f / (1.0f + exp(-v));
+                if (epi == 1 || epi == 5) v = max(v, 0.0f); else if (epi == 2) v = clamp(v, 0.0f, 6.0f); else if (epi == 3) v = 1.0f / (1.0f + exp(-v));
             }
+            // 5 and 6: a residual block that adds its own input back (input + ReLU(conv + bias), input + conv + bias).
+            // Solved from a dumped Super Resolution layer, where MPS matched 5 to 4.5e-7 on all 147,456 outputs.
+            // Only an output the same size and channel count as its input can be one; verification decides the rest.
+            if ((epi == 5 || epi == 6) && co < cin && ox < sw && oy < sh) v += src[co * sC + ox * sW + oy * sH + n * sN];
             if (res) v += res[co * oC + ob];
             dst[co * oC + ob] = v;
         }
@@ -146,3 +150,24 @@ kernel void nvconv_cmp(device const float *a [[buffer(5)]], device const float *
     if (lane == 0 && s && atomic_load_explicit(bad, memory_order_relaxed) < 4096u)
         atomic_fetch_add_explicit(bad, s, memory_order_relaxed);
 }
+// Copies n floats from buffer 5 to buffer 6. Used only by the NVMTL_NVCONV_DUMP diagnostic, which moves a refused
+// layer's input, weights and both outputs into CPU-readable buffers so its rule can be solved offline.
+kernel void nvconv_copy(device const float *a [[buffer(5)]], device float *b [[buffer(6)]], constant uint &n [[buffer(8)]],
+                        uint gid [[thread_position_in_grid]])
+{
+    if (gid < n) b[gid] = a[gid];
+}
+// 32x32 tiles: for small layers (e.g. a 48x48x64 -> 64 3x3 residual block) the 64x32 tiles leave only 72 threadgroups
+// for a 30-SM GPU; these give 4x as many output tiles per layer.
+kernel void nvconv3_t(device const float *src [[buffer(0)]], device const float *wts [[buffer(1)]], device float *dst [[buffer(2)]],
+                      constant uint *kp [[buffer(23)]], constant uint *cp [[buffer(29)]], constant uint &epi [[buffer(30)]],
+                      uint3 tgp [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]])
+{ threadgroup float As[BK][32 + 4]; threadgroup float Bs[BK][32 + 4]; nvconv_body<32, 32, 2, 2>(src, wts, dst, nullptr, nullptr, epi, kp, cp, tgp, lid, As, Bs); }
+kernel void nvconv4_t(device const float *src [[buffer(0)]], device const float *wts [[buffer(1)]], device const float *bias [[buffer(2)]],
+                      device float *dst [[buffer(3)]], constant uint *kp [[buffer(23)]], constant uint *cp [[buffer(29)]], constant uint &epi [[buffer(30)]],
+                      uint3 tgp [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]])
+{ threadgroup float As[BK][32 + 4]; threadgroup float Bs[BK][32 + 4]; nvconv_body<32, 32, 2, 2>(src, wts, dst, bias, nullptr, epi, kp, cp, tgp, lid, As, Bs); }
+kernel void nvconv5_t(device const float *src [[buffer(0)]], device const float *wts [[buffer(1)]], device const float *bias [[buffer(2)]],
+                      device const float *res [[buffer(3)]], device float *dst [[buffer(4)]], constant uint *kp [[buffer(23)]], constant uint *cp [[buffer(29)]],
+                      constant uint &epi [[buffer(30)]], uint3 tgp [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]])
+{ threadgroup float As[BK][32 + 4]; threadgroup float Bs[BK][32 + 4]; nvconv_body<32, 32, 2, 2>(src, wts, dst, bias, res, epi, kp, cp, tgp, lid, As, Bs); }
