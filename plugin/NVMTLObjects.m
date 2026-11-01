@@ -14,6 +14,27 @@ void nvlog(const char *fmt, ...);
 #import <objc/runtime.h>
 #import <objc/message.h>
 static int nvmtl_trace_on(void);
+// NVMTL_CB_TIME=1 (dev builds): one line per command buffer with its host and GPU timeline, so an app's idle GPU time can
+// be split into: not yet committed (app), committed but not started (driver submit), done but not reported (completion).
+#if !NVMTL_RELEASE
+static int nvmtl_cbt_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_CB_TIME"); on = e && e[0] == '1'; } return on; }
+static void nvmtl_cbt_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void nvmtl_cbt_line(const char *fmt, ...) {
+    static FILE *f; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu);
+    if (!f) { char fp[512]; const char *td = getenv("TMPDIR"); snprintf(fp, sizeof fp, "%s/nvmtl-cbtime-%d.log", td && *td ? td : "/private/tmp", (int)getpid()); f = fopen(fp, "a"); }
+    if (f) { va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap); }
+    pthread_mutex_unlock(&mu);
+}
+#else
+static inline int nvmtl_cbt_on(void) { return 0; }
+#define nvmtl_cbt_line(...) do { } while (0)
+#endif
+static inline uint64_t nvmtl_cbt_now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+static inline void nvmtl_cbt_kernel(NVMTLCommandBuffer *cb, const char *name) {
+    if (!cb || !nvmtl_cbt_on()) return;
+    if (!cb->_cbtND++ && name) snprintf(cb->_cbtK, sizeof cb->_cbtK, "%s", name);
+}
 static void nvtrace_emit(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 // Guard the call site: converting NSString arguments on every draw is expensive
 // even when the trace writer immediately returns without emitting anything.
@@ -4862,6 +4883,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     [self nvmtlE78Barrier:NO];
     if (nvmtl_vendor_dispatch_sass(selected, &_cb->_c, t, l) != 0) {
         uint32_t lr[3]; nvmtl_tg_reshape(_ps, l, lr);
+        nvmtl_cbt_kernel(_cb, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL);
         nvmtl_vk_dispatch_label(_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL);
         nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, lr);
     }
@@ -4884,6 +4906,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     [self nvmtlE78Barrier:NO];
     if (nvmtl_vendor_dispatch_sass(selected, &_cb->_c, t, l) != 0) {
         uint32_t lr[3]; nvmtl_tg_reshape(_ps, l, lr);
+        nvmtl_cbt_kernel(_cb, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL);
         nvmtl_vk_dispatch_label(_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL);
         nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, lr);
     }
@@ -5399,6 +5422,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     return self.status != MTLCommandBufferStatusError;
 }
 - (void)commit {
+    if (nvmtl_cbt_on() && !_cbtCommit) _cbtCommit = nvmtl_cbt_now();
     [self nvmtlSubmitWithEvents];
     // NVMTL_DEBUG_WAIT_EACH=1: every command buffer is waited for and its completion traced, so a GPU hang is pinned to
     // the command buffer (and the debug groups traced before it) that never finished. A diagnostic: it serialises the app.
@@ -5470,10 +5494,12 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 - (CFTimeInterval)kernelStartTime { return _legacyKernelStart; }
 - (CFTimeInterval)kernelEndTime { return _legacyKernelEnd; }
 - (void)waitUntilCompleted {
+    const uint64_t cbt0 = nvmtl_cbt_on() ? nvmtl_cbt_now() : 0;
     _nWait++; [_completionCondition lock];
     while (!_completionReady) [_completionCondition wait];
     [_completionCondition unlock];
     dispatch_group_wait(_callbackGroup, DISPATCH_TIME_FOREVER);
+    if (cbt0) nvmtl_cbt_line("W %llu %llu %llu\n", (unsigned long long)_cbtSeq, (unsigned long long)cbt0, (unsigned long long)nvmtl_cbt_now());
 }
 - (void)waitUntilScheduled {
     _nWait++; [_completionCondition lock];
@@ -5515,6 +5541,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     NVMTLCommandBuffer *cb = [NVMTLCommandBuffer new];
     if (!cb) { if (cap) dispatch_semaphore_signal(cap); return nil; }
     cb->_queue = self; cb->_capacityHeld = cap != nil;
+    if (nvmtl_cbt_on()) { static _Atomic uint64_t seq; cb->_cbtSeq = ++seq; cb->_cbtCreate = nvmtl_cbt_now(); }
     // The resource set exists from the start. Every encoder used to create it on first use
     // (`if (!cb->_resources) cb->_resources = [NVMTLResSet new]`), and encoders of one command buffer run on several
     // threads (parallel render encoders, CoreAnimation's async render queue): two threads both saw nil, the second

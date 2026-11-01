@@ -127,6 +127,7 @@ extern id gNVMTLMainDevice;
   unsigned _nEncSealed;
   CFTimeInterval _gpuStart, _gpuEnd;
   CFTimeInterval _legacyKernelStart, _legacyKernelEnd;
+  uint64_t _cbtSeq, _cbtCreate, _cbtCommit, _cbtWait0; unsigned _cbtND; char _cbtK[40];   // NVMTL_CB_TIME (dev)
   nvmtl_gpu_interval _gpuTiming; BOOL _gpuTimingSeen, _gpuTimingInvalid;
   NSMutableArray *_parts, *_scheduledHandlers;
   NSUInteger _nextPart;
