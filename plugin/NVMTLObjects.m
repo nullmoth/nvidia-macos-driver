@@ -4613,6 +4613,29 @@ static void nvmtl_zprobe_drain(void) {
     nvmtl_enc78_count(E78C_DISP, 1); nvmtl_enc78_count(E78C_FULL + kind, 1);
     if (_e78Concurrent) nvmtl_enc78_count(E78C_CONC, 1);
 }
+// A threadgroup of 1024 threads fits once per SM at 40 registers (32 of 48 warps) and MPS's Gaussian ran 1.5x
+// slower in 32x32 groups than in 32x4 on the RTX 5060 (gblin, identical pixels). A kernel that cannot see its
+// grouping (nvmtl_air_grid_only) runs the same threads in groups of at most 128: height first, then depth, then
+// width down to 32, each halved only while it stays a divisor, so the thread set and every grid position are
+// unchanged. NVMTL_TG_RESHAPE=0 turns it off for an A/B run; =force skips the grid-only check, which only a test
+// uses, to prove its probe sees a kernel that depends on its grouping.
+static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3], uint32_t out[3])
+{
+    out[0] = l[0]; out[1] = l[1]; out[2] = l[2];
+    static int mode = -1;
+    if (mode < 0) { const char *e = getenv("NVMTL_TG_RESHAPE"); mode = !e ? 1 : e[0] == '0' ? 0 : e[0] == 'f' ? 2 : 1; }
+    if (!mode || !ps || l[0] * l[1] * l[2] <= 128) return;
+    if (mode == 2) ps->_gridOnly = 1;
+    if (!ps->_gridOnly) {
+        ps->_gridOnly = nvmtl_air_grid_only(ps->_function) ? 1 : -1;
+        if (ps->_gridOnly > 0) nvlog("dispatch: %s uses only its grid position - threadgroups above 128 threads are split",
+                                     ps->_function ? ps->_function->_fname.UTF8String : "-");
+    }
+    if (ps->_gridOnly < 0) return;
+    while (out[0] * out[1] * out[2] > 128 && out[1] % 2 == 0) out[1] /= 2;
+    while (out[0] * out[1] * out[2] > 128 && out[2] % 2 == 0) out[2] /= 2;
+    while (out[0] * out[1] * out[2] > 128 && out[0] > 32 && out[0] % 2 == 0) out[0] /= 2;
+}
 - (void)dispatchThreadgroups:(MTLSize)grid threadsPerThreadgroup:(MTLSize)tg {
     if (_ps && _ps->_sassKernel) {
         int ran = nvmtl_sass_dispatch(self, grid, tg, 0, !_ps->_sassOnly);
@@ -4629,7 +4652,10 @@ static void nvmtl_zprobe_drain(void) {
         nvtrace("DISPATCH %s | threads %ux%ux%u tg %ux%ux%u", (_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL) ?: "-", t[0], t[1], t[2], l[0], l[1], l[2]);
         nvtrace("  BUFS%s", bufs_); }
     [self nvmtlE78Barrier:NO];
-    if (nvmtl_vendor_dispatch_sass(selected, &_cb->_c, t, l) != 0) nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, l);
+    if (nvmtl_vendor_dispatch_sass(selected, &_cb->_c, t, l) != 0) {
+        uint32_t lr[3]; nvmtl_tg_reshape(_ps, l, lr);
+        nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, lr);
+    }
     if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
 }
 - (void)dispatchThreads:(MTLSize)threads threadsPerThreadgroup:(MTLSize)tg {
@@ -4647,7 +4673,10 @@ static void nvmtl_zprobe_drain(void) {
         nvtrace("DISPATCH %s | threads %ux%ux%u tg %ux%ux%u", (_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL) ?: "-", t[0], t[1], t[2], l[0], l[1], l[2]);
         nvtrace("  BUFS%s", bufs_); }
     [self nvmtlE78Barrier:NO];
-    if (nvmtl_vendor_dispatch_sass(selected, &_cb->_c, t, l) != 0) nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, l);
+    if (nvmtl_vendor_dispatch_sass(selected, &_cb->_c, t, l) != 0) {
+        uint32_t lr[3]; nvmtl_tg_reshape(_ps, l, lr);
+        nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, lr);
+    }
     if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
 }
 - (void)setBufferOffset:(NSUInteger)off atIndex:(NSUInteger)i {

@@ -274,6 +274,9 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 @interface NVMTLIndirectCommandBuffer () { @public uint64_t _resid; } @end
 @interface NVMTLIndirectCommand () - (void)nvmtlCopyFrom:(NVMTLIndirectCommand *)o; @end
 NSUInteger nvmtl_air_max_tg(NVMTLFunction *fn);
+BOOL nvmtl_air_grid_only(NVMTLFunction *fn);
+// _gridOnly: 0 not yet asked, 1 the kernel's result does not depend on its threadgroup shape, -1 it may
+@interface NVMTLComputePipelineState () { @public int8_t _gridOnly; } @end
 @interface NVMTLRenderCommandEncoder () { @public NSString *_label; } @end
 @interface NVMTLRenderCommandEncoder () { @public uint32_t _vstride[NVMTL_NVIN]; uint32_t _vstrideSet; } @end
 @interface NVMTLComputeCommandEncoder () { @public NSString *_label; } @end
