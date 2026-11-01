@@ -15,10 +15,15 @@ impl Emitter {
                         call.args.len()
                     ));
                 }
-                let execution = air_barrier_execution_scope(call)?;
+                // The callee names the execution scope; the last operand is Metal's thread_scope argument, which
+                // is the MEMORY scope (simdgroup_barrier(flags, thread_scope_threadgroup) emits
+                // air.simdgroup.barrier(flags, 1)). Reading that operand as the execution scope turned simdgroup
+                // barriers into workgroup barriers (BAR.SYNC) and threadgroup barriers with a simdgroup memory scope
+                // into subgroup-only barriers.
+                let execution = air_barrier_execution_scope(call);
                 let scope = self.const_uint(execution as u32)?;
                 let memory_scope =
-                    self.const_uint(air_barrier_memory_scope(call, execution) as u32)?;
+                    self.const_uint(air_barrier_memory_scope(call, air_barrier_operand_scope(call)?) as u32)?;
                 let semantics = self.const_uint(air_barrier_memory_semantics(call).bits())?;
                 instructions.push(Self::inst(
                     Op::ControlBarrier,
@@ -576,7 +581,16 @@ fn air_barrier_memory_semantics(call: &LlCall) -> MemorySemantics {
     semantics
 }
 
-fn air_barrier_execution_scope(call: &LlCall) -> Result<Scope, String> {
+fn air_barrier_execution_scope(call: &LlCall) -> Scope {
+    if call.callee == "air.simdgroup.barrier" {
+        Scope::Subgroup
+    } else {
+        Scope::Workgroup
+    }
+}
+
+// Metal thread_scope values as AIR spells them: 1 threadgroup, 2 device, 4 simdgroup (0, thread, has no barrier meaning).
+fn air_barrier_operand_scope(call: &LlCall) -> Result<Scope, String> {
     let scope_index = call.args.len().saturating_sub(1);
     match call
         .args
@@ -584,14 +598,15 @@ fn air_barrier_execution_scope(call: &LlCall) -> Result<Scope, String> {
         .and_then(|arg| air_i32_literal(&arg.value))
     {
         Some(1) => Ok(Scope::Workgroup),
+        Some(2) => Ok(Scope::Device),
         Some(4) => Ok(Scope::Subgroup),
         Some(other) => Err(format!(
-            "native emitter: {} states execution scope {other}, which is neither AIR's threadgroup \
-             (1) nor its simdgroup (4)",
+            "native emitter: {} states memory scope {other}, which is none of AIR's threadgroup (1), \
+             device (2) or simdgroup (4)",
             call.callee
         )),
         None => Err(format!(
-            "native emitter: {} has no constant execution scope operand",
+            "native emitter: {} has no constant memory scope operand",
             call.callee
         )),
     }

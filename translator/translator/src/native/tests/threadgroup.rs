@@ -2945,7 +2945,7 @@ declare i1 @air.simd_is_first()
 }
 
 #[test]
-fn native_barrier_execution_scope_comes_from_the_operand_not_the_callee() {
+fn native_barrier_execution_scope_comes_from_the_callee_memory_scope_from_the_operand() {
     fn barrier_scopes(ll: &str, label: &str) -> Vec<(u32, u32, u32)> {
         let tmp = std::env::temp_dir().join(format!(
             "metal2vulkan_barrier_scope_{label}_{}",
@@ -3027,9 +3027,11 @@ declare void @air.simdgroup.barrier(i32, i32)
                  tail call void @air.simdgroup.barrier(i32 2, i32 4)"),
             "simd"
         ),
+        // simdgroup_barrier(mem_threadgroup, thread_scope_threadgroup): a simdgroup barrier whose memory scope is
+        // the threadgroup - it must never become a workgroup (BAR.SYNC) barrier.
         vec![
             (
-                Scope::Workgroup as u32,
+                Scope::Subgroup as u32,
                 Scope::Workgroup as u32,
                 workgroup_memory
             ),
@@ -3039,6 +3041,15 @@ declare void @air.simdgroup.barrier(i32, i32)
                 workgroup_memory
             ),
         ]
+    );
+    // threadgroup_barrier(mem_threadgroup, thread_scope_simdgroup): still a whole-threadgroup execution barrier.
+    assert_eq!(
+        barrier_scopes(&ll("  tail call void @air.wg.barrier(i32 2, i32 4)"), "wgsimd"),
+        vec![(
+            Scope::Workgroup as u32,
+            Scope::Subgroup as u32,
+            workgroup_memory
+        )]
     );
     assert_eq!(
         barrier_scopes(&ll("  tail call void @air.wg.barrier(i32 8, i32 1)"), "wg"),
@@ -3055,12 +3066,12 @@ declare void @air.simdgroup.barrier(i32, i32)
     ));
     let _ = std::fs::create_dir_all(&tmp);
     let err = crate::translate_sanitized_native(
-        &ll("  tail call void @air.wg.barrier(i32 2, i32 2)"),
+        &ll("  tail call void @air.wg.barrier(i32 2, i32 3)"),
         Stage::Kernel,
         &tmp,
     )
     .expect_err("undefined barrier scope");
-    assert!(err.contains("execution scope 2"), "{err}");
+    assert!(err.contains("memory scope 3"), "{err}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
