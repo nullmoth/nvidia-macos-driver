@@ -1,0 +1,114 @@
+--- api.rs.pre-noprepass	2026-11-01 01:16:00
++++ api.rs	2026-11-01 01:18:44
+@@ -555,44 +555,77 @@
+     };
+ 
+     let sm = ShaderModelInfo::new(nak.sm, nak.warps_per_sm);
+-    let mut s = nak_shader_from_nir(nak, nir, &sm, has_task_shader);
++    // speed267: NAK's prepass scheduler targets the lowest register count first, and on compute kernels that re-interleaves
++    // each load with its consumers: convolve_vertical's 4-tap unrolled block issued 1 tap of loads at a time (NVIDIA's
++    // compiler keeps 6 in flight). Without it the NIR order (loads first) stands. Across 183 GB7 kernels skipping it
++    // gave fewer static cycles on 131, more on 30, 0 more spills, and lost occupancy on 2 (MPS's blur, 40 -> 48 GPRs),
++    // so a compute shader is built both ways and keeps the order without the prepass only when it costs no occupancy
++    // and no spills and has fewer static cycles. NVMTL_NAK_PREPASS_PICK=0 = always the prepass (upstream behaviour);
++    // NVMTL_NAK_NO_PREPASS=1 = never.
++    let build = |prepass: bool| {
++        let mut s = nak_shader_from_nir(nak, nir, &sm, has_task_shader);
+ 
+-    if DEBUG.print() {
+-        eprintln!("NAK IR:\n{}", &s);
+-    }
++        if DEBUG.print() {
++            eprintln!("NAK IR:\n{}", &s);
++        }
+ 
+-    pass!(s, opt_bar_prop);
+-    pass!(s, opt_uniform_instrs);
+-    pass!(s, opt_copy_prop);
+-    pass!(s, opt_prmt);
+-    pass!(s, opt_lop);
+-    pass!(s, opt_copy_prop);
+-    pass!(s, opt_dce);
+-    pass!(s, opt_out);
+-    pass!(s, legalize);
+-    pass!(s, opt_dce);
+-    pass!(s, opt_instr_sched_prepass);
+-    {
+-        let cap = if nak.sm == 120 { unsafe { nvmtl_raw_budget(nir) } } else { 0 };
+-        let guard = NvmtlRaBudgetGuard::new(cap);
+-        pass!(s, assign_regs);
+-        guard.verify(u32::from(s.info.num_gprs) + sm.hw_reserved_gprs());
+-    }
+-    pass!(s, lower_par_copies);
+-    pass!(s, lower_copy_swap);
+-    if nak.sm >= 70 {
+-        pass!(s, opt_jump_thread);
+-    } else {
+-        pass!(s, opt_crs);
+-    }
+-
+-    s.remove_annotations();
+-
+-    pass!(s, opt_instr_sched_postpass);
+-    pass!(s, calc_instr_deps);
++        pass!(s, opt_bar_prop);
++        pass!(s, opt_uniform_instrs);
++        pass!(s, opt_copy_prop);
++        pass!(s, opt_prmt);
++        pass!(s, opt_lop);
++        pass!(s, opt_copy_prop);
++        pass!(s, opt_dce);
++        pass!(s, opt_out);
++        pass!(s, legalize);
++        pass!(s, opt_dce);
++        if prepass {
++            pass!(s, opt_instr_sched_prepass);
++        }
++        {
++            let cap = if nak.sm == 120 { unsafe { nvmtl_raw_budget(nir) } } else { 0 };
++            let guard = NvmtlRaBudgetGuard::new(cap);
++            pass!(s, assign_regs);
++            guard.verify(u32::from(s.info.num_gprs) + sm.hw_reserved_gprs());
++        }
++        pass!(s, lower_par_copies);
++        pass!(s, lower_copy_swap);
++        if nak.sm >= 70 {
++            pass!(s, opt_jump_thread);
++        } else {
++            pass!(s, opt_crs);
++        }
+ 
+-    s.gather_info();
++        s.remove_annotations();
+ 
++        pass!(s, opt_instr_sched_postpass);
++        pass!(s, calc_instr_deps);
++
++        s.gather_info();
++        s
++    };
++    let never = std::env::var("NVMTL_NAK_NO_PREPASS").map_or(false, |v| v == "1");
++    let pick = std::env::var("NVMTL_NAK_PREPASS_PICK").map_or(true, |v| v != "0");
++    let s = if never {
++        build(false)
++    } else {
++        let a = build(true);
++        if pick && nir.info.stage() == MESA_SHADER_COMPUTE {
++            let b = build(false);
++            let spills = |x: &ShaderInfo| x.num_spills_to_mem + x.num_fills_from_mem + x.num_spills_to_reg;
++            if b.info.max_warps_per_sm >= a.info.max_warps_per_sm
++                && spills(&b.info) <= spills(&a.info)
++                && b.info.num_static_cycles < a.info.num_static_cycles
++            {
++                b
++            } else {
++                a
++            }
++        } else {
++            a
++        }
++    };
++
+     let mut asm = String::new();
+     if dump_asm {
+         write!(asm, "{}", s).expect("Failed to dump assembly");
