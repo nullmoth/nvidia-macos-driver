@@ -338,7 +338,9 @@ for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do [ ! -e
 # $BK/nvfw, so an empty backup made them no-ops: the fallback put the previous driver back with NO
 # firmware at all and the Mac came up with no display and no way out. Measured on the test Mac.
 if [ -d "$FW" ]; then backup_copy firmware ditto "$FW" "$BK/nvfw"
-elif [ -d "$FWOLD" ]; then backup_copy firmware ditto "$FWOLD" "$BK/nvfw"
+# The old location is backed up only if root made it: a folder another account planted in /Users/Shared would otherwise
+# become the backup, and a rollback would copy that account's files into $FW, which the kernel reads.
+elif [ -d "$FWOLD" ] && [ ! -L "$FWOLD" ] && [ "$(stat -f %u "$FWOLD")" = 0 ]; then backup_copy firmware ditto "$FWOLD" "$BK/nvfw"
 fi
 ok "backup written"
 

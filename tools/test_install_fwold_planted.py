@@ -25,7 +25,8 @@ def arm(name, ok, detail=""):
 
 
 lines = [l.strip() for l in text.splitlines()
-         if not l.strip().startswith("#") and "FWOLD" in l and "BK" in l and "nvfw" in l and "ditto" in l]
+         if not l.strip().startswith("#") and "FWOLD" in l and "BK" in l and "nvfw" in l and "ditto" in l
+         and "backup_copy" not in l]
 arm("install.sh has the two rollback lines that restore the old firmware location", len(lines) == 2, str(len(lines)))
 
 
@@ -53,6 +54,11 @@ for i, line in enumerate(lines):
     arm(f"rollback line {i + 1}: a planted folder is not adopted", not fw)
     _, fw = run(line, None)
     arm(f"rollback line {i + 1}: with nothing there, the old location is still restored", fw)
+
+# the backup taken before an install: the old location counts only when root owns it (not a symlink, uid 0)
+bk = [l for l in text.splitlines() if "backup_copy firmware" in l and "FWOLD" in l]
+arm("the old firmware location is backed up only when it is root's own folder",
+    len(bk) == 1 and '! -L "$FWOLD"' in bk[0] and 'stat -f %u "$FWOLD")" = 0' in bk[0], bk[0].strip() if bk else "none")
 
 print(f"{len(FAILS)} failed")
 sys.exit(1 if FAILS else 0)
