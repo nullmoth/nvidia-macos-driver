@@ -545,6 +545,7 @@ pub fn air_intrinsic_disposition(name: &str) -> Option<AirIntrinsicDisposition> 
                 "air.simdgroup_matrix_8x8_load.",
                 "air.simdgroup_matrix_8x8_store.",
                 "air.simdgroup_matrix_8x8_init_diag.",
+                "air.simdgroup_matrix_8x8_init_filled.",
                 "air.simdgroup_async_copy_2d.",
                 "air.get_null_simdgroup_event",
                 "air.is_null_simdgroup_event",
