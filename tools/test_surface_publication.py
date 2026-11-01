@@ -26,7 +26,7 @@ fixture = r'''
 #include <string.h>
 #include <time.h>
 #import <objc/runtime.h>
-typedef struct __IOSurface { unsigned seed; unsigned char cpu[4]; } Surface;
+typedef struct __IOSurface { unsigned seed; unsigned char cpu[4]; unsigned planes; } Surface;
 typedef int IOReturn;
 enum { kIOSurfaceLockReadOnly = 1 };
 typedef struct { unsigned w,h,bpp; unsigned char gpu[4]; } Image;
@@ -40,7 +40,7 @@ static unsigned long long g_surfin_skip, g_surfin_copy, g_surfin_own_skip;
 static BOOL nvmtl_plane_seed_on(void) { return NO; }
 static BOOL nvmtl_own_bumps_cover(Surface *s, NSUInteger p, uint32_t from, uint32_t to) { return NO; }
 static void nvmtl_own_bump_add(Surface *s, NSUInteger p, uint32_t from, uint32_t to) {}
-static size_t IOSurfaceGetPlaneCount(Surface *s) { return 0; }
+static size_t IOSurfaceGetPlaneCount(Surface *s) { return s->planes; }
 static uint32_t IOSurfaceGetSeed(IOSurfaceRef s) { return s->seed; }
 static unsigned IOSurfaceGetID(IOSurfaceRef s) { return 1; }
 static IOReturn IOSurfaceLock(IOSurfaceRef s, unsigned opts, uint32_t *seed) {
@@ -111,11 +111,23 @@ checks = r'''
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc > 1 && !strncmp(argv[1], "reader-", 7)) {
         test_program = !strcmp(argv[1], "reader-app") ? "QQ" : "WindowServer";
-        Surface rs = { .seed = !strcmp(argv[1], "reader-wrap") ? UINT32_MAX - 2u : 10u };
+        Surface rs = { .seed = !strcmp(argv[1], "reader-wrap") ? UINT32_MAX - 2u : 10u,
+                       .planes = !strcmp(argv[1], "reader-multiplane") ? 2u : 1u };
         NVMTLTexture *rt = [NVMTLTexture new]; rt->_surf = &rs; rt->_vramOn = YES;
         rt->_i = (Image){ .w=1, .h=1, .bpp=4, .gpu={0,0,0,0} };
+        busyForeign = 0; busyWaits = 0;
         [rt nvmtlSurfaceIn]; assert(uploads == 1 && rt->_surfSynced);
         const unsigned before = uploads;
+        if (!strcmp(argv[1], "reader-foreign")) {
+            for (unsigned i = 0; i < 4; i++) { rs.seed++; nvmtl_surface_in_for_render_target(nil, rt); }
+            assert(rt->_readerStreak == 4 && uploads == before + 4);
+            rs.seed++; memset(rs.cpu, 123, sizeof rs.cpu); busyForeign = 1;
+            nvmtl_surface_in_for_render_target(nil, rt);
+            assert(busyWaits == 1 && rt->_clientWritten);
+            assert(uploads == before + 5 && !memcmp(rt->_i.gpu, rs.cpu, sizeof rs.cpu));
+            puts("PASS: pending foreign writer is waited for and imported; reader heuristic cannot skip it");
+            return 0;
+        }
         for (unsigned i = 0; i < 6; i++) {
             rs.seed++;
             if (!strcmp(argv[1], "reader-cpu-on") || !strcmp(argv[1], "reader-cpu-off"))
@@ -140,6 +152,8 @@ int main(int argc, char **argv) { @autoreleasepool {
             puts("PASS: explicit opt-in is ignored outside WindowServer");
         else if (!strcmp(argv[1], "reader-invalid"))
             puts("PASS: a value other than the exact opt-in 1 stays disabled");
+        else if (!strcmp(argv[1], "reader-multiplane"))
+            puts("PASS: multi-plane shared-VRAM surfaces never use the reader heuristic");
         else if (!strcmp(argv[1], "reader-wrap")) {
             assert(rs.seed == 3u);
             puts("PASS: reader streak handles uint32 seed wrap without overflow ambiguity");
@@ -221,7 +235,7 @@ with tempfile.TemporaryDirectory() as directory:
     subprocess.run([str(path / 'test')], check=True, env=env)
     subprocess.run([str(path / 'test'), 'shared'], check=True, env=env)
     env['NVMTL_SURFIN_READER_SKIP'] = '1'
-    for case in ('reader-on', 'reader-wrap', 'reader-app'):
+    for case in ('reader-on', 'reader-wrap', 'reader-app', 'reader-multiplane', 'reader-foreign'):
         subprocess.run([str(path / 'test'), case], check=True, env=env)
     env['NVMTL_SURFIN_READER_SKIP'] = 'yes'
     subprocess.run([str(path / 'test'), 'reader-invalid'], check=True, env=env)

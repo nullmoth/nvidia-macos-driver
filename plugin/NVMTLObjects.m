@@ -1331,7 +1331,7 @@ static BOOL nvmtl_surfin_reader_on(void)
 static unsigned long long g_surfin_reader_skip;
 static BOOL nvmtl_surfin_reader_only(NVMTLTexture *r)
 {
-    if (!r) return NO;
+    if (!r || !r->_surf || (r->_vramOn && IOSurfaceGetPlaneCount(r->_surf) > 1)) return NO;
     if (!nvmtl_surfin_reader_on() || !r->_surf || !r->_surfSynced) { r->_readerStreak = 0; return NO; }
     const uint32_t now = IOSurfaceGetSeed(r->_surf);
     if (now == r->_surfSeed) { r->_readerStreak = 0; return NO; }
@@ -1390,11 +1390,15 @@ static bool nvmtl_surfout_import(void) {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return;
     @synchronized (nvmtl_surface_sync(r)) {
-    if (readerSkipCandidate && nvmtl_surfin_reader_only(r)) return;
-    if (!readerSkipCandidate) r->_readerStreak = 0;
-    if (r->_clientWritten) nvmtl_busy_wait(r->_surf, r->_plane);
-    if (!r->_clientWritten && nvmtl_busy_foreign(r->_surf, r->_plane)) { r->_clientWritten = YES; nvmtl_busy_wait(r->_surf, r->_plane); }
+    if (r->_clientWritten) { nvmtl_busy_wait(r->_surf, r->_plane); r->_readerStreak = 0; }
+    if (!r->_clientWritten && nvmtl_busy_foreign(r->_surf, r->_plane)) {
+        r->_clientWritten = YES; nvmtl_busy_wait(r->_surf, r->_plane); r->_readerStreak = 0;
+    }
     // A foreign writer may publish a new generation while we wait. Inspect the generation only after that wait.
+    // The reader-seed heuristic must not suppress a surface once a foreign writer has been observed: its CPU edits
+    // can also be a one-seed bump and are indistinguishable from a read-only capture lock.
+    if (readerSkipCandidate && !r->_clientWritten && nvmtl_surfin_reader_only(r)) return;
+    if (!readerSkipCandidate) r->_readerStreak = 0;
     const uint32_t vgen = r->_vramOn ? 0 : nvmtl_vram_gen(r->_surf, r->_plane);
     if (r->_surfSynced && IOSurfaceGetSeed(r->_surf) == r->_surfSeed && (r->_vramOn || vgen == r->_surfGen)) return;
     if (r->_surfSynced && !r->_vramOn && vgen == r->_surfGen) {
