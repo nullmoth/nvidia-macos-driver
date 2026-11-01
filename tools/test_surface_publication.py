@@ -6,24 +6,41 @@ import tempfile
 
 root = pathlib.Path(__file__).resolve().parents[1]
 source = (root / 'plugin/NVMTLObjects.m').read_text()
-start = source.index('static id nvmtl_surface_sync(')
+release_keep = source[source.index('#if NVMTL_RELEASE'):source.index('const char *eq = strchr', source.index('#if NVMTL_RELEASE'))]
+assert 'NVMTL_SURFIN_READER_SKIP=' in release_keep, 'release environment filtering must preserve the explicit opt-in'
+wrapper_start = source.index('static BOOL nvmtl_surfin_reader_only(NVMTLTexture *r);')
+wrapper_end = source.index('static unsigned nvmtl_surf_id', wrapper_start)
+wrappers = source[wrapper_start:wrapper_end]
+reader_start = source.index('// Opt-in only. A read-write reader lock')
+reader_end = source.index('// IOSurface locking wires memory and updates its seed', reader_start)
+reader_methods = source[reader_start:reader_end]
+start = source.index('static id nvmtl_surface_sync(NVMTLTexture *t) {')
 end = source.index('- (NSUInteger)width ', start)
-methods = source[start:end]
+methods = wrappers + reader_methods + source[start:end]
 fixture = r'''
 #import <Foundation/Foundation.h>
+#include "nvmtl_reader_skip.h"
 #include <assert.h>
 #include <dispatch/dispatch.h>
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
 #import <objc/runtime.h>
-typedef struct __IOSurface { unsigned seed; unsigned char cpu[4]; } Surface;
+typedef struct __IOSurface { unsigned seed; unsigned char cpu[4]; unsigned planes; } Surface;
 typedef int IOReturn;
 enum { kIOSurfaceLockReadOnly = 1 };
 typedef struct { unsigned w,h,bpp; unsigned char gpu[4]; } Image;
+static const char *test_program = "test";
+const char *getprogname(void) { return test_program; }
 static dispatch_semaphore_t entered, release_read;
 static unsigned uploads, gpu_seed;
-static unsigned long long g_surfin_skip, g_surfin_copy;
+static unsigned long long g_surfin_skip, g_surfin_copy, g_surfin_own_skip;
+// Keep plane history off in this single-plane publication fixture. The actual
+// history helpers are exercised separately by test_surface_plane_seed.py.
+static BOOL nvmtl_plane_seed_on(void) { return NO; }
+static BOOL nvmtl_own_bumps_cover(Surface *s, NSUInteger p, uint32_t from, uint32_t to) { return NO; }
+static void nvmtl_own_bump_add(Surface *s, NSUInteger p, uint32_t from, uint32_t to) {}
+static size_t IOSurfaceGetPlaneCount(Surface *s) { return s->planes; }
 static uint32_t IOSurfaceGetSeed(IOSurfaceRef s) { return s->seed; }
 static unsigned IOSurfaceGetID(IOSurfaceRef s) { return 1; }
 static IOReturn IOSurfaceLock(IOSurfaceRef s, unsigned opts, uint32_t *seed) {
@@ -71,12 +88,18 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) {
     assert(!dispatch_semaphore_wait(release_read,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC)));
     memcpy(base,i->gpu,4); return 0;
 }
+@class NVMTLTexture;
+@interface NVMTLCommandBuffer : NSObject { @public NSMutableSet *_surfOverwrites; }
+@end
+@implementation NVMTLCommandBuffer @end
+static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t) { (void)cb; (void)t; return NO; }
 @interface NVMTLTexture : NSObject {
 @public NVMTLTexture *_parent; IOSurfaceRef _surf; BOOL _vramOn, _surfSynced, _clientWritten; void *_hostPages;
-    uint32_t _surfSeed, _surfGen; NSUInteger _plane; Image _i; void *_q;
+    uint32_t _surfSeed, _surfGen, _readerStreak; NSUInteger _plane; Image _i; void *_q;
 }
 - (BOOL)nvmtlSurfaceCopyable;
 - (void)nvmtlSurfaceIn;
+- (void)nvmtlSurfaceInForRenderTargetLoad:(BOOL)readerSkipCandidate;
 - (BOOL)nvmtlSurfaceOut;
 - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied;
 @end
@@ -86,6 +109,58 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) {
 checks = r'''
 @end
 int main(int argc, char **argv) { @autoreleasepool {
+    if (argc > 1 && !strncmp(argv[1], "reader-", 7)) {
+        test_program = !strcmp(argv[1], "reader-app") ? "QQ" : "WindowServer";
+        Surface rs = { .seed = !strcmp(argv[1], "reader-wrap") ? UINT32_MAX - 2u : 10u,
+                       .planes = !strcmp(argv[1], "reader-multiplane") ? 2u : 1u };
+        NVMTLTexture *rt = [NVMTLTexture new]; rt->_surf = &rs; rt->_vramOn = YES;
+        rt->_i = (Image){ .w=1, .h=1, .bpp=4, .gpu={0,0,0,0} };
+        busyForeign = 0; busyWaits = 0;
+        [rt nvmtlSurfaceIn]; assert(uploads == 1 && rt->_surfSynced);
+        const unsigned before = uploads;
+        if (!strcmp(argv[1], "reader-foreign")) {
+            for (unsigned i = 0; i < 4; i++) { rs.seed++; nvmtl_surface_in_for_render_target(nil, rt); }
+            assert(rt->_readerStreak == 4 && uploads == before + 4);
+            rs.seed++; memset(rs.cpu, 123, sizeof rs.cpu); busyForeign = 1;
+            nvmtl_surface_in_for_render_target(nil, rt);
+            assert(busyWaits == 1 && rt->_clientWritten);
+            assert(uploads == before + 5 && !memcmp(rt->_i.gpu, rs.cpu, sizeof rs.cpu));
+            puts("PASS: pending foreign writer is waited for and imported; reader heuristic cannot skip it");
+            return 0;
+        }
+        for (unsigned i = 0; i < 6; i++) {
+            rs.seed++;
+            if (!strcmp(argv[1], "reader-cpu-on") || !strcmp(argv[1], "reader-cpu-off"))
+                rs.cpu[i % sizeof rs.cpu] = (unsigned char)(rs.cpu[i % sizeof rs.cpu] + i + 1);
+            nvmtl_surface_in_for_render_target(nil, rt);
+            if (!strcmp(argv[1], "reader-cpu-on") && i >= 4) {
+                assert(uploads == before + 4);
+                assert(memcmp(rt->_i.gpu, rs.cpu, sizeof rs.cpu) != 0);
+            } else if ((!strcmp(argv[1], "reader-on") || !strcmp(argv[1], "reader-wrap")) && i >= 4) {
+                assert(uploads == before + 4);
+                assert(!memcmp(rt->_i.gpu, rs.cpu, sizeof rs.cpu));
+            } else {
+                assert(uploads == before + i + 1);
+                assert(!memcmp(rt->_i.gpu, rs.cpu, sizeof rs.cpu));
+            }
+        }
+        if (!strcmp(argv[1], "reader-cpu-on"))
+            puts("PASS: opt-in limitation reproduced: five changing CPU writes with seed +1 are indistinguishable and the fifth is skipped");
+        else if (!strcmp(argv[1], "reader-cpu-off"))
+            puts("PASS: default-off keeps importing every changing CPU write");
+        else if (!strcmp(argv[1], "reader-app"))
+            puts("PASS: explicit opt-in is ignored outside WindowServer");
+        else if (!strcmp(argv[1], "reader-invalid"))
+            puts("PASS: a value other than the exact opt-in 1 stays disabled");
+        else if (!strcmp(argv[1], "reader-multiplane"))
+            puts("PASS: multi-plane shared-VRAM surfaces never use the reader heuristic");
+        else if (!strcmp(argv[1], "reader-wrap")) {
+            assert(rs.seed == 3u);
+            puts("PASS: reader streak handles uint32 seed wrap without overflow ambiguity");
+        } else
+            puts("PASS: repeated unchanged reader bumps skip after four observed advances");
+        return 0;
+    }
     Surface s={.seed=1};
     NVMTLTexture *t=[NVMTLTexture new]; t->_surf=&s; t->_i=(Image){.w=1,.h=1,.bpp=4,.gpu={0,128,255,255}};
     NVMTLTexture *alias=[NVMTLTexture new];
@@ -152,7 +227,19 @@ int main(int argc, char **argv) { @autoreleasepool {
 with tempfile.TemporaryDirectory() as directory:
     path = pathlib.Path(directory)
     (path / 'test.m').write_text(fixture + methods + checks)
-    subprocess.run(['clang', '-fobjc-arc', '-framework', 'Foundation',
+    subprocess.run(['clang', '-fobjc-arc', '-framework', 'Foundation', '-I', str(root / 'plugin'),
                     str(path / 'test.m'), '-o', str(path / 'test')], check=True)
-    subprocess.run([str(path / 'test')], check=True)
-    subprocess.run([str(path / 'test'), 'shared'], check=True)
+    import os
+    env = dict(os.environ)
+    env.pop('NVMTL_SURFIN_READER_SKIP', None)
+    subprocess.run([str(path / 'test')], check=True, env=env)
+    subprocess.run([str(path / 'test'), 'shared'], check=True, env=env)
+    env['NVMTL_SURFIN_READER_SKIP'] = '1'
+    for case in ('reader-on', 'reader-wrap', 'reader-app', 'reader-multiplane', 'reader-foreign'):
+        subprocess.run([str(path / 'test'), case], check=True, env=env)
+    env['NVMTL_SURFIN_READER_SKIP'] = 'yes'
+    subprocess.run([str(path / 'test'), 'reader-invalid'], check=True, env=env)
+    env.pop('NVMTL_SURFIN_READER_SKIP', None)
+    subprocess.run([str(path / 'test'), 'reader-cpu-off'], check=True, env=env)
+    env['NVMTL_SURFIN_READER_SKIP'] = '1'
+    subprocess.run([str(path / 'test'), 'reader-cpu-on'], check=True, env=env)
