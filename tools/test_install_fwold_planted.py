@@ -58,7 +58,7 @@ for i, line in enumerate(lines):
 # the backup taken before an install: the old location counts only when root owns it (not a symlink, uid 0)
 bk = [l for l in text.splitlines() if "backup_copy firmware" in l and "FWOLD" in l]
 arm("the old firmware location is backed up only when it is root's own folder",
-    len(bk) == 1 and '! -L "$FWOLD"' in bk[0] and 'stat -f %u "$FWOLD")" = 0' in bk[0], bk[0].strip() if bk else "none")
+    len(bk) == 1 and '! -L "$FWOLD"' in bk[0] and "$1==0" in bk[0] and "[2367]" in bk[0], bk[0].strip() if bk else "none")
 
 print(f"{len(FAILS)} failed")
 sys.exit(1 if FAILS else 0)

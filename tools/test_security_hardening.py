@@ -217,7 +217,7 @@ check('every kext, the accelerator included, is installed from the checked priva
 # the new location does not exist yet, so a backup that only looked there saved nothing and the
 # boot-guard fallback restored the previous driver with no firmware at all - a dark Mac, no recovery.
 check('the firmware backup falls back to the old location on an upgrade',
-      'elif [ -d "$FWOLD" ]; then backup_copy firmware ditto "$FWOLD" "$BK/nvfw"' in inst)
+      'then backup_copy firmware ditto "$FWOLD" "$BK/nvfw"' in inst and 'elif [ -d "$FWOLD" ] && [ ! -L "$FWOLD" ]' in inst)
 
 print('FAILED' if fails else 'PASS')
 sys.exit(1 if fails else 0)
