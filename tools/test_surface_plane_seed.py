@@ -7,11 +7,12 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 objects = (root / "plugin/NVMTLObjects.m").read_text()
 start = objects.index("typedef struct { uint32_t surf, from, to, plane;")
-production = objects[start:objects.index("// IOSurface locking", start)]
+production = objects[start:objects.index("// Opt-in only. A read-write reader lock", start)]
 fixture = r'''
 #import <Foundation/Foundation.h>
 #import <CoreVideo/CoreVideo.h>
 #import <IOSurface/IOSurface.h>
+#include "nvmtl_reader_skip.h"
 #include <os/lock.h>
 #include <stdatomic.h>
 #include <assert.h>
@@ -42,6 +43,28 @@ int main(void) { @autoreleasepool {
     assert(!nvmtl_own_bumps_cover(surface,0,13,14));
     nvmtl_own_bump_add(surface,1,UINT32_MAX,0);
     assert(!nvmtl_own_bumps_cover(surface,0,UINT32_MAX,0));
+    // A private-plane candidate may include known writes to another plane
+    // before the final unaccounted seed bump. Same-plane writes must reset
+    // the streak and never be treated as reader-only.
+    uint32_t last=1000,streak=0;
+    for(unsigned i=0;i<5;i++) {
+        nvmtl_own_bump_add(surface,1,last,last+1);
+        uint32_t now=last+2;
+        BOOL others=nvmtl_own_bumps_cover(surface,0,last,now-1);
+        assert(others);
+        BOOL skip=nvmtl_reader_skip_observe(last,now,&streak,false,true,true,others);
+        assert(skip==(i==4));
+        last=now;
+    }
+    last=2000; streak=0;
+    for(unsigned i=0;i<5;i++) {
+        nvmtl_own_bump_add(surface,0,last,last+1);
+        uint32_t now=last+2;
+        BOOL others=nvmtl_own_bumps_cover(surface,0,last,now-1);
+        assert(!others);
+        assert(!nvmtl_reader_skip_observe(last,now,&streak,false,true,true,others));
+        last=now;
+    }
     nvmtl_own_bump_add(surface,1,20,21);
     CFDictionaryRef values=IOSurfaceCopyAllValues(surface);
     for(id key in (__bridge NSDictionary *)values) {
@@ -56,14 +79,14 @@ int main(void) { @autoreleasepool {
     assert(!nvmtl_own_bumps_cover(surface,0,100,180));
     assert(nvmtl_own_bumps_cover(surface,0,179,180));
     CVPixelBufferRelease(a); CVPixelBufferRelease(b);
-    puts("PASS: same-plane invalidation, other-plane reuse, foreign seed gaps, cookies, wrap and bounded history");
+    puts("PASS: same-plane invalidation, other-plane reuse, plane-isolated reader candidates, foreign seed gaps, cookies, wrap and bounded history");
 } }
 '''
 with tempfile.TemporaryDirectory() as directory:
     source = Path(directory) / "plane.m"
     source.write_text(fixture + production + checks)
     binary = Path(directory) / "plane"
-    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fsanitize=address,undefined", str(source),
+    subprocess.run(["xcrun", "clang", "-fobjc-arc", "-fsanitize=address,undefined", "-I", str(root / "plugin"), str(source),
                     "-o", str(binary), "-framework", "Foundation", "-framework", "CoreVideo",
                     "-framework", "IOSurface"], check=True)
     subprocess.run([str(binary)], check=True)
