@@ -4382,15 +4382,22 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     const uint32_t *kp = (const uint32_t *)e->_nvcKP, *cp = (const uint32_t *)e->_nvcCP;
     const uint32_t cin = cp[32], cout = cp[33], kw = cp[34], kh = cp[35], groups = cp[36], batch = cp[37], sw = cp[38], sh = cp[39], dw = cp[40], dh = cp[41];
     if (groups != 1 || !cin || !cout || !kw || !kh || !batch || !sw || !sh || !dw || !dh) NVC_SKIP("groups/dims");
+    // An array's four offset words are its view's origin (a concat branch: Face Tracking writes 256 channels at channel 256
+    // of a 512-channel tensor). The app's buffer binding already points at that origin - solved from a dumped layer
+    // (nvcdump2 off1): MPS's output equals ReLU(conv) at binding + pixel*512 + channel, max rel err 0 - so the words need
+    // no handling beyond the strides the kernel already reads. Verification below still has the last word on every layer.
     for (uint32_t a = 0; a < nar; a++) if (kp[a * 20] | kp[a * 20 + 1] | kp[a * 20 + 2] | kp[a * 20 + 3]) {
         if (nvmtl_nvconv_dump_offsets(e, grid, tg, nar, dev)) return 1;
-        NVC_SKIP("array offset");
+        break;
     }
     const uint32_t ob = (nar - 1) * 20;
     if (kp[4] != cin || kp[5] != sw || kp[6] != sh || kp[7] != batch || kp[8] != 1) NVC_SKIP("input descriptor");
     if (kp[24] != cout || kp[25] != cin || kp[26] != kw || kp[27] != kh || kp[28] != 1) NVC_SKIP("weights descriptor");
     if (kp[ob + 4] != cout || kp[ob + 5] != dw || kp[ob + 6] != dh || kp[ob + 7] != batch) NVC_SKIP("output sizes");
-    if (kp[ob + 8] != 1 || (dw > 1 && kp[ob + 9] != cout) || (dh > 1 && kp[ob + 10] != cout * dw) || (batch > 1 && kp[ob + 11] != cout * dw * dh)) {
+    // Strided output (a concat branch) is fine as long as no two outputs alias: channels innermost and dense, each wider
+    // dimension at least as far apart as the one inside it spans. The dense layout is the case where all are equal.
+    if (kp[ob + 8] != 1 || (dw > 1 && kp[ob + 9] < cout) || (dh > 1 && kp[ob + 10] < (uint64_t)(dw > 1 ? kp[ob + 9] : cout) * dw) ||
+        (batch > 1 && kp[ob + 11] < (uint64_t)(dh > 1 ? kp[ob + 10] : (dw > 1 ? kp[ob + 9] : cout)) * dh)) {
         char why[160]; snprintf(why, sizeof why, "output strides %u,%u,%u,%u for cout %u x %u x %u (sizes %u,%u,%u,%u)",
                                 kp[ob + 8], kp[ob + 9], kp[ob + 10], kp[ob + 11], cout, dw, dh, kp[ob + 4], kp[ob + 5], kp[ob + 6], kp[ob + 7]);
         NVC_SKIP(why); }
@@ -4403,7 +4410,9 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     const uint64_t nin = (uint64_t)(cin - 1) * kp[8] + (uint64_t)(sw - 1) * kp[9] + (uint64_t)(sh - 1) * kp[10] + (uint64_t)(batch - 1) * kp[11] + 1;
     const uint64_t nwt = (uint64_t)(cout - 1) * kp[28] + (uint64_t)(cin - 1) * kp[29] + (uint64_t)(kw - 1) * kp[30] + (uint64_t)(kh - 1) * kp[31] + 1;
     const uint64_t nout = (uint64_t)cout * dw * dh * batch;
-    if (!NVC_ROOM(bi, nin) || !NVC_ROOM(bw, nwt) || !NVC_ROOM(bo, nout) || (bb && !NVC_ROOM(bb, cout)) || (br && !NVC_ROOM(br, nout)) || nout > 0xffffffffull) NVC_SKIP("buffer too short for f32");
+    // nspan: floats from the output binding to one past the last output, gaps included (== nout when dense)
+    const uint64_t nspan = (uint64_t)(batch - 1) * kp[ob + 11] + (uint64_t)(dh - 1) * kp[ob + 10] + (uint64_t)(dw - 1) * kp[ob + 9] + cout;
+    if (!NVC_ROOM(bi, nin) || !NVC_ROOM(bw, nwt) || !NVC_ROOM(bo, nspan) || (bb && !NVC_ROOM(bb, cout)) || (br && !NVC_ROOM(br, nout)) || nspan > 0xffffffffull) NVC_SKIP("buffer too short for f32");
     #undef NVC_ROOM
     const uint64_t M = (uint64_t)batch * dh * dw;
     const BOOL small = ((M + 127) / 128) * ((cout + 63) / 64) < 60;
@@ -4419,7 +4428,7 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     id<MTLBuffer> outBuf = bo[0]; const NSUInteger outOff = [bo[1] unsignedLongValue];
     id<MTLBuffer> res = [dev newBufferWithLength:32 + 48 options:MTLResourceStorageModeShared];
     memset(res.contents, 0, 32 + 48);
-    const uint32_t n = (uint32_t)nout;
+    const uint32_t n = (uint32_t)nspan;   // compared floats: the whole span, so a strided layer is checked in place
     // NVMTL_NVCONV_DUMP=<dir>: copy this layer's input, weights, bias, MPS's output and variant 0's output into
     // CPU-readable buffers and write them with the parameter words, so a refused layer's rule can be solved offline.
     static const char *dumpDir; static dispatch_once_t dumpOnce;
@@ -4441,15 +4450,23 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     copyOut(@"w", bw[0], [bw[1] unsignedLongValue], nwt);
     if (bb) copyOut(@"b", bb[0], [bb[1] unsignedLongValue], cout);
     if (br) copyOut(@"res", br[0], [br[1] unsignedLongValue], nout);
-    copyOut(@"mps", outBuf, outOff, nout);
+    copyOut(@"mps", outBuf, outOff, nspan);
     NSData *kpCopy = dumps ? [NSData dataWithBytes:e->_nvcKP length:e->_nvcKPLen] : nil;
     NSData *cpCopy = dumps ? [NSData dataWithBytes:e->_nvcCP length:e->_nvcCPLen] : nil;
     for (uint32_t v = 0; v < NVC_NVAR; v++) {
-        id<MTLBuffer> scratch = [dev newBufferWithLength:(NSUInteger)nout * 4 options:MTLResourceStorageModePrivate];
+        id<MTLBuffer> scratch = [dev newBufferWithLength:(NSUInteger)nspan * 4 options:MTLResourceStorageModePrivate];
+        NVMTLComputePipelineState *saved = e->_ps; NSMutableDictionary *savedTG = e->_tgLen;
+        if (nspan != nout) {
+            // strided output: start the scratch as MPS's result, so the other concat branch's channels (which this layer
+            // must not touch) compare equal and any write into them shows up as a mismatch
+            e->_ps = (NVMTLComputePipelineState *)g_nvc_ps[NVC_COPY]; e->_tgLen = nil; e->_nvcIn = YES;
+            [e setBuffer:outBuf offset:outOff atIndex:5]; [e setBuffer:scratch offset:0 atIndex:6]; [e setBytes:&n length:4 atIndex:8];
+            [e dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            e->_nvcIn = NO; e->_ps = saved; e->_tgLen = savedTG;
+        }
         [e setBuffer:scratch offset:0 atIndex:nar - 1];
         nvmtl_nvconv_run(e, ours, og, v);
-        if (v == 0) copyOut(@"ours0", scratch, 0, nout);
-        NVMTLComputePipelineState *saved = e->_ps; NSMutableDictionary *savedTG = e->_tgLen;
+        if (v == 0) copyOut(@"ours0", scratch, 0, nspan);
         e->_ps = (NVMTLComputePipelineState *)g_nvc_ps[NVC_CMP]; e->_tgLen = nil; e->_nvcIn = YES;
         [e setBuffer:outBuf offset:outOff atIndex:5]; [e setBuffer:scratch offset:0 atIndex:6]; [e setBuffer:res offset:v * 4 atIndex:7];
         [e setBytes:&n length:4 atIndex:8]; [e setBuffer:res offset:32 atIndex:9];
