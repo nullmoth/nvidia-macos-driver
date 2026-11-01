@@ -613,6 +613,9 @@ static bool nvmtl_process_is_allowed(void)
     }
     fclose(f);
     if (ok) nvlog("  allow-listed: %s", me);
+    // a list that was read but grants nothing to this process said so nowhere, so a field log showed only the final
+    // refusal and could not tell an empty or replaced list from a deny rule
+    else nvlog("  no rule in nvmtl-allow.txt matches %s: no device (the list was read; it needs a '*' or '%s' line)", me, me);
     return ok;
 }
 
