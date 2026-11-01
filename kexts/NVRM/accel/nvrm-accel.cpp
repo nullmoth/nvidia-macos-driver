@@ -28,6 +28,7 @@
 #include "IOAccelMemoryMap.h"
 #include "../nvrm_gpuva_abi.h"
 #include "../nvrm_utilization_abi.h"
+#include "../nvrm_telemetry_cache.h"
 class NVMemoryMap;
 static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
                                            unsigned long long len, unsigned long long align);
@@ -293,6 +294,7 @@ public:
     NVRMUtilization     fUtil = {};
     uint64_t            fUtilUpdated = 0;
     bool                fUtilValid = false;
+    NVRMTelemetryCache  fTelemetry = {};
     IONotifier *fFBNote = nullptr;
     IONotifier *fIntelNote = nullptr;
     static NVAccel *gAccel;
@@ -896,6 +898,7 @@ public:
         if (fUtilProvider) { fUtilProvider->release(); fUtilProvider = nullptr; }
         if (fUtilLock) { IOLockFree(fUtilLock); fUtilLock = nullptr; }
         fUtilValid = false;
+        fTelemetry = {};
     }
 
     static void utilTimerFired(OSObject *owner, IOTimerEventSource *sender) {
@@ -907,6 +910,9 @@ public:
     void sampleUtilization() {
         if (fUtilProvider && fUtilProvider->isInactive()) {
             fUtilProvider->release(); fUtilProvider = nullptr;
+            IOLockLock(fUtilLock);
+            fTelemetry = {};
+            IOLockUnlock(fUtilLock);
         }
         if (!fUtilProvider) {
             // Match the RM service on this PCI device, rather than a global GPU 0.
@@ -931,7 +937,20 @@ public:
                 fn->release();
             }
         }
+        NVRMTelemetry telemetry = {};
+        telemetry.version = NVRM_TELEMETRY_ABI_VERSION;
+        IOReturn telemetryStatus = kIOReturnNotAttached;
+        if (fUtilProvider && !fUtilProvider->isInactive()) {
+            const OSSymbol *fn = OSSymbol::withCStringNoCopy(NVRM_TELEMETRY_FN);
+            if (fn) {
+                telemetryStatus = fUtilProvider->callPlatformFunction(fn, false, &telemetry, nullptr, nullptr, nullptr);
+                fn->release();
+            }
+        }
+        uint64_t nowNs = 0;
+        absolutetime_to_nanoseconds(mach_continuous_time(), &nowNs);
         IOLockLock(fUtilLock);
+        nvrmTelemetryCacheUpdate(&fTelemetry, telemetryStatus == kIOReturnSuccess ? &telemetry : nullptr, nowNs);
         if (status == kIOReturnSuccess && sample.version == NVRM_UTILIZATION_ABI_VERSION &&
             sample.timestamp && sample.gr <= 10000 && sample.fb <= 10000 &&
             sample.nvenc <= 10000 && sample.nvdec <= 10000) {
@@ -946,6 +965,55 @@ public:
             fUtilValid = false;
         }
         IOLockUnlock(fUtilLock);
+    }
+
+    static void setSensorStatistic(OSDictionary *d, const char *key, bool valid, unsigned long long value) {
+        if (!valid) { d->removeObject(key); return; }
+        if (OSNumber *n = OSNumber::withNumber(value, 64)) {
+            d->setObject(key, n);
+            n->release();
+        }
+    }
+
+    void publishTelemetry(OSDictionary *d) {
+        NVRMTelemetry sample = {};
+        if (fUtilLock) {
+            uint64_t nowNs = 0;
+            absolutetime_to_nanoseconds(mach_continuous_time(), &nowNs);
+            IOLockLock(fUtilLock);
+            sample = nvrmTelemetryCacheSnapshot(&fTelemetry, nowNs, kNvUtilMaxAgeNs);
+            IOLockUnlock(fUtilLock);
+        }
+        const bool average = sample.validMask & NVRM_TELEMETRY_VALID_AVERAGE_POWER;
+        const bool instant = sample.validMask & NVRM_TELEMETRY_VALID_INSTANT_POWER;
+        const bool clocks = sample.validMask & NVRM_TELEMETRY_VALID_CLOCKS;
+        const bool fans = (sample.validMask & NVRM_TELEMETRY_VALID_FANS) && sample.fanValidMask;
+        setSensorStatistic(d, "Total Power(W)", average, (sample.averagePowerMilliwatts + 500ULL) / 1000);
+        setSensorStatistic(d, "GPU Average Power(mW)", average, sample.averagePowerMilliwatts);
+        setSensorStatistic(d, "Instant Power(W)", instant, (sample.instantPowerMilliwatts + 500ULL) / 1000);
+        setSensorStatistic(d, "GPU Instant Power(mW)", instant, sample.instantPowerMilliwatts);
+        setSensorStatistic(d, "Core Clock(MHz)", clocks, sample.coreClockKHz / 1000);
+        setSensorStatistic(d, "Memory Clock(MHz)", clocks, sample.memoryClockKHz / 1000);
+
+        // RPM is measured per controller. No assumed maximum or estimated fan percentage.
+        unsigned maxRPM = 0;
+        OSDictionary *fanRPM = fans ? OSDictionary::withCapacity(NVRM_TELEMETRY_FAN_COUNT) : nullptr;
+        for (unsigned i = 0; fans && i < NVRM_TELEMETRY_FAN_COUNT; i++) {
+            if (!(sample.fanValidMask & (1u << i))) continue;
+            if (sample.fanRPM[i] > maxRPM) maxRPM = sample.fanRPM[i];
+            if (fanRPM) {
+                char index[12];
+                snprintf(index, sizeof index, "%u", i);
+                setSensorStatistic(fanRPM, index, true, sample.fanRPM[i]);
+            }
+        }
+        setSensorStatistic(d, "Fan Speed(RPM)", fans, maxRPM);
+        if (fanRPM) {
+            setProperty("NVRMFanRPM", fanRPM);
+            fanRPM->release();
+        } else {
+            removeProperty("NVRMFanRPM");
+        }
     }
 
     // Read-copy-modify-write: the family keeps 70-odd keys in this dictionary and replaces it
@@ -985,6 +1053,7 @@ public:
                 d->removeObject(keys[i]);
             }
         }
+        publishTelemetry(d);
 #endif
         setProperty("PerformanceStatistics", d);
         d->release();
