@@ -5,6 +5,12 @@ NVRM reads power, clock and fan samples from NVIDIA's RM user shared data
 The existing temperature, utilization and memory accounting paths are unchanged.
 No additional kext, daemon or VirtualSMC plugin is needed.
 
+These are IORegistry properties for monitoring clients, not a public Apple
+sensor API or a guarantee of compatibility with every monitoring app.
+`NVRMFanRPM` is specific to this driver. Clients must read the documented keys;
+iStat Menus support for the new power, clock and fan values has not been
+verified. This change does not publish SMC keys or include a VirtualSMC bridge.
+
 ## Published values
 
 These keys are in NVAccel's `PerformanceStatistics` dictionary:
