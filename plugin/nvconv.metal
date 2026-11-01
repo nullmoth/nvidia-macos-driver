@@ -86,7 +86,11 @@ static inline void nvconv_body(device const float *src ,
             for (uint j = 0; j < BCNT; j++) Bs[bkk][bnn + j] = v[j];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint kk = 0; kk < BK; kk++) {
+        // A runtime trip count (exact: rows past K were zero-filled) keeps NIR from unrolling all 16 steps; unrolled,
+        // the scheduler hoisted all 96 shared loads ahead of 256 FMAs and the kernel needed 152 registers (12 warps/SM);
+        // as a loop it needs 64 (32 warps/SM).
+        const uint kkN = min(BK, kEnd - k0);
+        for (uint kk = 0; kk < kkN; kk++) {
             float a[TM], b[TN];
             for (uint i = 0; i < TM; i++) a[i] = As[kk][ty * TM + i];
             for (uint j = 0; j < TN; j++) b[j] = Bs[kk][tx * TN + j];
