@@ -741,15 +741,31 @@ static int nvmtl_mzero_on(void) {
               : "memset their CPU copy at creation and upload it (old)", e ? e : "unset"); }
     return on;
 }
+// A fresh host-visible allocation is zeroed by RM in the kernel. Trusted only after the first NVMTL_FRESH_PROBE of them are
+// read back all-zero; one non-zero byte turns the skip off for the process (and that buffer is cleared as before).
+// NVMTL_FRESH_ZERO=0: always clear (the old path).
+#define NVMTL_FRESH_PROBE 4
+static int nvmtl_fresh_is_zero(const nvk_buffer *nb, NSUInteger len) {
+    static int on = -1; static _Atomic int checked, bad;
+    if (on < 0) { const char *e = getenv("NVMTL_FRESH_ZERO"); on = !(e && e[0] == '0'); }
+    if (!on || !nb || !nb->fresh || !nb->map || atomic_load(&bad)) return 0;
+    if (atomic_load(&checked) >= NVMTL_FRESH_PROBE) return 1;
+    const size_t n = MIN((size_t)len, nb->size); const uint64_t *w = (const uint64_t *)nb->map; uint64_t acc = 0;
+    for (size_t i = 0; i < n / 8; i++) acc |= w[i];
+    for (size_t i = n & ~(size_t)7; i < n; i++) acc |= ((const uint8_t *)nb->map)[i];
+    if (acc) { atomic_store(&bad, 1); nvlog("zero-fill: a fresh %zu-byte system allocation was NOT zero - the kernel does not clear them here; clearing every buffer", n); return 0; }
+    if (atomic_fetch_add(&checked, 1) + 1 == NVMTL_FRESH_PROBE) nvlog("zero-fill: %d fresh system allocations read back zero - fresh ones are no longer cleared twice", NVMTL_FRESH_PROBE);
+    return 1;
+}
 static void nvmtl_zero_new_buffer(NVMTLBuffer *b, NSUInteger len) {
     const int m = nvmtl_zero_mode();
     if (!m || !b || !len) return;
     const int mz = b->_shadow.map && m >= 2 && b->_b.buf && !b->_b.map && nvmtl_mzero_on();
-    if (mz) __atomic_store_n(&b->_zshadow, 1, __ATOMIC_RELEASE);
+    if (mz && !nvmtl_fresh_is_zero(&b->_shadow, len)) __atomic_store_n(&b->_zshadow, 1, __ATOMIC_RELEASE);
     if (b->_shadow.map && !mz) {
         memset(b->_shadow.map, 0, len); nvmtl_managed_mark(b, 0, MIN((NSUInteger)b->_b.size, len));
     } else if (b->_b.map && !mz) {
-        memset(b->_b.map, 0, len);
+        if (!nvmtl_fresh_is_zero(&b->_b, len)) memset(b->_b.map, 0, len);
     } else {
         if (m < 2 || !b->_b.buf) return;
         os_unfair_lock_lock(&gZeroLock);
