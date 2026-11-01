@@ -4326,7 +4326,8 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 
 #include "nvconv_lib.h"
 @interface NVMTLComputeCommandEncoder () { @public uint8_t _nvcKP[528]; uint32_t _nvcKPLen; uint8_t _nvcCP[272]; uint32_t _nvcCPLen; BOOL _nvcIn; } @end
-static id<MTLComputePipelineState> g_nvc_ps[8];
+static id<MTLComputePipelineState> g_nvc_ps[11];   /* 8..10: tensor-core forms of nvconv3_s/4_s/5_s (optional) */
+static int nvmtl_nvconv_mma_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_NVCONV_MMA"); on = !(e && e[0] == '0'); } return on; }
 #define NVC_CMP 6
 #define NVC_COPY 7
 #define NVC_NVAR 7   /* epilogues 0-4, plus 5 and 6: residual blocks that add their own input */
@@ -4377,6 +4378,13 @@ static BOOL nvmtl_nvconv_ready(id<MTLDevice> dev) {
                 id<MTLFunction> f = [lib newFunctionWithName:names[i]];
                 g_nvc_ps[i] = f ? [dev newComputePipelineStateWithFunction:f error:&err] : nil;
                 if (!g_nvc_ps[i]) { on = 0; nvlog("nvconv: %s did not build (%s) - MPS's conv stays everywhere", names[i].UTF8String, err.description.UTF8String); }
+            }
+            // the tensor-core forms are extra candidates: one that does not build turns only itself off
+            NSString *mnames[3] = { @"nvconvm3_s", @"nvconvm4_s", @"nvconvm5_s" };
+            for (int i = 0; i < 3 && on && nvmtl_nvconv_mma_on(); i++) {
+                id<MTLFunction> f = [lib newFunctionWithName:mnames[i]];
+                g_nvc_ps[8 + i] = f ? [dev newComputePipelineStateWithFunction:f error:&err] : nil;
+                if (!g_nvc_ps[8 + i]) nvlog("nvconv: %s did not build (%s) - the fp32 kernels stand", mnames[i].UTF8String, err.description.UTF8String);
             }
             g_nvc_state = [NSMutableDictionary new];
         }
@@ -4513,11 +4521,14 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     const BOOL small = ((M + 127) / 128) * ((cout + 63) / 64) < 60;
     id<MTLComputePipelineState> ours = g_nvc_ps[(nar - 3) * 2 + (small ? 1 : 0)];
     const MTLSize og = small ? MTLSizeMake((M + 63) / 64, (cout + 31) / 32, 1) : MTLSizeMake((M + 127) / 128, (cout + 63) / 64, 1);
+    id<MTLComputePipelineState> oursM = nvmtl_nvconv_mma_on() ? g_nvc_ps[8 + (nar - 3)] : nil;
+    const MTLSize ogM = MTLSizeMake((M + 63) / 64, (cout + 31) / 32, 1);   /* the tensor-core forms tile 64x32 */
     NSMutableData *key = [NSMutableData dataWithBytes:&e->_ps length:sizeof(void *)];
     for (uint32_t a = 0; a < nar; a++) [key appendBytes:kp + a * 20 + 4 length:8 * 4];
     [key appendBytes:cp + 32 length:18 * 4];
     pthread_mutex_lock(&g_nvc_lk); NSNumber *st = g_nvc_state[key]; if (!st) g_nvc_state[key] = @0; pthread_mutex_unlock(&g_nvc_lk);
-    if (st.intValue > 0) { nvmtl_nvconv_run(e, ours, og, (uint32_t)(st.intValue - 1) | shuf << 8); g_nvc_ran++; return 1; }
+    if (st.intValue > 100 && oursM) { nvmtl_nvconv_run(e, oursM, ogM, (uint32_t)(st.intValue - 101) | shuf << 8); g_nvc_ran++; return 1; }
+    if (st.intValue > 0 && st.intValue <= 100) { nvmtl_nvconv_run(e, ours, og, (uint32_t)(st.intValue - 1) | shuf << 8); g_nvc_ran++; return 1; }
     if (st) { static _Atomic unsigned long pend; if (st.intValue == 0 && ++pend <= 8) nvlog("nvconv: still pending (%lu)", (unsigned long)pend); return 0; }
     // Correct is not enough: on Background Blur's layers our kernel was slower than MPS (GB7 Blur 60,767 -> 56,277 with
     // nvconv on, while Super Resolution gained 136,044 -> 156,599). Time MPS's dispatch and each variant with the
@@ -4525,15 +4536,16 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     id<MTLCounterSampleBuffer> tsb = nil;
     if (nvmtl_nvconv_timed()) {
         MTLCounterSampleBufferDescriptor *td = [MTLCounterSampleBufferDescriptor new];
-        td.counterSet = nvmtl_timestamp_counter_set(); td.sampleCount = 2 + 2 * NVC_NVAR; td.storageMode = MTLStorageModeShared;
+        td.counterSet = nvmtl_timestamp_counter_set(); td.sampleCount = 2 + 4 * NVC_NVAR; td.storageMode = MTLStorageModeShared;
         tsb = [dev newCounterSampleBufferWithDescriptor:td error:nil];
     }
     if (tsb) [e sampleCountersInBuffer:tsb atSampleIndex:0 withBarrier:YES];
     e->_nvcIn = YES; [e dispatchThreadgroups:grid threadsPerThreadgroup:tg]; e->_nvcIn = NO;
     if (tsb) [e sampleCountersInBuffer:tsb atSampleIndex:1 withBarrier:YES];
     id<MTLBuffer> outBuf = bo[0]; const NSUInteger outOff = [bo[1] unsignedLongValue];
-    id<MTLBuffer> res = [dev newBufferWithLength:32 + 48 options:MTLResourceStorageModeShared];
-    memset(res.contents, 0, 32 + 48);
+    // counters: words 0-6 the fp32 kernel's epilogues, 8-14 the tensor-core kernel's; samples from byte 64
+    id<MTLBuffer> res = [dev newBufferWithLength:64 + 48 options:MTLResourceStorageModeShared];
+    memset(res.contents, 0, 64 + 48);
     const uint32_t n = (uint32_t)nspan;   // compared floats: the whole span, so a strided layer is checked in place
     // NVMTL_NVCONV_DUMP=<dir>: copy this layer's input, weights, bias, MPS's output and variant 0's output into
     // CPU-readable buffers and write them with the parameter words, so a refused layer's rule can be solved offline.
@@ -4559,6 +4571,7 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     copyOut(@"mps", outBuf, outOff, nspan);
     NSData *kpCopy = dumps ? [NSData dataWithBytes:e->_nvcKP length:e->_nvcKPLen] : nil;
     NSData *cpCopy = dumps ? [NSData dataWithBytes:e->_nvcCP length:e->_nvcCPLen] : nil;
+    for (uint32_t pass = 0; pass < (oursM ? 2u : 1u); pass++)
     for (uint32_t v = 0; v < NVC_NVAR; v++) {
         id<MTLBuffer> scratch = [dev newBufferWithLength:(NSUInteger)nspan * 4 options:MTLResourceStorageModePrivate];
         NVMTLComputePipelineState *saved = e->_ps; NSMutableDictionary *savedTG = e->_tgLen;
@@ -4571,13 +4584,14 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
             e->_nvcIn = NO; e->_ps = saved; e->_tgLen = savedTG;
         }
         [e setBuffer:scratch offset:0 atIndex:nar - 1];
-        if (tsb) [e sampleCountersInBuffer:tsb atSampleIndex:2 + 2 * v withBarrier:YES];
-        nvmtl_nvconv_run(e, ours, og, v | shuf << 8);   // epilogue in the low byte, depth-to-space factor above it
-        if (tsb) [e sampleCountersInBuffer:tsb atSampleIndex:3 + 2 * v withBarrier:YES];
-        if (v == 0) copyOut(@"ours0", scratch, 0, nspan);
+        const NSUInteger ts0 = 2 + 2 * NVC_NVAR * pass + 2 * v;
+        if (tsb) [e sampleCountersInBuffer:tsb atSampleIndex:ts0 withBarrier:YES];
+        nvmtl_nvconv_run(e, pass ? oursM : ours, pass ? ogM : og, v | shuf << 8);   // epilogue in the low byte, depth-to-space factor above it
+        if (tsb) [e sampleCountersInBuffer:tsb atSampleIndex:ts0 + 1 withBarrier:YES];
+        if (v == 0 && !pass) copyOut(@"ours0", scratch, 0, nspan);
         e->_ps = (NVMTLComputePipelineState *)g_nvc_ps[NVC_CMP]; e->_tgLen = nil; e->_nvcIn = YES;
-        [e setBuffer:outBuf offset:outOff atIndex:5]; [e setBuffer:scratch offset:0 atIndex:6]; [e setBuffer:res offset:v * 4 atIndex:7];
-        [e setBytes:&n length:4 atIndex:8]; [e setBuffer:res offset:32 atIndex:9];
+        [e setBuffer:outBuf offset:outOff atIndex:5]; [e setBuffer:scratch offset:0 atIndex:6]; [e setBuffer:res offset:32 * pass + v * 4 atIndex:7];
+        [e setBytes:&n length:4 atIndex:8]; [e setBuffer:res offset:64 atIndex:9];
         [e dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         e->_nvcIn = NO; e->_ps = saved; e->_tgLen = savedTG;
     }
@@ -4587,24 +4601,31 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     NSString *sh_ = @(shape);
     { static _Atomic unsigned long issued; const unsigned long k = ++issued; if (k <= 96) nvlog("nvconv: verifying %s (%lu issued)", shape, k); }
     [e->_cb addCompletedHandler:^(id<MTLCommandBuffer> cb) {
-        const uint32_t *r = (const uint32_t *)res.contents; int pick = 0;
+        const uint32_t *r = (const uint32_t *)res.contents; int pick = 0, pickm = 0;
         for (int v = 0; v < NVC_NVAR && !pick; v++) if (r[v] == 0) pick = v + 1;
+        for (int v = 0; v < NVC_NVAR && !pickm && oursM; v++) if (r[8 + v] == 0) pickm = v + 1;
         // speed gate: a verified layer stays on MPS unless ours took <= 90% of MPS's time (-2 = correct but slower)
-        double tm = -1, to = -1; int slower = 0;
-        NSData *ts = tsb ? [tsb resolveCounterRange:NSMakeRange(0, 2 + 2 * NVC_NVAR)] : nil;
-        if (pick && ts.length == (2 + 2 * NVC_NVAR) * 8) {
+        double tm = -1, to = -1, tmm = -1; int slower = 0, useM = 0;
+        NSData *ts = tsb ? [tsb resolveCounterRange:NSMakeRange(0, 2 + 4 * NVC_NVAR)] : nil;
+        if ((pick || pickm) && ts.length == (2 + 4 * NVC_NVAR) * 8) {
             const uint64_t *t = ts.bytes;
-            if (t[1] > t[0] && t[3 + 2 * (pick - 1)] > t[2 + 2 * (pick - 1)]) {
-                tm = (double)(t[1] - t[0]); to = (double)(t[3 + 2 * (pick - 1)] - t[2 + 2 * (pick - 1)]);
-                slower = to > 0.9 * tm;
-            }
+            if (t[1] > t[0]) tm = (double)(t[1] - t[0]);
+            if (pick && t[3 + 2 * (pick - 1)] > t[2 + 2 * (pick - 1)]) to = (double)(t[3 + 2 * (pick - 1)] - t[2 + 2 * (pick - 1)]);
+            const size_t mi = 2 + 2 * NVC_NVAR + 2 * (size_t)(pickm - 1);
+            if (pickm && t[mi + 1] > t[mi]) tmm = (double)(t[mi + 1] - t[mi]);
         }
-        pthread_mutex_lock(&g_nvc_lk); g_nvc_state[key] = @(pick ? (slower ? -2 : pick) : -1); pthread_mutex_unlock(&g_nvc_lk);
-        if (pick) nvmtl_nvc_report("%s %s | MPS %.0f ours %.0f (timestamp units; %s)", slower ? "SLOWER" : "FASTER", sh_.UTF8String, tm, to,
-                                   tm < 0 ? "untimed, taken" : slower ? "MPS keeps it" : "ours taken");
+        // the tensor-core form is taken when it is verified, at most 90% of MPS's time, and faster than the fp32 form
+        const int fastS = pick && tm > 0 && to > 0 && to <= 0.9 * tm, fastM = pickm && tm > 0 && tmm > 0 && tmm <= 0.9 * tm;
+        useM = fastM && (!fastS || tmm < to);
+        slower = (pick || pickm) && tm > 0 && !fastS && !fastM;
+        const int state = useM ? 100 + pickm : (pick && !slower && (fastS || tm < 0)) ? pick : (pick || pickm) ? -2 : -1;
+        pthread_mutex_lock(&g_nvc_lk); g_nvc_state[key] = @(state); pthread_mutex_unlock(&g_nvc_lk);
+        if (pick || pickm) nvmtl_nvc_report("%s %s | MPS %.0f ours %.0f mma %.0f (timestamp units; %s)", slower ? "SLOWER" : "FASTER", sh_.UTF8String, tm, to, tmm,
+                                   useM ? "tensor cores taken" : state > 0 ? (tm < 0 ? "untimed, taken" : "ours taken") : "MPS keeps it");
+        if (!pick && pickm) pick = 100 + pickm;   // for the VERIFIED line and its counters below
         if (pick) { const unsigned long k = ++g_nvc_verified; if (k <= 64 || !(k & (k - 1))) nvlog("nvconv: VERIFIED %s epilogue %d (%lu so far)", sh_.UTF8String, pick - 1, k); }
-        nvmtl_nvc_report("%s %s | epilogue %d | mismatches %u %u %u %u %u of %u", pick ? "VERIFIED" : "REFUSED", sh_.UTF8String, pick - 1,
-                         r[0], r[1], r[2], r[3], r[4], n);
+        nvmtl_nvc_report("%s %s | epilogue %d | mismatches %u %u %u %u %u of %u | mma %u %u %u %u %u", pick ? "VERIFIED" : "REFUSED", sh_.UTF8String, pick - 1,
+                         r[0], r[1], r[2], r[3], r[4], n, r[8], r[9], r[10], r[11], r[12]);
         if (dumps) {
             static _Atomic unsigned dseq; const unsigned id_ = atomic_fetch_add(&dseq, 1);
             NSString *base = [@(dumpDir) stringByAppendingFormat:@"/%d-%u-%@", getpid(), id_, pick ? @"ok" : @"refused"];
@@ -4616,7 +4637,7 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
             [[NSString stringWithFormat:@"%@\nmismatches %u %u %u %u %u of %u\n", sh_, r[0], r[1], r[2], r[3], r[4], n]
                 writeToFile:[base stringByAppendingString:@"/shape.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
         }
-        if (pick) {} else { const unsigned long k = ++g_nvc_refused; const float *sp = (const float *)(r + 8);
+        if (pick) {} else { const unsigned long k = ++g_nvc_refused; const float *sp = (const float *)(r + 16);
             if (k <= 64 || !(k & (k - 1))) nvlog("nvconv: REFUSED %s - mismatches %u/%u/%u/%u/%u of %u, MPS keeps it (%lu so far); MPS/ours(prelu) %g/%g %g/%g %g/%g %g/%g", sh_.UTF8String,
                                                   r[0], r[1], r[2], r[3], r[4], n, k, sp[0], sp[1], sp[2], sp[3], sp[4], sp[5], sp[6], sp[7]); }
     }];
