@@ -15,7 +15,8 @@ static inline void nvconv_body(device const float *src ,
                          device float *dst , device const float *bias, device const float *res, uint epi,
                          constant uint *kp ,
                          constant uint *cp ,
-                         uint3 tgp, uint lid, threadgroup float (*As)[BM + 4], threadgroup float (*Bs)[BN + 4])
+                         uint3 tgp, uint lid, threadgroup float (*As)[BM + 4], threadgroup float (*Bs)[BN + 4],
+                         uint nsplit = 1, device float *part = nullptr)
 {
     const uint cin = cp[32], cout = cp[33], kw = cp[34], kh = cp[35], batch = cp[37];
     const uint sw = cp[38], sh = cp[39], dw = cp[40], dh = cp[41];
@@ -43,7 +44,11 @@ static inline void nvconv_body(device const float *src ,
     const uint tx = lid % 16, ty = lid / 16;
     float acc[TM][TN] = {{0}};
 
-    for (uint k0 = 0; k0 < K; k0 += BK) {
+    // split-K: grid z picks a BK-aligned slice of the reduction; each slice writes raw sums to part[z][m][n] and
+    // nvconv_reduce adds the slices and applies the epilogue. nsplit 1 = the whole reduction, epilogue here.
+    const uint kChunk = ((K + nsplit - 1) / nsplit + BK - 1) / BK * BK;
+    const uint kBeg = tgp.z * kChunk, kEnd = min(K, kBeg + kChunk);
+    for (uint k0 = kBeg; k0 < kEnd; k0 += BK) {
         uint tci0 = 0, tix = 0, tiy = 0;
         if (fast) { tci0 = k0 % cin; const uint t = k0 / cin; tix = t % kw; tiy = t / kw; }
         {
@@ -92,6 +97,7 @@ static inline void nvconv_body(device const float *src ,
         for (uint j = 0; j < TN; j++) {
             const uint co = n0 + tx * TN + j;
             if (co >= N) continue;
+            if (part) { part[(tgp.z * M + m) * N + co] = acc[i][j]; continue; }
             float v = acc[i][j];
             if (epi == 4) { v = v > 0.0f ? v : v * (bias ? bias[co] : 0.0f); }
             else {
@@ -171,3 +177,43 @@ kernel void nvconv5_t(device const float *src [[buffer(0)]], device const float 
                       device const float *res [[buffer(3)]], device float *dst [[buffer(4)]], constant uint *kp [[buffer(23)]], constant uint *cp [[buffer(29)]],
                       constant uint &epi [[buffer(30)]], uint3 tgp [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]])
 { threadgroup float As[BK][32 + 4]; threadgroup float Bs[BK][32 + 4]; nvconv_body<32, 32, 2, 2>(src, wts, dst, bias, res, epi, kp, cp, tgp, lid, As, Bs); }
+
+// split-K kernels: 32x32 tiles, grid z = nsplit slices of the reduction, raw sums to part (buffer 7).
+kernel void nvconv4_k(device const float *src [[buffer(0)]], device const float *wts [[buffer(1)]], device const float *bias [[buffer(2)]],
+                      device float *dst [[buffer(3)]], device float *part [[buffer(7)]], constant uint *kp [[buffer(23)]], constant uint *cp [[buffer(29)]],
+                      constant uint &epi [[buffer(30)]], constant uint &nsplit [[buffer(28)]],
+                      uint3 tgp [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]])
+{ threadgroup float As[BK][32 + 4]; threadgroup float Bs[BK][32 + 4]; nvconv_body<32, 32, 2, 2>(src, wts, dst, bias, nullptr, epi, kp, cp, tgp, lid, As, Bs, nsplit, part); }
+kernel void nvconv5_k(device const float *src [[buffer(0)]], device const float *wts [[buffer(1)]], device const float *bias [[buffer(2)]],
+                      device const float *res [[buffer(3)]], device float *dst [[buffer(4)]], device float *part [[buffer(7)]], constant uint *kp [[buffer(23)]],
+                      constant uint *cp [[buffer(29)]], constant uint &epi [[buffer(30)]], constant uint &nsplit [[buffer(28)]],
+                      uint3 tgp [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]])
+{ threadgroup float As[BK][32 + 4]; threadgroup float Bs[BK][32 + 4]; nvconv_body<32, 32, 2, 2>(src, wts, dst, bias, res, epi, kp, cp, tgp, lid, As, Bs, nsplit, part); }
+// Adds the split-K slices for one output and applies the same epilogue as nvconv_body (bias, activation, residual).
+// form = number of arrays (4: src, wts, bias, dst; 5: + res). One thread per output element, gid = m * N + co.
+kernel void nvconv_reduce(device const float *src [[buffer(0)]], device const float *bias [[buffer(2)]], device const float *res [[buffer(3)]],
+                          device float *dst4 [[buffer(4)]], device float *dst3 [[buffer(5)]], device const float *part [[buffer(7)]],
+                          constant uint *kp [[buffer(23)]], constant uint *cp [[buffer(29)]], constant uint &epi [[buffer(30)]],
+                          constant uint &nsplit [[buffer(28)]], constant uint &form [[buffer(27)]], uint gid [[thread_position_in_grid]])
+{
+    const uint cin = cp[32], cout = cp[33], batch = cp[37], sw = cp[38], sh = cp[39], dw = cp[40], dh = cp[41];
+    const uint sC = kp[8], sW = kp[9], sH = kp[10], sN = kp[11];
+    const uint ob0 = form == 5 ? 80u : 60u;
+    const uint oC = kp[ob0 + 8], oW = kp[ob0 + 9], oH = kp[ob0 + 10], oN = kp[ob0 + 11];
+    const uint M = batch * dh * dw, N = cout;
+    if (gid >= M * N) return;
+    const uint m = gid / N, co = gid % N;
+    float v = 0.0f;
+    for (uint z = 0; z < nsplit; z++) v += part[(z * M + m) * N + co];
+    const uint ox = m % dw, t2 = m / dw, oy = t2 % dh, n = t2 / dh;
+    const uint ob = ox * oW + oy * oH + n * oN;
+    if (epi == 4) { v = v > 0.0f ? v : v * bias[co]; }
+    else {
+        v += bias[co];
+        if (epi == 1 || epi == 5) v = max(v, 0.0f); else if (epi == 2) v = clamp(v, 0.0f, 6.0f); else if (epi == 3) v = 1.0f / (1.0f + exp(-v));
+    }
+    if ((epi == 5 || epi == 6) && co < cin && ox < sw && oy < sh) v += src[co * sC + ox * sW + oy * sH + n * sN];
+    if (form == 5) v += res[co * oC + ob];
+    device float *dst = form == 5 ? dst4 : dst3;
+    dst[co * oC + ob] = v;
+}
