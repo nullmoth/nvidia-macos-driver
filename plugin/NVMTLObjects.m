@@ -4296,6 +4296,19 @@ static id<MTLComputePipelineState> g_nvc_ps[8];
 static NSMutableDictionary *g_nvc_state;
 static pthread_mutex_t g_nvc_lk = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic unsigned long g_nvc_ran, g_nvc_verified, g_nvc_refused, g_nvc_skips;
+// nvlog keeps only 8 lines per format, so after Face Tracking's 8 layers every later verification (Super Resolution)
+// vanished from the log. Dev builds also append every nvconv outcome to $TMPDIR/nvmtl-nvconv-<pid>.log, uncapped.
+static void nvmtl_nvc_report(const char *fmt, ...) {
+#if !NVMTL_RELEASE
+    static char path[1024]; static dispatch_once_t once;
+    dispatch_once(&once, ^{ const char *t = getenv("TMPDIR");
+        snprintf(path, sizeof path, "%s/nvmtl-nvconv-%d.log", (t && *t) ? t : "/private/tmp", getpid()); });
+    char b[400]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
+    FILE *f = fopen(path, "a"); if (f) { fprintf(f, "%s\n", b); fclose(f); }
+#else
+    (void)fmt;
+#endif
+}
 // Each distinct (reason, dispatch grid) is logged once, up to 96: a flat first-16 cap was spent entirely on Face
 // Tracking, so the Super Resolution layers' reasons (the 1.5 s 9216x32 dispatch) never reached the log.
 static void nvmtl_nvc_skip_log(const char *why, MTLSize grid) {
@@ -4309,6 +4322,7 @@ static void nvmtl_nvc_skip_log(const char *why, MTLSize grid) {
     pthread_mutex_unlock(&lk);
     if (fresh) nvlog("nvconv: not taken - %s (grid %lux%lux%lu, %lu skips so far)", why,
                      (unsigned long)grid.width, (unsigned long)grid.height, (unsigned long)grid.depth, k);
+    if (fresh) nvmtl_nvc_report("skip %s | grid %lux%lux%lu", why, (unsigned long)grid.width, (unsigned long)grid.height, (unsigned long)grid.depth);
 }
 #define NVC_SKIP(why) do { nvmtl_nvc_skip_log(why, grid); return 0; } while (0)
 static BOOL nvmtl_nvconv_ready(id<MTLDevice> dev) {
@@ -4511,7 +4525,8 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
         e->_nvcIn = NO; e->_ps = saved; e->_tgLen = savedTG;
     }
     [e setBuffer:outBuf offset:outOff atIndex:nar - 1];
-    char shape[96]; snprintf(shape, sizeof shape, "%ux%ux%u -> %u k%ux%u s%u,%u form %u", sw, sh, cin, cout, kw, kh, cp[46], cp[47], nar);
+    char shape[112]; snprintf(shape, sizeof shape, "%ux%ux%u -> %u k%ux%u s%u,%u form %u%s%s", sw, sh, cin, cout, kw, kh, cp[46], cp[47], nar,
+                              shuf > 1 ? " depth-to-space" : "", nspan != nout ? " strided" : "");
     NSString *sh_ = @(shape);
     { static _Atomic unsigned long issued; const unsigned long k = ++issued; if (k <= 96) nvlog("nvconv: verifying %s (%lu issued)", shape, k); }
     [e->_cb addCompletedHandler:^(id<MTLCommandBuffer> cb) {
@@ -4519,6 +4534,8 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
         for (int v = 0; v < NVC_NVAR && !pick; v++) if (r[v] == 0) pick = v + 1;
         pthread_mutex_lock(&g_nvc_lk); g_nvc_state[key] = @(pick ? pick : -1); pthread_mutex_unlock(&g_nvc_lk);
         if (pick) { const unsigned long k = ++g_nvc_verified; if (k <= 64 || !(k & (k - 1))) nvlog("nvconv: VERIFIED %s epilogue %d (%lu so far)", sh_.UTF8String, pick - 1, k); }
+        nvmtl_nvc_report("%s %s | epilogue %d | mismatches %u %u %u %u %u of %u", pick ? "VERIFIED" : "REFUSED", sh_.UTF8String, pick - 1,
+                         r[0], r[1], r[2], r[3], r[4], n);
         if (dumps) {
             static _Atomic unsigned dseq; const unsigned id_ = atomic_fetch_add(&dseq, 1);
             NSString *base = [@(dumpDir) stringByAppendingFormat:@"/%d-%u-%@", getpid(), id_, pick ? @"ok" : @"refused"];
