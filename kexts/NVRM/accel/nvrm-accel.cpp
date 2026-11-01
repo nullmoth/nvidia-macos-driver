@@ -29,6 +29,7 @@
 #include "../nvrm_gpuva_abi.h"
 #include "../nvrm_utilization_abi.h"
 #include "../nvrm_telemetry_cache.h"
+#include "../nvrm_telemetry_properties.h"
 class NVMemoryMap;
 static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
                                            unsigned long long len, unsigned long long align);
@@ -746,6 +747,18 @@ public:
         bool r = IOGraphicsAccelerator2::start(provider);
         ALOG("IOGraphicsAccelerator2::start -> %d", r);
         if (r) {
+#ifndef NMX_ACCEL
+            // Consumer tools match this concrete accelerator to its PCI device.
+            // Keep the broad personality match, but publish the attached device's identity.
+            if (IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider)) {
+                const unsigned vendor = pci->configRead16(0x00), device = pci->configRead16(0x02);
+                if (vendor == 0x10de && device != 0xffff) {
+                    char match[16];
+                    snprintf(match, sizeof match, "0x%04x%04x", device, vendor);
+                    setProperty("IOPCIMatch", match);
+                }
+            }
+#endif
             // Tells the Metal plugin that NVResource::pageoff waits for a surface WindowServer's GPU is still writing
             // (nvSurfWaitReady). Only then does the plugin mark WindowServer's surfaces newest in VRAM at commit; with an
             // accelerator that does not wait, that mark would let a CPU lock or a copied present read a surface before
@@ -846,6 +859,9 @@ public:
     }
 
     void sampleTemperature() {
+        // This timer publishes immediately after sampling; a failed read must
+        // clear the previous temperature and its aliases in that publication.
+        fTempC = 0;
         if (!fTempRegs) {
             fTempMap = fPCI->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0, 0);
             if (!fTempMap) { ALOG("temperature: BAR0 map FAILED -- giving up"); return; }
@@ -972,7 +988,27 @@ public:
         if (OSNumber *n = OSNumber::withNumber(value, 64)) {
             d->setObject(key, n);
             n->release();
-        }
+        } else d->removeObject(key);
+    }
+
+    static void writeTelemetryProperty(void *context, const char *key, int valid, unsigned long long value) {
+        setSensorStatistic(static_cast<OSDictionary *>(context), key, valid != 0, value);
+    }
+
+    void publishMemoryAliases(OSDictionary *d) {
+        OSObject *property = copyProperty("PerformanceStatisticsAccum");
+        OSDictionary *accumulated = OSDynamicCast(OSDictionary, property);
+        OSNumber *used = OSDynamicCast(OSNumber, d->getObject("inUseVidMemoryBytes"));
+        if (!used && accumulated)
+            used = OSDynamicCast(OSNumber, accumulated->getObject("inUseVidMemoryBytes"));
+        OSObject *totalProperty = fPCI ? fPCI->copyProperty("VRAM,totalsize") : nullptr;
+        OSNumber *total = OSDynamicCast(OSNumber, totalProperty);
+        nvrmTelemetryPublishMemory(used ? used->unsigned64BitValue() : 0, used != nullptr,
+                                    total ? total->unsigned64BitValue() : 0,
+                                    total && total->unsigned64BitValue() > 0,
+                                    d, writeTelemetryProperty);
+        if (property) property->release();
+        if (totalProperty) totalProperty->release();
     }
 
     void publishTelemetry(OSDictionary *d) {
@@ -984,30 +1020,19 @@ public:
             sample = nvrmTelemetryCacheSnapshot(&fTelemetry, nowNs, kNvUtilMaxAgeNs);
             IOLockUnlock(fUtilLock);
         }
-        const bool average = sample.validMask & NVRM_TELEMETRY_VALID_AVERAGE_POWER;
-        const bool instant = sample.validMask & NVRM_TELEMETRY_VALID_INSTANT_POWER;
-        const bool clocks = sample.validMask & NVRM_TELEMETRY_VALID_CLOCKS;
         const bool fans = (sample.validMask & NVRM_TELEMETRY_VALID_FANS) && sample.fanValidMask;
-        setSensorStatistic(d, "Total Power(W)", average, (sample.averagePowerMilliwatts + 500ULL) / 1000);
-        setSensorStatistic(d, "GPU Average Power(mW)", average, sample.averagePowerMilliwatts);
-        setSensorStatistic(d, "Instant Power(W)", instant, (sample.instantPowerMilliwatts + 500ULL) / 1000);
-        setSensorStatistic(d, "GPU Instant Power(mW)", instant, sample.instantPowerMilliwatts);
-        setSensorStatistic(d, "Core Clock(MHz)", clocks, sample.coreClockKHz / 1000);
-        setSensorStatistic(d, "Memory Clock(MHz)", clocks, sample.memoryClockKHz / 1000);
+        nvrmTelemetryPublishProperties(&sample, d, writeTelemetryProperty);
 
         // RPM is measured per controller. No assumed maximum or estimated fan percentage.
-        unsigned maxRPM = 0;
         OSDictionary *fanRPM = fans ? OSDictionary::withCapacity(NVRM_TELEMETRY_FAN_COUNT) : nullptr;
         for (unsigned i = 0; fans && i < NVRM_TELEMETRY_FAN_COUNT; i++) {
             if (!(sample.fanValidMask & (1u << i))) continue;
-            if (sample.fanRPM[i] > maxRPM) maxRPM = sample.fanRPM[i];
             if (fanRPM) {
                 char index[12];
                 snprintf(index, sizeof index, "%u", i);
                 setSensorStatistic(fanRPM, index, true, sample.fanRPM[i]);
             }
         }
-        setSensorStatistic(d, "Fan Speed(RPM)", fans, maxRPM);
         if (fanRPM) {
             setProperty("NVRMFanRPM", fanRPM);
             fanRPM->release();
@@ -1024,11 +1049,9 @@ public:
         OSDictionary *d = cur ? OSDynamicCast(OSDictionary, cur->copyCollection()) : nullptr;
         if (property) property->release();
         if (!d) { d = OSDictionary::withCapacity(8); if (!d) return; }
-        if (fTempC) {
-            OSNumber *n = OSNumber::withNumber((unsigned long long)fTempC, 32);
-            if (n) { d->setObject("Temperature(C)", n); n->release(); }
-        }
+        setSensorStatistic(d, "Temperature(C)", fTempC != 0, fTempC);
 #ifndef NMX_ACCEL
+        setSensorStatistic(d, "GPU Temperature(C)", fTempC != 0, fTempC);
         NVRMUtilization sample = {};
         bool valid = false;
         if (fUtilLock) {
@@ -1041,12 +1064,16 @@ public:
         }
         const char *keys[] = { "Device Utilization %", "GPU Core Utilization %",
                                "GPU Memory Utilization %", "GPU Video Engine Utilization %",
-                               "GPU Video Decode Utilization %" };
-        const unsigned values[] = { sample.gr, sample.gr, sample.fb, sample.nvenc, sample.nvdec };
+                               "GPU Video Decode Utilization %", "GPU Activity(%)",
+                               "GPU Core Utilization", "GPU FB Utilization(%)",
+                               "GPU Encoder Utilization(%)", "GPU Decoder Utilization(%)" };
+        const unsigned values[] = { sample.gr, sample.gr, sample.fb, sample.nvenc, sample.nvdec,
+                                    sample.gr, sample.gr, sample.fb, sample.nvenc, sample.nvdec };
         for (unsigned i = 0; i < sizeof values / sizeof values[0]; i++) {
             if (valid) {
                 OSNumber *n = OSNumber::withNumber((unsigned long long)((values[i] + 50) / 100), 32);
                 if (n) { d->setObject(keys[i], n); n->release(); }
+                else d->removeObject(keys[i]);
             } else {
                 // Missing telemetry is not an idle GPU; remove stale values instead of
                 // turning errors, sleep or an unsupported firmware command into 0%.
@@ -1054,6 +1081,7 @@ public:
             }
         }
         publishTelemetry(d);
+        publishMemoryAliases(d);
 #endif
         setProperty("PerformanceStatistics", d);
         d->release();
@@ -1068,6 +1096,15 @@ public:
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) APPLE_KEXT_OVERRIDE;
 };
 OSDefineMetaClassAndStructors(NVAccel, IOGraphicsAccelerator2)
+
+#ifndef NMX_ACCEL
+// A vendor-qualified concrete class lets monitoring clients classify the GPU.
+// The existing NVAccel base remains discoverable through IOKit's subclass matching.
+class NVAccelNVIDIA : public NVAccel {
+    OSDeclareDefaultStructors(NVAccelNVIDIA)
+};
+OSDefineMetaClassAndStructors(NVAccelNVIDIA, NVAccel)
+#endif
 NVAccel *NVAccel::gAccel = nullptr;
 
 IOAccelMemory *NVDisplayPipe::initFramebufferResource(unsigned int index, IOAccelResource2 *res)

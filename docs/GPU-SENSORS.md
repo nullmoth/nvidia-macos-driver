@@ -2,7 +2,8 @@
 
 NVRM reads power, clock and fan samples from NVIDIA's RM user shared data
 (RUSD). NVAccel exposes the results on the accelerator for monitoring tools.
-The existing temperature, utilization and memory accounting paths are unchanged.
+Temperature, utilization and memory accounting keep their existing data sources.
+An invalid temperature read removes both temperature names on the next publication.
 No additional kext, daemon or VirtualSMC plugin is needed.
 
 These are IORegistry properties for monitoring clients, not a public Apple
@@ -11,26 +12,49 @@ sensor API or a guarantee of compatibility with every monitoring app.
 iStat Menus support for the new power, clock and fan values has not been
 verified. This change does not publish SMC keys or include a VirtualSMC bridge.
 
-For example, the [Stats GPU reader](https://github.com/exelban/stats/blob/683a0581d42839969ab21c14659f23d6054bb618/Modules/GPU/reader.swift#L138-L145)
-reads `Temperature(C)`, `Device Utilization %`, `Core Clock(MHz)` and
-`Memory Clock(MHz)` with the same units. It reads `Fan Speed(%)`, not RPM,
-and does not consume the new power or per-controller fan properties. Matching
-field names alone does not establish device discovery or end-to-end support.
-No fan percentage is synthesized from RPM or an assumed maximum speed.
+The [Stats GPU reader](https://github.com/exelban/stats/blob/683a0581d42839969ab21c14659f23d6054bb618/Modules/GPU/reader.swift#L123-L150)
+matches an accelerator to its PCI device using `IOPCIMatch` and classifies NVIDIA
+devices using `IOClass`. The concrete accelerator class is `NVAccelNVIDIA`, with
+the existing `NVAccel` base preserved for IOKit class matching. `IOPCIMatch`
+contains the attached device's actual device/vendor IDs; the personality retains
+its broad NVIDIA vendor match. No specific card ID is hard-coded.
+
+Stats reads `Temperature(C)`, `Device Utilization %` (or `GPU Activity(%)`),
+`Core Clock(MHz)` and `Memory Clock(MHz)` with the units below. It reads
+`Fan Speed(%)`, not RPM, and does not consume these power or per-controller fan
+properties. No fan percentage is synthesized from RPM or an assumed maximum
+speed. Source compatibility is not proof of end-to-end operation: a new build
+still needs a reboot and verification in the consumer app.
 
 ## Published values
 
 These keys are in NVAccel's `PerformanceStatistics` dictionary:
 
-| Key | Value |
+| Keys sharing a value | Value |
 | --- | --- |
-| `Total Power(W)` | Average GPU power, rounded to watts |
-| `GPU Average Power(mW)` | The same average without rounding |
+| `Temperature(C)`, `GPU Temperature(C)` | Existing GPU temperature in degrees Celsius |
+| `Device Utilization %`, `GPU Core Utilization %`, `GPU Activity(%)`, `GPU Core Utilization` | Graphics engine utilization, 0–100 |
+| `GPU Memory Utilization %`, `GPU FB Utilization(%)` | Memory controller utilization, 0–100; not VRAM allocation |
+| `GPU Video Engine Utilization %`, `GPU Encoder Utilization(%)` | Video encoder utilization, 0–100 |
+| `GPU Video Decode Utilization %`, `GPU Decoder Utilization(%)` | Video decoder utilization, 0–100 |
+| `Total Power(W)`, `GPU Power(W)` | Average GPU power, rounded to watts |
+| `GPU Average Power(mW)`, `RUSD Power(mW)` | The same average without rounding |
 | `Instant Power(W)` | Instantaneous GPU power, rounded to watts |
 | `GPU Instant Power(mW)` | The same instantaneous sample without rounding |
-| `Core Clock(MHz)` | Actual graphics clock, converted from kHz |
-| `Memory Clock(MHz)` | Actual memory clock, converted from kHz |
-| `Fan Speed(RPM)` | Highest RPM among the reported fan controllers |
+| `Core Clock(MHz)`, `GPU Core Clock(MHz)` | Actual graphics clock, converted from kHz |
+| `Memory Clock(MHz)`, `GPU Memory Clock(MHz)` | Actual memory clock, converted from kHz |
+| `Fan Speed(RPM)`, `fan-rpm`, `GPU Fan Speed(RPM)`, `Fan RPM`, `GPU Fan RPM` | Highest RPM among the reported fan controllers |
+| `Fan Count`, `FanCount` | Number of reported fan controllers |
+| `vramUsedBytes` | Existing `inUseVidMemoryBytes` accounting, as a 64-bit byte count |
+| `vramTotalBytes` | PCI device's `VRAM,totalsize`, as a 64-bit byte count |
+| `GPU Memory Used(MB)`, `GPU Memory Total(MB)` | The corresponding byte counts divided by 1,048,576 (MiB, despite the legacy key spelling) |
+
+Aliases use the same source and validity as their original value. They are
+compatibility names used by monitoring clients, not additional sensors or a
+universal Apple standard. Memory aliases do not replace the accelerator family's
+canonical memory accounting properties.
+The memory aliases inherit the freshness of the family's current/accumulated
+accounting fields; they do not have a separate RUSD timestamp or expiry timer.
 
 `NVRMFanRPM` is a separate dictionary on NVAccel. Its numeric string keys are
 controller indices; values are RPM. A controller can drive more than one
@@ -67,7 +91,7 @@ The telemetry ABI is separate from the existing utilization and VRAM ABIs.
 
 ## Validation
 
-Run the cache tests without loading a driver:
+Run the decoder, cache and property-mapping tests without loading a driver:
 
 ```sh
 clang++ -std=c++17 -Wall -Wextra -Werror tools/test_nvrm_telemetry.cpp -o /tmp/nvrm-telemetry-test

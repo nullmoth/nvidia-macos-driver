@@ -8,9 +8,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <string>
 
 #include "../kexts/NVRM/nvrm_telemetry_cache.h"
 #include "../kexts/NVRM/nvrm_telemetry_decode.h"
+#include "../kexts/NVRM/nvrm_telemetry_properties.h"
 
 static unsigned int checks;
 static unsigned int maskChecks;
@@ -440,6 +443,70 @@ static void testInvalidRawTimestampCannotBeReplayed()
     expect(got.averagePowerTimestamp == 103 && got.averagePowerMilliwatts == 210000);
 }
 
+using PublishedProperties = std::map<std::string, unsigned long long>;
+
+static void publishProperty(void *context, const char *key, int valid, unsigned long long value)
+{
+    auto &properties = *static_cast<PublishedProperties *>(context);
+    if (valid) properties[key] = value;
+    else properties.erase(key);
+}
+
+static void testConsumerProperties()
+{
+    PublishedProperties p;
+    NVRMTelemetryCache cache = {};
+    auto sample = allGroups(1, 100);
+    sample.averagePowerMilliwatts = 125500;
+    sample.coreClockKHz = 1905999;
+    sample.memoryClockKHz = 9501999;
+    sample.fanValidMask = (1u << 0) | (1u << 3);
+    sample.fanRPM[0] = 1187;
+    sample.fanRPM[3] = 1022;
+    sample.fanRPM[1] = 99999; // excluded controller must never affect max RPM
+    primeCache(&cache, sample, 1000);
+    auto got = nvrmTelemetryCacheSnapshot(&cache, 1000, 5000);
+    nvrmTelemetryPublishProperties(&got, &p, publishProperty);
+    expect(p.at("Core Clock(MHz)") == 1905); // Stats reads integer MHz
+    expect(p.at("Memory Clock(MHz)") == 9501);
+    expect(p.at("GPU Core Clock(MHz)") == p.at("Core Clock(MHz)"));
+    expect(p.at("GPU Memory Clock(MHz)") == p.at("Memory Clock(MHz)"));
+    expect(p.at("Total Power(W)") == 126 && p.at("GPU Power(W)") == 126);
+    expect(p.at("RUSD Power(mW)") == 125500 && p.at("GPU Average Power(mW)") == 125500);
+    expect(p.at("Fan Speed(RPM)") == 1187 && p.at("fan-rpm") == 1187);
+    expect(p.at("Fan Count") == 2 && p.at("FanCount") == 2);
+    expect(p.count("Fan Speed(%)") == 0 && p.count("fan-percentage") == 0);
+    expect(p.count("FanMaxRPM") == 0);
+
+    got.validMask &= ~NVRM_TELEMETRY_VALID_AVERAGE_POWER;
+    nvrmTelemetryPublishProperties(&got, &p, publishProperty);
+    expect(!p.count("Total Power(W)") && !p.count("GPU Power(W)") && !p.count("RUSD Power(mW)"));
+    expect(p.at("Core Clock(MHz)") == 1905 && p.at("fan-rpm") == 1187);
+
+    got = nvrmTelemetryCacheSnapshot(&cache, 6001, 5000);
+    nvrmTelemetryPublishProperties(&got, &p, publishProperty);
+    expect(p.empty()); // expiry removes every compatibility alias too
+
+    got = allGroups(1, 200);
+    got.averagePowerMilliwatts = got.instantPowerMilliwatts = 0;
+    got.coreClockKHz = got.memoryClockKHz = 0;
+    got.fanValidMask = 1;
+    got.fanRPM[0] = 0;
+    nvrmTelemetryPublishProperties(&got, &p, publishProperty);
+    expect(p.at("Total Power(W)") == 0 && p.at("RUSD Power(mW)") == 0);
+    expect(p.at("Core Clock(MHz)") == 0 && p.at("GPU Memory Clock(MHz)") == 0);
+    expect(p.at("Fan Speed(RPM)") == 0 && p.at("GPU Fan RPM") == 0 && p.at("FanCount") == 1);
+
+    nvrmTelemetryPublishMemory(6ULL << 30, 1, 10ULL << 30, 1, &p, publishProperty);
+    expect(p.at("vramUsedBytes") == (6ULL << 30));
+    expect(p.at("vramTotalBytes") == (10ULL << 30));
+    expect(p.at("GPU Memory Used(MB)") == 6144 && p.at("GPU Memory Total(MB)") == 10240);
+    nvrmTelemetryPublishMemory(0, 1, 10ULL << 30, 1, &p, publishProperty);
+    expect(p.at("vramUsedBytes") == 0 && p.at("GPU Memory Used(MB)") == 0);
+    nvrmTelemetryPublishMemory(0, 0, 0, 0, &p, publishProperty);
+    expect(!p.count("vramUsedBytes") && !p.count("vramTotalBytes") && !p.count("GPU Memory Used(MB)"));
+}
+
 int main()
 {
     testInitialAndZeroSamples();
@@ -452,5 +519,6 @@ int main()
     testScalarAndClockDecoders();
     testFanDecoder();
     testInvalidRawTimestampCannotBeReplayed();
+    testConsumerProperties();
     std::printf("NVRM telemetry cache: %u checks passed\n", checks);
 }
