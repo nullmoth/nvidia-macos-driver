@@ -9,3 +9,13 @@
    compute shaders are built with and without the prepass scheduler and keep the one with fewer static cycles at no
    occupancy or spill cost. Offline census over 96 GB7 kernels: 67 better, 0 worse, sum -8.9%.
    `NVMTL_NAK_PREPASS_PICK=0` = upstream behaviour; `NVMTL_NAK_NO_PREPASS=1` = never run the prepass.
+4. `patch_pinwhole.py`, `patch_pinwhole2.py`, `patch_pinwhole3.py` (nak_nir_lower_non_uniform_ldcx.c; result =
+   `nak_pinwhole.diff`) - `pin_uniform_addrs_section` also pins a 64-bit address that is uniform as a whole (a
+   kernel-argument pointer read at a fixed offset), not only iadd(per-thread, uniform). Unpinned, legalize copied the
+   base into a fresh GPR pair before every load inside the bounds check (raw_process: 84 of 664 instructions).
+   Split uses weigh 2 in the 8-slot ranking, a whole-only base needs >= `NVMTL_NAK_PIN_WHOLE_MIN` uses (default 2),
+   and no unpin is emitted when the section ends at the last block (it cost the `if (!in_bounds) exit` shortcut).
+   Offline census (`census.sh`, `census_env.sh`), translated GB7 kernels: every one better or equal - raw_process
+   -5.0% static cycles, quantize -3.2%, particle -1.9%. All 183: -1.1% instructions, -0.3% cycles; regressions only in
+   native-Vulkan proxies (blend +3%, initialize_dye +6%). `NVMTL_NAK_NO_PIN_WHOLE=1` = previous behaviour
+   (census: 0 of 183 kernels differ from the old compiler).
