@@ -2877,6 +2877,45 @@ declare void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float>, ptr addr
 }
 
 #[test]
+fn native_simdgroup_matrix_init_filled_translates() {
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+define void @main(ptr addrspace(1) %in_h, ptr addrspace(1) %out) {
+entry:
+  %pv1 = insertelement <2 x i64> <i64 poison, i64 8>, i64 8, i64 0
+  %pv2 = insertelement <2 x i64> <i64 1, i64 poison>, i64 8, i64 1
+  %ph = getelementptr inbounds half, ptr addrspace(1) %in_h, i64 0
+  %po = getelementptr inbounds float, ptr addrspace(1) %out, i64 0
+  %A = call <64 x half> @air.simdgroup_matrix_8x8_load.v64f16.p1f16(ptr addrspace(1) %ph, <2 x i64> %pv1, <2 x i64> %pv2, <2 x i64> zeroinitializer)
+  %C = call <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(float 2.500000e-01)
+  %D = call <64 x float> @air.simdgroup_matrix_8x8_multiply_accumulate.v64f32.v64f16.v64f16.v64f32(<64 x half> %A, <64 x half> %A, <64 x float> %C)
+  call void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float> %D, ptr addrspace(1) %po, <2 x i64> %pv1, <2 x i64> %pv2, <2 x i64> zeroinitializer)
+  ret void
+}
+
+declare <64 x half> @air.simdgroup_matrix_8x8_load.v64f16.p1f16(ptr addrspace(1), <2 x i64>, <2 x i64>, <2 x i64>)
+declare <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(float)
+declare <64 x float> @air.simdgroup_matrix_8x8_multiply_accumulate.v64f32.v64f16.v64f16.v64f32(<64 x half>, <64 x half>, <64 x float>)
+declare void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float>, ptr addrspace(1), <2 x i64>, <2 x i64>, <2 x i64>)
+
+!air.kernel = !{!0}
+!0 = !{ptr @main, !1, !2}
+!1 = !{}
+!2 = !{!3, !4}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_name", !"half", !"air.arg_name", !"in_h"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_name", !"float", !"air.arg_name", !"out"}
+"#;
+    let tmp = std::env::temp_dir().join(format!("metal2vulkan_native_init_filled_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let out = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
+    let asm = disassemble(&out).expect("disassemble transformed");
+    assert!(!asm.contains("init_filled"), "{asm}");
+    if std::process::Command::new("spirv-val").arg("--version").output().is_ok() {
+        tools::spirv_val_bytes(&out, &tmp).expect("spirv-val");
+    }
+}
+
+#[test]
 fn native_declared_simdgroup_lane_is_the_lane_the_shuffle_reads() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
