@@ -1,4 +1,5 @@
 {
+  "artifact_version": "v0.9.5-ga10x1",
   "build_dependencies": {
     "nvidia_open_gpu_doc": {
       "commit": "9fdf5c4062007929d9f4e6cbad9c9771fe61b880",
@@ -30,7 +31,15 @@
   "license": "MIT; see LICENSE",
   "local_packaging_changes": [
     "Original upstream .gitignore is preserved as UPSTREAM.gitignore; local .gitignore only excludes build outputs so pinned dependency headers remain trackable.",
-    "No upstream production source files were modified in this vendor copy."
+    "build/nvenc_build.sh records the local artifact version and revision while preserving the upstream v0.9.5 tag and commit.",
+    "package/stage_nvencvt.py requires an exact schema v2 artifact version and local revision receipt before staging."
+  ],
+  "local_revision": "ga10x-encoding-1",
+  "local_source_changes": [
+    "src/enc.c: locally modified for explicit C7B7 NVENC magic and semaphore encoding.",
+    "src/enc_iface.h: added locally for scoped C7B7/C9B7 H.264/HEVC interface assertions and helpers.",
+    "vt/nvencvt.c: local GA10x registration and engine policy changes.",
+    "src/ga10x_policy.h: added locally for GA10x registration opt-out and single-engine selection."
   ],
   "omitted_upstream_data_bytes": 93991779,
   "omitted_upstream_data_files": 1279,

@@ -2,7 +2,9 @@
 
 ## mickys/nvenc
 
-The vendored NVENC VideoToolbox implementation and accompanying upstream files are from [mickys/nvenc](https://github.com/mickys/nvenc), tag `v0.9.5`, commit `1e91845d6f37d8bce671d62c14f4390324da3659`. They are distributed under the MIT License; the original license text is in `LICENSE`. Upstream copyright and source notices are retained. The vendor copy does not alter upstream production source files.
+The upstream baseline for the vendored NVENC VideoToolbox implementation is [mickys/nvenc](https://github.com/mickys/nvenc), tag `v0.9.5`, commit `1e91845d6f37d8bce671d62c14f4390324da3659`. Upstream files are distributed under the MIT License; the original license text is in `LICENSE`, and upstream copyright and source notices are retained.
+
+This tree also contains a separate local GA10x integration revision, `ga10x-encoding-1`, built as artifact `v0.9.5-ga10x1`. The local production-source changes are listed in `SOURCE.json`: `src/enc.c`, `src/enc_iface.h`, `src/ga10x_policy.h`, and `vt/nvencvt.c`. These changes are not part of the upstream `v0.9.5` tag; the upstream tag and commit above remain the unchanged provenance base.
 
 ## NVIDIA open-gpu-kernel-modules SDK headers
 

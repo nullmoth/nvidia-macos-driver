@@ -1,9 +1,30 @@
 # Optional NVEncVT VideoToolbox component
 
 The package can include `libnvencvt.dylib`, the VideoToolbox layer from the
-pinned `mickys/nvenc` v0.9.5 source. It provides NVIDIA NVENC encoders and
+pinned `mickys/nvenc` v0.9.5 source with local GA10x encoding changes
+(`v0.9.5-ga10x1`, revision `ga10x-encoding-1`). It provides NVIDIA NVENC encoders and
 NVDEC decoders through VideoToolbox. The library is present in the bundle but
 registration is **off by default**.
+This page describes the local integration. The vendored README and GA10x notes
+remain the upstream v0.9.5 snapshot, including its older decoder-only GA10x policy.
+
+## RTX 30 series encoding
+
+In normal operation, once the optional library is loaded, H.264 and HEVC encoders register on GA10x
+only when the NVIDIA RM reports the C7B7 encoder class. A PCI family match alone
+is insufficient. Each session uses NVENC0; the RTX 3080 has one NVENC engine.
+AV1 encoding remains limited to Ada. NVIDIA's [support matrix](https://developer.nvidia.com/video-encode-decode-support-matrix)
+lists the hardware capabilities; it does not establish validation for this port.
+
+For a decoder-only fallback on GA10x, set `NVENCVT_AMPERE_ENC=0` in the target
+process environment or in a root-owned `/usr/local/etc/nvencvt.conf` that is not
+writable by group or other users. Restart the target app. Unset or `1` enables
+the GA10x encoders after the class check; other values disable them.
+`NVENCVT_ENGINE=1` is rejected on GA10x; leave it unset or use `0`.
+The upstream `NVENCVT_ANY_GPU` development override bypasses GPU selection;
+leave it unset for normal operation and hardware validation.
+See the [RTX 3080 validation record](NVENCVT-GA10X-VALIDATION.md) for tested
+formats, source identity, and the limits of the hardware checks.
 
 ## Apps that load the Metal plugin
 
@@ -65,7 +86,8 @@ build/nvenc_build.sh /tmp/nvencvt-build
 package/stage_nvencvt.py /path/to/pkgroot /tmp/nvencvt-build
 ```
 
-The staging command checks the pinned build metadata and unsigned build hash,
+The staging command checks both the upstream pin and exact local artifact
+version/revision in the schema v2 build receipt, plus the unsigned build hash,
 copies the upstream license texts and third-party notices beside the library
 and into the package license folder, signs the dylib and containing bundle, then regenerates
 and verifies `SHA256SUMS` for the final signed package. The build receipt kept

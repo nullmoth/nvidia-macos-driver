@@ -15,7 +15,7 @@
 #include <time.h>
 #include "class/clc56f.h"
 #include "class/cl2080_notification.h"
-#include "clc9b7.h"
+#include "enc_iface.h"
 #define NV_NVENC_8_2 1
 #include "nvenc_drv.h"
 
@@ -36,9 +36,11 @@ static int rc_np(const Enc *e)
     return gop > 0 ? (gop + bf - 1) / (bf + 1) : 0x7fffffff;
 }
 
-// The picture setup's magic: the NVENC class in bits 31..16, version 0, revision 6 (nvenc_drv.h: 0xC9B70006 for Ada's
-// NVENC 8.2, 0xB4B70006 for NVENC 6.6 = the GTX 1650's TU117); the setup layout is the same for every version
-static NvU32 enc_magic(Enc *e) { const NvU32 c = rm_class(&e->rm, RM_CLS_NVENC); return c ? (c << 16) | 0x0006u : NV_NVENC_DRV_MAGIC_VALUE; }
+// The picture setup's magic: the NVENC class in bits 31..16, version 0, revision 6.
+static NvU32 enc_magic(Enc *e)
+{
+    return nvenc_pic_setup_magic(rm_class(&e->rm, RM_CLS_NVENC), NV_NVENC_DRV_MAGIC_VALUE);
+}
 
 int enc_open(Enc *e, const EncConfig *cfg)
 {
@@ -972,8 +974,7 @@ execute:
     chan_mthd(c, 0, NVC9B7_EXECUTE, 1, 0u);
     NvU32 payload = ++e->seq;
     chan_mthd(c, 0, NVC9B7_SEMAPHORE_A, 3, (NvU32)(e->sem.gpu >> 32), (NvU32)e->sem.gpu, payload);
-    chan_mthd(c, 0, NVC9B7_SEMAPHORE_D, 1, DRF_DEF(C9B7, _SEMAPHORE_D, _STRUCTURE_SIZE, _ONE) |
-              DRF_DEF(C9B7, _SEMAPHORE_D, _OPERATION, _RELEASE) | DRF_DEF(C9B7, _SEMAPHORE_D, _PAYLOAD_SIZE, _32BIT));
+    chan_mthd(c, 0, NVC9B7_SEMAPHORE_D, 1, nvenc_semaphore32_word(rm_class(&e->rm, RM_CLS_NVENC)));
     // event: the host waits for that release, then raises the channel's non-stall interrupt (NVK's way), which RM
     // counts on the NVENC<n> notifier. (The engine's own SEMAPHORE_D AWAKEN bit produced no event: T5.04.)
     if (e->ev.h) {

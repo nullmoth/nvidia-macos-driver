@@ -13,6 +13,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 STAGER = ROOT / "package/stage_nvencvt.py"
 UPSTREAM_COMMIT = "1e91845d6f37d8bce671d62c14f4390324da3659"
+ARTIFACT_VERSION = "v0.9.5-ga10x1"
+LOCAL_REVISION = "ga10x-encoding-1"
 
 
 def write_manifest(root: Path) -> None:
@@ -72,8 +74,10 @@ class NVEncVTStaging(unittest.TestCase):
         self.library.write_bytes(b"fixture nvencvt mach-o bytes\n")
         self.metadata_path = self.build / "nvencvt-build-info.json"
         self.metadata = {
-            "schema_version": 1,
+            "schema_version": 2,
             "artifact": "libnvencvt.dylib",
+            "artifact_version": ARTIFACT_VERSION,
+            "local_revision": LOCAL_REVISION,
             "sha256": hashlib.sha256(self.library.read_bytes()).hexdigest(),
             "arch": "x86_64",
             "min_os": "15.0",
@@ -132,6 +136,16 @@ class NVEncVTStaging(unittest.TestCase):
         result = self.run_stage()
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("SHA-256 mismatch", result.stderr)
+        self.assertEqual(snapshot(self.pkg), before)
+        self.assertFalse(self.log.exists())
+
+    def test_wrong_local_revision_is_refused_before_package_changes(self):
+        before = snapshot(self.pkg)
+        self.metadata["local_revision"] = "ga10x-encoding-0"
+        self.metadata_path.write_text(json.dumps(self.metadata) + "\n")
+        result = self.run_stage()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"build metadata local_revision must be {LOCAL_REVISION!r}", result.stderr)
         self.assertEqual(snapshot(self.pkg), before)
         self.assertFalse(self.log.exists())
 

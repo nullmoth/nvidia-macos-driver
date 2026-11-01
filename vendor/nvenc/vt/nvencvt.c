@@ -6,6 +6,7 @@
 // above nullmoth's 1000), NVENCVT_NO_REGISTER, NVENCVT_LOG, NVENCVT_DEPTH, NVENCVT_ENGINE, NVENCVT_STATS=<file> (or touch
 // /tmp/nvencvt.stats: statistics every 2 s to /tmp/nvencvt-stats.log, also in apps that get no environment).
 #include "enc.h"
+#include "ga10x_policy.h"
 #include "av1hdr.h"
 #include "rm.h"
 #include "ctrl/ctrl0080/ctrl0080gpu.h"
@@ -473,10 +474,17 @@ static OSStatus open_encoder(State *s)
     if (s->hasMdcv) { memcpy(c.mdcv, s->mdcv, 24); c.has_mdcv = true; }
     if (s->hasCll) { memcpy(c.cll, s->cll, 4); c.has_cll = true; }
     c.depth = getenv("NVENCVT_DEPTH") ? atoi(getenv("NVENCVT_DEPTH")) : 2;   // frames in flight
-    // the engine with fewer sessions in this process (a second session runs on NVENC1, in parallel)
+    // GA10x shares its single NVENC0 across sessions. Other supported GPUs keep
+    // the existing load balancing and NVENC1-to-NVENC0 fallback.
+    const char *engine_setting = getenv("NVENCVT_ENGINE");
+    const int ga10x_engine = nvenc_ga10x_engine(engine_setting);
+    if (gNvencvtGpu == GPU_AMPERE && ga10x_engine < 0) {
+        LOG("GA10x has only NVENC0; invalid NVENCVT_ENGINE=%s", engine_setting);
+        return kVTParameterErr;
+    }
     pthread_mutex_lock(&gEngineLock);
-    c.engine = gEngineUse[1] < gEngineUse[0] ? 1 : 0;
-    if (getenv("NVENCVT_ENGINE")) c.engine = atoi(getenv("NVENCVT_ENGINE")) & 1;
+    c.engine = gNvencvtGpu == GPU_AMPERE ? ga10x_engine : gEngineUse[1] < gEngineUse[0] ? 1 : 0;
+    if (gNvencvtGpu != GPU_AMPERE && engine_setting) c.engine = atoi(engine_setting) & 1;
     gEngineUse[c.engine]++; s->engine = c.engine;
     pthread_mutex_unlock(&gEngineLock);
     int eo = enc_open(&s->enc, &c);
@@ -877,10 +885,9 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_CreateInstance(FourCharC
     return noErr;
 }
 
-// The encoder drives Ada's NVENC class (NVC9B7_VIDEO_ENCODER, RTX 40) and NVENC 6.6 (0xb4b7, TU117: GTX 1650). Registering
-// on a GPU without either would make VideoToolbox pick an encoder that cannot start, so look at the GPU's class list.
-// GA10x (0xc7b7, RTX 30) is listed too: its NVDEC decodes AV1, so the decoders register there, but its NVENC is not Ada's,
-// so the encoders stay away (NVENCVT_AMPERE_ENC=1 tries them anyway).
+// Supported encoder classes: Ada C9B7, TU117 B4B7, and GA10x C7B7.
+// Verify the actual class before enabling GA10x encoders; a PCI-family match
+// alone also includes chips without an NVENC engine.
 static int gpu_nvenc_kind(void)
 {
     Rm rm = { 0 };
@@ -906,12 +913,12 @@ static OSStatus register_one(FourCharCode codec, CFStringRef id, CFStringRef nam
 }
 
 // The plugin calls NVEncVT_Register in every process it is enabled for, while the Metal device is created, so the
-// check must be cheap: the GPU's PCI device ID from the IORegistry (~0.1 ms) instead of an RM client and the class list
-// (6-9 ms). Ada (AD102-AD107: RTX 40, RTX Ada, L4/L40) is device IDs 0x2600-0x28ff; TU117 (GTX 1650, T400 / T600 / T1000:
+// first check uses the GPU's PCI device ID from the IORegistry (~0.1 ms); GA10x encoder registration also verifies
+// the actual RM class (6-9 ms). Ada (AD102-AD107: RTX 40, RTX Ada, L4/L40) is device IDs 0x2600-0x28ff; TU117 (GTX 1650, T400 / T600 / T1000:
 // NVENC 6.6, for which NullMoth has no encoder) 0x1f80-0x1fff. GA10x (consumer Ampere: RTX 30, the 3060 Ti among them) is
 // 0x2200-0x25ff; its NVDEC (0xc7b0) decodes AV1 (NVIDIA's Video Codec SDK 11.0 added GA10x and AV1 Main profile decoding),
-// its NVENC (0xc7b7) is not Ada's, so only the decoders register there. Other Turing and Ampere cards keep NullMoth's
-// encoders.
+// its NVENC (0xc7b7) gets H.264/HEVC after an RM class check. Other Turing and
+// Ampere cards keep NullMoth's encoders.
 // -1: no NVIDIA GPU in the registry.
 // the card's name for the encoder names, from the GPU's IORegistry "model" ("NVIDIA GeForce RTX 4090" -> "RTX 4090")
 static char gCardName[64] = "GPU";
@@ -1076,11 +1083,11 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
     snprintf(nameHevc, sizeof nameHevc, "NVENC - HEVC - (NVIDIA %s) - mickys/nvenc - %s", gCardName, ver);
     snprintf(nameAv1, sizeof nameAv1, "NVENC - AV1 - (NVIDIA %s) - mickys/nvenc - %s", gCardName, ver);
     CFStringRef na = CFStringCreateWithCString(NULL, nameAvc, kCFStringEncodingUTF8), nh = CFStringCreateWithCString(NULL, nameHevc, kCFStringEncodingUTF8);
-    // GA10x (RTX 30): the NVENC there is not Ada's, and our encoder setups are written for NVENC 8.2 (Ada) and 6.6
-    // (TU117). Registering them anyway would make VideoToolbox pick an encoder that cannot start (NullMoth's own
-    // encoders stay for these cards), so only the decoders register on GA10x. NVENCVT_AMPERE_ENC=1 tries them anyway.
-    const bool encoders = gpu != GPU_AMPERE || getenv("NVENCVT_AMPERE_ENC");
-    if (!encoders) LOG("GA10x (RTX 30): the decoders only (NVENCVT_AMPERE_ENC=1 registers the encoders too)");
+    // C7B7 uses the shared H.264/HEVC setup with class-specific magic and
+    // semaphore encoding (enc_iface.h). AV1 encoding remains Ada-only below.
+    const bool encoders = gpu != GPU_AMPERE ||
+        (nvenc_ga10x_encode_enabled(getenv("NVENCVT_AMPERE_ENC")) && gpu_nvenc_kind() == GPU_AMPERE);
+    if (gpu == GPU_AMPERE) LOG("GA10x H.264/HEVC encoders %s (C7B7 required; NVENCVT_AMPERE_ENC=0 disables)", encoders ? "enabled" : "disabled");
     OSStatus st = encoders ? register_one(kCMVideoCodecType_H264, CFSTR(ENCODER_ID), na, rating) : kVTCouldNotFindVideoEncoderErr;
     OSStatus sh = !encoders || getenv("NVENCVT_NO_HEVC") ? kVTCouldNotFindVideoEncoderErr
                 : register_one(kCMVideoCodecType_HEVC, CFSTR(ENCODER_ID_HEVC), nh, rating);

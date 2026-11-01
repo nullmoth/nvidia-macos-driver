@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage the pinned NVEncVT build into an already assembled offline package.
+"""Stage the locally revised NVEncVT build into an already assembled offline package.
 
 This does not build, install, load, or execute the library. It validates the
 build receipt, signs the library and containing bundle, copies the applicable
@@ -19,8 +19,10 @@ import tempfile
 
 
 EXPECTED = {
-    "schema_version": 1,
+    "schema_version": 2,
     "artifact": "libnvencvt.dylib",
+    "artifact_version": "v0.9.5-ga10x1",
+    "local_revision": "ga10x-encoding-1",
     "arch": "x86_64",
     "min_os": "15.0",
     "upstream_repo": "mickys/nvenc",
@@ -89,7 +91,7 @@ def load_build(build_dir: Path, repo: Path) -> tuple[Path, dict, bytes]:
     except (UnicodeError, json.JSONDecodeError) as exc:
         fail(f"cannot parse build metadata: {exc}")
     if not isinstance(info, dict) or set(info) != BUILD_KEYS:
-        fail(f"build metadata fields do not match schema v1: {sorted(info) if isinstance(info, dict) else type(info).__name__}")
+        fail(f"build metadata fields do not match schema v2: {sorted(info) if isinstance(info, dict) else type(info).__name__}")
     for key, value in EXPECTED.items():
         if info.get(key) != value or key == "schema_version" and type(info.get(key)) is not int:
             fail(f"build metadata {key} must be {value!r}, got {info.get(key)!r}")
@@ -237,7 +239,7 @@ def run(*args: str) -> None:
 def main(argv: list[str]) -> int:
     if len(argv) != 3 or argv[1] in {"-h", "--help"}:
         print(f"usage: {argv[0]} <pkgroot> <nvenc-build-output-dir>", file=sys.stderr)
-        print("Stages the pinned NVEncVT dylib into an assembled package; does not install or run it.", file=sys.stderr)
+        print("Stages the locally revised NVEncVT dylib into an assembled package; does not install or run it.", file=sys.stderr)
         return 2 if len(argv) != 2 else 0
 
     pkgroot = Path(argv[1]).resolve(strict=True)
@@ -330,7 +332,8 @@ def main(argv: list[str]) -> int:
             raise
 
     say(f"Staged {LIB_NAME} into {target_library}")
-    say(f"Pinned source: {build_info['upstream_repo']} {build_info['upstream_tag']} ({build_info['upstream_commit']})")
+    say(f"Artifact: {build_info['artifact_version']} (local revision {build_info['local_revision']})")
+    say(f"Upstream base: {build_info['upstream_repo']} {build_info['upstream_tag']} ({build_info['upstream_commit']})")
     say("Library and bundle signatures verified; package SHA256SUMS regenerated and verified.")
     say("No install, dlopen, VideoToolbox registration, or GPU work was performed.")
     return 0
