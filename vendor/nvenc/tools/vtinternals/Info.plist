@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>VTProbe</string>
+  <key>CFBundleIdentifier</key><string>org.nvenc.vtprobe</string>
+  <key>CFBundleName</key><string>VTProbe</string>
+  <key>CFBundlePackageType</key><string>BNDL</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleShortVersionString</key><string>0.1</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>CMClassImplementations</key><array><dict>
+    <key>CMClassID</key><string>com.apple.videotoolbox.videoencoder</string>
+    <key>CMClassImplementationID</key><string>org.nvenc.vtprobe.encoder</string>
+    <key>CMClassImplementationName</key><string>VT probe encoder</string>
+    <key>CMClassImplementationVersion</key><integer>1</integer>
+    <key>CMExecutableArchitectures</key><array><string>x86_64</string></array>
+    <key>CMFactoryFunction</key><string>ProbeEncoder_CreateInstance</string>
+    <key>CMManufacturer</key><string>nvenc test</string>
+    <key>CMMatchingInfo</key><dict><key>VTCodecType</key><string>prb0</string><key>VTRating</key><integer>100</integer></dict>
+    <key>VTCodecName</key><string>Probe</string>
+    <key>VTEncoderName</key><string>nvenc probe encoder (bundle)</string>
+  </dict></array>
+</dict></plist>

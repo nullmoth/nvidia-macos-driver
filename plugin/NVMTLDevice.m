@@ -346,12 +346,12 @@ static void nvmtl_nvenc_register(void)
               st ? "NOT registered" : "REGISTERED", me, (int)st, path);
     });
 }
-// An encoder built outside this driver can register itself beside ours and let VTRating decide which
-// one an app gets, so both can be installed and compared. The one this was written for reports H.264
-// at about 5 ms where the library we ship takes about 12, and it runs on Turing, Ampere and Ada,
-// which nvmtl_nvenc_register above turns away for not being Blackwell.
-// Off unless NVMTL_NVENCVT names this process (or is 1), from nvrm610.conf or the environment.
-// This loads code into every app that encodes, so the library and the directory holding it must be
+// An external VideoToolbox codec library can register beside ours; VideoToolbox's rating decides which
+// implementation is selected. The library decides which codecs its GPU classes support. For example,
+// mickys/nvenc registers VP9 and AV1 decoders on GA10x by default, but leaves its encoders disabled there.
+// Off unless NVMTL_NVENCVT names this process (or is 1). Release builds read this selector from
+// nvrm610.conf: their constructor scrubs this selector and rating from the inherited environment.
+// This loads code into each selected process, so the library and the directory holding it must be
 // ours and nobody else's. The firmware taught this: it used to sit in /Users/Shared, which is mode
 // 1777, and the only permission step was a chmod that adds read bits and never takes write away, so
 // a directory left there by any user was adopted as-is. A path anyone can write is not a path you can
@@ -367,20 +367,27 @@ static bool nvmtl_loadable_root_only(const char *path)
     if (!d || lstat(d, &ds) != 0 || !S_ISDIR(ds.st_mode)) return false;
     return ds.st_uid == 0 && !(ds.st_mode & (S_IWGRP | S_IWOTH));
 }
+static bool nvmtl_nvencvt_selected_for_process(const char *selector, const char *process)
+{
+    if (!selector || !*selector || !strcmp(selector, "0")) return false;
+    if (!strcmp(selector, "1")) return true;
+    if (!process || !*process) return false;
+    char list[512];
+    size_t n = strnlen(selector, sizeof list - 1);
+    memcpy(list, selector, n); list[n] = '\0';
+    char *save = NULL;
+    for (char *t = strtok_r(list, ", :", &save); t; t = strtok_r(NULL, ", :", &save))
+        if (!strcmp(t, process)) return true;
+    return false;
+}
 static void nvmtl_nvencvt_register(void)
 {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         const char *me = getprogname();
         const char *sel = getenv("NVMTL_NVENCVT");
-        if (!sel || !*sel || !strcmp(sel, "0")) return;
-        if (strcmp(sel, "1")) {                      // a process list, so one app can be moved over at a time
-            char list[512]; strlcpy(list, sel, sizeof list);
-            bool named = false;
-            for (char *t = strtok(list, ", :"); t && !named; t = strtok(NULL, ", :")) named = !strcmp(t, me);
-            if (!named) return;
-        }
-        if (!strcmp(me, "WindowServer")) return;     // the codec registrars all stay out of it
+        if (!nvmtl_nvencvt_selected_for_process(sel, me)) return;
+        if (!me || !strcmp(me, "WindowServer")) return; // the codec registrars all stay out of WindowServer
         Dl_info di;
         if (!dladdr((const void *)nvmtl_nvencvt_register, &di) || !di.dli_fname) { nvlog("nvencvt: dladdr failed - not registering"); return; }
         char dir[1024], path[1200];
@@ -399,8 +406,8 @@ static void nvmtl_nvencvt_register(void)
         const char *rv = getenv("NVMTL_NVENCVT_RATING");
         if (rv) { int v = atoi(rv); if (v > 0) rating = v; }
         int32_t st = r(rating);
-        nvlog("nvencvt: external encoder %s in %s (NVEncVT_Register -> %d, rating %d, %s)",
-              st ? "NOT registered" : "REGISTERED", me, (int)st, rating, path);
+        nvlog("nvencvt: external codec registration call in %s (NVEncVT_Register -> %d, rating %d, %s)",
+              me, (int)st, rating, path);
     });
 }
 static void nvmtl_nvdec_hevc_register(void)

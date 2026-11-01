@@ -75,6 +75,11 @@ on macOS against NVRM instead of the Linux DRM interface (`nvk/nvk-macos.patch` 
 **NVIDIAShared.bundle** carries NVIDIA's NVVM compiler libraries and `air2nvvm.py`, the AIR to NVVM path. The
 plugin's MPS convolution fast path is `plugin/nvconv.metal`.
 
+The bundle may also contain the optional `Contents/MacOS/libnvencvt.dylib` from `vendor/nvenc/`. It registers NVENC and
+NVDEC through VideoToolbox when `NVMTL_NVENCVT` selects a process; the selector is unset by default and the loader
+excludes `WindowServer`. See [NVENCVT.md](NVENCVT.md) for app and command-line usage, including the upstream-reported
+Safari sandbox boundary.
+
 ## 4. OpenCore settings the driver needs
 
 | Setting | Value | Why |
@@ -142,9 +147,15 @@ Nothing is sent; you can upload the file on the site yourself.
 ## 6. The package
 
 `package/install.sh` and `uninstall.sh` work without the app (README, *Install — prebuilt*). The tarball holds
-`pkgroot/` with every file at its install path plus `SHA256SUMS`.
+`pkgroot/` with every file at its install path plus `SHA256SUMS`. NVEncVT is nested in the existing
+`NVMTLDriver.bundle`, so the existing whole-bundle backup, installation, rollback and removal paths apply to its library.
+`package/stage_nvencvt.py` adds a built copy to an assembled package, copies its licence notices into the bundle and
+package licence folder, ad-hoc signs the library and bundle, and regenerates the final package manifest.
 
 ## 7. Building
 
 See the README, *Build from source*. The kexts need NVIDIA's `open-gpu-kernel-modules` at tag `615.78.08`; NVK needs
 Mesa `17ca6174` with `nvk/nvk-macos.patch`.
+The bundled NVEncVT source is pinned at `mickys/nvenc` v0.9.5; build it locally with `build/nvenc_build.sh <out-dir>`.
+Stage its output into the offline package root with `package/stage_nvencvt.py <pkgroot> <out-dir>` before producing the
+release archive. That staging step signs and checksums the final payload; it does not install or execute the library.

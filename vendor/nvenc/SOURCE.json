@@ -1,0 +1,43 @@
+{
+  "build_dependencies": {
+    "nvidia_open_gpu_doc": {
+      "commit": "9fdf5c4062007929d9f4e6cbad9c9771fe61b880",
+      "license_file": "vendor/open-gpu-doc/LICENSE.md"
+    },
+    "nvidia_open_gpu_kernel_modules": {
+      "commit": "e4a5faa2567f28c8eabe0ebb6422b6d0abcf37eb",
+      "license_file": "vendor/open-gpu-kernel-modules/COPYING",
+      "release": "610.57.04"
+    },
+    "webkit_spi_headers": {
+      "commit": "3bfbc200370710495ffa440abdd31b943c83ad7a",
+      "license_terms": "Embedded in each header; see THIRD_PARTY_NOTICES.md"
+    }
+  },
+  "included_upstream_components": [
+    "src/",
+    "vt/",
+    "tools/",
+    "scripts/",
+    "trace/",
+    "trace-linux/",
+    "notes/",
+    "README.md",
+    "build.sh",
+    "root sample inputs r.nv12, r25.pgm, r4.pgm",
+    "all text documentation and notes"
+  ],
+  "license": "MIT; see LICENSE",
+  "local_packaging_changes": [
+    "Original upstream .gitignore is preserved as UPSTREAM.gitignore; local .gitignore only excludes build outputs so pinned dependency headers remain trackable.",
+    "No upstream production source files were modified in this vendor copy."
+  ],
+  "omitted_upstream_data_bytes": 93991779,
+  "omitted_upstream_data_files": 1279,
+  "omitted_upstream_data_manifest": "UPSTREAM-OMITTED-DATA.json",
+  "schema_version": 1,
+  "upstream_commit": "1e91845d6f37d8bce671d62c14f4390324da3659",
+  "upstream_repo": "https://github.com/mickys/nvenc",
+  "upstream_tag": "v0.9.5",
+  "upstream_tree": "2517cf69cc0edd8e9925ad9c443ed1098ded95a4"
+}

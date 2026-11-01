@@ -1,0 +1,731 @@
+nvtrace in vttest (pid 7656)
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x3c13
+BIND  conn 0x3c13 fd 4 -> 0x0
+ESC 0xc8 libvulkan_nouveau.dylib size 2304 -> kr 0x0
+      0000: 00000001 00000000 00000001 268410de 00000100 00000001 80000000 00000000
+      0020: 01000000 00000000 00000000 000000ce 00000000 00000001 00000000 00000000
+      0040: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      0060: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x3b03
+BIND  conn 0x3b03 fd 5 -> 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560001 -> conn 0x3003
+BIND  conn 0x3003 fd 6 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0x00000000 parent 0x00000000 new 0xc1d00163 class 0x0041 size 0 -> 0x0
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xc1d00163 cmd 0x00000205 size 32 -> 0x0
+      0000: 00000100 00000001 00000000 00000000 00000041 00000100 00000000 ffffffff
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xc1d00163 new 0xcaf00000 class 0x0080 size 0 -> 0x0
+      0000: 00000000 c1d00163 00000000 00000000 00000000 00000000 00000000 00000000
+      0020: 00000000 00000000 00000000 00000000 00000000 00000000 00000005 00000000
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00001 class 0x2080 size 0 -> 0x0
+      0000: 00000000 00000000 00000004 b98be350 00007ff7 285551af d27384d9 a6a69039
+      0020: 9cdaba21 21aeb82f 659d12af b98bdfd0 00007ff7 16b34dd8 00007ff8 00000005
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x20801352 size 32 -> 0x0
+      0000: 00000018 00000000 00000010 00000000 00000020 00000000 00000003 00000000
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x20801701 size 16 -> 0x0
+      0000: 00000190 00000002 000000a1 00000002
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x20800110 size 68 -> 0x0
+      0000: 00000000 4449564e 47204149 726f4665 52206563 34205854 00303930 00000000
+      0020: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      0040: 00000000
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x20800111 size 64 -> 0x0
+      0000: 30314441 00412d32 00000000 00000000 00000000 00000000 00000000 00000000
+      0020: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00000 cmd 0x00800292 size 804 -> 0x0
+      0000: 0000006d 00000100 00000101 00000002 00000080 00000005 00000078 0000007e
+      0020: 00000079 00000076 00000081 0000003e 00000071 00000000 00000041 00000001
+      0040: 00002080 0000c639 0000c638 0000c640 0000c637 0000000f 0000906f 000090cc
+      0060: 000083de 00000090 0000008f 0000b1cc 0000b2cc 0000c763 0000900e 00000020
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00000 cmd 0x00801110 size 528 -> 0x0
+      0000: 00000003 0000000c 00000809 0000000d 00000030 00000020 00000002 00000000
+      0020: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      0040: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      0060: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x2080122a size 24 -> 0x0
+      0000: 00000000 00000000 00000000 00000000 00000f7f 00000000
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x2080122b size 24 -> 0x0
+      0000: 00000000 00000000 00000000 00000000 00000000 0000003e
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x2080122b size 24 -> 0x0
+      0000: 00000000 00000000 00000000 00000000 00000001 0000003f
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x2080122b size 24 -> 0x0
+      0000: 00000000 00000000 00000000 00000000 00000002 0000003f
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x2080122b size 24 -> 0x0
+      0000: 00000000 00000000 00000000 00000000 00000003 0000003f
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x2080122b size 24 -> 0x0
+      0000: 00000000 00000000 00000000 00000000 00000004 0000003f
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x2080122b size 24 -> 0x0
+      0000: 00000000 00000000 00000000 00000000 00000005 0000003f
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x2080122b size 24 -> 0x0
+      0000: 00000000 00000000 00000000 00000000 00000006 0000003f
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x2080122b size 24 -> 0x0
+      0000: 00000000 00000000 00000000 00000000 00000008 0000003f
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x2080122b size 24 -> 0x0
+      0000: 00000000 00000000 00000000 00000000 00000009 0000003e
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x2080122b size 24 -> 0x0
+      0000: 00000000 00000000 00000000 00000000 0000000a 0000003f
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x2080122b size 24 -> 0x0
+      0000: 00000000 00000000 00000000 00000000 0000000b 0000003f
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x20801303 size 1028 -> 0x0
+      0000: 00000002 00000007 017fd000 00000005 00400000 00000000 00000000 00000000
+      0020: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      0040: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      0060: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00001 new 0xcaf00002 class 0xc461 size 0 -> 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560001 -> conn 0x3103
+BIND  conn 0x3103 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf00002 off 0x0 len 0x1000 fd 7 -> flags 0x03000000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x3103 type 0 opt 0x1 -> 0x1068f3000 len 0x1000 (mem 0xcaf00002 off 0x0) kr 0x0
+BIND  conn 0x3103 fd -2 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00003 class 0x90f1 size 0 -> 0x0
+      0000: 00000000 00000002 00000000 0001fffe 00000000 00000000 00000000 00000000
+      0020: 00000000 00000000 00000000 00000002 00000000 00000000 00000000 00000000
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x2080200a size 8 -> 0x0
+      0000: 00000012 ffffffff
+ESC 0xc9 libvulkan_nouveau.dylib size 4 -> kr 0x0
+      0000: 00000005
+ESC 0x27 libvulkan_nouveau.dylib size 56 -> kr 0x0
+      0000: c1d00163 caf00000 5eaffff0 00000071 40001010 00000000 1380d000 00007f94
+      0020: 00000fff 00000000 00000000 00007ff7 00000006 00000001
+FREE  libvulkan_nouveau.dylib  client 0xc1d00163 parent 0x00000000 obj 0x5eaffff0 -> 0x0
+BIND  conn 0x3c13 fd -2 -> 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560001 -> conn 0x3303
+BIND  conn 0x3303 fd 4 -> 0x0
+ESC 0xce libvulkan_nouveau.dylib size 16 -> kr 0x0
+      0000: c1d00163 00000000 00000004 00000000
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00001 new 0xcaf00004 class 0x0079 size 0 -> 0x0
+      0000: c1d00163 caf00001 00000079 3800000c 1b96b940 ffffffac 00000005 c1d00163
+      0020: 038c0c80 00006000 14015c00 00007f94 1380e000 00007f94 00000001 00000000
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00005 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x1000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00006 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x200000000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf00006 mem 0xcaf00005 off 0x0 len 0x1000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200000000 status 0x0
+BIND  conn 0x3c13 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf00005 off 0x0 len 0x1000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x3c13 type 0 opt 0x1 -> 0x1068f4000 len 0x1000 (mem 0xcaf00005 off 0x0) kr 0x0
+BIND  conn 0x3c13 fd -2 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00007 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x80000 align 0x10000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00008 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x80000 align 0x10000 offset 0x200010000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf00008 mem 0xcaf00007 off 0x0 len 0x80000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200010000 status 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x3a03
+BIND  conn 0x3a03 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf00007 off 0x0 len 0x80000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x3a03 type 0 opt 0x1 -> 0x1068f5000 len 0x80000 (mem 0xcaf00007 off 0x0) kr 0x0
+BIND  conn 0x3a03 fd -2 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00009 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x40000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf0000a class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x40000 align 0x10000 offset 0x200090000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf0000a mem 0xcaf00009 off 0x0 len 0x40000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200090000 status 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x3403
+BIND  conn 0x3403 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf00009 off 0x0 len 0x40000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x3403 type 0 opt 0x1 -> 0x106975000 len 0x40000 (mem 0xcaf00009 off 0x0) kr 0x0
+BIND  conn 0x3403 fd -2 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf0000b class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x10000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf0000c class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x2000d0000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf0000c mem 0xcaf0000b off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x2000d0000 status 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x3503
+BIND  conn 0x3503 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf0000b off 0x0 len 0x10000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x3503 type 0 opt 0x1 -> 0x1069b5000 len 0x10000 (mem 0xcaf0000b off 0x0) kr 0x0
+BIND  conn 0x3503 fd -2 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf0000d class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x1000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf0000e class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x2000e0000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf0000e mem 0xcaf0000d off 0x0 len 0x1000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x2000e0000 status 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x3903
+BIND  conn 0x3903 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf0000d off 0x0 len 0x1000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x3903 type 0 opt 0x1 -> 0x1069c5000 len 0x1000 (mem 0xcaf0000d off 0x0) kr 0x0
+BIND  conn 0x3903 fd -2 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf0000f class 0x0002 size 0 -> 0x0
+      0000: 00000000 20100000 caf00005 00000000 00000000 00000000 00000fff 00000000
+      0020: 00000000 00000000 00000000 00000000 00000001 00000000 140177b0 00007f94
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x20800170 size 340 -> 0x0
+      0000: 0000000a 00000001 00000009 0000000a 0000000b 0000000c 00000013 0000001b
+      0020: 0000001c 00000022 00000033 00000000 00000000 00000000 00000000 00000000
+      0040: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      0060: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x20802a03 size 8 -> 0x0
+      0000: 00000009 000003e3
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x20802a03 size 8 -> 0x0
+      0000: 0000000a 000003e3
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x20802a03 size 8 -> 0x0
+      0000: 0000000b 000003e2
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00010 class 0xc56f size 0 -> 0x0
+      gpFifoOffset 0x200090000 entries 32768 flags 0x20 hObjectError 0xcaf0000f hObjectBuffer 0x00000000 hUserd 0xcaf00007 userdOffset 0x0 engineType 0xb hVASpace 0xcaf00003 hContextShare 0x00000000
+      0000: caf0000f 00000000 00090000 00000002 00008000 00000020 00000000 caf00003
+      0020: 00000000 caf00007 00000000 00000000 00000000 00000000 00000000 00000000
+      0080: 00000000 00000000 0000000b 000004f3 00000000 00000000 00000000 00000000
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00010 cmd 0xa06f0104 size 4 -> 0x0
+      0000: 0000000b
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00010 cmd 0xa06f0103 size 3 -> 0x0
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00010 cmd 0xc36f010a size 4 -> 0x0
+      0000: 00000001
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00010 cmd 0xc36f0108 size 4 -> 0x0
+      0000: 00010017
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00010 new 0xcaf00015 class 0xc7b5 size 0 -> 0x0
+      0000: 00000001 0000000b 0000000b 00000001 00010017 0000000b 027cc000 00006000
+      0020: b98bd208 00000001 b98bd110 00007ff7 06654fee 00000001 b98bd110 00007ff7
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00016 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008000 attr 0x2a800000 attr2 0x00000009 format 6 size 0x1000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00017 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x2000f0000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf00017 mem 0xcaf00016 off 0x0 len 0x1000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x2000f0000 status 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x3803
+BIND  conn 0x3803 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf00016 off 0x0 len 0x1000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x3803 type 0 opt 0x1 -> 0x1069c6000 len 0x1000 (mem 0xcaf00016 off 0x0) kr 0x0
+BIND  conn 0x3803 fd -2 -> 0x0
+ESC 0x4f libvulkan_nouveau.dylib size 32 -> kr 0x0
+      0000: c1d00163 caf00001 caf00016 00000001 897d4000 00000007 00000000 00000000
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00018 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00100005 format 6 size 0x2000000 align 0x200000 offset 0x200200000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00019 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008000 attr 0x2a800000 attr2 0x00000009 format 6 size 0x10000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf0001a class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x200100000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf0001a mem 0xcaf00019 off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200100000 status 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x3807
+BIND  conn 0x3807 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf00019 off 0x0 len 0x10000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x3807 type 0 opt 0x1 -> 0x1069c6000 len 0x10000 (mem 0xcaf00019 off 0x0) kr 0x0
+BIND  conn 0x3807 fd -2 -> 0x0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf00018 mem 0xcaf00019 off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200200000 status 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf0001b class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x20000 align 0x10000 offset 0x200110000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf0001c class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008000 attr 0x2a800000 attr2 0x00000009 format 6 size 0x10000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf0001d class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x200130000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf0001d mem 0xcaf0001c off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200130000 status 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x3603
+BIND  conn 0x3603 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf0001c off 0x0 len 0x10000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x3603 type 0 opt 0x1 -> 0x1069d6000 len 0x10000 (mem 0xcaf0001c off 0x0) kr 0x0
+BIND  conn 0x3603 fd -2 -> 0x0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf0001b mem 0xcaf0001c off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200110000 status 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf0001e class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008000 attr 0x2a800000 attr2 0x00000009 format 6 size 0x10000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf0001f class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x200140000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf0001f mem 0xcaf0001e off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200140000 status 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x3703
+BIND  conn 0x3703 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf0001e off 0x0 len 0x10000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x3703 type 0 opt 0x1 -> 0x1069e6000 len 0x10000 (mem 0xcaf0001e off 0x0) kr 0x0
+BIND  conn 0x3703 fd -2 -> 0x0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf0001b mem 0xcaf0001e off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200120000 status 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00020 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x1000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00021 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x200150000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf00021 mem 0xcaf00020 off 0x0 len 0x1000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200150000 status 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x4003
+BIND  conn 0x4003 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf00020 off 0x0 len 0x1000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x4003 type 0 opt 0x1 -> 0x1069f6000 len 0x1000 (mem 0xcaf00020 off 0x0) kr 0x0
+BIND  conn 0x4003 fd -2 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00022 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x80000 align 0x10000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00023 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x80000 align 0x10000 offset 0x200160000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf00023 mem 0xcaf00022 off 0x0 len 0x80000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200160000 status 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x4103
+BIND  conn 0x4103 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf00022 off 0x0 len 0x80000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x4103 type 0 opt 0x1 -> 0x106f0e000 len 0x80000 (mem 0xcaf00022 off 0x0) kr 0x0
+BIND  conn 0x4103 fd -2 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00024 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x40000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00025 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x40000 align 0x10000 offset 0x202200000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf00025 mem 0xcaf00024 off 0x0 len 0x40000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x202200000 status 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x5403
+BIND  conn 0x5403 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf00024 off 0x0 len 0x40000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x5403 type 0 opt 0x1 -> 0x1069f7000 len 0x40000 (mem 0xcaf00024 off 0x0) kr 0x0
+BIND  conn 0x5403 fd -2 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00026 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x10000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00027 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x2001e0000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf00027 mem 0xcaf00026 off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x2001e0000 status 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x5303
+BIND  conn 0x5303 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf00026 off 0x0 len 0x10000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x5303 type 0 opt 0x1 -> 0x106a37000 len 0x10000 (mem 0xcaf00026 off 0x0) kr 0x0
+BIND  conn 0x5303 fd -2 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00028 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x1000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00029 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x2001f0000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf00029 mem 0xcaf00028 off 0x0 len 0x1000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x2001f0000 status 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x4203
+BIND  conn 0x4203 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf00028 off 0x0 len 0x1000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x4203 type 0 opt 0x1 -> 0x106a47000 len 0x1000 (mem 0xcaf00028 off 0x0) kr 0x0
+BIND  conn 0x4203 fd -2 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf0002a class 0x0002 size 0 -> 0x0
+      0000: 00000000 20100000 caf00020 00000000 00000000 00000000 00000fff 00000000
+      0020: 0916efa1 00000001 08077e80 00000001 08077f15 00000001 129054d8 00007f94
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf0002b class 0xa06c size 0 -> 0x0
+      0000: 00000000 00000000 caf00003 00000001 99260000 b536ded5 00000005 00000000
+      0020: 023c4600 00006000 018c0a80 00006000 b98bd0f8 00007ff7 b98bd188 00007ff7
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf0002b new 0xcaf0002d class 0x9067 size 0 -> 0x0
+      0000: caf00003 00000000 00000000 00000001 00000040 00000000 00000000 00000000
+      0020: 00000057 00000000 023c4600 00006000 b98bd0f8 00007ff7 00000005 00000000
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf0002b new 0xcaf0002e class 0xc56f size 0 -> 0x0
+      gpFifoOffset 0x202200000 entries 32768 flags 0x20 hObjectError 0xcaf0002a hObjectBuffer 0x00000000 hUserd 0xcaf00022 userdOffset 0x0 engineType 0x1 hVASpace 0x00000000 hContextShare 0xcaf0002d
+      0000: caf0002a 00000000 02200000 00000002 00008000 00000020 caf0002d 00000000
+      0020: 00000000 caf00022 00000000 00000000 00000000 00000000 00000000 00000000
+      0080: 00000000 00000000 00000001 000004f6 00000000 00000000 00000000 00000000
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf0002e cmd 0xa06f0104 size 4 -> 0x0
+      0000: 00000001
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf0002e cmd 0xa06f0103 size 3 -> 0x0
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf0002e cmd 0xc36f010a size 4 -> 0x0
+      0000: 00000001
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf0002e cmd 0xc36f0108 size 4 -> 0x0
+      0000: 00000016
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf0002e new 0xcaf0002f class 0xc7b5 size 0 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf0002e new 0xcaf00030 class 0x902d size 0 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf0002e new 0xcaf00031 class 0xc997 size 0 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf0002e new 0xcaf00032 class 0xa140 size 0 -> 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf0002e new 0xcaf00033 class 0xc9c0 size 0 -> 0x0
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x20801210 size 32 -> 0x0
+      0000: 00000001 caf0002b 00000000 00000001 00000000 00000000 00000000 00000000
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x20801235 size 24 -> 0x0
+      0000: caf0002e 00000001 00000000 00000000 00000001 00000000
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf0002e cmd 0x0090010b size 4 -> 0x56
+      0000: 00000001
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00000 cmd 0x00801707 size 12 -> 0x0
+      0000: 00000008 00001000 001b9600
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00034 class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018100 attr 0x11000000 attr2 0x00000005 format 6 size 0x1c0000 align 0x10000 offset 0xe840000 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00035 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x1c0000 align 0x10000 offset 0x2025b0000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf00035 mem 0xcaf00034 off 0x0 len 0x1c0000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x2025b0000 status 0x0
+CTRL  libvulkan_nouveau.dylib  client 0xc1d00163 obj 0xcaf00001 cmd 0x20801208 size 24 -> 0x0
+      0000: c1d00163 caf0002e 025b0000 00000002 00000002 00000000
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00036 class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018000 attr 0x11000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x9de0000 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00037 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x202770000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf00037 mem 0xcaf00036 off 0x0 len 0x10000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x202770000 status 0x0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00038 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008000 attr 0x2a800000 attr2 0x00000005 format 6 size 0x10000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libvulkan_nouveau.dylib  client 0xc1d00163 parent 0xcaf00000 new 0xcaf00039 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x202780000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libvulkan_nouveau.dylib client 0xc1d00163 dma 0xcaf00039 mem 0xcaf00038 off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x202780000 status 0x0
+OPEN  libvulkan_nouveau.dylib  type 0x4e560000 -> conn 0x4303
+BIND  conn 0x4303 fd 7 -> 0x0
+MAP   libvulkan_nouveau.dylib  client 0xc1d00163 dev 0xcaf00001 mem 0xcaf00038 off 0x0 len 0x10000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP libvulkan_nouveau.dylib conn 0x4303 type 0 opt 0x1 -> 0x106a48000 len 0x10000 (mem 0xcaf00038 off 0x0) kr 0x0
+BIND  conn 0x4303 fd -2 -> 0x0
+VTREGISTER codec 0x61766331 factory 0x107083bd0 (NVEncVT_CreateInstance)
+OPEN  libnvenc_hevc.dylib      type 0x4e560000 -> conn 0x4b1b
+BIND  conn 0x4b1b fd 7 -> 0x0
+ESC 0xc8 libnvenc_hevc.dylib    size 2304 -> kr 0x0
+      0000: 00000001 00000000 00000001 268410de 00000100 00000001 80000000 00000000
+      0020: 01000000 00000000 00000000 000000ce 00000000 00000001 00000000 00000000
+      0040: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      0060: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+ALLOC libnvenc_hevc.dylib      client 0x00000000 parent 0x00000000 new 0xc1d00164 class 0x0041 size 0 -> 0x0
+CTRL  libnvenc_hevc.dylib      client 0xc1d00164 obj 0xc1d00164 cmd 0x00000205 size 32 -> 0x0
+      0000: 00000100 00000001 00000000 00000000 00000041 00000100 00000000 ffffffff
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xc1d00164 new 0xcaf00000 class 0x0080 size 0 -> 0x0
+      0000: 00000000 c1d00164 00000000 00000000 00000000 00000000 00000000 00000000
+      0020: 00000000 00000000 00000000 00000000 00000000 00000000 168acce4 00007ff8
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00001 class 0x2080 size 0 -> 0x0
+      0000: 00000000 00000001 00000000 00000001 268410de 00000100 00000001 80000000
+      0020: 00000000 01000000 00000000 00000000 000000ce 00000000 00000001 00000000
+CTRL  libnvenc_hevc.dylib      client 0xc1d00164 obj 0xcaf00000 cmd 0x00800292 size 804 -> 0x0
+      0000: 0000006d 00000100 00000101 00000002 00000080 00000005 00000078 0000007e
+      0020: 00000079 00000076 00000081 0000003e 00000071 00000000 00000041 00000001
+      0040: 00002080 0000c639 0000c638 0000c640 0000c637 0000000f 0000906f 000090cc
+      0060: 000083de 00000090 0000008f 0000b1cc 0000b2cc 0000c763 0000900e 00000020
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00001 new 0xcaf00002 class 0xc461 size 0 -> 0x0
+OPEN  libnvenc_hevc.dylib      type 0x4e560001 -> conn 0x4d0f
+BIND  conn 0x4d0f fd 8 -> 0x0
+MAP   libnvenc_hevc.dylib      client 0xc1d00164 dev 0xcaf00001 mem 0xcaf00002 off 0x0 len 0x1000 fd 8 -> flags 0x03000000 status 0x0
+CPUMAP libnvenc_hevc.dylib     conn 0x4d0f type 0 opt 0x1 -> 0x106a60000 len 0x1000 (mem 0xcaf00002 off 0x0) kr 0x0
+BIND  conn 0x4d0f fd -2 -> 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00003 class 0x90f1 size 0 -> 0x0
+      0000: 00000000 00000002 00000000 0001fffe 00000000 00000000 00000000 00000000
+      0020: 00000000 00000000 00000000 00000002 00000000 00000000 00000001 00000000
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00004 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x10000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  libnvenc_hevc.dylib      type 0x4e560000 -> conn 0x450b
+BIND  conn 0x450b fd 8 -> 0x0
+MAP   libnvenc_hevc.dylib      client 0xc1d00164 dev 0xcaf00001 mem 0xcaf00004 off 0x0 len 0x10000 fd 8 -> flags 0x03008000 status 0x0
+CPUMAP libnvenc_hevc.dylib     conn 0x450b type 0 opt 0x1 -> 0x10706f000 len 0x10000 (mem 0xcaf00004 off 0x0) kr 0x0
+BIND  conn 0x450b fd -2 -> 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00005 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x200000000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf00005 mem 0xcaf00004 off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200000000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00006 class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018100 attr 0x10800000 attr2 0x00000005 format 6 size 0x80000 align 0x1000 offset 0xdd30000 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  libnvenc_hevc.dylib      type 0x4e560001 -> conn 0x4803
+BIND  conn 0x4803 fd 8 -> 0x0
+MAP   libnvenc_hevc.dylib      client 0xc1d00164 dev 0xcaf00001 mem 0xcaf00006 off 0x0 len 0x80000 fd 8 -> flags 0x01010000 status 0x0
+CPUMAP libnvenc_hevc.dylib     conn 0x4803 type 0 opt 0x1 -> 0x1071c2000 len 0x80000 (mem 0xcaf00006 off 0x0) kr 0x0
+BIND  conn 0x4803 fd -2 -> 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00007 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x80000 align 0x10000 offset 0x200010000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf00007 mem 0xcaf00006 off 0x0 len 0x80000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x200010000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00008 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x40000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  libnvenc_hevc.dylib      type 0x4e560000 -> conn 0x4903
+BIND  conn 0x4903 fd 8 -> 0x0
+MAP   libnvenc_hevc.dylib      client 0xc1d00164 dev 0xcaf00001 mem 0xcaf00008 off 0x0 len 0x40000 fd 8 -> flags 0x03008000 status 0x0
+CPUMAP libnvenc_hevc.dylib     conn 0x4903 type 0 opt 0x1 -> 0x107242000 len 0x40000 (mem 0xcaf00008 off 0x0) kr 0x0
+BIND  conn 0x4903 fd -2 -> 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00009 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x40000 align 0x10000 offset 0x200090000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf00009 mem 0xcaf00008 off 0x0 len 0x40000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200090000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf0000a class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x40000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  libnvenc_hevc.dylib      type 0x4e560000 -> conn 0x4a03
+BIND  conn 0x4a03 fd 8 -> 0x0
+MAP   libnvenc_hevc.dylib      client 0xc1d00164 dev 0xcaf00001 mem 0xcaf0000a off 0x0 len 0x40000 fd 8 -> flags 0x03008000 status 0x0
+CPUMAP libnvenc_hevc.dylib     conn 0x4a03 type 0 opt 0x1 -> 0x107282000 len 0x40000 (mem 0xcaf0000a off 0x0) kr 0x0
+BIND  conn 0x4a03 fd -2 -> 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf0000b class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x40000 align 0x10000 offset 0x2000d0000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf0000b mem 0xcaf0000a off 0x0 len 0x40000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x2000d0000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf0000c class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x10000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  libnvenc_hevc.dylib      type 0x4e560000 -> conn 0x5503
+BIND  conn 0x5503 fd 8 -> 0x0
+MAP   libnvenc_hevc.dylib      client 0xc1d00164 dev 0xcaf00001 mem 0xcaf0000c off 0x0 len 0x10000 fd 8 -> flags 0x03008000 status 0x0
+CPUMAP libnvenc_hevc.dylib     conn 0x5503 type 0 opt 0x1 -> 0x1072c2000 len 0x10000 (mem 0xcaf0000c off 0x0) kr 0x0
+BIND  conn 0x5503 fd -2 -> 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf0000d class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x200110000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf0000d mem 0xcaf0000c off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200110000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf0000e class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x10000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  libnvenc_hevc.dylib      type 0x4e560000 -> conn 0x7f03
+BIND  conn 0x7f03 fd 8 -> 0x0
+MAP   libnvenc_hevc.dylib      client 0xc1d00164 dev 0xcaf00001 mem 0xcaf0000e off 0x0 len 0x10000 fd 8 -> flags 0x03008000 status 0x0
+CPUMAP libnvenc_hevc.dylib     conn 0x7f03 type 0 opt 0x1 -> 0x1072d2000 len 0x10000 (mem 0xcaf0000e off 0x0) kr 0x0
+BIND  conn 0x7f03 fd -2 -> 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf0000f class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x200120000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf0000f mem 0xcaf0000e off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200120000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00010 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x20000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  libnvenc_hevc.dylib      type 0x4e560000 -> conn 0x7e03
+BIND  conn 0x7e03 fd 8 -> 0x0
+MAP   libnvenc_hevc.dylib      client 0xc1d00164 dev 0xcaf00001 mem 0xcaf00010 off 0x0 len 0x20000 fd 8 -> flags 0x03008000 status 0x0
+CPUMAP libnvenc_hevc.dylib     conn 0x7e03 type 0 opt 0x1 -> 0x1072e2000 len 0x20000 (mem 0xcaf00010 off 0x0) kr 0x0
+BIND  conn 0x7e03 fd -2 -> 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00011 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x20000 align 0x10000 offset 0x200130000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf00011 mem 0xcaf00010 off 0x0 len 0x20000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200130000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00012 class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018100 attr 0x10800000 attr2 0x00000005 format 6 size 0x90000 align 0x1000 offset 0xddb0000 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00013 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x90000 align 0x10000 offset 0x200150000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf00013 mem 0xcaf00012 off 0x0 len 0x90000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x200150000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00014 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x400000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  libnvenc_hevc.dylib      type 0x4e560000 -> conn 0x7d03
+BIND  conn 0x7d03 fd 8 -> 0x0
+MAP   libnvenc_hevc.dylib      client 0xc1d00164 dev 0xcaf00001 mem 0xcaf00014 off 0x0 len 0x400000 fd 8 -> flags 0x03008000 status 0x0
+CPUMAP libnvenc_hevc.dylib     conn 0x7d03 type 0 opt 0x1 -> 0x107302000 len 0x400000 (mem 0xcaf00014 off 0x0) kr 0x0
+BIND  conn 0x7d03 fd -2 -> 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00015 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00100005 format 6 size 0x400000 align 0x200000 offset 0x200200000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf00015 mem 0xcaf00014 off 0x0 len 0x400000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200200000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00016 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x20000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  libnvenc_hevc.dylib      type 0x4e560000 -> conn 0x7c03
+BIND  conn 0x7c03 fd 8 -> 0x0
+MAP   libnvenc_hevc.dylib      client 0xc1d00164 dev 0xcaf00001 mem 0xcaf00016 off 0x0 len 0x20000 fd 8 -> flags 0x03008000 status 0x0
+CPUMAP libnvenc_hevc.dylib     conn 0x7c03 type 0 opt 0x1 -> 0x107702000 len 0x20000 (mem 0xcaf00016 off 0x0) kr 0x0
+BIND  conn 0x7c03 fd -2 -> 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00017 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x20000 align 0x10000 offset 0x2001e0000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf00017 mem 0xcaf00016 off 0x0 len 0x20000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x2001e0000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00018 class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018100 attr 0x10800000 attr2 0x00000005 format 6 size 0x800000 align 0x1000 offset 0x2d100000 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00019 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00100005 format 6 size 0x800000 align 0x200000 offset 0x200600000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf00019 mem 0xcaf00018 off 0x0 len 0x800000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x200600000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf0001a class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018100 attr 0x10800000 attr2 0x00000005 format 6 size 0x100000 align 0x1000 offset 0xea00000 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf0001b class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x100000 align 0x10000 offset 0x200e00000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf0001b mem 0xcaf0001a off 0x0 len 0x100000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x200e00000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf0001c class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018100 attr 0x10800000 attr2 0x00000005 format 6 size 0x10000 align 0x1000 offset 0x9050000 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf0001d class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x200f00000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf0001d mem 0xcaf0001c off 0x0 len 0x10000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x200f00000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf0001e class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018100 attr 0x10800000 attr2 0x00000005 format 6 size 0x800000 align 0x1000 offset 0x2e340000 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf0001f class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00100005 format 6 size 0x800000 align 0x200000 offset 0x201000000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf0001f mem 0xcaf0001e off 0x0 len 0x800000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x201000000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00020 class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018100 attr 0x10800000 attr2 0x00000005 format 6 size 0x800000 align 0x1000 offset 0x3a600000 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00021 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00100005 format 6 size 0x800000 align 0x200000 offset 0x201800000 hVASpace 0xcaf00003 pitch 0 w 0 h 0
+MAPDMA libnvenc_hevc.dylib     client 0xc1d00164 dma 0xcaf00021 mem 0xcaf00020 off 0x0 len 0x800000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x201800000 status 0x0
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00022 class 0x0002 size 0 -> 0x0
+      0000: 00000000 20100000 caf00004 00000000 00000000 00000000 00000fff 00000000
+      0020: 00000000 00000000 00000000 caf00003 00000000 00000000 00000000 00000000
+CTRL  libnvenc_hevc.dylib      client 0xc1d00164 obj 0xcaf00001 cmd 0x20800170 size 340 -> 0x0
+      0000: 0000000a 00000001 00000009 0000000a 0000000b 0000000c 00000013 0000001b
+      0020: 0000001c 00000022 00000033 00000000 00000000 00000000 00000000 00000000
+      0040: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      0060: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+CTRL  libnvenc_hevc.dylib      client 0xc1d00164 obj 0xcaf00000 cmd 0x00800292 size 804 -> 0x0
+      0000: 0000006d 00000100 00000101 00000002 00000080 00000005 00000078 0000007e
+      0020: 00000079 00000076 00000081 0000003e 00000071 00000000 00000041 00000001
+      0040: 00002080 0000c639 0000c638 0000c640 0000c637 0000000f 0000906f 000090cc
+      0060: 000083de 00000090 0000008f 0000b1cc 0000b2cc 0000c763 0000900e 00000020
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00000 new 0xcaf00023 class 0xc56f size 0 -> 0x0
+      gpFifoOffset 0x200090000 entries 32768 flags 0x0 hObjectError 0xcaf00022 hObjectBuffer 0x00000000 hUserd 0xcaf00006 userdOffset 0x0 engineType 0x1b hVASpace 0xcaf00003 hContextShare 0x00000000
+      0000: caf00022 00000000 00090000 00000002 00008000 00000000 00000000 caf00003
+      0020: 00000000 caf00006 00000000 00000000 00000000 00000000 00000000 00000000
+      0080: 00000000 00000000 0000001b 000004f7 00000000 00000000 00000000 00000000
+      -> following this NVENC channel's GPFIFO
+CTRL  libnvenc_hevc.dylib      client 0xc1d00164 obj 0xcaf00023 cmd 0xa06f0104 size 4 -> 0x0
+      0000: 0000001b
+CTRL  libnvenc_hevc.dylib      client 0xc1d00164 obj 0xcaf00023 cmd 0xa06f0103 size 3 -> 0x0
+CTRL  libnvenc_hevc.dylib      client 0xc1d00164 obj 0xcaf00023 cmd 0xc36f010a size 4 -> 0x0
+      0000: 00000001
+CTRL  libnvenc_hevc.dylib      client 0xc1d00164 obj 0xcaf00023 cmd 0xc36f0108 size 4 -> 0x0
+      0000: 00040001
+ALLOC libnvenc_hevc.dylib      client 0xc1d00164 parent 0xcaf00023 new 0xcaf00028 class 0xc9b7 size 0 -> 0x0
+      0000: 0000000c 00000000 00000000
+  gpfifo[0] chan 0xcaf00023: 0x00009802000d0000 -> pb 0x2000d0000, 38 dwords
+    sc4 000 SET_OBJECT                   0x0000c9b7
+    sc4 200 SET_APPLICATION_ID           0x00000003
+    sc4 700 SET_CONTROL_PARAMS           0x00001104
+    sc4 704 SET_PICTURE_INDEX            0x00000000
+    sc4 710 SET_IN_DRV_PIC_SETUP         0x02001200
+    sc4 720 SET_IOHISTORY                0x02006000
+    sc4 724 SET_IO_RC_PROCESS            0x0200e000
+    sc4 730 SET_OUT_REF_PIC_LUMA         0x02001500
+    sc4 74c SET_OUT_REF_PIC_CHROMA       0x02001580
+    sc4 718 SET_OUT_ENC_STATUS           0x02001e00
+    sc4 71c SET_OUT_BITSTREAM            0x02002000
+    sc4 734 SET_IN_CUR_PIC               0x02001300
+    sc4 740 SET_IN_CUR_PIC_CHROMA_U      0x02001380
+    sc4 744 SET_IN_CUR_PIC_CHROMA_V      0x02001380
+    sc4 70c SET_IN_RCDATA                0x0200f000
+    sc4 300 EXECUTE                      0x00000000
+  ==== EXECUTE #1 (0x0) on channel 0xcaf00023, NVENC state:
+    000 SET_OBJECT                   0x0000c9b7
+    200 SET_APPLICATION_ID           0x00000003
+    300 EXECUTE                      0x00000000
+    700 SET_CONTROL_PARAMS           0x00001104
+    704 SET_PICTURE_INDEX            0x00000000
+    70c SET_IN_RCDATA                0x0200f000  -> 0x200f00000 mem 0xcaf0001c cls 0x40 +0x0 of 0x10000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    710 SET_IN_DRV_PIC_SETUP         0x02001200  -> 0x200120000 mem 0xcaf0000e cls 0x3e +0x0 of 0x10000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    718 SET_OUT_ENC_STATUS           0x02001e00  -> 0x2001e0000 mem 0xcaf00016 cls 0x3e +0x0 of 0x20000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    71c SET_OUT_BITSTREAM            0x02002000  -> 0x200200000 mem 0xcaf00014 cls 0x3e +0x0 of 0x400000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    720 SET_IOHISTORY                0x02006000  -> 0x200600000 mem 0xcaf00018 cls 0x40 +0x0 of 0x800000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    724 SET_IO_RC_PROCESS            0x0200e000  -> 0x200e00000 mem 0xcaf0001a cls 0x40 +0x0 of 0x100000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    730 SET_OUT_REF_PIC_LUMA         0x02001500  -> 0x200150000 mem 0xcaf00012 cls 0x40 +0x0 of 0x90000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    734 SET_IN_CUR_PIC               0x02001300  -> 0x200130000 mem 0xcaf00010 cls 0x3e +0x0 of 0x20000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    740 SET_IN_CUR_PIC_CHROMA_U      0x02001380  -> 0x200138000 mem 0xcaf00010 cls 0x3e +0x8000 of 0x20000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    744 SET_IN_CUR_PIC_CHROMA_V      0x02001380  -> 0x200138000 mem 0xcaf00010 cls 0x3e +0x8000 of 0x20000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    74c SET_OUT_REF_PIC_CHROMA       0x02001580  -> 0x200158000 mem 0xcaf00012 cls 0x40 +0x8000 of 0x90000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    picture setup (32 KB, zero rows skipped):
+      0000: cfb70006 007f00ff 01000100 00000000 00000000 00000040 00000000 00000020
+      0020: 00000002 007f00ff 01000100 00000000 00000000 00000000 00000000 00000000
+      0040: 00000002 007f00ff 01000100 00000000 00000000 00000040 00000000 00000020
+      0060: 00000002 028f64a1 00000200 04d00000 00020000 121e1700 33000000 00003333
+      00a0: 00000000 000000fa 00000000 00000000 00000000 00000000 00000000 00000000
+      00c0: 00000000 00000000 00000000 00000000 00000000 fefefefe fefefefe fefefefe
+      00e0: fefefefe 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      0180: 00000000 00000042 00000000 00005500 00000400 00003400 00005400 00001800
+      01a0: 00400000 000000ff 00ffc5a7 00000000 00000100 00000100 00000100 01901300
+      02a0: 00000000 00000000 00000000 00000900 00006500 00010000 00000000 00000000
+      02c0: 00000000 00000000 00000008 ffffffff ffffffff ffffffff ffffffff 00000000
+      02e0: 00000000 00001200 00000100 00000000 00000000 00000000 00000000 00000000
+      0300: 00000000 00000000 00000000 80031704 00000000 00000999 00000000 00000000
+      0400: 00074002 00000000 00000000 28000289 00000000 a4800000 000000db 00000000
+      0420: 00000000 00000000 00000000 ff0c0c00 00000c0c 00000001 1e1e0c00 0000000c
+      0440: 00000003 ff0c0c00 00000c0c 00000001 1e0c0000 0000000c 00000001 00000000
+      0480: 00000000 00000000 00000000 00000000 088c7c00 06193649 46880000 0c400000
+      3400: 00000000 55555557 55555557 55555557 55555557 00000000 c0000b6d 0f00f70f
+      3420: 0001781f 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      3440: 00000000 00000000 00000000 283a0000 00000000 00000000 00000000 01111000
+      5400: aaff056b 000fffaa 000f0f0f 00000000 00000000 00000000 00000000 00000000
+      5500: 00900020 18000204 00000000 00000000 00000000 00000000 00000000 00000000
+    sc4 240 SEMAPHORE_A                  0x00000002
+    sc4 244 SEMAPHORE_B                  0x00110000
+    sc4 248 SEMAPHORE_C                  0x00000001
+    sc4 304 SEMAPHORE_D                  0x00000000
+  gpfifo[1] chan 0xcaf00023: 0x0000b002000d0100 -> pb 0x2000d0100, 44 dwords
+    sc4 200 SET_APPLICATION_ID           0x00000003
+    sc4 700 SET_CONTROL_PARAMS           0x00001104
+    sc4 704 SET_PICTURE_INDEX            0x00000001
+    sc4 710 SET_IN_DRV_PIC_SETUP         0x02001200
+    sc4 720 SET_IOHISTORY                0x02006000
+    sc4 738 SET_IN_MEPRED_DATA           0x02010000
+    sc4 73c SET_OUT_MEPRED_DATA          0x02018000
+    sc4 724 SET_IO_RC_PROCESS            0x0200e000
+    sc4 730 SET_OUT_REF_PIC_LUMA         0x020016c0
+    sc4 74c SET_OUT_REF_PIC_CHROMA       0x02001740
+    sc4 718 SET_OUT_ENC_STATUS           0x02001e00
+    sc4 71c SET_OUT_BITSTREAM            0x02002000
+    sc4 734 SET_IN_CUR_PIC               0x02001300
+    sc4 740 SET_IN_CUR_PIC_CHROMA_U      0x02001380
+    sc4 744 SET_IN_CUR_PIC_CHROMA_V      0x02001380
+    sc4 70c SET_IN_RCDATA                0x0200f000
+    sc4 400 SET_IN_REF_PICn_LUMA         0x02001500
+    sc4 440 SET_IN_REF_PICn_CHROMA       0x02001580
+    sc4 300 EXECUTE                      0x00000000
+  ==== EXECUTE #2 (0x0) on channel 0xcaf00023, NVENC state:
+    000 SET_OBJECT                   0x0000c9b7
+    200 SET_APPLICATION_ID           0x00000003
+    240 SEMAPHORE_A                  0x00000002
+    244 SEMAPHORE_B                  0x00110000
+    248 SEMAPHORE_C                  0x00000001
+    300 EXECUTE                      0x00000000
+    304 SEMAPHORE_D                  0x00000000
+    400 SET_IN_REF_PICn_LUMA         0x02001500  -> 0x200150000 mem 0xcaf00012 cls 0x40 +0x0 of 0x90000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    440 SET_IN_REF_PICn_CHROMA       0x02001580  -> 0x200158000 mem 0xcaf00012 cls 0x40 +0x8000 of 0x90000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    700 SET_CONTROL_PARAMS           0x00001104
+    704 SET_PICTURE_INDEX            0x00000001
+    70c SET_IN_RCDATA                0x0200f000  -> 0x200f00000 mem 0xcaf0001c cls 0x40 +0x0 of 0x10000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    710 SET_IN_DRV_PIC_SETUP         0x02001200  -> 0x200120000 mem 0xcaf0000e cls 0x3e +0x0 of 0x10000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    718 SET_OUT_ENC_STATUS           0x02001e00  -> 0x2001e0000 mem 0xcaf00016 cls 0x3e +0x0 of 0x20000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    71c SET_OUT_BITSTREAM            0x02002000  -> 0x200200000 mem 0xcaf00014 cls 0x3e +0x0 of 0x400000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    720 SET_IOHISTORY                0x02006000  -> 0x200600000 mem 0xcaf00018 cls 0x40 +0x0 of 0x800000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    724 SET_IO_RC_PROCESS            0x0200e000  -> 0x200e00000 mem 0xcaf0001a cls 0x40 +0x0 of 0x100000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    730 SET_OUT_REF_PIC_LUMA         0x020016c0  -> 0x20016c000 mem 0xcaf00012 cls 0x40 +0x1c000 of 0x90000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    734 SET_IN_CUR_PIC               0x02001300  -> 0x200130000 mem 0xcaf00010 cls 0x3e +0x0 of 0x20000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    738 SET_IN_MEPRED_DATA           0x02010000  -> 0x201000000 mem 0xcaf0001e cls 0x40 +0x0 of 0x800000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    73c SET_OUT_MEPRED_DATA          0x02018000  -> 0x201800000 mem 0xcaf00020 cls 0x40 +0x0 of 0x800000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    740 SET_IN_CUR_PIC_CHROMA_U      0x02001380  -> 0x200138000 mem 0xcaf00010 cls 0x3e +0x8000 of 0x20000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    744 SET_IN_CUR_PIC_CHROMA_V      0x02001380  -> 0x200138000 mem 0xcaf00010 cls 0x3e +0x8000 of 0x20000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    74c SET_OUT_REF_PIC_CHROMA       0x02001740  -> 0x200174000 mem 0xcaf00012 cls 0x40 +0x24000 of 0x90000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    picture setup (32 KB, zero rows skipped):
+      0000: cfb70006 007f00ff 01000100 00000000 00000000 00000040 00000000 00000020
+      0020: 00000002 007f00ff 01000100 00000000 00000000 00000000 00000000 00000000
+      0040: 00000002 007f00ff 01000100 00000000 00000000 00000040 00000000 00000020
+      0060: 00000002 028f64a1 00000200 04d00000 00020000 121e1700 33000000 00003333
+      00a0: 00000000 000000fa 00000000 00000000 00000000 00000000 00000000 00000000
+      00c0: 00000000 00000000 00000000 00000000 00000000 fefefe00 fefefefe fefefefe
+      00e0: fefefefe ffffff01 ffffffff ffffffff ffffffff 00000100 00000000 00000000
+      0100: 00000000 ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff
+      0120: ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff
+      0140: ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff
+      0160: ffffffff ffffffff ffffffff ffffffff ffffffff fefefefe fefefefe 00000000
+      0180: 00000000 00010042 00000000 00005500 00000400 00003400 00005400 00001800
+      01a0: 00400000 000000ff 00ffc5a4 00000000 00000100 00000100 00000100 01900100
+      01c0: 00000000 00000000 00000001 00000000 00000000 00000000 00000000 00000000
+      01e0: 00000000 00000000 00000000 00000001 00000000 00000000 00000000 00000000
+      0280: 00000000 00000000 00000001 00000000 00000000 00000000 00000000 00000000
+      02a0: 00000000 00000000 00000000 00000900 00006500 00010000 00000000 00000000
+      02c0: 00000000 00000000 00000008 ffffff00 ffffffff ffffffff ffffffff 00000001
+      02e0: 00000000 00001200 00000100 00000000 00000000 00000000 00000000 00000000
+      0300: 00000000 00000000 00000000 80031704 00000000 00000999 00000000 00000000
+      0400: 00074002 00000000 00000000 28000289 00000000 a4800000 000000db 00000000
+      0420: 00000000 00000000 00000000 ff0c0c00 00000c0c 00000001 1e1e0c00 0000000c
+      0440: 00000003 ff0c0c00 00000c0c 00000001 1e0c0000 0000000c 00000001 00000000
+      0480: 00000000 00000000 00000000 00000000 088c7c00 06193649 46880000 0c400000
+      3400: 00000000 55555557 55555557 55555557 55555557 00000000 c0000b6d 0f00f70f
+      3420: 0001781f 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      3440: 00000000 00000000 00000000 283a0000 00000000 00000000 00000000 01111000
+      5400: aaff056b 000fffaa 000f0f0f 00000000 00000000 00000000 00000000 00000000
+      5500: 00b80020 18000200 00000000 00000000 00000000 00000000 00000000 00000000
+    sc4 240 SEMAPHORE_A                  0x00000002
+    sc4 244 SEMAPHORE_B                  0x00110000
+    sc4 248 SEMAPHORE_C                  0x00000002
+    sc4 304 SEMAPHORE_D                  0x00000000
+  gpfifo[2] chan 0xcaf00023: 0x0000b002000d0200 -> pb 0x2000d0200, 44 dwords
+    sc4 200 SET_APPLICATION_ID           0x00000003
+    sc4 700 SET_CONTROL_PARAMS           0x00001104
+    sc4 704 SET_PICTURE_INDEX            0x00000002
+    sc4 710 SET_IN_DRV_PIC_SETUP         0x02001200
+    sc4 720 SET_IOHISTORY                0x02006000
+    sc4 738 SET_IN_MEPRED_DATA           0x02018000
+    sc4 73c SET_OUT_MEPRED_DATA          0x02010000
+    sc4 724 SET_IO_RC_PROCESS            0x0200e000
+    sc4 730 SET_OUT_REF_PIC_LUMA         0x02001880
+    sc4 74c SET_OUT_REF_PIC_CHROMA       0x02001900
+    sc4 718 SET_OUT_ENC_STATUS           0x02001e00
+    sc4 71c SET_OUT_BITSTREAM            0x02002000
+    sc4 734 SET_IN_CUR_PIC               0x02001300
+    sc4 740 SET_IN_CUR_PIC_CHROMA_U      0x02001380
+    sc4 744 SET_IN_CUR_PIC_CHROMA_V      0x02001380
+    sc4 70c SET_IN_RCDATA                0x0200f000
+    sc4 400 SET_IN_REF_PICn_LUMA         0x020016c0
+    sc4 440 SET_IN_REF_PICn_CHROMA       0x02001740
+    sc4 300 EXECUTE                      0x00000000
+  ==== EXECUTE #3 (0x0) on channel 0xcaf00023, NVENC state:
+    000 SET_OBJECT                   0x0000c9b7
+    200 SET_APPLICATION_ID           0x00000003
+    240 SEMAPHORE_A                  0x00000002
+    244 SEMAPHORE_B                  0x00110000
+    248 SEMAPHORE_C                  0x00000002
+    300 EXECUTE                      0x00000000
+    304 SEMAPHORE_D                  0x00000000
+    400 SET_IN_REF_PICn_LUMA         0x020016c0  -> 0x20016c000 mem 0xcaf00012 cls 0x40 +0x1c000 of 0x90000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    440 SET_IN_REF_PICn_CHROMA       0x02001740  -> 0x200174000 mem 0xcaf00012 cls 0x40 +0x24000 of 0x90000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    700 SET_CONTROL_PARAMS           0x00001104
+    704 SET_PICTURE_INDEX            0x00000002
+    70c SET_IN_RCDATA                0x0200f000  -> 0x200f00000 mem 0xcaf0001c cls 0x40 +0x0 of 0x10000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    710 SET_IN_DRV_PIC_SETUP         0x02001200  -> 0x200120000 mem 0xcaf0000e cls 0x3e +0x0 of 0x10000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    718 SET_OUT_ENC_STATUS           0x02001e00  -> 0x2001e0000 mem 0xcaf00016 cls 0x3e +0x0 of 0x20000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    71c SET_OUT_BITSTREAM            0x02002000  -> 0x200200000 mem 0xcaf00014 cls 0x3e +0x0 of 0x400000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    720 SET_IOHISTORY                0x02006000  -> 0x200600000 mem 0xcaf00018 cls 0x40 +0x0 of 0x800000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    724 SET_IO_RC_PROCESS            0x0200e000  -> 0x200e00000 mem 0xcaf0001a cls 0x40 +0x0 of 0x100000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    730 SET_OUT_REF_PIC_LUMA         0x02001880  -> 0x200188000 mem 0xcaf00012 cls 0x40 +0x38000 of 0x90000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    734 SET_IN_CUR_PIC               0x02001300  -> 0x200130000 mem 0xcaf00010 cls 0x3e +0x0 of 0x20000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    738 SET_IN_MEPRED_DATA           0x02018000  -> 0x201800000 mem 0xcaf00020 cls 0x40 +0x0 of 0x800000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    73c SET_OUT_MEPRED_DATA          0x02010000  -> 0x201000000 mem 0xcaf0001e cls 0x40 +0x0 of 0x800000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    740 SET_IN_CUR_PIC_CHROMA_U      0x02001380  -> 0x200138000 mem 0xcaf00010 cls 0x3e +0x8000 of 0x20000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    744 SET_IN_CUR_PIC_CHROMA_V      0x02001380  -> 0x200138000 mem 0xcaf00010 cls 0x3e +0x8000 of 0x20000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    74c SET_OUT_REF_PIC_CHROMA       0x02001900  -> 0x200190000 mem 0xcaf00012 cls 0x40 +0x40000 of 0x90000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    picture setup (32 KB, zero rows skipped):
+      0000: cfb70006 007f00ff 01000100 00000000 00000000 00000040 00000000 00000020
+      0020: 00000002 007f00ff 01000100 00000000 00000000 00000000 00000000 00000000
+      0040: 00000002 007f00ff 01000100 00000000 00000000 00000040 00000000 00000020
+      0060: 00000002 028f64a1 00000200 04d00000 00020000 121e1700 33000000 00003333
+      00a0: 00000000 000000fa 00000000 00000000 00000000 00000000 00000000 00000000
+      00c0: 00000000 00000000 00000000 00000000 00000000 fefefe02 fefefefe fefefefe
+      00e0: fefefefe ffffff01 ffffffff ffffffff ffffffff 00000100 00000000 00000000
+      0100: 00000000 ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff
+      0120: ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff
+      0140: ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff
+      0160: ffffffff ffffffff ffffffff ffffffff ffffffff fefefefe fefefefe 00000000
+      0180: 00000000 00020042 00000000 00005500 00000400 00003400 00005400 00001800
+      01a0: 00400000 000000ff 00ffc5a4 00000000 00000100 00000100 00000100 01900100
+      01c0: 00000000 00000000 00000002 00000000 00000000 00000000 00000000 00000000
+      01e0: 00000000 00000000 00000000 00000001 00000000 00000000 00000000 00000000
+      0280: 00000000 00000000 00000001 00000000 00000000 00000000 00000000 00000000
+      02a0: 00000000 00000000 00000000 00000900 00006500 00010000 00000000 00000000
+      02c0: 00000000 00000000 00000008 ffffff00 ffffffff ffffffff ffffffff 00000001
+      02e0: 00000000 00001200 00000100 00000000 00000000 00000000 00000000 00000000
+      0300: 00000000 00000000 00000000 80031704 00000000 00000999 00000000 00000000
+      0400: 00074002 00000000 00000000 28000289 00000000 a4800000 000000db 00000000
+      0420: 00000000 00000000 00000000 ff0c0c00 00000c0c 00000001 1e1e0c00 0000000c
+      0440: 00000003 ff0c0c00 00000c0c 00000001 1e0c0000 0000000c 00000001 00000000
+      0480: 00000000 00000000 00000000 00000000 088c7c00 06193649 46880000 0c400000
+      3400: 00000000 55555557 55555557 55555557 55555557 00000000 c0000b6d 0f00f70f
+      3420: 0001781f 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      3440: 00000000 00000000 00000000 283a0000 00000000 00000000 00000000 01111000
+      5400: aaff056b 000fffaa 000f0f0f 00000000 00000000 00000000 00000000 00000000
+      5500: 00b80020 18000200 00000000 00000000 00000000 00000000 00000000 00000000
+    sc4 240 SEMAPHORE_A                  0x00000002
+    sc4 244 SEMAPHORE_B                  0x00110000
+    sc4 248 SEMAPHORE_C                  0x00000003
+    sc4 304 SEMAPHORE_D                  0x00000000
+ESC 0x4f libnvenc_hevc.dylib    size 32 -> kr 0x0
+      0000: c1d00164 caf00001 caf00004 00007ff8 5376d000 00000006 00000000 00000000
+ESC 0x4f libnvenc_hevc.dylib    size 32 -> kr 0x0
+      0000: c1d00164 caf00001 caf00006 00007ff8 11d90000 000000ce 00000000 00000000

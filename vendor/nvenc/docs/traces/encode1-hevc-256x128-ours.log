@@ -1,0 +1,281 @@
+nvtrace in encode1 (pid 8193)
+OPEN  encode1                  type 0x4e560000 -> conn 0xd1b
+BIND  conn 0xd1b fd 4 -> 0x0
+OPEN  encode1                  type 0x4e560001 -> conn 0x170b
+BIND  conn 0x170b fd 5 -> 0x0
+ESC 0xc8 encode1                size 72 -> kr 0x0
+      0000: 00000001 00000000 00000001 268410de 00000100 00000001 80000000 00000000
+      0020: 01000000 00000000 00000000 000000ce 00000000 00000001 00000000 00000000
+      0040: 00000000 00000000
+ALLOC encode1                  client 0x00000000 parent 0x00000000 new 0xc1d0017a class 0x0041 size 0 -> 0x0
+CTRL  encode1                  client 0xc1d0017a obj 0xc1d0017a cmd 0x00000205 size 32 -> 0x0
+      0000: 00000100 00000001 00000000 00000000 00000041 00000100 00000000 ffffffff
+ALLOC encode1                  client 0xc1d0017a parent 0xc1d0017a new 0x4e560000 class 0x0080 size 0 -> 0x0
+      0000: 00000000 c1d0017a 00000000 00000000 00000000 00000000 00000000 00000000
+      0020: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560001 class 0x2080 size 0 -> 0x0
+      0000: 00000000 bb639b58 00007ff7 bb63991c 00007ff7 e9815800 00007fb3 bb6398a0
+      0020: 00007ff7 048c7e1d 00000001 575c5d07 00007ff8 575cf6b8 00007ff8 00000000
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560002 class 0x90f1 size 0 -> 0x0
+      0000: 00000000 00000002 00000000 0001fffe 00000000 00000000 00000000 00000000
+      0020: 00000000 00000000 00000000 00000002 00000000 00000000 e9815800 00007fb3
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560003 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x1c000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  encode1                  type 0x4e560000 -> conn 0x1013
+BIND  conn 0x1013 fd 6 -> 0x0
+MAP   encode1                  client 0xc1d0017a dev 0x4e560000 mem 0x4e560003 off 0x0 len 0x1c000 fd 6 -> flags 0x03008000 status 0x0
+CPUMAP encode1                 conn 0x1013 type 0 opt 0x1 -> 0x104a07000 len 0x1c000 (mem 0x4e560003 off 0x0) kr 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560004 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x20000 align 0x10000 offset 0x200000000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e560004 mem 0x4e560003 off 0x0 len 0x1c000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200000000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560005 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x1000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  encode1                  type 0x4e560000 -> conn 0x1623
+BIND  conn 0x1623 fd 7 -> 0x0
+MAP   encode1                  client 0xc1d0017a dev 0x4e560000 mem 0x4e560005 off 0x0 len 0x1000 fd 7 -> flags 0x03008000 status 0x0
+CPUMAP encode1                 conn 0x1623 type 0 opt 0x1 -> 0x104a23000 len 0x1000 (mem 0x4e560005 off 0x0) kr 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560006 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x200020000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e560006 mem 0x4e560005 off 0x0 len 0x1000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200020000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560007 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x110000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  encode1                  type 0x4e560000 -> conn 0x1513
+BIND  conn 0x1513 fd 8 -> 0x0
+MAP   encode1                  client 0xc1d0017a dev 0x4e560000 mem 0x4e560007 off 0x0 len 0x110000 fd 8 -> flags 0x03008000 status 0x0
+CPUMAP encode1                 conn 0x1513 type 0 opt 0x1 -> 0x104a24000 len 0x110000 (mem 0x4e560007 off 0x0) kr 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560008 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x110000 align 0x10000 offset 0x200030000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e560008 mem 0x4e560007 off 0x0 len 0x110000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200030000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560009 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x10000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  encode1                  type 0x4e560000 -> conn 0x1413
+BIND  conn 0x1413 fd 9 -> 0x0
+MAP   encode1                  client 0xc1d0017a dev 0x4e560000 mem 0x4e560009 off 0x0 len 0x10000 fd 9 -> flags 0x03008000 status 0x0
+CPUMAP encode1                 conn 0x1413 type 0 opt 0x1 -> 0x104b34000 len 0x10000 (mem 0x4e560009 off 0x0) kr 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e56000a class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x200140000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e56000a mem 0x4e560009 off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200140000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e56000b class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018100 attr 0x10800000 attr2 0x00000005 format 6 size 0x40000 align 0x10000 offset 0xe840000 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e56000c class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x40000 align 0x10000 offset 0x200150000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e56000c mem 0x4e56000b off 0x0 len 0x40000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x200150000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e56000d class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018100 attr 0x10800000 attr2 0x00000005 format 6 size 0x10000 align 0x1000 offset 0xd670000 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e56000e class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x200190000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e56000e mem 0x4e56000d off 0x0 len 0x10000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x200190000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e56000f class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018100 attr 0x10800000 attr2 0x00000005 format 6 size 0x10000 align 0x1000 offset 0xd970000 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560010 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x2001a0000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e560010 mem 0x4e56000f off 0x0 len 0x10000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x2001a0000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560011 class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018100 attr 0x10800000 attr2 0x00000005 format 6 size 0x10000 align 0x1000 offset 0xd990000 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560012 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x2001b0000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e560012 mem 0x4e560011 off 0x0 len 0x10000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x2001b0000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560013 class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018100 attr 0x10800000 attr2 0x00000005 format 6 size 0x10000 align 0x1000 offset 0xdb00000 hVASpace 0x00000000 pitch 0 w 0 h 0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560014 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x2001c0000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e560014 mem 0x4e560013 off 0x0 len 0x10000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x2001c0000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560015 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x10000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  encode1                  type 0x4e560000 -> conn 0x110b
+BIND  conn 0x110b fd 10 -> 0x0
+MAP   encode1                  client 0xc1d0017a dev 0x4e560000 mem 0x4e560015 off 0x0 len 0x10000 fd 10 -> flags 0x03008000 status 0x0
+CPUMAP encode1                 conn 0x110b type 0 opt 0x1 -> 0x104b44000 len 0x10000 (mem 0x4e560015 off 0x0) kr 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560016 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x2001d0000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e560016 mem 0x4e560015 off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x2001d0000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560017 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x10000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  encode1                  type 0x4e560000 -> conn 0x121b
+BIND  conn 0x121b fd 11 -> 0x0
+MAP   encode1                  client 0xc1d0017a dev 0x4e560000 mem 0x4e560017 off 0x0 len 0x10000 fd 11 -> flags 0x03008000 status 0x0
+CPUMAP encode1                 conn 0x121b type 0 opt 0x1 -> 0x104b54000 len 0x10000 (mem 0x4e560017 off 0x0) kr 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560018 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x2001e0000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e560018 mem 0x4e560017 off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x2001e0000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560019 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x1000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  encode1                  type 0x4e560000 -> conn 0x131b
+BIND  conn 0x131b fd 12 -> 0x0
+MAP   encode1                  client 0xc1d0017a dev 0x4e560000 mem 0x4e560019 off 0x0 len 0x1000 fd 12 -> flags 0x03008000 status 0x0
+CPUMAP encode1                 conn 0x131b type 0 opt 0x1 -> 0x104b64000 len 0x1000 (mem 0x4e560019 off 0x0) kr 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e56001a class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x2001f0000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e56001a mem 0x4e560019 off 0x0 len 0x1000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x2001f0000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560001 new 0x4e56001b class 0xc561 size 0 -> 0x0
+OPEN  encode1                  type 0x4e560001 -> conn 0x2023
+BIND  conn 0x2023 fd 13 -> 0x0
+MAP   encode1                  client 0xc1d0017a dev 0x4e560001 mem 0x4e56001b off 0x0 len 0x1000 fd 13 -> flags 0x03000000 status 0x0
+CPUMAP encode1                 conn 0x2023 type 0 opt 0x1 -> 0x104b65000 len 0x1000 (mem 0x4e56001b off 0x0) kr 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e56001c class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x1000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  encode1                  type 0x4e560000 -> conn 0x290b
+BIND  conn 0x290b fd 14 -> 0x0
+MAP   encode1                  client 0xc1d0017a dev 0x4e560000 mem 0x4e56001c off 0x0 len 0x1000 fd 14 -> flags 0x03008000 status 0x0
+CPUMAP encode1                 conn 0x290b type 0 opt 0x1 -> 0x104b66000 len 0x1000 (mem 0x4e56001c off 0x0) kr 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e56001d class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x200200000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e56001d mem 0x4e56001c off 0x0 len 0x1000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200200000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e56001e class 0x0040 size 0 -> 0x0
+      type 0 flags 0x00018100 attr 0x10800000 attr2 0x00000005 format 6 size 0x80000 align 0x10000 offset 0x104c0000 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  encode1                  type 0x4e560001 -> conn 0x281b
+BIND  conn 0x281b fd 15 -> 0x0
+MAP   encode1                  client 0xc1d0017a dev 0x4e560000 mem 0x4e56001e off 0x0 len 0x80000 fd 15 -> flags 0x01010000 status 0x0
+CPUMAP encode1                 conn 0x281b type 0 opt 0x401 -> 0x104b67000 len 0x80000 (mem 0x4e56001e off 0x0) kr 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e56001f class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x80000 align 0x10000 offset 0x200210000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e56001f mem 0x4e56001e off 0x0 len 0x80000 flags 0x00000008 flags2 0x0 kind 0x0 -> gpu 0x200210000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560020 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x40000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  encode1                  type 0x4e560000 -> conn 0x2713
+BIND  conn 0x2713 fd 16 -> 0x0
+MAP   encode1                  client 0xc1d0017a dev 0x4e560000 mem 0x4e560020 off 0x0 len 0x40000 fd 16 -> flags 0x03008000 status 0x0
+CPUMAP encode1                 conn 0x2713 type 0 opt 0x1 -> 0x104be7000 len 0x40000 (mem 0x4e560020 off 0x0) kr 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560021 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x40000 align 0x10000 offset 0x200290000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e560021 mem 0x4e560020 off 0x0 len 0x40000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x200290000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560022 class 0x003e size 0 -> 0x0
+      type 0 flags 0x00008100 attr 0x2a800000 attr2 0x00000009 format 6 size 0x10000 align 0x1000 offset 0x0 hVASpace 0x00000000 pitch 0 w 0 h 0
+OPEN  encode1                  type 0x4e560000 -> conn 0x260b
+BIND  conn 0x260b fd 17 -> 0x0
+MAP   encode1                  client 0xc1d0017a dev 0x4e560000 mem 0x4e560022 off 0x0 len 0x10000 fd 17 -> flags 0x03008000 status 0x0
+CPUMAP encode1                 conn 0x260b type 0 opt 0x1 -> 0x104c27000 len 0x10000 (mem 0x4e560022 off 0x0) kr 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560023 class 0x50a0 size 0 -> 0x0
+      type 0 flags 0x00088100 attr 0x16000000 attr2 0x00000005 format 6 size 0x10000 align 0x10000 offset 0x2002d0000 hVASpace 0x4e560002 pitch 0 w 0 h 0
+MAPDMA encode1                 client 0xc1d0017a dma 0x4e560023 mem 0x4e560022 off 0x0 len 0x10000 flags 0x00000018 flags2 0x0 kind 0x0 -> gpu 0x2002d0000 status 0x0
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560024 class 0x0002 size 0 -> 0x0
+      0000: 00000000 20100000 4e56001c 00000000 00000000 00000000 00000fff 00000000
+      0020: 00000018 00000000 04b65000 00000001 bb639844 00007ff7 00000000 00000000
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560000 new 0x4e560025 class 0xc56f size 0 -> 0x0
+      gpFifoOffset 0x200290000 entries 32768 flags 0x0 hObjectError 0x4e560024 hObjectBuffer 0x00000000 hUserd 0x4e56001e userdOffset 0x0 engineType 0x1b hVASpace 0x4e560002 hContextShare 0x00000000
+      0000: 4e560024 00000000 00290000 00000002 00008000 00000000 00000000 4e560002
+      0020: 00000000 4e56001e 00000000 00000000 00000000 00000000 00000000 00000000
+      0080: 00000000 00000000 0000001b 0000053b 00000000 00000000 00000000 00000000
+      -> following this NVENC channel's GPFIFO
+CTRL  encode1                  client 0xc1d0017a obj 0x4e560025 cmd 0xa06f0104 size 4 -> 0x0
+      0000: 0000001b
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560025 new 0x4e560026 class 0xc9b7 size 0 -> 0x0
+      0000: 0000000c 00000000 00000000
+CTRL  encode1                  client 0xc1d0017a obj 0x4e560025 cmd 0xa06f0103 size 3 -> 0x0
+CTRL  encode1                  client 0xc1d0017a obj 0x4e560025 cmd 0xc36f010a size 4 -> 0x0
+      0000: 00000001
+CTRL  encode1                  client 0xc1d0017a obj 0x4e560025 cmd 0xc36f0108 size 4 -> 0x0
+      0000: 00040002
+OPEN  encode1                  type 0x4e560000 -> conn 0x2213
+BIND  conn 0x2213 fd 18 -> 0x0
+ESC 0xce encode1                size 16 -> kr 0x0
+      0000: c1d0017a 4e560000 00000012 00000000
+ALLOC encode1                  client 0xc1d0017a parent 0x4e560001 new 0x4e560027 class 0x0079 size 0 -> 0x0
+      0000: c1d0017a 4e560001 00000079 38000026 1b68e080 ffffffac c1d0017a 4e560000
+      0020: 00000012 00000000 bb63a4b0 00007ff7 00000000 00000000 bb639f30 00007ff7
+  gpfifo[0] chan 0x4e560025: 0x0000c002002d0000 -> pb 0x2002d0000, 48 dwords
+    sc0 000 SET_OBJECT                   0x0000c9b7
+    sc0 200 SET_APPLICATION_ID           0x00000003
+    sc0 700 SET_CONTROL_PARAMS           0x00000104
+    sc0 704 SET_PICTURE_INDEX            0x00000000
+    sc0 710 SET_IN_DRV_PIC_SETUP         0x02000200
+    sc0 720 SET_IOHISTORY                0x02001900
+    sc0 730 SET_OUT_REF_PIC_LUMA         0x02001500
+    sc0 730 SET_OUT_REF_PIC_LUMA         0x02001500
+    sc0 74c SET_OUT_REF_PIC_CHROMA       0x02001580
+    sc0 718 SET_OUT_ENC_STATUS           0x02001400
+    sc0 71c SET_OUT_BITSTREAM            0x02000300
+    sc0 734 SET_IN_CUR_PIC               0x02000000
+    sc0 740 SET_IN_CUR_PIC_CHROMA_U      0x02000080
+    sc0 744 SET_IN_CUR_PIC_CHROMA_V      0x02000080
+    sc0 724 SET_IO_RC_PROCESS            0x02001d00
+    sc0 70c SET_IN_RCDATA                0x02001e00
+    sc0 300 EXECUTE                      0x00000000
+  ==== EXECUTE #1 (0x0) on channel 0x4e560025, NVENC state:
+    000 SET_OBJECT                   0x0000c9b7
+    200 SET_APPLICATION_ID           0x00000003
+    300 EXECUTE                      0x00000000
+    700 SET_CONTROL_PARAMS           0x00000104
+    704 SET_PICTURE_INDEX            0x00000000
+    70c SET_IN_RCDATA                0x02001e00  -> 0x2001e0000 mem 0x4e560017 cls 0x3e +0x0 of 0x10000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    710 SET_IN_DRV_PIC_SETUP         0x02000200  -> 0x200020000 mem 0x4e560005 cls 0x3e +0x0 of 0x1000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    718 SET_OUT_ENC_STATUS           0x02001400  -> 0x200140000 mem 0x4e560009 cls 0x3e +0x0 of 0x10000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    71c SET_OUT_BITSTREAM            0x02000300  -> 0x200030000 mem 0x4e560007 cls 0x3e +0x0 of 0x110000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    720 SET_IOHISTORY                0x02001900  -> 0x200190000 mem 0x4e56000d cls 0x40 +0x0 of 0x10000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    724 SET_IO_RC_PROCESS            0x02001d00  -> 0x2001d0000 mem 0x4e560015 cls 0x3e +0x0 of 0x10000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    730 SET_OUT_REF_PIC_LUMA         0x02001500  -> 0x200150000 mem 0x4e56000b cls 0x40 +0x0 of 0x40000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    734 SET_IN_CUR_PIC               0x02000000  -> 0x200000000 mem 0x4e560003 cls 0x3e +0x0 of 0x1c000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    740 SET_IN_CUR_PIC_CHROMA_U      0x02000080  -> 0x200008000 mem 0x4e560003 cls 0x3e +0x8000 of 0x1c000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    744 SET_IN_CUR_PIC_CHROMA_V      0x02000080  -> 0x200008000 mem 0x4e560003 cls 0x3e +0x8000 of 0x1c000 type 0 flags 0x8100 attr 0x2a800000 attr2 0x00000009 map 0x18 kind 0x0 cpu
+    74c SET_OUT_REF_PIC_CHROMA       0x02001580  -> 0x200158000 mem 0x4e56000b cls 0x40 +0x8000 of 0x40000 type 0 flags 0x18100 attr 0x10800000 attr2 0x00000005 map 0x8 kind 0x0
+    picture setup (32 KB, zero rows skipped):
+      0000: c9b70006 007f00ff 01000100 00000000 00000000 00000040 00000000 00000020
+      0020: 00000002 007f00ff 01000100 00000000 00000000 00000000 00000000 00000000
+      0040: 00000002 007f00ff 01000100 00000000 00000000 00000040 00000000 00000020
+      0060: 00000002 028f64a1 00000200 04d00000 00020000 19191900 33000000 00003333
+      0080: 00000100 00000100 00000100 0000003c 00000000 00000000 00000000 00000000
+      00a0: 00000000 ffffffff 00000000 00000000 00000000 00000000 00000000 00000000
+      00c0: 00000000 00000000 00000000 00000000 00000000 fefefefe fefefefe fefefefe
+      00e0: fefefefe 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      0180: 00000000 00000002 00000000 00000700 00000400 00000500 00000600 00010000
+      01a0: 00110000 00000000 00ffc5a7 00000000 00000000 00000000 00000000 01901380
+      02a0: 00000000 00000000 00000000 00000000 00000000 00010000 00000000 00000000
+      02c0: 00000000 00000000 00000008 ffffffff ffffffff ffffffff ffffffff 00000000
+      0400: 00074002 00000000 00000000 28000289 00000000 a4800000 000000db 00000000
+      0420: 00000000 00000000 00000000 ff0c0c00 00000c0c 00000001 1e1e0c00 0000000c
+      0440: 00000003 ff0c0c00 00000c0c 00000001 1e0c0000 0000000c 00000001 00000000
+      0480: 00000000 00000000 00000000 00000000 088c7c00 06193649 46880000 00000000
+      0500: 00000000 55555557 55555557 55555557 55555557 00000000 00000b6d 0f00f70f
+      0520: 0001781f 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+      0540: 00000000 00000000 00000000 283a0000 00000000 00000000 00000000 01111000
+      0600: aaff056b 000fffaa 000f0f0f 00000000 00000000 00000000 00000000 00000000
+      0700: 00c80020 18000204 00000000 00000000 00000000 00000000 00000000 00000000
+      1000: 01000000 78af0126 040c3cf7 e97e526a aaa49c8d f471f442 dcf03c37 93f68dca
+      1020: 659b5b29 c38af163 35d43098 eb7f0fed 0d8a5e3b b4c9f937 27a72a47 d31439e3
+      1040: 28a1e787 3c3aab45 ede895a2 69afe2e2 fe8f4d9d a4f99920 45c6e2da de90c9f0
+      1060: c9874617 66d37d60 56336eb3 73a66ba4 678d5ade 75ba393f 18636a4c ed133256
+      1080: 4e450860 a4c8fc32 342b9c81 4c4a8df7 2e9ccbbf af74435c 675ff0f5 d36e8ca9
+      10a0: 652d8854 8127878c b0a0e74a fa71ac95 386398ec 045f605a 35d6b01b a86f5a2d
+      10c0: 7391485e 31685fee e787a753 4a0fc979 5c35f93f 0e6be992 7b754ebb a6e54380
+      10e0: 43db3228 a3fdcfa8 5a0a7470 cef98c25 26634b02 928a7dff da869c02 df439f17
+      1100: 1c05335d 8fa1bee8 75a78546 4d51d314 33bdc934 b3e27836 f3e84f75 964ce8c4
+      1120: 01e9b4c3 aaf600a5 7e9e9057 e0c93cd6 5398627e 67f62ab7 a74acdfe 08575999
+      1140: 1314b565 7a47ea25 79d85250 4b6c862d e9073598 0cb9401e f7694d2d 0901f07a
+      1160: 299712b6 6a99ddf4 592af2ee 1fcbd761 bd718965 f3994913 a92fecd6 43915493
+      1180: adcaca02 92541714 1087e5ab 9c4c6b89 079b7e9f 647e4c40 e7c97aba 643f4292
+      11a0: b43c3453 22008bcf 80bf6c7d 7839e0e0 72b7eb55 5de1c302 90ab9f64 1412c250
+      11c0: 1100b203 b0bc3b47 5e2c331d fcdcaf7b 472d0268 687e58b8 8d20ec77 419c431b
+      11e0: 6798f970 d2cc9d3d b0870a89 62af57ab 16f962be 4d0a61aa 48fde127 c4487796
+      1200: cedf4f38 617799a6 180a9fcd 7160a04e 1485030a b063174e d5839f70 382ad8d6
+      1220: 52f6fcf0 d7d5fe33 2d14d7be 2ad2dc11 a18e69f7 f1f9b7c9 d58e3d8a 0cd2b0a7
+      1240: 07a2c301 e7ff9f69 b59319f0 a506d52b 609015db bcb59658 41e050b5 c85fee50
+      1260: a5388dc2 74201f01 a3b8862a 2e2257da 990b88f6 28ae61a1 bb97791d b1af724d
+      1280: 2deecdeb e7355420 30e08b56 4955d521 2becbfde 09f2627b 2beedba0 19e38875
+      12a0: afdc99ba 77984078 2a23e15f 1d9b8513 e5aadf99 b939371d 024d7564 06eff63b
+      12c0: 390fcfee d4bae788 6e73cc80 f8ba1e87 0b0b0832 284f8835 81751916 934a3b1f
+      12e0: f70d49f0 ea6b567e 2b7bf433 3eda0727 e993fee7 d2663fed 5840039a 6e8394e9
+      1300: 97743d28 92846ea0 2d642791 f4f0c603 2b26da91 4e046437 17d53caf 139e3cd8
+      1320: 2cad9efb 804d49eb db908a9d 05c595e0 73e27537 7a6aeed2 fd081db2 e04f69d2
+      1340: e0bcf7fd aea3adc0 8c4c1b59 4015d7b3 9b5f1213 9147f288 58259591 7c1365f8
+      1360: 00bc5937 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+    IN_RCDATA (4 KB, zero rows skipped):
+    IO_RC_PROCESS (4 KB, zero rows skipped):
+    sc0 240 SEMAPHORE_A                  0x00000002
+    sc0 244 SEMAPHORE_B                  0x001f0000
+    sc0 248 SEMAPHORE_C                  0x00000001
+    sc0 304 SEMAPHORE_D                  0x00000000
+    sc0 05c                              0x001f0000
+    sc0 060                              0x00000002
+    sc0 064                              0x00000001
+    sc0 068                              0x00000000
+    sc0 06c                              0x00000003
+    sc0 020                              0x00000000
+FREE  encode1                  client 0xc1d0017a parent 0x4e560001 obj 0x4e560027 -> 0x0
+ESC 0xcf encode1                size 16 -> kr 0x0
+      0000: c1d0017a 4e560000 00000012 00000000
+FREE  encode1                  client 0xc1d0017a parent 0x4e560000 obj 0x4e560025 -> 0x0
+FREE  encode1                  client 0xc1d0017a parent 0x4e560000 obj 0x4e560024 -> 0x0
+ESC 0x4f encode1                size 32 -> kr 0x0
+      0000: c1d0017a 4e560000 4e560022 00000000 cf814000 00000003 00000000 00000000
+FREE  encode1                  client 0xc1d0017a parent 0x4e560000 obj 0x4e560023 -> 0x0
+FREE  encode1                  client 0xc1d0017a parent 0x4e560000 obj 0x4e560022 -> 0x0
