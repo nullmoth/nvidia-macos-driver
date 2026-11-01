@@ -11,6 +11,13 @@ sensor API or a guarantee of compatibility with every monitoring app.
 iStat Menus support for the new power, clock and fan values has not been
 verified. This change does not publish SMC keys or include a VirtualSMC bridge.
 
+For example, the [Stats GPU reader](https://github.com/exelban/stats/blob/683a0581d42839969ab21c14659f23d6054bb618/Modules/GPU/reader.swift#L138-L145)
+reads `Temperature(C)`, `Device Utilization %`, `Core Clock(MHz)` and
+`Memory Clock(MHz)` with the same units. It reads `Fan Speed(%)`, not RPM,
+and does not consume the new power or per-controller fan properties. Matching
+field names alone does not establish device discovery or end-to-end support.
+No fan percentage is synthesized from RPM or an assumed maximum speed.
+
 ## Published values
 
 These keys are in NVAccel's `PerformanceStatistics` dictionary:
