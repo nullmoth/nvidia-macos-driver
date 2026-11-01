@@ -237,9 +237,9 @@ kernel void nvconv_reduce(device const float *src [[buffer(0)]], device const fl
 static inline void nvconv_mma_body(device const float *src, device const float *wts, device float *dst,
                                    device const float *bias, device const float *res, uint epi,
                                    constant uint *kp, constant uint *cp, uint3 tgp, uint lid, uint sg,
-                                   threadgroup half (*Ah)[BK + 8], threadgroup half (*Al)[BK + 8],
-                                   threadgroup half (*Bh)[32 + 8], threadgroup half (*Bl)[32 + 8],
-                                   threadgroup float (*Cs)[32 + 4], uint nsplit = 1, device float *part = nullptr)
+                                   threadgroup half *Ah, threadgroup half *Al,
+                                   threadgroup half *Bh, threadgroup half *Bl,
+                                   threadgroup float *Cs, uint nsplit = 1, device float *part = nullptr)
 {
     constexpr uint BM = 64, BN = 32, TM = 4, TN = 2;
     const uint cin = cp[32], cout = cp[33], kw = cp[34], kh = cp[35], batch = cp[37];
@@ -287,7 +287,7 @@ static inline void nvconv_mma_body(device const float *src, device const float *
                     if (x >= 0 && y >= 0 && uint(x) < sw && uint(y) < sh) v = src[ci * sC + uint(x) * sW + uint(y) * sH + am_n[i] * sN];
                 }
                 const half h = half(v);
-                Ah[amm0 + 16 * i][akk] = h; Al[amm0 + 16 * i][akk] = half(v - float(h));
+                Ah[(amm0 + 16 * i) * (BK + 8) + akk] = h; Al[(amm0 + 16 * i) * (BK + 8) + akk] = half(v - float(h));
             }
         }
         {
@@ -301,25 +301,24 @@ static inline void nvconv_mma_body(device const float *src, device const float *
                 const uint base = ci * wCi + ix * wKw + iy * wKh;
                 for (uint j = 0; j < BCNT; j++) { const uint co = n0 + bnn + j; v[j] = co < N ? wts[co * wCo + base] : 0.0f; }
             }
-            for (uint j = 0; j < BCNT; j++) { const half h = half(v[j]); Bh[bkk][bnn + j] = h; Bl[bkk][bnn + j] = half(v[j] - float(h)); }
+            for (uint j = 0; j < BCNT; j++) { const half h = half(v[j]); Bh[bkk * 40 + bnn + j] = h; Bl[bkk * 40 + bnn + j] = half(v[j] - float(h)); }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint kk = 0; kk < BK; kk += 8) {
-            simdgroup_half8x8 ah, al;
-            simdgroup_load(ah, &Ah[sg * 8][kk], BK + 8);
-            simdgroup_load(al, &Al[sg * 8][kk], BK + 8);
-            for (uint t = 0; t < 4; t++) {
-                simdgroup_half8x8 bh, bl;
-                simdgroup_load(bh, &Bh[kk][t * 8], 32 + 8);
-                simdgroup_load(bl, &Bl[kk][t * 8], 32 + 8);
-                simdgroup_multiply_accumulate(acc[t], al, bh, acc[t]);
-                simdgroup_multiply_accumulate(acc[t], ah, bl, acc[t]);
-                simdgroup_multiply_accumulate(acc[t], ah, bh, acc[t]);
-            }
+        // each pair of 8-deep products is one split term over k 0..7 and 8..15, so the two fuse into one k16 tensor op
+        simdgroup_half8x8 ah0, ah1, al0, al1;
+        simdgroup_load(ah0, Ah + sg * 8 * (BK + 8), BK + 8); simdgroup_load(ah1, Ah + sg * 8 * (BK + 8) + 8, BK + 8);
+        simdgroup_load(al0, Al + sg * 8 * (BK + 8), BK + 8); simdgroup_load(al1, Al + sg * 8 * (BK + 8) + 8, BK + 8);
+        for (uint t = 0; t < 4; t++) {
+            simdgroup_half8x8 bh0, bh1, bl0, bl1;
+            simdgroup_load(bh0, Bh + t * 8, 40); simdgroup_load(bh1, Bh + 8 * 40 + t * 8, 40);
+            simdgroup_load(bl0, Bl + t * 8, 40); simdgroup_load(bl1, Bl + 8 * 40 + t * 8, 40);
+            simdgroup_multiply_accumulate(acc[t], al0, bh0, acc[t]); simdgroup_multiply_accumulate(acc[t], al1, bh1, acc[t]);
+            simdgroup_multiply_accumulate(acc[t], ah0, bl0, acc[t]); simdgroup_multiply_accumulate(acc[t], ah1, bl1, acc[t]);
+            simdgroup_multiply_accumulate(acc[t], ah0, bh0, acc[t]); simdgroup_multiply_accumulate(acc[t], ah1, bh1, acc[t]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    for (uint t = 0; t < 4; t++) simdgroup_store(acc[t], &Cs[sg * 8][t * 8], 32 + 4);
+    for (uint t = 0; t < 4; t++) simdgroup_store(acc[t], Cs + sg * 8 * 36 + t * 8, 36);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     const uint tx = lid % 16, ty = lid / 16;
     for (uint i = 0; i < TM; i++) {
@@ -330,7 +329,7 @@ static inline void nvconv_mma_body(device const float *src, device const float *
         for (uint j = 0; j < TN; j++) {
             const uint co = n0 + tx * TN + j;
             if (co >= N) continue;
-            float v = Cs[ty * TM + i][tx * TN + j];
+            float v = Cs[(ty * TM + i) * 36 + tx * TN + j];
             if (part) { part[(tgp.z * M + m) * N + co] = v; continue; }
             if (epi == 4) { v = v > 0.0f ? v : v * (bias ? bias[co] : 0.0f); }
             else {
@@ -349,15 +348,15 @@ static inline void nvconv_mma_body(device const float *src, device const float *
 kernel void nvconvm3_s(device const float *src [[buffer(0)]], device const float *wts [[buffer(1)]], device float *dst [[buffer(2)]],
                        constant uint *kp [[buffer(23)]], constant uint *cp [[buffer(29)]], constant uint &epi [[buffer(30)]],
                        uint3 tgp [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]])
-{ threadgroup half Ah[64][BK + 8], Al[64][BK + 8], Bh[BK][32 + 8], Bl[BK][32 + 8]; threadgroup float Cs[64][32 + 4];
+{ threadgroup half Ah[64 * (BK + 8)], Al[64 * (BK + 8)], Bh[BK * 40], Bl[BK * 40]; threadgroup float Cs[64 * 36];
   nvconv_mma_body(src, wts, dst, nullptr, nullptr, epi, kp, cp, tgp, lid, sg, Ah, Al, Bh, Bl, Cs); }
 kernel void nvconvm4_s(device const float *src [[buffer(0)]], device const float *wts [[buffer(1)]], device const float *bias [[buffer(2)]],
                        device float *dst [[buffer(3)]], constant uint *kp [[buffer(23)]], constant uint *cp [[buffer(29)]], constant uint &epi [[buffer(30)]],
                        uint3 tgp [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]])
-{ threadgroup half Ah[64][BK + 8], Al[64][BK + 8], Bh[BK][32 + 8], Bl[BK][32 + 8]; threadgroup float Cs[64][32 + 4];
+{ threadgroup half Ah[64 * (BK + 8)], Al[64 * (BK + 8)], Bh[BK * 40], Bl[BK * 40]; threadgroup float Cs[64 * 36];
   nvconv_mma_body(src, wts, dst, bias, nullptr, epi, kp, cp, tgp, lid, sg, Ah, Al, Bh, Bl, Cs); }
 kernel void nvconvm5_s(device const float *src [[buffer(0)]], device const float *wts [[buffer(1)]], device const float *bias [[buffer(2)]],
                        device const float *res [[buffer(3)]], device float *dst [[buffer(4)]], constant uint *kp [[buffer(23)]], constant uint *cp [[buffer(29)]],
                        constant uint &epi [[buffer(30)]], uint3 tgp [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]])
-{ threadgroup half Ah[64][BK + 8], Al[64][BK + 8], Bh[BK][32 + 8], Bl[BK][32 + 8]; threadgroup float Cs[64][32 + 4];
+{ threadgroup half Ah[64 * (BK + 8)], Al[64 * (BK + 8)], Bh[BK * 40], Bl[BK * 40]; threadgroup float Cs[64 * 36];
   nvconv_mma_body(src, wts, dst, bias, res, epi, kp, cp, tgp, lid, sg, Ah, Al, Bh, Bl, Cs); }
