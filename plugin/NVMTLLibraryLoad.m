@@ -1772,6 +1772,47 @@ static NSArray<NSString *> *nvmtl_air_tuple_tokens(NSString *line)
     }
     return tok;
 }
+// YES when a kernel cannot tell how its threads are grouped: every argument is a buffer outside threadgroup memory, a
+// texture, a sampler, thread_position_in_grid or threads_per_grid, and the module has no threadgroup memory, barrier,
+// SIMD-group or quad operation and no imageblock. The dispatch may then run the same threads in smaller groups.
+// Anything the scan does not recognise answers NO, which only costs the reshape.
+static BOOL nvmtl_air_grid_only_scan(NSString *ll, NSString *fname)
+{
+    if (!ll.length || !fname.length) return NO;
+    for (NSString *bad in @[@"addrspace(3)", @"@air.wg.barrier", @"@air.simdgroup", @"@air.simd_", @"@air.quad_",
+                            @"imageblock", @"@air.atomic.local", @"air.visible_function_table", @"air.intersection_function_table"])
+        if ([ll rangeOfString:bad options:NSLiteralSearch].location != NSNotFound) return NO;
+    NSArray *allowed = @[@"!\"air.buffer\"", @"!\"air.texture\"", @"!\"air.sampler\"", @"!\"air.thread_position_in_grid\"",
+                         @"!\"air.threads_per_grid\""];
+    for (NSString *needle in @[[NSString stringWithFormat:@"@%@, ", fname], [NSString stringWithFormat:@"@\"%@\", ", fname]])
+    for (NSRange r = NSMakeRange(0, ll.length);;) {
+        NSRange m = [ll rangeOfString:needle options:NSLiteralSearch range:r];
+        if (m.location == NSNotFound) break;
+        NSRange ln = [ll lineRangeForRange:m];
+        r = NSMakeRange(NSMaxRange(ln), ll.length - NSMaxRange(ln));
+        if ([ll characterAtIndex:ln.location] != '!' || [ll rangeOfString:@" = !{" options:NSLiteralSearch range:ln].location == NSNotFound) continue;
+        // `!K = !{ptr @fname, !outputs, !args, ...}`: the third token is the argument list
+        NSArray<NSString *> *kt = nvmtl_air_tuple_tokens([ll substringWithRange:ln]);
+        if (kt.count < 3 || ![kt[2] hasPrefix:@"!"]) return NO;
+        NSRange al = [ll rangeOfString:[NSString stringWithFormat:@"\n%@ = !{", kt[2]] options:NSLiteralSearch];
+        if (al.location == NSNotFound) return NO;
+        for (NSString *arg in nvmtl_air_tuple_tokens([ll substringWithRange:[ll lineRangeForRange:NSMakeRange(al.location + 1, 1)]])) {
+            NSRange an = [ll rangeOfString:[NSString stringWithFormat:@"\n%@ = !{", arg] options:NSLiteralSearch];
+            if (an.location == NSNotFound) return NO;
+            NSArray<NSString *> *at = nvmtl_air_tuple_tokens([ll substringWithRange:[ll lineRangeForRange:NSMakeRange(an.location + 1, 1)]]);
+            if (at.count < 2 || ![allowed containsObject:at[1]]) return NO;
+            NSUInteger as = [at indexOfObject:@"!\"air.address_space\""];
+            if (as != NSNotFound && as + 1 < at.count && [at[as + 1] isEqualToString:@"i32 3"]) return NO;
+        }
+        return YES;
+    }
+    return NO;
+}
+BOOL nvmtl_air_grid_only(NVMTLFunction *fn)
+{
+    return fn ? nvmtl_air_grid_only_scan(fn->_air, fn->_fname) : NO;
+}
+
 // One `air.struct_type_info` tuple: members of `i32 offset, i32 size, i32 count, !"type", !"name",
 // !"air.indirect_argument", leaf`. A leaf is either a node with the member's `air.location_index` (its [[id]] inside the
 // struct), or, for a nested struct - whose member starts with `!"air.struct_type_info", !child` - `i32 id`, the
