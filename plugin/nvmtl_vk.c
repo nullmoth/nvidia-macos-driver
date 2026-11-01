@@ -4861,8 +4861,62 @@ int nvmtl_vk_cmd_dispatch_sass(nvk_cmdbuf *c,
     return 0;
 }
 
+#define NVMTL_DT_MAX 256
+struct nvmtl_dt_rec { char name[48]; uint32_t t[3], l[3]; };
+static __thread const char *t_dt_label;
+void nvmtl_vk_dispatch_label(const char *name) { t_dt_label = name; }
+static int nvmtl_dt_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_DISPATCH_TIME"); on = e && e[0] == '1'; } return on; }
+/* returns the slot whose timestamps bracket this dispatch, or -1 */
+static int nvmtl_dt_begin(nvk_cmdbuf *c, const uint32_t t[3], const uint32_t l[3])
+{
+    if (!nvmtl_dt_on() || !g_timestamp_bits || c->dt_n >= NVMTL_DT_MAX) return -1;
+    if (!c->dt_pool) {
+        VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, 2 * NVMTL_DT_MAX, 0 };
+        VkQueryPool qp;
+        if (!c->dt && !(c->dt = calloc(NVMTL_DT_MAX, sizeof *c->dt))) return -1;
+        if (pvkCreateQueryPool(g_dev, &qi, NULL, &qp) != VK_SUCCESS) return -1;
+        pvkCmdResetQueryPool(c->cb, qp, 0, 2 * NVMTL_DT_MAX); c->dt_pool = (void *)qp;
+    }
+    struct nvmtl_dt_rec *r = &c->dt[c->dt_n];
+    snprintf(r->name, sizeof r->name, "%s", t_dt_label ? t_dt_label : "-");
+    memcpy(r->t, t, sizeof r->t); memcpy(r->l, l, sizeof r->l);
+    pvkCmdWriteTimestamp(c->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, (VkQueryPool)c->dt_pool, 2 * c->dt_n);
+    return (int)c->dt_n;
+}
+static void nvmtl_dt_end(nvk_cmdbuf *c, int slot)
+{
+    if (slot < 0) return;
+    pvkCmdWriteTimestamp(c->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, (VkQueryPool)c->dt_pool, 2 * (uint32_t)slot + 1);
+    c->dt_n = (unsigned)slot + 1;
+}
+static void nvmtl_dt_collect(nvk_cmdbuf *c)
+{
+    if (!c->dt_pool) return;
+    const unsigned n = c->dt_n;
+    uint64_t *r = n ? calloc(2 * n, sizeof *r) : NULL;
+    if (r && pvkGetQueryPoolResults(g_dev, (VkQueryPool)c->dt_pool, 0, 2 * n, sizeof(uint64_t) * 2 * n, r, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+        static FILE *f; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static uint64_t seq;
+        pthread_mutex_lock(&mu);
+        if (!f) { char fp[512]; const char *td = getenv("TMPDIR"); snprintf(fp, sizeof fp, "%s/nvmtl-disptime-%d.log", td && *td ? td : "/private/tmp", (int)getpid()); f = fopen(fp, "a"); }
+        const double us = g_lim.timestampPeriod / 1000.0; const uint64_t mask = g_timestamp_bits >= 64 ? ~0ull : ((1ull << g_timestamp_bits) - 1);
+        seq++;
+        for (unsigned i = 0; f && i < n; i++) {
+            const struct nvmtl_dt_rec *d = &c->dt[i];
+            fprintf(f, "cb %llu d %u %s threads %ux%ux%u tg %ux%ux%u gpu_us %.2f gap_us %.2f\n", (unsigned long long)seq, i, d->name,
+                    d->t[0], d->t[1], d->t[2], d->l[0], d->l[1], d->l[2], (double)((r[2 * i + 1] - r[2 * i]) & mask) * us,
+                    i ? (double)((r[2 * i] - r[2 * i - 1]) & mask) * us : 0.0);
+        }
+        if (f) fflush(f);
+        pthread_mutex_unlock(&mu);
+    }
+    free(r);
+    pvkDestroyQueryPool(g_dev, (VkQueryPool)c->dt_pool, NULL); c->dt_pool = NULL; c->dt_n = 0;
+    free(c->dt); c->dt = NULL;
+}
+
 void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_t threads[3], const uint32_t tgIn[3])
 {
+    const int dt_slot = nvmtl_dt_begin(c, threads, tgIn);
     uint32_t tg[3], groups[3];
     for (int d = 0; d < 3; d++) { if (!tgIn[d] || !threads[d]) return; tg[d] = tgIn[d]; groups[d] = (threads[d] + tg[d] - 1) / tg[d]; }
     if (!(p = nvmtl_align_guard_pick(c, p))) { c->skipped++; return; }
@@ -4908,6 +4962,7 @@ void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_
             pvkCmdDispatch(c->cb, n[0], n[1], n[2]);
         }
     }
+    nvmtl_dt_end(c, dt_slot);
 }
 void nvmtl_vk_cmd_dispatch_indirect_tg(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *b, size_t off, const uint32_t tgIn[3])
 {
@@ -6245,6 +6300,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
             if (nvmtl_vk_interval_seconds(&c->timing, &a, &b)) c->timing.valid = 0;
         }
     }
+    nvmtl_dt_collect(c);
     if (c->pt_pool && c->pt_n) {
         uint64_t r[256] = {0}; const unsigned n = c->pt_n;
         if (pvkGetQueryPoolResults(g_dev, (VkQueryPool)c->pt_pool, 0, 2 * n, sizeof(uint64_t) * 2 * n, r, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
