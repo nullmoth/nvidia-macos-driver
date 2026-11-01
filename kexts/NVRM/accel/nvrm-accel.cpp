@@ -30,6 +30,7 @@
 #include "../nvrm_utilization_abi.h"
 #include "../nvrm_telemetry_cache.h"
 #include "../nvrm_telemetry_properties.h"
+#include "nvrm_smc_bridge.h"
 class NVMemoryMap;
 static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
                                            unsigned long long len, unsigned long long align);
@@ -118,7 +119,9 @@ extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NMXAccel, "0.1", _start, _stop) }
 extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NVAccel, "0.1", _start, _stop) }
 #endif
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d) { return KERN_SUCCESS; }
-extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return KERN_SUCCESS; }
+extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  {
+    return nvrmSMCCanUnload() ? KERN_SUCCESS : KERN_FAILURE;
+}
 
 class NVEventMachine : public IOAccelEventMachineFast2 {
     OSDeclareDefaultStructors(NVEventMachine)
@@ -296,6 +299,7 @@ public:
     uint64_t            fUtilUpdated = 0;
     bool                fUtilValid = false;
     NVRMTelemetryCache  fTelemetry = {};
+    NVRMSMCBridge      *fSMC = nullptr;
     IONotifier *fFBNote = nullptr;
     IONotifier *fIntelNote = nullptr;
     static NVAccel *gAccel;
@@ -896,6 +900,7 @@ public:
             stopUtilization();
             return;
         }
+        fSMC = nvrmSMCCreate(this);
         fUtilTimer->setTimeoutMS(kNvTempFirstMs);
 #endif
     }
@@ -911,6 +916,7 @@ public:
             fUtilTimer->release(); fUtilTimer = nullptr;
         }
         if (fUtilLoop) { fUtilLoop->release(); fUtilLoop = nullptr; }
+        nvrmSMCStop(fSMC); fSMC = nullptr;
         if (fUtilProvider) { fUtilProvider->release(); fUtilProvider = nullptr; }
         if (fUtilLock) { IOLockFree(fUtilLock); fUtilLock = nullptr; }
         fUtilValid = false;
@@ -980,7 +986,10 @@ public:
         } else {
             fUtilValid = false;
         }
+        const NVRMTelemetry published = nvrmTelemetryCacheSnapshot(&fTelemetry, nowNs, kNvUtilMaxAgeNs);
+        const uint64_t fanArrival = fTelemetry.groups[NVRM_TELEMETRY_CACHE_FANS].arrivalNs;
         IOLockUnlock(fUtilLock);
+        nvrmSMCTick(fSMC, published, fanArrival);
     }
 
     static void setSensorStatistic(OSDictionary *d, const char *key, bool valid, unsigned long long value) {
@@ -1044,6 +1053,7 @@ public:
     // Read-copy-modify-write: the family keeps 70-odd keys in this dictionary and replaces it
     // wholesale every 0.25-2 s, so the copy is taken from whatever is in it at this moment.
     void publishStatistics() {
+        nvrmSMCTemperature(fSMC, fTempC > 0 ? static_cast<unsigned>(fTempC) : 0);
         OSObject *property = copyProperty("PerformanceStatistics");
         OSDictionary *cur = OSDynamicCast(OSDictionary, property);
         OSDictionary *d = cur ? OSDynamicCast(OSDictionary, cur->copyCollection()) : nullptr;
