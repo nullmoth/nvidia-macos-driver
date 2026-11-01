@@ -3,6 +3,16 @@
 #include <cstdio>
 
 int main() {
+    struct Entry { unsigned key, value; } entries[23];
+    auto compare = [](unsigned a, unsigned b) { return a < b ? -1 : a > b ? 1 : 0; };
+    for (unsigned i = 0; i < 23; ++i) entries[i] = {23 - i, (23 - i) * 7};
+    nvrmSMCSort(entries, 23, compare);
+    for (unsigned i = 0; i < 23; ++i)
+        assert(entries[i].key == i + 1 && entries[i].value == (i + 1) * 7);
+    nvrmSMCSort(entries, 23, compare); // already sorted
+    nvrmSMCSort(entries, 1, compare);
+    nvrmSMCSort<Entry>(nullptr, 0, compare);
+
     // Seven motherboard channels, including stopped fans, all remain reserved.
     NVRMSMCInventory board {110, 7, 0x7f, 0};
     auto plan = nvrmSMCPlan(board, 3);

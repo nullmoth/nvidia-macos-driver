@@ -3,6 +3,21 @@
 
 enum { NVRM_SMC_MAX_FANS = 10, NVRM_SMC_MAX_GPUS = 10 };
 
+// The plugin has at most 23 keys. Sort its private array before publication,
+// without importing Lilu's qsort implementation or any kernel sort symbol.
+template <typename Entry, typename Compare>
+static inline void nvrmSMCSort(Entry *entries, unsigned count, Compare compare) {
+    for (unsigned i = 1; i < count; ++i) {
+        const Entry saved = entries[i];
+        unsigned j = i;
+        while (j && compare(saved.key, entries[j - 1].key) < 0) {
+            entries[j] = entries[j - 1];
+            --j;
+        }
+        entries[j] = saved;
+    }
+}
+
 struct NVRMSMCInventory {
     unsigned keyCount;
     unsigned fanCount;

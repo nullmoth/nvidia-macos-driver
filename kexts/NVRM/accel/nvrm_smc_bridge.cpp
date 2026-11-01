@@ -237,7 +237,9 @@ static void registerSensors(NVRMSMCBridge *b, unsigned fanMask) {
         status(b, "SMC inventory changed or allocation failed; no keys submitted");
         vsmc->release(); apple->release(); return;
     }
-    qsort(b->plugin.data.data(), b->plugin.data.size(), sizeof(NVRMVirtualSMCKeyValue), NVRMVirtualSMCKeyValue::compare);
+    nvrmSMCSort(b->plugin.data.data(), b->plugin.data.size(), [](SMC_KEY a, SMC_KEY c) {
+        return NVRMVirtualSMCKeyValue::compare(a, c);
+    });
     // The SDK retains pointers even after partial submission failure. From this
     // point the descriptor, values and containing code must live until reboot.
     b->attempted = true;
