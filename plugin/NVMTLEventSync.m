@@ -531,6 +531,13 @@ static int nvmtl_skip_empty_on(void) {
     [self nvmtlReleaseCapacity];
 }
 - (void)nvmtlFinishCallbacks {
+    if (nvmtl_cbt_on() && _cbtSeq)
+        // C seq create commit firstSubmit gpuStart gpuEnd fenceSeen done nDispatch firstKernel (ns, CLOCK_UPTIME_RAW)
+        nvmtl_cbt_line("C %llu %llu %llu %llu %llu %llu %llu %llu %u %s\n", (unsigned long long)_cbtSeq,
+            (unsigned long long)_cbtCreate, (unsigned long long)_cbtCommit, (unsigned long long)(_legacyKernelStart * 1e9),
+            (unsigned long long)(_gpuStart * 1e9), (unsigned long long)(_gpuEnd * 1e9),
+            (unsigned long long)(_gpuTimingSeen ? _gpuTiming.host_after_ns : 0), (unsigned long long)nvmtl_cbt_now(),
+            _cbtND, _cbtK[0] ? _cbtK : "-");
     [_completionCondition lock];
     NSArray *handlers = [_handlers copy]; [_handlers removeAllObjects];
     [self nvmtlDispatchHandlers:handlers scheduled:NO];
