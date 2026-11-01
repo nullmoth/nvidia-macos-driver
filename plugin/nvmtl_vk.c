@@ -1252,6 +1252,7 @@ static int bpark_take(size_t size, int host_visible, nvk_buffer *out)
     pthread_mutex_unlock(&g_bpark_lock);
     if (hit < 0) return -1;
     *out = got; g_buf_made++;
+    out->fresh = 0;   // recycled memory holds the last owner's bytes: it is cleared like any other
     atomic_fetch_add(&g_bpark_reused, 1); bpark_census("reuse");
     return 0;
 }
@@ -1431,6 +1432,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
         return -1; } }
     g_alloc_bytes += mr.size;
     g_buf_made++;
+    if (host_visible && out->map) out->fresh = 1;
     if ((g_buf_made & 0xFFF) == 0) nvlog("buffer census: %llu made, %llu gone, %llu live, %zu bytes allocated; pool %llu blocks, %llu pooled live, %llu bytes in ranges",
         (unsigned long long)g_buf_made, (unsigned long long)g_buf_gone, (unsigned long long)(g_buf_made - g_buf_gone), g_alloc_bytes,
         (unsigned long long)g_pool_blocks, (unsigned long long)g_pool_live, (unsigned long long)g_pool_bytes);
