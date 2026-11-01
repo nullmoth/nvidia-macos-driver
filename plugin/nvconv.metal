@@ -220,16 +220,17 @@ kernel void nvconv_reduce(device const float *src [[buffer(0)]], device const fl
     const uint M = batch * dh * dw, N = cout;
     if (gid >= M * N) return;
     const uint m = gid / N, co = gid % N;
+    const uint ep = epi & 0xffu;   // the driver sends the depth-to-space factor in the byte above (split-K never runs with one)
     float v = 0.0f;
     for (uint z = 0; z < nsplit; z++) v += part[(z * M + m) * N + co];
     const uint ox = m % dw, t2 = m / dw, oy = t2 % dh, n = t2 / dh;
     const uint ob = ox * oW + oy * oH + n * oN;
-    if (epi == 4) { v = v > 0.0f ? v : v * bias[co]; }
+    if (ep == 4) { v = v > 0.0f ? v : v * bias[co]; }
     else {
         v += bias[co];
-        if (epi == 1 || epi == 5) v = max(v, 0.0f); else if (epi == 2) v = clamp(v, 0.0f, 6.0f); else if (epi == 3) v = 1.0f / (1.0f + exp(-v));
+        if (ep == 1 || ep == 5) v = max(v, 0.0f); else if (ep == 2) v = clamp(v, 0.0f, 6.0f); else if (ep == 3) v = 1.0f / (1.0f + exp(-v));
     }
-    if ((epi == 5 || epi == 6) && co < cin && ox < sw && oy < sh) v += src[co * sC + ox * sW + oy * sH + n * sN];
+    if ((ep == 5 || ep == 6) && co < cin && ox < sw && oy < sh) v += src[co * sC + ox * sW + oy * sH + n * sN];
     if (form == 5) v += res[co * kp[68] + ox * kp[69] + oy * kp[70] + n * kp[71]];   // residual's own strides, as above
     device float *dst = form == 5 ? dst4 : dst3;
     dst[co * oC + ob] = v;
