@@ -108,7 +108,10 @@ static inline void nvconv_body(device const float *src ,
             // Solved from a dumped Super Resolution layer, where MPS matched 5 to 4.5e-7 on all 147,456 outputs.
             // Only an output the same size and channel count as its input can be one; verification decides the rest.
             if ((epi == 5 || epi == 6) && co < cin && ox < sw && oy < sh) v += src[co * sC + ox * sW + oy * sH + n * sN];
-            if (res) v += res[co * oC + ob];
+            // the residual has its OWN strides (array 3, words 68..71): a concat-branch output is strided (Super
+            // Resolution's 48x48 layer writes 64 of 256 channels per pixel) while its residual input stays dense, and
+            // reading it with the output's strides was the whole of that layer's refusal (dump 43204-68, numpy exact)
+            if (res) v += res[co * kp[68] + ox * kp[69] + oy * kp[70] + n * kp[71]];
             dst[co * oC + ob] = v;
         }
     }
@@ -213,7 +216,7 @@ kernel void nvconv_reduce(device const float *src [[buffer(0)]], device const fl
         if (epi == 1 || epi == 5) v = max(v, 0.0f); else if (epi == 2) v = clamp(v, 0.0f, 6.0f); else if (epi == 3) v = 1.0f / (1.0f + exp(-v));
     }
     if ((epi == 5 || epi == 6) && co < cin && ox < sw && oy < sh) v += src[co * sC + ox * sW + oy * sH + n * sN];
-    if (form == 5) v += res[co * oC + ob];
+    if (form == 5) v += res[co * kp[68] + ox * kp[69] + oy * kp[70] + n * kp[71]];   // residual's own strides, as above
     device float *dst = form == 5 ? dst4 : dst3;
     dst[co * oC + ob] = v;
 }

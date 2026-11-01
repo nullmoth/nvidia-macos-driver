@@ -4402,7 +4402,8 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
                                 kp[ob + 8], kp[ob + 9], kp[ob + 10], kp[ob + 11], cout, dw, dh, kp[ob + 4], kp[ob + 5], kp[ob + 6], kp[ob + 7]);
         NVC_SKIP(why); }
     if (nar >= 4 && (kp[44] != cout || kp[48] != 1)) NVC_SKIP("bias descriptor");
-    if (nar == 5 && (kp[64] != cout || kp[65] != dw || kp[66] != dh || kp[67] != batch || kp[68] != 1 || (dw > 1 && kp[69] != cout) || (dh > 1 && kp[70] != cout * dw)))
+    // the residual is only read, through its own strides (nvconv.metal), so any layout is fine; only its span must fit
+    if (nar == 5 && (kp[64] != cout || kp[65] != dw || kp[66] != dh || kp[67] != batch))
         NVC_SKIP("residual descriptor");
     NSArray *bi = e->_bufAt[@0], *bw = e->_bufAt[@1], *bo = e->_bufAt[@(nar - 1)], *bb = nar >= 4 ? e->_bufAt[@2] : nil, *br = nar == 5 ? e->_bufAt[@3] : nil;
     if (!bi || !bw || !bo || (nar >= 4 && !bb) || (nar == 5 && !br)) NVC_SKIP("buffer slot unbound");
@@ -4412,7 +4413,8 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     const uint64_t nout = (uint64_t)cout * dw * dh * batch;
     // nspan: floats from the output binding to one past the last output, gaps included (== nout when dense)
     const uint64_t nspan = (uint64_t)(batch - 1) * kp[ob + 11] + (uint64_t)(dh - 1) * kp[ob + 10] + (uint64_t)(dw - 1) * kp[ob + 9] + cout;
-    if (!NVC_ROOM(bi, nin) || !NVC_ROOM(bw, nwt) || !NVC_ROOM(bo, nspan) || (bb && !NVC_ROOM(bb, cout)) || (br && !NVC_ROOM(br, nout)) || nspan > 0xffffffffull) NVC_SKIP("buffer too short for f32");
+    const uint64_t nres = nar == 5 ? (uint64_t)(cout - 1) * kp[68] + (uint64_t)(dw - 1) * kp[69] + (uint64_t)(dh - 1) * kp[70] + (uint64_t)(batch - 1) * kp[71] + 1 : 0;
+    if (!NVC_ROOM(bi, nin) || !NVC_ROOM(bw, nwt) || !NVC_ROOM(bo, nspan) || (bb && !NVC_ROOM(bb, cout)) || (br && !NVC_ROOM(br, nres)) || nspan > 0xffffffffull) NVC_SKIP("buffer too short for f32");
     #undef NVC_ROOM
     const uint64_t M = (uint64_t)batch * dh * dw;
     const BOOL small = ((M + 127) / 128) * ((cout + 63) / 64) < 60;
@@ -4449,7 +4451,7 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     copyOut(@"in", bi[0], [bi[1] unsignedLongValue], nin);
     copyOut(@"w", bw[0], [bw[1] unsignedLongValue], nwt);
     if (bb) copyOut(@"b", bb[0], [bb[1] unsignedLongValue], cout);
-    if (br) copyOut(@"res", br[0], [br[1] unsignedLongValue], nout);
+    if (br) copyOut(@"res", br[0], [br[1] unsignedLongValue], nres);
     copyOut(@"mps", outBuf, outOff, nspan);
     NSData *kpCopy = dumps ? [NSData dataWithBytes:e->_nvcKP length:e->_nvcKPLen] : nil;
     NSData *cpCopy = dumps ? [NSData dataWithBytes:e->_nvcCP length:e->_nvcCPLen] : nil;
