@@ -21,6 +21,9 @@ typedef struct __IOSurface { unsigned seed; unsigned char cpu[4]; } Surface;
 typedef int IOReturn;
 enum { kIOSurfaceLockReadOnly = 1 };
 typedef struct { unsigned w,h,bpp; unsigned char gpu[4]; } Image;
+typedef void nvk_buffer;
+typedef void *(*nvmtl_vk_lease_retain_fn)(void *);
+typedef void (*nvmtl_vk_lease_release_fn)(void *);
 static dispatch_semaphore_t entered, release_read;
 static unsigned uploads, gpu_seed;
 static unsigned long long g_surfin_skip, g_surfin_copy;
@@ -41,7 +44,8 @@ static void *IOSurfaceGetBaseAddress(IOSurfaceRef s) { return s->cpu; }
 static size_t IOSurfaceGetAllocSize(IOSurfaceRef s) { return sizeof s->cpu; }
 // the imported-pages upload is unavailable here, so every upload takes the CPU copy this test checks
 // the host-page fast paths (#399) report "not available", so the copies below take the plain path this test checks
-static int nvmtl_vk_image_write_host(void *q, Image *img, void *base, size_t row, size_t bytes, void *cache) { return -1; }
+static int nvmtl_vk_image_write_host(void *q, Image *img, void *base, size_t row, size_t bytes, void *cache,
+    void *lease, nvmtl_vk_lease_retain_fn retain, nvmtl_vk_lease_release_fn release) { return -1; }
 static int nvmtl_vk_image_read_host(void *q, Image *img, void *base, size_t row, size_t bytes, void *cache) { return -1; }
 static uint32_t nvmtl_vram_gen(IOSurfaceRef s, NSUInteger p) { return 1; }
 static int nvmtl_vram_tag_current(IOSurfaceRef s, NSUInteger p, unsigned seed) { return gpu_seed == seed; }
@@ -79,10 +83,24 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) {
 - (void)nvmtlSurfaceIn;
 - (BOOL)nvmtlSurfaceOut;
 - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied;
+- (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied copied:(BOOL)copied;
+@end
+@interface NVMTLSurfaceUploadLease : NSObject
+- (instancetype)initWithSurface:(IOSurfaceRef)surface options:(uint32_t)options pages:(id)pages;
+@end
+static id nvmtl_surface_page_lease(NVMTLTexture *r, nvk_buffer *pages) { (void)r; (void)pages; return nil; }
+static void *nvmtl_surface_upload_lease_retain(void *lease) { (void)lease; return NULL; }
+static void nvmtl_surface_upload_lease_release(void *lease) { (void)lease; }
+@implementation NVMTLSurfaceUploadLease
+- (instancetype)initWithSurface:(IOSurfaceRef)surface options:(uint32_t)options pages:(id)pages {
+    (void)surface; (void)options; (void)pages; return [super init];
+}
 @end
 @implementation NVMTLTexture
 - (BOOL)nvmtlSurfaceCopyable { return YES; }
 '''
+methods = methods.replace('static nvk_buffer *nvmtl_surface_host_pages(NVMTLTexture *r, void *base, size_t bytes);',
+    'static nvk_buffer *nvmtl_surface_host_pages(NVMTLTexture *r, void *base, size_t bytes) { return r->_hostPages; }')
 checks = r'''
 @end
 int main(int argc, char **argv) { @autoreleasepool {
@@ -144,6 +162,12 @@ int main(int argc, char **argv) { @autoreleasepool {
     assert(busyWaits==1 && c->_clientWritten);
     busyForeign=0; cs.seed++; [c nvmtlSurfaceIn];
     assert(busyWaits==2);
+    // A completed capture copy keeps the CPU pixels, advances the seed and never calls either GPU readback path.
+    // The readback stub would block waiting for release_read, which is deliberately not signalled again here.
+    Surface captured={.seed=10,.cpu={17,18,19,20}};
+    NVMTLTexture *capture=[NVMTLTexture new];capture->_surf=&captured;capture->_i=(Image){.w=1,.h=1,.bpp=4,.gpu={0,0,0,0}};
+    assert([capture nvmtlSurfaceOutDirtied:NO copied:YES]);
+    assert(capture->_surfSynced && capture->_surfSeed==11 && captured.cpu[0]==17 && captured.cpu[3]==20);
     puts("PASS: overlapping publication preserves GPU pixels; later CPU edits import; a publication after the commit's "
          "VRAM mark never waits for the accelerator lock and retries a busy re-mark off its thread; another process's "
          "write is waited for before import");

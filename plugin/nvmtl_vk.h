@@ -111,6 +111,8 @@ uint64_t nvmtl_perf_now(void);
 void nvmtl_perf_note(int what, uint64_t t0, uint64_t bytes);
 int  nvmtl_vk_buffer_import_host(void *ptr, size_t size, nvk_buffer *out);
 size_t nvmtl_vk_host_import_align(void);
+typedef void *(*nvmtl_vk_lease_retain_fn)(void *lease);
+typedef void (*nvmtl_vk_lease_release_fn)(void *lease);
 #define NVMTL_MAX_GEOMS 256
 typedef struct { void *as; uint64_t addr; size_t size; int instance; } nvk_accel;
 typedef struct { uint64_t vertices; uint32_t stride; uint32_t count; uint32_t vertex_format; uint32_t max_vertex;
@@ -222,8 +224,11 @@ extern void (*nvmtl_pre_release_hook)(void *);
 extern void (*nvmtl_pre_submit_hook)(void);
 int  nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes);
 int  nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes);
-int  nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache);
+int  nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache,
+                               void *lease, nvmtl_vk_lease_retain_fn retain_lease, nvmtl_vk_lease_release_fn release_lease);
 int  nvmtl_vk_image_read_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache);
+int  nvmtl_vk_record_image_to_host(nvk_cmdbuf *c, nvk_image *img, const nvk_buffer *host, size_t offset, size_t row_bytes);
+int  nvmtl_vk_host_pages_hold(void *base, size_t bytes, nvk_buffer *out);
 void nvmtl_vk_host_pages_drop(nvk_buffer *cache);
 int  nvmtl_vk_copy_buffer(nvk_queue *q, nvk_buffer *src, size_t srcOff, nvk_buffer *dst, size_t dstOff, size_t size);
 int  nvmtl_vk_image_create_mips(uint32_t w, uint32_t h, int bgra, uint32_t mips, nvk_image *out);
@@ -314,9 +319,9 @@ void nvmtl_vk_cmd_dispatch_indirect(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *
 void nvmtl_vk_cmd_barrier(nvk_cmdbuf *c);
 void nvmtl_vk_buffer_destroy(nvk_buffer *b);
 void nvmtl_vk_image_destroy(nvk_image *i);
-// Finish any in-flight asynchronous texture upload to this image (NVMTL_ASYNC_TEX_UPLOAD) before its memory
-// is read back, migrated or freed. A no-op when none is pending, which is always the case with the flag off.
-void nvmtl_vk_image_upload_barrier(nvk_image *img);
+// Finish in-flight asynchronous uploads before this image is read back, migrated, overwritten or freed. Returns nonzero
+// if the per-image gate cannot be acquired or a fence/backend failure makes the image backing unsafe to touch.
+int nvmtl_vk_image_upload_barrier(nvk_image *img);
 void nvmtl_vk_queue_destroy(nvk_queue *q);
 size_t nvmtl_vk_allocated_bytes(void);
 uint64_t nvmtl_vk_buffer_address(nvk_buffer *b);
