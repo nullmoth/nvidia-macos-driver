@@ -31,6 +31,16 @@ PREFIX = r'''
 #include <stdio.h>
 #include <assert.h>
 #define nvlog(...) ((void)0)
+typedef int BOOL;
+typedef unsigned long NSUInteger;
+enum { NO=0, YES=1, MTLPixelFormatRGBA8Unorm=70, MTLPixelFormatRGBA8Unorm_sRGB=71,
+       MTLPixelFormatBGRA8Unorm=80, MTLPixelFormatBGRA8Unorm_sRGB=81, MTLTextureType2D=2 };
+typedef struct { size_t x,y,z; } MTLOrigin;
+typedef struct { size_t width,height,depth; } MTLSize;
+typedef struct { MTLOrigin origin; MTLSize size; } MTLRegion;
+typedef struct { unsigned w,h,bpp,mtl_type,mips,layers,samples,bw,bh; } nvk_image;
+typedef struct { void *_surf,*_parent,*_viewParent,*_tbView; unsigned _baseLevel,_baseSlice,_fmt;
+                 BOOL _vramMulti; nvk_image _i; } NVMTLTexture;
 static int mode;
 static int sysctlbyname(const char *n, void *p, size_t *len, void *v, size_t vl) {
     (void)v; (void)vl;
@@ -66,6 +76,20 @@ static int nvmtl_vk_copy_buffer(nvk_queue *q, nvk_buffer *s, size_t so,
 '''
 
 MAIN = r'''
+static void overwrite(void) {
+    NVMTLTexture t={._surf=&t,._fmt=MTLPixelFormatRGBA8Unorm,
+        ._i={.w=32,.h=16,.bpp=4,.mtl_type=MTLTextureType2D,.mips=1,.layers=1,.samples=1,.bw=1,.bh=1}};
+    MTLRegion r={{0,0,0},{32,16,1}};
+    const unsigned formats[]={70,71,80,81};
+    for (size_t f=0;f<4;f++) {
+        t._fmt=formats[f]; t._vramMulti=NO;
+        assert(nvmtl_surface_full_overwrite(&t,r,0,0));
+        t._vramMulti=YES;
+        assert(!nvmtl_surface_full_overwrite(&t,r,0,0));
+    }
+    t._vramMulti=NO; r.size.width=31;
+    assert(!nvmtl_surface_full_overwrite(&t,r,0,0));
+}
 static void bounds(void) {
     size_t off = 999;
     assert(nvmtl_mp_plane_range(0x1000, 0x1040, 4160, 32, 32, 4, 128, 32, &off) && off == 64);
@@ -102,7 +126,7 @@ int main(int argc, char **argv) {
     if (setting < 0) unsetenv("NVMTL_SURF_MULTIPLANE");
     else setenv("NVMTL_SURF_MULTIPLANE", setting == 1 ? "1" : setting == 2 ? "10" : "0", 1);
     assert(nvmtl_mp_on() == (mode == 2 && setting == 1));
-    bounds(); for (int i = 0; i < 4; i++) copy(i);
+    bounds(); overwrite(); for (int i = 0; i < 4; i++) copy(i);
     return 0;
 }
 '''
@@ -112,11 +136,12 @@ def main():
     gate = function("plugin/NVMTLDevice.m", "nvmtl_mp_on")
     bounds = function("plugin/NVMTLDevice.m", "nvmtl_mp_plane_range")
     copy = function("plugin/nvmtl_vk.c", "nvmtl_vk_buffer_fill_from_surface")
+    overwrite = function("plugin/NVMTLObjects.m", "nvmtl_surface_full_overwrite")
     with tempfile.TemporaryDirectory(prefix="nvmtl-multiplane-") as tmp:
         tmp = pathlib.Path(tmp)
         source, exe = tmp / "test.c", tmp / "test"
         def build(body):
-            source.write_text(PREFIX + gate + "\n" + bounds + "\n" + body + MAIN)
+            source.write_text(PREFIX + gate + "\n" + bounds + "\n" + overwrite + "\n" + body + MAIN)
             subprocess.run(["clang", "-std=gnu11", "-O1", "-g", "-fsanitize=address,undefined",
                             "-o", str(exe), str(source)], check=True)
         build(copy)

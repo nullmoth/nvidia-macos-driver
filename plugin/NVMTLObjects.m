@@ -1042,7 +1042,7 @@ static void nvmtl_nonzero(const void *base, size_t row, size_t rowValid, uint32_
 // Keep all partial updates, views, arrays, volumes, compressed and multisample images
 // on SurfaceIn: their untouched bytes still have to be preserved.
 static BOOL nvmtl_surface_full_overwrite(NVMTLTexture *t, MTLRegion r, NSUInteger level, NSUInteger slice) {
-    if (!t || !t->_surf || t->_parent || t->_viewParent || t->_tbView || t->_baseLevel || t->_baseSlice || level || slice)
+    if (!t || !t->_surf || t->_vramMulti || t->_parent || t->_viewParent || t->_tbView || t->_baseLevel || t->_baseSlice || level || slice)
         return NO;
     const nvk_image *i = &t->_i;
     if (i->bpp != 4 || (t->_fmt != MTLPixelFormatBGRA8Unorm && t->_fmt != MTLPixelFormatBGRA8Unorm_sRGB
@@ -5163,7 +5163,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
             (unsigned long)d.colorAttachments[0].storeAction, d.colorAttachments[0].clearColor.red, d.colorAttachments[0].clearColor.green,
             d.colorAttachments[0].clearColor.blue, d.colorAttachments[0].clearColor.alpha, d.depthAttachment.texture != nil);
         if (sr->_surf) {
-            if (d.colorAttachments[0].loadAction == MTLLoadActionClear) nvmtl_surface_overwrite_recorded(self, sr);
+            if (d.colorAttachments[0].loadAction == MTLLoadActionClear && !sr->_vramMulti) nvmtl_surface_overwrite_recorded(self, sr);
             else nvmtl_surface_in_for_cb(self, sr);
             nvmtl_surf_dirty(self, sr); } }
     const float defaultBlend[4] = { 0, 0, 0, 0 };

@@ -1343,7 +1343,7 @@ static char nvmtl_surface_cache_key;
     if (nvmtl_surface_image_create(t, surf, plane, (uint32_t)w, (uint32_t)h, vkf, bpp, a8, wantStex)) {
         nvlog("newTextureWithDescriptor:iosurface:plane: image create FAILED (%zux%zu)", w, h); return nil; }
     t->_q = nvmtl_device_queue();
-    t->_surf = surf; if (surf) { CFRetain(surf); t->_surfOwned = YES; t->_clientWritten = nvmtl_busy_foreign(surf, plane) != 0; }
+    t->_surf = surf; if (surf) { CFRetain(surf); t->_surfOwned = YES; t->_clientWritten = nvmtl_busy_foreign(surf, t->_vramMulti ? 0 : plane) != 0; }
     t->_plane = plane;
     t->_fmt = d.pixelFormat;
     t->_stex = t->_i.storage != 0;
