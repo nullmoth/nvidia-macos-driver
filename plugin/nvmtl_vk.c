@@ -226,6 +226,17 @@ static int g_dual;
 static int g_wide;
 static PFN_vkCmdSetLineWidth pvkCmdSetLineWidth;
 static int g_pstat;
+static int g_compute_unchecked;   /* compute pipelines skip buffer bounds checks (see device creation) */
+/* Spare mapped bytes after every buffer allocation once compute runs unchecked: a Metal kernel reading a little past a
+ * buffer's end (Apple GPUs tolerate it) then reads mapped memory instead of faulting the channel. Pool sub-allocations
+ * already have mapped neighbours; this covers the end of each standalone allocation and each pool block.
+ * NVMTL_BUF_GUARD=<bytes> overrides the 64 KB. */
+static VkDeviceSize nvmtl_buf_guard(void)
+{
+    static long long g = -1;
+    if (g < 0) { const char *e = getenv("NVMTL_BUF_GUARD"); g = e && *e ? atoll(e) : 65536; if (g < 0) g = 0; }
+    return g_compute_unchecked ? (VkDeviceSize)g : 0;
+}
 static PFN_vkGetPipelineExecutablePropertiesKHR p_pstat_props;
 static PFN_vkGetPipelineExecutableStatisticsKHR p_pstat_stats;
 static int g_mutable;
@@ -326,6 +337,17 @@ static int nvmtl_rebind_import(const void *inside, const char *symbol, void *rep
 }
 
 INSTANCE_FNS(DECL) DEVICE_FNS(DECL)
+/* Every compute pipeline creation goes through here, so the no-bounds-check choice cannot miss a site. */
+static VkResult nvmtl_create_compute_pipeline(VkDevice dev, VkPipelineCache cache, const VkComputePipelineCreateInfo *info,
+                                              const VkAllocationCallbacks *allocator, VkPipeline *out)
+{
+    VkComputePipelineCreateInfo ci = *info;
+    VkPipelineRobustnessCreateInfoEXT rob = { VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO_EXT, ci.pNext,
+        VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT, VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT,
+        VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT_EXT, VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT_EXT };
+    if (g_compute_unchecked) ci.pNext = &rob;
+    return pvkCreateComputePipelines(dev, cache, 1, &ci, allocator, out);
+}
 #undef DECL
 #define LOAD_I(f) do { p##f = (PFN_##f)pvkGetInstanceProcAddr(g_inst, #f); if (!p##f) { nvlog("vk: missing %s", #f); return -1; } } while (0);
 #define LOAD_D(f) do { p##f = (PFN_##f)pvkGetDeviceProcAddr(g_dev, #f);   if (!p##f) { nvlog("vk: missing %s", #f); return -1; } } while (0);
@@ -456,7 +478,7 @@ static VkResult nvmtl_opaque_CreateComputePipelines(VkDevice dev, VkPipelineCach
 {
     if (count != 1) return VK_ERROR_INITIALIZATION_FAILED;
     VkPipeline handle = VK_NULL_HANDLE;
-    VkResult result = pvkCreateComputePipelines(dev, cache, count, info, allocator, &handle);
+    VkResult result = nvmtl_create_compute_pipeline(dev, cache, info, allocator, &handle);
     if (result == VK_SUCCESS) *out = handle;
     else if (handle) pvkDestroyPipeline(dev, handle, allocator);
     return result;
@@ -792,21 +814,21 @@ static int nvmtl_vk_initialize(void)
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, g_qfam, 1, &prio };
 
-    static const char *kWant[16] = { "VK_EXT_extended_dynamic_state3", "VK_EXT_depth_clip_enable", "VK_EXT_memory_budget",
+    static const char *kWant[17] = { "VK_EXT_extended_dynamic_state3", "VK_EXT_depth_clip_enable", "VK_EXT_memory_budget",
                                     "VK_KHR_acceleration_structure", "VK_KHR_ray_query", "VK_KHR_deferred_host_operations",
                                     "VK_EXT_external_memory_host",
                                     "VK_EXT_image_drm_format_modifier",
                                     "VK_KHR_external_memory_fd",
                                     "VK_EXT_mutable_descriptor_type", "VK_KHR_cooperative_matrix", "VK_EXT_calibrated_timestamps", "VK_EXT_sample_locations", "VK_KHR_pipeline_executable_properties",
-                                    "VK_EXT_provoking_vertex", "VK_KHR_vertex_attribute_divisor" };
-    const char *exts[16]; uint32_t next = 0; int have[16] = {0};
+                                    "VK_EXT_provoking_vertex", "VK_KHR_vertex_attribute_divisor", "VK_EXT_pipeline_robustness" };
+    const char *exts[17]; uint32_t next = 0; int have[17] = {0};
     uint32_t na = 0;
     if (pvkEnumerateDeviceExtensionProperties &&
         pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, NULL) == VK_SUCCESS && na) {
         VkExtensionProperties *props = calloc(na, sizeof *props);
         if (props && pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, props) == VK_SUCCESS)
             for (uint32_t i = 0; i < na; i++)
-                for (int w = 0; w < 16; w++)
+                for (int w = 0; w < 17; w++)
                     if (!have[w] && !strcmp(props[i].extensionName, kWant[w])) { have[w] = 1; exts[next++] = kWant[w]; }
         free(props);
     }
@@ -826,6 +848,15 @@ static int nvmtl_vk_initialize(void)
     g_linmod = have[7];
     g_extfd = have[8];
     { const char *e = getenv("NVMTL_PSTAT"); g_pstat = have[13] && e && *e == '1'; }
+    /* Compute pipelines run without buffer bounds checks (VK_EXT_pipeline_robustness); graphics keep the device-wide
+     * robustBufferAccess that stops WoW's login-screen vertex fetch from faulting the channel. With it on, NAK guarded
+     * every store with a branch and split each uchar4 store into four guarded byte stores: GB7 raw_process 530 us vs
+     * 211 us without (NVIDIA's own 211), particle 66.5 vs 47.8 us (NVIDIA 46-47), outputs bit-identical; GB7 96,263 vs
+     * 105,364. Compute reads past a buffer's end land in the guard space every buffer now carries (NVMTL_BUF_GUARD).
+     * NVMTL_COMPUTE_ROBUST=1 keeps compute bounds-checked. */
+    { const char *e = getenv("NVMTL_COMPUTE_ROBUST"); g_compute_unchecked = have[16] && !(e && *e == '1'); }
+    nvlog("vk: compute pipelines %s", g_compute_unchecked ? "WITHOUT buffer bounds checks (pipeline robustness; graphics keep robustBufferAccess)"
+                                                          : have[16] ? "bounds-checked (NVMTL_COMPUTE_ROBUST=1)" : "bounds-checked (VK_EXT_pipeline_robustness ABSENT)");
     g_mutable = have[9] && !getenv("NVMTL_NO_TEXBUF");
     nvlog("vk: par3 VK_EXT_mutable_descriptor_type %s — texture buffers %s", have[9] ? "present" : "ABSENT",
           g_mutable ? "ON (mutable texture/storage bands)" : have[9] ? "OFF (NVMTL_NO_TEXBUF)" : "OFF");
@@ -842,6 +873,8 @@ static int nvmtl_vk_initialize(void)
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR cmf = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR };
     static VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT mdf;
     if (g_mutable) { mdf = (VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT){ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MUTABLE_DESCRIPTOR_TYPE_FEATURES_EXT, v12.pNext, VK_TRUE }; v12.pNext = &mdf; }
+    static VkPhysicalDevicePipelineRobustnessFeaturesEXT prf;
+    if (g_compute_unchecked) { prf = (VkPhysicalDevicePipelineRobustnessFeaturesEXT){ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT, v12.pNext, VK_TRUE }; v12.pNext = &prf; }
     static VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pef;
     if (g_pstat) { pef = (VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR){ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR, v12.pNext, VK_TRUE }; v12.pNext = &pef; }
     VkPhysicalDeviceDepthClipEnableFeaturesEXT clipf = {
@@ -972,7 +1005,12 @@ static int nvmtl_vk_initialize(void)
     // mapping is an MMU FAULT_PTE that kills the channel (WoW at the login screen). Bounds-checked buffer and
     // vertex-fetch access turns those reads into zeros instead.
     enabled.robustBufferAccess = supported.robustBufferAccess;
-    nvlog("vk: robustBufferAccess %s", supported.robustBufferAccess ? "ON (out-of-range buffer reads return zeros)" : "ABSENT - out-of-range buffer reads can fault the channel");
+#if !NVMTL_RELEASE
+    // speed267 measurement arm only: NVMTL_NO_ROBUST=1 drops robust buffer access, to price what the bounds checks
+    // cost (GB7 raw_process compiles every uchar4 store into 4 branch-guarded byte stores with it on).
+    { const char *nr = getenv("NVMTL_NO_ROBUST"); if (nr && nr[0] == '1') enabled.robustBufferAccess = VK_FALSE; }
+#endif
+    nvlog("vk: robustBufferAccess %s", enabled.robustBufferAccess ? "ON (out-of-range buffer reads return zeros)" : supported.robustBufferAccess ? "OFF (NVMTL_NO_ROBUST=1, measurement only)" : "ABSENT - out-of-range buffer reads can fault the channel");
     g_sampler_anisotropy = supported.samplerAnisotropy == VK_TRUE;
     nvlog("vk: sampler anisotropy %d (max %g), mirror-clamp-to-edge %d", g_sampler_anisotropy,
           (double)g_lim.maxSamplerAnisotropy, g_sampler_mirror_clamp);
@@ -1348,7 +1386,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
     if (mt < 0) { nvlog("vk: no memory type for buffer (host_visible=%d)", host_visible); return -1; }
     if (host_visible == 2 && size > NVMTL_POOL_MAX) { int bt = bar1_memtype(mr.memoryTypeBits, mr.size); if (bt >= 0) {
         VkMemoryAllocateFlagsInfo bf = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, NULL, VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT, 0 };
-        VkMemoryAllocateInfo bi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &bf, mr.size, (uint32_t)bt };
+        VkMemoryAllocateInfo bi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &bf, mr.size + nvmtl_buf_guard(), (uint32_t)bt };
         VkDeviceMemory bm = VK_NULL_HANDLE; void *bp = NULL;
         VkResult r1 = pvkAllocateMemory(g_dev, &bi, NULL, &bm);
         VkResult r2 = r1 == VK_SUCCESS ? pvkMapMemory(g_dev, bm, 0, VK_WHOLE_SIZE, 0, &bp) : r1;
@@ -1363,7 +1401,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
         nvlog("vk: shared-in-VRAM REFUSED (alloc %d, map %d, bind %d) at %zu BAR bytes - system RAM for this process", r1, r2, r3, g_bar1_bytes); } }
     VkMemoryAllocateFlagsInfo mafi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, NULL,
                                        VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT, 0 };
-    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &mafi, mr.size, (uint32_t)mt };
+    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &mafi, mr.size + nvmtl_buf_guard(), (uint32_t)mt };
     if (!host_visible) {
         uint64_t bbud = 0, bused = 0, bfree = 0; int bmeas = 0;
         int bgate = nvmtl_vk_vram_wall(mr.size, &bfree, &bbud, &bused, &bmeas);
@@ -4779,7 +4817,7 @@ static VkPipeline nvmtl_compute_variant(nvk_pipeline *p, const uint32_t l[3])
         VkComputePipelineCreateInfo cpi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0,
             { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, (VkShaderModule)p->mod, "main", &si },
             (VkPipelineLayout)p->layout, VK_NULL_HANDLE, -1 };
-        VkResult r = pvkCreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &cpi, NULL, &found);
+        VkResult r = nvmtl_create_compute_pipeline(g_dev, VK_NULL_HANDLE, &cpi, NULL, &found);
         if (r != VK_SUCCESS) {
             if (found) pvkDestroyPipeline(g_dev, found, NULL);
             nvlog("vk: compute variant %ux%ux%u -> %d — this dispatch is SKIPPED", l[0], l[1], l[2], r); found = VK_NULL_HANDLE;
@@ -7444,7 +7482,7 @@ static int nvmtl_visibility_sum_init(void)
         VkComputePipelineCreateInfo pi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0,
                                           stage, layout, VK_NULL_HANDLE, -1 };
         VkPipeline pipeline = VK_NULL_HANDLE;
-        if (pvkCreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &pi, NULL, &pipeline) == VK_SUCCESS) {
+        if (nvmtl_create_compute_pipeline(g_dev, VK_NULL_HANDLE, &pi, NULL, &pipeline) == VK_SUCCESS) {
             g_visibility_sum_layout = layout; g_visibility_sum_pipeline = pipeline; rc = 0;
         } else {
             if (pipeline) pvkDestroyPipeline(g_dev, pipeline, NULL);
@@ -7915,7 +7953,7 @@ static int nvmtl_vk_heap_create_body(size_t size, int host_visible, nvk_heap *ou
     int mt = memtype(bits, host_visible ? (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (mt < 0) { nvlog("vk: no memory type serves a %s placement heap (bits 0x%x)", host_visible ? "shared" : "private", bits); return -1; }
     VkMemoryAllocateFlagsInfo mafi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, NULL, VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT, 0 };
-    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &mafi, size, (uint32_t)mt };
+    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &mafi, size + nvmtl_buf_guard(), (uint32_t)mt };
     VkDeviceMemory mem = VK_NULL_HANDLE;
     { uint64_t hbud = 0, hused = 0, hfree = 0; int hmeas = 0;
       int hgate = host_visible ? 0 : nvmtl_vk_vram_wall(size, &hfree, &hbud, &hused, &hmeas);
@@ -8176,7 +8214,7 @@ static int vpool_heap_create(size_t size, nvk_heap *out)
     }
     int bt = bar1_memtype(bits, size); if (bt < 0) return -1;
     VkMemoryAllocateFlagsInfo bf = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, NULL, VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT, 0 };
-    VkMemoryAllocateInfo bi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &bf, size, (uint32_t)bt };
+    VkMemoryAllocateInfo bi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &bf, size + nvmtl_buf_guard(), (uint32_t)bt };
     VkDeviceMemory bm = VK_NULL_HANDLE; void *bp = NULL;
     VkResult r1 = pvkAllocateMemory(g_dev, &bi, NULL, &bm);
     VkResult r2 = r1 == VK_SUCCESS ? pvkMapMemory(g_dev, bm, 0, VK_WHOLE_SIZE, 0, &bp) : r1;
