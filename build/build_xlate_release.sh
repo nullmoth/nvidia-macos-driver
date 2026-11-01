@@ -4,8 +4,11 @@
 # Source paths are remapped so the dylib names no build machine path; the build stops if one is left.
 set -euo pipefail
 REV=${1:?git revision}; OUT=${2:?output directory}
+# The build Mac and its build folder come from the environment, so the public tree names no machine of ours.
+H=${NULLMOTH_BUILD_HOST:?set NULLMOTH_BUILD_HOST to the build Mac ssh host}
+BASE=${NULLMOTH_BUILD_ROOT:?set NULLMOTH_BUILD_ROOT to the build folder on that Mac}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-R=$NULLMOTH_BUILD_ROOT/build/xlate-release
+R=$BASE/build/xlate-release
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 git -C "$HERE" archive "$REV" translator | tar x -C "$TMP"

@@ -6,8 +6,11 @@
 # if the compiler reports an API newer than macOS 15 used without an availability check.
 set -euo pipefail
 REV=${1:?git revision}; OUT=${2:?output directory}
+# The build Mac and its build folder come from the environment, so the public tree names no machine of ours.
+H=${NULLMOTH_BUILD_HOST:?set NULLMOTH_BUILD_HOST to the build Mac ssh host}
+BASE=${NULLMOTH_BUILD_ROOT:?set NULLMOTH_BUILD_ROOT to the build folder on that Mac}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-R=$NULLMOTH_BUILD_ROOT/build/plugin-release
+R=$BASE/build/plugin-release
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 git -C "$HERE" archive "$REV" plugin | tar x -C "$TMP"
@@ -15,7 +18,7 @@ ssh "$H" "rm -rf $R/src $R/out && mkdir -p $R/src $R/out"
 rsync -a "$TMP/plugin/" "$H:$R/src/"
 ssh "$H" "cd $R/src && xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -bundle -fobjc-arc -O1 -DNVMTL_RELEASE=1 \
   -Wno-protocol -Wno-incomplete-implementation -Werror=unguarded-availability-new \
-  -I$NULLMOTH_BUILD_ROOT/build/gpu-src/mesa/include -o ../out/NVMTLDriver NVMTLDevice.m \
+  -I$BASE/build/gpu-src/mesa/include -o ../out/NVMTLDriver NVMTLDevice.m \
   -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation 2>../out/build.err" \
   || { ssh "$H" "grep ' error:' $R/out/build.err | head -20"; exit 1; }
 mkdir -p "$OUT"
