@@ -16,6 +16,26 @@
 }
 @end
 
+// The upload holds this per-call lease only when its asynchronous record is submitted. It keeps the shared page-cache
+// object alive and pairs the IOSurface lock with the eventual fence completion. The lock lifetime is not treated as a
+// cross-process CPU/GPU exclusion guarantee; producers still need their normal surface-publication synchronization.
+@implementation NVMTLSurfaceUploadLease
+- (instancetype)initWithSurface:(IOSurfaceRef)inSurface options:(uint32_t)inOptions pages:(id)inPages {
+    self = [super init];
+    if (self) { surface = (IOSurfaceRef)CFRetain(inSurface); options = inOptions; pages = inPages; }
+    return self;
+}
+- (void)dealloc {
+    if (surface) { (void)IOSurfaceUnlock(surface, options, NULL); CFRelease(surface); }
+}
+@end
+static void *nvmtl_surface_upload_lease_retain(void *lease) {
+    return lease ? (__bridge_retained void *)(__bridge id)lease : NULL;
+}
+static void nvmtl_surface_upload_lease_release(void *lease) {
+    if (lease) { id keep = CFBridgingRelease((CFTypeRef)lease); (void)keep; }
+}
+
 // Shared host-page leases. Keep the current host-copy implementation and its budget;
 // only the cache lifetime changes from one texture wrapper to one surface allocation.
 static NSMutableDictionary *nvmtl_page_cache;
@@ -90,6 +110,10 @@ static nvk_buffer *nvmtl_surface_host_pages(NVMTLTexture *r, void *base, size_t 
     discard = nil;
     r->_hostPageLease = pages;
     return &pages->buffer;
+}
+static id nvmtl_surface_page_lease(NVMTLTexture *r, nvk_buffer *buffer) {
+    NVMTLCapturePages *pages = r->_hostPageLease;
+    return pages && buffer == &pages->buffer ? pages : nil;
 }
 
 @implementation NVMTLTexture (CaptureCopyout)

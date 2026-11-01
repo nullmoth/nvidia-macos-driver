@@ -28,6 +28,7 @@ c_fixture = r'''
 #include <vulkan/vulkan_core.h>
 #include "nvmtl_vk.h"
 static unsigned barriers, copies, uploads, assertions;
+static int g_state = 1;
 static VkImageLayout expectedLayout;
 static VkBufferImageCopy seen;
 static _Atomic uint64_t g_host_pages_kept;
@@ -41,7 +42,7 @@ int nvmtl_vk_buffer_import_host(void *base,size_t bytes,nvk_buffer *b) {
 void nvmtl_vk_buffer_destroy(nvk_buffer *b) { memset(b,0,sizeof *b); }
 static uint32_t aspect = VK_IMAGE_ASPECT_COLOR_BIT;
 static uint32_t nvmtl_copy_aspect(nvk_image *i) { (void)i; return aspect; }
-void nvmtl_vk_image_upload_barrier(nvk_image *i) { (void)i; uploads++; }
+int nvmtl_vk_image_upload_barrier(nvk_image *i) { (void)i; uploads++; return 0; }
 static void pvkCmdPipelineBarrier(VkCommandBuffer c, VkPipelineStageFlags src, VkPipelineStageFlags dst,
     VkDependencyFlags flags, uint32_t nm, const VkMemoryBarrier *mb, uint32_t nb,
     const VkBufferMemoryBarrier *bb, uint32_t ni, const VkImageMemoryBarrier *ib) {
@@ -150,9 +151,10 @@ objc_fixture = r'''
 #include "nvmtl_vk.h"
 struct __IOSurface { uintptr_t base; size_t alloc, off, row; unsigned refs, planes; };
 typedef struct __IOSurface *IOSurfaceRef;
-static _Atomic unsigned imports, destroys, recordings;
+static _Atomic unsigned imports, destroys, recordings, unlocks;
 static BOOL importFails, recordFails, useHost=YES;
 static IOSurfaceRef kept;
+enum { kIOSurfaceLockReadOnly = 1 };
 size_t nvmtl_vk_host_import_align(void) { return 4096; }
 static unsigned IOSurfaceGetPlaneCount(IOSurfaceRef s) { return s->planes; }
 static unsigned IOSurfaceGetID(IOSurfaceRef s) { return (unsigned)(uintptr_t)s; }
@@ -162,6 +164,9 @@ static void *IOSurfaceGetBaseAddressOfPlane(IOSurfaceRef s,unsigned p) { (void)p
 static size_t IOSurfaceGetBytesPerRowOfPlane(IOSurfaceRef s,unsigned p) { (void)p; return s->row; }
 static void *keepSurface(IOSurfaceRef s) { s->refs++; return s; }
 static void releaseSurface(IOSurfaceRef s) { assert(s->refs); s->refs--; }
+static int IOSurfaceUnlock(IOSurfaceRef s,uint32_t options,void *seed) {
+    (void)options; (void)seed; assert(s && s->refs); unlocks++; return 0;
+}
 #define CFRetain(s) keepSurface(s)
 #define CFRelease(s) releaseSurface(s)
 int nvmtl_vk_host_pages_hold(void *base,size_t bytes,nvk_buffer *b) {
@@ -196,14 +201,26 @@ static bool nvmtl_surfout_import(void) { return useHost; }
 @interface NVMTLCommandBuffer : NSObject { @public NSArray *_parts; BOOL _scheduleAfterPublish; }
 @end
 @implementation NVMTLCommandBuffer @end
+@interface NVMTLSurfaceUploadLease : NSObject {
+@public IOSurfaceRef surface; uint32_t options; id pages;
+}
+- (instancetype)initWithSurface:(IOSurfaceRef)surface options:(uint32_t)options pages:(id)pages;
+@end
 '''
 objc_checks = r'''
 static int shared_pages_checks(void) {
     static struct __IOSurface s={.base=0x400000,.alloc=16384,.row=128,.planes=2};
     NVMTLTexture *a=[NVMTLTexture new], *b=[NVMTLTexture new]; a->_surf=&s; b->_surf=&s;
     setenv("NVMTL_SURFIN_PAGE_CACHE_EXTRA", "1", 1);
+    setenv("NVMTL_SURFIN_ASYNC", "1", 1); setenv("NVMTL_SURFIN_ASYNC_EXTRA", "1", 1);
+    setenv("NVMTL_SURFIN_ORDERED", "0", 1); setenv("NVMTL_SURFIN_ORDERED_EXTRA", "1", 1);
+    setenv("NVMTL_ASYNC_SURFACE_UPLOAD", "0", 1); setenv("NVMTL_ASYNC_SURFACE_UPLOAD_EXTRA", "1", 1);
     prune_release_environment();
     assert(!getenv("NVMTL_SURFIN_PAGE_CACHE_EXTRA"));
+    assert(getenv("NVMTL_SURFIN_ASYNC") && !getenv("NVMTL_SURFIN_ASYNC_EXTRA"));
+    assert(getenv("NVMTL_SURFIN_ORDERED") && !strcmp(getenv("NVMTL_SURFIN_ORDERED"),"0") && !getenv("NVMTL_SURFIN_ORDERED_EXTRA"));
+    assert(getenv("NVMTL_ASYNC_SURFACE_UPLOAD") && !strcmp(getenv("NVMTL_ASYNC_SURFACE_UPLOAD"),"0")
+        && !getenv("NVMTL_ASYNC_SURFACE_UPLOAD_EXTRA"));
     nvk_buffer *first=nvmtl_surface_host_pages(a,(void *)s.base,s.alloc);
     if(getenv("NVMTL_SURFIN_PAGE_CACHE") && !strcmp(getenv("NVMTL_SURFIN_PAGE_CACHE"),"0")) {
         assert(first==&a->_hostPages && !imports && !a->_hostPageLease);
@@ -214,10 +231,16 @@ static int shared_pages_checks(void) {
     assert(nvmtl_surface_host_pages(b,(void *)(s.base+1),s.alloc)==&b->_hostPages);
     assert(nvmtl_surface_host_pages(b,(void *)s.base,s.alloc-1)==&b->_hostPages);
     __weak id lease=a->_hostPageLease;
+    NVMTLSurfaceUploadLease *uploadLease=[[NVMTLSurfaceUploadLease alloc] initWithSurface:&s
+        options:kIOSurfaceLockReadOnly pages:a->_hostPageLease];
+    void *asyncLease=nvmtl_surface_upload_lease_retain((__bridge void *)uploadLease);
+    uploadLease=nil;
     @autoreleasepool { a->_hostPageLease=nil; b->_hostPageLease=nil; a=nil; b=nil; }
-    assert(lease && !destroys);
-    for(int i=0;i<500 && lease;i++) usleep(10000);
-    assert(!lease && destroys==1 && s.refs==0 && !nvmtl_page_cache.count);
+    for(int i=0;i<500 && nvmtl_page_cache.count;i++) usleep(10000);
+    assert(lease && !destroys && s.refs==2 && !nvmtl_page_cache.count);
+    nvmtl_surface_upload_lease_release(asyncLease);
+    for(int i=0;i<100 && lease;i++) usleep(10000);
+    assert(!lease && destroys==1 && unlocks==1 && s.refs==0 && !nvmtl_page_cache.count);
     importFails=YES;
     NVMTLTexture *failed=[NVMTLTexture new]; failed->_surf=&s;
     assert(nvmtl_surface_host_pages(failed,(void *)s.base,s.alloc)==&failed->_hostPages);
