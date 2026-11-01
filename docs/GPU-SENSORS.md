@@ -58,6 +58,13 @@ universal Apple standard. Memory aliases do not replace the accelerator family's
 canonical memory accounting properties.
 The memory aliases inherit the freshness of the family's current/accumulated
 accounting fields; they do not have a separate RUSD timestamp or expiry timer.
+`PerformanceStatisticsAccum` can be stored internally as an `OSSerializer`,
+even though IORegistry clients see a dictionary. NVAccel materializes that
+no-reset snapshot with the public serialization APIs before reading its
+`inUseVidMemoryBytes` gauge. It accepts at most 64 KiB of serialized XML for
+parsing; this is not a hard allocation limit on the trusted family serializer.
+If serialization, parsing or number lookup fails, the used-memory aliases are
+omitted rather than published as a fabricated zero.
 
 `NVRMFanRPM` is a separate dictionary on NVAccel. Its numeric string keys are
 controller indices; values are RPM. A controller can drive more than one

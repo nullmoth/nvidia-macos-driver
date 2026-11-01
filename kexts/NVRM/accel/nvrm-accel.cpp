@@ -14,6 +14,8 @@
 #include <IOKit/pci/IOPCIDevice.h>
 #include <pexpert/pexpert.h>
 #include <libkern/OSKextLib.h>
+#include <libkern/c++/OSSerialize.h>
+#include <libkern/c++/OSUnserialize.h>
 #include <mach/kmod.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IORangeAllocator.h>
@@ -1007,9 +1009,26 @@ public:
     void publishMemoryAliases(OSDictionary *d) {
         OSObject *property = copyProperty("PerformanceStatisticsAccum");
         OSDictionary *accumulated = OSDynamicCast(OSDictionary, property);
-        OSNumber *used = OSDynamicCast(OSNumber, d->getObject("inUseVidMemoryBytes"));
-        if (!used && accumulated)
-            used = OSDynamicCast(OSNumber, accumulated->getObject("inUseVidMemoryBytes"));
+        OSObject *decoded = nullptr;
+        // The family can store a deferred OSSerializer here. copyProperty()
+        // retains that object; only an IORegistry read materializes its dictionary.
+        // Accum uses the family's no-reset callback, unlike PerformanceStatistics.
+        // This runs on the temperature workloop with no utilization lock held.
+        if (!accumulated && OSDynamicCast(OSSerializer, property)) {
+            OSSerialize *serialized = OSSerialize::withCapacity(4096);
+            if (serialized) {
+                if (property->serialize(serialized)) {
+                    const unsigned length = serialized->getLength();
+                    // Bound accepted XML; withCapacity itself is not an allocation cap.
+                    if (length > 1 && length <= 65536 && serialized->text()[length - 1] == '\0')
+                        decoded = OSUnserializeXML(serialized->text(), static_cast<size_t>(length));
+                }
+                serialized->release();
+            }
+            accumulated = OSDynamicCast(OSDictionary, decoded);
+        }
+        OSNumber *used = accumulated ? OSDynamicCast(OSNumber, accumulated->getObject("inUseVidMemoryBytes")) : nullptr;
+        if (!used) used = OSDynamicCast(OSNumber, d->getObject("inUseVidMemoryBytes"));
         OSObject *totalProperty = fPCI ? fPCI->copyProperty("VRAM,totalsize") : nullptr;
         OSNumber *total = OSDynamicCast(OSNumber, totalProperty);
         nvrmTelemetryPublishMemory(used ? used->unsigned64BitValue() : 0, used != nullptr,
@@ -1017,6 +1036,7 @@ public:
                                     total && total->unsigned64BitValue() > 0,
                                     d, writeTelemetryProperty);
         if (property) property->release();
+        if (decoded) decoded->release();
         if (totalProperty) totalProperty->release();
     }
 
