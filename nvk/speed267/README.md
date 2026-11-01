@@ -19,3 +19,13 @@
    -5.0% static cycles, quantize -3.2%, particle -1.9%. All 183: -1.1% instructions, -0.3% cycles; regressions only in
    native-Vulkan proxies (blend +3%, initialize_dye +6%). `NVMTL_NAK_NO_PIN_WHOLE=1` = previous behaviour
    (census: 0 of 183 kernels differ from the old compiler).
+5. `patch_predload.py`, then `patch_predload_fwd.py`, `patch_predload_max.py`, `patch_predload_def32.py` (nak_nir.c;
+   result = `nak_predload.diff`) - `nak_cg_predload`: a small divergent if whose one side is ALU + plain global loads
+   (<= `NVMTL_NAK_PREDLOAD_MAX` instructions, default 32; <= 2 loads; not volatile/coherent) runs unconditionally, each load
+   becoming `load_global_nv` predicated on the branch condition (hardware: no access, returns 0 when false); peephole
+   then turns the phis into selects. `nak_cg_punroll` now also takes counters that step by a constant 2..4096
+   (grid-stride loops) and runs again after predload. GB7 particle's inner loop: 79 -> ~50 issue cycles per trip,
+   1 -> 4 loads in flight (`blkcyc.py`). Census: 35 kernels change, none fail; sort_keypoints -43%,
+   pressure_solver_prep -43%, hysteresis -38%, Fluid's curl/vorticity/pressure/gradient -13..17%, gemm -12%,
+   trace_bvh -9% static cycles. `NVMTL_NAK_NO_PREDLOAD=1` = previous behaviour (census: 0 kernels differ).
+   Correctness + speed: `session5.sh` (probe forces hash old == new == new-with-switch-off, then GB7 three ways).
