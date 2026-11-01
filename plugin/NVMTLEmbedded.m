@@ -319,13 +319,11 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
 }
 // the compute encoder keeps its bindings as index -> (buffer, offset, ...) arrays; the tables are built only for a
 // kernel that has embedded arguments
-void nvmtl_bind_embedded_dict(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NSDictionary *bufferAtIndex)
+void nvmtl_bind_embedded_enc(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NVMTLComputeCommandEncoder *e)
 {
     NVMTLBuffer *bufs[NVMTL_NBUFAT] = { nil }; NSUInteger offs[NVMTL_NBUFAT] = { 0 };
-    if (fn && nvmtl_embedded_plan(fn).count)
-        for (NSNumber *k in bufferAtIndex) {
-            NSUInteger i = k.unsignedIntegerValue; NSArray *e = bufferAtIndex[k];
-            if (i < NVMTL_NBUFAT && e.count >= 2) { bufs[i] = e[0]; offs[i] = [e[1] unsignedLongValue]; }
-        }
+    if (e && fn && nvmtl_embedded_plan(fn).count)
+        for (NSUInteger i = 0; i < NVMTL_NBUFAT; i++)
+            if (e->_baN[i] && e->_baObj[i]) { bufs[i] = e->_baObj[i]; offs[i] = e->_baOff[i]; }
     nvmtl_bind_embedded(cb, set, fn, bufs, offs);
 }
