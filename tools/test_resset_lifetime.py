@@ -79,8 +79,8 @@ def run(label, objects, header, d):
 
 new_obj = (root / 'plugin/NVMTLObjects.m').read_text()
 new_hdr = (root / 'plugin/NVMTLObjects.h').read_text()
-# the set as it stood just before the fix (the commit that made sealing a one-step take, 4434649, had the leak)
-BEFORE = '4434649'
+# the set as it stood just before the fix (the commit that made sealing a one-step take, 39d70bc, had the leak)
+BEFORE = '39d70bc'
 git = lambda p: subprocess.run(['git', '-C', str(root), 'show', f'{BEFORE}:{p}'], capture_output=True, text=True)
 old_obj, old_hdr = git('plugin/NVMTLObjects.m'), git('plugin/NVMTLObjects.h')
 if old_obj.returncode or old_hdr.returncode:
