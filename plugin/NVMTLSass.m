@@ -108,7 +108,9 @@ static BOOL nvmtl_sass_enabled(void)
     dispatch_once(&once, ^{
         const char *why = NULL;
         const char *knob = getenv("NVMTL_DIRECT_SASS");
-        if (knob && !strcmp(knob, "0")) why = "turned off by NVMTL_DIRECT_SASS=0";
+        // Off unless asked for: on the same build GB7 scored 105,061 with the lane and 110,067 without it (Photo Filter
+        // 105,190 -> 140,628, Background Blur 58,307 -> 71,256, Face Tracking 95,196 -> 102,463; gpu/352210 vs 352222).
+        if (!knob || strcmp(knob, "1")) why = "off by default (NVMTL_DIRECT_SASS=1 turns it on)";
         else if (nvmtl_vk_init() || !g_lib) why = "Vulkan is not up";
         else if (!nvmtl_sass_device_name_ok(g_name)) why = "this GPU is not a GeForce RTX 50 series card";
         else {
