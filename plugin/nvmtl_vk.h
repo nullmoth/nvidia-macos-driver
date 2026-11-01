@@ -9,7 +9,8 @@
 #include <stddef.h>
 const char *nvmtl_image_ident(const void *addr, char *out, size_t n);
 typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int placed; void *pool; size_t poff; int imported; int bar1; size_t moff; int sparse, sysmem; int mtype1; /* memory type + 1 when known */
-                 int fresh; /* host-visible memory from its own vkAllocateMemory: zeroed by the kernel, never recycled */ } nvk_buffer;
+                 int fresh; /* host-visible memory from its own vkAllocateMemory: zeroed by the kernel, never recycled */
+                 uint64_t parked_ns; /* when the buffer park took it (CLOCK_UPTIME_RAW) */ } nvk_buffer;
 #include "nvmtl_sample_positions.h"
 typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vfl;  uint64_t up_token; } nvk_image;
 #define NVMTL_NVAR 16

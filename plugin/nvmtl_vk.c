@@ -1203,8 +1203,9 @@ static int  pool_buffer_create_in(int vram, size_t size, nvk_buffer *out);
 static int  vpool_on(void);
 static void pool_buffer_release(nvk_buffer *b);
 #define NVMTL_BUFPARK_N     32
-#define NVMTL_BUFPARK_BYTES (256ull << 20)
-#define NVMTL_BUFPARK_MAX1  (64ull << 20)
+#define NVMTL_BUFPARK_BYTES (1024ull << 20)
+#define NVMTL_BUFPARK_MAX1  (512ull << 20)
+#define NVMTL_BUFPARK_AGE_NS (5000000000ull)   /* parked memory (system RAM is wired) is let go after 5 s unused */
 static pthread_mutex_t g_bpark_lock = PTHREAD_MUTEX_INITIALIZER;
 static nvk_buffer g_bpark[NVMTL_BUFPARK_N];
 static unsigned g_bpark_n;
@@ -6405,10 +6406,12 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b)
     const size_t n = b->size;
     nvk_buffer ev[NVMTL_BUFPARK_N + 1]; unsigned nev = 0;
     pthread_mutex_lock(&g_bpark_lock);
-    while (g_bpark_n && (g_bpark_n >= NVMTL_BUFPARK_N || g_bpark_bytes + b->alloc > NVMTL_BUFPARK_BYTES)) {
+    const uint64_t pnow = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    while (g_bpark_n && (g_bpark_n >= NVMTL_BUFPARK_N || g_bpark_bytes + b->alloc > NVMTL_BUFPARK_BYTES
+                         || pnow - g_bpark[0].parked_ns > NVMTL_BUFPARK_AGE_NS)) {
         ev[nev++] = g_bpark[0]; g_bpark_bytes -= g_bpark[0].alloc;
         memmove(&g_bpark[0], &g_bpark[1], (g_bpark_n - 1) * sizeof g_bpark[0]); g_bpark_n--; }
-    g_bpark[g_bpark_n++] = *b; g_bpark_bytes += b->alloc;
+    b->parked_ns = pnow; g_bpark[g_bpark_n++] = *b; g_bpark_bytes += b->alloc;
     pthread_mutex_unlock(&g_bpark_lock);
     g_buf_gone++;
     memset(b, 0, sizeof *b);
