@@ -183,10 +183,17 @@ extern id gNVMTLMainDevice;
 @interface NVMTLIndirectCommandBuffer : NSObject <MTLIndirectCommandBuffer> {
   @public NSMutableArray<NVMTLIndirectCommand *> *_cmds; id<MTLDevice> _dev; NSString *_label;
 } @end
+#ifndef NVMTL_NBUFAT
+#define NVMTL_NBUFAT 32   /* buffer argument indices an encoder tracks (Metal has 31) */
+#endif
 @interface NVMTLComputeCommandEncoder : NSObject <MTLComputeCommandEncoder> {
   @public NVMTLCommandBuffer *_cb; NVMTLComputePipelineState *_ps; NSMutableArray *_scratch; NSMutableDictionary *_samplers;
   NSMutableDictionary *_tgLen;
-  NSMutableDictionary *_bufAt;
+  // The binding table, by Metal buffer index: the buffer, its offset and, for setBytes, the inline length and base.
+  // Plain arrays: WAS an NSMutableDictionary of NSArrays, three allocations on every setBuffer (a large part of the
+  // ~2.5 us of host time per dispatch against Apple's ~0.3 us). _baN: 0 unbound, 2 = buffer+offset, 4 = setBytes form.
+  __strong id _baObj[NVMTL_NBUFAT]; NSUInteger _baOff[NVMTL_NBUFAT], _baLen[NVMTL_NBUFAT], _baBase[NVMTL_NBUFAT];
+  uint8_t _baN[NVMTL_NBUFAT];
   NSMutableSet *_resources;
   NSMutableDictionary *_sassTextures, *_sassSamplers;   // by Metal index, for kernels run from machine code
 } @end
@@ -224,7 +231,12 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
 
 NSArray<NSDictionary *> *nvmtl_embedded_bindings(NVMTLFunction *function);
 void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NVMTLBuffer *__strong const *bufAt, const NSUInteger *offAt);
-void nvmtl_bind_embedded_dict(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NSDictionary *bufferAtIndex);
+void nvmtl_bind_embedded_enc(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NVMTLComputeCommandEncoder *e);
+// the NSArray form of one binding ({buffer, offset} or {buffer, offset, length, base}), for the few readers that want it
+static inline NSArray *nvmtl_bufat(NVMTLComputeCommandEncoder *e, NSUInteger i) {
+    if (!e || i >= NVMTL_NBUFAT || !e->_baN[i] || !e->_baObj[i]) return nil;
+    return e->_baN[i] == 4 ? @[e->_baObj[i], @(e->_baOff[i]), @(e->_baLen[i]), @(e->_baBase[i])] : @[e->_baObj[i], @(e->_baOff[i])];
+}
 uint64_t nvmtl_resid_for_texture(id t);
 uint64_t nvmtl_resid_for_sampler(id s);
 

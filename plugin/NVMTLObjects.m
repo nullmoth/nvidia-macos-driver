@@ -4388,7 +4388,7 @@ static int nvmtl_nvconv_dump_offsets(NVMTLComputeCommandEncoder *e, MTLSize grid
     _Atomic unsigned *taken = ctr;
     NSMutableArray *dumps = [NSMutableArray new];
     void (^copyAll)(NSString *, uint32_t) = ^(NSString *nm, uint32_t slot) {
-        NSArray *bnd = e->_bufAt[@(slot)]; if (!bnd) return;
+        NSArray *bnd = nvmtl_bufat(e, slot); if (!bnd) return;
         id<MTLBuffer> from = bnd[0]; const NSUInteger off = [bnd[1] unsignedLongValue];
         if (off >= from.length) return;
         uint64_t count = MIN((uint64_t)(from.length - off) / 4, (uint64_t)(16u << 20));
@@ -4482,7 +4482,7 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     // the residual is only read, through its own strides (nvconv.metal), so any layout is fine; only its span must fit
     if (nar == 5 && (kp[64] != cout || kp[65] != dw || kp[66] != dh || kp[67] != batch))
         NVC_SKIP("residual descriptor");
-    NSArray *bi = e->_bufAt[@0], *bw = e->_bufAt[@1], *bo = e->_bufAt[@(nar - 1)], *bb = nar >= 4 ? e->_bufAt[@2] : nil, *br = nar == 5 ? e->_bufAt[@3] : nil;
+    NSArray *bi = nvmtl_bufat(e, 0), *bw = nvmtl_bufat(e, 1), *bo = nvmtl_bufat(e, nar - 1), *bb = nar >= 4 ? nvmtl_bufat(e, 2) : nil, *br = nar == 5 ? nvmtl_bufat(e, 3) : nil;
     if (!bi || !bw || !bo || (nar >= 4 && !bb) || (nar == 5 && !br)) NVC_SKIP("buffer slot unbound");
     #define NVC_ROOM(arr, need) ([(id<MTLBuffer>)arr[0] length] >= [arr[1] unsignedLongValue] + (uint64_t)(need) * 4)
     const uint64_t nin = (uint64_t)(cin - 1) * kp[8] + (uint64_t)(sw - 1) * kp[9] + (uint64_t)(sh - 1) * kp[10] + (uint64_t)(batch - 1) * kp[11] + 1;
@@ -4660,7 +4660,7 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
         _e78VarFor = _ps; _e78VarSel = selected;
     }
     nvmtl_retain_resource(_cb, selected);
-    nvmtl_bind_embedded_dict(_cb, NVMTL_SET_VERTEX, _ps->_function, _bufAt);
+    nvmtl_bind_embedded_enc(_cb, NVMTL_SET_VERTEX, _ps->_function, self);
     return selected;
 }
 static int nvmtl_zprobe_on(void);
@@ -4674,7 +4674,7 @@ static int nvmtl_zprobe_on(void);
 - (void)setBuffer:(id<MTLBuffer>)b offset:(NSUInteger)off atIndex:(NSUInteger)i {
     NVMTLBuffer *nb = (NVMTLBuffer *)b;
     if (!nb) {
-        [_bufAt removeObjectForKey:@(i)];   // the binding table must not keep the previous resource
+        if (i < NVMTL_NBUFAT) { _baObj[i] = nil; _baN[i] = 0; }   // the binding table must not keep the previous resource
         size_t zoff = 0;
         NVMTLBuffer *zb = nvmtl_bytes_ring(_cb, 16, &zoff);
         const BOOL zring = zb != nil;
@@ -4692,9 +4692,9 @@ static int nvmtl_zprobe_on(void);
         return;
     }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    [_cb->_resources addObject:nb];
-    if (!_bufAt) _bufAt = [NSMutableDictionary new];
-    _bufAt[@(i)] = @[nb, @(off)];
+    // the same buffer at the same index of this encoder is already held by the command buffer's set
+    if (i >= NVMTL_NBUFAT || _baObj[i] != (id)nb) [_cb->_resources addObject:nb];
+    if (i < NVMTL_NBUFAT) { _baObj[i] = nb; _baOff[i] = off; _baN[i] = 2; }
     if (nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, &nb->_b, off)) nvlog("compute setBuffer: bind FAILED");
     if (nvmtl_zprobe_on()) {
         static const char *ZH = "0123456789abcdef";
@@ -4725,8 +4725,7 @@ static int nvmtl_zprobe_on(void);
         if (nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, &_cb->_g79BRing[i]->_b, _cb->_g79BOff[i])) nvlog("compute setBytes: bind FAILED");
         // The binding table follows the binding: kernels run from compiled machine code read their buffer
         // addresses from it, and a stale entry hands the GPU an address that belongs to nothing.
-        if (!_bufAt) _bufAt = [NSMutableDictionary new];
-        _bufAt[@(i)] = @[_cb->_g79BRing[i], @(_cb->_g79BOff[i]), @(len), @(_cb->_g79BOff[i])];
+        _baObj[i] = _cb->_g79BRing[i]; _baOff[i] = _baBase[i] = _cb->_g79BOff[i]; _baLen[i] = len; _baN[i] = 4;
         nvmtl_g79_count(G79C_BYTESDUP);
         return;
     }
@@ -4742,8 +4741,7 @@ static int nvmtl_zprobe_on(void);
         _cb->_g79BRing[i] = ring && nb->_b.map ? nb : nil; _cb->_g79BOff[i] = roff; _cb->_g79BLen[i] = (uint32_t)len;
         memcpy(_cb->_g79B[i], bytes, len);
     }
-    if (!_bufAt) _bufAt = [NSMutableDictionary new];
-    _bufAt[@(i)] = @[nb, @(roff), @(len), @(roff)];   // buffer, offset, inline length, base
+    if (i < NVMTL_NBUFAT) { _baObj[i] = nb; _baOff[i] = _baBase[i] = roff; _baLen[i] = len; _baN[i] = 4; }   // buffer, offset, inline length, base
     if (nvmtl_vk_bind_buffer(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, &nb->_b, roff)) nvlog("compute setBytes: bind FAILED");
     if (nvmtl_zprobe_on()) {
         const uint32_t *zw = (const uint32_t *)bytes; char zb[220]; int zo = 0;
@@ -4913,7 +4911,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
 }
 - (void)setBufferOffset:(NSUInteger)off atIndex:(NSUInteger)i {
-    { NSArray *b = _bufAt[@(i)]; if (b) _bufAt[@(i)] = @[b[0], @(off)]; }
+    if (i < NVMTL_NBUFAT && _baN[i]) { _baOff[i] = off; _baN[i] = 2; }
     if (nvmtl_vk_bind_buffer_offset(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, off))
         nvlog("compute setBufferOffset: nothing bound at index %lu", (unsigned long)i);
 }
@@ -5018,7 +5016,8 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     // The command buffer holds every resource until the GPU is done; the encoder's own binding tables are dead after
     // this point, as in Apple's encoders. WAS: kept until dealloc, which MPS defers to the completion handler; by then
     // Espresso had recycled the objects they named and .cxx_destruct released freed memory (mediaanalysisd, issue #107).
-    _bufAt = nil; _samplers = nil; _tgLen = nil; _e78Key = nil;
+    for (unsigned k = 0; k < NVMTL_NBUFAT; k++) { _baObj[k] = nil; _baN[k] = 0; }
+    _samplers = nil; _tgLen = nil; _e78Key = nil;
 }
 - (void)setLabel:(NSString *)l { _label = [l copy]; }
 - (NSString *)label { return _label; }
