@@ -45,7 +45,7 @@ static int nvmtl_gsub_finish(NVMTLSubmissionPart *part) {
 static NSMapTable *nvmtl_surface_writers;
 // surface id and plane in one tagged NSNumber: no allocation on the per-bind path (it was a formatted string)
 static id nvmtl_surface_writer_key(NVMTLTexture *t) {
-    return @(((unsigned long long)IOSurfaceGetID(t->_surf) << 8) | ((unsigned long long)t->_plane & 0xff));
+    return @(((unsigned long long)IOSurfaceGetID(t->_surf) << 8) | ((unsigned long long)NVMTL_VP(t) & 0xff));
 }
 static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     if (!cb || !t || !t->_surf) return NO;
@@ -209,7 +209,7 @@ static void nvmtl_ws_mark_pending(NVMTLCommandBuffer *cb) {
         for (NVMTLSubmissionPart *part in cb->_parts) {
             if (![part isKindOfClass:[NVMTLSubmissionPart class]]) continue;
             for (NVMTLTexture *t in part->surfaces)
-                if (t->_surf && t->_vramOn && !nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(t->_surf), (uint32_t)t->_plane)) [dirtied addObject:t];
+                if (t->_surf && t->_vramOn && !nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(t->_surf), (uint32_t)(t->_vramMulti ? 0 : t->_plane))) [dirtied addObject:t];
         }
         holds->dirtied = dirtied;
     }
@@ -293,7 +293,7 @@ static void nvmtl_busy_mark_commit(NVMTLCommandBuffer *cb) {
             @synchronized (nvmtl_busy_lock()) {
                 if (!nvmtl_busy_latest) nvmtl_busy_latest = [NSMutableDictionary new];
                 nvmtl_busy_latest[key] = @(seq);
-                nvmtl_busy_write(t->_surf, t->_plane, seq, 0);
+                nvmtl_busy_write(t->_surf, NVMTL_VP(t), seq, 0);
             }
         }
     }
@@ -308,7 +308,7 @@ static void nvmtl_busy_mark_done(NVMTLCommandBuffer *cb) {
         @synchronized (nvmtl_busy_lock()) {
             if ([nvmtl_busy_latest[key] unsignedLongLongValue] != seq) continue;
             [nvmtl_busy_latest removeObjectForKey:key];
-            nvmtl_busy_write(t->_surf, t->_plane, seq, 1);
+            nvmtl_busy_write(t->_surf, NVMTL_VP(t), seq, 1);
         }
     }
 }

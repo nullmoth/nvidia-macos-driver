@@ -9,6 +9,7 @@ source = (root / 'plugin/NVMTLObjects.m').read_text()
 start = source.index('static id nvmtl_surface_sync(')
 end = source.index('- (NSUInteger)width ', start)
 methods = source[start:end]
+plane_macro = next(line for line in source.splitlines() if line.startswith('#define NVMTL_VP(')) + '\n'
 fixture = r'''
 #import <Foundation/Foundation.h>
 #include <assert.h>
@@ -23,7 +24,14 @@ enum { kIOSurfaceLockReadOnly = 1 };
 typedef struct { unsigned w,h,bpp; unsigned char gpu[4]; } Image;
 static dispatch_semaphore_t entered, release_read;
 static unsigned uploads, gpu_seed;
-static unsigned long long g_surfin_skip, g_surfin_copy;
+static unsigned wholeUploads, busyPlane, dirtyPlane;
+static unsigned long long g_surfin_skip, g_surfin_copy, g_surfin_own_skip;
+// Keep plane history off in this single-plane publication fixture. The actual
+// history helpers are exercised separately by test_surface_plane_seed.py.
+static BOOL nvmtl_plane_seed_on(void) { return NO; }
+static BOOL nvmtl_own_bumps_cover(Surface *s, NSUInteger p, uint32_t from, uint32_t to) { return NO; }
+static void nvmtl_own_bump_add(Surface *s, NSUInteger p, uint32_t from, uint32_t to) {}
+static size_t IOSurfaceGetPlaneCount(Surface *s) { return 0; }
 static uint32_t IOSurfaceGetSeed(IOSurfaceRef s) { return s->seed; }
 static unsigned IOSurfaceGetID(IOSurfaceRef s) { return 1; }
 static IOReturn IOSurfaceLock(IOSurfaceRef s, unsigned opts, uint32_t *seed) {
@@ -39,6 +47,9 @@ static void *IOSurfaceGetBaseAddressOfPlane(IOSurfaceRef s, uint32_t p) { return
 static size_t IOSurfaceGetBytesPerRowOfPlane(IOSurfaceRef s, uint32_t p) { return 4; }
 static void *IOSurfaceGetBaseAddress(IOSurfaceRef s) { return s->cpu; }
 static size_t IOSurfaceGetAllocSize(IOSurfaceRef s) { return sizeof s->cpu; }
+static int nvmtl_vk_buffer_fill_from_surface(void *q, void *dst, const void *base, size_t bytes) {
+    assert(bytes == 4); memcpy(dst, base, bytes); wholeUploads++; return 0;
+}
 // the imported-pages upload is unavailable here, so every upload takes the CPU copy this test checks
 // the host-page fast paths (#399) report "not available", so the copies below take the plain path this test checks
 static int nvmtl_vk_image_write_host(void *q, Image *img, void *base, size_t row, size_t bytes, void *cache) { return -1; }
@@ -50,13 +61,13 @@ static unsigned nvmtl_vram_tag_bump(IOSurfaceRef s, NSUInteger p, unsigned seed)
 // the kernel's VRAM mark: dirtyAnswer for the blocking one (1 = refused, the copy path), tryAnswer for the try that never
 // waits for the accelerator lock (1 = the lock was taken, -1 = refused); each call counted
 static int dirtyAnswer=1, tryAnswer=-1; static unsigned blockingDirties, tries;
-static int nvmtl_vk_surface_dirty(unsigned s, unsigned p) { blockingDirties++; return dirtyAnswer; }
-static int nvmtl_vk_surface_dirty_try(unsigned s, unsigned p) { tries++; return tryAnswer; }
+static int nvmtl_vk_surface_dirty(unsigned s, unsigned p) { dirtyPlane=p; blockingDirties++; return dirtyAnswer; }
+static int nvmtl_vk_surface_dirty_try(unsigned s, unsigned p) { dirtyPlane=p; tries++; return tryAnswer; }
 static int nvmtl_noseed(void) { return 0; }
 // cross-process busy marks (PR #398): who wrote the surface last, and the waits for another process's write
 static int busyForeign=0, busyWaits=0;
 static int nvmtl_busy_foreign(IOSurfaceRef s, NSUInteger p) { (void)s; (void)p; return busyForeign; }
-static void nvmtl_busy_wait(IOSurfaceRef s, NSUInteger p) { (void)s; (void)p; busyWaits++; }
+static void nvmtl_busy_wait(IOSurfaceRef s, NSUInteger p) { (void)s; busyPlane=p; busyWaits++; }
 static void nvmtl_frame_dump(const char *tag, void *base, size_t row, unsigned w, unsigned h) {}
 #define nvlog(...) ((void)0)
 // helpers the capture path calls (NVMTLEventSync.m); WindowServer kernel marks are off here
@@ -72,7 +83,8 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) {
     memcpy(base,i->gpu,4); return 0;
 }
 @interface NVMTLTexture : NSObject {
-@public NVMTLTexture *_parent; IOSurfaceRef _surf; BOOL _vramOn, _surfSynced, _clientWritten; void *_hostPages;
+@public NVMTLTexture *_parent; IOSurfaceRef _surf; BOOL _vramOn, _vramMulti, _surfSynced, _clientWritten; void *_hostPages;
+    unsigned char _vramBuf[4];
     uint32_t _surfSeed, _surfGen; NSUInteger _plane; Image _i; void *_q;
 }
 - (BOOL)nvmtlSurfaceCopyable;
@@ -144,6 +156,16 @@ int main(int argc, char **argv) { @autoreleasepool {
     assert(busyWaits==1 && c->_clientWritten);
     busyForeign=0; cs.seed++; [c nvmtlSurfaceIn];
     assert(busyWaits==2);
+    // Two aliases of the same full allocation synchronize and publish through plane zero.
+    NVMTLTexture *mp0=[NVMTLTexture new], *mp1=[NVMTLTexture new];
+    Surface ms={.seed=99,.cpu={3,5,7,9}};
+    mp0->_surf=mp1->_surf=&ms; mp0->_vramOn=mp1->_vramOn=YES;
+    mp0->_vramMulti=mp1->_vramMulti=YES; mp1->_plane=1; mp1->_clientWritten=YES;
+    mp0->_i=mp1->_i=(Image){.w=1,.h=1,.bpp=4};
+    assert(nvmtl_surface_sync(mp0)==nvmtl_surface_sync(mp1));
+    [mp1 nvmtlSurfaceIn];
+    assert(wholeUploads==1 && busyPlane==0 && !memcmp(mp1->_vramBuf,ms.cpu,4));
+    dirtyAnswer=0; assert([mp1 nvmtlSurfaceOut]); assert(dirtyPlane==0);
     puts("PASS: overlapping publication preserves GPU pixels; later CPU edits import; a publication after the commit's "
          "VRAM mark never waits for the accelerator lock and retries a busy re-mark off its thread; another process's "
          "write is waited for before import");
@@ -151,7 +173,7 @@ int main(int argc, char **argv) { @autoreleasepool {
 '''
 with tempfile.TemporaryDirectory() as directory:
     path = pathlib.Path(directory)
-    (path / 'test.m').write_text(fixture + methods + checks)
+    (path / 'test.m').write_text(fixture + plane_macro + methods + checks)
     subprocess.run(['clang', '-fobjc-arc', '-framework', 'Foundation',
                     str(path / 'test.m'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)

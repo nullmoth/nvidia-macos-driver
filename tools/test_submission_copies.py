@@ -30,7 +30,7 @@ typedef struct { void *map; size_t size; } Buffer;
 @implementation NVMTLBuffer @end
 @interface NVMTLTexture : NSObject { @public
     NVMTLBuffer *_backBuf; NVMTLTexture *_parent; MTLTextureUsage _usage;
-    IOSurfaceRef _surf; NSUInteger _plane; BOOL _vramOn; int _tag;
+    IOSurfaceRef _surf; NSUInteger _plane; BOOL _vramOn, _vramMulti; int _tag;
 } @end
 @implementation NVMTLTexture @end
 static unsigned uploads, downloads, managedCopies;
