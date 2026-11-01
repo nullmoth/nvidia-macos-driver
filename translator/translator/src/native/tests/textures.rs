@@ -7796,6 +7796,69 @@ declare void @air.write_texture_2d.i16.v4f16(ptr addrspace(1), <2 x i16>, <4 x h
     }
 }
 
+/// MPS's Gaussian sampler (linear, clamp-to-edge, pixel coordinates). The offset decides between the hardware filter and the emulation.
+fn pixel_linear_2d_kernel(offset_present: bool, offset: &str) -> String {
+    format!(r#"
+target triple = "spirv-unknown-vulkan1.2"
+
+@__air_sampler_state = internal addrspace(2) constant [2 x i64] [i64 34901797601053257, i64 0], align 8
+
+define void @k(ptr addrspace(1) %src, ptr addrspace(1) %dst, <2 x i16> %gid) {{
+entry:
+  %c0 = insertelement <2 x float> poison, float 1.250000e+00, i32 0
+  %coord = insertelement <2 x float> %c0, float 2.750000e+00, i32 1
+  %sample = tail call <4 x float> @air.sample_texture_2d.v4f32(ptr addrspace(1) %src, ptr addrspace(2) @__air_sampler_state, <2 x float> %coord, i1 {present}, <2 x i32> {offset}, i1 false, float 0.000000e+00, float 0.000000e+00, i32 0)
+  tail call void @air.write_texture_2d.i16.v4f32(ptr addrspace(1) %dst, <2 x i16> %gid, <4 x float> %sample, i16 0, i32 2)
+  ret void
+}}
+
+declare <4 x float> @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr addrspace(2), <2 x float>, i1, <2 x i32>, i1, float, float, i32)
+declare void @air.write_texture_2d.i16.v4f32(ptr addrspace(1), <2 x i16>, <4 x float>, i16, i32)
+
+!air.kernel = !{{!0}}
+!air.sampler_states = !{{!6}}
+!0 = !{{ptr @k, !1, !2}}
+!1 = !{{}}
+!2 = !{{!3, !4, !5}}
+!3 = !{{i32 0, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"texture2d<float, sample>", !"air.arg_name", !"src"}}
+!4 = !{{i32 1, !"air.texture", !"air.location_index", i32 1, i32 1, !"air.write", !"air.arg_type_name", !"texture2d<float, write>", !"air.arg_name", !"dst"}}
+!5 = !{{i32 2, !"air.thread_position_in_grid", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"gid"}}
+!6 = !{{!"air.sampler_state", ptr addrspace(2) @__air_sampler_state}}
+"#, present = offset_present, offset = offset)
+}
+
+fn translate_pixel_linear_2d(name: &str, ll: &str) -> (Vec<u8>, String, std::path::PathBuf) {
+    let tmp = std::env::temp_dir().join(format!("metal2vulkan_{name}_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    (spv, asm, tmp)
+}
+
+#[test]
+fn native_kernel_pixel_linear_2d_clamp_to_edge_samples_through_the_hardware_filter() {
+    // 4 fetches and a blend per sample ran 2.2x slower than the hardware filter on NVIDIA (MPS's Gaussian blur);
+    // coord / size through the same normalized sampler gives the pixel-space result
+    let (spv, asm, tmp) = translate_pixel_linear_2d("pixel_linear_hw", &pixel_linear_2d_kernel(false, "zeroinitializer"));
+    assert!(asm.contains("OpImageSampleExplicitLod"), "{asm}");
+    assert!(asm.contains("OpImageQuerySize"), "{asm}");
+    assert!(asm.contains("OpFDiv"), "{asm}");
+    assert!(!asm.contains("OpImageFetch"), "{asm}");
+    if std::process::Command::new("spirv-val").arg("--version").output().is_ok() {
+        tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
+    }
+}
+
+#[test]
+fn native_kernel_pixel_linear_2d_with_an_offset_keeps_the_fetch_emulation() {
+    let (spv, asm, tmp) = translate_pixel_linear_2d("pixel_linear_off", &pixel_linear_2d_kernel(true, "<i32 3, i32 0>"));
+    assert!(asm.contains("OpImageFetch"), "{asm}");
+    assert!(!asm.contains("OpImageSample"), "{asm}");
+    if std::process::Command::new("spirv-val").arg("--version").output().is_ok() {
+        tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
+    }
+}
+
 #[test]
 fn native_kernel_pixel_sampler_dynamic_offset_lowers_to_fetch_coord_add() {
     let ll = r#"

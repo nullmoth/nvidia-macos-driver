@@ -484,7 +484,7 @@ pub(in crate::passes) enum SampleLevel {
     Bias(Word),
 }
 
-fn classify_sample_level(ctx: &Ctx, arrayed: bool, args: &[Word]) -> Option<SampleLevel> {
+pub(in crate::passes) fn classify_sample_level(ctx: &Ctx, arrayed: bool, args: &[Word]) -> Option<SampleLevel> {
     let start = if arrayed { 4 } else { 3 };
     let rest = args.get(start..)?;
     let (offset, &slot) = rest
@@ -524,7 +524,7 @@ pub(in crate::passes) fn find_sample_lod(
     }
 }
 
-fn float_operand_is_constant_zero(ctx: &Ctx, value: Word) -> bool {
+pub(in crate::passes) fn float_operand_is_constant_zero(ctx: &Ctx, value: Word) -> bool {
     let Some(def) = value_def_instruction(ctx, value) else {
         return false;
     };
