@@ -4289,9 +4289,10 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 
 #include "nvconv_lib.h"
 @interface NVMTLComputeCommandEncoder () { @public uint8_t _nvcKP[528]; uint32_t _nvcKPLen; uint8_t _nvcCP[272]; uint32_t _nvcCPLen; BOOL _nvcIn; } @end
-static id<MTLComputePipelineState> g_nvc_ps[7];
+static id<MTLComputePipelineState> g_nvc_ps[8];
 #define NVC_CMP 6
-#define NVC_NVAR 5
+#define NVC_COPY 7
+#define NVC_NVAR 7   /* epilogues 0-4, plus 5 and 6: residual blocks that add their own input */
 static NSMutableDictionary *g_nvc_state;
 static pthread_mutex_t g_nvc_lk = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic unsigned long g_nvc_ran, g_nvc_verified, g_nvc_refused, g_nvc_skips;
@@ -4306,8 +4307,8 @@ static BOOL nvmtl_nvconv_ready(id<MTLDevice> dev) {
             NSError *err = nil;
             dispatch_data_t dd = dispatch_data_create(nvconv_metallib, nvconv_metallib_len, NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
             id<MTLLibrary> lib = [dev newLibraryWithData:dd error:&err];
-            NSString *names[7] = { @"nvconv3_b", @"nvconv3_s", @"nvconv4_b", @"nvconv4_s", @"nvconv5_b", @"nvconv5_s", @"nvconv_cmp" };
-            for (int i = 0; i < 7 && on; i++) {
+            NSString *names[8] = { @"nvconv3_b", @"nvconv3_s", @"nvconv4_b", @"nvconv4_s", @"nvconv5_b", @"nvconv5_s", @"nvconv_cmp", @"nvconv_copy" };
+            for (int i = 0; i < 8 && on; i++) {
                 id<MTLFunction> f = [lib newFunctionWithName:names[i]];
                 g_nvc_ps[i] = f ? [dev newComputePipelineStateWithFunction:f error:&err] : nil;
                 if (!g_nvc_ps[i]) { on = 0; nvlog("nvconv: %s did not build (%s) - MPS's conv stays everywhere", names[i].UTF8String, err.description.UTF8String); }
@@ -4326,6 +4327,47 @@ static void nvmtl_nvconv_run(NVMTLComputeCommandEncoder *e, id<MTLComputePipelin
     [e dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     e->_nvcIn = NO; e->_ps = saved; e->_tgLen = savedTG;
 }
+// NVMTL_NVCONV_DUMP=<dir>, for a layer nvconv skips with array offsets: copy every bound array whole (from its binding
+// offset to the buffer's end, capped at 64 MB), run MPS's kernel, copy its output, and write all of it with the parameter
+// words, so the offset rule can be solved offline from real data. First 12 such layers per process; MPS's result stands.
+static int nvmtl_nvconv_dump_offsets(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize tg, uint32_t nar, id<MTLDevice> dev) {
+    static const char *dir; static dispatch_once_t once; static _Atomic unsigned taken;
+    dispatch_once(&once, ^{ dir = getenv("NVMTL_NVCONV_DUMP"); if (dir && !*dir) dir = NULL; });
+    if (!dir || !g_nvc_ps[NVC_COPY] || atomic_fetch_add(&taken, 1) >= 12) return 0;
+    NSMutableArray *dumps = [NSMutableArray new];
+    void (^copyAll)(NSString *, uint32_t) = ^(NSString *nm, uint32_t slot) {
+        NSArray *bnd = e->_bufAt[@(slot)]; if (!bnd) return;
+        id<MTLBuffer> from = bnd[0]; const NSUInteger off = [bnd[1] unsignedLongValue];
+        if (off >= from.length) return;
+        uint64_t count = MIN((uint64_t)(from.length - off) / 4, (uint64_t)(16u << 20));
+        id<MTLBuffer> to = count ? [dev newBufferWithLength:(NSUInteger)count * 4 options:MTLResourceStorageModeShared] : nil;
+        if (!to) return;
+        const uint32_t cn = (uint32_t)count;
+        NVMTLComputePipelineState *saved = e->_ps; NSMutableDictionary *savedTG = e->_tgLen;
+        e->_ps = (NVMTLComputePipelineState *)g_nvc_ps[NVC_COPY]; e->_tgLen = nil; e->_nvcIn = YES;
+        [e setBuffer:from offset:off atIndex:5]; [e setBuffer:to offset:0 atIndex:6]; [e setBytes:&cn length:4 atIndex:8];
+        [e dispatchThreads:MTLSizeMake(cn, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        e->_nvcIn = NO; e->_ps = saved; e->_tgLen = savedTG;
+        [e setBuffer:from offset:off atIndex:slot];
+        [dumps addObject:@[nm, to]];
+    };
+    for (uint32_t a = 0; a + 1 < nar; a++) copyAll([NSString stringWithFormat:@"arg%u", a], a);
+    e->_nvcIn = YES; [e dispatchThreadgroups:grid threadsPerThreadgroup:tg]; e->_nvcIn = NO;   // MPS's own kernel
+    copyAll(@"mps", nar - 1);
+    NSData *kpc = [NSData dataWithBytes:e->_nvcKP length:e->_nvcKPLen], *cpc = [NSData dataWithBytes:e->_nvcCP length:e->_nvcCPLen];
+    NSString *base = [@(dir) stringByAppendingFormat:@"/%d-off%u", getpid(), (unsigned)atomic_load(&taken)];
+    NSString *info = [NSString stringWithFormat:@"array-offset layer, %u arrays, grid %lux%lux%lu tg %lux%lux%lu\n", nar,
+                      (unsigned long)grid.width, (unsigned long)grid.height, (unsigned long)grid.depth, (unsigned long)tg.width, (unsigned long)tg.height, (unsigned long)tg.depth];
+    [e->_cb addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+        [[NSFileManager defaultManager] createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil];
+        for (NSArray *d in dumps) { id<MTLBuffer> b = d[1];
+            [[NSData dataWithBytes:b.contents length:b.length] writeToFile:[base stringByAppendingFormat:@"/%@.f32", d[0]] atomically:YES]; }
+        [kpc writeToFile:[base stringByAppendingString:@"/kp.u32"] atomically:YES];
+        [cpc writeToFile:[base stringByAppendingString:@"/cp.u32"] atomically:YES];
+        [info writeToFile:[base stringByAppendingString:@"/shape.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }];
+    return 1;
+}
 static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize tg) {
     if (e->_nvcIn || !e->_ps || !e->_ps->_function || ![e->_ps->_function->_fname isEqualToString:@"ndArrayConvolution2D"]) return 0;
     const uint32_t nar = e->_nvcKPLen == 368 ? 3 : e->_nvcKPLen == 448 ? 4 : e->_nvcKPLen == 528 ? 5 : 0;
@@ -4340,7 +4382,10 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     const uint32_t *kp = (const uint32_t *)e->_nvcKP, *cp = (const uint32_t *)e->_nvcCP;
     const uint32_t cin = cp[32], cout = cp[33], kw = cp[34], kh = cp[35], groups = cp[36], batch = cp[37], sw = cp[38], sh = cp[39], dw = cp[40], dh = cp[41];
     if (groups != 1 || !cin || !cout || !kw || !kh || !batch || !sw || !sh || !dw || !dh) NVC_SKIP("groups/dims");
-    for (uint32_t a = 0; a < nar; a++) if (kp[a * 20] | kp[a * 20 + 1] | kp[a * 20 + 2] | kp[a * 20 + 3]) NVC_SKIP("array offset");
+    for (uint32_t a = 0; a < nar; a++) if (kp[a * 20] | kp[a * 20 + 1] | kp[a * 20 + 2] | kp[a * 20 + 3]) {
+        if (nvmtl_nvconv_dump_offsets(e, grid, tg, nar, dev)) return 1;
+        NVC_SKIP("array offset");
+    }
     const uint32_t ob = (nar - 1) * 20;
     if (kp[4] != cin || kp[5] != sw || kp[6] != sh || kp[7] != batch || kp[8] != 1) NVC_SKIP("input descriptor");
     if (kp[24] != cout || kp[25] != cin || kp[26] != kw || kp[27] != kh || kp[28] != 1) NVC_SKIP("weights descriptor");
@@ -4375,10 +4420,35 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     id<MTLBuffer> res = [dev newBufferWithLength:32 + 48 options:MTLResourceStorageModeShared];
     memset(res.contents, 0, 32 + 48);
     const uint32_t n = (uint32_t)nout;
+    // NVMTL_NVCONV_DUMP=<dir>: copy this layer's input, weights, bias, MPS's output and variant 0's output into
+    // CPU-readable buffers and write them with the parameter words, so a refused layer's rule can be solved offline.
+    static const char *dumpDir; static dispatch_once_t dumpOnce;
+    dispatch_once(&dumpOnce, ^{ dumpDir = getenv("NVMTL_NVCONV_DUMP"); if (dumpDir && !*dumpDir) dumpDir = NULL; });
+    NSMutableArray *dumps = dumpDir ? [NSMutableArray new] : nil;   // [name, shared buffer] pairs
+    void (^copyOut)(NSString *, id<MTLBuffer>, NSUInteger, uint64_t) = ^(NSString *nm, id<MTLBuffer> from, NSUInteger off, uint64_t count) {
+        if (!dumps || !from || !count || count > 0x10000000ull) return;
+        id<MTLBuffer> to = [dev newBufferWithLength:(NSUInteger)count * 4 options:MTLResourceStorageModeShared];
+        if (!to) return;
+        const uint32_t cn = (uint32_t)count;
+        NVMTLComputePipelineState *saved = e->_ps; NSMutableDictionary *savedTG = e->_tgLen;
+        e->_ps = (NVMTLComputePipelineState *)g_nvc_ps[NVC_COPY]; e->_tgLen = nil; e->_nvcIn = YES;
+        [e setBuffer:from offset:off atIndex:5]; [e setBuffer:to offset:0 atIndex:6]; [e setBytes:&cn length:4 atIndex:8];
+        [e dispatchThreads:MTLSizeMake(cn, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        e->_nvcIn = NO; e->_ps = saved; e->_tgLen = savedTG;
+        [dumps addObject:@[nm, to]];
+    };
+    copyOut(@"in", bi[0], [bi[1] unsignedLongValue], nin);
+    copyOut(@"w", bw[0], [bw[1] unsignedLongValue], nwt);
+    if (bb) copyOut(@"b", bb[0], [bb[1] unsignedLongValue], cout);
+    if (br) copyOut(@"res", br[0], [br[1] unsignedLongValue], nout);
+    copyOut(@"mps", outBuf, outOff, nout);
+    NSData *kpCopy = dumps ? [NSData dataWithBytes:e->_nvcKP length:e->_nvcKPLen] : nil;
+    NSData *cpCopy = dumps ? [NSData dataWithBytes:e->_nvcCP length:e->_nvcCPLen] : nil;
     for (uint32_t v = 0; v < NVC_NVAR; v++) {
         id<MTLBuffer> scratch = [dev newBufferWithLength:(NSUInteger)nout * 4 options:MTLResourceStorageModePrivate];
         [e setBuffer:scratch offset:0 atIndex:nar - 1];
         nvmtl_nvconv_run(e, ours, og, v);
+        if (v == 0) copyOut(@"ours0", scratch, 0, nout);
         NVMTLComputePipelineState *saved = e->_ps; NSMutableDictionary *savedTG = e->_tgLen;
         e->_ps = (NVMTLComputePipelineState *)g_nvc_ps[NVC_CMP]; e->_tgLen = nil; e->_nvcIn = YES;
         [e setBuffer:outBuf offset:outOff atIndex:5]; [e setBuffer:scratch offset:0 atIndex:6]; [e setBuffer:res offset:v * 4 atIndex:7];
@@ -4395,7 +4465,18 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
         for (int v = 0; v < NVC_NVAR && !pick; v++) if (r[v] == 0) pick = v + 1;
         pthread_mutex_lock(&g_nvc_lk); g_nvc_state[key] = @(pick ? pick : -1); pthread_mutex_unlock(&g_nvc_lk);
         if (pick) { const unsigned long k = ++g_nvc_verified; if (k <= 64 || !(k & (k - 1))) nvlog("nvconv: VERIFIED %s epilogue %d (%lu so far)", sh_.UTF8String, pick - 1, k); }
-        else { const unsigned long k = ++g_nvc_refused; const float *sp = (const float *)(r + 8);
+        if (dumps) {
+            static _Atomic unsigned dseq; const unsigned id_ = atomic_fetch_add(&dseq, 1);
+            NSString *base = [@(dumpDir) stringByAppendingFormat:@"/%d-%u-%@", getpid(), id_, pick ? @"ok" : @"refused"];
+            [[NSFileManager defaultManager] createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil];
+            for (NSArray *d in dumps) { id<MTLBuffer> b = d[1];
+                [[NSData dataWithBytes:b.contents length:b.length] writeToFile:[base stringByAppendingFormat:@"/%@.f32", d[0]] atomically:YES]; }
+            [kpCopy writeToFile:[base stringByAppendingString:@"/kp.u32"] atomically:YES];
+            [cpCopy writeToFile:[base stringByAppendingString:@"/cp.u32"] atomically:YES];
+            [[NSString stringWithFormat:@"%@\nmismatches %u %u %u %u %u of %u\n", sh_, r[0], r[1], r[2], r[3], r[4], n]
+                writeToFile:[base stringByAppendingString:@"/shape.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+        if (pick) {} else { const unsigned long k = ++g_nvc_refused; const float *sp = (const float *)(r + 8);
             if (k <= 64 || !(k & (k - 1))) nvlog("nvconv: REFUSED %s - mismatches %u/%u/%u/%u/%u of %u, MPS keeps it (%lu so far); MPS/ours(prelu) %g/%g %g/%g %g/%g %g/%g", sh_.UTF8String,
                                                   r[0], r[1], r[2], r[3], r[4], n, k, sp[0], sp[1], sp[2], sp[3], sp[4], sp[5], sp[6], sp[7]); }
     }];
