@@ -50,10 +50,12 @@ rollback_install() {
   done
   rm -rf /Library/NullMoth/kexts "$FW" || failed=1
   [ ! -d "$BK/kexts" ] || ditto "$BK/kexts" /Library/NullMoth/kexts || failed=1
-  # Restore the firmware to both locations: a driver older than this one looks for it in /Users/Shared,
-  # and root writing that directory is harmless (root-owned, inside a sticky parent).
+  # Restore the firmware to both locations: a driver older than this one looks for it in /Users/Shared.
+  # /Users/Shared is writable by every account, so the old location is written only when root creates it here:
+  # mkdir -p adopted a folder or symlink another account had put there and ditto then wrote through it as root.
+  # mkdir without -p fails on anything that exists, and a root-owned folder in the sticky parent cannot be swapped.
   [ ! -d "$BK/nvfw" ] || ditto "$BK/nvfw" "$FW" || failed=1
-  [ ! -d "$BK/nvfw" ] || { mkdir -p "$FWOLD" && ditto "$BK/nvfw" "$FWOLD"; } || failed=1
+  [ ! -d "$BK/nvfw" ] || ! mkdir -m 0755 "$FWOLD" 2>/dev/null || ditto "$BK/nvfw" "$FWOLD" || failed=1
   if [ -f "$BK/AuxiliaryKernelExtensions.kc" ]; then cp -p "$BK/AuxiliaryKernelExtensions.kc" "$KC" || failed=1
   else rm -f "$KC" || failed=1; fi
   if [ -f "$BK/os-major" ]; then cp -p "$BK/os-major" /Library/NullMoth/os-major || failed=1
@@ -498,7 +500,7 @@ rm -rf /Library/NullMoth/kexts "$FW"
 [ ! -d "\$BK/kexts" ] || ditto "\$BK/kexts" /Library/NullMoth/kexts
 [ ! -d "\$BK/nvfw" ] || ditto "\$BK/nvfw" "$FW"
 # the previous driver may be one that reads the old location
-[ ! -d "\$BK/nvfw" ] || { mkdir -p "$FWOLD" && ditto "\$BK/nvfw" "$FWOLD"; }
+[ ! -d "\$BK/nvfw" ] || ! mkdir -m 0755 "$FWOLD" 2>/dev/null || ditto "\$BK/nvfw" "$FWOLD"
 if [ -f "\$BK/AuxiliaryKernelExtensions.kc" ]; then cp -p "\$BK/AuxiliaryKernelExtensions.kc" "$KC"; else rm -f "$KC"; fi
 [ ! -f "\$BK/os-major" ] || cp -p "\$BK/os-major" /Library/NullMoth/os-major
 if [ -f "\$BK/driver-version" ]; then cp -p "\$BK/driver-version" /Library/NullMoth/driver-version; else rm -f /Library/NullMoth/driver-version; fi
