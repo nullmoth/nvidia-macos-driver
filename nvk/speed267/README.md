@@ -29,3 +29,7 @@
    pressure_solver_prep -43%, hysteresis -38%, Fluid's curl/vorticity/pressure/gradient -13..17%, gemm -12%,
    trace_bvh -9% static cycles. `NVMTL_NAK_NO_PREDLOAD=1` = previous behaviour (census: 0 kernels differ).
    Correctness + speed: `session5.sh` (probe forces hash old == new == new-with-switch-off, then GB7 three ways).
+6. `patch_weakstore.py` (nak/from_nir.rs) - plain global stores are weak (STG.E), coherent/volatile stay strong.gpu;
+   `NVMTL_NAK_STRONG_STORES=1` = previous behaviour. Found 11-01: GPU writes to Shared (system-RAM) buffers cost ~70-100 ns
+   per threadgroup - a near-empty kernel 317 us (Shared) vs 5.6 us (Private, or Shared with NVMTL_SHARED_VRAM=1), GB7's own
+   particle kernel 512 us vs 66 us (M1 Pro 188 us), outputs bit-identical. Timing of this patch pending (session23.sh).
