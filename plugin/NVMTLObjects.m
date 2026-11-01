@@ -2430,9 +2430,22 @@ extern NSData *nvmtl_compile_library_entry(NSData *, NSString *, NSString *, NSS
     return spv;
 }
 - (id<MTLDevice>)device { return (id<MTLDevice>)gNVMTLMainDevice; }
+// NVMTL_AIR_DUMP=<dir>: write each function's AIR text, once, as <dir>/<name>.ll when an app first asks for it, so an
+// app that builds its libraries from memory can be studied offline kernel by kernel. Nothing is written when unset.
+static void nvmtl_air_dump(NSString *name, NSString *air)
+{
+    static const char *dir; static dispatch_once_t once;
+    dispatch_once(&once, ^{ dir = getenv("NVMTL_AIR_DUMP"); if (dir && !*dir) dir = NULL; });
+    if (!dir || !air.length || !name.length || [name containsString:@"/"]) return;
+    NSString *path = [[@(dir) stringByAppendingPathComponent:name] stringByAppendingPathExtension:@"ll"];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:path]) return;
+    [[NSFileManager defaultManager] createDirectoryAtPath:@(dir) withIntermediateDirectories:YES attributes:nil error:nil];
+    [air writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name {
     NSData *spv = [_fns objectForKey:name];
     if (!spv && !_airs[name]) { nvlog("library: no function \"%s\" (this library holds %lu, externs %lu)", name.UTF8String, (unsigned long)(_fns.count + _airs.count), (unsigned long)_externs.count); return nil; }
+    nvmtl_air_dump(name, _airs[name]);
     if (spv && ([_stages[name] isEqualToString:@"mesh"] || [_stages[name] isEqualToString:@"object"])) {
         NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = nil; f->_fname = name; f->_stage = _stages[name];
         f->_air = _airs[name]; f->_lib = self; return f;
@@ -2482,6 +2495,7 @@ static size_t nvmtl_fc_width(NSUInteger dataType)
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)cv error:(NSError **)error {
     if (error) *error = nil;
     NSData *spv = [_fns objectForKey:name];
+    nvmtl_air_dump(name, _airs[name]);
     if (!spv && _airs[name]) {
         if (cv) nvlog("library: visible function \"%s\" asked with constant values — carried on the function",
                       name.UTF8String);
