@@ -28,6 +28,11 @@ static inline void nvconv_body(device const float *src ,
     const uint oC = kp[ob0 + 8], oW = kp[ob0 + 9], oH = kp[ob0 + 10], oN = kp[ob0 + 11];
 
     const uint M = batch * dh * dw, N = cout, K = kh * kw * cin;
+    // epi's high byte is a fused depth-to-space factor r (1 = none). MPS writes Super Resolution's 48x48x64 -> 1024
+    // conv straight into a 192x192x64 image: channel co = (dy*r + dx)*(cout/r^2) + c lands at (oy*r + dy, ox*r + dx, c).
+    // Solved from its dump (nvcdump4 shuf), max abs error 8.9e-7 against MPS; verification still decides at run time.
+    const uint shuf = max(epi >> 8, 1u), shC = cout / (shuf * shuf);
+    epi &= 0xffu;
     const uint m0 = tgp.x * BM, n0 = tgp.y * BN;
     const bool fast = (cin % BK) == 0;
 
@@ -112,7 +117,12 @@ static inline void nvconv_body(device const float *src ,
             // Resolution's 48x48 layer writes 64 of 256 channels per pixel) while its residual input stays dense, and
             // reading it with the output's strides was the whole of that layer's refusal (dump 43204-68, numpy exact)
             if (res) v += res[co * kp[68] + ox * kp[69] + oy * kp[70] + n * kp[71]];
-            dst[co * oC + ob] = v;
+            if (shuf > 1) {
+                const uint q = co / shC, c = co % shC;
+                dst[c * oC + (ox * shuf + q % shuf) * oW + (oy * shuf + q / shuf) * oH + n * oN] = v;
+            } else {
+                dst[co * oC + ob] = v;
+            }
         }
     }
 }

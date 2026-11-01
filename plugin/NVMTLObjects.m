@@ -4296,7 +4296,21 @@ static id<MTLComputePipelineState> g_nvc_ps[8];
 static NSMutableDictionary *g_nvc_state;
 static pthread_mutex_t g_nvc_lk = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic unsigned long g_nvc_ran, g_nvc_verified, g_nvc_refused, g_nvc_skips;
-#define NVC_SKIP(why) do { const unsigned long k_ = ++g_nvc_skips; if (k_ <= 16) nvlog("nvconv: not taken - %s (%lu)", why, k_); return 0; } while (0)
+// Each distinct (reason, dispatch grid) is logged once, up to 96: a flat first-16 cap was spent entirely on Face
+// Tracking, so the Super Resolution layers' reasons (the 1.5 s 9216x32 dispatch) never reached the log.
+static void nvmtl_nvc_skip_log(const char *why, MTLSize grid) {
+    static NSMutableSet *seen; static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+    const unsigned long k = ++g_nvc_skips;
+    NSString *key = [NSString stringWithFormat:@"%s|%lux%lux%lu", why, (unsigned long)grid.width, (unsigned long)grid.height, (unsigned long)grid.depth];
+    pthread_mutex_lock(&lk);
+    if (!seen) seen = [NSMutableSet new];
+    const BOOL fresh = seen.count < 96 && ![seen containsObject:key];
+    if (fresh) [seen addObject:key];
+    pthread_mutex_unlock(&lk);
+    if (fresh) nvlog("nvconv: not taken - %s (grid %lux%lux%lu, %lu skips so far)", why,
+                     (unsigned long)grid.width, (unsigned long)grid.height, (unsigned long)grid.depth, k);
+}
+#define NVC_SKIP(why) do { nvmtl_nvc_skip_log(why, grid); return 0; } while (0)
 static BOOL nvmtl_nvconv_ready(id<MTLDevice> dev) {
     static int on = -1;
     if (on >= 0) return on;
@@ -4330,10 +4344,13 @@ static void nvmtl_nvconv_run(NVMTLComputeCommandEncoder *e, id<MTLComputePipelin
 // NVMTL_NVCONV_DUMP=<dir>, for a layer nvconv skips with array offsets: copy every bound array whole (from its binding
 // offset to the buffer's end, capped at 64 MB), run MPS's kernel, copy its output, and write all of it with the parameter
 // words, so the offset rule can be solved offline from real data. First 12 such layers per process; MPS's result stands.
-static int nvmtl_nvconv_dump_offsets(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize tg, uint32_t nar, id<MTLDevice> dev) {
-    static const char *dir; static dispatch_once_t once; static _Atomic unsigned taken;
+static int nvmtl_nvconv_dump_offsets(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize tg, uint32_t nar, id<MTLDevice> dev,
+                                     const char *tag, _Atomic unsigned *ctr) {
+    static const char *dir; static dispatch_once_t once;
     dispatch_once(&once, ^{ dir = getenv("NVMTL_NVCONV_DUMP"); if (dir && !*dir) dir = NULL; });
-    if (!dir || !g_nvc_ps[NVC_COPY] || atomic_fetch_add(&taken, 1) >= 12) return 0;
+    // each caller has its own counter (tag): Face Tracking's offset layers came first and used every slot of a shared one
+    if (!dir || !g_nvc_ps[NVC_COPY] || atomic_fetch_add(ctr, 1) >= 12) return 0;
+    _Atomic unsigned *taken = ctr;
     NSMutableArray *dumps = [NSMutableArray new];
     void (^copyAll)(NSString *, uint32_t) = ^(NSString *nm, uint32_t slot) {
         NSArray *bnd = e->_bufAt[@(slot)]; if (!bnd) return;
@@ -4355,7 +4372,7 @@ static int nvmtl_nvconv_dump_offsets(NVMTLComputeCommandEncoder *e, MTLSize grid
     e->_nvcIn = YES; [e dispatchThreadgroups:grid threadsPerThreadgroup:tg]; e->_nvcIn = NO;   // MPS's own kernel
     copyAll(@"mps", nar - 1);
     NSData *kpc = [NSData dataWithBytes:e->_nvcKP length:e->_nvcKPLen], *cpc = [NSData dataWithBytes:e->_nvcCP length:e->_nvcCPLen];
-    NSString *base = [@(dir) stringByAppendingFormat:@"/%d-off%u", getpid(), (unsigned)atomic_load(&taken)];
+    NSString *base = [@(dir) stringByAppendingFormat:@"/%d-%s%u", getpid(), tag, (unsigned)atomic_load(taken)];
     NSString *info = [NSString stringWithFormat:@"array-offset layer, %u arrays, grid %lux%lux%lu tg %lux%lux%lu\n", nar,
                       (unsigned long)grid.width, (unsigned long)grid.height, (unsigned long)grid.depth, (unsigned long)tg.width, (unsigned long)tg.height, (unsigned long)tg.depth];
     [e->_cb addCompletedHandler:^(id<MTLCommandBuffer> cb) {
@@ -4367,6 +4384,12 @@ static int nvmtl_nvconv_dump_offsets(NVMTLComputeCommandEncoder *e, MTLSize grid
         [info writeToFile:[base stringByAppendingString:@"/shape.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }];
     return 1;
+}
+// NVMTL_NVCONV_SHUFFLE=0 keeps fused depth-to-space layers on MPS (the off switch for that one mapping)
+static BOOL nvmtl_nvconv_shuffle_enabled(void) {
+    static int on = -1;
+    if (on < 0) { const char *v = getenv("NVMTL_NVCONV_SHUFFLE"); on = !(v && v[0] == '0'); }
+    return on;
 }
 static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize tg) {
     if (e->_nvcIn || !e->_ps || !e->_ps->_function || ![e->_ps->_function->_fname isEqualToString:@"ndArrayConvolution2D"]) return 0;
@@ -4387,17 +4410,29 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     // (nvcdump2 off1): MPS's output equals ReLU(conv) at binding + pixel*512 + channel, max rel err 0 - so the words need
     // no handling beyond the strides the kernel already reads. Verification below still has the last word on every layer.
     for (uint32_t a = 0; a < nar; a++) if (kp[a * 20] | kp[a * 20 + 1] | kp[a * 20 + 2] | kp[a * 20 + 3]) {
-        if (nvmtl_nvconv_dump_offsets(e, grid, tg, nar, dev)) return 1;
+        static _Atomic unsigned offTaken;
+        if (nvmtl_nvconv_dump_offsets(e, grid, tg, nar, dev, "off", &offTaken)) return 1;
         break;
     }
     const uint32_t ob = (nar - 1) * 20;
     if (kp[4] != cin || kp[5] != sw || kp[6] != sh || kp[7] != batch || kp[8] != 1) NVC_SKIP("input descriptor");
     if (kp[24] != cout || kp[25] != cin || kp[26] != kw || kp[27] != kh || kp[28] != 1) NVC_SKIP("weights descriptor");
-    if (kp[ob + 4] != cout || kp[ob + 5] != dw || kp[ob + 6] != dh || kp[ob + 7] != batch) NVC_SKIP("output sizes");
+    // The output tensor is cout x dw x dh, or - a fused depth-to-space with factor r (Super Resolution's 1.5 s
+    // 48x48x64 -> 1024 layer is written as 192x192x64) - cout/r^2 x dw*r x dh*r. nvconv.metal places channel
+    // co = (dy*r + dx)*(cout/r^2) + c at (oy*r + dy, ox*r + dx, c): solved from the layer's dump, 8.9e-7 against MPS.
+    const uint32_t oc = kp[ob + 4], ow = kp[ob + 5], oh = kp[ob + 6];
+    const uint32_t shuf = (ow > dw && dw && ow % dw == 0) ? ow / dw : 1;
+    if (oh != dh * shuf || ow != dw * shuf || (uint64_t)oc * shuf * shuf != cout || kp[ob + 7] != batch || shuf > 255 ||
+        (shuf > 1 && !nvmtl_nvconv_shuffle_enabled())) {
+        char why[200]; snprintf(why, sizeof why, "output sizes %u,%u,%u,%u vs cout %u, %ux%u, batch %u (in %ux%ux%u k%ux%u, nar %u)",
+                                kp[ob + 4], kp[ob + 5], kp[ob + 6], kp[ob + 7], cout, dw, dh, batch, sw, sh, cin, kw, kh, nar);
+        static _Atomic unsigned shufTaken;
+        if (nvmtl_nvconv_dump_offsets(e, grid, tg, nar, dev, "shuf", &shufTaken)) return 1;
+        NVC_SKIP(why); }
     // Strided output (a concat branch) is fine as long as no two outputs alias: channels innermost and dense, each wider
     // dimension at least as far apart as the one inside it spans. The dense layout is the case where all are equal.
-    if (kp[ob + 8] != 1 || (dw > 1 && kp[ob + 9] < cout) || (dh > 1 && kp[ob + 10] < (uint64_t)(dw > 1 ? kp[ob + 9] : cout) * dw) ||
-        (batch > 1 && kp[ob + 11] < (uint64_t)(dh > 1 ? kp[ob + 10] : (dw > 1 ? kp[ob + 9] : cout)) * dh)) {
+    if (kp[ob + 8] != 1 || (ow > 1 && kp[ob + 9] < oc) || (oh > 1 && kp[ob + 10] < (uint64_t)(ow > 1 ? kp[ob + 9] : oc) * ow) ||
+        (batch > 1 && kp[ob + 11] < (uint64_t)(oh > 1 ? kp[ob + 10] : (ow > 1 ? kp[ob + 9] : oc)) * oh)) {
         char why[160]; snprintf(why, sizeof why, "output strides %u,%u,%u,%u for cout %u x %u x %u (sizes %u,%u,%u,%u)",
                                 kp[ob + 8], kp[ob + 9], kp[ob + 10], kp[ob + 11], cout, dw, dh, kp[ob + 4], kp[ob + 5], kp[ob + 6], kp[ob + 7]);
         NVC_SKIP(why); }
@@ -4412,7 +4447,7 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     const uint64_t nwt = (uint64_t)(cout - 1) * kp[28] + (uint64_t)(cin - 1) * kp[29] + (uint64_t)(kw - 1) * kp[30] + (uint64_t)(kh - 1) * kp[31] + 1;
     const uint64_t nout = (uint64_t)cout * dw * dh * batch;
     // nspan: floats from the output binding to one past the last output, gaps included (== nout when dense)
-    const uint64_t nspan = (uint64_t)(batch - 1) * kp[ob + 11] + (uint64_t)(dh - 1) * kp[ob + 10] + (uint64_t)(dw - 1) * kp[ob + 9] + cout;
+    const uint64_t nspan = (uint64_t)(batch - 1) * kp[ob + 11] + (uint64_t)(oh - 1) * kp[ob + 10] + (uint64_t)(ow - 1) * kp[ob + 9] + oc;
     const uint64_t nres = nar == 5 ? (uint64_t)(cout - 1) * kp[68] + (uint64_t)(dw - 1) * kp[69] + (uint64_t)(dh - 1) * kp[70] + (uint64_t)(batch - 1) * kp[71] + 1 : 0;
     if (!NVC_ROOM(bi, nin) || !NVC_ROOM(bw, nwt) || !NVC_ROOM(bo, nspan) || (bb && !NVC_ROOM(bb, cout)) || (br && !NVC_ROOM(br, nres)) || nspan > 0xffffffffull) NVC_SKIP("buffer too short for f32");
     #undef NVC_ROOM
@@ -4424,7 +4459,7 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     for (uint32_t a = 0; a < nar; a++) [key appendBytes:kp + a * 20 + 4 length:8 * 4];
     [key appendBytes:cp + 32 length:18 * 4];
     pthread_mutex_lock(&g_nvc_lk); NSNumber *st = g_nvc_state[key]; if (!st) g_nvc_state[key] = @0; pthread_mutex_unlock(&g_nvc_lk);
-    if (st.intValue > 0) { nvmtl_nvconv_run(e, ours, og, (uint32_t)(st.intValue - 1)); g_nvc_ran++; return 1; }
+    if (st.intValue > 0) { nvmtl_nvconv_run(e, ours, og, (uint32_t)(st.intValue - 1) | shuf << 8); g_nvc_ran++; return 1; }
     if (st) { static _Atomic unsigned long pend; if (st.intValue == 0 && ++pend <= 8) nvlog("nvconv: still pending (%lu)", (unsigned long)pend); return 0; }
     e->_nvcIn = YES; [e dispatchThreadgroups:grid threadsPerThreadgroup:tg]; e->_nvcIn = NO;
     id<MTLBuffer> outBuf = bo[0]; const NSUInteger outOff = [bo[1] unsignedLongValue];
@@ -4467,7 +4502,7 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
             e->_nvcIn = NO; e->_ps = saved; e->_tgLen = savedTG;
         }
         [e setBuffer:scratch offset:0 atIndex:nar - 1];
-        nvmtl_nvconv_run(e, ours, og, v);
+        nvmtl_nvconv_run(e, ours, og, v | shuf << 8);   // epilogue in the low byte, depth-to-space factor above it
         if (v == 0) copyOut(@"ours0", scratch, 0, nspan);
         e->_ps = (NVMTLComputePipelineState *)g_nvc_ps[NVC_CMP]; e->_tgLen = nil; e->_nvcIn = YES;
         [e setBuffer:outBuf offset:outOff atIndex:5]; [e setBuffer:scratch offset:0 atIndex:6]; [e setBuffer:res offset:v * 4 atIndex:7];
