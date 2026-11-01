@@ -21,8 +21,8 @@ import tempfile
 EXPECTED = {
     "schema_version": 2,
     "artifact": "libnvencvt.dylib",
-    "artifact_version": "v0.9.5-ga10x1",
-    "local_revision": "ga10x-encoding-1",
+    "artifact_version": "v0.9.5-ga10x2",
+    "local_revision": "ga10x-codecs-2",
     "arch": "x86_64",
     "min_os": "15.0",
     "upstream_repo": "mickys/nvenc",

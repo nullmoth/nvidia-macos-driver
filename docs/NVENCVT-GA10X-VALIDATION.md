@@ -1,5 +1,9 @@
 # GA10x encoding validation
 
+This record covers the `ga10x1` encoding rollout. See the separate
+[ga10x2 H.264 decoding record](NVENCVT-GA10X-H264-VALIDATION.md) for the later
+decoder change and its artifact identity.
+
 Tested on 2026-11-01 with an RTX 3080 (10de:2206), macOS 26.7.2 (25G332),
 and the integrated NullMoth v2.6.6 driver. This validates one GA102 system,
 not the entire Ampere family.

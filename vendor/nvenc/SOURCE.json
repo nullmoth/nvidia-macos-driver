@@ -1,5 +1,5 @@
 {
-  "artifact_version": "v0.9.5-ga10x1",
+  "artifact_version": "v0.9.5-ga10x2",
   "build_dependencies": {
     "nvidia_open_gpu_doc": {
       "commit": "9fdf5c4062007929d9f4e6cbad9c9771fe61b880",
@@ -34,12 +34,15 @@
     "build/nvenc_build.sh records the local artifact version and revision while preserving the upstream v0.9.5 tag and commit.",
     "package/stage_nvencvt.py requires an exact schema v2 artifact version and local revision receipt before staging."
   ],
-  "local_revision": "ga10x-encoding-1",
+  "local_revision": "ga10x-codecs-2",
   "local_source_changes": [
     "src/enc.c: locally modified for explicit C7B7 NVENC magic and semaphore encoding.",
     "src/enc_iface.h: added locally for scoped C7B7/C9B7 H.264/HEVC interface assertions and helpers.",
     "vt/nvencvt.c: local GA10x registration and engine policy changes.",
-    "src/ga10x_policy.h: added locally for GA10x registration opt-out and single-engine selection."
+    "src/ga10x_policy.h: added locally for GA10x encoder/decoder opt-out, actual NVDEC class gating, and single-encoder selection.",
+    "src/dec.c: locally includes the scoped C7B0/C9B0 H.264 interface checks; hardware command values are unchanged.",
+    "src/dec_iface.h: added locally for H.264 NVDEC method and field compatibility assertions.",
+    "vt/nvencvt_dec.c: local C7B0 H.264 registration with an independent opt-out; HEVC/MPEG keep their prior GA10x development gate."
   ],
   "omitted_upstream_data_bytes": 93991779,
   "omitted_upstream_data_files": 1279,

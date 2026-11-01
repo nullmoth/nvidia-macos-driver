@@ -156,7 +156,7 @@ package licence folder, ad-hoc signs the library and bundle, and regenerates the
 
 See the README, *Build from source*. The kexts need NVIDIA's `open-gpu-kernel-modules` at tag `615.78.08`; NVK needs
 Mesa `17ca6174` with `nvk/nvk-macos.patch`.
-The bundled NVEncVT source is pinned at `mickys/nvenc` v0.9.5 with local GA10x H.264/HEVC changes, identified as
-`v0.9.5-ga10x1` / `ga10x-encoding-1`; build it locally with `build/nvenc_build.sh <out-dir>`.
+The bundled NVEncVT source is pinned at `mickys/nvenc` v0.9.5 with local GA10x H.264/HEVC encoding and H.264 decoding changes, identified as
+`v0.9.5-ga10x2` / `ga10x-codecs-2`; build it locally with `build/nvenc_build.sh <out-dir>`.
 Stage its output into the offline package root with `package/stage_nvencvt.py <pkgroot> <out-dir>` before producing the
 release archive. That staging step signs and checksums the final payload; it does not install or execute the library.

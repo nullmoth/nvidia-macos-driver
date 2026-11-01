@@ -9,8 +9,8 @@ SRC="$HERE/vendor/nvenc"
 OUT=${1:?usage: build/nvenc_build.sh <output-directory>}
 UPSTREAM_TAG=v0.9.5
 UPSTREAM_COMMIT=1e91845d6f37d8bce671d62c14f4390324da3659
-ARTIFACT_VERSION=v0.9.5-ga10x1
-LOCAL_REVISION=ga10x-encoding-1
+ARTIFACT_VERSION=v0.9.5-ga10x2
+LOCAL_REVISION=ga10x-codecs-2
 MIN_OS=15.0
 
 OGKM="$SRC/vendor/open-gpu-kernel-modules"
@@ -18,7 +18,7 @@ OGD="$SRC/vendor/open-gpu-doc"
 WEBKIT="$SRC/vendor/webkit-spi"
 for path in \
     "$SRC/LICENSE" "$SRC/src/enc.c" "$SRC/src/enc_iface.h" "$SRC/src/ga10x_policy.h" \
-    "$SRC/src/dec.c" "$SRC/vt/nvencvt.c" "$SRC/vt/nvencvt_dec.c" \
+    "$SRC/src/dec.c" "$SRC/src/dec_iface.h" "$SRC/vt/nvencvt.c" "$SRC/vt/nvencvt_dec.c" \
     "$OGKM/COPYING" "$OGKM/src/common/sdk/nvidia/inc/nvtypes.h" \
     "$OGKM/src/nvidia/arch/nvalloc/unix/include/nv-unix-nvos-params-wrappers.h" \
     "$OGD/LICENSE.md" "$OGD/classes/video/nvenc_drv.h" "$OGD/classes/video/nvdec_drv.h" \

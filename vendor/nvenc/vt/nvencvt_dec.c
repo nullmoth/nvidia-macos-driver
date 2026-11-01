@@ -6,6 +6,7 @@
 // Registered by NVEncVT_Register next to the encoders (NVENCVT_NO_DEC=1 leaves it out), so every way the encoder gets
 // into a process (NullMoth's NVMTL_NVENCVT hook, nvenc-run) brings the decoder too.
 #include "dec.h"
+#include "ga10x_policy.h"
 #include "vp9dec.h"
 #include "av1dec.h"
 #include "hevcdec.h"
@@ -927,11 +928,10 @@ static NvU32 nvdec_class(void)
 
 // Called by NVEncVT_Register once the GPU checked out (Ada, GA10x or TU117). Rated above NullMoth's own H.264 / HEVC decoders (1000). HEVC,
 // VP9 and AV1 too (NVENCVT_NO_HEVCDEC / _VP9DEC / _AV1DEC=1 leave one out).
-// On GA10x (RTX 30) the VP9 and AV1 decoders register: their method IDs are the same as Ada's (clc7b0.h and clc9b0.h
-// agree on every one of them) and GA10x's NVDEC has both. The H.264 / HEVC / MPEG decoders were written for Ada's NVDEC
-// (0xc9b0) and Turing's (0xc4b0) and were not tried on 0xc7b0, and a decoder that registers and then fails is worse than
-// none (VideoToolbox does not fall back to another decoder once it picked ours). NVENCVT_AMPERE_ALL_DEC=1 registers
-// them all anyway.
+// On GA10x (RTX 30), H.264 additionally requires the actual C7B0 NVDEC class;
+// NVENCVT_AMPERE_H264_DEC=0 keeps the previous decoder selection. VP9 and AV1
+// retain their existing gates. HEVC/MPEG remain behind the upstream
+// NVENCVT_AMPERE_ALL_DEC development override until separately validated.
 OSStatus NVDecVT_Register(int rating)
 {
     gDLog = getenv("NVENCVT_LOG") != NULL;
@@ -939,7 +939,10 @@ OSStatus NVDecVT_Register(int rating)
     if (getenv("NVENCVT_NO_DEC")) return kVTCouldNotFindVideoDecoderErr;
     extern int gNvencvtGpu;   // vt/nvencvt.c: 1 Ada, 2 TU117 (GTX 1650: NVDEC 0xc4b0 has no AV1), 3 GA10x (RTX 30)
     const bool ampere = gNvencvtGpu == 3;
-    const bool av1Vp9Only = ampere && !getenv("NVENCVT_AMPERE_ALL_DEC");
+    const bool hevcMpeg = !ampere || getenv("NVENCVT_AMPERE_ALL_DEC") != NULL;
+    const bool h264 = !ampere || nvenc_ga10x_h264_decode_enabled(getenv("NVENCVT_AMPERE_H264_DEC"), nvdec_class());
+    if (ampere) DLOG("GA10x H.264 decoder %s (NVDEC class 0x%x; NVENCVT_AMPERE_H264_DEC=0 disables)",
+                    h264 ? "enabled" : "disabled", nvdec_class());
     typedef OSStatus (*RegFn)(FourCharCode, CFDictionaryRef, void *);
     RegFn reg = (RegFn)dlsym(RTLD_DEFAULT, "VTRegisterVideoDecoderWithInfo");
     if (!reg) { DLOG("VTRegisterVideoDecoderWithInfo not found"); return kVTCouldNotFindVideoDecoderErr; }
@@ -947,13 +950,13 @@ OSStatus NVDecVT_Register(int rating)
     const void *k[] = { CFSTR("CMClassImplementationID"), CFSTR("CMClassImplementationName"), CFSTR("VTRating"), CFSTR("VTIsHardwareAccelerated") };
     const void *v[] = { CFSTR(DECODER_ID), CFSTR("NVDEC - H.264 - mickys/nvenc"), nr, kCFBooleanTrue };
     CFDictionaryRef info = CFDictionaryCreate(NULL, k, v, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    OSStatus st = av1Vp9Only ? kVTCouldNotFindVideoDecoderErr : reg(kCMVideoCodecType_H264, info, (void *)NVDecVT_CreateInstance);
+    OSStatus st = h264 ? reg(kCMVideoCodecType_H264, info, (void *)NVDecVT_CreateInstance) : kVTCouldNotFindVideoDecoderErr;
     // 'avc3' / 'hev1' sample entries (ffmpeg writes hev1 for HEVC in MP4 by default): VideoToolbox has no decoder for them
     // at all (-12906, Apple's included); ours decodes them like avc1 / hvc1 (NVENCVT_NO_HEV1=1 leaves both out)
-    if (!av1Vp9Only && !getenv("NVENCVT_NO_HEV1")) { OSStatus s3 = reg(CODEC_AVC3, info, (void *)NVDecVT_CreateInstance); DLOG("registered %s for avc3 -> %d", DECODER_ID, (int)s3); }
+    if (h264 && !getenv("NVENCVT_NO_HEV1")) { OSStatus s3 = reg(CODEC_AVC3, info, (void *)NVDecVT_CreateInstance); DLOG("registered %s for avc3 -> %d", DECODER_ID, (int)s3); }
     CFRelease(info);
     DLOG("registered %s -> %d (rating %d)", DECODER_ID, (int)st, rating);
-    if (!av1Vp9Only && !getenv("NVENCVT_NO_HEVCDEC")) {   // HEVC (NVENCVT_NO_HEVCDEC=1 leaves it out): above NullMoth's own HEVC decoder too
+    if (hevcMpeg && !getenv("NVENCVT_NO_HEVCDEC")) {   // HEVC (NVENCVT_NO_HEVCDEC=1 leaves it out): above NullMoth's own HEVC decoder too
         const void *vh[] = { CFSTR(DECODER_ID_HEVC), CFSTR("NVDEC - HEVC - mickys/nvenc"), nr, kCFBooleanTrue };
         CFDictionaryRef ih = CFDictionaryCreate(NULL, k, vh, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         OSStatus sh = reg(kCMVideoCodecType_HEVC, ih, (void *)NVDecVT_CreateInstance);
@@ -991,7 +994,7 @@ OSStatus NVDecVT_Register(int rating)
         SuppFn supp = (SuppFn)dlsym(RTLD_DEFAULT, "VTRegisterSupplementalVideoDecoderIfAvailable");
         if (supp && !getenv("NVENCVT_NO_VP9SUPP")) { supp(CODEC_AV1); DLOG("opted in to AV1 decoding for this process"); }
     }
-    if (!av1Vp9Only && !getenv("NVENCVT_NO_MPEG2DEC")) {   // MPEG-1 / MPEG-2 and MPEG-4 Part 2 (M14): above Apple's software decoders
+    if (hevcMpeg && !getenv("NVENCVT_NO_MPEG2DEC")) {   // MPEG-1 / MPEG-2 and MPEG-4 Part 2 (M14): above Apple's software decoders
         const struct { FourCharCode c; const char *id, *name; } m[] = {
             { kCMVideoCodecType_MPEG2Video, DECODER_ID_MPEG2, "NVDEC - MPEG-2 - mickys/nvenc" },
             { kCMVideoCodecType_MPEG1Video, DECODER_ID_MPEG1, "NVDEC - MPEG-1 - mickys/nvenc" },

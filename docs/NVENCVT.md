@@ -1,8 +1,8 @@
 # Optional NVEncVT VideoToolbox component
 
 The package can include `libnvencvt.dylib`, the VideoToolbox layer from the
-pinned `mickys/nvenc` v0.9.5 source with local GA10x encoding changes
-(`v0.9.5-ga10x1`, revision `ga10x-encoding-1`). It provides NVIDIA NVENC encoders and
+pinned `mickys/nvenc` v0.9.5 source with local GA10x codec changes
+(`v0.9.5-ga10x2`, revision `ga10x-codecs-2`). It provides NVIDIA NVENC encoders and
 NVDEC decoders through VideoToolbox. The library is present in the bundle but
 registration is **off by default**.
 This page describes the local integration. The vendored README and GA10x notes
@@ -25,6 +25,23 @@ The upstream `NVENCVT_ANY_GPU` development override bypasses GPU selection;
 leave it unset for normal operation and hardware validation.
 See the [RTX 3080 validation record](NVENCVT-GA10X-VALIDATION.md) for tested
 formats, source identity, and the limits of the hardware checks.
+
+## RTX 30 series H.264 decoding
+
+The local GA10x revision also registers H.264 decoding when RM reports the
+C7B0 NVDEC class. The `avc1` and `avc3` registrations use the existing H.264
+implementation with explicit C7B0/C9B0 interface checks. This path accepts
+eight-bit 4:2:0 video with coded dimensions at most 4096x4096; it does not
+support FMO/slice groups or SP/SI slices.
+
+`NVENCVT_AMPERE_H264_DEC=0` keeps the previous H.264 decoder selection without
+disabling the NVEncVT encoders or VP9/AV1 decoders. Unset or `1` enables the
+H.264 registration after the class check; other values disable it. This
+specific setting takes precedence over the upstream `NVENCVT_AMPERE_ALL_DEC`
+development override. HEVC and MPEG decoding retain their earlier GA10x gate;
+normal use should leave that broad override unset.
+The [H.264 validation record](NVENCVT-GA10X-H264-VALIDATION.md) documents the
+exact decoder attribution, CPU reference checks and fixed-input comparison.
 
 ## Apps that load the Metal plugin
 

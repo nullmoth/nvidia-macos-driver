@@ -13,8 +13,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 STAGER = ROOT / "package/stage_nvencvt.py"
 UPSTREAM_COMMIT = "1e91845d6f37d8bce671d62c14f4390324da3659"
-ARTIFACT_VERSION = "v0.9.5-ga10x1"
-LOCAL_REVISION = "ga10x-encoding-1"
+ARTIFACT_VERSION = "v0.9.5-ga10x2"
+LOCAL_REVISION = "ga10x-codecs-2"
 
 
 def write_manifest(root: Path) -> None:
