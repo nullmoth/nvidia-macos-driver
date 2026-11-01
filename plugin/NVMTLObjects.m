@@ -4405,6 +4405,13 @@ static BOOL nvmtl_nvconv_shuffle_enabled(void) {
     if (on < 0) { const char *v = getenv("NVMTL_NVCONV_SHUFFLE"); on = !(v && v[0] == '0'); }
     return on;
 }
+// NVMTL_NVCONV_TIMED=0 takes every verified layer regardless of speed (the old behaviour)
+static BOOL nvmtl_nvconv_timed(void) {
+    static int on = -1;
+    if (on < 0) { const char *v = getenv("NVMTL_NVCONV_TIMED"); on = !(v && v[0] == '0'); }
+    return on;
+}
+id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
 static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize tg) {
     if (e->_nvcIn || !e->_ps || !e->_ps->_function || ![e->_ps->_function->_fname isEqualToString:@"ndArrayConvolution2D"]) return 0;
     const uint32_t nar = e->_nvcKPLen == 368 ? 3 : e->_nvcKPLen == 448 ? 4 : e->_nvcKPLen == 528 ? 5 : 0;
@@ -4475,7 +4482,18 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     pthread_mutex_lock(&g_nvc_lk); NSNumber *st = g_nvc_state[key]; if (!st) g_nvc_state[key] = @0; pthread_mutex_unlock(&g_nvc_lk);
     if (st.intValue > 0) { nvmtl_nvconv_run(e, ours, og, (uint32_t)(st.intValue - 1) | shuf << 8); g_nvc_ran++; return 1; }
     if (st) { static _Atomic unsigned long pend; if (st.intValue == 0 && ++pend <= 8) nvlog("nvconv: still pending (%lu)", (unsigned long)pend); return 0; }
+    // Correct is not enough: on Background Blur's layers our kernel was slower than MPS (GB7 Blur 60,767 -> 56,277 with
+    // nvconv on, while Super Resolution gained 136,044 -> 156,599). Time MPS's dispatch and each variant with the
+    // device's own timestamp counters, and take the layer only where ours needs <= 90% of MPS's time.
+    id<MTLCounterSampleBuffer> tsb = nil;
+    if (nvmtl_nvconv_timed()) {
+        MTLCounterSampleBufferDescriptor *td = [MTLCounterSampleBufferDescriptor new];
+        td.counterSet = nvmtl_timestamp_counter_set(); td.sampleCount = 2 + 2 * NVC_NVAR; td.storageMode = MTLStorageModeShared;
+        tsb = [dev newCounterSampleBufferWithDescriptor:td error:nil];
+    }
+    if (tsb) [e sampleCountersInBuffer:tsb atSampleIndex:0 withBarrier:YES];
     e->_nvcIn = YES; [e dispatchThreadgroups:grid threadsPerThreadgroup:tg]; e->_nvcIn = NO;
+    if (tsb) [e sampleCountersInBuffer:tsb atSampleIndex:1 withBarrier:YES];
     id<MTLBuffer> outBuf = bo[0]; const NSUInteger outOff = [bo[1] unsignedLongValue];
     id<MTLBuffer> res = [dev newBufferWithLength:32 + 48 options:MTLResourceStorageModeShared];
     memset(res.contents, 0, 32 + 48);
@@ -4516,7 +4534,9 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
             e->_nvcIn = NO; e->_ps = saved; e->_tgLen = savedTG;
         }
         [e setBuffer:scratch offset:0 atIndex:nar - 1];
+        if (tsb) [e sampleCountersInBuffer:tsb atSampleIndex:2 + 2 * v withBarrier:YES];
         nvmtl_nvconv_run(e, ours, og, v | shuf << 8);   // epilogue in the low byte, depth-to-space factor above it
+        if (tsb) [e sampleCountersInBuffer:tsb atSampleIndex:3 + 2 * v withBarrier:YES];
         if (v == 0) copyOut(@"ours0", scratch, 0, nspan);
         e->_ps = (NVMTLComputePipelineState *)g_nvc_ps[NVC_CMP]; e->_tgLen = nil; e->_nvcIn = YES;
         [e setBuffer:outBuf offset:outOff atIndex:5]; [e setBuffer:scratch offset:0 atIndex:6]; [e setBuffer:res offset:v * 4 atIndex:7];
@@ -4532,7 +4552,19 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     [e->_cb addCompletedHandler:^(id<MTLCommandBuffer> cb) {
         const uint32_t *r = (const uint32_t *)res.contents; int pick = 0;
         for (int v = 0; v < NVC_NVAR && !pick; v++) if (r[v] == 0) pick = v + 1;
-        pthread_mutex_lock(&g_nvc_lk); g_nvc_state[key] = @(pick ? pick : -1); pthread_mutex_unlock(&g_nvc_lk);
+        // speed gate: a verified layer stays on MPS unless ours took <= 90% of MPS's time (-2 = correct but slower)
+        double tm = -1, to = -1; int slower = 0;
+        NSData *ts = tsb ? [tsb resolveCounterRange:NSMakeRange(0, 2 + 2 * NVC_NVAR)] : nil;
+        if (pick && ts.length == (2 + 2 * NVC_NVAR) * 8) {
+            const uint64_t *t = ts.bytes;
+            if (t[1] > t[0] && t[3 + 2 * (pick - 1)] > t[2 + 2 * (pick - 1)]) {
+                tm = (double)(t[1] - t[0]); to = (double)(t[3 + 2 * (pick - 1)] - t[2 + 2 * (pick - 1)]);
+                slower = to > 0.9 * tm;
+            }
+        }
+        pthread_mutex_lock(&g_nvc_lk); g_nvc_state[key] = @(pick ? (slower ? -2 : pick) : -1); pthread_mutex_unlock(&g_nvc_lk);
+        if (pick) nvmtl_nvc_report("%s %s | MPS %.0f ours %.0f (timestamp units; %s)", slower ? "SLOWER" : "FASTER", sh_.UTF8String, tm, to,
+                                   tm < 0 ? "untimed, taken" : slower ? "MPS keeps it" : "ours taken");
         if (pick) { const unsigned long k = ++g_nvc_verified; if (k <= 64 || !(k & (k - 1))) nvlog("nvconv: VERIFIED %s epilogue %d (%lu so far)", sh_.UTF8String, pick - 1, k); }
         nvmtl_nvc_report("%s %s | epilogue %d | mismatches %u %u %u %u %u of %u", pick ? "VERIFIED" : "REFUSED", sh_.UTF8String, pick - 1,
                          r[0], r[1], r[2], r[3], r[4], n);
