@@ -2573,10 +2573,20 @@ static size_t nvmtl_fc_width(NSUInteger dataType)
         NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = nil; f->_fc = [constants copy]; f->_fname = name; f->_stage = _stages[name];
         f->_air = _airs[name]; f->_lib = self; f->_fcv = cv; return f;
     }
-    nvmtl_fc_expect_link(1);
-    NSData *spec = nvmtl_translate_with_fc_cached(_airs[name], _stages[name], name, constants, idx, sz, pay, n, &e);
-    nvmtl_fc_expect_link(0);
-    if (!spec && _airs[name] && nvmtl_needs_visible_link(_airs[name], e)) {
+    // A function that names visible functions or a function table is only translated once its pipeline links them
+    // (nvmtl_link_stage). Translating it here can only fail, and the failure is not cached: MPS's depthwise
+    // weight-gradient kernels paid seconds of failed translation on the encoding thread in every Geekbench run.
+    // The reference query is cheap, so defer at once. NVMTL_EAGER_LINK_PROBE=1 restores the translate-first order.
+    static int eagerProbe = -1;
+    if (eagerProbe < 0) { const char *ep = getenv("NVMTL_EAGER_LINK_PROBE"); eagerProbe = ep && ep[0] == '1'; }
+    const BOOL linkFirst = !eagerProbe && _airs[name] && nvmtl_needs_visible_link(_airs[name], nil);
+    NSData *spec = nil;
+    if (!linkFirst) {
+        nvmtl_fc_expect_link(1);
+        spec = nvmtl_translate_with_fc_cached(_airs[name], _stages[name], name, constants, idx, sz, pay, n, &e);
+        nvmtl_fc_expect_link(0);
+    }
+    if (!spec && _airs[name] && (linkFirst || nvmtl_needs_visible_link(_airs[name], e))) {
         nvlog("newFunctionWithName:constantValues: \"%s\" has visible-function references - DEFERRED to pipeline creation (%zu constant(s))", name.UTF8String, n);
         if (error) *error = nil;
         NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = nil; f->_fc = [constants copy]; f->_fname = name; f->_stage = (_stages[name] ?: @"");
@@ -4654,6 +4664,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     [self nvmtlE78Barrier:NO];
     if (nvmtl_vendor_dispatch_sass(selected, &_cb->_c, t, l) != 0) {
         uint32_t lr[3]; nvmtl_tg_reshape(_ps, l, lr);
+        nvmtl_vk_dispatch_label(_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL);
         nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, lr);
     }
     if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
@@ -4675,6 +4686,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     [self nvmtlE78Barrier:NO];
     if (nvmtl_vendor_dispatch_sass(selected, &_cb->_c, t, l) != 0) {
         uint32_t lr[3]; nvmtl_tg_reshape(_ps, l, lr);
+        nvmtl_vk_dispatch_label(_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL);
         nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, lr);
     }
     if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
