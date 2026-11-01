@@ -82,6 +82,8 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  void *occlusion_pages; uint32_t occlusion_count;
                  void *timing_pool; nvmtl_gpu_interval timing;
                  void *pt_pool; unsigned pt_n, pt_open; uint32_t pt_w[128], pt_h[128], pt_f[128]; uint32_t pt_fs[128][4];
+                 /* NVMTL_DISPATCH_TIME: per-dispatch timestamps, allocated on first use */
+                 void *dt_pool; unsigned dt_n; struct nvmtl_dt_rec *dt;
                  void *counter_recording; unsigned counter_error;
                  nvmtl_sample_pattern sample_pattern;
                  void **rvs; unsigned nrv, caprv;
@@ -192,6 +194,8 @@ void nvmtl_vk_cmd_bind_set(nvk_cmdbuf *c, nvk_pipeline *p);
 int  nvmtl_vk_compute_pipeline_create(const void *cs, size_t n, nvk_pipeline *out);
 void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t gy, uint32_t gz);
 void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_t threads[3], const uint32_t tg[3]);
+/* the kernel name the next dispatch on this thread is logged under (NVMTL_DISPATCH_TIME) */
+void nvmtl_vk_dispatch_label(const char *name);
 void nvmtl_vk_cmd_dispatch_indirect_tg(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *b, size_t off, const uint32_t tg[3]);
 void nvmtl_vk_cmd_end_render(nvk_cmdbuf *c);
 int  nvmtl_vk_submit_wait_at(nvk_cmdbuf *c, const char *who);
