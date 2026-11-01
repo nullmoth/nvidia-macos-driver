@@ -6,6 +6,8 @@ source=(root/'plugin/NVMTLEventSync.m').read_text()
 start=source.index('@interface NVMTLPendingSurfaceWrite')
 end=source.index('@implementation NVMTLSubmissionPart',start)
 helpers=source[start:end]
+objects=(root/'plugin/NVMTLObjects.m').read_text()
+plane_macro=next(line for line in objects.splitlines() if line.startswith('#define NVMTL_VP('))+'\n'
 fixture=r'''
 #import <Foundation/Foundation.h>
 #include <assert.h>
@@ -37,7 +39,7 @@ static void nvmtl_busy_write(IOSurfaceRef s,NSUInteger p,uint64_t seq,int done){
 static unsigned IOSurfaceGetID(IOSurfaceRef s){return s->id;}
 static unsigned IOSurfaceGetSeed(IOSurfaceRef s){return s->seed;}
 @class NVMTLCommandBuffer;
-@interface NVMTLTexture:NSObject{@public IOSurfaceRef _surf; BOOL _vramOn;NSUInteger _plane;}@end
+@interface NVMTLTexture:NSObject{@public IOSurfaceRef _surf; BOOL _vramOn,_vramMulti;NSUInteger _plane;}@end
 @implementation NVMTLTexture
 - (BOOL)nvmtlSurfaceOut{return YES;}
 - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied{(void)dirtied;return YES;}
@@ -66,7 +68,10 @@ int main(void){@autoreleasepool{
  surface.seed++;assert(!nvmtl_surface_pending_write(b,t));surface.seed--;
  alias->_vramOn=NO;assert(!nvmtl_surface_pending_write(b,alias));alias->_vramOn=YES;
  t->_vramOn=NO;assert(nvmtl_surface_pending_write(b,t));assert(!nvmtl_surface_pending_write(b,alias));t->_vramOn=YES;
- alias->_plane=1;assert(!nvmtl_surface_pending_write(b,alias));alias->_plane=0;
+ alias->_plane=1;assert(!nvmtl_surface_pending_write(b,alias));
+ // Full-allocation aliases share the pending writer across planes.
+ t->_vramMulti=alias->_vramMulti=YES;assert(nvmtl_surface_pending_write(b,alias));
+ t->_vramMulti=alias->_vramMulti=NO;alias->_plane=0;
  nvmtl_surface_register_writes(b);nvmtl_surface_finish_writes(a);
  assert(nvmtl_surface_pending_write(a,t));
  nvmtl_surface_finish_writes(b);assert(!nvmtl_surface_pending_write(a,t));
@@ -142,7 +147,7 @@ pend=pend[:pend.index('\n}\n')]
 assert pend.index('nvmtl_vk_surface_dirty(')<pend.index('nvmtl_ws_mark(n.unsignedIntValue, YES)'), 'VRAM marks before pending marks'
 print('PASS: production commit order: kernel marks outside the class lock, VRAM marks before pending marks, records after both')
 with tempfile.TemporaryDirectory() as d:
- p=pathlib.Path(d);(p/'test.m').write_text(fixture+helpers+checks)
+ p=pathlib.Path(d);(p/'test.m').write_text(fixture+plane_macro+helpers+checks)
  subprocess.run(['clang','-fobjc-arc','-framework','Foundation',str(p/'test.m'),'-o',str(p/'test')],check=True)
  import os
  for half in ('1','0'): subprocess.run([str(p/'test')],check=True,env=dict(os.environ,KERNEL_HALF=half))
