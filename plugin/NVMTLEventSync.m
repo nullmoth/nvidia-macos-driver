@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
  */
 
+#include "nvmtl_surface_schedule.h"
+
 @interface NVMTLQueueReservation : NSObject { @public __weak NVMTLCommandBuffer *buffer; } @end
 @implementation NVMTLQueueReservation @end
 @interface NVMTLSubmissionPart : NSObject {
@@ -370,10 +372,14 @@ static int nvmtl_skip_empty_on(void) {
     // waits for the GPU): a capture client (Parsec's encoder, a screen recorder) read the two-plane NV12 capture surface
     // before the copy-out, so it got the surface's previous frame, and now and then the new one when the copy-out won the
     // race: frames out of order. Such a command buffer reports "scheduled" once its writes are published.
-    // NVMTL_SCHEDULE_AFTER_SURFACE_WRITES=3 (default) does it only for two-plane surfaces written through private images (the
+    // Chromium's scheduled callbacks hand its layers to another process. Shared family VRAM does not establish a queue
+    // dependency with that consumer: reporting scheduled before publication caused whole-page flicker during animated
+    // backdrop filters in Chrome/Edge. Their default is 1; other processes keep 3.
+    // NVMTL_SCHEDULE_AFTER_SURFACE_WRITES=3 does it only for two-plane surfaces written through private images (the
     // NV12 surfaces WindowServer draws captured frames into, so it costs nothing without capture), =2 for every private one,
     // =1 for every surface write, =0 for none.
-    static int after = -1; if (after < 0) { const char *e = getenv("NVMTL_SCHEDULE_AFTER_SURFACE_WRITES"); after = e && *e ? e[0] - '0' : 3; }
+    static int after = -1;
+    if (after < 0) after = nvmtl_surface_schedule_after(getenv("NVMTL_SCHEDULE_AFTER_SURFACE_WRITES"), getprogname());
     NVMTLTexture *drawable = _present ? (_present->_parent ?: _present) : nil;
     for (NVMTLTexture *s in part->surfaces) {
         if (s == drawable || !after) continue;
