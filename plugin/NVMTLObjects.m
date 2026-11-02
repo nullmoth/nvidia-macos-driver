@@ -2813,6 +2813,20 @@ static void nvmtl_retain_resource(NVMTLCommandBuffer *cb, id resource) {
     if (!cb->_resources) cb->_resources = [NVMTLResSet new];
     [cb->_resources addObject:resource];
 }
+// An app that declares a HEAP is not required to declare the resources inside it: useHeap: says the
+// encoder may reach any of them indirectly, through an argument buffer or a bindless slot, and Metal
+// keeps the heap alive and resident for the command buffer's lifetime. Every useHeap:/useHeaps:
+// implementation here used to do nothing, so such a heap was retained by nobody: released after
+// encoding, -[NVMTLHeap dealloc] ran nvmtl_vk_heap_destroy -> vkFreeMemory on the whole block while
+// submitted work still read placed resources inside it, and the range lost its page table entry -
+// the next access is an MMU fault on a valid-looking address. Cyberpunk 2077 references all four
+// useHeap variants and creates heaps of 3 GiB and 384 MiB, so the window is large.
+// The command buffer's resource set is class-checked everywhere it is read, so a heap sitting in it
+// is skipped by the readers and only its lifetime matters.
+static void nvmtl_retain_heaps(NVMTLCommandBuffer *cb, const id<MTLHeap> __unsafe_unretained heaps[], NSUInteger n) {
+    if (!cb || !heaps) return;
+    for (NSUInteger i = 0; i < n; i++) nvmtl_retain_resource(cb, heaps[i]);
+}
 
 // A heap in use: Metal's contract for useHeap: is that the encoder may reach any resource placed in the heap, through an
 // argument buffer or a bindless slot, without naming it in useResource:. Every heap member is therefore held and made
@@ -3431,8 +3445,10 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)ps {
     // NVMTL_DUMP_PSO=<text>: the first encoder that sets a pipeline whose label contains it has the fragment buffers bound
     // at its end dumped, as NVMTL_DUMP_GROUP does, for apps that label pipelines but push no debug groups (diagnostic)
+    // Only asked for when the switch is set: this runs on every pipeline bind, and an unconditional `ps.label` was a message
+    // send plus a string retain/release per draw call in profiles of a game that never sets NVMTL_DUMP_PSO.
     { static const char *want; static int once; static _Atomic int armed; if (!once) { once = 1; want = getenv("NVMTL_DUMP_PSO"); }
-      NSString *lbl = ps.label;
+      NSString *lbl = want ? ps.label : nil;
       if (want && !strcmp(want, "?") && lbl) { static NSMutableSet *seen; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
           pthread_mutex_lock(&mu); if (!seen) seen = [NSMutableSet new]; BOOL n = ![seen containsObject:lbl]; if (n) [seen addObject:lbl];
           pthread_mutex_unlock(&mu); if (n) nvlog("NVMTL_DUMP_PSO: pipeline label %s", lbl.UTF8String); }
@@ -5808,8 +5824,13 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     }
     return self;
 }
-- (void)useResidencySet:(id<MTLResidencySet>)r {}
-- (void)useResidencySets:(const id<MTLResidencySet> __unsafe_unretained [])r count:(NSUInteger)n {}
+// as on the queue, but for this command buffer only: holding the set holds its allocations, and the
+// resource set is released when the command buffer completes
+- (void)useResidencySet:(id<MTLResidencySet>)r { nvmtl_retain_resource(self, r); }
+- (void)useResidencySets:(const id<MTLResidencySet> __unsafe_unretained [])r count:(NSUInteger)n {
+    if (!r) return;
+    for (NSUInteger i = 0; i < n; i++) nvmtl_retain_resource(self, r[i]);
+}
 - (NSMutableDictionary *)userDictionary {
     @synchronized ([NVMTLCommandBuffer class]) { if (!_userDictionary) _userDictionary = [NSMutableDictionary new]; return _userDictionary; }
 }
@@ -6077,10 +6098,25 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     nvlog("queue: background GPU priority hint %lu unavailable; retaining fixed backend priority", (unsigned long)priority);
     return NO;
 }
-- (void)addResidencySet:(id<MTLResidencySet>)r {}
-- (void)addResidencySets:(const id<MTLResidencySet> __unsafe_unretained [])r count:(NSUInteger)n {}
-- (void)removeResidencySet:(id<MTLResidencySet>)r {}
-- (void)removeResidencySets:(const id<MTLResidencySet> __unsafe_unretained [])r count:(NSUInteger)n {}
+// Residency is implicit in this backend, so these only have to hold the set: a set retains the
+// allocations added to it, so the app may hand the queue its only reference and release its own.
+// They are called from any thread, hence the lock.
+- (void)addResidencySet:(id<MTLResidencySet>)r {
+    if (!r) return;
+    @synchronized (self) { if (!_resSets) _resSets = [NSMutableArray new]; [_resSets addObject:r]; }
+}
+- (void)addResidencySets:(const id<MTLResidencySet> __unsafe_unretained [])r count:(NSUInteger)n {
+    if (!r) return;
+    for (NSUInteger i = 0; i < n; i++) [self addResidencySet:r[i]];
+}
+- (void)removeResidencySet:(id<MTLResidencySet>)r {
+    if (!r) return;
+    @synchronized (self) { [_resSets removeObject:r]; }
+}
+- (void)removeResidencySets:(const id<MTLResidencySet> __unsafe_unretained [])r count:(NSUInteger)n {
+    if (!r) return;
+    for (NSUInteger i = 0; i < n; i++) [self removeResidencySet:r[i]];
+}
 - (void)dealloc { nvmtl_vk_queue_destroy(&_q); }
 - (id<MTLCommandBuffer>)commandBuffer {
     dispatch_semaphore_t cap = nil;
@@ -6175,7 +6211,10 @@ typedef struct {
     void    *o0;
     const void *p0;
 } nvp_cmd;
-@interface NVMTLDeferredRenderCommandEncoder : NSProxy { @public __weak NVMTLParallelRenderCommandEncoder *_owner; NSMutableArray *_inv, *_keep; BOOL _ended; NSString *_label; nvp_cmd *_cmds; uint32_t _ncmd, _capcmd; }
+// _heaps: heaps this sub-encoder declared. Sub-encoders record on their own threads, so they are
+// collected here under the sub's own lock and handed to the real encoder during the single-threaded
+// replay in -endEncoding, which is what puts them on the command buffer (nvmtl_retain_heaps).
+@interface NVMTLDeferredRenderCommandEncoder : NSProxy { @public __weak NVMTLParallelRenderCommandEncoder *_owner; NSMutableArray *_inv, *_keep, *_heaps; BOOL _ended; NSString *_label; nvp_cmd *_cmds; uint32_t _ncmd, _capcmd; }
 @end
 @implementation NVMTLDeferredRenderCommandEncoder
 static int nvp_fast_off(void) {
@@ -6355,6 +6394,10 @@ static int nvp_fast_off(void) {
     for (NVMTLDeferredRenderCommandEncoder *s in subs) {
         if (!s->_ended) dropped++;
         @synchronized (s) {
+            // straight into the command buffer's resource set, which is what keeps a heap's memory alive
+            // while this submission still reads resources placed inside it (-useHeap: itself is
+            // deprecated, and this is the same set it would have added them to)
+            for (id<MTLHeap> heap in s->_heaps) nvmtl_retain_resource(real->_cb, heap);
             NSUInteger invi = 0;
             @autoreleasepool {
                 for (uint32_t ci = 0; ci < s->_ncmd; ci++) {
