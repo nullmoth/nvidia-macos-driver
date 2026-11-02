@@ -2195,13 +2195,30 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 - (id<MTLEvent>)newEvent { NVMTLEvent *e = [NVMTLEvent new]; e->_dev = self; return e; }
 - (id<MTLSharedEvent>)newSharedEvent { NVMTLSharedEvent *e = [NVMTLSharedEvent new]; e->_dev = self; return e; }
 - (MTLArgumentBuffersTier)argumentBuffersSupport { return MTLArgumentBuffersTier2; }
+// NVMTL_APPLE_FAMILY=<n>: also answer YES for MTLGPUFamilyApple1..Apple<n> (default 0: none).
+// Measured on Cyberpunk 2077: its whole GPU capability decision is five queries - supportsFamily
+// Apple6 (asked exactly once), name (twice), supportsRaytracing and supportsRaytracingFromRender -
+// and a NO to Apple6 puts it on the minimal tier with ray tracing refused before any acceleration
+// structure is touched. Six is also the most that is safe to claim: Apple7 and above promise
+// simdgroup matrices, and claiming them makes MPS select its A14 convolution kernels, which this
+// translator refuses. Any Apple family also implies tile shaders, imageblocks and memoryless
+// textures, which this driver does not implement, so the claim stays off unless asked for and is
+// a per-process measurement knob, not a default identity.
+static NSInteger nvmtl_apple_family_max(void)
+{
+    static NSInteger n = -1;
+    if (n < 0) { const char *e = getenv("NVMTL_APPLE_FAMILY"); n = (e && *e) ? atoi(e) : 0; if (n < 0) n = 0; if (n > 9) n = 9; }
+    return n;
+}
 - (BOOL)supportsFamily:(MTLGPUFamily)f {
     switch ((NSInteger)f) {
         case MTLGPUFamilyMac2: case MTLGPUFamilyCommon1: case MTLGPUFamilyCommon2: case MTLGPUFamilyCommon3: return YES;
         case 2001 : return YES;
         case 5001 : return YES;
-        default: return NO;
+        default: break;
     }
+    if ((NSInteger)f >= 1001 && (NSInteger)f <= 1000 + nvmtl_apple_family_max()) return YES;
+    return NO;
 }
 - (BOOL)supportsFeatureSet:(MTLFeatureSet)fs { return fs >= 10000 && fs <= 10005; }
 - (id<MTLHeap>)newHeapWithDescriptor:(MTLHeapDescriptor *)hd {
