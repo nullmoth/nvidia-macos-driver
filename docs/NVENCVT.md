@@ -95,22 +95,36 @@ list.
 
 ## Firefox (VP9 and AV1)
 
-On Ada, Firefox decodes VP9 and AV1 (and H.264 / HEVC) on NVDEC through
-NVEncVT. Measured on an RTX 4060 Ti (AD106), macOS 26.7.2, Firefox 159, a
-YouTube 4K60 video: Firefox's media log reports `VP9 SWDEC HWDEC, AV1 SWDEC
-HWDEC`, the media process uses 12-17% of a core instead of 90-350%, and
-"GPU Video Decode Utilization" reads 9-67%.
+On Ada, Firefox decodes VP9 and AV1 (and HEVC) on NVDEC through NVEncVT.
+Measured on an RTX 4060 Ti (AD106), macOS 26.7.2, Firefox 159, a YouTube 4K60
+video: `about:support` lists hardware decoding for VP9, AV1 and HEVC, and
+"GPU Video Decode Utilization" rises while the video plays.
 
-`NVMTL_NVENCVT=plugin-container` alone is not enough. Firefox decodes in
-`plugin-container` and asks VideoToolbox once, when that process starts, which
-codecs have hardware decoders; VideoToolbox answers from a list it built before
-the Metal plugin loaded NVEncVT, so the first answer for `vp09` is no. The
-library has to be in the process from its start, as for command-line tools.
-Preloading `libnvencvt.dylib` itself reaches every Firefox process, and
-Firefox's crash helper, forked while VideoToolbox's start-up threads held an
-allocator lock, crashed at every start. Firefox is therefore started with a
-small loader that links only libSystem and opens the library only in the
-processes `NVENCVT_INJECT_ONLY` names:
+Firefox decodes in `plugin-container`. Name it in the personal settings block
+of `/Library/GPUBundles/nvmtl/nvrm610.conf`, as for any app that loads the
+Metal plugin (see above), then quit Firefox completely and open it again:
+
+```text
+NVMTL_NVENCVT=plugin-container
+```
+
+To check, open `about:support` and look for VP9 and AV1 under "Codec Support
+Information": hardware decoding should read "Supported".
+
+Firefox's sandboxes refuse `/dev/null`. NVEncVT's RM connection and the
+plugin's VRAM import of app surfaces both fall back to an empty pipe there
+(`nvmtl_icd_open`); without it the decoder could not start and every Firefox
+window surface was read back in full after each frame.
+
+### Starting Firefox with NVEncVT preloaded (optional)
+
+Not needed with the setting above. `tools/firefox-nvdec/` is a fallback for a
+Firefox that asks VideoToolbox for decoders before the Metal plugin has loaded
+NVEncVT, which shows as VP9 / AV1 hardware decoding "Not supported" in
+`about:support` with the setting in place. Preloading `libnvencvt.dylib`
+directly reaches every Firefox process and made Firefox's crash helper crash
+at every start, so a small loader that links only libSystem opens the library
+only in the processes `NVENCVT_INJECT_ONLY` names:
 
 ```sh
 xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -O2 -Wall -dynamiclib \
@@ -120,17 +134,12 @@ sudo install -o root -g wheel -m 755 /tmp/libnvencvt-loader.dylib \
 tools/firefox-nvdec/firefox-nvdec.sh
 ```
 
-Quit Firefox before running the script. A driver update replaces the bundle
-and removes the loader; install it again afterwards. Firefox's runtime does not
-carry the `allow-dyld-environment-variables` entitlement: the preload works
-because the driver's AMFI boot arguments are set.
+Quit Firefox before running the script. A driver update removes the loader;
+install it again afterwards. The preload works because the driver's AMFI boot
+arguments are set: Firefox's runtime does not carry
+`allow-dyld-environment-variables`.
 
-Firefox's sandboxes refuse `/dev/null`. NVEncVT's RM connection and the
-plugin's VRAM import of app surfaces both fall back to an empty pipe there
-(`nvmtl_icd_open`); without it the decoder could not start and every Firefox
-window surface was read back in full after each frame.
-
-Settings read from the environment:
+### Settings read from the environment
 
 - `NVENCVT_INJECT_ONLY=<names>`: when the library is preloaded, register only
   in these processes (comma, colon or space separated). Unset: every process.

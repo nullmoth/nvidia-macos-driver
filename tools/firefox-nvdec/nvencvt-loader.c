@@ -1,4 +1,5 @@
-// nvencvt-loader: preloaded into Firefox (DYLD_INSERT_LIBRARIES) in place of libnvencvt.dylib. libnvencvt links
+// nvencvt-loader: optional, preloaded into Firefox (DYLD_INSERT_LIBRARIES) in place of libnvencvt.dylib when
+// NVMTL_NVENCVT alone does not give Firefox hardware decoding (docs/NVENCVT.md, "Firefox"). libnvencvt links
 // VideoToolbox, CoreMedia and Accelerate, whose start-up threads can hold a lock while Firefox forks its crash helper.
 // This loader links only libSystem and opens libnvencvt only in the processes NVENCVT_INJECT_ONLY names (plugin-container),
 // early enough for VideoToolbox's first decoder list; libnvencvt registers itself, as DYLD_INSERT_LIBRARIES names an nvencvt.
