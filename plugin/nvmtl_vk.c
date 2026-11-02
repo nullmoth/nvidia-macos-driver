@@ -277,6 +277,7 @@ static nvmtl_lv_state g_lv; static pthread_mutex_t g_lv_lock = PTHREAD_MUTEX_INI
 // Heap slots and images (nvmtl_slots.h): what each bindless slot's descriptors name, and every image's lifetime, for the fault report.
 static nvmtl_sl_state g_sl; static nvmtl_im_state g_im; static nvmtl_vw_state g_vw; static pthread_mutex_t g_sl_lock = PTHREAD_MUTEX_INITIALIZER;
 int nvmtl_resid_describe_slot(uint32_t slot, char *out, size_t cap);   /* NVMTLEmbedded.m: the live texture object holding a slot */
+void nvmtl_heaps_dump(FILE *f, void (*emit)(void *, const char *));   /* NVMTLObjects.m: every live app heap at device loss */
 // Buffer grace: a destroyed buffer keeps its VkBuffer (and so its GPU address) until the queue has completed every
 // submit that was in flight when the app freed it. vkDestroyBuffer releases the address at once, and NVK does not
 // wait for the GPU, so a per-frame buffer freed while a submit still stored through it was a page-table fault
@@ -2261,9 +2262,10 @@ static void nvmtl_commit_image(nvk_image *image)
     }
     g_img_made++;
     pthread_mutex_lock(&g_sl_lock);
-    {   const void *bmem = image->mem; uint64_t boff = image->pool ? image->poff : 0;
+    {   const void *bmem = image->mem; uint64_t boff = image->placed ? image->hz_off : image->pool ? image->poff : 0;
+        const uint64_t bsize = image->placed ? image->hz_len : image->alloc;   // placed: the bound range inside the heap; else the image's own allocation
         pthread_mutex_lock(&g_mm_lock); nvmtl_mb_find(&g_mb, image->img, &bmem, &boff); pthread_mutex_unlock(&g_mm_lock);   // the bind the image got, whichever path made it
-        nvmtl_im_add(&g_im, image->img, bmem, boff, image->alloc, image->view, image->w, image->h, image->fmt, image->storage, image->placed ? 1u : 0u, image->pool ? 1u : 0u, g_cmd_submitted); }
+        nvmtl_im_add(&g_im, image->img, bmem, boff, bsize, image->view, image->w, image->h, image->fmt, image->storage, image->placed ? 1u : 0u, image->pool ? 1u : 0u, g_cmd_submitted); }
     nvmtl_vw_add(&g_vw, image->view, image->img);
     pthread_mutex_unlock(&g_sl_lock);
     nvmtl_vk_image_census();
@@ -5756,6 +5758,8 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
         nvlog_every("fault context: %u device memories written to the fault file (%llu alive, %llu without a base address) - tools/fault_resolve.py maps a fault address to its memory and image", nmem, (unsigned long long)mlive, (unsigned long long)unb);
     }
     nvmtl_loss_section(f, "memories");
+    nvmtl_heaps_dump(f, nvmtl_fx_emit_both);   // every live app heap: its struct, VkDeviceMemory, size, use, free ranges and park (NVMTLObjects.m)
+    nvmtl_loss_section(f, "heaps");
     {   // the barriers between this command buffer's last dispatches (the record covers both hazard modes)
         const uint32_t first = c->fx.total > nd ? c->fx.total - nd : 0;
         lk = nvmtl_loss_mutex_lock(&g_fx_lock, "g_fx_lock");
@@ -9282,8 +9286,8 @@ int nvmtl_vk_heap_zero(nvk_heap *h, const char *what)
     }
     const uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
     g_heap_zero_n++; g_heap_zero_bytes += h->size; g_heap_zero_ns += dt;
-    nvlog("heap zero-fill: %s heap %p %llu bytes cleared on creation in %.2f ms (%s); %llu heaps, %llu MB, %.1f ms so far",
-          what, h->mem, (unsigned long long)h->size, dt / 1e6, how, (unsigned long long)g_heap_zero_n, (unsigned long long)(g_heap_zero_bytes >> 20), g_heap_zero_ns / 1e6);
+    nvlog("heap zero-fill: %s heap %p (VkDeviceMemory %p) %llu bytes cleared on creation in %.2f ms (%s); %llu heaps, %llu MB, %.1f ms so far",
+          what, (void *)h, h->mem, (unsigned long long)h->size, dt / 1e6, how, (unsigned long long)g_heap_zero_n, (unsigned long long)(g_heap_zero_bytes >> 20), g_heap_zero_ns / 1e6);
     return 0;
 }
 static int nvmtl_vk_heap_create_body(size_t size, int host_visible, nvk_heap *out)
