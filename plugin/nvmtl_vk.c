@@ -7497,7 +7497,7 @@ void nvmtl_vk_image_destroy(nvk_image *i)
 }
 static void nvmtl_vk_image_destroy_now(nvk_image *i)
 {
-    if (!i->img) return;
+    if (!i->img) { if (i->view) { pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); i->view = NULL; } return; }   // a view held by the grace
     nvmtl_vk_image_upload_barrier(i);   // an async upload must finish before we free this image's memory (#96)
     if (i->view) pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL);
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
@@ -8689,7 +8689,28 @@ int nvmtl_vk_image_view_create_aspect(nvk_image *img, uint32_t vkfmt, uint32_t a
     pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add_ex(&g_vw, v, vci.image, vci.viewType + 1, vci.subresourceRange.baseArrayLayer, vci.subresourceRange.layerCount, vci.subresourceRange.baseMipLevel, vci.subresourceRange.levelCount); pthread_mutex_unlock(&g_sl_lock);
     return 0;
 }
-void nvmtl_vk_image_view_destroy(void *view) { if (view) pvkDestroyImageView(g_dev, (VkImageView)view, NULL); }
+// A view's descriptor index (NVK keeps image views as indices into its device-wide descriptor table, and a heap slot's
+// element stores that index) returns to NVK's free list the moment the view is destroyed and is handed to the next
+// view created; a submit still in flight that read the slot before it was rewritten then stores through whatever that
+// index describes now. With the image grace on, a view is destroyed only after the submits in flight at its death
+// complete, exactly like an image; off, at once as before.
+void nvmtl_vk_image_view_destroy(void *view)
+{
+    if (!view || g_state != 1) return;
+    if (nvmtl_image_grace_on()) {
+        nvmtl_grace_img *e = calloc(1, sizeof *e);
+        if (e) {
+            e->img.view = view;   // img NULL: a view-only entry, nvmtl_vk_image_destroy_now destroys the view alone
+            pthread_mutex_lock(&g_grace_lock);
+            e->seq = g_cmd_submitted;
+            if (g_grace_tail) g_grace_tail->next = e; else g_grace_head = e;
+            g_grace_tail = e; g_grace_n++;
+            pthread_mutex_unlock(&g_grace_lock);
+            return;
+        }
+    }
+    pvkDestroyImageView(g_dev, (VkImageView)view, NULL);
+}
 int nvmtl_vk_texel_on(void) { return g_mutable && pvkCreateBufferView != NULL; }
 int nvmtl_vk_texel_view_create(nvk_buffer *b, size_t offset, size_t range, uint32_t vkfmt, int storage, void **alias, void **view, int *storage_ok)
 {
