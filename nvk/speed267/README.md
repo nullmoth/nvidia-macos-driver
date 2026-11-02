@@ -33,3 +33,11 @@
    `NVMTL_NAK_STRONG_STORES=1` = previous behaviour. Found 11-01: GPU writes to Shared (system-RAM) buffers cost ~70-100 ns
    per threadgroup - a near-empty kernel 317 us (Shared) vs 5.6 us (Private, or Shared with NVMTL_SHARED_VRAM=1), GB7's own
    particle kernel 512 us vs 66 us (M1 Pro 188 us), outputs bit-identical. Timing of this patch pending (session23.sh).
+7. `patch_small_arrays_def16.py` (nvmtl_raw_policy.h, nak_nir.c) - per-thread arrays of up to 16 elements go to
+   registers (if-else trees) by default instead of local memory. The plugin's own fp32 conv kernels kept their tile
+   accumulators and row tables in local memory (45 loads, 39 stores in the 64x32 kernel): the Metal front end leaves
+   those fixed-count loops rolled, so the arrays reach NAK with a loop index. In GB7 the conv gate then took our kernel
+   over MPS on 39 layers instead of 62, and one layer ran 852,768 vs 134,816 timestamp units. Limit 32 also takes
+   trace_bvh's stack (36 -> 16 warps, Path Tracer -27%), so the default is 16. Census, 237 kernels: with
+   `NVMTL_NO_SMALL_ARRAYS=1` 0 differ from the previous compiler; by default 0 differ from it plus NAK_B83_ARRAYS=16;
+   11 change, every one loses local-memory traffic, none loses occupancy.
