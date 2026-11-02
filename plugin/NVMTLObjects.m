@@ -1167,6 +1167,35 @@ static void nvmtl_blit_dump(NVMTLTexture *d) {
     else { char tag[24]; snprintf(tag, sizeof tag, "blit%u-", nvmtl_surf_id(d)); nvmtl_frame_dump(tag, px, row, i->w, i->h); }
     free(px);
 }
+// Present-time frame dump (request file /tmp/nvmtl-dump-request, the same one the other dumps use). The surface and blit
+// dumps never see a game's steady-state drawable: a whole Cyberpunk benchmark with the request file present wrote 2
+// dumps, both at load. This one is called from nvmtlFinishExecution, after every part of the command buffer has passed
+// its fence, so every write to the drawable is finished, and before the presentation blocks hand the drawable to the
+// compositor, which may recycle it after. Every 2 s while the file exists, into 8 rotating files (present-<k>-) so a run
+// keeps a short history (~8 MB each at 1080p); the file is checked at most every 250 ms, so it is inert without it.
+static void nvmtl_present_dump(NVMTLTexture *t) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static uint64_t next, last; static unsigned seq; static int on, said;
+    if (!t || pthread_mutex_trylock(&mu)) return;   // another completion thread is dumping: skip, never wait
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    if (now >= next) { next = now + 250000000ull; on = access("/tmp/nvmtl-dump-request", F_OK) == 0; }
+    nvk_image *i = (on && (!last || now - last >= 2000000000ull)) ? [t nvi] : NULL;
+    if (i && (i->bpp != 4 || i->w < 64 || i->h < 64)) {
+        if (!said++) nvlog("present dump: drawable %ux%u bpp %u not dumpable (4-byte pixels only)", i->w, i->h, i->bpp);
+        i = NULL;
+    }
+    if (!i) { pthread_mutex_unlock(&mu); return; }
+    last = now; const unsigned k = seq++;
+    size_t row = (size_t)i->w * 4; void *px = malloc(row * i->h);
+    if (!px) nvlog("present dump: malloc FAILED");
+    else if (nvmtl_vk_image_read(t->_q, i, px, row)) nvlog("present dump: readback FAILED (%ux%u)", i->w, i->h);
+    else {
+        char tag[24]; snprintf(tag, sizeof tag, "present-%u-", k % 8);
+        nvmtl_frame_dump(tag, px, row, i->w, i->h);
+        nvlog("present dump #%u: %ux%u fmt %u -> slot %u", k, i->w, i->h, (unsigned)i->fmt, k % 8);
+    }
+    free(px);
+    pthread_mutex_unlock(&mu);
+}
 #pragma mark - texture
 static _Atomic unsigned long long nvmtl_tex_objs_made, nvmtl_tex_objs_gone;
 unsigned long long nvmtl_tex_objs_live(void) {

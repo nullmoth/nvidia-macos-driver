@@ -497,6 +497,7 @@ static int nvmtl_skip_empty_on(void) {
         // Metal HUD creating its font texture) waits for a command buffer queued behind this one. WAS: inline here, a
         // deadlock (No Man's Sky with MetalForceHudEnabled: white window, main thread in waitUntilCompleted, the execution
         // queue in present). NVMTL_PRESENT_INLINE=1: the old inline presents.
+        if (_present) nvmtl_present_dump(_present->_parent ?: _present);   // the finished drawable, before it is handed over
         static dispatch_queue_t presentQ; static int inl = -1; static dispatch_once_t once;
         dispatch_once(&once, ^{
             const char *e = getenv("NVMTL_PRESENT_INLINE"); inl = e && *e && *e != '0';
