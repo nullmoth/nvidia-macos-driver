@@ -101,6 +101,10 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_heap_write_fence\(\);", 4),                                  # every heap descriptor write site (knob)
     ("nvmtl_vk.c", r"was encoded against heap set %p", 1),
     ("nvmtl_vk.c", r"BINDLESS heap layout binding %u: type", 1),
+    ("nvmtl_vk.c", r"queue\x27s programmed header pool: %u entries", 1),              # the pool limit the queue programmed vs the index used
+    ("nvmtl_vk.c", r"heap set bounds: GPU 0x%llx, %u bytes", 1),
+    ("nvmtl_vk.c", r"TARGET SUMMARY: slot %u -> binding 2 index %u", 1),
+    ("nvmtl_vk.c", r"per 4096-slot band \(differing/non-zero\)", 1),
     ("nvmtl_vk.c", r"nvmtl_loss_section\(f, \"images\"\)", 1),                        # images early, census last
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev, "NVMTLEmbedded.m": emb}
