@@ -17,9 +17,11 @@
 enum { NVMTL_FX_DISP = 8, NVMTL_FX_STOR = 6, NVMTL_FX_SUB = 48, NVMTL_FX_GONE = 128, NVMTL_FX_NAME = 40 };
 
 /* one dispatch: its kernel and the storage views bound to it (explicit binds; a bindless read is not visible here) */
-typedef struct { char name[NVMTL_FX_NAME]; const void *pipe; uint32_t key; uint64_t air; uint32_t nstor; uint32_t stor_idx[NVMTL_FX_STOR]; const void *stor_view[NVMTL_FX_STOR]; } nvmtl_fx_disp;
-/* per command buffer: the last dispatches recorded into it and the storage binds in force */
-typedef struct { nvmtl_fx_disp d[NVMTL_FX_DISP]; uint32_t n, total; uint32_t nstor; uint32_t stor_idx[NVMTL_FX_STOR]; const void *stor_view[NVMTL_FX_STOR]; } nvmtl_fx_cb;
+typedef struct { char name[NVMTL_FX_NAME]; const void *pipe; uint32_t key; uint64_t air; uint32_t nstor; uint32_t stor_idx[NVMTL_FX_STOR]; const void *stor_view[NVMTL_FX_STOR];
+                 const void *tab[2]; uint32_t dyn[2]; /* the binding-table buffer and offset in force per stage slot: the dispatch's root addresses */ } nvmtl_fx_disp;
+/* per command buffer: the last dispatches recorded into it, the storage binds and the binding tables in force */
+typedef struct { nvmtl_fx_disp d[NVMTL_FX_DISP]; uint32_t n, total; uint32_t nstor; uint32_t stor_idx[NVMTL_FX_STOR]; const void *stor_view[NVMTL_FX_STOR];
+                 const void *tab[2]; uint32_t dyn[2]; } nvmtl_fx_cb;
 /* one submit: the sequence number it got and the command buffer's dispatch ring as it was */
 typedef struct { uint64_t seq; const void *cb; uint32_t ndisp; nvmtl_fx_disp d[NVMTL_FX_DISP]; uint32_t n; } nvmtl_fx_sub;
 /* one death: an image (view, size, format) or a heap slot, at a sequence number */
@@ -28,7 +30,7 @@ typedef struct { uint64_t seq; const void *view; uint32_t slot, w, h, fmt, stora
 /* one buffer death: the GPU address range it held, at a sequence number. A page-table fault names an address and
    nothing else, so the ring of the last buffer deaths is what says whether that address was a buffer freed while a
    submit still read it. */
-enum { NVMTL_FX_BUFS = 256, NVMTL_FX_PARKED = 4 };
+enum { NVMTL_FX_BUFS = 4096, NVMTL_FX_PARKED = 4 };   /* the game frees ~18 buffers per submit; 256 covered 14 submits */
 typedef struct { uint64_t seq, lo, hi; uint32_t where; } nvmtl_fx_buf;
 typedef struct { nvmtl_fx_sub sub[NVMTL_FX_SUB]; uint32_t nsub; nvmtl_fx_gone gone[NVMTL_FX_GONE]; uint32_t ngone;
                  nvmtl_fx_buf buf[NVMTL_FX_BUFS]; uint32_t nbuf; } nvmtl_fx_state;
@@ -52,6 +54,7 @@ static inline void nvmtl_fx_dispatch(nvmtl_fx_cb *c, const char *name, const voi
     nvmtl_fx_disp *d = &c->d[c->n % NVMTL_FX_DISP];
     nvmtl_fx_copy_name(d->name, name); d->pipe = pipe; d->key = key; d->air = air;
     d->nstor = c->nstor; memcpy(d->stor_idx, c->stor_idx, sizeof d->stor_idx); memcpy(d->stor_view, c->stor_view, sizeof d->stor_view);
+    d->tab[0] = c->tab[0]; d->tab[1] = c->tab[1]; d->dyn[0] = c->dyn[0]; d->dyn[1] = c->dyn[1];
     c->n++; c->total++;
 }
 /* a submit of command buffer cb at sequence number seq */
@@ -144,9 +147,12 @@ static inline unsigned nvmtl_fx_report(const nvmtl_fx_state *s, uint64_t now_seq
                           b->where & NVMTL_FX_POOLED ? " pooled" : "", b->where & NVMTL_FX_PLACED ? " placed" : "", b->where & NVMTL_FX_PARKED ? " parked" : "");
             nshown++;
             if (++per == 4 || o >= (int)sizeof line - 80) { emit(ctx, line); per = 0; }
+            if (nshown == 64) break;   /* the log shows the newest 64; the fault file at device loss holds the whole ring */
         }
         if (per) emit(ctx, line);
-        snprintf(line, sizeof line, "fault context: %u buffer deaths within the last %llu submits (%u recorded in all)", nshown, (unsigned long long)window, s->nbuf);
+        unsigned inwin = 0;
+        for (uint32_t k = 0; k < nb; k++) { const nvmtl_fx_buf *b = &s->buf[(s->nbuf - 1 - k) % NVMTL_FX_BUFS]; if (!(now_seq > window && b->seq + window < now_seq)) inwin++; }
+        snprintf(line, sizeof line, "fault context: %u of %u buffer deaths within the last %llu submits shown (%u recorded in all)", nshown, inwin, (unsigned long long)window, s->nbuf);
         emit(ctx, line);
     }
     return dead;
