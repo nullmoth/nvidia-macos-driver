@@ -5362,7 +5362,7 @@ static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c, const nvk_pipeline *p)
     c->fx.tab[0] = c->tab_out[0]; c->fx.tab[1] = c->tab_out[1]; c->fx.dyn[0] = c->dyn_out[0]; c->fx.dyn[1] = c->dyn_out[1];
     c->fx.nroot = 0;
     if (c->table) for (unsigned i = 0; i < NVMTL_NBUF && c->fx.nroot < NVMTL_FX_ROOT; i++) {
-        const nvmtl_slot *s = &c->table->s[0][i];
+        const nvmtl_slot *s = &((const nvmtl_bindtable *)c->table)->s[0][i];
         if (s->kind != NVMTL_SLOT_BUF || !s->address) continue;
         c->fx.root[c->fx.nroot++] = (nvmtl_fx_root){ s->address + s->off, s->address + s->off + (s->size ? s->size : 1), i };
     }
