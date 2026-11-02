@@ -5231,6 +5231,7 @@ static void nvmtl_zprobe_drain(void) {
     const int hzm = nvmtl_hz_mode(), hzfirst = !indirect && !_e78NDisp;
     if (hzm) {
         if (hzm == 1 && hzfirst) kind = 2;
+        if (hzm == 1 && kind == 1 && nvmtl_hz_dispatch_decides()) kind = 2;   // the model records the narrow barrier on a conflict
         if (kind == 0) { nvmtl_hz_shadow(hzm == 2 && hzfirst); nvmtl_vk_barrier_site(hzfirst ? NVMTL_BARS_FIRST_DISPATCH : NVMTL_BARS_LATER_DISPATCH); nvmtl_vk_cmd_barrier(&_cb->_c); nvmtl_hz_shadow(0); }
         else if (kind == 1) nvmtl_vk_cmd_barrier_c2c(&_cb->_c);
         kind = 2;   // emitted above
@@ -5858,9 +5859,9 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
                     memcpy(lastb, bnow, sizeof lastb);
                 }
                 if (nvmtl_hz_mode() && dn) {   // the hazard model's decisions over the same window (nvmtl_hazard.h)
-                    static uint64_t lasth[24]; uint64_t h[24]; double d[24];
+                    static uint64_t lasth[32]; uint64_t h[32]; double d[32];
                     nvmtl_vk_hz_counts(h);
-                    for (int q = 0; q < 24; q++) d[q] = (double)(h[q] - lasth[q]) / dn;
+                    for (int q = 0; q < 32; q++) d[q] = (double)(h[q] - lasth[q]) / dn;
                     nvmtl_vk_hz_reasons_log((double)dn);   // top ten per context, one log line each
                     {   // the model's own CPU time per frame, by entry point (all encoding threads summed)
                         static uint64_t lastc[8]; uint64_t cn[8]; nvmtl_vk_hz_cpu(cn); double us[8], tot = 0;
@@ -5873,10 +5874,11 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
                           "(%.1f storms), %.1f forced; %.1f first dispatches (%.1f no barrier), %.1f later-dispatch barriers; %.1f untracked-work "
                           "and %.1f end-of-buffer barriers; %.1f transitions without a wait, %.1f model clears; useHeap %.1f untracked / %.1f tracked "
                           "(%.1f read everything); %.1f blits (%.1f no barrier, %.1f barrier, %.1f pre-barriers without a wait); "
-                          "%.1f untracked binding changes, %.1f keyless bindings, %.1f no-state (reasons: the 'hazard reason' lines)",
+                          "%.1f untracked binding changes, %.1f keyless bindings, %.1f no-state (reasons: the 'hazard reason' lines); "
+                          "later dispatches decided: %.1f compute-to-compute kept, %.1f skipped",
                           nvmtl_hz_mode() == 1 ? "acting" : "counting only", nvmtl_hz_heaps_all() ? "all" : "Metal",
                           d[0], d[1], d[2], d[3], d[4], d[18], d[19], d[5], d[6], d[7], d[8], d[9], d[10], d[11],
-                          d[15], d[16], d[13], d[20], d[21], d[22], d[23], d[17], d[12], d[14]);
+                          d[15], d[16], d[13], d[20], d[21], d[22], d[23], d[17], d[12], d[14], d[24], d[25]);
                     memcpy(lasth, h, sizeof lasth);
                 }
                 atomic_store(&t0, now); atomic_store(&lastn, n);

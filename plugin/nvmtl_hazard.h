@@ -35,10 +35,21 @@ enum { HZ_CAP = 8192, HZ_DECL = 4096, HZ_PEND = 2048, HZ_TAB = 1024, HZ_RC = 102
 enum { HZ_BIN_SHIFT = 21 };   // 2 MiB bins: an entry no longer than a bin sits in one bin chain and can overlap only two
 enum { HZC_PASS, HZC_PASS_FREE, HZC_PASS_BAR, HZC_PASS_RP, HZC_RESTART, HZC_DISP_FIRST, HZC_DISP_FREE, HZC_DISP_BAR,
        HZC_UNTRACKED, HZC_END, HZC_CLEAN, HZC_CLEAR, HZC_WILD, HZC_HEAP_ALL, HZC_NOSTATE, HZC_HEAP_UNTRACKED,
-       HZC_HEAP_TRACKED, HZC_UNTRACKED_BIND, HZC_STORM, HZC_FORCED, HZC_BLIT, HZC_BLIT_FREE, HZC_BLIT_BAR, HZC_BLIT_PREDROP, HZC_N };
+       HZC_HEAP_TRACKED, HZC_UNTRACKED_BIND, HZC_STORM, HZC_FORCED, HZC_BLIT, HZC_BLIT_FREE, HZC_BLIT_BAR, HZC_BLIT_PREDROP,
+       HZC_DISP_C2C, HZC_DISP_C2C_FREE, HZC_N };   /* later dispatches decided: a compute-to-compute barrier kept / skipped */
 static _Atomic uint64_t g_hzc[HZC_N];
 #define HZC(k) atomic_fetch_add_explicit(&g_hzc[k], 1, memory_order_relaxed)
-void nvmtl_vk_hz_counts(uint64_t out[24]) { for (int i = 0; i < 24; i++) out[i] = i < HZC_N ? atomic_load(&g_hzc[i]) : 0; }
+void nvmtl_vk_hz_counts(uint64_t out[32]) { for (int i = 0; i < 32; i++) out[i] = i < HZC_N ? atomic_load(&g_hzc[i]) : 0; }
+// NVMTL_HAZARD_DISPATCH=1: every later dispatch of a compute encoder is decided too. Today the first dispatch is checked
+// against earlier encoders and each later one takes a compute-to-compute barrier unconditionally, which on NVK waits for
+// every compute dispatch before it. With this on, a later dispatch is checked against this encoder's own entries since
+// the last such barrier and takes the narrow barrier only on a real conflict. Off by default; nothing without the model.
+int nvmtl_hz_dispatch_decides(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_HAZARD_DISPATCH"); on = e && e[0] == '1'; }
+    return on;
+}
 // The model's own CPU time, per entry point (the census prints it per frame): it runs on the encoding threads, and a
 // CPU that submits late starves the GPU, so its cost is fps. Thread-local sums, folded into the totals every 256 events.
 enum { HZT_DRAW, HZT_PASS, HZT_DISPATCH, HZT_BIND, HZT_DECLARE, HZT_WORK, HZT_BLIT, HZT_OTHER, HZT_N };
@@ -102,6 +113,8 @@ typedef struct {
     int enc_restarts;   // restarts of the current encoder's pass (a storm turns into a render pass)
     uint32_t region;    // unique id of the current region (g_hz_region): a slot committed in it is not collected again
     uint32_t n, k, nw_k, nw_n, npend, ndecl, decl_done;
+    uint32_t c2c_k, nw_c2c;   // entries [c2c_k, n) are this encoder's dispatches since its last compute-to-compute barrier
+    uint32_t hits_from;       // a check in progress ignores entries below this index (0 = none)
     uint32_t nidx;      // entries [0,nidx) are in the lookup chains: the rest are indexed when a check first needs them
     uint32_t rc[HZ_RC];                       // entry index + 1 of a key already in the current region (dedupe)
     uint32_t head_b[HZ_HB], head_m[HZ_HM], head_w;   // chains: by (memory, bin) or (memory, wide); by memory; wildcards
@@ -205,11 +218,13 @@ static void hz_init(hz_state *s, VkCommandBuffer cb)
     s->region = hz_new_region();
     s->cb = cb; s->all = 1; s->all_why = HZW_NEWCB; s->debt = 0; s->enc_restarts = 0; s->in_pass = s->nodep = s->arm_disp = s->arm_any = 0; s->full_scan = 1; s->pend_all = s->decl_over = 0;
     s->n = s->k = s->nw_k = s->nw_n = s->npend = s->ndecl = s->decl_done = 0;
+    s->c2c_k = s->nw_c2c = s->hits_from = 0;
     hz_index_clear(s);
 }
 static void hz_reset(hz_state *s)
 {
     s->n = s->k = s->nw_k = s->nw_n = 0; s->all = 0; s->debt = 0; s->decl_done = 0; s->region = hz_new_region(); s->full_scan = 1; s->arm_disp = s->arm_any = 0;
+    s->c2c_k = s->nw_c2c = s->hits_from = 0;
     hz_index_clear(s);
 }
 
@@ -273,26 +288,27 @@ static inline hz_state *hz_get(VkCommandBuffer cb, int make)
 static int hz_hits(hz_state *s, const hz_ent *a, uint32_t upto, uint32_t *who)
 {
     *who = UINT32_MAX;   // the earlier entry hit; UINT32_MAX = any earlier entry (the new access is keyless)
-    if (!upto) return 0;
-    if (!a->mem) return a->w ? 1 : (upto == s->k ? s->nw_k : s->nw_n) > 0;
+    const uint32_t from = s->hits_from;
+    if (upto <= from) return 0;
+    if (!a->mem) { if (a->w) return from < upto; return (from ? s->nw_n - s->nw_c2c : upto == s->k ? s->nw_k : s->nw_n) > 0; }
     for (uint32_t i = s->head_w; i; i = s->next_b[i - 1])
-        if (i - 1 < upto && (a->w || s->e[i - 1].w)) { *who = i - 1; return 1; }
+        if (i - 1 >= from && i - 1 < upto && (a->w || s->e[i - 1].w)) { *who = i - 1; return 1; }
     if (hz_narrow(a)) {
         const uint64_t b0 = a->lo >> HZ_BIN_SHIFT, b1 = (a->hi - 1) >> HZ_BIN_SHIFT;
         for (uint64_t b = b0 ? b0 - 1 : 0; b <= b1; b++)
             for (uint32_t i = HZ_HEADB(s, hz_hb(a->mem, b)); i; i = s->next_b[i - 1]) {
                 const hz_ent *e = &s->e[i - 1];
-                if (i - 1 < upto && (a->w || e->w) && hz_overlap(a, e)) { *who = i - 1; return 1; }
+                if (i - 1 >= from && i - 1 < upto && (a->w || e->w) && hz_overlap(a, e)) { *who = i - 1; return 1; }
             }
         for (uint32_t i = HZ_HEADB(s, hz_hb(a->mem, UINT64_MAX)); i; i = s->next_b[i - 1]) {
             const hz_ent *e = &s->e[i - 1];
-            if (i - 1 < upto && (a->w || e->w) && hz_overlap(a, e)) { *who = i - 1; return 1; }
+            if (i - 1 >= from && i - 1 < upto && (a->w || e->w) && hz_overlap(a, e)) { *who = i - 1; return 1; }
         }
         return 0;
     }
     for (uint32_t i = HZ_HEADM(s, hz_hm(a->mem)); i; i = s->next_m[i - 1]) {
         const hz_ent *e = &s->e[i - 1];
-        if (i - 1 < upto && (a->w || e->w) && hz_overlap(a, e)) { *who = i - 1; return 1; }
+        if (i - 1 >= from && i - 1 < upto && (a->w || e->w) && hz_overlap(a, e)) { *who = i - 1; return 1; }
     }
     return 0;
 }
@@ -353,6 +369,17 @@ static int hz_conflict_upto(hz_state *s, int ctx, uint32_t upto)
     return 1;
 }
 static int hz_conflict(hz_state *s, int ctx) { return hz_conflict_upto(s, ctx, s->k); }
+// The pending dispatch against this encoder's own entries since its last compute-to-compute barrier: a read of what an
+// earlier dispatch of the encoder wrote, or a write over what one read or wrote, needs that barrier; anything else does not.
+static int hz_conflict_intra(hz_state *s)
+{
+    s->hits_from = s->c2c_k;
+    const int r = hz_conflict_upto(s, 2, s->n);
+    s->hits_from = 0;
+    return r;
+}
+// A compute-to-compute barrier was recorded: the encoder's entries so far are ordered for its later dispatches.
+static void hz_c2c_done(hz_state *s) { s->c2c_k = s->n; s->nw_c2c = s->nw_n; }
 static void hz_commit(hz_state *s)
 {
     for (uint32_t j = 0; j < s->npend; j++) hz_append(s, &s->pend[j]);
@@ -361,7 +388,7 @@ static void hz_commit(hz_state *s)
 }
 static void hz_close_region(hz_state *s)
 {
-    s->k = s->n; s->nw_k = s->nw_n; s->region = hz_new_region();
+    s->k = s->n; s->nw_k = s->nw_n; s->c2c_k = s->n; s->nw_c2c = s->nw_n; s->region = hz_new_region();
     if (!++s->rcgen) { memset(s->grc, 0, sizeof s->grc); s->rcgen = 1; }
 }
 
@@ -711,6 +738,11 @@ static int hz_dispatch_impl(nvk_cmdbuf *c, int first)
     if (first) { HZC(HZC_DISP_FIRST); if (!v) { HZC(HZC_DISP_FREE); s->debt = 1; } }
     else if (v) HZC(HZC_DISP_BAR);
     if (v) { hz_barrier(c, s); s->npend = 0; s->pend_all = 0; hz_collect_slots(c, s, 1u, 1); s->full_scan = 0; hz_collect_decls(s); }
+    else if (!first && nvmtl_hz_dispatch_decides()) {
+        // NVMTL_HAZARD_DISPATCH: the caller left the compute-to-compute barrier to the model
+        if (hz_conflict_intra(s)) { HZC(HZC_DISP_C2C); if (m == 1) nvmtl_vk_cmd_barrier_c2c(c); hz_c2c_done(s); }
+        else { HZC(HZC_DISP_C2C_FREE); s->debt = 1; }
+    }
     hz_commit(s);
     s->arm_disp = 1;
     return v;

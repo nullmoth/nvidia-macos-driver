@@ -14,7 +14,7 @@ pdir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, "..", "plugin")
 def read(name):
     try: return open(os.path.join(pdir, name)).read()
     except OSError: return ""
-objc = read("NVMTLObjects.m"); vk = read("nvmtl_vk.c"); hdr = read("nvmtl_hazard.h")
+objc = read("NVMTLObjects.m"); vk = read("nvmtl_vk.c"); hdr = read("nvmtl_hazard.h"); dev = read("NVMTLDevice.m")
 # hook: (source, pattern, least count)
 hooks = [
     ("nvmtl_vk.c", r"#include \"nvmtl_hazard.h\"", 1),
@@ -40,8 +40,10 @@ hooks = [
     ("NVMTLObjects.m", r"_hzAttSkip \|= ", 2), ("NVMTLObjects.m", r"hz_force_full = _hzFull", 1),
     ("NVMTLObjects.m", r"nvmtl_hz_declare_buffer\(&_cb->_c, &b->_b, 0, 1\)", 1),   # the index buffer of a draw
     ("NVMTLObjects.m", r"hazard census \(", 1),
+    ("NVMTLObjects.m", r"nvmtl_hz_dispatch_decides\(\)\) kind = 2", 1),   # NVMTL_HAZARD_DISPATCH: later dispatches decided by the model
+    ("NVMTLDevice.m", r"nvmtl_pipeline_key_log\(", 4),                       # vertex, fragment, kernel + the definition
 ]
-src = {"NVMTLObjects.m": objc, "nvmtl_vk.c": vk}
+src = {"NVMTLObjects.m": objc, "nvmtl_vk.c": vk, "NVMTLDevice.m": dev}
 short = []; total = 0
 for f, pat, least in hooks:
     n = len(re.findall(pat, src[f])); total += n
