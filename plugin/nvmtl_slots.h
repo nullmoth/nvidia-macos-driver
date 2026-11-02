@@ -20,7 +20,7 @@ typedef struct { const void *view; uint64_t seq; } nvmtl_sl_bind;               
 typedef struct { nvmtl_sl_bind b[NVMTL_SL_NB]; uint32_t allocs, state; uint64_t alloc_seq, drop_seq; } nvmtl_sl_slot;   /* state: 0 never allocated, 1 live, 2 dropped */
 typedef struct { nvmtl_sl_slot *s; uint32_t n; uint64_t writes, allocs, drops; } nvmtl_sl_state;
 
-typedef struct { const void *img, *mem, *view; uint64_t off, size, seq, died; uint32_t w, h, fmt, storage, placed, pooled; } nvmtl_im_entry;
+typedef struct { const void *img, *mem, *view; uint64_t off, size, seq, died, parked; uint32_t w, h, fmt, storage, placed, pooled; } nvmtl_im_entry;   /* parked: in a heap/buffer park since this seq, 0 when in use */
 typedef struct { nvmtl_im_entry *e; uint32_t n, cap; uint64_t live; } nvmtl_im_state;
 typedef struct { const void *view, *img; } nvmtl_vw_entry;
 typedef struct { nvmtl_vw_entry *e; uint32_t n, cap; } nvmtl_vw_state;
@@ -53,7 +53,7 @@ static inline uint32_t nvmtl_im_add(nvmtl_im_state *s, const void *img, const vo
     if (!img) return 0;
     if (s->n == s->cap) { const uint32_t cap = s->cap ? s->cap * 2 : 4096; nvmtl_im_entry *e = (nvmtl_im_entry *)realloc(s->e, (size_t)cap * sizeof *e); if (!e) return 0; s->e = e; s->cap = cap; }
     nvmtl_im_entry *e = &s->e[s->n++];
-    e->img = img; e->mem = mem; e->off = off; e->size = size; e->view = view; e->w = w; e->h = h; e->fmt = fmt; e->storage = storage; e->placed = placed; e->pooled = pooled; e->seq = seq; e->died = 0;
+    e->img = img; e->mem = mem; e->off = off; e->size = size; e->view = view; e->w = w; e->h = h; e->fmt = fmt; e->storage = storage; e->placed = placed; e->pooled = pooled; e->seq = seq; e->died = 0; e->parked = 0;
     s->live++;
     return s->n;
 }
@@ -69,6 +69,9 @@ static inline void nvmtl_im_died(nvmtl_im_state *s, const void *img, uint64_t se
     nvmtl_im_entry *e = nvmtl_im_by_img(s, img);
     if (e && !e->died) { e->died = seq ? seq : 1; s->live--; }
 }
+/* a texture object died but its image went to a park for reuse (alive, mapped, recyclable); and the reuse */
+static inline void nvmtl_im_parked(nvmtl_im_state *s, const void *img, uint64_t seq) { nvmtl_im_entry *e = nvmtl_im_by_img(s, img); if (e && !e->died) e->parked = seq ? seq : 1; }
+static inline void nvmtl_im_recycled(nvmtl_im_state *s, const void *img) { nvmtl_im_entry *e = nvmtl_im_by_img(s, img); if (e) e->parked = 0; }
 static inline void nvmtl_vw_add(nvmtl_vw_state *s, const void *view, const void *img)
 {
     if (!view || !img) return;
@@ -87,7 +90,8 @@ static inline uint32_t nvmtl_im_dump(const nvmtl_im_state *s, FILE *f)
     for (uint32_t i = 0; i < s->n; i++) { const nvmtl_im_entry *e = &s->e[i];
         fprintf(f, "image %p view %p mem %p off %llu size %llu %ux%u fmt %u%s%s%s seq %llu died %llu\n", e->img, e->view, e->mem, (unsigned long long)e->off,
                 (unsigned long long)e->size, e->w, e->h, e->fmt, e->storage ? " storage" : "", e->placed ? " placed" : "", e->pooled ? " pooled" : "",
-                (unsigned long long)e->seq, (unsigned long long)e->died); }
+                (unsigned long long)e->seq, (unsigned long long)e->died);
+        if (e->parked) fprintf(f, "image %p parked since seq %llu\n", e->img, (unsigned long long)e->parked); }
     return s->n;
 }
 
@@ -133,12 +137,13 @@ static inline unsigned nvmtl_sl_report(const nvmtl_sl_state *sl, const nvmtl_im_
     for (uint32_t b = 0; b < NVMTL_SL_NB; b++) {
         const void *v = x->b[b].view;
         if (!v) { snprintf(line, sizeof line, "fault context:   binding %u: never written%s", b, b == 2 ? " (a storage write through it reads an undefined descriptor)" : ""); emit(ctx, line); continue; }
-        if (nvmtl_sl_is_dummy(d, b, v)) { snprintf(line, sizeof line, "fault context:   binding %u: the dummy (written at seq %llu)", b, (unsigned long long)x->b[b].seq); emit(ctx, line); continue; }
+        if (nvmtl_sl_is_dummy(d, b, v)) { snprintf(line, sizeof line, "fault context:   binding %u: the dummy (%s seq %llu)", b, x->b[b].seq ? "written at" : "prefilled at creation,", (unsigned long long)x->b[b].seq); emit(ctx, line); continue; }
         const nvmtl_im_entry *e = nvmtl_im_by_view(im, vw, v);
         if (!e) snprintf(line, sizeof line, "fault context:   binding %u: view %p written at seq %llu - of no image this table knows", b, v, (unsigned long long)x->b[b].seq);
         else snprintf(line, sizeof line, "fault context:   binding %u: view %p written at seq %llu -> image %p %ux%u fmt %u%s%s%s mem %p+%llu %llu bytes, created seq %llu, %s%llu",
                       b, v, (unsigned long long)x->b[b].seq, e->img, e->w, e->h, e->fmt, e->storage ? " storage" : "", e->placed ? " placed" : "", e->pooled ? " pooled" : "",
-                      e->mem, (unsigned long long)e->off, (unsigned long long)e->size, (unsigned long long)e->seq, e->died ? "DIED at seq " : "ALIVE", e->died ? (unsigned long long)e->died : 0ull);
+                      e->mem, (unsigned long long)e->off, (unsigned long long)e->size, (unsigned long long)e->seq, e->died ? "DIED at seq " : e->parked ? "ALIVE but PARKED for reuse since seq " : "ALIVE",
+                      e->died ? (unsigned long long)e->died : (unsigned long long)e->parked);
         emit(ctx, line);
     }
     const unsigned f = nvmtl_sl_flags(sl, im, vw, slot, d);

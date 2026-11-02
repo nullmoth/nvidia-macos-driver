@@ -822,7 +822,7 @@ static int nvmtl_bpark_take(NVMTLBuffer *b, const uint32_t *key, nvk_image *out)
     for (uint32_t k = b->_nbpk; k-- > 0; ) {
         nvmtl_park_t *p = &b->_bpk[k];
         if (memcmp(p->key, key, sizeof p->key)) continue;
-        *out = p->img; memmove(p, p + 1, (size_t)(b->_nbpk - k - 1) * sizeof *p); b->_nbpk--; got = 0; break;
+        *out = p->img; nvmtl_vk_image_recycled(out); memmove(p, p + 1, (size_t)(b->_nbpk - k - 1) * sizeof *p); b->_nbpk--; got = 0; break;
     }
     os_unfair_lock_unlock(&b->_bpl);
     return got;
@@ -838,7 +838,7 @@ static void nvmtl_bpark_put(NVMTLBuffer *b, nvk_image *img, const uint32_t *key)
         parked = 1;
     }
     os_unfair_lock_unlock(&b->_bpl);
-    if (parked) { memset(img, 0, sizeof *img); atomic_fetch_add(&gBTParked, 1); }
+    if (parked) { nvmtl_vk_image_parked(img); memset(img, 0, sizeof *img); atomic_fetch_add(&gBTParked, 1); }
     if (evict) { nvmtl_vk_image_destroy(&ev); atomic_fetch_add(&gBTEvicted, 1); }
 }
 static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, NSUInteger offset)
@@ -4256,7 +4256,7 @@ static int nvmtl_heap_unpark(NVMTLHeap *h, const uint32_t *key, nvk_image *out, 
     for (uint32_t k = h->_npk; k-- > 0; ) {
         nvmtl_park_t *p = &h->_pk[k];
         if (memcmp(p->key, key, sizeof p->key) || nvmtl_heap_take_at_locked(h, p->off, p->len)) continue;
-        *out = p->img; *off = p->off; *len = p->len;
+        *out = p->img; *off = p->off; *len = p->len; nvmtl_vk_image_recycled(out);
         memmove(p, p + 1, (size_t)(h->_npk - k - 1) * sizeof *p); h->_npk--; got = 0; break;
     }
     os_unfair_lock_unlock(&h->_fl);
@@ -4273,7 +4273,7 @@ static void nvmtl_heap_park(NVMTLHeap *h, nvk_image *img, const uint32_t *key, N
         parked = 1;
     }
     os_unfair_lock_unlock(&h->_fl);
-    if (parked) { memset(img, 0, sizeof *img); atomic_fetch_add(&gHTParked, 1); }
+    if (parked) { nvmtl_vk_image_parked(img); memset(img, 0, sizeof *img); atomic_fetch_add(&gHTParked, 1); }
     if (evict) { nvmtl_vk_image_destroy(&ev); atomic_fetch_add(&gHTEvicted, 1); }
 }
 static void nvmtl_heap_census(const char *what) {

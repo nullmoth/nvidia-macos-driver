@@ -14,7 +14,7 @@ pdir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, "..", "plugin")
 def read(n):
     try: return open(os.path.join(pdir, n)).read()
     except OSError: return ""
-vk = read("nvmtl_vk.c"); objc = read("NVMTLObjects.m"); hdr = read("nvmtl_fault_context.h"); vkh = read("nvmtl_vk.h"); dev = read("NVMTLDevice.m")
+vk = read("nvmtl_vk.c"); objc = read("NVMTLObjects.m"); hdr = read("nvmtl_fault_context.h"); vkh = read("nvmtl_vk.h"); dev = read("NVMTLDevice.m"); emb = read("NVMTLEmbedded.m")
 hooks = [
     ("nvmtl_vk.c", r"nvmtl_fx_note_dispatch\(c, p\);\n\s*pvkCmdDispatch(Indirect)?\(", 4),   # threads, indirect tg, groups, indirect
     ("nvmtl_vk.c", r"nvmtl_image_grace_reap\(\);", 1),                                       # NVMTL_IMAGE_GRACE: dead images reaped as submits finish
@@ -61,8 +61,16 @@ hooks = [
     ("nvmtl_vk.c", r"NVMTL_HEAP_PREFILL", 2),
     ("nvmtl_vk.c", r"nvmtl_slot_drop_reap\(\);", 1),                                    # a slot drop waits for the submits in flight at the texture's death
     ("nvmtl_vk.c", r"holds handle 0x%016llx: bit 62", 1),                                # the full gpuResourceID the kernel masked
+    ("nvmtl_vk.c", r"nvmtl_dwit_mark\(c, c->fx.total\);", 4),                           # a witness word after every compute dispatch form
+    ("nvmtl_vk.c", r"nvmtl_dwit_mark\(c, 0x8000u", 1),                                   # and at every render pass end
+    ("nvmtl_vk.c", r"out->begin_id = \(uint32_t\)g_cmd_begun;", 1),
+    ("nvmtl_vk.c", r"nvmtl_dwit_last\(c\)", 1),                                        # the faulting dispatch singled out at loss
+    ("nvmtl_vk.c", r"nvmtl_sl_write\(&g_sl, k, 2, g_dummyStex.view, 0\)", 1),         # the prefill is recorded
+    ("NVMTLObjects.m", r"nvmtl_vk_image_parked\(img\)", 2),                            # both parks
+    ("NVMTLObjects.m", r"nvmtl_vk_image_recycled\(out\)", 2),                          # both unparks
+    ("NVMTLEmbedded.m", r"VIEW NVMTLTexture %p", 1),
 ]
-src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev}
+src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev, "NVMTLEmbedded.m": emb}
 short = []; total = 0
 for f, pat, least in hooks:
     n = len(re.findall(pat, src[f])); total += n

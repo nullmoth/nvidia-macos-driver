@@ -2987,6 +2987,9 @@ static int ensure_descriptors_locked(void)
             VkWriteDescriptorSet hw = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, hset, 0, 0, NVMTL_BINDLESS_SLOTS,
                                         VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, fill, NULL, NULL };
             pvkUpdateDescriptorSets(g_dev, 1, &hw, 0, NULL);
+            pthread_mutex_lock(&g_sl_lock);
+            if (!nvmtl_sl_init(&g_sl, NVMTL_BINDLESS_SLOTS)) for (uint32_t k = 0; k < NVMTL_BINDLESS_SLOTS; k++) nvmtl_sl_write(&g_sl, k, 0, g_dummyImg.view, 0);
+            pthread_mutex_unlock(&g_sl_lock);
             static VkDescriptorImageInfo sfill[NVMTL_BINDLESS_SAMPLER_SLOTS];
             for (uint32_t k = 0; k < NVMTL_BINDLESS_SAMPLER_SLOTS; k++)
                 sfill[k] = (VkDescriptorImageInfo){ (VkSampler)g_dummySampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
@@ -3010,6 +3013,12 @@ static int ensure_descriptors_locked(void)
                             VkWriteDescriptorSet w4 = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, hset, 4, 0, NVMTL_BINDLESS_SLOTS, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NULL, NULL, tf };
                             pvkUpdateDescriptorSets(g_dev, 1, &w3, 0, NULL); pvkUpdateDescriptorSets(g_dev, 1, &w4, 0, NULL); free(tf); }
                   nvlog("vk: BINDLESS heap prefilled - every slot holds the storage dummy at binding 2%s (NVMTL_HEAP_PREFILL=1)", tf ? " and the texel dummy at 3-4" : "; no texel dummy yet, 3-4 stay unwritten");
+                  nvlog("vk: the storage dummy is image %p view %p: %ux%u, %u layer%s, vk format %u, metal type %u (a 2D array write through it lands in a 1x1 2D image: a dummy, never a fault)",
+                        g_dummyStex.img, g_dummyStex.view, g_dummyStex.w, g_dummyStex.h, g_dummyStex.layers ? g_dummyStex.layers : 1, g_dummyStex.layers == 1 ? "" : "s", g_dummyStex.fmt, g_dummyStex.mtl_type);
+                  pthread_mutex_lock(&g_sl_lock);
+                  if (!nvmtl_sl_init(&g_sl, NVMTL_BINDLESS_SLOTS))
+                      for (uint32_t k = 0; k < NVMTL_BINDLESS_SLOTS; k++) { nvmtl_sl_write(&g_sl, k, 2, g_dummyStex.view, 0); if (tf) { nvmtl_sl_write(&g_sl, k, 3, g_dummyTexView, 0); nvmtl_sl_write(&g_sl, k, 4, g_dummyTexView, 0); } }
+                  pthread_mutex_unlock(&g_sl_lock);
               } else if (hnb == 5) nvlog("vk: BINDLESS heap bindings 2-4 left unwritten for unfilled slots (%s)", prefill ? "no storage dummy" : "NVMTL_HEAP_PREFILL=0"); }
             g_heapLayout = hl; g_heapPool = hp; g_heapSet = hset;
             nvlog("vk: BINDLESS heap ready - set 2, %d sampled images, every slot the dummy until a texture asks for its gpuResourceID", NVMTL_BINDLESS_SLOTS);
@@ -3387,6 +3396,60 @@ static int nvmtl_wit_ready(void)
     return st > 0;
 }
 static uint32_t nvmtl_wit_read(uint32_t s) { return ((volatile uint32_t *)g_wit.map)[s % NVMTL_WIT_SLOTS]; }
+// The per-dispatch witness: after every compute dispatch (and every render pass end) a 4-byte fill of a host-visible
+// ring word with (the command buffer's begin ordinal << 16 | the dispatch ordinal), ordered after the dispatch, so a
+// device loss can say which dispatch of the dying command buffer completed last - the faulting one is the next.
+// A barrier and a fill per dispatch: a diagnostic. NVMTL_DISPATCH_WITNESS=1/0 overrides the build's default.
+#define NVMTL_DWIT_N 65536u
+static nvk_buffer g_dwit; static int g_dwit_state; static _Atomic uint32_t g_dwit_next;
+static int nvmtl_dwit_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_DISPATCH_WITNESS");
+#if NVMTL_RELEASE
+        on = e && e[0] == '1';
+#else
+        on = !(e && e[0] == '0');
+#endif
+        if (on) nvlog("vk: per-dispatch witness ON - a barrier + 4-byte fill after every compute dispatch names the last completed dispatch at device loss (NVMTL_DISPATCH_WITNESS=%s)", e ? e : "unset"); }
+    return on;
+}
+static int nvmtl_dwit_ready(void)
+{
+    int st = __atomic_load_n(&g_dwit_state, __ATOMIC_ACQUIRE);
+    if (st) return st > 0;
+    pthread_mutex_lock(&g_keep_lock);
+    st = g_dwit_state;
+    if (!st) {
+        if (nvmtl_vk_buffer_create(NVMTL_DWIT_N * 4, 1, &g_dwit) == 0 && g_dwit.map) { memset(g_dwit.map, 0, NVMTL_DWIT_N * 4); st = 1; }
+        else { nvmtl_vk_buffer_destroy(&g_dwit); st = -1; nvlog("vk: per-dispatch witness buffer REFUSED - no last-completed-dispatch line at a loss"); }
+        __atomic_store_n(&g_dwit_state, st, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&g_keep_lock);
+    return st > 0;
+}
+static void nvmtl_dwit_mark(nvk_cmdbuf *c, uint32_t ordinal)
+{
+    if (!nvmtl_dwit_on() || !nvmtl_dwit_ready() || !c->cb) return;
+    const uint32_t idx = atomic_fetch_add(&g_dwit_next, 1) % NVMTL_DWIT_N;
+    const uint32_t value = ((c->begin_id & 0xFFFFu) << 16) | (ordinal & 0xFFFFu);
+    VkMemoryBarrier after = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT };
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &after, 0, NULL, 0, NULL);
+    pvkCmdFillBuffer(c->cb, (VkBuffer)g_dwit.buf, (VkDeviceSize)idx * 4, 4, value);
+}
+// The highest completed dispatch ordinal of command buffer c the witness ring holds (0 = none seen).
+static uint32_t nvmtl_dwit_last(const nvk_cmdbuf *c)
+{
+    if (__atomic_load_n(&g_dwit_state, __ATOMIC_ACQUIRE) <= 0 || !g_dwit.map) return 0;
+    const volatile uint32_t *w = (const volatile uint32_t *)g_dwit.map; uint32_t best = 0;
+    for (uint32_t i = 0; i < NVMTL_DWIT_N; i++) {
+        const uint32_t v = w[i];
+        if ((v >> 16) != (c->begin_id & 0xFFFFu) || (v & 0x8000u)) continue;   // another command buffer, or a render-pass end mark
+        const uint32_t o = v & 0x7FFFu;
+        if (o > best && o <= c->fx.total) best = o;
+    }
+    return best;
+}
 static uint32_t nvmtl_wit_record(nvk_cmdbuf *c)
 {
     /* A command buffer that ran compiled machine code is never certified for reuse: the program, its
@@ -5511,9 +5574,27 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
     for (unsigned i = 0; i < g_keep_npage; i++) { const uint64_t a = nvmtl_vk_buffer_address(&g_keep_page[i]->buffer);
         fprintf(f, "page cached 0x%llx 0x%llx %llu seq %llu\n", (unsigned long long)a, (unsigned long long)(a + pbytes), (unsigned long long)pbytes, (unsigned long long)g_keep_page[i]->life.last_seq); }
     pthread_mutex_unlock(&g_keep_lock);
-    // this command buffer's last dispatches: each binding table's buffer roots, resolved
+    // this command buffer's last dispatches: each binding table's buffer roots, resolved - the faulting one first
     const uint32_t nd = c->fx.n < NVMTL_FX_DISP ? c->fx.n : NVMTL_FX_DISP;
-    for (uint32_t j = 0; j < nd; j++) {
+    const uint32_t last_done = nvmtl_dwit_last(c), faulting = last_done + 1;
+    {   char line[400]; const nvmtl_fx_disp *fd = NULL;
+        for (uint32_t j = 0; j < nd; j++) { const nvmtl_fx_disp *d = &c->fx.d[(c->fx.n - nd + j) % NVMTL_FX_DISP]; if (d->ordinal == faulting) fd = d; }
+        if (!nvmtl_dwit_on() || __atomic_load_n(&g_dwit_state, __ATOMIC_ACQUIRE) <= 0)
+            snprintf(line, sizeof line, "fault context: no per-dispatch witness in this process (NVMTL_DISPATCH_WITNESS) - the faulting dispatch is not singled out");
+        else if (!last_done && c->fx.total)
+            snprintf(line, sizeof line, "fault context: last completed dispatch of this command buffer: NONE witnessed (seq %llu, begin %u) - the faulting dispatch is therefore ordinal 1 of %u%s%s", (unsigned long long)c->fx_seq, c->begin_id, c->fx.total,
+                     fd ? ": " : "", fd ? fd->name : "");
+        else
+            snprintf(line, sizeof line, "fault context: last completed dispatch of this command buffer: seq %llu ordinal %u of %u - the faulting dispatch is therefore ordinal %u%s%s%s", (unsigned long long)c->fx_seq, last_done, c->fx.total, faulting,
+                     faulting > c->fx.total ? " (PAST THE LAST DISPATCH: the fault is after the dispatches, or in another command buffer in flight)" : "", fd ? ": " : "", fd ? fd->name : "");
+        if (fd) { size_t l = strlen(line); snprintf(line + l, sizeof line - l, " spv-fnv %08x air %016llx pipe %p", fd->key, (unsigned long long)fd->air, fd->pipe); }
+        nvmtl_fx_emit_both(f, line);
+    }
+    for (uint32_t jj = 0; jj < nd; jj++) {
+        // the faulting dispatch's record comes first, then the rest in order
+        uint32_t j = jj, jf = nd;
+        for (uint32_t q = 0; q < nd; q++) if (c->fx.d[(c->fx.n - nd + q) % NVMTL_FX_DISP].ordinal == faulting) jf = q;
+        if (jf < nd) { if (jj == 0) j = jf; else j = jj - 1 < jf ? jj - 1 : jj; }
         const nvmtl_fx_disp *d = &c->fx.d[(c->fx.n - nd + j) % NVMTL_FX_DISP];
         for (int t = 0; t < 2; t++) {
             if (!d->tab[t]) continue;
@@ -5727,6 +5808,7 @@ void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_
             pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES, pc);
             nvmtl_fx_note_dispatch(c, p);
             pvkCmdDispatch(c->cb, n[0], n[1], n[2]);
+            nvmtl_dwit_mark(c, c->fx.total);
         }
     }
     nvmtl_dt_end(c, dt_slot);
@@ -5751,6 +5833,7 @@ void nvmtl_vk_cmd_dispatch_indirect_tg(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffe
     pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES, pc);
     nvmtl_fx_note_dispatch(c, p);
     pvkCmdDispatchIndirect(c->cb, (VkBuffer)b->buf, off);
+    nvmtl_dwit_mark(c, c->fx.total);
 }
 void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t gy, uint32_t gz)
 {
@@ -5770,6 +5853,7 @@ void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t
     }
     nvmtl_fx_note_dispatch(c, p);
     pvkCmdDispatch(c->cb, gx, gy, gz);
+    nvmtl_dwit_mark(c, c->fx.total);
 }
 
 int nvmtl_vk_queue_create(nvk_queue *out)
@@ -5920,6 +6004,7 @@ int nvmtl_vk_cmd_begin(nvk_queue *q, nvk_cmdbuf *out)
         }
     }
     g_cmd_begun++;
+    out->begin_id = (uint32_t)g_cmd_begun;
     t_fx_cb = out->cb; t_fx_ord = 0;
     nvmtl_perf_note(NVP_BEGIN, b0, 0);
     return 0;
@@ -6786,6 +6871,7 @@ int nvmtl_pt_armed(void)
 }
 void nvmtl_vk_cmd_end_render(nvk_cmdbuf *c) {
     if (c->hz_dyn) { pvkCmdEndRendering(c->cb); c->hz_dyn = 0; } else pvkCmdEndRenderPass(c->cb);
+    nvmtl_dwit_mark(c, 0x8000u | (c->fx.total & 0x7FFFu));   // a render pass end: marked, not counted as a dispatch
     c->in_rp = 0; nvmtl_hz_pass_exit(c);
     if (c->pt_open && c->pt_pool) { pvkCmdWriteTimestamp(c->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, (VkQueryPool)c->pt_pool, 2 * c->pt_n + 1); c->pt_n++; c->pt_open = 0; g_pt_left--; }
     (void)nvmtl_counter_flush(c); }
@@ -7348,6 +7434,8 @@ void nvmtl_vk_bindless_rewrite(uint32_t slot, void *view)
     if (!g_heapSet || !slot || slot >= NVMTL_BINDLESS_SLOTS || !view) return;
     pthread_mutex_lock(&g_heap_lock); nvmtl_heap_write_locked(slot, view); pthread_mutex_unlock(&g_heap_lock);
 }
+void nvmtl_vk_image_parked(nvk_image *i) { if (i && i->img) { pthread_mutex_lock(&g_sl_lock); nvmtl_im_parked(&g_im, i->img, g_cmd_submitted); pthread_mutex_unlock(&g_sl_lock); } }
+void nvmtl_vk_image_recycled(nvk_image *i) { if (i && i->img) { pthread_mutex_lock(&g_sl_lock); nvmtl_im_recycled(&g_im, i->img); pthread_mutex_unlock(&g_sl_lock); } }
 void nvmtl_vk_image_free_backing(nvk_image *o)
 {
     if (g_state != 1 || !o || !o->img) return;
@@ -8075,6 +8163,7 @@ void nvmtl_vk_cmd_dispatch_indirect(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *
     if (c->nobind) return;
     nvmtl_fx_note_dispatch(c, p);
     pvkCmdDispatchIndirect(c->cb, (VkBuffer)b->buf, off);
+    nvmtl_dwit_mark(c, c->fx.total);
 }
 
 void nvmtl_vk_cmd_barrier(nvk_cmdbuf *c)
