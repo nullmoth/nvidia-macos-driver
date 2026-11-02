@@ -154,11 +154,13 @@ def selftest():
 
 if __name__ == '__main__':
     if '--selftest' in sys.argv: sys.exit(selftest())
-    args = [x for x in sys.argv[1:] if not x.startswith('--')]
+    args, frames, context, i = [], None, None, 1
+    while i < len(sys.argv):
+        x = sys.argv[i]
+        if x == '--frames': frames = int(sys.argv[i + 1]); i += 2
+        elif x == '--context': context = int(sys.argv[i + 1]); i += 2
+        elif x.startswith('--'): i += 1
+        else: args.append(x); i += 1
     if len(args) != 2: sys.exit(__doc__)
-    frames = context = None
-    for i, x in enumerate(sys.argv):
-        if x == '--frames': frames = int(sys.argv[i + 1])
-        if x == '--context': context = int(sys.argv[i + 1])
     a = parse(open(args[0], errors='replace')); b = parse(open(args[1], errors='replace'))
     sys.exit(report(a, b, frames, context or 3))
