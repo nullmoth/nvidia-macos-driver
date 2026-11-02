@@ -80,7 +80,7 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_mm_dump\(&g_mm, f\)", 1),
     ("nvmtl_vk.c", r"nvmtl_loss_section\(f, \"memories\"\)", 1),
     ("nvmtl_vk.c", r"nvmtl_heaps_dump\(f, nvmtl_fx_emit_both\)", 1),                   # every live app heap at loss
-    ("NVMTLObjects.m", r"nvmtl_heap_register\(h\)", 1),
+    ("NVMTLObjects.m", r"nvmtl_heap_list_for_loss\(h\)", 1),
     ("nvmtl_vk.c", r"image->placed \? image->hz_off", 1),                               # placed images record their bound range
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev, "NVMTLEmbedded.m": emb}
