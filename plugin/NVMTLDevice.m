@@ -23,6 +23,7 @@
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_log_failure.h"
 #include "nvmtl_env_knobs.h"
+#include <CommonCrypto/CommonDigest.h>
 #include <sys/sysctl.h>
 #import <libproc.h>
 #import <mach-o/dyld.h>
