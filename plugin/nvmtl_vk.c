@@ -17,6 +17,7 @@
 #include <math.h>
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
+#include <mach-o/loader.h>
 #include "nvmtl_vk.h"
 #include "nvmtl_tex_upload.h"
 #include "nvmtl_cmd_refusal.h"
@@ -5636,8 +5637,8 @@ static void nvmtl_fault_tic_scan(const void *view, const char *what, FILE *f)
     if (!nvmtl_fx_read_safe(view, w, sizeof w)) { snprintf(line, sizeof line, "fault context:     %s view %p: object unreadable, no descriptor words", what, view); nvmtl_fx_emit_both(f, line); return; }
     unsigned found = 0;
     for (unsigned i = 0; i + 8 <= 192 && found < 3; i++) {
-        const uint64_t addr = ((uint64_t)(w[i + 1] & 0xFFFFu) << 32) | w[i];
-        if (addr < 0x10000 || (addr & 0xFF)) continue;
+        const uint64_t addr = ((uint64_t)(w[i + 1] & 0x1FFFFFFu) << 32) | (w[i] & 0xFFFFFE00u);   // TEXHEAD_V2_BL: bits 31:9 in word 0, 56:32 in word 1
+        if (addr < 0x10000) continue;
         const int lm = nvmtl_fx_lock_bounded(&g_mm_lock, 50); const nvmtl_mm_entry *m = nvmtl_mm_at(&g_mm, addr); const nvmtl_mm_entry mc = m ? *m : (nvmtl_mm_entry){0}; if (lm) pthread_mutex_unlock(&g_mm_lock);
         if (!mc.mem) continue;
         char lv[40]; nvmtl_mm_liveness(mc.died, lv, sizeof lv);
@@ -5647,6 +5648,83 @@ static void nvmtl_fault_tic_scan(const void *view, const char *what, FILE *f)
         nvmtl_fx_emit_both(f, line); found++;
     }
     if (!found) { snprintf(line, sizeof line, "fault context:     %s view %p: no descriptor word pair forms an address inside a mapped memory (first words %08x %08x %08x %08x)", what, view, w[0], w[1], w[2], w[3]); nvmtl_fx_emit_both(f, line); }
+}
+// The installed NVK's texture headers, read through its private layout (nvmtl_nvk_layout.h) and only when the loaded
+// ICD is the build those offsets were measured on: the view's own copy and index, the device table's header at that
+// index, and the heap set's stored element for the slot - the three must agree, and their address must be the image's.
+static int g_nvk_layout_state;   // 0 unknown, 1 the ICD matches the measured build, -1 it does not
+static int nvmtl_nvk_layout_ok(void)
+{
+    if (g_nvk_layout_state) return g_nvk_layout_state > 0;
+    Dl_info info; char uuid[48] = "?"; const char *path = "?";
+    if (pvkGetInstanceProcAddr && dladdr((const void *)pvkGetInstanceProcAddr, &info) && info.dli_fbase) {
+        path = info.dli_fname ? info.dli_fname : "?";
+        const struct mach_header_64 *mh = (const struct mach_header_64 *)info.dli_fbase; const uint8_t *lc = (const uint8_t *)(mh + 1);
+        for (uint32_t i = 0; i < mh->ncmds; i++) {
+            const struct load_command *c = (const struct load_command *)lc;
+            if (c->cmd == LC_UUID) { const uint8_t *u = ((const struct uuid_command *)c)->uuid;
+                snprintf(uuid, sizeof uuid, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X", u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]); break; }
+            lc += c->cmdsize;
+        }
+    }
+    const int match = strcmp(uuid, NVMTL_NVK_LAYOUT_UUID) == 0;
+    g_nvk_layout_state = match ? 1 : -1;
+    nvlog("NVK layout reader: ICD %s uuid %s %s the measured build %s%s", path, uuid, match ? "MATCHES" : "does NOT match", NVMTL_NVK_LAYOUT_UUID, match ? "" : " - texture headers are not read");
+    return match;
+}
+static int nvmtl_nvk_tic_read(uint32_t index, uint32_t w[8], uint64_t *table_gpu)
+{
+    const uint8_t *table = (const uint8_t *)g_dev + NVK_L_DEV_IMAGES; uint32_t desc_size = 0, alloc = 0, mem_count = 0;
+    if (!nvmtl_fx_read_safe(table + NVK_L_TABLE_DESC_SIZE, &desc_size, 4) || !nvmtl_fx_read_safe(table + NVK_L_TABLE_ALLOC, &alloc, 4) || desc_size != NVK_L_TIC_BYTES || index >= alloc) return 0;
+    void *contig = NULL, *mem = NULL, *map = NULL; uint64_t base = 0;
+    if (!nvmtl_fx_read_safe(table + NVK_L_ARENA_CONTIG_VA, &contig, 8) || !nvmtl_fx_read_safe(table + NVK_L_ARENA_MEM_COUNT, &mem_count, 4)) return 0;
+    if (contig) nvmtl_fx_read_safe((const uint8_t *)contig + NVK_L_NVKMD_VA_ADDR, &base, 8);
+    const uint64_t off = (uint64_t)index * desc_size; const uint32_t mi = nvmtl_nvk_arena_mem_index(off);
+    if (mi >= mem_count || !nvmtl_fx_read_safe(table + NVK_L_ARENA_MEM + (size_t)mi * NVK_L_ARENA_MEM_STRIDE, &mem, 8) || !mem) return 0;
+    if (!nvmtl_fx_read_safe((const uint8_t *)mem + NVK_L_NVKMD_MEM_MAP, &map, 8) || !map) return 0;
+    if (!nvmtl_fx_read_safe((const uint8_t *)map + (off - nvmtl_nvk_arena_mem_offset(mi)), w, NVK_L_TIC_BYTES)) return 0;
+    *table_gpu = base ? base + off : 0;
+    return 1;
+}
+static int nvmtl_nvk_set_element(uint32_t binding, uint32_t slot, uint32_t *out)
+{
+    const uint8_t *set = (const uint8_t *)g_heapSet; void *layout = NULL, *map = NULL; uint32_t off = 0, arr = 0; uint8_t stride = 0;
+    if (!set || !nvmtl_fx_read_safe(set + NVK_L_SET_LAYOUT, &layout, 8) || !nvmtl_fx_read_safe(set + NVK_L_SET_MAP, &map, 8) || !layout || !map) return 0;
+    const uint8_t *b = (const uint8_t *)layout + NVK_L_LAYOUT_BINDING + (size_t)binding * NVK_L_BINDING_SIZE;
+    if (!nvmtl_fx_read_safe(b + NVK_L_BINDING_OFFSET, &off, 4) || !nvmtl_fx_read_safe(b + NVK_L_BINDING_STRIDE, &stride, 1) || !nvmtl_fx_read_safe(b + NVK_L_BINDING_ARRAY_SIZE, &arr, 4)) return 0;
+    if (slot >= arr || !stride) return 0;
+    return nvmtl_fx_read_safe((const uint8_t *)map + off + (uint64_t)slot * stride, out, 4);
+}
+static void nvmtl_fault_tic_line(const char *what, const uint32_t w[8], uint64_t expected, char *line, size_t cap)
+{
+    nvmtl_tic t; nvmtl_tic_decode(w, &t); char mem[300];
+    const int lm = nvmtl_fx_lock_bounded(&g_mm_lock, 50); nvmtl_mm_describe(&g_mm, t.addr, mem, sizeof mem); if (lm) pthread_mutex_unlock(&g_mm_lock);
+    snprintf(line, cap, "fault context:     NVK %s: TIC address 0x%llx %s%s (%s); %ux%ux%u %s, max mip %u, gobs/block h=%u d=%u, components 0x%x, header v%u; words %08x %08x %08x %08x %08x %08x %08x %08x",
+             what, (unsigned long long)t.addr, expected ? (t.addr == expected ? "== the image's bytes" : "!= the image's bytes at 0x") : "(no expected address)", expected && t.addr != expected ? "" : "",
+             mem, t.width, t.height, t.depth, nvmtl_tic_type_name(t.type), t.max_mip, t.gob_h, t.gob_d, t.components, t.version, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+    if (expected && t.addr != expected) { size_t l = strlen(line); snprintf(line + l, cap - l, " [expected 0x%llx, off by %lld]", (unsigned long long)expected, (long long)(t.addr - expected)); }
+}
+// For one heap slot: the binding's view (its own copy + index), the table's header at that index, and the set element.
+static void nvmtl_fault_nvk_slot(uint32_t slot, uint32_t binding, const void *view, uint64_t expected, FILE *f)
+{
+    char line[700]; uint32_t w[8], w2[8], idx = 0, elem = 0; uint64_t tg = 0;
+    const size_t desc_off = binding == 2 ? NVK_L_VIEW_STORAGE_DESC : NVK_L_VIEW_SAMPLED_DESC, idx_off = binding == 2 ? NVK_L_VIEW_STORAGE_INDEX : NVK_L_VIEW_SAMPLED_INDEX;
+    if (!view) return;
+    if (!nvmtl_fx_read_safe((const uint8_t *)view + idx_off, &idx, 4) || !nvmtl_fx_read_safe((const uint8_t *)view + desc_off, w, 32)) { snprintf(line, sizeof line, "fault context:     NVK binding %u view %p: object unreadable", binding, view); nvmtl_fx_emit_both(f, line); return; }
+    snprintf(line, sizeof line, "fault context:     NVK binding %u view %p holds descriptor index %u; its own copy of the header:", binding, view, idx); nvmtl_fx_emit_both(f, line);
+    nvmtl_fault_tic_line("view copy", w, expected, line, sizeof line); nvmtl_fx_emit_both(f, line);
+    if (nvmtl_nvk_tic_read(idx, w2, &tg)) {
+        const int same = memcmp(w, w2, 32) == 0;
+        snprintf(line, sizeof line, "fault context:     NVK device table[%u] (GPU 0x%llx): %s the view's copy", idx, (unsigned long long)tg, same ? "IDENTICAL to" : "DIFFERS from"); nvmtl_fx_emit_both(f, line);
+        if (!same) { nvmtl_fault_tic_line("table", w2, expected, line, sizeof line); nvmtl_fx_emit_both(f, line); }
+    } else { snprintf(line, sizeof line, "fault context:     NVK device table[%u]: unreadable (index past the table, or the arena is not mapped)", idx); nvmtl_fx_emit_both(f, line); }
+    if (nvmtl_nvk_set_element(binding, slot, &elem)) {
+        const uint32_t k = elem & 0xFFFFFu;
+        snprintf(line, sizeof line, "fault context:     NVK heap set binding %u [%u] stores 0x%08x -> image index %u: %s", binding, slot, elem, k,
+                 k == idx ? "MATCHES the view" : "STALE INDEX - the set names another header than the view holds"); nvmtl_fx_emit_both(f, line);
+        if (k != idx) { if (nvmtl_nvk_tic_read(k, w2, &tg)) { nvmtl_fault_tic_line("the set's header", w2, expected, line, sizeof line); nvmtl_fx_emit_both(f, line); }
+                        else { snprintf(line, sizeof line, "fault context:     NVK device table[%u]: unreadable", k); nvmtl_fx_emit_both(f, line); } }
+    } else { snprintf(line, sizeof line, "fault context:     NVK heap set binding %u [%u]: element unreadable", binding, slot); nvmtl_fx_emit_both(f, line); }
 }
 static void nvmtl_fault_slot_report(uint64_t ptr, FILE *f)
 {
@@ -5668,9 +5746,20 @@ static void nvmtl_fault_slot_report(uint64_t ptr, FILE *f)
     lk = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock");
     { const int lm = nvmtl_loss_mutex_lock(&g_mm_lock, "g_mm_lock"); nvmtl_sl_report(&g_sl, &g_im, &g_vw, slot, &d, owner, &g_mm, nvmtl_fx_emit_both, f); if (lm) pthread_mutex_unlock(&g_mm_lock); }
     const void *v2 = g_sl.s && slot < g_sl.n ? g_sl.s[slot].b[2].view : NULL, *v0 = g_sl.s && slot < g_sl.n ? g_sl.s[slot].b[0].view : NULL;
+    uint64_t exp2 = 0, exp0 = 0;
+    {   const nvmtl_im_entry *e2 = nvmtl_im_by_view(&g_im, &g_vw, v2), *e0 = nvmtl_im_by_view(&g_im, &g_vw, v0);
+        const int lm = nvmtl_fx_lock_bounded(&g_mm_lock, 50);
+        if (e2) { const nvmtl_mm_entry *m = nvmtl_mm_by_mem(&g_mm, e2->mem); if (m && m->base) exp2 = m->base + e2->off; }
+        if (e0) { const nvmtl_mm_entry *m = nvmtl_mm_by_mem(&g_mm, e0->mem); if (m && m->base) exp0 = m->base + e0->off; }
+        if (lm) pthread_mutex_unlock(&g_mm_lock); }
     if (lk) pthread_mutex_unlock(&g_sl_lock);
-    if (v2 && v2 != nvmtl_heap_storage_dummy()) nvmtl_fault_tic_scan(v2, "binding 2 (storage)", f);
-    if (v0 && v0 != g_dummyImg.view && v0 != v2) nvmtl_fault_tic_scan(v0, "binding 0 (sampled)", f);
+    if (nvmtl_nvk_layout_ok()) {
+        if (v2) nvmtl_fault_nvk_slot(slot, 2, v2, v2 == nvmtl_heap_storage_dummy() ? 0 : exp2, f);
+        if (v0 && v0 != v2) nvmtl_fault_nvk_slot(slot, 0, v0, v0 == g_dummyImg.view ? 0 : exp0, f);
+    } else {
+        if (v2 && v2 != nvmtl_heap_storage_dummy()) nvmtl_fault_tic_scan(v2, "binding 2 (storage)", f);
+        if (v0 && v0 != g_dummyImg.view && v0 != v2) nvmtl_fault_tic_scan(v0, "binding 0 (sampled)", f);
+    }
 }
 static void nvmtl_fault_file_write(nvk_cmdbuf *c)
 {
