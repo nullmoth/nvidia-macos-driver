@@ -877,6 +877,12 @@ fn pixel_linear_hw_coord(
     args: &[Word],
     out: &mut Vec<Instruction>,
 ) -> Option<Word> {
+    // NVMTL_NO_PIXEL_HW_FILTER=1 keeps the exact four-fetch emulation for every pixel-coordinate sample (diagnostic:
+    // the hardware filter is the one remaining difference against the translator that renders Cyberpunk correctly,
+    // in MetalFX's temporal unified pass, ten samples per module).
+    if std::env::var_os("NVMTL_NO_PIXEL_HW_FILTER").is_some() {
+        return None;
+    }
     if sampler_state.address_mode_s != SamplerAddressMode::ClampToEdge
         || sampler_state.address_mode_t != SamplerAddressMode::ClampToEdge
         || sampler_state.mip_filter != SamplerMipFilter::None
