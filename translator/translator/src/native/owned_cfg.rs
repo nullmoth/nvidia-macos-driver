@@ -3254,9 +3254,10 @@ fn owned_access_chain_error(
         }
         (result_pointee != selected).then(|| {
             format!(
-                "the index path selects {}, but the result pointer points to {}",
+                "the index path selects {}, but the result pointer points to {} (base %{base} points at {})",
                 describe_owned_id(selected, definitions),
-                describe_owned_id(result_pointee, definitions)
+                describe_owned_id(result_pointee, definitions),
+                describe_owned_id(base_pointee, definitions)
             )
         })
     })();
@@ -8264,7 +8265,7 @@ mod tests {
             (
                 chain(Op::AccessChain, 41, 37, &[13]),
                 "the index path selects %12 (TypeInt 32 0), but the result pointer points to \
-                 %15 (TypeFloat 32)",
+                 %15 (TypeFloat 32) (base %37 points at %20 (TypeArray %12 %19))",
             ),
             (
                 chain(Op::AccessChain, 14, 37, &[23]),
@@ -8294,12 +8295,12 @@ mod tests {
             (
                 ptr_chain(Op::PtrAccessChain, 41, 37, 46, &[46]),
                 "the index path selects %12 (TypeInt 32 0), but the result pointer points to \
-                 %15 (TypeFloat 32)",
+                 %15 (TypeFloat 32) (base %37 points at %20 (TypeArray %12 %19))",
             ),
             (
                 ptr_chain(Op::InBoundsPtrAccessChain, 41, 37, 46, &[46]),
                 "the index path selects %12 (TypeInt 32 0), but the result pointer points to \
-                 %15 (TypeFloat 32)",
+                 %15 (TypeFloat 32) (base %37 points at %20 (TypeArray %12 %19))",
             ),
         ] {
             let opcode = instruction.class.opcode;
@@ -8327,7 +8328,8 @@ mod tests {
         assert_owned_type_construction(
             &invalid,
             "native emitter: owned AccessChain violates its access-chain contract: the index path \
-             selects %12 (TypeInt 32 0), but the result pointer points to %15 (TypeFloat 32)",
+             selects %12 (TypeInt 32 0), but the result pointer points to %15 (TypeFloat 32) \
+             (base %37 points at %20 (TypeArray %12 %19))",
         );
         let tmp = std::env::temp_dir().join(format!(
             "metal2vulkan_owned_access_chain_contract_{}",

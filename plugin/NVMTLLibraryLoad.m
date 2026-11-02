@@ -2309,6 +2309,36 @@ static NVMTLFunction *nvmtl_link_dylibs(NVMTLFunction *fn, NSArray *dylibs, NSEr
     return df;
 }
 
+// Whether this AIR reads a visible or an intersection function table. Both callers below used to decide that by
+// searching for the argument metadata string !"air.visible_function_table", which a ray-tracing kernel from
+// Apple's shader converter never carries: its table is a field of the dispatch-rays argument struct, not a
+// kernel argument, so the only trace of it in the module is the intrinsic that reads it. Measured over 76
+// ray-tracing kernels captured from a running game: 76 of 76 call
+// air.get_function_pointer_visible_function_table, 0 of 76 carry the metadata either caller looked for. The
+// table branch was therefore never taken, the plain link ran with no table candidates, the handle lookup
+// survived specialization, and translation refused the module on the null compare its result feeds - 76
+// refusals and not one "reads a visible function table" line in the run. Ask for the intrinsics, which are what
+// actually reads the table; the metadata stays as a second form so a module that does carry it still matches.
+BOOL nvmtl_air_reads_function_table(NSString *air)
+{
+    if (!air.length) return NO;
+    static NSArray<NSString *> *forms;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        forms = @[@"@air.get_function_pointer_visible_function_table",
+                  @"@air.get_size_visible_function_table",
+                  @"@air.is_null_visible_function_table",
+                  @"@air.get_null_intersection_function_table",
+                  @"@air.set_buffer_intersection_function_table",
+                  @"@air.set_intersection_function_table",
+                  @"!\"air.visible_function_table\"",
+                  @"!\"air.intersection_function_table\""];
+    });
+    for (NSString *f in forms)
+        if ([air rangeOfString:f].location != NSNotFound) return YES;
+    return NO;
+}
+
 // Whether a function needs linking before it can be translated: it calls visible functions it does not define,
 // so the pipeline's linked functions have to supply them. This used to be decided by reading the translator's
 // error text, and when the translator stopped refusing every visible-function reference outright, its message for
@@ -2327,9 +2357,7 @@ BOOL nvmtl_needs_visible_link(NSString *air, NSString *why)
             // the query lists direct references only; a function that calls through a visible or intersection
             // function table has none, and nvmtl_link_stage links it from the table candidates
             if ([refs isKindOfClass:[NSArray class]])
-                return [(NSArray *)refs count] > 0
-                    || [air rangeOfString:@"!\"air.visible_function_table\""].location != NSNotFound
-                    || [air rangeOfString:@"!\"air.intersection_function_table\""].location != NSNotFound;
+                return [(NSArray *)refs count] > 0 || nvmtl_air_reads_function_table(air);
         }
     }
     return why && ([why rangeOfString:@"visible function reference"].location != NSNotFound
@@ -2361,7 +2389,33 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
         if (!df) { if (err) *err = de; return nil; }
         fn = df;
     }
-    if (!fn->_needsLink) return k;
+    // A PIPELINE'S LINKED FUNCTIONS MUST BE RECORDED EVEN WHEN NOTHING NEEDS LINKING.
+    //    This early return skips the whole link - correctly, there is nothing to resolve - but it also
+    //    threw away the descriptor's linkedFunctions, so the pipeline never learned them and
+    //    functionHandleWithFunction had nothing to answer from. MEASURED: the game creates
+    //    rgs_reference_wavefront_trace with needsLink=no and 24 linkedFunctions, then asks that pipeline
+    //    for handles to ahs_main / chs_main_0..5 and gets nil for all 8 - after which it binds no visible
+    //    function table, no intersection table and no acceleration structure, which is where ray tracing
+    //    stopped. A shader that dispatches only through handles the HOST writes needs no link of its own.
+    // The list is attached to the object the pipeline will hold (`k`), because that is what
+    //    functionHandleWithFunction reads; only functions with AIR are recorded, since a handle is a
+    //    name-to-index mapping and an AIR-less candidate could never be dispatched anyway.
+    if (!fn->_needsLink) {
+        NSMutableArray *handleFns = [NSMutableArray new];
+        for (id c in (lfIn.functions ?: @[]))
+            if ([c isKindOfClass:[NVMTLFunction class]] && ((NVMTLFunction *)c)->_air.length)
+                [handleFns addObject:c];
+        if (handleFns.count && !objc_getAssociatedObject(k, &kNVMTLTableFns)) {
+            objc_setAssociatedObject(k, &kNVMTLTableFns, [handleFns copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            FILE *lg = fopen(nvmtl_log_path(), "a");
+            if (lg) {
+                fprintf(lg, "pid %d NVMTL: link: \"%s\" needs no link but carries %lu linked function(s) for its handles\n",
+                        getpid(), fn->_fname.UTF8String, (unsigned long)handleFns.count);
+                fclose(lg);
+            }
+        }
+        return k;
+    }
     if (!nvmtl_xlate_ready() || !xlate_vrefs || !xlate_link) {
         if (err) *err = nvmtl_link_err(@"this translator has no nvmtl_link_visible - rebuild nvmtl_translate-merge with patch_xl_link.py");
         return nil;
@@ -2378,6 +2432,28 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     }
     NSMutableArray *cands = [NSMutableArray new];
     MTLLinkedFunctions *lf = lfIn;
+    // PER-LINK, WITH THE ENTRY NAME. computePipelineDescriptor's line is deduped by format
+    //    string (nvlog_dropped), so after a few cs_main_ pipelines every later one is suppressed and the
+    //    RT entries' counts never appear. This says what THIS link was actually given, which is the only
+    //    way to tell "the game passed no linked functions" from "we were called on a path that drops
+    //    them" - rgs_reference_wavefront_trace gets 0 candidates and then 8 nil handle requests.
+    // AND IT MUST BYPASS nvlog: nvlog_dropped dedupes by FORMAT-STRING POINTER, keeping the first
+    //    few per call site and then every Nth, so one busy site hides everything after it. That is why
+    //    the descriptor line only ever showed cs_main_ - the RT pipelines came later and were dropped -
+    //    and it would silently do the same here, which already made one run read as "never linked".
+    {
+        FILE *lg = fopen(nvmtl_log_path(), "a");
+        if (lg) {
+            fprintf(lg, "pid %d NVMTL: link: \"%s\" given linkedFunctions=%s functions=%lu private=%lu binary=%lu groups=%lu, %lu dylib(s)\n",
+                    getpid(), ((NVMTLFunction *)kIn)->_fname.UTF8String, lf ? "YES" : "nil",
+                    (unsigned long)lf.functions.count,
+                    (unsigned long)([lf respondsToSelector:@selector(privateFunctions)]
+                                    ? [(NSArray *)[(id)lf valueForKey:@"privateFunctions"] count] : 0),
+                    (unsigned long)lf.binaryFunctions.count, (unsigned long)lf.groups.count,
+                    (unsigned long)[dylibs count]);
+            fclose(lg);
+        }
+    }
     if (lf.functions) [cands addObjectsFromArray:lf.functions];
     if ([lf respondsToSelector:@selector(privateFunctions)]) { NSArray *pf = [(id)lf valueForKey:@"privateFunctions"]; if ([pf isKindOfClass:[NSArray class]]) [cands addObjectsFromArray:pf]; }
     for (NSArray *g in lf.groups.allValues) if ([g isKindOfClass:[NSArray class]]) [cands addObjectsFromArray:g];
@@ -2417,8 +2493,24 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     const char **syms = calloc(n ? n : 1, sizeof *syms), **mls = calloc(n ? n : 1, sizeof *mls);
     if (!syms || !mls) { free(syms); free(mls); if (err) *err = nvmtl_link_err(@"link table allocation failed"); return nil; }
     for (size_t i = 0; i < n; i++) { syms[i] = [keys[i] UTF8String]; mls[i] = [mods[keys[i]] UTF8String]; }
-    BOOL usesTable = [fn->_air rangeOfString:@"!\"air.visible_function_table\""].location != NSNotFound
-                  || [fn->_air rangeOfString:@"!\"air.intersection_function_table\""].location != NSNotFound;
+    // A REFERENCED FUNCTION CAN BE THE ONE THAT READS THE TABLE, and testing only the entry's
+    //    own AIR missed every one of them. MEASURED on the game's refused RT kernels: 60 of 60 surviving
+    //    `air.get_function_pointer_visible_function_table` calls live in a LINKED-IN define, not in the
+    //    entry — so this returned NO, the plain xlate_link path ran, it pulled that function in, and the
+    //    lookup reached the emitter, where `icmp eq ptr %fp, null` refuses with "pointer nullness is not
+    //    tracked". The table path has to be chosen on what the LINKED module will contain, which is the
+    //    entry plus every module linked into it.
+    BOOL usesTable = nvmtl_air_reads_function_table(fn->_air);
+    if (!usesTable) {
+        for (NSString *s in mods) {
+            if (nvmtl_air_reads_function_table(mods[s])) {
+                usesTable = YES;
+                nvlog("link: \"%s\": the table is read by linked function %s, not by the entry - taking the visible-table path",
+                      fn->_fname.UTF8String, s.UTF8String);
+                break;
+            }
+        }
+    }
     id failKey = nvmtl_link_failure_key(fn, mods, usesTable ? (lf.functions ?: @[]) : @[], fc);
     NSString *known = [nvmtl_link_failures() objectForKey:failKey];
     if (known) {
@@ -2526,7 +2618,31 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     NVMTLFunction *nf = [NVMTLFunction new];
     nf->_spirv = spv; nf->_fname = fn->_fname; nf->_stage = fn->_stage; nf->_air = linked; nf->_fc = [fc copy];
     nf->_lib = fn->_lib; nf->_fcv = fn->_fcv; nf->_specName = fn->_specName;
-    if (usesTable) objc_setAssociatedObject(nf, &kNVMTLTableFns, [tc copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // THE HANDLE API IS PIPELINE-LEVEL, NOT TABLE-LEVEL. functionHandleWithFunction: must
+    //    answer for ANY function in the descriptor's linkedFunctions, whether or not the entry's own AIR
+    //    reads a visible function table. MEASURED: `rgs_reference_wavefront_trace` never appears in a
+    //    "reads a visible function table" line - it links 24 hit shaders but reads no table itself - so
+    //    usesTable was NO, nothing was recorded, and all 8 handle requests for ahs_main / chs_main_0..5
+    //    came back nil with "(0 linked)". The game then binds no table and sets no acceleration
+    //    structure, which is where ray tracing stopped.
+    // The candidates are collected here WITHOUT the usesTable branch's validation, which must stay
+    //    an error only on the table path: a function with no AIR cannot be dispatched from a table, but
+    //    it must not newly refuse a pipeline that never dispatches one.
+    if (!tc.count) {
+        for (id c in (lf.functions ?: @[]))
+            if ([c isKindOfClass:[NVMTLFunction class]] && ((NVMTLFunction *)c)->_air.length)
+                [tc addObject:c];
+        if (tc.count)
+            nvlog("link: \"%s\" reads no table but links %lu function(s) - recorded so their handles resolve",
+                  nf->_fname.UTF8String, (unsigned long)tc.count);
+    }
+    if (tc.count) {
+        objc_setAssociatedObject(nf, &kNVMTLTableFns, [tc copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // say WHICH function object carries the candidate list, so a pipeline that later
+        //    reports "(0 linked)" can be matched against it by name and object identity.
+        nvlog("link: \"%s\" carries %lu table candidate(s) on function %p",
+              nf->_fname.UTF8String, (unsigned long)tc.count, (__bridge void *)nf);
+    }
     return nf;
 }
 
@@ -2541,6 +2657,7 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
 @interface NVMTLVisibleFunctionTable : NSObject <MTLVisibleFunctionTable> { @public id<MTLBuffer> _buf; NSUInteger _n; } @end
 @implementation NVMTLVisibleFunctionTable
 - (void)setFunction:(id<MTLFunctionHandle>)f atIndex:(NSUInteger)i {
+    { static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 8) { FILE *lg = fopen(nvmtl_log_path(), "a"); if (lg) { fprintf(lg, "pid %d NVMTL: RTBIND visible table setFunction slot %lu <- %s id %llu\n", getpid(), (unsigned long)i, f ? [[f name] UTF8String] : "nil", f && [(id)f isKindOfClass:[NVMTLFunctionHandle class]] ? (unsigned long long)((NVMTLFunctionHandle *)f)->_id : 0ull); fclose(lg); } } }
     if (i >= _n) { nvlog("visible function table: setFunction atIndex:%lu beyond %lu slots - IGNORED", (unsigned long)i, (unsigned long)_n); return; }
     if (f && ![(id)f isKindOfClass:[NVMTLFunctionHandle class]]) { nvlog("visible function table: foreign handle %s - slot %lu set NULL", NSStringFromClass([(id)f class]).UTF8String, (unsigned long)i); f = nil; }
     ((uint64_t *)_buf.contents)[i] = f ? ((NVMTLFunctionHandle *)f)->_id : 0;
@@ -2655,7 +2772,32 @@ static id<MTLIntersectionFunctionTable> nvmtl_ift_new(MTLIntersectionFunctionTab
             NVMTLFunctionHandle *h = [NVMTLFunctionHandle new]; h->_id = k + 1; h->_fn = f; return h;
         }
     }
-    nvlog("functionHandleWithFunction: \"%s\" is not a linked function of this pipeline (%lu linked) -> nil", f.name.UTF8String, (unsigned long)c.count);
+    // THE PIPELINE'S OWN FUNCTION IS PART OF THE PIPELINE, so a handle for it is a legitimate
+    //    request and nil is what stopped ray tracing. MEASURED on the game: it asks only for the ray
+    //    generation shader's own handle (rgs_diffuse_main / rgs_importance_main), and on nil it goes no
+    //    further - setVisibleFunctionTable, setIntersectionFunctionTable and setAccelerationStructure are
+    //    called ZERO times in a whole run, so without a handle it cannot fill the table it just built and
+    //    abandons RT entirely.
+    // The id handed back is the table's RESERVED UNBOUND INDEX 0, not a dispatch slot: the linkage
+    //    sizes the table as entries+1 with candidates at 1..N, so 0 is "no entry here" and the shader's
+    //    own null test is what reads it. That is the truthful answer - the entry is not one of the table's
+    //    candidates and the dispatcher has no case for it - and it lets the game proceed instead of
+    //    giving up. If a frame shows the ray generation shader needed to be CALLED through this slot, the
+    //    fix is to add the entry to the dispatcher, not to invent a slot number here.
+    if (_function && (f == (id)_function
+                      || [f.name isEqualToString:((NVMTLFunction *)_function)->_fname])) {
+        NVMTLFunctionHandle *h = [NVMTLFunctionHandle new];
+        h->_id = 0;
+        h->_fn = f;
+        nvlog("functionHandleWithFunction: \"%s\" IS this pipeline's own function - handle with the reserved unbound index 0 (%lu table candidate(s), none of them the entry)",
+              f.name.UTF8String, (unsigned long)c.count);
+        return h;
+    }
+    // "(0 linked)" alone cannot distinguish "the candidate list was never attached" from "this pipeline
+    // was built from a different function object than the one it was attached to", so name both.
+    nvlog("functionHandleWithFunction: \"%s\" is not a linked function of this pipeline (%lu linked, pipeline function \"%s\") -> nil",
+          f.name.UTF8String, (unsigned long)c.count,
+          _function ? ((NVMTLFunction *)_function)->_fname.UTF8String : "(none)");
     return nil;
 }
 - (id<MTLVisibleFunctionTable>)newVisibleFunctionTableWithDescriptor:(MTLVisibleFunctionTableDescriptor *)d {
@@ -2671,6 +2813,7 @@ static id<MTLIntersectionFunctionTable> nvmtl_ift_new(MTLIntersectionFunctionTab
 @implementation NVMTLComputeCommandEncoder (B39FunctionPointers)
 - (void)setVisibleFunctionTable:(id<MTLVisibleFunctionTable>)t atBufferIndex:(NSUInteger)i {
     if (t && ![(id)t isKindOfClass:[NVMTLVisibleFunctionTable class]]) { nvlog("setVisibleFunctionTable: foreign %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
+    { static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 4) { FILE *lg = fopen(nvmtl_log_path(), "a"); if (lg) { fprintf(lg, "pid %d NVMTL: RTBIND setVisibleFunctionTable index %lu %s\n", getpid(), (unsigned long)i, t ? "table" : "nil"); fclose(lg); } } }
     [self setBuffer:t ? ((NVMTLVisibleFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
 }
 - (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {

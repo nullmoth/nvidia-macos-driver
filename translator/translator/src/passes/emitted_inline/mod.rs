@@ -203,20 +203,69 @@ pub(super) fn prune_unreferenced_functions(ctx: &mut Ctx, entry_idx: usize) {
         .def
         .as_ref()
         .and_then(|d| d.result_id);
+    // Reachability, not just the entry's own call list. A function the ENTRY does not call can still be
+    // live: a linked ray-tracing shader is reached through the generated table dispatcher, so a one-level
+    // scan pruned every hit and miss shader in the pipeline and left the module referring to what it had
+    // just removed.
+    let calls_of = |f: &Function| -> Vec<Word> {
+        f.blocks
+            .iter()
+            .flat_map(|blk| blk.instructions.iter())
+            .filter(|inst| inst.class.opcode == Op::FunctionCall)
+            .filter_map(|inst| match inst.operands.first() {
+                Some(Operand::IdRef(c)) => Some(*c),
+                _ => None,
+            })
+            .collect()
+    };
     let mut called: HashSet<Word> = HashSet::default();
-    for blk in &ctx.module.functions[entry_idx].blocks {
-        for inst in &blk.instructions {
-            if inst.class.opcode == Op::FunctionCall {
-                if let Some(Operand::IdRef(c)) = inst.operands.first() {
-                    called.insert(*c);
-                }
-            }
+    let mut frontier: Vec<Word> = calls_of(&ctx.module.functions[entry_idx]);
+    while let Some(id) = frontier.pop() {
+        if !called.insert(id) {
+            continue;
         }
+        let Some(f) = ctx
+            .module
+            .functions
+            .iter()
+            .find(|f| f.def.as_ref().and_then(|d| d.result_id) == Some(id))
+        else {
+            continue;
+        };
+        frontier.extend(calls_of(f));
     }
-    ctx.module.functions.retain(|f| {
-        let id = f.def.as_ref().and_then(|d| d.result_id);
-        id == entry_id || id.map(|i| called.contains(&i)).unwrap_or(false)
-    });
+    let keeps: Vec<bool> = ctx
+        .module
+        .functions
+        .iter()
+        .map(|f| {
+            let id = f.def.as_ref().and_then(|d| d.result_id);
+            id == entry_id || id.map(|i| called.contains(&i)).unwrap_or(false)
+        })
+        .collect();
+    // Ids that leave with the functions. A sidecar fact can name an instruction with no instruction user -
+    // a bindless heap slot is masked out of the handle word and only the fact points at it - so dropping the
+    // function silently leaves the fact pointing at nothing, and materialize_texture_array_loads then built a
+    // texture access chain on an index no instruction defines. Measured on a ray-tracing hit shader, where
+    // the sampling lives in a helper this prune removes.
+    let gone: HashSet<Word> = ctx
+        .module
+        .functions
+        .iter()
+        .zip(&keeps)
+        .filter(|(_, keep)| !**keep)
+        .flat_map(|(f, _)| f.all_inst_iter())
+        .filter_map(|inst| inst.result_id)
+        .collect();
+    let mut keep_iter = keeps.iter();
+    ctx.module
+        .functions
+        .retain(|_| *keep_iter.next().unwrap_or(&true));
+    if !gone.is_empty() {
+        ctx.emit_sidecar
+            .device_handle_heap_loads
+            .retain(|fact| !gone.contains(&fact.id) && !gone.contains(&fact.slot));
+    }
 }
 
 enum MergePatch {

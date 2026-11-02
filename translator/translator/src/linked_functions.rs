@@ -13,11 +13,40 @@ pub struct LinkedFunctionReference {
     pub module_ll: String,
 }
 
+// A table a kernel reads through a parameter of its own names that parameter. Apple's shader converter does
+// not give the table a parameter: it puts it inside the dispatch-rays argument struct, so the only thing that
+// identifies it is the value that reaches the lookup intrinsic. Such a table carries TABLE_FROM_BODY, and
+// validate_linkage() refuses more than one of them, because without a parameter there is nothing to tell two
+// of them apart.
+pub const TABLE_FROM_BODY: u32 = u32::MAX;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkedFunctionTable {
     pub parameter_index: u32,
     pub size: u32,
     pub entries: Vec<LinkedFunction>,
+}
+
+impl LinkedFunctionTable {
+    fn from_body(&self) -> bool {
+        self.parameter_index == TABLE_FROM_BODY
+    }
+    /// How a message names this table.
+    fn label(&self) -> String {
+        if self.from_body() {
+            "loaded from the kernel's own storage".to_string()
+        } else {
+            format!("parameter {}", self.parameter_index)
+        }
+    }
+    /// How a generated dispatcher symbol names it.
+    fn tag(&self) -> String {
+        if self.from_body() {
+            "body".to_string()
+        } else {
+            format!("p{}", self.parameter_index)
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +119,41 @@ struct PointerTrace<'a> {
 struct LinkedFlow<'a> {
     table_parameters: HashMap<(String, usize), &'a LinkedFunctionTable>,
     pointer_parameters: HashMap<(String, usize), &'a LinkedFunctionTable>,
+    // (function, SSA value) for a table that has no parameter: the operand of every lookup intrinsic.
+    table_values: HashMap<(String, String), &'a LinkedFunctionTable>,
+}
+
+/// Every (function, value) pair where a value is handed to a visible function-table intrinsic. That is what
+/// identifies a table the kernel loaded rather than received: the intrinsics are the only thing that reads one.
+fn visible_table_values(ll: &str) -> Vec<(String, String)> {
+    const READS: [&str; 3] = [
+        "@air.get_function_pointer_visible_function_table(",
+        "@air.get_size_visible_function_table(",
+        "@air.is_null_visible_function_table(",
+    ];
+    let mut out = Vec::new();
+    let mut current = None::<String>;
+    for line in ll.lines() {
+        let trimmed = line.trim_start();
+        if let Some(global) = definition_global(trimmed) {
+            current = Some(global);
+            continue;
+        }
+        if trimmed == "}" {
+            current = None;
+            continue;
+        }
+        let Some(function) = current.as_deref() else { continue };
+        if !READS.iter().any(|r| trimmed.contains(r)) {
+            continue;
+        }
+        if let Ok(arguments) = call_arguments(trimmed) {
+            if let Some(first) = arguments.first() {
+                out.push((function.to_string(), value_operand(first).to_string()));
+            }
+        }
+    }
+    out
 }
 
 #[derive(Clone, Debug)]
@@ -690,6 +754,12 @@ pub fn trace_visible_function_table_parameters(
         .collect::<Vec<_>>();
     let (signatures, flow) = visible_table_flow(entry_ll, entry_name, &tables)?;
     let mut values = HashMap::<String, HashSet<String>>::default();
+    for ((function, value), _) in &flow.table_values {
+        values
+            .entry(function.clone())
+            .or_default()
+            .insert(value.clone());
+    }
     for ((function, ordinal), _) in flow.table_parameters {
         let parameter = signatures
             .get(&function)
@@ -714,7 +784,15 @@ fn visible_table_flow<'a>(
         format!("linked function-table entry function {entry_name:?} is not defined")
     })?;
     let mut flow = LinkedFlow::default();
+    let body_values = visible_table_values(entry_ll);
     for table in tables {
+        if table.from_body() {
+            for (function, value) in &body_values {
+                flow.table_values
+                    .insert((function.clone(), value.clone()), table);
+            }
+            continue;
+        }
         let parameter = entry_signature
             .parameters
             .get(table.parameter_index as usize)
@@ -930,14 +1008,14 @@ pub fn specialize_visible_function_tables(
                 .find(|entry| entry.index == index)
                 .ok_or_else(|| {
                     format!(
-                        "linked visible function table parameter {} has no entry at slot {index}",
-                        pointer.table.parameter_index
+                        "linked visible function table {} has no entry at slot {index}",
+                        pointer.table.label()
                     )
                 })?;
             if !linked_function_matches_call(function, &call)? {
                 return Err(format!(
-                    "linked visible function {:?} at table parameter {} slot {index} does not match indirect call type",
-                    function.symbol, pointer.table.parameter_index
+                    "linked visible function {:?} at table {} slot {index} does not match indirect call type",
+                    function.symbol, pointer.table.label()
                 ));
             }
             if linked_module_set.insert(function.module_ll.as_str()) {
@@ -947,13 +1025,13 @@ pub fn specialize_visible_function_tables(
         } else {
             if !pointer.index.trim_start().starts_with("i32 ") {
                 return Err(format!(
-                    "linked visible function table parameter {} has a non-i32 slot operand {:?}",
-                    pointer.table.parameter_index, pointer.index
+                    "linked visible function table {} has a non-i32 slot operand {:?}",
+                    pointer.table.label(), pointer.index
                 ));
             }
             let key = format!(
                 "{}|{}|{}",
-                pointer.table.parameter_index,
+                pointer.table.tag(),
                 call.return_type,
                 call.argument_types.join(",")
             );
@@ -961,8 +1039,8 @@ pub fn specialize_visible_function_tables(
                 name.clone()
             } else {
                 let name = format!(
-                    "metal2vulkan.linked.table.p{}.dispatch.{}",
-                    pointer.table.parameter_index,
+                    "metal2vulkan.linked.table.{}.dispatch.{}",
+                    pointer.table.tag(),
                     dispatchers.len()
                 );
                 dispatcher_names.insert(key, name.clone());
@@ -974,8 +1052,8 @@ pub fn specialize_visible_function_tables(
                 }
                 if entries.is_empty() {
                     return Err(format!(
-                        "linked visible function table parameter {} has no function matching indirect call type",
-                        pointer.table.parameter_index
+                        "linked visible function table {} has no function matching indirect call type",
+                        pointer.table.label()
                     ));
                 }
                 dispatchers.push(Dispatcher {
@@ -1020,7 +1098,98 @@ pub fn specialize_visible_function_tables(
         let resolved = specialize_visible_function_references(module, linkage)?;
         append_dependency_module(&mut output, &resolved);
     }
-    Ok(output)
+    Ok(drop_dead_table_lookups(&output))
+}
+
+/// Whether this line mentions an SSA value, as a whole name rather than as the prefix of a longer one:
+/// `%42` is not a use of `%4`.
+fn mentions_value(line: &str, value: &str) -> bool {
+    let mut rest = line;
+    while let Some(at) = rest.find(value) {
+        let after = rest[at + value.len()..].chars().next();
+        if !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+            return true;
+        }
+        rest = &rest[at + value.len()..];
+    }
+    false
+}
+
+/// Drops a table lookup whose result nothing reads any more, and the casts of it that then go dead too.
+/// Specialization replaces the CALL through the looked-up pointer with a direct call or a dispatcher, which
+/// leaves the lookup behind with no users - and the intrinsic has no lowering, so a dead one still refuses the
+/// whole module at emission. The converter bitcasts the looked-up pointer before calling it, so removing the
+/// lookup alone is not enough: the cast keeps it live. Only the lookup itself and pure casts DERIVED from it
+/// are ever removed, so nothing else in the body can be disturbed.
+fn drop_dead_table_lookups(module: &str) -> String {
+    const LOOKUP: &str = "@air.get_function_pointer_visible_function_table(";
+    const CASTS: [&str; 5] = [
+        "bitcast ",
+        "addrspacecast ",
+        "freeze ",
+        "ptrtoint ",
+        "inttoptr ",
+    ];
+    const DROPPED: &str = "\u{0}dead";
+    if !module.contains(LOOKUP) {
+        return module.to_string();
+    }
+    let mut lines: Vec<String> = module.lines().map(str::to_string).collect();
+    loop {
+        let mut dropped = false;
+        let mut start = 0usize;
+        for i in 0..=lines.len() {
+            if i != lines.len() && lines[i].trim_start() != "}" {
+                continue;
+            }
+            // Values derived from a lookup in this function: the lookup results, then casts of those.
+            let mut derived: Vec<String> = Vec::new();
+            for pass in 0..2 {
+                for k in start..i {
+                    let trimmed = lines[k].trim_start();
+                    let Some((result, instruction)) = trimmed.split_once(" = ") else {
+                        continue;
+                    };
+                    let result = result.trim().to_string();
+                    if !result.starts_with('%') || derived.contains(&result) {
+                        continue;
+                    }
+                    let is_lookup = pass == 0 && instruction.contains(LOOKUP);
+                    let is_cast = pass == 1
+                        && CASTS.iter().any(|c| instruction.starts_with(c))
+                        && derived.iter().any(|d| mentions_value(instruction, d));
+                    if is_lookup || is_cast {
+                        derived.push(result);
+                    }
+                }
+            }
+            for value in &derived {
+                let defined = (start..i).find(|&k| {
+                    lines[k]
+                        .trim_start()
+                        .split_once(" = ")
+                        .is_some_and(|(r, _)| r.trim() == value)
+                });
+                let Some(at) = defined else { continue };
+                if (start..i).any(|m| m != at && mentions_value(&lines[m], value)) {
+                    continue;
+                }
+                lines[at] = DROPPED.to_string();
+                dropped = true;
+            }
+            start = i + 1;
+        }
+        if !dropped {
+            break;
+        }
+        lines.retain(|l| l != DROPPED);
+    }
+    let mut out = String::with_capacity(module.len());
+    for line in &lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 fn null_pointer_comparison(instruction: &str) -> Option<(&str, bool)> {
@@ -1151,7 +1320,92 @@ impl Drop for DedupeDependencies {
     }
 }
 
+/// The named types a module defines, by name, in source order.
+fn named_type_definitions(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('%') {
+            continue;
+        }
+        if let Some((name, body)) = trimmed.split_once(" = type ") {
+            out.push((name.trim().to_string(), body.trim().to_string()));
+        }
+    }
+    out
+}
+
+/// Replaces a `%name` token, and only a whole one: `%struct.Payload` must not rewrite the start of
+/// `%struct.Payload.0`, which is a different type.
+fn replace_named_type(text: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(from) {
+        let after = rest[at + from.len()..].chars().next();
+        out.push_str(&rest[..at]);
+        if after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+            out.push_str(from);
+        } else {
+            out.push_str(to);
+        }
+        rest = &rest[at + from.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Renames a dependency module's named types that clash with a DIFFERENT type of the same name already in
+/// the module being built. Every ray-tracing shader the shader converter emits declares its own
+/// `%struct.Payload`, and they are not the same type: one linked kernel arrived with 32 definitions of that
+/// name and three different layouts ({i32, i32, float, float}, {<3 x float>, float, i32}, {float}). LLVM text
+/// has one namespace for them, so the emitter resolved every use to whichever definition it saw last and
+/// indexed the wrong fields - a GEP into member 1 of a type that, under that name, had one member. Identical
+/// definitions are left alone: those are the same type arriving twice, which costs nothing.
+pub(crate) fn disambiguate_named_types(output: &str, module: &str) -> String {
+    let have = named_type_definitions(output);
+    let mine = named_type_definitions(module);
+    if have.is_empty() || mine.is_empty() {
+        return module.to_string();
+    }
+    let mut renames: Vec<(String, String)> = Vec::new();
+    for (name, body) in &mine {
+        let clashes = have
+            .iter()
+            .any(|(other, other_body)| other == name && other_body != body);
+        if !clashes || renames.iter().any(|(from, _)| from == name) {
+            continue;
+        }
+        let taken = |candidate: &str| {
+            have.iter().any(|(other, _)| other == candidate)
+                || mine.iter().any(|(other, _)| other == candidate)
+                || renames.iter().any(|(_, to)| to == candidate)
+                || output.contains(candidate)
+                || module.contains(candidate)
+        };
+        let mut k = 0usize;
+        let fresh = loop {
+            let candidate = format!("{name}.linked{k}");
+            if !taken(&candidate) {
+                break candidate;
+            }
+            k += 1;
+        };
+        renames.push((name.clone(), fresh));
+    }
+    if renames.is_empty() {
+        return module.to_string();
+    }
+    // Longest name first, so a shorter name that is a prefix of a longer one cannot claim it.
+    renames.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+    let mut text = module.to_string();
+    for (from, to) in &renames {
+        text = replace_named_type(&text, from, to);
+    }
+    text
+}
+
 fn append_dependency_module(output: &mut String, module: &str) {
+    let module = &disambiguate_named_types(output, module);
     if DEDUPE_DEPENDENCIES.with(|d| d.get()) {
         return append_dependency_module_dedupe(output, module);
     }
@@ -1186,6 +1440,12 @@ fn append_dependency_module_dedupe(output: &mut String, module: &str) {
             }
         })
         .collect();
+    let named_types: HashSet<String> = output
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| l.starts_with('%') && l.contains(" = type "))
+        .map(str::to_string)
+        .collect();
     let mut skipping = false;
     for line in module.lines() {
         let trimmed = line.trim_start();
@@ -1209,6 +1469,12 @@ fn append_dependency_module_dedupe(output: &mut String, module: &str) {
                 if already.contains(g.trim()) {
                     continue;
                 }
+            }
+        } else if trimmed.contains(" = type ") && trimmed.starts_with('%') {
+            // The same named type arriving again, spelled identically. Any clash of DIFFERENT types under one
+            // name has already been renamed by disambiguate_named_types(), so an exact match is a repeat.
+            if named_types.contains(trimmed) {
+                continue;
             }
         }
         if trimmed.starts_with("; ModuleID =")
@@ -1301,7 +1567,8 @@ pub fn link_extern_definitions(entry_ll: &str, modules: &[String]) -> Result<Str
                 })
                 .map(|l| format!("{l}\n"))
                 .collect();
-            append_dependency_module_dedupe(&mut out, module);
+            let module = disambiguate_named_types(&out, module);
+            append_dependency_module_dedupe(&mut out, &module);
             progressed = true;
         }
         if !progressed {
@@ -1501,14 +1768,14 @@ fn validate_linkage(linkage: &LinkedFunctionLinkage) -> Result<(), String> {
     for table in &linkage.visible_tables {
         if !parameters.insert(table.parameter_index) {
             return Err(format!(
-                "duplicate linked visible function-table parameter {}",
-                table.parameter_index
+                "duplicate linked visible function table {}",
+                table.label()
             ));
         }
         if table.size == 0 {
             return Err(format!(
-                "linked visible function-table parameter {} has zero size",
-                table.parameter_index
+                "linked visible function table {} has zero size",
+                table.label()
             ));
         }
         let mut previous = None;
@@ -1655,6 +1922,11 @@ fn seed_function_values<'a>(
     let signature = signatures
         .get(global)
         .ok_or_else(|| format!("missing parsed signature for {global}"))?;
+    for ((function, value), table) in &flow.table_values {
+        if function == global {
+            tables.insert(value.clone(), *table);
+        }
+    }
     for (ordinal, parameter) in signature.parameters.iter().enumerate() {
         if let Some(table) = flow.table_parameters.get(&(global.to_string(), ordinal)) {
             tables.insert(parameter.clone(), *table);
@@ -2120,7 +2392,20 @@ fn dispatcher_definition(
             ));
         }
     }
-    output.push_str("invalid:\n  unreachable\n");
+    // AN UNBOUND SLOT MUST DO NOTHING, NOT FAULT. This default arm used to be
+    //    `unreachable`, which is undefined behaviour - and the slot number is HOST DATA: the app fills
+    //    the visible function table at run time, so a slot the shader dispatches may hold 0 or an index
+    //    outside the table. MEASURED on the game: with the ray generation shader written into a slot as
+    //    the reserved index 0, the RT benchmark took `channel FAULTED ... MMU fault addr 0x0 type NONE
+    //    compute shader VA 0x0` after 64 s, while the same bundle with RT OFF completed and wrote its
+    //    summary.json. A driver cannot assume the host wrote a valid index, so the unbound arm now
+    //    returns a zero of the dispatcher's return type and the shader sees "this slot did nothing".
+    output.push_str("invalid:\n");
+    if is_void {
+        output.push_str("  ret void\n");
+    } else {
+        output.push_str("  br label %exit\n");
+    }
     if !is_void {
         output.push_str("\nexit:\n  %result = phi ");
         output.push_str(return_type);
@@ -2134,10 +2419,25 @@ fn dispatcher_definition(
                 entry.index, entry.index
             ));
         }
+        // the unbound arm joins here with a zero, so an out-of-range slot yields a defined value
+        output.push_str(&format!(", [ {}, %invalid ]", zero_of(return_type)));
         output.push_str(&format!("\n  ret {return_type} %result\n"));
     }
     output.push_str("}\n");
     Ok(output)
+}
+
+/// A zero of an LLVM return type, for the dispatcher's unbound arm. An aggregate, vector or pointer all
+/// accept `zeroinitializer`; a float needs 0.0 and an integer 0, because LLVM rejects the wrong spelling.
+fn zero_of(return_type: &str) -> String {
+    let t = return_type.trim();
+    if t.starts_with('i') && t[1..].chars().all(char::is_numeric) {
+        "0".to_string()
+    } else if matches!(t, "float" | "double" | "half" | "bfloat" | "fp128" | "x86_fp80") {
+        "0.0".to_string()
+    } else {
+        "zeroinitializer".to_string()
+    }
 }
 
 pub(crate) const UNRESOLVED_VISIBLE_SUFFIX: &str = ".MTL_UNRESOLVED_VISIBLE_FN";
@@ -2982,11 +3282,16 @@ pub fn rewrite_runtime_table_lookups(
     entry_ll: &str,
     entry_name: &str,
     parameter_indices: &[u32],
+    from_body: bool,
 ) -> Result<String, String> {
-    if parameter_indices.is_empty() {
+    if parameter_indices.is_empty() && !from_body {
         return Ok(entry_ll.to_string());
     }
-    let traced = trace_visible_function_table_parameters(entry_ll, entry_name, parameter_indices)?;
+    let mut probe: Vec<u32> = parameter_indices.to_vec();
+    if from_body {
+        probe.push(TABLE_FROM_BODY);
+    }
+    let traced = trace_visible_function_table_parameters(entry_ll, entry_name, &probe)?;
     let mut output = String::with_capacity(entry_ll.len() + 256);
     let mut current = None::<String>;
     let mut counter = 0usize;

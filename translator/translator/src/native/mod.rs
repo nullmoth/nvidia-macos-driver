@@ -31,6 +31,7 @@ mod vec_scalar_merge;
 mod atomic_image_format;
 mod copy_memory_logical;
 mod stencil_export;
+mod punned_access_chain;
 mod short_access_chain;
 mod wg_atomic;
 
@@ -241,4 +242,9 @@ pub(crate) fn lower_stencil_export_module(module: &mut crate::spirv_module::Modu
 /// See short_access_chain: an access chain that stops short of its result pointee by first-member descent only.
 pub(crate) fn decay_short_access_chains_module(module: &mut crate::spirv_module::Module) -> usize {
     short_access_chain::decay_short_access_chains(module)
+}
+
+/// See punned_access_chain: a chain landing on a member whose scalar type differs from its result pointee.
+pub(crate) fn retype_punned_access_chains_module(module: &mut crate::spirv_module::Module) -> usize {
+    punned_access_chain::retype_punned_access_chains(module)
 }

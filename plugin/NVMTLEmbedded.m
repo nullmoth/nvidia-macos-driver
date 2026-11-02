@@ -254,8 +254,12 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
             NVMTLBuffer *owner = plan->ownerIndex < NVMTL_NBUFAT ? bufAt[plan->ownerIndex] : nil;
             if (!owner) { embKeyed = NO; break; }
             NSUInteger base = offAt[plan->ownerIndex]; size_t msize = owner->_b.size;
-            if (!owner->_b.map || base > msize || plan->fieldOffset > msize - base || sizeof(uint64_t) > msize - base - plan->fieldOffset) { embKeyed = NO; break; }
-            uint64_t h = 0; memcpy(&h, (const uint8_t *)owner->_b.map + base + plan->fieldOffset, sizeof h);
+            // nvmtl_buf_cpu, not _b.map: a Managed buffer keeps its CPU copy in _shadow and _b.map is
+            // null there, so reading the raw map refused every slot such a buffer owns. It also
+            // settles the buffer first.
+            const uint8_t *ocpu = (const uint8_t *)nvmtl_buf_cpu(owner);
+            if (!ocpu || base > msize || plan->fieldOffset > msize - base || sizeof(uint64_t) > msize - base - plan->fieldOffset) { embKeyed = NO; break; }
+            uint64_t h = 0; memcpy(&h, ocpu + base + plan->fieldOffset, sizeof h);
             embKey[embN++] = (uint64_t)(uintptr_t)(__bridge void *)owner; embKey[embN++] = base; embKey[embN++] = h;
         }
         if (embKeyed && nvmtl_vk_emb_same(&cb->_c, set, (__bridge void *)fn, embKey, embN)) return;
@@ -276,7 +280,10 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
         }
         NSUInteger base = offAt[ownerIndex];
         size_t msize = owner->_b.size;
-        if (!owner->_b.map || base > msize || fieldOffset > msize - base ||
+        // See above: a Managed buffer's CPU copy lives in _shadow, so _b.map is null and the slot was
+        // refused although the handle was readable.
+        const uint8_t *ocpu = (const uint8_t *)nvmtl_buf_cpu(owner);
+        if (!ocpu || base > msize || fieldOffset > msize - base ||
             sizeof(uint64_t) > msize - base - fieldOffset) {
             nvlog("embedded %s slot %u: buffer(%lu) offset %lu+%lu does not fit its %zu-byte mapping — REFUSED",
                   what, slot, (unsigned long)ownerIndex, (unsigned long)base,
@@ -284,7 +291,7 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
             nvmtl_clear_embedded_slot(cb, set, slot, wantSampler); continue;
         }
         uint64_t handle = 0;
-        memcpy(&handle, (const uint8_t *)owner->_b.map + base + fieldOffset, sizeof handle);
+        memcpy(&handle, ocpu + base + fieldOffset, sizeof handle);
         if (!handle) {
             if (nvmtl_embedded_info_due(&nvmtl_embedded_empty_count))
                 nvlog("embedded %s slot %u: buffer(%lu)+%lu holds a zero handle — binding cleared",

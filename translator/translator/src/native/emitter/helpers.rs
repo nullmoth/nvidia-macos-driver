@@ -73,6 +73,16 @@ pub(super) fn types_compatible(have: &LlType, want: &LlType) -> bool {
             {
                 types_compatible(h_elem, w_elem)
             }
+            // Two address spaces that become the same SPIR-V storage class describe the same pointer, and the
+            // number they carry in the AIR no longer distinguishes them. A ray payload arrives this way: the
+            // kernel holds it in its own space and an intersection function declares the parameter in AIR's
+            // ray-data space, both Private. A pointer crossing INTO another storage class is still refused.
+            (LlType::Ptr(have_space), LlType::Ptr(want_space)) => {
+                matches!(
+                    (llvm_pointer_storage(*have_space), llvm_pointer_storage(*want_space)),
+                    (Ok(h), Ok(w)) if h == w
+                )
+            }
             _ => false,
         }
 }
@@ -259,6 +269,10 @@ pub(super) fn llvm_pointer_storage(addrspace: u32) -> Result<StorageClass, Strin
         1 | 2 => Ok(StorageClass::UniformConstant),
         3 => Ok(StorageClass::Workgroup),
         4 => Ok(StorageClass::Private),
+        // AIR's ray-data space, which a [[payload]] parameter is declared in. An inline ray query has no
+        // payload storage of its own: the caller allocates the payload and the intersection functions write
+        // through the pointer, so it is the caller's own storage under another number.
+        5 => Ok(StorageClass::Private),
         _ => Err(format!(
             "native emitter: unsupported LLVM pointer addrspace({addrspace})"
         )),

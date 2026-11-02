@@ -218,6 +218,12 @@ static NSMutableSet *nvmtl_identity_set(NSUInteger cap) {
 // vertex, index and uniform buffers for every draw), and a hit skips the set's hash lookup.
 - (void)addObject:(id)o { if (!o) return; const void *p = (__bridge const void *)o; os_unfair_lock_lock(&_lk);
     for (unsigned k = 0; k < 8; k++) if (_mru[k] == p) { os_unfair_lock_unlock(&_lk); return; }
+    // A malloc_size() test used to sit here, meant to catch a freed resource before -member: calls
+    // -hash on it. It cannot: a freed object's block normally stays a valid block in the default zone,
+    // so malloc_size returns its old size and the test passes - while a tagged pointer, or any object
+    // outside the default zone, reads 0 and a LIVE resource would be dropped untracked, manufacturing
+    // the very use-after-free the test existed to prevent. A zone lookup under the hottest lock in the
+    // driver, that both misses the bug and invents one, is worse than no test.
     id member = [_s member:o]; BOOL had = member != nil;
     if (!had) { [_s addObject:o]; member = o; }
     // An equal object need not be the object retained by NSMutableSet. Cache only the retained member's address.
@@ -592,7 +598,23 @@ static void nvmtl_res2_pass(void) {
                   (unsigned long long)(nvmtl_vk_vram_free_now() >> 20),
                   (unsigned long long)(gGraveVram >> 20), (unsigned long long)(target >> 20)); }
         const int force = atomic_exchange(&gRes2Force, 0);
-        const uint64_t f0 = nvmtl_vk_vram_free_now() + gGraveVram, cap = force ? want + gRes2Margin : (target > f0 ? target - f0 : 0); uint64_t movedM = 0;
+        const uint64_t f0 = nvmtl_vk_vram_free_now() + gGraveVram;
+        uint64_t cap = force ? want + gRes2Margin : (target > f0 ? target - f0 : 0);
+        // BOUNDED on the estimated path. nvmtl_vk_vram_free_now() used to answer with the whole card
+        // when the budget is unmeasured, so f0 always exceeded target, cap came out 0 and this loop
+        // NEVER RAN - res2 eviction was silently inert on every card without VK_EXT_memory_budget.
+        // Giving that branch a real free figure wakes it, and the estimated model counts images alone
+        // while its headroom is the unclamped one, so an unbounded first pass would try to page out
+        // about a gigabyte of textures on a model we have never measured. Evict what the request
+        // actually asked for, not a full headroom restoration, until a run says more is safe.
+        if (!nvmtl_vk_vram_measured()) {
+            const uint64_t bounded = want + gRes2Margin;
+            if (cap > bounded) { cap = bounded;
+                static unsigned said; if (said++ < 8)
+                    nvlog("residency (res2): budget is ESTIMATED, so this pass is bounded to %llu MB instead of the %llu MB a full headroom restore would ask for",
+                          (unsigned long long)(bounded >> 20), (unsigned long long)((target > f0 ? target - f0 : 0) >> 20)); }
+        }
+        uint64_t movedM = 0;
         while (ci < cold.count && movedM < cap && (force || nvmtl_vk_vram_free_now() + gGraveVram < target)) {
             id v = cold[ci++]; const uint64_t a = r2_alloc(v); const BOOL vb = !r2_tex(v);
             if (r2_move(v, 1) == 0) { off++; offB += vb; offM += a; movedM += a; }
@@ -6419,6 +6441,19 @@ static int nvp_fast_off(void) {
 - (void)popDebugGroup {}
 @end
 
+// A geometry we cannot build still has to OCCUPY ITS INDEX. Skipping it compacted the array, so
+// every later geometry moved down one and its geometryIndex stopped matching the descriptor the game's
+// hit records are written against - while the intersection-function-table arithmetic kept counting the
+// uncompacted positions. An empty slot loses one mesh; a shifted index silently mis-binds every hit
+// record after it. A zero-primitive geometry is legal and its vertex data is never read.
+static void nvmtl_geom_make_empty(nvmtl_geom *o)
+{
+    // vertices too: the caller's array is _Thread_local and REUSED across builds, so relying on its
+    // memset would leave the previous build's device address in an empty slot the day that memset goes.
+    o->count = 0; o->is_boxes = 0; o->boxes = 0; o->box_stride = 0; o->indices = 0; o->vertices = 0;
+    o->vertex_format = 106; o->stride = 12; o->index_type = 1000165000u; o->max_vertex = 0;
+}
+
 uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int *instance, uint32_t *instance_count, NSMutableSet *track)
 {
     *instance = 0; *instance_count = 0;
@@ -6435,17 +6470,58 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
         if ([g isKindOfClass:[MTLAccelerationStructureTriangleGeometryDescriptor class]]) {
             MTLAccelerationStructureTriangleGeometryDescriptor *t = (MTLAccelerationStructureTriangleGeometryDescriptor *)g;
             NVMTLBuffer *vb = (NVMTLBuffer *)t.vertexBuffer;
-            if (!vb) { nvlog("acceleration structure: triangle geometry without a vertex buffer — dropped"); continue; }
+            if (!vb) { nvlog("acceleration structure: triangle geometry %u has no vertex buffer - built EMPTY, keeping its index", n);
+                       nvmtl_geom_make_empty(o); n++; continue; }
             if (track) [track addObject:vb];
-            o->vertices = nvmtl_vk_buffer_address(&vb->_b) + t.vertexBufferOffset; o->stride = (uint32_t)(t.vertexStride ? t.vertexStride : 12);
+            o->vertices = nvmtl_vk_buffer_address(&vb->_b) + t.vertexBufferOffset; o->stride = (uint32_t)t.vertexStride;
             o->count = (uint32_t)t.triangleCount;
             MTLAttributeFormat f = [t respondsToSelector:@selector(vertexFormat)] ? t.vertexFormat : MTLAttributeFormatFloat3;
+            // The formats Mesa's BVH builder decodes, from the switch in load_vertices
+            // (vk_bvh_helpers.h). It is the real contract: no driver sets
+            // VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT, so asking the device
+            // answers no for every format, including plain float3. A four-component format is read
+            // at its own width - the stride the game gave us still steps one vertex - and anything
+            // narrower than the builder can decode is DROPPED, never widened into a read past the
+            // end of the vertex buffer.
+            uint32_t vkfmt = 0;
             switch (f) {
-            case MTLAttributeFormatFloat3: o->vertex_format = 106; break;
-            case MTLAttributeFormatHalf3:  o->vertex_format = 90; break;
-            case MTLAttributeFormatFloat2: o->vertex_format = 103; break;
-            case MTLAttributeFormatHalf2:  o->vertex_format = 83; break;
-            default: nvlog("acceleration structure: vertex format %lu is not carried — read as float3", (unsigned long)f); o->vertex_format = 106; break;
+            case MTLAttributeFormatFloat2:            vkfmt = 103; break;  // R32G32_SFLOAT
+            case MTLAttributeFormatFloat3:            vkfmt = 106; break;  // R32G32B32_SFLOAT
+            case MTLAttributeFormatFloat4:            vkfmt = 109; break;  // R32G32B32A32_SFLOAT
+            case MTLAttributeFormatHalf2:             vkfmt = 83;  break;  // R16G16_SFLOAT
+            case MTLAttributeFormatHalf3:             vkfmt = 90;  break;  // R16G16B16_SFLOAT
+            case MTLAttributeFormatHalf4:             vkfmt = 97;  break;  // R16G16B16A16_SFLOAT
+            case MTLAttributeFormatShort2Normalized:  vkfmt = 78;  break;  // R16G16_SNORM
+            case MTLAttributeFormatShort4Normalized:  vkfmt = 92;  break;  // R16G16B16A16_SNORM
+            case MTLAttributeFormatChar2Normalized:   vkfmt = 20;  break;  // R8G8_SNORM
+            case MTLAttributeFormatChar4Normalized:   vkfmt = 42;  break;  // R8G8B8A8_SNORM
+            default: break;
+            }
+            if (!vkfmt) {
+                nvmtl_rt_count_bump(NVMTL_RT_FMT_UNCARRIED);
+                nvlog("acceleration structure: vertex format %lu has no format the builder decodes - geometry %u is built EMPTY, keeping its index, never read as float3",
+                      (unsigned long)f, n);
+                nvmtl_geom_make_empty(o); n++; continue;
+            }
+            o->vertex_format = vkfmt;
+            // A vertexStride of 0 means TIGHTLY PACKED in Metal - the size of the vertex format,
+            // not 12. Defaulting to 12 was harmless while float3 was the only format carried; now that
+            // the narrow formats are accepted it would step 12 bytes through a buffer packed at 2 to 8
+            // and read off the end, which is the same fault the format work was done to remove.
+            if (!o->stride) {
+                switch (vkfmt) {
+                case 109: o->stride = 16; break;   // R32G32B32A32_SFLOAT
+                case 106: o->stride = 12; break;   // R32G32B32_SFLOAT
+                case 103: o->stride = 8;  break;   // R32G32_SFLOAT
+                case 97:  o->stride = 8;  break;   // R16G16B16A16_SFLOAT
+                case 92:  o->stride = 8;  break;   // R16G16B16A16_SNORM
+                case 90:  o->stride = 6;  break;   // R16G16B16_SFLOAT
+                case 83:  o->stride = 4;  break;   // R16G16_SFLOAT
+                case 78:  o->stride = 4;  break;   // R16G16_SNORM
+                case 42:  o->stride = 4;  break;   // R8G8B8A8_SNORM
+                case 20:  o->stride = 2;  break;   // R8G8_SNORM
+                default:  o->stride = 12; break;   // unreachable: vkfmt came from the switch above
+                }
             }
             NVMTLBuffer *ib = (NVMTLBuffer *)t.indexBuffer;
             if (ib) { if (track) [track addObject:ib]; o->indices = nvmtl_vk_buffer_address(&ib->_b) + t.indexBufferOffset;
@@ -6454,12 +6530,15 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
         } else if ([g isKindOfClass:[MTLAccelerationStructureBoundingBoxGeometryDescriptor class]]) {
             MTLAccelerationStructureBoundingBoxGeometryDescriptor *b = (MTLAccelerationStructureBoundingBoxGeometryDescriptor *)g;
             NVMTLBuffer *bb = (NVMTLBuffer *)b.boundingBoxBuffer;
-            if (!bb) { nvlog("acceleration structure: box geometry without a buffer — dropped"); continue; }
+            if (!bb) { nvlog("acceleration structure: box geometry %u has no buffer - built EMPTY, keeping its index", n);
+                       nvmtl_geom_make_empty(o); n++; continue; }
             if (track) [track addObject:bb];
             o->is_boxes = 1; o->boxes = nvmtl_vk_buffer_address(&bb->_b) + b.boundingBoxBufferOffset;
             o->box_stride = (uint32_t)(b.boundingBoxStride ? b.boundingBoxStride : 24); o->count = (uint32_t)b.boundingBoxCount;
         } else {
-            nvlog("acceleration structure: geometry %s is not carried (motion / curves) — dropped", NSStringFromClass([g class]).UTF8String); continue;
+            nvlog("acceleration structure: geometry %u is a %s, not carried (motion / curves) - built EMPTY, keeping its index",
+                  n, NSStringFromClass([g class]).UTF8String);
+            nvmtl_geom_make_empty(o); n++; continue;
         }
         n++;
     }
@@ -6480,8 +6559,10 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
     return YES;
 }
 - (void)dealloc {
+    nvmtl_rt_count_bump(NVMTL_RT_AS_DEAD);
     nvmtl_vk_accel_destroy(&_as);
     if (_uid.buf) nvmtl_vk_buffer_destroy(&_uid);
+    if (_scratch.buf) nvmtl_vk_buffer_destroy(&_scratch);
 #if !__has_feature(objc_arc)
     [super dealloc];
 #endif
@@ -6498,10 +6579,15 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
 - (void)buildAccelerationStructure:(id<MTLAccelerationStructure>)as descriptor:(MTLAccelerationStructureDescriptor *)desc
                      scratchBuffer:(id<MTLBuffer>)scratch scratchBufferOffset:(NSUInteger)soff {
     NVMTLAccelerationStructure *dst = (NVMTLAccelerationStructure *)as; NVMTLBuffer *sc = (NVMTLBuffer *)scratch;
-    if (!dst || !sc) { nvlog("build acceleration structure: nil %s", dst ? "scratch" : "structure"); return; }
+    if (!dst || !sc) {
+        nvmtl_rt_count_bump(dst ? NVMTL_RT_NIL_SCRATCH : NVMTL_RT_NIL_STRUCT);
+        nvlog("build acceleration structure: nil %s", dst ? "scratch" : "structure"); return; }
     [self nvmtlTrack:dst]; [self nvmtlTrack:sc];
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    static nvmtl_geom geoms[NVMTL_MAX_GEOMS]; int instance = 0; uint32_t icount = 0;
+    // One per thread: these are filled from the descriptor and read by the build, and the game
+    // encodes from nine threads at once. Shared, two builds in flight overwrite each other's
+    // geometry and a structure gets built from another mesh.
+    static _Thread_local nvmtl_geom geoms[NVMTL_MAX_GEOMS]; int instance = 0; uint32_t icount = 0;
     uint32_t n = nvmtl_geoms_from_descriptor(desc, geoms, NVMTL_MAX_GEOMS, &instance, &icount, _cb->_resources);
     uint64_t scratch_addr = (nvmtl_vk_buffer_address(&sc->_b) + soff + 255ull) & ~255ull;
     if (![dst nvmtlEnsureCreated:instance]) return;
@@ -6519,18 +6605,31 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
         dst->_iftAdd = add;
     }
     uint64_t inst_addr = 0;
+    uint32_t nas_traced = 0;
     if (instance) {
         MTLInstanceAccelerationStructureDescriptor *idesc = (MTLInstanceAccelerationStructureDescriptor *)desc;
         NVMTLBuffer *ib = (NVMTLBuffer *)idesc.instanceDescriptorBuffer;
-        if (!ib || !nvmtl_buf_cpu(ib)) { nvlog("build acceleration structure: instance descriptors %s", ib ? "not host-visible" : "nil"); return; }
+        if (!ib) { nvlog("build acceleration structure: instance descriptors nil"); return; }
         const MTLAccelerationStructureInstanceDescriptorType itype = idesc.instanceDescriptorType;
         if (itype != MTLAccelerationStructureInstanceDescriptorTypeDefault && itype != MTLAccelerationStructureInstanceDescriptorTypeUserID &&
             itype != MTLAccelerationStructureInstanceDescriptorTypeIndirect) {
             nvlog("build acceleration structure: instance descriptor type %lu is not carried (Default, UserID and Indirect are)", (unsigned long)itype); return; }
         const uint32_t natural = itype == MTLAccelerationStructureInstanceDescriptorTypeDefault ? 64 : itype == MTLAccelerationStructureInstanceDescriptorTypeUserID ? 68 : 72;
-        NSArray *blases = idesc.instancedAccelerationStructures; static uint64_t addrs[4096]; uint32_t nas = 0;
-        static uint32_t iftAdds[4096];
-        for (NVMTLAccelerationStructure *b in blases) { if (nas < 4096) { iftAdds[nas] = b->_iftAdd; addrs[nas++] = b->_as.addr; } [self nvmtlTrack:b]; }
+        NSArray *blases = idesc.instancedAccelerationStructures; static _Thread_local uint64_t addrs[4096]; uint32_t nas = 0;
+        static _Thread_local uint32_t iftAdds[4096];
+        uint32_t zero_as = 0;
+        for (NVMTLAccelerationStructure *b in blases) { if (nas < 4096) { iftAdds[nas] = b->_iftAdd; addrs[nas++] = b->_as.addr; if (!b->_as.addr) zero_as++; } [self nvmtlTrack:b]; }
+        // An instanced structure with no device address means its Vulkan object was never created,
+        // so the reference written into the instance descriptor is null and the traversal walks a BVH
+        // at address zero. Report it rather than handing the GPU work that is certain to fault.
+        if (zero_as) {
+            FILE *lg = fopen(nvmtl_log_path(), "a");
+            if (lg) {
+                fprintf(lg, "pid %d NVMTL: build acceleration structure: %u of %u instanced structures have NO device address - their instances reference null\n",
+                        getpid(), zero_as, nas);
+                fclose(lg);
+            }
+        }
         NVMTLBuffer *vk = [NVMTLBuffer new];
         size_t bytes = (size_t)(icount ? icount : 1) * (64 + 4);
         if (nvmtl_vk_buffer_create(bytes, 1, &vk->_b) || !vk->_b.map) { nvlog("build acceleration structure: instance conversion buffer FAILED"); return; }
@@ -6540,9 +6639,112 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
                   (unsigned long)idesc.instanceDescriptorBufferOffset, ib->_b.size); return; }
         const size_t uidOff = (size_t)(icount ? icount : 1) * 64, uidBytes = (size_t)(icount ? icount : 1) * 4;
         memset((uint8_t *)vk->_b.map + uidOff, 0, uidBytes);
-        nvmtl_vk_convert_instances((const uint8_t *)nvmtl_buf_cpu(ib) + idesc.instanceDescriptorBufferOffset, stride, icount, addrs, nas, vk->_b.map,
-                                   itype == MTLAccelerationStructureInstanceDescriptorTypeIndirect ? 3u : (uint32_t)itype,
-                                   (uint32_t *)((uint8_t *)vk->_b.map + uidOff), iftAdds);
+        const uint32_t ctype = itype == MTLAccelerationStructureInstanceDescriptorTypeIndirect ? 3u : (uint32_t)itype;
+        // Convert on the GPU, as a dispatch in front of the build. Reading the descriptors on the
+        // host can only see writes already submitted, and the structure id of an Indirect
+        // descriptor is written INTO that buffer by the GPU, so a host read returns zeros and the
+        // top-level structure comes out full of null children. The table of instanced-structure
+        // addresses is ours and already known, so it is filled here and read by the kernel.
+        NVMTLBuffer *tab = [NVMTLBuffer new];
+        const size_t tab_bytes = (size_t)(nas ? nas : 1) * 16;
+        int on_gpu = 0;
+        if (nvmtl_vk_buffer_create(tab_bytes, 1, &tab->_b) || !tab->_b.map) {
+            // Counted here too, or conv_gpu + conv_host stops equalling the number of conversions and
+            // the route most worth seeing - the table failing under memory pressure - reads as nothing.
+            nvmtl_rt_count_bump(NVMTL_RT_CONV_HOST);
+            nvlog("build acceleration structure: structure address table (%zu B) FAILED - the conversion stays on the CPU", tab_bytes);
+        } else {
+            uint32_t *t = (uint32_t *)tab->_b.map;
+            memset(t, 0, tab_bytes);
+            for (uint32_t k = 0; k < nas; k++) {
+                t[k * 4 + 0] = (uint32_t)(addrs[k] & 0xFFFFFFFFu);
+                t[k * 4 + 1] = (uint32_t)(addrs[k] >> 32);
+                t[k * 4 + 2] = iftAdds[k];
+            }
+            const uint64_t mtl_addr = nvmtl_vk_buffer_address(&ib->_b);
+            nvmtl_convinst_args ca = {
+                .src = mtl_addr ? mtl_addr + idesc.instanceDescriptorBufferOffset : 0,
+                .dst = nvmtl_vk_buffer_address(&vk->_b),
+                .uid = nvmtl_vk_buffer_address(&vk->_b) + uidOff,
+                .astab = nvmtl_vk_buffer_address(&tab->_b),
+                .stride = stride, .count = icount, .mtl_type = ctype, .n_as = nas,
+            };
+            on_gpu = nvmtl_vk_cmd_convert_instances(&_cb->_c, &ca) == 0;
+            nvmtl_rt_count_bump(on_gpu ? NVMTL_RT_CONV_GPU : NVMTL_RT_CONV_HOST);
+            if (on_gpu) {
+                if (!_cb->_scratch) _cb->_scratch = [NSMutableArray new];
+                [_cb->_scratch addObject:tab];
+                if (getenv("NVMTL_RT_ADDR_TRACE") && icount >= 4) {
+                    struct { float m[12]; uint32_t cust_mask, sbt_flags; uint64_t ref; } w[8];
+                    const uint32_t have = nvmtl_vk_convert_witness_read(w, 8);
+                    FILE *lg = have ? fopen(nvmtl_log_path(), "a") : NULL;
+                    for (uint32_t k = 0; lg && k < have; k++) {
+                        // Which layout the app actually wrote, decided from the sample itself rather
+                        // than argued about. Apple's header declares MTLPackedFloat4x3 as
+                        // MTLPackedFloat3 columns[4], so the spec reading is m[col * 3 + row] and the
+                        // translation is words 9..11. A DXR-shaped engine instead writes a row-major
+                        // float[3][4], where the rows are words 0..2 / 4..6 / 8..10 and the
+                        // translation is words 3, 7, 11. A rigid instance transform has unit row
+                        // norms under the CORRECT reading and mixes the translation into the rows
+                        // under the wrong one, so printing both norms names the layout outright.
+                        const float *m = w[k].m;
+                        const double n0 = sqrt((double)m[0]*m[0] + (double)m[1]*m[1] + (double)m[2]*m[2]);
+                        const double n1 = sqrt((double)m[4]*m[4] + (double)m[5]*m[5] + (double)m[6]*m[6]);
+                        const double n2 = sqrt((double)m[8]*m[8] + (double)m[9]*m[9] + (double)m[10]*m[10]);
+                        const double c0 = sqrt((double)m[0]*m[0] + (double)m[3]*m[3] + (double)m[6]*m[6]);
+                        const double c1 = sqrt((double)m[1]*m[1] + (double)m[4]*m[4] + (double)m[7]*m[7]);
+                        const double c2 = sqrt((double)m[2]*m[2] + (double)m[5]*m[5] + (double)m[8]*m[8]);
+                        const double drow = fabs(n0 - 1) + fabs(n1 - 1) + fabs(n2 - 1);
+                        const double dcol = fabs(c0 - 1) + fabs(c1 - 1) + fabs(c2 - 1);
+                        // A bare drow < dcol would name a layout off noise. An ALL-ZERO witness gives
+                        // drow == dcol == 3.0 and would print "COLUMN-MAJOR" with full confidence - and
+                        // zeros are the LIKELY reading here, because unwritten descriptors are exactly
+                        // what the GPU conversion exists to fix. A scaled or non-rigid instance makes
+                        // both errors large too. So one reading must look rigid AND beat the other
+                        // clearly, or this says nothing.
+                        const int rigid = drow < 0.05 || dcol < 0.05;
+                        const int apart = fabs(drow - dcol) > 0.25;
+                        const char *verdict = !rigid || !apart ? "CANNOT TELL from this sample"
+                                            : drow < dcol ? "ROW-MAJOR (DXR shaped, NOT Apple's documented columns[4])"
+                                                          : "COLUMN-MAJOR (Apple's documented MTLPackedFloat4x3)";
+                        fprintf(lg, "pid %d NVMTL: RTCONV witness[%u] (this build has %u instances): ref=0x%llx custom=%u mask=0x%02x sbt=%u flags=0x%x\n",
+                                getpid(), k, icount, (unsigned long long)w[k].ref, w[k].cust_mask & 0xFFFFFF,
+                                w[k].cust_mask >> 24, w[k].sbt_flags & 0xFFFFFF, w[k].sbt_flags >> 24);
+                        fprintf(lg, "pid %d NVMTL: RTCONV xform[%u]: raw %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f\n",
+                                getpid(), k, m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
+                                m[8], m[9], m[10], m[11]);
+                        fprintf(lg, "pid %d NVMTL: RTLAYOUT[%u]: as ROWS norms %.3f %.3f %.3f (err %.3f) translation %.1f %.1f %.1f | "
+                                    "as COLUMNS norms %.3f %.3f %.3f (err %.3f) translation %.1f %.1f %.1f -> the app wrote %s\n",
+                                getpid(), k, n0, n1, n2, drow, m[3], m[7], m[11],
+                                c0, c1, c2, dcol, m[9], m[10], m[11], verdict);
+                    }
+                    if (lg) fclose(lg);
+                    nvmtl_vk_cmd_convert_witness(&_cb->_c, &vk->_b, icount);
+                }
+            }
+        }
+        // The host fallback. It is wrong for descriptors the GPU has yet to write, so it says so
+        // rather than quietly building a structure out of whatever the buffer held.
+        if (!on_gpu) {
+            const void *mtl_desc = nvmtl_buf_cpu(ib);
+            size_t mtl_base = idesc.instanceDescriptorBufferOffset;
+            void *staged = NULL;
+            if (!mtl_desc) {
+                const size_t span = (size_t)(icount ? icount - 1 : 0) * stride + natural;
+                staged = malloc(span);
+                if (!staged || nvmtl_vk_buffer_readback(&ib->_b, mtl_base, span, staged)) {
+                    free(staged);
+                    nvlog("build acceleration structure: could not stage %zu bytes of instance descriptors out of a device-only buffer", span);
+                    return;
+                }
+                mtl_desc = staged;
+                mtl_base = 0;
+            }
+            if (icount) nvlog("build acceleration structure: converting %u instances on the HOST - descriptors the GPU has not written yet read as zero", icount);
+            nvmtl_vk_convert_instances((const uint8_t *)mtl_desc + mtl_base, stride, icount, addrs, nas, vk->_b.map,
+                                       ctype, (uint32_t *)((uint8_t *)vk->_b.map + uidOff), iftAdds);
+            free(staged);
+        }
         if (dst->_uid.size < uidBytes) {
             if (dst->_uid.buf) { NVMTLBuffer *old = [NVMTLBuffer new]; old->_b = dst->_uid; if (!_cb->_scratch) _cb->_scratch = [NSMutableArray new]; [_cb->_scratch addObject:old]; }
             memset(&dst->_uid, 0, sizeof dst->_uid);
@@ -6552,8 +6754,95 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
             nvlog("build acceleration structure: userID side table copy FAILED");
         if (!_cb->_scratch) _cb->_scratch = [NSMutableArray new];
         [_cb->_scratch addObject:vk];
-        [self nvmtlTrack:ib]; inst_addr = nvmtl_vk_buffer_address(&vk->_b);
+        [self nvmtlTrack:ib]; inst_addr = nvmtl_vk_buffer_address(&vk->_b); nas_traced = nas;
     }
+    // Every address the build hands the GPU, with where its memory actually lives. A page fault in
+    // NVK's traversal names an address and nothing else, so without this there is no way to tell which
+    // of these allocations it was, or whether that allocation had been spilled out of VRAM.
+    if (getenv("NVMTL_RT_ADDR_TRACE")) {
+        FILE *lg = fopen(nvmtl_log_path(), "a");
+        if (lg) {
+            fprintf(lg, "pid %d NVMTL: RTADDR build %s: as=0x%llx size %zu backing=%s scratch=0x%llx(%s,%zu B) inst=0x%llx(%s) geoms=%u\n",
+                    getpid(), instance ? "instances" : "primitives",
+                    (unsigned long long)dst->_as.addr, dst->_b.size,
+                    dst->_b.map ? "SYSTEM" : (dst->_b.bar1 ? "BAR1" : "VRAM"),
+                    (unsigned long long)scratch_addr, sc->_b.map ? "SYSTEM" : (sc->_b.bar1 ? "BAR1" : "VRAM"), sc->_b.size,
+                    (unsigned long long)inst_addr, instance ? "instbuf" : "none", instance ? icount : n);
+            if (instance) fprintf(lg, "pid %d NVMTL: RTADDR tlas: %u instances over %u structures\n", getpid(), icount, nas_traced);
+            fclose(lg);
+        }
+    }
+    // What this build actually needs, for the geometry and instance count being recorded now - not
+    // for whatever descriptor the game asked about when it sized the buffers.
+    {
+        size_t need_as = 0, need_scratch = 0;
+        if (!nvmtl_vk_accel_sizes(geoms, n, instance, icount, &need_as, &need_scratch)) {
+            const size_t have_scratch = sc->_b.size > soff ? sc->_b.size - soff : 0;
+            // need_as == 0 is checked as well as the return code, because the return code alone can
+            // never fail here: init and g_rt are already proven by nvmtlEnsureCreated, and n is capped
+            // at NVMTL_MAX_GEOMS by construction. A guard whose condition cannot occur reads as
+            // protection and gives none, and its counter is a clean zero forever.
+            if (!need_as) {
+                nvmtl_rt_count_bump(NVMTL_RT_SIZE_UNKNOWN);
+                nvlog("build acceleration structure: the builder sized this build at ZERO bytes (%u geometr%s, %s) - REFUSED rather than build against a size we do not believe",
+                      n, n == 1 ? "y" : "ies", instance ? "instances" : "primitives");
+                return;
+            }
+            if (need_as > dst->_b.size) {
+                nvmtl_rt_count_bump(NVMTL_RT_AS_SHORT);
+                uint64_t prims = 0;
+                for (uint32_t k = 0; k < n; k++) prims += geoms[k].count;
+                FILE *lg = fopen(nvmtl_log_path(), "a");
+                if (lg) {
+                    fprintf(lg, "pid %d NVMTL: RTSHORT %s build needs %zu bytes, the structure has %zu: %u geometr%s, %llu primitive(s), icount %u - REFUSED\n",
+                            getpid(), instance ? "instances" : "primitives", need_as, dst->_b.size,
+                            n, n == 1 ? "y" : "ies", (unsigned long long)prims, icount);
+                    for (uint32_t k = 0; k < n && k < 4; k++)
+                        fprintf(lg, "pid %d NVMTL:   geom[%u] count %u stride %u fmt %u boxes %u\n",
+                                getpid(), k, geoms[k].count, geoms[k].stride, geoms[k].vertex_format, geoms[k].is_boxes);
+                    fclose(lg);
+                }
+                return;
+            }
+            if (need_scratch > have_scratch) {
+                nvmtl_rt_count_bump(NVMTL_RT_SCRATCH_SHORT);
+                // Our own scratch, kept on the structure so repeated builds reuse one allocation.
+                if (dst->_scratch.size < need_scratch) {
+                    if (dst->_scratch.buf) {
+                        NVMTLBuffer *old = [NVMTLBuffer new]; old->_b = dst->_scratch;
+                        if (!_cb->_scratch) _cb->_scratch = [NSMutableArray new];
+                        [_cb->_scratch addObject:old];
+                        memset(&dst->_scratch, 0, sizeof dst->_scratch);
+                    }
+                    if (nvmtl_vk_buffer_create(need_scratch, 0, &dst->_scratch) &&
+                        nvmtl_vk_buffer_create(need_scratch, 1, &dst->_scratch)) {
+                        memset(&dst->_scratch, 0, sizeof dst->_scratch);
+                        nvlog("build acceleration structure: needs %zu scratch bytes, has %zu, and our own scratch FAILED to allocate",
+                              need_scratch, have_scratch);
+                    }
+                }
+                if (dst->_scratch.buf) {
+                    nvmtl_rt_count_bump(NVMTL_RT_SCRATCH_OURS);
+                    nvlog("build acceleration structure: needs %zu scratch bytes and the game gave %zu - using our own",
+                          need_scratch, have_scratch);
+                    scratch_addr = (nvmtl_vk_buffer_address(&dst->_scratch) + 255ull) & ~255ull;
+                }
+            }
+        } else {
+            // A check that cannot run must block, never report clean. Without a size we cannot know
+            // the build fits, and a build that writes past its structure takes the channel and the
+            // process, where a missing structure only loses the geometry.
+            nvmtl_rt_count_bump(NVMTL_RT_SIZE_UNKNOWN);
+            nvlog("build acceleration structure: the required size could NOT be computed (%u geometries, %s) - REFUSED rather than risk writing past the structure",
+                  n, instance ? "instances" : "primitives");
+            return;
+        }
+    }
+    nvmtl_rt_count_bump(instance ? NVMTL_RT_BUILD_INST : NVMTL_RT_BUILD_PRIM);
+    if (instance) nvmtl_rt_count_add(NVMTL_RT_INSTANCES, icount);
+    // Atomic: nine encoding threads reach this, and a plain ++ is a read-modify-write that can miss
+    // the % 64 entirely under contention, so the census fired at an unpredictable rate.
+    { static unsigned long long nb; if (__atomic_add_fetch(&nb, 1, __ATOMIC_RELAXED) % 64 == 0) nvmtl_rt_census(); }
     if (nvmtl_vk_cmd_build_accel(&_cb->_c, &dst->_as, geoms, n, inst_addr, icount, scratch_addr)) nvlog("build acceleration structure: FAILED");
     else nvlog("build acceleration structure %p: %s (%u %s)", (__bridge void *)dst, instance ? "instances" : "primitives", instance ? icount : n, instance ? "instances" : "geometries");
 }

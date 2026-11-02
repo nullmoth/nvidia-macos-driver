@@ -8,9 +8,11 @@
 #include <stdint.h>
 #include <stddef.h>
 const char *nvmtl_image_ident(const void *addr, char *out, size_t n);
+// bind_lost: a sparse rebind AND its restore were both refused, so we do not know which allocation the
+// page tables name. Neither is safe to free, so the destroy path keeps both and counts the bytes.
 typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int placed; void *pool; size_t poff; int imported; int bar1; size_t moff; int sparse, sysmem; int mtype1; /* memory type + 1 when known */
                  int fresh; /* host-visible memory from its own vkAllocateMemory: zeroed by the kernel, never recycled */
-                 uint64_t parked_ns; /* when the buffer park took it (CLOCK_UPTIME_RAW) */
+                 uint64_t parked_ns; /* when the buffer park took it (CLOCK_UPTIME_RAW) */  void *lost_mem; int bind_lost;
                  uint8_t hz_ut; /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */ } nvk_buffer;
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_fault_context.h"
@@ -139,6 +141,30 @@ int  nvmtl_vk_accel_create(nvk_buffer *backing, size_t size, int instance, nvk_a
 void nvmtl_vk_accel_destroy(nvk_accel *a);
 int  nvmtl_vk_cmd_build_accel(nvk_cmdbuf *c, nvk_accel *dst, const nvmtl_geom *g, uint32_t ngeom, uint64_t instances_addr, uint32_t instance_count, uint64_t scratch_addr);
 int  nvmtl_vk_cmd_copy_accel(nvk_cmdbuf *c, nvk_accel *src, nvk_accel *dst);
+// The push constants of the GPU instance-conversion kernel. The structure table is four words per
+// instanced structure: device address low, high, its intersection-function-table base, pad.
+typedef struct nvmtl_convinst_args {
+    uint64_t src, dst, uid, astab;
+    uint32_t stride, count, mtl_type, n_as;
+} nvmtl_convinst_args;
+// nvlog prints a repeated message 8 times and then once every 4096, so a count taken off the log is
+// that cap rather than the number of events. These are the real counts for the ray-tracing path.
+enum {
+    NVMTL_RT_AS_VRAM, NVMTL_RT_AS_SYSMEM, NVMTL_RT_AS_FAILED,
+    NVMTL_RT_BUILD_PRIM, NVMTL_RT_BUILD_INST, NVMTL_RT_NIL_STRUCT, NVMTL_RT_NIL_SCRATCH,
+    NVMTL_RT_CONV_GPU, NVMTL_RT_CONV_HOST, NVMTL_RT_INSTANCES, NVMTL_RT_FMT_UNCARRIED,
+    NVMTL_RT_AS_SHORT, NVMTL_RT_SCRATCH_SHORT, NVMTL_RT_SCRATCH_OURS,
+    NVMTL_RT_AS_DEAD,
+    NVMTL_RT_SIZE_UNKNOWN,
+    NVMTL_RT_COUNTERS
+};
+extern unsigned long long nvmtl_rt_count[NVMTL_RT_COUNTERS];
+void nvmtl_rt_count_bump(int which);
+void nvmtl_rt_count_add(int which, unsigned long long n);
+void nvmtl_rt_census(void);
+int  nvmtl_vk_cmd_convert_instances(nvk_cmdbuf *c, const nvmtl_convinst_args *args);
+int  nvmtl_vk_cmd_convert_witness(nvk_cmdbuf *c, nvk_buffer *converted, uint32_t count);
+uint32_t nvmtl_vk_convert_witness_read(void *dst, uint32_t max_instances);
 int  nvmtl_vk_convert_instances(const void *mtl_instances, uint32_t stride, uint32_t count, const uint64_t *as_addrs, uint32_t n_as, void *vk_instances_out,
                                 uint32_t mtl_type,
                                 uint32_t *uid_out,
@@ -156,6 +182,7 @@ int  nvmtl_vk_cmd_begin_render(nvk_cmdbuf *c, nvk_image *img, nvk_pipeline *p, c
 int  nvmtl_vk_cmd_begin_render_ex(nvk_cmdbuf *c, nvk_image *img, nvk_pipeline *p, const float clear[4], uint32_t load);
 int  nvmtl_vk_cmd_begin_render_ms(nvk_cmdbuf *c, nvk_image *img, nvk_pipeline *p, const float clear[4], uint32_t load, nvk_image *resolve);
 uint64_t nvmtl_vk_working_set(void);
+uint64_t nvmtl_vk_recommended_working_set(void);
 uint64_t nvmtl_vk_vram_bytes(void);
 void     nvmtl_vk_mem_split(uint64_t *vram, uint64_t *sys);
 int  nvmtl_vk_image_create_ms(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, uint32_t samples, nvk_image *out);
@@ -252,6 +279,7 @@ void nvmtl_vk_image_free_backing(nvk_image *old);
 int nvmtl_vk_vram_room(uint64_t want);
 uint64_t nvmtl_vk_vram_free_now(void);
 uint64_t nvmtl_vk_vram_headroom(void);
+int nvmtl_vk_vram_measured(void);
 void nvmtl_vk_bindless_rewrite(uint32_t slot, void *view);
 void nvmtl_vk_res2_stats(uint64_t out[5]);
 int nvmtl_vk_buffer_migrate(nvk_buffer *b, int to_sysmem);
@@ -372,6 +400,7 @@ void nvmtl_vk_bar_counts(uint64_t out[16]);
 int nvmtl_vk_cmd_blit_convert(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint32_t ss, uint32_t sx, uint32_t sy,
                               nvk_image *dst, uint32_t dl, uint32_t ds, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h);
 void nvmtl_vk_buffer_destroy(nvk_buffer *b);
+int nvmtl_vk_buffer_readback(nvk_buffer *b, size_t off, size_t len, void *dst);
 void nvmtl_vk_image_destroy(nvk_image *i);
 // Finish any in-flight asynchronous texture upload to this image (NVMTL_ASYNC_TEX_UPLOAD) before its memory
 // is read back, migrated or freed. A no-op when none is pending, which is always the case with the flag off.

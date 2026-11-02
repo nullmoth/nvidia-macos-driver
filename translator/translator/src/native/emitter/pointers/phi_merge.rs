@@ -111,10 +111,11 @@ impl Emitter {
                     || self.bda_forward_addresses.contains(name)
                     || self.bda_direct_addresses.contains_key(name)
                     || self.raw_offsets.get(name).is_some_and(|raw| {
-                        raw.const_off == 0
-                            && raw.dyn_terms.is_empty()
-                            && (raw.device_addr_base.is_some()
-                                || self.bda_direct_addresses.contains_key(&raw.root))
+                        // Address materialization below already handles byte offsets and strides.
+                        (raw.device_addr_base.is_some() && !raw.unmodelable)
+                            || (raw.const_off == 0
+                                && raw.dyn_terms.is_empty()
+                                && self.bda_direct_addresses.contains_key(&raw.root))
                     })
                 {
                     return true;
@@ -960,6 +961,25 @@ impl Emitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bda_phi_offset_arm_is_materialized() {
+        let ir = LlModule::parse("define void @k() {\nentry:\n  ret void\n}\n").unwrap();
+        let mut emitter = Emitter::new(ir);
+        let base = emitter.const_signed_int(64, 4096).unwrap();
+        let mut raw = RawBufferOffset::root("%base".into(), 2);
+        raw.device_addr_base = Some(base);
+        raw.const_off = 16;
+        emitter.raw_offsets.insert("%offset".into(), raw);
+        let value = LlValue::Local("%offset".into());
+        assert!(emitter.bda_phi_value_is_addressable(&value));
+        let mut instructions = Vec::new();
+        let address = emitter.bda_phi_address_id(&value, &mut instructions).unwrap();
+        assert_ne!(address, base);
+        assert!(instructions.iter().any(|i| i.class.opcode == Op::IAdd
+            && i.result_id == Some(address)
+            && i.operands.first() == Some(&Operand::IdRef(base))));
+    }
+
 
     #[test]
     fn incompatible_defined_phi_arm_does_not_leave_reserved_index() {
