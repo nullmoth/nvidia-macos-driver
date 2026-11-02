@@ -257,6 +257,19 @@ static int nvmtl_layout_general_on(void)
 }
 // Fault context (nvmtl_fault_context.h): a few stores per dispatch, submit and death; read once, at device loss.
 static nvmtl_fx_state g_fx; static pthread_mutex_t g_fx_lock = PTHREAD_MUTEX_INITIALIZER;
+// Which command buffer this thread is encoding and the ordinal of its last dispatch, so a barrier is recorded as
+// "after dispatch k" of that command buffer (encoders run on the thread that encodes their command buffer).
+static __thread const void *t_fx_cb; static __thread uint32_t t_fx_ord;
+static void nvmtl_fx_note_barrier(VkCommandBuffer cb, VkPipelineStageFlags ss, VkPipelineStageFlags ds, uint32_t nm, const VkMemoryBarrier *m,
+                                  uint32_t nb, const VkBufferMemoryBarrier *b, uint32_t ni, const VkImageMemoryBarrier *im)
+{
+    uint32_t sa = 0, da = 0;
+    for (uint32_t i = 0; i < nm; i++) { sa |= m[i].srcAccessMask; da |= m[i].dstAccessMask; }
+    for (uint32_t i = 0; i < nb; i++) { sa |= b[i].srcAccessMask; da |= b[i].dstAccessMask; }
+    for (uint32_t i = 0; i < ni; i++) { sa |= im[i].srcAccessMask; da |= im[i].dstAccessMask; }
+    const uint32_t after = (const void *)cb == t_fx_cb ? t_fx_ord : 0xFFFFFFFFu;   // another thread's command buffer: ordinal unknown
+    pthread_mutex_lock(&g_fx_lock); nvmtl_fx_barrier(&g_fx, cb, after, (uint32_t)ss, (uint32_t)ds, sa, da, nm, nb, ni); pthread_mutex_unlock(&g_fx_lock);
+}
 // Address-page lifetime (nvmtl_page_life.h): a page is released by the highest submit that referenced it, not by its owner.
 static nvmtl_pl_state g_pl; static pthread_mutex_t g_pl_lock = PTHREAD_MUTEX_INITIALIZER;
 // Live GPU ranges (nvmtl_live.h): every buffer with a device address, from creation to destruction, for the fault file.
@@ -5336,6 +5349,7 @@ void nvmtl_vk_dispatch_label(const char *name) { t_dt_label = name; }
 static __thread uint32_t t_dt_key; static __thread uint64_t t_dt_air;
 void nvmtl_vk_dispatch_key(uint32_t spv_fnv, uint64_t air) { t_dt_key = spv_fnv; t_dt_air = air; }
 static void nvmtl_fx_emit_line(void *ctx, const char *line) { (void)ctx; nvlog_every("%s", line); }
+static void nvmtl_fx_emit_both(void *ctx, const char *line) { nvlog_every("%s", line); if (ctx) fprintf((FILE *)ctx, "%s\n", line); }
 static void nvmtl_fx_dump(const char *why)
 {
     pthread_mutex_lock(&g_fx_lock);
@@ -5346,7 +5360,14 @@ static void nvmtl_fx_dump(const char *why)
 static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c, const nvk_pipeline *p)
 {
     c->fx.tab[0] = c->tab_out[0]; c->fx.tab[1] = c->tab_out[1]; c->fx.dyn[0] = c->dyn_out[0]; c->fx.dyn[1] = c->dyn_out[1];
+    c->fx.nroot = 0;
+    if (c->table) for (unsigned i = 0; i < NVMTL_NBUF && c->fx.nroot < NVMTL_FX_ROOT; i++) {
+        const nvmtl_slot *s = &c->table->s[0][i];
+        if (s->kind != NVMTL_SLOT_BUF || !s->address) continue;
+        c->fx.root[c->fx.nroot++] = (nvmtl_fx_root){ s->address + s->off, s->address + s->off + (s->size ? s->size : 1), i };
+    }
     nvmtl_fx_dispatch(&c->fx, t_dt_label, p, t_dt_key, t_dt_air);
+    t_fx_cb = c->cb; t_fx_ord = c->fx.total;
 }
 static void nvmtl_live_add(nvk_buffer *b, uint32_t kind)
 {
@@ -5440,7 +5461,31 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
                 if (o > 440) { nvlog_every("fault context: %s", line); o = snprintf(line, sizeof line, "dispatch %u (continued):", c->fx.total - nd + j + 1); }   // the log line holds 640
             }
             nvlog_every("fault context: %s", line);
+            // who bound or copied into each root before this dispatch (same cb, and the two submits before it)
+            for (uint32_t r = 0; r < d->nroot; r++)
+                nvmtl_fx_writers(&g_fx, &c->fx, c->cb, c->fx_seq, d->ordinal, d->root[r].idx, d->root[r].lo, d->root[r].hi, nvmtl_fx_emit_both, f);
+            // a root with no host view: its first 64 bytes as the newest copy into it left them in the copy's source
+            for (unsigned i = 0; i < NVMTL_NBUF; i++) {
+                if (!tbl[i] || tbl[i] == nvmtl_vk_buffer_address(&g_dummyBuf)) continue;
+                pthread_mutex_lock(&g_lv_lock); const nvmtl_lv_entry *e = nvmtl_lv_find(&g_lv, tbl[i]); const int hasmap = e && e->map; pthread_mutex_unlock(&g_lv_lock);
+                if (hasmap) continue;
+                pthread_mutex_lock(&g_fx_lock); const nvmtl_fx_copy *cp = nvmtl_fx_copy_covering(&g_fx, tbl[i], tbl[i] + 64); const nvmtl_fx_copy cc = cp ? *cp : (nvmtl_fx_copy){0}; pthread_mutex_unlock(&g_fx_lock);
+                if (!cc.src_map) continue;
+                pthread_mutex_lock(&g_lv_lock); const nvmtl_lv_entry *se = nvmtl_lv_find(&g_lv, cc.src_lo); const int srclive = se && se->map; pthread_mutex_unlock(&g_lv_lock);
+                if (!srclive) { nvlog_every("fault context: root b%u 0x%llx was filled by a copy at seq %llu whose source is gone - bytes unreadable", i, (unsigned long long)tbl[i], (unsigned long long)cc.seq); continue; }
+                const uint64_t *q = (const uint64_t *)((const uint8_t *)cc.src_map + (tbl[i] - cc.dst_lo));
+                int o2 = snprintf(line, sizeof line, "root b%u 0x%llx bytes via the copy at seq %llu (source 0x%llx):", i, (unsigned long long)tbl[i], (unsigned long long)cc.seq, (unsigned long long)cc.src_lo);
+                for (unsigned k = 0; k < 8; k++) { char r2[160]; nvmtl_fault_resolve(c, q[k], r2, sizeof r2); o2 += snprintf(line + o2, sizeof line - (size_t)o2, " +%u:%s", k * 8, q[k] < 0x10000 ? "small" : r2);
+                                                   fprintf(f, "root dispatch %u b%u +%u 0x%llx %s (via copy)\n", c->fx.total - nd + j + 1, i, k * 8, (unsigned long long)q[k], r2); }
+                nvlog_every("fault context: %s", line);
+            }
         }
+    }
+    {   // the barriers between this command buffer's last dispatches (the record covers both hazard modes)
+        const uint32_t first = c->fx.total > nd ? c->fx.total - nd : 0;
+        pthread_mutex_lock(&g_fx_lock);
+        for (uint32_t k = first; k <= c->fx.total; k++) nvmtl_fx_barriers_after(&g_fx, c->cb, k, nvmtl_fx_emit_both, f);
+        pthread_mutex_unlock(&g_fx_lock);
     }
     fclose(f);
     nvlog_every("fault context: %u live ranges, %u recorded buffer deaths, this command buffer's pages and dispatch roots written to %s - tools/fault_resolve.py <file> <fault address>", nlive, g_fx.nbuf, fp);
@@ -5781,6 +5826,7 @@ int nvmtl_vk_cmd_begin(nvk_queue *q, nvk_cmdbuf *out)
         }
     }
     g_cmd_begun++;
+    t_fx_cb = out->cb; t_fx_ord = 0;
     nvmtl_perf_note(NVP_BEGIN, b0, 0);
     return 0;
 }
@@ -8751,6 +8797,12 @@ int nvmtl_vk_cmd_copy_buffer(nvk_cmdbuf *c, nvk_buffer *src, size_t srcOff, nvk_
     VkBufferCopy bc = { srcOff, dstOff, size };
     pvkCmdCopyBuffer(c->cb, (VkBuffer)src->buf, (VkBuffer)dst->buf, 1, &bc);
     nvmtl_vk_cmd_barrier(c);
+    {   // the fault context's copy ring: what wrote a range, and where its bytes can still be read on the host
+        const uint64_t da = nvmtl_vk_buffer_address(dst), sa = nvmtl_vk_buffer_address(src);
+        pthread_mutex_lock(&g_fx_lock);
+        nvmtl_fx_copy_note(&g_fx, da ? da + dstOff : 0, size, sa ? sa + srcOff : 0, src->map ? (const uint8_t *)src->map + srcOff : NULL, g_cmd_submitted, c->cb, c->fx.total);
+        pthread_mutex_unlock(&g_fx_lock);
+    }
     return 0;
 }
 

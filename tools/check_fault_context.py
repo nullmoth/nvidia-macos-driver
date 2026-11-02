@@ -43,6 +43,10 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_buffer_grace_reap\(\);", 1),                                  # freed buffers destroyed only after their submits complete
     ("nvmtl_vk.c", r"nvmtl_live_relabel\(b, NVMTL_LV_DYING\)", 1),
     ("nvmtl_vk.c", r"root dispatch %u b%u \+%u", 1),                                      # the pointers inside a root buffer, resolved
+    ("nvmtl_vk.c", r"nvmtl_fx_copy_note\(&g_fx", 1),                                     # the copy ring
+    ("nvmtl_vk.c", r"nvmtl_fx_writers\(&g_fx", 1),                                       # the writer census per root at loss
+    ("nvmtl_vk.c", r"nvmtl_fx_barriers_after\(&g_fx", 1),                                # the barriers between the last dispatches at loss
+    ("nvmtl_vk.c", r"t_fx_cb = out->cb; t_fx_ord = 0;", 1),                               # a begun cb is the thread's current one
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev}
 short = []; total = 0

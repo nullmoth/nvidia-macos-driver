@@ -864,6 +864,7 @@ static void nvmtl_hz_barrier_call(VkCommandBuffer cb, VkPipelineStageFlags ss, V
                                   uint32_t nm, const VkMemoryBarrier *m, uint32_t nb, const VkBufferMemoryBarrier *b,
                                   uint32_t ni, const VkImageMemoryBarrier *im)
 {
+    nvmtl_fx_note_barrier(cb, ss, ds, nm, m, nb, b, ni, im);   // the fault context's barrier record, both hazard modes
     if (t_hz.blit_pre && cb == t_hz.blit_cb && ni <= 16) {
         HZC(HZC_BLIT_PREDROP);
         if (!ni) return;

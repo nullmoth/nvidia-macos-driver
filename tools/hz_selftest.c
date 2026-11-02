@@ -16,6 +16,9 @@ static int g_hz_dynr;
 static void stub_barrier(VkCommandBuffer cb, VkPipelineStageFlags a, VkPipelineStageFlags b, VkDependencyFlags d, uint32_t n, const VkMemoryBarrier *m,
                          uint32_t nb, const VkBufferMemoryBarrier *bb, uint32_t ni, const VkImageMemoryBarrier *ib) { g_barriers++; }
 static PFN_vkCmdPipelineBarrier pvkCmdPipelineBarrier = stub_barrier;
+// the fault context's barrier record is a plugin function; the hazard header calls it on every barrier
+static void nvmtl_fx_note_barrier(VkCommandBuffer cb, VkPipelineStageFlags ss, VkPipelineStageFlags ds, uint32_t nm, const VkMemoryBarrier *m,
+                                  uint32_t nb, const VkBufferMemoryBarrier *b, uint32_t ni, const VkImageMemoryBarrier *im) { (void)cb; (void)ss; (void)ds; (void)nm; (void)m; (void)nb; (void)b; (void)ni; (void)im; }
 static VkAccessFlags nvmtl_dst_reads(void) { return VK_ACCESS_SHADER_READ_BIT; }
 static int nvmtl_fbfetch_on(void) { return 0; }
 static VkImageLayout nvmtl_image_access_layout(VkImageLayout l) { return l; }
