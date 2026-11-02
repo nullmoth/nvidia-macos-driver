@@ -130,6 +130,10 @@ static int nvmtl_xlate_ready(void) {
               strlcpy(gXlateTag, "untagged", sizeof gXlateTag);
               nvlog("translate: cache tag does not fit - the shader cache is OFF in this process");
           } }
+        // Typed dummy slots change every module that indexes the heap (a null resource id is redirected), so their
+        // SPIR-V never shares a cache entry with the other mode.
+        { extern int nvmtl_typed_dummies_wanted(void);
+          if (h && strcmp(gXlateTag, "untagged") && nvmtl_typed_dummies_wanted()) strlcat(gXlateTag, "-td1", sizeof gXlateTag); }
         if (!h) { nvlog("translate: dlopen(%s): %s", NVMTL_XLATE_LIB, dlerror()); return; }
         xlate = (nvmtl_translate_fn)dlsym(h, "nvmtl_translate");
         { char tid[1200];
@@ -160,7 +164,10 @@ static int nvmtl_xlate_ready(void) {
         xlate_refl_fc = (nvmtl_refl_fc_fn)dlsym(h, "nvmtl_reflect_fc");
         void (*setcaps)(uint32_t) = (void (*)(uint32_t))dlsym(h, "nvmtl_translate_set_caps");
         // Bits 0/1: formatless storage images. Bit 2: this plugin has no rasterization rate maps.
-        if (setcaps) setcaps(3u | 4u); else nvlog("translate: no nvmtl_translate_set_caps in this translator — written textures stay R32f-declared (one channel)");
+        // Bit 3: heap slots 1..5 are reserved for typed dummies (nvmtl_vk.c), a null resource id may be redirected to them.
+        { extern int nvmtl_typed_dummies_wanted(void);
+          if (setcaps) setcaps(3u | 4u | (nvmtl_typed_dummies_wanted() ? 8u : 0u)); }
+        if (!setcaps) nvlog("translate: no nvmtl_translate_set_caps in this translator — written textures stay R32f-declared (one channel)");
         if (!xlate) { nvlog("translate: no nvmtl_translate symbol"); return; }
         nvlog("translate: in-process AIR->SPIR-V library loaded");
     });

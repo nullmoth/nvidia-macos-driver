@@ -53,6 +53,8 @@ fn apply_tg(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::pass
     o = apply_rsc(o);
     // Bit 2 is an explicit guarantee from the plugin: no rate map can be created or bound.
     o.no_rasterization_rate_maps = CAPS.load(Ordering::Relaxed) & 4 != 0;
+    // Bit 3: the plugin reserved heap slots 1..5 for typed dummies, so a null resource id may be redirected to them.
+    o.typed_dummy_slots = CAPS.load(Ordering::Relaxed) & 8 != 0;
     for (index, length) in threadgroup_lengths() {
         match o.with_threadgroup_memory_length(index, length) {
             Ok(next) => o = next,
