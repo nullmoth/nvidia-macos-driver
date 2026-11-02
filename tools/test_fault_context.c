@@ -57,5 +57,20 @@ int main(void)
     arm("the dispatch count survives the ring (11 in all)", has("11 dispatches in all"));
 
     printf("%s: %d failed\n", fails ? "FAIL" : "PASS", fails);
+    /* buffer deaths: a FAULT_PTE address is matched against the ranges freed, newest first; a live address names nothing */
+    {   nvmtl_fx_state s4; memset(&s4, 0, sizeof s4);
+        nvmtl_fx_buffer_gone(&s4, 300, 0x36f100000ull, 0x40000, 0);                 /* 0x36f100000 .. 0x36f140000 */
+        nvmtl_fx_buffer_gone(&s4, 301, 0x4b0000000ull, 0x1000, NVMTL_FX_PARKED);
+        nvmtl_fx_buffer_gone(&s4, 302, 0, 0x1000, 0);                               /* no address: never recorded */
+        const nvmtl_fx_buf *b = nvmtl_fx_buffer_at(&s4, 0x36f122000ull);
+        arm("a fault address inside a freed buffer names that buffer and the sequence it died at", b && b->seq == 300 && b->lo == 0x36f100000ull);
+        arm("an address no freed buffer held names nothing (negative control)", nvmtl_fx_buffer_at(&s4, 0x36f140000ull) == NULL && nvmtl_fx_buffer_at(&s4, 0x1000ull) == NULL);
+        arm("a buffer without a device address is not recorded", s4.nbuf == 2);
+        nout = 0; nvmtl_fx_report(&s4, 302, 2, 10, emit, NULL);
+        arm("the report lists the freed ranges with their placement", has("301 0x4b0000000..0x4b0001000 4 parked |") && has("300 0x36f100000..0x36f140000 256 |"));
+        arm("  and counts them", has("2 buffer deaths within the last 10 submits (2 recorded in all)"));
+        for (unsigned k = 0; k < NVMTL_FX_BUFS + 5; k++) nvmtl_fx_buffer_gone(&s4, 400 + k, 0x1000000ull + k * 0x1000, 0x1000, 0);
+        arm("the ring wraps and the newest death still wins the match", nvmtl_fx_buffer_at(&s4, 0x1000000ull + (NVMTL_FX_BUFS + 4) * 0x1000) != NULL && nvmtl_fx_buffer_at(&s4, 0x36f122000ull) == NULL);
+    }
     return fails ? 1 : 0;
 }

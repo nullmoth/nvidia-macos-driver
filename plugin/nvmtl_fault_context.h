@@ -25,7 +25,13 @@ typedef struct { uint64_t seq; const void *cb; uint32_t ndisp; nvmtl_fx_disp d[N
 /* one death: an image (view, size, format) or a heap slot, at a sequence number */
 enum { NVMTL_FX_PLACED = 1, NVMTL_FX_POOLED = 2 };   /* where a dead image's memory lived */
 typedef struct { uint64_t seq; const void *view; uint32_t slot, w, h, fmt, storage, where; char label[NVMTL_FX_NAME]; } nvmtl_fx_gone;
-typedef struct { nvmtl_fx_sub sub[NVMTL_FX_SUB]; uint32_t nsub; nvmtl_fx_gone gone[NVMTL_FX_GONE]; uint32_t ngone; } nvmtl_fx_state;
+/* one buffer death: the GPU address range it held, at a sequence number. A page-table fault names an address and
+   nothing else, so the ring of the last buffer deaths is what says whether that address was a buffer freed while a
+   submit still read it. */
+enum { NVMTL_FX_BUFS = 256, NVMTL_FX_PARKED = 4 };
+typedef struct { uint64_t seq, lo, hi; uint32_t where; } nvmtl_fx_buf;
+typedef struct { nvmtl_fx_sub sub[NVMTL_FX_SUB]; uint32_t nsub; nvmtl_fx_gone gone[NVMTL_FX_GONE]; uint32_t ngone;
+                 nvmtl_fx_buf buf[NVMTL_FX_BUFS]; uint32_t nbuf; } nvmtl_fx_state;
 
 static inline void nvmtl_fx_copy_name(char *dst, const char *src) { snprintf(dst, NVMTL_FX_NAME, "%s", src ? src : "-"); }
 
@@ -67,6 +73,21 @@ static inline void nvmtl_fx_slot_gone(nvmtl_fx_state *s, uint64_t seq, uint32_t 
     nvmtl_fx_gone *g = &s->gone[s->ngone % NVMTL_FX_GONE];
     memset(g, 0, sizeof *g); g->seq = seq; g->slot = slot; nvmtl_fx_copy_name(g->label, "heap slot");
     s->ngone++;
+}
+/* a buffer whose GPU address range [lo, lo + size) was released at sequence number seq */
+static inline void nvmtl_fx_buffer_gone(nvmtl_fx_state *s, uint64_t seq, uint64_t lo, uint64_t size, uint32_t where)
+{
+    if (!lo) return;   /* a buffer that never had a device address cannot be the one a fault names */
+    nvmtl_fx_buf *b = &s->buf[s->nbuf % NVMTL_FX_BUFS];
+    b->seq = seq; b->lo = lo; b->hi = lo + size; b->where = where;
+    s->nbuf++;
+}
+/* the newest recorded buffer death whose range held addr, or NULL: the question a FAULT_PTE address asks */
+static inline const nvmtl_fx_buf *nvmtl_fx_buffer_at(const nvmtl_fx_state *s, uint64_t addr)
+{
+    const uint32_t nb = s->nbuf < NVMTL_FX_BUFS ? s->nbuf : NVMTL_FX_BUFS;
+    for (uint32_t k = 0; k < nb; k++) { const nvmtl_fx_buf *b = &s->buf[(s->nbuf - 1 - k) % NVMTL_FX_BUFS]; if (addr >= b->lo && addr < b->hi) return b; }
+    return NULL;
 }
 
 /* The report: calls emit(line) once per line. The last `subs` submits, newest first, with their dispatches; every
@@ -111,6 +132,23 @@ static inline unsigned nvmtl_fx_report(const nvmtl_fx_state *s, uint64_t now_seq
     }
     snprintf(line, sizeof line, "fault context: %u deaths within the last %llu submits, %u dispatches bound a dead image", shown, (unsigned long long)window, dead);
     emit(ctx, line);
+    /* the buffer deaths of the window, newest first, four to a line: match the fault's address against these ranges */
+    {   const uint32_t nb = s->nbuf < NVMTL_FX_BUFS ? s->nbuf : NVMTL_FX_BUFS;
+        unsigned nshown = 0, per = 0; int o = 0;
+        for (uint32_t k = 0; k < nb; k++) {
+            const nvmtl_fx_buf *b = &s->buf[(s->nbuf - 1 - k) % NVMTL_FX_BUFS];
+            if (now_seq > window && b->seq + window < now_seq) continue;
+            if (!per) o = snprintf(line, sizeof line, "fault context: dead buffers (seq GPU lo..hi KB):");
+            o += snprintf(line + o, sizeof line - (size_t)o, " %llu 0x%llx..0x%llx %llu%s%s%s |", (unsigned long long)b->seq, (unsigned long long)b->lo,
+                          (unsigned long long)b->hi, (unsigned long long)((b->hi - b->lo) >> 10),
+                          b->where & NVMTL_FX_POOLED ? " pooled" : "", b->where & NVMTL_FX_PLACED ? " placed" : "", b->where & NVMTL_FX_PARKED ? " parked" : "");
+            nshown++;
+            if (++per == 4 || o >= (int)sizeof line - 80) { emit(ctx, line); per = 0; }
+        }
+        if (per) emit(ctx, line);
+        snprintf(line, sizeof line, "fault context: %u buffer deaths within the last %llu submits (%u recorded in all)", nshown, (unsigned long long)window, s->nbuf);
+        emit(ctx, line);
+    }
     return dead;
 }
 #endif
