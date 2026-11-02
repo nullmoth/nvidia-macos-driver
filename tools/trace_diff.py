@@ -19,7 +19,7 @@ import re, sys
 EVENT = [
     ('CB',       re.compile(r'^CB commit #(\d+)')),
     ('PASS',     re.compile(r'^PASS target (\d+x\d+) surf \S+ view (-?\d+) load (\d+) store (\d+) clear \((.*?)\) depth (\d+)')),
-    ('DRAW',     re.compile(r'^DRAW (?:patches \d+ cp|type \d+) \| vs (\S+) \| fs (\S+) \| blend (\S+)')),
+    ('DRAW',     re.compile(r'^DRAW (?:patches \d+ cp|type \d+) \| vs (\S+) \| fs (\S+) \| blend (.*)$')),
     ('PSO',      re.compile(r'^PSO \S+ (\S+) / (\S+) vs ([0-9a-f]{8}) fs ([0-9a-f]{8})')),
     ('DISPATCH', re.compile(r'^DISPATCH (\S+) \| threads (\d+x\d+x\d+) tg (\d+x\d+x\d+)')),
     ('FTEX',     re.compile(r'^FTEX\[(\d+)\] (\d+x\d+) surf \S+ view (-?\d+)')),
@@ -40,6 +40,8 @@ def normalize(line):
 def parse(lines):
     """-> list of command buffers; each a list of (kind, key) events. A render pass is one event whose key folds the
     pass geometry and every DRAW (with its FTEX/FSAMP state) inside it, so a pass compares as a unit."""
+    lines = list(lines)
+    has_cb = any(l.startswith('CB commit') for l in lines)
     cbs, cur, pas, draw_state = [], None, None, []
     def close_pass():
         nonlocal pas
@@ -53,9 +55,11 @@ def parse(lines):
             m = rx.match(s)
             if m: kind = k; break
         if not kind: continue
-        if kind == 'CB':
+        if kind == 'CB' or (kind == 'SURFOUT' and not has_cb):
+            # a trace without "CB commit" lines (the 2.7 vocabulary) is cut at the present instead: one unit per frame
             close_pass()
             cur = []; cbs.append(cur); draw_state = []
+            if kind == 'SURFOUT': continue
         elif cur is None:
             continue                      # before the first complete command buffer
         elif kind == 'PASS':
@@ -139,6 +143,12 @@ def selftest():
     assert 'FTEX 2 3840x2160 3' in b2[1][first['event']][1]
     print('selftest 2 ok: the negative control fires at command buffer 1, the 1920x1080 pass whose FTEX[2] view differs')
     assert parse(['DRAW type 3 | vs x | fs y | blend off']) == []
+    so = ['SURFOUT surf 45 1920x1080 vramOn 1 t=1', 'PASS target 1280x720 surf 0 view 0 load 1 store 1 clear (0 0 0 1) depth 1',
+          'PSO 0x7 vs_main_ / ps_main_ vs ea1d37ea fs 410d3ada | ', 'DRAW type 3 | vs vs_main_ | fs ps_main_ | blend 0 rgb(1,0,op 0) a(1,0,op 0) mask f fmt 58',
+          'SURFOUT surf 45 1920x1080 vramOn 1 t=2']
+    c = parse(so)
+    assert len(c) == 2 and c[0][0][0] == 'PASS' and 'fmt 58' in c[0][0][1] and 'ea1d37ea' in c[0][0][1], c
+    print('selftest 4 ok: a trace without CB commit lines is cut at SURFOUT and the DRAW keeps blend state and attachment format')
     print('selftest 3 ok: events before the first command buffer are ignored')
     return 0
 
