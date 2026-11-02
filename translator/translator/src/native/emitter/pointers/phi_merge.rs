@@ -46,11 +46,26 @@ impl Emitter {
         let LlType::Ptr(addrspace @ 0..=2) = result_ty else {
             return Ok(None);
         };
-        if !self.bda_device_pointers
-            || !incoming
-                .iter()
-                .all(|(value, _)| self.bda_phi_value_is_addressable(value))
-        {
+        if !self.bda_device_pointers {
+            return Ok(None);
+        }
+        // A phi that joins a bare loaded device pointer with a constant-offset GEP of one (`phi [gep i8 %p, 16], [%q]`)
+        // is also an address phi: bda_phi_address_id materializes the GEP arm on its edge. The provenance lowering it
+        // used to fall to converted only the GEP arm and left the bare arm's pointer id undefined ("owned Select
+        // references undefined id", three Cyberpunk G-buffer material shaders in the argument-buffer sampler mode).
+        // Only that mixed shape: phis whose every arm is a GEP keep the lowering they already translated with
+        // (widening it to all of them changed 302 passing Cyberpunk modules).
+        let all_bare = incoming
+            .iter()
+            .all(|(value, _)| self.bda_phi_value_is_addressable(value));
+        let mixed = !all_bare
+            && incoming.iter().any(|(value, _)| {
+                matches!(value, LlValue::Local(_)) && self.bda_phi_value_is_addressable(value)
+            })
+            && incoming.iter().all(|(value, _)| {
+                self.bda_phi_value_is_addressable(value) || self.bda_const_offset_address(value)
+            });
+        if !all_bare && !mixed {
             return Ok(None);
         }
 
@@ -70,6 +85,14 @@ impl Emitter {
             .insert(name.to_string(), LlType::Int(8));
         self.gep_provenance.remove(name);
         Ok(Some(result))
+    }
+
+    /// A device address plus a constant byte offset, already modeled: bda_phi_address_id materializes it exactly.
+    fn bda_const_offset_address(&self, value: &LlValue) -> bool {
+        let LlValue::Local(name) = value else { return false };
+        self.raw_offsets.get(name).is_some_and(|raw| {
+            raw.dyn_terms.is_empty() && !raw.unmodelable && raw.device_addr_base.is_some()
+        })
     }
 
     pub(in crate::native::emitter) fn bda_phi_value_is_addressable(&self, value: &LlValue) -> bool {
@@ -92,13 +115,6 @@ impl Emitter {
                             && raw.dyn_terms.is_empty()
                             && (raw.device_addr_base.is_some()
                                 || self.bda_direct_addresses.contains_key(&raw.root))
-                    })
-                    // A device address plus a constant byte offset (`gep i8, %loaded_ptr, 16`): bda_phi_address_id
-                    // materializes it on the edge. Without this, a phi of one such GEP and one bare loaded pointer fell
-                    // to the provenance lowering, which converted only the GEP arm and left the bare arm's pointer id
-                    // undefined ("owned Select references undefined id", three Cyberpunk G-buffer material shaders).
-                    || self.raw_offsets.get(name).is_some_and(|raw| {
-                        raw.dyn_terms.is_empty() && !raw.unmodelable && raw.device_addr_base.is_some()
                     })
                 {
                     return true;
