@@ -984,11 +984,26 @@ static int nvmtl_vk_initialize(void)
         const char *off = getenv("NVMTL_NO_BINDLESS");
         g_bindless = gpf2 && !(off && *off == '1') && q12.descriptorIndexing && q12.runtimeDescriptorArray &&
                      q12.shaderSampledImageArrayNonUniformIndexing && q12.descriptorBindingPartiallyBound &&
-                     q12.descriptorBindingSampledImageUpdateAfterBind && q12.descriptorBindingUpdateUnusedWhilePending;
+                     q12.descriptorBindingSampledImageUpdateAfterBind && q12.descriptorBindingUpdateUnusedWhilePending &&
+                     q12.shaderStorageImageArrayNonUniformIndexing &&
+                     q12.shaderUniformTexelBufferArrayNonUniformIndexing && q12.shaderStorageTexelBufferArrayNonUniformIndexing &&
+                     q12.descriptorBindingStorageImageUpdateAfterBind &&
+                     q12.descriptorBindingUniformTexelBufferUpdateAfterBind && q12.descriptorBindingStorageTexelBufferUpdateAfterBind;
         if (g_bindless) {
             v12.descriptorIndexing = v12.runtimeDescriptorArray = v12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
             v12.descriptorBindingPartiallyBound = v12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
             v12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+            // The heap has five bands: sampled images, samplers, storage images, uniform texel buffers and storage texel
+            // buffers. Every band is update-after-bind, and translated storage-image indexes are nonuniform. A layout
+            // whose storage bindings carry UPDATE_AFTER_BIND without these device features is invalid, so the five-binding
+            // heap was refused and the two-binding heap took its place.
+            v12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
+            v12.shaderUniformTexelBufferArrayNonUniformIndexing = VK_TRUE;
+            v12.shaderStorageTexelBufferArrayNonUniformIndexing = VK_TRUE;
+            v12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
+            v12.descriptorBindingUniformTexelBufferUpdateAfterBind = VK_TRUE;
+            v12.descriptorBindingStorageTexelBufferUpdateAfterBind = VK_TRUE;
+            nvlog("vk: bindless storage images and texel buffers: nonuniform indexing and update-after-bind enabled");
         }
         nvlog("vk: descriptor indexing %s - bindless textures %s", g_bindless ? "present" : (off && *off == '1') ? "DISABLED by NVMTL_NO_BINDLESS" : "ABSENT",
               g_bindless ? "ON (set 2)" : "OFF");
