@@ -2300,6 +2300,7 @@ static nvk_image             g_dummyImg;
 #define NVMTL_BINDLESS_SAMPLER_SLOTS 2048   /* the translator's reflect::BINDLESS_SAMPLER_SLOTS; slot 0 stays the dummy */
 static VkDescriptorSetLayout g_heapLayout; static VkDescriptorPool g_heapPool; static VkDescriptorSet g_heapSet;
 static int g_heap_sampler_binding;   /* 1 = binding 1 holds samplers (NVMTL_ARGBUF_SAMPLERS=1) */
+static int g_heap_storage_binding;   /* 1 = bindings 2-4 hold storage images / uniform + storage texel buffers */
 static pthread_mutex_t g_heap_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t g_heap_next = 1;
 static uint32_t g_heap_fifo[NVMTL_BINDLESS_SLOTS]; static uint32_t g_heap_fifo_head, g_heap_fifo_n, g_heap_live;
@@ -2622,14 +2623,25 @@ static int ensure_descriptors_locked(void)
         // buffer holds is read as the slot in the low word of its gpuResourceID, nvmtl_vk_bindless_sampler_slot)
         // NVMTL_NO_ARGBUF_SAMPLERS=1 leaves the sampler binding out. A device that refuses the two-binding heap gets the
         // one-binding heap (below), never none: a heap that fails to create turns every bindless texture off.
-        const char *nas = getenv("NVMTL_NO_ARGBUF_SAMPLERS"); uint32_t hnb = (nas && nas[0] == '1') ? 1u : 2u;
-        const VkDescriptorBindingFlags hfs[2] = { hf, hf };
+        // bindings 2-4: storage images, uniform texel buffers, storage texel buffers - the translator's
+        // BINDLESS_STORAGE/UTEXEL/STEXEL_BINDING. A shader reaches a texture it writes, or a texture buffer, through
+        // these; a heap without them leaves those descriptors unbound (Cyberpunk: 621 modules write storage images
+        // through the heap, and every one of them drew with undefined descriptors - wrong colors).
+        // NVMTL_NO_HEAP_STORAGE=1 keeps the two-binding heap.
+        const char *nas = getenv("NVMTL_NO_ARGBUF_SAMPLERS"), *nhs = getenv("NVMTL_NO_HEAP_STORAGE");
+        uint32_t hnb = (nas && nas[0] == '1') ? 1u : (nhs && nhs[0] == '1') ? 2u : 5u;
+        const VkDescriptorBindingFlags hfs[5] = { hf, hf, hf, hf, hf };
         VkDescriptorSetLayoutBindingFlagsCreateInfo hfi = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO, NULL, hnb, hfs };
-        VkDescriptorSetLayoutBinding hb[2] = { { 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NVMTL_BINDLESS_SLOTS, VK_SHADER_STAGE_ALL, NULL },
-                                               { 1, VK_DESCRIPTOR_TYPE_SAMPLER, NVMTL_BINDLESS_SAMPLER_SLOTS, VK_SHADER_STAGE_ALL, NULL } };
+        VkDescriptorSetLayoutBinding hb[5] = { { 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NVMTL_BINDLESS_SLOTS, VK_SHADER_STAGE_ALL, NULL },
+                                               { 1, VK_DESCRIPTOR_TYPE_SAMPLER, NVMTL_BINDLESS_SAMPLER_SLOTS, VK_SHADER_STAGE_ALL, NULL },
+                                               { 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, NVMTL_BINDLESS_SLOTS, VK_SHADER_STAGE_ALL, NULL },
+                                               { 3, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, NVMTL_BINDLESS_SLOTS, VK_SHADER_STAGE_ALL, NULL },
+                                               { 4, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NVMTL_BINDLESS_SLOTS, VK_SHADER_STAGE_ALL, NULL } };
         VkDescriptorSetLayoutCreateInfo hli = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, &hfi,
                                                 VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT, hnb, hb };
-        VkDescriptorPoolSize hs[2] = { { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NVMTL_BINDLESS_SLOTS }, { VK_DESCRIPTOR_TYPE_SAMPLER, NVMTL_BINDLESS_SAMPLER_SLOTS } };
+        VkDescriptorPoolSize hs[5] = { { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NVMTL_BINDLESS_SLOTS }, { VK_DESCRIPTOR_TYPE_SAMPLER, NVMTL_BINDLESS_SAMPLER_SLOTS },
+                                       { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, NVMTL_BINDLESS_SLOTS }, { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, NVMTL_BINDLESS_SLOTS },
+                                       { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NVMTL_BINDLESS_SLOTS } };
         VkDescriptorPoolCreateInfo hpi = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL,
                                            VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT, 1, hnb, hs };
         VkDescriptorSetLayout hl = VK_NULL_HANDLE; VkDescriptorPool hp = VK_NULL_HANDLE; VkDescriptorSet hset = VK_NULL_HANDLE;
@@ -2641,10 +2653,12 @@ static int ensure_descriptors_locked(void)
             if (hr == VK_SUCCESS) { VkDescriptorSetAllocateInfo hai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, hp, 1, &hl };
                                     hr = pvkAllocateDescriptorSets(g_dev, &hai, &hset); }
             if (hr == VK_SUCCESS || hnb == 1) break;
-            nvlog("vk: BINDLESS heap with the sampler binding refused (vk result %d) - the texture-only heap instead; argument-buffer samplers read the default", (int)hr);
+            nvlog("vk: BINDLESS heap with %u bindings refused (vk result %d) - %s", hnb, (int)hr,
+                  hnb == 5 ? "two bindings instead; kernels that write a texture they read from memory are refused"
+                           : "the texture-only heap instead; argument-buffer samplers read the default");
             if (hp) { pvkDestroyDescriptorPool(g_dev, hp, NULL); hp = VK_NULL_HANDLE; }
             if (hl) { pvkDestroyDescriptorSetLayout(g_dev, hl, NULL); hl = VK_NULL_HANDLE; }
-            hset = VK_NULL_HANDLE; hnb = 1;
+            hset = VK_NULL_HANDLE; hnb = hnb == 5 ? 2u : 1u;
         }
         VkDescriptorImageInfo *fill = hr == VK_SUCCESS ? (VkDescriptorImageInfo *)malloc(sizeof *fill * NVMTL_BINDLESS_SLOTS) : NULL;
         if (fill && g_dummyImg.view) {
@@ -2658,7 +2672,8 @@ static int ensure_descriptors_locked(void)
                 sfill[k] = (VkDescriptorImageInfo){ (VkSampler)g_dummySampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
             VkWriteDescriptorSet sw = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, hset, 1, 0, NVMTL_BINDLESS_SAMPLER_SLOTS,
                                         VK_DESCRIPTOR_TYPE_SAMPLER, sfill, NULL, NULL };
-            if (hnb == 2) { pvkUpdateDescriptorSets(g_dev, 1, &sw, 0, NULL); g_heap_sampler_binding = 1; }
+            if (hnb >= 2) { pvkUpdateDescriptorSets(g_dev, 1, &sw, 0, NULL); g_heap_sampler_binding = 1; }
+            if (hnb == 5) g_heap_storage_binding = 1;   // partially bound: a slot no texture filled is never read
             g_heapLayout = hl; g_heapPool = hp; g_heapSet = hset;
             nvlog("vk: BINDLESS heap ready - set 2, %d sampled images, every slot the dummy until a texture asks for its gpuResourceID", NVMTL_BINDLESS_SLOTS);
         } else {
@@ -2722,6 +2737,45 @@ uint32_t nvmtl_vk_bindless_put(void *view)
     pthread_mutex_unlock(&g_heap_lock);
     if (!slot) { static int said; if (!said++) nvlog("vk: BINDLESS heap FULL (%d live) - this texture gets a lookup token, not a slot", NVMTL_BINDLESS_SLOTS); }
     else if ((live & 0xFFF) == 0) nvlog("vk: BINDLESS heap census - %u textures hold slots", live);
+    return slot;
+}
+// The storage descriptor of a heap slot: the texture's identity view when it can be a storage image, else the storage
+// dummy, so a slot recycled from a storage texture never keeps a dead view. No-op without bindings 2-4.
+void nvmtl_vk_bindless_put_storage(uint32_t slot, void *view)
+{
+    if (!slot || !g_heapSet || !g_heap_storage_binding) return;
+    void *v = view ? view : g_dummyStex.view;
+    if (!v) return;
+    VkDescriptorImageInfo ii = { VK_NULL_HANDLE, (VkImageView)v, VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 2, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ii, NULL, NULL };
+    pthread_mutex_lock(&g_heap_lock);
+    pvkUpdateDescriptorSets(g_dev, 1, &w, 0, NULL);
+    pthread_mutex_unlock(&g_heap_lock);
+    { static int said; if (view && !said++) nvlog("vk: BINDLESS storage heap - first storage texture at slot %u", slot); }
+}
+// A texture buffer's heap slot: its VkBufferView at binding 3 (uniform texel, reads) and, when the view can be written,
+// binding 4 (storage texel, writes). The translator reads a texture-buffer handle from memory as that slot. 0 = no slot.
+uint32_t nvmtl_vk_bindless_put_texel(void *bufview, int storage)
+{
+    if (!bufview || ensure_descriptors() || !g_heapSet || !g_heap_storage_binding) return 0;
+    uint32_t slot = 0;
+    pthread_mutex_lock(&g_heap_lock);
+    if (g_heap_next < NVMTL_BINDLESS_SLOTS) slot = g_heap_next++;
+    else if (g_heap_fifo_n > NVMTL_BINDLESS_QUARANTINE) {
+        slot = g_heap_fifo[g_heap_fifo_head]; g_heap_fifo_head = (g_heap_fifo_head + 1) % NVMTL_BINDLESS_SLOTS; g_heap_fifo_n--;
+    }
+    if (slot) {
+        VkBufferView bv = (VkBufferView)bufview;
+        VkDescriptorImageInfo di = { VK_NULL_HANDLE, (VkImageView)g_dummyImg.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet w[3]; uint32_t n = 0;
+        if (g_dummyImg.view) w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 0, slot, 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &di, NULL, NULL };
+        w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 3, slot, 1, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, NULL, NULL, &bv };
+        if (storage) w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 4, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NULL, NULL, &bv };
+        pvkUpdateDescriptorSets(g_dev, n, w, 0, NULL);
+        g_heap_live++;
+    }
+    pthread_mutex_unlock(&g_heap_lock);
+    { static int said; if (slot && !said++) nvlog("vk: BINDLESS texel heap - first texture buffer at slot %u%s", slot, storage ? " (writable)" : ""); }
     return slot;
 }
 void nvmtl_vk_bindless_drop(uint32_t slot);

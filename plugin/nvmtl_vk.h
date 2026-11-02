@@ -239,6 +239,8 @@ int  nvmtl_vk_image_create_ex2(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t 
 int  nvmtl_vk_format_is_storage(uint32_t vkfmt);
 int  nvmtl_vk_bind_storage_view(nvk_cmdbuf *c, uint32_t set, uint32_t index, void *view);
 uint32_t nvmtl_vk_bindless_put(void *view);
+void nvmtl_vk_bindless_put_storage(uint32_t slot, void *view);
+uint32_t nvmtl_vk_bindless_put_texel(void *bufview, int storage);
 uint32_t nvmtl_vk_bindless_sampler_slot(void *vksampler);
 void     nvmtl_vk_bindless_drop(uint32_t slot);
 int  nvmtl_vk_pipeline_create_ex(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vkfmt, int hasDepth, nvk_pipeline *out);
