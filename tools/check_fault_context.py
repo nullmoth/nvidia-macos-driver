@@ -40,6 +40,9 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_live_remove\(b\);", 2),                                      # destroy + park free leave it
     ("nvmtl_vk.c", r"nvmtl_live_relabel\(&page->buffer, NVMTL_LV_PAGE\)", 1),
     ("nvmtl_vk.c", r"nvmtl_fault_file_write\(c\);", 1),                                 # the fault file at device loss
+    ("nvmtl_vk.c", r"nvmtl_buffer_grace_reap\(\);", 1),                                  # freed buffers destroyed only after their submits complete
+    ("nvmtl_vk.c", r"nvmtl_live_relabel\(b, NVMTL_LV_DYING\)", 1),
+    ("nvmtl_vk.c", r"root dispatch %u b%u \+%u", 1),                                      # the pointers inside a root buffer, resolved
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev}
 short = []; total = 0
