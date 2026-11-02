@@ -69,6 +69,10 @@ hooks = [
     ("NVMTLObjects.m", r"nvmtl_vk_image_parked\(img\)", 2),                            # both parks
     ("NVMTLObjects.m", r"nvmtl_vk_image_recycled\(out\)", 2),                          # both unparks
     ("NVMTLEmbedded.m", r"VIEW NVMTLTexture %p", 1),
+    ("nvmtl_vk.c", r"nvmtl_loss_mutex_lock\(&g_", 14),                                   # every lock in the loss path is bounded
+    ("nvmtl_vk.c", r"nvmtl_loss_read\(", 5),                                             # every host read in the loss path goes through the kernel
+    ("nvmtl_vk.c", r"nvmtl_loss_section\(f, ", 6),                                       # flushed, announced sections
+    ("nvmtl_vk.c", r"a second device-loss dump on another thread - skipped", 1),
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev, "NVMTLEmbedded.m": emb}
 short = []; total = 0

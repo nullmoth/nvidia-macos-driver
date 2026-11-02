@@ -106,5 +106,20 @@ int main(void)
         nout = 0; w = nvmtl_fx_writers(&s5, &me, cb, 100, 2, 2, 0x100000, 0x140000, emit, NULL);
         arm("a dispatch of the submit two back that overlaps the root is named; three back is not", w == 3 && has("froxel 0d2845ba (dispatch 1, seq 98, b7)") && !has("seq 97"));
     }
+    /* the device-loss report can neither hang on a lock nor crash on a read */
+    {   pthread_mutex_t held = PTHREAD_MUTEX_INITIALIZER, freem = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&held);
+        struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+        const int got = nvmtl_fx_lock_bounded(&held, 50);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        const double ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+        arm("a lock another thread holds is given up within its bound, not waited for forever (the b74e536 dump stopped after the pages section)", got == 0 && ms >= 40 && ms < 400);
+        arm("  a free lock is taken at once (negative control)", nvmtl_fx_lock_bounded(&freem, 50) == 1);
+        pthread_mutex_unlock(&freem); pthread_mutex_unlock(&held);
+        uint64_t word = 0x1234567887654321ull, out = 0;
+        arm("a host read of mapped memory through the kernel returns the bytes", nvmtl_fx_read_safe(&word, &out, 8) && out == word);
+        void *bad = (void *)0x10;
+        arm("  a read of an unmapped address is refused, not a crash (negative control)", nvmtl_fx_read_safe(bad, &out, 8) == 0);
+    }
     return fails ? 1 : 0;
 }
