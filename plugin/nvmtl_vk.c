@@ -3103,6 +3103,11 @@ static int ensure_descriptors_locked(void)
                   pthread_mutex_unlock(&g_sl_lock);
               } else if (hnb == 5) nvlog("vk: BINDLESS heap bindings 2-4 left unwritten for unfilled slots (%s)", prefill ? "no storage dummy" : "NVMTL_HEAP_PREFILL=0"); }
             g_heapLayout = hl; g_heapPool = hp; g_heapSet = hset;
+            {   static const char *const tn[] = { "SAMPLER", "COMBINED", "SAMPLED_IMAGE", "STORAGE_IMAGE", "UNIFORM_TEXEL", "STORAGE_TEXEL" };
+                for (uint32_t i = 0; i < hnb; i++)
+                    nvlog("vk: BINDLESS heap layout binding %u: type %u (%s), count %u, flags 0x%x%s%s%s", hb[i].binding, hb[i].descriptorType, hb[i].descriptorType < 6 ? tn[hb[i].descriptorType] : "?", hb[i].descriptorCount, hfs[i],
+                          hfs[i] & VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT ? " UPDATE_AFTER_BIND" : "", hfs[i] & VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT ? " PARTIALLY_BOUND" : "", hfs[i] & VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT ? " VARIABLE_COUNT" : "");
+                nvlog("vk: BINDLESS heap set %p (layout %p, pool %p, UPDATE_AFTER_BIND pool) created once at seq %llu; it is never reallocated or moved", (void *)hset, (void *)hl, (void *)hp, (unsigned long long)g_cmd_submitted); }
             nvlog("vk: BINDLESS heap ready - set 2, %d sampled images, every slot the dummy until a texture asks for its gpuResourceID", NVMTL_BINDLESS_SLOTS);
         } else {
             nvlog("vk: BINDLESS heap NOT created (vk result %d, fill %s) - gpuResourceID stays a lookup token, a runtime-indexed texture reads element 0",
@@ -3132,11 +3137,25 @@ static void nvmtl_slots_write(uint32_t slot, uint32_t binding, const void *view)
 { pthread_mutex_lock(&g_sl_lock); if (!nvmtl_sl_init(&g_sl, NVMTL_BINDLESS_SLOTS)) nvmtl_sl_write(&g_sl, slot, binding, view, g_cmd_submitted); pthread_mutex_unlock(&g_sl_lock); }
 static void nvmtl_slots_drop(uint32_t slot)
 { pthread_mutex_lock(&g_sl_lock); if (!nvmtl_sl_init(&g_sl, NVMTL_BINDLESS_SLOTS)) nvmtl_sl_drop(&g_sl, slot, g_cmd_submitted); pthread_mutex_unlock(&g_sl_lock); }
+// NVMTL_HEAP_WRITE_FENCE=1: after every heap descriptor write, a full fence drains the CPU's write-combining buffers
+// (the descriptor pool is device memory mapped through the BAR, and the ICD's sync-to-GPU does nothing for it), so a
+// just-written element is visible to the GPU before the submit that reads it. A diagnostic arm, off by default.
+static void nvmtl_heap_write_fence(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_HEAP_WRITE_FENCE"); on = e && e[0] == '1'; if (on) nvlog("vk: heap descriptor writes are fenced (NVMTL_HEAP_WRITE_FENCE=1)"); }
+    if (!on) return;
+#if defined(__x86_64__)
+    __asm__ __volatile__("sfence; mfence" ::: "memory");
+#else
+    __sync_synchronize();
+#endif
+}
 static void nvmtl_heap_write_locked(uint32_t slot, void *view)
 {
     VkDescriptorImageInfo ii = { VK_NULL_HANDLE, (VkImageView)view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 0, slot, 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ii, NULL, NULL };
-    pvkUpdateDescriptorSets(g_dev, 1, &w, 0, NULL);
+    pvkUpdateDescriptorSets(g_dev, 1, &w, 0, NULL); nvmtl_heap_write_fence();
     nvmtl_slots_write(slot, 0, view);
 }
 // A heap slot for a sampler an argument buffer carries (Metal argument buffers hold samplers by gpuResourceID). Samplers
@@ -3184,7 +3203,7 @@ void nvmtl_vk_bindless_put_storage(uint32_t slot, void *view)
     VkDescriptorImageInfo ii = { VK_NULL_HANDLE, (VkImageView)v, VK_IMAGE_LAYOUT_GENERAL };
     VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 2, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ii, NULL, NULL };
     pthread_mutex_lock(&g_heap_lock);
-    pvkUpdateDescriptorSets(g_dev, 1, &w, 0, NULL);
+    pvkUpdateDescriptorSets(g_dev, 1, &w, 0, NULL); nvmtl_heap_write_fence();
     pthread_mutex_unlock(&g_heap_lock);
     nvmtl_slots_write(slot, 2, v);
     { static int said; if (view && !said++) nvlog("vk: BINDLESS storage heap - first storage texture at slot %u", slot); }
@@ -3207,7 +3226,7 @@ uint32_t nvmtl_vk_bindless_put_texel(void *bufview, int storage)
         if (g_dummyImg.view) w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 0, slot, 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &di, NULL, NULL };
         w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 3, slot, 1, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, NULL, NULL, &bv };
         if (storage) w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 4, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NULL, NULL, &bv };
-        pvkUpdateDescriptorSets(g_dev, n, w, 0, NULL);
+        pvkUpdateDescriptorSets(g_dev, n, w, 0, NULL); nvmtl_heap_write_fence();
         g_heap_live++;
         nvmtl_slots_alloc(slot); nvmtl_slots_write(slot, 0, g_dummyImg.view); nvmtl_slots_write(slot, 3, bufview); if (storage) nvmtl_slots_write(slot, 4, bufview);
     }
@@ -3309,7 +3328,7 @@ static void nvmtl_vk_bindless_drop_now(uint32_t slot)
         if (nvmtl_heap_storage_dummy()) w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 2, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &si, NULL, NULL };
         if (tv) { w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 3, slot, 1, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, NULL, NULL, &tv };
                   w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 4, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NULL, NULL, &tv }; }
-        if (n) pvkUpdateDescriptorSets(g_dev, n, w, 0, NULL);
+        if (n) { pvkUpdateDescriptorSets(g_dev, n, w, 0, NULL); nvmtl_heap_write_fence(); }
         if (nvmtl_heap_storage_dummy()) nvmtl_slots_write(slot, 2, nvmtl_heap_storage_dummy());
         if (tv) { nvmtl_slots_write(slot, 3, tv); nvmtl_slots_write(slot, 4, tv); }
     }
@@ -5569,7 +5588,7 @@ static void nvmtl_fx_dump(const char *why)
 static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c, const nvk_pipeline *p)
 {
     c->fx.tab[0] = c->tab_out[0]; c->fx.tab[1] = c->tab_out[1]; c->fx.dyn[0] = c->dyn_out[0]; c->fx.dyn[1] = c->dyn_out[1];
-    c->fx.nroot = 0;
+    c->fx.nroot = 0; c->fx.heap_set = g_heapSet;
     if (c->table) for (unsigned i = 0; i < NVMTL_NBUF && c->fx.nroot < NVMTL_FX_ROOT; i++) {
         const nvmtl_slot *s = &((const nvmtl_bindtable *)c->table)->s[0][i];
         if (s->kind != NVMTL_SLOT_BUF || !s->address) continue;
@@ -5699,13 +5718,30 @@ static int nvmtl_nvk_tic_read(uint32_t index, uint32_t w[8], uint64_t *table_gpu
     *table_gpu = base ? base + off : 0;
     return 1;
 }
+// A set's binding layout (offset in the set, element stride, element count) and host map, through the layout reader
+static int nvmtl_nvk_set_binding(const void *set, uint32_t binding, uint32_t *off, uint32_t *stride, uint32_t *count, void **map)
+{
+    const uint8_t *sp = (const uint8_t *)set; void *layout = NULL, *m = NULL; uint8_t st = 0;
+    if (!sp || !nvmtl_fx_read_safe(sp + NVK_L_SET_LAYOUT, &layout, 8) || !nvmtl_fx_read_safe(sp + NVK_L_SET_MAP, &m, 8) || !layout || !m) return 0;
+    const uint8_t *b = (const uint8_t *)layout + NVK_L_LAYOUT_BINDING + (size_t)binding * NVK_L_BINDING_SIZE;
+    if (!nvmtl_fx_read_safe(b + NVK_L_BINDING_OFFSET, off, 4) || !nvmtl_fx_read_safe(b + NVK_L_BINDING_STRIDE, &st, 1) || !nvmtl_fx_read_safe(b + NVK_L_BINDING_ARRAY_SIZE, count, 4) || !st) return 0;
+    *stride = st; if (map) *map = m;
+    return 1;
+}
+// The set's GPU address: its pool's memory base address + the set's offset in the pool (nvk_descriptor_set_addr)
+static int nvmtl_nvk_set_gpu_addr(const void *set, uint64_t *addr)
+{
+    const uint8_t *sp = (const uint8_t *)set; void *pool = NULL, *mem = NULL, *va = NULL; uint64_t base = 0, off = 0;
+    if (!sp || !nvmtl_fx_read_safe(sp + NVK_L_SET_POOL, &pool, 8) || !pool || !nvmtl_fx_read_safe((const uint8_t *)pool + NVK_L_POOL_MEM, &mem, 8) || !mem) return 0;
+    if (!nvmtl_fx_read_safe((const uint8_t *)mem + NVK_L_NVKMD_MEM_VA, &va, 8) || !va || !nvmtl_fx_read_safe((const uint8_t *)va + NVK_L_NVKMD_VA_ADDR, &base, 8) || !base) return 0;
+    if (!nvmtl_fx_read_safe(sp + NVK_L_SET_MEM_OFFSET, &off, 8)) return 0;
+    *addr = base + off;
+    return 1;
+}
 static int nvmtl_nvk_set_element(uint32_t binding, uint32_t slot, uint32_t *out)
 {
-    const uint8_t *set = (const uint8_t *)g_heapSet; void *layout = NULL, *map = NULL; uint32_t off = 0, arr = 0; uint8_t stride = 0;
-    if (!set || !nvmtl_fx_read_safe(set + NVK_L_SET_LAYOUT, &layout, 8) || !nvmtl_fx_read_safe(set + NVK_L_SET_MAP, &map, 8) || !layout || !map) return 0;
-    const uint8_t *b = (const uint8_t *)layout + NVK_L_LAYOUT_BINDING + (size_t)binding * NVK_L_BINDING_SIZE;
-    if (!nvmtl_fx_read_safe(b + NVK_L_BINDING_OFFSET, &off, 4) || !nvmtl_fx_read_safe(b + NVK_L_BINDING_STRIDE, &stride, 1) || !nvmtl_fx_read_safe(b + NVK_L_BINDING_ARRAY_SIZE, &arr, 4)) return 0;
-    if (slot >= arr || !stride) return 0;
+    uint32_t off = 0, stride = 0, arr = 0; void *map = NULL;
+    if (!nvmtl_nvk_set_binding(g_heapSet, binding, &off, &stride, &arr, &map) || slot >= arr) return 0;
     return nvmtl_fx_read_safe((const uint8_t *)map + off + (uint64_t)slot * stride, out, 4);
 }
 // At view creation: the indices and header addresses the view carries (only on the measured ICD build); at death: the seq.
@@ -5724,7 +5760,8 @@ static void nvmtl_vw_note_died(const void *view) { pthread_mutex_lock(&g_sl_lock
 // and header cache at that time; a header that differs from the host's copy names a mapping or cache the host did
 // not write. Diagnostic builds only (NVMTL_TABLE_SHADOW=1/0 overrides); it needs the layout reader's ICD match.
 #include "nvmtl_tabcopy_spv.h"
-static struct { VkShaderModule mod; VkPipelineLayout layout; VkPipeline pipe; nvk_buffer dst; uint32_t words, alloc_seen, mem_seen; uint64_t base_seen, seq, runs, growths; int state; } g_ts;
+static struct { VkShaderModule mod; VkPipelineLayout layout; VkPipeline pipe; nvk_buffer dst; uint32_t words, alloc_seen, mem_seen; uint64_t base_seen, seq, runs, growths; int state;
+                nvk_buffer set_dst; uint32_t set_words, b0_off, b0_stride, b0_count, b2_off, b2_stride, b2_count, b2_words_at; uint64_t set_addr, set_seq; } g_ts;
 static __thread int t_ts_inside;
 static int nvmtl_tabshadow_on(void)
 {
@@ -5776,9 +5813,26 @@ static int nvmtl_tabshadow_run(const char *why)
     pvkCmdDispatch(c.cb, (words + 63) / 64, 1, 1);
     VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT };
     pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    // the heap SET too: the binding-0 and binding-2 element arrays, from the set's own GPU address
+    int set_copied = 0;
+    if (g_heapSet && nvmtl_nvk_set_gpu_addr(g_heapSet, &g_ts.set_addr)
+        && nvmtl_nvk_set_binding(g_heapSet, 0, &g_ts.b0_off, &g_ts.b0_stride, &g_ts.b0_count, NULL) && nvmtl_nvk_set_binding(g_heapSet, 2, &g_ts.b2_off, &g_ts.b2_stride, &g_ts.b2_count, NULL)) {
+        const uint32_t w0 = g_ts.b0_count * g_ts.b0_stride / 4, w2 = g_ts.b2_count * g_ts.b2_stride / 4, swords = w0 + w2;
+        if (g_ts.set_dst.buf && g_ts.set_words < swords) { nvmtl_vk_buffer_destroy(&g_ts.set_dst); memset(&g_ts.set_dst, 0, sizeof g_ts.set_dst); g_ts.set_words = 0; }
+        if (!g_ts.set_dst.buf && nvmtl_vk_buffer_create((size_t)swords * 4, 1, &g_ts.set_dst) == 0 && g_ts.set_dst.map) { g_ts.set_words = swords; memset(g_ts.set_dst.map, 0, (size_t)swords * 4); }
+        const uint64_t sdst = g_ts.set_dst.buf ? nvmtl_vk_buffer_address(&g_ts.set_dst) : 0;
+        if (sdst && w0 && w2) {
+            g_ts.b2_words_at = w0;
+            struct { uint64_t src, dst; uint32_t n; uint32_t pad; } p0 = { g_ts.set_addr + g_ts.b0_off, sdst, w0, 0 }, p2 = { g_ts.set_addr + g_ts.b2_off, sdst + (uint64_t)w0 * 4, w2, 0 };
+            pvkCmdPushConstants(c.cb, g_ts.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 24, &p0); pvkCmdDispatch(c.cb, (w0 + 63) / 64, 1, 1);
+            pvkCmdPushConstants(c.cb, g_ts.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 24, &p2); pvkCmdDispatch(c.cb, (w2 + 63) / 64, 1, 1);
+            pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+            set_copied = 1;
+        }
+    }
     t_ts_inside = 1; const int r = nvmtl_vk_submit_wait(&c); t_ts_inside = 0;
     if (r) { nvlog("vk: table shadow copy (%s) failed to submit (%d)", why, r); return 0; }
-    g_ts.seq = g_cmd_submitted; g_ts.runs++;
+    g_ts.seq = g_cmd_submitted; g_ts.runs++; if (set_copied) g_ts.set_seq = g_cmd_submitted;
     if (g_ts.runs == 1 || (g_ts.runs & 0x3F) == 0) nvlog("vk: table shadow: %llu copies so far (%s), last at seq %llu, %u entries, %llu table growths seen", (unsigned long long)g_ts.runs, why, (unsigned long long)g_ts.seq, alloc, (unsigned long long)g_ts.growths);
     return 1;
 }
@@ -5790,6 +5844,15 @@ static void nvmtl_tabshadow_tick(void)
         const uint8_t *table = (const uint8_t *)g_dev + NVK_L_DEV_IMAGES; uint32_t alloc = 0, mem_count = 0;
         if (nvmtl_fx_read_safe(table + NVK_L_TABLE_ALLOC, &alloc, 4) && nvmtl_fx_read_safe(table + NVK_L_ARENA_MEM_COUNT, &mem_count, 4) && g_ts.alloc_seen && (alloc != g_ts.alloc_seen || mem_count != g_ts.mem_seen)) nvmtl_tabshadow_run("growth");
     }
+}
+// The GPU's copy of a heap set element (binding 0 or 2), 0 when the set shadow has none
+static int nvmtl_setshadow_element(uint32_t binding, uint32_t slot, uint32_t *out)
+{
+    if (!g_ts.set_dst.map || !g_ts.set_seq || (binding != 0 && binding != 2)) return 0;
+    const uint32_t stride = binding == 2 ? g_ts.b2_stride : g_ts.b0_stride, count = binding == 2 ? g_ts.b2_count : g_ts.b0_count, at = binding == 2 ? g_ts.b2_words_at : 0;
+    if (slot >= count || stride != 4) return 0;
+    *out = ((const uint32_t *)g_ts.set_dst.map)[at + slot];
+    return 1;
 }
 // The shadow's words for an index (0 when the shadow has none)
 static int nvmtl_tabshadow_words(uint32_t index, uint32_t w[8])
@@ -5819,6 +5882,17 @@ static void nvmtl_tabshadow_census(FILE *f)
     snprintf(line, sizeof line, "fault context: table shadow census: %u of %u entries DIFFER between the host's table and the GPU's copy (shadow taken at seq %llu, %llu submits before the loss; %llu copies, %llu growths)",
              differ, compared, (unsigned long long)g_ts.seq, (unsigned long long)(g_cmd_submitted - g_ts.seq), (unsigned long long)g_ts.runs, (unsigned long long)g_ts.growths);
     nvmtl_fx_emit_both(f, line);
+    if (g_ts.set_seq && g_ts.set_dst.map) {   // the heap set's elements, host against the GPU's copy, bindings 0 and 2
+        for (uint32_t b = 0; b <= 2; b += 2) {
+            uint32_t off = 0, stride = 0, count = 0; void *map = NULL; uint32_t sdiff = 0, sshown = 0;
+            if (!nvmtl_nvk_set_binding(g_heapSet, b, &off, &stride, &count, &map) || stride != 4) continue;
+            for (uint32_t k = 0; k < count; k++) { uint32_t hv = 0, gv = 0; if (!nvmtl_fx_read_safe((const uint8_t *)map + off + (uint64_t)k * 4, &hv, 4) || !nvmtl_setshadow_element(b, k, &gv)) continue;
+                if (hv == gv) continue; sdiff++;
+                if (sshown < 8) { snprintf(line, sizeof line, "fault context: heap set binding %u [%u] DIFFERS: host 0x%08x (index %u) vs GPU copy 0x%08x (index %u)", b, k, hv, hv & 0xFFFFFu, gv, gv & 0xFFFFFu); nvmtl_fx_emit_both(f, line); sshown++; } }
+            snprintf(line, sizeof line, "fault context: heap set binding %u census: %u of %u elements DIFFER between the host's set and the GPU's copy (copied at seq %llu, set GPU address 0x%llx + %u, stride %u)", b, sdiff, count,
+                     (unsigned long long)g_ts.set_seq, (unsigned long long)g_ts.set_addr, off, stride); nvmtl_fx_emit_both(f, line);
+        }
+    } else if (nvmtl_tabshadow_on()) { snprintf(line, sizeof line, "fault context: heap set shadow: no copy was made (set address or layout unreadable)"); nvmtl_fx_emit_both(f, line); }
 }
 static void nvmtl_fault_tic_line(const char *what, const uint32_t w[8], uint64_t expected, char *line, size_t cap)
 {
@@ -5854,6 +5928,14 @@ static void nvmtl_fault_nvk_slot(uint32_t slot, uint32_t binding, const void *vi
         const uint32_t k = elem & 0xFFFFFu;
         snprintf(line, sizeof line, "fault context:     NVK heap set binding %u [%u] stores 0x%08x -> image index %u: %s", binding, slot, elem, k,
                  k == idx ? "MATCHES the view" : "STALE INDEX - the set names another header than the view holds"); nvmtl_fx_emit_both(f, line);
+        uint32_t ge = 0;
+        if (nvmtl_setshadow_element(binding, slot, &ge)) {
+            const uint32_t gk = ge & 0xFFFFFu;
+            snprintf(line, sizeof line, "fault context:     GPU-side copy of heap set binding %u [%u] (seq %llu, %llu submits before the loss): 0x%08x -> image index %u: %s", binding, slot,
+                     (unsigned long long)g_ts.set_seq, (unsigned long long)(g_cmd_submitted - g_ts.set_seq), ge, gk, ge == elem ? "SAME as the host's element" : "DIFFERS from the host's element - the GPU reads another header");
+            nvmtl_fx_emit_both(f, line);
+            if (ge != elem && gk) { uint32_t wg[8]; uint64_t tgg = 0; if (nvmtl_nvk_tic_read(gk, wg, &tgg)) { nvmtl_fault_tic_line("the GPU set's header", wg, expected, line, sizeof line); nvmtl_fx_emit_both(f, line); } }
+        } else if (nvmtl_tabshadow_on()) { snprintf(line, sizeof line, "fault context:     GPU-side copy of the heap set: none covers binding %u [%u]", binding, slot); nvmtl_fx_emit_both(f, line); }
         if (k != idx) { if (nvmtl_nvk_tic_read(k, w2, &tg)) { nvmtl_fault_tic_line("the set's header", w2, expected, line, sizeof line); nvmtl_fx_emit_both(f, line); }
                         else { snprintf(line, sizeof line, "fault context:     NVK device table[%u]: unreadable", k); nvmtl_fx_emit_both(f, line); } }
     } else { snprintf(line, sizeof line, "fault context:     NVK heap set binding %u [%u]: element unreadable", binding, slot); nvmtl_fx_emit_both(f, line); }
@@ -5945,6 +6027,9 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
             if (!nvmtl_loss_read((const uint8_t *)pg->buffer.map + d->dyn[t], tblb, sizeof tblb, f)) continue;
             const uint64_t gpu = nvmtl_vk_buffer_address(&pg->buffer) + d->dyn[t];
             char line[1600]; int o = snprintf(line, sizeof line, "dispatch %u %s spv-fnv %08x air %016llx table[%d] GPU 0x%llx:", c->fx.total - nd + j + 1, d->name, d->key, (unsigned long long)d->air, t, (unsigned long long)gpu);
+            if (t == 0) { char hs[200]; uint64_t sa = 0; nvmtl_nvk_layout_ok() && nvmtl_nvk_set_gpu_addr(d->heap_set, &sa);
+                          snprintf(hs, sizeof hs, "fault context: dispatch %u was encoded against heap set %p (GPU 0x%llx); the heap set now is %p: %s", c->fx.total - nd + j + 1, d->heap_set, (unsigned long long)sa, (void *)g_heapSet, d->heap_set == g_heapSet ? "SAME object" : "MISMATCH - another set");
+                          nvmtl_fx_emit_both(f, hs); }
             for (unsigned i = 0; i < NVMTL_NBUF && o < (int)sizeof line - 120; i++) {
                 if (!tbl[i] || tbl[i] == nvmtl_vk_buffer_address(&g_dummyBuf)) continue;
                 char r[160]; nvmtl_fault_resolve(c, tbl[i], r, sizeof r);
