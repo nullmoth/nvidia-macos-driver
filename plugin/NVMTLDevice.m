@@ -103,12 +103,22 @@ const char *nvmtl_log_path(void) {
     }
     return path;
 }
+static void nvlog_line(const char *t);
 void nvlog(const char *fmt, ...) {
     uint64_t rep; if (nvlog_dropped(fmt, &rep)) return;
     char b[512]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
     char t[640];
     if (rep) snprintf(t, sizeof t, "%s   [logged %llu times now]", b, (unsigned long long)rep);
     else     snprintf(t, sizeof t, "%s", b);
+    nvlog_line(t);
+}
+// A periodic census line: the same format every window, so the repeat limiter above would drop it after a few windows
+// (a run's gameplay windows were lost that way). It goes to the log every time; the caller keeps its own period.
+void nvlog_every(const char *fmt, ...) {
+    char t[640]; va_list a; va_start(a, fmt); vsnprintf(t, sizeof t, fmt, a); va_end(a);
+    nvlog_line(t);
+}
+static void nvlog_line(const char *t) {
 #if NVMTL_RELEASE
     if (nvmtl_log_failure(t)) syslog(LOG_ERR, "NullMoth: %s", t);
     if (!nvmtl_process_env_on()) return;   // the file below is written only for a process that opted in

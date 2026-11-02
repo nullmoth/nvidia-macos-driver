@@ -9,6 +9,7 @@
 #import <Metal/Metal.h>
 
 void nvlog(const char *fmt, ...);
+void nvlog_every(const char *fmt, ...);   // a periodic census line, never dropped by the repeat limiter
 
 #import "NVMTLObjects.h"
 #import <objc/runtime.h>
@@ -5792,11 +5793,11 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
                     {   // the model's own CPU time per frame, by entry point (all encoding threads summed)
                         static uint64_t lastc[8]; uint64_t cn[8]; nvmtl_vk_hz_cpu(cn); double us[8], tot = 0;
                         for (int q = 0; q < 8; q++) { us[q] = (double)(cn[q] - lastc[q]) / 1000.0 / dn; tot += us[q]; }
-                        nvlog("hazard model CPU: %.1f us per frame (draw checks %.1f, pass begins %.1f, dispatches %.1f, bindings %.1f, "
+                        nvlog_every("hazard model CPU: %.1f us per frame (draw checks %.1f, pass begins %.1f, dispatches %.1f, bindings %.1f, "
                               "useResource/heap %.1f, command wrappers %.1f, blits %.1f)", tot, us[0], us[1], us[2], us[3], us[4], us[5], us[6]);
                         memcpy(lastc, cn, sizeof lastc);
                     }
-                    nvlog("hazard census (%s, heaps %s): per frame %.1f passes (%.1f no barrier, %.1f barrier, %.1f render pass), %.1f restarts "
+                    nvlog_every("hazard census (%s, heaps %s): per frame %.1f passes (%.1f no barrier, %.1f barrier, %.1f render pass), %.1f restarts "
                           "(%.1f storms), %.1f forced; %.1f first dispatches (%.1f no barrier), %.1f later-dispatch barriers; %.1f untracked-work "
                           "and %.1f end-of-buffer barriers; %.1f transitions without a wait, %.1f model clears; useHeap %.1f untracked / %.1f tracked "
                           "(%.1f read everything); %.1f blits (%.1f no barrier, %.1f barrier, %.1f pre-barriers without a wait); "
