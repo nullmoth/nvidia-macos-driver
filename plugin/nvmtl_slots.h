@@ -92,7 +92,9 @@ static inline nvmtl_vw_entry *nvmtl_vw_find_live(nvmtl_vw_state *s, const void *
 }
 static inline void nvmtl_vw_set_tic(nvmtl_vw_state *s, const void *view, uint32_t s_idx, uint64_t s_addr, uint32_t t_idx, uint64_t t_addr, uint64_t seq)
 { nvmtl_vw_entry *e = nvmtl_vw_find_live(s, view); if (e) { e->s_idx = s_idx; e->s_addr = s_addr; e->t_idx = t_idx; e->t_addr = t_addr; e->seq = seq; } }
-static inline void nvmtl_vw_died(nvmtl_vw_state *s, const void *view, uint64_t seq) { nvmtl_vw_entry *e = nvmtl_vw_find_live(s, view); if (e) e->died = seq ? seq : 1; }
+/* a destroyed view handle: every live record of it dies (the driver reissues handles; older records of the same handle are earlier lives) */
+static inline void nvmtl_vw_died(nvmtl_vw_state *s, const void *view, uint64_t seq)
+{ if (!view) return; for (uint32_t i = 0; i < s->n; i++) if (s->e[i].view == view && !s->e[i].died) s->e[i].died = seq ? seq : 1; }
 /* one line per view record: "tic view V image I sidx N saddr 0x.. tidx M taddr 0x.. type T layers b+n mips b+n seq A died B" */
 static inline uint32_t nvmtl_vw_dump(const nvmtl_vw_state *s, FILE *f)
 {
@@ -111,9 +113,9 @@ static inline unsigned nvmtl_vw_index_history(const nvmtl_vw_state *vw, const nv
         const nvmtl_vw_entry *e = &vw->e[i]; const int st = e->t_idx == idx, sa = e->s_idx == idx;
         if (!st && !sa) continue;
         const nvmtl_im_entry *ie = nvmtl_im_by_img(im, e->img);
-        snprintf(line, sizeof line, "fault context:     table[%u] held by view %p (%s) of image %p%s: header address 0x%llx, seq %llu..%s%llu%s", idx, e->view, st ? "storage" : "sampled", e->img,
-                 ie ? "" : " (image unknown)", (unsigned long long)(st ? e->t_addr : e->s_addr), (unsigned long long)e->seq, e->died ? "" : "alive", e->died ? (unsigned long long)e->died : 0ull,
-                 e->view == now_view ? " <- the current holder" : "");
+        char end[24]; if (e->died) snprintf(end, sizeof end, "%llu", (unsigned long long)e->died); else snprintf(end, sizeof end, "alive");
+        snprintf(line, sizeof line, "fault context:     table[%u] held by view %p (%s) of image %p%s: header address 0x%llx, seq %llu..%s%s", idx, e->view, st ? "storage" : "sampled", e->img,
+                 ie ? "" : " (image unknown)", (unsigned long long)(st ? e->t_addr : e->s_addr), (unsigned long long)e->seq, end, e->view == now_view ? " <- the current holder" : "");
         if (ie) { size_t l = strlen(line); snprintf(line + l, sizeof line - l, " [%ux%u fmt %u, image %s]", ie->w, ie->h, ie->fmt, ie->died ? "DIED" : "alive"); }
         emit(ctx, line); n++;
         if (e->view != now_view) { prev_addr = st ? e->t_addr : e->s_addr; prev_view = e->view; }
