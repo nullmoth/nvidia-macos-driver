@@ -13,6 +13,7 @@ typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int
                  uint64_t parked_ns; /* when the buffer park took it (CLOCK_UPTIME_RAW) */
                  uint8_t hz_ut; /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */ } nvk_buffer;
 #include "nvmtl_sample_positions.h"
+#include "nvmtl_fault_context.h"
 typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vfl;  uint64_t up_token;
                  void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */
                  size_t hz_off, hz_len;   /* placed: the image's byte range of mem, for the hazard model (0 = all of mem) */
@@ -107,6 +108,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  const void *hzp_res; uint8_t hzp_kind, hzp_on, hzp_skip, hzp_bskip;   /* the resource of the binding being written */
                  uint8_t hz_draw_due;   /* something the next draw's hazard check must see arrived */
                  uint32_t hz_sn;   /* hazard model timing sample counter */
+                 nvmtl_fx_cb fx;   /* fault context: the last dispatches and the storage binds in force (nvmtl_fault_context.h) */
                } nvk_cmdbuf;
 int  nvmtl_vk_init(void);
 int nvmtl_vk_sample_positions_backend(void);
@@ -209,6 +211,8 @@ void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t
 void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_t threads[3], const uint32_t tg[3]);
 /* the kernel name the next dispatch on this thread is logged under (NVMTL_DISPATCH_TIME) */
 void nvmtl_vk_dispatch_label(const char *name);
+/* fault context: the label an image dies under (the texture's, set just before its image is destroyed) */
+void nvmtl_vk_image_dying_label(const char *label);
 /* hazard tracking between encoders (nvmtl_hazard.h, NVMTL_HAZARD) */
 int  nvmtl_hz_mode(void);
 void nvmtl_hz_shadow(int on);
