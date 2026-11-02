@@ -43,7 +43,17 @@ static id nvmtl_resid_lookup(uint64_t token)
     return resource;
 }
 
-uint64_t nvmtl_resid_for_texture(id t) { return nvmtl_resid_assign(t, 0, nvmtl_vk_bindless_put([(NVMTLTexture *)t nvsampleview])); }
+// The same slot carries the storage descriptor (heap binding 2) for a texture a kernel may write - a shader reaches a
+// written texture only through this handle in memory.
+uint64_t nvmtl_resid_for_texture(id t)
+{
+    NVMTLTexture *x = (NVMTLTexture *)t;
+    // a texture buffer has no image view: its slot holds the buffer view in the texel bindings instead
+    if (x->_tbView) return nvmtl_resid_assign(t, 0, nvmtl_vk_bindless_put_texel(x->_tbView, x->_tbStorage));
+    const uint32_t slot = nvmtl_vk_bindless_put([x nvsampleview]);
+    if (slot) nvmtl_vk_bindless_put_storage(slot, x->_stex ? [x nvview] : NULL);
+    return nvmtl_resid_assign(t, 0, slot);
+}
 // A sampler's gpuResourceID carries its bindless heap slot in the low 32 bits (what a shader reading an argument buffer
 // indexes the sampler heap with) and a sequence number above them, so every sampler object keeps a unique token.
 uint64_t nvmtl_resid_for_sampler(id s)
