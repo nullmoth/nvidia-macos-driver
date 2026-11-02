@@ -1375,6 +1375,21 @@ static int nvmtl_vk_sparse_on(void)
     }
     return on;
 }
+// Outcomes of a sparse bind. The only distinction that is true of this backend is whether the batch
+// ever reached the queue:
+//   NOT_SUBMITTED - we never called vkQueueBindSparse (no fence, or the backend is already down), so
+//                   nothing changed and the range still holds what it held before.
+//   FAILED        - the batch was submitted and did not succeed. Two things follow, and both matter:
+//                   nvkmd_nvrm_bind_ctx_bind applies the binds IN ORDER and returns on the first
+//                   failure, so an unbind may already have been applied; and nvk_queue_submit turns a
+//                   failed bind into vk_queue_set_lost("Bind operation failed"), which means every
+//                   later submit on this queue returns VK_ERROR_DEVICE_LOST. res3 binds on g_queue,
+//                   the same queue every command buffer uses, so after this the process is finished -
+//                   there is no repair to attempt and nothing useful left to submit.
+// Both failures are non-zero, so a caller that only tests for failure keeps working.
+#define NVMTL_SPARSE_OK            0
+#define NVMTL_SPARSE_NOT_SUBMITTED 1
+#define NVMTL_SPARSE_FAILED        2
 static int nvmtl_vk_sparse_bind(VkBuffer b, int unbind_first, VkDeviceMemory mem, VkDeviceSize size)
 {
     VkSparseMemoryBind mb[2]; uint32_t n = 0;
@@ -1383,15 +1398,54 @@ static int nvmtl_vk_sparse_bind(VkBuffer b, int unbind_first, VkDeviceMemory mem
     VkSparseBufferMemoryBindInfo bbi = { b, n, mb };
     VkBindSparseInfo bsi = { VK_STRUCTURE_TYPE_BIND_SPARSE_INFO, NULL, 0, NULL, 1, &bbi, 0, NULL, 0, NULL, 0, NULL };
     VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, NULL, 0 }; VkFence f = VK_NULL_HANDLE;
-    if (pvkCreateFence(g_dev, &fci, NULL, &f) != VK_SUCCESS) return -1;
+    if (pvkCreateFence(g_dev, &fci, NULL, &f) != VK_SUCCESS) return NVMTL_SPARSE_NOT_SUBMITTED;
+    if (g_state != 1) { pvkDestroyFence(g_dev, f, NULL); return NVMTL_SPARSE_NOT_SUBMITTED; }
     pthread_mutex_lock(&nvmtl_submit_mutex);
-    VkResult r = g_state == 1 ? pvkQueueBindSparse(g_queue, 1, &bsi, f) : VK_ERROR_DEVICE_LOST;
+    // NVK performs sparse binds on the CPU the moment they are submitted, without waiting for the GPU,
+    // so an unbind would pull pages out from under any command buffer still executing on this queue.
+    // The migrate's copy only orders the work submitted before it; another thread can submit work
+    // that uses this buffer's (stable) address after the copy and before this bind. Draining the
+    // queue here, under the lock every command-buffer submit takes, closes that window. (The dummy
+    // zero-fill submits without this lock, so it is not excluded; it writes textures, never this
+    // buffer's range.) The lock is recursive, so a migrate on a thread already holding it would not be
+    // serialised; today migrates run only from the residency pass, outside any submit. The drain is an empty
+    // submit with a fence and a bounded wait rather than vkQueueWaitIdle, because a hung channel would
+    // otherwise hold this lock - and with it every encoder thread - forever. Metal event waits cannot
+    // deadlock it: a part that waits on an event is only submitted after the event is signalled.
+    if (unbind_first) {
+        VkFence d = VK_NULL_HANDLE;
+        VkResult dr = pvkCreateFence(g_dev, &fci, NULL, &d);
+        if (dr == VK_SUCCESS) dr = pvkQueueSubmit(g_queue, 0, NULL, d);
+        if (dr == VK_SUCCESS) dr = pvkWaitForFences(g_dev, 1, &d, VK_TRUE, 2000000000ull);
+        if (d) pvkDestroyFence(g_dev, d, NULL);
+        if (dr != VK_SUCCESS) {
+            pthread_mutex_unlock(&nvmtl_submit_mutex);
+            pvkDestroyFence(g_dev, f, NULL);
+            nvlog("residency (res3): the queue did not drain before an unbind (%d) - the bind was not submitted, nothing changed", dr);
+            return NVMTL_SPARSE_NOT_SUBMITTED;
+        }
+    }
+    VkResult r = pvkQueueBindSparse(g_queue, 1, &bsi, f);
     pthread_mutex_unlock(&nvmtl_submit_mutex);
-    if (r == VK_SUCCESS) r = pvkWaitForFences(g_dev, 1, &f, VK_TRUE, 5000000000ull);
+    int outcome, refused = r != VK_SUCCESS;
+    if (refused) outcome = NVMTL_SPARSE_FAILED;
+    else {
+        r = pvkWaitForFences(g_dev, 1, &f, VK_TRUE, 5000000000ull);
+        outcome = r == VK_SUCCESS ? NVMTL_SPARSE_OK : NVMTL_SPARSE_FAILED;
+    }
     pvkDestroyFence(g_dev, f, NULL);
-    if (r != VK_SUCCESS) nvlog("residency (res3): vkQueueBindSparse(%s%s, %llu MB) -> %d", unbind_first ? "unbind + " : "",
-                               mem ? "bind" : "nothing", (unsigned long long)(size >> 20), r);
-    return r == VK_SUCCESS ? 0 : -1;
+    // Say only what is known. A bind that failed - reported by vkQueueBindSparse itself, or as
+    // DEVICE_LOST on the fence when the runtime submits on a worker thread - failed part way: the bound
+    // state is indeterminate and NVK has marked the queue lost. A fence that merely timed out after an
+    // accepted batch leaves the bound state unknown, but says nothing about the queue.
+    const int lost = refused || r == VK_ERROR_DEVICE_LOST;
+    if (outcome != NVMTL_SPARSE_OK)
+        nvlog("residency (res3): vkQueueBindSparse(%s%s, %llu MB) -> %d, %s", unbind_first ? "unbind + " : "",
+              mem ? "bind" : "nothing", (unsigned long long)(size >> 20), r,
+              lost ? "the bind failed after submission: the bound state is indeterminate and NVK marks the "
+                     "queue lost, so later submits on it return DEVICE_LOST"
+                   : "accepted, but its fence did not signal: the bound state is unknown");
+    return outcome;
 }
 static int nvmtl_vk_sysmem_type(uint32_t bits)
 {
@@ -3023,7 +3077,30 @@ int nvmtl_vk_bind_buffer_offset(nvk_cmdbuf *c, uint32_t set, uint32_t index, siz
 #define NVMTL_TABLES_PER_PAGE 256
 #define NVMTL_TABLE_BYTES ((2 * NVMTL_NBUF + NVMTL_NTEX) * sizeof(uint64_t))
 typedef struct nvmtl_address_page { nvk_buffer buffer; struct nvmtl_address_page *next; } nvmtl_address_page;
+// A cached command pool keeps its NVK memory chunks, and every chunk holds a user-client connection
+// for as long as it lives: nvrm_xnu maps with IOConnectMapMemory64(conn, 0, ...), which is ONE mapping
+// per connection by design, so live mappings and live connections are the same number. macOS refuses
+// past roughly 1024 of them, and at 256 cached pools of ~16 chunks each that ceiling is reached
+// mid-run: measured 4,084 opens against 8 closes, then 1,025 IOServiceOpen failures, each surfacing to
+// the app as VK_ERROR_OUT_OF_DEVICE_MEMORY until it aborted. Caching 32 pools keeps the reuse that
+// matters (the hot path takes one straight back) while staying far under the ceiling - with reuse
+// switched off entirely the failures went 1,025 -> 0, which is what proved the mechanism.
+// NVMTL_KEEP_POOLS tunes it without a rebuild.
 #define NVMTL_KEEP 256
+static unsigned nvmtl_keep_cap(void)
+{
+    static int cap = -1;
+    if (cap < 0) {
+        const char *e = getenv("NVMTL_KEEP_POOLS");
+        long v = (e && *e) ? strtol(e, NULL, 10) : 32;
+        if (v < 1) v = 1;
+        if (v > NVMTL_KEEP) v = NVMTL_KEEP;
+        cap = (int)v;
+        nvlog("vk: command-pool cache capped at %d (each cached pool holds NVK chunks, and each chunk "
+              "holds a user-client connection; macOS refuses past ~1024)", cap);
+    }
+    return (unsigned)cap;
+}
 static pthread_mutex_t g_keep_lock = PTHREAD_MUTEX_INITIALIZER;
 static VkCommandPool g_keep_pool[NVMTL_KEEP]; static unsigned g_keep_npool;
 static nvmtl_address_page *g_keep_page[NVMTL_KEEP]; static unsigned g_keep_npage;
@@ -3055,7 +3132,7 @@ static int nvmtl_keep_pool_push(VkCommandPool p)
 {
     int kept = 0;
     if (!nvmtl_keep_on()) return 0;
-    pthread_mutex_lock(&g_keep_lock); if (g_keep_npool < NVMTL_KEEP) { g_keep_pool[g_keep_npool++] = p; kept = 1; } pthread_mutex_unlock(&g_keep_lock);
+    pthread_mutex_lock(&g_keep_lock); if (g_keep_npool < nvmtl_keep_cap()) { g_keep_pool[g_keep_npool++] = p; kept = 1; } pthread_mutex_unlock(&g_keep_lock);
     return kept;
 }
 static nvmtl_address_page *nvmtl_keep_page_pop(void)
@@ -3069,6 +3146,12 @@ static int nvmtl_keep_page_push(nvmtl_address_page *p)
 {
     int kept = 0;
     if (!nvmtl_keep_on()) return 0;
+    // The page cache is deliberately still NVMTL_KEEP, not nvmtl_keep_cap(): an address page is one
+    // nvk_buffer, so if its allocation holds a connection too, 256 cached pages are 256 more against
+    // the same ceiling. The measurement does not implicate them - every failing nvRmApiMapMemory stack
+    // in the 10-28 dtrace was nvk_cmd_pool_alloc_mem (1,018) or nvk_CreateQueryPool (6), and no
+    // address-page stack appeared - so this is left alone rather than capped on a guess. Measure
+    // connections per page (IOServiceOpen against the nvmtl_keep_page_push stack) before changing it.
     pthread_mutex_lock(&g_keep_lock); if (g_keep_npage < NVMTL_KEEP) { p->next = NULL; g_keep_page[g_keep_npage++] = p; kept = 1; } pthread_mutex_unlock(&g_keep_lock);
     return kept;
 }
@@ -6838,6 +6921,11 @@ fail:
 int nvmtl_vk_buffer_migrate(nvk_buffer *b, int to_sysmem)
 {
     if (g_state != 1 || !b || !b->sparse || !b->buf || !b->mem) return -1;
+    // A buffer whose backing is already indeterminate is never migrated again. Its page tables may
+    // name either allocation, so a second migrate cannot know what it is replacing - and `lost_mem`
+    // is ONE field, so setting it twice would drop the first handle entirely: unfreeable, and
+    // counted twice in g_bind_lost_bytes because b->alloc is added each time.
+    if (b->bind_lost) return -1;
     if (!to_sysmem == !b->sysmem) return 1;
     VkMemoryRequirements mr; pvkGetBufferMemoryRequirements(g_dev, (VkBuffer)b->buf, &mr);
     int mt;
@@ -6862,27 +6950,40 @@ int nvmtl_vk_buffer_migrate(nvk_buffer *b, int to_sysmem)
       pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &post, 0, NULL, 0, NULL);
       if (nvmtl_vk_submit_wait(&c)) { pvkDestroyBuffer(g_dev, tmp, NULL); pvkFreeMemory(g_dev, nm, NULL); return -1; } }
     pvkDestroyBuffer(g_dev, tmp, NULL);
-    if (nvmtl_vk_sparse_bind((VkBuffer)b->buf, 1, nm, mr.size)) {
-        // ONE restore attempt, deliberately. A retry loop was tried here and reverted: every
-        // nvmtl_vk_sparse_bind takes the global submit mutex and then waits on a fence with a 5 s
-        // timeout, and the failure that matters on this driver is "submitted, fence never signals" -
-        // so eight attempts is up to 40 s on the ALLOCATING thread, which can be WindowServer's, while
-        // serializing the other eight encoder threads behind the submit mutex.
-        if (nvmtl_vk_sparse_bind((VkBuffer)b->buf, 0, (VkDeviceMemory)b->mem, mr.size)) {
-            // Backing INDETERMINATE. A bind that was submitted and then refused may already name `nm`
-            // in the page tables while our record still names b->mem, and nothing here can tell which.
-            // So keep BOTH allocations and mark the buffer: a deliberate, counted leak beats freeing
-            // memory the GPU may still reach through a live address. The destroy path reads the mark.
-            b->bind_lost = 1; b->lost_mem = nm;
-            g_bind_lost++; g_bind_lost_bytes += mr.size + b->alloc;
-            nvlog("residency (res3): a %llu MB buffer could not be rebound OR restored - its backing is "
-                  "INDETERMINATE, so both allocations are kept on purpose (%llu buffers, %llu MB held this way) "
-                  "rather than free memory the page tables may still name",
-                  (unsigned long long)(mr.size >> 20), (unsigned long long)g_bind_lost,
-                  (unsigned long long)(g_bind_lost_bytes >> 20));
-            return -1;
-        }
+    // The migrate unbinds the range and binds the new memory in ONE VkBindSparseInfo, and that batch
+    // is NOT atomic on this backend: nvkmd_nvrm_bind_ctx_bind walks the binds in order and returns on
+    // the FIRST failure, leaving the earlier ones applied. So an error here can mean the unbind went
+    // through and the bind did not, which leaves the range with no page table entry at all - the GPU
+    // reports that as an MMU FAULT_PTE at an ordinary-looking address, not as an allocation failure.
+    // An error from vkQueueBindSparse therefore does not mean "nothing happened" on this driver, and
+    // NVK also marks the queue lost on it, so it cannot be repaired from here (see below).
+    int rebound = nvmtl_vk_sparse_bind((VkBuffer)b->buf, 1, nm, mr.size);
+    if (rebound == NVMTL_SPARSE_NOT_SUBMITTED) {
+        // The batch never reached the queue, so the range still holds b->mem and the buffer is whole:
+        // only the migration failed.
         pvkFreeMemory(g_dev, nm, NULL);
+        return -1;
+    }
+    if (rebound != NVMTL_SPARSE_OK) {
+        // Backing INDETERMINATE: the batch was submitted and did not succeed, so the page tables may
+        // name `nm`, may name b->mem, or - because the binds are applied in order and the unbind comes
+        // first - may name nothing at all. Keep BOTH allocations and mark the buffer: a deliberate,
+        // counted leak beats freeing memory the GPU may still reach through a live address. The destroy
+        // path reads the mark and the migrate refuses the buffer after this.
+        //
+        // There is deliberately NO repair attempt. A failed bind makes nvk_queue_submit call
+        // vk_queue_set_lost on this queue, and res3 binds on g_queue - the same queue every command
+        // buffer uses - so a restore would be submitted onto a queue that now returns DEVICE_LOST for
+        // everything. It could not succeed, and nothing else can be submitted either. Repairing this
+        // properly means making the bind batch atomic in NVK (roll back the ops already applied, and
+        // return the error WITHOUT marking the queue lost, since nothing was left half-done).
+        b->bind_lost = 1; b->lost_mem = nm;
+        g_bind_lost++; g_bind_lost_bytes += mr.size + b->alloc;
+        nvlog("residency (res3): a %llu MB buffer's rebind did not complete after submission - its backing is "
+              "INDETERMINATE (the line above says whether the queue was lost), so both allocations are kept on purpose "
+              "(%llu buffers, %llu MB held this way) rather than free memory the page tables may still name",
+              (unsigned long long)(mr.size >> 20), (unsigned long long)g_bind_lost,
+              (unsigned long long)(g_bind_lost_bytes >> 20));
         return -1;
     }
     pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL);
