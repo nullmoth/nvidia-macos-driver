@@ -31,6 +31,15 @@ static inline int nvmtl_env_knob_always_kept(const char *kv)
         || !strncmp(kv, "NVMTL_PRESENT_INLINE=", 21);       /* the switch that restores inline presents */
 }
 
+/* The cached answer for this process: 1 when it set NVMTL_PROCESS_ENV=1. Besides keeping the knobs, a release plugin then
+   writes its log (nvmtl_log_path) and its fps census for this process, which it never does otherwise. */
+static inline int nvmtl_process_env_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_PROCESS_ENV"); on = e && !strcmp(e, "1"); }
+    return on;
+}
+
 /* Unsets every driver knob in envp that is not kept and returns how many it forgot. envp is the process environment,
    which unsetenv edits, so the names are collected first and removed after. At most 256 are forgotten, as before. */
 static inline unsigned nvmtl_release_forget_env(char **envp)

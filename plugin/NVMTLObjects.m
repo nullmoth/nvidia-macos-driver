@@ -5567,7 +5567,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     {
         extern void nvmtl_vk_submit_wait_stats(uint64_t *total_ns, uint64_t *waits);
         static int off = -1;
-        if (off < 0) { const char *e = getenv("NVMTL_NO_FPS"); off = NVMTL_RELEASE ? 1 : (e && *e && *e != '0') ? 1 : 0; }
+        if (off < 0) { const char *e = getenv("NVMTL_NO_FPS"); off = (NVMTL_RELEASE && !nvmtl_process_env_on()) ? 1 : (e && *e && *e != '0') ? 1 : 0; }
         if (!off) {
             static _Atomic uint64_t frames, t0, lastn, lastwns, lastwaits;
             const uint64_t n = atomic_fetch_add(&frames, 1) + 1;

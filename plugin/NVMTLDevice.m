@@ -22,6 +22,7 @@
 #include <time.h>
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_log_failure.h"
+#include "nvmtl_env_knobs.h"
 #include <sys/sysctl.h>
 #import <libproc.h>
 #import <mach-o/dyld.h>
@@ -86,7 +87,8 @@ static int nvlog_dropped(const char *fmt, uint64_t *rep) {
 }
 const char *nvmtl_log_path(void) {
 #if NVMTL_RELEASE
-    return "/private/tmp/nvmtl-off.log";
+    // A release plugin writes no log unless this process opted into its own knobs (NVMTL_PROCESS_ENV=1).
+    if (!nvmtl_process_env_on()) return "/private/tmp/nvmtl-off.log";
 #endif
     // A diagnostic probe needs its own file even when the system log is writable.
     // Otherwise the per-run fault watcher reads an empty file and misses GPU faults.
@@ -109,10 +111,11 @@ void nvlog(const char *fmt, ...) {
     else     snprintf(t, sizeof t, "%s", b);
 #if NVMTL_RELEASE
     if (nvmtl_log_failure(t)) syslog(LOG_ERR, "NullMoth: %s", t);
+    if (!nvmtl_process_env_on()) return;   // the file below is written only for a process that opted in
 #else
     syslog(LOG_NOTICE, "NVMTL: %s", t);
-    FILE *f = fopen(nvmtl_log_path(), "a"); if (f) { fprintf(f, "pid %d NVMTL: %s\n", getpid(), t); fclose(f); }
 #endif
+    FILE *f = fopen(nvmtl_log_path(), "a"); if (f) { fprintf(f, "pid %d NVMTL: %s\n", getpid(), t); fclose(f); }
 }
 
 #define NVMTL_OOM_STREAK      32
