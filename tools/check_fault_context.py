@@ -65,7 +65,7 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_dwit_mark\(c, 0x8000u", 1),                                   # and at every render pass end
     ("nvmtl_vk.c", r"out->begin_id = \(uint32_t\)g_cmd_begun;", 1),
     ("nvmtl_vk.c", r"nvmtl_dwit_last\(c\)", 1),                                        # the faulting dispatch singled out at loss
-    ("nvmtl_vk.c", r"nvmtl_sl_write\(&g_sl, k, 2, g_dummyStex.view, 0\)", 1),         # the prefill is recorded
+    ("nvmtl_vk.c", r"nvmtl_sl_write\(&g_sl, k, 2, nvmtl_heap_storage_dummy\(\), 0\)", 1),   # the prefill is recorded (the heap's storage dummy)
     ("NVMTLObjects.m", r"nvmtl_vk_image_parked\(img\)", 2),                            # both parks
     ("NVMTLObjects.m", r"nvmtl_vk_image_recycled\(out\)", 2),                          # both unparks
     ("NVMTLEmbedded.m", r"VIEW NVMTLTexture %p", 1),
