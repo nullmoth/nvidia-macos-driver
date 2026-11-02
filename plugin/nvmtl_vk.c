@@ -5627,6 +5627,7 @@ static int nvmtl_loss_mutex_lock(pthread_mutex_t *m, const char *name)
     nvlog_every("fault context: %s is held by another thread (250 ms) - this section reads without it", name);
     return 0;
 }
+static void nvmtl_igw_report(const nvk_cmdbuf *c, FILE *f);
 static int nvmtl_loss_read(const void *src, void *dst, size_t n, FILE *f)
 {
     if (nvmtl_fx_read_safe(src, dst, n)) return 1;
@@ -6036,6 +6037,7 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
         if (fd) { size_t l = strlen(line); snprintf(line + l, sizeof line - l, " spv-fnv %08x air %016llx pipe %p", fd->key, (unsigned long long)fd->air, fd->pipe); }
         nvmtl_fx_emit_both(f, line);
     }
+    nvmtl_igw_report(c, f);
     for (uint32_t jj = 0; jj < nd; jj++) {
         // the faulting dispatch's record comes first, then the rest in order
         uint32_t j = jj, jf = nd;
@@ -6307,6 +6309,61 @@ void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_
     }
     nvmtl_dt_end(c, dt_slot);
 }
+// Indirect grid witness (diagnostic builds; NVMTL_INDIRECT_WITNESS=0/1 overrides): before every indirect compute dispatch
+// the 12-byte grid it is about to read is copied ON THE GPU into a host-visible ring, so a device loss can print the grid
+// the hardware actually dispatched - not what the host thinks the buffer holds. A grid the game's own kernel wrote can be
+// stale or garbage; the kernel then runs workgroups far outside its target and stores through a wrong row or layer.
+#define NVMTL_IGW_N 4096
+typedef struct { const void *cb; uint32_t ordinal; uint64_t args_va; size_t off, size; uint32_t tg[3]; int mapped; uint32_t host[3]; } nvmtl_igw_rec;
+static nvmtl_igw_rec g_igw[NVMTL_IGW_N]; static uint32_t g_igw_n; static nvk_buffer g_igw_buf; static int g_igw_state;
+static pthread_mutex_t g_igw_lock = PTHREAD_MUTEX_INITIALIZER;
+static int nvmtl_igw_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_INDIRECT_WITNESS");
+#if defined(NVMTL_RELEASE) && NVMTL_RELEASE
+        on = e && e[0] == '1';
+#else
+        on = !(e && e[0] == '0');
+#endif
+        nvlog("vk: indirect grid witness %s - every indirect dispatch's grid is copied on the GPU for the device-loss report (NVMTL_INDIRECT_WITNESS)", on ? "ON" : "off"); }
+    return on;
+}
+static void nvmtl_igw_note(nvk_cmdbuf *c, nvk_buffer *b, size_t off, const uint32_t tg[3])
+{
+    if (!nvmtl_igw_on() || !b || !b->buf || off > b->size || b->size - off < 12) return;
+    pthread_mutex_lock(&g_igw_lock);
+    if (g_igw_state == 0) g_igw_state = nvmtl_vk_buffer_create(12 * NVMTL_IGW_N, 1, &g_igw_buf) == 0 && g_igw_buf.map ? 1 : -1;
+    if (g_igw_state < 0) { pthread_mutex_unlock(&g_igw_lock); return; }
+    const uint32_t slot = g_igw_n++ % NVMTL_IGW_N;
+    nvmtl_igw_rec *r = &g_igw[slot];
+    r->cb = c->cb; r->ordinal = c->fx.total; r->args_va = nvmtl_vk_buffer_address(b); r->off = off; r->size = b->size;
+    memcpy(r->tg, tg, sizeof r->tg); r->mapped = b->map != NULL;
+    if (b->map) memcpy(r->host, (const uint8_t *)b->map + off, 12); else memset(r->host, 0, sizeof r->host);
+    memset((uint8_t *)g_igw_buf.map + slot * 12, 0xA5, 12);
+    pthread_mutex_unlock(&g_igw_lock);
+    VkBufferCopy bc = { off, (VkDeviceSize)slot * 12, 12 };
+    pvkCmdCopyBuffer(c->cb, (VkBuffer)b->buf, (VkBuffer)g_igw_buf.buf, 1, &bc);
+}
+static void nvmtl_igw_report(const nvk_cmdbuf *c, FILE *f)
+{
+    if (g_igw_state <= 0) { nvmtl_fx_emit_both(f, "fault context: indirect grid witness: no indirect dispatch recorded in this process"); return; }
+    uint32_t shown = 0; const uint32_t n = g_igw_n < NVMTL_IGW_N ? g_igw_n : NVMTL_IGW_N;
+    for (uint32_t k = 0; k < n; k++) {
+        const uint32_t slot = (g_igw_n - n + k) % NVMTL_IGW_N; const nvmtl_igw_rec *r = &g_igw[slot];
+        if (r->cb != c->cb) continue;
+        uint32_t gpu[3] = { 0, 0, 0 }; char line[400];
+        const int ok = nvmtl_loss_read((const uint8_t *)g_igw_buf.map + slot * 12, gpu, 12, NULL);
+        const int unrun = ok && gpu[0] == 0xA5A5A5A5u && gpu[1] == 0xA5A5A5A5u && gpu[2] == 0xA5A5A5A5u;
+        snprintf(line, sizeof line, "fault context: indirect dispatch ordinal %u: args 0x%llx + %zu (buffer %zu B, %s): the GPU %s %u x %u x %u groups of %ux%ux%u%s%s",
+                 r->ordinal, (unsigned long long)r->args_va, r->off, r->size, r->mapped ? "host-mapped" : "device-only",
+                 unrun ? "had not copied it yet (copy never ran)" : ok ? "read" : "copy unreadable,", unrun ? 0 : gpu[0], unrun ? 0 : gpu[1], unrun ? 0 : gpu[2],
+                 r->tg[0], r->tg[1], r->tg[2], r->mapped ? "; the host saw " : "", "");
+        if (r->mapped) { size_t l = strlen(line); snprintf(line + l, sizeof line - l, "%u x %u x %u at encode", r->host[0], r->host[1], r->host[2]); }
+        nvmtl_fx_emit_both(f, line); shown++;
+    }
+    if (!shown) nvmtl_fx_emit_both(f, "fault context: indirect grid witness: the dying command buffer had no indirect dispatch");
+}
 void nvmtl_vk_cmd_dispatch_indirect_tg(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *b, size_t off, const uint32_t tgIn[3])
 {
     uint32_t tg[3], g[3] = { 0, 0, 0 };
@@ -6326,6 +6383,7 @@ void nvmtl_vk_cmd_dispatch_indirect_tg(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffe
     uint32_t pc[12] = { F | tg[0], F | tg[1], F | tg[2], 0, 0, 0, 0, 0, 0, F, F, F };
     pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES, pc);
     nvmtl_fx_note_dispatch(c, p);
+    nvmtl_igw_note(c, b, off, tg);
     pvkCmdDispatchIndirect(c->cb, (VkBuffer)b->buf, off);
     nvmtl_dwit_mark(c, c->fx.total);
 }
