@@ -3172,10 +3172,39 @@ static PFN_vkDestroyImageView g_bl_real_destroy_view;
 static VKAPI_ATTR void VKAPI_CALL nvmtl_bl_destroy_view(VkDevice d, VkImageView v, const VkAllocationCallbacks *a)
 { nvmtl_bl_forget((const void *)v); g_bl_real_destroy_view(d, v, a); }
 void nvmtl_bl_hook_destroy(void) { if (!g_bl_real_destroy_view && pvkDestroyImageView) { g_bl_real_destroy_view = pvkDestroyImageView; pvkDestroyImageView = nvmtl_bl_destroy_view; } }
+static void nvmtl_vk_bindless_drop_now(uint32_t slot);
+// A texture's heap slot is dropped when the texture object dies. With the image grace on, the image itself outlives
+// that death until the submits in flight have completed, but the slot's descriptors went to the dummies at once - a
+// kernel already submitted that writes through the slot then wrote the dummy (lost writes). The drop now waits for
+// the same completion the image does; the quarantine on reuse starts from the real drop.
+typedef struct nvmtl_slot_drop { uint32_t slot; nvmtl_pl_node life; } nvmtl_slot_drop;
+static nvmtl_pl_state g_sd; static pthread_mutex_t g_sd_lock = PTHREAD_MUTEX_INITIALIZER;
 void nvmtl_vk_bindless_drop(uint32_t slot)
 {
     if (!g_heapSet || !slot || slot >= NVMTL_BINDLESS_SLOTS) return;
     pthread_mutex_lock(&g_fx_lock); nvmtl_fx_slot_gone(&g_fx, g_cmd_submitted, slot); pthread_mutex_unlock(&g_fx_lock);
+    if (nvmtl_image_grace_on()) {
+        nvmtl_slot_drop *d = calloc(1, sizeof *d);
+        if (d) {
+            d->slot = slot; nvmtl_pl_stamp(&d->life, g_cmd_submitted);
+            pthread_mutex_lock(&g_sd_lock); nvmtl_pl_made(&g_sd);
+            const int now = nvmtl_pl_release(&g_sd, &d->life, __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE), 0);
+            pthread_mutex_unlock(&g_sd_lock);
+            if (now) { nvmtl_vk_bindless_drop_now(slot); free(d); }
+            return;
+        }
+    }
+    nvmtl_vk_bindless_drop_now(slot);
+}
+static void nvmtl_slot_drop_reap(void)
+{
+    nvmtl_pl_node *due; unsigned n;
+    pthread_mutex_lock(&g_sd_lock); n = nvmtl_pl_reap(&g_sd, __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE), &due); pthread_mutex_unlock(&g_sd_lock);
+    while (due) { nvmtl_pl_node *e = due; due = e->cool; nvmtl_slot_drop *d = (nvmtl_slot_drop *)((char *)e - offsetof(nvmtl_slot_drop, life)); nvmtl_vk_bindless_drop_now(d->slot); free(d); }
+    if (n && (g_sd.reaped & 0xFFF) < n) nvlog("vk: heap slots dropped after their submits completed: %llu so far, %llu waiting", (unsigned long long)g_sd.reaped, (unsigned long long)g_sd.ncool);
+}
+static void nvmtl_vk_bindless_drop_now(uint32_t slot)
+{
     pthread_mutex_lock(&g_heap_lock);
     nvmtl_heap_write_locked(slot, g_dummyImg.view);
     // The slot's storage-image and texel-buffer descriptors (bindings 2-4) go back to the dummies too. They stayed as
@@ -5445,12 +5474,16 @@ static void nvmtl_fault_slot_report(uint64_t ptr, FILE *f)
 {
     static uint32_t seen[64]; static unsigned nseen;
     pthread_mutex_lock(&g_lv_lock); const nvmtl_lv_entry *e = nvmtl_lv_find(&g_lv, ptr); const nvmtl_lv_entry ec = e ? *e : (nvmtl_lv_entry){0}; pthread_mutex_unlock(&g_lv_lock);
-    if (!ec.map || ec.hi - ptr < 12) return;
-    const uint32_t word = *(const uint32_t *)((const uint8_t *)ec.map + (ptr - ec.lo) + 8), slot = word & 0x1FFFFu;
+    if (!ec.map || ec.hi - ptr < 16) return;
+    const uint64_t handle = *(const uint64_t *)((const uint8_t *)ec.map + (ptr - ec.lo) + 8);   // the texture's gpuResourceID as the app stored it
+    const uint32_t slot = (uint32_t)handle & 0x1FFFFu;
     for (unsigned k = 0; k < nseen; k++) if (seen[k] == slot) return;
     if (nseen < 64) seen[nseen++] = slot;
     char owner[200]; nvmtl_resid_describe_slot(slot, owner, sizeof owner);
-    char line[256]; snprintf(line, sizeof line, "fault context: pointee 0x%llx +8 holds 0x%08x -> heap slot %u", (unsigned long long)ptr, word, slot); nvmtl_fx_emit_both(f, line);
+    char line[300]; snprintf(line, sizeof line, "fault context: pointee 0x%llx +8 holds handle 0x%016llx: bit 62 (heap) %s, bit 63 (sampler) %s, bit 61 (pipeline) %s, low 32 0x%08x -> heap slot %u%s",
+                             (unsigned long long)ptr, (unsigned long long)handle, handle & (1ull << 62) ? "SET" : "clear", handle & (1ull << 63) ? "set" : "clear", handle & (1ull << 61) ? "set" : "clear",
+                             (uint32_t)handle, slot, handle & (1ull << 62) ? "" : " (NOT a heap token: a no-slot texture, sampler, pipeline or foreign value aliasing the slot)");
+    nvmtl_fx_emit_both(f, line);
     const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, g_dummyStex.view, g_dummyTexView, g_dummyTexView } };
     pthread_mutex_lock(&g_sl_lock); nvmtl_sl_report(&g_sl, &g_im, &g_vw, slot, &d, owner, nvmtl_fx_emit_both, f); pthread_mutex_unlock(&g_sl_lock);
 }
@@ -7059,7 +7092,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     // Every submit up to this one has completed (one in-order queue): dead images whose last possible reader was
     // among them can go now (NVMTL_IMAGE_GRACE).
     if (c->fx_seq) { pthread_mutex_lock(&g_grace_lock); if (c->fx_seq > g_cmd_finished_seq) g_cmd_finished_seq = c->fx_seq; pthread_mutex_unlock(&g_grace_lock);
-                     nvmtl_image_grace_reap(); nvmtl_page_cool_reap(); nvmtl_buffer_grace_reap(); }
+                     nvmtl_image_grace_reap(); nvmtl_page_cool_reap(); nvmtl_buffer_grace_reap(); nvmtl_slot_drop_reap(); }
     if (c->wseq && c->wseq != NVMTL_WSEQ_BLIND) {
         // The fence has already signalled, so the GPU is finished with this command buffer; the witness only certifies
         // its pool and address pages for reuse. A missing one used to switch the backend off for the whole process, and
