@@ -100,6 +100,20 @@ uint64_t nvmtl_resid_for_sampler(id s)
     return token;
 }
 void nvmtl_resid_texture_gone(uint64_t token) { if (token & NVMTL_RESID_HEAP) nvmtl_vk_bindless_drop((uint32_t)(token & 0xffffffffu)); }
+// For the fault report: the live texture object whose gpuResourceID carries this heap slot, or that none does.
+int nvmtl_resid_describe_slot(uint32_t slot, char *out, size_t cap)
+{
+    id o = nvmtl_resid_lookup(NVMTL_RESID_HEAP | slot);
+    if (!o) { snprintf(out, cap, "no live texture object holds slot %u", slot); return 0; }
+    if ([o isKindOfClass:[NVMTLTexture class]]) {
+        NVMTLTexture *t = o;
+        snprintf(out, cap, "NVMTLTexture %p %ux%u vkfmt %u mtl fmt %lu type %lu usage 0x%lx storage view %s image %p view %p \"%s\"", (__bridge void *)t, t->_i.w, t->_i.h, t->_i.fmt,
+                 (unsigned long)t->_fmt, (unsigned long)t.textureType, (unsigned long)t.usage, t->_stex ? "yes" : "no", t->_i.img, t->_i.view, t.label.UTF8String ?: "");
+        return 1;
+    }
+    snprintf(out, cap, "%s %p holds slot %u", object_getClassName(o), (__bridge void *)o, slot);
+    return 1;
+}
 
 static NSUInteger nvmtl_ss_enum(NSDictionary *st, NSString *key, NSDictionary<NSString *, NSNumber *> *map, NSUInteger fallback, BOOL *bad)
 {

@@ -50,6 +50,15 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_vk_heap_zero\(&", 2),                                         # pool blocks (mapped under the lock, VRAM after it)
     ("NVMTLObjects.m", r"nvmtl_vk_heap_zero\(&h->_hm", 1),                               # every app heap, cleared once on creation
     ("nvmtl_vk.c", r"nvmtl_lv_remove\(&g_lv, b->reg, g_cmd_submitted\)", 1),            # provenance keeps the death sequence
+    ("nvmtl_vk.c", r"nvmtl_im_died\(&g_im, ", 3),                                       # image death: destroy, free_backing, re-back
+    ("nvmtl_vk.c", r"nvmtl_im_add\(&g_im, ", 2),                                        # image birth: commit, re-back
+    ("nvmtl_vk.c", r"nvmtl_vw_add\(&g_vw, ", 6),                                        # every heap-bound view pairs with its image
+    ("nvmtl_vk.c", r"nvmtl_slots_write\(slot, 2, ", 2),                                 # binding 2: put_storage + the drop's dummy
+    ("nvmtl_vk.c", r"nvmtl_slots_alloc\(slot\)", 2),                                   # put + put_texel
+    ("nvmtl_vk.c", r"nvmtl_slots_drop\(slot\)", 1),
+    ("nvmtl_vk.c", r"nvmtl_fault_slot_report\(q\[k\], f\)", 2),                     # the slot a pointee names, from a host view and via a copy
+    ("nvmtl_vk.c", r"nvmtl_sl_census\(&g_sl", 1),
+    ("nvmtl_vk.c", r"NVMTL_HEAP_PREFILL", 2),
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev}
 short = []; total = 0
