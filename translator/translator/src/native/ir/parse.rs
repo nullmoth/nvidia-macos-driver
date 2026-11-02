@@ -229,6 +229,7 @@ impl LlModule {
             metadata_primitive_buffer_pointees,
             metadata_fc_buffer_locations,
             raw_buffer_params: HashSet::default(),
+            byte_addressed_raw_params: HashSet::default(),
             call_connected_raw_params: HashSet::default(),
             param_connected_raw_params: HashSet::default(),
         };
@@ -794,6 +795,10 @@ entry:
         assert_eq!(
             threaded.call_connected_raw_params,
             reparsed.call_connected_raw_params
+        );
+        assert_eq!(
+            threaded.byte_addressed_raw_params,
+            reparsed.byte_addressed_raw_params
         );
         assert_eq!(
             threaded.param_connected_raw_params,

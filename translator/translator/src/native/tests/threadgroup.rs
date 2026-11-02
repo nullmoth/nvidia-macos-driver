@@ -1973,6 +1973,40 @@ entry:
 }
 
 #[test]
+fn native_byte_addressed_workgroup_vector_view_is_valid_before_retries() {
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+
+define void @k(ptr addrspace(3) %tile, ptr addrspace(1) %out, i32 %index) {
+entry:
+  %wide = getelementptr <4 x half>, ptr addrspace(3) %tile, i32 %index
+  %alias = getelementptr i8, ptr addrspace(3) %wide, i64 8
+  %value = load <3 x half>, ptr addrspace(3) %alias, align 8
+  store <3 x half> %value, ptr addrspace(1) %out, align 8
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 3, !"air.arg_type_size", i32 8, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"half4", !"air.arg_name", !"tile"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.write", !"air.address_space", i32 1, !"air.arg_type_name", !"half3*", !"air.arg_name", !"out"}
+!5 = !{i32 2, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"uint", !"air.arg_name", !"index"}
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_byte_addressed_workgroup_vector_view_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let spv = crate::translate_native_no_retry(ll, Stage::Kernel).expect("primary translate");
+    tools::spirv_val_bytes(&spv, &tmp).expect("primary SPIR-V validates");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert!(asm.contains("Workgroup"), "{asm}");
+    assert!(asm.contains("OpBitcast"), "{asm}");
+}
+
+#[test]
 fn native_kernel_threadgroup_param_direct_scalar_load_uses_element_zero() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
