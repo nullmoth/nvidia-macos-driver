@@ -43,6 +43,12 @@ int main(void)
     n = nvmtl_release_forget_env(environ);
     arm("only the exact value 1 opts in: NVMTL_PROCESS_ENV=yes is forgotten with the rest", !getenv("NVMTL_SHARED_VRAM") && n == 6);
 
+    fresh(); setenv("NVMTL_PROCESS_ENV", "1", 1);
+    arm("the cached per-process answer agrees with the vector rule (opted in)", nvmtl_process_env_on() == 1 && nvmtl_env_knobs_kept(environ) == 1);
+    unsetenv("NVMTL_PROCESS_ENV");
+    arm("the vector rule sees the opt-in go; the cached answer is decided once per process (a process cannot opt in late)",
+        nvmtl_env_knobs_kept(environ) == 0 && nvmtl_process_env_on() == 1);
+
     printf("%s: %d failed\n", fails ? "FAIL" : "PASS", fails);
     return fails ? 1 : 0;
 }
