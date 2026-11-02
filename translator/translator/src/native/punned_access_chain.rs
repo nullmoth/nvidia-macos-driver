@@ -123,7 +123,7 @@ pub(super) fn retype_punned_access_chains(module: &mut Module) -> usize {
         .iter()
         .filter_map(|i| i.result_id.map(|id| (id, i.clone())))
         .collect();
-    let mut value_types: HashMap<Word, Word> = HashMap::new();
+    let mut value_types: HashMap<Word, Word> = HashMap::default();
     for instruction in module.all_inst_iter() {
         if let (Some(id), Some(ty)) = (instruction.result_id, instruction.result_type) {
             value_types.insert(id, ty);
@@ -131,7 +131,7 @@ pub(super) fn retype_punned_access_chains(module: &mut Module) -> usize {
     }
 
     // chain result -> (the type the result pointer claims, the type the member actually has, storage class)
-    let mut candidates: HashMap<Word, (Word, Word, Operand)> = HashMap::new();
+    let mut candidates: HashMap<Word, (Word, Word, Operand)> = HashMap::default();
     for function in &module.functions {
         for block in &function.blocks {
             for instruction in &block.instructions {
@@ -252,7 +252,7 @@ pub(super) fn retype_punned_access_chains(module: &mut Module) -> usize {
     let mut store_cast_ids: Vec<Word> = (0..store_sites).map(|_| module.fresh_id()).collect();
     store_cast_ids.reverse(); // popped from the back, so they are handed out in order
 
-    let mut retyped: HashMap<Word, (Word, Word, Word)> = HashMap::new(); // chain -> (ptr ty, selected, want)
+    let mut retyped: HashMap<Word, (Word, Word, Word)> = HashMap::default(); // chain -> (ptr ty, selected, want)
     // Sorted, because `candidates` is a HashMap and find_or_create_pointer allocates ids as it
     // goes: iterating it in hash order gave the same module a different set of OpTypePointer ids on
     // every run, so the output bytes were not reproducible. That breaks a hash-keyed translation
