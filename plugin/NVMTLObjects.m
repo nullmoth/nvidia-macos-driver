@@ -4765,6 +4765,10 @@ static void nvmtl_g79_flush(NVMTLCommandBuffer *cb) {
 }
 @interface NVMTLComputeCommandEncoder () {
 @public
+    // Textures declared with useResource:usage:, keyed by their Vulkan image (a view and its root share one), latest
+    // usage wins. An indirect dispatch reaches them only through argument buffers, so nothing else moves them into the
+    // layout a shader access needs; see nvmtlPrepareIndirectImages.
+    NSMutableDictionary *_indirectImages;
     NSData *_e78Key;
     NVMTLComputePipelineState *_e78VarFor, *_e78VarSel;
     NSUInteger _e78NDisp; BOOL _e78Concurrent, _e78Loose;
@@ -5548,11 +5552,42 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     uint32_t l[3] = { (uint32_t)tg.width, (uint32_t)tg.height, (uint32_t)tg.depth };
     if (nvmtl_vk_tg_reject(l, NULL, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, selected->_p.lin)) return;
     [self nvmtlE78Barrier:YES];
+    if (![self nvmtlPrepareIndirectImages]) return;
     nvmtl_vk_cmd_dispatch_indirect_tg(&_cb->_c, &selected->_p, &nb->_b, off, l);
     if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
 }
-- (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u { nvmtl_retain_resource(_cb, r); nvmtl_hz_use(_cb, r, u); }
-- (void)useResources:(const id<MTLResource> __unsafe_unretained [])r count:(NSUInteger)n usage:(MTLResourceUsage)u { for (NSUInteger i=0;i<n;i++) { nvmtl_retain_resource(_cb,r[i]); nvmtl_hz_use(_cb, r[i], u); } }
+// Before an indirect dispatch, every texture the encoder declared with useResource:usage: is brought in for this command
+// buffer and moved to the layout the access needs: GENERAL when it may be written as a storage image, read-only otherwise.
+// A texture written earlier in the frame as a render target is still in its attachment layout; on NVIDIA that layout can
+// keep the surface compressed, and a storage write into it without the transition reaches memory the image does not own
+// (Cyberpunk's 2048x2048 RG11B10 clear faulted in a page no image or buffer held). Direct dispatches get the same
+// preparation through setTexture:atIndex:; textures reached only through an argument buffer get it here.
+- (BOOL)nvmtlPrepareIndirectImages {
+    for (NSValue *key in _indirectImages) {
+        NSArray *entry = _indirectImages[key]; NVMTLTexture *t = entry[0];
+        MTLResourceUsage usage = [entry[1] unsignedLongLongValue];
+        nvmtl_surface_in_for_cb(_cb, t);
+        if (usage & MTLResourceUsageWrite) nvmtl_surf_dirty(_cb, t);
+        if (nvmtl_vk_cmd_prepare_sampled_image(&_cb->_c, [t nvi], (usage & MTLResourceUsageWrite) && t->_stex)) {
+            [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
+                userInfo:@{NSLocalizedDescriptionKey:@"Cannot prepare a declared indirect texture for dispatch"}]];
+            return NO;
+        }
+    }
+    return YES;
+}
+- (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u {
+    nvmtl_retain_resource(_cb, r);
+    nvmtl_hz_use(_cb, r, u);
+    if ([(id)r isKindOfClass:[NVMTLTexture class]]) {
+        NVMTLTexture *t = (NVMTLTexture *)r;
+        if (!t->_tbView) {
+            if (!_indirectImages) _indirectImages = [NSMutableDictionary new];
+            _indirectImages[[NSValue valueWithPointer:[t nvi]]] = @[t, @(u)];
+        }
+    }
+}
+- (void)useResources:(const id<MTLResource> __unsafe_unretained [])r count:(NSUInteger)n usage:(MTLResourceUsage)u { for (NSUInteger i=0;i<n;i++) [self useResource:r[i] usage:u]; }
 - (void)useHeap:(id<MTLHeap>)h { nvmtl_use_heap(_cb, h); }
 - (void)sampleCountersInBuffer:(id)sb atSampleIndex:(NSUInteger)i withBarrier:(BOOL)b { nvmtl_sample_counter(_cb, sb, i, self, b); }
 - (void)memoryBarrierWithScope:(MTLBarrierScope)scope {
