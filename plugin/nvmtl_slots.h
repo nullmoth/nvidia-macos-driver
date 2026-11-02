@@ -21,9 +21,10 @@ typedef struct { const void *view; uint64_t seq; } nvmtl_sl_bind;               
 typedef struct { nvmtl_sl_bind b[NVMTL_SL_NB]; uint32_t allocs, state; uint64_t alloc_seq, drop_seq; } nvmtl_sl_slot;   /* state: 0 never allocated, 1 live, 2 dropped */
 typedef struct { nvmtl_sl_slot *s; uint32_t n; uint64_t writes, allocs, drops; } nvmtl_sl_state;
 
-typedef struct { const void *img, *mem, *view; uint64_t off, size, seq, died, parked; uint32_t w, h, fmt, storage, placed, pooled; } nvmtl_im_entry;   /* parked: in a heap/buffer park since this seq, 0 when in use */
+typedef struct { const void *img, *mem, *view; uint64_t off, size, seq, died, parked, avail; uint32_t w, h, fmt, storage, placed, pooled, layers, mips, flags, usage, samples; } nvmtl_im_entry;
+/* parked: in a heap/buffer park since this seq, 0 when in use; size: the memory the image needs (its requirement); avail: the memory it was given from its bind offset (0 = unknown) */
 typedef struct { nvmtl_im_entry *e; uint32_t n, cap; uint64_t live; } nvmtl_im_state;
-typedef struct { const void *view, *img; } nvmtl_vw_entry;
+typedef struct { const void *view, *img; uint32_t type, base_layer, layers, base_mip, mips; } nvmtl_vw_entry;   /* type: VkImageViewType + 1 (0 = not recorded) */
 typedef struct { nvmtl_vw_entry *e; uint32_t n, cap; } nvmtl_vw_state;
 
 static inline int nvmtl_sl_init(nvmtl_sl_state *s, uint32_t n)
@@ -73,12 +74,27 @@ static inline void nvmtl_im_died(nvmtl_im_state *s, const void *img, uint64_t se
 /* a texture object died but its image went to a park for reuse (alive, mapped, recyclable); and the reuse */
 static inline void nvmtl_im_parked(nvmtl_im_state *s, const void *img, uint64_t seq) { nvmtl_im_entry *e = nvmtl_im_by_img(s, img); if (e && !e->died) e->parked = seq ? seq : 1; }
 static inline void nvmtl_im_recycled(nvmtl_im_state *s, const void *img) { nvmtl_im_entry *e = nvmtl_im_by_img(s, img); if (e) e->parked = 0; }
-static inline void nvmtl_vw_add(nvmtl_vw_state *s, const void *view, const void *img)
+static inline void nvmtl_vw_add_ex(nvmtl_vw_state *s, const void *view, const void *img, uint32_t type1, uint32_t base_layer, uint32_t layers, uint32_t base_mip, uint32_t mips)
 {
     if (!view || !img) return;
     if (s->n == s->cap) { const uint32_t cap = s->cap ? s->cap * 2 : 4096; nvmtl_vw_entry *e = (nvmtl_vw_entry *)realloc(s->e, (size_t)cap * sizeof *e); if (!e) return; s->e = e; s->cap = cap; }
-    s->e[s->n].view = view; s->e[s->n].img = img; s->n++;
+    nvmtl_vw_entry *e = &s->e[s->n++]; e->view = view; e->img = img; e->type = type1; e->base_layer = base_layer; e->layers = layers; e->base_mip = base_mip; e->mips = mips;
 }
+static inline void nvmtl_vw_add(nvmtl_vw_state *s, const void *view, const void *img) { nvmtl_vw_add_ex(s, view, img, 0, 0, 0, 0, 0); }
+/* the newest view record for a view handle, or NULL */
+static inline const nvmtl_vw_entry *nvmtl_vw_find(const nvmtl_vw_state *s, const void *view)
+{
+    if (!view) return NULL;
+    for (uint32_t i = s->n; i-- > 0;) if (s->e[i].view == view) return &s->e[i];
+    return NULL;
+}
+/* the image's creation parameters and the memory it was given: an image whose requirement exceeds what its bind offers is UNDERSIZED */
+static inline void nvmtl_im_set_params(nvmtl_im_state *s, uint32_t id, uint32_t layers, uint32_t mips, uint32_t flags, uint32_t usage, uint32_t samples, uint64_t avail)
+{
+    if (!id || id > s->n) return;
+    nvmtl_im_entry *e = &s->e[id - 1]; e->layers = layers; e->mips = mips; e->flags = flags; e->usage = usage; e->samples = samples; e->avail = avail;
+}
+static inline int nvmtl_im_undersized(const nvmtl_im_entry *e) { return e->avail && e->size > e->avail; }
 /* the image a heap-bound view belongs to (newest pairing, so a reused handle resolves to its latest image), or NULL */
 static inline const nvmtl_im_entry *nvmtl_im_by_view(const nvmtl_im_state *im, const nvmtl_vw_state *vw, const void *view)
 {
@@ -89,9 +105,9 @@ static inline const nvmtl_im_entry *nvmtl_im_by_view(const nvmtl_im_state *im, c
 static inline uint32_t nvmtl_im_dump(const nvmtl_im_state *s, FILE *f)
 {
     for (uint32_t i = 0; i < s->n; i++) { const nvmtl_im_entry *e = &s->e[i];
-        fprintf(f, "image %p view %p mem %p off %llu size %llu %ux%u fmt %u%s%s%s seq %llu died %llu\n", e->img, e->view, e->mem, (unsigned long long)e->off,
+        fprintf(f, "image %p view %p mem %p off %llu size %llu %ux%u fmt %u%s%s%s seq %llu died %llu layers %u mips %u samples %u flags 0x%x usage 0x%x avail %llu%s\n", e->img, e->view, e->mem, (unsigned long long)e->off,
                 (unsigned long long)e->size, e->w, e->h, e->fmt, e->storage ? " storage" : "", e->placed ? " placed" : "", e->pooled ? " pooled" : "",
-                (unsigned long long)e->seq, (unsigned long long)e->died);
+                (unsigned long long)e->seq, (unsigned long long)e->died, e->layers, e->mips, e->samples, e->flags, e->usage, (unsigned long long)e->avail, nvmtl_im_undersized(e) ? " UNDERSIZED" : "");
         if (e->parked) fprintf(f, "image %p parked since seq %llu\n", e->img, (unsigned long long)e->parked); }
     return s->n;
 }
@@ -146,6 +162,14 @@ static inline unsigned nvmtl_sl_report(const nvmtl_sl_state *sl, const nvmtl_im_
                       b, v, (unsigned long long)x->b[b].seq, e->img, e->w, e->h, e->fmt, e->storage ? " storage" : "", e->placed ? " placed" : "", e->pooled ? " pooled" : "",
                       e->mem, (unsigned long long)e->off, (unsigned long long)e->size, (unsigned long long)e->seq, lv); }
         emit(ctx, line);
+        if (e) {   /* what the image is, what it needs, what it got; what the view covers */
+            const nvmtl_vw_entry *ve = nvmtl_vw_find(vw, v);
+            snprintf(line, sizeof line, "fault context:     image: %u layer%s, %u mip%s, %u sample%s, flags 0x%x, usage 0x%x; needs %llu bytes, given %llu from its bind offset%s; view: %s%u, layers %u+%u, mips %u+%u",
+                     e->layers, e->layers == 1 ? "" : "s", e->mips, e->mips == 1 ? "" : "s", e->samples ? e->samples : 1, e->samples == 1 || !e->samples ? "" : "s", e->flags, e->usage,
+                     (unsigned long long)e->size, (unsigned long long)e->avail, nvmtl_im_undersized(e) ? " - UNDERSIZED BIND: the requirement exceeds the memory from the bind offset" : e->avail ? "" : " (memory size unknown)",
+                     ve && ve->type ? "VkImageViewType " : "type ", ve && ve->type ? ve->type - 1 : 0, ve ? ve->base_layer : 0, ve ? ve->layers : 0, ve ? ve->base_mip : 0, ve ? ve->mips : 0);
+            emit(ctx, line);
+        }
         if (e && mm) {   /* where that image's bytes are: the memory it is bound into, its base address, and whether that memory still lives */
             const nvmtl_mm_entry *m = nvmtl_mm_by_mem(mm, e->mem);
             if (!m) snprintf(line, sizeof line, "fault context:     its memory %p is not in the memory table", e->mem);

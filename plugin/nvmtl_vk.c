@@ -2251,6 +2251,7 @@ static void nvmtl_failed_image(nvk_image *image)
     }
     memset(image, 0, sizeof *image);
 }
+static VkImageViewType nvmtl_vk_view_type_of(const nvk_image *img);
 static void nvmtl_commit_image(nvk_image *image)
 {
     if (image->pool) { if (image->sysmem) g_sys_bytes += image->alloc; else g_vram_bytes += image->alloc; }
@@ -2264,9 +2265,15 @@ static void nvmtl_commit_image(nvk_image *image)
     pthread_mutex_lock(&g_sl_lock);
     {   const void *bmem = image->mem; uint64_t boff = image->placed ? image->hz_off : image->pool ? image->poff : 0;
         const uint64_t bsize = image->placed ? image->hz_len : image->alloc;   // placed: the bound range inside the heap; else the image's own allocation
-        pthread_mutex_lock(&g_mm_lock); nvmtl_mb_find(&g_mb, image->img, &bmem, &boff); pthread_mutex_unlock(&g_mm_lock);   // the bind the image got, whichever path made it
-        nvmtl_im_add(&g_im, image->img, bmem, boff, bsize, image->view, image->w, image->h, image->fmt, image->storage, image->placed ? 1u : 0u, image->pool ? 1u : 0u, g_cmd_submitted); }
-    nvmtl_vw_add(&g_vw, image->view, image->img);
+        uint64_t avail = 0;
+        pthread_mutex_lock(&g_mm_lock); nvmtl_mb_find(&g_mb, image->img, &bmem, &boff);   // the bind the image got, whichever path made it
+        { const nvmtl_mm_entry *me = nvmtl_mm_by_mem(&g_mm, bmem); if (me && !me->died && me->size > boff) avail = me->size - boff; }
+        pthread_mutex_unlock(&g_mm_lock);
+        const uint32_t id = nvmtl_im_add(&g_im, image->img, bmem, boff, bsize, image->view, image->w, image->h, image->fmt, image->storage, image->placed ? 1u : 0u, image->pool ? 1u : 0u, g_cmd_submitted);
+        nvmtl_im_set_params(&g_im, id, image->layers ? image->layers : 1, image->mips ? image->mips : 1, image->vkflags, image->usage, image->samples, avail);
+        nvmtl_vw_add_ex(&g_vw, image->view, image->img, nvmtl_vk_view_type_of(image) + 1, 0, image->layers ? image->layers : 1, 0, image->mips ? image->mips : 1);
+        if (avail && bsize > avail) nvlog("image: UNDERSIZED BIND - a %ux%u fmt %u image (%u layers, %u mips) needs %llu bytes but its bind at offset %llu of a %llu-byte memory leaves %llu",
+                                          image->w, image->h, image->fmt, image->layers, image->mips, (unsigned long long)bsize, (unsigned long long)boff, (unsigned long long)(boff + avail), (unsigned long long)avail); }
     pthread_mutex_unlock(&g_sl_lock);
     nvmtl_vk_image_census();
 }
@@ -5614,6 +5621,29 @@ static int nvmtl_fault_resolve(nvk_cmdbuf *c, uint64_t a, char *out, size_t cap)
 // command buffer's last dispatches) for tools/fault_resolve.py, and the dispatch roots in the log as well.
 // A root's pointee that is host-readable: the u32 at +8 is a texture's gpuResourceID (the slot in its low 17 bits), the
 // way a kernel that writes a texture through an argument-buffer struct reads it. Reports the slot once per loss.
+// An NVK image view carries a copy of the descriptor words it put in the heap (nvk_image_view_descriptor.desc): the
+// texture header holds the image's GPU address in its first two words (low 32 | high bits). The struct layout is
+// NVK's own and version-bound, so the words are found by scanning the view object for a pair that forms an address
+// inside a memory this process mapped, and printed raw with that address - not decoded further.
+static void nvmtl_fault_tic_scan(const void *view, const char *what, FILE *f)
+{
+    if (!view) return;
+    uint32_t w[192]; char line[400];
+    if (!nvmtl_fx_read_safe(view, w, sizeof w)) { snprintf(line, sizeof line, "fault context:     %s view %p: object unreadable, no descriptor words", what, view); nvmtl_fx_emit_both(f, line); return; }
+    unsigned found = 0;
+    for (unsigned i = 0; i + 8 <= 192 && found < 3; i++) {
+        const uint64_t addr = ((uint64_t)(w[i + 1] & 0xFFFFu) << 32) | w[i];
+        if (addr < 0x10000 || (addr & 0xFF)) continue;
+        const int lm = nvmtl_fx_lock_bounded(&g_mm_lock, 50); const nvmtl_mm_entry *m = nvmtl_mm_at(&g_mm, addr); const nvmtl_mm_entry mc = m ? *m : (nvmtl_mm_entry){0}; if (lm) pthread_mutex_unlock(&g_mm_lock);
+        if (!mc.mem) continue;
+        char lv[40]; nvmtl_mm_liveness(mc.died, lv, sizeof lv);
+        snprintf(line, sizeof line, "fault context:     %s view %p descriptor words at +%u: address 0x%llx = %s memory %p (base 0x%llx, size %llu, %s) + %llu; words %08x %08x %08x %08x %08x %08x %08x %08x",
+                 what, view, i * 4, (unsigned long long)addr, mc.kind, mc.mem, (unsigned long long)mc.base, (unsigned long long)mc.size, lv, (unsigned long long)(addr - mc.base),
+                 w[i], w[i + 1], w[i + 2], w[i + 3], w[i + 4], w[i + 5], w[i + 6], w[i + 7]);
+        nvmtl_fx_emit_both(f, line); found++;
+    }
+    if (!found) { snprintf(line, sizeof line, "fault context:     %s view %p: no descriptor word pair forms an address inside a mapped memory (first words %08x %08x %08x %08x)", what, view, w[0], w[1], w[2], w[3]); nvmtl_fx_emit_both(f, line); }
+}
 static void nvmtl_fault_slot_report(uint64_t ptr, FILE *f)
 {
     int lk;
@@ -5633,7 +5663,10 @@ static void nvmtl_fault_slot_report(uint64_t ptr, FILE *f)
     const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, nvmtl_heap_storage_dummy(), g_dummyTexView, g_dummyTexView } };   // the heap's storage dummy (2D array when it exists)
     lk = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock");
     { const int lm = nvmtl_loss_mutex_lock(&g_mm_lock, "g_mm_lock"); nvmtl_sl_report(&g_sl, &g_im, &g_vw, slot, &d, owner, &g_mm, nvmtl_fx_emit_both, f); if (lm) pthread_mutex_unlock(&g_mm_lock); }
+    const void *v2 = g_sl.s && slot < g_sl.n ? g_sl.s[slot].b[2].view : NULL, *v0 = g_sl.s && slot < g_sl.n ? g_sl.s[slot].b[0].view : NULL;
     if (lk) pthread_mutex_unlock(&g_sl_lock);
+    if (v2 && v2 != nvmtl_heap_storage_dummy()) nvmtl_fault_tic_scan(v2, "binding 2 (storage)", f);
+    if (v0 && v0 != g_dummyImg.view && v0 != v2) nvmtl_fault_tic_scan(v0, "binding 0 (sampled)", f);
 }
 static void nvmtl_fault_file_write(nvk_cmdbuf *c)
 {
@@ -5644,27 +5677,6 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
     snprintf(fp, sizeof fp, "%s/nvmtl-fault-%d.txt", td && *td ? td : "/private/tmp", (int)getpid());
     FILE *f = fopen(fp, "w");
     if (!f) { nvlog_every("fault context: could not write %s", fp); return; }
-    lk = nvmtl_loss_mutex_lock(&g_lv_lock, "g_lv_lock"); const uint32_t nlive = nvmtl_lv_dump(&g_lv, f); if (lk) pthread_mutex_unlock(&g_lv_lock);
-    nvmtl_loss_section(f, "live ranges");
-    lk = nvmtl_loss_mutex_lock(&g_fx_lock, "g_fx_lock");
-    {   const uint32_t nb = g_fx.nbuf < NVMTL_FX_BUFS ? g_fx.nbuf : NVMTL_FX_BUFS;
-        for (uint32_t k = 0; k < nb; k++) { const nvmtl_fx_buf *b = &g_fx.buf[(g_fx.nbuf - 1 - k) % NVMTL_FX_BUFS];
-            fprintf(f, "dead buffer 0x%llx 0x%llx %llu seq %llu%s%s%s\n", (unsigned long long)b->lo, (unsigned long long)b->hi, (unsigned long long)(b->hi - b->lo),
-                    (unsigned long long)b->seq, b->where & NVMTL_FX_POOLED ? " pooled" : "", b->where & NVMTL_FX_PLACED ? " placed" : "", b->where & NVMTL_FX_PARKED ? " parked" : ""); } }
-    if (lk) pthread_mutex_unlock(&g_fx_lock);
-    nvmtl_loss_section(f, "dead buffers");
-    const uint64_t pbytes = (uint64_t)NVMTL_TABLES_PER_PAGE * NVMTL_TABLE_BYTES;
-    for (nvmtl_address_page *pg = c->address_pages; pg; pg = pg->next) { const uint64_t a = nvmtl_vk_buffer_address(&pg->buffer);
-        fprintf(f, "page own 0x%llx 0x%llx %llu seq %llu\n", (unsigned long long)a, (unsigned long long)(a + pbytes), (unsigned long long)pbytes, (unsigned long long)pg->life.last_seq); }
-    lk = nvmtl_loss_mutex_lock(&g_pl_lock, "g_pl_lock");
-    for (nvmtl_pl_node *e = g_pl.cooling; e; e = e->cool) { nvmtl_address_page *pg = (nvmtl_address_page *)((char *)e - offsetof(nvmtl_address_page, life)); const uint64_t a = nvmtl_vk_buffer_address(&pg->buffer);
-        fprintf(f, "page cooling 0x%llx 0x%llx %llu seq %llu\n", (unsigned long long)a, (unsigned long long)(a + pbytes), (unsigned long long)pbytes, (unsigned long long)e->last_seq); }
-    if (lk) pthread_mutex_unlock(&g_pl_lock);
-    lk = nvmtl_loss_mutex_lock(&g_keep_lock, "g_keep_lock");
-    for (unsigned i = 0; i < g_keep_npage; i++) { const uint64_t a = nvmtl_vk_buffer_address(&g_keep_page[i]->buffer);
-        fprintf(f, "page cached 0x%llx 0x%llx %llu seq %llu\n", (unsigned long long)a, (unsigned long long)(a + pbytes), (unsigned long long)pbytes, (unsigned long long)g_keep_page[i]->life.last_seq); }
-    if (lk) pthread_mutex_unlock(&g_keep_lock);
-    nvmtl_loss_section(f, "address pages");
     // this command buffer's last dispatches: each binding table's buffer roots, resolved - the faulting one first
     const uint32_t nd = c->fx.n < NVMTL_FX_DISP ? c->fx.n : NVMTL_FX_DISP;
     const uint32_t last_done = nvmtl_dwit_last(c), faulting = last_done + 1;
@@ -5742,15 +5754,11 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
         }
     }
     nvmtl_loss_section(f, "dispatches, roots, pointees and slots");
-    {   // every heap slot's health, and every image this process made, with its lifetime
-        const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, nvmtl_heap_storage_dummy(), g_dummyTexView, g_dummyTexView } };   // the heap's storage dummy (2D array when it exists)
-        lk = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock");
-        nvmtl_sl_census(&g_sl, &g_im, &g_vw, &d, nvmtl_fx_emit_both, f);
-        const uint32_t nimg = nvmtl_im_dump(&g_im, f);
-        if (lk) pthread_mutex_unlock(&g_sl_lock);
-        nvlog_every("fault context: %u images written to the fault file with their memory, shape and lifetime", nimg);
+    {   // every image this process made: memory, bind, shape, requirement, lifetime
+        lk = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock"); const uint32_t nimg = nvmtl_im_dump(&g_im, f); if (lk) pthread_mutex_unlock(&g_sl_lock);
+        nvlog_every("fault context: %u images written to the fault file with their memory, bind, shape, requirement and lifetime", nimg);
     }
-    nvmtl_loss_section(f, "slot census and images");
+    nvmtl_loss_section(f, "images");
     {   // every device memory with its base address and lifetime: what resolves a fault address to an image's bytes
         lk = nvmtl_loss_mutex_lock(&g_mm_lock, "g_mm_lock");
         const uint32_t nmem = nvmtl_mm_dump(&g_mm, f); const uint64_t unb = g_mm.unbased, mlive = g_mm.live;
@@ -5760,6 +5768,34 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
     nvmtl_loss_section(f, "memories");
     nvmtl_heaps_dump(f, nvmtl_fx_emit_both);   // every live app heap: its struct, VkDeviceMemory, size, use, free ranges and park (NVMTLObjects.m)
     nvmtl_loss_section(f, "heaps");
+    lk = nvmtl_loss_mutex_lock(&g_lv_lock, "g_lv_lock"); const uint32_t nlive = nvmtl_lv_dump(&g_lv, f); if (lk) pthread_mutex_unlock(&g_lv_lock);
+    nvmtl_loss_section(f, "live ranges");
+    lk = nvmtl_loss_mutex_lock(&g_fx_lock, "g_fx_lock");
+    {   const uint32_t nb = g_fx.nbuf < NVMTL_FX_BUFS ? g_fx.nbuf : NVMTL_FX_BUFS;
+        for (uint32_t k = 0; k < nb; k++) { const nvmtl_fx_buf *b = &g_fx.buf[(g_fx.nbuf - 1 - k) % NVMTL_FX_BUFS];
+            fprintf(f, "dead buffer 0x%llx 0x%llx %llu seq %llu%s%s%s\n", (unsigned long long)b->lo, (unsigned long long)b->hi, (unsigned long long)(b->hi - b->lo),
+                    (unsigned long long)b->seq, b->where & NVMTL_FX_POOLED ? " pooled" : "", b->where & NVMTL_FX_PLACED ? " placed" : "", b->where & NVMTL_FX_PARKED ? " parked" : ""); } }
+    if (lk) pthread_mutex_unlock(&g_fx_lock);
+    nvmtl_loss_section(f, "dead buffers");
+    const uint64_t pbytes = (uint64_t)NVMTL_TABLES_PER_PAGE * NVMTL_TABLE_BYTES;
+    for (nvmtl_address_page *pg = c->address_pages; pg; pg = pg->next) { const uint64_t a = nvmtl_vk_buffer_address(&pg->buffer);
+        fprintf(f, "page own 0x%llx 0x%llx %llu seq %llu\n", (unsigned long long)a, (unsigned long long)(a + pbytes), (unsigned long long)pbytes, (unsigned long long)pg->life.last_seq); }
+    lk = nvmtl_loss_mutex_lock(&g_pl_lock, "g_pl_lock");
+    for (nvmtl_pl_node *e = g_pl.cooling; e; e = e->cool) { nvmtl_address_page *pg = (nvmtl_address_page *)((char *)e - offsetof(nvmtl_address_page, life)); const uint64_t a = nvmtl_vk_buffer_address(&pg->buffer);
+        fprintf(f, "page cooling 0x%llx 0x%llx %llu seq %llu\n", (unsigned long long)a, (unsigned long long)(a + pbytes), (unsigned long long)pbytes, (unsigned long long)e->last_seq); }
+    if (lk) pthread_mutex_unlock(&g_pl_lock);
+    lk = nvmtl_loss_mutex_lock(&g_keep_lock, "g_keep_lock");
+    for (unsigned i = 0; i < g_keep_npage; i++) { const uint64_t a = nvmtl_vk_buffer_address(&g_keep_page[i]->buffer);
+        fprintf(f, "page cached 0x%llx 0x%llx %llu seq %llu\n", (unsigned long long)a, (unsigned long long)(a + pbytes), (unsigned long long)pbytes, (unsigned long long)g_keep_page[i]->life.last_seq); }
+    if (lk) pthread_mutex_unlock(&g_keep_lock);
+    nvmtl_loss_section(f, "address pages");
+    {   // every heap slot's health, and every image this process made, with its lifetime
+        const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, nvmtl_heap_storage_dummy(), g_dummyTexView, g_dummyTexView } };   // the heap's storage dummy (2D array when it exists)
+        lk = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock");
+        nvmtl_sl_census(&g_sl, &g_im, &g_vw, &d, nvmtl_fx_emit_both, f);
+        if (lk) pthread_mutex_unlock(&g_sl_lock);
+    }
+    nvmtl_loss_section(f, "slot census (all 131072 slots)");
     {   // the barriers between this command buffer's last dispatches (the record covers both hazard modes)
         const uint32_t first = c->fx.total > nd ? c->fx.total - nd : 0;
         lk = nvmtl_loss_mutex_lock(&g_fx_lock, "g_fx_lock");
@@ -6638,7 +6674,7 @@ int nvmtl_vk_image_view_create_range_swz(nvk_image *img, uint32_t vkfmt, int a8,
     VkImageView vv = VK_NULL_HANDLE;
     VKCK(pvkCreateImageView(g_dev, &vci, NULL, &vv), "vkCreateImageView(swizzle)");
     *out_view = vv;
-    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add(&g_vw, vv, vci.image); pthread_mutex_unlock(&g_sl_lock);
+    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add_ex(&g_vw, vv, vci.image, vci.viewType + 1, vci.subresourceRange.baseArrayLayer, vci.subresourceRange.layerCount, vci.subresourceRange.baseMipLevel, vci.subresourceRange.levelCount); pthread_mutex_unlock(&g_sl_lock);
     return 0;
 }
 int nvmtl_vk_pass_kind(const nvk_pass *ps)
@@ -8636,7 +8672,7 @@ int nvmtl_vk_image_view_create_ex(nvk_image *img, uint32_t vkfmt, int a8, uint32
     VkImageView v = VK_NULL_HANDLE;
     VKCK(pvkCreateImageView(g_dev, &vci, NULL, &v), "vkCreateImageView(view)");
     *out_view = v;
-    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add(&g_vw, v, vci.image); pthread_mutex_unlock(&g_sl_lock);
+    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add_ex(&g_vw, v, vci.image, vci.viewType + 1, vci.subresourceRange.baseArrayLayer, vci.subresourceRange.layerCount, vci.subresourceRange.baseMipLevel, vci.subresourceRange.levelCount); pthread_mutex_unlock(&g_sl_lock);
     return 0;
 }
 int nvmtl_vk_image_view_create_aspect(nvk_image *img, uint32_t vkfmt, uint32_t aspect, uint32_t baseLevel, uint32_t levelCount, void **out_view)
@@ -8650,7 +8686,7 @@ int nvmtl_vk_image_view_create_aspect(nvk_image *img, uint32_t vkfmt, uint32_t a
     VkImageView v = VK_NULL_HANDLE;
     VKCK(pvkCreateImageView(g_dev, &vci, NULL, &v), "vkCreateImageView(aspect view)");
     *out_view = v;
-    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add(&g_vw, v, vci.image); pthread_mutex_unlock(&g_sl_lock);
+    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add_ex(&g_vw, v, vci.image, vci.viewType + 1, vci.subresourceRange.baseArrayLayer, vci.subresourceRange.layerCount, vci.subresourceRange.baseMipLevel, vci.subresourceRange.levelCount); pthread_mutex_unlock(&g_sl_lock);
     return 0;
 }
 void nvmtl_vk_image_view_destroy(void *view) { if (view) pvkDestroyImageView(g_dev, (VkImageView)view, NULL); }
@@ -10029,7 +10065,7 @@ int nvmtl_vk_image_view_create_range_aspect(nvk_image *img, uint32_t vkfmt, int 
     VkImageView v = VK_NULL_HANDLE;
     VKCK(pvkCreateImageView(g_dev, &vci, NULL, &v), "vkCreateImageView(range)");
     *out_view = v;
-    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add(&g_vw, v, vci.image); pthread_mutex_unlock(&g_sl_lock);
+    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add_ex(&g_vw, v, vci.image, vci.viewType + 1, vci.subresourceRange.baseArrayLayer, vci.subresourceRange.layerCount, vci.subresourceRange.baseMipLevel, vci.subresourceRange.levelCount); pthread_mutex_unlock(&g_sl_lock);
     return 0;
 }
 
