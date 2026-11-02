@@ -17,7 +17,7 @@
 enum { NVMTL_FX_DISP = 8, NVMTL_FX_STOR = 6, NVMTL_FX_SUB = 48, NVMTL_FX_GONE = 128, NVMTL_FX_NAME = 40 };
 
 /* one dispatch: its kernel and the storage views bound to it (explicit binds; a bindless read is not visible here) */
-typedef struct { char name[NVMTL_FX_NAME]; const void *pipe; uint32_t key; uint32_t nstor; uint32_t stor_idx[NVMTL_FX_STOR]; const void *stor_view[NVMTL_FX_STOR]; } nvmtl_fx_disp;
+typedef struct { char name[NVMTL_FX_NAME]; const void *pipe; uint32_t key; uint64_t air; uint32_t nstor; uint32_t stor_idx[NVMTL_FX_STOR]; const void *stor_view[NVMTL_FX_STOR]; } nvmtl_fx_disp;
 /* per command buffer: the last dispatches recorded into it and the storage binds in force */
 typedef struct { nvmtl_fx_disp d[NVMTL_FX_DISP]; uint32_t n, total; uint32_t nstor; uint32_t stor_idx[NVMTL_FX_STOR]; const void *stor_view[NVMTL_FX_STOR]; } nvmtl_fx_cb;
 /* one submit: the sequence number it got and the command buffer's dispatch ring as it was */
@@ -41,10 +41,10 @@ static inline void nvmtl_fx_bind_storage(nvmtl_fx_cb *c, uint32_t index, const v
     else { c->stor_idx[NVMTL_FX_STOR - 1] = index; c->stor_view[NVMTL_FX_STOR - 1] = view; }   /* the newest keeps the last place */
 }
 /* a dispatch: the kernel name and the storage binds in force go into the command buffer's ring */
-static inline void nvmtl_fx_dispatch(nvmtl_fx_cb *c, const char *name, const void *pipe, uint32_t key)
+static inline void nvmtl_fx_dispatch(nvmtl_fx_cb *c, const char *name, const void *pipe, uint32_t key, uint64_t air)
 {
     nvmtl_fx_disp *d = &c->d[c->n % NVMTL_FX_DISP];
-    nvmtl_fx_copy_name(d->name, name); d->pipe = pipe; d->key = key;
+    nvmtl_fx_copy_name(d->name, name); d->pipe = pipe; d->key = key; d->air = air;
     d->nstor = c->nstor; memcpy(d->stor_idx, c->stor_idx, sizeof d->stor_idx); memcpy(d->stor_view, c->stor_view, sizeof d->stor_view);
     c->n++; c->total++;
 }
@@ -88,7 +88,7 @@ static inline unsigned nvmtl_fx_report(const nvmtl_fx_state *s, uint64_t now_seq
         const uint32_t nd = u->n < NVMTL_FX_DISP ? u->n : NVMTL_FX_DISP;
         for (uint32_t j = 0; j < nd; j++) {
             const nvmtl_fx_disp *d = &u->d[(u->n - nd + j) % NVMTL_FX_DISP];
-            int o = snprintf(line, sizeof line, "fault context:   dispatch %u %s spv-fnv %08x pipe %p", u->ndisp - nd + j + 1, d->name, d->key, d->pipe);
+            int o = snprintf(line, sizeof line, "fault context:   dispatch %u %s spv-fnv %08x air %016llx pipe %p", u->ndisp - nd + j + 1, d->name, d->key, (unsigned long long)d->air, d->pipe);
             for (uint32_t m = 0; m < d->nstor && m < NVMTL_FX_STOR; m++) {
                 const nvmtl_fx_gone *g = NULL;
                 for (uint32_t q = 0; q < ng; q++) { const nvmtl_fx_gone *c = &s->gone[q]; if (c->view && c->view == d->stor_view[m] && c->seq <= u->seq) { g = c; break; } }

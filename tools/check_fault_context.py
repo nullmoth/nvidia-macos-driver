@@ -22,6 +22,7 @@ hooks = [
     ("nvmtl_vk.c", r"fault context: this command buffer's address page", 1),   # the binding-table pages by GPU address at device loss
     ("NVMTLObjects.m", r"nvmtl_vk_dispatch_key\(", 2),                        # both compute dispatch paths carry the kernel hash
     ("NVMTLDevice.m", r"nvlog_every\(\"pipeline key:", 1),                      # never throttled
+    ("nvmtl_vk.c", r"nvmtl_heap_binding_refused\(", 4),                        # definition + compute + vertex + fragment: a module indexing a heap binding the heap lacks never runs
     ("nvmtl_vk.c", r"nvmtl_fx_bind_storage\(&c->fx", 1),
     ("nvmtl_vk.c", r"nvmtl_fx_submit\(&g_fx, g_cmd_submitted", 1),
     ("nvmtl_vk.c", r"nvmtl_fx_image_gone\(&g_fx, g_cmd_submitted", 1),

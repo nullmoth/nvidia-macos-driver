@@ -240,7 +240,7 @@ void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_
 /* the kernel name the next dispatch on this thread is logged under (NVMTL_DISPATCH_TIME) */
 void nvmtl_vk_dispatch_label(const char *name);
 /* the kernel's SPIR-V hash (FNV-1a, the profile and pipeline-key hash) the next dispatch on this thread is recorded under */
-void nvmtl_vk_dispatch_key(uint32_t spv_fnv);
+void nvmtl_vk_dispatch_key(uint32_t spv_fnv, uint64_t air);
 /* fault context: the label an image dies under (the texture's, set just before its image is destroyed) */
 void nvmtl_vk_image_dying_label(const char *label);
 /* hazard tracking between encoders (nvmtl_hazard.h, NVMTL_HAZARD) */
