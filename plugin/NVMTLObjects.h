@@ -110,7 +110,10 @@ extern id gNVMTLMainDevice;
   NSString *_vname, *_fname, *_blend, *_vdesc; MTLRenderPipelineDescriptor *_descriptor; NSMutableDictionary *_samplerVariants;
   NVMTLFunction *_linkedVert, *_linkedFrag; uint32_t _a8mask; } @end
 @interface NVMTLCommandQueue : NSObject <MTLCommandQueue> {
-  @public nvk_queue _q; id _dev; id _completionQueue; dispatch_queue_t _callbackOrderQueue; NSMutableArray *_reservations; dispatch_semaphore_t _capacity; NSUInteger _capacityCount;
+  // _resSets: the residency sets this queue was given. A set retains its allocations, so holding the
+  // set is what keeps them alive; without this nobody did, and an app that handed its only reference
+  // to the queue had every resource in the set freed under work the queue had not finished.
+  @public nvk_queue _q; id _dev; id _completionQueue; dispatch_queue_t _callbackOrderQueue; NSMutableArray *_reservations; dispatch_semaphore_t _capacity; NSUInteger _capacityCount; NSMutableArray *_resSets;
 } @end
 @interface NVMTLCommandBuffer : NSObject <MTLCommandBuffer> {
   NSError *_cbError;
