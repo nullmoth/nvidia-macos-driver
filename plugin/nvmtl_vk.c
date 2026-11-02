@@ -252,6 +252,35 @@ static int nvmtl_layout_general_on(void)
 static nvmtl_fx_state g_fx; static pthread_mutex_t g_fx_lock = PTHREAD_MUTEX_INITIALIZER;
 static __thread const char *t_fx_dying;   // the label the next image death on this thread is recorded under
 void nvmtl_vk_image_dying_label(const char *label) { t_fx_dying = label; }
+// NVMTL_IMAGE_GRACE=1 (default off): a dead image's view, image and memory are released only once every submit that was
+// in flight when it died has completed, instead of at once. A command buffer still executing can hold a descriptor it
+// read before the slot was rewritten, or an address it computed earlier, to an image the app has already released; with
+// the memory gone that read is a page fault that takes the channel, with it still mapped it is a stale read of a dead
+// texture and nothing more. The held images are reaped as submits finish (one in-order queue), so the cost is the few
+// frames of memory a release burst occupies. The census counts what is held. Off, every path is exactly as before.
+static int nvmtl_image_grace_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_IMAGE_GRACE"); on = e && e[0] == '1';
+        if (on) nvlog("vk: dead images are released only after the submits in flight at their death complete (NVMTL_IMAGE_GRACE=1)"); }
+    return on;
+}
+typedef struct nvmtl_grace_img { nvk_image img; uint64_t seq; struct nvmtl_grace_img *next; } nvmtl_grace_img;
+static pthread_mutex_t g_grace_lock = PTHREAD_MUTEX_INITIALIZER;
+static nvmtl_grace_img *g_grace_head, *g_grace_tail; static uint64_t g_grace_n, g_grace_reaped, g_cmd_finished_seq;
+static void nvmtl_vk_image_destroy_now(nvk_image *i);
+static void nvmtl_image_grace_reap(void)
+{
+    nvmtl_grace_img *due = NULL, **tail = &due; uint64_t n = 0;
+    pthread_mutex_lock(&g_grace_lock);
+    while (g_grace_head && g_grace_head->seq <= g_cmd_finished_seq) {
+        nvmtl_grace_img *e = g_grace_head; g_grace_head = e->next; if (!g_grace_head) g_grace_tail = NULL;
+        e->next = NULL; *tail = e; tail = &e->next; g_grace_n--; g_grace_reaped++; n++;
+    }
+    pthread_mutex_unlock(&g_grace_lock);
+    while (due) { nvmtl_grace_img *e = due; due = e->next; nvmtl_vk_image_destroy_now(&e->img); free(e); }
+    if (n && (g_grace_reaped & 0xFFF) < n) nvlog("vk: image grace: %llu dead images released so far, %llu still held", (unsigned long long)g_grace_reaped, (unsigned long long)g_grace_n);
+}
 void nvmtl_vk_cmd_counts(uint64_t *begun, uint64_t *submitted, uint64_t *abandoned)
 {
     if (begun) *begun = g_cmd_begun; if (submitted) *submitted = g_cmd_submitted; if (abandoned) *abandoned = g_cmd_abandoned;
@@ -5193,7 +5222,7 @@ static void nvmtl_fx_dump(const char *why)
     nvmtl_fx_report(&g_fx, g_cmd_submitted, 12, 256, nvmtl_fx_emit_line, NULL);
     pthread_mutex_unlock(&g_fx_lock);
 }
-static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c) { nvmtl_fx_dispatch(&c->fx, t_dt_label); }
+static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c, const nvk_pipeline *p) { nvmtl_fx_dispatch(&c->fx, t_dt_label, p); }
 static int nvmtl_dt_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_DISPATCH_TIME"); on = e && e[0] == '1'; } return on; }
 /* returns the slot whose timestamps bracket this dispatch, or -1 */
 static int nvmtl_dt_begin(nvk_cmdbuf *c, const uint32_t t[3], const uint32_t l[3])
@@ -5288,7 +5317,7 @@ void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_
                                 tbase[0] + off[0] * local[0], tbase[1] + off[1] * local[1], tbase[2] + off[2] * local[2],
                                 gbase[0] + off[0], gbase[1] + off[1], gbase[2] + off[2], groups[0], groups[1], groups[2] };
             pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES, pc);
-            nvmtl_fx_note_dispatch(c);
+            nvmtl_fx_note_dispatch(c, p);
             pvkCmdDispatch(c->cb, n[0], n[1], n[2]);
         }
     }
@@ -5312,7 +5341,7 @@ void nvmtl_vk_cmd_dispatch_indirect_tg(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffe
     const uint32_t F = 0x80000000u;
     uint32_t pc[12] = { F | tg[0], F | tg[1], F | tg[2], 0, 0, 0, 0, 0, 0, F, F, F };
     pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES, pc);
-    nvmtl_fx_note_dispatch(c);
+    nvmtl_fx_note_dispatch(c, p);
     pvkCmdDispatchIndirect(c->cb, (VkBuffer)b->buf, off);
 }
 void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t gy, uint32_t gz)
@@ -5331,7 +5360,7 @@ void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t
         nvlog("vk: raw dispatch of %ux%ux%u groups exceeds the device limit — SKIPPED", gx, gy, gz);
         c->skipped++; return;
     }
-    nvmtl_fx_note_dispatch(c);
+    nvmtl_fx_note_dispatch(c, p);
     pvkCmdDispatch(c->cb, gx, gy, gz);
 }
 
@@ -6569,6 +6598,7 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     pthread_mutex_unlock(&nvmtl_submit_mutex);
     pt[4] = nvmtl_perf_now();
     g_cmd_submitted++;
+    c->fx_seq = g_cmd_submitted;
     pthread_mutex_lock(&g_fx_lock); nvmtl_fx_submit(&g_fx, g_cmd_submitted, c->cb, &c->fx); pthread_mutex_unlock(&g_fx_lock);
     if (result != VK_SUCCESS) {
         g_state = -1;
@@ -6623,6 +6653,10 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
         nvmtl_fx_dump("fence wait failed: the device is lost");
         return -2;
     }
+    // Every submit up to this one has completed (one in-order queue): dead images whose last possible reader was
+    // among them can go now (NVMTL_IMAGE_GRACE).
+    if (c->fx_seq) { pthread_mutex_lock(&g_grace_lock); if (c->fx_seq > g_cmd_finished_seq) g_cmd_finished_seq = c->fx_seq; pthread_mutex_unlock(&g_grace_lock);
+                     nvmtl_image_grace_reap(); }
     if (c->wseq && c->wseq != NVMTL_WSEQ_BLIND) {
         // The fence has already signalled, so the GPU is finished with this command buffer; the witness only certifies
         // its pool and address pages for reuse. A missing one used to switch the backend off for the whole process, and
@@ -6747,10 +6781,29 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b)
 void nvmtl_vk_image_destroy(nvk_image *i)
 {
     if (g_state != 1 || !i || !i->img) return;
-    nvmtl_vk_image_upload_barrier(i);   // an async upload must finish before we free this image's memory (#96)
     g_img_gone++;
-    pthread_mutex_lock(&g_fx_lock); nvmtl_fx_image_gone(&g_fx, g_cmd_submitted, i->view, i->w, i->h, i->fmt, i->storage, t_fx_dying); pthread_mutex_unlock(&g_fx_lock);
+    pthread_mutex_lock(&g_fx_lock);
+    nvmtl_fx_image_gone(&g_fx, g_cmd_submitted, i->view, i->w, i->h, i->fmt, i->storage, (i->pool ? NVMTL_FX_POOLED : 0) | (i->placed ? NVMTL_FX_PLACED : 0), t_fx_dying);
+    pthread_mutex_unlock(&g_fx_lock);
     t_fx_dying = NULL;
+    if (nvmtl_image_grace_on()) {
+        nvmtl_grace_img *e = calloc(1, sizeof *e);
+        if (e) {
+            e->img = *i; memset(i, 0, sizeof *i);
+            pthread_mutex_lock(&g_grace_lock);
+            e->seq = g_cmd_submitted;   // the last submit that could have read it
+            if (g_grace_tail) g_grace_tail->next = e; else g_grace_head = e;
+            g_grace_tail = e; g_grace_n++;
+            pthread_mutex_unlock(&g_grace_lock);
+            return;
+        }
+    }
+    nvmtl_vk_image_destroy_now(i);
+}
+static void nvmtl_vk_image_destroy_now(nvk_image *i)
+{
+    if (!i->img) return;
+    nvmtl_vk_image_upload_barrier(i);   // an async upload must finish before we free this image's memory (#96)
     if (i->view) pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL);
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
     if (i->pool) { if (i->sysmem) g_sys_bytes -= i->alloc; else g_vram_bytes -= i->alloc; image_pool_release(i); }
@@ -7548,7 +7601,7 @@ void nvmtl_vk_cmd_dispatch_indirect(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *
 {
     pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipeline)p->pipe);
     if (c->nobind) return;
-    nvmtl_fx_note_dispatch(c);
+    nvmtl_fx_note_dispatch(c, p);
     pvkCmdDispatchIndirect(c->cb, (VkBuffer)b->buf, off);
 }
 
