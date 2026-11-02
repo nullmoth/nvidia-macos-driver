@@ -31,6 +31,9 @@ pub struct TransformOptions {
     /// The caller guarantees that no rasterization rate map can be bound.
     /// Generic translation must keep rejecting undecoded runtime map data.
     pub no_rasterization_rate_maps: bool,
+    /// The plugin reserved heap slots 1..5 for typed dummies: a null resource id reads the dummy of the declared
+    /// image dimensionality instead of slot 0 (reflect::BINDLESS_DUMMY_SLOT_*).
+    pub typed_dummy_slots: bool,
     pub runtime_sampler_states: [Option<RuntimeSamplerState>; SAMPLER_ARGUMENT_COUNT_USIZE],
     pub runtime_storage_image_states:
         [Option<RuntimeStorageImageState>; TEXTURE_ARGUMENT_COUNT_USIZE],
@@ -50,6 +53,7 @@ impl Default for TransformOptions {
             denorm_flush_to_zero_f32: false,
             raster_sample_count: None,
             no_rasterization_rate_maps: false,
+            typed_dummy_slots: false,
             vertex_amplification_count: 1,
             runtime_sampler_states: [None; SAMPLER_ARGUMENT_COUNT_USIZE],
             runtime_storage_image_states: [None; TEXTURE_ARGUMENT_COUNT_USIZE],
@@ -330,6 +334,7 @@ struct Ctx {
     kernel_dispatch: crate::reflect::KernelDispatch,
     raster_sample_count: Option<u32>,
     no_rasterization_rate_maps: bool,
+    typed_dummy_slots: bool,
     vertex_amplification_count: u32,
     runtime_sampler_states: [Option<RuntimeSamplerState>; SAMPLER_ARGUMENT_COUNT_USIZE],
     runtime_storage_image_states: [Option<RuntimeStorageImageState>; TEXTURE_ARGUMENT_COUNT_USIZE],
@@ -423,6 +428,7 @@ impl Ctx {
                 .unwrap_or_else(crate::reflect::KernelDispatch::safe_default),
             raster_sample_count: options.raster_sample_count,
             no_rasterization_rate_maps: options.no_rasterization_rate_maps,
+            typed_dummy_slots: options.typed_dummy_slots,
             vertex_amplification_count: options.vertex_amplification_count,
             runtime_sampler_states: options.runtime_sampler_states,
             runtime_storage_image_states: options.runtime_storage_image_states,
@@ -2965,6 +2971,7 @@ pub(crate) fn transform_with_options_and_sidecar(
     decorate_ptr_access_chain_base_strides(&mut ctx);
     ctx.emit_sidecar.buffer_root_source_types.clear();
     neutralize_private_placeholder_access_chains(&mut ctx, entry_idx)?;
+    resources::redirect_zero_heap_slots(&mut ctx);
     ctx.phase_type_positions = None;
     ctx.module.types_global_values.append(&mut ctx.new_globals);
     let preserved_pointer_facts = ctx

@@ -2843,6 +2843,14 @@ static uint32_t g_heap_fifo[NVMTL_BINDLESS_SLOTS]; static uint32_t g_heap_fifo_h
 static nvk_image             g_dummyStex;
 static nvk_image             g_dummyStexArray;   /* the heap's storage dummy: a 2D ARRAY, the type the game's handle writes declare */
 static inline void *nvmtl_heap_storage_dummy(void) { return g_dummyStexArray.view ? g_dummyStexArray.view : g_dummyStex.view; }
+/* Typed dummies for the heap's reserved slots 1..5 (the translator's BINDLESS_DUMMY_SLOT_*): 3D, cube and cube array.
+   Slot 1 holds the 2D dummies, slot 2 the 2D array one. A null resource id is redirected by the translated shader to the
+   slot whose dummy has the dimensionality it declares, so its reads are zeros and its writes are discarded for every
+   type, as on Apple. NVMTL_TYPED_DUMMIES=0 keeps slot 0 alone and tells the translator nothing. */
+static nvk_image g_dummyStex3D, g_dummyStexCube, g_dummyStexCubeArray;
+static int g_heap_typed_dummies;
+int nvmtl_typed_dummies_wanted(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_TYPED_DUMMIES"); on = !(e && e[0] == '0'); } return on; }
+int nvmtl_vk_heap_typed_dummies(void) { return g_heap_typed_dummies; }
 static VkSampler             g_dummySampler;
 
 #define NVMTL_SAMPLER_INTERN_CAP 4096u
@@ -3154,6 +3162,17 @@ static int ensure_descriptors_locked(void)
         if (g_dummyStexArray.img) nvmtl_vk_image_destroy(&g_dummyStexArray);
         memset(&g_dummyStexArray, 0, sizeof g_dummyStexArray);
     }
+    if (nvmtl_typed_dummies_wanted()) {
+        struct { nvk_image *img; uint32_t mtl_type, layers; const char *what; } typed[3] = {
+            { &g_dummyStex3D, 7, 1, "3D" }, { &g_dummyStexCube, 5, 6, "cube" }, { &g_dummyStexCubeArray, 6, 6, "cube array" } };
+        for (int k = 0; k < 3; k++) {
+            if (nvmtl_vk_image_create_typed(1, 1, VK_FORMAT_R8G8B8A8_UNORM, 4, 0, 1, 1, typed[k].mtl_type, typed[k].layers, typed[k].img) || !typed[k].img->storage) {
+                nvlog("vk: NO %s storage dummy (RGBA8 storage refused) - its reserved heap slot keeps the 2D-array dummy", typed[k].what);
+                if (typed[k].img->img) nvmtl_vk_image_destroy(typed[k].img);
+                memset(typed[k].img, 0, sizeof *typed[k].img);
+            }
+        }
+    }
     if (g_mutable && nvmtl_vk_texel_view_create(&g_dummyBuf, 0, 256, VK_FORMAT_R8G8B8A8_UNORM, 1, &g_dummyTexAlias, &g_dummyTexView, NULL)) {
         nvlog("vk: par3 NO texel dummy — texture buffers are turned OFF for this process (the layout stays mutable)"); g_mutable = 0; }
     /* The sampler a shader gets at a slot nothing was bound to. A Metal constexpr sampler defaults to mip_filter::none,
@@ -3249,6 +3268,26 @@ static int ensure_descriptors_locked(void)
                       for (uint32_t k = 0; k < NVMTL_BINDLESS_SLOTS; k++) { nvmtl_sl_write(&g_sl, k, 2, nvmtl_heap_storage_dummy(), 0); if (tf) { nvmtl_sl_write(&g_sl, k, 3, g_dummyTexView, 0); nvmtl_sl_write(&g_sl, k, 4, g_dummyTexView, 0); } }
                   pthread_mutex_unlock(&g_sl_lock);
               } else if (hnb == 5) nvlog("vk: BINDLESS heap bindings 2-4 left unwritten for unfilled slots (%s)", prefill ? "no storage dummy" : "NVMTL_HEAP_PREFILL=0"); }
+            if (nvmtl_typed_dummies_wanted() && hnb == 5) {
+                // slots 1..5 = the typed dummies (translator's BINDLESS_DUMMY_SLOT_2D .. _CUBE_ARRAY); a type whose dummy
+                // failed to create keeps the array dummy, and the slot stays reserved so no texture can land there
+                void *sampled[5] = { g_dummyImg.view, g_dummyStexArray.view, g_dummyStex3D.view, g_dummyStexCube.view, g_dummyStexCubeArray.view };
+                void *storage[5] = { g_dummyStex.view, g_dummyStexArray.view, g_dummyStex3D.view, g_dummyStexCube.view, g_dummyStexCubeArray.view };
+                for (uint32_t k = 0; k < 5; k++) {
+                    const uint32_t slot = 1 + k;
+                    void *sv = sampled[k] ? sampled[k] : g_dummyImg.view, *tv = storage[k] ? storage[k] : nvmtl_heap_storage_dummy();
+                    VkDescriptorImageInfo si = { VK_NULL_HANDLE, (VkImageView)sv, k ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                    VkDescriptorImageInfo ti = { VK_NULL_HANDLE, (VkImageView)tv, VK_IMAGE_LAYOUT_GENERAL };
+                    VkWriteDescriptorSet w[2] = { { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, hset, 0, slot, 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &si, NULL, NULL },
+                                                  { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, hset, 2, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ti, NULL, NULL } };
+                    pvkUpdateDescriptorSets(g_dev, tv ? 2 : 1, w, 0, NULL);
+                    pthread_mutex_lock(&g_sl_lock); nvmtl_sl_write(&g_sl, slot, 0, sv, 0); if (tv) nvmtl_sl_write(&g_sl, slot, 2, tv, 0); pthread_mutex_unlock(&g_sl_lock);
+                }
+                pthread_mutex_lock(&g_heap_lock); if (g_heap_next < 6) g_heap_next = 6; pthread_mutex_unlock(&g_heap_lock);
+                g_heap_typed_dummies = 1;
+                nvlog("vk: BINDLESS heap slots 1-5 reserved for typed dummies (2D, 2D array%s, 3D%s, cube%s, cube array%s) - a null resource id reads/writes the dummy of its declared type",
+                      g_dummyStexArray.view ? "" : " MISSING", g_dummyStex3D.view ? "" : " MISSING", g_dummyStexCube.view ? "" : " MISSING", g_dummyStexCubeArray.view ? "" : " MISSING");
+            }
             g_heapLayout = hl; g_heapPool = hp; g_heapSet = hset;
             {   static const char *const tn[] = { "SAMPLER", "COMBINED", "SAMPLED_IMAGE", "STORAGE_IMAGE", "UNIFORM_TEXEL", "STORAGE_TEXEL" };
                 for (uint32_t i = 0; i < hnb; i++)
@@ -7419,7 +7458,8 @@ static void nvmtl_vk_zero_dummies(void)
     static int done;
     if (done) return;
     done = 1;
-    nvk_image *imgs[3] = { &g_dummyImg, g_dummyStex.view ? &g_dummyStex : NULL, g_dummyStexArray.view ? &g_dummyStexArray : NULL };
+    nvk_image *imgs[6] = { &g_dummyImg, g_dummyStex.view ? &g_dummyStex : NULL, g_dummyStexArray.view ? &g_dummyStexArray : NULL,
+                           g_dummyStex3D.view ? &g_dummyStex3D : NULL, g_dummyStexCube.view ? &g_dummyStexCube : NULL, g_dummyStexCubeArray.view ? &g_dummyStexCubeArray : NULL };
     VkCommandPool pool = VK_NULL_HANDLE; VkCommandBuffer cb = VK_NULL_HANDLE; VkFence fence = VK_NULL_HANDLE;
     VkCommandPoolCreateInfo cpci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL, 0, g_qfam };
     if (pvkCreateCommandPool(g_dev, &cpci, NULL, &pool) != VK_SUCCESS) { nvlog("vk: dummy zero-fill SKIPPED — vkCreateCommandPool failed; an unbound texture still samples uninitialised memory"); return; }
@@ -7429,9 +7469,10 @@ static void nvmtl_vk_zero_dummies(void)
     if (pvkBeginCommandBuffer(cb, &bi) != VK_SUCCESS) { nvlog("vk: dummy zero-fill SKIPPED — vkBeginCommandBuffer failed; an unbound texture still samples uninitialised memory"); return; }
     VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     VkClearColorValue zero; memset(&zero, 0, sizeof zero);
-    for (int k = 0; k < 3; k++) {
+    for (int k = 0; k < 6; k++) {
         if (!imgs[k] || !imgs[k]->img) continue;
-        VkImageLayout fin = (imgs[k] == &g_dummyStex || imgs[k] == &g_dummyStexArray) ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkImageLayout fin = (imgs[k] == &g_dummyImg) ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
+        VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, imgs[k]->layers > 1 ? imgs[k]->layers : 1 };
         VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
             0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)imgs[k]->img, range };
