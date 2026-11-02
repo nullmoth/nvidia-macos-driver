@@ -112,6 +112,10 @@ static int nvmtl_xlate_ready(void) {
         void *h = dlopen(xpath, RTLD_NOW | RTLD_LOCAL);
         if (h) nvmtl_translator_cache_tag(xpath, gXlateTag, sizeof gXlateTag);
         if (!getenv("NVMTL_NO_AIR_UNROLL")) strlcat(gXlateTag, "-u2", sizeof gXlateTag);
+        // Canonical pointers and argument-buffer samplers each change the SPIR-V a module translates to, so a cache
+        // entry written in one mode must never be served in the other.
+        if (getenv("NVMTL_CANONICAL_POINTERS")) strlcat(gXlateTag, "-p5", sizeof gXlateTag);
+        if (getenv("NVMTL_ARGBUF_SAMPLERS") && !strcmp(getenv("NVMTL_ARGBUF_SAMPLERS"), "1")) strlcat(gXlateTag, "-as1", sizeof gXlateTag);
         if (!h) { nvlog("translate: dlopen(%s): %s", NVMTL_XLATE_LIB, dlerror()); return; }
         xlate = (nvmtl_translate_fn)dlsym(h, "nvmtl_translate");
         { char tid[1200];
@@ -532,7 +536,8 @@ static NSString *nvmtl_aircache_path(NSData *air) {
     char hex[2 * CC_SHA256_DIGEST_LENGTH + 1];
     for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) snprintf(hex + 2 * i, 3, "%02x", h[i]);
     return [[nvmtl_aircache_dir() stringByAppendingPathComponent:@(hex)] stringByAppendingPathExtension:
-            nvmtl_air_unroll_wanted(air) ? @"u2.ll" : @"ll"];
+            getenv("NVMTL_CANONICAL_POINTERS") ? (nvmtl_air_unroll_wanted(air) ? @"p5.u2.ll" : @"p5.ll")
+                                               : (nvmtl_air_unroll_wanted(air) ? @"u2.ll" : @"ll")];
 }
 
 static BOOL nvmtl_run_air_opt(const char *input, const char *output) {
@@ -590,13 +595,26 @@ struct nvmtl_llvm_walk {
     void *(*GetElementType)(void *); unsigned long long (*GetArrayLength2)(void *); void *(*GetModuleContext)(void *);
     void *(*Int64TypeInContext)(void *); void *(*ConstInt)(void *, unsigned long long, int);
     void *(*ConstInBoundsGEP2)(void *, void *, void **, unsigned); void (*ReplaceAllUsesWith)(void *, void *);
+    void *(*GetFirstFunction)(void *); void *(*GetNextFunction)(void *); int (*GetLinkage)(void *);
+    void *(*IsACallInst)(void *); void *(*GetCalledValue)(void *);
+    unsigned (*GetEnumAttributeKindForName)(const char *, size_t); void *(*CreateEnumAttribute)(void *, unsigned, uint64_t);
+    void (*AddAttributeAtIndex)(void *, unsigned, void *); void *(*GetEnumAttributeAtIndex)(void *, unsigned, unsigned);
+    void *(*GetInstructionParent)(void *); void *(*GetBasicBlockParent)(void *);
+    void *(*GetFirstBasicBlock)(void *); void *(*GetNextBasicBlock)(void *);
+    void *(*GetFirstInstruction)(void *); void *(*GetNextInstruction)(void *);
+    void *(*IsAPHINode)(void *); void *(*IsASelectInst)(void *); void *(*TypeOf)(void *);
 };
 typedef struct nvmtl_llvm_walk nvmtl_llvm_walk;
 #define NVMTL_LLVM_WALK_NAMES "LLVMGetFirstGlobal", "LLVMGetNextGlobal", "LLVMGlobalGetValueType", "LLVMGetFirstUse", \
     "LLVMGetNextUse", "LLVMGetUser", "LLVMIsAConstantExpr", "LLVMGetConstOpcode", "LLVMGetGEPSourceElementType", \
     "LLVMGetNumOperands", "LLVMGetOperand", "LLVMIsAConstantInt", "LLVMConstIntGetSExtValue", "LLVMGetTypeKind", \
     "LLVMGetIntTypeWidth", "LLVMGetElementType", "LLVMGetArrayLength2", "LLVMGetModuleContext", "LLVMInt64TypeInContext", \
-    "LLVMConstInt", "LLVMConstInBoundsGEP2", "LLVMReplaceAllUsesWith"
+    "LLVMConstInt", "LLVMConstInBoundsGEP2", "LLVMReplaceAllUsesWith", \
+    "LLVMGetFirstFunction", "LLVMGetNextFunction", "LLVMGetLinkage", "LLVMIsACallInst", "LLVMGetCalledValue", \
+    "LLVMGetEnumAttributeKindForName", "LLVMCreateEnumAttribute", "LLVMAddAttributeAtIndex", "LLVMGetEnumAttributeAtIndex", \
+    "LLVMGetInstructionParent", "LLVMGetBasicBlockParent", \
+    "LLVMGetFirstBasicBlock", "LLVMGetNextBasicBlock", "LLVMGetFirstInstruction", "LLVMGetNextInstruction", \
+    "LLVMIsAPHINode", "LLVMIsASelectInst", "LLVMTypeOf"
 static int nvmtl_scalar_bytes(const nvmtl_llvm_walk *w, void *t) {
     switch (w->GetTypeKind(t)) {
     case 1: case 18: return 2; case 2: return 4; case 3: return 8;
@@ -635,6 +653,35 @@ static int nvmtl_llvm_walk_load(nvmtl_llvm_walk *w, void *library) {
     return 1;
 }
 static nvmtl_llvm_walk gLLVMWalk;
+
+static BOOL nvmtl_has_pointer_choice(const nvmtl_llvm_walk *w, void *module) {
+    for (void *fn = w->GetFirstFunction(module); fn; fn = w->GetNextFunction(fn))
+        for (void *bb = w->GetFirstBasicBlock(fn); bb; bb = w->GetNextBasicBlock(bb))
+            for (void *i = w->GetFirstInstruction(bb); i; i = w->GetNextInstruction(i))
+                if ((w->IsAPHINode(i) || w->IsASelectInst(i)) && w->GetTypeKind(w->TypeOf(i)) == 12) return YES;
+    return NO;
+}
+
+// Marks every internal helper with exactly one direct caller always-inline, so the pointer it returns or takes is
+// visible as SSA to the translator instead of crossing a call. One caller means no helper body is duplicated.
+static unsigned nvmtl_inline_single_use_helpers(const nvmtl_llvm_walk *w, void *module) {
+    unsigned inl = w->GetEnumAttributeKindForName("alwaysinline", strlen("alwaysinline"));
+    unsigned no = w->GetEnumAttributeKindForName("noinline", strlen("noinline"));
+    if (!inl || !no) return 0;
+    void *context = w->GetModuleContext(module); unsigned count = 0;
+    for (void *fn = w->GetFirstFunction(module); fn; fn = w->GetNextFunction(fn)) {
+        int linkage = w->GetLinkage(fn);
+        if (linkage != 8 && linkage != 9) continue; // LLVMInternalLinkage and LLVMPrivateLinkage
+        void *use = w->GetFirstUse(fn);
+        if (!use || w->GetNextUse(use)) continue;
+        void *call = w->GetUser(use);
+        if (!w->IsACallInst(call) || w->GetCalledValue(call) != fn) continue;
+        if (w->GetBasicBlockParent(w->GetInstructionParent(call)) == fn) continue;
+        if (w->GetEnumAttributeAtIndex(fn, ~0u, no)) continue;
+        w->AddAttributeAtIndex(fn, ~0u, w->CreateEnumAttribute(context, inl, 0)); count++;
+    }
+    return count;
+}
 
 // Set only when the reader reports an ERROR about a module - it used to only log, so a module the reader
 // had rejected was still compiled. Severity matters: the same handler carries warnings, remarks and notes,
@@ -717,8 +764,37 @@ static NSString *nvmtl_air_in_memory(NSData *air) {
             else { int rt = nvmtl_retype_byte_geps(&gLLVMWalk, module);
                    nvlog("library: air unroll: simdgroup_matrix module (%lu bytes) unrolled + sroa, %d byte GEPs retyped", (unsigned long)air.length, rt); }
         }
-        char *text = nvLLVMPrintModuleToString(module);
-        if (text) { result = [NSString stringWithUTF8String:text]; nvLLVMDisposeMessage(text); }
+        // NVMTL_CANONICAL_POINTERS: inline single-use helpers and SROA so pointers reach the translator as plain SSA;
+        // instcombine only when a pointer phi/select exists (it also rewrites typed GEPs to byte GEPs).
+        if (getenv("NVMTL_CANONICAL_POINTERS")) {
+            if (!nvLLVMRunPasses) { gAirError = 1; nvlog("library: pointer canonicalization requires the LLVM pass-builder API"); }
+            else {
+                unsigned helpers = nvmtl_inline_single_use_helpers(&gLLVMWalk, module);
+                void *opts = nvLLVMCreatePassBuilderOptions();
+                void *err = nvLLVMRunPasses(module, "always-inline,function(sroa,simplifycfg)", NULL, opts);
+                nvlog("library: pointer canonicalization exposed %u single-use helpers", helpers);
+                nvLLVMDisposePassBuilderOptions(opts);
+                if (!err && nvmtl_has_pointer_choice(&gLLVMWalk, module)) {
+                    opts = nvLLVMCreatePassBuilderOptions();
+                    err = nvLLVMRunPasses(module, "function(instcombine,simplifycfg)", NULL, opts);
+                    nvLLVMDisposePassBuilderOptions(opts);
+                    nvlog("library: pointer selection simplification applied");
+                }
+                if (err) {
+                    gAirError = 1;
+                    char *m = nvLLVMGetErrorMessage(err);
+                    nvlog("library: pointer canonicalization refused: %s", m ? m : "unknown LLVM error");
+                    if (m) nvLLVMDisposeErrorMessage(m);
+                }
+            }
+        }
+        char *text = gAirError ? NULL : nvLLVMPrintModuleToString(module);
+        if (text) {
+            result = [NSString stringWithUTF8String:text]; nvLLVMDisposeMessage(text);
+            // samesign only restricts defined inputs; the translator reads the plain integer predicate.
+            if (getenv("NVMTL_CANONICAL_POINTERS"))
+                result = [result stringByReplacingOccurrencesOfString:@"icmp samesign " withString:@"icmp "];
+        }
     }
     if (module) nvLLVMDisposeModule(module);
     if (buffer) nvLLVMDisposeMemoryBuffer(buffer);
@@ -738,6 +814,10 @@ static NSString *nvmtl_air_to_text(NSData *air) {
         return nvmtl_air_text_made(memoryIR);
     }
 
+    if (getenv("NVMTL_CANONICAL_POINTERS")) {
+        nvlog("library: canonical AIR unavailable; decoder fallback cannot satisfy this contract");
+        return nil;
+    }
     NSString *dir = NSTemporaryDirectory();
     NSString *inp = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"nvmtl-%d-%p.air", getpid(), air]];
     NSString *outp = [inp stringByAppendingPathExtension:@"ll"];
