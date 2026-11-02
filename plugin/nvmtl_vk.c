@@ -257,6 +257,9 @@ static int nvmtl_layout_general_on(void)
 }
 // Fault context (nvmtl_fault_context.h): a few stores per dispatch, submit and death; read once, at device loss.
 static nvmtl_fx_state g_fx; static pthread_mutex_t g_fx_lock = PTHREAD_MUTEX_INITIALIZER;
+// Address-page lifetime (nvmtl_page_life.h): a page is released by the highest submit that referenced it, not by its owner.
+static nvmtl_pl_state g_pl; static pthread_mutex_t g_pl_lock = PTHREAD_MUTEX_INITIALIZER;
+static void nvmtl_fx_note_buffer_gone(nvk_buffer *b, uint32_t where);
 static __thread const char *t_fx_dying;   // the label the next image death on this thread is recorded under
 void nvmtl_vk_image_dying_label(const char *label) { t_fx_dying = label; }
 // NVMTL_IMAGE_GRACE=1 (default off): a dead image's view, image and memory are released only once every submit that was
@@ -1352,6 +1355,7 @@ static void bpark_census(const char *what)
 }
 static void bpark_free(nvk_buffer *b)
 {
+    nvmtl_fx_note_buffer_gone(b, NVMTL_FX_PARKED);
     pvkDestroyBuffer(g_dev, (VkBuffer)b->buf, NULL);
     if (b->map && pvkUnmapMemory) pvkUnmapMemory(g_dev, (VkDeviceMemory)b->mem);
     if (b->bar1) g_bar1_bytes -= b->alloc;
@@ -3182,7 +3186,7 @@ int nvmtl_vk_bind_buffer_offset(nvk_cmdbuf *c, uint32_t set, uint32_t index, siz
 
 #define NVMTL_TABLES_PER_PAGE 256
 #define NVMTL_TABLE_BYTES ((2 * NVMTL_NBUF + NVMTL_NTEX) * sizeof(uint64_t))
-typedef struct nvmtl_address_page { nvk_buffer buffer; struct nvmtl_address_page *next; } nvmtl_address_page;
+typedef struct nvmtl_address_page { nvk_buffer buffer; struct nvmtl_address_page *next; nvmtl_pl_node life; } nvmtl_address_page;
 // A cached command pool keeps its NVK memory chunks, and every chunk holds a user-client connection
 // for as long as it lives: nvrm_xnu maps with IOConnectMapMemory64(conn, 0, ...), which is ONE mapping
 // per connection by design, so live mappings and live connections are the same number. macOS refuses
@@ -3391,6 +3395,7 @@ static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBuf
             if (nvmtl_vk_buffer_create(NVMTL_TABLE_BYTES * NVMTL_TABLES_PER_PAGE, 1, &page->buffer)) { nvmtl_vk_buffer_destroy(&page->buffer); free(page); return -1; }
         }
         page->next = c->address_pages; c->address_pages = page;
+        pthread_mutex_lock(&g_pl_lock); nvmtl_pl_made(&g_pl); pthread_mutex_unlock(&g_pl_lock);
     }
     uint64_t *addresses = (uint64_t *)((uint8_t *)page->buffer.map + slot * NVMTL_TABLE_BYTES);
     nvmtl_bindtable *t = c->table;
@@ -5317,6 +5322,53 @@ static void nvmtl_fx_dump(const char *why)
     pthread_mutex_unlock(&g_fx_lock);
 }
 static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c, const nvk_pipeline *p) { nvmtl_fx_dispatch(&c->fx, t_dt_label, p, t_dt_key, t_dt_air); }
+static void nvmtl_fx_note_buffer_gone(nvk_buffer *b, uint32_t where)
+{
+    const uint64_t a = nvmtl_vk_buffer_address(b);
+    pthread_mutex_lock(&g_fx_lock); nvmtl_fx_buffer_gone(&g_fx, g_cmd_submitted, a, b->size ? b->size : b->alloc, where); pthread_mutex_unlock(&g_fx_lock);
+}
+static void nvmtl_pl_census_log(void)
+{
+    char line[256];
+    pthread_mutex_lock(&g_pl_lock); nvmtl_pl_census(&g_pl, line, sizeof line); pthread_mutex_unlock(&g_pl_lock);
+    nvlog_every("%s", line);
+}
+// Cooling pages whose last referencing submit has now completed go to the reuse cache or are destroyed.
+static void nvmtl_page_cool_reap(void)
+{
+    nvmtl_pl_node *due; unsigned n;
+    pthread_mutex_lock(&g_pl_lock); n = nvmtl_pl_reap(&g_pl, __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE), &due); pthread_mutex_unlock(&g_pl_lock);
+    while (due) {
+        nvmtl_pl_node *e = due; due = e->cool; e->cool = NULL;
+        nvmtl_address_page *page = (nvmtl_address_page *)((char *)e - offsetof(nvmtl_address_page, life));
+        if (!(e->reuse && nvmtl_keep_page_push(page))) { nvmtl_vk_buffer_destroy(&page->buffer); free(page); }
+    }
+    if (n) nvmtl_pl_census_log();
+}
+// At device loss: every cooling page and every cached page by exact GPU range, so a fault address is matched
+// against pages themselves and not against the span between the lowest and highest of them.
+static void nvmtl_page_addresses_log(void)
+{
+    char line[400]; int o = 0; unsigned per = 0, n = 0;
+    pthread_mutex_lock(&g_pl_lock);
+    for (nvmtl_pl_node *e = g_pl.cooling; e; e = e->cool) {
+        nvmtl_address_page *page = (nvmtl_address_page *)((char *)e - offsetof(nvmtl_address_page, life));
+        const uint64_t a = nvmtl_vk_buffer_address(&page->buffer);
+        nvlog_every("fault context: cooling address page GPU 0x%llx .. 0x%llx, last referenced by submit seq %llu", (unsigned long long)a,
+                    (unsigned long long)(a + (uint64_t)NVMTL_TABLES_PER_PAGE * NVMTL_TABLE_BYTES), (unsigned long long)e->last_seq);
+    }
+    pthread_mutex_unlock(&g_pl_lock);
+    pthread_mutex_lock(&g_keep_lock);
+    for (unsigned i = 0; i < g_keep_npage; i++, n++) {
+        const uint64_t a = nvmtl_vk_buffer_address(&g_keep_page[i]->buffer);
+        if (!per) o = snprintf(line, sizeof line, "fault context: cached address pages (GPU lo, each %u KB, last seq):", (unsigned)((NVMTL_TABLES_PER_PAGE * NVMTL_TABLE_BYTES) >> 10));
+        o += snprintf(line + o, sizeof line - (size_t)o, " 0x%llx/%llu", (unsigned long long)a, (unsigned long long)g_keep_page[i]->life.last_seq);
+        if (++per == 8 || o >= (int)sizeof line - 40) { nvlog_every("%s", line); per = 0; }
+    }
+    pthread_mutex_unlock(&g_keep_lock);
+    if (per) nvlog_every("%s", line);
+    nvmtl_pl_census_log();
+}
 static int nvmtl_dt_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_DISPATCH_TIME"); on = e && e[0] == '1'; } return on; }
 /* returns the slot whose timestamps bracket this dispatch, or -1 */
 static int nvmtl_dt_begin(nvk_cmdbuf *c, const uint32_t t[3], const uint32_t l[3])
@@ -6508,9 +6560,17 @@ static void nvmtl_cmd_retire(nvk_cmdbuf *c)
     free(c->table); c->table = NULL;
     nvmtl_address_page *page = c->address_pages;
     const int keep = nvmtl_keep_verdict(c->wseq);
-    while (page) { nvmtl_address_page *next = page->next;
-        if (keep >= 0 && !(keep > 0 && nvmtl_keep_page_push(page))) { nvmtl_vk_buffer_destroy(&page->buffer); free(page); }
+    // A page is reused or destroyed only once the queue has completed the highest submit that referenced it
+    // (nvmtl_page_life.h). On the ordinary path that is this command buffer's own submit, already completed by the
+    // fence wait above, so the page goes straight on; a page a later submit still reads cools until that completes.
+    const uint64_t finished = __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE);
+    uint64_t released = 0;
+    while (page) { nvmtl_address_page *next = page->next; page->next = NULL;
+        if (keep < 0) { page = next; continue; }   // a lost witness leaks the page, as before
+        pthread_mutex_lock(&g_pl_lock); const int now = nvmtl_pl_release(&g_pl, &page->life, finished, keep > 0); released = g_pl.retired; pthread_mutex_unlock(&g_pl_lock);
+        if (now && !(keep > 0 && nvmtl_keep_page_push(page))) { nvmtl_vk_buffer_destroy(&page->buffer); free(page); }
         page = next; }
+    if (released && (released & 0xFFF) == 0) nvmtl_pl_census_log();
     c->address_pages = NULL; c->address_count = 0;
     if (c->cb && c->pool) {
         VkCommandBuffer cb = (VkCommandBuffer)c->cb;
@@ -6693,6 +6753,8 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     pt[4] = nvmtl_perf_now();
     g_cmd_submitted++;
     c->fx_seq = g_cmd_submitted;
+    for (nvmtl_address_page *pg = c->address_pages; pg; pg = pg->next) nvmtl_pl_stamp(&pg->life, c->fx_seq);
+    if (pre->begun) for (nvmtl_address_page *pg = pre->cb.address_pages; pg; pg = pg->next) nvmtl_pl_stamp(&pg->life, c->fx_seq);
     pthread_mutex_lock(&g_fx_lock); nvmtl_fx_submit(&g_fx, g_cmd_submitted, c->cb, &c->fx); pthread_mutex_unlock(&g_fx_lock);
     if (result != VK_SUCCESS) {
         g_state = -1;
@@ -6758,13 +6820,14 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
             const unsigned npg = g_keep_npage, npool = g_keep_npool;
             pthread_mutex_unlock(&g_keep_lock);
             nvlog_every("fault context: %u address pages cached for reuse (GPU 0x%llx .. 0x%llx), %u command pools cached", npg, (unsigned long long)(npg ? lo : 0), (unsigned long long)(npg ? hi : 0), npool);
+            nvmtl_page_addresses_log();
         }
         return -2;
     }
     // Every submit up to this one has completed (one in-order queue): dead images whose last possible reader was
     // among them can go now (NVMTL_IMAGE_GRACE).
     if (c->fx_seq) { pthread_mutex_lock(&g_grace_lock); if (c->fx_seq > g_cmd_finished_seq) g_cmd_finished_seq = c->fx_seq; pthread_mutex_unlock(&g_grace_lock);
-                     nvmtl_image_grace_reap(); }
+                     nvmtl_image_grace_reap(); nvmtl_page_cool_reap(); }
     if (c->wseq && c->wseq != NVMTL_WSEQ_BLIND) {
         // The fence has already signalled, so the GPU is finished with this command buffer; the witness only certifies
         // its pool and address pages for reuse. A missing one used to switch the backend off for the whole process, and
@@ -6843,6 +6906,7 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
     // in-flight budget (`if (!host_visible) nvmtl_vk_budget_charge`), and BAR1 buffers are not charged.
     const int was_charged = b->map == NULL && !b->bar1;
     g_buf_gone++;
+    nvmtl_fx_note_buffer_gone(b, (b->pool ? NVMTL_FX_POOLED : 0) | (b->placed ? NVMTL_FX_PLACED : 0));
     pvkDestroyBuffer(g_dev, (VkBuffer)b->buf, NULL);
     if (b->pool) pool_buffer_release(b);
     if (!b->placed && !b->imported && b->mem && b->map && pvkUnmapMemory) { pvkUnmapMemory(g_dev, (VkDeviceMemory)b->mem); b->map = NULL; }

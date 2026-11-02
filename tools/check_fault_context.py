@@ -31,6 +31,11 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_fx_dump\(\"", 2),                                              # queue submit failed, fence wait failed
     ("NVMTLObjects.m", r"nvmtl_vk_image_dying_label\(_label\.UTF8String\)", 1),
     ("nvmtl_vk.h", r"nvmtl_fx_cb fx;", 1),
+    ("nvmtl_vk.c", r"nvmtl_fx_note_buffer_gone\(b, ", 2),                              # every buffer death (destroy + park free) with its GPU range
+    ("nvmtl_vk.c", r"nvmtl_pl_stamp\(&pg->life, c->fx_seq\)", 2),                      # every page of a submit (and its prologue) carries the sequence
+    ("nvmtl_vk.c", r"nvmtl_page_cool_reap\(\);", 1),                                   # cooling pages released as submits finish
+    ("nvmtl_vk.c", r"nvmtl_pl_release\(&g_pl, &page->life, finished, keep > 0\)", 1),  # the owner's release asks the page, not the witness alone
+    ("nvmtl_vk.c", r"nvmtl_page_addresses_log\(\);", 1),                               # exact page ranges at device loss
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev}
 short = []; total = 0
