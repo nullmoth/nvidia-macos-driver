@@ -223,11 +223,18 @@ static uint64_t nvmtl_vk_headroom_eff(uint64_t bud, int measured)
 // 8151 MB card: the app budgeted 6324 MB, the heap reached 7110 MB, so 786 MB
 // of the heap was ours. Default 0 keeps the advertised value unchanged until a
 // reserve is proven for the whole desktop; NVMTL_WS_RESERVE_MB sets it.
+// Default: 29% of the card. The formula above moves with the memory budget at the moment of the query, which is the
+// desktop's footprint at that boot: measured 11-02 on the same card and stack, 5748-5830 MB advertised on two boots and
+// 6444-6525 MB on five others. Above ~6.4 GB the game sized its heaps at 4.8 GB instead of 0.75 GB, VRAM read 6.2 GB
+// used before the first scene, and the first scene frame faulted; at 5.7-5.8 GB it ran clean, and ray-tracing pipelines
+// were still created at that figure (10-26). 29% of 8151 MB caps the recommendation at 5787 MB, inside the clean band,
+// whatever the budget reads. NVMTL_WS_RESERVE_MB overrides it; 0 disables the cap.
 static uint64_t nvmtl_vk_ws_reserve(void)
 {
     static long long mb = -2;
-    if (mb == -2) { const char *e = getenv("NVMTL_WS_RESERVE_MB"); mb = (e && *e) ? atoll(e) : 0; }
-    return mb > 0 ? (uint64_t)mb << 20 : 0;
+    if (mb == -2) { const char *e = getenv("NVMTL_WS_RESERVE_MB"); mb = (e && *e) ? atoll(e) : -1; }
+    if (mb >= 0) return (uint64_t)mb << 20;
+    return nvmtl_vk_vram_bytes() / 100 * 29;
 }
 static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_out, uint64_t *used_out, int *measured_out);
 
@@ -2063,13 +2070,17 @@ uint64_t nvmtl_vk_working_set(void)
 uint64_t nvmtl_vk_recommended_working_set(void)
 {
     uint64_t limit = nvmtl_vk_working_set();
-    uint64_t reserve = nvmtl_vk_ws_reserve();
-    if (!limit || !reserve || reserve >= limit) return limit;
+    const uint64_t reserve = nvmtl_vk_ws_reserve(), card = nvmtl_vk_vram_bytes();
+    // the cap: never more than the card less the reserve, whatever the budget reads at this moment
+    const uint64_t cap = card > reserve ? card - reserve : 0;
+    uint64_t b = 0, u = 0; nvmtl_vk_vram_budget(&b, &u);
     static int said;
-    if (!said++) nvlog("working set: holding back %llu MB for driver-internal device memory -> recommending %llu MB of %llu MB",
-                       (unsigned long long)(reserve >> 20), (unsigned long long)((limit - reserve) >> 20),
-                       (unsigned long long)(limit >> 20));
-    return limit - reserve;
+    if (!said++) nvlog("working set: formula %llu MB (budget %llu MB, used %llu MB at the query), cap %llu MB (card %llu MB less %llu MB reserve) -> recommending %llu MB",
+                       (unsigned long long)(limit >> 20), (unsigned long long)(b >> 20), (unsigned long long)(u >> 20),
+                       (unsigned long long)(cap >> 20), (unsigned long long)(card >> 20), (unsigned long long)(reserve >> 20),
+                       (unsigned long long)((cap && limit > cap ? cap : limit) >> 20));
+    if (cap && limit > cap) limit = cap;
+    return limit;
 }
 
 unsigned long long nvmtl_tex_objs_live(void);
