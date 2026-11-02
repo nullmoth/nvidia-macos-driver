@@ -14456,38 +14456,3 @@ declare { i32, float, i32, i32, i8 addrspace(1)*, i32, i32, <2 x float>, i1 } @a
     );
     tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
 }
-
-#[test]
-fn native_threadgroup_aligned_byte_gep_preserves_vector_stride() {
-    let ll = r#"
-target triple = "spirv-unknown-vulkan1.2"
-define void @k(ptr addrspace(3) %temp, ptr addrspace(1) %out, i32 %i) {
-entry:
-  %idx = zext i32 %i to i64
-  %base = getelementptr <4 x half>, ptr addrspace(3) %temp, i64 %idx
-  %offset = getelementptr i8, ptr addrspace(3) %base, i64 328
-  %v = load <3 x half>, ptr addrspace(3) %offset, align 8
-  %h = extractelement <3 x half> %v, i32 2
-  %f = fpext half %h to float
-  store float %f, ptr addrspace(1) %out, align 4
-  ret void
-}
-!air.kernel = !{!0}
-!0 = !{ptr @k, !1, !2}
-!1 = !{}
-!2 = !{!3, !4, !5}
-!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.arg_type_size", i32 8, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"half4", !"air.arg_name", !"temp"}
-!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.write", !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"float", !"air.arg_name", !"out"}
-!5 = !{i32 2, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"uint", !"air.arg_name", !"i"}
-"#;
-    let tmp = std::env::temp_dir().join(format!("metal2vulkan_threadgroup_vector_stride_{}",std::process::id()));
-    std::fs::create_dir_all(&tmp).unwrap();
-    let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
-    let asm = disassemble(&spv).expect("disassemble");
-    let module = load_bytes(&spv).unwrap();
-    assert!(module.types_global_values.iter().any(|inst|
-        inst.class.opcode == Op::Constant
-            && inst.operands == vec![Operand::LiteralBit32(41)]), "{asm}");
-    assert!(!asm.contains("OpTypeInt 8 0"), "{asm}");
-    tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
-}

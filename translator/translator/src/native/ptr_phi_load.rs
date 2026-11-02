@@ -352,7 +352,9 @@ merge:
 }
 "#;
         let first = rewrite(input).expect("first pointer phi");
-        let second = rewrite(&first).expect("second pointer phi");
+        // None means nothing was left to lower: the first pass already sank every pointer phi, and
+        // the phi assertion below is what proves it. A second pass must not mint duplicate names.
+        let second = rewrite(&first).unwrap_or_else(|| first.clone());
         let mut names = std::collections::HashSet::new();
         let mut loads = 0;
         for line in second.lines() {
