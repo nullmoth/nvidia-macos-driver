@@ -295,6 +295,8 @@ static int nvmtl_buffer_grace_on(void)
 static void nvmtl_live_add(nvk_buffer *b, uint32_t kind);
 static void nvmtl_live_remove(nvk_buffer *b);
 static void nvmtl_live_relabel(nvk_buffer *b, uint32_t kind);
+static void nvmtl_vw_tic_note(const void *view);   /* the view's descriptor indices and header addresses, through the NVK layout reader */
+static void nvmtl_vw_note_died(const void *view);
 static void nvmtl_buffer_grace_reap(void);
 static void nvmtl_fx_note_buffer_gone(nvk_buffer *b, uint32_t where);
 static __thread const char *t_fx_dying;   // the label the next image death on this thread is recorded under
@@ -2286,6 +2288,7 @@ static void nvmtl_commit_image(nvk_image *image)
         const uint32_t id = nvmtl_im_add(&g_im, image->img, bmem, boff, bsize, image->view, image->w, image->h, image->fmt, image->storage, image->placed ? 1u : 0u, image->pool ? 1u : 0u, g_cmd_submitted);
         nvmtl_im_set_params(&g_im, id, image->layers ? image->layers : 1, image->mips ? image->mips : 1, image->vkflags, image->usage, image->samples, avail);
         nvmtl_vw_add_ex(&g_vw, image->view, image->img, nvmtl_vk_view_type_of(image) + 1, 0, image->layers ? image->layers : 1, 0, image->mips ? image->mips : 1);
+        nvmtl_vw_tic_note(image->view);
         if (avail && bsize > avail) nvlog("image: UNDERSIZED BIND - a %ux%u fmt %u image (%u layers, %u mips) needs %llu bytes but its bind at offset %llu of a %llu-byte memory leaves %llu",
                                           image->w, image->h, image->fmt, image->layers, image->mips, (unsigned long long)bsize, (unsigned long long)boff, (unsigned long long)(boff + avail), (unsigned long long)avail); }
     pthread_mutex_unlock(&g_sl_lock);
@@ -5704,6 +5707,16 @@ static int nvmtl_nvk_set_element(uint32_t binding, uint32_t slot, uint32_t *out)
     if (slot >= arr || !stride) return 0;
     return nvmtl_fx_read_safe((const uint8_t *)map + off + (uint64_t)slot * stride, out, 4);
 }
+// At view creation: the indices and header addresses the view carries (only on the measured ICD build); at death: the seq.
+static void nvmtl_vw_tic_note(const void *view)
+{
+    if (!view || !nvmtl_nvk_layout_ok()) return;
+    uint32_t si = 0, ti = 0, w[8]; uint64_t sa = 0, ta = 0; nvmtl_tic t;
+    if (nvmtl_fx_read_safe((const uint8_t *)view + NVK_L_VIEW_SAMPLED_INDEX, &si, 4) && nvmtl_fx_read_safe((const uint8_t *)view + NVK_L_VIEW_SAMPLED_DESC, w, 32)) { nvmtl_tic_decode(w, &t); sa = t.addr; }
+    if (nvmtl_fx_read_safe((const uint8_t *)view + NVK_L_VIEW_STORAGE_INDEX, &ti, 4) && nvmtl_fx_read_safe((const uint8_t *)view + NVK_L_VIEW_STORAGE_DESC, w, 32)) { nvmtl_tic_decode(w, &t); ta = t.addr; }
+    nvmtl_vw_set_tic(&g_vw, view, si, sa, ti, ta, g_cmd_submitted);   // callers hold g_sl_lock
+}
+static void nvmtl_vw_note_died(const void *view) { pthread_mutex_lock(&g_sl_lock); nvmtl_vw_died(&g_vw, view, g_cmd_submitted); pthread_mutex_unlock(&g_sl_lock); }
 static void nvmtl_fault_tic_line(const char *what, const uint32_t w[8], uint64_t expected, char *line, size_t cap)
 {
     nvmtl_tic t; nvmtl_tic_decode(w, &t); char mem[300];
@@ -5765,6 +5778,18 @@ static void nvmtl_fault_slot_report(uint64_t ptr, FILE *f)
     if (nvmtl_nvk_layout_ok()) {
         if (v2) nvmtl_fault_nvk_slot(slot, 2, v2, v2 == nvmtl_heap_storage_dummy() ? 0 : exp2, f);
         if (v0 && v0 != v2) nvmtl_fault_nvk_slot(slot, 0, v0, v0 == g_dummyImg.view ? 0 : exp0, f);
+        {   // who held those descriptor indices before: the stale-header question
+            uint32_t ti = 0, si = 0; const uint8_t *table = (const uint8_t *)g_dev + NVK_L_DEV_IMAGES; uint32_t alloc = 0, max_alloc = 0, next_desc = 0, mem_count = 0;
+            if (v2) nvmtl_fx_read_safe((const uint8_t *)v2 + NVK_L_VIEW_STORAGE_INDEX, &ti, 4);
+            if (v0) nvmtl_fx_read_safe((const uint8_t *)v0 + NVK_L_VIEW_SAMPLED_INDEX, &si, 4);
+            nvmtl_fx_read_safe(table + NVK_L_TABLE_ALLOC, &alloc, 4); nvmtl_fx_read_safe(table + NVK_L_TABLE_ALLOC + 4, &max_alloc, 4); nvmtl_fx_read_safe(table + NVK_L_TABLE_ALLOC + 8, &next_desc, 4); nvmtl_fx_read_safe(table + NVK_L_ARENA_MEM_COUNT, &mem_count, 4);
+            char line[300]; snprintf(line, sizeof line, "fault context:     NVK image table: alloc %u, max %u, next fresh index %u, %u arena memories; binding 2 index %u is in arena memory #%u, binding 0 index %u in #%u", alloc, max_alloc, next_desc, mem_count,
+                                     ti, nvmtl_nvk_arena_mem_index((uint64_t)ti * NVK_L_TIC_BYTES), si, nvmtl_nvk_arena_mem_index((uint64_t)si * NVK_L_TIC_BYTES)); nvmtl_fx_emit_both(f, line);
+            const int ls = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock");
+            if (ti) nvmtl_vw_index_history(&g_vw, &g_im, ti, v2, nvmtl_fx_emit_both, f);
+            if (si && si != ti) nvmtl_vw_index_history(&g_vw, &g_im, si, v0, nvmtl_fx_emit_both, f);
+            if (ls) pthread_mutex_unlock(&g_sl_lock);
+        }
     } else {
         if (v2 && v2 != nvmtl_heap_storage_dummy()) nvmtl_fault_tic_scan(v2, "binding 2 (storage)", f);
         if (v0 && v0 != g_dummyImg.view && v0 != v2) nvmtl_fault_tic_scan(v0, "binding 0 (sampled)", f);
@@ -5861,6 +5886,9 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
         nvlog_every("fault context: %u images written to the fault file with their memory, bind, shape, requirement and lifetime", nimg);
     }
     nvmtl_loss_section(f, "images");
+    {   lk = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock"); const uint32_t nv = nvmtl_vw_dump(&g_vw, f); if (lk) pthread_mutex_unlock(&g_sl_lock);
+        nvlog_every("fault context: %u views written to the fault file with their descriptor indices and header addresses", nv); }
+    nvmtl_loss_section(f, "views");
     {   // every device memory with its base address and lifetime: what resolves a fault address to an image's bytes
         lk = nvmtl_loss_mutex_lock(&g_mm_lock, "g_mm_lock");
         const uint32_t nmem = nvmtl_mm_dump(&g_mm, f); const uint64_t unb = g_mm.unbased, mlive = g_mm.live;
@@ -6776,7 +6804,7 @@ int nvmtl_vk_image_view_create_range_swz(nvk_image *img, uint32_t vkfmt, int a8,
     VkImageView vv = VK_NULL_HANDLE;
     VKCK(pvkCreateImageView(g_dev, &vci, NULL, &vv), "vkCreateImageView(swizzle)");
     *out_view = vv;
-    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add_ex(&g_vw, vv, vci.image, vci.viewType + 1, vci.subresourceRange.baseArrayLayer, vci.subresourceRange.layerCount, vci.subresourceRange.baseMipLevel, vci.subresourceRange.levelCount); pthread_mutex_unlock(&g_sl_lock);
+    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add_ex(&g_vw, vv, vci.image, vci.viewType + 1, vci.subresourceRange.baseArrayLayer, vci.subresourceRange.layerCount, vci.subresourceRange.baseMipLevel, vci.subresourceRange.levelCount); nvmtl_vw_tic_note(vv); pthread_mutex_unlock(&g_sl_lock);
     return 0;
 }
 int nvmtl_vk_pass_kind(const nvk_pass *ps)
@@ -7599,9 +7627,9 @@ void nvmtl_vk_image_destroy(nvk_image *i)
 }
 static void nvmtl_vk_image_destroy_now(nvk_image *i)
 {
-    if (!i->img) { if (i->view) { pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); i->view = NULL; } return; }   // a view held by the grace (texel entries: nvmtl_image_grace_reap)
+    if (!i->img) { if (i->view) { nvmtl_vw_note_died(i->view); pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); i->view = NULL; } return; }   // a view held by the grace (texel entries: nvmtl_image_grace_reap)
     nvmtl_vk_image_upload_barrier(i);   // an async upload must finish before we free this image's memory (#96)
-    if (i->view) pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL);
+    if (i->view) { nvmtl_vw_note_died(i->view); pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); }
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
     if (i->pool) { if (i->sysmem) g_sys_bytes -= i->alloc; else g_vram_bytes -= i->alloc; image_pool_release(i); }
     if (!i->placed && i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); g_alloc_bytes -= i->alloc; if (i->sysmem) { g_sys_bytes -= i->alloc; g_sys_align -= (i->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= i->alloc; g_img_align -= (i->alloc + 65535ull) & ~65535ull; nvmtl_vk_budget_discharge(i->alloc); }    }
@@ -7653,7 +7681,7 @@ int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
     else { g_vram_bytes += mr.size; g_img_align += aligned; nvmtl_vk_budget_charge(mr.size); g_res1_on++; g_res1_on_b += mr.size; }
     i->img = img; i->mem = mem; i->view = view; i->alloc = mr.size; i->sysmem = to_sysmem ? 1 : 0; i->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     pthread_mutex_lock(&g_sl_lock);
-    nvmtl_im_add(&g_im, img, mem, 0, mr.size, view, i->w, i->h, i->fmt, i->storage, 0, 0, g_cmd_submitted); nvmtl_vw_add(&g_vw, view, img);
+    nvmtl_im_add(&g_im, img, mem, 0, mr.size, view, i->w, i->h, i->fmt, i->storage, 0, 0, g_cmd_submitted); nvmtl_vw_add(&g_vw, view, img); nvmtl_vw_tic_note(view);
     pthread_mutex_unlock(&g_sl_lock);
     return 0;
 }
@@ -7684,7 +7712,7 @@ void nvmtl_vk_image_free_backing(nvk_image *o)
 {
     if (g_state != 1 || !o || !o->img) return;
     pthread_mutex_lock(&g_sl_lock); nvmtl_im_died(&g_im, o->img, g_cmd_submitted); pthread_mutex_unlock(&g_sl_lock);
-    if (o->view) pvkDestroyImageView(g_dev, (VkImageView)o->view, NULL);
+    if (o->view) { nvmtl_vw_note_died(o->view); pvkDestroyImageView(g_dev, (VkImageView)o->view, NULL); }
     pvkDestroyImage(g_dev, (VkImage)o->img, NULL);
     if (o->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)o->mem, NULL); g_alloc_bytes -= o->alloc; if (o->sysmem) { g_sys_bytes -= o->alloc; g_sys_align -= (o->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= o->alloc; g_img_align -= (o->alloc + 65535ull) & ~65535ull; nvmtl_vk_budget_discharge(o->alloc); }    }
     memset(o, 0, sizeof *o);
@@ -8774,7 +8802,7 @@ int nvmtl_vk_image_view_create_ex(nvk_image *img, uint32_t vkfmt, int a8, uint32
     VkImageView v = VK_NULL_HANDLE;
     VKCK(pvkCreateImageView(g_dev, &vci, NULL, &v), "vkCreateImageView(view)");
     *out_view = v;
-    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add_ex(&g_vw, v, vci.image, vci.viewType + 1, vci.subresourceRange.baseArrayLayer, vci.subresourceRange.layerCount, vci.subresourceRange.baseMipLevel, vci.subresourceRange.levelCount); pthread_mutex_unlock(&g_sl_lock);
+    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add_ex(&g_vw, v, vci.image, vci.viewType + 1, vci.subresourceRange.baseArrayLayer, vci.subresourceRange.layerCount, vci.subresourceRange.baseMipLevel, vci.subresourceRange.levelCount); nvmtl_vw_tic_note(v); pthread_mutex_unlock(&g_sl_lock);
     return 0;
 }
 int nvmtl_vk_image_view_create_aspect(nvk_image *img, uint32_t vkfmt, uint32_t aspect, uint32_t baseLevel, uint32_t levelCount, void **out_view)
@@ -8788,7 +8816,7 @@ int nvmtl_vk_image_view_create_aspect(nvk_image *img, uint32_t vkfmt, uint32_t a
     VkImageView v = VK_NULL_HANDLE;
     VKCK(pvkCreateImageView(g_dev, &vci, NULL, &v), "vkCreateImageView(aspect view)");
     *out_view = v;
-    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add_ex(&g_vw, v, vci.image, vci.viewType + 1, vci.subresourceRange.baseArrayLayer, vci.subresourceRange.layerCount, vci.subresourceRange.baseMipLevel, vci.subresourceRange.levelCount); pthread_mutex_unlock(&g_sl_lock);
+    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add_ex(&g_vw, v, vci.image, vci.viewType + 1, vci.subresourceRange.baseArrayLayer, vci.subresourceRange.layerCount, vci.subresourceRange.baseMipLevel, vci.subresourceRange.levelCount); nvmtl_vw_tic_note(v); pthread_mutex_unlock(&g_sl_lock);
     return 0;
 }
 // A view's descriptor index (NVK keeps image views as indices into its device-wide descriptor table, and a heap slot's
@@ -10207,7 +10235,7 @@ int nvmtl_vk_image_view_create_range_aspect(nvk_image *img, uint32_t vkfmt, int 
     VkImageView v = VK_NULL_HANDLE;
     VKCK(pvkCreateImageView(g_dev, &vci, NULL, &v), "vkCreateImageView(range)");
     *out_view = v;
-    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add_ex(&g_vw, v, vci.image, vci.viewType + 1, vci.subresourceRange.baseArrayLayer, vci.subresourceRange.layerCount, vci.subresourceRange.baseMipLevel, vci.subresourceRange.levelCount); pthread_mutex_unlock(&g_sl_lock);
+    pthread_mutex_lock(&g_sl_lock); nvmtl_vw_add_ex(&g_vw, v, vci.image, vci.viewType + 1, vci.subresourceRange.baseArrayLayer, vci.subresourceRange.layerCount, vci.subresourceRange.baseMipLevel, vci.subresourceRange.levelCount); nvmtl_vw_tic_note(v); pthread_mutex_unlock(&g_sl_lock);
     return 0;
 }
 
