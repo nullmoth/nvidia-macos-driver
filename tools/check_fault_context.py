@@ -47,6 +47,9 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_fx_writers\(&g_fx", 1),                                       # the writer census per root at loss
     ("nvmtl_vk.c", r"nvmtl_fx_barriers_after\(&g_fx", 1),                                # the barriers between the last dispatches at loss
     ("nvmtl_vk.c", r"t_fx_cb = out->cb; t_fx_ord = 0;", 1),                               # a begun cb is the thread's current one
+    ("nvmtl_vk.c", r"nvmtl_vk_heap_zero\(&", 2),                                         # pool blocks (mapped under the lock, VRAM after it)
+    ("NVMTLObjects.m", r"nvmtl_vk_heap_zero\(&h->_hm", 1),                               # every app heap, cleared once on creation
+    ("nvmtl_vk.c", r"nvmtl_lv_remove\(&g_lv, b->reg, g_cmd_submitted\)", 1),            # provenance keeps the death sequence
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev}
 short = []; total = 0

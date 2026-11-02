@@ -4290,6 +4290,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
               shared ? "shared" : "private", (unsigned long)size);
         return;
     }
+    nvmtl_vk_heap_zero(&h->_hm, shared ? "shared" : "private");
     h->_fl = OS_UNFAIR_LOCK_INIT; h->_nfr = 0; h->_cfr = 0; h->_fr = NULL;
     if (nvmtl_heap_grow(h)) { nvmtl_vk_heap_destroy(&h->_hm); nvlog("heap alias: no free list for a %lu-byte heap - legacy path", (unsigned long)size); return; }
     h->_fr[0] = 0; h->_fr[1] = size; h->_nfr = 1; h->_backed = YES;
