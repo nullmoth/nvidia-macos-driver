@@ -12,7 +12,12 @@
 #include "hevcdec.h"
 #include "mpeg2dec.h"
 #include "mpeg4dec.h"
+#ifndef NVENCVT_TMP_DIAGNOSTICS
+#define NVENCVT_TMP_DIAGNOSTICS 0
+#endif
 #include <CoreFoundation/CoreFoundation.h>
+#include <sys/time.h>
+#include <time.h>
 #include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
 #include <VideoToolbox/VideoToolbox.h>
@@ -64,9 +69,16 @@ typedef struct { CMBaseVTable base; const DecoderClass *decoderClass; } DecoderV
 static bool is_mpeg12(FourCharCode c) { return c == kCMVideoCodecType_MPEG2Video || c == kCMVideoCodecType_MPEG1Video; }
 enum { CODEC_VP9 = 0x76703039, CODEC_AV1 = 0x61763031 };   // 'vp09', 'av01' (kCMVideoCodecType_VP9 / _AV1)
 enum { CODEC_HEV1 = 0x68657631, CODEC_AVC3 = 0x61766333 };  // 'hev1', 'avc3': sample entries macOS has no decoder for
-static bool gDLog; static FILE *gDLogF;
-#define DLOG(...) do { if (gDLog) { FILE *lf_ = gDLogF ? gDLogF : stderr; fprintf(lf_, "nvdecvt: " __VA_ARGS__); fputc('\n', lf_); fflush(lf_); } } while (0)
+static bool gDLog, gDLogAll; static FILE *gDLogF;   // gDLogAll: NVENCVT_LOG=2, a line for every frame
+// each line starts with the wall-clock time (HH:MM:SS.mmm), to match the log against what was seen on screen
+#define DLOG(...) do { if (gDLog) { FILE *lf_ = gDLogF ? gDLogF : stderr; struct timeval tv_; gettimeofday(&tv_, NULL); struct tm tm_; \
+    localtime_r(&tv_.tv_sec, &tm_); fprintf(lf_, "%02d:%02d:%02d.%03d nvdecvt: ", tm_.tm_hour, tm_.tm_min, tm_.tm_sec, (int)(tv_.tv_usec / 1000)); \
+    fprintf(lf_, __VA_ARGS__); fputc('\n', lf_); fflush(lf_); } } while (0)
 
+// A picture handed to the client stays referenced here for the next NVDEC_HOLD (default 8, 0..16) pictures. A client in
+// another process (Firefox's GPU process) takes the IOSurface over a few ms after it is emitted; released at once, the
+// buffer could go back out of the pool and the next picture would overwrite the one about to be drawn.
+#define NVDEC_HOLD_MAX 16
 typedef struct {
     pthread_mutex_t lock;
     VTVideoDecoderSession session;
@@ -88,6 +100,8 @@ typedef struct {
     // asynchronous output (T8.09): pictures waiting for the output thread (copy, emit, release), in decode order
     struct OutJob { VTVideoDecoderFrame frame; OSStatus res; VTDecodeInfoFlags fl; CVPixelBufferRef pb; int surf, rel; unsigned w, h, cx, cy, usCopy, usEmit; } q[4];
     unsigned qh, qt; bool async, thrOn, stop; pthread_t thr; pthread_cond_t cv;
+    // the last pictures handed out, still referenced here (see hold_picture)
+    CVPixelBufferRef held[NVDEC_HOLD_MAX]; unsigned heldNext; pthread_mutex_t heldLock;
 } DState;
 typedef struct OutJob OutJob;
 
@@ -172,6 +186,7 @@ static int open_vp9(DState *s, unsigned w, unsigned h, int depth)
 
 // ---- base object ----
 static void out_drain(DState *s);
+static void hold_release_all(DState *s);
 static OSStatus b_invalidate(CMBaseObjectRef o)
 {
     DState *s = dstate(o); if (!s) return noErr;
@@ -192,6 +207,7 @@ static OSStatus b_invalidate(CMBaseObjectRef o)
         s->opened = false;
     }
     if (s->fmt) { CFRelease(s->fmt); s->fmt = NULL; }
+    hold_release_all(s);
     if (s->ownPool) { CVPixelBufferPoolRelease(s->ownPool); s->ownPool = NULL; }
     if (s->colour) { CFRelease(s->colour); s->colour = NULL; }
     if (s->frames) DLOG("per frame: decodeFrame %.2f ms (engine %.2f, pool %.2f, copy %.2f, emit %.2f), outside %.2f ms",
@@ -203,7 +219,7 @@ static OSStatus b_invalidate(CMBaseObjectRef o)
 static void b_finalize(CMBaseObjectRef o)
 {
     DState *s = dstate(o); if (!s) return;
-    b_invalidate(o); pthread_cond_destroy(&s->cv); pthread_mutex_destroy(&s->lock); free(s->tmp); free(s);
+    b_invalidate(o); pthread_cond_destroy(&s->cv); pthread_mutex_destroy(&s->heldLock); pthread_mutex_destroy(&s->lock); free(s->tmp); free(s);
     *(DState **)CMBaseObjectGetDerivedStorage(o) = NULL;
 }
 static CFStringRef b_desc(CMBaseObjectRef o)
@@ -570,11 +586,37 @@ static void out_release(DState *s, const OutJob *j)   // lock held
     else h264dec_release(&s->dec, j->rel);
 }
 
+static unsigned hold_count(void)
+{
+    static int n = -1;
+    if (n < 0) { const char *e = getenv("NVDEC_HOLD"); n = e ? atoi(e) : 8; if (n < 0) n = 0; if (n > NVDEC_HOLD_MAX) n = NVDEC_HOLD_MAX; }
+    return (unsigned)n;
+}
+// takes over the caller's reference to pb; the picture it displaces goes back to its pool
+static void hold_picture(DState *s, CVPixelBufferRef pb)
+{
+    const unsigned n = hold_count();
+    if (!n) { CVPixelBufferRelease(pb); return; }
+    pthread_mutex_lock(&s->heldLock);
+    CVPixelBufferRef old = s->held[s->heldNext % n];
+    s->held[s->heldNext % n] = pb; s->heldNext++;
+    pthread_mutex_unlock(&s->heldLock);
+    if (old) CVPixelBufferRelease(old);
+}
+static void hold_release_all(DState *s)
+{
+    pthread_mutex_lock(&s->heldLock);
+    CVPixelBufferRef gone[NVDEC_HOLD_MAX];
+    memcpy(gone, s->held, sizeof gone); memset(s->held, 0, sizeof s->held); s->heldNext = 0;
+    pthread_mutex_unlock(&s->heldLock);
+    for (int i = 0; i < NVDEC_HOLD_MAX; i++) if (gone[i]) CVPixelBufferRelease(gone[i]);
+}
+
 static void out_emit(DState *s, OutJob *j)
 {
     const double te = nowms();
     VTDecoderSessionEmitDecodedFrame(s->session, j->frame, j->res, j->fl, j->pb);
-    if (j->pb) CVPixelBufferRelease(j->pb);
+    if (j->pb) hold_picture(s, j->pb);
     j->pb = NULL; j->usEmit = (unsigned)((nowms() - te) * 1000);
 }
 
@@ -654,8 +696,9 @@ static OSStatus decode_vp9(DState *s, VTVideoDecoderFrame frame, const uint8_t *
         s->tPool += nowms() - tp;
         s->frames++;
     }
-    if (gDLog && (s->frames <= 3 || res)) DLOG("decodeFrame %p: %zu bytes, %d frames -> %d, shown %d, status 0x%x, %.2f ms", frame, len, nf,
-                                              (int)res, shown, s->vp9->err_status, s->vp9->engine_ms);
+    // NVENCVT_LOG=2: every frame with NVDEC's status, to tell a frame the engine did not finish from one shown wrong later
+    if (gDLog && (s->frames <= 3 || res || gDLogAll)) DLOG("decodeFrame %p #%u: %zu bytes, %d frames -> %d, shown %d, status 0x%x ok %u err %u, %.2f ms",
+                                              frame, s->frames, len, nf, (int)res, shown, s->vp9->err_status, s->vp9->ok_blocks, s->vp9->err_blocks, s->vp9->engine_ms);
     j.res = res; j.fl = (!res && shown < 0) ? kVTDecodeInfo_FrameDropped : 0;
     out_deliver(s, &j);
     return res;
@@ -687,8 +730,10 @@ static OSStatus decode_av1(DState *s, VTVideoDecoderFrame frame, const uint8_t *
         s->tPool += nowms() - tp;
         s->frames++;
     }
-    if (gDLog && (s->frames <= 3 || res)) DLOG("decodeFrame %p: %zu bytes -> %d, shown %d, status 0x%x, %.2f ms", frame, len, (int)res, shown,
-                                              s->av1->err_status, s->av1->engine_ms);
+    if (gDLog && (s->frames <= 3 || res || gDLogAll)) DLOG("decodeFrame %p #%u: %zu bytes -> %d, shown %d (decoded %d, twin %d), tiles %d, status 0x%x ok %u err %u, %.2f ms",
+                                              frame, s->frames, len, (int)res, shown, s->av1->dec_surf,
+                                              s->av1->dec_surf >= 0 ? s->av1->twin[s->av1->dec_surf] : -1, s->av1->ntiles,
+                                              s->av1->err_status, s->av1->ok_blocks, s->av1->err_blocks, s->av1->engine_ms);
     j.res = res; j.fl = (!res && shown < 0) ? kVTDecodeInfo_FrameDropped : 0;
     out_deliver(s, &j);
     return res;
@@ -903,7 +948,7 @@ __attribute__((visibility("default"))) OSStatus NVDecVT_CreateInstance(FourCharC
     OSStatus st = CMDerivedObjectCreate(al, &gDVT.base, VTVideoDecoderGetClassID(), &obj);
     if (st) return st;
     DState *s = calloc(1, sizeof *s);
-    pthread_mutex_init(&s->lock, NULL); pthread_cond_init(&s->cv, NULL);
+    pthread_mutex_init(&s->lock, NULL); pthread_mutex_init(&s->heldLock, NULL); pthread_cond_init(&s->cv, NULL);
     s->codec = codec;
     *(DState **)CMBaseObjectGetDerivedStorage(obj) = s;
     *out = obj;
@@ -934,8 +979,9 @@ static NvU32 nvdec_class(void)
 // NVENCVT_AMPERE_ALL_DEC development override until separately validated.
 OSStatus NVDecVT_Register(int rating)
 {
-    gDLog = getenv("NVENCVT_LOG") != NULL;
-    if (!gDLog && access("/tmp/nvencvt.log", F_OK) == 0) { char p[64]; snprintf(p, sizeof p, "/tmp/nvencvt-%d.log", (int)getpid()); if ((gDLogF = fopen(p, "a"))) gDLog = true; }
+    gDLog = getenv("NVENCVT_LOG") != NULL; gDLogAll = gDLog && !strcmp(getenv("NVENCVT_LOG"), "2");
+    // /tmp flag files are honoured only in a diagnostics build (vt/nvencvt.c explains why)
+    if (NVENCVT_TMP_DIAGNOSTICS && !gDLog && access("/tmp/nvencvt.log", F_OK) == 0) { char p[64]; snprintf(p, sizeof p, "/tmp/nvencvt-%d.log", (int)getpid()); if ((gDLogF = fopen(p, "a"))) gDLog = true; }
     if (getenv("NVENCVT_NO_DEC")) return kVTCouldNotFindVideoDecoderErr;
     extern int gNvencvtGpu;   // vt/nvencvt.c: 1 Ada, 2 TU117 (GTX 1650: NVDEC 0xc4b0 has no AV1), 3 GA10x (RTX 30)
     const bool ampere = gNvencvtGpu == 3;

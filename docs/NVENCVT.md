@@ -93,6 +93,60 @@ notes that injecting before process startup also lets VideoToolbox see the
 decoders before a command-line client's first session enumerates its decoder
 list.
 
+## Firefox (VP9 and AV1)
+
+On Ada, Firefox decodes VP9 and AV1 (and H.264 / HEVC) on NVDEC through
+NVEncVT. Measured on an RTX 4060 Ti (AD106), macOS 26.7.2, Firefox 159, a
+YouTube 4K60 video: Firefox's media log reports `VP9 SWDEC HWDEC, AV1 SWDEC
+HWDEC`, the media process uses 12-17% of a core instead of 90-350%, and
+"GPU Video Decode Utilization" reads 9-67%.
+
+`NVMTL_NVENCVT=plugin-container` alone is not enough. Firefox decodes in
+`plugin-container` and asks VideoToolbox once, when that process starts, which
+codecs have hardware decoders; VideoToolbox answers from a list it built before
+the Metal plugin loaded NVEncVT, so the first answer for `vp09` is no. The
+library has to be in the process from its start, as for command-line tools.
+Preloading `libnvencvt.dylib` itself reaches every Firefox process, and
+Firefox's crash helper, forked while VideoToolbox's start-up threads held an
+allocator lock, crashed at every start. Firefox is therefore started with a
+small loader that links only libSystem and opens the library only in the
+processes `NVENCVT_INJECT_ONLY` names:
+
+```sh
+xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -O2 -Wall -dynamiclib \
+  -o /tmp/libnvencvt-loader.dylib tools/firefox-nvdec/nvencvt-loader.c
+sudo install -o root -g wheel -m 755 /tmp/libnvencvt-loader.dylib \
+  /Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/
+tools/firefox-nvdec/firefox-nvdec.sh
+```
+
+Quit Firefox before running the script. A driver update replaces the bundle
+and removes the loader; install it again afterwards. Firefox's runtime does not
+carry the `allow-dyld-environment-variables` entitlement: the preload works
+because the driver's AMFI boot arguments are set.
+
+Firefox's sandboxes refuse `/dev/null`. NVEncVT's RM connection and the
+plugin's VRAM import of app surfaces both fall back to an empty pipe there
+(`nvmtl_icd_open`); without it the decoder could not start and every Firefox
+window surface was read back in full after each frame.
+
+Settings read from the environment:
+
+- `NVENCVT_INJECT_ONLY=<names>`: when the library is preloaded, register only
+  in these processes (comma, colon or space separated). Unset: every process.
+- `NVDEC_HOLD=<0..16>` (default 8): pictures kept referenced after they are
+  handed to the app. A client in another process (Firefox's GPU process) takes
+  over the surface a few milliseconds after the decoder lets it go; without the
+  hold the pool reused it first and older or half-written pictures showed.
+- `NVENCVT_LOG=2`: one log line per decoded VP9 / AV1 frame with the time and
+  NVDEC's status.
+
+The `/tmp` flag files of the upstream diagnostics (`/tmp/nvencvt.log`,
+`.refs`, `.dpb`, `.stats`, `.dump`, `.barcode`, `.anyfmt`) and the renaming of
+VideoToolbox's registry entries are compiled only with
+`-DNVENCVT_TMP_DIAGNOSTICS=1` and `-DNVENCVT_REGISTRY_RENAME=1`: `/tmp` is
+writable by every account.
+
 ## Building a release package
 
 On the build Mac, build the local x86_64 dylib and then stage it into an already

@@ -307,7 +307,7 @@ int vp9dec_frame(Vp9Dec *d, const uint8_t *buf, size_t n)
     d->engine_ms = now_ms() - t0;
     if (sv[0] != val) { fprintf(stderr, "vp9dec: no completion (error notifier 0x%x)\n", chan_error(c)); return -1; }
     const nvdec_status_s *st = d->status.cpu;
-    d->err_status = st->error_status; d->ok_blocks = st->mbs_correctly_decoded;
+    d->err_status = st->error_status; d->ok_blocks = st->mbs_correctly_decoded; d->err_blocks = st->mbs_in_error;
     if (d->verbose)
         printf("  vp9dec: surf %2d %s%s %dx%d q %d refs %d,%d,%d -> status 0x%x, ok %u, err %u, intra %u inter %u, %.2f ms\n", surf,
                f->frame_type == VP9_KEY_FRAME ? "key" : f->intra_only ? "intra" : "inter", f->show_frame ? "" : " (hidden)",

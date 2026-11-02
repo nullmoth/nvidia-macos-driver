@@ -1073,7 +1073,7 @@ static void nvmtl_busy_wait(IOSurfaceRef surf, NSUInteger plane)
 typedef struct { uint32_t sid; size_t need; uint64_t cookie; nvk_buffer b; int refs, stale; uint64_t idle; } nvmtl_ic_ent;
 #define NVMTL_IC_N 128   /* 32 filled up with live textures while a capture runs: the same menu-bar surfaces were imported every frame */
 // NVMTL_SURF_IMPORT_CACHE_IDLE_MS (default 2000): how long an import stays after its last wrapper goes.
-// NVMTL_SURF_IMPORT_CACHE_MAX_MB (default 64 with 8 GB of VRAM or more, else 16; 0 = no limit): larger surfaces (a 4K window
+// NVMTL_SURF_IMPORT_CACHE_MAX_MB (default 64 with an 8 GB card or larger, else 16; 0 = no limit): larger surfaces (a 4K window
 // or composite is ~33 MB) are imported per wrapper as without the cache, so on a small card the cache never holds the VRAM of
 // the big surfaces that 4K HiDPI capture pages off (uncapped, a 4 GB GTX 1650 had up to 67 stalls of ~100 ms per 15 s).
 static uint64_t nvmtl_ic_env(const char *name, uint64_t def, uint64_t unit)
@@ -1091,7 +1091,9 @@ static uint64_t nvmtl_ic_max_bytes(void)
 {
     static uint64_t v; static dispatch_once_t once;
     dispatch_once(&once, ^{ const uint64_t vram = nvmtl_vk_vram_bytes();
-        v = nvmtl_ic_env("NVMTL_SURF_IMPORT_CACHE_MAX_MB", vram >= (8ull << 30) ? 64 : 16, 1ull << 20);
+        // 7 GiB, not 8: an "8 GB" card reports a little less (RTX 4060 Ti: 8188 MB, part of it held by the GSP), and the
+        // small-card limit would leave out the 4K / 5K surfaces that WindowServer composites.
+        v = nvmtl_ic_env("NVMTL_SURF_IMPORT_CACHE_MAX_MB", vram >= (7ull << 30) ? 64 : 16, 1ull << 20);
         nvlog("family VRAM import cache: surfaces up to %llu MB are kept (VRAM %llu MB; NVMTL_SURF_IMPORT_CACHE_MAX_MB overrides)",
               (unsigned long long)(v >> 20), (unsigned long long)(vram >> 20)); });
     return v;

@@ -1,5 +1,6 @@
 // rm.c: see rm.h.
 #include "rm.h"
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,19 @@
 
 enum { SEL_ESC = 1, SEL_BINDFD = 3, SEL_EVWAIT = 6 };
 
+// The fd number the user client keys its RM file on. Firefox's media (RDD) sandbox refuses /dev/null; there the read
+// end of an empty pipe stands in for it, as in the NullMoth plugin (plugin/nvmtl_fd_token.h).
+static int rm_fd_token(void)
+{
+    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0 || (errno != EACCES && errno != EPERM)) return fd;
+    int ends[2];
+    if (pipe(ends)) return -1;
+    close(ends[1]);
+    if (fcntl(ends[0], F_SETFD, FD_CLOEXEC) < 0) { close(ends[0]); return -1; }
+    return ends[0];
+}
+
 static io_connect_t open_conn_fd(NvU32 type, int *fdOut)
 {
     // NVAccel's bridge first (0x4E56xxxx), then NVRM itself, as NVK's nvrm_xnu_open does
@@ -32,7 +46,8 @@ static io_connect_t open_conn_fd(NvU32 type, int *fdOut)
         kr = IOServiceOpen(svc, mach_task_self(), type, &conn); IOObjectRelease(svc);
         if (kr != KERN_SUCCESS) return 0;
     }
-    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);   // the user client keys its RM file on an fd number
+    int fd = rm_fd_token();
+    if (fd < 0) { IOServiceClose(conn); return 0; }
     uint64_t in = (uint64_t)fd;
     IOConnectCallScalarMethod(conn, SEL_BINDFD, &in, 1, NULL, NULL);
     if (fdOut) *fdOut = fd;

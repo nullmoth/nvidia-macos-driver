@@ -2054,8 +2054,10 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
     int mt = memtype(all, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (mt < 0) return -1;
     nvmtl_vram_rec r = { 3, surfaceID, plane, 0, (uint64_t)need };
+    // nvmtl_icd_open, as for NVK's own opens: Firefox's GPU process sandbox refuses /dev/null, and a failed import here
+    // leaves the surface in a private image that is read back in full after every frame
     VkImportMemoryFdInfoKHR imp = { VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, NULL, VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
-                                    open("/dev/null", O_RDONLY | O_CLOEXEC) };
+                                    nvmtl_icd_open("/dev/null", O_RDONLY | O_CLOEXEC) };
     if (imp.fd < 0) return -1;
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &imp, need, (uint32_t)mt };
     VkDeviceMemory m = VK_NULL_HANDLE;

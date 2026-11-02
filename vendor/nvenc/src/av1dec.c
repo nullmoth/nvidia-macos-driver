@@ -550,7 +550,7 @@ static int decode_frame(Av1Dec *d)
     d->engine_ms = now_ms() - t0;
     if (sv[0] != val) { fprintf(stderr, "av1dec: no completion (error notifier 0x%x)\n", chan_error(c)); return -1; }
     const nvdec_status_s *st = d->status.cpu;
-    d->err_status = st->error_status; d->ok_blocks = st->mbs_correctly_decoded;
+    d->err_status = st->error_status; d->ok_blocks = st->mbs_correctly_decoded; d->err_blocks = st->mbs_in_error;
     if (d->verbose)
         printf("  av1dec: surf %2d type %d%s %dx%d q %d tiles %d -> status 0x%x, ok %u, err %u, %.2f ms\n", surf, f->frame_type,
                f->show_frame ? "" : " (hidden)", f->upscaled_width, f->frame_height, f->base_q_idx, d->ntiles, st->error_status,
