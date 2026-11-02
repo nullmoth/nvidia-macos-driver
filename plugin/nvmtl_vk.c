@@ -193,6 +193,20 @@ static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_
 static uint64_t g_buf_vram_refused;
 static uint64_t g_heap_vram_refused;
 static uint64_t g_cmd_begun, g_cmd_submitted, g_cmd_abandoned;
+static _Atomic uint64_t g_bars[NVMTL_BARS_N]; static __thread int t_bar_site;
+void nvmtl_vk_barrier_site(int site) { t_bar_site = site; }
+void nvmtl_vk_bar_counts(uint64_t out[16]) { for (int i = 0; i < 16; i++) out[i] = i < NVMTL_BARS_N ? atomic_load(&g_bars[i]) : 0; }
+// NVMTL_IMAGE_LAYOUT_GENERAL=1: an image transition the hazard model proves unneeded (nothing earlier in this command buffer
+// touched the image) records no barrier at all; the image is treated as resting in GENERAL, which NVK does not act on. A
+// transition the model cannot clear is recorded as before. Only with the model acting (NVMTL_HAZARD=1); off by default,
+// so nothing changes for a process that does not set both.
+static int nvmtl_layout_general_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_IMAGE_LAYOUT_GENERAL"); on = e && e[0] == '1';
+        if (on) nvlog("vk: image transitions the hazard model clears are not recorded (NVMTL_IMAGE_LAYOUT_GENERAL=1%s)", nvmtl_hz_mode() == 1 ? "" : " - inert: NVMTL_HAZARD=1 is not set"); }
+    return on;
+}
 // Fault context (nvmtl_fault_context.h): a few stores per dispatch, submit and death; read once, at device loss.
 static nvmtl_fx_state g_fx; static pthread_mutex_t g_fx_lock = PTHREAD_MUTEX_INITIALIZER;
 static __thread const char *t_fx_dying;   // the label the next image death on this thread is recorded under
@@ -5567,6 +5581,7 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
               memset(c->pt_fs[c->pt_n], 0, sizeof c->pt_fs[c->pt_n]); }
       } }
     if (hzs) hz_pass_enter(c, hzs, hz_nodep);
+    atomic_fetch_add(&g_bars[NVMTL_BARS_PASS], 1);
     if (hzs && hz_nodep && nvmtl_hz_mode() == 1) nvmtl_hz_begin_rendering(c, ps, p, ncol, cf);
     else pvkCmdBeginRenderPass(c->cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     c->in_rp = 1;
@@ -7062,7 +7077,15 @@ static void img_to(nvk_cmdbuf *c, nvk_image *img, VkImageLayout to,
 {
     if ((VkImageLayout)img->layout == to) return;
     VkImageSubresourceRange r = { nvmtl_barrier_aspect(img), 0, img->mips ? img->mips : 1, 0, img->layers ? img->layers : 1 };
+    const VkAccessFlags asked = srcA;
     srcA = nvmtl_hz_clean_src(c, img, srcA);   // hazard model: no wait on an image nothing earlier in this buffer touched
+    if (asked && !srcA) {
+        atomic_fetch_add(&g_bars[NVMTL_BARS_TRANSITION_NOWAIT], 1);
+        if (nvmtl_layout_general_on() && nvmtl_hz_mode() == 1 && img->layout != VK_IMAGE_LAYOUT_UNDEFINED && img->layout != VK_IMAGE_LAYOUT_PREINITIALIZED) {
+            atomic_fetch_add(&g_bars[NVMTL_BARS_TRANSITION_SKIPPED], 1); img->layout = to; return;
+        }
+    }
+    atomic_fetch_add(&g_bars[NVMTL_BARS_TRANSITION], 1);
     VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, srcA, dstA,
         (VkImageLayout)img->layout, to, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, r };
     nvmtl_sample_pattern pattern = c->sample_pattern;
@@ -7312,6 +7335,7 @@ void nvmtl_vk_cmd_dispatch_indirect(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *
 
 void nvmtl_vk_cmd_barrier(nvk_cmdbuf *c)
 {
+    atomic_fetch_add(&g_bars[t_bar_site], 1); t_bar_site = NVMTL_BARS_LAYER;
     VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
         VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
     pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
@@ -7320,6 +7344,7 @@ void nvmtl_vk_cmd_barrier(nvk_cmdbuf *c)
 }
 void nvmtl_vk_cmd_barrier_c2c(nvk_cmdbuf *c)
 {
+    atomic_fetch_add(&g_bars[NVMTL_BARS_C2C], 1);
     VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
         VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT };
     pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,

@@ -360,6 +360,13 @@ void nvmtl_vk_cmd_draw_indirect(nvk_cmdbuf *c, nvk_buffer *b, size_t off);
 void nvmtl_vk_cmd_draw_indexed_indirect(nvk_cmdbuf *c, nvk_buffer *idx, size_t idxOff, int is32, nvk_buffer *b, size_t off);
 void nvmtl_vk_cmd_dispatch_indirect(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *b, size_t off);
 void nvmtl_vk_cmd_barrier(nvk_cmdbuf *c);
+/* Barrier census: which site asked for each full barrier. An encoder names its site before the call; a call from inside
+   the Vulkan layer (copies, uploads, clears) counts as the layer's own. nvmtl_vk_bar_counts reads the totals. */
+enum { NVMTL_BARS_LAYER, NVMTL_BARS_FIRST_DISPATCH, NVMTL_BARS_LATER_DISPATCH, NVMTL_BARS_ENCODER_END, NVMTL_BARS_OWED_FLUSH,
+       NVMTL_BARS_FENCE_API, NVMTL_BARS_HAZARD_RESTART, NVMTL_BARS_OTHER, NVMTL_BARS_C2C, NVMTL_BARS_TRANSITION,
+       NVMTL_BARS_TRANSITION_NOWAIT, NVMTL_BARS_TRANSITION_SKIPPED, NVMTL_BARS_PASS, NVMTL_BARS_N };
+void nvmtl_vk_barrier_site(int site);
+void nvmtl_vk_bar_counts(uint64_t out[16]);
 int nvmtl_vk_cmd_blit_convert(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint32_t ss, uint32_t sx, uint32_t sy,
                               nvk_image *dst, uint32_t dl, uint32_t ds, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h);
 void nvmtl_vk_buffer_destroy(nvk_buffer *b);
