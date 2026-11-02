@@ -10,10 +10,13 @@
 const char *nvmtl_image_ident(const void *addr, char *out, size_t n);
 typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int placed; void *pool; size_t poff; int imported; int bar1; size_t moff; int sparse, sysmem; int mtype1; /* memory type + 1 when known */
                  int fresh; /* host-visible memory from its own vkAllocateMemory: zeroed by the kernel, never recycled */
-                 uint64_t parked_ns; /* when the buffer park took it (CLOCK_UPTIME_RAW) */ } nvk_buffer;
+                 uint64_t parked_ns; /* when the buffer park took it (CLOCK_UPTIME_RAW) */
+                 uint8_t hz_ut; /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */ } nvk_buffer;
 #include "nvmtl_sample_positions.h"
 typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vfl;  uint64_t up_token;
-                 void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */ } nvk_image;
+                 void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */
+                 size_t hz_off, hz_len;   /* placed: the image's byte range of mem, for the hazard model (0 = all of mem) */
+                 uint8_t hz_ut; } nvk_image;   /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */
 #define NVMTL_NVAR 16
 #define NVMTL_NVAR_MAX 4096
 #define NVMTL_NCOL 8
@@ -97,6 +100,13 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  void *graphics_pipeline, *graphics_layout, *graphics_sets[3];
                  uint32_t graphics_set_count, graphics_offset_count, graphics_offsets[4], gl_uniform_dyn[2];
                  uint32_t gl_uniform_result; /* optional diagnostics for the next recorded draw */
+                 /* hazard model inputs (nvmtl_hazard.h): writable buffer slots and storage textures per stage, the
+                    sampled textures each stage's SPIR-V names; hz_dyn = the open pass began with vkCmdBeginRendering */
+                 uint32_t hz_bufw[2]; uint64_t hz_texw[2][2]; uint64_t hz_tmask[2][4]; uint8_t hz_tmask_ok[2];
+                 int hz_wm_dirty, hz_dyn, hz_force_full; uint32_t hz_att_skip;   /* untracked attachments: bit i colour, bit 8 depth */
+                 const void *hzp_res; uint8_t hzp_kind, hzp_on, hzp_skip, hzp_bskip;   /* the resource of the binding being written */
+                 uint8_t hz_draw_due;   /* something the next draw's hazard check must see arrived */
+                 uint32_t hz_sn;   /* hazard model timing sample counter */
                } nvk_cmdbuf;
 int  nvmtl_vk_init(void);
 int nvmtl_vk_sample_positions_backend(void);
@@ -199,6 +209,31 @@ void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t
 void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_t threads[3], const uint32_t tg[3]);
 /* the kernel name the next dispatch on this thread is logged under (NVMTL_DISPATCH_TIME) */
 void nvmtl_vk_dispatch_label(const char *name);
+/* hazard tracking between encoders (nvmtl_hazard.h, NVMTL_HAZARD) */
+int  nvmtl_hz_mode(void);
+void nvmtl_hz_shadow(int on);
+int  nvmtl_hz_draw(nvk_cmdbuf *c);
+int  nvmtl_hz_dispatch(nvk_cmdbuf *c, int first);
+void nvmtl_hz_encoder_end(nvk_cmdbuf *c);
+void nvmtl_hz_force_full(nvk_cmdbuf *c, int keep_nodep);
+int  nvmtl_hz_nodep(nvk_cmdbuf *c);
+int  nvmtl_hz_heaps_all(void);
+void nvmtl_hz_declare_buffer(nvk_cmdbuf *c, const nvk_buffer *b, int w, int index);
+void nvmtl_hz_declare_image(nvk_cmdbuf *c, const nvk_image *im, int w);
+void nvmtl_hz_declare_any(nvk_cmdbuf *c, int w);
+void nvmtl_hz_use_heap(nvk_cmdbuf *c, int tracked, void *mem, size_t size, int legacy);
+int  nvmtl_hz_bind_texture(nvk_cmdbuf *c, const nvk_image *im, int untracked, uint32_t set, uint32_t index, void *view);
+int  nvmtl_hz_bind_storage(nvk_cmdbuf *c, const nvk_image *im, int untracked, uint32_t set, uint32_t index, void *view);
+int  nvmtl_hz_bind_texel(nvk_cmdbuf *c, const nvk_image *im, int untracked, uint32_t set, uint32_t index, void *view, int storage);
+int  nvmtl_hz_bind_buffer(nvk_cmdbuf *c, int untracked, uint32_t set, uint32_t index, nvk_buffer *b, size_t offset);
+void nvmtl_vk_hz_counts(uint64_t out[24]);
+void nvmtl_vk_hz_reasons(double frames, char *out, size_t cap);
+void nvmtl_vk_hz_reasons_log(double frames);
+void nvmtl_vk_hz_cpu(uint64_t out_ns[8]);
+int  nvmtl_hz_blit_begin(nvk_cmdbuf *c);
+void nvmtl_hz_blit_key(nvk_cmdbuf *c, const nvk_buffer *b, const nvk_image *im, int w);
+void nvmtl_hz_blit_go(nvk_cmdbuf *c);
+void nvmtl_hz_blit_end(nvk_cmdbuf *c);
 void nvmtl_vk_cmd_dispatch_indirect_tg(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *b, size_t off, const uint32_t tg[3]);
 void nvmtl_vk_cmd_end_render(nvk_cmdbuf *c);
 int  nvmtl_vk_submit_wait_at(nvk_cmdbuf *c, const char *who);
