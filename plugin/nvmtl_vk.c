@@ -5529,17 +5529,41 @@ static void nvmtl_live_relabel(nvk_buffer *b, uint32_t kind)
 }
 // One root address of a dispatch's binding table, resolved: L = live buffer/page, D = died (seq), P = this command
 // buffer's own page, - = the dummy, ? = nothing this plugin ever mapped (an image, NVK's own memory, or a bad pointer).
+// The device-loss report must never hang or crash the process it is reporting on: every lock it takes is bounded (a
+// lock another thread holds for 250 ms is reported and the section proceeds without it - read-only, a torn read
+// accepted), every host read of app or GPU-visible memory goes through the kernel (an unmapped or bus-faulting
+// mapping comes back as an error, not a signal), and every section is flushed and announced, so a truncated dump
+// names the section it died in.
+static int nvmtl_loss_mutex_lock(pthread_mutex_t *m, const char *name)
+{
+    if (nvmtl_fx_lock_bounded(m, 250)) return 1;
+    nvlog_every("fault context: %s is held by another thread (250 ms) - this section reads without it", name);
+    return 0;
+}
+static int nvmtl_loss_read(const void *src, void *dst, size_t n, FILE *f)
+{
+    if (nvmtl_fx_read_safe(src, dst, n)) return 1;
+    char line[160]; snprintf(line, sizeof line, "fault context: host read of %p (%zu bytes) refused by the kernel - unreadable mapping, skipped", src, n);
+    nvmtl_fx_emit_both(f, line);
+    return 0;
+}
+static void nvmtl_loss_section(FILE *f, const char *name)
+{
+    fflush(f);
+    nvlog_every("fault context: section written: %s", name);
+}
 static int nvmtl_fault_resolve(nvk_cmdbuf *c, uint64_t a, char *out, size_t cap)
 {
+    int lk;
     if (!a) return snprintf(out, cap, "0");
     if (a == nvmtl_vk_buffer_address(&g_dummyBuf)) return snprintf(out, cap, "-");
     for (nvmtl_address_page *pg = c->address_pages; pg; pg = pg->next) {
         const uint64_t lo = nvmtl_vk_buffer_address(&pg->buffer);
         if (a >= lo && a < lo + (uint64_t)NVMTL_TABLES_PER_PAGE * NVMTL_TABLE_BYTES) return snprintf(out, cap, "0x%llx=P", (unsigned long long)a);
     }
-    pthread_mutex_lock(&g_lv_lock); const nvmtl_lv_entry *e = nvmtl_lv_find(&g_lv, a); const nvmtl_lv_entry ec = e ? *e : (nvmtl_lv_entry){0}; pthread_mutex_unlock(&g_lv_lock);
+    lk = nvmtl_loss_mutex_lock(&g_lv_lock, "g_lv_lock"); const nvmtl_lv_entry *e = nvmtl_lv_find(&g_lv, a); const nvmtl_lv_entry ec = e ? *e : (nvmtl_lv_entry){0}; if (lk) pthread_mutex_unlock(&g_lv_lock);
     if (ec.lo) return snprintf(out, cap, "0x%llx=L(%s %lluK seq %llu)", (unsigned long long)a, nvmtl_lv_kind_name(ec.kind), (unsigned long long)((ec.hi - ec.lo) >> 10), (unsigned long long)ec.seq);
-    pthread_mutex_lock(&g_fx_lock); const nvmtl_fx_buf *d = nvmtl_fx_buffer_at(&g_fx, a); const nvmtl_fx_buf dc = d ? *d : (nvmtl_fx_buf){0}; pthread_mutex_unlock(&g_fx_lock);
+    lk = nvmtl_loss_mutex_lock(&g_fx_lock, "g_fx_lock"); const nvmtl_fx_buf *d = nvmtl_fx_buffer_at(&g_fx, a); const nvmtl_fx_buf dc = d ? *d : (nvmtl_fx_buf){0}; if (lk) pthread_mutex_unlock(&g_fx_lock);
     if (dc.lo) return snprintf(out, cap, "0x%llx=D(died seq %llu, %lluK)", (unsigned long long)a, (unsigned long long)dc.seq, (unsigned long long)((dc.hi - dc.lo) >> 10));
     return snprintf(out, cap, "0x%llx=?", (unsigned long long)a);
 }
@@ -5549,10 +5573,12 @@ static int nvmtl_fault_resolve(nvk_cmdbuf *c, uint64_t a, char *out, size_t cap)
 // way a kernel that writes a texture through an argument-buffer struct reads it. Reports the slot once per loss.
 static void nvmtl_fault_slot_report(uint64_t ptr, FILE *f)
 {
+    int lk;
     static uint32_t seen[64]; static unsigned nseen;
-    pthread_mutex_lock(&g_lv_lock); const nvmtl_lv_entry *e = nvmtl_lv_find(&g_lv, ptr); const nvmtl_lv_entry ec = e ? *e : (nvmtl_lv_entry){0}; pthread_mutex_unlock(&g_lv_lock);
+    lk = nvmtl_loss_mutex_lock(&g_lv_lock, "g_lv_lock"); const nvmtl_lv_entry *e = nvmtl_lv_find(&g_lv, ptr); const nvmtl_lv_entry ec = e ? *e : (nvmtl_lv_entry){0}; if (lk) pthread_mutex_unlock(&g_lv_lock);
     if (!ec.map || ec.hi - ptr < 16) return;
-    const uint64_t handle = *(const uint64_t *)((const uint8_t *)ec.map + (ptr - ec.lo) + 8);   // the texture's gpuResourceID as the app stored it
+    uint64_t handle = 0;   // the texture's gpuResourceID as the app stored it
+    if (!nvmtl_loss_read((const uint8_t *)ec.map + (ptr - ec.lo) + 8, &handle, sizeof handle, f)) return;
     const uint32_t slot = (uint32_t)handle & 0x1FFFFu;
     for (unsigned k = 0; k < nseen; k++) if (seen[k] == slot) return;
     if (nseen < 64) seen[nseen++] = slot;
@@ -5562,32 +5588,38 @@ static void nvmtl_fault_slot_report(uint64_t ptr, FILE *f)
                              (uint32_t)handle, slot, handle & (1ull << 62) ? "" : " (NOT a heap token: a no-slot texture, sampler, pipeline or foreign value aliasing the slot)");
     nvmtl_fx_emit_both(f, line);
     const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, nvmtl_heap_storage_dummy(), g_dummyTexView, g_dummyTexView } };   // the heap's storage dummy (2D array when it exists)
-    pthread_mutex_lock(&g_sl_lock); nvmtl_sl_report(&g_sl, &g_im, &g_vw, slot, &d, owner, nvmtl_fx_emit_both, f); pthread_mutex_unlock(&g_sl_lock);
+    lk = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock"); nvmtl_sl_report(&g_sl, &g_im, &g_vw, slot, &d, owner, nvmtl_fx_emit_both, f); if (lk) pthread_mutex_unlock(&g_sl_lock);
 }
 static void nvmtl_fault_file_write(nvk_cmdbuf *c)
 {
+    int lk;
+    // one writer: a second thread whose fence fails on the same lost device must not truncate this file under the first
+    static _Atomic int writers; if (atomic_fetch_add(&writers, 1)) { nvlog_every("fault context: a second device-loss dump on another thread - skipped"); return; }
     char fp[512]; const char *td = getenv("TMPDIR");
     snprintf(fp, sizeof fp, "%s/nvmtl-fault-%d.txt", td && *td ? td : "/private/tmp", (int)getpid());
     FILE *f = fopen(fp, "w");
     if (!f) { nvlog_every("fault context: could not write %s", fp); return; }
-    pthread_mutex_lock(&g_lv_lock); const uint32_t nlive = nvmtl_lv_dump(&g_lv, f); pthread_mutex_unlock(&g_lv_lock);
-    pthread_mutex_lock(&g_fx_lock);
+    lk = nvmtl_loss_mutex_lock(&g_lv_lock, "g_lv_lock"); const uint32_t nlive = nvmtl_lv_dump(&g_lv, f); if (lk) pthread_mutex_unlock(&g_lv_lock);
+    nvmtl_loss_section(f, "live ranges");
+    lk = nvmtl_loss_mutex_lock(&g_fx_lock, "g_fx_lock");
     {   const uint32_t nb = g_fx.nbuf < NVMTL_FX_BUFS ? g_fx.nbuf : NVMTL_FX_BUFS;
         for (uint32_t k = 0; k < nb; k++) { const nvmtl_fx_buf *b = &g_fx.buf[(g_fx.nbuf - 1 - k) % NVMTL_FX_BUFS];
             fprintf(f, "dead buffer 0x%llx 0x%llx %llu seq %llu%s%s%s\n", (unsigned long long)b->lo, (unsigned long long)b->hi, (unsigned long long)(b->hi - b->lo),
                     (unsigned long long)b->seq, b->where & NVMTL_FX_POOLED ? " pooled" : "", b->where & NVMTL_FX_PLACED ? " placed" : "", b->where & NVMTL_FX_PARKED ? " parked" : ""); } }
-    pthread_mutex_unlock(&g_fx_lock);
+    if (lk) pthread_mutex_unlock(&g_fx_lock);
+    nvmtl_loss_section(f, "dead buffers");
     const uint64_t pbytes = (uint64_t)NVMTL_TABLES_PER_PAGE * NVMTL_TABLE_BYTES;
     for (nvmtl_address_page *pg = c->address_pages; pg; pg = pg->next) { const uint64_t a = nvmtl_vk_buffer_address(&pg->buffer);
         fprintf(f, "page own 0x%llx 0x%llx %llu seq %llu\n", (unsigned long long)a, (unsigned long long)(a + pbytes), (unsigned long long)pbytes, (unsigned long long)pg->life.last_seq); }
-    pthread_mutex_lock(&g_pl_lock);
+    lk = nvmtl_loss_mutex_lock(&g_pl_lock, "g_pl_lock");
     for (nvmtl_pl_node *e = g_pl.cooling; e; e = e->cool) { nvmtl_address_page *pg = (nvmtl_address_page *)((char *)e - offsetof(nvmtl_address_page, life)); const uint64_t a = nvmtl_vk_buffer_address(&pg->buffer);
         fprintf(f, "page cooling 0x%llx 0x%llx %llu seq %llu\n", (unsigned long long)a, (unsigned long long)(a + pbytes), (unsigned long long)pbytes, (unsigned long long)e->last_seq); }
-    pthread_mutex_unlock(&g_pl_lock);
-    pthread_mutex_lock(&g_keep_lock);
+    if (lk) pthread_mutex_unlock(&g_pl_lock);
+    lk = nvmtl_loss_mutex_lock(&g_keep_lock, "g_keep_lock");
     for (unsigned i = 0; i < g_keep_npage; i++) { const uint64_t a = nvmtl_vk_buffer_address(&g_keep_page[i]->buffer);
         fprintf(f, "page cached 0x%llx 0x%llx %llu seq %llu\n", (unsigned long long)a, (unsigned long long)(a + pbytes), (unsigned long long)pbytes, (unsigned long long)g_keep_page[i]->life.last_seq); }
-    pthread_mutex_unlock(&g_keep_lock);
+    if (lk) pthread_mutex_unlock(&g_keep_lock);
+    nvmtl_loss_section(f, "address pages");
     // this command buffer's last dispatches: each binding table's buffer roots, resolved - the faulting one first
     const uint32_t nd = c->fx.n < NVMTL_FX_DISP ? c->fx.n : NVMTL_FX_DISP;
     const uint32_t last_done = nvmtl_dwit_last(c), faulting = last_done + 1;
@@ -5615,7 +5647,8 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
             nvmtl_address_page *pg = c->address_pages;
             while (pg && (void *)pg->buffer.buf != d->tab[t]) pg = pg->next;
             if (!pg || !pg->buffer.map) continue;
-            const uint64_t *tbl = (const uint64_t *)((const uint8_t *)pg->buffer.map + d->dyn[t]);
+            uint64_t tblb[NVMTL_NBUF]; const uint64_t *tbl = tblb;
+            if (!nvmtl_loss_read((const uint8_t *)pg->buffer.map + d->dyn[t], tblb, sizeof tblb, f)) continue;
             const uint64_t gpu = nvmtl_vk_buffer_address(&pg->buffer) + d->dyn[t];
             char line[1600]; int o = snprintf(line, sizeof line, "dispatch %u %s spv-fnv %08x air %016llx table[%d] GPU 0x%llx:", c->fx.total - nd + j + 1, d->name, d->key, (unsigned long long)d->air, t, (unsigned long long)gpu);
             for (unsigned i = 0; i < NVMTL_NBUF && o < (int)sizeof line - 120; i++) {
@@ -5624,9 +5657,10 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
                 o += snprintf(line + o, sizeof line - (size_t)o, " b%u=%s", i, r);
                 fprintf(f, "root dispatch %u b%u 0x%llx %s\n", c->fx.total - nd + j + 1, i, (unsigned long long)tbl[i], r);
                 {   // the pointers the kernel reads out of this root (an argument buffer the app wrote), when the host can see it
-                    pthread_mutex_lock(&g_lv_lock); const nvmtl_lv_entry *e = nvmtl_lv_find(&g_lv, tbl[i]); const nvmtl_lv_entry ec = e ? *e : (nvmtl_lv_entry){0}; pthread_mutex_unlock(&g_lv_lock);
+                    lk = nvmtl_loss_mutex_lock(&g_lv_lock, "g_lv_lock"); const nvmtl_lv_entry *e = nvmtl_lv_find(&g_lv, tbl[i]); const nvmtl_lv_entry ec = e ? *e : (nvmtl_lv_entry){0}; if (lk) pthread_mutex_unlock(&g_lv_lock);
                     if (ec.map && ec.hi - tbl[i] >= 64) {
-                        const uint64_t *q = (const uint64_t *)((const uint8_t *)ec.map + (tbl[i] - ec.lo));
+                        uint64_t qb[8]; const uint64_t *q = qb;
+                        if (!nvmtl_loss_read((const uint8_t *)ec.map + (tbl[i] - ec.lo), qb, sizeof qb, f)) continue;
                         for (unsigned k = 0; k < 8; k++) {
                             if (q[k] < 0x10000) continue;   // not an address
                             char r2[160]; nvmtl_fault_resolve(c, q[k], r2, sizeof r2);
@@ -5646,13 +5680,14 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
             // a root with no host view: its first 64 bytes as the newest copy into it left them in the copy's source
             for (unsigned i = 0; i < NVMTL_NBUF; i++) {
                 if (!tbl[i] || tbl[i] == nvmtl_vk_buffer_address(&g_dummyBuf)) continue;
-                pthread_mutex_lock(&g_lv_lock); const nvmtl_lv_entry *e = nvmtl_lv_find(&g_lv, tbl[i]); const int hasmap = e && e->map; pthread_mutex_unlock(&g_lv_lock);
+                lk = nvmtl_loss_mutex_lock(&g_lv_lock, "g_lv_lock"); const nvmtl_lv_entry *e = nvmtl_lv_find(&g_lv, tbl[i]); const int hasmap = e && e->map; if (lk) pthread_mutex_unlock(&g_lv_lock);
                 if (hasmap) continue;
-                pthread_mutex_lock(&g_fx_lock); const nvmtl_fx_copy *cp = nvmtl_fx_copy_covering(&g_fx, tbl[i], tbl[i] + 64); const nvmtl_fx_copy cc = cp ? *cp : (nvmtl_fx_copy){0}; pthread_mutex_unlock(&g_fx_lock);
+                lk = nvmtl_loss_mutex_lock(&g_fx_lock, "g_fx_lock"); const nvmtl_fx_copy *cp = nvmtl_fx_copy_covering(&g_fx, tbl[i], tbl[i] + 64); const nvmtl_fx_copy cc = cp ? *cp : (nvmtl_fx_copy){0}; if (lk) pthread_mutex_unlock(&g_fx_lock);
                 if (!cc.src_map) continue;
-                pthread_mutex_lock(&g_lv_lock); const nvmtl_lv_entry *se = nvmtl_lv_find(&g_lv, cc.src_lo); const int srclive = se && se->map; pthread_mutex_unlock(&g_lv_lock);
+                lk = nvmtl_loss_mutex_lock(&g_lv_lock, "g_lv_lock"); const nvmtl_lv_entry *se = nvmtl_lv_find(&g_lv, cc.src_lo); const int srclive = se && se->map; if (lk) pthread_mutex_unlock(&g_lv_lock);
                 if (!srclive) { nvlog_every("fault context: root b%u 0x%llx was filled by a copy at seq %llu whose source is gone - bytes unreadable", i, (unsigned long long)tbl[i], (unsigned long long)cc.seq); continue; }
-                const uint64_t *q = (const uint64_t *)((const uint8_t *)cc.src_map + (tbl[i] - cc.dst_lo));
+                uint64_t qb[8]; const uint64_t *q = qb;
+                if (!nvmtl_loss_read((const uint8_t *)cc.src_map + (tbl[i] - cc.dst_lo), qb, sizeof qb, f)) continue;
                 int o2 = snprintf(line, sizeof line, "root b%u 0x%llx bytes via the copy at seq %llu (source 0x%llx):", i, (unsigned long long)tbl[i], (unsigned long long)cc.seq, (unsigned long long)cc.src_lo);
                 for (unsigned k = 0; k < 8; k++) { char r2[160]; nvmtl_fault_resolve(c, q[k], r2, sizeof r2); o2 += snprintf(line + o2, sizeof line - (size_t)o2, " +%u:%s", k * 8, q[k] < 0x10000 ? "small" : r2);
                                                    fprintf(f, "root dispatch %u b%u +%u 0x%llx %s (via copy)\n", c->fx.total - nd + j + 1, i, k * 8, (unsigned long long)q[k], r2);
@@ -5661,20 +5696,23 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
             }
         }
     }
+    nvmtl_loss_section(f, "dispatches, roots, pointees and slots");
     {   // every heap slot's health, and every image this process made, with its lifetime
         const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, nvmtl_heap_storage_dummy(), g_dummyTexView, g_dummyTexView } };   // the heap's storage dummy (2D array when it exists)
-        pthread_mutex_lock(&g_sl_lock);
+        lk = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock");
         nvmtl_sl_census(&g_sl, &g_im, &g_vw, &d, nvmtl_fx_emit_both, f);
         const uint32_t nimg = nvmtl_im_dump(&g_im, f);
-        pthread_mutex_unlock(&g_sl_lock);
+        if (lk) pthread_mutex_unlock(&g_sl_lock);
         nvlog_every("fault context: %u images written to the fault file with their memory, shape and lifetime", nimg);
     }
+    nvmtl_loss_section(f, "slot census and images");
     {   // the barriers between this command buffer's last dispatches (the record covers both hazard modes)
         const uint32_t first = c->fx.total > nd ? c->fx.total - nd : 0;
-        pthread_mutex_lock(&g_fx_lock);
+        lk = nvmtl_loss_mutex_lock(&g_fx_lock, "g_fx_lock");
         for (uint32_t k = first; k <= c->fx.total; k++) nvmtl_fx_barriers_after(&g_fx, c->cb, k, nvmtl_fx_emit_both, f);
-        pthread_mutex_unlock(&g_fx_lock);
+        if (lk) pthread_mutex_unlock(&g_fx_lock);
     }
+    nvmtl_loss_section(f, "barriers");
     fclose(f);
     nvlog_every("fault context: %u live ranges (%llu ever, with their deaths), %u recorded buffer deaths, this command buffer's pages and dispatch roots written to %s - tools/fault_resolve.py <file> <fault address>",
                 nlive, (unsigned long long)g_lv.added, g_fx.nbuf, fp);

@@ -13,6 +13,10 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <pthread.h>
+#include <time.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 
 enum { NVMTL_FX_DISP = 8, NVMTL_FX_STOR = 6, NVMTL_FX_SUB = 48, NVMTL_FX_GONE = 128, NVMTL_FX_NAME = 40, NVMTL_FX_ROOT = 12, NVMTL_FX_BARS = 1024, NVMTL_FX_COPIES = 4096 };
 /* a buffer root of a dispatch: the GPU range bound at binding-table index idx (what the kernel may read or write) */
@@ -196,6 +200,20 @@ static inline unsigned nvmtl_fx_writers(const nvmtl_fx_state *s, const nvmtl_fx_
     else o += snprintf(line + o, sizeof line - (size_t)o, "%s | 0 copies", n ? "" : " nothing recorded");
     emit(ctx, line);
     return n + copies;
+}
+
+/* A lock the device-loss report takes: at most `ms` milliseconds, then 0 - the report proceeds without it (read-only,
+   a torn read accepted) rather than hang the process it is reporting on. A mutex this thread already holds also returns 0. */
+static inline int nvmtl_fx_lock_bounded(pthread_mutex_t *m, unsigned ms)
+{
+    for (unsigned t = 0; t < ms * 10u; t++) { if (pthread_mutex_trylock(m) == 0) return 1; struct timespec ts = { 0, 100000 }; nanosleep(&ts, NULL); }
+    return 0;
+}
+/* A host read through the kernel: an unmapped or bus-faulting mapping is an error (0), never a signal. */
+static inline int nvmtl_fx_read_safe(const void *src, void *dst, size_t n)
+{
+    mach_vm_size_t got = 0;
+    return mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)(uintptr_t)src, n, (mach_vm_address_t)(uintptr_t)dst, &got) == KERN_SUCCESS && got == n;
 }
 
 /* The report: calls emit(line) once per line. The last `subs` submits, newest first, with their dispatches; every
