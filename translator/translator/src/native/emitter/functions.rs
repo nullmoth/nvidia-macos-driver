@@ -2786,6 +2786,9 @@ impl Emitter {
         let key = (func.to_string(), name.to_string());
         if !self.ir.raw_buffer_params.contains(&key)
             || self.ir.param_connected_raw_params.contains(&key)
+            // Byte GEPs must retain byte offsets, including offsets carried by pointer phis.
+            // A concrete vector view would interpret those offsets as vector indices.
+            || self.ir.byte_addressed_raw_params.contains(&key)
         {
             return None;
         }

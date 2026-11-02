@@ -179,6 +179,9 @@ pub(super) struct LlModule {
     pub(super) metadata_primitive_buffer_pointees: HashMap<(String, String), LlType>,
     pub(super) metadata_fc_buffer_locations: HashMap<(String, String), u32>,
     pub(super) raw_buffer_params: HashSet<(String, String)>,
+    // Raw params some function addresses with byte GEPs (propagated along calls). Their offsets are bytes, so they must
+    // never get a concrete vector view: MetalFX unified_pass_tile carries byte offsets into a half4 tile through phis.
+    pub(super) byte_addressed_raw_params: HashSet<(String, String)>,
     pub(super) call_connected_raw_params: HashSet<(String, String)>,
     pub(super) param_connected_raw_params: HashSet<(String, String)>,
 }
