@@ -944,6 +944,18 @@ static BOOL nvmtl_desc_fbo(MTLTextureDescriptor *d) {
     SEL s = sel_registerName("framebufferOnly");
     return d && [d respondsToSelector:s] && ((BOOL (*)(id, SEL))objc_msgSend)(d, s);
 }
+// BGR10A2Unorm (VkFormat 58) cannot be a storage image on NVIDIA; a writable private texture of it is created as
+// R10G10B10A2 (VkFormat 64): same bits per channel, storage-capable. YES when the format was swapped. Without this a
+// kernel's stores to such a texture went to the dummy storage image (Cyberpunk's tonemapped output is BGR10A2).
+static inline BOOL nvmtl_bgr10_storage_remap(MTLTextureDescriptor *d, uint32_t *vkf)
+{
+    if (!d || !vkf || *vkf != 58u || d.pixelFormat != MTLPixelFormatBGR10A2Unorm) return NO;
+    if (!(d.usage & MTLTextureUsageShaderWrite) || d.storageMode != MTLStorageModePrivate) return NO;
+    if (getenv("NVMTL_NO_BGR10_REMAP")) return NO;
+    *vkf = 64u;
+    { static int said; if (!said++) nvlog("texture: writable BGR10A2Unorm is held as R10G10B10A2 so kernels can store to it"); }
+    return YES;
+}
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
     if (nvmtl_vk_init()) return nil;
     if (d.textureType == MTLTextureTypeTextureBuffer) {
@@ -972,6 +984,7 @@ static BOOL nvmtl_desc_fbo(MTLTextureDescriptor *d) {
     }
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
+    const BOOL rbSwap = nvmtl_bgr10_storage_remap(d, &vkf);
     int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
     if (d.textureType == MTLTextureType2DMultisample || d.textureType == MTLTextureType2DMultisampleArray) {
         if (d.mipmapLevelCount != 1 || d.depth != 1) { nvlog("newTextureWithDescriptor: invalid multisample color descriptor"); return nil; }
@@ -983,6 +996,7 @@ static BOOL nvmtl_desc_fbo(MTLTextureDescriptor *d) {
     nvmtl_alloc_ok();
     t->_q = nvmtl_device_queue();
     t->_stex = t->_i.storage != 0;
+    t->_rbSwap = rbSwap;
     t->_usage = d.usage;
     if (wantStex && !t->_stex) { static unsigned long lost; lost++;
         if (!(lost & (lost - 1))) nvlog("newTextureWithDescriptor: pixel format %lu asked for ShaderWrite and NVK cannot make it a storage image — shader writes to it will be LOST (%lu texture(s) so far in this process)", (unsigned long)d.pixelFormat, lost); }

@@ -8846,3 +8846,21 @@ void nvmtl_vk_pipeline_destroy(nvk_pipeline *p)
     const unsigned long long k = atomic_fetch_add(&freed, 1) + 1;
     if (!(k & (k - 1))) nvlog("psofree: %llu pipeline state(s) freed after their last command buffer completed", k);
 }
+
+// A copy between two images whose formats hold the same channels in different bit orders (R10G10B10A2 <-> B10G10R10A2):
+// vkCmdBlitImage converts by channel meaning, which a raw copy cannot. One 2D level/slice, 1:1, nearest.
+int nvmtl_vk_cmd_blit_convert(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint32_t ss, uint32_t sx, uint32_t sy,
+                              nvk_image *dst, uint32_t dl, uint32_t ds, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h)
+{
+    if (!c || !src || !dst || !src->img || !dst->img || !w || !h) return -1;
+    nvmtl_vk_cmd_barrier(c);
+    img_to(c, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    img_to(c, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkImageBlit b = { { VK_IMAGE_ASPECT_COLOR_BIT, sl, ss, 1 }, { { (int32_t)sx, (int32_t)sy, 0 }, { (int32_t)(sx + w), (int32_t)(sy + h), 1 } },
+                      { VK_IMAGE_ASPECT_COLOR_BIT, dl, ds, 1 }, { { (int32_t)dx, (int32_t)dy, 0 }, { (int32_t)(dx + w), (int32_t)(dy + h), 1 } } };
+    pvkCmdBlitImage(c->cb, (VkImage)src->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, (VkImage)dst->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_NEAREST);
+    nvmtl_vk_cmd_barrier(c);
+    return 0;
+}
