@@ -5378,7 +5378,7 @@ static void nvmtl_live_add(nvk_buffer *b, uint32_t kind)
 static void nvmtl_live_remove(nvk_buffer *b)
 {
     if (!b || !b->reg) return;
-    pthread_mutex_lock(&g_lv_lock); nvmtl_lv_remove(&g_lv, b->reg); pthread_mutex_unlock(&g_lv_lock);
+    pthread_mutex_lock(&g_lv_lock); nvmtl_lv_remove(&g_lv, b->reg, g_cmd_submitted); pthread_mutex_unlock(&g_lv_lock);
     b->reg = 0;
 }
 static void nvmtl_live_relabel(nvk_buffer *b, uint32_t kind)
@@ -5488,7 +5488,8 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
         pthread_mutex_unlock(&g_fx_lock);
     }
     fclose(f);
-    nvlog_every("fault context: %u live ranges, %u recorded buffer deaths, this command buffer's pages and dispatch roots written to %s - tools/fault_resolve.py <file> <fault address>", nlive, g_fx.nbuf, fp);
+    nvlog_every("fault context: %u live ranges (%llu ever, with their deaths), %u recorded buffer deaths, this command buffer's pages and dispatch roots written to %s - tools/fault_resolve.py <file> <fault address>",
+                nlive, (unsigned long long)g_lv.added, g_fx.nbuf, fp);
 }
 static void nvmtl_fx_note_buffer_gone(nvk_buffer *b, uint32_t where)
 {
@@ -8945,6 +8946,53 @@ int nvmtl_vk_heap_create(size_t size, int host_visible, nvk_heap *out)
     nvmtl_perf_note(NVP_HEAP, t0, size);
     return r;
 }
+// A fresh MTLHeap reads as zero on Apple's stack (the kernel scrubs pages at allocation; a re-placement inside a live
+// heap is NOT zeroed, and aliasing relies on that), so an argument-buffer item the app never wrote holds NULL pointers
+// its kernels null-check. A fresh VkDeviceMemory holds whatever VRAM held - this process's earlier allocations - and
+// such an item then carries a stale pointer into memory that is no longer mapped: a page-table fault in the kernel that
+// dereferences it. Every heap is therefore cleared once, on creation, before anything is placed in it: a host memset
+// when it is mapped, else a transient buffer over the whole memory and one vkCmdFillBuffer, waited for, so the first
+// placement's use is ordered after it. NVMTL_HEAP_ZERO=0 switches it off.
+static int nvmtl_heap_zero_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_HEAP_ZERO"); on = !(e && e[0] == '0');
+        nvlog("vk: heaps are cleared to zero on creation, as a fresh MTLHeap reads (NVMTL_HEAP_ZERO=%d)", on); }
+    return on;
+}
+static uint64_t g_heap_zero_n, g_heap_zero_bytes, g_heap_zero_ns, g_heap_zero_failed;
+int nvmtl_vk_heap_zero(nvk_heap *h, const char *what)
+{
+    if (!nvmtl_heap_zero_on() || g_state != 1 || !h || !h->mem || !h->size) return 0;
+    const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); const char *how = "host memset";
+    if (h->map) memset(h->map, 0, h->size);
+    else {
+        how = "GPU fill";
+        VkBufferCreateInfo bci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, h->size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL };
+        VkBuffer buf = VK_NULL_HANDLE; VkMemoryRequirements mr = {0}; int ok = 0;
+        if (pvkCreateBuffer(g_dev, &bci, NULL, &buf) == VK_SUCCESS) {
+            pvkGetBufferMemoryRequirements(g_dev, buf, &mr);
+            if ((mr.memoryTypeBits & (1u << h->memtype)) && mr.size <= h->size + nvmtl_buf_guard()
+                && pvkBindBufferMemory(g_dev, buf, (VkDeviceMemory)h->mem, 0) == VK_SUCCESS) {
+                nvk_cmdbuf c;
+                if (!nvmtl_vk_cmd_begin(NULL, &c)) {
+                    pvkCmdFillBuffer(c.cb, buf, 0, h->size & ~(VkDeviceSize)3, 0);
+                    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
+                    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+                    ok = nvmtl_vk_submit_wait(&c) == 0;
+                }
+            }
+            pvkDestroyBuffer(g_dev, buf, NULL);
+        }
+        if (!ok) { g_heap_zero_failed++; nvlog("heap zero-fill: %s heap %p of %llu bytes NOT cleared (buffer over its memory refused: type bits 0x%x vs %u, need %llu) - %llu failed so far",
+                                               what, h->mem, (unsigned long long)h->size, mr.memoryTypeBits, h->memtype, (unsigned long long)mr.size, (unsigned long long)g_heap_zero_failed); return -1; }
+    }
+    const uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
+    g_heap_zero_n++; g_heap_zero_bytes += h->size; g_heap_zero_ns += dt;
+    nvlog("heap zero-fill: %s heap %p %llu bytes cleared on creation in %.2f ms (%s); %llu heaps, %llu MB, %.1f ms so far",
+          what, h->mem, (unsigned long long)h->size, dt / 1e6, how, (unsigned long long)g_heap_zero_n, (unsigned long long)(g_heap_zero_bytes >> 20), g_heap_zero_ns / 1e6);
+    return 0;
+}
 static int nvmtl_vk_heap_create_body(size_t size, int host_visible, nvk_heap *out)
 {
     if (nvmtl_vk_init()) return -1;
@@ -9244,6 +9292,7 @@ static int pool_buffer_create_in(int vram, size_t size, nvk_buffer *out)
         pool_block *nb = calloc(1, sizeof *nb);
         if (!nb || (vram ? vpool_heap_create(NVMTL_VPOOL_BLOCK, &nb->heap) : nvmtl_vk_heap_create(NVMTL_POOL_BLOCK, 1, &nb->heap))) { free(nb); pthread_mutex_unlock(&g_pool_lock); return -1; }
         nb->vram = vram; nb->next = *head; *head = nb; g_pool_blocks++; if (vram) g_vpool_blocks++;
+        nvmtl_vk_heap_zero(&nb->heap, vram ? "buffer pool (VRAM through BAR1)" : "buffer pool");   // mapped: a host memset, no submit under the pool lock
         nvlog("buffer pool: block #%llu mapped (%zu MiB, %s; %llu VRAM blocks, memory type %u); %llu pooled buffers live in %llu bytes of ranges",
               (unsigned long long)g_pool_blocks, nb->heap.size >> 20, pool_place_why(vram), (unsigned long long)g_vpool_blocks,
               nb->heap.memtype, (unsigned long long)g_pool_live, (unsigned long long)g_pool_bytes);
@@ -9318,6 +9367,9 @@ static pool_block *pool_take_vram(int vram, uint32_t bits, size_t reserved, size
     }
     blk->nlive++; g_pool_live++; g_pool_bytes += reserved;
     pthread_mutex_unlock(&g_pool_lock);
+    // A fresh VRAM block is cleared outside the pool lock (the clear submits and waits, and a submit's retire can take
+    // that lock). The block is already listed, but every use of a range in it is a later submit on the in-order queue.
+    if (!got) nvmtl_vk_heap_zero(&blk->heap, what);
     return blk;
 }
 static int private_pool_buffer_create(size_t size, nvk_buffer *out)
