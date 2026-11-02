@@ -3025,11 +3025,13 @@ static int ensure_descriptors_locked(void)
                             VkWriteDescriptorSet w4 = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, hset, 4, 0, NVMTL_BINDLESS_SLOTS, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NULL, NULL, tf };
                             pvkUpdateDescriptorSets(g_dev, 1, &w3, 0, NULL); pvkUpdateDescriptorSets(g_dev, 1, &w4, 0, NULL); free(tf); }
                   nvlog("vk: BINDLESS heap prefilled - every slot holds the storage dummy at binding 2%s (NVMTL_HEAP_PREFILL=1)", tf ? " and the texel dummy at 3-4" : "; no texel dummy yet, 3-4 stay unwritten");
-                  nvlog("vk: the storage dummy is image %p view %p: %ux%u, %u layer%s, vk format %u, metal type %u (a 2D array write through it lands in a 1x1 2D image: a dummy, never a fault)",
-                        g_dummyStex.img, g_dummyStex.view, g_dummyStex.w, g_dummyStex.h, g_dummyStex.layers ? g_dummyStex.layers : 1, g_dummyStex.layers == 1 ? "" : "s", g_dummyStex.fmt, g_dummyStex.mtl_type);
+                  { const nvk_image *sd = g_dummyStexArray.view ? &g_dummyStexArray : &g_dummyStex;
+                    nvlog("vk: the heap's storage dummy is image %p view %p: %ux%u, %u layer%s, vk format %u, metal type %u (%s)",
+                          sd->img, sd->view, sd->w, sd->h, sd->layers ? sd->layers : 1, sd->layers == 1 ? "" : "s", sd->fmt, sd->mtl_type,
+                          sd == &g_dummyStexArray ? "a 2D array: the type the game's handle writes declare" : "2D only: the array dummy was not created"); }
                   pthread_mutex_lock(&g_sl_lock);
                   if (!nvmtl_sl_init(&g_sl, NVMTL_BINDLESS_SLOTS))
-                      for (uint32_t k = 0; k < NVMTL_BINDLESS_SLOTS; k++) { nvmtl_sl_write(&g_sl, k, 2, g_dummyStex.view, 0); if (tf) { nvmtl_sl_write(&g_sl, k, 3, g_dummyTexView, 0); nvmtl_sl_write(&g_sl, k, 4, g_dummyTexView, 0); } }
+                      for (uint32_t k = 0; k < NVMTL_BINDLESS_SLOTS; k++) { nvmtl_sl_write(&g_sl, k, 2, nvmtl_heap_storage_dummy(), 0); if (tf) { nvmtl_sl_write(&g_sl, k, 3, g_dummyTexView, 0); nvmtl_sl_write(&g_sl, k, 4, g_dummyTexView, 0); } }
                   pthread_mutex_unlock(&g_sl_lock);
               } else if (hnb == 5) nvlog("vk: BINDLESS heap bindings 2-4 left unwritten for unfilled slots (%s)", prefill ? "no storage dummy" : "NVMTL_HEAP_PREFILL=0"); }
             g_heapLayout = hl; g_heapPool = hp; g_heapSet = hset;
@@ -5559,7 +5561,7 @@ static void nvmtl_fault_slot_report(uint64_t ptr, FILE *f)
                              (unsigned long long)ptr, (unsigned long long)handle, handle & (1ull << 62) ? "SET" : "clear", handle & (1ull << 63) ? "set" : "clear", handle & (1ull << 61) ? "set" : "clear",
                              (uint32_t)handle, slot, handle & (1ull << 62) ? "" : " (NOT a heap token: a no-slot texture, sampler, pipeline or foreign value aliasing the slot)");
     nvmtl_fx_emit_both(f, line);
-    const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, g_dummyStex.view, g_dummyTexView, g_dummyTexView } };
+    const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, nvmtl_heap_storage_dummy(), g_dummyTexView, g_dummyTexView } };   // the heap's storage dummy (2D array when it exists)
     pthread_mutex_lock(&g_sl_lock); nvmtl_sl_report(&g_sl, &g_im, &g_vw, slot, &d, owner, nvmtl_fx_emit_both, f); pthread_mutex_unlock(&g_sl_lock);
 }
 static void nvmtl_fault_file_write(nvk_cmdbuf *c)
@@ -5660,7 +5662,7 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
         }
     }
     {   // every heap slot's health, and every image this process made, with its lifetime
-        const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, g_dummyStex.view, g_dummyTexView, g_dummyTexView } };
+        const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, nvmtl_heap_storage_dummy(), g_dummyTexView, g_dummyTexView } };   // the heap's storage dummy (2D array when it exists)
         pthread_mutex_lock(&g_sl_lock);
         nvmtl_sl_census(&g_sl, &g_im, &g_vw, &d, nvmtl_fx_emit_both, f);
         const uint32_t nimg = nvmtl_im_dump(&g_im, f);
