@@ -3757,7 +3757,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     for(NSUInteger k=0;k<r.length;k++) [self setVertexSamplerState:ss[k] lodMinClamp:lo[k] lodMaxClamp:hi[k] atIndex:r.location+k];
 }
 - (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u { nvmtl_retain_resource(_cb, r); }
-- (void)useHeaps:(const id<MTLHeap> __unsafe_unretained [])h count:(NSUInteger)n { for (NSUInteger i = 0; i < n; i++) [self useHeap:h[i]]; }
+- (void)useHeaps:(const id<MTLHeap> __unsafe_unretained [])h count:(NSUInteger)n { for (NSUInteger i = 0; i < n; i++) nvmtl_use_heap(_cb, h[i]); }
 - (void)useHeaps:(const id<MTLHeap> __unsafe_unretained [])h count:(NSUInteger)n stages:(MTLRenderStages)st { nvtrace("USEHEAPS %lu stages %lu", (unsigned long)n, (unsigned long)st); for (NSUInteger i = 0; i < n; i++) [self useHeap:h[i] stages:st]; }
 - (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u stages:(MTLRenderStages)st { nvmtl_retain_resource(_cb, r); nvtrace("USERES %s %p usage %lu stages %lu", object_getClassName(r), (__bridge void *)r, (unsigned long)u, (unsigned long)st); }
 - (void)useResources:(const id<MTLResource> __unsafe_unretained [])r count:(NSUInteger)n usage:(MTLResourceUsage)u { for (NSUInteger i=0;i<n;i++) nvmtl_retain_resource(_cb,r[i]); }
