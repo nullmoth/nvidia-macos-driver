@@ -488,7 +488,13 @@ static int nvmtl_res2_move(NVMTLTexture *t, int to_sys) {
             nvk_image old; memset(&old, 0, sizeof old);
             r = nvmtl_vk_image_migrate(&t->_i, to_sys, t->_fmt == MTLPixelFormatA8Unorm, &old);
             if (r == 0) {
-                if (t->_resid & (1ull << 62)) nvmtl_vk_bindless_rewrite((uint32_t)(t->_resid & 0xffffffffu), t->_i.view);
+                if (t->_resid & (1ull << 62)) {
+                    // the slot's sampled view follows the new image, and so must its storage descriptor (binding 2):
+                    // the old image is freed below, and a kernel writing through a stale binding 2 stored into freed memory
+                    const uint32_t slot = (uint32_t)(t->_resid & 0xffffffffu);
+                    nvmtl_vk_bindless_rewrite(slot, t->_i.view);
+                    nvmtl_vk_bindless_put_storage(slot, t->_stex ? [t nvview] : NULL);
+                }
                 if (gRes2Batching) { nvmtl_res2_pend(t, &old); held = 1; }
                 else nvmtl_grave_put(&old);
             }
