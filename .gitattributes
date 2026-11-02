@@ -1,0 +1,2 @@
+# Preserve the imported sources and header snapshots byte-for-byte, including upstream whitespace.
+vendor/nvenc/** linguist-vendored -whitespace

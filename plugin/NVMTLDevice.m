@@ -346,12 +346,12 @@ static void nvmtl_nvenc_register(void)
               st ? "NOT registered" : "REGISTERED", me, (int)st, path);
     });
 }
-// An encoder built outside this driver can register itself beside ours and let VTRating decide which
-// one an app gets, so both can be installed and compared. The one this was written for reports H.264
-// at about 5 ms where the library we ship takes about 12, and it runs on Turing, Ampere and Ada,
-// which nvmtl_nvenc_register above turns away for not being Blackwell.
-// Off unless NVMTL_NVENCVT names this process (or is 1), from nvrm610.conf or the environment.
-// This loads code into every app that encodes, so the library and the directory holding it must be
+// An external VideoToolbox codec library can register beside ours; VideoToolbox's rating decides which
+// implementation is selected. The library decides which codecs its GPU classes support. For example,
+// mickys/nvenc registers VP9 and AV1 decoders on GA10x by default, but leaves its encoders disabled there.
+// Off unless NVMTL_NVENCVT names this process (or is 1). Release builds read this selector from
+// nvrm610.conf: their constructor scrubs this selector and rating from the inherited environment.
+// This loads code into each selected process, so the library and the directory holding it must be
 // ours and nobody else's. The firmware taught this: it used to sit in /Users/Shared, which is mode
 // 1777, and the only permission step was a chmod that adds read bits and never takes write away, so
 // a directory left there by any user was adopted as-is. A path anyone can write is not a path you can
@@ -367,20 +367,27 @@ static bool nvmtl_loadable_root_only(const char *path)
     if (!d || lstat(d, &ds) != 0 || !S_ISDIR(ds.st_mode)) return false;
     return ds.st_uid == 0 && !(ds.st_mode & (S_IWGRP | S_IWOTH));
 }
+static bool nvmtl_nvencvt_selected_for_process(const char *selector, const char *process)
+{
+    if (!selector || !*selector || !strcmp(selector, "0")) return false;
+    if (!strcmp(selector, "1")) return true;
+    if (!process || !*process) return false;
+    char list[512];
+    size_t n = strnlen(selector, sizeof list - 1);
+    memcpy(list, selector, n); list[n] = '\0';
+    char *save = NULL;
+    for (char *t = strtok_r(list, ", :", &save); t; t = strtok_r(NULL, ", :", &save))
+        if (!strcmp(t, process)) return true;
+    return false;
+}
 static void nvmtl_nvencvt_register(void)
 {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         const char *me = getprogname();
         const char *sel = getenv("NVMTL_NVENCVT");
-        if (!sel || !*sel || !strcmp(sel, "0")) return;
-        if (strcmp(sel, "1")) {                      // a process list, so one app can be moved over at a time
-            char list[512]; strlcpy(list, sel, sizeof list);
-            bool named = false;
-            for (char *t = strtok(list, ", :"); t && !named; t = strtok(NULL, ", :")) named = !strcmp(t, me);
-            if (!named) return;
-        }
-        if (!strcmp(me, "WindowServer")) return;     // the codec registrars all stay out of it
+        if (!nvmtl_nvencvt_selected_for_process(sel, me)) return;
+        if (!me || !strcmp(me, "WindowServer")) return; // the codec registrars all stay out of WindowServer
         Dl_info di;
         if (!dladdr((const void *)nvmtl_nvencvt_register, &di) || !di.dli_fname) { nvlog("nvencvt: dladdr failed - not registering"); return; }
         char dir[1024], path[1200];
@@ -399,8 +406,8 @@ static void nvmtl_nvencvt_register(void)
         const char *rv = getenv("NVMTL_NVENCVT_RATING");
         if (rv) { int v = atoi(rv); if (v > 0) rating = v; }
         int32_t st = r(rating);
-        nvlog("nvencvt: external encoder %s in %s (NVEncVT_Register -> %d, rating %d, %s)",
-              st ? "NOT registered" : "REGISTERED", me, (int)st, rating, path);
+        nvlog("nvencvt: external codec registration call in %s (NVEncVT_Register -> %d, rating %d, %s)",
+              me, (int)st, rating, path);
     });
 }
 static void nvmtl_nvdec_hevc_register(void)
@@ -1054,6 +1061,151 @@ static void nvmtl_busy_wait(IOSurfaceRef surf, NSUInteger plane)
         if (now - t0 > NVMTL_BUSY_WAIT_NS || (t.stamp_ns <= now && now - t.stamp_ns > NVMTL_BUSY_STALE_NS)) return;
     }
 }
+// VRAM import cache (on by default, NVMTL_SURF_IMPORT_CACHE=0 off). CoreAnimation wraps the same few IOSurfaces (an app's
+// drawables, its layers) in a new texture for every frame it composites, and each wrap imported the surface's family VRAM
+// again: four RM calls (share, dup, VA allocation, DMA map), about 0.6 ms in WindowServer. One import per surface is now
+// shared by its wrappers and kept for a while after the last one goes, so the next frame's wrap reuses it. A surface ID can
+// be reused after the surface is freed, so each import writes a per-process cookie into the surface and a cached import is
+// used only while the surface still carries it. Needs the plane seed: alone it made screen capture slower, with stalls.
+#include <os/lock.h>
+#include <stdatomic.h>
+#include <unistd.h>
+typedef struct { uint32_t sid; size_t need; uint64_t cookie; nvk_buffer b; int refs, stale; uint64_t idle; } nvmtl_ic_ent;
+#define NVMTL_IC_N 128   /* 32 filled up with live textures while a capture runs: the same menu-bar surfaces were imported every frame */
+// NVMTL_SURF_IMPORT_CACHE_IDLE_MS (default 2000): how long an import stays after its last wrapper goes.
+// NVMTL_SURF_IMPORT_CACHE_MAX_MB (default 64 with an 8 GB card or larger, else 16; 0 = no limit): larger surfaces (a 4K window
+// or composite is ~33 MB) are imported per wrapper as without the cache, so on a small card the cache never holds the VRAM of
+// the big surfaces that 4K HiDPI capture pages off (uncapped, a 4 GB GTX 1650 had up to 67 stalls of ~100 ms per 15 s).
+static uint64_t nvmtl_ic_env(const char *name, uint64_t def, uint64_t unit)
+{
+    const char *e = getenv(name); if (!e || !*e) return def * unit;
+    char *end; const unsigned long long v = strtoull(e, &end, 10); return end == e ? def * unit : v * unit;
+}
+static uint64_t nvmtl_ic_idle_ns(void)
+{
+    static uint64_t v; static dispatch_once_t once;
+    dispatch_once(&once, ^{ v = nvmtl_ic_env("NVMTL_SURF_IMPORT_CACHE_IDLE_MS", 2000, 1000000ull); });
+    return v;
+}
+static uint64_t nvmtl_ic_max_bytes(void)
+{
+    static uint64_t v; static dispatch_once_t once;
+    dispatch_once(&once, ^{ const uint64_t vram = nvmtl_vk_vram_bytes();
+        // 7 GiB, not 8: an "8 GB" card reports a little less (RTX 4060 Ti: 8188 MB, part of it held by the GSP), and the
+        // small-card limit would leave out the 4K / 5K surfaces that WindowServer composites.
+        v = nvmtl_ic_env("NVMTL_SURF_IMPORT_CACHE_MAX_MB", vram >= (7ull << 30) ? 64 : 16, 1ull << 20);
+        nvlog("family VRAM import cache: surfaces up to %llu MB are kept (VRAM %llu MB; NVMTL_SURF_IMPORT_CACHE_MAX_MB overrides)",
+              (unsigned long long)(v >> 20), (unsigned long long)(vram >> 20)); });
+    return v;
+}
+static nvmtl_ic_ent g_ic[NVMTL_IC_N];
+static os_unfair_lock g_ic_lock = OS_UNFAIR_LOCK_INIT;
+static unsigned long long g_ic_hits, g_ic_imports, g_ic_stale, g_ic_big;
+static void nvmtl_ic_trim(int all);
+static dispatch_source_t g_ic_timer;
+static void nvmtl_ic_timer_start(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_queue_t queue = dispatch_queue_create("nvmtl.import-cache", DISPATCH_QUEUE_SERIAL);
+        dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+        if (!timer) return;
+        dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
+                                  500 * NSEC_PER_MSEC, 50 * NSEC_PER_MSEC);
+        dispatch_source_set_event_handler(timer, ^{ @autoreleasepool { nvmtl_ic_trim(0); } });
+        g_ic_timer = timer;
+        dispatch_resume(timer);
+    });
+}
+static int nvmtl_ic_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_SURF_IMPORT_CACHE"); on = !(e && e[0] == '0');
+                  nvlog("family VRAM import cache %s (NVMTL_SURF_IMPORT_CACHE=%s, idle %llu ms, max %llu MB)", on ? "on" : "off", e ?: "unset",
+                        (unsigned long long)(nvmtl_ic_idle_ns() / 1000000), (unsigned long long)(nvmtl_ic_max_bytes() >> 20)); }
+    if (on) nvmtl_ic_timer_start();
+    return on;
+}
+static CFStringRef nvmtl_ic_key(void)
+{
+    static CFStringRef k; static dispatch_once_t once;
+    dispatch_once(&once, ^{ k = CFStringCreateWithFormat(NULL, NULL, CFSTR("NVMTLImport.%d"), (int)getpid()); });
+    return k;
+}
+static uint64_t nvmtl_ic_cookie(IOSurfaceRef s)
+{
+    uint64_t c = 0; CFTypeRef v = IOSurfaceCopyValue(s, nvmtl_ic_key());
+    if (v && CFGetTypeID(v) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)v, kCFNumberSInt64Type, &c);
+    if (v) CFRelease(v);
+    return c;
+}
+// destroys idle entries (no wrapper left) older than the idle time, or every idle one when `all`; call without the lock
+static void nvmtl_ic_trim(int all)
+{
+    nvk_buffer gone[NVMTL_IC_N]; int n = 0; const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    os_unfair_lock_lock(&g_ic_lock);
+    for (int i = 0; i < NVMTL_IC_N; i++)
+        if (g_ic[i].sid && !g_ic[i].refs && (all || g_ic[i].stale || (now >= g_ic[i].idle && now - g_ic[i].idle > nvmtl_ic_idle_ns()))) { gone[n++] = g_ic[i].b; memset(&g_ic[i], 0, sizeof g_ic[i]); }
+    os_unfair_lock_unlock(&g_ic_lock);
+    for (int i = 0; i < n; i++) nvmtl_vk_buffer_destroy(&gone[i]);
+}
+// the family VRAM of plane 0 of `surf` as a buffer, from the cache or a new import; 0 = ok (release with nvmtl_ic_put)
+static int nvmtl_ic_get(IOSurfaceRef surf, size_t need, nvk_buffer *out)
+{
+    const uint32_t sid = IOSurfaceGetID(surf);
+    if (!nvmtl_ic_on()) return nvmtl_vk_surface_vram(sid, 0, need, out);
+    nvmtl_ic_trim(0);
+    if (nvmtl_ic_max_bytes() && need > nvmtl_ic_max_bytes()) {   // too big to keep: a plain import, nvmtl_ic_put does not find it
+        const unsigned long long n = __atomic_add_fetch(&g_ic_big, 1, __ATOMIC_RELAXED);
+        if (n < 4 || n % 1000 == 0) nvlog("family VRAM import cache: %llu imports over %llu MB not cached", n, (unsigned long long)(nvmtl_ic_max_bytes() >> 20));
+        return nvmtl_vk_surface_vram(sid, 0, need, out);
+    }
+    const uint64_t have = nvmtl_ic_cookie(surf);
+    os_unfair_lock_lock(&g_ic_lock);
+    for (int i = 0; i < NVMTL_IC_N; i++) {
+        if (g_ic[i].sid != sid || g_ic[i].need != need || g_ic[i].stale) continue;
+        if (g_ic[i].cookie != have) { g_ic[i].stale = 1; g_ic_stale++; continue; }   // another surface with a reused ID
+        g_ic[i].refs++; *out = g_ic[i].b; g_ic_hits++;
+        os_unfair_lock_unlock(&g_ic_lock);
+        return 0;
+    }
+    os_unfair_lock_unlock(&g_ic_lock);
+    if (nvmtl_vk_surface_vram(sid, 0, need, out)) return -1;
+    static _Atomic uint64_t next = 1;
+    const uint64_t cookie = ((uint64_t)getpid() << 32) | (atomic_fetch_add(&next, 1) & 0xffffffffu);
+    CFNumberRef cn = CFNumberCreate(NULL, kCFNumberSInt64Type, &cookie); IOSurfaceSetValue(surf, nvmtl_ic_key(), cn); CFRelease(cn);
+    int slot = -1; uint64_t oldest = UINT64_MAX; nvk_buffer evict = { 0 };
+    os_unfair_lock_lock(&g_ic_lock);
+    g_ic_imports++;
+    for (int i = 0; i < NVMTL_IC_N && slot < 0; i++) if (!g_ic[i].sid) slot = i;
+    if (slot < 0) for (int i = 0; i < NVMTL_IC_N; i++) if (!g_ic[i].refs && g_ic[i].idle < oldest) { oldest = g_ic[i].idle; slot = i; }
+    if (slot >= 0) {
+        if (g_ic[slot].sid) evict = g_ic[slot].b;
+        g_ic[slot] = (nvmtl_ic_ent){ sid, need, cookie, *out, 1, 0, 0 };
+    }
+    const unsigned long long hits = g_ic_hits, imports = g_ic_imports, stale = g_ic_stale;
+    os_unfair_lock_unlock(&g_ic_lock);
+    if (evict.buf) nvmtl_vk_buffer_destroy(&evict);
+    if (imports < 4 || imports % 1000 == 0) nvlog("family VRAM import cache: %llu imports, %llu reused, %llu stale%s", imports, hits, stale, slot < 0 ? " (table full: not cached)" : "");
+    return 0;
+}
+// a wrapper's buffer goes: 1 = the cache owns it (kept for reuse, or destroyed when stale), 0 = not cached (destroy it)
+static int nvmtl_ic_put(nvk_buffer *b)
+{
+    int found = 0, destroy = 0; nvk_buffer gone = { 0 };
+    os_unfair_lock_lock(&g_ic_lock);
+    for (int i = 0; i < NVMTL_IC_N; i++) {
+        if (!g_ic[i].sid || g_ic[i].b.buf != b->buf) continue;
+        found = 1;
+        if (--g_ic[i].refs <= 0) { g_ic[i].refs = 0; g_ic[i].idle = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+                                   if (g_ic[i].stale) { gone = g_ic[i].b; memset(&g_ic[i], 0, sizeof g_ic[i]); destroy = 1; } }
+        break;
+    }
+    os_unfair_lock_unlock(&g_ic_lock);
+    if (destroy) nvmtl_vk_buffer_destroy(&gone);
+    if (found) memset(b, 0, sizeof *b);
+    return found;
+}
+
 static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInteger plane, uint32_t w, uint32_t h,
                                       uint32_t vkf, uint32_t bpp, int a8, int stex)
 {
@@ -1061,7 +1213,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
         size_t row = IOSurfaceGetBytesPerRow(surf), sh = IOSurfaceGetHeight(surf);
         if ((size_t)w * (bpp ? bpp : 4) <= row && h <= sh && row % 32 == 0) {
             nvk_buffer vb;
-            if (!nvmtl_vk_surface_vram(IOSurfaceGetID(surf), 0, row * h, &vb)) {
+            if (!nvmtl_ic_get(surf, row * h, &vb)) {
                 if (!nvmtl_vk_image_create_buffer_alias(w, h, vkf, bpp, a8, stex, 1, &vb, 0, row, &t->_i)) {
                     t->_vramBuf = vb; t->_vramOn = YES; g_surf_vram++;
                     uint32_t seed = IOSurfaceGetSeed(surf);
@@ -1072,7 +1224,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
                               w, h, row, current ? ", already current (no upload)" : "", g_surf_vram, g_surf_private);
                     return 0;
                 }
-                nvmtl_vk_buffer_destroy(&vb);
+                if (!nvmtl_ic_put(&vb)) nvmtl_vk_buffer_destroy(&vb);
             }
         }
     }

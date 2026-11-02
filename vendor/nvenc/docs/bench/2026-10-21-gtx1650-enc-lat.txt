@@ -1,0 +1,66 @@
+GPU NVIDIA GeForce GTX 1650, driver 2.4.3, nvenc v0.9.0-dirty
+SOURCE crowd60 1920x1080 300 frames at 6000000 bit/s
+[out#0/rawvideo @ 0x7fb543f058c0] Output file does not contain any stream
+Error opening output file /tmp/bench/dec.nv12.
+Error opening output files: Invalid argument
+[out#0/rawvideo @ 0x7fdd1c705940] Output file does not contain any stream
+Error opening output file /tmp/bench/dec.nv12.
+Error opening output files: Invalid argument
+RESULT ours-h264-rt 1920x1080 fps=160.85 kbps=5989 psnr=26.565985 vmaf=49.691130
+RESULT ours-h264 1920x1080 fps=150.67 kbps=6031 psnr=27.197211 vmaf=58.542844
+RESULT ours-hevc-rt 1920x1080 fps=147.42 kbps=5986 psnr=27.151917 vmaf=58.736360
+RESULT ours-hevc 1920x1080 fps=172.41 kbps=6010 psnr=27.085359 vmaf=59.096641   # re-run after 3fd516d (the first run had no output: DTS)
+RESULT ours-hevc10 1920x1080 fps=202.97 kbps=6019 psnr=26.529461 vmaf=55.204158   # re-run after 3fd516d (the first run had no output: DTS)
+RESULT apple-h264 1920x1080 fps=48.590 kbps=6270 psnr=25.741994 vmaf=46.952762
+RESULT apple-hevc 1920x1080 fps=6.8989 kbps=6580 psnr=27.572593 vmaf=61.780365
+RESULT x264-veryfast 1920x1080 fps=187.73 kbps=6133 psnr=26.266763 vmaf=50.109627
+RESULT x264-medium 1920x1080 fps=85.689 kbps=6143 psnr=26.553489 vmaf=57.557971
+RESULT x265-fast 1920x1080 fps=47.214 kbps=5958 psnr=27.717948 vmaf=61.622989
+RESULT x265-medium 1920x1080 fps=45.420 kbps=5935 psnr=27.545787 vmaf=60.899354
+SOURCE park1080_60 1920x1080 300 frames at 6000000 bit/s
+[out#0/rawvideo @ 0x7fd158905040] Output file does not contain any stream
+Error opening output file /tmp/bench/dec.nv12.
+Error opening output files: Invalid argument
+[out#0/rawvideo @ 0x7f8465f07fc0] Output file does not contain any stream
+Error opening output file /tmp/bench/dec.nv12.
+Error opening output files: Invalid argument
+RESULT ours-h264-rt 1920x1080 fps=175.13 kbps=5914 psnr=26.747289 vmaf=53.054562
+RESULT ours-h264 1920x1080 fps=162.16 kbps=6087 psnr=27.361069 vmaf=62.801558
+RESULT ours-hevc-rt 1920x1080 fps=165.47 kbps=5897 psnr=27.233585 vmaf=60.473811
+RESULT ours-hevc 1920x1080 fps=198.54 kbps=6058 psnr=27.240306 vmaf=60.513818   # re-run after 3fd516d (the first run had no output: DTS)
+RESULT ours-hevc10 1920x1080 fps=198.80 kbps=6059 psnr=26.829923 vmaf=57.837266   # re-run after 3fd516d (the first run had no output: DTS)
+RESULT apple-h264 1920x1080 fps=53.333 kbps=6226 psnr=25.534980 vmaf=45.827397
+RESULT apple-hevc 1920x1080 fps=6.3624 kbps=6423 psnr=27.523269 vmaf=62.769734
+RESULT x264-veryfast 1920x1080 fps=181.81 kbps=6161 psnr=26.926227 vmaf=57.620841
+RESULT x264-medium 1920x1080 fps=79.030 kbps=6178 psnr=26.830232 vmaf=63.446770
+RESULT x265-fast 1920x1080 fps=38.920 kbps=6034 psnr=27.976947 vmaf=65.719337
+RESULT x265-medium 1920x1080 fps=34.486 kbps=6045 psnr=27.915493 vmaf=65.757507
+SOURCE crowd2160_60 3840x2160 300 frames at 20000000 bit/s
+RESULT ours-h264-rt 3840x2160 fps=59.288 kbps=20015 psnr=30.694716 vmaf=61.986553
+RESULT ours-h264 3840x2160 fps=45.509 kbps=20561 psnr=31.196907 vmaf=68.122162
+RESULT ours-hevc-rt 3840x2160 fps=61.957 kbps=20012 psnr=31.554664 vmaf=71.470237
+RESULT ours-hevc 3840x2160 fps=83.705 kbps=20145 psnr=31.641225 vmaf=72.194465
+RESULT ours-hevc10 3840x2160 fps=82.599 kbps=19946 psnr=31.095053 vmaf=68.434930
+RESULT apple-h264 3840x2160 fps=15.331 kbps=20842 psnr=29.879320 vmaf=58.100480
+RESULT apple-hevc 3840x2160 fps=2.8600 kbps=21337 psnr=31.729394 vmaf=70.421000
+RESULT x264-veryfast 3840x2160 fps=49.792 kbps=20590 psnr=29.197725 vmaf=52.596722
+RESULT x264-medium 3840x2160 fps=19.104 kbps=20964 psnr=29.768774 vmaf=59.661587
+RESULT x265-fast 3840x2160 fps=17.906 kbps=19869 psnr=31.915222 vmaf=72.089305
+RESULT x265-medium 3840x2160 fps=10.092 kbps=19899 psnr=31.905723 vmaf=72.202861
+SOURCE park2160_60 3840x2160 300 frames at 20000000 bit/s
+RESULT ours-h264-rt 3840x2160 fps=60.827 kbps=19825 psnr=30.675586 vmaf=61.847128
+RESULT ours-h264 3840x2160 fps=40.376 kbps=20575 psnr=30.995335 vmaf=67.848892
+RESULT ours-hevc-rt 3840x2160 fps=63.157 kbps=19767 psnr=31.563152 vmaf=71.159347
+RESULT ours-hevc 3840x2160 fps=86.455 kbps=20549 psnr=31.671775 vmaf=71.803728
+RESULT ours-hevc10 3840x2160 fps=82.394 kbps=20513 psnr=31.287020 vmaf=69.240460
+RESULT apple-h264 3840x2160 fps=16.278 kbps=20846 psnr=29.535514 vmaf=54.830644
+RESULT apple-hevc 3840x2160 fps=2.5339 kbps=21209 psnr=31.715227 vmaf=70.088632
+RESULT x264-veryfast 3840x2160 fps=46.260 kbps=20830 psnr=30.082720 vmaf=59.091033
+RESULT x264-medium 3840x2160 fps=18.819 kbps=21028 psnr=30.183075 vmaf=64.733843
+RESULT x265-fast 3840x2160 fps=15.888 kbps=20422 psnr=32.128810 vmaf=74.109719
+RESULT x265-medium 3840x2160 fps=12.018 kbps=20437 psnr=32.122744 vmaf=74.828419
+RESULT latency avc1 1920x1080 entry_emit_ms=4.475 max_ms=5.113 engine_ms=3.907
+RESULT latency hvc1 1920x1080 entry_emit_ms=4.173 max_ms=4.505 engine_ms=3.636
+RESULT latency avc1 3840x2160 entry_emit_ms=17.297 max_ms=18.648 engine_ms=15.540
+RESULT latency hvc1 3840x2160 entry_emit_ms=15.300 max_ms=15.759 engine_ms=13.792
+BENCH1650 DONE

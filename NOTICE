@@ -25,3 +25,12 @@ kexts/NMIntelFB  Panel brightness follows the method of WhateverXe's panel PWM (
 
 air-runtime  LLVM (Apache-2.0 with LLVM exceptions) and Zstandard (BSD-3-Clause); their licence texts are in
              NVMTLDriver.bundle/Contents/Resources/air-runtime.
+
+NVEncVT      Optional VideoToolbox encoders and decoders from mickys/nvenc v0.9.5, MIT. Its source and licence are
+             kept under vendor/nvenc; the package places the MIT licence and third-party notices beside
+             libnvencvt.dylib and in licenses/ (NVEncVT-MIT-LICENSE.txt, NVEncVT-THIRD_PARTY_NOTICES.md).
+             The bundled NVIDIA open-gpu-kernel-modules 610.57.04 headers retain NVIDIA's COPYING file; the
+             open-gpu-doc headers are MIT (2019); Apple's published WebKit VideoToolbox SPI declarations retain
+             Apple's BSD-3-Clause terms. The corresponding texts/notices are also packaged as
+             NVEncVT-NVIDIA-open-gpu-kernel-modules-COPYING.txt and NVEncVT-open-gpu-doc-LICENSE.md. The
+             repository's PolyForm Noncommercial licence does not replace these upstream terms.

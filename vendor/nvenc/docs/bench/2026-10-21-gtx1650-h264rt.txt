@@ -1,0 +1,36 @@
+AB h264 'baseline' Mbps=20.53 psnr=28.829284 vmaf=45.265736 ms=11.504 
+AB h264 'ENC_H264_CTRL_P=nv66-h264-cbr-p.bin ENC_H264_CTRL_I=nv66-h264-cbr-idr.bin' Mbps=20.48 psnr=29.014276 vmaf=46.569730 ms=8.701 
+AB h264 'ENC_H264_CTRL_P=nv66-h264-cbr-p.bin ENC_H264_CTRL_I=nv66-h264-cbr-idr.bin ENC_H264_CTRL_Q=1' Mbps=21.37 psnr=29.539719 vmaf=53.991056 ms=8.877 
+AB h264 'ENC_H264_CTRL_P=nv66-h264-cqp-p.bin ENC_H264_CTRL_I=nv66-h264-cqp-idr.bin' Mbps=20.48 psnr=29.014276 vmaf=46.569730 ms=8.724 
+AB hevc 'baseline' Mbps=19.92 psnr=30.924234 vmaf=67.168522 ms=10.121 
+H264SPD DONE
+== crowd2160_60
+AB h264 'baseline' Mbps=20.53 psnr=28.829284 vmaf=45.265736 ms=11.433 
+AB h264 'ENC_H264_TMPLQ=1' Mbps=21.56 psnr=29.004001 vmaf=50.576943 ms=11.472 
+AB h264 'NV66-CTRL ENC_H264_TMPLQ=1' Mbps=21.53 psnr=29.170046 vmaf=51.247082 ms=8.644 
+AB h264 'NV66-CTRL ENC_H264_CTRL_Q=1' Mbps=21.37 psnr=29.539719 vmaf=53.991056 ms=8.836 
+== crowd60
+AB h264 'baseline' Mbps=6.090 psnr=25.089557 vmaf=35.011822 ms=3.285 
+AB h264 'ENC_H264_TMPLQ=1' Mbps=6.047 psnr=25.082057 vmaf=39.461167 ms=3.157 
+AB h264 'NV66-CTRL ENC_H264_TMPLQ=1' Mbps=6.073 psnr=25.251657 vmaf=40.662875 ms=2.279 
+AB h264 'NV66-CTRL ENC_H264_CTRL_Q=1' Mbps=6.016 psnr=25.527369 vmaf=42.961543 ms=2.267 
+== park1080_60
+AB h264 'baseline' Mbps=6.098 psnr=25.529507 vmaf=39.658455 ms=3.269 
+AB h264 'ENC_H264_TMPLQ=1' Mbps=6.100 psnr=25.567465 vmaf=46.458960 ms=3.136 
+AB h264 'NV66-CTRL ENC_H264_TMPLQ=1' Mbps=6.094 psnr=25.656219 vmaf=46.878142 ms=2.249 
+AB h264 'NV66-CTRL ENC_H264_CTRL_Q=1' Mbps=6.102 psnr=25.857928 vmaf=47.909415 ms=2.302 
+H264Q DONE
+== 1. rc-ab default (expect ~43 VMAF on crowd_run 1080p)
+AB h264 'baseline' Mbps=6.016 psnr=25.527369 vmaf=42.961543 ms=2.350 
+AB h264 'HIGH=1 CABAC=1' Mbps=6.005 psnr=25.922671 vmaf=46.183408 ms=3.260 
+== 2. High + CABAC decodes
+frames 10..119: 55.10 Mbit/s at 60 fps (918.4 kbit/frame), largest P 2140.0 kbit
+decode errors: 0
+== 3. benchmark rows ours-h264-rt (table: 1080p 49.7 / 53.1, 4K 62.0 / 61.8)
+crowd60: RESULT ours-h264-rt 1920x1080 fps=174.21 kbps=5980 psnr=26.678058 vmaf=52.851158 RESULT ours-h264 1920x1080 fps=155.52 kbps=6031 psnr=27.197211 vmaf=58.542844 
+park1080_60: RESULT ours-h264-rt 1920x1080 fps=175.95 kbps=5846 psnr=26.795398 vmaf=56.790958 RESULT ours-h264 1920x1080 fps=157.56 kbps=6087 psnr=27.361069 vmaf=62.801558 
+crowd2160_60: RESULT ours-h264-rt 3840x2160 fps=66.681 kbps=20015 psnr=30.540507 vmaf=61.865176 RESULT ours-h264 3840x2160 fps=44.649 kbps=20561 psnr=31.196907 vmaf=68.122162 
+park2160_60: RESULT ours-h264-rt 3840x2160 fps=67.980 kbps=19587 psnr=30.598548 vmaf=63.385289 RESULT ours-h264 3840x2160 fps=45.065 kbps=20575 psnr=30.995335 vmaf=67.848892 
+H264FIX DONE
+RESULT latency avc1 1920x1080 entry_emit_ms=4.069 engine_ms=3.499
+RESULT latency avc1 3840x2160 entry_emit_ms=15.421 engine_ms=13.770

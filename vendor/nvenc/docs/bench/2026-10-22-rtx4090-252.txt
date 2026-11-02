@@ -1,0 +1,93 @@
+# 2026-10-22 RTX 4090, NullMoth 2.5.2 (RM 615.78.08), macOS 26.7.1, nvenc v0.9.4: bench-all.sh enc dec lat 8k, our encoders only (BENCH_ENCODERS=ours-*)
+SOURCE crowd60 1920x1080 300 frames at 6000000 bit/s
+RESULT ours-h264-rt 1920x1080 fps=305.81 kbps=5988 psnr=26.684084 vmaf=54.239846
+RESULT ours-h264 1920x1080 fps=267.37 kbps=6012 psnr=27.354217 vmaf=59.542463
+RESULT ours-hevc-rt 1920x1080 fps=217.86 kbps=5988 psnr=27.153786 vmaf=58.848379
+RESULT ours-hevc 1920x1080 fps=128.04 kbps=6020 psnr=27.737611 vmaf=62.262777
+RESULT ours-hevc10 1920x1080 fps=126.74 kbps=6032 psnr=27.721503 vmaf=63.213820
+RESULT ours-av1-rt 1920x1080 fps=255.10 kbps=5876 psnr=27.371210 vmaf=60.566838
+RESULT ours-av1 1920x1080 fps=274.97 kbps=6111 psnr=28.091864 vmaf=65.169714
+RESULT ours-av1-10 1920x1080 fps=227.96 kbps=6112 psnr=28.097165 vmaf=65.203207
+SOURCE park1080_60 1920x1080 300 frames at 6000000 bit/s
+RESULT ours-h264-rt 1920x1080 fps=308.00 kbps=5876 psnr=26.842107 vmaf=57.562113
+RESULT ours-h264 1920x1080 fps=271.73 kbps=6079 psnr=27.481618 vmaf=63.202595
+RESULT ours-hevc-rt 1920x1080 fps=223.71 kbps=5899 psnr=27.248211 vmaf=60.688013
+RESULT ours-hevc 1920x1080 fps=128.25 kbps=6099 psnr=27.899990 vmaf=65.125880
+RESULT ours-hevc10 1920x1080 fps=129.14 kbps=6099 psnr=27.908429 vmaf=66.070350
+RESULT ours-av1-rt 1920x1080 fps=267.85 kbps=5820 psnr=27.575228 vmaf=63.842062
+RESULT ours-av1 1920x1080 fps=264.78 kbps=6132 psnr=28.268701 vmaf=68.844615
+RESULT ours-av1-10 1920x1080 fps=244.10 kbps=6130 psnr=28.264736 vmaf=68.844531
+SOURCE crowd2160_60 3840x2160 300 frames at 20000000 bit/s
+RESULT ours-h264-rt 3840x2160 fps=117.69 kbps=20015 psnr=30.914945 vmaf=65.673437
+RESULT ours-h264 3840x2160 fps=87.006 kbps=20386 psnr=31.400766 vmaf=69.141527
+RESULT ours-hevc-rt 3840x2160 fps=90.771 kbps=20012 psnr=31.558506 vmaf=71.608192
+RESULT ours-hevc 3840x2160 fps=78.988 kbps=20219 psnr=31.922522 vmaf=72.648495
+RESULT ours-hevc10 3840x2160 fps=75.623 kbps=20214 psnr=31.923421 vmaf=73.255619
+RESULT ours-av1-rt 3840x2160 fps=94.966 kbps=19913 psnr=31.944445 vmaf=73.064493
+RESULT ours-av1 3840x2160 fps=111.15 kbps=21406 psnr=32.452228 vmaf=76.080468
+RESULT ours-av1-10 3840x2160 fps=96.432 kbps=21425 psnr=32.465796 vmaf=76.207575
+SOURCE park2160_60 3840x2160 300 frames at 20000000 bit/s
+RESULT ours-h264-rt 3840x2160 fps=113.80 kbps=19731 psnr=30.849602 vmaf=65.385857
+RESULT ours-h264 3840x2160 fps=86.981 kbps=20549 psnr=31.240654 vmaf=68.722500
+RESULT ours-hevc-rt 3840x2160 fps=99.140 kbps=19784 psnr=31.588942 vmaf=71.397209
+RESULT ours-hevc 3840x2160 fps=78.390 kbps=20164 psnr=31.903266 vmaf=72.668688
+RESULT ours-hevc10 3840x2160 fps=74.925 kbps=20172 psnr=31.903039 vmaf=73.078189
+RESULT ours-av1-rt 3840x2160 fps=95.724 kbps=19836 psnr=32.229065 vmaf=75.448457
+RESULT ours-av1 3840x2160 fps=108.30 kbps=21167 psnr=32.632159 vmaf=77.772637
+RESULT ours-av1-10 3840x2160 fps=91.968 kbps=21147 psnr=32.629297 vmaf=77.793815
+RESULT h264 ours 1920x1080 fps=666.0 hardware 1, error 0
+RESULT h264 nullmoth 1920x1080 fps=160.1 hardware 1, error 0
+RESULT h264 apple-sw 1920x1080 fps=93.9 hardware 0, error 0
+RESULT h264 ffmpeg-sw 1920x1080 fps=645.16
+RESULT hevc ours 1920x1080 fps=933.1 hardware 1, error 0
+RESULT hevc nullmoth 1920x1080 fps=833.4 hardware 1, error 0
+RESULT hevc apple-sw 1920x1080 fps=231.7 hardware 0, error 0
+RESULT hevc ffmpeg-sw 1920x1080 fps=141.44
+RESULT hevc10 ours 1920x1080 fps=608.8 hardware 1, error 0
+RESULT hevc10 nullmoth 1920x1080 fps=564.6 hardware 1, error 0
+RESULT hevc10 apple-sw 1920x1080 fps=301.3 hardware 0, error 0
+RESULT hevc10 ffmpeg-sw 1920x1080 fps=308.32
+RESULT vp9 ours 1920x1080 fps=946.0 hardware 1, error 0
+RESULT vp9 ffmpeg-sw 1920x1080 fps=349.65
+RESULT av1 ours 1920x1080 fps=995.8 hardware 1, error 0
+RESULT av1 ffmpeg-sw 1920x1080 fps=116.09
+RESULT mpeg2 ours 1920x1080 fps=740.6 hardware 1, error 0
+RESULT mpeg2 ffmpeg-sw 1920x1080 fps=1298.7
+RESULT mpeg4 ours 1920x1080 fps=720.3 hardware 1, error 0
+RESULT mpeg4 ffmpeg-sw 1920x1080 fps=1094.8
+RESULT vp8 ours-cli 1920x1080 fps=1030.9 (engine 0.97 ms/frame)
+RESULT vp8 ffmpeg-sw 1920x1080 fps=940.43
+RESULT h264 ours 3840x2160 fps=189.7 hardware 1, error 0
+RESULT h264 nullmoth 3840x2160 fps=38.1 hardware 1, error 0
+RESULT h264 apple-sw 3840x2160 fps=25.2 hardware 0, error 0
+RESULT h264 ffmpeg-sw 3840x2160 fps=164.74
+RESULT hevc ours 3840x2160 fps=310.2 hardware 1, error 0
+RESULT hevc nullmoth 3840x2160 fps=305.0 hardware 1, error 0
+RESULT hevc apple-sw 3840x2160 fps=190.1 hardware 0, error 0
+RESULT hevc ffmpeg-sw 3840x2160 fps=164.56
+RESULT hevc10 ours 3840x2160 fps=173.2 hardware 1, error 0
+RESULT hevc10 nullmoth 3840x2160 fps=169.7 hardware 1, error 0
+RESULT hevc10 apple-sw 3840x2160 fps=147.6 hardware 0, error 0
+RESULT hevc10 ffmpeg-sw 3840x2160 fps=129.47
+RESULT vp9 ours 3840x2160 fps=306.5 hardware 1, error 0
+RESULT vp9 ffmpeg-sw 3840x2160 fps=167.78
+RESULT av1 ours 3840x2160 fps=295.4 hardware 1, error 0
+RESULT av1 ffmpeg-sw 3840x2160 fps=33.160
+RESULT mpeg2 ours 3840x2160 fps=209.4 hardware 1, error 0
+RESULT mpeg2 ffmpeg-sw 3840x2160 fps=519.93
+RESULT mpeg4 ours 3840x2160 RESULT speed hw: no decoder
+RESULT mpeg4 ffmpeg-sw 3840x2160 fps=351.28
+RESULT vp8 ours-cli 3840x2160 fps=248.75 (engine 4.02 ms/frame)
+RESULT vp8 ffmpeg-sw 3840x2160 fps=342.07
+RESULT latency avc1 1920x1080 entry_emit_ms=1.825 max_ms=53.819 engine_ms=1.187
+RESULT latency hvc1 1920x1080 entry_emit_ms=1.759 max_ms=56.294 engine_ms=1.223
+RESULT latency av01 1920x1080 entry_emit_ms=1.599 max_ms=109.519 engine_ms=1.053
+RESULT latency avc1 3840x2160 entry_emit_ms=5.565 max_ms=6.460 engine_ms=4.330
+RESULT latency hvc1 3840x2160 entry_emit_ms=5.703 max_ms=6.570 engine_ms=4.510
+RESULT latency av01 3840x2160 entry_emit_ms=4.884 max_ms=5.785 engine_ms=3.718
+RESULT 8k-encode av1 7680x4320 encode 14.417 ms avg
+RESULT 8k-decode av1 7680x4320 (64.8 fps) hardware 1
+RESULT 8k-encode hevc 7680x4320 encode 16.068 ms avg
+RESULT 8k-decode hevc 7680x4320 (70.0 fps) hardware 1
+RESULT 8k-encode h264 7680x4320 encode 15.331 ms avg
+RESULT 8k-decode h264 7680x4320 (10.8 fps) hardware 1

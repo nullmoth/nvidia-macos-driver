@@ -1,0 +1,11 @@
+# NVIDIA's own hevc_nvenc (Linux driver 580.105.08, ffmpeg 7.1) on the GTX 1650: Main vs Main 10, 2026-10-21
+# crowd_run 1080p (first 60 frames, looped to 300), 50 fps, -bf 0 -g 250; CBR -b:v 6M (300 frames) and constqp (first 30 frames)
+# scored in Tahoe like docs/benchmarks.md: decoded to 8-bit NV12, luma PSNR and VMAF (libvmaf default model) against the source
+nv-p4-8   CBR p4 Main     5007434 bytes  6.68 Mbit/s  PSNR-Y 27.578  VMAF 62.66
+nv-p4-10  CBR p4 Main 10  5028592 bytes  6.70 Mbit/s  PSNR-Y 27.104  VMAF 59.53
+nv-p7-8   CBR p7 Main     5072736 bytes  6.76 Mbit/s  PSNR-Y 27.613  VMAF 62.91
+nv-p7-10  CBR p7 Main 10  5027441 bytes  6.70 Mbit/s  PSNR-Y 27.152  VMAF 59.67
+nv-q28-8  constqp 28 Main     3825244 bytes (30 frames)  PSNR-Y 35.703  VMAF 95.85
+nv-q28-10 constqp 28 Main 10  3591226 bytes (30 frames)  PSNR-Y 34.945  VMAF 97.07
+nv-q34-8  constqp 34 Main     1715994 bytes (30 frames)  PSNR-Y 32.298  VMAF 88.29
+nv-q34-10 constqp 34 Main 10  1594782 bytes (30 frames)  PSNR-Y 31.373  VMAF 84.19
