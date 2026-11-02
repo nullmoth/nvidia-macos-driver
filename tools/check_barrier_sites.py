@@ -16,7 +16,7 @@ def read(n):
     except OSError: return ""
 objc = read("NVMTLObjects.m"); vk = read("nvmtl_vk.c")
 calls = [m.start() for m in re.finditer(r"nvmtl_vk_cmd_barrier\(&", objc)]
-untagged = [objc.count("\n", 0, p) + 1 for p in calls if "nvmtl_vk_barrier_site(" not in objc[max(0, p - 90):p]]
+untagged = [objc.count("\n", 0, p) + 1 for p in calls if "nvmtl_vk_barrier_site(" not in objc[max(0, p - 140):p]]
 census = len(re.findall(r'nvlog_every\("bar census: per frame', objc))
 counted = len(re.findall(r"atomic_fetch_add\(&g_bars\[", vk))
 print(f"barrier sites: {len(calls)} encoder-side full barriers, {len(untagged)} untagged; census line {census}; layer counters {counted}")
