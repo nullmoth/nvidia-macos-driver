@@ -12,7 +12,8 @@ typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int
                  int fresh; /* host-visible memory from its own vkAllocateMemory: zeroed by the kernel, never recycled */
                  uint64_t parked_ns; /* when the buffer park took it (CLOCK_UPTIME_RAW) */ } nvk_buffer;
 #include "nvmtl_sample_positions.h"
-typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vfl;  uint64_t up_token; } nvk_image;
+typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vfl;  uint64_t up_token;
+                 void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */ } nvk_image;
 #define NVMTL_NVAR 16
 #define NVMTL_NVAR_MAX 4096
 #define NVMTL_NCOL 8
