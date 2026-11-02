@@ -3476,7 +3476,22 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     NVMTLRenderPipelineState *p = (NVMTLRenderPipelineState *)ps;
     if (!p) { nvlog("encoder: nil render pipeline refused"); return; }
     if (_begun && !nvmtl_vk_pipeline_compatible(&_passSig, &p->_p)) {
-        nvlog("encoder: incompatible render pipeline refused before changing draw state"); return;
+        // Metal can omit unused attachments in a later pipeline. Vulkan requires a new compatible pass: end this one,
+        // keep every attachment an earlier segment used, preserve the encoder's dynamic state and begin again below.
+        // Refusing the pipeline instead dropped every draw until the next compatible one: Cyberpunk's parallel render
+        // encoders replay thousands of such binds per frame (4,096+ refusals logged per run) and the frame lost them.
+        uint32_t keep = 0;
+        for (uint32_t i = 0; i < _passSig.ncol; i++)
+            if (_passSig.cfmts[i]) keep |= NVMTL_LOAD_COLOUR(i);
+        if (_passSig.has_depth) keep |= NVMTL_LOAD_DEPTH;
+        if (_ps && _ps->_p.has_stencil) keep |= NVMTL_LOAD_STENCIL;
+        BOOL visibility = _visActive || _visPending;
+        [self nvmtlCloseVisibility];
+        nvmtl_vk_cmd_end_render(&_cb->_c);
+        _begun = NO; _pass.load |= keep; _load |= keep; _visPending = visibility;
+        static _Atomic unsigned long long transitions; const unsigned long long k = atomic_fetch_add(&transitions, 1) + 1;
+        if (!(k & (k - 1))) nvlog("encoder: pipeline attachment transition #%llu preserves load mask 0x%x (pass %u colour, depth %u, %u samples -> pipeline %s / %s)",
+                                 k, keep, _passSig.ncol, _passSig.has_depth, _passSig.samples, p->_vname.UTF8String ?: "?", p->_fname.UTF8String ?: "?");
     }
     if (_begun && p->_p.fetch_mask && nvmtl_hz_mode()) [self nvmtlHzForceFull];
     _ps = p;
