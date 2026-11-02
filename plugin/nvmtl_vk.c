@@ -193,6 +193,10 @@ static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_
 static uint64_t g_buf_vram_refused;
 static uint64_t g_heap_vram_refused;
 static uint64_t g_cmd_begun, g_cmd_submitted, g_cmd_abandoned;
+// Fault context (nvmtl_fault_context.h): a few stores per dispatch, submit and death; read once, at device loss.
+static nvmtl_fx_state g_fx; static pthread_mutex_t g_fx_lock = PTHREAD_MUTEX_INITIALIZER;
+static __thread const char *t_fx_dying;   // the label the next image death on this thread is recorded under
+void nvmtl_vk_image_dying_label(const char *label) { t_fx_dying = label; }
 void nvmtl_vk_cmd_counts(uint64_t *begun, uint64_t *submitted, uint64_t *abandoned)
 {
     if (begun) *begun = g_cmd_begun; if (submitted) *submitted = g_cmd_submitted; if (abandoned) *abandoned = g_cmd_abandoned;
@@ -2862,6 +2866,7 @@ void nvmtl_bl_hook_destroy(void) { if (!g_bl_real_destroy_view && pvkDestroyImag
 void nvmtl_vk_bindless_drop(uint32_t slot)
 {
     if (!g_heapSet || !slot || slot >= NVMTL_BINDLESS_SLOTS) return;
+    pthread_mutex_lock(&g_fx_lock); nvmtl_fx_slot_gone(&g_fx, g_cmd_submitted, slot); pthread_mutex_unlock(&g_fx_lock);
     pthread_mutex_lock(&g_heap_lock);
     nvmtl_heap_write_locked(slot, g_dummyImg.view);
     g_heap_fifo[(g_heap_fifo_head + g_heap_fifo_n) % NVMTL_BINDLESS_SLOTS] = slot; g_heap_fifo_n++;
@@ -5005,6 +5010,15 @@ int nvmtl_vk_cmd_dispatch_sass(nvk_cmdbuf *c,
 struct nvmtl_dt_rec { char name[48]; uint32_t t[3], l[3]; };
 static __thread const char *t_dt_label;
 void nvmtl_vk_dispatch_label(const char *name) { t_dt_label = name; }
+static void nvmtl_fx_emit_line(void *ctx, const char *line) { (void)ctx; nvlog_every("%s", line); }
+static void nvmtl_fx_dump(const char *why)
+{
+    pthread_mutex_lock(&g_fx_lock);
+    nvlog_every("fault context: %s", why);
+    nvmtl_fx_report(&g_fx, g_cmd_submitted, 12, 256, nvmtl_fx_emit_line, NULL);
+    pthread_mutex_unlock(&g_fx_lock);
+}
+static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c) { nvmtl_fx_dispatch(&c->fx, t_dt_label); }
 static int nvmtl_dt_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_DISPATCH_TIME"); on = e && e[0] == '1'; } return on; }
 /* returns the slot whose timestamps bracket this dispatch, or -1 */
 static int nvmtl_dt_begin(nvk_cmdbuf *c, const uint32_t t[3], const uint32_t l[3])
@@ -5099,6 +5113,7 @@ void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_
                                 tbase[0] + off[0] * local[0], tbase[1] + off[1] * local[1], tbase[2] + off[2] * local[2],
                                 gbase[0] + off[0], gbase[1] + off[1], gbase[2] + off[2], groups[0], groups[1], groups[2] };
             pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES, pc);
+            nvmtl_fx_note_dispatch(c);
             pvkCmdDispatch(c->cb, n[0], n[1], n[2]);
         }
     }
@@ -5122,6 +5137,7 @@ void nvmtl_vk_cmd_dispatch_indirect_tg(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffe
     const uint32_t F = 0x80000000u;
     uint32_t pc[12] = { F | tg[0], F | tg[1], F | tg[2], 0, 0, 0, 0, 0, 0, F, F, F };
     pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES, pc);
+    nvmtl_fx_note_dispatch(c);
     pvkCmdDispatchIndirect(c->cb, (VkBuffer)b->buf, off);
 }
 void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t gy, uint32_t gz)
@@ -5140,6 +5156,7 @@ void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t
         nvlog("vk: raw dispatch of %ux%ux%u groups exceeds the device limit — SKIPPED", gx, gy, gz);
         c->skipped++; return;
     }
+    nvmtl_fx_note_dispatch(c);
     pvkCmdDispatch(c->cb, gx, gy, gz);
 }
 
@@ -6376,9 +6393,11 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     pthread_mutex_unlock(&nvmtl_submit_mutex);
     pt[4] = nvmtl_perf_now();
     g_cmd_submitted++;
+    pthread_mutex_lock(&g_fx_lock); nvmtl_fx_submit(&g_fx, g_cmd_submitted, c->cb, &c->fx); pthread_mutex_unlock(&g_fx_lock);
     if (result != VK_SUCCESS) {
         g_state = -1;
         nvlog("vk: queue submit -> %d; disabling backend and retaining uncertain in-flight resources", result);
+        nvmtl_fx_dump("queue submit failed");
         return -2;
     }
     f->fence = fence;
@@ -6425,6 +6444,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     if (wr != VK_SUCCESS || g_state != 1) {
         g_state = -1;
         nvlog("vk: fence wait -> %d after %ld ms (budget %ld ms); the device is lost, disabling backend without retiring in-flight resources", wr, waited_ms, budget_ms);
+        nvmtl_fx_dump("fence wait failed: the device is lost");
         return -2;
     }
     if (c->wseq && c->wseq != NVMTL_WSEQ_BLIND) {
@@ -6539,6 +6559,8 @@ void nvmtl_vk_image_destroy(nvk_image *i)
     if (g_state != 1 || !i || !i->img) return;
     nvmtl_vk_image_upload_barrier(i);   // an async upload must finish before we free this image's memory (#96)
     g_img_gone++;
+    pthread_mutex_lock(&g_fx_lock); nvmtl_fx_image_gone(&g_fx, g_cmd_submitted, i->view, i->w, i->h, i->fmt, i->storage, t_fx_dying); pthread_mutex_unlock(&g_fx_lock);
+    t_fx_dying = NULL;
     if (i->view) pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL);
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
     if (i->pool) { if (i->sysmem) g_sys_bytes -= i->alloc; else g_vram_bytes -= i->alloc; image_pool_release(i); }
@@ -7284,6 +7306,7 @@ void nvmtl_vk_cmd_dispatch_indirect(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *
 {
     pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipeline)p->pipe);
     if (c->nobind) return;
+    nvmtl_fx_note_dispatch(c);
     pvkCmdDispatchIndirect(c->cb, (VkBuffer)b->buf, off);
 }
 
@@ -7563,6 +7586,7 @@ int nvmtl_vk_bind_texture_view(nvk_cmdbuf *c, uint32_t set, uint32_t index, void
 int nvmtl_vk_bind_storage_view(nvk_cmdbuf *c, uint32_t set, uint32_t index, void *view)
 {
     if (index >= NVMTL_NSTEX) return -1;
+    nvmtl_fx_bind_storage(&c->fx, index, view);
     return nvmtl_bind_slot(c, set, NVMTL_STEX_BASE + index, view ? NVMTL_SLOT_TEX : NVMTL_SLOT_NONE, view, 0);
 }
 
