@@ -2014,20 +2014,45 @@ static int nvmtl_vk_vram_wall0(uint64_t want, uint64_t *freev_out, uint64_t *bud
     if (measured_out) *measured_out = measured;
     return gate;
 }
+// The working set the app is told to budget against. Default: the budget less the allocator's headroom and the
+// non-image reserve, filled to NVMTL_WS_FILL_PCT (92%) - the figure every clean benchmark run advertised (5.7 GB of
+// 8 GB on the measured card). NVMTL_WS_FULL=1 advertises the whole budget instead (min of budget and card), as the
+// ray-tracing batch did: measured 11-02, that figure (6.5 GB) made the game size its heaps at 4.8 GB instead of
+// 0.75 GB, VRAM read 6.2 GB used at the first image census, and the first scene frame's compute chain faulted at the
+// same address in five runs; with the default figure the same stack ran the whole benchmark clean.
+static int nvmtl_ws_full_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_WS_FULL"); on = e && e[0] == '1';
+        if (on) nvlog("working set: advertising the whole budget (NVMTL_WS_FULL=1)"); }
+    return on;
+}
 uint64_t nvmtl_vk_working_set(void)
 {
-    if (nvmtl_vk_init()) return 0;
+    if (nvmtl_vk_init()) return nvmtl_ws_full_on() ? 0 : 2ull << 30;
     uint64_t card = nvmtl_vk_vram_bytes();
-    if (!card) return 0;
-    uint64_t budget = 0, used = 0;
-    nvmtl_vk_vram_budget(&budget, &used);
-    // The budget already includes this process's live resources. Subtracting its
-    // buffers again turns the public total recommendation into a remaining quota.
-    if (!budget) return 0;
-    uint64_t limit = budget < card ? budget : card;
-    // NVK's process budget already reserves ten percent against thrashing.
-    // Keep the allocator's separate headroom guard out of this total-resource API.
-    return limit;
+    uint64_t b = 0, u = 0;
+    nvmtl_vk_vram_budget(&b, &u);
+    if (nvmtl_ws_full_on()) {
+        // The budget already includes this process's live resources. Subtracting its
+        // buffers again turns the public total recommendation into a remaining quota.
+        if (!card || !b) return 0;
+        // NVK's process budget already reserves ten percent against thrashing.
+        // Keep the allocator's separate headroom guard out of this total-resource API.
+        return b < card ? b : card;
+    }
+    { static int res2 = -1; if (res2 < 0) { const char *e = getenv("NVMTL_NO_RES2"), *w = getenv("NVMTL_RES2_WS");
+          res2 = !(w && w[0] == '0') && g_sparse && !(e && e[0] == '1'); }
+      if (res2 && card) return card; }
+    static long long ovr = -2; if (ovr == -2) { const char *e = getenv("NVMTL_VRAM_WS_NONIMAGE_MB"); ovr = (e && *e) ? atoll(e) : -1; }
+    uint64_t nonimg = ovr >= 0 ? (uint64_t)ovr << 20 : NVMTL_VRAM_NONIMAGE;
+    if (u > g_vram_bytes && u - g_vram_bytes > nonimg) nonimg = u - g_vram_bytes;
+    uint64_t reserve = NVMTL_VRAM_HEADROOM + nonimg;
+    uint64_t room = b > reserve ? b - reserve : 0;
+    { static long long pct = -2; if (pct == -2) { const char *e = getenv("NVMTL_WS_FILL_PCT"); pct = (e && *e) ? atoll(e) : 92;
+          if (pct < 50 || pct > 100) pct = 92; }
+      room = room / 100 * (uint64_t)pct; }
+    return room > (1ull << 30) ? room : (1ull << 30);
 }
 // What the app is told to budget against. The reserve belongs here and not in
 // nvmtl_vk_working_set, because that value is also the driver's own notion of
