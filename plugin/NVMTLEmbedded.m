@@ -33,7 +33,10 @@ static uint64_t nvmtl_resid_assign(id resource, uint64_t tag, uint32_t heapSlot)
     if (!nvmtl_resid_map) nvmtl_resid_map = [[NSMapTable alloc]
         initWithKeyOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsIntegerPersonality
         valueOptions:NSPointerFunctionsWeakMemory capacity:0];
-    uint64_t token = heapSlot ? (NVMTL_RESID_HEAP | heapSlot) : ((++nvmtl_resid_seq) | tag);
+    // A token without a slot keeps its low 17 bits zero: the translated shader masks a handle's low word to a heap slot
+    // (BINDLESS_HEAP_SLOTS = 131072) with no way to tell the two apart, so a bare sequence number there made a kernel read
+    // or write through another texture's slot, or a slot whose storage descriptor nobody had written. Slot 0 is the dummy.
+    uint64_t token = heapSlot ? (NVMTL_RESID_HEAP | heapSlot) : (((++nvmtl_resid_seq) << 17) | tag);
     [nvmtl_resid_map setObject:resource forKey:(__bridge id)(void *)(uintptr_t)token];
     uint64_t censusIssued = 0; NSUInteger censusLive = 0; BOOL doCensus = ((nvmtl_resid_seq & 0xFFF) == 0);
     if (doCensus) { censusIssued = nvmtl_resid_seq & ~NVMTL_RESID_SAMPLER; censusLive = nvmtl_resid_map.count; }
