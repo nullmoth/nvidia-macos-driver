@@ -52,7 +52,7 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_lv_remove\(&g_lv, b->reg, g_cmd_submitted\)", 1),            # provenance keeps the death sequence
     ("nvmtl_vk.c", r"nvmtl_im_died\(&g_im, ", 3),                                       # image death: destroy, free_backing, re-back
     ("nvmtl_vk.c", r"nvmtl_im_add\(&g_im, ", 2),                                        # image birth: commit, re-back
-    ("nvmtl_vk.c", r"nvmtl_vw_add\(&g_vw, ", 6),                                        # every heap-bound view pairs with its image
+    ("nvmtl_vk.c", r"nvmtl_vw_add(_ex)?\(&g_vw, ", 6),                                        # every heap-bound view pairs with its image
     ("nvmtl_vk.c", r"nvmtl_slots_write\(slot, 2, ", 2),                                 # binding 2: put_storage + the drop's dummy
     ("nvmtl_vk.c", r"nvmtl_slots_alloc\(slot\)", 2),                                   # put + put_texel
     ("nvmtl_vk.c", r"nvmtl_slots_drop\(slot\)", 1),
@@ -71,7 +71,7 @@ hooks = [
     ("NVMTLEmbedded.m", r"VIEW NVMTLTexture %p", 1),
     ("nvmtl_vk.c", r"nvmtl_loss_mutex_lock\(&g_", 14),                                   # every lock in the loss path is bounded
     ("nvmtl_vk.c", r"nvmtl_loss_read\(", 5),                                             # every host read in the loss path goes through the kernel
-    ("nvmtl_vk.c", r"nvmtl_loss_section\(f, ", 8),                                       # flushed, announced sections
+    ("nvmtl_vk.c", r"nvmtl_loss_section\(f, ", 9),                                       # flushed, announced sections
     ("nvmtl_vk.c", r"a second device-loss dump on another thread - skipped", 1),
     ("nvmtl_vk.c", r"#define pvkAllocateMemory\(d, i, a, o\) nvmtl_mem_alloc_rec", 1),   # every memory allocation recorded with its base address
     ("nvmtl_vk.c", r"#define pvkFreeMemory\(d, m, a\) nvmtl_mem_free_rec", 1),
@@ -82,6 +82,10 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_heaps_dump\(f, nvmtl_fx_emit_both\)", 1),                   # every live app heap at loss
     ("NVMTLObjects.m", r"nvmtl_heap_list_for_loss\(h\)", 1),
     ("nvmtl_vk.c", r"image->placed \? image->hz_off", 1),                               # placed images record their bound range
+    ("nvmtl_vk.c", r"nvmtl_im_set_params\(&g_im, id, ", 1),                            # image requirement vs the memory its bind gave it
+    ("nvmtl_vk.c", r"nvmtl_vw_add_ex\(&g_vw, ", 5),                                     # every view records what it covers
+    ("nvmtl_vk.c", r"nvmtl_fault_tic_scan\(v2, ", 1),                                   # the storage descriptor's words and address
+    ("nvmtl_vk.c", r"nvmtl_loss_section\(f, \"images\"\)", 1),                        # images early, census last
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev, "NVMTLEmbedded.m": emb}
 short = []; total = 0

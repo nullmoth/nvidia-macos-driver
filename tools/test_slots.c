@@ -26,6 +26,13 @@ int main(void)
     nout = 0; unsigned f = nvmtl_sl_report(&sl, &im, &vw, 7, &d, "NVMTLTexture 0x1 512x512", &mm, emit, NULL);
     ARM("a consistent live slot reports OK", f == 0 && has("heap slot 7: LIVE, allocated 1 time (last at seq 101); owner: NVMTLTexture 0x1 512x512") && has("verdict: OK"));
     ARM("  each binding names its image and that it is alive", has("binding 2: view 0xa2 written at seq 101 -> image 0xa0 512x512 fmt 37 storage placed mem 0xaa+4096 1048576 bytes, created seq 100, ALIVE"));
+    nvmtl_im_set_params(&im, 1, 1, 12, 0, 0x7, 1, 1 << 20); nvmtl_vw_add_ex(&vw, sA, imgA, 5 + 1, 0, 1, 0, 1);
+    nout = 0; nvmtl_sl_report(&sl, &im, &vw, 7, &d, "", &mm, emit, NULL);
+    ARM("the image line says what it is, needs and got, and what the view covers", has("image: 1 layer, 12 mips, 1 sample, flags 0x0, usage 0x7; needs 1048576 bytes, given 1048576 from its bind offset; view: VkImageViewType 5, layers 0+1, mips 0+1"));
+    nvmtl_im_set_params(&im, 1, 2, 12, 0, 0x7, 1, 1 << 19);
+    nout = 0; nvmtl_sl_report(&sl, &im, &vw, 7, &d, "", &mm, emit, NULL);
+    ARM("an image needing more than its bind offers is flagged UNDERSIZED BIND", has("needs 1048576 bytes, given 524288 from its bind offset - UNDERSIZED BIND") && nvmtl_im_undersized(nvmtl_im_by_img(&im, imgA)));
+    nvmtl_im_set_params(&im, 1, 1, 12, 0, 0x7, 1, 1 << 20);
     ARM("  and where its bytes are: the memory, its base, liveness and the image's start", has("its memory 0xaa: nvmtl_vk_heap_create_body, base 0x2ef000000, size 67108864, created seq 90, ALIVE -> the image's bytes start at 0x2ef001000"));
     /* the memory table resolves an address to a memory and its offset, live or dead, and binds remember an image's offset */
     { char ml[300]; nvmtl_mm_describe(&mm, 0x2ef822000ull, ml, sizeof ml);
