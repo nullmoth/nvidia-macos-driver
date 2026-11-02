@@ -11,43 +11,59 @@ static int has(const char *needle) { for (unsigned i = 0; i < nout; i++) if (str
 int main(void)
 {
     nvmtl_sl_state sl; nvmtl_im_state im; nvmtl_vw_state vw; memset(&sl, 0, sizeof sl); memset(&im, 0, sizeof im); memset(&vw, 0, sizeof vw);
+    nvmtl_mm_state mm; memset(&mm, 0, sizeof mm); nvmtl_mb_state mb; memset(&mb, 0, sizeof mb);
+    const void *memA = (void *)0xaa; nvmtl_mm_add(&mm, memA, 0x2ef000000ull, 64 << 20, 0, "nvmtl_vk_heap_create_body", 90);
     ARM("the slot table allocates", nvmtl_sl_init(&sl, 4096) == 0 && sl.n == 4096);
     const void *dummy0 = (void *)0xd0, *dummy2 = (void *)0xd2, *dummyT = (void *)0xd3;
     nvmtl_sl_dummies d = { { dummy0, NULL, dummy2, dummyT, dummyT } };
     /* image A with sampled view vA and storage view sA; image B with vB/sB */
-    const void *imgA = (void *)0xa0, *vA = (void *)0xa1, *sA = (void *)0xa2, *memA = (void *)0xaa;
+    const void *imgA = (void *)0xa0, *vA = (void *)0xa1, *sA = (void *)0xa2;
     const void *imgB = (void *)0xb0, *vB = (void *)0xb1, *sB = (void *)0xb2;
     nvmtl_im_add(&im, imgA, memA, 4096, 1 << 20, vA, 512, 512, 37, 1, 1, 0, 100); nvmtl_vw_add(&vw, vA, imgA); nvmtl_vw_add(&vw, sA, imgA);
     nvmtl_im_add(&im, imgB, memA, 1 << 20, 1 << 20, vB, 256, 256, 37, 1, 1, 0, 120); nvmtl_vw_add(&vw, vB, imgB); nvmtl_vw_add(&vw, sB, imgB);
     /* slot 7: texture A takes it, bindings 0 and 2 written consistently */
     nvmtl_sl_alloc(&sl, 7, 101); nvmtl_sl_write(&sl, 7, 0, vA, 101); nvmtl_sl_write(&sl, 7, 2, sA, 101);
-    nout = 0; unsigned f = nvmtl_sl_report(&sl, &im, &vw, 7, &d, "NVMTLTexture 0x1 512x512", emit, NULL);
+    nout = 0; unsigned f = nvmtl_sl_report(&sl, &im, &vw, 7, &d, "NVMTLTexture 0x1 512x512", &mm, emit, NULL);
     ARM("a consistent live slot reports OK", f == 0 && has("heap slot 7: LIVE, allocated 1 time (last at seq 101); owner: NVMTLTexture 0x1 512x512") && has("verdict: OK"));
     ARM("  each binding names its image and that it is alive", has("binding 2: view 0xa2 written at seq 101 -> image 0xa0 512x512 fmt 37 storage placed mem 0xaa+4096 1048576 bytes, created seq 100, ALIVE"));
+    ARM("  and where its bytes are: the memory, its base, liveness and the image's start", has("its memory 0xaa: nvmtl_vk_heap_create_body, base 0x2ef000000, size 67108864, created seq 90, ALIVE -> the image's bytes start at 0x2ef001000"));
+    /* the memory table resolves an address to a memory and its offset, live or dead, and binds remember an image's offset */
+    { char ml[300]; nvmtl_mm_describe(&mm, 0x2ef822000ull, ml, sizeof ml);
+      ARM("an address inside a live memory resolves to it with the offset", strstr(ml, "0x2ef822000 = nvmtl_vk_heap_create_body memory 0xaa (base 0x2ef000000, size 67108864, created seq 90, ALIVE) + offset 8527872") != NULL);
+      nvmtl_mm_describe(&mm, 0x1ull, ml, sizeof ml);
+      ARM("an address in no memory says so (negative control)", strstr(ml, "is in no memory this process ever mapped (1 memories, 0 without a base address)") != NULL);
+      nvmtl_mm_died(&mm, memA, 777); nvmtl_mm_describe(&mm, 0x2ef822000ull, ml, sizeof ml);
+      ARM("after the memory is freed the same address resolves to it as DIED", strstr(ml, "DIED at seq 777) + offset 8527872") != NULL && mm.live == 0);
+      nvmtl_mm_add(&mm, memA, 0x300000000ull, 4096, 1, "reuse", 800);
+      ARM("a reused memory handle resolves to its newest record", nvmtl_mm_by_mem(&mm, memA)->base == 0x300000000ull && nvmtl_mm_at(&mm, 0x2ef822000ull)->died == 777);
+      const void *bm = NULL; uint64_t bo = 0; nvmtl_mb_note(&mb, imgA, memA, 4096); nvmtl_mb_note(&mb, imgB, memA, 1 << 20);
+      ARM("an image's newest bind gives its memory and offset", nvmtl_mb_find(&mb, imgB, &bm, &bo) && bm == memA && bo == (1 << 20) && nvmtl_mb_find(&mb, imgA, &bm, &bo) && bo == 4096);
+      ARM("an image never bound is not found (negative control)", nvmtl_mb_find(&mb, (void *)0x99, &bm, &bo) == 0);
+      nvmtl_mm_add(&mm, memA, 0x2ef000000ull, 64 << 20, 0, "nvmtl_vk_heap_create_body", 90);   /* restore a live record for the later arms */ }
     /* the negative control: A dies, the slot is dropped (dummies at 0, 2-4), then reused by B which rewrites binding 0 ONLY */
     nvmtl_im_died(&im, imgA, 150);
     nvmtl_sl_drop(&sl, 7, 150); nvmtl_sl_write(&sl, 7, 0, dummy0, 150); nvmtl_sl_write(&sl, 7, 2, dummy2, 150); nvmtl_sl_write(&sl, 7, 3, dummyT, 150); nvmtl_sl_write(&sl, 7, 4, dummyT, 150);
-    nout = 0; f = nvmtl_sl_report(&sl, &im, &vw, 7, &d, "", emit, NULL);
+    nout = 0; f = nvmtl_sl_report(&sl, &im, &vw, 7, &d, "", &mm, emit, NULL);
     ARM("a dropped slot with dummies everywhere reports DROPPED and nothing stale", f == NVMTL_SL_DROPPED && has("heap slot 7: DROPPED, allocated 1 time (last at seq 101), dropped at seq 150") && has("binding 2: the dummy (written at seq 150)"));
     nvmtl_sl_alloc(&sl, 7, 200); nvmtl_sl_write(&sl, 7, 0, vB, 200);
     nvmtl_sl_write(&sl, 7, 2, sA, 200);   /* the stale case: binding 2 left (or rewritten) with the DEAD image's storage view */
-    nout = 0; f = nvmtl_sl_report(&sl, &im, &vw, 7, &d, "", emit, NULL);
+    nout = 0; f = nvmtl_sl_report(&sl, &im, &vw, 7, &d, "", &mm, emit, NULL);
     ARM("a reused slot whose storage descriptor names the dead image reports MISMATCH and DEAD (negative control)",
         (f & NVMTL_SL_MISMATCH) && (f & NVMTL_SL_DEAD) && !(f & NVMTL_SL_DROPPED) && has("allocated 2 times (last at seq 200)") && has("-> image 0xa0 512x512") && has("DIED at seq 150") && has("verdict: MISMATCH"));
     nvmtl_sl_write(&sl, 7, 2, sB, 201);
-    nout = 0; f = nvmtl_sl_report(&sl, &im, &vw, 7, &d, "", emit, NULL);
+    nout = 0; f = nvmtl_sl_report(&sl, &im, &vw, 7, &d, "", &mm, emit, NULL);
     ARM("after the storage descriptor is rewritten for the new image the slot is OK again", f == 0 && has("verdict: OK"));
     /* a slot nobody ever allocated, and a live slot whose binding 2 was never written */
-    nout = 0; f = nvmtl_sl_report(&sl, &im, &vw, 9, &d, "", emit, NULL);
+    nout = 0; f = nvmtl_sl_report(&sl, &im, &vw, 9, &d, "", &mm, emit, NULL);
     ARM("a never-allocated slot says so, with binding 2 never written", (f & NVMTL_SL_NEVER) && (f & NVMTL_SL_UNWRITTEN) && has("heap slot 9: NEVER ALLOCATED") && has("binding 2: never written (a storage write through it reads an undefined descriptor)"));
     nvmtl_sl_alloc(&sl, 11, 300); nvmtl_sl_write(&sl, 11, 0, vB, 300);
-    nout = 0; f = nvmtl_sl_report(&sl, &im, &vw, 11, &d, "", emit, NULL);
+    nout = 0; f = nvmtl_sl_report(&sl, &im, &vw, 11, &d, "", &mm, emit, NULL);
     ARM("a live slot with binding 2 never written is flagged UNWRITTEN only", f == NVMTL_SL_UNWRITTEN);
-    nout = 0; f = nvmtl_sl_report(&sl, &im, &vw, 5000, &d, "", emit, NULL);
+    nout = 0; f = nvmtl_sl_report(&sl, &im, &vw, 5000, &d, "", &mm, emit, NULL);
     ARM("a slot index outside the heap is refused", f == NVMTL_SL_NEVER && has("outside the heap (4096 slots)"));
     /* a view of no known image */
     nvmtl_sl_write(&sl, 11, 2, (void *)0xee, 301);
-    nout = 0; f = nvmtl_sl_report(&sl, &im, &vw, 11, &d, "", emit, NULL);
+    nout = 0; f = nvmtl_sl_report(&sl, &im, &vw, 11, &d, "", &mm, emit, NULL);
     ARM("a view the table never paired with an image is said so, and is neither dead nor a mismatch", f == 0 && has("of no image this table knows"));
     /* census */
     nvmtl_sl_write(&sl, 7, 2, sA, 400);   /* make 7 stale again */
@@ -62,10 +78,10 @@ int main(void)
     ARM("a recycled VkImage handle resolves to its newest image, alive", e && e->w == 64 && !e->died && e->seq == 500);
     /* a park is alive but recyclable; a destroy after a park is a death the census must show */
     nvmtl_im_parked(&im, imgB, 600);
-    nout = 0; nvmtl_sl_report(&sl, &im, &vw, 7, &d, "", emit, NULL);
+    nout = 0; nvmtl_sl_report(&sl, &im, &vw, 7, &d, "", &mm, emit, NULL);
     ARM("a parked image is reported alive but parked, with the seq", has("ALIVE but PARKED for reuse since seq 600"));
     nvmtl_im_recycled(&im, imgB);
-    nout = 0; nvmtl_sl_report(&sl, &im, &vw, 7, &d, "", emit, NULL);
+    nout = 0; nvmtl_sl_report(&sl, &im, &vw, 7, &d, "", &mm, emit, NULL);
     ARM("a recycled image is plain ALIVE again", !has("PARKED") && has("created seq 120, ALIVE"));
     {   nvmtl_im_state im2; memset(&im2, 0, sizeof im2); nvmtl_im_add(&im2, (void *)0xf0, NULL, 0, 4096, (void *)0xf1, 8, 8, 37, 0, 0, 0, 700);
         ARM("one image made: one alive", im2.live == 1);
@@ -76,7 +92,9 @@ int main(void)
     FILE *fp = tmpfile(); const uint32_t n = nvmtl_im_dump(&im, fp);
     rewind(fp); char first[256]; fgets(first, sizeof first, fp);
     ARM("the image dump writes every image with its memory, shape and lifetime", n == 3 && strstr(first, "image 0xa0 view 0xa1 mem 0xaa off 4096 size 1048576 512x512 fmt 37 storage placed seq 100 died 150"));
-    fclose(fp); free(sl.s); free(im.e); free(vw.e);
+    { FILE *mf = tmpfile(); const uint32_t mn = nvmtl_mm_dump(&mm, mf); rewind(mf); char l1[256] = ""; fgets(l1, sizeof l1, mf); fclose(mf);
+      ARM("the memory dump writes one line per memory in the resolver's format", mn == 3 && strstr(l1, "memory nvmtl_vk_heap_create_body mem 0xaa base 0x2ef000000 size 67108864 type 0 seq 90 died 777")); }
+    fclose(fp); free(sl.s); free(im.e); free(vw.e); free(mm.e);
     printf("test_slots: %d failed\n", fails);
     return fails ? 1 : 0;
 }

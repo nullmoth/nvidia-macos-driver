@@ -71,8 +71,14 @@ hooks = [
     ("NVMTLEmbedded.m", r"VIEW NVMTLTexture %p", 1),
     ("nvmtl_vk.c", r"nvmtl_loss_mutex_lock\(&g_", 14),                                   # every lock in the loss path is bounded
     ("nvmtl_vk.c", r"nvmtl_loss_read\(", 5),                                             # every host read in the loss path goes through the kernel
-    ("nvmtl_vk.c", r"nvmtl_loss_section\(f, ", 6),                                       # flushed, announced sections
+    ("nvmtl_vk.c", r"nvmtl_loss_section\(f, ", 7),                                       # flushed, announced sections
     ("nvmtl_vk.c", r"a second device-loss dump on another thread - skipped", 1),
+    ("nvmtl_vk.c", r"#define pvkAllocateMemory\(d, i, a, o\) nvmtl_mem_alloc_rec", 1),   # every memory allocation recorded with its base address
+    ("nvmtl_vk.c", r"#define pvkFreeMemory\(d, m, a\) nvmtl_mem_free_rec", 1),
+    ("nvmtl_vk.c", r"#define pvkBindImageMemory\(d, img, m, o\) nvmtl_mem_bind_image_rec", 1),
+    ("nvmtl_vk.c", r"nvmtl_mb_find\(&g_mb, image->img, &bmem, &boff\)", 1),            # image records carry their real bind
+    ("nvmtl_vk.c", r"nvmtl_mm_dump\(&g_mm, f\)", 1),
+    ("nvmtl_vk.c", r"nvmtl_loss_section\(f, \"memories\"\)", 1),
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev, "NVMTLEmbedded.m": emb}
 short = []; total = 0

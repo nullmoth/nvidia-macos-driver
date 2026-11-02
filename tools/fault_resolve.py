@@ -11,7 +11,7 @@ import sys
 
 def main():
     if len(sys.argv) < 3: print(__doc__); return 2
-    live, dead, pages, roots, was = [], [], [], [], []
+    live, dead, pages, roots, was, mems, imgs = [], [], [], [], [], [], []
     for ln in open(sys.argv[1]):
         w = ln.split()
         if not w: continue
@@ -24,7 +24,11 @@ def main():
         elif w[0] == "page":          # page own|cooling|cached 0xlo 0xhi bytes seq S
             pages.append((int(w[2], 16), int(w[3], 16), w[1], int(w[-1])))
         elif w[0] == "root": roots.append(ln.rstrip())
-    print(f"{len(live)} live ranges, {len(was)} ranges that once lived, {len(dead)} recorded deaths, {len(pages)} pages, {len(roots)} dispatch roots")
+        elif w[0] == "memory" and "mem" in w:   # memory <kind> mem 0x.. base 0x.. size S type T seq A died B
+            i = w.index("mem"); mems.append((w[i + 1], int(w[i + 3], 16), int(w[i + 5]), " ".join(w[1:i]), int(w[i + 9]), int(w[i + 11])))
+        elif w[0] == "image" and "mem" in w and "off" in w:   # image <img> view <v> mem <m> off <o> size <s> WxH fmt F ... seq C died D
+            imgs.append((w[1], w[w.index("mem") + 1], int(w[w.index("off") + 1]), int(w[w.index("size") + 1]), w[w.index("size") + 2], w[w.index("fmt") + 1], int(w[w.index("seq") + 1]), int(w[w.index("died") + 1])))
+    print(f"{len(live)} live ranges, {len(was)} ranges that once lived, {len(dead)} recorded deaths, {len(pages)} pages, {len(roots)} dispatch roots, {len(mems)} memories, {len(imgs)} images")
     rc = 0
     for a in sys.argv[2:]:
         addr = int(a, 16)
@@ -36,6 +40,13 @@ def main():
         if hit: lo, hi, s, f = hit[0]; print(f"0x{addr:x} lies in DEAD buffer 0x{lo:x}..0x{hi:x} ({hi - lo} bytes{', ' + f if f else ''}) freed after submit {s}"); continue
         hit = [(lo, hi, k, s, d) for lo, hi, k, s, d in was if lo <= addr < hi]
         if hit: lo, hi, k, s, d = hit[-1]; print(f"0x{addr:x} WAS {k} 0x{lo:x}..0x{hi:x} ({hi - lo} bytes), created at submit {s}, died at submit {d} (newest of {len(hit)} that held it)"); continue
+        hit = [m for m in mems if m[1] and m[1] <= addr < m[1] + m[2]]
+        if hit:
+            mem, base, size, kind, c, d = hit[-1]; off = addr - base
+            cands = [im for im in imgs if im[1] == mem and im[2] <= off]
+            best = max(cands, key=lambda im: (im[2], im[6])) if cands else None
+            tail = f" -> image {best[0]} ({best[4]} fmt {best[5]}, created seq {best[6]}, {'died seq ' + str(best[7]) if best[7] else 'alive'}) bound at offset {best[2]} (+{off - best[2]} into it)" if best else " -> no image bound at or below that offset in the table"
+            print(f"0x{addr:x} = {kind} memory {mem} (base 0x{base:x}, size {size}, created seq {c}, {'DIED at seq ' + str(d) if d else 'ALIVE'}) + offset {off}{tail}"); rc = 1; continue
         near = sorted(live, key=lambda e: min(abs(e[0] - addr), abs(e[1] - addr)))[:2]
         print(f"0x{addr:x} is NEVER MAPPED by this plugin's buffers or pages (an image, NVK's own memory, or a computed pointer); nearest live: "
               + "; ".join(f"{k} 0x{lo:x}..0x{hi:x}" for lo, hi, k, s in near)); rc = 1
