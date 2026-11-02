@@ -384,10 +384,12 @@ for c in aircache spvcache; do
 done
 # A user's own settings survive updates: the lines between these two markers in nvrm610.conf are put back after the
 # copy below. An RTX 3050 (GA106, GH #130) ran only with NVMTL_NO_SURFACE_PAGEOFF=1 and uncached command pools, and every
-# update wrote the file fresh and dropped them. Only driver knobs (NVMTL_/NVK_/NVRM_ with plain values) are kept.
+# update wrote the file fresh and dropped them. Driver knobs are kept only with restricted values; NVMTL_NVENCVT also
+# accepts its bounded process selector list (comma/colon/space separated) so an opt-in can survive package updates.
 MYCONF_START='# --- my settings, kept on update ---'; MYCONF_END='# --- end my settings ---'
 [ ! -f "$GB/nvmtl/nvrm610.conf" ] || sed -n "/^$MYCONF_START\$/,/^$MYCONF_END\$/p" "$GB/nvmtl/nvrm610.conf" \
-  | grep -E "^($MYCONF_START|$MYCONF_END|(NVMTL|NVK|NVRM)_[A-Z0-9_]+=[A-Za-z0-9._-]{0,64})\$" > "$T/my-conf" || : > "$T/my-conf"
+  | grep -E "^($MYCONF_START|$MYCONF_END|NVMTL_NVENCVT=[A-Za-z0-9._,: -]*|(NVMTL|NVK|NVRM)_[A-Z0-9_]+=[A-Za-z0-9._-]{0,64})\$" \
+  | LC_ALL=C awk '$0 !~ /^NVMTL_NVENCVT=/ || length($0) <= 525' > "$T/my-conf" || : > "$T/my-conf"
 for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl; do rm -rf "$GB/$b" && ditto "$HERE/Library/GPUBundles/$b" "$GB/$b" || die "copy $b (restore from $BK)"; done
 if [ -s "$T/my-conf" ] && [ -f "$GB/nvmtl/nvrm610.conf" ]; then
   cat "$T/my-conf" >> "$GB/nvmtl/nvrm610.conf" || die "keep your settings in nvrm610.conf (restore from $BK)"

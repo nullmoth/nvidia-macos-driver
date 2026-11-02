@@ -58,7 +58,7 @@ class Install(unittest.TestCase):
     def setUpClass(cls):
         cls.guard_temp=tempfile.TemporaryDirectory()
         cls.guard=Path(cls.guard_temp.name)/'runtime-check'
-        cls.guard.write_text("#!/bin/bash\ncase \"$1\" in 15.4.*) echo 'requires macOS 15.5.0';exit 1;;esac\ncase \"$2\" in *.dylib) exit 0;;*) exit 3;;esac\n")
+        cls.guard.write_text("#!/bin/bash\ncase \"$1\" in 15.4.*) echo 'requires macOS 15.5.0';exit 1;;esac\ncase \"$2\" in *.dylib|*/Contents/MacOS/NVMTLDriver) exit 0;;*) exit 3;;esac\n")
         cls.guard.chmod(0o755)
     @classmethod
     def tearDownClass(cls):cls.guard_temp.cleanup()
@@ -73,6 +73,13 @@ class Install(unittest.TestCase):
             b=self.payload/f'Library/Extensions/{k}.kext/Contents/MacOS/{k}';b.parent.mkdir(parents=True);b.write_bytes(('new-'+k).encode())
         for b in ['NVMTLDriver.bundle','NVIDIAShared.bundle','nvmtl']:
             p=self.payload/'Library/GPUBundles'/b;p.mkdir(parents=True);(p/'fixture').write_text('new-'+b)
+        # The external VideoToolbox library is nested in this bundle, so the existing whole-bundle
+        # install/rollback paths must carry it with the plugin without a separate system-file path.
+        plugin=self.payload/'Library/GPUBundles/NVMTLDriver.bundle/Contents'
+        (plugin/'MacOS').mkdir(parents=True)
+        (plugin/'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'com.nullmoth.NVMTLDriver'}))
+        (plugin/'MacOS/NVMTLDriver').write_bytes(b'new-NVMTLDriver')
+        (plugin/'MacOS/libnvencvt.dylib').write_bytes(b'new-libnvencvt')
         (self.payload/'Library/GPUBundles/nvmtl-allow.txt').write_text('new-allow')
         load=struct.pack('<6I',0x32,24,1,0x000f0500,0x000f0500,0)
         runtime=self.payload/'Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib'
@@ -91,6 +98,9 @@ class Install(unittest.TestCase):
             p=self.root/f'Library/Extensions/{k}.kext/Contents/MacOS/{k}';p.parent.mkdir(parents=True);p.write_text('old-'+k);self.old[p]=p.read_bytes()
         for b in ['NVMTLDriver.bundle','NVIDIAShared.bundle','nvmtl']:
             p=self.root/'Library/GPUBundles'/b/'fixture';p.parent.mkdir(parents=True);p.write_text('old-'+b);self.old[p]=p.read_bytes()
+        for rel,value in [('Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver','old-NVMTLDriver'),
+                          ('Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib','old-libnvencvt')]:
+            p=self.root/rel;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(value.encode());self.old[p]=p.read_bytes()
         for rel,value in [('Library/GPUBundles/nvmtl-allow.txt','old-allow'),('Users/Shared/nvfw/fixture','old-firmware'),('Library/NullMoth/kexts/old-marker','old-cache'),('Library/NullMoth/os-major','15'),('Library/KernelCollections/AuxiliaryKernelExtensions.kc','OLD15-AUX')]:
             p=self.root/rel;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(value);self.old[p]=p.read_bytes()
         other=self.root/'Library/Extensions/NVMeFix.kext/fixture';other.parent.mkdir();other.write_text('unrelated');other.chmod(0o400);self.other=other

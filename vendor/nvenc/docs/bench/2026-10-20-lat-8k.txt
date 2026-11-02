@@ -1,0 +1,12 @@
+RESULT latency avc1 1920x1080 entry_emit_ms=1.830 max_ms=68.022 engine_ms=1.187
+RESULT latency hvc1 1920x1080 entry_emit_ms=1.871 max_ms=66.594 engine_ms=1.228
+RESULT latency av01 1920x1080 entry_emit_ms=1.584 max_ms=87.066 engine_ms=1.051
+RESULT latency avc1 3840x2160 entry_emit_ms=5.817 max_ms=6.959 engine_ms=4.348
+RESULT latency hvc1 3840x2160 entry_emit_ms=5.826 max_ms=6.543 engine_ms=4.493
+RESULT latency av01 3840x2160 entry_emit_ms=4.818 max_ms=5.517 engine_ms=3.699
+RESULT 8k-encode av1 7680x4320 encode 14.330 ms avg
+RESULT 8k-decode av1 7680x4320 (63.5 fps) hardware 1
+RESULT 8k-encode hevc 7680x4320 encode 16.088 ms avg
+RESULT 8k-decode hevc 7680x4320 (67.6 fps) hardware 1
+RESULT 8k-encode h264 7680x4320 encode 15.092 ms avg
+RESULT 8k-decode h264 7680x4320 (10.9 fps) hardware 1

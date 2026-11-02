@@ -37,11 +37,15 @@ Metal app ─► NVMTLDriver.bundle ─► translator (Apple AIR → SPIR-V) ─
 | Metal driver plugin | `/Library/GPUBundles/NVMTLDriver.bundle` | `plugin/` |
 | Shader translator | inside the plugin (`libnvmtl_translate.dylib`) | `translator/` (LGPL-3.0, based on metal2vulkan) |
 | Vulkan back end (NVK) | `/Library/GPUBundles/nvmtl/` | `nvk/nvk-macos.patch` on Mesa `17ca6174` |
+| Optional VideoToolbox codecs | inside `NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib` | `vendor/nvenc/` (MIT; opt-in, off by default) |
 | Kernel extensions | `/Library/Extensions/NVRM, NVAccel, NVRMFB, NVRMAGDC` | `kexts/` |
 | GPU firmware (GSP) | `/Library/NullMoth/nvfw/nvidia/615.78.08` | NVIDIA, unmodified |
 
 The kernel side runs NVIDIA's own open GPU kernel modules (r610) under macOS. NVRMFB is the display framebuffer,
 NVAccel the accelerator WindowServer composites through, NVRMAGDC the display-policy shim.
+
+The optional [NVEncVT VideoToolbox component](docs/NVENCVT.md) adds NVIDIA video encoding and decoding. It remains
+disabled unless selected in `nvrm610.conf`; command-line tools can load it explicitly with `DYLD_INSERT_LIBRARIES`.
 
 ## Install — by hand
 

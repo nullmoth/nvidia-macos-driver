@@ -1,0 +1,3 @@
+# The upstream repository ignores vendor/ because its build fetches these headers on demand.
+# This embedded copy tracks the pinned headers so builds are reproducible without network access.
+build/

@@ -1,0 +1,259 @@
+# OBS (obs-rec.sh) and Parsec (host log + libnvencvt statistics) on the GTX 1650, 2026-10-21
+## Parsec host log (~/.parsec/log.txt), the session lines
+[I 2026-10-21 03:29:03] mickys#2235062 connected.
+[D 2026-10-21 03:29:04] encoder       = Hardware
+[D 2026-10-21 03:29:04] codec         = h265
+[D 2026-10-21 03:29:04] encode_x      = 3840
+[D 2026-10-21 03:29:04] encode_y      = 2160
+[D 2026-10-21 03:29:13] [0] FPS:9.6/0, L:21.5/177.5, B:0.3/2.6, N:0/0/0
+[D 2026-10-21 03:29:23] [0] FPS:9.8/0, L:21.3/36.5, B:0.1/4.9, N:0/0/0
+[D 2026-10-21 03:29:34] [0] FPS:9.9/0, L:21.3/37.4, B:0.1/7.9, N:0/0/0
+[D 2026-10-21 03:29:44] [0] FPS:9.8/0, L:21.2/37.8, B:0.1/10.1, N:0/0/0
+[D 2026-10-21 03:29:54] [0] FPS:9.9/0, L:22.1/37.6, B:0.2/12.4, N:0/0/0
+[D 2026-10-21 03:30:04] [0] FPS:9.8/0, L:20.3/36.2, B:0.2/15.4, N:0/0/0
+[D 2026-10-21 03:30:14] [0] FPS:10.0/0, L:21.7/37.8, B:0.2/17.6, N:0/0/0
+[D 2026-10-21 03:30:20] encoder       = Hardware
+[D 2026-10-21 03:30:20] codec         = h265
+[D 2026-10-21 03:30:20] encode_x      = 3840
+[D 2026-10-21 03:30:20] encode_y      = 2160
+[D 2026-10-21 03:30:25] [0] FPS:8.9/0, L:23.6/178.1, B:0.7/19.9, N:0/0/0
+[D 2026-10-21 03:30:31] encoder       = Hardware
+[D 2026-10-21 03:30:31] codec         = h265
+[D 2026-10-21 03:30:31] encode_x      = 3840
+[D 2026-10-21 03:30:31] encode_y      = 2160
+[D 2026-10-21 03:30:36] [0] FPS:9.0/0, L:22.7/139.1, B:1.1/22.9, N:0/0/0
+[D 2026-10-21 03:30:47] [0] FPS:9.6/0, L:21.2/37.5, B:1.1/25.1, N:0/0/0
+[D 2026-10-21 03:30:57] [0] FPS:9.9/0, L:21.1/36.1, B:0.9/27.4, N:0/0/0
+[D 2026-10-21 03:31:07] [0] FPS:9.8/0, L:20.5/38.0, B:1.0/30.4, N:0/0/0
+[D 2026-10-21 03:31:17] [0] FPS:9.7/0, L:20.8/36.4, B:1.0/32.6, N:0/0/0
+[D 2026-10-21 03:31:27] [0] FPS:9.9/0, L:21.1/37.6, B:0.9/34.8, N:0/0/0
+[D 2026-10-21 03:31:38] [0] FPS:9.9/0, L:20.3/37.8, B:1.0/37.8, N:0/0/0
+[D 2026-10-21 03:31:48] [0] FPS:10.0/0, L:20.6/37.5, B:1.1/40.1, N:0/0/0
+[D 2026-10-21 03:31:58] [0] FPS:9.6/0, L:21.0/37.8, B:0.9/42.3, N:0/0/0
+[D 2026-10-21 03:32:08] [0] FPS:9.7/0, L:21.4/37.3, B:1.0/45.3, N:0/0/0
+[D 2026-10-21 03:32:18] [0] FPS:9.8/0, L:21.1/37.5, B:1.0/47.6, N:0/0/0
+[D 2026-10-21 03:32:29] [0] FPS:9.8/0, L:21.5/37.6, B:1.0/49.8, N:0/0/0
+[D 2026-10-21 03:32:39] [0] FPS:9.9/0, L:20.8/38.4, B:0.9/50.0, N:0/0/0
+[D 2026-10-21 03:32:49] [0] FPS:9.7/0, L:22.2/37.8, B:0.9/50.0, N:0/0/0
+[D 2026-10-21 03:32:59] [0] FPS:10.2/0, L:21.2/38.4, B:2.2/50.0, N:0/0/0
+[D 2026-10-21 03:33:09] encoder       = Hardware
+[D 2026-10-21 03:33:09] codec         = h265
+[D 2026-10-21 03:33:09] encode_x      = 3840
+[D 2026-10-21 03:33:09] encode_y      = 2160
+[D 2026-10-21 03:33:10] [0] FPS:8.9/0, L:19.8/59.9, B:0.5/50.0, N:0/0/0
+[D 2026-10-21 03:33:19] [0] FPS:10.9/0, L:13.3/21.7, B:3.4/50.0, N:0/0/0
+[D 2026-10-21 03:33:29] [0] FPS:9.9/0, L:13.9/21.7, B:3.2/50.0, N:0/0/0
+[D 2026-10-21 03:33:39] [0] FPS:10.3/0, L:13.4/21.4, B:3.3/50.0, N:0/0/0
+[D 2026-10-21 03:33:49] [0] FPS:10.2/0, L:13.5/22.1, B:3.1/50.0, N:0/0/0
+[D 2026-10-21 03:34:00] [0] FPS:8.9/0, L:14.5/23.6, B:4.5/50.0, N:0/0/0
+[D 2026-10-21 03:34:11] [0] FPS:8.9/0, L:14.4/17.3, B:2.1/50.0, N:0/0/0
+[D 2026-10-21 03:34:21] encoder       = Hardware
+[D 2026-10-21 03:34:21] codec         = h264
+[D 2026-10-21 03:34:21] encode_x      = 3840
+[D 2026-10-21 03:34:21] encode_y      = 2160
+[D 2026-10-21 03:34:23] [0] FPS:8.8/0, L:17.1/109.2, B:2.1/50.0, N:0/0/0
+[D 2026-10-21 03:34:33] [0] FPS:9.5/0, L:23.5/31.2, B:1.4/50.0, N:0/0/0
+[D 2026-10-21 03:34:44] [0] FPS:9.4/0, L:23.5/27.5, B:1.1/10.0, N:0/0/0
+[D 2026-10-21 03:34:54] [0] FPS:9.7/0, L:23.8/28.9, B:1.1/10.0, N:0/0/0
+[D 2026-10-21 03:35:05] [0] FPS:9.6/0, L:23.3/27.5, B:1.2/10.6, N:0/0/0
+[D 2026-10-21 03:35:14] [0] FPS:10.2/0, L:22.5/28.3, B:4.3/3.0, N:0/0/0
+[D 2026-10-21 03:35:24] [0] FPS:10.0/0, L:23.5/28.2, B:1.1/3.0, N:0/0/0
+[D 2026-10-21 03:35:27] encoder       = Hardware
+[D 2026-10-21 03:35:27] codec         = h265
+[D 2026-10-21 03:35:27] encode_x      = 3840
+[D 2026-10-21 03:35:27] encode_y      = 2160
+## libnvencvt statistics (/tmp/nvencvt-stats.log)
+03:27:35 OBS pid 2053 1920x1080 420v NVENC0: 64.7 fps, call 2.637 ms (max 116.547; tiling 0.385), engine 4.985 ms (max 17.444), entry->emit 7.689 ms (max 126.333), 14.1 KB/frame, 2 IDR, 0 failed, rate 20000000 bit/s rt 0
+03:27:37 OBS pid 2053 1920x1080 420v NVENC0: 59.0 fps, call 1.580 ms (max 8.861; tiling 0.372), engine 4.465 ms (max 11.622), entry->emit 6.111 ms (max 14.098), 14.9 KB/frame, 1 IDR, 0 failed, rate 20000000 bit/s rt 0
+03:27:39 OBS pid 2053 1920x1080 420v NVENC0: 61.8 fps, call 1.785 ms (max 9.271; tiling 0.377), engine 4.737 ms (max 13.526), entry->emit 6.583 ms (max 15.328), 14.4 KB/frame, 1 IDR, 0 failed, rate 20000000 bit/s rt 0
+03:27:41 OBS pid 2053 1920x1080 420v NVENC0: 60.9 fps, call 1.636 ms (max 8.700; tiling 0.378), engine 4.584 ms (max 11.327), entry->emit 6.281 ms (max 13.822), 15.1 KB/frame, 1 IDR, 0 failed, rate 20000000 bit/s rt 0
+03:27:43 OBS pid 2053 1920x1080 420v NVENC0: 61.5 fps, call 1.694 ms (max 4.912; tiling 0.370), engine 4.668 ms (max 11.392), entry->emit 6.420 ms (max 13.446), 14.4 KB/frame, 1 IDR, 0 failed, rate 20000000 bit/s rt 0
+03:29:06 parsecd pid 2135 3840x2160 l10r NVENC0: 12.4 fps, call 9.964 ms (max 154.645; tiling 4.145), engine 15.332 ms (max 30.276), entry->emit 25.364 ms (max 177.307), 6.0 KB/frame, 1 IDR, 0 failed, rate 2000000 bit/s rt 1
+03:29:08 parsecd pid 2135 3840x2160 l10r NVENC0: 10.3 fps, call 3.352 ms (max 4.494; tiling 3.331), engine 13.914 ms (max 25.052), entry->emit 17.309 ms (max 27.870), 2.2 KB/frame, 0 IDR, 0 failed, rate 2000000 bit/s rt 1
+03:29:10 parsecd pid 2135 3840x2160 l10r NVENC0: 10.3 fps, call 3.644 ms (max 9.332; tiling 3.619), engine 18.119 ms (max 34.956), entry->emit 21.796 ms (max 37.897), 2.0 KB/frame, 0 IDR, 0 failed, rate 2150000 bit/s rt 1
+03:29:12 parsecd pid 2135 3840x2160 l10r NVENC0: 10.4 fps, call 3.097 ms (max 4.747; tiling 3.080), engine 18.490 ms (max 33.166), entry->emit 21.620 ms (max 35.823), 1.3 KB/frame, 0 IDR, 0 failed, rate 2150000 bit/s rt 1
+03:29:14 parsecd pid 2135 3840x2160 l10r NVENC0: 10.1 fps, call 3.141 ms (max 3.784; tiling 3.121), engine 16.748 ms (max 25.340), entry->emit 19.926 ms (max 28.591), 1.8 KB/frame, 0 IDR, 0 failed, rate 2600000 bit/s rt 1
+03:29:16 parsecd pid 2135 3840x2160 l10r NVENC0: 9.9 fps, call 3.068 ms (max 4.572; tiling 3.048), engine 16.993 ms (max 29.823), entry->emit 20.099 ms (max 32.823), 0.9 KB/frame, 0 IDR, 0 failed, rate 3350000 bit/s rt 1
+03:29:18 parsecd pid 2135 3840x2160 l10r NVENC0: 10.1 fps, call 2.987 ms (max 4.326; tiling 2.969), engine 20.851 ms (max 33.119), entry->emit 23.870 ms (max 36.344), 1.8 KB/frame, 0 IDR, 0 failed, rate 4100000 bit/s rt 1
+03:29:20 parsecd pid 2135 3840x2160 l10r NVENC0: 10.1 fps, call 3.043 ms (max 3.608; tiling 3.024), engine 18.744 ms (max 32.054), entry->emit 21.820 ms (max 35.362), 1.1 KB/frame, 0 IDR, 0 failed, rate 4100000 bit/s rt 1
+03:29:22 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.342 ms (max 4.548; tiling 3.321), engine 16.133 ms (max 32.085), entry->emit 19.509 ms (max 34.900), 3.1 KB/frame, 0 IDR, 0 failed, rate 4850000 bit/s rt 1
+03:29:25 parsecd pid 2135 3840x2160 l10r NVENC0: 9.2 fps, call 3.297 ms (max 4.444; tiling 3.276), engine 19.860 ms (max 33.547), entry->emit 23.196 ms (max 36.392), 1.7 KB/frame, 0 IDR, 0 failed, rate 5600000 bit/s rt 1
+03:29:27 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 3.033 ms (max 3.780; tiling 3.015), engine 18.332 ms (max 32.433), entry->emit 21.398 ms (max 35.350), 2.0 KB/frame, 0 IDR, 0 failed, rate 5600000 bit/s rt 1
+03:29:29 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.071 ms (max 3.799; tiling 3.052), engine 17.019 ms (max 32.849), entry->emit 20.125 ms (max 36.249), 1.3 KB/frame, 0 IDR, 0 failed, rate 6350000 bit/s rt 1
+03:29:31 parsecd pid 2135 3840x2160 l10r NVENC0: 10.2 fps, call 3.564 ms (max 11.726; tiling 3.544), engine 17.102 ms (max 33.484), entry->emit 20.707 ms (max 37.386), 4.1 KB/frame, 0 IDR, 0 failed, rate 7100000 bit/s rt 1
+03:29:33 parsecd pid 2135 3840x2160 l10r NVENC0: 9.6 fps, call 3.215 ms (max 4.693; tiling 3.197), engine 17.443 ms (max 30.058), entry->emit 20.693 ms (max 32.953), 1.7 KB/frame, 0 IDR, 0 failed, rate 7100000 bit/s rt 1
+03:29:35 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.328 ms (max 4.411; tiling 3.309), engine 18.267 ms (max 29.528), entry->emit 21.636 ms (max 33.079), 2.0 KB/frame, 0 IDR, 0 failed, rate 7850000 bit/s rt 1
+03:29:37 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.115 ms (max 4.621; tiling 3.095), engine 17.152 ms (max 32.179), entry->emit 20.306 ms (max 35.719), 1.5 KB/frame, 0 IDR, 0 failed, rate 8600000 bit/s rt 1
+03:29:39 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.060 ms (max 4.529; tiling 3.043), engine 19.226 ms (max 34.982), entry->emit 22.321 ms (max 37.729), 2.0 KB/frame, 0 IDR, 0 failed, rate 8600000 bit/s rt 1
+03:29:41 parsecd pid 2135 3840x2160 l10r NVENC0: 9.9 fps, call 3.151 ms (max 4.011; tiling 3.130), engine 17.866 ms (max 29.318), entry->emit 21.052 ms (max 32.199), 1.7 KB/frame, 0 IDR, 0 failed, rate 9350000 bit/s rt 1
+03:29:43 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.071 ms (max 3.748; tiling 3.049), engine 16.836 ms (max 32.711), entry->emit 19.951 ms (max 35.498), 2.8 KB/frame, 0 IDR, 0 failed, rate 10100000 bit/s rt 1
+03:29:45 parsecd pid 2135 3840x2160 l10r NVENC0: 9.6 fps, call 3.029 ms (max 3.574; tiling 3.010), engine 18.749 ms (max 32.247), entry->emit 21.819 ms (max 35.039), 3.1 KB/frame, 0 IDR, 0 failed, rate 10100000 bit/s rt 1
+03:29:47 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.165 ms (max 4.257; tiling 3.145), engine 19.055 ms (max 31.741), entry->emit 22.271 ms (max 34.644), 2.0 KB/frame, 0 IDR, 0 failed, rate 10850000 bit/s rt 1
+03:29:49 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 3.179 ms (max 3.645; tiling 3.160), engine 18.465 ms (max 32.820), entry->emit 21.682 ms (max 35.795), 2.3 KB/frame, 0 IDR, 0 failed, rate 11600000 bit/s rt 1
+03:29:51 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 3.071 ms (max 3.689; tiling 3.053), engine 20.697 ms (max 34.584), entry->emit 23.805 ms (max 37.575), 2.2 KB/frame, 0 IDR, 0 failed, rate 11600000 bit/s rt 1
+03:29:53 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.144 ms (max 4.250; tiling 3.124), engine 17.982 ms (max 30.076), entry->emit 21.163 ms (max 32.975), 2.3 KB/frame, 0 IDR, 0 failed, rate 12350000 bit/s rt 1
+03:29:55 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.428 ms (max 9.724; tiling 3.404), engine 17.965 ms (max 30.159), entry->emit 21.436 ms (max 32.959), 1.7 KB/frame, 0 IDR, 0 failed, rate 13100000 bit/s rt 1
+03:29:57 parsecd pid 2135 3840x2160 l10r NVENC0: 9.9 fps, call 3.041 ms (max 3.680; tiling 3.023), engine 17.503 ms (max 33.308), entry->emit 20.580 ms (max 36.117), 2.2 KB/frame, 0 IDR, 0 failed, rate 13100000 bit/s rt 1
+03:29:59 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.266 ms (max 4.376; tiling 3.248), engine 16.791 ms (max 31.862), entry->emit 20.095 ms (max 35.703), 2.0 KB/frame, 0 IDR, 0 failed, rate 13850000 bit/s rt 1
+03:30:01 parsecd pid 2135 3840x2160 l10r NVENC0: 10.2 fps, call 3.156 ms (max 3.705; tiling 3.133), engine 15.019 ms (max 20.262), entry->emit 18.213 ms (max 23.440), 2.3 KB/frame, 0 IDR, 0 failed, rate 14600000 bit/s rt 1
+03:30:03 parsecd pid 2135 3840x2160 l10r NVENC0: 9.6 fps, call 3.190 ms (max 4.346; tiling 3.171), engine 17.108 ms (max 29.777), entry->emit 20.333 ms (max 32.877), 1.9 KB/frame, 0 IDR, 0 failed, rate 14600000 bit/s rt 1
+03:30:06 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.028 ms (max 3.763; tiling 3.002), engine 20.409 ms (max 34.970), entry->emit 23.474 ms (max 37.389), 2.7 KB/frame, 0 IDR, 0 failed, rate 15350000 bit/s rt 1
+03:30:08 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 3.113 ms (max 4.421; tiling 3.093), engine 17.983 ms (max 32.749), entry->emit 21.137 ms (max 35.887), 2.9 KB/frame, 0 IDR, 0 failed, rate 16100000 bit/s rt 1
+03:30:10 parsecd pid 2135 3840x2160 l10r NVENC0: 9.9 fps, call 3.192 ms (max 4.458; tiling 3.174), engine 19.774 ms (max 34.647), entry->emit 23.000 ms (max 37.787), 2.8 KB/frame, 0 IDR, 0 failed, rate 16100000 bit/s rt 1
+03:30:12 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 3.071 ms (max 3.716; tiling 3.053), engine 17.637 ms (max 33.164), entry->emit 20.751 ms (max 36.017), 1.9 KB/frame, 0 IDR, 0 failed, rate 16850000 bit/s rt 1
+03:30:14 parsecd pid 2135 3840x2160 l10r NVENC0: 10.2 fps, call 2.972 ms (max 3.555; tiling 2.952), engine 18.159 ms (max 33.902), entry->emit 21.172 ms (max 36.873), 2.6 KB/frame, 0 IDR, 0 failed, rate 17600000 bit/s rt 1
+03:30:16 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.087 ms (max 3.616; tiling 3.068), engine 18.094 ms (max 33.300), entry->emit 21.219 ms (max 36.052), 1.6 KB/frame, 0 IDR, 0 failed, rate 17600000 bit/s rt 1
+03:30:18 parsecd pid 2135 3840x2160 l10r NVENC0: 9.9 fps, call 3.091 ms (max 3.932; tiling 3.072), engine 20.510 ms (max 34.310), entry->emit 23.639 ms (max 37.361), 2.7 KB/frame, 0 IDR, 0 failed, rate 18350000 bit/s rt 1
+03:30:20 parsecd pid 2135 3840x2160 l10r NVENC0: 6.6 fps, call 3.044 ms (max 3.959; tiling 3.023), engine 17.227 ms (max 29.694), entry->emit 20.314 ms (max 32.766), 1.9 KB/frame, 0 IDR, 0 failed, rate 19100000 bit/s rt 1
+03:30:22 parsecd pid 2135 3840x2160 l10r NVENC0: 10.1 fps, call 10.691 ms (max 152.384; tiling 3.755), engine 17.715 ms (max 29.745), entry->emit 28.470 ms (max 178.017), 19.2 KB/frame, 1 IDR, 0 failed, rate 19100000 bit/s rt 1
+03:30:24 parsecd pid 2135 3840x2160 l10r NVENC0: 9.6 fps, call 2.991 ms (max 3.455; tiling 2.970), engine 19.944 ms (max 33.734), entry->emit 22.979 ms (max 36.597), 10.3 KB/frame, 0 IDR, 0 failed, rate 19850000 bit/s rt 1
+03:30:27 parsecd pid 2135 3840x2160 l10r NVENC0: 10.1 fps, call 2.984 ms (max 3.569; tiling 2.965), engine 17.799 ms (max 32.543), entry->emit 20.828 ms (max 35.659), 13.3 KB/frame, 0 IDR, 0 failed, rate 20600000 bit/s rt 1
+03:30:29 parsecd pid 2135 3840x2160 l10r NVENC0: 9.6 fps, call 3.184 ms (max 4.052; tiling 3.164), engine 17.565 ms (max 34.397), entry->emit 20.793 ms (max 37.337), 7.2 KB/frame, 0 IDR, 0 failed, rate 20600000 bit/s rt 1
+03:30:31 parsecd pid 2135 3840x2160 l10r NVENC0: 6.1 fps, call 3.119 ms (max 4.156; tiling 3.096), engine 16.444 ms (max 30.107), entry->emit 19.628 ms (max 33.152), 19.3 KB/frame, 0 IDR, 0 failed, rate 21350000 bit/s rt 1
+03:30:33 parsecd pid 2135 3840x2160 l10r NVENC0: 10.7 fps, call 8.823 ms (max 114.868; tiling 4.009), engine 17.834 ms (max 32.942), entry->emit 26.721 ms (max 138.975), 21.2 KB/frame, 1 IDR, 0 failed, rate 21350000 bit/s rt 1
+03:30:35 parsecd pid 2135 3840x2160 l10r NVENC0: 9.5 fps, call 2.996 ms (max 3.704; tiling 2.976), engine 20.230 ms (max 34.480), entry->emit 23.272 ms (max 37.341), 10.9 KB/frame, 0 IDR, 0 failed, rate 22100000 bit/s rt 1
+03:30:37 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 3.173 ms (max 5.240; tiling 3.151), engine 18.208 ms (max 34.379), entry->emit 21.427 ms (max 37.400), 12.6 KB/frame, 0 IDR, 0 failed, rate 22850000 bit/s rt 1
+03:30:39 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.100 ms (max 4.470; tiling 3.081), engine 17.529 ms (max 33.035), entry->emit 20.672 ms (max 35.937), 11.2 KB/frame, 0 IDR, 0 failed, rate 22850000 bit/s rt 1
+03:30:41 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 2.985 ms (max 3.813; tiling 2.965), engine 18.676 ms (max 34.398), entry->emit 21.721 ms (max 37.467), 12.1 KB/frame, 0 IDR, 0 failed, rate 23600000 bit/s rt 1
+03:30:43 parsecd pid 2135 3840x2160 l10r NVENC0: 9.5 fps, call 3.264 ms (max 4.765; tiling 3.241), engine 16.257 ms (max 27.978), entry->emit 19.575 ms (max 31.052), 13.8 KB/frame, 0 IDR, 0 failed, rate 24350000 bit/s rt 1
+03:30:45 parsecd pid 2135 3840x2160 l10r NVENC0: 9.3 fps, call 3.086 ms (max 3.903; tiling 3.066), engine 19.341 ms (max 33.914), entry->emit 22.489 ms (max 37.159), 19.8 KB/frame, 0 IDR, 0 failed, rate 24350000 bit/s rt 1
+03:30:47 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.141 ms (max 3.677; tiling 3.121), engine 18.368 ms (max 34.034), entry->emit 21.554 ms (max 37.454), 10.2 KB/frame, 0 IDR, 0 failed, rate 25100000 bit/s rt 1
+03:30:49 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.125 ms (max 4.342; tiling 3.104), engine 19.370 ms (max 33.141), entry->emit 22.547 ms (max 36.027), 12.8 KB/frame, 0 IDR, 0 failed, rate 25850000 bit/s rt 1
+03:30:51 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 3.016 ms (max 3.652; tiling 2.997), engine 19.559 ms (max 30.194), entry->emit 22.621 ms (max 33.039), 10.9 KB/frame, 0 IDR, 0 failed, rate 25850000 bit/s rt 1
+03:30:53 parsecd pid 2135 3840x2160 l10r NVENC0: 10.3 fps, call 3.126 ms (max 4.145; tiling 3.106), engine 16.161 ms (max 26.887), entry->emit 19.327 ms (max 29.771), 12.9 KB/frame, 0 IDR, 0 failed, rate 26600000 bit/s rt 1
+03:30:56 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.070 ms (max 4.281; tiling 3.049), engine 17.736 ms (max 32.516), entry->emit 20.855 ms (max 36.018), 10.4 KB/frame, 0 IDR, 0 failed, rate 27350000 bit/s rt 1
+03:30:58 parsecd pid 2135 3840x2160 l10r NVENC0: 9.6 fps, call 2.911 ms (max 3.704; tiling 2.893), engine 15.998 ms (max 33.113), entry->emit 18.955 ms (max 35.879), 12.7 KB/frame, 0 IDR, 0 failed, rate 27350000 bit/s rt 1
+03:31:00 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.029 ms (max 3.542; tiling 3.008), engine 16.480 ms (max 26.536), entry->emit 19.560 ms (max 29.610), 10.3 KB/frame, 0 IDR, 0 failed, rate 28100000 bit/s rt 1
+03:31:02 parsecd pid 2135 3840x2160 l10r NVENC0: 10.6 fps, call 2.922 ms (max 3.556; tiling 2.903), engine 16.926 ms (max 30.243), entry->emit 19.892 ms (max 32.998), 13.3 KB/frame, 0 IDR, 0 failed, rate 28850000 bit/s rt 1
+03:31:04 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.151 ms (max 3.941; tiling 3.133), engine 19.113 ms (max 34.971), entry->emit 22.315 ms (max 37.938), 10.1 KB/frame, 0 IDR, 0 failed, rate 28850000 bit/s rt 1
+03:31:06 parsecd pid 2135 3840x2160 l10r NVENC0: 9.4 fps, call 3.015 ms (max 3.788; tiling 2.998), engine 17.429 ms (max 33.500), entry->emit 20.493 ms (max 36.750), 14.0 KB/frame, 0 IDR, 0 failed, rate 29600000 bit/s rt 1
+03:31:08 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 2.992 ms (max 4.147; tiling 2.974), engine 18.334 ms (max 30.169), entry->emit 21.373 ms (max 33.107), 9.0 KB/frame, 0 IDR, 0 failed, rate 30350000 bit/s rt 1
+03:31:10 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 3.085 ms (max 4.461; tiling 3.067), engine 18.180 ms (max 33.228), entry->emit 21.314 ms (max 36.231), 13.5 KB/frame, 0 IDR, 0 failed, rate 30350000 bit/s rt 1
+03:31:12 parsecd pid 2135 3840x2160 l10r NVENC0: 9.4 fps, call 3.409 ms (max 4.635; tiling 3.386), engine 16.567 ms (max 28.697), entry->emit 20.019 ms (max 31.656), 10.3 KB/frame, 0 IDR, 0 failed, rate 31100000 bit/s rt 1
+03:31:14 parsecd pid 2135 3840x2160 l10r NVENC0: 9.9 fps, call 2.922 ms (max 4.211; tiling 2.906), engine 16.430 ms (max 29.620), entry->emit 19.403 ms (max 32.586), 14.4 KB/frame, 0 IDR, 0 failed, rate 31850000 bit/s rt 1
+03:31:16 parsecd pid 2135 3840x2160 l10r NVENC0: 9.5 fps, call 3.436 ms (max 9.684; tiling 3.417), engine 17.401 ms (max 30.333), entry->emit 20.881 ms (max 33.178), 9.5 KB/frame, 0 IDR, 0 failed, rate 31850000 bit/s rt 1
+03:31:18 parsecd pid 2135 3840x2160 l10r NVENC0: 10.2 fps, call 3.129 ms (max 4.256; tiling 3.110), engine 17.835 ms (max 30.744), entry->emit 21.020 ms (max 34.845), 14.3 KB/frame, 0 IDR, 0 failed, rate 32599998 bit/s rt 1
+03:31:20 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.100 ms (max 3.804; tiling 3.079), engine 19.439 ms (max 32.828), entry->emit 22.590 ms (max 35.797), 9.9 KB/frame, 0 IDR, 0 failed, rate 33350000 bit/s rt 1
+03:31:22 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 2.917 ms (max 3.358; tiling 2.901), engine 17.909 ms (max 30.993), entry->emit 20.871 ms (max 33.873), 13.4 KB/frame, 0 IDR, 0 failed, rate 33350000 bit/s rt 1
+03:31:24 parsecd pid 2135 3840x2160 l10r NVENC0: 9.6 fps, call 3.097 ms (max 3.910; tiling 3.076), engine 16.389 ms (max 31.635), entry->emit 19.527 ms (max 34.620), 10.2 KB/frame, 0 IDR, 0 failed, rate 34100000 bit/s rt 1
+03:31:26 parsecd pid 2135 3840x2160 l10r NVENC0: 9.9 fps, call 3.152 ms (max 3.890; tiling 3.130), engine 18.599 ms (max 34.410), entry->emit 21.807 ms (max 37.477), 13.9 KB/frame, 0 IDR, 0 failed, rate 34850000 bit/s rt 1
+03:31:28 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 2.966 ms (max 3.879; tiling 2.947), engine 19.417 ms (max 34.823), entry->emit 22.434 ms (max 37.651), 9.7 KB/frame, 0 IDR, 0 failed, rate 35600000 bit/s rt 1
+03:31:30 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.093 ms (max 4.112; tiling 3.074), engine 18.105 ms (max 33.179), entry->emit 21.254 ms (max 36.527), 13.3 KB/frame, 0 IDR, 0 failed, rate 35600000 bit/s rt 1
+03:31:33 parsecd pid 2135 3840x2160 l10r NVENC0: 10.4 fps, call 3.234 ms (max 4.480; tiling 3.215), engine 16.859 ms (max 24.911), entry->emit 20.140 ms (max 27.990), 11.9 KB/frame, 0 IDR, 0 failed, rate 36350000 bit/s rt 1
+03:31:35 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.227 ms (max 4.237; tiling 3.207), engine 16.346 ms (max 28.773), entry->emit 19.624 ms (max 31.878), 13.2 KB/frame, 0 IDR, 0 failed, rate 37100000 bit/s rt 1
+03:31:37 parsecd pid 2135 3840x2160 l10r NVENC0: 9.6 fps, call 2.958 ms (max 3.243; tiling 2.939), engine 15.195 ms (max 18.632), entry->emit 18.198 ms (max 21.838), 9.9 KB/frame, 0 IDR, 0 failed, rate 37100000 bit/s rt 1
+03:31:39 parsecd pid 2135 3840x2160 l10r NVENC0: 9.9 fps, call 3.138 ms (max 4.259; tiling 3.117), engine 17.449 ms (max 32.186), entry->emit 20.630 ms (max 35.219), 12.7 KB/frame, 0 IDR, 0 failed, rate 37850000 bit/s rt 1
+03:31:41 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.072 ms (max 3.794; tiling 3.052), engine 19.256 ms (max 32.014), entry->emit 22.380 ms (max 35.059), 10.8 KB/frame, 0 IDR, 0 failed, rate 38600000 bit/s rt 1
+03:31:43 parsecd pid 2135 3840x2160 l10r NVENC0: 10.1 fps, call 3.074 ms (max 4.507; tiling 3.055), engine 16.022 ms (max 34.930), entry->emit 19.139 ms (max 37.483), 14.2 KB/frame, 0 IDR, 0 failed, rate 38600000 bit/s rt 1
+03:31:45 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 2.998 ms (max 3.715; tiling 2.979), engine 17.175 ms (max 28.169), entry->emit 20.220 ms (max 31.083), 11.6 KB/frame, 0 IDR, 0 failed, rate 39350000 bit/s rt 1
+03:31:47 parsecd pid 2135 3840x2160 l10r NVENC0: 10.3 fps, call 3.137 ms (max 4.412; tiling 3.120), engine 16.552 ms (max 29.412), entry->emit 19.735 ms (max 32.157), 11.7 KB/frame, 0 IDR, 0 failed, rate 40100000 bit/s rt 1
+03:31:49 parsecd pid 2135 3840x2160 l10r NVENC0: 9.5 fps, call 3.044 ms (max 4.310; tiling 3.022), engine 17.550 ms (max 33.442), entry->emit 20.660 ms (max 36.350), 12.4 KB/frame, 0 IDR, 0 failed, rate 40100000 bit/s rt 1
+03:31:51 parsecd pid 2135 3840x2160 l10r NVENC0: 9.9 fps, call 3.059 ms (max 3.842; tiling 3.038), engine 17.577 ms (max 29.680), entry->emit 20.685 ms (max 32.692), 11.9 KB/frame, 0 IDR, 0 failed, rate 40850000 bit/s rt 1
+03:31:53 parsecd pid 2135 3840x2160 l10r NVENC0: 9.4 fps, call 3.592 ms (max 9.806; tiling 3.572), engine 16.878 ms (max 34.700), entry->emit 20.515 ms (max 37.478), 12.2 KB/frame, 0 IDR, 0 failed, rate 41600000 bit/s rt 1
+03:31:55 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.196 ms (max 4.547; tiling 3.176), engine 19.780 ms (max 34.536), entry->emit 23.024 ms (max 37.713), 11.5 KB/frame, 0 IDR, 0 failed, rate 41600000 bit/s rt 1
+03:31:57 parsecd pid 2135 3840x2160 l10r NVENC0: 9.5 fps, call 3.255 ms (max 4.455; tiling 3.235), engine 16.877 ms (max 30.335), entry->emit 20.193 ms (max 33.357), 12.1 KB/frame, 0 IDR, 0 failed, rate 42350000 bit/s rt 1
+03:31:59 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 3.052 ms (max 4.030; tiling 3.035), engine 18.505 ms (max 33.972), entry->emit 21.608 ms (max 37.656), 11.4 KB/frame, 0 IDR, 0 failed, rate 43100000 bit/s rt 1
+03:32:01 parsecd pid 2135 3840x2160 l10r NVENC0: 10.2 fps, call 3.390 ms (max 4.938; tiling 3.371), engine 16.589 ms (max 27.897), entry->emit 20.023 ms (max 30.787), 11.5 KB/frame, 0 IDR, 0 failed, rate 43100000 bit/s rt 1
+03:32:03 parsecd pid 2135 3840x2160 l10r NVENC0: 9.3 fps, call 3.654 ms (max 13.412; tiling 3.634), engine 19.039 ms (max 30.328), entry->emit 22.749 ms (max 33.135), 13.3 KB/frame, 0 IDR, 0 failed, rate 43850000 bit/s rt 1
+03:32:05 parsecd pid 2135 3840x2160 l10r NVENC0: 9.2 fps, call 3.090 ms (max 3.874; tiling 3.072), engine 16.921 ms (max 29.566), entry->emit 20.059 ms (max 33.114), 14.0 KB/frame, 0 IDR, 0 failed, rate 43850000 bit/s rt 1
+03:32:07 parsecd pid 2135 3840x2160 l10r NVENC0: 9.9 fps, call 3.331 ms (max 4.662; tiling 3.308), engine 17.610 ms (max 34.466), entry->emit 20.985 ms (max 37.267), 10.8 KB/frame, 0 IDR, 0 failed, rate 44600000 bit/s rt 1
+03:32:09 parsecd pid 2135 3840x2160 l10r NVENC0: 9.9 fps, call 2.914 ms (max 3.729; tiling 2.892), engine 19.908 ms (max 33.600), entry->emit 22.877 ms (max 36.454), 12.6 KB/frame, 0 IDR, 0 failed, rate 45350000 bit/s rt 1
+03:32:11 parsecd pid 2135 3840x2160 l10r NVENC0: 9.6 fps, call 2.966 ms (max 3.665; tiling 2.949), engine 19.064 ms (max 30.461), entry->emit 22.084 ms (max 33.277), 10.7 KB/frame, 0 IDR, 0 failed, rate 46100000 bit/s rt 1
+03:32:13 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.042 ms (max 4.006; tiling 3.023), engine 15.516 ms (max 26.677), entry->emit 18.608 ms (max 29.486), 14.0 KB/frame, 0 IDR, 0 failed, rate 46100000 bit/s rt 1
+03:32:15 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.008 ms (max 3.692; tiling 2.989), engine 18.892 ms (max 30.250), entry->emit 21.943 ms (max 33.873), 9.8 KB/frame, 0 IDR, 0 failed, rate 46850000 bit/s rt 1
+03:32:17 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.535 ms (max 9.603; tiling 3.512), engine 16.505 ms (max 34.600), entry->emit 20.091 ms (max 37.482), 13.9 KB/frame, 0 IDR, 0 failed, rate 47600000 bit/s rt 1
+03:32:20 parsecd pid 2135 3840x2160 l10r NVENC0: 9.9 fps, call 3.160 ms (max 3.863; tiling 3.139), engine 19.369 ms (max 32.279), entry->emit 22.579 ms (max 35.739), 11.5 KB/frame, 0 IDR, 0 failed, rate 47600000 bit/s rt 1
+03:32:22 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.350 ms (max 3.927; tiling 3.327), engine 17.747 ms (max 30.051), entry->emit 21.156 ms (max 33.055), 13.2 KB/frame, 0 IDR, 0 failed, rate 48350000 bit/s rt 1
+03:32:24 parsecd pid 2135 3840x2160 l10r NVENC0: 9.4 fps, call 3.350 ms (max 4.446; tiling 3.328), engine 17.943 ms (max 32.854), entry->emit 21.347 ms (max 35.738), 10.7 KB/frame, 0 IDR, 0 failed, rate 49100000 bit/s rt 1
+03:32:26 parsecd pid 2135 3840x2160 l10r NVENC0: 10.4 fps, call 3.149 ms (max 4.055; tiling 3.128), engine 18.560 ms (max 34.558), entry->emit 21.757 ms (max 37.403), 13.2 KB/frame, 0 IDR, 0 failed, rate 49100000 bit/s rt 1
+03:32:28 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.006 ms (max 3.499; tiling 2.987), engine 17.996 ms (max 29.856), entry->emit 21.043 ms (max 32.726), 9.3 KB/frame, 0 IDR, 0 failed, rate 49850000 bit/s rt 1
+03:32:30 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.060 ms (max 3.720; tiling 3.040), engine 17.171 ms (max 34.303), entry->emit 20.287 ms (max 37.232), 14.4 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:32:32 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.078 ms (max 4.237; tiling 3.058), engine 16.970 ms (max 31.037), entry->emit 20.096 ms (max 33.890), 10.0 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:32:34 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 3.230 ms (max 4.585; tiling 3.207), engine 18.080 ms (max 30.572), entry->emit 21.377 ms (max 33.677), 13.5 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:32:36 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 3.222 ms (max 4.301; tiling 3.204), engine 17.129 ms (max 32.920), entry->emit 20.394 ms (max 35.841), 9.2 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:32:38 parsecd pid 2135 3840x2160 l10r NVENC0: 10.2 fps, call 2.944 ms (max 3.290; tiling 2.923), engine 18.448 ms (max 35.442), entry->emit 21.440 ms (max 38.326), 13.6 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:32:40 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.029 ms (max 4.918; tiling 3.009), engine 16.595 ms (max 27.364), entry->emit 19.663 ms (max 30.227), 9.9 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:32:42 parsecd pid 2135 3840x2160 l10r NVENC0: 9.5 fps, call 3.109 ms (max 4.039; tiling 3.092), engine 19.512 ms (max 30.330), entry->emit 22.668 ms (max 33.195), 12.7 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:32:44 parsecd pid 2135 3840x2160 l10r NVENC0: 9.6 fps, call 3.065 ms (max 4.639; tiling 3.044), engine 18.934 ms (max 34.854), entry->emit 22.052 ms (max 37.749), 10.0 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:32:46 parsecd pid 2135 3840x2160 l10r NVENC0: 9.9 fps, call 3.163 ms (max 4.606; tiling 3.144), engine 19.309 ms (max 33.140), entry->emit 22.526 ms (max 35.989), 13.7 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:32:48 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.148 ms (max 4.324; tiling 3.124), engine 18.367 ms (max 33.259), entry->emit 21.560 ms (max 37.393), 9.0 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:32:50 parsecd pid 2135 3840x2160 l10r NVENC0: 9.9 fps, call 3.067 ms (max 3.783; tiling 3.048), engine 21.073 ms (max 34.511), entry->emit 24.192 ms (max 37.449), 13.7 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:32:52 parsecd pid 2135 3840x2160 l10r NVENC0: 9.8 fps, call 3.114 ms (max 4.085; tiling 3.093), engine 20.546 ms (max 31.727), entry->emit 23.704 ms (max 34.854), 10.0 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:32:54 parsecd pid 2135 3840x2160 l10r NVENC0: 10.5 fps, call 3.608 ms (max 5.255; tiling 3.589), engine 15.124 ms (max 24.235), entry->emit 18.837 ms (max 29.219), 50.1 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:32:56 parsecd pid 2135 3840x2160 l10r NVENC0: 10.1 fps, call 3.372 ms (max 4.153; tiling 3.344), engine 17.340 ms (max 32.511), entry->emit 20.805 ms (max 35.927), 46.0 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:32:58 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 3.291 ms (max 3.973; tiling 3.269), engine 16.842 ms (max 34.894), entry->emit 20.257 ms (max 38.308), 50.8 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:00 parsecd pid 2135 3840x2160 l10r NVENC0: 10.7 fps, call 2.830 ms (max 3.711; tiling 2.813), engine 16.521 ms (max 28.745), entry->emit 19.383 ms (max 31.361), 4.7 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:02 parsecd pid 2135 3840x2160 l10r NVENC0: 10.0 fps, call 3.043 ms (max 3.836; tiling 3.022), engine 17.446 ms (max 27.305), entry->emit 20.531 ms (max 30.552), 6.5 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:04 parsecd pid 2135 3840x2160 l10r NVENC0: 9.5 fps, call 3.359 ms (max 4.739; tiling 3.339), engine 16.628 ms (max 28.344), entry->emit 20.023 ms (max 33.122), 4.8 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:06 parsecd pid 2135 3840x2160 l10r NVENC0: 9.7 fps, call 3.142 ms (max 4.065; tiling 3.122), engine 18.499 ms (max 29.197), entry->emit 21.688 ms (max 33.325), 6.2 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:08 parsecd pid 2135 3840x2160 l10r NVENC0: 4.5 fps, call 3.318 ms (max 4.057; tiling 3.293), engine 15.280 ms (max 27.148), entry->emit 18.633 ms (max 29.986), 3.8 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:11 parsecd pid 2135 3840x2160 420f NVENC0: 10.7 fps, call 3.363 ms (max 43.190; tiling 1.607), engine 12.422 ms (max 21.062), entry->emit 15.860 ms (max 59.809), 38.2 KB/frame, 1 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:13 parsecd pid 2135 3840x2160 420f NVENC0: 10.5 fps, call 1.231 ms (max 2.108; tiling 1.208), engine 13.149 ms (max 20.148), entry->emit 14.443 ms (max 21.287), 27.9 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:15 parsecd pid 2135 3840x2160 420f NVENC0: 11.3 fps, call 1.187 ms (max 1.672; tiling 1.161), engine 12.006 ms (max 20.341), entry->emit 13.286 ms (max 21.622), 40.0 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:17 parsecd pid 2135 3840x2160 420f NVENC0: 10.7 fps, call 1.223 ms (max 2.172; tiling 1.199), engine 11.479 ms (max 16.428), entry->emit 12.778 ms (max 17.608), 37.5 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:19 parsecd pid 2135 3840x2160 420f NVENC0: 10.4 fps, call 1.151 ms (max 1.673; tiling 1.130), engine 11.651 ms (max 19.242), entry->emit 12.870 ms (max 20.511), 38.8 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:21 parsecd pid 2135 3840x2160 420f NVENC0: 10.7 fps, call 1.241 ms (max 2.209; tiling 1.218), engine 12.397 ms (max 20.276), entry->emit 13.721 ms (max 21.353), 39.2 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:23 parsecd pid 2135 3840x2160 420f NVENC0: 9.7 fps, call 1.149 ms (max 1.725; tiling 1.127), engine 12.981 ms (max 20.205), entry->emit 14.203 ms (max 21.219), 37.6 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:25 parsecd pid 2135 3840x2160 420f NVENC0: 9.8 fps, call 1.224 ms (max 1.883; tiling 1.202), engine 12.827 ms (max 20.340), entry->emit 14.121 ms (max 21.621), 40.2 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:27 parsecd pid 2135 3840x2160 420f NVENC0: 9.3 fps, call 1.123 ms (max 1.735; tiling 1.103), engine 12.124 ms (max 18.847), entry->emit 13.314 ms (max 19.792), 35.5 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:29 parsecd pid 2135 3840x2160 420f NVENC0: 10.5 fps, call 1.209 ms (max 2.139; tiling 1.186), engine 12.028 ms (max 19.610), entry->emit 13.309 ms (max 20.705), 39.7 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:31 parsecd pid 2135 3840x2160 420f NVENC0: 10.0 fps, call 1.224 ms (max 1.927; tiling 1.203), engine 11.257 ms (max 13.586), entry->emit 12.561 ms (max 15.223), 39.0 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:33 parsecd pid 2135 3840x2160 420f NVENC0: 11.0 fps, call 1.276 ms (max 1.964; tiling 1.254), engine 12.455 ms (max 20.237), entry->emit 13.806 ms (max 21.326), 39.2 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:35 parsecd pid 2135 3840x2160 420f NVENC0: 9.8 fps, call 1.154 ms (max 1.477; tiling 1.132), engine 12.260 ms (max 14.594), entry->emit 13.481 ms (max 16.159), 37.5 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:37 parsecd pid 2135 3840x2160 420f NVENC0: 10.2 fps, call 1.168 ms (max 1.877; tiling 1.150), engine 12.105 ms (max 19.160), entry->emit 13.341 ms (max 20.251), 38.9 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:39 parsecd pid 2135 3840x2160 420f NVENC0: 10.6 fps, call 1.207 ms (max 1.754; tiling 1.185), engine 11.891 ms (max 20.266), entry->emit 13.182 ms (max 21.316), 36.5 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:41 parsecd pid 2135 3840x2160 420f NVENC0: 10.1 fps, call 1.264 ms (max 1.972; tiling 1.240), engine 11.416 ms (max 14.750), entry->emit 12.752 ms (max 16.462), 41.4 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:44 parsecd pid 2135 3840x2160 420f NVENC0: 8.6 fps, call 1.232 ms (max 1.939; tiling 1.210), engine 12.843 ms (max 20.736), entry->emit 14.163 ms (max 22.018), 37.6 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:46 parsecd pid 2135 3840x2160 420f NVENC0: 10.4 fps, call 1.257 ms (max 2.400; tiling 1.233), engine 12.381 ms (max 20.298), entry->emit 13.725 ms (max 21.346), 39.8 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:48 parsecd pid 2135 3840x2160 420f NVENC0: 12.2 fps, call 1.347 ms (max 2.858; tiling 1.324), engine 11.641 ms (max 20.262), entry->emit 13.060 ms (max 21.359), 36.1 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:50 parsecd pid 2135 3840x2160 420f NVENC0: 10.4 fps, call 1.277 ms (max 2.225; tiling 1.253), engine 12.696 ms (max 19.213), entry->emit 14.054 ms (max 20.272), 40.0 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:52 parsecd pid 2135 3840x2160 420f NVENC0: 8.4 fps, call 1.220 ms (max 1.545; tiling 1.200), engine 13.600 ms (max 20.215), entry->emit 14.909 ms (max 21.672), 38.1 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:54 parsecd pid 2135 3840x2160 420f NVENC0: 8.0 fps, call 1.438 ms (max 2.241; tiling 1.409), engine 11.421 ms (max 19.621), entry->emit 12.955 ms (max 21.954), 63.4 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:56 parsecd pid 2135 3840x2160 420f NVENC0: 9.4 fps, call 1.330 ms (max 2.286; tiling 1.308), engine 12.784 ms (max 20.386), entry->emit 14.264 ms (max 21.696), 90.8 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:33:58 parsecd pid 2135 3840x2160 420f NVENC0: 8.5 fps, call 1.180 ms (max 1.818; tiling 1.158), engine 14.050 ms (max 22.410), entry->emit 15.350 ms (max 23.568), 79.0 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:00 parsecd pid 2135 3840x2160 420f NVENC0: 9.5 fps, call 1.273 ms (max 2.018; tiling 1.248), engine 13.216 ms (max 15.333), entry->emit 14.567 ms (max 16.529), 41.2 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:02 parsecd pid 2135 3840x2160 420f NVENC0: 9.6 fps, call 1.425 ms (max 2.033; tiling 1.405), engine 13.176 ms (max 16.405), entry->emit 14.765 ms (max 18.471), 114.3 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:04 parsecd pid 2135 3840x2160 420f NVENC0: 8.2 fps, call 1.136 ms (max 1.422; tiling 1.113), engine 12.694 ms (max 15.365), entry->emit 13.924 ms (max 16.918), 63.2 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:06 parsecd pid 2135 3840x2160 420f NVENC0: 9.1 fps, call 1.070 ms (max 1.897; tiling 1.046), engine 13.219 ms (max 14.675), entry->emit 14.363 ms (max 15.782), 27.1 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:08 parsecd pid 2135 3840x2160 420f NVENC0: 8.7 fps, call 1.126 ms (max 1.470; tiling 1.104), engine 13.328 ms (max 15.916), entry->emit 14.536 ms (max 17.102), 27.1 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:10 parsecd pid 2135 3840x2160 420f NVENC0: 8.5 fps, call 1.071 ms (max 1.310; tiling 1.050), engine 13.098 ms (max 14.752), entry->emit 14.227 ms (max 15.935), 27.1 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:12 parsecd pid 2135 3840x2160 420f NVENC0: 9.7 fps, call 1.129 ms (max 1.400; tiling 1.106), engine 13.109 ms (max 14.740), entry->emit 14.294 ms (max 16.020), 27.1 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:14 parsecd pid 2135 3840x2160 420f NVENC0: 9.1 fps, call 1.176 ms (max 2.570; tiling 1.153), engine 12.604 ms (max 15.783), entry->emit 13.845 ms (max 17.000), 27.1 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:17 parsecd pid 2135 3840x2160 420f NVENC0: 10.2 fps, call 1.087 ms (max 1.605; tiling 1.064), engine 13.317 ms (max 14.656), entry->emit 14.468 ms (max 15.731), 27.2 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:19 parsecd pid 2135 3840x2160 420f NVENC0: 10.3 fps, call 1.035 ms (max 1.254; tiling 1.011), engine 12.839 ms (max 14.658), entry->emit 13.938 ms (max 15.650), 27.1 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:21 parsecd pid 2135 3840x2160 420f NVENC0: 4.2 fps, call 1.067 ms (max 1.315; tiling 1.040), engine 13.261 ms (max 13.540), entry->emit 14.407 ms (max 14.821), 27.4 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:23 parsecd pid 2135 3840x2160 420f NVENC0: 10.1 fps, call 6.141 ms (max 101.810; tiling 1.468), engine 22.190 ms (max 25.778), entry->emit 28.415 ms (max 109.121), 38.9 KB/frame, 1 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:25 parsecd pid 2135 3840x2160 420f NVENC0: 9.8 fps, call 1.139 ms (max 1.531; tiling 1.118), engine 22.055 ms (max 30.002), entry->emit 23.241 ms (max 31.057), 16.6 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:27 parsecd pid 2135 3840x2160 420f NVENC0: 9.8 fps, call 1.153 ms (max 1.347; tiling 1.135), engine 22.780 ms (max 25.165), entry->emit 23.988 ms (max 26.391), 16.2 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:29 parsecd pid 2135 3840x2160 420f NVENC0: 9.0 fps, call 1.107 ms (max 1.338; tiling 1.090), engine 22.729 ms (max 25.280), entry->emit 23.896 ms (max 26.586), 18.8 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:31 parsecd pid 2135 3840x2160 420f NVENC0: 9.7 fps, call 1.148 ms (max 1.449; tiling 1.127), engine 22.158 ms (max 24.946), entry->emit 23.358 ms (max 26.195), 14.2 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:33 parsecd pid 2135 3840x2160 420f NVENC0: 9.2 fps, call 1.128 ms (max 1.271; tiling 1.108), engine 21.404 ms (max 24.823), entry->emit 22.581 ms (max 26.113), 14.1 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:35 parsecd pid 2135 3840x2160 420f NVENC0: 9.3 fps, call 1.187 ms (max 1.430; tiling 1.164), engine 21.879 ms (max 24.744), entry->emit 23.121 ms (max 25.794), 14.2 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:37 parsecd pid 2135 3840x2160 420f NVENC0: 9.5 fps, call 1.178 ms (max 1.458; tiling 1.156), engine 22.913 ms (max 25.256), entry->emit 24.141 ms (max 26.516), 14.2 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:39 parsecd pid 2135 3840x2160 420f NVENC0: 9.4 fps, call 1.123 ms (max 1.385; tiling 1.104), engine 22.931 ms (max 26.157), entry->emit 24.110 ms (max 27.449), 14.1 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:41 parsecd pid 2135 3840x2160 420f NVENC0: 9.5 fps, call 1.151 ms (max 1.593; tiling 1.132), engine 22.259 ms (max 25.050), entry->emit 23.461 ms (max 26.308), 14.1 KB/frame, 0 IDR, 0 failed, rate 50000000 bit/s rt 1
+03:34:43 parsecd pid 2135 3840x2160 420f NVENC0: 9.6 fps, call 1.155 ms (max 1.508; tiling 1.136), engine 21.517 ms (max 25.341), entry->emit 22.725 ms (max 26.266), 14.3 KB/frame, 0 IDR, 0 failed, rate 10000000 bit/s rt 1
+03:34:46 parsecd pid 2135 3840x2160 420f NVENC0: 10.3 fps, call 1.202 ms (max 1.469; tiling 1.179), engine 21.249 ms (max 25.636), entry->emit 22.502 ms (max 26.826), 14.3 KB/frame, 0 IDR, 0 failed, rate 10000000 bit/s rt 1
+03:34:48 parsecd pid 2135 3840x2160 420f NVENC0: 9.3 fps, call 1.359 ms (max 5.064; tiling 1.338), engine 22.769 ms (max 25.026), entry->emit 24.182 ms (max 28.725), 14.2 KB/frame, 0 IDR, 0 failed, rate 10000000 bit/s rt 1
+03:34:50 parsecd pid 2135 3840x2160 420f NVENC0: 9.5 fps, call 1.126 ms (max 1.260; tiling 1.104), engine 22.844 ms (max 24.955), entry->emit 24.029 ms (max 26.322), 14.2 KB/frame, 0 IDR, 0 failed, rate 10000000 bit/s rt 1
+03:34:52 parsecd pid 2135 3840x2160 420f NVENC0: 9.5 fps, call 1.180 ms (max 1.518; tiling 1.157), engine 22.091 ms (max 25.240), entry->emit 23.329 ms (max 26.527), 14.1 KB/frame, 0 IDR, 0 failed, rate 10000000 bit/s rt 1
+03:34:54 parsecd pid 2135 3840x2160 420f NVENC0: 9.8 fps, call 1.089 ms (max 1.356; tiling 1.071), engine 22.641 ms (max 24.869), entry->emit 23.777 ms (max 26.096), 14.2 KB/frame, 0 IDR, 0 failed, rate 10000000 bit/s rt 1
+03:34:56 parsecd pid 2135 3840x2160 420f NVENC0: 9.7 fps, call 1.110 ms (max 1.283; tiling 1.091), engine 22.557 ms (max 25.385), entry->emit 23.714 ms (max 26.478), 14.1 KB/frame, 0 IDR, 0 failed, rate 10000000 bit/s rt 1
+03:34:58 parsecd pid 2135 3840x2160 420f NVENC0: 9.6 fps, call 1.128 ms (max 1.299; tiling 1.111), engine 23.002 ms (max 25.509), entry->emit 24.183 ms (max 26.631), 14.1 KB/frame, 0 IDR, 0 failed, rate 10000000 bit/s rt 1
+03:35:00 parsecd pid 2135 3840x2160 420f NVENC0: 10.8 fps, call 1.222 ms (max 1.679; tiling 1.202), engine 19.224 ms (max 24.652), entry->emit 20.497 ms (max 25.837), 14.2 KB/frame, 0 IDR, 0 failed, rate 10150000 bit/s rt 1
+03:35:02 parsecd pid 2135 3840x2160 420f NVENC0: 9.6 fps, call 1.138 ms (max 1.405; tiling 1.118), engine 23.081 ms (max 26.347), entry->emit 24.274 ms (max 27.405), 14.2 KB/frame, 0 IDR, 0 failed, rate 10150000 bit/s rt 1
+03:35:04 parsecd pid 2135 3840x2160 420f NVENC0: 8.6 fps, call 1.127 ms (max 1.288; tiling 1.105), engine 22.572 ms (max 26.195), entry->emit 23.756 ms (max 27.292), 14.5 KB/frame, 0 IDR, 0 failed, rate 10599999 bit/s rt 1
+03:35:06 parsecd pid 2135 3840x2160 420f NVENC0: 9.5 fps, call 1.173 ms (max 1.449; tiling 1.152), engine 21.476 ms (max 24.918), entry->emit 22.697 ms (max 26.105), 14.1 KB/frame, 0 IDR, 0 failed, rate 3000000 bit/s rt 1
+03:35:08 parsecd pid 2135 3840x2160 420f NVENC0: 9.4 fps, call 1.285 ms (max 1.560; tiling 1.255), engine 19.935 ms (max 26.911), entry->emit 21.322 ms (max 28.261), 42.6 KB/frame, 0 IDR, 0 failed, rate 3000000 bit/s rt 1
+03:35:10 parsecd pid 2135 3840x2160 420f NVENC0: 10.1 fps, call 1.334 ms (max 1.941; tiling 1.313), engine 20.347 ms (max 24.889), entry->emit 21.774 ms (max 26.122), 58.3 KB/frame, 0 IDR, 0 failed, rate 3000000 bit/s rt 1
+03:35:12 parsecd pid 2135 3840x2160 420f NVENC0: 11.8 fps, call 1.391 ms (max 1.766; tiling 1.369), engine 21.235 ms (max 25.898), entry->emit 22.760 ms (max 27.086), 65.6 KB/frame, 0 IDR, 0 failed, rate 3000000 bit/s rt 1
+03:35:14 parsecd pid 2135 3840x2160 420f NVENC0: 9.7 fps, call 1.386 ms (max 5.829; tiling 1.362), engine 22.661 ms (max 26.287), entry->emit 24.106 ms (max 27.416), 14.8 KB/frame, 0 IDR, 0 failed, rate 3000000 bit/s rt 1
+03:35:16 parsecd pid 2135 3840x2160 420f NVENC0: 9.0 fps, call 1.435 ms (max 5.980; tiling 1.414), engine 21.678 ms (max 24.979), entry->emit 23.171 ms (max 26.073), 14.8 KB/frame, 0 IDR, 0 failed, rate 3000000 bit/s rt 1
+03:35:18 parsecd pid 2135 3840x2160 420f NVENC0: 9.6 fps, call 1.193 ms (max 1.586; tiling 1.173), engine 21.863 ms (max 25.906), entry->emit 23.104 ms (max 27.000), 14.7 KB/frame, 0 IDR, 0 failed, rate 3000000 bit/s rt 1
+03:35:20 parsecd pid 2135 3840x2160 420f NVENC0: 9.8 fps, call 1.148 ms (max 1.416; tiling 1.129), engine 21.919 ms (max 25.026), entry->emit 23.114 ms (max 26.176), 14.7 KB/frame, 0 IDR, 0 failed, rate 3000000 bit/s rt 1
+03:35:22 parsecd pid 2135 3840x2160 420f NVENC0: 9.8 fps, call 1.141 ms (max 1.621; tiling 1.122), engine 22.246 ms (max 24.789), entry->emit 23.442 ms (max 25.940), 14.7 KB/frame, 0 IDR, 0 failed, rate 3000000 bit/s rt 1
+03:35:25 parsecd pid 2135 3840x2160 420f NVENC0: 11.9 fps, call 1.264 ms (max 1.785; tiling 1.243), engine 22.824 ms (max 26.567), entry->emit 24.139 ms (max 28.126), 14.9 KB/frame, 0 IDR, 0 failed, rate 3000000 bit/s rt 1
+03:35:27 parsecd pid 2135 3840x2160 420f NVENC0: 6.0 fps, call 1.154 ms (max 1.378; tiling 1.130), engine 22.197 ms (max 25.035), entry->emit 23.398 ms (max 26.177), 14.7 KB/frame, 0 IDR, 0 failed, rate 3000000 bit/s rt 1
+03:35:29 parsecd pid 2135 3840x2160 420f NVENC0: 10.3 fps, call 4.882 ms (max 75.918; tiling 1.433), engine 13.416 ms (max 17.590), entry->emit 18.334 ms (max 93.572), 4.4 KB/frame, 1 IDR, 0 failed, rate 3000000 bit/s rt 1
+03:35:31 parsecd pid 2135 3840x2160 420f NVENC0: 8.7 fps, call 1.127 ms (max 2.017; tiling 1.103), engine 12.902 ms (max 14.775), entry->emit 14.066 ms (max 15.920), 0.4 KB/frame, 0 IDR, 0 failed, rate 3000000 bit/s rt 1
+03:35:33 parsecd pid 2135 3840x2160 420f NVENC0: 10.3 fps, call 1.091 ms (max 1.585; tiling 1.070), engine 13.234 ms (max 15.810), entry->emit 14.357 ms (max 16.793), 0.3 KB/frame, 0 IDR, 0 failed, rate 3000000 bit/s rt 1

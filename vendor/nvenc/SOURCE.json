@@ -1,0 +1,55 @@
+{
+  "artifact_version": "v0.9.5-ga10x2",
+  "build_dependencies": {
+    "nvidia_open_gpu_doc": {
+      "commit": "9fdf5c4062007929d9f4e6cbad9c9771fe61b880",
+      "license_file": "vendor/open-gpu-doc/LICENSE.md"
+    },
+    "nvidia_open_gpu_kernel_modules": {
+      "commit": "e4a5faa2567f28c8eabe0ebb6422b6d0abcf37eb",
+      "license_file": "vendor/open-gpu-kernel-modules/COPYING",
+      "release": "610.57.04"
+    },
+    "webkit_spi_headers": {
+      "commit": "3bfbc200370710495ffa440abdd31b943c83ad7a",
+      "license_terms": "Embedded in each header; see THIRD_PARTY_NOTICES.md"
+    }
+  },
+  "included_upstream_components": [
+    "src/",
+    "vt/",
+    "tools/",
+    "scripts/",
+    "trace/",
+    "trace-linux/",
+    "notes/",
+    "README.md",
+    "build.sh",
+    "root sample inputs r.nv12, r25.pgm, r4.pgm",
+    "all text documentation and notes"
+  ],
+  "license": "MIT; see LICENSE",
+  "local_packaging_changes": [
+    "Original upstream .gitignore is preserved as UPSTREAM.gitignore; local .gitignore only excludes build outputs so pinned dependency headers remain trackable.",
+    "build/nvenc_build.sh records the local artifact version and revision while preserving the upstream v0.9.5 tag and commit.",
+    "package/stage_nvencvt.py requires an exact schema v2 artifact version and local revision receipt before staging."
+  ],
+  "local_revision": "ga10x-codecs-2",
+  "local_source_changes": [
+    "src/enc.c: locally modified for explicit C7B7 NVENC magic and semaphore encoding.",
+    "src/enc_iface.h: added locally for scoped C7B7/C9B7 H.264/HEVC interface assertions and helpers.",
+    "vt/nvencvt.c: local GA10x registration and engine policy changes.",
+    "src/ga10x_policy.h: added locally for GA10x encoder/decoder opt-out, actual NVDEC class gating, and single-encoder selection.",
+    "src/dec.c: locally includes the scoped C7B0/C9B0 H.264 interface checks; hardware command values are unchanged.",
+    "src/dec_iface.h: added locally for H.264 NVDEC method and field compatibility assertions.",
+    "vt/nvencvt_dec.c: local C7B0 H.264 registration with an independent opt-out; HEVC/MPEG keep their prior GA10x development gate."
+  ],
+  "omitted_upstream_data_bytes": 93991779,
+  "omitted_upstream_data_files": 1279,
+  "omitted_upstream_data_manifest": "UPSTREAM-OMITTED-DATA.json",
+  "schema_version": 1,
+  "upstream_commit": "1e91845d6f37d8bce671d62c14f4390324da3659",
+  "upstream_repo": "https://github.com/mickys/nvenc",
+  "upstream_tag": "v0.9.5",
+  "upstream_tree": "2517cf69cc0edd8e9925ad9c443ed1098ded95a4"
+}
