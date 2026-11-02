@@ -58,13 +58,30 @@ static id nvmtl_resid_lookup(uint64_t token)
 
 // The same slot carries the storage descriptor (heap binding 2) for a texture a kernel may write - a shader reaches a
 // written texture only through this handle in memory.
+// A texture that gets no slot is read by a shader as slot 0, the dummy (nvmtl_resid_assign): its reads come back black
+// and its writes are lost. The first 8 are logged verbatim with the reason, then a census every 256, so a run shows
+// the population instead of guessing it.
+static void nvmtl_resid_no_slot(NVMTLTexture *x, const char *why)
+{
+    static _Atomic unsigned long long n; const unsigned long long k = atomic_fetch_add(&n, 1) + 1;
+    if (k <= 8) nvlog("resid: NO SLOT #%llu for texture %p %ux%u type %lu pixelFormat %lu usage 0x%lx storage %lu mips %u stex %d - %s",
+                     k, (__bridge void *)x, x->_i.w, x->_i.h, (unsigned long)x.textureType, (unsigned long)x->_fmt, (unsigned long)x->_usage,
+                     (unsigned long)x.storageMode, x->_i.mips, x->_stex ? 1 : 0, why);
+    else if ((k & 255) == 0) nvlog("resid: NO SLOT census - %llu textures so far read as the dummy (last: %s)", k, why);
+}
 uint64_t nvmtl_resid_for_texture(id t)
 {
     NVMTLTexture *x = (NVMTLTexture *)t;
     // a texture buffer has no image view: its slot holds the buffer view in the texel bindings instead
-    if (x->_tbView) return nvmtl_resid_assign(t, 0, nvmtl_vk_bindless_put_texel(x->_tbView, x->_tbStorage));
-    const uint32_t slot = nvmtl_vk_bindless_put([x nvsampleview]);
+    if (x->_tbView) {
+        const uint32_t ts = nvmtl_vk_bindless_put_texel(x->_tbView, x->_tbStorage);
+        if (!ts) nvmtl_resid_no_slot(x, "texture buffer: the heap has no texel bindings (NVMTL_NO_HEAP_STORAGE) or no buffer view");
+        return nvmtl_resid_assign(t, 0, ts);
+    }
+    void *sample = [x nvsampleview];
+    const uint32_t slot = nvmtl_vk_bindless_put(sample);
     if (slot) nvmtl_vk_bindless_put_storage(slot, x->_stex ? [x nvview] : NULL);
+    else nvmtl_resid_no_slot(x, sample ? "heap full, or no heap in this process" : "the image has no sample view");
     return nvmtl_resid_assign(t, 0, slot);
 }
 // A sampler's gpuResourceID carries its bindless heap slot in the low 32 bits (what a shader reading an argument buffer
