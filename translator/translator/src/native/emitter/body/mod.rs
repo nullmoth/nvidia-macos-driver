@@ -236,6 +236,31 @@ fn leading_vector_store_target(pointee: &LlType) -> Option<(LlType, Vec<u32>)> {
     first_aggregate_leaf(pointee, &|t| matches!(t, LlType::Vector(_, _)), false)
 }
 
+// A scalar array is read whole as a vector with one lane per element; elements whose type
+// differs from the lane type are bitcast, so their widths must match.
+fn scalar_array_loads_as_vector(array: &LlType, vector: &LlType) -> bool {
+    let (LlType::Array(array_elem, array_len), LlType::Vector(vector_elem, vector_len)) =
+        (array, vector)
+    else {
+        return false;
+    };
+    array_len == vector_len
+        && is_scalar_storage_type(array_elem)
+        && is_scalar_storage_type(vector_elem)
+        && (types_compatible(array_elem, vector_elem)
+            || bitcast_width(array_elem)
+                .is_some_and(|bits| bitcast_width(vector_elem) == Some(bits)))
+}
+
+// The vector covers exactly the aggregate's leading scalar array, so a load of it at offset 0
+// reads only that array.
+fn leading_scalar_array_load_target(
+    pointee: &LlType,
+    vector: &LlType,
+) -> Option<(LlType, Vec<u32>)> {
+    first_aggregate_leaf(pointee, &|t| scalar_array_loads_as_vector(t, vector), false)
+}
+
 #[cfg(test)]
 mod binary_dispatch_tests {
     use super::{
