@@ -52,7 +52,11 @@ def main():
                 if a and a <= addr < a + sz: th.append((c, v, i, role, idx, a, d))
         if th:
             th.sort(); c, v, i, role, idx, a, d = th[-1]
-            print(f"0x{addr:x} = image {i} by its {role} header (view {v}, descriptor index {idx}, header address 0x{a:x}, +{addr - a} into it; image size {isize.get(i, 0) or 'unknown'}), view created seq {c}, {'DIED seq ' + str(d) if d else 'alive'}; {len(th)} header(s) covered it: " + ", ".join(f"{vv} idx {ii} seq {cc}..{dd or 'alive'}" for cc, vv, _, _, ii, _, dd in th)); rc = 1; continue
+            dims = next((im[4] for im in imgs if im[0] == i), "")
+            try: width = int(dims.split("x")[0])
+            except Exception: width = 0
+            rowhint = f"; with a {width}-wide 4-byte-per-texel row of {width * 4} B that is tile row {(addr - a) // (width * 4)}" if width else ""
+            print(f"0x{addr:x} = image {i} by its {role} header (view {v}, descriptor index {idx}, header address 0x{a:x}, +{addr - a} into it{rowhint}; image size {isize.get(i, 0) or 'unknown'}), view created seq {c}, {'DIED seq ' + str(d) if d else 'alive'}; {len(th)} header(s) covered it: " + ", ".join(f"{vv} idx {ii} seq {cc}..{dd or 'alive'}" for cc, vv, _, _, ii, _, dd in th)); rc = 1; continue
         hit = [m for m in mems if m[1] and m[1] <= addr < m[1] + m[2]]
         if hit:
             mem, base, size, kind, c, d = hit[-1]; off = addr - base
