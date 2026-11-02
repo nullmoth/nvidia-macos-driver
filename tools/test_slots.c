@@ -60,6 +60,19 @@ int main(void)
     const void *vC = (void *)0xc1; nvmtl_im_add(&im, imgA, memA, 0, 4096, vC, 64, 64, 37, 0, 0, 1, 500); nvmtl_vw_add(&vw, vC, imgA);
     const nvmtl_im_entry *e = nvmtl_im_by_view(&im, &vw, vC);
     ARM("a recycled VkImage handle resolves to its newest image, alive", e && e->w == 64 && !e->died && e->seq == 500);
+    /* a park is alive but recyclable; a destroy after a park is a death the census must show */
+    nvmtl_im_parked(&im, imgB, 600);
+    nout = 0; nvmtl_sl_report(&sl, &im, &vw, 7, &d, "", emit, NULL);
+    ARM("a parked image is reported alive but parked, with the seq", has("ALIVE but PARKED for reuse since seq 600"));
+    nvmtl_im_recycled(&im, imgB);
+    nout = 0; nvmtl_sl_report(&sl, &im, &vw, 7, &d, "", emit, NULL);
+    ARM("a recycled image is plain ALIVE again", !has("PARKED") && has("created seq 120, ALIVE"));
+    {   nvmtl_im_state im2; memset(&im2, 0, sizeof im2); nvmtl_im_add(&im2, (void *)0xf0, NULL, 0, 4096, (void *)0xf1, 8, 8, 37, 0, 0, 0, 700);
+        ARM("one image made: one alive", im2.live == 1);
+        nvmtl_im_died(&im2, (void *)0xf0, 701);
+        FILE *f2 = tmpfile(); nvmtl_im_dump(&im2, f2); rewind(f2); char l2[256] = ""; fgets(l2, sizeof l2, f2); fclose(f2);
+        ARM("a destroyed image is a death: zero alive, and the dump says when (an instrument that counts 0 deaths after a destroy is broken)", im2.live == 0 && strstr(l2, "seq 700 died 701"));
+        free(im2.e); }
     FILE *fp = tmpfile(); const uint32_t n = nvmtl_im_dump(&im, fp);
     rewind(fp); char first[256]; fgets(first, sizeof first, fp);
     ARM("the image dump writes every image with its memory, shape and lifetime", n == 3 && strstr(first, "image 0xa0 view 0xa1 mem 0xaa off 4096 size 1048576 512x512 fmt 37 storage placed seq 100 died 150"));

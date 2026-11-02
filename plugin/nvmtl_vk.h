@@ -116,6 +116,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  uint32_t hz_sn;   /* hazard model timing sample counter */
                  nvmtl_fx_cb fx;   /* fault context: the last dispatches and the storage binds in force (nvmtl_fault_context.h) */
                  uint64_t fx_seq;  /* the queue-submit sequence number this command buffer was submitted with */
+                 uint32_t begin_id; /* this command buffer's begin ordinal: what its per-dispatch witness words carry */
                } nvk_cmdbuf;
 int  nvmtl_vk_init(void);
 int nvmtl_vk_sample_positions_backend(void);
@@ -419,6 +420,8 @@ uint64_t nvmtl_vk_buffer_address(nvk_buffer *b);
 int nvmtl_vk_image_create_typed(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out);
 typedef struct { void *mem; void *map; size_t size; uint32_t memtype; int host_visible; } nvk_heap;
 int  nvmtl_vk_heap_create(size_t size, int host_visible, nvk_heap *out);
+void nvmtl_vk_image_parked(nvk_image *i);     /* the image went to a park for reuse (alive, recyclable) */
+void nvmtl_vk_image_recycled(nvk_image *i);   /* a parked image was taken back into use */
 int nvmtl_vk_heap_zero(nvk_heap *h, const char *what);   /* clear a fresh heap to zero before its first placement (NVMTL_HEAP_ZERO) */
 int  nvmtl_vk_format_block(uint32_t vkfmt, uint32_t *bw, uint32_t *bh, uint32_t *block_bytes);
 static inline uint32_t nvmtl_vk_layers_for_type(uint32_t t, uint32_t n) { n = n ? n : 1; return (t == 1 || t == 3 || t == 8) ? n : t == 5 ? 6u : t == 6 ? 6u * n : 1u; }

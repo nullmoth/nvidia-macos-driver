@@ -107,6 +107,13 @@ int nvmtl_resid_describe_slot(uint32_t slot, char *out, size_t cap)
     if (!o) { snprintf(out, cap, "no live texture object holds slot %u", slot); return 0; }
     if ([o isKindOfClass:[NVMTLTexture class]]) {
         NVMTLTexture *t = o;
+        if (t->_parent || t->_viewParent) {
+            NVMTLTexture *p = t->_parent ? t->_parent : t->_viewParent; nvk_image *pi = [p nvi];
+            snprintf(out, cap, "VIEW NVMTLTexture %p (mtl fmt %lu type %lu usage 0x%lx storage view %s own view %p swizzle view %p) of parent NVMTLTexture %p (%ux%u vkfmt %u image %p view %p \"%s\")",
+                     (__bridge void *)t, (unsigned long)t->_fmt, (unsigned long)t.textureType, (unsigned long)t.usage, t->_stex ? "yes" : "no", t->_ownView, t->_swzView,
+                     (__bridge void *)p, pi->w, pi->h, pi->fmt, pi->img, pi->view, p.label.UTF8String ?: "");
+            return 1;
+        }
         snprintf(out, cap, "NVMTLTexture %p %ux%u vkfmt %u mtl fmt %lu type %lu usage 0x%lx storage view %s image %p view %p \"%s\"", (__bridge void *)t, t->_i.w, t->_i.h, t->_i.fmt,
                  (unsigned long)t->_fmt, (unsigned long)t.textureType, (unsigned long)t.usage, t->_stex ? "yes" : "no", t->_i.img, t->_i.view, t.label.UTF8String ?: "");
         return 1;
