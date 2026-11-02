@@ -592,6 +592,12 @@ static void nvmtl_gsub_census(void) {
 static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL writtenOnly) {
     NSMutableSet<NVMTLBuffer *> *copies = nil;
     for (id resource in resources) {
+        if ([resource isKindOfClass:[NVMTLHeapPin class]]) {   // a used heap: its members with a host copy
+            NVMTLHeapPin *pin = resource;
+            NSArray *nested = nvmtl_submission_copies([NSSet setWithArray:[pin allCopyCandidates]], writtenOnly);
+            if (nested.count) { if (!copies) copies = [NSMutableSet new]; [copies addObjectsFromArray:nested]; }
+            continue;
+        }
         NVMTLBuffer *buffer = nil;
         if ([resource isKindOfClass:[NVMTLBuffer class]]) buffer = resource;
         else if ([resource isKindOfClass:[NVMTLTexture class]]) {
