@@ -5237,8 +5237,9 @@ static void nvmtl_zprobe_drain(void) {
         nvmtl_hz_dispatch(&_cb->_c, hzfirst);
     }
     _g79Bar = NO;
-    if (kind == 0) { nvmtl_vk_barrier_site(_e78NDisp ? NVMTL_BARS_LATER_DISPATCH : NVMTL_BARS_FIRST_DISPATCH); nvmtl_vk_cmd_barrier(&_cb->_c); }
+    const BOOL firstDispatch = !_e78NDisp;
     _e78NDisp++;
+    if (kind == 0) { nvmtl_vk_barrier_site(firstDispatch ? NVMTL_BARS_FIRST_DISPATCH : NVMTL_BARS_LATER_DISPATCH); nvmtl_vk_cmd_barrier(&_cb->_c); }
     else if (kind == 1) nvmtl_vk_cmd_barrier_c2c(&_cb->_c);
     if (kind) _e78Loose = YES;
     nvmtl_enc78_count(E78C_DISP, 1); nvmtl_enc78_count(E78C_FULL + kind, 1);
