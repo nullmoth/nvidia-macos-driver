@@ -1614,6 +1614,10 @@ static NVMTLTexture *nvmtl_texbuf_view(NVMTLTexture *t, MTLPixelFormat f) {
     }
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt_public(f, &vkf, &bpp, &a8)) return nil;
+    // a remapped texture's bits are R10G10B10A2: a BGR10A2 view reads them as 64, an RGB10A2 view as 58, so a
+    // format-reinterpreting view means what it means on Metal
+    { NVMTLTexture *root = _parent ? _parent : self;
+      if (root->_rbSwap) { if (vkf == 58u) { vkf = 64u; v->_rbSwap = YES; } else if (vkf == 64u) vkf = 58u; } }
     if (vkf != [v nvi]->fmt && bpp != [v nvi]->bpp) {
         nvlog("newTextureView: pixel format %lu is %u B per element, its texture's is %u B - nil", (unsigned long)f, bpp, [v nvi]->bpp); return nil; }
     if (nvmtl_vk_image_view_create_range([v nvi], vkf, a8, v->_baseLevel, v->_mips, v->_baseSlice, v->_viewSlices, v->_viewType, &v->_ownView)) {
@@ -1659,6 +1663,10 @@ static uint32_t nvmtl_tex_attach_vkfmt(NVMTLTexture *t, int *a8) {
     }
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt_public(f, &vkf, &bpp, &a8)) return nil;
+    // a remapped texture's bits are R10G10B10A2: a BGR10A2 view reads them as 64, an RGB10A2 view as 58, so a
+    // format-reinterpreting view means what it means on Metal
+    { NVMTLTexture *root = _parent ? _parent : self;
+      if (root->_rbSwap) { if (vkf == 58u) { vkf = 64u; v->_rbSwap = YES; } else if (vkf == 64u) vkf = 58u; } }
     if (vkf != [v nvi]->fmt && bpp != [v nvi]->bpp) {
         nvlog("newTextureView: pixel format %lu is %u B per element, its texture's is %u B - nil", (unsigned long)f, bpp, [v nvi]->bpp); return nil; }
     uint32_t nslices = (uint32_t)slices.length;
@@ -4243,11 +4251,12 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     }
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt_public(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
+    const BOOL rbSwapPl = nvmtl_bgr10_storage_remap(d, &vkf);
     int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
     if (nvmtl_vk_image_create_typed_placed((uint32_t)d.width, (uint32_t)d.height, vkf, bpp, a8, (uint32_t)d.mipmapLevelCount, wantStex,
                                             (uint32_t)d.textureType, nvmtl_vk_layers_for_desc((uint32_t)d.textureType, (uint32_t)d.arrayLength, (uint32_t)d.depth), &_hm, off, &t->_i)) {
         nvlog("heap newTextureWithDescriptor: %lux%lu offset:%lu FAILED", (unsigned long)d.width, (unsigned long)d.height, (unsigned long)off); return nil; }
-    t->_q = nvmtl_device_queue(); t->_stex = t->_i.storage != 0; t->_heap = self; t->_heapOffset = off;
+    t->_q = nvmtl_device_queue(); t->_stex = t->_i.storage != 0; t->_rbSwap = rbSwapPl; t->_heap = self; t->_heapOffset = off;
     nvmtl_heap_register(self, t);
     nvmtl_texture_desc_swizzle(t, d);
     nvlog("heap newTextureWithDescriptor: %lux%lu%s offset:%lu -> %p", (unsigned long)d.width, (unsigned long)d.height, t->_stex ? " +storage" : "", (unsigned long)off, (__bridge void *)t);
@@ -4331,6 +4340,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
         || !d.width || !d.height || d.width > UINT32_MAX || d.height > UINT32_MAX) return nil;
     uint32_t dvk = 0, dasp = 0, vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_depthfmt_public(d.pixelFormat, &dvk, &dasp) == 0 || nvmtl_pixfmt_public(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
+    const BOOL rbSwapPl = nvmtl_bgr10_storage_remap(d, &vkf);
     const uint32_t w = (uint32_t)d.width, hh = (uint32_t)d.height, mips = (uint32_t)(d.mipmapLevelCount ? d.mipmapLevelCount : 1);
     const uint32_t type = (uint32_t)d.textureType, layers = nvmtl_vk_layers_for_desc(type, (uint32_t)d.arrayLength, (uint32_t)d.depth);
     const int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
@@ -4356,7 +4366,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)d.hazardTrackingMode << MTLResourceHazardTrackingModeShift)
              | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
     t->_fmt = d.pixelFormat; t->_mips = mips; t->_usage = d.usage;
-    t->_q = nvmtl_device_queue(); t->_stex = t->_i.storage != 0;
+    t->_q = nvmtl_device_queue(); t->_stex = t->_i.storage != 0; t->_rbSwap = rbSwapPl;
     t->_subHeap = self; t->_subCharge = len; t->_subPlaced = YES; t->_heapOffset = off;
     nvmtl_heap_register(self, t);
     t->_parkable = !noRecycle; memcpy(t->_pkey, key, sizeof key); t->_pkLen = len;
@@ -5424,6 +5434,19 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
     MTLTextureType type = t.textureType;
     return type == MTLTextureTypeCube ? 6 : type == MTLTextureTypeCubeArray ? t.arrayLength * 6 : t.arrayLength;
 }
+// A private BGR10A2Unorm texture with no ShaderWrite, so it keeps VkFormat 58: Metal's own byte layout. Held by the command
+// buffer until it completes.
+static NVMTLTexture *nvmtl_rb_temp(NVMTLCommandBuffer *cb, id<MTLDevice> dev, NSUInteger w, NSUInteger h)
+{
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGR10A2Unorm width:w height:h mipmapped:NO];
+    td.storageMode = MTLStorageModePrivate; td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+    NVMTLTexture *t = (NVMTLTexture *)[dev newTextureWithDescriptor:td];
+    if (!t || t->_rbSwap) { nvlog("blit: no BGR10A2 staging texture %lux%lu - this copy keeps R and B exchanged", (unsigned long)w, (unsigned long)h); return nil; }
+    if (!cb->_resources) cb->_resources = [NVMTLResSet new];
+    [cb->_resources addObject:t];
+    return t;
+}
+static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbSwap; }
 @implementation NVMTLBlitCommandEncoder
 - (unsigned long long)globalTraceObjectID { return nvmtl_global_trace_id(self); }
 - (void)copyFromBuffer:(id<MTLBuffer>)src sourceOffset:(NSUInteger)so toBuffer:(id<MTLBuffer>)dst
@@ -5458,6 +5481,24 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
     [_cb->_resources addObject:s];
     [_cb->_resources addObject:d];
+    // one side holds BGR10A2 as R10G10B10A2: stage through Metal's byte layout so the copy moves what Metal would move
+    if (nvmtl_rb_root(s) != nvmtl_rb_root(d) && [s nvi]->mtl_type != 7 && [d nvi]->mtl_type != 7 && (size.depth ? size.depth : 1) == 1) {
+        NVMTLTexture *tmp = nvmtl_rb_temp(_cb, s.device, size.width, size.height);
+        if (tmp) {
+            if (nvmtl_rb_root(s)) {
+                if (nvmtl_vk_cmd_blit_convert(&_cb->_c, [s nvi], (uint32_t)sl + s->_baseLevel, (uint32_t)ss + s->_baseSlice, (uint32_t)so.x, (uint32_t)so.y,
+                                              [tmp nvi], 0, 0, 0, 0, (uint32_t)size.width, (uint32_t)size.height)) nvlog("blit: BGR10A2 staging FAILED");
+                [self copyFromTexture:tmp sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:size toTexture:d
+                     destinationSlice:ds destinationLevel:dl destinationOrigin:dof];
+            } else {
+                [self copyFromTexture:s sourceSlice:ss sourceLevel:sl sourceOrigin:so sourceSize:size toTexture:tmp
+                     destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+                if (nvmtl_vk_cmd_blit_convert(&_cb->_c, [tmp nvi], 0, 0, 0, 0, [d nvi], (uint32_t)dl + d->_baseLevel, (uint32_t)ds + d->_baseSlice,
+                                              (uint32_t)dof.x, (uint32_t)dof.y, (uint32_t)size.width, (uint32_t)size.height)) nvlog("blit: BGR10A2 staging FAILED");
+            }
+            return;
+        }
+    }
     { int was = nvtrace_scope([d nvi]->w, [d nvi]->h);
       nvtrace("BLIT tex %ux%u surf %u (%lu,%lu %lux%lu) -> tex %ux%u surf %u (%lu,%lu)", [s nvi]->w, [s nvi]->h, nvmtl_surf_id(s), (unsigned long)so.x,
           (unsigned long)so.y, (unsigned long)size.width, (unsigned long)size.height, [d nvi]->w, [d nvi]->h, nvmtl_surf_id(d), (unsigned long)dof.x, (unsigned long)dof.y);
@@ -5550,6 +5591,16 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
     [_cb->_resources addObject:b];
     [_cb->_resources addObject:t];
+    if (nvmtl_rb_root(t) && [t nvi]->mtl_type != 7 && size.depth == 1) {   // buffer bytes are Metal's BGR10A2 layout
+        NVMTLTexture *tmp = nvmtl_rb_temp(_cb, t.device, size.width, size.height);
+        if (tmp) {
+            [self copyFromBuffer:src sourceOffset:so sourceBytesPerRow:row sourceBytesPerImage:img sourceSize:size toTexture:tmp
+                destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+            if (nvmtl_vk_cmd_blit_convert(&_cb->_c, [tmp nvi], 0, 0, 0, 0, [t nvi], (uint32_t)dl + t->_baseLevel, (uint32_t)ds + t->_baseSlice,
+                                          (uint32_t)dof.x, (uint32_t)dof.y, (uint32_t)size.width, (uint32_t)size.height)) nvlog("blit: BGR10A2 staging FAILED");
+            return;
+        }
+    }
     { nvk_image *ti = [t nvi]; uint32_t tl = (uint32_t)nvmtl_texture_slice_count(t), tm = (uint32_t)t.mipmapLevelCount; BOOL vol = ti->mtl_type == 7;
       if (ds >= tl || dl >= tm || (vol ? (dof.z + size.depth > MAX((NSUInteger)1, t.depth >> dl)) : (size.depth != 1 || dof.z))) {
           nvlog("blit copyFromBuffer:toTexture: slice %lu/%u level %lu/%u depth %lu@z%lu — outside this texture", (unsigned long)ds, tl, (unsigned long)dl, tm, (unsigned long)size.depth, (unsigned long)dof.z); return; } }
@@ -5600,6 +5651,16 @@ destinationBytesPerImage:(NSUInteger)img {
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
     [_cb->_resources addObject:t];
     [_cb->_resources addObject:b];
+    if (nvmtl_rb_root(t) && [t nvi]->mtl_type != 7 && size.depth == 1) {   // hand the buffer Metal's BGR10A2 layout
+        NVMTLTexture *tmp = nvmtl_rb_temp(_cb, t.device, size.width, size.height);
+        if (tmp) {
+            if (nvmtl_vk_cmd_blit_convert(&_cb->_c, [t nvi], (uint32_t)sl + t->_baseLevel, (uint32_t)ss + t->_baseSlice, (uint32_t)so.x, (uint32_t)so.y,
+                                          [tmp nvi], 0, 0, 0, 0, (uint32_t)size.width, (uint32_t)size.height)) nvlog("blit: BGR10A2 staging FAILED");
+            [self copyFromTexture:tmp sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:size toBuffer:dst
+                destinationOffset:dof destinationBytesPerRow:row destinationBytesPerImage:img];
+            return;
+        }
+    }
     { nvk_image *ti = [t nvi]; uint32_t tl = (uint32_t)nvmtl_texture_slice_count(t), tm = (uint32_t)t.mipmapLevelCount; BOOL vol = ti->mtl_type == 7;
       if (ss >= tl || sl >= tm || (vol ? (so.z + size.depth > MAX((NSUInteger)1, t.depth >> sl)) : (size.depth != 1 || so.z))) {
           nvlog("blit copyFromTexture:toBuffer: slice %lu/%u level %lu/%u depth %lu@z%lu — outside this texture", (unsigned long)ss, tl, (unsigned long)sl, tm, (unsigned long)size.depth, (unsigned long)so.z); return; } }

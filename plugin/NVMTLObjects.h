@@ -302,6 +302,7 @@ BOOL nvmtl_air_grid_only(NVMTLFunction *fn);
 @interface NVMTLIndirectCommandBuffer () { @public MTLResourceOptions _opts; } @end
 @interface NVMTLBuffer () { @public uint32_t _purge; } @end
 @interface NVMTLTexture () { @public uint32_t _purge; } @end
+@interface NVMTLTexture () { @public BOOL _rbSwap; } @end   // a writable BGR10A2Unorm held as R10G10B10A2 (NVMTLDevice.m)
 @interface NVMTLHeap () { @public uint32_t _purge; } @end
 #include <os/lock.h>
 @interface NVMTLHeap () { @public NSUInteger *_fr; uint32_t _nfr, _cfr; os_unfair_lock _fl; BOOL _backed; } @end
