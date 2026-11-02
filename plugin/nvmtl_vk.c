@@ -2626,6 +2626,8 @@ static uint32_t g_heap_next = 1;
 static uint32_t g_heap_fifo[NVMTL_BINDLESS_SLOTS]; static uint32_t g_heap_fifo_head, g_heap_fifo_n, g_heap_live;
 
 static nvk_image             g_dummyStex;
+static nvk_image             g_dummyStexArray;   /* the heap's storage dummy: a 2D ARRAY, the type the game's handle writes declare */
+static inline void *nvmtl_heap_storage_dummy(void) { return g_dummyStexArray.view ? g_dummyStexArray.view : g_dummyStex.view; }
 static VkSampler             g_dummySampler;
 
 #define NVMTL_SAMPLER_INTERN_CAP 4096u
@@ -2927,6 +2929,16 @@ static int ensure_descriptors_locked(void)
         nvlog("vk: NO storage dummy image (RGBA8 storage refused) — a declared-but-unbound storage texture stays unwritten");
         g_dummyStex.view = NULL;
     }
+    // The bindless heap's storage dummy is a 2D ARRAY (1x1, one layer), not the 2D image above: a kernel that stores through
+    // a heap slot declares the type the handle's texture has, and in Cyberpunk 584 of 609 such kernels write 2D arrays
+    // (23 write 3D, 1 writes 2D). A store whose declared dimensionality differs from the descriptor's header is undefined
+    // on NVIDIA and walked off the 1x1 2D image into unmapped memory (a clear kernel storing through resource ID 0 = slot
+    // 0, a FAULT_PDE in the image region). The per-draw storage dummy stays 2D: declared 2D storage arguments use it.
+    if (nvmtl_vk_image_create_typed(1, 1, VK_FORMAT_R8G8B8A8_UNORM, 4, 0, 1, 1, 3, 1, &g_dummyStexArray) || !g_dummyStexArray.storage) {
+        nvlog("vk: NO 2D-array storage dummy (RGBA8 storage refused) - heap slot 0 keeps the 2D storage dummy");
+        if (g_dummyStexArray.img) nvmtl_vk_image_destroy(&g_dummyStexArray);
+        memset(&g_dummyStexArray, 0, sizeof g_dummyStexArray);
+    }
     if (g_mutable && nvmtl_vk_texel_view_create(&g_dummyBuf, 0, 256, VK_FORMAT_R8G8B8A8_UNORM, 1, &g_dummyTexAlias, &g_dummyTexView, NULL)) {
         nvlog("vk: par3 NO texel dummy — texture buffers are turned OFF for this process (the layout stays mutable)"); g_mutable = 0; }
     /* The sampler a shader gets at a slot nothing was bound to. A Metal constexpr sampler defaults to mip_filter::none,
@@ -3003,8 +3015,8 @@ static int ensure_descriptors_locked(void)
             // undefined storage-image descriptor and writes through it to an address nothing maps. Every slot now holds
             // the dummies at 2-4 from the start, as binding 0 always has. NVMTL_HEAP_PREFILL=0 restores the old state.
             { const char *e = getenv("NVMTL_HEAP_PREFILL"); const int prefill = !(e && e[0] == '0');
-              if (hnb == 5 && prefill && g_dummyStex.view) {
-                  for (uint32_t k = 0; k < NVMTL_BINDLESS_SLOTS; k++) fill[k] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, (VkImageView)g_dummyStex.view, VK_IMAGE_LAYOUT_GENERAL };
+              if (hnb == 5 && prefill && nvmtl_heap_storage_dummy()) {
+                  for (uint32_t k = 0; k < NVMTL_BINDLESS_SLOTS; k++) fill[k] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, (VkImageView)nvmtl_heap_storage_dummy(), VK_IMAGE_LAYOUT_GENERAL };
                   VkWriteDescriptorSet w2 = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, hset, 2, 0, NVMTL_BINDLESS_SLOTS, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, fill, NULL, NULL };
                   pvkUpdateDescriptorSets(g_dev, 1, &w2, 0, NULL);
                   VkBufferView *tf = g_dummyTexView ? (VkBufferView *)malloc(sizeof *tf * NVMTL_BINDLESS_SLOTS) : NULL;
@@ -3097,7 +3109,7 @@ uint32_t nvmtl_vk_bindless_put(void *view)
 void nvmtl_vk_bindless_put_storage(uint32_t slot, void *view)
 {
     if (!slot || !g_heapSet || !g_heap_storage_binding) return;
-    void *v = view ? view : g_dummyStex.view;
+    void *v = view ? view : nvmtl_heap_storage_dummy();
     if (!v) return;
     VkDescriptorImageInfo ii = { VK_NULL_HANDLE, (VkImageView)v, VK_IMAGE_LAYOUT_GENERAL };
     VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 2, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ii, NULL, NULL };
@@ -3221,14 +3233,14 @@ static void nvmtl_vk_bindless_drop_now(uint32_t slot)
     // binding 2 (a new sampled texture rewrites binding 0 only), and a kernel writing through it stored into the old
     // image's memory - a page fault once that memory was freed (the first-scene fault with the five-binding heap on).
     if (g_heap_storage_binding) {
-        VkDescriptorImageInfo si = { VK_NULL_HANDLE, (VkImageView)g_dummyStex.view, VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo si = { VK_NULL_HANDLE, (VkImageView)nvmtl_heap_storage_dummy(), VK_IMAGE_LAYOUT_GENERAL };
         VkBufferView tv = (VkBufferView)g_dummyTexView;
         VkWriteDescriptorSet w[3]; uint32_t n = 0;
-        if (g_dummyStex.view) w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 2, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &si, NULL, NULL };
+        if (nvmtl_heap_storage_dummy()) w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 2, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &si, NULL, NULL };
         if (tv) { w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 3, slot, 1, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, NULL, NULL, &tv };
                   w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 4, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NULL, NULL, &tv }; }
         if (n) pvkUpdateDescriptorSets(g_dev, n, w, 0, NULL);
-        if (g_dummyStex.view) nvmtl_slots_write(slot, 2, g_dummyStex.view);
+        if (nvmtl_heap_storage_dummy()) nvmtl_slots_write(slot, 2, nvmtl_heap_storage_dummy());
         if (tv) { nvmtl_slots_write(slot, 3, tv); nvmtl_slots_write(slot, 4, tv); }
     }
     nvmtl_slots_drop(slot);
@@ -6610,7 +6622,7 @@ static void nvmtl_vk_zero_dummies(void)
     static int done;
     if (done) return;
     done = 1;
-    nvk_image *imgs[2] = { &g_dummyImg, g_dummyStex.view ? &g_dummyStex : NULL };
+    nvk_image *imgs[3] = { &g_dummyImg, g_dummyStex.view ? &g_dummyStex : NULL, g_dummyStexArray.view ? &g_dummyStexArray : NULL };
     VkCommandPool pool = VK_NULL_HANDLE; VkCommandBuffer cb = VK_NULL_HANDLE; VkFence fence = VK_NULL_HANDLE;
     VkCommandPoolCreateInfo cpci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL, 0, g_qfam };
     if (pvkCreateCommandPool(g_dev, &cpci, NULL, &pool) != VK_SUCCESS) { nvlog("vk: dummy zero-fill SKIPPED — vkCreateCommandPool failed; an unbound texture still samples uninitialised memory"); return; }
@@ -6620,9 +6632,9 @@ static void nvmtl_vk_zero_dummies(void)
     if (pvkBeginCommandBuffer(cb, &bi) != VK_SUCCESS) { nvlog("vk: dummy zero-fill SKIPPED — vkBeginCommandBuffer failed; an unbound texture still samples uninitialised memory"); return; }
     VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     VkClearColorValue zero; memset(&zero, 0, sizeof zero);
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < 3; k++) {
         if (!imgs[k] || !imgs[k]->img) continue;
-        VkImageLayout fin = (imgs[k] == &g_dummyStex) ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkImageLayout fin = (imgs[k] == &g_dummyStex || imgs[k] == &g_dummyStexArray) ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
             0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)imgs[k]->img, range };
