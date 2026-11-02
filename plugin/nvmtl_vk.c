@@ -311,10 +311,11 @@ static int nvmtl_image_grace_on(void)
         if (on) nvlog("vk: dead images are released only after the submits in flight at their death complete (NVMTL_IMAGE_GRACE=1)"); }
     return on;
 }
-typedef struct nvmtl_grace_img { nvk_image img; uint64_t seq; struct nvmtl_grace_img *next; } nvmtl_grace_img;
+typedef struct nvmtl_grace_img { nvk_image img; void *bufview, *alias; uint64_t seq; struct nvmtl_grace_img *next; } nvmtl_grace_img;
 static pthread_mutex_t g_grace_lock = PTHREAD_MUTEX_INITIALIZER;
 static nvmtl_grace_img *g_grace_head, *g_grace_tail; static uint64_t g_grace_n, g_grace_reaped, g_cmd_finished_seq;
 static void nvmtl_vk_image_destroy_now(nvk_image *i);
+static void nvmtl_vk_texel_view_destroy_now(void *alias, void *view);
 static void nvmtl_image_grace_reap(void)
 {
     nvmtl_grace_img *due = NULL, **tail = &due; uint64_t n = 0;
@@ -324,7 +325,10 @@ static void nvmtl_image_grace_reap(void)
         e->next = NULL; *tail = e; tail = &e->next; g_grace_n--; g_grace_reaped++; n++;
     }
     pthread_mutex_unlock(&g_grace_lock);
-    while (due) { nvmtl_grace_img *e = due; due = e->next; nvmtl_vk_image_destroy_now(&e->img); free(e); }
+    while (due) { nvmtl_grace_img *e = due; due = e->next;
+                  if (e->bufview || e->alias) nvmtl_vk_texel_view_destroy_now(e->alias, e->bufview);
+                  else nvmtl_vk_image_destroy_now(&e->img);
+                  free(e); }
     if (n && (g_grace_reaped & 0xFFF) < n) nvlog("vk: image grace: %llu dead images released so far, %llu still held", (unsigned long long)g_grace_reaped, (unsigned long long)g_grace_n);
 }
 void nvmtl_vk_cmd_counts(uint64_t *begun, uint64_t *submitted, uint64_t *abandoned)
@@ -7497,7 +7501,7 @@ void nvmtl_vk_image_destroy(nvk_image *i)
 }
 static void nvmtl_vk_image_destroy_now(nvk_image *i)
 {
-    if (!i->img) { if (i->view) { pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); i->view = NULL; } return; }   // a view held by the grace
+    if (!i->img) { if (i->view) { pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); i->view = NULL; } return; }   // a view held by the grace (texel entries: nvmtl_image_grace_reap)
     nvmtl_vk_image_upload_barrier(i);   // an async upload must finish before we free this image's memory (#96)
     if (i->view) pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL);
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
@@ -7542,7 +7546,7 @@ int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
         (VkFormat)i->fmt, swz, { VK_IMAGE_ASPECT_COLOR_BIT, 0, i->mips ? i->mips : 1, 0, t == 7 ? 1 : i->layers } };
     if (pvkCreateImageView(g_dev, &vci, NULL, &view) != VK_SUCCESS) { pvkFreeMemory(g_dev, mem, NULL); pvkDestroyImage(g_dev, img, NULL); return -1; }
     pthread_mutex_lock(&g_sl_lock); nvmtl_im_died(&g_im, i->img, g_cmd_submitted); pthread_mutex_unlock(&g_sl_lock);   // re-backed: the old image dies, the new one is recorded below
-    if (i->view) pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL);
+    if (i->view) nvmtl_vk_image_view_destroy(i->view);   // through the grace: a submit in flight may still hold this view's descriptor index
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
     if (i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); g_alloc_bytes -= i->alloc; if (i->sysmem) { g_sys_bytes -= i->alloc; g_sys_align -= (i->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= i->alloc; g_img_align -= (i->alloc + 65535ull) & ~65535ull; }    }
     uint64_t aligned = (mr.size + 65535ull) & ~65535ull;
@@ -8741,7 +8745,26 @@ int nvmtl_vk_texel_view_create(nvk_buffer *b, size_t offset, size_t range, uint3
     *alias = ab; *view = v; if (storage_ok) *storage_ok = st;
     return 0;
 }
+// A texel buffer view's descriptor index (heap bindings 3 and 4) has the same lifetime rule as an image view's: with the
+// image grace on it is destroyed only after the submits in flight at its death complete.
 void nvmtl_vk_texel_view_destroy(void *alias, void *view)
+{
+    if (!view && !alias) return;
+    if (g_state == 1 && nvmtl_image_grace_on()) {
+        nvmtl_grace_img *e = calloc(1, sizeof *e);
+        if (e) {
+            e->bufview = view; e->alias = alias;
+            pthread_mutex_lock(&g_grace_lock);
+            e->seq = g_cmd_submitted;
+            if (g_grace_tail) g_grace_tail->next = e; else g_grace_head = e;
+            g_grace_tail = e; g_grace_n++;
+            pthread_mutex_unlock(&g_grace_lock);
+            return;
+        }
+    }
+    nvmtl_vk_texel_view_destroy_now(alias, view);
+}
+static void nvmtl_vk_texel_view_destroy_now(void *alias, void *view)
 {
     if (view && pvkDestroyBufferView) pvkDestroyBufferView(g_dev, (VkBufferView)view, NULL);
     if (alias) pvkDestroyBuffer(g_dev, (VkBuffer)alias, NULL);
