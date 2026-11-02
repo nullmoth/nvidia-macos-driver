@@ -1315,10 +1315,12 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
 - (id<MTLHeap>)heap { return _heap ?: _subHeap; }
 - (NSUInteger)heapOffset { return _heapOffset; }
 - (void)dealloc {
+    // the heap slot goes back to the dummies BEFORE any view or buffer view it names is destroyed, so no slot ever
+    // holds the index of a dead view (NVK reissues a destroyed view's descriptor index to the next view created)
+    if (_resid) nvmtl_resid_texture_gone(_resid);
     if (_sampledDepthView) nvmtl_vk_image_view_destroy(_sampledDepthView);
     nvmtl_tex_objs_gone++;
     if (_tbView || _tbAlias) { nvmtl_vk_texel_view_destroy(_tbAlias, _tbView); _tbView = _tbAlias = NULL; }
-    if (_resid) nvmtl_resid_texture_gone(_resid);
     if (_ownView) nvmtl_vk_image_view_destroy(_ownView);
     if (_swzView) nvmtl_vk_image_view_destroy(_swzView);
     if (!_parent && _parkable && _subHeap && _i.img) nvmtl_heap_park(_subHeap, &_i, _pkey, _heapOffset, _pkLen);
