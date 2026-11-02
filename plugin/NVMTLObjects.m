@@ -4284,6 +4284,30 @@ static void nvmtl_heap_census(const char *what) {
           (unsigned long long)atomic_load(&gHABacked), (unsigned long long)(atomic_load(&gHABackedBytes) >> 20),
           (unsigned long long)atomic_load(&gHAFallback));
 }
+// Every live app heap, for the device-loss report: the struct, its VkDeviceMemory, size, use, free ranges and park.
+static NSHashTable *gHeaps; static os_unfair_lock gHeapsLock = OS_UNFAIR_LOCK_INIT;
+static void nvmtl_heap_register(NVMTLHeap *h) {
+    os_unfair_lock_lock(&gHeapsLock);
+    if (!gHeaps) gHeaps = [NSHashTable weakObjectsHashTable];
+    [gHeaps addObject:h];
+    os_unfair_lock_unlock(&gHeapsLock);
+}
+void nvmtl_heaps_dump(FILE *f, void (*emit)(void *, const char *)) {
+    NSArray *all = nil;
+    if (os_unfair_lock_trylock(&gHeapsLock)) { all = gHeaps.allObjects; os_unfair_lock_unlock(&gHeapsLock); }
+    else { emit(f, "fault context: the heap registry is locked by another thread - heaps not listed"); return; }
+    char line[600]; unsigned n = 0;
+    for (NVMTLHeap *h in all) {
+        int o = snprintf(line, sizeof line, "fault context: heap %p \"%s\": VkDeviceMemory %p, size %lu, used %lu, %s, park %u, free ranges (%u):",
+                         (__bridge void *)h, h.label.UTF8String ?: "", h->_hm.mem, (unsigned long)h->_hm.size, (unsigned long)h->_used, h->_backed ? "backed" : "legacy (not backed)", h->_npk, h->_nfr);
+        if (os_unfair_lock_trylock(&h->_fl)) {
+            for (uint32_t i = 0; i < h->_nfr && o < (int)sizeof line - 40; i++) o += snprintf(line + o, sizeof line - (size_t)o, " %lu+%lu", (unsigned long)h->_fr[2 * i], (unsigned long)h->_fr[2 * i + 1]);
+            os_unfair_lock_unlock(&h->_fl);
+        } else o += snprintf(line + o, sizeof line - (size_t)o, " (free list locked)");
+        emit(f, line); n++;
+    }
+    snprintf(line, sizeof line, "fault context: %u live app heaps listed", n); emit(f, line);
+}
 void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     if (nvmtl_vk_heap_create(size, shared, &h->_hm)) {
         nvlog("heap alias: an automatic %s heap of %lu bytes got no memory of its own - its resources take the legacy fresh path",
@@ -4291,6 +4315,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
         return;
     }
     nvmtl_vk_heap_zero(&h->_hm, shared ? "shared" : "private");
+    nvmtl_heap_register(h);
     h->_fl = OS_UNFAIR_LOCK_INIT; h->_nfr = 0; h->_cfr = 0; h->_fr = NULL;
     if (nvmtl_heap_grow(h)) { nvmtl_vk_heap_destroy(&h->_hm); nvlog("heap alias: no free list for a %lu-byte heap - legacy path", (unsigned long)size); return; }
     h->_fr[0] = 0; h->_fr[1] = size; h->_nfr = 1; h->_backed = YES;

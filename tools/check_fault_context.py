@@ -71,7 +71,7 @@ hooks = [
     ("NVMTLEmbedded.m", r"VIEW NVMTLTexture %p", 1),
     ("nvmtl_vk.c", r"nvmtl_loss_mutex_lock\(&g_", 14),                                   # every lock in the loss path is bounded
     ("nvmtl_vk.c", r"nvmtl_loss_read\(", 5),                                             # every host read in the loss path goes through the kernel
-    ("nvmtl_vk.c", r"nvmtl_loss_section\(f, ", 7),                                       # flushed, announced sections
+    ("nvmtl_vk.c", r"nvmtl_loss_section\(f, ", 8),                                       # flushed, announced sections
     ("nvmtl_vk.c", r"a second device-loss dump on another thread - skipped", 1),
     ("nvmtl_vk.c", r"#define pvkAllocateMemory\(d, i, a, o\) nvmtl_mem_alloc_rec", 1),   # every memory allocation recorded with its base address
     ("nvmtl_vk.c", r"#define pvkFreeMemory\(d, m, a\) nvmtl_mem_free_rec", 1),
@@ -79,6 +79,9 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_mb_find\(&g_mb, image->img, &bmem, &boff\)", 1),            # image records carry their real bind
     ("nvmtl_vk.c", r"nvmtl_mm_dump\(&g_mm, f\)", 1),
     ("nvmtl_vk.c", r"nvmtl_loss_section\(f, \"memories\"\)", 1),
+    ("nvmtl_vk.c", r"nvmtl_heaps_dump\(f, nvmtl_fx_emit_both\)", 1),                   # every live app heap at loss
+    ("NVMTLObjects.m", r"nvmtl_heap_register\(h\)", 1),
+    ("nvmtl_vk.c", r"image->placed \? image->hz_off", 1),                               # placed images record their bound range
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev, "NVMTLEmbedded.m": emb}
 short = []; total = 0
