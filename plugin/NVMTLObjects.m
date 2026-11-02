@@ -104,20 +104,12 @@ static _Atomic uint64_t gRes2Tick;
 static void nvmtl_res2_note_use(NVMTLTexture *t);
 static uint64_t nvmtl_res2_evict(uint64_t want);
 extern uint64_t (*nvmtl_res2_evict_hook)(uint64_t want);
+#include "nvmtl_env_knobs.h"
 __attribute__((constructor)) static void nvmtl_conf_knobs(void)
 {
 #if NVMTL_RELEASE
-    { extern char **environ; char *names[256]; unsigned n = 0;
-      for (char **e = environ; e && *e && n < 256; e++)
-          if (!strncmp(*e, "NVMTL_", 6) || !strncmp(*e, "NVK_", 4) || !strncmp(*e, "NAK_", 4) || !strncmp(*e, "NVRM_", 5)) {
-              // Preserve the GL uniform path's per-process override and diagnostics.
-              if (!strncmp(*e, "NVMTL_UNIFORM_CBUF=", 19)
-                  || !strncmp(*e, "NVMTL_UNIFORM_CBUF_STATS=", 25)) continue;
-              // Keep the switch that restores inline presents.
-              if (!strncmp(*e, "NVMTL_PRESENT_INLINE=", 21)) continue;
-              const char *eq = strchr(*e, '='); if (!eq) continue;
-              names[n] = strndup(*e, (size_t)(eq - *e)); if (names[n]) n++; }
-      for (unsigned i = 0; i < n; i++) { unsetenv(names[i]); free(names[i]); } }
+    // Inherited driver knobs are forgotten unless this process set NVMTL_PROCESS_ENV=1 (nvmtl_env_knobs.h has the rule).
+    { extern char **environ; nvmtl_release_forget_env(environ); }
 #endif
     unsigned forgot = 0;
     { const char *rec = getenv("NVMTL_CONF_SET");
