@@ -888,6 +888,11 @@ fn pixel_linear_hw_coord(
         return None;
     }
     match classify_sample_level(ctx, false, args) {
+        // A fragment sample with no level is an implicit-LOD sample in SPIR-V: the hardware would pick a mip level from
+        // the uv derivatives, while a Metal pixel-coordinate sample always reads level 0. The VkSampler behind a pixel
+        // sampler is created with linear mips and no LOD clamp, so MetalFX's MFX_NORMALIZE (full-screen, implicit)
+        // blended mip levels and the whole colour chain after it came out wrong. Compute has no implicit LOD.
+        None if ctx.stage == Stage::Fragment => return None,
         None => {}
         Some(SampleLevel::Explicit(lod)) if float_operand_is_constant_zero(ctx, lod) => {}
         _ => return None,
