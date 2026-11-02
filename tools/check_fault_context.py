@@ -59,6 +59,8 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_fault_slot_report\(q\[k\], f\)", 2),                     # the slot a pointee names, from a host view and via a copy
     ("nvmtl_vk.c", r"nvmtl_sl_census\(&g_sl", 1),
     ("nvmtl_vk.c", r"NVMTL_HEAP_PREFILL", 2),
+    ("nvmtl_vk.c", r"nvmtl_slot_drop_reap\(\);", 1),                                    # a slot drop waits for the submits in flight at the texture's death
+    ("nvmtl_vk.c", r"holds handle 0x%016llx: bit 62", 1),                                # the full gpuResourceID the kernel masked
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev}
 short = []; total = 0
