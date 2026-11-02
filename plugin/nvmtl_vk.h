@@ -111,6 +111,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  uint8_t hz_draw_due;   /* something the next draw's hazard check must see arrived */
                  uint32_t hz_sn;   /* hazard model timing sample counter */
                  nvmtl_fx_cb fx;   /* fault context: the last dispatches and the storage binds in force (nvmtl_fault_context.h) */
+                 uint64_t fx_seq;  /* the queue-submit sequence number this command buffer was submitted with */
                } nvk_cmdbuf;
 int  nvmtl_vk_init(void);
 int nvmtl_vk_sample_positions_backend(void);
