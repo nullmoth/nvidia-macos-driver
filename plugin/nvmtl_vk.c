@@ -206,7 +206,7 @@ void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, siz
 #define INSTANCE_FNS(X) X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceFeatures) \
     X(vkEnumerateDeviceExtensionProperties) X(vkGetPhysicalDeviceQueueFamilyProperties) X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceMemoryProperties2) X(vkGetPhysicalDeviceProperties2) X(vkCreateDevice) X(vkGetDeviceProcAddr)
 #define DEVICE_FNS(X) X(vkGetDeviceQueue) X(vkCreateBuffer) X(vkGetBufferMemoryRequirements) X(vkAllocateMemory) \
-    X(vkBindBufferMemory) X(vkMapMemory) X(vkUnmapMemory) X(vkCreateImage) X(vkGetImageMemoryRequirements) X(vkBindImageMemory) \
+    X(vkGetImageMemoryRequirements2) X(vkBindBufferMemory) X(vkMapMemory) X(vkUnmapMemory) X(vkCreateImage) X(vkGetImageMemoryRequirements) X(vkBindImageMemory) \
     X(vkCreateImageView) X(vkCreateRenderPass) X(vkCreateFramebuffer) X(vkCreateShaderModule) X(vkDestroyShaderModule) X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) \
     X(vkDestroyPipeline) X(vkDestroyRenderPass) X(vkCreateGraphicsPipelines) X(vkCreateComputePipelines) X(vkCmdDispatch) X(vkCmdPushConstants) X(vkCreateCommandPool) X(vkAllocateCommandBuffers) X(vkBeginCommandBuffer) \
     X(vkCmdBeginRenderPass) X(vkCmdBindPipeline) X(vkCmdDraw) X(vkCmdEndRenderPass) X(vkEndCommandBuffer) \
@@ -1202,6 +1202,10 @@ static int  pool_buffer_create(size_t size, nvk_buffer *out);
 static int  pool_buffer_create_in(int vram, size_t size, nvk_buffer *out);
 static int  vpool_on(void);
 static void pool_buffer_release(nvk_buffer *b);
+static int  private_pool_on(void);
+static int  private_pool_buffer_create(size_t size, nvk_buffer *out);
+static int  image_pool_bind(nvk_image *out);
+static void image_pool_release(nvk_image *out);
 #define NVMTL_BUFPARK_N     32
 #define NVMTL_BUFPARK_BYTES (1024ull << 20)
 #define NVMTL_BUFPARK_MAX1  (512ull << 20)
@@ -1368,6 +1372,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
 {
     if (nvmtl_vk_init()) return -1;
     memset(out, 0, sizeof *out); out->size = size;
+    if (!host_visible && size <= NVMTL_POOL_MAX && private_pool_on() && private_pool_buffer_create(size, out) == 0) return 0;
     if (host_visible == 2 && size <= NVMTL_POOL_MAX && vpool_on() && pool_buffer_create_in(1, size, out) == 0) return 0;
     memset(out, 0, sizeof *out); out->size = size;
     if (host_visible && size <= NVMTL_POOL_MAX && pool_buffer_create(size, out) == 0) return 0;
@@ -1920,6 +1925,7 @@ static void nvmtl_failed_image(nvk_image *image)
 {
     if (image->view) pvkDestroyImageView(g_dev, (VkImageView)image->view, NULL);
     if (image->img) pvkDestroyImage(g_dev, (VkImage)image->img, NULL);
+    if (image->pool) image_pool_release(image);
     if (image->mem && !image->placed) {
         pvkFreeMemory(g_dev, (VkDeviceMemory)image->mem, NULL);
 
@@ -1929,6 +1935,7 @@ static void nvmtl_failed_image(nvk_image *image)
 }
 static void nvmtl_commit_image(nvk_image *image)
 {
+    if (image->pool) { if (image->sysmem) g_sys_bytes += image->alloc; else g_vram_bytes += image->alloc; }
     if (image->mem && !image->placed) {
         uint64_t aligned = (image->alloc + 65535ull) & ~65535ull;
         g_alloc_bytes += image->alloc;
@@ -2011,9 +2018,11 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
     nvmtl_vk_image_mutable(&ici, out);
     VKCK(nvmtl_opaque_CreateImage(g_dev, &ici, NULL, &out->img), "vkCreateImage");
     VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, out->img, &mr);
-    VKCK(nvmtl_alloc_opaque_image_mem(&mr, &out->mem, &out->sysmem, "colour"), "vkAllocateMemory(image)");
-    out->alloc = mr.size;
-    VKCK(pvkBindImageMemory(g_dev, out->img, out->mem, 0), "vkBindImageMemory");
+    if (image_pool_bind(out)) {
+        VKCK(nvmtl_alloc_opaque_image_mem(&mr, &out->mem, &out->sysmem, "colour"), "vkAllocateMemory(image)");
+        out->alloc = mr.size;
+        VKCK(pvkBindImageMemory(g_dev, out->img, out->mem, 0), "vkBindImageMemory");
+    }
     VkComponentMapping swz = nvmtl_a8_mapping(a8);
     VkImageViewType viewType = mtl_type == 0 ? VK_IMAGE_VIEW_TYPE_1D : mtl_type == 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : mtl_type == 3 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
                              : mtl_type == 5 ? VK_IMAGE_VIEW_TYPE_CUBE : mtl_type == 6 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : mtl_type == 7 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
@@ -6428,6 +6437,7 @@ void nvmtl_vk_image_destroy(nvk_image *i)
     g_img_gone++;
     if (i->view) pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL);
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
+    if (i->pool) { if (i->sysmem) g_sys_bytes -= i->alloc; else g_vram_bytes -= i->alloc; image_pool_release(i); }
     if (!i->placed && i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); g_alloc_bytes -= i->alloc; if (i->sysmem) { g_sys_bytes -= i->alloc; g_sys_align -= (i->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= i->alloc; g_img_align -= (i->alloc + 65535ull) & ~65535ull; }    }
     memset(i, 0, sizeof *i);
 }
@@ -8150,6 +8160,9 @@ typedef struct pool_block {
 static pool_block *g_pool;
 #define NVMTL_VPOOL_BLOCK (8u << 20)
 static pool_block *g_vpool;
+static pool_block *g_private_pool;   /* NVMTL_PRIVATE_POOL: small private buffers */
+static pool_block *g_image_pool;     /* NVMTL_IMAGE_POOL: small optimal images */
+static pool_block **pool_head(int vram);
 static uint64_t g_vpool_blocks;
 static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
 static size_t g_pool_align;
@@ -8271,17 +8284,106 @@ static void pool_buffer_release(nvk_buffer *b)
     blk->nlive--; g_pool_live--; g_pool_bytes -= b->alloc;
     pool_block_give(blk, b->poff, b->alloc);
     if (!blk->nlive) {
-        pool_block **head = blk->vram ? &g_vpool : &g_pool;
+        pool_block **head = pool_head(blk->vram);
         uint32_t empties = 0; for (pool_block *p = *head; p; p = p->next) if (!p->nlive) empties++;
         if (empties > NVMTL_POOL_KEEP) {
             pool_block **pp = head; while (*pp && *pp != blk) pp = &(*pp)->next;
             if (*pp) { *pp = blk->next; const size_t hs = blk->heap.size; const int v = blk->vram;
                 nvmtl_vk_heap_destroy(&blk->heap); free(blk->fr); free(blk); g_pool_blocks--;
-                if (v) { g_vpool_blocks--; g_bar1_bytes -= hs; } }
+                if (v == 1) { g_vpool_blocks--; g_bar1_bytes -= hs; } }
         }
     }
     pthread_mutex_unlock(&g_pool_lock);
     b->pool = NULL;
+}
+
+/* NVMTL_PRIVATE_POOL=1: private buffers of up to NVMTL_POOL_MAX bytes share VRAM blocks of NVMTL_POOL_BLOCK instead of
+   each taking a vkAllocateMemory of its own (a kernel round trip per buffer, and the budget query in front of it).
+   Each keeps its own VkBuffer and device address; the reservation is the memory requirement plus alignment slack, so
+   the bound range stays inside it even when a free range is split. Off unless asked for: the sharing changes nothing a
+   shader sees, but an app that makes and frees many small private buffers is the case it was measured for. */
+static int private_pool_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_PRIVATE_POOL"); on = e && e[0] == '1';
+        if (on) nvlog("vk: private buffers of up to %u KB share %u MiB VRAM blocks (NVMTL_PRIVATE_POOL=1)", NVMTL_POOL_MAX >> 10, NVMTL_POOL_BLOCK >> 20); }
+    return on;
+}
+/* the block list for a pool kind: 0 system pool, 1 shared-in-VRAM pool, 2 private buffers, 3 optimal images */
+static pool_block **pool_head(int vram)
+{
+    return vram == 3 ? &g_image_pool : vram == 2 ? &g_private_pool : vram ? &g_vpool : &g_pool;
+}
+/* Takes `reserved` bytes from a block of kind `vram` whose memory type is in `bits`, making a VRAM block when none fits.
+   On success the block has one more live range and the lock is released; the caller binds at an aligned offset. */
+static pool_block *pool_take_vram(int vram, uint32_t bits, size_t reserved, size_t *off, const char *what)
+{
+    pthread_mutex_lock(&g_pool_lock);
+    pool_block *blk = *pool_head(vram); int got = 0;
+    for (; blk; blk = blk->next) if ((bits & (1u << blk->heap.memtype)) && pool_block_take(blk, reserved, off)) { got = 1; break; }
+    if (!got) {
+        pool_block *fresh = calloc(1, sizeof *fresh);
+        if (!fresh || nvmtl_vk_heap_create(NVMTL_POOL_BLOCK, 0, &fresh->heap)) { free(fresh); pthread_mutex_unlock(&g_pool_lock); return NULL; }
+        if (!(bits & (1u << fresh->heap.memtype)) || !pool_block_take(fresh, reserved, off)) {
+            nvmtl_vk_heap_destroy(&fresh->heap); free(fresh); pthread_mutex_unlock(&g_pool_lock); return NULL; }
+        fresh->vram = vram; fresh->next = *pool_head(vram); *pool_head(vram) = fresh; g_pool_blocks++; blk = fresh;
+        nvlog("%s pool: %zu MiB block, memory type %u, %llu pool blocks in all", what, fresh->heap.size >> 20, fresh->heap.memtype, (unsigned long long)g_pool_blocks);
+    }
+    blk->nlive++; g_pool_live++; g_pool_bytes += reserved;
+    pthread_mutex_unlock(&g_pool_lock);
+    return blk;
+}
+static int private_pool_buffer_create(size_t size, nvk_buffer *out)
+{
+    VkBufferCreateInfo ci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, size, NVMTL_BUFFER_USAGE, VK_SHARING_MODE_EXCLUSIVE, 0, NULL };
+    VkBuffer buffer = VK_NULL_HANDLE;
+    if (pvkCreateBuffer(g_dev, &ci, NULL, &buffer) != VK_SUCCESS) return -1;
+    VkMemoryRequirements mr; pvkGetBufferMemoryRequirements(g_dev, buffer, &mr);
+    const size_t alignment = mr.alignment ? (size_t)mr.alignment : 1;
+    if (mr.size > SIZE_MAX - (alignment - 1) || (size_t)mr.size + alignment - 1 > NVMTL_POOL_BLOCK) { pvkDestroyBuffer(g_dev, buffer, NULL); return -1; }
+    const size_t reserved = (size_t)mr.size + alignment - 1; size_t off = 0;
+    pool_block *blk = pool_take_vram(2, mr.memoryTypeBits, reserved, &off, "private buffer");
+    if (!blk) { pvkDestroyBuffer(g_dev, buffer, NULL); return -1; }
+    const size_t bound = (off + alignment - 1) / alignment * alignment;
+    if (pvkBindBufferMemory(g_dev, buffer, (VkDeviceMemory)blk->heap.mem, bound) != VK_SUCCESS) {
+        nvk_buffer failed = { .pool = blk, .poff = off, .alloc = reserved }; pool_buffer_release(&failed);
+        pvkDestroyBuffer(g_dev, buffer, NULL); return -1; }
+    *out = (nvk_buffer){ .buf = (void *)buffer, .mem = blk->heap.mem, .size = size, .alloc = reserved, .placed = 1, .pool = blk, .poff = off, .moff = bound,
+                         .sysmem = !(g_memp.memoryTypes[blk->heap.memtype].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+    g_buf_made++;
+    return 0;
+}
+/* NVMTL_IMAGE_POOL=1: ordinary optimal colour images of up to NVMTL_POOL_MAX bytes share VRAM blocks of their own, the
+   same way. External, linear, placed and dedicated images keep their paths. Returns -1 when the image is to be bound the
+   usual way. */
+static int image_pool_bind(nvk_image *out)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_IMAGE_POOL"); on = e && e[0] == '1';
+        if (on) nvlog("vk: optimal images of up to %u KB share %u MiB VRAM blocks (NVMTL_IMAGE_POOL=1)", NVMTL_POOL_MAX >> 10, NVMTL_POOL_BLOCK >> 20); }
+    if (!on) return -1;
+    VkMemoryDedicatedRequirements dedicated = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS };
+    VkMemoryRequirements2 requirements = { VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dedicated };
+    VkImageMemoryRequirementsInfo2 info = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2, NULL, (VkImage)out->img };
+    pvkGetImageMemoryRequirements2(g_dev, &info, &requirements);
+    const VkMemoryRequirements *mr = &requirements.memoryRequirements;
+    if (dedicated.requiresDedicatedAllocation || mr->size > NVMTL_POOL_MAX) return -1;
+    const size_t alignment = mr->alignment ? (size_t)mr->alignment : 1;
+    if (mr->size > SIZE_MAX - (alignment - 1) || (size_t)mr->size + alignment - 1 > NVMTL_POOL_BLOCK) return -1;
+    const size_t reserved = (size_t)mr->size + alignment - 1; size_t off = 0;
+    pool_block *blk = pool_take_vram(3, mr->memoryTypeBits, reserved, &off, "optimal image");
+    if (!blk) return -1;
+    const size_t bound = (off + alignment - 1) / alignment * alignment;
+    if (pvkBindImageMemory(g_dev, (VkImage)out->img, (VkDeviceMemory)blk->heap.mem, bound) != VK_SUCCESS) {
+        nvk_buffer failed = { .pool = blk, .poff = off, .alloc = reserved }; pool_buffer_release(&failed); return -1; }
+    out->mem = blk->heap.mem; out->alloc = (size_t)mr->size; out->placed = 1; out->pool = blk; out->poff = off; out->poollen = reserved;
+    out->sysmem = !(g_memp.memoryTypes[blk->heap.memtype].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    return 0;
+}
+static void image_pool_release(nvk_image *out)
+{
+    nvk_buffer range = { .pool = out->pool, .poff = out->poff, .alloc = out->poollen };
+    pool_buffer_release(&range); out->pool = NULL;
 }
 
 int nvmtl_vk_image_placed_fits(const nvk_image *img, size_t len)
