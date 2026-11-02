@@ -8,9 +8,9 @@ static int fails;
 int main(void)
 {
     nvmtl_lv_state s; memset(&s, 0, sizeof s); char line[256];
-    const uint32_t a = nvmtl_lv_add(&s, 0x36f100000ull, 0x40000, NVMTL_LV_BUFFER, 7000);
-    const uint32_t b = nvmtl_lv_add(&s, 0x4b36c0000ull, 0x60000, NVMTL_LV_PAGE, 7001);
-    const uint32_t z = nvmtl_lv_add(&s, 0, 0x1000, NVMTL_LV_BUFFER, 7002);
+    const uint32_t a = nvmtl_lv_add(&s, 0x36f100000ull, 0x40000, NVMTL_LV_BUFFER, 7000, NULL);
+    const uint32_t b = nvmtl_lv_add(&s, 0x4b36c0000ull, 0x60000, NVMTL_LV_PAGE, 7001, NULL);
+    const uint32_t z = nvmtl_lv_add(&s, 0, 0x1000, NVMTL_LV_BUFFER, 7002, NULL);
     ARM("two ranges registered, a range without an address refused", a == 1 && b == 2 && z == 0 && s.live == 2 && s.refused == 1);
     const nvmtl_lv_entry *e = nvmtl_lv_find(&s, 0x36f122000ull);
     ARM("an address inside a live buffer resolves to that buffer", e && e->lo == 0x36f100000ull && e->kind == NVMTL_LV_BUFFER && e->seq == 7000);
@@ -24,11 +24,15 @@ int main(void)
     ARM("after removal the address resolves to nothing", nvmtl_lv_find(&s, 0x36f122000ull) == NULL && s.live == 1 && s.removed == 1);
     nvmtl_lv_remove(&s, a);
     ARM("removing twice is harmless", s.live == 1 && s.removed == 1);
-    const uint32_t c = nvmtl_lv_add(&s, 0x100000ull, 0x1000, NVMTL_LV_POOLED, 7003);
+    const uint32_t c = nvmtl_lv_add(&s, 0x100000ull, 0x1000, NVMTL_LV_POOLED, 7003, NULL);
     ARM("a freed slot is reused before the table grows", c == a && s.n == 2);
-    for (uint32_t k = 0; k < 5000; k++) if (!nvmtl_lv_add(&s, 0x10000000ull + (uint64_t)k * 0x10000, 0x8000, NVMTL_LV_PLACED, 8000 + k)) fails++;
+    for (uint32_t k = 0; k < 5000; k++) if (!nvmtl_lv_add(&s, 0x10000000ull + (uint64_t)k * 0x10000, 0x8000, NVMTL_LV_PLACED, 8000 + k, NULL)) fails++;
     ARM("the table grows past its first capacity and every entry stays resolvable", s.live == 5002 && s.cap >= 5002
         && nvmtl_lv_find(&s, 0x10000000ull + 4999ull * 0x10000 + 0x7fff)->seq == 8000 + 4999 && nvmtl_lv_find(&s, 0x4b36c0100ull)->kind == NVMTL_LV_PAGE);
+    static const uint64_t host[2] = { 0x36f100000ull, 7 }; const uint32_t m = nvmtl_lv_add(&s, 0x50000000ull, 0x1000, NVMTL_LV_BUFFER, 9000, host);
+    ARM("a host-visible range keeps its host view for reading pointers at device loss", nvmtl_lv_find(&s, 0x50000800ull)->map == host && ((const uint64_t *)nvmtl_lv_find(&s, 0x50000800ull)->map)[0] == 0x36f100000ull);
+    nvmtl_lv_remove(&s, m);
+    ARM("  and loses it on removal", s.live == 5002);
     FILE *f = tmpfile(); const uint32_t n = nvmtl_lv_dump(&s, f);
     ARM("the dump writes one line per live range", n == 5002);
     rewind(f); char first[256]; fgets(first, sizeof first, f);

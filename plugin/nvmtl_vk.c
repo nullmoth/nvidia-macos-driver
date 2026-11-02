@@ -261,9 +261,23 @@ static nvmtl_fx_state g_fx; static pthread_mutex_t g_fx_lock = PTHREAD_MUTEX_INI
 static nvmtl_pl_state g_pl; static pthread_mutex_t g_pl_lock = PTHREAD_MUTEX_INITIALIZER;
 // Live GPU ranges (nvmtl_live.h): every buffer with a device address, from creation to destruction, for the fault file.
 static nvmtl_lv_state g_lv; static pthread_mutex_t g_lv_lock = PTHREAD_MUTEX_INITIALIZER;
+// Buffer grace: a destroyed buffer keeps its VkBuffer (and so its GPU address) until the queue has completed every
+// submit that was in flight when the app freed it. vkDestroyBuffer releases the address at once, and NVK does not
+// wait for the GPU, so a per-frame buffer freed while a submit still stored through it was a page-table fault
+// attributed to whatever ran next. Same shape as the image grace and the page lifetime. NVMTL_BUFFER_GRACE=0 turns it off.
+typedef struct nvmtl_bgrace { nvk_buffer b; nvmtl_pl_node life; } nvmtl_bgrace;
+static nvmtl_pl_state g_bg; static pthread_mutex_t g_bg_lock = PTHREAD_MUTEX_INITIALIZER;
+static int nvmtl_buffer_grace_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_BUFFER_GRACE"); on = !(e && e[0] == '0');
+        nvlog("vk: freed buffers keep their GPU address until the submits in flight at their death complete (NVMTL_BUFFER_GRACE=%d)", on); }
+    return on;
+}
 static void nvmtl_live_add(nvk_buffer *b, uint32_t kind);
 static void nvmtl_live_remove(nvk_buffer *b);
 static void nvmtl_live_relabel(nvk_buffer *b, uint32_t kind);
+static void nvmtl_buffer_grace_reap(void);
 static void nvmtl_fx_note_buffer_gone(nvk_buffer *b, uint32_t where);
 static __thread const char *t_fx_dying;   // the label the next image death on this thread is recorded under
 void nvmtl_vk_image_dying_label(const char *label) { t_fx_dying = label; }
@@ -5338,7 +5352,7 @@ static void nvmtl_live_add(nvk_buffer *b, uint32_t kind)
 {
     if (!b || !b->buf) return;
     const uint64_t a = nvmtl_vk_buffer_address(b);
-    pthread_mutex_lock(&g_lv_lock); b->reg = nvmtl_lv_add(&g_lv, a, b->size ? b->size : b->alloc, kind, g_cmd_submitted); pthread_mutex_unlock(&g_lv_lock);
+    pthread_mutex_lock(&g_lv_lock); b->reg = nvmtl_lv_add(&g_lv, a, b->size ? b->size : b->alloc, kind, g_cmd_submitted, b->map); pthread_mutex_unlock(&g_lv_lock);
 }
 static void nvmtl_live_remove(nvk_buffer *b)
 {
@@ -5410,6 +5424,19 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
                 char r[160]; nvmtl_fault_resolve(c, tbl[i], r, sizeof r);
                 o += snprintf(line + o, sizeof line - (size_t)o, " b%u=%s", i, r);
                 fprintf(f, "root dispatch %u b%u 0x%llx %s\n", c->fx.total - nd + j + 1, i, (unsigned long long)tbl[i], r);
+                {   // the pointers the kernel reads out of this root (an argument buffer the app wrote), when the host can see it
+                    pthread_mutex_lock(&g_lv_lock); const nvmtl_lv_entry *e = nvmtl_lv_find(&g_lv, tbl[i]); const nvmtl_lv_entry ec = e ? *e : (nvmtl_lv_entry){0}; pthread_mutex_unlock(&g_lv_lock);
+                    if (ec.map && ec.hi - tbl[i] >= 64) {
+                        const uint64_t *q = (const uint64_t *)((const uint8_t *)ec.map + (tbl[i] - ec.lo));
+                        for (unsigned k = 0; k < 8; k++) {
+                            if (q[k] < 0x10000) continue;   // not an address
+                            char r2[160]; nvmtl_fault_resolve(c, q[k], r2, sizeof r2);
+                            fprintf(f, "root dispatch %u b%u +%u 0x%llx %s\n", c->fx.total - nd + j + 1, i, k * 8, (unsigned long long)q[k], r2);
+                            if (strchr(r2, '=')) { o += snprintf(line + o, sizeof line - (size_t)o, " [+%u:%s]", k * 8, r2);
+                                                   if (o > 440) { nvlog_every("fault context: %s", line); o = snprintf(line, sizeof line, "dispatch %u (continued):", c->fx.total - nd + j + 1); } }
+                        }
+                    }
+                }
                 if (o > 440) { nvlog_every("fault context: %s", line); o = snprintf(line, sizeof line, "dispatch %u (continued):", c->fx.total - nd + j + 1); }   // the log line holds 640
             }
             nvlog_every("fault context: %s", line);
@@ -6924,7 +6951,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     // Every submit up to this one has completed (one in-order queue): dead images whose last possible reader was
     // among them can go now (NVMTL_IMAGE_GRACE).
     if (c->fx_seq) { pthread_mutex_lock(&g_grace_lock); if (c->fx_seq > g_cmd_finished_seq) g_cmd_finished_seq = c->fx_seq; pthread_mutex_unlock(&g_grace_lock);
-                     nvmtl_image_grace_reap(); nvmtl_page_cool_reap(); }
+                     nvmtl_image_grace_reap(); nvmtl_page_cool_reap(); nvmtl_buffer_grace_reap(); }
     if (c->wseq && c->wseq != NVMTL_WSEQ_BLIND) {
         // The fence has already signalled, so the GPU is finished with this command buffer; the witness only certifies
         // its pool and address pages for reuse. A missing one used to switch the backend off for the whole process, and
@@ -6989,12 +7016,39 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
 }
 
 static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b);
+static __thread int t_grace_reaping;   /* set while the grace reap destroys: the death was recorded at the app's free */
 void nvmtl_vk_buffer_destroy(nvk_buffer *b)
 {
     const uint64_t t0 = nvmtl_perf_now();
     const size_t n = b ? b->size : 0;
+    if (b && b->buf && g_state == 1 && !b->bind_lost && nvmtl_buffer_grace_on()) {
+        nvmtl_bgrace *g = calloc(1, sizeof *g);
+        if (g) {
+            nvmtl_fx_note_buffer_gone(b, (b->pool ? NVMTL_FX_POOLED : 0) | (b->placed ? NVMTL_FX_PLACED : 0));
+            nvmtl_live_relabel(b, NVMTL_LV_DYING);
+            g->b = *b; memset(b, 0, sizeof *b);
+            nvmtl_pl_stamp(&g->life, g_cmd_submitted);
+            pthread_mutex_lock(&g_bg_lock); nvmtl_pl_made(&g_bg);
+            const int now = nvmtl_pl_release(&g_bg, &g->life, __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE), 0);
+            pthread_mutex_unlock(&g_bg_lock);
+            if (now) { t_grace_reaping = 1; nvmtl_vk_buffer_destroy_body(&g->b); t_grace_reaping = 0; free(g); }
+            nvmtl_perf_note(NVP_BUFDEL, t0, n);
+            return;
+        }
+    }
     nvmtl_vk_buffer_destroy_body(b);
     nvmtl_perf_note(NVP_BUFDEL, t0, n);
+}
+// Graced buffers whose last possible reader has completed are destroyed now (called where the completed sequence advances).
+static void nvmtl_buffer_grace_reap(void)
+{
+    nvmtl_pl_node *due; unsigned n;
+    pthread_mutex_lock(&g_bg_lock); n = nvmtl_pl_reap(&g_bg, __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE), &due); pthread_mutex_unlock(&g_bg_lock);
+    t_grace_reaping = 1;
+    while (due) { nvmtl_pl_node *e = due; due = e->cool; nvmtl_bgrace *g = (nvmtl_bgrace *)((char *)e - offsetof(nvmtl_bgrace, life)); nvmtl_vk_buffer_destroy_body(&g->b); free(g); }
+    t_grace_reaping = 0;
+    if (n && (g_bg.reaped & 0xFFF) < n) nvlog("vk: buffer grace: %llu freed buffers destroyed after their submits completed so far, %llu held now",
+                                            (unsigned long long)g_bg.reaped, (unsigned long long)g_bg.ncool);
 }
 static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
 {
@@ -7003,7 +7057,7 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
     // in-flight budget (`if (!host_visible) nvmtl_vk_budget_charge`), and BAR1 buffers are not charged.
     const int was_charged = b->map == NULL && !b->bar1;
     g_buf_gone++;
-    nvmtl_fx_note_buffer_gone(b, (b->pool ? NVMTL_FX_POOLED : 0) | (b->placed ? NVMTL_FX_PLACED : 0));
+    if (!t_grace_reaping) nvmtl_fx_note_buffer_gone(b, (b->pool ? NVMTL_FX_POOLED : 0) | (b->placed ? NVMTL_FX_PLACED : 0));
     nvmtl_live_remove(b);
     pvkDestroyBuffer(g_dev, (VkBuffer)b->buf, NULL);
     if (b->pool) pool_buffer_release(b);

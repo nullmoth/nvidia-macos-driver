@@ -14,17 +14,17 @@
 #include <stdio.h>
 #include <string.h>
 
-enum { NVMTL_LV_BUFFER = 1, NVMTL_LV_PLACED, NVMTL_LV_POOLED, NVMTL_LV_IMPORTED, NVMTL_LV_PAGE, NVMTL_LV_PARKED, NVMTL_LV_KINDS };
+enum { NVMTL_LV_BUFFER = 1, NVMTL_LV_PLACED, NVMTL_LV_POOLED, NVMTL_LV_IMPORTED, NVMTL_LV_PAGE, NVMTL_LV_PARKED, NVMTL_LV_DYING, NVMTL_LV_KINDS };
 static inline const char *nvmtl_lv_kind_name(uint32_t k)
 {
-    static const char *const n[NVMTL_LV_KINDS] = { "?", "buffer", "placed buffer", "pooled buffer", "imported buffer", "address page", "parked buffer" };
+    static const char *const n[NVMTL_LV_KINDS] = { "?", "buffer", "placed buffer", "pooled buffer", "imported buffer", "address page", "parked buffer", "dying buffer" };
     return k < NVMTL_LV_KINDS ? n[k] : "?";
 }
-typedef struct { uint64_t lo, hi, seq; uint32_t kind, next_free; } nvmtl_lv_entry;   /* next_free: index + 1 of the next free slot, when free */
+typedef struct { uint64_t lo, hi, seq; uint32_t kind, next_free; const void *map; } nvmtl_lv_entry;   /* map: host view when host-visible; next_free: index + 1 of the next free slot, when free */
 typedef struct { nvmtl_lv_entry *e; uint32_t cap, n, free_head, live; uint64_t added, removed, refused; } nvmtl_lv_state;
 
 /* Registers [lo, lo + size) and returns its handle (index + 1), or 0 when lo is 0 or memory ran out. */
-static inline uint32_t nvmtl_lv_add(nvmtl_lv_state *s, uint64_t lo, uint64_t size, uint32_t kind, uint64_t seq)
+static inline uint32_t nvmtl_lv_add(nvmtl_lv_state *s, uint64_t lo, uint64_t size, uint32_t kind, uint64_t seq, const void *map)
 {
     if (!lo) { s->refused++; return 0; }
     uint32_t i;
@@ -38,14 +38,14 @@ static inline uint32_t nvmtl_lv_add(nvmtl_lv_state *s, uint64_t lo, uint64_t siz
         }
         i = s->n++;
     }
-    s->e[i].lo = lo; s->e[i].hi = lo + size; s->e[i].kind = kind; s->e[i].seq = seq; s->e[i].next_free = 0;
+    s->e[i].lo = lo; s->e[i].hi = lo + size; s->e[i].kind = kind; s->e[i].seq = seq; s->e[i].next_free = 0; s->e[i].map = map;
     s->live++; s->added++;
     return i + 1;
 }
 static inline void nvmtl_lv_remove(nvmtl_lv_state *s, uint32_t id)
 {
     if (!id || id > s->n || !s->e[id - 1].lo) return;
-    s->e[id - 1].lo = s->e[id - 1].hi = 0; s->e[id - 1].kind = 0; s->e[id - 1].next_free = s->free_head; s->free_head = id;
+    s->e[id - 1].lo = s->e[id - 1].hi = 0; s->e[id - 1].kind = 0; s->e[id - 1].map = NULL; s->e[id - 1].next_free = s->free_head; s->free_head = id;
     s->live--; s->removed++;
 }
 static inline void nvmtl_lv_relabel(nvmtl_lv_state *s, uint32_t id, uint32_t kind) { if (id && id <= s->n && s->e[id - 1].lo) s->e[id - 1].kind = kind; }
