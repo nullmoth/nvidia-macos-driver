@@ -3084,7 +3084,7 @@ static nvk_cmdbuf *nvmtl_hz_blit_open(NVMTLCommandBuffer *cb, id src, id dst) {
     [self nvmtlCloseVisibility];
     nvmtl_vk_cmd_end_render(&_cb->_c);
     _begun = NO; _pass.load |= keep; _load |= keep; _visPending = visibility;
-    nvmtl_vk_cmd_barrier(&_cb->_c);
+    nvmtl_vk_barrier_site(NVMTL_BARS_HAZARD_RESTART); nvmtl_vk_cmd_barrier(&_cb->_c);
     NVMTLRenderPipelineState *p = _ps;
     if (p) [self setRenderPipelineState:p];
 }
@@ -3932,16 +3932,16 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 - (void)useHeap:(id<MTLHeap>)h { nvmtl_use_heap(_cb, h); }
 - (void)useHeap:(id<MTLHeap>)h stages:(MTLRenderStages)st { (void)st; nvmtl_use_heap(_cb, h); }
 - (void)sampleCountersInBuffer:(id)sb atSampleIndex:(NSUInteger)i withBarrier:(BOOL)b { nvmtl_sample_counter(_cb, sb, i, self, b); }
-- (void)textureBarrier { nvmtl_vk_cmd_barrier(&_cb->_c); }
+- (void)textureBarrier { nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c); }
 - (void)updateFence:(id<MTLFence>)f afterStages:(MTLRenderStages)st {}
 - (void)waitForFence:(id<MTLFence>)f beforeStages:(MTLRenderStages)st {
     // in a pass begun without a barrier the wait must order what came before the pass: restart it behind one
     if (nvmtl_hz_mode() == 1 && _cb->_c.hz_dyn) { [self nvmtlHzRestart:NO]; return; }
     if (nvmtl_hz_mode() == 2) nvmtl_hz_force_full(&_cb->_c, 1);
-    nvmtl_vk_cmd_barrier(&_cb->_c);
+    nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c);
 }
-- (void)memoryBarrierWithScope:(MTLBarrierScope)scope afterStages:(MTLRenderStages)a beforeStages:(MTLRenderStages)b { nvmtl_vk_cmd_barrier(&_cb->_c); }
-- (void)memoryBarrierWithResources:(const id<MTLResource> __unsafe_unretained [])r count:(NSUInteger)n afterStages:(MTLRenderStages)a beforeStages:(MTLRenderStages)b { nvmtl_vk_cmd_barrier(&_cb->_c); }
+- (void)memoryBarrierWithScope:(MTLBarrierScope)scope afterStages:(MTLRenderStages)a beforeStages:(MTLRenderStages)b { nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c); }
+- (void)memoryBarrierWithResources:(const id<MTLResource> __unsafe_unretained [])r count:(NSUInteger)n afterStages:(MTLRenderStages)a beforeStages:(MTLRenderStages)b { nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c); }
 - (void)drawPrimitives:(MTLPrimitiveType)type indirectBuffer:(id<MTLBuffer>)buf indirectBufferOffset:(NSUInteger)off {
     NVMTLBuffer *nb = (NVMTLBuffer *)buf;
     if (!nb) { nvlog("drawPrimitives:indirectBuffer: nil"); return; }
@@ -4609,7 +4609,7 @@ static void nvmtl_g79_census(void) {
 }
 static void nvmtl_g79_flush(NVMTLCommandBuffer *cb) {
     if (!cb) return;
-    if (cb->_g79Owed) { nvmtl_hz_shadow(1); nvmtl_vk_cmd_barrier(&cb->_c); nvmtl_hz_shadow(0); cb->_g79Owed = NO; nvmtl_g79_count(G79C_OWEDPAID); }
+    if (cb->_g79Owed) { nvmtl_hz_shadow(1); nvmtl_vk_barrier_site(NVMTL_BARS_OWED_FLUSH); nvmtl_vk_cmd_barrier(&cb->_c); nvmtl_hz_shadow(0); cb->_g79Owed = NO; nvmtl_g79_count(G79C_OWEDPAID); }
     cb->_g79C2C = NO;
 }
 @interface NVMTLComputeCommandEncoder () {
@@ -5231,14 +5231,14 @@ static void nvmtl_zprobe_drain(void) {
     const int hzm = nvmtl_hz_mode(), hzfirst = !indirect && !_e78NDisp;
     if (hzm) {
         if (hzm == 1 && hzfirst) kind = 2;
-        if (kind == 0) { nvmtl_hz_shadow(hzm == 2 && hzfirst); nvmtl_vk_cmd_barrier(&_cb->_c); nvmtl_hz_shadow(0); }
+        if (kind == 0) { nvmtl_hz_shadow(hzm == 2 && hzfirst); nvmtl_vk_barrier_site(hzfirst ? NVMTL_BARS_FIRST_DISPATCH : NVMTL_BARS_LATER_DISPATCH); nvmtl_vk_cmd_barrier(&_cb->_c); nvmtl_hz_shadow(0); }
         else if (kind == 1) nvmtl_vk_cmd_barrier_c2c(&_cb->_c);
         kind = 2;   // emitted above
         nvmtl_hz_dispatch(&_cb->_c, hzfirst);
     }
     _g79Bar = NO;
+    if (kind == 0) { nvmtl_vk_barrier_site(_e78NDisp ? NVMTL_BARS_LATER_DISPATCH : NVMTL_BARS_FIRST_DISPATCH); nvmtl_vk_cmd_barrier(&_cb->_c); }
     _e78NDisp++;
-    if (kind == 0) nvmtl_vk_cmd_barrier(&_cb->_c);
     else if (kind == 1) nvmtl_vk_cmd_barrier_c2c(&_cb->_c);
     if (kind) _e78Loose = YES;
     nvmtl_enc78_count(E78C_DISP, 1); nvmtl_enc78_count(E78C_FULL + kind, 1);
@@ -5401,11 +5401,11 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
 - (void)useHeap:(id<MTLHeap>)h { nvmtl_use_heap(_cb, h); }
 - (void)sampleCountersInBuffer:(id)sb atSampleIndex:(NSUInteger)i withBarrier:(BOOL)b { nvmtl_sample_counter(_cb, sb, i, self, b); }
 - (void)memoryBarrierWithScope:(MTLBarrierScope)scope {
-    if (nvmtl_g79_on(NVMTL_G79_BAR)) { _g79Bar = YES; nvmtl_g79_count(G79C_BARLAZY); } else nvmtl_vk_cmd_barrier(&_cb->_c); }
+    if (nvmtl_g79_on(NVMTL_G79_BAR)) { _g79Bar = YES; nvmtl_g79_count(G79C_BARLAZY); } else { nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c); } }
 - (void)updateFence:(id<MTLFence>)f {}
-- (void)waitForFence:(id<MTLFence>)f { nvmtl_vk_cmd_barrier(&_cb->_c); }
+- (void)waitForFence:(id<MTLFence>)f { nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c); }
 - (void)memoryBarrierWithResources:(const id<MTLResource> __unsafe_unretained [])r count:(NSUInteger)n {
-    if (nvmtl_g79_on(NVMTL_G79_BAR)) { _g79Bar = YES; nvmtl_g79_count(G79C_BARLAZY); } else nvmtl_vk_cmd_barrier(&_cb->_c); }
+    if (nvmtl_g79_on(NVMTL_G79_BAR)) { _g79Bar = YES; nvmtl_g79_count(G79C_BARLAZY); } else { nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c); } }
 - (void)pushDebugGroup:(NSString *)g { nvtrace("GROUP %s", g.UTF8String ?: "?"); }
 - (void)popDebugGroup {}
 - (void)insertDebugSignpost:(NSString *)sp {}
@@ -5413,7 +5413,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     if (nvmtl_g79_on(NVMTL_G79_ENC)) {
         if (_e78NDisp) { _cb->_g79C2C = YES; if ((_e78Loose || _g79Bar) && nvmtl_hz_mode() != 1) _cb->_g79Owed = YES; }
         _e78Loose = NO; _g79Bar = NO;
-    } else if (_e78Loose || _g79Bar) { if (nvmtl_hz_mode() != 1) { nvmtl_hz_shadow(1); nvmtl_vk_cmd_barrier(&_cb->_c); nvmtl_hz_shadow(0); } _e78Loose = NO; _g79Bar = NO; nvmtl_enc78_count(E78C_ENDFULL, 1); }
+    } else if (_e78Loose || _g79Bar) { if (nvmtl_hz_mode() != 1) { nvmtl_hz_shadow(1); nvmtl_vk_barrier_site(NVMTL_BARS_ENCODER_END); nvmtl_vk_cmd_barrier(&_cb->_c); nvmtl_hz_shadow(0); } _e78Loose = NO; _g79Bar = NO; nvmtl_enc78_count(E78C_ENDFULL, 1); }
     nvmtl_g79_census();
     nvmtl_hz_encoder_end(&_cb->_c);
     [_cb->_stTwins removeAllObjects];   // the next encoder copies each twin in again
@@ -5690,7 +5690,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     nvmtl_vk_copy_aspect_override(0, 0);
 }
 - (void)updateFence:(id<MTLFence>)f {}
-- (void)waitForFence:(id<MTLFence>)f { nvmtl_vk_cmd_barrier(&_cb->_c); }
+- (void)waitForFence:(id<MTLFence>)f { nvmtl_vk_barrier_site(NVMTL_BARS_FENCE_API); nvmtl_vk_cmd_barrier(&_cb->_c); }
 - (void)pushDebugGroup:(NSString *)g { nvtrace("GROUP %s", g.UTF8String ?: "?"); }
 - (void)popDebugGroup {}
 - (void)insertDebugSignpost:(NSString *)s {}
@@ -5845,6 +5845,16 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
                                           (double)dn / secs, (unsigned long long)dn, 100.0 * (double)dwns / (double)(now - t), dn ? (double)dwaits / (double)dn : 0.0);
                         fflush(ff);
                     }
+                }
+                if (dn) {   // barrier census over the same window: which site asked for each full barrier (nvmtl_vk.c g_bars)
+                    static uint64_t lastb[16]; uint64_t bnow[16]; double b[16]; nvmtl_vk_bar_counts(bnow);
+                    for (int q = 0; q < 16; q++) b[q] = (double)(bnow[q] - lastb[q]) / dn;
+                    const double full = b[0] + b[1] + b[2] + b[3] + b[4] + b[5] + b[6] + b[7];
+                    nvlog_every("bar census: per frame %.1f full barriers (first dispatch %.1f, later dispatch %.1f, encoder end %.1f, owed flush %.1f, "
+                                "fence/api %.1f, hazard restart %.1f, copies/uploads %.1f, other %.1f), %.1f compute-to-compute, %.1f image transitions "
+                                "(%.1f without a wait, %.1f not recorded), %.1f render passes",
+                                full, b[1], b[2], b[3], b[4], b[5], b[6], b[0], b[7], b[8], b[9], b[10], b[11], b[12]);
+                    memcpy(lastb, bnow, sizeof lastb);
                 }
                 if (nvmtl_hz_mode() && dn) {   // the hazard model's decisions over the same window (nvmtl_hazard.h)
                     static uint64_t lasth[24]; uint64_t h[24]; double d[24];
