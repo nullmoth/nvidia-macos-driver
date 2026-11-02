@@ -296,6 +296,7 @@ static void nvmtl_live_add(nvk_buffer *b, uint32_t kind);
 static void nvmtl_live_remove(nvk_buffer *b);
 static void nvmtl_live_relabel(nvk_buffer *b, uint32_t kind);
 static void nvmtl_vw_tic_note(const void *view);   /* the view's descriptor indices and header addresses, through the NVK layout reader */
+static void nvmtl_tabshadow_tick(void);              /* the GPU-side shadow of NVK's image table, every few submits and at every table growth */
 static void nvmtl_vw_note_died(const void *view);
 static void nvmtl_buffer_grace_reap(void);
 static void nvmtl_fx_note_buffer_gone(nvk_buffer *b, uint32_t where);
@@ -5717,6 +5718,108 @@ static void nvmtl_vw_tic_note(const void *view)
     nvmtl_vw_set_tic(&g_vw, view, si, sa, ti, ta, g_cmd_submitted);   // callers hold g_sl_lock
 }
 static void nvmtl_vw_note_died(const void *view) { pthread_mutex_lock(&g_sl_lock); nvmtl_vw_died(&g_vw, view, g_cmd_submitted); pthread_mutex_unlock(&g_sl_lock); }
+// A GPU-side shadow of NVK's image descriptor table: a 64-wide kernel (plugin/nvmtl_tabcopy_spv.h, from
+// tools/tabcopy.spvasm) copies the table's bytes from its GPU address into a host-visible buffer on the game's queue,
+// every 64 submits and at every table growth. At device loss the shadow is what the GPU read through its page tables
+// and header cache at that time; a header that differs from the host's copy names a mapping or cache the host did
+// not write. Diagnostic builds only (NVMTL_TABLE_SHADOW=1/0 overrides); it needs the layout reader's ICD match.
+#include "nvmtl_tabcopy_spv.h"
+static struct { VkShaderModule mod; VkPipelineLayout layout; VkPipeline pipe; nvk_buffer dst; uint32_t words, alloc_seen, mem_seen; uint64_t base_seen, seq, runs, growths; int state; } g_ts;
+static __thread int t_ts_inside;
+static int nvmtl_tabshadow_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_TABLE_SHADOW");
+#if NVMTL_RELEASE
+        on = e && e[0] == '1';
+#else
+        on = !(e && e[0] == '0');
+#endif
+        if (on) nvlog("vk: GPU-side shadow of NVK's image descriptor table ON - copied by a kernel every 64 submits and at every table growth (NVMTL_TABLE_SHADOW=%s)", e ? e : "unset"); }
+    return on;
+}
+static int nvmtl_tabshadow_init(void)
+{
+    if (g_ts.state) return g_ts.state > 0;
+    VkShaderModuleCreateInfo smci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_tabcopy_spv, nvmtl_tabcopy_spv };
+    VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 24 };
+    VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL, 1, &pcr };
+    if (pvkCreateShaderModule(g_dev, &smci, NULL, &g_ts.mod) != VK_SUCCESS || pvkCreatePipelineLayout(g_dev, &plci, NULL, &g_ts.layout) != VK_SUCCESS) { g_ts.state = -1; nvlog("vk: table shadow: shader module or layout refused - shadow off"); return 0; }
+    VkComputePipelineCreateInfo cpci = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0,
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, g_ts.mod, "main", NULL }, g_ts.layout, VK_NULL_HANDLE, 0 };
+    if (pvkCreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &cpci, NULL, &g_ts.pipe) != VK_SUCCESS) { g_ts.state = -1; nvlog("vk: table shadow: compute pipeline refused - shadow off"); return 0; }
+    g_ts.state = 1;
+    return 1;
+}
+// One copy of the whole table (alloc entries) into the shadow buffer, waited for. Returns 0 when nothing was copied.
+static int nvmtl_tabshadow_run(const char *why)
+{
+    if (!nvmtl_nvk_layout_ok() || !nvmtl_tabshadow_init() || g_state != 1) return 0;
+    const uint8_t *table = (const uint8_t *)g_dev + NVK_L_DEV_IMAGES; uint32_t desc_size = 0, alloc = 0, mem_count = 0; void *contig = NULL; uint64_t base = 0;
+    if (!nvmtl_fx_read_safe(table + NVK_L_TABLE_DESC_SIZE, &desc_size, 4) || !nvmtl_fx_read_safe(table + NVK_L_TABLE_ALLOC, &alloc, 4) || !nvmtl_fx_read_safe(table + NVK_L_ARENA_MEM_COUNT, &mem_count, 4)
+        || !nvmtl_fx_read_safe(table + NVK_L_ARENA_CONTIG_VA, &contig, 8) || !contig || !nvmtl_fx_read_safe((const uint8_t *)contig + NVK_L_NVKMD_VA_ADDR, &base, 8) || !base || desc_size != NVK_L_TIC_BYTES || !alloc) return 0;
+    if (alloc != g_ts.alloc_seen || mem_count != g_ts.mem_seen || base != g_ts.base_seen) {
+        uint64_t newva = 0; if (mem_count) nvmtl_fx_read_safe(table + NVK_L_ARENA_MEM + (size_t)(mem_count - 1) * NVK_L_ARENA_MEM_STRIDE + 8, &newva, 8);
+        if (g_ts.alloc_seen) g_ts.growths++;
+        nvlog("NVK image table %s: alloc %u (was %u), %u arena memories (was %u), base VA 0x%llx, newest memory VA 0x%llx, seq %llu - bound by nvRmApiMapMemoryDma in nvkmd_nvrm_va_bind_mem (the fork issues no TLB invalidate of its own; RM does it in the kernel)",
+              g_ts.alloc_seen ? "GREW" : "seen", alloc, g_ts.alloc_seen, mem_count, g_ts.mem_seen, (unsigned long long)base, (unsigned long long)newva, (unsigned long long)g_cmd_submitted);
+        g_ts.alloc_seen = alloc; g_ts.mem_seen = mem_count; g_ts.base_seen = base;
+    }
+    const uint32_t words = alloc * (NVK_L_TIC_BYTES / 4);
+    if (g_ts.dst.buf && g_ts.words < words) { nvmtl_vk_buffer_destroy(&g_ts.dst); memset(&g_ts.dst, 0, sizeof g_ts.dst); g_ts.words = 0; }
+    if (!g_ts.dst.buf) { if (nvmtl_vk_buffer_create((size_t)words * 4, 1, &g_ts.dst) || !g_ts.dst.map) { nvlog("vk: table shadow: %u-word host buffer refused", words); return 0; } g_ts.words = words; memset(g_ts.dst.map, 0, (size_t)words * 4); }
+    const uint64_t dst = nvmtl_vk_buffer_address(&g_ts.dst); if (!dst) return 0;
+    nvk_cmdbuf c; if (nvmtl_vk_cmd_begin(NULL, &c)) return 0;
+    struct { uint64_t src, dst; uint32_t n; uint32_t pad; } pc = { base, dst, words, 0 };
+    pvkCmdBindPipeline(c.cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_ts.pipe);
+    pvkCmdPushConstants(c.cb, g_ts.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 24, &pc);
+    pvkCmdDispatch(c.cb, (words + 63) / 64, 1, 1);
+    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT };
+    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    t_ts_inside = 1; const int r = nvmtl_vk_submit_wait(&c); t_ts_inside = 0;
+    if (r) { nvlog("vk: table shadow copy (%s) failed to submit (%d)", why, r); return 0; }
+    g_ts.seq = g_cmd_submitted; g_ts.runs++;
+    if (g_ts.runs == 1 || (g_ts.runs & 0x3F) == 0) nvlog("vk: table shadow: %llu copies so far (%s), last at seq %llu, %u entries, %llu table growths seen", (unsigned long long)g_ts.runs, why, (unsigned long long)g_ts.seq, alloc, (unsigned long long)g_ts.growths);
+    return 1;
+}
+static void nvmtl_tabshadow_tick(void)
+{
+    if (!nvmtl_tabshadow_on() || t_ts_inside || g_state != 1) return;
+    if ((g_cmd_submitted & 63) == 0) { nvmtl_tabshadow_run("periodic"); return; }
+    if ((g_cmd_submitted & 7) == 0 && nvmtl_nvk_layout_ok()) {   // a growth between periodic copies: copy at once
+        const uint8_t *table = (const uint8_t *)g_dev + NVK_L_DEV_IMAGES; uint32_t alloc = 0, mem_count = 0;
+        if (nvmtl_fx_read_safe(table + NVK_L_TABLE_ALLOC, &alloc, 4) && nvmtl_fx_read_safe(table + NVK_L_ARENA_MEM_COUNT, &mem_count, 4) && g_ts.alloc_seen && (alloc != g_ts.alloc_seen || mem_count != g_ts.mem_seen)) nvmtl_tabshadow_run("growth");
+    }
+}
+// The shadow's words for an index (0 when the shadow has none)
+static int nvmtl_tabshadow_words(uint32_t index, uint32_t w[8])
+{
+    if (!g_ts.dst.map || (uint64_t)(index + 1) * 8 > g_ts.words) return 0;
+    memcpy(w, (const uint32_t *)g_ts.dst.map + (size_t)index * 8, 32);
+    return 1;
+}
+// At loss: the whole table, host copy against the GPU's shadow
+static void nvmtl_tabshadow_census(FILE *f)
+{
+    char line[400];
+    if (!nvmtl_tabshadow_on()) return;
+    if (!g_ts.runs || !g_ts.dst.map) { snprintf(line, sizeof line, "fault context: table shadow: no copy was ever made (%s)", g_ts.state < 0 ? "pipeline refused" : nvmtl_nvk_layout_ok() ? "never ran" : "ICD build not measured"); nvmtl_fx_emit_both(f, line); return; }
+    uint32_t differ = 0, shown = 0, compared = 0; uint32_t w[8], g[8]; uint64_t tg;
+    const uint32_t n = g_ts.words / 8;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!nvmtl_nvk_tic_read(i, w, &tg) || !nvmtl_tabshadow_words(i, g)) continue;
+        compared++;
+        if (memcmp(w, g, 32) == 0) continue;
+        differ++;
+        if (shown < 8) { nvmtl_tic th, tgp; nvmtl_tic_decode(w, &th); nvmtl_tic_decode(g, &tgp);
+            snprintf(line, sizeof line, "fault context: table shadow DIFFERS at index %u: host address 0x%llx %ux%u %s / GPU-shadow address 0x%llx %ux%u %s; GPU words %08x %08x %08x %08x %08x %08x %08x %08x", i,
+                     (unsigned long long)th.addr, th.width, th.height, nvmtl_tic_type_name(th.type), (unsigned long long)tgp.addr, tgp.width, tgp.height, nvmtl_tic_type_name(tgp.type), g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7]);
+            nvmtl_fx_emit_both(f, line); shown++; }
+    }
+    snprintf(line, sizeof line, "fault context: table shadow census: %u of %u entries DIFFER between the host's table and the GPU's copy (shadow taken at seq %llu, %llu submits before the loss; %llu copies, %llu growths)",
+             differ, compared, (unsigned long long)g_ts.seq, (unsigned long long)(g_cmd_submitted - g_ts.seq), (unsigned long long)g_ts.runs, (unsigned long long)g_ts.growths);
+    nvmtl_fx_emit_both(f, line);
+}
 static void nvmtl_fault_tic_line(const char *what, const uint32_t w[8], uint64_t expected, char *line, size_t cap)
 {
     nvmtl_tic t; nvmtl_tic_decode(w, &t); char mem[300];
@@ -5739,6 +5842,13 @@ static void nvmtl_fault_nvk_slot(uint32_t slot, uint32_t binding, const void *vi
         const int same = memcmp(w, w2, 32) == 0;
         snprintf(line, sizeof line, "fault context:     NVK device table[%u] (GPU 0x%llx): %s the view's copy", idx, (unsigned long long)tg, same ? "IDENTICAL to" : "DIFFERS from"); nvmtl_fx_emit_both(f, line);
         if (!same) { nvmtl_fault_tic_line("table", w2, expected, line, sizeof line); nvmtl_fx_emit_both(f, line); }
+        uint32_t g[8];
+        if (nvmtl_tabshadow_words(idx, g)) {
+            const int gsame = memcmp(w2, g, 32) == 0;
+            snprintf(line, sizeof line, "fault context:     GPU-side shadow of table[%u] (seq %llu, %llu submits before the loss): %s the host's entry", idx, (unsigned long long)g_ts.seq, (unsigned long long)(g_cmd_submitted - g_ts.seq), gsame ? "SAME as" : "DIFFERS from");
+            nvmtl_fx_emit_both(f, line);
+            if (!gsame) { nvmtl_fault_tic_line("GPU shadow", g, expected, line, sizeof line); nvmtl_fx_emit_both(f, line); }
+        } else if (nvmtl_tabshadow_on()) { snprintf(line, sizeof line, "fault context:     GPU-side shadow: no copy covers index %u", idx); nvmtl_fx_emit_both(f, line); }
     } else { snprintf(line, sizeof line, "fault context:     NVK device table[%u]: unreadable (index past the table, or the arena is not mapped)", idx); nvmtl_fx_emit_both(f, line); }
     if (nvmtl_nvk_set_element(binding, slot, &elem)) {
         const uint32_t k = elem & 0xFFFFFu;
@@ -5881,6 +5991,9 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
         }
     }
     nvmtl_loss_section(f, "dispatches, roots, pointees and slots");
+    nvmtl_tabshadow_census(f);
+    {   char line[200]; snprintf(line, sizeof line, "fault context: the plugin uses one VkQueue (%p, family %u): every command buffer, the dying one included, and NVK's SET_TEX_HEADER_POOL re-emits go through it", (void *)g_queue, g_qfam); nvmtl_fx_emit_both(f, line); }
+    nvmtl_loss_section(f, "table shadow");
     {   // every image this process made: memory, bind, shape, requirement, lifetime
         lk = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock"); const uint32_t nimg = nvmtl_im_dump(&g_im, f); if (lk) pthread_mutex_unlock(&g_sl_lock);
         nvlog_every("fault context: %u images written to the fault file with their memory, bind, shape, requirement and lifetime", nimg);
@@ -7450,7 +7563,8 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     // Every submit up to this one has completed (one in-order queue): dead images whose last possible reader was
     // among them can go now (NVMTL_IMAGE_GRACE).
     if (c->fx_seq) { pthread_mutex_lock(&g_grace_lock); if (c->fx_seq > g_cmd_finished_seq) g_cmd_finished_seq = c->fx_seq; pthread_mutex_unlock(&g_grace_lock);
-                     nvmtl_image_grace_reap(); nvmtl_page_cool_reap(); nvmtl_buffer_grace_reap(); nvmtl_slot_drop_reap(); }
+                     nvmtl_image_grace_reap(); nvmtl_page_cool_reap(); nvmtl_buffer_grace_reap(); nvmtl_slot_drop_reap();
+                     nvmtl_tabshadow_tick(); }
     if (c->wseq && c->wseq != NVMTL_WSEQ_BLIND) {
         // The fence has already signalled, so the GPU is finished with this command buffer; the witness only certifies
         // its pool and address pages for reuse. A missing one used to switch the backend off for the whole process, and

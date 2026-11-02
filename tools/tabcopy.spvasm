@@ -1,0 +1,57 @@
+; copy nwords 32-bit words from a raw GPU address to another: the device-loss report's shadow of NVK's image table
+               OpCapability Shader
+               OpCapability Int64
+               OpCapability PhysicalStorageBufferAddresses
+               OpExtension "SPV_KHR_physical_storage_buffer"
+               OpMemoryModel PhysicalStorageBuffer64 GLSL450
+               OpEntryPoint GLCompute %main "main" %gid %pc
+               OpExecutionMode %main LocalSize 64 1 1
+               OpDecorate %gid BuiltIn GlobalInvocationId
+               OpDecorate %PC Block
+               OpMemberDecorate %PC 0 Offset 0
+               OpMemberDecorate %PC 1 Offset 8
+               OpMemberDecorate %PC 2 Offset 16
+       %void = OpTypeVoid
+       %fn   = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+      %ulong = OpTypeInt 64 0
+       %bool = OpTypeBool
+     %v3uint = OpTypeVector %uint 3
+  %ptr_in_v3 = OpTypePointer Input %v3uint
+        %gid = OpVariable %ptr_in_v3 Input
+         %PC = OpTypeStruct %ulong %ulong %uint
+     %ptr_pc = OpTypePointer PushConstant %PC
+         %pc = OpVariable %ptr_pc PushConstant
+  %ptr_pc_ul = OpTypePointer PushConstant %ulong
+   %ptr_pc_u = OpTypePointer PushConstant %uint
+    %ptr_psb = OpTypePointer PhysicalStorageBuffer %uint
+     %uint_0 = OpConstant %uint 0
+     %uint_1 = OpConstant %uint 1
+     %uint_2 = OpConstant %uint 2
+    %ulong_4 = OpConstant %ulong 4
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+        %g   = OpLoad %v3uint %gid
+        %id  = OpCompositeExtract %uint %g 0
+      %pn    = OpAccessChain %ptr_pc_u %pc %uint_2
+        %n   = OpLoad %uint %pn
+       %lt   = OpULessThan %bool %id %n
+               OpSelectionMerge %merge None
+               OpBranchConditional %lt %body %merge
+       %body = OpLabel
+      %psrc  = OpAccessChain %ptr_pc_ul %pc %uint_0
+       %src  = OpLoad %ulong %psrc
+      %pdst  = OpAccessChain %ptr_pc_ul %pc %uint_1
+       %dst  = OpLoad %ulong %pdst
+       %id64 = OpUConvert %ulong %id
+       %off  = OpIMul %ulong %id64 %ulong_4
+      %sa    = OpIAdd %ulong %src %off
+      %da    = OpIAdd %ulong %dst %off
+      %sp    = OpConvertUToPtr %ptr_psb %sa
+      %dp    = OpConvertUToPtr %ptr_psb %da
+       %w    = OpLoad %uint %sp Aligned 4
+               OpStore %dp %w Aligned 4
+               OpBranch %merge
+      %merge = OpLabel
+               OpReturn
+               OpFunctionEnd
