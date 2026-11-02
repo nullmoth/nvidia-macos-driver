@@ -40,6 +40,7 @@ typedef struct { nvmtl_slot s[2][NVMTL_NBIND]; hz_ent hk[2][NVMTL_NBIND]; const 
                  uint32_t hzseen[2][NVMTL_NBIND]; uint32_t hzany; } nvmtl_bindtable;
 #include "nvmtl_hazard.h"
 void nvmtl_vk_cmd_barrier(nvk_cmdbuf *c) { g_barriers++; nvmtl_hz_full_barrier(c); }
+static int g_c2c; void nvmtl_vk_cmd_barrier_c2c(nvk_cmdbuf *c) { (void)c; g_c2c++; }
 
 static int fails, arms;
 #define ARM(name, cond) do { arms++; if (!(cond)) { fails++; printf("FAIL  %s\n", name); } else printf("ok    %s\n", name); } while (0)
@@ -138,6 +139,43 @@ int main(void)
       nvmtl_hz_blit_end(&cc);
       w->npend = 0; hz_ent rd = K(B, 0, 64, 0); rd.src = HZS_TEX; hz_pend(w, rd);
       ARM("the next encoder reading what the blit wrote conflicts", hz_conflict(w, 2)); }
+    // NVMTL_HAZARD_DISPATCH: later dispatches of one compute encoder against the encoder's own earlier dispatches
+    { hz_state *d = hz_find((VkCommandBuffer)(uintptr_t)0x6000, 1); d->all = 0;
+      hz_ent w1 = K(A, 0, 4096, 1); d->npend = 0; hz_pend(d, w1); hz_commit(d);   // dispatch 1 writes A[0,4K)
+      hz_ent r2 = K(A, 1024, 2048, 0); d->npend = 0; hz_pend(d, r2);
+      ARM("NEGATIVE CONTROL: a later dispatch reading what an earlier dispatch of the same encoder wrote MUST get its compute-to-compute barrier",
+          hz_conflict_intra(d) == 1);
+      hz_c2c_done(d); hz_commit(d);
+      hz_ent r3 = K(A, 0, 64, 0); d->npend = 0; hz_pend(d, r3);
+      ARM("after that barrier the same read is ordered: no second barrier", hz_conflict_intra(d) == 0);
+      hz_commit(d);
+      hz_ent rb = K(B, 0, 4096, 0); d->npend = 0; hz_pend(d, rb);
+      ARM("a later dispatch reading memory no dispatch of this encoder wrote takes no barrier", hz_conflict_intra(d) == 0);
+      hz_commit(d);
+      hz_ent wB = K(B, 0, 64, 1); d->npend = 0; hz_pend(d, wB);
+      ARM("a later dispatch writing what an earlier one read (write-after-read) MUST get its barrier", hz_conflict_intra(d) == 1);
+      hz_c2c_done(d); hz_commit(d);
+      hz_ent kw = hz_wild(1); d->npend = 0; hz_pend(d, kw);
+      ARM("a keyless write conflicts with the barrier-taking dispatch's own write, which was recorded after the barrier", hz_conflict_intra(d) == 1);
+      hz_commit(d);
+      hz_ent kr = hz_wild(0); d->npend = 0; hz_pend(d, kr);
+      ARM("a keyless read after a keyless write since the barrier conflicts", hz_conflict_intra(d) == 1);
+      ARM("the intra check leaves the lower bound cleared for the next inter-encoder check", d->hits_from == 0);
+      // the inter-encoder check is untouched by the watermark: the next encoder's read of A still conflicts
+      hz_close_region(d); hz_ent nr = K(A, 0, 64, 0); d->npend = 0; hz_pend(d, nr);
+      ARM("the next encoder's read of A conflicts across the encoder boundary as before", hz_conflict(d, 2) == 1);
+      ARM("an encoder end moves the intra watermark to the end (nothing pending from the old encoder)", d->c2c_k == d->n); }
+    // exposure_texture_to_buffer: one thread reads one texel of an image a transfer wrote, in a new encoder
+    { hz_state *x = hz_find((VkCommandBuffer)(uintptr_t)0x7000, 1); x->all = 0;
+      nvk_cmdbuf cc; memset(&cc, 0, sizeof cc); cc.cb = (void *)(uintptr_t)0x7000;
+      nvk_image im; memset(&im, 0, sizeof im); im.mem = B; im.placed = 1; im.hz_off = 0; im.hz_len = 1 << 20;
+      nvmtl_hz_blit_begin(&cc); nvmtl_hz_blit_key(&cc, NULL, &im, 1); nvmtl_hz_blit_go(&cc); nvmtl_hz_blit_end(&cc);
+      nvmtl_hz_encoder_end(&cc);   // the blit encoder ends; the exposure kernel's encoder begins
+      hz_ent rd = hz_key_image(&im, 0); rd.src = HZS_TEX; x->npend = 0; hz_pend(x, rd);
+      ARM("exposure case: the first dispatch reading the image the transfer wrote is a conflict - the model keeps its barrier (correct: it must wait for the copy)",
+          hz_conflict(x, 2) == 1);
+      hz_ent other = K(A, 0, 64, 0); x->npend = 0; hz_pend(x, other);
+      ARM("exposure case: a dispatch reading something the transfer did not touch takes no barrier", hz_conflict(x, 2) == 0); }
     printf("%d arms, %d failed\n", arms, fails);
     return fails != 0;
 }

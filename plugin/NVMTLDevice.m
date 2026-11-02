@@ -1636,6 +1636,23 @@ static NVMTLFunction *nvmtl_empty_fragment(void) {
 MTLRenderPipelineDescriptor *nvmtl_gl_rewrite_descriptor(MTLRenderPipelineDescriptor *d, NSError **err);
 NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, NSString **err);
 void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
+// One line per function the first time it goes into a pipeline: the kernel/stage name, the FNV-1a of its SPIR-V (what a
+// per-kernel GPU profile keys a row on) and the sha256 of its AIR (what the translator caches key a module on), so a
+// profile row maps to a translator module without guessing.
+static void nvmtl_pipeline_key_log(id f, const char *stage)
+{
+    if (![f isKindOfClass:[NVMTLFunction class]]) return;
+    NVMTLFunction *fn = f; static char kKey;
+    if (objc_getAssociatedObject(fn, &kKey)) return;
+    objc_setAssociatedObject(fn, &kKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    uint32_t x = 2166136261u; const uint8_t *b = fn->_spirv.bytes;
+    for (NSUInteger i = 0; i < fn->_spirv.length; i++) { x ^= b[i]; x *= 16777619u; }
+    char air[17] = "-";
+    if (fn->_air.length) { unsigned char dg[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(fn->_air.UTF8String, (CC_LONG)strlen(fn->_air.UTF8String), dg);
+                           for (int i = 0; i < 8; i++) snprintf(air + 2 * i, 3, "%02x", dg[i]); }
+    nvlog("pipeline key: %s %s spv-fnv %08x air %s%s%s", stage, fn->_fname.UTF8String ?: "-", fn->_spirv.length ? x : 0u, air,
+          fn->_specName.length ? " fc " : "", fn->_specName.length ? fn->_specName.UTF8String : "");
+}
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)err {
     if (err) *err = nil;
     // Work on a copy: some descriptor getters (vertexLinkedFunctions, ...) create their object on first read, and the
@@ -1665,6 +1682,7 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
     if ([samplePayload isKindOfClass:[NSDictionary class]] && !nvmtl_vk_sample_positions_backend())
         return nvmtl_fail(err, @"pipeline: fragment sample positions require the checked NVIDIA runtime payload contract");
     NVMTLRenderPipelineState *ps = [NVMTLRenderPipelineState new];
+    nvmtl_pipeline_key_log(d.vertexFunction, "vertex"); nvmtl_pipeline_key_log(d.fragmentFunction, "fragment");
     nvk_rt rt; memset(&rt, 0, sizeof rt); uint32_t a8mask = 0;
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
         MTLRenderPipelineColorAttachmentDescriptor *ca = d.colorAttachments[i];
@@ -2054,6 +2072,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     }
     NVMTLComputePipelineState *ps = [NVMTLComputePipelineState new];
     ps->_function = f;
+    nvmtl_pipeline_key_log(f, "kernel");
     ps->_attrT = nvmtl_air_max_tg(f);
     if (nvmtl_vk_compute_pipeline_create(f->_spirv.bytes, f->_spirv.length, &ps->_p)) {
         return nvmtl_fail(err, @"newComputePipelineState: vkCreateComputePipelines FAILED"); }

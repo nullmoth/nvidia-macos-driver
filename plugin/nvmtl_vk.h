@@ -230,7 +230,8 @@ int  nvmtl_hz_bind_texture(nvk_cmdbuf *c, const nvk_image *im, int untracked, ui
 int  nvmtl_hz_bind_storage(nvk_cmdbuf *c, const nvk_image *im, int untracked, uint32_t set, uint32_t index, void *view);
 int  nvmtl_hz_bind_texel(nvk_cmdbuf *c, const nvk_image *im, int untracked, uint32_t set, uint32_t index, void *view, int storage);
 int  nvmtl_hz_bind_buffer(nvk_cmdbuf *c, int untracked, uint32_t set, uint32_t index, nvk_buffer *b, size_t offset);
-void nvmtl_vk_hz_counts(uint64_t out[24]);
+void nvmtl_vk_hz_counts(uint64_t out[32]);
+int  nvmtl_hz_dispatch_decides(void);   /* NVMTL_HAZARD_DISPATCH=1: later dispatches take their barrier from the model */
 void nvmtl_vk_hz_reasons(double frames, char *out, size_t cap);
 void nvmtl_vk_hz_reasons_log(double frames);
 void nvmtl_vk_hz_cpu(uint64_t out_ns[8]);
@@ -360,6 +361,7 @@ void nvmtl_vk_cmd_draw_indirect(nvk_cmdbuf *c, nvk_buffer *b, size_t off);
 void nvmtl_vk_cmd_draw_indexed_indirect(nvk_cmdbuf *c, nvk_buffer *idx, size_t idxOff, int is32, nvk_buffer *b, size_t off);
 void nvmtl_vk_cmd_dispatch_indirect(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *b, size_t off);
 void nvmtl_vk_cmd_barrier(nvk_cmdbuf *c);
+void nvmtl_vk_cmd_barrier_c2c(nvk_cmdbuf *c);
 /* Barrier census: which site asked for each full barrier. An encoder names its site before the call; a call from inside
    the Vulkan layer (copies, uploads, clears) counts as the layer's own. nvmtl_vk_bar_counts reads the totals. */
 enum { NVMTL_BARS_LAYER, NVMTL_BARS_FIRST_DISPATCH, NVMTL_BARS_LATER_DISPATCH, NVMTL_BARS_ENCODER_END, NVMTL_BARS_OWED_FLUSH,
