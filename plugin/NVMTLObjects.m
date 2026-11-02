@@ -4286,7 +4286,7 @@ static void nvmtl_heap_census(const char *what) {
 }
 // Every live app heap, for the device-loss report: the struct, its VkDeviceMemory, size, use, free ranges and park.
 static NSHashTable *gHeaps; static os_unfair_lock gHeapsLock = OS_UNFAIR_LOCK_INIT;
-static void nvmtl_heap_register(NVMTLHeap *h) {
+static void nvmtl_heap_list_for_loss(NVMTLHeap *h) {
     os_unfair_lock_lock(&gHeapsLock);
     if (!gHeaps) gHeaps = [NSHashTable weakObjectsHashTable];
     [gHeaps addObject:h];
@@ -4315,7 +4315,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
         return;
     }
     nvmtl_vk_heap_zero(&h->_hm, shared ? "shared" : "private");
-    nvmtl_heap_register(h);
+    nvmtl_heap_list_for_loss(h);
     h->_fl = OS_UNFAIR_LOCK_INIT; h->_nfr = 0; h->_cfr = 0; h->_fr = NULL;
     if (nvmtl_heap_grow(h)) { nvmtl_vk_heap_destroy(&h->_hm); nvlog("heap alias: no free list for a %lu-byte heap - legacy path", (unsigned long)size); return; }
     h->_fr[0] = 0; h->_fr[1] = size; h->_nfr = 1; h->_backed = YES;
