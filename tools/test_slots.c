@@ -1,6 +1,7 @@
 /* test_slots.c - the heap slot / image report, proven on the host without a GPU.
    Build and run anywhere:  cc -I plugin tools/test_slots.c -o /tmp/test_slots && /tmp/test_slots */
 #include "nvmtl_slots.h"
+#include "nvmtl_nvk_layout.h"
 
 static int fails;
 #define ARM(name, cond) do { const int ok = !!(cond); printf("%s  %s\n", ok ? "ok  " : "FAIL", name); if (!ok) fails++; } while (0)
@@ -96,6 +97,17 @@ int main(void)
         FILE *f2 = tmpfile(); nvmtl_im_dump(&im2, f2); rewind(f2); char l2[256] = ""; fgets(l2, sizeof l2, f2); fclose(f2);
         ARM("a destroyed image is a death: zero alive, and the dump says when (an instrument that counts 0 deaths after a destroy is broken)", im2.live == 0 && strstr(l2, "seq 700 died 701"));
         free(im2.e); }
+    /* the texture header decode against hand-built words: address 0x4c3200000 (bits 31:9 in w0, 56:32 in w1), 2048x2048x1, 2D array, 11 mips, gob height 4 */
+    {   uint32_t w[8] = {0}; const uint64_t addr = 0x4c3200000ull;
+        w[0] = (uint32_t)(addr & 0xFFFFFE00u) | 0x1A3; w[1] = (uint32_t)(addr >> 32) | (0x5u << 25); w[2] = (2u << 3) | (1u << 6) | (10u << 28); w[3] = (0x7u << 16) | (1u << 28);
+        w[4] = 2047u | (5u << 22); w[5] = 2047u | (0u << 17);
+        nvmtl_tic t; nvmtl_tic_decode(w, &t);
+        ARM("the texture header decode recovers the address, size, type, mips and tiling from the bit fields", t.addr == addr && t.width == 2048 && t.height == 2048 && t.depth == 1 && t.type == 5 && t.max_mip == 10 && t.gob_h == 2 && t.gob_d == 1 && t.components == 7 && t.version == 1
+            && strcmp(nvmtl_tic_type_name(t.type), "2D_ARRAY") == 0);
+        ARM("  the low 9 bits of word 0 and bits above 56 are not address (negative control)", t.addr != ((uint64_t)w[1] << 32 | w[0]));
+        ARM("the arena index of a table offset follows NVK's doubling memories", nvmtl_nvk_arena_mem_index(0) == 0 && nvmtl_nvk_arena_mem_index(65535) == 0 && nvmtl_nvk_arena_mem_index(65536) == 1 && nvmtl_nvk_arena_mem_index(131072) == 2 && nvmtl_nvk_arena_mem_index(262143) == 2
+            && nvmtl_nvk_arena_mem_offset(0) == 0 && nvmtl_nvk_arena_mem_offset(1) == 65536 && nvmtl_nvk_arena_mem_offset(2) == 131072 && nvmtl_nvk_arena_mem_offset(3) == 262144);
+    }
     FILE *fp = tmpfile(); const uint32_t n = nvmtl_im_dump(&im, fp);
     rewind(fp); char first[256]; fgets(first, sizeof first, fp);
     ARM("the image dump writes every image with its memory, shape and lifetime", n == 3 && strstr(first, "image 0xa0 view 0xa1 mem 0xaa off 4096 size 1048576 512x512 fmt 37 storage placed seq 100 died 150"));

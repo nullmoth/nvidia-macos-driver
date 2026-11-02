@@ -20,6 +20,7 @@ typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int
 #include "nvmtl_page_life.h"
 #include "nvmtl_live.h"
 #include "nvmtl_slots.h"
+#include "nvmtl_nvk_layout.h"
 typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vfl;  uint64_t up_token;
                  void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */
                  size_t hz_off, hz_len;   /* placed: the image's byte range of mem, for the hazard model (0 = all of mem) */

@@ -85,6 +85,9 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_im_set_params\(&g_im, id, ", 1),                            # image requirement vs the memory its bind gave it
     ("nvmtl_vk.c", r"nvmtl_vw_add_ex\(&g_vw, ", 5),                                     # every view records what it covers
     ("nvmtl_vk.c", r"nvmtl_fault_tic_scan\(v2, ", 1),                                   # the storage descriptor's words and address
+    ("nvmtl_vk.c", r"nvmtl_nvk_layout_ok\(\)", 1),                                    # the texture-header reader runs only on the measured ICD build
+    ("nvmtl_vk.c", r"nvmtl_fault_nvk_slot\(slot, 2, v2, ", 1),
+    ("nvmtl_vk.c", r"STALE INDEX - the set names another header", 1),
     ("nvmtl_vk.c", r"nvmtl_loss_section\(f, \"images\"\)", 1),                        # images early, census last
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev, "NVMTLEmbedded.m": emb}
