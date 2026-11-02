@@ -25,10 +25,10 @@ typedef struct { uint64_t lo, hi; uint32_t idx; } nvmtl_fx_root;
 /* one dispatch: its kernel and the storage views bound to it (explicit binds; a bindless read is not visible here) */
 typedef struct { char name[NVMTL_FX_NAME]; const void *pipe; uint32_t key; uint64_t air; uint32_t nstor; uint32_t stor_idx[NVMTL_FX_STOR]; const void *stor_view[NVMTL_FX_STOR];
                  const void *tab[2]; uint32_t dyn[2]; /* the binding-table buffer and offset in force per stage slot: the dispatch's root addresses */
-                 uint32_t ordinal; uint32_t nroot; nvmtl_fx_root root[NVMTL_FX_ROOT]; } nvmtl_fx_disp;
+                 uint32_t ordinal; uint32_t nroot; nvmtl_fx_root root[NVMTL_FX_ROOT]; const void *heap_set; /* the bindless heap set bound at encode */ } nvmtl_fx_disp;
 /* per command buffer: the last dispatches recorded into it, the storage binds and the binding tables in force */
 typedef struct { nvmtl_fx_disp d[NVMTL_FX_DISP]; uint32_t n, total; uint32_t nstor; uint32_t stor_idx[NVMTL_FX_STOR]; const void *stor_view[NVMTL_FX_STOR];
-                 const void *tab[2]; uint32_t dyn[2]; uint32_t nroot; nvmtl_fx_root root[NVMTL_FX_ROOT]; } nvmtl_fx_cb;
+                 const void *tab[2]; uint32_t dyn[2]; uint32_t nroot; nvmtl_fx_root root[NVMTL_FX_ROOT]; const void *heap_set; } nvmtl_fx_cb;
 /* one pipeline barrier: the command buffer it went into and the dispatch ordinal it followed (0 = before the first) */
 typedef struct { const void *cb; uint32_t after; uint32_t ss, ds, sa, da, nm, nb, ni; } nvmtl_fx_bar;
 /* one buffer-to-buffer copy: where it wrote, where it read from (host view when the source is host-visible), when */
@@ -68,7 +68,7 @@ static inline void nvmtl_fx_dispatch(nvmtl_fx_cb *c, const char *name, const voi
     nvmtl_fx_copy_name(d->name, name); d->pipe = pipe; d->key = key; d->air = air;
     d->nstor = c->nstor; memcpy(d->stor_idx, c->stor_idx, sizeof d->stor_idx); memcpy(d->stor_view, c->stor_view, sizeof d->stor_view);
     d->tab[0] = c->tab[0]; d->tab[1] = c->tab[1]; d->dyn[0] = c->dyn[0]; d->dyn[1] = c->dyn[1];
-    d->ordinal = c->total + 1; d->nroot = c->nroot < NVMTL_FX_ROOT ? c->nroot : NVMTL_FX_ROOT; memcpy(d->root, c->root, sizeof d->root);
+    d->ordinal = c->total + 1; d->nroot = c->nroot < NVMTL_FX_ROOT ? c->nroot : NVMTL_FX_ROOT; memcpy(d->root, c->root, sizeof d->root); d->heap_set = c->heap_set;
     c->n++; c->total++;
 }
 /* a submit of command buffer cb at sequence number seq */

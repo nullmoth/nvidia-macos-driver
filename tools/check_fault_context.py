@@ -96,6 +96,11 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_tabshadow_census\(f\);", 1),
     ("nvmtl_vk.c", r"GPU-side shadow of table\[%u\]", 1),
     ("nvmtl_vk.c", r"NVK image table %s: alloc %u \(was %u\)", 1),                       # every table growth logged with the bind path named
+    ("nvmtl_vk.c", r"nvmtl_setshadow_element\(binding, slot, &ge\)", 1),              # the GPU's copy of the set element beside the host's
+    ("nvmtl_vk.c", r"heap set binding %u census", 1),
+    ("nvmtl_vk.c", r"nvmtl_heap_write_fence\(\);", 4),                                  # every heap descriptor write site (knob)
+    ("nvmtl_vk.c", r"was encoded against heap set %p", 1),
+    ("nvmtl_vk.c", r"BINDLESS heap layout binding %u: type", 1),
     ("nvmtl_vk.c", r"nvmtl_loss_section\(f, \"images\"\)", 1),                        # images early, census last
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev, "NVMTLEmbedded.m": emb}
