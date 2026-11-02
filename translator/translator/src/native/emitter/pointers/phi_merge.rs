@@ -93,6 +93,13 @@ impl Emitter {
                             && (raw.device_addr_base.is_some()
                                 || self.bda_direct_addresses.contains_key(&raw.root))
                     })
+                    // A device address plus a constant byte offset (`gep i8, %loaded_ptr, 16`): bda_phi_address_id
+                    // materializes it on the edge. Without this, a phi of one such GEP and one bare loaded pointer fell
+                    // to the provenance lowering, which converted only the GEP arm and left the bare arm's pointer id
+                    // undefined ("owned Select references undefined id", three Cyberpunk G-buffer material shaders).
+                    || self.raw_offsets.get(name).is_some_and(|raw| {
+                        raw.dyn_terms.is_empty() && !raw.unmodelable && raw.device_addr_base.is_some()
+                    })
                 {
                     return true;
                 }
