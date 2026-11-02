@@ -2052,6 +2052,19 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
         return nvmtl_fail(err, [NSString stringWithFormat:
             @"newComputePipelineState: REFUSED - this function is not ours: %s", object_getClassName(fn)]);
     NVMTLFunction *f = (NVMTLFunction *)fn;
+    // EVERY compute pipeline, named, bypassing nvlog's per-site dedupe (which hid the RT
+    //    pipelines behind cs_main_ and made a run read as "never linked"). This is the only way to tell a
+    //    pipeline created from a DESCRIPTOR (which carries linkedFunctions) from one created with a bare
+    //    function - the latter reaches the relink below with nil linked functions, so its handles can
+    //    never resolve. rgs_reference_wavefront_trace asks for 8 handles and gets nil on exactly that path.
+    {
+        FILE *lg = fopen(nvmtl_log_path(), "a");
+        if (lg) {
+            fprintf(lg, "pid %d NVMTL: computePipelineFromFunction: \"%s\" needsLink=%s\n", getpid(),
+                    f ? f->_fname.UTF8String : "(nil)", (f && f->_needsLink) ? "YES" : "no");
+            fclose(lg);
+        }
+    }
     if (f && f->_needsLink) { NSError *le = nil; id<MTLFunction> lk = nvmtl_link_stage(fn, nil, nil, &le); if (!lk) { if (err) *err = le; return nil; } f = (NVMTLFunction *)lk; fn = lk; }
     // Machine code compiled ahead of time (NVMTLSass.m), from the linker or looked up for this function, runs
     // instead of a Vulkan pipeline, which is then never built for it.
@@ -2087,7 +2100,10 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 - (BOOL)supportsRaytracingFromRender { return nvmtl_vk_rt_available() != 0; }
 - (MTLAccelerationStructureSizes)accelerationStructureSizesWithDescriptor:(MTLAccelerationStructureDescriptor *)desc {
     MTLAccelerationStructureSizes s = { 0, 0, 0 };
-    static nvmtl_geom geoms[NVMTL_MAX_GEOMS]; int instance = 0; uint32_t icount = 0;
+    // One per thread: these are filled from the descriptor and read by the build, and the game
+    // encodes from nine threads at once. Shared, two builds in flight overwrite each other's
+    // geometry and a structure gets built from another mesh.
+    static _Thread_local nvmtl_geom geoms[NVMTL_MAX_GEOMS]; int instance = 0; uint32_t icount = 0;
     uint32_t n = nvmtl_geoms_from_descriptor(desc, geoms, NVMTL_MAX_GEOMS, &instance, &icount, nil);
     size_t as = 0, sc = 0;
     if (nvmtl_vk_accel_sizes(geoms, n, instance, icount, &as, &sc)) {
@@ -2100,7 +2116,23 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     if (nvmtl_vk_init() || !nvmtl_vk_rt_available()) { nvlog("newAccelerationStructureWithSize: no ray tracing on this NVK"); return nil; }
     NVMTLAccelerationStructure *a = [NVMTLAccelerationStructure new];
     a->_storage = MTLStorageModePrivate;
-    if (nvmtl_vk_buffer_create(size < 256 ? 256 : size, 0, &a->_b)) { nvlog("newAccelerationStructureWithSize: FAILED"); return nil; }
+    const size_t as_len = size < 256 ? 256 : size;
+    if (nvmtl_vk_buffer_create(as_len, 0, &a->_b)) {
+        // Every other resource falls back to system memory when VRAM refuses it; this one used to
+        // return nil instead. A nil acceleration structure is far worse than a slow one: the game
+        // keeps the nil, hands it back at build time (the "nil structure" refusal), and the
+        // structure its instance descriptors still name is never built - so the traversal reads
+        // uninitialised memory and the channel faults at an address that moves from run to run.
+        nvlog("newAccelerationStructureWithSize:%lu: VRAM refused - placing it in system memory", (unsigned long)size);
+        if (nvmtl_vk_buffer_create(as_len, 1, &a->_b)) {
+            nvmtl_alloc_failed("newAccelerationStructureWithSize");
+            nvmtl_rt_count_bump(NVMTL_RT_AS_FAILED);
+            nvlog("newAccelerationStructureWithSize: FAILED in system memory too");
+            return nil;
+        }
+        nvmtl_rt_count_bump(NVMTL_RT_AS_SYSMEM);
+    } else nvmtl_rt_count_bump(NVMTL_RT_AS_VRAM);
+    nvmtl_alloc_ok();
     nvlog("newAccelerationStructureWithSize:%lu -> %p", (unsigned long)size, (__bridge void *)a); return a;
 }
 - (id<MTLAccelerationStructure>)newAccelerationStructureWithDescriptor:(MTLAccelerationStructureDescriptor *)desc {
@@ -2242,7 +2274,13 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 }
 - (NSUInteger)currentAllocatedSize { return (NSUInteger)nvmtl_vk_allocated_bytes(); }
 - (uint64_t)recommendedMaxWorkingSetSize {
-    uint64_t ws = nvmtl_vk_working_set();
+    uint64_t ws = nvmtl_vk_recommended_working_set();
+    // The same hole as maxBufferLength, and it matters more here: a streaming engine sizes its pools
+    // from this number, and the working set reads 0 when the budget is unknown. The old code could
+    // never answer under 1 GB. An unknown budget falls back to the card rather than telling the app
+    // that nothing fits.
+    if (!ws) { ws = nvmtl_vk_vram_bytes();
+        static int said; if (!said++) nvlog("recommendedMaxWorkingSetSize: working set UNKNOWN - answering the card's %llu MB", (unsigned long long)(ws >> 20)); }
     nvlog("recommendedMaxWorkingSetSize -> %llu MB", (unsigned long long)(ws >> 20));
     return ws;
 }
@@ -2261,7 +2299,12 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 - (NSUInteger)maxBufferLength {
     uint64_t range = 0; nvmtl_vk_pubcaps(NULL, NULL, &range, NULL);
     if (!range) { static int said; if (!said++) nvlog("maxBufferLength: NVK limits unavailable - answering 0 (UNKNOWN)"); return 0; }
-    uint64_t three_q = nvmtl_vk_working_set() / 4 * 3;
+    // A zero working set means the budget is UNKNOWN, not that no buffer can be made. maxBufferLength
+    // is a capability an app may treat as hard, and three quarters of zero is zero, so an unknown
+    // budget leaves NVK's own range as the answer rather than reporting that nothing fits.
+    const uint64_t ws = nvmtl_vk_working_set();
+    uint64_t three_q = ws / 4 * 3;
+    if (!ws) { static int saidws; if (!saidws++) nvlog("maxBufferLength: working set UNKNOWN - answering NVK's maxStorageBufferRange alone"); three_q = range; }
     uint64_t v = range < three_q ? range : three_q;
     static int said;
     if (!said++) nvlog("maxBufferLength -> %llu MB (NVK maxStorageBufferRange %llu MB, 3/4 of working set %llu MB)",

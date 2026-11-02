@@ -169,7 +169,19 @@ static void nvmtl_vk_budget_charge(uint64_t bytes)
 {
     g_budget_delta += (bytes + 65535ull) & ~65535ull;
 }
+// The matching DISCHARGE, which this had none of: seven charge sites and nothing that gave bytes
+// back, so the driver believed VRAM was fuller than it was by the whole allocate-and-free churn of a
+// refresh window - subtracted from a free figure already capped at bud/9.  And setting g_budget_stale
+// instead is not a discharge: the refresh ends with `g_budget_delta = 0`, which throws away every OTHER
+// allocation still in flight, and that error runs the LOOSE way. Decrement what was freed, nothing more.
+static void nvmtl_vk_budget_discharge(uint64_t bytes)
+{
+    const uint64_t n = (bytes + 65535ull) & ~65535ull;
+    g_budget_delta = g_budget_delta > n ? g_budget_delta - n : 0;
+}
 static uint64_t g_vram_bytes, g_sys_bytes, g_spilled;
+// Deliberate, counted leaks: buffers whose sparse backing could not be determined (see res3 below).
+static uint64_t g_bind_lost, g_bind_lost_bytes;
 static int g_budget_ext;
 static int g_rt;
 #define NVMTL_RT_BUFFER_USAGE (g_rt ? (VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR) : 0)
@@ -188,6 +200,35 @@ static uint64_t nvmtl_vk_headroom(void)
     return ovr >= 0 ? (uint64_t)ovr << 20 : NVMTL_VRAM_HEADROOM_DEFAULT;
 }
 #define NVMTL_VRAM_HEADROOM nvmtl_vk_headroom()
+// The headroom the gate will ACTUALLY hold back, in ONE place so every caller, label and eviction
+// target agrees with it. On the measured path the gate's free figure can never exceed bud/9, so a
+// headroom above half that slack closes the gate for every request, a zero-byte one included.
+// Compute it here, never read NVMTL_VRAM_HEADROOM directly beside a gate decision: clamping it in
+// the gate alone left the res1 fast-admit path and the res2 eviction target chasing ~620 MB more than
+// the gate needed, so neither could ever be satisfied.  One consequence: on the measured path
+// NVMTL_VRAM_HEADROOM_MB can only lower the headroom now, never raise it past the slack.
+static uint64_t nvmtl_vk_headroom_eff(uint64_t bud, int measured)
+{
+    uint64_t head = NVMTL_VRAM_HEADROOM;
+    const uint64_t inv = bud / 9 * 10;
+    if (measured && bud && inv > bud) { const uint64_t cap = (inv - bud) / 2; if (head > cap) head = cap; }
+    return head;
+}
+// Held back from the working set we recommend to the app. BAR1 staging,
+// acceleration structures, ray-tracing pipelines and descriptor memory are
+// charged to the same device-local heap but are not part of the app's own
+// budget accounting, so a streaming engine that sizes its pools to fill the
+// advertised working set leaves the driver's internal allocations nowhere to
+// go and they fail in nvRmApiAlloc with OUT_OF_DEVICE_MEMORY. Measured on an
+// 8151 MB card: the app budgeted 6324 MB, the heap reached 7110 MB, so 786 MB
+// of the heap was ours. Default 0 keeps the advertised value unchanged until a
+// reserve is proven for the whole desktop; NVMTL_WS_RESERVE_MB sets it.
+static uint64_t nvmtl_vk_ws_reserve(void)
+{
+    static long long mb = -2;
+    if (mb == -2) { const char *e = getenv("NVMTL_WS_RESERVE_MB"); mb = (e && *e) ? atoll(e) : 0; }
+    return mb > 0 ? (uint64_t)mb << 20 : 0;
+}
 static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_out, uint64_t *used_out, int *measured_out);
 
 static uint64_t g_buf_vram_refused;
@@ -1279,6 +1320,8 @@ static void bpark_free(nvk_buffer *b)
     if (b->map && pvkUnmapMemory) pvkUnmapMemory(g_dev, (VkDeviceMemory)b->mem);
     if (b->bar1) g_bar1_bytes -= b->alloc;
     pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL); g_alloc_bytes -= b->alloc;
+    // The park holds device-local memory, so draining it has to be visible to the gate.
+    if (!b->map && !b->bar1) nvmtl_vk_budget_discharge(b->alloc);
     memset(b, 0, sizeof *b);
 }
 static int bpark_take(size_t size, int host_visible, nvk_buffer *out)
@@ -1461,7 +1504,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
                   "heapUsage %llu of budget %llu MB (%s), %llu buffers live, %llu refused so far "
                   "- the caller places it in system memory",
                   size, bgate ? "our soft gate" : "RM refused it", br,
-                  (unsigned long long)(bfree >> 20), (unsigned long long)(NVMTL_VRAM_HEADROOM >> 20),
+                  (unsigned long long)(bfree >> 20), (unsigned long long)(nvmtl_vk_headroom_eff(bbud, bmeas) >> 20),
                   (unsigned long long)(bused >> 20), (unsigned long long)(bbud >> 20),
                   bmeas ? "measured" : "estimated",
                   (unsigned long long)(g_buf_made - g_buf_gone),
@@ -1811,13 +1854,14 @@ static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_
     if (fv > g_res1_seen_free) { uint64_t up = fv - g_res1_seen_free; g_res1_credit = g_res1_credit > up ? g_res1_credit - up : 0; }
     g_res1_seen_free = fv;
     if (gate && nvmtl_reclaim_hook && !t_in_reclaim) {
-        uint64_t need = want + NVMTL_VRAM_HEADROOM > fv + g_res1_credit ? want + NVMTL_VRAM_HEADROOM - fv - g_res1_credit : 0;
+        const uint64_t head1 = nvmtl_vk_headroom_eff(bd, ms);
+        uint64_t need = want + head1 > fv + g_res1_credit ? want + head1 - fv - g_res1_credit : 0;
         if (need) {
             t_in_reclaim = 1; g_res1_calls++;
             g_res1_credit += nvmtl_reclaim_hook(need);
             t_in_reclaim = 0;
         }
-        if (ms && want + NVMTL_VRAM_HEADROOM <= fv + g_res1_credit) {
+        if (ms && want + head1 <= fv + g_res1_credit) {
             g_res1_credit = g_res1_credit > want ? g_res1_credit - want : 0; g_res1_admit++; gate = 0;
             { static unsigned said; if (said++ < 8 || said % 1000 == 0)
                 nvlog("residency (res1): %llu MB admitted to VRAM on purged bytes RM has not shown yet (free %llu MB, credit left %llu MB, %llu admitted)",
@@ -1855,9 +1899,27 @@ static int nvmtl_vk_vram_wall0(uint64_t want, uint64_t *freev_out, uint64_t *bud
     uint64_t card = nvmtl_vk_vram_bytes();
     uint64_t inv = bud / 9 * 10;
     uint64_t freev = card;
-    uint64_t head = NVMTL_VRAM_HEADROOM;
+    // Measured on this card: a budget of 7276 MB gives a free ceiling of 808 MB against a 1024 MB
+    // headroom, so with heapUsage pinned at the budget EVERY allocation was refused - a zero-byte one
+    // included - while ~800 MB of the card sat unused and the classes with no system-memory fallback
+    // handed the app nil. Half the slack keeps a real reserve and makes this a ramp, not a wall.
+    uint64_t head = nvmtl_vk_headroom_eff(bud, measured);
     int gate;
-    if (!measured || !bud) gate = (used + g_budget_delta + want + head > bud);
+    if (!measured || !bud) {
+        // A REAL free figure here, not the whole card. res1 computes its reclaim target from
+        // *freev_out, and leaving `card` on this branch made its `need` collapse to zero while the gate
+        // refused - so res1 was a no-op whenever the budget is unmeasured, and the refusal log printed
+        // the whole card as "free" beside a refusal.
+        // NOT quite the same predicate as the old `used + delta + want + head > bud`, in exactly one
+        // corner, measured: when the budget is already overspent AND want == 0 AND head == 0 (which
+        // needs NVMTL_VRAM_HEADROOM_MB=0), the old sum always exceeded bud and refused, while this
+        // saturates freev to 0 and admits. Admitting a zero-byte request that asks for zero headroom is
+        // the defensible answer, so the behaviour stands - but it is a change, not an identity.
+        // And this form cannot WRAP: the old sum could overflow on a garbage heapUsage and admit.
+        const uint64_t spent = used + g_budget_delta;
+        freev = bud > spent ? bud - spent : 0;
+        gate = (want + head > freev);
+    }
     else if (inv >= card) gate = 0;
     else { freev = inv > used ? inv - used : 0;
 
@@ -1871,21 +1933,37 @@ static int nvmtl_vk_vram_wall0(uint64_t want, uint64_t *freev_out, uint64_t *bud
 }
 uint64_t nvmtl_vk_working_set(void)
 {
-    uint64_t b = 0, u = 0; if (nvmtl_vk_init()) return 2ull << 30;
-    { static int res2 = -1; if (res2 < 0) { const char *e = getenv("NVMTL_NO_RES2"), *w = getenv("NVMTL_RES2_WS");
-          res2 = !(w && w[0] == '0') && g_sparse && !(e && e[0] == '1'); }
-      if (res2 && nvmtl_vk_vram_bytes()) return nvmtl_vk_vram_bytes(); }
-    nvmtl_vk_vram_budget(&b, &u);
-    static long long ovr = -2; if (ovr == -2) { const char *e = getenv("NVMTL_VRAM_WS_NONIMAGE_MB"); ovr = (e && *e) ? atoll(e) : -1; }
-    uint64_t nonimg = ovr >= 0 ? (uint64_t)ovr << 20 : NVMTL_VRAM_NONIMAGE;
-    if (u > g_vram_bytes && u - g_vram_bytes > nonimg) nonimg = u - g_vram_bytes;
-    uint64_t reserve = NVMTL_VRAM_HEADROOM + nonimg;
-    uint64_t room = b > reserve ? b - reserve : 0;
-    { static long long pct = -2; if (pct == -2) { const char *e = getenv("NVMTL_WS_FILL_PCT"); pct = (e && *e) ? atoll(e) : 92;
-          if (pct < 50 || pct > 100) pct = 92; }
-      room = room / 100 * (uint64_t)pct; }
-    return room > (1ull << 30) ? room : (1ull << 30);
+    if (nvmtl_vk_init()) return 0;
+    uint64_t card = nvmtl_vk_vram_bytes();
+    if (!card) return 0;
+    uint64_t budget = 0, used = 0;
+    nvmtl_vk_vram_budget(&budget, &used);
+    // The budget already includes this process's live resources. Subtracting its
+    // buffers again turns the public total recommendation into a remaining quota.
+    if (!budget) return 0;
+    uint64_t limit = budget < card ? budget : card;
+    // NVK's process budget already reserves ten percent against thrashing.
+    // Keep the allocator's separate headroom guard out of this total-resource API.
+    return limit;
 }
+// What the app is told to budget against. The reserve belongs here and not in
+// nvmtl_vk_working_set, because that value is also the driver's own notion of
+// capacity: maxBufferLength is three quarters of it, and holding memory back
+// from a recommendation must not shrink a limit the app may treat as a hard
+// capability. Measured: a 1536 MB reserve took maxBufferLength from 4095 MB,
+// where NVK's maxStorageBufferRange was the binding limit, down to 3597 MB.
+uint64_t nvmtl_vk_recommended_working_set(void)
+{
+    uint64_t limit = nvmtl_vk_working_set();
+    uint64_t reserve = nvmtl_vk_ws_reserve();
+    if (!limit || !reserve || reserve >= limit) return limit;
+    static int said;
+    if (!said++) nvlog("working set: holding back %llu MB for driver-internal device memory -> recommending %llu MB of %llu MB",
+                       (unsigned long long)(reserve >> 20), (unsigned long long)((limit - reserve) >> 20),
+                       (unsigned long long)(limit >> 20));
+    return limit - reserve;
+}
+
 unsigned long long nvmtl_tex_objs_live(void);
 unsigned long long nvmtl_tex_objs_released(void);
 static void nvmtl_vk_image_census(void)
@@ -1917,7 +1995,7 @@ static VkResult nvmtl_vk_alloc_image_mem(const VkMemoryRequirements *mr, VkDevic
     if (!gate) r = pvkAllocateMemory(g_dev, &mai, NULL, mem);
     else nvlog("vk: soft VRAM gate: %llu MB free on the card, this %s image wants %llu MB + %llu MB headroom -> SYSTEM MEMORY (heapUsage %llu of budget %llu MB, %s)",
                (unsigned long long)(freev >> 20), what, (unsigned long long)(mr->size >> 20),
-               (unsigned long long)(NVMTL_VRAM_HEADROOM >> 20), (unsigned long long)(used >> 20),
+               (unsigned long long)(nvmtl_vk_headroom_eff(bud, measured) >> 20), (unsigned long long)(used >> 20),
                (unsigned long long)(bud >> 20), measured ? "measured" : "estimated");
     if (r == VK_ERROR_OUT_OF_DEVICE_MEMORY && nvmtl_res2_evict_hook && !t_in_reclaim && !nvmtl_res2_evict_off()) {
         t_in_reclaim = 1;
@@ -6536,12 +6614,26 @@ void nvmtl_vk_buffer_destroy(nvk_buffer *b)
 static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
 {
     if (g_state != 1 || !b || !b->buf) return;
+    // Noted BEFORE the unmap below clears b->map: only a private buffer was ever charged to the
+    // in-flight budget (`if (!host_visible) nvmtl_vk_budget_charge`), and BAR1 buffers are not charged.
+    const int was_charged = b->map == NULL && !b->bar1;
     g_buf_gone++;
     pvkDestroyBuffer(g_dev, (VkBuffer)b->buf, NULL);
     if (b->pool) pool_buffer_release(b);
     if (!b->placed && !b->imported && b->mem && b->map && pvkUnmapMemory) { pvkUnmapMemory(g_dev, (VkDeviceMemory)b->mem); b->map = NULL; }
     if (b->bar1) g_bar1_bytes -= b->alloc;
-    if (!b->placed && b->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL); g_alloc_bytes -= b->alloc; }
+    if (b->bind_lost) {
+        // Marked by the res3 failure path: which of the two allocations the hardware holds is unknown,
+        // so NEITHER is returned. Destroying the VkBuffer above has already released the GPU address,
+        // which is the part that must happen; the memory stays allocated and stays counted.
+        static unsigned said;
+        if (said++ < 8) nvlog("residency (res3): freeing a buffer whose backing was INDETERMINATE - both allocations stay held (%llu MB in %llu buffers)",
+                              (unsigned long long)(g_bind_lost_bytes >> 20), (unsigned long long)g_bind_lost);
+        memset(b, 0, sizeof *b);
+        return;
+    }
+    if (!b->placed && b->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL); g_alloc_bytes -= b->alloc;
+                                if (was_charged) nvmtl_vk_budget_discharge(b->alloc); }
     memset(b, 0, sizeof *b);
 }
 
@@ -6579,7 +6671,7 @@ void nvmtl_vk_image_destroy(nvk_image *i)
     if (i->view) pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL);
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
     if (i->pool) { if (i->sysmem) g_sys_bytes -= i->alloc; else g_vram_bytes -= i->alloc; image_pool_release(i); }
-    if (!i->placed && i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); g_alloc_bytes -= i->alloc; if (i->sysmem) { g_sys_bytes -= i->alloc; g_sys_align -= (i->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= i->alloc; g_img_align -= (i->alloc + 65535ull) & ~65535ull; }    }
+    if (!i->placed && i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); g_alloc_bytes -= i->alloc; if (i->sysmem) { g_sys_bytes -= i->alloc; g_sys_align -= (i->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= i->alloc; g_img_align -= (i->alloc + 65535ull) & ~65535ull; nvmtl_vk_budget_discharge(i->alloc); }    }
     memset(i, 0, sizeof *i);
 }
 
@@ -6633,7 +6725,17 @@ static uint64_t g_res2_off, g_res2_on, g_res2_off_b, g_res2_on_b, g_res2_fail;
 void nvmtl_vk_res2_stats(uint64_t out[5]) { out[0] = g_res2_off; out[1] = g_res2_on; out[2] = g_res2_off_b >> 20; out[3] = g_res2_on_b >> 20; out[4] = g_res2_fail; }
 int nvmtl_vk_vram_room(uint64_t want) { g_budget_stale = 1; return !nvmtl_vk_vram_wall0(want, NULL, NULL, NULL, NULL); }
 uint64_t nvmtl_vk_vram_free_now(void) { uint64_t f = 0; g_budget_stale = 1; (void)nvmtl_vk_vram_wall0(0, &f, NULL, NULL, NULL); return f; }
-uint64_t nvmtl_vk_vram_headroom(void) { return NVMTL_VRAM_HEADROOM; }
+// Whether the budget behind every figure above is RM's own (VK_EXT_memory_budget) or our estimate. The
+// estimated model counts IMAGES only, so a caller that sizes work from it should size it smaller.
+int nvmtl_vk_vram_measured(void) { uint64_t b = 0, u = 0; return nvmtl_vk_vram_budget(&b, &u); }
+// The res2 pager uses this as its eviction TARGET, so it must be the figure the gate actually gates
+// on - the raw 1024 MB made it chase ~620 MB it never needed and never reach its target.
+uint64_t nvmtl_vk_vram_headroom(void)
+{
+    uint64_t bud = 0, used = 0;
+    const int measured = nvmtl_vk_vram_budget(&bud, &used);
+    return nvmtl_vk_headroom_eff(bud, measured);
+}
 void nvmtl_vk_bindless_rewrite(uint32_t slot, void *view)
 {
     if (!g_heapSet || !slot || slot >= NVMTL_BINDLESS_SLOTS || !view) return;
@@ -6644,7 +6746,7 @@ void nvmtl_vk_image_free_backing(nvk_image *o)
     if (g_state != 1 || !o || !o->img) return;
     if (o->view) pvkDestroyImageView(g_dev, (VkImageView)o->view, NULL);
     pvkDestroyImage(g_dev, (VkImage)o->img, NULL);
-    if (o->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)o->mem, NULL); g_alloc_bytes -= o->alloc; if (o->sysmem) { g_sys_bytes -= o->alloc; g_sys_align -= (o->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= o->alloc; g_img_align -= (o->alloc + 65535ull) & ~65535ull; }    }
+    if (o->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)o->mem, NULL); g_alloc_bytes -= o->alloc; if (o->sysmem) { g_sys_bytes -= o->alloc; g_sys_align -= (o->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= o->alloc; g_img_align -= (o->alloc + 65535ull) & ~65535ull; nvmtl_vk_budget_discharge(o->alloc); }    }
     memset(o, 0, sizeof *o);
 }
 static __thread nvk_cmdbuf t_mig_cb; static __thread nvk_cmdbuf *t_mig_batch; static __thread unsigned t_mig_n;
@@ -6761,9 +6863,25 @@ int nvmtl_vk_buffer_migrate(nvk_buffer *b, int to_sysmem)
       if (nvmtl_vk_submit_wait(&c)) { pvkDestroyBuffer(g_dev, tmp, NULL); pvkFreeMemory(g_dev, nm, NULL); return -1; } }
     pvkDestroyBuffer(g_dev, tmp, NULL);
     if (nvmtl_vk_sparse_bind((VkBuffer)b->buf, 1, nm, mr.size)) {
-        if (nvmtl_vk_sparse_bind((VkBuffer)b->buf, 0, (VkDeviceMemory)b->mem, mr.size))
-            nvlog("residency (res3): a %llu MB buffer is LEFT WITHOUT BACKING (rebind and restore both refused) - its GPU address will fault",
-                  (unsigned long long)(mr.size >> 20));
+        // ONE restore attempt, deliberately. A retry loop was tried here and reverted: every
+        // nvmtl_vk_sparse_bind takes the global submit mutex and then waits on a fence with a 5 s
+        // timeout, and the failure that matters on this driver is "submitted, fence never signals" -
+        // so eight attempts is up to 40 s on the ALLOCATING thread, which can be WindowServer's, while
+        // serializing the other eight encoder threads behind the submit mutex.
+        if (nvmtl_vk_sparse_bind((VkBuffer)b->buf, 0, (VkDeviceMemory)b->mem, mr.size)) {
+            // Backing INDETERMINATE. A bind that was submitted and then refused may already name `nm`
+            // in the page tables while our record still names b->mem, and nothing here can tell which.
+            // So keep BOTH allocations and mark the buffer: a deliberate, counted leak beats freeing
+            // memory the GPU may still reach through a live address. The destroy path reads the mark.
+            b->bind_lost = 1; b->lost_mem = nm;
+            g_bind_lost++; g_bind_lost_bytes += mr.size + b->alloc;
+            nvlog("residency (res3): a %llu MB buffer could not be rebound OR restored - its backing is "
+                  "INDETERMINATE, so both allocations are kept on purpose (%llu buffers, %llu MB held this way) "
+                  "rather than free memory the page tables may still name",
+                  (unsigned long long)(mr.size >> 20), (unsigned long long)g_bind_lost,
+                  (unsigned long long)(g_bind_lost_bytes >> 20));
+            return -1;
+        }
         pvkFreeMemory(g_dev, nm, NULL);
         return -1;
     }
@@ -7384,7 +7502,9 @@ int nvmtl_vk_accel_sizes(const nvmtl_geom *g, uint32_t n, int instance, uint32_t
 {
     if (nvmtl_vk_init() || !g_rt) return -1;
     if (n > NVMTL_MAX_GEOMS) { nvlog("vk: %u geometries in one acceleration structure — more than %d carried", n, NVMTL_MAX_GEOMS); return -1; }
-    static VkAccelerationStructureGeometryKHR geoms[NVMTL_MAX_GEOMS]; static uint32_t counts[NVMTL_MAX_GEOMS];
+    // One per thread: the game encodes acceleration-structure builds from nine threads at once,
+    // and shared these let two builds in flight overwrite each other's geometry.
+    static _Thread_local VkAccelerationStructureGeometryKHR geoms[NVMTL_MAX_GEOMS]; static _Thread_local uint32_t counts[NVMTL_MAX_GEOMS];
     uint32_t ng = nvmtl_fill_geometries(g, n, 0, instance_count, instance, geoms, counts);
     VkAccelerationStructureBuildGeometryInfoKHR bi = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR, NULL,
         instance ? VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR : VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
@@ -7419,8 +7539,10 @@ int nvmtl_vk_cmd_build_accel(nvk_cmdbuf *c, nvk_accel *dst, const nvmtl_geom *g,
 {
     if (!g_rt || !dst->as) return -1;
     if (n > NVMTL_MAX_GEOMS) return -1;
-    static VkAccelerationStructureGeometryKHR geoms[NVMTL_MAX_GEOMS]; static uint32_t counts[NVMTL_MAX_GEOMS];
-    static VkAccelerationStructureBuildRangeInfoKHR ranges[NVMTL_MAX_GEOMS];
+    // One per thread: the game encodes acceleration-structure builds from nine threads at once,
+    // and shared these let two builds in flight overwrite each other's geometry.
+    static _Thread_local VkAccelerationStructureGeometryKHR geoms[NVMTL_MAX_GEOMS]; static _Thread_local uint32_t counts[NVMTL_MAX_GEOMS];
+    static _Thread_local VkAccelerationStructureBuildRangeInfoKHR ranges[NVMTL_MAX_GEOMS];
     uint32_t ng = nvmtl_fill_geometries(g, n, instances_addr, instance_count, dst->instance, geoms, counts);
     for (uint32_t i = 0; i < ng; i++) ranges[i] = (VkAccelerationStructureBuildRangeInfoKHR){ counts[i], 0, 0, 0 };
     VkAccelerationStructureBuildGeometryInfoKHR bi = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR, NULL,
@@ -7443,6 +7565,32 @@ int nvmtl_vk_cmd_copy_accel(nvk_cmdbuf *c, nvk_accel *src, nvk_accel *dst)
     return 0;
 }
 
+// Copy bytes out of a buffer that has no CPU mapping, through a host-visible staging buffer.
+// Acceleration-structure instance descriptors may live in a Private buffer, and converting them
+// from the Metal layout to the Vulkan one has to read them. The queue is flushed first, so every
+// write already submitted has landed; descriptors produced by work still being encoded into the
+// caller's own command buffer are not visible here, and a build that depends on those needs the
+// conversion to happen on the GPU instead.
+int nvmtl_vk_buffer_readback(nvk_buffer *b, size_t off, size_t len, void *dst)
+{
+    if (nvmtl_vk_init() || !b || !b->buf || !dst || !len) return -1;
+    if (off > b->size || len > b->size - off) return -1;
+    nvk_buffer tmp;
+    if (nvmtl_vk_buffer_create(len, 1, &tmp) || !tmp.map) { nvmtl_vk_buffer_destroy(&tmp); return -1; }
+    nvk_cmdbuf c;
+    if (nvmtl_vk_cmd_begin(NULL, &c)) { nvmtl_vk_buffer_destroy(&tmp); return -1; }
+    VkMemoryBarrier pre = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT };
+    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &pre, 0, NULL, 0, NULL);
+    VkBufferCopy bc = { off, 0, len };
+    pvkCmdCopyBuffer(c.cb, (VkBuffer)b->buf, (VkBuffer)tmp.buf, 1, &bc);
+    VkMemoryBarrier post = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT };
+    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &post, 0, NULL, 0, NULL);
+    if (nvmtl_vk_submit_wait(&c)) { nvmtl_vk_buffer_destroy(&tmp); return -1; }
+    memcpy(dst, tmp.map, len);
+    nvmtl_vk_buffer_destroy(&tmp);
+    return 0;
+}
+
 int nvmtl_vk_convert_instances(const void *mtl, uint32_t stride, uint32_t count, const uint64_t *as_addrs, uint32_t n_as, void *out,
                                uint32_t mtl_type, uint32_t *uid_out, const uint32_t *as_ift)
 {
@@ -7451,7 +7599,12 @@ int nvmtl_vk_convert_instances(const void *mtl, uint32_t stride, uint32_t count,
         const float *m = (const float *)src; const uint32_t *w = (const uint32_t *)(src + 48);
         VkAccelerationStructureInstanceKHR *d = (VkAccelerationStructureInstanceKHR *)out + i;
         memset(d, 0, sizeof *d);
-        for (int r = 0; r < 3; r++) for (int col = 0; col < 4; col++) d->transform.matrix[r][col] = m[col * 3 + r];
+        // Three rows of four, copied straight across. Measured on a live instance: read this way the
+        // 3x3 has unit rows and determinant +1 and the fourth column is a world translation
+        // (-306.1, 601.4, 274.4); read as four packed columns the row norms come out 306.1, 601.4,
+        // 0.707, which is not a transform. The transpose was never exercised before, because an
+        // instanced structure had never been built.
+        for (int r = 0; r < 3; r++) for (int col = 0; col < 4; col++) d->transform.matrix[r][col] = m[r * 4 + col];
         uint32_t options = w[0], mask = w[1], ift = w[2], as_index = w[3];
         uint32_t user = mtl_type == 1 ? w[4] : mtl_type == 3 ? w[3] : 0;
         if (uid_out) uid_out[i] = user;
@@ -7471,6 +7624,152 @@ int nvmtl_vk_convert_instances(const void *mtl, uint32_t stride, uint32_t count,
         } else if (as_index < n_as) d->accelerationStructureReference = as_addrs[as_index];
         else { d->accelerationStructureReference = 0; nvlog("vk: instance %u names structure %u of %u — dropped", i, as_index, n_as); }
     }
+    return 0;
+}
+
+#include "nvmtl_convert_instances_spv.h"
+static pthread_mutex_t g_convinst_lock = PTHREAD_MUTEX_INITIALIZER;
+static VkPipeline g_convinst_pipeline;
+static VkPipelineLayout g_convinst_layout;
+
+static int nvmtl_convinst_init(void)
+{
+    int rc = -1;
+    pthread_mutex_lock(&g_convinst_lock);
+    if (g_convinst_pipeline) { rc = 0; goto done; }
+    VkShaderModule mod = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo sm = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0,
+                                   sizeof nvmtl_convert_instances_spv, nvmtl_convert_instances_spv };
+    if (pvkCreateShaderModule(g_dev, &sm, NULL, &mod) != VK_SUCCESS) {
+        nvlog("instance conversion kernel: vkCreateShaderModule FAILED - the conversion stays on the CPU");
+        goto done;
+    }
+    VkPushConstantRange push = { VK_SHADER_STAGE_COMPUTE_BIT, 0, (uint32_t)sizeof(nvmtl_convinst_args) };
+    VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL, 1, &push };
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (pvkCreatePipelineLayout(g_dev, &li, NULL, &layout) == VK_SUCCESS) {
+        VkPipelineShaderStageCreateInfo stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
+                                                 VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", NULL };
+        VkComputePipelineCreateInfo pi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0,
+                                          stage, layout, VK_NULL_HANDLE, -1 };
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        if (pvkCreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &pi, NULL, &pipeline) == VK_SUCCESS) {
+            g_convinst_layout = layout; g_convinst_pipeline = pipeline; rc = 0;
+        } else {
+            nvlog("instance conversion kernel: vkCreateComputePipelines FAILED - the conversion stays on the CPU");
+            if (pipeline) pvkDestroyPipeline(g_dev, pipeline, NULL);
+            pvkDestroyPipelineLayout(g_dev, layout, NULL);
+        }
+    }
+    pvkDestroyShaderModule(g_dev, mod, NULL);
+done:
+    pthread_mutex_unlock(&g_convinst_lock);
+    return rc;
+}
+
+// Converting the Metal instance descriptors on the CPU can only ever see what has already been
+// submitted. An Indirect descriptor names its structure with an id written INTO that buffer by the
+// GPU, and a game may also transform the instances with its own kernel in the command buffer this
+// build belongs to, so a host read returns whatever was there before that work ran - for Cyberpunk,
+// zeros, which make a top-level structure full of null children. Running the same conversion as a
+// dispatch in front of the build reads the descriptors at the point in the stream where they are
+// actually valid. nvmtl_vk_convert_instances stays as the fallback for a layout the kernel's
+// word-addressing cannot reach; the two are held to the same values by the equivalence check in the
+// RT rig, which compares every output byte for all three descriptor types.
+enum { NVMTL_CONVINST_WITNESS = 512 };
+static nvk_buffer g_convinst_witness;
+static uint32_t g_convinst_witness_count;
+
+int nvmtl_vk_cmd_convert_witness(nvk_cmdbuf *c, nvk_buffer *converted, uint32_t count)
+{
+    if (!c || !converted) return -1;
+    if (!g_convinst_witness.buf && nvmtl_vk_buffer_create(NVMTL_CONVINST_WITNESS, 1, &g_convinst_witness))
+        return -1;
+    size_t bytes = (size_t)count * 64;
+    if (bytes > NVMTL_CONVINST_WITNESS) bytes = NVMTL_CONVINST_WITNESS;
+    if (nvmtl_vk_cmd_copy_buffer(c, converted, 0, &g_convinst_witness, 0, bytes)) return -1;
+    g_convinst_witness_count = (uint32_t)(bytes / 64);
+    return 0;
+}
+
+// Whatever the last completed conversion left behind. A read that races a conversion still in
+// flight shows the one before it, which is what is wanted: a value the GPU has actually written.
+uint32_t nvmtl_vk_convert_witness_read(void *dst, uint32_t max_instances)
+{
+    if (!g_convinst_witness.map || !g_convinst_witness_count) return 0;
+    uint32_t n = g_convinst_witness_count < max_instances ? g_convinst_witness_count : max_instances;
+    memcpy(dst, g_convinst_witness.map, (size_t)n * 64);
+    return n;
+}
+
+unsigned long long nvmtl_rt_count[NVMTL_RT_COUNTERS];
+static pthread_mutex_t g_rt_count_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void nvmtl_rt_count_bump(int which)
+{
+    nvmtl_rt_count_add(which, 1);
+}
+// One lock per BUILD, not per instance. Counting 827,432 instances a run one bump at a time put nine
+// encoding threads through a single mutex on the hot path - instrumentation heavy enough to change the
+// thread interleaving it was measuring.
+void nvmtl_rt_count_add(int which, unsigned long long n)
+{
+    if (which < 0 || which >= NVMTL_RT_COUNTERS || !n) return;
+    pthread_mutex_lock(&g_rt_count_lock);
+    nvmtl_rt_count[which] += n;
+    pthread_mutex_unlock(&g_rt_count_lock);
+}
+
+void nvmtl_rt_census(void)
+{
+    static const char *name[NVMTL_RT_COUNTERS] = {
+        "as_vram", "as_sysmem", "as_FAILED", "build_prim", "build_inst",
+        "nil_struct", "nil_scratch", "conv_gpu", "conv_host", "instances", "fmt_uncarried",
+        "as_SHORT", "scratch_SHORT", "scratch_ours", "as_dead", "size_unknown"
+    };
+    // A name table shorter than the enum prints "(null)=N" and hides which counter moved.
+    _Static_assert(sizeof name / sizeof *name == NVMTL_RT_COUNTERS, "census name table is out of step with the counters");
+    // Snapshot under the lock, print outside it. Holding the counter lock across a fopen and 16
+    // fprintfs stopped all nine encoding threads' counter updates for the length of a file write.
+    unsigned long long snap[NVMTL_RT_COUNTERS];
+    pthread_mutex_lock(&g_rt_count_lock);
+    for (int i = 0; i < NVMTL_RT_COUNTERS; i++) snap[i] = nvmtl_rt_count[i];
+    pthread_mutex_unlock(&g_rt_count_lock);
+    FILE *lg = fopen(nvmtl_log_path(), "a");
+    if (!lg) return;
+    fprintf(lg, "pid %d NVMTL: RTCENSUS", getpid());
+    for (int i = 0; i < NVMTL_RT_COUNTERS; i++) fprintf(lg, " %s=%llu", name[i], snap[i]);
+    // The live allocator totals belong beside the counters: this line is the only RT report that
+    // is not behind the log dedupe, and a structure count that only rises is a leak while one
+    // that churns is not.
+    uint64_t bm = 0, bg = 0, im = 0, ig = 0; size_t held = 0;
+    nvmtl_vk_counts(&bm, &bg, &im, &ig, &held);
+    // bind_lost is a DELIBERATE leak (res3 could not determine a buffer's backing), so it belongs on
+    // the one line that is not behind the log dedupe. A leak the census cannot see is worse than a leak.
+    fprintf(lg, " | bufs_live=%llu(made %llu) imgs_live=%llu held=%lluMB bind_lost=%llu(%lluMB)\n",
+            (unsigned long long)(bm - bg), (unsigned long long)bm,
+            (unsigned long long)(im - ig), (unsigned long long)(held >> 20),
+            (unsigned long long)g_bind_lost, (unsigned long long)(g_bind_lost_bytes >> 20));
+    fclose(lg);
+}
+
+int nvmtl_vk_cmd_convert_instances(nvk_cmdbuf *c, const nvmtl_convinst_args *args)
+{
+    if (!c || c->in_rp || !args || !args->count) return -1;
+    if (!args->src || !args->dst || !args->uid || !args->astab) return -1;
+    // The kernel indexes words, so a descriptor array that is not 4-byte aligned in both its
+    // address and its stride has to go back to the CPU.
+    if ((args->src & 3) || (args->stride & 3)) {
+        nvlog("instance conversion kernel: address 0x%llx stride %u is not 4-byte aligned - the conversion stays on the CPU",
+              (unsigned long long)args->src, args->stride);
+        return -1;
+    }
+    if (nvmtl_convinst_init()) return -1;
+    nvmtl_vk_cmd_barrier(c);
+    pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_convinst_pipeline);
+    pvkCmdPushConstants(c->cb, g_convinst_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof *args, args);
+    pvkCmdDispatch(c->cb, (args->count + 63u) / 64u, 1, 1);
+    nvmtl_vk_cmd_barrier(c);
     return 0;
 }
 
@@ -8136,7 +8435,7 @@ static int nvmtl_vk_heap_create_body(size_t size, int host_visible, nvk_heap *ou
                   nvlog("vk: private placement heap of %zu bytes REFUSED VRAM (%s) -> SYSTEM MEMORY: %llu MB free, "
                         "%llu MB headroom, heapUsage %llu of budget %llu MB (%s), %llu heaps refused so far",
                         size, hgate ? "our soft gate" : "RM refused it", (unsigned long long)(hfree >> 20),
-                        (unsigned long long)(NVMTL_VRAM_HEADROOM >> 20), (unsigned long long)(hused >> 20),
+                        (unsigned long long)(nvmtl_vk_headroom_eff(hbud, hmeas) >> 20), (unsigned long long)(hused >> 20),
                         (unsigned long long)(hbud >> 20), hmeas ? "measured" : "estimated",
                         (unsigned long long)g_heap_vram_refused); } }
       }
@@ -8154,6 +8453,7 @@ void nvmtl_vk_heap_destroy(nvk_heap *h)
     if (g_state != 1 || !h || !h->mem) return;
     if (h->map && pvkUnmapMemory) { pvkUnmapMemory(g_dev, (VkDeviceMemory)h->mem); h->map = NULL; }
     pvkFreeMemory(g_dev, (VkDeviceMemory)h->mem, NULL); g_alloc_bytes -= h->size;
+    if (!h->host_visible) nvmtl_vk_budget_discharge(h->size);   // the biggest single thing we return
     memset(h, 0, sizeof *h);
 }
 static int placed_ok(const VkMemoryRequirements *mr, const nvk_heap *heap, size_t offset, const char *what)

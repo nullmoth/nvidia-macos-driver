@@ -263,8 +263,15 @@ fn rewrite(ll: &str) -> Option<String> {
         }
         let mut arms = Vec::new();
         for ((value, label), at) in phi.incoming.iter().zip(ats) {
-            let name = format!("%ptrphi.sunk.{fresh}");
-            fresh += 1;
+            // Earlier lowering attempts may already have inserted sunk loads.
+            // Keep their SSA names distinct when this pass runs again.
+            let name = loop {
+                let candidate = format!("%ptrphi.sunk.{fresh}");
+                fresh += 1;
+                if !uses_value(ll, &candidate) {
+                    break candidate;
+                }
+            };
             let loaded = if tail.is_empty() {
                 format!("  {name} = load {ty}, ptr {value}")
             } else {
@@ -321,6 +328,45 @@ pub(crate) fn sink_pointer_phi_loads_owned(ll: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repeated_lowering_preserves_unique_sunk_load_names() {
+        let input = r#"
+define float @two_pointer_phis(i1 %pick) {
+entry:
+  %a = alloca float
+  %b = alloca float
+  %c = alloca float
+  %d = alloca float
+  br i1 %pick, label %left, label %right
+left:
+  br label %merge
+right:
+  br label %merge
+merge:
+  %p = phi ptr [ %a, %left ], [ %b, %right ]
+  %q = phi ptr [ %c, %left ], [ %d, %right ]
+  %x = load float, ptr %p, align 4
+  %y = load float, ptr %q, align 4
+  %sum = fadd float %x, %y
+  ret float %sum
+}
+"#;
+        let first = rewrite(input).expect("first pointer phi");
+        let second = rewrite(&first).expect("second pointer phi");
+        let mut names = std::collections::HashSet::new();
+        let mut loads = 0;
+        for line in second.lines() {
+            if let Some((name, rhs)) = line.trim().split_once(" = ") {
+                assert!(names.insert(name), "duplicate SSA definition {name}");
+                if name.starts_with("%ptrphi.sunk.") && rhs.starts_with("load ") {
+                    loads += 1;
+                }
+            }
+        }
+        assert_eq!(loads, 4);
+        assert!(!second.contains("phi ptr "));
+    }
+
     use super::*;
 
     /// The shape a refused module has, reduced: a pointer phi over two alloca-derived GEPs whose

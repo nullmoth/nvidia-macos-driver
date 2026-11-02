@@ -38,6 +38,41 @@ impl Emitter {
                 .map(|ty| self.resolve_type(ty))
                 .transpose()?
         };
+        if std::env::var_os("METAL2VULKAN_POINTEE_SRC").is_some() && gep.indices.len() > 1 {
+            if let Some(b) = base_pointee.as_ref() {
+                let src = self.resolve_type(&gep.source_ty)?;
+                if !types_compatible(b, &src) {
+                    eprintln!(
+                        "pointee-src: {name} from={} base={b:?}",
+                        if network_base_pointee.is_some() { "network_pointees" } else { "pointee_for_value" }
+                    );
+                }
+            }
+        }
+        // Keep aligned byte offsets in a typed Workgroup vector stream in vector units.
+        // The interface pass must not retarget a byte pointer to the vector element type.
+        if parsed_source_ty == LlType::Int(8)
+            && gep.indices.len() == 1
+            && self.pointer_storage_for(&gep.base.value, addrspace)? == StorageClass::Workgroup
+        {
+            if let (Some(vector_ty @ LlType::Vector(_, _)), Some(byte_offset)) =
+                (base_pointee.as_ref(), const_index_i64(&gep.indices[0]))
+            {
+                let (vector_size, _) = self.raw_type_size_align(vector_ty)?;
+                if vector_size > 0 && byte_offset % (vector_size as i64) == 0 {
+                    let typed_gep = LlGep {
+                        inbounds: gep.inbounds,
+                        source_ty: vector_ty.clone(),
+                        base: gep.base.clone(),
+                        indices: vec![TypedValue {
+                            ty: gep.indices[0].ty.clone(),
+                            value: LlValue::SignedInt(byte_offset / vector_size as i64),
+                        }],
+                    };
+                    return self.emit_gep_result(name, &typed_gep, instructions);
+                }
+            }
+        }
         if self.null_rooted_pointer_values.contains(name)
             && matches!(&gep.base.value, LlValue::Local(base) if self.null_rooted_pointer_values.contains(base))
         {
