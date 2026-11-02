@@ -126,6 +126,7 @@ static inline const char *nvmtl_icd_lib_path(void) {
 static void *g_lib;
 static int g_sample_loader_unwrapped;
 static VkInstance g_inst; static VkPhysicalDevice g_pdev; static VkDevice g_dev; static VkQueue g_queue;
+static int g_hz_dynr;   // the device enabled dynamicRendering (hazard-model passes begin with vkCmdBeginRendering)
 static int g_host_query_reset, g_occlusion_precise;
 static int g_atomic64_buffer, g_atomic64_shared;
 static int g_coop_matrix, g_float16, g_vulkan_memory_model, g_vulkan_memory_device_scope, g_storage16, g_uniform_storage16;
@@ -868,6 +869,7 @@ static int nvmtl_vk_initialize(void)
     VkPhysicalDeviceAccelerationStructureFeaturesKHR asf = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR, &rqf,
                                                             VK_TRUE, VK_FALSE, VK_FALSE, VK_FALSE, VK_TRUE };
     VkPhysicalDeviceVulkan12Features v12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, g_rt ? (void *)&asf : NULL };
+    VkPhysicalDeviceVulkan13Features v13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };   // chained in only for the hazard model's passes
     v12.bufferDeviceAddress = VK_TRUE;
     VkPhysicalDeviceVulkan11Features v11 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &v12 };
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR cmf = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR };
@@ -922,12 +924,17 @@ static int nvmtl_vk_initialize(void)
         PFN_vkGetPhysicalDeviceFeatures2 gpf2 = (PFN_vkGetPhysicalDeviceFeatures2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFeatures2");
         VkPhysicalDeviceVulkan12Features q12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
         VkPhysicalDeviceCooperativeMatrixFeaturesKHR qcm = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR };
-        VkPhysicalDeviceVulkan11Features q11 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, have[10] ? (void *)&qcm : NULL };
+        VkPhysicalDeviceVulkan13Features q13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, have[10] ? (void *)&qcm : NULL };
+        VkPhysicalDeviceVulkan11Features q11 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &q13 };
         q12.pNext = &q11;
         VkPhysicalDeviceFeatures2 f2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &q12 };
         if (gpf2) gpf2(g_pdev, &f2);
         v12.shaderFloat16 = q12.shaderFloat16;
         v12.shaderInt8 = q12.shaderInt8;
+        // NVMTL_HAZARD passes begin with vkCmdBeginRendering: enabled only when the model acts; the census only needs to
+        // know the device supports it
+        g_hz_dynr = q13.dynamicRendering == VK_TRUE;
+        if (nvmtl_hz_mode() == 1 && g_hz_dynr) { v13.dynamicRendering = VK_TRUE; v13.pNext = v12.pNext; v12.pNext = &v13; }
         v12.vulkanMemoryModel = q12.vulkanMemoryModel;
         v12.vulkanMemoryModelDeviceScope = q12.vulkanMemoryModelDeviceScope;
         v11.storageBuffer16BitAccess = q11.storageBuffer16BitAccess;
@@ -2290,6 +2297,7 @@ static int nvmtl_dirty_only_on(void)
         nvlog("vk: dirty-only bindings %s (NVMTL_NO_DIRTYONLY=%s)", on ? "ON - unchanged descriptors are copied, unchanged argument-buffer tables skipped" : "OFF", e ? e : "unset"); }
     return on;
 }
+typedef struct { void *mem; uint64_t lo, hi; uint8_t w, src, skip; } hz_ent;   // nvmtl_hazard.h: one access; mem NULL = any memory
 typedef struct { nvmtl_slot s[2][NVMTL_NBIND];
                  uint8_t dirty[2]; VkDescriptorSet last[2]; unsigned last_idx[2]; uint32_t last_hi[2]; uint64_t lastw[2][4];
                  uint64_t chg[2][4]; uint64_t texgen[2]; const void *emb_fn[2]; uint64_t emb_gen[2]; uint32_t emb_n[2];
@@ -2299,7 +2307,17 @@ typedef struct { nvmtl_slot s[2][NVMTL_NBIND];
                  uint32_t lastgl[2]; VkBuffer lastubuf[2]; VkDeviceSize lasturange[2];
                  /* samplers a shader brought itself, parked in sampler slots it leaves free, and what each displaced */
                  uint32_t park_mask[2]; uint8_t park_kind[2][NVMTL_NSAMP], park_saved_kind[2][NVMTL_NSAMP];
-                 void *park_h[2][NVMTL_NSAMP], *park_saved[2][NVMTL_NSAMP]; } nvmtl_bindtable;
+                 void *park_h[2][NVMTL_NSAMP], *park_saved[2][NVMTL_NSAMP];
+                 hz_ent hk[2][NVMTL_NBIND]; const void *hkh[2][NVMTL_NBIND];   /* hazard keys of the bound resources */
+                 uint64_t hzdirty[2][(NVMTL_NBIND + 63) / 64];
+                 uint64_t hzbound[2][(NVMTL_NBIND + 63) / 64];   /* slots holding a tracked resource */
+                 uint32_t hzseen[2][NVMTL_NBIND];   /* region<<1|write the slot was last collected in */
+                 uint32_t hzany; } nvmtl_bindtable;   /* some dirty bit is set */
+// The model asks for the reads a barrier's destination must cover and for an image's access layout; this layer keeps
+// the whole read mask and the optimized layouts.
+static inline VkAccessFlags nvmtl_dst_reads(void) { return VK_ACCESS_MEMORY_READ_BIT; }
+static inline VkImageLayout nvmtl_image_access_layout(VkImageLayout optimized) { return optimized; }
+#include "nvmtl_hazard.h"
 
 static VkDescriptorSetLayout g_setLayout;
 static VkDescriptorSetLayout g_glUniformLayout;
@@ -2876,6 +2894,7 @@ static int nvmtl_bind_slot(nvk_cmdbuf *c, uint32_t set, uint32_t binding, uint8_
         t->chg[set][binding >> 6] |= 1ull << (binding & 63);
         if (kind != NVMTL_SLOT_BUF || sl->kind != NVMTL_SLOT_BUF) t->texgen[set]++;
     }
+    if (sl->kind != kind || sl->h != h) nvmtl_hz_slot_bound(c, t, set, binding, kind, h);   // hazard keys change only with the handle
     sl->kind = kind; sl->h = h; sl->off = off;
     return 0;
 }
@@ -3424,7 +3443,9 @@ int nvmtl_vk_bind_buffer(nvk_cmdbuf *c, uint32_t set, uint32_t index, nvk_buffer
 {
     if (index >= NVMTL_NBUF) { nvlog("bind buffer: index %u is outside [0,%d)", index, NVMTL_NBUF); return -1; }
     if (!b || !b->buf || offset >= b->size) { nvlog("bind buffer: offset %zu outside length %zu", offset, b ? b->size : 0); return -1; }
+    nvmtl_hz_pend_res(c, b, 1, c->hzp_bskip);
     int r = nvmtl_bind_slot(c, set, index, NVMTL_SLOT_BUF, b->buf, offset);
+    nvmtl_hz_pend_clear(c);
     if (!r) { nvmtl_bindtable *t = (nvmtl_bindtable *)c->table; nvmtl_slot *sl = &t->s[set][index]; uint64_t a = nvmtl_vk_buffer_address(b);
               if (sl->size != b->size || sl->address != a) t->dirty[set] = 1;
               sl->size = b->size; sl->address = a; }
@@ -5379,6 +5400,13 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
         if ((ps->colfmt[i] ? ps->colfmt[i] : img->fmt) != cf[i]) { static int said; if (said++ < 4) nvlog("begin_render: colour %u: the pipeline's format %u draws into a format-%u attachment - pass REFUSED", i, cf[i], ps->colfmt[i] ? ps->colfmt[i] : img->fmt); return -1; }
     }
     if (p->has_depth && !ps->dsview) { nvlog("begin_render: pipeline has a depth attachment but the encoder has no depth texture — pass REFUSED"); return -1; }
+    // Hazard model (NVMTL_HAZARD): decide this pass's barrier before its transitions, so a transition of an image no
+    // earlier encoder touched needs no wait (nvmtl_hz_clean_src).
+    hz_state *hzs = NULL; int hz_nodep = 0;
+    if (nvmtl_hz_mode() > 0 && !c->in_rp && (hzs = hz_get(c->cb, 1))) {
+        const int elig = nvmtl_hz_dyn_ready() && p->samples <= 1 && ps->layers <= 1 && !p->fetch_mask && !c->hz_force_full && pattern.count <= 1;
+        hz_nodep = hz_pass_decide(c, hzs, ps, p, ncol, cf, elig);
+    }
     if (p->has_depth && ps->ds) {
         uint32_t ds_s = ps->ds->samples > 1 ? ps->ds->samples : 1u, p_s = p->samples > 1 ? p->samples : 1u;
         if (ds_s != p_s) { nvlog("begin_render: apps2 pipeline has %u samples but the depth target has %u — pass REFUSED", p_s, ds_s); return -1; }
@@ -5521,7 +5549,9 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
               c->pt_w[c->pt_n] = ps->w; c->pt_h[c->pt_n] = ps->h; c->pt_f[c->pt_n] = ncol ? cf[0] : (p->has_depth ? 1000u + p->dfmt : 0u); c->pt_open = 1;
               memset(c->pt_fs[c->pt_n], 0, sizeof c->pt_fs[c->pt_n]); }
       } }
-    pvkCmdBeginRenderPass(c->cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    if (hzs) hz_pass_enter(c, hzs, hz_nodep);
+    if (hzs && hz_nodep && nvmtl_hz_mode() == 1) nvmtl_hz_begin_rendering(c, ps, p, ncol, cf);
+    else pvkCmdBeginRenderPass(c->cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     c->in_rp = 1;
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) c->fetchview[i] = (i < ncol && cf[i]) ? ps->colview[i] : NULL;
     if (p->pipe) nvmtl_vk_cmd_bind_pipeline(c, p);
@@ -5909,7 +5939,10 @@ int nvmtl_vk_cmd_clear_image(nvk_cmdbuf *c, nvk_image *img, const float clear[4]
     pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                           0, 0, NULL, 0, NULL, 1, &toDst);
     VkClearColorValue cv; nvmtl_clear_colour(&cv, img->fmt, clear);
+    hz_state *hzs = nvmtl_hz_mode() > 0 && !c->in_rp ? hz_get(c->cb, 1) : NULL;
+    if (hzs) hzs->arm_any = 1;
     pvkCmdClearColorImage(c->cb, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &cv, 1, &range);
+    if (hzs) { hz_ent e = hz_key_image(img, 1); e.src = HZS_CLEAR; hz_append(hzs, &e); hz_close_region(hzs); hzs->debt = 1; HZC(HZC_CLEAR); }
     VkImageMemoryBarrier toSrc = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
         VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -6120,7 +6153,8 @@ int nvmtl_pt_armed(void)
     return g_pt_left > 0;
 }
 void nvmtl_vk_cmd_end_render(nvk_cmdbuf *c) {
-    pvkCmdEndRenderPass(c->cb); c->in_rp = 0;
+    if (c->hz_dyn) { pvkCmdEndRendering(c->cb); c->hz_dyn = 0; } else pvkCmdEndRenderPass(c->cb);
+    c->in_rp = 0; nvmtl_hz_pass_exit(c);
     if (c->pt_open && c->pt_pool) { pvkCmdWriteTimestamp(c->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, (VkQueryPool)c->pt_pool, 2 * c->pt_n + 1); c->pt_n++; c->pt_open = 0; g_pt_left--; }
     (void)nvmtl_counter_flush(c); }
 
@@ -6174,6 +6208,7 @@ int nvmtl_vk_cmd_abandon(nvk_cmdbuf *c)
 {
     if (g_state != 1 || !c || !c->cb) return 0;
     g_cmd_abandoned++;
+    nvmtl_hz_forget((VkCommandBuffer)c->cb);
     nvmtl_cmd_retire(c);
     return 0;
 }
@@ -7005,6 +7040,7 @@ static void img_to(nvk_cmdbuf *c, nvk_image *img, VkImageLayout to,
 {
     if ((VkImageLayout)img->layout == to) return;
     VkImageSubresourceRange r = { nvmtl_barrier_aspect(img), 0, img->mips ? img->mips : 1, 0, img->layers ? img->layers : 1 };
+    srcA = nvmtl_hz_clean_src(c, img, srcA);   // hazard model: no wait on an image nothing earlier in this buffer touched
     VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, srcA, dstA,
         (VkImageLayout)img->layout, to, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, r };
     nvmtl_sample_pattern pattern = c->sample_pattern;
@@ -7257,6 +7293,7 @@ void nvmtl_vk_cmd_barrier(nvk_cmdbuf *c)
         VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
     pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                           0, 1, &mb, 0, NULL, 0, NULL);
+    nvmtl_hz_full_barrier(c);
 }
 void nvmtl_vk_cmd_barrier_c2c(nvk_cmdbuf *c)
 {
@@ -8209,7 +8246,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
         nvlog("buffer texture: image size %llu runs %llu B past the buffer's %zu at offset %zu (the tail of the last row, never addressed)",
               (unsigned long long)mr.size, (unsigned long long)(mr.size - (b->size - offset)), b->size, offset);
     VKCK(pvkBindImageMemory(g_dev, (VkImage)out->img, (VkDeviceMemory)b->mem, at), "vkBindImageMemory(buffer texture)");
-    out->mem = b->mem; out->placed = 1; out->alloc = 0;
+    out->mem = b->mem; out->placed = 1; out->alloc = 0; out->hz_off = at; out->hz_len = mr.size;
     VkComponentMapping swz = nvmtl_a8_mapping(a8);
     VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, out->img, VK_IMAGE_VIEW_TYPE_2D,
         (VkFormat)vkfmt, swz, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
@@ -8446,6 +8483,7 @@ static int image_pool_bind(nvk_image *out)
     if (pvkBindImageMemory(g_dev, (VkImage)out->img, (VkDeviceMemory)blk->heap.mem, bound) != VK_SUCCESS) {
         nvk_buffer failed = { .pool = blk, .poff = off, .alloc = reserved }; pool_buffer_release(&failed); return -1; }
     out->mem = blk->heap.mem; out->alloc = (size_t)mr->size; out->placed = 1; out->pool = blk; out->poff = off; out->poollen = reserved;
+    out->hz_off = bound; out->hz_len = (size_t)mr->size;
     out->sysmem = !(g_memp.memoryTypes[blk->heap.memtype].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     return 0;
 }
@@ -8495,7 +8533,7 @@ static int nvmtl_vk_image_create_typed_placed_lifetime_body(uint32_t w, uint32_t
     VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, out->img, &mr);
     if (placed_ok(&mr, heap, offset, "placed image")) { pvkDestroyImage(g_dev, (VkImage)out->img, NULL); memset(out, 0, sizeof *out); return -1; }
     VKCK(pvkBindImageMemory(g_dev, out->img, (VkDeviceMemory)heap->mem, offset), "vkBindImageMemory(placed)");
-    out->mem = heap->mem; out->placed = 1; out->alloc = 0;
+    out->mem = heap->mem; out->placed = 1; out->alloc = 0; out->hz_off = offset; out->hz_len = mr.size;
     VkComponentMapping swz = nvmtl_a8_mapping(a8);
     VkImageViewType viewType = mtl_type == 0 ? VK_IMAGE_VIEW_TYPE_1D : mtl_type == 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : mtl_type == 3 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
                              : mtl_type == 5 ? VK_IMAGE_VIEW_TYPE_CUBE : mtl_type == 6 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : mtl_type == 7 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
@@ -8526,7 +8564,7 @@ static int nvmtl_vk_depth_create_ex_placed_lifetime_body(uint32_t w, uint32_t h,
     VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, out->img, &mr);
     if (placed_ok(&mr, heap, offset, "placed depth image")) { pvkDestroyImage(g_dev, (VkImage)out->img, NULL); memset(out, 0, sizeof *out); return -1; }
     VKCK(pvkBindImageMemory(g_dev, out->img, (VkDeviceMemory)heap->mem, offset), "vkBindImageMemory(placed depth)");
-    out->mem = heap->mem; out->placed = 1; out->alloc = 0;
+    out->mem = heap->mem; out->placed = 1; out->alloc = 0; out->hz_off = offset; out->hz_len = mr.size;
     VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, out->img, VK_IMAGE_VIEW_TYPE_2D,
         (VkFormat)vkfmt, { 0 }, { (VkImageAspectFlags)aspect, 0, 1, 0, 1 } };
     VKCK(nvmtl_opaque_CreateImageView(g_dev, &vci, NULL, &out->view), "vkCreateImageView(placed depth)");

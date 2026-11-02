@@ -296,6 +296,9 @@ BOOL nvmtl_air_grid_only(NVMTLFunction *fn);
 @interface NVMTLBlitCommandEncoder () { @public NSString *_label; } @end
 @interface NVMTLAccelerationStructureCommandEncoder () { @public NSString *_label; } @end
 @interface NVMTLHeap () { @public MTLHazardTrackingMode _hazard; } @end
+// hazard model (nvmtl_hazard.h): which buffer slots and textures each stage of a pipeline writes, from its reflection
+@interface NVMTLRenderPipelineState () { @public int _hzReady; uint32_t _hzBuf[2]; uint64_t _hzTex[2][2]; } @end
+@interface NVMTLComputePipelineState () { @public int _hzReady; uint32_t _hzBuf; uint64_t _hzTex[2]; } @end
 @interface NVMTLIndirectCommandBuffer () { @public MTLResourceOptions _opts; } @end
 @interface NVMTLBuffer () { @public uint32_t _purge; } @end
 @interface NVMTLTexture () { @public uint32_t _purge; } @end
