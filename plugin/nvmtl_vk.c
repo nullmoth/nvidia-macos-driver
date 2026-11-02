@@ -3097,6 +3097,19 @@ void nvmtl_vk_bindless_drop(uint32_t slot)
     pthread_mutex_lock(&g_fx_lock); nvmtl_fx_slot_gone(&g_fx, g_cmd_submitted, slot); pthread_mutex_unlock(&g_fx_lock);
     pthread_mutex_lock(&g_heap_lock);
     nvmtl_heap_write_locked(slot, g_dummyImg.view);
+    // The slot's storage-image and texel-buffer descriptors (bindings 2-4) go back to the dummies too. They stayed as
+    // the dead resource left them: a slot reused after the quarantine then still carried the old storage descriptor at
+    // binding 2 (a new sampled texture rewrites binding 0 only), and a kernel writing through it stored into the old
+    // image's memory - a page fault once that memory was freed (the first-scene fault with the five-binding heap on).
+    if (g_heap_storage_binding) {
+        VkDescriptorImageInfo si = { VK_NULL_HANDLE, (VkImageView)g_dummyStex.view, VK_IMAGE_LAYOUT_GENERAL };
+        VkBufferView tv = (VkBufferView)g_dummyTexView;
+        VkWriteDescriptorSet w[3]; uint32_t n = 0;
+        if (g_dummyStex.view) w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 2, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &si, NULL, NULL };
+        if (tv) { w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 3, slot, 1, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, NULL, NULL, &tv };
+                  w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 4, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NULL, NULL, &tv }; }
+        if (n) pvkUpdateDescriptorSets(g_dev, n, w, 0, NULL);
+    }
     g_heap_fifo[(g_heap_fifo_head + g_heap_fifo_n) % NVMTL_BINDLESS_SLOTS] = slot; g_heap_fifo_n++;
     if (g_heap_live) g_heap_live--;
     pthread_mutex_unlock(&g_heap_lock);
