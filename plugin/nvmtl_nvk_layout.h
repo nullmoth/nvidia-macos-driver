@@ -19,7 +19,9 @@ enum {
     NVK_L_ARENA_CONTIG_VA = 96, NVK_L_ARENA_MEM_COUNT = 108, NVK_L_ARENA_MEM = 120, NVK_L_ARENA_MEM_STRIDE = 16, NVK_L_ARENA_MIN_LOG2 = 16,
     NVK_L_NVKMD_MEM_MAP = 160, NVK_L_NVKMD_VA_ADDR = 24,
     NVK_L_SET_POOL = 64, NVK_L_SET_LAYOUT = 88, NVK_L_SET_MAP = 96, NVK_L_SET_MEM_OFFSET = 104, NVK_L_POOL_MEM = 88, NVK_L_NVKMD_MEM_VA = 56, NVK_L_LAYOUT_BINDING = 152, NVK_L_BINDING_SIZE = 32, NVK_L_BINDING_OFFSET = 12, NVK_L_BINDING_STRIDE = 16, NVK_L_BINDING_ARRAY_SIZE = 8,
-    NVK_L_TIC_BYTES = 32
+    NVK_L_TIC_BYTES = 32,
+    NVK_L_QUEUE_IMAGES_ALLOC = 624, NVK_L_QUEUE_SAMPLERS_ALLOC = 628,   /* nvk_queue.state.images/samplers.alloc_count: what the queue last programmed as the pools' sizes */
+    NVK_L_NVKMD_MEM_SIZE = 48, NVK_L_SET_SIZE = 112
 };
 
 typedef struct { uint64_t addr; uint32_t width, height, depth, type, max_mip, gob_w, gob_h, gob_d, components, version; } nvmtl_tic;

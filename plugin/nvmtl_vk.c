@@ -5886,11 +5886,16 @@ static void nvmtl_tabshadow_census(FILE *f)
         for (uint32_t b = 0; b <= 2; b += 2) {
             uint32_t off = 0, stride = 0, count = 0; void *map = NULL; uint32_t sdiff = 0, sshown = 0;
             if (!nvmtl_nvk_set_binding(g_heapSet, b, &off, &stride, &count, &map) || stride != 4) continue;
+            uint32_t lowest = UINT32_MAX, highest = 0, band[64] = {0}, nonzero_band[64] = {0};
             for (uint32_t k = 0; k < count; k++) { uint32_t hv = 0, gv = 0; if (!nvmtl_fx_read_safe((const uint8_t *)map + off + (uint64_t)k * 4, &hv, 4) || !nvmtl_setshadow_element(b, k, &gv)) continue;
-                if (hv == gv) continue; sdiff++;
+                if ((hv || gv) && (k >> 12) < 64) nonzero_band[k >> 12]++;
+                if (hv == gv) continue; sdiff++; if (k < lowest) lowest = k; if (k > highest) highest = k; if ((k >> 12) < 64) band[k >> 12]++;
                 if (sshown < 8) { snprintf(line, sizeof line, "fault context: heap set binding %u [%u] DIFFERS: host 0x%08x (index %u) vs GPU copy 0x%08x (index %u)", b, k, hv, hv & 0xFFFFFu, gv, gv & 0xFFFFFu); nvmtl_fx_emit_both(f, line); sshown++; } }
-            snprintf(line, sizeof line, "fault context: heap set binding %u census: %u of %u elements DIFFER between the host's set and the GPU's copy (copied at seq %llu, set GPU address 0x%llx + %u, stride %u)", b, sdiff, count,
-                     (unsigned long long)g_ts.set_seq, (unsigned long long)g_ts.set_addr, off, stride); nvmtl_fx_emit_both(f, line);
+            snprintf(line, sizeof line, "fault context: heap set binding %u census: %u of %u elements DIFFER between the host's set and the GPU's copy (copied at seq %llu, set GPU address 0x%llx + %u, stride %u); lowest differing slot %u, highest %u", b, sdiff, count,
+                     (unsigned long long)g_ts.set_seq, (unsigned long long)g_ts.set_addr, off, stride, sdiff ? lowest : 0, highest); nvmtl_fx_emit_both(f, line);
+            {   int o = snprintf(line, sizeof line, "fault context: heap set binding %u per 4096-slot band (differing/non-zero):", b);
+                for (uint32_t i = 0; i < 64 && (uint64_t)i * 4096 < count && o < (int)sizeof line - 24; i++) o += snprintf(line + o, sizeof line - (size_t)o, " %u:%u/%u", i, band[i], nonzero_band[i]);
+                nvmtl_fx_emit_both(f, line); }
         }
     } else if (nvmtl_tabshadow_on()) { snprintf(line, sizeof line, "fault context: heap set shadow: no copy was made (set address or layout unreadable)"); nvmtl_fx_emit_both(f, line); }
 }
@@ -5975,8 +5980,27 @@ static void nvmtl_fault_slot_report(uint64_t ptr, FILE *f)
             if (v2) nvmtl_fx_read_safe((const uint8_t *)v2 + NVK_L_VIEW_STORAGE_INDEX, &ti, 4);
             if (v0) nvmtl_fx_read_safe((const uint8_t *)v0 + NVK_L_VIEW_SAMPLED_INDEX, &si, 4);
             nvmtl_fx_read_safe(table + NVK_L_TABLE_ALLOC, &alloc, 4); nvmtl_fx_read_safe(table + NVK_L_TABLE_ALLOC + 4, &max_alloc, 4); nvmtl_fx_read_safe(table + NVK_L_TABLE_ALLOC + 8, &next_desc, 4); nvmtl_fx_read_safe(table + NVK_L_ARENA_MEM_COUNT, &mem_count, 4);
-            char line[300]; snprintf(line, sizeof line, "fault context:     NVK image table: alloc %u, max %u, next fresh index %u, %u arena memories; binding 2 index %u is in arena memory #%u, binding 0 index %u in #%u", alloc, max_alloc, next_desc, mem_count,
+            char line[400]; snprintf(line, sizeof line, "fault context:     NVK image table: alloc %u, max %u, next fresh index %u, %u arena memories; binding 2 index %u is in arena memory #%u, binding 0 index %u in #%u", alloc, max_alloc, next_desc, mem_count,
                                      ti, nvmtl_nvk_arena_mem_index((uint64_t)ti * NVK_L_TIC_BYTES), si, nvmtl_nvk_arena_mem_index((uint64_t)si * NVK_L_TIC_BYTES)); nvmtl_fx_emit_both(f, line);
+            {   // what the queue last programmed as the header pool's size (SET_TEX_HEADER_POOL_C = alloc_count - 1), against the index the dispatch used
+                uint32_t q_images = 0, q_samplers = 0; const uint8_t *q = (const uint8_t *)g_queue;
+                const int qok = q && nvmtl_fx_read_safe(q + NVK_L_QUEUE_IMAGES_ALLOC, &q_images, 4) && nvmtl_fx_read_safe(q + NVK_L_QUEUE_SAMPLERS_ALLOC, &q_samplers, 4);
+                if (qok) snprintf(line, sizeof line, "fault context:     queue's programmed header pool: %u entries (limit index %u; samplers %u); table alloc now %u -> binding 2 index %u is %s the programmed limit, binding 0 index %u is %s",
+                                  q_images, q_images ? q_images - 1 : 0, q_samplers, alloc, ti, q_images && ti < q_images ? "WITHIN" : "PAST", si, q_images && si < q_images ? "within" : "PAST");
+                else snprintf(line, sizeof line, "fault context:     queue state unreadable");
+                nvmtl_fx_emit_both(f, line);
+                // the set's bounds: its GPU address and byte size, its pool memory's size, and where binding 2's element for this slot lies
+                uint64_t sa = 0, pmem_size = 0; uint32_t set_size = 0, off2 = 0, st2 = 0, cnt2 = 0; void *pool = NULL, *pmem = NULL;
+                nvmtl_nvk_set_gpu_addr(g_heapSet, &sa); nvmtl_fx_read_safe((const uint8_t *)g_heapSet + NVK_L_SET_SIZE, &set_size, 4);
+                if (nvmtl_fx_read_safe((const uint8_t *)g_heapSet + NVK_L_SET_POOL, &pool, 8) && pool && nvmtl_fx_read_safe((const uint8_t *)pool + NVK_L_POOL_MEM, &pmem, 8) && pmem) nvmtl_fx_read_safe((const uint8_t *)pmem + NVK_L_NVKMD_MEM_SIZE, &pmem_size, 8);
+                nvmtl_nvk_set_binding(g_heapSet, 2, &off2, &st2, &cnt2, NULL);
+                const uint64_t elem_at = off2 + (uint64_t)slot * st2;
+                snprintf(line, sizeof line, "fault context:     heap set bounds: GPU 0x%llx, %u bytes (pool memory %llu bytes); binding 2 starts at +%u, stride %u, %u elements; slot %u's element at +%llu = GPU 0x%llx: %s the set",
+                         (unsigned long long)sa, set_size, (unsigned long long)pmem_size, off2, st2, cnt2, slot, (unsigned long long)elem_at, (unsigned long long)(sa + elem_at), elem_at + st2 <= set_size ? "INSIDE" : "OUTSIDE");
+                nvmtl_fx_emit_both(f, line);
+                snprintf(line, sizeof line, "fault context:     TARGET SUMMARY: slot %u -> binding 2 index %u (arena memory #%u), binding 0 index %u (#%u); programmed pool %u, table alloc %u", slot, ti, nvmtl_nvk_arena_mem_index((uint64_t)ti * NVK_L_TIC_BYTES), si, nvmtl_nvk_arena_mem_index((uint64_t)si * NVK_L_TIC_BYTES), q_images, alloc);
+                nvmtl_fx_emit_both(f, line);
+            }
             const int ls = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock");
             if (ti) nvmtl_vw_index_history(&g_vw, &g_im, ti, v2, nvmtl_fx_emit_both, f);
             if (si && si != ti) nvmtl_vw_index_history(&g_vw, &g_im, si, v0, nvmtl_fx_emit_both, f);
