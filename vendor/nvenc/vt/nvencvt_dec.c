@@ -101,7 +101,7 @@ typedef struct {
     struct OutJob { VTVideoDecoderFrame frame; OSStatus res; VTDecodeInfoFlags fl; CVPixelBufferRef pb; int surf, rel; unsigned w, h, cx, cy, usCopy, usEmit; } q[4];
     unsigned qh, qt; bool async, thrOn, stop; pthread_t thr; pthread_cond_t cv;
     // the last pictures handed out, still referenced here (see hold_picture)
-    CVPixelBufferRef held[NVDEC_HOLD_MAX]; unsigned heldNext; pthread_mutex_t heldLock;
+    CVPixelBufferRef held[NVDEC_HOLD_MAX]; unsigned heldNext, hold; pthread_mutex_t heldLock;
 } DState;
 typedef struct OutJob OutJob;
 
@@ -586,16 +586,15 @@ static void out_release(DState *s, const OutJob *j)   // lock held
     else h264dec_release(&s->dec, j->rel);
 }
 
-static unsigned hold_count(void)
+static unsigned hold_count(void)   // NVDEC_HOLD, read once per session when it is created: nothing is shared between threads
 {
-    static int n = -1;
-    if (n < 0) { const char *e = getenv("NVDEC_HOLD"); n = e ? atoi(e) : 8; if (n < 0) n = 0; if (n > NVDEC_HOLD_MAX) n = NVDEC_HOLD_MAX; }
-    return (unsigned)n;
+    const char *e = getenv("NVDEC_HOLD"); const int n = e ? atoi(e) : 8;
+    return n < 0 ? 0 : n > NVDEC_HOLD_MAX ? NVDEC_HOLD_MAX : (unsigned)n;
 }
 // takes over the caller's reference to pb; the picture it displaces goes back to its pool
 static void hold_picture(DState *s, CVPixelBufferRef pb)
 {
-    const unsigned n = hold_count();
+    const unsigned n = s->hold;
     if (!n) { CVPixelBufferRelease(pb); return; }
     pthread_mutex_lock(&s->heldLock);
     CVPixelBufferRef old = s->held[s->heldNext % n];
@@ -949,7 +948,7 @@ __attribute__((visibility("default"))) OSStatus NVDecVT_CreateInstance(FourCharC
     if (st) return st;
     DState *s = calloc(1, sizeof *s);
     pthread_mutex_init(&s->lock, NULL); pthread_mutex_init(&s->heldLock, NULL); pthread_cond_init(&s->cv, NULL);
-    s->codec = codec;
+    s->codec = codec; s->hold = hold_count();
     *(DState **)CMBaseObjectGetDerivedStorage(obj) = s;
     *out = obj;
     DLOG("instance %p (%s)", obj, entry == CODEC_HEV1 ? "hev1" : entry == CODEC_AVC3 ? "avc3" : codec == CODEC_VP9 ? "vp09" : codec == CODEC_AV1 ? "av01" : codec == kCMVideoCodecType_HEVC ? "hvc1" :
