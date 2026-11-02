@@ -5214,6 +5214,8 @@ int nvmtl_vk_cmd_dispatch_sass(nvk_cmdbuf *c,
 struct nvmtl_dt_rec { char name[48]; uint32_t t[3], l[3]; };
 static __thread const char *t_dt_label;
 void nvmtl_vk_dispatch_label(const char *name) { t_dt_label = name; }
+static __thread uint32_t t_dt_key;
+void nvmtl_vk_dispatch_key(uint32_t spv_fnv) { t_dt_key = spv_fnv; }
 static void nvmtl_fx_emit_line(void *ctx, const char *line) { (void)ctx; nvlog_every("%s", line); }
 static void nvmtl_fx_dump(const char *why)
 {
@@ -5222,7 +5224,7 @@ static void nvmtl_fx_dump(const char *why)
     nvmtl_fx_report(&g_fx, g_cmd_submitted, 12, 256, nvmtl_fx_emit_line, NULL);
     pthread_mutex_unlock(&g_fx_lock);
 }
-static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c, const nvk_pipeline *p) { nvmtl_fx_dispatch(&c->fx, t_dt_label, p); }
+static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c, const nvk_pipeline *p) { nvmtl_fx_dispatch(&c->fx, t_dt_label, p, t_dt_key); }
 static int nvmtl_dt_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_DISPATCH_TIME"); on = e && e[0] == '1'; } return on; }
 /* returns the slot whose timestamps bracket this dispatch, or -1 */
 static int nvmtl_dt_begin(nvk_cmdbuf *c, const uint32_t t[3], const uint32_t l[3])
@@ -6651,6 +6653,20 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
         g_state = -1;
         nvlog("vk: fence wait -> %d after %ld ms (budget %ld ms); the device is lost, disabling backend without retiring in-flight resources", wr, waited_ms, budget_ms);
         nvmtl_fx_dump("fence wait failed: the device is lost");
+        {   // the binding-table pages this command buffer's draws and dispatches read, and the cached pages, by GPU address
+            unsigned n = 0;
+            for (nvmtl_address_page *pg = c->address_pages; pg; pg = pg->next, n++) {
+                const uint64_t a = nvmtl_vk_buffer_address(&pg->buffer);
+                nvlog_every("fault context: this command buffer's address page %u: GPU 0x%llx .. 0x%llx (%u tables)", n,
+                            (unsigned long long)a, (unsigned long long)(a + (uint64_t)NVMTL_TABLES_PER_PAGE * NVMTL_TABLE_BYTES), NVMTL_TABLES_PER_PAGE);
+            }
+            pthread_mutex_lock(&g_keep_lock);
+            uint64_t lo = ~0ull, hi = 0;
+            for (unsigned i = 0; i < g_keep_npage; i++) { const uint64_t a = nvmtl_vk_buffer_address(&g_keep_page[i]->buffer); if (a < lo) lo = a; if (a > hi) hi = a; }
+            const unsigned npg = g_keep_npage, npool = g_keep_npool;
+            pthread_mutex_unlock(&g_keep_lock);
+            nvlog_every("fault context: %u address pages cached for reuse (GPU 0x%llx .. 0x%llx), %u command pools cached", npg, (unsigned long long)(npg ? lo : 0), (unsigned long long)(npg ? hi : 0), npool);
+        }
         return -2;
     }
     // Every submit up to this one has completed (one in-order queue): dead images whose last possible reader was

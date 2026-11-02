@@ -992,6 +992,20 @@ static void nvmtl_surf_dirty(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
 // storage twin of the same VkFormat in optimal tiling, filled from the texture when this encoder first binds it and
 // copied back after every dispatch (nvmtl_storage_twins_out), the IOSurface marked dirty as for a direct write.
 static void nvmtl_retain_resource(NVMTLCommandBuffer *cb, id resource);
+// The FNV-1a of a function's SPIR-V: what a per-kernel profile row, the pipeline key line and a fault-context dispatch
+// record all carry, so one hash joins the three. Computed once per function.
+uint32_t nvmtl_function_spv_fnv(id f)
+{
+    if (![f isKindOfClass:[NVMTLFunction class]]) return 0;
+    NVMTLFunction *fn = f; static char kKey;
+    NSNumber *h = objc_getAssociatedObject(fn, &kKey);
+    if (h) return h.unsignedIntValue;
+    uint32_t x = 2166136261u; const uint8_t *b = fn->_spirv.bytes;
+    for (NSUInteger i = 0; i < fn->_spirv.length; i++) { x ^= b[i]; x *= 16777619u; }
+    if (!fn->_spirv.length) x = 0;
+    objc_setAssociatedObject(fn, &kKey, @(x), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return x;
+}
 static void nvmtl_heap_register(NVMTLHeap *heap, id resource);
 static void nvmtl_use_heap(NVMTLCommandBuffer *cb, id<MTLHeap> heap);
 // `writes`: the shader declares a storage binding there. A texture made with MTLTextureUsageUnknown (0) may be used
@@ -3476,6 +3490,10 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     NVMTLRenderPipelineState *p = (NVMTLRenderPipelineState *)ps;
     if (!p) { nvlog("encoder: nil render pipeline refused"); return; }
     if (_begun && !nvmtl_vk_pipeline_compatible(&_passSig, &p->_p)) {
+        static int refuse = -1;   // NVMTL_NO_PASS_TRANSITION=1: the old refusal instead of the transition below (a split switch)
+        if (refuse < 0) { const char *e = getenv("NVMTL_NO_PASS_TRANSITION"); refuse = e && e[0] == '1';
+            if (refuse) nvlog("encoder: an incompatible render pipeline is REFUSED, not transitioned (NVMTL_NO_PASS_TRANSITION=1)"); }
+        if (refuse) { nvlog("encoder: incompatible render pipeline refused before changing draw state"); return; }
         // Metal can omit unused attachments in a later pipeline. Vulkan requires a new compatible pass: end this one,
         // keep every attachment an earlier segment used, preserve the encoder's dynamic state and begin again below.
         // Refusing the pipeline instead dropped every draw until the next compatible one: Cyberpunk's parallel render
@@ -5371,6 +5389,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
         uint32_t lr[3]; nvmtl_tg_reshape(_ps, l, lr);
         nvmtl_cbt_kernel(_cb, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL);
         nvmtl_vk_dispatch_label(_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL);
+        nvmtl_vk_dispatch_key(_ps ? nvmtl_function_spv_fnv(_ps->_function) : 0);
         nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, lr);
     }
     if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
@@ -5394,6 +5413,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
         uint32_t lr[3]; nvmtl_tg_reshape(_ps, l, lr);
         nvmtl_cbt_kernel(_cb, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL);
         nvmtl_vk_dispatch_label(_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL);
+        nvmtl_vk_dispatch_key(_ps ? nvmtl_function_spv_fnv(_ps->_function) : 0);
         nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, lr);
     }
     if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
