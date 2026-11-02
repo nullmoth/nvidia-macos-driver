@@ -2428,6 +2428,32 @@ static int nvmtl_spirv_bands_ok(const void *p, size_t n, const char *what)
 }
 static int nvmtl_spirv_bmask_x(const void *p, size_t n, uint64_t out[4], int skip_fetch);
 static int nvmtl_spirv_bmask(const void *p, size_t n, uint64_t out[4]) { return nvmtl_spirv_bmask_x(p, n, out, 0); }
+static int nvmtl_heap_binding_refused(const void *p, size_t n, const char *what);
+// The highest binding a module uses in the heap set (2), or -1 when it uses none: OpDecorate DescriptorSet 2 marks the
+// variables, OpDecorate Binding gives their bindings. Read the decorations only; nothing else in the module is parsed.
+static int nvmtl_spirv_heap_binding_max(const void *p, size_t n)
+{
+    const uint32_t *w = (const uint32_t *)p; const size_t nw = n / 4;
+    if (!p || nw < 5 || w[0] != 0x07230203u) return -1;
+    const uint32_t bound = w[3];
+    uint8_t *inheap = bound && bound < (1u << 24) ? (uint8_t *)calloc(bound, 1) : NULL;
+    if (!inheap) return -1;
+    for (size_t i = 5; i < nw; ) {
+        const uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
+        if (!wc || i + wc > nw) break;
+        if (op == 71 && wc == 4 && w[i + 2] == 34 && w[i + 3] == 2 && w[i + 1] < bound) inheap[w[i + 1]] = 1;
+        i += wc;
+    }
+    int hi = -1;
+    for (size_t i = 5; i < nw; ) {
+        const uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
+        if (!wc || i + wc > nw) break;
+        if (op == 71 && wc == 4 && w[i + 2] == 33 && w[i + 1] < bound && inheap[w[i + 1]] && (int)w[i + 3] > hi) hi = (int)w[i + 3];
+        i += wc;
+    }
+    free(inheap);
+    return hi;
+}
 // NVMTL_DESC_MASK (on by default, =0 off): pipelines use the masks that also leave the framebuffer-fetch set out
 // (skip_fetch below). With the set counted, a pipeline with framebuffer fetch had no mask, and every draw of it wrote
 // all ~180 descriptors: CoreAnimation's pipelines use framebuffer fetch, so WindowServer wrote 2.2 million descriptors
@@ -2538,6 +2564,7 @@ static nvk_image             g_dummyImg;
 static VkDescriptorSetLayout g_heapLayout; static VkDescriptorPool g_heapPool; static VkDescriptorSet g_heapSet;
 static int g_heap_sampler_binding;   /* 1 = binding 1 holds samplers (NVMTL_ARGBUF_SAMPLERS=1) */
 static int g_heap_storage_binding;   /* 1 = bindings 2-4 hold storage images / uniform + storage texel buffers */
+static uint32_t g_heap_nbind;        /* how many bindings the heap layout was created with (1, 2 or 5) */
 static pthread_mutex_t g_heap_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t g_heap_next = 1;
 static uint32_t g_heap_fifo[NVMTL_BINDLESS_SLOTS]; static uint32_t g_heap_fifo_head, g_heap_fifo_n, g_heap_live;
@@ -2910,6 +2937,7 @@ static int ensure_descriptors_locked(void)
             VkWriteDescriptorSet sw = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, hset, 1, 0, NVMTL_BINDLESS_SAMPLER_SLOTS,
                                         VK_DESCRIPTOR_TYPE_SAMPLER, sfill, NULL, NULL };
             if (hnb >= 2) { pvkUpdateDescriptorSets(g_dev, 1, &sw, 0, NULL); g_heap_sampler_binding = 1; }
+            g_heap_nbind = hnb;
             if (hnb == 5) g_heap_storage_binding = 1;   // partially bound: a slot no texture filled is never read
             g_heapLayout = hl; g_heapPool = hp; g_heapSet = hset;
             nvlog("vk: BINDLESS heap ready - set 2, %d sampled images, every slot the dummy until a texture asks for its gpuResourceID", NVMTL_BINDLESS_SLOTS);
@@ -4800,6 +4828,7 @@ void nvmtl_vk_pipeline_try_gl_uniform(const void *vs, size_t vn, const void *fs,
 static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vkfmt, uint32_t depthfmt, const void *blend_,
                                          const void *vin_, uint32_t samples, const nvk_tess_desc *td, const nvk_rt *rt, void *out_, int uniform_layout)
 {
+    if (nvmtl_heap_binding_refused(vs, vn, "vertex") || nvmtl_heap_binding_refused(fs, fn, "fragment")) return -1;
     const nvk_blend_state *blend = (const nvk_blend_state *)blend_; const nvk_vertex_input *vin = (const nvk_vertex_input *)vin_; nvk_pipeline *out = (nvk_pipeline *)out_;
     nvk_rt lrt;
     if (!rt) {
@@ -5034,6 +5063,19 @@ void nvmtl_vk_sampler_destroy(nvk_sampler *s)
 static int nvmtl_vk_compute_pipeline_create_g(const void *cs, size_t n, uint32_t flags, nvk_pipeline *out);
 int nvmtl_vk_compute_pipeline_create(const void *cs, size_t n, nvk_pipeline *out) { return nvmtl_vk_compute_pipeline_create_g(cs, n, 0, out); }
 static int nvmtl_vk_compute_pipeline_create_g_lifetime_body(const void *cs, size_t n, uint32_t flags, nvk_pipeline *out);
+// A module that indexes a heap binding the heap was not created with (NVMTL_NO_HEAP_STORAGE=1 keeps two bindings,
+// NVMTL_NO_ARGBUF_SAMPLERS=1 one) reads its descriptor past the end of the set's descriptor memory: a garbage image
+// descriptor, and a store through it is a channel fault at whatever address the garbage names (measured 11-02: the same
+// address in five runs). Such a pipeline is refused here, before it can run, and the log names it.
+static int nvmtl_heap_binding_refused(const void *p, size_t n, const char *what)
+{
+    if (ensure_descriptors() || !g_heapSet || !g_heap_nbind) return 0;
+    const int hi = nvmtl_spirv_heap_binding_max(p, n);
+    if (hi < (int)g_heap_nbind) return 0;
+    nvlog("pipeline REFUSED: the %s module indexes heap binding %d but the heap was created with %u binding(s) "
+          "(NVMTL_NO_HEAP_STORAGE / NVMTL_NO_ARGBUF_SAMPLERS) - it would read a garbage descriptor", what, hi, g_heap_nbind);
+    return 1;
+}
 static int nvmtl_vk_compute_pipeline_create_g(const void *cs, size_t n, uint32_t flags, nvk_pipeline *out)
 {
     nvk_pipeline pending = {0};
@@ -5044,6 +5086,7 @@ static int nvmtl_vk_compute_pipeline_create_g(const void *cs, size_t n, uint32_t
 }
 static int nvmtl_vk_compute_pipeline_create_g_lifetime_body(const void *cs, size_t n, uint32_t flags, nvk_pipeline *out)
 {
+    if (nvmtl_heap_binding_refused(cs, n, "compute")) return -1;
     const void *const ag_src = cs; const size_t ag_srcn = n; uint32_t ag[4];
     NSData *data = nvmtl_address_shader_g(cs, n, flags, ag); if (!data) return -1;
     if (!(flags & 1) && ag[2]) {
@@ -5239,8 +5282,8 @@ int nvmtl_vk_cmd_dispatch_sass(nvk_cmdbuf *c,
 struct nvmtl_dt_rec { char name[48]; uint32_t t[3], l[3]; };
 static __thread const char *t_dt_label;
 void nvmtl_vk_dispatch_label(const char *name) { t_dt_label = name; }
-static __thread uint32_t t_dt_key;
-void nvmtl_vk_dispatch_key(uint32_t spv_fnv) { t_dt_key = spv_fnv; }
+static __thread uint32_t t_dt_key; static __thread uint64_t t_dt_air;
+void nvmtl_vk_dispatch_key(uint32_t spv_fnv, uint64_t air) { t_dt_key = spv_fnv; t_dt_air = air; }
 static void nvmtl_fx_emit_line(void *ctx, const char *line) { (void)ctx; nvlog_every("%s", line); }
 static void nvmtl_fx_dump(const char *why)
 {
@@ -5249,7 +5292,7 @@ static void nvmtl_fx_dump(const char *why)
     nvmtl_fx_report(&g_fx, g_cmd_submitted, 12, 256, nvmtl_fx_emit_line, NULL);
     pthread_mutex_unlock(&g_fx_lock);
 }
-static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c, const nvk_pipeline *p) { nvmtl_fx_dispatch(&c->fx, t_dt_label, p, t_dt_key); }
+static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c, const nvk_pipeline *p) { nvmtl_fx_dispatch(&c->fx, t_dt_label, p, t_dt_key, t_dt_air); }
 static int nvmtl_dt_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_DISPATCH_TIME"); on = e && e[0] == '1'; } return on; }
 /* returns the slot whose timestamps bracket this dispatch, or -1 */
 static int nvmtl_dt_begin(nvk_cmdbuf *c, const uint32_t t[3], const uint32_t l[3])

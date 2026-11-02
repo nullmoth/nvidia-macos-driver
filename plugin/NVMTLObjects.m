@@ -1006,6 +1006,23 @@ uint32_t nvmtl_function_spv_fnv(id f)
     objc_setAssociatedObject(fn, &kKey, @(x), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return x;
 }
+// The first 8 bytes of the sha256 of a function's AIR text, as the pipeline key line prints them: the module key a
+// profile row or a fault-context dispatch is joined to. Computed once per function.
+uint64_t nvmtl_function_air_key(id f)
+{
+    if (![f isKindOfClass:[NVMTLFunction class]]) return 0;
+    NVMTLFunction *fn = f; static char kKey;
+    NSNumber *h = objc_getAssociatedObject(fn, &kKey);
+    if (h) return h.unsignedLongLongValue;
+    uint64_t v = 0;
+    if (fn->_air.length) {
+        const char *s = fn->_air.UTF8String; unsigned char dg[CC_SHA256_DIGEST_LENGTH];
+        CC_SHA256(s, (CC_LONG)strlen(s), dg);
+        for (int i = 0; i < 8; i++) v = (v << 8) | dg[i];
+    }
+    objc_setAssociatedObject(fn, &kKey, @(v), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return v;
+}
 static void nvmtl_heap_register(NVMTLHeap *heap, id resource);
 static void nvmtl_use_heap(NVMTLCommandBuffer *cb, id<MTLHeap> heap);
 // `writes`: the shader declares a storage binding there. A texture made with MTLTextureUsageUnknown (0) may be used
@@ -5389,7 +5406,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
         uint32_t lr[3]; nvmtl_tg_reshape(_ps, l, lr);
         nvmtl_cbt_kernel(_cb, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL);
         nvmtl_vk_dispatch_label(_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL);
-        nvmtl_vk_dispatch_key(_ps ? nvmtl_function_spv_fnv(_ps->_function) : 0);
+        nvmtl_vk_dispatch_key(_ps ? nvmtl_function_spv_fnv(_ps->_function) : 0, _ps ? nvmtl_function_air_key(_ps->_function) : 0);
         nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, lr);
     }
     if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
@@ -5413,7 +5430,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
         uint32_t lr[3]; nvmtl_tg_reshape(_ps, l, lr);
         nvmtl_cbt_kernel(_cb, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL);
         nvmtl_vk_dispatch_label(_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL);
-        nvmtl_vk_dispatch_key(_ps ? nvmtl_function_spv_fnv(_ps->_function) : 0);
+        nvmtl_vk_dispatch_key(_ps ? nvmtl_function_spv_fnv(_ps->_function) : 0, _ps ? nvmtl_function_air_key(_ps->_function) : 0);
         nvmtl_vk_cmd_dispatch_threads(&_cb->_c, &selected->_p, t, lr);
     }
     if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);

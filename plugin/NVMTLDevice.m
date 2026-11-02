@@ -1641,6 +1641,7 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
 // per-kernel GPU profile keys a row on) and the sha256 of its AIR (what the translator caches key a module on), so a
 // profile row maps to a translator module without guessing.
 uint32_t nvmtl_function_spv_fnv(id f);
+uint64_t nvmtl_function_air_key(id f);
 static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
 {
     if (![f isKindOfClass:[NVMTLFunction class]]) return;
@@ -1649,8 +1650,7 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
     objc_setAssociatedObject(fn, &kKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     const uint32_t x = nvmtl_function_spv_fnv(fn);
     char air[17] = "-";
-    if (fn->_air.length) { unsigned char dg[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(fn->_air.UTF8String, (CC_LONG)strlen(fn->_air.UTF8String), dg);
-                           for (int i = 0; i < 8; i++) snprintf(air + 2 * i, 3, "%02x", dg[i]); }
+    if (fn->_air.length) snprintf(air, sizeof air, "%016llx", (unsigned long long)nvmtl_function_air_key(fn));
     nvlog_every("pipeline key: %s %s spv-fnv %08x air %s%s%s pipe %p", stage, fn->_fname.UTF8String ?: "-", x, air,
           fn->_specName.length ? " fc " : "", fn->_specName.length ? fn->_specName.UTF8String : "", pipe);
 }
