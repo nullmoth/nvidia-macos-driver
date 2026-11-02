@@ -72,5 +72,39 @@ int main(void)
         for (unsigned k = 0; k < NVMTL_FX_BUFS + 5; k++) nvmtl_fx_buffer_gone(&s4, 400 + k, 0x1000000ull + k * 0x1000, 0x1000, 0);
         arm("the ring wraps and the newest death still wins the match", nvmtl_fx_buffer_at(&s4, 0x1000000ull + (NVMTL_FX_BUFS + 4) * 0x1000) != NULL && nvmtl_fx_buffer_at(&s4, 0x36f122000ull) == NULL);
     }
+    /* barrier record, copy ring and writer census */
+    {   nvmtl_fx_state s5; memset(&s5, 0, sizeof s5); nvmtl_fx_cb me; memset(&me, 0, sizeof me);
+        const void *cb = (const void *)0x1000, *other = (const void *)0x2000;
+        /* dispatch 1 (writer) binds b2 = [0x100000, 0x140000); dispatch 2 (reader) binds the same b2 */
+        me.nroot = 1; me.root[0] = (nvmtl_fx_root){ 0x100000, 0x140000, 2 }; nvmtl_fx_dispatch(&me, "writer", NULL, 0x844d7eb8, 1);
+        nvmtl_fx_barrier(&s5, cb, 1, 0x800, 0x800, 0x40, 0x20 | 0x40, 1, 0, 0);          /* COMPUTE->COMPUTE after dispatch 1 */
+        nvmtl_fx_barrier(&s5, other, 1, 0x10000, 0x10000, 0x10000, 0x8000, 1, 0, 0);  /* another cb's barrier: not ours */
+        nvmtl_fx_dispatch(&me, "reader", NULL, 0x3d8cd246, 2);
+        arm("a dispatch carries its ordinal and roots", me.d[1].ordinal == 2 && me.d[1].nroot == 1 && me.d[1].root[0].idx == 2 && me.d[0].ordinal == 1);
+        nout = 0; unsigned nb1 = nvmtl_fx_barriers_after(&s5, cb, 1, emit, NULL);
+        arm("the barrier after dispatch 1 is reported with its stages and access masks", nb1 == 1 && has("barrier after dispatch 1: COMPUTE -> COMPUTE, 1 memory [SHADER_WRITE -> SHADER_READ|SHADER_WRITE], 0 buffer, 0 image"));
+        nout = 0; unsigned nb2 = nvmtl_fx_barriers_after(&s5, cb, 2, emit, NULL);
+        arm("no barrier after dispatch 2 reads NONE (negative control; the other cb's barrier is not counted)", nb2 == 0 && has("barrier after dispatch 2: NONE"));
+        /* a copy into b2 one submit earlier, from a host-visible staging source */
+        static uint64_t staging[16] = { 0x36f100000ull, 7, 0x2ef8a1ff8ull };
+        nvmtl_fx_copy_note(&s5, 0x100000, 0x200, 0x9000000, staging, 99, other, 3);
+        nvmtl_fx_copy_note(&s5, 0x300000, 0x100, 0x9100000, NULL, 100, other, 1);   /* elsewhere */
+        const nvmtl_fx_copy *cv = nvmtl_fx_copy_covering(&s5, 0x100000, 0x100040);
+        arm("the newest copy covering a 64-byte window is found and carries the host view", cv && cv->src_map == staging && cv->seq == 99);
+        arm("a window the copy does not cover whole names nothing", nvmtl_fx_copy_covering(&s5, 0x1001f0, 0x100230) == NULL && nvmtl_fx_copy_covering(&s5, 0x200000, 0x200040) == NULL);
+        /* writers of b2 before dispatch 2 of this cb at seq 100: dispatch 1 here, plus the copy at seq 99 */
+        nout = 0; unsigned w = nvmtl_fx_writers(&s5, &me, cb, 100, 2, 2, 0x100000, 0x140000, emit, NULL);
+        arm("the writer census names the earlier dispatch of this cb and the copy one submit before", w == 2 && has("bound earlier by: writer 844d7eb8 (dispatch 1, this cb, b2) | 1 copies into it, newest 0x100000..0x100200 at seq 99 after dispatch 3"));
+        nout = 0; w = nvmtl_fx_writers(&s5, &me, cb, 100, 1, 2, 0x100000, 0x140000, emit, NULL);
+        arm("before dispatch 1 nothing in this cb precedes it; the copy still counts", w == 1 && has("bound earlier by: | 1 copies"));
+        nout = 0; w = nvmtl_fx_writers(&s5, &me, cb, 100, 2, 5, 0x500000, 0x500100, emit, NULL);
+        arm("a range nobody bound or copied reads 'nothing recorded' (negative control)", w == 0 && has("nothing recorded | 0 copies"));
+        /* the previous submits' dispatches count too */
+        nvmtl_fx_cb prev; memset(&prev, 0, sizeof prev); prev.nroot = 1; prev.root[0] = (nvmtl_fx_root){ 0x120000, 0x130000, 7 }; nvmtl_fx_dispatch(&prev, "froxel", NULL, 0x0d2845ba, 9);
+        nvmtl_fx_submit(&s5, 98, other, &prev);
+        nvmtl_fx_submit(&s5, 97, other, &prev);   /* too old: three submits back */
+        nout = 0; w = nvmtl_fx_writers(&s5, &me, cb, 100, 2, 2, 0x100000, 0x140000, emit, NULL);
+        arm("a dispatch of the submit two back that overlaps the root is named; three back is not", w == 3 && has("froxel 0d2845ba (dispatch 1, seq 98, b7)") && !has("seq 97"));
+    }
     return fails ? 1 : 0;
 }

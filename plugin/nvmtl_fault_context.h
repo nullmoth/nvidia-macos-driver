@@ -14,14 +14,21 @@
 #include <stdio.h>
 #include <string.h>
 
-enum { NVMTL_FX_DISP = 8, NVMTL_FX_STOR = 6, NVMTL_FX_SUB = 48, NVMTL_FX_GONE = 128, NVMTL_FX_NAME = 40 };
+enum { NVMTL_FX_DISP = 8, NVMTL_FX_STOR = 6, NVMTL_FX_SUB = 48, NVMTL_FX_GONE = 128, NVMTL_FX_NAME = 40, NVMTL_FX_ROOT = 12, NVMTL_FX_BARS = 1024, NVMTL_FX_COPIES = 4096 };
+/* a buffer root of a dispatch: the GPU range bound at binding-table index idx (what the kernel may read or write) */
+typedef struct { uint64_t lo, hi; uint32_t idx; } nvmtl_fx_root;
 
 /* one dispatch: its kernel and the storage views bound to it (explicit binds; a bindless read is not visible here) */
 typedef struct { char name[NVMTL_FX_NAME]; const void *pipe; uint32_t key; uint64_t air; uint32_t nstor; uint32_t stor_idx[NVMTL_FX_STOR]; const void *stor_view[NVMTL_FX_STOR];
-                 const void *tab[2]; uint32_t dyn[2]; /* the binding-table buffer and offset in force per stage slot: the dispatch's root addresses */ } nvmtl_fx_disp;
+                 const void *tab[2]; uint32_t dyn[2]; /* the binding-table buffer and offset in force per stage slot: the dispatch's root addresses */
+                 uint32_t ordinal; uint32_t nroot; nvmtl_fx_root root[NVMTL_FX_ROOT]; } nvmtl_fx_disp;
 /* per command buffer: the last dispatches recorded into it, the storage binds and the binding tables in force */
 typedef struct { nvmtl_fx_disp d[NVMTL_FX_DISP]; uint32_t n, total; uint32_t nstor; uint32_t stor_idx[NVMTL_FX_STOR]; const void *stor_view[NVMTL_FX_STOR];
-                 const void *tab[2]; uint32_t dyn[2]; } nvmtl_fx_cb;
+                 const void *tab[2]; uint32_t dyn[2]; uint32_t nroot; nvmtl_fx_root root[NVMTL_FX_ROOT]; } nvmtl_fx_cb;
+/* one pipeline barrier: the command buffer it went into and the dispatch ordinal it followed (0 = before the first) */
+typedef struct { const void *cb; uint32_t after; uint32_t ss, ds, sa, da, nm, nb, ni; } nvmtl_fx_bar;
+/* one buffer-to-buffer copy: where it wrote, where it read from (host view when the source is host-visible), when */
+typedef struct { uint64_t dst_lo, dst_hi, src_lo, seq; const void *src_map; const void *cb; uint32_t ordinal; } nvmtl_fx_copy;
 /* one submit: the sequence number it got and the command buffer's dispatch ring as it was */
 typedef struct { uint64_t seq; const void *cb; uint32_t ndisp; nvmtl_fx_disp d[NVMTL_FX_DISP]; uint32_t n; } nvmtl_fx_sub;
 /* one death: an image (view, size, format) or a heap slot, at a sequence number */
@@ -33,7 +40,9 @@ typedef struct { uint64_t seq; const void *view; uint32_t slot, w, h, fmt, stora
 enum { NVMTL_FX_BUFS = 4096, NVMTL_FX_PARKED = 4 };   /* the game frees ~18 buffers per submit; 256 covered 14 submits */
 typedef struct { uint64_t seq, lo, hi; uint32_t where; } nvmtl_fx_buf;
 typedef struct { nvmtl_fx_sub sub[NVMTL_FX_SUB]; uint32_t nsub; nvmtl_fx_gone gone[NVMTL_FX_GONE]; uint32_t ngone;
-                 nvmtl_fx_buf buf[NVMTL_FX_BUFS]; uint32_t nbuf; } nvmtl_fx_state;
+                 nvmtl_fx_buf buf[NVMTL_FX_BUFS]; uint32_t nbuf;
+                 nvmtl_fx_bar bar[NVMTL_FX_BARS]; uint32_t nbar;
+                 nvmtl_fx_copy copy[NVMTL_FX_COPIES]; uint32_t ncopy; } nvmtl_fx_state;
 
 static inline void nvmtl_fx_copy_name(char *dst, const char *src) { snprintf(dst, NVMTL_FX_NAME, "%s", src ? src : "-"); }
 
@@ -55,6 +64,7 @@ static inline void nvmtl_fx_dispatch(nvmtl_fx_cb *c, const char *name, const voi
     nvmtl_fx_copy_name(d->name, name); d->pipe = pipe; d->key = key; d->air = air;
     d->nstor = c->nstor; memcpy(d->stor_idx, c->stor_idx, sizeof d->stor_idx); memcpy(d->stor_view, c->stor_view, sizeof d->stor_view);
     d->tab[0] = c->tab[0]; d->tab[1] = c->tab[1]; d->dyn[0] = c->dyn[0]; d->dyn[1] = c->dyn[1];
+    d->ordinal = c->total + 1; d->nroot = c->nroot < NVMTL_FX_ROOT ? c->nroot : NVMTL_FX_ROOT; memcpy(d->root, c->root, sizeof d->root);
     c->n++; c->total++;
 }
 /* a submit of command buffer cb at sequence number seq */
@@ -91,6 +101,101 @@ static inline const nvmtl_fx_buf *nvmtl_fx_buffer_at(const nvmtl_fx_state *s, ui
     const uint32_t nb = s->nbuf < NVMTL_FX_BUFS ? s->nbuf : NVMTL_FX_BUFS;
     for (uint32_t k = 0; k < nb; k++) { const nvmtl_fx_buf *b = &s->buf[(s->nbuf - 1 - k) % NVMTL_FX_BUFS]; if (addr >= b->lo && addr < b->hi) return b; }
     return NULL;
+}
+
+/* a pipeline barrier recorded into cb after dispatch `after` of that command buffer */
+static inline void nvmtl_fx_barrier(nvmtl_fx_state *s, const void *cb, uint32_t after, uint32_t ss, uint32_t ds, uint32_t sa, uint32_t da, uint32_t nm, uint32_t nb, uint32_t ni)
+{
+    nvmtl_fx_bar *b = &s->bar[s->nbar % NVMTL_FX_BARS];
+    b->cb = cb; b->after = after; b->ss = ss; b->ds = ds; b->sa = sa; b->da = da; b->nm = nm; b->nb = nb; b->ni = ni;
+    s->nbar++;
+}
+/* a copy of size bytes into dst_lo from src_lo (host view src_map when the source is host-visible), recorded into cb after dispatch ordinal */
+static inline void nvmtl_fx_copy_note(nvmtl_fx_state *s, uint64_t dst_lo, uint64_t size, uint64_t src_lo, const void *src_map, uint64_t seq, const void *cb, uint32_t ordinal)
+{
+    if (!dst_lo) return;
+    nvmtl_fx_copy *c = &s->copy[s->ncopy % NVMTL_FX_COPIES];
+    c->dst_lo = dst_lo; c->dst_hi = dst_lo + size; c->src_lo = src_lo; c->src_map = src_map; c->seq = seq; c->cb = cb; c->ordinal = ordinal;
+    s->ncopy++;
+}
+/* the newest copy whose destination covers [lo, hi) whole, or NULL */
+static inline const nvmtl_fx_copy *nvmtl_fx_copy_covering(const nvmtl_fx_state *s, uint64_t lo, uint64_t hi)
+{
+    const uint32_t n = s->ncopy < NVMTL_FX_COPIES ? s->ncopy : NVMTL_FX_COPIES;
+    for (uint32_t k = 0; k < n; k++) { const nvmtl_fx_copy *c = &s->copy[(s->ncopy - 1 - k) % NVMTL_FX_COPIES]; if (c->dst_lo <= lo && hi <= c->dst_hi) return c; }
+    return NULL;
+}
+static inline const char *nvmtl_fx_stage_name(uint32_t f, char *buf, size_t cap)
+{
+    switch (f) {
+    case 0x1: return "TOP"; case 0x8: return "VERTEX"; case 0x80: return "FRAGMENT"; case 0x400: return "COLOR_OUT"; case 0x800: return "COMPUTE";
+    case 0x1000: return "TRANSFER"; case 0x2000: return "BOTTOM"; case 0x8000: return "ALL_GRAPHICS"; case 0x10000: return "ALL_COMMANDS";
+    default: snprintf(buf, cap, "0x%x", f); return buf; }
+}
+static inline int nvmtl_fx_access_name(uint32_t f, char *buf, size_t cap)
+{
+    static const struct { uint32_t bit; const char *n; } names[] = { {0x8,"UNIFORM_READ"}, {0x20,"SHADER_READ"}, {0x40,"SHADER_WRITE"}, {0x80,"COLOR_READ"}, {0x100,"COLOR_WRITE"},
+        {0x200,"DS_READ"}, {0x400,"DS_WRITE"}, {0x800,"TRANSFER_READ"}, {0x1000,"TRANSFER_WRITE"}, {0x8000,"MEMORY_READ"}, {0x10000,"MEMORY_WRITE"} };
+    int o = 0; uint32_t rest = f;
+    for (unsigned k = 0; k < sizeof names / sizeof names[0]; k++) if (f & names[k].bit) { o += snprintf(buf + o, cap - (size_t)o, "%s%s", o ? "|" : "", names[k].n); rest &= ~names[k].bit; }
+    if (rest || !o) o += snprintf(buf + o, cap - (size_t)o, "%s0x%x", o ? "|" : "", rest);
+    return o;
+}
+/* The barriers recorded into cb after dispatch `after` (before `after` + 1): one line each, or one "NONE" line. Returns how many. */
+static inline unsigned nvmtl_fx_barriers_after(const nvmtl_fx_state *s, const void *cb, uint32_t after, void (*emit)(void *, const char *), void *ctx)
+{
+    char line[400], sb[32], db[32], sa[160], da[160]; unsigned n = 0;
+    const uint32_t nb = s->nbar < NVMTL_FX_BARS ? s->nbar : NVMTL_FX_BARS;
+    for (uint32_t k = 0; k < nb; k++) {
+        const nvmtl_fx_bar *b = &s->bar[(s->nbar - nb + k) % NVMTL_FX_BARS];   /* oldest first */
+        if (b->cb != cb || b->after != after) continue;
+        nvmtl_fx_access_name(b->sa, sa, sizeof sa); nvmtl_fx_access_name(b->da, da, sizeof da);
+        snprintf(line, sizeof line, "fault context: barrier after dispatch %u: %s -> %s, %u memory [%s -> %s], %u buffer, %u image", after,
+                 nvmtl_fx_stage_name(b->ss, sb, sizeof sb), nvmtl_fx_stage_name(b->ds, db, sizeof db), b->nm, b->nm ? sa : "-", b->nm ? da : "-", b->nb, b->ni);
+        emit(ctx, line); n++;
+    }
+    if (!n) { snprintf(line, sizeof line, "fault context: barrier after dispatch %u: NONE", after); emit(ctx, line); }
+    return n;
+}
+/* Who wrote (bound) the range [lo, hi) before dispatch `ordinal` of the command buffer whose ring is `me` (submit sequence `seq`):
+   earlier dispatches of the same command buffer, every dispatch of the two submits before it, and every copy into the range.
+   One line; returns how many writers it named. */
+static inline unsigned nvmtl_fx_writers(const nvmtl_fx_state *s, const nvmtl_fx_cb *me, const void *cb, uint64_t seq, uint32_t ordinal, uint32_t idx, uint64_t lo, uint64_t hi,
+                                        void (*emit)(void *, const char *), void *ctx)
+{
+    char line[600]; int o = snprintf(line, sizeof line, "fault context: root b%u 0x%llx..0x%llx of dispatch %u bound earlier by:", idx, (unsigned long long)lo, (unsigned long long)hi, ordinal);
+    unsigned n = 0;
+    const uint32_t nd = me->n < NVMTL_FX_DISP ? me->n : NVMTL_FX_DISP;
+    for (uint32_t j = 0; j < nd && o < (int)sizeof line - 80; j++) {
+        const nvmtl_fx_disp *d = &me->d[(me->n - nd + j) % NVMTL_FX_DISP];
+        if (d->ordinal >= ordinal) continue;
+        for (uint32_t r = 0; r < d->nroot; r++) if (d->root[r].lo < hi && lo < d->root[r].hi) {
+            o += snprintf(line + o, sizeof line - (size_t)o, " %s %08x (dispatch %u, this cb, b%u)", d->name, d->key, d->ordinal, d->root[r].idx); n++; break; }
+    }
+    const uint32_t ns = s->nsub < NVMTL_FX_SUB ? s->nsub : NVMTL_FX_SUB;
+    for (uint32_t k = 0; k < ns && o < (int)sizeof line - 80; k++) {
+        const nvmtl_fx_sub *u = &s->sub[(s->nsub - 1 - k) % NVMTL_FX_SUB];
+        if (u->seq + 2 < seq || u->seq >= seq) continue;
+        const uint32_t un = u->n < NVMTL_FX_DISP ? u->n : NVMTL_FX_DISP;
+        for (uint32_t j = 0; j < un && o < (int)sizeof line - 80; j++) {
+            const nvmtl_fx_disp *d = &u->d[(u->n - un + j) % NVMTL_FX_DISP];
+            for (uint32_t r = 0; r < d->nroot; r++) if (d->root[r].lo < hi && lo < d->root[r].hi) {
+                o += snprintf(line + o, sizeof line - (size_t)o, " %s %08x (dispatch %u, seq %llu, b%u)", d->name, d->key, d->ordinal, (unsigned long long)u->seq, d->root[r].idx); n++; break; }
+        }
+    }
+    unsigned copies = 0; const nvmtl_fx_copy *last = NULL;
+    const uint32_t nc = s->ncopy < NVMTL_FX_COPIES ? s->ncopy : NVMTL_FX_COPIES;
+    for (uint32_t k = 0; k < nc; k++) {
+        const nvmtl_fx_copy *c = &s->copy[(s->ncopy - 1 - k) % NVMTL_FX_COPIES];
+        if (!(c->dst_lo < hi && lo < c->dst_hi)) continue;
+        if (c->cb == cb ? c->ordinal >= ordinal : (c->seq + 2 < seq || c->seq >= seq)) continue;
+        if (!last) last = c; copies++;
+    }
+    if (last) o += snprintf(line + o, sizeof line - (size_t)o, " | %u copies into it, newest 0x%llx..0x%llx at seq %llu after dispatch %u%s", copies,
+                            (unsigned long long)last->dst_lo, (unsigned long long)last->dst_hi, (unsigned long long)last->seq, last->ordinal, last->cb == cb ? " (this cb)" : "");
+    else o += snprintf(line + o, sizeof line - (size_t)o, "%s | 0 copies", n ? "" : " nothing recorded");
+    emit(ctx, line);
+    return n + copies;
 }
 
 /* The report: calls emit(line) once per line. The last `subs` submits, newest first, with their dispatches; every
