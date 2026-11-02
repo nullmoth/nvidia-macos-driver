@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include "nvmtl_mem.h"
 
 enum { NVMTL_SL_NB = 5 };
 typedef struct { const void *view; uint64_t seq; } nvmtl_sl_bind;                       /* the last descriptor written to a binding, and when */
@@ -124,7 +125,7 @@ typedef void (*nvmtl_sl_emit)(void *ctx, const char *line);
 /* The slot's full state, one line per binding plus a verdict line; `owner` is the caller's description of the live
    texture object holding the slot (may be ""). Returns the verdict flags. */
 static inline unsigned nvmtl_sl_report(const nvmtl_sl_state *sl, const nvmtl_im_state *im, const nvmtl_vw_state *vw, uint32_t slot, const nvmtl_sl_dummies *d,
-                                       const char *owner, nvmtl_sl_emit emit, void *ctx)
+                                       const char *owner, const nvmtl_mm_state *mm, nvmtl_sl_emit emit, void *ctx)
 {
     char line[512];
     if (!sl->s || slot >= sl->n) { snprintf(line, sizeof line, "fault context: heap slot %u: outside the heap (%u slots)", slot, sl->n); emit(ctx, line); return NVMTL_SL_NEVER; }
@@ -140,11 +141,19 @@ static inline unsigned nvmtl_sl_report(const nvmtl_sl_state *sl, const nvmtl_im_
         if (nvmtl_sl_is_dummy(d, b, v)) { snprintf(line, sizeof line, "fault context:   binding %u: the dummy (%s seq %llu)", b, x->b[b].seq ? "written at" : "prefilled at creation,", (unsigned long long)x->b[b].seq); emit(ctx, line); continue; }
         const nvmtl_im_entry *e = nvmtl_im_by_view(im, vw, v);
         if (!e) snprintf(line, sizeof line, "fault context:   binding %u: view %p written at seq %llu - of no image this table knows", b, v, (unsigned long long)x->b[b].seq);
-        else snprintf(line, sizeof line, "fault context:   binding %u: view %p written at seq %llu -> image %p %ux%u fmt %u%s%s%s mem %p+%llu %llu bytes, created seq %llu, %s%llu",
+        else { char lv[64]; if (e->died) snprintf(lv, sizeof lv, "DIED at seq %llu", (unsigned long long)e->died); else if (e->parked) snprintf(lv, sizeof lv, "ALIVE but PARKED for reuse since seq %llu", (unsigned long long)e->parked); else snprintf(lv, sizeof lv, "ALIVE");
+               snprintf(line, sizeof line, "fault context:   binding %u: view %p written at seq %llu -> image %p %ux%u fmt %u%s%s%s mem %p+%llu %llu bytes, created seq %llu, %s",
                       b, v, (unsigned long long)x->b[b].seq, e->img, e->w, e->h, e->fmt, e->storage ? " storage" : "", e->placed ? " placed" : "", e->pooled ? " pooled" : "",
-                      e->mem, (unsigned long long)e->off, (unsigned long long)e->size, (unsigned long long)e->seq, e->died ? "DIED at seq " : e->parked ? "ALIVE but PARKED for reuse since seq " : "ALIVE",
-                      e->died ? (unsigned long long)e->died : (unsigned long long)e->parked);
+                      e->mem, (unsigned long long)e->off, (unsigned long long)e->size, (unsigned long long)e->seq, lv); }
         emit(ctx, line);
+        if (e && mm) {   /* where that image's bytes are: the memory it is bound into, its base address, and whether that memory still lives */
+            const nvmtl_mm_entry *m = nvmtl_mm_by_mem(mm, e->mem);
+            if (!m) snprintf(line, sizeof line, "fault context:     its memory %p is not in the memory table", e->mem);
+            else { char lv[40]; nvmtl_mm_liveness(m->died, lv, sizeof lv);
+                   snprintf(line, sizeof line, "fault context:     its memory %p: %s, base 0x%llx, size %llu, created seq %llu, %s -> the image's bytes start at 0x%llx",
+                            e->mem, m->kind, (unsigned long long)m->base, (unsigned long long)m->size, (unsigned long long)m->seq, lv, (unsigned long long)(m->base + e->off)); }
+            emit(ctx, line);
+        }
     }
     const unsigned f = nvmtl_sl_flags(sl, im, vw, slot, d);
     snprintf(line, sizeof line, "fault context:   verdict: %s%s%s%s%s%s", f & NVMTL_SL_MISMATCH ? "MISMATCH (bindings 0 and 2 name different images) " : "",

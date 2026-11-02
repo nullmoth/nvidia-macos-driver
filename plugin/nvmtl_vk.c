@@ -494,6 +494,45 @@ static VkResult nvmtl_opaque_CreateBuffer(VkDevice dev, const VkBufferCreateInfo
     if (result == VK_SUCCESS) *out = handle;
     return result;
 }
+// Every VkDeviceMemory this process allocates is recorded with its base GPU address (nvmtl_mem.h): NVK maps a memory
+// once, so a 16-byte buffer bound at offset 0 answers the base, and an image bound at offset O lives at base + O.
+// Allocation, free and image bind go through these recorders by macro, whichever function calls them (the caller's
+// name is the memory's kind). The probe costs a tiny buffer create/bind/destroy per allocation, next to the kernel
+// round trip the allocation already is.
+static nvmtl_mm_state g_mm; static nvmtl_mb_state g_mb; static pthread_mutex_t g_mm_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t nvmtl_mem_base_va(VkDeviceMemory mem, VkDeviceSize size)
+{
+    if (size < 16 || !pvkCreateBuffer || !pvkBindBufferMemory || !pvkGetBufferDeviceAddress || !pvkDestroyBuffer) return 0;
+    VkBufferCreateInfo bci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL };
+    VkBuffer b = VK_NULL_HANDLE; uint64_t a = 0;
+    if (pvkCreateBuffer(g_dev, &bci, NULL, &b) != VK_SUCCESS) return 0;
+    if (pvkBindBufferMemory(g_dev, b, mem, 0) == VK_SUCCESS) { VkBufferDeviceAddressInfo i = { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, NULL, b }; a = pvkGetBufferDeviceAddress(g_dev, &i); }
+    pvkDestroyBuffer(g_dev, b, NULL);
+    return a;
+}
+static VkResult nvmtl_mem_alloc_rec(VkDevice dev, const VkMemoryAllocateInfo *info, const VkAllocationCallbacks *allocator, VkDeviceMemory *out, const char *kind)
+{
+    const VkResult r = (pvkAllocateMemory)(dev, info, allocator, out);
+    if (r == VK_SUCCESS && *out) {
+        const uint64_t base = nvmtl_mem_base_va(*out, info->allocationSize);
+        pthread_mutex_lock(&g_mm_lock); nvmtl_mm_add(&g_mm, (const void *)*out, base, info->allocationSize, info->memoryTypeIndex, kind, g_cmd_submitted); pthread_mutex_unlock(&g_mm_lock);
+    }
+    return r;
+}
+static void nvmtl_mem_free_rec(VkDevice dev, VkDeviceMemory mem, const VkAllocationCallbacks *allocator)
+{
+    if (mem) { pthread_mutex_lock(&g_mm_lock); nvmtl_mm_died(&g_mm, (const void *)mem, g_cmd_submitted); pthread_mutex_unlock(&g_mm_lock); }
+    (pvkFreeMemory)(dev, mem, allocator);
+}
+static VkResult nvmtl_mem_bind_image_rec(VkDevice dev, VkImage img, VkDeviceMemory mem, VkDeviceSize off)
+{
+    const VkResult r = (pvkBindImageMemory)(dev, img, mem, off);
+    if (r == VK_SUCCESS) { pthread_mutex_lock(&g_mm_lock); nvmtl_mb_note(&g_mb, (const void *)img, (const void *)mem, off); pthread_mutex_unlock(&g_mm_lock); }
+    return r;
+}
+#define pvkAllocateMemory(d, i, a, o) nvmtl_mem_alloc_rec((d), (i), (a), (o), __func__)
+#define pvkFreeMemory(d, m, a) nvmtl_mem_free_rec((d), (m), (a))
+#define pvkBindImageMemory(d, img, m, o) nvmtl_mem_bind_image_rec((d), (img), (m), (o))
 _Static_assert(sizeof(VkDeviceMemory) == sizeof(void *) && _Alignof(VkDeviceMemory) == _Alignof(void *), "VkDeviceMemory bridge ABI");
 static VkResult nvmtl_opaque_AllocateMemory(VkDevice dev, const VkMemoryAllocateInfo *info, const VkAllocationCallbacks *allocator, void **out)
 {
@@ -2222,7 +2261,9 @@ static void nvmtl_commit_image(nvk_image *image)
     }
     g_img_made++;
     pthread_mutex_lock(&g_sl_lock);
-    nvmtl_im_add(&g_im, image->img, image->mem, image->pool ? image->poff : 0, image->alloc, image->view, image->w, image->h, image->fmt, image->storage, image->placed ? 1u : 0u, image->pool ? 1u : 0u, g_cmd_submitted);
+    {   const void *bmem = image->mem; uint64_t boff = image->pool ? image->poff : 0;
+        pthread_mutex_lock(&g_mm_lock); nvmtl_mb_find(&g_mb, image->img, &bmem, &boff); pthread_mutex_unlock(&g_mm_lock);   // the bind the image got, whichever path made it
+        nvmtl_im_add(&g_im, image->img, bmem, boff, image->alloc, image->view, image->w, image->h, image->fmt, image->storage, image->placed ? 1u : 0u, image->pool ? 1u : 0u, g_cmd_submitted); }
     nvmtl_vw_add(&g_vw, image->view, image->img);
     pthread_mutex_unlock(&g_sl_lock);
     nvmtl_vk_image_census();
@@ -5588,7 +5629,9 @@ static void nvmtl_fault_slot_report(uint64_t ptr, FILE *f)
                              (uint32_t)handle, slot, handle & (1ull << 62) ? "" : " (NOT a heap token: a no-slot texture, sampler, pipeline or foreign value aliasing the slot)");
     nvmtl_fx_emit_both(f, line);
     const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, nvmtl_heap_storage_dummy(), g_dummyTexView, g_dummyTexView } };   // the heap's storage dummy (2D array when it exists)
-    lk = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock"); nvmtl_sl_report(&g_sl, &g_im, &g_vw, slot, &d, owner, nvmtl_fx_emit_both, f); if (lk) pthread_mutex_unlock(&g_sl_lock);
+    lk = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock");
+    { const int lm = nvmtl_loss_mutex_lock(&g_mm_lock, "g_mm_lock"); nvmtl_sl_report(&g_sl, &g_im, &g_vw, slot, &d, owner, &g_mm, nvmtl_fx_emit_both, f); if (lm) pthread_mutex_unlock(&g_mm_lock); }
+    if (lk) pthread_mutex_unlock(&g_sl_lock);
 }
 static void nvmtl_fault_file_write(nvk_cmdbuf *c)
 {
@@ -5706,6 +5749,13 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
         nvlog_every("fault context: %u images written to the fault file with their memory, shape and lifetime", nimg);
     }
     nvmtl_loss_section(f, "slot census and images");
+    {   // every device memory with its base address and lifetime: what resolves a fault address to an image's bytes
+        lk = nvmtl_loss_mutex_lock(&g_mm_lock, "g_mm_lock");
+        const uint32_t nmem = nvmtl_mm_dump(&g_mm, f); const uint64_t unb = g_mm.unbased, mlive = g_mm.live;
+        if (lk) pthread_mutex_unlock(&g_mm_lock);
+        nvlog_every("fault context: %u device memories written to the fault file (%llu alive, %llu without a base address) - tools/fault_resolve.py maps a fault address to its memory and image", nmem, (unsigned long long)mlive, (unsigned long long)unb);
+    }
+    nvmtl_loss_section(f, "memories");
     {   // the barriers between this command buffer's last dispatches (the record covers both hazard modes)
         const uint32_t first = c->fx.total > nd ? c->fx.total - nd : 0;
         lk = nvmtl_loss_mutex_lock(&g_fx_lock, "g_fx_lock");
