@@ -108,6 +108,19 @@ int main(void)
         ARM("the arena index of a table offset follows NVK's doubling memories", nvmtl_nvk_arena_mem_index(0) == 0 && nvmtl_nvk_arena_mem_index(65535) == 0 && nvmtl_nvk_arena_mem_index(65536) == 1 && nvmtl_nvk_arena_mem_index(131072) == 2 && nvmtl_nvk_arena_mem_index(262143) == 2
             && nvmtl_nvk_arena_mem_offset(0) == 0 && nvmtl_nvk_arena_mem_offset(1) == 65536 && nvmtl_nvk_arena_mem_offset(2) == 131072 && nvmtl_nvk_arena_mem_offset(3) == 262144);
     }
+    /* descriptor index history: index 10263 held first by a view of A (died), then by a view of B */
+    {   nvmtl_vw_set_tic(&vw, sA, 11, 0x2ef400000ull, 10263, 0x2ef400000ull, 4000); nvmtl_vw_died(&vw, sA, 4100);
+        nvmtl_vw_set_tic(&vw, sB, 12, 0x4d6a00000ull, 10263, 0x4d6a00000ull, 4200);
+        nout = 0; unsigned hn = nvmtl_vw_index_history(&vw, &im, 10263, sB, emit, NULL);
+        ARM("the index history lists every holder in order with addresses and lifetimes", hn == 2 && has("table[10263] held by view 0xa2 (storage) of image 0xa0: header address 0x2ef400000, seq 4000..4100") && has("held by view 0xb2 (storage) of image 0xb0: header address 0x4d6a00000, seq 4200..alive <- the current holder"));
+        ARM("  and names the previous holder's bytes as the stale-header candidate", has("index 10263 was REISSUED 1 time; the previous holder's bytes began at 0x2ef400000 - a fault there is a STALE HEADER"));
+        nout = 0; hn = nvmtl_vw_index_history(&vw, &im, 12, sB, emit, NULL);
+        ARM("a first-use index says so (negative control)", hn == 1 && has("index 12 is on its first use"));
+        nout = 0; hn = nvmtl_vw_index_history(&vw, &im, 777, sB, emit, NULL);
+        ARM("an index nobody held has no holder", hn == 0 && has("index 777 has no recorded holder"));
+        ARM("a dead view is not found as live, its record keeps its death", nvmtl_vw_find_live(&vw, sA) == NULL && nvmtl_vw_find(&vw, sA)->died == 4100);
+        FILE *vf = tmpfile(); const uint32_t vn = nvmtl_vw_dump(&vw, vf); rewind(vf); char vl[256] = ""; int hit = 0; while (fgets(vl, sizeof vl, vf)) if (strstr(vl, "tic view 0xa2 image 0xa0 sidx 11 saddr 0x2ef400000 tidx 10263 taddr 0x2ef400000 type 5 layers 0+1 mips 0+1 seq 4000 died 4100")) hit = 1; fclose(vf);
+        ARM("the view dump writes the resolver's tic lines", vn >= 2 && hit); }
     FILE *fp = tmpfile(); const uint32_t n = nvmtl_im_dump(&im, fp);
     rewind(fp); char first[256]; fgets(first, sizeof first, fp);
     ARM("the image dump writes every image with its memory, shape and lifetime", n == 3 && strstr(first, "image 0xa0 view 0xa1 mem 0xaa off 4096 size 1048576 512x512 fmt 37 storage placed seq 100 died 150"));

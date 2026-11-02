@@ -17,6 +17,7 @@
 #include "nvmtl_mem.h"
 
 enum { NVMTL_SL_NB = 5 };
+typedef void (*nvmtl_sl_emit)(void *ctx, const char *line);
 typedef struct { const void *view; uint64_t seq; } nvmtl_sl_bind;                       /* the last descriptor written to a binding, and when */
 typedef struct { nvmtl_sl_bind b[NVMTL_SL_NB]; uint32_t allocs, state; uint64_t alloc_seq, drop_seq; } nvmtl_sl_slot;   /* state: 0 never allocated, 1 live, 2 dropped */
 typedef struct { nvmtl_sl_slot *s; uint32_t n; uint64_t writes, allocs, drops; } nvmtl_sl_state;
@@ -24,7 +25,8 @@ typedef struct { nvmtl_sl_slot *s; uint32_t n; uint64_t writes, allocs, drops; }
 typedef struct { const void *img, *mem, *view; uint64_t off, size, seq, died, parked, avail; uint32_t w, h, fmt, storage, placed, pooled, layers, mips, flags, usage, samples; } nvmtl_im_entry;
 /* parked: in a heap/buffer park since this seq, 0 when in use; size: the memory the image needs (its requirement); avail: the memory it was given from its bind offset (0 = unknown) */
 typedef struct { nvmtl_im_entry *e; uint32_t n, cap; uint64_t live; } nvmtl_im_state;
-typedef struct { const void *view, *img; uint32_t type, base_layer, layers, base_mip, mips; } nvmtl_vw_entry;   /* type: VkImageViewType + 1 (0 = not recorded) */
+typedef struct { const void *view, *img; uint32_t type, base_layer, layers, base_mip, mips; uint32_t s_idx, t_idx; uint64_t s_addr, t_addr, seq, died; } nvmtl_vw_entry;
+/* type: VkImageViewType + 1 (0 = not recorded); s_/t_: the sampled and storage descriptor indices and the header addresses the view carried (0 = not read); seq/died: created / destroyed */
 typedef struct { nvmtl_vw_entry *e; uint32_t n, cap; } nvmtl_vw_state;
 
 static inline int nvmtl_sl_init(nvmtl_sl_state *s, uint32_t n)
@@ -79,6 +81,48 @@ static inline void nvmtl_vw_add_ex(nvmtl_vw_state *s, const void *view, const vo
     if (!view || !img) return;
     if (s->n == s->cap) { const uint32_t cap = s->cap ? s->cap * 2 : 4096; nvmtl_vw_entry *e = (nvmtl_vw_entry *)realloc(s->e, (size_t)cap * sizeof *e); if (!e) return; s->e = e; s->cap = cap; }
     nvmtl_vw_entry *e = &s->e[s->n++]; e->view = view; e->img = img; e->type = type1; e->base_layer = base_layer; e->layers = layers; e->base_mip = base_mip; e->mips = mips;
+    e->s_idx = e->t_idx = 0; e->s_addr = e->t_addr = 0; e->seq = 0; e->died = 0;
+}
+/* the newest live record of a view handle, for the recorder to fill */
+static inline nvmtl_vw_entry *nvmtl_vw_find_live(nvmtl_vw_state *s, const void *view)
+{
+    if (!view) return NULL;
+    for (uint32_t i = s->n; i-- > 0;) if (s->e[i].view == view && !s->e[i].died) return &s->e[i];
+    return NULL;
+}
+static inline void nvmtl_vw_set_tic(nvmtl_vw_state *s, const void *view, uint32_t s_idx, uint64_t s_addr, uint32_t t_idx, uint64_t t_addr, uint64_t seq)
+{ nvmtl_vw_entry *e = nvmtl_vw_find_live(s, view); if (e) { e->s_idx = s_idx; e->s_addr = s_addr; e->t_idx = t_idx; e->t_addr = t_addr; e->seq = seq; } }
+static inline void nvmtl_vw_died(nvmtl_vw_state *s, const void *view, uint64_t seq) { nvmtl_vw_entry *e = nvmtl_vw_find_live(s, view); if (e) e->died = seq ? seq : 1; }
+/* one line per view record: "tic view V image I sidx N saddr 0x.. tidx M taddr 0x.. type T layers b+n mips b+n seq A died B" */
+static inline uint32_t nvmtl_vw_dump(const nvmtl_vw_state *s, FILE *f)
+{
+    for (uint32_t i = 0; i < s->n; i++) { const nvmtl_vw_entry *e = &s->e[i];
+        fprintf(f, "tic view %p image %p sidx %u saddr 0x%llx tidx %u taddr 0x%llx type %u layers %u+%u mips %u+%u seq %llu died %llu\n", e->view, e->img, e->s_idx, (unsigned long long)e->s_addr,
+                e->t_idx, (unsigned long long)e->t_addr, e->type ? e->type - 1 : 0, e->base_layer, e->layers, e->base_mip, e->mips, (unsigned long long)e->seq, (unsigned long long)e->died); }
+    return s->n;
+}
+/* Every view that ever held descriptor index idx (either role), oldest first: the index's history. Emits one line per
+   holder and a verdict; returns how many holders. */
+static inline unsigned nvmtl_vw_index_history(const nvmtl_vw_state *vw, const nvmtl_im_state *im, uint32_t idx, const void *now_view, nvmtl_sl_emit emit, void *ctx)
+{
+    char line[400]; unsigned n = 0; uint64_t prev_addr = 0; const void *prev_view = NULL;
+    if (!idx) return 0;
+    for (uint32_t i = 0; i < vw->n; i++) {
+        const nvmtl_vw_entry *e = &vw->e[i]; const int st = e->t_idx == idx, sa = e->s_idx == idx;
+        if (!st && !sa) continue;
+        const nvmtl_im_entry *ie = nvmtl_im_by_img(im, e->img);
+        snprintf(line, sizeof line, "fault context:     table[%u] held by view %p (%s) of image %p%s: header address 0x%llx, seq %llu..%s%llu%s", idx, e->view, st ? "storage" : "sampled", e->img,
+                 ie ? "" : " (image unknown)", (unsigned long long)(st ? e->t_addr : e->s_addr), (unsigned long long)e->seq, e->died ? "" : "alive", e->died ? (unsigned long long)e->died : 0ull,
+                 e->view == now_view ? " <- the current holder" : "");
+        if (ie) { size_t l = strlen(line); snprintf(line + l, sizeof line - l, " [%ux%u fmt %u, image %s]", ie->w, ie->h, ie->fmt, ie->died ? "DIED" : "alive"); }
+        emit(ctx, line); n++;
+        if (e->view != now_view) { prev_addr = st ? e->t_addr : e->s_addr; prev_view = e->view; }
+    }
+    if (n > 1 && prev_view) snprintf(line, sizeof line, "fault context:     verdict: index %u was REISSUED %u time%s; the previous holder's bytes began at 0x%llx - a fault there is a STALE HEADER (the GPU still used the previous holder's header)", idx, n - 1, n == 2 ? "" : "s", (unsigned long long)prev_addr);
+    else if (n == 1) snprintf(line, sizeof line, "fault context:     verdict: index %u is on its first use", idx);
+    else snprintf(line, sizeof line, "fault context:     verdict: index %u has no recorded holder", idx);
+    emit(ctx, line);
+    return n;
 }
 static inline void nvmtl_vw_add(nvmtl_vw_state *s, const void *view, const void *img) { nvmtl_vw_add_ex(s, view, img, 0, 0, 0, 0, 0); }
 /* the newest view record for a view handle, or NULL */
@@ -137,7 +181,6 @@ static inline unsigned nvmtl_sl_flags(const nvmtl_sl_state *sl, const nvmtl_im_s
     return f;
 }
 
-typedef void (*nvmtl_sl_emit)(void *ctx, const char *line);
 /* The slot's full state, one line per binding plus a verdict line; `owner` is the caller's description of the live
    texture object holding the slot (may be ""). Returns the verdict flags. */
 static inline unsigned nvmtl_sl_report(const nvmtl_sl_state *sl, const nvmtl_im_state *im, const nvmtl_vw_state *vw, uint32_t slot, const nvmtl_sl_dummies *d,

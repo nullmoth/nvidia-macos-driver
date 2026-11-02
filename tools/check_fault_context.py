@@ -71,7 +71,7 @@ hooks = [
     ("NVMTLEmbedded.m", r"VIEW NVMTLTexture %p", 1),
     ("nvmtl_vk.c", r"nvmtl_loss_mutex_lock\(&g_", 14),                                   # every lock in the loss path is bounded
     ("nvmtl_vk.c", r"nvmtl_loss_read\(", 5),                                             # every host read in the loss path goes through the kernel
-    ("nvmtl_vk.c", r"nvmtl_loss_section\(f, ", 9),                                       # flushed, announced sections
+    ("nvmtl_vk.c", r"nvmtl_loss_section\(f, ", 10),                                       # flushed, announced sections
     ("nvmtl_vk.c", r"a second device-loss dump on another thread - skipped", 1),
     ("nvmtl_vk.c", r"#define pvkAllocateMemory\(d, i, a, o\) nvmtl_mem_alloc_rec", 1),   # every memory allocation recorded with its base address
     ("nvmtl_vk.c", r"#define pvkFreeMemory\(d, m, a\) nvmtl_mem_free_rec", 1),
@@ -88,6 +88,10 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_nvk_layout_ok\(\)", 1),                                    # the texture-header reader runs only on the measured ICD build
     ("nvmtl_vk.c", r"nvmtl_fault_nvk_slot\(slot, 2, v2, ", 1),
     ("nvmtl_vk.c", r"STALE INDEX - the set names another header", 1),
+    ("nvmtl_vk.c", r"nvmtl_vw_tic_note\(", 6),                                          # every recorded view carries its indices and header addresses (5 creations + the definition)
+    ("nvmtl_vk.c", r"nvmtl_vw_note_died\(", 4),                                         # the grace's lone view, an image's own view, free_backing (+ definition)
+    ("nvmtl_vk.c", r"nvmtl_vw_index_history\(&g_vw, &g_im, ti, v2", 1),                # the stale-header history at loss
+    ("nvmtl_vk.c", r"nvmtl_loss_section\(f, \"views\"\)", 1),
     ("nvmtl_vk.c", r"nvmtl_loss_section\(f, \"images\"\)", 1),                        # images early, census last
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev, "NVMTLEmbedded.m": emb}

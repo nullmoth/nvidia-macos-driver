@@ -11,7 +11,7 @@ import sys
 
 def main():
     if len(sys.argv) < 3: print(__doc__); return 2
-    live, dead, pages, roots, was, mems, imgs = [], [], [], [], [], [], []
+    live, dead, pages, roots, was, mems, imgs, tics = [], [], [], [], [], [], [], []
     for ln in open(sys.argv[1]):
         w = ln.split()
         if not w: continue
@@ -26,9 +26,13 @@ def main():
         elif w[0] == "root": roots.append(ln.rstrip())
         elif w[0] == "memory" and "mem" in w:   # memory <kind> mem 0x.. base 0x.. size S type T seq A died B
             i = w.index("mem"); mems.append((w[i + 1], int(w[i + 3], 16), int(w[i + 5]), " ".join(w[1:i]), int(w[i + 9]), int(w[i + 11])))
+        elif w[0] == "tic":           # tic view V image I sidx N saddr 0x.. tidx M taddr 0x.. type T layers b+n mips b+n seq A died B
+            tics.append((w[2], w[4], int(w[6]), int(w[8], 16), int(w[10]), int(w[12], 16), int(w[w.index("seq") + 1]), int(w[w.index("died") + 1])))
         elif w[0] == "image" and "mem" in w and "off" in w:   # image <img> view <v> mem <m> off <o> size <s> WxH fmt F ... seq C died D
             imgs.append((w[1], w[w.index("mem") + 1], int(w[w.index("off") + 1]), int(w[w.index("size") + 1]), w[w.index("size") + 2], w[w.index("fmt") + 1], int(w[w.index("seq") + 1]), int(w[w.index("died") + 1])))
-    print(f"{len(live)} live ranges, {len(was)} ranges that once lived, {len(dead)} recorded deaths, {len(pages)} pages, {len(roots)} dispatch roots, {len(mems)} memories, {len(imgs)} images")
+    print(f"{len(live)} live ranges, {len(was)} ranges that once lived, {len(dead)} recorded deaths, {len(pages)} pages, {len(roots)} dispatch roots, {len(mems)} memories, {len(imgs)} images, {len(tics)} views with headers")
+    isize = {}
+    for im in imgs: isize[im[0]] = max(isize.get(im[0], 0), im[3])
     rc = 0
     for a in sys.argv[2:]:
         addr = int(a, 16)
@@ -40,6 +44,15 @@ def main():
         if hit: lo, hi, s, f = hit[0]; print(f"0x{addr:x} lies in DEAD buffer 0x{lo:x}..0x{hi:x} ({hi - lo} bytes{', ' + f if f else ''}) freed after submit {s}"); continue
         hit = [(lo, hi, k, s, d) for lo, hi, k, s, d in was if lo <= addr < hi]
         if hit: lo, hi, k, s, d = hit[-1]; print(f"0x{addr:x} WAS {k} 0x{lo:x}..0x{hi:x} ({hi - lo} bytes), created at submit {s}, died at submit {d} (newest of {len(hit)} that held it)"); continue
+        # the image headers: where the GPU was told each view's image lives (NVK binds images at their own addresses)
+        th = []
+        for v, i, sidx, saddr, tidx, taddr, c, d in tics:
+            sz = isize.get(i, 0) or (64 << 20)
+            for role, idx, a in (("storage", tidx, taddr), ("sampled", sidx, saddr)):
+                if a and a <= addr < a + sz: th.append((c, v, i, role, idx, a, d))
+        if th:
+            th.sort(); c, v, i, role, idx, a, d = th[-1]
+            print(f"0x{addr:x} = image {i} by its {role} header (view {v}, descriptor index {idx}, header address 0x{a:x}, +{addr - a} into it; image size {isize.get(i, 0) or 'unknown'}), view created seq {c}, {'DIED seq ' + str(d) if d else 'alive'}; {len(th)} header(s) covered it: " + ", ".join(f"{vv} idx {ii} seq {cc}..{dd or 'alive'}" for cc, vv, _, _, ii, _, dd in th)); rc = 1; continue
         hit = [m for m in mems if m[1] and m[1] <= addr < m[1] + m[2]]
         if hit:
             mem, base, size, kind, c, d = hit[-1]; off = addr - base
