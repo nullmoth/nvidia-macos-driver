@@ -79,12 +79,16 @@ fn lower_air_text_rest(san_ll: &str) -> std::borrow::Cow<'_, str> {
     };
     // a Function-storage pointer phi has no legal form under Logical addressing, so the input is rewritten
     // instead: the phi's single load is hoisted into each predecessor and the phi carries the VALUES
-    let lowered = match lowered {
+    // NVMTL_NO_PTR_PHI_LOAD=1 skips this rewrite (diagnostic: it changes 46 Cyberpunk material shaders against the
+    // translator that renders the game correctly).
+    let lowered = if std::env::var_os("NVMTL_NO_PTR_PHI_LOAD").is_some() {
+        lowered
+    } else { match lowered {
         std::borrow::Cow::Borrowed(borrowed) => ptr_phi_load::sink_pointer_phi_loads(borrowed),
         std::borrow::Cow::Owned(owned) => {
             std::borrow::Cow::Owned(ptr_phi_load::sink_pointer_phi_loads_owned(owned))
         }
-    };
+    } };
     match lowered {
         std::borrow::Cow::Borrowed(borrowed) => inline::forward_builder_pointer_fields(borrowed),
         std::borrow::Cow::Owned(owned) => match inline::forward_builder_pointer_fields(&owned) {
