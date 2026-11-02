@@ -36,6 +36,10 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_page_cool_reap\(\);", 1),                                   # cooling pages released as submits finish
     ("nvmtl_vk.c", r"nvmtl_pl_release\(&g_pl, &page->life, finished, keep > 0\)", 1),  # the owner's release asks the page, not the witness alone
     ("nvmtl_vk.c", r"nvmtl_page_addresses_log\(\);", 1),                               # exact page ranges at device loss
+    ("nvmtl_vk.c", r"nvmtl_live_add\(out, ", 3),                               # own/pooled, imported, placed buffers enter the live registry
+    ("nvmtl_vk.c", r"nvmtl_live_remove\(b\);", 2),                                      # destroy + park free leave it
+    ("nvmtl_vk.c", r"nvmtl_live_relabel\(&page->buffer, NVMTL_LV_PAGE\)", 1),
+    ("nvmtl_vk.c", r"nvmtl_fault_file_write\(c\);", 1),                                 # the fault file at device loss
 ]
 src = {"nvmtl_vk.c": vk, "NVMTLObjects.m": objc, "nvmtl_vk.h": vkh, "NVMTLDevice.m": dev}
 short = []; total = 0

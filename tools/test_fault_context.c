@@ -68,7 +68,7 @@ int main(void)
         arm("a buffer without a device address is not recorded", s4.nbuf == 2);
         nout = 0; nvmtl_fx_report(&s4, 302, 2, 10, emit, NULL);
         arm("the report lists the freed ranges with their placement", has("301 0x4b0000000..0x4b0001000 4 parked |") && has("300 0x36f100000..0x36f140000 256 |"));
-        arm("  and counts them", has("2 buffer deaths within the last 10 submits (2 recorded in all)"));
+        arm("  and counts them", has("2 of 2 buffer deaths within the last 10 submits shown (2 recorded in all)"));
         for (unsigned k = 0; k < NVMTL_FX_BUFS + 5; k++) nvmtl_fx_buffer_gone(&s4, 400 + k, 0x1000000ull + k * 0x1000, 0x1000, 0);
         arm("the ring wraps and the newest death still wins the match", nvmtl_fx_buffer_at(&s4, 0x1000000ull + (NVMTL_FX_BUFS + 4) * 0x1000) != NULL && nvmtl_fx_buffer_at(&s4, 0x36f122000ull) == NULL);
     }

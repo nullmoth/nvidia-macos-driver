@@ -11,12 +11,14 @@ const char *nvmtl_image_ident(const void *addr, char *out, size_t n);
 // bind_lost: a sparse rebind AND its restore were both refused, so we do not know which allocation the
 // page tables name. Neither is safe to free, so the destroy path keeps both and counts the bytes.
 typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int placed; void *pool; size_t poff; int imported; int bar1; size_t moff; int sparse, sysmem; int mtype1; /* memory type + 1 when known */
+                 uint32_t reg; /* handle in the live GPU-range registry (nvmtl_live.h), 0 when unregistered */
                  int fresh; /* host-visible memory from its own vkAllocateMemory: zeroed by the kernel, never recycled */
                  uint64_t parked_ns; /* when the buffer park took it (CLOCK_UPTIME_RAW) */  void *lost_mem; int bind_lost;
                  uint8_t hz_ut; /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */ } nvk_buffer;
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_fault_context.h"
 #include "nvmtl_page_life.h"
+#include "nvmtl_live.h"
 typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vfl;  uint64_t up_token;
                  void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */
                  size_t hz_off, hz_len;   /* placed: the image's byte range of mem, for the hazard model (0 = all of mem) */

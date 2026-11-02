@@ -259,6 +259,11 @@ static int nvmtl_layout_general_on(void)
 static nvmtl_fx_state g_fx; static pthread_mutex_t g_fx_lock = PTHREAD_MUTEX_INITIALIZER;
 // Address-page lifetime (nvmtl_page_life.h): a page is released by the highest submit that referenced it, not by its owner.
 static nvmtl_pl_state g_pl; static pthread_mutex_t g_pl_lock = PTHREAD_MUTEX_INITIALIZER;
+// Live GPU ranges (nvmtl_live.h): every buffer with a device address, from creation to destruction, for the fault file.
+static nvmtl_lv_state g_lv; static pthread_mutex_t g_lv_lock = PTHREAD_MUTEX_INITIALIZER;
+static void nvmtl_live_add(nvk_buffer *b, uint32_t kind);
+static void nvmtl_live_remove(nvk_buffer *b);
+static void nvmtl_live_relabel(nvk_buffer *b, uint32_t kind);
 static void nvmtl_fx_note_buffer_gone(nvk_buffer *b, uint32_t where);
 static __thread const char *t_fx_dying;   // the label the next image death on this thread is recorded under
 void nvmtl_vk_image_dying_label(const char *label) { t_fx_dying = label; }
@@ -1356,6 +1361,7 @@ static void bpark_census(const char *what)
 static void bpark_free(nvk_buffer *b)
 {
     nvmtl_fx_note_buffer_gone(b, NVMTL_FX_PARKED);
+    nvmtl_live_remove(b);
     pvkDestroyBuffer(g_dev, (VkBuffer)b->buf, NULL);
     if (b->map && pvkUnmapMemory) pvkUnmapMemory(g_dev, (VkDeviceMemory)b->mem);
     if (b->bar1) g_bar1_bytes -= b->alloc;
@@ -1541,7 +1547,7 @@ int nvmtl_vk_buffer_create(size_t size, int host_visible, nvk_buffer *out)
             if (!host_visible) g_budget_stale = 1;
         }
         memset(out, 0, sizeof *out);
-    } else *out = pending;
+    } else { *out = pending; nvmtl_live_add(out, out->pool ? NVMTL_LV_POOLED : NVMTL_LV_BUFFER); }
     nvmtl_perf_note(r == 0 && out->pool ? NVP_BUFPOOL : NVP_BUFNEW, t0, size);
     return r;
 }
@@ -1689,6 +1695,7 @@ int nvmtl_vk_buffer_import_host(void *ptr, size_t size, nvk_buffer *out)
         out->buf = NULL; out->mem = NULL; return -1; }
     out->map = ptr; out->alloc = size; out->imported = 1; out->mtype1 = mt + 1;
     g_alloc_bytes += size; g_buf_made++;
+    nvmtl_live_add(out, NVMTL_LV_IMPORTED);
     { static int said; if (!said++) nvlog("vk: imported the caller's pages as device memory — %zu bytes at %p, memory type %d", size, ptr, mt); }
     return 0;
 }
@@ -3393,6 +3400,7 @@ static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBuf
             page = calloc(1, sizeof(*page));
             if (!page) return -1;
             if (nvmtl_vk_buffer_create(NVMTL_TABLE_BYTES * NVMTL_TABLES_PER_PAGE, 1, &page->buffer)) { nvmtl_vk_buffer_destroy(&page->buffer); free(page); return -1; }
+            nvmtl_live_relabel(&page->buffer, NVMTL_LV_PAGE);
         }
         page->next = c->address_pages; c->address_pages = page;
         pthread_mutex_lock(&g_pl_lock); nvmtl_pl_made(&g_pl); pthread_mutex_unlock(&g_pl_lock);
@@ -5321,7 +5329,95 @@ static void nvmtl_fx_dump(const char *why)
     nvmtl_fx_report(&g_fx, g_cmd_submitted, 12, 256, nvmtl_fx_emit_line, NULL);
     pthread_mutex_unlock(&g_fx_lock);
 }
-static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c, const nvk_pipeline *p) { nvmtl_fx_dispatch(&c->fx, t_dt_label, p, t_dt_key, t_dt_air); }
+static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c, const nvk_pipeline *p)
+{
+    c->fx.tab[0] = c->tab_out[0]; c->fx.tab[1] = c->tab_out[1]; c->fx.dyn[0] = c->dyn_out[0]; c->fx.dyn[1] = c->dyn_out[1];
+    nvmtl_fx_dispatch(&c->fx, t_dt_label, p, t_dt_key, t_dt_air);
+}
+static void nvmtl_live_add(nvk_buffer *b, uint32_t kind)
+{
+    if (!b || !b->buf) return;
+    const uint64_t a = nvmtl_vk_buffer_address(b);
+    pthread_mutex_lock(&g_lv_lock); b->reg = nvmtl_lv_add(&g_lv, a, b->size ? b->size : b->alloc, kind, g_cmd_submitted); pthread_mutex_unlock(&g_lv_lock);
+}
+static void nvmtl_live_remove(nvk_buffer *b)
+{
+    if (!b || !b->reg) return;
+    pthread_mutex_lock(&g_lv_lock); nvmtl_lv_remove(&g_lv, b->reg); pthread_mutex_unlock(&g_lv_lock);
+    b->reg = 0;
+}
+static void nvmtl_live_relabel(nvk_buffer *b, uint32_t kind)
+{
+    if (!b || !b->reg) return;
+    pthread_mutex_lock(&g_lv_lock); nvmtl_lv_relabel(&g_lv, b->reg, kind); pthread_mutex_unlock(&g_lv_lock);
+}
+// One root address of a dispatch's binding table, resolved: L = live buffer/page, D = died (seq), P = this command
+// buffer's own page, - = the dummy, ? = nothing this plugin ever mapped (an image, NVK's own memory, or a bad pointer).
+static int nvmtl_fault_resolve(nvk_cmdbuf *c, uint64_t a, char *out, size_t cap)
+{
+    if (!a) return snprintf(out, cap, "0");
+    if (a == nvmtl_vk_buffer_address(&g_dummyBuf)) return snprintf(out, cap, "-");
+    for (nvmtl_address_page *pg = c->address_pages; pg; pg = pg->next) {
+        const uint64_t lo = nvmtl_vk_buffer_address(&pg->buffer);
+        if (a >= lo && a < lo + (uint64_t)NVMTL_TABLES_PER_PAGE * NVMTL_TABLE_BYTES) return snprintf(out, cap, "0x%llx=P", (unsigned long long)a);
+    }
+    pthread_mutex_lock(&g_lv_lock); const nvmtl_lv_entry *e = nvmtl_lv_find(&g_lv, a); const nvmtl_lv_entry ec = e ? *e : (nvmtl_lv_entry){0}; pthread_mutex_unlock(&g_lv_lock);
+    if (ec.lo) return snprintf(out, cap, "0x%llx=L(%s %lluK seq %llu)", (unsigned long long)a, nvmtl_lv_kind_name(ec.kind), (unsigned long long)((ec.hi - ec.lo) >> 10), (unsigned long long)ec.seq);
+    pthread_mutex_lock(&g_fx_lock); const nvmtl_fx_buf *d = nvmtl_fx_buffer_at(&g_fx, a); const nvmtl_fx_buf dc = d ? *d : (nvmtl_fx_buf){0}; pthread_mutex_unlock(&g_fx_lock);
+    if (dc.lo) return snprintf(out, cap, "0x%llx=D(died seq %llu, %lluK)", (unsigned long long)a, (unsigned long long)dc.seq, (unsigned long long)((dc.hi - dc.lo) >> 10));
+    return snprintf(out, cap, "0x%llx=?", (unsigned long long)a);
+}
+// At device loss: the fault file (every live range, every recorded death, every page, and the root addresses of this
+// command buffer's last dispatches) for tools/fault_resolve.py, and the dispatch roots in the log as well.
+static void nvmtl_fault_file_write(nvk_cmdbuf *c)
+{
+    char fp[512]; const char *td = getenv("TMPDIR");
+    snprintf(fp, sizeof fp, "%s/nvmtl-fault-%d.txt", td && *td ? td : "/private/tmp", (int)getpid());
+    FILE *f = fopen(fp, "w");
+    if (!f) { nvlog_every("fault context: could not write %s", fp); return; }
+    pthread_mutex_lock(&g_lv_lock); const uint32_t nlive = nvmtl_lv_dump(&g_lv, f); pthread_mutex_unlock(&g_lv_lock);
+    pthread_mutex_lock(&g_fx_lock);
+    {   const uint32_t nb = g_fx.nbuf < NVMTL_FX_BUFS ? g_fx.nbuf : NVMTL_FX_BUFS;
+        for (uint32_t k = 0; k < nb; k++) { const nvmtl_fx_buf *b = &g_fx.buf[(g_fx.nbuf - 1 - k) % NVMTL_FX_BUFS];
+            fprintf(f, "dead buffer 0x%llx 0x%llx %llu seq %llu%s%s%s\n", (unsigned long long)b->lo, (unsigned long long)b->hi, (unsigned long long)(b->hi - b->lo),
+                    (unsigned long long)b->seq, b->where & NVMTL_FX_POOLED ? " pooled" : "", b->where & NVMTL_FX_PLACED ? " placed" : "", b->where & NVMTL_FX_PARKED ? " parked" : ""); } }
+    pthread_mutex_unlock(&g_fx_lock);
+    const uint64_t pbytes = (uint64_t)NVMTL_TABLES_PER_PAGE * NVMTL_TABLE_BYTES;
+    for (nvmtl_address_page *pg = c->address_pages; pg; pg = pg->next) { const uint64_t a = nvmtl_vk_buffer_address(&pg->buffer);
+        fprintf(f, "page own 0x%llx 0x%llx %llu seq %llu\n", (unsigned long long)a, (unsigned long long)(a + pbytes), (unsigned long long)pbytes, (unsigned long long)pg->life.last_seq); }
+    pthread_mutex_lock(&g_pl_lock);
+    for (nvmtl_pl_node *e = g_pl.cooling; e; e = e->cool) { nvmtl_address_page *pg = (nvmtl_address_page *)((char *)e - offsetof(nvmtl_address_page, life)); const uint64_t a = nvmtl_vk_buffer_address(&pg->buffer);
+        fprintf(f, "page cooling 0x%llx 0x%llx %llu seq %llu\n", (unsigned long long)a, (unsigned long long)(a + pbytes), (unsigned long long)pbytes, (unsigned long long)e->last_seq); }
+    pthread_mutex_unlock(&g_pl_lock);
+    pthread_mutex_lock(&g_keep_lock);
+    for (unsigned i = 0; i < g_keep_npage; i++) { const uint64_t a = nvmtl_vk_buffer_address(&g_keep_page[i]->buffer);
+        fprintf(f, "page cached 0x%llx 0x%llx %llu seq %llu\n", (unsigned long long)a, (unsigned long long)(a + pbytes), (unsigned long long)pbytes, (unsigned long long)g_keep_page[i]->life.last_seq); }
+    pthread_mutex_unlock(&g_keep_lock);
+    // this command buffer's last dispatches: each binding table's buffer roots, resolved
+    const uint32_t nd = c->fx.n < NVMTL_FX_DISP ? c->fx.n : NVMTL_FX_DISP;
+    for (uint32_t j = 0; j < nd; j++) {
+        const nvmtl_fx_disp *d = &c->fx.d[(c->fx.n - nd + j) % NVMTL_FX_DISP];
+        for (int t = 0; t < 2; t++) {
+            if (!d->tab[t]) continue;
+            nvmtl_address_page *pg = c->address_pages;
+            while (pg && (void *)pg->buffer.buf != d->tab[t]) pg = pg->next;
+            if (!pg || !pg->buffer.map) continue;
+            const uint64_t *tbl = (const uint64_t *)((const uint8_t *)pg->buffer.map + d->dyn[t]);
+            const uint64_t gpu = nvmtl_vk_buffer_address(&pg->buffer) + d->dyn[t];
+            char line[1600]; int o = snprintf(line, sizeof line, "dispatch %u %s spv-fnv %08x air %016llx table[%d] GPU 0x%llx:", c->fx.total - nd + j + 1, d->name, d->key, (unsigned long long)d->air, t, (unsigned long long)gpu);
+            for (unsigned i = 0; i < NVMTL_NBUF && o < (int)sizeof line - 120; i++) {
+                if (!tbl[i] || tbl[i] == nvmtl_vk_buffer_address(&g_dummyBuf)) continue;
+                char r[160]; nvmtl_fault_resolve(c, tbl[i], r, sizeof r);
+                o += snprintf(line + o, sizeof line - (size_t)o, " b%u=%s", i, r);
+                fprintf(f, "root dispatch %u b%u 0x%llx %s\n", c->fx.total - nd + j + 1, i, (unsigned long long)tbl[i], r);
+                if (o > 440) { nvlog_every("fault context: %s", line); o = snprintf(line, sizeof line, "dispatch %u (continued):", c->fx.total - nd + j + 1); }   // the log line holds 640
+            }
+            nvlog_every("fault context: %s", line);
+        }
+    }
+    fclose(f);
+    nvlog_every("fault context: %u live ranges, %u recorded buffer deaths, this command buffer's pages and dispatch roots written to %s - tools/fault_resolve.py <file> <fault address>", nlive, g_fx.nbuf, fp);
+}
 static void nvmtl_fx_note_buffer_gone(nvk_buffer *b, uint32_t where)
 {
     const uint64_t a = nvmtl_vk_buffer_address(b);
@@ -6821,6 +6917,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
             pthread_mutex_unlock(&g_keep_lock);
             nvlog_every("fault context: %u address pages cached for reuse (GPU 0x%llx .. 0x%llx), %u command pools cached", npg, (unsigned long long)(npg ? lo : 0), (unsigned long long)(npg ? hi : 0), npool);
             nvmtl_page_addresses_log();
+            nvmtl_fault_file_write(c);
         }
         return -2;
     }
@@ -6907,6 +7004,7 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
     const int was_charged = b->map == NULL && !b->bar1;
     g_buf_gone++;
     nvmtl_fx_note_buffer_gone(b, (b->pool ? NVMTL_FX_POOLED : 0) | (b->placed ? NVMTL_FX_PLACED : 0));
+    nvmtl_live_remove(b);
     pvkDestroyBuffer(g_dev, (VkBuffer)b->buf, NULL);
     if (b->pool) pool_buffer_release(b);
     if (!b->placed && !b->imported && b->mem && b->map && pvkUnmapMemory) { pvkUnmapMemory(g_dev, (VkDeviceMemory)b->mem); b->map = NULL; }
@@ -6940,6 +7038,7 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b)
                          || pnow - g_bpark[0].parked_ns > NVMTL_BUFPARK_AGE_NS)) {
         ev[nev++] = g_bpark[0]; g_bpark_bytes -= g_bpark[0].alloc;
         memmove(&g_bpark[0], &g_bpark[1], (g_bpark_n - 1) * sizeof g_bpark[0]); g_bpark_n--; }
+    nvmtl_live_relabel(b, NVMTL_LV_PARKED);
     b->parked_ns = pnow; g_bpark[g_bpark_n++] = *b; g_bpark_bytes += b->alloc;
     pthread_mutex_unlock(&g_bpark_lock);
     g_buf_gone++;
@@ -8804,6 +8903,7 @@ int nvmtl_vk_buffer_create_placed(size_t size, nvk_heap *heap, size_t offset, nv
     out->moff = offset;
     out->map = heap->map ? (char *)heap->map + offset : NULL;
     g_buf_made++;
+    nvmtl_live_add(out, NVMTL_LV_PLACED);
     return 0;
 }
 
