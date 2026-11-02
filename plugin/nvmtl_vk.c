@@ -316,6 +316,15 @@ typedef struct nvmtl_grace_img { nvk_image img; void *bufview, *alias; uint64_t 
 static pthread_mutex_t g_grace_lock = PTHREAD_MUTEX_INITIALIZER;
 static nvmtl_grace_img *g_grace_head, *g_grace_tail; static uint64_t g_grace_n, g_grace_reaped, g_cmd_finished_seq;
 static void nvmtl_vk_image_destroy_now(nvk_image *i);
+// The submit a dead resource must outlive: every submit in flight at its death AND every command buffer already begun
+// but not yet submitted - a command buffer records the handle, is committed after the app released the resource, and
+// only then reads the slot. Pending command buffers submit after the ones in flight, so the bound is the count begun
+// less the abandoned ones; a bound too high only holds the release a little longer.
+static uint64_t nvmtl_grace_seq_locked(void)
+{
+    const uint64_t pending = g_cmd_begun > g_cmd_submitted + g_cmd_abandoned ? g_cmd_begun - g_cmd_submitted - g_cmd_abandoned : 0;
+    return g_cmd_submitted + pending;
+}
 static void nvmtl_vk_texel_view_destroy_now(void *alias, void *view);
 static void nvmtl_image_grace_reap(void)
 {
@@ -7579,7 +7588,7 @@ void nvmtl_vk_image_destroy(nvk_image *i)
         if (e) {
             e->img = *i; memset(i, 0, sizeof *i);
             pthread_mutex_lock(&g_grace_lock);
-            e->seq = g_cmd_submitted;   // the last submit that could have read it
+            e->seq = nvmtl_grace_seq_locked();   // the last submit that can still read it (in flight or begun)
             if (g_grace_tail) g_grace_tail->next = e; else g_grace_head = e;
             g_grace_tail = e; g_grace_n++;
             pthread_mutex_unlock(&g_grace_lock);
@@ -8795,7 +8804,7 @@ void nvmtl_vk_image_view_destroy(void *view)
         if (e) {
             e->img.view = view;   // img NULL: a view-only entry, nvmtl_vk_image_destroy_now destroys the view alone
             pthread_mutex_lock(&g_grace_lock);
-            e->seq = g_cmd_submitted;
+            e->seq = nvmtl_grace_seq_locked();
             if (g_grace_tail) g_grace_tail->next = e; else g_grace_head = e;
             g_grace_tail = e; g_grace_n++;
             pthread_mutex_unlock(&g_grace_lock);
@@ -8844,7 +8853,7 @@ void nvmtl_vk_texel_view_destroy(void *alias, void *view)
         if (e) {
             e->bufview = view; e->alias = alias;
             pthread_mutex_lock(&g_grace_lock);
-            e->seq = g_cmd_submitted;
+            e->seq = nvmtl_grace_seq_locked();
             if (g_grace_tail) g_grace_tail->next = e; else g_grace_head = e;
             g_grace_tail = e; g_grace_n++;
             pthread_mutex_unlock(&g_grace_lock);
