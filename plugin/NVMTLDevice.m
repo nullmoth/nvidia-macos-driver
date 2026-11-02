@@ -1640,18 +1640,18 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
 // One line per function the first time it goes into a pipeline: the kernel/stage name, the FNV-1a of its SPIR-V (what a
 // per-kernel GPU profile keys a row on) and the sha256 of its AIR (what the translator caches key a module on), so a
 // profile row maps to a translator module without guessing.
+uint32_t nvmtl_function_spv_fnv(id f);
 static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
 {
     if (![f isKindOfClass:[NVMTLFunction class]]) return;
     NVMTLFunction *fn = f; static char kKey;
     if (objc_getAssociatedObject(fn, &kKey)) return;
     objc_setAssociatedObject(fn, &kKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    uint32_t x = 2166136261u; const uint8_t *b = fn->_spirv.bytes;
-    for (NSUInteger i = 0; i < fn->_spirv.length; i++) { x ^= b[i]; x *= 16777619u; }
+    const uint32_t x = nvmtl_function_spv_fnv(fn);
     char air[17] = "-";
     if (fn->_air.length) { unsigned char dg[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(fn->_air.UTF8String, (CC_LONG)strlen(fn->_air.UTF8String), dg);
                            for (int i = 0; i < 8; i++) snprintf(air + 2 * i, 3, "%02x", dg[i]); }
-    nvlog("pipeline key: %s %s spv-fnv %08x air %s%s%s pipe %p", stage, fn->_fname.UTF8String ?: "-", fn->_spirv.length ? x : 0u, air,
+    nvlog_every("pipeline key: %s %s spv-fnv %08x air %s%s%s pipe %p", stage, fn->_fname.UTF8String ?: "-", x, air,
           fn->_specName.length ? " fc " : "", fn->_specName.length ? fn->_specName.UTF8String : "", pipe);
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)err {
