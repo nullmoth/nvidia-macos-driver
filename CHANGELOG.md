@@ -2,6 +2,8 @@
 
 ## 2.7
 
+- ARM apps (opt-in, experimental): an optional translator for Mac apps built only for Apple silicon. It compiles an app's ARM code into Intel (x86-64) code ahead of time, so the app can run on Intel and AMD hackintoshes. Turn it on in 1401 › ARM apps (opt-in); on Windows, tick Also set up ARM apps (opt-in) on a fresh install. Your original app is never changed, and Turn off removes the translator and every translated copy.
+- ARM apps works today for command-line tools (lz4, xxhsum, cmake and z3 give byte-identical output to Apple silicon). Apps with windows are experimental; Go, Flutter, Java/Electron and SVE video codecs do not work yet, and games are not supported in 2.7. It needs a CPU with AES instructions and the Xcode Command Line Tools.
 - macOS 26 Tahoe has sound. Tahoe ships no HD Audio driver, so PCs on it had no output device at all. The driver package now carries NullMoth's own HD Audio driver and installs it on Tahoe when your PC has an HD Audio controller: onboard Realtek and other codecs (rear and front analog) and NVIDIA HDMI/DisplayPort audio. macOS 15 keeps Apple's own driver and is not touched.
 - If Logic Pro, GarageBand, or MainStage says "Selected Driver not found" after updating, open its Settings › Audio and pick your output again. The old device was Apple's, and it no longer exists.
 - Kernel panics fixed. The driver kept a saved interrupt state inside a shared lock object, which macOS reported as "element modified after free" and which could end in a panic. The state now stays with the caller, as NVIDIA's code expects.
