@@ -284,6 +284,13 @@ if [ "$PRIMARY" = 1 ]; then
   codesign --verify --strict "$SELECTOR_SOURCE" || die "primary selector signature invalid; no files changed"
   KEXTS="$KEXTS NVPrimarySelector"
 fi
+# The audio driver does NOT belong in this package, and a reading of the 11-02 support census briefly suggested it
+# did. It is a separate product in the nmx repo with its own package and installer (nmx/package/build.sh audio), and
+# release.py deliberately strips every NMX*.kext from this payload and then REFUSES the release if one reappears
+# ("the NVIDIA driver carries the NVIDIA driver and nothing else"). Adding it here would have broken the release gate.
+# The 660 "audio: NO output device" reports are real and the cause is real - macOS 26 ships no AppleHDA, so without
+# that product nothing binds to the HD Audio controller - but the fix belongs in whatever delivers the audio package
+# to users, not in this list.
 # kmutil builds the auxiliary collection from every kext in /Library/Extensions, so one that names a dependency this
 # macOS lacks stops the build for all of them. 2.5.3 report: a Realtek USB Wi-Fi kext (RtWlanU1827) needed
 # com.apple.iokit.IOUSBFamily, which macOS 15 no longer has, and the stop said only "test kernel collection build
