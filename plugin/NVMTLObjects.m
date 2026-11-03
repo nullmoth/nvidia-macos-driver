@@ -106,7 +106,17 @@ static void nvmtl_res2_note_use(NVMTLTexture *t);
 static uint64_t nvmtl_res2_evict(uint64_t want);
 extern uint64_t (*nvmtl_res2_evict_hook)(uint64_t want);
 #include "nvmtl_env_knobs.h"
-__attribute__((constructor)) static void nvmtl_conf_knobs(void)
+// The keys the user's own block of nvrm610.conf set ("my settings, kept on update"): an application profile never
+// replaces them. The shipped lines above that block are defaults, which a profile does replace.
+static char g_conf_mine[64][48];
+static unsigned g_conf_nmine;
+static void nvmtl_conf_note_mine(const char *key)
+{
+    for (unsigned i = 0; i < g_conf_nmine; i++) if (!strcmp(g_conf_mine[i], key)) return;
+    if (g_conf_nmine < 64 && strlen(key) < sizeof g_conf_mine[0]) strcpy(g_conf_mine[g_conf_nmine++], key);
+}
+// Forgets what this process inherited and should not keep; returns how many conf-set knobs a parent passed down.
+static unsigned nvmtl_conf_forget_inherited(void)
 {
 #if NVMTL_RELEASE
     // Inherited driver knobs are forgotten unless this process set NVMTL_PROCESS_ENV=1 (nvmtl_env_knobs.h has the rule).
@@ -122,6 +132,10 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
           }
           free(dup); }
       unsetenv("NVMTL_CONF_SET"); }
+    return forgot;
+}
+static void nvmtl_conf_read_file(unsigned forgot)
+{
     char recbuf[2048]; size_t recn = 0; recbuf[0] = 0;
     FILE *f = fopen("/Library/GPUBundles/nvmtl/nvrm610.conf", "r");
     if (!f) { if (forgot) nvlog("conf: forgot %u inherited knob(s); no conf file", forgot); return; }
@@ -131,9 +145,12 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
     // of the file, and the first match used to win, so a shipped value of the same key above it silently beat the
     // user's (#399). Keys set by an earlier line of this file may be replaced; the real environment still wins.
     char fromFile[64][48]; unsigned nFromFile = 0;
+    int mine = 0;   // inside the user's own block (the installer's markers, package/install.sh)
     while (fgets(line, sizeof line, f)) {
         char *p = line;
         while (*p == ' ' || *p == '\t') p++;
+        if (!strncmp(p, "# --- my settings, kept on update ---", 37)) { mine = 1; continue; }
+        if (!strncmp(p, "# --- end my settings ---", 25)) { mine = 0; continue; }
         if (*p == '#' || *p == '\n' || !*p) continue;
         char *eq = strchr(p, '=');
         if (!eq) continue;
@@ -147,7 +164,8 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
         bool ours = false;
         for (unsigned i = 0; i < nFromFile; i++) if (!strcmp(fromFile[i], key)) { ours = true; break; }
         if (getenv(key) && !ours) continue;
-        if (setenv(key, val, 1) == 0) { if (ours) { nvlog("conf: %s=%s (a later line of the file replaces an earlier one)", key, val); continue; }
+        if (setenv(key, val, 1) == 0) { if (mine) nvmtl_conf_note_mine(key);
+            if (ours) { nvlog("conf: %s=%s (a later line of the file replaces an earlier one)", key, val); continue; }
             took++;
             if (nFromFile < 64 && strlen(key) < sizeof fromFile[0]) strcpy(fromFile[nFromFile++], key); }
     }
@@ -162,6 +180,50 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
     if (recn) setenv("NVMTL_CONF_SET", recbuf, 1);
     if (took || forgot) nvlog("conf: %u knob(s) read from /Library/GPUBundles/nvmtl/nvrm610.conf, %u inherited conf knob(s) forgotten first (the environment still wins)", took, forgot);
 }
+// Which profile keys the user set: in this process's kept environment before the conf file was read (bit i = knob i),
+// or in the user's block of the conf file.
+typedef struct { const nvmtl_app_profile *p; uint64_t envBits; } nvmtl_profile_ctx;
+static int nvmtl_profile_user_set(const char *key, void *vctx)
+{
+    const nvmtl_profile_ctx *c = vctx;
+    for (unsigned i = 0; i < c->p->nknobs && i < 64; i++)
+        if (!strcmp(c->p->knobs[i].key, key)) { if ((c->envBits >> i) & 1) return 1; break; }
+    for (unsigned i = 0; i < g_conf_nmine; i++) if (!strcmp(g_conf_mine[i], key)) return 1;
+    return 0;
+}
+// Settles this process's driver knobs once, before any of them is read: forget what was inherited, read nvrm610.conf,
+// then apply the application profile for this executable, if there is one (nvmtl_app_profile.h has the order of
+// precedence). Every constructor that reads a knob calls this first; the first call does the work.
+static void nvmtl_conf_settle(void)
+{
+    static int done;
+    if (done) return;
+    done = 1;
+    unsigned forgot = nvmtl_conf_forget_inherited();
+    const char *me = getprogname();
+    // The main bundle's identifier; a process outside any bundle has none and gets no profile.
+    char bid[256] = "";
+    { CFBundleRef mb = CFBundleGetMainBundle(); CFStringRef s = mb ? CFBundleGetIdentifier(mb) : NULL;
+      if (s && !CFStringGetCString(s, bid, sizeof bid, kCFStringEncodingUTF8)) bid[0] = 0; }
+    const nvmtl_app_profile *p = nvmtl_app_profile_for(me, bid, getenv("NVMTL_APP_PROFILE"));
+    nvmtl_profile_ctx ctx = { p, 0 };
+    for (unsigned i = 0; p && i < p->nknobs && i < 64; i++) if (getenv(p->knobs[i].key)) ctx.envBits |= 1ull << i;
+    nvmtl_conf_read_file(forgot);
+    if (p && !nvmtl_app_profile_for(me, bid, getenv("NVMTL_APP_PROFILE"))) {
+        nvlog("profile: %s: off (NVMTL_APP_PROFILE=0)", me);
+        p = NULL;
+    }
+    if (!p) return;
+    // The profile's values join the conf file's record, so a child process (a crash reporter, a helper) forgets them.
+    char rec[3072]; const char *had = getenv("NVMTL_CONF_SET");
+    snprintf(rec, sizeof rec, "%s", had ? had : "");
+    unsigned kept = 0, set = nvmtl_app_profile_apply(p, nvmtl_profile_user_set, &ctx, rec, sizeof rec, &kept);
+    if (rec[0]) setenv("NVMTL_CONF_SET", rec, 1);
+    g_app_profile = p;
+    nvlog("profile: %s (%s): %u setting(s) applied, %u left as the user set them%s", me, bid, set, kept,
+          p->shader_from ? "; one kernel edit armed" : "");
+}
+__attribute__((constructor)) static void nvmtl_conf_knobs(void) { nvmtl_conf_settle(); }
 static int nvmtl_dontcare_clears(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("NVMTL_DONTCARE_CLEARS"); on = (e && *e && *e != '0') ? 1 : 0; }

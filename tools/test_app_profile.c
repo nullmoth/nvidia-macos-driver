@@ -1,0 +1,122 @@
+/* test_app_profile.c - the application-profile rules (plugin/nvmtl_app_profile.h), run against this process's environment.
+   Build and run anywhere (no GPU, no Metal):  cc -I plugin tools/test_app_profile.c -o /tmp/test_app_profile && /tmp/test_app_profile
+   Optional: /tmp/test_app_profile <original.spv> <edited.spv> also proves the shipped kernel edit turns the original
+   translated module into the edited one, byte for byte. Exit status 0 when every arm holds. */
+#include <stdio.h>
+#include "nvmtl_app_profile.h"
+
+static int fails;
+static void arm(const char *what, int ok) { printf("%s  %s\n", ok ? "ok  " : "FAIL", what); if (!ok) fails++; }
+static void clear(const nvmtl_app_profile *p) { for (unsigned i = 0; i < p->nknobs; i++) unsetenv(p->knobs[i].key); }
+static int none_set(const nvmtl_app_profile *p) { for (unsigned i = 0; i < p->nknobs; i++) if (getenv(p->knobs[i].key)) return 0; return 1; }
+static int all_as_profile(const nvmtl_app_profile *p, const char *except)
+{
+    for (unsigned i = 0; i < p->nknobs; i++) {
+        if (except && !strcmp(p->knobs[i].key, except)) continue;
+        const char *v = getenv(p->knobs[i].key); if (!v || strcmp(v, p->knobs[i].value)) return 0;
+    }
+    return 1;
+}
+static int user_says(const char *key, void *ctx) { return !strcmp(key, (const char *)ctx); }
+static uint32_t *read_words(const char *path, size_t *n)
+{
+    FILE *f = fopen(path, "rb"); if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
+    uint32_t *w = malloc((size_t)len); if (!w || fread(w, 1, (size_t)len, f) != (size_t)len) { fclose(f); free(w); return NULL; }
+    fclose(f); *n = (size_t)len / 4; return w;
+}
+
+int main(int argc, char **argv)
+{
+    const nvmtl_app_profile *cp = nvmtl_app_profile_for("Cyberpunk2077", "com.cdprojektred.cyberpunk.steam", NULL);
+    arm("the profile applies to the game: executable Cyberpunk2077, bundle com.cdprojektred.cyberpunk.steam", cp != NULL);
+    arm("and to the GOG and App Store builds (any com.cdprojektred.cyberpunk identifier)",
+        nvmtl_app_profile_for("Cyberpunk2077", "com.cdprojektred.cyberpunk.gog", NULL) == cp && nvmtl_app_profile_for("Cyberpunk2077", "com.cdprojektred.cyberpunk2077", NULL) == cp);
+    arm("the right name in another bundle, or in no bundle at all, is not the game",
+        !nvmtl_app_profile_for("Cyberpunk2077", "com.example.cyberpunk", NULL) && !nvmtl_app_profile_for("Cyberpunk2077", "", NULL)
+        && !nvmtl_app_profile_for("Cyberpunk2077", NULL, NULL));
+    arm("a helper inside the game's bundle (same identifier, other executable) is not the game",
+        !nvmtl_app_profile_for("Cyberpunk2077Helper", "com.cdprojektred.cyberpunk.steam", NULL) && !nvmtl_app_profile_for("REDprelauncher", "com.cdprojektred.cyberpunk.steam", NULL));
+    if (!cp) { printf("FAIL: %d failed\n", fails); return 1; }
+
+    const char *others[] = { "WindowServer", "Steam", "Cyberpunk2077Helper", "cyberpunk2077", "Cyberpunk2077.exe",
+                             "Cyberpunk 2077", "REDprelauncher", "Geekbench 6", "" };
+    int any = 0;
+    for (size_t i = 0; i < sizeof others / sizeof others[0]; i++) any |= nvmtl_app_profile_for(others[i], "com.apple.WindowServer", NULL) != NULL;
+    arm("no other process gets it: WindowServer, Steam, a helper, another case, the Windows name, an empty name", !any);
+    arm("a process with no name gets nothing", nvmtl_app_profile_for(NULL, "com.cdprojektred.cyberpunk.steam", NULL) == NULL);
+    arm("NVMTL_APP_PROFILE=0 turns it off for the game itself", nvmtl_app_profile_for("Cyberpunk2077", "com.cdprojektred.cyberpunk.steam", "0") == NULL);
+    arm("any other NVMTL_APP_PROFILE value leaves it on", nvmtl_app_profile_for("Cyberpunk2077", "com.cdprojektred.cyberpunk.steam", "1") == cp);
+
+    int sysmem = 0, diag = 0;
+    for (unsigned i = 0; i < cp->nknobs; i++) {
+        if (!strcmp(cp->knobs[i].key, "NVK_LOCAL_MAP_SYSMEM") && !strcmp(cp->knobs[i].value, "0")) sysmem = 1;
+        if (strstr(cp->knobs[i].key, "SNAPSHOT") || strstr(cp->knobs[i].key, "PROBE") || strstr(cp->knobs[i].key, "DUMP")
+            || strstr(cp->knobs[i].key, "LOG") || strstr(cp->knobs[i].key, "WITNESS") || strstr(cp->knobs[i].key, "TRACE")
+            || !strcmp(cp->knobs[i].key, "NVMTL_PROCESS_ENV") || strstr(cp->knobs[i].key, "CACHE")) diag = 1;
+    }
+    arm("the game's profile carries VRAM placement (NVK_LOCAL_MAP_SYSMEM=0)", sysmem);
+    arm("and no diagnostic switch: no snapshot, probe, dump, log, witness, trace, cache path or NVMTL_PROCESS_ENV", !diag);
+
+    /* the environment: a fresh process, then the plugin's call */
+    clear(cp);
+    char rec[3072] = "NVMTL_FROM_CONF=1"; unsigned kept = 9;
+    unsigned set = nvmtl_app_profile_apply(cp, NULL, NULL, rec, sizeof rec, &kept);
+    arm("applied to the game, every setting lands with the profile's value", all_as_profile(cp, NULL) && set == cp->nknobs && kept == 0);
+    arm("and joins the conf record after what was already there, so a child process forgets them",
+        !strncmp(rec, "NVMTL_FROM_CONF=1;", 18) && strstr(rec, "NVK_LOCAL_MAP_SYSMEM=0") != NULL);
+
+    clear(cp);
+    setenv("NVK_LOCAL_MAP_SYSMEM", "1", 1);
+    rec[0] = 0;
+    set = nvmtl_app_profile_apply(cp, user_says, "NVK_LOCAL_MAP_SYSMEM", rec, sizeof rec, &kept);
+    arm("a value the user set wins: NVK_LOCAL_MAP_SYSMEM=1 stays 1", !strcmp(getenv("NVK_LOCAL_MAP_SYSMEM"), "1"));
+    arm("the rest of the profile still applies, and the count says one was left to the user",
+        all_as_profile(cp, "NVK_LOCAL_MAP_SYSMEM") && set == cp->nknobs - 1 && kept == 1 && !strstr(rec, "NVK_LOCAL_MAP_SYSMEM"));
+
+    clear(cp);
+    setenv("NVMTL_HAZARD", "1", 1);
+    nvmtl_app_profile_apply(cp, NULL, NULL, NULL, 0, NULL);
+    arm("a knob outside the profile is not touched", !strcmp(getenv("NVMTL_HAZARD"), "1"));
+
+    /* what a non-matching process does: the plugin applies nothing, because the match returns NULL */
+    clear(cp);
+    set = nvmtl_app_profile_apply(nvmtl_app_profile_for("WindowServer", "com.apple.WindowServer", NULL), NULL, NULL, NULL, 0, &kept);
+    arm("WindowServer's path applies nothing and NVK_LOCAL_MAP_SYSMEM stays unset", set == 0 && none_set(cp) && !getenv("NVK_LOCAL_MAP_SYSMEM"));
+
+    /* the shader edit, on a synthetic module (the shipped edit needs the game's own module: see argv below) */
+    uint32_t mod[8] = { 0x07230203u, 0x00010500u, 0, 40, 0, 11, 22, 33 };
+    uint32_t want[9] = { 0x07230203u, 0x00010500u, 0, 41, 0, 11, 99, 22, 33 };
+    uint32_t edit[] = { 3, 1, 1, 41,   2, 0, 1, 99 };   /* keep 3, replace the bound; keep 2, insert one word */
+    uint32_t from = nvmtl_spv_fnv1a(mod, sizeof mod), to = nvmtl_spv_fnv1a(want, sizeof want);
+    size_t n = 0; uint32_t *out = nvmtl_spv_apply_edit(mod, 8, edit, 8, from, to, &n);
+    arm("an edit on the module it was made from gives exactly the edited module", out && n == 9 && !memcmp(out, want, sizeof want));
+    free(out);
+    uint32_t other[8]; memcpy(other, mod, sizeof mod); other[7] = 34; uint32_t copy[8]; memcpy(copy, other, sizeof other);
+    out = nvmtl_spv_apply_edit(other, 8, edit, 8, from, to, &n);
+    arm("a hash miss changes nothing: another module gets no edit and is left as it was", !out && !memcmp(other, copy, sizeof copy));
+    out = nvmtl_spv_apply_edit(mod, 8, edit, 8, from, to ^ 1, &n);
+    arm("a result that does not hash to the recorded value is thrown away", !out);
+    uint32_t bad[] = { 3, 1, 9, 41 };
+    out = nvmtl_spv_apply_edit(mod, 8, bad, 4, from, to, &n);
+    arm("a patch that claims more words than it has is refused, not read past", !out);
+    uint32_t far[] = { 30, 0, 0 };
+    out = nvmtl_spv_apply_edit(mod, 8, far, 3, from, to, &n);
+    arm("a patch that keeps past the end of the module is refused", !out);
+    mod[0] = 0x03022307u;
+    arm("a module without the SPIR-V magic is refused", !nvmtl_spv_apply_edit(mod, 8, edit, 8, from, to, &n));
+
+    if (cp->shader_from) {
+        arm("the shipped edit is armed with two hashes and a patch", cp->shader_to && cp->npatch > 3);
+        if (argc == 3) {
+            size_t on = 0, en = 0; uint32_t *orig = read_words(argv[1], &on), *ed = read_words(argv[2], &en);
+            out = orig ? nvmtl_spv_apply_edit(orig, on, cp->patch, cp->npatch, cp->shader_from, cp->shader_to, &n) : NULL;
+            arm("the shipped edit turns the game's translated light-cluster kernel into the bounds-checked one, byte for byte",
+                out && ed && n == en && !memcmp(out, ed, n * 4));
+            free(out); free(orig); free(ed);
+        } else printf("skip  the shipped edit against the game's module (pass original.spv edited.spv)\n");
+    } else printf("note  this build carries no shader edit\n");
+
+    printf("%s: %d failed\n", fails ? "FAIL" : "PASS", fails);
+    return fails ? 1 : 0;
+}

@@ -116,6 +116,10 @@ static int nvmtl_xlate_ready(void) {
         // entry written in one mode must never be served in the other.
         if (getenv("NVMTL_CANONICAL_POINTERS")) strlcat(gXlateTag, "-p5", sizeof gXlateTag);
         if (getenv("NVMTL_ARGBUF_SAMPLERS") && !strcmp(getenv("NVMTL_ARGBUF_SAMPLERS"), "1")) strlcat(gXlateTag, "-as1", sizeof gXlateTag);
+        // The two translator switches an application profile sets change the SPIR-V too: an entry translated before a
+        // profile existed (or with it turned off) must not be served with it on.
+        if (getenv("NVMTL_NO_PTR_PHI_LOAD")) strlcat(gXlateTag, "-np", sizeof gXlateTag);
+        if (getenv("NVMTL_NO_PIXEL_HW_FILTER")) strlcat(gXlateTag, "-nf", sizeof gXlateTag);
         if (!h) { nvlog("translate: dlopen(%s): %s", NVMTL_XLATE_LIB, dlerror()); return; }
         xlate = (nvmtl_translate_fn)dlsym(h, "nvmtl_translate");
         { char tid[1200];
