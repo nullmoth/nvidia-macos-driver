@@ -165,6 +165,7 @@ pub(crate) use rewrites::{
     construct_interface_cross_binding_pointer_values_module, construct_opaque_image_selects_module,
     construct_atomic_storage_image_formats_module,
     split_mismatched_copy_memory_module,
+    construct_composite_atomic_pointer_lvalues_module,
     construct_physical_atomic_pointer_lvalues_module, construct_workgroup_atomic_floats_module,
     eliminate_dead_pointer_values_module, eliminate_dead_values_module,
     lower_unobserved_bda_aggregate_pointer_fields_module, prune_constant_branches_module,
