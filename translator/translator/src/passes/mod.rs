@@ -1462,7 +1462,6 @@ impl Ctx {
 mod access;
 mod air_calls;
 mod aliased_imageblock;
-mod dispatch_tail_guard;
 mod emitted_inline;
 mod finalize;
 mod latch_trampoline;
@@ -3049,18 +3048,23 @@ pub(crate) fn transform_with_options_and_sidecar(
             );
         }
     }
-    // LAST, after every pass that reads the CFG. The guard splits the entry block and adds two blocks, and
-    // running it earlier moved the pointer-phi construction's ground under it: four buffers tests lost the
-    // phi they assert on. Nothing below this point analyses control flow.
-    // entry_idx from the top of this phase is stale by now - pruning and inlining rewrite the function list -
-    // so the entry is re-found by name, the same way this phase does after prune.
-    if !crate::env_vars::no_dispatch_tail_guard() {
-        if let Some(idx) = find_entry_index(&ctx.module, entry_name) {
-            dispatch_tail_guard::emit_dispatch_tail_guard(&mut ctx, idx);
-        }
-        // the guard may have synthesized the bool/uint types and the push-constant pointer it compares with
-        ctx.module.types_global_values.append(&mut ctx.new_globals);
-    }
+    // A dispatch-tail guard used to run here: an entry-block test that retired the lanes a Metal
+    // dispatchThreads: grid never creates, by comparing GlobalInvocationId + thread_base against the
+    // threads_per_grid in the dispatch-region push constants. It was removed on 2026-11-03 because both
+    // of its premises were false, and it cost a game run and two crashes to learn that:
+    //  - There is no overshoot to discard. nvmtl_vk_cmd_dispatch_threads already reproduces Metal's exact
+    //    thread count by dispatching a SMALLER-WORKGROUP pipeline variant for the partial group
+    //    (local[d] = threads[d] % tg[d]), so every launched invocation is one Metal would have created.
+    //    That emulation is also strictly better than a guard: it keeps the workgroup size honest, so
+    //    threadgroup-shared reductions and barriers in the tail group still see the right extent.
+    //  - The push constants it read are not always there. Only dispatch_threads and
+    //    dispatch_indirect_tg push the 12-uint region; nvmtl_vk_cmd_dispatch (dispatchThreadgroups:)
+    //    and nvmtl_vk_cmd_dispatch_indirect push nothing, and a kernel reached through either one read
+    //    whatever the previous compute dispatch had left in push-constant state. Lanes of a live kernel
+    //    were retired against a stale grid, which in Cyberpunk showed up as submits/frame climbing 2.5
+    //    -> 30.8 over four seconds and then FAULT_PDE at an unmapped 0x2ef3a2000.
+    // Read the region for POSITION (stage_input/kernel_grid.rs), never for a correctness decision about
+    // which lanes should run.
     debug_phase!("complete");
 
     let placeholder_descriptor_bindings = surviving_placeholder_bindings(&ctx);

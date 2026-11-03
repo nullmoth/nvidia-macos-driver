@@ -4230,26 +4230,12 @@ entry:
                 .is_some_and(|ptr| store_targets.contains(ptr))),
         "a guarded store has nothing to read back: {asm}"
     );
-    // This kernel takes its position from the grid, so it carries the dispatch tail guard, which is exactly
-    // one OpBranchConditional and it is the entry block's terminator. Both numbers are asserted rather than
-    // just the total: bumping the old total of 2 to 3 would also have passed if one of the two stores lost
-    // its own guard and the tail guard made up the difference, which is the regression this arm exists to
-    // catch. With METAL2VULKAN_NO_DISPATCH_TAIL_GUARD=1 the entry count is 0 and this arm fails - that knob
-    // is a development A/B switch, and the arm is written for the shipping configuration.
-    let entry_conditionals = module
-        .functions
-        .iter()
-        .filter_map(|function| function.blocks.first())
-        .flat_map(|block| &block.instructions)
-        .filter(|inst| inst.class.opcode == Op::BranchConditional)
-        .count();
-    assert_eq!(entry_conditionals, 1, "the dispatch tail guard is the entry block's branch: {asm}");
     assert_eq!(
         body.iter()
             .filter(|inst| inst.class.opcode == Op::BranchConditional)
             .count(),
-        3,
-        "each arm's store is guarded by that arm being selected, plus the tail guard: {asm}"
+        2,
+        "each arm's store is guarded by that arm being selected: {asm}"
     );
     let stored_values = stores
         .iter()
