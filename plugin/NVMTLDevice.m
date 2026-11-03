@@ -32,6 +32,10 @@
 // (NVMTLObjects.m), which reads nvrm610.conf and applies the profile before any knob is read.
 static const nvmtl_app_profile *g_app_profile;
 static void nvmtl_conf_settle(void);
+// Set by the last compute pipeline creation on this thread: 1 when the profile's kernel edit was applied to its module.
+static __thread int g_app_edit_last;
+// Marks a pipeline state whose module carried the kernel edit, so a variant later built for it can say what it did.
+static char g_app_edit_ps_key;
 #include <CommonCrypto/CommonDigest.h>
 #include <sys/sysctl.h>
 #import <libproc.h>
@@ -2088,29 +2092,10 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
         return ps;
     }
     if (!f || !f->_spirv) return nvmtl_fail(err, @"newComputePipelineState: function has no SPIR-V");
-    // A replacement module for one translated kernel. NVMTL_BDA_PROBE_FILE names a whole replacement file (a developer
-    // override); otherwise the application profile may carry an edit for one kernel, applied below.
+    // A replacement module for one translated kernel, from a whole file (a developer override). The application profile's
+    // kernel edit is applied later, where every compute pipeline is created (nvmtl_vk_compute_pipeline_create_g).
     const char *compatPath = getenv("NVMTL_BDA_PROBE_FILE");
     static char compatShaderKey;
-    if (!compatPath && g_app_profile && g_app_profile->shader_from && !objc_getAssociatedObject(f, &compatShaderKey)) {
-        // Cyberpunk 2077's light-cluster kernel computes a tile index from each light's projected screen position. A light
-        // off screen gives an index past the end of the tile grid, and the kernel reads there without a bounds check
-        // (its reads are only checked for a null base). Apple GPUs tolerate the stray read; here it faults the GPU. The
-        // profile's edit adds the missing bounds check and nothing else. It applies only to the exact translator output it
-        // was made from: any other module, or a result that does not hash to the recorded value, is left untouched.
-        // A general translator fix for out-of-range reads is planned and will retire this edit.
-        size_t outn = 0;
-        uint32_t *edited = (f->_spirv.length & 3u) ? NULL : nvmtl_spv_apply_edit((const uint32_t *)f->_spirv.bytes, f->_spirv.length / 4,
-                                                g_app_profile->patch, g_app_profile->npatch,
-                                                g_app_profile->shader_from, g_app_profile->shader_to, &outn);
-        if (edited) {
-            f->_spirv = [NSData dataWithBytesNoCopy:edited length:outn * 4 freeWhenDone:YES];
-            nvlog("profile: %s: edited kernel %s (module %08x -> %08x)", g_app_profile->exe, f->_fname.UTF8String,
-                  g_app_profile->shader_from, g_app_profile->shader_to);
-        }
-        // Checked once per function either way, so the hash is not recomputed for every pipeline made from it.
-        objc_setAssociatedObject(f, &compatShaderKey, @(edited != NULL), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
     if (compatPath && !objc_getAssociatedObject(f, &compatShaderKey)) {
         uint32_t hash = 2166136261u;
         for (NSUInteger i = 0; i < f->_spirv.length; i++) { hash ^= ((const uint8_t *)f->_spirv.bytes)[i]; hash *= 16777619u; }
@@ -2139,6 +2124,11 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     ps->_attrT = nvmtl_air_max_tg(f);
     if (nvmtl_vk_compute_pipeline_create(f->_spirv.bytes, f->_spirv.length, &ps->_p)) {
         return nvmtl_fail(err, @"newComputePipelineState: vkCreateComputePipelines FAILED"); }
+    if (g_app_edit_last) {
+        objc_setAssociatedObject(ps, &g_app_edit_ps_key, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        nvlog("profile: %s: edited kernel %s (module %08x -> %08x)", g_app_profile->exe, f->_fname.UTF8String,
+              g_app_profile->shader_from, g_app_profile->shader_to);
+    }
     nvlog("newComputePipelineStateWithFunction: %s -> %p (%lu B of SPIR-V)",
           f->_fname.UTF8String, (__bridge void *)ps, (unsigned long)f->_spirv.length);
     nvmtl_vendor_attach_sass(self, ps, f);

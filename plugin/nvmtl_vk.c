@@ -5491,8 +5491,22 @@ static int nvmtl_heap_binding_refused(const void *p, size_t n, const char *what)
           "(NVMTL_NO_HEAP_STORAGE / NVMTL_NO_ARGBUF_SAMPLERS) - it would read a garbage descriptor", what, hi, g_heap_nbind);
     return 1;
 }
+// Every compute pipeline is created here: a kernel's own module (fresh translation or shader-cache hit), a sampler or
+// threadgroup-memory variant re-translated at dispatch, a mesh stage's kernel, and the align guard's SAFE rebuild, which
+// starts again from the module kept below. The threadgroup-size variants are built later from the shader module made
+// here. So the application profile's kernel edit is applied here, once, and reaches every one of them.
+static _Atomic unsigned long long g_app_edits;
 static int nvmtl_vk_compute_pipeline_create_g(const void *cs, size_t n, uint32_t flags, nvk_pipeline *out)
 {
+    g_app_edit_last = 0;
+    size_t en = 0;
+    uint32_t *ew = g_app_profile ? nvmtl_app_profile_edit_module(g_app_profile, cs, n, &en) : NULL;
+    NSData *edited = ew ? [NSData dataWithBytesNoCopy:ew length:en * 4 freeWhenDone:YES] : nil;
+    if (edited) {
+        cs = edited.bytes; n = edited.length; g_app_edit_last = 1;
+        const unsigned long long k = atomic_fetch_add(&g_app_edits, 1) + 1;
+        if (!(k & (k - 1))) nvlog("profile: kernel edit applied to %llu compute pipeline(s) so far", k);
+    }
     nvk_pipeline pending = {0};
     int result = nvmtl_vk_compute_pipeline_create_g_lifetime_body(cs, n, flags, &pending);
     if (result) { nvmtl_failed_pipeline(&pending); memset(out, 0, sizeof pending); }
