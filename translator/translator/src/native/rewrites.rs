@@ -568,6 +568,243 @@ pub(crate) fn construct_physical_atomic_pointer_lvalues_module(module: &mut Modu
     true
 }
 
+/// An atomic must name a pointer to its scalar. A helper that receives an OpenCL `__local int*` kernel argument
+/// unindexed ends up, once the argument is materialized, with the Workgroup array variable itself as its atomic's
+/// pointer. Geekbench 7's RAW `find_max_brightness` does `atomic_max(local_brightness, i)` on exactly that: the
+/// owned-module check refused the array pointer, the kernel had no pipeline, and the whole RAW workload scored 0
+/// (which Geekbench counts as 1 in its geometric mean, dividing the OpenCL score by about 2.4). This steps each such
+/// pointer through element 0 of every level down to the atomic's own scalar type with an access chain. A pointer
+/// whose first-element chain does not end in that scalar is left alone, so the owned-module check still reports it.
+pub(crate) fn construct_composite_atomic_pointer_lvalues_module(module: &mut Module) -> bool {
+    fn is_atomic(op: Op) -> bool {
+        matches!(
+            op,
+            Op::AtomicLoad
+                | Op::AtomicStore
+                | Op::AtomicExchange
+                | Op::AtomicCompareExchange
+                | Op::AtomicCompareExchangeWeak
+                | Op::AtomicIIncrement
+                | Op::AtomicIDecrement
+                | Op::AtomicIAdd
+                | Op::AtomicISub
+                | Op::AtomicSMin
+                | Op::AtomicUMin
+                | Op::AtomicSMax
+                | Op::AtomicUMax
+                | Op::AtomicAnd
+                | Op::AtomicOr
+                | Op::AtomicXor
+                | Op::AtomicFAddEXT
+                | Op::AtomicFMinEXT
+                | Op::AtomicFMaxEXT
+        )
+    }
+    // Composite levels between a pointer type's pointee and `scalar`, following element 0; None if it never gets there.
+    fn first_element_depth(
+        types: &HashMap<Word, Instruction>,
+        mut ty: Word,
+        scalar: Word,
+    ) -> Option<usize> {
+        let mut depth = 0usize;
+        while ty != scalar {
+            let definition = types.get(&ty)?;
+            match (definition.class.opcode, definition.operands.first()) {
+                (
+                    Op::TypeArray | Op::TypeRuntimeArray | Op::TypeStruct,
+                    Some(Operand::IdRef(first)),
+                ) => ty = *first,
+                _ => return None,
+            }
+            depth += 1;
+            // SPIR-V types do not nest without end; a malformed module must not hang the pass
+            if depth > 16 {
+                return None;
+            }
+        }
+        Some(depth)
+    }
+
+    let types = module
+        .types_global_values
+        .iter()
+        .filter_map(|instruction| Some((instruction.result_id?, instruction.clone())))
+        .collect::<HashMap<_, _>>();
+    let value_types = module
+        .types_global_values
+        .iter()
+        .chain(
+            module
+                .functions
+                .iter()
+                .flat_map(|function| function.parameters.iter().chain(function.all_inst_iter())),
+        )
+        .filter_map(|instruction| Some((instruction.result_id?, instruction.result_type?)))
+        .collect::<HashMap<_, _>>();
+    let pointer_parts = |pointer_type: Word| match types.get(&pointer_type) {
+        Some(definition) if definition.class.opcode == Op::TypePointer => {
+            match definition.operands.as_slice() {
+                [Operand::StorageClass(storage), Operand::IdRef(pointee)] => {
+                    Some((*storage, *pointee))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
+    // (function, block, instruction) -> (storage, scalar, depth)
+    let mut sites = HashMap::<(usize, usize, usize), (StorageClass, Word, usize)>::default();
+    for (function_index, function) in module.functions.iter().enumerate() {
+        for (block_index, block) in function.blocks.iter().enumerate() {
+            for (instruction_index, instruction) in block.instructions.iter().enumerate() {
+                if !is_atomic(instruction.class.opcode) {
+                    continue;
+                }
+                let scalar = if instruction.class.opcode == Op::AtomicStore {
+                    match instruction.operands.get(3) {
+                        Some(Operand::IdRef(value)) => value_types.get(value).copied(),
+                        _ => None,
+                    }
+                } else {
+                    instruction.result_type
+                };
+                let Some(scalar) = scalar else {
+                    continue;
+                };
+                let Some(Operand::IdRef(pointer)) = instruction.operands.first() else {
+                    continue;
+                };
+                let Some((storage, pointee)) =
+                    value_types.get(pointer).and_then(|ty| pointer_parts(*ty))
+                else {
+                    continue;
+                };
+                if let Some(depth) = first_element_depth(&types, pointee, scalar) {
+                    if depth > 0 {
+                        sites.insert(
+                            (function_index, block_index, instruction_index),
+                            (storage, scalar, depth),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    if sites.is_empty() {
+        return false;
+    }
+
+    let mut next_id = module
+        .header
+        .as_ref()
+        .map(|header| header.bound)
+        .unwrap_or(1);
+    let uint32 = types
+        .iter()
+        .filter(|(_, definition)| {
+            definition.class.opcode == Op::TypeInt
+                && definition.operands == [Operand::LiteralBit32(32), Operand::LiteralBit32(0)]
+        })
+        .map(|(id, _)| *id)
+        .min();
+    let uint32 = uint32.unwrap_or_else(|| {
+        let id = next_id;
+        next_id += 1;
+        module.types_global_values.push(Instruction::new(
+            Op::TypeInt,
+            None,
+            Some(id),
+            vec![Operand::LiteralBit32(32), Operand::LiteralBit32(0)],
+        ));
+        id
+    });
+    let zero = module
+        .types_global_values
+        .iter()
+        .find_map(|instruction| {
+            (instruction.class.opcode == Op::Constant
+                && instruction.result_type == Some(uint32)
+                && instruction.operands == [Operand::LiteralBit32(0)])
+            .then_some(instruction.result_id?)
+        })
+        .unwrap_or_else(|| {
+            let id = next_id;
+            next_id += 1;
+            module.types_global_values.push(Instruction::new(
+                Op::Constant,
+                Some(uint32),
+                Some(id),
+                vec![Operand::LiteralBit32(0)],
+            ));
+            id
+        });
+    let mut scalar_pointer_types = HashMap::<(StorageClass, Word), Word>::default();
+    for instruction in &module.types_global_values {
+        if let (Some(id), Some((storage, pointee))) = (
+            instruction.result_id,
+            (instruction.class.opcode == Op::TypePointer)
+                .then(|| match instruction.operands.as_slice() {
+                    [Operand::StorageClass(storage), Operand::IdRef(pointee)] => {
+                        Some((*storage, *pointee))
+                    }
+                    _ => None,
+                })
+                .flatten(),
+        ) {
+            scalar_pointer_types.entry((storage, pointee)).or_insert(id);
+        }
+    }
+
+    for (function_index, function) in module.functions.iter_mut().enumerate() {
+        for (block_index, block) in function.blocks.iter_mut().enumerate() {
+            let original = std::mem::take(&mut block.instructions);
+            let mut rewritten = Vec::with_capacity(original.len() + 1);
+            for (instruction_index, mut instruction) in original.into_iter().enumerate() {
+                if let Some(&(storage, scalar, depth)) =
+                    sites.get(&(function_index, block_index, instruction_index))
+                {
+                    let pointer_type = *scalar_pointer_types
+                        .entry((storage, scalar))
+                        .or_insert_with(|| {
+                            let id = next_id;
+                            next_id += 1;
+                            module.types_global_values.push(Instruction::new(
+                                Op::TypePointer,
+                                None,
+                                Some(id),
+                                vec![Operand::StorageClass(storage), Operand::IdRef(scalar)],
+                            ));
+                            id
+                        });
+                    let Some(Operand::IdRef(pointer)) = instruction.operands.first().cloned()
+                    else {
+                        rewritten.push(instruction);
+                        continue;
+                    };
+                    let element = next_id;
+                    next_id += 1;
+                    rewritten.push(Instruction::new(
+                        Op::InBoundsAccessChain,
+                        Some(pointer_type),
+                        Some(element),
+                        std::iter::once(Operand::IdRef(pointer))
+                            .chain(std::iter::repeat_n(Operand::IdRef(zero), depth))
+                            .collect(),
+                    ));
+                    instruction.operands[0] = Operand::IdRef(element);
+                }
+                rewritten.push(instruction);
+            }
+            block.instructions = rewritten;
+        }
+    }
+    if let Some(header) = module.header.as_mut() {
+        header.bound = next_id;
+    }
+    true
+}
+
 pub(crate) fn prune_constant_branches_module(module: &mut Module) -> Result<(), String> {
     if !prune_constant_branches_module_if_changed(module) {
         return Err("native emitter: no constant branch to prune".to_string());
@@ -1310,6 +1547,180 @@ mod tests {
                 && instruction.operands.get(2) == Some(&Operand::Decoration(Decoration::Offset))
                 && instruction.operands.get(3) == Some(&Operand::LiteralBit32(0))
         }));
+    }
+
+    #[test]
+    fn atomic_on_an_unindexed_workgroup_array_steps_to_element_zero() {
+        // atomic_max(local_brightness, i) where local_brightness is an OpenCL __local int* kernel argument: the
+        // atomic names the Workgroup array variable itself (Geekbench 7 RAW find_max_brightness).
+        let uint = 1;
+        let four = 2;
+        let array = 3;
+        let array_ptr = 4;
+        let scalar_ptr = 5;
+        let zero = 6;
+        let local = 7;
+        let other = 8;
+        let float = 9;
+        let float_array = 12;
+        let float_array_ptr = 13;
+        let float_local = 14;
+        let mut module = Module::new();
+        module.header = Some(ModuleHeader::new(30));
+        module.types_global_values = vec![
+            inst(
+                Op::TypeInt,
+                None,
+                Some(uint),
+                vec![Operand::LiteralBit32(32), Operand::LiteralBit32(0)],
+            ),
+            inst(
+                Op::Constant,
+                Some(uint),
+                Some(four),
+                vec![Operand::LiteralBit32(4)],
+            ),
+            inst(
+                Op::TypeArray,
+                None,
+                Some(array),
+                vec![Operand::IdRef(uint), Operand::IdRef(four)],
+            ),
+            inst(
+                Op::TypePointer,
+                None,
+                Some(array_ptr),
+                vec![
+                    Operand::StorageClass(StorageClass::Workgroup),
+                    Operand::IdRef(array),
+                ],
+            ),
+            inst(
+                Op::TypePointer,
+                None,
+                Some(scalar_ptr),
+                vec![
+                    Operand::StorageClass(StorageClass::Workgroup),
+                    Operand::IdRef(uint),
+                ],
+            ),
+            inst(
+                Op::Constant,
+                Some(uint),
+                Some(zero),
+                vec![Operand::LiteralBit32(0)],
+            ),
+            inst(
+                Op::Variable,
+                Some(array_ptr),
+                Some(local),
+                vec![Operand::StorageClass(StorageClass::Workgroup)],
+            ),
+            inst(
+                Op::Variable,
+                Some(scalar_ptr),
+                Some(other),
+                vec![Operand::StorageClass(StorageClass::Workgroup)],
+            ),
+            inst(
+                Op::TypeFloat,
+                None,
+                Some(float),
+                vec![Operand::LiteralBit32(32)],
+            ),
+            inst(
+                Op::TypeArray,
+                None,
+                Some(float_array),
+                vec![Operand::IdRef(float), Operand::IdRef(four)],
+            ),
+            inst(
+                Op::TypePointer,
+                None,
+                Some(float_array_ptr),
+                vec![
+                    Operand::StorageClass(StorageClass::Workgroup),
+                    Operand::IdRef(float_array),
+                ],
+            ),
+            inst(
+                Op::Variable,
+                Some(float_array_ptr),
+                Some(float_local),
+                vec![Operand::StorageClass(StorageClass::Workgroup)],
+            ),
+        ];
+        let atomic = |result, pointer| {
+            inst(
+                Op::AtomicSMax,
+                Some(uint),
+                Some(result),
+                vec![
+                    Operand::IdRef(pointer),
+                    Operand::IdScope(zero),
+                    Operand::IdMemorySemantics(zero),
+                    Operand::IdRef(four),
+                ],
+            )
+        };
+        let mut function = Function::new();
+        function.blocks.push(Block {
+            label: Some(inst(Op::Label, None, Some(10), vec![])),
+            instructions: vec![
+                atomic(20, local),
+                atomic(21, other),
+                // a uint atomic on a float array: its chain never reaches uint, so it is left for the owned check
+                atomic(22, float_local),
+                inst(Op::Return, None, None, vec![]),
+            ],
+        });
+        module.functions.push(function);
+
+        assert!(construct_composite_atomic_pointer_lvalues_module(
+            &mut module
+        ));
+        assert!(
+            !construct_composite_atomic_pointer_lvalues_module(&mut module),
+            "a second run finds nothing left to step"
+        );
+
+        let body = &module.functions[0].blocks[0].instructions;
+        let pointer_of = |result| {
+            let atomic = body
+                .iter()
+                .find(|instruction| instruction.result_id == Some(result))
+                .expect("atomic");
+            let Operand::IdRef(pointer) = atomic.operands[0] else {
+                panic!("atomic pointer is an id")
+            };
+            pointer
+        };
+        let stepped = pointer_of(20);
+        let chain = body
+            .iter()
+            .find(|instruction| instruction.result_id == Some(stepped))
+            .expect("the array atomic reads through a new access chain");
+        assert_eq!(chain.class.opcode, Op::InBoundsAccessChain);
+        assert_eq!(
+            chain.result_type,
+            Some(scalar_ptr),
+            "reuses the existing Workgroup uint pointer type"
+        );
+        assert_eq!(
+            chain.operands,
+            vec![Operand::IdRef(local), Operand::IdRef(zero)]
+        );
+        assert_eq!(
+            pointer_of(21),
+            other,
+            "an atomic already on a scalar pointer is untouched"
+        );
+        assert_eq!(
+            pointer_of(22),
+            float_local,
+            "a chain that never reaches the atomic's scalar is untouched"
+        );
+        assert_eq!(body.len(), 5, "exactly one access chain was added");
     }
 
     fn module_with_typed_instruction(instruction: Instruction) -> Module {
