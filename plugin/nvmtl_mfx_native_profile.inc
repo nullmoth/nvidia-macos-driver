@@ -36,6 +36,8 @@ static id nvmtl_mfx_new(id receiver, SEL selector, id device) {
     } @finally { --nvmtl_mfx_profile_depth; }
 }
 __attribute__((constructor)) static void nvmtl_mfx_profile_install(void) {
+    // This constructor runs before the one that reads nvrm610.conf; settle the knobs first so a conf or profile value counts.
+    nvmtl_conf_settle();
     const char *enabled = getenv("NVMTL_METALFX_NATIVE_PROFILE");
     if (!enabled || strcmp(enabled, "1")) return;
     Class type = MTLFXTemporalScalerDescriptor.class;
