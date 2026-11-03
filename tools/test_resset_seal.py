@@ -26,6 +26,8 @@ def check(name, ok, detail=''):
 
 impl = objects[objects.index('@implementation NVMTLResSet'):]
 impl = impl[:impl.index('@end') + 4]
+# the identity-hashed set the class allocates sits just above it in NVMTLObjects.m
+impl = objects[objects.index('static NSMutableSet *nvmtl_identity_set('):objects.index('@implementation NVMTLResSet')] + impl
 iface = re.search(r'@interface NVMTLResSet : NSMutableSet .*?@end', header, re.S).group(0)
 
 HARNESS = r'''
