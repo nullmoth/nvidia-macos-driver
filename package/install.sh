@@ -284,13 +284,22 @@ if [ "$PRIMARY" = 1 ]; then
   codesign --verify --strict "$SELECTOR_SOURCE" || die "primary selector signature invalid; no files changed"
   KEXTS="$KEXTS NVPrimarySelector"
 fi
-# The audio driver does NOT belong in this package, and a reading of the 11-02 support census briefly suggested it
-# did. It is a separate product in the nmx repo with its own package and installer (nmx/package/build.sh audio), and
-# release.py deliberately strips every NMX*.kext from this payload and then REFUSES the release if one reappears
-# ("the NVIDIA driver carries the NVIDIA driver and nothing else"). Adding it here would have broken the release gate.
-# The 660 "audio: NO output device" reports are real and the cause is real - macOS 26 ships no AppleHDA, so without
-# that product nothing binds to the HD Audio controller - but the fix belongs in whatever delivers the audio package
-# to users, not in this list.
+# The audio driver. macOS 26 ships no HD Audio driver at all, so on a PC running it nothing binds to the sound
+# controller and there is no output device: 2,866 of 4,078 no-sound reports from 10-27 to 11-02 were macOS 26 with
+# "codecs none attached". NMXAudio is that driver (FreeBSD's HD Audio driver on the BSD-on-xnu layer), and it rides in
+# this package so every install and update gets it. It is installed only where it is needed and cannot collide: macOS 26
+# or later (15 has Apple's own HD Audio driver, and both would match the same controller), and an HD Audio controller
+# (PCI class 0x0403) on the bus. It goes through the same backup, collection build and verification as every kext above.
+AUDIO_NOTE=""
+if [ "$MAJ" -ge 26 ]; then
+  if ! ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | grep -q '"class-code" = <00030400>'; then
+    AUDIO_NOTE="no HD Audio controller on PCI, so the audio driver was not installed"
+  elif [ ! -f "$HERE/Library/Extensions/NMXAudio.kext/Contents/MacOS/NMXAudio" ]; then
+    AUDIO_NOTE="this package carries no audio driver"
+  else
+    KEXTS="$KEXTS NMXAudio"
+  fi
+fi
 # kmutil builds the auxiliary collection from every kext in /Library/Extensions, so one that names a dependency this
 # macOS lacks stops the build for all of them. 2.5.3 report: a Realtek USB Wi-Fi kext (RtWlanU1827) needed
 # com.apple.iokit.IOUSBFamily, which macOS 15 no longer has, and the stop said only "test kernel collection build
@@ -590,6 +599,7 @@ if kmutil showloaded --list-only --bundle-identifier as.vit9696.WhateverGreen 2>
 fi
 
 echo; echo "Done. Reboot now: sudo shutdown -r now"
+[ -z "$AUDIO_NOTE" ] || echo "Audio: $AUDIO_NOTE."
 if [ "$ALLOWED" = "$(echo $KEXTS | wc -w | tr -d ' ')" ]; then
   echo "This is an update of extensions you already allowed: one restart is enough. macOS may show a notice that they were"
   echo "updated; the new driver loads on this restart without allowing them again."
