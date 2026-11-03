@@ -152,7 +152,7 @@ int  nvmtl_vk_cmd_copy_accel(nvk_cmdbuf *c, nvk_accel *src, nvk_accel *dst);
 // instanced structure: device address low, high, its intersection-function-table base, pad.
 typedef struct nvmtl_convinst_args {
     uint64_t src, dst, uid, astab;
-    uint32_t stride, count, mtl_type, n_as;
+    uint32_t stride, count, mtl_type, n_as, matrix_layout;
 } nvmtl_convinst_args;
 // nvlog prints a repeated message 8 times and then once every 4096, so a count taken off the log is
 // that cap rather than the number of events. These are the real counts for the ray-tracing path.
@@ -175,7 +175,7 @@ uint32_t nvmtl_vk_convert_witness_read(void *dst, uint32_t max_instances);
 int  nvmtl_vk_convert_instances(const void *mtl_instances, uint32_t stride, uint32_t count, const uint64_t *as_addrs, uint32_t n_as, void *vk_instances_out,
                                 uint32_t mtl_type,
                                 uint32_t *uid_out,
-                                const uint32_t *as_ift);
+                                const uint32_t *as_ift, uint32_t matrix_layout);
 int  nvmtl_vk_image_create(uint32_t w, uint32_t h, nvk_image *out);
 int  nvmtl_vk_image_create_fmt(uint32_t w, uint32_t h, int bgra, nvk_image *out);
 int  nvmtl_vk_pipeline_create(const void *vs, size_t vn, const void *fs, size_t fn, nvk_pipeline *out);
