@@ -1462,6 +1462,7 @@ impl Ctx {
 mod access;
 mod air_calls;
 mod aliased_imageblock;
+mod dispatch_tail_guard;
 mod emitted_inline;
 mod finalize;
 mod latch_trampoline;
@@ -3047,6 +3048,18 @@ pub(crate) fn transform_with_options_and_sidecar(
                 "[retry-debug] passes: hoisted {hoisted} device load(s) above threadgroup stores"
             );
         }
+    }
+    // LAST, after every pass that reads the CFG. The guard splits the entry block and adds two blocks, and
+    // running it earlier moved the pointer-phi construction's ground under it: four buffers tests lost the
+    // phi they assert on. Nothing below this point analyses control flow.
+    // entry_idx from the top of this phase is stale by now - pruning and inlining rewrite the function list -
+    // so the entry is re-found by name, the same way this phase does after prune.
+    if !crate::env_vars::no_dispatch_tail_guard() {
+        if let Some(idx) = find_entry_index(&ctx.module, entry_name) {
+            dispatch_tail_guard::emit_dispatch_tail_guard(&mut ctx, idx);
+        }
+        // the guard may have synthesized the bool/uint types and the push-constant pointer it compares with
+        ctx.module.types_global_values.append(&mut ctx.new_globals);
     }
     debug_phase!("complete");
 
