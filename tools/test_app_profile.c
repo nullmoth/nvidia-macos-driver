@@ -3,6 +3,7 @@
    Optional: /tmp/test_app_profile <original.spv> <edited.spv> also proves the shipped kernel edit turns the original
    translated module into the edited one, byte for byte. Exit status 0 when every arm holds. */
 #include <stdio.h>
+#include <unistd.h>
 #include "nvmtl_app_profile.h"
 
 static int fails;
@@ -113,7 +114,27 @@ int main(int argc, char **argv)
             out = orig ? nvmtl_spv_apply_edit(orig, on, cp->patch, cp->npatch, cp->shader_from, cp->shader_to, &n) : NULL;
             arm("the shipped edit turns the game's translated light-cluster kernel into the bounds-checked one, byte for byte",
                 out && ed && n == en && !memcmp(out, ed, n * 4));
-            free(out); free(orig); free(ed);
+            free(out);
+            /* Every compute pipeline goes through one call, nvmtl_app_profile_edit_module, at pipeline creation. These arms
+               feed it the module as each path delivers it. */
+            size_t m = 0; uint32_t *e1 = nvmtl_app_profile_edit_module(cp, orig, on * 4, &m);
+            arm("path: a fresh translation (the original module in memory) is edited", e1 && m == en && !memcmp(e1, ed, m * 4));
+            char tmp[] = "/tmp/test_app_profile_cache_XXXXXX"; int fd = mkstemp(tmp); size_t cn = 0; uint32_t *hit = NULL;
+            if (fd >= 0) { FILE *cf = fdopen(fd, "wb"); fwrite(orig, 4, on, cf); fclose(cf); hit = read_words(tmp, &cn); unlink(tmp); }
+            size_t m2 = 0; uint32_t *e2 = hit ? nvmtl_app_profile_edit_module(cp, hit, cn * 4, &m2) : NULL;
+            arm("path: a shader-cache hit (the same module written to disk and read back) is edited the same way",
+                e2 && m2 == en && !memcmp(e2, ed, m2 * 4));
+            size_t m3 = 0; uint32_t *e3 = nvmtl_app_profile_edit_module(cp, ed, en * 4, &m3);
+            arm("path: the align guard's SAFE rebuild starts from the already edited module and is not edited twice (it stays edited)",
+                !e3);
+            uint32_t *var = malloc(on * 4); memcpy(var, orig, on * 4); var[on - 1] ^= 1u;   /* a re-translated variant differs */
+            size_t m4 = 0; uint32_t *e4 = nvmtl_app_profile_edit_module(cp, var, on * 4, &m4);
+            arm("path: a sampler or threadgroup variant re-translated from AIR is a different module and gets NO edit (the known limit; the plugin logs it)",
+                !e4 && var[on - 1] == (orig[on - 1] ^ 1u));
+            size_t m5 = 0;
+            arm("another process (no profile) never edits, even the exact original", !nvmtl_app_profile_edit_module(NULL, orig, on * 4, &m5));
+            arm("a module whose length is not whole words is left alone", !nvmtl_app_profile_edit_module(cp, orig, on * 4 - 1, &m5));
+            free(e1); free(e2); free(e3); free(e4); free(var); free(hit); free(orig); free(ed);
         } else printf("skip  the shipped edit against the game's module (pass original.spv edited.spv)\n");
     } else printf("note  this build carries no shader edit\n");
 

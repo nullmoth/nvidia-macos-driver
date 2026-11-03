@@ -5269,6 +5269,12 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
                     if (nvmtl_vk_compute_pipeline_create(spirv.bytes, spirv.length, &selected->_p)) {
                         selected = nil; why = @"Vulkan compute pipeline creation failed";
                     }
+                    // A variant is re-translated from the kernel's AIR with this encoder's samplers or threadgroup sizes,
+                    // so its module differs from the one the profile's edit was made from. Say so when the base was edited.
+                    if (objc_getAssociatedObject(_ps, &g_app_edit_ps_key))
+                        nvlog("profile: variant of edited kernel %s built (module %08x, %lu B): edit %s", _ps->_function->_fname.UTF8String,
+                              nvmtl_spv_fnv1a(spirv.bytes, spirv.length), (unsigned long)spirv.length,
+                              (selected && g_app_edit_last) ? "applied" : "NOT applied - this variant runs without the bounds check");
                 }
                 if (!selected) {
                     nvlog("compute pixel sampler specialization REFUSED %s: %s", _ps->_function->_fname.UTF8String, why.UTF8String);

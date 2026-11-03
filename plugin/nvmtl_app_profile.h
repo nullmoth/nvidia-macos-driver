@@ -145,4 +145,11 @@ bad:
     free(out);
     return NULL;
 }
+/* The profile's kernel edit for one module about to become a compute pipeline: the edited module (malloc'd, *outn words)
+   when this module is exactly the one the edit was made from, else NULL and the module is used as it is. */
+static inline uint32_t *nvmtl_app_profile_edit_module(const nvmtl_app_profile *p, const void *bytes, size_t len, size_t *outn)
+{
+    if (!p || !p->shader_from || !bytes || (len & 3u)) return NULL;
+    return nvmtl_spv_apply_edit((const uint32_t *)bytes, len / 4, p->patch, p->npatch, p->shader_from, p->shader_to, outn);
+}
 #endif
