@@ -6,6 +6,8 @@ set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 # the NVIDIA driver only: the AMD/Intel GPU driver, the NPU driver and the audio driver are separate products with
 # their own uninstallers
+# No NMX* kext belongs here: the audio, AMD/Intel and NPU drivers are separate products in the nmx repo with their
+# own uninstallers, and removing another product's kext from this one would take out a driver the user still wants.
 KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NVPrimarySelector"; EXT=/Library/Extensions; GB=/Library/GPUBundles
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 K=/System/Library/Kernels/kernel
