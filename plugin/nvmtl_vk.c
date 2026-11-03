@@ -3629,6 +3629,29 @@ static int nvmtl_dwit_ready(void)
     pthread_mutex_unlock(&g_keep_lock);
     return st > 0;
 }
+// The ordering barrier: the same barrier the per-dispatch witness emits, without the witness's 4-byte record.
+// On 2026-11-03 the witness was the only configuration in which Cyberpunk's benchmark completed every time
+// (3 of 3, 37.55-39.44 fps) and rendered the bar's lighting correctly; with its barrier absent the game
+// faulted at addresses no buffer covers and over-lit interiors - a pass reading what an earlier compute
+// dispatch or render pass had not finished writing. Turning off the plugin's concurrent-encoder rule (H7)
+// alone removed most of it but one run in two still faulted, because the witness also orders the end of
+// every RENDER PASS: render-target writes must land before a following compute pass reads them, and the
+// narrow compute->compute barrier never covers color-attachment output. This keeps exactly the witness's
+// stages and access so the measured behaviour carries over unchanged. NVMTL_NO_ORDER_BARRIER=1 removes it for
+// an A/B.
+static int nvmtl_order_barrier_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_NO_ORDER_BARRIER"); on = !(e && e[0] == '1');
+        nvlog("vk: ordering barrier after every compute dispatch and render pass %s", on ? "ON" : "OFF (NVMTL_NO_ORDER_BARRIER=1)"); }
+    return on;
+}
+static void nvmtl_order_barrier(nvk_cmdbuf *c)
+{
+    if (!c->cb || !nvmtl_order_barrier_on()) return;
+    VkMemoryBarrier after = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT };
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &after, 0, NULL, 0, NULL);
+}
 static void nvmtl_dwit_mark(nvk_cmdbuf *c, uint32_t ordinal)
 {
     if (!nvmtl_dwit_on() || !nvmtl_dwit_ready() || !c->cb) return;
@@ -6437,7 +6460,8 @@ void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_
             pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES, pc);
             nvmtl_fx_note_dispatch(c, p);
             pvkCmdDispatch(c->cb, n[0], n[1], n[2]);
-            nvmtl_dwit_mark(c, c->fx.total);
+            nvmtl_order_barrier(c);
+    nvmtl_dwit_mark(c, c->fx.total);
         }
     }
     nvmtl_dt_end(c, dt_slot);
@@ -6518,6 +6542,7 @@ void nvmtl_vk_cmd_dispatch_indirect_tg(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffe
     nvmtl_fx_note_dispatch(c, p);
     nvmtl_igw_note(c, b, off, tg);
     pvkCmdDispatchIndirect(c->cb, (VkBuffer)b->buf, off);
+    nvmtl_order_barrier(c);
     nvmtl_dwit_mark(c, c->fx.total);
 }
 void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t gy, uint32_t gz)
@@ -6538,6 +6563,7 @@ void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t
     }
     nvmtl_fx_note_dispatch(c, p);
     pvkCmdDispatch(c->cb, gx, gy, gz);
+    nvmtl_order_barrier(c);
     nvmtl_dwit_mark(c, c->fx.total);
 }
 
@@ -7555,6 +7581,7 @@ int nvmtl_pt_armed(void)
 }
 void nvmtl_vk_cmd_end_render(nvk_cmdbuf *c) {
     if (c->hz_dyn) { pvkCmdEndRendering(c->cb); c->hz_dyn = 0; } else pvkCmdEndRenderPass(c->cb);
+    nvmtl_order_barrier(c);
     nvmtl_dwit_mark(c, 0x8000u | (c->fx.total & 0x7FFFu));   // a render pass end: marked, not counted as a dispatch
     c->in_rp = 0; nvmtl_hz_pass_exit(c);
     if (c->pt_open && c->pt_pool) { pvkCmdWriteTimestamp(c->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, (VkQueryPool)c->pt_pool, 2 * c->pt_n + 1); c->pt_n++; c->pt_open = 0; g_pt_left--; }
@@ -8849,6 +8876,7 @@ void nvmtl_vk_cmd_dispatch_indirect(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *
     if (c->nobind) return;
     nvmtl_fx_note_dispatch(c, p);
     pvkCmdDispatchIndirect(c->cb, (VkBuffer)b->buf, off);
+    nvmtl_order_barrier(c);
     nvmtl_dwit_mark(c, c->fx.total);
 }
 
