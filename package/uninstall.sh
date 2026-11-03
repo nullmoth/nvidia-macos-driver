@@ -4,11 +4,10 @@ set -u
 # fixed PATH those resolve through whatever the caller exported, and kmutil
 # rebuilds the auxiliary kernel collection.
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
-# the NVIDIA driver only: the AMD/Intel GPU driver, the NPU driver and the audio driver are separate products with
-# their own uninstallers
-# No NMX* kext belongs here: the audio, AMD/Intel and NPU drivers are separate products in the nmx repo with their
-# own uninstallers, and removing another product's kext from this one would take out a driver the user still wants.
-KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NVPrimarySelector"; EXT=/Library/Extensions; GB=/Library/GPUBundles
+# the NVIDIA driver and the audio driver it carries (install.sh puts NMXAudio in on macOS 26). The AMD/Intel GPU and
+# NPU drivers are separate products with their own uninstallers, and removing another product's kext from this one
+# would take out a driver the user still wants.
+KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NVPrimarySelector NMXAudio"; EXT=/Library/Extensions; GB=/Library/GPUBundles
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 K=/System/Library/Kernels/kernel
 KARG=(--allow-missing-kdk); [ -f "$K" ] && KARG+=(--kernel "$K")   # without a matching Kernel Debug Kit, kmutil needs --allow-missing-kdk
