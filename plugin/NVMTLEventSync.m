@@ -640,7 +640,7 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
         }
         if (!part->commands.cb) return NO;
         if (!part->encoders && !part->resources.count && !part->surfaces.count && !part->scratch.count && nvmtl_skip_empty_on()) {
-            if (!nvmtl_evfold_on() || _nextSubmit + 1 >= _parts.count) return NO;
+            if (!nvmtl_evfold_on() || (_nextSubmit + 1 >= _parts.count && (part->signalEvent || part->signals.count))) return NO;
             [self nvmtlMarkScheduled];
         if (!_legacyKernelStart) _legacyKernelStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
             nvmtl_vk_cmd_abandon(&part->commands);
@@ -676,6 +676,7 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
     }
     return YES;
 }
+static void nvmtl_ahead_kick(void);
 static void nvmtl_gsub_ahead_pass1(void);
 static void nvmtl_gsub_ahead_pass(void) {
     for (int round = 0; round < 64; round++) {
@@ -729,7 +730,25 @@ static void nvmtl_gsub_ahead_pass1(void) {
         else {
             nvmtl_prepare_submission_copies(part);
             for (NVMTLBuffer *buffer in part->copyInputs) nvmtl_buffer_sync_in(buffer);
-            result = nvmtl_vk_submit_wait(&part->commands);
+            // A worker-owned part is an ordering barrier until QueueSubmit has
+            // accepted it. Publish that progress before waiting on its fence so
+            // the ahead lane can issue later parts in the same queue.
+            nvmtl_inflight *f = nvmtl_vk_inflight_new();
+            if (!f) result = nvmtl_vk_submit_wait(&part->commands);
+            else {
+                result = nvmtl_vk_submit_begin(&part->commands, f);
+                if (!result) {
+                    @synchronized ([NVMTLCommandBuffer class]) {
+                        if (_nextSubmit <= _nextPart) _nextSubmit = _nextPart + 1;
+                        nvmtl_evfold_promise_part(part);
+                    }
+                    if (nvmtl_gsub_ahead_on()) nvmtl_ahead_kick();
+                    result = nvmtl_vk_submit_finish(f);
+                }
+                // Retain uncertain submission state on an error, as the ahead
+                // path does; the owning part enters quarantine on device loss.
+                if (!result) nvmtl_vk_inflight_free(f);
+            }
         }
         if (result == -2) {
             if (!nvmtl_quarantined_parts) nvmtl_quarantined_parts = [NSMutableArray new];

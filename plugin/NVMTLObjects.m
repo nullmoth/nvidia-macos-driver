@@ -906,7 +906,7 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
         return nil; }
     t->_q = nvmtl_device_queue();
     t->_fmt = d.pixelFormat; t->_mips = 1;
-    t->_stex = t->_i.storage != 0;
+    t->_stex = t->_i.storage == 1;
     t->_ropt |= (MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift;
     t->_usage = d.usage;
     _texSeen = YES;
@@ -1192,8 +1192,20 @@ static void nvmtl_surface_cpu_dump(NVMTLTexture *rt) {
     nvmtl_frame_dump(tag, IOSurfaceGetBaseAddress(rt->_surf), IOSurfaceGetBytesPerRow(rt->_surf), (uint32_t)IOSurfaceGetWidth(rt->_surf), (uint32_t)IOSurfaceGetHeight(rt->_surf));
     IOSurfaceUnlock(rt->_surf, kIOSurfaceLockReadOnly, NULL);
 }
+/* The frame dump keeps its documented trigger. The isolation these two knobs give — a private request
+      file and a private directory, so two concurrent investigations cannot capture each other's frames —
+      is worth keeping, but it arrived as a REPLACEMENT: with neither variable set, `touch
+      /tmp/nvmtl-dump-request` stopped producing anything. That trigger is what every runbook, every rule
+      file and every one of our own debugging sessions uses to get the frame instead of a photo of the
+      monitor, and a dump that silently never fires is the worst possible failure for a diagnostic. So the
+      private paths are an OVERRIDE and the documented default stands. */
+static const char *nvmtl_dump_request_path(void) {
+    const char *p = getenv("NVMTL_PRIVATE_CAPTURE_REQUEST");
+    return (p && *p) ? p : "/tmp/nvmtl-dump-request";
+}
 static void nvmtl_frame_dump(const char *tag, const void *base, size_t row, uint32_t w, uint32_t h) {
-    if ((uint64_t)w * h < 1024 || access("/tmp/nvmtl-dump-request", F_OK)) return;
+    const char *request = nvmtl_dump_request_path();
+    if ((uint64_t)w * h < 1024 || access(request, F_OK)) return;
     static struct { char tag[24]; uint32_t w, h; uint64_t last; } slot[32]; static int nslot;
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW); int k, go = 0;
     @synchronized([NSObject class]) {
@@ -1202,7 +1214,8 @@ static void nvmtl_frame_dump(const char *tag, const void *base, size_t row, uint
         if (k < nslot && (!slot[k].last || now - slot[k].last >= 2000000000ull)) { slot[k].last = now; go = 1; }
     }
     if (!go) return;
-    char dst[400], tmp[416]; const char *dir = "/tmp"; int fd = -1;
+    char dst[400], tmp[416]; const char *dir = getenv("NVMTL_PRIVATE_CAPTURE_DIR"); int fd = -1;
+    if (!dir || !*dir) dir = "/tmp";   /* an override, not a requirement — see nvmtl_dump_request_path */
     for (int pass = 0; pass < 2 && fd < 0; pass++) {
         if (pass) { const char *t = getenv("TMPDIR"); if (!t || !*t || (errno != EPERM && errno != EACCES)) break; dir = t; }
         size_t dl = strlen(dir); const char *sep = (dl && dir[dl - 1] == '/') ? "" : "/";
@@ -1236,7 +1249,7 @@ static void nvmtl_present_dump(NVMTLTexture *t) {
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static uint64_t next, last; static unsigned seq; static int on, said;
     if (!t || pthread_mutex_trylock(&mu)) return;   // another completion thread is dumping: skip, never wait
     const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-    if (now >= next) { next = now + 250000000ull; on = access("/tmp/nvmtl-dump-request", F_OK) == 0; }
+    if (now >= next) { next = now + 250000000ull; on = access(nvmtl_dump_request_path(), F_OK) == 0; }
     nvk_image *i = (on && (!last || now - last >= 2000000000ull)) ? [t nvi] : NULL;
     if (i && (i->bpp != 4 || i->w < 64 || i->h < 64)) {
         if (!said++) nvlog("present dump: drawable %ux%u bpp %u not dumpable (4-byte pixels only)", i->w, i->h, i->bpp);
@@ -4407,7 +4420,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     if (nvmtl_vk_image_create_typed_placed((uint32_t)d.width, (uint32_t)d.height, vkf, bpp, a8, (uint32_t)d.mipmapLevelCount, wantStex,
                                             (uint32_t)d.textureType, nvmtl_vk_layers_for_desc((uint32_t)d.textureType, (uint32_t)d.arrayLength, (uint32_t)d.depth), &_hm, off, &t->_i)) {
         nvlog("heap newTextureWithDescriptor: %lux%lu offset:%lu FAILED", (unsigned long)d.width, (unsigned long)d.height, (unsigned long)off); return nil; }
-    t->_q = nvmtl_device_queue(); t->_stex = t->_i.storage != 0; t->_rbSwap = rbSwapPl; t->_heap = self; t->_heapOffset = off;
+    t->_q = nvmtl_device_queue(); t->_stex = t->_i.storage == 1; t->_rbSwap = rbSwapPl; t->_heap = self; t->_heapOffset = off;
     nvmtl_heap_register(self, t);
     nvmtl_texture_desc_swizzle(t, d);
     nvlog("heap newTextureWithDescriptor: %lux%lu%s offset:%lu -> %p", (unsigned long)d.width, (unsigned long)d.height, t->_stex ? " +storage" : "", (unsigned long)off, (__bridge void *)t);
@@ -4517,7 +4530,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)d.hazardTrackingMode << MTLResourceHazardTrackingModeShift)
              | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
     t->_fmt = d.pixelFormat; t->_mips = mips; t->_usage = d.usage;
-    t->_q = nvmtl_device_queue(); t->_stex = t->_i.storage != 0; t->_rbSwap = rbSwapPl;
+    t->_q = nvmtl_device_queue(); t->_stex = t->_i.storage == 1; t->_rbSwap = rbSwapPl;
     t->_subHeap = self; t->_subCharge = len; t->_subPlaced = YES; t->_heapOffset = off;
     nvmtl_heap_register(self, t);
     t->_parkable = !noRecycle; memcpy(t->_pkey, key, sizeof key); t->_pkLen = len;
@@ -5553,6 +5566,9 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     if (nvmtl_vk_tg_reject(l, NULL, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, selected->_p.lin)) return;
     [self nvmtlE78Barrier:YES];
     if (![self nvmtlPrepareIndirectImages]) return;
+    nvmtl_cbt_kernel(_cb, selected->_function ? selected->_function->_fname.UTF8String : NULL);
+    nvmtl_vk_dispatch_label(selected->_function ? selected->_function->_fname.UTF8String : NULL);
+    nvmtl_vk_dispatch_key(nvmtl_function_spv_fnv(selected->_function), nvmtl_function_air_key(selected->_function));
     nvmtl_vk_cmd_dispatch_indirect_tg(&_cb->_c, &selected->_p, &nb->_b, off, l);
     if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
 }
@@ -6774,6 +6790,11 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
         MTLInstanceAccelerationStructureDescriptor *idesc = (MTLInstanceAccelerationStructureDescriptor *)desc;
         NVMTLBuffer *ib = (NVMTLBuffer *)idesc.instanceDescriptorBuffer;
         if (!ib) { nvlog("build acceleration structure: instance descriptors nil"); return; }
+        const MTLMatrixLayout matrixLayout = idesc.instanceTransformationMatrixLayout;
+        if (matrixLayout != MTLMatrixLayoutColumnMajor && matrixLayout != MTLMatrixLayoutRowMajor) {
+            [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal userInfo:@{NSLocalizedDescriptionKey:@"Unsupported acceleration-structure instance matrix layout"}]];
+            return;
+        }
         const MTLAccelerationStructureInstanceDescriptorType itype = idesc.instanceDescriptorType;
         if (itype != MTLAccelerationStructureInstanceDescriptorTypeDefault && itype != MTLAccelerationStructureInstanceDescriptorTypeUserID &&
             itype != MTLAccelerationStructureInstanceDescriptorTypeIndirect) {
@@ -6831,7 +6852,7 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
                 .dst = nvmtl_vk_buffer_address(&vk->_b),
                 .uid = nvmtl_vk_buffer_address(&vk->_b) + uidOff,
                 .astab = nvmtl_vk_buffer_address(&tab->_b),
-                .stride = stride, .count = icount, .mtl_type = ctype, .n_as = nas,
+                .stride = stride, .count = icount, .mtl_type = ctype, .n_as = nas, .matrix_layout = (uint32_t)matrixLayout,
             };
             on_gpu = nvmtl_vk_cmd_convert_instances(&_cb->_c, &ca) == 0;
             nvmtl_rt_count_bump(on_gpu ? NVMTL_RT_CONV_GPU : NVMTL_RT_CONV_HOST);
@@ -6906,7 +6927,7 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
             }
             if (icount) nvlog("build acceleration structure: converting %u instances on the HOST - descriptors the GPU has not written yet read as zero", icount);
             nvmtl_vk_convert_instances((const uint8_t *)mtl_desc + mtl_base, stride, icount, addrs, nas, vk->_b.map,
-                                       ctype, (uint32_t *)((uint8_t *)vk->_b.map + uidOff), iftAdds);
+                                       ctype, (uint32_t *)((uint8_t *)vk->_b.map + uidOff), iftAdds, (uint32_t)matrixLayout);
             free(staged);
         }
         if (dst->_uid.size < uidBytes) {

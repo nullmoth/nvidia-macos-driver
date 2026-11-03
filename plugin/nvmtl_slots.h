@@ -25,9 +25,34 @@ typedef struct { nvmtl_sl_slot *s; uint32_t n; uint64_t writes, allocs, drops; }
 typedef struct { const void *img, *mem, *view; uint64_t off, size, seq, died, parked, avail; uint32_t w, h, fmt, storage, placed, pooled, layers, mips, flags, usage, samples; } nvmtl_im_entry;
 /* parked: in a heap/buffer park since this seq, 0 when in use; size: the memory the image needs (its requirement); avail: the memory it was given from its bind offset (0 = unknown) */
 typedef struct { nvmtl_im_entry *e; uint32_t n, cap; uint64_t live; } nvmtl_im_state;
-typedef struct { const void *view, *img; uint32_t type, base_layer, layers, base_mip, mips; uint32_t s_idx, t_idx; uint64_t s_addr, t_addr, seq, died; } nvmtl_vw_entry;
+typedef struct { const void *view, *img; uint32_t type, base_layer, layers, base_mip, mips; uint32_t s_idx, t_idx; uint64_t s_addr, t_addr, seq, died; uint32_t live_next; } nvmtl_vw_entry;
 /* type: VkImageViewType + 1 (0 = not recorded); s_/t_: the sampled and storage descriptor indices and the header addresses the view carried (0 = not read); seq/died: created / destroyed */
-typedef struct { nvmtl_vw_entry *e; uint32_t n, cap; } nvmtl_vw_state;
+enum { NVMTL_VW_LIVE_BUCKETS = 4096 };
+/* The history remains append-only. Only live records participate in the hot-path index.
+   Indices, rather than pointers, survive growth of the history allocation. Callers retain
+   the existing state lock for both the records and the index. */
+typedef struct { nvmtl_vw_entry *e; uint32_t n, cap, indexed_n, live_heads[NVMTL_VW_LIVE_BUCKETS]; } nvmtl_vw_state;
+static inline uint32_t nvmtl_vw_live_bucket(const void *view)
+{
+    uint64_t key = (uint64_t)(uintptr_t)view;
+    key ^= key >> 33; key *= UINT64_C(0xff51afd7ed558ccd); key ^= key >> 33;
+    return (uint32_t)key & (NVMTL_VW_LIVE_BUCKETS - 1);
+}
+/* Also accepts a state populated before its first indexed operation. No extra allocation
+   can fail here; a failed history growth leaves the previous records and index intact. */
+static inline void nvmtl_vw_live_sync(nvmtl_vw_state *s)
+{
+    if (s->indexed_n == s->n) return;
+    memset(s->live_heads, 0, sizeof s->live_heads);
+    for (uint32_t i = 0; i < s->n; i++) {
+        nvmtl_vw_entry *e = &s->e[i]; e->live_next = 0;
+        if (!e->died && e->view) {
+            uint32_t b = nvmtl_vw_live_bucket(e->view);
+            e->live_next = s->live_heads[b]; s->live_heads[b] = i + 1;
+        }
+    }
+    s->indexed_n = s->n;
+}
 
 static inline int nvmtl_sl_init(nvmtl_sl_state *s, uint32_t n)
 {
@@ -80,21 +105,37 @@ static inline void nvmtl_vw_add_ex(nvmtl_vw_state *s, const void *view, const vo
 {
     if (!view || !img) return;
     if (s->n == s->cap) { const uint32_t cap = s->cap ? s->cap * 2 : 4096; nvmtl_vw_entry *e = (nvmtl_vw_entry *)realloc(s->e, (size_t)cap * sizeof *e); if (!e) return; s->e = e; s->cap = cap; }
+    nvmtl_vw_live_sync(s);
     nvmtl_vw_entry *e = &s->e[s->n++]; e->view = view; e->img = img; e->type = type1; e->base_layer = base_layer; e->layers = layers; e->base_mip = base_mip; e->mips = mips;
     e->s_idx = e->t_idx = 0; e->s_addr = e->t_addr = 0; e->seq = 0; e->died = 0;
+    uint32_t b = nvmtl_vw_live_bucket(view);
+    e->live_next = s->live_heads[b]; s->live_heads[b] = s->n; s->indexed_n = s->n;
 }
 /* the newest live record of a view handle, for the recorder to fill */
 static inline nvmtl_vw_entry *nvmtl_vw_find_live(nvmtl_vw_state *s, const void *view)
 {
     if (!view) return NULL;
-    for (uint32_t i = s->n; i-- > 0;) if (s->e[i].view == view && !s->e[i].died) return &s->e[i];
+    nvmtl_vw_live_sync(s);
+    for (uint32_t id = s->live_heads[nvmtl_vw_live_bucket(view)]; id; id = s->e[id - 1].live_next)
+        if (s->e[id - 1].view == view && !s->e[id - 1].died) return &s->e[id - 1];
     return NULL;
 }
 static inline void nvmtl_vw_set_tic(nvmtl_vw_state *s, const void *view, uint32_t s_idx, uint64_t s_addr, uint32_t t_idx, uint64_t t_addr, uint64_t seq)
 { nvmtl_vw_entry *e = nvmtl_vw_find_live(s, view); if (e) { e->s_idx = s_idx; e->s_addr = s_addr; e->t_idx = t_idx; e->t_addr = t_addr; e->seq = seq; } }
 /* a destroyed view handle: every live record of it dies (the driver reissues handles; older records of the same handle are earlier lives) */
 static inline void nvmtl_vw_died(nvmtl_vw_state *s, const void *view, uint64_t seq)
-{ if (!view) return; for (uint32_t i = 0; i < s->n; i++) if (s->e[i].view == view && !s->e[i].died) s->e[i].died = seq ? seq : 1; }
+{
+    if (!view) return;
+    nvmtl_vw_live_sync(s);
+    uint32_t *next = &s->live_heads[nvmtl_vw_live_bucket(view)];
+    while (*next) {
+        nvmtl_vw_entry *e = &s->e[*next - 1];
+        if (e->view == view) {
+            if (!e->died) e->died = seq ? seq : 1;
+            *next = e->live_next; e->live_next = 0;
+        } else next = &e->live_next;
+    }
+}
 /* one line per view record: "tic view V image I sidx N saddr 0x.. tidx M taddr 0x.. type T layers b+n mips b+n seq A died B" */
 static inline uint32_t nvmtl_vw_dump(const nvmtl_vw_state *s, FILE *f)
 {
