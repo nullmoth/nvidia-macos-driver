@@ -7,9 +7,10 @@
    of nvrm610.conf ("my settings, kept on update"), then the profile, then the shipped part of nvrm610.conf.
    NVMTL_APP_PROFILE=0 (in the conf file or a kept environment) turns every profile off.
 
-   A profile can also carry a shader edit: a word-level patch applied to one translated SPIR-V module, recognised by the
-   FNV-1a hash of the translator's exact output. The patched result must hash to a second recorded value, or the module is
-   left as it was. Only the edit ships, never the application's own shader.
+   A profile can also carry a shader edit for one translated SPIR-V module, recognised by the FNV-1a hash of the
+   translator's exact output. The edit reproduces a known-good module byte for byte (its added instructions, header and ID
+   renumbering); the result must hash to a second recorded value, or the module is left as it was. Only the edit ships,
+   never the application's own shader.
 
    Everything here is pure over its inputs, so tools/test_app_profile.c proves the rules without loading the plugin. */
 #ifndef NVMTL_APP_PROFILE_H
@@ -128,35 +129,46 @@ static inline uint32_t nvmtl_spv_fnv1a(const void *bytes, size_t len)
     return h;
 }
 
-/* The patch is a list of hunks over the module's 32-bit words: { keep, drop, add, <add words> }. Each hunk copies `keep`
-   words of the original, skips `drop` words, then appends its `add` words; the rest of the original follows the last hunk.
+/* The edit reproduces one known-good module exactly from the translator's output, without carrying the application's
+   code. The two differ only in ID numbering, the header, and a few added instructions, so the edit holds just those:
+     [0] 0x3245564e ("NVE2")   [1] version  [2] generator  [3] id bound   (the edited module's header words)
+     [4] at: the original word offset where the added instructions go   [5] nadd, then nadd words (the added instructions)
+     then nmap, then nmap words: map[old id] = new id (0 = no mapping)
+     then nbits, then nbits words: bit w set = original word w is an ID operand and is renumbered through map
    Returns a malloc'd module (*outn words) when the input hashes to `from` and the result hashes to `to`; otherwise NULL
-   and the caller keeps the original. A malformed patch, a short module or a wrong result all return NULL. */
-static inline uint32_t *nvmtl_spv_apply_edit(const uint32_t *in, size_t n, const uint32_t *patch, size_t np,
+   and the caller keeps the original. A malformed edit, a short module, an unmapped ID or a wrong result all return NULL. */
+#define NVMTL_SPV_EDIT_MAGIC 0x3245564eu
+static inline uint32_t *nvmtl_spv_apply_edit(const uint32_t *in, size_t n, const uint32_t *e, size_t ne,
                                              uint32_t from, uint32_t to, size_t *outn)
 {
-    if (!in || n < 5 || !patch || !np || in[0] != 0x07230203u || nvmtl_spv_fnv1a(in, n * 4) != from) return NULL;
-    size_t cap = n, pos = 0, o = 0;
-    for (size_t i = 0; i + 3 <= np; ) { cap += patch[i + 2]; i += 3 + patch[i + 2]; }
-    uint32_t *out = (uint32_t *)malloc(cap * 4);
+    if (!in || n < 5 || !e || ne < 7 || e[0] != NVMTL_SPV_EDIT_MAGIC || in[0] != 0x07230203u) return NULL;
+    const size_t at = e[4], nadd = e[5];
+    if (at < 5 || at > n || 6 + nadd + 1 > ne) return NULL;
+    const uint32_t *add = e + 6;
+    const size_t nmap = e[6 + nadd];
+    if (6 + nadd + 1 + nmap + 1 > ne) return NULL;
+    const uint32_t *map = e + 6 + nadd + 1;
+    const size_t nbits = e[6 + nadd + 1 + nmap];
+    const uint32_t *bits = e + 6 + nadd + 1 + nmap + 1;
+    if (6 + nadd + 1 + nmap + 1 + nbits != ne || nbits * 32 < n) return NULL;
+    if (nvmtl_spv_fnv1a(in, n * 4) != from) return NULL;
+    uint32_t *out = (uint32_t *)malloc((n + nadd) * 4);
     if (!out) return NULL;
-    size_t i = 0;
-    while (i < np) {
-        if (i + 3 > np) goto bad;
-        size_t keep = patch[i], drop = patch[i + 1], add = patch[i + 2];
-        if (i + 3 + add > np || pos + keep + drop > n || o + keep + add > cap) goto bad;
-        memcpy(out + o, in + pos, keep * 4); o += keep; pos += keep + drop;
-        memcpy(out + o, patch + i + 3, add * 4); o += add;
-        i += 3 + add;
+    size_t o = 0;
+    out[o++] = in[0]; out[o++] = e[1]; out[o++] = e[2]; out[o++] = e[3]; out[o++] = in[4];
+    for (size_t w = 5; w < n; w++) {
+        if (w == at) { memcpy(out + o, add, nadd * 4); o += nadd; }
+        uint32_t v = in[w];
+        if ((bits[w >> 5] >> (w & 31)) & 1u) {
+            if (v >= nmap || !map[v]) { free(out); return NULL; }
+            v = map[v];
+        }
+        out[o++] = v;
     }
-    if (o + (n - pos) > cap) goto bad;
-    memcpy(out + o, in + pos, (n - pos) * 4); o += n - pos;
-    if (out[0] != 0x07230203u || nvmtl_spv_fnv1a(out, o * 4) != to) goto bad;
+    if (at == n) { memcpy(out + o, add, nadd * 4); o += nadd; }
+    if (nvmtl_spv_fnv1a(out, o * 4) != to) { free(out); return NULL; }
     *outn = o;
     return out;
-bad:
-    free(out);
-    return NULL;
 }
 /* The profile's kernel edit for one module about to become a compute pipeline: the edited module (malloc'd, *outn words)
    when this module is exactly the one the edit was made from, else NULL and the module is used as it is. */
