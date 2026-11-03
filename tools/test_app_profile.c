@@ -138,6 +138,26 @@ int main(int argc, char **argv)
             && !nvmtl_spvcache_same_build("00ff.kernel.sha256-0446740c8cfcb42d5322c6dd852a4891bb1c3005b00d409f33ee1e72c5b3f828x-u2.c3.spv", build));
         free(back); unlink(a1); rmdir(dir);
     }
+    {
+        /* two modes in one cache folder: run the sweep's keep rule over a folder holding both, from each side */
+        const char *ea = "00ff.kernel.sha256-0446740c8cfcb42d5322c6dd852a4891bb1c3005b00d409f33ee1e72c5b3f828-u2-p5-as1-np-nf.c3.spv";
+        const char *eb = "00ff.kernel.sha256-0446740c8cfcb42d5322c6dd852a4891bb1c3005b00d409f33ee1e72c5b3f828-u2.c3.spv";
+        arm("two modes in one cache folder do not evict each other: each side's sweep keeps the other's entry",
+            nvmtl_spvcache_same_build(ea, build) && nvmtl_spvcache_same_build(eb, build));
+        char ia[512], ib[512];
+        nvmtl_idx_record_name(ia, sizeof ia, "idx2-abcd", prof); nvmtl_idx_record_name(ib, sizeof ib, "idx2-abcd", plain);
+        arm("a library-index record written in mode A is a different file from mode B's: B misses it", strcmp(ia, ib) != 0);
+        arm("the record's name carries the library and the whole tag", strstr(ia, "idx2-abcd.") == ia && strstr(ia, prof) != NULL);
+        char tiny[16];
+        arm("a record name that does not fit is refused (no record), not cut", !nvmtl_idx_record_name(tiny, sizeof tiny, "idx2-abcd", prof));
+        char root[256];
+        arm("the profile's application gets its own cache root under <caches>/nvmtl/apps/<bundle id>",
+            nvmtl_app_cache_root(root, sizeof root, "/var/caches", "com.cdprojektred.cyberpunk.steam")
+            && !strcmp(root, "/var/caches/nvmtl/apps/com.cdprojektred.cyberpunk.steam"));
+        arm("a bundle identifier that could leave that folder (/, .., empty, leading dot) gets no root",
+            !nvmtl_app_cache_root(root, sizeof root, "/c", "a/../b") && !nvmtl_app_cache_root(root, sizeof root, "/c", "..")
+            && !nvmtl_app_cache_root(root, sizeof root, "/c", "") && !nvmtl_app_cache_root(root, sizeof root, "/c", ".hidden"));
+    }
 
     if (cp->shader_from) {
         arm("the shipped edit is armed with two hashes and a patch", cp->shader_to && cp->npatch > 3);

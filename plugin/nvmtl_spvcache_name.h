@@ -26,4 +26,11 @@ static inline int nvmtl_spvcache_same_build(const char *name, const char *build)
         if (at > name && at[-1] == '.' && (at[bn] == '-' || at[bn] == '.')) return 1;
     return 0;
 }
+/* The library-index record's file name: idx2-<library sha>.<full cache tag>.plist. Returns 0 when it does not fit. */
+static inline int nvmtl_idx_record_name(char *out, size_t cap, const char *libkey, const char *tag)
+{
+    if (!out || !cap || !libkey || !tag || !*tag) return 0;
+    const int k = snprintf(out, cap, "%s.%s.plist", libkey, tag);
+    return k > 0 && (size_t)k < cap;
+}
 #endif

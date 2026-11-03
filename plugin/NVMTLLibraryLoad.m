@@ -1145,10 +1145,17 @@ NSDictionary<NSString *, NSData *> *nvmtl_index_metallib_uncached(NSData *lib, N
     return (out.count || visible) ? [out copy] : nil;
 }
 
+// A library-index record carries the externs read from the library's AIR text, and that text depends on this process's
+// modes (canonical pointers inline helpers). It is named by the library AND the full cache tag, so a record written in
+// one mode is never read in another; without a tag there is no record.
 static NSString *nvmtl_idx_path(NSData *key) {
+    (void)nvmtl_xlate_ready();   // the tag is made there
+    if (!strcmp(gXlateTag, "untagged")) return nil;
     NSMutableString *h = [NSMutableString stringWithString:@"idx2-"]; const uint8_t *d = key.bytes;
     for (NSUInteger i = 0; i < key.length; i++) [h appendFormat:@"%02x", d[i]];
-    return [nvmtl_aircache_dir() stringByAppendingPathComponent:[h stringByAppendingString:@".plist"]];
+    char name[NVMTL_SPVCACHE_TAG_MAX + 160];
+    if (!nvmtl_idx_record_name(name, sizeof name, h.UTF8String, gXlateTag)) return nil;
+    return [nvmtl_aircache_dir() stringByAppendingPathComponent:@(name)];
 }
 static _Atomic unsigned long gLazyLibs, gLazyNames, gLazyForced, gLazyFail;
 @interface NVMTLLazyAirs : NSDictionary { NSDictionary *_slot; NSArray *_blob; NSMutableArray *_text; os_unfair_lock _lk; }
