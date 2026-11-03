@@ -5685,8 +5685,32 @@ static void nvmtl_fx_dump(const char *why)
     nvmtl_fx_report(&g_fx, g_cmd_submitted, 12, 256, nvmtl_fx_emit_line, NULL);
     pthread_mutex_unlock(&g_fx_lock);
 }
+// The per-dispatch binding snapshot and the live buffer registry exist only to make a device-loss report
+// readable: every consumer of either is inside that report, and nothing reads them to decide what the GPU
+// does. They are not free. The snapshot walks all NVMTL_NBUF binding slots and copies the whole root array
+// on every dispatch and draw, and the registry takes one global mutex on every buffer create, free and
+// relabel - with an app running several encoder threads that serialises allocation across all of them.
+// A release build therefore keeps them off and a development build keeps them on, the same split the
+// dispatch witness and the indirect grid witness already use. The dispatch witness reads fx.total to name
+// the last completed dispatch, so asking for the witness asks for these records too.
+// This gate must never be extended to nvmtl_heap_register: that one is not diagnostic. It feeds
+// NVMTLHeapPin, which is what retains a heap's members for the lifetime of submitted work, and without it
+// a heap's memory can be freed under work the GPU has not finished - a page fault, not a thinner report.
+static int nvmtl_fx_records_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_FAULT_RECORDS");
+#if NVMTL_RELEASE
+        on = (e && e[0] == '1') || nvmtl_dwit_on();
+#else
+        on = !(e && e[0] == '0') || nvmtl_dwit_on();
+#endif
+        nvlog("vk: fault-context records %s - the per-dispatch binding snapshot and the live buffer registry that resolve a fault address in the device-loss report (NVMTL_FAULT_RECORDS=%s)", on ? "ON" : "off", e ? e : "unset"); }
+    return on;
+}
 static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c, const nvk_pipeline *p)
 {
+    if (!nvmtl_fx_records_on()) return;
     c->fx.tab[0] = c->tab_out[0]; c->fx.tab[1] = c->tab_out[1]; c->fx.dyn[0] = c->dyn_out[0]; c->fx.dyn[1] = c->dyn_out[1];
     c->fx.nroot = 0; c->fx.heap_set = g_heapSet;
     if (c->table) for (unsigned i = 0; i < NVMTL_NBUF && c->fx.nroot < NVMTL_FX_ROOT; i++) {
@@ -5699,18 +5723,21 @@ static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c, const nvk_pipeline *p)
 }
 static void nvmtl_live_add(nvk_buffer *b, uint32_t kind)
 {
+    if (!nvmtl_fx_records_on()) return;
     if (!b || !b->buf) return;
     const uint64_t a = nvmtl_vk_buffer_address(b);
     pthread_mutex_lock(&g_lv_lock); b->reg = nvmtl_lv_add(&g_lv, a, b->size ? b->size : b->alloc, kind, g_cmd_submitted, b->map); pthread_mutex_unlock(&g_lv_lock);
 }
 static void nvmtl_live_remove(nvk_buffer *b)
 {
+    if (!nvmtl_fx_records_on()) return;
     if (!b || !b->reg) return;
     pthread_mutex_lock(&g_lv_lock); nvmtl_lv_remove(&g_lv, b->reg, g_cmd_submitted); pthread_mutex_unlock(&g_lv_lock);
     b->reg = 0;
 }
 static void nvmtl_live_relabel(nvk_buffer *b, uint32_t kind)
 {
+    if (!nvmtl_fx_records_on()) return;
     if (!b || !b->reg) return;
     pthread_mutex_lock(&g_lv_lock); nvmtl_lv_relabel(&g_lv, b->reg, kind); pthread_mutex_unlock(&g_lv_lock);
 }
