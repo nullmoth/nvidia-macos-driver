@@ -5481,7 +5481,7 @@ static void nvmtl_zprobe_drain(void) {
     // promise that the dispatches are independent, and Cyberpunk's are not: a later dispatch read a buffer an
     // earlier one in the same encoder was still writing, so it consumed garbage - wrong lighting, and pointers
     // loaded out of that garbage faulted the channel at addresses no buffer covers (FAULT_PTE / FAULT_PDE).
-    // Measured 2026-11-03 on the benchmark, every other setting held: H7 on faulted in every run that reached
+    // Measured on the benchmark, every other setting held: H7 on faulted in every run that reached
     // the light pass; NVMTL_ENC78_OFF=h7 completed at 39.28 fps against 41.08 with it on, so the narrow
     // compute->compute barrier it costs is within noise. Concurrent dispatches now take that same narrow
     // barrier serial ones do (P1); NVMTL_ENC78_OFF still turns the rows off for an A/B.

@@ -148,7 +148,7 @@ void      NV_API_CALL os_release_mutex(void *p) { NV_XNU_TRC; IOLockUnlock((IOLo
 //
 // This used to hold the state in the lock object: acquire did `sp->s = IOSimpleLockLockDisableInterrupt(...)`
 // and returned 0, and release passed `sp->s` back. That is a kernel panic, and it was reported 37 times in the
-// 2026-11-02 support logs as
+// Support logs as
 //     panic [kalloc.type.varN.16]: element modified after free (off:8, val:0x0000000000000002, sz:16)
 // with the trace NVRM::autoGo -> rm_init_rm -> RmInitRm -> nvlogInit -> tlsInitialize ->
 // portSyncSpinlockCreate -> os_alloc_spinlock -> kern_os_malloc -> kalloc_ext. The figures identify it

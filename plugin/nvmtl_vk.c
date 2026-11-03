@@ -228,7 +228,7 @@ static uint64_t nvmtl_vk_headroom_eff(uint64_t bud, int measured)
 // desktop's footprint at that boot: measured 11-02 on the same card and stack, 5748-5830 MB advertised on two boots and
 // 6444-6525 MB on five others. Above ~6.4 GB the game sized its heaps at 4.8 GB instead of 0.75 GB, VRAM read 6.2 GB
 // used before the first scene, and the first scene frame faulted; at 5.7-5.8 GB it ran clean, and ray-tracing pipelines
-// were still created at that figure (10-26). 29% of 8151 MB caps the recommendation at 5787 MB, inside the clean band,
+// were still created at that figure. 29% of 8151 MB caps the recommendation at 5787 MB, inside the clean band,
 // whatever the budget reads. NVMTL_WS_RESERVE_MB overrides it; 0 disables the cap.
 static uint64_t nvmtl_vk_ws_reserve(void)
 {
@@ -1287,7 +1287,7 @@ static int nvmtl_vk_initialize(void)
     // vertex-fetch access turns those reads into zeros instead.
     enabled.robustBufferAccess = supported.robustBufferAccess;
 #if !NVMTL_RELEASE
-    // speed267 measurement arm only: NVMTL_NO_ROBUST=1 drops robust buffer access, to price what the bounds checks
+    // speed267 measurement arm only: NVMTL_NO_ROBUST=1 drops robustBufferAccess, to price what the bounds checks
     // cost (GB7 raw_process compiles every uchar4 store into 4 branch-guarded byte stores with it on).
     { const char *nr = getenv("NVMTL_NO_ROBUST"); if (nr && nr[0] == '1') enabled.robustBufferAccess = VK_FALSE; }
 #endif
@@ -3630,7 +3630,7 @@ static int nvmtl_dwit_ready(void)
     return st > 0;
 }
 // The ordering barrier: the same barrier the per-dispatch witness emits, without the witness's 4-byte record.
-// On 2026-11-03 the witness was the only configuration in which Cyberpunk's benchmark completed every time
+// In measurement the witness was the only configuration in which Cyberpunk's benchmark completed every time
 // (3 of 3, 37.55-39.44 fps) and rendered the bar's lighting correctly; with its barrier absent the game
 // faulted at addresses no buffer covers and over-lit interiors - a pass reading what an earlier compute
 // dispatch or render pass had not finished writing. Turning off the plugin's concurrent-encoder rule (H7)

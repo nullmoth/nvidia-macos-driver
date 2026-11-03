@@ -1,5 +1,5 @@
 #!/bin/bash
-# session5.sh (studio): correctness then speed for the two NAK changes of 11-01.
+# session5.sh: correctness then speed for the two NAK changes.
 #  probe: GB7-shaped particle n-body (tgmem), forces hashed - old NVK (pinwhole) == new NVK (predload) == new with
 #  NVMTL_NAK_NO_PREDLOAD=1 is the correctness gate; the per-dispatch time is the particle speed.
 #  GB7: pick (current dev NVK) vs pinwhole vs predload, one run each, VM-guarded by ab.sh.

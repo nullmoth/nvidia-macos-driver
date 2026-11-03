@@ -65,7 +65,7 @@ void nvmtl_vk_hz_cpu(uint64_t out_ns[8])
 }
 static inline uint64_t hzt_now(void) { return mach_absolute_time(); }
 // The cost of reading the clock twice, subtracted from every timed interval: the frequent entry points take a few
-// nanoseconds, the clock pair more, and a sample scaled by 32 or 128 multiplies that error (studio's first census
+// nanoseconds, the clock pair more, and a sample scaled by 32 or 128 multiplies that error (the first census
 // printed 774 us of "bindings" that were mostly the clock).
 static uint64_t g_hzt_bias = UINT64_MAX;
 static uint64_t hzt_bias(void)
