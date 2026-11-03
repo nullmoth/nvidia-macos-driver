@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include "nvmtl_app_profile.h"
+#include "nvmtl_spvcache_name.h"
 
 static int fails;
 static void arm(const char *what, int ok) { printf("%s  %s\n", ok ? "ok  " : "FAIL", what); if (!ok) fails++; }
@@ -106,6 +107,37 @@ int main(int argc, char **argv)
     arm("a patch that keeps past the end of the module is refused", !out);
     mod[0] = 0x03022307u;
     arm("a module without the SPIR-V magic is refused", !nvmtl_spv_apply_edit(mod, 8, edit, 8, from, to, &n));
+
+    /* the shader cache's names: every mode must be in the tag, or a lookup can be served another mode's module */
+    const char *build = "sha256-0446740c8cfcb42d5322c6dd852a4891bb1c3005b00d409f33ee1e72c5b3f828";
+    char prof[NVMTL_SPVCACHE_TAG_MAX], plain[NVMTL_SPVCACHE_TAG_MAX], noas[NVMTL_SPVCACHE_TAG_MAX], small[80];
+    int fit = nvmtl_spvcache_mode_tag(prof, sizeof prof, build, 1, 1, 1, 1, 1);
+    nvmtl_spvcache_mode_tag(plain, sizeof plain, build, 1, 1, 1, 0, 0);
+    nvmtl_spvcache_mode_tag(noas, sizeof noas, build, 1, 1, 0, 1, 1);
+    arm("the game's cache tag names every mode: <build>-u2-p5-as1-np-nf", fit && strlen(prof) > 16 && !strcmp(prof + strlen(prof) - 16, "-u2-p5-as1-np-nf"));
+    arm("the old 80-byte tag buffer could not hold it (it kept \"-u2-p5-a\" and lost the rest): refused, not cut",
+        !nvmtl_spvcache_mode_tag(small, sizeof small, build, 1, 1, 1, 1, 1));
+    arm("with and without the profile's translator switches the tags differ", strcmp(prof, plain) != 0);
+    arm("with and without argument-buffer samplers the tags differ", strcmp(prof, noas) != 0);
+    {
+        char dir[] = "/tmp/test_app_profile_spv_XXXXXX"; int okdir = mkdtemp(dir) != NULL;
+        char a1[512], a2[512];
+        snprintf(a1, sizeof a1, "%s/00ff.kernel.%s.c3.spv", dir, prof);
+        snprintf(a2, sizeof a2, "%s/00ff.kernel.%s.c3.spv", dir, plain);
+        const uint32_t fresh[6] = { 0x07230203u, 0x00010400u, 0, 7, 0, 42 };
+        FILE *w = okdir ? fopen(a1, "wb") : NULL; if (w) { fwrite(fresh, 4, 6, w); fclose(w); }
+        size_t rn = 0; uint32_t *back = read_words(a1, &rn); FILE *other = fopen(a2, "rb");
+        arm("store then read back under the profile's tag: the bytes are the fresh ones", back && rn == 6 && !memcmp(back, fresh, sizeof fresh));
+        arm("a process without the profile looks under its own name and does not find the profile's entry", other == NULL);
+        if (other) fclose(other);
+        arm("the sweep keeps an entry of the same translator build in another mode",
+            nvmtl_spvcache_same_build(strrchr(a2, '/') + 1, build) && nvmtl_spvcache_same_build(strrchr(a1, '/') + 1, build));
+        arm("the sweep drops an entry of another translator build, and a file that is not an entry",
+            !nvmtl_spvcache_same_build("00ff.kernel.sha256-1175b70008995e356ace5ec36b20ee689a88e8e8dcebb1a40102d9020b8714c3-u2-p5-a.c3.spv", build)
+            && !nvmtl_spvcache_same_build("README-not-a-cache-entry.txt", build)
+            && !nvmtl_spvcache_same_build("00ff.kernel.sha256-0446740c8cfcb42d5322c6dd852a4891bb1c3005b00d409f33ee1e72c5b3f828x-u2.c3.spv", build));
+        free(back); unlink(a1); rmdir(dir);
+    }
 
     if (cp->shader_from) {
         arm("the shipped edit is armed with two hashes and a patch", cp->shader_to && cp->npatch > 3);

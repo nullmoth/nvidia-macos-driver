@@ -49,7 +49,14 @@ static nvmtl_lower_ex_fn xlate_lower_ex;
 typedef int (*nvmtl_to_uniform_fn)(const uint8_t *, size_t, uint8_t **, size_t *, char *, size_t);
 static nvmtl_to_uniform_fn xlate_to_uniform;   /* the table of an unlowered module moved to a Uniform block */
 static nvmtl_translate_fn xlate;
-static char gXlateTag[80] = "untagged";
+#include "nvmtl_spvcache_name.h"
+// The cache tag: the translator build (sha256-<64 hex>, 71 characters) plus every mode suffix. This buffer was 80 bytes,
+// so a tag with -u2 and -p5 had room for only "-a" of "-as1", and any suffix after it was silently dropped: entries
+// translated with and without the switches that follow shared one name, and a lookup could be served a module made in
+// the other mode. nvmtl_spvcache_mode_tag refuses a tag that does not fit instead of cutting it.
+static char gXlateTag[NVMTL_SPVCACHE_TAG_MAX] = "untagged";
+// The translator build alone, without the mode suffixes (-u2, -p5, ...) gXlateTag adds: the stale-entry sweep keys on it.
+static char gXlateBuildTag[NVMTL_SPVCACHE_TAG_MAX] = "untagged";
 static void nvmtl_translator_cache_tag(const char *path, char *tag, size_t capacity) {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     CC_SHA256_CTX context; CC_SHA256_Init(&context);
@@ -111,15 +118,18 @@ static int nvmtl_xlate_ready(void) {
         const char *xpath = bundled && access(bundled.fileSystemRepresentation,R_OK)==0 ? bundled.fileSystemRepresentation : NVMTL_XLATE_LIB;
         void *h = dlopen(xpath, RTLD_NOW | RTLD_LOCAL);
         if (h) nvmtl_translator_cache_tag(xpath, gXlateTag, sizeof gXlateTag);
-        if (!getenv("NVMTL_NO_AIR_UNROLL")) strlcat(gXlateTag, "-u2", sizeof gXlateTag);
-        // Canonical pointers and argument-buffer samplers each change the SPIR-V a module translates to, so a cache
-        // entry written in one mode must never be served in the other.
-        if (getenv("NVMTL_CANONICAL_POINTERS")) strlcat(gXlateTag, "-p5", sizeof gXlateTag);
-        if (getenv("NVMTL_ARGBUF_SAMPLERS") && !strcmp(getenv("NVMTL_ARGBUF_SAMPLERS"), "1")) strlcat(gXlateTag, "-as1", sizeof gXlateTag);
-        // The two translator switches an application profile sets change the SPIR-V too: an entry translated before a
-        // profile existed (or with it turned off) must not be served with it on.
-        if (getenv("NVMTL_NO_PTR_PHI_LOAD")) strlcat(gXlateTag, "-np", sizeof gXlateTag);
-        if (getenv("NVMTL_NO_PIXEL_HW_FILTER")) strlcat(gXlateTag, "-nf", sizeof gXlateTag);
+        strlcpy(gXlateBuildTag, gXlateTag, sizeof gXlateBuildTag);
+        // Each mode below changes the SPIR-V a module translates to, so a cache entry written in one mode must never be
+        // served in another: unrolled AIR, canonical pointers, argument-buffer samplers, and the two translator switches
+        // an application profile sets.
+        { const char *as = getenv("NVMTL_ARGBUF_SAMPLERS");
+          if (h && !nvmtl_spvcache_mode_tag(gXlateTag, sizeof gXlateTag, gXlateBuildTag, !getenv("NVMTL_NO_AIR_UNROLL"),
+                                       getenv("NVMTL_CANONICAL_POINTERS") != NULL, as && !strcmp(as, "1"),
+                                       getenv("NVMTL_NO_PTR_PHI_LOAD") != NULL, getenv("NVMTL_NO_PIXEL_HW_FILTER") != NULL)) {
+              // A tag that cannot name every mode cannot keep the modes apart: no cache entry is read or written.
+              strlcpy(gXlateTag, "untagged", sizeof gXlateTag);
+              nvlog("translate: cache tag does not fit - the shader cache is OFF in this process");
+          } }
         if (!h) { nvlog("translate: dlopen(%s): %s", NVMTL_XLATE_LIB, dlerror()); return; }
         xlate = (nvmtl_translate_fn)dlsym(h, "nvmtl_translate");
         { char tid[1200];
@@ -379,13 +389,15 @@ static BOOL nvmtl_dir_writable(NSString *d) {
 // The sweep must not run before the translator has been opened. Until then the build tag is "untagged", nothing would
 // match it, and a cache the running driver can use would be deleted.
 static void nvmtl_spvcache_drop_stale(const char *dirc) {
-    if (!dirc || !strcmp(gXlateTag, "untagged")) {
+    if (!dirc || !strcmp(gXlateBuildTag, "untagged")) {
         nvlog("spvcache: stale-tag sweep SKIPPED - the translator has no cache tag yet; nothing was deleted");
         return;
     }
-    char suffix[128];
-    snprintf(suffix, sizeof suffix, ".%s.c3.spv", gXlateTag);
-    const size_t sn = strlen(suffix);
+    // Every process shares this folder unless it names its own cache, and each process's modes (canonical pointers,
+    // argument-buffer samplers, an application profile's translator switches) give its entries a different tag. Only
+    // entries from another translator BUILD are stale; an entry of the same build in another mode belongs to a process
+    // that runs in that mode, and deleting it made each process wipe the others' caches on every start.
+
     DIR *eh = opendir(dirc);
     if (!eh) {
         nvlog("spvcache: stale-tag sweep CANNOT READ %s: %s - entries from older drivers are left in place",
@@ -398,7 +410,7 @@ static void nvmtl_spvcache_drop_stale(const char *dirc) {
     while ((de = readdir(eh)) != NULL) {
         const size_t n = strlen(de->d_name);
         if (n < 7 || strcmp(de->d_name + n - 7, ".c3.spv") != 0) continue;   /* not one of ours */
-        if (n >= sn && strcmp(de->d_name + n - sn, suffix) == 0) { kept++; continue; }
+        if (nvmtl_spvcache_same_build(de->d_name, gXlateBuildTag)) { kept++; continue; }
         char full[1200];
         if (snprintf(full, sizeof full, "%s/%s", dirc, de->d_name) >= (int)sizeof full) continue;
         struct stat st;
@@ -407,8 +419,8 @@ static void nvmtl_spvcache_drop_stale(const char *dirc) {
     }
     closedir(eh);
     if (gone || failed)
-        nvlog("spvcache: dropped %lu entries / %llu MiB left by earlier drivers (%lu match %s, %lu could not be removed)",
-              gone, freed >> 20, kept, gXlateTag, failed);
+        nvlog("spvcache: dropped %lu entries / %llu MiB left by earlier drivers (%lu of build %s kept, %lu could not be removed)",
+              gone, freed >> 20, kept, gXlateBuildTag, failed);
 }
 static NSString *nvmtl_spvcache_dir(void) {
     static NSString *dir; static dispatch_once_t once;
@@ -428,6 +440,8 @@ static NSString *nvmtl_spvcache_dir(void) {
     return dir;
 }
 static NSString *nvmtl_spvcache_path_digest(const unsigned char h[CC_SHA256_DIGEST_LENGTH], NSString *stage) {
+    // No tag, no file: an entry named without its modes could be served to a process in another mode.
+    if (!strcmp(gXlateTag, "untagged")) return nil;
     NSString *d = nvmtl_spvcache_dir();
     if (!d) return nil;
     // Sweep the folder clear of other builds' entries once, here rather than where the folder is chosen: a process
