@@ -199,7 +199,8 @@ check('deferring a function to pipeline creation asks the translator for its vis
       bool(_vl) and _vl.index('xlate_vrefs(') < _vl.index('rangeOfString:')
       and 'no linked function supplies it' in _vl)
 check('no caller decides it from the error text any more',
-      obj.count('nvmtl_needs_visible_link(_airs[name]') == 2
+      # two callers pass the error text as the fallback; the link-first probe passes nil (no text at all)
+      obj.count('nvmtl_needs_visible_link(_airs[name]') == 3 and obj.count('nvmtl_needs_visible_link(_airs[name], nil)') == 1
       and 'rangeOfString:@"visible function reference"' not in obj
       and 'rangeOfString:@"Metal visible function table"' not in obj)
 check('the expected first attempt is not logged as a failure, and only on the path that defers',

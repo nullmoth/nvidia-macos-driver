@@ -152,7 +152,7 @@ with tempfile.TemporaryDirectory(prefix="nullmoth-card-tests-") as directory:
     (tmp / "log.c").write_text(LOG)
     run("xcrun", "clang", "-I" + str(ROOT / "plugin"), str(tmp / "log.c"), "-o", str(tmp / "log"))
     print(run(str(tmp / "log")))
-    submit = snippet("plugin/NVMTLObjects.m", "- (BOOL)commitAndWaitUntilSubmitted {", "- (void)commit {\n    [self nvmtlSubmitWithEvents];")
+    submit = snippet("plugin/NVMTLObjects.m", "- (BOOL)commitAndWaitUntilSubmitted {", "- (void)commit {\n    if (nvmtl_cbt_on()")
     (tmp / "submit.m").write_text(SUBMIT.replace("PRODUCTION", submit))
     run("xcrun", "clang", "-fobjc-arc", str(tmp / "submit.m"), "-framework", "Foundation", "-o", str(tmp / "submit"))
     for program in ("WindowServer", "mediaanalysisd", ""):

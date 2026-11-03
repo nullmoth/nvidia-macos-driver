@@ -33,6 +33,9 @@ typedef struct { void *map; size_t size; } Buffer;
     IOSurfaceRef _surf; NSUInteger _plane; BOOL _vramOn; int _tag;
 } @end
 @implementation NVMTLTexture @end
+// a used heap's pin (NVMTLObjects.m): its members with a host copy; none in these fixtures
+@interface NVMTLHeapPin : NSObject - (NSArray *)allCopyCandidates; @end
+@implementation NVMTLHeapPin - (NSArray *)allCopyCandidates { return @[]; } @end
 static unsigned uploads, downloads, managedCopies;
 enum { NVP_SYNCIN, NVP_SYNCOUT };
 static uint64_t nvmtl_perf_now(void) { return 0; }
@@ -148,6 +151,11 @@ static void fakeGPU(void) {
 }
 static int nvmtl_vk_submit_begin(Commands *cmd, nvmtl_inflight *f) { begins++; fakeGPU(); return submitResult; }
 static int nvmtl_vk_submit_wait(Commands *cmd) { waits++; fakeGPU(); return submitResult; }
+// the part-advance path finishes a begun submission; the ahead lane is off in these fixtures
+// finishing waits for the work begin submitted: it counts as the wait and the GPU's write lands
+static int nvmtl_vk_submit_finish(nvmtl_inflight *f) { (void)f; waits++; if (!submitResult) memset(testGPU,writtenPixel,16); return submitResult; }
+static BOOL nvmtl_gsub_ahead_on(void) { return NO; }
+static void nvmtl_ahead_kick(void) {}
 static int nvmtl_gsub_finish(NVMTLSubmissionPart *part) {
     finishes++; nvmtl_vk_inflight_free(part->inflight); part->inflight=NULL;
     atomic_fetch_sub(&gsub_inflight,1); return submitResult;
@@ -209,17 +217,20 @@ int main(void) { @autoreleasepool {
     submitResult=0; expectedPixel=73; writtenPixel=89; memset(cpu,73,16);
     cb=makeCommand([NSSet setWithObjects:t,v,nil],event); event->expected=89;
     const char *lift=getenv("NVMTL_GSUB_HOSTPTR_LIFT");
+    // the part-advance path above begins and finishes its own submissions; these checks count only the ahead pass's
+    const unsigned base=begins;
     if (!lift) {
         assert(![cb nvmtlSubmitAhead]); // Texture views retain the default host-pointer hold.
-        assert(!begins && uploads==2 && !cb->_nextSubmit);
+        assert(begins==base && uploads==2 && !cb->_nextSubmit);
     } else {
         allocationFails=YES;
-        assert(![cb nvmtlSubmitAhead] && uploads==2 && !begins && !cb->_nextSubmit);
+        assert(![cb nvmtlSubmitAhead] && uploads==2 && begins==base && !cb->_nextSubmit);
         allocationFails=NO;
-        assert([cb nvmtlSubmitAhead] && begins==1 && uploads==3 && downloads==1);
+        assert([cb nvmtlSubmitAhead] && begins==base+1 && uploads==3 && downloads==1);
         memset(cpu,101,16); // Finishing an ahead submission must not upload again.
         assert([cb nvmtlAdvancePart]);
-        assert(finishes==1 && waits==2 && uploads==3 && downloads==2 && cpu[0]==89 && event->signals==2);
+        // a submission whose begin fails has nothing to wait for, so only the first advance waited
+        assert(finishes==1 && waits==1 && uploads==3 && downloads==2 && cpu[0]==89 && event->signals==2);
         assert(cb->_executionDone && !cb->_cbError);
         submitResult=-1; expectedPixel=113; memset(cpu,113,16);
         cb=makeCommand([NSSet setWithObject:v],event);
