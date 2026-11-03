@@ -1,7 +1,7 @@
 /* test_app_profile.c - the application-profile rules (plugin/nvmtl_app_profile.h), run against this process's environment.
    Build and run anywhere (no GPU, no Metal):  cc -I plugin tools/test_app_profile.c -o /tmp/test_app_profile && /tmp/test_app_profile
-   Optional: /tmp/test_app_profile <original.spv> <edited.spv> also proves the shipped kernel edit turns the original
-   translated module into the edited one, byte for byte. Exit status 0 when every arm holds. */
+   Optional: /tmp/test_app_profile <original.spv> <guard.spv> also proves the shipped kernel edit turns the original
+   translated module (FNV-1a d57e32ce) into the known-good guard module (bd4ccf94, 113,592 bytes), byte for byte. Exit status 0 when every arm holds. */
 #include <stdio.h>
 #include <unistd.h>
 #include "nvmtl_app_profile.h"
@@ -86,27 +86,33 @@ int main(int argc, char **argv)
     set = nvmtl_app_profile_apply(nvmtl_app_profile_for("WindowServer", "com.apple.WindowServer", NULL), NULL, NULL, NULL, 0, &kept);
     arm("WindowServer's path applies nothing and NVK_LOCAL_MAP_SYSMEM stays unset", set == 0 && none_set(cp) && !getenv("NVK_LOCAL_MAP_SYSMEM"));
 
-    /* the shader edit, on a synthetic module (the shipped edit needs the game's own module: see argv below) */
-    uint32_t mod[8] = { 0x07230203u, 0x00010500u, 0, 40, 0, 11, 22, 33 };
-    uint32_t want[9] = { 0x07230203u, 0x00010500u, 0, 41, 0, 11, 99, 22, 33 };
-    uint32_t edit[] = { 3, 1, 1, 41,   2, 0, 1, 99 };   /* keep 3, replace the bound; keep 2, insert one word */
+    /* the shader edit, on a synthetic module (the shipped edit needs the game's own module: see argv below).
+       Original: header, then an instruction using IDs 3 and 4 (words 6, 7), then a literal 4 (word 8, not an ID).
+       Edited: IDs renumbered 3->1, 4->2, bound 5->6, version 1.6, and one word (99) added before word 8. */
+    uint32_t mod[9] = { 0x07230203u, 0x00010400u, 0x000f0000u, 5, 0, 0x00030000u, 3, 4, 4 };
+    uint32_t want[10] = { 0x07230203u, 0x00010600u, 0x00070000u, 6, 0, 0x00030000u, 1, 2, 99, 4 };
+    uint32_t edit[] = { NVMTL_SPV_EDIT_MAGIC, 0x00010600u, 0x00070000u, 6, 8, 1, 99, 5, 0, 0, 0, 1, 2, 1, (1u << 6) | (1u << 7) };
+    const size_t ne = sizeof edit / sizeof edit[0];
     uint32_t from = nvmtl_spv_fnv1a(mod, sizeof mod), to = nvmtl_spv_fnv1a(want, sizeof want);
-    size_t n = 0; uint32_t *out = nvmtl_spv_apply_edit(mod, 8, edit, 8, from, to, &n);
-    arm("an edit on the module it was made from gives exactly the edited module", out && n == 9 && !memcmp(out, want, sizeof want));
+    size_t n = 0; uint32_t *out = nvmtl_spv_apply_edit(mod, 9, edit, ne, from, to, &n);
+    arm("an edit on the module it was made from gives exactly the edited module: IDs renumbered, a literal equal to an ID left alone",
+        out && n == 10 && !memcmp(out, want, sizeof want));
     free(out);
-    uint32_t other[8]; memcpy(other, mod, sizeof mod); other[7] = 34; uint32_t copy[8]; memcpy(copy, other, sizeof other);
-    out = nvmtl_spv_apply_edit(other, 8, edit, 8, from, to, &n);
+    uint32_t other[9]; memcpy(other, mod, sizeof mod); other[8] = 5; uint32_t copy[9]; memcpy(copy, other, sizeof other);
+    out = nvmtl_spv_apply_edit(other, 9, edit, ne, from, to, &n);
     arm("a hash miss changes nothing: another module gets no edit and is left as it was", !out && !memcmp(other, copy, sizeof copy));
-    out = nvmtl_spv_apply_edit(mod, 8, edit, 8, from, to ^ 1, &n);
+    out = nvmtl_spv_apply_edit(mod, 9, edit, ne, from, to ^ 1, &n);
     arm("a result that does not hash to the recorded value is thrown away", !out);
-    uint32_t bad[] = { 3, 1, 9, 41 };
-    out = nvmtl_spv_apply_edit(mod, 8, bad, 4, from, to, &n);
-    arm("a patch that claims more words than it has is refused, not read past", !out);
-    uint32_t far[] = { 30, 0, 0 };
-    out = nvmtl_spv_apply_edit(mod, 8, far, 3, from, to, &n);
-    arm("a patch that keeps past the end of the module is refused", !out);
+    out = nvmtl_spv_apply_edit(mod, 9, edit, ne - 1, from, to, &n);
+    arm("an edit shorter than it claims is refused, not read past", !out);
+    { uint32_t e2[sizeof edit / sizeof edit[0]]; memcpy(e2, edit, sizeof edit); e2[4] = 30;
+      arm("an edit that inserts past the end of the module is refused", !nvmtl_spv_apply_edit(mod, 9, e2, ne, from, to, &n)); }
+    { uint32_t e3[sizeof edit / sizeof edit[0]]; memcpy(e3, edit, sizeof edit); e3[11] = 0;   /* map[3] = 0: no mapping */
+      arm("an ID the map does not cover is refused, not passed through", !nvmtl_spv_apply_edit(mod, 9, e3, ne, from, to, &n)); }
+    { uint32_t e4[sizeof edit / sizeof edit[0]]; memcpy(e4, edit, sizeof edit); e4[0] = 0;
+      arm("an edit without its magic word is refused", !nvmtl_spv_apply_edit(mod, 9, e4, ne, from, to, &n)); }
     mod[0] = 0x03022307u;
-    arm("a module without the SPIR-V magic is refused", !nvmtl_spv_apply_edit(mod, 8, edit, 8, from, to, &n));
+    arm("a module without the SPIR-V magic is refused", !nvmtl_spv_apply_edit(mod, 9, edit, ne, from, to, &n));
 
     /* the shader cache's names: every mode must be in the tag, or a lookup can be served another mode's module */
     const char *build = "sha256-0446740c8cfcb42d5322c6dd852a4891bb1c3005b00d409f33ee1e72c5b3f828";
@@ -160,12 +166,14 @@ int main(int argc, char **argv)
     }
 
     if (cp->shader_from) {
-        arm("the shipped edit is armed with two hashes and a patch", cp->shader_to && cp->npatch > 3);
+        arm("the shipped edit is armed with two hashes and a patch", cp->shader_to && cp->npatch > 7 && cp->patch[0] == NVMTL_SPV_EDIT_MAGIC);
         if (argc == 3) {
             size_t on = 0, en = 0; uint32_t *orig = read_words(argv[1], &on), *ed = read_words(argv[2], &en);
             out = orig ? nvmtl_spv_apply_edit(orig, on, cp->patch, cp->npatch, cp->shader_from, cp->shader_to, &n) : NULL;
-            arm("the shipped edit turns the game's translated light-cluster kernel into the bounds-checked one, byte for byte",
+            arm("the shipped edit turns the game's translated light-cluster kernel (d57e32ce) into the known-good guard module, byte for byte",
                 out && ed && n == en && !memcmp(out, ed, n * 4));
+            arm("and that module is the one the correct run dispatched: FNV-1a bd4ccf94, 113,592 bytes",
+                out && n * 4 == 113592 && nvmtl_spv_fnv1a(out, n * 4) == 0xbd4ccf94u && cp->shader_to == 0xbd4ccf94u);
             free(out);
             /* Every compute pipeline goes through one call, nvmtl_app_profile_edit_module, at pipeline creation. These arms
                feed it the module as each path delivers it. */
