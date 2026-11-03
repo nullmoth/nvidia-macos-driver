@@ -4,7 +4,7 @@ use crate::passes::access::{is_unsigned_byte_scalar, single_member_array_scalar_
 use crate::passes::air_calls::subgroup_local_invocation_id_input_var;
 use crate::passes::stage_output::handle_static_sampler;
 mod decorations;
-mod kernel_grid;
+pub(in crate::passes) mod kernel_grid;
 mod kernel_values;
 mod layout;
 

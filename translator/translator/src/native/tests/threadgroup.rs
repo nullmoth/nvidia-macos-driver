@@ -3358,3 +3358,87 @@ declare i32 @air.atomic.local.add.u.i32(ptr addrspace(3), i32, i32, i32, i1)
     );
     let _ = std::fs::remove_dir_all(tmp);
 }
+
+// The dispatch tail guard, measured in both directions. A guard that has only been shown to allow traffic
+// has not been shown to do anything: these assert that it fires for an exact-thread dispatch and that it is
+// absent for a threadgroup dispatch, where the thread count is a multiple of the group size by construction.
+const TAIL_GUARD_KERNEL: &str = r#"
+target triple = "spirv-unknown-vulkan1.2"
+define void @k(i32 %gid, ptr addrspace(1) %out) {
+entry:
+  %scaled = mul i32 %gid, 3
+  %p = getelementptr i32, ptr addrspace(1) %out, i32 %gid
+  store i32 %scaled, ptr addrspace(1) %p
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3, !4}
+!3 = !{i32 0, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint", !"air.arg_name", !"gid"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"out"}
+"#;
+
+fn translate_tail_guard_kernel(dispatch: Option<crate::reflect::KernelDispatch>, tag: &str) -> String {
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_tail_guard_{}_{}",
+        tag,
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let spv = crate::translate_sanitized_native_with_options(
+        TAIL_GUARD_KERNEL,
+        Stage::Kernel,
+        &tmp,
+        passes::TransformOptions {
+            kernel_local_size: [32, 1, 1],
+            kernel_dispatch: dispatch,
+            ..passes::TransformOptions::default()
+        },
+    )
+    .expect("translate");
+    if std::process::Command::new("spirv-val")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
+    }
+    disassemble(&spv).expect("disassemble")
+}
+
+#[test]
+fn dispatch_tail_guard_retires_the_tail_before_any_of_the_body() {
+    let asm = translate_tail_guard_kernel(
+        Some(crate::reflect::KernelDispatch::ThreadsDynamic { offset: 0 }),
+        "fires",
+    );
+    // one comparison per axis, OR-ed, then a selection that returns
+    assert_eq!(asm.matches("OpUGreaterThanEqual").count(), 3, "{asm}");
+    assert_eq!(asm.matches("OpLogicalOr").count(), 2, "{asm}");
+    assert!(asm.contains("OpSelectionMerge"), "{asm}");
+    assert!(asm.contains("OpBranchConditional"), "{asm}");
+    // The property that makes it correct: the guard is ahead of the body, so every subgroup collective
+    // below it sees the lane set Metal would give it. A guard placed after any of the body would leave the
+    // instructions above it running on the full set and the ones below on the reduced set.
+    let guard_at = asm
+        .find("OpUGreaterThanEqual")
+        .expect("the guard comparison is emitted");
+    let body_at = asm.find("OpIMul").expect("the body's multiply survives");
+    assert!(
+        guard_at < body_at,
+        "the guard must precede the body: guard at {guard_at}, body at {body_at}\n{asm}"
+    );
+}
+
+#[test]
+fn dispatch_tail_guard_is_absent_for_a_threadgroup_dispatch() {
+    // NEGATIVE CONTROL. dispatchThreadgroups: passes a thread count that is the group count times the group
+    // size, so no lane is ever out of range and the guard would be dead weight. If this ever starts seeing a
+    // guard, the pass has stopped reading the dispatch kind and the arm above proves nothing.
+    let asm = translate_tail_guard_kernel(Some(crate::reflect::KernelDispatch::Workgroups), "quiet");
+    assert_eq!(asm.matches("OpUGreaterThanEqual").count(), 0, "{asm}");
+    assert!(!asm.contains("OpSelectionMerge"), "{asm}");
+    assert!(!asm.contains("OpBranchConditional"), "{asm}");
+}

@@ -311,6 +311,9 @@ pub fn reloop_why() -> bool {
 pub fn converge_inloop() -> bool {
     present("METAL2VULKAN_CONVERGE_INLOOP")
 }
+pub fn no_dispatch_tail_guard() -> bool {
+    present("METAL2VULKAN_NO_DISPATCH_TAIL_GUARD")
+}
 pub fn no_latch_trampoline_fold() -> bool {
     present("METAL2VULKAN_NO_LATCH_TRAMPOLINE_FOLD")
 }
