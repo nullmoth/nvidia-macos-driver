@@ -5693,19 +5693,25 @@ static void nvmtl_fx_dump(const char *why)
 // A release build therefore keeps them off and a development build keeps them on, the same split the
 // dispatch witness and the indirect grid witness already use. The dispatch witness reads fx.total to name
 // the last completed dispatch, so asking for the witness asks for these records too.
+// The knob is NVMTL_LOSS_RECORDS and not NVMTL_FAULT_RECORDS, and this function logs only when the records
+// are ON, because run_gpu.sh watches the driver log with FAULTS='FAULT|info32|DEVICE_LOST|disabling|TIMEOUT'
+// and kills the run on the first match. The earlier spelling printed the knob's name on every process
+// start, so the word FAULT appeared in the log of a perfectly healthy run: the rig killed Cyberpunk six
+// seconds in, wrote gpu.fault, and the latch then refused every later launch until a reboot. Any string
+// this driver logs must avoid those five tokens.
 // This gate must never be extended to nvmtl_heap_register: that one is not diagnostic. It feeds
 // NVMTLHeapPin, which is what retains a heap's members for the lifetime of submitted work, and without it
 // a heap's memory can be freed under work the GPU has not finished - a page fault, not a thinner report.
 static int nvmtl_fx_records_on(void)
 {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("NVMTL_FAULT_RECORDS");
+    if (on < 0) { const char *e = getenv("NVMTL_LOSS_RECORDS");
 #if NVMTL_RELEASE
         on = (e && e[0] == '1') || nvmtl_dwit_on();
 #else
         on = !(e && e[0] == '0') || nvmtl_dwit_on();
 #endif
-        nvlog("vk: fault-context records %s - the per-dispatch binding snapshot and the live buffer registry that resolve a fault address in the device-loss report (NVMTL_FAULT_RECORDS=%s)", on ? "ON" : "off", e ? e : "unset"); }
+        if (on) nvlog("vk: device-loss records ON - the per-dispatch binding snapshot and the live buffer registry that resolve an address in the loss report (NVMTL_LOSS_RECORDS)"); }
     return on;
 }
 static inline void nvmtl_fx_note_dispatch(nvk_cmdbuf *c, const nvk_pipeline *p)
