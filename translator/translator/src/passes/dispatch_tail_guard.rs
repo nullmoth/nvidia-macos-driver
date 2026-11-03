@@ -60,6 +60,18 @@ pub(in crate::passes) fn emit_dispatch_tail_guard(ctx: &mut Ctx, entry_idx: usiz
     let Some(gid) = existing_global_invocation_id_var(ctx) else {
         return;
     };
+    // A kernel that executes a workgroup barrier may NOT have lanes retired ahead of it. Vulkan requires
+    // OpControlBarrier to be reached by every invocation in the workgroup, and a fixed-size Vulkan
+    // workgroup still contains the tail lanes even when Metal's dispatch would not have created them: if
+    // this guard returns first, the survivors wait at a barrier the retired lanes never reach, which is
+    // undefined and faults the channel. Measured, not reasoned: 1,024 of the 2,544 kernels this guard
+    // reached in Cyberpunk's shader cache contain OpControlBarrier, and the first game run on it died with
+    // "NVRM channel faulted / FAULT_PDE compute shader" after translating cleanly.
+    // Metal gets away with the same source because on that hardware the tail threads genuinely do not
+    // exist, so its barrier is consistent with a smaller workgroup. Ours cannot be.
+    if function_has_workgroup_barrier(ctx, entry_idx) {
+        return;
+    }
 
     let uint_ty = ctx.ty_uint();
     let bool_ty = ctx.ty_bool();
@@ -247,6 +259,48 @@ fn load_region_member_raw(
         vec![Operand::IdRef(pointer)],
     ));
     value
+}
+
+// True when the entry point, or anything it calls, executes a barrier that synchronises the workgroup.
+// The whole static call tree is walked rather than the entry function alone: a barrier inside a helper is
+// just as binding, and a check that looked only at the top level would pass the kernels it must refuse.
+// OpControlBarrier is the operation that waits; OpMemoryBarrier only orders memory and retires nobody, so
+// it does not constrain this guard.
+fn function_has_workgroup_barrier(ctx: &Ctx, entry_idx: usize) -> bool {
+    let entry_id = match ctx.module.functions.get(entry_idx).and_then(|f| f.def.as_ref()).and_then(|d| d.result_id) {
+        Some(id) => id,
+        // The entry cannot be identified, so whether it barriers is UNKNOWN - and unknown is not "no".
+        None => return true,
+    };
+    let mut pending = vec![entry_id];
+    let mut seen = crate::fxhash::HashSet::default();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(function) = ctx
+            .module
+            .functions
+            .iter()
+            .find(|f| f.def.as_ref().and_then(|d| d.result_id) == Some(id))
+        else {
+            // A call we cannot resolve might barrier; refuse rather than assume it does not.
+            return true;
+        };
+        for block in &function.blocks {
+            for inst in &block.instructions {
+                if inst.class.opcode == Op::ControlBarrier {
+                    return true;
+                }
+                if inst.class.opcode == Op::FunctionCall {
+                    if let Some(Operand::IdRef(callee)) = inst.operands.first() {
+                        pending.push(*callee);
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 fn existing_dispatch_region_var(ctx: &Ctx) -> Option<Word> {
