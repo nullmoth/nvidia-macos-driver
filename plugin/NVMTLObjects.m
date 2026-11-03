@@ -6819,7 +6819,15 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
         size_t bytes = (size_t)(icount ? icount : 1) * (64 + 4);
         if (nvmtl_vk_buffer_create(bytes, 1, &vk->_b) || !vk->_b.map) { nvlog("build acceleration structure: instance conversion buffer FAILED"); return; }
         uint32_t stride = (uint32_t)(idesc.instanceDescriptorStride ? idesc.instanceDescriptorStride : natural);
-        if (stride < natural || idesc.instanceDescriptorBufferOffset + (size_t)(icount ? icount - 1 : 0) * stride + natural > ib->_b.size) {
+        // The span is computed so it cannot WRAP. Written as offset + (count-1)*stride + natural > size, an app that
+        // passes an offset or a stride near SIZE_MAX overflows the sum, the comparison reads as in-bounds, and the
+        // refusal never fires - a bounds check that can wrap is not a bounds check. The reads it guards land in the
+        // app's own buffer rather than ours, so this is not a privilege crossing, but the test is still wrong and the
+        // correct form costs nothing: compare each term against what is LEFT instead of building a sum.
+        const size_t instOff = (size_t)idesc.instanceDescriptorBufferOffset;
+        const size_t instSpan = (size_t)(icount ? icount - 1 : 0) * stride + natural;
+        const BOOL instOverflows = icount && stride && (size_t)(icount - 1) > (SIZE_MAX - natural) / stride;
+        if (stride < natural || instOverflows || instOff > ib->_b.size || instSpan > ib->_b.size - instOff) {
             nvlog("build acceleration structure: %u instances of stride %u at %lu overrun the %zu-byte descriptor buffer - REFUSED", icount, stride,
                   (unsigned long)idesc.instanceDescriptorBufferOffset, ib->_b.size); return; }
         const size_t uidOff = (size_t)(icount ? icount : 1) * 64, uidBytes = (size_t)(icount ? icount : 1) * 4;
