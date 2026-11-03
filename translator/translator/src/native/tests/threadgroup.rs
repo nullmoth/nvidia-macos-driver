@@ -3359,7 +3359,7 @@ declare i32 @air.atomic.local.add.u.i32(ptr addrspace(3), i32, i32, i32, i1)
     let _ = std::fs::remove_dir_all(tmp);
 }
 
-// Three dispatch-tail-guard arms lived here and were removed with the pass itself on 2026-11-03. They are
+// Three dispatch-tail-guard arms lived here and were removed with the pass itself. They are
 // worth naming because they all PASSED while the thing they guarded was wrong, which is the trap: each arm
 // tested the pass against its own premise instead of against the plugin. The premise was that a Metal
 // dispatchThreads: grid launches lanes Metal would not create, so the translator had to retire them. It

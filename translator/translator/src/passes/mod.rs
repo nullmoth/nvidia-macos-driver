@@ -3050,7 +3050,7 @@ pub(crate) fn transform_with_options_and_sidecar(
     }
     // A dispatch-tail guard used to run here: an entry-block test that retired the lanes a Metal
     // dispatchThreads: grid never creates, by comparing GlobalInvocationId + thread_base against the
-    // threads_per_grid in the dispatch-region push constants. It was removed on 2026-11-03 because both
+    // threads_per_grid in the dispatch-region push constants. It was removed because both
     // of its premises were false, and it cost a game run and two crashes to learn that:
     //  - There is no overshoot to discard. nvmtl_vk_cmd_dispatch_threads already reproduces Metal's exact
     //    thread count by dispatching a SMALLER-WORKGROUP pipeline variant for the partial group
