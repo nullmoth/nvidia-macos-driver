@@ -218,10 +218,31 @@ static void nvmtl_conf_settle(void)
     char rec[3072]; const char *had = getenv("NVMTL_CONF_SET");
     snprintf(rec, sizeof rec, "%s", had ? had : "");
     unsigned kept = 0, set = nvmtl_app_profile_apply(p, nvmtl_profile_user_set, &ctx, rec, sizeof rec, &kept);
+    // The application gets its own shader-cache root (aircache, with spvcache beside it), as a launcher that sets
+    // NVMTL_AIRCACHE does. A cache folder shared with every other process mixed entries of different modes. A cache the
+    // user named (the process environment or nvrm610.conf) wins.
+    char root[1024] = "", air[1100] = "";
+    if (!getenv("NVMTL_AIRCACHE")) {
+        NSArray *c = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+        const char *caches = c.count ? [c[0] fileSystemRepresentation] : NULL;
+        if (caches && nvmtl_app_cache_root(root, sizeof root, caches, bid)) {
+            snprintf(air, sizeof air, "%s/aircache", root);
+            char spv[1100]; snprintf(spv, sizeof spv, "%s/spvcache", root);
+            [[NSFileManager defaultManager] createDirectoryAtPath:@(air) withIntermediateDirectories:YES
+                                                       attributes:@{ NSFilePosixPermissions: @0700 } error:nil];
+            [[NSFileManager defaultManager] createDirectoryAtPath:@(spv) withIntermediateDirectories:YES
+                                                       attributes:@{ NSFilePosixPermissions: @0700 } error:nil];
+            chmod(root, 0700); chmod(air, 0700); chmod(spv, 0700);
+            if (access(air, W_OK) == 0 && setenv("NVMTL_AIRCACHE", air, 1) == 0) {
+                size_t n = strlen(rec);
+                if (n + strlen(air) + 18 < sizeof rec) snprintf(rec + n, sizeof rec - n, "%sNVMTL_AIRCACHE=%s", n ? ";" : "", air);
+            } else air[0] = 0;
+        }
+    }
     if (rec[0]) setenv("NVMTL_CONF_SET", rec, 1);
     g_app_profile = p;
-    nvlog("profile: %s (%s): %u setting(s) applied, %u left as the user set them%s", me, bid, set, kept,
-          p->shader_from ? "; one kernel edit armed" : "");
+    nvlog("profile: %s (%s): %u setting(s) applied, %u left as the user set them%s; shader cache %s", me, bid, set, kept,
+          p->shader_from ? "; one kernel edit armed" : "", air[0] ? air : (getenv("NVMTL_AIRCACHE") ?: "shared"));
 }
 __attribute__((constructor)) static void nvmtl_conf_knobs(void) { nvmtl_conf_settle(); }
 static int nvmtl_dontcare_clears(void) {

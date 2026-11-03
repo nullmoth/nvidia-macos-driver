@@ -107,6 +107,19 @@ static inline unsigned nvmtl_app_profile_apply(const nvmtl_app_profile *p, int (
     return set;
 }
 
+/* The matched application's own shader-cache root: <caches>/nvmtl/apps/<bundle id>. Its translated shaders and AIR
+   text then never share a folder with another process's, whatever modes that process runs in. Returns 0 (no root) when
+   the identifier is empty, holds anything but letters, digits, '.', '-' or '_', starts with '.', or does not fit. */
+static inline int nvmtl_app_cache_root(char *out, size_t cap, const char *caches, const char *bundle_id)
+{
+    if (!out || !cap || !caches || !*caches || !bundle_id || !*bundle_id || bundle_id[0] == '.') return 0;
+    for (const char *c = bundle_id; *c; c++)
+        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '.' || *c == '-' || *c == '_'))
+            return 0;
+    const int k = snprintf(out, cap, "%s/nvmtl/apps/%s", caches, bundle_id);
+    return k > 0 && (size_t)k < cap;
+}
+
 /* The hash the plugin has always used to recognise a translated module: FNV-1a over its bytes. */
 static inline uint32_t nvmtl_spv_fnv1a(const void *bytes, size_t len)
 {
