@@ -3442,3 +3442,57 @@ fn dispatch_tail_guard_is_absent_for_a_threadgroup_dispatch() {
     assert!(!asm.contains("OpSelectionMerge"), "{asm}");
     assert!(!asm.contains("OpBranchConditional"), "{asm}");
 }
+
+// A kernel with a workgroup barrier must NOT be guarded: Vulkan requires OpControlBarrier to be reached by
+// every invocation in the workgroup, and retiring the tail lanes first leaves the survivors waiting on a
+// barrier nobody else reaches. That is undefined, and it faulted the GPU on the first real game run. This
+// arm is the one that would have caught it before the install.
+const TAIL_GUARD_BARRIER_KERNEL: &str = r#"
+target triple = "spirv-unknown-vulkan1.2"
+@shared = internal addrspace(3) global [64 x i32] zeroinitializer
+declare void @air.wg.barrier(i32, i32)
+define void @k(i32 %gid, ptr addrspace(1) %out) {
+entry:
+  %slot = getelementptr [64 x i32], ptr addrspace(3) @shared, i32 0, i32 0
+  store i32 %gid, ptr addrspace(3) %slot
+  call void @air.wg.barrier(i32 2, i32 1)
+  %back = load i32, ptr addrspace(3) %slot
+  %p = getelementptr i32, ptr addrspace(1) %out, i32 %gid
+  store i32 %back, ptr addrspace(1) %p
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3, !4}
+!3 = !{i32 0, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint", !"air.arg_name", !"gid"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"out"}
+"#;
+
+#[test]
+fn dispatch_tail_guard_refuses_a_kernel_that_barriers() {
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_tail_guard_barrier_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let spv = crate::translate_sanitized_native_with_options(
+        TAIL_GUARD_BARRIER_KERNEL,
+        Stage::Kernel,
+        &tmp,
+        passes::TransformOptions {
+            kernel_local_size: [32, 1, 1],
+            kernel_dispatch: Some(crate::reflect::KernelDispatch::ThreadsDynamic { offset: 0 }),
+            ..passes::TransformOptions::default()
+        },
+    )
+    .expect("translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert!(asm.contains("OpControlBarrier"), "the arm needs a barrier to be meaningful: {asm}");
+    assert_eq!(
+        asm.matches("OpUGreaterThanEqual").count(),
+        0,
+        "a kernel that barriers must not carry the dispatch tail guard: {asm}"
+    );
+}
