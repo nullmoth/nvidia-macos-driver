@@ -1,0 +1,70 @@
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -3026,6 +3026,11 @@
+          * only validated configuration is expected
+          * to commit.
+          */
++        if (layerConfig->surface != NULL) {
++            if (!device->notifier.mapped || device->notifier.pLinearAddress == NULL) return NV_FALSE;
++            nvKmsResetNotifier(NVKMS_KAPI_NOTIFIER_INDEX(head, layer, nextIndex),
++                               device->notifier.pLinearAddress);
++        }
+         device->layerState[head][layer].
+             currFlipNotifierIndex = nextIndex;
+     }
+@@ -3234,6 +3239,11 @@
+          * only validated configuration is expected
+          * to commit.
+          */
++        if (layerConfig->surface != NULL) {
++            if (!device->notifier.mapped || device->notifier.pLinearAddress == NULL) return NV_FALSE;
++            nvKmsResetNotifier(NVKMS_KAPI_NOTIFIER_INDEX(head, NVKMS_MAIN_LAYER, nextIndex),
++                               device->notifier.pLinearAddress);
++        }
+         device->layerState[head][NVKMS_MAIN_LAYER].
+             currFlipNotifierIndex = nextIndex;
+     }
+@@ -4023,6 +4033,35 @@
+     }
+ }
+ 
++static NvBool GetFlipPendingStatus(
++    const struct NvKmsKapiDevice *device,
++    const NvU32 head, const NvU32 layer, NvBool *pending)
++{
++    if (pending != NULL) *pending = NV_TRUE;
++    if (device == NULL || pending == NULL ||
++        head >= NVKMS_KAPI_MAX_HEADS || head >= device->numHeads ||
++        layer >= NVKMS_KAPI_LAYER_MAX || layer >= device->numLayers[head] ||
++        !device->notifier.mapped || device->notifier.pLinearAddress == NULL) {
++        return NV_FALSE;
++    }
++    const NvU32 index = device->layerState[head][layer].currFlipNotifierIndex;
++    if (index >= NVKMS_KAPI_MAX_NOTIFERS_PER_LAYER) return NV_FALSE;
++    struct nvKmsParsedNotifier parsed = { };
++    nvKmsParseNotifier(NVKMS_KAPI_NOTIFIER_INDEX(head, layer, index),
++                      device->notifier.pLinearAddress, &parsed);
++    static NvU32 reports = 0;
++    if (reports++ < 16) nvKmsKapiLogDeviceDebug(device,
++        "Flip completion head %u layer %u slot %u status %u format %u",
++        head, layer, index, (NvU32)parsed.status, (NvU32)device->notifier.format);
++    switch (parsed.status) {
++        // EVO signals a latched display flip with BEGUN (IsPreviousFlipDone in nvkms-headsurface.c).
++        case NVKMS_NOTIFIER_STATUS_BEGUN:
++        case NVKMS_NOTIFIER_STATUS_FINISHED: *pending = NV_FALSE; return NV_TRUE;
++        case NVKMS_NOTIFIER_STATUS_NOT_BEGUN: return NV_TRUE;
++        default: return NV_FALSE;
++    }
++}
++
+ static void FramebufferConsoleDisabled
+ (
+     struct NvKmsKapiDevice *device
+@@ -4189,6 +4228,7 @@
+     funcsTable->validateDisplayMode = ValidateDisplayMode;
+ 
+     funcsTable->applyModeSetConfig   = ApplyModeSetConfig;
++    funcsTable->getFlipPendingStatus = GetFlipPendingStatus;
+ 
+     funcsTable->allocateChannelEvent = nvKmsKapiAllocateChannelEvent;
+     funcsTable->freeChannelEvent = nvKmsKapiFreeChannelEvent;

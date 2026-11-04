@@ -1,0 +1,58 @@
+name: RTX6000 BAR preflight test 2.7
+on:
+  workflow_dispatch:
+  push:
+    branches: [test/rtx6000-bar-preflight-2.7]
+permissions:
+  contents: read
+concurrency:
+  group: bar-preflight-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Select matching Intel macOS toolchain
+        run: |
+          test "$(uname -m)" = x86_64
+          if [ -d /Applications/Xcode_16.4.app ]; then
+            sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          fi
+          xcodebuild -version
+          command -v gmake || brew install make
+      - name: Test address limits and fault-inject preflight staging
+        run: |
+          mkdir -p build-out/logs
+          set -o pipefail
+          python3 ci/test-bar-preflight.py 2>&1 | tee build-out/logs/preflight-tests.log
+      - name: Fetch pinned NVIDIA source and matching official patches
+        run: |
+          git clone --depth 1 --branch 615.78.08 https://github.com/NVIDIA/open-gpu-kernel-modules.git .deps/open-gpu-kernel-modules
+          test "$(git -C .deps/open-gpu-kernel-modules rev-parse HEAD)" = 1a82fbfda8f321b056eb3568850f9316c5e465c5
+          # 615 already guards and clears FSP pPollEvent; the old 610 FSP patch does not apply.
+          git -C .deps/open-gpu-kernel-modules apply ../../ci/patches/610-macos-version-headers.patch
+          git -C .deps/open-gpu-kernel-modules apply ../../ci/patches/615-display-completion.patch
+          git -C .deps/open-gpu-kernel-modules apply --directory=src/nvidia-modeset ../../kexts/NVRM/patches/610-setmode-reason.patch
+          git -C .deps/open-gpu-kernel-modules apply --directory=src/nvidia-modeset ../../kexts/NVRM/patches/610-backlight-register-log.patch
+          git -C .deps/open-gpu-kernel-modules apply --recount --directory=src/nvidia-modeset ../../kexts/NVRM/patches/615-viewport-scaling.patch
+      - name: Build and link the native Intel kexts
+        run: python3 ci/build-macos-kexts.py --vendor .deps/open-gpu-kernel-modules --output build-out --jobs 4
+      - name: Replace only NVRM in the checksum-pinned official 2.7 package
+        run: python3 ci/package-experiment.py --output build-out
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rtx6000-bar-preflight-2.7-${{ github.run_number }}
+          path: |
+            build-out/logs/
+            build-out/build-proof.json
+            build-out/SHA256SUMS.txt
+            build-out/nullmoth-2.7-rtx6000-bar-preflight-v1.tar.gz
+          if-no-files-found: warn
+          retention-days: 14
