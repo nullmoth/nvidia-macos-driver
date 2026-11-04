@@ -1934,6 +1934,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     id<MTLComputePipelineState> ps = [self newComputePipelineStateWithFunction:kfn error:err];
     if ([(id)ps isKindOfClass:[NVMTLComputePipelineState class]]) { ((NVMTLComputePipelineState *)ps)->_icb = d.supportIndirectCommandBuffers;
         ((NVMTLComputePipelineState *)ps)->_askT = d.maxTotalThreadsPerThreadgroup;
+        ((NVMTLComputePipelineState *)ps)->_reqTG = nvmtl_desc_size(d, @selector(requiredThreadsPerThreadgroup));
         ((NVMTLComputePipelineState *)ps)->_label = [d.label copy]; }
     if (r) *r = ps ? (MTLComputePipelineReflection *)nvmtl_compute_reflection(kfn) : nil;
     return ps;

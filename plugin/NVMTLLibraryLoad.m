@@ -3219,6 +3219,8 @@ static NSString *nvmtl_mesh_text(uint8_t *p, size_t n) {
     mi->_tgMesh = nvmtl_air_max_tg(mf) ?: md.maxTotalThreadsPerMeshThreadgroup;
     mi->_tgObj = of ? (nvmtl_air_max_tg(of) ?: md.maxTotalThreadsPerObjectThreadgroup) : 0;
     mi->_gridAsk = md.maxTotalThreadgroupsPerMeshGrid;
+    ps->_reqMesh = nvmtl_desc_size(md, @selector(requiredThreadsPerMeshThreadgroup));
+    ps->_reqObj = of ? nvmtl_desc_size(md, @selector(requiredThreadsPerObjectThreadgroup)) : MTLSizeMake(0, 0, 0);
     if (!of) {
         mi->_capi = 16384;
         NVMTLComputePipelineState *ki = nil, *unused = nil; NSString *w2 = nil;

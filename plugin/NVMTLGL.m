@@ -265,7 +265,6 @@ void nvmtl_gl_caps_enable(void) {
 - (void)setTileIntersectionFunctionTable:(id)t atBufferIndex:(NSUInteger)i {}
 - (void)dispatchThreadsPerTile:(MTLSize)s {}
 - (void)setThreadgroupMemoryLength:(NSUInteger)l offset:(NSUInteger)o atIndex:(NSUInteger)i {}
-- (void)setDepthTestMinBound:(float)lo maxBound:(float)hi {}
 @end
 @implementation NVMTLComputeCommandEncoder (NVMTLSel2)
 - (void)setImageblockWidth:(NSUInteger)w height:(NSUInteger)h {}
