@@ -147,6 +147,7 @@ typedef struct { uint64_t vertices; uint32_t stride; uint32_t count; uint32_t ve
                  uint64_t indices; uint32_t index_type; uint32_t opaque;
                  uint64_t boxes; uint32_t box_stride; uint32_t is_boxes; } nvmtl_geom;
 int  nvmtl_vk_rt_available(void);
+int  nvmtl_vk_barycentrics_available(void);   // VK_KHR_fragment_shader_barycentric present and enabled-capable
 int  nvmtl_vk_accel_sizes(const nvmtl_geom *g, uint32_t ngeom, int instance, uint32_t instance_count, size_t *as_size, size_t *scratch_size);
 int  nvmtl_vk_accel_create(nvk_buffer *backing, size_t size, int instance, nvk_accel *out);
 void nvmtl_vk_accel_destroy(nvk_accel *a);
