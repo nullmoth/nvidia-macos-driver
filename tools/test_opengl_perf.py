@@ -218,7 +218,7 @@ static int enabled; static float constant_value,slope_value,clamp_value;
 static void pvkCmdSetDepthBiasEnable(void *c,int value) { enabled=value; }
 static void pvkCmdSetDepthBias(void *c,float b,float cl,float s) { constant_value=b;clamp_value=cl;slope_value=s; }
 ''' + bias + r'''
-static int g_dyn3,g_provoking,g_clip,g_wide,g_sample_locations;
+static int g_dyn3,g_provoking,g_clip,g_wide,g_sample_locations,g_depth_bounds;
 static unsigned states(int hasDepth,nvk_pipeline *out,unsigned samples) {
 ''' + pipeline_states + r'''
     assert(dsci.dynamicStateCount<=sizeof dyn/sizeof dyn[0]);
@@ -231,14 +231,15 @@ int main(void) {
     nvmtl_vk_cmd_set_depth_bias(&c,1,2,3); assert(enabled && constant_value==1 && slope_value==2 && clamp_value==3);
     nvmtl_vk_cmd_set_depth_bias(&c,0,2,0); assert(enabled);
     nvmtl_vk_cmd_set_depth_bias(&c,0,0,0); assert(!enabled);
-    for(unsigned flags=0;flags<128;flags++) {
-        g_dyn3=flags&1;g_provoking=flags&2;g_clip=flags&4;g_wide=flags&8;g_sample_locations=flags&16;
+    for(unsigned flags=0;flags<256;flags++) {
+        g_dyn3=flags&1;g_provoking=flags&2;g_clip=flags&4;g_wide=flags&8;g_sample_locations=flags&16;g_depth_bounds=!!(flags&128);
         nvk_pipeline p={.has_stencil=!!(flags&32),.vin_dyn=!!(flags&64)};
         states(0,&p,1);states(1,&p,4);
     }
-    g_dyn3=g_provoking=g_clip=g_wide=g_sample_locations=1;
-    nvk_pipeline p={.has_stencil=1,.vin_dyn=1}; assert(states(1,&p,4)==23);
-    puts("PASS: depth bias is disabled at zero; all 128 dynamic-state combinations fit without duplicates");
+    g_dyn3=g_provoking=g_clip=g_wide=g_sample_locations=g_depth_bounds=1;
+    /* 16 depth/stencil + depth-bias enable + 2 depth bounds + polygon, provoking, clip, stride, width, sample locations */
+    nvk_pipeline p={.has_stencil=1,.vin_dyn=1}; assert(states(1,&p,4)==25);
+    puts("PASS: depth bias is disabled at zero; all 256 dynamic-state combinations fit without duplicates");
 }
 '''
 
