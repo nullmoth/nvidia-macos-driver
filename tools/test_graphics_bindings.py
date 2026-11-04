@@ -39,6 +39,9 @@ static void pvkCmdBindDescriptorSets(VkCommandBuffer cb,VkPipelineBindPoint poin
 static void pvkCmdBindPipeline(VkCommandBuffer cb,VkPipelineBindPoint point,VkPipeline pipeline) {
     assert(point==VK_PIPELINE_BIND_POINT_GRAPHICS); pipeline_calls++;
 }
+/* depth bounds (2.7.2) are re-sent after a bind only for a pipeline with db_dyn set; these pipelines have it off */
+static void pvkCmdSetDepthBoundsTestEnable(VkCommandBuffer cb,VkBool32 on) { (void)cb; (void)on; }
+static void pvkCmdSetDepthBounds(VkCommandBuffer cb,float lo,float hi) { (void)cb; (void)lo; (void)hi; }
 ''' + sets + '\n' + uniform_pick + '\n' + pipeline + r'''
 int main(void) {
     nvk_cmdbuf c={0};
