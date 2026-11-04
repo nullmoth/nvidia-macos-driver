@@ -24,5 +24,5 @@ system-wide changes:
   relaxes a related protection on task ports.
 - **System Integrity Protection** is partly off (`csr-active-config` 0x0A43).
 
-Removing the driver with the Mac app or `uninstall.sh` restores these settings. While the driver is installed, only run
-software you trust, as you would on any Mac with these protections off.
+Removing the driver with the Mac app restores what its setup changed. `uninstall.sh` on its own does not change them. While
+these settings are on, only run software you trust, as you would on any Mac with these protections off.
