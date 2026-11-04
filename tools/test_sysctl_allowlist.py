@@ -19,7 +19,10 @@ SOURCES = ["kexts/NVRM/NVRM.cpp", "kexts/NVRM/os-xnu2.cpp", "kexts/NVRM/os-nvkms
 # set with sudo. Reviewed 2.6.6.
 WRITABLE = {"nvaccel_igpu", "nvaccel_iop", "nvaccelfb", "nvaccel_vm_sticky", "nvaccel_iop_flip", "nvaccel_surface_gpu_on",
             "nvaccel_iop_async", "nvaccel_crc_head", "nvaccel_svdiag", "nvrmfb_agdc", "nvrmfb_vram_display_aware",
-            "nvrmfb_vramtest", "nvrmfb_vramtest_mode", "nvrmfb_flip_latch", "nvrmfb_flip_lean", "nvrmfb_flip_interval"}
+            "nvrmfb_vramtest", "nvrmfb_vramtest_mode", "nvrmfb_flip_latch", "nvrmfb_flip_lean", "nvrmfb_flip_interval",
+            # Root-only choice of accelerator-lock handling during a bounded page-off wait;
+            # exposes no memory and retains the ownership check before unlocking.
+            "nvaccel_pageoff_unlocked_wait"}
 # Read-only diagnostics that print physical addresses or memory: registered only with boot-arg nvrmdiag=1, root only.
 PHYSICAL = {"nvrm_watchpage", "nvrm_physmap", "nvrm_pvsentinel", "nvrm_winwhy", "nvrm_pvchain", "nvrm_winraw"}
 DECL = re.compile(r"SYSCTL_(?:INT|UINT|QUAD|PROC|STRING|OPAQUE|LONG|ULONG)\(\s*_debug\s*,\s*OID_AUTO\s*,\s*(\w+)\s*,([^;]*?)\)\s*;", re.S)
