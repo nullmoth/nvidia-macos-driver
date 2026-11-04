@@ -206,7 +206,8 @@ int main(void) {
 '''
 
 bias = section(vk, 'void nvmtl_vk_cmd_set_depth_bias(', '\nvoid nvmtl_vk_cmd_set_line_width(')
-pipeline_states = section(vk, '    VkDynamicState dyn[24]', '    // Metal has no depth-bias enable switch.')
+# the array grows as dynamic states are added (24 -> 26 with depth bounds), so the anchor names no size
+pipeline_states = section(vk, '    VkDynamicState dyn[', '    // Metal has no depth-bias enable switch.')
 bias_check = r'''
 #include <assert.h>
 #include <stdio.h>
