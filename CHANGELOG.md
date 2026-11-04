@@ -8,6 +8,10 @@
 - Setting a colour attachment map on a Metal 3 render encoder no longer stops the app. As on Apple GPUs, the map has no effect on a Metal 3 pipeline.
 - Fragment barycentrics are reported only on GPUs whose Vulkan driver provides them, so an app never builds a pipeline the GPU cannot run. On AMD GCN 3 and 4 the Vulkan driver now uses half-precision arithmetic where the hardware has it.
 - The 2.x driver is built for macOS 15 and macOS 26. On any other macOS version it creates no Metal device.
+- Security: fixed races in the NVIDIA kernel driver that let a logged-in user crash the Mac or corrupt kernel memory by binding, mapping, and closing GPU connections at the same time.
+- Security: the display driver no longer publishes kernel addresses where any app can read them.
+- Security: GPU profiling and channel priority now need an administrator. They were open to every user.
+- Security: a setuid or root process ignores the driver's environment settings, and a release build only loads a library named by one from a root-only folder.
 
 ## 2.7.1
 
