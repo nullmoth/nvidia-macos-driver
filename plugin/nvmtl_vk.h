@@ -56,6 +56,7 @@ typedef struct { void *rp; void *pipe; void *layout; int has_depth; uint32_t dfm
     uint32_t skip_draws;   /* NVMTL_SKIP_FS names this fragment shader: its draws are not recorded (hang bisection) */
     void *gl_uniform_alt; /* optional owned GL-only pipeline; the original remains the draw-time fallback */
     uint32_t gl_uniform_layout, gl_uniform_slot[2], gl_uniform_range[2], gl_uniform_tracked;
+    uint32_t db_dyn;   /* the depth bounds test and its range are dynamic state of this pipeline (depth attachment + depthBounds feature) */
 } nvk_pipeline;
 void nvmtl_vk_pipeline_destroy(nvk_pipeline *p);
 typedef struct { void *pool; nvk_buffer stage; } nvk_queue;
@@ -118,6 +119,9 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  nvmtl_fx_cb fx;   /* fault context: the last dispatches and the storage binds in force (nvmtl_fault_context.h) */
                  uint64_t fx_seq;  /* the queue-submit sequence number this command buffer was submitted with */
                  uint32_t begin_id; /* this command buffer's begin ordinal: what its per-dispatch witness words carry */
+                 /* the encoder's depth bounds (setDepthTestMinBound:maxBound:), re-emitted when a pipeline that has them as
+                    dynamic state is bound, since binding a pipeline without them leaves that state undefined */
+                 uint8_t db_on; float db_lo, db_hi;
                } nvk_cmdbuf;
 int  nvmtl_vk_init(void);
 int nvmtl_vk_sample_positions_backend(void);
@@ -227,6 +231,7 @@ void nvmtl_vk_cmd_set_provoking_last(nvk_cmdbuf *c, int last);
 void nvmtl_vk_cmd_set_blend_color(nvk_cmdbuf *c, const float rgba[4]);
 void nvmtl_vk_cmd_set_stencil_ref(nvk_cmdbuf *c, uint32_t front, uint32_t back);
 void nvmtl_vk_cmd_set_depth_bias(nvk_cmdbuf *c, float constant, float slope, float clamp);
+int  nvmtl_vk_cmd_set_depth_bounds(nvk_cmdbuf *c, int on, float lo, float hi);
 void nvmtl_vk_cmd_set_line_width(nvk_cmdbuf *c, float w);
 int  nvmtl_vk_fill_buffer(nvk_queue *q, nvk_buffer *b, size_t offset, size_t size, uint8_t value);
 int  nvmtl_vk_bind_buffer(nvk_cmdbuf *c, uint32_t set, uint32_t index, nvk_buffer *b, size_t offset);

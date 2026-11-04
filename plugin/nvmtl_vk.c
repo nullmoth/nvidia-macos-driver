@@ -387,7 +387,8 @@ void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, siz
     X(vkQueueSubmit) X(vkQueueBindSparse) X(vkCreateFence) X(vkWaitForFences) X(vkResetFences) X(vkDestroyFence) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyBuffer) \
     X(vkCmdPipelineBarrier) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkDeviceWaitIdle) X(vkFreeCommandBuffers) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetPrimitiveTopology) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdBindVertexBuffers) X(vkCreateDescriptorSetLayout) X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkDestroyDescriptorSetLayout) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets) X(vkCreateSampler) X(vkDestroySampler) X(vkFreeDescriptorSets) X(vkCmdSetBlendConstants) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdFillBuffer) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkGetBufferDeviceAddress) X(vkCmdWriteTimestamp) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdBeginQuery) X(vkCmdEndQuery) X(vkCmdCopyQueryPoolResults) X(vkGetQueryPoolResults) X(vkDestroyQueryPool) X(vkResetQueryPool) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatchIndirect) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) \
     X(vkDestroyBuffer) X(vkFreeMemory) X(vkDestroyImage) X(vkDestroyImageView) X(vkDestroyFramebuffer) X(vkDestroyCommandPool) \
-    X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetDepthBiasEnable)
+    X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetDepthBiasEnable) \
+    X(vkCmdSetDepthBoundsTestEnable) X(vkCmdSetDepthBounds)
 static int g_dyn3;
 static int g_provoking;   /* provoking vertex is per-draw dynamic state, and the last vertex can provoke */
 static int g_divisor;     /* per-instance step rates (VK_KHR_vertex_attribute_divisor), up to g_max_divisor */
@@ -396,6 +397,7 @@ static PFN_vkCmdSetProvokingVertexModeEXT pvkCmdSetProvokingVertexModeEXT;
 static int g_tess;
 static int g_indep;
 static int g_a2one;
+static int g_depth_bounds;   /* the depthBounds feature: Metal's setDepthTestMinBound:maxBound: */
 static int g_dual;
 static int g_wide;
 static PFN_vkCmdSetLineWidth pvkCmdSetLineWidth;
@@ -1299,6 +1301,8 @@ static int nvmtl_vk_initialize(void)
     enabled.vertexPipelineStoresAndAtomics = supported.vertexPipelineStoresAndAtomics;
     enabled.independentBlend = supported.independentBlend; g_indep = supported.independentBlend == VK_TRUE;
     enabled.alphaToOne = supported.alphaToOne; g_a2one = supported.alphaToOne == VK_TRUE;
+    enabled.depthBounds = supported.depthBounds; g_depth_bounds = supported.depthBounds == VK_TRUE;
+    nvlog("vk: depthBounds %s", g_depth_bounds ? "AVAILABLE" : "ABSENT - setDepthTestMinBound:maxBound: is refused");
     enabled.dualSrcBlend = supported.dualSrcBlend; g_dual = supported.dualSrcBlend == VK_TRUE;
     enabled.wideLines = supported.wideLines; g_wide = supported.wideLines == VK_TRUE;
     nvlog("vk: sel1 wideLines %s (range %g..%g)", g_wide ? "AVAILABLE" : "ABSENT", (double)g_lim.lineWidthRange[0], (double)g_lim.lineWidthRange[1]);
@@ -5362,14 +5366,19 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
         td ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_FALSE };
     VkPipelineTessellationStateCreateInfo tss = { VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO, NULL, 0, 1 };
     VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, NULL, 0, 1, NULL, 1, NULL };
-    // At most 23 states with stencil, dynamic vertex stride, line width, sample locations and dynamic-state3.
-    VkDynamicState dyn[24] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE,
+    // At most 25 states with stencil, depth bounds, dynamic vertex stride, line width, sample locations and dynamic-state3.
+    VkDynamicState dyn[26] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE,
         VK_DYNAMIC_STATE_BLEND_CONSTANTS, VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_DEPTH_BIAS,
         VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY, VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE, VK_DYNAMIC_STATE_FRONT_FACE,
         VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE, VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
         VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_OP, VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK };
     uint32_t ndyn = hasDepth ? (out->has_stencil ? 16u : 12u) : 9u;
     dyn[ndyn++] = VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE; // core Vulkan 1.3, like primitive-restart enable
+    // Metal's depth bounds test (macOS 26) is set on the encoder, not the pipeline, and compares the depth already STORED
+    // in the attachment, which is Vulkan's depth bounds test exactly (measured on Apple silicon: stored 0.25 with a
+    // fragment at 0.9 and bounds [0.5, 1] is discarded). Both the switch and the range are dynamic.
+    out->db_dyn = hasDepth && g_depth_bounds;
+    if (out->db_dyn) { dyn[ndyn++] = VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE; dyn[ndyn++] = VK_DYNAMIC_STATE_DEPTH_BOUNDS; }
     if (g_dyn3) {
         dyn[ndyn++] = VK_DYNAMIC_STATE_POLYGON_MODE_EXT;
         if (g_provoking) dyn[ndyn++] = VK_DYNAMIC_STATE_PROVOKING_VERTEX_MODE_EXT;
@@ -7472,6 +7481,10 @@ void nvmtl_vk_cmd_bind_pipeline(nvk_cmdbuf *c, nvk_pipeline *p) {
     if (p->pipe && c->graphics_pipeline == p->pipe) return;
     pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipeline)p->pipe);
     c->graphics_pipeline = p->pipe;
+    if (p->db_dyn) {
+        pvkCmdSetDepthBoundsTestEnable(c->cb, c->db_on ? VK_TRUE : VK_FALSE);
+        pvkCmdSetDepthBounds(c->cb, c->db_on ? c->db_lo : 0.0f, c->db_on ? c->db_hi : 1.0f);
+    }
 }
 int nvmtl_vk_cmd_set_topology(nvk_cmdbuf *c, unsigned mtlType) {
     static const VkPrimitiveTopology map[5] = { VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
@@ -7558,6 +7571,19 @@ void nvmtl_vk_cmd_set_stencil(nvk_cmdbuf *c, int enable, const uint32_t *f, cons
         pvkCmdSetStencilWriteMask(c->cb, face[i], o[i][5]);
         c->st_wmask[i] = enable ? o[i][5] : 0;
     }
+}
+// Returns -1 when the device has no depthBounds feature and the test was asked for; the caller says so once.
+// Vulkan needs the range inside [0, 1] without VK_EXT_depth_range_unrestricted; a stored depth is in that range
+// anyway, so clamping keeps the test's answer.
+int nvmtl_vk_cmd_set_depth_bounds(nvk_cmdbuf *c, int on, float lo, float hi)
+{
+    if (!g_depth_bounds) return on ? -1 : 0;
+    lo = !(lo > 0.0f) ? 0.0f : lo > 1.0f ? 1.0f : lo;
+    hi = !(hi < 1.0f) ? 1.0f : hi < 0.0f ? 0.0f : hi;
+    c->db_on = on ? 1 : 0; c->db_lo = lo; c->db_hi = hi;
+    pvkCmdSetDepthBoundsTestEnable(c->cb, on ? VK_TRUE : VK_FALSE);
+    pvkCmdSetDepthBounds(c->cb, on ? lo : 0.0f, on ? hi : 1.0f);
+    return 0;
 }
 void nvmtl_vk_cmd_set_depth_bias(nvk_cmdbuf *c, float constant, float slope, float clamp)
 {

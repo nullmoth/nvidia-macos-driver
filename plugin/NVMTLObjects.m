@@ -1860,6 +1860,24 @@ static uint32_t nvmtl_tex_attach_vkfmt(NVMTLTexture *t, int *a8) {
     v->_stex = [v nvi]->storage && !a8 && nvmtl_vk_format_is_storage(vkf);
     return v;
 }
+// macOS 26: the same view as newTextureViewWithPixelFormat:textureType:levels:slices:swizzle:, described by an
+// MTLTextureViewDescriptor. The descriptor is read by key because the plugin is built for macOS 15, where the class does
+// not exist. A field left at zero means "as the texture is": no pixel format keeps the texture's, an empty level or slice
+// range covers every level or slice, and an all-zero swizzle is the identity.
+- (id<MTLTexture>)newTextureViewWithDescriptor:(id)d {
+    if (!d) return nil;
+    MTLPixelFormat f = [[d valueForKey:@"pixelFormat"] unsignedIntegerValue];
+    MTLTextureType tt = (MTLTextureType)[[d valueForKey:@"textureType"] unsignedIntegerValue];
+    NSRange levels = [[d valueForKey:@"levelRange"] rangeValue], slices = [[d valueForKey:@"sliceRange"] rangeValue];
+    MTLTextureSwizzleChannels sw = { 0, 0, 0, 0 };
+    { id v = [d valueForKey:@"swizzle"];
+      if ([v isKindOfClass:[NSValue class]] && !strcmp([(NSValue *)v objCType], @encode(MTLTextureSwizzleChannels))) [(NSValue *)v getValue:&sw size:sizeof sw]; }
+    if (f == MTLPixelFormatInvalid) f = self.pixelFormat;
+    if (!levels.length) levels = NSMakeRange(0, self.mipmapLevelCount);
+    if (!slices.length) slices = NSMakeRange(0, self.textureType == MTLTextureTypeCube ? 6 : self.textureType == MTLTextureTypeCubeArray ? self.arrayLength * 6 : self.arrayLength);
+    if (!sw.red && !sw.green && !sw.blue && !sw.alpha) sw = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha);
+    return [self newTextureViewWithPixelFormat:f textureType:tt levels:levels slices:slices swizzle:sw];
+}
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)f textureType:(MTLTextureType)tt
                                          levels:(NSRange)levels slices:(NSRange)slices
                                         swizzle:(MTLTextureSwizzleChannels)sw {
@@ -2933,6 +2951,9 @@ static uint64_t nvmtl_resid_pipe(id o, uint64_t *slot) {
 - (NSUInteger)maxTotalThreadsPerThreadgroup { return 1024; }
 - (NSUInteger)threadExecutionWidth { return 32; }
 - (BOOL)threadgroupSizeMatchesTileSize { return NO; }
+- (MTLSize)requiredThreadsPerTileThreadgroup { return MTLSizeMake(0, 0, 0); }   // no tile pipelines here
+- (MTLSize)requiredThreadsPerObjectThreadgroup { return _reqObj; }
+- (MTLSize)requiredThreadsPerMeshThreadgroup { return _reqMesh; }
 - (NSString *)label { return _descriptor.label; }
 - (BOOL)supportIndirectCommandBuffers { return _descriptor.supportIndirectCommandBuffers; }
 - (MTLResourceID)gpuResourceID {
@@ -3572,6 +3593,10 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
 - (void)nvmtlApplyDepthStencil {
     if (!_begun || !_ps || !_ps->_p.has_depth) return;
     nvmtl_vk_cmd_set_depth(&_cb->_c, _ds ? 1 : 0, _ds ? _ds->_write : 0, _ds ? _ds->_compare : 7);
+    // Every encoder starts with the depth bounds test off, as on Apple; the pipeline holds it as dynamic state, which
+    // must be set before the first draw, so it is written here at pass begin even when the app never asks for it.
+    if (nvmtl_vk_cmd_set_depth_bounds(&_cb->_c, _dbOn, _dbLo, _dbHi) && _dbOn) {
+        static int said; if (!said++) nvlog("setDepthTestMinBound:maxBound: REFUSED - this device has no depthBounds feature, the test is not applied"); }
     if (!_ps->_p.has_stencil) return;
     static const uint32_t off[6] = { 7, 0, 0, 0, 0xff, 0xff };
     nvmtl_vk_cmd_set_stencil(&_cb->_c, _ds && _ds->_stencil, _ds ? _ds->_sf : off, _ds ? _ds->_sb : off);
@@ -4040,6 +4065,19 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)s {
     _ds = (NVMTLDepthStencilState *)s;
     [self nvmtlApplyDepthStencil];
+}
+// macOS 26: the depth bounds test. Setting a range turns the test on for the rest of the encoder; fragments whose STORED
+// attachment depth is outside [min, max] are discarded. Apple applies no test until this is called.
+- (void)setDepthTestMinBound:(float)lo maxBound:(float)hi {
+    _dbOn = YES; _dbLo = lo; _dbHi = hi;
+    [self nvmtlApplyDepthStencil];
+}
+// macOS 26: a logical-to-physical colour attachment map. Measured on Apple GPUs, a Metal 3 encoder accepts it and nothing
+// changes, because a Metal 3 render pipeline always uses the identity mapping (only Metal 4 pipelines inherit the map).
+// Without the method the call is an unrecognized selector and the app stops.
+- (void)setColorAttachmentMap:(id)map {
+    static int said;
+    if (map && !said++) nvlog("render encoder setColorAttachmentMap: a Metal 3 pipeline uses the identity mapping, so the map has no effect, as on Apple GPUs (said once)");
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)type indexCount:(NSUInteger)count indexType:(MTLIndexType)it
                   indexBuffer:(id<MTLBuffer>)ib indexBufferOffset:(NSUInteger)off
@@ -4680,7 +4718,11 @@ static NSUInteger nvmtl_env_uint(NSString *k, NSUInteger dflt) {
     return s.length ? (NSUInteger)s.integerValue : dflt;
 }
 static NSUInteger nvmtl_compute_maxt(void) { static NSUInteger v; if (!v) v = nvmtl_env_uint(@"NVMTL_MAXT", 1024); return v; }
-- (NSUInteger)maxTotalThreadsPerThreadgroup { NSUInteger v = nvmtl_compute_maxt(), n = _attrT ?: _askT; return n && n < v ? n : v; }
+// A required threadgroup size fixes the total too: Apple answers 64 for a pipeline that requires 64x1x1.
+- (NSUInteger)maxTotalThreadsPerThreadgroup { NSUInteger v = nvmtl_compute_maxt(), n = _attrT ?: _askT;
+    NSUInteger rq = _reqTG.width * _reqTG.height * _reqTG.depth; if (rq && (!n || rq < n)) n = rq;
+    return n && n < v ? n : v; }
+- (MTLSize)requiredThreadsPerThreadgroup { return _reqTG; }
 - (NSUInteger)threadExecutionWidth { static NSUInteger v; if (!v) v = nvmtl_env_uint(@"NVMTL_TEW", 32); return v; }
 - (NSUInteger)staticThreadgroupMemoryLength { return 0; }
 - (NSString *)label { return _label; }
