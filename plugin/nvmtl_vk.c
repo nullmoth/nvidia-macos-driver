@@ -185,6 +185,7 @@ static uint64_t g_vram_bytes, g_sys_bytes, g_spilled;
 static uint64_t g_bind_lost, g_bind_lost_bytes;
 static int g_budget_ext;
 static int g_rt;
+static int g_bary;  /* VK_KHR_fragment_shader_barycentric with fragmentShaderBarycentric: backs the barycentric claim */
 #define NVMTL_RT_BUFFER_USAGE (g_rt ? (VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR) : 0)
 static PFN_vkCreateAccelerationStructureKHR pvkCreateAccelerationStructureKHR;
 static PFN_vkDestroyAccelerationStructureKHR pvkDestroyAccelerationStructureKHR;
@@ -1001,6 +1002,11 @@ static int nvmtl_vk_initialize(void)
             }
         }
     }
+    /* GCN 3/4 (Tonga, Fiji, Polaris) have a 16-bit ALU, but RADV reports shaderFloat16 there only with this option (one of
+       its own driconf defaults). Without it every half-precision module is refused on those cards by nvmtl_spirv_ok,
+       though RADV compiles them. GCN 1/2 have no 16-bit ALU and keep shaderFloat16 off: their half modules stay refused,
+       which is what keeps ACO from compiling half arithmetic it cannot lower there. A value the user set wins. */
+    if (nvmtl_vk_vendor() == 0x1002) setenv("radv_enable_float16_gfx8", "true", 0);
     g_lib = dlopen(NVMTL_ICD_LIB, RTLD_NOW | RTLD_LOCAL);
     if (g_lib) {
         pvkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(g_lib, "vkGetInstanceProcAddr");
@@ -1104,6 +1110,25 @@ static int nvmtl_vk_initialize(void)
             g_sample_props.maxSampleLocationGridSize.width >= 1 && g_sample_props.maxSampleLocationGridSize.height >= 1 &&
             (g_sample_props.sampleLocationSampleCounts & (VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT | VK_SAMPLE_COUNT_8_BIT)) == (VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT | VK_SAMPLE_COUNT_8_BIT) && g_sample_props.sampleLocationSubPixelBits == 4 &&
             g_sample_props.sampleLocationCoordinateRange[0] <= 0 && g_sample_props.sampleLocationCoordinateRange[1] >= 0.9375f;
+    }
+    {
+        /* only asked, not enabled: the translator emits BaryCoordKHR and the claim must match what the device has */
+        int bext = 0; uint32_t nb = 0;
+        if (pvkEnumerateDeviceExtensionProperties && pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &nb, NULL) == VK_SUCCESS && nb) {
+            VkExtensionProperties *bp = calloc(nb, sizeof *bp);
+            if (bp && pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &nb, bp) == VK_SUCCESS)
+                for (uint32_t i = 0; i < nb; i++)
+                    if (!strcmp(bp[i].extensionName, "VK_KHR_fragment_shader_barycentric")) bext = 1;
+            free(bp);
+        }
+        if (bext) {
+            PFN_vkGetPhysicalDeviceFeatures2 gbf = (PFN_vkGetPhysicalDeviceFeatures2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFeatures2");
+            VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR bf = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR };
+            VkPhysicalDeviceFeatures2 bf2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &bf };
+            if (gbf) gbf(g_pdev, &bf2);
+            g_bary = bf.fragmentShaderBarycentric == VK_TRUE;
+        }
+        nvlog("vk: fragment shader barycentrics %s", g_bary ? "present - supportsShaderBarycentricCoordinates YES" : "ABSENT - not claimed");
     }
     g_dyn3 = have[0]; g_clip = have[0] && have[1]; g_budget_ext = have[2]; g_rt = have[3] && have[4] && have[5];
     g_host_import = have[6];
@@ -8939,6 +8964,7 @@ void nvmtl_vk_cmd_barrier_c2c(nvk_cmdbuf *c)
 }
 
 int nvmtl_vk_rt_available(void) { return nvmtl_vk_init() ? 0 : g_rt; }
+int nvmtl_vk_barycentrics_available(void) { return nvmtl_vk_init() ? 0 : g_bary; }
 
 static uint32_t nvmtl_fill_geometries(const nvmtl_geom *g, uint32_t n, uint64_t instances_addr, uint32_t instance_count, int instance,
                                       VkAccelerationStructureGeometryKHR *out, uint32_t *counts)
