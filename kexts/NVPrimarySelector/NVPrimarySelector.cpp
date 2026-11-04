@@ -6,6 +6,7 @@
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <mach/kmod.h>
+#include <libkern/version.h>
 #include "nvrm_gpu_select.h"
 
 extern "C" kern_return_t _start(kmod_info_t *,void *) {return KERN_SUCCESS;}
@@ -80,6 +81,7 @@ public:
         return IOService::init(properties);
     }
     bool start(IOService *provider) override {
+        if (version_major != 24 && version_major != 25) return false;   /* the 2.x line supports macOS 15 (Darwin 24) and macOS 26 (Darwin 25) only */
         if(!IOService::start(provider))return false;
         // Matching IOResources gives one coordinator for the entire PCI tree.
         setProperty("selector-version","0.1.0");

@@ -28,6 +28,11 @@ extern "C" {
 #include <sys/proc.h>
 #include <sys/kauth.h>
 #include <sys/sysctl.h>
+#include <libkern/version.h>
+
+// The 2.x driver is built for macOS 15 (Darwin 24) and macOS 26 (Darwin 25) only; on any other kernel NVRM
+// claims nothing, so NVRMFB and NVRMAGDC, which attach to it, never start either.
+static bool nvrm_kernel_supported(void) { return version_major == 24 || version_major == 25; }
 
 #include "nvrm_gpuva_abi.h"
 #define NVRM_SS_KERNEL_ABI 1
@@ -396,6 +401,7 @@ static inline bool nvrmNameIsUnknown(const char *s)
 IOService *NVRM::probe(IOService *provider, SInt32 *score)
 {
     { if (nvrm_driver_off()) return NULL; }
+    if (!nvrm_kernel_supported()) { LOG("Darwin %d is not supported by this driver: not claiming the GPU", version_major); return NULL; }
     IOService *res = super::probe(provider, score);
     IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
     if (!pci) return NULL;
@@ -418,6 +424,7 @@ IOService *NVRM::probe(IOService *provider, SInt32 *score)
 bool NVRM::start(IOService *provider)
 {
     { if (nvrm_driver_off()) return false; }
+    if (!nvrm_kernel_supported()) return false;
     nvrm_guard_count_start();
     if (!super::start(provider)) return false;
     fPCI = OSDynamicCast(IOPCIDevice, provider);

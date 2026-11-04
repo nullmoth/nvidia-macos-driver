@@ -686,6 +686,12 @@ static void nvmtl_install_hw_resource_pools(id dev)
 }
 - (instancetype)initWithAcceleratorPort:(mach_port_t)port {
     nvlog("-[NVMTLDevice initWithAcceleratorPort:%u] in %s", port, getprogname());
+    {   /* the 2.x driver is built for macOS 15 and 26 only: on any later macOS, or when the version cannot be
+           read, it creates no device, before touching the accelerator */
+        char v[32] = {0}; size_t n = sizeof v - 1;
+        int major = sysctlbyname("kern.osproductversion", v, &n, NULL, 0) == 0 ? atoi(v) : 0;
+        if (major < 15 || major > 26) { nvlog("  macOS %s is not supported by this driver: no device", v[0] ? v : "unknown"); return nil; }
+    }
     self = [super initWithAcceleratorPort:port];
     if (!self) { nvlog("  super initWithAcceleratorPort: returned nil"); return nil; }
     {   /* one GPU per process: the plugin runs a single Vulkan device, so a second Metal device on another vendor's
