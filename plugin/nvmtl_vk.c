@@ -115,7 +115,7 @@ static const char *nvmtl_vk_icd_json(void) {
 }
 #define NVMTL_ICD    nvmtl_vk_icd_json()
 static inline const char *nvmtl_icd_lib_path(void) {
-    const char *e = getenv("NVMTL_ICD_LIB"); if (e && access(e, R_OK) == 0) return e;
+    const char *e = getenv("NVMTL_ICD_LIB"); if (e && access(e, R_OK) == 0 && nvmtl_code_path_allowed(e)) return e;
     switch (nvmtl_vk_vendor()) {
     case 0x1002: return "/Library/GPUBundles/nvmtl/libvulkan_radeon.dylib";
     case 0x8086: return "/Library/GPUBundles/nvmtl/libvulkan_intel.dylib";
@@ -5697,7 +5697,7 @@ int nvmtl_vk_cmd_dispatch_sass(nvk_cmdbuf *c,
     if (!looked) {
 
         const char *path = getenv("NVMTL_NVK_DYLIB");
-        void *h = dlopen(path && *path ? path : "/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib",
+        void *h = dlopen(path && *path && nvmtl_code_path_allowed(path) ? path : "/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib",
                          RTLD_NOW | RTLD_LOCAL);
         looked = 1;
         if (!h) nvlog("sass dispatch: cannot open NVK: %s", dlerror());

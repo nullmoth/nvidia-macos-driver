@@ -32,7 +32,7 @@ static bool nvmtl_vendor_enabled(void) {
 
 static const char *nvmtl_vendor_plugin_path(void) {
     const char *p = getenv("NVMTL_VENDOR_PLUGIN_PATH");
-    return (p && *p) ? p : NVMTL_VENDOR_PLUGIN;
+    return (p && *p && nvmtl_code_path_allowed(p)) ? p : NVMTL_VENDOR_PLUGIN;
 }
 
 struct nvmtl_hwinfo {
