@@ -1037,11 +1037,17 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
             return false;
         }
     }
-    fKms = (struct NvKmsKapiFunctionsTable *)(uintptr_t)propU64(provider, "nvkms-kapi");
+    struct NVRMDisplayPointers displayPtrs = {};
+    displayPtrs.version = NVRM_DISPLAY_PTRS_ABI_VERSION;
+    {
+        const OSSymbol *displayPtrsFn = OSSymbol::withCString(NVRM_DISPLAY_PTRS_FN);
+        if (displayPtrsFn) { provider->callPlatformFunction(displayPtrsFn, false, &displayPtrs, NULL, NULL, NULL); displayPtrsFn->release(); }
+    }
+    fKms = (struct NvKmsKapiFunctionsTable *)displayPtrs.kapi;
     fGpuId = (NvU32)propU64(provider, "gpu-id");
     fIndex = (unsigned)propU64(provider, "fb-index");
     if (fIndex == 0 && gFB != this) { retain(); gFB = this; }
-    fPhysForVa = (nvrm_phys_for_va_t)(uintptr_t)propU64(provider, "phys-for-va");
+    fPhysForVa = (nvrm_phys_for_va_t)displayPtrs.physForVa;
     if (!fKms || !fPhysForVa) { FBLOG("nub lacks nvkms-kapi/phys-for-va properties"); return false; }
     setProperty("IOFBDependentID", (unsigned long long)0x4E56524D00000001ull, 64);
     setProperty("IOFBDependentIndex", (unsigned long long)fIndex, 32);

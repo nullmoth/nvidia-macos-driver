@@ -33,7 +33,7 @@ check('RM administrator check reads the caller uid', 'return (kauth_getuid() == 
 check('first-time GPU bring-up refuses non-root callers', 'if (pass > fPassDone && kauth_getuid() != 0)' in nvrm)
 check('event waiters are capped', 'kNvEvtMaxSleepers = 256' in nvrm and 'OSDecrementAtomic(&gNvEvtSleepers)' in nvrm)
 check('bind-fd rejects out-of-range values and clears a stale context when bound to a real fd',
-      'if (v > 0x7FFFFFFFLL || v < -0x80000000LL) return kIOReturnBadArgument;' in nvrm and 'if (me->fBound >= 0 && me->fMmap.valid)' in nvrm)
+      'if (v > 0x7FFFFFFFLL || v < -0x80000000LL) return kIOReturnBadArgument;' in nvrm and 'if (me->fBound >= 0) {\n        IOLockLock(me->fMapLock);\n        if (me->fMmap.valid) {' in nvrm)
 
 # --- 2.3.7: the gates added after the driver was audited against Apple's and NVIDIA's own bug classes ---
 fb = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
@@ -219,6 +219,56 @@ check('every kext, the accelerator included, is installed from the checked priva
 # boot-guard fallback restored the previous driver with no firmware at all - a dark Mac, no recovery.
 check('the firmware backup falls back to the old location on an upgrade',
       'then backup_copy firmware ditto "$FWOLD" "$BK/nvfw"' in inst and 'elif [ -d "$FWOLD" ] && [ ! -L "$FWOLD" ]' in inst)
+
+# Kernel review, 2.7.2. The registry is readable by every process, so a kernel pointer there defeats address randomisation.
+nvrmfb = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
+nvrmfb2 = (root / 'kexts/NVRM/fb/nvrm-fb.cpp').read_text()
+intel = (root / 'kexts/NMIntelFB/intelfb.cpp').read_text()
+for name, text in (('NVRM', nvrm), ('NVRMFB', nvrmfb), ('NVRM fb', nvrmfb2), ('NVRM accel', accel), ('NMIntelFB', intel)):
+    check(f'{name} neither publishes nor reads a kernel pointer as a registry property',
+          '"nvkms-kapi"' not in text and '"phys-for-va"' not in text)
+check('both display kexts ask NVRM for the pointers through a kernel-only call',
+      all('NVRM_DISPLAY_PTRS_FN' in t for t in (nvrmfb, nvrmfb2, accel)) and 'isEqualTo(NVRM_DISPLAY_PTRS_FN)' in nvrm)
+abi1 = (root / 'kexts/NVRM/nvrm_gpuva_abi.h').read_text()
+abi2 = (root / 'kexts/NVRMFB/nvrm_gpuva_abi.h').read_text()
+check('the two copies of the display ABI header agree', abi1 == abi2)
+
+def body(text, start, end):
+    i = text.find(start)
+    j = text.find(end, i + len(start)) if i >= 0 else -1
+    return text[i:j] if i >= 0 and j >= 0 else ''
+
+bind = body(nvrm, 'IOReturn NVRMUserClient::sBindFd(', 'IOReturn NVRMUserClient::')
+check('a bind clears the mapping context only under the mapping lock',
+      bind.find('IOLockLock(me->fMapLock)') >= 0 and
+      bind.find('IOLockLock(me->fMapLock)') < bind.find('nvMmapContextClear') < bind.find('IOLockUnlock(me->fMapLock)'))
+cmft = body(nvrm, 'IOReturn NVRMUserClient::clientMemoryForType(', 'IOReturn NVRMUserClient::externalMethod(')
+copied = cmft.find('snapshot.memArea.pRanges = ranges;')
+check('a map reads the live context only under the mapping lock, then only its private copy',
+      copied > 0 and 'nvu_memcpy(ranges,' in cmft[:copied] and 'fMmap' not in cmft[copied:]
+      and 'c = &snapshot' in cmft[copied:] and 'c = &fMmap' not in cmft)
+check('a map refuses an empty range list before reading its first entry',
+      'count == 0 || count > 4096' in cmft)
+close = body(nvrm, 'IOReturn NVRMUserClient::clientClose(', 'void NVRMUserClient::free(')
+check('close marks the context dead under the mapping lock',
+      'IOLockLock(fMapLock);\n        fMmap.valid = NV_FALSE;' in close)
+
+look = body(nvrm, 'nv_file_private_t *nv_xnu_lookup_fd(', 'static void nvMmapContextClear')
+check('a looked-up client is retained before the table lock is dropped',
+      0 <= look.find('c->retain()') < look.find('IOLockUnlock(gNvClientsLock)'))
+check('a client being closed is not handed out', 'c->cleaned()' in look)
+check('putting a client releases it', 'void NV_API_CALL nv_put_file_private(void *os_private) { TRC; nv_xnu_put_client(os_private); }' in osx2)
+getfp = body(osx2, 'nv_file_private_t *NV_API_CALL nv_get_file_private(', 'extern "C" IOMemoryDescriptor *nv_xnu_alloc_md')
+check('the wrong kind of client is released, and the caller gets no pointer to it',
+      'nv_xnu_put_client(os_private ? *os_private : NULL)' in getfp and '*os_private = NULL' in getfp)
+amap = body(osx2, 'NV_STATUS NV_API_CALL nv_add_mapping_context_to_file(', 'void NV_API_CALL nv_put_file_private')
+check("another client's context is written under that client's lock and every exit puts it",
+      0 <= amap.find('nv_xnu_mmap_lock(priv)') < amap.find('if (c->valid)') and 'nv_xnu_mmap_unlock(p); nv_put_file_private(p);' in amap)
+
+access = body(osx2, 'NvBool NV_API_CALL os_check_access(', 'NvU32  NV_API_CALL os_get_current_process_flags')
+check('GPU profiling and channel priority are for administrators; any other right is refused',
+      'RS_ACCESS_PERFMON' in access and 'RS_ACCESS_NICE' in access and 'os_is_administrator()' in access
+      and 'NV_FALSE' in access and 'return NV_TRUE' not in access)
 
 print('FAILED' if fails else 'PASS')
 sys.exit(1 if fails else 0)

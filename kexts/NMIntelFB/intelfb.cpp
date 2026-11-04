@@ -596,7 +596,7 @@ static int nmintelfb_attach_sysctl SYSCTL_HANDLER_ARGS
     if (!nub0 || !nvrm) { OSSafeReleaseNULL(nub0); OSSafeReleaseNULL(nvrm); IFBLOG("attach: no NVRMDisplay 0 / NVRM"); return ENODEV; }
     IOService *nub = OSDynamicCast(IOService, OSMetaClass::allocClassWithName("NVRMDisplay"));
     if (!nub || !nub->init()) { OSSafeReleaseNULL(nub); nub0->release(); nvrm->release(); return ENOMEM; }
-    static const char *const kCopy[] = {"nvkms-kapi", "gpu-id", "phys-for-va"};
+    static const char *const kCopy[] = {"gpu-id"};
     for (const char *k : kCopy) if (OSObject *v = nub0->getProperty(k)) nub->setProperty(k, v);
     nub->setProperty("fb-index", 4ull, 32);
     nub->setProperty("nm-intel-panel", kOSBooleanTrue);

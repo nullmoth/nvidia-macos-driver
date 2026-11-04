@@ -50,7 +50,13 @@ static inline void nvx2_memcpy(void *d, const void *s, size_t n) { __asm__ __vol
 
 extern "C" {
 
-NvBool NV_API_CALL os_check_access(RsAccessRight accessRight) { TRC; return NV_TRUE; }
+// GPU profiling and channel priority are for administrators, as on Linux, where this answers from CAP_PERFMON and
+// CAP_SYS_NICE. RM's own kernel clients do not come through here. Any other right is refused.
+NvBool NV_API_CALL os_check_access(RsAccessRight accessRight)
+{
+    TRC;
+    return (accessRight == RS_ACCESS_PERFMON || accessRight == RS_ACCESS_NICE) ? os_is_administrator() : NV_FALSE;
+}
 NvU32  NV_API_CALL os_get_current_process_flags(void) { TRC; return 0; }
 NvBool NV_API_CALL nv_requires_dma_remap(nv_state_t *nv) { TRC; return NV_FALSE; }
 static NvU32 nv_xnu_dma_bits = 64;
@@ -1616,11 +1622,19 @@ void NV_API_CALL nv_destroy_nano_timer(nv_state_t *nv, nv_nano_timer_t *t)
 
 extern "C" nv_file_private_t *nv_xnu_lookup_fd(NvS32 fd, void **priv, NvBool *isCtl);
 extern "C" nv_alloc_mapping_context_t *nv_xnu_mmap_context(void *priv);
+extern "C" void nv_xnu_put_client(void *priv);
+extern "C" void nv_xnu_mmap_lock(void *priv);
+extern "C" void nv_xnu_mmap_unlock(void *priv);
 nv_file_private_t *NV_API_CALL nv_get_file_private(NvS32 fd, NvBool ctl, void **os_private)
 {
     TRC; NvBool isCtl = NV_FALSE; nv_file_private_t *fp = nv_xnu_lookup_fd(fd, os_private, &isCtl);
     if (!fp) { kprintf("NVRM-xnu: nv_get_file_private(fd %d) -> none\n", fd); return NULL; }
-    if (!!isCtl != !!ctl) { kprintf("NVRM-xnu: nv_get_file_private(fd %d): wanted %s, is %s\n", fd, ctl ? "ctl" : "device", isCtl ? "ctl" : "device"); return NULL; }
+    if (!!isCtl != !!ctl) {
+        kprintf("NVRM-xnu: nv_get_file_private(fd %d): wanted %s, is %s\n", fd, ctl ? "ctl" : "device", isCtl ? "ctl" : "device");
+        nv_xnu_put_client(os_private ? *os_private : NULL);
+        if (os_private) *os_private = NULL;
+        return NULL;
+    }
     return fp;
 }
 extern "C" IOMemoryDescriptor *nv_xnu_alloc_md(void *priv, NvU64 *bytes, NvU32 *cache)
@@ -1662,7 +1676,13 @@ NV_STATUS NV_API_CALL nv_add_mapping_context_to_file(nv_state_t *nv, nv_usermap_
     nv_file_private_t *nvfp = nv_get_file_private((NvS32)fd, NV_IS_CTL_DEVICE(nv), &priv);
     if (!nvfp) return NV_ERR_INVALID_ARGUMENT;
     nv_alloc_mapping_context_t *c = nv_xnu_mmap_context(priv);
-    if (!c) return NV_ERR_INVALID_ARGUMENT;
+    if (!c) { nv_put_file_private(priv); return NV_ERR_INVALID_ARGUMENT; }
+    // The target client's own lock: it can be another connection, mapping or binding right now.
+    nv_xnu_mmap_lock(priv);
+    struct Done {
+        void *p;
+        ~Done() { nv_xnu_mmap_unlock(p); nv_put_file_private(p); }
+    } done = { priv };
     if (c->valid) return NV_ERR_STATE_IN_USE;
     nvx2_memset(c, 0, sizeof *c);
     if (NV_IS_CTL_DEVICE(nv)) { c->alloc = pAllocPriv; c->page_index = pageIndex; }
@@ -1680,7 +1700,7 @@ NV_STATUS NV_API_CALL nv_add_mapping_context_to_file(nv_state_t *nv, nv_usermap_
             fd, NV_IS_CTL_DEVICE(nv) ? "sysmem" : "device", pageIndex, c->memArea.numRanges, c->access_start, c->access_size, c->caching, prot);
     return NV_OK;
 }
-void NV_API_CALL nv_put_file_private(void *os_private) { TRC; }
+void NV_API_CALL nv_put_file_private(void *os_private) { TRC; nv_xnu_put_client(os_private); }
 NvBool NV_API_CALL nv_is_gpu_accessible(nv_state_t *nv) { TRC; return NV_TRUE; }
 static nv_state_t nv_xnu_ctl_state;
 nv_state_t *NV_API_CALL nv_get_ctl_state(void)
