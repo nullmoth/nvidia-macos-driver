@@ -480,6 +480,9 @@ ok "installed"
 # the licences and notices of everything this package carries, beside the driver they cover
 if [ -d "$HERE/licenses" ]; then rm -rf /Library/NullMoth/licenses && ditto "$HERE/licenses" /Library/NullMoth/licenses \
   && chmod -R go-w /Library/NullMoth/licenses || echo "   note: the licence texts could not be copied to /Library/NullMoth/licenses"; fi
+# /Library/NullMoth must stay traversable by every user: ARM apps' nm-arm lives under it and runs as the user. A root
+# shell with umask 077 (the Mac app's privileged steps) left it 700 in 2.7, which hid nm-arm from its own user.
+mkdir -p /Library/NullMoth && chmod 755 /Library/NullMoth || echo "   note: /Library/NullMoth could not be made readable (ARM apps may not start)"
 if [ -f "$HERE/VERSION" ]; then mkdir -p /Library/NullMoth && tr -cd '0-9.\n' < "$HERE/VERSION" | head -n 1 > /Library/NullMoth/driver-version.tmp \
   && chmod 644 /Library/NullMoth/driver-version.tmp && mv /Library/NullMoth/driver-version.tmp /Library/NullMoth/driver-version; fi
 
