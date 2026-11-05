@@ -1,0 +1,122 @@
+### hq.txt
+== crowd60
+refs 1 AB hevc 'baseline' Mbps=6.080 psnr=26.584637 vmaf=55.217033 ms=2.805 
+refs 1 AB hevc 'QUALITY=1' Mbps=6.078 psnr=26.509465 vmaf=54.759469 ms=3.600 
+refs 1 AB hevc 'TWOPASS=1' Mbps=6.013 psnr=26.469062 vmaf=53.793255 ms=4.710 
+refs 1 AB hevc 'QUALITY=1 TWOPASS=1' Mbps=6.050 psnr=26.402346 vmaf=53.322368 ms=6.298 
+refs 3 AB hevc 'baseline' Mbps=6.081 psnr=26.583275 vmaf=55.188959 ms=2.833 
+refs 3 AB hevc 'QUALITY=1' Mbps=6.080 psnr=26.497965 vmaf=54.678131 ms=3.460 
+refs 3 AB hevc 'TWOPASS=1' Mbps=6.012 psnr=26.461366 vmaf=53.778154 ms=4.664 
+refs 3 AB hevc 'QUALITY=1 TWOPASS=1' Mbps=6.024 psnr=26.379351 vmaf=53.161550 ms=6.108 
+x265 fast Mbps=5.929 psnr=27.117136 vmaf=56.919999
+x265 medium Mbps=5.924 psnr=26.945278 vmaf=56.071539
+== park1080_60
+refs 1 AB hevc 'baseline' Mbps=6.099 psnr=26.778223 vmaf=56.563538 ms=2.946 
+refs 1 AB hevc 'QUALITY=1' Mbps=6.090 psnr=26.730640 vmaf=56.216193 ms=3.203 
+refs 1 AB hevc 'TWOPASS=1' Mbps=6.003 psnr=26.781326 vmaf=56.901956 ms=4.512 
+refs 1 AB hevc 'QUALITY=1 TWOPASS=1' Mbps=6.017 psnr=26.744213 vmaf=56.674517 ms=5.704 
+refs 3 AB hevc 'baseline' Mbps=6.101 psnr=26.778190 vmaf=56.503024 ms=2.754 
+refs 3 AB hevc 'QUALITY=1' Mbps=6.101 psnr=26.733494 vmaf=56.188955 ms=3.314 
+refs 3 AB hevc 'TWOPASS=1' Mbps=5.977 psnr=26.770621 vmaf=56.772689 ms=4.599 
+refs 3 AB hevc 'QUALITY=1 TWOPASS=1' Mbps=6.020 psnr=26.745909 vmaf=56.694900 ms=5.565 
+x265 fast Mbps=6.003 psnr=27.448902 vmaf=61.387534
+x265 medium Mbps=6.015 psnr=27.370204 vmaf=61.249425
+HQ DONE
+### hq2.txt
+== crowd60
+AB hevc 'baseline' Mbps=6.080 psnr=26.584637 vmaf=55.217033 ms=2.931 
+AB hevc 'ENC_HEVC_CTRL_P=nv66-p4-p-1080.bin' Mbps=6.090 psnr=26.593478 vmaf=55.316122 ms=2.882 
+AB hevc 'ENC_HEVC_CTRL_P=nv66-p4-p-1080.bin ENC_HEVC_CTRL_I=nv66-p4-idr-1080.bin' Mbps=6.090 psnr=26.593478 vmaf=55.316122 ms=2.958 
+AB hevc 'QUALITY=1 ENC_HEVC_CTRL_P=nv66-p4-p-1080.bin ENC_HEVC_CTRL_I=nv66-p4-idr-1080.bin' Mbps=6.077 psnr=26.544909 vmaf=55.062921 ms=3.417 
+== park1080_60
+AB hevc 'baseline' Mbps=6.099 psnr=26.778223 vmaf=56.563538 ms=2.957 
+AB hevc 'ENC_HEVC_CTRL_P=nv66-p4-p-1080.bin' Mbps=6.107 psnr=26.768945 vmaf=56.400407 ms=2.753 
+AB hevc 'ENC_HEVC_CTRL_P=nv66-p4-p-1080.bin ENC_HEVC_CTRL_I=nv66-p4-idr-1080.bin' Mbps=6.107 psnr=26.768945 vmaf=56.400407 ms=2.740 
+AB hevc 'QUALITY=1 ENC_HEVC_CTRL_P=nv66-p4-p-1080.bin ENC_HEVC_CTRL_I=nv66-p4-idr-1080.bin' Mbps=6.098 psnr=26.747172 vmaf=56.252207 ms=3.203 
+HQ2 DONE
+### hq3.txt
+== park1080_60
+AB hevc 'baseline' Mbps=6.099 psnr=26.778223 vmaf=56.563538 ms=2.826 
+AB hevc 'AQ=1' Mbps=6.090 psnr=26.735706 vmaf=56.434880 ms=2.972 
+AB hevc 'AQ=2' Mbps=6.089 psnr=26.666221 vmaf=55.976798 ms=2.964 
+AB hevc 'AQ=3' Mbps=6.084 psnr=26.625026 vmaf=55.583286 ms=2.959 
+AB hevc 'VBV=12000000' Mbps=5.832 psnr=26.608832 vmaf=55.224698 ms=2.891 
+AB hevc 'RC=17 MAXRATE=9000000 VBV=12000000' Mbps=7.457 psnr=27.298960 vmaf=60.712284 ms=2.989 
+x265 fast bframes=0 Mbps=6.673 vmaf=58.239308
+x265 fast bframes=0:aq-mode=0 Mbps=6.774 vmaf=59.193288
+x265 fast psy-rd=0 Mbps=5.970 vmaf=61.773715
+== crowd60
+AB hevc 'baseline' Mbps=6.080 psnr=26.584637 vmaf=55.217033 ms=3.017 
+AB hevc 'AQ=1' Mbps=5.999 psnr=26.512220 vmaf=54.925225 ms=3.092 
+AB hevc 'AQ=2' Mbps=5.935 psnr=26.408095 vmaf=54.294543 ms=3.074 
+AB hevc 'AQ=3' Mbps=5.937 psnr=26.360582 vmaf=54.126242 ms=3.077 
+AB hevc 'VBV=12000000' Mbps=5.691 psnr=26.318480 vmaf=53.421521 ms=3.035 
+AB hevc 'RC=17 MAXRATE=9000000 VBV=12000000' Mbps=7.709 psnr=27.314032 vmaf=60.849315 ms=2.807 
+x265 fast bframes=0 Mbps=6.992 vmaf=54.963931
+x265 fast bframes=0:aq-mode=0 Mbps=6.999 vmaf=55.430755
+x265 fast psy-rd=0 Mbps=5.912 vmaf=57.280008
+HQ3 DONE
+### hq4.txt
+== park1080_60
+AB hevc cqp I40 P42 Mbps=7.715 psnr=27.534619 vmaf=62.429823 ms=2.847 
+AB hevc cqp I38 P42 Mbps=7.754 psnr=27.544501 vmaf=62.544259 ms=2.989 
+AB hevc cqp I42 P44 Mbps=5.255 psnr=26.449611 vmaf=53.319414 ms=2.882 
+AB hevc cqp I40 P44 Mbps=5.287 psnr=26.459883 vmaf=53.466741 ms=2.706 
+AB hevc cqp I44 P46 Mbps=3.504 psnr=25.484032 vmaf=44.783140 ms=2.868 
+AB hevc cqp I42 P46 Mbps=3.529 psnr=25.493570 vmaf=44.938568 ms=2.726 
+AB hevc cqp I46 P48 Mbps=2.315 psnr=24.608991 vmaf=36.442002 ms=2.828 
+AB hevc cqp I44 P48 Mbps=2.333 psnr=24.619920 vmaf=36.636477 ms=2.779 
+== crowd60
+AB hevc cqp I40 P42 Mbps=7.807 psnr=27.434175 vmaf=61.154713 ms=2.882 
+AB hevc cqp I38 P42 Mbps=7.862 psnr=27.477758 vmaf=61.575501 ms=2.986 
+AB hevc cqp I42 P44 Mbps=5.653 psnr=26.312015 vmaf=52.520403 ms=2.864 
+AB hevc cqp I40 P44 Mbps=5.692 psnr=26.356661 vmaf=52.993829 ms=2.799 
+AB hevc cqp I44 P46 Mbps=4.023 psnr=25.265879 vmaf=44.372040 ms=2.843 
+AB hevc cqp I42 P46 Mbps=4.059 psnr=25.315524 vmaf=45.019718 ms=2.935 
+AB hevc cqp I46 P48 Mbps=2.815 psnr=24.333763 vmaf=36.373053 ms=2.860 
+AB hevc cqp I44 P48 Mbps=2.855 psnr=24.373322 vmaf=37.083620 ms=2.831 
+HQ4 DONE
+### hq5.txt
+== park1080_60
+P42 'baseline' Mbps=7.754 psnr=27.544501 vmaf=62.544259 ms=2.848 
+P42 'ENC_NRP=0' Mbps=9.096 psnr=27.382254 vmaf=60.521082 ms=2.978 
+P42 'ENC_NRP=2' Mbps=7.317 psnr=27.058760 vmaf=58.111783 ms=2.957 
+P42 'ENC_NRP=3' Mbps=6.770 psnr=26.940869 vmaf=57.225147 ms=2.795 
+P42 'ENC_NRP=4' Mbps=6.379 psnr=26.839315 vmaf=56.482927 ms=2.992 
+P43 'baseline' Mbps=6.524 psnr=27.005020 vmaf=58.150516 ms=2.825 
+P43 'ENC_NRP=0' Mbps=7.669 psnr=26.844623 vmaf=56.023426 ms=2.842 
+P43 'ENC_NRP=2' Mbps=6.092 psnr=26.550830 vmaf=53.742754 ms=2.697 
+P43 'ENC_NRP=3' Mbps=5.634 psnr=26.441993 vmaf=52.859108 ms=2.764 
+P43 'ENC_NRP=4' Mbps=5.329 psnr=26.350939 vmaf=52.149816 ms=2.842 
+P44 'baseline' Mbps=5.287 psnr=26.459883 vmaf=53.466741 ms=2.872 
+P44 'ENC_NRP=0' Mbps=6.221 psnr=26.306667 vmaf=51.329309 ms=2.718 
+P44 'ENC_NRP=2' Mbps=4.941 psnr=26.041454 vmaf=49.271710 ms=2.800 
+P44 'ENC_NRP=3' Mbps=4.569 psnr=25.940793 vmaf=48.441923 ms=2.906 
+P44 'ENC_NRP=4' Mbps=4.336 psnr=25.868566 vmaf=47.808549 ms=2.901 
+P46 'baseline' Mbps=3.529 psnr=25.493570 vmaf=44.938568 ms=2.852 
+P46 'ENC_NRP=0' Mbps=4.156 psnr=25.354391 vmaf=42.817876 ms=2.810 
+P46 'ENC_NRP=2' Mbps=3.289 psnr=25.129366 vmaf=40.994940 ms=2.812 
+P46 'ENC_NRP=3' Mbps=3.043 psnr=25.049176 vmaf=40.322134 ms=2.756 
+P46 'ENC_NRP=4' Mbps=2.886 psnr=24.988358 vmaf=39.850330 ms=2.850 
+== crowd60
+P42 'baseline' Mbps=7.862 psnr=27.477758 vmaf=61.575501 ms=2.991 
+P42 'ENC_NRP=0' Mbps=9.218 psnr=27.350312 vmaf=60.143512 ms=3.026 
+P42 'ENC_NRP=2' Mbps=7.626 psnr=27.072280 vmaf=57.988441 ms=2.877 
+P42 'ENC_NRP=3' Mbps=7.140 psnr=26.967464 vmaf=57.119301 ms=2.951 
+P42 'ENC_NRP=4' Mbps=6.785 psnr=26.874343 vmaf=56.329910 ms=3.007 
+P43 'baseline' Mbps=6.797 psnr=26.920096 vmaf=57.389993 ms=2.996 
+P43 'ENC_NRP=0' Mbps=7.988 psnr=26.802703 vmaf=55.939827 ms=3.098 
+P43 'ENC_NRP=2' Mbps=6.539 psnr=26.539681 vmaf=53.827524 ms=3.054 
+P43 'ENC_NRP=3' Mbps=6.125 psnr=26.439395 vmaf=52.984980 ms=2.951 
+P43 'ENC_NRP=4' Mbps=5.840 psnr=26.354126 vmaf=52.185624 ms=2.932 
+P44 'baseline' Mbps=5.692 psnr=26.356661 vmaf=52.993829 ms=2.818 
+P44 'ENC_NRP=0' Mbps=6.682 psnr=26.244645 vmaf=51.457609 ms=2.976 
+P44 'ENC_NRP=2' Mbps=5.469 psnr=26.004550 vmaf=49.468855 ms=2.860 
+P44 'ENC_NRP=3' Mbps=5.124 psnr=25.914277 vmaf=48.661291 ms=2.710 
+P44 'ENC_NRP=4' Mbps=4.897 psnr=25.837417 vmaf=48.008225 ms=2.901 
+P46 'baseline' Mbps=4.059 psnr=25.315524 vmaf=45.019718 ms=2.908 
+P46 'ENC_NRP=0' Mbps=4.736 psnr=25.231031 vmaf=43.259270 ms=2.886 
+P46 'ENC_NRP=2' Mbps=3.875 psnr=25.020547 vmaf=41.471366 ms=2.886 
+P46 'ENC_NRP=3' Mbps=3.627 psnr=24.940916 vmaf=40.826395 ms=2.868 
+P46 'ENC_NRP=4' Mbps=3.455 psnr=24.874455 vmaf=40.194562 ms=2.770 
+HQ5 DONE

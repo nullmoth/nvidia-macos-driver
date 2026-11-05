@@ -139,7 +139,7 @@ static void nvmtl_conf_read_file(unsigned forgot)
     char recbuf[2048]; size_t recn = 0; recbuf[0] = 0;
     FILE *f = fopen("/Library/GPUBundles/nvmtl/nvrm610.conf", "r");
     if (!f) { if (forgot) nvlog("conf: forgot %u inherited knob(s); no conf file", forgot); return; }
-    char line[512];
+    char line[1024];
     unsigned took = 0;
     // The last line for a key wins: the installer keeps the user's own block ("my settings, kept on update") at the end
     // of the file, and the first match used to win, so a shipped value of the same key above it silently beat the

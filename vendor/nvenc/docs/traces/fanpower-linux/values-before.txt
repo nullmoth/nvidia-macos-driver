@@ -1,0 +1,2 @@
+fan.speed [%], power.draw [W], power.draw.average [W], power.draw.instant [W], power.limit [W], power.default_limit [W], power.min_limit [W], power.max_limit [W], enforced.power.limit [W], temperature.gpu, temperature.memory, clocks.current.graphics [MHz]
+33 %, 51.09 W, 1.00 W, 51.09 W, 450.00 W, 450.00 W, 150.00 W, 500.00 W, 450.00 W, 40, N/A, 2520 MHz

@@ -1,0 +1,16 @@
+# 2026-10-22 RTX 4090 (NullMoth 2.5.2, macOS 26.7.1): real-time H.264 through VideoToolbox (bench-enc.sh ours-h264-rt, BENCH_VMAF=1),
+# 300 frames, 6 Mbit/s at 1080p, 20 Mbit/s at 4K, with and without NVIDIA's p4 quant table (ENC_H264_RT_QTABLE)
+RESULT qtable=off crowd60 RESULT ours-h264-rt 1920x1080 fps=279.06 kbps=5990 psnr=26.616240 vmaf=51.098129
+RESULT qtable=on crowd60 RESULT ours-h264-rt 1920x1080 fps=340.90 kbps=5988 psnr=26.684084 vmaf=54.239846
+RESULT qtable=off park1080_60 RESULT ours-h264-rt 1920x1080 fps=308.64 kbps=5909 psnr=26.861993 vmaf=54.816678
+RESULT qtable=on park1080_60 RESULT ours-h264-rt 1920x1080 fps=280.37 kbps=5876 psnr=26.842107 vmaf=57.562113
+RESULT qtable=off crowd2160_60 RESULT ours-h264-rt 3840x2160 fps=110.86 kbps=20002 psnr=30.858539 vmaf=63.624185
+RESULT qtable=on crowd2160_60 RESULT ours-h264-rt 3840x2160 fps=111.19 kbps=20015 psnr=30.914945 vmaf=65.673437
+
+# latency (bench-all.sh lat; engine_ms = time on the engine; entry_emit spikes are single VM stalls), table on (=1) then off (=0)
+qtable=1
+RESULT latency avc1 1920x1080 entry_emit_ms=1.757 max_ms=68.792 engine_ms=1.178
+RESULT latency avc1 3840x2160 entry_emit_ms=5.606 max_ms=6.591 engine_ms=4.332
+qtable=0
+RESULT latency avc1 1920x1080 entry_emit_ms=1.876 max_ms=94.765 engine_ms=1.186
+RESULT latency avc1 3840x2160 entry_emit_ms=16.592 max_ms=1355.385 engine_ms=4.353
