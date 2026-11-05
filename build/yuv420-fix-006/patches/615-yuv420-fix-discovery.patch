@@ -1,0 +1,73 @@
+--- a/kapi/src/nvkms-kapi.c
++++ b/kapi/src/nvkms-kapi.c
+@@ -2532,6 +2532,9 @@
+ extern NvBool nvkms_yuv420_diag_claim(NvU32 display);
+ static void Yuv420DiagEnumerate(struct NvKmsKapiDevice *, NvKmsKapiDisplay);
+ 
++/* Opt-in production-fix experiment; distinct from once-per-boot A/B probe. */
++extern NvBool nvkms_yuv420_fix_enabled(NvU32 display);
++
+ static int GetDisplayMode
+ (
+     struct NvKmsKapiDevice *device,
+@@ -2568,8 +2571,60 @@
+             modeIndex, display);
+         return -1;
+     }
+ 
++    /*
++     * Stage 1: offer an EDID-derived 4K60 candidate only if the normal
++     * validation failed and an independent hardware YUV420 retry succeeds.
++     * This changes no SetMode/ValidateDisplayMode request. Do NOT enable
++     * the boot argument until those paths have their own reviewed fix.
++     */
++    if (!paramsValidate.reply.end &&
++        !paramsValidate.reply.valid &&
++        paramsValidate.reply.mode.timings.hVisible == 3840 &&
++        paramsValidate.reply.mode.timings.vVisible == 2160 &&
++        paramsValidate.reply.mode.timings.RRx1k >= 59900 &&
++        paramsValidate.reply.mode.timings.RRx1k <= 60100 &&
++        nvkms_yuv420_fix_enabled(display)) {
++        struct NvKmsValidateModeIndexParams *retry =
++            nvKmsKapiCalloc(1, sizeof(*retry));
++        if (retry != NULL) {
++            retry->request = paramsValidate.request;
++            retry->request.modeValidation.preferYUV420 = NV_TRUE;
++            if (nvkms_ioctl_from_kapi(device->pKmsOpen,
++                                      NVKMS_IOCTL_VALIDATE_MODE_INDEX,
++                                      retry, sizeof(*retry)) &&
++                !retry->reply.end && retry->reply.valid &&
++                retry->reply.mode.timings.yuv420Mode == NV_YUV420_MODE_HW &&
++                retry->reply.mode.timings.pixelClockHz ==
++                    paramsValidate.reply.mode.timings.pixelClockHz &&
++                retry->reply.mode.timings.RRx1k ==
++                    paramsValidate.reply.mode.timings.RRx1k &&
++                retry->reply.mode.timings.hVisible ==
++                    paramsValidate.reply.mode.timings.hVisible &&
++                retry->reply.mode.timings.vVisible ==
++                    paramsValidate.reply.mode.timings.vVisible &&
++                retry->reply.mode.timings.hTotal ==
++                    paramsValidate.reply.mode.timings.hTotal &&
++                retry->reply.mode.timings.vTotal ==
++                    paramsValidate.reply.mode.timings.vTotal &&
++                retry->reply.mode.timings.hSyncStart ==
++                    paramsValidate.reply.mode.timings.hSyncStart &&
++                retry->reply.mode.timings.hSyncEnd ==
++                    paramsValidate.reply.mode.timings.hSyncEnd &&
++                retry->reply.mode.timings.vSyncStart ==
++                    paramsValidate.reply.mode.timings.vSyncStart &&
++                retry->reply.mode.timings.vSyncEnd ==
++                    paramsValidate.reply.mode.timings.vSyncEnd) {
++                paramsValidate.reply = retry->reply;
++                nvKmsKapiLogDeviceDebug(device,
++                    "Y420-FIX stage1: validated 4K60 candidate for display 0x%x index %u",
++                    display, modeIndex);
++            }
++            nvKmsKapiFree(retry);
++        }
++    }
++
+     if (mode != NULL) {
+         NvKmsModeToKapi(&paramsValidate.reply.mode, mode);
+     }
+ 

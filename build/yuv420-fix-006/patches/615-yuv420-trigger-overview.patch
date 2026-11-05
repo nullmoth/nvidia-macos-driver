@@ -1,0 +1,69 @@
+--- a/kapi/src/nvkms-kapi.c
++++ b/kapi/src/nvkms-kapi.c
+@@ -2583,10 +2583,6 @@
+     }
+ 
+     if (!paramsValidate.reply.end &&
+-        paramsValidate.reply.mode.timings.hVisible == 3840 &&
+-        paramsValidate.reply.mode.timings.vVisible == 2160 &&
+-        paramsValidate.reply.mode.timings.RRx1k >= 59000 &&
+-        paramsValidate.reply.mode.timings.RRx1k <= 61000 &&
+         nvkms_yuv420_diag_claim(display)) {
+         Yuv420DiagEnumerate(device, display);
+     }
+@@ -2640,6 +2636,8 @@
+     nvkms_log(NVKMS_LOG_LEVEL_INFO, NULL, text); \
+ } while (0)
+ 
++#define Y420_DIAG_4K30_LOG_LIMIT 8
++
+ static const char *Yuv420DiagName(enum NvYuv420Mode mode)
+ {
+     switch (mode) {
+@@ -2661,7 +2659,7 @@
+         goto out;
+     }
+     for (pass = 0; pass < 2; pass++) {
+-        NvU32 index, matches = 0;
++        NvU32 index, matches = 0, matches30 = 0, logged30 = 0;
+         NvBool complete = NV_FALSE;
+         const char label = pass ? 'B' : 'A';
+         Y420_LOG("Y420-AB dpy=0x%x pass=%c BEGIN prefer420=%u", display, label, pass);
+@@ -2688,6 +2686,18 @@
+                 break;
+             }
+             t = &p->reply.mode.timings;
++            if (t->hVisible == 3840 && t->vVisible == 2160 &&
++                t->RRx1k >= 29000 && t->RRx1k <= 31000) {
++                matches30++;
++                if (logged30 < Y420_DIAG_4K30_LOG_LIMIT) {
++                    Y420_LOG("Y420-AB dpy=0x%x pass=%c index=%u overview=4K30 "
++                             "source=%u valid=%u pclkHz=%llu rrMilliHz=%u yuv420=%s",
++                             display, label, index, p->reply.source, p->reply.valid,
++                             (unsigned long long)t->pixelClockHz, t->RRx1k,
++                             Yuv420DiagName(t->yuv420Mode));
++                    logged30++;
++                }
++            }
+             if (t->hVisible == 3840 && t->vVisible == 2160 &&
+                 t->RRx1k >= 59000 && t->RRx1k <= 61000) {
+                 struct NvKmsKapiDisplayMode wire;
+@@ -2721,15 +2731,16 @@
+                     Y420_LOG("Y420-AB dpy=0x%x pass=%c index=%u INFO_MAY_BE_TRUNCATED", display, label, index);
+             }
+         }
+-        Y420_LOG("Y420-AB dpy=0x%x pass=%c %s queried=%u matches=%u",
++        Y420_LOG("Y420-AB dpy=0x%x pass=%c %s queried=%u matches=%u matches30=%u logged30=%u",
+                  display, label, complete ? "COMPLETE" : "INCOMPLETE",
+-                 index < 512 ? index + 1 : index, matches);
++                 index < 512 ? index + 1 : index, matches, matches30, logged30);
+     }
+ out:
+     nvKmsKapiFree(info);
+     nvKmsKapiFree(p);
+ }
+ 
++#undef Y420_DIAG_4K30_LOG_LIMIT
+ #undef Y420_LOG
+ 
+ static NvBool ValidateDisplayMode
