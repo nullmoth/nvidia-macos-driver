@@ -57,4 +57,13 @@ k = src.find('static const nvmtl_slot *nvmtl_slot_checked(')
 chk = src[k:src.index('\n}\n', k)] if k >= 0 else ''
 check('a rejected slot returns NULL, so each loop writes its dummy', 'return NULL;' in chk)
 check('both rejections are logged, a bounded number of times', src.count('(said up to 8 times)') >= 2)
+u0 = src.index('static VkDescriptorSet nvmtl_snapshot_set_c(')
+uni = src[u0:src.index('if (!t || !nvmtl_enc78_on(NVMTL_E78_H3))', u0)]
+check('the GL uniform buffer reads its slot through the check (field: nvk_UpdateDescriptorSets+1836, WindowServer)',
+      'nvmtl_slot_checked(&t->s[which][b], which, b)' in uni)
+check('the GL uniform buffer needs a live buffer slot, else the dummy stays bound',
+      'sl && sl->kind == NVMTL_SLOT_BUF && sl->h' in uni and 'uniformInfo = (VkDescriptorBufferInfo){ (VkBuffer)g_dummyBuf.buf, 0, 16 };' in uni)
+check('negative control: no buffer descriptor takes a slot handle unchecked',
+      'uniformInfo.buffer = (VkBuffer)sl->h; uniformInfo.range' not in src.replace(
+          'if (sl && sl->kind == NVMTL_SLOT_BUF && sl->h) {\n                uniformInfo.buffer = (VkBuffer)sl->h; uniformInfo.range', ''))
 sys.exit(1 if fails else 0)
