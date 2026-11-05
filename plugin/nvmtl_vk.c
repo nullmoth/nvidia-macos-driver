@@ -4060,9 +4060,20 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
         uniformInfo = (VkDescriptorBufferInfo){ (VkBuffer)g_dummyBuf.buf, 0, 16 };
         c->gl_uniform_dyn[which] = 0;
         if (p->gl_uniform_slot[which] && t) {
-            const nvmtl_slot *sl = &t->s[which][p->gl_uniform_slot[which] - 1];
-            uniformInfo.buffer = (VkBuffer)sl->h; uniformInfo.range = p->gl_uniform_range[which];
-            c->gl_uniform_dyn[which] = (uint32_t)sl->off;
+            // The one buffer descriptor that read its slot raw: no kind check, no handle check, no dummy. A slot that
+            // holds a texture, a sampler or a handle that cannot be a live object reached NVK here, and
+            // nvk_UpdateDescriptorSets+1836 read through it - WindowServer died seconds after each login (field
+            // crashes on macOS 15 and 26 from 10-23, the same 0x0100... handle the bound-slot guard already refuses).
+            const uint32_t b = p->gl_uniform_slot[which] - 1;
+            const nvmtl_slot *sl = nvmtl_slot_checked(&t->s[which][b], which, b);
+            if (sl && sl->kind == NVMTL_SLOT_BUF && sl->h) {
+                uniformInfo.buffer = (VkBuffer)sl->h; uniformInfo.range = p->gl_uniform_range[which];
+                c->gl_uniform_dyn[which] = (uint32_t)sl->off;
+            } else {
+                static int said;
+                if (said < 8) { said++; nvlog("vk: the GL uniform buffer (binding %u of set %u) holds no live buffer (kind %u) - "
+                                              "the dummy is bound instead (said up to 8 times)", b, which, sl ? sl->kind : 0); }
+            }
         }
         uniform = &uniformInfo;
     }
