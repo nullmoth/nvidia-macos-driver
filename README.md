@@ -169,6 +169,9 @@ diagnostic); NVK (apply `nvk/nvk-macos.patch` to Mesa `17ca6174` first); the kex
 Rebuild both accelerators whenever `nvrm_vram_abi.h` or `nvrm_gpuva_abi.h` changes: an accelerator built against an
 older ABI loads, but NVRMFB refuses all its VRAM requests and the desktop stays black.
 
+The native power, clock and fan sampler adds an RM-internal C object to NVRM;
+see [GPU sensors](docs/GPU-SENSORS.md) for its build command, published values and validation.
+
 ## License
 
 Free of charge, source code included. Nobody may sell it or use it to make money.

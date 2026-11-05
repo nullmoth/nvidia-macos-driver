@@ -14,6 +14,8 @@
 #include <IOKit/pci/IOPCIDevice.h>
 #include <pexpert/pexpert.h>
 #include <libkern/OSKextLib.h>
+#include <libkern/c++/OSSerialize.h>
+#include <libkern/c++/OSUnserialize.h>
 #include <mach/kmod.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IORangeAllocator.h>
@@ -28,6 +30,9 @@
 #include "IOAccelMemoryMap.h"
 #include "../nvrm_gpuva_abi.h"
 #include "../nvrm_utilization_abi.h"
+#include "../nvrm_telemetry_cache.h"
+#include "../nvrm_telemetry_properties.h"
+#include "nvrm_smc_bridge.h"
 class NVMemoryMap;
 static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
                                            unsigned long long len, unsigned long long align);
@@ -116,7 +121,9 @@ extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NMXAccel, "0.1", _start, _stop) }
 extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NVAccel, "0.1", _start, _stop) }
 #endif
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d) { return KERN_SUCCESS; }
-extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return KERN_SUCCESS; }
+extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  {
+    return nvrmSMCCanUnload() ? KERN_SUCCESS : KERN_FAILURE;
+}
 
 class NVEventMachine : public IOAccelEventMachineFast2 {
     OSDeclareDefaultStructors(NVEventMachine)
@@ -293,6 +300,8 @@ public:
     NVRMUtilization     fUtil = {};
     uint64_t            fUtilUpdated = 0;
     bool                fUtilValid = false;
+    NVRMTelemetryCache  fTelemetry = {};
+    NVRMSMCBridge      *fSMC = nullptr;
     IONotifier *fFBNote = nullptr;
     IONotifier *fIntelNote = nullptr;
     static NVAccel *gAccel;
@@ -744,6 +753,18 @@ public:
         bool r = IOGraphicsAccelerator2::start(provider);
         ALOG("IOGraphicsAccelerator2::start -> %d", r);
         if (r) {
+#ifndef NMX_ACCEL
+            // Consumer tools match this concrete accelerator to its PCI device.
+            // Keep the broad personality match, but publish the attached device's identity.
+            if (IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider)) {
+                const unsigned vendor = pci->configRead16(0x00), device = pci->configRead16(0x02);
+                if (vendor == 0x10de && device != 0xffff) {
+                    char match[16];
+                    snprintf(match, sizeof match, "0x%04x%04x", device, vendor);
+                    setProperty("IOPCIMatch", match);
+                }
+            }
+#endif
             // Tells the Metal plugin that NVResource::pageoff waits for a surface WindowServer's GPU is still writing
             // (nvSurfWaitReady). Only then does the plugin mark WindowServer's surfaces newest in VRAM at commit; with an
             // accelerator that does not wait, that mark would let a CPU lock or a copied present read a surface before
@@ -844,6 +865,9 @@ public:
     }
 
     void sampleTemperature() {
+        // This timer publishes immediately after sampling; a failed read must
+        // clear the previous temperature and its aliases in that publication.
+        fTempC = 0;
         if (!fTempRegs) {
             fTempMap = fPCI->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0, 0);
             if (!fTempMap) { ALOG("temperature: BAR0 map FAILED -- giving up"); return; }
@@ -878,6 +902,7 @@ public:
             stopUtilization();
             return;
         }
+        fSMC = nvrmSMCCreate(this);
         fUtilTimer->setTimeoutMS(kNvTempFirstMs);
 #endif
     }
@@ -893,9 +918,11 @@ public:
             fUtilTimer->release(); fUtilTimer = nullptr;
         }
         if (fUtilLoop) { fUtilLoop->release(); fUtilLoop = nullptr; }
+        nvrmSMCStop(fSMC); fSMC = nullptr;
         if (fUtilProvider) { fUtilProvider->release(); fUtilProvider = nullptr; }
         if (fUtilLock) { IOLockFree(fUtilLock); fUtilLock = nullptr; }
         fUtilValid = false;
+        fTelemetry = {};
     }
 
     static void utilTimerFired(OSObject *owner, IOTimerEventSource *sender) {
@@ -907,6 +934,9 @@ public:
     void sampleUtilization() {
         if (fUtilProvider && fUtilProvider->isInactive()) {
             fUtilProvider->release(); fUtilProvider = nullptr;
+            IOLockLock(fUtilLock);
+            fTelemetry = {};
+            IOLockUnlock(fUtilLock);
         }
         if (!fUtilProvider) {
             // Match the RM service on this PCI device, rather than a global GPU 0.
@@ -931,7 +961,20 @@ public:
                 fn->release();
             }
         }
+        NVRMTelemetry telemetry = {};
+        telemetry.version = NVRM_TELEMETRY_ABI_VERSION;
+        IOReturn telemetryStatus = kIOReturnNotAttached;
+        if (fUtilProvider && !fUtilProvider->isInactive()) {
+            const OSSymbol *fn = OSSymbol::withCStringNoCopy(NVRM_TELEMETRY_FN);
+            if (fn) {
+                telemetryStatus = fUtilProvider->callPlatformFunction(fn, false, &telemetry, nullptr, nullptr, nullptr);
+                fn->release();
+            }
+        }
+        uint64_t nowNs = 0;
+        absolutetime_to_nanoseconds(mach_continuous_time(), &nowNs);
         IOLockLock(fUtilLock);
+        nvrmTelemetryCacheUpdate(&fTelemetry, telemetryStatus == kIOReturnSuccess ? &telemetry : nullptr, nowNs);
         if (status == kIOReturnSuccess && sample.version == NVRM_UTILIZATION_ABI_VERSION &&
             sample.timestamp && sample.gr <= 10000 && sample.fb <= 10000 &&
             sample.nvenc <= 10000 && sample.nvdec <= 10000) {
@@ -945,22 +988,100 @@ public:
         } else {
             fUtilValid = false;
         }
+        const NVRMTelemetry published = nvrmTelemetryCacheSnapshot(&fTelemetry, nowNs, kNvUtilMaxAgeNs);
+        const uint64_t fanArrival = fTelemetry.groups[NVRM_TELEMETRY_CACHE_FANS].arrivalNs;
         IOLockUnlock(fUtilLock);
+        nvrmSMCTick(fSMC, published, fanArrival);
+    }
+
+    static void setSensorStatistic(OSDictionary *d, const char *key, bool valid, unsigned long long value) {
+        if (!valid) { d->removeObject(key); return; }
+        if (OSNumber *n = OSNumber::withNumber(value, 64)) {
+            d->setObject(key, n);
+            n->release();
+        } else d->removeObject(key);
+    }
+
+    static void writeTelemetryProperty(void *context, const char *key, int valid, unsigned long long value) {
+        setSensorStatistic(static_cast<OSDictionary *>(context), key, valid != 0, value);
+    }
+
+    void publishMemoryAliases(OSDictionary *d) {
+        OSObject *property = copyProperty("PerformanceStatisticsAccum");
+        OSDictionary *accumulated = OSDynamicCast(OSDictionary, property);
+        OSObject *decoded = nullptr;
+        // The family can store a deferred OSSerializer here. copyProperty()
+        // retains that object; only an IORegistry read materializes its dictionary.
+        // Accum uses the family's no-reset callback, unlike PerformanceStatistics.
+        // This runs on the temperature workloop with no utilization lock held.
+        if (!accumulated && OSDynamicCast(OSSerializer, property)) {
+            OSSerialize *serialized = OSSerialize::withCapacity(4096);
+            if (serialized) {
+                if (property->serialize(serialized)) {
+                    const unsigned length = serialized->getLength();
+                    // Bound accepted XML; withCapacity itself is not an allocation cap.
+                    if (length > 1 && length <= 65536 && serialized->text()[length - 1] == '\0')
+                        decoded = OSUnserializeXML(serialized->text(), static_cast<size_t>(length));
+                }
+                serialized->release();
+            }
+            accumulated = OSDynamicCast(OSDictionary, decoded);
+        }
+        OSNumber *used = accumulated ? OSDynamicCast(OSNumber, accumulated->getObject("inUseVidMemoryBytes")) : nullptr;
+        if (!used) used = OSDynamicCast(OSNumber, d->getObject("inUseVidMemoryBytes"));
+        OSObject *totalProperty = fPCI ? fPCI->copyProperty("VRAM,totalsize") : nullptr;
+        OSNumber *total = OSDynamicCast(OSNumber, totalProperty);
+        nvrmTelemetryPublishMemory(used ? used->unsigned64BitValue() : 0, used != nullptr,
+                                    total ? total->unsigned64BitValue() : 0,
+                                    total && total->unsigned64BitValue() > 0,
+                                    d, writeTelemetryProperty);
+        if (property) property->release();
+        if (decoded) decoded->release();
+        if (totalProperty) totalProperty->release();
+    }
+
+    void publishTelemetry(OSDictionary *d) {
+        NVRMTelemetry sample = {};
+        if (fUtilLock) {
+            uint64_t nowNs = 0;
+            absolutetime_to_nanoseconds(mach_continuous_time(), &nowNs);
+            IOLockLock(fUtilLock);
+            sample = nvrmTelemetryCacheSnapshot(&fTelemetry, nowNs, kNvUtilMaxAgeNs);
+            IOLockUnlock(fUtilLock);
+        }
+        const bool fans = (sample.validMask & NVRM_TELEMETRY_VALID_FANS) && sample.fanValidMask;
+        nvrmTelemetryPublishProperties(&sample, d, writeTelemetryProperty);
+
+        // RPM is measured per controller. No assumed maximum or estimated fan percentage.
+        OSDictionary *fanRPM = fans ? OSDictionary::withCapacity(NVRM_TELEMETRY_FAN_COUNT) : nullptr;
+        for (unsigned i = 0; fans && i < NVRM_TELEMETRY_FAN_COUNT; i++) {
+            if (!(sample.fanValidMask & (1u << i))) continue;
+            if (fanRPM) {
+                char index[12];
+                snprintf(index, sizeof index, "%u", i);
+                setSensorStatistic(fanRPM, index, true, sample.fanRPM[i]);
+            }
+        }
+        if (fanRPM) {
+            setProperty("NVRMFanRPM", fanRPM);
+            fanRPM->release();
+        } else {
+            removeProperty("NVRMFanRPM");
+        }
     }
 
     // Read-copy-modify-write: the family keeps 70-odd keys in this dictionary and replaces it
     // wholesale every 0.25-2 s, so the copy is taken from whatever is in it at this moment.
     void publishStatistics() {
+        nvrmSMCTemperature(fSMC, fTempC > 0 ? static_cast<unsigned>(fTempC) : 0);
         OSObject *property = copyProperty("PerformanceStatistics");
         OSDictionary *cur = OSDynamicCast(OSDictionary, property);
         OSDictionary *d = cur ? OSDynamicCast(OSDictionary, cur->copyCollection()) : nullptr;
         if (property) property->release();
         if (!d) { d = OSDictionary::withCapacity(8); if (!d) return; }
-        if (fTempC) {
-            OSNumber *n = OSNumber::withNumber((unsigned long long)fTempC, 32);
-            if (n) { d->setObject("Temperature(C)", n); n->release(); }
-        }
+        setSensorStatistic(d, "Temperature(C)", fTempC != 0, fTempC);
 #ifndef NMX_ACCEL
+        setSensorStatistic(d, "GPU Temperature(C)", fTempC != 0, fTempC);
         NVRMUtilization sample = {};
         bool valid = false;
         if (fUtilLock) {
@@ -973,18 +1094,24 @@ public:
         }
         const char *keys[] = { "Device Utilization %", "GPU Core Utilization %",
                                "GPU Memory Utilization %", "GPU Video Engine Utilization %",
-                               "GPU Video Decode Utilization %" };
-        const unsigned values[] = { sample.gr, sample.gr, sample.fb, sample.nvenc, sample.nvdec };
+                               "GPU Video Decode Utilization %", "GPU Activity(%)",
+                               "GPU Core Utilization", "GPU FB Utilization(%)",
+                               "GPU Encoder Utilization(%)", "GPU Decoder Utilization(%)" };
+        const unsigned values[] = { sample.gr, sample.gr, sample.fb, sample.nvenc, sample.nvdec,
+                                    sample.gr, sample.gr, sample.fb, sample.nvenc, sample.nvdec };
         for (unsigned i = 0; i < sizeof values / sizeof values[0]; i++) {
             if (valid) {
                 OSNumber *n = OSNumber::withNumber((unsigned long long)((values[i] + 50) / 100), 32);
                 if (n) { d->setObject(keys[i], n); n->release(); }
+                else d->removeObject(keys[i]);
             } else {
                 // Missing telemetry is not an idle GPU; remove stale values instead of
                 // turning errors, sleep or an unsupported firmware command into 0%.
                 d->removeObject(keys[i]);
             }
         }
+        publishTelemetry(d);
+        publishMemoryAliases(d);
 #endif
         setProperty("PerformanceStatistics", d);
         d->release();
@@ -999,6 +1126,15 @@ public:
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) APPLE_KEXT_OVERRIDE;
 };
 OSDefineMetaClassAndStructors(NVAccel, IOGraphicsAccelerator2)
+
+#ifndef NMX_ACCEL
+// A vendor-qualified concrete class lets monitoring clients classify the GPU.
+// The existing NVAccel base remains discoverable through IOKit's subclass matching.
+class NVAccelNVIDIA : public NVAccel {
+    OSDeclareDefaultStructors(NVAccelNVIDIA)
+};
+OSDefineMetaClassAndStructors(NVAccelNVIDIA, NVAccel)
+#endif
 NVAccel *NVAccel::gAccel = nullptr;
 
 IOAccelMemory *NVDisplayPipe::initFramebufferResource(unsigned int index, IOAccelResource2 *res)

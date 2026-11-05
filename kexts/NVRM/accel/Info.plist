@@ -26,7 +26,7 @@
 		<key>NVAccel</key>
 		<dict>
 			<key>CFBundleIdentifier</key><string>com.nullmoth.NVAccel</string>
-			<key>IOClass</key><string>NVAccel</string>
+			<key>IOClass</key><string>NVAccelNVIDIA</string>
 			<key>IOProviderClass</key><string>IOPCIDevice</string>
 			<!-- ANY NVIDIA GPU: the same vendor+class mask as NVRM.kext; see its
 			     Info.plist for why it is a mask and NVAccel::probe() for the gate behind it.-->

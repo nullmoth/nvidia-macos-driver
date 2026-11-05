@@ -14,6 +14,16 @@ kexts/       Builds against NVIDIA's open GPU kernel modules 615.78.08, MIT (wit
 
 NVK          Vulkan driver from Mesa, MIT (licenses/Mesa-license.rst). NullMoth's changes ship as patches.
 
+GPU sensors  Sensor selection and monitoring keys follow SMCNvidiaGPU by zzzyy678, MIT.
+             https://github.com/zzzyy678/SMCNvidiaGPU
+             (licenses/SMCNvidiaGPU-LICENSE.txt). The native sampler uses NVIDIA's typed RUSD API.
+
+SMC adapter  Minimal public VirtualSMC 1.3.8 / Lilu 1.6.9 SDK headers and adapted value methods,
+             Copyright (c) their respective authors, BSD-3-Clause.
+             https://github.com/acidanthera/VirtualSMC and https://github.com/acidanthera/Lilu
+             (licenses/VirtualSMC-LICENSE.txt and licenses/Lilu-LICENSE.txt).
+             Source pins: kexts/NVRM/accel/smc/vendor/VERSIONS.md.
+
 GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images from NVIDIA's 615.78.08 driver,
              redistributed unmodified under NVIDIA's licence (licenses/NVIDIA-firmware-LICENCE.txt), the same
              terms under which linux-firmware redistributes these images.
