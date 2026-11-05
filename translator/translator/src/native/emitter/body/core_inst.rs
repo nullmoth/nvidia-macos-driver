@@ -2509,6 +2509,16 @@ impl Emitter {
                 {
                     return Ok(());
                 }
+                if self.emit_leading_scalar_array_as_vector_load(
+                    result,
+                    &pointee,
+                    &result_ty,
+                    &load.ptr,
+                    ptr,
+                    instructions,
+                )? {
+                    return Ok(());
+                }
                 let pointee_bits = bitcast_width(&pointee).ok_or_else(|| {
                     format!(
                         "native emitter: cannot reinterpret load `{name}` from {:?} with non-bitcastable pointee {pointee:?} to {result_ty:?}",

@@ -85,28 +85,15 @@ impl Emitter {
         ptr: Word,
         instructions: &mut Vec<Instruction>,
     ) -> Result<bool, String> {
-        let (LlType::Array(array_elem, array_len), LlType::Vector(vector_elem, vector_len)) =
+        let (LlType::Array(array_elem, _), LlType::Vector(vector_elem, vector_len)) =
             (pointee, result_ty)
         else {
             return Ok(false);
         };
-        if array_len != vector_len
-            || !is_scalar_storage_type(array_elem)
-            || !is_scalar_storage_type(vector_elem)
-        {
+        if !scalar_array_loads_as_vector(pointee, result_ty) {
             return Ok(false);
         }
         let elements_are_compatible = types_compatible(array_elem, vector_elem);
-        if !elements_are_compatible {
-            let (Some(array_elem_bits), Some(vector_elem_bits)) =
-                (bitcast_width(array_elem), bitcast_width(vector_elem))
-            else {
-                return Ok(false);
-            };
-            if array_elem_bits != vector_elem_bits {
-                return Ok(false);
-            }
-        }
 
         let array_type = self.type_id(pointee)?;
         let loaded = self.fresh();
@@ -150,6 +137,40 @@ impl Emitter {
             lanes,
         ));
         Ok(true)
+    }
+
+    // A vector loaded through a pointer to an aggregate whose leading field is (or wraps) a scalar
+    // array of the same size, as when a buffer of `struct { packed_uint4 header; }` slots
+    // ({ { [4 x i32] } }) is read as float4: the load reads that array, so it is lowered as a load
+    // of the array.
+    pub(in crate::native::emitter) fn emit_leading_scalar_array_as_vector_load(
+        &mut self,
+        result: Word,
+        pointee: &LlType,
+        result_ty: &LlType,
+        ptr_value: &TypedValue,
+        ptr: Word,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<bool, String> {
+        if !matches!(pointee, LlType::Array(_, _) | LlType::Struct(_)) {
+            return Ok(false);
+        }
+        let Some((array_ty, access_path)) = leading_scalar_array_load_target(pointee, result_ty)
+        else {
+            return Ok(false);
+        };
+
+        let storage = match self.resolve_type(&ptr_value.ty)? {
+            LlType::Ptr(addrspace) => self.pointer_storage_for(&ptr_value.value, addrspace)?,
+            other => {
+                return Err(format!(
+                    "native emitter: load pointer is not a pointer: {other:?}"
+                ))
+            }
+        };
+        let array_ptr =
+            self.emit_aggregate_field_pointer(storage, &array_ty, ptr, &access_path, instructions)?;
+        self.emit_scalar_array_as_vector_load(result, &array_ty, result_ty, array_ptr, instructions)
     }
 
     pub(in crate::native::emitter) fn emit_narrowing_vector_store(
