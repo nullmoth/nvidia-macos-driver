@@ -18,6 +18,9 @@ using NvU32=uint32_t;using NvU64=uint64_t;using UInt64=uint64_t;using UInt16=uin
 enum { NV_TRUE=1,NV_FALSE=0,kIODigitalSignal=1 };
 #define FBLOG(...) ((void)0)
 static void nvu_zero(void *p,size_t n){memset(p,0,n);}
+static bool gSmallFile=false;
+static bool PE_parse_boot_argn(const char *name,void *data,size_t size){(void)name;(void)data;(void)size;return false;}
+static bool nvrmRootFile(const char *path){(void)path;return gSmallFile;}
 struct NvKmsKapiDisplayModeTimings {
     NvU32 pixelClockHz,hVisible,hSyncStart,hSyncEnd,hTotal,vVisible,vSyncStart,vSyncEnd,vTotal,refreshRate;
     struct { bool interlaced=false,doubleScan=false,hSyncPos=true,vSyncPos=true; } flags;
@@ -53,10 +56,17 @@ static NvKmsKapiDisplayMode mode(unsigned w,unsigned h,unsigned hz) {
 }
 '''
 checks = r'''
-int main() {
+int main(int argc,char **argv) {
+    gSmallFile=argc>1 && strcmp(argv[1],"small")==0;
     Kms kms;kms.modes={mode(2560,1600,60),mode(2560,1600,165),mode(1280,720,60)};
     NVRMNVDAFramebuffer f;f.fKms=&kms;f.fBootMode=kms.modes[1];
-    unsigned n=f.addKmsRefreshModes(0);assert(n==2);
+    unsigned n=f.addKmsRefreshModes(0);
+    if(gSmallFile) {
+        assert(n==3 && f.fDT[2].horizontalActive==1280 && f.fDT[2].verticalActive==720);
+        puts("PASS: root-file opt-in offers smaller validated NVKMS rasters");
+        return 0;
+    }
+    assert(n==2);
     assert(f.fDT[0].detailedTimingModeID==0x10000 && f.fDT[1].detailedTimingModeID==0x10100);
     assert(f.fDT[1].pixelClock==777321600 && !f.fDT[1].horizontalScaled);
     assert(f.addKmsRefreshModes(n)==n);
@@ -84,3 +94,4 @@ with tempfile.TemporaryDirectory() as directory:
     subprocess.run(['clang++', '-std=c++17', '-I', str(root / 'kexts/NVRMFB/fb'),
                     str(path / 'test.cpp'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)
+    subprocess.run([str(path / 'test'), 'small'], check=True)
