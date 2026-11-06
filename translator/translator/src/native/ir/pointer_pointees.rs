@@ -219,10 +219,29 @@ impl LlModule {
                 let mut seen = seen.into_iter().collect::<Vec<_>>();
                 seen.sort_by_key(|ty| format!("{ty:?}"));
                 seen.dedup();
-                let [pointee] = seen.as_slice() else {
+                // A local union helper can use both a typed aggregate and its byte image.
+                // Keep one allocation extent instead of letting its first GEP choose storage.
+                let byte_image = self.mixed_aggregate_byte_image(&seen);
+                let pointee = if let Some(byte_image) = byte_image.as_ref() {
+                    byte_image
+                } else if let [pointee] = seen.as_slice() {
+                    pointee
+                } else {
                     continue;
                 };
                 let key = (f.name.clone(), param);
+                if byte_image.is_some() {
+                    if self.ptr_pointees.get(&key).is_some_and(|ty| self.type_contains_pointer(ty))
+                        || self.metadata_pointee_sizes.get(&key).is_some_and(|declared|
+                            self.native_memcpy_type_size_align(pointee)
+                                .is_none_or(|(size, _)| size != *declared))
+                    {
+                        continue;
+                    }
+                    self.metadata_pointee_params.remove(&key);
+                    self.ptr_pointees.insert(key, pointee.clone());
+                    continue;
+                }
                 if self.gep_source_should_override(&key, pointee) {
                     self.metadata_pointee_params.remove(&key);
                     self.ptr_pointees.insert(key, pointee.clone());
@@ -264,6 +283,15 @@ impl LlModule {
                         self.metadata_pointee_params.remove(&key);
                         changed = true;
                     }
+                    Some(existing)
+                        if !self.is_pure_byte_image(&existing)
+                            && self.is_pure_byte_image(pointee)
+                            && self.metadata_pointee_can_yield_to_call(&existing, pointee) =>
+                    {
+                        self.ptr_pointees.insert(key.clone(), pointee.clone());
+                        self.metadata_pointee_params.remove(&key);
+                        changed = true;
+                    }
                     Some(_) => {}
                     None => {
                         self.ptr_pointees.insert(key, pointee.clone());
@@ -272,6 +300,29 @@ impl LlModule {
                 }
             }
         }
+    }
+
+    fn mixed_aggregate_byte_image(&self, seen: &[LlType]) -> Option<LlType> {
+        if !seen.contains(&LlType::Int(8)) || seen.iter().any(|ty| self.type_contains_pointer(ty)) {
+            return None;
+        }
+        let mut extent = None;
+        for ty in seen {
+            if !matches!(ty, LlType::Struct(_) | LlType::Array(_, _)) {
+                continue;
+            }
+            let (size, _) = self.native_memcpy_type_size_align(ty)?;
+            if size <= 1 || extent.is_some_and(|old| old != size) {
+                return None;
+            }
+            extent = Some(size);
+        }
+        let extent = extent?;
+        if seen.iter().any(|ty| self.native_memcpy_type_size_align(ty)
+            .is_none_or(|(size, _)| size > extent)) {
+            return None;
+        }
+        Some(LlType::Array(Box::new(LlType::Int(8)), u32::try_from(extent).ok()?))
     }
 
     pub(in crate::native) fn gep_source_should_override(
