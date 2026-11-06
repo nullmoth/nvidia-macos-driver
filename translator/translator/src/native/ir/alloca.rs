@@ -12,7 +12,72 @@ impl LlModule {
                 .keys()
                 .map(|name| (name.clone(), name.clone()))
                 .collect();
+            // Only a proven whole-object view can redefine an alloca's storage.
+            // Traverse identity edges as a graph so a phi backedge may cycle while
+            // all reachable terminal pointers still name the same alloca.
+            let mut whole_edges: HashMap<String, Vec<String>> = HashMap::default();
+            for inst in f.carrier_insts() {
+                if let Some((res, base)) = inst.identity_ptr_bitcast() {
+                    whole_edges.insert(res.to_string(), vec![base.to_string()]);
+                    continue;
+                }
+                let Some(res) = &inst.result else { continue; };
+                if let Some(gep) = &inst.gep() {
+                    if matches!(gep.indices.as_slice(), [TypedValue { value:
+                        LlValue::Int(0) | LlValue::SignedInt(0) | LlValue::Hex(0) | LlValue::Zero, .. }]) {
+                        if let LlValue::Local(base) = &gep.base.value {
+                            whole_edges.insert(res.clone(), vec![base.clone()]);
+                        }
+                    }
+                    continue;
+                }
+                if let Some(incoming) = inst.phi_values() {
+                    let edges: Option<Vec<String>> = incoming.map(|value| match value {
+                        LlValue::Local(name) => Some(name.clone()),
+                        _ => None,
+                    }).collect();
+                    if let Some(edges) = edges.filter(|edges| !edges.is_empty()) {
+                        whole_edges.insert(res.clone(), edges);
+                    }
+                }
+            }
+            // Every reachable cycle must also have a path to an alloca. This
+            // rejects a rooted phi arm merged with an independent unrooted cycle.
+            let mut parents: HashMap<String, Vec<String>> = HashMap::default();
+            for (alias, edges) in &whole_edges {
+                for base in edges {
+                    parents.entry(base.clone()).or_default().push(alias.clone());
+                }
+            }
+            let mut rooted = HashSet::default();
+            let mut pending: Vec<String> = allocas.keys().cloned().collect();
+            while let Some(name) = pending.pop() {
+                if !rooted.insert(name.clone()) { continue; }
+                if let Some(aliases) = parents.get(&name) {
+                    pending.extend(aliases.iter().cloned());
+                }
+            }
             let mut alias_roots: HashMap<String, String> = roots.clone();
+            for alias in whole_edges.keys() {
+                let mut pending = vec![alias.clone()];
+                let mut visited = HashSet::default();
+                let mut found = HashSet::default();
+                let mut valid = true;
+                while let Some(name) = pending.pop() {
+                    if !visited.insert(name.clone()) { continue; }
+                    if allocas.contains_key(&name) {
+                        found.insert(name);
+                    } else if let Some(edges) = whole_edges.get(&name) {
+                        pending.extend(edges.iter().cloned());
+                    } else {
+                        valid = false;
+                        break;
+                    }
+                }
+                if valid && found.len() == 1 && visited.iter().all(|name| rooted.contains(name)) {
+                    alias_roots.insert(alias.clone(), found.into_iter().next().unwrap());
+                }
+            }
             let mut sources: HashMap<String, HashSet<LlType>> = HashMap::default();
             let mut changed = true;
             while changed {
@@ -21,11 +86,6 @@ impl LlModule {
                     if let Some((res, base)) = inst.identity_ptr_bitcast() {
                         if let Some(root) = roots.get(base).cloned() {
                             if roots.insert(res.to_string(), root).is_none() {
-                                changed = true;
-                            }
-                        }
-                        if let Some(root) = alias_roots.get(base).cloned() {
-                            if alias_roots.insert(res.to_string(), root).is_none() {
                                 changed = true;
                             }
                         }
@@ -42,10 +102,15 @@ impl LlModule {
                         let Some(root) = roots.get(base).cloned() else {
                             continue;
                         };
-                        sources
-                            .entry(root.clone())
-                            .or_default()
-                            .insert(gep.source_ty.clone());
+                        // A GEP through a member describes that subobject, not a new view of
+                        // the whole alloca. Equal-sized first members (e.g. a matrix's
+                        // column array) must not replace their enclosing struct storage.
+                        if alias_roots.get(base) == Some(&root) {
+                            sources
+                                .entry(root.clone())
+                                .or_default()
+                                .insert(gep.source_ty.clone());
+                        }
                         if roots.insert(res.clone(), root).is_none() {
                             changed = true;
                         }
@@ -146,7 +211,12 @@ impl LlModule {
                         (&d, &p),
                         (LlType::Vector(de, dl), LlType::Vector(pe, pl)) if de == pe && pl > dl
                     ) || padded_float3_rows_viewed_wide(&d, &p);
-                    if widens {
+                    // Helpers can view a whole local union as bytes without changing its allocation size.
+                    let byte_view = self.is_pure_byte_image(&p)
+                        && !self.type_contains_pointer(&d)
+                        && (p == LlType::Int(8)
+                            || self.is_local_alloca_reinterpret_candidate(&d, &p));
+                    if widens || byte_view {
                         sources
                             .entry(root.clone())
                             .or_default()
