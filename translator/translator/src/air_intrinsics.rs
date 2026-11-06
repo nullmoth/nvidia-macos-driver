@@ -671,6 +671,7 @@ pub fn air_intrinsic_disposition(name: &str) -> Option<AirIntrinsicDisposition> 
             "air.fabs",
             "air.pow",
             "air.powr",
+            "air.native_powr",
             "air.sign",
             "air.mix",
             "air.floor",
