@@ -9,7 +9,7 @@
 @interface NVMTLSubmissionPart : NSObject {
 @public
     nvk_cmdbuf commands;
-    NSSet *resources, *surfaces;
+    NSSet *resources, *surfaces, *hostPublications;
     NSArray *scratch;
     id waitEvent, signalEvent;
     uint64_t value;
@@ -363,6 +363,7 @@ static int nvmtl_skip_empty_on(void) {
     part->commands = _c;
     memset(&_c, 0, sizeof(_c));
     part->resources = [(NVMTLResSet *)_resources nvmtlTakeAll]; part->surfaces = [_surfDirty copy];
+    part->hostPublications = [_hostPublications copy]; [_hostPublications removeAllObjects];
     // Another process may read an IOSurface once its writer is scheduled, and nothing orders its queue after ours.
     // A surface whose VRAM is shared is covered by the kernel (a CPU lock's page-off waits for the pending write); one we
     // write through a private image is copied out only after the GPU has finished, and a CPU lock does not wait for that.
@@ -620,7 +621,7 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
     // backings once, but refresh their bytes only when it actually submits.
     part->copyInputs = nvmtl_submission_copies(part->resources, NO);
     for (NVMTLBuffer *buffer in part->copyInputs) {
-        if (buffer->_hostPtr) { part->hasHostCopies = YES; break; }
+        if (buffer->_hostPtr && !nvmtl_owned_host_shadow(buffer)) { part->hasHostCopies = YES; break; }
     }
     part->copyInputsPrepared = YES;
 }
@@ -763,6 +764,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
             for (NVMTLTexture *texture in nvmtl_ws_part_landed(self, _nextPart, settled)) if (![texture nvmtlSurfaceOut]) published = NO;
             if (!nvmtl_ws_publish_settled(settled, self)) published = NO;
             for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, YES)) nvmtl_buffer_sync_out(buffer);
+            for (NVMTLBuffer *buffer in part->hostPublications) nvmtl_buffer_publish_host(buffer);
         }
         if (!published) {
             [self nvmtlFinishExecution:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
