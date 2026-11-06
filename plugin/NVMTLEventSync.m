@@ -653,6 +653,18 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
 - (BOOL)nvmtlSubmitAhead {
     // a commit still putting its kernel marks in (nvmtlSubmitWithEvents) must not reach the GPU before them
     if (_executionDone || _partsRetiring || _cbError || !_committed || _commitMarking) return NO;
+    // Local guard (Shared/NoCopy data race): a channel promise cannot order a part's CPU host copies against GPU writes
+    // still pending in this buffer, and NVMTL_GSUB_HOSTPTR_LIFT=1 (the shipped setting) lifts the per-part hold. While any
+    // remaining part carries legacy host copies, nothing in this buffer goes ahead; the worker submits it in order. The
+    // scan is by index (no fast enumeration of a mutable array) under the class lock the ahead pass holds, and a part the
+    // worker has claimed is never prepared here (the worker prepares claimed parts outside that lock).
+    for (NSUInteger i = _nextPart; i < _parts.count; i++) {
+        NVMTLSubmissionPart *pending = _parts[i];
+        if (![pending isKindOfClass:[NVMTLSubmissionPart class]]) continue;
+        if (pending->claimed) return NO;
+        nvmtl_prepare_submission_copies(pending);
+        if (pending->hasHostCopies) return NO;
+    }
     if (_nextSubmit < _nextPart) _nextSubmit = _nextPart;
     while (_nextSubmit < _parts.count) {
         if (atomic_load(&gsub_inflight) >= nvmtl_gsub_cap()) return NO;
