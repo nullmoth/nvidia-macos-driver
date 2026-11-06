@@ -1552,6 +1552,23 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
     @synchronized (nvmtl_surface_sync(r)) {
+    // Local fix: a protected (DRM) surface has no CPU mapping, so it can never be copied out. Publish it GPU-side
+    // instead of failing the whole command buffer ("Could not publish event segment writes" -> black screen). As on
+    // the dirtied path, completion never blocks on the accelerator lock: a busy try leaves the commit's mark and retries.
+    if (!IOSurfaceGetBaseAddress(r->_surf)) {
+        const int markResult = !r->_vramOn ? -1 : dirtied ? nvmtl_vk_surface_dirty_try((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane)
+                                                         : nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane);
+        const BOOL marked = r->_vramOn && (dirtied || !markResult);
+        const uint32_t seed = IOSurfaceGetSeed(r->_surf);
+        r->_surfSeed = seed; r->_surfSynced = YES;
+        if (marked) r->_surfGen = nvmtl_vram_tag_bump(r->_surf, r->_plane, seed);
+        if (dirtied && markResult > 0) nvmtl_surface_remark_later(r, seed);
+        static _Atomic unsigned np; const unsigned k = atomic_fetch_add(&np, 1);
+        if (k < 4 || (k + 1) % 5000 == 0)
+            nvlog("surface-out: surface %u %ux%u has no CPU mapping (protected) - published GPU-side (%s, #%u)", (unsigned)IOSurfaceGetID(r->_surf),
+                  r->_i.w, r->_i.h, marked ? "family VRAM marked newest" : r->_vramOn ? "VRAM mark refused" : "private image, no CPU copy", k + 1);
+        return YES;
+    }
     if (![r nvmtlSurfaceCopyable]) { nvtrace("SURFOUT surf %u %ux%u NOT copyable", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h); return NO; }
     nvtrace("SURFOUT surf %u %ux%u vramOn %d t=%llu", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h, (int)r->_vramOn,
             (unsigned long long)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000));
