@@ -61,6 +61,7 @@ static VkImageAspectFlags nvmtl_barrier_aspect(const nvk_image *img)
 #include <limits.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include "nvmtl_bundled_icd.h"
 static pthread_mutex_t g_gpu_clock_lock = PTHREAD_MUTEX_INITIALIZER;
 static inline const char *nvmtl_pick_vk(const char *staged, const char *dev) {
     return access(staged, R_OK) == 0 ? staged : dev;
@@ -114,12 +115,33 @@ static const char *nvmtl_vk_icd_json(void) {
     }
 }
 #define NVMTL_ICD    nvmtl_vk_icd_json()
-static inline const char *nvmtl_icd_lib_path(void) {
+// Local packaging adaptation (single bundle): on NVIDIA the Vulkan driver is the libvulkan_nouveau.dylib beside this
+// plugin image, so a plugin and its NVK always come from the same bundle (the installed one, or an isolated test copy).
+// An NVMTL_ICD_LIB override must still pass the release rule for library paths (nvmtl_code_path_allowed).
+static const char *nvmtl_icd_lib_path(void);
+static pthread_once_t g_nvidia_icd_path_once = PTHREAD_ONCE_INIT;
+static char g_nvidia_icd_path[PATH_MAX];
+static void nvmtl_nvidia_icd_path_init(void)
+{
+    const char *e = getenv("NVMTL_ICD_LIB");
+    if (e && *e) {
+        if (nvmtl_code_path_allowed(e)) (void)nvmtl_icd_regular_path(e, g_nvidia_icd_path, sizeof g_nvidia_icd_path);
+        return;
+    }
+    Dl_info own = {0};
+    if (dladdr((const void *)nvmtl_icd_lib_path, &own))
+        (void)nvmtl_icd_sibling_path(own.dli_fname, g_nvidia_icd_path, sizeof g_nvidia_icd_path);
+}
+static const char *nvmtl_icd_lib_path(void) {
+    if (nvmtl_vk_vendor() == 0x10de) {
+        pthread_once(&g_nvidia_icd_path_once, nvmtl_nvidia_icd_path_init);
+        return g_nvidia_icd_path[0] ? g_nvidia_icd_path : NULL;
+    }
     const char *e = getenv("NVMTL_ICD_LIB"); if (e && access(e, R_OK) == 0 && nvmtl_code_path_allowed(e)) return e;
     switch (nvmtl_vk_vendor()) {
     case 0x1002: return "/Library/GPUBundles/nvmtl/libvulkan_radeon.dylib";
     case 0x8086: return "/Library/GPUBundles/nvmtl/libvulkan_intel.dylib";
-    default:     return "/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib";
+    default:     return NULL;
     }
 }
 #define NVMTL_ICD_LIB nvmtl_icd_lib_path()
@@ -1007,6 +1029,7 @@ static int nvmtl_vk_initialize(void)
        though RADV compiles them. GCN 1/2 have no 16-bit ALU and keep shaderFloat16 off: their half modules stay refused,
        which is what keeps ACO from compiling half arithmetic it cannot lower there. A value the user set wins. */
     if (nvmtl_vk_vendor() == 0x1002) setenv("radv_enable_float16_gfx8", "true", 0);
+    if (!NVMTL_ICD_LIB) { nvlog("vk: no readable regular ICD beside this NVIDIA plugin (or a refused NVMTL_ICD_LIB override)"); return -1; }
     g_lib = dlopen(NVMTL_ICD_LIB, RTLD_NOW | RTLD_LOCAL);
     if (g_lib) {
         pvkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(g_lib, "vkGetInstanceProcAddr");
@@ -1030,6 +1053,10 @@ static int nvmtl_vk_initialize(void)
         nvlog("vk: dlopen(%s): %s", NVMTL_ICD_LIB, dlerror());
     }
     if (!pvkGetInstanceProcAddr) {
+        if (nvmtl_vk_vendor() == 0x10de) {
+            nvlog("vk: NVIDIA direct ICD unavailable; global loader fallback REFUSED (single-bundle layout)");
+            return -1;
+        }
         if (!getenv("VK_ICD_FILENAMES")) setenv("VK_ICD_FILENAMES", NVMTL_ICD, 1);
         g_lib = dlopen(NVMTL_LOADER, RTLD_NOW | RTLD_LOCAL);
         if (!g_lib) { nvlog("vk: dlopen(%s): %s", NVMTL_LOADER, dlerror()); return -1; }
@@ -5679,14 +5706,25 @@ static VkPipeline nvmtl_compute_variant(nvk_pipeline *p, const uint32_t l[3])
     return found;
 }
 
+static int (*g_sass_hook)(void *, const void *, uint32_t, uint32_t, uint32_t, uint32_t,
+                          const uint64_t *, uint32_t, const uint32_t *, const uint32_t *);
+static pthread_once_t g_sass_hook_once = PTHREAD_ONCE_INIT;
+// The SASS hook is taken from the ICD image already selected for this device, never from a second NVK.
+static void nvmtl_sass_hook_init(void)
+{
+    const char *override = getenv("NVMTL_NVK_DYLIB");
+    if (override && *override && !nvmtl_code_path_allowed(override)) override = "/nonexistent-refused-override";
+    g_sass_hook = (int (*)(void *, const void *, uint32_t, uint32_t, uint32_t, uint32_t,
+                          const uint64_t *, uint32_t, const uint32_t *, const uint32_t *))
+        nvmtl_icd_same_image_hook(g_lib, (const void *)pvkGetInstanceProcAddr, override, "nvmtl_nvk_dispatch_sass_v1");
+    nvlog("sass dispatch: selected ICD hook %s", g_sass_hook ? "found" : "MISSING or mismatched override - SPIR-V fallback");
+}
+
 int nvmtl_vk_cmd_dispatch_sass(nvk_cmdbuf *c,
                                const void *sass, uint32_t sass_len,
                                uint32_t regs, uint32_t smem, uint32_t barriers, uint32_t nparams,
                                const uint32_t threads[3], const uint32_t tg[3])
 {
-    static int (*hook)(void *, const void *, uint32_t, uint32_t, uint32_t, uint32_t,
-                       const uint64_t *, uint32_t, const uint32_t *, const uint32_t *);
-    static int looked;
     uint64_t params[16];
     uint32_t grid[3];
 
@@ -5694,21 +5732,8 @@ int nvmtl_vk_cmd_dispatch_sass(nvk_cmdbuf *c,
     if (nvmtl_vk_vendor() != 0x10de) return -3;     /* NVIDIA machine code: the caller dispatches the SPIR-V instead */
     if (nparams > 16) { nvlog("sass dispatch: %u parameters is more than 16 — REFUSED", nparams); return -2; }
 
-    if (!looked) {
-
-        const char *path = getenv("NVMTL_NVK_DYLIB");
-        void *h = dlopen(path && *path && nvmtl_code_path_allowed(path) ? path : "/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib",
-                         RTLD_NOW | RTLD_LOCAL);
-        looked = 1;
-        if (!h) nvlog("sass dispatch: cannot open NVK: %s", dlerror());
-        else {
-            hook = (int (*)(void *, const void *, uint32_t, uint32_t, uint32_t, uint32_t,
-                            const uint64_t *, uint32_t, const uint32_t *, const uint32_t *))
-                       dlsym(h, "nvmtl_nvk_dispatch_sass_v1");
-            nvlog("sass dispatch: NVK hook %s", hook ? "found" : "MISSING — this NVK predates it");
-        }
-    }
-    if (!hook) return -3;
+    pthread_once(&g_sass_hook_once, nvmtl_sass_hook_init);
+    if (!g_sass_hook) return -3;
 
     for (int d = 0; d < 3; d++) {
         if (!tg[d] || !threads[d]) return -4;
@@ -5732,7 +5757,7 @@ int nvmtl_vk_cmd_dispatch_sass(nvk_cmdbuf *c,
         params[i] = s->address + (uint64_t)s->off;
     }
 
-    int rc = hook(c->cb, sass, sass_len, regs, smem, barriers, params, nparams, tg, grid);
+    int rc = g_sass_hook(c->cb, sass, sass_len, regs, smem, barriers, params, nparams, tg, grid);
     if (rc) { nvlog("sass dispatch: NVK refused it, rc=%d", rc); return -8; }
     if (nvmtl_trace_on())
         nvtrace("SASS DISPATCH %u B, regs %u, %u param(s) | tg %ux%ux%u grid %ux%ux%u | p0 0x%llx",
