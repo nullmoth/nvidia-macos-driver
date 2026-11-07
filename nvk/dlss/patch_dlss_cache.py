@@ -400,6 +400,11 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
       count++;
    }
 
+   /* The SM prefetches instructions past the end of the code it runs (NVK's own shader heap overallocates 2048 bytes
+    * for it). Without this, a small module whose code ended near a page end faulted (FAULT_PTE one page past the
+    * module) as soon as a kernel took its CALL.ABS slow path: cuda_dldn_engine_auto_exposure_copy_kernel calling
+    * __cuda_sm20_div_rn_f64_full, DLSS at 3x into 4K. */
+   total += 0x1000;
    result = nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &dev->vk.base, total, 0x1000,
                                        NVKMD_MEM_LOCAL, NVKMD_MEM_MAP_WR, &module->link_mem);
    if (result != VK_SUCCESS)
