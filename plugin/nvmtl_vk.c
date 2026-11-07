@@ -322,6 +322,7 @@ typedef struct nvmtl_grace_img { nvk_image img; void *bufview, *alias; uint64_t 
 static pthread_mutex_t g_grace_lock = PTHREAD_MUTEX_INITIALIZER;
 static nvmtl_grace_img *g_grace_head, *g_grace_tail; static uint64_t g_grace_n, g_grace_reaped, g_cmd_finished_seq;
 static void nvmtl_vk_image_destroy_now(nvk_image *i);
+static void nvmtl_dlss_views_drop(VkImage img);   // DLSS Super Resolution section, near the end
 /* The lifetime horizon and all changes to its counts share g_grace_lock.
    Diagnostic readers may read the atomic counts without that lock. Queue sequence
    allocation additionally remains inside the queue submission critical section. */
@@ -8241,6 +8242,7 @@ static void nvmtl_vk_image_destroy_now(nvk_image *i)
     if (!i->img) { if (i->view) { nvmtl_vw_note_died(i->view); pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); i->view = NULL; } return; }   // a view held by the grace (texel entries: nvmtl_image_grace_reap)
     nvmtl_vk_image_upload_barrier(i);   // an async upload must finish before we free this image's memory (#96)
     if (i->view) { nvmtl_vw_note_died(i->view); pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); }
+    nvmtl_dlss_views_drop((VkImage)i->img);   // DLSS's own views of this image go with it
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
     if (i->pool) { if (i->sysmem) g_sys_bytes -= i->alloc; else g_vram_bytes -= i->alloc; image_pool_release(i); }
     if (!i->placed && i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); g_alloc_bytes -= i->alloc; if (i->sysmem) { g_sys_bytes -= i->alloc; g_sys_align -= (i->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= i->alloc; g_img_align -= (i->alloc + 65535ull) & ~65535ull; nvmtl_vk_budget_discharge(i->alloc); }    }
@@ -10797,23 +10799,43 @@ int nvmtl_vk_dlss_available(void)
 }
 /* The views DLSS reads and writes are its own: a plain 2D view of level 0 / layer 0 with ONE aspect and the image's own
  * format. The Metal texture's view can carry depth AND stencil (a combined depth-stencil texture), several levels or
- * layers, or a swizzle; the core turns each view into a descriptor handle (VK_NVX_image_view_handle), and a
- * depth+stencil sampled descriptor is invalid, which the GPU reads as a fault. The standalone check used a plain D32
- * image and never met that case. The views are released 64 evaluations later, long after the work that used them. */
-#define DLSS_VIEW_RING 384
-static VkImageView g_dlss_views[DLSS_VIEW_RING]; static unsigned g_dlss_view_at;
+ * layers, or a swizzle; the core turns each view into a descriptor handle (VK_NVX_image_view_handle).
+ * The view is made ONCE per image and kept until the image itself is destroyed (nvmtl_dlss_views_drop, called from
+ * nvmtl_vk_image_destroy_now after the GPU is done with it). The core keeps the handle it took for a view across
+ * frames; a view destroyed and re-created every frame can come back with the same handle value naming another
+ * image's descriptor. */
+#define DLSS_VIEW_CACHE 48
+typedef struct { VkImage img; uint32_t fmt; VkImageAspectFlags aspect; int rw; VkImageView v; } dlss_view_ent;
+static dlss_view_ent g_dlss_vc[DLSS_VIEW_CACHE];
+static pthread_mutex_t g_dlss_vc_mu = PTHREAD_MUTEX_INITIALIZER;
+static void nvmtl_dlss_views_drop(VkImage img)
+{
+    if (!img) return;
+    pthread_mutex_lock(&g_dlss_vc_mu);
+    for (int k = 0; k < DLSS_VIEW_CACHE; k++)
+        if (g_dlss_vc[k].img == img) { pvkDestroyImageView(g_dev, g_dlss_vc[k].v, NULL); memset(&g_dlss_vc[k], 0, sizeof g_dlss_vc[k]); }
+    pthread_mutex_unlock(&g_dlss_vc_mu);
+}
 static VkImageView dlss_view(nvk_image *i, VkImageAspectFlags aspect, int rw)
 {
+    pthread_mutex_lock(&g_dlss_vc_mu);
+    int freek = -1;
+    for (int k = 0; k < DLSS_VIEW_CACHE; k++) {
+        const dlss_view_ent *e = &g_dlss_vc[k];
+        if (e->img == (VkImage)i->img && e->fmt == i->fmt && e->aspect == aspect && e->rw == rw) { VkImageView v = e->v; pthread_mutex_unlock(&g_dlss_vc_mu); return v; }
+        if (!e->img && freek < 0) freek = k;
+    }
     VkImageViewUsageCreateInfo use = { VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, NULL,
                                        rw ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT };
     VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, &use, 0, (VkImage)i->img, VK_IMAGE_VIEW_TYPE_2D,
                                   (VkFormat)i->fmt, { 0 }, { aspect, 0, 1, 0, 1 } };
     VkImageView v = VK_NULL_HANDLE;
     const VkResult r = pvkCreateImageView(g_dev, &vci, NULL, &v);
-    if (r != VK_SUCCESS) { nvlog("dlss: own %s view of VkFormat %u -> %d", rw ? "storage" : "sampled", i->fmt, r); return VK_NULL_HANDLE; }
-    const unsigned slot = g_dlss_view_at++ % DLSS_VIEW_RING;
-    if (g_dlss_views[slot]) pvkDestroyImageView(g_dev, g_dlss_views[slot], NULL);
-    g_dlss_views[slot] = v;
+    if (r != VK_SUCCESS) { pthread_mutex_unlock(&g_dlss_vc_mu); nvlog("dlss: own %s view of VkFormat %u -> %d", rw ? "storage" : "sampled", i->fmt, r); return VK_NULL_HANDLE; }
+    if (freek < 0) {   // full: a game that keeps more scaler textures alive than this; the new view is not cached and is
+        nvlog("dlss: view cache full (%d) - a view is made for this evaluation only and kept", DLSS_VIEW_CACHE);   // leaked, never reused
+    } else g_dlss_vc[freek] = (dlss_view_ent){ (VkImage)i->img, i->fmt, aspect, rw, v };
+    pthread_mutex_unlock(&g_dlss_vc_mu);
     return v;
 }
 static int dlss_image(nvmtl_dlss_image *o, nvk_image *i, void *view, int rw)
@@ -10851,6 +10873,17 @@ int nvmtl_vk_cmd_dlss(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_args *a
     e.jitter_x = a->jitter_x; e.jitter_y = a->jitter_y; e.mv_scale_x = a->mv_scale_x; e.mv_scale_y = a->mv_scale_y;
     e.pre_exposure = a->pre_exposure; e.reset = a->reset; e.render_w = a->cfg_in_w_used; e.render_h = a->cfg_in_h_used;
     e.color_x = a->color_x; e.color_y = a->color_y; e.depth_x = a->depth_x; e.depth_y = a->depth_y; e.motion_x = a->motion_x; e.motion_y = a->motion_y;
+    // The game's render size and input offsets go to the core as they are; a region outside a texture is a read past
+    // its end on the GPU. Refuse the frame (the scaler falls back) rather than hand the core an out-of-range region.
+    if (!e.render_w || !e.render_h || e.render_w > a->in_w || e.render_h > a->in_h
+        || (uint64_t)e.color_x + e.render_w > a->color->w || (uint64_t)e.color_y + e.render_h > a->color->h
+        || (uint64_t)e.depth_x + e.render_w > a->depth->w || (uint64_t)e.depth_y + e.render_h > a->depth->h
+        || (uint64_t)e.motion_x + (a->mv_lowres ? e.render_w : a->out_w) > a->motion->w
+        || (uint64_t)e.motion_y + (a->mv_lowres ? e.render_h : a->out_h) > a->motion->h) {
+        nvlog("dlss: render region %ux%u (color +%u,%u depth +%u,%u motion +%u,%u) is outside the textures (feature %ux%u) - not recorded",
+              e.render_w, e.render_h, e.color_x, e.color_y, e.depth_x, e.depth_y, e.motion_x, e.motion_y, a->in_w, a->in_h);
+        return -1;
+    }
     const nvmtl_dlss_cfg want = { a->in_w, a->in_h, a->out_w, a->out_h, a->hdr, a->mv_lowres, a->mv_jittered, a->depth_inverted, a->auto_exposure };
     if (c->in_rp) nvmtl_vk_cmd_end_render(c);
     nvmtl_vk_cmd_barrier(c);
@@ -10863,7 +10896,12 @@ int nvmtl_vk_cmd_dlss(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_args *a
         nvlog("dlss: scaler settings changed - making a new feature (the old one is kept until the process ends)");
         f = NULL;
     }
-    if (!f) { f = nvmtl_dlss_feature_create(c->cb, &want); if (!f) return -1; *feature = f; }
+    if (!f) {
+        f = nvmtl_dlss_feature_create(c->cb, &want); if (!f) return -1; *feature = f;
+        // The feature's setup (weights and tables the core uploads) is recorded into this same command buffer: its
+        // writes must land before the first evaluation reads them. The standalone check submitted and waited between.
+        nvmtl_vk_cmd_barrier(c);
+    }
     c->direct_sass = 1;   // the core launches compiled machine code from this buffer: never reuse its pool
     const int rc = nvmtl_dlss_evaluate(c->cb, f, &e);
     nvmtl_vk_cmd_barrier(c);
