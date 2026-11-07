@@ -823,8 +823,20 @@ static void nvrmHeadOlut(struct NvKmsKapiHeadRequestedConfig *hr, struct NvKmsKa
     hr->modeSetConfig.olut.lutEntries = olut ? NVKMS_LUT_ARRAY_SIZE + 1 : 0;
     hr->flags.olutChanged = NV_TRUE;
 }
+// NVIDIA 620 added NvKmsKapiHeadModeSetConfig::colorFormat and applies it on EVERY full mode set ("always specify the
+// color format" in nvkms-kapi.c). Its zero is RGB, and a specified RGB never falls back: a mode that only fits the link
+// as YCbCr (4K at high refresh over HDMI 2.0) would be refused, a black screen. Through 615 the format was never
+// specified, so NVKMS tried RGB and fell back. UNKNOWN keeps that exact behaviour (it is what Linux DRM's "auto" maps
+// to). Member detection keeps this file building against 615 headers, which have no such field, for baseline builds.
+// 3 = NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_FORMAT_UNKNOWN (620 nvkms-api-types.h; 615 has no such constant).
+static const NvU32 kNvrmColorFormatAuto = 3;
+template <typename C> static auto nvrmAutoColorFormat(C *c, int) -> decltype(c->colorFormat = kNvrmColorFormatAuto, void())
+{ c->colorFormat = kNvrmColorFormatAuto; }
+template <typename C> static void nvrmAutoColorFormat(C *, long) {}
+
 static void nvrmHeadConfigBaseline(struct NvKmsKapiHeadRequestedConfig *hr, struct NvKmsKapiSurface *olut = NULL)
 {
+    nvrmAutoColorFormat(&hr->modeSetConfig, 0);   // colorBpc 0 = UNKNOWN and allmMode 0 = DISABLED already match 615
     hr->modeSetConfig.olutFpNormScale = NVKMS_OLUT_FP_NORM_SCALE_DEFAULT;
     hr->flags.olutFpNormScaleChanged = NV_TRUE;
     if (olut) nvrmHeadOlut(hr, olut);
