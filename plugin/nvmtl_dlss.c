@@ -85,6 +85,9 @@ int nvmtl_dlss_wanted(void)
     if (cached < 0) {
         const char *e = getenv("NVMTL_DLSS"); char core[512];
         if (e && !strcmp(e, "0")) { cached = 0; nvlog("dlss: off (NVMTL_DLSS=0)"); }
+        /* The desktop compositor never upscales; keep its Vulkan device exactly as before (no NVX extensions, no extra
+         * features), so the DLSS files being installed can never change what WindowServer runs. */
+        else if (!strcmp(getprogname(), "WindowServer")) cached = 0;
         else if (!is_dir(NVMTL_DLSS_SNIPPET_DIR) || find_core(core, sizeof core)) {
             cached = 0;
             if (e && !strcmp(e, "1")) nvlog("dlss: NVMTL_DLSS=1 but the files are not installed under %s", NVMTL_DLSS_ROOT);
