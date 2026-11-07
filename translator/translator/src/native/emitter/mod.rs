@@ -209,14 +209,24 @@ struct SelectedAccessTree {
 #[derive(Clone, Debug)]
 enum SelectedAccessArm {
     Typed { ptr: Word, storage: StorageClass },
+    DeferredTyped {
+        base: SelectedTypedBase,
+        storage: StorageClass,
+        geps: Vec<(LlType, Vec<TypedValue>)>,
+    },
     Raw(RawBufferOffset),
     Nested(Box<SelectedAccessTree>),
     Null,
 }
 
+#[derive(Clone, Debug)]
+enum SelectedTypedBase {
+    Value(LlValue, LlType),
+    Id(Word),
+}
+
 struct SelectedGepShape<'a> {
     source_ty: &'a LlType,
-    pointee: &'a LlType,
     indices: &'a [TypedValue],
 }
 

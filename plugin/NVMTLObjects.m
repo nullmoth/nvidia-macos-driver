@@ -77,6 +77,14 @@ static MTLDataType nvmtl_air_fc_type(NSString *t) {
 static void nvmtl_buffer_sync_in(NVMTLBuffer *b);
 @class NVMTLCommandBuffer;
 static void nvmtl_buffer_sync_out(NVMTLBuffer *b);
+// Local 16 KiB managed NoCopy: an unimportable caller range gets owned coherent staging as its managed shadow, and the
+// caller's pointer stays the CPU view. These are the only buffers with all of: managed, a caller pointer, an owned
+// (not imported) shadow mapping, and no host mapping of the GPU copy.
+static BOOL nvmtl_owned_host_shadow(NVMTLBuffer *b) {
+    return b && b->_storage == MTLStorageModeManaged && b->_hostPtr && b->_shadow.map
+        && !b->_shadow.imported && !b->_b.map;
+}
+static void nvmtl_buffer_publish_host(NVMTLBuffer *b);
 static void nvbt(const char *tag, int *count, int max) {
     if (*count >= max) return; (*count)++;
     extern const char *nvmtl_log_path(void);
@@ -284,8 +292,8 @@ static NSMutableSet *nvmtl_identity_set(NSUInteger cap) {
     return (__bridge_transfer NSMutableSet *)CFSetCreateMutable(kCFAllocatorDefault, (CFIndex)cap, &cb);
 }
 @implementation NVMTLResSet
-- (instancetype)init { if ((self = [super init])) _s = nvmtl_identity_set(0); return self; }
-- (instancetype)initWithCapacity:(NSUInteger)n { if ((self = [super init])) _s = nvmtl_identity_set(n); return self; }
+- (instancetype)init { if ((self = [super init])) { _s = nvmtl_identity_set(0); _w = nvmtl_identity_set(0); } return self; }
+- (instancetype)initWithCapacity:(NSUInteger)n { if ((self = [super init])) { _s = nvmtl_identity_set(n); _w = nvmtl_identity_set(n); } return self; }
 // 10-07 (a user's crash report, RTX 5060 Ti): Hackintool died in -[__NSSetM member:] under -addObject:, called
 // from setFragmentTexture on CoreAnimation's async-render workqueue thread. NSMutableSet is not thread-safe and nothing
 // here serialised it, so every operation now holds _lk. Enumeration hands out a snapshot, never the live set.
@@ -309,24 +317,32 @@ static NSMutableSet *nvmtl_identity_set(NSUInteger cap) {
     // driver, that both misses the bug and invents one, is worse than no test.
     id member = [_s member:o]; BOOL had = member != nil;
     if (!had) { [_s addObject:o]; member = o; }
+    [_w addObject:member];
     // An equal object need not be the object retained by NSMutableSet. Cache only the retained member's address.
     _mru[_mruNext++ & 7] = (__bridge const void *)member;
     os_unfair_lock_unlock(&_lk); if (!had) nvmtl_resref(o, 1); }
+- (void)addReadOnlyObject:(id)o { if (!o) return; const void *p = (__bridge const void *)o; os_unfair_lock_lock(&_lk);
+    for (unsigned k = 0; k < 8; k++) if (_mru[k] == p) { os_unfair_lock_unlock(&_lk); return; }
+    id member = [_s member:o]; BOOL had = member != nil;
+    if (!had) [_s addObject:o];
+    os_unfair_lock_unlock(&_lk); if (!had) nvmtl_resref(o, 1); }
+- (BOOL)isWrittenObject:(id)o { if (!o) return NO; os_unfair_lock_lock(&_lk);
+    BOOL w = [_w member:o] != nil; os_unfair_lock_unlock(&_lk); return w; }
 - (void)removeObject:(id)o { if (!o) return; os_unfair_lock_lock(&_lk); id member = [_s member:o];
-    if (member) [_s removeObject:member];
+    if (member) { [_s removeObject:member]; [_w removeObject:member]; }
     for (unsigned k = 0; k < 8; k++) if (_mru[k] == (__bridge const void *)member) _mru[k] = NULL;
     os_unfair_lock_unlock(&_lk); if (member) nvmtl_resref(member, -1); }
 // Clearing, copying and sealing never go through -allObjects. That array is autoreleased into the CALLER's pool, and
 // these run on the app's own commit thread: Geekbench 7 never drains that pool, so every resource a command buffer had
 // ever touched stayed alive, and Super Resolution filled VRAM with 9 MB MPS buffers until allocations were refused.
 // The sets below are owned (+1) and released at the end of scope.
-- (void)removeAllObjects { NSMutableSet *fresh = nvmtl_identity_set(0), *old;
-    os_unfair_lock_lock(&_lk); old = _s; _s = fresh; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
+- (void)removeAllObjects { NSMutableSet *fresh = nvmtl_identity_set(0), *freshW = nvmtl_identity_set(0), *old, *oldW;
+    os_unfair_lock_lock(&_lk); old = _s; oldW = _w; _s = fresh; _w = freshW; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
     for (id o in old) nvmtl_resref(o, -1); }
 - (id)copyWithZone:(NSZone *)z { atomic_fetch_add(&gRes2Tick, 1);
     NVMTLResSet *c = [NVMTLResSet new];
-    os_unfair_lock_lock(&_lk); NSMutableSet *m = [_s mutableCopy]; os_unfair_lock_unlock(&_lk);
-    c->_s = m;
+    os_unfair_lock_lock(&_lk); NSMutableSet *m = [_s mutableCopy], *mw = [_w mutableCopy]; os_unfair_lock_unlock(&_lk);
+    c->_s = m; c->_w = mw;
     for (id o in m) nvmtl_resref(o, 1);
     return c; }
 - (id)mutableCopyWithZone:(NSZone *)z { return [self copyWithZone:z]; }
@@ -335,8 +351,8 @@ static NSMutableSet *nvmtl_identity_set(NSUInteger cap) {
 // being in the part: the command buffer stopped holding it while the GPU work still used it. Membership moves to one
 // new owner, so each resource's residency count is unchanged; the new set's -dealloc gives it back.
 - (NVMTLResSet *)nvmtlTakeAll { atomic_fetch_add(&gRes2Tick, 1);
-    NVMTLResSet *taken = [NVMTLResSet new]; NSMutableSet *empty = taken->_s;
-    os_unfair_lock_lock(&_lk); taken->_s = _s; _s = empty; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
+    NVMTLResSet *taken = [NVMTLResSet new]; NSMutableSet *empty = taken->_s, *emptyW = taken->_w;
+    os_unfair_lock_lock(&_lk); taken->_s = _s; taken->_w = _w; _s = empty; _w = emptyW; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
     return taken; }
 - (void)dealloc { for (id o in _s) nvmtl_resref(o, -1); }
 @end
@@ -1041,14 +1057,18 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
     if (_b.buf && nvmtl_trace_on()) nvtrace("BUFFREE 0x%llx len %zu", (unsigned long long)nvmtl_vk_buffer_address(&_b), _b.size);
     for (uint32_t k = 0; k < _nbpk; k++) nvmtl_vk_image_destroy(&_bpk[k].img);
     free(_bpk); _bpk = NULL; _nbpk = 0;
+    // Retire clears the buffer descriptors (parked or destroyed): take the no-copy caller pointer and length first, or
+    // the deallocator receives (NULL, 0) for an imported buffer.
+    void *hostForDealloc = _hostPtr ?: (_shadow.imported ? _shadow.map : _b.map);
+    const NSUInteger hostLength = (NSUInteger)(_hostLen ?: _b.size);
     nvmtl_vk_buffer_retire(&_b); if (_shadow.buf) nvmtl_vk_buffer_retire(&_shadow);
     if (_subHeap) { NVMTLHeap *h = _subHeap; NSUInteger c = _subCharge; _subHeap = nil; _subCharge = 0;
                     if (_subPlaced && c) { _subPlaced = NO; [h nvmtlGiveRange:_heapOffset length:c]; }
                     [h nvmtlReleaseSubAllocation:c]; }
     if (_hostDealloc) { void (^d)(void *, NSUInteger) = _hostDealloc; _hostDealloc = nil;
-                        d(_hostPtr ?: _b.map, (NSUInteger)(_hostLen ?: _b.size)); } }
+                        d(hostForDealloc, hostLength); } }
 - (MTLStorageMode)storageMode { return _storage; }
-- (void *)contents { nvmtl_buf_settle(self); return _shadow.map ? _shadow.map : (_hostPtr ? _hostPtr : _b.map); }
+- (void *)contents { nvmtl_buf_settle(self); return _hostPtr ? _hostPtr : (_shadow.map ? _shadow.map : _b.map); }
 - (id<MTLHeap>)heap { return _heap ?: _subHeap; }
 - (NSUInteger)heapOffset { return _heapOffset; }
 - (NSUInteger)length { return _b.size; }
@@ -1057,7 +1077,11 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
     if (_shadow.map) {
         if (r.location >= _b.size) return;
         NSUInteger n = MIN(r.length, _b.size - r.location);
-        if (n) nvmtl_managed_mark(self, r.location, r.location + n);
+        if (n) {
+            if (nvmtl_owned_host_shadow(self))
+                memcpy((char *)_shadow.map + r.location, (const char *)_hostPtr + r.location, n);
+            nvmtl_managed_mark(self, r.location, r.location + n);
+        }
         return;
     }
     nvmtl_buffer_sync_in(self); }
@@ -1423,7 +1447,7 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
     if (!_parent && _bparkable && _backBuf && _i.img) nvmtl_bpark_put(_backBuf, &_i, _pkey);
     if (!_parent) { nvmtl_vk_image_dying_label(_label.UTF8String); nvmtl_vk_image_destroy(&_i); }
     if (_stTwin.img) nvmtl_vk_image_destroy(&_stTwin);
-    if (!_parent && _vramOn) { nvmtl_vk_buffer_destroy(&_vramBuf); _vramOn = NO; }
+    if (!_parent && _vramOn) { nvmtl_vram_import_done(&_vramBuf, _vramShare, &_hostPages); _vramShare = 0; _vramOn = NO; }
     if (!_parent) nvmtl_vk_host_pages_drop(&_hostPages);
     if (_surfOwned && _surf) CFRelease(_surf);
     if (_subHeap) { NVMTLHeap *h = _subHeap; NSUInteger c = _subCharge; _subHeap = nil; _subCharge = 0;
@@ -1552,6 +1576,23 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
     @synchronized (nvmtl_surface_sync(r)) {
+    // Local fix: a protected (DRM) surface has no CPU mapping, so it can never be copied out. Publish it GPU-side
+    // instead of failing the whole command buffer ("Could not publish event segment writes" -> black screen). As on
+    // the dirtied path, completion never blocks on the accelerator lock: a busy try leaves the commit's mark and retries.
+    if (!IOSurfaceGetBaseAddress(r->_surf)) {
+        const int markResult = !r->_vramOn ? -1 : dirtied ? nvmtl_vk_surface_dirty_try((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane)
+                                                         : nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane);
+        const BOOL marked = r->_vramOn && (dirtied || !markResult);
+        const uint32_t seed = IOSurfaceGetSeed(r->_surf);
+        r->_surfSeed = seed; r->_surfSynced = YES;
+        if (marked) r->_surfGen = nvmtl_vram_tag_bump(r->_surf, r->_plane, seed);
+        if (dirtied && markResult > 0) nvmtl_surface_remark_later(r, seed);
+        static _Atomic unsigned np; const unsigned k = atomic_fetch_add(&np, 1);
+        if (k < 4 || (k + 1) % 5000 == 0)
+            nvlog("surface-out: surface %u %ux%u has no CPU mapping (protected) - published GPU-side (%s, #%u)", (unsigned)IOSurfaceGetID(r->_surf),
+                  r->_i.w, r->_i.h, marked ? "family VRAM marked newest" : r->_vramOn ? "VRAM mark refused" : "private image, no CPU copy", k + 1);
+        return YES;
+    }
     if (![r nvmtlSurfaceCopyable]) { nvtrace("SURFOUT surf %u %ux%u NOT copyable", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h); return NO; }
     nvtrace("SURFOUT surf %u %ux%u vramOn %d t=%llu", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h, (int)r->_vramOn,
             (unsigned long long)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000));
@@ -5800,7 +5841,7 @@ static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbS
     NVMTLBuffer *s = (NVMTLBuffer *)src, *d = (NVMTLBuffer *)dst;
     if (!s || !d) { nvlog("blit copyFromBuffer: nil"); return; }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    [_cb->_resources addObject:s];
+    [(NVMTLResSet *)_cb->_resources addReadOnlyObject:s];
     [_cb->_resources addObject:d];
     if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &s->_b, so, &d->_b, dof, size)) nvlog("blit copyFromBuffer: FAILED");
 }
@@ -5934,7 +5975,7 @@ static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbS
     NVMTLBuffer *b = (NVMTLBuffer *)src; NVMTLTexture *t = (NVMTLTexture *)dst;
     if (!b || !t) { nvlog("blit copyFromBuffer:toTexture: nil"); return; }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    [_cb->_resources addObject:b];
+    [(NVMTLResSet *)_cb->_resources addReadOnlyObject:b];
     [_cb->_resources addObject:t];
     if (nvmtl_rb_root(t) && [t nvi]->mtl_type != 7 && size.depth == 1) {   // buffer bytes are Metal's BGR10A2 layout
         NVMTLTexture *tmp = nvmtl_rb_temp(_cb, t.device, size.width, size.height);
@@ -6049,6 +6090,10 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
         if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &b->_b, 0, &b->_shadow, 0, b->_b.size))
             [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
                 userInfo:@{NSLocalizedDescriptionKey:@"Cannot encode managed buffer synchronization"}]];
+        else if (nvmtl_owned_host_shadow(b)) {
+            if (!_cb->_hostPublications) _cb->_hostPublications = [NSMutableSet new];
+            [_cb->_hostPublications addObject:b];
+        }
     }
     if ([(id)r isKindOfClass:[NVMTLTexture class]]) {
         NVMTLTexture *t = (NVMTLTexture *)r;
@@ -6059,6 +6104,10 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
             if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &bb->_b, 0, &bb->_shadow, 0, bb->_b.size))
                 [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
                     userInfo:@{NSLocalizedDescriptionKey:@"Cannot encode managed buffer-texture synchronization"}]];
+            else if (nvmtl_owned_host_shadow(bb)) {
+                if (!_cb->_hostPublications) _cb->_hostPublications = [NSMutableSet new];
+                [_cb->_hostPublications addObject:bb];
+            }
         }
     }
 }
@@ -7256,4 +7305,14 @@ static void nvmtl_buffer_sync_out(NVMTLBuffer *b)
     const uint64_t t0 = nvmtl_perf_now();
     memcpy(b->_hostPtr, b->_b.map, b->_hostLen);
     nvmtl_perf_note(NVP_SYNCOUT, t0, b->_hostLen);
+}
+
+// Called only by the exact submission part that encoded its GPU->staging synchronization, after the fence and before
+// any event is signaled. A different part cannot consume a global pending-publication bit.
+static void nvmtl_buffer_publish_host(NVMTLBuffer *b) {
+    if (!nvmtl_owned_host_shadow(b)) return;
+    const size_t n = MIN(b->_hostLen, MIN(b->_b.size, b->_shadow.size));
+    const uint64_t t0 = nvmtl_perf_now();
+    if (n) memcpy(b->_hostPtr, b->_shadow.map, n);
+    nvmtl_perf_note(NVP_SYNCOUT, t0, n);
 }

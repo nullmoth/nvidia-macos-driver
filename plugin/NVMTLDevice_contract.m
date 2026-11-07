@@ -41,17 +41,30 @@ static void nvbt(const char *tag, int *count, int max);
     // synchronizeResource (GPU -> CPU). Apple's OpenCL wraps every cl_mem this way; importing the pages zero-copy put
     // every kernel access across PCIe instead (a 5600x4200 byte-image rotate: 6.6 s per dispatch, Geekbench 6 OpenCL
     // Horizon Detection hit the 60 s GPU watchdog). The caller's pages become the managed shadow, so contents is still
-    // the caller's pointer, and the GPU side lives in VRAM. Under 1 MiB the transfer outweighs the win (the same
-    // threshold the Shared pair uses), so small buffers stay zero-copy.
-    if (sm == MTLStorageModeManaged && a1 >= (1u << 20) && nvmtl_vk_buffer_import_host(a0, a1, &b->_shadow) == 0) {
-        if (nvmtl_vk_buffer_create(a1, 0, &b->_b) == 0) {
-            [b didModifyRange:NSMakeRange(0, a1)];
-            { static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: managed %lu bytes -> VRAM copy, caller's pages are the shadow", (unsigned long)a1); }
+    // the caller's pointer, and the GPU side lives in VRAM. This isolated 16 KiB experiment also gives small
+    // caller-page buffers a private GPU copy; smaller buffers keep the established direct-host path.
+    if (sm == MTLStorageModeManaged && a1 >= (1u << 14)) {
+        const BOOL imported = nvmtl_vk_buffer_import_host(a0, a1, &b->_shadow) == 0;
+        // A caller's unaligned pointer or unpadded length cannot be imported. Keep managed GPU accesses in VRAM:
+        // owned coherent staging carries the explicit didModifyRange / synchronizeResource transfers instead.
+        const BOOL owned = !imported && nvmtl_vk_buffer_create(a1, 1, &b->_shadow) == 0 && b->_shadow.map;
+        if (imported || owned) {
+            if (owned) { b->_hostPtr = a0; b->_hostLen = (size_t)a1; }
+            if (nvmtl_vk_buffer_create(a1, 0, &b->_b) == 0) {
+                [b didModifyRange:NSMakeRange(0, a1)];
+                if (owned) { static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: managed %lu bytes -> VRAM copy with owned staging for unimportable caller pages", (unsigned long)a1); }
+                else { static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: managed %lu bytes -> VRAM copy, caller's pages are the shadow", (unsigned long)a1); }
+                return b;
+            }
+            // No VRAM: the owned staging allocation becomes the old generic copy-backed pair; an imported shadow
+            // becomes the original direct caller-page buffer. Preserve both established publication paths.
+            if (owned) memcpy(b->_shadow.map, a0, a1);
+            nvlog("newBufferWithBytesNoCopy: managed %lu bytes: VRAM refused - using the host-visible fallback", (unsigned long)a1);
+            b->_b = b->_shadow; memset(&b->_shadow, 0, sizeof b->_shadow);
             return b;
         }
-        nvlog("newBufferWithBytesNoCopy: managed %lu bytes: VRAM refused - the GPU reads the caller's pages directly", (unsigned long)a1);
-        b->_b = b->_shadow; memset(&b->_shadow, 0, sizeof b->_shadow);
-        return b;
+        if (b->_shadow.buf) nvmtl_vk_buffer_destroy(&b->_shadow);
+        memset(&b->_shadow, 0, sizeof b->_shadow);
     }
     if (nvmtl_vk_buffer_import_host(a0, a1, &b->_b) == 0) {
         static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: IMPORTED the caller's pages (%lu bytes at %p) \u2014 zero copy", (unsigned long)a1, a0);
@@ -62,8 +75,15 @@ static void nvbt(const char *tag, int *count, int max);
         nvlog("newBufferWithBytesNoCopy: could neither import nor allocate %lu bytes -> nil", (unsigned long)a1);
         return nil;
     }
-    memcpy(b->_b.map, a0, a1);
-    b->_hostPtr = a0; b->_hostLen = (size_t)a1;
+    const char *me = getprogname();
+    const BOOL ws = me && !strcmp(me, "WindowServer");
+    if (ws || a1 < (1u << 20)) memcpy(b->_b.map, a0, a1);
+    if (ws) {
+        if (a3) { void (^user)(void *, NSUInteger) = [a3 copy]; void *const ptr = a0; const NSUInteger n = a1;
+                  b->_hostDealloc = ^(void *p, NSUInteger l) { (void)p; (void)l; user(ptr, n); }; }
+    } else {
+        b->_hostPtr = a0; b->_hostLen = (size_t)a1;
+    }
     { static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: COPIED %lu bytes at %p (import alignment %zu) \u2014 resynced at every submission",
                                           (unsigned long)a1, a0, nvmtl_vk_host_import_align()); }
     return b;

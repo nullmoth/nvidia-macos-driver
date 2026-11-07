@@ -25,40 +25,49 @@ impl Emitter {
         };
         let result_ty = self.resolve_type(result_ty)?;
         let result_type = self.type_id(&result_ty)?;
-        let true_value = if true_is_null {
-            self.const_null(&result_ty)?
-        } else {
-            self.emit_selected_direct_load_arm_value(
-                &selected.true_value,
-                &selected.ty,
-                true_storage.unwrap_or(storage),
-                &result_ty,
-                access_align,
-                instructions,
-            )?
-        };
-        let false_value = if false_is_null {
-            self.const_null(&result_ty)?
-        } else {
-            self.emit_selected_direct_load_arm_value(
-                &selected.false_value,
-                &selected.ty,
-                false_storage.unwrap_or(storage),
-                &result_ty,
-                access_align,
-                instructions,
-            )?
-        };
-        instructions.push(Self::inst(
-            Op::Select,
-            Some(result_type),
-            Some(result),
-            vec![
-                Operand::IdRef(selected.cond),
-                Operand::IdRef(true_value),
-                Operand::IdRef(false_value),
-            ],
-        ));
+        self.emit_selected_load_choice(result, result_type, selected.cond, instructions,
+            |this, when_true, instructions| {
+                let (value, is_null, arm_storage) = if when_true {
+                    (&selected.true_value, true_is_null, true_storage)
+                } else {
+                    (&selected.false_value, false_is_null, false_storage)
+                };
+                if is_null { this.const_null(&result_ty) }
+                else { this.emit_selected_direct_load_arm_value(value, &selected.ty,
+                    arm_storage.unwrap_or(storage), &result_ty, access_align, instructions) }
+            })
+    }
+
+    // Load only the selected operand; materialize deferred GEP arms inside their branch.
+    fn emit_selected_load_choice(
+        &mut self,
+        result: Word,
+        result_type: Word,
+        condition: Word,
+        instructions: &mut Vec<Instruction>,
+        mut arm: impl FnMut(&mut Self, bool, &mut Vec<Instruction>) -> Result<Word, String>,
+    ) -> Result<(), String> {
+        let true_label = self.fresh();
+        let false_label = self.fresh();
+        let merge_label = self.fresh();
+        instructions.push(Self::inst(Op::SelectionMerge, None, None,
+            vec![Operand::IdRef(merge_label), Operand::SelectionControl(SelectionControl::NONE)]));
+        instructions.push(Self::inst(Op::BranchConditional, None, None,
+            vec![Operand::IdRef(condition), Operand::IdRef(true_label), Operand::IdRef(false_label)]));
+        instructions.push(Self::inst(Op::Label, None, Some(true_label), vec![]));
+        let true_value = arm(self, true, instructions)?;
+        let true_end = instructions.iter().rev().find(|i| i.class.opcode == Op::Label)
+            .and_then(|i| i.result_id).expect("selected load true block");
+        instructions.push(Self::inst(Op::Branch, None, None, vec![Operand::IdRef(merge_label)]));
+        instructions.push(Self::inst(Op::Label, None, Some(false_label), vec![]));
+        let false_value = arm(self, false, instructions)?;
+        let false_end = instructions.iter().rev().find(|i| i.class.opcode == Op::Label)
+            .and_then(|i| i.result_id).expect("selected load false block");
+        instructions.push(Self::inst(Op::Branch, None, None, vec![Operand::IdRef(merge_label)]));
+        instructions.push(Self::inst(Op::Label, None, Some(merge_label), vec![]));
+        instructions.push(Self::inst(Op::Phi, Some(result_type), Some(result),
+            vec![Operand::IdRef(true_value), Operand::IdRef(true_end),
+                 Operand::IdRef(false_value), Operand::IdRef(false_end)]));
         Ok(())
     }
 
@@ -332,107 +341,12 @@ impl Emitter {
                 tree.pointee
             ));
         }
-        if matches!(tree.true_arm, SelectedAccessArm::Null)
-            || matches!(tree.false_arm, SelectedAccessArm::Null)
-        {
-            let true_label = self.fresh();
-            let false_label = self.fresh();
-            let merge_label = self.fresh();
-            instructions.push(Self::inst(
-                Op::SelectionMerge,
-                None,
-                None,
-                vec![
-                    Operand::IdRef(merge_label),
-                    Operand::SelectionControl(SelectionControl::NONE),
-                ],
-            ));
-            instructions.push(Self::inst(
-                Op::BranchConditional,
-                None,
-                None,
-                vec![
-                    Operand::IdRef(tree.cond),
-                    Operand::IdRef(true_label),
-                    Operand::IdRef(false_label),
-                ],
-            ));
-            instructions.push(Self::inst(Op::Label, None, Some(true_label), vec![]));
-            let true_value = self.emit_selected_access_arm_load_value(
-                &tree.true_arm,
-                result_ty,
-                access_align,
-                instructions,
-            )?;
-            let true_end = instructions
-                .iter()
-                .rev()
-                .find(|i| i.class.opcode == Op::Label)
-                .and_then(|i| i.result_id)
-                .unwrap();
-            instructions.push(Self::inst(
-                Op::Branch,
-                None,
-                None,
-                vec![Operand::IdRef(merge_label)],
-            ));
-            instructions.push(Self::inst(Op::Label, None, Some(false_label), vec![]));
-            let false_value = self.emit_selected_access_arm_load_value(
-                &tree.false_arm,
-                result_ty,
-                access_align,
-                instructions,
-            )?;
-            let false_end = instructions
-                .iter()
-                .rev()
-                .find(|i| i.class.opcode == Op::Label)
-                .and_then(|i| i.result_id)
-                .unwrap();
-            instructions.push(Self::inst(
-                Op::Branch,
-                None,
-                None,
-                vec![Operand::IdRef(merge_label)],
-            ));
-            instructions.push(Self::inst(Op::Label, None, Some(merge_label), vec![]));
-            let value = self.fresh();
-            instructions.push(Self::inst(
-                Op::Phi,
-                Some(self.type_id(result_ty)?),
-                Some(value),
-                vec![
-                    Operand::IdRef(true_value),
-                    Operand::IdRef(true_end),
-                    Operand::IdRef(false_value),
-                    Operand::IdRef(false_end),
-                ],
-            ));
-            return Ok(value);
-        }
-        let true_value = self.emit_selected_access_arm_load_value(
-            &tree.true_arm,
-            result_ty,
-            access_align,
-            instructions,
-        )?;
-        let false_value = self.emit_selected_access_arm_load_value(
-            &tree.false_arm,
-            result_ty,
-            access_align,
-            instructions,
-        )?;
         let value = self.fresh();
-        instructions.push(Self::inst(
-            Op::Select,
-            Some(self.type_id(result_ty)?),
-            Some(value),
-            vec![
-                Operand::IdRef(tree.cond),
-                Operand::IdRef(true_value),
-                Operand::IdRef(false_value),
-            ],
-        ));
+        let result_type = self.type_id(result_ty)?;
+        self.emit_selected_load_choice(value, result_type, tree.cond, instructions,
+            |this, when_true, instructions| this.emit_selected_access_arm_load_value(
+                if when_true { &tree.true_arm } else { &tree.false_arm },
+                result_ty, access_align, instructions))?;
         Ok(value)
     }
 
@@ -452,6 +366,13 @@ impl Emitter {
                     Some(value),
                     vec![Operand::IdRef(*ptr)],
                 ));
+                Ok(value)
+            }
+            SelectedAccessArm::DeferredTyped { base, storage, geps } => {
+                let ptr = self.materialize_selected_typed_arm(base, *storage, geps, instructions)?;
+                let value = self.fresh();
+                instructions.push(Self::inst(Op::Load, Some(self.type_id(result_ty)?), Some(value),
+                    vec![Operand::IdRef(ptr)]));
                 Ok(value)
             }
             SelectedAccessArm::Raw(raw) => {
@@ -600,6 +521,17 @@ impl Emitter {
                     Ok(())
                 })
             }
+            SelectedAccessArm::DeferredTyped { base, storage, geps } => {
+                if !matches!(storage, StorageClass::StorageBuffer | StorageClass::UniformConstant) {
+                    return Err(format!("native emitter: selected access store has unsupported storage {storage:?}"));
+                }
+                self.emit_guarded(condition, instructions, |this, instructions| {
+                    let ptr = this.materialize_selected_typed_arm(base, *storage, geps, instructions)?;
+                    instructions.push(Self::inst(Op::Store, None, None,
+                        vec![Operand::IdRef(ptr), Operand::IdRef(object)]));
+                    Ok(())
+                })
+            }
             SelectedAccessArm::Raw(raw) => {
                 let raw = raw.clone();
                 let object_ty = object_ty.clone();
@@ -681,49 +613,20 @@ impl Emitter {
             ));
         }
         let result_type = self.type_id(&result_ty)?;
-        let true_value = self.fresh();
-        let false_value = self.fresh();
-        if let Some(true_ptr) = selected.true_ptr {
-            instructions.push(Self::inst(
-                Op::Load,
-                Some(result_type),
-                Some(true_value),
-                vec![Operand::IdRef(true_ptr)],
-            ));
-        } else if let Some(true_raw) = &selected.true_raw {
-            self.emit_raw_load(true_value, &result_ty, true_raw, access_align, instructions)?;
-        } else {
-            return Err("native emitter: selected pointer load missing true arm".to_string());
-        }
-        if let Some(false_ptr) = selected.false_ptr {
-            instructions.push(Self::inst(
-                Op::Load,
-                Some(result_type),
-                Some(false_value),
-                vec![Operand::IdRef(false_ptr)],
-            ));
-        } else if let Some(false_raw) = &selected.false_raw {
-            self.emit_raw_load(
-                false_value,
-                &result_ty,
-                false_raw,
-                access_align,
-                instructions,
-            )?;
-        } else {
-            return Err("native emitter: selected pointer load missing false arm".to_string());
-        }
-        instructions.push(Self::inst(
-            Op::Select,
-            Some(result_type),
-            Some(result),
-            vec![
-                Operand::IdRef(selected.cond),
-                Operand::IdRef(true_value),
-                Operand::IdRef(false_value),
-            ],
-        ));
-        Ok(())
+        self.emit_selected_load_choice(result, result_type, selected.cond, instructions,
+            |this, when_true, instructions| {
+                let (ptr, raw) = if when_true {
+                    (selected.true_ptr, &selected.true_raw)
+                } else { (selected.false_ptr, &selected.false_raw) };
+                let value = this.fresh();
+                if let Some(ptr) = ptr {
+                    instructions.push(Self::inst(Op::Load, Some(result_type), Some(value),
+                        vec![Operand::IdRef(ptr)]));
+                } else if let Some(raw) = raw {
+                    this.emit_raw_load(value, &result_ty, raw, access_align, instructions)?;
+                } else { return Err("native emitter: selected pointer load missing arm".to_string()); }
+                Ok(value)
+            })
     }
 
     pub(in crate::native::emitter) fn emit_selected_pointer_store(

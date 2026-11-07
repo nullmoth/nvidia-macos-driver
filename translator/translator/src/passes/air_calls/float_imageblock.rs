@@ -610,6 +610,30 @@ pub(in crate::passes) fn lower_float_math(
     {
         return Ok(lower_fast_trig(ctx, res, rty, args[0], GLSLstd450::Sin));
     }
+    // OpenCL native_powr is a separate AIR family, not a blanket native_ alias.
+    // It has implementation-defined range/accuracy, with nonnegative base;
+    // GLSL Pow preserves componentwise positive-base exponentiation.  Do not
+    // route through Metal pow's abs/parity handling of negative bases.
+    if name.starts_with("air.native_powr.") {
+        let lanes = vector_len(ctx, rty);
+        let suffix = if lanes == 1 { "f32".to_string() } else { format!("v{lanes}f32") };
+        if !is_f32_scalar_or_vector(ctx, rty)
+            || !matches!(lanes, 1 | 2 | 3 | 4 | 8 | 16)
+            || name != format!("air.native_powr.{suffix}")
+            || args.len() != 2
+            || args.iter().any(|a| value_result_type(ctx, *a) != Some(rty))
+        {
+            return Err(format!("{name} expects two matching f32 scalar/vector operands and result"));
+        }
+        let ext = ctx.glsl();
+        return Ok(vec![Instruction::new(
+            Op::ExtInst,
+            Some(rty),
+            Some(res),
+            vec![Operand::IdRef(ext), Operand::LiteralExtInstInteger(GLSLstd450::Pow as u32),
+                 Operand::IdRef(args[0]), Operand::IdRef(args[1])],
+        )]);
+    }
     if let Some(glsl_op) = glsl_extinst(name) {
         if args.len() == 1
             && glsl_op == GLSLstd450::Round

@@ -1,6 +1,7 @@
 use super::*;
 use crate::passes::access::{
-    direct_scalar_width, is_unsigned_byte_scalar, single_member_array_scalar_elem,
+    direct_scalar_width, is_atomic_pointer_op, is_unsigned_byte_scalar,
+    single_member_array_scalar_elem,
 };
 use crate::passes::resources::rewrites::*;
 use crate::passes::stage_input::{layout_ty_size_align, round_up};
@@ -49,6 +50,24 @@ pub(in crate::passes) fn rewrite_workgroup_root_access(
                     };
                     if !want.contains(&t) {
                         want.push(t);
+                    }
+                }
+                op if is_atomic_pointer_op(op)
+                    && inst.operands.first() == Some(&Operand::IdRef(var)) =>
+                {
+                    // A threadgroup argument is backed by an array even when
+                    // the AIR helper performs a scalar atomic on its root.
+                    // AtomicStore has no result type; its value is operand3.
+                    let target = inst.result_type.or_else(|| {
+                        inst.operands.get(3).and_then(|operand| match operand {
+                            Operand::IdRef(value) => value_types.get(value).copied(),
+                            _ => None,
+                        })
+                    });
+                    if let Some(t) = target {
+                        if !want.contains(&t) {
+                            want.push(t);
+                        }
                     }
                 }
                 Op::Select | Op::Phi => {
@@ -126,6 +145,19 @@ pub(in crate::passes) fn rewrite_workgroup_root_access(
                         continue;
                     };
                     if let Some(&chain) = value_types.get(object).and_then(|t| leaf_chain.get(t)) {
+                        inst.operands[0] = Operand::IdRef(chain);
+                    }
+                }
+                op if is_atomic_pointer_op(op)
+                    && inst.operands.first() == Some(&Operand::IdRef(var)) =>
+                {
+                    let target = inst.result_type.or_else(|| {
+                        inst.operands.get(3).and_then(|operand| match operand {
+                            Operand::IdRef(value) => value_types.get(value).copied(),
+                            _ => None,
+                        })
+                    });
+                    if let Some(&chain) = target.and_then(|t| leaf_chain.get(&t)) {
                         inst.operands[0] = Operand::IdRef(chain);
                     }
                 }

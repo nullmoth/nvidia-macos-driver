@@ -31,7 +31,7 @@ static inline void nvmtl_buf_settle(NVMTLBuffer *b) {
         __atomic_store_n(&b->_zshadow, 0, __ATOMIC_RELEASE); return; }
     while (__atomic_load_n(&b->_zshadow, __ATOMIC_ACQUIRE) == 2) sched_yield();
 }
-static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return b->_shadow.map ? b->_shadow.map : b->_b.map; }
+static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return b->_hostPtr ? b->_hostPtr : (b->_shadow.map ? b->_shadow.map : b->_b.map); }
 @interface NVMTLTexture : NSObject <MTLTexture> {
   @public nvk_image _i; nvk_queue *_q; IOSurfaceRef _surf; MTLPixelFormat _fmt; NSUInteger _plane;
   NVMTLHeap *_heap; NSUInteger _heapOffset;
@@ -45,7 +45,7 @@ static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return 
   uint32_t _viewType, _viewSlices, _relativeLevel, _relativeSlice;
   uint32_t _baseSlice, _baseLevel;
   uint32_t _surfSeed, _surfGen; BOOL _surfSynced, _surfOwned;
-  nvk_buffer _vramBuf; BOOL _vramOn;
+  nvk_buffer _vramBuf; BOOL _vramOn; uintptr_t _vramShare;   // _vramShare: slot + 1 in the surface import cache, 0 = own import
   nvk_buffer _hostPages;   // this surface's pages imported for the host copies (nvmtl_host_pages), kept while they hold
   BOOL _stex;
   uint64_t _resid;
@@ -124,6 +124,7 @@ extern id gNVMTLMainDevice;
   NSMutableArray *_handlers;
   NSMutableArray *_scratch;
   NSMutableSet *_resources;
+  NSMutableSet *_hostPublications; // owned managed staging: publish caller pages after this part finishes
   NSMutableSet *_surfDirty;
   NSMutableSet *_surfOverwrites; // contents defined by writes recorded in this command buffer
   unsigned _nEnc, _nEnd, _nHandlers, _nStatus, _nEnqueue, _nLabel, _nPresent, _nWait;
@@ -255,7 +256,7 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
 @interface NVMTLBuffer () { @public NSString *_label; MTLResourceOptions _ropt;
   int _resRefs, _rstate, _lruReg, _wantOn; uint64_t _lastUse;
   uint64_t _useEp;
-  BOOL _texSeen;
+  BOOL _texSeen, _everGpuWritten;
 } @end
 @interface NVMTLTexture () { @public NSString *_label; MTLResourceOptions _ropt; BOOL _shareable; BOOL _fbo;
   MTLTextureSwizzleChannels _swz; BOOL _hasSwz; void *_swzView;
@@ -269,7 +270,9 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
 } @end
 void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 #include <os/lock.h>
-@interface NVMTLResSet : NSMutableSet { @public NSMutableSet *_s; os_unfair_lock _lk; const void *_mru[8]; unsigned _mruNext; }
+@interface NVMTLResSet : NSMutableSet { @public NSMutableSet *_s, *_w; os_unfair_lock _lk; const void *_mru[8]; unsigned _mruNext; }
+- (void)addReadOnlyObject:(id)o;
+- (BOOL)isWrittenObject:(id)o;
 - (NVMTLResSet *)nvmtlTakeAll;
 @end
 @interface NVMTLFunction () { @public NSString *_label; } @end

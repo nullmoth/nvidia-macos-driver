@@ -9,7 +9,7 @@
 @interface NVMTLSubmissionPart : NSObject {
 @public
     nvk_cmdbuf commands;
-    NSSet *resources, *surfaces;
+    NSSet *resources, *surfaces, *hostPublications;
     NSArray *scratch;
     id waitEvent, signalEvent;
     uint64_t value;
@@ -344,6 +344,32 @@ static int nvmtl_skip_empty_on(void) {
     return on;
 }
 
+// Local: NVMTL_SCHEDULE_AFTER_SURFACE_WRITES keeps upstream's 0..3 modes, and adds the token "simulator": mode 1 (every
+// surface write) only inside the iOS Simulator's own GPU processes, the upstream default (3) everywhere else, so the
+// Simulator workaround never spreads to unrelated applications. Upstream parsed any value as e[0]-'0', which turned
+// "simulator" into mode 67 (every private surface write in every process); an unknown value now keeps the default.
+static int nvmtl_schedule_after_surface_writes(void) {
+    static int after = -1;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *e = getenv("NVMTL_SCHEDULE_AFTER_SURFACE_WRITES");
+        const char *me = getprogname();
+        if (!e || !*e) after = 3;
+        else if (!strcmp(e, "simulator"))
+            after = (me && (!strcmp(me, "SimMetalHost") || !strcmp(me, "SimRenderServer"))) ? 1 : 3;
+        else if (e[0] >= '0' && e[0] <= '3') after = e[0] - '0';
+        else after = 3;
+        if (e && *e) nvlog("schedule-after-surface-writes: NVMTL_SCHEDULE_AFTER_SURFACE_WRITES=%s -> mode %d in %s", e, after, me ? me : "?");
+    });
+    return after;
+}
+// A surface write that holds "scheduled" until it is published (the same rule the seal applies).
+static BOOL nvmtl_surface_holds_schedule(int after, NVMTLTexture *s, NVMTLTexture *drawable) {
+    if (s == drawable || !after) return NO;
+    NVMTLTexture *r = s->_parent ? s->_parent : s;
+    return after == 1 || (r->_surf && !r->_vramOn && (after != 3 || IOSurfaceGetPlaneCount(r->_surf) > 1));
+}
+
 @implementation NVMTLCommandBuffer (EventSubmission)
 - (void)nvmtlReserveQueue {
     if (_reservation) return;
@@ -363,6 +389,16 @@ static int nvmtl_skip_empty_on(void) {
     part->commands = _c;
     memset(&_c, 0, sizeof(_c));
     part->resources = [(NVMTLResSet *)_resources nvmtlTakeAll]; part->surfaces = [_surfDirty copy];
+    part->hostPublications = [_hostPublications copy]; [_hostPublications removeAllObjects];
+    {
+        NVMTLResSet *rs = [part->resources isKindOfClass:[NVMTLResSet class]] ? (NVMTLResSet *)part->resources : nil;
+        for (id r in part->resources) {
+            if ([r isKindOfClass:[NVMTLBuffer class]]) {
+                NVMTLBuffer *b = r;
+                if (b->_hostPtr && (!rs || [rs isWrittenObject:b] || b->_texSeen)) b->_everGpuWritten = YES;
+            }
+        }
+    }
     // Another process may read an IOSurface once its writer is scheduled, and nothing orders its queue after ours.
     // A surface whose VRAM is shared is covered by the kernel (a CPU lock's page-off waits for the pending write); one we
     // write through a private image is copied out only after the GPU has finished, and a CPU lock does not wait for that.
@@ -373,13 +409,9 @@ static int nvmtl_skip_empty_on(void) {
     // NVMTL_SCHEDULE_AFTER_SURFACE_WRITES=3 (default) does it only for two-plane surfaces written through private images (the
     // NV12 surfaces WindowServer draws captured frames into, so it costs nothing without capture), =2 for every private one,
     // =1 for every surface write, =0 for none.
-    static int after = -1; if (after < 0) { const char *e = getenv("NVMTL_SCHEDULE_AFTER_SURFACE_WRITES"); after = e && *e ? e[0] - '0' : 3; }
+    const int after = nvmtl_schedule_after_surface_writes();
     NVMTLTexture *drawable = _present ? (_present->_parent ?: _present) : nil;
-    for (NVMTLTexture *s in part->surfaces) {
-        if (s == drawable || !after) continue;
-        NVMTLTexture *r = s->_parent ? s->_parent : s;
-        if (after == 1 || (r->_surf && !r->_vramOn && (after != 3 || IOSurfaceGetPlaneCount(r->_surf) > 1))) _scheduleAfterPublish = YES;
-    }
+    for (NVMTLTexture *s in part->surfaces) if (nvmtl_surface_holds_schedule(after, s, drawable)) _scheduleAfterPublish = YES;
     part->scratch = [_scratch copy]; part->signalEvent = event; part->value = value;
     part->encoders = _nEnc - _nEncSealed; _nEncSealed = _nEnc;
     if (_g79Sig.count) { part->signals = [_g79Sig copy]; [_g79Sig removeAllObjects]; }
@@ -395,7 +427,10 @@ static int nvmtl_skip_empty_on(void) {
     // completes, as Metal's do. WAS: only the part held them, so a texture the app had released died when that part
     // completed and the next dispatch wrote its destroyed image view (NVK abort in get_sampled_image_view_desc under
     // nvk_UpdateDescriptorSets: mediaanalysisd, Safari, wallpapers).
-    if (restart) for (id o in (NVMTLResSet *)part->resources) [(NVMTLResSet *)_resources addObject:o];
+    if (restart) {
+        NVMTLResSet *pr = (NVMTLResSet *)part->resources, *dst = (NVMTLResSet *)_resources;
+        for (id o in pr) { if ([pr isWrittenObject:o]) [dst addObject:o]; else [dst addReadOnlyObject:o]; }
+    }
     if (restart && nvmtl_vk_cmd_begin(&_queue->_q, &_c)) {
         _cbError = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorOutOfMemory
             userInfo:@{NSLocalizedDescriptionKey:@"Could not allocate recording after event boundary"}];
@@ -457,9 +492,9 @@ static int nvmtl_skip_empty_on(void) {
     });
 }
 - (void)nvmtlMarkScheduled {
-    if (_scheduleAfterPublish) return;
+    // Local: the hold is read under the same lock that clears it (the ahead pass and the worker run on other threads).
     [_completionCondition lock];
-    if (!_wasScheduled) {
+    if (!_scheduleAfterPublish && !_wasScheduled) {
         _wasScheduled = YES; _cbstatus = MTLCommandBufferStatusScheduled;
         NSArray *handlers = [_scheduledHandlers copy]; [_scheduledHandlers removeAllObjects];
         [self nvmtlDispatchHandlers:handlers scheduled:YES];
@@ -479,7 +514,10 @@ static int nvmtl_skip_empty_on(void) {
     // The ahead pass can run on another thread (nvmtl_ahead_kick). Close the parts to it first, so it cannot submit a
     // part this loop has already passed: that part's fence and its in-flight slot would never come back.
     @synchronized ([NVMTLCommandBuffer class]) { _partsRetiring = YES; }
-    if (_scheduleAfterPublish) { _scheduleAfterPublish = NO; [self nvmtlMarkScheduled]; }
+    if (_scheduleAfterPublish) {
+        [_completionCondition lock]; _scheduleAfterPublish = NO; [_completionCondition unlock];
+        [self nvmtlMarkScheduled];
+    }
     for (NSUInteger i = _nextPart; i < _parts.count; i++) {
         NVMTLSubmissionPart *p = _parts[i];
         if (![p isKindOfClass:[NVMTLSubmissionPart class]] || !p->inflight) continue;
@@ -591,6 +629,7 @@ static void nvmtl_gsub_census(void) {
 // A texture over a copy-backed buffer must refresh the same bytes as a direct
 // buffer binding. Keep direct managed-buffer writeback and copy each backing once.
 static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL writtenOnly) {
+    NVMTLResSet *resSet = [resources isKindOfClass:[NVMTLResSet class]] ? (NVMTLResSet *)resources : nil;
     NSMutableSet<NVMTLBuffer *> *copies = nil;
     for (id resource in resources) {
         if ([resource isKindOfClass:[NVMTLHeapPin class]]) {   // a used heap: its members with a host copy
@@ -600,8 +639,11 @@ static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL wr
             continue;
         }
         NVMTLBuffer *buffer = nil;
-        if ([resource isKindOfClass:[NVMTLBuffer class]]) buffer = resource;
-        else if ([resource isKindOfClass:[NVMTLTexture class]]) {
+        if ([resource isKindOfClass:[NVMTLBuffer class]]) {
+            NVMTLBuffer *candidate = resource;
+            if (writtenOnly && !candidate->_shadow.map && resSet && ![resSet isWrittenObject:candidate] && !candidate->_texSeen) continue;
+            buffer = candidate;
+        } else if ([resource isKindOfClass:[NVMTLTexture class]]) {
             NVMTLTexture *texture = resource;
             if (writtenOnly && texture->_usage != MTLTextureUsageUnknown &&
                 !(texture->_usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget))) continue;
@@ -618,9 +660,14 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
     // A sealed part's membership and its buffers' backing modes do not change.
     // The ahead pass can retry a held part many times: discover its upload
     // backings once, but refresh their bytes only when it actually submits.
+    NVMTLResSet *resSet = [part->resources isKindOfClass:[NVMTLResSet class]] ? (NVMTLResSet *)part->resources : nil;
     part->copyInputs = nvmtl_submission_copies(part->resources, NO);
     for (NVMTLBuffer *buffer in part->copyInputs) {
-        if (buffer->_hostPtr) { part->hasHostCopies = YES; break; }
+        if (buffer->_hostPtr && !nvmtl_owned_host_shadow(buffer) &&
+            (buffer->_everGpuWritten || buffer->_texSeen || !resSet || [resSet isWrittenObject:buffer])) {
+            part->hasHostCopies = YES;
+            break;
+        }
     }
     part->copyInputsPrepared = YES;
 }
@@ -628,6 +675,18 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
     // a commit still putting its kernel marks in (nvmtlSubmitWithEvents) must not reach the GPU before them
     if (_executionDone || _partsRetiring || _cbError || !_committed || _commitMarking) return NO;
     if (_nextSubmit < _nextPart) _nextSubmit = _nextPart;
+    // Local guard (Shared/NoCopy data race): a channel promise cannot order a part's CPU host copies against GPU writes
+    // still pending in this buffer, and NVMTL_GSUB_HOSTPTR_LIFT=1 (the shipped setting) lifts the per-part hold. While any
+    // remaining unsubmitted part carries legacy host copies on a GPU-written buffer, nothing in this buffer goes ahead; the
+    // worker submits it in order. The scan starts at _nextSubmit so a worker-claimed part already submitted to NVK does not
+    // block later reservations in the same queue.
+    for (NSUInteger i = _nextSubmit; i < _parts.count; i++) {
+        NVMTLSubmissionPart *pending = _parts[i];
+        if (![pending isKindOfClass:[NVMTLSubmissionPart class]]) continue;
+        if (pending->claimed) return NO;
+        nvmtl_prepare_submission_copies(pending);
+        if (pending->hasHostCopies) return NO;
+    }
     while (_nextSubmit < _parts.count) {
         if (atomic_load(&gsub_inflight) >= nvmtl_gsub_cap()) return NO;
         NVMTLSubmissionPart *part = _parts[_nextSubmit];
@@ -722,21 +781,27 @@ static void nvmtl_gsub_ahead_pass1(void) {
         if (!k || ((k + 1) & 0xFFF) == 0) nvlog("commit: %llu empty submission parts NOT submitted (no encoder, no resources) - each WAS a full submit + wait", k + 1);
     }
     if (part->commands.cb || ahead) {
-        [self nvmtlMarkScheduled];
         if (!_legacyKernelStart) _legacyKernelStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
         int result;
-        if (part->inflight) result = nvmtl_gsub_finish(part);
-        else if (part->aheadFailed) result = part->aheadFailed;
-        else {
+        if (part->inflight) {
+            [self nvmtlMarkScheduled];
+            result = nvmtl_gsub_finish(part);
+        } else if (part->aheadFailed) {
+            [self nvmtlMarkScheduled];
+            result = part->aheadFailed;
+        } else {
             nvmtl_prepare_submission_copies(part);
             for (NVMTLBuffer *buffer in part->copyInputs) nvmtl_buffer_sync_in(buffer);
             // A worker-owned part is an ordering barrier until QueueSubmit has
             // accepted it. Publish that progress before waiting on its fence so
             // the ahead lane can issue later parts in the same queue.
             nvmtl_inflight *f = nvmtl_vk_inflight_new();
-            if (!f) result = nvmtl_vk_submit_wait(&part->commands);
-            else {
+            if (!f) {
+                [self nvmtlMarkScheduled];
+                result = nvmtl_vk_submit_wait(&part->commands);
+            } else {
                 result = nvmtl_vk_submit_begin(&part->commands, f);
+                [self nvmtlMarkScheduled];
                 if (!result) {
                     @synchronized ([NVMTLCommandBuffer class]) {
                         if (_nextSubmit <= _nextPart) _nextSubmit = _nextPart + 1;
@@ -763,6 +828,25 @@ static void nvmtl_gsub_ahead_pass1(void) {
             for (NVMTLTexture *texture in nvmtl_ws_part_landed(self, _nextPart, settled)) if (![texture nvmtlSurfaceOut]) published = NO;
             if (!nvmtl_ws_publish_settled(settled, self)) published = NO;
             for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, YES)) nvmtl_buffer_sync_out(buffer);
+            for (NVMTLBuffer *buffer in part->hostPublications) nvmtl_buffer_publish_host(buffer);
+            // Local (surface-prefix scheduling): once every held surface write is published, report "scheduled" now.
+            // A later part may wait on an event whose producer is only committed from this buffer's scheduled
+            // handler; holding "scheduled" to the end of the buffer would deadlock that wait.
+            if (published && _scheduleAfterPublish) {
+                const int after = nvmtl_schedule_after_surface_writes();
+                NVMTLTexture *drawable = _present ? (_present->_parent ?: _present) : nil;
+                BOOL pendingSurface = NO;
+                for (NSUInteger i = _nextPart + 1; i < _parts.count && !pendingSurface; i++) {
+                    NVMTLSubmissionPart *next = _parts[i];
+                    if (![next isKindOfClass:[NVMTLSubmissionPart class]]) continue;
+                    for (NVMTLTexture *surface in next->surfaces)
+                        if (nvmtl_surface_holds_schedule(after, surface, drawable)) { pendingSurface = YES; break; }
+                }
+                if (!pendingSurface) {
+                    [_completionCondition lock]; _scheduleAfterPublish = NO; [_completionCondition unlock];
+                    [self nvmtlMarkScheduled];
+                }
+            }
         }
         if (!published) {
             [self nvmtlFinishExecution:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal

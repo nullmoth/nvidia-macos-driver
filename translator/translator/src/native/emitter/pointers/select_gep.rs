@@ -19,7 +19,10 @@ impl Emitter {
             }
             _ => false,
         };
-        if nullable_raw
+        let device_arm = [&selected.true_value, &selected.false_value].iter().any(|value|
+            matches!(self.pointer_storage_for(value, addrspace).ok(),
+                Some(StorageClass::StorageBuffer | StorageClass::UniformConstant)));
+        if nullable_raw || device_arm
             || self.selected_value_has_access_tree(&selected.true_value)
             || self.selected_value_has_access_tree(&selected.false_value)
         {
@@ -221,7 +224,6 @@ impl Emitter {
         let pointee = gep_pointee(source_ty, indices)?;
         let shape = SelectedGepShape {
             source_ty,
-            pointee: &pointee,
             indices,
         };
         let true_arm = self.build_selected_access_arm(
@@ -293,18 +295,11 @@ impl Emitter {
             }
         }
         let storage = self.pointer_storage_for(value, addrspace)?;
-        let ptr_type = self.ptr_type_id(storage, shape.pointee)?;
-        let ptr = self.emit_selected_pointer_access_chain(
-            ptr_type,
-            value,
-            pointer_ty,
-            shape.source_ty,
-            shape.pointee,
+        Ok(SelectedAccessArm::DeferredTyped {
+            base: SelectedTypedBase::Value(value.clone(), pointer_ty.clone()),
             storage,
-            shape.indices,
-            instructions,
-        )?;
-        Ok(SelectedAccessArm::Typed { ptr, storage })
+            geps: vec![(shape.source_ty.clone(), shape.indices.to_vec())],
+        })
     }
 
     pub(in crate::native::emitter) fn emit_selected_access_tree_gep(
@@ -336,14 +331,12 @@ impl Emitter {
         let true_arm = self.apply_selected_access_arm_gep(
             &tree.true_arm,
             source_ty,
-            &pointee,
             indices,
             instructions,
         )?;
         let false_arm = self.apply_selected_access_arm_gep(
             &tree.false_arm,
             source_ty,
-            &pointee,
             indices,
             instructions,
         )?;
@@ -359,26 +352,18 @@ impl Emitter {
         &mut self,
         arm: &SelectedAccessArm,
         source_ty: &LlType,
-        pointee: &LlType,
         indices: &[TypedValue],
         instructions: &mut Vec<Instruction>,
     ) -> Result<SelectedAccessArm, String> {
         match arm {
-            SelectedAccessArm::Typed { ptr, storage } => {
-                let ptr_type = self.ptr_type_id(*storage, pointee)?;
-                let ptr = self.emit_selected_pointer_access_chain_from_id(
-                    ptr_type,
-                    *ptr,
-                    *storage,
-                    source_ty,
-                    pointee,
-                    indices,
-                    instructions,
-                )?;
-                Ok(SelectedAccessArm::Typed {
-                    ptr,
-                    storage: *storage,
-                })
+            SelectedAccessArm::Typed { ptr, storage } => Ok(SelectedAccessArm::DeferredTyped {
+                base: SelectedTypedBase::Id(*ptr), storage: *storage,
+                geps: vec![(source_ty.clone(), indices.to_vec())],
+            }),
+            SelectedAccessArm::DeferredTyped { base, storage, geps } => {
+                let mut geps = geps.clone();
+                geps.push((source_ty.clone(), indices.to_vec()));
+                Ok(SelectedAccessArm::DeferredTyped { base: base.clone(), storage: *storage, geps })
             }
             SelectedAccessArm::Raw(raw) => Ok(SelectedAccessArm::Raw(self.apply_raw_gep(
                 raw.clone(),
@@ -400,90 +385,19 @@ impl Emitter {
         indices: &[TypedValue],
         instructions: &mut Vec<Instruction>,
     ) -> Result<bool, String> {
-        staged_emit(instructions, |instructions| {
-            if !types_compatible(&self.resolve_type(&selected.pointee)?, source_ty) {
-                return Ok(false);
-            }
-            let pointee = gep_pointee(source_ty, indices)?;
-            let true_raw = selected
-                .true_raw
-                .clone()
-                .map(|raw| self.apply_raw_gep(raw, source_ty, indices))
-                .transpose()?;
-            let false_raw = selected
-                .false_raw
-                .clone()
-                .map(|raw| self.apply_raw_gep(raw, source_ty, indices))
-                .transpose()?;
-            let true_ptr_type = selected
-                .true_ptr
-                .is_some()
-                .then(|| self.ptr_type_id(selected.true_storage, &pointee))
-                .transpose()?;
-            let false_ptr_type = selected
-                .false_ptr
-                .is_some()
-                .then(|| self.ptr_type_id(selected.false_storage, &pointee))
-                .transpose()?;
-            let true_ptr = match (selected.true_ptr, true_ptr_type) {
-                (Some(ptr), Some(ptr_type)) => {
-                    Some(self.emit_selected_pointer_access_chain_from_id(
-                        ptr_type,
-                        ptr,
-                        selected.true_storage,
-                        source_ty,
-                        &pointee,
-                        indices,
-                        instructions,
-                    )?)
-                }
-                (None, _) => None,
-                (Some(_), None) => return Ok(false),
-            };
-            let false_ptr = match (selected.false_ptr, false_ptr_type) {
-                (Some(ptr), Some(ptr_type)) => {
-                    Some(self.emit_selected_pointer_access_chain_from_id(
-                        ptr_type,
-                        ptr,
-                        selected.false_storage,
-                        source_ty,
-                        &pointee,
-                        indices,
-                        instructions,
-                    )?)
-                }
-                (None, _) => None,
-                (Some(_), None) => return Ok(false),
-            };
-            if (true_ptr.is_none() && true_raw.is_none())
-                || (false_ptr.is_none() && false_raw.is_none())
-            {
-                return Ok(false);
-            }
-            self.selected_load_pointers.insert(
-                name.to_string(),
-                SelectedLoadPointer {
-                    cond: selected.cond,
-                    true_ptr,
-                    false_ptr,
-                    true_storage: selected.true_storage,
-                    false_storage: selected.false_storage,
-                    pointee: pointee.clone(),
-                    true_raw,
-                    false_raw,
-                },
-            );
-            if selected.true_storage == selected.false_storage {
-                self.pointer_storage
-                    .insert(name.to_string(), selected.true_storage);
-            }
-            self.pointer_pointees.insert(name.to_string(), pointee);
-            if !self.pointer_phi_values.is_empty() {
-                let is_null = self.const_bool(false)?;
-                self.record_pointer_nullness(name.to_string(), is_null);
-            }
-            Ok(true)
-        })
+        if !types_compatible(&self.resolve_type(&selected.pointee)?, source_ty) { return Ok(false); }
+        let arm = |ptr, storage, raw: &Option<RawBufferOffset>| -> Result<SelectedAccessArm, String> {
+            if let Some(raw) = raw { Ok(SelectedAccessArm::Raw(raw.clone())) }
+            else if let Some(ptr) = ptr { Ok(SelectedAccessArm::Typed { ptr, storage }) }
+            else { Err("native emitter: selected pointer GEP missing arm".to_string()) }
+        };
+        let tree = SelectedAccessTree {
+            cond: selected.cond,
+            true_arm: arm(selected.true_ptr, selected.true_storage, &selected.true_raw)?,
+            false_arm: arm(selected.false_ptr, selected.false_storage, &selected.false_raw)?,
+            pointee: selected.pointee.clone(),
+        };
+        self.emit_selected_access_tree_gep(name, &tree, source_ty, indices, instructions)
     }
 
     pub(in crate::native::emitter) fn emit_selected_raw_pointer_gep(
@@ -677,6 +591,26 @@ impl Emitter {
         }
         instructions.push(Self::inst(op, Some(ptr_type), Some(result), ops));
         Ok(())
+    }
+
+    pub(in crate::native::emitter) fn materialize_selected_typed_arm(
+        &mut self, base: &SelectedTypedBase, storage: StorageClass,
+        geps: &[(LlType, Vec<TypedValue>)], instructions: &mut Vec<Instruction>,
+    ) -> Result<Word, String> {
+        let mut pointer = match base { SelectedTypedBase::Id(id) => Some(*id), _ => None };
+        for (source_ty, indices) in geps {
+            let pointee = gep_pointee(source_ty, indices)?;
+            let ptr_type = self.ptr_type_id(storage, &pointee)?;
+            pointer = Some(if let Some(pointer) = pointer {
+                self.emit_selected_pointer_access_chain_from_id(ptr_type, pointer, storage,
+                    source_ty, &pointee, indices, instructions)?
+            } else {
+                let SelectedTypedBase::Value(value, ty) = base else { unreachable!() };
+                self.emit_selected_pointer_access_chain(ptr_type, value, ty, source_ty,
+                    &pointee, storage, indices, instructions)?
+            });
+        }
+        pointer.ok_or_else(|| "native emitter: empty deferred selected GEP".to_string())
     }
 
     pub(in crate::native::emitter) fn emit_selected_pointer_access_chain_from_id(
