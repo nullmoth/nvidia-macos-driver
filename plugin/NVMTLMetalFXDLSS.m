@@ -147,6 +147,10 @@ static id nvmtl_mfx_dlss_make(id descriptor, id device) {
               (unsigned long)d.outputWidth, (unsigned long)d.outputHeight);
         return nil;
     }
+    if ((double)d.outputWidth > 3.01 * (double)d.inputWidth || (double)d.outputHeight > 3.01 * (double)d.inputHeight) {
+        nvlog("dlss: scaler ratio is beyond 3x - using the MetalFX path");
+        return nil;
+    }
     NVMTLDLSSScaler *s = [[NVMTLDLSSScaler alloc] initWithDescriptor:d];
     nvlog("dlss: MetalFX temporal scaler %lux%lu -> %lux%lu served by DLSS", (unsigned long)d.inputWidth, (unsigned long)d.inputHeight,
           (unsigned long)d.outputWidth, (unsigned long)d.outputHeight);

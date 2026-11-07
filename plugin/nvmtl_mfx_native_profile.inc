@@ -24,7 +24,13 @@ static BOOL nvmtl_mfx_support(id receiver, SEL selector, id device) {
 }
 static float nvmtl_mfx_min(id receiver, SEL selector, id device) {
     if (!nvmtl_mfx_our_device(device)) return nvmtl_mfx_min_original(receiver, selector, device);
-    if (nvmtl_mfx_dlss_on && nvmtl_mfx_dlss_ready()) return NVMTL_DLSS_MIN_INPUT_SCALE;
+    if (nvmtl_mfx_dlss_on && nvmtl_mfx_dlss_ready()) {
+        // Report what the native profile reports, narrowed to the range DLSS takes, so an app's quality menu is unchanged.
+        float v = NVMTL_DLSS_MIN_INPUT_SCALE;
+        if (nvmtl_mfx_native_on) { ++nvmtl_mfx_profile_depth; v = nvmtl_mfx_min_original(receiver, selector, device); --nvmtl_mfx_profile_depth;
+                                   if (!(v >= NVMTL_DLSS_MIN_INPUT_SCALE)) v = NVMTL_DLSS_MIN_INPUT_SCALE; }
+        return v;
+    }
     if (!nvmtl_mfx_native_on) return nvmtl_mfx_min_original(receiver, selector, device);
     ++nvmtl_mfx_profile_depth;
     @try { return nvmtl_mfx_min_original(receiver, selector, device); }
@@ -32,7 +38,12 @@ static float nvmtl_mfx_min(id receiver, SEL selector, id device) {
 }
 static float nvmtl_mfx_max(id receiver, SEL selector, id device) {
     if (!nvmtl_mfx_our_device(device)) return nvmtl_mfx_max_original(receiver, selector, device);
-    if (nvmtl_mfx_dlss_on && nvmtl_mfx_dlss_ready()) return NVMTL_DLSS_MAX_INPUT_SCALE;
+    if (nvmtl_mfx_dlss_on && nvmtl_mfx_dlss_ready()) {
+        float v = NVMTL_DLSS_MAX_INPUT_SCALE;
+        if (nvmtl_mfx_native_on) { ++nvmtl_mfx_profile_depth; v = nvmtl_mfx_max_original(receiver, selector, device); --nvmtl_mfx_profile_depth;
+                                   if (!(v > 0) || v > NVMTL_DLSS_MAX_INPUT_SCALE) v = NVMTL_DLSS_MAX_INPUT_SCALE; }
+        return v;
+    }
     if (!nvmtl_mfx_native_on) return nvmtl_mfx_max_original(receiver, selector, device);
     ++nvmtl_mfx_profile_depth;
     @try { return nvmtl_mfx_max_original(receiver, selector, device); }
