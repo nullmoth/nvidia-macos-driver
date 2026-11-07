@@ -45,7 +45,7 @@ def length_read_under_lock(src):
     # unlock that follows the copy (the earlier unlock belongs to the no-context early return).
     body = src[src.find('IOReturn NVRMUserClient::clientMemoryForType('):]
     m = re.search(r'IOLockLock\(fMapLock\);.*?snapshot = fMapList->context;(.*?)IOLockUnlock\(fMapLock\);', body, re.S)
-    return bool(m and 'snapLen = fMapLen;' in m.group(1))
+    return bool(m and 'snapLen = (fMapLenNode == fMapList) ? fMapLen : 0;' in m.group(1))
 
 
 def length_reported(src):
@@ -56,12 +56,25 @@ def length_reported(src):
 
 def arms_only_new_node(src):
     m = re.search(r'void NV_API_CALL nv_release_file_va\(.*?\n\}\n', src, re.S)
-    return bool(m and 'p->wasEmpty && stored' in m.group(0))
+    return bool(m and 'p->wasEmpty && now' in m.group(0) and 'if (now != c->mapLenNode())' in m.group(0))
 
 
 def length_reset_with_list(src):
-    return src.count('nvMapListFree(&fMapList);\n    fMapLen = 0;') == 1 and \
-           src.count('nvMapListFree(&me->fMapList);\n            me->fMapLen = 0;') == 1
+    return src.count('nvMapListFree(&fMapList);\n    fMapLen = 0; fMapLenNode = nullptr;') == 1 and \
+           src.count('nvMapListFree(&me->fMapList);\n            me->fMapLen = 0; me->fMapLenNode = nullptr;') == 1
+
+
+def applied_to_stored_node_only(src):
+    m = re.search(r'extern "C" void nv_xnu_note_map_len\(NvU64 bytes\)\n\{.*?\n\}\n', src, re.S)
+    return bool(m and 'if (*c->mapList() == node && c->mapLenNode() == nullptr)' in m.group(0)
+                and 'retain()' not in m.group(0))
+
+
+def slot_scoped_to_escape(src):
+    m = re.search(r'IOReturn NVRMUserClient::esc\(uint32_t cmd, void \*data, uint32_t size\)\n\{\n    Gate g\(fGate\);\n(.*?)\n', src)
+    scope = re.search(r'struct NvMapPendingScope \{ NvMapPendingScope\(\) \{ mapPendingClearThread\(\); \} '
+                      r'~NvMapPendingScope\(\) \{ mapPendingClearThread\(\); \} \};', src)
+    return bool(m and 'NvMapPendingScope pendingScope;' in m.group(1) and scope)
 
 
 arms = [
@@ -70,13 +83,18 @@ arms = [
     ('the mapped length is the validated length, capped by the allocation, never the allocation end', clamps_to_length,
      nvrm, lambda s: s.replace('NvU64 len = (snapLen + PAGE_SIZE - 1) & ~(NvU64)(PAGE_SIZE - 1);', 'NvU64 len = bytes - off;')),
     ('the length is read in the same locked snapshot as the context', length_read_under_lock, nvrm,
-     lambda s: s.replace('    snapLen = fMapLen;\n', '')),
+     lambda s: s.replace('    snapLen = (fMapLenNode == fMapList) ? fMapLen : 0;', '    snapLen = fMapLen;')),
     ('nv_alloc_user_mapping reports pageOffset + Length, and 0 on overflow', length_reported, osx,
      lambda s: s.replace('nv_xnu_note_map_len(validated)', '(void)validated')),
-    ('only a node stored during this hold is armed for a length', arms_only_new_node, nvrm,
-     lambda s: s.replace('p->wasEmpty && stored', 'stored')),
+    ('only a node stored during this hold is armed, and a changed node drops the old length', arms_only_new_node, nvrm,
+     lambda s: s.replace('p->wasEmpty && now', 'now')),
+    ('a reported length lands only on the node this thread stored, and only while it is current',
+     applied_to_stored_node_only, nvrm,
+     lambda s: s.replace('if (*c->mapList() == node && c->mapLenNode() == nullptr)', 'if (*c->mapList())')),
+    ('a pending slot lives for one escape: cleared on entry and on every exit', slot_scoped_to_escape, nvrm,
+     lambda s: s.replace('    NvMapPendingScope pendingScope;', '    (void)0;')),
     ('a freed or re-bound mapping list forgets its length', length_reset_with_list, nvrm,
-     lambda s: s.replace('nvMapListFree(&fMapList);\n    fMapLen = 0;', 'nvMapListFree(&fMapList);')),
+     lambda s: s.replace('nvMapListFree(&fMapList);\n    fMapLen = 0; fMapLenNode = nullptr;', 'nvMapListFree(&fMapList);')),
 ]
 for name, fn, src, breaker in arms:
     check(name, fn(src))
