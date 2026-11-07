@@ -2147,8 +2147,8 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     { id apple = nvmtl_vendor_apple_pipeline(self, f); if (apple) return apple; }
     return ps; }
 
-- (BOOL)supportsRaytracing { return nvmtl_vk_rt_available() != 0; }
-- (BOOL)supportsRaytracingFromRender { return nvmtl_vk_rt_available() != 0; }
+- (BOOL)supportsRaytracing { const BOOL y = nvmtl_vk_rt_available() != 0; static int said; if (!said++) nvlog("QUERY supportsRaytracing -> %s", y ? "YES" : "NO"); return y; }
+- (BOOL)supportsRaytracingFromRender { const BOOL y = nvmtl_vk_rt_available() != 0; static int said; if (!said++) nvlog("QUERY supportsRaytracingFromRender -> %s", y ? "YES" : "NO"); return y; }
 - (MTLAccelerationStructureSizes)accelerationStructureSizesWithDescriptor:(MTLAccelerationStructureDescriptor *)desc {
     MTLAccelerationStructureSizes s = { 0, 0, 0 };
     // One per thread: these are filled from the descriptor and read by the build, and the game
@@ -2261,6 +2261,15 @@ static NSInteger nvmtl_apple_family_max(void)
     if (n < 0) { const char *e = getenv("NVMTL_APPLE_FAMILY"); n = (e && *e) ? atoi(e) : 0; if (n < 0) n = 0; if (n > 9) n = 9; }
     return n;
 }
+// The answer to each family query, logged once per family: whether an application's ray-tracing option is offered is decided
+// by these answers, and the only way to tell a refused family from a refused ray-tracing capability is to see both.
+static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
+{
+    static _Atomic uint32_t seen; const uint32_t bit = 1u << ((f % 1000) & 15);
+    if (!(atomic_fetch_or(&seen, bit) & bit))
+        nvlog("QUERY supportsFamily %ld -> %s (%s; claim up to Apple%ld)", (long)f, yes ? "YES" : "NO", why, (long)nvmtl_apple_family_max());
+    return yes;
+}
 - (BOOL)supportsFamily:(MTLGPUFamily)f {
     if (nvmtl_mfx_profile_depth && (NSInteger)f >= 1001 && (NSInteger)f <= 1009) return NO;
     switch ((NSInteger)f) {
@@ -2269,6 +2278,7 @@ static NSInteger nvmtl_apple_family_max(void)
         case 5001 : { struct nvmtl_caps c = { 0, 0 }; return nvmtl_claim_metal3(&c) ? YES : NO; }   // MTLGPUFamilyMetal3
         default: break;
     }
+    if ((NSInteger)f >= 1001 && (NSInteger)f <= 1009) return nvmtl_family_answer(f, (NSInteger)f <= 1000 + nvmtl_apple_family_max(), "Apple family");
     if ((NSInteger)f >= 1001 && (NSInteger)f <= 1000 + nvmtl_apple_family_max()) return YES;
     return NO;
 }
