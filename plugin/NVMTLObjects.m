@@ -191,6 +191,30 @@ static int nvmtl_profile_user_set(const char *key, void *vctx)
     for (unsigned i = 0; i < g_conf_nmine; i++) if (!strcmp(g_conf_mine[i], key)) return 1;
     return 0;
 }
+// NVMTL_OS_VERSION=<major>[.<minor>[.<patch>]]: this process is told the operating system is at least that version.
+// Measured in the arm64 slice of Cyberpunk 2077 (device set-up 0x104978498..0x104978508): it reads
+// -[NSProcessInfo operatingSystemVersion] once and stores two flags, "26.2 or newer" and "major above 26"; the second one is
+// what the settings screen asks (renderer virtual 0x390, 0x101494648) before it offers MetalFX Frame Generation, and the
+// first sets a field of its MetalFX settings. Nothing about the device is consulted. The process only; never a default.
+static void nvmtl_os_version_override(void)
+{
+    const char *e = getenv("NVMTL_OS_VERSION");
+    if (!e || !*e) return;
+    long v[3] = { 0, 0, 0 };
+    sscanf(e, "%ld.%ld.%ld", &v[0], &v[1], &v[2]);
+    if (v[0] < 14 || v[0] > 99) return;
+    const NSOperatingSystemVersion fake = { (NSInteger)v[0], (NSInteger)v[1], (NSInteger)v[2] };
+    Method m = class_getInstanceMethod([NSProcessInfo class], @selector(operatingSystemVersion));
+    if (!m) return;
+    method_setImplementation(m, imp_implementationWithBlock(^NSOperatingSystemVersion(id _self) { (void)_self; return fake; }));
+    Method at = class_getInstanceMethod([NSProcessInfo class], @selector(isOperatingSystemAtLeastVersion:));
+    if (at) method_setImplementation(at, imp_implementationWithBlock(^BOOL(id _self, NSOperatingSystemVersion want) {
+        (void)_self;
+        if (fake.majorVersion != want.majorVersion) return fake.majorVersion > want.majorVersion;
+        if (fake.minorVersion != want.minorVersion) return fake.minorVersion > want.minorVersion;
+        return fake.patchVersion >= want.patchVersion; }));
+    nvlog("os version: this process is told %ld.%ld.%ld (NVMTL_OS_VERSION)", v[0], v[1], v[2]);
+}
 // Settles this process's driver knobs once, before any of them is read: forget what was inherited, read nvrm610.conf,
 // then apply the application profile for this executable, if there is one (nvmtl_app_profile.h has the order of
 // precedence). Every constructor that reads a knob calls this first; the first call does the work.
@@ -209,6 +233,7 @@ static void nvmtl_conf_settle(void)
     nvmtl_profile_ctx ctx = { p, 0 };
     for (unsigned i = 0; p && i < p->nknobs && i < 64; i++) if (getenv(p->knobs[i].key)) ctx.envBits |= 1ull << i;
     nvmtl_conf_read_file(forgot);
+    nvmtl_os_version_override();
     if (p && !nvmtl_app_profile_for(me, bid, getenv("NVMTL_APP_PROFILE"))) {
         nvlog("profile: %s: off (NVMTL_APP_PROFILE=0)", me);
         p = NULL;
