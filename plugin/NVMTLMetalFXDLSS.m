@@ -28,6 +28,18 @@
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
 
+// The command buffer DLSS records into. A Metal 3 encode passes this driver's NVMTLCommandBuffer; a Metal 4 encode passes
+// an MTL4 command buffer, which hands out the recording it is filling through -nvmtl_recordingCommandBuffer (between
+// beginCommandBufferWithAllocator: and endCommandBuffer). Anything else is not this driver's.
+static NVMTLCommandBuffer *nvmtl_dlss_recording_cb(id commandBuffer) {
+    if ([commandBuffer isKindOfClass:[NVMTLCommandBuffer class]]) return (NVMTLCommandBuffer *)commandBuffer;
+    SEL rec = sel_registerName("nvmtl_recordingCommandBuffer");
+    if ([commandBuffer respondsToSelector:rec]) {
+        id r = ((id (*)(id, SEL))objc_msgSend)(commandBuffer, rec);
+        if ([r isKindOfClass:[NVMTLCommandBuffer class]]) return (NVMTLCommandBuffer *)r;
+    }
+    return nil;
+}
 @interface NVMTLDLSSScaler : NSObject <MTLFXTemporalScaler> {
     void *_feature;   // nvmtl_dlss_feature, made on the first encode
     BOOL _hdr, _mvLowRes, _mvJittered, _autoExposure;
@@ -102,8 +114,8 @@ static BOOL nvmtl_dlss_float_format(MTLPixelFormat f) {
 static NVMTLTexture *nvmtl_dlss_tex(id<MTLTexture> t) { return [(id)t isKindOfClass:[NVMTLTexture class]] ? (NVMTLTexture *)t : nil; }
 
 - (void)encodeToCommandBuffer:(id<MTLCommandBuffer>)commandBuffer {
-    if (![(id)commandBuffer isKindOfClass:[NVMTLCommandBuffer class]]) { nvlog("dlss: the command buffer is not this driver's - upscale skipped"); return; }
-    NVMTLCommandBuffer *cb = (NVMTLCommandBuffer *)commandBuffer;
+    NVMTLCommandBuffer *cb = nvmtl_dlss_recording_cb(commandBuffer);
+    if (!cb) { nvlog("dlss: the command buffer is not this driver's - upscale skipped"); return; }
     NVMTLTexture *color = nvmtl_dlss_tex(_colorTexture), *depth = nvmtl_dlss_tex(_depthTexture), *motion = nvmtl_dlss_tex(_motionTexture), *out = nvmtl_dlss_tex(_outputTexture);
     NVMTLTexture *expo = nvmtl_dlss_tex(_exposureTexture), *react = nvmtl_dlss_tex(_reactiveMaskTexture);
     if (!color || !depth || !motion || !out) { nvlog("dlss: colour, depth, motion and output textures must all be set (and be this driver's) - upscale skipped"); return; }
@@ -244,8 +256,8 @@ static void nvmtl_rr_matrix(float out[16], simd_float4x4 m) {
 }
 
 - (void)encodeToCommandBuffer:(id<MTLCommandBuffer>)commandBuffer {
-    if (![(id)commandBuffer isKindOfClass:[NVMTLCommandBuffer class]]) { nvlog("dlss: RR: the command buffer is not this driver's - denoise skipped"); return; }
-    NVMTLCommandBuffer *cb = (NVMTLCommandBuffer *)commandBuffer;
+    NVMTLCommandBuffer *cb = nvmtl_dlss_recording_cb(commandBuffer);
+    if (!cb) { nvlog("dlss: RR: the command buffer is not this driver's - denoise skipped"); return; }
     NVMTLTexture *color = nvmtl_dlss_tex(_colorTexture), *depth = nvmtl_dlss_tex(_depthTexture), *motion = nvmtl_dlss_tex(_motionTexture), *out = nvmtl_dlss_tex(_outputTexture);
     NVMTLTexture *diff = nvmtl_dlss_tex(_diffuseAlbedoTexture), *spec = nvmtl_dlss_tex(_specularAlbedoTexture);
     NVMTLTexture *nrm = nvmtl_dlss_tex(_normalTexture), *rgh = nvmtl_dlss_tex(_roughnessTexture), *hit = nvmtl_dlss_tex(_specularHitDistanceTexture);
@@ -376,8 +388,8 @@ static void nvmtl_fg_copy(float out[16], simd_float4x4 m) { for (int c = 0; c < 
 }
 
 - (void)encodeToCommandBuffer:(id<MTLCommandBuffer>)commandBuffer {
-    if (![(id)commandBuffer isKindOfClass:[NVMTLCommandBuffer class]]) { nvlog("dlss: FG: the command buffer is not this driver's - interpolation skipped"); return; }
-    NVMTLCommandBuffer *cb = (NVMTLCommandBuffer *)commandBuffer;
+    NVMTLCommandBuffer *cb = nvmtl_dlss_recording_cb(commandBuffer);
+    if (!cb) { nvlog("dlss: FG: the command buffer is not this driver's - interpolation skipped"); return; }
     NVMTLTexture *color = nvmtl_dlss_tex(_colorTexture), *prev = nvmtl_dlss_tex(_prevColorTexture), *depth = nvmtl_dlss_tex(_depthTexture);
     NVMTLTexture *motion = nvmtl_dlss_tex(_motionTexture), *out = nvmtl_dlss_tex(_outputTexture), *ui = nvmtl_dlss_tex(_uiTexture);
     if (!color || !depth || !motion || !out) { nvlog("dlss: FG: colour, depth, motion and output textures must all be set (and be this driver's) - interpolation skipped"); return; }

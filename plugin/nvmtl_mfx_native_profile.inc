@@ -120,6 +120,61 @@ static void nvmtl_mfx_fg_install(void) {
     method_setImplementation(factory, (IMP)nvmtl_mfx_fg_new);
     nvlog("MetalFX frame interpolator: Frame Generation hooks installed for NVMTL devices");
 }
+// Metal 4 FX (macOS 26): the same DLSS objects stand behind +supportsMetal4FX: and the new...WithDevice:compiler:
+// factories of the temporal scaler, the denoised scaler and the frame interpolator. The compiler argument is not needed:
+// DLSS brings its own kernels. The objects take an MTL4 command buffer in encodeToCommandBuffer: through
+// nvmtl_dlss_recording_cb() (NVMTLMetalFXDLSS.m). NVMTL_METAL4=0 turns the Metal 4 answers off; everything else stays.
+typedef BOOL (*nvmtl_mfx_bool_fn)(id, SEL, id);
+typedef id (*nvmtl_mfx_factory2_fn)(id, SEL, id, id) __attribute__((ns_returns_retained));
+static nvmtl_mfx_bool_fn nvmtl_m4fx_support_o[3];
+static nvmtl_mfx_factory2_fn nvmtl_m4fx_new_o[3];
+static BOOL nvmtl_mtl4_wanted(void) { const char *e = getenv("NVMTL_METAL4"); return !(e && e[0] == '0'); }
+static BOOL nvmtl_m4fx_ready(int kind) {
+    return kind == 0 ? nvmtl_mfx_dlss_ready() : kind == 1 ? nvmtl_mfx_dlss_rr_ready() : nvmtl_mfx_dlss_fg_ready();
+}
+static id nvmtl_m4fx_make(int kind, id descriptor, id device) {
+    return kind == 0 ? nvmtl_mfx_dlss_make(descriptor, device) : kind == 1 ? nvmtl_mfx_dlss_rr_make(descriptor, device)
+                                                                          : nvmtl_mfx_dlss_fg_make(descriptor, device);
+}
+#define NVMTL_M4FX_PAIR(k)                                                                                               \
+    static BOOL nvmtl_m4fx_support_##k(id r, SEL s, id d) {                                                              \
+        if (nvmtl_mtl4_wanted() && nvmtl_mfx_our_device(d) && nvmtl_m4fx_ready(k)) return YES;                           \
+        return nvmtl_m4fx_support_o[k] ? nvmtl_m4fx_support_o[k](r, s, d) : NO;                                          \
+    }                                                                                                                     \
+    static id nvmtl_m4fx_new_##k(id r, SEL s, id d, id c) __attribute__((ns_returns_retained));                          \
+    static id nvmtl_m4fx_new_##k(id r, SEL s, id d, id c) {                                                              \
+        if (nvmtl_mtl4_wanted() && nvmtl_mfx_our_device(d)) { id x = nvmtl_m4fx_make(k, r, d); if (x) return x; }        \
+        return nvmtl_m4fx_new_o[k] ? nvmtl_m4fx_new_o[k](r, s, d, c) : nil;                                              \
+    }
+NVMTL_M4FX_PAIR(0)
+NVMTL_M4FX_PAIR(1)
+NVMTL_M4FX_PAIR(2)
+#undef NVMTL_M4FX_PAIR
+static void nvmtl_mfx_mtl4fx_install(void) {
+    static const char *const desc[3] = { "MTLFXTemporalScalerDescriptor", "MTLFXTemporalDenoisedScalerDescriptor",
+                                         "MTLFXFrameInterpolatorDescriptor" };
+    static const char *const factory[3] = { "newTemporalScalerWithDevice:compiler:", "newTemporalDenoisedScalerWithDevice:compiler:",
+                                            "newFrameInterpolatorWithDevice:compiler:" };
+    static const char *const proto[3] = { "MTL4FXTemporalScaler", "MTL4FXTemporalDenoisedScaler", "MTL4FXFrameInterpolator" };
+    static const char *const impl[3] = { "NVMTLDLSSScaler", "NVMTLDLSSDenoisedScaler", "NVMTLDLSSFrameInterpolator" };
+    const IMP sup[3] = { (IMP)nvmtl_m4fx_support_0, (IMP)nvmtl_m4fx_support_1, (IMP)nvmtl_m4fx_support_2 };
+    const IMP mk[3] = { (IMP)nvmtl_m4fx_new_0, (IMP)nvmtl_m4fx_new_1, (IMP)nvmtl_m4fx_new_2 };
+    for (int k = 0; k < 3; k++) {
+        Class type = objc_getClass(desc[k]);
+        Method support = type ? class_getClassMethod(type, sel_registerName("supportsMetal4FX:")) : NULL;
+        Method make = type ? class_getInstanceMethod(type, sel_registerName(factory[k])) : NULL;
+        if (!support || !make) { nvlog("MetalFX %s: no Metal 4 FX API - not hooked", desc[k]); continue; }
+        nvmtl_m4fx_support_o[k] = (nvmtl_mfx_bool_fn)method_getImplementation(support);
+        nvmtl_m4fx_new_o[k] = (nvmtl_mfx_factory2_fn)method_getImplementation(make);
+        method_setImplementation(support, sup[k]);
+        method_setImplementation(make, mk[k]);
+        // The objects already answer encodeToCommandBuffer:; declaring the Metal 4 protocol lets conformsToProtocol: say so.
+        Protocol *p = objc_getProtocol(proto[k]);
+        Class c = objc_getClass(impl[k]);
+        if (p && c) class_addProtocol(c, p);
+        nvlog("MetalFX %s: Metal 4 FX hooks installed (DLSS)", desc[k]);
+    }
+}
 // Called from the constructor below when DLSS is on. Quietly does nothing where the denoised scaler does not exist.
 static void nvmtl_mfx_rr_install(void) {
     Class type = NSClassFromString(@"MTLFXTemporalDenoisedScalerDescriptor");
@@ -148,7 +203,7 @@ __attribute__((constructor)) static void nvmtl_mfx_profile_install(void) {
     // does exactly what it did before.
     nvmtl_mfx_dlss_on = nvmtl_dlss_wanted() != 0;
     if (!nvmtl_mfx_native_on && !nvmtl_mfx_dlss_on) return;
-    if (nvmtl_mfx_dlss_on) { nvmtl_mfx_rr_install(); nvmtl_mfx_fg_install(); }
+    if (nvmtl_mfx_dlss_on) { nvmtl_mfx_rr_install(); nvmtl_mfx_fg_install(); nvmtl_mfx_mtl4fx_install(); }
     Class type = MTLFXTemporalScalerDescriptor.class;
     Method support = class_getClassMethod(type, @selector(supportsDevice:));
     Method min = class_getClassMethod(type, @selector(supportedInputContentMinScaleForDevice:));
