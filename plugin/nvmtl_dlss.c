@@ -220,13 +220,11 @@ static int init_locked(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, PFN_v
     nvlog("dlss: ready on %s (device %04x, chip code 0x%x)", g_chip->name, pci_device, g_chip->chip);
     return 0;
 }
-int nvmtl_dlss_init(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, PFN_vkGetInstanceProcAddr gipa, PFN_vkGetDeviceProcAddr gdpa,
-                    uint32_t pci_vendor, uint32_t pci_device)
+static int init_impl(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, PFN_vkGetInstanceProcAddr gipa, PFN_vkGetDeviceProcAddr gdpa,
+                     uint32_t pci_vendor, uint32_t pci_device)
 {
     pthread_mutex_lock(&g_lock);
-    thread_env te; env_save(&te);
     int r = g_state ? (g_state == 1 ? 0 : -1) : init_locked(inst, pd, dev, gipa, gdpa, pci_vendor, pci_device);
-    env_restore(&te);
     pthread_mutex_unlock(&g_lock);
     return r;
 }
@@ -245,11 +243,10 @@ int nvmtl_dlss_quality_for_ratio(float r)
 /* DLSS.Feature.Create.Flags bits */
 enum { F_HDR = 1 << 0, F_MV_LOWRES = 1 << 1, F_MV_JITTERED = 1 << 2, F_DEPTH_INVERTED = 1 << 3, F_AUTO_EXPOSURE = 1 << 6 };
 
-nvmtl_dlss_feature *nvmtl_dlss_feature_create(VkCommandBuffer cmd, const nvmtl_dlss_cfg *cfg)
+static nvmtl_dlss_feature *create_impl(VkCommandBuffer cmd, const nvmtl_dlss_cfg *cfg)
 {
     if (g_state != 1 || !cmd || !cfg || !cfg->in_w || !cfg->in_h || !cfg->out_w || !cfg->out_h) return NULL;
     pthread_mutex_lock(&g_lock);
-    thread_env te; env_save(&te);
     nvmtl_dlss_feature *f = calloc(1, sizeof *f); ngxp *prm = NULL, *ev = NULL; void *handle = NULL; unsigned rc = 0;
     if (!f) goto bad;
     g_alloc(&prm);
@@ -267,14 +264,12 @@ nvmtl_dlss_feature *nvmtl_dlss_feature_create(VkCommandBuffer cmd, const nvmtl_d
     g_alloc(&ev);
     if (!ev) { nvlog("dlss: AllocateParameters (evaluate) gave nothing"); goto bad; }
     f->handle = handle; f->eval = ev; f->cfg = *cfg;
-    env_restore(&te);
     pthread_mutex_unlock(&g_lock);
     nvlog("dlss: feature %ux%u -> %ux%u, quality %d, hdr %d, mv %s%s, depth %s, exposure %s", cfg->in_w, cfg->in_h, cfg->out_w, cfg->out_h,
           quality, cfg->hdr, cfg->mv_lowres ? "input-res" : "output-res", cfg->mv_jittered ? "+jitter" : "",
           cfg->depth_inverted ? "inverted" : "normal", cfg->auto_exposure ? "auto" : "texture");
     return f;
 bad:
-    env_restore(&te);
     pthread_mutex_unlock(&g_lock);
     free(f);   /* the parameter objects and any half-made feature belong to the core and are not released here */
     return NULL;
@@ -286,14 +281,13 @@ static void fill(ngx_res_vk *r, const nvmtl_dlss_image *i, bool rw)
     r->type = 0; r->rw = rw;
     r->image = (ngx_image_vk){ i->view, i->image, { i->aspect, 0, 1, 0, 1 }, i->format, i->w, i->h };
 }
-int nvmtl_dlss_evaluate(VkCommandBuffer cmd, nvmtl_dlss_feature *f, const nvmtl_dlss_eval *e)
+static int eval_impl(VkCommandBuffer cmd, nvmtl_dlss_feature *f, const nvmtl_dlss_eval *e)
 {
     if (g_state != 1 || !f || !cmd || !e) return -1;
     ngx_res_vk color, depth, motion, out, expo, react;
     fill(&color, &e->color, false); fill(&depth, &e->depth, false); fill(&motion, &e->motion, false); fill(&out, &e->output, true);
     ngxp *p = f->eval;
     pthread_mutex_lock(&g_lock);
-    thread_env te; env_save(&te);
     P_SETP(p, "Color", &color); P_SETP(p, "Output", &out); P_SETP(p, "Depth", &depth); P_SETP(p, "MotionVectors", &motion);
     if (e->exposure) { fill(&expo, e->exposure, false); P_SETP(p, "ExposureTexture", &expo); } else P_SETP(p, "ExposureTexture", NULL);
     if (e->reactive) { fill(&react, e->reactive, false); P_SETP(p, "DLSS.Input.Bias.Current.Color.Mask", &react); } else P_SETP(p, "DLSS.Input.Bias.Current.Color.Mask", NULL);
@@ -306,8 +300,114 @@ int nvmtl_dlss_evaluate(VkCommandBuffer cmd, nvmtl_dlss_feature *f, const nvmtl_
     P_SETUI(p, "DLSS.Input.Depth.Subrect.Base.X", e->depth_x); P_SETUI(p, "DLSS.Input.Depth.Subrect.Base.Y", e->depth_y);
     P_SETUI(p, "DLSS.Input.MV.Subrect.Base.X", e->motion_x); P_SETUI(p, "DLSS.Input.MV.Subrect.Base.Y", e->motion_y);
     unsigned rc = g_eval(cmd, f->handle, p, NULL);
-    env_restore(&te);
     pthread_mutex_unlock(&g_lock);
     if (rc != 1) { nvlog("dlss: EvaluateFeature returned 0x%08x", rc); return -1; }
     return 0;
+}
+
+/* ---- the worker thread -------------------------------------------------------------------------------------- */
+/* Every call that enters the NGX core or the runtime it loads runs on ONE dedicated thread with a large stack. That
+ * code is built for a Linux thread (8 MB default stack); an application's worker threads here have 512 KB, and the
+ * core's deep frames overran them into neighbouring memory. One thread also keeps all of the ELF host's per-thread
+ * state (its thread-local blocks) in one place. The caller blocks until the job is done, so command-buffer recording
+ * the core does is complete when the call returns. The thread's floating-point environment, locale and signal mask are
+ * restored after every job. */
+#define WORKER_STACK (16u << 20)
+typedef struct { void (*fn)(void *); void *arg; int done; } wjob;
+static pthread_mutex_t w_call = PTHREAD_MUTEX_INITIALIZER;   /* one job at a time */
+static pthread_mutex_t w_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t w_go = PTHREAD_COND_INITIALIZER, w_fin = PTHREAD_COND_INITIALIZER;
+static wjob *w_job; static int w_started; static pthread_t w_thr;
+
+static void *worker_main(void *unused)
+{
+    for (;;) {
+        pthread_mutex_lock(&w_mu);
+        while (!w_job) pthread_cond_wait(&w_go, &w_mu);
+        wjob *j = w_job;
+        pthread_mutex_unlock(&w_mu);
+        thread_env te; env_save(&te);
+        j->fn(j->arg);
+        env_restore(&te);
+        pthread_mutex_lock(&w_mu);
+        j->done = 1; w_job = NULL;
+        pthread_cond_broadcast(&w_fin);
+        pthread_mutex_unlock(&w_mu);
+    }
+    return NULL;
+}
+/* 0 when the job ran, -1 when the worker could not be started. */
+static int run_on_worker(void (*fn)(void *), void *arg)
+{
+    if (w_started && pthread_equal(pthread_self(), w_thr)) { fn(arg); return 0; }   /* already on it */
+    pthread_mutex_lock(&w_call);
+    if (!w_started) {
+        pthread_attr_t at; pthread_attr_init(&at);
+        int rc = pthread_attr_setstacksize(&at, WORKER_STACK);
+        if (!rc) rc = pthread_attr_setguardsize(&at, 64 * 1024);
+        if (!rc) rc = pthread_create(&w_thr, &at, worker_main, NULL);
+        pthread_attr_destroy(&at);
+        if (rc) { nvlog("dlss: could not start the worker thread (%d)", rc); pthread_mutex_unlock(&w_call); return -1; }
+        w_started = 1;
+    }
+    wjob j = { fn, arg, 0 };
+    pthread_mutex_lock(&w_mu);
+    w_job = &j; pthread_cond_signal(&w_go);
+    while (!j.done) pthread_cond_wait(&w_fin, &w_mu);
+    pthread_mutex_unlock(&w_mu);
+    pthread_mutex_unlock(&w_call);
+    return 0;
+}
+
+typedef struct { VkInstance inst; VkPhysicalDevice pd; VkDevice dev; PFN_vkGetInstanceProcAddr gipa; PFN_vkGetDeviceProcAddr gdpa;
+                 uint32_t vendor, device; int r; } init_job;
+static void init_run(void *a) { init_job *j = a; j->r = init_impl(j->inst, j->pd, j->dev, j->gipa, j->gdpa, j->vendor, j->device); }
+int nvmtl_dlss_init(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, PFN_vkGetInstanceProcAddr gipa, PFN_vkGetDeviceProcAddr gdpa,
+                    uint32_t pci_vendor, uint32_t pci_device)
+{
+    if (g_state) return g_state == 1 ? 0 : -1;   /* settled: no need to wake the worker */
+    init_job j = { inst, pd, dev, gipa, gdpa, pci_vendor, pci_device, -1 };
+    if (run_on_worker(init_run, &j)) return -1;
+    return j.r;
+}
+typedef struct { VkCommandBuffer cmd; const nvmtl_dlss_cfg *cfg; nvmtl_dlss_feature *f; } create_job;
+static void create_run(void *a) { create_job *j = a; j->f = create_impl(j->cmd, j->cfg); }
+nvmtl_dlss_feature *nvmtl_dlss_feature_create(VkCommandBuffer cmd, const nvmtl_dlss_cfg *cfg)
+{
+    create_job j = { cmd, cfg, NULL };
+    return run_on_worker(create_run, &j) ? NULL : j.f;
+}
+typedef struct { VkCommandBuffer cmd; nvmtl_dlss_feature *f; const nvmtl_dlss_eval *e; int r; } eval_job;
+static void eval_run(void *a) { eval_job *j = a; j->r = eval_impl(j->cmd, j->f, j->e); }
+int nvmtl_dlss_evaluate(VkCommandBuffer cmd, nvmtl_dlss_feature *f, const nvmtl_dlss_eval *e)
+{
+    eval_job j = { cmd, f, e, -1 };
+    return run_on_worker(eval_run, &j) ? -1 : j.r;
+}
+
+/* Local check of the worker (no NGX needed): a job runs on a different thread, which has far more than the 512 KB an
+ * application thread gets, and the caller's floating-point environment is untouched. Returns 0 when all hold. */
+typedef struct { pthread_t who; size_t reached; } probe_job;
+static size_t probe_depth(size_t used, size_t limit)
+{
+    volatile char frame[16 * 1024];
+    frame[0] = (char)used; frame[sizeof frame - 1] = (char)used;   /* touch both ends so the pages are really used */
+    if (used + sizeof frame >= limit) return used + sizeof frame;
+    return probe_depth(used + sizeof frame, limit);
+}
+static void probe_run(void *a) { probe_job *j = a; j->who = pthread_self(); j->reached = probe_depth(0, 8u << 20); fesetround(FE_UPWARD); }
+int nvmtl_dlss_selftest(void)
+{
+    probe_job j = {0};
+    const int round = fegetround();
+    if (run_on_worker(probe_run, &j)) { fprintf(stderr, "selftest: worker did not start\n"); return 1; }
+    int bad = 0;
+    if (pthread_equal(j.who, pthread_self())) { fprintf(stderr, "selftest: job ran on the caller's thread\n"); bad++; }
+    if (j.reached < (8u << 20)) { fprintf(stderr, "selftest: only %zu bytes of stack reached\n", j.reached); bad++; }
+    if (fegetround() != round) { fprintf(stderr, "selftest: caller's rounding mode changed\n"); bad++; }
+    probe_job k = {0};
+    run_on_worker(probe_run, &k);
+    if (!pthread_equal(j.who, k.who)) { fprintf(stderr, "selftest: two jobs ran on different threads\n"); bad++; }
+    fprintf(stderr, "selftest: stack reached %zu bytes, %s\n", j.reached, bad ? "FAIL" : "ok");
+    return bad;
 }
