@@ -604,7 +604,11 @@ fi
 
 # Optional DLSS 4 / 4.5 files: downloaded from NVIDIA on this Mac and checked against pinned hashes. A failure here
 # never undoes the driver install.
-if [ -f "$HERE/dlss_fetch.sh" ]; then
+# dlss_fetch.sh runs as root from the private copy; it is only trusted when SHA256SUMS covered it and its tools.
+if [ -f "$HERE/dlss_fetch.sh" ] && ! { grep -qE '[ *]dlss_fetch\.sh$' "$HERE/SHA256SUMS" && grep -qE '[ *]dlss/dlss_cache$' "$HERE/SHA256SUMS" \
+      && grep -qE '[ *]dlss/assertfail_trap\.ptx$' "$HERE/SHA256SUMS"; }; then
+  echo "   NOTE: this package's SHA256SUMS does not cover the DLSS step; skipping it."
+elif [ -f "$HERE/dlss_fetch.sh" ]; then
   if [ "${NULLMOTH_DLSS:-0}" = 1 ]; then
     step "DLSS 4 / 4.5 files"
     /bin/bash "$HERE/dlss_fetch.sh" --yes || echo "   NOTE: the DLSS files were not installed; the driver itself is. Run again later: sudo ./dlss_fetch.sh --yes"

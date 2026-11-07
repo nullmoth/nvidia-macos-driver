@@ -104,6 +104,15 @@ fi
 
 # ---- preconditions ---------------------------------------------------------------------------------------------
 [ -x "$DLSS_TOOLS/dlss_cache" ] && [ -f "$DLSS_TOOLS/assertfail_trap.ptx" ] || die "this package lacks dlss/dlss_cache or dlss/assertfail_trap.ptx"
+# As root this runs dlss_cache. A tool in a folder the logged-in user can write could be swapped after the package
+# check, so as root every path it runs from must be root-owned and writable by root only (install.sh runs it from its
+# verified private copy; a manual run needs the same).
+if [ "$(id -u)" = 0 ]; then
+  for p in "$HERE" "$DLSS_TOOLS" "$DLSS_TOOLS/dlss_cache" "$DLSS_TOOLS/assertfail_trap.ptx" "$HERE/dlss_fetch.sh"; do
+    [ ! -L "$p" ] && [ -z "$(find "$p" -maxdepth 0 \( ! -user root -o -perm -g+w -o -perm -o+w \) -print -quit)" ] || \
+      die "$p is not root-owned and root-writable only; run this through install.sh (it checks and copies the package first)"
+  done
+fi
 PARENT=$(dirname "$DLSS_ROOT")
 [ -d "$PARENT" ] && [ ! -L "$PARENT" ] || die "$PARENT is missing or a link"
 if [ -e "$DLSS_ROOT" ] || [ -L "$DLSS_ROOT" ]; then
