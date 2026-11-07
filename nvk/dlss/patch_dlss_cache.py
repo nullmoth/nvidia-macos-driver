@@ -246,6 +246,9 @@ edit("src/nouveau/vulkan/nvk_image_view.c",
 #    - 46 kernels read constant bank 2 (.nv.constant2.<kernel>: the compiler's branch tables; hiluma_engine_input_*
 #      does LDC c[0x2] then BRX) and 4 read bank 3 (.nv.constant3, module __constant__ data). Unbound, BRX jumped
 #      through garbage.
+#    - Native sm_120 SASS carries module-wide banks too: rr2_post_kernel (ray reconstruction) has .nv.constant4, a
+#      table of 64-bit pointers (R_CUDA_64) into its .nv.global.init. Every module bank 1, 3..7 is bound, and
+#      R_CUDA_32/64 relocations into placed data are applied.
 #    A module that needs none of this keeps the old path.
 edit("src/nouveau/vulkan/nvk_cubin.h",
      """   void *owned_data;
@@ -259,8 +262,8 @@ edit("src/nouveau/vulkan/nvk_cubin.h",
    char **link_name;          /* section names placed in link_mem */
    uint64_t *link_addr;
    uint64_t *link_size;
-   uint64_t cb3_addr;
-   uint32_t cb3_size;
+   uint64_t bank_addr[8];     /* module-wide .nv.constant<N> (N = 1, 3..7), bound as bank N */
+   uint32_t bank_size[8];
 };
 """)
 edit("src/nouveau/vulkan/nvk_cubin.h",
@@ -281,8 +284,8 @@ edit("src/nouveau/vulkan/nvk_shader.h",
    uint64_t data_addr;
 
    /* Imported CUDA kernels (nvk_cubin.c): constant banks beyond the root, by bank index; size 0 = unbound */
-   uint64_t cubin_bank_addr[4];
-   uint32_t cubin_bank_size[4];
+   uint64_t cubin_bank_addr[8];
+   uint32_t cubin_bank_size[8];
 """)
 edit("src/nouveau/vulkan/nvk_cmd_dispatch.c",
      """      uint32_t qmd[NAK_MAX_QMD_DWORDS];
@@ -365,14 +368,16 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
    }
 
 #define NVK_LINK_IS_TEXT(i) (sh[i].type == 1 && (sh[i].flags & 0x4 /* SHF_EXECINSTR */))
+#define NVK_LINK_BANK(i) (!strncmp(names[i], ".nv.constant", 12) && names[i][12] >= '1' && names[i][12] <= '7' && \\
+                          names[i][12] != '2' && names[i][13] == 0 ? names[i][12] - '0' : 0)   /* module-wide bank N */
 #define NVK_LINK_IS_DATA(i) (!strncmp(names[i], ".nv.global", 10) || !strncmp(names[i], ".nv.constant2.", 14) || \\
-                             !strcmp(names[i], ".nv.constant3"))
+                             NVK_LINK_BANK(i))
    bool need = false;
    for (uint32_t i = 0; i < shnum; i++) {
-      if (!strncmp(names[i], ".nv.constant2.", 14) || !strcmp(names[i], ".nv.constant3"))
+      if (!strncmp(names[i], ".nv.constant2.", 14) || NVK_LINK_BANK(i))
          need = true;
       if (sh[i].type == 4 /* RELA */ && sh[i].size && sh[i].info < shnum) {
-         if (NVK_LINK_IS_TEXT(sh[i].info))
+         if (NVK_LINK_IS_TEXT(sh[i].info) || NVK_LINK_IS_DATA(sh[i].info))
             need = true;
          else if (strncmp(names[sh[i].info], ".debug", 6)) {
             result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
@@ -407,9 +412,10 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
          memcpy(map + place[i] - 1, b + sh[i].offset, sh[i].size);
 
    for (uint32_t r = 0; r < shnum; r++) {
-      if (sh[r].type != 4 || !sh[r].size || sh[r].info >= shnum || !NVK_LINK_IS_TEXT(sh[r].info))
+      if (sh[r].type != 4 || !sh[r].size || sh[r].info >= shnum || !place[sh[r].info])
          continue;
       const uint32_t t = sh[r].info, sy = sh[r].link;
+      const bool code = NVK_LINK_IS_TEXT(t);
       if (sy >= shnum || sh[sy].type != 2 /* SYMTAB */) {
          result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED, "cubin link: relocation without a symbol table");
          goto out;
@@ -420,8 +426,10 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
          memcpy(&r_add, b + sh[r].offset + e + 16, 8);
          const uint32_t type = (uint32_t)r_info;
          const uint64_t si = r_info >> 32;
-         /* overflow-safe: r_off comes from the file */
-         if (si >= sh[sy].size / 24 || r_off % 16 || r_off > sh[t].size || sh[t].size - r_off < 16) {
+         /* overflow-safe: r_off comes from the file; code relocations patch a whole 16-byte instruction */
+         const uint64_t span = code ? 16 : (r_info & 0xffffffff) == 1 ? 4 : 8;
+         if (si >= sh[sy].size / 24 || (code && r_off % 16) || r_off > sh[t].size || sh[t].size - r_off < span ||
+             sh[t].type == 8 /* NOBITS: nothing to patch */) {
             result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED, "cubin link: bad relocation in %s", names[t]);
             goto out;
          }
@@ -436,7 +444,18 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
          }
          const uint64_t v = base + place[s_shndx] - 1 + (s_value - sh[s_shndx].addr) + (uint64_t)r_add;
          uint8_t *ins = map + place[t] - 1 + r_off;
-         if (type == 56 || type == 57) {          /* MOV imm32 = low / high half */
+         if (!code) {                             /* data: R_CUDA_32 / R_CUDA_64, e.g. bank 4's pointers into globals */
+            if (type == 1) {
+               const uint32_t w = (uint32_t)v;
+               memcpy(ins, &w, 4);
+            } else if (type == 2) {
+               memcpy(ins, &v, 8);
+            } else {
+               result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                                  "cubin link: data relocation type %u in %s is not supported", type, names[t]);
+               goto out;
+            }
+         } else if (type == 56 || type == 57) {   /* MOV imm32 = low / high half */
             const uint32_t w = type == 56 ? (uint32_t)v : (uint32_t)(v >> 32);
             memcpy(ins + 4, &w, 4);
          } else if (type == 75) {                 /* CALL.ABS: address bits 8..55 at instruction bits 32..79 */
@@ -471,13 +490,15 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
       module->link_addr[k] = base + place[i] - 1;
       module->link_size[k] = sh[i].size;
       if (!module->link_name[k]) { result = VK_ERROR_OUT_OF_HOST_MEMORY; goto out; }
-      if (!strcmp(names[i], ".nv.constant3")) {
-         module->cb3_addr = module->link_addr[k];
-         module->cb3_size = (uint32_t)sh[i].size;
+      const int bank = NVK_LINK_BANK(i);
+      if (bank) {
+         module->bank_addr[bank] = module->link_addr[k];
+         module->bank_size[bank] = (uint32_t)sh[i].size;
       }
    }
 #undef NVK_LINK_IS_TEXT
 #undef NVK_LINK_IS_DATA
+#undef NVK_LINK_BANK
 out:
    free(sh); free(place); free(names);
    return result;   /* on failure the module destroy frees whatever was made */
@@ -548,10 +569,26 @@ edit("src/nouveau/vulkan/nvk_cubin.c",
      """   shader.cbuf_map.cbufs[0].type = NVK_CBUF_TYPE_ROOT_DESC;
 """,
      """   shader.cbuf_map.cbufs[0].type = NVK_CBUF_TYPE_ROOT_DESC;
-   shader.cubin_bank_addr[2] = function->cb2_addr;
-   shader.cubin_bank_size[2] = function->cb2_size;
-   shader.cubin_bank_addr[3] = function->module->cb3_addr;
-   shader.cubin_bank_size[3] = function->module->cb3_size;
+   for (int b = 1; b < 8; b++) {
+      shader.cubin_bank_addr[b] = b == 2 ? function->cb2_addr : function->module->bank_addr[b];
+      shader.cubin_bank_size[b] = b == 2 ? function->cb2_size : function->module->bank_size[b];
+   }
+""")
+
+# 9. the stack. NVIDIA-compiled kernels start their stack pointer at the stack top the driver puts in bank 0
+#    (c[0x37c] on sm_100+, c[0x28] before) and keep every spill there (R1-relative LDL/STL). CUDA's value, 0xfffdc0,
+#    lies in the QMD's HIGH local-memory region, which NVK never sizes (NAK writes SHADER_LOCAL_MEMORY_HIGH_SIZE = 0),
+#    so spills read back 0. Measured on hiluma_engine_output (MIN_STACK_SIZE 0x28): its output row is reloaded from
+#    [R1+0x14] before each store, every pixel landed on row 0, and the DLSS 4 transformer produced an empty image.
+#    The top is now the kernel's own declared stack size, inside the LOW region that ensure_slm backs per lane.
+edit("src/nouveau/vulkan/nvk_cubin.c",
+     """      w[0x37c / 4] = 0xfffdc0;
+   }
+""",
+     """      w[0x37c / 4] = align(function_info->slm_size, 16);   /* stack top: see edit 9 */
+   } else if (root_size >= 0x2c) {
+      ((uint32_t *)root)[0x28 / 4] = align(function_info->slm_size, 16);
+   }
 """)
 
 print("patch_dlss_cache: applied")
