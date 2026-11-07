@@ -19,6 +19,7 @@
 #include <vulkan/vulkan.h>
 #include <mach-o/loader.h>
 #include "nvmtl_vk.h"
+#include "nvmtl_dlss.h"
 #include "nvmtl_tex_upload.h"
 #include "nvmtl_cmd_refusal.h"
 #include "nvmtl_sampler_state.h"
@@ -127,6 +128,7 @@ static inline const char *nvmtl_icd_lib_path(void) {
 static void *g_lib;
 static int g_sample_loader_unwrapped;
 static VkInstance g_inst; static VkPhysicalDevice g_pdev; static VkDevice g_dev; static VkQueue g_queue;
+static int g_dlss_exts;   // the device was created with the extensions DLSS needs (nvmtl_dlss_device_exts)
 static int g_hz_dynr;   // the device enabled dynamicRendering (hazard-model passes begin with vkCmdBeginRendering)
 static int g_host_query_reset, g_occlusion_precise;
 static int g_atomic64_buffer, g_atomic64_shared;
@@ -972,6 +974,42 @@ static void nvmtl_vkmsg_arm(void)
     }
 }
 
+// DLSS needs two NVX extensions on the device. They are requested only when the user installed the DLSS files (and
+// NVMTL_DLSS is not 0), and only if the device offers both. Returns 1 when both were appended to exts.
+static int nvmtl_dlss_device_exts(const char **exts, uint32_t *next)
+{
+    if (!nvmtl_dlss_wanted()) return 0;
+    static const char *const want[2] = { NVMTL_DLSS_EXT_BINARY_IMPORT, NVMTL_DLSS_EXT_IMAGE_HANDLE };
+    uint32_t na = 0; int got[2] = {0, 0};
+    if (!pvkEnumerateDeviceExtensionProperties || pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, NULL) != VK_SUCCESS || !na) return 0;
+    VkExtensionProperties *props = calloc(na, sizeof *props);
+    if (props && pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, props) == VK_SUCCESS)
+        for (uint32_t i = 0; i < na; i++) for (int w = 0; w < 2; w++) if (!strcmp(props[i].extensionName, want[w])) got[w] = 1;
+    free(props);
+    if (!got[0] || !got[1]) { nvlog("dlss: the device lacks %s%s%s - DLSS stays off", got[0] ? "" : want[0], (!got[0] && !got[1]) ? " and " : "", got[1] ? "" : want[1]); return 0; }
+    exts[(*next)++] = want[0]; exts[(*next)++] = want[1];
+    return 1;
+}
+// The NGX core uses a range of core 1.1/1.2 features it does not name up front, so with DLSS on every feature the
+// device supports in those two groups is enabled (they are plain booleans after the header). Nothing else in the
+// plugin changes behaviour because a feature is on; NVMTL_DLSS=0 leaves the feature set exactly as before.
+static void nvmtl_dlss_or_features(void *dst, const void *supported, size_t size)
+{
+    VkBool32 *d = (VkBool32 *)((char *)dst + 16); const VkBool32 *s = (const VkBool32 *)((const char *)supported + 16);
+    for (size_t i = 0; i < (size - 16) / sizeof(VkBool32); i++) d[i] |= s[i];
+}
+static void nvmtl_dlss_device_features(VkPhysicalDeviceVulkan11Features *v11, VkPhysicalDeviceVulkan12Features *v12)
+{
+    PFN_vkGetPhysicalDeviceFeatures2 gpf = (PFN_vkGetPhysicalDeviceFeatures2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFeatures2");
+    if (!gpf) { nvlog("dlss: vkGetPhysicalDeviceFeatures2 missing - core features left as they are"); return; }
+    VkPhysicalDeviceVulkan12Features q12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    VkPhysicalDeviceVulkan11Features q11 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &q12 };
+    VkPhysicalDeviceFeatures2 q2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &q11 };
+    gpf(g_pdev, &q2);
+    nvmtl_dlss_or_features(v11, &q11, sizeof q11); nvmtl_dlss_or_features(v12, &q12, sizeof q12);
+    nvlog("dlss: core 1.1/1.2 device features widened to what the device supports");
+}
+
 static int nvmtl_vk_initialize(void)
 {
     if (g_state) return g_state == 1 ? 0 : -1;
@@ -1089,7 +1127,7 @@ static int nvmtl_vk_initialize(void)
                                     "VK_KHR_external_memory_fd",
                                     "VK_EXT_mutable_descriptor_type", "VK_KHR_cooperative_matrix", "VK_EXT_calibrated_timestamps", "VK_EXT_sample_locations", "VK_KHR_pipeline_executable_properties",
                                     "VK_EXT_provoking_vertex", "VK_KHR_vertex_attribute_divisor", "VK_EXT_pipeline_robustness" };
-    const char *exts[17]; uint32_t next = 0; int have[17] = {0};
+    const char *exts[19]; uint32_t next = 0; int have[17] = {0};
     uint32_t na = 0;
     if (pvkEnumerateDeviceExtensionProperties &&
         pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, NULL) == VK_SUCCESS && na) {
@@ -1100,6 +1138,7 @@ static int nvmtl_vk_initialize(void)
                     if (!have[w] && !strcmp(props[i].extensionName, kWant[w])) { have[w] = 1; exts[next++] = kWant[w]; }
         free(props);
     }
+    g_dlss_exts = nvmtl_dlss_device_exts(exts, &next);   // DLSS only: the two NVX extensions, when the files are installed and the device has them
     /* Single-sample rendering uses its fixed center; only MSAA needs this extension. */
     if (have[12]) {
         PFN_vkGetPhysicalDeviceProperties2 props2 = (PFN_vkGetPhysicalDeviceProperties2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceProperties2");
@@ -1158,6 +1197,7 @@ static int nvmtl_vk_initialize(void)
     VkPhysicalDeviceVulkan13Features v13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };   // chained in only for the hazard model's passes
     v12.bufferDeviceAddress = VK_TRUE;
     VkPhysicalDeviceVulkan11Features v11 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &v12 };
+    if (g_dlss_exts) nvmtl_dlss_device_features(&v11, &v12);
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR cmf = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR };
     static VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT mdf;
     if (g_mutable) { mdf = (VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT){ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MUTABLE_DESCRIPTOR_TYPE_FEATURES_EXT, v12.pNext, VK_TRUE }; v12.pNext = &mdf; }
@@ -10681,6 +10721,56 @@ int nvmtl_vk_srgb_format(uint32_t fmt)
     case VK_FORMAT_A8B8G8R8_SRGB_PACK32: return 1;
     default: return 0;
     }
+}
+// ---- DLSS Super Resolution (nvmtl_dlss.h), recorded on the command buffer the MetalFX temporal scaler encodes into ----
+int nvmtl_vk_dlss_available(void)
+{
+    if (!nvmtl_dlss_wanted()) return 0;
+    if (nvmtl_vk_init() || !g_dlss_exts) return 0;   // g_dlss_exts is settled while the device is created
+    VkPhysicalDeviceProperties pp; pvkGetPhysicalDeviceProperties(g_pdev, &pp);
+    return nvmtl_dlss_init(g_inst, g_pdev, g_dev, pvkGetInstanceProcAddr, pvkGetDeviceProcAddr, pp.vendorID, pp.deviceID) == 0;
+}
+static int dlss_image(nvmtl_dlss_image *o, nvk_image *i, void *view)
+{
+    if (!i || !i->img || !view || (i->samples ? i->samples : 1) > 1) return -1;
+    const VkImageAspectFlags a = nvmtl_barrier_aspect(i);
+    *o = (nvmtl_dlss_image){ (VkImageView)view, (VkImage)i->img, (a & VK_IMAGE_ASPECT_DEPTH_BIT) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT,
+                             (VkFormat)i->fmt, i->w, i->h };
+    return 0;
+}
+int nvmtl_vk_cmd_dlss(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_args *a)
+{
+    if (!c || !feature || !a || !nvmtl_dlss_ready()) return -1;
+    nvmtl_dlss_eval e = {0}; nvmtl_dlss_image ex, re;
+    if (dlss_image(&e.color, a->color, a->color_view) || dlss_image(&e.depth, a->depth, a->depth_view)
+        || dlss_image(&e.motion, a->motion, a->motion_view) || dlss_image(&e.output, a->output, a->output_view)) {
+        nvlog("dlss: a scaler texture has no usable Vulkan image/view (or is multisampled) - not recorded"); return -1;
+    }
+    if (a->exposure) { if (dlss_image(&ex, a->exposure, a->exposure_view)) { nvlog("dlss: the exposure texture is unusable - not recorded"); return -1; } e.exposure = &ex; }
+    if (a->reactive) { if (dlss_image(&re, a->reactive, a->reactive_view)) { nvlog("dlss: the reactive mask is unusable - not recorded"); return -1; } e.reactive = &re; }
+    if (!(a->output->usage & VK_IMAGE_USAGE_STORAGE_BIT) && a->output->storage != 2) {
+        nvlog("dlss: the output texture was created without shader-write usage - not recorded"); return -1;
+    }
+    e.jitter_x = a->jitter_x; e.jitter_y = a->jitter_y; e.mv_scale_x = a->mv_scale_x; e.mv_scale_y = a->mv_scale_y;
+    e.pre_exposure = a->pre_exposure; e.reset = a->reset; e.render_w = a->cfg_in_w_used; e.render_h = a->cfg_in_h_used;
+    e.color_x = a->color_x; e.color_y = a->color_y; e.depth_x = a->depth_x; e.depth_y = a->depth_y; e.motion_x = a->motion_x; e.motion_y = a->motion_y;
+    const nvmtl_dlss_cfg want = { a->in_w, a->in_h, a->out_w, a->out_h, a->hdr, a->mv_lowres, a->mv_jittered, a->depth_inverted, a->auto_exposure };
+    if (c->in_rp) nvmtl_vk_cmd_end_render(c);
+    nvmtl_vk_cmd_barrier(c);
+    nvk_image *all[6] = { a->color, a->depth, a->motion, a->output, a->exposure, a->reactive };
+    for (int k = 0; k < 6; k++) if (all[k])
+        img_to(c, all[k], VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    nvmtl_dlss_feature *f = (nvmtl_dlss_feature *)*feature;
+    if (f && memcmp(nvmtl_dlss_feature_cfg(f), &want, sizeof want)) {
+        nvlog("dlss: scaler settings changed - making a new feature (the old one is kept until the process ends)");
+        f = NULL;
+    }
+    if (!f) { f = nvmtl_dlss_feature_create(c->cb, &want); if (!f) return -1; *feature = f; }
+    c->direct_sass = 1;   // the core launches compiled machine code from this buffer: never reuse its pool
+    const int rc = nvmtl_dlss_evaluate(c->cb, f, &e);
+    nvmtl_vk_cmd_barrier(c);
+    return rc;
 }
 int nvmtl_vk_cmd_blit_image_2d(nvk_cmdbuf *c, nvk_image *src, nvk_image *dst, uint32_t w, uint32_t h)
 {
