@@ -314,6 +314,7 @@ public:
     NvU64 *mapLen() { return &fMapLen; }
     nv_alloc_mapping_list_node_t *mapLenNode() const { return fMapLenNode; }
     void setMapLenNode(nv_alloc_mapping_list_node_t *n) { fMapLenNode = n; }
+    NvU64 *mapGen() { return &fMapGen; }
     bool isCtl() const { return fIsCtl; }
     nv_state_t *nvState();
 protected:
@@ -328,6 +329,9 @@ private:
     // can hold other objects past this one, so the map path clamps to this and refuses when it is 0. Under fMapLock.
     NvU64 fMapLen = 0;
     nv_alloc_mapping_list_node_t *fMapLenNode = nullptr;   // the node fMapLen belongs to
+    // Bumped under fMapLock whenever the list head is stored or freed: a node address can be reused after a free, so a
+    // pending length is applied only while the generation it was recorded at is still current.
+    NvU64 fMapGen = 0;
     bool fIsCtl = true;
     int  fFd = -1;
     int  fPid = 0;
@@ -416,11 +420,12 @@ static nv_alloc_mapping_list_node_t *gNvMapBusy = &gNvMapBusyNode;
 // then, on the same thread and inside the same escape, calls nv_alloc_user_mapping with the Length it validated; that
 // call reports the length through nv_xnu_note_map_len, which applies it to that exact node only.
 // Lifetime: a slot lives for one escape call. NVRMUserClient::esc clears the calling thread's slot on entry and on every
-// exit (NvMapPendingScope), so a slot can never outlive the escape or point at a client from an earlier one. No retain:
-// RM holds the target client through nv_get_file_private/nv_put_file_private for the whole escape.
+// exit (NvMapPendingScope), so a slot can never outlive the escape or point at a client from an earlier one. A slot also
+// holds its own reference on the client (taken when stored, dropped with the slot, always outside the simple lock), so
+// it stays valid even on an RM path that does not come through esc().
 // Fail closed: no free slot, an error before nv_alloc_user_mapping, or a node that changed means no length is recorded
 // for the current node, and the map path refuses a node without one.
-struct NvMapPending { thread_t th; NVRMUserClient *c; nv_alloc_mapping_list_node_t *node; bool wasEmpty; };
+struct NvMapPending { thread_t th; NVRMUserClient *c; nv_alloc_mapping_list_node_t *node; NvU64 gen; bool wasEmpty; };
 static NvMapPending gNvMapPending[64];
 static IOSimpleLock *gNvMapPendingLock = nullptr;
 static IOSimpleLock *mapPendingLock()
@@ -436,16 +441,20 @@ static NvMapPending *mapPendingSlot(bool claim)
 {
     thread_t me = current_thread(); NvMapPending *freeSlot = nullptr;
     for (auto &p : gNvMapPending) { if (p.th == me) return &p; if (!p.th && !freeSlot) freeSlot = &p; }
-    if (claim && freeSlot) { freeSlot->th = me; freeSlot->c = nullptr; freeSlot->node = nullptr; freeSlot->wasEmpty = false; return freeSlot; }
+    if (claim && freeSlot) { freeSlot->th = me; freeSlot->c = nullptr; freeSlot->node = nullptr; freeSlot->gen = 0; freeSlot->wasEmpty = false; return freeSlot; }
     return nullptr;
 }
-static void mapPendingDrop(NvMapPending *p) { p->th = nullptr; p->c = nullptr; p->node = nullptr; p->wasEmpty = false; }
+// Empties a slot and hands back its client reference; the caller releases it after dropping the simple lock.
+static NVRMUserClient *mapPendingDrop(NvMapPending *p)
+{ NVRMUserClient *c = p->c; p->th = nullptr; p->c = nullptr; p->node = nullptr; p->gen = 0; p->wasEmpty = false; return c; }
 static void mapPendingClearThread()
 {
+    NVRMUserClient *drop = nullptr;
     IOSimpleLockLock(mapPendingLock());
     NvMapPending *p = mapPendingSlot(false);
-    if (p) mapPendingDrop(p);
+    if (p) drop = mapPendingDrop(p);
     IOSimpleLockUnlock(gNvMapPendingLock);
+    if (drop) drop->release();
 }
 struct NvMapPendingScope { NvMapPendingScope() { mapPendingClearThread(); } ~NvMapPendingScope() { mapPendingClearThread(); } };
 
@@ -455,10 +464,16 @@ extern "C" nv_alloc_mapping_list_node_t **NV_API_CALL nv_acquire_file_va(nv_file
     if (!c || !c->mapLock()) { gNvMapBusy = &gNvMapBusyNode; return &gNvMapBusy; }
     IOLockLock(c->mapLock());
     if (write) {
+        // Releasing the previous holder here is safe while c's lock is held: if it is c, RM still holds c (it got it
+        // from nv_get_file_private), so this is not the last reference; any other client frees under its own lock.
+        NVRMUserClient *old = nullptr;
+        c->retain();
         IOSimpleLockLock(mapPendingLock());
         NvMapPending *p = mapPendingSlot(true);
-        if (p) { p->c = c; p->node = nullptr; p->wasEmpty = (*c->mapList() == nullptr); }
+        if (p) { old = mapPendingDrop(p); p->th = current_thread(); p->c = c; p->wasEmpty = (*c->mapList() == nullptr); }
         IOSimpleLockUnlock(gNvMapPendingLock);
+        if (!p) c->release();   // no slot: nothing holds it, and the node gets no length (refused at map time)
+        if (old) old->release();
     }
     return c->mapList();
 }
@@ -469,28 +484,35 @@ extern "C" void NV_API_CALL nv_release_file_va(nv_file_private_t *nvfp, NvBool w
     if (write) {
         // A node that appeared during this hold is new. Whatever length the client held belonged to an older node.
         nv_alloc_mapping_list_node_t *now = *c->mapList();
+        NVRMUserClient *drop = nullptr;
         IOSimpleLockLock(mapPendingLock());
         NvMapPending *p = mapPendingSlot(false);
-        if (p && p->c == c && p->wasEmpty && now) p->node = now; else if (p) mapPendingDrop(p);
+        const bool fresh = p && p->c == c && p->wasEmpty && now;
+        if (fresh) { p->node = now; p->gen = ++*c->mapGen(); } else if (p) drop = mapPendingDrop(p);
         IOSimpleLockUnlock(gNvMapPendingLock);
         if (now != c->mapLenNode()) { *c->mapLen() = 0; c->setMapLenNode(nullptr); }
+        if (drop) drop->release();   // not the last reference to c (RM holds it); others free under their own lock
     }
     IOLockUnlock(c->mapLock());
 }
 // Called from nv_alloc_user_mapping with the bytes RM validated, counted from page_index's first byte.
 extern "C" void nv_xnu_note_map_len(NvU64 bytes)
 {
-    NVRMUserClient *c = nullptr; nv_alloc_mapping_list_node_t *node = nullptr;
+    NVRMUserClient *c = nullptr; nv_alloc_mapping_list_node_t *node = nullptr; NvU64 gen = 0;
     IOSimpleLockLock(mapPendingLock());
     NvMapPending *p = mapPendingSlot(false);
-    if (p && p->node) { c = p->c; node = p->node; }
-    if (p) mapPendingDrop(p);
+    if (p && p->node) { node = p->node; gen = p->gen; }
+    if (p) c = mapPendingDrop(p);   // the slot's reference now belongs to this function
     IOSimpleLockUnlock(gNvMapPendingLock);
     if (!c) return;
-    IOLockLock(c->mapLock());
-    // Only the node this thread stored, and only if it is still the client's current one.
-    if (*c->mapList() == node && c->mapLenNode() == nullptr) { *c->mapLen() = bytes; c->setMapLenNode(node); }
-    IOLockUnlock(c->mapLock());
+    if (node) {
+        IOLockLock(c->mapLock());
+        // Only the node this thread stored, only while it is current, and only in the generation it was stored in (a
+        // freed node's address can come back as a new node).
+        if (*c->mapList() == node && *c->mapGen() == gen && c->mapLenNode() == nullptr) { *c->mapLen() = bytes; c->setMapLenNode(node); }
+        IOLockUnlock(c->mapLock());
+    }
+    c->release();
 }
 // 620 callers check control-vs-device themselves (nv_verify_nvfp_control_or_put); this answers which state a file is on.
 extern "C" nv_state_t *NV_API_CALL nv_get_state_ptr_from_nvfp(nv_file_private_t *nvfp)
@@ -2000,7 +2022,7 @@ void NVRMUserClient::free(void)
 {
     if (fMapLock) IOLockLock(fMapLock);
     nvMapListFree(&fMapList);
-    fMapLen = 0; fMapLenNode = nullptr;
+    fMapLen = 0; fMapLenNode = nullptr; fMapGen++;
     if (fMapLock) IOLockUnlock(fMapLock);
     if (fGate) { IOLockFree(fGate); fGate = nullptr; }
     if (fMapLock) { IOLockFree(fMapLock); fMapLock = nullptr; }
@@ -2195,7 +2217,7 @@ IOReturn NVRMUserClient::sBindFd(OSObject *target, void *reference, IOExternalMe
         if (me->fMapList) {
             kprintf("NVRM-xnu: client %d re-bound to fd %d with a stale mapping context - cleared\n", me->fFd, me->fBound);
             nvMapListFree(&me->fMapList);
-            me->fMapLen = 0; me->fMapLenNode = nullptr;
+            me->fMapLen = 0; me->fMapLenNode = nullptr; me->fMapGen++;
         }
         IOLockUnlock(me->fMapLock);
     }
