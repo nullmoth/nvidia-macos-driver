@@ -439,6 +439,20 @@ typedef struct {
 } nvmtl_vk_dlss_rr_args;
 int nvmtl_vk_dlss_rr_available(void);
 int nvmtl_vk_cmd_dlss_rr(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_rr_args *a);
+// DLSS Frame Generation behind the MetalFX frame interpolator: one evaluation writes the in-between frame into output.
+typedef struct {
+    nvk_image *color, *depth, *motion, *output, *ui;   // ui may be NULL
+    void *color_view, *depth_view, *motion_view, *output_view, *ui_view;
+    uint32_t in_w, in_h, out_w, out_h;
+    int hdr, depth_inverted, reset, camera_motion_included;
+    float near_z, far_z, fov_y, aspect;
+    float cam_pos[3], cam_right[3], cam_up[3], cam_fwd[3];
+    float clip_to_prev[16], prev_to_clip[16], view_to_clip[16];
+    float mv_scale_x, mv_scale_y, jitter_x, jitter_y;
+    uint32_t frame_id, multi_index, multi_count;
+} nvmtl_vk_dlss_fg_args;
+int nvmtl_vk_dlss_fg_available(void);
+int nvmtl_vk_cmd_dlss_fg(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_fg_args *a);
 int nvmtl_vk_cmd_blit_convert(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint32_t ss, uint32_t sx, uint32_t sy,
                               nvk_image *dst, uint32_t dl, uint32_t ds, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h);
 void nvmtl_vk_buffer_destroy(nvk_buffer *b);

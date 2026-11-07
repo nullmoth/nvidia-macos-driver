@@ -303,4 +303,146 @@ static id nvmtl_mfx_dlss_rr_make(id descriptor, id device) {
           (unsigned long)d.inputHeight, (unsigned long)d.outputWidth, (unsigned long)d.outputHeight);
     return [[NVMTLDLSSDenoisedScaler alloc] initWithDescriptor:d];
 }
+
+// ---- Frame Generation behind MTLFXFrameInterpolator -------------------------------------------------------------------
+// Handed out by the interpolator descriptor's newFrameInterpolatorWithDevice: hook (nvmtl_mfx_native_profile.inc) only for
+// this driver's devices and only while the NGX core reports Frame Generation. The core keeps the previous real frame as
+// its own history, so one MetalFX encode is one or two evaluations:
+//   - when the app's prevColorTexture is not the colorTexture of the previous encode (or history is reset, or this is the
+//     first encode) the previous frame is fed first as a priming evaluation (reset on the very first), then
+//   - the current frame is evaluated and the core writes the in-between frame into outputTexture.
+// Mapping: colorTexture -> DLSSG.Backbuffer, depthTexture -> DLSSG.Depth, motionTexture -> DLSSG.MVecs,
+// outputTexture -> DLSSG.OutputInterpolated, uiTexture -> DLSSG.UI, motionVectorScale -> DLSSG.MvecScale, jitter -> DLSSG.Jitter.
+// Camera: nearPlane/farPlane/fieldOfView(degrees -> radians)/aspectRatio give the projection. The interpolator carries no
+// camera pose; when the descriptor's scaler offers worldToViewMatrix/viewToClipMatrix (the denoised scaler) the pose and
+// ClipToPrevClip come from them (the previous frame's matrices are kept), otherwise the pose is the origin looking down -Z
+// with an identity ClipToPrevClip and the motion vectors (which include camera motion) carry all of the movement.
+// Not mapped (logged once): deltaTime, the fence, uiTextureComposited, and anything the core takes that MetalFX never gives
+// (HUD-less colour, UI alpha, dynamic frame count).
+@interface NVMTLDLSSFrameInterpolator : NSObject <MTLFXFrameInterpolator> {
+    void *_feature;
+    id<MTLFXFrameInterpolatableScaler> _scaler;
+    NSUInteger _inW, _inH, _outW, _outH;
+    MTLPixelFormat _fmtColor, _fmtDepth, _fmtMotion, _fmtOutput, _fmtUI;
+    id<MTLTexture> _lastColor;      // colorTexture of the previous encode, to tell whether prevColorTexture is the core's history
+    BOOL _haveHistory, _notedUnmapped, _havePrevVP;
+    simd_float4x4 _prevVP;
+    uint32_t _frame;
+}
+- (instancetype)initWithDescriptor:(MTLFXFrameInterpolatorDescriptor *)d;
+@end
+
+@implementation NVMTLDLSSFrameInterpolator
+@synthesize colorTexture = _colorTexture, prevColorTexture = _prevColorTexture, depthTexture = _depthTexture, motionTexture = _motionTexture;
+@synthesize outputTexture = _outputTexture, uiTexture = _uiTexture, fence = _fence;
+@synthesize motionVectorScaleX = _motionVectorScaleX, motionVectorScaleY = _motionVectorScaleY, deltaTime = _deltaTime;
+@synthesize nearPlane = _nearPlane, farPlane = _farPlane, fieldOfView = _fieldOfView, aspectRatio = _aspectRatio;
+@synthesize jitterOffsetX = _jitterOffsetX, jitterOffsetY = _jitterOffsetY, uiTextureComposited = _uiTextureComposited;
+@synthesize shouldResetHistory = _shouldResetHistory, depthReversed = _depthReversed;
+
+- (instancetype)initWithDescriptor:(MTLFXFrameInterpolatorDescriptor *)d {
+    if (!(self = [super init])) return nil;
+    _inW = d.inputWidth; _inH = d.inputHeight; _outW = d.outputWidth; _outH = d.outputHeight;
+    _fmtColor = d.colorTextureFormat; _fmtDepth = d.depthTextureFormat; _fmtMotion = d.motionTextureFormat;
+    _fmtOutput = d.outputTextureFormat; _fmtUI = d.uiTextureFormat;
+    _scaler = d.scaler;
+    _motionVectorScaleX = 1.0f; _motionVectorScaleY = 1.0f; _depthReversed = YES;   // the protocol's documented default
+    _nearPlane = 0.1f; _farPlane = 1000.0f; _fieldOfView = 60.0f; _aspectRatio = _outH ? (float)_outW / (float)_outH : 1.0f;
+    return self;
+}
+- (MTLTextureUsage)colorTextureUsage { return MTLTextureUsageShaderRead; }
+- (MTLTextureUsage)depthTextureUsage { return MTLTextureUsageShaderRead; }
+- (MTLTextureUsage)motionTextureUsage { return MTLTextureUsageShaderRead; }
+- (MTLTextureUsage)uiTextureUsage { return MTLTextureUsageShaderRead; }
+- (MTLTextureUsage)outputTextureUsage { return MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite; }
+- (MTLPixelFormat)colorTextureFormat { return _fmtColor; }
+- (MTLPixelFormat)depthTextureFormat { return _fmtDepth; }
+- (MTLPixelFormat)motionTextureFormat { return _fmtMotion; }
+- (MTLPixelFormat)outputTextureFormat { return _fmtOutput; }
+- (MTLPixelFormat)uiTextureFormat { return _fmtUI; }
+- (NSUInteger)inputWidth { return _inW; }
+- (NSUInteger)inputHeight { return _inH; }
+- (NSUInteger)outputWidth { return _outW; }
+- (NSUInteger)outputHeight { return _outH; }
+
+static void nvmtl_fg_copy(float out[16], simd_float4x4 m) { for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) out[c * 4 + r] = m.columns[c][r]; }
+
+// One call into the Vulkan layer for `color` with the shared arguments in `base`; the matrices and pose are set by the caller.
+- (int)evaluate:(NVMTLCommandBuffer *)cb args:(nvmtl_vk_dlss_fg_args)a color:(NVMTLTexture *)color reset:(BOOL)reset {
+    a.color = [color nvi]; a.color_view = [color nvview]; a.reset = reset;
+    int rc;
+    @synchronized (self) { rc = nvmtl_vk_cmd_dlss_fg(&cb->_c, &_feature, &a); }
+    return rc;
+}
+
+- (void)encodeToCommandBuffer:(id<MTLCommandBuffer>)commandBuffer {
+    if (![(id)commandBuffer isKindOfClass:[NVMTLCommandBuffer class]]) { nvlog("dlss: FG: the command buffer is not this driver's - interpolation skipped"); return; }
+    NVMTLCommandBuffer *cb = (NVMTLCommandBuffer *)commandBuffer;
+    NVMTLTexture *color = nvmtl_dlss_tex(_colorTexture), *prev = nvmtl_dlss_tex(_prevColorTexture), *depth = nvmtl_dlss_tex(_depthTexture);
+    NVMTLTexture *motion = nvmtl_dlss_tex(_motionTexture), *out = nvmtl_dlss_tex(_outputTexture), *ui = nvmtl_dlss_tex(_uiTexture);
+    if (!color || !depth || !motion || !out) { nvlog("dlss: FG: colour, depth, motion and output textures must all be set (and be this driver's) - interpolation skipped"); return; }
+    if (_prevColorTexture && !prev) { nvlog("dlss: FG: the previous colour texture is not this driver's - interpolation skipped"); return; }
+    if (_uiTexture && !ui) { nvlog("dlss: FG: the UI texture is not this driver's - interpolation skipped"); return; }
+    if (!_notedUnmapped) {
+        _notedUnmapped = YES;
+        if (_fence || _deltaTime > 0 || _uiTextureComposited) nvlog("dlss: FG: deltaTime, the fence and uiTextureComposited are not mapped to NGX (ignored)");
+    }
+    nvmtl_vk_dlss_fg_args a = {0};
+    a.depth = [depth nvi]; a.depth_view = [depth nvview]; a.motion = [motion nvi]; a.motion_view = [motion nvview];
+    a.output = [out nvi]; a.output_view = [out nvview];
+    if (ui) { a.ui = [ui nvi]; a.ui_view = [ui nvview]; }
+    a.in_w = (uint32_t)_inW; a.in_h = (uint32_t)_inH; a.out_w = (uint32_t)_outW; a.out_h = (uint32_t)_outH;
+    a.hdr = nvmtl_dlss_float_format(_fmtColor); a.depth_inverted = _depthReversed; a.camera_motion_included = 1;
+    a.near_z = _nearPlane; a.far_z = _farPlane; a.fov_y = _fieldOfView * (float)M_PI / 180.0f; a.aspect = _aspectRatio;
+    a.mv_scale_x = _motionVectorScaleX; a.mv_scale_y = _motionVectorScaleY; a.jitter_x = _jitterOffsetX; a.jitter_y = _jitterOffsetY;
+    a.multi_index = 1; a.multi_count = 1; a.frame_id = ++_frame;
+    // Camera pose and the clip-space step from the previous frame, when the scaler has the matrices.
+    simd_float4x4 id4 = matrix_identity_float4x4, v = id4, p = id4, vp = id4;
+    BOOL haveMat = NO;
+    id sc = _scaler;
+    if (sc && [sc respondsToSelector:@selector(worldToViewMatrix)] && [sc respondsToSelector:@selector(viewToClipMatrix)]) {
+        v = ((simd_float4x4 (*)(id, SEL))objc_msgSend)(sc, @selector(worldToViewMatrix));
+        p = ((simd_float4x4 (*)(id, SEL))objc_msgSend)(sc, @selector(viewToClipMatrix));
+        haveMat = YES;
+    }
+    vp = simd_mul(p, v);
+    simd_float4x4 toPrev = id4, fromPrev = id4;
+    if (haveMat && _havePrevVP && !_shouldResetHistory) { toPrev = simd_mul(_prevVP, simd_inverse(vp)); fromPrev = simd_inverse(toPrev); }
+    // View rows are the camera axes in world space; the camera looks down -Z of view space, and sits at -R^T t.
+    simd_float3 right = { v.columns[0][0], v.columns[1][0], v.columns[2][0] }, up = { v.columns[0][1], v.columns[1][1], v.columns[2][1] };
+    simd_float3 fwd = { -v.columns[0][2], -v.columns[1][2], -v.columns[2][2] }, t = { v.columns[3][0], v.columns[3][1], v.columns[3][2] };
+    simd_float3 pos = -(right * t.x + up * t.y - fwd * t.z);
+    a.cam_right[0] = right.x; a.cam_right[1] = right.y; a.cam_right[2] = right.z;
+    a.cam_up[0] = up.x; a.cam_up[1] = up.y; a.cam_up[2] = up.z;
+    a.cam_fwd[0] = fwd.x; a.cam_fwd[1] = fwd.y; a.cam_fwd[2] = fwd.z;
+    a.cam_pos[0] = pos.x; a.cam_pos[1] = pos.y; a.cam_pos[2] = pos.z;
+    nvmtl_fg_copy(a.clip_to_prev, toPrev); nvmtl_fg_copy(a.prev_to_clip, fromPrev);
+    nvmtl_fg_copy(a.view_to_clip, haveMat ? p : id4);
+
+    int rc = 0;
+    // Prime the core's history with the previous real frame when it has not already seen it as the last encode's colour.
+    BOOL reset = _shouldResetHistory;   // a scene cut: the current frame alone starts the history
+    if (!reset && prev && (!_haveHistory || (id)_prevColorTexture != (id)_lastColor)) {
+        rc = [self evaluate:cb args:a color:prev reset:!_haveHistory];
+        if (!rc) nvmtl_retain_resource(cb, prev);
+    } else if (!reset && !_haveHistory) reset = YES;   // no previous frame at all: the first frame starts the history
+    if (!rc) rc = [self evaluate:cb args:a color:color reset:reset];
+    if (rc) { nvlog("dlss: FG: interpolation was not recorded (output left as it was)"); _haveHistory = NO; return; }
+    _haveHistory = YES; _lastColor = _colorTexture; if (haveMat) { _prevVP = vp; _havePrevVP = YES; }
+    nvmtl_retain_resource(cb, color); nvmtl_retain_resource(cb, depth); nvmtl_retain_resource(cb, motion); nvmtl_retain_resource(cb, out);
+    if (ui) nvmtl_retain_resource(cb, ui);
+    NVMTLTexture *rs = out->_parent ? out->_parent : out;
+    if (rs->_surf) nvmtl_surf_dirty(cb, rs);
+}
+@end
+
+static BOOL nvmtl_mfx_dlss_fg_ready(void) { return nvmtl_vk_dlss_fg_available(); }
+static id nvmtl_mfx_dlss_fg_make(id descriptor, id device) {
+    if (!nvmtl_vk_dlss_fg_available()) return nil;
+    MTLFXFrameInterpolatorDescriptor *d = (MTLFXFrameInterpolatorDescriptor *)descriptor;
+    if (!d.inputWidth || !d.inputHeight || !d.outputWidth || !d.outputHeight) { nvlog("dlss: FG: interpolator has no sizes - using the MetalFX path"); return nil; }
+    nvlog("dlss: MetalFX frame interpolator %lux%lu (depth/motion %lux%lu) served by DLSS Frame Generation", (unsigned long)d.outputWidth,
+          (unsigned long)d.outputHeight, (unsigned long)d.inputWidth, (unsigned long)d.inputHeight);
+    return [[NVMTLDLSSFrameInterpolator alloc] initWithDescriptor:d];
+}
 #pragma clang diagnostic pop

@@ -10965,6 +10965,57 @@ int nvmtl_vk_cmd_dlss_rr(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_rr_a
     nvmtl_vk_cmd_barrier(c);
     return rc;
 }
+int nvmtl_vk_dlss_fg_available(void) { return nvmtl_vk_dlss_available() && nvmtl_dlss_fg_ready(); }
+int nvmtl_vk_cmd_dlss_fg(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_fg_args *a)
+{
+    if (!c || !feature || !a || !nvmtl_dlss_fg_ready() || !a->color || !a->depth || !a->motion || !a->output) return -1;
+    nvmtl_dlss_fg_eval e = {0}; nvmtl_dlss_image ui;
+    if (!*feature) {
+        dlss_describe("color", a->color); dlss_describe("depth", a->depth); dlss_describe("motion", a->motion);
+        dlss_describe("output", a->output); dlss_describe("ui", a->ui);
+    }
+    if (!(a->output->usage & VK_IMAGE_USAGE_STORAGE_BIT)) { nvlog("dlss: FG output texture was created without shader-write usage - not recorded"); return -1; }
+    if (dlss_image(&e.color, a->color, a->color_view, 0) || dlss_image(&e.depth, a->depth, a->depth_view, 0)
+        || dlss_image(&e.motion, a->motion, a->motion_view, 0) || dlss_image(&e.output, a->output, a->output_view, 1)) {
+        nvlog("dlss: an FG texture has no usable Vulkan image/view (or is multisampled) - not recorded"); return -1;
+    }
+    if (a->ui) { if (dlss_image(&ui, a->ui, a->ui_view, 0)) { nvlog("dlss: the FG UI texture is unusable - not recorded"); return -1; } e.ui = &ui; }
+    // The core reads the colour and writes the output over the feature's output size, depth and motion over its input size.
+    if (a->color->w < a->out_w || a->color->h < a->out_h || a->output->w < a->out_w || a->output->h < a->out_h
+        || a->depth->w < a->in_w || a->depth->h < a->in_h || a->motion->w < a->in_w || a->motion->h < a->in_h
+        || (a->ui && (a->ui->w < a->out_w || a->ui->h < a->out_h))) {
+        nvlog("dlss: an FG texture is smaller than the interpolator's size (%ux%u, depth/motion %ux%u) - not recorded", a->out_w, a->out_h, a->in_w, a->in_h);
+        return -1;
+    }
+    e.near_z = a->near_z; e.far_z = a->far_z; e.fov_y = a->fov_y; e.aspect = a->aspect;
+    memcpy(e.cam_pos, a->cam_pos, sizeof e.cam_pos); memcpy(e.cam_right, a->cam_right, sizeof e.cam_right);
+    memcpy(e.cam_up, a->cam_up, sizeof e.cam_up); memcpy(e.cam_fwd, a->cam_fwd, sizeof e.cam_fwd);
+    memcpy(e.clip_to_prev, a->clip_to_prev, sizeof e.clip_to_prev); memcpy(e.prev_to_clip, a->prev_to_clip, sizeof e.prev_to_clip);
+    memcpy(e.view_to_clip, a->view_to_clip, sizeof e.view_to_clip);
+    e.mv_scale_x = a->mv_scale_x; e.mv_scale_y = a->mv_scale_y; e.jitter_x = a->jitter_x; e.jitter_y = a->jitter_y;
+    e.reset = a->reset; e.camera_motion_included = a->camera_motion_included;
+    e.frame_id = a->frame_id; e.multi_index = a->multi_index; e.multi_count = a->multi_count;
+    const nvmtl_dlss_fg_cfg want = { a->out_w, a->out_h, a->in_w, a->in_h, (uint32_t)a->color->fmt, a->hdr, a->depth_inverted };
+    if (c->in_rp) nvmtl_vk_cmd_end_render(c);
+    nvmtl_vk_cmd_barrier(c);
+    nvk_image *all[5] = { a->color, a->depth, a->motion, a->output, a->ui };
+    for (int k = 0; k < 5; k++) if (all[k])
+        img_to(c, all[k], VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    nvmtl_dlss_fg_feature *f = (nvmtl_dlss_fg_feature *)*feature;
+    if (f && memcmp(nvmtl_dlss_fg_feature_cfg(f), &want, sizeof want)) {
+        nvlog("dlss: frame interpolator settings changed - making a new FG feature (the old one is kept until the process ends)");
+        f = NULL;
+    }
+    if (!f) {
+        f = nvmtl_dlss_fg_feature_create(c->cb, &want); if (!f) return -1; *feature = f;
+        nvmtl_vk_cmd_barrier(c);   // the feature's setup is recorded into this buffer: it must land before the first evaluation
+    }
+    c->direct_sass = 1;
+    const int rc = nvmtl_dlss_fg_evaluate(c->cb, f, &e);
+    nvmtl_vk_cmd_barrier(c);
+    return rc;
+}
 int nvmtl_vk_cmd_blit_image_2d(nvk_cmdbuf *c, nvk_image *src, nvk_image *dst, uint32_t w, uint32_t h)
 {
     if (!c || !src || !dst || !src->img || !dst->img || !w || !h || w > src->w || h > src->h || w > dst->w || h > dst->h
