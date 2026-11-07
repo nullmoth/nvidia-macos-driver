@@ -81,3 +81,6 @@ typedef struct {
 int nvmtl_dlss_evaluate(VkCommandBuffer cmd, nvmtl_dlss_feature *f, const nvmtl_dlss_eval *e);
 /* The cfg a feature was created with. */
 const nvmtl_dlss_cfg *nvmtl_dlss_feature_cfg(const nvmtl_dlss_feature *f);
+
+/* Local check of the worker thread every call above runs on (stack size, one thread, environment kept). 0 = pass. */
+int nvmtl_dlss_selftest(void);
