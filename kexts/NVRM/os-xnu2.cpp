@@ -29,6 +29,11 @@
 // NVIDIA's GSP firmware must be the exact release the RM was built from; this directory names it (the package ships
 // nvfw/nvidia/<version>/, and older versions stay beside it for a rollback).
 #define NV_XNU_FW_DIR "/Library/NullMoth/nvfw/nvidia/620.70.06/"
+// Fallback for an early start: /Library is firmlinked to the Data volume, so NV_XNU_FW_DIR does not
+// exist yet when this driver is loaded from the boot collection. /usr/share lives on the system
+// volume and is not firmlinked. Same layout underneath, so only the prefix differs. See the
+// firmlink note in nv_get_firmware.
+#define NV_XNU_FW_ALT_DIR "/usr/share/nvfw/nvidia/620.70.06/"
 // The largest image we ship is the Ampere ucodes at 56 MB (620.70.06, measured); the cap only has to be generous.
 #define NV_XNU_FW_MAX_BYTES (256u * 1024u * 1024u)
 #define NV_FIRMWARE_FOR_NAME(name) NV_XNU_FW_DIR name ".bin"
@@ -1235,6 +1240,20 @@ const void *NV_API_CALL nv_get_firmware(nv_state_t *nv, nv_firmware_type_t fw_ty
     vfs_context_t ctx = vfs_context_current();
     vnode_t vp = NULL;
     int err = vnode_open(path, FREAD, 0, 0, &vp, ctx);
+    // /Library is firmlinked to the Data volume, so NV_XNU_FW_DIR is unreachable whenever this driver
+    // starts before that volume is mounted (loaded from the boot collection it starts a few seconds
+    // after the root volume mounts, and every image comes back ENOENT, which RM reports only as
+    // "RmFetchGspRmImages: No firmware image found"). /usr/share is on the system volume and is not
+    // firmlinked, so it is readable with only the root volume mounted. A fallback, not a move, so an
+    // installer that places firmware the existing way keeps working.
+    if (err) {
+        char alt[256];
+        snprintf(alt, sizeof alt, "%s%s", NV_XNU_FW_ALT_DIR, path + sizeof(NV_XNU_FW_DIR) - 1);
+        kprintf("NVRM-xnu:   vnode_open failed %d on %s, trying %s\n", err, path, alt);
+        err = vnode_open(alt, FREAD, 0, 0, &vp, ctx);
+        // `path` is deliberately not reassigned: nv_xnu_fw_expect() keys the expected size and sha1 off
+        // the canonical NV_XNU_FW_DIR path, so the integrity check still applies to the fallback image.
+    }
     if (err) { kprintf("NVRM-xnu:   vnode_open failed %d\n", err); return NULL; }
     struct vnode_attr va; VATTR_INIT(&va); VATTR_WANTED(&va, va_data_size);
     if (vnode_getattr(vp, &va, ctx) != 0) { kprintf("NVRM-xnu:   vnode_getattr failed\n"); vnode_close(vp, FREAD, ctx); return NULL; }
