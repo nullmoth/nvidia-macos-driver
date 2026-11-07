@@ -25,16 +25,23 @@
 void nvlog(const char *fmt, ...);
 
 /* ---- which device is this: PCI device id -> management-library architecture and chip code ------------------ */
-/* The core asks the management library for an architecture (a public enum) and, through a private export table
- * (slot 257), for a chip code. The architecture values are the public NVML enum. The chip codes are NOT public:
- * UNVERIFIED. 0x60 is the value the core accepted on a GeForce RTX 5060 (device id 0x2d05) and nothing else has been
- * measured. Rows with chip 0 are architectures whose code is not known; DLSS stays off on them and says so. */
+/* Read from the NGX core's own code (NGX 620.70.06, function nvmlArchToNGX): it walks the GPUs, takes the NVML
+ * architecture (public enum) and the chip code from the management library's private export table, slot 257, and maps
+ * them to its internal architecture id:
+ *   Volta 5 -> 0x140, Turing 6 -> 0x160, Ampere 7 -> 0x170, Hopper 9 -> 0x180, Ada 8 -> 0x190, anything newer than
+ *   Hopper uses the chip code (Blackwell, 10): chip 0x51-0x53 and 0x5e-0x5f -> 0x1a0, every other chip -> 0x1b0.
+ * For Turing, Ampere and Ada the chip code is read but not used, so only a successful answer matters. For Blackwell,
+ * 0x60 selects 0x1b0, the id the core logged on a GeForce RTX 5060 (device id 0x2d05). What the real management library
+ * returns in slot 257 per GPU is not decoded, so the exact chip code of each Blackwell part is unknown; any code outside
+ * the two ranges above gives the same result for GeForce parts. Architecture values below are the public enum. */
 typedef struct { uint16_t lo, hi; unsigned arch; int chip; const char *name; } chip_row;
 static const chip_row k_chips[] = {
-    { 0x2900, 0x2fff, 10, 0x60, "Blackwell (GB20x)" },   /* chip code seen working on 0x2d05 only */
-    { 0x2600, 0x28ff,  8, 0,    "Ada (AD10x)" },         /* chip code unknown */
-    { 0x2200, 0x25ff,  7, 0,    "Ampere (GA10x)" },      /* chip code unknown */
-    { 0x1e00, 0x21ff,  6, 0,    "Turing (TU10x)" },      /* chip code unknown */
+    { 0x2900, 0x2fff, 10, 0x60, "Blackwell (GB20x)" },   /* chip 0x60 measured on 0x2d05; maps to 0x1b0 */
+    { 0x2600, 0x28ff,  8, 0x60, "Ada (AD10x)" },         /* chip unused by the core for arch 8; maps to 0x190 */
+    { 0x2200, 0x25ff,  7, 0x60, "Ampere (GA10x)" },      /* chip unused for arch 7; maps to 0x170 */
+    { 0x2000, 0x20ff,  7, 0x60, "Ampere (GA100)" },      /* same */
+    { 0x2180, 0x21ff,  6, 0x60, "Turing (TU11x)" },      /* chip unused for arch 6; maps to 0x160 */
+    { 0x1e00, 0x1fff,  6, 0x60, "Turing (TU10x)" },      /* same */
 };
 static const chip_row *chip_for(uint32_t device)
 {
@@ -166,7 +173,6 @@ static int init_locked(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, PFN_v
     if (pci_vendor != 0x10de) return fail("not an NVIDIA device");
     g_chip = chip_for(pci_device);
     if (!g_chip) return fail("device id has no row in the chip table");
-    if (!g_chip->chip) { char m[160]; snprintf(m, sizeof m, "the chip code for %s is not known", g_chip->name); return fail(m); }
     /* the device must have been created with both extensions; asking is cheaper than a crash inside the core */
     if (!gdpa(dev, "vkCreateCuModuleNVX") || !gdpa(dev, "vkGetImageViewHandleNVX")) return fail("device lacks VK_NVX_binary_import / VK_NVX_image_view_handle");
     char core[512], err[256] = "";
@@ -200,7 +206,7 @@ static int init_locked(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, PFN_v
     if (caps) P_GETI(caps, "SuperSampling.Available", &avail);
     if (avail != 1) return fail("NGX reports Super Resolution not available");
     g_state = 1;
-    nvlog("dlss: ready on %s (device %04x, chip code 0x%x - unverified)", g_chip->name, pci_device, g_chip->chip);
+    nvlog("dlss: ready on %s (device %04x, chip code 0x%x)", g_chip->name, pci_device, g_chip->chip);
     return 0;
 }
 int nvmtl_dlss_init(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, PFN_vkGetInstanceProcAddr gipa, PFN_vkGetDeviceProcAddr gdpa,
