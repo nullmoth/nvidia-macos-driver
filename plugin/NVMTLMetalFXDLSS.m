@@ -157,6 +157,9 @@ static id nvmtl_mfx_dlss_make(id descriptor, id device) {
     return s;
 }
 
+// The denoised scaler is macOS 26 API; the hooks that hand this class out are installed only when the class exists at run time.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
 // ---- Ray Reconstruction behind MTLFXTemporalDenoisedScaler ------------------------------------------------------------
 // Handed out by the denoised descriptor's newTemporalDenoisedScalerWithDevice: hook (nvmtl_mfx_native_profile.inc) only for
 // this driver's devices and only while the NGX core reports Ray Reconstruction. Mapping to NGX:
@@ -300,3 +303,4 @@ static id nvmtl_mfx_dlss_rr_make(id descriptor, id device) {
           (unsigned long)d.inputHeight, (unsigned long)d.outputWidth, (unsigned long)d.outputHeight);
     return [[NVMTLDLSSDenoisedScaler alloc] initWithDescriptor:d];
 }
+#pragma clang diagnostic pop
