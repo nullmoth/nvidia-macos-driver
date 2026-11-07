@@ -412,6 +412,20 @@ enum { NVMTL_BARS_LAYER, NVMTL_BARS_FIRST_DISPATCH, NVMTL_BARS_LATER_DISPATCH, N
        NVMTL_BARS_TRANSITION_NOWAIT, NVMTL_BARS_TRANSITION_SKIPPED, NVMTL_BARS_PASS, NVMTL_BARS_N };
 void nvmtl_vk_barrier_site(int site);
 void nvmtl_vk_bar_counts(uint64_t out[16]);
+// DLSS Super Resolution behind the MetalFX temporal scaler (nvmtl_dlss.h). available: the files are installed, the
+// device has the NVX extensions, and the NGX core initialised. cmd_dlss records one upscale; *feature holds the
+// scaler's NGX feature (NULL at first, made on the first call and again when a setting it was made for changes).
+typedef struct {
+    nvk_image *color, *depth, *motion, *output, *exposure, *reactive;   // exposure and reactive may be NULL
+    void *color_view, *depth_view, *motion_view, *output_view, *exposure_view, *reactive_view;
+    uint32_t in_w, in_h, out_w, out_h;   // the descriptor's sizes: what the feature is made for
+    uint32_t cfg_in_w_used, cfg_in_h_used;   // the part of the input used this frame
+    int hdr, mv_lowres, mv_jittered, depth_inverted, auto_exposure;
+    float jitter_x, jitter_y, mv_scale_x, mv_scale_y, pre_exposure; int reset;
+    uint32_t color_x, color_y, depth_x, depth_y, motion_x, motion_y;
+} nvmtl_vk_dlss_args;
+int nvmtl_vk_dlss_available(void);
+int nvmtl_vk_cmd_dlss(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_args *a);
 int nvmtl_vk_cmd_blit_convert(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint32_t ss, uint32_t sx, uint32_t sy,
                               nvk_image *dst, uint32_t dl, uint32_t ds, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h);
 void nvmtl_vk_buffer_destroy(nvk_buffer *b);
