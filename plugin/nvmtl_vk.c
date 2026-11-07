@@ -10741,27 +10741,59 @@ int nvmtl_vk_dlss_available(void)
     VkPhysicalDeviceProperties pp; pvkGetPhysicalDeviceProperties(g_pdev, &pp);
     return nvmtl_dlss_init(g_inst, g_pdev, g_dev, pvkGetInstanceProcAddr, pvkGetDeviceProcAddr, pp.vendorID, pp.deviceID) == 0;
 }
-static int dlss_image(nvmtl_dlss_image *o, nvk_image *i, void *view)
+/* The views DLSS reads and writes are its own: a plain 2D view of level 0 / layer 0 with ONE aspect and the image's own
+ * format. The Metal texture's view can carry depth AND stencil (a combined depth-stencil texture), several levels or
+ * layers, or a swizzle; the core turns each view into a descriptor handle (VK_NVX_image_view_handle), and a
+ * depth+stencil sampled descriptor is invalid, which the GPU reads as a fault. The standalone check used a plain D32
+ * image and never met that case. The views are released 64 evaluations later, long after the work that used them. */
+#define DLSS_VIEW_RING 384
+static VkImageView g_dlss_views[DLSS_VIEW_RING]; static unsigned g_dlss_view_at;
+static VkImageView dlss_view(nvk_image *i, VkImageAspectFlags aspect, int rw)
+{
+    VkImageViewUsageCreateInfo use = { VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, NULL,
+                                       rw ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT };
+    VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, &use, 0, (VkImage)i->img, VK_IMAGE_VIEW_TYPE_2D,
+                                  (VkFormat)i->fmt, { 0 }, { aspect, 0, 1, 0, 1 } };
+    VkImageView v = VK_NULL_HANDLE;
+    const VkResult r = pvkCreateImageView(g_dev, &vci, NULL, &v);
+    if (r != VK_SUCCESS) { nvlog("dlss: own %s view of VkFormat %u -> %d", rw ? "storage" : "sampled", i->fmt, r); return VK_NULL_HANDLE; }
+    const unsigned slot = g_dlss_view_at++ % DLSS_VIEW_RING;
+    if (g_dlss_views[slot]) pvkDestroyImageView(g_dev, g_dlss_views[slot], NULL);
+    g_dlss_views[slot] = v;
+    return v;
+}
+static int dlss_image(nvmtl_dlss_image *o, nvk_image *i, void *view, int rw)
 {
     if (!i || !i->img || !view || (i->samples ? i->samples : 1) > 1) return -1;
     const VkImageAspectFlags a = nvmtl_barrier_aspect(i);
-    *o = (nvmtl_dlss_image){ (VkImageView)view, (VkImage)i->img, (a & VK_IMAGE_ASPECT_DEPTH_BIT) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT,
-                             (VkFormat)i->fmt, i->w, i->h };
+    const VkImageAspectFlags one = (a & VK_IMAGE_ASPECT_DEPTH_BIT) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    const VkImageView own = dlss_view(i, one, rw);
+    if (!own) return -1;
+    *o = (nvmtl_dlss_image){ own, (VkImage)i->img, one, (VkFormat)i->fmt, i->w, i->h };
     return 0;
+}
+static void dlss_describe(const char *what, const nvk_image *i)
+{
+    if (i) nvlog("dlss: %-8s VkFormat %u %ux%u mips %u layers %u type %u samples %u usage 0x%x storage %u aspect 0x%x",
+                 what, i->fmt, i->w, i->h, i->mips, i->layers, i->mtl_type, i->samples, i->usage, i->storage, nvmtl_barrier_aspect(i));
 }
 int nvmtl_vk_cmd_dlss(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_args *a)
 {
     if (!c || !feature || !a || !nvmtl_dlss_ready()) return -1;
     nvmtl_dlss_eval e = {0}; nvmtl_dlss_image ex, re;
-    if (dlss_image(&e.color, a->color, a->color_view) || dlss_image(&e.depth, a->depth, a->depth_view)
-        || dlss_image(&e.motion, a->motion, a->motion_view) || dlss_image(&e.output, a->output, a->output_view)) {
-        nvlog("dlss: a scaler texture has no usable Vulkan image/view (or is multisampled) - not recorded"); return -1;
+    if (!*feature) {   // once per feature: what the game hands the scaler
+        dlss_describe("color", a->color); dlss_describe("depth", a->depth); dlss_describe("motion", a->motion);
+        dlss_describe("output", a->output); dlss_describe("exposure", a->exposure); dlss_describe("reactive", a->reactive);
     }
-    if (a->exposure) { if (dlss_image(&ex, a->exposure, a->exposure_view)) { nvlog("dlss: the exposure texture is unusable - not recorded"); return -1; } e.exposure = &ex; }
-    if (a->reactive) { if (dlss_image(&re, a->reactive, a->reactive_view)) { nvlog("dlss: the reactive mask is unusable - not recorded"); return -1; } e.reactive = &re; }
-    if (!(a->output->usage & VK_IMAGE_USAGE_STORAGE_BIT) && a->output->storage != 2) {
+    if (a->output && !(a->output->usage & VK_IMAGE_USAGE_STORAGE_BIT)) {   // a storage view needs storage usage on the image itself
         nvlog("dlss: the output texture was created without shader-write usage - not recorded"); return -1;
     }
+    if (dlss_image(&e.color, a->color, a->color_view, 0) || dlss_image(&e.depth, a->depth, a->depth_view, 0)
+        || dlss_image(&e.motion, a->motion, a->motion_view, 0) || dlss_image(&e.output, a->output, a->output_view, 1)) {
+        nvlog("dlss: a scaler texture has no usable Vulkan image/view (or is multisampled) - not recorded"); return -1;
+    }
+    if (a->exposure) { if (dlss_image(&ex, a->exposure, a->exposure_view, 0)) { nvlog("dlss: the exposure texture is unusable - not recorded"); return -1; } e.exposure = &ex; }
+    if (a->reactive) { if (dlss_image(&re, a->reactive, a->reactive_view, 0)) { nvlog("dlss: the reactive mask is unusable - not recorded"); return -1; } e.reactive = &re; }
     e.jitter_x = a->jitter_x; e.jitter_y = a->jitter_y; e.mv_scale_x = a->mv_scale_x; e.mv_scale_y = a->mv_scale_y;
     e.pre_exposure = a->pre_exposure; e.reset = a->reset; e.render_w = a->cfg_in_w_used; e.render_h = a->cfg_in_h_used;
     e.color_x = a->color_x; e.color_y = a->color_y; e.depth_x = a->depth_x; e.depth_y = a->depth_y; e.motion_x = a->motion_x; e.motion_y = a->motion_y;
