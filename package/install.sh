@@ -602,6 +602,17 @@ if kmutil showloaded --list-only --bundle-identifier as.vit9696.WhateverGreen 2>
   case " $ba " in *" gfxrst=4 "*) ;; *) echo "   NOTE: WhateverGreen is loaded and boot-args lack 'gfxrst=4' — add it in your OpenCore config.plist, or the Mac can panic when the NVIDIA display first opens";; esac
 fi
 
+# Optional DLSS 4 / 4.5 files: downloaded from NVIDIA on this Mac and checked against pinned hashes. A failure here
+# never undoes the driver install.
+if [ -f "$HERE/dlss_fetch.sh" ]; then
+  if [ "${NULLMOTH_DLSS:-0}" = 1 ]; then
+    step "DLSS 4 / 4.5 files"
+    /bin/bash "$HERE/dlss_fetch.sh" --yes || echo "   NOTE: the DLSS files were not installed; the driver itself is. Run again later: sudo ./dlss_fetch.sh --yes"
+  else
+    echo "   DLSS 4 / 4.5 is optional: sudo ./dlss_fetch.sh --yes (or install with NULLMOTH_DLSS=1 in the environment)."
+  fi
+fi
+
 echo; echo "Done. Reboot now: sudo shutdown -r now"
 [ -z "$AUDIO_NOTE" ] || echo "Audio: $AUDIO_NOTE."
 if [ "$ALLOWED" = "$(echo $KEXTS | wc -w | tr -d ' ')" ]; then
