@@ -230,6 +230,10 @@ enum NvKmsFrlRateForce nvkms_force_frl_rate(void) { return NVKMS_FRL_RATE_FORCE_
 NvBool nvkms_conceal_vrr_caps(void)             { return NV_FALSE; }
 NvBool nvkms_enhanced_pcon_support(void)        { return NV_FALSE; }
 NvBool nvkms_output_rounding_fix(void)          { return NV_TRUE; }
+// NVIDIA 620: gates a NEW single-GPU multi-head fliplock path (Linux default true). 615, which every shipped driver
+// used, returned before enabling fliplock on one GPU; false keeps that scan-out behaviour exactly. Turning it on
+// changes what the heads flip on, so it needs its own WindowServer gate first.
+NvBool nvkms_opportunistic_flip_sync(void)      { return NV_FALSE; }
 NvBool nvkms_disable_hdmi_frl(void)             { return NV_FALSE; }
 NvBool nvkms_disable_vrr_memclk_switch(void)    { return NV_FALSE; }
 NvBool nvkms_hdmi_deepcolor(void)               { return NV_TRUE; }
