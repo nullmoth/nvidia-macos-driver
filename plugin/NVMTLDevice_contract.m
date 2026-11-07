@@ -75,8 +75,15 @@ static void nvbt(const char *tag, int *count, int max);
         nvlog("newBufferWithBytesNoCopy: could neither import nor allocate %lu bytes -> nil", (unsigned long)a1);
         return nil;
     }
-    memcpy(b->_b.map, a0, a1);
-    b->_hostPtr = a0; b->_hostLen = (size_t)a1;
+    const char *me = getprogname();
+    const BOOL ws = me && !strcmp(me, "WindowServer");
+    if (ws || a1 < (1u << 20)) memcpy(b->_b.map, a0, a1);
+    if (ws) {
+        if (a3) { void (^user)(void *, NSUInteger) = [a3 copy]; void *const ptr = a0; const NSUInteger n = a1;
+                  b->_hostDealloc = ^(void *p, NSUInteger l) { (void)p; (void)l; user(ptr, n); }; }
+    } else {
+        b->_hostPtr = a0; b->_hostLen = (size_t)a1;
+    }
     { static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: COPIED %lu bytes at %p (import alignment %zu) \u2014 resynced at every submission",
                                           (unsigned long)a1, a0, nvmtl_vk_host_import_align()); }
     return b;

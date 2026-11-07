@@ -390,6 +390,15 @@ static BOOL nvmtl_surface_holds_schedule(int after, NVMTLTexture *s, NVMTLTextur
     memset(&_c, 0, sizeof(_c));
     part->resources = [(NVMTLResSet *)_resources nvmtlTakeAll]; part->surfaces = [_surfDirty copy];
     part->hostPublications = [_hostPublications copy]; [_hostPublications removeAllObjects];
+    {
+        NVMTLResSet *rs = [part->resources isKindOfClass:[NVMTLResSet class]] ? (NVMTLResSet *)part->resources : nil;
+        for (id r in part->resources) {
+            if ([r isKindOfClass:[NVMTLBuffer class]]) {
+                NVMTLBuffer *b = r;
+                if (b->_hostPtr && (!rs || [rs isWrittenObject:b] || b->_texSeen)) b->_everGpuWritten = YES;
+            }
+        }
+    }
     // Another process may read an IOSurface once its writer is scheduled, and nothing orders its queue after ours.
     // A surface whose VRAM is shared is covered by the kernel (a CPU lock's page-off waits for the pending write); one we
     // write through a private image is copied out only after the GPU has finished, and a CPU lock does not wait for that.
@@ -418,7 +427,10 @@ static BOOL nvmtl_surface_holds_schedule(int after, NVMTLTexture *s, NVMTLTextur
     // completes, as Metal's do. WAS: only the part held them, so a texture the app had released died when that part
     // completed and the next dispatch wrote its destroyed image view (NVK abort in get_sampled_image_view_desc under
     // nvk_UpdateDescriptorSets: mediaanalysisd, Safari, wallpapers).
-    if (restart) for (id o in (NVMTLResSet *)part->resources) [(NVMTLResSet *)_resources addObject:o];
+    if (restart) {
+        NVMTLResSet *pr = (NVMTLResSet *)part->resources, *dst = (NVMTLResSet *)_resources;
+        for (id o in pr) { if ([pr isWrittenObject:o]) [dst addObject:o]; else [dst addReadOnlyObject:o]; }
+    }
     if (restart && nvmtl_vk_cmd_begin(&_queue->_q, &_c)) {
         _cbError = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorOutOfMemory
             userInfo:@{NSLocalizedDescriptionKey:@"Could not allocate recording after event boundary"}];
@@ -617,6 +629,7 @@ static void nvmtl_gsub_census(void) {
 // A texture over a copy-backed buffer must refresh the same bytes as a direct
 // buffer binding. Keep direct managed-buffer writeback and copy each backing once.
 static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL writtenOnly) {
+    NVMTLResSet *resSet = [resources isKindOfClass:[NVMTLResSet class]] ? (NVMTLResSet *)resources : nil;
     NSMutableSet<NVMTLBuffer *> *copies = nil;
     for (id resource in resources) {
         if ([resource isKindOfClass:[NVMTLHeapPin class]]) {   // a used heap: its members with a host copy
@@ -626,8 +639,11 @@ static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL wr
             continue;
         }
         NVMTLBuffer *buffer = nil;
-        if ([resource isKindOfClass:[NVMTLBuffer class]]) buffer = resource;
-        else if ([resource isKindOfClass:[NVMTLTexture class]]) {
+        if ([resource isKindOfClass:[NVMTLBuffer class]]) {
+            NVMTLBuffer *candidate = resource;
+            if (writtenOnly && !candidate->_shadow.map && resSet && ![resSet isWrittenObject:candidate] && !candidate->_texSeen) continue;
+            buffer = candidate;
+        } else if ([resource isKindOfClass:[NVMTLTexture class]]) {
             NVMTLTexture *texture = resource;
             if (writtenOnly && texture->_usage != MTLTextureUsageUnknown &&
                 !(texture->_usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget))) continue;
@@ -644,28 +660,33 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
     // A sealed part's membership and its buffers' backing modes do not change.
     // The ahead pass can retry a held part many times: discover its upload
     // backings once, but refresh their bytes only when it actually submits.
+    NVMTLResSet *resSet = [part->resources isKindOfClass:[NVMTLResSet class]] ? (NVMTLResSet *)part->resources : nil;
     part->copyInputs = nvmtl_submission_copies(part->resources, NO);
     for (NVMTLBuffer *buffer in part->copyInputs) {
-        if (buffer->_hostPtr && !nvmtl_owned_host_shadow(buffer)) { part->hasHostCopies = YES; break; }
+        if (buffer->_hostPtr && !nvmtl_owned_host_shadow(buffer) &&
+            (buffer->_everGpuWritten || buffer->_texSeen || !resSet || [resSet isWrittenObject:buffer])) {
+            part->hasHostCopies = YES;
+            break;
+        }
     }
     part->copyInputsPrepared = YES;
 }
 - (BOOL)nvmtlSubmitAhead {
     // a commit still putting its kernel marks in (nvmtlSubmitWithEvents) must not reach the GPU before them
     if (_executionDone || _partsRetiring || _cbError || !_committed || _commitMarking) return NO;
+    if (_nextSubmit < _nextPart) _nextSubmit = _nextPart;
     // Local guard (Shared/NoCopy data race): a channel promise cannot order a part's CPU host copies against GPU writes
     // still pending in this buffer, and NVMTL_GSUB_HOSTPTR_LIFT=1 (the shipped setting) lifts the per-part hold. While any
-    // remaining part carries legacy host copies, nothing in this buffer goes ahead; the worker submits it in order. The
-    // scan is by index (no fast enumeration of a mutable array) under the class lock the ahead pass holds, and a part the
-    // worker has claimed is never prepared here (the worker prepares claimed parts outside that lock).
-    for (NSUInteger i = _nextPart; i < _parts.count; i++) {
+    // remaining unsubmitted part carries legacy host copies on a GPU-written buffer, nothing in this buffer goes ahead; the
+    // worker submits it in order. The scan starts at _nextSubmit so a worker-claimed part already submitted to NVK does not
+    // block later reservations in the same queue.
+    for (NSUInteger i = _nextSubmit; i < _parts.count; i++) {
         NVMTLSubmissionPart *pending = _parts[i];
         if (![pending isKindOfClass:[NVMTLSubmissionPart class]]) continue;
         if (pending->claimed) return NO;
         nvmtl_prepare_submission_copies(pending);
         if (pending->hasHostCopies) return NO;
     }
-    if (_nextSubmit < _nextPart) _nextSubmit = _nextPart;
     while (_nextSubmit < _parts.count) {
         if (atomic_load(&gsub_inflight) >= nvmtl_gsub_cap()) return NO;
         NVMTLSubmissionPart *part = _parts[_nextSubmit];
@@ -760,21 +781,27 @@ static void nvmtl_gsub_ahead_pass1(void) {
         if (!k || ((k + 1) & 0xFFF) == 0) nvlog("commit: %llu empty submission parts NOT submitted (no encoder, no resources) - each WAS a full submit + wait", k + 1);
     }
     if (part->commands.cb || ahead) {
-        [self nvmtlMarkScheduled];
         if (!_legacyKernelStart) _legacyKernelStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
         int result;
-        if (part->inflight) result = nvmtl_gsub_finish(part);
-        else if (part->aheadFailed) result = part->aheadFailed;
-        else {
+        if (part->inflight) {
+            [self nvmtlMarkScheduled];
+            result = nvmtl_gsub_finish(part);
+        } else if (part->aheadFailed) {
+            [self nvmtlMarkScheduled];
+            result = part->aheadFailed;
+        } else {
             nvmtl_prepare_submission_copies(part);
             for (NVMTLBuffer *buffer in part->copyInputs) nvmtl_buffer_sync_in(buffer);
             // A worker-owned part is an ordering barrier until QueueSubmit has
             // accepted it. Publish that progress before waiting on its fence so
             // the ahead lane can issue later parts in the same queue.
             nvmtl_inflight *f = nvmtl_vk_inflight_new();
-            if (!f) result = nvmtl_vk_submit_wait(&part->commands);
-            else {
+            if (!f) {
+                [self nvmtlMarkScheduled];
+                result = nvmtl_vk_submit_wait(&part->commands);
+            } else {
                 result = nvmtl_vk_submit_begin(&part->commands, f);
+                [self nvmtlMarkScheduled];
                 if (!result) {
                     @synchronized ([NVMTLCommandBuffer class]) {
                         if (_nextSubmit <= _nextPart) _nextSubmit = _nextPart + 1;
