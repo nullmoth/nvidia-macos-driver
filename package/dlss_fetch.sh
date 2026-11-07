@@ -79,8 +79,13 @@ sm_for_id() {
 }
 if [ -z "$SM" ]; then
   if [ -z "$DEVICE_IDS" ]; then
-    DEVICE_IDS=$(ioreg -r -c IOPCIDevice -d 1 | awk '/"vendor-id" = <de100000>/{nv=1} /"device-id" = </{ if (match($0, /<[0-9a-f]+>/)) d=substr($0, RSTART+1, 4) }
-      /^\+-o|^ *\}/{ if (nv && d != "") print toupper(substr(d,3,2) substr(d,1,2)); nv=0; d="" }' | sort -u)
+    # Display-class functions only (PCI class 03xxxx: VGA 0300, 3D 0302). Every NVIDIA card also exposes an HDMI
+    # audio function (class 0403) whose id sits in another family's range: an RTX 5060 (2D05) carries audio 22EB,
+    # which read as Ampere and built sm_86 kernels for a Blackwell card.
+    DEVICE_IDS=$(ioreg -r -c IOPCIDevice -d 1 | awk '/"vendor-id" = <de100000>/{nv=1}
+      /"class-code" = </{ if (match($0, /<[0-9a-f]+>/)) c=substr($0, RSTART+1, 8) }
+      /"device-id" = </{ if (match($0, /<[0-9a-f]+>/)) d=substr($0, RSTART+1, 4) }
+      /^\+-o|^ *\}/{ if (nv && d != "" && substr(c,5,2) == "03") print toupper(substr(d,3,2) substr(d,1,2)); nv=0; d=""; c="" }' | sort -u)
   fi
   for i in $DEVICE_IDS; do
     case $i in *[!0-9A-F]*|"") continue;; esac
