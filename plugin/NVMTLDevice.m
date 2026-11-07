@@ -653,6 +653,22 @@ static id<MTLCommandBuffer> nvmtl_m4_underlying(id cb);
 void nvmtl_m4_note_buffer(id buf, uint64_t addr, uint64_t length);
 #include "nvmtl_mfx_native_profile.inc"
 
+// NVMTL_WS_RT_GATE_MB=<n>: the working-set figure given to ONE query - the one an application makes right after it asks
+// supportsRaytracing - is raised to at least n MB. Measured in the disassembly of Cyberpunk 2077's capability function
+// (0x104ffff9c in the arm64 slice): it reads supportsRaytracing, then recommendedMaxWorkingSetSize, and keeps ray tracing
+// only if the figure is above 0x1800FFFFF bytes (6145 MB), caching the verdict for the process. Every other query, and so
+// the pool sizing, keeps the ordinary figure. Default 0: off.
+static __thread BOOL nvmtl_rt_gate_armed;
+static uint64_t nvmtl_rt_gate_working_set(uint64_t ws)
+{
+    static long long floor_mb = -1;
+    if (floor_mb < 0) { const char *e = getenv("NVMTL_WS_RT_GATE_MB"); floor_mb = (e && *e) ? atoll(e) : 0; }
+    if (!nvmtl_rt_gate_armed) return ws;
+    nvmtl_rt_gate_armed = NO;
+    if (floor_mb <= 0 || ws >= ((uint64_t)floor_mb << 20)) return ws;
+    nvlog("working set: the query that follows supportsRaytracing is answered %lld MB instead of %llu MB (NVMTL_WS_RT_GATE_MB)", floor_mb, (unsigned long long)(ws >> 20));
+    return (uint64_t)floor_mb << 20;
+}
 @implementation NVMTLDevice
 + (void)load {
     char me[1200], ts[40] = "?"; time_t now = time(NULL); struct tm tm;
@@ -2150,7 +2166,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     { id apple = nvmtl_vendor_apple_pipeline(self, f); if (apple) return apple; }
     return ps; }
 
-- (BOOL)supportsRaytracing { const BOOL y = nvmtl_vk_rt_available() != 0; static int said; if (!said++) nvlog("QUERY supportsRaytracing -> %s", y ? "YES" : "NO"); return y; }
+- (BOOL)supportsRaytracing { const BOOL y = nvmtl_vk_rt_available() != 0; nvmtl_rt_gate_armed = y; static int said; if (!said++) nvlog("QUERY supportsRaytracing -> %s", y ? "YES" : "NO"); return y; }
 - (BOOL)supportsRaytracingFromRender { const BOOL y = nvmtl_vk_rt_available() != 0; static int said; if (!said++) nvlog("QUERY supportsRaytracingFromRender -> %s", y ? "YES" : "NO"); return y; }
 - (MTLAccelerationStructureSizes)accelerationStructureSizesWithDescriptor:(MTLAccelerationStructureDescriptor *)desc {
     MTLAccelerationStructureSizes s = { 0, 0, 0 };
@@ -2358,6 +2374,7 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
 - (NSUInteger)currentAllocatedSize { return (NSUInteger)nvmtl_vk_allocated_bytes(); }
 - (uint64_t)recommendedMaxWorkingSetSize {
     uint64_t ws = nvmtl_vk_recommended_working_set();
+    ws = nvmtl_rt_gate_working_set(ws);
     // The same hole as maxBufferLength, and it matters more here: a streaming engine sizes its pools
     // from this number, and the working set reads 0 when the budget is unknown. The old code could
     // never answer under 1 GB. An unknown budget falls back to the card rather than telling the app
