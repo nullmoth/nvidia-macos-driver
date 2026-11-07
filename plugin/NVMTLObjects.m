@@ -5,6 +5,7 @@
  */
 
 #import <QuartzCore/QuartzCore.h>
+#include "nvmtl_format_twin.h"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
@@ -3634,7 +3635,51 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     nvmtl_vk_cmd_set_stencil(&_cb->_c, _ds && _ds->_stencil, _ds ? _ds->_sf : off, _ds ? _ds->_sb : off);
     if (!_hasRef) { nvmtl_vk_cmd_set_stencil_ref(&_cb->_c, 0, 0); _hasRef = YES; }
 }
+// Metal draws through the ATTACHMENT's format, not the pipeline's: a pipeline declared BGRA8 that renders into an RGBA8
+// texture (or the reverse) writes the colour the shader returned into the texture's own channel order and reports no error
+// (measured on Apple M1 Pro: a BGRA8 pipeline into an RGBA8 texture stores 255,128,64,255 for float4(1,.5,.25,1), exactly as
+// an RGBA8 pipeline does). Vulkan builds a pass in the pipeline's format, so the pass was refused and the draws dropped.
+// Cyberpunk with frame generation on asks for an RGBA8 back buffer while its pipelines are BGRA8. The pipeline is rebuilt
+// from its own descriptor with the channel-swapped format the attachment really has, once per pipeline.
+static uint32_t nvmtl_swizzle_twin_vk(uint32_t f) { return nvmtl_format_twin_vk(f); }
+static MTLPixelFormat nvmtl_swizzle_twin_mtl(MTLPixelFormat f) { return (MTLPixelFormat)nvmtl_format_twin_mtl((uint32_t)f); }
+- (NVMTLRenderPipelineState *)nvmtlColourTwinPipeline:(NVMTLRenderPipelineState *)p {
+    if (!p || !p->_descriptor) return p;
+    const uint32_t n = p->_p.ncol ? p->_p.ncol : (p->_p.cfmt ? 1u : 0u);
+    uint32_t swap = 0;
+    for (uint32_t i = 0; i < n && i < NVMTL_NCOL; i++) {
+        const uint32_t pf = p->_p.ncol ? p->_p.cfmts[i] : p->_p.cfmt;
+        if (!pf || !_pass.col[i]) continue;
+        const uint32_t af = _pass.colfmt[i] ? _pass.colfmt[i] : _pass.col[i]->fmt;
+        if (af != pf && nvmtl_swizzle_twin_vk(pf) == af) swap |= 1u << i;
+    }
+    if (!swap) return p;
+    NSString *key = [NSString stringWithFormat:@"colour-twin:%x", swap];
+    @synchronized (p) {
+        if (!p->_samplerVariants) p->_samplerVariants = [NSMutableDictionary new];
+        id got = p->_samplerVariants[key];
+        if (got == [NSNull null]) return p;
+        if (got) return got;
+        MTLRenderPipelineDescriptor *desc = [p->_descriptor copy];
+        NVMTLFunction *vf = p->_linkedVert ?: (id)p->_descriptor.vertexFunction, *ff = p->_linkedFrag ?: (id)p->_descriptor.fragmentFunction;
+        desc.vertexFunction = vf; desc.fragmentFunction = ff;
+        for (uint32_t i = 0; i < n && i < NVMTL_NCOL; i++) if (swap & (1u << i)) {
+            const MTLPixelFormat t = nvmtl_swizzle_twin_mtl(desc.colorAttachments[i].pixelFormat);
+            if (t == MTLPixelFormatInvalid) { p->_samplerVariants[key] = [NSNull null]; return p; }
+            desc.colorAttachments[i].pixelFormat = t;
+        }
+        NSError *error = nil;
+        NVMTLRenderPipelineState *v = (NVMTLRenderPipelineState *)[(id<MTLDevice>)gNVMTLMainDevice newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (!v) { nvlog("pipeline %s / %s: no variant for the attachment's channel order (%s)", p->_vname.UTF8String ?: "?", p->_fname.UTF8String ?: "?", error.description.UTF8String ?: "?");
+                  p->_samplerVariants[key] = [NSNull null]; return p; }
+        p->_samplerVariants[key] = v;
+        static _Atomic unsigned long made; const unsigned long k = atomic_fetch_add(&made, 1) + 1;
+        if (!(k & (k - 1))) nvlog("pipeline %s / %s rebuilt for the attachment's channel order (colour mask 0x%x) [%lu made]", p->_vname.UTF8String ?: "?", p->_fname.UTF8String ?: "?", swap, k);
+        return v;
+    }
+}
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)ps {
+    ps = (id<MTLRenderPipelineState>)[self nvmtlColourTwinPipeline:(NVMTLRenderPipelineState *)ps];
     // The same pipeline again inside a begun pass changes nothing: Apple's OpenGL renderer sets it before every draw, so
     // GL games paid a full bind per draw (the GL-on-Metal per-draw overhead). Not inside an open pass-time pool.
     if (ps && (NVMTLRenderPipelineState *)ps == _ps && _begun && !(_cb->_c.pt_open && _cb->_c.pt_pool)) return;
