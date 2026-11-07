@@ -9,6 +9,10 @@ static BOOL nvmtl_mfx_dlss_ready(void);
 static id nvmtl_mfx_dlss_make(id descriptor, id device);
 static BOOL nvmtl_mfx_dlss_rr_ready(void);
 static id nvmtl_mfx_dlss_rr_make(id descriptor, id device);
+static BOOL nvmtl_mfx_dlss_fg_ready(void);
+static id nvmtl_mfx_dlss_fg_make(id descriptor, id device);
+static BOOL (*nvmtl_mfx_fg_support_original)(id, SEL, id);
+static nvmtl_mfx_factory_fn nvmtl_mfx_fg_new_original;
 // The denoised scaler's descriptor: only the factory and the support/scale answers are hooked, and only for DLSS.
 static BOOL (*nvmtl_mfx_rr_support_original)(id, SEL, id);
 static float (*nvmtl_mfx_rr_min_original)(id, SEL, id);
@@ -92,6 +96,30 @@ static id nvmtl_mfx_rr_new(id receiver, SEL selector, id device) {
     }
     return nvmtl_mfx_rr_new_original(receiver, selector, device);
 }
+static BOOL nvmtl_mfx_fg_support(id receiver, SEL selector, id device) {
+    if (nvmtl_mfx_our_device(device) && nvmtl_mfx_dlss_fg_ready()) return YES;
+    return nvmtl_mfx_fg_support_original(receiver, selector, device);
+}
+static id nvmtl_mfx_fg_new(id receiver, SEL selector, id device) __attribute__((ns_returns_retained));
+static id nvmtl_mfx_fg_new(id receiver, SEL selector, id device) {
+    if (nvmtl_mfx_our_device(device)) {
+        id fg = nvmtl_mfx_dlss_fg_make(receiver, device);
+        if (fg) return fg;
+    }
+    return nvmtl_mfx_fg_new_original(receiver, selector, device);
+}
+static void nvmtl_mfx_fg_install(void) {
+    Class type = NSClassFromString(@"MTLFXFrameInterpolatorDescriptor");
+    if (!type) return;
+    Method support = class_getClassMethod(type, @selector(supportsDevice:));
+    Method factory = class_getInstanceMethod(type, @selector(newFrameInterpolatorWithDevice:));
+    if (!support || !factory) { nvlog("MetalFX frame interpolator: API unavailable - Frame Generation hooks not installed"); return; }
+    nvmtl_mfx_fg_support_original = (void *)method_getImplementation(support);
+    nvmtl_mfx_fg_new_original = (nvmtl_mfx_factory_fn)method_getImplementation(factory);
+    method_setImplementation(support, (IMP)nvmtl_mfx_fg_support);
+    method_setImplementation(factory, (IMP)nvmtl_mfx_fg_new);
+    nvlog("MetalFX frame interpolator: Frame Generation hooks installed for NVMTL devices");
+}
 // Called from the constructor below when DLSS is on. Quietly does nothing where the denoised scaler does not exist.
 static void nvmtl_mfx_rr_install(void) {
     Class type = NSClassFromString(@"MTLFXTemporalDenoisedScalerDescriptor");
@@ -120,7 +148,7 @@ __attribute__((constructor)) static void nvmtl_mfx_profile_install(void) {
     // does exactly what it did before.
     nvmtl_mfx_dlss_on = nvmtl_dlss_wanted() != 0;
     if (!nvmtl_mfx_native_on && !nvmtl_mfx_dlss_on) return;
-    if (nvmtl_mfx_dlss_on) nvmtl_mfx_rr_install();
+    if (nvmtl_mfx_dlss_on) { nvmtl_mfx_rr_install(); nvmtl_mfx_fg_install(); }
     Class type = MTLFXTemporalScalerDescriptor.class;
     Method support = class_getClassMethod(type, @selector(supportsDevice:));
     Method min = class_getClassMethod(type, @selector(supportedInputContentMinScaleForDevice:));

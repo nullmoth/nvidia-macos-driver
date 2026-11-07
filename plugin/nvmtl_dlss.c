@@ -87,6 +87,7 @@ typedef struct { VkImageView view; VkImage image; VkImageSubresourceRange range;
 typedef struct { ngx_image_vk image; int type; bool rw; } ngx_res_vk;
 
 struct nvmtl_dlss_feature { void *handle; ngxp *eval; nvmtl_dlss_cfg cfg; };
+struct nvmtl_dlss_fg_feature { void *handle; ngxp *eval; nvmtl_dlss_fg_cfg cfg; float clip_to_prev[16], prev_to_clip[16], view_to_clip[16]; };
 struct nvmtl_dlss_rr_feature { void *handle; ngxp *eval; nvmtl_dlss_rr_cfg cfg; float world_to_view[16], view_to_clip[16]; };
 
 /* ---- the files ---------------------------------------------------------------------------------------------- */
@@ -543,6 +544,85 @@ static int rr_eval_impl(VkCommandBuffer cmd, nvmtl_dlss_rr_feature *f, const nvm
     return 0;
 }
 
+/* ---- Frame Generation (the core's "FrameGeneration", the dlssg snippet) ----------------------------------------- */
+/* NVSDK_NGX_Feature_FrameGeneration. Believed to be 11; overridable with NVMTL_DLSS_FG_FEATURE until a run confirms it.
+ * The snippet launches compute kernels through VK_NVX_binary_import like the other two (no optical-flow hardware is
+ * named anywhere in it); the core's own error text says Width and Height are the required creation parameters. */
+static int fg_feature_id(void)
+{
+    const char *e = getenv("NVMTL_DLSS_FG_FEATURE");
+    return e && e[0] ? (int)strtol(e, NULL, 0) : 11;
+}
+int nvmtl_dlss_fg_ready(void)
+{
+    const char *off = getenv("NVMTL_DLSS_FG");
+    return g_state == 1 && g_fg_avail == 1 && !(off && off[0] == '0');
+}
+static nvmtl_dlss_fg_feature *fg_create_impl(VkCommandBuffer cmd, const nvmtl_dlss_fg_cfg *cfg)
+{
+    if (!nvmtl_dlss_fg_ready() || !cmd || !cfg || !cfg->out_w || !cfg->out_h || !cfg->in_w || !cfg->in_h) return NULL;
+    pthread_mutex_lock(&g_lock);
+    nvmtl_dlss_fg_feature *f = calloc(1, sizeof *f); ngxp *prm = NULL, *ev = NULL; void *handle = NULL;
+    if (!f) goto bad;
+    g_alloc(&prm);
+    if (!prm) { nvlog("dlss: FG AllocateParameters gave nothing"); goto bad; }
+    P_SETUI(prm, "CreationNodeMask", 1); P_SETUI(prm, "VisibilityNodeMask", 1);
+    P_SETUI(prm, "DLSSG.Width", cfg->out_w); P_SETUI(prm, "DLSSG.Height", cfg->out_h);
+    P_SETUI(prm, "DLSSG.InternalWidth", cfg->in_w); P_SETUI(prm, "DLSSG.InternalHeight", cfg->in_h);
+    P_SETUI(prm, "DLSSG.BackbufferFormat", cfg->color_format);
+    P_SETI(prm, "DLSSG.ColorBuffersHDR", cfg->hdr); P_SETI(prm, "DLSSG.DepthInverted", cfg->depth_inverted);
+    P_SETI(prm, "DLSSG.DynamicResolution", 0);
+    const unsigned rc = g_create(g_dev, cmd, fg_feature_id(), prm, &handle);
+    if (rc != 1 || !handle) { nvlog("dlss: FG CreateFeature1 returned 0x%08x (feature id %d)", rc, fg_feature_id()); goto bad; }
+    g_alloc(&ev);
+    if (!ev) { nvlog("dlss: FG AllocateParameters (evaluate) gave nothing"); goto bad; }
+    f->handle = handle; f->eval = ev; f->cfg = *cfg;
+    pthread_mutex_unlock(&g_lock);
+    nvlog("dlss: FG feature %ux%u (depth/motion %ux%u), format %u, hdr %d, depth %s", cfg->out_w, cfg->out_h, cfg->in_w, cfg->in_h,
+          cfg->color_format, cfg->hdr, cfg->depth_inverted ? "inverted" : "normal");
+    return f;
+bad:
+    pthread_mutex_unlock(&g_lock);
+    free(f);
+    return NULL;
+}
+const nvmtl_dlss_fg_cfg *nvmtl_dlss_fg_feature_cfg(const nvmtl_dlss_fg_feature *f) { return &f->cfg; }
+static int fg_eval_impl(VkCommandBuffer cmd, nvmtl_dlss_fg_feature *f, const nvmtl_dlss_fg_eval *e)
+{
+    if (!nvmtl_dlss_fg_ready() || !f || !cmd || !e) return -1;
+    ngx_res_vk color, depth, motion, out, ui;
+    fill(&color, &e->color, false); fill(&depth, &e->depth, false); fill(&motion, &e->motion, false); fill(&out, &e->output, true);
+    ngxp *p = f->eval;
+    pthread_mutex_lock(&g_lock);
+    P_SETP(p, "DLSSG.Backbuffer", &color); P_SETP(p, "DLSSG.Depth", &depth); P_SETP(p, "DLSSG.MVecs", &motion);
+    P_SETP(p, "DLSSG.OutputInterpolated", &out);
+    if (e->ui) { fill(&ui, e->ui, false); P_SETP(p, "DLSSG.UI", &ui); } else P_SETP(p, "DLSSG.UI", NULL);
+    P_SETP(p, "DLSSG.HUDLess", NULL); P_SETP(p, "DLSSG.UIAlpha", NULL); P_SETP(p, "DLSSG.OutputReal", NULL);
+    /* The matrices are read through pointers: keep a copy in the feature for as long as the recorded work may run. */
+    memcpy(f->clip_to_prev, e->clip_to_prev, sizeof f->clip_to_prev); memcpy(f->prev_to_clip, e->prev_to_clip, sizeof f->prev_to_clip);
+    memcpy(f->view_to_clip, e->view_to_clip, sizeof f->view_to_clip);
+    P_SETP(p, "DLSSG.ClipToPrevClip", f->clip_to_prev); P_SETP(p, "DLSSG.PrevClipToClip", f->prev_to_clip);
+    P_SETP(p, "DLSSG.CameraViewToClip", f->view_to_clip);
+    P_SETF(p, "DLSSG.CameraNear", e->near_z); P_SETF(p, "DLSSG.CameraFar", e->far_z);
+    P_SETF(p, "DLSSG.CameraFOV", e->fov_y); P_SETF(p, "DLSSG.CameraAspectRatio", e->aspect);
+    P_SETF(p, "DLSSG.CameraPosX", e->cam_pos[0]); P_SETF(p, "DLSSG.CameraPosY", e->cam_pos[1]); P_SETF(p, "DLSSG.CameraPosZ", e->cam_pos[2]);
+    P_SETF(p, "DLSSG.CameraRightX", e->cam_right[0]); P_SETF(p, "DLSSG.CameraRightY", e->cam_right[1]); P_SETF(p, "DLSSG.CameraRightZ", e->cam_right[2]);
+    P_SETF(p, "DLSSG.CameraUpX", e->cam_up[0]); P_SETF(p, "DLSSG.CameraUpY", e->cam_up[1]); P_SETF(p, "DLSSG.CameraUpZ", e->cam_up[2]);
+    P_SETF(p, "DLSSG.CameraFwdX", e->cam_fwd[0]); P_SETF(p, "DLSSG.CameraFwdY", e->cam_fwd[1]); P_SETF(p, "DLSSG.CameraFwdZ", e->cam_fwd[2]);
+    P_SETF(p, "DLSSG.CameraPinholeOffsetX", 0); P_SETF(p, "DLSSG.CameraPinholeOffsetY", 0);
+    P_SETI(p, "DLSSG.CameraMotionIncluded", e->camera_motion_included);
+    P_SETF(p, "DLSSG.MvecScaleX", e->mv_scale_x); P_SETF(p, "DLSSG.MvecScaleY", e->mv_scale_y);
+    P_SETF(p, "DLSSG.JitterOffsetX", e->jitter_x); P_SETF(p, "DLSSG.JitterOffsetY", e->jitter_y);
+    P_SETI(p, "DLSSG.Reset", e->reset ? 1 : 0); P_SETI(p, "DLSSG.NoWarp", 0); P_SETI(p, "DLSSG.OutputDisableInterpolation", 0);
+    P_SETI(p, "DLSSG.OrthoProjection", 0); P_SETI(p, "DLSSG.MvecJittered", 0); P_SETI(p, "DLSSG.MvecDilated", 0);
+    P_SETUI(p, "DLSSG.BackbufferFrameID", e->frame_id);
+    P_SETUI(p, "DLSSG.MultiFrameIndex", e->multi_index); P_SETUI(p, "DLSSG.MultiFrameCount", e->multi_count);
+    const unsigned rc = g_eval(cmd, f->handle, p, NULL);
+    pthread_mutex_unlock(&g_lock);
+    if (rc != 1) { nvlog("dlss: FG EvaluateFeature returned 0x%08x", rc); return -1; }
+    return 0;
+}
+
 /* ---- the worker thread -------------------------------------------------------------------------------------- */
 /* Every call that enters the NGX core or the runtime it loads runs on ONE dedicated thread with a large stack. That
  * code is built for a Linux thread (8 MB default stack); an application's worker threads here have 512 KB, and the
@@ -640,6 +720,22 @@ int nvmtl_dlss_rr_evaluate(VkCommandBuffer cmd, nvmtl_dlss_rr_feature *f, const 
 {
     rr_eval_job j = { cmd, f, e, -1 };
     if (run_on_worker(rr_eval_run, &j)) return -1;
+    return j.r;
+}
+typedef struct { VkCommandBuffer cmd; const nvmtl_dlss_fg_cfg *cfg; nvmtl_dlss_fg_feature *f; } fg_create_job;
+static void fg_create_run(void *a) { fg_create_job *j = a; j->f = fg_create_impl(j->cmd, j->cfg); }
+nvmtl_dlss_fg_feature *nvmtl_dlss_fg_feature_create(VkCommandBuffer cmd, const nvmtl_dlss_fg_cfg *cfg)
+{
+    fg_create_job j = { cmd, cfg, NULL };
+    if (run_on_worker(fg_create_run, &j)) return NULL;
+    return j.f;
+}
+typedef struct { VkCommandBuffer cmd; nvmtl_dlss_fg_feature *f; const nvmtl_dlss_fg_eval *e; int r; } fg_eval_job;
+static void fg_eval_run(void *a) { fg_eval_job *j = a; j->r = fg_eval_impl(j->cmd, j->f, j->e); }
+int nvmtl_dlss_fg_evaluate(VkCommandBuffer cmd, nvmtl_dlss_fg_feature *f, const nvmtl_dlss_fg_eval *e)
+{
+    fg_eval_job j = { cmd, f, e, -1 };
+    if (run_on_worker(fg_eval_run, &j)) return -1;
     return j.r;
 }
 static size_t probe_depth(size_t used, size_t limit)

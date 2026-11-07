@@ -105,5 +105,30 @@ typedef struct {
 /* Record the denoise + upscale into cmd. All images must be in VK_IMAGE_LAYOUT_GENERAL. 0 on success. */
 int nvmtl_dlss_rr_evaluate(VkCommandBuffer cmd, nvmtl_dlss_rr_feature *f, const nvmtl_dlss_rr_eval *e);
 
+/* ---- Frame Generation behind the MetalFX frame interpolator ---- */
+/* 1 once the core is ready, reported Frame Generation available, and NVMTL_DLSS_FG is not "0". */
+int nvmtl_dlss_fg_ready(void);
+typedef struct {
+    uint32_t out_w, out_h;      /* the colour / output size (the "backbuffer") */
+    uint32_t in_w, in_h;        /* the depth and motion size */
+    uint32_t color_format;      /* VkFormat of the colour image */
+    int hdr, depth_inverted;
+} nvmtl_dlss_fg_cfg;
+typedef struct nvmtl_dlss_fg_feature nvmtl_dlss_fg_feature;
+nvmtl_dlss_fg_feature *nvmtl_dlss_fg_feature_create(VkCommandBuffer cmd, const nvmtl_dlss_fg_cfg *cfg);
+const nvmtl_dlss_fg_cfg *nvmtl_dlss_fg_feature_cfg(const nvmtl_dlss_fg_feature *f);
+typedef struct {
+    nvmtl_dlss_image color, depth, motion, output;   /* colour = the newer real frame; output = the in-between frame */
+    const nvmtl_dlss_image *ui;                       /* NULL when absent */
+    float near_z, far_z, fov_y, aspect;               /* fov in radians */
+    float cam_pos[3], cam_right[3], cam_up[3], cam_fwd[3];
+    float clip_to_prev[16], prev_to_clip[16], view_to_clip[16];
+    float mv_scale_x, mv_scale_y, jitter_x, jitter_y;
+    int reset, camera_motion_included;
+    uint32_t frame_id, multi_index, multi_count;
+} nvmtl_dlss_fg_eval;
+/* Record one evaluation into cmd; images must be in VK_IMAGE_LAYOUT_GENERAL. 0 on success. */
+int nvmtl_dlss_fg_evaluate(VkCommandBuffer cmd, nvmtl_dlss_fg_feature *f, const nvmtl_dlss_fg_eval *e);
+
 /* Local check of the worker thread every call above runs on (stack size, one thread, environment kept). 0 = pass. */
 int nvmtl_dlss_selftest(void);
