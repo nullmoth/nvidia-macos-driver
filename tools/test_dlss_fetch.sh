@@ -15,7 +15,7 @@ shastr() { printf '%s\n' "$1" | shasum -a 256 | awk '{print $1}'; }
 t() { if "$@"; then echo 0; else echo 1; fi; }
 
 F=$W/files; mkdir -p "$F" "$W/tools"
-printf 'dlss runtime\n' > "$F/dlss.so"; printf 'dlssd runtime\n' > "$F/dlssd.so"
+printf 'dlss runtime\n' > "$F/dlss.so"; printf 'dlssd runtime\n' > "$F/dlssd.so"; printf 'dlssg runtime\n' > "$F/dlssg.so"
 cat > "$F/driver.run" <<'RUN'
 #!/bin/sh
 # stand-in for NVIDIA's installer: only --extract-only --target DIR
@@ -42,6 +42,7 @@ mkpins() { # mkpins <file> <root> [dlss-sha-override]
   cat > "$1" <<P
 URL_DLSS=file://$F/dlss.so; SHA_DLSS=${3:-$(sha "$F/dlss.so")}
 URL_DLSSD=file://$F/dlssd.so; SHA_DLSSD=$(sha "$F/dlssd.so")
+URL_DLSSG=file://$F/dlssg.so; SHA_DLSSG=$(sha "$F/dlssg.so")
 URL_RUN=file://$F/driver.run; SHA_RUN=$(sha "$F/driver.run")
 SHA_NGX=$(shastr 'ngx core')
 URL_WHEEL=file://$F/nvjitlink.whl; SHA_WHEEL=$(sha "$F/nvjitlink.whl")
@@ -54,7 +55,7 @@ run() { # run <pins> [args]: stdin is not a terminal
   DLSS_TEST_PINS=$p bash "$SCRIPT" "$@" </dev/null 2>&1
 }
 good() { [ $rc = 0 ] && [ -f "$R1/ngx/libnvidia-ngx.so.620.70.06" ] && [ -f "$R1/snippets/libnvidia-ngx-dlss.so.310.9.16" ] &&
-  [ -f "$R1/snippets/libnvidia-ngx-dlssd.so.310.9.16" ] && [ -f "$R1/kernels/0123abcd.sm120.cubin" ] &&
+  [ -f "$R1/snippets/libnvidia-ngx-dlssd.so.310.9.16" ] && [ -f "$R1/snippets/libnvidia-ngx-dlssg.so.310.9.16" ] && [ -f "$R1/kernels/0123abcd.sm120.cubin" ] &&
   grep -q '^sm: 120$' "$R1/manifest.txt"; }
 perms() { [ "$(stat -f %Lp "$R1/kernels/0123abcd.sm120.cubin")" = 644 ] && [ -z "$(find "$R1" \( -perm -g+w -o -perm -o+w \) -print -quit)" ]; }
 nostage() { [ -z "$(find "$R1" \( -name '.new.*' -o -name '*.old' \) -print -quit)" ]; }

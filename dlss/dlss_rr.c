@@ -354,7 +354,7 @@ int main(int argc, char **argv)
     alloc(&prm);
     /* RR_IN=WxH, RR_OUT=WxH, RR_Q=<PerfQualityValue>, RR_FLAGS=<create flags: 1 hdr, 2 mv at input size, 8 depth inverted,
      * 0x40 auto exposure>, RR_FEATURE=<NGX feature id of Ray Reconstruction, 13 unless overridden>, RR_PRESET=<n>. */
-    uint32_t W = 1280, H = 720, OW = 1920, OH = 1080; int Q = 2, FL = 0x3, FEAT = 13;
+    uint32_t W = 1280, H = 720, OW = 1920, OH = 1080; int Q = 2, FL = 0x3, FEAT = 13;   /* the runtime requires hdr (1) and low-res motion vectors (2) */
     if (getenv("RR_IN")) sscanf(getenv("RR_IN"), "%ux%u", &W, &H);
     if (getenv("RR_OUT")) sscanf(getenv("RR_OUT"), "%ux%u", &OW, &OH);
     if (getenv("RR_Q")) Q = atoi(getenv("RR_Q"));
@@ -364,6 +364,7 @@ int main(int argc, char **argv)
     P_SETUI(prm, "CreationNodeMask", 1); P_SETUI(prm, "VisibilityNodeMask", 1);
     P_SETUI(prm, "Width", W); P_SETUI(prm, "Height", H); P_SETUI(prm, "OutWidth", OW); P_SETUI(prm, "OutHeight", OH);
     P_SETI(prm, "PerfQualityValue", Q); P_SETI(prm, "DLSS.Feature.Create.Flags", FL); P_SETI(prm, "DLSS.Enable.Output.Subrects", 0);
+    P_SETI(prm, "DLSS.Denoise.Mode", 1);   /* DLUnified; the core refuses Off for Ray Reconstruction */
     P_SETI(prm, "DLSS.Roughness.Mode", 0);   /* roughness in its own texture */
     if (getenv("RR_PRESET")) {
         unsigned pr = (unsigned)atoi(getenv("RR_PRESET"));

@@ -5,9 +5,11 @@
 # NVIDIA's own files from NVIDIA's public sources onto this Mac, refuses anything whose SHA-256 differs from the pin
 # below, and compiles the DLSS GPU kernels for this card with NVIDIA's nvJitLink (dlss/dlss_cache.c).
 #
+# (The frame-generation runtime is fetched alongside the other two.)
 # Result, all under /Library/NullMoth/dlss (root-owned, not writable by others):
 #   ngx/        NGX core               libnvidia-ngx.so.620.70.06
-#   snippets/   DLSS runtimes          libnvidia-ngx-dlss.so.310.9.16, libnvidia-ngx-dlssd.so.310.9.16
+#   snippets/   DLSS runtimes          libnvidia-ngx-dlss.so.310.9.16, libnvidia-ngx-dlssd.so.310.9.16,
+#               libnvidia-ngx-dlssg.so.310.9.16
 #   kernels/    compiled GPU kernels   <BLAKE3 of the PTX object>.sm<N>.cubin
 #   manifest.txt  versions, hashes and the SM they were built for
 # Running it again with nothing changed does nothing. uninstall.sh removes the whole folder.
@@ -23,6 +25,8 @@ URL_DLSS="$GH_RAW/libnvidia-ngx-dlss.so.310.9.16"
 SHA_DLSS=30982c937afed85c96b8d313323de9a650a2eec6de1bb0f714b21750f4ce98f6
 URL_DLSSD="$GH_RAW/libnvidia-ngx-dlssd.so.310.9.16"
 SHA_DLSSD=a5d59de18841f15779039dda567a15dd723ba737915f489271fdb5f109fbfb96
+URL_DLSSG="$GH_RAW/libnvidia-ngx-dlssg.so.310.9.16"
+SHA_DLSSG=574839cae01c835de4d5845c36ca9cf75361f8160bd52397142c36a24e29e6f7
 # NGX core: inside NVIDIA's Linux 620.70.06 driver package (about 550 MB; only one file is kept)
 URL_RUN="https://download.nvidia.com/XFree86/Linux-x86_64/620.70.06/NVIDIA-Linux-x86_64-620.70.06.run"
 SHA_RUN=29118e3abd08c07559bcca3d9c76238d039490af0362a2e5bcfcbe7204afd4b1
@@ -87,7 +91,7 @@ fi
 case "$SM" in 75|80|86|87|89|90|100|120) ;; *) die "unsupported SM '$SM'";; esac
 
 # ---- already done? ---------------------------------------------------------------------------------------------
-WANT="dlss=$SHA_DLSS dlssd=$SHA_DLSSD ngx=$SHA_NGX jitlink=$SHA_JITLINK sm=$SM"
+WANT="dlss=$SHA_DLSS dlssd=$SHA_DLSSD dlssg=$SHA_DLSSG ngx=$SHA_NGX jitlink=$SHA_JITLINK sm=$SM"
 have_manifest() { [ -f "$DLSS_ROOT/manifest.txt" ] && [ "$(sed -n 's/^pins: //p' "$DLSS_ROOT/manifest.txt")" = "$WANT" ]; }
 if [ "$FORCE" = 0 ] && have_manifest && [ -f "$DLSS_ROOT/ngx/$NGX_MEMBER" ] && [ -d "$DLSS_ROOT/kernels" ]; then
   echo "DLSS files are already installed for sm_$SM (use --force to rebuild)."; exit 0
@@ -96,7 +100,7 @@ fi
 # ---- opt in ----------------------------------------------------------------------------------------------------
 if [ "$YES" != 1 ]; then
   [ -t 0 ] || { echo "DLSS 4 / 4.5 is optional and was not requested (run: sudo ./dlss_fetch.sh --yes)."; exit 0; }
-  echo "DLSS 4 / 4.5 support downloads about 700 MB of NVIDIA files (DLSS SDK 310.9.16, NGX 620.70.06, nvJitLink 12.9.86)"
+  echo "DLSS 4 / 4.5 support downloads about 750 MB of NVIDIA files (DLSS SDK 310.9.16, NGX 620.70.06, nvJitLink 12.9.86)"
   echo "from NVIDIA's public sites and builds GPU kernels for this card (sm_$SM). The files stay under NVIDIA's licences."
   printf 'Download and install them? [y/N] '; read -r a
   case "$a" in y|Y|yes|YES) ;; *) echo "Skipped."; exit 0;; esac
@@ -142,6 +146,7 @@ member_check() { # member_check <file> <sha256>
 
 fetch dlss.so "$URL_DLSS" "$SHA_DLSS"
 fetch dlssd.so "$URL_DLSSD" "$SHA_DLSSD"
+fetch dlssg.so "$URL_DLSSG" "$SHA_DLSSG"
 fetch driver.run "$URL_RUN" "$SHA_RUN"
 fetch nvjitlink.whl "$URL_WHEEL" "$SHA_WHEEL"
 
@@ -163,10 +168,11 @@ mkdir -m 755 "$NEW/ngx" "$NEW/snippets" "$NEW/kernels" || die "create staging fo
 # kernels already built for another card stay: their names carry the SM
 [ ! -d "$DLSS_ROOT/kernels" ] || cp -p "$DLSS_ROOT/kernels/"*.cubin "$NEW/kernels/" 2>/dev/null
 cp "$T/run/x/$NGX_MEMBER" "$NEW/ngx/$NGX_MEMBER" || die "stage the NGX core"
-cp "$T/dlss.so" "$NEW/snippets/libnvidia-ngx-dlss.so.310.9.16" && cp "$T/dlssd.so" "$NEW/snippets/libnvidia-ngx-dlssd.so.310.9.16" || die "stage the DLSS runtimes"
+cp "$T/dlss.so" "$NEW/snippets/libnvidia-ngx-dlss.so.310.9.16" && cp "$T/dlssd.so" "$NEW/snippets/libnvidia-ngx-dlssd.so.310.9.16" \
+  && cp "$T/dlssg.so" "$NEW/snippets/libnvidia-ngx-dlssg.so.310.9.16" || die "stage the DLSS runtimes"
 echo "   building GPU kernels for sm_$SM (a few minutes)"
 "$DLSS_TOOLS/dlss_cache" "$T/wheel/$JITLINK_MEMBER" "$SM" "$NEW/kernels" "$DLSS_TOOLS/assertfail_trap.ptx" \
-  "$T/dlss.so" "$T/dlssd.so" >"$T/cache.log" 2>&1
+  "$T/dlss.so" "$T/dlssd.so" "$T/dlssg.so" >"$T/cache.log" 2>&1
 rc=$?
 tail -n 5 "$T/cache.log"
 [ "$rc" = 0 ] || die "the kernel build failed (exit $rc); nothing was installed"

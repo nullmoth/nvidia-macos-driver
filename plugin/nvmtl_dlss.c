@@ -486,9 +486,14 @@ static nvmtl_dlss_rr_feature *rr_create_impl(VkCommandBuffer cmd, const nvmtl_dl
     P_SETUI(prm, "Width", cfg->in_w); P_SETUI(prm, "Height", cfg->in_h);
     P_SETUI(prm, "OutWidth", cfg->out_w); P_SETUI(prm, "OutHeight", cfg->out_h);
     P_SETI(prm, "PerfQualityValue", quality);
-    P_SETI(prm, "DLSS.Feature.Create.Flags", (cfg->hdr ? F_HDR : 0) | (cfg->mv_lowres ? F_MV_LOWRES : 0) | (cfg->mv_jittered ? F_MV_JITTERED : 0)
+    /* The runtime states "HDR Color required" and "Low resolution Motion Vectors required": both flags are always set. */
+    P_SETI(prm, "DLSS.Feature.Create.Flags", F_HDR | F_MV_LOWRES | (cfg->mv_jittered ? F_MV_JITTERED : 0)
                                            | (cfg->depth_inverted ? F_DEPTH_INVERTED : 0) | (cfg->auto_exposure ? F_AUTO_EXPOSURE : 0));
+    
     P_SETI(prm, "DLSS.Enable.Output.Subrects", 0);
+    /* The core refuses a Ray Reconstruction feature whose denoise mode is Off ("DenoiseModeOff is incompatible with
+     * SuperSamplingDenoising features"); 1 = NVSDK_NGX_DLSS_Denoise_Mode_DLUnified. */
+    P_SETI(prm, "DLSS.Denoise.Mode", 1);
     /* 0 = roughness in its own texture (MetalFX hands it over that way); 1 = packed in the normals' alpha. */
     P_SETI(prm, "DLSS.Roughness.Mode", 0);
     if (getenv("NVMTL_DLSS_RR_PRESET")) {
