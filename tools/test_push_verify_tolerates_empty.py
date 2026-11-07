@@ -5,7 +5,7 @@ The shipped NVK is built -Dbuildtype=debugoptimized (build/build263.sh), so asse
 in src/nouveau/headers/nv_push.h asserts that the previous non-immediate method header carried a nonzero data
 count. An empty method (count 0) is benign to the GPU, but the assert turned it into a hard abort: the highest
 machine-count NVK crash, under vk_meta_copy_memory_to_image / vk_meta_draw_volume (Chess, mediaanalysisd, video
-apps). The fix in nvk/nvk-macos.patch downgrades it to a warn-once.
+apps). The fix in nvk/nv_push-warn-empty-method.patch downgrades it to a warn-once.
 
 This extracts BOTH the pre-fix (removed, '-') and post-fix (added, '+') __push_verify bodies from the patch hunk,
 compiles each with assertions enabled, and runs four header scenarios. The post-fix build must tolerate the empty
@@ -18,7 +18,7 @@ import sys
 import tempfile
 
 root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1])
-patch = (root / 'nvk/nvk-macos.patch').read_text().splitlines()
+patch = (root / 'nvk/nv_push-warn-empty-method.patch').read_text().splitlines()
 
 # locate the nv_push.h hunk appended for this fix
 start = next(i for i, l in enumerate(patch) if l.startswith('diff --git a/src/nouveau/headers/nv_push.h'))
