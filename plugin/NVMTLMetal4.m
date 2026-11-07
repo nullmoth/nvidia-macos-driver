@@ -624,7 +624,7 @@ static void nvmtl_m4_convert_attachments(MTL4RenderPipelineColorAttachmentDescri
     id<MTLFunction> f = nvmtl_m4_function(d.computeFunctionDescriptor, err);
     if (!f) return nil;
     MTLComputePipelineDescriptor *p = [MTLComputePipelineDescriptor new];
-    p.label = d.label; p.computeFunction = f;
+    if (d.label) p.label = d.label;   /* Metal asserts on a nil label */ p.computeFunction = f;
     p.threadGroupSizeIsMultipleOfThreadExecutionWidth = d.threadGroupSizeIsMultipleOfThreadExecutionWidth;
     if (d.maxTotalThreadsPerThreadgroup) p.maxTotalThreadsPerThreadgroup = d.maxTotalThreadsPerThreadgroup;
     p.supportIndirectCommandBuffers = d.supportIndirectCommandBuffers == MTL4IndirectCommandBufferSupportStateEnabled;
@@ -638,7 +638,7 @@ static void nvmtl_m4_convert_attachments(MTL4RenderPipelineColorAttachmentDescri
     if ([desc isKindOfClass:[MTL4RenderPipelineDescriptor class]]) {
         MTL4RenderPipelineDescriptor *d = (MTL4RenderPipelineDescriptor *)desc;
         MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
-        p.label = d.label;
+        if (d.label) p.label = d.label;   /* Metal asserts on a nil label */
         p.vertexFunction = nvmtl_m4_function(d.vertexFunctionDescriptor, err);
         if (d.vertexFunctionDescriptor && !p.vertexFunction) return nil;
         p.fragmentFunction = nvmtl_m4_function(d.fragmentFunctionDescriptor, err);
@@ -655,7 +655,7 @@ static void nvmtl_m4_convert_attachments(MTL4RenderPipelineColorAttachmentDescri
     if ([desc isKindOfClass:[MTL4MeshRenderPipelineDescriptor class]]) {
         MTL4MeshRenderPipelineDescriptor *d = (MTL4MeshRenderPipelineDescriptor *)desc;
         MTLMeshRenderPipelineDescriptor *p = [MTLMeshRenderPipelineDescriptor new];
-        p.label = d.label;
+        if (d.label) p.label = d.label;   /* Metal asserts on a nil label */
         p.objectFunction = nvmtl_m4_function(d.objectFunctionDescriptor, err);
         if (d.objectFunctionDescriptor && !p.objectFunction) return nil;
         p.meshFunction = nvmtl_m4_function(d.meshFunctionDescriptor, err);
