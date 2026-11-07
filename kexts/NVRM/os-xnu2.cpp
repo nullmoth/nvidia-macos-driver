@@ -1205,10 +1205,11 @@ NV_STATUS NV_API_CALL nv_dma_unmap_alloc(nv_dma_device_t *dev, NvU64 page_count,
 // the card's own secure boot is what decides whether an image may run.
 struct nv_xnu_fw_expected { const char *name; NvU64 bytes; const char *sha1; };
 static const nv_xnu_fw_expected nv_xnu_fw_set[] = {
-    { "gsp_ga10x.bin",    27043992ull, "2a4840509e4a8a51436c0550e444e22d4304e519" },
-    { "gsp_tu10x.bin",    22901632ull, "44efed1a8c98dc54039c714547785cce67293de3" },
-    { "ucodes_ga10x.bin", 58215936ull, "f9bf8077ad46314eebec97b195bad40ee0a7771c" },
-    { "ucodes_tu10x.bin",  8837632ull, "81b4f1593cc0ba9313680ad68dc46b867393ca80" },
+    // NVIDIA 620.70.06 (NV_XNU_FW_DIR above); these move together with that directory on every NVIDIA update
+    { "gsp_ga10x.bin",    18266264ull, "6af82922e1a09b7dc4a8ce4c321fbb9d2f81894b" },
+    { "gsp_tu10x.bin",    16692112ull, "e16ff38dd2f9db6958b02dea4582dc5dff9b21cc" },
+    { "ucodes_ga10x.bin", 56128512ull, "62e74fcdd2c22765993a36a796cec536eb2eed4b" },
+    { "ucodes_tu10x.bin", 12532480ull, "5ccef0d210a2cdc1f1a1becb3ff50dbad19c332b" },
 };
 static const nv_xnu_fw_expected *nv_xnu_fw_expect(const char *path)
 {
