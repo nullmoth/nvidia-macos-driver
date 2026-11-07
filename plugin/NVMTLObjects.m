@@ -206,10 +206,17 @@ static void nvmtl_os_version_override(void)
     const NSOperatingSystemVersion fake = { (NSInteger)v[0], (NSInteger)v[1], (NSInteger)v[2] };
     Method m = class_getInstanceMethod([NSProcessInfo class], @selector(operatingSystemVersion));
     if (!m) return;
-    method_setImplementation(m, imp_implementationWithBlock(^NSOperatingSystemVersion(id _self) { (void)_self; return fake; }));
+    method_setImplementation(m, imp_implementationWithBlock(^NSOperatingSystemVersion(id _self) {
+        (void)_self;
+        // Each of the first 8 reads is logged with its caller: the fake only matters if the application's own read reaches it.
+        static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) { Dl_info di; void *ra = __builtin_return_address(0);
+            if (dladdr(ra, &di) && di.dli_fname) nvlog("os version: read #%d -> %ld.%ld.%ld from %s+0x%lx", atomic_load(&n), (long)fake.majorVersion, (long)fake.minorVersion, (long)fake.patchVersion, strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname, (unsigned long)((char *)ra - (char *)di.dli_fbase));
+            else nvlog("os version: read #%d -> %ld.%ld.%ld from %p", atomic_load(&n), (long)fake.majorVersion, (long)fake.minorVersion, (long)fake.patchVersion, ra); }
+        return fake; }));
     Method at = class_getInstanceMethod([NSProcessInfo class], @selector(isOperatingSystemAtLeastVersion:));
     if (at) method_setImplementation(at, imp_implementationWithBlock(^BOOL(id _self, NSOperatingSystemVersion want) {
         (void)_self;
+        static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) nvlog("os version: isOperatingSystemAtLeastVersion %ld.%ld.%ld asked", (long)want.majorVersion, (long)want.minorVersion, (long)want.patchVersion);
         if (fake.majorVersion != want.majorVersion) return fake.majorVersion > want.majorVersion;
         if (fake.minorVersion != want.minorVersion) return fake.minorVersion > want.minorVersion;
         return fake.patchVersion >= want.patchVersion; }));
