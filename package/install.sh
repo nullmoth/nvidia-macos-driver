@@ -145,7 +145,8 @@ kpath() {
 }
 ioreg -r -c IOPCIDevice -d 1 | grep -q '"vendor-id" = <de100000>' || die "no NVIDIA GPU found on PCI"
 # The driver runs the cards NVIDIA's GSP firmware supports (Turing and later). The same list the Windows builder uses
-# (open-gpu-kernel-modules 615.78.08, p1401/nvidia_gsp_ids.json). Installing it for an older card (GTX 10 and before)
+# (open-gpu-kernel-modules 620.70.06: 615's list + 2BBD RTX PRO 5500 Blackwell, 2E13 RTX Spark N1X; the datacenter
+# VR NVL72 3041 left out like the other datacenter parts). Installing it for an older card (GTX 10 and before)
 # would switch the firmware screen off and leave nothing to draw: those PCs run macOS in basic display instead.
 SUPPORTED_IDS="
 1E02 1E04 1E07 1E30 1E36 1E78 1E81 1E82 1E84 1E87 1E89 1E90 1E91 1E93 1EB0 1EB1 1EB5 1EB6 1EC2 1EC7 1ED0 1ED1 1ED3
@@ -157,8 +158,8 @@ SUPPORTED_IDS="
 25AD 25B0 25B2 25B8 25B9 25BA 25BB 25BC 25BD 25E0 25E2 25E5 25EC 25ED 25F9 25FA 25FB 2684 2685 2689 26B1 26B2 26B3
 2702 2704 2705 2709 2717 2730 2757 2770 2782 2783 2786 2788 27A0 27B0 27B1 27B2 27BA 27BB 27E0 27FB 2803 2805 2808
 2820 2822 2838 2860 2882 28A0 28A1 28A3 28B0 28B8 28B9 28BA 28BB 28E0 28E1 28E3 28F8 2B85 2B87 2B8C 2BB1 2BB3 2BB4
-2BB5 2BB9 2C02 2C05 2C09 2C18 2C19 2C31 2C33 2C34 2C38 2C39 2C3A 2C58 2C59 2C77 2C79 2D04 2D05 2D18 2D19 2D30 2D39
-2D58 2D59 2D79 2D83 2D98 2DB8 2DB9 2DD8 2DF9 2E03 2E06 2E12 2F04 2F06 2F18 2F38 2F58
+2BB5 2BB9 2BBD 2C02 2C05 2C09 2C18 2C19 2C31 2C33 2C34 2C38 2C39 2C3A 2C58 2C59 2C77 2C79 2D04 2D05 2D18 2D19 2D30
+2D39 2D58 2D59 2D79 2D83 2D98 2DB8 2DB9 2DD8 2DF9 2E03 2E06 2E12 2E13 2F04 2F06 2F18 2F38 2F58
 "
 NV_IDS=$(ioreg -r -c IOPCIDevice -d 1 | awk '/"vendor-id" = <de100000>/{nv=1} /"device-id" = </{ if (match($0, /<[0-9a-f]+>/)) d=substr($0, RSTART+1, 4) }
   /^\+-o|^ *\}/{ if (nv && d != "") print toupper(substr(d,3,2) substr(d,1,2)); nv=0; d="" }' | sort -u)
