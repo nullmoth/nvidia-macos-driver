@@ -376,7 +376,7 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
    for (uint32_t i = 0; i < shnum; i++) {
       if (!strncmp(names[i], ".nv.constant2.", 14) || NVK_LINK_BANK(i))
          need = true;
-      if (sh[i].type == 4 /* RELA */ && sh[i].size && sh[i].info < shnum) {
+      if ((sh[i].type == 4 /* RELA */ || sh[i].type == 9 /* REL */) && sh[i].size && sh[i].info < shnum) {
          if (NVK_LINK_IS_TEXT(sh[i].info) || NVK_LINK_IS_DATA(sh[i].info))
             need = true;
          else if (strncmp(names[sh[i].info], ".debug", 6)) {
@@ -404,6 +404,8 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
     * for it). Without this, a small module whose code ended near a page end faulted (FAULT_PTE one page past the
     * module) as soon as a kernel took its CALL.ABS slow path: cuda_dldn_engine_auto_exposure_copy_kernel calling
     * __cuda_sm20_div_rn_f64_full, DLSS at 3x into 4K. */
+   const uint64_t stub_off = align64(total, NVK_LINK_PLACE_ALIGN);   /* __assertfail stand-in, see below */
+   total = stub_off + NVK_LINK_PLACE_ALIGN;
    total += 0x1000;
    result = nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &dev->vk.base, total, 0x1000,
                                        NVKMD_MEM_LOCAL, NVKMD_MEM_MAP_WR, &module->link_mem);
@@ -416,8 +418,28 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
       if (place[i] && sh[i].type != 8)
          memcpy(map + place[i] - 1, b + sh[i].offset, sh[i].size);
 
+   /* The cubins NVIDIA ships as native SASS (sm_75 .. sm_90) import __assertfail and reach it through a pointer in
+    * .nv.constant4 (an R_CUDA_64 against the undefined symbol; every internal call is CALL.REL and the one indirect
+    * call is CALL.ABS.NOINC through that pointer). CUDA's runtime would supply the function. Here it is a stub of
+    * BPT.TRAP then EXIT: the kernel stops with a clean channel fault instead of a call to address 0. The encodings
+    * are the same on sm_75, 80, 86, 89 and 90 (nvdisasm -hex of the shipped DLSS kernels: BPT.TRAP 0x1 =
+    * 0x000000040000795c / 0x000fea0000300000, EXIT = 0x000000000000794d / 0x000fea0003800000). */
+   const bool have_stub = module->info->sm >= 75 && module->info->sm <= 90;
+   if (have_stub) {
+      static const uint64_t trap_stub[8] = {
+         0x000000040000795cull, 0x000fea0000300000ull,   /* BPT.TRAP 0x1 */
+         0x000000000000794dull, 0x000fea0003800000ull,   /* EXIT */
+         0x000000000000794dull, 0x000fea0003800000ull,   /* EXIT (never reached) */
+         0x000000000000794dull, 0x000fea0003800000ull,
+      };
+      memcpy(map + stub_off, trap_stub, sizeof(trap_stub));
+   }
+
    for (uint32_t r = 0; r < shnum; r++) {
-      if (sh[r].type != 4 || !sh[r].size || sh[r].info >= shnum || !place[sh[r].info])
+      /* RELA (explicit addend: Hopper and Blackwell cubins) or REL (implicit addend stored at the target: Turing,
+       * Ampere and Ada cubins, where the whole DLSS set only has R_CUDA_64 pointers in .nv.constant4) */
+      const bool is_rel = sh[r].type == 9;
+      if ((sh[r].type != 4 && !is_rel) || !sh[r].size || sh[r].info >= shnum || !place[sh[r].info])
          continue;
       const uint32_t t = sh[r].info, sy = sh[r].link;
       const bool code = NVK_LINK_IS_TEXT(t);
@@ -425,10 +447,12 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
          result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED, "cubin link: relocation without a symbol table");
          goto out;
       }
-      for (uint64_t e = 0; e + 24 <= sh[r].size; e += 24) {
-         uint64_t r_off, r_info; int64_t r_add;
+      const uint64_t esize = is_rel ? 16 : 24;
+      for (uint64_t e = 0; e + esize <= sh[r].size; e += esize) {
+         uint64_t r_off, r_info; int64_t r_add = 0;
          memcpy(&r_off, b + sh[r].offset + e, 8); memcpy(&r_info, b + sh[r].offset + e + 8, 8);
-         memcpy(&r_add, b + sh[r].offset + e + 16, 8);
+         if (!is_rel)
+            memcpy(&r_add, b + sh[r].offset + e + 16, 8);
          const uint32_t type = (uint32_t)r_info;
          const uint64_t si = r_info >> 32;
          /* overflow-safe: r_off comes from the file; code relocations patch a whole 16-byte instruction */
@@ -439,8 +463,37 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
             goto out;
          }
          uint16_t s_shndx; uint64_t s_value;
+         uint32_t s_name;
+         memcpy(&s_name, b + sh[sy].offset + si * 24, 4);
          memcpy(&s_shndx, b + sh[sy].offset + si * 24 + 6, 2);
          memcpy(&s_value, b + sh[sy].offset + si * 24 + 8, 8);
+         if (is_rel && !code) {   /* the addend is what the compiler left in place */
+            uint64_t in_place = 0;
+            memcpy(&in_place, map + place[t] - 1 + r_off, type == 1 ? 4 : 8);
+            r_add = (int64_t)in_place;
+         }
+         bool undef_ok = false;
+         if (s_shndx == 0 /* SHN_UNDEF */ && have_stub && sh[sy].link < shnum && sh[sh[sy].link].type == 3 &&
+             s_name < sh[sh[sy].link].size && sh[sh[sy].link].size - s_name >= sizeof("__assertfail") &&
+             !strcmp((const char *)b + sh[sh[sy].link].offset + s_name, "__assertfail")) {
+            undef_ok = true;
+         }
+         if (undef_ok) {
+            const uint64_t v_stub = base + stub_off + (uint64_t)r_add;
+            uint8_t *dst = map + place[t] - 1 + r_off;
+            if (code || (type != 1 && type != 2)) {
+               result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                                  "cubin link: __assertfail referenced by relocation type %u in %s", type, names[t]);
+               goto out;
+            }
+            if (type == 1) {
+               const uint32_t w = (uint32_t)v_stub;
+               memcpy(dst, &w, 4);
+            } else {
+               memcpy(dst, &v_stub, 8);
+            }
+            continue;
+         }
          if (s_shndx >= shnum || !place[s_shndx] || s_value < sh[s_shndx].addr ||
              s_value - sh[s_shndx].addr > sh[s_shndx].size) {
             result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
