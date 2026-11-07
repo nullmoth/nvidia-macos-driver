@@ -1621,20 +1621,13 @@ void NV_API_CALL nv_destroy_nano_timer(nv_state_t *nv, nv_nano_timer_t *t)
 }
 
 extern "C" nv_file_private_t *nv_xnu_lookup_fd(NvS32 fd, void **priv, NvBool *isCtl);
-extern "C" nv_alloc_mapping_context_t *nv_xnu_mmap_context(void *priv);
 extern "C" void nv_xnu_put_client(void *priv);
-extern "C" void nv_xnu_mmap_lock(void *priv);
-extern "C" void nv_xnu_mmap_unlock(void *priv);
-nv_file_private_t *NV_API_CALL nv_get_file_private(NvS32 fd, NvBool ctl, void **os_private)
+// NVIDIA 620 dropped the control/device argument: every caller now checks it with nv_verify_nvfp_control_or_put
+// (nv.h), which asks nv_get_state_ptr_from_nvfp and drops the reference on a mismatch.
+nv_file_private_t *NV_API_CALL nv_get_file_private(NvS32 fd, void **os_private)
 {
     TRC; NvBool isCtl = NV_FALSE; nv_file_private_t *fp = nv_xnu_lookup_fd(fd, os_private, &isCtl);
     if (!fp) { kprintf("NVRM-xnu: nv_get_file_private(fd %d) -> none\n", fd); return NULL; }
-    if (!!isCtl != !!ctl) {
-        kprintf("NVRM-xnu: nv_get_file_private(fd %d): wanted %s, is %s\n", fd, ctl ? "ctl" : "device", isCtl ? "ctl" : "device");
-        nv_xnu_put_client(os_private ? *os_private : NULL);
-        if (os_private) *os_private = NULL;
-        return NULL;
-    }
     return fp;
 }
 extern "C" IOMemoryDescriptor *nv_xnu_alloc_md(void *priv, NvU64 *bytes, NvU32 *cache)
@@ -1670,37 +1663,30 @@ NV_STATUS NV_API_CALL os_match_mmap_offset(void *pAllocPrivate, NvU64 offset, Nv
     kprintf("NVRM-xnu: os_match_mmap_offset: 0x%llx not in a %u-page alloc\n", offset, a->page_count);
     return NV_ERR_OBJECT_NOT_FOUND;
 }
-NV_STATUS NV_API_CALL nv_add_mapping_context_to_file(nv_state_t *nv, nv_usermap_access_params_t *nvuap, NvU32 prot, void *pAllocPriv, NvU64 pageIndex, NvU32 fd)
-{
-    TRC; void *priv = NULL;
-    nv_file_private_t *nvfp = nv_get_file_private((NvS32)fd, NV_IS_CTL_DEVICE(nv), &priv);
-    if (!nvfp) return NV_ERR_INVALID_ARGUMENT;
-    nv_alloc_mapping_context_t *c = nv_xnu_mmap_context(priv);
-    if (!c) { nv_put_file_private(priv); return NV_ERR_INVALID_ARGUMENT; }
-    // The target client's own lock: it can be another connection, mapping or binding right now.
-    nv_xnu_mmap_lock(priv);
-    struct Done {
-        void *p;
-        ~Done() { nv_xnu_mmap_unlock(p); nv_put_file_private(p); }
-    } done = { priv };
-    if (c->valid) return NV_ERR_STATE_IN_USE;
-    nvx2_memset(c, 0, sizeof *c);
-    if (NV_IS_CTL_DEVICE(nv)) { c->alloc = pAllocPriv; c->page_index = pageIndex; }
-    else {
-        NvU64 n = nvuap->memArea.numRanges;
-        if (n == 0 || n > 4096) return NV_ERR_INVALID_ARGUMENT;
-        c->memArea.pRanges = (MemoryRange *)kern_os_malloc((size_t)(sizeof(MemoryRange) * n));
-        if (!c->memArea.pRanges) return NV_ERR_NO_MEMORY;
-        nvx2_memcpy(c->memArea.pRanges, nvuap->memArea.pRanges, (size_t)(sizeof(MemoryRange) * n));
-        c->memArea.numRanges = n;
-    }
-    c->access_start = nvuap->access_start; c->access_size = nvuap->access_size;
-    c->prot = prot; c->caching = nvuap->caching; c->valid = NV_TRUE;
-    if (nv_xnu_chat()) kprintf("NVRM-xnu: mapping context on fd %u: %s page_index=%llu ranges=%llu access=0x%llx+0x%llx caching=%u prot=0x%x\n",
-            fd, NV_IS_CTL_DEVICE(nv) ? "sysmem" : "device", pageIndex, c->memArea.numRanges, c->access_start, c->access_size, c->caching, prot);
-    return NV_OK;
-}
 void NV_API_CALL nv_put_file_private(void *os_private) { TRC; nv_xnu_put_client(os_private); }
+
+// ---- NVIDIA 620 OS-interface additions RM calls ---------------------------------------------------------------------
+// TDISP (trusted device DMA for confidential computing) is never enabled here; Linux sets this only when the kernel
+// and platform support it. RM reads it as data.
+extern "C" NvBool os_tdisp_enabled;
+NvBool os_tdisp_enabled = NV_FALSE;
+// Mapping reference on an allocation (os.c osMapSystemMemory / osUnmapSystemMemory). Linux counts it so nv_free_pages
+// can tell a still-mapped allocation; here a user mapping holds a retained IOMemoryDescriptor of the allocation's pages
+// (nv_xnu_alloc_md), which already keeps them alive, so the count is kept for the leak report and nothing waits on it.
+static volatile SInt64 nv_xnu_user_map_refs = 0;
+void NV_API_CALL nv_inc_alloc_refcount(void *pAllocPrivate) { TRC; if (pAllocPrivate) OSIncrementAtomic64(&nv_xnu_user_map_refs); }
+void NV_API_CALL nv_dec_alloc_refcount(nv_state_t *nv, void *pAllocPrivate) { TRC; if (pAllocPrivate) OSDecrementAtomic64(&nv_xnu_user_map_refs); }
+// Peer-to-peer resource mapping through dma_map_resource has no macOS counterpart; RM falls back when this is false.
+NvBool NV_API_CALL nv_dma_is_map_resource_usable(nv_dma_device_t *dma_dev) { TRC; return NV_FALSE; }
+// A memory carve-out is an SoC (Tegra) concept; discrete GPUs have none.
+NV_STATUS NV_API_CALL nv_get_carveout_info(NvU64 *base, NvU64 *size) { TRC; return NV_ERR_NOT_SUPPORTED; }
+// Linux ftrace tracepoint for GPU operations; nothing listens on macOS.
+NV_STATUS NV_API_CALL nv_emit_tracepoint_gpu_op_event(nv_state_t *nv, const nv_gpu_op_event_t *op_event) { TRC; return NV_OK; }
+// Device-certificate reads serve SPDM attestation for confidential computing, which this driver does not enable.
+NV_STATUS NV_API_CALL os_read_device_certificate(void *nv_state, NvU8 *pBuffer, NvU32 *pBufferSize) { TRC; return NV_ERR_NOT_SUPPORTED; }
+NV_STATUS NV_API_CALL os_read_device_cert_digests(void *nv_state, const NvU8 *pCertChain, NvU32 certChainSize,
+                                                  NvU8 *pTsmDigest, NvU8 *pLocalDigest, NvU32 *pDigestSize)
+{ TRC; return NV_ERR_NOT_SUPPORTED; }
 NvBool NV_API_CALL nv_is_gpu_accessible(nv_state_t *nv) { TRC; return NV_TRUE; }
 static nv_state_t nv_xnu_ctl_state;
 nv_state_t *NV_API_CALL nv_get_ctl_state(void)

@@ -310,14 +310,16 @@ public:
     bool initWithTask(task_t owningTask, void *securityID, UInt32 type, OSDictionary *properties) override;
     nv_file_private_t *nvfp() { return &fNvfp; }
     IOReturn clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory) override;
-    nv_alloc_mapping_context_t *mmapContext() { return &fMmap; }
+    nv_alloc_mapping_list_node_t **mapList() { return &fMapList; }
     bool isCtl() const { return fIsCtl; }
     nv_state_t *nvState();
 protected:
     NVRM *fOwner = NULL;
 private:
     nv_file_private_t fNvfp = {};
-    nv_alloc_mapping_context_t fMmap = {};
+    // RM's pending mapping context for this fd (NVIDIA 620: RM allocates the node with os_alloc_mem and stores it here
+    // through nv_acquire_file_va; at most one, a second is refused with NV_ERR_STATE_IN_USE). Freed in free().
+    nv_alloc_mapping_list_node_t *fMapList = nullptr;
     bool fIsCtl = true;
     int  fFd = -1;
     int  fPid = 0;
@@ -325,11 +327,11 @@ private:
     int  fBound = -1;
     SInt32 fCleaned = 0;
     IOLock *fGate = nullptr;      // serialises this client's methods against its own teardown
-    // Guards fMmap and nothing else. It is separate from fGate because RM writes another client's context from inside
+    // Guards fMapList and nothing else. It is separate from fGate because RM writes another client's context from inside
     // that client's neighbour's esc(), and because bind does not hold fGate. Nothing that takes another lock runs under it.
     IOLock *fMapLock = nullptr;
     // Held across esc() and clientMemoryForType() and across the teardown in clientClose. The RM
-    // callbacks below it (nv_add_mapping_context_to_file and friends) must NOT take it: they run
+    // callbacks below it (nv_acquire_file_va and friends) must NOT take it: they run
     // nested inside esc() for this same client and IOLock is not recursive.
     struct Gate {
         IOLock *l;
@@ -372,10 +374,15 @@ extern "C" nv_file_private_t *nv_xnu_lookup_fd(NvS32 fd, void **priv, NvBool *is
     if (isCtl) *isCtl = c->isCtl() ? NV_TRUE : NV_FALSE;
     return c->nvfp();
 }
-static void nvMmapContextClear(nv_alloc_mapping_context_t *c)
+// Frees RM's mapping nodes and their ranges; both came from RM's os_alloc_mem, so they go back through os_free_mem.
+static void nvMapListFree(nv_alloc_mapping_list_node_t **list)
 {
-    if (c->memArea.pRanges) kern_os_free(c->memArea.pRanges);
-    bzero(c, sizeof *c);
+    while (*list) {
+        nv_alloc_mapping_list_node_t *n = *list;
+        *list = n->pNext;
+        if (n->context.memArea.pRanges) os_free_mem(n->context.memArea.pRanges);
+        os_free_mem(n);
+    }
 }
 extern "C" void nv_xnu_put_client(void *priv) { if (priv) ((OSObject *)priv)->release(); }
 extern "C" void nv_xnu_mmap_lock(void *priv)
@@ -388,10 +395,33 @@ extern "C" void nv_xnu_mmap_unlock(void *priv)
     NVRMUserClient *c = OSDynamicCast(NVRMUserClient, (OSObject *)priv);
     if (c && c->mapLock()) IOLockUnlock(c->mapLock());
 }
-extern "C" nv_alloc_mapping_context_t *nv_xnu_mmap_context(void *priv)
+// NVIDIA 620 OS interface: RM reaches a file's mapping list only between these two calls, so they hold that client's
+// fMapLock (the same lock clientMemoryForType and a re-bind take). RM calls them nested inside another client's esc(),
+// which is why this is fMapLock and never fGate.
+// A file private that is not one of our clients cannot occur (every nvfp RM sees came from nv_get_file_private); if it
+// ever did, RM gets a list that already holds a node, so it refuses with NV_ERR_STATE_IN_USE and frees its own node,
+// instead of parking a mapping no fd can reach.
+static nv_alloc_mapping_list_node_t gNvMapBusyNode;
+static nv_alloc_mapping_list_node_t *gNvMapBusy = &gNvMapBusyNode;
+extern "C" nv_alloc_mapping_list_node_t **NV_API_CALL nv_acquire_file_va(nv_file_private_t *nvfp, NvBool write)
 {
-    NVRMUserClient *c = OSDynamicCast(NVRMUserClient, (OSObject *)priv);
-    return c ? c->mmapContext() : NULL;
+    (void)write;
+    NVRMUserClient *c = NVRMUserClient::fromNvfp(nvfp);
+    if (!c || !c->mapLock()) { gNvMapBusy = &gNvMapBusyNode; return &gNvMapBusy; }
+    IOLockLock(c->mapLock());
+    return c->mapList();
+}
+extern "C" void NV_API_CALL nv_release_file_va(nv_file_private_t *nvfp, NvBool write)
+{
+    (void)write;
+    NVRMUserClient *c = NVRMUserClient::fromNvfp(nvfp);
+    if (c && c->mapLock()) IOLockUnlock(c->mapLock());
+}
+// 620 callers check control-vs-device themselves (nv_verify_nvfp_control_or_put); this answers which state a file is on.
+extern "C" nv_state_t *NV_API_CALL nv_get_state_ptr_from_nvfp(nv_file_private_t *nvfp)
+{
+    NVRMUserClient *c = NVRMUserClient::fromNvfp(nvfp);
+    return c ? c->nvState() : NULL;
 }
 extern "C" IOMemoryDescriptor *nv_xnu_alloc_md(void *priv, NvU64 *bytes, NvU32 *cache);
 extern "C" { IOMemoryDescriptor *nv_pm_ram_submd(NvU64, NvU64, int); bool nv_pm_is_gpu(NvU64, NvU64); bool nv_pm_is_gpu_fb(NvU64, NvU64); void nv_pm_dev_refused(NvU64, NvU64); bool nv_xnu_chat(void); }
@@ -1884,7 +1914,7 @@ IOReturn NVRMUserClient::clientClose(void)
         // landed in the reused block. Marking the context dead is enough; free() does the release,
         // and IOKit only gets there once no method can still be running.
         IOLockLock(fMapLock);
-        fMmap.valid = NV_FALSE;
+        if (fMapList) fMapList->context.valid = NV_FALSE;
         IOLockUnlock(fMapLock);
         if (nv_xnu_chat()) kprintf("NVRM-xnu: client fd %d closed\n", fFd);
     }
@@ -1893,7 +1923,9 @@ IOReturn NVRMUserClient::clientClose(void)
 }
 void NVRMUserClient::free(void)
 {
-    if (fMmap.memArea.pRanges) { kern_os_free(fMmap.memArea.pRanges); fMmap.memArea.pRanges = NULL; }
+    if (fMapLock) IOLockLock(fMapLock);
+    nvMapListFree(&fMapList);
+    if (fMapLock) IOLockUnlock(fMapLock);
     if (fGate) { IOLockFree(fGate); fGate = nullptr; }
     if (fMapLock) { IOLockFree(fMapLock); fMapLock = nullptr; }
     super::free();
@@ -1906,12 +1938,12 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
     nv_alloc_mapping_context_t snapshot;
     MemoryRange *ranges = NULL;
     IOLockLock(fMapLock);
-    if (!fMmap.valid) {
+    if (!fMapList || !fMapList->context.valid) {
         IOLockUnlock(fMapLock);
         kprintf("NVRM-xnu: map on fd %d with no mapping context\n", fFd);
         return kIOReturnBadArgument;
     }
-    snapshot = fMmap;
+    snapshot = fMapList->context;
     if (!fIsCtl) {
         const NvU64 count = snapshot.memArea.numRanges;
         if (count == 0 || count > 4096 || !snapshot.memArea.pRanges) { IOLockUnlock(fMapLock); return kIOReturnBadArgument; }
@@ -1931,11 +1963,10 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
         NvU64 off = c->page_index * PAGE_SIZE;
         if (!base) return kIOReturnBadArgument;
         if (off >= bytes) { base->release(); return kIOReturnBadArgument; }
-        // Subtract, never add: access_size arrives verbatim from RM (nv_add_mapping_context_to_file) and a
-        // near-2^64 value made off+len wrap below bytes, skipping this clamp - and IOSubMemoryDescriptor's own
-        // offset+length test wraps identically, so nothing downstream caught it either.
-        NvU64 len = c->access_size ? c->access_size : (bytes - off);
-        if (len > bytes - off) { base->release(); return kIOReturnBadArgument; }
+        // NVIDIA 620's context carries no access size (it was dropped with nv_usermap_access_params_t): the mapping
+        // is bounded by the allocation RM validated for this fd, from page_index to its end. Subtract, never add -
+        // an earlier off+len form wrapped past the clamp.
+        NvU64 len = bytes - off;
         md = IOSubMemoryDescriptor::withSubRange(base, (IOByteCount)off, (IOByteCount)len, kIODirectionInOut);
         base->release();
         caching = cache;
@@ -2080,9 +2111,9 @@ IOReturn NVRMUserClient::sBindFd(OSObject *target, void *reference, IOExternalMe
     // the ranges that map was reading, so what it checked and what it mapped could differ.
     if (me->fBound >= 0) {
         IOLockLock(me->fMapLock);
-        if (me->fMmap.valid) {
+        if (me->fMapList) {
             kprintf("NVRM-xnu: client %d re-bound to fd %d with a stale mapping context - cleared\n", me->fFd, me->fBound);
-            nvMmapContextClear(&me->fMmap);
+            nvMapListFree(&me->fMapList);
         }
         IOLockUnlock(me->fMapLock);
     }
