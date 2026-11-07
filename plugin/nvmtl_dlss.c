@@ -152,6 +152,7 @@ static const struct { const char *n; void *f; } k_nvml[] = {
  * back 0, the name of each compiled function, and the first launches of each function with their 8-byte parameter
  * words, so the run names which kernel received the null and where it came from. Off unless the switch is set. */
 static int trace_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_DLSS_TRACE"); on = e && e[0] == '1'; } return on; }
+static PFN_vkGetImageViewHandle64NVX r_ivh64;
 static PFN_vkGetBufferDeviceAddress r_bda; static PFN_vkGetImageViewHandleNVX r_ivh; static PFN_vkGetImageViewAddressNVX r_iva;
 static PFN_vkCreateCuFunctionNVX r_cfn; static PFN_vkCmdCuLaunchKernelNVX r_launch;
 #define TR_FN 256
@@ -161,6 +162,8 @@ static VkDeviceAddress VKAPI_CALL w_bda(VkDevice d, const VkBufferDeviceAddressI
 { VkDeviceAddress a = r_bda(d, i); if (!a) nvlog("dlss-trace: vkGetBufferDeviceAddress(buffer %p) = 0", (void *)i->buffer); return a; }
 static uint32_t VKAPI_CALL w_ivh(VkDevice d, const VkImageViewHandleInfoNVX *i)
 { uint32_t h = r_ivh(d, i); nvlog("dlss-trace: image view handle view %p type %d sampler %p = 0x%x", (void *)i->imageView, i->descriptorType, (void *)i->sampler, h); return h; }
+static uint64_t VKAPI_CALL w_ivh64(VkDevice d, const VkImageViewHandleInfoNVX *i)
+{ uint64_t h = r_ivh64(d, i); nvlog("dlss-trace: image view handle64 view %p type %d sampler %p = 0x%llx", (void *)i->imageView, i->descriptorType, (void *)i->sampler, (unsigned long long)h); return h; }
 static VkResult VKAPI_CALL w_iva(VkDevice d, VkImageView v, VkImageViewAddressPropertiesNVX *p)
 { VkResult r = r_iva(d, v, p); nvlog("dlss-trace: image view address view %p -> %d addr 0x%llx size %llu", (void *)v, r, (unsigned long long)p->deviceAddress, (unsigned long long)p->size); return r; }
 static VkResult VKAPI_CALL w_cfn(VkDevice d, const VkCuFunctionCreateInfoNVX *ci, const VkAllocationCallbacks *a, VkCuFunctionNVX *f)
@@ -178,11 +181,25 @@ static void VKAPI_CALL w_launch(VkCommandBuffer cb, const VkCuLaunchInfoNVX *li)
     for (unsigned k = 0; k < g_trn; k++) if (g_tr[k].fn == li->function) { name = g_tr[k].name; n = ++g_tr[k].launches; break; }
     pthread_mutex_unlock(&g_tr_mu);
     if (n <= 2) {
-        char words[600]; size_t o = 0; int zero = 0;
+        char words[900]; size_t o = 0; int zero = 0;
         for (size_t p = 0; p < li->paramCount && p < 24 && o < sizeof words - 24; p++) {
             uint64_t v = 0; if (li->pParams && li->pParams[p]) memcpy(&v, li->pParams[p], 8);
             if (!v) zero++;
             o += (size_t)snprintf(words + o, sizeof words - o, " %llx", (unsigned long long)v);
+        }
+        const void *pbuf = NULL; size_t psize = 0;
+        for (size_t x = 0; li->pExtras && x + 1 < li->extraCount * 2 + 2 && x < 16; x += 2) {
+            const uintptr_t key = (uintptr_t)li->pExtras[x];
+            if (key == 0) break;
+            if (key == 1) pbuf = li->pExtras[x + 1];
+            else if (key == 2 && li->pExtras[x + 1]) psize = *(const size_t *)li->pExtras[x + 1];
+        }
+        if (pbuf && psize) {
+            o = 0; zero = 0;
+            for (size_t q = 0; q + 8 <= psize && q < 8 * 40 && o < sizeof words - 24; q += 8) {
+                uint64_t v; memcpy(&v, (const char *)pbuf + q, 8); if (!v) zero++;
+                o += (size_t)snprintf(words + o, sizeof words - o, " %llx", (unsigned long long)v);
+            }
         }
         nvlog("dlss-trace: launch %s #%u grid %u,%u,%u block %u,%u,%u smem %u params %zu extras %zu zero-words %d:%s", name, n,
               li->gridDimX, li->gridDimY, li->gridDimZ, li->blockDimX, li->blockDimY, li->blockDimZ, li->sharedMemBytes,
@@ -208,6 +225,7 @@ static PFN_vkVoidFunction trace_wrap(const char *n, PFN_vkVoidFunction f)
     if (!strcmp(n, "vkGetBufferDeviceAddress") || !strcmp(n, "vkGetBufferDeviceAddressKHR") || !strcmp(n, "vkGetBufferDeviceAddressEXT"))
         { r_bda = (PFN_vkGetBufferDeviceAddress)f; return (PFN_vkVoidFunction)w_bda; }
     if (!strcmp(n, "vkGetImageViewHandleNVX")) { r_ivh = (PFN_vkGetImageViewHandleNVX)f; return (PFN_vkVoidFunction)w_ivh; }
+    if (!strcmp(n, "vkGetImageViewHandle64NVX")) { r_ivh64 = (PFN_vkGetImageViewHandle64NVX)f; return (PFN_vkVoidFunction)w_ivh64; }
     if (!strcmp(n, "vkGetImageViewAddressNVX")) { r_iva = (PFN_vkGetImageViewAddressNVX)f; return (PFN_vkVoidFunction)w_iva; }
     if (!strcmp(n, "vkCreateCuFunctionNVX")) { r_cfn = (PFN_vkCreateCuFunctionNVX)f; return (PFN_vkVoidFunction)w_cfn; }
     if (!strcmp(n, "vkCmdCuLaunchKernelNVX")) { r_launch = (PFN_vkCmdCuLaunchKernelNVX)f; return (PFN_vkVoidFunction)w_launch; }
