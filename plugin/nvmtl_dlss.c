@@ -18,6 +18,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <errno.h>
+#include <unistd.h>
 #include <wchar.h>
 
 void nvlog(const char *fmt, ...);
@@ -181,7 +183,18 @@ static int init_locked(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, PFN_v
     static wchar_t wpath[1024]; mbstowcs(wpath, NVMTL_DLSS_SNIPPET_DIR, 1023); static const wchar_t *paths[1] = { wpath };
     struct { const wchar_t *const *p; unsigned n; void *in; void (*cb)(const char *, int, int); int lvl; bool off; } info = { paths, 1, NULL, ngx_log, 1, 0 };
     /* application id: arbitrary non-zero; data path: scratch; 0x15 is the SDK version word accepted on the proving run. */
-    unsigned rc = init2(0x4e756c6cULL, L"/tmp", inst, pd, dev, (void *)log_gipa, (void *)log_gdpa, 0x15, &info);
+    /* NGX writes logs and model data under this folder: a per-user cache folder that only this user owns, never a
+     * shared, world-writable /tmp where another account could plant links. */
+    wchar_t wdata[600]; char data[512] = "";
+    size_t dn = confstr(_CS_DARWIN_USER_CACHE_DIR, data, sizeof data);
+    if (!dn || dn >= sizeof data - 16) return fail("no per-user cache folder");
+    strlcat(data, "nullmoth-dlss", sizeof data);
+    struct stat dst;
+    if (mkdir(data, 0700) && errno != EEXIST) return fail("cannot create the per-user DLSS folder");
+    if (lstat(data, &dst) || !S_ISDIR(dst.st_mode) || dst.st_uid != getuid() || (dst.st_mode & 077))
+        return fail("the per-user DLSS folder is not a private folder owned by this user");
+    if (mbstowcs(wdata, data, sizeof wdata / sizeof wdata[0]) == (size_t)-1) return fail("DLSS folder path is not valid text");
+    unsigned rc = init2(0x4e756c6cULL, wdata, inst, pd, dev, (void *)log_gipa, (void *)log_gdpa, 0x15, &info);
     if (rc != 1) { char m[64]; snprintf(m, sizeof m, "NGX Init_Ext2 returned 0x%08x", rc); return fail(m); }
     ngxp *caps = NULL; int avail = -1; caps_fn(&caps);
     if (caps) P_GETI(caps, "SuperSampling.Available", &avail);
