@@ -493,6 +493,8 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     int priorFlipState();
     void publishFlipWait();
     unsigned fRejected = 0;     // commits NVKMS refused on this head, for NVRMRejectedCommits
+    uint64_t fEnableAbs = 0;    // when enableController ran, for the first-primary-flip timing line
+    bool fFirstPrimaryLogged = false;   // a login screen that never gets one is the black-screen-with-cursor signature
     NvBool submitConfig(struct NvKmsKapiRequestedModeSetConfig *cfg, struct NvKmsKapiModeSetReplyConfig *rep, NvBool commit,
                         bool bootstrap = false, bool cursorOnly = false, bool frame = false);
     thread_call_t fReflip = nullptr;
@@ -1924,11 +1926,29 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
                   (unsigned)p->config.dstHeight, h->cursorRequestedConfig.surface ? 1u : 0u,
                   (unsigned)h->cursorRequestedConfig.flags.surfaceChanged);
         }
+        // Until this head has shown one primary flip, every rejected primary is logged with the surface it carried:
+        // the login window's first frame being refused is the one case the counters above cannot tell apart.
+        if (!fFirstPrimaryLogged && tracked) {
+            const struct NvKmsKapiLayerConfig *pc =
+                &cfg->headRequestedConfig[fHead].layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX].config;
+            FBLOG("primary rejected before the first shown flip on head %u: result %d src %ux%u+%u+%u dst %ux%u%+d%+d",
+                  fHead, (int)rep->flipResult, (unsigned)pc->srcWidth, (unsigned)pc->srcHeight, (unsigned)pc->srcX,
+                  (unsigned)pc->srcY, (unsigned)pc->dstWidth, (unsigned)pc->dstHeight, (int)pc->dstX,
+                  (int)pc->dstY);
+        }
         setProperty("NVRMRejectedCommits", (unsigned long long)fRejected, 32);
         return NV_FALSE;
     }
     if (cursorOnly) return NV_TRUE;
     if (!tracked) { fSubmissionSeen = false; return NV_TRUE; }
+    if (!fFirstPrimaryLogged) {
+        fFirstPrimaryLogged = true;
+        uint64_t ns = 0;
+        if (fEnableAbs) absolutetime_to_nanoseconds(submit0 - fEnableAbs, &ns);
+        FBLOG("first accepted primary flip on head %u, %llu ms after enableController (%u rejected before it)%s",
+              fHead, (unsigned long long)(ns / 1000000), fRejected, bootstrap ? " [bootstrap]" : "");
+        setProperty("NVRMFirstPrimaryFlipMs", (unsigned long long)(ns / 1000000), 64);
+    }
     fSubmissionSeen = true;
     fFlipSubmitAbs = submit0;
     // Initial acceptance permits console handoff, never surface retirement. The owned boot surface remains pinned.
@@ -2901,6 +2921,7 @@ void NVRMNVDAFramebuffer::free()
 IOReturn NVRMNVDAFramebuffer::enableController()
 {
     FBLOG("enableController");
+    fEnableAbs = mach_absolute_time();
     const bool ok = applyMode();
     if (ok) refreshDisplayAudioProperties();
     // A display that appeared after boot: tell the framework, through the connect handler it registered (fConnect),
