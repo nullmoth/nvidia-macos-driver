@@ -197,7 +197,27 @@ edit("src/nouveau/cubin/nv_cubin.c",
             continue;
 """)
 
-# 5. expose the extension without the experimental switch (the plugin's DLSS path is its only user)
+# 5. Blackwell (sm_100 and newer) code reads its launch dimensions and memory windows from new bank-0 offsets, measured
+#    on an RTX 5060 with a marker probe: blockDim x/y/z at 0x360/0x364/0x368, gridDim at 0x370/0x374/0x378. NVK wrote
+#    only the pre-Blackwell 0x00/0x0C, so every kernel saw a 0-sized block and grid (DLSS's tiled kernels then never
+#    finish). The shared/local memory windows (0x2F0/0x2F8) and 0xfffdc0 at 0x37C follow the same layout; the window
+#    values are the ones NVK programs into the hardware (nvk_cmd_dispatch.c).
+edit("src/nouveau/vulkan/nvk_cubin.c",
+     "   root->grid_dim[2] = pLaunchInfo->gridDimZ;\n",
+     """   root->grid_dim[2] = pLaunchInfo->gridDimZ;
+   if (function->module->info->sm >= 100 && root_size >= 0x380) {
+      uint32_t *w = (uint32_t *)root;
+      const uint64_t smem_window = 1ull << 32;   /* sm_100+ is newer than Hopper: NVK's 4 GiB-aligned window */
+      const uint64_t lmem_window = 0xffull << 24;
+      memcpy(&w[0x2f0 / 4], &smem_window, 8);
+      memcpy(&w[0x2f8 / 4], &lmem_window, 8);
+      w[0x360 / 4] = pLaunchInfo->blockDimX; w[0x364 / 4] = pLaunchInfo->blockDimY; w[0x368 / 4] = pLaunchInfo->blockDimZ;
+      w[0x370 / 4] = pLaunchInfo->gridDimX;  w[0x374 / 4] = pLaunchInfo->gridDimY;  w[0x378 / 4] = pLaunchInfo->gridDimZ;
+      w[0x37c / 4] = 0xfffdc0;
+   }
+""")
+
+# 6. expose the extension without the experimental switch (the plugin's DLSS path is its only user)
 edit("src/nouveau/vulkan/nvk_physical_device.c",
      """      .NVX_binary_import = info->cls_eng3d >= MAXWELL_A &&
          instance->experimental_flags & NVK_EXPERIMENTAL_DLSS,""",
