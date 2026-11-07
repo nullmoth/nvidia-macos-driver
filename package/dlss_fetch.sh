@@ -39,7 +39,7 @@ JITLINK_MEMBER=nvidia/nvjitlink/lib/libnvJitLink.so.12
 SHA_JITLINK=02d3acb5fe598dd20f0fca3cc03734ad164037a22747a01900561a42d0b8448f
 DLSS_ROOT=/Library/NullMoth/dlss
 CURL_PROTO='=https'
-DLSS_TOOLS="$HERE/dlss"          # dlss_cache and assertfail_trap.ptx, built from dlss/ (build/build_dlss_cache.sh)
+DLSS_TOOLS="$HERE/dlss"          # dlss_cache, nm_unzstd and assertfail_trap.ptx, built from dlss/ (build/build_dlss_cache.sh)
 DEVICE_IDS=""                    # empty = read them from ioreg
 # Tests may replace the pins and paths, but only when not running as root: a root run always uses the values above.
 if [ "$(id -u)" != 0 ] && [ -n "${DLSS_TEST_PINS:-}" ]; then . "$DLSS_TEST_PINS" || exit 2; fi
@@ -107,12 +107,12 @@ if [ "$YES" != 1 ]; then
 fi
 
 # ---- preconditions ---------------------------------------------------------------------------------------------
-[ -x "$DLSS_TOOLS/dlss_cache" ] && [ -f "$DLSS_TOOLS/assertfail_trap.ptx" ] || die "this package lacks dlss/dlss_cache or dlss/assertfail_trap.ptx"
+[ -x "$DLSS_TOOLS/dlss_cache" ] && [ -x "$DLSS_TOOLS/nm_unzstd" ] && [ -f "$DLSS_TOOLS/assertfail_trap.ptx" ] || die "this package lacks dlss/dlss_cache, dlss/nm_unzstd or dlss/assertfail_trap.ptx"
 # As root this runs dlss_cache. A tool in a folder the logged-in user can write could be swapped after the package
 # check, so as root every path it runs from must be root-owned and writable by root only (install.sh runs it from its
 # verified private copy; a manual run needs the same).
 if [ "$(id -u)" = 0 ]; then
-  for p in "$HERE" "$DLSS_TOOLS" "$DLSS_TOOLS/dlss_cache" "$DLSS_TOOLS/assertfail_trap.ptx" "$HERE/dlss_fetch.sh"; do
+  for p in "$HERE" "$DLSS_TOOLS" "$DLSS_TOOLS/dlss_cache" "$DLSS_TOOLS/nm_unzstd" "$DLSS_TOOLS/assertfail_trap.ptx" "$HERE/dlss_fetch.sh"; do
     [ ! -L "$p" ] && [ -z "$(find "$p" -maxdepth 0 \( ! -user root -o -perm -g+w -o -perm -o+w \) -print -quit)" ] || \
       die "$p is not root-owned and root-writable only; run this through install.sh (it checks and copies the package first)"
   done
@@ -152,7 +152,15 @@ fetch nvjitlink.whl "$URL_WHEEL" "$SHA_WHEEL"
 
 # the .run is NVIDIA's installer script; it is only unpacked after its hash matched
 mkdir -p "$T/run" "$T/wheel" && chmod 700 "$T/run" "$T/wheel"
-sh "$T/driver.run" --extract-only --target "$T/run/x" >"$T/extract.log" 2>&1 || die "unpacking the NVIDIA package failed (see $T/extract.log)"
+# The .run is a makeself archive: a shell header, then (from line `skip=`) a zstd-compressed tar. Its own --extract-only
+# runs a bundled Linux zstd that a Mac cannot execute (and still exits 0 with nothing extracted), so the payload is read
+# here: tail -> nm_unzstd (the reference decoder, shipped in the package) -> tar, taking only the one member we pin.
+SKIP=$(head -n 40 "$T/driver.run" | LC_ALL=C sed -n 's/^skip=\([0-9][0-9]*\)$/\1/p' | head -n 1)
+case "$SKIP" in ""|*[!0-9]*) die "the NVIDIA package header has no usable skip= line";; esac
+[ "$SKIP" -gt 1 ] && [ "$SKIP" -lt 100000 ] || die "the NVIDIA package header gives an unreasonable skip=$SKIP"
+mkdir -p "$T/run/x" && chmod 700 "$T/run/x"
+( set -o pipefail; tail -n +"$SKIP" "$T/driver.run" | "$DLSS_TOOLS/nm_unzstd" | /usr/bin/tar -x -C "$T/run/x" "$NGX_MEMBER" ) >"$T/extract.log" 2>&1 \
+  || die "unpacking the NVIDIA package failed (see $T/extract.log)"
 [ -f "$T/run/x/$NGX_MEMBER" ] && [ ! -L "$T/run/x/$NGX_MEMBER" ] || die "the NVIDIA package has no $NGX_MEMBER"
 member_check "$T/run/x/$NGX_MEMBER" "$SHA_NGX"
 ok "$NGX_MEMBER matches its pin"
