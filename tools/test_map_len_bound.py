@@ -73,7 +73,8 @@ def applied_to_stored_node_only(src):
 def generation_bumps_on_every_head_change(src):
     return (src.count('nvMapListFree(&fMapList);\n    fMapLen = 0; fMapLenNode = nullptr; fMapGen++;') == 1 and
             src.count('nvMapListFree(&me->fMapList);\n            me->fMapLen = 0; me->fMapLenNode = nullptr; me->fMapGen++;') == 1 and
-            'p->gen = ++*c->mapGen();' in src)
+            'if (now != *c->mapHeadAtAcquire()) ++*c->mapGen();' in src and
+            '*c->mapHeadAtAcquire() = *c->mapList();' in src)
 
 
 def slot_scoped_to_escape(src):
@@ -100,6 +101,8 @@ arms = [
                          'if (*c->mapList() == node && c->mapLenNode() == nullptr)')),
     ('a freed node address coming back as a new node cannot inherit a length (generation bumps on store and free)',
      generation_bumps_on_every_head_change, nvrm,
+     lambda s: s.replace('if (now != *c->mapHeadAtAcquire()) ++*c->mapGen();', '')),
+    ('a freed list also moves the generation', generation_bumps_on_every_head_change, nvrm,
      lambda s: s.replace('fMapLen = 0; fMapLenNode = nullptr; fMapGen++;', 'fMapLen = 0; fMapLenNode = nullptr;')),
     ('a pending slot lives for one escape: cleared on entry and on every exit', slot_scoped_to_escape, nvrm,
      lambda s: s.replace('    NvMapPendingScope pendingScope;', '    (void)0;')),

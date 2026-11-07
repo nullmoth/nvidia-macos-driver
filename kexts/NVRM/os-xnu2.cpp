@@ -26,8 +26,10 @@
 // The firmware moved out of /Users/Shared, which every user can write: the kernel reads these images and
 // the card runs them. /Library/NullMoth is where the installer already keeps the cached accelerators
 // root-owned and not group- or world-writable.
-#define NV_XNU_FW_DIR "/Library/NullMoth/nvfw/nvidia/615.78.08/"
-// The largest image we ship is the Ampere ucodes at 58 MB (615.78.08, measured); the cap only has to be generous.
+// NVIDIA's GSP firmware must be the exact release the RM was built from; this directory names it (the package ships
+// nvfw/nvidia/<version>/, and older versions stay beside it for a rollback).
+#define NV_XNU_FW_DIR "/Library/NullMoth/nvfw/nvidia/620.70.06/"
+// The largest image we ship is the Ampere ucodes at 56 MB (620.70.06, measured); the cap only has to be generous.
 #define NV_XNU_FW_MAX_BYTES (256u * 1024u * 1024u)
 #define NV_FIRMWARE_FOR_NAME(name) NV_XNU_FW_DIR name ".bin"
 extern "C" {

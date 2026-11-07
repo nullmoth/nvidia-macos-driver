@@ -315,6 +315,7 @@ public:
     nv_alloc_mapping_list_node_t *mapLenNode() const { return fMapLenNode; }
     void setMapLenNode(nv_alloc_mapping_list_node_t *n) { fMapLenNode = n; }
     NvU64 *mapGen() { return &fMapGen; }
+    nv_alloc_mapping_list_node_t **mapHeadAtAcquire() { return &fMapHeadAtAcquire; }
     bool isCtl() const { return fIsCtl; }
     nv_state_t *nvState();
 protected:
@@ -332,6 +333,7 @@ private:
     // Bumped under fMapLock whenever the list head is stored or freed: a node address can be reused after a free, so a
     // pending length is applied only while the generation it was recorded at is still current.
     NvU64 fMapGen = 0;
+    nv_alloc_mapping_list_node_t *fMapHeadAtAcquire = nullptr;   // list head when RM took the write hold
     bool fIsCtl = true;
     int  fFd = -1;
     int  fPid = 0;
@@ -464,6 +466,7 @@ extern "C" nv_alloc_mapping_list_node_t **NV_API_CALL nv_acquire_file_va(nv_file
     if (!c || !c->mapLock()) { gNvMapBusy = &gNvMapBusyNode; return &gNvMapBusy; }
     IOLockLock(c->mapLock());
     if (write) {
+        *c->mapHeadAtAcquire() = *c->mapList();   // under c's lock, held until nv_release_file_va
         // Releasing the previous holder here is safe while c's lock is held: if it is c, RM still holds c (it got it
         // from nv_get_file_private), so this is not the last reference; any other client frees under its own lock.
         NVRMUserClient *old = nullptr;
@@ -487,8 +490,11 @@ extern "C" void NV_API_CALL nv_release_file_va(nv_file_private_t *nvfp, NvBool w
         NVRMUserClient *drop = nullptr;
         IOSimpleLockLock(mapPendingLock());
         NvMapPending *p = mapPendingSlot(false);
+        // Any head change during this hold moves the generation, whether or not this thread got a slot, so no pending
+        // length recorded before it can land afterwards.
+        if (now != *c->mapHeadAtAcquire()) ++*c->mapGen();
         const bool fresh = p && p->c == c && p->wasEmpty && now;
-        if (fresh) { p->node = now; p->gen = ++*c->mapGen(); } else if (p) drop = mapPendingDrop(p);
+        if (fresh) { p->node = now; p->gen = *c->mapGen(); } else if (p) drop = mapPendingDrop(p);
         IOSimpleLockUnlock(gNvMapPendingLock);
         if (now != c->mapLenNode()) { *c->mapLen() = 0; c->setMapLenNode(nullptr); }
         if (drop) drop->release();   // not the last reference to c (RM holds it); others free under their own lock
