@@ -352,6 +352,10 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
       }
    }
    const struct nvk_link_shdr *st = &sh[shstrndx];
+   if (st->type != 3 /* STRTAB */ || st->size == 0) {
+      result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED, "cubin link: bad section name table");
+      goto out;
+   }
    for (uint32_t i = 0; i < shnum; i++) {
       if (sh[i].name >= st->size || !memchr(b + st->offset + sh[i].name, 0, st->size - sh[i].name)) {
          result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED, "cubin link: bad section name");
@@ -416,14 +420,16 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
          memcpy(&r_add, b + sh[r].offset + e + 16, 8);
          const uint32_t type = (uint32_t)r_info;
          const uint64_t si = r_info >> 32;
-         if ((si + 1) * 24 > sh[sy].size || r_off % 16 || r_off + 16 > sh[t].size) {
+         /* overflow-safe: r_off comes from the file */
+         if (si >= sh[sy].size / 24 || r_off % 16 || r_off > sh[t].size || sh[t].size - r_off < 16) {
             result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED, "cubin link: bad relocation in %s", names[t]);
             goto out;
          }
          uint16_t s_shndx; uint64_t s_value;
          memcpy(&s_shndx, b + sh[sy].offset + si * 24 + 6, 2);
          memcpy(&s_value, b + sh[sy].offset + si * 24 + 8, 8);
-         if (s_shndx >= shnum || !place[s_shndx]) {
+         if (s_shndx >= shnum || !place[s_shndx] || s_value < sh[s_shndx].addr ||
+             s_value - sh[s_shndx].addr > sh[s_shndx].size) {
             result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
                                "cubin link: %s refers to unplaced section %u", names[t], s_shndx);
             goto out;
