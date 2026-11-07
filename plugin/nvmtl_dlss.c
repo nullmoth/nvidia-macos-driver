@@ -396,13 +396,11 @@ static nvmtl_dlss_feature *create_impl(VkCommandBuffer cmd, const nvmtl_dlss_cfg
     P_SETI(prm, "DLSS.Feature.Create.Flags", (cfg->hdr ? F_HDR : 0) | (cfg->mv_lowres ? F_MV_LOWRES : 0) | (cfg->mv_jittered ? F_MV_JITTERED : 0)
                                            | (cfg->depth_inverted ? F_DEPTH_INVERTED : 0) | (cfg->auto_exposure ? F_AUTO_EXPOSURE : 0));
     P_SETI(prm, "DLSS.Enable.Output.Subrects", 0);
-    /* Render preset for every quality mode. The DLSS 4 transformer presets (J, K) run on NVK but their output stage
-     * still writes an empty image, so the default is preset E (the CNN model, 51.7 dB against the reference at a
-     * game's 1280x720 -> 1920x1080 HDR + auto-exposure settings). NVMTL_DLSS_PRESET=<n> overrides (0 = DLSS's own
-     * choice, 10 = J, 11 = K). */
-    {
-        const char *ps = getenv("NVMTL_DLSS_PRESET");
-        const unsigned preset = ps ? (unsigned)strtoul(ps, NULL, 0) : 5u;
+    /* Render preset: DLSS's own choice (the DLSS 4 transformer at 1.5x and above: 56.25 dB against the reference at a
+     * game's 1280x720 -> 1920x1080 HDR + auto-exposure settings; the CNN preset E gives 52.40 dB there).
+     * NVMTL_DLSS_PRESET=<n> pins one for every quality mode (5 = E, 6 = F, 10 = J, 11 = K). */
+    if (getenv("NVMTL_DLSS_PRESET")) {
+        const unsigned preset = (unsigned)strtoul(getenv("NVMTL_DLSS_PRESET"), NULL, 0);
         static const char *const pn[] = { "DLSS.Hint.Render.Preset.DLAA", "DLSS.Hint.Render.Preset.Quality",
                                           "DLSS.Hint.Render.Preset.Balanced", "DLSS.Hint.Render.Preset.Performance",
                                           "DLSS.Hint.Render.Preset.UltraPerformance", "DLSS.Hint.Render.Preset.UltraQuality" };
