@@ -1027,7 +1027,7 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
 - (id<MTLBuffer>)remoteStorageBuffer { return nil; }
 - (id<MTLBuffer>)newRemoteBufferViewForDevice:(id<MTLDevice>)d { return nil; }
 - (kern_return_t)setOwnerWithIdentity:(task_id_token_t)t { return nvmtl_owner_check(t); }
-- (uint64_t)gpuAddress { return nvmtl_vk_buffer_address(&_b); }
+- (uint64_t)gpuAddress { uint64_t a = nvmtl_vk_buffer_address(&_b); nvmtl_m4_note_buffer(self, a, [self length]); return a; }   // a Metal 4 argument table resolves addresses back to buffers
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)s {
     if (_heap || _subHeap || _hostPtr) return MTLPurgeableStateNonVolatile;
     MTLPurgeableState prev = nvmtl_purge(&_purge, s);
