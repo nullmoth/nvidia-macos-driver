@@ -1622,6 +1622,7 @@ void NV_API_CALL nv_destroy_nano_timer(nv_state_t *nv, nv_nano_timer_t *t)
 
 extern "C" nv_file_private_t *nv_xnu_lookup_fd(NvS32 fd, void **priv, NvBool *isCtl);
 extern "C" void nv_xnu_put_client(void *priv);
+extern "C" void nv_xnu_note_map_len(NvU64 bytes);
 // NVIDIA 620 dropped the control/device argument: every caller now checks it with nv_verify_nvfp_control_or_put
 // (nv.h), which asks nv_get_state_ptr_from_nvfp and drops the reference on a mismatch.
 nv_file_private_t *NV_API_CALL nv_get_file_private(NvS32 fd, void **os_private)
@@ -1649,6 +1650,11 @@ NV_STATUS NV_API_CALL nv_alloc_user_mapping(nv_state_t *nv, void *pAllocPrivate,
     addr64_t phys = a->md->getPhysicalSegment((IOByteCount)(pageIndex * PAGE_SIZE), &len, kIOMemoryMapperNone);
     if (!phys) return NV_ERR_GENERIC;
     *pUserAddress = (NvU64)phys + pageOffset; if (ppPrivate) *ppPrivate = NULL;
+    // The bytes RM validated for this user mapping, from page_index's first byte; the map path clamps to them.
+    // An overflowing sum reports 0, which the map path refuses.
+    NvU64 validated = 0;
+    if (!__builtin_add_overflow((NvU64)pageOffset, size, &validated)) nv_xnu_note_map_len(validated);
+    else nv_xnu_note_map_len(0);
     return NV_OK;
 }
 void NV_API_CALL nv_free_user_mapping(nv_state_t *nv, void *pAllocPrivate, NvU64 userAddress, void *pPrivate) { TRC; }
