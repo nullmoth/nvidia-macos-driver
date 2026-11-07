@@ -648,6 +648,9 @@ static bool nvmtl_process_is_allowed(void)
 }
 
 #include "nvmtl_dlss.h"
+static BOOL nvmtl_m4_enabled(void);   // NVMTLMetal4.m, later in this translation unit
+static id<MTLCommandBuffer> nvmtl_m4_underlying(id cb);
+void nvmtl_m4_note_buffer(id buf, uint64_t addr, uint64_t length);
 #include "nvmtl_mfx_native_profile.inc"
 
 @implementation NVMTLDevice
@@ -2276,6 +2279,7 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
         case MTLGPUFamilyMac2: case MTLGPUFamilyCommon1: case MTLGPUFamilyCommon2: case MTLGPUFamilyCommon3: return YES;
         case 2001 : return YES;
         case 5001 : { struct nvmtl_caps c = { 0, 0 }; return nvmtl_claim_metal3(&c) ? YES : NO; }   // MTLGPUFamilyMetal3
+        case 5002 : { struct nvmtl_caps c = { 0, 0 }; return nvmtl_claim_metal3(&c) && nvmtl_m4_enabled() ? YES : NO; }   // MTLGPUFamilyMetal4: the Metal 4 command model in NVMTLMetal4.m, on top of Metal 3
         default: break;
     }
     if ((NSInteger)f >= 1001 && (NSInteger)f <= 1009) return nvmtl_family_answer(f, (NSInteger)f <= 1000 + nvmtl_apple_family_max(), "Apple family");
@@ -2471,6 +2475,7 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
 #import "NVMTLGL.m"
 #import "NVMTLGLVBlank.m"
 #import "NVMTLEmbedded.m"
+#import "NVMTLMetal4.m"
 #import "NVMTLVendorCompiler.m"
 #include "nvmtl_vk.c"
 #import "NVMTLSass.m"
