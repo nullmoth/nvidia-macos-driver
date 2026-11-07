@@ -82,5 +82,28 @@ int nvmtl_dlss_evaluate(VkCommandBuffer cmd, nvmtl_dlss_feature *f, const nvmtl_
 /* The cfg a feature was created with. */
 const nvmtl_dlss_cfg *nvmtl_dlss_feature_cfg(const nvmtl_dlss_feature *f);
 
+/* ---- Ray Reconstruction behind the MetalFX temporal denoised scaler ---- */
+/* 1 once the core is ready, reported Ray Reconstruction available, and NVMTL_DLSS_RR is not "0". */
+int nvmtl_dlss_rr_ready(void);
+typedef struct {
+    uint32_t in_w, in_h, out_w, out_h;
+    int hdr, mv_lowres, mv_jittered, depth_inverted, auto_exposure;
+} nvmtl_dlss_rr_cfg;
+typedef struct nvmtl_dlss_rr_feature nvmtl_dlss_rr_feature;
+nvmtl_dlss_rr_feature *nvmtl_dlss_rr_feature_create(VkCommandBuffer cmd, const nvmtl_dlss_rr_cfg *cfg);
+const nvmtl_dlss_rr_cfg *nvmtl_dlss_rr_feature_cfg(const nvmtl_dlss_rr_feature *f);
+typedef struct {
+    nvmtl_dlss_image color, depth, motion, output, diffuse_albedo, specular_albedo, normals, roughness;
+    const nvmtl_dlss_image *hit_distance;   /* NULL when absent */
+    const nvmtl_dlss_image *exposure;       /* NULL when absent */
+    const nvmtl_dlss_image *reactive;       /* NULL when absent */
+    float world_to_view[16], view_to_clip[16];   /* as the app gave them (column-major), copied by the evaluate call */
+    float jitter_x, jitter_y, mv_scale_x, mv_scale_y, pre_exposure;
+    int reset;
+    uint32_t render_w, render_h;
+} nvmtl_dlss_rr_eval;
+/* Record the denoise + upscale into cmd. All images must be in VK_IMAGE_LAYOUT_GENERAL. 0 on success. */
+int nvmtl_dlss_rr_evaluate(VkCommandBuffer cmd, nvmtl_dlss_rr_feature *f, const nvmtl_dlss_rr_eval *e);
+
 /* Local check of the worker thread every call above runs on (stack size, one thread, environment kept). 0 = pass. */
 int nvmtl_dlss_selftest(void);

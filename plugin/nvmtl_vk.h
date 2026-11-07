@@ -426,6 +426,19 @@ typedef struct {
 } nvmtl_vk_dlss_args;
 int nvmtl_vk_dlss_available(void);
 int nvmtl_vk_cmd_dlss(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_args *a);
+// DLSS Ray Reconstruction behind the MetalFX temporal denoised scaler. rr_available: nvmtl_vk_dlss_available and the core
+// reported Ray Reconstruction. cmd_dlss_rr records one denoise + upscale; *feature works as for cmd_dlss.
+typedef struct {
+    nvk_image *color, *depth, *motion, *output, *diffuse_albedo, *specular_albedo, *normals, *roughness, *hit_distance, *exposure, *reactive;
+    void *color_view, *depth_view, *motion_view, *output_view, *diffuse_albedo_view, *specular_albedo_view, *normals_view, *roughness_view,
+         *hit_distance_view, *exposure_view, *reactive_view;
+    uint32_t in_w, in_h, out_w, out_h;
+    int hdr, mv_lowres, mv_jittered, depth_inverted, auto_exposure;
+    float world_to_view[16], view_to_clip[16];
+    float jitter_x, jitter_y, mv_scale_x, mv_scale_y, pre_exposure; int reset;
+} nvmtl_vk_dlss_rr_args;
+int nvmtl_vk_dlss_rr_available(void);
+int nvmtl_vk_cmd_dlss_rr(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_rr_args *a);
 int nvmtl_vk_cmd_blit_convert(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint32_t ss, uint32_t sx, uint32_t sy,
                               nvk_image *dst, uint32_t dl, uint32_t ds, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h);
 void nvmtl_vk_buffer_destroy(nvk_buffer *b);

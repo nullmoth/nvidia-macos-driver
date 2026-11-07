@@ -69,6 +69,7 @@ static VkInstance g_inst; static VkDevice g_dev;
 static PFN_vkGetInstanceProcAddr g_gipa; static PFN_vkGetDeviceProcAddr g_gdpa;
 static uint32_t g_vendor, g_device; static const chip_row *g_chip;
 static elfhost_module *g_core;
+static int g_rr_avail, g_fg_avail;   /* the core's answers for Ray Reconstruction and Frame Generation (1 = yes) */
 
 typedef struct { void **vt; } ngxp;   /* parameter object; vtable: 0 SetULL 1 SetF 3 SetUI 4 SetI 7 SetVoidPointer 12 GetI */
 #define P_SETF(p, n, v)  ((void (*)(ngxp *, const char *, float))(p)->vt[1])((p), (n), (v))
@@ -86,6 +87,7 @@ typedef struct { VkImageView view; VkImage image; VkImageSubresourceRange range;
 typedef struct { ngx_image_vk image; int type; bool rw; } ngx_res_vk;
 
 struct nvmtl_dlss_feature { void *handle; ngxp *eval; nvmtl_dlss_cfg cfg; };
+struct nvmtl_dlss_rr_feature { void *handle; ngxp *eval; nvmtl_dlss_rr_cfg cfg; float world_to_view[16], view_to_clip[16]; };
 
 /* ---- the files ---------------------------------------------------------------------------------------------- */
 static int is_dir(const char *p) { struct stat s; return stat(p, &s) == 0 && S_ISDIR(s.st_mode); }
@@ -353,6 +355,10 @@ static int init_locked(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, PFN_v
     ngxp *caps = NULL; int avail = -1; caps_fn(&caps);
     if (caps) P_GETI(caps, "SuperSampling.Available", &avail);
     if (avail != 1) return fail("NGX reports Super Resolution not available");
+    /* The core names Ray Reconstruction "SuperSamplingDenoising". Frame Generation is only reported: it is not driven. */
+    if (caps) { P_GETI(caps, "SuperSamplingDenoising.Available", &g_rr_avail); P_GETI(caps, "FrameGeneration.Available", &g_fg_avail); }
+    nvlog("dlss: core reports Ray Reconstruction %s, Frame Generation %s", g_rr_avail == 1 ? "available" : "not available",
+          g_fg_avail == 1 ? "available" : "not available");
     g_state = 1;
     nvlog("dlss: ready on %s (device %04x, chip code 0x%x)", g_chip->name, pci_device, g_chip->chip);
     return 0;
@@ -453,6 +459,90 @@ static int eval_impl(VkCommandBuffer cmd, nvmtl_dlss_feature *f, const nvmtl_dls
     return 0;
 }
 
+/* ---- Ray Reconstruction (the core's "SuperSamplingDenoising") ------------------------------------------------- */
+/* NVSDK_NGX_Feature_RayReconstruction. Believed to be 13 (Super Resolution is 1, Frame Generation 11); the value is
+ * overridable with NVMTL_DLSS_RR_FEATURE until a run on the device confirms it. */
+static int rr_feature_id(void)
+{
+    const char *e = getenv("NVMTL_DLSS_RR_FEATURE");
+    return e && e[0] ? (int)strtol(e, NULL, 0) : 13;
+}
+int nvmtl_dlss_rr_ready(void)
+{
+    const char *off = getenv("NVMTL_DLSS_RR");
+    return g_state == 1 && g_rr_avail == 1 && !(off && off[0] == '0');
+}
+static nvmtl_dlss_rr_feature *rr_create_impl(VkCommandBuffer cmd, const nvmtl_dlss_rr_cfg *cfg)
+{
+    if (!nvmtl_dlss_rr_ready() || !cmd || !cfg || !cfg->in_w || !cfg->in_h || !cfg->out_w || !cfg->out_h) return NULL;
+    pthread_mutex_lock(&g_lock);
+    nvmtl_dlss_rr_feature *f = calloc(1, sizeof *f); ngxp *prm = NULL, *ev = NULL; void *handle = NULL;
+    if (!f) goto bad;
+    g_alloc(&prm);
+    if (!prm) { nvlog("dlss: RR AllocateParameters gave nothing"); goto bad; }
+    const int quality = nvmtl_dlss_quality_for_ratio((float)cfg->out_w / (float)cfg->in_w);
+    P_SETUI(prm, "CreationNodeMask", 1); P_SETUI(prm, "VisibilityNodeMask", 1);
+    P_SETUI(prm, "Width", cfg->in_w); P_SETUI(prm, "Height", cfg->in_h);
+    P_SETUI(prm, "OutWidth", cfg->out_w); P_SETUI(prm, "OutHeight", cfg->out_h);
+    P_SETI(prm, "PerfQualityValue", quality);
+    P_SETI(prm, "DLSS.Feature.Create.Flags", (cfg->hdr ? F_HDR : 0) | (cfg->mv_lowres ? F_MV_LOWRES : 0) | (cfg->mv_jittered ? F_MV_JITTERED : 0)
+                                           | (cfg->depth_inverted ? F_DEPTH_INVERTED : 0) | (cfg->auto_exposure ? F_AUTO_EXPOSURE : 0));
+    P_SETI(prm, "DLSS.Enable.Output.Subrects", 0);
+    /* 0 = roughness in its own texture (MetalFX hands it over that way); 1 = packed in the normals' alpha. */
+    P_SETI(prm, "DLSS.Roughness.Mode", 0);
+    if (getenv("NVMTL_DLSS_RR_PRESET")) {
+        const unsigned preset = (unsigned)strtoul(getenv("NVMTL_DLSS_RR_PRESET"), NULL, 0);
+        static const char *const pn[] = { "RayReconstruction.Hint.Render.Preset.DLAA", "RayReconstruction.Hint.Render.Preset.Quality",
+                                          "RayReconstruction.Hint.Render.Preset.Balanced", "RayReconstruction.Hint.Render.Preset.Performance",
+                                          "RayReconstruction.Hint.Render.Preset.UltraPerformance", "RayReconstruction.Hint.Render.Preset.UltraQuality" };
+        for (unsigned i = 0; i < sizeof pn / sizeof pn[0]; i++) P_SETUI(prm, pn[i], preset);
+        nvlog("dlss: RR render preset %u", preset);
+    }
+    const unsigned rc = g_create(g_dev, cmd, rr_feature_id(), prm, &handle);
+    if (rc != 1 || !handle) { nvlog("dlss: RR CreateFeature1 returned 0x%08x (feature id %d)", rc, rr_feature_id()); goto bad; }
+    g_alloc(&ev);
+    if (!ev) { nvlog("dlss: RR AllocateParameters (evaluate) gave nothing"); goto bad; }
+    f->handle = handle; f->eval = ev; f->cfg = *cfg;
+    pthread_mutex_unlock(&g_lock);
+    nvlog("dlss: RR feature %ux%u -> %ux%u, quality %d, hdr %d, depth %s, exposure %s", cfg->in_w, cfg->in_h, cfg->out_w, cfg->out_h,
+          quality, cfg->hdr, cfg->depth_inverted ? "inverted" : "normal", cfg->auto_exposure ? "auto" : "texture");
+    return f;
+bad:
+    pthread_mutex_unlock(&g_lock);
+    free(f);
+    return NULL;
+}
+const nvmtl_dlss_rr_cfg *nvmtl_dlss_rr_feature_cfg(const nvmtl_dlss_rr_feature *f) { return &f->cfg; }
+static int rr_eval_impl(VkCommandBuffer cmd, nvmtl_dlss_rr_feature *f, const nvmtl_dlss_rr_eval *e)
+{
+    if (!nvmtl_dlss_rr_ready() || !f || !cmd || !e) return -1;
+    ngx_res_vk color, depth, motion, out, diff, spec, nrm, rgh, hit, expo, react;
+    fill(&color, &e->color, false); fill(&depth, &e->depth, false); fill(&motion, &e->motion, false); fill(&out, &e->output, true);
+    fill(&diff, &e->diffuse_albedo, false); fill(&spec, &e->specular_albedo, false); fill(&nrm, &e->normals, false);
+    fill(&rgh, &e->roughness, false);
+    ngxp *p = f->eval;
+    pthread_mutex_lock(&g_lock);
+    P_SETP(p, "Color", &color); P_SETP(p, "Output", &out); P_SETP(p, "Depth", &depth); P_SETP(p, "MotionVectors", &motion);
+    P_SETP(p, "DLSS.Input.DiffuseAlbedo", &diff); P_SETP(p, "DLSS.Input.SpecularAlbedo", &spec);
+    P_SETP(p, "GBuffer.Normals", &nrm); P_SETP(p, "GBuffer.Roughness", &rgh);
+    if (e->hit_distance) { fill(&hit, e->hit_distance, false); P_SETP(p, "DLSSD.SpecularHitDistance", &hit); } else P_SETP(p, "DLSSD.SpecularHitDistance", NULL);
+    if (e->exposure) { fill(&expo, e->exposure, false); P_SETP(p, "ExposureTexture", &expo); } else P_SETP(p, "ExposureTexture", NULL);
+    if (e->reactive) { fill(&react, e->reactive, false); P_SETP(p, "DLSS.Input.Bias.Current.Color.Mask", &react); } else P_SETP(p, "DLSS.Input.Bias.Current.Color.Mask", NULL);
+    /* The camera matrices are read through pointers, 16 floats each, so they are copied into the feature (the core may
+     * read them after this call returns, when the recorded work runs). */
+    memcpy(f->world_to_view, e->world_to_view, sizeof f->world_to_view); memcpy(f->view_to_clip, e->view_to_clip, sizeof f->view_to_clip);
+    P_SETP(p, "WorldToViewMatrix", f->world_to_view); P_SETP(p, "ViewToClipMatrix", f->view_to_clip);
+    P_SETF(p, "Jitter.Offset.X", e->jitter_x); P_SETF(p, "Jitter.Offset.Y", e->jitter_y);
+    P_SETF(p, "MV.Scale.X", e->mv_scale_x); P_SETF(p, "MV.Scale.Y", e->mv_scale_y);
+    P_SETF(p, "DLSS.Pre.Exposure", e->pre_exposure > 0 ? e->pre_exposure : 1.0f); P_SETF(p, "DLSS.Exposure.Scale", 1.0f);
+    P_SETI(p, "Reset", e->reset ? 1 : 0);
+    P_SETUI(p, "DLSS.Render.Subrect.Dimensions.Width", e->render_w); P_SETUI(p, "DLSS.Render.Subrect.Dimensions.Height", e->render_h);
+    const unsigned rc = g_eval(cmd, f->handle, p, NULL);
+    pthread_mutex_unlock(&g_lock);
+    if (rc != 1) { nvlog("dlss: RR EvaluateFeature returned 0x%08x", rc); return -1; }
+    return 0;
+}
+
 /* ---- the worker thread -------------------------------------------------------------------------------------- */
 /* Every call that enters the NGX core or the runtime it loads runs on ONE dedicated thread with a large stack. That
  * code is built for a Linux thread (8 MB default stack); an application's worker threads here have 512 KB, and the
@@ -536,6 +626,22 @@ int nvmtl_dlss_evaluate(VkCommandBuffer cmd, nvmtl_dlss_feature *f, const nvmtl_
 /* Local check of the worker (no NGX needed): a job runs on a different thread, which has far more than the 512 KB an
  * application thread gets, and the caller's floating-point environment is untouched. Returns 0 when all hold. */
 typedef struct { pthread_t who; size_t reached; } probe_job;
+typedef struct { VkCommandBuffer cmd; const nvmtl_dlss_rr_cfg *cfg; nvmtl_dlss_rr_feature *f; } rr_create_job;
+static void rr_create_run(void *a) { rr_create_job *j = a; j->f = rr_create_impl(j->cmd, j->cfg); }
+nvmtl_dlss_rr_feature *nvmtl_dlss_rr_feature_create(VkCommandBuffer cmd, const nvmtl_dlss_rr_cfg *cfg)
+{
+    rr_create_job j = { cmd, cfg, NULL };
+    if (run_on_worker(rr_create_run, &j)) return NULL;
+    return j.f;
+}
+typedef struct { VkCommandBuffer cmd; nvmtl_dlss_rr_feature *f; const nvmtl_dlss_rr_eval *e; int r; } rr_eval_job;
+static void rr_eval_run(void *a) { rr_eval_job *j = a; j->r = rr_eval_impl(j->cmd, j->f, j->e); }
+int nvmtl_dlss_rr_evaluate(VkCommandBuffer cmd, nvmtl_dlss_rr_feature *f, const nvmtl_dlss_rr_eval *e)
+{
+    rr_eval_job j = { cmd, f, e, -1 };
+    if (run_on_worker(rr_eval_run, &j)) return -1;
+    return j.r;
+}
 static size_t probe_depth(size_t used, size_t limit)
 {
     volatile char frame[16 * 1024];
