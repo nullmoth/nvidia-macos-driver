@@ -312,6 +312,8 @@ public:
     IOReturn clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory) override;
     nv_alloc_mapping_list_node_t **mapList() { return &fMapList; }
     NvU64 *mapLen() { return &fMapLen; }
+    nv_alloc_mapping_list_node_t *mapLenNode() const { return fMapLenNode; }
+    void setMapLenNode(nv_alloc_mapping_list_node_t *n) { fMapLenNode = n; }
     bool isCtl() const { return fIsCtl; }
     nv_state_t *nvState();
 protected:
@@ -325,6 +327,7 @@ private:
     // its osMapSystemMemory call). 620's context no longer carries a size, and its alloc is the ROOT allocation, which
     // can hold other objects past this one, so the map path clamps to this and refuses when it is 0. Under fMapLock.
     NvU64 fMapLen = 0;
+    nv_alloc_mapping_list_node_t *fMapLenNode = nullptr;   // the node fMapLen belongs to
     bool fIsCtl = true;
     int  fFd = -1;
     int  fPid = 0;
@@ -409,11 +412,15 @@ extern "C" void nv_xnu_mmap_unlock(void *priv)
 static nv_alloc_mapping_list_node_t gNvMapBusyNode;
 static nv_alloc_mapping_list_node_t *gNvMapBusy = &gNvMapBusyNode;
 
-// Which client a thread just stored a new mapping node on. RM's osMapSystemMemory stores the node (acquire/release
-// below) and then, on the same thread, calls nv_alloc_user_mapping with the Length it validated; that call reports the
-// length through nv_xnu_note_map_len, which finds the client here. One slot per thread in flight; the client is
-// retained while it sits in a slot.
-struct NvMapPending { thread_t th; NVRMUserClient *c; bool wasEmpty; bool armed; };
+// Which node a thread just stored on which client. RM's osMapSystemMemory stores the node (acquire/release below) and
+// then, on the same thread and inside the same escape, calls nv_alloc_user_mapping with the Length it validated; that
+// call reports the length through nv_xnu_note_map_len, which applies it to that exact node only.
+// Lifetime: a slot lives for one escape call. NVRMUserClient::esc clears the calling thread's slot on entry and on every
+// exit (NvMapPendingScope), so a slot can never outlive the escape or point at a client from an earlier one. No retain:
+// RM holds the target client through nv_get_file_private/nv_put_file_private for the whole escape.
+// Fail closed: no free slot, an error before nv_alloc_user_mapping, or a node that changed means no length is recorded
+// for the current node, and the map path refuses a node without one.
+struct NvMapPending { thread_t th; NVRMUserClient *c; nv_alloc_mapping_list_node_t *node; bool wasEmpty; };
 static NvMapPending gNvMapPending[64];
 static IOSimpleLock *gNvMapPendingLock = nullptr;
 static IOSimpleLock *mapPendingLock()
@@ -424,18 +431,23 @@ static IOSimpleLock *mapPendingLock()
     }
     return gNvMapPendingLock;
 }
-// Returns the slot for the current thread (claiming a free one if asked); call with the pending lock held.
+// The current thread's slot (claiming a free one if asked); pending lock held.
 static NvMapPending *mapPendingSlot(bool claim)
 {
     thread_t me = current_thread(); NvMapPending *freeSlot = nullptr;
     for (auto &p : gNvMapPending) { if (p.th == me) return &p; if (!p.th && !freeSlot) freeSlot = &p; }
-    if (claim && freeSlot) { freeSlot->th = me; freeSlot->c = nullptr; freeSlot->armed = false; return freeSlot; }
+    if (claim && freeSlot) { freeSlot->th = me; freeSlot->c = nullptr; freeSlot->node = nullptr; freeSlot->wasEmpty = false; return freeSlot; }
     return nullptr;
 }
-static void mapPendingDrop(NvMapPending *p)   // pending lock held; the client is released by the caller after unlock
+static void mapPendingDrop(NvMapPending *p) { p->th = nullptr; p->c = nullptr; p->node = nullptr; p->wasEmpty = false; }
+static void mapPendingClearThread()
 {
-    p->th = nullptr; p->c = nullptr; p->armed = false; p->wasEmpty = false;
+    IOSimpleLockLock(mapPendingLock());
+    NvMapPending *p = mapPendingSlot(false);
+    if (p) mapPendingDrop(p);
+    IOSimpleLockUnlock(gNvMapPendingLock);
 }
+struct NvMapPendingScope { NvMapPendingScope() { mapPendingClearThread(); } ~NvMapPendingScope() { mapPendingClearThread(); } };
 
 extern "C" nv_alloc_mapping_list_node_t **NV_API_CALL nv_acquire_file_va(nv_file_private_t *nvfp, NvBool write)
 {
@@ -443,12 +455,10 @@ extern "C" nv_alloc_mapping_list_node_t **NV_API_CALL nv_acquire_file_va(nv_file
     if (!c || !c->mapLock()) { gNvMapBusy = &gNvMapBusyNode; return &gNvMapBusy; }
     IOLockLock(c->mapLock());
     if (write) {
-        NVRMUserClient *stale = nullptr;
         IOSimpleLockLock(mapPendingLock());
         NvMapPending *p = mapPendingSlot(true);
-        if (p) { stale = p->c; p->c = nullptr; p->armed = false; p->wasEmpty = (*c->mapList() == nullptr); }
+        if (p) { p->c = c; p->node = nullptr; p->wasEmpty = (*c->mapList() == nullptr); }
         IOSimpleLockUnlock(gNvMapPendingLock);
-        if (stale) stale->release();
     }
     return c->mapList();
 }
@@ -457,31 +467,30 @@ extern "C" void NV_API_CALL nv_release_file_va(nv_file_private_t *nvfp, NvBool w
     NVRMUserClient *c = NVRMUserClient::fromNvfp(nvfp);
     if (!c || !c->mapLock()) return;
     if (write) {
-        // A node that appeared during this hold is new: arm the slot so the validated length can follow it.
-        const bool stored = (*c->mapList() != nullptr);
-        bool arm = false;
+        // A node that appeared during this hold is new. Whatever length the client held belonged to an older node.
+        nv_alloc_mapping_list_node_t *now = *c->mapList();
         IOSimpleLockLock(mapPendingLock());
         NvMapPending *p = mapPendingSlot(false);
-        if (p) { if (p->wasEmpty && stored) { p->c = c; p->armed = true; arm = true; } else mapPendingDrop(p); }
+        if (p && p->c == c && p->wasEmpty && now) p->node = now; else if (p) mapPendingDrop(p);
         IOSimpleLockUnlock(gNvMapPendingLock);
-        if (arm) { c->retain(); *c->mapLen() = 0; }
+        if (now != c->mapLenNode()) { *c->mapLen() = 0; c->setMapLenNode(nullptr); }
     }
     IOLockUnlock(c->mapLock());
 }
 // Called from nv_alloc_user_mapping with the bytes RM validated, counted from page_index's first byte.
 extern "C" void nv_xnu_note_map_len(NvU64 bytes)
 {
-    NVRMUserClient *c = nullptr;
+    NVRMUserClient *c = nullptr; nv_alloc_mapping_list_node_t *node = nullptr;
     IOSimpleLockLock(mapPendingLock());
     NvMapPending *p = mapPendingSlot(false);
-    if (p && p->armed) c = p->c;
+    if (p && p->node) { c = p->c; node = p->node; }
     if (p) mapPendingDrop(p);
     IOSimpleLockUnlock(gNvMapPendingLock);
     if (!c) return;
     IOLockLock(c->mapLock());
-    if (*c->mapList() && *c->mapLen() == 0) *c->mapLen() = bytes;
+    // Only the node this thread stored, and only if it is still the client's current one.
+    if (*c->mapList() == node && c->mapLenNode() == nullptr) { *c->mapLen() = bytes; c->setMapLenNode(node); }
     IOLockUnlock(c->mapLock());
-    c->release();
 }
 // 620 callers check control-vs-device themselves (nv_verify_nvfp_control_or_put); this answers which state a file is on.
 extern "C" nv_state_t *NV_API_CALL nv_get_state_ptr_from_nvfp(nv_file_private_t *nvfp)
@@ -1991,7 +2000,7 @@ void NVRMUserClient::free(void)
 {
     if (fMapLock) IOLockLock(fMapLock);
     nvMapListFree(&fMapList);
-    fMapLen = 0;
+    fMapLen = 0; fMapLenNode = nullptr;
     if (fMapLock) IOLockUnlock(fMapLock);
     if (fGate) { IOLockFree(fGate); fGate = nullptr; }
     if (fMapLock) { IOLockFree(fMapLock); fMapLock = nullptr; }
@@ -2012,7 +2021,7 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
         return kIOReturnBadArgument;
     }
     snapshot = fMapList->context;
-    snapLen = fMapLen;
+    snapLen = (fMapLenNode == fMapList) ? fMapLen : 0;   // a length belongs to one node only
     if (!fIsCtl) {
         const NvU64 count = snapshot.memArea.numRanges;
         if (count == 0 || count > 4096 || !snapshot.memArea.pRanges) { IOLockUnlock(fMapLock); return kIOReturnBadArgument; }
@@ -2186,7 +2195,7 @@ IOReturn NVRMUserClient::sBindFd(OSObject *target, void *reference, IOExternalMe
         if (me->fMapList) {
             kprintf("NVRM-xnu: client %d re-bound to fd %d with a stale mapping context - cleared\n", me->fFd, me->fBound);
             nvMapListFree(&me->fMapList);
-            me->fMapLen = 0;
+            me->fMapLen = 0; me->fMapLenNode = nullptr;
         }
         IOLockUnlock(me->fMapLock);
     }
@@ -2223,6 +2232,7 @@ IOReturn NVRMUserClient::sEsc(OSObject *target, void *reference, IOExternalMetho
 IOReturn NVRMUserClient::esc(uint32_t cmd, void *data, uint32_t size)
 {
     Gate g(fGate);
+    NvMapPendingScope pendingScope;   // a mapping-length slot never outlives this escape
     if (!fOwner || fOwner->fPassDone < 2) { static bool once; if (!once) { once = true; kprintf("NVRM-xnu: esc 0x%x refused: adapter not up (run nvrmctl go 2)\n", cmd); } return kIOReturnNotReady; }
     nv_state_t *nv = nvState();
     NvXnuPmUse pmUse;
