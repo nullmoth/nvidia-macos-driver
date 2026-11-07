@@ -12,6 +12,10 @@
 #include "nvmtl_dlss.h"
 #include "dlss/elfhost.h"
 #include <dirent.h>
+#include <fenv.h>
+#include <locale.h>
+#include <signal.h>
+#include <xlocale.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -23,6 +27,13 @@
 #include <wchar.h>
 
 void nvlog(const char *fmt, ...);
+
+/* The core and the runtime it loads execute on the calling thread. Their C library shims may reset the floating-point
+ * environment (fesetenv), change the thread's locale, or change the signal mask; a caller that tracks those (a
+ * translated game keeps its rounding and flush modes in them) must see them unchanged. */
+typedef struct { fenv_t env; locale_t loc; sigset_t mask; } thread_env;
+static void env_save(thread_env *t) { fegetenv(&t->env); t->loc = uselocale((locale_t)0); pthread_sigmask(SIG_SETMASK, NULL, &t->mask); }
+static void env_restore(const thread_env *t) { fesetenv(&t->env); uselocale(t->loc); pthread_sigmask(SIG_SETMASK, &t->mask, NULL); }
 
 /* ---- which device is this: PCI device id -> management-library architecture and chip code ------------------ */
 /* Read from the NGX core's own code (NGX 620.70.06, function nvmlArchToNGX): it walks the GPUs, takes the NVML
@@ -213,7 +224,9 @@ int nvmtl_dlss_init(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, PFN_vkGe
                     uint32_t pci_vendor, uint32_t pci_device)
 {
     pthread_mutex_lock(&g_lock);
+    thread_env te; env_save(&te);
     int r = g_state ? (g_state == 1 ? 0 : -1) : init_locked(inst, pd, dev, gipa, gdpa, pci_vendor, pci_device);
+    env_restore(&te);
     pthread_mutex_unlock(&g_lock);
     return r;
 }
@@ -236,6 +249,7 @@ nvmtl_dlss_feature *nvmtl_dlss_feature_create(VkCommandBuffer cmd, const nvmtl_d
 {
     if (g_state != 1 || !cmd || !cfg || !cfg->in_w || !cfg->in_h || !cfg->out_w || !cfg->out_h) return NULL;
     pthread_mutex_lock(&g_lock);
+    thread_env te; env_save(&te);
     nvmtl_dlss_feature *f = calloc(1, sizeof *f); ngxp *prm = NULL, *ev = NULL; void *handle = NULL; unsigned rc = 0;
     if (!f) goto bad;
     g_alloc(&prm);
@@ -253,12 +267,14 @@ nvmtl_dlss_feature *nvmtl_dlss_feature_create(VkCommandBuffer cmd, const nvmtl_d
     g_alloc(&ev);
     if (!ev) { nvlog("dlss: AllocateParameters (evaluate) gave nothing"); goto bad; }
     f->handle = handle; f->eval = ev; f->cfg = *cfg;
+    env_restore(&te);
     pthread_mutex_unlock(&g_lock);
     nvlog("dlss: feature %ux%u -> %ux%u, quality %d, hdr %d, mv %s%s, depth %s, exposure %s", cfg->in_w, cfg->in_h, cfg->out_w, cfg->out_h,
           quality, cfg->hdr, cfg->mv_lowres ? "input-res" : "output-res", cfg->mv_jittered ? "+jitter" : "",
           cfg->depth_inverted ? "inverted" : "normal", cfg->auto_exposure ? "auto" : "texture");
     return f;
 bad:
+    env_restore(&te);
     pthread_mutex_unlock(&g_lock);
     free(f);   /* the parameter objects and any half-made feature belong to the core and are not released here */
     return NULL;
@@ -277,6 +293,7 @@ int nvmtl_dlss_evaluate(VkCommandBuffer cmd, nvmtl_dlss_feature *f, const nvmtl_
     fill(&color, &e->color, false); fill(&depth, &e->depth, false); fill(&motion, &e->motion, false); fill(&out, &e->output, true);
     ngxp *p = f->eval;
     pthread_mutex_lock(&g_lock);
+    thread_env te; env_save(&te);
     P_SETP(p, "Color", &color); P_SETP(p, "Output", &out); P_SETP(p, "Depth", &depth); P_SETP(p, "MotionVectors", &motion);
     if (e->exposure) { fill(&expo, e->exposure, false); P_SETP(p, "ExposureTexture", &expo); } else P_SETP(p, "ExposureTexture", NULL);
     if (e->reactive) { fill(&react, e->reactive, false); P_SETP(p, "DLSS.Input.Bias.Current.Color.Mask", &react); } else P_SETP(p, "DLSS.Input.Bias.Current.Color.Mask", NULL);
@@ -289,6 +306,7 @@ int nvmtl_dlss_evaluate(VkCommandBuffer cmd, nvmtl_dlss_feature *f, const nvmtl_
     P_SETUI(p, "DLSS.Input.Depth.Subrect.Base.X", e->depth_x); P_SETUI(p, "DLSS.Input.Depth.Subrect.Base.Y", e->depth_y);
     P_SETUI(p, "DLSS.Input.MV.Subrect.Base.X", e->motion_x); P_SETUI(p, "DLSS.Input.MV.Subrect.Base.Y", e->motion_y);
     unsigned rc = g_eval(cmd, f->handle, p, NULL);
+    env_restore(&te);
     pthread_mutex_unlock(&g_lock);
     if (rc != 1) { nvlog("dlss: EvaluateFeature returned 0x%08x", rc); return -1; }
     return 0;
