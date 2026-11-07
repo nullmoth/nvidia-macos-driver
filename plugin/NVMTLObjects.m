@@ -3644,7 +3644,9 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
 static uint32_t nvmtl_swizzle_twin_vk(uint32_t f) { return nvmtl_format_twin_vk(f); }
 static MTLPixelFormat nvmtl_swizzle_twin_mtl(MTLPixelFormat f) { return (MTLPixelFormat)nvmtl_format_twin_mtl((uint32_t)f); }
 - (NVMTLRenderPipelineState *)nvmtlColourTwinPipeline:(NVMTLRenderPipelineState *)p {
-    if (!p || !p->_descriptor) return p;
+    // NVMTL_FORMAT_TWIN=0 restores the old refusal of a pass whose attachment format is not the pipeline's (an A/B switch).
+    static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_FORMAT_TWIN"); on = !(e && e[0] == '0'); if (!on) nvlog("pipelines are NOT rebuilt for an attachment's channel order (NVMTL_FORMAT_TWIN=0)"); }
+    if (!on || !p || !p->_descriptor) return p;
     const uint32_t n = p->_p.ncol ? p->_p.ncol : (p->_p.cfmt ? 1u : 0u);
     uint32_t swap = 0;
     for (uint32_t i = 0; i < n && i < NVMTL_NCOL; i++) {
