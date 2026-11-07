@@ -50,6 +50,7 @@ typedef int (*nvmtl_to_uniform_fn)(const uint8_t *, size_t, uint8_t **, size_t *
 static nvmtl_to_uniform_fn xlate_to_uniform;   /* the table of an unlowered module moved to a Uniform block */
 static nvmtl_translate_fn xlate;
 #include "nvmtl_spvcache_name.h"
+#include "nvmtl_pretranslate.h"
 // The cache tag: the translator build (sha256-<64 hex>, 71 characters) plus every mode suffix. This buffer was 80 bytes,
 // so a tag with -u2 and -p5 had room for only "-a" of "-as1", and any suffix after it was silently dropped: entries
 // translated with and without the switches that follow shared one name, and a lookup could be served a module made in
@@ -1051,6 +1052,24 @@ NSArray<NSString *> *nvmtl_externs_of_airs(NSDictionary<NSString *, NSString *> 
     }
 }
 
+// ---- one translation per module (nvmtl_pretranslate.h) ----
+static void *nvmtl_flight_retain(void *p) { return (void *)CFBridgingRetain((__bridge id)p); }
+static void nvmtl_flight_release(void *p) { CFRelease(p); }
+static nvmtl_sf *nvmtl_translate_flight(void) {
+    static nvmtl_sf sf; static dispatch_once_t once;
+    dispatch_once(&once, ^{ nvmtl_sf_init(&sf, nvmtl_flight_retain, nvmtl_flight_release); });
+    return &sf;
+}
+// A module the translator refused is refused again with the same message, so neither the application nor the background
+// pass pays for the same failure twice.
+static NSMutableDictionary<NSString *, NSString *> *gTranslateFailures;
+static NSString *nvmtl_translate_failure_for(NSString *key) {
+    @synchronized([NSProcessInfo processInfo]) { return gTranslateFailures[key]; }
+}
+static void nvmtl_translate_failure_note(NSString *key, NSString *why) {
+    @synchronized([NSProcessInfo processInfo]) { if (!gTranslateFailures) gTranslateFailures = [NSMutableDictionary new]; gTranslateFailures[key] = why; }
+}
+
 NSData *nvmtl_compile_library_entry(NSData *air, NSString *ll, NSString *stage, NSString *name, NSString **error) {
     if (!air || !ll || !stage || !nvmtl_xlate_ready()) { if(error)*error=@"missing entry or translator"; return nil; }
     if (air.length >= 20 && *(const uint32_t *)air.bytes == 0x07230203u) return air;
@@ -1061,13 +1080,47 @@ NSData *nvmtl_compile_library_entry(NSData *air, NSString *ll, NSString *stage, 
         uint8_t *spv = NULL; size_t spvn = 0; char err[512] = { 0 };
         if (hit) { gSpvHit++; nvmtl_cache_touch(spvp); }
         else {
+            // One translation per module at a time: the background pre-translation (nvmtl_pretranslate_library) and the
+            // application ask for the same modules, and whoever comes second takes the first one's result. The key is the
+            // cache file name, which names the module and the translator's modes.
+            NSString *sfKey = spvp ?: [NSString stringWithFormat:@"%p/%@", (__bridge void *)air, stage];
+            nvmtl_sf *sf = nvmtl_translate_flight();
+            void *shared = NULL;
+            if (!nvmtl_sf_begin(sf, sfKey.UTF8String, 1, &shared)) {
+                NSData *got = shared ? (NSData *)CFBridgingRelease(shared) : nil;
+                if (!got) {
+                    if (error) *error = nvmtl_translate_failure_for(sfKey) ?: @"translation failed (see the first FAILED line for this function)";
+                    return nil;
+                }
+                gSpvHit++;
+                return got;
+            }
+            // The owner looks at the cache once more: a translation that finished just before this caller arrived has
+            // retired its entry because its file is stored.
+            NSData *again = getenv("NVMTL_SPVCACHE_OFF") ? nil : [NSData dataWithContentsOfFile:spvp];
+            if (again.length >= 20 && *(const uint32_t *)again.bytes == 0x07230203u) {
+                gSpvHit++; nvmtl_cache_touch(spvp);
+                nvmtl_sf_publish(sf, sfKey.UTF8String, (__bridge void *)again);
+                nvmtl_sf_retire(sf, sfKey.UTF8String);
+                return again;
+            }
+            NSString *known = nvmtl_translate_failure_for(sfKey);
+            if (known) {   // refused before: the same module gives the same refusal
+                nvmtl_sf_publish(sf, sfKey.UTF8String, NULL); nvmtl_sf_retire(sf, sfKey.UTF8String);
+                if (error) *error = known;
+                return nil;
+            }
             gSpvMiss++;
             if (xlate(ll.UTF8String, stage.UTF8String, &spv, &spvn, err, sizeof err) != 0) {
-                nvlog("library: translate %s (%s) FAILED: %s", name.UTF8String, stage.UTF8String, err); if (error) *error = @(err); return nil;
+                nvlog("library: translate %s (%s) FAILED: %s", name.UTF8String, stage.UTF8String, err);
+                nvmtl_translate_failure_note(sfKey, @(err));
+                nvmtl_sf_publish(sf, sfKey.UTF8String, NULL); nvmtl_sf_retire(sf, sfKey.UTF8String);
+                if (error) *error = @(err); return nil;
             }
             spvData = [NSData dataWithBytes:spv length:spvn];
+            nvmtl_sf_publish(sf, sfKey.UTF8String, (__bridge void *)spvData);
             if (spvp) {
-                NSData *stored = [spvData copy]; NSString *file = [spvp copy];
+                NSData *stored = [spvData copy]; NSString *file = [spvp copy]; NSString *flightKey = [sfKey copy];
                 nvmtl_cache_io(^{
                     NSError *werr = nil;
                     if ([stored writeToFile:file options:NSDataWritingAtomic error:&werr]) {
@@ -1077,8 +1130,9 @@ NSData *nvmtl_compile_library_entry(NSData *air, NSString *ll, NSString *stage, 
                         nvlog("spvcache: STORE FAILED %s (%zu bytes): %s", file.lastPathComponent.UTF8String,
                               (size_t)stored.length, werr.localizedDescription.UTF8String ?: "?");
                     }
+                    nvmtl_sf_retire(nvmtl_translate_flight(), flightKey.UTF8String);   // the file (or its failure) is final
                 });
-            }
+            } else nvmtl_sf_retire(sf, sfKey.UTF8String);
         }
         if (spv && xlate_free) xlate_free(spv, spvn);
         { double ms = (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6;
@@ -1098,6 +1152,63 @@ NSData *nvmtl_compile_library_entry(NSData *air, NSString *ll, NSString *stage, 
         }
     nvlog("library entry: spvcache %lu hit, %lu miss, %lu stored", gSpvHit, gSpvMiss, gSpvStored);
     return spvData;
+}
+
+// ---- background pre-translation of a new library's shaders ----
+// NVMTL_PRETRANSLATE=1 (the Cyberpunk profile sets it): every entry point of a library the application creates is
+// translated and stored in the shader cache by a small low-priority pool, so a cold first run does not translate each
+// shader on the thread that asks. It does the work the application's own request would do, through the same
+// single-flight entry (nvmtl_compile_library_entry), so a shader is translated once whoever asks first. Only the plain
+// translation is made here: variants that depend on function-constant values, and functions that need linking at pipeline
+// creation, are left to the pipeline path. NVMTL_PRETRANSLATE=0 or unset: nothing runs. NVMTL_PRETRANSLATE_THREADS (1..4, 2).
+typedef struct { void *lib; void *name; } nvmtl_pre_job;
+static _Atomic unsigned long gPreQueued, gPreDone, gPreTranslated, gPreCached, gPreSkipped, gPreFailed;
+static nvmtl_pool *nvmtl_pre_pool(void) {
+    static nvmtl_pool pool; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *t = getenv("NVMTL_PRETRANSLATE_THREADS"); int n = t ? atoi(t) : 2;
+        nvmtl_pool_init(&pool, n < 1 ? 1 : n > 4 ? 4 : n, 1);
+    });
+    return &pool;
+}
+static void nvmtl_pre_run(void *ctx) {
+    nvmtl_pre_job *j = ctx;
+    @autoreleasepool {
+        NVMTLLibrary *lib = CFBridgingRelease(j->lib); NSString *name = CFBridgingRelease(j->name); free(j);
+        NSData *air = lib->_fns[name]; NSString *ll = lib->_airs[name], *stage = lib->_stages[name];
+        if (!air || !ll || !stage.length || ![@[@"kernel", @"vertex", @"fragment"] containsObject:stage]
+            || (air.length >= 20 && *(const uint32_t *)air.bytes == 0x07230203u)
+            || (nvmtl_air_text_flags(ll) & (NVMTL_AIRF_DYLD_TABLE | NVMTL_AIRF_ISECT_TABLE))) atomic_fetch_add(&gPreSkipped, 1);
+        else {
+            NSString *file = getenv("NVMTL_SPVCACHE_OFF") ? nil : nvmtl_spvcache_path(air, stage);
+            if (file && access(file.fileSystemRepresentation, F_OK) == 0) atomic_fetch_add(&gPreCached, 1);
+            else {
+                NSString *why = nil;
+                if (nvmtl_compile_library_entry(air, ll, stage, name, &why)) atomic_fetch_add(&gPreTranslated, 1);
+                else atomic_fetch_add(&gPreFailed, 1);   // a refusal the pipeline path may still handle (linking, constants)
+            }
+        }
+    }
+    unsigned long done = atomic_fetch_add(&gPreDone, 1) + 1;
+    if (done == atomic_load(&gPreQueued) || done % 1000 == 0)
+        nvlog("pretranslate: %lu of %lu queued shaders processed - %lu translated, %lu already cached, %lu skipped, %lu refused",
+              done, (unsigned long)atomic_load(&gPreQueued), (unsigned long)atomic_load(&gPreTranslated),
+              (unsigned long)atomic_load(&gPreCached), (unsigned long)atomic_load(&gPreSkipped), (unsigned long)atomic_load(&gPreFailed));
+}
+void nvmtl_pretranslate_library(NVMTLLibrary *lib) {
+    const char *on = getenv("NVMTL_PRETRANSLATE");
+    if (!on || strcmp(on, "1") || !lib || !lib->_fns.count || !lib->_airs || !nvmtl_xlate_ready()) return;
+    unsigned long n = 0;
+    for (NSString *name in lib->_fns) {
+        nvmtl_pre_job *j = malloc(sizeof *j); if (!j) break;
+        j->lib = (void *)CFBridgingRetain(lib); j->name = (void *)CFBridgingRetain(name);
+        atomic_fetch_add(&gPreQueued, 1);
+        if (nvmtl_pool_submit(nvmtl_pre_pool(), nvmtl_pre_run, j)) {
+            atomic_fetch_sub(&gPreQueued, 1); CFRelease(j->lib); CFRelease(j->name); free(j); break;
+        }
+        n++;
+    }
+    nvlog("pretranslate: library of %lu entry points queued for background translation", n);
 }
 
 NSDictionary<NSString *, NSData *> *nvmtl_index_metallib_uncached(NSData *lib, NSDictionary **stageOut, NSDictionary **airOut, NSMutableArray *rec)

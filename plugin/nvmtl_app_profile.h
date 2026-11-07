@@ -62,6 +62,9 @@ static const nvmtl_app_knob nvmtl_cp2077_knobs[] = {
     { "NVMTL_IMAGE_GRACE", "1" },
     /* No residency eviction and no sparse buffers: the game manages its own working set. */
     { "NVMTL_NO_RES2", "1" },
+    /* Shaders of each library the game creates are translated in the background, so a first run with an empty shader
+       cache does not translate them one by one on the thread that asks. */
+    { "NVMTL_PRETRANSLATE", "1" },
     /* Completion is signalled by the kernel's event instead of polling. */
     { "NVRM_EVENT_WAIT", "1" },
     /* The GPU family and the MetalFX temporal scaler the game was qualified against. */
