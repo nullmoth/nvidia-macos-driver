@@ -60,14 +60,20 @@ def arms_only_new_node(src):
 
 
 def length_reset_with_list(src):
-    return src.count('nvMapListFree(&fMapList);\n    fMapLen = 0; fMapLenNode = nullptr;') == 1 and \
-           src.count('nvMapListFree(&me->fMapList);\n            me->fMapLen = 0; me->fMapLenNode = nullptr;') == 1
+    return src.count('nvMapListFree(&fMapList);\n    fMapLen = 0; fMapLenNode = nullptr; fMapGen++;') == 1 and \
+           src.count('nvMapListFree(&me->fMapList);\n            me->fMapLen = 0; me->fMapLenNode = nullptr; me->fMapGen++;') == 1
 
 
 def applied_to_stored_node_only(src):
     m = re.search(r'extern "C" void nv_xnu_note_map_len\(NvU64 bytes\)\n\{.*?\n\}\n', src, re.S)
-    return bool(m and 'if (*c->mapList() == node && c->mapLenNode() == nullptr)' in m.group(0)
-                and 'retain()' not in m.group(0))
+    return bool(m and 'if (*c->mapList() == node && *c->mapGen() == gen && c->mapLenNode() == nullptr)' in m.group(0)
+                and 'c->release();' in m.group(0))
+
+
+def generation_bumps_on_every_head_change(src):
+    return (src.count('nvMapListFree(&fMapList);\n    fMapLen = 0; fMapLenNode = nullptr; fMapGen++;') == 1 and
+            src.count('nvMapListFree(&me->fMapList);\n            me->fMapLen = 0; me->fMapLenNode = nullptr; me->fMapGen++;') == 1 and
+            'p->gen = ++*c->mapGen();' in src)
 
 
 def slot_scoped_to_escape(src):
@@ -90,11 +96,15 @@ arms = [
      lambda s: s.replace('p->wasEmpty && now', 'now')),
     ('a reported length lands only on the node this thread stored, and only while it is current',
      applied_to_stored_node_only, nvrm,
-     lambda s: s.replace('if (*c->mapList() == node && c->mapLenNode() == nullptr)', 'if (*c->mapList())')),
+     lambda s: s.replace('if (*c->mapList() == node && *c->mapGen() == gen && c->mapLenNode() == nullptr)',
+                         'if (*c->mapList() == node && c->mapLenNode() == nullptr)')),
+    ('a freed node address coming back as a new node cannot inherit a length (generation bumps on store and free)',
+     generation_bumps_on_every_head_change, nvrm,
+     lambda s: s.replace('fMapLen = 0; fMapLenNode = nullptr; fMapGen++;', 'fMapLen = 0; fMapLenNode = nullptr;')),
     ('a pending slot lives for one escape: cleared on entry and on every exit', slot_scoped_to_escape, nvrm,
      lambda s: s.replace('    NvMapPendingScope pendingScope;', '    (void)0;')),
     ('a freed or re-bound mapping list forgets its length', length_reset_with_list, nvrm,
-     lambda s: s.replace('nvMapListFree(&fMapList);\n    fMapLen = 0; fMapLenNode = nullptr;', 'nvMapListFree(&fMapList);')),
+     lambda s: s.replace('nvMapListFree(&fMapList);\n    fMapLen = 0; fMapLenNode = nullptr; fMapGen++;', 'nvMapListFree(&fMapList);')),
 ]
 for name, fn, src, breaker in arms:
     check(name, fn(src))
