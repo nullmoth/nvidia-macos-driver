@@ -1498,6 +1498,8 @@ static int nvmtl_vk_initialize(void)
 }
 static pthread_once_t g_vk_once = PTHREAD_ONCE_INIT;
 static void nvmtl_vk_initialize_once(void) { (void)nvmtl_vk_initialize(); }
+/* 1 once the backend is down in this process: a failed submit or fence wait disabled it, or it never started. */
+int nvmtl_vk_lost(void) { return atomic_load(&g_state) == -1; }
 int nvmtl_vk_init(void) {
     pthread_once(&g_vk_once, nvmtl_vk_initialize_once);
     return g_state == 1 ? 0 : -1;
