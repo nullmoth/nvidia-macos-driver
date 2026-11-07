@@ -191,6 +191,41 @@ static VkResult VKAPI_CALL w_cfn(VkDevice d, const VkCuFunctionCreateInfoNVX *ci
     pthread_mutex_unlock(&g_tr_mu);
     return r;
 }
+/* NVMTL_DLSS_SKIP (bisection, with the trace on): "all" records no NVX launch, "vk" no Vulkan dispatch of the runtime,
+ * otherwise a comma-separated list of kernel-name substrings whose launches are not recorded. The frame is wrong, but
+ * a GPU fault that survives a skip did not come from the skipped work. */
+static int skip_match(const char *name)
+{
+    const char *e = getenv("NVMTL_DLSS_SKIP");
+    if (!e || !*e) return 0;
+    if (!strcmp(e, "all")) return 1;
+    char buf[512]; snprintf(buf, sizeof buf, "%s", e);
+    for (char *t = strtok(buf, ","); t; t = strtok(NULL, ",")) if (*t && strcmp(t, "vk") && strstr(name, t)) return 1;
+    return 0;
+}
+static int skip_vk(void) { const char *e = getenv("NVMTL_DLSS_SKIP"); return e && (strstr(e, "vk") != NULL); }
+static PFN_vkCmdDispatch r_disp; static PFN_vkCmdPushDescriptorSetKHR r_pds; static PFN_vkCmdBindPipeline r_bp;
+static unsigned g_ndisp, g_npds;
+static void VKAPI_CALL w_disp(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z)
+{
+    const unsigned n = ++g_ndisp;
+    if (n <= 64) tr("vk dispatch #%u %u,%u,%u%s", n, x, y, z, skip_vk() ? " SKIPPED" : "");
+    if (!skip_vk()) r_disp(cb, x, y, z);
+}
+static void VKAPI_CALL w_pds(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout l, uint32_t set, uint32_t n, const VkWriteDescriptorSet *w)
+{
+    if (++g_npds <= 64)
+        for (uint32_t k = 0; k < n; k++) {
+            const VkWriteDescriptorSet *d = &w[k];
+            if (d->pImageInfo) tr("vk push set %u binding %u type %d view %p sampler %p", set, d->dstBinding, d->descriptorType,
+                                  (void *)d->pImageInfo[0].imageView, (void *)d->pImageInfo[0].sampler);
+            else if (d->pBufferInfo) tr("vk push set %u binding %u type %d buffer %p off %llu range %llu", set, d->dstBinding, d->descriptorType,
+                                        (void *)d->pBufferInfo[0].buffer, (unsigned long long)d->pBufferInfo[0].offset, (unsigned long long)d->pBufferInfo[0].range);
+            else tr("vk push set %u binding %u type %d (other)", set, d->dstBinding, d->descriptorType);
+        }
+    r_pds(cb, bp, l, set, n, w);
+}
+static void VKAPI_CALL w_bp(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p) { tr("vk bind pipeline %d %p", bp, (void *)p); r_bp(cb, bp, p); }
 static void VKAPI_CALL w_launch(VkCommandBuffer cb, const VkCuLaunchInfoNVX *li)
 {
     const char *name = "?"; unsigned n = 0;
@@ -222,6 +257,7 @@ static void VKAPI_CALL w_launch(VkCommandBuffer cb, const VkCuLaunchInfoNVX *li)
               li->gridDimX, li->gridDimY, li->gridDimZ, li->blockDimX, li->blockDimY, li->blockDimZ, li->sharedMemBytes,
               li->paramCount, li->extraCount, zero, words);
     }
+    if (skip_match(name)) { tr("SKIPPED launch %s", name); return; }
     r_launch(cb, li);
 }
 
@@ -245,6 +281,9 @@ static PFN_vkVoidFunction trace_wrap(const char *n, PFN_vkVoidFunction f)
     if (!strcmp(n, "vkGetImageViewHandle64NVX")) { r_ivh64 = (PFN_vkGetImageViewHandle64NVX)f; return (PFN_vkVoidFunction)w_ivh64; }
     if (!strcmp(n, "vkGetImageViewAddressNVX")) { r_iva = (PFN_vkGetImageViewAddressNVX)f; return (PFN_vkVoidFunction)w_iva; }
     if (!strcmp(n, "vkCreateCuFunctionNVX")) { r_cfn = (PFN_vkCreateCuFunctionNVX)f; return (PFN_vkVoidFunction)w_cfn; }
+    if (!strcmp(n, "vkCmdDispatch")) { r_disp = (PFN_vkCmdDispatch)f; return (PFN_vkVoidFunction)w_disp; }
+    if (!strcmp(n, "vkCmdPushDescriptorSetKHR")) { r_pds = (PFN_vkCmdPushDescriptorSetKHR)f; return (PFN_vkVoidFunction)w_pds; }
+    if (!strcmp(n, "vkCmdBindPipeline")) { r_bp = (PFN_vkCmdBindPipeline)f; return (PFN_vkVoidFunction)w_bp; }
     if (!strcmp(n, "vkCmdCuLaunchKernelNVX")) { r_launch = (PFN_vkCmdCuLaunchKernelNVX)f; return (PFN_vkVoidFunction)w_launch; }
     return f;
 }
