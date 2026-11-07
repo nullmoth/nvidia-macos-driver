@@ -222,4 +222,18 @@ edit("src/nouveau/vulkan/nvk_physical_device.c",
      """      .NVX_binary_import = info->cls_eng3d >= MAXWELL_A &&
          instance->experimental_flags & NVK_EXPERIMENTAL_DLSS,""",
      """      .NVX_binary_import = info->cls_eng3d >= MAXWELL_A,   /* DLSS through the plugin; kernels: nvk_cubin.c */""")
+# 7. 64-bit image handles: NVIDIA-compiled kernels take a combined image+sampler handle as image index | sampler index << 32
+#    (measured with a JIT-compiled tex.base probe on an RTX 5060: the 32-bit packing, sampler in bits 20..31, read zeros
+#    for any sampler index but 0; the high-word packing read every texel right). Storage and sampled-only handles are
+#    the image index either way.
+edit("src/nouveau/vulkan/nvk_image_view.c",
+     """   /* NVK does not currently support 64-bit texture addressing,
+    * so this is the same as vkGetImageViewHandleNVX. */
+
+   return nvk_GetImageViewHandleNVX(_device, pInfo);""",
+     """   const uint32_t h = nvk_GetImageViewHandleNVX(_device, pInfo);
+   if (pInfo->descriptorType != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+      return h;
+   return (uint64_t)(h & 0xfffff) | ((uint64_t)(h >> 20) << 32);""")
+
 print("patch_dlss_cache: applied")
