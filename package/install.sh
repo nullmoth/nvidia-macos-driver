@@ -606,7 +606,7 @@ fi
 # never undoes the driver install.
 # dlss_fetch.sh runs as root from the private copy; it is only trusted when SHA256SUMS covered it and its tools.
 if [ -f "$HERE/dlss_fetch.sh" ] && ! { grep -qE '[ *]dlss_fetch\.sh$' "$HERE/SHA256SUMS" && grep -qE '[ *]dlss/dlss_cache$' "$HERE/SHA256SUMS" \
-      && grep -qE '[ *]dlss/assertfail_trap\.ptx$' "$HERE/SHA256SUMS"; }; then
+      && grep -qE '[ *]dlss/nm_unzstd$' "$HERE/SHA256SUMS" && grep -qE '[ *]dlss/assertfail_trap\.ptx$' "$HERE/SHA256SUMS"; }; then
   echo "   NOTE: this package's SHA256SUMS does not cover the DLSS step; skipping it."
 elif [ -f "$HERE/dlss_fetch.sh" ]; then
   if [ "${NULLMOTH_DLSS:-0}" = 1 ]; then

@@ -16,12 +16,12 @@ t() { if "$@"; then echo 0; else echo 1; fi; }
 
 F=$W/files; mkdir -p "$F" "$W/tools"
 printf 'dlss runtime\n' > "$F/dlss.so"; printf 'dlssd runtime\n' > "$F/dlssd.so"; printf 'dlssg runtime\n' > "$F/dlssg.so"
-cat > "$F/driver.run" <<'RUN'
-#!/bin/sh
-# stand-in for NVIDIA's installer: only --extract-only --target DIR
-[ "$1" = --extract-only ] && [ "$2" = --target ] || exit 1
-mkdir -p "$3" && printf 'ngx core\n' > "$3/libnvidia-ngx.so.620.70.06"
-RUN
+# stand-in for NVIDIA's makeself .run: a shell header with skip=N, then a zstd-compressed tar (as the real one is)
+ZSTD=${ZSTD:-$(command -v zstd || echo /opt/homebrew/bin/zstd)}   # only the fixture needs the compressor; the script under test never does
+[ -x "$ZSTD" ] || { echo "test needs a zstd command (set ZSTD=) to build its fixture"; exit 2; }
+mkdir -p "$W/payload" && printf 'ngx core\n' > "$W/payload/libnvidia-ngx.so.620.70.06" && printf 'other\n' > "$W/payload/other.bin"
+{ printf '#!/bin/sh\n# makeself stand-in\nCRCsum=0\nskip=6\n'; printf 'exit 1\n'; tar -C "$W/payload" -cf - . | "$ZSTD" -q -c; } > "$F/driver.run"
+clang -O1 -DZSTD_DISABLE_ASM -o "$W/tools/nm_unzstd" "$ROOT/dlss/nm_unzstd.c" "$ROOT"/dlss/zstd/common/*.c "$ROOT"/dlss/zstd/decompress/*.c || { echo "cannot build nm_unzstd"; exit 2; }
 python3 -I - "$F" <<'PY'
 import sys, zipfile
 z = zipfile.ZipFile(sys.argv[1] + "/nvjitlink.whl", "w")
