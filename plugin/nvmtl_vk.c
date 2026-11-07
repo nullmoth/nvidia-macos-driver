@@ -976,6 +976,9 @@ static void nvmtl_vkmsg_arm(void)
 
 // DLSS needs two NVX extensions on the device. They are requested only when the user installed the DLSS files (and
 // NVMTL_DLSS is not 0), and only if the device offers both. Returns 1 when both were appended to exts.
+// VK_KHR_push_descriptor rides along when offered: the DLSS runtime's own compute passes bind their resources with
+// vkCmdPushDescriptorSetKHR, and without it they ran with nothing bound - Cyberpunk's first evaluation faulted the GPU
+// channel, while the standalone check (which enabled it) passed.
 static int nvmtl_dlss_device_exts(const char **exts, uint32_t *next)
 {
     if (!nvmtl_dlss_wanted()) return 0;
@@ -988,6 +991,16 @@ static int nvmtl_dlss_device_exts(const char **exts, uint32_t *next)
     free(props);
     if (!got[0] || !got[1]) { nvlog("dlss: the device lacks %s%s%s - DLSS stays off", got[0] ? "" : want[0], (!got[0] && !got[1]) ? " and " : "", got[1] ? "" : want[1]); return 0; }
     exts[(*next)++] = want[0]; exts[(*next)++] = want[1];
+    int have_push = 0;
+    for (uint32_t i = 0; i < *next; i++) if (!strcmp(exts[i], "VK_KHR_push_descriptor")) have_push = 1;
+    if (!have_push) {
+        props = calloc(na, sizeof *props);
+        if (props && pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, props) == VK_SUCCESS)
+            for (uint32_t i = 0; i < na && !have_push; i++) if (!strcmp(props[i].extensionName, "VK_KHR_push_descriptor")) have_push = 2;
+        free(props);
+        if (have_push == 2) exts[(*next)++] = "VK_KHR_push_descriptor";
+        else nvlog("dlss: the device lacks VK_KHR_push_descriptor - the runtime's own compute passes cannot bind");
+    }
     return 1;
 }
 // The NGX core uses a range of core 1.1/1.2 features it does not name up front, so with DLSS on every feature the
@@ -1127,7 +1140,7 @@ static int nvmtl_vk_initialize(void)
                                     "VK_KHR_external_memory_fd",
                                     "VK_EXT_mutable_descriptor_type", "VK_KHR_cooperative_matrix", "VK_EXT_calibrated_timestamps", "VK_EXT_sample_locations", "VK_KHR_pipeline_executable_properties",
                                     "VK_EXT_provoking_vertex", "VK_KHR_vertex_attribute_divisor", "VK_EXT_pipeline_robustness" };
-    const char *exts[19]; uint32_t next = 0; int have[17] = {0};
+    const char *exts[20]; uint32_t next = 0; int have[17] = {0};   // 17 wanted + DLSS's three
     uint32_t na = 0;
     if (pvkEnumerateDeviceExtensionProperties &&
         pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, NULL) == VK_SUCCESS && na) {
