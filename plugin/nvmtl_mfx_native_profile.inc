@@ -76,9 +76,17 @@ static id nvmtl_mfx_new(id receiver, SEL selector, id device) {
         return scaler;
     } @finally { --nvmtl_mfx_profile_depth; }
 }
+// Every MetalFX support answer is logged (first 4 per question): an application hides an upscaler, denoiser or frame
+// generation option when these say NO, and the option list in its settings is the only other trace of the answer.
+static BOOL nvmtl_mfx_note(const char *what, id device, BOOL ours, BOOL yes) {
+    static _Atomic uint32_t n[8]; uint32_t slot = (uint32_t)(((uintptr_t)what >> 3) & 7);
+    if (atomic_fetch_add(&n[slot], 1) < 4) nvlog("QUERY MetalFX %s -> %s (device %s)", what, yes ? "YES" : "NO", ours ? "ours" : "not ours");
+    return yes;
+}
 static BOOL nvmtl_mfx_rr_support(id receiver, SEL selector, id device) {
-    if (nvmtl_mfx_our_device(device) && nvmtl_mfx_dlss_rr_ready()) return YES;
-    return nvmtl_mfx_rr_support_original(receiver, selector, device);
+    const BOOL ours = nvmtl_mfx_our_device(device);
+    if (ours && nvmtl_mfx_dlss_rr_ready()) return nvmtl_mfx_note("denoised scaler supportsDevice:", device, ours, YES);
+    return nvmtl_mfx_note("denoised scaler supportsDevice:", device, ours, nvmtl_mfx_rr_support_original(receiver, selector, device));
 }
 static float nvmtl_mfx_rr_min(id receiver, SEL selector, id device) {
     if (nvmtl_mfx_our_device(device) && nvmtl_mfx_dlss_rr_ready()) return NVMTL_DLSS_MIN_INPUT_SCALE;
@@ -97,8 +105,9 @@ static id nvmtl_mfx_rr_new(id receiver, SEL selector, id device) {
     return nvmtl_mfx_rr_new_original(receiver, selector, device);
 }
 static BOOL nvmtl_mfx_fg_support(id receiver, SEL selector, id device) {
-    if (nvmtl_mfx_our_device(device) && nvmtl_mfx_dlss_fg_ready()) return YES;
-    return nvmtl_mfx_fg_support_original(receiver, selector, device);
+    const BOOL ours = nvmtl_mfx_our_device(device);
+    if (ours && nvmtl_mfx_dlss_fg_ready()) return nvmtl_mfx_note("frame interpolator supportsDevice:", device, ours, YES);
+    return nvmtl_mfx_note("frame interpolator supportsDevice:", device, ours, nvmtl_mfx_fg_support_original(receiver, selector, device));
 }
 static id nvmtl_mfx_fg_new(id receiver, SEL selector, id device) __attribute__((ns_returns_retained));
 static id nvmtl_mfx_fg_new(id receiver, SEL selector, id device) {
@@ -138,8 +147,10 @@ static id nvmtl_m4fx_make(int kind, id descriptor, id device) {
 }
 #define NVMTL_M4FX_PAIR(k)                                                                                               \
     static BOOL nvmtl_m4fx_support_##k(id r, SEL s, id d) {                                                              \
-        if (nvmtl_mtl4_wanted() && nvmtl_mfx_our_device(d) && nvmtl_m4fx_ready(k)) return YES;                           \
-        return nvmtl_m4fx_support_o[k] ? nvmtl_m4fx_support_o[k](r, s, d) : NO;                                          \
+        static const char *const q = k == 0 ? "temporal scaler supportsMetal4FX:" : k == 1 ? "denoised scaler supportsMetal4FX:" \
+                                            : "frame interpolator supportsMetal4FX:";                                     \
+        if (nvmtl_mtl4_wanted() && nvmtl_mfx_our_device(d) && nvmtl_m4fx_ready(k)) return nvmtl_mfx_note(q, d, YES, YES); \
+        return nvmtl_mfx_note(q, d, nvmtl_mfx_our_device(d), nvmtl_m4fx_support_o[k] ? nvmtl_m4fx_support_o[k](r, s, d) : NO); \
     }                                                                                                                     \
     static id nvmtl_m4fx_new_##k(id r, SEL s, id d, id c) __attribute__((ns_returns_retained));                          \
     static id nvmtl_m4fx_new_##k(id r, SEL s, id d, id c) {                                                              \
