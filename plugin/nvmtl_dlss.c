@@ -17,6 +17,7 @@
 #include <signal.h>
 #include <xlocale.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -151,6 +152,22 @@ static const struct { const char *n; void *f; } k_nvml[] = {
  * wrappers sit between the core and the Vulkan driver and log every address or handle the core is given that comes
  * back 0, the name of each compiled function, and the first launches of each function with their 8-byte parameter
  * words, so the run names which kernel received the null and where it came from. Off unless the switch is set. */
+static FILE *g_trf; static pthread_mutex_t g_trf_mu = PTHREAD_MUTEX_INITIALIZER;
+/* The trace goes to its own file ($TMPDIR/dlss-trace.txt): nvlog keeps only the first 8 lines of each message format,
+ * which cut the first trace off after 8 launches. */
+static void tr(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void tr(const char *fmt, ...)
+{
+    pthread_mutex_lock(&g_trf_mu);
+    if (!g_trf) {
+        char path[600]; const char *t = getenv("TMPDIR");
+        snprintf(path, sizeof path, "%s/dlss-trace.txt", t && *t ? t : "/tmp");
+        g_trf = fopen(path, "a");
+        if (g_trf) { setvbuf(g_trf, NULL, _IOLBF, 0); nvlog("dlss: trace file %s", path); }
+    }
+    if (g_trf) { va_list ap; va_start(ap, fmt); vfprintf(g_trf, fmt, ap); va_end(ap); fputc('\n', g_trf); }
+    pthread_mutex_unlock(&g_trf_mu);
+}
 static int trace_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_DLSS_TRACE"); on = e && e[0] == '1'; } return on; }
 static PFN_vkGetImageViewHandle64NVX r_ivh64;
 static PFN_vkGetBufferDeviceAddress r_bda; static PFN_vkGetImageViewHandleNVX r_ivh; static PFN_vkGetImageViewAddressNVX r_iva;
@@ -159,13 +176,13 @@ static PFN_vkCreateCuFunctionNVX r_cfn; static PFN_vkCmdCuLaunchKernelNVX r_laun
 static struct { VkCuFunctionNVX fn; char name[96]; unsigned launches; } g_tr[TR_FN]; static unsigned g_trn;
 static pthread_mutex_t g_tr_mu = PTHREAD_MUTEX_INITIALIZER;
 static VkDeviceAddress VKAPI_CALL w_bda(VkDevice d, const VkBufferDeviceAddressInfo *i)
-{ VkDeviceAddress a = r_bda(d, i); if (!a) nvlog("dlss-trace: vkGetBufferDeviceAddress(buffer %p) = 0", (void *)i->buffer); return a; }
+{ VkDeviceAddress a = r_bda(d, i); if (!a) tr("vkGetBufferDeviceAddress(buffer %p) = 0", (void *)i->buffer); return a; }
 static uint32_t VKAPI_CALL w_ivh(VkDevice d, const VkImageViewHandleInfoNVX *i)
-{ uint32_t h = r_ivh(d, i); nvlog("dlss-trace: image view handle view %p type %d sampler %p = 0x%x", (void *)i->imageView, i->descriptorType, (void *)i->sampler, h); return h; }
+{ uint32_t h = r_ivh(d, i); tr("image view handle view %p type %d sampler %p = 0x%x", (void *)i->imageView, i->descriptorType, (void *)i->sampler, h); return h; }
 static uint64_t VKAPI_CALL w_ivh64(VkDevice d, const VkImageViewHandleInfoNVX *i)
-{ uint64_t h = r_ivh64(d, i); nvlog("dlss-trace: image view handle64 view %p type %d sampler %p = 0x%llx", (void *)i->imageView, i->descriptorType, (void *)i->sampler, (unsigned long long)h); return h; }
+{ uint64_t h = r_ivh64(d, i); tr("image view handle64 view %p type %d sampler %p = 0x%llx", (void *)i->imageView, i->descriptorType, (void *)i->sampler, (unsigned long long)h); return h; }
 static VkResult VKAPI_CALL w_iva(VkDevice d, VkImageView v, VkImageViewAddressPropertiesNVX *p)
-{ VkResult r = r_iva(d, v, p); nvlog("dlss-trace: image view address view %p -> %d addr 0x%llx size %llu", (void *)v, r, (unsigned long long)p->deviceAddress, (unsigned long long)p->size); return r; }
+{ VkResult r = r_iva(d, v, p); tr("image view address view %p -> %d addr 0x%llx size %llu", (void *)v, r, (unsigned long long)p->deviceAddress, (unsigned long long)p->size); return r; }
 static VkResult VKAPI_CALL w_cfn(VkDevice d, const VkCuFunctionCreateInfoNVX *ci, const VkAllocationCallbacks *a, VkCuFunctionNVX *f)
 {
     VkResult r = r_cfn(d, ci, a, f);
@@ -180,8 +197,8 @@ static void VKAPI_CALL w_launch(VkCommandBuffer cb, const VkCuLaunchInfoNVX *li)
     pthread_mutex_lock(&g_tr_mu);
     for (unsigned k = 0; k < g_trn; k++) if (g_tr[k].fn == li->function) { name = g_tr[k].name; n = ++g_tr[k].launches; break; }
     pthread_mutex_unlock(&g_tr_mu);
-    if (n <= 2) {
-        char words[900]; size_t o = 0; int zero = 0;
+    if (n <= 3) {
+        char words[3400]; size_t o = 0; int zero = 0;
         for (size_t p = 0; p < li->paramCount && p < 24 && o < sizeof words - 24; p++) {
             uint64_t v = 0; if (li->pParams && li->pParams[p]) memcpy(&v, li->pParams[p], 8);
             if (!v) zero++;
@@ -196,12 +213,12 @@ static void VKAPI_CALL w_launch(VkCommandBuffer cb, const VkCuLaunchInfoNVX *li)
         }
         if (pbuf && psize) {
             o = 0; zero = 0;
-            for (size_t q = 0; q + 8 <= psize && q < 8 * 40 && o < sizeof words - 24; q += 8) {
+            for (size_t q = 0; q + 8 <= psize && q < 8 * 160 && o < sizeof words - 24; q += 8) {
                 uint64_t v; memcpy(&v, (const char *)pbuf + q, 8); if (!v) zero++;
                 o += (size_t)snprintf(words + o, sizeof words - o, " %llx", (unsigned long long)v);
             }
         }
-        nvlog("dlss-trace: launch %s #%u grid %u,%u,%u block %u,%u,%u smem %u params %zu extras %zu zero-words %d:%s", name, n,
+        tr("launch %s #%u grid %u,%u,%u block %u,%u,%u smem %u params %zu extras %zu zero-words %d:%s", name, n,
               li->gridDimX, li->gridDimY, li->gridDimZ, li->blockDimX, li->blockDimY, li->blockDimZ, li->sharedMemBytes,
               li->paramCount, li->extraCount, zero, words);
     }
