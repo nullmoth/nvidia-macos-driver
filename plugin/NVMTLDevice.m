@@ -647,6 +647,7 @@ static bool nvmtl_process_is_allowed(void)
     return ok;
 }
 
+#include "nvmtl_dlss.h"
 #include "nvmtl_mfx_native_profile.inc"
 
 @implementation NVMTLDevice
@@ -2454,6 +2455,7 @@ static NSInteger nvmtl_apple_family_max(void)
 #import "NVMTLDevice_contract.m"
 
 #import "NVMTLObjects.m"
+#import "NVMTLMetalFXDLSS.m"
 #import "NVMTLForward.m"
 #import "NVMTLLibraryLoad.m"
 #import "NVMTLGL.m"
