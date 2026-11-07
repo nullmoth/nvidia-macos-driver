@@ -147,4 +147,6 @@ Nothing is sent; you can upload the file on the site yourself.
 ## 7. Building
 
 See the README, *Build from source*. The kexts need NVIDIA's `open-gpu-kernel-modules` at tag `615.78.08`; NVK needs
-Mesa `17ca6174` with `nvk/nvk-macos.patch`.
+Mesa `17ca6174` with, in order, `nvk/nvk-macos.patch`, `nvk/nvk-fixes-after-def16.patch` and `nvk/nvk-620-kernel.patch`
+(`patch -p1` from the Mesa root). NVK compiles against the `open-gpu-kernel-modules` 610.57.04 headers with
+`nvk/ogkm-nvos-620.patch` applied to that tree; 620's `nv.h` does not compile in user space, so the rest stays 610.
