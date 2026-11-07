@@ -197,6 +197,7 @@ NSData *nvmtl_libkey_for_file(NSString *path, NSData *lib, const struct stat *be
 int nvmtl_stat_same(const struct stat *a, const struct stat *b);
 static char gNVMTLLibKeyAssoc, gNVMTLLibFileAssoc;
 NSArray<NSString *> *nvmtl_externs_of_airs(NSDictionary<NSString *, NSString *> *airs);
+void nvmtl_pretranslate_library(NVMTLLibrary *lib);
 NSSet<NSString *> *nvmtl_mtlb_extern_names(NSData *raw);
 @interface NSObject (NVMTLExternSPI)
 - (id)newExternFunctionWithName:(NSString *)name;
@@ -1515,6 +1516,7 @@ static void nvmtl_stitch_dump(const char *what, NSString *dag, NSArray *fns, id 
     lib->_raw = bytes;
     nvmtl_vendor_compile_airs((NSDictionary<NSString *, NSString *> *)airs,
                               (NSDictionary<NSString *, NSString *> *)stages);
+    nvmtl_pretranslate_library(lib);
     return lib; }
 - (id<MTLLibrary>)nvmtlBridgeAppleLibrary:(id)apple what:(const char *)what error:(NSError **)err {
     if (!apple) return nil;
@@ -1594,6 +1596,7 @@ static void nvmtl_stitch_dump(const char *what, NSString *dag, NSArray *fns, id 
     lib->_raw = d;
     objc_setAssociatedObject(lib, &gNVMTLLibKeyAssoc, ckey, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (st0 == 0) objc_setAssociatedObject(lib, &gNVMTLLibFileAssoc, @[[fp copy], [NSData dataWithBytes:&s0 length:sizeof s0]], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    nvmtl_pretranslate_library(lib);
     return lib; }
 
 - (id<MTLLibrary>)nvmtlLibraryFromPath:(NSString *)path error:(NSError **)err {
@@ -1611,6 +1614,7 @@ static void nvmtl_stitch_dump(const char *what, NSString *dag, NSArray *fns, id 
     lib->_rawPath = [path copy];
     objc_setAssociatedObject(lib, &gNVMTLLibKeyAssoc, ckey, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (st0 == 0) objc_setAssociatedObject(lib, &gNVMTLLibFileAssoc, @[lib->_rawPath, [NSData dataWithBytes:&s0 length:sizeof s0]], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    nvmtl_pretranslate_library(lib);
     return lib; }
 
 - (id<MTLLibrary>)newLibraryWithFile:(NSString *)path error:(NSError **)err {
