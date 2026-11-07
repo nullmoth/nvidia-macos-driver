@@ -10909,6 +10909,62 @@ int nvmtl_vk_cmd_dlss(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_args *a
     nvmtl_vk_cmd_barrier(c);
     return rc;
 }
+int nvmtl_vk_dlss_rr_available(void) { return nvmtl_vk_dlss_available() && nvmtl_dlss_rr_ready(); }
+int nvmtl_vk_cmd_dlss_rr(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_rr_args *a)
+{
+    if (!c || !feature || !a || !nvmtl_dlss_rr_ready()) return -1;
+    if (!a->color || !a->depth || !a->motion || !a->output || !a->diffuse_albedo || !a->specular_albedo || !a->normals || !a->roughness) return -1;
+    nvmtl_dlss_rr_eval e = {0}; nvmtl_dlss_image hit, ex, re;
+    if (!*feature) {
+        dlss_describe("color", a->color); dlss_describe("depth", a->depth); dlss_describe("motion", a->motion);
+        dlss_describe("output", a->output); dlss_describe("diffuse", a->diffuse_albedo); dlss_describe("specular", a->specular_albedo);
+        dlss_describe("normals", a->normals); dlss_describe("rough", a->roughness); dlss_describe("hitdist", a->hit_distance);
+    }
+    if (!(a->output->usage & VK_IMAGE_USAGE_STORAGE_BIT)) { nvlog("dlss: RR output texture was created without shader-write usage - not recorded"); return -1; }
+    if (dlss_image(&e.color, a->color, a->color_view, 0) || dlss_image(&e.depth, a->depth, a->depth_view, 0)
+        || dlss_image(&e.motion, a->motion, a->motion_view, 0) || dlss_image(&e.output, a->output, a->output_view, 1)
+        || dlss_image(&e.diffuse_albedo, a->diffuse_albedo, a->diffuse_albedo_view, 0)
+        || dlss_image(&e.specular_albedo, a->specular_albedo, a->specular_albedo_view, 0)
+        || dlss_image(&e.normals, a->normals, a->normals_view, 0) || dlss_image(&e.roughness, a->roughness, a->roughness_view, 0)) {
+        nvlog("dlss: an RR texture has no usable Vulkan image/view (or is multisampled) - not recorded"); return -1;
+    }
+    if (a->hit_distance) { if (dlss_image(&hit, a->hit_distance, a->hit_distance_view, 0)) { nvlog("dlss: the RR hit distance texture is unusable - not recorded"); return -1; } e.hit_distance = &hit; }
+    if (a->exposure) { if (dlss_image(&ex, a->exposure, a->exposure_view, 0)) { nvlog("dlss: the RR exposure texture is unusable - not recorded"); return -1; } e.exposure = &ex; }
+    if (a->reactive) { if (dlss_image(&re, a->reactive, a->reactive_view, 0)) { nvlog("dlss: the RR reactive mask is unusable - not recorded"); return -1; } e.reactive = &re; }
+    memcpy(e.world_to_view, a->world_to_view, sizeof e.world_to_view); memcpy(e.view_to_clip, a->view_to_clip, sizeof e.view_to_clip);
+    e.jitter_x = a->jitter_x; e.jitter_y = a->jitter_y; e.mv_scale_x = a->mv_scale_x; e.mv_scale_y = a->mv_scale_y;
+    e.pre_exposure = a->pre_exposure; e.reset = a->reset; e.render_w = a->in_w; e.render_h = a->in_h;
+    // Every input is read over the full render size from its origin: refuse a texture that is smaller (a GPU read past its end).
+    if (a->color->w < a->in_w || a->color->h < a->in_h || a->depth->w < a->in_w || a->depth->h < a->in_h
+        || a->diffuse_albedo->w < a->in_w || a->diffuse_albedo->h < a->in_h || a->specular_albedo->w < a->in_w || a->specular_albedo->h < a->in_h
+        || a->normals->w < a->in_w || a->normals->h < a->in_h || a->roughness->w < a->in_w || a->roughness->h < a->in_h
+        || a->motion->w < (a->mv_lowres ? a->in_w : a->out_w) || a->motion->h < (a->mv_lowres ? a->in_h : a->out_h)
+        || (a->hit_distance && (a->hit_distance->w < a->in_w || a->hit_distance->h < a->in_h))) {
+        nvlog("dlss: an RR input texture is smaller than the %ux%u render size - not recorded", a->in_w, a->in_h);
+        return -1;
+    }
+    const nvmtl_dlss_rr_cfg want = { a->in_w, a->in_h, a->out_w, a->out_h, a->hdr, a->mv_lowres, a->mv_jittered, a->depth_inverted, a->auto_exposure };
+    if (c->in_rp) nvmtl_vk_cmd_end_render(c);
+    nvmtl_vk_cmd_barrier(c);
+    nvk_image *all[11] = { a->color, a->depth, a->motion, a->output, a->diffuse_albedo, a->specular_albedo, a->normals, a->roughness,
+                           a->hit_distance, a->exposure, a->reactive };
+    for (int k = 0; k < 11; k++) if (all[k])
+        img_to(c, all[k], VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    nvmtl_dlss_rr_feature *f = (nvmtl_dlss_rr_feature *)*feature;
+    if (f && memcmp(nvmtl_dlss_rr_feature_cfg(f), &want, sizeof want)) {
+        nvlog("dlss: denoised scaler settings changed - making a new RR feature (the old one is kept until the process ends)");
+        f = NULL;
+    }
+    if (!f) {
+        f = nvmtl_dlss_rr_feature_create(c->cb, &want); if (!f) return -1; *feature = f;
+        nvmtl_vk_cmd_barrier(c);   // the feature's setup is recorded into this buffer: it must land before the first evaluation
+    }
+    c->direct_sass = 1;
+    const int rc = nvmtl_dlss_rr_evaluate(c->cb, f, &e);
+    nvmtl_vk_cmd_barrier(c);
+    return rc;
+}
 int nvmtl_vk_cmd_blit_image_2d(nvk_cmdbuf *c, nvk_image *src, nvk_image *dst, uint32_t w, uint32_t h)
 {
     if (!c || !src || !dst || !src->img || !dst->img || !w || !h || w > src->w || h > src->h || w > dst->w || h > dst->h
