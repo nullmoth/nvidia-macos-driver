@@ -10825,9 +10825,10 @@ static VkImageView dlss_view(nvk_image *i, VkImageAspectFlags aspect, int rw)
         if (e->img == (VkImage)i->img && e->fmt == i->fmt && e->aspect == aspect && e->rw == rw) { VkImageView v = e->v; pthread_mutex_unlock(&g_dlss_vc_mu); return v; }
         if (!e->img && freek < 0) freek = k;
     }
-    VkImageViewUsageCreateInfo use = { VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, NULL,
-                                       rw ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT };
-    VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, &use, 0, (VkImage)i->img, VK_IMAGE_VIEW_TYPE_2D,
+    // The view keeps every usage of its image (no VkImageViewUsageCreateInfo): the core asks for a sampled handle of
+    // the output as well as a storage one, and NVK makes a view's sampled or storage descriptor only for a usage the
+    // view has - a storage-only output view returned sampled handle 0, a null descriptor the GPU faulted on (VA 0x0).
+    VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, (VkImage)i->img, VK_IMAGE_VIEW_TYPE_2D,
                                   (VkFormat)i->fmt, { 0 }, { aspect, 0, 1, 0, 1 } };
     VkImageView v = VK_NULL_HANDLE;
     const VkResult r = pvkCreateImageView(g_dev, &vci, NULL, &v);
@@ -10835,6 +10836,7 @@ static VkImageView dlss_view(nvk_image *i, VkImageAspectFlags aspect, int rw)
     if (freek < 0) {   // full: a game that keeps more scaler textures alive than this; the new view is not cached and is
         nvlog("dlss: view cache full (%d) - a view is made for this evaluation only and kept", DLSS_VIEW_CACHE);   // leaked, never reused
     } else g_dlss_vc[freek] = (dlss_view_ent){ (VkImage)i->img, i->fmt, aspect, rw, v };
+    nvlog("dlss: own view %p of image %p (VkFormat %u %ux%u usage 0x%x, %s)", (void *)v, i->img, i->fmt, i->w, i->h, i->usage, rw ? "output" : "input");
     pthread_mutex_unlock(&g_dlss_vc_mu);
     return v;
 }
