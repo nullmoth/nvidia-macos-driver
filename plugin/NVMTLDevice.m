@@ -667,6 +667,15 @@ static uint64_t nvmtl_rt_gate_working_set(uint64_t ws)
     static long long floor_mb = -1;
     if (floor_mb < 0) { const char *e = getenv("NVMTL_WS_RT_GATE_MB"); floor_mb = (e && *e) ? atoll(e) : 0; }
     if (floor_mb <= 0 || ws >= ((uint64_t)floor_mb << 20) || !nvmtl_vk_rt_available()) return ws;
+    // The floor is a figure for 8 GB and larger cards. A card with less than 1 GB of memory above it (a 6 GB card) keeps
+    // its own answer: telling the game it may use more than the card holds would let it place ray tracing it cannot fit.
+    uint64_t card = nvmtl_vk_vram_bytes();
+    if (card < ((uint64_t)floor_mb << 20) + (1024ull << 20)) {
+        static int refused;
+        if (!refused++) nvlog("working set: the %lld MB ray tracing floor is not applied on this %llu MB card (it needs %lld MB)",
+                              floor_mb, (unsigned long long)(card >> 20), floor_mb + 1024);
+        return ws;
+    }
     static int said;
     if (!said++) nvlog("working set: answered %lld MB instead of %llu MB while ray tracing is available (NVMTL_WS_RT_GATE_MB)", floor_mb, (unsigned long long)(ws >> 20));
     return (uint64_t)floor_mb << 20;
