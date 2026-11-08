@@ -334,6 +334,13 @@ private:
     // pending length is applied only while the generation it was recorded at is still current.
     NvU64 fMapGen = 0;
     nv_alloc_mapping_list_node_t *fMapHeadAtAcquire = nullptr;   // list head when RM took the write hold
+    // Token mappings (selector 7 advertises them, selector 8 forgets one; see clientMemoryForType). A memory type with
+    // kNvMapTokenBit set names one mapping: its first clientMemoryForType consumes the pending context and keeps the
+    // descriptor it built under that token, so the unmap - which IOKit resolves by calling clientMemoryForType again
+    // with the same type and looking the mapping up on the descriptor it gets back - finds it. Under fMapLock.
+    struct NvMapToken { uint32_t token; IOOptionBits options; IOMemoryDescriptor *md; };
+    NvMapToken *fTok = nullptr;
+    unsigned fNTok = 0;
     bool fIsCtl = true;
     int  fFd = -1;
     int  fPid = 0;
@@ -359,6 +366,8 @@ private:
     static IOReturn sBindFd(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sRetired(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sWaitEvent(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sCaps(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sForgetToken(OSObject *target, void *reference, IOExternalMethodArguments *args);
 public:
     volatile UInt32 fEvtSeq = 0;
     UInt32 fEvtMagic = 0x4e564556u;
@@ -2055,14 +2064,45 @@ void NVRMUserClient::free(void)
     if (fMapLock) IOLockLock(fMapLock);
     nvMapListFree(&fMapList);
     fMapLen = 0; fMapLenNode = nullptr; fMapGen++;
+    if (fTok) {
+        for (unsigned i = 0; i < fNTok; i++) if (fTok[i].md) fTok[i].md->release();
+        kern_os_free(fTok); fTok = nullptr; fNTok = 0;
+    }
     if (fMapLock) IOLockUnlock(fMapLock);
     if (fGate) { IOLockFree(fGate); fGate = nullptr; }
     if (fMapLock) { IOLockFree(fMapLock); fMapLock = nullptr; }
     super::free();
 }
+// Token mappings - many CPU mappings on one connection.
+// Type 0 is the original contract: map whatever context is pending, and leave it pending (the userland driver opens
+// one connection per mapping and closes it with the mapping). That costs a user-client connection per live mapping;
+// Cyberpunk held ~275 of them. With a token type (kNvMapTokenBit set, chosen by the caller, unique per mapping on this
+// client) the first call consumes the pending context - the way Linux's per-file mapping list is used once per mmap -
+// so RM accepts the next RM_MAP_MEMORY on the same fd, and the descriptor is kept under the token. Every later call with
+// that token returns the SAME descriptor: IOKit's unmap (is_io_connect_unmap_memory_from_task) calls clientMemoryForType
+// with the type it is given and finds the mapping with kIOMapReference on the returned descriptor's own mapping list,
+// so a fresh descriptor would never match and the mapping would stay until the connection closed. That is the shape of
+// the 10-14 bug (8494d18): a cleared context made the unmap lookup fail and VRAM stayed mapped until exit.
+// The caller forgets the token (selector 8) after unmapping, which drops the descriptor. RM's own unmap
+// (NV_ESC_RM_UNMAP_MEMORY -> Nv04UnmapMemoryWithSecInfo, on the ctl fd, by hClient/hDevice/hMemory/pLinearAddress) never
+// reads the per-file list, and nv_free_user_mapping is a no-op here, so consuming the node takes nothing RM needs.
+// The pages stay alive through the descriptor, not the node (see nv_inc_alloc_refcount in os-xnu2.cpp).
+static const uint32_t kNvMapTokenBit = 0x80000000u;
+static const unsigned kNvMapTokensPerClient = 4096;
 IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
 {
     Gate g(fGate);
+    const bool tokenMode = (type & kNvMapTokenBit) != 0;
+    // any other type keeps the original behaviour (it was never checked, so nothing is refused that was accepted)
+    if (tokenMode) {
+        IOMemoryDescriptor *have = nullptr; IOOptionBits haveOpts = 0;
+        IOLockLock(fMapLock);
+        for (unsigned i = 0; i < fNTok; i++)
+            if (fTok[i].token == type) { have = fTok[i].md; haveOpts = fTok[i].options; have->retain(); break; }
+        IOLockUnlock(fMapLock);
+        if (have) { *options |= haveOpts; *memory = have; return kIOReturnSuccess; }
+    }
+    nv_alloc_mapping_list_node_t *snapNode = nullptr; NvU64 snapGen = 0;
     // Everything below reads this private copy. RM or a bind can replace the live context at any moment, and the ranges
     // that are checked must be the ranges that are mapped.
     nv_alloc_mapping_context_t snapshot;
@@ -2075,6 +2115,7 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
         return kIOReturnBadArgument;
     }
     snapshot = fMapList->context;
+    snapNode = fMapList; snapGen = fMapGen;
     snapLen = (fMapLenNode == fMapList) ? fMapLen : 0;   // a length belongs to one node only
     if (!fIsCtl) {
         const NvU64 count = snapshot.memArea.numRanges;
@@ -2135,10 +2176,51 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
         kprintf("NVRM-xnu: map fd %d: device %llu range(s) first 0x%llx+0x%llx caching %u\n", fFd, n, c->memArea.pRanges[0].start, c->memArea.pRanges[0].size, caching);
     }
     if (!md) return kIOReturnNoMemory;
-    if (caching == NV_MEMORY_UNCACHED) *options |= kIOMapInhibitCache;
-    else if (caching == NV_MEMORY_WRITECOMBINED) *options |= kIOMapWriteCombineCache;
-    if (!(c->prot & NV_PROTECT_WRITEABLE)) *options |= kIOMapReadOnly;
+    IOOptionBits add = 0;
+    if (caching == NV_MEMORY_UNCACHED) add |= kIOMapInhibitCache;
+    else if (caching == NV_MEMORY_WRITECOMBINED) add |= kIOMapWriteCombineCache;
+    if (!(c->prot & NV_PROTECT_WRITEABLE)) add |= kIOMapReadOnly;
+    if (tokenMode) {
+        IOReturn r = kIOReturnSuccess;
+        IOLockLock(fMapLock);
+        if (fMapList != snapNode || fMapGen != snapGen) r = kIOReturnBusy;   // RM replaced the context meanwhile
+        else if (fNTok >= kNvMapTokensPerClient) r = kIOReturnNoResources;
+        else if (!fTok && !(fTok = (NvMapToken *)kern_os_malloc(sizeof(NvMapToken) * kNvMapTokensPerClient))) r = kIOReturnNoMemory;
+        if (r == kIOReturnSuccess) {
+            nv_alloc_mapping_list_node_t *one = fMapList;
+            fMapList = one->pNext; one->pNext = nullptr;
+            nvMapListFree(&one);
+            fMapLen = 0; fMapLenNode = nullptr; fMapGen++;
+            md->retain();
+            fTok[fNTok].token = type; fTok[fNTok].options = add; fTok[fNTok].md = md; fNTok++;
+        }
+        IOLockUnlock(fMapLock);
+        if (r != kIOReturnSuccess) { md->release(); return r; }
+    }
+    *options |= add;
     *memory = md;
+    return kIOReturnSuccess;
+}
+// Selector 7: what this kext supports. bit0 = token mappings (clientMemoryForType above).
+IOReturn NVRMUserClient::sCaps(OSObject *target, void *reference, IOExternalMethodArguments *args)
+{
+    if (!OSDynamicCast(NVRMUserClient, target)) return kIOReturnNotAttached;
+    args->scalarOutput[0] = 1;
+    return kIOReturnSuccess;
+}
+// Selector 8: forget a token after its mapping is unmapped; drops the descriptor. An unknown token is not an error.
+IOReturn NVRMUserClient::sForgetToken(OSObject *target, void *reference, IOExternalMethodArguments *args)
+{
+    NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);
+    if (!me) return kIOReturnNotAttached;
+    const uint64_t v = args->scalarInput[0];
+    if (v > 0xFFFFFFFFull || !((uint32_t)v & kNvMapTokenBit)) return kIOReturnBadArgument;
+    IOMemoryDescriptor *drop = nullptr;
+    IOLockLock(me->fMapLock);
+    for (unsigned i = 0; i < me->fNTok; i++)
+        if (me->fTok[i].token == (uint32_t)v) { drop = me->fTok[i].md; me->fTok[i] = me->fTok[--me->fNTok]; break; }
+    IOLockUnlock(me->fMapLock);
+    if (drop) drop->release();
     return kIOReturnSuccess;
 }
 IOReturn NVRMUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
@@ -2153,6 +2235,8 @@ IOReturn NVRMUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
         { sRetired, 0, 0, 0, 0 },
         { sRetired, 0, 0, 0, 0 },
         { sWaitEvent, 2, 0, 1, 0 },
+        { sCaps, 0, 0, 1, 0 },
+        { sForgetToken, 1, 0, 0, 0 },
     };
     if (selector >= sizeof tbl / sizeof tbl[0]) return kIOReturnBadArgument;
     IOExternalMethodDispatch d = tbl[selector];
