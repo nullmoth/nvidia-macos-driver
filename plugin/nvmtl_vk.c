@@ -22,6 +22,7 @@
 #include "nvmtl_dlss.h"
 #include "nvmtl_tex_upload.h"
 #include "nvmtl_cmd_refusal.h"
+#include "nvmtl_copy_compat.h"
 #include "nvmtl_sampler_state.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
 static int g_scalar_layout;
@@ -10717,12 +10718,31 @@ int nvmtl_vk_cmd_copy_image_sub3(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uin
 {
     if (!depth) depth = 1;
     const int s3 = src && src->mtl_type == 7, d3 = dst && dst->mtl_type == 7;
-    if (!c || !src || !dst || !w || !h || src->fmt != dst->fmt
+    /* Two formats join when vkCmdCopyImage accepts them (nvmtl_copy_compat.h): the same texel size, or the same BC class.
+     * WAS: an identical VkFormat only, so a Metal copy between an sRGB texture and its linear twin, a channel-order twin, or
+     * a view in another format of the same size was dropped and its destination kept the bytes it held before.
+     * NVMTL_COPY_EXACT_FORMAT=1 restores the exact-match refusal. */
+    static int exact = -1;
+    if (exact < 0) { const char *e = getenv("NVMTL_COPY_EXACT_FORMAT"); exact = e && e[0] == '1';
+                     nvlog("copy_image_sub: formats join when %s (NVMTL_COPY_EXACT_FORMAT=%s)", exact ? "identical" : "size-compatible, as vkCmdCopyImage allows", e ? e : "unset"); }
+    const int fmt_ok = src && dst && (exact ? src->fmt == dst->fmt : nvmtl_copy_formats_ok(src->fmt, dst->fmt));
+    if (!c || !src || !dst || !w || !h || !fmt_ok
         || (src->samples ? src->samples : 1) != (dst->samples ? dst->samples : 1)
         || ss >= (src->layers ? src->layers : 1) || ds >= (dst->layers ? dst->layers : 1)
         || sl >= (src->mips ? src->mips : 1) || dl >= (dst->mips ? dst->mips : 1)) {
-        nvlog("copy_image_sub: incompatible format/sample count or invalid subresource");
+        static _Atomic unsigned long long refused;
+        const unsigned long long k = atomic_fetch_add(&refused, 1) + 1;
+        if (!src || !dst) nvlog("copy_image_sub: REFUSED - %s image is missing (%llu refused so far)", src ? "destination" : "source", k);
+        else nvlog("copy_image_sub: REFUSED (%llu so far) - format %u -> %u%s, samples %u -> %u, layer %u of %u -> %u of %u, level %u of %u -> %u of %u, "
+                   "%ux%u (src %ux%u type %u, dst %ux%u type %u)", k, src->fmt, dst->fmt, fmt_ok ? "" : " (not size-compatible)",
+                   src->samples, dst->samples, ss, src->layers, ds, dst->layers, sl, src->mips, dl, dst->mips, w, h,
+                   src->w, src->h, src->mtl_type, dst->w, dst->h, dst->mtl_type);
         return -1;
+    }
+    if (src->fmt != dst->fmt) {
+        static _Atomic unsigned long long joined;
+        const unsigned long long k = atomic_fetch_add(&joined, 1) + 1;
+        if (!(k & (k - 1))) nvlog("copy_image_sub: %llu copy(ies) between size-compatible formats so far (latest %u -> %u, %ux%u)", k, src->fmt, dst->fmt, w, h);
     }
     const uint32_t sw = nvmtl_lvl(src->w, sl), sh = nvmtl_lvl(src->h, sl);
     const uint32_t dw = nvmtl_lvl(dst->w, dl), dh = nvmtl_lvl(dst->h, dl);
