@@ -19,7 +19,7 @@ pub use embedded::{
 pub(crate) use function_constants::function_constants_without_a_supplied_value;
 pub use function_constants::{parse_function_constants, FunctionConstant};
 use globals::{location_index_with_static, static_init_int_global_values};
-pub(crate) use globals::{static_init_foldable_global_values, StaticIntValue};
+pub(crate) use globals::{fold_static_init_struct_fields, static_init_foldable_global_values, StaticIntValue};
 pub use intersections::{
     AirIntersectionFamily, AirIntersectionInstancing, AirIntersectionResultField,
 };
