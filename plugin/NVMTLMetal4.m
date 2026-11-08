@@ -46,14 +46,57 @@ static NSUInteger nvmtl_m4_lower(uint64_t base)
     while (lo < hi) { NSUInteger m = (lo + hi) / 2; if (nvmtl_m4_ranges[m]->base < base) lo = m + 1; else hi = m; }
     return lo;
 }
+// Bumped whenever an existing entry changes owner or length. A buffer whose cached note carries the current epoch
+// and the same base and end is still exactly what the table holds for it, so asking again changes nothing.
+// Measured on Cyberpunk: every -gpuAddress took this lock, did a binary search through NSArray (a retain and
+// release per probe) and re-stored the weak pointer. With nine render threads asking for the same buffers'
+// addresses, that was 1,266 of 22,300 busy render-thread samples, half of it spinning on this one lock.
+// NVMTL_M4_NOTE_FAST=0 puts every call back through the table.
+static _Atomic uint64_t nvmtl_m4_epoch = 1;
+static int nvmtl_m4_note_fast(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_M4_NOTE_FAST"); on = !(e && e[0] == '0');
+        nvlog("Metal 4: gpuAddress table %s (NVMTL_M4_NOTE_FAST=%s)", on ? "skipped for a buffer already noted at the same range" : "updated on every call", e ? e : "unset"); }
+    return on;
+}
+int nvmtl_m4_note_current(_Atomic uint64_t note[3], uint64_t addr, uint64_t length)
+{
+    if (!addr || !length) return 1;   // never entered in the table either
+    if (!nvmtl_m4_note_fast()) return 0;
+    const uint64_t epoch = atomic_load_explicit(&note[2], memory_order_acquire);
+    return epoch && epoch == atomic_load_explicit(&nvmtl_m4_epoch, memory_order_acquire) &&
+           atomic_load_explicit(&note[0], memory_order_relaxed) == addr &&
+           atomic_load_explicit(&note[1], memory_order_relaxed) == addr + length;
+}
+static void nvmtl_m4_note_locked(id buf, uint64_t addr, uint64_t length);
 void nvmtl_m4_note_buffer(id buf, uint64_t addr, uint64_t length)
 {
     if (!addr || !length) return;
     os_unfair_lock_lock(&nvmtl_m4_lock);
+    nvmtl_m4_note_locked(buf, addr, length);
+    os_unfair_lock_unlock(&nvmtl_m4_lock);
+}
+void nvmtl_m4_note_buffer_cached(id buf, uint64_t addr, uint64_t length, _Atomic uint64_t note[3])
+{
+    if (!addr || !length) return;
+    os_unfair_lock_lock(&nvmtl_m4_lock);
+    nvmtl_m4_note_locked(buf, addr, length);
+    // Read under the lock, after this call's own bump: a later owner change bumps again and invalidates the note.
+    atomic_store_explicit(&note[0], addr, memory_order_relaxed);
+    atomic_store_explicit(&note[1], addr + length, memory_order_relaxed);
+    atomic_store_explicit(&note[2], atomic_load_explicit(&nvmtl_m4_epoch, memory_order_relaxed), memory_order_release);
+    os_unfair_lock_unlock(&nvmtl_m4_lock);
+}
+static void nvmtl_m4_note_locked(id buf, uint64_t addr, uint64_t length)
+{
     if (!nvmtl_m4_ranges) nvmtl_m4_ranges = [NSMutableArray new];
     NSUInteger i = nvmtl_m4_lower(addr);
     if (i < nvmtl_m4_ranges.count && nvmtl_m4_ranges[i]->base == addr) {      // the same base again: the newer buffer owns it
-        nvmtl_m4_ranges[i]->end = addr + length; nvmtl_m4_ranges[i]->buf = buf;
+        NVMTL4Range *r = nvmtl_m4_ranges[i];
+        id prev = r->buf;
+        if (prev != buf || r->end != addr + length) atomic_fetch_add_explicit(&nvmtl_m4_epoch, 1, memory_order_release);
+        r->end = addr + length; r->buf = buf;
     } else {
         NVMTL4Range *r = [NVMTL4Range new]; r->base = addr; r->end = addr + length; r->buf = buf;
         [nvmtl_m4_ranges insertObject:r atIndex:i];
@@ -65,7 +108,6 @@ void nvmtl_m4_note_buffer(id buf, uint64_t addr, uint64_t length)
             nvmtl_m4_ranges = live; sweepAt = MAX((NSUInteger)1024, live.count * 2);
         }
     }
-    os_unfair_lock_unlock(&nvmtl_m4_lock);
 }
 // The live buffer whose range holds `addr`, and the offset of `addr` in it. NO when none does (logged by the caller).
 static BOOL nvmtl_m4_resolve(uint64_t addr, id<MTLBuffer> *out, NSUInteger *off)
