@@ -392,35 +392,21 @@ static void nvmtl_fg_copy(float out[16], simd_float4x4 m) { for (int c = 0; c < 
     if (!cb) { nvlog("dlss: FG: the command buffer is not this driver's - interpolation skipped"); return; }
     NVMTLTexture *color = nvmtl_dlss_tex(_colorTexture), *prev = nvmtl_dlss_tex(_prevColorTexture), *depth = nvmtl_dlss_tex(_depthTexture);
     NVMTLTexture *motion = nvmtl_dlss_tex(_motionTexture), *out = nvmtl_dlss_tex(_outputTexture), *ui = nvmtl_dlss_tex(_uiTexture);
-    // An app may set its depth texture as the interpolator's motion texture too (Cyberpunk 2.5 sets ONE Depth32Float_Stencil8
-    // object as both, measured 11-07). NGX Frame Generation needs real motion vectors; depth read as motion makes every
-    // generated frame warp. The interpolator is bound to the temporal scaler of the same frame, which carries the frame's
-    // motion vectors and their scale - use those. NVMTL_FG_SCALER_MOTION=0 passes the app's texture through unchanged.
-    float mvsx = _motionVectorScaleX, mvsy = _motionVectorScaleY;
-    {   static int on = -1;
-        if (on < 0) { const char *e = getenv("NVMTL_FG_SCALER_MOTION"); on = !(e && e[0] == '0'); }
-        id sc = _scaler;
-        if (on && _motionTexture && _motionTexture == _depthTexture && sc && [sc respondsToSelector:@selector(motionTexture)]) {
-            id<MTLTexture> smv = ((id<MTLTexture> (*)(id, SEL))objc_msgSend)(sc, @selector(motionTexture));
-            NVMTLTexture *sm = nvmtl_dlss_tex(smv);
-            if (sm && smv != _depthTexture) {
-                motion = sm;
-                if ([sc respondsToSelector:@selector(motionVectorScaleX)] && [sc respondsToSelector:@selector(motionVectorScaleY)]) {
-                    mvsx = ((float (*)(id, SEL))objc_msgSend)(sc, @selector(motionVectorScaleX));
-                    mvsy = ((float (*)(id, SEL))objc_msgSend)(sc, @selector(motionVectorScaleY));
-                }
-                static int said;
-                if (!said++) nvlog("dlss: FG: the app set its depth texture as motion - using the scaler's motion texture %p (Metal format %lu, %lux%lu, scale %.3f %.3f) (NVMTL_FG_SCALER_MOTION=0 restores)",
-                                   (__bridge void *)smv, (unsigned long)smv.pixelFormat, (unsigned long)smv.width, (unsigned long)smv.height, mvsx, mvsy);
-            } else { static int said2; if (!said2++) nvlog("dlss: FG: the app set its depth texture as motion and the scaler has no separate motion texture - depth passed as motion"); }
-        }
-    }
     if (!color || !depth || !motion || !out) { nvlog("dlss: FG: colour, depth, motion and output textures must all be set (and be this driver's) - interpolation skipped"); return; }
     if (_prevColorTexture && !prev) { nvlog("dlss: FG: the previous colour texture is not this driver's - interpolation skipped"); return; }
     if (_uiTexture && !ui) { nvlog("dlss: FG: the UI texture is not this driver's - interpolation skipped"); return; }
     if (!_notedUnmapped) {
         _notedUnmapped = YES;
         if (_fence || _deltaTime > 0 || _uiTextureComposited) nvlog("dlss: FG: deltaTime, the fence and uiTextureComposited are not mapped to NGX (ignored)");
+        // Once: what the app set as depth and motion. Every run so far described both as the same D32 image, which would
+        // feed NGX depth as motion vectors - this line says whether the app passed one texture twice or two textures.
+        nvlog("dlss: FG: depthTexture %p (%s, Metal format %lu, %lux%lu) motionTexture %p (%s, Metal format %lu, %lux%lu)%s; descriptor depth %lu motion %lu",
+              (__bridge void *)_depthTexture, object_getClassName(_depthTexture), (unsigned long)_depthTexture.pixelFormat,
+              (unsigned long)_depthTexture.width, (unsigned long)_depthTexture.height,
+              (__bridge void *)_motionTexture, object_getClassName(_motionTexture), (unsigned long)_motionTexture.pixelFormat,
+              (unsigned long)_motionTexture.width, (unsigned long)_motionTexture.height,
+              _depthTexture == _motionTexture ? " - THE SAME OBJECT" : (depth == motion ? " - the same driver texture" : ""),
+              (unsigned long)_fmtDepth, (unsigned long)_fmtMotion);
     }
     nvmtl_vk_dlss_fg_args a = {0};
     a.depth = [depth nvi]; a.depth_view = [depth nvview]; a.motion = [motion nvi]; a.motion_view = [motion nvview];
@@ -429,7 +415,7 @@ static void nvmtl_fg_copy(float out[16], simd_float4x4 m) { for (int c = 0; c < 
     a.in_w = (uint32_t)_inW; a.in_h = (uint32_t)_inH; a.out_w = (uint32_t)_outW; a.out_h = (uint32_t)_outH;
     a.hdr = nvmtl_dlss_float_format(_fmtColor); a.depth_inverted = _depthReversed; a.camera_motion_included = 1;
     a.near_z = _nearPlane; a.far_z = _farPlane; a.fov_y = _fieldOfView * (float)M_PI / 180.0f; a.aspect = _aspectRatio;
-    a.mv_scale_x = mvsx; a.mv_scale_y = mvsy; a.jitter_x = _jitterOffsetX; a.jitter_y = _jitterOffsetY;
+    a.mv_scale_x = _motionVectorScaleX; a.mv_scale_y = _motionVectorScaleY; a.jitter_x = _jitterOffsetX; a.jitter_y = _jitterOffsetY;
     a.multi_index = 1; a.multi_count = 1; a.frame_id = ++_frame;
     // Camera pose and the clip-space step from the previous frame, when the scaler has the matrices.
     simd_float4x4 id4 = matrix_identity_float4x4, v = id4, p = id4, vp = id4;
