@@ -34,6 +34,7 @@ fixture = r'''
 #include <mach/mach.h>
 #include <vulkan/vulkan.h>
 #include "nvmtl_vk.h"
+#include "nvmtl_copy_compat.h"
 #define nvlog(...) ((void)0)
 static unsigned calls, errors, checks;
 static VkImageCopy region;
