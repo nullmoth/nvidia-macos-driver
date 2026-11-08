@@ -19,7 +19,7 @@ def cases_for(name):
     return json.load(open(os.path.join(here, "data", CASES[name])))
 
 
-def decode(r, sign_mask=True, hit_rule="v-sign", geo_mask=True):
+def decode(r, sign_mask=True, hit_rule="v-sign", geo_mask=True, front_rule="u-sign"):
     """Python port of ttu_decode; the keyword arguments exist so the controls can break one rule at a time."""
     hit = (r[15] & 0x80000000) == 0 if hit_rule == "v-sign" else (r[15] & 0x80000000) != 0
     if not hit:
@@ -29,7 +29,7 @@ def decode(r, sign_mask=True, hit_rule="v-sign", geo_mask=True):
     k = r[12] >> 29
     pbits = 28 - 4 * k
     return {"hit": True, "t": f(r[13]), "u": f(r[14]), "v": f(r[15]), "primitive": r[12] & ((1 << pbits) - 1),
-            "geometry": ((r[12] & 0x0fffffff) if geo_mask else r[12]) >> pbits, "instance": r[5] - 1}
+            "geometry": ((r[12] & 0x0fffffff) if geo_mask else r[12]) >> pbits, "instance": r[5] - 1, "front": ((r[14] >> 31) == 0) if front_rule == "u-sign" else ((r[14] >> 31) != 0)}
 
 
 def compare(rows, cases):
@@ -74,6 +74,11 @@ for s in SETS:
     rows = [decode(r) for r in load(s)]
     bad = compare(rows, cases_for(s))
     arm(f"{s}: all 32 lanes match the CPU test (hit, t, u, v, primitive, geometry)", not bad, str(bad[:3]))
+    # every triangle in both corpora faces +z, so a ray with direction z > 0 meets its back side
+    bad_f = [c["label"] for c, r in zip(cases_for(s), rows) if r["hit"] and r["front"] != (c["direction"][2] < 0)]
+    both = {c["direction"][2] < 0 for c, r in zip(cases_for(s), rows) if r["hit"]}
+    arm(f"{s}: front/back face (sign of word 14) matches the geometry for every hit, and both faces occur",
+        not bad_f and both == {True, False}, str(bad_f[:3]) + str(both))
     inst = sorted(set(r["instance"] for r in rows if r["hit"]))
     arm(f"{s}: every hit reports one instance value", len(inst) == 1, str(inst))
 
@@ -82,6 +87,9 @@ for name, kw in (("keeping the sign bit of u", {"sign_mask": False}), ("reading 
                  ("not masking the geometry field", {"geo_mask": False})):
     bad = compare([decode(r, **kw) for r in load(SETS[0])], cases_for(SETS[0]))
     arm(f"control: {name} is caught", bool(bad), "the broken decode still matched, so the check cannot tell")
+
+bad = [1 for c, r in zip(cases_for(SETS[0]), [decode(x, front_rule="inv") for x in load(SETS[0])]) if r["hit"] and r["front"] != (c["direction"][2] < 0)]
+arm("control: reading the face bit backwards is caught", bool(bad), "the inverted face rule still matched")
 
 # the C header must decode exactly what the python port decodes
 with tempfile.TemporaryDirectory() as tmp:
@@ -101,7 +109,7 @@ with tempfile.TemporaryDirectory() as tmp:
                     ok = False
                 elif py["hit"]:
                     ok &= all(math.isclose(float(p[i]), py[k], rel_tol=1e-6) for i, k in ((2, "t"), (3, "u"), (4, "v")))
-                    ok &= (int(p[5]), int(p[6]), int(p[7])) == (py["primitive"], py["geometry"], py["instance"])
+                    ok &= (int(p[5]), int(p[6]), int(p[7]), int(p[8])) == (py["primitive"], py["geometry"], py["instance"], int(py["front"]))
             arm(f"C decode == python decode on {s}", ok)
         pk = out[32].split()
         arm("ttu_pack puts mask, tmin, tmax, root and the kind bits where the proof program does",

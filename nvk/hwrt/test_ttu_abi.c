@@ -12,7 +12,7 @@ int main(int argc, char **argv)
    fclose(f);
    for (int l = 0; l < 32; l++) {
       struct ttu_hit h = ttu_decode(&rec[l][8]);
-      printf("%d %d %.9g %.9g %.9g %u %u %d\n", l, h.hit, h.t, h.u, h.v, h.primitive, h.geometry, h.instance);
+      printf("%d %d %.9g %.9g %.9g %u %u %d %d\n", l, h.hit, h.t, h.u, h.v, h.primitive, h.geometry, h.instance, h.front_face);
    }
    struct ttu_request r;
    const float o[3] = { 0.25f, 0.25f, -1.f }, d[3] = { 0, 0, 1 };
