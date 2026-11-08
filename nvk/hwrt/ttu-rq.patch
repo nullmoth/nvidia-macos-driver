@@ -1,0 +1,243 @@
+--- a/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c
++++ b/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c
+@@ -10,6 +10,8 @@
+ 
+ #include "util/hash_table.h"
+ 
++#include <stdlib.h>
++
+ typedef struct {
+    nir_variable *variable;
+    unsigned array_length;
+@@ -124,6 +126,7 @@
+    rq_variable *primitive_id;
+    rq_variable *geometry_id_and_flags;
+    rq_variable *instance_addr;
++   rq_variable *instance_index;   /* hardware traversal only */
+    rq_variable *intersection_type;
+    rq_variable *opaque;
+    rq_variable *frontface;
+@@ -190,6 +193,8 @@
+                                                      VAR_NAME("_geometry_id_and_flags"));
+    result.instance_addr = rq_variable_create(ctx, shader, array_length, glsl_uint64_t_type(),
+                                              VAR_NAME("_instance_addr"));
++   result.instance_index = rq_variable_create(ctx, shader, array_length, glsl_uint_type(),
++                                              VAR_NAME("_instance_index"));
+    result.intersection_type = rq_variable_create(ctx, shader, array_length, glsl_uint_type(),
+                                                  VAR_NAME("_intersection_type"));
+    result.opaque =
+@@ -307,7 +312,136 @@
+    intersection_type_triangle,
+    intersection_type_aabb
+ };
++
++/* Hardware traversal (NVK_HWRT_QUERY=1).
++ *
++ * The query instruction walks a structure built by the vendor's own builder (header, node and instance layout measured
++ * on the card), NOT the structure nvk_acceleration_structure.c builds: switching this on with a structure from the
++ * software builder reads garbage and faults. Scope: ONE closest-hit query over opaque triangles. Not covered, and
++ * silently ignored here: ray flags (all of them), non-opaque candidates and any-hit, procedural primitives, the
++ * triangle vertex positions of a hit, and a query that starts at a bottom-level structure. The request and result word
++ * layout is nvk/hwrt/ttu_abi.h, checked against recorded device output by nvk/hwrt/check_ttu_abi.py. */
++#define NVK_TTU_ROOT_OFFSET       0x20u   /* u64 in the structure header: offset of the root node from the structure base */
++#define NVK_TTU_INSTANCE_XFORM    0x280u  /* 3x4 row-major transform per instance, 48 bytes each, in input order */
++#define NVK_TTU_INSTANCE_RECORD   0x580u  /* {u32 sbtRecordOffset, u32 instanceCustomIndex} per instance, 8 bytes each */
++
++static bool
++nvk_hwrt_query_enabled(void)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("NVK_HWRT_QUERY");
++      on = e && e[0] == '1';
++   }
++   return on;
++}
++
++/* inverse of the affine transform stored at xf_addr, as three vec4 rows (the layout nvk_mul_vec3_mat takes) */
++static void
++ttu_load_wto_matrix(nir_builder *b, nir_def *xf_addr, nir_def **out)
++{
++   nir_def *row[3], *a[3][3], *t[3];
++   for (unsigned i = 0; i < 3; i++) {
++      row[i] = nir_build_load_global(b, 4, 32, nir_iadd_imm(b, xf_addr, i * 16), .align_mul = 4);
++      for (unsigned j = 0; j < 3; j++)
++         a[i][j] = nir_channel(b, row[i], j);
++      t[i] = nir_channel(b, row[i], 3);
++   }
++#define M(x, y) nir_fmul(b, x, y)
++#define SUB(x, y) nir_fsub(b, x, y)
++   nir_def *c00 = SUB(M(a[1][1], a[2][2]), M(a[1][2], a[2][1]));
++   nir_def *c01 = SUB(M(a[1][2], a[2][0]), M(a[1][0], a[2][2]));
++   nir_def *c02 = SUB(M(a[1][0], a[2][1]), M(a[1][1], a[2][0]));
++   nir_def *c10 = SUB(M(a[0][2], a[2][1]), M(a[0][1], a[2][2]));
++   nir_def *c11 = SUB(M(a[0][0], a[2][2]), M(a[0][2], a[2][0]));
++   nir_def *c12 = SUB(M(a[0][1], a[2][0]), M(a[0][0], a[2][1]));
++   nir_def *c20 = SUB(M(a[0][1], a[1][2]), M(a[0][2], a[1][1]));
++   nir_def *c21 = SUB(M(a[0][2], a[1][0]), M(a[0][0], a[1][2]));
++   nir_def *c22 = SUB(M(a[0][0], a[1][1]), M(a[0][1], a[1][0]));
++   nir_def *det = nir_fadd(b, nir_fadd(b, M(a[0][0], c00), M(a[0][1], c01)), M(a[0][2], c02));
++   nir_def *rcp = nir_frcp(b, det);
++   nir_def *inv[3][3] = {
++      { M(c00, rcp), M(c10, rcp), M(c20, rcp) },
++      { M(c01, rcp), M(c11, rcp), M(c21, rcp) },
++      { M(c02, rcp), M(c12, rcp), M(c22, rcp) },
++   };
++   for (unsigned i = 0; i < 3; i++) {
++      nir_def *tr = nir_fadd(b, nir_fadd(b, M(inv[i][0], t[0]), M(inv[i][1], t[1])), M(inv[i][2], t[2]));
++      out[i] = nir_vec4(b, inv[i][0], inv[i][1], inv[i][2], nir_fneg(b, tr));
++   }
++#undef M
++#undef SUB
++}
++
++static nir_def *
++ttu_instance_xform_addr(nir_builder *b, nir_def *base, nir_def *instance_index)
++{
++   return nir_iadd(b, nir_iadd_imm(b, base, NVK_TTU_INSTANCE_XFORM),
++                   nir_u2u64(b, nir_imul_imm(b, instance_index, 48)));
++}
++
++static nir_def *
++lower_rq_proceed_ttu(nir_builder *b, nir_def *index, struct ray_query_vars *vars)
++{
++   nir_push_if(b, rq_load_var(b, index, vars->incomplete));
++   {
++      nir_def *base = rq_load_var(b, index, vars->root_bvh_base);
++      nir_def *root = nir_iadd(b, base, nir_build_load_global(b, 1, 64, nir_iadd_imm(b, base, NVK_TTU_ROOT_OFFSET),
++                                                              .align_mul = 8));
++      /* cull_mask is kept shifted to bits 31:24 for the software walk; the request wants it in bits 23:16 */
++      nir_def *mask = nir_ushr_imm(b, rq_load_var(b, index, vars->cull_mask), 8);
++      nir_def *org = rq_load_var(b, index, vars->origin);
++      nir_def *dir = rq_load_var(b, index, vars->direction);
++      nir_def *tmin = rq_load_var(b, index, vars->tmin);
++      nir_def *tmax = rq_load_var(b, index, vars->closest.t);
++      nir_def *zero = nir_imm_int(b, 0);
++
++      nir_def *v0 = nir_vec4(b, nir_imm_int(b, 0xff030207), nir_imm_int(b, 0x50455400), mask, zero);
++      nir_def *v1 = nir_vec4(b, nir_channel(b, org, 0), nir_channel(b, org, 1), nir_channel(b, org, 2), tmin);
++      nir_def *v2 = nir_vec4(b, nir_channel(b, dir, 0), nir_channel(b, dir, 1), nir_channel(b, dir, 2), tmax);
++      nir_def *v3 = nir_vec4(b, nir_imm_int(b, 0xff030407), nir_imm_int(b, 0x50400400), mask, zero);
++      nir_def *v4 = nir_vec4(b, nir_unpack_64_2x32_split_x(b, root),
++                             nir_ior_imm(b, nir_unpack_64_2x32_split_y(b, root), 0x10000000), zero, zero);
++      nir_def *r = nir_ttu_query_nv(b, v0, v1, v2, v3, v4, .flags = 1);
++
++      nir_def *w5 = nir_channel(b, r, 5), *w12 = nir_channel(b, r, 12), *w13 = nir_channel(b, r, 13);
++      nir_def *w14 = nir_channel(b, r, 14), *w15 = nir_channel(b, r, 15);
++
++      /* a miss leaves word 15 all ones; a committed opaque triangle leaves its sign bit clear */
++      nir_push_if(b, nir_ieq_imm(b, nir_ushr_imm(b, w15, 31), 0));
++      {
++         nir_def *kind = nir_ushr_imm(b, w12, 29);
++         nir_def *pbits = nir_isub_imm(b, 28, nir_ishl_imm(b, kind, 2));
++         nir_def *prim = nir_iand(b, w12, nir_iadd_imm(b, nir_ishl(b, nir_imm_int(b, 1), pbits), -1));
++         nir_def *geom = nir_ushr(b, nir_iand_imm(b, w12, 0x0fffffff), pbits);
++         nir_def *inst = nir_iadd_imm(b, w5, -1);
++
++         rq_store_var(b, index, vars->closest.t, nir_iand_imm(b, w13, 0x7fffffff), 0x1);
++         rq_store_var(b, index, vars->closest.barycentrics,
++                      nir_vec2(b, nir_iand_imm(b, w14, 0x7fffffff), nir_iand_imm(b, w15, 0x7fffffff)), 0x3);
++         rq_store_var(b, index, vars->closest.frontface, nir_ieq_imm(b, nir_ushr_imm(b, w14, 31), 0), 0x1);
++         rq_store_var(b, index, vars->closest.primitive_id, prim, 0x1);
++         rq_store_var(b, index, vars->closest.geometry_id_and_flags, geom, 0x1);
++         rq_store_var(b, index, vars->closest.instance_index, inst, 0x1);
++         rq_store_var(b, index, vars->closest.instance_addr, ttu_instance_xform_addr(b, base, inst), 0x1);
++         rq_store_var(b, index, vars->closest.sbt_offset_and_flags,
++                      nir_build_load_global(b, 1, 32,
++                                            nir_iadd(b, nir_iadd_imm(b, base, NVK_TTU_INSTANCE_RECORD),
++                                                     nir_u2u64(b, nir_imul_imm(b, inst, 8))),
++                                            .align_mul = 4), 0x1);
++         rq_store_var(b, index, vars->closest.intersection_type, nir_imm_int(b, intersection_type_triangle), 0x1);
++         rq_store_var(b, index, vars->closest.opaque, nir_imm_true(b), 0x1);
++      }
++      nir_pop_if(b, NULL);
+ 
++      /* opaque triangles produce no candidates, so one query is the whole traversal */
++      rq_store_var(b, index, vars->incomplete, nir_imm_false(b), 0x1);
++   }
++   nir_pop_if(b, NULL);
++
++   return rq_load_var(b, index, vars->incomplete);
++}
++
+ static void
+ lower_rq_initialize(nir_builder *b, nir_def *index, nir_intrinsic_instr *instr,
+                     struct ray_query_vars *vars)
+@@ -415,6 +549,11 @@
+    case nir_ray_query_value_intersection_geometry_index:
+       return nir_iand_imm(b, rq_load_var(b, index, intersection->geometry_id_and_flags), 0xFFFFFF);
+    case nir_ray_query_value_intersection_instance_custom_index: {
++      if (nvk_hwrt_query_enabled()) {
++         nir_def *rec = nir_iadd(b, nir_iadd_imm(b, rq_load_var(b, index, vars->root_bvh_base), NVK_TTU_INSTANCE_RECORD + 4),
++                                 nir_u2u64(b, nir_imul_imm(b, rq_load_var(b, index, intersection->instance_index), 8)));
++         return nir_iand_imm(b, nir_build_load_global(b, 1, 32, rec, .align_mul = 4), 0xFFFFFF);
++      }
+       nir_def *instance_node_addr = rq_load_var(b, index, intersection->instance_addr);
+       return nir_iand_imm(b,
+                           nir_build_load_global(b, 1, 32,
+@@ -424,6 +563,8 @@
+                           0xFFFFFF);
+    }
+    case nir_ray_query_value_intersection_instance_id: {
++      if (nvk_hwrt_query_enabled())
++         return rq_load_var(b, index, intersection->instance_index);
+       nir_def *instance_node_addr = rq_load_var(b, index, intersection->instance_addr);
+       return nir_build_load_global(
+          b, 1, 32,
+@@ -434,23 +575,28 @@
+    case nir_ray_query_value_intersection_object_ray_direction: {
+       nir_def *instance_node_addr = rq_load_var(b, index, intersection->instance_addr);
+       nir_def *wto_matrix[3];
+-      nvk_load_wto_matrix(b, instance_node_addr, NULL, wto_matrix);
++      if (nvk_hwrt_query_enabled())
++         ttu_load_wto_matrix(b, instance_node_addr, wto_matrix);
++      else
++         nvk_load_wto_matrix(b, instance_node_addr, NULL, wto_matrix);
+       return nvk_mul_vec3_mat(b, rq_load_var(b, index, vars->direction), wto_matrix, false);
+    }
+    case nir_ray_query_value_intersection_object_ray_origin: {
+       nir_def *instance_node_addr = rq_load_var(b, index, intersection->instance_addr);
+       nir_def *wto_matrix[3];
+-      nvk_load_wto_matrix(b, instance_node_addr, NULL, wto_matrix);
++      if (nvk_hwrt_query_enabled())
++         ttu_load_wto_matrix(b, instance_node_addr, wto_matrix);
++      else
++         nvk_load_wto_matrix(b, instance_node_addr, NULL, wto_matrix);
+       return nvk_mul_vec3_mat(b, rq_load_var(b, index, vars->origin), wto_matrix, true);
+    }
+    case nir_ray_query_value_intersection_object_to_world: {
+       nir_def *instance_node_addr = rq_load_var(b, index, intersection->instance_addr);
+       nir_def *rows[3];
++      /* in hardware mode instance_addr already points at the 3x4 transform */
++      const unsigned otw_base = nvk_hwrt_query_enabled() ? 0 : offsetof(struct nvk_bvh_instance_node, otw_matrix);
+       for (unsigned r = 0; r < 3; ++r)
+-         rows[r] = nir_build_load_global(
+-            b, 4, 32,
+-            nir_iadd_imm(b, instance_node_addr,
+-                         offsetof(struct nvk_bvh_instance_node, otw_matrix) + r * 16));
++         rows[r] = nir_build_load_global(b, 4, 32, nir_iadd_imm(b, instance_node_addr, otw_base + r * 16));
+ 
+       return nir_vec3(b, nir_channel(b, rows[0], column), nir_channel(b, rows[1], column),
+                       nir_channel(b, rows[2], column));
+@@ -470,7 +616,10 @@
+       nir_def *instance_node_addr = rq_load_var(b, index, intersection->instance_addr);
+ 
+       nir_def *wto_matrix[3];
+-      nvk_load_wto_matrix(b, instance_node_addr, NULL, wto_matrix);
++      if (nvk_hwrt_query_enabled())
++         ttu_load_wto_matrix(b, instance_node_addr, wto_matrix);
++      else
++         nvk_load_wto_matrix(b, instance_node_addr, NULL, wto_matrix);
+ 
+       nir_def *vals[3];
+       for (unsigned i = 0; i < 3; ++i)
+@@ -680,7 +829,8 @@
+                new_dest = lower_rq_load(&builder, index, intrinsic, vars);
+                break;
+             case nir_intrinsic_rq_proceed:
+-               new_dest = lower_rq_proceed(&builder, index, vars);
++               new_dest = nvk_hwrt_query_enabled() ? lower_rq_proceed_ttu(&builder, index, vars)
++                                                    : lower_rq_proceed(&builder, index, vars);
+                break;
+             case nir_intrinsic_rq_terminate:
+                lower_rq_terminate(&builder, index, intrinsic, vars);
