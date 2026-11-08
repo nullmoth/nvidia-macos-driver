@@ -22,9 +22,20 @@ typedef struct { const void *view; uint64_t seq; } nvmtl_sl_bind;               
 typedef struct { nvmtl_sl_bind b[NVMTL_SL_NB]; uint32_t allocs, state; uint64_t alloc_seq, drop_seq; } nvmtl_sl_slot;   /* state: 0 never allocated, 1 live, 2 dropped */
 typedef struct { nvmtl_sl_slot *s; uint32_t n; uint64_t writes, allocs, drops; } nvmtl_sl_state;
 
-typedef struct { const void *img, *mem, *view; uint64_t off, size, seq, died, parked, avail; uint32_t w, h, fmt, storage, placed, pooled, layers, mips, flags, usage, samples; } nvmtl_im_entry;
+typedef struct { const void *img, *mem, *view; uint64_t off, size, seq, died, parked, avail; uint32_t w, h, fmt, storage, placed, pooled, layers, mips, flags, usage, samples, chain; } nvmtl_im_entry;
 /* parked: in a heap/buffer park since this seq, 0 when in use; size: the memory the image needs (its requirement); avail: the memory it was given from its bind offset (0 = unknown) */
-typedef struct { nvmtl_im_entry *e; uint32_t n, cap; uint64_t live; } nvmtl_im_state;
+/* heads/chain: a hash index over the append-only history - heads[bucket] is 1 + the newest entry of that bucket, each
+   entry's chain is 1 + the next older one. Without it every image death, park and reuse scanned the WHOLE history under
+   g_sl_lock: Cyberpunk creates and frees textures every frame, the history only grows, and on 11-07 ~28% of the game's
+   main-thread samples sat in that scan inside -[NVMTLTexture dealloc] (the 100-135 ms hitches). */
+enum { NVMTL_IM_BUCKETS = 16384 };
+typedef struct { nvmtl_im_entry *e; uint32_t n, cap; uint64_t live; uint32_t heads[NVMTL_IM_BUCKETS]; } nvmtl_im_state;
+static inline uint32_t nvmtl_im_bucket(const void *img)
+{
+    uint64_t key = (uint64_t)(uintptr_t)img;
+    key ^= key >> 33; key *= UINT64_C(0xff51afd7ed558ccd); key ^= key >> 33;
+    return (uint32_t)key & (NVMTL_IM_BUCKETS - 1);
+}
 typedef struct { const void *view, *img; uint32_t type, base_layer, layers, base_mip, mips; uint32_t s_idx, t_idx; uint64_t s_addr, t_addr, seq, died; uint32_t live_next; } nvmtl_vw_entry;
 /* type: VkImageViewType + 1 (0 = not recorded); s_/t_: the sampled and storage descriptor indices and the header addresses the view carried (0 = not read); seq/died: created / destroyed */
 enum { NVMTL_VW_LIVE_BUCKETS = 4096 };
@@ -83,6 +94,7 @@ static inline uint32_t nvmtl_im_add(nvmtl_im_state *s, const void *img, const vo
     if (s->n == s->cap) { const uint32_t cap = s->cap ? s->cap * 2 : 4096; nvmtl_im_entry *e = (nvmtl_im_entry *)realloc(s->e, (size_t)cap * sizeof *e); if (!e) return 0; s->e = e; s->cap = cap; }
     nvmtl_im_entry *e = &s->e[s->n++];
     e->img = img; e->mem = mem; e->off = off; e->size = size; e->view = view; e->w = w; e->h = h; e->fmt = fmt; e->storage = storage; e->placed = placed; e->pooled = pooled; e->seq = seq; e->died = 0; e->parked = 0;
+    { const uint32_t b = nvmtl_im_bucket(img); e->chain = s->heads[b]; s->heads[b] = s->n; }   /* s->n is already 1 + this entry */
     s->live++;
     return s->n;
 }
@@ -90,7 +102,7 @@ static inline uint32_t nvmtl_im_add(nvmtl_im_state *s, const void *img, const vo
 static inline nvmtl_im_entry *nvmtl_im_by_img(const nvmtl_im_state *s, const void *img)
 {
     if (!img) return NULL;
-    for (uint32_t i = s->n; i-- > 0;) if (s->e[i].img == img) return &s->e[i];
+    for (uint32_t i = s->heads[nvmtl_im_bucket(img)]; i && i <= s->n; i = s->e[i - 1].chain) if (s->e[i - 1].img == img) return &s->e[i - 1];
     return NULL;
 }
 static inline void nvmtl_im_died(nvmtl_im_state *s, const void *img, uint64_t seq)
