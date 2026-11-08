@@ -651,6 +651,8 @@ static bool nvmtl_process_is_allowed(void)
 static BOOL nvmtl_m4_enabled(void);   // NVMTLMetal4.m, later in this translation unit
 static id<MTLCommandBuffer> nvmtl_m4_underlying(id cb);
 void nvmtl_m4_note_buffer(id buf, uint64_t addr, uint64_t length);
+int nvmtl_m4_note_current(_Atomic uint64_t note[3], uint64_t addr, uint64_t length);
+void nvmtl_m4_note_buffer_cached(id buf, uint64_t addr, uint64_t length, _Atomic uint64_t note[3]);
 #include "nvmtl_mfx_native_profile.inc"
 
 // NVMTL_WS_RT_GATE_MB=<n>: while ray tracing is available, the working-set answer is raised to at least n MB. Measured in the

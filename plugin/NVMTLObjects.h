@@ -334,6 +334,9 @@ typedef struct { nvk_image img; uint32_t key[12]; NSUInteger off, len; } nvmtl_p
 @interface NVMTLHeap () { @public size_t _lzc; uint32_t _lzn, _lzcap, _lzslots; nvk_heap *_lzm; size_t *_lzb; uint16_t *_lzo;
                          os_unfair_lock _lzl; } @end
 @interface NVMTLBuffer () { @public nvmtl_park_t *_bpk; uint32_t _nbpk; os_unfair_lock _bpl; } @end
+// What this buffer last put in the Metal 4 address table: base, end, and the table epoch at the time. -gpuAddress
+// skips the table (one global lock) while all three still hold - see nvmtl_m4_note_current.
+@interface NVMTLBuffer () { @public _Atomic uint64_t _m4note[3]; } @end
 @interface NVMTLTexture () { @public BOOL _bparkable; } @end
 static void nvmtl_heap_park(NVMTLHeap *h, nvk_image *img, const uint32_t *key, NSUInteger off, NSUInteger len);
 void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared);
