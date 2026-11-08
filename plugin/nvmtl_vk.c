@@ -3625,7 +3625,23 @@ static unsigned nvmtl_keep_cap(void)
 static pthread_mutex_t g_keep_lock = PTHREAD_MUTEX_INITIALIZER;
 static VkCommandPool g_keep_pool[NVMTL_KEEP]; static unsigned g_keep_npool;
 static unsigned g_keep_pool_cost[NVMTL_KEEP], g_keep_pool_maps;
-static unsigned long long g_keep_pool_hit, g_keep_pool_miss, g_keep_pool_drop;
+static unsigned long long g_keep_pool_hit, g_keep_pool_miss, g_keep_pool_drop, g_keep_pool_unproven;
+// Every miss here is a fresh NVK pool whose 64 KB chunks are each an RM allocation, a VA bind, and a user-client open + map
+// on the recording thread, and every drop or unproven pool is the matching close + unmap + free on the completion thread.
+// In a 20 s Cyberpunk sample that was ~3,000 recording-thread and ~1,800 completion-thread samples, so the cache's hit
+// rate is logged (every 4096 command buffers) to tell which of the three is costing it: misses (cache too small for
+// the burst), drops (cache full at retire), or unproven (no witness, so the pool cannot be reused at all).
+static void nvmtl_keep_pool_census(void)
+{
+    static _Atomic unsigned long long n;
+    if ((atomic_fetch_add_explicit(&n, 1, memory_order_relaxed) & 4095) != 4095) return;
+    pthread_mutex_lock(&g_keep_lock);
+    const unsigned long long h = g_keep_pool_hit, m = g_keep_pool_miss, d = g_keep_pool_drop, u = g_keep_pool_unproven;
+    const unsigned np = g_keep_npool;
+    pthread_mutex_unlock(&g_keep_lock);
+    nvlog("vk: command-pool cache: hits=%llu misses=%llu (%.1f%%) drops=%llu unproven=%llu cached=%u/%u (NVMTL_KEEP_POOLS)",
+          h, m, (h + m) ? 100.0 * (double)m / (double)(h + m) : 0.0, d, u, np, nvmtl_keep_cap());
+}
 static nvmtl_address_page *g_keep_page[NVMTL_KEEP]; static unsigned g_keep_npage;
 // Set once a process has lost NVMTL_WIT_LOST_MAX witnesses: reuse stops and every pool is destroyed after its fence
 // signals, so a witness that keeps going missing costs speed, never memory. Each lost witness has already cost its
@@ -3655,6 +3671,7 @@ static VkCommandPool nvmtl_keep_pool_pop(void)
         g_keep_pool_maps -= g_keep_pool_cost[i]; g_keep_pool_hit++;
     } else g_keep_pool_miss++;
     pthread_mutex_unlock(&g_keep_lock);
+    nvmtl_keep_pool_census();
     return p;
 }
 static int nvmtl_keep_pool_push(VkCommandPool p)
@@ -7808,6 +7825,7 @@ static void nvmtl_cmd_retire(nvk_cmdbuf *c)
     if (c->cb && c->pool) {
         VkCommandBuffer cb = (VkCommandBuffer)c->cb;
         pvkFreeCommandBuffers(g_dev, (VkCommandPool)c->pool, 1, &cb);
+        if (keep == 0 && nvmtl_keep_on()) { pthread_mutex_lock(&g_keep_lock); g_keep_pool_unproven++; pthread_mutex_unlock(&g_keep_lock); }
         if (keep >= 0 && !(keep > 0 && nvmtl_keep_pool_push((VkCommandPool)c->pool))) pvkDestroyCommandPool(g_dev, (VkCommandPool)c->pool, NULL);
         c->cb = NULL; c->pool = NULL;
     }
