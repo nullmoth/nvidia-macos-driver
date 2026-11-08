@@ -796,13 +796,32 @@ static void nvmtl_install_hw_resource_pools(id dev)
 
 static void nvmtl_zero_new_buffer(NVMTLBuffer *b, NSUInteger len);
 static __thread int gZeroSkip;
+// NVMTL_MANAGED_SYSMEM=1: a Managed buffer lives in mapped system memory (no VRAM copy + shadow pair). This was a bare
+// getenv() on every call, so any value - "0" included - switched it on, nothing said whether it had, and a release
+// plugin forgets the variable unless the process also sets NVMTL_PROCESS_ENV=1 (or the conf file sets it), which made a
+// run with it look identical to a run without it. Now read once, only "1" enables it, and it says so: once when read,
+// and once when the first Managed buffer is actually placed by it (an app that makes no Managed buffers is unaffected).
+static int nvmtl_managed_sysmem(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_MANAGED_SYSMEM");
+        on = e && e[0] == '1';
+        if (e || on) nvlog("buffers: Managed buffers %s (NVMTL_MANAGED_SYSMEM=%s)", on ? "go to mapped system memory" : "keep VRAM + shadow", e ? e : "unset");
+    }
+    return on;
+}
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)len options:(MTLResourceOptions)opt {
     if (nvmtl_vk_init()) return nil;
     if (nvmtl_alloc_blocked()) return nil;
     NVMTLBuffer *b = [NVMTLBuffer new];
     b->_storage = (MTLStorageMode)((opt >> MTLResourceStorageModeShift) & 0xF);
     b->_ropt = opt & ((MTLResourceOptions)0xF | ((MTLResourceOptions)0x3 << MTLResourceHazardTrackingModeShift));
-    int hv = (b->_storage == MTLStorageModeShared) || (b->_storage == MTLStorageModeManaged && getenv("NVMTL_MANAGED_SYSMEM"));
+    int hv = (b->_storage == MTLStorageModeShared) || (b->_storage == MTLStorageModeManaged && nvmtl_managed_sysmem());
+    if (b->_storage == MTLStorageModeManaged && hv) {
+        static _Atomic int said;
+        if (!atomic_exchange(&said, 1)) nvlog("buffers: first Managed buffer (%lu bytes) placed in system memory by NVMTL_MANAGED_SYSMEM=1", (unsigned long)len);
+    }
     if (nvmtl_vk_buffer_create(len, (hv && b->_storage == MTLStorageModeShared) ? 2 : hv, &b->_b)) {
         if (hv) { nvmtl_alloc_failed("newBufferWithLength"); nvlog("newBufferWithLength: FAILED"); return nil; }
         nvlog("newBufferWithLength:%lu private: VRAM refused - placing it in system memory", (unsigned long)len);
