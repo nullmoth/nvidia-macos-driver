@@ -45,6 +45,7 @@ static inline void ttu_pack(struct ttu_request *r, const float org[3], const flo
 struct ttu_hit {
    int hit;
    float t, u, v;          /* distance and the two barycentric coordinates the hardware reports */
+   int front_face;         /* the sign bit of word 14 is set for a hit on the back (clockwise) side of the triangle */
    uint32_t primitive;     /* index inside its geometry */
    uint32_t geometry;      /* geometry index inside its structure */
    int32_t instance;       /* instance index; every recorded scene has one instance (0), and every recorded query started at a
@@ -58,6 +59,7 @@ static inline struct ttu_hit ttu_decode(const uint32_t r[16])
    /* a miss leaves the last word all ones; a committed opaque triangle leaves its sign bit clear */
    h.hit = (r[15] & 0x80000000u) == 0;
    if (!h.hit) return h;
+   h.front_face = (r[14] >> 31) == 0;
    h.t = ttu_u2f(r[13] & 0x7fffffffu);
    h.u = ttu_u2f(r[14] & 0x7fffffffu);
    h.v = ttu_u2f(r[15] & 0x7fffffffu);
