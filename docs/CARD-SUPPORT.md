@@ -15,9 +15,26 @@ setup still have to cooperate.
 | Ada | RTX 40, supported RTX workstation and laptop cards | Pending |
 | Blackwell | RTX 50 and supported RTX PRO cards | RTX 5060 automated; RTX 5070/5080 reported working |
 
-Pascal, Maxwell, Kepler, and earlier cards need a different kernel/firmware implementation.
-They are outside the present GSP-based driver. Headless compute cards are not promised a
-macOS desktop. A laptop also needs a display/output route the NVIDIA card can drive; accepting
+### Older cards (GTX 900 and GTX 10 series, TITAN X/Xp/V, Quadro M/P, Kepler)
+
+These cards are not supported, and there is no date for them. The driver is built on NVIDIA's open
+kernel modules, which run on the GPU System Processor (GSP). Only Turing and newer cards have one,
+so the installer stops on anything older and changes nothing.
+
+There are two ways to drive an older card, and we checked both:
+
+- NVIDIA's closed Linux kernel driver (branch 580 for Maxwell, Pascal and Volta; 470 for Kepler).
+  Running it on macOS would mean converting and patching NVIDIA's binary, and its licence forbids
+  modifying or disassembling it. We will not ship that without NVIDIA's permission.
+- The open nouveau driver. On GTX 900 and newer it can only run the card at its boot clocks, because
+  the power firmware has to be signed by NVIDIA, so the card would run at a small fraction of its
+  speed. It would also be a separate driver of several months' work.
+
+If you are choosing a card for this driver, pick a GTX 1650 or newer. Mac Pro owners with a Kepler
+card (for example a GTX 680) can keep using OpenCore Legacy Patcher's Kepler support on macOS 15
+and earlier; we have not verified it on macOS 26.
+
+Headless compute cards are not promised a macOS desktop. A laptop also needs a display/output route the NVIDIA card can drive; accepting
 its PCI ID does not implement an Optimus display mux.
 
 ## Startup correction

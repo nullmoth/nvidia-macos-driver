@@ -167,7 +167,7 @@ CARD=""; for i in $NV_IDS; do case " $(echo $SUPPORTED_IDS) " in *" $i "*) CARD=
 # Every device id from 1E00 up is Turing or newer (TU102 is 1E02; Volta and older sit below it), which RM drives through GSP.
 # The list above names the GeForce/RTX ids measured so far; a Quadro T1200 laptop (1FBC) was refused as "older".
 [ -n "$CARD" ] || for i in $NV_IDS; do case $i in *[!0-9A-F]*|"") ;; *) [ $((16#$i)) -ge $((16#1E00)) ] && CARD=$i;; esac; done
-[ -n "$CARD" ] || die "this NVIDIA card (device $(echo $NV_IDS)) is older than the driver supports (RTX 20 / Turing and newer); macOS keeps running on it in basic display, with no changes made"
+[ -n "$CARD" ] || die "this NVIDIA card (device $(echo $NV_IDS)) is older than the driver supports (Turing and newer: GTX 16, RTX 20 and later); GTX 900/10, TITAN X/Xp/V and Kepler cards are not supported, see docs/CARD-SUPPORT.md. macOS keeps running on it in basic display, with no changes made"
 ok "macOS $v, x86_64, NVIDIA GPU present"
 
 step "2. package integrity"
