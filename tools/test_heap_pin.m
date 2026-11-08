@@ -12,7 +12,14 @@
 // no single build, walk on collapse); "legacy" is the original (v1 without keep, every member referenced). The
 // "broken:" variants each remove one rule an arm depends on, and that arm must catch it.
 //
-//   clang -fobjc-arc -O1 -framework Foundation tools/test_heap_pin.m -o /tmp/test_heap_pin && /tmp/test_heap_pin
+// Every arm must give the same verdict at any optimisation level:
+//   for o in 0 1 2; do clang -fobjc-arc -O$o -Wall -framework Foundation tools/test_heap_pin.m -o /tmp/test_heap_pin \
+//                      && /tmp/test_heap_pin; done
+// What makes that true: at -O0 ARC does not elide the autorelease handshake, so an object returned by a function or
+// a Foundation getter sits in the innermost autorelease pool and outlives every "release point" in the arm. So: every
+// helper here that returns an object is NS_RETURNS_RETAINED (no autorelease at all), every Foundation call that hands
+// back a member, a pin or a command buffer runs inside its own @autoreleasepool (STEP below, or inside the helper), and
+// no arm reads a returned object into a strong local that is still alive at the point where the arm expects a free.
 #import <Foundation/Foundation.h>
 #include <stdio.h>
 
@@ -64,12 +71,14 @@ static void take(NSArray *ms, NSMutableArray **own) {
 
 static Pin *unkeep_locked(Members *m) NS_RETURNS_RETAINED;
 static Pin *unkeep_locked(Members *m) { Pin *k = m->_keep; m->_keep = nil; m->_keepUntil = 0; return k; }
+// One step of an arm inside its own pool, so nothing it autoreleases outlives it.
+#define STEP(...) do { @autoreleasepool { __VA_ARGS__; } } while (0)
 static void reg(Heap *h, Member *r) {   // nvmtl_heap_register; its own pool, the weak table's lookups autorelease
     @autoreleasepool { Members *m = h->_m;
         if (![m->_members containsObject:r]) { [m->_members addObject:r]; [m->_added addPointer:(__bridge void *)r]; m->_version++; } }
 }
-static BOOL unkeep(Heap *h) { if (P.noUnkeep) return NO; Pin *k = unkeep_locked(h->_m); BOOL had = k != nil; k = nil; (void)k; return had; }
-static void tick(void) {   // the dispatch_after drops whose time has come
+static BOOL unkeep(Heap *h) { if (P.noUnkeep) return NO; BOOL had; @autoreleasepool { Pin *k = unkeep_locked(h->_m); had = k != nil; k = nil; (void)k; } return had; }
+static void tick(void) { @autoreleasepool {   // the dispatch_after drops whose time has come
     NSMutableArray *left = [NSMutableArray new];
     for (NSArray *t in gTimers) {
         if (gNow < [t[2] unsignedLongLongValue]) { [left addObject:t]; continue; }
@@ -77,7 +86,7 @@ static void tick(void) {   // the dispatch_after drops whose time has come
         Pin *k = nil; if (m->_keepGen == [t[1] unsignedLongLongValue]) k = unkeep_locked(m); k = nil; (void)k;
     }
     gTimers = left;
-}
+} }
 static void arm_timer(Members *members, uint64_t gen, uint64_t keepNs) {
     if (P.noTimer) return;
     NSPointerArray *w = [NSPointerArray weakObjectsPointerArray]; [w addPointer:(__bridge void *)members];
@@ -90,6 +99,7 @@ enum { kNone, kReuse, kDelta, kFlat, kWalk, kWait };
 @implementation Use @end
 
 // nvmtl_use_heap, first locked section (the shipped one), and its v1 / legacy counterpart.
+static Use *use_decide(CB *cb, Heap *heap) NS_RETURNS_RETAINED;
 static Use *use_decide(CB *cb, Heap *heap) {
     Members *members = heap->_m; Use *u = [Use new]; u->cb = cb; u->heap = heap; u->kind = kNone;
     NSValue *key = [NSValue valueWithNonretainedObject:heap]; NSNumber *prior = cb->_versions[key];
@@ -179,8 +189,15 @@ static void arm(BOOL ok, BOOL wantOk, const char *name, NSString *detail) {
 }
 static void reset(Policy p) { P = p; gNow = 0; gWalks = gWalked = gDeltas = gFlats = gReuses = gWaits = gRefsTaken = gRefsSkipped = 0; gTimers = [NSMutableArray new]; }
 static const uint64_t MS = 1000000;
+static Member *mk(Heap *h, NSMutableArray *app, int *freed) NS_RETURNS_RETAINED;
 static Member *mk(Heap *h, NSMutableArray *app, int *freed) {
     Member *m = [Member new]; m->_heapBacked = YES; m->_freed = freed; if (app) [app addObject:m]; reg(h, m); return m; }
+// The newest pin a command buffer holds, retained (not autoreleased) so the caller decides when it goes.
+static Pin *last_pin(CB *cb) NS_RETURNS_RETAINED;
+static Pin *last_pin(CB *cb) { Pin *p; @autoreleasepool { p = cb->_held.lastObject; } return p; }
+// Does the pin's chain hold o? allMembers builds autoreleased arrays that hold every member, so in a pool of its own.
+static BOOL pin_holds(Pin *p, id o) { BOOL r; @autoreleasepool { r = p && [p holds:o]; } return r; }
+static BOOL pin_holds_all(Pin *p, NSArray *ms) { BOOL r = YES; @autoreleasepool { for (id m in ms) r = r && [p holds:m]; } return r; }
 
 int main(void) { @autoreleasepool {
     const Policy NEW = { .name = "new", .keepNs = 200 * MS };
@@ -208,7 +225,7 @@ int main(void) { @autoreleasepool {
     for (int k = 0; k < 4; k++) { reset(a2[k]);
         int freed = 0; Heap *h = [Heap new]; NSMutableArray *app = [NSMutableArray new];
         for (int i = 0; i < 50; i++) mk(h, app, NULL);
-        ((Member *)app[49])->_freed = &freed;
+        STEP(((Member *)app[49])->_freed = &freed);
         for (int f = 0; f < 60; f++) {                                       // 60 frames at 16 ms, GPU drains each frame
             if (f == 3) [app removeObjectAtIndex:49];                        // app drops one member in frame 3
             if (f % 2 == 0) mk(h, app, NULL);                                // and keeps adding (deltas every other frame)
@@ -237,7 +254,7 @@ int main(void) { @autoreleasepool {
         for (int i = 0; i < 20; i++) { mk(h, nil, NULL); CB *cb = [CB new]; use_heap(cb, h); }   // through a flat collapse too
         CB *cb = [CB new]; use_heap(cb, h);
         arm(a->_resRefs == 0, k == 0, "heap-backed member: no reference taken", [NSString stringWithFormat:@"refs %d", a->_resRefs]);
-        BOOL took = b->_resRefs >= 1; cb = nil; Pin *k2 = unkeep_locked(h->_m); k2 = nil; (void)k2;
+        BOOL took = b->_resRefs >= 1; cb = nil; unkeep(h);
         arm(took && b->_resRefs == 0, YES, "plain member: references taken and all given back (incl. the flat pin's)",
             [NSString stringWithFormat:@"refs after release %d, flats %llu", b->_resRefs, gFlats]); }
 
@@ -263,8 +280,8 @@ int main(void) { @autoreleasepool {
       for (int i = 0; i < 10; i++) mk(h, app, NULL);
       { CB *cb = [CB new]; use_heap(cb, h); }
       mk(h, app, NULL); gNow += 16 * MS;
-      CB *cb = [CB new]; use_heap(cb, h); Pin *p = cb->_held.lastObject;
-      BOOL all = YES; for (Member *m in app) all = all && [p holds:m];
+      CB *cb = [CB new]; use_heap(cb, h); Pin *p = last_pin(cb);
+      BOOL all = pin_holds_all(p, app);
       arm(all && p->_depth == 1, YES, "every live member covered, as a delta (no walk)", [NSString stringWithFormat:@"depth %u, walks %llu", p->_depth, gWalks]); }
 
     printf("A8 collapse: a 16-link chain collapses flat without a walk, covers every member, and a released member it\n"
@@ -275,8 +292,8 @@ int main(void) { @autoreleasepool {
         Member *x = mk(h, nil, &freed); (void)x;
         { CB *cb = [CB new]; use_heap(cb, h); } x = nil;
         Pin *last = nil;
-        for (int i = 0; i < 20; i++) { mk(h, app, NULL); CB *cb = [CB new]; use_heap(cb, h); last = cb->_held.lastObject; gNow += MS; }
-        BOOL all = YES; @autoreleasepool { for (Member *m in app) all = all && [last holds:m]; }   // allMembers autoreleases
+        for (int i = 0; i < 20; i++) { mk(h, app, NULL); CB *cb = [CB new]; use_heap(cb, h); last = last_pin(cb); gNow += MS; }
+        BOOL all = pin_holds_all(last, app);
         const uint64_t walksAtCollapse = gWalks, flats = gFlats; last = nil;
         for (int f = 0; f < 30; f++) { mk(h, app, NULL); CB *cb = [CB new]; use_heap(cb, h); cb = nil; gNow += 16 * MS; tick(); }
         if (k == 0) arm(walksAtCollapse == 1 && flats >= 1 && all, YES, "collapse is flat (1 walk total) and covers all",
@@ -291,9 +308,8 @@ int main(void) { @autoreleasepool {
         Heap *h = [Heap new]; NSMutableArray *app = [NSMutableArray new];
         for (int i = 0; i < 6000; i++) mk(h, app, NULL);
         for (int f = 0; f < 1000; f++) {
-            NSArray *cbs = @[[CB new], [CB new], [CB new]];
-            use_together(cbs, h, ^{ mk(h, app, NULL); });
-            cbs = nil; gNow += 15385000; tick(); }
+            STEP(use_together(@[[CB new], [CB new], [CB new]], h, ^{ mk(h, app, NULL); }));   // the array literal autoreleases
+            gNow += 15385000; tick(); }
         w9[k] = gWalks;
         // one walk per 200 ms keep window = 77, plus the first
         arm(gWalks <= 80, k == 0, "at most one walk per keep window",
@@ -305,16 +321,17 @@ int main(void) { @autoreleasepool {
     for (int k = 0; k < 2; k++) { reset(a10[k]);
         Heap *h = [Heap new]; NSMutableArray *app = [NSMutableArray new]; for (int i = 0; i < 10; i++) mk(h, app, NULL);
         __block Member *late = nil;
-        use_together(@[[CB new]], h, ^{ late = mk(h, app, NULL); });
-        CB *cb = [CB new]; use_heap(cb, h); Pin *p = cb->_held.lastObject;
-        arm(p && [p holds:late], k == 0, "late member pinned (else the GPU reads an unpinned resource)", [NSString stringWithFormat:@"held %d", p ? (int)[p holds:late] : -1]); }
+        STEP(use_together(@[[CB new]], h, ^{ late = mk(h, app, NULL); }));
+        CB *cb = [CB new]; use_heap(cb, h); Pin *p = last_pin(cb); const BOOL held = pin_holds(p, late);
+        arm(held, k == 0, "late member pinned (else the GPU reads an unpinned resource)", [NSString stringWithFormat:@"held %d", held]); }
 
     printf("A11 single build: two command buffers that miss together walk the heap once\n");
     Policy a11[] = { NEW, NOSF };
     for (int k = 0; k < 2; k++) { reset(a11[k]);
         Heap *h = [Heap new]; NSMutableArray *app = [NSMutableArray new]; for (int i = 0; i < 100; i++) mk(h, app, NULL);
-        CB *a = [CB new], *b = [CB new]; use_together(@[a, b], h, nil);
-        arm(gWalks == 1 && [b->_held.lastObject holds:app.lastObject], k == 0, "one walk, the second reuses it",
+        CB *a = [CB new], *b = [CB new]; STEP(use_together(@[a, b], h, nil));
+        Pin *pb = last_pin(b); Member *lastM; STEP(lastM = app.lastObject); const BOOL held = pin_holds(pb, lastM);
+        arm(gWalks == 1 && held, k == 0, "one walk, the second reuses it",
             [NSString stringWithFormat:@"walks %llu, waits %llu, reuses %llu", gWalks, gWaits, gReuses]); }
 
     printf("%s: %d arm(s) off\n", gFail ? "FAIL" : "PASS", gFail);
