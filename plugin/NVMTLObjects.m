@@ -3102,7 +3102,15 @@ static void nvmtl_heap_register(NVMTLHeap *heap, id resource) {
 static void nvmtl_use_heap(NVMTLCommandBuffer *cb, id<MTLHeap> value) {
     NVMTLHeap *heap = (NVMTLHeap *)value;
     if (!cb || !heap || ![heap isKindOfClass:[NVMTLHeap class]]) return;
-    if (nvmtl_hz_mode()) nvmtl_hz_use_heap(&cb->_c, heap->_hazard == MTLHazardTrackingModeTracked, heap->_hm.mem, heap->_hm.size, heap->_hzLegacy);
+    if (nvmtl_hz_mode()) {
+        if (!heap->_lzc) nvmtl_hz_use_heap(&cb->_c, heap->_hazard == MTLHazardTrackingModeTracked, heap->_hm.mem, heap->_hm.size, heap->_hzLegacy);
+        else {   // a lazily backed heap: every memory it has so far
+            os_unfair_lock_lock(&heap->_lzl);
+            for (uint32_t k = 0; k < heap->_lzn; k++)
+                nvmtl_hz_use_heap(&cb->_c, heap->_hazard == MTLHazardTrackingModeTracked, heap->_lzm[k].mem, heap->_lzm[k].size, heap->_hzLegacy);
+            os_unfair_lock_unlock(&heap->_lzl);
+        }
+    }
     NVMTLHeapUseCache *cache;
     // A lock object of its own: the command buffer's monitor may be held by the application.
     @synchronized ([NVMTLHeapUseCache class]) {
@@ -4406,6 +4414,16 @@ static NSUInteger nvmtl_heap_take(NVMTLHeap *h, NSUInteger size, NSUInteger al) 
     for (uint32_t i = 0; i < h->_nfr; i++) {
         NSUInteger ro = h->_fr[2 * i], rl = h->_fr[2 * i + 1], o = (ro + al - 1) / al * al;
         if (o < ro || o + size < o || o + size > ro + rl) continue;
+        if (h->_lzc && size) {
+            // a lazily backed heap: a resource that fits a slot must not straddle two (each slot may get its own memory);
+            // a larger one starts on a slot boundary so it owns whole slots
+            const NSUInteger c = h->_lzc;
+            if (size > c ? o % c != 0 : o / c != (o + size - 1) / c) {
+                NSUInteger o2 = (o / c + 1) * c; o2 = (o2 + al - 1) / al * al;
+                if (o2 < o || o2 + size < o2 || o2 + size > ro + rl) continue;
+                o = o2;
+            }
+        }
         NSUInteger lo = o - ro, hi = ro + rl - (o + size);
         if (lo && hi) {
             if (nvmtl_heap_grow(h)) break;
@@ -4516,8 +4534,10 @@ void nvmtl_heaps_dump(FILE *f, void (*emit)(void *, const char *)) {
     else { emit(f, "fault context: the heap registry is locked by another thread - heaps not listed"); return; }
     char line[600]; unsigned n = 0;
     for (NVMTLHeap *h in all) {
-        int o = snprintf(line, sizeof line, "fault context: heap %p \"%s\": VkDeviceMemory %p, size %lu, used %lu, %s, park %u, free ranges (%u):",
-                         (__bridge void *)h, h.label.UTF8String ?: "", h->_hm.mem, (unsigned long)h->_hm.size, (unsigned long)h->_used, h->_backed ? "backed" : "legacy (not backed)", h->_npk, h->_nfr);
+        size_t lzb = 0; for (uint32_t k = 0; k < h->_lzn; k++) lzb += h->_lzm[k].size;
+        int o = snprintf(line, sizeof line, "fault context: heap %p \"%s\": VkDeviceMemory %p, size %lu, used %lu, %s, lazy %u memories %zu bytes, park %u, free ranges (%u):",
+                         (__bridge void *)h, h.label.UTF8String ?: "", h->_hm.mem, (unsigned long)(h->_lzc ? h->_size : h->_hm.size), (unsigned long)h->_used, h->_backed ? "backed" : "legacy (not backed)",
+                         h->_lzn, lzb, h->_npk, h->_nfr);
         if (os_unfair_lock_trylock(&h->_fl)) {
             for (uint32_t i = 0; i < h->_nfr && o < (int)sizeof line - 40; i++) o += snprintf(line + o, sizeof line - (size_t)o, " %lu+%lu", (unsigned long)h->_fr[2 * i], (unsigned long)h->_fr[2 * i + 1]);
             os_unfair_lock_unlock(&h->_fl);
@@ -4526,7 +4546,72 @@ void nvmtl_heaps_dump(FILE *f, void (*emit)(void *, const char *)) {
     }
     snprintf(line, sizeof line, "fault context: %u live app heaps listed", n); emit(f, line);
 }
+static const size_t kLazySlot = 64u << 20, kLazyMin = 256u << 20;
+static _Atomic uint64_t gHLazyHeaps, gHLazyReserved, gHLazyBacked, gHLazyMixed;
+static int nvmtl_heap_lazy_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_HEAP_LAZY"); on = !(e && e[0] == '0');
+                  nvlog("heap lazy backing: %s (automatic heaps of %zu MB and up take memory in %zu MB slots as resources land)",
+                        on ? "ON" : "OFF (NVMTL_HEAP_LAZY=0)", kLazyMin >> 20, kLazySlot >> 20); }
+    return on;
+}
+/* The memory and the offset inside it for a resource at heap offset off, length len. A non-lazy heap answers its one
+ * _hm. A lazy heap answers the backing that owns every slot the range touches, creating one when none of them has memory
+ * yet; NULL when the slots belong to different backings (the caller gives the range back and takes the legacy path). */
+static nvk_heap *nvmtl_heap_mem_for(NVMTLHeap *h, NSUInteger off, NSUInteger len, NSUInteger *rel) {
+    if (!h->_lzc) { *rel = off; return &h->_hm; }
+    if (!len || off + len < off || off + len > h->_size) return NULL;
+    const uint32_t s0 = (uint32_t)(off / h->_lzc), s1 = (uint32_t)((off + len - 1) / h->_lzc);
+    nvk_heap *got = NULL;
+    os_unfair_lock_lock(&h->_lzl);
+    uint16_t own = h->_lzo[s0]; int same = 1;
+    for (uint32_t s = s0 + 1; s <= s1; s++) if (h->_lzo[s] != own) { same = 0; break; }
+    if (same && own) { got = &h->_lzm[own - 1]; *rel = off - h->_lzb[own - 1]; }
+    else if (same && !own && h->_lzn < 65535) {
+        if (h->_lzn == h->_lzcap) {
+            const uint32_t nc = h->_lzcap ? h->_lzcap * 2 : 8;
+            nvk_heap *nm = realloc(h->_lzm, nc * sizeof *nm); if (nm) h->_lzm = nm;
+            size_t *nb = realloc(h->_lzb, nc * sizeof *nb); if (nb) h->_lzb = nb;
+            if (nm && nb) h->_lzcap = nc;
+        }
+        if (h->_lzn < h->_lzcap) {
+            const size_t base = (size_t)s0 * h->_lzc, end = (size_t)(s1 + 1) * h->_lzc, top = end < h->_size ? end : h->_size;
+            nvk_heap *m = &h->_lzm[h->_lzn]; memset(m, 0, sizeof *m);
+            if (!nvmtl_vk_heap_create(top - base, h->_storage == MTLStorageModeShared, m)) {
+                nvmtl_vk_heap_zero(m, h->_storage == MTLStorageModeShared ? "shared slot" : "private slot");
+                h->_lzb[h->_lzn] = base; h->_lzn++;
+                for (uint32_t s = s0; s <= s1; s++) h->_lzo[s] = (uint16_t)h->_lzn;
+                atomic_fetch_add(&gHLazyBacked, top - base);
+                got = m; *rel = off - base;
+            } else nvlog("heap lazy backing: %zu bytes for slots %u-%u of a %lu-byte heap REFUSED - legacy path", top - base, s0, s1, (unsigned long)h->_size);
+        }
+    } else if (!same) {
+        const uint64_t n = atomic_fetch_add(&gHLazyMixed, 1);
+        if (n < 4) nvlog("heap lazy backing: %lu+%lu spans slots %u-%u with different memories - legacy path", (unsigned long)off, (unsigned long)len, s0, s1);
+    }
+    os_unfair_lock_unlock(&h->_lzl);
+    return got;
+}
+void nvmtl_heap_lazy_census(const char *why) {
+    nvlog_every("heap lazy backing (%s): %llu heaps, %llu MB reserved by the app, %llu MB given memory, %llu mixed-slot fallbacks", why,
+                (unsigned long long)gHLazyHeaps, (unsigned long long)(gHLazyReserved >> 20), (unsigned long long)(gHLazyBacked >> 20),
+                (unsigned long long)gHLazyMixed);
+}
 void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
+    if (size >= kLazyMin && nvmtl_heap_lazy_on()) {
+        h->_lzslots = (uint32_t)((size + kLazySlot - 1) / kLazySlot);
+        h->_lzo = calloc(h->_lzslots, sizeof *h->_lzo);
+        if (h->_lzo) {
+            h->_lzc = kLazySlot; h->_lzl = OS_UNFAIR_LOCK_INIT; memset(&h->_hm, 0, sizeof h->_hm);
+            nvmtl_heap_list_for_loss(h);
+            h->_fl = OS_UNFAIR_LOCK_INIT; h->_nfr = 0; h->_cfr = 0; h->_fr = NULL;
+            if (nvmtl_heap_grow(h)) { free(h->_lzo); h->_lzo = NULL; h->_lzc = 0; nvlog("heap alias: no free list for a %lu-byte heap - legacy path", (unsigned long)size); return; }
+            h->_fr[0] = 0; h->_fr[1] = size; h->_nfr = 1; h->_backed = YES;
+            atomic_fetch_add(&gHABacked, 1); atomic_fetch_add(&gHLazyHeaps, 1); atomic_fetch_add(&gHLazyReserved, size);
+            nvlog_every("heap lazy backing: %s heap of %lu bytes = %u slots, memory on first use", shared ? "shared" : "private", (unsigned long)size, h->_lzslots);
+            return;
+        }
+    }
     if (nvmtl_vk_heap_create(size, shared, &h->_hm)) {
         nvlog("heap alias: an automatic %s heap of %lu bytes got no memory of its own - its resources take the legacy fresh path",
               shared ? "shared" : "private", (unsigned long)size);
@@ -4561,7 +4646,8 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     NVMTLBuffer *b = [NVMTLBuffer new];
     b->_storage = sm;
     b->_ropt = opt & ((MTLResourceOptions)0xF | ((MTLResourceOptions)0x3 << MTLResourceHazardTrackingModeShift));
-    if (nvmtl_vk_buffer_create_placed(len, &_hm, off, &b->_b)) {
+    NSUInteger rel = off; nvk_heap *mem = nvmtl_heap_mem_for(self, off, charge, &rel);
+    if (!mem || nvmtl_vk_buffer_create_placed(len, mem, rel, &b->_b)) {
         const char *why = nvmtl_heap_give(self, off, charge);
         nvlog("heap alias: bind of %lu at %lu FAILED - legacy path%s%s", (unsigned long)len, (unsigned long)off, why ? "; range kept out: " : "", why ? why : "");
         return nil;
@@ -4588,7 +4674,9 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
 - (NSUInteger)allocatedSize { return _size; }
 - (void)dealloc { for (uint32_t k = 0; k < _npk; k++) nvmtl_vk_image_destroy(&_pk[k].img);
                   free(_pk); _pk = NULL; _npk = 0;
-                  nvmtl_vk_heap_destroy(&_hm); free(_fr); _fr = NULL; }
+                  nvmtl_vk_heap_destroy(&_hm); free(_fr); _fr = NULL;
+                  for (uint32_t k = 0; k < _lzn; k++) nvmtl_vk_heap_destroy(&_lzm[k]);
+                  free(_lzm); free(_lzb); free(_lzo); _lzm = NULL; _lzb = NULL; _lzo = NULL; _lzn = 0; }
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)len options:(MTLResourceOptions)opt offset:(NSUInteger)off {
     if (_type != MTLHeapTypePlacement) { nvlog("heap newBufferWithLength:offset: on a non-placement heap"); return nil; }
     NVMTLBuffer *b = [NVMTLBuffer new];
@@ -4722,7 +4810,8 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
             static int said; if (said++ < 4) nvlog("heap texture: no free range of %lu (align %lu) in a %lu-byte heap with %lu charged - legacy path",
                                                    (unsigned long)charge, (unsigned long)al, (unsigned long)_size, (unsigned long)_used);
             return nil; }
-        if (nvmtl_vk_image_create_typed_placed(w, hh, vkf, bpp, a8, mips, wantStex, type, layers, &_hm, off, &t->_i)
+        NSUInteger rel = off; nvk_heap *mem = nvmtl_heap_mem_for(self, off, charge, &rel);
+        if (!mem || nvmtl_vk_image_create_typed_placed(w, hh, vkf, bpp, a8, mips, wantStex, type, layers, mem, rel, &t->_i)
             || !nvmtl_vk_image_placed_fits(&t->_i, charge)) {
             if (t->_i.img) { nvmtl_vk_image_destroy(&t->_i); atomic_fetch_add(&gHTMisfit, 1); }
             const char *why = nvmtl_heap_give(self, off, charge);
