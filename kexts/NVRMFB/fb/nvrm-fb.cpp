@@ -2923,6 +2923,14 @@ IOReturn NVRMNVDAFramebuffer::enableController()
     FBLOG("enableController");
     fEnableAbs = mach_absolute_time();
     const bool ok = applyMode();
+    // A failed boot mode set must not fail the open. IOFramebuffer::open() marks a framebuffer whose enableController
+    // failed as dead for good, WindowServer's IOServiceOpen on it fails (xnu reports the masked error as
+    // 0xe00002c7, kIOReturnUnsupported) and CoreDisplay aborts in CGXMappedDisplayStart ("Driver Error: FB: x of y
+    // opened"). Measured on 2.7.2: "applyModeSetConfig -> 0" 0.7 s before "IOServiceOpen failed(0xe00002c7), index(0)",
+    // 4 of 5 such boots with the abort. Opened, the head is still there for WindowServer's own setDisplayMode, which
+    // tries the mode set again (fModeSet stays false).
+    if (!ok) FBLOG("fb%u: the boot mode set failed -- opening anyway so WindowServer can set a mode (a failed open "
+                   "would leave this framebuffer dead and WindowServer aborting)", fIndex);
     if (ok) refreshDisplayAudioProperties();
     // A display that appeared after boot: tell the framework, through the connect handler it registered (fConnect),
     // that this connection is new. It has to happen after the mode set -- WindowServer re-probes a framebuffer that
@@ -2931,7 +2939,7 @@ IOReturn NVRMNVDAFramebuffer::enableController()
         notifyConnectionChanged(1500);
         FBLOG("fb%u: connect interrupt scheduled (1.5 s after the mode set)", fIndex);
     }
-    return ok ? kIOReturnSuccess : kIOReturnError;
+    return kIOReturnSuccess;
 }
 IOReturn NVRMNVDAFramebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth)
 {
