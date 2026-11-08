@@ -5,6 +5,19 @@ pub fn specialize_air_function_constants<'a>(
     air_ll: &'a str,
     values: &[(u32, Vec<u8>)],
 ) -> Result<Cow<'a, str>, String> {
+    let specialized = specialize_air_function_constants_unfolded(air_ll, values)?;
+    // Fields a static initializer copies from the constants just supplied are folded too, so the branches they decide
+    // are gone before translation instead of after it (crate::meta::fold_static_init_struct_fields).
+    Ok(match crate::meta::fold_static_init_struct_fields(&specialized) {
+        Some(folded) => Cow::Owned(folded),
+        None => specialized,
+    })
+}
+
+pub(crate) fn specialize_air_function_constants_unfolded<'a>(
+    air_ll: &'a str,
+    values: &[(u32, Vec<u8>)],
+) -> Result<Cow<'a, str>, String> {
     if values.is_empty() {
         return Ok(Cow::Borrowed(air_ll));
     }
@@ -304,6 +317,105 @@ define internal void @_GLOBAL__sub_I_metadata() section "air.static_init" {
                 .and_then(|meta| meta.output_role_of(0).cloned()),
             Some(crate::meta::VertOutRole::FunctionConstantDisabled)
         );
+    }
+
+    // Core Animation's shape, shrunk: the static initializer copies function constants into an internal config struct
+    // (one field behind a branch, one inside a packed nested struct), and the shader reads every field through
+    // `select (has_config == 0), @config, %buffer`.
+    const CONFIG_STRUCT: &str = r#"%T = type { [2 x %I], i8, i8 }
+%I = type <{ i8, <2 x i8>, i8 }>
+@fc_generic.MTL_FC_INIT_0_b = internal addrspace(2) externally_initialized constant i8 undef, section "air.fc_initializer", align 1
+@fc_mode.MTL_FC_INIT_1_h = internal addrspace(2) externally_initialized constant i8 undef, section "air.fc_initializer", align 1
+@fc_pair.MTL_FC_INIT_2_Dv2_h = internal addrspace(2) externally_initialized constant <2 x i8> undef, section "air.fc_initializer", align 2
+@has_config = internal unnamed_addr addrspace(2) global i8 0, align 1
+@config = internal unnamed_addr addrspace(2) global %T zeroinitializer, align 4
+define internal void @_GLOBAL__sub_I_t() section "air.static_init" {
+  %g = load i8, ptr addrspace(2) @fc_generic.MTL_FC_INIT_0_b, align 1
+  store i8 %g, ptr addrspace(2) @has_config, align 1
+  %m = load i8, ptr addrspace(2) @fc_mode.MTL_FC_INIT_1_h, align 1
+  %p = load <2 x i8>, ptr addrspace(2) @fc_pair.MTL_FC_INIT_2_Dv2_h, align 2
+  store i8 %m, ptr addrspace(2) @config, align 4
+  store <2 x i8> %p, ptr addrspace(2) getelementptr inbounds (%T, ptr addrspace(2) @config, i64 0, i32 0, i64 1, i32 1), align 1
+  %big = icmp ugt i8 %m, 2
+  br i1 %big, label %hi, label %lo
+hi:
+  store i8 70, ptr addrspace(2) getelementptr inbounds (%T, ptr addrspace(2) @config, i64 0, i32 1), align 1
+  br label %done
+lo:
+  store i8 50, ptr addrspace(2) getelementptr inbounds (%T, ptr addrspace(2) @config, i64 0, i32 1), align 1
+  br label %done
+done:
+  ret void
+}
+define void @main(ptr addrspace(2) %buf) {
+  %h = load i8, ptr addrspace(2) @has_config, align 1
+  %use_fc = icmp eq i8 %h, 0
+  %cfg = select i1 %use_fc, ptr addrspace(2) @config, ptr addrspace(2) %buf
+  %f0 = load i8, ptr addrspace(2) %cfg, align 1
+  %a = getelementptr inbounds %T, ptr addrspace(2) %cfg, i64 0, i32 0, i64 1, i32 1
+  %pair = load <2 x i8>, ptr addrspace(2) %a, align 1
+  %b = getelementptr inbounds %T, ptr addrspace(2) %cfg, i64 0, i32 1
+  %level = load i8, ptr addrspace(2) %b, align 1
+  %c = getelementptr inbounds %T, ptr addrspace(2) %cfg, i64 0, i32 2
+  %never = load i8, ptr addrspace(2) %c, align 1
+  %sum = add i8 %f0, %level
+  %lane = extractelement <2 x i8> %pair, i32 1
+  %all = add i8 %sum, %never
+  ret void
+}
+"#;
+
+    #[test]
+    fn config_struct_fields_fold_into_the_shader() {
+        let out = specialize_air_function_constants(CONFIG_STRUCT, &[(0, vec![0]), (1, vec![3]), (2, vec![7, 5])])
+            .expect("specialize");
+        // the initializer took its `hi` arm (mode 3 > 2); a field it never wrote reads the zero initializer
+        assert!(out.contains("%sum = add i8 3, 70"), "{out}");
+        assert!(out.contains("%lane = extractelement <2 x i8> <i8 7, i8 5>, i32 1"), "{out}");
+        assert!(out.contains("%all = add i8 %sum, 0"), "{out}");
+        assert!(!out.contains("= load i8, ptr addrspace(2) %b"), "{out}");
+        // numbered values keep their definitions, so the module still parses in order
+        assert!(out.contains("%level = or i8 0, 70"), "{out}");
+    }
+
+    #[test]
+    fn config_struct_fold_follows_the_initializers_branches() {
+        let out = specialize_air_function_constants(CONFIG_STRUCT, &[(0, vec![0]), (1, vec![1]), (2, vec![0, 0])])
+            .expect("specialize");
+        assert!(out.contains("%sum = add i8 1, 50"), "the `lo` arm's store, not the last one in the text: {out}");
+    }
+
+    #[test]
+    fn config_struct_is_not_folded_when_the_select_picks_the_buffer() {
+        let out = specialize_air_function_constants(CONFIG_STRUCT, &[(0, vec![1]), (1, vec![3]), (2, vec![7, 5])])
+            .expect("specialize");
+        assert!(out.contains("%f0 = load i8, ptr addrspace(2) %cfg"), "{out}");
+        assert!(out.contains("%sum = add i8 %f0, %level"), "{out}");
+    }
+
+    #[test]
+    fn config_struct_written_outside_the_initializer_is_not_folded() {
+        let ll = CONFIG_STRUCT.replace(
+            "  %sum = add i8 %f0, %level\n",
+            "  store i8 9, ptr addrspace(2) %b, align 1\n  %sum = add i8 %f0, %level\n",
+        );
+        let out = specialize_air_function_constants(&ll, &[(0, vec![0]), (1, vec![3]), (2, vec![7, 5])])
+            .expect("specialize");
+        assert!(out.contains("%sum = add i8 %f0, %level"), "{out}");
+        assert!(out.contains("%level = load i8"), "{out}");
+    }
+
+    #[test]
+    fn config_struct_partial_overwrite_is_not_folded() {
+        // a wider store over the pair's bytes after it was written: the pair's value is no longer one store's
+        let ll = CONFIG_STRUCT.replace(
+            "  %big = icmp ugt i8 %m, 2\n",
+            "  store i16 513, ptr addrspace(2) getelementptr inbounds (%T, ptr addrspace(2) @config, i64 0, i32 0, i64 1, i32 0), align 1\n  %big = icmp ugt i8 %m, 2\n",
+        );
+        let out = specialize_air_function_constants(&ll, &[(0, vec![0]), (1, vec![3]), (2, vec![7, 5])])
+            .expect("specialize");
+        assert!(out.contains("%pair = load <2 x i8>"), "{out}");
+        assert!(out.contains("%sum = add i8 3, 70"), "the untouched fields still fold: {out}");
     }
 
     #[test]
