@@ -398,6 +398,15 @@ static void nvmtl_fg_copy(float out[16], simd_float4x4 m) { for (int c = 0; c < 
     if (!_notedUnmapped) {
         _notedUnmapped = YES;
         if (_fence || _deltaTime > 0 || _uiTextureComposited) nvlog("dlss: FG: deltaTime, the fence and uiTextureComposited are not mapped to NGX (ignored)");
+        // Once: what the app set as depth and motion. Every run so far described both as the same D32 image, which would
+        // feed NGX depth as motion vectors - this line says whether the app passed one texture twice or two textures.
+        nvlog("dlss: FG: depthTexture %p (%s, Metal format %lu, %lux%lu) motionTexture %p (%s, Metal format %lu, %lux%lu)%s; descriptor depth %lu motion %lu",
+              (__bridge void *)_depthTexture, object_getClassName(_depthTexture), (unsigned long)_depthTexture.pixelFormat,
+              (unsigned long)_depthTexture.width, (unsigned long)_depthTexture.height,
+              (__bridge void *)_motionTexture, object_getClassName(_motionTexture), (unsigned long)_motionTexture.pixelFormat,
+              (unsigned long)_motionTexture.width, (unsigned long)_motionTexture.height,
+              _depthTexture == _motionTexture ? " - THE SAME OBJECT" : (depth == motion ? " - the same driver texture" : ""),
+              (unsigned long)_fmtDepth, (unsigned long)_fmtMotion);
     }
     nvmtl_vk_dlss_fg_args a = {0};
     a.depth = [depth nvi]; a.depth_view = [depth nvview]; a.motion = [motion nvi]; a.motion_view = [motion nvview];
