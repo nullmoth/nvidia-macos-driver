@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.8.1
+
+- Updates no longer fail when GitHub's downloads are down. The Mac app now falls back to a copy of each release on nullmothsystems.com when a GitHub download fails, for both driver updates and its own updates. 1401 for Windows does the same for the driver package it puts on the stick. Every file is checked against the release's SHA-256 list and the NullMoth release signature, wherever it came from, and a file that differs by one byte is refused.
+- The driver itself is unchanged from 2.8 (same kernel extensions, Metal plugin and Vulkan driver); only its version number moves so the app and the driver keep the same version.
+
 ## 2.8
 
 - NVIDIA 620: the kernel driver now runs NVIDIA's 620.70.06 open kernel modules (was 615.78.08) with their GPU firmware. Two new cards come with it: RTX PRO 5500 Blackwell and RTX Spark N1X (249 device ids in all).
