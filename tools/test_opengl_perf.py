@@ -17,6 +17,9 @@ def section(text, start, end):
 
 cache = section(vk, 'static VkDescriptorSet nvmtl_snapshot_set_c(', '\nint nvmtl_vk_bind_buffer(')
 macros = section(vk, '#define NVMTL_NBUF ', '#define NVMTL_DISPATCH_PC_BYTES')
+# The slot type and the handle check come from the plugin: the GL uniform path reads its slot through
+# nvmtl_slot_checked, so a hand copy here would test a slot read the plugin no longer does.
+slots = '#define nvlog(...) ((void)0)\n' + section(vk, 'enum { NVMTL_SLOT_NONE', '#define NVMTL_EMB_KEYMAX')
 fixture = r'''
 #include <assert.h>
 #include <stdint.h>
@@ -30,8 +33,7 @@ fixture = r'''
 #define NVMTL_E78_HAS(m,i) (!(m) || (((m)[(i)>>6] >> ((i)&63)) & 1))
 #define NVMTL_TABLES_PER_PAGE 256
 enum { NVMTL_E78_H3, E78C_SETREUSE, E78C_SETNEW };
-enum { NVMTL_SLOT_BUF=1 };
-typedef struct { uint8_t kind; void *h; size_t off,size; uint64_t address; } nvmtl_slot;
+''' + slots + r'''
 static nvk_buffer g_dummyBuf={.buf=(void *)1,.size=256};
 typedef struct {
     nvmtl_slot s[2][NVMTL_NBIND];
@@ -121,7 +123,7 @@ int main(void) {
     enabled=0; nvmtl_snapshot_set_c(&c,0,&p); assert(allocations==10);
     enabled=1; p.bmask[0]&=~1ull; p.gl_uniform_layout=1;
     p.gl_uniform_slot[0]=8; p.gl_uniform_range[0]=80;
-    table.s[0][7]=(nvmtl_slot){.kind=NVMTL_SLOT_BUF,.h=(void *)77,.size=65536};
+    table.s[0][7]=(nvmtl_slot){.kind=NVMTL_SLOT_BUF,.h=(void *)0x770000,.size=65536};
     c.address_count=1;
     VkDescriptorSet uniform=nvmtl_snapshot_set_c(&c,0,&p); assert(allocations==11);
     for(unsigned i=1;i<16;i++) {
@@ -131,10 +133,13 @@ int main(void) {
     }
     p.gl_uniform_range[0]=96;
     assert(nvmtl_snapshot_set_c(&c,0,&p)!=uniform && allocations==12);
-    table.s[0][7].h=(void *)78;
+    table.s[0][7].h=(void *)0x780000;
     nvmtl_snapshot_set_c(&c,0,&p); assert(allocations==13);
     p.gl_uniform_layout=0;
     nvmtl_snapshot_set_c(&c,0,&p); assert(allocations==14);
+    // A handle that cannot be a live object is not handed on (the dummy is bound instead).
+    nvmtl_slot bad={.kind=NVMTL_SLOT_BUF,.h=(void *)0xa3,.size=65536};
+    assert(nvmtl_slot_checked(&bad,0,7)==NULL && nvmtl_slot_checked(&table.s[0][7],0,7)==&table.s[0][7]);
     puts("PASS: unchanged/offset-only reuse, table-page rollover, texel/image masks, direct buffers, recycled sets, growing masks, opt-out");
 }
 '''
