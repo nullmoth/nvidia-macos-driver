@@ -28,6 +28,9 @@
 #include <wchar.h>
 
 void nvlog(const char *fmt, ...);
+void nvlog_every(const char *fmt, ...);
+void nvmtl_heaps_dump(FILE *f, void (*emit)(void *, const char *));   /* NVMTLObjects.m */
+static void dlss_heap_line(void *c, const char *l) { (void)c; nvlog_every("dlss: at FG out-of-memory, %s", l); }
 
 /* The core and the runtime it loads execute on the calling thread. Their C library shims may reset the floating-point
  * environment (fesetenv), change the thread's locale, or change the signal mask; a caller that tracks those (a
@@ -578,7 +581,14 @@ static nvmtl_dlss_fg_feature *fg_create_impl(VkCommandBuffer cmd, const nvmtl_dl
     P_SETI(prm, "DLSSG.ColorBuffersHDR", cfg->hdr); P_SETI(prm, "DLSSG.DepthInverted", cfg->depth_inverted);
     P_SETI(prm, "DLSSG.DynamicResolution", 0);
     const unsigned rc = g_create(g_dev, cmd, fg_feature_id(), prm, &handle);
-    if (rc != 1 || !handle) { nvlog("dlss: FG CreateFeature1 returned 0x%08x (feature id %d)", rc, fg_feature_id()); goto bad; }
+    if (rc != 1 || !handle) {
+        nvlog("dlss: FG CreateFeature1 returned 0x%08x (feature id %d)", rc, fg_feature_id());
+        // Out of device memory (0xBAD0000D): list every app heap once - size, used, free ranges - so the run shows
+        // whether the heaps the game asked for are full or mostly empty when the card ran out.
+        static int heaps_listed;
+        if (rc == 0xBAD0000Du && !heaps_listed++) nvmtl_heaps_dump(NULL, dlss_heap_line);
+        goto bad;
+    }
     g_alloc(&ev);
     if (!ev) { nvlog("dlss: FG AllocateParameters (evaluate) gave nothing"); goto bad; }
     f->handle = handle; f->eval = ev; f->cfg = *cfg;
