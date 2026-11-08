@@ -611,9 +611,9 @@ if [ -f "$HERE/dlss_fetch.sh" ] && ! { grep -qE '[ *]dlss_fetch\.sh$' "$HERE/SHA
 elif [ -f "$HERE/dlss_fetch.sh" ]; then
   if [ "${NULLMOTH_DLSS:-0}" = 1 ]; then
     step "DLSS 4 / 4.5 files"
-    /bin/bash "$HERE/dlss_fetch.sh" --yes || echo "   NOTE: the DLSS files were not installed; the driver itself is. Run again later: sudo ./dlss_fetch.sh --yes"
+    /bin/bash "$HERE/dlss_fetch.sh" --yes || echo "   NOTE: the DLSS files were not installed; the driver itself is. Run again later: sudo env NULLMOTH_DLSS=1 ./install.sh"
   else
-    echo "   DLSS 4 / 4.5 is optional: sudo ./dlss_fetch.sh --yes (or install with NULLMOTH_DLSS=1 in the environment)."
+    echo "   DLSS 4 / 4.5 is optional: install with sudo env NULLMOTH_DLSS=1 ./install.sh (dlss_fetch.sh runs only from the installer's checked root-owned copy)."
   fi
 fi
 
