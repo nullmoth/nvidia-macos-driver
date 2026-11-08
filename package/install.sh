@@ -552,6 +552,13 @@ step "6c. counting a start as good once the desktop is up"
 # not always reach it: two boots that missed it switched a healthy driver off, leaving the Mac with no NVIDIA card in
 # Metal at all. A desktop that comes up and stays up is also a good start, so this job says so. A boot that never
 # reaches a desktop keeps its count, which is what the guard is for.
+# A lit head is not a desktop. When WindowServer cannot get a Metal device for a display this driver drives (the plugin
+# refused at load, or a crash in it), CoreDisplay asserts "Failed to create MetalDevice" and launchd restarts
+# WindowServer every ten seconds: a black screen with only the cursor, boot after boot (477 such crashes since 10-31,
+# 92 of them 12 or more in a row, on 2.7.2 too). The head lit, so the kernel had already cleared its count, and a
+# WindowServer was running at both of this job's looks, so the start was called good. Now "stayed up" means the SAME
+# WindowServer for the whole wait with no new WindowServer report, and a WindowServer that keeps dying while the
+# driver drives the display turns the driver off for the next boot, exactly like the kernel's guard.
 BG=/Library/NullMoth/bootguard.sh; BGP=/Library/LaunchDaemons/com.nullmoth.bootguard.plist
 launchctl bootout system/com.nullmoth.bootguard 2>/dev/null || true
 mkdir -p /Library/NullMoth /Library/LaunchDaemons || die "create the boot-guard job's folders"
@@ -560,15 +567,54 @@ cat > "$BG.tmp" <<'EOF' || die "write the boot-guard job"
 # Written by the NVIDIA driver install: the desktop came up, so this start counts as good.
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 V=7C436110-AB2A-4BBB-A880-FE41995C9F82; LOG=/Library/NullMoth/bootguard.log
-n=0
+DR=/Library/Logs/DiagnosticReports
+# kern.boottime reads "{ sec = 1762500000, usec = 912475 } ...": the first number, not usec's
+BOOT=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p')
+# WindowServer reports written since this boot (crashes and watchdog hangs); 0 when the boot time cannot be read
+ws_reports() {
+  [ -n "$BOOT" ] || { echo 0; return; }
+  c=0
+  for f in "$DR"/WindowServer*.ips; do
+    [ -f "$f" ] || continue
+    m=$(stat -f %m "$f" 2>/dev/null) || continue
+    [ "$m" -ge "$BOOT" ] && c=$((c + 1))
+  done
+  echo $c
+}
+pids=""; n=0
 while [ "$n" -lt 48 ]; do
-  if pgrep -x WindowServer >/dev/null 2>&1; then
+  p=$(pgrep -x WindowServer 2>/dev/null | head -1)
+  if [ -n "$p" ]; then
+    case " $pids " in *" $p "*) ;; *) pids="$pids $p";; esac
+    r0=$(ws_reports)
     sleep 45
-    pgrep -x WindowServer >/dev/null 2>&1 || { n=$((n + 1)); continue; }
-    nvram -d $V:nullmoth-nv-starts 2>/dev/null
-    nvram $V:nullmoth-nv-ok=1 2>/dev/null
-    echo "$(date) the desktop came up and stayed up; this start counts as good" >> $LOG
-    exit 0
+    p2=$(pgrep -x WindowServer 2>/dev/null | head -1)
+    r1=$(ws_reports)
+    if [ "$p2" = "$p" ] && [ "$r1" = "$r0" ]; then
+      nvram -d $V:nullmoth-nv-starts 2>/dev/null
+      nvram $V:nullmoth-nv-ok=1 2>/dev/null
+      nvram -d $V:nullmoth-ws-loop 2>/dev/null
+      echo "$(date) the desktop came up and stayed up (WindowServer $p for 45 s); this start counts as good" >> $LOG
+      exit 0
+    fi
+    [ -n "$p2" ] && case " $pids " in *" $p2 "*) ;; *) pids="$pids $p2";; esac
+    set -- $pids
+    # Only a display this driver drives makes WindowServer's Metal device ours: debug.nvaccelfb reads 1 once armed.
+    if { [ "$r1" -ge 3 ] || [ "$#" -ge 4 ]; } && [ "$(sysctl -n debug.nvaccelfb 2>/dev/null)" = 1 ]; then
+      prev=$(nvram $V:nullmoth-ws-loop 2>/dev/null | cut -f2)
+      nvram $V:nullmoth-nv-starts=%02 2>/dev/null
+      nvram -d $V:nullmoth-nv-ok 2>/dev/null
+      nvram $V:nullmoth-ws-loop=$r1 2>/dev/null
+      echo "$(date) WindowServer keeps dying ($r1 reports since boot, $# processes seen) on the NVIDIA display; the driver is off for the next boot" >> $LOG
+      # At the login window nothing is open yet, and the screen stays black until a restart. Restart once; a second
+      # loop (the previous driver, or the next boot still looping) is left to the user.
+      if [ -z "$prev" ] && [ "$(stat -f %Su /dev/console 2>/dev/null)" = root ]; then
+        echo "$(date) restarting from the login window" >> $LOG
+        shutdown -r now
+      fi
+      exit 0
+    fi
+    n=$((n + 9)); continue
   fi
   n=$((n + 1)); sleep 5
 done
