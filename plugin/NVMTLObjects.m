@@ -192,36 +192,27 @@ static int nvmtl_profile_user_set(const char *key, void *vctx)
     for (unsigned i = 0; i < g_conf_nmine; i++) if (!strcmp(g_conf_mine[i], key)) return 1;
     return 0;
 }
-// NVMTL_OS_VERSION=<major>[.<minor>[.<patch>]]: this process is told the operating system is at least that version.
-// Measured in the arm64 slice of Cyberpunk 2077 (device set-up 0x104978498..0x104978508): it reads
-// -[NSProcessInfo operatingSystemVersion] once and stores two flags, "26.2 or newer" and "major above 26"; the second one is
-// what the settings screen asks (renderer virtual 0x390, 0x101494648) before it offers MetalFX Frame Generation, and the
-// first sets a field of its MetalFX settings. Nothing about the device is consulted. The process only; never a default.
-static void nvmtl_os_version_override(void)
+// NVMTL_OS_VERSION=<major>[.<minor>[.<patch>]]: this process is told the operating system is at least that version
+// ("0" = never, even for a profile). The application profile can carry a version too (nvmtl_app_profile.h): Cyberpunk
+// 2077 reads -[NSProcessInfo operatingSystemVersion] once in device set-up and offers MetalFX frame generation only above
+// macOS 26. That read happens before Metal loads this plugin, so the answer that counts is installed earlier, by
+// libnvmtl_osver.dylib (nvmtl_osver.m), which the game's own build loads. This is the same answer installed again when
+// the plugin loads, for a build without that library and for a process that sets the knob; it does nothing when the
+// library already answered. The previous version replaced the method on NSProcessInfo only, which the real instance's
+// class (a private subclass with its own implementation) never reached.
+static void nvmtl_os_version_override(const char *me, const char *bid)
 {
-    const char *e = getenv("NVMTL_OS_VERSION");
-    if (!e || !*e) return;
-    long v[3] = { 0, 0, 0 };
-    sscanf(e, "%ld.%ld.%ld", &v[0], &v[1], &v[2]);
-    if (v[0] < 14 || v[0] > 99) return;
-    const NSOperatingSystemVersion fake = { (NSInteger)v[0], (NSInteger)v[1], (NSInteger)v[2] };
-    Method m = class_getInstanceMethod([NSProcessInfo class], @selector(operatingSystemVersion));
-    if (!m) return;
-    method_setImplementation(m, imp_implementationWithBlock(^NSOperatingSystemVersion(id _self) {
-        (void)_self;
-        // Each of the first 8 reads is logged with its caller: the fake only matters if the application's own read reaches it.
-        static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) { Dl_info di; void *ra = __builtin_return_address(0);
-            if (dladdr(ra, &di) && di.dli_fname) nvlog("os version: read #%d -> %ld.%ld.%ld from %s+0x%lx", atomic_load(&n), (long)fake.majorVersion, (long)fake.minorVersion, (long)fake.patchVersion, strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname, (unsigned long)((char *)ra - (char *)di.dli_fbase));
-            else nvlog("os version: read #%d -> %ld.%ld.%ld from %p", atomic_load(&n), (long)fake.majorVersion, (long)fake.minorVersion, (long)fake.patchVersion, ra); }
-        return fake; }));
-    Method at = class_getInstanceMethod([NSProcessInfo class], @selector(isOperatingSystemAtLeastVersion:));
-    if (at) method_setImplementation(at, imp_implementationWithBlock(^BOOL(id _self, NSOperatingSystemVersion want) {
-        (void)_self;
-        static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) nvlog("os version: isOperatingSystemAtLeastVersion %ld.%ld.%ld asked", (long)want.majorVersion, (long)want.minorVersion, (long)want.patchVersion);
-        if (fake.majorVersion != want.majorVersion) return fake.majorVersion > want.majorVersion;
-        if (fake.minorVersion != want.minorVersion) return fake.minorVersion > want.minorVersion;
-        return fake.patchVersion >= want.patchVersion; }));
-    nvlog("os version: this process is told %ld.%ld.%ld (NVMTL_OS_VERSION)", v[0], v[1], v[2]);
+    int *done = dlsym(RTLD_DEFAULT, "nvmtl_osver_installed");
+    if (done && *done) { nvlog("os version: already answered by libnvmtl_osver.dylib"); return; }
+    const NSOperatingSystemVersion r = [[NSProcessInfo processInfo] operatingSystemVersion];
+    const long real[3] = { (long)r.majorVersion, (long)r.minorVersion, (long)r.patchVersion };
+    const char *env = getenv("NVMTL_OS_VERSION");
+    long v[3];
+    if (!nvmtl_os_version_answer(me, bid, getenv("NVMTL_APP_PROFILE"), env, real, v)) return;
+    const int n = nvmtl_osver_install((NSOperatingSystemVersion){ v[0], v[1], v[2] });
+    if (!n) { nvlog("os version: FAILED - NSProcessInfo has no operatingSystemVersion to replace"); return; }
+    nvlog("os version: this process is told %ld.%ld.%ld instead of %ld.%ld.%ld (%s, installed late: reads made before the "
+          "plugin loaded saw the real version)", v[0], v[1], v[2], real[0], real[1], real[2], env ? "NVMTL_OS_VERSION" : "application profile");
 }
 // Settles this process's driver knobs once, before any of them is read: forget what was inherited, read nvrm610.conf,
 // then apply the application profile for this executable, if there is one (nvmtl_app_profile.h has the order of
@@ -241,7 +232,7 @@ static void nvmtl_conf_settle(void)
     nvmtl_profile_ctx ctx = { p, 0 };
     for (unsigned i = 0; p && i < p->nknobs && i < 64; i++) if (getenv(p->knobs[i].key)) ctx.envBits |= 1ull << i;
     nvmtl_conf_read_file(forgot);
-    nvmtl_os_version_override();
+    nvmtl_os_version_override(me, bid);
     if (p && !nvmtl_app_profile_for(me, bid, getenv("NVMTL_APP_PROFILE"))) {
         nvlog("profile: %s: off (NVMTL_APP_PROFILE=0)", me);
         p = NULL;

@@ -28,6 +28,7 @@
 #include "nvmtl_log_failure.h"
 #include "nvmtl_env_knobs.h"
 #include "nvmtl_app_profile.h"
+#import "nvmtl_osver_install.h"
 #include "nvmtl_claims.h"
 // The application profile matched for this process (nvmtl_app_profile.h), or NULL. Set once by nvmtl_conf_settle
 // (NVMTLObjects.m), which reads nvrm610.conf and applies the profile before any knob is read.
