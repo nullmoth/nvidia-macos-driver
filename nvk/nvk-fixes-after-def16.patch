@@ -53,7 +53,31 @@
           ctx->ceOnly = false; engineType = NV2080_ENGINE_TYPE_GRAPHICS; createChannelParams.engineType = engineType; ctx->hChannel = 0;
           chs = nvRmApiAlloc(&rm, chanParent, &ctx->hChannel, pdev->channelClass, &createChannelParams);
        }
-@@ -889,15 +889,15 @@
+@@ -790,13 +790,19 @@
+    if (cs != NV_OK && !ctx->ceOnly) {
+       NV2080_CTRL_GPU_GET_ENGINE_PARTNERLIST_PARAMS pl = { .engineType = NV2080_ENGINE_TYPE_GRAPHICS,
+                                                            .partnershipClassId = pdev->base.dev_info.cls_copy, .runqueue = 0 };
++      const NV_STATUS first = cs;
+       NV_STATUS ps = nvRmApiControl(&rm, pdev->hSubdevice, NV2080_CTRL_CMD_GPU_GET_ENGINE_PARTNERLIST, &pl, sizeof(pl));
+-      fprintf(stderr, "nvrm: copy object on the graphics channel refused rc 0x%x - partner CE lookup rc 0x%x, %u partner(s)\n",
+-              (unsigned)cs, (unsigned)ps, (unsigned)pl.numPartners);
+-      if (ps == NV_OK && pl.numPartners >= 1) {
+-         NVB0B5_ALLOCATION_PARAMETERS ceParams = { .version = NVB0B5_ALLOCATION_PARAMETERS_VERSION_1, .engineType = pl.partnerList[0] };
++      const NvU32 ceEngine = (ps == NV_OK && pl.numPartners >= 1) ? pl.partnerList[0] : 0;
++      if (ceEngine) {
++         NVB0B5_ALLOCATION_PARAMETERS ceParams = { .version = NVB0B5_ALLOCATION_PARAMETERS_VERSION_1, .engineType = ceEngine };
+          cs = nvRmApiAlloc(&rm, ctx->hChannel, &ctx->subchannels.hCopy, pdev->base.dev_info.cls_copy, &ceParams);
+       }
++      /* The one piece of field evidence for why a copy queue did or did not come up on the graphics channel.
++       * vk_logw reaches the plugin's debug messenger, which writes it to nvmtl.log as an "nvk-reason:" line that
++       * Send logs collects; a stderr line reaches neither nvmtl.log nor the kernel log. */
++      vk_logw(VK_LOG_OBJS(log_obj),
++              "nvrm copy-engine retry: class 0x%x refused on the graphics channel rc 0x%x; partner lookup rc 0x%x, %u partner(s), engine 0x%x; retry rc 0x%x",
++              (unsigned)pdev->base.dev_info.cls_copy, (unsigned)first, (unsigned)ps, (unsigned)pl.numPartners, (unsigned)ceEngine, (unsigned)cs);
+    }
+    NV_CHECK(cs);
+    if (!ctx->ceOnly) {   /* b81: a copy-engine channel carries the copy class only (610 trace 242-246) */
+@@ -889,15 +895,15 @@
        NV2080_CTRL_GR_GET_CTXSW_MODES_PARAMS after = { .hChannel = ctx->hChannel };
        NV_STATUS gs = nvRmApiControl(&rm, pdev->hSubdevice, NV2080_CTRL_CMD_GR_GET_CTXSW_MODES, &after, sizeof after);
        if (ps != NV_OK || gs != NV_OK || after.cilpPreemptMode != NV2080_CTRL_SET_CTXSW_PREEMPTION_MODE_COMPUTE_CTA || nvmtl_cfg_getenv("NVK_PREEMPT_LOG"))
@@ -72,7 +96,7 @@
     }
     if (!ctx->ceOnly && nvrm610_on("ZCULL")) {
        /* b81 trace 322: a zcull context buffer bound SEPARATE_BUFFER (hierarchical Z survives a context switch).
-@@ -912,14 +912,14 @@
+@@ -912,14 +918,14 @@
                                                            .zcullMode = NV2080_CTRL_CTXSW_ZCULL_MODE_SEPARATE_BUFFER };
              NV_STATUS bs = nvRmApiControl(&rm, pdev->hSubdevice, NV2080_CTRL_CMD_GR_CTXSW_ZCULL_BIND, &zb, sizeof zb);
              if (bs != NV_OK || nvmtl_cfg_getenv("NVK_PREEMPT_LOG"))
@@ -90,7 +114,7 @@
                ctx->ceOnly ? "COPY-ENGINE" : "graphics", (unsigned)ctx->hTsg, (unsigned)ctx->hCtxShare, (unsigned)engineType);
  
     /* b73 (patch_evdev.py): NO per-channel non-stall event. WAS one GRAPHICS event per channel (copy-engine ones too)
-@@ -951,7 +951,7 @@
+@@ -951,7 +957,7 @@
  {
     VkResult r = nvkmd_nvrm_create_exec_ctx_on(_dev, log_obj, engines, true, ctx_out);
     if (r != VK_SUCCESS && engines == NVKMD_ENGINE_COPY && nvrm610_on("CECHAN")) {
