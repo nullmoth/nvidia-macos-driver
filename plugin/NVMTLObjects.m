@@ -6777,7 +6777,7 @@ typedef enum : uint8_t {
     NVP_INV = 0, NVP_PIPE, NVP_DS, NVP_VBUF, NVP_FBUF, NVP_VTEX, NVP_FTEX, NVP_VSAMP, NVP_FSAMP,
     NVP_CULL, NVP_WIND, NVP_FILL, NVP_SREF, NVP_SREF2, NVP_VIEWPORT, NVP_SCISSOR, NVP_DEPTHBIAS, NVP_BLENDCOL,
     NVP_DRAWIDX, NVP_DRAWIDX5, NVP_DRAW, NVP_DRAW3, NVP_USERES, NVP_USERES3, NVP_VBYTES, NVP_FBYTES,
-    NVP_VOFF, NVP_FOFF, NVP_DEPTHCLIP
+    NVP_VOFF, NVP_FOFF, NVP_DEPTHCLIP, NVP_VBUFST, NVP_VOFFST, NVP_USEHEAP, NVP_USEHEAP2
 } nvp_kind;
 typedef struct {
     nvp_kind kind;
@@ -6792,6 +6792,39 @@ typedef struct {
 // replay in -endEncoding, which is what puts them on the command buffer (nvmtl_retain_heaps).
 @interface NVMTLDeferredRenderCommandEncoder : NSProxy { @public __weak NVMTLParallelRenderCommandEncoder *_owner; NSMutableArray *_inv, *_keep, *_heaps; BOOL _ended; NSString *_label; nvp_cmd *_cmds; uint32_t _ncmd, _capcmd; }
 @end
+// Method signatures for the sub-encoder, by selector. The translated game asks the proxy for a signature before
+// messaging it, and +instanceMethodSignatureForSelector: walks the class's protocol lists each time (class_copyProtocolList,
+// a malloc, a hash probe): ~320 render-thread samples in 20 s. A signature never changes for a selector, so the first
+// answer is kept. Reads take no lock: a slot's signature is published before its selector. NVMTL_PAR_SIGCACHE=0 turns it off.
+#define NVP_SIG_SLOTS 512u
+static struct { _Atomic(SEL) sel; void *sig; } nvp_sig_tab[NVP_SIG_SLOTS];
+static os_unfair_lock nvp_sig_lock = OS_UNFAIR_LOCK_INIT;
+static int nvp_sig_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_PAR_SIGCACHE"); on = !(e && e[0] == '0'); }
+    return on;
+}
+static inline unsigned nvp_sig_slot(SEL s) { return (unsigned)(((uintptr_t)(const void *)s >> 3) * 0x9E3779B1u) & (NVP_SIG_SLOTS - 1); }
+static NSMethodSignature *nvp_sig_cached(SEL s) {
+    if (!s || !nvp_sig_on()) return nil;
+    for (unsigned k = 0, i = nvp_sig_slot(s); k < NVP_SIG_SLOTS; k++, i = (i + 1) & (NVP_SIG_SLOTS - 1)) {
+        SEL t = atomic_load_explicit(&nvp_sig_tab[i].sel, memory_order_acquire);
+        if (t == s) return (__bridge NSMethodSignature *)nvp_sig_tab[i].sig;
+        if (!t) return nil;
+    }
+    return nil;
+}
+static void nvp_sig_remember(SEL s, NSMethodSignature *m) {
+    if (!s || !m || !nvp_sig_on()) return;
+    os_unfair_lock_lock(&nvp_sig_lock);
+    for (unsigned k = 0, i = nvp_sig_slot(s); k < NVP_SIG_SLOTS * 3 / 4; k++, i = (i + 1) & (NVP_SIG_SLOTS - 1)) {
+        SEL t = atomic_load_explicit(&nvp_sig_tab[i].sel, memory_order_relaxed);
+        if (t == s) break;
+        if (!t) { nvp_sig_tab[i].sig = (__bridge_retained void *)m;   // held for the life of the process
+                  atomic_store_explicit(&nvp_sig_tab[i].sel, s, memory_order_release); break; }
+    }
+    os_unfair_lock_unlock(&nvp_sig_lock);
+}
 @implementation NVMTLDeferredRenderCommandEncoder
 static int nvp_fast_off(void) {
     static int off = -1;
@@ -6832,6 +6865,32 @@ static int nvp_fast_off(void) {
 - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i { [self nvpBind:NVP_VBUF obj:b u0:o idx:i]; }
 - (void)setFragmentBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i { [self nvpBind:NVP_FBUF obj:b u0:o idx:i]; }
 - (void)setVertexBufferOffset:(NSUInteger)o atIndex:(NSUInteger)i { [self nvpBind:NVP_VOFF obj:nil u0:o idx:i]; }
+// The strided and heap forms used to fall through to -forwardInvocation:, which costs a method-signature lookup, an
+// NSInvocation, retainArguments, and an -invokeWithTarget: at replay - for a call the game makes per draw. Measured on
+// Cyberpunk: ~1,100 render-thread samples in 20 s between recording and replay. NVMTL_NO_PARFAST=1 restores the old path.
+- (void)nvpStrided:(nvp_kind)k obj:(id)o u0:(uint64_t)u0 stride:(uint64_t)st idx:(uint64_t)i {
+    @synchronized (self) { nvp_cmd *c = [self nvpPush:k]; if (!c) return; [self nvpKeep:o]; c->o0 = (__bridge void *)o; c->u0 = u0; c->u1 = i; c->u2 = st; }
+}
+- (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o attributeStride:(NSUInteger)st atIndex:(NSUInteger)i {
+    if (nvp_fast_off()) {
+        SEL sel = @selector(setVertexBuffer:offset:attributeStride:atIndex:);
+        NSMethodSignature *m = [NVMTLRenderCommandEncoder instanceMethodSignatureForSelector:sel]; if (!m) return;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:m]; inv.selector = sel;
+        [inv setArgument:&b atIndex:2]; [inv setArgument:&o atIndex:3]; [inv setArgument:&st atIndex:4]; [inv setArgument:&i atIndex:5];
+        [self forwardInvocation:inv]; return;
+    }
+    [self nvpStrided:NVP_VBUFST obj:b u0:o stride:st idx:i];
+}
+- (void)setVertexBufferOffset:(NSUInteger)o attributeStride:(NSUInteger)st atIndex:(NSUInteger)i {
+    if (nvp_fast_off()) {
+        SEL sel = @selector(setVertexBufferOffset:attributeStride:atIndex:);
+        NSMethodSignature *m = [NVMTLRenderCommandEncoder instanceMethodSignatureForSelector:sel]; if (!m) return;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:m]; inv.selector = sel;
+        [inv setArgument:&o atIndex:2]; [inv setArgument:&st atIndex:3]; [inv setArgument:&i atIndex:4];
+        [self forwardInvocation:inv]; return;
+    }
+    [self nvpStrided:NVP_VOFFST obj:nil u0:o stride:st idx:i];
+}
 - (void)setFragmentBufferOffset:(NSUInteger)o atIndex:(NSUInteger)i { [self nvpBind:NVP_FOFF obj:nil u0:o idx:i]; }
 - (void)setVertexTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i { [self nvpBind:NVP_VTEX obj:t u0:0 idx:i]; }
 - (void)setFragmentTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i { [self nvpBind:NVP_FTEX obj:t u0:0 idx:i]; }
@@ -6905,8 +6964,11 @@ static int nvp_fast_off(void) {
     @synchronized (self) { if (!_keep) _keep = [NSMutableArray new]; [_keep addObject:d]; [_inv addObject:inv]; }
 }
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)s {
-    NSMethodSignature *m = [NVMTLRenderCommandEncoder instanceMethodSignatureForSelector:s];
+    NSMethodSignature *m = nvp_sig_cached(s);
+    if (m) return m;
+    m = [NVMTLRenderCommandEncoder instanceMethodSignatureForSelector:s];
     if (!m) { nvlog("parallel sub-encoder: %s is not a render-encoder selector — recorded as a no-op", sel_getName(s)); m = [NSMethodSignature signatureWithObjCTypes:"v@:"]; }
+    nvp_sig_remember(s, m);
     return m;
 }
 - (void)forwardInvocation:(NSInvocation *)inv {
@@ -6945,8 +7007,15 @@ static int nvp_fast_off(void) {
 - (void)useResources:(const id<MTLResource> __unsafe_unretained [])r count:(NSUInteger)n usage:(MTLResourceUsage)u stages:(MTLRenderStages)st { for (NSUInteger i = 0; i < n; i++) [(id)self useResource:r[i] usage:u stages:st]; }
 - (void)useHeaps:(const id<MTLHeap> __unsafe_unretained [])h count:(NSUInteger)n { for (NSUInteger i = 0; i < n; i++) [self useHeap:h[i]]; }
 - (void)useHeaps:(const id<MTLHeap> __unsafe_unretained [])h count:(NSUInteger)n stages:(MTLRenderStages)st { for (NSUInteger i = 0; i < n; i++) [self useHeap:h[i] stages:st]; }
-- (void)useHeap:(id<MTLHeap>)h { [self nvpSlowObj:@selector(useHeap:) obj:h]; }
+- (void)useHeap:(id<MTLHeap>)h {
+    if (nvp_fast_off()) { [self nvpSlowObj:@selector(useHeap:) obj:h]; return; }
+    @synchronized (self) { nvp_cmd *c = [self nvpPush:NVP_USEHEAP]; if (!c) return; [self nvpKeep:h]; c->o0 = (__bridge void *)h; }
+}
 - (void)useHeap:(id<MTLHeap>)h stages:(MTLRenderStages)st {
+    if (!nvp_fast_off()) {
+        @synchronized (self) { nvp_cmd *c = [self nvpPush:NVP_USEHEAP2]; if (!c) return; [self nvpKeep:h]; c->o0 = (__bridge void *)h; c->u0 = st; }
+        return;
+    }
     SEL sel = @selector(useHeap:stages:);
     NSMethodSignature *m = [NVMTLRenderCommandEncoder instanceMethodSignatureForSelector:sel];
     NSInvocation *inv = [NSInvocation invocationWithMethodSignature:m]; inv.selector = sel;
@@ -6991,6 +7060,10 @@ static int nvp_fast_off(void) {
                     case NVP_FBUF:   [real setFragmentBuffer:(__bridge id)c->o0 offset:(NSUInteger)c->u0 atIndex:(NSUInteger)c->u1]; n++; break;
                     case NVP_VOFF:   [real setVertexBufferOffset:(NSUInteger)c->u0 atIndex:(NSUInteger)c->u1]; n++; break;
                     case NVP_FOFF:   [real setFragmentBufferOffset:(NSUInteger)c->u0 atIndex:(NSUInteger)c->u1]; n++; break;
+                    case NVP_VBUFST: [real setVertexBuffer:(__bridge id)c->o0 offset:(NSUInteger)c->u0 attributeStride:(NSUInteger)c->u2 atIndex:(NSUInteger)c->u1]; n++; break;
+                    case NVP_VOFFST: [real setVertexBufferOffset:(NSUInteger)c->u0 attributeStride:(NSUInteger)c->u2 atIndex:(NSUInteger)c->u1]; n++; break;
+                    case NVP_USEHEAP:  nvmtl_use_heap(real->_cb, (__bridge id)c->o0); n++; break;   // what -[real useHeap:] does
+                    case NVP_USEHEAP2: [real useHeap:(__bridge id)c->o0 stages:(MTLRenderStages)c->u0]; n++; break;
                     case NVP_VTEX:   [real setVertexTexture:(__bridge id)c->o0 atIndex:(NSUInteger)c->u1]; n++; break;
                     case NVP_FTEX:   [real setFragmentTexture:(__bridge id)c->o0 atIndex:(NSUInteger)c->u1]; n++; break;
                     case NVP_VSAMP:  [real setVertexSamplerState:(__bridge id)c->o0 atIndex:(NSUInteger)c->u1]; n++; break;
