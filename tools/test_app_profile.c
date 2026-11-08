@@ -198,6 +198,42 @@ int main(int argc, char **argv)
         } else printf("skip  the shipped edit against the game's module (pass original.spv edited.spv)\n");
     } else printf("note  this build carries no shader edit\n");
 
+    /* the RT working-set floor and the operating-system answer */
+    { const char *rt = NULL;
+      for (unsigned i = 0; i < cp->nknobs; i++) if (!strcmp(cp->knobs[i].key, "NVMTL_WS_RT_GATE_MB")) rt = cp->knobs[i].value;
+      arm("the game's profile raises the RT working-set floor to 6200 MB (above the game's 6145 MB gate)", rt && atoi(rt) == 6200 && 6200 > 6145); }
+    { long v[3], r26[3] = { 26, 1, 0 }, r15[3] = { 15, 7, 3 }, r27[3] = { 27, 0, 0 }, r28[3] = { 28, 0, 0 };
+      const char *G = "Cyberpunk2077", *B = "com.cdprojektred.cyberpunk.steam";
+      arm("os: the game on macOS 26.1 is told 27.0.0 by its profile",
+          nvmtl_os_version_answer(G, B, NULL, NULL, r26, v) == 1 && v[0] == 27 && v[1] == 0 && v[2] == 0);
+      arm("os: and on macOS 15.7.3", nvmtl_os_version_answer(G, B, NULL, NULL, r15, v) == 1 && v[0] == 27);
+      arm("os: on macOS 27.0 and newer it gets the real answer (never lowered, nothing to do)",
+          !nvmtl_os_version_answer(G, B, NULL, NULL, r27, v) && !nvmtl_os_version_answer(G, B, NULL, NULL, r28, v));
+      static const char *others[][2] = { { "WindowServer", "" }, { "steam_osx", "com.valvesoftware.steam" }, { "Cyberpunk2077", "" },
+          { "Cyberpunk2077", "com.example.other" }, { "REDprelauncher", "com.cdprojektred.cyberpunk.steam" }, { "cyberpunk2077", "com.cdprojektred.cyberpunk.steam" } };
+      int any = 0; for (unsigned i = 0; i < sizeof others / sizeof others[0]; i++) any |= nvmtl_os_version_answer(others[i][0], others[i][1], NULL, NULL, r26, v);
+      arm("os: no other process is told anything: WindowServer, Steam, the name outside the bundle, a helper in the bundle, another case", !any);
+      arm("os: NVMTL_APP_PROFILE=0 turns the game's answer off", !nvmtl_os_version_answer(G, B, "0", NULL, r26, v));
+      arm("os: NVMTL_OS_VERSION=0 turns it off too", !nvmtl_os_version_answer(G, B, NULL, "0", r26, v));
+      arm("os: an explicit NVMTL_OS_VERSION wins over the profile, for any process (the per-process knob as before)",
+          nvmtl_os_version_answer(G, B, NULL, "28.2", r26, v) == 1 && v[0] == 28 && v[1] == 2 &&
+          nvmtl_os_version_answer("SomeApp", "com.example", NULL, "27.1.4", r26, v) == 1 && v[2] == 4);
+      arm("os: a malformed NVMTL_OS_VERSION is ignored and the profile decides (27.0.0 for the game, nothing elsewhere)",
+          nvmtl_os_version_answer(G, B, NULL, "27.x", r26, v) == 1 && v[0] == 27 && !nvmtl_os_version_answer("SomeApp", "com.example", NULL, "banana", r26, v));
+      long w[3];
+      arm("os: version parsing takes 27, 27.1, 27.1.2 and refuses 13, 100, 27., 27.1.2.3, -27, empty",
+          nvmtl_os_version_parse("27", w) && nvmtl_os_version_parse("27.1", w) && nvmtl_os_version_parse("27.1.2", w) && w[2] == 2 &&
+          !nvmtl_os_version_parse("13", w) && !nvmtl_os_version_parse("100", w) && !nvmtl_os_version_parse("27.", w) &&
+          !nvmtl_os_version_parse("27.1.2.3", w) && !nvmtl_os_version_parse("-27", w) && !nvmtl_os_version_parse("", w)); }
+    { char out[64]; int n = 0, ok = 1;
+      const char *lines[] = { "# NVMTL_OS_VERSION=26.0\n", "NVMTL_OS_VERSION=27.0\n", "  NVMTL_OS_VERSION = 0 \r\n", "NVMTL_OS_VERSIONX=9\n", "\n" };
+      char last[64] = "";
+      for (unsigned i = 0; i < 5; i++) if (nvmtl_conf_line_value(lines[i], "NVMTL_OS_VERSION", out, sizeof out)) { n++; snprintf(last, sizeof last, "%s", out); }
+      ok = n == 2 && !strcmp(last, "0");
+      arm("conf: comments and other keys are skipped, blanks trimmed, the last line wins (the user's block)", ok);
+      char tiny[3];
+      arm("conf: a value that does not fit is refused, not cut", !nvmtl_conf_line_value("NVMTL_OS_VERSION=27.0.0\n", "NVMTL_OS_VERSION", tiny, sizeof tiny)); }
+
     printf("%s: %d failed\n", fails ? "FAIL" : "PASS", fails);
     return fails ? 1 : 0;
 }
