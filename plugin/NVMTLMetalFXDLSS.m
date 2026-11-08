@@ -331,13 +331,18 @@ static id nvmtl_mfx_dlss_rr_make(id descriptor, id device) {
 // with an identity ClipToPrevClip and the motion vectors (which include camera motion) carry all of the movement.
 // Not mapped (logged once): deltaTime, the fence, uiTextureComposited, and anything the core takes that MetalFX never gives
 // (HUD-less colour, UI alpha, dynamic frame count).
+// With a scaler attached, MetalFX takes the sizes and the motion vectors from the scaler. An app may then leave the
+// descriptor's input/output sizes and motionTextureFormat unset (Cyberpunk 2077 does: it calls setScaler: and skips the
+// size setters), and may set the interpolator's motionTexture to its depth texture. So: a size or the motion format the
+// descriptor leaves at 0 is read from the scaler, and when the interpolator's motionTexture is missing or is the depth
+// texture, the scaler's own motionTexture and motionVectorScale (the ones it was last encoded with) are used instead.
 @interface NVMTLDLSSFrameInterpolator : NSObject <MTLFXFrameInterpolator> {
     void *_feature;
     id<MTLFXFrameInterpolatableScaler> _scaler;
     NSUInteger _inW, _inH, _outW, _outH;
     MTLPixelFormat _fmtColor, _fmtDepth, _fmtMotion, _fmtOutput, _fmtUI;
     id<MTLTexture> _lastColor;      // colorTexture of the previous encode, to tell whether prevColorTexture is the core's history
-    BOOL _haveHistory, _notedUnmapped, _havePrevVP;
+    BOOL _haveHistory, _notedUnmapped, _havePrevVP, _notedScalerMotion;
     simd_float4x4 _prevVP;
     uint32_t _frame;
 }
@@ -352,12 +357,31 @@ static id nvmtl_mfx_dlss_rr_make(id descriptor, id device) {
 @synthesize jitterOffsetX = _jitterOffsetX, jitterOffsetY = _jitterOffsetY, uiTextureComposited = _uiTextureComposited;
 @synthesize shouldResetHistory = _shouldResetHistory, depthReversed = _depthReversed;
 
+// A property of the descriptor's scaler, or 0 / nil when there is no scaler or it does not have that property.
+static NSUInteger nvmtl_fg_scaler_uint(id s, SEL sel) { return s && [s respondsToSelector:sel] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(s, sel) : 0; }
+static float nvmtl_fg_scaler_float(id s, SEL sel, float dflt) { return s && [s respondsToSelector:sel] ? ((float (*)(id, SEL))objc_msgSend)(s, sel) : dflt; }
+static id nvmtl_fg_scaler_obj(id s, SEL sel) { return s && [s respondsToSelector:sel] ? ((id (*)(id, SEL))objc_msgSend)(s, sel) : nil; }
+// The descriptor's sizes, each one the descriptor leaves at 0 taken from its scaler. Returns YES when any came from the scaler.
+static BOOL nvmtl_fg_sizes(MTLFXFrameInterpolatorDescriptor *d, NSUInteger s[4]) {
+    id sc = d.scaler;
+    NSUInteger own[4] = { d.inputWidth, d.inputHeight, d.outputWidth, d.outputHeight };
+    SEL sel[4] = { @selector(inputWidth), @selector(inputHeight), @selector(outputWidth), @selector(outputHeight) };
+    BOOL fromScaler = NO;
+    for (int i = 0; i < 4; i++) {
+        s[i] = own[i];
+        if (!s[i]) { s[i] = nvmtl_fg_scaler_uint(sc, sel[i]); fromScaler |= s[i] != 0; }
+    }
+    return fromScaler;
+}
+
 - (instancetype)initWithDescriptor:(MTLFXFrameInterpolatorDescriptor *)d {
     if (!(self = [super init])) return nil;
-    _inW = d.inputWidth; _inH = d.inputHeight; _outW = d.outputWidth; _outH = d.outputHeight;
+    NSUInteger s[4]; nvmtl_fg_sizes(d, s);
+    _inW = s[0]; _inH = s[1]; _outW = s[2]; _outH = s[3];
     _fmtColor = d.colorTextureFormat; _fmtDepth = d.depthTextureFormat; _fmtMotion = d.motionTextureFormat;
     _fmtOutput = d.outputTextureFormat; _fmtUI = d.uiTextureFormat;
     _scaler = d.scaler;
+    if (_fmtMotion == MTLPixelFormatInvalid) _fmtMotion = (MTLPixelFormat)nvmtl_fg_scaler_uint(_scaler, @selector(motionTextureFormat));
     _motionVectorScaleX = 1.0f; _motionVectorScaleY = 1.0f; _depthReversed = YES;   // the protocol's documented default
     _nearPlane = 0.1f; _farPlane = 1000.0f; _fieldOfView = 60.0f; _aspectRatio = _outH ? (float)_outW / (float)_outH : 1.0f;
     return self;
@@ -392,6 +416,23 @@ static void nvmtl_fg_copy(float out[16], simd_float4x4 m) { for (int c = 0; c < 
     if (!cb) { nvlog("dlss: FG: the command buffer is not this driver's - interpolation skipped"); return; }
     NVMTLTexture *color = nvmtl_dlss_tex(_colorTexture), *prev = nvmtl_dlss_tex(_prevColorTexture), *depth = nvmtl_dlss_tex(_depthTexture);
     NVMTLTexture *motion = nvmtl_dlss_tex(_motionTexture), *out = nvmtl_dlss_tex(_outputTexture), *ui = nvmtl_dlss_tex(_uiTexture);
+    float mvScaleX = _motionVectorScaleX, mvScaleY = _motionVectorScaleY;
+    if (_scaler && (!_motionTexture || (id)_motionTexture == (id)_depthTexture)) {
+        // Depth handed in as motion (or no motion at all): the scaler holds the real motion vectors of this frame.
+        id<MTLTexture> sm = nvmtl_fg_scaler_obj(_scaler, @selector(motionTexture));
+        NVMTLTexture *smt = nvmtl_dlss_tex(sm);
+        if (smt) {
+            motion = smt;
+            mvScaleX = nvmtl_fg_scaler_float(_scaler, @selector(motionVectorScaleX), mvScaleX);
+            mvScaleY = nvmtl_fg_scaler_float(_scaler, @selector(motionVectorScaleY), mvScaleY);
+            if (!_notedScalerMotion) {
+                _notedScalerMotion = YES;
+                nvlog("dlss: FG: motion vectors from the temporal scaler (%lux%lu, format %lu, scale %.1f x %.1f) instead of the interpolator's %s",
+                      (unsigned long)sm.width, (unsigned long)sm.height, (unsigned long)sm.pixelFormat, mvScaleX, mvScaleY,
+                      _motionTexture ? "depth texture" : "empty motion texture");
+            }
+        }
+    }
     if (!color || !depth || !motion || !out) { nvlog("dlss: FG: colour, depth, motion and output textures must all be set (and be this driver's) - interpolation skipped"); return; }
     if (_prevColorTexture && !prev) { nvlog("dlss: FG: the previous colour texture is not this driver's - interpolation skipped"); return; }
     if (_uiTexture && !ui) { nvlog("dlss: FG: the UI texture is not this driver's - interpolation skipped"); return; }
@@ -406,7 +447,7 @@ static void nvmtl_fg_copy(float out[16], simd_float4x4 m) { for (int c = 0; c < 
     a.in_w = (uint32_t)_inW; a.in_h = (uint32_t)_inH; a.out_w = (uint32_t)_outW; a.out_h = (uint32_t)_outH;
     a.hdr = nvmtl_dlss_float_format(_fmtColor); a.depth_inverted = _depthReversed; a.camera_motion_included = 1;
     a.near_z = _nearPlane; a.far_z = _farPlane; a.fov_y = _fieldOfView * (float)M_PI / 180.0f; a.aspect = _aspectRatio;
-    a.mv_scale_x = _motionVectorScaleX; a.mv_scale_y = _motionVectorScaleY; a.jitter_x = _jitterOffsetX; a.jitter_y = _jitterOffsetY;
+    a.mv_scale_x = mvScaleX; a.mv_scale_y = mvScaleY; a.jitter_x = _jitterOffsetX; a.jitter_y = _jitterOffsetY;
     a.multi_index = 1; a.multi_count = 1; a.frame_id = ++_frame;
     // Camera pose and the clip-space step from the previous frame, when the scaler has the matrices.
     simd_float4x4 id4 = matrix_identity_float4x4, v = id4, p = id4, vp = id4;
@@ -452,9 +493,14 @@ static BOOL nvmtl_mfx_dlss_fg_ready(void) { return nvmtl_vk_dlss_fg_available();
 static id nvmtl_mfx_dlss_fg_make(id descriptor, id device) {
     if (!nvmtl_vk_dlss_fg_available()) return nil;
     MTLFXFrameInterpolatorDescriptor *d = (MTLFXFrameInterpolatorDescriptor *)descriptor;
-    if (!d.inputWidth || !d.inputHeight || !d.outputWidth || !d.outputHeight) { nvlog("dlss: FG: interpolator has no sizes - using the MetalFX path"); return nil; }
-    nvlog("dlss: MetalFX frame interpolator %lux%lu (depth/motion %lux%lu) served by DLSS Frame Generation", (unsigned long)d.outputWidth,
-          (unsigned long)d.outputHeight, (unsigned long)d.inputWidth, (unsigned long)d.inputHeight);
+    NSUInteger s[4];
+    BOOL fromScaler = nvmtl_fg_sizes(d, s);
+    if (!s[0] || !s[1] || !s[2] || !s[3]) {
+        nvlog("dlss: FG: interpolator has no sizes (scaler %s) - using the MetalFX path", d.scaler ? "attached but without sizes" : "none");
+        return nil;
+    }
+    nvlog("dlss: MetalFX frame interpolator %lux%lu (depth/motion %lux%lu%s) served by DLSS Frame Generation", (unsigned long)s[2],
+          (unsigned long)s[3], (unsigned long)s[0], (unsigned long)s[1], fromScaler ? ", sizes from the temporal scaler" : "");
     return [[NVMTLDLSSFrameInterpolator alloc] initWithDescriptor:d];
 }
 #pragma clang diagnostic pop
