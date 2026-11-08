@@ -329,6 +329,10 @@ typedef struct { nvk_image img; uint32_t key[12]; NSUInteger off, len; } nvmtl_p
 @interface NVMTLTexture () { @public BOOL _clientWritten; } @end
 @interface NVMTLCommandBuffer () { @public NSDictionary *_busyMarks; } @end
 @interface NVMTLHeap () { @public nvmtl_park_t *_pk; uint32_t _npk; } @end
+// Lazy backing: _lzc = slot size (0 = the heap owns one _hm of its full size). _lzo[slot] = 1 + index into _lzm/_lzb (0 = no
+// memory yet); one backing may cover several slots (a resource larger than a slot gets one backing for all of them).
+@interface NVMTLHeap () { @public size_t _lzc; uint32_t _lzn, _lzcap, _lzslots; nvk_heap *_lzm; size_t *_lzb; uint16_t *_lzo;
+                         os_unfair_lock _lzl; } @end
 @interface NVMTLBuffer () { @public nvmtl_park_t *_bpk; uint32_t _nbpk; os_unfair_lock _bpl; } @end
 @interface NVMTLTexture () { @public BOOL _bparkable; } @end
 static void nvmtl_heap_park(NVMTLHeap *h, nvk_image *img, const uint32_t *key, NSUInteger off, NSUInteger len);

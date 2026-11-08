@@ -30,6 +30,7 @@
 void nvlog(const char *fmt, ...);
 void nvlog_every(const char *fmt, ...);
 void nvmtl_heaps_dump(FILE *f, void (*emit)(void *, const char *));   /* NVMTLObjects.m */
+void nvmtl_heap_lazy_census(const char *why);                          /* NVMTLObjects.m */
 static void dlss_heap_line(void *c, const char *l) { (void)c; nvlog_every("dlss: at FG out-of-memory, %s", l); }
 
 /* The core and the runtime it loads execute on the calling thread. Their C library shims may reset the floating-point
@@ -586,7 +587,7 @@ static nvmtl_dlss_fg_feature *fg_create_impl(VkCommandBuffer cmd, const nvmtl_dl
         // Out of device memory (0xBAD0000D): list every app heap once - size, used, free ranges - so the run shows
         // whether the heaps the game asked for are full or mostly empty when the card ran out.
         static int heaps_listed;
-        if (rc == 0xBAD0000Du && !heaps_listed++) nvmtl_heaps_dump(NULL, dlss_heap_line);
+        if (rc == 0xBAD0000Du && !heaps_listed++) { nvmtl_heaps_dump(NULL, dlss_heap_line); nvmtl_heap_lazy_census("at FG out-of-memory"); }
         goto bad;
     }
     g_alloc(&ev);
