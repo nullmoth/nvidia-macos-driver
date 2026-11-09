@@ -322,6 +322,14 @@ public:
     static NvrmDevTab<NVAccel> gAccelTab;  // every accelerator (more than the primary only with nvmultigpu=1)
     static NvrmStartGate gAccelGate;
     static NvrmWaitQueue<IOService> gAccelWait;   // providers refused by the gate, offered again when a start finishes
+    // nvmultigpu=1: tell Metal clients which accelerator is the primary (NVAccelPrimary); the plugin binds a process to one card
+    static void publishPrimary() {
+        if (!nvaccelMultiGpu()) return;
+        for (unsigned i = 0; i < gAccelTab.count(); i++) {
+            NVAccel *a = gAccelTab.at(i);
+            a->setProperty("NVAccelPrimary", a == gAccelTab.primary() ? kOSBooleanTrue : kOSBooleanFalse);
+        }
+    }
     static void reofferNext() { if (IOService *p = gAccelWait.next()) { p->registerService(kIOServiceAsynchronous); p->release(); } }
     static unsigned count() { return gAccelTab.count(); }
     static NVAccel *at(unsigned i) { return gAccelTab.at(i); }
@@ -820,6 +828,7 @@ public:
             registerService(); ALOG("registerService() called — Metal can now find MetalPluginName=%s", "NVMTLDriver");
             gAccelTab.add(this, scope.multi, provider->getProperty("nullmoth-auto-primary") == kOSBooleanTrue);
             gAccel = gAccelTab.primary(); gEnableAccel = &NVAccel::enableFromHook;
+            publishPrimary();
             scope.started = true;
             for (unsigned i = 0; i < NV_CARRIERS; i++) {
                 IOAccelNVRMCarrier *c = OSTypeAlloc(IOAccelNVRMCarrier);
@@ -1066,6 +1075,7 @@ public:
         stopUtilization();
         gAccelTab.remove(this, nvaccelMultiGpu());   // a no-op without nvmultigpu=1
         gAccel = gAccelTab.primary();
+        publishPrimary();
         IOGraphicsAccelerator2::stop(provider);
     }
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) APPLE_KEXT_OVERRIDE;
