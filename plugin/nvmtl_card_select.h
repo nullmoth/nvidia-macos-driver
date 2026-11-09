@@ -48,4 +48,22 @@ static inline int nvmtl_card_accept(int multi, int wanted, int primary_prop, int
     if (primary_prop >= 0) return primary_prop == 1;
     return ordinal == 0;                                   /* kernel did not say: the first one, as before */
 }
+
+/* Several vendors (an NVIDIA card with an AMD or Intel GPU that NMXGPU drives). The ordinal counts every Metal accelerator of
+   either class, in registry-id order, so NVMTL_CARD indexes every card in the machine in one order.
+   Position of `mine` among ids[0..n) when sorted ascending; 0 if it is not in the list (as the NVIDIA-only code did). */
+static inline int nvmtl_card_ordinal(const unsigned long long *ids, unsigned n, unsigned long long mine)
+{
+    int below = 0, found = 0;
+    for (unsigned i = 0; i < n; i++) { if (ids[i] < mine) below++; else if (ids[i] == mine) found = 1; }
+    return found ? below : 0;
+}
+
+/* NVAccelPrimary is an NVIDIA property. An NMXAccel publishes none, so with no assignment it is the process's device only when
+   the machine has no NVIDIA accelerator: an AMD or Intel GPU never takes the primary away from an NVIDIA card. nvidia_count is
+   the number of NVAccel services; the result feeds nvmtl_card_accept as primary_prop. */
+static inline int nvmtl_card_nmx_primary(int nvidia_count)
+{
+    return nvidia_count > 0 ? 0 : -1;
+}
 #endif
