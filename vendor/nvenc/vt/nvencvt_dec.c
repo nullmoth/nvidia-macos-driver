@@ -911,13 +911,18 @@ static OSStatus d_finishDelayed(VTVideoDecoderRef o)
     return noErr;
 }
 
-static CMBaseClass gDBase = { .version = 1, .derivedStorageSize = sizeof(void *), .invalidate = b_invalidate, .finalize = b_finalize,
-                              .copyDebugDescription = b_desc, .copyProperty = b_copyProperty, .setProperty = b_setProperty };
-static const DecoderClass gDec = { .version = 1, .startSession = d_startSession, .decodeFrame = d_decodeFrame,
+// CMBaseClass is packed to 4 bytes (CoreMedia's layout), so its function pointers sit at offsets 12 + 8n. Held 4 bytes
+// into an 8-byte-aligned wrapper they fall on 8-byte boundaries, which lets the linker bind them with chained fixups;
+// the class itself is unchanged.
+static struct { uint32_t pad; CMBaseClass c; } __attribute__((aligned(8))) gDBaseHeld = { 0, { .version = 1, .derivedStorageSize = sizeof(void *), .invalidate = b_invalidate, .finalize = b_finalize,
+                              .copyDebugDescription = b_desc, .copyProperty = b_copyProperty, .setProperty = b_setProperty } };
+// packed to 4 bytes like CMBaseClass above: the same 8-byte-aligned wrapper puts its function pointers (offsets 4 + 8n) on
+// 8-byte boundaries; the table itself is unchanged.
+static const struct { uint32_t pad; DecoderClass c; } __attribute__((aligned(8))) gDecHeld = { 0, { .version = 1, .startSession = d_startSession, .decodeFrame = d_decodeFrame,
                                    .copySupportedPropertyDictionary = d_copySupported, .setProperties = d_setProperties,
                                    .copySerializableProperties = d_copySerializable, .canAcceptFormatDescription = d_canAccept,
-                                   .finishDelayedFrames = d_finishDelayed };
-static const DecoderVTable gDVT = { .base = { NULL, &gDBase }, .decoderClass = &gDec };
+                                   .finishDelayedFrames = d_finishDelayed } };
+static const DecoderVTable gDVT = { .base = { NULL, &gDBaseHeld.c }, .decoderClass = &gDecHeld.c };
 
 __attribute__((visibility("default"))) OSStatus NVDecVT_CreateInstance(FourCharCode codec, CFAllocatorRef al, VTVideoDecoderRef *out)
 {
