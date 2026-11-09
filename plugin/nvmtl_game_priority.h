@@ -54,4 +54,60 @@ static inline void nvmtl_game_priority_apply(const struct nvmtl_game_priority *p
     }
 }
 
+
+/* ---- the other clients while a game is active ------------------------------------------------------------------------------
+ * The plugin runs inside every Metal client, so each client can lower its OWN channel group while a game is in the foreground.
+ * The policy helper (the Mac app's nullmoth-gamemode-policy.py) publishes "a game is active" as the state of the notify(3) key
+ * com.nullmoth.gamemode.active (1 active, 0 not) and in the root-owned file /Library/NullMoth/gamemode-active. This decides what
+ * a client that is not the game does with it. It is lowered only when it is a plain application: never a system process (the
+ * window server above all), never anything under /System or /usr, and only with NVMTL_GAME_LOWER_BACKGROUND=1.
+ *
+ *   NVMTL_GAME_BACKGROUND_TIMESLICE_US=<n>   the timeslice a lowered client gets (default 1000)
+ *
+ * The knobs are read when the client's queue context is made, so a client already running keeps what it has until it makes a
+ * new device; a client started while the game is active is lowered from the start. */
+#define NVMTL_BG_DEFAULT_TIMESLICE_US 1000UL
+
+struct nvmtl_bg_priority { int apply; int interleave_low; unsigned long timeslice_us; };
+
+static inline int nvmtl_bg_path_protected(const char *exe_path)
+{
+    if (!exe_path || !*exe_path) return 1;                 /* unknown: do not touch */
+    static const char *const prefix[] = { "/System/", "/usr/", "/sbin/", "/bin/", "/Library/Apple/", "/private/var/db/", 0 };
+    for (int i = 0; prefix[i]; i++) if (!strncmp(exe_path, prefix[i], strlen(prefix[i]))) return 1;
+    const char *base = strrchr(exe_path, '/');
+    base = base ? base + 1 : exe_path;
+    static const char *const name[] = { "WindowServer", "loginwindow", "Dock", "SystemUIServer", "ControlCenter", "coreaudiod",
+                                        "launchd", "kernel_task", "universalaccessd", "NVMTLWindowServerProbe", 0 };
+    for (int i = 0; name[i]; i++) if (!strcmp(base, name[i])) return 1;
+    return 0;
+}
+
+static inline struct nvmtl_bg_priority nvmtl_bg_priority_decide(const char *sw, int process_is_game, int game_active,
+                                                                const char *exe_path, const char *timeslice_env)
+{
+    struct nvmtl_bg_priority r = { 0, 0, 0 };
+    if (!sw || strcmp(sw, "1") || process_is_game || !game_active || nvmtl_bg_path_protected(exe_path)) return r;
+    r.apply = 1;
+    r.interleave_low = 1;
+    r.timeslice_us = NVMTL_BG_DEFAULT_TIMESLICE_US;
+    if (timeslice_env && *timeslice_env) {
+        char *end = 0;
+        unsigned long v = strtoul(timeslice_env, &end, 10);
+        if (end && !*end && v > 0 && v <= 1000000UL) r.timeslice_us = v;
+    }
+    return r;
+}
+
+static inline void nvmtl_bg_priority_apply(const struct nvmtl_bg_priority *p)
+{
+    if (!p->apply) return;
+    if (p->interleave_low) setenv("NVRM_TSG_Q0_HIGH", "0", 0);   /* 0 = interleave LOW in the NVK knob */
+    if (p->timeslice_us) {
+        char b[24];
+        snprintf(b, sizeof b, "%lu", p->timeslice_us);
+        setenv("NVRM_TSG_TIMESLICE_US", b, 0);
+    }
+}
+
 #endif

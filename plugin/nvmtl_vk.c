@@ -1403,6 +1403,11 @@ static int nvmtl_vk_initialize(void)
     { extern int nvmtl_process_is_game(void);   // Game Mode on a PC: raise this game process's GPU channel group (NVMTL_GAME_GPU_PRIORITY=1)
       struct nvmtl_game_priority gp = nvmtl_game_priority_decide(getenv("NVMTL_GAME_GPU_PRIORITY"), getenv("NVMTL_GAME_GPU_PRIORITY") ? nvmtl_process_is_game() : 0, getenv("NVMTL_GAME_TIMESLICE_US"));
       nvmtl_game_priority_apply(&gp);
+      { extern int nvmtl_game_active(void); extern const char *nvmtl_process_exe_path(void);
+        struct nvmtl_bg_priority bg = nvmtl_bg_priority_decide(getenv("NVMTL_GAME_LOWER_BACKGROUND"), getenv("NVMTL_GAME_GPU_PRIORITY") && nvmtl_process_is_game(),
+                                                               getenv("NVMTL_GAME_LOWER_BACKGROUND") ? nvmtl_game_active() : 0, nvmtl_process_exe_path(), getenv("NVMTL_GAME_BACKGROUND_TIMESLICE_US"));
+        nvmtl_bg_priority_apply(&bg);
+        if (bg.apply) nvlog("vk: a game is active: this client lowers its own channel group (interleave LOW, timeslice %lu us)", bg.timeslice_us); }
       if (gp.apply) nvlog("vk: Game Mode GPU priority: interleave HIGH, timeslice %lu us for this process", gp.timeslice_us); }
     VKCK(pvkCreateDevice(g_pdev, &dci, NULL, &g_dev), "vkCreateDevice");
     DEVICE_FNS(LOAD_D)
