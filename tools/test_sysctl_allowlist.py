@@ -22,7 +22,11 @@ WRITABLE = {"nvaccel_igpu", "nvaccel_iop", "nvaccelfb", "nvaccel_vm_sticky", "nv
             "nvaccel_iop_async", "nvaccel_crc_head", "nvaccel_svdiag", "nvrmfb_agdc", "nvrmfb_vram_display_aware",
             "nvrmfb_vramtest", "nvrmfb_vramtest_mode", "nvrmfb_flip_latch", "nvrmfb_flip_lean", "nvrmfb_flip_interval",
             # Reviewed 2.7.2: the display-link switch the boot guard manages, and the Intel panel's test attach. Both root-only.
-            "nvrmfb_agdc_k5", "nmintelfb_attach"}
+            "nvrmfb_agdc_k5", "nmintelfb_attach",
+            # Reviewed 2.9: the high-refresh latch switch (an on/off integer) and the output colour controls. The colour
+            # handler rejects any value outside the enumerated bpc / format / range sets and -100..100 for vibrance
+            # (EINVAL), and all five are root-only.
+            "nvrmfb_flip_latch_auto", "nvrmfb_color_bpc", "nvrmfb_color_format", "nvrmfb_color_range", "nvrmfb_color_vibrance"}
 # Read-only diagnostics that print physical addresses or memory: registered only with boot-arg nvrmdiag=1, root only.
 PHYSICAL = {"nvrm_watchpage", "nvrm_physmap", "nvrm_pvsentinel", "nvrm_winwhy", "nvrm_pvchain", "nvrm_winraw"}
 DECL = re.compile(r"SYSCTL_(?:INT|UINT|QUAD|PROC|STRING|OPAQUE|LONG|ULONG)\s*\(\s*_debug\s*,\s*OID_AUTO\s*,\s*(\w+)\s*,(.*?)\)\s*;", re.S)
