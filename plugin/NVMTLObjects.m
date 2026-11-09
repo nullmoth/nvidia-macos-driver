@@ -4192,9 +4192,15 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     nvmtl_hz_bind_storage(&_cb->_c, [nt nvi], nvmtl_hz_untracked_tex(nt), NVMTL_SET_FRAGMENT, (uint32_t)i, nt->_stex ? [nt nvview] : NULL);
     if (!nt->_stex && (nt.usage & MTLTextureUsageShaderWrite)) {
         // a fragment shader writing a texture that has no storage view writes the dummy: say which texture, once per shape
-        static NSMutableSet *seen; static os_unfair_lock sl = OS_UNFAIR_LOCK_INIT;
-        NSString *k = [NSString stringWithFormat:@"%lu/%lu/%lu", (unsigned long)nt.pixelFormat, (unsigned long)nt.usage, (unsigned long)nt.textureType];
-        os_unfair_lock_lock(&sl); if (!seen) seen = [NSMutableSet new]; BOOL fresh = ![seen containsObject:k]; if (fresh) [seen addObject:k]; os_unfair_lock_unlock(&sl);
+        // OpenGL rebinds every texture before each draw, and its textures carry ShaderWrite: this runs thousands of times
+        // a frame, so the shape is a packed integer in a small table, with no string or object made per bind.
+        static uint64_t seen[64]; static int nseen; static os_unfair_lock sl = OS_UNFAIR_LOCK_INIT;
+        const uint64_t k = ((uint64_t)nt.pixelFormat << 40) ^ ((uint64_t)nt.usage << 8) ^ (uint64_t)nt.textureType ^ 0x8000000000000000ull;
+        BOOL fresh = YES;
+        os_unfair_lock_lock(&sl);
+        for (int q = 0; q < nseen; q++) if (seen[q] == k) { fresh = NO; break; }
+        if (fresh && nseen < 64) seen[nseen++] = k; else if (fresh) fresh = NO;   // a full table says nothing more
+        os_unfair_lock_unlock(&sl);
         if (fresh) nvlog("setFragmentTexture: texture %lu is ShaderWrite but has no storage view (pixelFormat %lu, usage 0x%lx, type %lu, image storage %u) - a fragment write to it goes to the dummy",
                          (unsigned long)i, (unsigned long)nt.pixelFormat, (unsigned long)nt.usage, (unsigned long)nt.textureType, [nt nvi]->storage);
     }
