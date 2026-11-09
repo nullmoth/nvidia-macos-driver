@@ -28,13 +28,18 @@ def classify(r):
     idset = {x for s in ids for x in s.split(',')}
     if asus_guid or ids:
         if '0x00050021' in idset and asus_guid: out['covered'].append('asus-wmi')
-        elif '0x00050021' not in idset: out['refused'].append('asus-wmi: no keyboard backlight id 0x00050021 (only %s)' % (','.join(sorted(idset)) or 'none'))
+        elif '0x00050021' not in idset: out['refused'].append('asus-wmi: no keyboard backlight id 0x00050021 (only %s; 0x00050011 is ASUS_WMI_DEVID_BACKLIGHT, the display, in asus-wmi.h)' % (','.join(sorted(idset)) or 'none'))
         else: out['refused'].append('asus-wmi: WMNB ids but no ASUS management GUID')
     if 'Lenovo_VPC2004' in v:
         if 'Lenovo_KBLC' in v: out['covered'].append('ideapad-kblc')
         elif 'Lenovo_HALS' in v and 'Lenovo_SALS' in v: out['covered'].append('ideapad-plain')
     if 'Dell SMBIOS call' in g:
         (out['covered'] if DELL_DESC in g.upper() else out['refused']).append('dell-smbios' if DELL_DESC in g.upper() else 'dell-smbios: descriptor GUID %s not in the family' % DELL_DESC)
+    # ThinkPad: the census has no MLCG/MLCS column, but every ThinkPad row whose keyboard method is KBLS(2) on MFFD/VOL3/HIDD has
+    # it: MLCG and MLCS are wrappers over that KBLS (tools/fixtures/kbl_aml/thinkpad_kbls.dsl, read from the real DSDT of each of the
+    # 11 families, all with MLCG, MLCS and LEN0068). So the ThinkPad backend drives KBLS through the method it already calls.
+    if r['family'].startswith('ThinkPad') and re.search(r'(MFFD|VOL3|HIDD)\.KBLS\(2\)', k):
+        out['covered'].append('thinkpad (MLCG/MLCS over KBLS, AML-verified)')
     if 'MSI platform WMI' in g:
         if re.search(r'EC\.KBBL@', e): out['covered'].append('msi-ec (upper bound: firmware string unchecked)')
         else: out['refused'].append('msi-ec: no EC KBBL field in the census')
@@ -53,6 +58,11 @@ def main(path, show):
         for m in method_names(r):
             name = m.split('(')[0].split('.')[-1]
             handled = (name == 'KBLC' and 'ideapad-kblc' in ' '.join(c['covered']))
+            handled = handled or (name == 'SKBL' and 'ideapad-plain' in ' '.join(c['covered']))   # Yoga 14sARE: SMI helper under HALS/SALS
+            handled = handled or (name == 'KBLS' and any(x.startswith('thinkpad') for x in c['covered']))
+            known_other = {'EC0.KBLS(0)': 'ASUS: read-only getter of the keyboard RGB state (WMI status for id 0x0010005B), no setter',
+                           '.SKBL(1)': 'HONOR: stub that answers STAT=1 and does nothing', 'VPC0.SKBL(1)': 'Lenovo Yoga: SMI helper under HALS/SALS, which the plain backend drives'}
+            if not handled and m in known_other: m = '%s  [read from the real AML: %s]' % (m, known_other[m])
             if not handled: unhandled[m].append('%s / %s' % (r['vendor'], r['family']))
     print('families in census:', len(rows))
     for b, f in sorted(cover.items()): print('COVERED   %-14s %3d families' % (b, len(f)))
