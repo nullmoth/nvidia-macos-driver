@@ -1542,6 +1542,14 @@ static uint64_t nvmtl_plane_cookie(IOSurfaceRef s, BOOL create)
     return v;
 }
 static unsigned long long g_surfin_plane_skip;
+// The cookie that lets wrappers of one surface share an import of its pages (NVMTL_HOST_PAGES_SHARE=1); 0 when sharing is off,
+// so the default path never touches the surface's attachments.
+static uint64_t nvmtl_host_pages_cookie(IOSurfaceRef s)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_HOST_PAGES_SHARE"); on = e && e[0] == '1'; }
+    return on ? nvmtl_plane_cookie(s, YES) : 0;
+}
 - (void)nvmtlSurfaceIn {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return;
@@ -1576,7 +1584,9 @@ static unsigned long long g_surfin_plane_skip;
     int rc = -1;
     if (base && row && nvmtl_surfin_import()) {
         const size_t off = (size_t)((uint8_t *)base - (uint8_t *)IOSurfaceGetBaseAddress(r->_surf));
+        nvmtl_vk_host_pages_key((uint32_t)IOSurfaceGetID(r->_surf), nvmtl_host_pages_cookie(r->_surf));
         rc = nvmtl_vk_image_write_host(r->_q, &r->_i, base, row, IOSurfaceGetAllocSize(r->_surf) - off, &r->_hostPages);
+        nvmtl_vk_host_pages_key(0, 0);
     }
     if (rc) rc = (base && row) ? nvmtl_vk_image_write(r->_q, &r->_i, base, row) : -1;
     if (!rc && r->_i.bpp == 4) { char tag[24]; snprintf(tag, sizeof tag, "in%u-", (unsigned)IOSurfaceGetID(r->_surf)); nvmtl_frame_dump(tag, base, row, r->_i.w, r->_i.h); }
@@ -1643,7 +1653,9 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
     int rc = -1;
     if (base && row && nvmtl_surfout_import()) {
         const size_t off = (size_t)((uint8_t *)base - (uint8_t *)IOSurfaceGetBaseAddress(r->_surf));
+        nvmtl_vk_host_pages_key((uint32_t)IOSurfaceGetID(r->_surf), nvmtl_host_pages_cookie(r->_surf));
         rc = nvmtl_vk_image_read_host(r->_q, &r->_i, base, row, IOSurfaceGetAllocSize(r->_surf) - off, &r->_hostPages);
+        nvmtl_vk_host_pages_key(0, 0);
     }
     if (rc) rc = (base && row) ? nvmtl_vk_image_read(r->_q, &r->_i, base, row) : -1;
     if (!rc && r->_i.bpp == 4) { char tag[24]; snprintf(tag, sizeof tag, "out%u-", (unsigned)IOSurfaceGetID(r->_surf)); nvmtl_frame_dump(tag, base, row, r->_i.w, r->_i.h); }
