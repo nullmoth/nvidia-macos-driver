@@ -10,7 +10,7 @@ mkdir -p "$OUT" || exit 1
 
 SDK=$(xcrun --show-sdk-path)
 KHDR="$SDK/System/Library/Frameworks/Kernel.framework/Headers"
-CFLAGS=( -arch x86_64 -fapple-kext -mkernel -nostdinc -I"$KHDR" -I"$SRC"
+CFLAGS=( -arch x86_64 -fapple-kext -mkernel -nostdinc -I"$KHDR" -I"$SRC" -I"$SRC/../NVRM/accel"
   -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT
   -mmacosx-version-min=15.0 -g0
   -ffile-prefix-map="$SRC"=driver -ffile-prefix-map="$HOME"=/build

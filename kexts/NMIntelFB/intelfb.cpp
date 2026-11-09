@@ -17,6 +17,8 @@
 #include <IOKit/ndrvsupport/IOMacOSVideo.h>
 #include <libkern/OSAtomic.h>
 #include "nvrm_vram_abi.h"
+#include "nm_hybrid.h"
+#include "nm_hybrid_abi.h"
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
@@ -64,6 +66,11 @@ constexpr uint32_t VSYNC(int t)        { return 0x60014u + (uint32_t)t * 0x1000u
 // one count per vblank (Linux PIPE_FRMCOUNT_G4X, 0x70040 + pipe): counting it is how the real refresh is known without
 // reading the PLL and M/N values back
 constexpr uint32_t FRMCOUNT(int p)     { return 0x70040u + (uint32_t)p * 0x1000u; }
+// the surface the plane is scanning out right now (Linux PLANE_SURFLIVE, display 9+); PLANE_SURF is the one being armed
+constexpr uint32_t PLANE_SURFLIVE(int p) { return 0x701ACu + (uint32_t)p * 0x1000u; }
+// graphics translation table invalidate after entries change (Linux GFX_FLSH_CNTL_GEN6, enable bit 0)
+constexpr uint32_t kGfxFlshCntl = 0x101008u;
+uint64_t ggttRead(void *ctx, uint64_t idx) { return ((volatile uint64_t *)ctx)[idx]; }
 
 // PLANE_CTL (display 11+): enable bit 31, format bits 27:23 (8 = XRGB 8:8:8:8, Linux PLANE_CTL_FORMAT_XRGB_8888 on
 // ICL+), tiling bits 12:10 (0 = linear)
@@ -161,6 +168,21 @@ private:
     uint64_t fPclk = 0;
     int fPipe = -1;
     uint8_t fVer = 0;
+    uint32_t fStrideReg = 0;                     // PLANE_STRIDE as the firmware left it, restored when going back to the boot surface
+
+    // hybrid path, level 2 (nm_hybrid.h): the composited surface's pages are mapped into unused graphics-table entries and
+    // the plane is flipped to them. Level 1 needs nothing here: NVAccel copies into fSurfMap.
+    int fHyLevel = 0;
+    bool fHyReady = false, fHyBad = false;
+    volatile uint64_t *fGsm = nullptr;
+    uint64_t fGsmEntries = 0;
+    struct nmh_ring fRing;
+    uint32_t fHyPitch = 0, fHyHeight = 0, fHyFlips = 0;
+    bool hybridSetup(uint32_t pitch, uint32_t height);
+    bool hybridWaitLive(int slot);
+    void hybridWriteSurf(uint32_t surf, uint32_t strideReg);
+    void hybridHome();
+    IOReturn hybridImport(NMHybridReq *q);
 
     uint32_t rd(uint32_t off) const { return *(volatile uint32_t *)(fRegs + off); }
     void wr(uint32_t off, uint32_t v) const { *(volatile uint32_t *)(fRegs + off) = v; }
@@ -285,6 +307,10 @@ IOService *NMIntelFB::probe(IOService *provider, SInt32 *score)
     IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
     if (!pci) return nullptr;
     if (PE_parse_boot_argn("-nmintelfboff", nullptr, 0)) { IFBLOG("off by boot-arg"); return nullptr; }
+    // One switch, default off: this framebuffer takes a laptop's panel from the firmware only when nmhybrid is 1 or 2
+    { int lv = 0; const int present = PE_parse_boot_argn("nmhybrid", &lv, sizeof lv);
+      fHyLevel = nmh_level_parse(present, lv);
+      if (!fHyLevel) return nullptr; }
     uint16_t dev = pci->configRead16(kIOPCIConfigDeviceID);
     fVer = displayVersion(dev);
     if (!fVer) return nullptr;   // an Intel GPU this driver does not know (older ones have Apple's own driver)
@@ -301,6 +327,7 @@ bool NMIntelFB::adoptFirmwareMode()
         if (fmtOf(ctl) != 8) { IFBLOG("pipe %c: plane format %u is not XRGB8888 - leaving the firmware screen", 'A' + p, fmtOf(ctl)); return false; }
         if (tileOf(ctl) != 0) { IFBLOG("pipe %c: plane is tiled (%u) - leaving the firmware screen", 'A' + p, tileOf(ctl)); return false; }
         uint32_t size = rd(PLANE_SIZE(p)), stride = rd(PLANE_STRIDE(p)) & 0x7FF;
+        fStrideReg = rd(PLANE_STRIDE(p));
         fWidth = (size & 0xFFFF) + 1; fHeight = ((size >> 16) & 0xFFFF) + 1;
         fRowBytes = stride * 64;                     // linear planes count the stride in 64-byte units
         fSurf = rd(PLANE_SURF(p)) & ~0xFFFu;         // GGTT offset of the surface, 4 KiB aligned
@@ -384,6 +411,9 @@ bool NMIntelFB::start(IOService *provider)
         setProperty("IOFBDependentID", 0x4E56524D00000001ull, 64);
         setProperty("IOFBDependentIndex", 4ull, 32);
     } else IFBLOG("the surface would not map write-combined: NVIDIA rendering stays off for this panel");
+    IFBLOG("hybrid: provider NMIntelFB %ux%u pitch %u display version %u level %d (CPU-mapped scanout, no VRAM)",
+           fWidth, fHeight, fRowBytes, fVer, fHyLevel);
+    setProperty("NMIntelFBHybridLevel", (unsigned long long)fHyLevel, 32);
     setProperty("NMIntelFBPipe", fPipe, 32);
     setProperty("NMIntelFBDisplayVersion", fVer, 32);
     setProperty("built-in", kOSBooleanTrue);   // the panel is the laptop's own (kConnectionFlags says so too)
@@ -396,6 +426,7 @@ bool NMIntelFB::start(IOService *provider)
 void NMIntelFB::stop(IOService *provider)
 {
     fStopping = true;
+    if (fHyReady && fRing.live != -1) hybridHome();
 #ifdef NMINTELFB_VIRTUAL
     if (gVirt == this) { sysctl_unregister_oid(&sysctl__debug_nmintelfb_sample); gVirt = nullptr; }
 #endif
@@ -545,11 +576,138 @@ IOReturn NMIntelFB::getAttributeForConnection(IOIndex idx, IOSelect attr, uintpt
     }
 }
 
+
+// ---- hybrid level 2: scan out the composited surface in place ----------------------------------------------------------
+// Layout and registers from the Linux i915 driver (MIT): display versions 12 and 13 keep the graphics table in the upper
+// half of BAR0 (one 64-bit entry per 4 KiB page, bit 0 present, bits 45:12 the page address), its size in GMCH_CTRL
+// (config 0x50, bits 7:6, in MiB as a power of two). Entries are written only inside a range that already reads as one
+// repeated value (the unused scratch or zero entries); the firmware's own surface and every other mapping are left alone.
+bool NMIntelFB::hybridSetup(uint32_t pitch, uint32_t height)
+{
+    if (fHyReady) return true;
+    if (fHyBad) return false;
+#define HYFAIL(...) do { fHyBad = true; IFBLOG("hybrid: import unavailable: " __VA_ARGS__); return false; } while (0)
+    if (!nmh_gen_ok(fVer)) HYFAIL("display version %u", fVer);
+    const uint64_t len = fMMIO ? fMMIO->getLength() : 0;
+    if (len < (16ull << 20)) HYFAIL("BAR0 is %llu MiB, the table is expected in the upper half of 16 MiB", (unsigned long long)(len >> 20));
+    const unsigned ggms = (fPCI->configRead16(0x50) >> 6) & 3;
+    const uint64_t gsmBytes = ggms ? ((uint64_t)1 << ggms) << 20 : 0;
+    if (!gsmBytes || gsmBytes > len / 2) HYFAIL("graphics table size field %u does not fit BAR0", ggms);
+    fGsm = (volatile uint64_t *)(fRegs + len / 2);
+    fGsmEntries = gsmBytes / 8;
+    const uint64_t slotPages = nmh_pages_for(pitch, height), need = slotPages * NMH_SLOTS;
+    const uint64_t top = fGsmEntries > 512 ? fGsmEntries - 512 : 0;      // keep clear of the top 2 MiB
+    const uint64_t fwLo = fSurf >> 12, fwHi = (((uint64_t)fSurf + (uint64_t)fRowBytes * fHeight) - 1) >> 12;
+    const int64_t first = nmh_find_free_run(ggttRead, (void *)fGsm, top, 65536, need, fwLo, fwHi);
+    if (first < 0) HYFAIL("no run of %llu unused entries in the top 256 MiB of %llu entries", (unsigned long long)need, (unsigned long long)fGsmEntries);
+    if ((uint64_t)(first + need) * NMH_PAGE > (1ull << 32)) HYFAIL("range ends past the 32-bit plane address");
+    nmh_ring_init(&fRing, (uint64_t)first * NMH_PAGE, slotPages * NMH_PAGE);
+    fHyPitch = pitch; fHyHeight = height; fHyReady = true;
+    IFBLOG("hybrid: import ring %d slots x %llu KiB at table offset 0x%llx (entries %lld..%lld of %llu)", NMH_SLOTS,
+           (unsigned long long)(slotPages * 4), (unsigned long long)fRing.base, (long long)first, (long long)(first + need - 1),
+           (unsigned long long)fGsmEntries);
+    return true;
+#undef HYFAIL
+}
+
+void NMIntelFB::hybridWriteSurf(uint32_t surf, uint32_t strideReg)
+{
+    wr(PLANE_STRIDE(fPipe), strideReg);
+    wr(PLANE_SURF(fPipe), surf);        // writing the surface register arms the update for the next vertical blank
+    (void)rd(PLANE_SURF(fPipe));
+}
+
+// polls the live register for up to 40 ms (about two frames at 60 Hz); the flip lands at the next vertical blank
+bool NMIntelFB::hybridWaitLive(int slot)
+{
+    for (int i = 0; i < 160; i++) {
+        const int rc = nmh_flip_poll(&fRing, rd(PLANE_SURFLIVE(fPipe)), fSurf, 160);
+        if (rc == 1) return true;
+        if (rc < 0) break;
+        IODelay(250);
+    }
+    IFBLOG("hybrid: flip to %s did not reach the screen in 40 ms", slot < 0 ? "the boot surface" : "an import slot");
+    nmh_flip_abandon(&fRing);
+    return false;
+}
+
+void NMIntelFB::hybridHome()
+{
+    if (!nmh_need_home(&fRing)) return;
+    if (fRing.pending != NMH_NONE) nmh_flip_abandon(&fRing);
+    fRing.pending = NMH_NONE;
+    if (nmh_flip_begin(&fRing, -1) != NMH_OK) return;
+    hybridWriteSurf(fSurf, fStrideReg);
+    if (hybridWaitLive(-1)) IFBLOG("hybrid: plane back on the boot surface");
+}
+
+IOReturn NMIntelFB::hybridImport(NMHybridReq *q)
+{
+    q->result = NMH_OK;
+#ifdef NMINTELFB_VIRTUAL
+    q->result = NMH_E_PROVIDER; return kIOReturnUnsupported;
+#else
+    if (q->op == NMH_OP_HOME) {       // always honoured: after a stuck flip the plane must still be brought back
+        if (fHyReady && fRegs) hybridHome();
+        return kIOReturnSuccess;
+    }
+    if (fHyLevel < NMH_IMPORT || !fRegs || fPipe < 0) { q->result = fHyLevel < NMH_IMPORT ? NMH_E_LEVEL : NMH_E_PROVIDER; return kIOReturnUnsupported; }
+    if (q->op == NMH_OP_QUERY) {
+        q->result = nmh_import_check(fHyLevel, fVer, q->format, q->width, q->height, q->pitch, fWidth, fHeight);
+        if (q->result != NMH_OK) return kIOReturnUnsupported;
+        if (!hybridSetup(q->pitch, q->height)) { q->result = NMH_E_NOSPACE; return kIOReturnUnsupported; }
+        if (nmh_pages_for(q->pitch, q->height) * NMH_PAGE != fRing.slot_bytes) { q->result = NMH_E_SIZE; return kIOReturnUnsupported; }
+        int need = 0; uint32_t ev = 0;
+        q->slot = nmh_ring_acquire(&fRing, q->surfaceId, &need, &ev);
+        if (q->slot < 0) { q->result = NMH_E_BUSY; return kIOReturnBusy; }
+        q->needMap = need; q->evictedId = ev;
+        return kIOReturnSuccess;
+    }
+    if (!fHyReady || q->slot < 0 || q->slot >= NMH_SLOTS) { q->result = NMH_E_BUSY; return kIOReturnBadArgument; }
+    if (q->op == NMH_OP_MAP) {
+        const uint64_t want = fRing.slot_bytes / NMH_PAGE;
+        if (!q->pages || q->npages != want) { q->result = NMH_E_PAGES; nmh_ring_forget(&fRing, q->slot); return kIOReturnBadArgument; }
+        const uint64_t at = fRing.base / NMH_PAGE + (uint64_t)q->slot * want;
+        for (uint32_t i = 0; i < q->npages; i++)
+            if (!nmh_ggtt_pte(q->pages[i])) { q->result = NMH_E_RANGE; nmh_ring_forget(&fRing, q->slot); return kIOReturnBadArgument; }
+        for (uint32_t i = 0; i < q->npages; i++) fGsm[at + i] = nmh_ggtt_pte(q->pages[i]);
+        (void)fGsm[at + q->npages - 1];                  // the last write has landed before the table is invalidated
+        wr(kGfxFlshCntl, 1);
+        nmh_ring_mapped(&fRing, q->slot);
+        return kIOReturnSuccess;
+    }
+    if (q->op == NMH_OP_FLIP) {
+        if (!fRing.s[q->slot].mapped) { q->result = NMH_E_PAGES; return kIOReturnNotReady; }
+        if (nmh_flip_begin(&fRing, q->slot) != NMH_OK) { q->result = NMH_E_BUSY; return kIOReturnBusy; }
+        if (fRing.pending == NMH_NONE) return kIOReturnSuccess;             // already on screen
+        hybridWriteSurf((uint32_t)nmh_slot_surf(&fRing, q->slot), (fStrideReg & ~0x7FFu) | (q->pitch / 64));
+        if (!hybridWaitLive(q->slot)) {
+            // import is over for this boot: the copy path takes the panel back
+            fHyLevel = NMH_COPY;
+            hybridWriteSurf(fSurf, fStrideReg);
+            fRing.live = -3;
+            q->result = NMH_E_STUCK;
+            IFBLOG("hybrid: fallback to copy: %s", nmh_why_name(NMH_E_STUCK));
+            return kIOReturnTimeout;
+        }
+        if (++fHyFlips == 1) IFBLOG("hybrid: zero-copy flip #1 surface 0x%x slot %d live", q->surfaceId, q->slot);
+        return kIOReturnSuccess;
+    }
+    q->result = NMH_E_PROVIDER;
+    return kIOReturnBadArgument;
+#endif
+}
+
 // NVAccel's display pipe asks every head for its scan-out (NVRM_VRAM_FN_SCANOUT). This head answers with a CPU mapping and
 // no VRAM address: phys 0 keeps NVAccel from treating Intel memory as NVIDIA VRAM (it is not in the NVIDIA card's BAR1),
 // so frames reach the panel only through the copy into kva.
 IOReturn NMIntelFB::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4)
 {
+    if (fn && fn->isEqualTo(NMH_FN_IMPORT)) {
+        NMHybridReq *q = (NMHybridReq *)p1;
+        if (!q || q->version != NMH_ABI_VERSION) return kIOReturnBadArgument;
+        return hybridImport(q);
+    }
     if (fn && fn->isEqualTo(NVRM_VRAM_FN_SCANOUT)) {
         NVRMVramRequest *r = (NVRMVramRequest *)p1;
         if (!r || r->version != NVRM_VRAM_ABI_VERSION) return kIOReturnBadArgument;
