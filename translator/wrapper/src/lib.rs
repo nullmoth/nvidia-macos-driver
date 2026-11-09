@@ -1165,3 +1165,64 @@ pub unsafe extern "C" fn nvmtl_tile_rewrite(
         Err(e) => { if !err.is_null() && err_len > 0 { let n = e.len().min(err_len - 1); std::ptr::copy_nonoverlapping(e.as_ptr(), err.cast(), n); *err.add(n) = 0; } -1 }
     }
 }
+
+#[cfg(test)]
+mod tile_function_constant_tests {
+    use super::*;
+    use spirv_tools::val::Validator;
+
+    // a tile function with a function constant, in the sanitized shape (AIR from Apple's compiler, pointers opaque)
+    const TILE_FC: &str = r#"
+%"struct.metal::_imageblock_base" = type { ptr addrspace(4) }
+@_ZL5boost = internal unnamed_addr addrspace(2) global i8 undef, align 1
+@_Z5boost.MTL_FC_INIT_0_b = linkonce_odr hidden local_unnamed_addr addrspace(2) externally_initialized constant i8 undef, section "air.fc_initializer", align 1
+define void @tile_fc(%"struct.metal::_imageblock_base" %0, <2 x i16> noundef %1) local_unnamed_addr #0 {
+  %3 = tail call fast <4 x half> @air.load.implicit_imageblock.v4f16(i32 0, <2 x i16> %1, i32 0, i16 0) #4
+  %4 = load i8, ptr addrspace(2) @_ZL5boost, align 1, !range !27
+  %5 = icmp eq i8 %4, 0
+  %6 = extractelement <4 x half> %3, i64 0
+  %7 = fadd fast half %6, 0xH3800
+  %8 = insertelement <4 x half> %3, half %7, i64 0
+  %9 = select i1 %5, <4 x half> %3, <4 x half> %8
+  tail call void @air.store.implicit_imageblock.v4f16(<4 x half> %9, i32 0, <2 x i16> %1, i32 0, i16 0) #5
+  ret void
+}
+declare <4 x half> @air.load.implicit_imageblock.v4f16(i32, <2 x i16>, i32, i16) local_unnamed_addr #1
+declare void @air.store.implicit_imageblock.v4f16(<4 x half>, i32, <2 x i16>, i32, i16) local_unnamed_addr #2
+define internal void @_GLOBAL__sub_I_fc.metal() #3 section "air.static_init" {
+  %1 = load i8, ptr addrspace(2) @_Z5boost.MTL_FC_INIT_0_b, align 1, !range !27
+  store i8 %1, ptr addrspace(2) @_ZL5boost, align 1
+  ret void
+}
+!air.kernel = !{!9}
+!air.function_constants = !{!18}
+!9 = !{ptr @tile_fc, !10, !11}
+!10 = !{}
+!11 = !{!12, !14}
+!12 = !{i32 0, !"air.imageblock", !"implicit", !"air.struct_type_info", !13, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"imageblock<Px, layout_implicit>", !"air.arg_name", !"ib"}
+!13 = !{i32 0, i32 8, i32 0, !"half4", !"c", !"air.render_target", i32 0}
+!14 = !{i32 1, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"tid"}
+!18 = !{ptr addrspace(2) @_Z5boost.MTL_FC_INIT_0_b, !"bool", !"boost", i32 0}
+!27 = !{i8 0, i8 2}
+"#;
+
+    fn words(b: &[u8]) -> Vec<u32> { b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect() }
+    fn translate(text: &str, constant: Option<u8>) -> Result<Vec<u32>, String> {
+        let ll = std::ffi::CString::new(text).unwrap(); let stage = std::ffi::CString::new("kernel").unwrap();
+        let (idx, size, pay) = ([0u32], [1u32], [constant.unwrap_or(0)]); let payloads = [pay.as_ptr()];
+        let (mut out, mut len) = (std::ptr::null_mut(), 0usize); let mut err = [0i8; 2048];
+        let n = usize::from(constant.is_some());
+        let rc = nvmtl_translate_fc(ll.as_ptr(), stage.as_ptr(), idx.as_ptr(), size.as_ptr(), payloads.as_ptr(), n, &mut out, &mut len, err.as_mut_ptr(), err.len());
+        if rc != 0 { return Err(unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy().into_owned()); }
+        let w = words(unsafe { std::slice::from_raw_parts(out, len) }); nvmtl_translate_free(out, len); Ok(w)
+    }
+
+    #[test]
+    fn a_tile_function_with_a_function_constant_specializes_after_the_rewrite() {
+        let text = metal2vulkan::rewrite_tile_kernel(TILE_FC, [32, 32]).expect("the rewrite keeps the function constant machinery intact");
+        assert!(text.contains("@_Z5boost.MTL_FC_INIT_0_b") && text.contains("!air.function_constants"), "the constants survive the rewrite:\n{text}");
+        let (on, off) = (translate(&text, Some(1)).expect("boost = true"), translate(&text, Some(0)).expect("boost = false"));
+        for m in [&on, &off] { spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2)).validate(m, None).expect("valid"); }
+        assert_ne!(on, off, "the two constant values must give two different kernels");
+    }
+}
