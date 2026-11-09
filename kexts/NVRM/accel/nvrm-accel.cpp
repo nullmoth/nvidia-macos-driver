@@ -373,7 +373,28 @@ public:
         }
         return seen && none;
     }
+    // true when an accelerator that names a Metal plugin sits under this PCI device (two levels covers the accelerators
+    // macOS's own GPU drivers publish: the accelerator is a child of the PCI device or of its framebuffer controller)
+    static bool gpuHasMetalAccelerator(IORegistryEntry *pci) {
+        if (!pci) return false;
+        bool found = false;
+        if (OSIterator *it = pci->getChildIterator(gIOServicePlane)) {
+            while (!found) {
+                IORegistryEntry *c = OSDynamicCast(IORegistryEntry, it->getNextObject());
+                if (!c) break;
+                if (c->getProperty("MetalPluginName")) { found = true; break; }
+                if (OSIterator *it2 = c->getChildIterator(gIOServicePlane)) {
+                    while (IORegistryEntry *g = OSDynamicCast(IORegistryEntry, it2->getNextObject()))
+                        if (g->getProperty("MetalPluginName")) { found = true; break; }
+                    it2->release();
+                }
+            }
+            it->release();
+        }
+        return found;
+    }
     // the first framebuffer that is not one of this driver's heads; *other is set when it sits on another vendor's GPU
+    // that can give WindowServer a Metal device
     static void headlessDisplayOwner(char *owner, size_t len, bool *other) {
         *other = false;
         OSIterator *it = getMatchingServices(serviceMatching("IOFramebuffer"));
@@ -390,6 +411,14 @@ public:
             if (v && v->getLength() >= 2) {
                 const uint8_t *b = (const uint8_t *)v->getBytesNoCopy();
                 *other = (uint16_t)(b[0] | (b[1] << 8)) != 0x10de;
+            }
+            // Another GPU only takes the desktop if it can give WindowServer a Metal device. A framebuffer with no
+            // Metal accelerator on its GPU (IONDRVFramebuffer on an integrated GPU macOS 26 no longer accelerates) cannot:
+            // treating it as the desktop's GPU made the plugin refuse WindowServer, and with no Metal device anywhere
+            // WindowServer aborted at start ("Failed to create MetalDevice") every ten seconds, a black screen with a cursor.
+            if (*other && !gpuHasMetalAccelerator(e)) {
+                *other = false;
+                strlcat(owner, " without a Metal accelerator", len);
             }
             break;
         }
@@ -2239,8 +2268,13 @@ static int nvaccel_crc_sysctl SYSCTL_HANDLER_ARGS
     NVAccel *a = NVAccel::gAccel;
     IOService *fb = a ? a->fFB : nullptr;
     IOService *nub = fb ? fb->getProvider() : nullptr;
-    OSNumber *n = nub ? OSDynamicCast(OSNumber, nub->getProperty("nvkms-kapi")) : nullptr;
-    struct NvKmsKapiFunctionsTable *k = n ? (struct NvKmsKapiFunctionsTable *)(uintptr_t)n->unsigned64BitValue() : nullptr;
+    struct NVRMDisplayPointers displayPtrs = {};
+    displayPtrs.version = NVRM_DISPLAY_PTRS_ABI_VERSION;
+    if (nub) {
+        const OSSymbol *displayPtrsFn = OSSymbol::withCString(NVRM_DISPLAY_PTRS_FN);
+        if (displayPtrsFn) { nub->callPlatformFunction(displayPtrsFn, false, &displayPtrs, NULL, NULL, NULL); displayPtrsFn->release(); }
+    }
+    struct NvKmsKapiFunctionsTable *k = (struct NvKmsKapiFunctionsTable *)displayPtrs.kapi;
     struct NVRMRmHandles h; nvSVZero(&h, sizeof h);
     if (k && k->getCRC32 && gCrcHead >= 0 && gCrcHead < 8 && nvAccelRmHandles(&h) && h.kapiDevice) {
         struct NvKmsKapiCrcs c; nvSVZero(&c, sizeof c);
