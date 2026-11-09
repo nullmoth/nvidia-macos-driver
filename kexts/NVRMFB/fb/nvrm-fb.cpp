@@ -3625,6 +3625,10 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
     struct NvKmsKapiModeSetReplyConfig *rep = (struct NvKmsKapiModeSetReplyConfig *)IOMalloc(sizeof *rep);
     if (!cfg || !rep) { if (cfg) IOFree(cfg, sizeof *cfg); if (rep) IOFree(rep, sizeof *rep); fKms->destroySurface(fDev, ns); return kIOReturnNoMemory; }
     NvBool ok = NV_FALSE;
+    // Boot-arg nvfbkeepfront=1: carry the frame on screen through the mode set (see nvrmKeepFrontSurface).
+    UInt32 keepArg = 0; PE_parse_boot_argn("nvfbkeepfront", &keepArg, sizeof keepArg);
+    const bool keepFront = nvrmKeepFrontSurface(keepArg != 0, fFrontSurf != nullptr, fFrontSurf == fSurf, fW, fH, w, h, fCurTransform, transform);
+    struct NvKmsKapiSurface *shown = keepFront ? fFrontSurf : ns;
     for (int commit = 0; commit < 2; commit++) {
         nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
         cfg->headsMask = 1u << fHead;
@@ -3634,7 +3638,7 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
         hr->modeSetConfig.mode = m;
         hr->flags.activeChanged = hr->flags.displaysChanged = hr->flags.modeChanged = NV_TRUE;
         struct NvKmsKapiLayerRequestedConfig *lr = &hr->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX];
-        lr->config.surface = ns; lr->config.srcWidth = (NvU16)w; lr->config.srcHeight = (NvU16)h;
+        lr->config.surface = shown; lr->config.srcWidth = (NvU16)w; lr->config.srcHeight = (NvU16)h;
         lr->config.dstWidth = (NvU16)m.timings.hVisible; lr->config.dstHeight = (NvU16)m.timings.vVisible;
         lr->config.compParams.compMode = NVKMS_COMPOSITION_BLENDING_MODE_OPAQUE; lr->config.minPresentInterval = 1;
         lr->flags.surfaceChanged = lr->flags.srcXYChanged = lr->flags.srcWHChanged = lr->flags.dstXYChanged = lr->flags.dstWHChanged = NV_TRUE;
@@ -3658,7 +3662,7 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
     }
     struct NvKmsKapiSurface *old = fSurf;
     fScan30 = ten;
-    fSurf = ns; fFrontSurf = ns; fMode = m; fW = w; fH = h; fPitch = pitch;
+    fSurf = ns; fFrontSurf = shown; fMode = m; fW = w; fH = h; fPitch = pitch;
     fRasterW = m.timings.hVisible; fRasterH = m.timings.vVisible; fCurId = id; fModeSet = true; fModeSwitches++;
     fCurShownKnown = false;   // the mode set named no cursor
     publishFlipWait();
