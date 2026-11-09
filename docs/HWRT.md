@@ -122,7 +122,7 @@ Fifteen instructions, SM120, in this order. Offsets are in the 40..55 bit field 
 | 8..13 | `0x3d2` load | offsets 896, 960, 976, 800, 784, 768; destination pair at 16..23, second pair (first + 2) at 64..71; type field 81..83 = 7; scoreboard i written (bits 110..112); bit 74 set on the last load only |
 | 14 | `0x918` drain | waits on all six scoreboards |
 
-## Measurement procedure (studio session)
+## Measurement procedure (on a card)
 
 Everything below uses our own driver and our own data. Nothing is read from, decompiled from, or compared with a vendor
 binary. Run every GPU step through the bounded runner (own log directory, fault and WindowServer watch) and reboot after any
@@ -143,7 +143,7 @@ against the structure (it names the field the hardware read) and fix the layout 
 **P1 fit the measured rows.** Capture bottom-level structures for the cases `A`, `B`, `n02` .. `n64` and the nine `poke_*`
 cases (definitions in the header of `hwrt_layout_check.py`) with the vendor driver on the Linux boot, copy the dumps into
 one directory and run `python3 nvk/hwrt/hwrt_layout_check.py <dir>`. Every row R01..R13 must PASS; the rows already pass on
-the dumps recorded on 2026-10-01.
+the dumps recorded earlier.
 
 **P2 pin the node and leaf rows (R20..R22).** For each unpinned field, change the generation-1 rule for that field only,
 rebuild, and run the P4 ray set against our structure. The card is the oracle: a field is pinned when 32 of 32 rays agree
@@ -158,8 +158,7 @@ repeat P1/P2 for the instance record, the transform (3x4, row order), and the ma
 **P4 ray set.** The 32-ray corpus in `data/ray_cases_fresh.json` plus 1000 random rays per scene, queried through the
 `hwrt_probe` (`NVK_HWRT_QUERY=1`) and through `NVK_HWRT_QUERY` unset on the same structure build. Pass: distances equal to
 within 1 ulp, same instance, geometry and primitive, same facing; software and hardware agree on every ray that is not a
-bit-identical tie. Run the ray flags and non-opaque cases of `hwrt_model_test.c` as a Vulkan compute test with a glTF-free
-synthetic scene.
+bit-identical tie. The ray flags and non-opaque cases of `hwrt_model_test.c` are the cases to add to the probe next.
 
 **P5 tmin and tmax.** One triangle at a known distance; ask with tmin equal to, one step below and one step above that
 distance, and with tmax likewise. Record the four answers in R27. If tmin is exclusive the lowering's one-step advance is

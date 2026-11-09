@@ -2,7 +2,7 @@
  * line by line port of that shader), walks them with a plain stack traversal, and checks the walk against the model's hardware
  * primitive over random scenes. It proves the mapping (internal-node numbering, leaf offsets, child references, instance leaves,
  * masks, header words, relocation after a copy). It cannot say anything about the card: the node and leaf contents are our own
- * rule in layout generation 1, and docs/HWRT.md lists what the studio procedure has to measure before that changes.
+ * rule in layout generation 1, and docs/HWRT.md lists what the measurement procedure has to measure before that changes.
  *
  * cc -O2 -I. -o hwrt_ref hwrt_model.c hwrt_ref.c -lm && ./hwrt_ref */
 #include "hwrt_model.h"

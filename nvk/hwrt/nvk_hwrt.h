@@ -29,7 +29,7 @@
 
 /* The layout generation the encoder writes. 1 is the provisional layout: every field the hardware reads that has not been
  * measured yet is written by our own rule, and the lowering refuses to use a structure of a generation it does not know.
- * The studio procedure in docs/HWRT.md replaces a generation only after every row of its table passes. */
+ * The measurement procedure in docs/HWRT.md replaces a generation only after every row of its table passes. */
 #define NVK_HWRT_LAYOUT_PROVISIONAL 1u
 
 struct nvk_hwrt_appendix {
