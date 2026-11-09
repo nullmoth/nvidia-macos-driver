@@ -14,10 +14,19 @@
 #include <IOKit/IORegistryEntry.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOLib.h>
+#include <IOKit/IOKitKeys.h>         // kIONVRAMSyncNowPropertyKey
+#include <libkern/c++/OSBoolean.h>
 #include <libkern/c++/OSData.h>
 #include <pexpert/pexpert.h>
 
 #define NVRM_GUARD_VAR "nullmoth-nv-starts"
+// Writes to /options stay in the kernel's copy of NVRAM until macOS syncs it (normally at shutdown). A panic never gets
+// there, so a boot that panicked lost its increment: six panicking boots on one card all read "start 1" (#529) and the
+// guard never tripped. Every change of the counter asks for the sync at once (the same key the nvram tool uses).
+static inline void nvrm_guard_sync(IORegistryEntry *options)
+{
+    if (options) options->setProperty(kIONVRAMSyncNowPropertyKey, kOSBooleanTrue);
+}
 #define NVRM_GUARD_OK_VAR "nullmoth-nv-ok"
 #define NVRM_GUARD_LIMIT 2
 
@@ -62,6 +71,7 @@ static inline void nvrm_guard_count_start(void)
     if (!options) return;
     unsigned char n = (unsigned char)(nvrm_guard_starts(options) + 1);
     if (OSData *d = OSData::withBytes(&n, 1)) { gNvrmGuardCounted = options->setProperty(NVRM_GUARD_VAR, d); d->release(); }
+    nvrm_guard_sync(options);
     options->release();
     if (gNvrmGuardCounted)
         IOLog("NVRM: boot guard: start %u without a display so far (the driver turns itself off after %u)\n", n, NVRM_GUARD_LIMIT);
@@ -86,6 +96,7 @@ static inline void nvrm_guard_pause_for_wait(unsigned ms)
         unsigned char m = (unsigned char)(n - 1);
         if (m == 0) { options->removeProperty(NVRM_GUARD_VAR); written = nvrm_guard_starts(options) == 0; }
         else if (OSData *d = OSData::withBytes(&m, 1)) { written = options->setProperty(NVRM_GUARD_VAR, d); d->release(); }
+        nvrm_guard_sync(options);
     }
     options->release();
     if (!written) { gNvrmGuardPause = 2; return; }
@@ -105,6 +116,7 @@ static inline void nvrm_guard_resume_after_wait(bool guardCleared)
     unsigned char n = (unsigned char)(nvrm_guard_starts(options) + 1);
     bool written = false;
     if (OSData *d = OSData::withBytes(&n, 1)) { written = options->setProperty(NVRM_GUARD_VAR, d); d->release(); }
+    nvrm_guard_sync(options);
     options->release();
     if (written)
         IOLog("NVRM: boot guard: start %u counted again, arming the display (the driver turns itself off after %u)\n", n, NVRM_GUARD_LIMIT);
@@ -119,6 +131,7 @@ static inline void nvrm_guard_display_up(const char *why)
     IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
     if (!options) return;
     options->removeProperty(NVRM_GUARD_VAR);
+    nvrm_guard_sync(options);
     OSObject *ok = options->copyProperty(NVRM_GUARD_OK_VAR);
     if (ok) ok->release();
     else if (OSData *d = OSData::withBytes("1", 1)) { options->setProperty(NVRM_GUARD_OK_VAR, d); d->release(); }
