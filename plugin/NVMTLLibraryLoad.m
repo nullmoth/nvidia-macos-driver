@@ -90,6 +90,13 @@ static nvmtl_sampler_fn xlate_sampler;
 typedef void (*nvmtl_tglen_fn)(const uint32_t *, uint32_t);
 static nvmtl_tglen_fn xlate_tglen;
 static nvmtl_fc_fn xlate_fc;
+// One translation per function for every set of function constants (NVMTL_FC_SPEC=1): nvmtl_translate_spec makes a module
+// whose function constants are specialization constants, nvmtl_spec_apply fixes a set of values in it in one pass.
+typedef int (*nvmtl_spec_fn)(const char *, const char *, uint8_t **, size_t *, uint8_t **, size_t *, char *, size_t);
+typedef int (*nvmtl_spec_apply_fn)(const uint8_t *, size_t, const uint8_t *, size_t, const uint32_t *, const uint32_t *,
+                                   const uint8_t *const *, size_t, uint8_t **, size_t *, char *, size_t);
+static nvmtl_spec_fn xlate_spec;
+static nvmtl_spec_apply_fn xlate_spec_apply;
 static nvmtl_refl_fn xlate_refl;
 static nvmtl_refl_fc_fn xlate_refl_fc;
 static nvmtl_free_fn xlate_free;
@@ -152,6 +159,8 @@ static int nvmtl_xlate_ready(void) {
         xlate_tglen = (nvmtl_tglen_fn)dlsym(h, "nvmtl_translate_set_threadgroup_lengths");
         if (!xlate_tglen) nvlog("translate: no nvmtl_translate_set_threadgroup_lengths in this translator — dynamic threadgroup memory stays unsized (MPS convolutions read zeros)");
         xlate_fc = (nvmtl_fc_fn)dlsym(h, "nvmtl_translate_fc");
+        xlate_spec = (nvmtl_spec_fn)dlsym(h, "nvmtl_translate_spec");
+        xlate_spec_apply = (nvmtl_spec_apply_fn)dlsym(h, "nvmtl_spec_apply");
         xlate_vrefs = (nvmtl_vrefs_fn)dlsym(h, "nvmtl_visible_refs");
         xlate_link = (nvmtl_link_fn)dlsym(h, "nvmtl_link_visible");
         xlate_link_rt = (nvmtl_link_rt_fn)dlsym(h, "nvmtl_link_runtime");
@@ -1577,6 +1586,72 @@ static void nvmtl_fc_dump(const char *dd, NSString *ll, NSString *stage, const u
     }
     [meta writeToFile:[base stringByAppendingString:@".txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
+// NVMTL_FC_SPEC=1: function-constant variants are made from one specialization-constant module per function instead of one
+// translation each. OFF by default: the module keeps the branches the values decide, so a variant whose constants would
+// have folded the module small in a translation of its own comes out larger here; whether that costs more in the GPU
+// compiler than the translation saved has to be measured on a card.
+static BOOL nvmtl_fc_spec_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_FC_SPEC"); on = e && e[0] == '1';
+                  nvlog("function constants: one module per function with specialization constants %s (NVMTL_FC_SPEC=%s)", on ? "on" : "off", e ?: "unset"); }
+    return on;
+}
+// The specialization-constant module of an AIR function and the table of its constants, from memory, from the cache
+// folder, or translated now (once per function and translator build). Entry layout: 'SPC1', table bytes, table, module.
+static BOOL nvmtl_fc_spec_module(NSString *ll, NSString *stage, NSData **module, NSData **table, NSString **why)
+{
+    NVMTLAirDigest *ad = nvmtl_air_state(ll);
+    NSData *tail = [@"spec1" dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *path = ad ? nvmtl_spvcache_path_air(ad, tail, stage) : nil;
+    NSString *key = ad ? (path ?: nvmtl_spvcache_memo_key_air(ad, tail, stage)) : nil;
+    NSData *entry = key ? [nvmtl_memo() objectForKey:key] : nil;
+    if (!entry && path) entry = nvmtl_cache_read(path);
+    uint32_t magic = 0, tlen = 0;
+    if (entry.length >= 8) { memcpy(&magic, entry.bytes, 4); memcpy(&tlen, (const char *)entry.bytes + 4, 4); }
+    if (magic != 0x31435053u || (size_t)tlen % 20 != 0 || entry.length < 8 + (size_t)tlen + 20) {
+        static NSObject *lock; static dispatch_once_t once; dispatch_once(&once, ^{ lock = [NSObject new]; });
+        @synchronized (lock) {
+            entry = key ? [nvmtl_memo() objectForKey:key] : nil;   // another thread may have just made it
+            if (entry.length >= 8) { memcpy(&magic, entry.bytes, 4); memcpy(&tlen, (const char *)entry.bytes + 4, 4); }
+            if (!(entry.length >= 8 && magic == 0x31435053u)) {
+                uint8_t *o = NULL, *t = NULL; size_t on = 0, tn = 0; char e[512] = {0};
+                const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+                if (xlate_spec(ll.UTF8String, stage.UTF8String, &o, &on, &t, &tn, e, sizeof e) != 0) {
+                    if (why) *why = [NSString stringWithUTF8String:e[0] ? e : "no specialization-constant module"];
+                    return NO;
+                }
+                NSMutableData *made = [NSMutableData dataWithCapacity:8 + tn + on];
+                uint32_t hdr[2] = { 0x31435053u, (uint32_t)tn };
+                [made appendBytes:hdr length:8]; [made appendBytes:t length:tn]; [made appendBytes:o length:on];
+                if (xlate_free) { xlate_free(o, on); xlate_free(t, tn); }
+                entry = made; tlen = (uint32_t)tn;
+                nvlog("fc spec: made the one module for this function: %lu B, %lu constants, %.1f ms", (unsigned long)on, (unsigned long)(tn / 20),
+                      (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6);
+                if (path) { NSData *stored = [entry copy]; NSString *file = [path copy]; nvmtl_cache_io(^{ (void)nvmtl_cache_write(file, stored); }); }
+            }
+            if (key) [nvmtl_memo() setObject:entry forKey:key cost:entry.length];
+        }
+    }
+    if (entry.length < 8 + (size_t)tlen) { if (why) *why = @"specialization-constant cache entry is short"; return NO; }
+    *table = [entry subdataWithRange:NSMakeRange(8, tlen)];
+    *module = [entry subdataWithRange:NSMakeRange(8 + tlen, entry.length - 8 - tlen)];
+    return YES;
+}
+static NSData *nvmtl_fc_via_spec(NSString *ll, NSString *stage, const uint32_t *idx, const uint32_t *sizes,
+                                 const uint8_t *const *payloads, size_t n, NSString **why)
+{
+    NSData *module = nil, *table = nil;
+    if (!nvmtl_fc_spec_module(ll, stage, &module, &table, why)) return nil;
+    uint8_t *out = NULL; size_t out_len = 0; char e[512] = {0};
+    if (xlate_spec_apply(module.bytes, module.length, table.bytes, table.length, idx, sizes, payloads, n, &out, &out_len, e, sizeof e) != 0) {
+        if (why) *why = [NSString stringWithUTF8String:e[0] ? e : "applying the constants failed"];
+        return nil;
+    }
+    NSData *d = [NSData dataWithBytes:out length:out_len];
+    if (xlate_free) xlate_free(out, out_len);
+    return d;
+}
 NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *idx, const uint32_t *sizes,
                                 const uint8_t *const *payloads, size_t n, NSString **err)
 {
@@ -1586,6 +1661,12 @@ NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *i
     uint8_t *out = NULL; size_t out_len = 0; char e[512] = {0};
     // NVMTL_FC_DUMP_ALL=<dir>: keep every module before it is translated, including one whose translation never returns.
     nvmtl_fc_dump(getenv("NVMTL_FC_DUMP_ALL"), ll, stage, idx, sizes, payloads, n, NULL);
+    if (n > 0 && nvmtl_fc_spec_on() && xlate_spec && xlate_spec_apply) {
+        NSString *why = nil;
+        NSData *viaSpec = nvmtl_fc_via_spec(ll, stage, idx, sizes, payloads, n, &why);
+        if (viaSpec) return viaSpec;
+        nvlog("function constants: the one-module path declined (%s); translating this set", why.UTF8String ?: "?");
+    }
     if (xlate_fc(ll.UTF8String, stage.UTF8String, idx, sizes, payloads, n, &out, &out_len, e, sizeof e) != 0) {
         if (g_fc_expect_link && nvmtl_needs_visible_link(ll, @(e)))
             nvlog("function constants: this function calls linked visible functions; it is specialized when its pipeline is created");

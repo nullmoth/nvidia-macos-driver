@@ -107,12 +107,7 @@ for si, line in enumerate(sets):
     ok = r.returncode == 0
     check(f'set {si}: the defaults apply', ok, r.stderr.decode()[:200])
     if not ok: continue
-    g = L.nvmtl_fc_fold_percent
-    g.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
-    gi = (ctypes.c_uint32 * len(vals))(*[v[0] for v in vals]); gs = (ctypes.c_uint32 * len(vals))(*[len(v[1]) for v in vals])
-    gb = [ctypes.create_string_buffer(v[1], len(v[1])) for v in vals]
-    gp = (ctypes.c_void_p * len(vals))(*[ctypes.cast(b, ctypes.c_void_p) for b in gb])
-    fold = g(ll, gi, gs, gp, len(vals))
+    a = call_fc(vals)
     ap2 = call_apply(spv, table, vals)
     check(f'set {si}: nvmtl_spec_apply returns a module', ap2 is not None, ERR.value.decode(errors='replace')[:120])
     if ap2 is not None:
@@ -123,7 +118,6 @@ for si, line in enumerate(sets):
         # the reference freeze (spirv-opt) and ours agree on every constant
         cnt = lambda t: sorted(re.findall(r'OpConstant(?:True|False)? [^\n]*', re.sub(r'%\S+ = ', '', t)))
         check(f'set {si}: it fixes the same constants as spirv-opt --freeze-spec-const', cnt(dr) == cnt(da), str((__import__('collections').Counter(cnt(dr)) - __import__('collections').Counter(cnt(da))).most_common(4)) + ' | ' + str((__import__('collections').Counter(cnt(da)) - __import__('collections').Counter(cnt(dr))).most_common(4)))
-    a = call_fc(vals)
     if a is None:
         check(f'set {si}: the per-variant translation exists', False, ERR.value.decode(errors='replace')[:120]); continue
     ap = path(f'var{si}.spv', a)
@@ -136,5 +130,5 @@ for si, line in enumerate(sets):
     (epa, bda, na), (epb, bdb, nb) = facts(fa), facts(fb)
     check(f'set {si}: same entry points', epa == epb, f'{epa} {epb}')
     print(f'     set {si}: resources bound after folding that the per-variant module does not bind: {sorted(set(bdb) - set(bda))}')
-    print(f'     set {si}: AIR text kept by the fold {fold}%; instructions after -O: per-variant {na}, one module specialized {nb} (before -O {len(spv)} vs {len(a)} bytes)')
+    print(f'     set {si}: instructions after -O: per-variant {na}, one module specialized {nb} (before -O {len(spv)} vs {len(a)} bytes)')
 sys.exit(1 if fails else 0)
