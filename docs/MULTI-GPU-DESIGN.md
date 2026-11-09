@@ -69,7 +69,7 @@ bound to; one process does not drive two cards at once.
 
 ### Proof
 
-- `tools/test_nvrm_devtab.cpp` (host, 24 arms): table and gate rules against a model of the old code, the four-card overlapping
+- `tools/test_nvrm_devtab.cpp` (host, 26 arms): table and gate rules against a model of the old code, the four-card overlapping
   start, the re-offer sequencing, `resolve()` for one and two cards. Two mutants of the header fail it.
 - `tools/check_accel_resolution.py`, `tools/test_card_select.c` (11 arms), `tools/test_multigpu_wiring.py` (8 arms).
 - Builds on the mini: NVRM 43 warnings before and after; NVAccel 24 and 24 for macOS 15 and 26; the plugin 330 and 330; NVK with
