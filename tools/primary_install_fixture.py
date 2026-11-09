@@ -73,6 +73,7 @@ class Install(unittest.TestCase):
             b=self.payload/f'Library/Extensions/{k}.kext/Contents/MacOS/{k}';b.parent.mkdir(parents=True);b.write_bytes(('new-'+k).encode())
         for b in ['NVMTLDriver.bundle','NVIDIAShared.bundle','nvmtl']:
             p=self.payload/'Library/GPUBundles'/b;p.mkdir(parents=True);(p/'fixture').write_text('new-'+b)
+        lib=self.payload/'Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib';lib.parent.mkdir(parents=True);lib.write_text('new-codecs')
         (self.payload/'Library/GPUBundles/nvmtl-allow.txt').write_text('new-allow')
         load=struct.pack('<6I',0x32,24,1,0x000f0500,0x000f0500,0)
         runtime=self.payload/'Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib'

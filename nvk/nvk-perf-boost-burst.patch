@@ -1,0 +1,170 @@
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
+index 27770bc..6c9cf32 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
+@@ -44,12 +44,27 @@ struct nvkmd_nvrm_pdev {
+    struct NV2080_CTRL_FB_GET_SEMAPHORE_SURFACE_LAYOUT_PARAMS semSurfLayout;
+    uint32_t channelClass;
+ 
++   /* Performance boost policy (see nvkmd_nvrm_boost_burst): the mode is fixed when the device is created,
++    * boostRenewNs is the monotonic time before which a submit does not ask again. */
++   int boostMode;
++   uint64_t boostRenewNs;
++
+    uint32_t numClasses;
+    uint32_t *classList;
+ };
+ 
+ NVKMD_DECL_SUBCLASS(pdev, nvrm);
+ 
++/* NVRM_610_BOOST: how the GPU is kept at full clocks while this process works. */
++enum {
++   NVKMD_NVRM_BOOST_OFF,     /* NVRM_610_BOOST=0: never ask, the GPU follows its own idle policy */
++   NVKMD_NVRM_BOOST_BURST,   /* default: a short lease, renewed by submissions, so an idle GPU drops to low power */
++   NVKMD_NVRM_BOOST_HOLD,    /* NVRM_610_BOOST=hold: one boost for the life of the device (compute-style) */
++};
++
++/* Called on every command submission; asks for full clocks at most once a second and only while work is flowing. */
++void nvkmd_nvrm_boost_burst(struct nvkmd_nvrm_pdev *pdev);
++
+ VkResult nvkmd_nvrm_try_create_pdev(struct _drmDevice *drm_device,
+                                        struct vk_object_base *log_obj,
+                                        enum nvk_debug debug_flags,
+@@ -270,8 +285,8 @@ VkResult nvkmd_nvrm_sync_cpu_wait(struct vk_sync *sync, uint64_t wait_value,
+ 
+ 
+ /* b81: NVRM_610_<ITEM>=0 turns one recipe item back to the b80 shape (TSG PREEMPT LGPROMO ZCULL USERMODE BOOST CECHAN) */
+-static inline bool
+-nvrm610_on(const char *item)
++static inline int
++nvrm610_value(const char *item)
+ {
+    char k[64];
+    snprintf(k, sizeof k, "NVRM_610_%s", item);
+@@ -291,10 +306,16 @@ nvrm610_on(const char *item)
+       if (hit && (hit == conf || hit[-1] == '\n')) {
+          char v = hit[strlen(key)];
+          fprintf(stderr, "nvrm: 610 %s=%c (nvrm610.conf)\n", item, v);
+-         return v != '0';
++         return (unsigned char)v;
+       }
+    }
+-   return !(e && e[0] == '0');
++   return e ? (unsigned char)e[0] : -1;   /* -1: not set anywhere */
++}
++
++static inline bool
++nvrm610_on(const char *item)
++{
++   return nvrm610_value(item) != '0';
+ }
+ 
+ static inline void
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
+index e297f19..1bab1db 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
+@@ -1168,6 +1168,8 @@ nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
+    struct NvRmApi rm;
+    nvkmd_nvrm_dev_api_ctl(pdev, &rm);
+ 
++   nvkmd_nvrm_boost_burst(pdev);   /* full clocks while work is being submitted, idle clocks when it stops */
++
+    NvNotification *notifiers = ctx->notifier->map;
+    NvNotification *submitTokenNotifier = &notifiers[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN];
+    KeplerBControlGPFifo *userD = ctx->userD->map;
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
+index df70c2c..6a6e53b 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
+@@ -10,6 +10,7 @@
+ #include <stdlib.h>
+ 
+ #include "util/os_misc.h"
++#include "util/os_time.h"
+ #include "util/u_memory.h"
+ #include "vk_log.h"
+ 
+@@ -643,17 +644,25 @@ nvkmd_nvrm_create_pdev(struct vk_object_base *log_obj,
+    assert(os_page_size <= UINT32_MAX);
+    pdev->base.bind_align_B = os_page_size;
+ 
+-   /* b81 A1 (GAPS-.md): the memory clock sat at its 7,001 MHz boot level because nothing asked GSP to
+-    * raise it (dram_khz 7,001,000 -> 14,001,000 under boost, DRAM 206.6 -> 413.6 GB/s,  21:5x). 610 Vulkan
+-    * sends BOOST_TO_MAX duration 2 per burst; CUDA sends flags 0x12 (BOOST_TO_MAX | CUDA_YES) INFINITE for the
+-    * context's life and CLEARs at teardown. This is CUDA's shape, per physical device. NVRM_610_BOOST=0 skips it. */
+-   if (nvrm610_on("BOOST")) {
++   /* Nothing asks the GPU to raise its memory clock by itself: it sat at its 7,001 MHz boot level until a boost was
++    * requested (14,001 MHz under boost, 206.6 -> 413.6 GB/s). Two shapes exist. Graphics drivers send BOOST_TO_MAX
++    * with a short duration per burst of work, so an idle GPU falls back to its low-power state. Compute runtimes
++    * send flags 0x12 (BOOST_TO_MAX | CUDA_YES) with an infinite duration for the context's life. Holding the second
++    * shape for a display driver kept every GPU at full power while idle, so the default is the first.
++    * NVRM_610_BOOST: unset or 1 = per burst, hold = for the device's life, 0 = never. */
++   {
++      int bv = nvrm610_value("BOOST");
++      pdev->boostMode = bv == '0' ? NVKMD_NVRM_BOOST_OFF : (bv == 'h' || bv == 'H') ? NVKMD_NVRM_BOOST_HOLD : NVKMD_NVRM_BOOST_BURST;
++   }
++   if (pdev->boostMode == NVKMD_NVRM_BOOST_HOLD) {
+       NV2080_CTRL_PERF_BOOST_PARAMS bp = {
+          .flags = NV2080_CTRL_PERF_BOOST_FLAGS_CMD_BOOST_TO_MAX | (NV2080_CTRL_PERF_BOOST_FLAGS_CUDA_YES << 4),   /* 0x12 */
+          .duration = NV2080_CTRL_PERF_BOOST_DURATION_INFINITE,
+       };
+       NV_STATUS bs = nvRmApiControl(&rm, pdev->hSubdevice, NV2080_CTRL_CMD_PERF_BOOST, &bp, sizeof bp);
+       if (nvkmd_nvrm_diag_on()) fprintf(stderr, "nvrm: PERF_BOOST flags 0x%x INFINITE rc 0x%x\n", (unsigned)bp.flags, (unsigned)bs);
++   } else if (nvkmd_nvrm_diag_on()) {
++      fprintf(stderr, "nvrm: PERF_BOOST %s\n", pdev->boostMode == NVKMD_NVRM_BOOST_BURST ? "per burst of work" : "off");
+    }
+ 
+    /* b72 host-pointer import PROBE: pin ONE page as OS-descriptor memory. VK_EXT_external_memory_host is advertised
+@@ -753,6 +762,42 @@ done:
+    return result;
+ }
+ 
++/* How long one lease lasts, and how often a busy process renews it. The lease outlives the renewal interval, so
++ * it never lapses while submissions keep coming; a process that stops submitting falls out of boost within
++ * NVKMD_NVRM_BOOST_LEASE_S seconds and the GPU can drop to its idle state. */
++#define NVKMD_NVRM_BOOST_LEASE_S   3
++#define NVKMD_NVRM_BOOST_RENEW_NS  1000000000ull
++
++void
++nvkmd_nvrm_boost_burst(struct nvkmd_nvrm_pdev *pdev)
++{
++   if (pdev->boostMode != NVKMD_NVRM_BOOST_BURST)
++      return;
++
++   const uint64_t now = os_time_get_nano();
++   uint64_t due = __atomic_load_n(&pdev->boostRenewNs, __ATOMIC_RELAXED);
++   if (now < due)
++      return;
++   /* One thread wins the renewal; the others see the new deadline and go on. */
++   if (!__atomic_compare_exchange_n(&pdev->boostRenewNs, &due, now + NVKMD_NVRM_BOOST_RENEW_NS, false,
++                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED))
++      return;
++
++   struct NvRmApi rm;
++   nvkmd_nvrm_dev_api_ctl(pdev, &rm);
++   NV2080_CTRL_PERF_BOOST_PARAMS bp = {
++      .flags = NV2080_CTRL_PERF_BOOST_FLAGS_CMD_BOOST_TO_MAX,
++      .duration = NVKMD_NVRM_BOOST_LEASE_S,
++   };
++   NV_STATUS bs = nvRmApiControl(&rm, pdev->hSubdevice, NV2080_CTRL_CMD_PERF_BOOST, &bp, sizeof bp);
++   if (bs != NV_OK) {
++      /* Not supported here: stop asking rather than fail every second. */
++      __atomic_store_n(&pdev->boostMode, NVKMD_NVRM_BOOST_OFF, __ATOMIC_RELAXED);
++      if (nvkmd_nvrm_diag_on())
++         fprintf(stderr, "nvrm: PERF_BOOST lease refused (rc 0x%x), not asking again\n", (unsigned)bs);
++   }
++}
++
+ static void
+ nvkmd_nvrm_pdev_destroy(struct nvkmd_pdev *_pdev)
+ {
+@@ -762,7 +807,7 @@ nvkmd_nvrm_pdev_destroy(struct nvkmd_pdev *_pdev)
+ 	   struct NvRmApi rm;
+ 	   nvkmd_nvrm_dev_api_ctl(pdev, &rm);
+ 
+-	   if (nvrm610_on("BOOST")) {   /* b81: CLEAR the context-life boost (CUDA's teardown shape) */
++	   if (pdev->boostMode != NVKMD_NVRM_BOOST_OFF) {   /* drop any boost still leased or held */
+ 	      NV2080_CTRL_PERF_BOOST_PARAMS bp = { .flags = NV2080_CTRL_PERF_BOOST_FLAGS_CMD_CLEAR, .duration = 0 };
+ 	      nvRmApiControl(&rm, pdev->hSubdevice, NV2080_CTRL_CMD_PERF_BOOST, &bp, sizeof bp);
+ 	   }

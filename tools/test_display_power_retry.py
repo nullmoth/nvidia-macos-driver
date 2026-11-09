@@ -32,6 +32,7 @@ struct NVRMDisplayGate {
 static bool PE_parse_boot_argn(const char*,char*,unsigned long) { return disabled; }
 static int OSAddAtomic(int n,int *value) { int old=*value;*value+=n;return old; }
 #define FBLOG(...) ((void)0)
+#define FBLOGV(...) ((void)0)
 struct NVRMNVDAFramebuffer {
     bool fHeadSlept=false, fModeSet=true, sleepOK=true, wakeOK=true;
     bool fPowerOn=true, pagingState=true, fSysSlept=false, gpuReady=true;
