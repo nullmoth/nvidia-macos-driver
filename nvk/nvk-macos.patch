@@ -9522,7 +9522,7 @@ diff -ruN a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h b/src/nouveau/vulkan/nvkm
 diff -ruN a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c	1969-12-31 16:00:00
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c	2026-10-29 17:38:59
-@@ -0,0 +1,1452 @@
+@@ -0,0 +1,1529 @@
 +/*
 + * Copyright © 2024 Collabora Ltd. and Red Hat Inc.
 + * SPDX-License-Identifier: MIT
@@ -10975,6 +10975,83 @@ diff -ruN a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/
 +      return nvkmd_nvrm_create_exec_ctx(dev, log_obj, engines, ctx_out);
 +   }
 +}
++/*
++ * Game Mode (the plugin calls this through dlsym, with the notify state the policy helper publishes): re-apply the scheduling
++ * of THIS process's graphics channel groups while they run. The groups are the ones nvkmd_nvrm_create_ctx made; the controls
++ * are the same NVA06C_CTRL_CMD_SET_INTERLEAVE_LEVEL (0xa06c0107) and SET_TIMESLICE (0xa06c0103) it applies at creation.
++ *   interleave_level  0 LOW, 1 MEDIUM, 2 HIGH, or -1 to put every group back to what it had before its first change
++ *   timeslice_us      0 leaves the timeslice alone (with -1 the saved timeslice is restored)
++ * The first change of a group records its interleave level and timeslice (GET_INTERLEAVE_LEVEL 0xa06c0108, GET_TIMESLICE
++ * 0xa06c0104), so a restore returns exactly what RM had. Returns the number of groups changed, or -1 for an argument out of
++ * range. A group made after the call is not touched by it.
++ */
++static struct {
++   const void *ctx;
++   NvHandle hTsg;
++   NvU32 level;
++   NvU64 slice;
++   bool have;
++} nvmtl_tsg_saved[NVRM_CTX_MAX];
++
++__attribute__((visibility("default"))) int nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us);
++__attribute__((visibility("default"))) int
++nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
++{
++   if (interleave_level < -1 || interleave_level > 2 || timeslice_us > 1000000UL)
++      return -1;
++   int changed = 0;
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   for (unsigned i = 0; i < NVRM_CTX_MAX; i++) {
++      struct nvkmd_nvrm_exec_ctx *c = nvkmd_nvrm_slots[i].ctx;
++      if (c == NULL || c->ceOnly || c->hTsg == 0)
++         continue;
++      struct nvkmd_nvrm_dev *dev = nvkmd_nvrm_dev(c->base.dev);
++      struct nvkmd_nvrm_pdev *pdev = nvkmd_nvrm_pdev(dev->base.pdev);
++      struct NvRmApi rm;
++      nvkmd_nvrm_dev_api_ctl(pdev, &rm);
++      if (nvmtl_tsg_saved[i].ctx != c || nvmtl_tsg_saved[i].hTsg != c->hTsg) {   /* a new group in this slot: drop the old record */
++         nvmtl_tsg_saved[i].ctx = c;
++         nvmtl_tsg_saved[i].hTsg = c->hTsg;
++         nvmtl_tsg_saved[i].have = false;
++      }
++      struct { NvU64 timesliceUs; } __attribute__((aligned(8))) ts = { 0 };
++      if (interleave_level < 0) {
++         if (!nvmtl_tsg_saved[i].have)
++            continue;
++         NvU32 lv = nvmtl_tsg_saved[i].level;
++         ts.timesliceUs = nvmtl_tsg_saved[i].slice;
++         NV_STATUS a = nvRmApiControl(&rm, c->hTsg, 0xa06c0107, &lv, sizeof lv);
++         NV_STATUS b = ts.timesliceUs ? nvRmApiControl(&rm, c->hTsg, 0xa06c0103, &ts, sizeof ts) : NV_OK;
++         if (a == NV_OK && b == NV_OK) {
++            nvmtl_tsg_saved[i].have = false;
++            changed++;
++         }
++         continue;
++      }
++      if (!nvmtl_tsg_saved[i].have) {
++         NvU32 cur = 1;   /* MEDIUM is RM's default if it will not say */
++         if (nvRmApiControl(&rm, c->hTsg, 0xa06c0108, &cur, sizeof cur) != NV_OK)
++            cur = 1;
++         if (nvRmApiControl(&rm, c->hTsg, 0xa06c0104, &ts, sizeof ts) != NV_OK)
++            ts.timesliceUs = 0;
++         nvmtl_tsg_saved[i].level = cur;
++         nvmtl_tsg_saved[i].slice = ts.timesliceUs;
++         nvmtl_tsg_saved[i].have = true;
++      }
++      NvU32 lv = (NvU32)interleave_level;
++      NV_STATUS a = nvRmApiControl(&rm, c->hTsg, 0xa06c0107, &lv, sizeof lv);
++      NV_STATUS b = NV_OK;
++      if (timeslice_us) {
++         ts.timesliceUs = timeslice_us;
++         b = nvRmApiControl(&rm, c->hTsg, 0xa06c0103, &ts, sizeof ts);
++      }
++      if (a == NV_OK && b == NV_OK)
++         changed++;
++   }
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   return changed;
++}
++
 diff -ruN a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_dev.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_dev.c
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_dev.c	1969-12-31 16:00:00
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_dev.c	2026-10-05 13:10:16

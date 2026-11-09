@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Writes msi_table.h: the per-firmware embedded-controller address of the keyboard light on MSI laptops, taken from the
-table in the public msi-ec Linux driver (GPL-2.0; facts only: firmware strings and controller addresses).
+table in the public msi-ec driver (BeardOverflow/msi-ec, GPL-2.0; facts only: firmware strings and controller addresses).
 
 usage: gen_msi_table.py <msi-ec.c> [out.h]      (out defaults to msi_table.h beside this script)
 Each firmware string maps to { state address, base value, highest state } of its configuration. A configuration whose
@@ -11,14 +11,16 @@ import sys
 
 
 def parse(text):
-    """[(firmware string, state address, base value, max state)] for every configuration with a usable keyboard light."""
+    """[(firmware string, state address, base value, max state)] for every configuration with a usable keyboard light.
+    Reads the layout of the msi-ec driver (the out-of-tree one that has the light's setter, and the mainline one's older
+    naming): firmware arrays ALLOWED_FW_<name>[], configurations CONF<_name> pointing at one with .allowed_fw."""
     fw = {}
-    for m in re.finditer(r'ALLOWED_FW_(\d+)\[\][^{]*\{(.*?)NULL', text, re.S):
+    for m in re.finditer(r'ALLOWED_FW_([A-Za-z0-9_]+)\[\][^{]*\{(.*?)NULL', text, re.S):
         fw[m.group(1)] = re.findall(r'"([^"]+)"', m.group(2))
     rows = []
-    for m in re.finditer(r'struct msi_ec_conf CONF(\d+)[^{]*\{(.*?)\n\};', text, re.S):
+    for m in re.finditer(r'struct msi_ec_conf CONF_?([A-Za-z0-9_]+)[^{]*\{(.*?)\n\};', text, re.S):
         body = m.group(2)
-        a = re.search(r'\.allowed_fw\s*=\s*ALLOWED_FW_(\d+)', body)
+        a = re.search(r'\.allowed_fw\s*=\s*ALLOWED_FW_([A-Za-z0-9_]+)', body)
         k = re.search(r'\.kbd_bl\s*=\s*\{(.*?)\n\t\}', body, re.S)
         if not a or not k:
             continue
@@ -26,11 +28,11 @@ def parse(text):
         addr = re.search(r'\.bl_state_address\s*=\s*([^,/\s]+)', kb)
         base = re.search(r'\.state_base_value\s*=\s*([^,/\s]+)', kb)
         mx = re.search(r'\.max_state\s*=\s*([^,/\s]+)', kb)
-        if not (addr and base and mx) or 'UNSUPP' in addr.group(1) or 'UNSUPP' in base.group(1):
+        if not (addr and base and mx) or 'UNSUPP' in addr.group(1) or 'UNKNOWN' in addr.group(1) or 'UNSUPP' in base.group(1):
             continue
-        for s in fw.get(a.group(1), []):
-            rows.append((s, int(addr.group(1), 0), int(base.group(1), 0), int(mx.group(1), 0)))
-    return rows
+        for fwstr in fw.get(a.group(1), []):
+            rows.append((fwstr, int(addr.group(1), 0), int(base.group(1), 0), int(mx.group(1), 0)))
+    return sorted(set(rows))
 
 
 def render(rows):
