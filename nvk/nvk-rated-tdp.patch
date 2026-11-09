@@ -1,0 +1,32 @@
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
+index 6a6e53b..41cf695 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
+@@ -665,6 +665,27 @@ nvkmd_nvrm_create_pdev(struct vk_object_base *log_obj,
+       fprintf(stderr, "nvrm: PERF_BOOST %s\n", pdev->boostMode == NVKMD_NVRM_BOOST_BURST ? "per burst of work" : "off");
+    }
+ 
++   /* Power cap. NVRM_610_RATEDTDP: unset or 0 = leave the card's policy alone (default), l (limit) = hold the rated TDP
++    * performance state (a lower power and clock ceiling), k = lock it, x = allow the turbo ceiling. Only the first letter is read. This is
++    * the public RATED_TDP control; it caps downward and does not raise a board's power limit above its VBIOS value. */
++   {
++      int tv = nvrm610_value("RATEDTDP");
++      NV2080_CTRL_PERF_RATED_TDP_ACTION act = NV2080_CTRL_PERF_RATED_TDP_ACTION_DEFAULT;
++      if (tv == 'l' || tv == 'L') act = NV2080_CTRL_PERF_RATED_TDP_ACTION_FORCE_LIMIT;
++      else if (tv == 'k' || tv == 'K') act = NV2080_CTRL_PERF_RATED_TDP_ACTION_FORCE_LOCK;
++      else if (tv == 'x' || tv == 'X') act = NV2080_CTRL_PERF_RATED_TDP_ACTION_FORCE_EXCEED;
++      if (act != NV2080_CTRL_PERF_RATED_TDP_ACTION_DEFAULT) {
++         NV2080_CTRL_PERF_RATED_TDP_SET_CONTROL_PARAMS tp = {
++            .client = NV2080_CTRL_PERF_RATED_TDP_CLIENT_GLOBAL,
++            .input = act,
++            .vPstateType = NV2080_CTRL_PERF_VPSTATE_RATED_TDP,
++         };
++         NV_STATUS ts = nvRmApiControl(&rm, pdev->hSubdevice, NV2080_CTRL_CMD_PERF_RATED_TDP_SET_CONTROL, &tp, sizeof tp);
++         if (nvkmd_nvrm_diag_on())
++            fprintf(stderr, "nvrm: RATED_TDP action %d rc 0x%x\n", (int)act, (unsigned)ts);
++      }
++   }
++
+    /* b72 host-pointer import PROBE: pin ONE page as OS-descriptor memory. VK_EXT_external_memory_host is advertised
+     * only if the running kext implements os_lock_user_pages (b72+);  an older kext answers NV_ERR_NOT_SUPPORTED
+     * (the weak stubs) and the plugin keeps its copy path — never a half-working import. NVK_HOST_IMPORT=0 skips it. */
