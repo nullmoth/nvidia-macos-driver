@@ -315,7 +315,8 @@ BOOL nvmtl_air_grid_only(NVMTLFunction *fn);
 @interface NVMTLRenderCommandEncoder () { @public NSString *_label; } @end
 @interface NVMTLRenderCommandEncoder () { @public BOOL _dbOn; float _dbLo, _dbHi; } @end   // setDepthTestMinBound:maxBound:
 @interface NVMTLRenderCommandEncoder () { @public uint32_t _vstride[NVMTL_NVIN]; uint32_t _vstrideSet; } @end
-@interface NVMTLTexture () { @public uint32_t _y422; NSMutableData *_y422Raw; }
+@interface NVMTLTexture () { @public uint32_t _y422; NSMutableData *_y422Raw; BOOL _y422GpuWritten; IOSurfaceRef _y422Surf; NSUInteger _y422Plane; uint32_t _y422Seed; BOOL _y422Synced; }
+- (void)nvmtlY422SurfaceIn;
 - (void)nvmtlY422Upload:(uint32_t)y0 rows:(uint32_t)n;
 @end   // GBGR422 / BGRG422: _y422 is the Metal format, _y422Raw the packed bytes
 @interface NVMTLRenderCommandEncoder () { @public uint32_t _ampCount; const char *_ampWhy; } @end   // setVertexAmplificationCount:viewMappings: (0 = never set = 1 view)

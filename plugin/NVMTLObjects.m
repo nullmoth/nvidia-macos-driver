@@ -1458,6 +1458,7 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
     if (!_parent && _bparkable && _backBuf && _i.img) nvmtl_bpark_put(_backBuf, &_i, _pkey);
     if (!_parent) { nvmtl_vk_image_dying_label(_label.UTF8String); nvmtl_vk_image_destroy(&_i); }
     if (_stTwin.img) nvmtl_vk_image_destroy(&_stTwin);
+    if (_y422Surf) { CFRelease(_y422Surf); _y422Surf = NULL; }
     if (!_parent && _vramOn) { if (!nvmtl_ic_put(&_vramBuf)) nvmtl_vk_buffer_destroy(&_vramBuf); _vramOn = NO; }
     if (!_parent) nvmtl_vk_host_pages_drop(&_hostPages);
     if (_surfOwned && _surf) CFRelease(_surf);
@@ -1554,7 +1555,26 @@ static uint64_t nvmtl_host_pages_cookie(IOSurfaceRef s)
     if (on < 0) { const char *e = getenv("NVMTL_HOST_PAGES_SHARE"); on = e && e[0] == '1'; }
     return on ? nvmtl_plane_cookie(s, YES) : 0;
 }
+// A 4:2:2 texture wrapping an IOSurface plane (video frames): the surface's packed rows are copied and decoded whenever the
+// surface has changed since the last use (the surface seed), by the CPU. The surface is never written back.
+- (void)nvmtlY422SurfaceIn {
+    @synchronized (self) {
+        if (_y422Synced && IOSurfaceGetSeed(_y422Surf) == _y422Seed) return;
+        uint32_t seed = 0;
+        if (IOSurfaceLock(_y422Surf, kIOSurfaceLockReadOnly, &seed) != kIOReturnSuccess) { nvlog("4:2:2 surface-in: IOSurfaceLock FAILED"); return; }
+        const uint8_t *base = IOSurfaceGetBaseAddressOfPlane(_y422Surf, (uint32_t)_y422Plane);
+        const size_t row = IOSurfaceGetBytesPerRowOfPlane(_y422Surf, (uint32_t)_y422Plane), span = nvmtl_y422_row_bytes(_i.w);
+        const size_t rows = IOSurfaceGetHeightOfPlane(_y422Surf, (uint32_t)_y422Plane);
+        if (base && row >= span && rows >= _i.h) {
+            for (uint32_t y = 0; y < _i.h; y++) memcpy((uint8_t *)_y422Raw.mutableBytes + (size_t)y * span, base + (size_t)y * row, span);
+            _y422Seed = IOSurfaceGetSeed(_y422Surf);
+        } else nvlog("4:2:2 surface-in: surface plane %lu is %zu bytes/row x %zu rows, the texture needs %zu x %u - frame skipped", (unsigned long)_y422Plane, row, rows, span, _i.h);
+        IOSurfaceUnlock(_y422Surf, kIOSurfaceLockReadOnly, &seed);
+        if (base && row >= span && rows >= _i.h) { [self nvmtlY422Upload:0 rows:_i.h]; _y422Synced = YES; }
+    }
+}
 - (void)nvmtlSurfaceIn {
+    if (_y422Surf) { [self nvmtlY422SurfaceIn]; return; }
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return;
     @synchronized (nvmtl_surface_sync(r)) {
@@ -1766,7 +1786,9 @@ static BOOL nvmtl_region_fits(MTLRegion r, NSUInteger level, NSUInteger slice) {
         && level <= UINT32_MAX && slice <= UINT32_MAX;
 }
 // ---- GBGR422 / BGRG422 (nvmtl_yuv422.h): the image is decoded RGBA8, _y422Raw holds the packed bytes the app wrote
+static _Thread_local int g_y422_bypass;   // set while the blit encoder copies its own decoded scratch into a 4:2:2 texture
 int nvmtl_y422_blit_refused(id tex, const char *what) {
+    if (g_y422_bypass) return 0;
     if (![tex isKindOfClass:[NVMTLTexture class]] || !((NVMTLTexture *)tex)->_y422) return 0;
     static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 8) nvlog("%s: a 4:2:2 texture is not a blit source or destination in this driver - REFUSED (use replaceRegion / getBytes)", what);
     return 1;
@@ -1796,6 +1818,7 @@ int nvmtl_y422_blit_refused(id tex, const char *what) {
     [self nvmtlY422Upload:(uint32_t)r.origin.y rows:(uint32_t)r.size.height];   // a pair's chroma reaches its neighbours: redecode the whole rows
 }
 - (void)nvmtlY422Get:(MTLRegion)r into:(void *)bytes bytesPerRow:(NSUInteger)row {
+    if (_y422GpuWritten) { nvlog("getBytes: this 4:2:2 texture was written by a GPU copy; the packed bytes are not kept - REFUSED"); return; }
     const size_t rb = nvmtl_y422_row_bytes(_i.w), span = (size_t)r.size.width * 2u;
     if (!bytes || row < span) return;
     for (NSUInteger y = 0; y < r.size.height; y++)
@@ -4531,6 +4554,11 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 // executeCommandsInBuffer:indirectBuffer:indirectBufferOffset: - the commands to run are chosen by a range the GPU wrote
 // (nvmtl_icb_range.h). Every armed slot becomes an indirect draw whose count is zeroed outside that range.
 // GPU-encoded commands (a kernel writing the ICB) are not carried: this ICB is the list the CPU encoded.
+static NVMTLBuffer *nvmtl_icb_scratch_bytes(NSUInteger n) {
+    id<MTLBuffer> b = [(id<MTLDevice>)gNVMTLMainDevice newBufferWithLength:n options:MTLResourceStorageModeShared];
+    if (b) memset(b.contents, 0, n);
+    return (NVMTLBuffer *)b;
+}
 static NVMTLBuffer *nvmtl_icb_scratch(uint32_t slots) {
     id<MTLBuffer> b = [(id<MTLDevice>)gNVMTLMainDevice newBufferWithLength:(NSUInteger)slots * NVMTL_ICB_RECORD_BYTES options:MTLResourceStorageModeShared];
     if (b) memset(b.contents, 0, (size_t)slots * NVMTL_ICB_RECORD_BYTES);
@@ -6605,10 +6633,30 @@ static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbS
                sourceSize:MTLSizeMake(s.width, s.height, s.textureType == MTLTextureType3D ? s.depth : 1) toTexture:dst
          destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
 }
+// copyFromBuffer:toTexture: into a 4:2:2 texture: a compute pass decodes the packed rows into a scratch RGBA8 buffer, which the
+// ordinary copy then moves into the texture. Whole-width rows of level 0 only (a pair's chroma reaches its neighbours).
+// The CPU copy of the packed bytes is not updated, so getBytes after such a copy is refused.
+- (void)nvmtlY422FromBuffer:(id<MTLBuffer>)src offset:(NSUInteger)so row:(NSUInteger)row size:(MTLSize)size toTexture:(id<MTLTexture>)dst
+                      slice:(NSUInteger)ds level:(NSUInteger)dl origin:(MTLOrigin)dof {
+    NVMTLBuffer *b = (NVMTLBuffer *)src; NVMTLTexture *t = (NVMTLTexture *)dst;
+    const uint32_t w = t->_i.w;
+    if (!b || ds || dl || dof.x || dof.z || size.depth > 1 || size.width != w || !size.height || dof.y + size.height > t->_i.h) {
+        nvlog("blit copyFromBuffer:toTexture: a 4:2:2 copy must be whole-width rows of level 0 - REFUSED"); return; }
+    NVMTLBuffer *sc = nvmtl_icb_scratch_bytes((NSUInteger)w * size.height * 4u);
+    if (!sc) { nvlog("blit copyFromBuffer:toTexture: 4:2:2 scratch FAILED"); return; }
+    nvmtl_retain_resource(_cb, sc); nvmtl_retain_resource(_cb, b);
+    if (nvmtl_vk_cmd_y422_convert(&_cb->_c, &b->_b, so, row, &sc->_b, w, (uint32_t)size.height, (uint32_t)t->_fmt)) {
+        nvlog("blit copyFromBuffer:toTexture: the 4:2:2 conversion pass was refused (offset/pitch must be multiples of 4, pitch >= 2*width) - nothing copied"); return; }
+    t->_y422GpuWritten = YES;
+    g_y422_bypass = 1;
+    [self copyFromBuffer:sc sourceOffset:0 sourceBytesPerRow:(NSUInteger)w * 4u sourceBytesPerImage:0 sourceSize:MTLSizeMake(w, size.height, 1)
+               toTexture:dst destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, dof.y, 0)];
+    g_y422_bypass = 0;
+}
 - (void)copyFromBuffer:(id<MTLBuffer>)src sourceOffset:(NSUInteger)so sourceBytesPerRow:(NSUInteger)row
    sourceBytesPerImage:(NSUInteger)img sourceSize:(MTLSize)size toTexture:(id<MTLTexture>)dst
       destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dof {
-    if (nvmtl_y422_blit_refused(dst, "blit copyFromBuffer:toTexture")) return;
+    if (nvmtl_y422_blit_refused(dst, "blit copyFromBuffer:toTexture")) { [self nvmtlY422FromBuffer:src offset:so row:row size:size toTexture:dst slice:ds level:dl origin:dof]; return; }
     NVMTL_HZ_BLIT(src, dst);   // hazard model: a tracked blit
     NVMTLBuffer *b = (NVMTLBuffer *)src; NVMTLTexture *t = (NVMTLTexture *)dst;
     if (!b || !t) { nvlog("blit copyFromBuffer:toTexture: nil"); return; }
@@ -6656,7 +6704,7 @@ static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbS
    sourceBytesPerImage:(NSUInteger)img sourceSize:(MTLSize)size toTexture:(id<MTLTexture>)dst
       destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dof
                options:(MTLBlitOption)opt {
-    if (nvmtl_y422_blit_refused(dst, "blit copyFromBuffer:toTexture")) return;
+    if (nvmtl_y422_blit_refused(dst, "blit copyFromBuffer:toTexture")) { [self nvmtlY422FromBuffer:src offset:so row:row size:size toTexture:dst slice:ds level:dl origin:dof]; return; }
     NVMTL_HZ_BLIT(src, dst);   // hazard model: a tracked blit
     const uint32_t asp = (opt & MTLBlitOptionDepthFromDepthStencil) ? 2u : (opt & MTLBlitOptionStencilFromDepthStencil) ? 4u : 0u;
     if (opt & ~(MTLBlitOptionDepthFromDepthStencil | MTLBlitOptionStencilFromDepthStencil))

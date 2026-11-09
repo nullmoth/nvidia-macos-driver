@@ -25,6 +25,7 @@
 #include "nvmtl_loss.h"
 #include "nvmtl_multiview.h"
 #include "nvmtl_icb_range.h"
+#include "nvmtl_y422_convert.h"
 #include "nvmtl_copy_compat.h"
 #include "nvmtl_sampler_state.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
@@ -9829,6 +9830,52 @@ int nvmtl_vk_cmd_icb_mask(nvk_cmdbuf *c, nvk_buffer *args, nvk_buffer *range, si
     pvkCmdPushConstants(c->cb, g_icb_mask_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 28, &a);
     pvkCmdDispatch(c->cb, nvmtl_icb_mask_groups(slots), 1, 1);
     nvmtl_vk_cmd_barrier(c);   // the indirect draws and dispatches read the records next
+    return 0;
+}
+
+// Decodes packed 4:2:2 rows of `src` (at src_off) into RGBA8 in `dst`, outside a render pass (nvmtl_y422_convert.h).
+static pthread_mutex_t g_y422_lock = PTHREAD_MUTEX_INITIALIZER;
+static VkPipeline g_y422_pipeline;
+static VkPipelineLayout g_y422_layout;
+static int nvmtl_y422_init(void)
+{
+    int rc = -1;
+    pthread_mutex_lock(&g_y422_lock);
+    if (g_y422_pipeline) { rc = 0; goto done; }
+    VkShaderModule mod = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo sm = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_y422_convert_spv, nvmtl_y422_convert_spv };
+    if (pvkCreateShaderModule(g_dev, &sm, NULL, &mod) != VK_SUCCESS) goto done;
+    VkPushConstantRange push = { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(nvmtl_y422_convert_args) };
+    VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL, 1, &push };
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (pvkCreatePipelineLayout(g_dev, &li, NULL, &layout) == VK_SUCCESS) {
+        VkPipelineShaderStageCreateInfo stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", NULL };
+        VkComputePipelineCreateInfo pi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, stage, layout, VK_NULL_HANDLE, -1 };
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        if (nvmtl_create_compute_pipeline(g_dev, VK_NULL_HANDLE, &pi, NULL, &pipeline) == VK_SUCCESS) {
+            g_y422_layout = layout; g_y422_pipeline = pipeline; rc = 0;
+        } else {
+            if (pipeline) pvkDestroyPipeline(g_dev, pipeline, NULL);
+            pvkDestroyPipelineLayout(g_dev, layout, NULL);
+        }
+    }
+    pvkDestroyShaderModule(g_dev, mod, NULL);
+done:
+    pthread_mutex_unlock(&g_y422_lock);
+    return rc;
+}
+int nvmtl_vk_cmd_y422_convert(nvk_cmdbuf *c, nvk_buffer *src, size_t src_off, size_t pitch, nvk_buffer *dst, uint32_t w, uint32_t h, uint32_t mtl_format)
+{
+    if (!c || c->in_rp || !src || !dst || !w || !h || (w & 1u) || (src_off & 3) || (pitch & 3) || pitch < (size_t)w * 2u ||
+        src_off > src->size || src->size - src_off < pitch * (h - 1u) + (size_t)w * 2u || dst->size < (size_t)w * h * 4u ||
+        nvmtl_y422_init()) return -1;
+    nvmtl_y422_convert_args a = { nvmtl_vk_buffer_address(src) + src_off, nvmtl_vk_buffer_address(dst), w, h, (uint32_t)(pitch / 4u), mtl_format };
+    if (!a.src || !a.dst) return -1;
+    nvmtl_vk_cmd_barrier(c);
+    pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_y422_pipeline);
+    pvkCmdPushConstants(c->cb, g_y422_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof a, &a);
+    pvkCmdDispatch(c->cb, nvmtl_y422_convert_groups(w, h), 1, 1);
+    nvmtl_vk_cmd_barrier(c);
     return 0;
 }
 
