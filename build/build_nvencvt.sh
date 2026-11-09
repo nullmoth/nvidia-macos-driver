@@ -29,7 +29,7 @@ ssh "$H" "set -e; cd $HDR
   for f in CMBaseObjectSPI.h VTVideoDecoderSPI.h; do
     [ -s webkit-spi/\$f ] || curl -fsSL -o webkit-spi/\$f https://raw.githubusercontent.com/WebKit/WebKit/3bfbc200370710495ffa440abdd31b943c83ad7a/Source/ThirdParty/libwebrtc/Source/webrtc/webkit_sdk/WebKit/\$f
   done"
-ssh "$H" "cd $R/src && xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -O2 -Wall -dynamiclib -DNVENC_VERSION='\"$VER\"' \
+ssh "$H" "cd $R/src && xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -O2 -Wall -fvisibility=hidden -dynamiclib -DNVENC_VERSION='\"$VER\"' \
   -o ../out/libnvencvt.dylib vt/nvencvt.c vt/nvencvt_dec.c src/*.c -I src -I $HDR/webkit-spi \
   -I $HDR/ogkm/src/common/sdk/nvidia/inc -I $HDR/ogkm/src/nvidia/arch/nvalloc/unix/include -I $HDR/ogd/classes/video \
   -Werror=unguarded-availability-new \
@@ -40,7 +40,8 @@ mkdir -p "$OUT"
 scp -q "$H:$R/out/libnvencvt.dylib" "$H:$R/out/build.err" "$OUT/"
 minos=$(vtool -show-build "$OUT/libnvencvt.dylib" | awk '/minos/{print $2; exit}')
 [ "$minos" = 15.0 ] || { echo "STOP: minos $minos, not 15.0"; exit 1; }
-for s in NVEncVT_Register NVEncVT_RegisterDecoders NVEncVT_CreateInstance NVDecVT_CreateInstance; do
-  nm -gU "$OUT/libnvencvt.dylib" | grep -q " _$s\$" || { echo "STOP: $s is not exported"; exit 1; }
-done
+# only the four entry points leave the library: the plugin looks up two, VideoToolbox is handed the other two
+want="_NVDecVT_CreateInstance _NVEncVT_CreateInstance _NVEncVT_Register _NVEncVT_RegisterDecoders"
+have=$(nm -gU "$OUT/libnvencvt.dylib" | awk '{print $3}' | sort | tr '\n' ' ' | sed 's/ $//')
+[ "$have" = "$want" ] || { echo "STOP: exports are [$have], want [$want]"; exit 1; }
 echo "libnvencvt $(git -C "$HERE" rev-parse --short "$REV") sha $(shasum -a 256 "$OUT/libnvencvt.dylib" | cut -c1-8) minos $minos warnings $(grep -c ': warning:' "$OUT/build.err" || true)"
