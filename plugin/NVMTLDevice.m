@@ -1945,6 +1945,13 @@ static NVMTLFunction *nvmtl_empty_fragment(void) {
 }
 MTLRenderPipelineDescriptor *nvmtl_gl_rewrite_descriptor(MTLRenderPipelineDescriptor *d, NSError **err);
 NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, NSString **err);
+NSData *nvmtl_translate_samplers_amp(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, uint32_t amp, NSString **err);
+// A copy of a translated stage that carries different SPIR-V (a variant of the same entry point).
+static NVMTLFunction *nvmtl_function_with_spirv(NVMTLFunction *src, NSData *spv) {
+    NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = spv; f->_fname = src->_fname; f->_stage = src->_stage; f->_fc = src->_fc;
+    f->_refl = src->_refl; f->_airNames = src->_airNames; f->_arguments = src->_arguments; f->_embedded = src->_embedded; return f;
+}
+
 void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
 // One line per function the first time it goes into a pipeline: the kernel/stage name, the FNV-1a of its SPIR-V (what a
 // per-kernel GPU profile keys a row on) and the sha256 of its AIR (what the translator caches key a module on), so a
@@ -2073,6 +2080,30 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
             static _Atomic unsigned na8; if (atomic_fetch_add(&na8, 1) < 8)
                 nvlog("pipeline: %s writes alpha into A8 target(s) mask %#x (%lu B variant)", ff->_fname.UTF8String, a8mask, (unsigned long)fa.length);
         }
+    }
+    // Vertex amplification (NVMTL_VERTEX_AMPLIFICATION=1): the descriptor's maxVertexAmplificationCount is the number of
+    // views the pipeline's render pass runs. Both stages are re-translated for that count so the view index reads the
+    // Vulkan view index; a stage with no AIR left is already a variant and is used as it is.
+    if (nvmtl_vk_multiview_views() && [d respondsToSelector:@selector(maxVertexAmplificationCount)] && d.maxVertexAmplificationCount > 1) {
+        const uint32_t want = (uint32_t)d.maxVertexAmplificationCount, mask = nvmtl_mv_mask_for_count(want, nvmtl_vk_multiview_views());
+        if (!mask) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: REFUSED - vertex amplification count %u is more views than this device can run in one pass (%u)", want, nvmtl_vk_multiview_views()]);
+        if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &(uint32_t){0}, &(uint32_t){0}))
+            return nvmtl_fail(err, @"pipeline: REFUSED - vertex amplification with tessellation is not carried");
+        const char *mvwhy = nvmtl_mv_vertex_refusal(vf->_spirv.bytes, vf->_spirv.length / 4);
+        if (mvwhy) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: REFUSED - %s (%@)", mvwhy, vf->_fname]);
+        NSString *mw = nil;
+        if (vf->_air) {
+            NSData *va = nvmtl_translate_samplers_amp(vf, nil, 0, want, &mw);
+            if (!va) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: amplified variant of %@ REFUSED: %@", vf->_fname, mw ?: @"?"]);
+            vf = nvmtl_function_with_spirv(vf, va);
+        }
+        if (!noFrag && ff->_air) {
+            NSData *fa = nvmtl_translate_samplers_amp(ff, nil, a8mask, want, &mw);
+            if (!fa) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: amplified variant of %@ REFUSED: %@", ff->_fname, mw ?: @"?"]);
+            ffx = nvmtl_function_with_spirv(ff, fa);
+        }
+        rt.view_mask = mask;
+        static _Atomic unsigned nmv; if (atomic_fetch_add(&nmv, 1) < 8) nvlog("pipeline: vertex amplification %u views (mask 0x%x) for %s / %s", want, mask, vf->_fname.UTF8String ?: "?", ff->_fname.UTF8String ?: "?");
     }
     uint32_t rsc = (uint32_t)([d respondsToSelector:@selector(rasterSampleCount)] ? d.rasterSampleCount : d.sampleCount); if (!rsc) rsc = 1;
     NSData *flk = nvmtl_varying_link(vf, ffx); const void *fsb = flk ? flk.bytes : ffx->_spirv.bytes; size_t fsl = flk ? flk.length : ffx->_spirv.length;

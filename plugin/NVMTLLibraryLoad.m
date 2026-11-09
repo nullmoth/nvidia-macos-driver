@@ -2515,11 +2515,19 @@ NSData *nvmtl_translate_variant(NVMTLFunction *fn, NSDictionary *states, NSDicti
 }
 
 // a8: Metal A8Unorm colour attachments (bit per location); the variant writes the output's alpha into the R8 lane.
+NSData *nvmtl_translate_samplers_amp(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, uint32_t amp, NSString **err);
 NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, NSString **err) {
-    if (!states.count && !a8) return fn->_spirv;
-    if (!fn->_air && !states.count) return fn->_spirv;   // already a specialised variant (no AIR kept): nothing more to apply
+    return nvmtl_translate_samplers_amp(fn, states, a8, 0, err);
+}
+// amp: the vertex amplification count of the pipeline (2 or more makes a multiview variant; 0 and 1 are the ordinary shader).
+NSData *nvmtl_translate_samplers_amp(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, uint32_t amp, NSString **err) {
+    if (amp < 2) amp = 0;
+    if (!states.count && !a8 && !amp) return fn->_spirv;
+    if (!fn->_air && !states.count && !amp) return fn->_spirv;   // already a specialised variant (no AIR kept): nothing more to apply
     if (!fn->_air || !nvmtl_xlate_ready() || !xlate_sampler) { if(err)*err=@"sampler specialization has no AIR or translator";return nil; }
-    NSData *json=[NSJSONSerialization dataWithJSONObject:@{@"samplers":states ?: @{},@"constants":fn->_fc ?: @{},@"a8_targets":@(a8)} options:NSJSONWritingSortedKeys error:NULL];
+    NSMutableDictionary *jd=[@{@"samplers":states ?: @{},@"constants":fn->_fc ?: @{},@"a8_targets":@(a8)} mutableCopy];
+    if (amp) jd[@"vertex_amplification"]=@(amp);   // part of the key text below, so a variant never shares a cache entry with the plain shader
+    NSData *json=[NSJSONSerialization dataWithJSONObject:jd options:NSJSONWritingSortedKeys error:NULL];
     NSString *s=[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
     // The same variant is asked for whenever a pipeline state is made again with these shaders and samplers (RenderBox
     // makes one for each icon it draws, in a fresh process per app). Kept like the compute variants.

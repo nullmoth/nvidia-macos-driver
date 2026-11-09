@@ -23,6 +23,7 @@
 #include "nvmtl_tex_upload.h"
 #include "nvmtl_cmd_refusal.h"
 #include "nvmtl_loss.h"
+#include "nvmtl_multiview.h"
 #include "nvmtl_copy_compat.h"
 #include "nvmtl_sampler_state.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
@@ -403,6 +404,7 @@ void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, siz
     X(vkCmdSetDepthBoundsTestEnable) X(vkCmdSetDepthBounds)
 static int g_dyn3;
 static int g_provoking;   /* provoking vertex is per-draw dynamic state, and the last vertex can provoke */
+static uint32_t g_mv_views;   /* multiview view count the device offers while NVMTL_VERTEX_AMPLIFICATION=1; 0 = off */
 static int g_divisor;     /* per-instance step rates (VK_KHR_vertex_attribute_divisor), up to g_max_divisor */
 static uint32_t g_max_divisor;
 static PFN_vkCmdSetProvokingVertexModeEXT pvkCmdSetProvokingVertexModeEXT;
@@ -1268,6 +1270,25 @@ static int nvmtl_vk_initialize(void)
         }
     }
     nvlog("vk: vertex step rates %s", g_divisor ? "ON (binding divisors)" : "OFF - per-instance data steps once per instance");
+    {   // Vertex amplification (setVertexAmplificationCount) runs as a multiview pass. Off unless asked for: with it off a
+        // shader that reads the view index sees the constant 0 and the pass is an ordinary one, exactly as before.
+        const char *mve = getenv("NVMTL_VERTEX_AMPLIFICATION");
+        if (mve && mve[0] == '1') {
+            PFN_vkGetPhysicalDeviceFeatures2 gpf = (PFN_vkGetPhysicalDeviceFeatures2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFeatures2");
+            PFN_vkGetPhysicalDeviceProperties2 gpp = (PFN_vkGetPhysicalDeviceProperties2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceProperties2");
+            VkPhysicalDeviceMultiviewFeatures mvq = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES };
+            VkPhysicalDeviceFeatures2 qf2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &mvq };
+            VkPhysicalDeviceMultiviewProperties mvp = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES };
+            VkPhysicalDeviceProperties2 pp = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &mvp };
+            if (gpf && gpp) { gpf(g_pdev, &qf2); gpp(g_pdev, &pp); }
+            if (mvq.multiview && mvp.maxMultiviewViewCount >= 2) {
+                v11.multiview = VK_TRUE;
+                g_mv_views = mvp.maxMultiviewViewCount > NVMTL_MV_HARD_MAX ? NVMTL_MV_HARD_MAX : mvp.maxMultiviewViewCount;
+            }
+            nvlog("vk: vertex amplification %s", g_mv_views ? "ON - multiview passes, up to the logged view count" : "requested but the device has no multiview - amplified pipelines keep a single view");
+            if (g_mv_views) nvlog("vk: multiview max views %u", g_mv_views);
+        }
+    }
     {
         PFN_vkGetPhysicalDeviceFeatures2 gpf2 = (PFN_vkGetPhysicalDeviceFeatures2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFeatures2");
         VkPhysicalDeviceVulkan12Features q12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
@@ -4917,6 +4938,7 @@ static uint32_t nvmtl_rt_shape(const nvk_pipeline *p, uint32_t cf[NVMTL_NCOL], u
     for (uint32_t i = 0; i < n; i++) cf[i] = p->cfmts[i];
     return n;
 }
+uint32_t nvmtl_vk_multiview_views(void) { return g_mv_views; }
 static VkResult nvmtl_make_render_pass(const nvk_pipeline *p, uint32_t load, VkRenderPass *out)
 {
     VkSampleCountFlagBits sc = (VkSampleCountFlagBits)(p->samples > 1 ? p->samples : 1);
@@ -4966,8 +4988,10 @@ static VkResult nvmtl_make_render_pass(const nvk_pipeline *p, uint32_t load, VkR
         { 0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
           VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, 0 },
         { 0, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT, VK_DEPENDENCY_BY_REGION_BIT } };
-    VkRenderPassCreateInfo rpci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, NULL, 0, n, atts, 1, &sp, fetch ? 3u : 2u, deps };
+          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT, VK_DEPENDENCY_BY_REGION_BIT | (p->view_mask ? VK_DEPENDENCY_VIEW_LOCAL_BIT : 0u) } };
+    // vertex amplification: one subpass that runs every view of the mask; all views are correlated (they see one scene)
+    VkRenderPassMultiviewCreateInfo mv = { VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO, NULL, 1, &p->view_mask, 0, NULL, 1, &p->view_mask };
+    VkRenderPassCreateInfo rpci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, p->view_mask ? (const void *)&mv : NULL, 0, n, atts, 1, &sp, fetch ? 3u : 2u, deps };
     return pvkCreateRenderPass(g_dev, &rpci, NULL, out);
 }
 int nvmtl_vk_pipeline_create_blend(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vkfmt, uint32_t depthfmt, const nvk_blend_state *blend, nvk_pipeline *out)
@@ -5488,6 +5512,7 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     out->has_depth = hasDepth; out->dfmt = rt->dfmt; out->cfmt = rt->ncol ? rt->cfmt[0] : 0u; out->samples = samples;
     out->ncol = rt->ncol; memcpy(out->cfmts, rt->cfmt, sizeof out->cfmts);
     out->has_stencil = rt->dfmt >= VK_FORMAT_S8_UINT && rt->dfmt <= VK_FORMAT_D32_SFLOAT_S8_UINT;
+    out->view_mask = g_mv_views ? rt->view_mask : 0u;
     for (uint32_t i = 0; samples > 1 && i < rt->ncol; i++) if (rt->cfmt[i]) out->rmask |= 1u << i;
     out->stex_hi[0] = nvmtl_spirv_stex_hi(vs, vn); out->stex_hi[1] = nvmtl_spirv_stex_hi(fs, fn);
     nvmtl_spirv_texel_mask(vs, vn, out->tbm[0]); nvmtl_spirv_texel_mask(fs, fn, out->tbm[1]);
@@ -7050,7 +7075,7 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
     // earlier encoder touched needs no wait (nvmtl_hz_clean_src).
     hz_state *hzs = NULL; int hz_nodep = 0;
     if (nvmtl_hz_mode() > 0 && !c->in_rp && (hzs = hz_get(c->cb, 1))) {
-        const int elig = nvmtl_hz_dyn_ready() && p->samples <= 1 && ps->layers <= 1 && !p->fetch_mask && !c->hz_force_full && pattern.count <= 1;
+        const int elig = nvmtl_hz_dyn_ready() && p->samples <= 1 && ps->layers <= 1 && !p->view_mask && !p->fetch_mask && !c->hz_force_full && pattern.count <= 1;
         hz_nodep = hz_pass_decide(c, hzs, ps, p, ncol, cf, elig);
     }
     if (p->has_depth && ps->ds) {
@@ -7149,8 +7174,10 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
         views[nviews++] = (VkImageView)ps->resview[i]; ps->res[i]->layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     }
     if (dres) { views[nviews++] = (VkImageView)ps->dresview; if (ps->dres) ps->dres->layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; }
+    const char *mvwhy = NULL; const uint32_t fblayers = nvmtl_mv_framebuffer_layers(p->view_mask, ps->layers, &mvwhy);
+    if (!fblayers) { nvlog("begin_render: vertex amplification: %s (%u layer(s), views 0x%x) - pass REFUSED", mvwhy, ps->layers, p->view_mask); return -1; }
     VkFramebufferCreateInfo fci = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, NULL, 0, rpShape ? (VkRenderPass)rpShape : p->rp,
-        nviews, views, ps->w, ps->h, ps->layers > 1 ? ps->layers : 1 };
+        nviews, views, ps->w, ps->h, fblayers };
     VkFramebuffer fb = VK_NULL_HANDLE;
     VKCK(pvkCreateFramebuffer(g_dev, &fci, NULL, &fb), "vkCreateFramebuffer");
     c->fb = fb;
@@ -7275,7 +7302,7 @@ void nvmtl_vk_pipeline_sig(const nvk_pipeline *p, nvk_rtsig *out)
     uint32_t rmask; memset(out, 0, sizeof *out);
     out->ncol = nvmtl_rt_shape(p, out->cfmts, &rmask);
     while (out->ncol && !out->cfmts[out->ncol - 1]) out->ncol--;
-    out->has_depth = p->has_depth ? 1u : 0u; out->dfmt = p->has_depth ? p->dfmt : 0u; out->samples = p->samples > 1 ? p->samples : 1u;
+    out->has_depth = p->has_depth ? 1u : 0u; out->dfmt = p->has_depth ? p->dfmt : 0u; out->samples = p->samples > 1 ? p->samples : 1u; out->view_mask = p->view_mask;
 }
 int nvmtl_vk_pipeline_compatible(const nvk_rtsig *sig, const nvk_pipeline *p)
 { nvk_rtsig s; nvmtl_vk_pipeline_sig(p, &s); return !memcmp(&s, sig, sizeof s); }
@@ -7383,18 +7410,18 @@ static VkResult nvmtl_make_render_pass_shape(const nvk_pipeline *p, uint32_t loa
                                              cref[i].attachment != VK_ATTACHMENT_UNUSED ? VK_IMAGE_ASPECT_COLOR_BIT : 0 };
     }
     VkSubpassDescription2 sp = { VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2, drref.attachment != VK_ATTACHMENT_UNUSED ? (const void *)&dsr : NULL, 0,
-        VK_PIPELINE_BIND_POINT_GRAPHICS, 0, fetch ? ncol : 0, fetch ? iref2 : NULL, ncol, ncol ? cref : NULL, anyres ? rref : NULL, p->has_depth ? &dref : NULL, 0, NULL };
+        VK_PIPELINE_BIND_POINT_GRAPHICS, p->view_mask, fetch ? ncol : 0, fetch ? iref2 : NULL, ncol, ncol ? cref : NULL, anyres ? rref : NULL, p->has_depth ? &dref : NULL, 0, NULL };
     const VkSubpassDependency2 deps2[3] = {
         { VK_STRUCTURE_TYPE_SUBPASS_DEPENDENCY_2, NULL, VK_SUBPASS_EXTERNAL, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
           VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, 0, 0 },
         { VK_STRUCTURE_TYPE_SUBPASS_DEPENDENCY_2, NULL, 0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
           VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, 0, 0 },
         { VK_STRUCTURE_TYPE_SUBPASS_DEPENDENCY_2, NULL, 0, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0 } };
-    VkRenderPassCreateInfo2 rci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2, NULL, 0, n, atts, 1, &sp, fetch ? 3u : 2u, deps2, 0, NULL };
+          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT, VK_DEPENDENCY_BY_REGION_BIT | (p->view_mask ? VK_DEPENDENCY_VIEW_LOCAL_BIT : 0u), 0 } };
+    VkRenderPassCreateInfo2 rci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2, NULL, 0, n, atts, 1, &sp, fetch ? 3u : 2u, deps2, p->view_mask ? 1u : 0u, p->view_mask ? &p->view_mask : NULL };
     return pvkCreateRenderPass2(g_dev, &rci, NULL, out);
 }
-typedef struct { uint64_t identity; uint32_t load, prm, dmode, smode; void *rp; } nvmtl_shape_rp;
+typedef struct { uint64_t identity; uint32_t load, prm, dmode, smode, vmask; void *rp; } nvmtl_shape_rp;
 static uint64_t g_shape_identity;
 static nvmtl_shape_rp *g_srp; static uint32_t g_nsrp, g_csrp;
 #define NVMTL_SRP_MAX 65536
@@ -7411,7 +7438,7 @@ static void *nvmtl_rp_shape_variant(nvk_pipeline *p, uint32_t load, uint32_t prm
         p->shape_identity = ++g_shape_identity;
     }
     for (uint32_t i = 0; i < g_nsrp; i++)
-        if (g_srp[i].identity == p->shape_identity && g_srp[i].load == load && g_srp[i].prm == prm && g_srp[i].dmode == dmode && g_srp[i].smode == smode) { rp = g_srp[i].rp; break; }
+        if (g_srp[i].identity == p->shape_identity && g_srp[i].vmask == p->view_mask && g_srp[i].load == load && g_srp[i].prm == prm && g_srp[i].dmode == dmode && g_srp[i].smode == smode) { rp = g_srp[i].rp; break; }
     if (!rp && g_nsrp == g_csrp && g_csrp < NVMTL_SRP_MAX) {
         uint32_t cap = g_csrp ? g_csrp * 2u : 16u;
         nvmtl_shape_rp *gx = (nvmtl_shape_rp *)realloc(g_srp, cap * sizeof *gx);
@@ -7421,7 +7448,7 @@ static void *nvmtl_rp_shape_variant(nvk_pipeline *p, uint32_t load, uint32_t prm
         VkRenderPass made = VK_NULL_HANDLE;
         VkResult r = nvmtl_make_render_pass_shape(p, load, prm, dmode, smode, &made);
         if (r == VK_SUCCESS) {
-            g_srp[g_nsrp++] = (nvmtl_shape_rp){ p->shape_identity, load, prm, dmode, smode, (void *)made }; rp = (void *)made;
+            g_srp[g_nsrp++] = (nvmtl_shape_rp){ p->shape_identity, load, prm, dmode, smode, p->view_mask, (void *)made }; rp = (void *)made;
             nvlog("vk: par1 resolve-shape render pass made (%u colour slot(s), %u samples, resolves colour 0x%x of 0x%x, depth filter %d, stencil filter %d, load 0x%x)",
                   ncol, p->samples, prm, rmask, (int)dmode - 1, (int)smode - 1, load);
         } else nvlog("vk: par1 resolve-shape vkCreateRenderPass2 -> %d (%s)", r, pvkCreateRenderPass2 ? "the device refused it" : "vkCreateRenderPass2 not loaded");

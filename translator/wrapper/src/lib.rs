@@ -891,13 +891,17 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
         let mut opts=formatless_options(ll,st,CAPS.load(Ordering::Relaxed)).unwrap_or_default();
         let a8=j["a8_targets"].as_u64().unwrap_or(0) as u32;   // Metal A8Unorm colour attachments, bit per location
         opts=opts.with_a8_render_targets(a8);
+        // Vertex amplification: the pipeline's render pass runs this many views (VK_KHR_multiview); the shader's view
+        // index reads the Vulkan view index. 0 or 1 keeps the single-view translation (a view index reads constant 0).
+        let amp=j["vertex_amplification"].as_u64().unwrap_or(0).min(32) as u32;
+        if amp>1 { opts.vertex_amplification_count=amp; }
         let mut used=0;
         for (idx,state) in states {
             if reflection.bindings.iter().any(|b| b.kind==metal2vulkan::reflect::ResourceKind::Sampler && b.metal_index==idx) {
                 opts=opts.with_runtime_sampler(idx,state)?;used+=1;
             }
         }
-        if used==0 && a8==0{return translate_one(ll,st)}
+        if used==0 && a8==0 && amp<=1{return translate_one(ll,st)}
         let opts=apply_tg(opts);
         translate_with_pointer_retry(ll, |ll| {
             metal2vulkan::translate_native_no_retry_constructed_with_options(ll,st,opts)

@@ -2008,6 +2008,7 @@ NSData *nvmtl_translate_with_fc_cached(NSString *air, NSString *stage, NSString 
 id gNVMTLMainDevice = nil;
 
 extern NSData *nvmtl_translate_samplers(NVMTLFunction *, NSDictionary *, uint32_t, NSString **);
+extern NSData *nvmtl_translate_samplers_amp(NVMTLFunction *, NSDictionary *, uint32_t, uint32_t, NSString **);
 extern NSData *nvmtl_translate_variant(NVMTLFunction *, NSDictionary *, NSDictionary *, NSString **);
 // facts about a module's text that newFunctionWithName asks for on every call; kept on the text (NVMTLLibraryLoad.m)
 enum { NVMTL_AIRF_KNOWN = 1, NVMTL_AIRF_DYLD_TABLE = 2, NVMTL_AIRF_ISECT_TABLE = 4 };
@@ -3750,7 +3751,8 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
                 NVMTLFunction *vf=_ps->_linkedVert?:(id)_ps->_descriptor.vertexFunction,*ff=_ps->_linkedFrag?:(id)_ps->_descriptor.fragmentFunction;
                 NSString *why=nil;
                 NSString *gk=nvmtl_sampvar_key(_ps->_descriptor,vf,ff,key); selected=nvmtl_sampvar_get(gk);
-                NSData *v=selected?nil:nvmtl_translate_samplers(vf,vS,0,&why),*f=(selected||!v)?nil:(ff?nvmtl_translate_samplers(ff,fS,_ps->_a8mask,&why):[NSData data]);
+                const uint32_t amp=nvmtl_mv_popcount(_ps->_p.view_mask);   // an amplified pipeline's variants stay multiview shaders
+                NSData *v=selected?nil:nvmtl_translate_samplers_amp(vf,vS,0,amp,&why),*f=(selected||!v)?nil:(ff?nvmtl_translate_samplers_amp(ff,fS,_ps->_a8mask,amp,&why):[NSData data]);
                 if(v && f) {
                     NVMTLFunction *vs=[NVMTLFunction new],*fs=ff?[NVMTLFunction new]:nil;
                     vs->_spirv=v;vs->_fname=vf->_fname;vs->_stage=vf->_stage;
@@ -3770,8 +3772,25 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     }
     return selected;
 }
+- (void)setVertexAmplificationCount:(NSUInteger)count viewMappings:(const MTLVertexAmplificationViewMapping *)m {
+    if (count > NVMTL_MV_HARD_MAX) count = NVMTL_MV_HARD_MAX;
+    _ampCount = (uint32_t)count; _ampWhy = NULL;
+    if (count < 2) return;
+    if (!nvmtl_vk_multiview_views()) {
+        static int said; if (!said++) nvlog("encoder: setVertexAmplificationCount:%lu with vertex amplification OFF (NVMTL_VERTEX_AMPLIFICATION=1 turns it on) - draws render one view", (unsigned long)count);
+        return;
+    }
+    nvmtl_mv_mapping map[NVMTL_MV_HARD_MAX];
+    for (NSUInteger i = 0; m && i < count; i++) map[i] = (nvmtl_mv_mapping){ (uint32_t)m[i].renderTargetArrayIndexOffset, (uint32_t)m[i].viewportArrayIndexOffset };
+    _ampWhy = nvmtl_mv_mappings_refusal((uint32_t)count, m ? map : NULL);
+    if (_ampWhy) { static int said; if (said++ < 8) nvlog("encoder: vertex amplification view mappings not carried: %s - amplified draws are refused", _ampWhy); }
+}
 - (BOOL)nvmtlBindSamplerPipeline {
     if (!_ps) return NO;
+    if (_ps->_p.view_mask) {   // an amplified pipeline: the encoder must have asked for the views it renders
+        const char *why = _ampWhy ?: nvmtl_mv_draw_refusal(_ps->_p.view_mask, _ampCount ? _ampCount : 1u);
+        if (why) { static int said; if (said++ < 16) nvlog("encoder: amplified draw REFUSED (pipeline views 0x%x, encoder count %u): %s", _ps->_p.view_mask, _ampCount, why); return NO; }
+    }
     if (_cb->_c.hz_draw_due || _cb->_c.hz_wm_dirty) {   // hazard model: only a draw with something new is checked
       const int hzr = nvmtl_hz_draw(&_cb->_c);   // 1: restart behind a barrier; 2: a restart storm, keep a render pass
       if (hzr == 1) [self nvmtlHzRestart:NO]; else if (hzr == 2) [self nvmtlHzRestart:YES];
