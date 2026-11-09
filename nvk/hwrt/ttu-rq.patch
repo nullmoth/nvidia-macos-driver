@@ -1,6 +1,6 @@
 diff -ruN a/src/nouveau/vulkan/bvh/encode.comp b/src/nouveau/vulkan/bvh/encode.comp
---- a/src/nouveau/vulkan/bvh/encode.comp	2026-11-08 23:38:58
-+++ b/src/nouveau/vulkan/bvh/encode.comp	2026-11-08 23:38:58
+--- a/src/nouveau/vulkan/bvh/encode.comp	2026-11-08 23:44:12
++++ b/src/nouveau/vulkan/bvh/encode.comp	2026-11-08 23:44:12
 @@ -194,6 +194,6 @@
        DEREF(header).compacted_size = args.bvh_size;
        /* vk_accel_struct_serialization_header: two UUIDs, three uint64 = 56 bytes, then one uint64 per instance */
@@ -11,8 +11,8 @@ diff -ruN a/src/nouveau/vulkan/bvh/encode.comp b/src/nouveau/vulkan/bvh/encode.c
  }
 diff -ruN a/src/nouveau/vulkan/bvh/encode_ttu.comp b/src/nouveau/vulkan/bvh/encode_ttu.comp
 --- a/src/nouveau/vulkan/bvh/encode_ttu.comp	1969-12-31 16:00:00
-+++ b/src/nouveau/vulkan/bvh/encode_ttu.comp	2026-11-08 23:38:58
-@@ -0,0 +1,240 @@
++++ b/src/nouveau/vulkan/bvh/encode_ttu.comp	2026-11-08 23:44:12
+@@ -0,0 +1,241 @@
 +/*
 + * encode_ttu.comp - the hardware half of an acceleration structure build (docs/HWRT.md).
 + *
@@ -249,13 +249,14 @@ diff -ruN a/src/nouveau/vulkan/bvh/encode_ttu.comp b/src/nouveau/vulkan/bvh/enco
 +      put64(hw, NVK_HWL_OFF_SENTINEL, ~0ul);
 +      put32(hw, NVK_HWL_OFF_NODES, NVK_HWL_NODES_VALUE);
 +      put32(hw, NVK_HWL_OFF_GEOMS, tlas ? 0u : args.geometry_count);
++      put32(hw, NVK_HWL_OFF_PRIMS, leaf_count);
 +      put64(hw, NVK_HWL_OFF_SELF, hw);
 +      DEREF(REF(nvk_bvh_header)(args.output_bvh)).hw_offset = args.hw_offset;
 +   }
 +}
 diff -ruN a/src/nouveau/vulkan/bvh/meson.build b/src/nouveau/vulkan/bvh/meson.build
---- a/src/nouveau/vulkan/bvh/meson.build	2026-11-08 23:38:58
-+++ b/src/nouveau/vulkan/bvh/meson.build	2026-11-08 23:38:58
+--- a/src/nouveau/vulkan/bvh/meson.build	2026-11-08 23:44:12
++++ b/src/nouveau/vulkan/bvh/meson.build	2026-11-08 23:44:12
 @@ -4,6 +4,10 @@
      'encode.comp',
      'nvk_encode',
@@ -277,8 +278,8 @@ diff -ruN a/src/nouveau/vulkan/bvh/meson.build b/src/nouveau/vulkan/bvh/meson.bu
    nvk_vk_bvh_include_dir + '/vk_bvh_defines.h',
  )
 diff -ruN a/src/nouveau/vulkan/bvh/nvk_build_interface.h b/src/nouveau/vulkan/bvh/nvk_build_interface.h
---- a/src/nouveau/vulkan/bvh/nvk_build_interface.h	2026-11-08 23:38:58
-+++ b/src/nouveau/vulkan/bvh/nvk_build_interface.h	2026-11-08 23:38:58
+--- a/src/nouveau/vulkan/bvh/nvk_build_interface.h	2026-11-08 23:44:12
++++ b/src/nouveau/vulkan/bvh/nvk_build_interface.h	2026-11-08 23:44:12
 @@ -24,4 +24,20 @@
     uint32_t padding;
  };
@@ -301,8 +302,8 @@ diff -ruN a/src/nouveau/vulkan/bvh/nvk_build_interface.h b/src/nouveau/vulkan/bv
 +
  #endif /* NVK_BVH_BUILD_INTERFACE_H */
 diff -ruN a/src/nouveau/vulkan/meson.build b/src/nouveau/vulkan/meson.build
---- a/src/nouveau/vulkan/meson.build	2026-11-08 23:38:58
-+++ b/src/nouveau/vulkan/meson.build	2026-11-08 23:38:58
+--- a/src/nouveau/vulkan/meson.build	2026-11-08 23:44:12
++++ b/src/nouveau/vulkan/meson.build	2026-11-08 23:44:12
 @@ -32,6 +32,8 @@
  nvk_files = files(
    'nvk_acceleration_structure.c',
@@ -313,8 +314,8 @@ diff -ruN a/src/nouveau/vulkan/meson.build b/src/nouveau/vulkan/meson.build
    'nvk_nir_ray_tracing.c',
    'nvk_nir_ray_tracing.h',
 diff -ruN a/src/nouveau/vulkan/nvk_acceleration_structure.c b/src/nouveau/vulkan/nvk_acceleration_structure.c
---- a/src/nouveau/vulkan/nvk_acceleration_structure.c	2026-11-08 23:38:58
-+++ b/src/nouveau/vulkan/nvk_acceleration_structure.c	2026-11-08 23:38:58
+--- a/src/nouveau/vulkan/nvk_acceleration_structure.c	2026-11-08 23:44:12
++++ b/src/nouveau/vulkan/nvk_acceleration_structure.c	2026-11-08 23:44:12
 @@ -17,6 +17,8 @@
   *
   * Copyright © 2023 Valve Corporation (the lavapipe implementation this follows) — SPDX-License-Identifier: MIT
@@ -548,8 +549,8 @@ diff -ruN a/src/nouveau/vulkan/nvk_acceleration_structure.c b/src/nouveau/vulkan
  
  VKAPI_ATTR void VKAPI_CALL
 diff -ruN a/src/nouveau/vulkan/nvk_bvh.h b/src/nouveau/vulkan/nvk_bvh.h
---- a/src/nouveau/vulkan/nvk_bvh.h	2026-11-08 23:38:58
-+++ b/src/nouveau/vulkan/nvk_bvh.h	2026-11-08 23:38:58
+--- a/src/nouveau/vulkan/nvk_bvh.h	2026-11-08 23:44:12
++++ b/src/nouveau/vulkan/nvk_bvh.h	2026-11-08 23:44:12
 @@ -81,7 +81,8 @@
     uint32_t serialization_size;
     uint32_t instance_count;
@@ -562,7 +563,7 @@ diff -ruN a/src/nouveau/vulkan/nvk_bvh.h b/src/nouveau/vulkan/nvk_bvh.h
  #define NVK_BVH_HEADER_SIZE      48
 diff -ruN a/src/nouveau/vulkan/nvk_hwrt.h b/src/nouveau/vulkan/nvk_hwrt.h
 --- a/src/nouveau/vulkan/nvk_hwrt.h	1969-12-31 16:00:00
-+++ b/src/nouveau/vulkan/nvk_hwrt.h	2026-11-08 23:38:58
++++ b/src/nouveau/vulkan/nvk_hwrt.h	2026-11-08 23:44:12
 @@ -0,0 +1,65 @@
 +/*
 + * nvk_hwrt.h - the hardware ray-traversal part of an acceleration structure (docs/HWRT.md in the driver repository).
@@ -631,8 +632,8 @@ diff -ruN a/src/nouveau/vulkan/nvk_hwrt.h b/src/nouveau/vulkan/nvk_hwrt.h
 +#endif /* NVK_HWRT_H */
 diff -ruN a/src/nouveau/vulkan/nvk_hwrt_layout.h b/src/nouveau/vulkan/nvk_hwrt_layout.h
 --- a/src/nouveau/vulkan/nvk_hwrt_layout.h	1969-12-31 16:00:00
-+++ b/src/nouveau/vulkan/nvk_hwrt_layout.h	2026-11-08 23:38:58
-@@ -0,0 +1,44 @@
++++ b/src/nouveau/vulkan/nvk_hwrt_layout.h	2026-11-08 23:44:12
+@@ -0,0 +1,45 @@
 +/*
 + * nvk_hwrt_layout.h - the hardware structure the RT cores walk, layout generation NVK_HWRT_LAYOUT_PROVISIONAL.
 + *
@@ -653,10 +654,11 @@ diff -ruN a/src/nouveau/vulkan/nvk_hwrt_layout.h b/src/nouveau/vulkan/nvk_hwrt_l
 +#define NVK_HWL_OFF_SENTINEL   0x040u        /* MEASURED: u64 all ones */
 +#define NVK_HWL_OFF_NODES      0x048u        /* MEASURED: u32, 0x180 in every recorded build */
 +#define NVK_HWL_OFF_GEOMS      0x058u        /* MEASURED: u32, geometry count */
++#define NVK_HWL_OFF_PRIMS      0x060u        /* MEASURED: u32, primitive count (1, 2, 4, 8, 16, 32, 64 in the recorded builds) */
 +#define NVK_HWL_OFF_SELF       0x0d0u        /* MEASURED: u64, the structure's own device address */
 +#define NVK_HWL_NODES_VALUE    0x180u
 +
-+#define NVK_HWL_HEADER_SIZE    0x400u        /* PROVISIONAL: header and frame, before the first node */
++#define NVK_HWL_HEADER_SIZE    0x380u        /* MEASURED: the root node is at 0x380 in every recorded build; header and frame precede it */
 +#define NVK_HWL_NODE_SIZE      128u          /* MEASURED: node stride */
 +#define NVK_HWL_TRI_LEAF_SIZE  64u           /* PROVISIONAL */
 +#define NVK_HWL_BOX_LEAF_SIZE  64u           /* PROVISIONAL */
@@ -678,8 +680,8 @@ diff -ruN a/src/nouveau/vulkan/nvk_hwrt_layout.h b/src/nouveau/vulkan/nvk_hwrt_l
 +
 +#endif
 diff -ruN a/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c b/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c
---- a/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c	2026-11-08 23:38:58
-+++ b/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c	2026-11-08 23:38:58
+--- a/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c	2026-11-08 23:44:12
++++ b/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c	2026-11-08 23:44:12
 @@ -5,11 +5,14 @@
  
  #include "nvk_nir_ray_tracing.h"
@@ -825,7 +827,7 @@ diff -ruN a/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c b/src/nouveau/vulkan/
        .cull_mask = rq_load_var(b, index, vars->cull_mask),
        .origin = rq_load_var(b, index, vars->origin),
        .tmin = rq_load_var(b, index, vars->tmin),
-@@ -589,18 +674,204 @@
+@@ -589,18 +674,207 @@
        .data = &data,
     };
  
@@ -871,8 +873,11 @@ diff -ruN a/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c b/src/nouveau/vulkan/
 +   nir_def *no_cull_no_opaque = nir_ieq_imm(b, nir_iand_imm(b, flags, SpvRayFlagsCullNoOpaqueKHRMask), 0);
 +   nir_def *skip_triangles = nir_test_mask(b, flags, SpvRayFlagsSkipTrianglesKHRMask);
 +
-+   nir_push_loop(b);
++   nir_loop *loop = nir_push_loop(b);
 +   {
++      /* a continue needs the loop's continue block (nir_lower_continue_constructs removes it again) */
++      nir_loop_add_continue_construct(loop);
++
 +      nir_push_if(b, nir_ieq_imm(b, rq_load_var(b, index, vars->hw_phase), 0));
 +      {
 +         nir_def *tmin = rq_load_var(b, index, vars->hw_tmin);
@@ -1033,7 +1038,7 @@ diff -ruN a/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c b/src/nouveau/vulkan/
  lower_rq_terminate(nir_builder *b, nir_def *index, nir_intrinsic_instr *instr,
                     struct ray_query_vars *vars)
  {
-@@ -680,7 +951,8 @@
+@@ -680,7 +954,8 @@
                 new_dest = lower_rq_load(&builder, index, intrinsic, vars);
                 break;
              case nir_intrinsic_rq_proceed:
