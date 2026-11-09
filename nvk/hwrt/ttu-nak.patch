@@ -1,0 +1,352 @@
+diff -ruN tree.orig/src/compiler/nir/nir_divergence_analysis.c tree/src/compiler/nir/nir_divergence_analysis.c
+--- tree.orig/src/compiler/nir/nir_divergence_analysis.c	2026-10-24 06:44:44
++++ tree/src/compiler/nir/nir_divergence_analysis.c	2026-10-24 06:50:58
+@@ -1082,6 +1082,7 @@
+    case nir_intrinsic_end_primitive_nv:
+    case nir_intrinsic_report_ray_intersection:
+    case nir_intrinsic_rq_proceed:
++   case nir_intrinsic_ttu_query_nv:
+    case nir_intrinsic_rq_load:
+    case nir_intrinsic_load_ray_triangle_vertex_positions:
+    case nir_intrinsic_cmat_extract:
+diff -ruN tree.orig/src/compiler/nir/nir_intrinsics.py tree/src/compiler/nir/nir_intrinsics.py
+--- tree.orig/src/compiler/nir/nir_intrinsics.py	2026-10-24 06:44:44
++++ tree/src/compiler/nir/nir_intrinsics.py	2026-10-24 06:50:58
+@@ -3141,6 +3141,13 @@
+ # Moves a 8x8 16bit matrix with transposition within a subgroup
+ intrinsic("cmat_mov_transpose_nv", src_comp=[2], dest_comp=2, bit_sizes=[16], flags=[CAN_ELIMINATE, CAN_REORDER, SUBGROUP])
+ 
++# One hardware ray-traversal query on Blackwell's RT core (TTU). The five sources are the 16-byte TTU input
++# blocks the backend stores at TTU offsets 0, 64, 80, 128 and 512 (ray header, origin+tmin, direction+tmax,
++# instance-level header, root handle); the result is the last four 16-byte TTU output blocks, read back from
++# offsets 976, 800, 784 and 768. The backend emits the whole open/store/go/load sequence as one indivisible
++# region, so nothing can be scheduled into it. FLAGS bit 0 = open with .init (a fresh traversal).
++intrinsic("ttu_query_nv", src_comp=[4, 4, 4, 4, 4], dest_comp=16, indices=[FLAGS], bit_sizes=[32])
++
+ # NVIDIA-specific system values
+ system_value("warps_per_sm_nv", 1, bit_sizes=[32])
+ system_value("sm_count_nv", 1, bit_sizes=[32])
+diff -ruN tree.orig/src/nouveau/compiler/nak/calc_instr_deps.rs tree/src/nouveau/compiler/nak/calc_instr_deps.rs
+--- tree.orig/src/nouveau/compiler/nak/calc_instr_deps.rs	2026-10-24 06:44:44
++++ tree/src/nouveau/compiler/nak/calc_instr_deps.rs	2026-10-24 06:56:56
+@@ -654,7 +654,16 @@
+                 // Execution predicates are handled immediately and we don't
+                 // need barriers for them, regardless of whether or not it's a
+                 // fixed-latency instruction.
+-                let mut waits = Vec::new();
++                //
++                // A TTU query region signals scoreboards 0-5 itself for its
++                // result loads, so everything still in flight must land
++                // before it starts.
++                let mut waits: Vec<usize> =
++                    if matches!(instr.op, Op::TtuQuery(_)) {
++                        deps.active.iter().cloned().collect()
++                    } else {
++                        Vec::new()
++                    };
+                 uses.for_each_instr_pred_mut(instr, |u| {
+                     let u = u.clear_write();
+                     waits.extend_from_slice(u.deps());
+diff -ruN tree.orig/src/nouveau/compiler/nak/from_nir.rs tree/src/nouveau/compiler/nak/from_nir.rs
+--- tree.orig/src/nouveau/compiler/nak/from_nir.rs	2026-10-24 06:44:44
++++ tree/src/nouveau/compiler/nak/from_nir.rs	2026-10-24 06:58:31
+@@ -2250,6 +2250,27 @@
+     ) {
+         let srcs = intrin.srcs_as_slice();
+         match intrin.intrinsic {
++            nir_intrinsic_ttu_query_nv => {
++                assert!(b.sm() == 120, "TTU queries are only encoded for SM120");
++                let srcs: [Src; 5] = std::array::from_fn(|i| {
++                    assert!(srcs[i].num_components() == 4);
++                    assert!(srcs[i].bit_size() == 32);
++                    self.get_src(&srcs[i])
++                });
++                let blocks: [SSARef; 6] =
++                    std::array::from_fn(|_| b.alloc_ssa_vec(RegFile::GPR, 4));
++                b.push_op(OpTtuQuery {
++                    srcs,
++                    dsts: blocks.clone().map(|block| block.into()),
++                    initialize: intrin.flags() & 1 != 0,
++                });
++                // The NIR result is the blocks at 976, 800, 784 and 768.
++                let mut result = Vec::with_capacity(16);
++                for block in &blocks[2..] {
++                    result.extend_from_slice(&block[..]);
++                }
++                self.set_ssa(&intrin.def, result);
++            }
+             nir_intrinsic_al2p_nv => {
+                 let offset = self.get_src(&srcs[0]);
+                 let addr = u16::try_from(intrin.base()).unwrap();
+diff -ruN tree.orig/src/nouveau/compiler/nak/ir.rs tree/src/nouveau/compiler/nak/ir.rs
+--- tree.orig/src/nouveau/compiler/nak/ir.rs	2026-10-24 06:44:44
++++ tree/src/nouveau/compiler/nak/ir.rs	2026-10-24 07:00:10
+@@ -8079,8 +8079,41 @@
+     }
+ }
+ 
++/// One hardware traversal query on the SM120 RT core (TTU).
++///
++/// The TTU holds a per-lane context that the open/store/go/load instructions
++/// read and write without naming it, so the whole sequence is a single op:
++/// register allocation and scheduling can place its inputs before it and its
++/// results after it, but never put an instruction inside it. The encoder
++/// emits the 15-instruction region measured on an RTX 5060 for one query
++/// (TTUOPEN, TTUCCTL, 5 TTUST, TTUGO, 6 TTULD, scoreboard drain).
++///
++/// srcs are the TTU input blocks at offsets 0, 64, 80, 128 and 512. dsts[0]
++/// and dsts[1] receive the blocks at 896 and 960 (loaded because the protocol
++/// reads all six); dsts[2..6] are the blocks at 976, 800, 784 and 768.
++#[repr(C)]
++#[derive(SrcsAsSlice, DstsAsSlice)]
++pub struct OpTtuQuery {
++    #[src_type(GPR)]
++    pub srcs: [Src; 5],
++    pub dsts: [Dst; 6],
++    pub initialize: bool,
++}
++
++impl DisplayOp for OpTtuQuery {
++    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "ttu.query{}", if self.initialize { ".init" } else { "" })?;
++        for src in &self.srcs {
++            write!(f, " {}", src)?;
++        }
++        Ok(())
++    }
++}
++impl_display_for_op!(OpTtuQuery);
++
+ #[derive(DisplayOp, DstsAsSlice, SrcsAsSlice, FromVariants)]
+ pub enum Op {
++    TtuQuery(Box<OpTtuQuery>),
+     FAdd(Box<OpFAdd>),
+     FFma(Box<OpFFma>),
+     FMnMx(Box<OpFMnMx>),
+@@ -8249,6 +8282,8 @@
+ 
+     pub fn has_fixed_latency(&self, sm: u8) -> bool {
+         match self {
++            // The region drains its own result scoreboards before it ends.
++            Op::TtuQuery(_) => true,
+             // Float ALU
+             Op::F2FP(_)
+             | Op::FAdd(_)
+@@ -8428,6 +8463,7 @@
+ 
+     pub fn is_virtual(&self) -> bool {
+         match self {
++            Op::TtuQuery(_) => false,
+             // Float ALU
+             Op::F2FP(_)
+             | Op::FAdd(_)
+@@ -8912,6 +8948,8 @@
+ 
+     pub fn uses_global_mem(&self) -> bool {
+         match &self.op {
++            // The TTU reads the acceleration structure from global memory.
++            Op::TtuQuery(_) => true,
+             Op::Atom(op) => op.mem_space != MemSpace::Local,
+             Op::Ld(op) => op.access.space != MemSpace::Local,
+             Op::St(op) => op.access.space != MemSpace::Local,
+@@ -8935,7 +8973,9 @@
+ 
+     pub fn can_eliminate(&self) -> bool {
+         match &self.op {
+-            Op::ASt(_)
++            // Opens and closes the lane's TTU context; never drop half of it.
++            Op::TtuQuery(_)
++            | Op::ASt(_)
+             | Op::SuSt(_)
+             | Op::SuStGa(_)
+             | Op::SuAtom(_)
+@@ -8990,6 +9030,7 @@
+ 
+     pub fn ftz(&self) -> bool {
+         match &self.op {
++            Op::TtuQuery(_) => false,
+             Op::F2F(op) => op.ftz,
+             Op::F2I(op) => op.ftz,
+             Op::FAdd(op) => op.ftz,
+diff -ruN tree.orig/src/nouveau/compiler/nak/opt_instr_sched_common.rs tree/src/nouveau/compiler/nak/opt_instr_sched_common.rs
+--- tree.orig/src/nouveau/compiler/nak/opt_instr_sched_common.rs	2026-10-24 06:44:44
++++ tree/src/nouveau/compiler/nak/opt_instr_sched_common.rs	2026-10-24 06:56:32
+@@ -83,6 +83,8 @@
+ 
+ pub fn side_effect_type(op: &Op) -> SideEffect {
+     match op {
++        // Hidden per-lane TTU context: nothing may move across the region.
++        Op::TtuQuery(_) => SideEffect::Barrier,
+         // Float ALU
+         Op::F2FP(_)
+         | Op::FAdd(_)
+diff -ruN tree.orig/src/nouveau/compiler/nak/sm120_instr_latencies.rs tree/src/nouveau/compiler/nak/sm120_instr_latencies.rs
+--- tree.orig/src/nouveau/compiler/nak/sm120_instr_latencies.rs	2026-10-24 06:44:44
++++ tree/src/nouveau/compiler/nak/sm120_instr_latencies.rs	2026-10-24 06:56:32
+@@ -22,6 +22,9 @@
+ fn op_reg_latency(op: &Op, reader: bool, op_reg_idx: usize) -> RegLatencySM100 {
+     use RegLatencySM100::*;
+     match op {
++        // Results are drained inside the region and payload registers are
++        // consumed by TTUST, so both sides behave like ALU registers.
++        Op::TtuQuery(_) => Alu,
+         // this will need updating if imad grows support for input predicates
+         Op::IMad(_) | Op::IMul(_) => Fma,
+         Op::IMad64(_) => {
+diff -ruN tree.orig/src/nouveau/compiler/nak/sm70_encode.rs tree/src/nouveau/compiler/nak/sm70_encode.rs
+--- tree.orig/src/nouveau/compiler/nak/sm70_encode.rs	2026-10-24 06:44:44
++++ tree/src/nouveau/compiler/nak/sm70_encode.rs	2026-10-24 06:58:08
+@@ -4358,6 +4358,118 @@
+     }
+ }
+ 
++impl SM70Op for OpTtuQuery {
++    fn legalize(&mut self, b: &mut LegalizeBuilder) {
++        for src in &mut self.srcs {
++            b.copy_src_if_uniform(src);
++        }
++    }
++
++    fn encode(&self, _e: &mut SM70Encoder<'_>) {
++        panic!("a TTU query is encoded as a region by encode_ttu_query");
++    }
++}
++
++/// Instructions in one TTU query region (see OpTtuQuery).
++const TTU_QUERY_INSTRS: usize = 15;
++/// TTU input block offsets, in OpTtuQuery::srcs order.
++const TTU_STORE_OFFSETS: [u16; 5] = [0, 64, 80, 128, 512];
++/// TTU output block offsets, in OpTtuQuery::dsts order. The last load closes
++/// the context.
++const TTU_LOAD_OFFSETS: [u16; 6] = [896, 960, 976, 800, 784, 768];
++
++/// A 128-bit TTU payload is two 64-bit register pairs.
++fn ttu_reg_pairs(reg: RegRef) -> (RegRef, RegRef) {
++    assert!(reg.file() == RegFile::GPR && reg.comps() == 4);
++    assert!(reg.base_idx() % 2 == 0 && reg.base_idx() <= 250);
++    (
++        RegRef::new(RegFile::GPR, reg.base_idx(), 2),
++        RegRef::new(RegFile::GPR, reg.base_idx() + 2, 2),
++    )
++}
++
++/// Emits the 15-instruction region for one SM120 hardware query. Opcodes,
++/// field positions and delays were measured on an RTX 5060 (32 of 32 rays
++/// exact); check_ttu_region.py judges every emitted word against the field
++/// table in docs/HWRT.md. The region waits on whatever calc_instr_deps asked
++/// for, uses scoreboards 0-5 for its six result loads and waits on all six
++/// before the next instruction.
++fn encode_ttu_query(
++    sm: u8,
++    op: &OpTtuQuery,
++    deps: &InstrDeps,
++    labels: &FxHashMap<Label, usize>,
++    encoded: &mut Vec<u32>,
++) {
++    assert!(sm == 120, "the TTU query encoding is only known for SM120");
++    let mut emit = |deps: InstrDeps, f: &dyn Fn(&mut SM70Encoder<'_>)| {
++        let mut e = SM70Encoder {
++            sm,
++            ip: encoded.len(),
++            labels,
++            inst: [0_u32; 4],
++        };
++        f(&mut e);
++        e.set_pred(&Pred::from(true));
++        e.set_instr_deps(&deps);
++        encoded.extend_from_slice(&e.inst[..]);
++    };
++    let with_delay = |delay: u8| {
++        let mut d = InstrDeps::new();
++        d.set_delay(delay);
++        d
++    };
++
++    // TTUOPEN: waits for the payload loads and anything still in flight.
++    let mut open = with_delay(6);
++    open.add_wt_bar_mask(deps.wt_bar_mask);
++    emit(open, &|e| {
++        e.set_opcode(0x3d0);
++        e.set_bit(72, op.initialize);
++    });
++
++    // TTUCCTL: the number of instructions from here to the closing load.
++    emit(with_delay(4), &|e| {
++        e.set_opcode(0x9d4);
++        e.set_field(40..56, 12_u16);
++    });
++
++    for (src, offset) in op.srcs.iter().zip(TTU_STORE_OFFSETS) {
++        let reg = *src.src_ref.as_reg().expect("TTU payload must be in GPRs");
++        let (lo, hi) = ttu_reg_pairs(reg);
++        emit(with_delay(1), &|e| {
++            e.set_opcode(0x3d1);
++            e.set_field(40..56, offset);
++            e.set_reg(64..72, lo);
++            e.set_reg(32..40, hi);
++        });
++    }
++
++    emit(with_delay(1), &|e| e.set_opcode(0x3d3)); // TTUGO
++
++    for (i, (dst, offset)) in op.dsts.iter().zip(TTU_LOAD_OFFSETS).enumerate()
++    {
++        let reg = *dst.as_reg().expect("TTU results must be in GPRs");
++        let (lo, hi) = ttu_reg_pairs(reg);
++        let close = i == TTU_LOAD_OFFSETS.len() - 1;
++        let mut d = with_delay(if close { 2 } else { 1 });
++        d.set_wr_bar(i as u8);
++        emit(d, &|e| {
++            e.set_opcode(0x3d2);
++            e.set_field(40..56, offset);
++            e.set_reg(16..24, lo);
++            e.set_reg(64..72, hi);
++            e.set_field(81..84, 7_u8);
++            e.set_bit(74, close);
++        });
++    }
++
++    // Drain the six result scoreboards so the results are plain registers.
++    let mut drain = with_delay(4);
++    drain.add_wt_bar_mask(0x3f);
++    emit(drain, &|e| e.set_opcode(0x918));
++}
++
+ impl SM70Op for OpNop {
+     fn legalize(&mut self, _b: &mut LegalizeBuilder) {
+         // Nothing to do
+@@ -4684,6 +4796,7 @@
+ macro_rules! sm70_op_match {
+     ($op: expr, |$x: ident| $y: expr) => {
+         match $op {
++            Op::TtuQuery($x) => $y,
+             Op::FAdd($x) => $y,
+             Op::FFma($x) => $y,
+             Op::FMnMx($x) => $y,
+@@ -4813,13 +4926,25 @@
+                     labels.insert(label, ip);
+                 }
+             }
+-            ip += 4;
++            ip += if matches!(instr.op, Op::TtuQuery(_)) {
++                4 * TTU_QUERY_INSTRS
++            } else {
++                4
++            };
+         }
+     }
+ 
+     let mut encoded = Vec::new();
+     for b in &func.blocks {
+         for instr in &b.instrs {
++            if let Op::TtuQuery(op) = &instr.op {
++                assert!(
++                    instr.pred.is_true(),
++                    "a predicated TTU query must be lowered to control flow"
++                );
++                encode_ttu_query(sm.sm(), op, &instr.deps, &labels, &mut encoded);
++                continue;
++            }
+             let mut e = SM70Encoder {
+                 sm: sm.sm(),
+                 ip: encoded.len(),

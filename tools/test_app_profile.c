@@ -81,6 +81,22 @@ int main(int argc, char **argv)
     nvmtl_app_profile_apply(cp, NULL, NULL, NULL, 0, NULL);
     arm("a knob outside the profile is not touched", !strcmp(getenv("NVMTL_HAZARD"), "1"));
 
+    /* ray queries on the RT cores: an opt-in, never on by default */
+    unsetenv("NVK_HWRT_QUERY");
+    set = nvmtl_app_profile_apply_optin(cp, NULL, NULL, NULL, NULL, 0, &kept);
+    arm("ray queries on the RT cores stay off when NVMTL_HWRT is unset", set == 0 && !getenv("NVK_HWRT_QUERY"));
+    set = nvmtl_app_profile_apply_optin(cp, "0", NULL, NULL, NULL, 0, &kept);
+    arm("and when it is 0 or anything but 1", set == 0 && !getenv("NVK_HWRT_QUERY"));
+    rec[0] = 0;
+    set = nvmtl_app_profile_apply_optin(cp, "1", NULL, NULL, rec, sizeof rec, &kept);
+    arm("NVMTL_HWRT=1 turns NVK_HWRT_QUERY=1 on for the game, and the conf record carries it", set == 1 && !strcmp(getenv("NVK_HWRT_QUERY"), "1") && strstr(rec, "NVK_HWRT_QUERY=1"));
+    unsetenv("NVK_HWRT_QUERY");
+    set = nvmtl_app_profile_apply_optin(cp, "1", user_says, "NVK_HWRT_QUERY", NULL, 0, &kept);
+    arm("a user's own NVK_HWRT_QUERY wins over the opt-in", set == 0 && kept == 1 && !getenv("NVK_HWRT_QUERY"));
+    unsetenv("NVK_HWRT_QUERY");
+    arm("a process with no profile gets no opt-in settings even with NVMTL_HWRT=1",
+        nvmtl_app_profile_apply_optin(nvmtl_app_profile_for("WindowServer", "com.apple.WindowServer", NULL), "1", NULL, NULL, NULL, 0, &kept) == 0 && !getenv("NVK_HWRT_QUERY"));
+
     /* what a non-matching process does: the plugin applies nothing, because the match returns NULL */
     clear(cp);
     set = nvmtl_app_profile_apply(nvmtl_app_profile_for("WindowServer", "com.apple.WindowServer", NULL), NULL, NULL, NULL, 0, &kept);

@@ -1,0 +1,730 @@
+[
+  {
+    "label": "primitive-0",
+    "origin": [
+      0.25,
+      0.25,
+      -1.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 0,
+      "geometry": 0,
+      "t": 1.0,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-1",
+    "origin": [
+      4.25,
+      0.25,
+      -1.125
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 1,
+      "geometry": 0,
+      "t": 1.125,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-2",
+    "origin": [
+      8.25,
+      0.25,
+      -1.25
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 2,
+      "geometry": 0,
+      "t": 1.25,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-3",
+    "origin": [
+      12.25,
+      0.25,
+      -1.375
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 3,
+      "geometry": 0,
+      "t": 1.375,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-4",
+    "origin": [
+      16.25,
+      0.25,
+      -1.5
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 4,
+      "geometry": 0,
+      "t": 1.5,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-5",
+    "origin": [
+      20.25,
+      0.25,
+      -1.625
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 5,
+      "geometry": 0,
+      "t": 1.625,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-6",
+    "origin": [
+      24.25,
+      0.25,
+      -1.75
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 6,
+      "geometry": 0,
+      "t": 1.75,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-7",
+    "origin": [
+      28.25,
+      0.25,
+      -1.875
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 7,
+      "geometry": 0,
+      "t": 1.875,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-8",
+    "origin": [
+      32.25,
+      0.25,
+      -2.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 8,
+      "geometry": 0,
+      "t": 2.0,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-9",
+    "origin": [
+      36.25,
+      0.25,
+      -2.125
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 9,
+      "geometry": 0,
+      "t": 2.125,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-10",
+    "origin": [
+      40.25,
+      0.25,
+      -2.25
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 10,
+      "geometry": 0,
+      "t": 2.25,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-11",
+    "origin": [
+      44.25,
+      0.25,
+      -2.375
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 11,
+      "geometry": 0,
+      "t": 2.375,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-12",
+    "origin": [
+      48.25,
+      0.25,
+      -2.5
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 12,
+      "geometry": 0,
+      "t": 2.5,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-13",
+    "origin": [
+      52.25,
+      0.25,
+      -2.625
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 13,
+      "geometry": 0,
+      "t": 2.625,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-14",
+    "origin": [
+      56.25,
+      0.25,
+      -2.75
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 14,
+      "geometry": 0,
+      "t": 2.75,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "primitive-15",
+    "origin": [
+      60.25,
+      0.25,
+      -2.875
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 15,
+      "geometry": 0,
+      "t": 2.875,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "reverse-0",
+    "origin": [
+      0.125,
+      0.5,
+      2.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      -2.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 0,
+      "geometry": 0,
+      "t": 1.0,
+      "u": 0.125,
+      "v": 0.5
+    }
+  },
+  {
+    "label": "reverse-1",
+    "origin": [
+      4.125,
+      0.5,
+      3.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      -2.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 1,
+      "geometry": 0,
+      "t": 1.5,
+      "u": 0.125,
+      "v": 0.5
+    }
+  },
+  {
+    "label": "reverse-2",
+    "origin": [
+      8.125,
+      0.5,
+      4.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      -2.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 2,
+      "geometry": 0,
+      "t": 2.0,
+      "u": 0.125,
+      "v": 0.5
+    }
+  },
+  {
+    "label": "reverse-3",
+    "origin": [
+      12.125,
+      0.5,
+      5.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      -2.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 3,
+      "geometry": 0,
+      "t": 2.5,
+      "u": 0.125,
+      "v": 0.5
+    }
+  },
+  {
+    "label": "outside-x",
+    "origin": [
+      -10.0,
+      0.25,
+      -1.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": false
+    }
+  },
+  {
+    "label": "outside-y",
+    "origin": [
+      0.25,
+      2.0,
+      -1.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": false
+    }
+  },
+  {
+    "label": "inside-box-outside-triangle",
+    "origin": [
+      0.875,
+      0.875,
+      -1.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": false
+    }
+  },
+  {
+    "label": "gap-between-primitives",
+    "origin": [
+      2.0,
+      0.25,
+      -1.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": false
+    }
+  },
+  {
+    "label": "zero-mask",
+    "origin": [
+      0.25,
+      0.25,
+      -1.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 0,
+    "expected": {
+      "hit": false
+    }
+  },
+  {
+    "label": "mask-bit-1",
+    "origin": [
+      0.25,
+      0.25,
+      -1.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 1,
+    "expected": {
+      "hit": true,
+      "primitive": 0,
+      "geometry": 0,
+      "t": 1.0,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "mask-bit-128",
+    "origin": [
+      0.25,
+      0.25,
+      -1.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 128,
+    "expected": {
+      "hit": true,
+      "primitive": 0,
+      "geometry": 0,
+      "t": 1.0,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "tmax-before-hit",
+    "origin": [
+      0.25,
+      0.25,
+      -1.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 0.5,
+    "mask": 255,
+    "expected": {
+      "hit": false
+    }
+  },
+  {
+    "label": "tmin-after-hit",
+    "origin": [
+      0.25,
+      0.25,
+      -1.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "tmin": 1.5,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": false
+    }
+  },
+  {
+    "label": "away-from-plane",
+    "origin": [
+      0.25,
+      0.25,
+      -1.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": false
+    }
+  },
+  {
+    "label": "angled-hit",
+    "origin": [
+      0.125,
+      0.125,
+      -1.0
+    ],
+    "direction": [
+      0.125,
+      0.125,
+      1.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 0,
+      "geometry": 0,
+      "t": 1.0,
+      "u": 0.25,
+      "v": 0.25
+    }
+  },
+  {
+    "label": "non-unit-direction",
+    "origin": [
+      0.25,
+      0.25,
+      -2.0
+    ],
+    "direction": [
+      0.0,
+      0.0,
+      4.0
+    ],
+    "tmin": 0.0,
+    "tmax": 100.0,
+    "mask": 255,
+    "expected": {
+      "hit": true,
+      "primitive": 0,
+      "geometry": 0,
+      "t": 0.5,
+      "u": 0.25,
+      "v": 0.25
+    }
+  }
+]
