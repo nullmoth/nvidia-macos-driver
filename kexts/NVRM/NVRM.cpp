@@ -58,6 +58,11 @@ __private_extern__ int _kext_apple_cc = __APPLE_CC__;
 
 extern "C" { NvBool nvkms_xnu_load(void); }
 static class NVRM *gNVRMService;
+#include "nv_rtd3_policy.h"
+extern "C" void nv_rtd3_arm(const struct nv_rtd3_ops *ops);
+extern "C" int  nv_rtd3_before_system_resume(void);
+extern "C" int  nv_rtd3_power_off(IOACPIPlatformDevice *acpi);
+extern "C" int  nv_rtd3_power_on(IOACPIPlatformDevice *acpi);
 extern "C" nv_state_t *nv_xnu_gpu_state(void);
 extern "C" void nv_xnu_log_init(void);
 extern "C" bool nv_xnu_maps_init(void);
@@ -142,6 +147,7 @@ private:
     } fPciSave = {};
     void gpuSuspend();
     void gpuResume();
+    void rtd3Arm();   // opt-in D3cold (nvrtd3=1): kexts/NVRM/nv_rtd3.cpp
     void pciSaveForSleep();
     bool pciRestoreAfterWake();
     bool gpuAnswers();
@@ -1636,6 +1642,7 @@ IOReturn NVRM::go(uint32_t pass)
         fAdapter = true;
         LOG("PASS 2 REACHED: the adapter is up — GSP-RM is running on the card under macOS");
         fPassDone = 2;
+        rtd3Arm();
         {
             NvU32 ramKb = 0, totalKb = 0, qst = 0;
             if (nvrm_query_vram_kb(nv->gpu_id, &ramKb, &totalKb, &qst) && ramKb) {
@@ -1711,7 +1718,7 @@ IOReturn NVRM::setPowerState(unsigned long ordinal, IOService *device)
     nv_xnu_power_refresh();        // a wake can be a change of power source; this runs before the firmware asks
     const SInt32 pm = OSAddAtomic(0, &fGpuPm);
     if (ordinal == 0 && pm == kGpuPmRunning && fAdapter) gpuSuspend();
-    else if (ordinal != 0 && pm == kGpuPmSuspended) gpuResume();
+    else if (ordinal != 0 && pm == kGpuPmSuspended) { nv_rtd3_before_system_resume(); gpuResume(); }
     else LOG("power: setPowerState %lu (gpu %s, adapter %s) - nothing to do", ordinal,
              pm == kGpuPmRunning ? "running" : pm == kGpuPmSuspended ? "suspended" : "lost", fAdapter ? "up" : "down");
     return kIOPMAckImplied;
@@ -1765,6 +1772,36 @@ void NVRM::gpuResume()
         (unsigned)st, (unsigned)cst, ns / 1000000ULL,
         ok ? "GPU running, telling the framebuffers" : "GPU LOST: NVKMS refuses all display work until a restart");
     notifyFramebuffers(ok ? 1 : 2);
+}
+
+// Opt-in D3cold. The driver's own system-sleep and wake paths do the suspend and resume; nv_rtd3.cpp decides when.
+static IOACPIPlatformDevice *rtd3Acpi(NVRM *n)
+{
+    IOService *s = n; IOACPIPlatformDevice *a = NULL;
+    for (int i = 0; s && i < 16 && !a; i++) { s = s->getProvider(); a = OSDynamicCast(IOACPIPlatformDevice, s); }
+    return a;
+}
+static int rtd3Heads(void *) {
+    OSDictionary *m = IOService::serviceMatching("NVRMFramebuffer"); if (!m) return 1;
+    OSIterator *it = IOService::getMatchingServices(m); m->release();
+    int n = 0; if (it) { while (it->getNextObject()) n++; it->release(); }
+    return n;
+}
+static int rtd3Clients(void *ctx) {
+    IOService *n = (IOService *)ctx; int c = 0;
+    if (OSIterator *it = n->getClientIterator()) { while (OSObject *o = it->getNextObject()) if (OSDynamicCast(IOUserClient, o)) c++; it->release(); }
+    return c;
+}
+void NVRM::rtd3Arm()
+{
+    const struct nv_rtd3_ops ops = {
+        this, rtd3Heads, rtd3Clients,
+        [](void *c) { ((NVRM *)c)->gpuSuspend(); },
+        [](void *c) { ((NVRM *)c)->gpuResume(); },
+        [](void *c) { return nv_rtd3_power_off(rtd3Acpi((NVRM *)c)); },
+        [](void *c) { return nv_rtd3_power_on(rtd3Acpi((NVRM *)c)); },
+    };
+    nv_rtd3_arm(&ops);
 }
 
 void NVRM::pciSaveForSleep()

@@ -34,6 +34,16 @@ if stage.exists() and platform.system() == 'Darwin' and shutil.which('clang'):
         sums = (pkg / 'SHA256SUMS').read_text()
         lines = [l for l in sums.split('\n') if 'libnvencvt' in l]
         check('SHA256SUMS keeps its other lines and has exactly one fresh libnvencvt line', './other' in sums and len(lines) == 1 and '1111' not in sums)
+        chk = root / 'package/check_package.sh'
+        r = subprocess.run(['bash', str(chk), str(pkg)], capture_output=True, text=True)
+        check('the package check passes a staged tree', r.returncode == 0, r.stdout.strip()[-80:])
+        (m / 'libnvencvt.dylib').write_bytes((m / 'libnvencvt.dylib').read_bytes() + b'x')
+        r = subprocess.run(['bash', str(chk), str(pkg)], capture_output=True, text=True)
+        check('it fails when the library no longer matches SHA256SUMS or its signature', r.returncode != 0, r.stdout.strip()[-80:])
+        (m / 'libnvencvt.dylib').unlink()
+        r = subprocess.run(['bash', str(chk), str(pkg)], capture_output=True, text=True)
+        check('it fails when the library is missing', r.returncode != 0 and 'missing' in r.stdout, r.stdout.strip()[-80:])
+        subprocess.run(['bash', str(stage), str(pkg), str(d / 'good.dylib')], capture_output=True)
         sig = subprocess.run(['codesign', '-v', str(m / 'libnvencvt.dylib')], capture_output=True, text=True)
         check('the staged library is signed', sig.returncode == 0, sig.stderr.strip()[-80:])
 else:
