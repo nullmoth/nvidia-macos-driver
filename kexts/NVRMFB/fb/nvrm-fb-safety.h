@@ -81,3 +81,50 @@ static inline int nvrmFlipLatchMode(int setting, int autoDefer, unsigned long lo
 }
 // Native refresh rate from which half and quarter rates are derived, and the lowest derived rate offered.
 enum { kNvrmDerivedRateMinHz = 240, kNvrmDerivedRateFloorHz = 48 };
+// EDID overrides. A replacement EDID for one display is read from
+//   /Library/NullMoth/edid-override/<vendor>-<product>.bin
+// (the display's own manufacturer id and product code, four upper-case hex digits each). It is accepted only when it is a
+// whole number of 128-byte blocks, carries the EDID header, its block count byte matches, every block sums to zero, and
+// its manufacturer id and product code are the display's own. The same checks gate a boot raster or mode list built from
+// it, so a file for another monitor, or a truncated one, is ignored rather than driven.
+static inline bool nvrmEdidValid(const unsigned char *e, unsigned n)
+{
+    static const unsigned char hdr[8] = { 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0 };
+    if (!e || n < 128 || n % 128) return false;
+    for (unsigned i = 0; i < 8; i++) if (e[i] != hdr[i]) return false;
+    if ((n / 128) != (unsigned)e[126] + 1u) return false;
+    for (unsigned b = 0; b < n; b += 128) {
+        unsigned char sum = 0;
+        for (unsigned i = 0; i < 128; i++) sum = (unsigned char)(sum + e[b + i]);
+        if (sum) return false;
+    }
+    return true;
+}
+static inline bool nvrmEdidSameDisplay(const unsigned char *a, const unsigned char *b)
+{
+    return a && b && a[8] == b[8] && a[9] == b[9] && a[10] == b[10] && a[11] == b[11];
+}
+// "<VVVV>-<PPPP>.bin": vendor = bytes 8..9 as stored (big-endian), product = bytes 11,10 (stored little-endian).
+static inline void nvrmEdidOverrideName(const unsigned char *real, char *out, unsigned size)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    if (!real || !out || size < 16) { if (out && size) out[0] = 0; return; }
+    const unsigned char b[4] = { real[8], real[9], real[11], real[10] };
+    unsigned k = 0;
+    for (unsigned i = 0; i < 4; i++) {
+        out[k++] = hex[b[i] >> 4]; out[k++] = hex[b[i] & 15];
+        if (i == 1) out[k++] = '-';
+    }
+    out[k++] = '.'; out[k++] = 'b'; out[k++] = 'i'; out[k++] = 'n'; out[k] = 0;
+}
+// Smaller-than-boot rasters are offered only when asked for: nvfbsmall=1 on the boot line, or the file
+// /Library/NullMoth/nvfb-small (root-owned). A boot-arg of 0 turns it off even when the file exists.
+static inline bool nvrmSmallRastersWanted(bool haveArg, unsigned argValue, bool fileTrusted)
+{
+    return haveArg ? argValue != 0 : fileTrusted;
+}
+// Root-owned and not writable by group or others: the trust rule for files the kext reads from /Library/NullMoth.
+static inline bool nvrmFileTrusted(unsigned uid, unsigned mode)
+{
+    return uid == 0 && !(mode & 022);
+}

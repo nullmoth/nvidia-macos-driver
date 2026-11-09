@@ -20,6 +20,12 @@ enum { NV_TRUE=1,NV_FALSE=0,kIODigitalSignal=1 };
 #include "nvrm-fb-safety.h"
 struct DpyRec { unsigned hdaConnectorType = 0; };
 static DpyRec gDpy[4]; static int gNDpy = 1;
+#ifdef SMALL_ON
+static bool PE_parse_boot_argn(const char *, uint32_t *v, size_t) { *v = 1; return true; }
+#else
+static bool PE_parse_boot_argn(const char *, uint32_t *, size_t) { return false; }
+#endif
+static bool nvrmRootFile(const char *) { return false; }
 static void nvu_zero(void *p,size_t n){memset(p,0,n);}
 struct NvKmsKapiDisplayModeTimings {
     NvU32 pixelClockHz,hVisible,hSyncStart,hSyncEnd,hTotal,vVisible,vSyncStart,vSyncEnd,vTotal,refreshRate;
@@ -94,9 +100,22 @@ int main() {
     puts("PASS: boot 165 Hz desktop timing, stable IDs, no duplicate, scaled mode coexistence, smaller-raster exclusion, memory and timing guards, ultrawide wider than the scaler but not past the raster limit or memory");
 }
 '''
+SMALL = r'''
+int main() {
+    // nvfbsmall=1: a raster smaller than the boot raster is offered too (default: it is not, checked in the other build)
+    Kms k;k.modes={mode(2560,1600,60),mode(1280,720,60)};
+    NVRMNVDAFramebuffer f;f.fKms=&k;f.fBootMode=k.modes[0];
+    assert(f.addKmsRefreshModes(0)==2);
+    puts("PASS small");
+}
+'''
 with tempfile.TemporaryDirectory() as directory:
     path = pathlib.Path(directory)
     (path / 'test.cpp').write_text(fixture + '\n#include "nvrm-fb-safety.h"\n' + method + checks)
     subprocess.run(['clang++', '-std=c++17', '-I', str(root / 'kexts/NVRMFB/fb'),
                     str(path / 'test.cpp'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)
+    (path / 'small.cpp').write_text(fixture + '\n#include "nvrm-fb-safety.h"\n' + method + SMALL)
+    subprocess.run(['clang++', '-std=c++17', '-DSMALL_ON', '-I', str(root / 'kexts/NVRMFB/fb'),
+                    str(path / 'small.cpp'), '-o', str(path / 'small')], check=True)
+    subprocess.run([str(path / 'small')], check=True)
