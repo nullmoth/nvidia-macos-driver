@@ -1,5 +1,6 @@
 #include "NMKbdBacklight.hpp"
 #include <Headers/kern_version.hpp>
+#include "NMKbdBacklightHID.hpp"
 
 OSDefineMetaClassAndStructors(NMKbdBacklight, IOService)
 
@@ -144,21 +145,39 @@ IOService *NMKbdBacklight::probe(IOService *provider, SInt32 *score) {
     int sensor = 0, ali = 0;
     if (auto sd = IOService::nameMatching("SMCLightSensor")) { auto it = IOService::getMatchingServices(sd); sd->release(); if (it) { sensor = it->getNextObject() != nullptr; it->release(); } }
     ali = find("ACPI0008", "_ALI") != nullptr;
-    if (kbl_should_decline(sensor, ali, force == 1)) { SYSLOG("nmkbl", "SMCLightSensor owns LKSB/LKSS on this machine; standing aside (nmkblforce=1 registers anyway)"); return nullptr; }
+    forced_ = force == 1;
+    skipSmc_ = kbl_should_decline(sensor, ali, forced_);   // only the SMC keys are given up; the HID route does not collide
+    if (skipSmc_) SYSLOG("nmkbl", "SMCLightSensor owns LKSB/LKSS on this machine; not registering the SMC keys (nmkblforce=1 registers anyway)");
 
     if (!probeAsus() && !probeIdeaPad() && !probeThinkPad()) { SYSLOG("nmkbl", "no supported keyboard backlight interface found"); dev = nullptr; return nullptr; }
     DBGLOG("nmkbl", "backend %d, max level %d", (int)backend, maxLevel_);
 
     setProperty("VersionInfo", kextVersion);
-    vsmcNotifier = VirtualSMCAPI::registerHandler(vsmcNotificationHandler, this);
-    return vsmcNotifier ? this : nullptr;
+    if (!skipSmc_) vsmcNotifier = VirtualSMCAPI::registerHandler(vsmcNotificationHandler, this);
+    return this;
 }
 
-bool NMKbdBacklight::start(IOService *provider) { return IOService::start(provider); }
+bool NMKbdBacklight::start(IOService *provider) {
+    if (!IOService::start(provider)) return false;
+    uint32_t hid = 1;
+    PE_parse_boot_argn("nmkblhid", &hid, sizeof hid);   // the HID route is on with nmkbl=1; nmkblhid=0 turns it off
+    if (hid && backend != None) {
+        auto d = OSTypeAlloc(NMKbdBacklightHID);
+        if (d && d->init(this) && d->attach(this) && d->start(this)) { d->registerService(); hidDevice = d; DBGLOG("nmkbl", "virtual HID keyboard backlight published"); }
+        else { SYSLOG("nmkbl", "the virtual HID keyboard could not be published"); if (d) d->release(); }
+    }
+    return true;
+}
 
 bool NMKbdBacklight::vsmcNotificationHandler(void *sensors, void *refCon, IOService *vsmc, IONotifier *notifier) {
     if (!sensors || !vsmc) return false;
     auto self = static_cast<NMKbdBacklight *>(sensors);
+    // SMCLightSensor may have loaded since probe: check again so the answer does not depend on which plugin got here first
+    if (!self->forced_) {
+        int sensor = 0;
+        if (auto sd = IOService::nameMatching("SMCLightSensor")) { auto it = IOService::getMatchingServices(sd); sd->release(); if (it) { sensor = it->getNextObject() != nullptr; it->release(); } }
+        if (sensor && self->find("ACPI0008", "_ALI")) { SYSLOG("nmkbl", "SMCLightSensor loaded first; not registering the SMC keys"); return false; }
+    }
     uint8_t zero[2] = {0, 0};
     VirtualSMCAPI::addKey(SMC_MAKE_IDENTIFIER('L','K','S','B'), self->vsmcPlugin.data,
         VirtualSMCAPI::valueWithData(reinterpret_cast<const SMC_DATA *>(zero), sizeof zero, SmcKeyTypeLkb,

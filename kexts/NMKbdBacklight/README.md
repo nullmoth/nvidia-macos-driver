@@ -32,15 +32,24 @@ Two routes exist in the Intel build of macOS, and a PC's SMBIOS model decides wh
    HID service with a primary usage page and usage, not through the SMC. The SMBIOS models 1401 picks (MacPro7,1,
    iMac20,x, MacBookPro16,x) are T2-era models, so this is the route macOS 26 takes for them.
 
-This plugin implements route 1 only. Route 2 needs a virtual HID keyboard that carries the vendor element and answers
-report `0xBF`; the report's byte layout is not yet read, so it is not built. It is the missing piece for the PC's
-macOS 26 slider to work, and route 1 alone should not be expected to move the slider on a T2-era model.
+This plugin implements both. Route 2 is a virtual built-in keyboard (`NMKbdBacklightHID`, an IOHIDDevice) whose report
+descriptor carries the vendor element 0xFF00:0x0F as an input, a feature report 0xBF that answers `{ version 1, off, on_min,
+on_max }`, and an output report 0xB0 that takes `{ version 1, brightness, rate }`; the layouts are the ones the public Linux
+hid-apple driver documents and the macOS driver's own calls match. A set report is passed to the laptop through the same
+backend as the SMC route. `nmkblhid=0` turns the HID route off.
+
+## How the two routes meet VirtualSMC
+
+Read from VirtualSMC's keystore source: a plugin key that is already in VirtualSMC's own table is an override, and a second
+plugin overriding the same key panics; `LKSB` and `LKSS` are not in that table. Two plugins that both add them are merged in
+the order they loaded, with the first one found on a read. So the order, not a rule, would decide. This plugin therefore
+checks twice, at probe time and again just before it submits its keys, whether SMCLightSensor is loaded on a machine with an
+ambient-light `_ALI`; if it is, this plugin gives up only the SMC keys and keeps the HID route, which does not collide.
+`nmkblforce=1` registers the SMC keys anyway, and then the plugin that loaded first answers.
 
 ## What is unverified
 
-* Whether CoreBrightness on a T2-era SMBIOS ever looks at `LKSB` (see route 2 above).
-* VirtualSMC's `SMCLightSensor` also registers `LKSB` and `LKSS` as plain stored values; which registration wins when both
-  load has not been run.
+* Whether macOS 26 on a PC, with no T2 chip behind the keyboard, accepts a virtual keyboard as the built-in one and drives its backlight from it. The descriptor, the report layouts and the registry flags follow what the macOS driver was read to expect; the whole route has not run.
 * Whether the ASUS method behaves as the table reads on every ASUS model (it was read from one table and matched by name
   and device id in 33).
 
