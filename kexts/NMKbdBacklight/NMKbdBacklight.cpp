@@ -15,20 +15,50 @@ public:
 protected:
     SMC_RESULT readAccess() override {
         int level = 0;
-        if (owner->getLevel(&level)) data[0] = kbl_level_to_smc(level, owner->maxLevel());
+        if (owner->getLevel(&level)) kbl_smc_encode(kbl_level_to_smc(level, owner->maxLevel()), &data[0], &data[1]);
         return SmcSuccess;
     }
     SMC_RESULT writeAccess() override {
-        owner->setLevel(kbl_smc_to_level(data[0], owner->maxLevel()));
+        owner->setLevel(kbl_smc_to_level(kbl_smc_decode(data[0], data[1]), owner->maxLevel()));
         return SmcSuccess;
     }
 };
+
+/* the first ACPI device matching `nameMatch` that has `method` */
+IOACPIPlatformDevice *NMKbdBacklight::find(const char *nameMatch, const char *method) {
+    auto dict = IOService::nameMatching(nameMatch);
+    if (!dict) return nullptr;
+    auto it = IOService::getMatchingServices(dict);
+    dict->release();
+    if (!it) return nullptr;
+    IOACPIPlatformDevice *found = nullptr;
+    while (auto obj = it->getNextObject()) {
+        auto d = OSDynamicCast(IOACPIPlatformDevice, obj);
+        if (d && d->validateObject(method) == kIOReturnSuccess) { found = d; break; }
+    }
+    it->release();
+    return found;
+}
+
+bool NMKbdBacklight::evalInt(const char *method, uint32_t arg, uint32_t *result, bool noArgument) {
+    OSObject *params[1] = { noArgument ? nullptr : OSNumber::withNumber(arg, 32) };
+    OSObject *out = nullptr;
+    IOReturn ret = noArgument ? dev->evaluateObject(method, &out, nullptr, 0)
+                              : (params[0] ? dev->evaluateObject(method, &out, params, 1) : kIOReturnNoMemory);
+    if (params[0]) params[0]->release();
+    if (ret != kIOReturnSuccess) { DBGLOG("nmkbl", "%s failed %x", method, ret); return false; }
+    auto n = OSDynamicCast(OSNumber, out);
+    if (result) *result = n ? (uint32_t)n->unsigned32BitValue() : 0;
+    bool ok = n != nullptr;
+    if (out) out->release();
+    return ok;
+}
 
 bool NMKbdBacklight::callAsus(uint32_t method, uint32_t argument, uint32_t *result) {
     uint32_t buf[2] = { KBL_ASUS_DEVID, argument };
     OSObject *params[3] = { OSNumber::withNumber(0ULL, 32), OSNumber::withNumber(method, 32), OSData::withBytes(buf, sizeof buf) };
     OSObject *out = nullptr;
-    IOReturn ret = (params[0] && params[1] && params[2]) ? wmi->evaluateObject("WMNB", &out, params, 3) : kIOReturnNoMemory;
+    IOReturn ret = (params[0] && params[1] && params[2]) ? dev->evaluateObject("WMNB", &out, params, 3) : kIOReturnNoMemory;
     for (auto p : params) if (p) p->release();
     if (ret != kIOReturnSuccess) { DBGLOG("nmkbl", "WMNB failed %x", ret); return false; }
     auto n = OSDynamicCast(OSNumber, out);
@@ -39,14 +69,68 @@ bool NMKbdBacklight::callAsus(uint32_t method, uint32_t argument, uint32_t *resu
 }
 
 bool NMKbdBacklight::setLevel(int level) {
-    return wmi && callAsus(KBL_ASUS_METHOD_DEVS, kbl_asus_set_argument(level), nullptr);
+    if (!dev) return false;
+    switch (backend) {
+    case Asus: return callAsus(KBL_ASUS_METHOD_DEVS, kbl_asus_set_argument(level), nullptr);
+    case IdeaPad: return evalInt("KBLC", kbl_lenovo_set_command(lenovoType, level), nullptr);
+    case IdeaPadPlain: return evalInt("SALS", kbl_lenovo_plain_set_argument(level), nullptr);
+    case ThinkPad: return evalInt("MLCS", (uint32_t)level, nullptr);
+    default: return false;
+    }
 }
 
 bool NMKbdBacklight::getLevel(int *level) {
     uint32_t r = 0;
-    if (!wmi || !callAsus(KBL_ASUS_METHOD_DSTS, 0, &r) || !kbl_asus_present(r)) return false;
-    *level = kbl_asus_level(r);
-    return true;
+    if (!dev) return false;
+    switch (backend) {
+    case Asus:
+        if (!callAsus(KBL_ASUS_METHOD_DSTS, 0, &r) || !kbl_asus_present(r)) return false;
+        *level = kbl_asus_level(r); return true;
+    case IdeaPad: {
+        if (!evalInt("KBLC", kbl_lenovo_get_command(lenovoType), &r)) return false;
+        int l = kbl_lenovo_level_from_answer(r);
+        if (l < 0) return false;
+        *level = l; return true;
+    }
+    case IdeaPadPlain:
+        if (!evalInt("HALS", 0, &r, true) || !kbl_lenovo_plain_supported(r)) return false;
+        *level = kbl_lenovo_plain_level(r); return true;
+    case ThinkPad:
+        if (!evalInt("MLCG", 0, &r) || !kbl_thinkpad_present(r)) return false;
+        *level = kbl_thinkpad_level(r); return true;
+    default: return false;
+    }
+}
+
+bool NMKbdBacklight::probeAsus() {
+    dev = find("PNP0C14", "WMNB");
+    if (!dev) return false;
+    backend = Asus; maxLevel_ = KBL_ASUS_MAX_LEVEL;
+    int l; return getLevel(&l);
+}
+
+bool NMKbdBacklight::probeIdeaPad() {
+    dev = find("VPC2004", "KBLC");
+    uint32_t q = 0;
+    if (dev && evalInt("KBLC", KBL_LENOVO_QUERY_TYPE, &q) && kbl_lenovo_type(q)) {
+        lenovoType = kbl_lenovo_type(q); backend = IdeaPad; maxLevel_ = kbl_lenovo_max_level(lenovoType);
+        int l; return getLevel(&l);
+    }
+    dev = find("VPC2004", "HALS");   // a plain on/off light is read with HALS and set with SALS
+    if (dev && dev->validateObject("SALS") == kIOReturnSuccess) {
+        backend = IdeaPadPlain; maxLevel_ = kbl_lenovo_max_level(0);
+        int l; return getLevel(&l);
+    }
+    return false;
+}
+
+bool NMKbdBacklight::probeThinkPad() {
+    dev = find("LEN0068", "MLCG");
+    if (!dev) dev = find("IBM0068", "MLCG");
+    if (!dev) dev = find("LEN0268", "MLCG");
+    if (!dev || dev->validateObject("MLCS") != kIOReturnSuccess) return false;
+    backend = ThinkPad; maxLevel_ = KBL_THINKPAD_MAX_LEVEL;
+    int l; return getLevel(&l);
 }
 
 IOService *NMKbdBacklight::probe(IOService *provider, SInt32 *score) {
@@ -54,20 +138,16 @@ IOService *NMKbdBacklight::probe(IOService *provider, SInt32 *score) {
     uint32_t on = 0;
     if (!PE_parse_boot_argn("nmkbl", &on, sizeof on) || on != 1) return nullptr;   // off unless asked for
 
-    auto dict = IOService::nameMatching("PNP0C14");
-    if (!dict) return nullptr;
-    auto it = IOService::getMatchingServices(dict);
-    dict->release();
-    if (!it) return nullptr;
-    while (auto obj = it->getNextObject()) {
-        auto dev = OSDynamicCast(IOACPIPlatformDevice, obj);
-        if (dev && dev->validateObject("WMNB") == kIOReturnSuccess) { wmi = dev; break; }
-    }
-    it->release();
-    if (!wmi) { SYSLOG("nmkbl", "no ASUS WMI device (WMNB) on this laptop"); return nullptr; }
+    // Two plugins must not own LKSB: stand aside when SMCLightSensor has registered it (unless forced).
+    uint32_t force = 0;
+    PE_parse_boot_argn("nmkblforce", &force, sizeof force);
+    int sensor = 0, ali = 0;
+    if (auto sd = IOService::nameMatching("SMCLightSensor")) { auto it = IOService::getMatchingServices(sd); sd->release(); if (it) { sensor = it->getNextObject() != nullptr; it->release(); } }
+    ali = find("ACPI0008", "_ALI") != nullptr;
+    if (kbl_should_decline(sensor, ali, force == 1)) { SYSLOG("nmkbl", "SMCLightSensor owns LKSB/LKSS on this machine; standing aside (nmkblforce=1 registers anyway)"); return nullptr; }
 
-    int level = 0;
-    if (!getLevel(&level)) { SYSLOG("nmkbl", "the firmware reports no keyboard backlight"); wmi = nullptr; return nullptr; }
+    if (!probeAsus() && !probeIdeaPad() && !probeThinkPad()) { SYSLOG("nmkbl", "no supported keyboard backlight interface found"); dev = nullptr; return nullptr; }
+    DBGLOG("nmkbl", "backend %d, max level %d", (int)backend, maxLevel_);
 
     setProperty("VersionInfo", kextVersion);
     vsmcNotifier = VirtualSMCAPI::registerHandler(vsmcNotificationHandler, this);
