@@ -532,13 +532,10 @@ pub(in crate::native) fn first_type_after_op(rhs: &str) -> Option<LlType> {
 
 pub(in crate::native) fn first_type_after(rhs: &str, start: usize) -> Option<LlType> {
     let toks: Vec<&str> = rhs.split_whitespace().collect();
+    let mut candidate = String::new();
     for begin in start..toks.len() {
-        for end in (begin + 1)..=toks.len() {
-            let candidate = toks[begin..end].join(" ");
-            let candidate = candidate.trim_end_matches(',');
-            if let Ok(ty) = parse_type(candidate) {
-                return Some(ty);
-            }
+        if let Some(ty) = first_type_from(&toks[begin..], &mut candidate) {
+            return Some(ty);
         }
     }
     None
@@ -546,8 +543,42 @@ pub(in crate::native) fn first_type_after(rhs: &str, start: usize) -> Option<LlT
 
 pub(in crate::native) fn first_type_token(s: &str) -> Option<LlType> {
     let toks: Vec<&str> = s.split_whitespace().collect();
+    first_type_from(&toks, &mut String::new())
+}
+
+/// The shortest run of leading `toks` that `parse_type` accepts (each run joined by single spaces, trailing commas
+/// trimmed), trying runs in order of length.
+///
+/// A run that cannot be a type is skipped without calling `parse_type`, whose failure formats an error message: that
+/// was most of the time spent here, and this function was 4% of all translation time, because a line's type is searched
+/// for by trying every run from every token. `parse_type` accepts only a text that, once its leading fast-math flags
+/// are stripped, starts with `v`, `m`, `f`, `h`, `b`, `i`, `%`, `p`, `<`, `{` or `[`, or that ends in `*`; a run whose
+/// first non-flag token starts with none of those and that holds no `*` is therefore refused, and skipping it
+/// returns what calling `parse_type` would have.
+fn first_type_from(toks: &[&str], candidate: &mut String) -> Option<LlType> {
+    let first = toks.iter().position(|tok| {
+        !matches!(
+            *tok,
+            "fast" | "nnan" | "ninf" | "nsz" | "arcp" | "contract" | "afn" | "reassoc" | "volatile"
+        )
+    })?;
+    let opens = matches!(
+        toks[first].as_bytes().first(),
+        Some(b'v' | b'm' | b'f' | b'h' | b'b' | b'i' | b'%' | b'p' | b'<' | b'{' | b'[')
+    );
+    let mut star = false;
     for end in 1..=toks.len() {
-        let candidate = toks[..end].join(" ");
+        star |= toks[end - 1].contains('*');
+        if end <= first || !(opens || star) {
+            continue;
+        }
+        candidate.clear();
+        for (i, tok) in toks[..end].iter().enumerate() {
+            if i > 0 {
+                candidate.push(' ');
+            }
+            candidate.push_str(tok);
+        }
         if let Ok(ty) = parse_type(candidate.trim_end_matches(',')) {
             return Some(ty);
         }
@@ -607,4 +638,70 @@ pub(in crate::native) fn strip_keywords(s: &str) -> String {
         .filter(|t| !is_flag_keyword(t))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod first_type_tests {
+    use super::*;
+
+    /// The search as it was before runs that cannot be a type were skipped: every run from every token.
+    fn first_type_after_every_run(rhs: &str, start: usize) -> Option<LlType> {
+        every_run(rhs, start, usize::MAX)
+    }
+
+    /// `first_type_token` as it was: every run from the first token only.
+    fn first_type_token_every_run(s: &str) -> Option<LlType> {
+        every_run(s, 0, 1)
+    }
+
+    fn every_run(rhs: &str, start: usize, begins: usize) -> Option<LlType> {
+        let toks: Vec<&str> = rhs.split_whitespace().collect();
+        for begin in (start..toks.len()).take(begins) {
+            for end in (begin + 1)..=toks.len() {
+                let candidate = toks[begin..end].join(" ");
+                if let Ok(ty) = parse_type(candidate.trim_end_matches(',')) {
+                    return Some(ty);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn skipping_runs_that_cannot_be_types_finds_the_same_type_as_trying_every_run() {
+        let lines = [
+            "call fast float @air.fast_cos.f32(float %x)",
+            "tail call afn nnan <4 x half> @air.mix.v4f16(<4 x half> %a, <4 x half> %b, <4 x half> %c)",
+            "call { float, i32 } @f(ptr addrspace(1) %p, i64 0)",
+            "call spir_func void @g(i32 %a) #3",
+            "call reassoc contract [4 x i32] @h()",
+            "call %struct.S @k(%struct.S* byval(%struct.S) %v)",
+            "call i8 addrspace(1)* @legacy(i32 %0)",
+            "call void (i32)* @fnptr()",
+            "phi float [ %a, %b ], [ 0.000000e+00, %c ]",
+            "fadd fast float %a, %b",
+            "icmp eq <2 x i32> %a, zeroinitializer",
+            "call fast",
+            "call fast nnan",
+            "call ,",
+            "call @nothing(), !dbg !4",
+            "extractelement <4 x float> %v, i32 2",
+            "call bfloat @b(bfloat %x)",
+            "call metadata @m()",
+        ];
+        for line in lines {
+            for start in 0..3 {
+                assert_eq!(
+                    format!("{:?}", first_type_after(line, start)),
+                    format!("{:?}", first_type_after_every_run(line, start)),
+                    "`{line}` from token {start}"
+                );
+            }
+            assert_eq!(
+                format!("{:?}", first_type_token(line)),
+                format!("{:?}", first_type_token_every_run(line)),
+                "first_type_token `{line}`"
+            );
+        }
+    }
 }

@@ -296,7 +296,9 @@ pub(crate) fn materialize_texture_array_loads(ctx: &mut Ctx, entry_idx: usize) {
     }
     dead_roots.extend(handle_order.iter().map(|handle| handles[handle].0));
 
-    let mut placeholder_uses: HashMap<(usize, usize), (Instruction, Instruction, Word)> =
+    // chain, load, image, and the handle the three came from: the handle names the prelude that computes the
+    // heap index, and without it the chain references an index no instruction defines.
+    let mut placeholder_uses: HashMap<(usize, usize), (Instruction, Instruction, Word, Word)> =
         HashMap::default();
     let mut placeholder_specs = Vec::new();
     for (block_idx, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
@@ -313,10 +315,10 @@ pub(crate) fn materialize_texture_array_loads(ctx: &mut Ctx, entry_idx: usize) {
             if defs.contains_key(handle) {
                 continue;
             }
-            placeholder_specs.push((block_idx, inst_idx, arrayvar, idx));
+            placeholder_specs.push((block_idx, inst_idx, arrayvar, idx, *handle));
         }
     }
-    for (block_idx, inst_idx, arrayvar, idx) in placeholder_specs {
+    for (block_idx, inst_idx, arrayvar, idx, handle) in placeholder_specs {
         let &(image_ty, dim, comp, multisampled) = ctx.image_array_vars.get(&arrayvar).unwrap();
         let ptr_image = ctx.ty_ptr(StorageClass::UniformConstant, image_ty);
         let pointer = ctx.module.fresh_id();
@@ -346,7 +348,7 @@ pub(crate) fn materialize_texture_array_loads(ctx: &mut Ctx, entry_idx: usize) {
                 ctx.register_runtime_storage_image_value(image, metal_index, Some(state));
             }
         }
-        placeholder_uses.insert((block_idx, inst_idx), (chain, load, image));
+        placeholder_uses.insert((block_idx, inst_idx), (chain, load, image, handle));
     }
 
     let func = &mut ctx.module.functions[entry_idx];
@@ -354,7 +356,16 @@ pub(crate) fn materialize_texture_array_loads(ctx: &mut Ctx, entry_idx: usize) {
         let mut rebuilt: Vec<Instruction> =
             Vec::with_capacity(blk.instructions.len() + handles.len());
         for (inst_idx, inst) in blk.instructions.clone().into_iter().enumerate() {
-            if let Some((chain, load, image)) = placeholder_uses.remove(&(block_idx, inst_idx)) {
+            if let Some((chain, load, image, handle)) =
+                placeholder_uses.remove(&(block_idx, inst_idx))
+            {
+                // The index this chain reads is defined by the handle's prelude. The other path below already
+                // emits it; this one did not, so a ray-tracing hit shader's bindless texture - a handle with no
+                // defining instruction of its own in the entry - built a chain on an undefined id and the whole
+                // module was refused as invalid.
+                if let Some(prelude) = handle_preludes.remove(&handle) {
+                    rebuilt.extend(prelude);
+                }
                 rebuilt.push(chain);
                 rebuilt.push(load);
                 let mut call = inst;
@@ -385,6 +396,14 @@ pub(crate) fn materialize_texture_array_loads(ctx: &mut Ctx, entry_idx: usize) {
     }
     ctx.emit_sidecar
         .local_pointer_dynamic_field_loads
+        .retain(|fact| !handles.contains_key(&fact.id));
+    // A handle this run materialized is spent: its heap-slot computation is retired with it. This pass runs
+    // more than once, and leaving the fact behind made the second run rebuild the access chain on a slot id
+    // the first run had already removed - an index no instruction defines, and the module refused as invalid.
+    // The entry's own textures survived because their first run resolved them; a ray-tracing hit shader's did
+    // not, which is why it took a ray-tracing kernel to show this.
+    ctx.emit_sidecar
+        .device_handle_heap_loads
         .retain(|fact| !handles.contains_key(&fact.id));
 
     retire_dead_pointer_projections(ctx, entry_idx, dead_roots.iter().copied());
