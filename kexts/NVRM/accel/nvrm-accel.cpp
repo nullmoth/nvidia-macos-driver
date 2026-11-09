@@ -2666,12 +2666,42 @@ static void nvAccelHybridHome(IOService *fb, unsigned head)
 }
 
 // Level 4: the copy engine writes the frame, which is still only in the GPU's memory, into a buffer the panel driver owns. The
-// order of the steps is nm_hybrid.h's nmh_dma_frame. Returns true when the frame is on its way to the screen.
+// order of the steps, and where the accelerator lock is held, is nm_hybrid.h's nmh_dma_frame: the GPU is waited for with no
+// lock, the lock covers the resource lookup and the copy, and it is released before the flip, whose wait for the next vertical
+// blank (up to 40 ms) would otherwise stall every other WindowServer thread that needs the accelerator. The lock is taken and
+// given back by this function itself (nvFamLock / nvFamUnlock), so no lock-owner bookkeeping is needed, as there is for a
+// page-off that the family calls with the lock already held.
 struct NVHyDmaCtx {
     NVDisplayPipe *pipe; IOService *fb; IOSurface *s; const OSSymbol *sym; NVResource *res; NVVidMemory *vm; NVRMRmHandles h;
-    NMHybridReq q; unsigned long long len; unsigned id; void *cache; bool locked; NVAccel *accel;
+    NMHybridReq q; unsigned long long len; unsigned id; void *cache; NVAccel *accel;
 };
 static int hyDmaRender(void *c) { NVHyDmaCtx *x = (NVHyDmaCtx *)c; nvSurfWaitReady(x->id); return 0; }
+static int hyDmaLockLookup(void *c)
+{
+    NVHyDmaCtx *x = (NVHyDmaCtx *)c;
+    if (!nvFamLock(x->accel, true)) return -1;
+    x->cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)x->accel, (void *)x->s, 0);
+    OSObject *ctx = x->cache ? *(OSObject *volatile *)((unsigned char *)x->cache + 0x20) : nullptr;
+    x->res = OSDynamicCast(NVResource, ctx);
+    x->vm = x->res ? nvres_vidmem(x->res) : nullptr;
+    struct NVRMVramRequest sq; nvSVZero(&sq, sizeof sq); sq.version = NVRM_VRAM_ABI_VERSION;
+    const IOReturn sr = x->accel->askFramebufferForScanout(&sq, x->fb);
+    // the copy is of what is still only in the GPU's memory; nvSVPend was true when the frame was chosen
+    const int why = (x->vm && x->vm->fRmHandle && !x->vm->fScanout && sr == kIOReturnSuccess && nvAccelRmHandles(x->pipe->fAccel, &x->h))
+        ? nmh_dma_eligible(gNmHybrid, 1, x->s->getPixelFormat(), (unsigned)x->s->getWidth(), (unsigned)x->s->getHeight(), (unsigned)x->s->getBytesPerRow(),
+                           sq.width, sq.height, sq.pitch, x->vm->fBytes, (unsigned long long)sq.pitch * sq.height)
+        : NMH_E_NOTVRAM;
+    if (why == NMH_OK) return 0;
+    if (x->cache) { ((OSObject *)x->cache)->release(); x->cache = nullptr; }
+    nvFamUnlock(x->accel);
+    return -1;
+}
+static void hyDmaUnlock(void *c)
+{
+    NVHyDmaCtx *x = (NVHyDmaCtx *)c;
+    if (x->cache) { ((OSObject *)x->cache)->release(); x->cache = nullptr; }
+    nvFamUnlock(x->accel);
+}
 static int hyDmaAcquire(void *c, int *idx)
 {
     NVHyDmaCtx *x = (NVHyDmaCtx *)c;
@@ -2718,34 +2748,15 @@ static bool nvAccelHybridDma(NVDisplayPipe *pipe, IOService *fb, unsigned head, 
     NVHyDmaCtx x; nvSVZero(&x, sizeof x);
     x.pipe = pipe; x.fb = fb; x.s = s; x.id = s->getSurfaceID();
     x.len = (unsigned long long)s->getBytesPerRow() * s->getHeight();
-    NVAccel *a = NVAccel::resolve(pipe->fAccel);
-    if (!a || !nvSVPend(x.id, 2, nullptr)) return false;                 // the newest pixels are not only in the GPU's memory: level 3
+    x.accel = NVAccel::resolve(pipe->fAccel);
+    if (!x.accel || !nvSVPend(x.id, 2, nullptr)) return false;           // the newest pixels are not only in the GPU's memory: level 3
     x.sym = OSSymbol::withCStringNoCopy(NMH_FN_IMPORT);
     if (!x.sym) return false;
-    bool done = false;
-    // the family lock is held while the resource is looked up and the copy runs, as in a page-off
-    if (nvFamLock(a, true)) {
-        void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, (void *)s, 0);
-        OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
-        x.res = OSDynamicCast(NVResource, ctx);
-        x.vm = x.res ? nvres_vidmem(x.res) : nullptr;
-        // geometry the scan-out would take: asked of the panel driver by the query below, through a scan-out request
-        struct NVRMVramRequest sq; nvSVZero(&sq, sizeof sq); sq.version = NVRM_VRAM_ABI_VERSION;
-        IOReturn sr = a->askFramebufferForScanout(&sq, fb);
-        const int why = (x.vm && x.vm->fRmHandle && !x.vm->fScanout && sr == kIOReturnSuccess && nvAccelRmHandles(pipe->fAccel, &x.h))
-            ? nmh_dma_eligible(gNmHybrid, 1, s->getPixelFormat(), (unsigned)s->getWidth(), (unsigned)s->getHeight(), (unsigned)s->getBytesPerRow(),
-                               sq.width, sq.height, sq.pitch, x.vm->fBytes, (unsigned long long)sq.pitch * sq.height)
-            : NMH_E_NOTVRAM;
-        if (why == NMH_OK) {
-            struct nmh_dma_ops ops = { &x, hyDmaRender, hyDmaAcquire, hyDmaCopy, hyDmaPresent, hyDmaAbort, hyDmaQuarantine };
-            const int rc = nmh_dma_frame(&ops);
-            done = rc == NMH_DMA_DONE;
-            if (!done && gHyFailLogs < 8) { gHyFailLogs++; ALOG("hybrid: fallback to copy: copy-engine frame not shown (step result %d)", rc); }
-        }
-        if (cache) ((OSObject *)cache)->release();
-        nvFamUnlock(a);
-    }
+    struct nmh_dma_ops ops = { &x, hyDmaRender, hyDmaLockLookup, hyDmaUnlock, hyDmaAcquire, hyDmaCopy, hyDmaPresent, hyDmaAbort, hyDmaQuarantine };
+    const int rc = nmh_dma_frame(&ops);
     x.sym->release();
+    const bool done = rc == NMH_DMA_DONE;
+    if (!done && rc != NMH_DMA_NOT_ELIGIBLE && gHyFailLogs < 8) { gHyFailLogs++; ALOG("hybrid: fallback to copy: copy-engine frame not shown (step result %d)", rc); }
     if (done) {
         gHyOnSlot[head] = true;
         nmh_shadow_invalidate(&gHyShadow[head].sh);

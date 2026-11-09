@@ -145,4 +145,63 @@ static inline uint32_t nmd_plan(const struct nmd_part *p, struct nmd_write *w, u
     return n;
 }
 
+/* ---- which file a given GPU needs, and how large its program may be (Linux intel_dmc.c dmc_firmware_default, pciids.h) */
+static inline const char *nmd_file_for(unsigned display_version, unsigned pci_device)
+{
+    static const unsigned tgl[] = { 0x9a40, 0x9a49, 0x9a59, 0x9a60, 0x9a68, 0x9a70, 0x9a78, 0x9ac0, 0x9ac9, 0x9ad9, 0x9af8 };
+    static const unsigned adlp[] = { 0x4626, 0x4628, 0x462a, 0x46a0, 0x46a1, 0x46a2, 0x46a3, 0x46a6, 0x46a8, 0x46aa, 0x46b0, 0x46b1, 0x46b2, 0x46b3, 0x46c0, 0x46c1, 0x46c2, 0x46c3 };
+    static const unsigned mtl[] = { 0x7d40, 0x7d45, 0x7d55, 0x7d60, 0x7dd5, 0x7d41, 0x7d51, 0x7d67, 0x7dd1, 0xb640 };   /* Meteor Lake and Arrow Lake */
+    unsigned i;
+    if (display_version == 12) { for (i = 0; i < sizeof tgl / sizeof *tgl; i++) if (tgl[i] == pci_device) return "tgl_dmc_ver2_12.bin"; }
+    else if (display_version == 13) { for (i = 0; i < sizeof adlp / sizeof *adlp; i++) if (adlp[i] == pci_device) return "adlp_dmc_ver2_16.bin"; }
+    else if (display_version == 14) { for (i = 0; i < sizeof mtl / sizeof *mtl; i++) if (mtl[i] == pci_device) return "mtl_dmc.bin"; }
+    return 0;      /* Rocket Lake and Alder Lake S have their own files, not fetched */
+}
+static inline uint32_t nmd_max_words(unsigned display_version)
+{
+    return (display_version >= 14 ? 0x7000u : (display_version == 13 ? 0x20000u : 0x6000u)) / 4;
+}
+
+/* ---- the load sequence, as Linux's intel_dmc_load_program does it, but with every event handler left disabled: the program
+ * is in place, nothing it would trigger runs. (Linux keeps the main program's events enabled for the deep display power states;
+ * this driver never enables those states, so there is nothing for them to do.) Register bases: the main program at 0x8F000, the
+ * pipe programs at 0x5F000 (version 13 and later) or 0x92000 plus 0x400 per pipe. */
+#define NMD_EVT_COUNT 8
+#define NMD_EVT_DISABLED ((3u << 16) | (0x01u << 8))        /* edge 0 to 1 on the event "false": never fires */
+#define NMD_EVT_CTL_OFF 0x34u
+#define NMD_EVT_HTP_OFF 0x04u
+static inline uint32_t nmd_base(unsigned id, unsigned display_version)
+{
+    return id == 0 ? 0x8F000u : ((display_version >= 13 ? 0x5F000u : 0x92000u) + 0x400u * (id - 1));
+}
+static inline int nmd_is_evt_ctl(unsigned id, unsigned display_version, uint32_t reg)
+{
+    const uint32_t b = nmd_base(id, display_version) + NMD_EVT_CTL_OFF;
+    return reg >= b && reg < b + 4u * NMD_EVT_COUNT;
+}
+static inline uint32_t nmd_load_plan(const struct nmd_fw *fw, unsigned display_version, struct nmd_write *w, uint32_t cap)
+{
+    uint32_t n = 0, i, h; unsigned id;
+    for (id = 0; id < NMD_MAX_IDS; id++) {
+        const struct nmd_part *p = &fw->part[id];
+        if (!p->present) continue;
+        if (n + 2 * NMD_EVT_COUNT + p->words + p->mmio_count > cap) return 0;
+        for (h = 0; h < NMD_EVT_COUNT; h++) {
+            w[n].reg = nmd_base(id, display_version) + NMD_EVT_CTL_OFF + 4 * h; w[n].val = NMD_EVT_DISABLED; n++;
+            w[n].reg = nmd_base(id, display_version) + NMD_EVT_HTP_OFF + 4 * h; w[n].val = 0; n++;
+        }
+    }
+    for (id = 0; id < NMD_MAX_IDS; id++) {
+        const struct nmd_part *p = &fw->part[id];
+        if (!p->present) continue;
+        for (i = 0; i < p->words; i++) { w[n].reg = p->start_mmio + 4 * i; w[n].val = nmd_u32(p->payload + 4 * i); n++; }
+        for (i = 0; i < p->mmio_count; i++) {
+            w[n].reg = p->mmio_addr[i];
+            w[n].val = nmd_is_evt_ctl(id, display_version, p->mmio_addr[i]) ? NMD_EVT_DISABLED : p->mmio_data[i];
+            n++;
+        }
+    }
+    return n;
+}
+
 #endif

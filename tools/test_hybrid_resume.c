@@ -15,6 +15,7 @@ static int fails;
 
 #define NREG (0x170000 / 4)
 static unsigned T_PIPE = 0, T_PORT = 0, T_VER = 12;
+static struct nmr_edp T_EDP;                /* what the video BIOS says about the panel's drive table */
 static uint32_t reg[NREG];
 static uint8_t dpcd[0x800];
 static struct { uint32_t off; uint32_t v; } wlog[6000]; static int nw;
@@ -28,13 +29,14 @@ static uint32_t *R(uint32_t o) { return &reg[o / 4]; }
 static void phy_level(unsigned *v, unsigned *p)
 {
     const uint32_t lane = nmr_phy_base(T_PORT) + 0x880;
-    const struct nmr_trans *tab = nmr_table(T_VER, dpcd[0x100] * 27000u);
+    const struct nmr_sel sel = nmr_select(T_VER, dpcd[0x100] * 27000u, &T_EDP);
+    const struct nmr_trans *tab = sel.t;
     uint32_t d2 = *R(lane + 8), d4 = *R(lane + 16), d7 = *R(lane + 28);
     *v = *p = 0;
     for (unsigned vv = 0; vv < 4; vv++) for (unsigned pp = 0; pp + vv < 4; pp++) {
         int idx = nmr_level_index(vv, pp);
         const struct nmr_trans *t = &tab[idx];
-        if (idx == 0) continue;
+        if (idx == 0 || (unsigned)idx >= sel.n) continue;
         if ((((d2 >> 15) & 1) << 3 | ((d2 >> 11) & 7)) == t->sw && ((d7 >> 24) & 0x7F) == t->ns && (d4 & 0x3F) == t->cc && ((d4 >> 12) & 0x3F) == t->pc1) { *v = vv; *p = pp; }
     }
 }
@@ -59,7 +61,7 @@ static void aux_process(void)
     for (i = 0; i < len; i++) {
         uint32_t a = addr + i; uint8_t v = dpcd[a];
         if (a == 0x202 || a == 0x203 || a == 0x204) {
-            unsigned pat = dpcd[0x102] & 3, srcpat = (*R(NMR_DP_TP_CTL(T_PORT)) >> 8) & 7, dv, dp; int cr, eq;
+            unsigned pat = dpcd[0x102] & 3, srcpat = (*R(NMR_DP_TP_CTL(T_PIPE)) >> 8) & 7, dv, dp; int cr, eq;
             phy_level(&dv, &dp);
             cr = pat >= 1 && srcpat == (pat == 1 ? 0u : 1u) && !train_fail_level && dv >= (unsigned)sink_needs_v && (dpcd[0x103] & 3) == dv;
             eq = cr && pat == 2 && dp >= (unsigned)sink_needs_p;
@@ -91,7 +93,7 @@ static void m_wr(void *c, uint32_t o, uint32_t v)
     if (o == NMR_DE_PLL_ENABLE && (v & NMR_PLL_ENABLE) && !pll_fail) *R(o) |= NMR_PLL_LOCK;
     for (unsigned k = 0; k < 2; k++) if (o == NMR_DPLL_ENABLE(k)) { if (v & NMR_PLL_POWER) *R(o) |= NMR_PLL_PSTATE; if ((v & NMR_PLL_ENABLE) && !pll_fail) *R(o) |= NMR_PLL_LOCK; }
     if (o == NMR_PP_CONTROL && (v & 1) && !panel_fail) *R(NMR_PP_STATUS) = NMR_PP_ON_VALUE;
-    if (o == NMR_DP_TP_CTL(T_PORT) && ((v >> 8) & 7) == 2) *R(NMR_DP_TP_STATUS(T_PORT)) |= NMR_TP_IDLE_DONE;
+    if (o == NMR_DP_TP_CTL(T_PIPE) && ((v >> 8) & 7) == 2) *R(NMR_DP_TP_STATUS(T_PIPE)) |= NMR_TP_IDLE_DONE;
 }
 static void m_delay(void *c, unsigned us) { (void)c; now_us += us; }
 static void m_log(void *c, const char *s) { (void)c; if (nsteps < 32) steps[nsteps++] = s; }
@@ -104,7 +106,7 @@ static void lit_state(void)
     const unsigned t = T_PIPE, p = T_PIPE, port = T_PORT;
     reg[NMR_PW_DRIVER / 4] = 0x0000001Fu | 0x2Au; reg[NMR_PW_AUX / 4] = 3u << (2 * port); reg[NMR_PW_DDI / 4] = 3u << (2 * port);
     reg[NMR_DE_PLL_ENABLE / 4] = NMR_PLL_ENABLE | NMR_PLL_LOCK | 0x23; reg[NMR_CDCLK_CTL / 4] = 0x00000BB8;
-    reg[NMR_DPLL_ENABLE(port) / 4] = NMR_PLL_POWER | NMR_PLL_PSTATE | NMR_PLL_ENABLE | NMR_PLL_LOCK;
+    reg[NMR_DPLL_ENABLE(port & 1) / 4] = NMR_PLL_POWER | NMR_PLL_PSTATE | NMR_PLL_ENABLE | NMR_PLL_LOCK;
     for (unsigned k = 0; k < 2; k++) {
         reg[NMR_DPLL_CFGCR0(k) / 4] = 0x1234567 + k; reg[NMR_DPLL_CFGCR1(k) / 4] = 0x89AB + k; reg[NMR_DPLL_DIV0(k) / 4] = 0x5 + k;
     }
@@ -118,7 +120,7 @@ static void lit_state(void)
     for (unsigned i = 0; i < NMR_PLANE_WM_WORDS; i++) reg[(NMR_PLANE_WM_BASE(p) / 4) + i] = 0x80000000u + i;
     reg[NMR_SURF(p) / 4] = 0x00800000;
     reg[NMR_FUNC_CTL(t) / 4] = 0x80000000u | ((port + 1u) << NMR_TRANS_PORT_SHIFT) | (1u << 8);
-    reg[NMR_DP_TP_CTL(port) / 4] = NMR_TP_ENABLE | NMR_TP_NORMAL; reg[NMR_DDI_BUF_CTL(port) / 4] = NMR_DDI_ENABLE | (1u << 1);
+    reg[NMR_DP_TP_CTL(p) / 4] = NMR_TP_ENABLE | NMR_TP_NORMAL; reg[NMR_DDI_BUF_CTL(port) / 4] = NMR_DDI_ENABLE | (1u << 1);
     reg[NMR_TRANSCONF(p) / 4] = NMR_TRANS_ENABLE | 0x4; reg[NMR_BLC_PWM_CTL / 4] = 0x80000000u; reg[NMR_BLC_PWM_FREQ / 4] = 0x4B0; reg[NMR_BLC_PWM_DUTY / 4] = 0x258;
     dpcd[0x100] = 0x14; dpcd[0x101] = 0x82; dpcd[0x107] = 0x10; dpcd[0x108] = 1; dpcd[0x115] = 0;
     dpcd[0x002] = 0x82; dpcd[0x003] = 0x01; dpcd[0x00E] = 0; dpcd[0x600] = 1;
@@ -146,30 +148,31 @@ static int naive_resume(const struct nmr_ops *o, const struct nmr_snap *s, unsig
 #define nmr_resume naive_resume
 #endif
 
+static void edp_suite(void);
 static void suite(void)
 {
     static struct nmr_snap snap; static uint32_t want[NREG];
     const unsigned t = T_PIPE, p = T_PIPE, port = T_PORT;
     lit_state(); memcpy(want, reg, sizeof want);
-    ARM("a lit panel is captured", nmr_snapshot(&ops, &snap, p) == NMR_OK && snap.valid);
+    ARM("a lit panel is captured", nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP) == NMR_OK && snap.valid);
     ARM("the port is read from the transcoder's function register", snap.topo.port == port && snap.topo.pipe == p);
     ARM("the sink's link settings are captured over the AUX channel", snap.dpcd[0] == 0x14 && snap.dpcd[1] == 0x82 && snap.have_sink);
     ARM("a panel that uses the AUX handshake is recognised", !snap.no_handshake);
-    lit_state(); reg[NMR_PW_AUX / 4] = 0; { static struct nmr_snap s2; ARM("a firmware that left the AUX well off still gets its sink captured", nmr_snapshot(&ops, &s2, p) == NMR_OK && s2.have_sink && reg[NMR_PW_AUX / 4] == 0); }
-    lit_state(); nmr_snapshot(&ops, &snap, p);
+    lit_state(); reg[NMR_PW_AUX / 4] = 0; { static struct nmr_snap s2; ARM("a firmware that left the AUX well off still gets its sink captured", nmr_snapshot(&ops, &s2, p, T_VER, &T_EDP) == NMR_OK && s2.have_sink && reg[NMR_PW_AUX / 4] == 0); }
+    lit_state(); nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP);
 
     s3(); int rc = nmr_resume(&ops, &snap, T_VER);
     ARM("resume after S3 lights the panel", rc == NMR_OK);
-    { int ok = 1; uint32_t chk[] = { NMR_DPLL_CFGCR0(port), NMR_DPLL_CFGCR1(port), NMR_DPLL_DIV0(port), NMR_DPCLKA_CFGCR0, nmr_phy_base(port), nmr_phy_base(port) + 0x880 + 8,
+    { int ok = 1; uint32_t chk[] = { NMR_DPLL_CFGCR0(port & 1), NMR_DPLL_CFGCR1(port & 1), NMR_DPLL_DIV0(port & 1), NMR_DPCLKA_CFGCR0, nmr_phy_base(port), nmr_phy_base(port) + 0x880 + 8,
         nmr_phy_base(port) + 4 * (NMR_PHY_WORDS - 1), NMR_PP_ON_DELAYS, NMR_TIMING(t, 0), NMR_TIMING(t, 6), NMR_TIMING(t, 10), NMR_SURF(p), NMR_PLANE(p, 1), NMR_PLANE_WM_BASE(p),
         NMR_PLANE_WM_BASE(p) + 0x3C, NMR_FUNC_CTL(t), NMR_PIPE_MISC(p), NMR_BLC_PWM_DUTY, NMR_CDCLK_CTL, NMR_TRANS_CLK_SEL(t), NMR_MSA_MISC(t) };
       for (unsigned i = 0; i < sizeof chk / sizeof *chk; i++) if (reg[chk[i] / 4] != want[chk[i] / 4]) { ok = 0; printf("   differs: 0x%x\n", chk[i]); }
       ARM("every captured configuration register is back to its firmware value, including the whole PHY block", ok); }
     ARM("the transcoder and the DDI buffer are running", (reg[NMR_TRANSCONF(p) / 4] & NMR_TRANS_ENABLE) && (reg[NMR_DDI_BUF_CTL(port) / 4] & NMR_DDI_ENABLE));
-    ARM("the link ends in normal operation", ((reg[NMR_DP_TP_CTL(port) / 4] >> 8) & 7) == 3);
+    ARM("the link ends in normal operation", ((reg[NMR_DP_TP_CTL(p) / 4] >> 8) & 7) == 3);
     ARM("the sink is told the link settings and powered to D0", dpcd[0x100] == 0x14 && dpcd[0x101] == 0x82 && dpcd[0x600] == 1);
     ARM("the training pattern is switched off at the sink afterwards", dpcd[0x102] == 0);
-    { int pw = first_write(NMR_PW_DRIVER), cd = first_write(NMR_DE_PLL_ENABLE), pl = first_write(NMR_DPLL_ENABLE(port)), ph = first_write(nmr_phy_base(port)),
+    { int pw = first_write(NMR_PW_DRIVER), cd = first_write(NMR_DE_PLL_ENABLE), pl = first_write(NMR_DPLL_ENABLE(port & 1)), ph = first_write(nmr_phy_base(port)),
           pp = first_write(NMR_PP_CONTROL), aux = first_write(NMR_AUX_CTL(port)), tim = first_write(NMR_TIMING(t, 0)), sf = last_write(NMR_SURF(p)),
           pl7 = last_write(NMR_PLANE(p, 3)), fn = first_write(NMR_FUNC_CTL(t)), dd = first_write(NMR_DDI_BUF_CTL(port)), tc = first_write(NMR_TRANSCONF(p)), bl = first_write(NMR_BLC_PWM_DUTY);
       ARM("order: power wells, display clock, DPLL, PHY block, panel power", pw < cd && cd < pl && pl < ph && ph < pp);
@@ -183,55 +186,79 @@ static void suite(void)
       ARM("each step is logged in order (these are the lines a tester sends)", ok); }
     ARM("the other port's registers are never written", port == 0 ? first_write(NMR_DDI_BUF_CTL(1)) < 0 : first_write(NMR_DDI_BUF_CTL(0)) < 0);
 
-    lit_state(); nmr_snapshot(&ops, &snap, p); nw = 0;
+    lit_state(); nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); nw = 0;
     ARM("a panel that is still lit is not touched", nmr_resume(&ops, &snap, T_VER) == NMR_ALREADY_LIT && nw == 0);
 
     s3(); ARM("display version 14 is refused with no register written", nmr_resume(&ops, &snap, 14) == NMR_E_GEN && nw == 0);
     { static struct nmr_snap none; memset(&none, 0, sizeof none); ARM("no snapshot, no resume, nothing written", nmr_resume(&ops, &none, T_VER) == NMR_E_NO_SNAPSHOT && nw == 0); }
     memset(reg, 0, sizeof reg);
-    ARM("a dark panel is not captured", nmr_snapshot(&ops, &snap, p) == NMR_E_NO_SNAPSHOT && !snap.valid);
-    lit_state(); reg[NMR_FUNC_CTL(t) / 4] = 0x80000000u | (3u << NMR_TRANS_PORT_SHIFT);
-    ARM("a panel on DDI C or later (possibly Type-C) is refused, not guessed", nmr_snapshot(&ops, &snap, p) == NMR_E_GEN);
+    ARM("a dark panel is not captured", nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP) == NMR_E_NO_SNAPSHOT && !snap.valid);
+    lit_state(); reg[NMR_FUNC_CTL(t) / 4] = 0x80000000u | (4u << NMR_TRANS_PORT_SHIFT);   /* DDI D */
+    ARM("a panel on DDI D or later (Type-C) is refused, not guessed", nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP) == NMR_E_GEN);
 
-    lit_state(); nmr_snapshot(&ops, &snap, p); s3(); pw_fail = 1;
+    lit_state(); nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); s3(); pw_fail = 1;
     ARM("a power well that never acknowledges stops the resume", nmr_resume(&ops, &snap, T_VER) == NMR_E_POWER);
-    ARM("...before any PLL, panel or DDI register is written", first_write(NMR_DPLL_ENABLE(port)) < 0 && first_write(NMR_PP_CONTROL) < 0 && first_write(NMR_DDI_BUF_CTL(port)) < 0);
-    lit_state(); nmr_snapshot(&ops, &snap, p); s3(); pll_fail = 1;
+    ARM("...before any PLL, panel or DDI register is written", first_write(NMR_DPLL_ENABLE(port & 1)) < 0 && first_write(NMR_PP_CONTROL) < 0 && first_write(NMR_DDI_BUF_CTL(port)) < 0);
+    lit_state(); nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); s3(); pll_fail = 1;
     ARM("a display clock PLL that never locks stops the resume", nmr_resume(&ops, &snap, T_VER) == NMR_E_CDCLK && first_write(NMR_DDI_BUF_CTL(port)) < 0);
-    lit_state(); nmr_snapshot(&ops, &snap, p); s3(); panel_fail = 1;
+    lit_state(); nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); s3(); panel_fail = 1;
     ARM("a panel power sequence that never completes stops the resume", nmr_resume(&ops, &snap, T_VER) == NMR_E_PANEL && first_write(NMR_DDI_BUF_CTL(port)) < 0 && first_write(NMR_TRANSCONF(p)) < 0);
-    lit_state(); nmr_snapshot(&ops, &snap, p); s3(); sink_deaf = 1;
+    lit_state(); nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); s3(); sink_deaf = 1;
     ARM("a sink that does not answer on AUX stops the resume", nmr_resume(&ops, &snap, T_VER) == NMR_E_SINK && first_write(NMR_DDI_BUF_CTL(port)) < 0);
 
     /* link training: the adjust-request loop and the drive registers */
-    lit_state(); nmr_snapshot(&ops, &snap, p); s3(); sink_needs_v = 2; sink_needs_p = 1;
+    lit_state(); nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); s3(); sink_needs_v = 2; sink_needs_p = 1;
     { rc = nmr_resume(&ops, &snap, T_VER); unsigned dv, dp; phy_level(&dv, &dp);
       ARM("a sink that asks for swing 2 and pre-emphasis 1 gets exactly that in the PHY registers", rc == NMR_OK && dv == 2 && dp == 1);
       ARM("...and in the sink's lane setting", (dpcd[0x103] & 3) == 2 || dpcd[0x102] == 0); }
-    lit_state(); nmr_snapshot(&ops, &snap, p); s3(); sink_needs_v = 3;
+    lit_state(); nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); s3(); sink_needs_v = 3;
     { rc = nmr_resume(&ops, &snap, T_VER); unsigned dv, dp; phy_level(&dv, &dp);
       ARM("the maximum swing is reachable", rc == NMR_OK && dv == 3 && dp == 0); }
-    lit_state(); nmr_snapshot(&ops, &snap, p); s3(); sink_needs_v = 0; sink_needs_p = 3;
+    lit_state(); nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); s3(); sink_needs_v = 0; sink_needs_p = 3;
     { rc = nmr_resume(&ops, &snap, T_VER); unsigned dv, dp; phy_level(&dv, &dp);
       ARM("the maximum pre-emphasis is reachable", rc == NMR_OK && dv == 0 && dp == 3); }
-    lit_state(); nmr_snapshot(&ops, &snap, p); s3(); sink_needs_v = 2; no_drive = 1;
+    lit_state(); nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); s3(); sink_needs_v = 2; no_drive = 1;
     ARM("an observer that refuses the level makes the training fail", nmr_resume(&ops, &snap, T_VER) == NMR_E_TRAIN);
     ARM("a failed training turns the DDI buffer off and leaves the transcoder off", !(reg[NMR_DDI_BUF_CTL(port) / 4] & NMR_DDI_ENABLE) && !(reg[NMR_TRANSCONF(p) / 4] & NMR_TRANS_ENABLE));
-    lit_state(); nmr_snapshot(&ops, &snap, p); s3(); train_fail_level = 1; now_us = 0;
+    lit_state(); nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); s3(); train_fail_level = 1; now_us = 0;
     ARM("a sink that never reports clock recovery fails within a bounded time", nmr_resume(&ops, &snap, T_VER) == NMR_E_TRAIN && now_us < 5000000ul);
-    lit_state(); dpcd[0x003] = 0x41; nmr_snapshot(&ops, &snap, p);
+    lit_state(); dpcd[0x003] = 0x41; nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP);
     ARM("a panel flagged as not using the AUX handshake is recognised", snap.no_handshake);
     s3(); train_fail_level = 1;
     ARM("such a panel is not trained over AUX, so a sink that cannot train still relights", nmr_resume(&ops, &snap, T_VER) == NMR_OK && (reg[NMR_DDI_BUF_CTL(port) / 4] & NMR_DDI_ENABLE));
 }
 
+static void edp_suite(void)
+{
+    static struct nmr_snap snap; unsigned dv, dp; int rc;
+    const unsigned p = T_PIPE, port = T_PORT;
+    lit_state(); T_EDP.known = 1; T_EDP.low_vswing = 1; T_EDP.hobl = 0; nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); s3(); sink_needs_v = 2; sink_needs_p = 1;
+    rc = nmr_resume(&ops, &snap, T_VER); phy_level(&dv, &dp);
+    ARM("the panel's own table is used: low swing, the sink's request reaches the PHY", rc == NMR_OK && dv == 2 && dp == 1);
+    { const struct nmr_trans *low = nmr_select(T_VER, 540000, &T_EDP).t, *dpt = nmr_select(T_VER, 540000, 0).t;
+      ARM("and it is not the DisplayPort row", low != dpt && memcmp(&low[8], &dpt[8], sizeof low[8]) != 0); }
+    lit_state(); T_EDP.known = 1; T_EDP.low_vswing = 0; T_EDP.hobl = 1; nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); s3(); sink_needs_v = 2;
+    rc = nmr_resume(&ops, &snap, T_VER);
+    ARM("reduced-power panel: up to swing 2 is trained", rc == NMR_OK);
+    ARM("reduced-power panel: the PHY's reduced-power override bits are set", (*R(nmr_phy_base(port) + 40) & 0xC) == 0xC);
+    lit_state(); T_EDP.known = 1; T_EDP.hobl = 1; nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); s3(); sink_needs_v = 3;
+    ARM("reduced-power panel: swing 3 has no row, so the training fails rather than guess", nmr_resume(&ops, &snap, T_VER) == NMR_E_TRAIN);
+    ARM("a table with 9 rows offers swing 2 at most", nmr_select(T_VER, 270000, &T_EDP).n == 9);
+    lit_state(); T_EDP.known = 0; T_EDP.hobl = 0; T_EDP.low_vswing = 1; nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); s3(); sink_needs_v = 2; sink_needs_p = 1;
+    rc = nmr_resume(&ops, &snap, T_VER); phy_level(&dv, &dp);
+    ARM("a panel the video BIOS did not identify keeps the DisplayPort table, whatever the flags say", rc == NMR_OK && nmr_select(T_VER, 270000, &T_EDP).t == nmr_select(T_VER, 270000, 0).t);
+    ARM("above 5.4 Gb/s an eDP panel has a table of its own", ({ struct nmr_edp e = {1, 0, 0}; nmr_select(T_VER, 810000, &e).t != nmr_select(T_VER, 810000, 0).t; }));
+    memset(&T_EDP, 0, sizeof T_EDP);
+}
+
 int main(void)
 {
-    static const struct { unsigned pipe, port, ver; } cases[] = { {0, 0, 12}, {1, 1, 12}, {3, 0, 13}, {2, 1, 13} };
+    static const struct { unsigned pipe, port, ver; } cases[] = { {0, 0, 12}, {1, 1, 12}, {3, 0, 13}, {2, 1, 13}, {0, 2, 12}, {2, 2, 12} };
     for (unsigned c = 0; c < sizeof cases / sizeof *cases; c++) {
         T_PIPE = cases[c].pipe; T_PORT = cases[c].port; T_VER = cases[c].ver;
         printf("-- panel on pipe %c, DDI %c, display version %u\n", 'A' + T_PIPE, 'A' + T_PORT, T_VER);
         suite();
+        if (c == 0 || c == 2) { printf("-- the same panel with a video BIOS that names its drive table\n"); edp_suite(); }
     }
     T_PIPE = 0; T_PORT = 0; T_VER = 12;
 
@@ -241,9 +268,9 @@ int main(void)
     lit_state();
     { const uint32_t l1 = nmr_phy_base(0) + 0x880 + 0x100;
       *R(l1 + 8) = 0xFFFF0700u; *R(l1 + 16) = 0xFFFC0000u; *R(l1 + 28) = 0x80FFFFFFu; nw = 0;
-      ARM("level 0 writes nothing", nmr_drive_apply(&ops, 0, 12, 540000, 0, 0) == 0 && nw == 0);
-      ARM("an invalid pair is refused and writes nothing", nmr_drive_apply(&ops, 0, 12, 540000, 3, 2) == -1 && nw == 0);
-      ARM("a level programs all four lanes", nmr_drive_apply(&ops, 0, 12, 540000, 1, 2) == 0 && nw == 12);
+      ARM("level 0 writes nothing", nmr_drive_apply(&ops, 0, 12, 540000, 0, 0, 0) == 0 && nw == 0);
+      ARM("an invalid pair is refused and writes nothing", nmr_drive_apply(&ops, 0, 12, 540000, 0, 3, 2) == -1 && nw == 0);
+      ARM("a level programs all four lanes", nmr_drive_apply(&ops, 0, 12, 540000, 0, 1, 2) == 0 && nw == 12);
       uint32_t d2 = *R(l1 + 8), d4 = *R(l1 + 16), d7 = *R(l1 + 28); const struct nmr_trans *t = &nmr_tgl_hbr2[6];
       ARM("DW2 holds the swing select and the rcomp scalar 0x98, the other bits kept", (((d2 >> 15) & 1) << 3 | ((d2 >> 11) & 7)) == t->sw && (d2 & 0xFF) == 0x98 && (d2 & 0xFFFF0000u) == 0xFFFF0000u && (d2 & 0x700u) == 0x700u);
       ARM("DW4 holds cursor, post-cursor 1 and 2, the other bits kept", (d4 & 0x3F) == t->cc && ((d4 >> 12) & 0x3F) == t->pc1 && ((d4 >> 6) & 0x3F) == 0 && (d4 & 0xFFFC0000u) == 0xFFFC0000u);

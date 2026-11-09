@@ -356,16 +356,23 @@ static inline int nmh_own_may_free(const struct nmh_own *o)
 /* ---------------------------------------------------------------------------------------------------------------------
  * level 4: the copy engine writes the composited frame into an owned buffer. The order is the whole point, and this is the
  * only place it is written down:
- *   1. the GPU has finished drawing the surface (wait_render)   -- the copy reads the surface's final pixels
- *   2. an owned buffer is taken and flushed from the CPU caches (acquire) -- so no dirty line can land over the DMA
- *   3. the copy engine writes it and the call returns only when the engine is done (ce_copy)
- *   4. only then the plane is flipped to it (present)
+ *   1. the GPU has finished drawing the surface (wait_render)   -- NO lock held: this can wait on the GPU
+ *   2. the accelerator lock is taken, the surface's GPU memory is looked up and the frame is checked (lock_lookup)
+ *   3. an owned buffer is taken and flushed from the CPU caches (acquire) -- so no dirty line can land over the DMA
+ *   4. the copy engine writes it and the call returns only when the engine is done (ce_copy)   -- lock held
+ *   5. the lock is released (unlock) -- before anything that waits for the display
+ *   6. only then the plane is flipped to the buffer (present), which can wait up to 40 ms for the next vertical blank
+ * The lock covers the lookup and the copy and nothing else: a flip wait with the accelerator lock held stalls every other
+ * thread of WindowServer that needs the accelerator. lock_lookup returns 0 holding the lock, or non-zero holding nothing;
+ * unlock is called exactly once for every successful lock_lookup, on every path.
  * A copy that fails cleanly returns the buffer (abort) and the caller copies the old way. A copy that TIMED OUT may still be
  * writing: the buffer is quarantined, never presented, never reused. Nothing is presented unless the copy completed.
  */
 struct nmh_dma_ops {
     void *ctx;
     int (*wait_render)(void *ctx);                 /* 0 = the surface is final */
+    int (*lock_lookup)(void *ctx);                 /* 0 = lock held and the frame is eligible; non-zero = no lock held */
+    void (*unlock)(void *ctx);
     int (*acquire)(void *ctx, int *idx);           /* 0 and a buffer, flushed, or non-zero */
     int (*ce_copy)(void *ctx, int idx);            /* 0 done, 1 failed with nothing written, 2 timed out */
     int (*present)(void *ctx, int idx);            /* 0 = flip landed */
@@ -392,8 +399,10 @@ static inline int nmh_dma_frame(const struct nmh_dma_ops *d)
 {
     int idx = -1, rc;
     if (d->wait_render(d->ctx)) return NMH_DMA_RENDER;
-    if (d->acquire(d->ctx, &idx) || idx < 0) return NMH_DMA_NO_BUFFER;
+    if (d->lock_lookup(d->ctx)) return NMH_DMA_NOT_ELIGIBLE;
+    if (d->acquire(d->ctx, &idx) || idx < 0) { d->unlock(d->ctx); return NMH_DMA_NO_BUFFER; }
     rc = d->ce_copy(d->ctx, idx);
+    d->unlock(d->ctx);
     if (rc == 2) { d->quarantine(d->ctx, idx); return NMH_DMA_COPY_TIMEOUT; }
     if (rc) { d->abort(d->ctx, idx); return NMH_DMA_COPY_FAILED; }
     if (d->present(d->ctx, idx)) { d->abort(d->ctx, idx); return NMH_DMA_PRESENT_FAILED; }

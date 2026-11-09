@@ -20,6 +20,9 @@
 #include "nm_hybrid.h"
 #include "nm_hybrid_abi.h"
 #include "nm_hybrid_resume.h"
+#include "nm_hybrid_resume14.h"
+#include "nm_hybrid_vbt.h"
+#include "nm_hybrid_dmc.h"
 #include "nvrm_off.h"
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -46,6 +49,17 @@ extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return KERN_SUCCESS;
 char gIfbStepStr[48] = "none";
 SYSCTL_STRING(_debug, OID_AUTO, nmintelfb_step, CTLFLAG_RD | CTLFLAG_LOCKED, gIfbStepStr, sizeof gIfbStepStr,
               "last step the Intel panel driver reached (nmhybrid)");
+
+// display firmware hand-over: a root helper writes the verified file here (package/nm_dmc_push); debug.nmintelfb_dmc_want names the
+// file this GPU needs
+class NMIntelFB;
+static NMIntelFB *gDmcTarget = nullptr;
+static int nmintelfb_dmc_write SYSCTL_HANDLER_ARGS;
+SYSCTL_PROC(_debug, OID_AUTO, nmintelfb_dmc, CTLTYPE_OPAQUE | CTLFLAG_WR | CTLFLAG_LOCKED, nullptr, 0, nmintelfb_dmc_write, "-",
+            "Intel display firmware for the panel driver (root only; parsed and checked before use)");
+static int nmintelfb_dmc_want_read SYSCTL_HANDLER_ARGS;
+SYSCTL_PROC(_debug, OID_AUTO, nmintelfb_dmc_want, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, nullptr, 0, nmintelfb_dmc_want_read, "A",
+            "name of the Intel display firmware file this GPU needs, or none");
 
 namespace {
 // display version by PCI device ID, from Linux include/drm/intel/pciids.h (MIT); 0 = not ours
@@ -88,7 +102,7 @@ void ifbStep(int step)
 {
     gIfbStep = step;
     snprintf(gIfbStepStr, sizeof gIfbStepStr, "%d %s", step, nmh_step_name(step));
-    if (!gIfbStepRegistered) { gIfbStepRegistered = true; sysctl_register_oid(&sysctl__debug_nmintelfb_step); }
+    if (!gIfbStepRegistered) { gIfbStepRegistered = true; sysctl_register_oid(&sysctl__debug_nmintelfb_step); sysctl_register_oid(&sysctl__debug_nmintelfb_dmc); sysctl_register_oid(&sysctl__debug_nmintelfb_dmc_want); }
     IOLog("NMIntelFB: hybrid: step %s\n", gIfbStepStr);
     if (IORegistryEntry *opt = IORegistryEntry::fromPath("/options", gIODTPlane)) {
         if (OSData *d = OSData::withBytes(gIfbStepStr, (unsigned)strlen(gIfbStepStr))) { opt->setProperty("nullmoth-ifb-step", d); d->release(); }
@@ -235,6 +249,16 @@ private:
     uint64_t *fFwPte = nullptr; uint64_t fFwPteFirst = 0, fFwPteCount = 0;
     thread_call_t fResumeCall = nullptr;
     bool ggttMap();
+    bool readVbt(struct nmr_edp *out);
+    // Intel display firmware (nm_hybrid_dmc.h), handed over by a root helper through debug.nmintelfb_dmc; boot-arg nmhybriddmc=1
+    // loads it (with every event handler left disabled). The kext cannot read a file, and never trusts the bytes: they are parsed
+    // and range-checked here before anything is kept or written.
+    uint8_t *fDmcBlob = nullptr; uint32_t fDmcLen = 0; bool fDmcOn = false;
+public:
+    int dmcAccept(const uint8_t *buf, uint32_t len);
+    char fDmcWant[40] = "none";
+private:
+    void dmcApply();
     void resumeCapture();
     void resumeRun();
     static void resumeFire(thread_call_param_t p0, thread_call_param_t) { ((NMIntelFB *)p0)->resumeRun(); }
@@ -342,6 +366,24 @@ public:
 };
 
 OSDefineMetaClassAndStructors(NMIntelFB, IOFramebuffer)
+static int nmintelfb_dmc_write SYSCTL_HANDLER_ARGS
+{
+    if (!req->newptr) return 0;
+    if (!gDmcTarget) return ENXIO;
+    if (req->newlen < 1024 || req->newlen > 160 * 1024) return EINVAL;
+    uint8_t *buf = (uint8_t *)IOMalloc(req->newlen);
+    if (!buf) return ENOMEM;
+    int err = SYSCTL_IN(req, buf, req->newlen);
+    if (!err) err = gDmcTarget->dmcAccept(buf, (uint32_t)req->newlen);
+    IOFree(buf, req->newlen);
+    return err;
+}
+static int nmintelfb_dmc_want_read SYSCTL_HANDLER_ARGS
+{
+    char b[40] = "none";
+    if (gDmcTarget) snprintf(b, sizeof b, "%s", gDmcTarget->fDmcWant);
+    return sysctl_handle_string(oidp, b, sizeof b, req);
+}
 #ifdef NMINTELFB_VIRTUAL
 static NMIntelFB *gVirt;
 static int nmintelfb_sample_sysctl SYSCTL_HANDLER_ARGS
@@ -475,6 +517,10 @@ bool NMIntelFB::start(IOService *provider)
     if (!adoptFirmwareMode()) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false; }
     ifbStep(NMH_STEP_ADOPT);
     resumeCapture();
+    { int a = 0; fDmcOn = PE_parse_boot_argn("nmhybriddmc", &a, sizeof a) && a == 1;
+      const char *want = nmd_file_for(fVer, fPCI->configRead16(kIOPCIConfigDeviceID));
+      snprintf(fDmcWant, sizeof fDmcWant, "%s", want ? want : "none");
+      gDmcTarget = this; }
     publishBacklight();   // before IOFramebuffer::start: IOFramebuffer::open looks for a service named "backlight"
     if (!IOFramebuffer::start(provider)) {
         if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
@@ -509,6 +555,8 @@ void NMIntelFB::stop(IOService *provider)
     if (fHyReady && fRing.live != -1) hybridHome();
     if (fOwnReady && nmh_own_may_free(&fOwn)) ownRelease();
     fResumeOn = false;
+    if (gDmcTarget == this) gDmcTarget = nullptr;
+    if (fDmcBlob) { IOFree(fDmcBlob, fDmcLen); fDmcBlob = nullptr; }
     if (fResumeCall) { thread_call_cancel(fResumeCall); while (!thread_call_free(fResumeCall)) { thread_call_cancel(fResumeCall); IOSleep(5); } fResumeCall = nullptr; }
     if (fSnap) { IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; }
     if (fFwPte) { IOFree(fFwPte, (size_t)(fFwPteCount * sizeof(uint64_t))); fFwPte = nullptr; }
@@ -781,12 +829,74 @@ void NMIntelFB::ownRelease()
 
 // ---- sleep and wake ----------------------------------------------------------------------------------------------------
 
+// The video BIOS tables through the OpRegion (PCI config 0xFC holds its physical address): the panel type, and from it whether
+// this panel uses the low-swing or reduced-power drive table. Nothing is guessed: any failure leaves the DisplayPort tables.
+bool NMIntelFB::readVbt(struct nmr_edp *out)
+{
+    const uint32_t asls = fPCI->configRead32(0xFC);
+    if (!asls) return false;
+    IOMemoryDescriptor *od = IOMemoryDescriptor::withPhysicalAddress(asls, NMV_OPREGION_SIZE, kIODirectionIn);
+    IOMemoryMap *om = od ? od->map() : nullptr;
+    bool ok = false;
+    if (om) {
+        const uint8_t *op = (const uint8_t *)om->getVirtualAddress();
+        uint32_t io = 0, is = 0; struct nmv_loc loc; struct nmv_edp e;
+        if (nmv_locate(op, asls, &io, &is, &loc)) {
+            if (loc.kind == 1) ok = nmv_edp(op + io, is, &e);
+            else if (loc.kind == 2) {
+                IOMemoryDescriptor *vd = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)loc.phys, loc.size, kIODirectionIn);
+                IOMemoryMap *vm = vd ? vd->map() : nullptr;
+                if (vm) ok = nmv_edp((const uint8_t *)vm->getVirtualAddress(), loc.size, &e);
+                if (vm) vm->release();
+                if (vd) vd->release();
+            }
+        }
+        if (ok) { out->known = 1; out->low_vswing = (uint8_t)e.low_vswing; out->hobl = (uint8_t)e.hobl;
+                  IFBLOG("hybrid: video BIOS: panel type %u, low-swing table %s, reduced-power table %s (VBT %u, BDB %u)", e.panel_type,
+                         e.low_vswing ? "yes" : "no", e.hobl ? "yes" : "no", e.vbt_version, e.bdb_version); }
+        else IFBLOG("hybrid: video BIOS: no panel type found; the DisplayPort drive tables are used");
+        om->release();
+    }
+    if (od) od->release();
+    return ok;
+}
+
+// ---- display firmware
+int NMIntelFB::dmcAccept(const uint8_t *buf, uint32_t len)
+{
+    struct nmd_fw fw;
+    if (!fRegs || fVer < 12 || fVer > 14) return ENXIO;
+    const int rc = nmd_parse(buf, len, '*', '*', nmd_max_words(fVer), &fw);
+    if (rc != NMD_OK) { IFBLOG("hybrid: display firmware refused: %s", nmd_err(rc)); return EINVAL; }
+    uint8_t *copy = (uint8_t *)IOMalloc(len);
+    if (!copy) return ENOMEM;
+    memcpy(copy, buf, len);
+    if (fDmcBlob) IOFree(fDmcBlob, fDmcLen);
+    fDmcBlob = copy; fDmcLen = len;
+    IFBLOG("hybrid: display firmware accepted: %u words for the main program, version %u.%u%s", fw.part[0].words, fw.version >> 16, fw.version & 0xFFFF,
+           fDmcOn ? "" : " (not loaded: boot-arg nmhybriddmc is not 1)");
+    if (fDmcOn) dmcApply();
+    return 0;
+}
+void NMIntelFB::dmcApply()
+{
+    struct nmd_fw fw;
+    if (!fDmcBlob || nmd_parse(fDmcBlob, fDmcLen, '*', '*', nmd_max_words(fVer), &fw) != NMD_OK) return;
+    const uint32_t cap = 1u << 15;
+    struct nmd_write *w = (struct nmd_write *)IOMalloc(cap * sizeof *w);
+    if (!w) return;
+    const uint32_t n = nmd_load_plan(&fw, fVer, w, cap);
+    if (n) { for (uint32_t i = 0; i < n; i++) wr(w[i].reg, w[i].val); IFBLOG("hybrid: display firmware loaded: %u register writes, every event handler left disabled", n); }
+    else IFBLOG("hybrid: display firmware not loaded: the load plan did not fit");
+    IOFree(w, cap * sizeof *w);
+}
+
 void NMIntelFB::resumeCapture()
 {
     long long v = 0; int a = 0; const int present = PE_parse_boot_argn("nmhybridresume", &a, sizeof a); v = a;
     if (!nmr_enabled(present, v)) return;
-    if (!nmh_gen_ok(fVer) || fPipe < 0 || fPipe > 3) { IFBLOG("hybrid: resume unavailable: display version %u pipe %d (version 12 or 13, pipes A to D)", fVer, fPipe); return; }
-    if (!ggttMap()) return;
+    if (!(fVer == 12 || fVer == 13 || fVer == 14) || fPipe < 0 || fPipe > 3) { IFBLOG("hybrid: resume unavailable: display version %u pipe %d (versions 12 to 14, pipes A to D)", fVer, fPipe); return; }
+    if (fVer <= 13 && !ggttMap()) return;
     fSnap = (struct nmr_snap *)IOMalloc(sizeof *fSnap);
     if (!fSnap) return;
     bzero(fSnap, sizeof *fSnap);
@@ -796,11 +906,14 @@ void NMIntelFB::resumeCapture()
         [](void *, unsigned us) { IODelay(us); },
         [](void *, const char *st) { IFBLOG("hybrid: resume step: %s", st); },
         nullptr };
-    const int rc = nmr_snapshot(&ops, fSnap, (unsigned)fPipe);
+    struct nmr_edp edp = {};
+    readVbt(&edp);
+    const int rc = fVer == 14 ? nmr14_snapshot(&ops, fSnap, (unsigned)fPipe, &edp) : nmr_snapshot(&ops, fSnap, (unsigned)fPipe, fVer, &edp);
     if (rc != NMR_OK) { IFBLOG("hybrid: resume unavailable: %s", nmr_result_name(rc)); IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; return; }
-    // the firmware surface's entries in the graphics table: restored first on wake
+    // the firmware surface's entries in the graphics table: restored first on wake (versions 12 and 13; on version 14 the table
+    // sits in system memory and is not touched)
     fFwPteFirst = fSurf >> 12; fFwPteCount = (((uint64_t)fRowBytes * fHeight) + 4095) / 4096;
-    if (fFwPteFirst + fFwPteCount <= fGsmEntries) {
+    if (fVer <= 13 && fFwPteFirst + fFwPteCount <= fGsmEntries) {
         fFwPte = (uint64_t *)IOMalloc((size_t)(fFwPteCount * sizeof(uint64_t)));
         if (fFwPte) for (uint64_t i = 0; i < fFwPteCount; i++) fFwPte[i] = fGsm[fFwPteFirst + i];
     }
@@ -821,10 +934,11 @@ void NMIntelFB::resumeRun()
         [](void *, unsigned us) { IODelay(us); },
         [](void *, const char *st) { IFBLOG("hybrid: resume step: %s", st); },
         nullptr };      // swing and pre-emphasis levels are programmed by nmr_drive_apply (nm_hybrid_resume.h)
-    const int rc = nmr_resume(&ops, fSnap, fVer);
+    const int rc = fVer == 14 ? nmr14_resume(&ops, fSnap) : nmr_resume(&ops, fSnap, fVer);
     IFBLOG("hybrid: resume: %s", nmr_result_name(rc));
     ifbStep(rc == NMR_OK || rc == NMR_ALREADY_LIT ? NMH_STEP_RESUME_DONE : NMH_STEP_RESUME_FAILED);
     if (rc == NMR_OK || rc == NMR_ALREADY_LIT) {
+        if (fDmcOn) dmcApply();             // the display microcontroller lost its program too
         // the plane is on the firmware surface again; import slots and owned buffers must be mapped anew
         if (fHyReady) { nmh_ring_init(&fRing, fRing.base, fRing.slot_bytes); }
         if (fOwnReady) { nmh_own_home(&fOwn); }

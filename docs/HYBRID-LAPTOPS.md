@@ -33,7 +33,7 @@ pipe sees that, and for every composited frame does one of two things.
 | import | `nmhybrid=2` | the composited surface's own pages are written into unused entries of the Intel GPU's graphics translation table and the display plane is pointed at them. No pixel is copied. Intel display versions 12 and 13 only (Tiger, Rocket, Alder and Raptor Lake). Every other panel, every login-window frame (10-bit), and any surface that does not fit is copied instead, one frame at a time. |
 
 | owned | `nmhybrid=3` | as import, and a frame import refuses (10-bit login window, a pitch the plane cannot take) is written into one of three buffers the panel driver owns (cached memory, mapped into the graphics table) which the plane is then flipped to. No write-combined stores and no tearing for those frames. The buffers are lent to one writer at a time, never written while on screen or queued, and all freed when the plane goes back to the boot surface. Intel display versions 12 and 13. |
-| copy engine | `nmhybrid=4` | as owned, and a frame whose newest pixels are still only in the GPU's memory is written by the GPU's copy engine straight into the pages of an owned buffer (the same engine that pages a surface out to system memory), then the plane is flipped to that buffer. No CPU copy, no mapping of the application's surface. The order is fixed and tested: the GPU has finished drawing, an owned buffer is taken and flushed from the CPU caches, the copy engine writes it and the call returns only when it is done, only then the flip. A copy that fails cleanly returns the buffer and the frame is copied the old way; a copy that timed out may still be writing, so that buffer is quarantined, never shown and never handed out again. Needs the surface to have exactly the panel's size and pitch (a linear byte copy), 8-bit BGRA. Intel display versions 12 and 13. This is done in the kernel through the resource manager's copy-engine call, not in the Metal plugin: the plugin has no mapping of the panel driver's pages and does not need one. |
+| copy engine | `nmhybrid=4` | as owned, and a frame whose newest pixels are still only in the GPU's memory is written by the GPU's copy engine straight into the pages of an owned buffer (the same engine that pages a surface out to system memory), then the plane is flipped to that buffer. No CPU copy, no mapping of the application's surface. The order is fixed and tested: the GPU has finished drawing (no lock held), the accelerator lock is taken for the resource lookup and the copy only, an owned buffer is taken and flushed from the CPU caches, the copy engine writes it and the call returns only when it is done, the lock is released, and only then is the plane flipped, whose wait for the next vertical blank (up to 40 ms) never holds the accelerator lock. A copy that fails cleanly returns the buffer and the frame is copied the old way; a copy that timed out may still be writing, so that buffer is quarantined, never shown and never handed out again. Needs the surface to have exactly the panel's size and pitch (a linear byte copy), 8-bit BGRA. Intel display versions 12 and 13. This is done in the kernel through the resource manager's copy-engine call, not in the Metal plugin: the plugin has no mapping of the panel driver's pages and does not need one. |
 
 Panels covered: Intel display versions 12 to 20 through `NMIntelFB` (copy, import on 12 and 13); AMD integrated GPUs macOS
 has no driver for through `NMGopFB` (copy, see the next section); AMD and Intel through `NMXGPU` (copy). The NMXGPU part is in the NMX tree: `xkpi/xnu/nmx_hybrid.h` holds the answer the panel gives the display
@@ -123,13 +123,29 @@ applied to the combo PHY first (the TX registers of all four lanes, from the gen
 the sink; five tries at one swing, ten loops, at most six equalisation rounds, a lost clock recovery starts over. The whole
 combo PHY register block (768 words) is captured and replayed.
 
-Limits, all untested on hardware: display versions 12 and 13, a panel on DDI A or B (the combo ports), any pipe A to D; DDI C
-and later may be Type-C and are refused, not guessed, as are display versions 14 and later (see below). The eDP-specific drive
-tables (low voltage swing, reduced-power panels), chosen by the video BIOS, are not applied: level 0 is whatever the firmware
-programmed and is never rewritten, and the DisplayPort tables are used only for the levels a sink asks for above it. The
-tables are those of Tiger Lake (version 12) and Alder Lake P (version 13); other members of those generations use their own
-and a wrong row costs a failed training, not damage. The fast link training of panels without an AUX handshake uses fixed
-1 ms patterns.
+Limits, all untested on hardware: display versions 12, 13 and 14 (version 14 below), a panel on a combo port (DDI A to C on
+version 12, A and B on version 13 and 14), any pipe A to D. Type-C ports (DDI D and later on version 12, C and later on 13) need
+the port's PHY ownership handshake and the Type-C subsystem; no laptop wires its internal panel to one, so they are refused with
+a log line, not driven blind. Display version 20 and later (Lunar Lake, Panther Lake) keep these registers elsewhere and are
+refused.
+
+**Drive tables for eDP panels.** The video BIOS names, per panel type, whether the panel uses the low-voltage-swing table and
+whether it uses the reduced-power table. The panel driver reads the BIOS tables through the OpRegion (`nm_hybrid_vbt.h`: every
+offset checked against the buffer, a table that names no panel type is not guessed) and picks the table Linux's i915 would:
+above 5.4 Gb/s the eDP table of the generation, else reduced-power, else low swing, else the DisplayPort table. The reduced-power
+table has nine rows, so a sink asking for swing 3 gets a refusal and the training fails rather than guess; its PHY override bits
+are set when it is in use. If the video BIOS picks the panel type by the panel's EDID identifier, which this does not read, the
+type is unknown and the DisplayPort tables are used. Level 0 is always the firmware's own.
+
+**Display version 14 (Meteor Lake, Arrow Lake).** The PHY is a C10 block reached through a per-port message bus. The panel
+driver reads the firmware's PLL, common, transmitter, width and level-override registers over the bus while the panel is lit, and
+on wake replays them in the order of Linux's `intel_cx0pll_enable` and `mtl_ddi_pre_enable_dp`: power wells, display clock, the
+power-management demand, panel power, the port clock control, lane reset and power state ready, the PLL registers (lane 0
+master), the transmitters, the clock frequency, the PLL request and acknowledge, the sink, the pipe registers, the D2D link, the
+port buffer width, the DDI buffer, link training with the C10 override registers as the source levels, the transcoder and the
+backlight. Log lines: `Cx0 PHY` and `power-management demand` join the step list. Not covered: C20 PHYs (Thunderbolt/Type-C
+ports and the faster eDP rates are C20 on some parts), and the platform controller's voltage handshake for a display clock that
+differs from the one in use (the display clock is written back as it was).
 
 **Display microcontroller (DMC) firmware.** Generations 12 and 13 scan out without it: Linux's i915 uses it for the
 deeper power states (DC5, DC6) and per-pipe features, not for the scan-out, and macOS never loaded it on these panels, so
@@ -138,16 +154,14 @@ offset and register range, refuses damaged files; tested on synthetic packages, 
 undefined-behaviour sanitisers, and on the real Tiger Lake, Alder Lake P and Meteor Lake files) and turns it into the list of
 writes that loads it. `package/dmc_fetch.sh` fetches Intel's files unmodified at a pinned linux-firmware commit and checks
 their SHA-256 on the user's Mac; the licence is `licenses/Intel-i915-firmware-LICENSE.txt` (redistribution in binary form,
-unmodified; no reverse engineering, which this does not do). The panel driver does not load it yet: a kext cannot read a
-file, so the bytes would have to be handed to it by a helper, and nothing needs it until display version 14.
-
-**Display versions 14 and later (Meteor Lake, Arrow Lake, Lunar Lake): not built.** These have no combo PHY. The PHY
-(Cx0, C10 or C20) is reached only through a message bus with its own handshake, its PLL is programmed from per-link-rate
-tables and a power-down and power-up order, the DDI buffer, clock and AUX power registers differ, and Meteor Lake adds a
-power well for the PHY block. Linux's `intel_cx0_phy.c` has all of it, but it is a port of about three thousand lines whose
-only offline check would be a model written from the same source, which proves nothing about the hardware; the DMC firmware
-would also be needed. These panels still run level 1 (copy) without sleep support; turn sleep off on them. **Until a tester confirms a wake on their machine, turn sleep off** (`sudo pmset -a sleep 0 disablesleep 1`) and
-leave `nmhybridresume` unset; with the switch off, sleep behaves as before. Send the `hybrid: resume` lines with the result.
+unmodified; no reverse engineering, which this does not do). With the boot-arg `nmhybriddmc=1` the panel driver loads it: a root helper (`package/nm-dmc-load.sh`, with the small `nm_dmc_push`)
+asks the driver which file this GPU needs (`sysctl debug.nmintelfb_dmc_want`: Tiger Lake, Alder Lake P, Meteor Lake and Arrow
+Lake have one; Rocket Lake and Alder Lake S do not), makes sure the verified file is on disk, checks its SHA-256 again and writes
+it to `debug.nmintelfb_dmc` (root only). The driver parses and range-checks the bytes itself before keeping anything, writes the
+program and the register list with every event handler left disabled, and loads it again after sleep. Run the helper once per
+boot after the panel driver has started. Linux keeps the main program's events enabled for the deep display power states; this
+driver never enables those states, so the loaded program has nothing to do. The stepping is not read: the generic entry of the
+package is used, as Linux does when the stepping is unknown.
 
 ## Which GPU an application gets
 
@@ -312,7 +326,9 @@ open row.
   registers, AUX channel and sink, for a panel on pipe A / DDI A, pipe B / DDI B, pipe D / DDI A and pipe C / DDI B (order,
   handshakes, the sink's swing and pre-emphasis requests reaching the PHY registers, every failure stops at its handshake);
   `-DNAIVE_RESTORE` runs the same arms against a plain register restore and fails 84.
-- `tools/test_hybrid_dmc.c`, `tools/test_dmc_fetch.sh`: the firmware package reader and the fetch script.
+- `tools/test_hybrid_resume14.c`: the message bus, the C10 register file, the lane-reset, power-state, PLL, D2D and DDI-buffer handshakes and the training levels on display version 14, panel on DDI A and DDI B, with bus errors injected.
+- `tools/test_hybrid_vbt.c`: the video BIOS reader (6000 corrupted tables under the sanitisers, the OpRegion locations).
+- `tools/test_hybrid_dmc.c`, `tools/test_dmc_fetch.sh`: the firmware package reader and load plan (and the real files when `NMH_DMC_DIR` names them), the fetch script and the root helper.
 - `tools/test_gpu_policy.c`: the per-process choice. `tools/test_hybrid_rtd3.c`: idle power-down counts.
 - NMX tree: `tools/test_nmx_hybrid.cpp`.
 - `tools/hy_nometal_bucket.py`: sorts kernel logs from machines with no Metal device into the causes the accelerator logs
