@@ -431,6 +431,16 @@ pub(super) fn add_needed_capabilities(ctx: &mut Ctx, variable_pointer_requiremen
         .all_inst_iter()
         .filter_map(|i| Some((i.result_id?, i.result_type?)))
         .collect();
+    // a multisampled storage image (MS = 1, Sampled = 2) needs its own capability
+    if ctx.module.types_global_values.iter().any(|i| {
+        i.class.opcode == Op::TypeImage
+            && i.operands.get(4) == Some(&Operand::LiteralBit32(1))
+            && i.operands.get(5) == Some(&Operand::LiteralBit32(2))
+            && i.operands.get(1) != Some(&Operand::Dim(spirv::Dim::DimSubpassData))
+    }) && !want.contains(&Capability::StorageImageMultisample)
+    {
+        want.push(Capability::StorageImageMultisample);
+    }
     for instruction in ctx
         .module
         .functions

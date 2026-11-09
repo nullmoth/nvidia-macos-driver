@@ -41,7 +41,11 @@ pub(in crate::passes) fn lower_write(
             .collect();
         eprintln!("WRITE-TEX img {img} dim {dim:?} arrayed {arrayed} args {tys:?}");
     }
-    let (coord, layer, texel) = if dim == Dim::DimCube && arrayed {
+    // a tile function's write to a multisampled attachment (native/tile_imageblock.rs): air.write_texture_2d_ms(image, coord, sample, texel)
+    let ms_write = name.contains("_2d_ms") && !arrayed && args.len() >= 4;
+    let (coord, layer, texel) = if ms_write {
+        (args[1], None, args[3])
+    } else if dim == Dim::DimCube && arrayed {
         if args.len() < 5 {
             return Err("air.write_texture cube array write missing face/slice/texel".into());
         }
@@ -115,16 +119,16 @@ pub(in crate::passes) fn lower_write(
 
     let texel32 = preserve_defined_texel_lanes(ctx, &mut out, img, coord32, texel, texel32)?;
 
-    out.push(Instruction::new(
-        Op::ImageWrite,
-        None,
-        None,
-        vec![
-            Operand::IdRef(img),
-            Operand::IdRef(coord32),
-            Operand::IdRef(texel32),
-        ],
-    ));
+    let mut operands = vec![
+        Operand::IdRef(img),
+        Operand::IdRef(coord32),
+        Operand::IdRef(texel32),
+    ];
+    if ms_write {
+        operands.push(Operand::ImageOperands(spirv::ImageOperands::SAMPLE));
+        operands.push(Operand::IdRef(args[2]));
+    }
+    out.push(Instruction::new(Op::ImageWrite, None, None, operands));
     Ok(out)
 }
 
@@ -403,6 +407,13 @@ fn read_rest(
     };
     let mut ops = vec![Operand::IdRef(img), Operand::IdRef(coord32)];
     let op = if image_is_storage(ctx, img) {
+        // a multisampled storage image (a tile function's attachment) is read at one sample
+        if image_value_is_multisampled(ctx, img) {
+            if let Some(sample) = lod32 {
+                ops.push(Operand::ImageOperands(spirv::ImageOperands::SAMPLE));
+                ops.push(Operand::IdRef(sample));
+            }
+        }
         Op::ImageRead
     } else {
         if image_value_is_multisampled(ctx, img) {

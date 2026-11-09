@@ -2305,15 +2305,15 @@ static NSOperationQueue *nvmtl_pipeline_compile_queue(void) {
 // selector taking the process down. What does work: a fragment function that reads [[color(n)]] (framebuffer fetch) and
 // a compute kernel that uses imageblock memory (MPS).
 int nvmtl_tile_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_TILE_SHADING"); on = e && e[0] == '1'; } return on; }
-NSString *nvmtl_tile_rewrite(NSString *ll, uint32_t tw, uint32_t th, NSString **err);
+NSString *nvmtl_tile_rewrite(NSString *ll, uint32_t tw, uint32_t th, uint32_t samples, NSString **err);
 NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *idx, const uint32_t *sizes, const uint8_t *const *payloads, size_t n, NSString **err);
 // The tile function rewritten for one tile size and built as a compute pipeline (cached on the tile pipeline per size).
 id nvmtl_tile_compute_pipeline(NVMTLRenderPipelineState *tp, uint32_t tw, uint32_t th, NSString **why) {
-    NSNumber *key = @((uint64_t)tw << 32 | th);
+    NSNumber *key = @((uint64_t)tp->_tileSamples << 56 | (uint64_t)tw << 28 | th);
     @synchronized (tp) {
         id hit = tp->_tileCps[key]; if (hit) return hit == [NSNull null] ? nil : hit;
         NSString *w = nil;
-        NSString *text = nvmtl_tile_rewrite(tp->_tileFn->_air, tw, th, &w);
+        NSString *text = nvmtl_tile_rewrite(tp->_tileFn->_air, tw, th, tp->_tileSamples ? tp->_tileSamples : 1u, &w);
         // the function's constant values apply to the rewritten kernel exactly as they would to the original
         NSDictionary *fcs = tp->_tileFn->_fc; const size_t nfc = fcs.count;
         uint32_t *fidx = calloc(nfc ? nfc : 1, sizeof *fidx), *fsz = calloc(nfc ? nfc : 1, sizeof *fsz); uint8_t **fpay = calloc(nfc ? nfc : 1, sizeof *fpay);
@@ -2349,6 +2349,8 @@ static NSString *nvmtl_tile_refusal(MTLTileRenderPipelineDescriptor *d) {
     if (nvmtl_tile_on() && [(id)d.tileFunction isKindOfClass:[NVMTLFunction class]] && ((NVMTLFunction *)d.tileFunction)->_air.length) {
         NVMTLFunction *tf = (NVMTLFunction *)d.tileFunction;
         NVMTLRenderPipelineState *tp = [NVMTLRenderPipelineState new]; tp->_tileFn = tf;
+        tp->_tileSamples = d.rasterSampleCount > 1 ? (uint32_t)d.rasterSampleCount : 1u;
+        if (tp->_tileSamples > 1 && !nvmtl_vk_ms_storage_ok()) return nvmtl_fail(err, @"tile render pipeline: REFUSED - a multisampled tile pipeline needs shaderStorageImageMultisample, which this device does not offer");
         NSString *w = nil;   // translate once now (32x32 tiles) so a function that cannot be carried is refused here, with the reason
         if (!nvmtl_tile_compute_pipeline(tp, 32, 32, &w)) { NSString *why = [NSString stringWithFormat:@"tile render pipeline (%@): REFUSED - %@", tf->_fname, w]; nvlog("%s", why.UTF8String); return nvmtl_fail(err, why); }
         return tp;

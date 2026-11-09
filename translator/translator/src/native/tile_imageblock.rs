@@ -41,9 +41,10 @@ fn node_refs(body: &str) -> Vec<u32> {
         .filter_map(|t| t.strip_prefix('!').and_then(|d| d.parse().ok())).collect()
 }
 
-pub(crate) fn rewrite(ll: &str, tile: [u32; 2]) -> Result<String, String> {
+pub(crate) fn rewrite(ll: &str, tile: [u32; 2], samples: u32) -> Result<String, String> {
+    let ms = samples > 1;
     if !ll.contains("implicit_imageblock") { return Err("the function has no implicit imageblock access to rewrite".into()); }
-    for banned in ["air.imageblock_data", "air.get_imageblock_", "explicit_imageblock", "threadgroup_imageblock"] {
+    for banned in ["air.imageblock_data", "air.get_imageblock_width", "air.get_imageblock_height", "explicit_imageblock", "threadgroup_imageblock"] {
         if ll.contains(banned) { return Err(format!("tile function uses {banned}, which is not carried (only implicit-layout imageblocks)")); }
     }
     let lines: Vec<&str> = ll.lines().collect();
@@ -78,6 +79,8 @@ pub(crate) fn rewrite(ll: &str, tile: [u32; 2]) -> Result<String, String> {
         let args = split_args(call_arguments(t).unwrap_or(""));
         let a_arg = if callee.contains(".store.") { args.get(1) } else { args.first() }.ok_or("imageblock access with no attachment index")?;
         let a: u32 = a_arg.rsplit(' ').next().unwrap_or("").parse().map_err(|_| format!("imageblock access with a computed attachment index: {t}"))?;
+        let rate = args.get(if callee.contains(".store.") { 3 } else { 2 }).and_then(|r| r.rsplit(' ').next()).unwrap_or("");
+        if ms && rate != "2" { return Err(format!("a multisampled attachment is accessed per sample only (imageblock_data_rate::sample); this access has rate {rate}: {t}")); }
         if a >= 8 { return Err(format!("attachment {a}: a render pass has at most 8 colour attachments")); }
         if let Some(prev) = atts.insert(a, e) { if prev.name != e.name { return Err(format!("attachment {a} is accessed as both {} and {}", prev.name, e.name)); } }
     }
@@ -102,6 +105,11 @@ pub(crate) fn rewrite(ll: &str, tile: [u32; 2]) -> Result<String, String> {
             out.push(format!("{indent}{}{}{}", &t[..open], params.join(", "), &t[close..]));
             continue;
         }
+        if t.contains("call ") && t.contains("@air.get_imageblock_samples") {
+            let result = t.split('=').next().unwrap().trim().to_string();
+            out.push(format!("{indent}{result} = add i16 {samples}, 0"));
+            continue;
+        }
         if t.contains("call ") && t.contains("implicit_imageblock.") {
             n += 1;
             let callee = t.split('@').nth(1).and_then(|s| s.split('(').next()).unwrap().to_string();
@@ -118,6 +126,10 @@ pub(crate) fn rewrite(ll: &str, tile: [u32; 2]) -> Result<String, String> {
             out.push(format!("{indent}{} = add <2 x i32> {}, {}", p("p"), p("o"), p("c")));
             let t4 = format!("<4 x {}>", e.ty);
             let tex = format!("ptr addrspace(1) %tile.tex{a}");
+            let smp = if ms {
+                let idx = args[if store { 4 } else { 3 }].rsplit(' ').next().unwrap().to_string();
+                out.push(format!("{indent}{} = zext i16 {idx} to i32", p("smp"))); p("smp")
+            } else { String::new() };
             if store {
                 let v = args[0].rsplit(' ').next().unwrap().to_string();
                 let v4 = if lanes == 4 { v } else if lanes == 1 {
@@ -126,11 +138,13 @@ pub(crate) fn rewrite(ll: &str, tile: [u32; 2]) -> Result<String, String> {
                     let idx = (0..4).map(|i| format!("i32 {i}")).collect::<Vec<_>>().join(", ");
                     out.push(format!("{indent}{} = shufflevector {} {v}, {} zeroinitializer, <4 x i32> <{idx}>", p("v4"), vec_ty(lanes, e), vec_ty(lanes, e))); p("v4")
                 };
-                out.push(format!("{indent}call void @air.write_texture_2d.v4{}({tex}, <2 x i32> {}, {t4} {v4}, i32 0, i32 3)", e.name, p("p")));
+                if ms { out.push(format!("{indent}call void @air.write_texture_2d_ms.v4{}({tex}, <2 x i32> {}, i32 {smp}, {t4} {v4}, i32 0, i32 3)", e.name, p("p"))); }
+                else { out.push(format!("{indent}call void @air.write_texture_2d.v4{}({tex}, <2 x i32> {}, {t4} {v4}, i32 0, i32 3)", e.name, p("p"))); }
             } else {
                 let result = t.split('=').next().unwrap().trim().to_string();
                 out.push(format!("{indent}{} = call ptr addrspace(2) @air.get_read_sampler()", p("s")));
-                out.push(format!("{indent}{} = call {{ {t4}, i8 }} @air.read_texture_2d.v4{}({tex}, ptr addrspace(2) {}, <2 x i32> {}, <2 x i32> zeroinitializer, i32 0, i32 3)", p("r"), e.name, p("s"), p("p")));
+                if ms { out.push(format!("{indent}{} = call {{ {t4}, i8 }} @air.read_texture_2d_ms.v4{}({tex}, ptr addrspace(2) {}, <2 x i32> {}, i32 {smp}, i32 1)", p("r"), e.name, p("s"), p("p"))); }
+                else { out.push(format!("{indent}{} = call {{ {t4}, i8 }} @air.read_texture_2d.v4{}({tex}, ptr addrspace(2) {}, <2 x i32> {}, <2 x i32> zeroinitializer, i32 0, i32 3)", p("r"), e.name, p("s"), p("p"))); }
                 out.push(format!("{indent}{} = extractvalue {{ {t4}, i8 }} {}, 0", p("t"), p("r")));
                 if lanes == 4 { out.push(format!("{indent}{result} = bitcast {t4} {} to {t4}", p("t"))); }
                 else if lanes == 1 { out.push(format!("{indent}{result} = extractelement {t4} {}, i32 0", p("t"))); }
@@ -167,8 +181,8 @@ pub(crate) fn rewrite(ll: &str, tile: [u32; 2]) -> Result<String, String> {
     let first_new = max_id + 1;
     let base_idx = (arg_nodes.len() - 1) as u32;
     for (k, (a, e)) in atts.iter().enumerate() {
-        out.push(format!("!{} = !{{i32 {}, !\"air.texture\", !\"air.location_index\", i32 {}, i32 1, !\"air.read_write\", !\"air.arg_type_name\", !\"texture2d<{}, read_write>\", !\"air.arg_name\", !\"tile_tex{a}\"}}",
-            first_new + k as u32, base_idx + k as u32, TILE_TEXTURE_BASE + a, e.tex));
+        out.push(format!("!{} = !{{i32 {}, !\"air.texture\", !\"air.location_index\", i32 {}, i32 1, !\"air.read_write\", !\"air.arg_type_name\", !\"texture2d{}<{}, read_write>\", !\"air.arg_name\", !\"tile_tex{a}\"}}",
+            first_new + k as u32, base_idx + k as u32, TILE_TEXTURE_BASE + a, if ms { "_ms" } else { "" }, e.tex));
     }
     out.push(format!("!{} = !{{i32 {}, !\"air.threadgroup_position_in_grid\", !\"air.arg_type_name\", !\"uint2\", !\"air.arg_name\", !\"tile_tg\"}}",
         first_new + atts.len() as u32, base_idx + atts.len() as u32));
@@ -178,8 +192,13 @@ pub(crate) fn rewrite(ll: &str, tile: [u32; 2]) -> Result<String, String> {
     declares.insert("declare ptr addrspace(2) @air.get_read_sampler()".to_string());
     for e in atts.values() {
         let t4 = format!("<4 x {}>", e.ty);
-        declares.insert(format!("declare {{ {t4}, i8 }} @air.read_texture_2d.v4{}(ptr addrspace(1), ptr addrspace(2), <2 x i32>, <2 x i32>, i32, i32)", e.name));
-        declares.insert(format!("declare void @air.write_texture_2d.v4{}(ptr addrspace(1), <2 x i32>, {t4}, i32, i32)", e.name));
+        if ms {
+            declares.insert(format!("declare {{ {t4}, i8 }} @air.read_texture_2d_ms.v4{}(ptr addrspace(1), ptr addrspace(2), <2 x i32>, i32, i32)", e.name));
+            declares.insert(format!("declare void @air.write_texture_2d_ms.v4{}(ptr addrspace(1), <2 x i32>, i32, {t4}, i32, i32)", e.name));
+        } else {
+            declares.insert(format!("declare {{ {t4}, i8 }} @air.read_texture_2d.v4{}(ptr addrspace(1), ptr addrspace(2), <2 x i32>, <2 x i32>, i32, i32)", e.name));
+            declares.insert(format!("declare void @air.write_texture_2d.v4{}(ptr addrspace(1), <2 x i32>, {t4}, i32, i32)", e.name));
+        }
     }
     for d in declares {
         let sym = d.split('@').nth(1).unwrap().split('(').next().unwrap().to_string();
@@ -220,7 +239,7 @@ declare void @air.store.implicit_imageblock.f32(float, i32, <2 x i16>, i32, i16)
 
     #[test]
     fn the_rewrite_removes_the_imageblock_and_adds_attachment_textures() {
-        let out = rewrite(TILE, [32, 32]).unwrap();
+        let out = rewrite(TILE, [32, 32], 1).unwrap();
         assert!(!out.contains("implicit_imageblock.v4f16(i32") || out.lines().all(|l| !l.contains("call") || !l.contains("implicit_imageblock")), "{out}");
         assert!(!out.contains("\"air.imageblock\""), "the imageblock argument node is gone:\n{out}");
         assert!(out.contains("define void @tile_k(<2 x i16> noundef %1,"), "the imageblock parameter is gone:\n{out}");
@@ -234,15 +253,15 @@ declare void @air.store.implicit_imageblock.f32(float, i32, <2 x i16>, i32, i16)
 
     #[test]
     fn what_cannot_be_carried_is_refused_by_name() {
-        assert!(rewrite(&TILE.replace("\"implicit\"", "\"explicit\""), [32, 32]).unwrap_err().contains("explicit"));
-        assert!(rewrite(&TILE.replace("i32 1, <2 x i16> %1, i32 0, i16 0) #3", "i32 %6, <2 x i16> %1, i32 0, i16 0) #3"), [32, 32]).unwrap_err().contains("computed attachment"));
-        assert!(rewrite(&format!("{TILE}\ndeclare i32 @air.get_imageblock_width()"), [32, 32]).unwrap_err().contains("not carried"));
-        assert!(rewrite("define void @k() {\n ret void\n}\n", [32, 32]).is_err());
+        assert!(rewrite(&TILE.replace("\"implicit\"", "\"explicit\""), [32, 32], 1).unwrap_err().contains("explicit"));
+        assert!(rewrite(&TILE.replace("i32 1, <2 x i16> %1, i32 0, i16 0) #3", "i32 %6, <2 x i16> %1, i32 0, i16 0) #3"), [32, 32], 1).unwrap_err().contains("computed attachment"));
+        assert!(rewrite(&format!("{TILE}\ndeclare i32 @air.get_imageblock_width()"), [32, 32], 1).unwrap_err().contains("not carried"));
+        assert!(rewrite("define void @k() {\n ret void\n}\n", [32, 32], 1).is_err());
     }
 
     #[test]
     fn the_rewritten_tile_kernel_translates_to_valid_spirv_with_two_storage_images() {
-        let out = rewrite(TILE, [32, 32]).unwrap();
+        let out = rewrite(TILE, [32, 32], 1).unwrap();
         let tmp = std::env::temp_dir().join(format!("tile_rewrite_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let bytes = crate::translate_sanitized_native(&out, crate::passes::Stage::Kernel, &tmp).unwrap_or_else(|e| panic!("translate: {e}\n{out}"));
@@ -255,5 +274,61 @@ declare void @air.store.implicit_imageblock.f32(float, i32, <2 x i16>, i32, i16)
         let textures: Vec<u32> = reflection.bindings.iter().filter(|b| format!("{:?}", b.kind).contains("Image")).map(|b| b.metal_index as u32).collect();
         assert!(textures.contains(&120) && textures.contains(&121), "texture bindings at 120 and 121, got {textures:?}");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// the shape of a per-sample tile function (AIR from Apple's compiler, pointers opaque): the M1 oracle arm's kernel
+    const TILE_MS: &str = r#"
+%"struct.metal::_imageblock_base" = type { ptr addrspace(4) }
+define void @tile_ms(%"struct.metal::_imageblock_base" %0, <2 x i16> noundef %1) local_unnamed_addr #0 {
+entry:
+  %n = tail call i16 @air.get_imageblock_samples() #4
+  br label %loop
+loop:
+  %s = phi i16 [ 0, %entry ], [ %s2, %loop ]
+  %v = tail call fast <4 x half> @air.load.implicit_imageblock.v4f16(i32 0, <2 x i16> %1, i32 2, i16 %s) #5
+  %x = extractelement <4 x half> %v, i64 0
+  %f = uitofp i16 %s to half
+  %m = fmul half %f, 0xH3000
+  %y = fadd half %x, %m
+  %w = insertelement <4 x half> %v, half %y, i64 0
+  tail call void @air.store.implicit_imageblock.v4f16(<4 x half> %w, i32 0, <2 x i16> %1, i32 2, i16 %s) #6
+  %s2 = add i16 %s, 1
+  %c = icmp ult i16 %s2, %n
+  br i1 %c, label %loop, label %done
+done:
+  ret void
+}
+declare i16 @air.get_imageblock_samples() local_unnamed_addr #1
+declare <4 x half> @air.load.implicit_imageblock.v4f16(i32, <2 x i16>, i32, i16) local_unnamed_addr #2
+declare void @air.store.implicit_imageblock.v4f16(<4 x half>, i32, <2 x i16>, i32, i16) local_unnamed_addr #3
+!air.kernel = !{!9}
+!9 = !{ptr @tile_ms, !10, !11}
+!10 = !{}
+!11 = !{!12, !14}
+!12 = !{i32 0, !"air.imageblock", !"implicit", !"air.struct_type_info", !13, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"imageblock<Pm, layout_implicit>", !"air.arg_name", !"ib"}
+!13 = !{i32 0, i32 8, i32 0, !"half4", !"c", !"air.render_target", i32 0}
+!14 = !{i32 1, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"tid"}
+"#;
+
+    #[test]
+    fn a_multisampled_tile_function_reads_and_writes_each_sample_of_a_storage_image() {
+        let out = rewrite(TILE_MS, [16, 16], 4).unwrap();
+        assert!(out.contains("texture2d_ms<half, read_write>"), "the attachment is declared multisampled:\n{out}");
+        assert!(out.contains("@air.read_texture_2d_ms.v4f16(") && out.contains("@air.write_texture_2d_ms.v4f16("), "{out}");
+        assert!(out.contains("%n = add i16 4, 0"), "the sample count query becomes the pipeline's sample count:\n{out}");
+        let tmp = std::env::temp_dir().join(format!("tile_ms_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let bytes = crate::translate_sanitized_native(&out, crate::passes::Stage::Kernel, &tmp).unwrap_or_else(|e| panic!("translate: {e}\n{out}"));
+        crate::tools::spirv_val_bytes(&bytes, &tmp).expect("spirv-val");
+        let asm = crate::disassemble(&bytes).expect("disassemble");
+        assert!(asm.contains("OpTypeImage") && asm.lines().any(|l| l.contains("OpTypeImage") && l.contains("2D 0 0 1 2")), "a multisampled storage image type (MS = 1, Sampled = 2):\n{asm}");
+        assert!(asm.lines().any(|l| l.contains("OpImageWrite") && l.contains("Sample")), "the write carries the Sample operand:\n{asm}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_pixel_rate_access_to_a_multisampled_attachment_is_refused() {
+        let ll = TILE_MS.replace("i32 2, i16 %s)", "i32 0, i16 %s)");
+        assert!(rewrite(&ll, [16, 16], 4).unwrap_err().contains("per sample only"));
     }
 }

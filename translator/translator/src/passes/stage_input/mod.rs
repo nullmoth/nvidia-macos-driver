@@ -816,7 +816,11 @@ pub(super) fn build_stage_input(
                 metal_texture_index.ok_or("storage texture has no Metal texture index")?;
             let (fmt, runtime_state) =
                 ctx.specialize_storage_image_format(metal_index, fmt, comp)?;
-            let image_ty = ctx.ty_storage_image(dim, arrayed, fmt, comp);
+            // a read_write texture2d_ms (a tile function's multisampled attachment) is a multisampled storage image
+            let storage_ms = dim == Dim::Dim2D
+                && !arrayed
+                && texture_type_hints.get(pid).is_some_and(|hint| hint.multisampled);
+            let image_ty = ctx.ty_storage_image_ms(dim, arrayed, fmt, comp, storage_ms);
             let pptr = ctx.ty_ptr(StorageClass::UniformConstant, image_ty);
             let var = ctx.module.fresh_id();
             ctx.new_globals.push(Instruction::new(
