@@ -401,6 +401,7 @@ API_AVAILABLE(macos(26.0))
 }
 @end
 @implementation NVMTL4RenderEncoder
+@dynamic tileHeight, tileWidth;
 - (id<MTL4CommandBuffer>)commandBuffer { return _cb; }
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)l { _label = [l copy]; _enc.label = l; }

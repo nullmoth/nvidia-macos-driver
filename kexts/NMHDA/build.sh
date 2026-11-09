@@ -7,14 +7,16 @@ LILU=$1; MKSDK=$2; OUT=$3; SDK="$LILU/Contents/Resources"
 [ -f "$SDK/Headers/plugin_start.hpp" ] || { echo "STOP: no Lilu SDK in $LILU (use the DEBUG Lilu.kext)"; exit 1; }
 K="$MKSDK/Headers"; [ -d "$K" ] || { echo "STOP: no MacKernelSDK at $MKSDK"; exit 1; }
 mkdir -p "$OUT/NMHDA.kext/Contents/MacOS"
+: > "$OUT/NMHDA.err"
 FLAGS=(-arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -mkernel -nostdinc -I"$K" -I"$SDK"
        -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT -DPRODUCT_NAME=NMHDA -DMODULE_VERSION=1.0.0
        -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common -O2 -Wall -Wno-unused-parameter -g0)
-xcrun clang++ "${FLAGS[@]}" -c nmhda.cpp -o "$OUT/nmhda.o"
+xcrun clang++ "${FLAGS[@]}" -c nmhda.cpp -o "$OUT/nmhda.o" 2>> "$OUT/NMHDA.err" || { cat "$OUT/NMHDA.err"; exit 1; }
 # volume and mute for display sinks: IOAudioFamily's public headers; the SDK's own deprecation and override notes are not ours
-xcrun clang++ "${FLAGS[@]}" -Wno-deprecated-declarations -Wno-inconsistent-missing-override -Wno-#warnings -c nmhda_volume.cpp -o "$OUT/nmhda_volume.o"
+xcrun clang++ "${FLAGS[@]}" -Wno-deprecated-declarations -Wno-inconsistent-missing-override -Wno-#warnings -c nmhda_volume.cpp -o "$OUT/nmhda_volume.o" 2>> "$OUT/NMHDA.err" || { cat "$OUT/NMHDA.err"; exit 1; }
 # Lilu's bundled startup source carries its own conversion and shadow warnings.
-xcrun clang++ "${FLAGS[@]}" -Wno-sign-conversion -Wno-shadow -c "$SDK/Library/plugin_start.cpp" -o "$OUT/plugin_start.o"
+xcrun clang++ "${FLAGS[@]}" -Wno-sign-conversion -Wno-shadow -c "$SDK/Library/plugin_start.cpp" -o "$OUT/plugin_start.o" 2>> "$OUT/NMHDA.err" || { cat "$OUT/NMHDA.err"; exit 1; }
+bash ../../build/warn_ceiling.sh nmhda "$(grep -c ': warning:' "$OUT/NMHDA.err" || true)" "$OUT/NMHDA.err"
 xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xlinker -kext -L"$MKSDK/Library/x86_64" -lkmodc++ -lkmod -lcc_kext \
   "$OUT/nmhda.o" "$OUT/nmhda_volume.o" "$OUT/plugin_start.o" -o "$OUT/NMHDA.kext/Contents/MacOS/NMHDA"
 cp Info.plist "$OUT/NMHDA.kext/Contents/Info.plist"

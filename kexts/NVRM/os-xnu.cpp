@@ -407,7 +407,7 @@ NvU64 nv_xnu_phys_for_kernel_va(const void *va)
     for (unsigned i = 0; i < nv_xnu_maps_high; i++) {
         const char *base = (const char *)__atomic_load_n(&nv_xnu_maps[i].va, __ATOMIC_ACQUIRE);
         if (base && (const char *)va >= base && (const char *)va < base + nv_xnu_maps[i].size)
-            return nv_xnu_maps[i].phys + ((const char *)va - base);
+            return nv_xnu_maps[i].phys + (NvU64)((const char *)va - base);
     }
     return 0;
 }

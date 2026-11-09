@@ -1,7 +1,12 @@
 #ifndef NM_KBD_BACKLIGHT_HID_HPP
 #define NM_KBD_BACKLIGHT_HID_HPP
 
+// the SDK's IOEventSource::init hides OSObject::init; scoped to this header (OSObject.h's own unpopped ignore used to
+// cover it, and with it this file's classes)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Woverloaded-virtual"
 #include <IOKit/hid/IOHIDDevice.h>
+#pragma clang diagnostic pop
 #include "kbl_core.h"
 
 class NMKbdBacklight;
@@ -13,6 +18,7 @@ class NMKbdBacklightHID : public IOHIDDevice {
     OSDeclareDefaultStructors(NMKbdBacklightHID)
 
 public:
+    using IOHIDDevice::init;   // the inherited init(OSDictionary *) stays visible beside the owner form below
     bool init(NMKbdBacklight *owner, OSDictionary *dict = nullptr);
 
     OSString *newTransportString() const override;

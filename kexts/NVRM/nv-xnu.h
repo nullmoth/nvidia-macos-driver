@@ -8,16 +8,27 @@
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
+// IOPCIDevice (with its setBusMasterEnable) is marked deprecated in favour of PCIDriverKit, which runs in user space and
+// cannot replace a kernel extension's PCI access; that deprecation is ignored from here on in this kext's sources.
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #include <IOKit/pci/IOPCIDevice.h>
 #include <libkern/libkern.h>
 
 extern "C" {
 enum UvmPmaGpuMemoryType_tag {};
 #define NVRM 1
+// NVIDIA's open-gpu-kernel-modules headers (third-party) carry their own integer-conversion warnings under the kernel
+// compiler's defaults; the exception is scoped to these includes and our code below stays checked.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wsign-conversion"
+#pragma clang diagnostic ignored "-Wimplicit-int-conversion"
+#pragma clang diagnostic ignored "-Wshorten-64-to-32"
+#pragma clang diagnostic ignored "-Wc99-designator"
 #include "cpuopsys.h"
 #include "nv.h"
 #include "os-interface.h"
 #include "nv-kernel-rmapi-ops.h"
+#pragma clang diagnostic pop
 }
 #undef NVRM
 

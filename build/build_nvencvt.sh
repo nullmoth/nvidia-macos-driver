@@ -38,6 +38,7 @@ ssh "$H" "cd $R/src && xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -O2 -W
   || { ssh "$H" "grep ' error:' $R/out/build.err | head -20"; exit 1; }
 mkdir -p "$OUT"
 scp -q "$H:$R/out/libnvencvt.dylib" "$H:$R/out/build.err" "$OUT/"
+bash "$HERE/build/warn_ceiling.sh" nvencvt "$(grep -c ': warning:' "$OUT/build.err" || true)" "$OUT/build.err" || exit 4
 minos=$(vtool -show-build "$OUT/libnvencvt.dylib" | awk '/minos/{print $2; exit}')
 [ "$minos" = 15.0 ] || { echo "STOP: minos $minos, not 15.0"; exit 1; }
 # only the four entry points leave the library: the plugin looks up two, VideoToolbox is handed the other two

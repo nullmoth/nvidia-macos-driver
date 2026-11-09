@@ -696,7 +696,7 @@ static NvU64 nv_win_pm[(0x101340000ULL - 0x101300000ULL) >> 12], nv_win_va[(0x10
 static NvU64 nv_win_stale_pm[(0x101340000ULL - 0x101300000ULL) >> 12];
 static const NvU64 kNvWinPages = (0x101340000ULL - 0x101300000ULL) >> 12;
 static uint8_t nv_wm_boot_attr[kNvWinPages];
-static NvU64   nv_wm_boot_pm[kNvWinPages], nv_wm_boot_va[kNvWinPages];
+static NvU64   nv_wm_boot_pm[kNvWinPages];
 static bool    nv_wm_boot_taken = false;
 static void nv_win_scan(void)
 {
@@ -801,7 +801,7 @@ static const char *nv_pv_arm(void)
         if (ppn >= nv_pv_last) break;
         nv_wm_boot_attr[i] = nv_pv_attr[ppn];
         nv_wm_boot_pm[i]   = *(const volatile uint64_t *)(nv_pv_head + ppn * 32 + 0x18);
-        nv_wm_boot_va[i]   = *(const volatile uint64_t *)(nv_pv_head + ppn * 32 + 0x10);
+        (void)*(const volatile uint64_t *)(nv_pv_head + ppn * 32 + 0x10);   // the VA word is still read, as before; nothing keeps it
     }
     nv_wm_boot_taken = true;
     return NULL;
@@ -1102,14 +1102,14 @@ static void nv_pv_start(void)
     kprintf("NVRM-xnu: PV-SENTINEL armed: pages 0x%x managed %llu detect-only\n", nv_pv_last, nv_pv_managed_n);
 }
 
-NV_STATUS NV_API_CALL nv_alloc_pages(nv_state_t *nv, NvU32 page_count, NvU64 page_size, NvBool contiguous, NvU32 cache_type,
+NV_STATUS NV_API_CALL nv_alloc_pages(nv_state_t *nv, NvU32 page_count, NvU64 pageSize, NvBool contiguous, NvU32 cache_type,
                                      NvBool zeroed, NvBool unencrypted, NvS32 node_id, NvU64 *pte_array, void **priv_data)
 {
     NvU64 bytes = (NvU64)page_count * PAGE_SIZE;
     if (nv_xnu_chat()) kprintf("NVRM-xnu: >nv_alloc_pages count=%u page_size=0x%llx contig=%u cache=%u zeroed=%u (%llu KB)\n",
-            page_count, page_size, contiguous, cache_type, zeroed, bytes >> 10);
+            page_count, pageSize, contiguous, cache_type, zeroed, bytes >> 10);
     IOOptionBits opts = kIODirectionInOut | kIOMemoryKernelUserShared;
-    if (contiguous || page_size > PAGE_SIZE) opts |= kIOMemoryPhysicallyContiguous;
+    if (contiguous || pageSize > PAGE_SIZE) opts |= kIOMemoryPhysicallyContiguous;
     if (cache_type == NV_MEMORY_UNCACHED) opts |= kIOMapInhibitCache;
     else if (cache_type == NV_MEMORY_WRITECOMBINED) opts |= kIOMapWriteCombineCache;
     uint64_t mask = (nv_xnu_dma_bits >= 64) ? 0xFFFFFFFFFFFFF000ULL : ((1ULL << nv_xnu_dma_bits) - 1) & ~0xFFFULL;
@@ -1117,7 +1117,7 @@ NV_STATUS NV_API_CALL nv_alloc_pages(nv_state_t *nv, NvU32 page_count, NvU64 pag
     // the request's shape rides in the failure line: 1.14.5-1.14.7 reports logged hundreds of these (8100, 9800, 10240 KB)
     // after the boot-time allocation log had stopped, so no report said whether RM asked for contiguous memory
     if (!md) { kprintf("NVRM-xnu:   inTaskWithPhysicalMask FAILED (%llu KB, page 0x%llx, contig %u, cache %u)\n",
-                       bytes >> 10, page_size, (unsigned)contiguous, cache_type); return NV_ERR_NO_MEMORY; }
+                       bytes >> 10, pageSize, (unsigned)contiguous, cache_type); return NV_ERR_NO_MEMORY; }
     if (md->prepare() != kIOReturnSuccess) { kprintf("NVRM-xnu:   prepare FAILED\n"); md->release(); return NV_ERR_NO_MEMORY; }
     void *va = md->getBytesNoCopy();
     if (zeroed && va) nvx2_memset(va, 0, (size_t)bytes);
@@ -1131,7 +1131,7 @@ NV_STATUS NV_API_CALL nv_alloc_pages(nv_state_t *nv, NvU32 page_count, NvU64 pag
     nv_xnu_alloc *a = (nv_xnu_alloc *)kern_os_malloc(sizeof *a);
     if (!a) { md->complete(); md->release(); return NV_ERR_NO_MEMORY; }
     nvx2_memset(a, 0, sizeof *a);
-    a->md = md; a->va = va; a->page_size = page_size; a->bytes = bytes; a->page_count = page_count; a->contig = contiguous; a->cache = cache_type;
+    a->md = md; a->va = va; a->page_size = pageSize; a->bytes = bytes; a->page_count = page_count; a->contig = contiguous; a->cache = cache_type;
     a->owner_pid = proc_selfpid();  // the client whose escape triggered this allocation; 0 for a kernel-thread (RM-internal) allocation
     a->ptes = (NvU64 *)kern_os_malloc((size_t)n * sizeof(NvU64));
     if (a->ptes) { for (NvU32 i = 0; i < n; i++) a->ptes[i] = pte_array[i]; a->nptes = n; }
