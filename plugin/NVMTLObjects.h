@@ -85,7 +85,8 @@ uint64_t nvmtl_resid_for_sampler(id s);
 @interface NVMTLArrayType : NVMTLType { @public MTLDataType _elem; NSUInteger _len, _stride; } @end
 @interface NVMTLStructMember : NSObject { @public NSString *_name; NSUInteger _offset; MTLDataType _dataType; NSUInteger _argIndex; NVMTLArrayType *_arr;
   NVMTLStructType *_struct; NVMTLTextureReferenceType *_texRef; NVMTLPointerType *_ptr; } @end
-@interface NVMTLArgument : NSObject { @public NSString *_name; MTLArgumentType _type; MTLBindingAccess _access; NSUInteger _index; BOOL _active;
+// _type holds MTLArgumentType values in its underlying NSUInteger; MTLBindingType, the replacement, numbers them the same
+@interface NVMTLArgument : NSObject { @public NSString *_name; NSUInteger _type; MTLBindingAccess _access; NSUInteger _index; BOOL _active;
   NSUInteger _arrayLength, _bufAlign, _bufSize; MTLDataType _bufDataType; NVMTLStructType *_bufStruct; NVMTLPointerType *_bufPtr;
   MTLTextureType _texType; MTLDataType _texDataType; BOOL _depth; } @end
 @interface NVMTLRenderPipelineReflection : NSObject { @public NSArray *_v, *_f, *_o, *_m; } @end
@@ -152,6 +153,11 @@ extern id gNVMTLMainDevice;
   NSMutableArray *_signals;
   NSMutableArray *_waits;
 }
+- (void)nvmtlReleaseCapacity;
+- (void)nvmtlRecordEncodingError:(NSError *)error;
+@end
+// implemented by the EventSubmission category in NVMTLEventSync.m, so declared on that category rather than on the class
+@interface NVMTLCommandBuffer (EventSubmission)
 - (void)nvmtlReserveQueue;
 - (void)nvmtlReleaseReservation;
 - (void)nvmtlRecordWait:(id)event value:(uint64_t)value;
@@ -159,8 +165,6 @@ extern id gNVMTLMainDevice;
 - (void)nvmtlSubmitWithEvents;
 - (BOOL)nvmtlAdvancePart;
 - (BOOL)nvmtlSubmitAhead;
-- (void)nvmtlReleaseCapacity;
-- (void)nvmtlRecordEncodingError:(NSError *)error;
 - (void)nvmtlFinishCallbacks;
 @end
 @interface NVMTLDepthStencilState : NSObject <MTLDepthStencilState> { @public int _write; int _compare;
@@ -244,6 +248,8 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
   nvk_pass _pass; nvk_rtsig _passSig; BOOL _hasRef, _refused;
 } @end
 @interface NVMTLRenderCommandEncoder ()
+// this class's own implementation, which the deferred encoder replays a recorded two-argument call into
+- (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u;
 - (BOOL)nvmtlBuildPass:(MTLRenderPassDescriptor *)d;
 - (BOOL)nvmtlBeginPassLoad:(uint32_t)load;
 - (void)nvmtlApplyDepthStencil;
