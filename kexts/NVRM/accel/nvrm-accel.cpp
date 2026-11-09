@@ -5,6 +5,7 @@
  */
 
 #include "../nvrm_off.h"
+#include "../nvrm_startup_policy.h"
 #ifdef NMX_ACCEL
 // NMXAccel: this accelerator built for the AMD and Intel GPUs that NMXGPU drives (see nmx_accel_names.h)
 #include "nmx_accel_names.h"
@@ -354,7 +355,9 @@ public:
     // first login while the name came back at 60 s). So the name goes back as soon as both are true: NVKMS reports no
     // display on any of this card's connectors, and another GPU's framebuffer already shows the desktop. A desktop whose
     // monitor is slow to wake has no other GPU's framebuffer and still waits for the deadline.
-    static constexpr uint32_t kHeadlessDeadlineSec = 60;   // chosen: NVRMFB heads publish within ~20 s of start (#76 log)
+    static constexpr uint32_t kHeadlessDeadlineSec = 60;   // chosen: NVRMFB heads publish within ~20 s of auto-go's bring-up (#76 log)
+    // base wait counted from the end of auto-go's settle delay, not from this accelerator's start
+    uint32_t fHeadlessDeadlineSec = kHeadlessDeadlineSec;
     static constexpr uint32_t kHeadlessPollSec = 2;        // chosen: a small fraction of the ~7 s NVKMS takes to enumerate
     struct thread_call *fHeadlessCall = nullptr;
     uint32_t fHeadlessWaited = 0;
@@ -431,10 +434,16 @@ public:
         fHeadlessCall = thread_call_allocate(&NVAccel::headlessCheck, this);
         if (!fHeadlessCall) { ALOG("headless check: thread_call_allocate FAILED -- a GPU with no display stays hidden from Metal"); return; }
         fHeadlessWaited = 0;
+        {   // auto-go publishes its settle delay on the PCI device; heads cannot exist before it has passed
+            uint32_t settleMs = 0;
+            if (IORegistryEntry *pci = getProvider())
+                if (OSNumber *n = OSDynamicCast(OSNumber, pci->getProperty("nvrm-autogo-settle-ms"))) settleMs = n->unsigned32BitValue();
+            fHeadlessDeadlineSec = nvrmHeadlessDeadlineSec(kHeadlessDeadlineSec, settleMs);
+        }
         uint64_t when = 0;
         clock_interval_to_deadline(kHeadlessPollSec, kSecondScale, &when);
         thread_call_enter_delayed(fHeadlessCall, when);
-        ALOG("headless check: armed, every %u s for up to %u s", kHeadlessPollSec, kHeadlessDeadlineSec);
+        ALOG("headless check: armed, every %u s for up to %u s", kHeadlessPollSec, fHeadlessDeadlineSec);
     }
     static void headlessCheck(void *p0, void *) {
         NVAccel *me = (NVAccel *)p0;
@@ -451,7 +460,7 @@ public:
             bool other = false;
             headlessDisplayOwner(owner, sizeof owner, &other);
             const bool early = other && headlessNoDisplayHere();
-            if (!early && me->fHeadlessWaited < kHeadlessDeadlineSec) {
+            if (!early && me->fHeadlessWaited < me->fHeadlessDeadlineSec) {
                 uint64_t when = 0;
                 clock_interval_to_deadline(kHeadlessPollSec, kSecondScale, &when);
                 thread_call_enter_delayed(me->fHeadlessCall, when);
