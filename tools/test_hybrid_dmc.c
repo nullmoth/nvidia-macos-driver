@@ -119,6 +119,28 @@ int main(void)
           int rc = got ? nmd_parse(big, (uint32_t)got, '*', '*', nmd_max_words(real[r].ver), &fw) : -1; uint32_t c = rc == NMD_OK ? nmd_load_plan(&fw, real[r].ver, w, 1 << 15) : 0;
           int evt_ok = c > 0; for (uint32_t k = 0; k < c; k++) for (unsigned id = 0; id < NMD_MAX_IDS; id++) if (fw.part[id].present && nmd_is_evt_ctl(id, real[r].ver, w[k].reg) && w[k].val != NMD_EVT_DISABLED && w[k].val != 0) evt_ok = 0;
           snprintf(nm, sizeof nm, "real %s: load plan of %u writes, every event handler left disabled", real[r].name, c); ARM(nm, c > 0 && evt_ok); } } }
+
+    /* the stepping */
+    ARM("Tiger Lake U/Y: revision 3 is C0", ({ struct nmd_step x = nmd_stepping(12, 0x9a49, 3, 0); x.st == 'C' && x.sub == '0'; }));
+    ARM("Tiger Lake H: revision 1 is B0", ({ struct nmd_step x = nmd_stepping(12, 0x9a60, 1, 0); x.st == 'B' && x.sub == '0'; }));
+    ARM("Tiger Lake U/Y and H differ for the same revision 2", ({ struct nmd_step a = nmd_stepping(12, 0x9a49, 2, 0), b = nmd_stepping(12, 0x9a60, 2, 0); a.st == 'B' && a.sub == '1' && b.st == '*'; }));
+    ARM("Alder Lake P: revisions 0, 4, 8 and 12 are A0, B0, C0, C0", ({ struct nmd_step a = nmd_stepping(13, 0x46a6, 0, 0), b = nmd_stepping(13, 0x46a6, 4, 0), c = nmd_stepping(13, 0x46a6, 8, 0), d = nmd_stepping(13, 0x46a6, 12, 0);
+        a.st == 'A' && b.st == 'B' && c.st == 'C' && d.st == 'C' && d.sub == '0'; }));
+    ARM("Alder Lake P: a gap in the table takes the next revision's stepping", ({ struct nmd_step x = nmd_stepping(13, 0x46a6, 5, 0); x.st == 'C' && x.sub == '0'; }));
+    ARM("Alder Lake P: past the table is the wildcard", ({ struct nmd_step x = nmd_stepping(13, 0x46a6, 13, 0); x.st == '*' && x.sub == '*'; }));
+    ARM("Raptor Lake P revision 4 is C0, Alder Lake N revision 0 is A0", ({ struct nmd_step a = nmd_stepping(13, 0xa7a0, 4, 0), b = nmd_stepping(13, 0x46d1, 0, 0); a.st == 'C' && b.st == 'A'; }));
+    ARM("Meteor Lake reads the display step from the GMD register", ({ struct nmd_step x = nmd_stepping(14, 0x7d55, 0, (14u << 22) | (0u << 14) | 4); x.st == 'B' && x.sub == '0'; }));
+    ARM("a GMD register that is not version 14 is the wildcard", ({ struct nmd_step x = nmd_stepping(14, 0x7d55, 0, (20u << 22) | 4); x.st == '*'; }));
+    ARM("an unlisted part is the wildcard", ({ struct nmd_step x = nmd_stepping(12, 0x4c8a, 0, 0); x.st == '*' && x.sub == '*'; }));
+    ARM("Raptor Lake P and Alder Lake N get the Alder Lake P file", !strcmp(nmd_file_for(13, 0xa7a0), "adlp_dmc_ver2_16.bin") && !strcmp(nmd_file_for(13, 0x46d2), "adlp_dmc_ver2_16.bin"));
+    { const char *dir = getenv("NMH_DMC_DIR");
+      if (dir) { char path[512]; snprintf(path, sizeof path, "%s/adlp_dmc_ver2_16.bin", dir);
+        FILE *fp = fopen(path, "rb"); static uint8_t big[1 << 20]; size_t got = fp ? fread(big, 1, sizeof big, fp) : 0; if (fp) fclose(fp);
+        struct nmd_fw fa, fc, fw2; int ra = got ? nmd_parse(big, (uint32_t)got, 'A', '0', nmd_max_words(13), &fa) : -1, rc2 = got ? nmd_parse(big, (uint32_t)got, 'C', '0', nmd_max_words(13), &fc) : -1;
+        (void)fw2;
+        ARM("real Alder Lake P file: an A0 part takes the A-stepping main program", ra == NMD_OK && fa.part[0].words == 6195);
+        ARM("real Alder Lake P file: a C0 part takes the generic main program, a different one", rc2 == NMD_OK && fc.part[0].words != fa.part[0].words);
+        ARM("real Alder Lake P file: the wildcard query is what the old code got, the A program", ({ struct nmd_fw fx; nmd_parse(big, (uint32_t)got, '*', '*', nmd_max_words(13), &fx) == NMD_OK && fx.part[0].words == fa.part[0].words; })); } }
     printf("%d failed\n", fails);
     return fails != 0;
 }

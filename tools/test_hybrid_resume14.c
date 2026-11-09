@@ -20,6 +20,7 @@ static uint8_t phy[2][4096];          /* the C10 register file, one per lane */
 static uint8_t dpcd[0x800];
 static struct { uint32_t off, v; } wlog[20000]; static int nw;
 static unsigned long now_us;
+static int dbuf_fail;
 static int pw_fail, bus_fail, pll_ack_fail, sink_deaf, soc_fail, d2d_fail, idle_fail, pmd_fail, train_fail, sink_needs_v, sink_needs_p;
 static int bus_errs_left;             /* inject N bus errors then recover */
 static int nsteps; static const char *steps[40];
@@ -129,6 +130,7 @@ static void m_wr(void *c, uint32_t o, uint32_t v)
         return; }
     *R(o) = v;
     if (o == NMR_PW_DRIVER || o == NMR_PW_AUX || o == NMR_PW_DDI) { if (!pw_fail) *R(o) = v | ((v & 0x55555555u) << 1); }
+    for (unsigned k = 0; k < 4; k++) if (o == NMR_DBUF_CTL(k) && (v & NMR_DBUF_REQ) && !dbuf_fail) *R(o) |= NMR_DBUF_STATE;
     if (o == NMR_DE_PLL_ENABLE && (v & NMR_PLL_ENABLE)) *R(o) |= NMR_PLL_LOCK;
     if (o == NMX_PMDEMAND(1) && (v & NMX_PMD_REQ) && !pmd_fail) *R(o) &= ~NMX_PMD_REQ;
     if (o == NMR_PP_CONTROL && (v & 1)) *R(NMR_PP_STATUS) = NMR_PP_ON_VALUE;
@@ -142,6 +144,7 @@ static void lit_state(void)
 {
     const unsigned t = T_PIPE, p = T_PIPE, port = T_PORT;
     memset(reg, 0, sizeof reg); memset(dpcd, 0, sizeof dpcd); memset(phy, 0, sizeof phy);
+    reg[NMR_DBUF_CTL(0) / 4] = NMR_DBUF_REQ | NMR_DBUF_STATE; reg[NMR_NDE_RSTWRN / 4] = 0x10u;
     reg[NMR_PW_DRIVER / 4] = 0x1F | 0x2A; reg[NMR_PW_AUX / 4] = 3u << (2 * port); reg[NMR_PW_DDI / 4] = 3u << (2 * port);
     reg[NMR_DE_PLL_ENABLE / 4] = NMR_PLL_ENABLE | NMR_PLL_LOCK | 0x23; reg[NMR_CDCLK_CTL / 4] = 0xBB8;
     reg[NMX_PMDEMAND(0) / 4] = 0x00A31204; reg[NMX_PMDEMAND(1) / 4] = 0x0004F1A0;
@@ -170,7 +173,7 @@ static void lit_state(void)
 }
 static void s3(void)
 {
-    pw_fail = bus_fail = pll_ack_fail = sink_deaf = soc_fail = d2d_fail = idle_fail = pmd_fail = train_fail = 0; sink_needs_v = sink_needs_p = 0; bus_errs_left = 0;
+    pw_fail = bus_fail = pll_ack_fail = sink_deaf = soc_fail = d2d_fail = idle_fail = pmd_fail = train_fail = dbuf_fail = 0; sink_needs_v = sink_needs_p = 0; bus_errs_left = 0;
     memset(reg, 0, sizeof reg); memset(phy, 0, sizeof phy); memset(dpcd, 0, sizeof dpcd); dpcd[0x002] = 0x84; dpcd[0x003] = 0x01; nw = 0; nsteps = 0;
 }
 static int first_write(uint32_t off) { for (int i = 0; i < nw; i++) if (wlog[i].off == off) return i; return -1; }
@@ -208,14 +211,18 @@ static void suite(void)
       ARM("order: clock frequency written before the PLL is requested", vf > ck);
       ARM("order: sink and pipe registers after the PLL, function register, then the DDI buffer, then the transcoder, then the backlight", au > vf && fn > au && db > fn && tc > db && bl > tc);
       ARM("order: the D2D link is enabled before the DDI buffer", d2 > 0 && d2 < db); }
-    { const char *w[] = { "power wells", "display clock", "power-management demand", "panel power", "Cx0 PHY", "sink power", "pipe and plane registers",
+    { const char *w[] = { "display core init", "power wells", "display clock", "power-management demand", "panel power", "Cx0 PHY", "sink power", "pipe and plane registers",
                           "transcoder function and DDI buffer", "link training", "link training: clock recovery done", "transcoder on", "backlight" };
-      int ok = nsteps == 12; for (int i = 0; ok && i < 12; i++) if (strcmp(steps[i], w[i])) ok = 0;
+      int ok = nsteps == 13; for (int i = 0; ok && i < 13; i++) if (strcmp(steps[i], w[i])) ok = 0;
       ARM("each step is logged in order", ok); }
 
     /* failures */
     s3(); lit_state(); nmr14_snapshot(&ops, &snap, p, 0); nw = 0; ARM("a panel still lit is left alone", nmr14_resume(&ops, &snap) == NMR_ALREADY_LIT && nw == 0);
     memcpy(&snap, &saved, sizeof snap);
+    s3(); rc = nmr14_resume(&ops, &snap);
+    ARM("the platform reset handshake is replayed before the power wells", rc == NMR_OK && first_write(NMR_NDE_RSTWRN) >= 0 && first_write(NMR_NDE_RSTWRN) < first_write(NMR_PW_DRIVER));
+    ARM("the display buffer slice is requested after the display clock and before the PHY", first_write(NMR_DBUF_CTL(0)) > first_write(NMR_CDCLK_CTL) && first_write(NMR_DBUF_CTL(0)) < first_write(NMX_CLOCK_CTL(port)));
+    s3(); dbuf_fail = 1; ARM("a display buffer slice that never powers stops the resume before the PHY", nmr14_resume(&ops, &snap) == NMR_E_POWER && first_write(NMX_CLOCK_CTL(port)) < 0);
     s3(); pw_fail = 1; ARM("a power well that never answers stops the resume before the PHY", nmr14_resume(&ops, &snap) == NMR_E_POWER && first_write(NMX_CLOCK_CTL(port)) < 0);
     s3(); pmd_fail = 1; ARM("a power-management demand that is not acknowledged stops the resume before the panel is powered", nmr14_resume(&ops, &snap) == NMR_E_PMDEMAND && first_write(NMR_PP_CONTROL) < 0);
     s3(); soc_fail = 1; ARM("a PHY that never leaves reset stops the resume before any PLL register is written", nmr14_resume(&ops, &snap) == NMR_E_PHY && first_write(NMR_DDI_BUF_CTL(port)) < 0);

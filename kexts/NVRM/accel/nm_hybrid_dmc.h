@@ -145,11 +145,55 @@ static inline uint32_t nmd_plan(const struct nmd_part *p, struct nmd_write *w, u
     return n;
 }
 
+
+/* ---- the display stepping, which picks between the package's entries (Linux intel_step.c; intel_dmc.c intel_get_stepping_info).
+ * Versions 12 and 13 map the PCI revision id through a table per sub-platform; version 14 reads the display step from the
+ * GMD_ID_DISPLAY register (0x510A0, bits 5:0). An unknown part gets the wildcard, which Linux also does. */
+struct nmd_step { char st, sub; };
+static inline struct nmd_step nmd_step_of(unsigned n)
+{
+    struct nmd_step r;
+    if (n >= 40) { r.st = r.sub = '*'; return r; }          /* a stepping beyond the names Linux has: "future" */
+    r.st = (char)('A' + n / 4); r.sub = (char)('0' + n % 4);
+    return r;
+}
+static inline int nmd_id_in(const unsigned *t, unsigned n, unsigned id) { unsigned i; for (i = 0; i < n; i++) if (t[i] == id) return 1; return 0; }
+/* Steppings by revision id, as arrays of (revid -> step number, 0xFF = gap): A0 = 0, A1 = 1, B0 = 4, B1 = 5, C0 = 8 */
+static inline struct nmd_step nmd_stepping(unsigned display_version, unsigned pci_device, unsigned revid, uint32_t gmd_display_id)
+{
+    static const unsigned tgl_uy[] = { 0x9a40, 0x9a49, 0x9a59, 0x9a78, 0x9ac0, 0x9ac9, 0x9ad9, 0x9af8 };
+    static const unsigned tgl_gt1[] = { 0x9a60, 0x9a68, 0x9a70 };
+    static const unsigned adln[] = { 0x46d0, 0x46d1, 0x46d2, 0x46d3, 0x46d4 };
+    static const unsigned rplp[] = { 0xa720, 0xa7a0, 0xa7a8, 0xa7aa, 0xa7ab };
+    static const unsigned char t_uy[] = { 0, 4, 5, 8 }, t_tgl[] = { 0, 4 }, t_adlp[13] = { 0, 0xFF, 0xFF, 0xFF, 4, 0xFF, 0xFF, 0xFF, 8, 0xFF, 0xFF, 0xFF, 8 },
+                              t_rplp[] = { 0xFF, 0xFF, 0xFF, 0xFF, 8 }, t_adln[] = { 0 };
+    const unsigned char *t = 0; unsigned size = 0;
+    struct nmd_step wild = { '*', '*' };
+    if (display_version == 14) {
+        if ((gmd_display_id >> 22) != 14) return wild;
+        return nmd_step_of(gmd_display_id & 0x3F);
+    }
+    if (display_version == 12) {
+        if (nmd_id_in(tgl_uy, sizeof tgl_uy / sizeof *tgl_uy, pci_device)) { t = t_uy; size = sizeof t_uy; }
+        else if (nmd_id_in(tgl_gt1, sizeof tgl_gt1 / sizeof *tgl_gt1, pci_device)) { t = t_tgl; size = sizeof t_tgl; }
+    } else if (display_version == 13) {
+        if (nmd_id_in(adln, 5, pci_device)) { t = t_adln; size = sizeof t_adln; }
+        else if (nmd_id_in(rplp, 5, pci_device)) { t = t_rplp; size = sizeof t_rplp; }
+        else { t = t_adlp; size = sizeof t_adlp; }
+    }
+    if (!t) return wild;
+    /* a gap in the table takes the next revision's stepping; past the end is "future" */
+    while (revid < size && t[revid] == 0xFF) revid++;
+    if (revid < size) return nmd_step_of(t[revid]);
+    return wild;
+}
+
 /* ---- which file a given GPU needs, and how large its program may be (Linux intel_dmc.c dmc_firmware_default, pciids.h) */
 static inline const char *nmd_file_for(unsigned display_version, unsigned pci_device)
 {
     static const unsigned tgl[] = { 0x9a40, 0x9a49, 0x9a59, 0x9a60, 0x9a68, 0x9a70, 0x9a78, 0x9ac0, 0x9ac9, 0x9ad9, 0x9af8 };
-    static const unsigned adlp[] = { 0x4626, 0x4628, 0x462a, 0x46a0, 0x46a1, 0x46a2, 0x46a3, 0x46a6, 0x46a8, 0x46aa, 0x46b0, 0x46b1, 0x46b2, 0x46b3, 0x46c0, 0x46c1, 0x46c2, 0x46c3 };
+    static const unsigned adlp[] = { 0x4626, 0x4628, 0x462a, 0x46a0, 0x46a1, 0x46a2, 0x46a3, 0x46a6, 0x46a8, 0x46aa, 0x46b0, 0x46b1, 0x46b2, 0x46b3, 0x46c0, 0x46c1, 0x46c2, 0x46c3,
+                                     0x46d0, 0x46d1, 0x46d2, 0x46d3, 0x46d4 /* Alder Lake N */, 0xa720, 0xa7a0, 0xa7a8, 0xa7aa, 0xa7ab /* Raptor Lake P */ };
     static const unsigned mtl[] = { 0x7d40, 0x7d45, 0x7d55, 0x7d60, 0x7dd5, 0x7d41, 0x7d51, 0x7d67, 0x7dd1, 0xb640 };   /* Meteor Lake and Arrow Lake */
     unsigned i;
     if (display_version == 12) { for (i = 0; i < sizeof tgl / sizeof *tgl; i++) if (tgl[i] == pci_device) return "tgl_dmc_ver2_12.bin"; }
