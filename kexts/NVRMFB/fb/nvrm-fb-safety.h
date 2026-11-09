@@ -283,3 +283,8 @@ static inline bool nvrmDsrSize(unsigned nativeW, unsigned nativeH, unsigned i, u
     if (dw > maxW || dh > maxH || dw <= nativeW || dh <= nativeH) return false;
     *w = dw; *h = dh; return true;
 }
+// Highest pixel clock published in IOFBTimingRange. 1.2 GHz excluded the very modes NVKMS lists for fast panels (a 2560x1600
+// 300 Hz eDP panel needs 1.37 GHz, a 4K 240 Hz DSC mode 2.1 GHz); macOS then validated them against this range rather than
+// as the panel's own timing (issue 429: the mode is enumerated as valid, the panel goes black). NVKMS still validates every
+// commit, so a higher bound only stops macOS from refusing or rewriting timings the hardware takes.
+enum { kNvrmMaxPixelClockMHz = 2700 };
