@@ -1,0 +1,10 @@
+# WMNB device ids found as 32-bit constants in the DSDT+SSDTs of the probe bundles (2026-11-09), per family: bundles, then how many carry each id
+family	bundles	kbd_0x00050021	rgb_mode_0x00100056	rgb_mode2_0x0010005A	rgb_cmd_0x00100057
+ASUS TUF Dash F15	2	1	0	1	1
+ASUS TUF Gaming A15	6	0	0	3	0
+ASUS TUF Gaming A16	1	1	1	1	1
+ASUS TUF Gaming A17	1	0	0	0	0
+ASUS TUF Gaming F15	5	1	1	2	1
+ASUS TUF Gaming F17	3	3	3	2	3
+TUF Gaming	1	1	1	0	1
+TX Gaming	5	5	1	5	1
