@@ -41,9 +41,23 @@ static void nvbt(const char *tag, int *count, int max);
     // synchronizeResource (GPU -> CPU). Apple's OpenCL wraps every cl_mem this way; importing the pages zero-copy put
     // every kernel access across PCIe instead (a 5600x4200 byte-image rotate: 6.6 s per dispatch, Geekbench 6 OpenCL
     // Horizon Detection hit the 60 s GPU watchdog). The caller's pages become the managed shadow, so contents is still
-    // the caller's pointer, and the GPU side lives in VRAM. Under 1 MiB the transfer outweighs the win (the same
-    // threshold the Shared pair uses), so small buffers stay zero-copy.
-    if (sm == MTLStorageModeManaged && a1 >= (1u << 20) && nvmtl_vk_buffer_import_host(a0, a1, &b->_shadow) == 0) {
+    // the caller's pointer, and the GPU side lives in VRAM.
+    // This used to apply only from 1 MiB up, on the theory that a small buffer's transfer outweighs the win. It does
+    // not: the transfer is one DMA of the dirty range per submission, while a kernel that reads a small buffer reads it
+    // once per thread. Geekbench 7 OpenCL keeps exactly its hottest data in small cl_mem objects - Particle Physics'
+    // whole state (4 buffers, 0.1 MB, 1000 dispatches per chain), Video Filter's colour LUT (read per pixel), the
+    // network weights and biases in Blur / Face / Super Resolution, the path tracer's ray counters (atomics) - and
+    // every one of those accesses crossed PCIe: those workloads ran at 0.4-12% of the same card under OpenCL on
+    // Windows, while the two whose buffers are all large (Horizon, Fluid) ran at 64-82%.
+    // NVMTL_MANAGED_VRAM_MIN=<bytes> sets the floor (1048576 restores the old behaviour).
+    static NSUInteger vramMin = NSUIntegerMax;
+    if (vramMin == NSUIntegerMax) {
+        const char *e = getenv("NVMTL_MANAGED_VRAM_MIN");
+        vramMin = e && *e ? (NSUInteger)strtoull(e, NULL, 0) : 0;
+        nvlog("newBufferWithBytesNoCopy: managed buffers from %lu bytes get a VRAM copy (NVMTL_MANAGED_VRAM_MIN=%s)",
+              (unsigned long)vramMin, e ? e : "unset");
+    }
+    if (sm == MTLStorageModeManaged && a1 >= vramMin && nvmtl_vk_buffer_import_host(a0, a1, &b->_shadow) == 0) {
         if (nvmtl_vk_buffer_create(a1, 0, &b->_b) == 0) {
             [b didModifyRange:NSMakeRange(0, a1)];
             { static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: managed %lu bytes -> VRAM copy, caller's pages are the shadow", (unsigned long)a1); }

@@ -26,8 +26,15 @@
 // The firmware moved out of /Users/Shared, which every user can write: the kernel reads these images and
 // the card runs them. /Library/NullMoth is where the installer already keeps the cached accelerators
 // root-owned and not group- or world-writable.
-#define NV_XNU_FW_DIR "/Library/NullMoth/nvfw/nvidia/615.78.08/"
-// The largest image we ship is the Ampere ucodes at 58 MB (615.78.08, measured); the cap only has to be generous.
+// NVIDIA's GSP firmware must be the exact release the RM was built from; this directory names it (the package ships
+// nvfw/nvidia/<version>/, and older versions stay beside it for a rollback).
+#define NV_XNU_FW_DIR "/Library/NullMoth/nvfw/nvidia/620.70.06/"
+// Fallback for an early start: /Library is firmlinked to the Data volume, so NV_XNU_FW_DIR does not
+// exist yet when this driver is loaded from the boot collection. /usr/share lives on the system
+// volume and is not firmlinked. Same layout underneath, so only the prefix differs. See the
+// firmlink note in nv_get_firmware.
+#define NV_XNU_FW_ALT_DIR "/usr/share/nvfw/nvidia/620.70.06/"
+// The largest image we ship is the Ampere ucodes at 56 MB (620.70.06, measured); the cap only has to be generous.
 #define NV_XNU_FW_MAX_BYTES (256u * 1024u * 1024u)
 #define NV_FIRMWARE_FOR_NAME(name) NV_XNU_FW_DIR name ".bin"
 extern "C" {
@@ -50,7 +57,13 @@ static inline void nvx2_memcpy(void *d, const void *s, size_t n) { __asm__ __vol
 
 extern "C" {
 
-NvBool NV_API_CALL os_check_access(RsAccessRight accessRight) { TRC; return NV_TRUE; }
+// GPU profiling and channel priority are for administrators, as on Linux, where this answers from CAP_PERFMON and
+// CAP_SYS_NICE. RM's own kernel clients do not come through here. Any other right is refused.
+NvBool NV_API_CALL os_check_access(RsAccessRight accessRight)
+{
+    TRC;
+    return (accessRight == RS_ACCESS_PERFMON || accessRight == RS_ACCESS_NICE) ? os_is_administrator() : NV_FALSE;
+}
 NvU32  NV_API_CALL os_get_current_process_flags(void) { TRC; return 0; }
 NvBool NV_API_CALL nv_requires_dma_remap(nv_state_t *nv) { TRC; return NV_FALSE; }
 static NvU32 nv_xnu_dma_bits = 64;
@@ -1197,10 +1210,11 @@ NV_STATUS NV_API_CALL nv_dma_unmap_alloc(nv_dma_device_t *dev, NvU64 page_count,
 // the card's own secure boot is what decides whether an image may run.
 struct nv_xnu_fw_expected { const char *name; NvU64 bytes; const char *sha1; };
 static const nv_xnu_fw_expected nv_xnu_fw_set[] = {
-    { "gsp_ga10x.bin",    27043992ull, "2a4840509e4a8a51436c0550e444e22d4304e519" },
-    { "gsp_tu10x.bin",    22901632ull, "44efed1a8c98dc54039c714547785cce67293de3" },
-    { "ucodes_ga10x.bin", 58215936ull, "f9bf8077ad46314eebec97b195bad40ee0a7771c" },
-    { "ucodes_tu10x.bin",  8837632ull, "81b4f1593cc0ba9313680ad68dc46b867393ca80" },
+    // NVIDIA 620.70.06 (NV_XNU_FW_DIR above); these move together with that directory on every NVIDIA update
+    { "gsp_ga10x.bin",    18266264ull, "6af82922e1a09b7dc4a8ce4c321fbb9d2f81894b" },
+    { "gsp_tu10x.bin",    16692112ull, "e16ff38dd2f9db6958b02dea4582dc5dff9b21cc" },
+    { "ucodes_ga10x.bin", 56128512ull, "62e74fcdd2c22765993a36a796cec536eb2eed4b" },
+    { "ucodes_tu10x.bin", 12532480ull, "5ccef0d210a2cdc1f1a1becb3ff50dbad19c332b" },
 };
 static const nv_xnu_fw_expected *nv_xnu_fw_expect(const char *path)
 {
@@ -1226,6 +1240,20 @@ const void *NV_API_CALL nv_get_firmware(nv_state_t *nv, nv_firmware_type_t fw_ty
     vfs_context_t ctx = vfs_context_current();
     vnode_t vp = NULL;
     int err = vnode_open(path, FREAD, 0, 0, &vp, ctx);
+    // /Library is firmlinked to the Data volume, so NV_XNU_FW_DIR is unreachable whenever this driver
+    // starts before that volume is mounted (loaded from the boot collection it starts a few seconds
+    // after the root volume mounts, and every image comes back ENOENT, which RM reports only as
+    // "RmFetchGspRmImages: No firmware image found"). /usr/share is on the system volume and is not
+    // firmlinked, so it is readable with only the root volume mounted. A fallback, not a move, so an
+    // installer that places firmware the existing way keeps working.
+    if (err) {
+        char alt[256];
+        snprintf(alt, sizeof alt, "%s%s", NV_XNU_FW_ALT_DIR, path + sizeof(NV_XNU_FW_DIR) - 1);
+        kprintf("NVRM-xnu:   vnode_open failed %d on %s, trying %s\n", err, path, alt);
+        err = vnode_open(alt, FREAD, 0, 0, &vp, ctx);
+        // `path` is deliberately not reassigned: nv_xnu_fw_expect() keys the expected size and sha1 off
+        // the canonical NV_XNU_FW_DIR path, so the integrity check still applies to the fallback image.
+    }
     if (err) { kprintf("NVRM-xnu:   vnode_open failed %d\n", err); return NULL; }
     struct vnode_attr va; VATTR_INIT(&va); VATTR_WANTED(&va, va_data_size);
     if (vnode_getattr(vp, &va, ctx) != 0) { kprintf("NVRM-xnu:   vnode_getattr failed\n"); vnode_close(vp, FREAD, ctx); return NULL; }
@@ -1615,12 +1643,14 @@ void NV_API_CALL nv_destroy_nano_timer(nv_state_t *nv, nv_nano_timer_t *t)
 }
 
 extern "C" nv_file_private_t *nv_xnu_lookup_fd(NvS32 fd, void **priv, NvBool *isCtl);
-extern "C" nv_alloc_mapping_context_t *nv_xnu_mmap_context(void *priv);
-nv_file_private_t *NV_API_CALL nv_get_file_private(NvS32 fd, NvBool ctl, void **os_private)
+extern "C" void nv_xnu_put_client(void *priv);
+extern "C" void nv_xnu_note_map_len(NvU64 bytes);
+// NVIDIA 620 dropped the control/device argument: every caller now checks it with nv_verify_nvfp_control_or_put
+// (nv.h), which asks nv_get_state_ptr_from_nvfp and drops the reference on a mismatch.
+nv_file_private_t *NV_API_CALL nv_get_file_private(NvS32 fd, void **os_private)
 {
     TRC; NvBool isCtl = NV_FALSE; nv_file_private_t *fp = nv_xnu_lookup_fd(fd, os_private, &isCtl);
     if (!fp) { kprintf("NVRM-xnu: nv_get_file_private(fd %d) -> none\n", fd); return NULL; }
-    if (!!isCtl != !!ctl) { kprintf("NVRM-xnu: nv_get_file_private(fd %d): wanted %s, is %s\n", fd, ctl ? "ctl" : "device", isCtl ? "ctl" : "device"); return NULL; }
     return fp;
 }
 extern "C" IOMemoryDescriptor *nv_xnu_alloc_md(void *priv, NvU64 *bytes, NvU32 *cache)
@@ -1642,6 +1672,11 @@ NV_STATUS NV_API_CALL nv_alloc_user_mapping(nv_state_t *nv, void *pAllocPrivate,
     addr64_t phys = a->md->getPhysicalSegment((IOByteCount)(pageIndex * PAGE_SIZE), &len, kIOMemoryMapperNone);
     if (!phys) return NV_ERR_GENERIC;
     *pUserAddress = (NvU64)phys + pageOffset; if (ppPrivate) *ppPrivate = NULL;
+    // The bytes RM validated for this user mapping, from page_index's first byte; the map path clamps to them.
+    // An overflowing sum reports 0, which the map path refuses.
+    NvU64 validated = 0;
+    if (!__builtin_add_overflow((NvU64)pageOffset, size, &validated)) nv_xnu_note_map_len(validated);
+    else nv_xnu_note_map_len(0);
     return NV_OK;
 }
 void NV_API_CALL nv_free_user_mapping(nv_state_t *nv, void *pAllocPrivate, NvU64 userAddress, void *pPrivate) { TRC; }
@@ -1656,31 +1691,30 @@ NV_STATUS NV_API_CALL os_match_mmap_offset(void *pAllocPrivate, NvU64 offset, Nv
     kprintf("NVRM-xnu: os_match_mmap_offset: 0x%llx not in a %u-page alloc\n", offset, a->page_count);
     return NV_ERR_OBJECT_NOT_FOUND;
 }
-NV_STATUS NV_API_CALL nv_add_mapping_context_to_file(nv_state_t *nv, nv_usermap_access_params_t *nvuap, NvU32 prot, void *pAllocPriv, NvU64 pageIndex, NvU32 fd)
-{
-    TRC; void *priv = NULL;
-    nv_file_private_t *nvfp = nv_get_file_private((NvS32)fd, NV_IS_CTL_DEVICE(nv), &priv);
-    if (!nvfp) return NV_ERR_INVALID_ARGUMENT;
-    nv_alloc_mapping_context_t *c = nv_xnu_mmap_context(priv);
-    if (!c) return NV_ERR_INVALID_ARGUMENT;
-    if (c->valid) return NV_ERR_STATE_IN_USE;
-    nvx2_memset(c, 0, sizeof *c);
-    if (NV_IS_CTL_DEVICE(nv)) { c->alloc = pAllocPriv; c->page_index = pageIndex; }
-    else {
-        NvU64 n = nvuap->memArea.numRanges;
-        if (n == 0 || n > 4096) return NV_ERR_INVALID_ARGUMENT;
-        c->memArea.pRanges = (MemoryRange *)kern_os_malloc((size_t)(sizeof(MemoryRange) * n));
-        if (!c->memArea.pRanges) return NV_ERR_NO_MEMORY;
-        nvx2_memcpy(c->memArea.pRanges, nvuap->memArea.pRanges, (size_t)(sizeof(MemoryRange) * n));
-        c->memArea.numRanges = n;
-    }
-    c->access_start = nvuap->access_start; c->access_size = nvuap->access_size;
-    c->prot = prot; c->caching = nvuap->caching; c->valid = NV_TRUE;
-    if (nv_xnu_chat()) kprintf("NVRM-xnu: mapping context on fd %u: %s page_index=%llu ranges=%llu access=0x%llx+0x%llx caching=%u prot=0x%x\n",
-            fd, NV_IS_CTL_DEVICE(nv) ? "sysmem" : "device", pageIndex, c->memArea.numRanges, c->access_start, c->access_size, c->caching, prot);
-    return NV_OK;
-}
-void NV_API_CALL nv_put_file_private(void *os_private) { TRC; }
+void NV_API_CALL nv_put_file_private(void *os_private) { TRC; nv_xnu_put_client(os_private); }
+
+// ---- NVIDIA 620 OS-interface additions RM calls ---------------------------------------------------------------------
+// TDISP (trusted device DMA for confidential computing) is never enabled here; Linux sets this only when the kernel
+// and platform support it. RM reads it as data.
+extern "C" NvBool os_tdisp_enabled;
+NvBool os_tdisp_enabled = NV_FALSE;
+// Mapping reference on an allocation (os.c osMapSystemMemory / osUnmapSystemMemory). Linux counts it so nv_free_pages
+// can tell a still-mapped allocation; here a user mapping holds a retained IOMemoryDescriptor of the allocation's pages
+// (nv_xnu_alloc_md), which already keeps them alive, so the count is kept for the leak report and nothing waits on it.
+static volatile SInt64 nv_xnu_user_map_refs = 0;
+void NV_API_CALL nv_inc_alloc_refcount(void *pAllocPrivate) { TRC; if (pAllocPrivate) OSIncrementAtomic64(&nv_xnu_user_map_refs); }
+void NV_API_CALL nv_dec_alloc_refcount(nv_state_t *nv, void *pAllocPrivate) { TRC; if (pAllocPrivate) OSDecrementAtomic64(&nv_xnu_user_map_refs); }
+// Peer-to-peer resource mapping through dma_map_resource has no macOS counterpart; RM falls back when this is false.
+NvBool NV_API_CALL nv_dma_is_map_resource_usable(nv_dma_device_t *dma_dev) { TRC; return NV_FALSE; }
+// A memory carve-out is an SoC (Tegra) concept; discrete GPUs have none.
+NV_STATUS NV_API_CALL nv_get_carveout_info(NvU64 *base, NvU64 *size) { TRC; return NV_ERR_NOT_SUPPORTED; }
+// Linux ftrace tracepoint for GPU operations; nothing listens on macOS.
+NV_STATUS NV_API_CALL nv_emit_tracepoint_gpu_op_event(nv_state_t *nv, const nv_gpu_op_event_t *op_event) { TRC; return NV_OK; }
+// Device-certificate reads serve SPDM attestation for confidential computing, which this driver does not enable.
+NV_STATUS NV_API_CALL os_read_device_certificate(void *nv_state, NvU8 *pBuffer, NvU32 *pBufferSize) { TRC; return NV_ERR_NOT_SUPPORTED; }
+NV_STATUS NV_API_CALL os_read_device_cert_digests(void *nv_state, const NvU8 *pCertChain, NvU32 certChainSize,
+                                                  NvU8 *pTsmDigest, NvU8 *pLocalDigest, NvU32 *pDigestSize)
+{ TRC; return NV_ERR_NOT_SUPPORTED; }
 NvBool NV_API_CALL nv_is_gpu_accessible(nv_state_t *nv) { TRC; return NV_TRUE; }
 static nv_state_t nv_xnu_ctl_state;
 nv_state_t *NV_API_CALL nv_get_ctl_state(void)
