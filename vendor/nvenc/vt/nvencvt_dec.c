@@ -16,6 +16,7 @@
 #include <CoreVideo/CoreVideo.h>
 #include <VideoToolbox/VideoToolbox.h>
 #include <dlfcn.h>
+#include <stdlib.h>
 #include <dispatch/dispatch.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -213,9 +214,30 @@ static CFStringRef b_desc(CMBaseObjectRef o)
            c == kCMVideoCodecType_MPEG4Video ? CFSTR("nvenc MPEG-4 Part 2 decoder (NVDEC)") :
            CFSTR("nvenc H.264 decoder (NVDEC)");
 }
+// The most pixels per second this decoder is offered as able to decode. The Screen Sharing viewer builds a session for a
+// small HEVC stream and reads this to choose its frame rate; a decoder that does not answer is treated as 60 frames per
+// second. Apple's own decoder answers a number of this kind (a CFNumber, pixels per second). The default is 4K at 120
+// frames per second, which NVDEC meets on every generation the driver supports; NVMTL_NVDEC_MAX_PIXEL_RATE replaces it.
+// The key is not in the public SDK headers, so it is spelled out.
+#define NV_MAX_DECODER_PIXEL_RATE_KEY CFSTR("MaxDecoderPixelRate")
+static int64_t nv_max_decoder_pixel_rate(void)
+{
+    const char *e = getenv("NVMTL_NVDEC_MAX_PIXEL_RATE");
+    if (e && *e) {
+        char *end = NULL;
+        long long v = strtoll(e, &end, 10);
+        if (end && !*end && v > 0) return (int64_t)v;
+    }
+    return (int64_t)3840 * 2160 * 120;
+}
 static OSStatus b_copyProperty(CMBaseObjectRef o, CFStringRef key, CFAllocatorRef al, void *out)
 {
     (void)o; (void)al;
+    if (CFEqual(key, NV_MAX_DECODER_PIXEL_RATE_KEY)) {
+        int64_t rate = nv_max_decoder_pixel_rate();
+        *(CFTypeRef *)out = CFNumberCreate(NULL, kCFNumberSInt64Type, &rate);
+        return *(CFTypeRef *)out ? noErr : kCMBaseObjectError_ValueNotAvailable;
+    }
     if (CFEqual(key, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder)) { *(CFTypeRef *)out = kCFBooleanTrue; return noErr; }
     if (gDLog) { char k[128]; CFStringGetCString(key, k, sizeof k, kCFStringEncodingUTF8); DLOG("copy %s: not available", k); }
     return kCMBaseObjectError_ValueNotAvailable;
@@ -864,10 +886,14 @@ static OSStatus d_copySupported(VTVideoDecoderRef o, CFDictionaryRef *out)
     const void *pk[] = { kVTPropertyTypeKey, kVTPropertyReadWriteStatusKey };
     const void *pv[] = { kVTPropertyType_Boolean, kVTPropertyReadWriteStatus_ReadOnly };
     CFDictionaryRef ro = CFDictionaryCreate(NULL, pk, pv, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    const void *k[] = { kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder };
-    const void *v[] = { ro };
-    *out = CFDictionaryCreate(NULL, k, v, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    const void *nk[] = { kVTPropertyTypeKey, kVTPropertyReadWriteStatusKey };
+    const void *nv[] = { kVTPropertyType_Number, kVTPropertyReadWriteStatus_ReadOnly };
+    CFDictionaryRef rn = CFDictionaryCreate(NULL, nk, nv, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    const void *k[] = { kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder, NV_MAX_DECODER_PIXEL_RATE_KEY };
+    const void *v[] = { ro, rn };
+    *out = CFDictionaryCreate(NULL, k, v, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFRelease(ro);
+    CFRelease(rn);
     return noErr;
 }
 static OSStatus d_setProperties(VTVideoDecoderRef o, CFDictionaryRef d) { (void)o; DLOG("setProperties %p", d); return noErr; }
