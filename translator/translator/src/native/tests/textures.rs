@@ -1814,7 +1814,7 @@ declare { float, i8 } @air.sample_compare_depth_2d.f32(ptr addrspace(1), ptr add
 }
 
 #[test]
-fn runtime_sampler_specialization_refuses_pointer_selected_state_loss() {
+fn runtime_sampler_specialization_keeps_each_selected_sampler_state() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
 define void @k(ptr addrspace(1) %tex, ptr addrspace(2) %sampler0, ptr addrspace(2) %sampler1, ptr addrspace(1) %out, i32 %lane) {
@@ -1854,9 +1854,13 @@ declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr a
         .unwrap()
         .with_runtime_sampler(1, state)
         .unwrap();
-    let error = crate::translate_sanitized_native_with_options(ll, Stage::Kernel, &tmp, options)
-        .expect_err("pointer-selected runtime sampler state must not silently disappear");
-    assert!(error.contains("pointer selection"), "{error}");
+    // The sample runs once with each candidate sampler and the chosen result is kept, so each sampler's own state
+    // is used and none is lost to the selection.
+    let spv = crate::translate_sanitized_native_with_options(ll, Stage::Kernel, &tmp, options)
+        .expect("a selected runtime sampler samples with each candidate");
+    let asm = crate::disassemble(&spv).expect("disassemble");
+    // pixel-coordinate sampling reads with OpImageFetch: one read per candidate sampler
+    assert_eq!(asm.lines().filter(|l| l.contains("OpImageFetch")).count(), 2, "{asm}");
 }
 
 #[test]
