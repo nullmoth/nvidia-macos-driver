@@ -5777,6 +5777,16 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     return 1;
 }
 
+// Metal binds a compute buffer at any 4-byte offset; Vulkan storage buffers need 16. A slot at an unaligned offset is bound to
+// a dummy buffer, so a shader that reads its arguments through that slot reads zeros (Photoshop's duplicate-layer kernel, slot 1
+// at offset 4100, then dereferenced a null pointer). With NVMTL_MISALIGNED_BUFFER_COPY=1 a CPU-visible buffer at such an
+// offset is bound as a copy of the bytes from the offset on (up to 4 MB), the way setBytes binds, which is correct for data the
+// kernel only reads and was written before encoding. Writes to the copy are not carried back. Off unless set.
+static int nvmtl_misaligned_copy_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_MISALIGNED_BUFFER_COPY"); on = e && *e && *e != '0'; }
+    return on;
+}
 @implementation NVMTLComputeCommandEncoder
 - (unsigned long long)globalTraceObjectID { return nvmtl_global_trace_id(self); }
 static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said && st) { said = YES;
@@ -5850,6 +5860,12 @@ static int nvmtl_zprobe_on(void);
 }
 - (void)setBuffer:(id<MTLBuffer>)b offset:(NSUInteger)off atIndex:(NSUInteger)i {
     NVMTLBuffer *nb = (NVMTLBuffer *)b;
+    if (nb && (off & 15) && nvmtl_misaligned_copy_on() && nb->_b.map && nb->_b.size > off) {
+        size_t n = nb->_b.size - off; if (n > ((size_t)4 << 20)) n = (size_t)4 << 20;
+        static int said; if (!said++) nvlog("compute setBuffer: slot %lu at offset %lu is not 16-aligned - bound as a %lu-byte copy (NVMTL_MISALIGNED_BUFFER_COPY)", (unsigned long)i, (unsigned long)off, (unsigned long)n);
+        [self setBytes:(const uint8_t *)nb->_b.map + off length:n atIndex:i];
+        return;
+    }
     if (!nb) {
         if (i < NVMTL_NBUFAT) { _baObj[i] = nil; _baN[i] = 0; }   // the binding table must not keep the previous resource
         size_t zoff = 0;
