@@ -11,7 +11,9 @@ mkdir -p "$OUT/NVPrimarySelector.kext/Contents/MacOS"
 xcrun clang++ -arch x86_64 -mmacosx-version-min=10.15 -fapple-kext -mkernel -nostdinc \
  -I"$KHDR" -I"$SRC" -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
  -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common -fno-stack-protector \
- -O2 -Wall -Wextra -c "$SRC/NVPrimarySelector.cpp" -o "$OUT/NVPrimarySelector.o"
+ -O2 -Wall -Wextra -c "$SRC/NVPrimarySelector.cpp" -o "$OUT/NVPrimarySelector.o" 2> "$OUT/NVPrimarySelector.err" \
+ || { cat "$OUT/NVPrimarySelector.err"; exit 1; }
+bash "$BASE/build/warn_ceiling.sh" primary-selector "$(grep -c ': warning:' "$OUT/NVPrimarySelector.err" || true)" "$OUT/NVPrimarySelector.err"
 xcrun clang++ -arch x86_64 -mmacosx-version-min=10.15 -fapple-kext -nostdlib -Xlinker -kext \
  "$OUT/NVPrimarySelector.o" -L"$KLIB" -lkmod -o "$OUT/NVPrimarySelector.kext/Contents/MacOS/NVPrimarySelector"
 cp "$SRC/Info.plist" "$OUT/NVPrimarySelector.kext/Contents/Info.plist"

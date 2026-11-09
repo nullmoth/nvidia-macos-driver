@@ -24,6 +24,7 @@ if [ $rc -ne 0 ]; then
     exit 1
 fi
 echo "compiled: $(grep -c "warning:" "$E") warnings"
+bash "$SRC/../../build/warn_ceiling.sh" nmgopfb "$(grep -c ": warning:" "$E")" "$E" || exit 4
 K="$OUT/$NAME.kext"
 mkdir -p "$K/Contents/MacOS"
 xcrun clang++ -arch x86_64 -mmacosx-version-min="$MIN" -fapple-kext -nostdlib \
