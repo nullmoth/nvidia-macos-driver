@@ -39,12 +39,18 @@ struct OSData : OSObject {
 };
 template <class T> T *OSDynamicCast_impl(OSObject *o) { return dynamic_cast<T *>(o); }
 #define OSDynamicCast(T, o) OSDynamicCast_impl<T>(o)
-static std::map<std::string, std::vector<unsigned char>> gNvram;
+static std::map<std::string, std::vector<unsigned char>> gNvram, gSynced;   // gSynced: what reached the firmware
+struct OSBoolean : OSObject {};
+static OSBoolean gTrueObj;
+#define kOSBooleanTrue (&gTrueObj)
+#define kIONVRAMSyncNowPropertyKey "IONVRAM-SYNCNOW-PROPERTY"
 struct IORegistryEntry : OSObject {
     static IORegistryEntry *fromPath(const char *, int) { return gOptionsGone ? nullptr : new IORegistryEntry; }
     OSObject *copyProperty(const char *k) { auto it = gNvram.find(k); return it == gNvram.end() ? nullptr : OSData::withBytes(it->second.data(), (unsigned)it->second.size()); }
     bool setProperty(const char *k, OSData *d) { if (gWritesFail) return false; gNvram[k] = d->b; return true; }
     void removeProperty(const char *k) { if (!gWritesFail) gNvram.erase(k); }
+    // the sync key copies the kernel's NVRAM to the firmware; nothing else does until a clean shutdown
+    bool setProperty(const char *k, OSObject *) { if (!strcmp(k, kIONVRAMSyncNowPropertyKey)) gSynced = gNvram; return true; }
 };
 static int gIODTPlane = 0;
 typedef void *thread_t;
@@ -60,6 +66,7 @@ int main(int argc, char **argv) {
     const std::string sc = argc > 1 ? argv[1] : "";
     if (argc > 2) for (const char *p = argv[2]; *p;) { const char *e = strchr(p, '='); const char *c = strchr(p, ','); if (!c) c = p + strlen(p);
         std::string k(p, e), v(e + 1, c); gNvram[k] = std::vector<unsigned char>(v.begin(), v.end()); p = *c ? c + 1 : c; }
+    gSynced = gNvram;   // what the firmware held when this boot began
     const bool off = nvrm_driver_off();
     if (!off) {
         gOptionsGone = sc.find("nooptions-at-start") != std::string::npos;      // registry not published when NVRM started
@@ -85,6 +92,7 @@ int main(int argc, char **argv) {
         nvrm_guard_display_up("test");
     }
 out:
+    if (sc.find("panic") != std::string::npos) gNvram = gSynced;            // a panic: only what was synced survives
     printf("off=%d starts=%u ok=%d\n", off, starts(), gNvram.count(NVRM_GUARD_OK_VAR) ? 1 : 0);
     for (auto &kv : gNvram) { printf("NV %s=", kv.first.c_str()); for (unsigned char c : kv.second) printf("%c", c); printf("\n"); }
     return 0;
@@ -155,10 +163,17 @@ headless = accel[h0:accel.index('void deliverModeChange()', h0)]
 check('the headless fallback does not clear the guard', 'nvrm_guard_display_up(' not in headless)
 fb = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
 check('the framebuffer clears it on a connector list with no display', 'if (n > 0 && gNDpy == 0) fbGuardCleared(' in fb)
+# a start that panics never reaches a clean shutdown, so only a synced counter survives it (#529: six panicking boots, "start 1" each)
+r = boots(exe, ['hang-panic', 'hang-panic', 'good'])
+check('two starts that panic switch the driver off on the third boot (the count is synced, not left in the kernel copy)', r[2][0] == 1, r)
+nosync = body.replace('if (options) options->setProperty(kIONVRAMSyncNowPropertyKey, kOSBooleanTrue);', '(void)options;')
+assert nosync != body
+r = boots(build(nosync), ['hang-panic', 'hang-panic', 'good'])
+check('negative control: without the sync the panicking starts never add up (the field report)', r[2][0] == 0 and r[1][1] == 0, r)   # nothing reaches the firmware, so every boot logs start 1
 # negative control: the guard without the wait exemption switches the Mac off after two resets during the wait
 control = body.replace('nvrm_guard_pause_for_wait(unsigned ms)\n{', 'nvrm_guard_pause_for_wait(unsigned ms)\n{ (void)ms; return;')
 assert control != body
 r = boots(build(control), ['wait-reset-in-wait', 'wait-reset-in-wait', 'wait'])
 check('negative control: without the exemption two resets in the wait switch the driver off', r[2][0] == 1, r)
-print(f'boot guard wait: {15 - fails} of 15 arms')
+print(f'boot guard wait: {17 - fails} of 17 arms')
 raise SystemExit(1 if fails else 0)
