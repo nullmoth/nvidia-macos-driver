@@ -39,7 +39,7 @@ for g, iv in (('Tile', None), ('Object', '_reqObj'), ('Mesh', '_reqMesh')):
     sig = f'- (MTLSize)requiredThreadsPer{g}Threadgroup'
     arm(f'render pipeline defines requiredThreadsPer{g}Threadgroup', sig in objects)
     if iv:
-        arm(f'the {g.lower()} getter returns what the mesh descriptor gave', f'{sig} {{ return {iv}; }}' in objects and f'ps->{iv} = ' in library)
+        arm(f'the {g.lower()} getter returns what the mesh descriptor gave', f'{sig} {{ return {iv}; }}' in objects and f'ps->{iv} = ' in library + device)   # the mesh pipeline is built in NVMTLDevice.m
 arm('the compute descriptor value is stored on the pipeline',
     "->_reqTG = nvmtl_desc_size(d, @selector(requiredThreadsPerThreadgroup));" in device)
 mt = body(objects, '- (NSUInteger)maxTotalThreadsPerThreadgroup { NSUInteger v = nvmtl_compute_maxt()')
