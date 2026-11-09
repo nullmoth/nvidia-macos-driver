@@ -66,7 +66,10 @@ fn classify(name: &str) -> Option<Family> {
 }
 
 fn tags_are_carried(name: &str) -> bool {
-    !(name.contains("motion") || name.contains("curve") || name.contains("intersection_function"))
+    // The inline curve intersection (`air.intersect.*curve_data`) is carried: the driver's curve test runs inside the query and
+    // leaves curve_parameter in the first barycentric. Curve tags on other calls and on intersection functions are not.
+    let curve_ok = name.starts_with("air.intersect.") && name.contains("curve_data") && !name.contains("intersection_function");
+    !(name.contains("motion") || (name.contains("curve") && !curve_ok) || name.contains("intersection_function"))
 }
 
 fn air_function_names(ctx: &Ctx) -> HashMap<Word, String> {
