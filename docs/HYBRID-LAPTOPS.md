@@ -339,24 +339,34 @@ With the boot-arg `nmhybridtc=1` the panel driver starts an observe-only monitor
 status of the four Type-C ports and logs `hybrid: Type-C port N: cable plugged/unplugged/changed, live mode ...`. It never
 takes a PHY, so a dock keeps its USB lanes. That is the hardware check of the hot-plug decoding.
 
-What is missing for an external Type-C display to light in mirror or extend mode, exactly: (1) the Type-C PHY's PLL and lane
-programming for the mode being set (the Dekel PHY on these versions, `intel_dkl_phy*.c`, plus the DPLL for the port clock); (2) EDID
-and DPCD over the port's own AUX channel; (3) a mode set for a second head (transcoder, pipe, plane, timing from the EDID) and its
-link training on a Type-C lane count; (4) publishing that head to the window system as a second framebuffer, and taking the
-PHY (the handshake above) only for the time the display is on, since display ownership takes the dock's USB 3 lanes. NMIntelFB
-is a one-panel driver today, so (1) to (4) are a second display driver, not a step of this one.
+What is built toward an external Type-C display (`nm_hybrid_ext.h`, `nm_hybrid_dkl.h`, `tools/test_hybrid_ext.c`; formulas from Linux's
+i915, MIT): the EDID read over I2C-over-AUX and its preferred mode, the DPCD capabilities, the cheapest link that carries the mode
+(lowest rate, fewest lanes), the link and data M/N values, the transcoder timing, source-size and function words, and the Dekel PHY's
+PLL (divider search for 1.62 to 8.1 Gb/s on 19.2, 24 and 38.4 MHz references, checked by computing the rate back from the registers;
+the banked register writes through the HIP index; power, program, enable, lock). Without the library nothing drives these ports.
 
-## Zero-copy scan-out from the NVIDIA GPU's memory (decision only)
+What is still missing for an external Type-C display to light in mirror or extend mode, exactly: (1) the Dekel lane programming
+(`DKL_TX_*` signal levels, lane reset and soft-reset in `DKL_PCS_DW5`) and the DDI clock select that routes the PLL to the port;
+(2) the plane, its display-buffer allocation and watermarks for the second pipe, and the pipe and transcoder enable order around the
+words above; (3) the orchestrating sequence tying hot-plug, the PHY handshake, EDID, mode set and link training together, tested the way
+the panel resume is; (4) a second framebuffer published to the window system: NMIntelFB is a one-panel driver, so this is a second
+`IOFramebuffer` instance per connector, with its hot-plug notification, and the PHY must be taken only while the display is on, since
+display ownership takes the dock's USB 3 lanes.
+
+## Zero-copy scan-out from the NVIDIA GPU's memory (`nmhybridp2p`)
 
 `kexts/NVRM/accel/nm_hybrid_p2p.h` decides whether the integrated GPU's display engine may read a frame straight out of the NVIDIA
 GPU's BAR1 window: refused unless the boot-arg `nmhybridp2p` is 1 (host bridge on a known-good list) or 2 (forced, for testers),
 and refused in every case when the NVIDIA GPU is not on the integrated GPU's root complex, its BAR1 is not a 64-bit prefetchable
 window bigger than the frame, or the integrated GPU's DMA is translated. Linux's peer-to-peer rule is the model (a path across
 the host bridge only on a known-good chipset, never by default); the list starts empty because no client chipset has a measured
-result, so by the rule no laptop qualifies until one is measured. `tools/test_hybrid_p2p.c` tests the decision. What is not built:
-the page list from the NVIDIA resource's BAR1 physical range into the import path, and the table-entry flags for a bus address
-that is not RAM; both need a run on a machine where the read works to be anything but a guess, and the existing system-memory
-import and the copy-engine paths stay the supported ones.
+result, so by the rule no laptop qualifies until one is measured. `tools/test_hybrid_p2p.c` tests the decision and the page list. What is built, and what only a
+machine can settle (whether the read works): the page list from the NVIDIA resource's BAR1 range (`nmp_pages`: consecutive pages,
+refused beyond bit 45, which the table entry cannot address) is wired into the import path, which uses it for a VRAM-resident frame
+when the decision allows it and otherwise keeps the system-memory import and the copy paths. The table entry for a bus address that is
+not RAM is the same entry (present bit and page address); no other flag exists. Counter `debug.nmhybrid_p2p`, log
+`hybrid: zero-copy from VRAM, head N: <reason>`. Read the heading as "built, never run": the allowlist is empty, so it stays off unless a
+tester sets `nmhybridp2p=2`.
 
 ## Known limits
 
@@ -391,6 +401,7 @@ open row.
 - `tools/test_hybrid_resume20.c`: display versions 20 and 30 and the C20 PHY (register range, D2D in the DDI buffer, MBUS and GMBUS
   steps, SRAM context switch, table self-check), `tools/test_hybrid_tc.c`: the Type-C handshake and hot-plug, and
   `tools/test_hybrid_p2p.c`: the zero-copy decision.
+- `tools/test_hybrid_ext.c`: EDID over AUX, preferred mode, link choice, M/N, transcoder words, and the Dekel PLL.
 - `tools/test_hybrid_resume.c`: the wake replay against a model of the display engine, panel power sequencer, combo PHY drive
   registers, AUX channel and sink, for a panel on pipe A / DDI A, pipe B / DDI B, pipe D / DDI A and pipe C / DDI B (order,
   handshakes, the sink's swing and pre-emphasis requests reaching the PHY registers, every failure stops at its handshake);

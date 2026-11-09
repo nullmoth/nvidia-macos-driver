@@ -18,6 +18,9 @@ int main(void)
     { struct nmp_topo u = t; u.bar1_bytes = 16ull << 20; ARM("a BAR1 smaller than the frame is refused even when forced", nmp_decide(NMP_FORCE, &u, frame) == NMP_NO_BAR); }
     { struct nmp_topo u = t; u.bar1_64bit_prefetch = 0; ARM("a BAR1 that is not 64-bit prefetchable is refused even when forced", nmp_decide(NMP_FORCE, &u, frame) == NMP_NO_BAR); }
     { struct nmp_topo u = t; u.igpu_dma_translated = 1; ARM("a translated DMA is refused even when forced", nmp_decide(NMP_FORCE, &u, frame) == NMP_NO_IOMMU); }
+    { uint64_t pa[8]; ARM("a BAR1 frame becomes consecutive pages", nmp_pages(0x4000000000ull, 1 << 20, 5 * 4096 - 7, pa, 5) && pa[0] == 0x4000000000ull && pa[4] == 0x4000004000ull);
+      ARM("an unaligned window address, a frame longer than the allocation, or a wrong page count is refused", !nmp_pages(0x4000000800ull, 1 << 20, 4096, pa, 1) && !nmp_pages(0x4000000000ull, 4096, 8192, pa, 2) && !nmp_pages(0x4000000000ull, 1 << 20, 8192, pa, 3));
+      ARM("a page beyond bit 45 is refused (the table entry cannot address it)", !nmp_pages(1ull << 46, 1 << 20, 4096, pa, 1) && nmp_pages((1ull << 46) - 4096, 1 << 20, 4096, pa, 1)); }
     ARM("every verdict has a distinct reason line", nmp_name(NMP_OK_LISTED) != nmp_name(NMP_NO_BAR) && nmp_name(NMP_NOT_LISTED)[0] && nmp_name(NMP_NO_PATH)[0]);
     printf("%d failed\n", fails);
     return fails != 0;
