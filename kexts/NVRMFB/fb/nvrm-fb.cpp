@@ -4079,7 +4079,7 @@ IOReturn NVRMNVDAFramebuffer::setDetailedTimings(OSArray *array)
     n = addKmsRefreshModes(n);
     { UInt32 dsr = 0; if (PE_parse_boot_argn("nvfbdsr", &dsr, sizeof dsr) && dsr) n = addDsrModes(n); }
     n = addRotatedDesktops(n);
-    if (fSurN) { fDT[0] = fDT[0]; n = addSurroundMode(0); }   // a surround group offers its combined mode only
+    if (fSurN) n = addSurroundMode(0);   // a surround group offers its combined mode only
     fNDT = n;
     setProperty(kIOFBDetailedTimingsKey, array);
     fBootInDT = false;
