@@ -533,8 +533,9 @@ static void nvmtl_nvenc_hevc_register(void)
 }
 // ANGLE refuses Metal on NVIDIA (disableMetalOnNvidia), and Chromium on macOS has no other GL backend, so without this
 // the GPU process exits at start-up and the app draws everything on the CPU. Chrome, Chromium, Brave, Edge and Discord
-// get it by default: without it their GPU process cannot start. Electron stays opt-in (NVMTL_ANGLE_METAL=1) because it showed artifacts,
-// stutter and lost transparency on several cards. NVMTL_ANGLE_METAL=0 turns the rule off in every process. An existing
+// get it by default, and so do Electron apps (matched by name or by the Electron framework in the bundle): without it their GPU
+// process draws through ANGLE's OpenGL path and Apple's OpenGL layer, which keeps the GPU process main thread busy.
+// NVMTL_ANGLE_METAL=0 turns the rule off in every process. An existing
 // ANGLE override is kept; no sandbox setting is changed.
 // Matched three ways: by process name, by the frameworks in the app bundle, and by ANGLE's own libraries
 // (libGLESv2.dylib, libEGL.dylib) already loaded in the process. The loaded-library check covers Chromium-based apps
