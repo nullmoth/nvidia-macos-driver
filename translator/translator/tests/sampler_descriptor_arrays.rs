@@ -242,3 +242,37 @@ fn a_sampler_array_element_reached_through_angles_texture_env_samples_its_own_el
     assert!(images.len() == 2 && images[0] != images[1], "each light reads its own shadow map:\n{asm}");
     spirv_val(&spv);
 }
+
+const TEXTURE_ENV_BEHIND_A_SWITCH: &str =
+    include_str!("fixtures/gl/texture_env_three_sites_behind_a_switch.ll");
+
+#[test]
+fn three_samples_of_one_array_element_behind_a_switch_all_reach_the_sampler_and_image() {
+    // The glyph shader of xterm.js samples a texture in every arm of an if / else-if chain. Metal turns three or more arms
+    // into a switch and leaves the user main as a call, so the texture and sampler addresses are read inside the callee out
+    // of the object the entry filled. Those reads came out as placeholders and every sample was folded to zero: the whole
+    // fragment result was lost with no error, as a terminal with a background and no text.
+    let spv = translate_sanitized_native(TEXTURE_ENV_BEHIND_A_SWITCH, Stage::Fragment, &tmp())
+        .expect("the chain must translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    if std::env::var_os("M2V_SHOW_ASM").is_some() {
+        eprintln!("{asm}");
+    }
+    let ops = operations(&asm);
+    let sampled: Vec<&str> = ops
+        .iter()
+        .filter_map(|(_, body)| {
+            body.strip_prefix("OpImageSampleImplicitLod")?.split_whitespace().nth(1).map(bare)
+        })
+        .collect();
+    assert_eq!(sampled.len(), 3, "one sample per arm, none folded to zero:\n{asm}");
+    let first = metal2vulkan::reflect::sampler_resource_binding(0).expect("sampler band");
+    for combined in sampled {
+        assert_eq!(
+            sampler_binding_of(&asm, &ops, combined),
+            Some(first + 1),
+            "every arm samples with element 1 of the sampler array:\n{asm}"
+        );
+    }
+    spirv_val(&spv);
+}
