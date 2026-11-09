@@ -14,6 +14,7 @@
 # Environment (build host specifics):
 #   NVK_PATH        directories put first on PATH: python with mako/pyyaml, glslangValidator, llvm-spirv, llvm-config
 #                   (LLVM 22.1.x), cargo with the x86_64-apple-darwin target, bindgen, cbindgen, meson, ninja
+#   PKG_CONFIG_PATH must reach LLVMSPIRVLib.pc (SPIRV-LLVM-Translator matching the LLVM) for the native mesa_clc build
 #   NVK_SYSROOT     x86_64 prefix holding lib/pkgconfig for zlib (and any other library the build needs)
 #   NVK_JOBS        parallel jobs (default 6)
 #   NVK_REF_EXPORTS optional file with the exported symbols to compare against (one name per line, sorted)
