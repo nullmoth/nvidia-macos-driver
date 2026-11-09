@@ -1,0 +1,35 @@
+diff -ruN a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c	2026-11-08 22:27:59
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c	2026-11-08 22:28:01
+@@ -135,7 +135,21 @@
+         pthread_mutex_lock(&gLock); gConn[rfd] = reuse; gConnType[rfd] = type; pthread_mutex_unlock(&gLock);
+         return rfd;
+     }
+-    io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"));
++    /* NVK_ACCEL_ID: the registry entry id of the accelerator to use. The driver's Metal plugin sets it when a process is bound to
++     * one card of several; without it the first NVAccel is used, as always. A named card that is gone is an error: falling
++     * back to another card would run the work on the wrong GPU. */
++    const char *want_id = getenv("NVK_ACCEL_ID");
++    io_service_t svc = 0;
++    if (want_id && *want_id) {
++        char *end = NULL; unsigned long long id = strtoull(want_id, &end, 10);
++        if (*end == 0 && id) {
++            svc = IOServiceGetMatchingService(kIOMainPortDefault, IORegistryEntryIDMatching(id));
++            if (svc && !IOObjectConformsTo(svc, "NVAccel")) { IOObjectRelease(svc); svc = 0; }
++        }
++        if (!svc) { fprintf(stderr, "nvrm_xnu: NVK_ACCEL_ID=%s names no NVAccel\n", want_id); errno = ENODEV; return -1; }
++    } else {
++        svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"));
++    }
+     uint32_t open_type = 0x4E560000u | type;
+     if (!svc) {
+         svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVRM"));
+@@ -148,7 +162,7 @@
+         // the accelerator is there but would not vend one — fall back rather than lose the GPU
+         fprintf(stderr, "nvrm_xnu: IOServiceOpen(NVAccel, 0x%08x) 0x%08x — falling back to NVRM\n", open_type, kr);
+         IOObjectRelease(svc);
+-        svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVRM"));
++        svc = (want_id && *want_id) ? 0 : IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVRM"));
+         if (svc) kr = IOServiceOpen(svc, mach_task_self(), type, &conn);
+     }
+     if (svc) IOObjectRelease(svc);

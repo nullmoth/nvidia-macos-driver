@@ -32,6 +32,8 @@
 #import "nvmtl_osver_install.h"
 #include "nvmtl_claims.h"
 #include "nvmtl_gpu_policy.h"
+#include "nvmtl_card_select.h"
+extern uint64_t nvmtl_card_registry_id;   // nvmtl_vk.c
 // The application profile matched for this process (nvmtl_app_profile.h), or NULL. Set once by nvmtl_conf_settle
 // (NVMTLObjects.m), which reads nvrm610.conf and applies the profile before any knob is read.
 static const nvmtl_app_profile *g_app_profile;
@@ -763,6 +765,47 @@ static uint64_t nvmtl_rt_gate_working_set(uint64_t ws)
     nvlog("NVMTLDevice +load in pid %d (static class, image-owned) image %s at %s", getpid(),
           nvmtl_image_ident((const void *)nvmtl_image_ident, me, sizeof me), ts);
 }
+/* nvmultigpu=1 (boot argument, or NVMTL_MULTIGPU=1 in the conf): more than one NVIDIA card is accelerated. Off, every function
+   below answers "yes, use this accelerator" and the plugin behaves as it always did. */
+static int nvmtl_multi_gpu_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_MULTIGPU"); on = (e && !strcmp(e, "1")) ? 1 : 0;
+        char bootargs[1024] = {0}; size_t n = sizeof bootargs - 1;
+        if (!on && sysctlbyname("kern.bootargs", bootargs, &n, NULL, 0) == 0) {
+            for (char *t = strtok(bootargs, " "); t; t = strtok(NULL, " ")) if (!strcmp(t, "nvmultigpu=1")) on = 1;
+        }
+    }
+    return on;
+}
+static int cmp_u64(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
+/* Is `port` the accelerator this process should use? With several NVIDIA cards and nvmultigpu=1 the process takes the card
+   its assignment (NVMTL_CARD) or the primary names, tells NVK which one through NVK_ACCEL_ID, and refuses the rest. */
+static BOOL nvmtl_card_wanted(mach_port_t port)
+{
+    if (!nvmtl_multi_gpu_on() || !port || !IOObjectConformsTo(port, "NVAccel")) return YES;
+    uint64_t mine = 0;
+    if (IORegistryEntryGetRegistryEntryID(port, &mine) != KERN_SUCCESS) return YES;
+    uint64_t ids[16]; unsigned n = 0; io_iterator_t it = 0;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("NVAccel"), &it) == KERN_SUCCESS) {
+        for (io_service_t s; (s = IOIteratorNext(it)); IOObjectRelease(s)) {
+            uint64_t id = 0; if (n < 16 && IORegistryEntryGetRegistryEntryID(s, &id) == KERN_SUCCESS) ids[n++] = id;
+        }
+        IOObjectRelease(it);
+    }
+    qsort(ids, n, sizeof ids[0], cmp_u64);
+    int ordinal = 0; for (unsigned i = 0; i < n; i++) if (ids[i] == mine) ordinal = (int)i;
+    int prim = -1;
+    CFTypeRef v = IORegistryEntryCreateCFProperty(port, CFSTR("NVAccelPrimary"), kCFAllocatorDefault, 0);
+    if (v) { if (CFGetTypeID(v) == CFBooleanGetTypeID()) prim = CFBooleanGetValue((CFBooleanRef)v) ? 1 : 0; CFRelease(v); }
+    const int wanted = nvmtl_card_for(getenv("NVMTL_CARD"), getprogname());
+    const int ok = nvmtl_card_accept(1, wanted, prim, ordinal);
+    nvlog("nvmultigpu: accelerator %llu is card %d of %u, primary=%d, assignment=%d: %s", (unsigned long long)mine, ordinal, n, prim, wanted,
+          ok ? "this process's device" : "left to another process");
+    if (ok) { char b[32]; snprintf(b, sizeof b, "%llu", (unsigned long long)mine); setenv("NVK_ACCEL_ID", b, 1); nvmtl_card_registry_id = mine; }
+    return ok ? YES : NO;
+}
 static void nvmtl_fill_pool_args(uint8_t *a, int second)
 {
     memset(a, 0, 2440);
@@ -799,6 +842,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
         int major = sysctlbyname("kern.osproductversion", v, &n, NULL, 0) == 0 ? atoi(v) : 0;
         if (major < 15 || major > 26) { nvlog("  macOS %s is not supported by this driver: no device", v[0] ? v : "unknown"); return nil; }
     }
+    if (!nvmtl_card_wanted(port)) return nil;   // nvmultigpu=1 only: this process drives another card
     self = [super initWithAcceleratorPort:port];
     if (!self) { nvlog("  super initWithAcceleratorPort: returned nil"); return nil; }
     {   /* one GPU per process: the plugin runs a single Vulkan device, so a second Metal device on another vendor's
