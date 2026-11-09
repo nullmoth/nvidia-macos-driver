@@ -415,6 +415,10 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     bool fVrrSupported = false, fVrrOn = false; unsigned fVrrMinHz = 0, fVrrMaxHz = 0;
     static bool vrrAllowed();
     IOReturn setVrr(bool on);
+public:
+    static void colorChanged(bool needsModeset);   // a debug.nvrmfb_color_* sysctl changed: apply to every lit head
+private:
+    bool applyVibrance();
     NVRMBacklightHandler *fBacklight = nullptr;   // the panel's brightness control, see NVRMBacklightHandler
     void publishBacklight();
     struct NvKmsKapiDisplayMode fMode = {};
@@ -925,6 +929,23 @@ template <typename C> static auto nvrmAutoColorFormat(C *c, int) -> decltype(c->
 { c->colorFormat = kNvrmColorFormatAuto; }
 template <typename C> static void nvrmAutoColorFormat(C *, long) {}
 
+// Output colour controls. Set from boot-args nvfbbpc (6/8/10/12), nvfbformat (0 RGB, 1 YCbCr 4:2:2, 2 YCbCr 4:4:4),
+// nvfbrange (1 full, 2 limited) and nvfbvib (0..200, 100 = off; below is duller, above more vivid), and live through the
+// debug.nvrmfb_color_* sysctls. All default to "automatic": NVKMS decides, as before. They apply to every head.
+static int gColorBpc = 0, gColorFormat = (int)kNvrmColorFormatAuto, gColorRange = 0, gVibrance = 0;
+// The range field exists only in headers carrying 620-color-range.patch; detection keeps baseline builds compiling.
+template <typename C> static auto nvrmSetColorFormat(C *c, NvU32 v, int) -> decltype(c->colorFormat = v, void()) { c->colorFormat = v; }
+template <typename C> static void nvrmSetColorFormat(C *, NvU32, long) {}
+template <typename C> static auto nvrmSetColorRange(C *c, unsigned v, int) -> decltype(c->colorRange = v, void()) { c->colorRange = v; }
+template <typename C> static void nvrmSetColorRange(C *, unsigned, long) {}
+template <typename F> static auto nvrmFlagColorRange(F *f, int) -> decltype(f->colorRangeChanged = NV_TRUE, void()) { f->colorRangeChanged = NV_TRUE; }
+template <typename F> static void nvrmFlagColorRange(F *, long) {}
+static void nvrmApplyColorPrefs(struct NvKmsKapiHeadRequestedConfig *hr)
+{
+    if ((NvU32)gColorFormat != kNvrmColorFormatAuto) nvrmSetColorFormat(&hr->modeSetConfig, (NvU32)gColorFormat, 0);
+    if (gColorBpc) hr->modeSetConfig.colorBpc = (NvU32)gColorBpc;
+    if (gColorRange) nvrmSetColorRange(&hr->modeSetConfig, (unsigned)gColorRange, 0);
+}
 static void nvrmHeadConfigBaseline(struct NvKmsKapiHeadRequestedConfig *hr, struct NvKmsKapiSurface *olut = NULL)
 {
     nvrmAutoColorFormat(&hr->modeSetConfig, 0);   // colorBpc 0 = UNKNOWN and allmMode 0 = DISABLED already match 615
@@ -937,6 +958,10 @@ static void nvrmHeadConfigBaseline(struct NvKmsKapiHeadRequestedConfig *hr, stru
         lr->config.csc.m[0][0] = 0x10000;
         lr->config.csc.m[1][1] = 0x10000;
         lr->config.csc.m[2][2] = 0x10000;
+        if (gVibrance && i == NVKMS_KAPI_LAYER_PRIMARY_IDX) {
+            int sm[3][3]; nvrmSaturationMatrix(gVibrance, sm);
+            for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) lr->config.csc.m[r][c] = sm[r][c];
+        }
         lr->flags.cscChanged = NV_TRUE;
     }
 }
@@ -1972,6 +1997,9 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
     if (!fKms || !fDev || !cfg || !rep || fHead >= 8 || fSubmissionFaulted) return NV_FALSE;
     {   // a full mode set carries the variable-refresh state, so a mode change does not drop it
         struct NvKmsKapiHeadRequestedConfig *vh = &cfg->headRequestedConfig[fHead];
+        const bool full = vh->modeSetConfig.bActive && (vh->flags.modeChanged || vh->flags.activeChanged || vh->flags.colorBpcChanged ||
+                                                        vh->flags.colorFormatChanged);
+        if (full) nvrmApplyColorPrefs(vh);
         if (fVrrOn && fVrrSupported && vh->modeSetConfig.bActive && (vh->flags.modeChanged || vh->flags.activeChanged)) {
             vh->modeSetConfig.vrrEnabled = NV_TRUE; vh->flags.vrrEnabledChanged = NV_TRUE;
         }
@@ -2886,6 +2914,15 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     setName("NVRMFramebuffer");
     { char loc[12]; if (nvrmFbLocation(fIndex, loc, sizeof loc)) setLocation(loc); }   // distinct registry path per head
     if (fInternal) publishBacklight();   // before super::start(): IOFramebuffer::open looks for "backlight"
+    {   // output colour controls from the boot line (see gColorBpc); invalid values are ignored
+        static bool done; if (!done) { done = true;
+            UInt32 v = 0;
+            if (PE_parse_boot_argn("nvfbbpc", &v, sizeof v) && nvrmColorBpcValid(v)) gColorBpc = (int)v;
+            if (PE_parse_boot_argn("nvfbformat", &v, sizeof v) && nvrmColorFormatValid(v)) gColorFormat = (int)v;
+            if (PE_parse_boot_argn("nvfbrange", &v, sizeof v) && nvrmColorRangeValid(v)) gColorRange = (int)v;
+            if (PE_parse_boot_argn("nvfbvib", &v, sizeof v) && v <= 200) gVibrance = (int)v - 100;
+            if (gColorBpc || gColorFormat != 3 || gColorRange || gVibrance)
+                FBLOG("colour controls: bpc %d format %d range %d vibrance %d", gColorBpc, gColorFormat, gColorRange, gVibrance); } }
     publishDdcBus();                     // before super::start() too: IOFramebuffer::open creates the I2C interface from it
     if (!super::start(provider)) {
         NVRMDisplayGate gate; if (gate.valid() && fOwnsHead) { gHeadsTaken &= ~(1u << fHead); fOwnsHead = false; }
@@ -3852,6 +3889,23 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_flip_us_sum, CTLFLAG_RD | CTLFLAG_LOCKED, (
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_flip_n, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gFlipN, "pure flips timed");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_flip_us_max, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gFlipUsMax, "the slowest pure flip, us");
 static bool gFbSysctl = false;
+static int nvrmfbColorSysctl SYSCTL_HANDLER_ARGS
+{
+    int v = *(int *)arg1;
+    int err = sysctl_handle_int(oidp, &v, 0, req);
+    if (err || req->newptr == 0) return err;
+    const int which = arg2;   // 0 bpc, 1 format, 2 range, 3 vibrance
+    if ((which == 0 && !(v >= 0 && nvrmColorBpcValid((unsigned)v))) || (which == 1 && !(v >= 0 && nvrmColorFormatValid((unsigned)v))) ||
+        (which == 2 && !(v >= 0 && nvrmColorRangeValid((unsigned)v))) || (which == 3 && (v < -100 || v > 100))) return EINVAL;
+    if (v == *(int *)arg1) return 0;
+    *(int *)arg1 = v;
+    NVRMNVDAFramebuffer::colorChanged(which != 3);
+    return 0;
+}
+SYSCTL_PROC(_debug, OID_AUTO, nvrmfb_color_bpc, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &gColorBpc, 0, nvrmfbColorSysctl, "I", "output bits per channel: 0 automatic, 6, 8, 10, 12");
+SYSCTL_PROC(_debug, OID_AUTO, nvrmfb_color_format, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &gColorFormat, 1, nvrmfbColorSysctl, "I", "output colour format: 0 RGB, 1 YCbCr 4:2:2, 2 YCbCr 4:4:4, 3 automatic");
+SYSCTL_PROC(_debug, OID_AUTO, nvrmfb_color_range, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &gColorRange, 2, nvrmfbColorSysctl, "I", "output range: 0 automatic, 1 full, 2 limited");
+SYSCTL_PROC(_debug, OID_AUTO, nvrmfb_color_vibrance, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &gVibrance, 3, nvrmfbColorSysctl, "I", "saturation gain in percent, -100 (grey) to 100 (double); 0 off");
 static void nvrmfbInstallSysctl(void)
 {
     if (gFbSysctl) return; gFbSysctl = true;
@@ -3866,6 +3920,8 @@ static void nvrmfbInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_waits);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_timeouts); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_max_us);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_late); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_deferred); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_auto);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_color_bpc); sysctl_register_oid(&sysctl__debug_nvrmfb_color_format);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_color_range); sysctl_register_oid(&sysctl__debug_nvrmfb_color_vibrance);
 }
 
 bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
@@ -4358,6 +4414,38 @@ IOReturn NVRMNVDAFramebuffer::setVrr(bool on)
     IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
     if (!ok) { fVrrOn = !on; return kIOReturnError; }
     return kIOReturnSuccess;
+}
+// Vibrance without a mode set: the primary layer's colour matrix, in a commit that carries only that.
+bool NVRMNVDAFramebuffer::applyVibrance()
+{
+    if (!fModeSet || !fSurf || fHeadSlept || fConsoleAperture || !rmGpuReady()) return true;   // the next mode set carries it
+    NVRMDisplayGate gate; if (!gate.valid() || !fKms || !fDev) return true;
+    struct NvKmsKapiRequestedModeSetConfig *cfg = (struct NvKmsKapiRequestedModeSetConfig *)IOMalloc(sizeof *cfg);
+    struct NvKmsKapiModeSetReplyConfig *rep = (struct NvKmsKapiModeSetReplyConfig *)IOMalloc(sizeof *rep);
+    if (!cfg || !rep) { if (cfg) IOFree(cfg, sizeof *cfg); if (rep) IOFree(rep, sizeof *rep); return false; }
+    nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
+    cfg->headsMask = 1u << fHead;
+    struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
+    hr->modeSetConfig.bActive = NV_TRUE; hr->modeSetConfig.numDisplays = 1; hr->modeSetConfig.displays[0] = fDisplay;
+    hr->modeSetConfig.mode = fMode;
+    struct NvKmsKapiLayerRequestedConfig *lr = &hr->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX];
+    nvu_zero(&lr->config.csc, sizeof lr->config.csc);
+    int sm[3][3]; nvrmSaturationMatrix(gVibrance, sm);
+    for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) lr->config.csc.m[r][c] = sm[r][c];
+    lr->flags.cscChanged = NV_TRUE;
+    const NvBool ok = submitConfig(cfg, rep, NV_TRUE, false, true);
+    FBLOG("fb%u: vibrance %d -> %s", fIndex, gVibrance, ok ? "committed" : "REFUSED");
+    IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
+    return ok;
+}
+void NVRMNVDAFramebuffer::colorChanged(bool needsModeset)
+{
+    for (unsigned i = 0; i < 16; i++) {
+        NVRMNVDAFramebuffer *fb = gFBs[i];
+        if (!fb) continue;
+        // bpc, format and range need a mode set: the head is lit again with the new settings. Vibrance does not.
+        if (needsModeset) (void)fb->reflip(); else (void)fb->applyVibrance();
+    }
 }
 IOReturn NVRMNVDAFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
 {

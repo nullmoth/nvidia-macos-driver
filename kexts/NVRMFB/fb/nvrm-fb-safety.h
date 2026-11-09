@@ -162,3 +162,27 @@ static inline unsigned nvrmVrrBlankExtension(unsigned vTotal, unsigned hz, unsig
     const unsigned long long stretched = ((unsigned long long)vTotal * hz + minHz / 2) / minHz;
     return stretched > vTotal ? (unsigned)(stretched - vTotal) : 0;
 }
+// ---- Output colour controls (colour depth, format, range, vibrance) ----
+// Settings that reach the head: bpc 0 = automatic, else 6/8/10/12; format 0 RGB, 1 YCbCr 4:2:2, 2 YCbCr 4:4:4, 3 automatic;
+// range 0 automatic, 1 full, 2 limited; vibrance -100..100 percent (0 = off).
+static inline bool nvrmColorBpcValid(unsigned v) { return v == 0 || v == 6 || v == 8 || v == 10 || v == 12; }
+static inline bool nvrmColorFormatValid(unsigned v) { return v <= 3; }
+static inline bool nvrmColorRangeValid(unsigned v) { return v <= 2; }
+// Vibrance is a saturation gain in the layer's colour matrix, 16.16 fixed point: each channel becomes
+//   luma + (1 + v/100) * (channel - luma), luma from the Rec.709 weights, so greys are untouched and v = -100 is monochrome.
+// v is clamped to -100..100. Rows sum to 1.0 exactly (greys stay grey).
+static inline void nvrmSaturationMatrix(int vibrance, int m[3][3])
+{
+    if (vibrance < -100) vibrance = -100;
+    if (vibrance > 100) vibrance = 100;
+    static const long long w[3] = { 13933, 46871, 4732 };    // 0.2126, 0.7152, 0.0722 in 16.16 (sum 65536)
+    const long long gain = 65536 + (long long)vibrance * 65536 / 100;   // 1 + v/100
+    for (int r = 0; r < 3; r++) {
+        long long sum = 0;
+        for (int c = 0; c < 3; c++) {
+            long long v = w[c] * (65536 - gain) / 65536 + (r == c ? gain : 0);
+            if (c < 2) { m[r][c] = (int)v; sum += v; }
+        }
+        m[r][2] = (int)(65536 - sum);
+    }
+}
