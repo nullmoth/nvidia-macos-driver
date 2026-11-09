@@ -47,6 +47,7 @@ static inline thread_call_t nvrmfbCall(thread_call_func_t fn, thread_call_param_
 #include "nvrm-fb-safety.h"
 #include <IOKit/i2c/IOI2CInterface.h>
 #include "../nvrm_ddc_abi.h"
+#include "../nvrm_off_bar.h"
 #include "../nvrm_edp_backlight.h"
 #include "nvrm-allocation-table.h"
 static IORecursiveLock *startLock();
@@ -889,6 +890,31 @@ public:
             IOLog("NVRMFB: driver off - firmware framebuffer %lux%lu rowbytes %lu in BAR%u lights the screen\n",
                   (unsigned long)v.v_width, (unsigned long)v.v_height, (unsigned long)v.v_rowBytes, (unsigned)i);
             return this;
+        }
+        // Boot-arg nvoffbar=1: NVRM repairs a lost BAR1 and publishes where it put it ("nvrm-bar1-placed"); the firmware drew at
+        // VRAM offset 0, so the screen is at the start of that BAR1. This only reads a property: if NVRM has not placed BAR1 yet
+        // the probe declines, and NVRM's registerService() after the placement matches this class again.
+        {
+            UInt32 offbar = 0;
+            if (PE_parse_boot_argn("nvoffbar", &offbar, sizeof offbar) && offbar) {
+                OSNumber *placed = OSDynamicCast(OSNumber, provider->getProperty("nvrm-bar1-placed"));
+                const NvU64 scr = placed ? placed->unsigned64BitValue() : 0;
+                for (IOItemCount i = 0; scr && i < provider->getDeviceMemoryCount(); i++) {
+                    IOMemoryDescriptor *m = provider->getDeviceMemoryWithIndex(i);
+                    if (!m || (NvU64)m->getPhysicalSegment(0, 0, kIOMemoryMapperNone) != scr || m->getLength() < bytes) continue;
+                    IOMemoryDescriptor *sub = IOSubMemoryDescriptor::withSubRange(m, 0, (IOByteCount)bytes, kIODirectionNone);
+                    if (!sub) return NULL;
+                    OSSafeReleaseNULL(fAp);
+                    fAp = (IODeviceMemory *)sub; fV = v; fV.v_baseAddr = (unsigned long)scr;
+                    PE_Video nv = v; nv.v_baseAddr = (unsigned long)scr;   // the kernel console must draw there too
+                    getPlatform()->setConsoleInfo(&nv, kPEBaseAddressChange);
+                    IOLog("NVRMFB: driver off - the screen is at the placed BAR1 0x%llx (was 0x%llx), %lux%lu\n", scr, base,
+                          (unsigned long)v.v_width, (unsigned long)v.v_height);
+                    return this;
+                }
+                if (!scr) IOLog("NVRMFB: driver off - BAR1 not placed yet (nvoffbar=1); waiting for NVRM to match this card again\n");
+                else IOLog("NVRMFB: driver off - BAR1 placed at 0x%llx but no aperture of the card starts there\n", scr);
+            }
         }
         // the addresses, so a screen that stays dark with the driver off can be traced: macOS can move the card's VRAM
         // window after the firmware drew into it (10-17: the firmware's window was gone on a Resizable BAR card)
