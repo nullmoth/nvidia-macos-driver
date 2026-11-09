@@ -80,6 +80,8 @@ extern "C" int  nv_rtd3_before_system_resume(void);
 extern "C" int  nv_rtd3_power_off(IOACPIPlatformDevice *acpi);
 extern "C" int  nv_rtd3_power_on(IOACPIPlatformDevice *acpi);
 extern "C" nv_state_t *nv_xnu_gpu_state(void);
+extern "C" nv_state_t *nv_xnu_gpu_state_at(unsigned index);
+extern "C" void *nv_xnu_gpu_os_device_at(unsigned index);
 struct NVRMDdcRequest;
 extern "C" int nvrm_ddc_transfer(struct NVRMDdcRequest *r);   // nvrm_ddc.cpp
 struct NVRMDpAuxRequest;
