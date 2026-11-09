@@ -30,6 +30,7 @@
 #include "nvmtl_app_profile.h"
 #import "nvmtl_osver_install.h"
 #include "nvmtl_claims.h"
+#include "nvmtl_gpu_policy.h"
 // The application profile matched for this process (nvmtl_app_profile.h), or NULL. Set once by nvmtl_conf_settle
 // (NVMTLObjects.m), which reads nvrm610.conf and applies the profile before any knob is read.
 static const nvmtl_app_profile *g_app_profile;
@@ -190,6 +191,7 @@ int  nvmtl_sass_dispatch(id encoder, MTLSize grid, MTLSize group, uint32_t kind,
 NSDictionary<NSString *, NSData *> *nvmtl_translate_metallib(NSData *lib, NSDictionary **stages, NSDictionary **airs);
 void nvmtl_vendor_compile_airs(NSDictionary<NSString *, NSString *> *airs,
                                NSDictionary<NSString *, NSString *> *stages);
+#include <fcntl.h>
 #include <sys/stat.h>
 NSDictionary<NSString *, NSData *> *nvmtl_translate_metallib_k(NSData *lib, NSData *knownKey, NSDictionary **stages, NSDictionary **airs);
 NSData *nvmtl_lib_sha256(NSData *lib);
@@ -635,6 +637,52 @@ __attribute__((constructor)) static void nvmtl_angle_allow_nvidia(void)
     if (cur && *cur) snprintf(v, sizeof v, "%s:%s", cur, rule); else snprintf(v, sizeof v, "%s", rule);
     setenv(key, v, 1);
 }
+// Another GPU that offers Metal (an integrated GPU macOS still drives): an IOAccelerator that names a Metal plugin and is
+// not one of ours.
+static bool nvmtl_other_metal_gpu(void)
+{
+    bool found = false;
+    io_iterator_t it = 0;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOAccelerator"), &it) != KERN_SUCCESS) return false;
+    io_service_t s;
+    while (!found && (s = IOIteratorNext(it))) {
+        io_name_t cls = {0};
+        IOObjectGetClass(s, cls);
+        CFTypeRef mp = IORegistryEntryCreateCFProperty(s, CFSTR("MetalPluginName"), kCFAllocatorDefault, 0);
+        if (mp) { if (strncmp(cls, "NV", 2)) found = true; CFRelease(mp); }
+        IOObjectRelease(s);
+    }
+    IOObjectRelease(it);
+    return found;
+}
+// Per-process GPU choice on a hybrid laptop (nvmtl_gpu_policy.h). Inactive unless the hybrid switch is on.
+static bool nvmtl_gpu_policy_allows(const char *me)
+{
+    int lv = 0; size_t ln = sizeof lv;
+    if (sysctlbyname("debug.nmhybrid", &lv, &ln, NULL, 0) != 0 || lv <= 0) return true;
+    char text[4096] = {0};
+    // Read only a regular file owned by root and not writable by group or others, opened without following a link,
+    // as the DLSS kernel cache is: the policy decides which processes get the GPU.
+    int pfd = open("/Library/GPUBundles/nvmtl-gpu-policy.txt", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (pfd >= 0) {
+        struct stat pst;
+        if (fstat(pfd, &pst) == 0 && S_ISREG(pst.st_mode) && pst.st_uid == 0 && !(pst.st_mode & (S_IWGRP | S_IWOTH))) {
+            ssize_t n = read(pfd, text, sizeof text - 1); text[n > 0 ? n : 0] = 0;
+        } else nvlog("  gpu policy file ignored: not a root-owned regular file closed to other writers");
+        close(pfd);
+    }
+    int apple = 0;
+    int pref = nmp_parse(text, me, &apple);
+    int autosw = -1;
+    @autoreleasepool {
+        id v = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"NSSupportsAutomaticGraphicsSwitching"];
+        if ([v respondsToSelector:@selector(boolValue)]) autosw = [v boolValue] ? 1 : 0;
+    }
+    const char *why = "";
+    int give = nmp_decide(lv, apple, pref, autosw, nvmtl_other_metal_gpu(), &why);
+    nvlog("  gpu policy for %s: %s (%s)", me, give ? "NVIDIA device" : "no NVIDIA device", why);
+    return give != 0;
+}
 static bool nvmtl_process_is_allowed(void)
 {
     const char *me = getprogname();
@@ -671,6 +719,7 @@ static bool nvmtl_process_is_allowed(void)
     // a list that was read but grants nothing to this process said so nowhere, so a field log showed only the final
     // refusal and could not tell an empty or replaced list from a deny rule
     else nvlog("  no rule in nvmtl-allow.txt matches %s: no device (the list was read; it needs a '*' or '%s' line)", me, me);
+    if (ok && !nvmtl_gpu_policy_allows(me)) return false;
     return ok;
 }
 
