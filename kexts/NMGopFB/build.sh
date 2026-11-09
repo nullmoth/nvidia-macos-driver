@@ -1,0 +1,38 @@
+#!/bin/bash
+# Builds NMGopFB, the panel provider that publishes the firmware framebuffer of an AMD integrated GPU as head 4 of the
+# NVIDIA accelerator. Flags are NMIntelFB's. Usage: build.sh [outdir] [min-macos: 15.0 default, or 26.0]
+set -u
+SRC=$(cd "$(dirname "$0")" && pwd)
+OUT=${1:-$SRC/out}
+MIN=${2:-15.0}
+mkdir -p "$OUT" || exit 1
+SDK=$(xcrun --show-sdk-path)
+KHDR="$SDK/System/Library/Frameworks/Kernel.framework/Headers"
+CFLAGS=( -arch x86_64 -fapple-kext -mkernel -nostdinc -I"$KHDR" -I"$SRC" -I"$SRC/../NMIntelFB" -I"$SRC/../NVRM/accel"
+  -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT
+  -mmacosx-version-min="$MIN" -g0
+  -ffile-prefix-map="$SRC"=driver -ffile-prefix-map="$HOME"=/build
+  -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common
+  -Wall -Wno-unused-parameter -Wno-inconsistent-missing-override -Wno-unused-function -O2 )
+NAME=NMGopFB
+E="$OUT/$NAME.err"
+xcrun clang++ "${CFLAGS[@]}" -c "$SRC/gopfb.cpp" -o "$OUT/$NAME.o" 2> "$E"
+rc=$?
+if [ $rc -ne 0 ]; then
+    echo "COMPILE FAILED (rc=$rc), $(grep -c "error:" "$E") errors, $(grep -c "warning:" "$E") warnings"
+    grep "error:" "$E" | head -12
+    exit 1
+fi
+echo "compiled: $(grep -c "warning:" "$E") warnings"
+K="$OUT/$NAME.kext"
+mkdir -p "$K/Contents/MacOS"
+xcrun clang++ -arch x86_64 -mmacosx-version-min="$MIN" -fapple-kext -nostdlib \
+    -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "$OUT/$NAME.o" -o "$K/Contents/MacOS/$NAME" 2> "$OUT/$NAME.link.err"
+lrc=$?
+if [ $lrc -ne 0 ]; then echo "LINK FAILED (rc=$lrc)"; head -12 "$OUT/$NAME.link.err"; exit 1; fi
+cp "$SRC/Info.plist" "$K/Contents/Info.plist"
+echo "$(shasum -a 256 "$K/Contents/MacOS/$NAME" | cut -c1-16)  $(stat -f %z "$K/Contents/MacOS/$NAME") B"
+echo "kmod_info:    $(nm "$K/Contents/MacOS/$NAME" | grep -c "_kmod_info")"
+echo "metaclasses:  $(nm "$K/Contents/MacOS/$NAME" | grep -c "gMetaClass")"
+echo "undefined:    $(nm -u "$K/Contents/MacOS/$NAME" | wc -l | tr -d ' ') symbols"
+plutil -lint "$K/Contents/Info.plist"

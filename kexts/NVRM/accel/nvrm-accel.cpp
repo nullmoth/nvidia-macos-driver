@@ -318,6 +318,7 @@ public:
     bool                fUtilValid = false;
     IONotifier *fFBNote = nullptr;
     IONotifier *fIntelNote = nullptr;
+    IONotifier *fGopNote = nullptr;     // NMGopFB: an AMD integrated GPU's panel, published as head 4 with the hybrid switch on
     static NVAccel *gAccel;                // the primary card's accelerator: what the single-card code paths read
     static NvrmDevTab<NVAccel> gAccelTab;  // every accelerator (more than the primary only with nvmultigpu=1)
     static NvrmStartGate gAccelGate;
@@ -463,6 +464,8 @@ public:
             strlcpy(owner, s->getMetaClass()->getClassName(), len);
             // the Intel panel driver publishes as a head of this accelerator, so it is not another GPU's desktop here
             if (s->metaCast("NMIntelFB")) break;
+            // the same for the firmware-framebuffer panel provider (an AMD integrated GPU's panel), with the switch on
+            if (gNmHybrid && s->metaCast("NMGopFB")) break;
             // with the hybrid switch on, an AMD or Intel panel driven by NMXGPU is also a head of this accelerator
             if (gNmHybrid && s->metaCast("NMXGPUFB")) break;
             IORegistryEntry *e = s->getProvider();
@@ -528,7 +531,7 @@ public:
             // refuses WindowServer on a headless GPU, and WindowServer aborted at start ("Failed to create MetalDevice")
             // every ten seconds. With no other GPU there is no display to hand frames to, so the name stays withheld:
             // WindowServer runs unaccelerated on the firmware framebuffer and the desktop comes up, as before the check.
-            if (!other && strcmp(owner, "NMIntelFB") != 0 && !(gNmHybrid && strcmp(owner, "NMXGPUFB") == 0)) {
+            if (!other && strcmp(owner, "NMIntelFB") != 0 && !(gNmHybrid && (strcmp(owner, "NMXGPUFB") == 0 || strcmp(owner, "NMGopFB") == 0))) {
                 ALOG("headless check: no NVIDIA display head after %u s and no other GPU shows the desktop (%s) -- "
                      "MetalPluginName stays withheld so WindowServer starts on the firmware framebuffer",
                      me->fHeadlessWaited, owner);
@@ -869,6 +872,11 @@ public:
                     fIntelNote = addMatchingNotification(gIOFirstPublishNotification, im, &NVAccel::fbPublished, this, nullptr, 0);
                     im->release();
                     ALOG("watching for an Intel built-in panel (NMIntelFB) -> notifier %p", fIntelNote);
+                }
+                if (gNmHybrid) if (OSDictionary *gm = serviceMatching("NMGopFB")) {
+                    fGopNote = addMatchingNotification(gIOFirstPublishNotification, gm, &NVAccel::fbPublished, this, nullptr, 0);
+                    gm->release();
+                    ALOG("watching for a firmware-framebuffer panel (NMGopFB) -> notifier %p", fGopNote);
                 }
                 nvaccelInstallSysctl();
                 if (getProperty("MetalPluginName")) {
