@@ -785,26 +785,48 @@ static int cmp_u64(const void *a, const void *b) { uint64_t x = *(const uint64_t
    its assignment (NVMTL_CARD) or the primary names, tells NVK which one through NVK_ACCEL_ID, and refuses the rest. */
 static BOOL nvmtl_card_wanted(mach_port_t port)
 {
-    if (!nvmtl_multi_gpu_on() || !port || !IOObjectConformsTo(port, "NVAccel")) return YES;
+    const BOOL nv = port && IOObjectConformsTo(port, "NVAccel"), nmx = port && IOObjectConformsTo(port, "NMXAccel");
+    if (!nvmtl_multi_gpu_on() || !(nv || nmx)) return YES;
     uint64_t mine = 0;
     if (IORegistryEntryGetRegistryEntryID(port, &mine) != KERN_SUCCESS) return YES;
-    uint64_t ids[16]; unsigned n = 0; io_iterator_t it = 0;
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("NVAccel"), &it) == KERN_SUCCESS) {
+    /* every Metal accelerator of either class, NVIDIA's and the AMD/Intel ones NMXGPU drives, in one order */
+    unsigned long long ids[16]; unsigned n = 0; int nvidia = 0;
+    for (int cls = 0; cls < 2; cls++) {
+        io_iterator_t it = 0;
+        if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching(cls ? "NMXAccel" : "NVAccel"), &it) != KERN_SUCCESS) continue;
         for (io_service_t s; (s = IOIteratorNext(it)); IOObjectRelease(s)) {
-            uint64_t id = 0; if (n < 16 && IORegistryEntryGetRegistryEntryID(s, &id) == KERN_SUCCESS) ids[n++] = id;
+            uint64_t id = 0; if (!cls) nvidia++;
+            if (n < 16 && IORegistryEntryGetRegistryEntryID(s, &id) == KERN_SUCCESS) ids[n++] = id;
         }
         IOObjectRelease(it);
     }
-    qsort(ids, n, sizeof ids[0], cmp_u64);
-    int ordinal = 0; for (unsigned i = 0; i < n; i++) if (ids[i] == mine) ordinal = (int)i;
+    const int ordinal = nvmtl_card_ordinal(ids, n, mine);
     int prim = -1;
-    CFTypeRef v = IORegistryEntryCreateCFProperty(port, CFSTR("NVAccelPrimary"), kCFAllocatorDefault, 0);
-    if (v) { if (CFGetTypeID(v) == CFBooleanGetTypeID()) prim = CFBooleanGetValue((CFBooleanRef)v) ? 1 : 0; CFRelease(v); }
+    if (nv) {
+        CFTypeRef v = IORegistryEntryCreateCFProperty(port, CFSTR("NVAccelPrimary"), kCFAllocatorDefault, 0);
+        if (v) { if (CFGetTypeID(v) == CFBooleanGetTypeID()) prim = CFBooleanGetValue((CFBooleanRef)v) ? 1 : 0; CFRelease(v); }
+    } else prim = nvmtl_card_nmx_primary(nvidia);
     const int wanted = nvmtl_card_for(getenv("NVMTL_CARD"), getprogname());
     const int ok = nvmtl_card_accept(1, wanted, prim, ordinal);
-    nvlog("nvmultigpu: accelerator %llu is card %d of %u, primary=%d, assignment=%d: %s", (unsigned long long)mine, ordinal, n, prim, wanted,
-          ok ? "this process's device" : "left to another process");
-    if (ok) { char b[32]; snprintf(b, sizeof b, "%llu", (unsigned long long)mine); setenv("NVK_ACCEL_ID", b, 1); nvmtl_card_registry_id = mine; }
+    nvlog("nvmultigpu: %s accelerator %llu is card %d of %u, primary=%d, assignment=%d: %s", nv ? "NVIDIA" : "AMD/Intel",
+          (unsigned long long)mine, ordinal, n, prim, wanted, ok ? "this process's device" : "left to another process");
+    if (ok) {
+        char b[32]; snprintf(b, sizeof b, "%llu", (unsigned long long)mine);
+        if (nv) setenv("NVK_ACCEL_ID", b, 1);
+        else {   /* RADV and ANV choose among the GPUs they find: name this one by its PCI ids (Mesa's device-select layer) */
+            io_registry_entry_t pci = 0;
+            if (IORegistryEntryGetParentEntry(port, kIOServicePlane, &pci) == KERN_SUCCESS) {
+                uint16_t vid = 0, did = 0; CFTypeRef d;
+                if ((d = IORegistryEntryCreateCFProperty(pci, CFSTR("vendor-id"), kCFAllocatorDefault, 0))) {
+                    if (CFGetTypeID(d) == CFDataGetTypeID() && CFDataGetLength(d) >= 2) { const UInt8 *p = CFDataGetBytePtr(d); vid = (uint16_t)(p[0] | (p[1] << 8)); } CFRelease(d); }
+                if ((d = IORegistryEntryCreateCFProperty(pci, CFSTR("device-id"), kCFAllocatorDefault, 0))) {
+                    if (CFGetTypeID(d) == CFDataGetTypeID() && CFDataGetLength(d) >= 2) { const UInt8 *p = CFDataGetBytePtr(d); did = (uint16_t)(p[0] | (p[1] << 8)); } CFRelease(d); }
+                IOObjectRelease(pci);
+                if (vid && did) { char sel[32]; snprintf(sel, sizeof sel, "%04x:%04x", vid, did); setenv("MESA_VK_DEVICE_SELECT", sel, 1); }
+            }
+        }
+        nvmtl_card_registry_id = mine;
+    }
     return ok ? YES : NO;
 }
 static void nvmtl_fill_pool_args(uint8_t *a, int second)
