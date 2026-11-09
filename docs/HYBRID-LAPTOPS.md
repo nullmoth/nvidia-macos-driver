@@ -134,8 +134,9 @@ whether it uses the reduced-power table. The panel driver reads the BIOS tables 
 offset checked against the buffer, a table that names no panel type is not guessed) and picks the table Linux's i915 would:
 above 5.4 Gb/s the eDP table of the generation, else reduced-power, else low swing, else the DisplayPort table. The reduced-power
 table has nine rows, so a sink asking for swing 3 gets a refusal and the training fails rather than guess; its PHY override bits
-are set when it is in use. If the video BIOS picks the panel type by the panel's EDID identifier, which this does not read, the
-type is unknown and the DisplayPort tables are used. Level 0 is always the firmware's own.
+are set when it is in use. If the video BIOS picks the panel type by the panel's EDID identifier, the panel driver reads the first ten bytes of the
+panel's EDID over the AUX channel while the panel is lit (manufacturer, product, serial, week, year) and matches them against
+the BIOS panel table as Linux does; only if that fails too is the type unknown and the DisplayPort tables used. Level 0 is always the firmware's own.
 
 **Display version 14 (Meteor Lake, Arrow Lake).** The PHY is a C10 block reached through a per-port message bus. The panel
 driver reads the firmware's PLL, common, transmitter, width and level-override registers over the bus while the panel is lit, and
@@ -144,8 +145,15 @@ power-management demand, panel power, the port clock control, lane reset and pow
 master), the transmitters, the clock frequency, the PLL request and acknowledge, the sink, the pipe registers, the D2D link, the
 port buffer width, the DDI buffer, link training with the C10 override registers as the source levels, the transcoder and the
 backlight. Log lines: `Cx0 PHY` and `power-management demand` join the step list. Not covered: C20 PHYs (Thunderbolt/Type-C
-ports and the faster eDP rates are C20 on some parts), and the platform controller's voltage handshake for a display clock that
-differs from the one in use (the display clock is written back as it was).
+ports and the faster eDP rates are C20 on some parts). Version 14 has no display-clock voltage handshake in Linux, so none is sent.
+
+**Display clock handshake and core init (versions 12 and 13).** Before the display clock PLL is touched the platform controller
+is asked to prepare (mailbox 0x7, ready-for-change), and after the clock is set the voltage level for it is sent (level from the
+clock: 480 MHz is level 2); a controller that never answers stops the resume. From version 13 the squash register is replayed
+between the PLL and the clock control. Around the power wells and the clock the resume also replays the display core init state
+the firmware left: the reset handshake with the platform controller, the display buffer slices (requested, then the state bit is
+waited for), and on versions 12 and 13 the MBUS and bandwidth-buddy registers, the combo PHY power-down register and the clock
+gating registers. A slice that never powers stops the resume before the PHY and the pipe.
 
 **Display microcontroller (DMC) firmware.** Generations 12 and 13 scan out without it: Linux's i915 uses it for the
 deeper power states (DC5, DC6) and per-pipe features, not for the scan-out, and macOS never loaded it on these panels, so
@@ -295,6 +303,16 @@ total is the share of the screen that did not need storing.
   pipe until a second arm and a WindowServer restart.
 
 ## Known limits
+
+- Not built, with the reason: (a) display version 20 and later (Lunar Lake, Panther Lake) and the C20 PHY: the register map,
+  the display buffer, MBUS, power well and clock blocks all differ, and the C20 PLL needs a generated table per link rate plus
+  its own message-bus sequence; none of it can be checked against a register dump or a sink without such a machine, and a
+  guessed write sequence to a display engine can leave the panel dark. The resume refuses these parts with a log line.
+  (b) Type-C ports on versions 12 and 13: the panel driver drives only the internal panel; an external Type-C output needs the
+  PHY ownership handshake, the Type-C subsystem, hot-plug, EDID and mode setting for a second display, which is a display driver
+  of its own, not a resume step. (c) Zero-copy scan-out of the NVIDIA GPU's buffer by the integrated GPU's display engine:
+  needs peer reads from the NVIDIA aperture, which depends on the chipset and cannot be shown offline; the shipped paths (copy,
+  import ring, owned buffers, copy engine) are the supported ones.
 
 - A copy into the single scan-out buffer can tear. The only cure is the import path (the plane switches surface at a
   vertical blank).
