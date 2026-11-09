@@ -1,0 +1,25 @@
+# Compiler warning ceilings, read by build/warn_ceiling.sh: "<component> <most warnings allowed>". A build with more stops.
+# Lower a number when warnings are fixed; never raise one to let a new warning through.
+# Every non-zero line names what is left and why it is not fixed in source.
+#
+# plugin: -Wobjc-protocol-method-implementation for Metal protocol methods that are implemented only in the function-
+#   pointer, intersection-table and mesh categories of NVMTLLibraryLoad.m (moving them into the primary @implementation
+#   is code motion across files, not a warning fix)
+plugin 44
+# nvrm, nvaccel, primary-selector, nmgopfb, nmintelfb: IOPCIDevice is marked deprecated in favour of PCIDriverKit, which
+#   is user space and cannot replace a kernel extension's PCI access; nvrm also calls setBusMasterEnable, whose
+#   replacement setBusLeadEnable is not virtual, so changing the call is not a like-for-like change
+nvrm 58
+nvaccel 21
+primary-selector 6
+nmgopfb 8
+nmintelfb 6
+# nvencvt: the linker's unaligned-pointer notes for gBase/gDBase, CoreMedia's CMBaseClass, whose layout is packed to
+#   4 bytes by Apple's ABI
+nvencvt 22
+nvrmfb 0
+nvrmagdc 0
+nmsmn 0
+nmhda 0
+nmkbdbacklight 0
+translator 0

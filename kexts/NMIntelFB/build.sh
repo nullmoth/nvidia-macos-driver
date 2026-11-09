@@ -34,6 +34,7 @@ for VARIANT in real virtual; do
         continue
     fi
     echo "  compiled: $(grep -c "warning:" "$E") warnings"
+    bash "$SRC/../../build/warn_ceiling.sh" nmintelfb "$(grep -c ": warning:" "$E")" "$E" || exit 4
     K="$OUT/$NAME.kext"
     mkdir -p "$K/Contents/MacOS"
     xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib \

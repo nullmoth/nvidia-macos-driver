@@ -16,6 +16,7 @@ CFLAGS=( -arch x86_64 -mmacosx-version-min=${MINVER:-15.0} -fapple-kext -mkernel
   -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common
   -Wall -Wno-unused-parameter -Wno-inconsistent-missing-override -Wno-unused-function -O2 ${FB_DEFS:-} )
 xcrun clang++ "${CFLAGS[@]}" -c "$SRC/NVRMFB/fb/nvrm-fb.cpp" -o "$OUT/nvrm-fb.o" 2>"$OUT/fb.err" || { grep error "$OUT/fb.err" | head -20; exit 1; }
+bash "$(dirname "$0")/warn_ceiling.sh" nvrmfb "$(grep -c ': warning:' "$OUT/fb.err")" "$OUT/fb.err" || exit 4
 xcrun clang++ -arch x86_64 -mmacosx-version-min=${MINVER:-15.0} -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "$OUT/nvrm-fb.o" \
   -o "$OUT/NVRMFB.kext/Contents/MacOS/NVRMFB" 2>"$OUT/fbld.err" || { head "$OUT/fbld.err"; exit 1; }
 cp "$SRC/NVRMFB/fb/Info.plist" "$OUT/NVRMFB.kext/Contents/Info.plist"
