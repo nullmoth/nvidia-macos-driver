@@ -5,6 +5,7 @@
  */
 
 #pragma once
+class NVAccel;
 #include "IOAccelResource2.h"
 #include "IOAccelSysMemory.h"
 #include "IOAccelVidMemory.h"
@@ -18,6 +19,7 @@ class NVResource : public IOAccelResource2 {
     OSDeclareDefaultStructors(NVResource)
     NM_TAHOE_FWD(NVResource)
 public:
+    class NVAccel *fAccel = nullptr;   // the accelerator that made this object (NVAccel::resolve)
     unsigned int fPbLogged = 0;
     void rebuildPagingBuffer() APPLE_KEXT_OVERRIDE { if (fPbLogged < 4) { fPbLogged++; ALOG("NVResource::rebuildPagingBuffer -- nothing to rebuild until there are page tables (rung 5)"); } }
     uint64_t getLevelOffset(unsigned char a0, unsigned char a1, int* a2) APPLE_KEXT_OVERRIDE {
@@ -71,6 +73,7 @@ class NVVidMemory : public IOAccelVidMemory {
     OSDeclareDefaultStructors(NVVidMemory)
     NM_TAHOE_FWD(NVVidMemory)
 public:
+    class NVAccel *fAccel = nullptr;   // the accelerator that made this object (NVAccel::resolve)
     void              *fRmHandle = nullptr;
     unsigned long long fAllocationCookie = 0;
     void              *fKva      = nullptr;
@@ -143,6 +146,7 @@ class NVDisplayPipe : public IOAccelLegacyDisplayPipe {
     OSDeclareDefaultStructors(NVDisplayPipe)
     NM_TAHOE_FWD(NVDisplayPipe)
 public:
+    class NVAccel *fAccel = nullptr;   // the accelerator that made this object (NVAccel::resolve)
     IOAccelMemory *initFramebufferResource(unsigned int index, IOAccelResource2 *res) APPLE_KEXT_OVERRIDE;
     IOReturn validateTransaction(IOAccelDisplayPipeTransaction2 *txn) APPLE_KEXT_OVERRIDE;
     IOReturn performTransaction(IOAccelDisplayPipeTransaction2 *txn) APPLE_KEXT_OVERRIDE;

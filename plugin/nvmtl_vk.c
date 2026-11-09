@@ -89,6 +89,8 @@ static uint16_t nvmtl_pci_vendor_of(io_service_t accel)
     return v;
 }
 /* the vendor of the accelerator a Metal device was made on (0 if the port is neither of ours); the first one wins */
+/* registry entry id of the accelerator this process is bound to; 0 = not bound (the first accelerator is used) */
+uint64_t nvmtl_card_registry_id;
 uint16_t nvmtl_vk_set_accelerator(mach_port_t accel)
 {
     uint16_t v = 0;
@@ -2639,7 +2641,9 @@ uint32_t nvmtl_vk_surface_gpu_mark(uint32_t surfaceID, int pending)
 /* 1 when NVAccel publishes NVAccelSurfaceWait: its page-off waits for a surface WindowServer's GPU is still writing */
 int nvmtl_vk_accel_surface_wait(void)
 {
-    io_service_t s = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"));
+    /* the card this process was bound to (nvmultigpu=1), else the first accelerator as always */
+    io_service_t s = nvmtl_card_registry_id ? IOServiceGetMatchingService(kIOMainPortDefault, IORegistryEntryIDMatching(nvmtl_card_registry_id))
+                                            : IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"));
     if (!s) return 0;
     CFTypeRef v = IORegistryEntryCreateCFProperty(s, CFSTR("NVAccelSurfaceWait"), kCFAllocatorDefault, 0);
     int on = 0;

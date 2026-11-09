@@ -39,18 +39,40 @@ a display failure, so slice 4 has to be measured before it is allowed to default
 
 ## Status in 2.9
 
+Everything below is off unless the boot argument `nvmultigpu=1` is present. Without it, one card and several cards run the code
+they ran before.
+
 | Slice | State |
 |---|---|
-| 1 NVRM device table | built: `kexts/NVRM/nvrm_devtab.h`, used by `NVRM.cpp`. `nv_xnu_gpu_state()` and `nv_xnu_gpu_os_device()` return the table's primary; new `nv_xnu_gpu_state_at`, `nv_xnu_gpu_os_device_at`, `nv_xnu_gpu_count`. Without `nvmultigpu=1` the table is the old global (newest start wins, never cleared). |
-| 2 NVAccel table | built, partly: the table, primary and start gate exist and `NVAccel::gAccel` is the primary, so every one of its 34 uses runs exactly as before. The uses are **not** yet converted to take the accelerator from the object they hold, so a second card's accelerator is created and listed (`NVAccel::at(i)`) but surfaces and user clients still resolve to the primary. |
-| 3 NVKMS | no change needed: NVKMS binds the primary only (`nvkms_enumerate_gpus` reports one GPU and the primary is now deterministic); other cards get no display. |
-| 4 Matching | built as the start gate: with `nvmultigpu=1` one card starts at a time and a card the selector did not mark waits for the marked one (refused with a log line, left unaccelerated). Without the switch there is no gate. |
-| 5 Plugin | **not built**: one Metal device per accelerator needs the plugin's device-level statics split per card, and `MTLCopyAllDevices` listing each depends on slice 2's conversion. |
+| 1 NVRM device table | built: `kexts/NVRM/nvrm_devtab.h`; `nv_xnu_gpu_state()` and `nv_xnu_gpu_os_device()` return the primary, `nv_xnu_gpu_state_at(i)`, `nv_xnu_gpu_os_device_at(i)`, `nv_xnu_gpu_count()` enumerate. |
+| 2 NVAccel per-object resolution | built: every object the accelerator makes (video memory, resource, memory map, display pipe) holds its accelerator and uses `NVAccel::resolve(fAccel)`; RM handles, the NVRM service lookup and the accelerator lock owner are per accelerator. Display, scanout and flip code uses `NVAccel::forDisplay()`, the primary, because the primary is the only card with a display. `tools/check_accel_resolution.py` fails on any other read of the global (15 arms fail on the pre-change source). |
+| 3 NVKMS | NVKMS binds the primary only; no change was needed. |
+| 4 Matching and re-offer | built: a one-at-a-time start gate (atomic) with the unmarked cards waiting for the marked one; a refused card is queued and, when a start finishes, the oldest waiting card is offered again with `registerService(kIOServiceAsynchronous)`, at most 3 times per card. Sequencing is proven on the host (four cards offered in the worst order start 0, 3, 2, 1 with never more than one in flight). |
+| 5 Plugin | built as card binding, not as several cards in one process: see below. |
 
-Proof: `tools/test_nvrm_devtab.cpp` (17 arms, host). The legacy arms model the old code and fail on a table that grows or a gate
-that refuses without the switch (checked with two mutants); the gate arms include four cards asking at once, of which exactly one
-starts. Kexts build for macOS 15 and 26: NVRM warnings 43 before and after, NVAccel 24 and 24 for each of 15 and 26; NVRM
-exports gain `startGPU` and the three accessors, nothing else changes.
+### Slice 5: one card per process
 
-What a second card still needs on hardware: a refused card is not retried by IOKit, so after the primary is running something
-must re-offer the others (a registerService on their PCI device); that and slices 2 and 5 are the work left.
+The plugin's Vulkan layer (`nvmtl_vk.c`) is one device per process: 184 file-level globals, about 500 call sites in the Metal
+object code, 371 uses of the instance, device and physical-device globals. Making that a context passed to every call cannot
+be proven without a second card, so the plugin keeps one device per process and chooses which card:
+
+- the kernel publishes `NVAccelPrimary` on every accelerator;
+- the plugin (`nvmtl_card_wanted`, rules in `plugin/nvmtl_card_select.h`) accepts the accelerator the user assigned to this
+  executable (`NVMTL_CARD` in the conf: `1`, or `Game=1,*=0`; 0 is the primary, 1 the second in registry order), else the
+  primary, and refuses the others, so `MTLCreateSystemDefaultDevice` is the primary card and an assigned application gets its card;
+- it hands the choice to NVK as `NVK_ACCEL_ID` (the registry entry id), which `nvk/nvk-card-select.patch` makes the RM
+  connection open, and never falls back to another card;
+- the accelerator's user client already comes from the NVRM that attached to the same PCI device (`NVAccel::locateNVRM`).
+
+So each card is a Metal device in the processes that use it, and `MTLCopyAllDevices` in a process lists the card that process is
+bound to; one process does not drive two cards at once.
+
+### Proof
+
+- `tools/test_nvrm_devtab.cpp` (host, 26 arms): table and gate rules against a model of the old code, the four-card overlapping
+  start, the re-offer sequencing, `resolve()` for one and two cards. Two mutants of the header fail it.
+- `tools/check_accel_resolution.py`, `tools/test_card_select.c` (11 arms), `tools/test_multigpu_wiring.py` (8 arms).
+- Builds on the mini: NVRM 43 warnings before and after; NVAccel 24 and 24 for macOS 15 and 26; the plugin 330 and 330; NVK with
+  both window and card patches, 2274 exports, the same set as before.
+- Not proven, because it needs two cards: that IOKit offers a re-registered card again exactly as modelled, and a real second
+  card's Metal and Vulkan work.
