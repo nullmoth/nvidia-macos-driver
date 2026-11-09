@@ -92,7 +92,7 @@ impl KernelStageIn {
     pub fn is_empty(&self) -> bool {
         self.attributes.iter().all(Option::is_none)
     }
-    pub(crate) fn attribute(&self, index: u32) -> Option<(StageInAttribute, StageInLayout)> {
+    pub fn attribute(&self, index: u32) -> Option<(StageInAttribute, StageInLayout)> {
         let attribute = self.attributes.iter().flatten().find(|a| a.attribute == index).copied()?;
         let layout = self.layouts.iter().flatten().find(|l| l.buffer_index == attribute.buffer_index).copied()?;
         Some((attribute, layout))

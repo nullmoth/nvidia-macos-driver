@@ -89,6 +89,9 @@ typedef int (*nvmtl_sampler_fn)(const char *, const char *, const char *, uint8_
 static nvmtl_sampler_fn xlate_sampler;
 typedef void (*nvmtl_tglen_fn)(const uint32_t *, uint32_t);
 static nvmtl_tglen_fn xlate_tglen;
+typedef uint32_t (*nvmtl_stagein_fn)(const uint32_t *, uint32_t);
+static nvmtl_stagein_fn xlate_stagein;
+static _Thread_local BOOL g_translate_variant_forced;
 static nvmtl_fc_fn xlate_fc;
 // One translation per function for every set of function constants (NVMTL_FC_SPEC=1): nvmtl_translate_spec makes a module
 // whose function constants are specialization constants, nvmtl_spec_apply fixes a set of values in it in one pass.
@@ -157,6 +160,7 @@ static int nvmtl_xlate_ready(void) {
         xlate_free = (nvmtl_free_fn)dlsym(h, "nvmtl_translate_free");
         xlate_sampler = (nvmtl_sampler_fn)dlsym(h, "nvmtl_translate_samplers");
         xlate_tglen = (nvmtl_tglen_fn)dlsym(h, "nvmtl_translate_set_threadgroup_lengths");
+        xlate_stagein = (nvmtl_stagein_fn)dlsym(h, "nvmtl_translate_set_kernel_stage_in");
         if (!xlate_tglen) nvlog("translate: no nvmtl_translate_set_threadgroup_lengths in this translator — dynamic threadgroup memory stays unsized (MPS convolutions read zeros)");
         xlate_fc = (nvmtl_fc_fn)dlsym(h, "nvmtl_translate_fc");
         xlate_spec = (nvmtl_spec_fn)dlsym(h, "nvmtl_translate_spec");
@@ -2433,7 +2437,7 @@ NSArray<NSDictionary *> *nvmtl_embedded_bindings(NVMTLFunction *function)
 }
 
 NSData *nvmtl_translate_variant_uncached(NVMTLFunction *fn, NSDictionary *states, NSDictionary *tgLen, NSString **err) {
-    if (!states.count && !tgLen.count) return fn->_spirv;
+    if (!states.count && !tgLen.count && !g_translate_variant_forced) return fn->_spirv;
     if (!fn->_air || !nvmtl_xlate_ready()) { if(err)*err=@"specialization has no AIR or translator";return nil; }
     if (states.count && !xlate_sampler) { if(err)*err=@"sampler specialization has no translator";return nil; }
     if (tgLen.count && !xlate_tglen) { if(err)*err=@"this translator cannot size threadgroup memory";return nil; }
@@ -2620,6 +2624,77 @@ static NSString *nvmtl_link_candidate_air(NVMTLFunction *cf, NSString **nameOut)
     if (nameOut) *nameOut = name;
     return air;
 }
+// A compute pipeline with a stage-input descriptor reads its [[stage_in]] attributes from the application's buffer by that
+// descriptor's strides, offsets and formats, so its kernel is translated again with the layout (the kernel's own SPIR-V reads
+// each member as an array of its own type at its natural size). A kernel with no stage-in attribute, or a descriptor that
+// names none, keeps the function it has. NVMTL_NO_KERNEL_STAGE_IN=1 turns this off. A layout the translator cannot carry
+// (a format or step function outside its table, an unaligned stride) fails the pipeline with the reason instead of
+// running it with the wrong strides.
+static NSError *nvmtl_stagein_err(NSString *m) {
+    nvlog("%s", m.UTF8String);
+    return [NSError errorWithDomain:MTLLibraryErrorDomain code:MTLLibraryErrorCompileFailure userInfo:@{NSLocalizedDescriptionKey: m}];
+}
+static NSString *nvmtl_stage_in_words(MTLStageInputOutputDescriptor *sd, NSMutableData *words) {
+    uint32_t a[1 + 16 * 4 + 1 + 31 * 4]; uint32_t n = 1, na = 0; uint32_t bufs[31]; uint32_t nb = 0;
+    for (NSUInteger i = 0; i < 16; i++) {
+        MTLAttributeDescriptor *at = [sd.attributes objectAtIndexedSubscript:i];
+        if (at.format == MTLAttributeFormatInvalid) continue;
+        if (at.bufferIndex >= 31) return [NSString stringWithFormat:@"stage-in attribute %lu uses buffer %lu", (unsigned long)i, (unsigned long)at.bufferIndex];
+        a[n++] = (uint32_t)i; a[n++] = (uint32_t)at.bufferIndex; a[n++] = (uint32_t)at.offset; a[n++] = (uint32_t)at.format; na++;
+        BOOL seen = NO; for (uint32_t k = 0; k < nb; k++) if (bufs[k] == at.bufferIndex) seen = YES;
+        if (!seen) bufs[nb++] = (uint32_t)at.bufferIndex;
+    }
+    if (!na) return nil;
+    a[0] = na;
+    a[n++] = nb;
+    for (uint32_t k = 0; k < nb; k++) {
+        MTLBufferLayoutDescriptor *ly = [sd.layouts objectAtIndexedSubscript:bufs[k]];
+        a[n++] = bufs[k]; a[n++] = (uint32_t)ly.stride; a[n++] = (uint32_t)ly.stepFunction; a[n++] = (uint32_t)ly.stepRate;
+    }
+    [words appendBytes:a length:n * sizeof a[0]];
+    return nil;
+}
+
+NVMTLFunction *nvmtl_kernel_with_stage_in(NVMTLFunction *fn, MTLStageInputOutputDescriptor *sd, NSError **err)
+{
+    if (err) *err = nil;
+    if (!sd || !fn || getenv("NVMTL_NO_KERNEL_STAGE_IN")) return fn;
+    if (!fn->_air.length || fn->_needsLink) return fn;     // linked kernels were translated by the linker; not carried here
+    NSMutableData *words = [NSMutableData new];
+    NSString *bad = nvmtl_stage_in_words(sd, words);
+    if (bad) { if (err) *err = nvmtl_stagein_err([NSString stringWithFormat:@"compute stage-in: %@", bad]); return nil; }
+    if (!words.length) return fn;
+    if (!nvmtl_xlate_ready() || !xlate_stagein) {
+        if (err) *err = nvmtl_stagein_err(@"compute stage-in: this translator has no nvmtl_translate_set_kernel_stage_in - rebuild nvmtl_translate");
+        return nil;
+    }
+    NSString *key = [NSString stringWithFormat:@"stagein:%lu:%@:%@:%@", (unsigned long)fn->_air.hash, fn->_fname, [words base64EncodedStringWithOptions:0], fn->_fc ?: @""];
+    static NSMutableDictionary *memo; static dispatch_once_t once; dispatch_once(&once, ^{ memo = [NSMutableDictionary new]; });
+    NSData *spirv;
+    @synchronized (memo) { spirv = memo[key]; }
+    if (!spirv) {
+        if (!xlate_stagein(words.bytes, (uint32_t)(words.length / 4))) {
+            if (err) *err = nvmtl_stagein_err(@"compute stage-in: the translator refused the stage-input layout (a format, step function or count it does not carry)");
+            return nil;
+        }
+        NSString *why = nil;
+        g_translate_variant_forced = YES;
+        spirv = nvmtl_translate_variant_uncached(fn, @{}, @{}, &why);
+        g_translate_variant_forced = NO;
+        xlate_stagein(NULL, 0);
+        if (!spirv) {
+            if (err) *err = nvmtl_stagein_err([NSString stringWithFormat:@"compute stage-in: translating \"%@\" with the layout failed: %@", fn->_fname, why ?: @"unknown"]);
+            return nil;
+        }
+        @synchronized (memo) { memo[key] = spirv; }
+        nvlog("compute stage-in: \"%s\" translated with %lu word(s) of layout -> %lu B", fn->_fname.UTF8String, (unsigned long)(words.length / 4), (unsigned long)spirv.length);
+    }
+    NVMTLFunction *sf = [NVMTLFunction new];
+    sf->_spirv = spirv; sf->_fname = fn->_fname; sf->_stage = fn->_stage; sf->_air = fn->_air; sf->_fc = fn->_fc;
+    sf->_lib = fn->_lib; sf->_fcv = fn->_fcv; sf->_specName = fn->_specName; sf->_needsLink = NO;
+    return sf;
+}
+
 id<MTLFunction> nvmtl_link_kernel(MTLComputePipelineDescriptor *d, NSError **err)
 {
     return nvmtl_link_stage(d.computeFunction, d.linkedFunctions, d.preloadedLibraries, err);

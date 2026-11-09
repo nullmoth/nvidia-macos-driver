@@ -49,8 +49,49 @@ fn apply_rsc(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::pas
     o
 }
 
+// The compute pipeline's stage-input layout, for the next translation on this thread. The words are
+// [attribute count, (attribute, buffer index, byte offset, MTLAttributeFormat) per attribute,
+//  layout count, (buffer index, stride, MTLStepFunction, step rate) per layout]. A malformed or unsupported layout is
+// refused (the call returns 0 and nothing is set) rather than half applied; count 0 clears it.
+thread_local! { static STAGE_IN: std::cell::Cell<metal2vulkan::passes::KernelStageIn> = std::cell::Cell::new(Default::default()); }
+#[no_mangle]
+pub extern "C" fn nvmtl_translate_set_kernel_stage_in(words: *const u32, count: u32) -> u32 {
+    use metal2vulkan::passes::{KernelStageIn, StageInAttribute, StageInFormat as F, StageInLayout, StageInStep};
+    if words.is_null() || count == 0 {
+        STAGE_IN.with(|c| c.set(KernelStageIn::default()));
+        return 1;
+    }
+    let w = unsafe { std::slice::from_raw_parts(words, count as usize) };
+    let mut out = KernelStageIn::default();
+    let mut at = 0usize;
+    let mut take = |n: usize| { let s = w.get(at..at + n); at += n; s };
+    let Some(&[na]) = take(1) else { return 0 };
+    if na as usize > out.attributes.len() { return 0; }
+    for i in 0..na as usize {
+        let Some(&[attribute, buffer_index, offset, fmt]) = take(4) else { return 0 };
+        let format = match fmt {
+            9 => F::UChar4Normalized, 25 => F::Half2, 27 => F::Half4,
+            28 => F::Float, 29 => F::Float2, 30 => F::Float3, 31 => F::Float4,
+            32 => F::Int, 33 => F::Int2, 34 => F::Int3, 35 => F::Int4,
+            36 => F::UInt, 37 => F::UInt2, 38 => F::UInt3, 39 => F::UInt4,
+            _ => return 0,
+        };
+        out.attributes[i] = Some(StageInAttribute { attribute, buffer_index, offset, format });
+    }
+    let Some(&[nl]) = take(1) else { return 0 };
+    if nl as usize > out.layouts.len() { return 0; }
+    for i in 0..nl as usize {
+        let Some(&[buffer_index, stride, step, rate]) = take(4) else { return 0 };
+        let step = match step { 0 => StageInStep::Constant, 5 => StageInStep::GridX, 6 => StageInStep::GridY, _ => return 0 };
+        out.layouts[i] = Some(StageInLayout { buffer_index, stride, step, rate: rate.max(1) });
+    }
+    STAGE_IN.with(|c| c.set(out));
+    1
+}
+
 fn apply_tg(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::passes::TransformOptions {
     o = apply_rsc(o);
+    o.kernel_stage_in = STAGE_IN.with(|c| c.get());
     // Bit 2 is an explicit guarantee from the plugin: no rate map can be created or bound.
     o.no_rasterization_rate_maps = CAPS.load(Ordering::Relaxed) & 4 != 0;
     // Bit 3: the plugin reserved heap slots 1..5 for typed dummies, so a null resource id may be redirected to them.
@@ -1003,5 +1044,34 @@ declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr a
         assert_eq!(workgroup_array_elements_after_sampler_translation(None), 512, "no length: the default");
         assert_eq!(workgroup_array_elements_after_sampler_translation(Some(16384)), 1024, "16384 bytes of float4");
         assert_eq!(workgroup_array_elements_after_sampler_translation(Some(4096)), 256, "4096 bytes of float4");
+    }
+}
+
+#[cfg(test)]
+mod stage_in_tests {
+    use super::*;
+
+    #[test]
+    fn a_well_formed_stage_input_layout_is_accepted_and_applied_to_the_next_translation() {
+        // one Float3 attribute at offset 0 of buffer 1, which steps by thread x with a 12-byte stride
+        let words = [1u32, 0, 1, 0, 30, 1, 1, 12, 5, 1];
+        assert_eq!(nvmtl_translate_set_kernel_stage_in(words.as_ptr(), words.len() as u32), 1);
+        let o = apply_tg(Default::default());
+        let (attribute, layout) = o.kernel_stage_in.attribute(0).expect("attribute 0 is described");
+        assert_eq!((attribute.buffer_index, attribute.offset), (1, 0));
+        assert_eq!(layout.stride, 12);
+        assert_eq!(nvmtl_translate_set_kernel_stage_in(std::ptr::null(), 0), 1);
+        assert!(apply_tg(Default::default()).kernel_stage_in.is_empty(), "count 0 clears it");
+    }
+
+    #[test]
+    fn a_truncated_or_unsupported_stage_input_layout_is_refused_and_leaves_nothing_set() {
+        let truncated = [1u32, 0, 1, 0];
+        assert_eq!(nvmtl_translate_set_kernel_stage_in(truncated.as_ptr(), 4), 0);
+        let unsupported_format = [1u32, 0, 1, 0, 26, 0];
+        assert_eq!(nvmtl_translate_set_kernel_stage_in(unsupported_format.as_ptr(), 6), 0);
+        let indexed_step = [1u32, 0, 1, 0, 30, 1, 1, 12, 7, 1];
+        assert_eq!(nvmtl_translate_set_kernel_stage_in(indexed_step.as_ptr(), 10), 0);
+        assert!(apply_tg(Default::default()).kernel_stage_in.is_empty());
     }
 }

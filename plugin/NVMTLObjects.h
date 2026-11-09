@@ -88,6 +88,7 @@ NVMTLArgument *nvmtl_argument_for_buffer(NVMTLFunction *fn, NSUInteger index);
 id nvmtl_render_reflection(MTLRenderPipelineDescriptor *d);
 id nvmtl_compute_reflection(id<MTLFunction> fn);
 id<MTLFunction> nvmtl_link_kernel(MTLComputePipelineDescriptor *d, NSError **err);
+NVMTLFunction *nvmtl_kernel_with_stage_in(NVMTLFunction *fn, MTLStageInputOutputDescriptor *sd, NSError **err);
 id<MTLFunction> nvmtl_link_stage(id<MTLFunction> k, MTLLinkedFunctions *lf, NSArray *dylibs, NSError **err);
 void nvmtl_render_keep_linked(id ps, id<MTLFunction> vf, id<MTLFunction> ff);
 void nvmtl_note_compile_dylibs(id lib, NSArray *libraries);
