@@ -194,7 +194,7 @@ BOOL nvmtl_sass_resolve_block(NVMTLComputeCommandEncoder *encoder,
 
         switch (params[i].kind) {
         case NVMTL_SASS_BUFFER: {
-            NSArray *entry = encoder->_bufAt[@(metal)];
+            NSArray *entry = nvmtl_bufat(encoder, metal);
             NVMTLBuffer *buffer = entry.count ? entry[0] : nil;
             uint64_t offset = entry.count > 1 ? [entry[1] unsignedLongLongValue] : 0;
             if (![buffer isKindOfClass:NVMTLBuffer.class]) {
@@ -252,7 +252,7 @@ BOOL nvmtl_sass_resolve_block(NVMTLComputeCommandEncoder *encoder,
             for (uint32_t k = 0; k < NVMTL_SASS_TABLE_SLOTS; k++) slots[k] = dummy;
             uint32_t first = metal, filled = 0;
             for (uint32_t k = 0; k < NVMTL_SASS_TABLE_SLOTS && filled < NVMTL_SASS_TABLE_SLOTS; k++) {
-                NSArray *entry = encoder->_bufAt[@(first + k)];
+                NSArray *entry = nvmtl_bufat(encoder, first + k);
                 NVMTLBuffer *bound = entry.count ? entry[0] : nil;
                 uint64_t off = entry.count > 1 ? [entry[1] unsignedLongLongValue] : 0;
                 uint64_t addr = bound ? nvmtl_vk_buffer_address(&bound->_b) : 0;
@@ -268,7 +268,7 @@ BOOL nvmtl_sass_resolve_block(NVMTLComputeCommandEncoder *encoder,
              *    buffer is right here, so READ IT rather than infer from a fault address: its first
              *    four words, and whether it is even CPU-readable. */
             {
-                NSArray *own = encoder->_bufAt[@(metal)];
+                NSArray *own = nvmtl_bufat(encoder, metal);
                 NVMTLBuffer *src = own.count ? own[0] : nil;
                 const uint64_t *words = src && src->_b.map ? (const uint64_t *)src->_b.map : NULL;
                 static _Atomic int peeked;
@@ -292,7 +292,7 @@ BOOL nvmtl_sass_resolve_block(NVMTLComputeCommandEncoder *encoder,
                 for (uint32_t k = 0; k < filled && k < 8; k++) [line appendFormat:@" 0x%llx", (unsigned long long)slots[k]];
                 [line appendString:@" | bound"];
                 for (uint32_t k = 0; k < 8; k++) {
-                    NSArray *e = encoder->_bufAt[@(k)];
+                    NSArray *e = nvmtl_bufat(encoder, k);
                     NVMTLBuffer *b = e.count ? e[0] : nil;
                     [line appendFormat:@" %u:%@", k, b ? [NSString stringWithFormat:@"%zu", b->_b.size] : @"-"];
                 }
@@ -301,7 +301,7 @@ BOOL nvmtl_sass_resolve_block(NVMTLComputeCommandEncoder *encoder,
                  *    Read as 32-bit words — a count or an index is readable either way. */
                 for (uint32_t which = 0; which < 2; which++) {
                     uint32_t idx = which ? 29 : 23;
-                    NSArray *pe = encoder->_bufAt[@(idx)];
+                    NSArray *pe = nvmtl_bufat(encoder, idx);
                     NVMTLBuffer *pb = pe.count ? pe[0] : nil;
                     uint64_t poff = pe.count > 1 ? [pe[1] unsignedLongLongValue] : 0;
                     [line appendFormat:@" | PARAMS%u", idx];

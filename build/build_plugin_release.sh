@@ -18,8 +18,8 @@ ssh "$H" "rm -rf $R/src $R/out && mkdir -p $R/src $R/out"
 rsync -a "$TMP/plugin/" "$H:$R/src/"
 ssh "$H" "cd $R/src && xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -bundle -fobjc-arc -O1 -DNVMTL_RELEASE=1 \
   -Wno-protocol -Wno-incomplete-implementation -Werror=unguarded-availability-new \
-  -I$BASE/build/gpu-src/mesa/include -o ../out/NVMTLDriver NVMTLDevice.m \
-  -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation 2>../out/build.err" \
+  -I$BASE/build/gpu-src/mesa/include -o ../out/NVMTLDriver NVMTLDevice.m nvmtl_dlss.c dlss/elfhost.c dlss/lnxlibc.c \
+  -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation -framework MetalFX -liconv 2>../out/build.err" \
   || { ssh "$H" "grep ' error:' $R/out/build.err | head -20"; exit 1; }
 mkdir -p "$OUT"
 scp -q "$H:$R/out/NVMTLDriver" "$H:$R/out/build.err" "$OUT/"
