@@ -410,6 +410,11 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     unsigned fIndex = 0; bool fOwnsHead = false;
     bool fBootConsole = false;
     bool fInternal = false;     // NVKMS static display info: laptop panel (eDP/LVDS)
+    // Variable refresh rate (boot-arg nvfbvrr=1): the display supports it, WindowServer asked for it, and the vertical range
+    // the EDID gives. fVrrOn follows the last kIOFBVariableRefreshRate set and is carried by every full mode set.
+    bool fVrrSupported = false, fVrrOn = false; unsigned fVrrMinHz = 0, fVrrMaxHz = 0;
+    static bool vrrAllowed();
+    IOReturn setVrr(bool on);
     NVRMBacklightHandler *fBacklight = nullptr;   // the panel's brightness control, see NVRMBacklightHandler
     void publishBacklight();
     struct NvKmsKapiDisplayMode fMode = {};
@@ -730,7 +735,7 @@ public:
 OSDefineMetaClassAndStructors(NVRMNVDAFramebuffer, IOFramebuffer)
 struct nvrm_dpy_rec {
     NvKmsKapiDisplay handle; NvKmsKapiConnector connector; NvU32 headMask; NvBool internal;
-    NvU32 hdaConnectorType; NvBool mst, connected; NvU32 edidSize; NvU8 edid[NVKMS_KAPI_EDID_BUFFER_SIZE];
+    NvU32 hdaConnectorType; NvBool mst, connected, vrr; NvU32 edidSize; NvU8 edid[NVKMS_KAPI_EDID_BUFFER_SIZE];
 };
 static NvU32 nvrmHdaConnectorType(const struct NvKmsKapiConnectorInfo *info)
 {
@@ -1041,7 +1046,7 @@ bool NVRMNVDAFramebuffer::kapiInit()
             if (!dd->connected || !gs) continue;
             if (gNDpy >= (int)(sizeof gDpy / sizeof gDpy[0])) { FBLOG("dpy table full at %d", gNDpy); break; }
             struct nvrm_dpy_rec *r = &gDpy[gNDpy++];
-            r->connected = dd->connected ? NV_TRUE : NV_FALSE; r->mst = si.isDpMST;
+            r->connected = dd->connected ? NV_TRUE : NV_FALSE; r->mst = si.isDpMST; r->vrr = dd->vrrSupported;
             r->handle = handles[i]; r->connector = si.connectorHandle; r->headMask = si.headMask; r->internal = si.internal;
             r->hdaConnectorType = si.internal ? 0 : nvrmQueryHdaConnectorType(fKms, fDev, si.connectorHandle);
             r->edidSize = dd->edid.bufferSize > sizeof r->edid ? (NvU32)sizeof r->edid : dd->edid.bufferSize;
@@ -1116,7 +1121,7 @@ bool NVRMNVDAFramebuffer::kapiInit()
     }
     {
         struct nvrm_dpy_rec *r = &gDpy[fIndex];
-        fDisplay = r->handle; fConnector = r->connector; fInternal = r->internal;
+        fDisplay = r->handle; fConnector = r->connector; fInternal = r->internal; fVrrSupported = r->vrr && vrrAllowed();
         if (fInternal) FBLOG("fb%u: display 0x%x is internal -- reporting kIOConnectionBuiltIn", fIndex, fDisplay);
         takeEdid(r->edid, r->edidSize);
         FBLOG("fb%u: EDID %u B, panel %ux%u mm (imageWidth/imageHeight)", fIndex, (unsigned)fEdidSize,
@@ -1587,6 +1592,7 @@ void NVRMNVDAFramebuffer::takeEdid(const NvU8 *src, NvU32 size)
     fEdidSize = (NvU16)(size > sizeof fEdid ? sizeof fEdid : size);
     nvu_copy(fEdid, src, fEdidSize);
     nvrmEdidPanelSizeMm(fEdid, fEdidSize, &fEdidMmW, &fEdidMmH);
+    if (!nvrmEdidVerticalRange(fEdid, fEdidSize, &fVrrMinHz, &fVrrMaxHz)) fVrrMinHz = fVrrMaxHz = 0;
     if (fEdidSize < 128) return;
     bool twin = false;
     for (int k = 0; k < gNDpy && !twin; k++) {
@@ -1716,7 +1722,7 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
         if (!me->fKms->getStaticDisplayInfo(me->fDev, handles[i], &si)) continue;
         if (gNDpy >= (int)(sizeof gDpy / sizeof gDpy[0])) break;
         struct nvrm_dpy_rec *r = &gDpy[gNDpy];
-        r->connected = dd->connected ? NV_TRUE : NV_FALSE; r->mst = si.isDpMST;
+        r->connected = dd->connected ? NV_TRUE : NV_FALSE; r->mst = si.isDpMST; r->vrr = dd->vrrSupported;
             r->handle = handles[i]; r->connector = si.connectorHandle; r->headMask = si.headMask; r->internal = si.internal;
         r->hdaConnectorType = si.internal ? 0 : nvrmQueryHdaConnectorType(me->fKms, me->fDev, si.connectorHandle);
         r->edidSize = dd->edid.bufferSize > sizeof r->edid ? (NvU32)sizeof r->edid : dd->edid.bufferSize;
@@ -1964,6 +1970,12 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
                                             bool cursorOnly, bool frame)
 {
     if (!fKms || !fDev || !cfg || !rep || fHead >= 8 || fSubmissionFaulted) return NV_FALSE;
+    {   // a full mode set carries the variable-refresh state, so a mode change does not drop it
+        struct NvKmsKapiHeadRequestedConfig *vh = &cfg->headRequestedConfig[fHead];
+        if (fVrrOn && fVrrSupported && vh->modeSetConfig.bActive && (vh->flags.modeChanged || vh->flags.activeChanged)) {
+            vh->modeSetConfig.vrrEnabled = NV_TRUE; vh->flags.vrrEnabledChanged = NV_TRUE;
+        }
+    }
     if (!commit) return fKms->applyModeSetConfig(fDev, cfg, rep, NV_FALSE);
     // A cursor-only request leaves the primary layer alone: KAPI does not advance the primary layer's completion slot
     // for it, so there is no primary flip to wait for and the primary tracking below stays as the last present left it.
@@ -3582,7 +3594,7 @@ void NVRMNVDAFramebuffer::publishTimingCaps()
     if (s) { setProperty(kIOFBScalerInfoKey, s); s->release(); }
     IODisplayTimingRangeV1 r; nvu_zero(&r, sizeof r);
     r.minPixelClock = 25000000ull; r.maxPixelClock = 1200000000ull; r.maxPixelError = 0;
-    r.supportedSyncFlags = kIORangeSupportsSeparateSyncs;
+    r.supportedSyncFlags = kIORangeSupportsSeparateSyncs | (fVrrSupported && fVrrMinHz ? kIORangeSupportsVRR : 0);
     r.supportedSignalLevels = 0; r.supportedSignalConfigs = kIODigitalSignal;
     r.minFrameRate = 23; r.maxFrameRate = kNvrmMaxFrameRate; r.minLineRate = 10000; r.maxLineRate = 1000000;
     r.maxHorizontalTotal = 16384; r.maxVerticalTotal = 16384;
@@ -3646,6 +3658,12 @@ IOReturn NVRMNVDAFramebuffer::getTimingInfoForDisplayMode(IODisplayModeID mode, 
         nvu_zero(info, sizeof *info);
         info->appleTimingID = kIOTimingIDInvalid;
         info->detailedInfo.v2 = fDT[i];
+        if (fVrrSupported && fVrrMinHz) {
+            const IODetailedTimingInformationV2 &t = fDT[i];
+            const UInt64 tot = (UInt64)(t.horizontalActive + t.horizontalBlanking) * (t.verticalActive + t.verticalBlanking);
+            const unsigned hz = tot ? (unsigned)((t.pixelClock + tot / 2) / tot) : 0;
+            info->detailedInfo.v2.verticalBlankingExtension = nvrmVrrBlankExtension(t.verticalActive + t.verticalBlanking, hz, fVrrMinHz, fVrrMaxHz);
+        }
         IODetailedTimingInformationV2 &d = info->detailedInfo.v2;
         if (swapped && !(d.detailedTimingModeID & 0x80000000u) && !d.horizontalScaled && !d.verticalScaled) {
             d.horizontalScaled = d.horizontalActive; d.verticalScaled = d.verticalActive;
@@ -4312,9 +4330,43 @@ IODeviceMemory *NVRMNVDAFramebuffer::getApertureRange(IOPixelAperture aperture)
     return (IODeviceMemory *)IOMemoryDescriptor::withAddressRange(
         target, bytes, kIODirectionNone | kIOMemoryMapperNone, NULL);
 }
+bool NVRMNVDAFramebuffer::vrrAllowed()
+{
+    UInt32 on = 0;
+    return PE_parse_boot_argn("nvfbvrr", &on, sizeof on) && on;
+}
+// Switch variable refresh on or off for the lit head: a commit that carries only that flag. Not lit yet: it is remembered
+// and the next full mode set applies it.
+IOReturn NVRMNVDAFramebuffer::setVrr(bool on)
+{
+    if (!fVrrSupported || !fVrrMinHz) return kIOReturnUnsupported;
+    if (on == fVrrOn) return kIOReturnSuccess;
+    fVrrOn = on;
+    if (!fModeSet || !fSurf || fHeadSlept || fConsoleAperture || !rmGpuReady()) return kIOReturnSuccess;
+    NVRMDisplayGate gate; if (!gate.valid() || !fKms || !fDev) return kIOReturnSuccess;
+    struct NvKmsKapiRequestedModeSetConfig *cfg = (struct NvKmsKapiRequestedModeSetConfig *)IOMalloc(sizeof *cfg);
+    struct NvKmsKapiModeSetReplyConfig *rep = (struct NvKmsKapiModeSetReplyConfig *)IOMalloc(sizeof *rep);
+    if (!cfg || !rep) { if (cfg) IOFree(cfg, sizeof *cfg); if (rep) IOFree(rep, sizeof *rep); fVrrOn = !on; return kIOReturnNoMemory; }
+    nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
+    cfg->headsMask = 1u << fHead;
+    struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
+    hr->modeSetConfig.bActive = NV_TRUE; hr->modeSetConfig.numDisplays = 1; hr->modeSetConfig.displays[0] = fDisplay;
+    hr->modeSetConfig.mode = fMode;
+    hr->modeSetConfig.vrrEnabled = on ? NV_TRUE : NV_FALSE; hr->flags.vrrEnabledChanged = NV_TRUE;
+    const NvBool ok = submitConfig(cfg, rep, NV_TRUE, false, true);
+    FBLOG("fb%u: variable refresh %s -> %s", fIndex, on ? "on" : "off", ok ? "committed" : "REFUSED");
+    IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
+    if (!ok) { fVrrOn = !on; return kIOReturnError; }
+    return kIOReturnSuccess;
+}
 IOReturn NVRMNVDAFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
 {
     FBSEL(attribute);
+    if (attribute == kIOFBVariableRefreshRate) {
+        if (!fVrrSupported || !fVrrMinHz) return kIOReturnUnsupported;
+        if (value) *value = fVrrOn ? 1 : 0;
+        return kIOReturnSuccess;
+    }
     if (attribute == kIOWindowServerActiveAttribute) { if (value) *value = 1; FBLOG("getAttribute 'wsrv' -> 1"); return kIOReturnSuccess; }
     if (attribute == kIOHardwareCursorAttribute) {
         uintptr_t v = (fCursorEnabled && fCurSurf && fCurKva) ? 1 : 0;
@@ -4446,6 +4498,7 @@ IOReturn NVRMNVDAFramebuffer::setPowerState(unsigned long ordinal, IOService *de
 IOReturn NVRMNVDAFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
 {
     char c[5] = { (char)(attribute >> 24), (char)(attribute >> 16), (char)(attribute >> 8), (char)attribute, 0 };
+    if (attribute == kIOFBVariableRefreshRate) return setVrr(value != 0);
     if (attribute == kIOWindowServerActiveAttribute) {
         FBLOG("setAttribute 'wsrv' %lu -> success", (unsigned long)value);
         return kIOReturnSuccess; }
