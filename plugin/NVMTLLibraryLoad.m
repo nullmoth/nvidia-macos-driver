@@ -120,6 +120,8 @@ static nvmtl_lower_mesh2_fn xlate_lower_mesh2;
 typedef int (*nvmtl_promote_uniform_fn)(const uint8_t *, size_t, uint32_t, uint32_t,
                                        uint8_t **, size_t *, uint32_t *, char *, size_t);
 static nvmtl_promote_uniform_fn xlate_promote_uniform;
+typedef int (*nvmtl_tile_rewrite_fn)(const char *, uint32_t, uint32_t, uint8_t **, size_t *, char *, size_t);
+static nvmtl_tile_rewrite_fn xlate_tile_rewrite;
 static char kNVMTLTableFns;
 
 static int nvmtl_xlate_ready(void) {
@@ -170,6 +172,8 @@ static int nvmtl_xlate_ready(void) {
         xlate_link_rt = (nvmtl_link_rt_fn)dlsym(h, "nvmtl_link_runtime");
         if (!xlate_link_rt) nvlog("translate: no nvmtl_link_runtime in this translator - visible function tables cannot be linked");
         xlate_link_ext = (nvmtl_link_ext_fn)dlsym(h, "nvmtl_link_externs");
+        xlate_tile_rewrite = (nvmtl_tile_rewrite_fn)dlsym(h, "nvmtl_tile_rewrite");
+        if (!xlate_tile_rewrite) nvlog("translate: no nvmtl_tile_rewrite in this translator - tile functions cannot be built");
         xlate_lower_mesh = (nvmtl_lower_mesh_fn)dlsym(h, "nvmtl_lower_mesh");
         if (!xlate_lower_mesh) nvlog("translate: no nvmtl_lower_mesh in this translator - mesh pipelines will be refused");
         xlate_lower_mesh2 = (nvmtl_lower_mesh2_fn)dlsym(h, "nvmtl_lower_mesh2");
@@ -2565,6 +2569,14 @@ NSData *nvmtl_translate_variant(NVMTLFunction *fn, NSDictionary *states, NSDicti
     return result;
 }
 
+// A tile function's AIR rewritten into a compute kernel over the colour attachments (tile_rewrite in the translator).
+NSString *nvmtl_tile_rewrite(NSString *ll, uint32_t tw, uint32_t th, NSString **err) {
+    if (!nvmtl_xlate_ready() || !xlate_tile_rewrite) { if (err) *err = @"this translator cannot rewrite tile functions"; return nil; }
+    uint8_t *out = NULL; size_t len = 0; char e[512] = {0};
+    if (xlate_tile_rewrite(ll.UTF8String, tw, th, &out, &len, e, sizeof e)) { if (err) *err = @(e); return nil; }
+    NSString *text = [[NSString alloc] initWithBytes:out length:len encoding:NSUTF8StringEncoding]; xlate_free(out, len);
+    return text;
+}
 // a8: Metal A8Unorm colour attachments (bit per location); the variant writes the output's alpha into the R8 lane.
 NSData *nvmtl_translate_samplers_amp(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, uint32_t amp, NSString **err);
 NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, NSString **err) {
