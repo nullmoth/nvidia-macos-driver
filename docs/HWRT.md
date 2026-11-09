@@ -119,9 +119,14 @@ MEASURED are written with their measured values.
 `nvk/hwrt/hwrt_wide.c` is the 8-wide variant as a host reference: the binary tree is collapsed to up to eight children per 128-byte
 node with 8-bit bounds in the node's own frame, rounded outward in the arithmetic the walk uses. The walk over it equals the model
 bit for bit (0 of 9000 rays differ), it uses under two fifths of the binary tree's nodes, and boxes that do not contain their children
-are caught. It models the shape rows R21/R22 suggest and is unmeasured like them. The GLSL encoder writes only the 2-wide variant: a
-parallel collapse needs the depth of each node, which the intermediate tree does not carry, so it would be a multi-pass encoder; P3
-builds the 2-wide variant on the card first and the 8-wide encoder follows only if the card prefers that shape.
+are caught. It models the shape rows R21/R22 suggest and is unmeasured like them. `NVK_HWRT_WIDE=1` (with `NVK_HWRT_QUERY=1`) selects it in the driver: `bvh/encode_wide.comp` runs after the 2-wide encode and overwrites the
+node area in place (same bytes reserved, sparse slots, leaves and header untouched). Three kinds of pass: the depth word of every
+intermediate box is cleared (the root gets 0), 64 propagation rounds give each box its parent's depth plus one (the traversal stack is 64
+deep, so no tree here is deeper), and a box whose depth is a multiple of three becomes a wide node holding the descendants three levels
+down (or the leaves met sooner), depth first. The passes are one text, `encode_wide_body.h`, compiled as GLSL for the driver and as C++ for
+`hwrt_wide_shader.cpp`, which the host test runs on 40 random trees including 1 to 3 triangle ones: the node area it writes equals the
+reference's byte for byte. The GPU's division may differ from the host's in the last bit, which can move a quantised bound by one step;
+the outward widening keeps every box containing its child either way. P3 builds either shape on the card.
 
 ## Query region (what `check_ttu_region.py` judges)
 
