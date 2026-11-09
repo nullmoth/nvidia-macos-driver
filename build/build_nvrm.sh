@@ -12,6 +12,10 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 unset NM_TAHOE   # NVRM is one binary for macOS 15 and 26; only NVAccel has a Tahoe build
 rm -rf "$OUT"; mkdir -p "$OUT/NVRM.kext/Contents/MacOS"; OUT=$(cd "$OUT" && pwd)
 NV="$OGKM/src/nvidia"; KMS="$OGKM/src/nvidia-modeset"
+# NVRM_PRISTINE_OGKM=<pristine 620.70.06 tree>: the patch chain must still apply to it with --fuzz=0 before anything is built.
+if [ -n "${NVRM_PRISTINE_OGKM:-}" ]; then
+  bash "$HERE/../tools/test_patch_chain.sh" "$NVRM_PRISTINE_OGKM" > "$OUT/patch-chain.txt" 2>&1 || { echo "STOP: the kexts/NVRM/patches chain does not apply to $NVRM_PRISTINE_OGKM"; cat "$OUT/patch-chain.txt"; exit 1; }
+fi
 [ -f "$NV/_out/Darwin_x86_64/libnvkernel.a" ] || { echo "STOP: $NV/_out/Darwin_x86_64/libnvkernel.a is not built"; exit 1; }
 KMSLIB=${KMS_ARCHIVE:-$KMS/_out/Darwin_x86_64/libnvkms.a}
 [ -f "$KMSLIB" ] || { echo "STOP: no NVKMS archive at $KMSLIB"; exit 1; }
