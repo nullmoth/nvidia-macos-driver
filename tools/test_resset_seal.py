@@ -26,6 +26,8 @@ def check(name, ok, detail=''):
 
 impl = objects[objects.index('@implementation NVMTLResSet'):]
 impl = impl[:impl.index('@end') + 4]
+# the identity-hashed set the class allocates sits just above it in NVMTLObjects.m
+impl = objects[objects.index('static NSMutableSet *nvmtl_identity_set('):objects.index('@implementation NVMTLResSet')] + impl
 iface = re.search(r'@interface NVMTLResSet : NSMutableSet .*?@end', header, re.S).group(0)
 
 HARNESS = r'''
@@ -102,13 +104,16 @@ with tempfile.TemporaryDirectory() as d:
     check('negative control: the old copy-then-clear seal loses resources under the same race', oheld < oadded,
           f'{oheld} held of {oadded} added')
 
-    lazy = subprocess.run([str(exe), 'lazy'], capture_output=True, text=True, timeout=300)
+    # the race fires rarely on some machines (measured: 1 run in 6), so the control gets a bounded number of tries
+    for _try in range(30):
+        lazy = subprocess.run([str(exe), 'lazy'], capture_output=True, text=True, timeout=300)
+        if lazy.returncode != 0 or (lazy.stdout.split() and int(lazy.stdout.split()[0]) > 0): break
     eager = subprocess.run([str(exe), 'eager'], capture_output=True, text=True, timeout=300)
     lazy_lost = int(lazy.stdout.split()[0]) if lazy.returncode == 0 and lazy.stdout.split() else -1
     eager_lost = int(eager.stdout.split()[0]) if eager.returncode == 0 and eager.stdout.split() else -1
     check('negative control: a set made lazily by two encoder threads loses resources or crashes',
           lazy.returncode != 0 or lazy_lost > 0,
-          f'exit {lazy.returncode}, {lazy_lost} lost in 20000 command buffers' if lazy.returncode == 0 else f'crashed, exit {lazy.returncode}')
+          f'try {_try + 1}, exit {lazy.returncode}, {lazy_lost} lost in 20000 command buffers' if lazy.returncode == 0 else f'crashed, exit {lazy.returncode}')
     check('a set made with the command buffer keeps both threads\' resources', eager.returncode == 0 and eager_lost == 0,
           f'exit {eager.returncode}, {eager_lost} lost in 20000 command buffers')
 
