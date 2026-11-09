@@ -1081,12 +1081,13 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
     if (_hostDealloc) { void (^d)(void *, NSUInteger) = _hostDealloc; _hostDealloc = nil;
                         d(_hostPtr ?: _b.map, (NSUInteger)(_hostLen ?: _b.size)); } }
 - (MTLStorageMode)storageMode { return _storage; }
-- (void *)contents { nvmtl_buf_settle(self); return _shadow.map ? _shadow.map : (_hostPtr ? _hostPtr : _b.map); }
+- (void *)contents { nvmtl_buf_settle(self); if (_swc && _hostPtr) return _hostPtr; return _shadow.map ? _shadow.map : (_hostPtr ? _hostPtr : _b.map); }
 - (id<MTLHeap>)heap { return _heap ?: _subHeap; }
 - (NSUInteger)heapOffset { return _heapOffset; }
 - (NSUInteger)length { return _b.size; }
 - (void)didModifyRange:(NSRange)r {
     nvmtl_buf_settle(self);
+    if (_swc && _hostPtr) return;   // the caller's pages are diffed at the next submit; _shadow is only staging and holds old bytes
     if (_shadow.map) {
         if (r.location >= _b.size) return;
         NSUInteger n = MIN(r.length, _b.size - r.location);
@@ -7792,7 +7793,10 @@ static void nvmtl_swc_sync_in(NVMTLBuffer *b)
     nvmtl_buf_settle(b);
     nvmtl_swc_range r[16]; int n;
     os_unfair_lock_lock(&gSwcLock);
-    n = nvmtl_swc_before_submit((nvmtl_swc *)b->_swc, b->_shadow.map, r, 16);
+    // the host side is the caller's pages when there are any (then _shadow is staging for the transfer), else _shadow itself
+    const uint8_t *host = b->_hostPtr ? (const uint8_t *)b->_hostPtr : (const uint8_t *)b->_shadow.map;
+    n = nvmtl_swc_before_submit((nvmtl_swc *)b->_swc, host, r, 16);
+    if (b->_hostPtr) for (int i = 0; i < n; i++) memcpy((uint8_t *)b->_shadow.map + r[i].lo, host + r[i].lo, r[i].hi - r[i].lo);
     for (int i = 0; i < n; i++)
         if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_shadow, r[i].lo, &b->_b, r[i].lo, r[i].hi - r[i].lo)) {
             // the GPU keeps the old bytes: force a full upload at the next submit rather than trust the hashes
@@ -7806,7 +7810,10 @@ static void nvmtl_swc_sync_out(NVMTLBuffer *b)
     os_unfair_lock_lock(&gSwcLock);
     if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_b, 0, &b->_shadow, 0, b->_shadow.size < b->_b.size ? b->_shadow.size : b->_b.size))
         nvlog("shared VRAM copy: copy-back of %zu bytes FAILED - contents keeps the CPU's last bytes", b->_b.size);
-    else nvmtl_swc_after_complete((nvmtl_swc *)b->_swc, b->_shadow.map);
+    else {
+        if (b->_hostPtr) memcpy(b->_hostPtr, b->_shadow.map, b->_hostLen < b->_shadow.size ? b->_hostLen : b->_shadow.size);
+        nvmtl_swc_after_complete((nvmtl_swc *)b->_swc, b->_hostPtr ? b->_hostPtr : b->_shadow.map);
+    }
     os_unfair_lock_unlock(&gSwcLock);
 }
 static void nvmtl_buffer_sync_in(NVMTLBuffer *b)
