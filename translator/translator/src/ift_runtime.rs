@@ -10,6 +10,8 @@ struct IsectFn {
     bounding_box: bool,
     result_ty: String,
     params: Vec<(String, Role)>,
+    // The function returns {accept_intersection, continue_search} rather than the bare accept flag.
+    continue_search: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +30,18 @@ enum Role {
     FrontFacing,
     Distance,
     Buffer(u64),
+    // The ray payload the caller handed air.intersect: a pointer into the calling kernel's own storage that
+    // every intersection function in a real ray-tracing shader reads and writes. The shader converter declares
+    // it in the ray-data address space, so the pointer is cast on the way in.
+    Payload,
+    // The instance transforms. A ray query reports both, so these are getters like the rest.
+    ObjectToWorld,
+    WorldToObject,
+    // Where this instance's and this geometry's entries start in the intersection function table. We already
+    // take both out of the shader-binding-table record to pick the function to call, so the arguments repeat
+    // that arithmetic rather than introducing a second source for it.
+    InstanceTableOffset,
+    GeometryTableOffset,
 }
 
 fn metadata_nodes(module: &str) -> crate::fxhash::HashMap<String, String> {
@@ -77,6 +91,11 @@ fn role_of(node: &str) -> Result<(u32, Role), String> {
         "air.barycentric_coord" => Role::Barycentric,
         "air.front_facing" => Role::FrontFacing,
         "air.distance" => Role::Distance,
+        "air.payload" => Role::Payload,
+        "air.object_to_world_transform" => Role::ObjectToWorld,
+        "air.world_to_object_transform" => Role::WorldToObject,
+        "air.instance_intersection_function_table_offset" => Role::InstanceTableOffset,
+        "air.geometry_intersection_function_table_offset" => Role::GeometryTableOffset,
         "air.buffer" => {
             let loc = node
                 .split("!\"air.location_index\", i32 ")
@@ -153,13 +172,40 @@ fn intersection_functions(
             })
             .collect::<Vec<_>>()
             .join(" ");
+        // The results the function declares, in order. A triangle function returns either the bare accept flag
+        // or, as the shader converter's any-hit wrapper does, accept paired with continue_search: false there
+        // means stop traversal and keep what is already committed.
+        let results: Vec<String> = node_refs(&entry)
+            .first()
+            .and_then(|r| nodes.get(r))
+            .map(|list| {
+                node_refs(list)
+                    .into_iter()
+                    .filter_map(|r| nodes.get(&r))
+                    .map(|n| {
+                        n.split("!\"")
+                            .nth(1)
+                            .and_then(|s| s.split('"').next())
+                            .unwrap_or("")
+                            .to_string()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let two_member = result_ty == "<{ i1, i1 }>" || result_ty == "{ i1, i1 }";
+        let continue_search = !bounding_box
+            && two_member
+            && results == ["air.accept_intersection", "air.continue_search"];
         let ok_result = if bounding_box {
             result_ty == "<{ i1, float }>" || result_ty == "{ i1, float }"
         } else {
-            result_ty == "i1"
+            result_ty == "i1" || continue_search
         };
         if !ok_result {
-            return Err(format!("intersection function {symbol}: result {result_ty} is not carried (bool for triangles, {{bool, float}} for boxes)"));
+            return Err(format!(
+                "intersection function {symbol}: result {result_ty} declaring {results:?} is not carried \
+                 (bool, or {{accept, continue_search}}, for triangles; {{bool, float}} for boxes)"
+            ));
         }
         let open = head.find('(').unwrap();
         let close = head
@@ -221,6 +267,7 @@ fn intersection_functions(
             bounding_box,
             result_ty,
             params,
+            continue_search,
         });
     }
     Ok(out)
@@ -340,10 +387,21 @@ pub fn rewrite_runtime_intersection_tables(
             i += 1;
             continue;
         }
-        if args[7].split_whitespace().last() != Some("null") {
-            return Err("intersection tables: a ray payload is not carried yet".to_string());
-        }
         let fns = intersection_functions(candidates, &tags)?;
+        // The payload is the ray's own scratch: the caller allocates it, every intersection function reads and
+        // writes it, and the shading afterwards reads what they left. A ray that passes none is legal only when
+        // no function asks for one - carrying a null pointer into a function that writes through it would
+        // corrupt whatever address zero resolves to on the device.
+        if args[7].split_whitespace().last() == Some("null")
+            && fns
+                .iter()
+                .any(|f| f.params.iter().any(|(_, r)| *r == Role::Payload))
+        {
+            return Err(
+                "intersection tables: an intersection function takes a payload but the ray passes none"
+                    .to_string(),
+            );
+        }
         if let Some(n) = table_value
             .strip_prefix('%')
             .and_then(|v| v.parse::<u32>().ok())
@@ -382,7 +440,26 @@ pub fn rewrite_runtime_intersection_tables(
         };
         let prefix = format!("ift{n}");
         n += 1;
-        let inline = emit_inline(&prefix, &res, &ret_ty, &tags, &args, &fns, &mut declares)?;
+        let members = result_members(ll, &ret_ty)?;
+        let mut prologue = Vec::new();
+        let inline = emit_inline(
+            &prefix, &res, &ret_ty, &members, &tags, &args, &fns, &mut declares, &mut prologue,
+        )?;
+        if !prologue.is_empty() {
+            // After the define, and after a leading label if the body has one: an instruction placed BEFORE
+            // that label would sit in an implicit first block with no terminator.
+            let at = if lines
+                .get(1)
+                .is_some_and(|l| l.trim_end().ends_with(':') && !l.trim_start().starts_with(';'))
+            {
+                2
+            } else {
+                1
+            };
+            let n = prologue.len();
+            lines.splice(at..at, prologue);
+            i += n;
+        }
         let mut succ = Vec::new();
         let mut k = i + 1;
         while k < lines.len() {
@@ -495,6 +572,8 @@ pub fn rewrite_runtime_intersection_tables(
 }
 
 fn append_module_dedupe(output: &mut String, module: &str) {
+    // Two candidates can define different types under one name - see disambiguate_named_types().
+    let module = &crate::linked_functions::disambiguate_named_types(output, module);
     let already: HashSet<String> = output
         .lines()
         .filter_map(|l| {
@@ -548,14 +627,42 @@ fn append_module_dedupe(output: &mut String, module: &str) {
     }
 }
 
+// The members of air.intersect's result. The shader converter returns a NAMED struct (%struct.IntersectRet),
+// so the literal text of the call's result type is no longer the member list and has to be resolved against the
+// module's type definitions; the returned value keeps the named type, because the kernel's own extractvalue
+// instructions name it.
+fn result_members(ll: &str, ret_ty: &str) -> Result<Vec<String>, String> {
+    let ty = ret_ty.trim();
+    if !ty.starts_with('%') {
+        return Ok(split_top(ty.trim_start_matches('{').trim_end_matches('}')));
+    }
+    let head = format!("{ty} = type ");
+    let body = ll
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix(&head))
+        .ok_or_else(|| format!("intersection tables: result type {ty} has no definition"))?;
+    let open = body
+        .find('{')
+        .ok_or_else(|| format!("intersection tables: result type {ty} is not a struct"))?;
+    let close = body
+        .rfind('}')
+        .ok_or_else(|| format!("intersection tables: result type {ty} is unterminated"))?;
+    Ok(split_top(&body[open + 1..close]))
+}
+
 fn emit_inline(
     p: &str,
     res: &str,
     ret_ty: &str,
+    members: &[String],
     tags: &str,
     args: &[String],
     fns: &[IsectFn],
     declares: &mut Vec<String>,
+    // Lines the caller puts at the top of the function's first block. A slot has to be declared there: an
+    // alloca in a block the traversal loop re-enters is a new variable each time round, and the emitter puts
+    // its OpVariable where it finds it, which is not where SPIR-V allows one.
+    prologue: &mut Vec<String>,
 ) -> Result<String, String> {
     let q = |f: &str| format!("@air.{f}_intersection_query.{tags}");
     let get = |what: &str, ty: &str, committed: bool, decl: &mut Vec<String>| -> String {
@@ -584,8 +691,12 @@ fn emit_inline(
     }
     let named = |i: usize| -> String { format!("{} {}", names[i].0, names[i].1) };
     declares.push(format!("declare ptr {}()", q("allocate")));
+    // The acceleration structure goes in as its 64-bit device address, not as a pointer: the converter hands
+    // the shader an address out of the dispatch-rays arguments, and the ray-query lowering turns an integer
+    // operand into a structure with OpConvertUToAccelerationStructureKHR. Passing the pointer instead left a
+    // value the emitter models only as a raw address, so the reset call referenced an id defined nowhere.
     declares.push(format!(
-        "declare void {}(ptr, <3 x float>, <3 x float>, float, float, ptr addrspace(1), i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i1, i1)",
+        "declare void {}(ptr, <3 x float>, <3 x float>, float, float, i64, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i1, i1)",
         q("reset")
     ));
     declares.push(format!("declare i1 {}(ptr)", q("next")));
@@ -600,7 +711,20 @@ fn emit_inline(
         "{p}.entry:\n  %{p}.q = call ptr {}()\n",
         q("allocate")
     ));
-    let reset_args: Vec<String> = (0..=5).chain(9..=19).map(named).collect();
+    s.push_str(&format!(
+        "  %{p}.asaddr = ptrtoint {} to i64\n",
+        named(4)
+    ));
+    let reset_args: Vec<String> = (0..=5)
+        .chain(9..=19)
+        .map(|i| {
+            if i == 4 {
+                format!("i64 %{p}.asaddr")
+            } else {
+                named(i)
+            }
+        })
+        .collect();
     s.push_str(&format!(
         "  call void {}(ptr %{p}.q, {})\n  br label %{p}.loop\n",
         q("reset"),
@@ -680,7 +804,7 @@ fn emit_inline(
         s.push_str(&format!("  %{lbl}.none = icmp eq i32 %{lbl}.cty, 0\n  %{lbl}.max = select i1 %{lbl}.none, float {}, float %{lbl}.cd\n", names[3].1));
         let mut call_args = Vec::new();
         for (k, (ty, role)) in f.params.iter().enumerate() {
-            let v = format!("%{lbl}.p{k}");
+            let mut v = format!("%{lbl}.p{k}");
             let line = match role {
                 Role::Origin => format!("  {v} = {}\n", get("ray_origin", ty, false, declares)),
                 Role::Direction => format!("  {v} = {}\n", get("ray_direction", ty, false, declares)),
@@ -702,6 +826,35 @@ fn emit_inline(
                     "  {v}.at = getelementptr ptr addrspace(1), ptr addrspace(1) {}, i64 {loc}\n  {v} = load {ty}, ptr addrspace(1) {v}.at, align 8\n",
                     names[6].1
                 ),
+                // The caller's payload pointer, passed straight through. The converter declares the parameter
+                // in AIR's ray-data space while the caller holds the payload in its own, and both map to the
+                // same storage, so the call names the callee's type and no cast is emitted: an address-space
+                // cast here would be a no-op the emitter has no reason to carry.
+                Role::Payload => {
+                    v = names[7].1.clone();
+                    String::new()
+                }
+                // The instance transforms. The query reports a four-column matrix by value; the shader
+                // converter declares the parameter as a POINTER to one, so the value is stored into a slot of
+                // the ray query's own frame and the slot is what the function receives.
+                Role::ObjectToWorld | Role::WorldToObject => {
+                    let what = if *role == Role::ObjectToWorld {
+                        "object_to_world_transform"
+                    } else {
+                        "world_to_object_transform"
+                    };
+                    let column = "<3 x float>";
+                    let four = format!("{{ {column}, {column}, {column}, {column} }}");
+                    if ty.starts_with("ptr") {
+                        let call = get(what, &four, false, declares);
+                        prologue.push(format!("  {v} = alloca {four}, align 16"));
+                        format!("  {v}.m = {call}\n  store {four} {v}.m, {ty} {v}, align 16\n")
+                    } else {
+                        format!("  {v} = {}\n", get(what, ty, false, declares))
+                    }
+                }
+                Role::InstanceTableOffset => format!("  {v} = add {ty} {}, 0\n", x("base")),
+                Role::GeometryTableOffset => format!("  {v} = add {ty} {}, 0\n", x("gadd")),
             };
             s.push_str(&line);
             call_args.push(format!("{ty} {v}"));
@@ -724,6 +877,29 @@ fn emit_inline(
             s.push_str(&format!(
                 "  call void @air.commit_bounding_box_intersection_intersection_query.{tags}(ptr %{p}.q, float %{lbl}.t)\n  br label %{p}.loop\n"
             ));
+        } else if f.continue_search {
+            s.push_str(&format!(
+                "  %{lbl}.r = call {} @{}({})\n",
+                f.result_ty,
+                f.symbol,
+                call_args.join(", ")
+            ));
+            s.push_str(&format!(
+                "  %{lbl}.acc = extractvalue {t} %{lbl}.r, 0\n  %{lbl}.go = extractvalue {t} %{lbl}.r, 1\n",
+                t = f.result_ty
+            ));
+            // accept commits this hit; continue_search then decides whether traversal goes on. Leaving the
+            // loop IS the termination - the committed intersection is what the query reports either way, so
+            // this needs no separate terminate operation.
+            s.push_str(&format!(
+                "  br i1 %{lbl}.acc, label %{lbl}.commit, label %{lbl}.skip\n"
+            ));
+            s.push_str(&format!(
+                "{lbl}.commit:\n  call void @air.commit_triangle_intersection_intersection_query.{tags}(ptr %{p}.q)\n  br label %{lbl}.skip\n"
+            ));
+            s.push_str(&format!(
+                "{lbl}.skip:\n  br i1 %{lbl}.go, label %{p}.loop, label %{p}.done\n"
+            ));
         } else {
             s.push_str(&format!(
                 "  %{lbl}.acc = call i1 @{}({})\n",
@@ -736,11 +912,22 @@ fn emit_inline(
         }
     }
     s.push_str(&format!("{p}.done:\n"));
-    let members = split_top(ret_ty.trim().trim_start_matches('{').trim_end_matches('}'));
-    if members.len() != 9 {
+    // Nine members is the plain intersection_result. A query tagged triangle_data returns eight more, the
+    // columns of the two instance transforms: the shader converter names them itself in the kernels this was
+    // read from - world_to_object[0..3] at 9..12, then object_to_world[0..3] at 13..16.
+    const TRANSFORMS: [(&str, usize); 2] = [("world_to_object_transform", 9), ("object_to_world_transform", 13)];
+    if members.len() != 9 && members.len() != 17 {
         return Err(format!(
-            "intersection tables: result {ret_ty} is not the 9-member intersection_result"
+            "intersection tables: result {ret_ty} has {} members, not the 9 of intersection_result or the 17 of one carrying both instance transforms",
+            members.len()
         ));
+    }
+    if members.len() == 17 {
+        if let Some(bad) = members[9..].iter().find(|m| m.trim() != "<3 x float>") {
+            return Err(format!(
+                "intersection tables: result {ret_ty} member {bad} is not a transform column"
+            ));
+        }
     }
     let comm = [
         ("intersection_type", 0usize),
@@ -763,6 +950,26 @@ fn emit_inline(
             members[*slot]
         ));
         agg = format!("%{p}.agg{k}");
+    }
+    if members.len() == 17 {
+        let column = members[9].trim().to_string();
+        let four = format!("{{ {column}, {column}, {column}, {column} }}");
+        for (t, (what, first)) in TRANSFORMS.iter().enumerate() {
+            s.push_str(&format!(
+                "  %{p}.m{t} = {}\n",
+                get(what, &four, true, declares)
+            ));
+            for c in 0..4usize {
+                s.push_str(&format!(
+                    "  %{p}.m{t}c{c} = extractvalue {four} %{p}.m{t}, {c}\n"
+                ));
+                s.push_str(&format!(
+                    "  %{p}.tagg{t}{c} = insertvalue {ret_ty} {agg}, {column} %{p}.m{t}c{c}, {}\n",
+                    first + c
+                ));
+                agg = format!("%{p}.tagg{t}{c}");
+            }
+        }
     }
     s.push_str(&format!(
         "  {res} = insertvalue {ret_ty} {agg}, {} null, 4\n  br label %{p}.cont\n",
@@ -861,10 +1068,54 @@ mod tests {
         assert_eq!(out, k);
     }
 
+    // A triangle function shaped like the shader converter's any-hit wrapper: it reads the ray payload and
+    // returns {accept, continue_search} instead of the bare accept flag.
+    const ANYHIT: &str = r#"define { i1, i1 } @anyHit(<3 x float> noundef %0, <3 x float> noundef %1, float noundef %2, float noundef %3, ptr addrspace(5) %4) local_unnamed_addr #3 {
+  %6 = insertvalue { i1, i1 } undef, i1 true, 0
+  %7 = insertvalue { i1, i1 } %6, i1 false, 1
+  ret { i1, i1 } %7
+}
+!air.intersection = !{!50}
+!50 = !{ptr @anyHit, !51, !54, !"air.triangle", !"air.instancing", !"air.triangle_data"}
+!51 = !{!52, !53}
+!52 = !{!"air.accept_intersection", !"air.arg_type_name", !"bool"}
+!53 = !{!"air.continue_search", !"air.arg_type_name", !"bool"}
+!54 = !{!55, !56, !57, !58, !59}
+!55 = !{i32 0, !"air.origin", !"air.arg_type_name", !"float3"}
+!56 = !{i32 1, !"air.direction", !"air.arg_type_name", !"float3"}
+!57 = !{i32 2, !"air.min_distance", !"air.arg_type_name", !"float"}
+!58 = !{i32 3, !"air.max_distance", !"air.arg_type_name", !"float"}
+!59 = !{i32 4, !"air.payload", !"air.arg_type_size", i32 48, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"payload_t", !"air.arg_name", !"payload"}
+"#;
+
     #[test]
-    fn a_payload_is_refused_by_name() {
+    fn a_ray_that_carries_a_payload_is_no_longer_refused() {
         let k = KERNEL.replace("ptr null, i64 0", "ptr %1, i64 16");
-        let err = rewrite_runtime_intersection_tables(&k, "k", &[]).unwrap_err();
-        assert!(err.contains("payload"), "{err}");
+        let out = rewrite_runtime_intersection_tables(&k, "k", &[]).unwrap();
+        assert!(!out.contains("@air.intersect."), "{out}");
+    }
+
+    #[test]
+    fn an_intersection_function_that_reads_a_payload_gets_the_rays_own() {
+        let k = KERNEL.replace("ptr null, i64 0", "ptr %1, i64 16");
+        let out = rewrite_runtime_intersection_tables(&k, "k", &[("anyHit".into(), ANYHIT.into())])
+            .unwrap();
+        assert!(out.contains("@anyHit("), "{out}");
+        let call = out
+            .lines()
+            .find(|l| l.contains("call { i1, i1 } @anyHit("))
+            .unwrap_or_else(|| panic!("{out}"));
+        assert!(call.contains("ptr addrspace(5) %1"), "{call}");
+    }
+
+    #[test]
+    fn a_function_that_reads_a_payload_is_refused_when_the_ray_passes_none() {
+        let err = rewrite_runtime_intersection_tables(
+            KERNEL,
+            "k",
+            &[("anyHit".into(), ANYHIT.into())],
+        )
+        .unwrap_err();
+        assert!(err.contains("payload but the ray passes none"), "{err}");
     }
 }
