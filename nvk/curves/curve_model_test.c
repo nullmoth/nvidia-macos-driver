@@ -196,7 +196,7 @@ int main(void)
    {
       int ok = 1, hits = 0;
       for (int i = 0; i < 400; i++) {
-         struct curve c = { .basis = 2, .count = 2, .flat = 1, .caps = 2 };
+         struct curve c = { .basis = 2, .count = 2, .flat = 1, .caps = 0 };   /* the ribbon alone: the end caps are tested below */
          c.p[0] = d3(fr(-1, 0), fr(-.5, .5), fr(-.5, .5)); c.p[1] = d3(fr(.2, 1.2), fr(-.5, .5), fr(-.5, .5)); c.r[0] = c.r[1] = fr(.1, .4);
          D3 tgt = d3(fr(-1, 1.2), fr(-.6, .6), fr(-.6, .6)), o = d3(fr(-1, 1), fr(-1, 1), -4), dd = sub3(tgt, o);
          struct cv_hit h = run(&c, o, dd, 0, 100);
@@ -213,6 +213,19 @@ int main(void)
       }
       snprintf(d, sizeof d, "%d hits compared", hits);
       arm("a flat curve is the ribbon facing the ray: hit, distance and parameter equal the plane construction", ok && hits > 30, d);
+   }
+   /* flat end caps: a half disc facing the ray beyond each end point (measured on Apple GPUs) */
+   {
+      struct curve c = { .basis = 2, .count = 2, .flat = 1, .caps = 2 }; c.p[0] = d3(0, 0, 0); c.p[1] = d3(2, 0, 0); c.r[0] = c.r[1] = 0.3;
+      struct cv_hit behind = run(&c, d3(-0.2, 0.1, -5), d3(0, 0, 1), 0, 100);       /* beyond the start point, inside the radius */
+      struct cv_hit far_ = run(&c, d3(-0.2, 0.28, -5), d3(0, 0, 1), 0, 100);        /* beyond it and outside the radius (0.34 away) */
+      struct cv_hit past_end = run(&c, d3(2.2, -0.1, -5), d3(0, 0, 1), 0, 100);
+      struct cv_hit front = run(&c, d3(0.5, 0.1, -5), d3(0, 0, 1), 0, 100);         /* on the ribbon itself */
+      c.caps = 0; struct cv_hit nocap = run(&c, d3(-0.2, 0.1, -5), d3(0, 0, 1), 0, 100);
+      snprintf(d, sizeof d, "behind %d t %g u %g, outside %d, past the end %d u %g, ribbon %d u %g, no caps %d", (int)behind.hit, fv_(behind.t), fv_(behind.u), (int)far_.hit, (int)past_end.hit, fv_(past_end.u), (int)front.hit, fv_(front.u), (int)nocap.hit);
+      arm("a flat curve with sphere caps continues past each end as a disc that faces the ray (distance 5, parameter 0 or 1), not beyond the radius, and the ribbon is untouched",
+          behind.hit && fabsf(fv_(behind.t) - 5.0f) < 1e-4 && fv_(behind.u) == 0.0f && !far_.hit && past_end.hit && fv_(past_end.u) == 1.0f && front.hit && fv_(front.u) > 0.2f && fv_(front.u) < 0.3f, d);
+      arm("control: the same ray with no caps misses", !nocap.hit, d);
    }
    /* accuracy of the 8-piece cut against a 128-piece cut of the same curve */
    {
