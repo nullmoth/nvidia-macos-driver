@@ -18,6 +18,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+#include <notify.h>
+#include <mach-o/dyld.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <vulkan/vulkan_core.h>
@@ -2547,6 +2549,27 @@ int nvmtl_process_is_game(void)
     id opt = [info objectForKey:@"LSSupportsGameMode"];
     return [opt respondsToSelector:@selector(boolValue)] && [opt boolValue];
 }
+// Whether a game is active, from the state the policy helper publishes: the notify(3) key com.nullmoth.gamemode.active holds
+// 1 while a game is in the foreground, and the root-owned file /Library/NullMoth/gamemode-active exists then. Either says yes.
+int nvmtl_game_active(void)
+{
+    int token = 0;
+    if (notify_register_check("com.nullmoth.gamemode.active", &token) == NOTIFY_STATUS_OK) {
+        uint64_t state = 0;
+        int ok = notify_get_state(token, &state) == NOTIFY_STATUS_OK;
+        notify_cancel(token);
+        if (ok && state == 1) return 1;
+    }
+    return access("/Library/NullMoth/gamemode-active", R_OK) == 0;
+}
+
+const char *nvmtl_process_exe_path(void)
+{
+    static char path[1024];
+    uint32_t n = sizeof path;
+    return _NSGetExecutablePath(path, &n) == 0 ? path : "";
+}
+
 // NVMTL_APPLE_FAMILY=<n>: also answer YES for MTLGPUFamilyApple1..Apple<n> (default 0: none).
 // Measured on Cyberpunk 2077: its whole GPU capability decision is five queries - supportsFamily
 // Apple6 (asked exactly once), name (twice), supportsRaytracing and supportsRaytracingFromRender -
