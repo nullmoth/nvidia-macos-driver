@@ -413,6 +413,13 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     // Variable refresh rate (boot-arg nvfbvrr=1): the display supports it, WindowServer asked for it, and the vertical range
     // the EDID gives. fVrrOn follows the last kIOFBVariableRefreshRate set and is carried by every full mode set.
     bool fVrrSupported = false, fVrrOn = false; unsigned fVrrMinHz = 0, fVrrMaxHz = 0;
+    // 10-bit and HDR10 (boot-args nvfb10bit=1, nvfbhdr=1). fHdrCapable: the display's EDID lists PQ. fHdrActive: the mode on the
+    // head (or being set) is an HDR10 timing. fScan30: the scanout surface is X2B10G10R10 (told to the accelerator in the
+    // nvScanoutInfo reply). fHdrMeta: the mastering metadata WindowServer last sent (kIOFBHDRMetaDataAttribute).
+    bool fHdrWant = false;   // the mode being set is HDR10
+    bool fHdrCapable = false, fHdrActive = false, fScan30 = false, fHdrMetaSet = false; unsigned fHdrMaxLumCode = 0;
+    struct NvKmsHDRStaticMetadata fHdrMeta = {};
+    IOReturn setHdrMeta(const void *meta);
     static bool vrrAllowed();
     IOReturn setVrr(bool on);
     friend void nvrmfbColorChanged(bool needsModeset);   // a debug.nvrmfb_color_* sysctl changed: apply to every lit head
@@ -930,6 +937,7 @@ template <typename C> static void nvrmAutoColorFormat(C *, long) {}
 // Output colour controls. Set from boot-args nvfbbpc (6/8/10/12), nvfbformat (0 RGB, 1 YCbCr 4:2:2, 2 YCbCr 4:4:4),
 // nvfbrange (1 full, 2 limited) and nvfbvib (0..200, 100 = off; below is duller, above more vivid), and live through the
 // debug.nvrmfb_color_* sysctls. All default to "automatic": NVKMS decides, as before. They apply to every head.
+static bool gHdrOn = false, gTenBit = false;   // boot-args nvfbhdr / nvfb10bit
 static int gColorBpc = 0, gColorFormat = (int)kNvrmColorFormatAuto, gColorRange = 0, gVibrance = 0;
 // The range field exists only in headers carrying 620-color-range.patch; detection keeps baseline builds compiling.
 template <typename C> static auto nvrmSetColorFormat(C *c, NvU32 v, int) -> decltype(c->colorFormat = v, void()) { c->colorFormat = v; }
@@ -1360,6 +1368,7 @@ bool NVRMNVDAFramebuffer::kapiInit()
     struct NvKmsKapiCreateSurfaceParams sp = {};
     sp.planes[0].memory = fMem; sp.planes[0].offset = 0; sp.planes[0].pitch = fPitch;
     sp.width = fW; sp.height = fH; sp.format = NvKmsSurfaceMemoryFormatX8R8G8B8;
+    fScan30 = false; fHdrActive = false;   // the first scanout surface is 8-bit; a 30-bit one comes with a mode change
     fSurf = fKms->createSurface(fDev, &sp);
     if (!fSurf) {
         FBLOG("createSurface failed");
@@ -1616,6 +1625,7 @@ void NVRMNVDAFramebuffer::takeEdid(const NvU8 *src, NvU32 size)
     nvu_copy(fEdid, src, fEdidSize);
     nvrmEdidPanelSizeMm(fEdid, fEdidSize, &fEdidMmW, &fEdidMmH);
     if (!nvrmEdidVerticalRange(fEdid, fEdidSize, &fVrrMinHz, &fVrrMaxHz)) fVrrMinHz = fVrrMaxHz = 0;
+    fHdrCapable = nvrmEdidHdrPq(fEdid, fEdidSize, &fHdrMaxLumCode);
     if (fEdidSize < 128) return;
     bool twin = false;
     for (int k = 0; k < gNDpy && !twin; k++) {
@@ -1998,8 +2008,29 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
         const bool full = vh->modeSetConfig.bActive && (vh->flags.modeChanged || vh->flags.activeChanged || vh->flags.colorBpcChanged ||
                                                         vh->flags.colorFormatChanged);
         if (full) nvrmApplyColorPrefs(vh);
-        if (fVrrOn && fVrrSupported && vh->modeSetConfig.bActive && (vh->flags.modeChanged || vh->flags.activeChanged)) {
-            vh->modeSetConfig.vrrEnabled = NV_TRUE; vh->flags.vrrEnabledChanged = NV_TRUE;
+        if (gHdrOn && fHdrCapable && vh->modeSetConfig.bActive) {
+            // HDR10: PQ in BT.2100 colorimetry, 10 bits, the composited pixels passed through untouched. Every config for the
+            // head says so (a flip that left it out would fall back to SDR); a full mode set also flags the change, and also
+            // when it turns HDR off.
+            struct NvKmsKapiHeadModeSetConfig &mc = vh->modeSetConfig;
+            if (fHdrActive) {
+                mc.hdrInfoFrame.enabled = NV_TRUE; mc.hdrInfoFrame.eotf = NVKMS_INFOFRAME_EOTF_ST2084;
+                mc.hdrInfoFrame.staticMetadata = fHdrMeta;
+                mc.colorimetry = NVKMS_OUTPUT_COLORIMETRY_BT2100;
+                mc.postcompColorPassthrough = NV_TRUE;
+                if (!gColorBpc && mc.colorBpc == 0) mc.colorBpc = 10;
+                mc.olut.enabled = NV_FALSE; mc.olut.lutSurface = NULL; mc.olut.lutEntries = 0;   // no gamma ramp on PQ content
+            }
+            if (full) {
+                vh->flags.hdrInfoFrameChanged = vh->flags.colorimetryChanged = vh->flags.postcompColorPassthroughChanged = NV_TRUE;
+                vh->flags.olutChanged = NV_TRUE;
+            }
+        }
+        // NVKMS lets a flip float with the display's refresh only when the config it is given still says VRR is on, so every
+        // config for an active head carries it; the change flag goes with full mode sets.
+        if (fVrrOn && fVrrSupported && vh->modeSetConfig.bActive) {
+            vh->modeSetConfig.vrrEnabled = NV_TRUE;
+            if (vh->flags.modeChanged || vh->flags.activeChanged) vh->flags.vrrEnabledChanged = NV_TRUE;
         }
     }
     if (!commit) return fKms->applyModeSetConfig(fDev, cfg, rep, NV_FALSE);
@@ -2919,6 +2950,9 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
             if (PE_parse_boot_argn("nvfbformat", &v, sizeof v) && nvrmColorFormatValid(v)) gColorFormat = (int)v;
             if (PE_parse_boot_argn("nvfbrange", &v, sizeof v) && nvrmColorRangeValid(v)) gColorRange = (int)v;
             if (PE_parse_boot_argn("nvfbvib", &v, sizeof v) && v <= 200) gVibrance = (int)v - 100;
+            gHdrOn = PE_parse_boot_argn("nvfbhdr", &v, sizeof v) && v;
+            gTenBit = PE_parse_boot_argn("nvfb10bit", &v, sizeof v) && v;
+            if (gHdrOn || gTenBit) FBLOG("%s%s", gTenBit ? "10-bit scanout on mode changes (nvfb10bit=1) " : "", gHdrOn ? "HDR10 advertised for PQ displays (nvfbhdr=1)" : "");
             if (gColorBpc || gColorFormat != 3 || gColorRange || gVibrance)
                 FBLOG("colour controls: bpc %d format %d range %d vibrance %d", gColorBpc, gColorFormat, gColorRange, gVibrance); } }
     publishDdcBus();                     // before super::start() too: IOFramebuffer::open creates the I2C interface from it
@@ -3088,7 +3122,7 @@ IOReturn NVRMNVDAFramebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth
     if (mode == kModeId) {
         result = fCurId == kModeId
             ? (applyMode() ? kIOReturnSuccess : kIOReturnError)
-            : switchMode(kModeId, fBootMode, fBootW, fBootH, 0);
+            : (fHdrWant = false, switchMode(kModeId, fBootMode, fBootW, fBootH, 0));
     } else {
         int i = dtIndex(mode);
         if (i < 0) return kIOReturnUnsupportedMode;
@@ -3099,6 +3133,7 @@ IOReturn NVRMNVDAFramebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth
             if (!edidModeFor(&fDT[i], &m)) dtToKapi(&fDT[i], &m);
             NvU32 w = 0, h = 0; dtSurfaceSize(&fDT[i], &w, &h);
             const IODetailedTimingInformationV2 dt = fDT[i];
+            fHdrWant = gHdrOn && fHdrCapable && dt.dynamicRange == kIODynamicRangeHDR10;
             result = switchMode(mode, m, w, h, dt.scalerFlags & kIOScaleRotateFlags);
             if (result == kIOReturnSuccess) fCurDT = dt;
         }
@@ -3171,7 +3206,8 @@ bool NVRMNVDAFramebuffer::dtIsCurrent(const IODetailedTimingInformationV2 &d) co
 {
     NvU32 w = 0, h = 0; dtSurfaceSize(&d, &w, &h);
     return fModeSet && w == fW && h == fH && d.horizontalActive == fRasterW && d.verticalActive == fRasterH
-        && (d.scalerFlags & kIOScaleRotateFlags) == fCurTransform && d.pixelClock == fMode.timings.pixelClockHz;
+        && (d.scalerFlags & kIOScaleRotateFlags) == fCurTransform && d.pixelClock == fMode.timings.pixelClockHz
+        && (d.dynamicRange == kIODynamicRangeHDR10) == fHdrActive;   // the same raster as an HDR10 timing is another mode
 }
 void NVRMNVDAFramebuffer::dtSurfaceSize(const IODetailedTimingInformationV2 *d, NvU32 *w, NvU32 *h)
 {
@@ -3434,9 +3470,13 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
     }
     struct NvKmsKapiCreateSurfaceParams sp = {};
     sp.planes[0].memory = fMem; sp.planes[0].offset = 0; sp.planes[0].pitch = pitch;
-    sp.width = w; sp.height = h; sp.format = NvKmsSurfaceMemoryFormatX8R8G8B8;
+    // A 30-bit mode (HDR10, or nvfb10bit=1) scans an X2B10G10R10 surface; the accelerator is told in the nvScanoutInfo reply.
+    const bool ten = fHdrWant || gTenBit;
+    const bool hdrBefore = fHdrActive;
+    fHdrActive = fHdrWant;
+    sp.width = w; sp.height = h; sp.format = ten ? NvKmsSurfaceMemoryFormatX2B10G10R10 : NvKmsSurfaceMemoryFormatX8R8G8B8;
     struct NvKmsKapiSurface *ns = fKms->createSurface(fDev, &sp);
-    if (!ns) { FBLOG("switchMode 0x%x: createSurface %ux%u pitch %u FAILED", (unsigned)id, w, h, pitch); return kIOReturnNoMemory; }
+    if (!ns) { fHdrActive = hdrBefore; FBLOG("switchMode 0x%x: createSurface %ux%u pitch %u FAILED", (unsigned)id, w, h, pitch); return kIOReturnNoMemory; }
     struct NvKmsKapiRequestedModeSetConfig *cfg = (struct NvKmsKapiRequestedModeSetConfig *)IOMalloc(sizeof *cfg);
     struct NvKmsKapiModeSetReplyConfig *rep = (struct NvKmsKapiModeSetReplyConfig *)IOMalloc(sizeof *rep);
     if (!cfg || !rep) { if (cfg) IOFree(cfg, sizeof *cfg); if (rep) IOFree(rep, sizeof *rep); fKms->destroySurface(fDev, ns); return kIOReturnNoMemory; }
@@ -3462,8 +3502,9 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
         if (!ok) break;
     }
     IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
-    if (!ok) { if (!fSubmissionFaulted) fKms->destroySurface(fDev, ns); return kIOReturnUnsupportedMode; }
+    if (!ok) { fHdrActive = hdrBefore; if (!fSubmissionFaulted) fKms->destroySurface(fDev, ns); return kIOReturnUnsupportedMode; }
     struct NvKmsKapiSurface *old = fSurf;
+    fScan30 = ten;
     fSurf = ns; fFrontSurf = ns; fMode = m; fW = w; fH = h; fPitch = pitch;
     fRasterW = m.timings.hVisible; fRasterH = m.timings.vVisible; fCurId = id; fModeSet = true; fModeSwitches++;
     fCurShownKnown = false;   // the mode set named no cursor
@@ -3648,6 +3689,10 @@ void NVRMNVDAFramebuffer::publishTimingCaps()
     r.maxNumLinks = 1; r.minLink0PixelClock = 25000; r.maxLink0PixelClock = 1200000;
     r.supportedPixelEncoding = kIORangePixelEncodingRGB444; r.supportedBitsPerColorComponent = kIORangeBitsPerColorComponent8;
     r.supportedColorimetryModes = kIORangeColorimetryNativeRGB | kIORangeColorimetrysRGB; r.supportedDynamicRangeModes = kIORangeDynamicRangeSDR;
+    if (gHdrOn && fHdrCapable) {   // a PQ-capable display: HDR10 timings in BT.2020/BT.2100 are offered next to the SDR ones
+        r.supportedColorimetryModes |= kIORangeColorimetryBT2020 | kIORangeColorimetryBT2100;
+        r.supportedDynamicRangeModes |= kIORangeDynamicRangeHDR10;
+    }
     OSData *g = OSData::withBytes(&r, sizeof r);
     if (g) { setProperty(kIOFBTimingRangeKey, g); g->release(); }
     setProperty(kIOFBProbeOptionsKey, (unsigned long long)kNVRMFBSetTransform, 32);
@@ -4138,6 +4183,7 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
         r->actualSize = (unsigned long long)fPitch * fH;
         r->width = fW; r->height = fH; r->pitch = fPitch;
         r->handle = fMem;
+        r->flags = fScan30 ? NVRM_VRAM_SCANOUT_30BIT : 0;
         // Asked once per frame: logging every answer was 92% of a 512 KiB Send-logs kernel log (1401 issue #16), about
         // 67 s of history. Log only when the answer changes.
         if (fPhys != fScanLogPhys || fW != fScanLogW || fH != fScanLogH || fPitch != fScanLogPitch) {
@@ -4385,6 +4431,36 @@ IODeviceMemory *NVRMNVDAFramebuffer::getApertureRange(IOPixelAperture aperture)
     return (IODeviceMemory *)IOMemoryDescriptor::withAddressRange(
         target, bytes, kIODirectionNone | kIOMemoryMapperNone, NULL);
 }
+// kIOFBHDRMetaDataAttribute: WindowServer sends the mastering display and light-level metadata of the content on screen. It
+// goes out in the HDR infoframe on the next config that flags it; while HDR is active it is applied now.
+IOReturn NVRMNVDAFramebuffer::setHdrMeta(const void *meta)
+{
+    if (!gHdrOn || !fHdrCapable || !meta) return kIOReturnUnsupported;
+    const IOFBHDRMetaDataV1 &v = ((const IOFBHDRMetaData *)meta)->v1;
+    struct NvKmsHDRStaticMetadata m; nvu_zero(&m, sizeof m);
+    m.displayPrimaries[0].x = v.displayPrimary_X0; m.displayPrimaries[0].y = v.displayPrimary_Y0;
+    m.displayPrimaries[1].x = v.displayPrimary_X1; m.displayPrimaries[1].y = v.displayPrimary_Y1;
+    m.displayPrimaries[2].x = v.displayPrimary_X2; m.displayPrimaries[2].y = v.displayPrimary_Y2;
+    m.whitePoint.x = v.displayPrimary_X; m.whitePoint.y = v.displayPrimary_Y;
+    m.maxDisplayMasteringLuminance = v.desiredLuminance_Max; m.minDisplayMasteringLuminance = v.desiredLuminance_Min;
+    m.maxCLL = v.desiredLightLevel_Max; m.maxFALL = v.desiredLightLevel_Avg;
+    fHdrMeta = m; fHdrMetaSet = true;
+    FBLOG("fb%u: HDR metadata: max %u cd/m2, CLL %u, FALL %u", fIndex, (unsigned)m.maxDisplayMasteringLuminance, (unsigned)m.maxCLL, (unsigned)m.maxFALL);
+    if (!fHdrActive || !fModeSet || !fSurf || fHeadSlept || fConsoleAperture || !rmGpuReady()) return kIOReturnSuccess;
+    NVRMDisplayGate gate; if (!gate.valid() || !fKms || !fDev) return kIOReturnSuccess;
+    struct NvKmsKapiRequestedModeSetConfig *cfg = (struct NvKmsKapiRequestedModeSetConfig *)IOMalloc(sizeof *cfg);
+    struct NvKmsKapiModeSetReplyConfig *rep = (struct NvKmsKapiModeSetReplyConfig *)IOMalloc(sizeof *rep);
+    if (!cfg || !rep) { if (cfg) IOFree(cfg, sizeof *cfg); if (rep) IOFree(rep, sizeof *rep); return kIOReturnNoMemory; }
+    nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
+    cfg->headsMask = 1u << fHead;
+    struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
+    hr->modeSetConfig.bActive = NV_TRUE; hr->modeSetConfig.numDisplays = 1; hr->modeSetConfig.displays[0] = fDisplay;
+    hr->modeSetConfig.mode = fMode;
+    hr->flags.hdrInfoFrameChanged = NV_TRUE;   // submitConfig fills in the infoframe from fHdrMeta
+    const NvBool ok = submitConfig(cfg, rep, NV_TRUE, false, true);
+    IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
+    return ok ? kIOReturnSuccess : kIOReturnError;
+}
 bool NVRMNVDAFramebuffer::vrrAllowed()
 {
     UInt32 on = 0;
@@ -4586,6 +4662,7 @@ IOReturn NVRMNVDAFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
 {
     char c[5] = { (char)(attribute >> 24), (char)(attribute >> 16), (char)(attribute >> 8), (char)attribute, 0 };
     if (attribute == kIOFBVariableRefreshRate) return setVrr(value != 0);
+    if (attribute == kIOFBHDRMetaDataAttribute) return value > 0x1000 ? setHdrMeta((const void *)value) : kIOReturnBadArgument;
     if (attribute == kIOWindowServerActiveAttribute) {
         FBLOG("setAttribute 'wsrv' %lu -> success", (unsigned long)value);
         return kIOReturnSuccess; }

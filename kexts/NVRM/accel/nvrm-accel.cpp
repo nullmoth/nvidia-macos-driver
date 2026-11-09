@@ -1243,6 +1243,7 @@ public:
 static int    gNvIop = 0;
 static SInt64 gCntIopOk, gCntIopFail, gCntIopEmpty, gCntIopSrcRes, gCntIopSrcSurf, gCntIopBlank;
 static SInt64 gCntIopOkHead[kNvMaxFB];
+static SInt64 gCntIop30, gCntIopHalf;       // frames written to a 30-bit scanout; frames converted from half-float RGhA
 static SInt64 gCntIopL10r;                 // frames narrowed from 10-bit l10r (login window, lock screen)
 #define NVIOP_LOG_MAX 40
 static unsigned gIopLogs = 0;
@@ -1313,6 +1314,7 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     if (!s && !ro) { OSAddAtomic64(1, &gCntIopEmpty); return kIOReturnSuccess; }
 
     const volatile unsigned int *src = nullptr; unsigned w = 0, h = 0, pitch = 0; bool fromRes = false, from10 = false;
+    unsigned srcFmt = NV_IOP_FMT_BGRA;   // the pixel layout of what is copied (nv_iop_pixel.h)
     NVResource *res = OSDynamicCast(NVResource, ro);
     NVVidMemory *vm = res ? nvres_vidmem(res) : nullptr;
     static SInt32 gIopK6Logs;
@@ -1346,11 +1348,13 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         nvSurfWaitReady(s->getSurfaceID());   // a copied frame is read here, so its GPU work must be done first
         if (!nvAccelSurfCopyReady(s, head)) return kIOReturnSuccess;
         const unsigned fmt = s->getPixelFormat();
-        from10 = (fmt == NV_IOP_FMT_L10R);   // nv_iop_pixel.h: narrowed to the 8-bit scanout while copying
-        if (fmt != NV_IOP_FMT_BGRA && !from10) NVIOP_FAIL(kIOReturnUnsupported, "surface 0x%x format 0x%08x is not BGRA or l10r", s->getSurfaceID(), fmt);
+        from10 = (fmt == NV_IOP_FMT_L10R);   // nv_iop_pixel.h: narrowed to the 8-bit scanout (or swapped into a 30-bit one) while copying
+        if (fmt != NV_IOP_FMT_BGRA && !from10 && fmt != NV_IOP_FMT_RGHA) NVIOP_FAIL(kIOReturnUnsupported, "surface 0x%x format 0x%08x is not BGRA, l10r or RGhA", s->getSurfaceID(), fmt);
+        srcFmt = fmt;
+        const unsigned long long bpp = NV_IOP_BYTES_PER_PIXEL(fmt);
         const unsigned long long W = s->getWidth(), H = s->getHeight(), P = s->getBytesPerRow();
         if (!W || !H || P < 4 || W > 16384 || H > 16384 || P > 16384ull * 8) NVIOP_FAIL(kIOReturnBadArgument, "surface geometry %llux%llu pitch %llu", W, H, P);
-        if (P < 4 * W || (P & 3)) NVIOP_FAIL(kIOReturnBadArgument, "surface %llux%llu: row pitch %llu is under 4*W or not word-aligned", W, H, P);
+        if (P < bpp * W || (P & 3)) NVIOP_FAIL(kIOReturnBadArgument, "surface %llux%llu: row pitch %llu is under %llu*W or not word-aligned", W, H, P, bpp);
         IOMemoryDescriptor *md = s->getMemoryDescriptor();
         if (!md) NVIOP_FAIL(kIOReturnNoMemory, "surface 0x%x has no memory descriptor", s->getSurfaceID());
         src = (const volatile unsigned int *)iopMapSurface(s->getSurfaceID(), md, H * P);
@@ -1369,15 +1373,20 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     if (w != q.width || h != q.height) NVIOP_FAIL(kIOReturnBadArgument, "source %ux%u is not the scanout's %ux%u", w, h, q.width, q.height);
 
     nvAccelIopHome(fb, head);
-    const unsigned words = (((pitch < q.pitch) ? pitch : q.pitch) & ~3u) / 4;
+    // The framebuffer says in the reply when its scanout is 30-bit (X2B10G10R10): a 10-bit mode set (NVRM_VRAM_SCANOUT_30BIT).
+    const int dst30 = (q.flags & NVRM_VRAM_SCANOUT_30BIT) != 0;
+    const unsigned bppSrc = NV_IOP_BYTES_PER_PIXEL(srcFmt);
+    if (q.pitch < 4u * w) NVIOP_FAIL(kIOReturnBadArgument, "scanout pitch %u is under 4*%u", q.pitch, w);
     const unsigned spr = pitch / 4, dpr = q.pitch / 4;
     volatile unsigned int *d = (volatile unsigned int *)q.kva;
     for (unsigned y = 0; y < h; y++) {
         const volatile unsigned int *sp = src + (unsigned long)y * spr;
         volatile unsigned int *dp = d + (unsigned long)y * dpr;
-        if (from10) for (unsigned x = 0; x < words; x++) dp[x] = nv_iop_l10r_to_x8r8g8b8(sp[x]);
-        else        for (unsigned x = 0; x < words; x++) dp[x] = sp[x];
+        (void)nv_iop_convert_row(dp, sp, w, srcFmt, dst30);
     }
+    (void)bppSrc;
+    if (dst30) OSAddAtomic64(1, &gCntIop30);
+    if (srcFmt == NV_IOP_FMT_RGHA) OSAddAtomic64(1, &gCntIopHalf);
     if (from10) OSAddAtomic64(1, &gCntIopL10r);
     OSAddAtomic64(1, fromRes ? &gCntIopSrcRes : &gCntIopSrcSurf);
     const SInt64 n = OSAddAtomic64(1, &gCntIopOk);
@@ -1468,6 +1477,8 @@ NVACCEL_CNT(nvaccel_iop_fail,         gCntIopFail,        "K3: transactions refu
 NVACCEL_CNT(nvaccel_iop_empty,        gCntIopEmpty,       "K3: transactions with no plane (gamma/options only)");
 NVACCEL_CNT(nvaccel_iop_src_res,      gCntIopSrcRes,      "K3: frames sourced from our VRAM resource");
 NVACCEL_CNT(nvaccel_iop_src_surf,     gCntIopSrcSurf,     "K3: frames sourced from the IOSurface memory");
+NVACCEL_CNT(nvaccel_iop_30bit,         gCntIop30,          "frames written to a 30-bit scanout");
+NVACCEL_CNT(nvaccel_iop_half,          gCntIopHalf,        "frames converted from half-float RGhA");
 NVACCEL_CNT(nvaccel_iop_l10r,         gCntIopL10r,        "frames narrowed from 10-bit l10r to the 8-bit scanout");
 NVACCEL_CNT(nvaccel_iop_blank,        gCntIopBlank,       "K6: frames copied whose 64 samples were all ONE colour (a blank frame)");
 static SInt64 gCntIopCopySkip;
@@ -1610,7 +1621,7 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_iop);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok);         sysctl_register_oid(&sysctl__debug_nvaccel_iop_fail);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_empty);
-    sysctl_register_oid(&sysctl__debug_nvaccel_iop_src_res);    sysctl_register_oid(&sysctl__debug_nvaccel_iop_src_surf); sysctl_register_oid(&sysctl__debug_nvaccel_iop_l10r);
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_src_res);    sysctl_register_oid(&sysctl__debug_nvaccel_iop_src_surf); sysctl_register_oid(&sysctl__debug_nvaccel_iop_l10r); sysctl_register_oid(&sysctl__debug_nvaccel_iop_30bit); sysctl_register_oid(&sysctl__debug_nvaccel_iop_half);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_blank);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_skip);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip);       sysctl_register_oid(&sysctl__debug_nvaccel_iop_flips);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_home);  sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_lock);

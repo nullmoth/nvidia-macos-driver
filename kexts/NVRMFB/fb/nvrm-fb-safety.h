@@ -186,3 +186,34 @@ static inline void nvrmSaturationMatrix(int vibrance, int m[3][3])
         m[r][2] = (int)(65536 - sum);
     }
 }
+// ---- HDR (HDR10) ----
+// The display's HDR static-metadata data block (CTA-861 extension block, extended tag 6): which transfer functions it takes
+// (bit 2 of `eotfMask` is ST 2084 / PQ) and its luminance codes. Returns true when a PQ-capable block is present.
+static inline bool nvrmEdidHdrPq(const unsigned char *e, unsigned n, unsigned *maxLumCode)
+{
+    if (!e || n < 256) return false;
+    for (unsigned blk = 128; blk + 128 <= n; blk += 128) {
+        const unsigned char *x = e + blk;
+        if (x[0] != 0x02) continue;
+        const unsigned end = x[2] < 4 ? 4 : (x[2] > 127 ? 127 : x[2]);
+        for (unsigned i = 4; i < end;) {
+            const unsigned tag = x[i] >> 5, len = x[i] & 31;
+            if (i + 1 + len > end) break;
+            if (tag == 7 && len >= 3 && x[i + 1] == 6 && (x[i + 2] & 4)) {
+                if (maxLumCode) *maxLumCode = len >= 5 ? x[i + 4] : 0;
+                return true;
+            }
+            i += 1 + len;
+        }
+    }
+    return false;
+}
+// The EDID luminance code to cd/m2: 50 * 2^(code / 32), 0 = unknown.
+static inline unsigned nvrmHdrLuminanceFromCode(unsigned code)
+{
+    if (!code) return 0;
+    unsigned long long v = 50ull << (code / 32);
+    static const unsigned frac[32] = { 1000, 1022, 1044, 1067, 1091, 1114, 1139, 1164, 1189, 1215, 1242, 1269, 1297, 1325, 1354, 1384, 1414, 1445, 1477, 1509, 1542, 1576, 1610, 1646, 1682, 1719, 1756, 1795, 1834, 1874, 1915, 1957 };
+    v = v * frac[code % 32] / 1000;
+    return v > 65535 ? 65535 : (unsigned)v;
+}
