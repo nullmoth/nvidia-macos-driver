@@ -8,4 +8,5 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 lipo -archs "$BIN" | grep -qx x86_64 || { echo "STOP: nvmtl-boost is not x86_64"; exit 1; }
 mkdir -p "$ROOT/Library/NullMoth/boost"
 cp "$BIN" "$ROOT/Library/NullMoth/boost/nvmtl-boost"
+bash "$HERE/sums_refresh.sh" "$ROOT" Library/NullMoth/boost/nvmtl-boost
 echo "staged the GPU boost daemon $(shasum -a 256 "$ROOT/Library/NullMoth/boost/nvmtl-boost" | cut -c1-8)"

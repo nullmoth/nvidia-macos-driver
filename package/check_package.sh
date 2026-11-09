@@ -1,6 +1,7 @@
 #!/bin/bash
 # check_package.sh <pkgroot>: the last step of a package build. Fails (exit 1) if the tree lacks the video codec library, if
-# it is not signed, if SHA256SUMS does not carry a line that matches it, or if the Ryzen power parts (stage_nmsmn.sh) are missing or unlisted.
+# it is not signed, if SHA256SUMS does not carry a line that matches it, if the Ryzen power parts (stage_nmsmn.sh) are missing or
+# unlisted, or if any regular file in the tree is not listed in SHA256SUMS.
 set -uo pipefail
 ROOT=${1:?pkgroot}
 REL="Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib"
@@ -30,5 +31,9 @@ else
     grep -qE "^$w  (\./)?$f\$" "$ROOT/SHA256SUMS" 2>/dev/null || { echo "STOP: SHA256SUMS has no matching line for $f"; fail=1; }
   done < <(cd "$ROOT" && find "$N" "Library/NullMoth/ryzenadj" -type f | LC_ALL=C sort)
 fi
+# Every regular file must be listed: install.sh refuses a package whose SHA256SUMS leaves a file out (sums_complete.sh).
+HERE=$(cd "$(dirname "$0")" && pwd)
+bash "$HERE/sums_complete.sh" "$ROOT" || fail=1
+[ -f "$ROOT/sums_complete.sh" ] || { echo "STOP: the package lacks sums_complete.sh, which install.sh runs"; fail=1; }
 [ "$fail" = 0 ] && echo "package carries libnvencvt.dylib ${want:0:8} and the Ryzen power parts"
 exit $fail
