@@ -47,6 +47,7 @@ static inline thread_call_t nvrmfbCall(thread_call_func_t fn, thread_call_param_
 #include "nvrm-fb-safety.h"
 #include <IOKit/i2c/IOI2CInterface.h>
 #include "../nvrm_ddc_abi.h"
+#include "../nvrm_edp_backlight.h"
 #include "nvrm-allocation-table.h"
 static IORecursiveLock *startLock();
 class NVRMCallReference {
@@ -246,6 +247,7 @@ class NVRMBacklightHandler : public IODisplayParameterHandler {
     volatile SInt32 fPersistPending = -1;
     volatile UInt64 fPersistDeadline = 0;
     SInt32 fRestoreLevel = -1;
+    bool fEdp = false; unsigned fEdpGpu = 0, fEdpDisplay = 0; EdpBacklightCaps fEdpCaps = {};   // DPCD brightness fallback, see publishBacklight
     bool fHaveSaved = false;            // NVRAM held a saved level when this handler was made
     volatile bool fUserSeen = false;    // a user request other than a start-up default has arrived
     OSDictionary *fParameters = nullptr;
@@ -254,6 +256,8 @@ class NVRMBacklightHandler : public IODisplayParameterHandler {
     static const OSSymbol *sBrightnessProbe, *sLinearBrightnessProbe;
 public:
     static NVRMBacklightHandler *withRM(IOService *rm, NvU32 level);
+    unsigned edpGpu() const { return fEdpGpu; } unsigned edpDisplay() const { return fEdpDisplay; } const EdpBacklightCaps &edpCaps() const { return fEdpCaps; }
+    void useEdpAux(unsigned gpu, unsigned display, const EdpBacklightCaps &caps) { fEdp = true; fEdpGpu = gpu; fEdpDisplay = display; fEdpCaps = caps; }
     bool setDisplay(IODisplay *display) override;
     bool doIntegerSet(OSDictionary *params, const OSSymbol *paramName, UInt32 value) override;
     bool doDataSet(const OSSymbol *, OSData *) override { return false; }
@@ -367,6 +371,22 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
     return true;
 }
 
+// One DPCD transaction through NVRM (nvrm_ddc.cpp): at most 16 bytes within 0x700..0x7ff.
+static IOReturn nvrmDpAux(IOService *rm, unsigned gpu, unsigned display, bool write, unsigned addr, unsigned char *d, unsigned len)
+{
+    const OSSymbol *fn = OSSymbol::withCString(NVRM_DPAUX_FN);
+    struct NVRMDpAuxRequest *q = (struct NVRMDpAuxRequest *)IOMalloc(sizeof *q);
+    if (!rm || !fn || !q || len > kNvrmDpAuxMax) { OSSafeReleaseNULL(fn); if (q) IOFree(q, sizeof *q); return kIOReturnNoMemory; }
+    nvu_zero(q, sizeof *q);
+    q->gpuId = gpu; q->displayId = display; q->write = write ? 1 : 0; q->addr = addr; q->len = len;
+    if (write) nvu_copy(q->data, d, len);
+    IOReturn r = rm->callPlatformFunction(fn, false, q, NULL, NULL, NULL);
+    if (r == kIOReturnSuccess && !write) nvu_copy(d, q->data, len);
+    IOFree(q, sizeof *q); fn->release();
+    return r;
+}
+// Brightness over the eDP AUX channel: read the current mode and enable bytes, write what changes (nvrm_edp_backlight.h).
+static IOReturn nvrmEdpSet(NVRMBacklightHandler *h, IOService *rm, unsigned percent);
 void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
 {
     NVRMBacklightHandler *me = (NVRMBacklightHandler *)p;
@@ -374,7 +394,7 @@ void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
     do { v = me->fPending; } while (!OSCompareAndSwap((UInt32)v, (UInt32)-1, (volatile UInt32 *)&me->fPending));
     if (v < 0) return;
     NvU32 percent = nvrm_backlight_to_percent((UInt32)v);
-    IOReturn r = me->fRM->callPlatformFunction(me->fFn, false, &percent, (void *)1, NULL, NULL);
+    IOReturn r = me->fEdp ? nvrmEdpSet(me, me->fRM, percent) : me->fRM->callPlatformFunction(me->fFn, false, &percent, (void *)1, NULL, NULL);
     if (r == kIOReturnSuccess) {
         me->fLevel = v;
         BLLOG("backlight: applied logical=%d/65535 hardware=%u%% user-target=%d/65535",
@@ -3071,6 +3091,16 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
 }
 
 // The internal panel's brightness control, when NVKMS registered a backlight for it (needs the NBCI _DSM).
+static IOReturn nvrmEdpSet(NVRMBacklightHandler *h, IOService *rm, unsigned percent)
+{
+    unsigned char mode = 0, ctl = 0;
+    IOReturn r = nvrmDpAux(rm, h->edpGpu(), h->edpDisplay(), false, kEdpBacklightMode, &mode, 1);
+    if (r == kIOReturnSuccess) r = nvrmDpAux(rm, h->edpGpu(), h->edpDisplay(), false, kEdpDisplayCtl, &ctl, 1);
+    if (r != kIOReturnSuccess) return r;
+    EdpWrite w[5]; const unsigned n = edpBacklightPlan(h->edpCaps(), mode, ctl, percent, w);
+    for (unsigned i = 0; i < n && r == kIOReturnSuccess; i++) { unsigned char b = w[i].value; r = nvrmDpAux(rm, h->edpGpu(), h->edpDisplay(), true, w[i].addr, &b, 1); }
+    return r;
+}
 void NVRMNVDAFramebuffer::publishBacklight()
 {
     IOService *rm = getProvider();
@@ -3079,8 +3109,30 @@ void NVRMNVDAFramebuffer::publishBacklight()
     NvU32 level = 0;
     IOReturn r = (rm && fn) ? rm->callPlatformFunction(fn, false, &level, NULL, NULL, NULL) : kIOReturnNotFound;
     OSSafeReleaseNULL(fn);
+    bool viaAux = false; EdpBacklightCaps caps = {};
+    if (r != kIOReturnSuccess) {
+        // NVKMS knows no way to dim this panel. If the panel takes brightness over the eDP AUX channel (its DPCD says so), do
+        // that; a panel that only has the PWM pin stays without a control. Off with boot-arg nvfbedpbl=0.
+        UInt32 on = 1;
+        unsigned char cap[2] = { 0, 0 };
+        PE_parse_boot_argn("nvfbedpbl", &on, sizeof on);
+        if (on && rm && nvrmDpAux(rm, fGpuId, (unsigned)fDisplay, false, kEdpGeneralCap1, cap, 2) == kIOReturnSuccess) {
+            caps = edpBacklightCaps(cap[0], cap[1]);
+            FBLOG("fb%u: no NVKMS backlight; eDP DPCD 0x701=0x%02x 0x702=0x%02x -> AUX brightness %s", fIndex, cap[0], cap[1], caps.auxSet ? "supported" : "not offered by the panel");
+            if (caps.auxSet) {
+                unsigned char msb = 0, lsb = 0;
+                if (nvrmDpAux(rm, fGpuId, (unsigned)fDisplay, false, kEdpBacklightMsb, &msb, 1) == kIOReturnSuccess) {
+                    if (caps.twoBytes) (void)nvrmDpAux(rm, fGpuId, (unsigned)fDisplay, false, kEdpBacklightLsb, &lsb, 1);
+                    const unsigned raw = caps.twoBytes ? ((unsigned)msb << 8 | lsb) : msb, full = caps.twoBytes ? 0xFFFFu : 0xFFu;
+                    level = raw >= full ? 100 : (raw * 100 + full / 2) / full;
+                } else level = 100;
+                viaAux = true; r = kIOReturnSuccess;
+            }
+        }
+    }
     if (r != kIOReturnSuccess) { FBLOG("fb%u: internal panel, but NVKMS registered no backlight (0x%x) -- no brightness control", fIndex, r); return; }
     fBacklight = NVRMBacklightHandler::withRM(rm, level);
+    if (fBacklight && viaAux) fBacklight->useEdpAux(fGpuId, (unsigned)fDisplay, caps);
     if (!fBacklight) { FBLOG("fb%u: backlight handler allocation failed", fIndex); return; }
     fBacklight->setName("backlight");
     if (!fBacklight->attach(this)) { OSSafeReleaseNULL(fBacklight); FBLOG("fb%u: backlight handler attach failed", fIndex); return; }

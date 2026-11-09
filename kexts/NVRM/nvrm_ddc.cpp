@@ -96,3 +96,33 @@ extern "C" int nvrm_ddc_transfer(struct NVRMDdcRequest *r)
                                 (NvU8)r->addr7, 0, r->len, r->data);
     return r->status == 0 ? 0 : -1;
 }
+
+// One native DPCD read or write on the display's AUX channel (NV0073_CTRL_CMD_DP_AUXCH_CTRL, public control interface).
+// Only the eDP panel-control range is reachable: DPCD 0x700 to 0x7ff, where the backlight registers are.
+#include "ctrl/ctrl0073/ctrl0073dp.h"
+extern "C" int nvrm_dpaux_transfer(struct NVRMDpAuxRequest *r)
+{
+    if (!r) return -1;
+    r->status = 0;
+    if (!r->len || r->len > kNvrmDpAuxMax || r->addr < 0x700 || r->addr + r->len > 0x800) { r->status = NV_ERR_INVALID_ARGUMENT; return -1; }
+    nv_state_t *nv = nv_xnu_gpu_state();
+    if (!nv || nv->gpu_id != r->gpuId || !nv->rmapi.hClient || !nv->rmapi.hDisp) { r->status = NV_ERR_OBJECT_NOT_FOUND; return -1; }
+    NV0073_CTRL_DP_AUXCH_CTRL_PARAMS p;
+    for (unsigned i = 0; i < sizeof p; i++) ((unsigned char *)&p)[i] = 0;
+    p.displayId = r->displayId;
+    p.cmd = DRF_DEF(0073_CTRL, _DP_AUXCH_CMD, _TYPE, _AUX) | DRF_DEF(0073_CTRL, _DP_AUXCH_CMD, _I2C_MOT, _FALSE) |
+            (r->write ? DRF_DEF(0073_CTRL, _DP_AUXCH_CMD, _REQ_TYPE, _WRITE) : DRF_DEF(0073_CTRL, _DP_AUXCH_CMD, _REQ_TYPE, _READ));
+    p.addr = r->addr; p.size = r->len;
+    if (r->write) for (unsigned i = 0; i < r->len; i++) p.data[i] = r->data[i];
+    nvidia_kernel_rmapi_ops_t ops;
+    for (unsigned i = 0; i < sizeof ops; i++) ((unsigned char *)&ops)[i] = 0;
+    ops.op = NV04_CONTROL;
+    ops.params.control.hClient = nv->rmapi.hClient; ops.params.control.hObject = nv->rmapi.hDisp;
+    ops.params.control.cmd = NV0073_CTRL_CMD_DP_AUXCH_CTRL;
+    ops.params.control.params = (NvP64)(NvUPtr)&p; ops.params.control.paramsSize = sizeof p;
+    rm_kernel_rmapi_op(NULL, &ops);
+    if (ops.params.control.status != 0) { r->status = ops.params.control.status; return -1; }
+    if (p.replyType != NV0073_CTRL_DP_AUXCH_REPLYTYPE_ACK) { r->status = NV_ERR_INVALID_STATE; return -1; }
+    if (!r->write) for (unsigned i = 0; i < r->len && i < p.size; i++) r->data[i] = p.data[i];
+    return 0;
+}

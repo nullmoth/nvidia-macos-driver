@@ -48,3 +48,17 @@ static inline unsigned nvrmDdcReplyDelayMs(unsigned long long requestedNs)
     if (ms > 500) ms = 500;
     return (unsigned)ms;
 }
+
+// Native DisplayPort AUX transactions (DPCD reads and writes), for the eDP backlight fallback in nvrm_edp_backlight.h.
+// NVRM::callPlatformFunction("NVRMDpAux", &request). At most 16 bytes per transaction, as the resource manager allows.
+#define NVRM_DPAUX_FN "NVRMDpAux"
+enum { kNvrmDpAuxMax = 16 };
+struct NVRMDpAuxRequest {
+    unsigned gpuId;
+    unsigned displayId;
+    unsigned write;            // 1 = write, 0 = read
+    unsigned addr;             // DPCD address
+    unsigned len;              // 1..16
+    unsigned status;           // out: resource manager status (0 = ok)
+    unsigned char data[kNvrmDpAuxMax];
+};
