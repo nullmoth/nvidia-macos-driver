@@ -27,6 +27,7 @@ def check(name, ok, detail=''):
 
 # BAR1 sits at 0xE0000000; the console is either inside it or elsewhere
 prog = r'''#include <stdio.h>
+#include "nvrm_startup_policy.h"
 #include <stdlib.h>
 #include <strings.h>
 typedef unsigned long long UInt64; typedef unsigned int UInt32;
@@ -39,12 +40,15 @@ static Platform g_platform;
 static Platform *getPlatform() { return &g_platform; }
 struct PCI { UInt32 configRead32(int off) { return off == 0x14 ? 0xE000000Cu : 0; } };
 static PCI g_pci, *fPCI = &g_pci;
+static bool g_keep;
+static bool nvrmKeepBar1Size() { return g_keep; }   // -nvrmkeepbar1
 static UInt64 choose(UInt64 bar1Size, UInt32 rbSupported, UInt32 rbCtlOff, bool smallBar) {
 ''' + body + r'''
     return newSize ? newSize : bar1Size;
 }
 int main(int c, char **v) {
     g_con = strtoull(v[4], 0, 0);
+    g_keep = c > 5 && atoi(v[5]);
     printf("%llu\n", choose(strtoull(v[1], 0, 0) << 20, (UInt32)strtoul(v[2], 0, 0), 0x108, atoi(v[3])) >> 20);
     return 0;
 }
@@ -54,12 +58,12 @@ prog = prog.replace('return false;', 'return 0;')
 with tempfile.TemporaryDirectory() as t:
     t = pathlib.Path(t)
     (t / 'c.cpp').write_text(prog)
-    r = subprocess.run(['/usr/bin/clang++', '-std=c++17', '-Wall', '-Werror', t / 'c.cpp', '-o', t / 'c'],
+    r = subprocess.run(['/usr/bin/clang++', '-std=c++17', '-Wall', '-Werror', '-I', str(pathlib.Path(__file__).resolve().parents[1] / 'kexts/NVRM'), t / 'c.cpp', '-o', t / 'c'],
                        capture_output=True, text=True, timeout=120)
     check('the size choice compiles out of NVRM.cpp', r.returncode == 0, r.stderr[:300])
     if r.returncode == 0:
-        def mb(size_mb, mask, small=0, console=0x80000000):
-            return int(subprocess.run([t / 'c', str(size_mb), hex(mask), str(small), hex(console)],
+        def mb(size_mb, mask, small=0, console=0x80000000, keep=0):
+            return int(subprocess.run([t / 'c', str(size_mb), hex(mask), str(small), hex(console), str(keep)],
                                       capture_output=True, text=True, timeout=30).stdout)
         inside = 0xE0001000
         check('a Turing card left at 64 MB (mask 0x1c0) is resized to 256 MB', mb(64, 0x1c0) == 256, mb(64, 0x1c0))
@@ -73,6 +77,11 @@ with tempfile.TemporaryDirectory() as t:
         check('-nvrmsmallbar sizes an 8 GB card to 256 MB', mb(8192, 0x7fc0, small=1) == 256, mb(8192, 0x7fc0, small=1))
         check('negative control: -nvrmsmallbar on a card without 256 MB is refused', mb(8192, 0x6000, small=1) == 0,
               mb(8192, 0x6000, small=1))
+
+        check('a firmware 16 GB BAR1 that offers 8 GB is resized to 8 GB', mb(16384, 0xffc0) == 8192, mb(16384, 0xffc0))
+        check('-nvrmkeepbar1 keeps the firmware 16 GB', mb(16384, 0xffc0, keep=1) in (0, 16384), mb(16384, 0xffc0, keep=1))
+        check('negative control: a 16 GB BAR1 on a card without 8 GB is left alone', mb(16384, 0x4000 | 0x8000) in (0, 16384),
+              mb(16384, 0xc000))
 
 print('FAILED' if fails else 'PASS')
 sys.exit(1 if fails else 0)
