@@ -1017,9 +1017,20 @@ void NVRM::autoGo(void *p0, wait_result_t)
     } else {
         s->setProperty("nvrm-autogo", "up");
         int want = 1; if (!PE_parse_boot_argn("nvfbheads", &want, sizeof(want)) || want < 1) want = 1;
+        // Hybrid laptops (boot-arg nmhybrid 1 or 2): the panel is another GPU's framebuffer, published as head 4 of this
+        // accelerator. Arming before it exists leaves it without a pipe until a second write and a WindowServer restart,
+        // so wait for it, bounded by the same 20 s as the NVIDIA heads.
+        bool hyWait = false;
+        { int lv = 0; const int present = PE_parse_boot_argn("nmhybrid", &lv, sizeof(lv)); hyWait = present && (lv == 1 || lv == 2); }
         int mask = 0, last = -1, still = 0, i;
         for (i = 0; i < 20; i++) {
             if (nvrmSysR("debug.nvaccel_heads_published", &mask) != 0) mask = 0;
+            if (hyWait) {
+                if (mask & 0x10) { LOG("auto-go: hybrid: the other GPU's panel published as head 4 after %d s", i); break; }
+                if (i == 0) LOG("auto-go: hybrid: waiting up to 20 s for the other GPU's panel (head 4) before arming");
+                IOSleep(1000);
+                continue;
+            }
             if ((int)nvrmPop((unsigned)mask) >= want) break;
             still = (mask && mask == last) ? still + 1 : 0; last = mask;
             if (still >= 3) break;
