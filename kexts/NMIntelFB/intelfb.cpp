@@ -22,6 +22,8 @@
 #include "nm_hybrid_resume.h"
 #include "nm_hybrid_resume14.h"
 #include "nm_hybrid_tc.h"
+#include "nm_hybrid_extmode.h"
+#include "nm_hybrid_heads.h"
 #include "nm_hybrid_vbt.h"
 #include "nm_hybrid_dmc.h"
 #include "nvrm_off.h"
@@ -274,6 +276,15 @@ private:
     thread_call_t fTcTimer = nullptr; struct nmt_port fTcPort[4]; uint32_t fTcLast[4] = {0, 0, 0, 0}; unsigned fTcN = 0;
     void tcStart();
     static void tcFire(thread_call_param_t p0, thread_call_param_t);
+    // External test heads (boot-arg nmhybridext=1, display versions 12 and 13): when a cable arrives on a Type-C port the whole bring-up of
+    // nm_hybrid_extmode.h runs on a second pipe with a colour-bar buffer mapped into the graphics table, and unplug takes it down. The
+    // framebuffer for the window system is not published (heads.h has the lifecycle; the accelerator has no pipe for it yet).
+    struct ExtObj;
+    bool fExtOn = false; struct nmhd fHeads; struct nmhd_ops fHeadOps; ExtObj *fExtObj[NMHD_MAX] = {}; uint64_t fExtScratch = 0; uint32_t fExtPipes = 0;
+    static int extDevOpen(void *c); static void extDevClose(void *c);
+    static void *extCreate(void *c, unsigned slot, unsigned port); static int extBringUp(void *c, void *o, unsigned port);
+    static int extPublish(void *c, void *o, unsigned slot); static void extUnpublish(void *c, void *o);
+    static void extTakeDown(void *c, void *o, unsigned port); static void extRelease(void *c, void *o);
 
     uint32_t rd(uint32_t off) const { return *(volatile uint32_t *)(fRegs + off); }
     void wr(uint32_t off, uint32_t v) const { *(volatile uint32_t *)(fRegs + off) = v; }
@@ -580,6 +591,7 @@ void NMIntelFB::stop(IOService *provider)
     if (fDmcBlob) { IOFree(fDmcBlob, fDmcLen); fDmcBlob = nullptr; }
     if (gDmcLock) IOLockUnlock(gDmcLock);
     if (fTcTimer) { thread_call_cancel(fTcTimer); while (!thread_call_free(fTcTimer)) { thread_call_cancel(fTcTimer); IOSleep(5); } fTcTimer = nullptr; }
+    if (fExtOn) { nmhd_stop(&fHeads, &fHeadOps); fExtOn = false; }
     if (fResumeCall) { thread_call_cancel(fResumeCall); while (!thread_call_free(fResumeCall)) { thread_call_cancel(fResumeCall); IOSleep(5); } fResumeCall = nullptr; }
     if (fSnap) { IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; }
     if (fFwPte) { IOFree(fFwPte, (size_t)(fFwPteCount * sizeof(uint64_t))); fFwPte = nullptr; }
@@ -990,6 +1002,94 @@ void NMIntelFB::resumeCapture()
            fSnap->no_handshake ? "no AUX handshake" : "AUX link training");
 }
 
+struct NMIntelFB::ExtObj { IOBufferMemoryDescriptor *md = nullptr; uint64_t first = 0, count = 0; struct nmo m; unsigned pipe = 0; };
+int NMIntelFB::extDevOpen(void *c) { NMIntelFB *me = (NMIntelFB *)c; return me->fRegs && me->fGsm ? 0 : -1; }
+void NMIntelFB::extDevClose(void *) {}
+void *NMIntelFB::extCreate(void *c, unsigned slot, unsigned)
+{
+    NMIntelFB *me = (NMIntelFB *)c;
+    if (slot >= NMHD_MAX) return nullptr;
+    ExtObj *x = (ExtObj *)IOMalloc(sizeof(ExtObj));
+    if (!x) return nullptr;
+    bzero(x, sizeof *x);
+    const size_t bytes = (size_t)1920 * 1080 * 4;
+    x->md = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut, bytes, 4096);
+    if (!x->md || x->md->prepare() != kIOReturnSuccess) { OSSafeReleaseNULL(x->md); IOFree(x, sizeof *x); return nullptr; }
+    bzero(x->md->getBytesNoCopy(), bytes);
+    me->fExtObj[slot] = x;
+    return x;
+}
+int NMIntelFB::extBringUp(void *c, void *o, unsigned port)
+{
+    NMIntelFB *me = (NMIntelFB *)c; ExtObj *x = (ExtObj *)o;
+    const size_t bytes = (size_t)x->md->getLength();
+    const uint64_t pages = (bytes + 4095) / 4096;
+    // a pipe other than the panel's and the other external heads'
+    unsigned pipe = 4;
+    for (unsigned p = 0; p < 4; p++) if ((int)p != me->fPipe && !(me->fExtPipes & (1u << p))) { pipe = p; break; }
+    if (pipe == 4) return -1;
+    // a run of unused graphics-table entries below the import ring, clear of the firmware surface
+    const uint64_t top0 = me->fGsmEntries > 512 ? me->fGsmEntries - 512 : 0;
+    const uint64_t top = (me->fHyReady && me->fRing.base / NMH_PAGE < top0) ? me->fRing.base / NMH_PAGE : top0;
+    const uint64_t fwLo = me->fSurf >> 12, fwHi = (((uint64_t)me->fSurf + (uint64_t)me->fRowBytes * me->fHeight) - 1) >> 12;
+    const int64_t first = nmh_find_free_run(ggttRead, (void *)me->fGsm, top, 65536, pages, fwLo, fwHi);
+    if (first < 0 || (uint64_t)(first + pages) * NMH_PAGE > (1ull << 32)) { IFBLOG("hybrid: external head: no free run of %llu graphics-table entries", (unsigned long long)pages); return -1; }
+    for (uint64_t i = 0; i < pages; i++) {
+        IOByteCount seg = 0;
+        const addr64_t a = x->md->getPhysicalSegment((IOByteCount)i * 4096, &seg, kIOMemoryMapperNone);
+        const uint64_t pte = (a && seg >= 4096) ? nmh_ggtt_pte(a) : 0;
+        if (!pte) { for (uint64_t k = 0; k < i; k++) me->fGsm[first + k] = me->fExtScratch; return -1; }
+        me->fGsm[first + i] = pte;
+    }
+    (void)me->fGsm[first + pages - 1];
+    me->wr(kGfxFlshCntl, 1);
+    x->first = (uint64_t)first; x->count = pages; x->pipe = pipe;
+    struct nmr_ops ops = { me,
+        [](void *cc, uint32_t off) { return ((NMIntelFB *)cc)->rd(off); },
+        [](void *cc, uint32_t off, uint32_t v) { ((NMIntelFB *)cc)->wr(off, v); },
+        [](void *, unsigned us) { IODelay(us); },
+        [](void *, const char *st) { IFBLOG("hybrid: %s", st); },
+        nullptr };
+    const uint32_t ref = (me->rd(NMR_DSSM) >> 29) & 7u;
+    const unsigned refclk = ref == 0 ? 24000u : (ref == 1 ? 19200u : 38400u);
+    unsigned ds = 0, de = 0;
+    { const uint32_t pc = me->rd(0x7027Cu + 0x1000u * (unsigned)me->fPipe); ds = pc & 0xFFFu; de = ((pc >> 16) & 0xFFFu) + 1u; }
+    unsigned fs, fe; nmw_free_run(nmw_dbuf_total(me->fVer), ds, de, &fs, &fe);
+    if (nmo_init(&ops, &x->m, me->fVer, port, pipe, refclk)) return -1;
+    const int rc = nmo_enable(&ops, &x->m, (uint32_t)(x->first * NMH_PAGE), (uint32_t)bytes, fs, fe);
+    if (rc) { IFBLOG("hybrid: external head on Type-C port %u failed: %s", port + 1, nmo_err_name(rc)); for (uint64_t k = 0; k < pages; k++) me->fGsm[first + k] = me->fExtScratch; me->wr(kGfxFlshCntl, 1); return -1; }
+    // colour bars in the buffer, then out of the CPU caches for the display engine
+    { uint32_t *px = (uint32_t *)x->md->getBytesNoCopy(); static const uint32_t bars[8] = { 0xFFFFFF, 0xFFFF00, 0x00FFFF, 0x00FF00, 0xFF00FF, 0xFF0000, 0x0000FF, 0x000000 };
+      const unsigned w = x->m.t.hactive, h = x->m.t.vactive, pitch = x->m.pitch / 4;
+      for (unsigned yy = 0; yy < h; yy++) for (unsigned xx = 0; xx < w; xx++) px[(size_t)yy * pitch + xx] = bars[xx * 8 / w];
+      x->md->performOperation(kIOMemoryIncoherentIOFlush, 0, (IOByteCount)bytes); }
+    me->fExtPipes |= 1u << pipe;
+    IFBLOG("hybrid: external head on Type-C port %u is up: %ux%u, %u lanes at %u Gb/s per lane x100, pipe %c", port + 1, x->m.t.hactive, x->m.t.vactive, x->m.lanes, x->m.rate / 10000u, 'A' + pipe);
+    return 0;
+}
+int NMIntelFB::extPublish(void *, void *, unsigned slot) { IFBLOG("hybrid: external head %u shows colour bars (it is not published to the window system)", slot); return 0; }
+void NMIntelFB::extUnpublish(void *, void *) {}
+void NMIntelFB::extTakeDown(void *c, void *o, unsigned)
+{
+    NMIntelFB *me = (NMIntelFB *)c; ExtObj *x = (ExtObj *)o;
+    struct nmr_ops ops = { me,
+        [](void *cc, uint32_t off) { return ((NMIntelFB *)cc)->rd(off); },
+        [](void *cc, uint32_t off, uint32_t v) { ((NMIntelFB *)cc)->wr(off, v); },
+        [](void *, unsigned us) { IODelay(us); },
+        [](void *, const char *st) { IFBLOG("hybrid: %s", st); },
+        nullptr };
+    nmo_teardown(&ops, &x->m);
+    if (x->count) { for (uint64_t k = 0; k < x->count; k++) me->fGsm[x->first + k] = me->fExtScratch; me->wr(kGfxFlshCntl, 1); x->count = 0; }
+    me->fExtPipes &= ~(1u << x->pipe);
+}
+void NMIntelFB::extRelease(void *c, void *o)
+{
+    NMIntelFB *me = (NMIntelFB *)c; ExtObj *x = (ExtObj *)o;
+    for (unsigned i = 0; i < NMHD_MAX; i++) if (me->fExtObj[i] == x) me->fExtObj[i] = nullptr;
+    if (x->md) { x->md->complete(); OSSafeReleaseNULL(x->md); }
+    IOFree(x, sizeof *x);
+}
+
 static const char *tcModeName(unsigned m) { return m == NMT_DPALT ? "DisplayPort-alt" : m == NMT_TBT ? "Thunderbolt-alt" : m == NMT_LEGACY ? "legacy" : "disconnected"; }
 void NMIntelFB::tcFire(thread_call_param_t p0, thread_call_param_t)
 {
@@ -1005,6 +1105,11 @@ void NMIntelFB::tcFire(thread_call_param_t p0, thread_call_param_t)
         const int ev = nmt_poll(&ops, &me->fTcPort[i], &me->fTcLast[i]);
         if (ev) IFBLOG("hybrid: Type-C port %u: %s, live mode %s", i + 1, ev == 1 ? "cable plugged" : ev == 2 ? "cable unplugged" : "cable changed",
                        tcModeName(nmt_mask_to_mode(me->fTcLast[i])));
+        if (me->fExtOn && !me->fStopping) {
+            if (ev == 1) { const int r = nmhd_plug(&me->fHeads, &me->fHeadOps, i); IFBLOG("hybrid: external head on Type-C port %u: %s", i + 1, r == 0 ? "up" : r == 1 ? "waiting for a teardown" : "not brought up"); }
+            else if (ev == 2) nmhd_unplug(&me->fHeads, &me->fHeadOps, i);
+            else if (ev == 3) { nmhd_unplug(&me->fHeads, &me->fHeadOps, i); if (me->fTcLast[i]) nmhd_plug(&me->fHeads, &me->fHeadOps, i); }
+        }
     }
     uint64_t d; clock_interval_to_deadline(2000, kMillisecondScale, &d);
     if (!me->fStopping) thread_call_enter_delayed(me->fTcTimer, d);
@@ -1012,7 +1117,9 @@ void NMIntelFB::tcFire(thread_call_param_t p0, thread_call_param_t)
 void NMIntelFB::tcStart()
 {
     int a = 0;
-    if (!PE_parse_boot_argn("nmhybridtc", &a, sizeof a) || a != 1) return;
+    int e = 0;
+    const bool ext = PE_parse_boot_argn("nmhybridext", &e, sizeof e) && e == 1;
+    if (!ext && (!PE_parse_boot_argn("nmhybridtc", &a, sizeof a) || a != 1)) return;
     if (fVer != 12 && fVer != 13) { IFBLOG("hybrid: Type-C monitor: display version %u is not supported (versions 12 and 13)", fVer); return; }
     struct nmr_ops ops = { this,
         [](void *c, uint32_t o) { return ((NMIntelFB *)c)->rd(o); },
@@ -1025,9 +1132,18 @@ void NMIntelFB::tcStart()
         else IFBLOG("hybrid: Type-C monitor: port %u unavailable (PHY in TC-cold or the platform controller did not answer)", i + 1);
     }
     if (!fTcN) return;
+    if (ext) {
+        if (fPipe < 0 || fPipe > 3 || !fRegs || !ggttMap()) { IFBLOG("hybrid: external heads unavailable (pipe %d, graphics table %s)", fPipe, fGsm ? "ok" : "not reachable"); }
+        else {
+            nmhd_init(&fHeads);
+            fHeadOps = (struct nmhd_ops){ this, extDevOpen, extDevClose, extCreate, extBringUp, extPublish, extUnpublish, extTakeDown, extRelease };
+            fExtScratch = fGsm[fGsmEntries - 1];
+            if (nmhd_panel_up(&fHeads, &fHeadOps) == 0) fExtOn = true;
+        }
+    }
     fTcTimer = thread_call_allocate(tcFire, this);
-    if (!fTcTimer) return;
-    IFBLOG("hybrid: Type-C monitor armed for %u ports (observe only)", fTcN);
+    if (!fTcTimer) { fExtOn = false; return; }
+    IFBLOG("hybrid: Type-C monitor armed for %u ports (%s)", fTcN, fExtOn ? "external heads on: colour bars on a second pipe, not published to the window system" : "observe only");
     thread_call_enter(fTcTimer);
 }
 
