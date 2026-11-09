@@ -1,0 +1,17 @@
+Third-party source: mickys/nvenc, https://github.com/mickys/nvenc
+Commit 1e91845d6f37d8bce671d62c14f4390324da3659 (release 0.9.5), MIT licence (LICENSE, Copyright (c) 2026 mickys).
+Imported: src/ and vt/ and LICENSE. Left out: the upstream tools, trace interposers, test streams, benchmark data and
+documentation (about 100 MB), none of which the library needs.
+
+Changes made here, in this order of importance:
+  vt/nvencvt.c   NVEncVT_RegisterDecoders(): registers only the decoders, for the decode service (appended before
+                 load_conf).
+                 EnableLowLatencyRateControl: declared as a selection property of the H.264 and HEVC encoders, accepted by
+                 SetProperty / CopyProperty and listed among the supported properties. A session that sets it is real-time
+                 with no B pictures. Without the declaration VideoToolbox drops the encoder from the candidates of any
+                 client that asks for low-latency rate control (FFmpeg's low_delay, Sunshine), and answers -12902.
+
+Build inputs (fetched at build time by build/build_nvencvt.sh, not vendored):
+  NVIDIA open-gpu-kernel-modules 610.57.04   RM API headers, MIT
+  NVIDIA open-gpu-doc 9fdf5c4062007929d9f4e6cbad9c9771fe61b880   video class headers, MIT
+  WebKit CMBaseObjectSPI.h and VTVideoDecoderSPI.h at 3bfbc200370710495ffa440abdd31b943c83ad7a, BSD

@@ -169,8 +169,9 @@ check('the external encoder loads only from a root-owned, non-writable path',
       and 'st.st_uid != 0' in _guard and 'ds.st_uid == 0' in _guard
       and _guard.count('S_IWGRP | S_IWOTH') == 2
       and 'S_ISREG' in _guard and 'S_ISDIR' in _guard)
-check('the external encoder is off unless a conf knob names the process',
-      bool(_nvcvt) and 'getenv("NVMTL_NVENCVT")' in _nvcvt and 'return;' in _nvcvt)
+check('the external encoder follows NVMTL_NVENCVT: automatic on Ada and Ampere, 0 turns it off, a list names processes',
+      bool(_nvcvt) and 'getenv("NVMTL_NVENCVT")' in _nvcvt and 'return;' in _nvcvt
+      and 'strcmp(sel, "0")) return false' in dev)
 check('the external encoder stays out of WindowServer, like the other codec registrars',
       bool(_nvcvt) and 'strcmp(me, "WindowServer")' in _nvcvt)
 
