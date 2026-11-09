@@ -301,6 +301,10 @@ if [ "$MAJ" -ge 26 ]; then
     KEXTS="$KEXTS NMXAudio"
   fi
 fi
+# The video codecs (vendor/nvenc) are one library beside the plugin. A package built without it would install and then
+# silently leave Ada without a hardware encoder and Safari on the wrong decoder, so the install stops before it changes anything.
+[ -f "$HERE/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib" ] || \
+  die "this package has no libnvencvt.dylib in NVMTLDriver.bundle (the video codecs); rebuild it with package/stage_nvencvt.sh"
 # kmutil builds the auxiliary collection from every kext in /Library/Extensions, so one that names a dependency this
 # macOS lacks stops the build for all of them. 2.5.3 report: a Realtek USB Wi-Fi kext (RtWlanU1827) needed
 # com.apple.iokit.IOUSBFamily, which macOS 15 no longer has, and the stop said only "test kernel collection build
