@@ -1,6 +1,6 @@
 #!/bin/bash
 # check_package.sh <pkgroot>: the last step of a package build. Fails (exit 1) if the tree lacks the video codec library, if
-# it is not signed, or if SHA256SUMS does not carry a line that matches it.
+# it is not signed, if SHA256SUMS does not carry a line that matches it, or if the Ryzen power parts (stage_nmsmn.sh) are missing or unlisted.
 set -uo pipefail
 ROOT=${1:?pkgroot}
 REL="Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib"
@@ -17,5 +17,18 @@ if [ -d "$ROOT/$V" ]; then
   vw=$(shasum -a 256 "$ROOT/$V/libvulkan.1.dylib" 2>/dev/null | cut -d' ' -f1)
   grep -qE "^$vw  (\./)?$V/libvulkan.1.dylib\$" "$ROOT/SHA256SUMS" 2>/dev/null || { echo "STOP: SHA256SUMS has no matching line for the Vulkan loader"; fail=1; }
 fi
-[ "$fail" = 0 ] && echo "package carries libnvencvt.dylib ${want:0:8}"
+# The Ryzen power parts (package/stage_nmsmn.sh): required, so a release cannot go out without them. The kext is carried only
+# (install.sh never loads it; the Mac app installs it on request), the RyzenAdj build must be the one the app pins.
+N="Library/NullMoth/kexts/NMSMN.kext"; R="Library/NullMoth/ryzenadj/ryzenadj"
+if [ ! -f "$ROOT/$N/Contents/MacOS/NMSMN" ] || [ ! -f "$ROOT/$R" ]; then
+  echo "STOP: the Ryzen power parts are missing (run package/stage_nmsmn.sh)"; fail=1
+else
+  [ "$(plutil -extract CFBundleIdentifier raw -o - "$ROOT/$N/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMSMN ] || { echo "STOP: $N is not the NullMoth NMSMN kext"; fail=1; }
+  [ -z "$(find "$ROOT/$N" "$ROOT/Library/NullMoth/ryzenadj" -type l 2>/dev/null)" ] || { echo "STOP: the Ryzen power parts hold a link"; fail=1; }
+  while IFS= read -r f; do
+    w=$(shasum -a 256 "$ROOT/$f" | cut -d' ' -f1)
+    grep -qE "^$w  (\./)?$f\$" "$ROOT/SHA256SUMS" 2>/dev/null || { echo "STOP: SHA256SUMS has no matching line for $f"; fail=1; }
+  done < <(cd "$ROOT" && find "$N" "Library/NullMoth/ryzenadj" -type f | LC_ALL=C sort)
+fi
+[ "$fail" = 0 ] && echo "package carries libnvencvt.dylib ${want:0:8} and the Ryzen power parts"
 exit $fail
