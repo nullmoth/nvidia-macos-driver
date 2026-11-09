@@ -1,7 +1,9 @@
 /*
- * NullMoth NVIDIA driver for macOS
- * Copyright (c) 2026 NullMoth Systems.
- * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * The display engine's compiled 3D shaders (ampere, hopper, turing, blackwell, gb20x), xz-compressed and embedded as data.
+ * They are the files src/nvidia-modeset/src/shaders/g_*_shaders of NVIDIA's open-gpu-kernel-modules 620.70.06,
+ * Copyright (c) NVIDIA CORPORATION & AFFILIATES, MIT licence (licenses/NVIDIA-open-gpu-kernel-modules-COPYING.txt),
+ * compressed unchanged. NullMoth wrote only this embedding.
+ * SPDX-License-Identifier: MIT
  */
 
 __asm__(".section __TEXT,__const\n"

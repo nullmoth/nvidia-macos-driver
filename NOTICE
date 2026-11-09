@@ -8,13 +8,13 @@ translator/  Based on metal2vulkan, Copyright (C) Anees Iqbal
              (translator/LICENSE, translator/COPYING). Modifications by NullMoth Systems
              are released under the same licence.
 
-kexts/       Builds against NVIDIA's open GPU kernel modules 615.78.08, MIT (with GPL-2.0 alternatives
+kexts/       Builds against NVIDIA's open GPU kernel modules 620.70.06, MIT (with GPL-2.0 alternatives
              where noted), https://github.com/NVIDIA/open-gpu-kernel-modules
              (licenses/NVIDIA-open-gpu-kernel-modules-COPYING.txt).
 
 NVK          Vulkan driver from Mesa, MIT (licenses/Mesa-license.rst). NullMoth's changes ship as patches.
 
-GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images from NVIDIA's 615.78.08 driver,
+GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images from NVIDIA's 620.70.06 driver,
              redistributed unmodified under NVIDIA's licence (licenses/NVIDIA-firmware-LICENCE.txt), the same
              terms under which linux-firmware redistributes these images.
 
