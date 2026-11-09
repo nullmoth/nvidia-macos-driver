@@ -1348,7 +1348,7 @@ static SInt64 gCntIopOkHead[kNvMaxFB];
 static SInt64 gCntIop30, gCntIopHalf;       // frames written to a 30-bit scanout; frames converted from half-float RGhA
 static SInt64 gCntIopL10r;                 // frames narrowed from 10-bit l10r (login window, lock screen)
 // hybrid laptops (nm_hybrid.h)
-static SInt64 gCntHyFrames, gCntHyWords, gCntHyWordsSkipped, gCntHyFlips, gCntHyImportFail, gCntHyOwned;
+static SInt64 gCntHyFrames, gCntHyWords, gCntHyWordsSkipped, gCntHyFlips, gCntHyImportFail, gCntHyOwned, gCntHyDma, gCntHyDmaTimeout;
 #define NVIOP_LOG_MAX 40
 static unsigned gIopLogs = 0;
 #define NVIOPLOG(fmt, ...) do { if (gIopLogs < NVIOP_LOG_MAX) { gIopLogs++; ALOG("iop: " fmt, ##__VA_ARGS__); } } while (0)
@@ -1404,6 +1404,7 @@ static bool nvAccelSurfCopyReady(IOSurface *s, unsigned head);
 static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe);
 static bool nvSurfWaitReady(unsigned int id);
 static bool nvAccelHybridImport(IOService *fb, unsigned head, IOSurface *s);
+static bool nvAccelHybridDma(NVDisplayPipe *pipe, IOService *fb, unsigned head, IOSurface *s);
 static bool nvAccelHybridOwned(IOService *fb, unsigned head, const volatile unsigned int *src, unsigned w, unsigned h, unsigned pitch, bool from10, unsigned dpitch);
 static bool nvSVPend(unsigned id, int op, NVResource *resource);
 static bool nvAccelFlatHeld(NVDisplayPipe *pipe, unsigned head, IOSurface *s);
@@ -1452,6 +1453,10 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         OSAddAtomic64(1, &gCntFlatHeld);
         return kIOReturnSuccess;
     } else if (s && nvAccelIopFlip(fb, head, s, this)) {
+        OSAddAtomic64(1, &gCntIopSrcSurf); OSAddAtomic64(1, &gCntIopOk); OSAddAtomic64(1, &gCntIopOkHead[head]);
+        return kIOReturnSuccess;
+    } else if (s && gNmHybrid >= NMH_DMA && nvAccelHybridDma(this, fb, head, s)) {
+        // the copy engine wrote the frame into a buffer the panel driver owns, and the plane was flipped to it (nmhybrid=4)
         OSAddAtomic64(1, &gCntIopSrcSurf); OSAddAtomic64(1, &gCntIopOk); OSAddAtomic64(1, &gCntIopOkHead[head]);
         return kIOReturnSuccess;
     } else if (s && gNmHybrid >= NMH_IMPORT && nvAccelHybridImport(fb, head, s)) {
@@ -1636,6 +1641,8 @@ static SInt64 gCntIopUnwritten, gCntIopCopyUnwritten;
 SYSCTL_INT(_debug, OID_AUTO, nmhybrid, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gNmHybrid, 0,
            "hybrid laptop path: 0 off, 1 copy changed pixels to the other GPU's panel, 2 scan out the composited surface in place");
 NVACCEL_CNT(nmhybrid_owned,        gCntHyOwned,        "hybrid: frames written into the panel driver's own buffers and flipped to");
+NVACCEL_CNT(nmhybrid_dma,          gCntHyDma,          "hybrid: frames the copy engine wrote straight into the panel driver's buffers");
+NVACCEL_CNT(nmhybrid_dma_timeouts, gCntHyDmaTimeout,   "hybrid: copy-engine frames that timed out (buffer quarantined)");
 NVACCEL_CNT(nmflat_held,            gCntFlatHeld,       "frames of one flat colour held back from the flip (nmflatskip)");
 NVACCEL_CNT(nmhybrid_frames,        gCntHyFrames,       "hybrid: frames presented by copy to another GPU's panel");
 NVACCEL_CNT(nmhybrid_words,         gCntHyWords,        "hybrid: pixels stored to the other GPU's scan-out");
@@ -1820,7 +1827,7 @@ static void nvaccelInstallSysctl(void)
       gNmFlatSkip = nmh_flat_parse(present, fv);
       if (gNmFlatSkip) ALOG("flat frames: up to %u in a row are held back (boot-arg nmflatskip)", gNmFlatSkip); }
     sysctl_register_oid(&sysctl__debug_nmflat_held);
-    sysctl_register_oid(&sysctl__debug_nmhybrid_owned);
+    sysctl_register_oid(&sysctl__debug_nmhybrid_owned); sysctl_register_oid(&sysctl__debug_nmhybrid_dma); sysctl_register_oid(&sysctl__debug_nmhybrid_dma_timeouts);
     sysctl_register_oid(&sysctl__debug_nmhybrid);
     sysctl_register_oid(&sysctl__debug_nmhybrid_frames);        sysctl_register_oid(&sysctl__debug_nmhybrid_words);
     sysctl_register_oid(&sysctl__debug_nmhybrid_words_skipped); sysctl_register_oid(&sysctl__debug_nmhybrid_flips);
@@ -2656,6 +2663,95 @@ static void nvAccelHybridHome(IOService *fb, unsigned head)
     gHyOnSlot[head] = false;
     nmh_shadow_invalidate(&gHyShadow[head].sh);
     if (rr != kIOReturnSuccess && gHyFailLogs < 8) { gHyFailLogs++; ALOG("hybrid: HOME refused (0x%x) head %u", (unsigned)rr, head); }
+}
+
+// Level 4: the copy engine writes the frame, which is still only in the GPU's memory, into a buffer the panel driver owns. The
+// order of the steps is nm_hybrid.h's nmh_dma_frame. Returns true when the frame is on its way to the screen.
+struct NVHyDmaCtx {
+    NVDisplayPipe *pipe; IOService *fb; IOSurface *s; const OSSymbol *sym; NVResource *res; NVVidMemory *vm; NVRMRmHandles h;
+    NMHybridReq q; unsigned long long len; unsigned id; void *cache; bool locked; NVAccel *accel;
+};
+static int hyDmaRender(void *c) { NVHyDmaCtx *x = (NVHyDmaCtx *)c; nvSurfWaitReady(x->id); return 0; }
+static int hyDmaAcquire(void *c, int *idx)
+{
+    NVHyDmaCtx *x = (NVHyDmaCtx *)c;
+    nvSVZero(&x->q, sizeof x->q);
+    x->q.version = NMH_ABI_VERSION; x->q.op = NMH_OP_ACQUIRE; x->q.flags = NMH_REQ_DEVICE_WRITES;
+    IOReturn rr = x->fb->callPlatformFunction(x->sym, false, &x->q, nullptr, nullptr, nullptr);
+    if (rr != kIOReturnSuccess || !x->q.pages || !x->q.npages || (unsigned long long)x->q.npages * 4096 < x->len) return -1;
+    *idx = x->q.slot;
+    return 0;
+}
+static int hyDmaCopy(void *c, int idx)
+{
+    NVHyDmaCtx *x = (NVHyDmaCtx *)c; (void)idx;
+    struct NVRMSurfPageoff p; nvSVZero(&p, sizeof p);
+    p.version = NVRM_SS_RM_VERSION; p.status = NVRM_SS_OFF; p.kapiDevice = x->h.kapiDevice; p.kapiMemory = x->vm->fRmHandle;
+    p.pages = x->q.pages; p.pageCount = (x->len + 4095) >> 12; p.length = x->len;
+    IOService *nvrm = nvAccelNVRM(x->pipe->fAccel);
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVRM_SS_FN_PAGEOFF);
+    if (nvrm && sym) nvrm->callPlatformFunction(sym, false, &p, nullptr, nullptr, nullptr);
+    if (sym) sym->release();
+    if (p.status == 0) return 0;
+    if (p.status == 0x65u) { OSAddAtomic64(1, &gCntHyDmaTimeout); return 2; }
+    return 1;
+}
+static int hyDmaPresent(void *c, int idx)
+{
+    NVHyDmaCtx *x = (NVHyDmaCtx *)c;
+    x->q.op = NMH_OP_PRESENT; x->q.slot = idx;
+    return x->fb->callPlatformFunction(x->sym, false, &x->q, nullptr, nullptr, nullptr) == kIOReturnSuccess ? 0 : -1;
+}
+static void hyDmaAbort(void *c, int idx)
+{
+    NVHyDmaCtx *x = (NVHyDmaCtx *)c;
+    x->q.op = NMH_OP_ABORT; x->q.slot = idx; x->fb->callPlatformFunction(x->sym, false, &x->q, nullptr, nullptr, nullptr);
+}
+static void hyDmaQuarantine(void *c, int idx)
+{
+    NVHyDmaCtx *x = (NVHyDmaCtx *)c;
+    x->q.op = NMH_OP_QUARANTINE; x->q.slot = idx; x->fb->callPlatformFunction(x->sym, false, &x->q, nullptr, nullptr, nullptr);
+}
+static bool nvAccelHybridDma(NVDisplayPipe *pipe, IOService *fb, unsigned head, IOSurface *s)
+{
+    if (!pipe || !fb || !s || head >= kNvMaxFB || fb->metaCast("NVRMNVDAFramebuffer")) return false;
+    NVHyDmaCtx x; nvSVZero(&x, sizeof x);
+    x.pipe = pipe; x.fb = fb; x.s = s; x.id = s->getSurfaceID();
+    x.len = (unsigned long long)s->getBytesPerRow() * s->getHeight();
+    NVAccel *a = NVAccel::resolve(pipe->fAccel);
+    if (!a || !nvSVPend(x.id, 2, nullptr)) return false;                 // the newest pixels are not only in the GPU's memory: level 3
+    x.sym = OSSymbol::withCStringNoCopy(NMH_FN_IMPORT);
+    if (!x.sym) return false;
+    bool done = false;
+    // the family lock is held while the resource is looked up and the copy runs, as in a page-off
+    if (nvFamLock(a, true)) {
+        void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, (void *)s, 0);
+        OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
+        x.res = OSDynamicCast(NVResource, ctx);
+        x.vm = x.res ? nvres_vidmem(x.res) : nullptr;
+        // geometry the scan-out would take: asked of the panel driver by the query below, through a scan-out request
+        struct NVRMVramRequest sq; nvSVZero(&sq, sizeof sq); sq.version = NVRM_VRAM_ABI_VERSION;
+        IOReturn sr = a->askFramebufferForScanout(&sq, fb);
+        const int why = (x.vm && x.vm->fRmHandle && !x.vm->fScanout && sr == kIOReturnSuccess && nvAccelRmHandles(pipe->fAccel, &x.h))
+            ? nmh_dma_eligible(gNmHybrid, 1, s->getPixelFormat(), (unsigned)s->getWidth(), (unsigned)s->getHeight(), (unsigned)s->getBytesPerRow(),
+                               sq.width, sq.height, sq.pitch, x.vm->fBytes, (unsigned long long)sq.pitch * sq.height)
+            : NMH_E_NOTVRAM;
+        if (why == NMH_OK) {
+            struct nmh_dma_ops ops = { &x, hyDmaRender, hyDmaAcquire, hyDmaCopy, hyDmaPresent, hyDmaAbort, hyDmaQuarantine };
+            const int rc = nmh_dma_frame(&ops);
+            done = rc == NMH_DMA_DONE;
+            if (!done && gHyFailLogs < 8) { gHyFailLogs++; ALOG("hybrid: fallback to copy: copy-engine frame not shown (step result %d)", rc); }
+        }
+        if (cache) ((OSObject *)cache)->release();
+        nvFamUnlock(a);
+    }
+    x.sym->release();
+    if (done) {
+        gHyOnSlot[head] = true;
+        nmh_shadow_invalidate(&gHyShadow[head].sh);
+        if (OSAddAtomic64(1, &gCntHyDma) == 0) ALOG("hybrid: first frame written by the copy engine into the panel's own buffer");
+    }
+    return done;
 }
 
 // Level 3: the frame is written into a buffer the panel driver owns (cached memory), and the plane is flipped to it.

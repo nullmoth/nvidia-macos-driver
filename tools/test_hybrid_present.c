@@ -38,6 +38,17 @@ static void fill(uint32_t seed) { for (unsigned i = 0; i < W * H; i++) src[i] = 
 static int same(void) { return memcmp(src, dst, sizeof src) == 0; }
 static uint64_t rd_tab(void *c, uint64_t i) { return ((uint64_t *)c)[i]; }
 
+
+/* fakes for the level-4 order test: they record the order of the calls and use the real ownership model */
+static struct nmh_own own; static char order[16]; static int on, ce_result, render_result, present_result, acquired_idx;
+static void rec(char c) { if (on < 15) order[on++] = c; order[on] = 0; }
+static int f_render(void *c) { (void)c; rec('W'); return render_result; }
+static int f_acquire(void *c, int *i) { (void)c; rec('A'); *i = nmh_own_acquire(&own); acquired_idx = *i; return *i < 0; }
+static int f_copy(void *c, int i) { (void)c; (void)i; rec('C'); return ce_result; }
+static int f_present(void *c, int i) { (void)c; rec('P'); if (present_result) return -1; nmh_own_present(&own, i); nmh_own_landed(&own); return 0; }
+static void f_abort(void *c, int i) { (void)c; rec('X'); nmh_own_abort(&own, i); }
+static void f_quar(void *c, int i) { (void)c; rec('Q'); nmh_own_quarantine(&own, i); }
+
 int main(void)
 {
     /* ---- the switch */
@@ -45,7 +56,8 @@ int main(void)
     ARM("nmhybrid=1: copy", nmh_level_parse(1, 1) == NMH_COPY);
     ARM("nmhybrid=2: import", nmh_level_parse(1, 2) == NMH_IMPORT);
     ARM("nmhybrid=3: owned buffers", nmh_level_parse(1, 3) == NMH_OWNED);
-    ARM("nmhybrid=0, 4 and -1 are off", nmh_level_parse(1, 0) == NMH_OFF && nmh_level_parse(1, 4) == NMH_OFF && nmh_level_parse(1, -1) == NMH_OFF);
+    ARM("nmhybrid=4: copy engine into owned buffers", nmh_level_parse(1, 4) == NMH_DMA);
+    ARM("nmhybrid=0, 5 and -1 are off", nmh_level_parse(1, 0) == NMH_OFF && nmh_level_parse(1, 5) == NMH_OFF && nmh_level_parse(1, -1) == NMH_OFF);
 
     /* ---- level 1: the copy */
     memset(&shadow, 0, sizeof shadow); sh.valid = 0; memset(dst, 0, sizeof dst);
@@ -239,6 +251,33 @@ int main(void)
       ARM("a writer in progress keeps its buffer through home", (c = nmh_own_acquire(&o), nmh_own_home(&o), o.st[c] == NMH_OB_WRITER));
       struct nmh_own full; nmh_own_init(&full); full.st[0] = full.st[1] = full.st[2] = NMH_OB_LIVE; full.live = 0;
       ARM("with every buffer taken the caller is told to copy the old way", nmh_own_acquire(&full) == -1); }
+
+    /* ---- level 4: the copy engine writes the frame into an owned buffer */
+    ARM("level 3 does not use the copy engine path", nmh_dma_eligible(NMH_OWNED, 1, NMH_FMT_BGRA, 1920, 1080, 7680, 1920, 1080, 7680, 9u << 20, 9u << 20) == NMH_E_LEVEL);
+    ARM("a surface already paged to system memory is left to level 3", nmh_dma_eligible(NMH_DMA, 0, NMH_FMT_BGRA, 1920, 1080, 7680, 1920, 1080, 7680, 9u << 20, 9u << 20) == NMH_E_NOTVRAM);
+    ARM("a 10-bit login frame is left to the narrowing copy", nmh_dma_eligible(NMH_DMA, 1, NMH_FMT_L10R, 1920, 1080, 7680, 1920, 1080, 7680, 9u << 20, 9u << 20) == NMH_E_FMT);
+    ARM("a linear byte copy needs the scan-out's size and pitch exactly", nmh_dma_eligible(NMH_DMA, 1, NMH_FMT_BGRA, 1920, 1080, 7744, 1920, 1080, 7680, 9u << 20, 9u << 20) == NMH_E_SIZE && nmh_dma_eligible(NMH_DMA, 1, NMH_FMT_BGRA, 1920, 1088, 7680, 1920, 1080, 7680, 9u << 20, 9u << 20) == NMH_E_SIZE);
+    ARM("a surface longer than the GPU memory behind it or the buffer is refused", nmh_dma_eligible(NMH_DMA, 1, NMH_FMT_BGRA, 1920, 1080, 7680, 1920, 1080, 7680, 7u << 20, 9u << 20) == NMH_E_DMALEN && nmh_dma_eligible(NMH_DMA, 1, NMH_FMT_BGRA, 1920, 1080, 7680, 1920, 1080, 7680, 9u << 20, 7u << 20) == NMH_E_DMALEN);
+    ARM("an eligible frame is accepted", nmh_dma_eligible(NMH_DMA, 1, NMH_FMT_BGRA, 1920, 1080, 7680, 1920, 1080, 7680, 9u << 20, 9u << 20) == NMH_OK);
+    {   /* fakes that record the order of the calls and use the real ownership model */
+        struct nmh_dma_ops ops = { &own, f_render, f_acquire, f_copy, f_present, f_abort, f_quar };
+        nmh_own_init(&own); on = 0; order[0] = 0; ce_result = 0; render_result = 0; present_result = 0;
+        ARM("a good frame: render wait, acquire, copy, then present, in that order", nmh_dma_frame(&ops) == NMH_DMA_DONE && !strcmp(order, "WACP") && own.live == acquired_idx);
+        nmh_own_init(&own); on = 0; render_result = 1;
+        ARM("a surface the GPU is still drawing is not copied: nothing is acquired", nmh_dma_frame(&ops) == NMH_DMA_RENDER && !strcmp(order, "W"));
+        nmh_own_init(&own); on = 0; render_result = 0; ce_result = 1;
+        ARM("a copy that failed cleanly gives the buffer back and presents nothing", nmh_dma_frame(&ops) == NMH_DMA_COPY_FAILED && !strcmp(order, "WACX") && own.st[0] == NMH_OB_FREE);
+        nmh_own_init(&own); on = 0; ce_result = 2;
+        ARM("a copy that timed out is quarantined and never presented", nmh_dma_frame(&ops) == NMH_DMA_COPY_TIMEOUT && !strcmp(order, "WACQ") && own.st[0] == NMH_OB_QUARANTINE);
+        int a = nmh_own_acquire(&own); nmh_own_abort(&own, a); int b = nmh_own_acquire(&own); nmh_own_present(&own, b); nmh_own_landed(&own);
+        int c = nmh_own_acquire(&own); nmh_own_abort(&own, c); int d = nmh_own_acquire(&own);
+        ARM("a quarantined buffer is never handed out again", a == 1 && b == 1 && c == 2 && d == 2);
+        ARM("and the buffers cannot be released while one may still be written", !nmh_own_may_free(&own) && (nmh_own_home(&own), own.st[0] == NMH_OB_QUARANTINE));
+        nmh_own_init(&own); on = 0; ce_result = 0; present_result = 1;
+        ARM("a flip that fails after a good copy gives the buffer back", nmh_dma_frame(&ops) == NMH_DMA_PRESENT_FAILED && !strcmp(order, "WACPX") && own.st[0] == NMH_OB_FREE);
+        nmh_own_init(&own); own.st[0] = own.st[1] = own.st[2] = NMH_OB_LIVE; on = 0; present_result = 0;
+        ARM("with every buffer taken nothing is copied", nmh_dma_frame(&ops) == NMH_DMA_NO_BUFFER && !strcmp(order, "WA"));
+    }
     /* ---- start-up controls */
     ARM("nmhybriddelay absent is 0", nmh_delay_parse(0, 45) == 0);
     ARM("nmhybriddelay=45 waits 45 s", nmh_delay_parse(1, 45) == 45);

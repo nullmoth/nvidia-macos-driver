@@ -20,6 +20,8 @@
  *   3            as 2, and a surface that cannot be imported is written into one of three buffers the panel driver owns
  *                (ordinary cached memory mapped into its graphics table) which is then flipped to; no write-combined
  *                stores and no tearing, for frames import refuses (10-bit login window, odd pitch).
+ *   4            as 3, and a frame whose newest pixels are still in the GPU's memory is written into an owned buffer by the
+ *                copy engine (a DMA into the buffer's pages), with no CPU copy and no mapping of the application's surface.
  * Any other value is treated as 0.
  */
 #ifndef NM_HYBRID_H
@@ -34,13 +36,13 @@
 /* ---------------------------------------------------------------------------------------------------------------------
  * the switch
  */
-enum { NMH_OFF = 0, NMH_COPY = 1, NMH_IMPORT = 2, NMH_OWNED = 3 };
+enum { NMH_OFF = 0, NMH_COPY = 1, NMH_IMPORT = 2, NMH_OWNED = 3, NMH_DMA = 4 };
 
 /* 'present' is the boot-arg parse result, 'value' what it parsed to. */
 static inline int nmh_level_parse(int present, long long value)
 {
     if (!present) return NMH_OFF;
-    return (value >= NMH_COPY && value <= NMH_OWNED) ? (int)value : NMH_OFF;
+    return (value >= NMH_COPY && value <= NMH_DMA) ? (int)value : NMH_OFF;
 }
 
 /* ---------------------------------------------------------------------------------------------------------------------
@@ -59,7 +61,9 @@ enum nmh_why {
     NMH_E_NOSPACE,     /* no unused GGTT range to map into */
     NMH_E_BUSY,        /* every import slot is on screen or about to be */
     NMH_E_STUCK,       /* a flip never reached the screen */
-    NMH_E_PROVIDER     /* the display GPU's driver does not offer import */
+    NMH_E_PROVIDER,    /* the display GPU's driver does not offer import */
+    NMH_E_NOTVRAM,     /* the surface's newest pixels are in system memory already (level 3 copies them) */
+    NMH_E_DMALEN       /* the surface is longer than the GPU memory behind it or the owned buffer */
 };
 
 static inline const char *nmh_why_name(int why)
@@ -77,6 +81,8 @@ static inline const char *nmh_why_name(int why)
     case NMH_E_BUSY:     return "all import slots in use";
     case NMH_E_STUCK:    return "a flip never reached the screen";
     case NMH_E_PROVIDER: return "display driver has no import entry";
+    case NMH_E_NOTVRAM:  return "the newest pixels are not in the GPU's memory";
+    case NMH_E_DMALEN:   return "surface longer than its source or the owned buffer";
     default:             return "unknown";
     }
 }
@@ -279,7 +285,7 @@ static inline int nmh_need_home(const struct nmh_ring *r) { return r->live != -1
  * to be.
  */
 #define NMH_OWN_BUFS 3
-enum { NMH_OB_FREE = 0, NMH_OB_WRITER, NMH_OB_QUEUED, NMH_OB_LIVE };
+enum { NMH_OB_FREE = 0, NMH_OB_WRITER, NMH_OB_QUEUED, NMH_OB_LIVE, NMH_OB_QUARANTINE };
 struct nmh_own {
     uint8_t st[NMH_OWN_BUFS];
     int     live;       /* buffer on screen, -1 = the boot surface */
@@ -298,6 +304,12 @@ static inline int nmh_own_acquire(struct nmh_own *o)
     for (i = 0; i < NMH_OWN_BUFS; i++) if (o->st[i] == NMH_OB_WRITER) return -1;     /* one writer at a time */
     for (i = 0; i < NMH_OWN_BUFS; i++) if (o->st[i] == NMH_OB_FREE) { o->st[i] = NMH_OB_WRITER; return i; }
     return -1;
+}
+/* A copy into this buffer timed out: the copy engine may still be writing it, so it is never handed out again (until the
+ * panel driver stops) and it cannot be freed. */
+static inline void nmh_own_quarantine(struct nmh_own *o, int idx)
+{
+    if (idx >= 0 && idx < NMH_OWN_BUFS && o->st[idx] == NMH_OB_WRITER) o->st[idx] = NMH_OB_QUARANTINE;
 }
 /* The writer is done: the buffer waits for its flip. Only the writer's own buffer, and only with no flip already queued. */
 static inline int nmh_own_present(struct nmh_own *o, int idx)
@@ -330,15 +342,62 @@ static inline void nmh_own_flip_failed(struct nmh_own *o)
 static inline void nmh_own_home(struct nmh_own *o)
 {
     unsigned i;
-    for (i = 0; i < NMH_OWN_BUFS; i++) if (o->st[i] != NMH_OB_WRITER) o->st[i] = NMH_OB_FREE;
+    for (i = 0; i < NMH_OWN_BUFS; i++) if (o->st[i] != NMH_OB_WRITER && o->st[i] != NMH_OB_QUARANTINE) o->st[i] = NMH_OB_FREE;
     o->live = -1; o->queued = -1;
 }
 /* Buffers may be released (module unload, mode change) only when nobody writes and nothing is on screen from them. */
 static inline int nmh_own_may_free(const struct nmh_own *o)
 {
     unsigned i;
-    for (i = 0; i < NMH_OWN_BUFS; i++) if (o->st[i] == NMH_OB_WRITER || o->st[i] == NMH_OB_QUEUED) return 0;
+    for (i = 0; i < NMH_OWN_BUFS; i++) if (o->st[i] == NMH_OB_WRITER || o->st[i] == NMH_OB_QUEUED || o->st[i] == NMH_OB_QUARANTINE) return 0;
     return o->live < 0;
+}
+
+/* ---------------------------------------------------------------------------------------------------------------------
+ * level 4: the copy engine writes the composited frame into an owned buffer. The order is the whole point, and this is the
+ * only place it is written down:
+ *   1. the GPU has finished drawing the surface (wait_render)   -- the copy reads the surface's final pixels
+ *   2. an owned buffer is taken and flushed from the CPU caches (acquire) -- so no dirty line can land over the DMA
+ *   3. the copy engine writes it and the call returns only when the engine is done (ce_copy)
+ *   4. only then the plane is flipped to it (present)
+ * A copy that fails cleanly returns the buffer (abort) and the caller copies the old way. A copy that TIMED OUT may still be
+ * writing: the buffer is quarantined, never presented, never reused. Nothing is presented unless the copy completed.
+ */
+struct nmh_dma_ops {
+    void *ctx;
+    int (*wait_render)(void *ctx);                 /* 0 = the surface is final */
+    int (*acquire)(void *ctx, int *idx);           /* 0 and a buffer, flushed, or non-zero */
+    int (*ce_copy)(void *ctx, int idx);            /* 0 done, 1 failed with nothing written, 2 timed out */
+    int (*present)(void *ctx, int idx);            /* 0 = flip landed */
+    void (*abort)(void *ctx, int idx);
+    void (*quarantine)(void *ctx, int idx);
+};
+enum { NMH_DMA_DONE = 0, NMH_DMA_NOT_ELIGIBLE, NMH_DMA_RENDER, NMH_DMA_NO_BUFFER, NMH_DMA_COPY_FAILED, NMH_DMA_COPY_TIMEOUT, NMH_DMA_PRESENT_FAILED };
+
+/* May this frame use level 4 at all? 'pending_in_vram': the surface's newest pixels are in the GPU's memory (not yet paged to
+ * its system memory). The copy is a linear byte copy, so the surface must have the scan-out's geometry exactly. */
+static inline int nmh_dma_eligible(int level, int pending_in_vram, uint32_t fmt, uint32_t w, uint32_t h, uint32_t pitch,
+                                   uint32_t scan_w, uint32_t scan_h, uint32_t scan_pitch, uint64_t vram_bytes, uint64_t buf_bytes)
+{
+    const uint64_t len = (uint64_t)pitch * h;
+    if (level < NMH_DMA) return NMH_E_LEVEL;
+    if (!pending_in_vram) return NMH_E_NOTVRAM;
+    if (fmt != NMH_FMT_BGRA) return NMH_E_FMT;
+    if (w != scan_w || h != scan_h || pitch != scan_pitch) return NMH_E_SIZE;
+    if (len > vram_bytes || len > buf_bytes) return NMH_E_DMALEN;
+    return NMH_OK;
+}
+
+static inline int nmh_dma_frame(const struct nmh_dma_ops *d)
+{
+    int idx = -1, rc;
+    if (d->wait_render(d->ctx)) return NMH_DMA_RENDER;
+    if (d->acquire(d->ctx, &idx) || idx < 0) return NMH_DMA_NO_BUFFER;
+    rc = d->ce_copy(d->ctx, idx);
+    if (rc == 2) { d->quarantine(d->ctx, idx); return NMH_DMA_COPY_TIMEOUT; }
+    if (rc) { d->abort(d->ctx, idx); return NMH_DMA_COPY_FAILED; }
+    if (d->present(d->ctx, idx)) { d->abort(d->ctx, idx); return NMH_DMA_PRESENT_FAILED; }
+    return NMH_DMA_DONE;
 }
 
 /* ---------------------------------------------------------------------------------------------------------------------
