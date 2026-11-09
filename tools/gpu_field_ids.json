@@ -323,6 +323,10 @@
    "machines": 4,
    "name": "Intel(R) Graphics"
   },
+  "8086:a7ac": {
+   "machines": 1,
+   "name": "Intel(R) Graphics (Core 5 120U)"
+  },
   "8086:b0a0": {
    "machines": 3,
    "name": "Intel(R) Graphics"

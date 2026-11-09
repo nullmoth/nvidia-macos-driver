@@ -68,6 +68,18 @@ Community ideas  The shared family-VRAM import cache and the browser surface-pub
              published by mickys (https://github.com/mickys/nvidia-macos-driver, PolyForm Noncommercial 1.0.0) and
              proposed to this project by GeekAudio in pull requests 463 and 481. The code here is NullMoth's own.
 
+kexts/NMHDA  Volume and mute controls for display audio sinks (nmhda_gain.h, nmhda_volume.cpp, boot argument nmhdavol=1)
+             follow the idea published in emirercan3459/nullmoth-nvidia-audio (no licence file): give the sink's engine the
+             standard level and mute controls and scale the samples it writes. The implementation here uses IOAudioFamily's
+             public interface only and is NullMoth's own.
+
+tools        The field census names Raptor Lake-U 8086:A7AC after the Intel Core 5 120U driver project by pongpan-bk
+             (no licence file), which reported the id. Nothing of that project is used.
+
+Community ideas  The hybrid-laptop notes on the Intel panel (sleep leaves the display engine unlit, flat frames before a
+             first image, a start-up delay) come from kitsuneislife/nmx-intel; they were handed to the hybrid work and nothing
+             of that repository is used.
+
 plugin       Opt-in VRAM working copies for buffers (nvmtl_shared_wc.h, NVMTL_SHARED_VRAM, NVMTL_MANAGED_OWNED_VRAM) follow
              ideas from pull request 524 by emretascii (owned staging memory for caller pages that cannot be imported, with the
              GPU working in VRAM). The code here is NullMoth's own.
