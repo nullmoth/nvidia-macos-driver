@@ -88,6 +88,36 @@ bool NMKbdBacklight::dellCall(uint32_t in0, uint32_t in1, uint32_t in2, uint32_t
     return ok;
 }
 
+// MSI: the embedded controller through ACPI's embedded-controller address space.
+bool NMKbdBacklight::ecRead(uint8_t addr, uint8_t *v) {
+    UInt64 x = 0;
+    IOACPIAddress at; at.addr64 = addr;
+    if (dev->readAddressSpace(&x, kIOACPIAddressSpaceIDEmbeddedController, at, 8) != kIOReturnSuccess) return false;
+    *v = (uint8_t)x;
+    return true;
+}
+
+bool NMKbdBacklight::ecWrite(uint8_t addr, uint8_t v) {
+    IOACPIAddress at; at.addr64 = addr;
+    return dev->writeAddressSpace(v, kIOACPIAddressSpaceIDEmbeddedController, at, 8) == kIOReturnSuccess;
+}
+
+bool NMKbdBacklight::probeMsi() {
+    dev = find("PNP0C09", "_STA");   // the embedded controller device
+    if (!dev) return false;
+    char fw[KBL_MSI_FW_LENGTH + 1];
+    for (int i = 0; i < KBL_MSI_FW_LENGTH; i++) {
+        uint8_t b = 0;
+        if (!ecRead((uint8_t)(KBL_MSI_FW_ADDRESS + i), &b)) return false;
+        fw[i] = (char)b;
+    }
+    fw[KBL_MSI_FW_LENGTH] = 0;
+    msiRow = kbl_msi_find(fw);
+    if (!msiRow) return false;      // a firmware the table does not name: the controller is not touched again
+    backend = Msi; maxLevel_ = msiRow->max_state;
+    int l; return getLevel(&l);
+}
+
 bool NMKbdBacklight::setLevel(int level) {
     if (!dev) return false;
     switch (backend) {
@@ -95,6 +125,7 @@ bool NMKbdBacklight::setLevel(int level) {
     case IdeaPad: return evalInt("KBLC", kbl_lenovo_set_command(lenovoType, level), nullptr);
     case IdeaPadPlain: return evalInt("SALS", kbl_lenovo_plain_set_argument(level), nullptr);
     case ThinkPad: return evalInt("MLCS", (uint32_t)level, nullptr);
+    case Msi: return ecWrite(msiRow->addr, kbl_msi_value(msiRow, level));
     case Dell: {
         uint32_t o1 = 0, o2 = 0;
         if (!dellCall(1, 0, 0, &o1, &o2)) return false;
@@ -126,6 +157,13 @@ bool NMKbdBacklight::getLevel(int *level) {
     case ThinkPad:
         if (!evalInt("MLCG", 0, &r) || !kbl_thinkpad_present(r)) return false;
         *level = kbl_thinkpad_level(r); return true;
+    case Msi: {
+        uint8_t v = 0;
+        if (!ecRead(msiRow->addr, &v)) return false;
+        int l = kbl_msi_level(msiRow, v);
+        if (l < 0) return false;
+        *level = l; return true;
+    }
     case Dell: {
         uint32_t o1 = 0, o2 = 0;
         if (!dellCall(1, 0, 0, &o1, &o2)) return false;
@@ -173,31 +211,47 @@ bool NMKbdBacklight::probeDell() {
     auto it = IOService::getMatchingServices(dict);
     dict->release();
     if (!it) return false;
+    // The SMBIOS method and the descriptor block are listed in the _WDG of the Dell WMI device(s); find the method, then ask
+    // the descriptor how big a buffer the BIOS expects.
     bool found = false;
+    char descObj[2] = {0, 0};
+    bool haveDesc = false;
+    IOACPIPlatformDevice *descDev = nullptr;
     while (auto obj = it->getNextObject()) {
         auto d = OSDynamicCast(IOACPIPlatformDevice, obj);
         OSObject *wdg = nullptr;
         if (!d || d->evaluateObject("_WDG", &wdg) != kIOReturnSuccess) continue;
         auto data = OSDynamicCast(OSData, wdg);
-        char name[2];
-        if (data && kbl_dell_wdg_find((const uint8_t *)data->getBytesNoCopy(), data->getLength(), name)) {
-            dev = d;
-            snprintf(dellMethod, sizeof dellMethod, "WM%c%c", name[0], name[1]);
-            found = true;
+        if (data) {
+            const uint8_t *bytes = (const uint8_t *)data->getBytesNoCopy();
+            char name[2]; int flags = 0;
+            if (!found && kbl_wdg_find(bytes, data->getLength(), kKblDellGuid, name, &flags) && (flags & 0x02)) {
+                dev = d; found = true;
+                snprintf(dellMethod, sizeof dellMethod, "WM%c%c", name[0], name[1]);
+            }
+            if (!haveDesc && kbl_wdg_find(bytes, data->getLength(), kKblDellDescGuid, descObj, &flags)) { haveDesc = true; descDev = d; }
         }
         if (wdg) wdg->release();
-        if (found) break;
     }
     it->release();
-    if (!found) return false;
+    if (!found || !haveDesc) return false;      // without the descriptor the buffer size is unknown: refuse
+    char q[8];
+    snprintf(q, sizeof q, "WQ%c%c", descObj[0], descObj[1]);
+    OSObject *args[1] = { OSNumber::withNumber(0ULL, 32) };
+    OSObject *res = nullptr;
+    IOReturn rc = args[0] ? descDev->evaluateObject(q, &res, args, 1) : kIOReturnNoMemory;
+    if (args[0]) args[0]->release();
+    auto block = OSDynamicCast(OSData, res);
+    uint32_t size = 0, hotfix = 0;
+    bool ok = rc == kIOReturnSuccess && block && kbl_dell_parse_descriptor((const uint8_t *)block->getBytesNoCopy(), block->getLength(), &size, &hotfix);
+    if (res) res->release();
+    if (!ok) return false;
+    dellBuf = size;
     backend = Dell;
     uint32_t o1 = 0, o2 = 0;
-    static const unsigned sizes[2] = { 4096u, 32768u };
-    for (unsigned k = 0; k < 2; k++) {
-        dellBuf = sizes[k];
-        if (dellCall(0, 0, 0, &o1, &o2)) { maxLevel_ = kbl_dell_info_levels(o2); return maxLevel_ > 0; }
-    }
-    return false;
+    if (!dellCall(0, 0, 0, &o1, &o2)) return false;
+    maxLevel_ = kbl_dell_info_levels(o2);
+    return maxLevel_ > 0;
 }
 
 IOService *NMKbdBacklight::probe(IOService *provider, SInt32 *score) {
@@ -215,7 +269,7 @@ IOService *NMKbdBacklight::probe(IOService *provider, SInt32 *score) {
     skipSmc_ = kbl_should_decline(sensor, ali, forced_);   // only the SMC keys are given up; the HID route does not collide
     if (skipSmc_) SYSLOG("nmkbl", "SMCLightSensor owns LKSB/LKSS on this machine; not registering the SMC keys (nmkblforce=1 registers anyway)");
 
-    if (!probeAsus() && !probeIdeaPad() && !probeThinkPad() && !probeDell()) { SYSLOG("nmkbl", "no supported keyboard backlight interface found"); dev = nullptr; return nullptr; }
+    if (!probeAsus() && !probeIdeaPad() && !probeThinkPad() && !probeDell() && !probeMsi()) { SYSLOG("nmkbl", "no supported keyboard backlight interface found"); dev = nullptr; return nullptr; }
     DBGLOG("nmkbl", "backend %d, max level %d", (int)backend, maxLevel_);
 
     setProperty("VersionInfo", kextVersion);
