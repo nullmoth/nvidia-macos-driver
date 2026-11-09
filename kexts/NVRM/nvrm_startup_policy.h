@@ -50,6 +50,19 @@ static inline unsigned long long nvrmBar1ShrinkTarget(unsigned long long current
     return ((supportedMask >> 13) & 1) ? k8GB : 0;
 }
 
+// With no 64-bit memory window in the host bridge's ACPI _CRS, BAR1 is placed from a fixed fallback range only when
+// something above 4 GB is known to be routed. A BAR1 the firmware left below 4 GB on a host that decodes nothing above
+// 4 GB (Above 4G Decoding off) is fine where it is, and moving it made a board start; but a card whose BAR1 must grow
+// to 4 GB or more (a 64 MB laptop BAR1 resized to 8 GB) can only live above 4 GB, so it needs the fallback range when
+// other PCI devices already sit up there. 2.6.3 refused every unplaced BAR1 below 4 GB, and a 64 MB BAR1 that 2.6.2
+// had resized stayed at 64 MB: the desktop froze on a stale frame.
+static inline bool nvrmFallbackWindowAllowed(unsigned long long firmwareBar1, unsigned long long resizeTo, bool above4GRouted)
+{
+    const unsigned long long k4GB = 4ULL << 30;
+    if (firmwareBar1 >= k4GB) return true;
+    return resizeTo >= k4GB && above4GRouted;
+}
+
 // The name the registry carries when the RM's released-chip table has no entry for a PCI id (a newer board revision):
 // the generation and chip the RM itself reports, never a made-up retail name. snprintf semantics; returns the length.
 #ifdef KERNEL
