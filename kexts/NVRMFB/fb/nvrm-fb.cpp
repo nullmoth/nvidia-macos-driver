@@ -268,6 +268,22 @@ OSDefineMetaClassAndStructors(NVRMBacklightHandler, IODisplayParameterHandler)
 const OSSymbol *NVRMBacklightHandler::sBrightnessProbe = nullptr;
 const OSSymbol *NVRMBacklightHandler::sLinearBrightnessProbe = nullptr;
 
+// One DPCD transaction through NVRM (nvrm_ddc.cpp): at most 16 bytes within 0x700..0x7ff.
+static IOReturn nvrmDpAux(IOService *rm, unsigned gpu, unsigned display, bool write, unsigned addr, unsigned char *d, unsigned len)
+{
+    const OSSymbol *fn = OSSymbol::withCString(NVRM_DPAUX_FN);
+    struct NVRMDpAuxRequest *q = (struct NVRMDpAuxRequest *)IOMalloc(sizeof *q);
+    if (!rm || !fn || !q || len > kNvrmDpAuxMax) { OSSafeReleaseNULL(fn); if (q) IOFree(q, sizeof *q); return kIOReturnNoMemory; }
+    nvu_zero(q, sizeof *q);
+    q->gpuId = gpu; q->displayId = display; q->write = write ? 1 : 0; q->addr = addr; q->len = len;
+    if (write) nvu_copy(q->data, d, len);
+    IOReturn r = rm->callPlatformFunction(fn, false, q, NULL, NULL, NULL);
+    if (r == kIOReturnSuccess && !write) nvu_copy(d, q->data, len);
+    IOFree(q, sizeof *q); fn->release();
+    return r;
+}
+// Brightness over the eDP AUX channel: read the current mode and enable bytes, write what changes (nvrm_edp_backlight.h).
+static IOReturn nvrmEdpSet(NVRMBacklightHandler *h, IOService *rm, unsigned percent);
 NVRMBacklightHandler *NVRMBacklightHandler::withRM(IOService *rm, NvU32 level)
 {
     NVRMBacklightHandler *h = OSTypeAlloc(NVRMBacklightHandler);
@@ -371,22 +387,6 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
     return true;
 }
 
-// One DPCD transaction through NVRM (nvrm_ddc.cpp): at most 16 bytes within 0x700..0x7ff.
-static IOReturn nvrmDpAux(IOService *rm, unsigned gpu, unsigned display, bool write, unsigned addr, unsigned char *d, unsigned len)
-{
-    const OSSymbol *fn = OSSymbol::withCString(NVRM_DPAUX_FN);
-    struct NVRMDpAuxRequest *q = (struct NVRMDpAuxRequest *)IOMalloc(sizeof *q);
-    if (!rm || !fn || !q || len > kNvrmDpAuxMax) { OSSafeReleaseNULL(fn); if (q) IOFree(q, sizeof *q); return kIOReturnNoMemory; }
-    nvu_zero(q, sizeof *q);
-    q->gpuId = gpu; q->displayId = display; q->write = write ? 1 : 0; q->addr = addr; q->len = len;
-    if (write) nvu_copy(q->data, d, len);
-    IOReturn r = rm->callPlatformFunction(fn, false, q, NULL, NULL, NULL);
-    if (r == kIOReturnSuccess && !write) nvu_copy(d, q->data, len);
-    IOFree(q, sizeof *q); fn->release();
-    return r;
-}
-// Brightness over the eDP AUX channel: read the current mode and enable bytes, write what changes (nvrm_edp_backlight.h).
-static IOReturn nvrmEdpSet(NVRMBacklightHandler *h, IOService *rm, unsigned percent);
 void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
 {
     NVRMBacklightHandler *me = (NVRMBacklightHandler *)p;
