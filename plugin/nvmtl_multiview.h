@@ -88,12 +88,6 @@ static inline uint32_t nvmtl_mv_framebuffer_layers(uint32_t mask, uint32_t pass_
     return 1u;
 }
 
-/* the key that makes a render pass of one view mask distinct from every other (the shape cache hashes this in) */
-static inline uint64_t nvmtl_mv_shape_key(uint64_t identity, uint32_t mask)
-{
-    return identity * 0x9E3779B97F4A7C15ull ^ ((uint64_t)mask << 32 | mask);
-}
-
 /* ---- SPIR-V scans (word streams, little-endian host words) ---- */
 #define NVMTL_SPV_OP_DECORATE        71u
 #define NVMTL_SPV_OP_MEMBER_DECORATE 72u

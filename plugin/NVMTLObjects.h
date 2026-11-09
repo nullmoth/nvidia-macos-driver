@@ -9,6 +9,7 @@
 #import <Metal/Metal.h>
 #import <IOSurface/IOSurface.h>
 #include "nvmtl_vk.h"
+#include "nvmtl_multiview.h"
 #include "nvmtl_cmd_refusal.h"
 
 static inline NSMutableData *nvmtl_fc_storage(NSUInteger count) {
@@ -312,6 +313,7 @@ BOOL nvmtl_air_grid_only(NVMTLFunction *fn);
 @interface NVMTLRenderCommandEncoder () { @public NSString *_label; } @end
 @interface NVMTLRenderCommandEncoder () { @public BOOL _dbOn; float _dbLo, _dbHi; } @end   // setDepthTestMinBound:maxBound:
 @interface NVMTLRenderCommandEncoder () { @public uint32_t _vstride[NVMTL_NVIN]; uint32_t _vstrideSet; } @end
+@interface NVMTLRenderCommandEncoder () { @public uint32_t _ampCount; const char *_ampWhy; } @end   // setVertexAmplificationCount:viewMappings: (0 = never set = 1 view)
 @interface NVMTLComputeCommandEncoder () { @public NSString *_label; } @end
 @interface NVMTLBlitCommandEncoder () { @public NSString *_label; } @end
 @interface NVMTLAccelerationStructureCommandEncoder () { @public NSString *_label; } @end

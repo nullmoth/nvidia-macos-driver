@@ -47,10 +47,6 @@ int main(void)
     arm("a multiview pass has a framebuffer of 1 layer when the views carry enough layers", nvmtl_mv_framebuffer_layers(3u, 2, &why) == 1u && !why);
     arm("a multiview pass over a single-layer attachment is refused with a reason", nvmtl_mv_framebuffer_layers(3u, 1, &why) == 0u && why != NULL);
 
-    arm("the shape key differs between the same pipeline at two view masks", nvmtl_mv_shape_key(5, 3u) != nvmtl_mv_shape_key(5, 0u)
-        && nvmtl_mv_shape_key(5, 3u) != nvmtl_mv_shape_key(5, 15u));
-    arm("the shape key differs between two pipelines at one view mask", nvmtl_mv_shape_key(5, 3u) != nvmtl_mv_shape_key(6, 3u));
-
     uint32_t w[16]; size_t n;
     n = decorate(w, NVMTL_SPV_BI_LAYER, 0);
     arm("a vertex module that writes Layer is refused under multiview", nvmtl_mv_vertex_refusal(w, n) != NULL);
