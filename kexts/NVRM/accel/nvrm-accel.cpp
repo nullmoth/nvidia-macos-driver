@@ -12,6 +12,9 @@
 #endif
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
+// IOPCIDevice (with its setBusMasterEnable) is marked deprecated in favour of PCIDriverKit, which runs in user space and
+// cannot replace a kernel extension's PCI access; that deprecation is ignored from here on in this kext's sources.
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #include <IOKit/pci/IOPCIDevice.h>
 #include <pexpert/pexpert.h>
 #include <libkern/OSKextLib.h>

@@ -11,6 +11,9 @@
 // SIZE +0x10, SURF +0x1C. Transcoder T timings at 0x60000 + T*0x1000, TRANSCONF at 0x70008 + P*0x1000, PIPESRC 0x6001C.
 
 #include <IOKit/IOLib.h>
+// IOPCIDevice (with its setBusMasterEnable) is marked deprecated in favour of PCIDriverKit, which runs in user space and
+// cannot replace a kernel extension's PCI access; that deprecation is ignored from here on in this kext's sources.
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/graphics/IOFramebuffer.h>
 #include <IOKit/graphics/IODisplay.h>
