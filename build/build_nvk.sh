@@ -22,7 +22,7 @@
 #   NVK_EXTRA_PATCHES  space-separated names of extra patches in nvk/ applied last (e.g. nvk-upstream-nak)
 #   NVK_REF_EXPORTS optional file with the exported symbols to compare against (one name per line, sorted)
 #
-# The Mesa git must contain commit 17ca6174 (nvk/MESA_BASE). The tree is exported with git archive, so no .git is
+# The Mesa git must contain the commit in nvk/MESA_BASE (2.9: 90a959eb, mesa-26.3.0-rc3) and, for 2.8, 17ca6174. The tree is exported with git archive, so no .git is
 # present and the binary carries no git sha. Rebuilding is deterministic: the same inputs give the same LC_UUID.
 set -euo pipefail
 
@@ -34,8 +34,9 @@ JOBS=${NVK_JOBS:-6}
 
 case $REL in
   2.9) FIXES=$NVK/nvk-fixes-after-def16.patch
-       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide" ;;
+       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings" ;;
   2.8) FIXES=$NVK/release-2.8/nvk-fixes-after-def16.patch
+       BASE=17ca6174   # the 2.8 / 2.8.1 package was built on this Mesa; 2.9 moved to nvk/MESA_BASE (26.3)
        CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef" ;;
   *) echo "STOP: release must be 2.9 or 2.8"; exit 2 ;;
 esac
@@ -52,6 +53,7 @@ git -C "$MESA_GIT" archive "$BASE" | tar -x -C "$S"
 # Headers: NVK compiles against the 610 open kernel module headers with the 620 nvos.h change applied.
 cp -R "$OGKM" "$OUT/ogkm"
 patch -p1 -s --no-backup-if-mismatch -d "$OUT/ogkm" < "$NVK/ogkm-nvos-620.patch"
+[ "$REL" = 2.8 ] || patch -p1 -s --no-backup-if-mismatch -d "$OUT/ogkm" < "$NVK/ogkm-warnings.patch"   # DRF_MASK, also defined by Mesa's drf.h
 
 for p in $CHAIN; do
   f=$NVK/$p.patch; [ "$p" = "@FIXES" ] && f=$FIXES
@@ -112,8 +114,12 @@ meson setup "$B" "$S" --cross-file="$X" -Dbuildtype=release -Db_ndebug=true -Dvu
   -Dlmsensors=disabled -Dvalgrind=disabled -Dxlib-lease=disabled -Dgallium-rusticl=false -Dspirv-tools=disabled \
   "-Dc_args=-ffile-prefix-map=$S=/src -ffile-prefix-map=$HOME=/build" "-Dcpp_args=-ffile-prefix-map=$S=/src -ffile-prefix-map=$HOME=/build" \
   "-Drust_args=--remap-path-prefix=$S=/src --remap-path-prefix=$HOME=/build" \
-  "-Dc_link_args=-Wl,-oso_prefix,$B" "-Dcpp_link_args=-Wl,-oso_prefix,$B" > "$OUT/setup.log" 2>&1
+  "-Dc_link_args=-Wl,-oso_prefix,$B -Wl,-no_warn_duplicate_libraries" "-Dcpp_link_args=-Wl,-oso_prefix,$B -Wl,-no_warn_duplicate_libraries" > "$OUT/setup.log" 2>&1
 ninja -C "$B" -j"$JOBS" src/nouveau/vulkan/libvulkan_nouveau.dylib > "$OUT/build.log" 2>&1
+# Warnings may only go down: the committed count in nvk/WARNINGS is the ceiling (2.9 brought it to 0).
+WARN=$(grep -c 'warning:' "$OUT/build.log" || true); WMAX=$(cat "$NVK/WARNINGS" 2>/dev/null || echo 0)
+[ "$WARN" -le "$WMAX" ] || { echo "STOP: $WARN compiler/linker warnings, more than the $WMAX in nvk/WARNINGS"; grep 'warning:' "$OUT/build.log" | head -20; exit 4; }
+echo "warnings $WARN (ceiling $WMAX)"
 
 # Licence texts of the Rust crates Mesa fetched for NAK (meson setup downloads them into subprojects/packagecache).
 # licenses/nvk-rust-crates.txt in the package must equal this; a different crate set stops the build until it is updated.

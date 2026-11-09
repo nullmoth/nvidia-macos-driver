@@ -24,7 +24,7 @@ source, which this audit could not fetch, so the owner's statement that none was
 | Kernel driver core (RM, display engine, user-mode interface headers) | NVIDIA open-gpu-kernel-modules 620.70.06 | MIT (GPL-2.0 alternative not used) | `NOTICE`, `licenses/NVIDIA-open-gpu-kernel-modules-COPYING.txt` |
 | Display-engine 3D shaders `kexts/NVRM/nvkms_shaders.cpp` | `src/nvidia-modeset/src/shaders/g_*_shaders` of the same tree, xz-compressed unchanged | MIT | file header (was labelled as NullMoth's: corrected) |
 | `nvidia-modeset-os-interface.h` (two copies) | the same tree | MIT, NVIDIA copyright | file header (SPDX said PolyForm: corrected) |
-| Vulkan driver NVK and the NAK compiler | Mesa commit `17ca6174` plus `nvk/*.patch` | MIT | `NOTICE`, `licenses/Mesa-license.rst` |
+| Vulkan driver NVK and the NAK compiler | Mesa commit `90a959eb` (26.3.0-rc3) plus `nvk/*.patch` | MIT | `NOTICE`, `licenses/Mesa-license.rst` |
 | Rust crates NAK builds from (proc-macro2, quote, syn, paste and similar, fetched by Mesa's meson wraps) | crates.io | MIT and/or Apache-2.0 | stays with Mesa's tree; see item P8 |
 | Shader translator | `steelbrain/metal2vulkan` (Anees Iqbal) | LGPL-3.0-or-later | `NOTICE`, `translator/LICENSE`, `translator/COPYING` |
 | The Rust crates linked into the translator | crates.io | MIT, Apache-2.0, Unlicense or MIT, Unicode-3.0 | `licenses/translator-rust-crates.txt` (new) |
