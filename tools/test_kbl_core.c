@@ -146,6 +146,17 @@ int main(void)
         char obj[2]; int fl = -1;
         arm("the descriptor block is found in a _WDG buffer with its object characters and flags", kbl_wdg_find(wdg, 20, kKblDellDescGuid, obj, &fl) && obj[0] == 'B' && obj[1] == 'A' && fl == 0);
     }
+    /* census: the Razer Blade families carry Dell's SMBIOS call GUID with no descriptor block; the Dell families carry both. */
+    {
+        uint8_t razer[20] = {0}, dell[40] = {0};
+        for (int i = 0; i < 16; i++) { razer[i] = kKblDellGuid[i]; dell[i] = kKblDellGuid[i]; dell[20 + i] = kKblDellDescGuid[i]; }
+        razer[16] = 'W'; razer[17] = 'M'; razer[19] = 0x02;
+        dell[16] = 'A'; dell[17] = 'A'; dell[19] = 0x02; dell[36] = 'B'; dell[37] = 'A';
+        char o[2], d[2]; int f;
+        arm("a Razer-style table (SMBIOS GUID, no descriptor) is found as SMBIOS but has no descriptor, so Dell is declined",
+            kbl_dell_wdg_find(razer, 20, o) && !kbl_wdg_find(razer, 20, kKblDellDescGuid, d, &f));
+        arm("a Dell table (both blocks) passes both lookups", kbl_dell_wdg_find(dell, 40, o) && o[0] == 'A' && kbl_wdg_find(dell, 40, kKblDellDescGuid, d, &f) && d[0] == 'B');
+    }
     arm("the method ids are the ASCII of their names", KBL_ASUS_METHOD_DSTS == ('D' | 'S' << 8 | 'T' << 16 | 'S' << 24)
                                                     && KBL_ASUS_METHOD_DEVS == ('D' | 'E' << 8 | 'V' << 16 | 'S' << 24));
     return fails ? 1 : 0;
