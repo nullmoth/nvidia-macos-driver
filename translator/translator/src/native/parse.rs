@@ -1050,6 +1050,14 @@ fn split_trailing_addrspace(s: &str) -> Result<(&str, u32), String> {
         return Ok((s, 0));
     };
     let digits = &s[open + " addrspace(".len()..s.len() - 1];
+    // `void (ptr addrspace(1))*` ends in a parenthesis that belongs to a function type, so text with brackets is left to
+    // the caller; a plain word where the number belongs is a malformed address space and must not become space 0.
+    if !digits.is_empty()
+        && digits.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !digits.chars().all(|c| c.is_ascii_digit())
+    {
+        return Err(format!("native emitter: bad addrspace `{digits}` in `{s}*`"));
+    }
     if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
         return Ok((s, 0));
     }

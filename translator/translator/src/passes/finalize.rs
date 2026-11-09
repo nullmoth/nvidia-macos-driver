@@ -433,7 +433,6 @@ fn finalize_bindless_heap(ctx: &mut Ctx) {
     use std::collections::BTreeSet;
     for capability in [
         spirv::Capability::RuntimeDescriptorArray,
-        spirv::Capability::ShaderNonUniform,
         spirv::Capability::SampledImageArrayNonUniformIndexing,
     ] {
         ctx.add_capability(capability);
@@ -450,6 +449,8 @@ fn finalize_bindless_heap(ctx: &mut Ctx) {
             _ => None,
         })
         .collect();
+    // Each *ArrayNonUniformIndexing capability below declares ShaderNonUniform implicitly, and SampledImage... is added
+    // above in every case, so the decoration's capability is never declared a second time.
     for (dim, sampled) in kinds {
         ctx.add_capability(match (dim == spirv::Dim::DimBuffer, sampled) {
             (false, 2) => spirv::Capability::StorageImageArrayNonUniformIndexing,

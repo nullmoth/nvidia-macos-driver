@@ -406,7 +406,8 @@ declare i16 @air.pack.unorm.rgb565.v3f16(<3 x half>)
     assert_eq!(asm.matches(" FClamp ").count(), 0, "{asm}");
     assert_eq!(asm.matches(" RoundEven ").count(), 3, "{asm}");
     assert_eq!(asm.matches(" Round ").count(), 0, "{asm}");
-    assert_eq!(asm.matches("OpIsNan").count(), 0, "{asm}");
+    // a NaN component packs as zero (one NaN test per component)
+    assert_eq!(asm.matches("OpIsNan").count(), 3, "{asm}");
     assert_eq!(asm.matches("OpShiftLeftLogical").count(), 2, "{asm}");
     assert!(asm.contains("OpUConvert"), "{asm}");
     if std::process::Command::new("spirv-val")
@@ -452,7 +453,8 @@ declare i32 @air.pack.unorm.rgb10a2.v4f32(<4 x float>)
     assert_eq!(asm.matches(" FClamp ").count(), 0, "{asm}");
     assert_eq!(asm.matches(" Fma ").count(), 4, "{asm}");
     assert_eq!(asm.matches(" Floor ").count(), 4, "{asm}");
-    assert_eq!(asm.matches("OpIsNan").count(), 0, "{asm}");
+    // a NaN component packs as zero (one NaN test per component)
+    assert_eq!(asm.matches("OpIsNan").count(), 4, "{asm}");
     assert_eq!(asm.matches("OpShiftLeftLogical").count(), 3, "{asm}");
 
     let module = load_bytes(&spv).expect("load native spv");
@@ -1948,8 +1950,47 @@ declare float @air.fast_tanpi.f32(float)
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+// NVMTL_XLATE_TRIG_FLUSH is read from the process environment; the two sin/cos tests take turns.
+static TRIG_KNOB: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
-fn native_fast_sincos_f32_zeroes_large_arguments() {
+fn native_fast_sincos_f32_is_plain_sin_and_cos_by_default() {
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+define void @main(float %x) {
+entry:
+  %cos = tail call fast float @air.fast_cos.f32(float %x)
+  %sin = tail call fast float @air.fast_sin.f32(float %x)
+  ret void
+}
+declare float @air.fast_cos.f32(float)
+declare float @air.fast_sin.f32(float)
+"#;
+    let _held = TRIG_KNOB.lock().unwrap_or_else(|e| e.into_inner());
+    let module = load_bytes(emit_vulkan_spirv(ll).expect("native emit")).expect("load native spv");
+    let out = passes::transform(module, Stage::Kernel, None, None, None, Some("main"))
+        .expect("interface transform")
+        .assemble()
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect::<Vec<_>>();
+    let asm = disassemble(&out).expect("disassemble transformed");
+    assert!(asm.contains(" Cos ") && asm.contains(" Sin "), "{asm}");
+    assert!(!asm.contains(" FAbs "), "{asm}");
+}
+
+#[test]
+fn native_fast_sincos_f32_zeroes_large_arguments_when_the_flush_knob_is_set() {
+    let _held = TRIG_KNOB.lock().unwrap_or_else(|e| e.into_inner());
+    // The zeroing of large arguments is opt-in (NVMTL_XLATE_TRIG_FLUSH=1); the default lowers to plain Sin and Cos.
+    std::env::set_var("NVMTL_XLATE_TRIG_FLUSH", "1");
+    let _reset = Reset;
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            std::env::remove_var("NVMTL_XLATE_TRIG_FLUSH");
+        }
+    }
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
 define void @main(float %x) {
