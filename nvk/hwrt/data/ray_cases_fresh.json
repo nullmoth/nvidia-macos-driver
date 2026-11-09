@@ -1,0 +1,754 @@
+[
+ {
+  "label": "fresh-triangle-0",
+  "origin": [
+   0.1625,
+   0.1,
+   -0.25
+  ],
+  "direction": [
+   -0.125,
+   0.0,
+   0.5
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 1,
+  "expected": {
+   "hit": true,
+   "t": 0.5,
+   "u": 0.1,
+   "v": 0.1,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-1",
+  "origin": [
+   0.2,
+   0.053125000000000006,
+   0.75
+  ],
+  "direction": [
+   0.0,
+   0.0625,
+   -1.0
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 128,
+  "expected": {
+   "hit": true,
+   "t": 0.75,
+   "u": 0.2,
+   "v": 0.1,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-2",
+  "origin": [
+   0.17500000000000004,
+   0.1,
+   -1.5
+  ],
+  "direction": [
+   0.125,
+   0.0,
+   1.5
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 255,
+  "expected": {
+   "hit": true,
+   "t": 1.0,
+   "u": 0.30000000000000004,
+   "v": 0.1,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-3",
+  "origin": [
+   0.55625,
+   0.021875000000000006,
+   2.5
+  ],
+  "direction": [
+   -0.125,
+   0.0625,
+   -2.0
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 1,
+  "expected": {
+   "hit": true,
+   "t": 1.25,
+   "u": 0.4,
+   "v": 0.1,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-4",
+  "origin": [
+   0.1,
+   0.2,
+   -0.75
+  ],
+  "direction": [
+   0.0,
+   0.0,
+   0.5
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 128,
+  "expected": {
+   "hit": true,
+   "t": 1.5,
+   "u": 0.1,
+   "v": 0.2,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-5",
+  "origin": [
+   0.1375,
+   0.16875,
+   0.5
+  ],
+  "direction": [
+   0.125,
+   0.0625,
+   -1.0
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 255,
+  "expected": {
+   "hit": true,
+   "t": 0.5,
+   "u": 0.2,
+   "v": 0.2,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-6",
+  "origin": [
+   0.39375000000000004,
+   0.2,
+   -1.125
+  ],
+  "direction": [
+   -0.125,
+   0.0,
+   1.5
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 1,
+  "expected": {
+   "hit": true,
+   "t": 0.75,
+   "u": 0.30000000000000004,
+   "v": 0.2,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-7",
+  "origin": [
+   0.4,
+   0.1375,
+   2.0
+  ],
+  "direction": [
+   0.0,
+   0.0625,
+   -2.0
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 128,
+  "expected": {
+   "hit": true,
+   "t": 1.0,
+   "u": 0.4,
+   "v": 0.2,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-8",
+  "origin": [
+   -0.056249999999999994,
+   0.30000000000000004,
+   -0.625
+  ],
+  "direction": [
+   0.125,
+   0.0,
+   0.5
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 255,
+  "expected": {
+   "hit": true,
+   "t": 1.25,
+   "u": 0.1,
+   "v": 0.30000000000000004,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-9",
+  "origin": [
+   0.3875,
+   0.20625000000000004,
+   1.5
+  ],
+  "direction": [
+   -0.125,
+   0.0625,
+   -1.0
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 1,
+  "expected": {
+   "hit": true,
+   "t": 1.5,
+   "u": 0.2,
+   "v": 0.30000000000000004,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-10",
+  "origin": [
+   0.30000000000000004,
+   0.30000000000000004,
+   -0.75
+  ],
+  "direction": [
+   0.0,
+   0.0,
+   1.5
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 128,
+  "expected": {
+   "hit": true,
+   "t": 0.5,
+   "u": 0.30000000000000004,
+   "v": 0.30000000000000004,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-11",
+  "origin": [
+   0.30625,
+   0.25312500000000004,
+   1.5
+  ],
+  "direction": [
+   0.125,
+   0.0625,
+   -2.0
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 255,
+  "expected": {
+   "hit": true,
+   "t": 0.75,
+   "u": 0.4,
+   "v": 0.30000000000000004,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-12",
+  "origin": [
+   0.225,
+   0.1,
+   -0.5
+  ],
+  "direction": [
+   -0.125,
+   0.0,
+   0.5
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 1,
+  "expected": {
+   "hit": true,
+   "t": 1.0,
+   "u": 0.1,
+   "v": 0.1,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-13",
+  "origin": [
+   0.2,
+   0.021875000000000006,
+   1.25
+  ],
+  "direction": [
+   0.0,
+   0.0625,
+   -1.0
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 128,
+  "expected": {
+   "hit": true,
+   "t": 1.25,
+   "u": 0.2,
+   "v": 0.1,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-14",
+  "origin": [
+   0.11250000000000004,
+   0.1,
+   -2.25
+  ],
+  "direction": [
+   0.125,
+   0.0,
+   1.5
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 255,
+  "expected": {
+   "hit": true,
+   "t": 1.5,
+   "u": 0.30000000000000004,
+   "v": 0.1,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-15",
+  "origin": [
+   0.4625,
+   0.06875,
+   1.0
+  ],
+  "direction": [
+   -0.125,
+   0.0625,
+   -2.0
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 1,
+  "expected": {
+   "hit": true,
+   "t": 0.5,
+   "u": 0.4,
+   "v": 0.1,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-16",
+  "origin": [
+   0.1,
+   0.2,
+   -0.375
+  ],
+  "direction": [
+   0.0,
+   0.0,
+   0.5
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 128,
+  "expected": {
+   "hit": true,
+   "t": 0.75,
+   "u": 0.1,
+   "v": 0.2,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-17",
+  "origin": [
+   0.07500000000000001,
+   0.1375,
+   1.0
+  ],
+  "direction": [
+   0.125,
+   0.0625,
+   -1.0
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 255,
+  "expected": {
+   "hit": true,
+   "t": 1.0,
+   "u": 0.2,
+   "v": 0.2,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-18",
+  "origin": [
+   0.45625000000000004,
+   0.2,
+   -1.875
+  ],
+  "direction": [
+   -0.125,
+   0.0,
+   1.5
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 1,
+  "expected": {
+   "hit": true,
+   "t": 1.25,
+   "u": 0.30000000000000004,
+   "v": 0.2,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-19",
+  "origin": [
+   0.4,
+   0.10625000000000001,
+   3.0
+  ],
+  "direction": [
+   0.0,
+   0.0625,
+   -2.0
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 128,
+  "expected": {
+   "hit": true,
+   "t": 1.5,
+   "u": 0.4,
+   "v": 0.2,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-20",
+  "origin": [
+   0.037500000000000006,
+   0.30000000000000004,
+   -0.25
+  ],
+  "direction": [
+   0.125,
+   0.0,
+   0.5
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 255,
+  "expected": {
+   "hit": true,
+   "t": 0.5,
+   "u": 0.1,
+   "v": 0.30000000000000004,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-21",
+  "origin": [
+   0.29375,
+   0.25312500000000004,
+   0.75
+  ],
+  "direction": [
+   -0.125,
+   0.0625,
+   -1.0
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 1,
+  "expected": {
+   "hit": true,
+   "t": 0.75,
+   "u": 0.2,
+   "v": 0.30000000000000004,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-22",
+  "origin": [
+   0.30000000000000004,
+   0.30000000000000004,
+   -1.5
+  ],
+  "direction": [
+   0.0,
+   0.0,
+   1.5
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 128,
+  "expected": {
+   "hit": true,
+   "t": 1.0,
+   "u": 0.30000000000000004,
+   "v": 0.30000000000000004,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "fresh-triangle-23",
+  "origin": [
+   0.24375000000000002,
+   0.22187500000000004,
+   2.5
+  ],
+  "direction": [
+   0.125,
+   0.0625,
+   -2.0
+  ],
+  "tmin": 0.0,
+  "tmax": 10.0,
+  "mask": 255,
+  "expected": {
+   "hit": true,
+   "t": 1.25,
+   "u": 0.4,
+   "v": 0.30000000000000004,
+   "primitive": 0,
+   "geometry": 0,
+   "instance": 0
+  }
+ },
+ {
+  "label": "mask-zero",
+  "origin": [
+   0.25,
+   0.25,
+   -1
+  ],
+  "direction": [
+   0,
+   0,
+   1
+  ],
+  "tmin": 0,
+  "tmax": 10,
+  "mask": 0,
+  "expected": {
+   "hit": false
+  }
+ },
+ {
+  "label": "outside-x",
+  "origin": [
+   10,
+   0.25,
+   -1
+  ],
+  "direction": [
+   0,
+   0,
+   1
+  ],
+  "tmin": 0,
+  "tmax": 10,
+  "mask": 255,
+  "expected": {
+   "hit": false
+  }
+ },
+ {
+  "label": "outside-y",
+  "origin": [
+   0.25,
+   2,
+   -1
+  ],
+  "direction": [
+   0,
+   0,
+   1
+  ],
+  "tmin": 0,
+  "tmax": 10,
+  "mask": 255,
+  "expected": {
+   "hit": false
+  }
+ },
+ {
+  "label": "outside-diagonal",
+  "origin": [
+   0.8,
+   0.8,
+   -1
+  ],
+  "direction": [
+   0,
+   0,
+   1
+  ],
+  "tmin": 0,
+  "tmax": 10,
+  "mask": 255,
+  "expected": {
+   "hit": false
+  }
+ },
+ {
+  "label": "behind",
+  "origin": [
+   0.25,
+   0.25,
+   -1
+  ],
+  "direction": [
+   0,
+   0,
+   -1
+  ],
+  "tmin": 0,
+  "tmax": 10,
+  "mask": 255,
+  "expected": {
+   "hit": false
+  }
+ },
+ {
+  "label": "before-min",
+  "origin": [
+   0.25,
+   0.25,
+   -1
+  ],
+  "direction": [
+   0,
+   0,
+   1
+  ],
+  "tmin": 2,
+  "tmax": 10,
+  "mask": 255,
+  "expected": {
+   "hit": false
+  }
+ },
+ {
+  "label": "after-max",
+  "origin": [
+   0.25,
+   0.25,
+   -1
+  ],
+  "direction": [
+   0,
+   0,
+   1
+  ],
+  "tmin": 0,
+  "tmax": 0.5,
+  "mask": 255,
+  "expected": {
+   "hit": false
+  }
+ },
+ {
+  "label": "negative-x",
+  "origin": [
+   -0.25,
+   0.25,
+   -1
+  ],
+  "direction": [
+   0,
+   0,
+   1
+  ],
+  "tmin": 0,
+  "tmax": 10,
+  "mask": 255,
+  "expected": {
+   "hit": false
+  }
+ }
+]

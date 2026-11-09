@@ -1,0 +1,932 @@
+diff -ruN a/src/nouveau/vulkan/bvh/encode.comp b/src/nouveau/vulkan/bvh/encode.comp
+--- a/src/nouveau/vulkan/bvh/encode.comp	2026-11-08 23:56:44
++++ b/src/nouveau/vulkan/bvh/encode.comp	2026-11-08 23:56:44
+@@ -194,6 +194,6 @@
+       DEREF(header).compacted_size = args.bvh_size;
+       /* vk_accel_struct_serialization_header: two UUIDs, three uint64 = 56 bytes, then one uint64 per instance */
+       DEREF(header).serialization_size = 56u + 8u * instance_count + args.bvh_size;
+-      DEREF(header).padding = 0;
++      DEREF(header).hw_offset = 0;   /* encode_ttu.comp sets it when the hardware part is built */
+    }
+ }
+diff -ruN a/src/nouveau/vulkan/bvh/encode_ttu.comp b/src/nouveau/vulkan/bvh/encode_ttu.comp
+--- a/src/nouveau/vulkan/bvh/encode_ttu.comp	1969-12-31 16:00:00
++++ b/src/nouveau/vulkan/bvh/encode_ttu.comp	2026-11-08 23:56:44
+@@ -0,0 +1,241 @@
++/*
++ * encode_ttu.comp - the hardware half of an acceleration structure build (docs/HWRT.md).
++ *
++ * Runs after encode.comp, from the same intermediate BVH, and writes struct nvk_hwrt_appendix, the geometry table and the
++ * structure the RT cores walk (nvk_hwrt_layout.h, generation NVK_HWRT_LAYOUT_PROVISIONAL). The mapping is the one encode.comp
++ * uses: index arithmetic only, one invocation per leaf that also writes internal node x, no atomics except the top level's
++ * has-procedural word.
++ *   leaf i      -> leaves_base + i * leaf_size
++ *   IR box j    -> header + (internal_count - 1 - j) * node_size      (the root becomes node 0)
++ * mode 1 (after a copy of a finished structure) rewrites the structure's own address and nothing else.
++ */
++#version 460
++
++#extension GL_GOOGLE_include_directive : require
++
++#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
++#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
++#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
++#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
++#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
++#extension GL_EXT_scalar_block_layout : require
++#extension GL_EXT_buffer_reference : require
++#extension GL_EXT_buffer_reference2 : require
++
++layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
++
++#define VK_USED_BUILD_FLAGS 0
++#include "vk_bvh_helpers.h"
++#include "nvk_build_interface.h"
++#include "nvk_bvh.h"
++#include "nvk_hwrt.h"
++#include "nvk_hwrt_layout.h"
++
++#ifndef VK_GEOMETRY_TYPE_TRIANGLES_KHR
++#define VK_GEOMETRY_TYPE_TRIANGLES_KHR 0
++#define VK_GEOMETRY_TYPE_AABBS_KHR     1
++#define VK_GEOMETRY_TYPE_INSTANCES_KHR 2
++#endif
++
++layout(push_constant) uniform CONSTS {
++   nvk_hwrt_encode_args args;
++};
++
++void
++put32(uint64_t base, uint32_t off, uint32_t v)
++{
++   DEREF(REF(nvk_hwrt_word32)(OFFSET(base, off))).v = v;
++}
++
++void
++put64(uint64_t base, uint32_t off, uint64_t v)
++{
++   DEREF(REF(nvk_hwrt_word64)(OFFSET(base, off))).v = v;
++}
++
++void
++putf(uint64_t base, uint32_t off, float v)
++{
++   put32(base, off, floatBitsToUint(v));
++}
++
++void
++main()
++{
++   uint32_t gid = gl_GlobalInvocationID.x;
++   /* mode 1 runs on a finished structure, so it reads where the appendix is from the structure itself */
++   uint32_t hw_offset = args.mode == 1u ? DEREF(REF(nvk_bvh_header)(args.output_bvh)).hw_offset : args.hw_offset;
++   uint64_t app_addr = OFFSET(args.output_bvh, hw_offset);
++   uint64_t hw = OFFSET(app_addr, NVK_HWRT_STRUCT_OFFSET);
++
++   if (args.mode == 1u) {
++      if (gid == 0u && hw_offset != 0u)
++         put64(hw, NVK_HWL_OFF_SELF, hw);
++      return;
++   }
++   if (args.mode == 2u) {
++      /* clear the appendix before the pass: the top level ORs into it */
++      if (gid == 0u) {
++         REF(nvk_hwrt_appendix) a = REF(nvk_hwrt_appendix)(app_addr);
++         DEREF(a).magic = 0u;
++         DEREF(a).generation = 0u;
++         DEREF(a).structure_size = 0u;
++         DEREF(a).geometry_table_offset = 0u;
++         DEREF(a).geometry_count = 0u;
++         DEREF(a).has_procedural = 0u;
++         DEREF(a).padding[0] = 0u;
++         DEREF(a).padding[1] = 0u;
++      }
++      return;
++   }
++
++   uint32_t leaf_count = args.leaf_node_count;
++   uint32_t ir_leaf_size;
++   uint32_t out_leaf_size;
++   uint32_t leaf_type;
++   switch (args.geometry_type) {
++   case VK_GEOMETRY_TYPE_TRIANGLES_KHR:
++      ir_leaf_size = SIZEOF(vk_ir_triangle_node);
++      out_leaf_size = NVK_HWL_TRI_LEAF_SIZE;
++      leaf_type = nvk_bvh_node_triangle;
++      break;
++   case VK_GEOMETRY_TYPE_AABBS_KHR:
++      ir_leaf_size = SIZEOF(vk_ir_aabb_node);
++      out_leaf_size = NVK_HWL_BOX_LEAF_SIZE;
++      leaf_type = nvk_bvh_node_aabb;
++      break;
++   default:
++      ir_leaf_size = SIZEOF(vk_ir_instance_node);
++      out_leaf_size = NVK_HWL_INST_LEAF_SIZE;
++      leaf_type = nvk_bvh_node_instance;
++      break;
++   }
++
++   uint32_t internal_count = max(DEREF(args.header).ir_internal_node_count, 1u);
++   uint32_t leaves_base = NVK_HWL_HEADER_SIZE + internal_count * NVK_HWL_NODE_SIZE;
++   uint32_t root_offset = leaf_count * ir_leaf_size;
++
++   if (gid < leaf_count) {
++      VOID_REF src = OFFSET(args.intermediate_bvh, gid * ir_leaf_size);
++      uint64_t dst = OFFSET(hw, leaves_base + gid * out_leaf_size);
++      switch (args.geometry_type) {
++      case VK_GEOMETRY_TYPE_TRIANGLES_KHR: {
++         vk_ir_triangle_node s = DEREF(REF(vk_ir_triangle_node)(src));
++         for (uint32_t i = 0; i < 3; i++)
++            for (uint32_t j = 0; j < 3; j++)
++               putf(dst, (i * 3 + j) * 4, s.coords[i][j]);
++         put32(dst, 36, s.triangle_id);
++         put32(dst, 40, s.geometry_id_and_flags);
++         /* the lowering reads these per geometry; the first primitive of a geometry names it */
++         if (s.triangle_id == 0u) {
++            uint32_t geom = s.geometry_id_and_flags & 0xFFFFFFu;
++            uint64_t entry = OFFSET(app_addr, args.geometry_table_offset + geom * 8u);
++            put32(entry, 0, s.geometry_id_and_flags);
++            put32(entry, 4, gid);
++         }
++         break;
++      }
++      case VK_GEOMETRY_TYPE_AABBS_KHR: {
++         vk_ir_aabb_node s = DEREF(REF(vk_ir_aabb_node)(src));
++         for (uint32_t j = 0; j < 3; j++) {
++            putf(dst, j * 4, s.base.aabb.min[j]);
++            putf(dst, 12 + j * 4, s.base.aabb.max[j]);
++         }
++         put32(dst, 24, s.primitive_id);
++         put32(dst, 28, s.geometry_id_and_flags);
++         break;
++      }
++      default: {
++         vk_ir_instance_node s = DEREF(REF(vk_ir_instance_node)(src));
++         mat3x4 o = s.otw_matrix;
++         for (uint32_t r = 0; r < 3; r++)
++            for (uint32_t c = 0; c < 4; c++)
++               putf(dst, NVK_HWL_INST_XFORM + (r * 4 + c) * 4, o[r][c]);
++         uint64_t root = 0ul;
++         uint32_t missing = 0u;
++         if (s.base_ptr != 0ul) {
++            uint32_t blas_hw_off = DEREF(REF(nvk_bvh_header)(s.base_ptr)).hw_offset;
++            if (blas_hw_off != 0u) {
++               uint64_t blas_app = OFFSET(s.base_ptr, blas_hw_off);
++               uint64_t blas_hw = OFFSET(blas_app, NVK_HWRT_STRUCT_OFFSET);
++               root = blas_hw;
++               atomicOr(DEREF(REF(nvk_hwrt_appendix)(app_addr)).has_procedural,
++                        DEREF(REF(nvk_hwrt_appendix)(blas_app)).has_procedural & 1u);
++            } else {
++               missing = 2u;
++            }
++         }
++         if (missing != 0u)
++            atomicOr(DEREF(REF(nvk_hwrt_appendix)(app_addr)).has_procedural, missing);
++         put64(dst, NVK_HWL_INST_ROOT, root);
++         put32(dst, NVK_HWL_INST_MASK, s.custom_instance_and_mask >> 24);
++         put32(dst, NVK_HWL_INST_INDEX, gid);
++         put32(dst, NVK_HWL_INST_SBT, s.sbt_offset_and_flags & 0xFFFFFFu);
++         put32(dst, NVK_HWL_INST_CUSTOM, s.custom_instance_and_mask & 0xFFFFFFu);
++         put32(dst, NVK_HWL_INST_FLAGS, s.sbt_offset_and_flags >> 24);
++         break;
++      }
++      }
++   }
++
++   if (gid >= internal_count)
++      return;
++
++   uint32_t src_index = internal_count - 1 - gid;
++   REF(vk_ir_box_node) src =
++      REF(vk_ir_box_node)(OFFSET(args.intermediate_bvh, root_offset + src_index * SIZEOF(vk_ir_box_node)));
++   uint64_t dst = OFFSET(hw, NVK_HWL_HEADER_SIZE + gid * NVK_HWL_NODE_SIZE);
++   bool built = DEREF(args.header).ir_internal_node_count > 0;
++
++   for (uint32_t c = 0; c < 2; c++) {
++      uint32_t child = built ? DEREF(src).children[c] : VK_BVH_INVALID_NODE;
++      uint32_t slot = c * 56u;
++      if (child == VK_BVH_INVALID_NODE) {
++         for (uint32_t k = 0; k < 6; k++)
++            putf(dst, slot + k * 4, uintBitsToFloat(0x7fc00000u));
++         put32(dst, slot + 24, NVK_BVH_INVALID_NODE);
++         continue;
++      }
++      uint32_t child_offset = child & ~3u;
++      vk_aabb aabb = DEREF(REF(vk_ir_node)(OFFSET(args.intermediate_bvh, child_offset))).aabb;
++      /* the same watertight growth encode.comp applies */
++      aabb.min -= max(abs(aabb.min), vec3(1.0)) * 1.1920929e-7;
++      aabb.max += max(abs(aabb.max), vec3(1.0)) * 1.1920929e-7;
++      for (uint32_t k = 0; k < 3; k++) {
++         putf(dst, slot + k * 4, aabb.min[k]);
++         putf(dst, slot + 12 + k * 4, aabb.max[k]);
++      }
++      if (child_offset < root_offset) {
++         uint32_t leaf_index = child_offset / ir_leaf_size;
++         put32(dst, slot + 24, (leaves_base + leaf_index * out_leaf_size) | leaf_type);
++      } else {
++         uint32_t si = (child_offset - root_offset) / SIZEOF(vk_ir_box_node);
++         uint32_t di = internal_count - si - 1;
++         put32(dst, slot + 24, (NVK_HWL_HEADER_SIZE + di * NVK_HWL_NODE_SIZE) | nvk_bvh_node_internal);
++      }
++   }
++
++   if (gid == 0u) {
++      bool tlas = args.geometry_type == VK_GEOMETRY_TYPE_INSTANCES_KHR;
++      REF(nvk_hwrt_appendix) app = REF(nvk_hwrt_appendix)(app_addr);
++      DEREF(app).magic = NVK_HWRT_APPENDIX_MAGIC;
++      DEREF(app).generation = NVK_HWRT_LAYOUT_PROVISIONAL;
++      DEREF(app).structure_size = args.hw_size;
++      DEREF(app).geometry_table_offset = tlas ? 0u : args.geometry_table_offset;
++      DEREF(app).geometry_count = tlas ? 0u : args.geometry_count;
++      if (args.geometry_type == VK_GEOMETRY_TYPE_AABBS_KHR)
++         DEREF(app).has_procedural = 1u;   /* the top level's word is cleared by mode 2 and only OR-ed into */
++      DEREF(app).magic = NVK_HWRT_APPENDIX_MAGIC;
++      put32(hw, 0x000, tlas ? NVK_HWL_MAGIC_TLAS : NVK_HWL_MAGIC_BLAS);
++      put32(hw, NVK_HWL_OFF_FLAGS, NVK_HWL_BUILD_FLAGS);
++      put32(hw, NVK_HWL_OFF_SIZE, args.hw_size);
++      put32(hw, NVK_HWL_OFF_LEAVES, leaves_base);
++      put64(hw, NVK_HWL_OFF_ROOT, uint64_t(NVK_HWL_HEADER_SIZE));
++      put64(hw, NVK_HWL_OFF_SENTINEL, ~0ul);
++      put32(hw, NVK_HWL_OFF_NODES, NVK_HWL_NODES_VALUE);
++      put32(hw, NVK_HWL_OFF_GEOMS, tlas ? 0u : args.geometry_count);
++      put32(hw, NVK_HWL_OFF_PRIMS, leaf_count);
++      put64(hw, NVK_HWL_OFF_SELF, hw);
++      DEREF(REF(nvk_bvh_header)(args.output_bvh)).hw_offset = args.hw_offset;
++   }
++}
+diff -ruN a/src/nouveau/vulkan/bvh/meson.build b/src/nouveau/vulkan/bvh/meson.build
+--- a/src/nouveau/vulkan/bvh/meson.build	2026-11-08 23:56:44
++++ b/src/nouveau/vulkan/bvh/meson.build	2026-11-08 23:56:44
+@@ -4,6 +4,10 @@
+     'encode.comp',
+     'nvk_encode',
+   ],
++  [
++    'encode_ttu.comp',
++    'nvk_encode_ttu',
++  ],
+ ]
+ 
+ nvk_bvh_include_dir = dir_source_root + '/src/nouveau/vulkan/bvh'
+@@ -13,6 +17,8 @@
+ nvk_bvh_includes = files(
+   'nvk_build_interface.h',
+   '../nvk_bvh.h',
++  '../nvk_hwrt.h',
++  '../nvk_hwrt_layout.h',
+   nvk_vk_bvh_include_dir + '/vk_bvh_helpers.h',
+   nvk_vk_bvh_include_dir + '/vk_bvh_defines.h',
+ )
+diff -ruN a/src/nouveau/vulkan/bvh/nvk_build_interface.h b/src/nouveau/vulkan/bvh/nvk_build_interface.h
+--- a/src/nouveau/vulkan/bvh/nvk_build_interface.h	2026-11-08 23:56:44
++++ b/src/nouveau/vulkan/bvh/nvk_build_interface.h	2026-11-08 23:56:44
+@@ -24,4 +24,20 @@
+    uint32_t padding;
+ };
+ 
++/* Push constants of the hardware encode pass (bvh/encode_ttu.comp). mode 0 writes the appendix and the hardware structure from
++ * the same intermediate BVH the software encode just consumed; mode 1 only rewrites the structure's own address after a copy. */
++struct nvk_hwrt_encode_args {
++   VOID_REF intermediate_bvh;
++   VOID_REF output_bvh;
++   REF(vk_ir_header) header;
++   uint32_t leaf_node_count;
++   uint32_t geometry_type;
++   uint32_t hw_offset;          /* appendix offset from the structure base */
++   uint32_t hw_size;            /* bytes of the hardware structure */
++   uint32_t geometry_count;
++   uint32_t geometry_table_offset;   /* from the appendix */
++   uint32_t mode;
++   uint32_t padding;
++};
++
+ #endif /* NVK_BVH_BUILD_INTERFACE_H */
+diff -ruN a/src/nouveau/vulkan/meson.build b/src/nouveau/vulkan/meson.build
+--- a/src/nouveau/vulkan/meson.build	2026-11-08 23:56:44
++++ b/src/nouveau/vulkan/meson.build	2026-11-08 23:56:44
+@@ -32,6 +32,8 @@
+ nvk_files = files(
+   'nvk_acceleration_structure.c',
+   'nvk_bvh.h',
++  'nvk_hwrt.h',
++  'nvk_hwrt_layout.h',
+   'nvk_nir_lower_ray_queries.c',
+   'nvk_nir_ray_tracing.c',
+   'nvk_nir_ray_tracing.h',
+diff -ruN a/src/nouveau/vulkan/nvk_acceleration_structure.c b/src/nouveau/vulkan/nvk_acceleration_structure.c
+--- a/src/nouveau/vulkan/nvk_acceleration_structure.c	2026-11-08 23:56:44
++++ b/src/nouveau/vulkan/nvk_acceleration_structure.c	2026-11-08 23:56:44
+@@ -17,6 +17,8 @@
+  *
+  * Copyright © 2023 Valve Corporation (the lavapipe implementation this follows) — SPDX-License-Identifier: MIT
+  */
++#include <stdlib.h>
++
+ #include "nvk_bvh.h"
+ #include "nvk_cmd_buffer.h"
+ #include "nvk_device.h"
+@@ -27,6 +29,8 @@
+ #include "vk_acceleration_structure.h"
+ #include "vk_command_buffer.h"
+ #include "bvh/nvk_build_interface.h"
++#include "nvk_hwrt.h"
++#include "nvk_hwrt_layout.h"
+ 
+ #include "nvtypes.h"
+ #include "nv_push_cl90b5.h"
+@@ -35,6 +39,10 @@
+ #include "nvk_encode.spv.h"
+ };
+ 
++static const uint32_t nvk_encode_ttu_spv[] = {
++#include "nvk_encode_ttu.spv.h"
++};
++
+ static_assert(sizeof(struct nvk_bvh_header) == NVK_BVH_HEADER_SIZE, "nvk_bvh_header size drifted from NVK_BVH_HEADER_SIZE");
+ static_assert(sizeof(struct nvk_bvh_triangle_node) % 8 == 0, "nvk_bvh_triangle_node is not padded");
+ static_assert(sizeof(struct nvk_bvh_aabb_node) % 8 == 0, "nvk_bvh_aabb_node is not padded");
+@@ -45,8 +53,22 @@
+ 
+ enum nvk_meta_object_key_type {
+    NVK_META_OBJECT_KEY_BVH_ENCODE = VK_META_OBJECT_KEY_DRIVER_OFFSET,
++   NVK_META_OBJECT_KEY_BVH_ENCODE_TTU,
+ };
+ 
++/* NVK_HWRT_QUERY switches the hardware ray-traversal part on for the whole process: structures then carry the appendix and
++ * shaders use it (nvk_nir_lower_ray_queries.c reads the same variable). Off, nothing below changes. */
++static bool
++nvk_hwrt_build_enabled(void)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("NVK_HWRT_QUERY");
++      on = e && e[0] != '\0' && e[0] != '0';
++   }
++   return on;
++}
++
+ static void
+ nvk_get_leaf_node_size(VkGeometryTypeKHR geometry_type, uint32_t *ir_leaf_node_size,
+                        uint32_t *output_leaf_node_size)
+@@ -86,10 +108,39 @@
+    return sizeof(struct nvk_bvh_header) + nodes_size;
+ }
+ 
++/* Where the hardware part sits in a structure of this build, relative to the structure base, and how large it is. */
++struct nvk_hwrt_place {
++   uint32_t hw_offset;               /* appendix, 256-aligned after the software BVH */
++   uint32_t hw_size;                 /* the hardware structure */
++   uint32_t geometry_table_offset;   /* from the appendix; after the hardware structure */
++   uint32_t geometry_count;
++   uint64_t total;                   /* the whole acceleration structure */
++};
++
++static struct nvk_hwrt_place
++nvk_hwrt_place(VkGeometryTypeKHR geometry_type, uint32_t leaf_node_count, uint32_t geometry_count)
++{
++   struct nvk_hwrt_place p;
++   const uint32_t leaf_size = geometry_type == VK_GEOMETRY_TYPE_INSTANCES_KHR ? NVK_HWL_INST_LEAF_SIZE
++                              : geometry_type == VK_GEOMETRY_TYPE_AABBS_KHR   ? NVK_HWL_BOX_LEAF_SIZE
++                                                                              : NVK_HWL_TRI_LEAF_SIZE;
++   const uint64_t sw = nvk_get_as_size_internal(geometry_type, leaf_node_count);
++   p.hw_offset = (uint32_t)align64(sw, NVK_HWRT_ALIGN);
++   p.hw_size = (uint32_t)align64(NVK_HWL_HEADER_SIZE + (uint64_t)NVK_HWL_NODES_FOR(leaf_node_count) * NVK_HWL_NODE_SIZE +
++                                 (uint64_t)leaf_node_count * leaf_size, NVK_HWRT_ALIGN);
++   p.geometry_count = geometry_type == VK_GEOMETRY_TYPE_INSTANCES_KHR ? 0 : geometry_count;
++   p.geometry_table_offset = NVK_HWRT_STRUCT_OFFSET + p.hw_size;
++   p.total = (uint64_t)p.hw_offset + p.geometry_table_offset + (uint64_t)p.geometry_count * sizeof(struct nvk_hwrt_geometry);
++   return p;
++}
++
+ static VkDeviceSize
+ nvk_get_as_size(VkDevice device, const struct vk_acceleration_structure_build_state *state)
+ {
+-   return nvk_get_as_size_internal(vk_get_as_geometry_type(state->build_info), state->leaf_node_count);
++   const VkGeometryTypeKHR type = vk_get_as_geometry_type(state->build_info);
++   if (nvk_hwrt_build_enabled())
++      return nvk_hwrt_place(type, state->leaf_node_count, state->build_info->geometryCount).total;
++   return nvk_get_as_size_internal(type, state->leaf_node_count);
+ }
+ 
+ /* ---- the device hooks the shared builder calls ------------------------------------------------------------------ */
+@@ -178,6 +229,62 @@
+    /* defaults: 32-bit morton keys, no quads (encode.comp writes single triangles), no update path */
+ }
+ 
++/* The hardware part: clear each appendix, then write it from the same intermediate BVH the software encode just read. */
++static void
++nvk_hwrt_encode(VkCommandBuffer commandBuffer, struct vk_device *vk_device, struct vk_meta_device *meta,
++                const struct vk_acceleration_structure_build_args *build_args,
++                struct vk_acceleration_structure_build_state *states, uint32_t build_count)
++{
++   VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
++   struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
++
++   VkPipeline pipeline;
++   VkResult result = vk_get_bvh_build_pipeline_spv(vk_device, meta,
++                                                   (enum vk_meta_object_key_type)NVK_META_OBJECT_KEY_BVH_ENCODE_TTU,
++                                                   nvk_encode_ttu_spv, sizeof(nvk_encode_ttu_spv),
++                                                   sizeof(struct nvk_hwrt_encode_args), build_args, 0, &pipeline, false);
++   if (result != VK_SUCCESS) {
++      vk_command_buffer_set_error(&cmd->vk, result);
++      return;
++   }
++   VkPipelineLayout layout;
++   result = vk_get_bvh_build_pipeline_layout(vk_device, meta, sizeof(struct nvk_hwrt_encode_args), &layout);
++   if (result != VK_SUCCESS) {
++      vk_command_buffer_set_error(&cmd->vk, result);
++      return;
++   }
++   dev->vk.dispatch_table.CmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
++
++   /* the software encode wrote hw_offset = 0 into the header; the hardware pass sets it, so it must come after */
++   vk_bvh_build_barrier_compute_to_compute(commandBuffer, true);
++
++   for (uint32_t pass = 0; pass < 2; pass++) {
++      for (uint32_t i = 0; i < build_count; i++) {
++         const struct vk_acceleration_structure_build_state *state = &states[i];
++         VK_FROM_HANDLE(vk_acceleration_structure, dst, state->build_info->dstAccelerationStructure);
++         const VkGeometryTypeKHR type = vk_get_as_geometry_type(state->build_info);
++         const struct nvk_hwrt_place place = nvk_hwrt_place(type, state->leaf_node_count, state->build_info->geometryCount);
++         const struct nvk_hwrt_encode_args args = {
++            .intermediate_bvh = state->build_info->scratchData.deviceAddress + state->scratch.ir_offset,
++            .output_bvh = vk_acceleration_structure_get_va(dst),
++            .header = state->build_info->scratchData.deviceAddress + state->scratch.header_offset,
++            .leaf_node_count = state->leaf_node_count,
++            .geometry_type = type,
++            .hw_offset = place.hw_offset,
++            .hw_size = place.hw_size,
++            .geometry_count = place.geometry_count,
++            .geometry_table_offset = place.geometry_table_offset,
++            .mode = pass == 0 ? 2 : 0,
++         };
++         dev->vk.dispatch_table.CmdPushConstants(commandBuffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(args), &args);
++         const uint32_t groups_x = pass == 0 ? 1 : DIV_ROUND_UP(MAX2(state->leaf_node_count, 1), 64);
++         dev->vk.dispatch_table.CmdDispatchBase(commandBuffer, 0, 0, 0, groups_x, 1, 1);
++      }
++      if (pass == 0)
++         vk_bvh_build_barrier_compute_to_compute(commandBuffer, true);
++   }
++}
++
+ /* 26.3: one encode callback for every build (tu_encode's shape): bind the pipeline once, then per build push the args
+  * and dispatch. One invocation per leaf covers every internal node too (internal nodes = active leaves - 1); at least
+  * one for the root box + header of an empty build. encode.comp bounds-checks against args and the IR header itself. */
+@@ -231,6 +338,9 @@
+       const uint32_t groups_x = DIV_ROUND_UP(MAX2(state->leaf_node_count, 1), local_x);
+       dev->vk.dispatch_table.CmdDispatchBase(commandBuffer, 0, 0, 0, groups_x, 1, 1);
+    }
++
++   if (nvk_hwrt_build_enabled())
++      nvk_hwrt_encode(commandBuffer, vk_device, meta, build_args, states, build_count);
+ }
+ 
+ static const struct vk_acceleration_structure_build_ops nvk_as_build_ops = {
+@@ -305,6 +415,47 @@
+    nvk_descriptor_state_set_root_array(cmd, &cmd->state.cs.descriptors, push, 0, NVK_MAX_PUSH_SIZE, save->push);
+ }
+ 
++/* After a finished structure was copied or deserialized to a new address: rewrite the hardware structure's own address. */
++static void
++nvk_hwrt_relocate(struct nvk_cmd_buffer *cmd, uint64_t dst_va)
++{
++   struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
++   struct vk_device *vk_device = &dev->vk;
++   VkCommandBuffer commandBuffer = nvk_cmd_buffer_to_handle(cmd);
++
++   VkMemoryBarrier2 mb = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
++      .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
++      .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
++      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
++      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
++   };
++   VkDependencyInfo di = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb };
++   dev->vk.dispatch_table.CmdPipelineBarrier2(commandBuffer, &di);
++
++   struct nvk_accel_saved_state saved;
++   nvk_accel_save(cmd, &saved);
++
++   VkPipeline pipeline;
++   VkPipelineLayout layout;
++   VkResult result = vk_get_bvh_build_pipeline_spv(vk_device, &dev->meta,
++                                                   (enum vk_meta_object_key_type)NVK_META_OBJECT_KEY_BVH_ENCODE_TTU,
++                                                   nvk_encode_ttu_spv, sizeof(nvk_encode_ttu_spv),
++                                                   sizeof(struct nvk_hwrt_encode_args), &dev->accel.args, 0, &pipeline, false);
++   if (result == VK_SUCCESS)
++      result = vk_get_bvh_build_pipeline_layout(vk_device, &dev->meta, sizeof(struct nvk_hwrt_encode_args), &layout);
++   if (result != VK_SUCCESS) {
++      vk_command_buffer_set_error(&cmd->vk, result);
++      nvk_accel_restore(cmd, &saved);
++      return;
++   }
++   dev->vk.dispatch_table.CmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
++   const struct nvk_hwrt_encode_args args = { .output_bvh = dst_va, .mode = 1 };
++   dev->vk.dispatch_table.CmdPushConstants(commandBuffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(args), &args);
++   dev->vk.dispatch_table.CmdDispatchBase(commandBuffer, 0, 0, 0, 1, 1, 1);
++   nvk_accel_restore(cmd, &saved);
++}
++
+ VKAPI_ATTR void VKAPI_CALL
+ nvk_CmdBuildAccelerationStructuresKHR(VkCommandBuffer commandBuffer, uint32_t infoCount,
+                                       const VkAccelerationStructureBuildGeometryInfoKHR *pInfos,
+@@ -345,6 +496,8 @@
+    /* CLONE and COMPACT are the same here: the encode writes the structure compacted already. */
+    nvk_cmd_dma_copy_addr(cmd, vk_acceleration_structure_get_va(dst), vk_acceleration_structure_get_va(src),
+                          MIN2(src->size, dst->size));
++   if (nvk_hwrt_build_enabled())
++      nvk_hwrt_relocate(cmd, vk_acceleration_structure_get_va(dst));
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+@@ -379,6 +532,8 @@
+ 
+    nvk_cmd_dma_copy_addr(cmd, vk_acceleration_structure_get_va(dst),
+                          pInfo->src.deviceAddress + sizeof(struct vk_accel_struct_serialization_header), dst->size);
++   if (nvk_hwrt_build_enabled())
++      nvk_hwrt_relocate(cmd, vk_acceleration_structure_get_va(dst));
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+diff -ruN a/src/nouveau/vulkan/nvk_bvh.h b/src/nouveau/vulkan/nvk_bvh.h
+--- a/src/nouveau/vulkan/nvk_bvh.h	2026-11-08 23:56:44
++++ b/src/nouveau/vulkan/nvk_bvh.h	2026-11-08 23:56:44
+@@ -81,7 +81,8 @@
+    uint32_t serialization_size;
+    uint32_t instance_count;
+    uint32_t leaf_nodes_offset;
+-   uint32_t padding;
++   /* offset of the hardware ray-traversal appendix (nvk_hwrt.h) from the structure base; 0 when the structure has none */
++   uint32_t hw_offset;
+ };
+ 
+ #define NVK_BVH_HEADER_SIZE      48
+diff -ruN a/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c b/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c
+--- a/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c	2026-11-08 23:56:44
++++ b/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c	2026-11-08 23:56:44
+@@ -5,11 +5,14 @@
+ 
+ #include "nvk_nir_ray_tracing.h"
+ #include "nvk_bvh.h"
++#include "nvk_hwrt.h"
+ 
+ #include "compiler/spirv/spirv.h"
+ 
+ #include "util/hash_table.h"
+ 
++#include <stdlib.h>
++
+ typedef struct {
+    nir_variable *variable;
+    unsigned array_length;
+@@ -142,6 +145,12 @@
+ 
+    rq_variable *incomplete;
+ 
++   /* hardware traversal only (nvk_hwrt_query_enabled) */
++   rq_variable *hw_app;       /* address of the structure's hardware appendix, 0 when it has none */
++   rq_variable *hw_tmin;      /* lower bound of the next hardware query */
++   rq_variable *hw_phase;     /* 0 triangles on the hardware, 1 boxes in software */
++   rq_variable *sw_flags;     /* the ray flags the software walk runs with */
++
+    struct ray_query_intersection_vars closest;
+    struct ray_query_intersection_vars candidate;
+ 
+@@ -224,6 +233,10 @@
+ 
+    dst->incomplete =
+       rq_variable_create(dst, shader, array_length, glsl_bool_type(), VAR_NAME("_incomplete"));
++   dst->hw_app = rq_variable_create(dst, shader, array_length, glsl_uint64_t_type(), VAR_NAME("_hw_app"));
++   dst->hw_tmin = rq_variable_create(dst, shader, array_length, glsl_float_type(), VAR_NAME("_hw_tmin"));
++   dst->hw_phase = rq_variable_create(dst, shader, array_length, glsl_uint_type(), VAR_NAME("_hw_phase"));
++   dst->sw_flags = rq_variable_create(dst, shader, array_length, glsl_uint_type(), VAR_NAME("_sw_flags"));
+ 
+    dst->closest = init_ray_query_intersection_vars(dst, shader, array_length, VAR_NAME("_closest"));
+    dst->candidate =
+@@ -308,6 +321,49 @@
+    intersection_type_aabb
+ };
+ 
++/* Hardware traversal (NVK_HWRT_QUERY=1).
++ *
++ * The query instruction (nvk/hwrt/ttu_abi.h) answers one question: the nearest triangle hit in [tmin, tmax] for an instance
++ * mask, every triangle taken as opaque, no culling, no flags. A ray query needs more, so the lowering builds the rest around
++ * that one primitive; nvk/hwrt/hwrt_model.c is the executable statement of the algorithm, checked against a brute-force
++ * reference by nvk/hwrt/hwrt_model_test.c, and this code follows it line by line:
++ *
++ *   phase 0  ask for the nearest triangle, classify it with the ray, instance and geometry flags, then commit it (opaque),
++ *            hand it to the shader as a candidate (non-opaque) or drop it (culled). The next ask starts one step past the
++ *            distance of the hit, so every triangle is offered at most once, nearest first. Two triangles at a bit-identical
++ *            distance: only the first is offered.
++ *   phase 1  boxes: the software walk with SkipTriangles forced on, reporting each box as a candidate. Skipped when the
++ *            structure has no boxes (appendix has_procedural).
++ *
++ * A structure without the hardware appendix (hw_offset == 0) is walked entirely in software. Instance data (transforms,
++ * custom index, sbt offset, flags) is read from the software instance leaves, which the hit's instance index selects; the
++ * hardware structure's own copy is never read. */
++#define NVK_TTU_ROOT_OFFSET 0x20u   /* u64 in the hardware structure header: offset of the root node from the structure base */
++
++static bool
++nvk_hwrt_query_enabled(void)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("NVK_HWRT_QUERY");
++      on = e && e[0] != '\0' && e[0] != '0';
++   }
++   return on;
++}
++
++static nir_def *
++hw_load_u32(nir_builder *b, nir_def *addr, unsigned offset)
++{
++   return nir_build_load_global(b, 1, 32, nir_iadd_imm(b, addr, offset), .align_mul = 4);
++}
++
++static nir_def *
++hw_load_u64(nir_builder *b, nir_def *addr, unsigned offset)
++{
++   return nir_build_load_global(b, 1, 64, nir_iadd_imm(b, addr, offset), .align_mul = 8);
++}
++
++
+ static void
+ lower_rq_initialize(nir_builder *b, nir_def *index, nir_intrinsic_instr *instr,
+                     struct ray_query_vars *vars)
+@@ -348,6 +404,35 @@
+    rq_store_var(b, index, vars->closest.instance_addr, nir_imm_int64(b, 0), 0x1);
+ 
+    rq_store_var(b, index, vars->incomplete, nir_ine_imm(b, accel_struct, 0), 0x1);
++
++   if (nvk_hwrt_query_enabled()) {
++      /* ray flags the software walk runs with; with a hardware appendix the triangles belong to the hardware, so the walk is
++       * for the boxes only */
++      rq_store_var(b, index, vars->sw_flags, instr->src[2].ssa, 0x1);
++      rq_store_var(b, index, vars->hw_app, nir_imm_int64(b, 0), 0x1);
++      rq_store_var(b, index, vars->hw_phase, nir_imm_int(b, 1), 0x1);
++      rq_store_var(b, index, vars->hw_tmin, instr->src[5].ssa, 0x1);
++      /* The appendix is used only when it is there and of the layout generation this compiler writes. */
++      nir_variable *off_var = nir_local_variable_create(b->impl, glsl_uint_type(), "hw_off");
++      nir_store_var(b, off_var, nir_imm_int(b, 0), 0x1);
++      nir_push_if(b, nir_ine_imm(b, accel_struct, 0));
++      {
++         nir_def *off = hw_load_u32(b, accel_struct, offsetof(struct nvk_bvh_header, hw_offset));
++         nir_def *app = nir_iadd(b, accel_struct, nir_u2u64(b, off));
++         nir_def *ok = nir_iand(b, nir_ieq_imm(b, hw_load_u32(b, app, offsetof(struct nvk_hwrt_appendix, magic)), NVK_HWRT_APPENDIX_MAGIC),
++                                nir_ieq_imm(b, hw_load_u32(b, app, offsetof(struct nvk_hwrt_appendix, generation)), NVK_HWRT_LAYOUT_PROVISIONAL));
++         /* bit 1 of has_procedural on a top level: an instance has no hardware part, the hardware cannot see the whole scene */
++         ok = nir_iand(b, ok, nir_ieq_imm(b, nir_iand_imm(b, hw_load_u32(b, app, offsetof(struct nvk_hwrt_appendix, has_procedural)), 2), 0));
++         nir_store_var(b, off_var, nir_bcsel(b, ok, off, nir_imm_int(b, 0)), 0x1);
++      }
++      nir_pop_if(b, NULL);
++      nir_def *off = nir_load_var(b, off_var);
++      nir_def *use_hw = nir_ine_imm(b, off, 0);
++      rq_store_var(b, index, vars->hw_app, nir_bcsel(b, use_hw, nir_iadd(b, accel_struct, nir_u2u64(b, off)), nir_imm_int64(b, 0)), 0x1);
++      rq_store_var(b, index, vars->hw_phase, nir_imm_int(b, 0), 0x1);
++      rq_store_var(b, index, vars->sw_flags,
++                   nir_ior(b, instr->src[2].ssa, nir_bcsel(b, use_hw, nir_imm_int(b, SpvRayFlagsSkipTrianglesKHRMask), nir_imm_int(b, 0))), 0x1);
++   }
+ }
+ 
+ /* The values that dereference the intersection's instance node. On a miss there is none: instance_addr is 0. */
+@@ -550,8 +635,8 @@
+    nir_pop_if(b, NULL);
+ }
+ 
+-static nir_def *
+-lower_rq_proceed(nir_builder *b, nir_def *index, struct ray_query_vars *vars)
++static void
++rq_software_walk(nir_builder *b, nir_def *index, struct ray_query_vars *vars)
+ {
+    nir_variable *inv_dir =
+       nir_local_variable_create(b->impl, glsl_vector_type(GLSL_TYPE_FLOAT, 3), "inv_dir");
+@@ -578,7 +663,7 @@
+ 
+    struct nvk_ray_traversal_args args = {
+       .root_bvh_base = rq_load_var(b, index, vars->root_bvh_base),
+-      .flags = rq_load_var(b, index, vars->flags),
++      .flags = nvk_hwrt_query_enabled() ? rq_load_var(b, index, vars->sw_flags) : rq_load_var(b, index, vars->flags),
+       .cull_mask = rq_load_var(b, index, vars->cull_mask),
+       .origin = rq_load_var(b, index, vars->origin),
+       .tmin = rq_load_var(b, index, vars->tmin),
+@@ -589,18 +674,207 @@
+       .data = &data,
+    };
+ 
++   nir_def *incomplete = nvk_build_ray_traversal(b, &args);
++   rq_store_var(b, index, vars->incomplete,
++                nir_iand(b, rq_load_var(b, index, vars->incomplete), incomplete), 1);
++}
++
++static nir_def *
++lower_rq_proceed(nir_builder *b, nir_def *index, struct ray_query_vars *vars)
++{
+    nir_push_if(b, rq_load_var(b, index, vars->incomplete));
+    {
+-      nir_def *incomplete = nvk_build_ray_traversal(b, &args);
+-      rq_store_var(b, index, vars->incomplete,
+-                   nir_iand(b, rq_load_var(b, index, vars->incomplete), incomplete), 1);
++      rq_software_walk(b, index, vars);
+    }
+    nir_pop_if(b, NULL);
+ 
+    return rq_load_var(b, index, vars->incomplete);
+ }
+ 
++/* Address of the software instance leaf with the given input index. */
++static nir_def *
++hw_instance_leaf(nir_builder *b, nir_def *tlas, nir_def *inst)
++{
++   nir_def *leaves = hw_load_u32(b, tlas, offsetof(struct nvk_bvh_header, leaf_nodes_offset));
++   nir_def *off = nir_iadd(b, leaves, nir_imul_imm(b, inst, sizeof(struct nvk_bvh_instance_node)));
++   return nir_iadd(b, tlas, nir_u2u64(b, off));
++}
++
+ static void
++rq_hybrid_body(nir_builder *b, nir_def *index, struct ray_query_vars *vars)
++{
++   nir_def *flags = rq_load_var(b, index, vars->flags);
++   nir_def *force_opaque = nir_test_mask(b, flags, SpvRayFlagsOpaqueKHRMask);
++   nir_def *force_not_opaque = nir_test_mask(b, flags, SpvRayFlagsNoOpaqueKHRMask);
++   nir_def *terminate = nir_test_mask(b, flags, SpvRayFlagsTerminateOnFirstHitKHRMask);
++   nir_def *no_cull_front = nir_ieq_imm(b, nir_iand_imm(b, flags, SpvRayFlagsCullFrontFacingTrianglesKHRMask), 0);
++   nir_def *no_cull_back = nir_ieq_imm(b, nir_iand_imm(b, flags, SpvRayFlagsCullBackFacingTrianglesKHRMask), 0);
++   nir_def *no_cull_opaque = nir_ieq_imm(b, nir_iand_imm(b, flags, SpvRayFlagsCullOpaqueKHRMask), 0);
++   nir_def *no_cull_no_opaque = nir_ieq_imm(b, nir_iand_imm(b, flags, SpvRayFlagsCullNoOpaqueKHRMask), 0);
++   nir_def *skip_triangles = nir_test_mask(b, flags, SpvRayFlagsSkipTrianglesKHRMask);
++
++   nir_loop *loop = nir_push_loop(b);
++   {
++      /* a continue needs the loop's continue block (nir_lower_continue_constructs removes it again) */
++      nir_loop_add_continue_construct(loop);
++
++      nir_push_if(b, nir_ieq_imm(b, rq_load_var(b, index, vars->hw_phase), 0));
++      {
++         nir_def *tmin = rq_load_var(b, index, vars->hw_tmin);
++         nir_def *tmax = rq_load_var(b, index, vars->closest.t);
++
++         nir_push_if(b, nir_ior(b, skip_triangles, nir_flt(b, tmax, tmin)));
++         {
++            rq_store_var(b, index, vars->hw_phase, nir_imm_int(b, 1), 0x1);
++            nir_jump(b, nir_jump_continue);
++         }
++         nir_pop_if(b, NULL);
++
++         nir_def *tlas = rq_load_var(b, index, vars->root_bvh_base);
++         nir_def *hwbase = nir_iadd_imm(b, rq_load_var(b, index, vars->hw_app), NVK_HWRT_STRUCT_OFFSET);
++         nir_def *root = nir_iadd(b, hwbase, hw_load_u64(b, hwbase, NVK_TTU_ROOT_OFFSET));
++         /* cull_mask is kept shifted to bits 31:24 for the software walk; the request wants it in bits 23:16 */
++         nir_def *mask = nir_ushr_imm(b, rq_load_var(b, index, vars->cull_mask), 8);
++         nir_def *org = rq_load_var(b, index, vars->origin);
++         nir_def *dir = rq_load_var(b, index, vars->direction);
++         nir_def *zero = nir_imm_int(b, 0);
++
++         nir_def *v0 = nir_vec4(b, nir_imm_int(b, 0xff030207), nir_imm_int(b, 0x50455400), mask, zero);
++         nir_def *v1 = nir_vec4(b, nir_channel(b, org, 0), nir_channel(b, org, 1), nir_channel(b, org, 2), tmin);
++         nir_def *v2 = nir_vec4(b, nir_channel(b, dir, 0), nir_channel(b, dir, 1), nir_channel(b, dir, 2), tmax);
++         nir_def *v3 = nir_vec4(b, nir_imm_int(b, 0xff030407), nir_imm_int(b, 0x50400400), mask, zero);
++         nir_def *v4 = nir_vec4(b, nir_unpack_64_2x32_split_x(b, root),
++                                nir_ior_imm(b, nir_unpack_64_2x32_split_y(b, root), 0x10000000), zero, zero);
++         nir_def *r = nir_ttu_query_nv(b, v0, v1, v2, v3, v4, .flags = 1);
++
++         nir_def *w5 = nir_channel(b, r, 5), *w12 = nir_channel(b, r, 12), *w13 = nir_channel(b, r, 13);
++         nir_def *w14 = nir_channel(b, r, 14), *w15 = nir_channel(b, r, 15);
++
++         /* a miss leaves word 15 all ones; a committed triangle leaves its sign bit clear */
++         nir_push_if(b, nir_ine_imm(b, nir_ushr_imm(b, w15, 31), 0));
++         {
++            rq_store_var(b, index, vars->hw_phase, nir_imm_int(b, 1), 0x1);
++            nir_jump(b, nir_jump_continue);
++         }
++         nir_pop_if(b, NULL);
++
++         nir_def *t_bits = nir_iand_imm(b, w13, 0x7fffffff);
++         /* the next query starts one step past this hit: +1 on the bits of the distance, whose sign bit is clear */
++         rq_store_var(b, index, vars->hw_tmin, nir_iadd_imm(b, t_bits, 1), 0x1);
++
++         nir_def *kind = nir_ushr_imm(b, w12, 29);
++         nir_def *pbits = nir_isub_imm(b, 28, nir_ishl_imm(b, kind, 2));
++         nir_def *prim = nir_iand(b, w12, nir_iadd_imm(b, nir_ishl(b, nir_imm_int(b, 1), pbits), -1));
++         nir_def *geom = nir_ushr(b, nir_iand_imm(b, w12, 0x0fffffff), pbits);
++         nir_def *inst = nir_iadd_imm(b, w5, -1);
++         nir_def *back = nir_ine_imm(b, nir_ushr_imm(b, w14, 31), 0);
++
++         nir_def *leaf = hw_instance_leaf(b, tlas, inst);
++         nir_def *sbt = hw_load_u32(b, leaf, offsetof(struct nvk_bvh_instance_node, sbt_offset_and_flags));
++         nir_def *blas = hw_load_u64(b, leaf, offsetof(struct nvk_bvh_instance_node, bvh_ptr));
++         nir_def *blas_app = nir_iadd(b, blas, nir_u2u64(b, hw_load_u32(b, blas, offsetof(struct nvk_bvh_header, hw_offset))));
++         nir_def *table = nir_iadd(b, blas_app,
++                                   nir_u2u64(b, nir_iadd(b, hw_load_u32(b, blas_app,
++                                                                         offsetof(struct nvk_hwrt_appendix, geometry_table_offset)),
++                                                         nir_imul_imm(b, geom, sizeof(struct nvk_hwrt_geometry)))));
++         nir_def *gentry = nir_build_load_global(b, 2, 32, table, .align_mul = 4);
++         nir_def *geometry_id_and_flags = nir_channel(b, gentry, 0);
++         nir_def *first_leaf = nir_channel(b, gentry, 1);
++         nir_def *tri_leaves = hw_load_u32(b, blas, offsetof(struct nvk_bvh_header, leaf_nodes_offset));
++         nir_def *prim_off = nir_iadd(b, tri_leaves, nir_imul_imm(b, nir_iadd(b, first_leaf, prim), sizeof(struct nvk_bvh_triangle_node)));
++         nir_def *prim_addr = nir_iadd(b, blas, nir_u2u64(b, prim_off));
++
++         nir_def *front = nir_ixor(b, nir_inot(b, back), nir_test_mask(b, sbt, NVK_INSTANCE_TRIANGLE_FLIP_FACING));
++         nir_def *not_facing_cull = nir_bcsel(b, front, no_cull_front, no_cull_back);
++         nir_def *not_cull = nir_iand(b, nir_inot(b, skip_triangles),
++                                      nir_ior(b, not_facing_cull, nir_test_mask(b, sbt, NVK_INSTANCE_TRIANGLE_FACING_CULL_DISABLE)));
++         nir_def *opaque = nir_uge_imm(b, nir_ior(b, geometry_id_and_flags, sbt),
++                                       NVK_INSTANCE_FORCE_OPAQUE | NVK_INSTANCE_NO_FORCE_NOT_OPAQUE);
++         opaque = nir_bcsel(b, force_opaque, nir_imm_true(b), opaque);
++         opaque = nir_bcsel(b, force_not_opaque, nir_imm_false(b), opaque);
++         not_cull = nir_iand(b, not_cull, nir_bcsel(b, opaque, no_cull_opaque, no_cull_no_opaque));
++
++         nir_push_if(b, not_cull);
++         {
++            rq_store_var(b, index, vars->candidate.barycentrics,
++                         nir_vec2(b, nir_iand_imm(b, w14, 0x7fffffff), nir_iand_imm(b, w15, 0x7fffffff)), 0x3);
++            rq_store_var(b, index, vars->candidate.primitive_addr, prim_addr, 0x1);
++            rq_store_var(b, index, vars->candidate.primitive_id, prim, 0x1);
++            rq_store_var(b, index, vars->candidate.geometry_id_and_flags,
++                         nir_ior(b, nir_iand_imm(b, geometry_id_and_flags, 0xff000000u), geom), 0x1);
++            rq_store_var(b, index, vars->candidate.instance_addr, leaf, 0x1);
++            rq_store_var(b, index, vars->candidate.sbt_offset_and_flags, sbt, 0x1);
++            rq_store_var(b, index, vars->candidate.t, t_bits, 0x1);
++            rq_store_var(b, index, vars->candidate.opaque, opaque, 0x1);
++            rq_store_var(b, index, vars->candidate.frontface, front, 0x1);
++            rq_store_var(b, index, vars->candidate.intersection_type, nir_imm_int(b, intersection_type_triangle), 0x1);
++
++            nir_push_if(b, opaque);
++            {
++               copy_candidate_to_closest(b, index, vars);
++               nir_push_if(b, terminate);
++               {
++                  rq_store_var(b, index, vars->incomplete, nir_imm_false(b), 0x1);
++                  nir_jump(b, nir_jump_break);
++               }
++               nir_pop_if(b, NULL);
++               /* everything nearer was already enumerated */
++               rq_store_var(b, index, vars->hw_phase, nir_imm_int(b, 1), 0x1);
++               nir_jump(b, nir_jump_continue);
++            }
++            nir_push_else(b, NULL);
++            {
++               nir_jump(b, nir_jump_break);   /* a candidate for the shader to confirm */
++            }
++            nir_pop_if(b, NULL);
++         }
++         nir_push_else(b, NULL);
++         {
++            nir_jump(b, nir_jump_continue);
++         }
++         nir_pop_if(b, NULL);
++      }
++      nir_pop_if(b, NULL);
++
++      /* phase 1: boxes, in software, only when the structure has any */
++      nir_def *has_boxes = hw_load_u32(b, rq_load_var(b, index, vars->hw_app), offsetof(struct nvk_hwrt_appendix, has_procedural));
++      nir_push_if(b, nir_ieq_imm(b, has_boxes, 0));
++      {
++         rq_store_var(b, index, vars->incomplete, nir_imm_false(b), 0x1);
++         nir_jump(b, nir_jump_break);
++      }
++      nir_pop_if(b, NULL);
++      rq_software_walk(b, index, vars);
++      nir_jump(b, nir_jump_break);
++   }
++   nir_pop_loop(b, NULL);
++}
++
++static nir_def *
++lower_rq_proceed_hybrid(nir_builder *b, nir_def *index, struct ray_query_vars *vars)
++{
++   nir_push_if(b, nir_ine_imm(b, rq_load_var(b, index, vars->hw_app), 0));
++   {
++      nir_push_if(b, rq_load_var(b, index, vars->incomplete));
++      {
++         rq_hybrid_body(b, index, vars);
++      }
++      nir_pop_if(b, NULL);
++   }
++   nir_push_else(b, NULL);
++   {
++      nir_push_if(b, rq_load_var(b, index, vars->incomplete));
++      {
++         rq_software_walk(b, index, vars);
++      }
++      nir_pop_if(b, NULL);
++   }
++   nir_pop_if(b, NULL);
++
++   return rq_load_var(b, index, vars->incomplete);
++}
++
++static void
+ lower_rq_terminate(nir_builder *b, nir_def *index, nir_intrinsic_instr *instr,
+                    struct ray_query_vars *vars)
+ {
+@@ -680,7 +954,8 @@
+                new_dest = lower_rq_load(&builder, index, intrinsic, vars);
+                break;
+             case nir_intrinsic_rq_proceed:
+-               new_dest = lower_rq_proceed(&builder, index, vars);
++               new_dest = nvk_hwrt_query_enabled() ? lower_rq_proceed_hybrid(&builder, index, vars)
++                                                    : lower_rq_proceed(&builder, index, vars);
+                break;
+             case nir_intrinsic_rq_terminate:
+                lower_rq_terminate(&builder, index, intrinsic, vars);

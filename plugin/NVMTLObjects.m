@@ -244,6 +244,8 @@ static void nvmtl_conf_settle(void)
     char rec[3072]; const char *had = getenv("NVMTL_CONF_SET");
     snprintf(rec, sizeof rec, "%s", had ? had : "");
     unsigned kept = 0, set = nvmtl_app_profile_apply(p, nvmtl_profile_user_set, &ctx, rec, sizeof rec, &kept);
+    // Settings written and tested offline but not yet measured on a card: only for a user who asks (NVMTL_HWRT=1).
+    { unsigned kept2 = 0; set += nvmtl_app_profile_apply_optin(p, getenv("NVMTL_HWRT"), nvmtl_profile_user_set, &ctx, rec, sizeof rec, &kept2); kept += kept2; }
     // The application gets its own shader-cache root (aircache, with spvcache beside it), as a launcher that sets
     // NVMTL_AIRCACHE does. A cache folder shared with every other process mixed entries of different modes. A cache the
     // user named (the process environment or nvrm610.conf) wins.
