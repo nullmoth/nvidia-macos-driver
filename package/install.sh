@@ -348,7 +348,9 @@ ok "test collection holds all four kexts"
 FWSRC="$HERE/Users/Shared/nvfw"
 if [ ! -d "$FWSRC" ]; then
   [ -x "$HERE/fw_fetch.sh" ] || die "this package lacks fw_fetch.sh; no changes made"
-  mkdir -m 700 "$T/fw" && "$HERE/fw_fetch.sh" --dest "$T/fw" --installed "$FW" || die "the GPU firmware is not available (see above); no changes made"
+  # NULLMOTH_FW_RUN: NVIDIA's driver package already on this Mac or on the install stick (the 1401 apps put it there);
+  # fw_fetch.sh copies it first and checks its SHA-256, so a wrong or replaced file is refused, never trusted.
+  mkdir -m 700 "$T/fw" && "$HERE/fw_fetch.sh" --dest "$T/fw" --installed "$FW" ${NULLMOTH_FW_RUN:+--run "$NULLMOTH_FW_RUN"} || die "the GPU firmware is not available (see above); no changes made"
   FWSRC="$T/fw"
 fi
 

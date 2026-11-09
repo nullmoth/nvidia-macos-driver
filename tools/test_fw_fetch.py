@@ -140,6 +140,7 @@ check("the driver package URL and SHA-256 equal the ones dlss_fetch.sh pins", g(
 check("every firmware member the installer needs has a 64-hex pin",
       all(re.search(r"%s\)\s+echo [0-9a-f]{64};;" % re.escape(m), fw) for m in MEMBERS))
 inst = open(ROOT + "/package/install.sh").read()
+check("install.sh passes a driver package found by the 1401 apps (NULLMOTH_FW_RUN) to the fetcher", '${NULLMOTH_FW_RUN:+--run "$NULLMOTH_FW_RUN"}' in inst)
 check("install.sh gets the firmware before it changes anything (before the backup directory is made)",
       inst.index('"$HERE/fw_fetch.sh"') < inst.index('BK=$(mktemp -d "/Library/NullMoth/backup-') and 'ditto "$FWSRC" "$FW"' in inst)
 sys.exit(1 if fails else 0)
