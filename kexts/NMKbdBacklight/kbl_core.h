@@ -136,4 +136,55 @@ static inline int kbl_level_to_smc(int level, int max_level)
     return (level * 4095 + max_level / 2) / max_level;
 }
 
+/* ---- The HID route (macOS 26 on T2-era Mac models) ------------------------------------------------------------------
+ * Apple's HID keyboard driver looks for a keyboard that carries the vendor element usage page 0xFF00, usage 0x0F in an input
+ * report, then reads the light's range with feature report 0xBF and sets it with output report 0xB0. The layouts below are
+ * the ones the public Linux hid-apple driver documents and the macOS driver's own calls match (feature report 191, vendor
+ * page 65280, usage 15), written again here:
+ *   feature 0xBF (get):  { 0xBF, version = 1, u16 off, u16 on_min, u16 on_max }          8 bytes with the id
+ *   output  0xB0 (set):  { 0xB0, version = 1, u16 brightness, u16 rate }                 6 bytes with the id
+ * The brightness here runs 0 to KBL_HID_MAX. All fields are little-endian. */
+#define KBL_HID_REPORT_CONFIG 0xBF
+#define KBL_HID_REPORT_SET    0xB0
+#define KBL_HID_VERSION       1
+#define KBL_HID_MAX           255
+#define KBL_HID_CONFIG_BYTES  8
+#define KBL_HID_SET_BYTES     6
+
+static const uint8_t kKblHidDescriptor[] = {
+    0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,                                   /* Generic Desktop, Keyboard, Application */
+    0x85, 0x01,                                                           /*   Report ID 1 */
+    0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02,   /* modifier keys */
+    0x95, 0x01, 0x75, 0x08, 0x81, 0x01,                                   /* reserved byte */
+    0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00,               /* key array */
+    0x06, 0x00, 0xFF, 0x09, 0x0F, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 0x01, 0x81, 0x02,   /* vendor 0xFF00:0x0F input */
+    0x85, 0xBF, 0x06, 0x00, 0xFF, 0x09, 0x10, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 0x07, 0xB1, 0x02,  /* feature 0xBF */
+    0x85, 0xB0, 0x06, 0x00, 0xFF, 0x09, 0x11, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 0x05, 0x91, 0x02,  /* output 0xB0 */
+    0xC0
+};
+
+static inline void kbl_hid_config_report(uint8_t out[KBL_HID_CONFIG_BYTES])
+{
+    out[0] = KBL_HID_REPORT_CONFIG; out[1] = KBL_HID_VERSION;
+    out[2] = 0; out[3] = 0;                          /* off */
+    out[4] = 1; out[5] = 0;                          /* on_min */
+    out[6] = KBL_HID_MAX; out[7] = 0;                /* on_max */
+}
+
+/* 1 with the brightness and rate when the buffer is a valid set report (with its id byte, or 5 bytes when the transport
+ * already took the id off), else 0 */
+static inline int kbl_hid_parse_set(const uint8_t *b, unsigned len, int *brightness, int *rate)
+{
+    if (len == KBL_HID_SET_BYTES) { if (b[0] != KBL_HID_REPORT_SET) return 0; b++; }
+    else if (len != KBL_HID_SET_BYTES - 1) return 0;
+    if (b[0] != KBL_HID_VERSION) return 0;
+    *brightness = b[1] | (b[2] << 8);
+    *rate = b[3] | (b[4] << 8);
+    return 1;
+}
+
+/* HID brightness 0..255 to the 12-bit value kbl_smc_to_level() takes, and back */
+static inline int kbl_hid_to_v12(int hid) { return hid <= 0 ? 0 : hid >= KBL_HID_MAX ? 0xFFF : (hid * 4095 + 127) / 255; }
+static inline int kbl_v12_to_hid(int v12) { return v12 <= 0 ? 0 : v12 >= 0xFFF ? KBL_HID_MAX : (v12 * 255 + 2047) / 4095; }
+
 #endif

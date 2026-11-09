@@ -25,6 +25,7 @@ public:
 private:
     enum Backend { None, Asus, IdeaPad, IdeaPadPlain, ThinkPad };
 
+    friend class NMKbdBacklightHID;
     static bool vsmcNotificationHandler(void *sensors, void *refCon, IOService *vsmc, IONotifier *notifier);
     IOACPIPlatformDevice *find(const char *nameMatch, const char *method);
     bool callAsus(uint32_t method, uint32_t argument, uint32_t *result);
@@ -34,6 +35,8 @@ private:
     bool probeThinkPad();
 
     IOACPIPlatformDevice *dev {nullptr};
+    IOService *hidDevice {nullptr};
+    bool forced_ {false}, skipSmc_ {false};
     Backend backend {None};
     int lenovoType {0};
     int maxLevel_ {KBL_ASUS_MAX_LEVEL};
