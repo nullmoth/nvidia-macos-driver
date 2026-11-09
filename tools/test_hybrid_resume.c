@@ -59,7 +59,7 @@ static void aux_process(void)
     for (i = 0; i < len; i++) {
         uint32_t a = addr + i; uint8_t v = dpcd[a];
         if (a == 0x202 || a == 0x203 || a == 0x204) {
-            unsigned pat = dpcd[0x102] & 3, srcpat = (*R(NMR_DP_TP_CTL(T_PORT)) >> 8) & 7, dv, dp; int cr, eq;
+            unsigned pat = dpcd[0x102] & 3, srcpat = (*R(NMR_DP_TP_CTL(T_PIPE)) >> 8) & 7, dv, dp; int cr, eq;
             phy_level(&dv, &dp);
             cr = pat >= 1 && srcpat == (pat == 1 ? 0u : 1u) && !train_fail_level && dv >= (unsigned)sink_needs_v && (dpcd[0x103] & 3) == dv;
             eq = cr && pat == 2 && dp >= (unsigned)sink_needs_p;
@@ -91,7 +91,7 @@ static void m_wr(void *c, uint32_t o, uint32_t v)
     if (o == NMR_DE_PLL_ENABLE && (v & NMR_PLL_ENABLE) && !pll_fail) *R(o) |= NMR_PLL_LOCK;
     for (unsigned k = 0; k < 2; k++) if (o == NMR_DPLL_ENABLE(k)) { if (v & NMR_PLL_POWER) *R(o) |= NMR_PLL_PSTATE; if ((v & NMR_PLL_ENABLE) && !pll_fail) *R(o) |= NMR_PLL_LOCK; }
     if (o == NMR_PP_CONTROL && (v & 1) && !panel_fail) *R(NMR_PP_STATUS) = NMR_PP_ON_VALUE;
-    if (o == NMR_DP_TP_CTL(T_PORT) && ((v >> 8) & 7) == 2) *R(NMR_DP_TP_STATUS(T_PORT)) |= NMR_TP_IDLE_DONE;
+    if (o == NMR_DP_TP_CTL(T_PIPE) && ((v >> 8) & 7) == 2) *R(NMR_DP_TP_STATUS(T_PIPE)) |= NMR_TP_IDLE_DONE;
 }
 static void m_delay(void *c, unsigned us) { (void)c; now_us += us; }
 static void m_log(void *c, const char *s) { (void)c; if (nsteps < 32) steps[nsteps++] = s; }
@@ -118,7 +118,7 @@ static void lit_state(void)
     for (unsigned i = 0; i < NMR_PLANE_WM_WORDS; i++) reg[(NMR_PLANE_WM_BASE(p) / 4) + i] = 0x80000000u + i;
     reg[NMR_SURF(p) / 4] = 0x00800000;
     reg[NMR_FUNC_CTL(t) / 4] = 0x80000000u | ((port + 1u) << NMR_TRANS_PORT_SHIFT) | (1u << 8);
-    reg[NMR_DP_TP_CTL(port) / 4] = NMR_TP_ENABLE | NMR_TP_NORMAL; reg[NMR_DDI_BUF_CTL(port) / 4] = NMR_DDI_ENABLE | (1u << 1);
+    reg[NMR_DP_TP_CTL(p) / 4] = NMR_TP_ENABLE | NMR_TP_NORMAL; reg[NMR_DDI_BUF_CTL(port) / 4] = NMR_DDI_ENABLE | (1u << 1);
     reg[NMR_TRANSCONF(p) / 4] = NMR_TRANS_ENABLE | 0x4; reg[NMR_BLC_PWM_CTL / 4] = 0x80000000u; reg[NMR_BLC_PWM_FREQ / 4] = 0x4B0; reg[NMR_BLC_PWM_DUTY / 4] = 0x258;
     dpcd[0x100] = 0x14; dpcd[0x101] = 0x82; dpcd[0x107] = 0x10; dpcd[0x108] = 1; dpcd[0x115] = 0;
     dpcd[0x002] = 0x82; dpcd[0x003] = 0x01; dpcd[0x00E] = 0; dpcd[0x600] = 1;
@@ -166,7 +166,7 @@ static void suite(void)
       for (unsigned i = 0; i < sizeof chk / sizeof *chk; i++) if (reg[chk[i] / 4] != want[chk[i] / 4]) { ok = 0; printf("   differs: 0x%x\n", chk[i]); }
       ARM("every captured configuration register is back to its firmware value, including the whole PHY block", ok); }
     ARM("the transcoder and the DDI buffer are running", (reg[NMR_TRANSCONF(p) / 4] & NMR_TRANS_ENABLE) && (reg[NMR_DDI_BUF_CTL(port) / 4] & NMR_DDI_ENABLE));
-    ARM("the link ends in normal operation", ((reg[NMR_DP_TP_CTL(port) / 4] >> 8) & 7) == 3);
+    ARM("the link ends in normal operation", ((reg[NMR_DP_TP_CTL(p) / 4] >> 8) & 7) == 3);
     ARM("the sink is told the link settings and powered to D0", dpcd[0x100] == 0x14 && dpcd[0x101] == 0x82 && dpcd[0x600] == 1);
     ARM("the training pattern is switched off at the sink afterwards", dpcd[0x102] == 0);
     { int pw = first_write(NMR_PW_DRIVER), cd = first_write(NMR_DE_PLL_ENABLE), pl = first_write(NMR_DPLL_ENABLE(port)), ph = first_write(nmr_phy_base(port)),
