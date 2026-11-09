@@ -3925,7 +3925,7 @@ void NVRMNVDAFramebuffer::publishTimingCaps()
     OSData *s = OSData::withBytes(&si, sizeof si);
     if (s) { setProperty(kIOFBScalerInfoKey, s); s->release(); }
     IODisplayTimingRangeV1 r; nvu_zero(&r, sizeof r);
-    r.minPixelClock = 25000000ull; r.maxPixelClock = 1200000000ull; r.maxPixelError = 0;
+    r.minPixelClock = 25000000ull; r.maxPixelClock = (UInt64)kNvrmMaxPixelClockMHz * 1000000ull; r.maxPixelError = 0;
     r.supportedSyncFlags = kIORangeSupportsSeparateSyncs | (fVrrSupported && fVrrMinHz ? kIORangeSupportsVRR : 0);
     r.supportedSignalLevels = 0; r.supportedSignalConfigs = kIODigitalSignal;
     r.minFrameRate = 23; r.maxFrameRate = kNvrmMaxFrameRate; r.minLineRate = 10000; r.maxLineRate = 1000000;
@@ -3952,8 +3952,8 @@ void NVRMNVDAFramebuffer::publishTimingCaps()
     OSData *g = OSData::withBytes(&r, sizeof r);
     if (g) { setProperty(kIOFBTimingRangeKey, g); g->release(); }
     setProperty(kIOFBProbeOptionsKey, (unsigned long long)kNVRMFBSetTransform, 32);
-    FBLOG("fbmodes: published IOFBScalerInfo (up+down+rotate, max %ux%u) + IOFBTimingRange (25 MHz..1.2 GHz, 23..%u Hz) + IOFBProbeOptions 0x%x",
-          fScalerMaxW, fScalerMaxH, (unsigned)kNvrmMaxFrameRate, (unsigned)kNVRMFBSetTransform);
+    FBLOG("fbmodes: published IOFBScalerInfo (up+down+rotate, max %ux%u) + IOFBTimingRange (25 MHz..%u MHz, 23..%u Hz) + IOFBProbeOptions 0x%x",
+          fScalerMaxW, fScalerMaxH, (unsigned)kNvrmMaxPixelClockMHz, (unsigned)kNvrmMaxFrameRate, (unsigned)kNVRMFBSetTransform);
 }
 IOReturn NVRMNVDAFramebuffer::getInformationForDisplayMode(IODisplayModeID mode, IODisplayModeInformation *info)
 {
