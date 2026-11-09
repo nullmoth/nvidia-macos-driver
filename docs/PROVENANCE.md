@@ -28,7 +28,7 @@ source, which this audit could not fetch, so the owner's statement that none was
 | Rust crates NAK builds from (proc-macro2, quote, syn, paste and similar, fetched by Mesa's meson wraps) | crates.io | MIT and/or Apache-2.0 | stays with Mesa's tree; see item P8 |
 | Shader translator | `steelbrain/metal2vulkan` (Anees Iqbal) | LGPL-3.0-or-later | `NOTICE`, `translator/LICENSE`, `translator/COPYING` |
 | The Rust crates linked into the translator | crates.io | MIT, Apache-2.0, Unlicense or MIT, Unicode-3.0 | `licenses/translator-rust-crates.txt` (new) |
-| GSP firmware | NVIDIA 620.70.06 driver package, unmodified | NVIDIA "License For Customer Use of NVIDIA Software" | `licenses/NVIDIA-firmware-LICENCE.txt`; **see P1** |
+| GSP firmware | NVIDIA 620.70.06 driver package, unmodified | NVIDIA "License For Customer Use of NVIDIA Software" | `licenses/NVIDIA-firmware-LICENCE.txt`; fetched on the user's Mac, see P1 (resolved) |
 | Video encoders and decoders `vendor/nvenc` | `mickys/nvenc` 0.9.5, commit `1e91845` | MIT | `vendor/nvenc/SOURCE`, `licenses/mickys-nvenc-LICENSE.txt` |
 | Headers `libnvencvt` is built against (fetched, not shipped) | NVIDIA open-gpu-kernel-modules 610.57.04, open-gpu-doc `9fdf5c4` (classes/video), WebKit `CMBaseObjectSPI.h` and `VTVideoDecoderSPI.h` | MIT, MIT, BSD | `vendor/nvenc/SOURCE` |
 | Panel brightness method `NMIntelFB` | `WhateverXe` (b00t0x), idea and register sequence; register layout from Linux i915/xe headers | BSD-3-Clause, MIT | `NOTICE`, `licenses/WhateverXe-LICENSE.txt` |
@@ -68,6 +68,8 @@ translator's own BVH path.
 
 Severity is the legal exposure, not a code defect. Each names the evidence and the action.
 
+> Status (2.9): resolved. The package no longer carries the firmware. `package/fw_fetch.sh` takes the four files from NVIDIA's own 620.70.06 Linux driver package (the .run that `dlss_fetch.sh` already pins), checks each against a SHA-256, and `install.sh` runs it before it changes anything; an earlier install that still matches is reused, and with no network and no earlier install the installer stops with the download address and changes nothing. Test: `tools/test_fw_fetch.py`.
+
 **P1. GSP firmware redistribution (decision for the owner, highest).** `licenses/NVIDIA-firmware-LICENCE.txt` is the licence
 `linux-firmware` ships these files under. Its only redistribution grant (section 2.1.2) is "solely for use on operating
 systems distributed under the terms of an OSI-approved open source license", binary unmodified, with the licence copied.
@@ -77,6 +79,8 @@ at install time from NVIDIA's package or `linux-firmware`, pinned by SHA-256, ex
 1401 app already downloads other pinned files while it builds an EFI; a Mac installed offline would need the stick to carry
 a download step); (b) ask NVIDIA for permission in writing; (c) keep shipping and accept the risk. Not changed here because it
 reshapes the installer and the 1401 flow.
+
+> Status (2.9): resolved. The relocation kinds and the instruction bits they patch are LLVM's public CUDA ELF definitions; the stub words come from NAK's own encoder source at patch time (`nvk/dlss/legal/nak_stub.py`); the trap is a NAK-encoded store to address 0 followed by EXIT. Sources, commands and tests: `nvk/dlss/legal/README.md`. Following the public definition also fixed the placement of kind 75 and added kind 58, which the older placement refused.
 
 **P2. DLSS kernel-cache patcher cites `nvdisasm` output of NVIDIA's shipped DLSS kernels.** `nvk/dlss/patch_dlss_cache.py`
 lines 243 and 425 state that the relocation kinds (56, 57, 75), the `CALL.ABS` operand layout and the two 128-bit words of the
@@ -88,9 +92,13 @@ are in NVIDIA's public CUDA binary documentation. The `CALL.ABS` address-field l
 Action: generate the stub words from NAK at build time with a host test comparing them, and either find a public source for
 the call-target layout or drop relocation handling for cubins that need it (the DLSS 4 transformer layers).
 
+> Status (2.9): resolved. The comment now cites cubins compiled from our own PTX (`.nv.constant0` sizes, `nvk/dlss/legal/cubin_relocs.py`) and tinygrad's launcher (MIT).
+
 **P3. `nvk-macos.patch` states cbuf0 offsets "measured by disassembling cubins" (line 13636, `nvk_cubin` launch).** The nvcc
 constant-buffer layout (`0x358`, `0x37c`, `0x380`) is the same kind of fact as P2. Same decision. It is cross-checked against a
 cubin NullMoth's own compiler produced, which is the clean source to cite instead.
+
+> Status (2.9): resolved. The comment is a black-box description; `docs/RT-WORKING-SET-GATE.md` is the procedure to re-measure the figure. The knob stays.
 
 **P4. `plugin/NVMTLDevice.m` line 735: `NVMTL_WS_RT_GATE_MB`** is documented as measured "in the disassembly of Cyberpunk 2077's
 device set-up" (a game binary, not NVIDIA's; the game's licence forbids it). The knob is default off and holds one number
@@ -118,15 +126,19 @@ firmware source; the kexts and the firmware directory are 620.70.06. The two NVI
 label (PolyForm instead of MIT). The translator's crate licences and the Zstandard and BLAKE3 texts were missing from
 `licenses/`.
 
+> Status (2.9): resolved. `build/build_nvk.sh` writes the licence texts of the fetched crates (`build/gen_nvk_rust_crates.py`), stops if `licenses/nvk-rust-crates.txt` differs, and the file ships in `licenses/`.
+
 **P8. Mesa's Rust crates.** NVK's binary contains NAK, which builds from crates fetched by Mesa's `subprojects/*.wrap`
 (proc-macro2, quote, syn, unicode-ident, paste and others, all MIT and/or Apache-2.0). Their copyright and licence texts must
 ship with the binary the way P7's translator list now does. Not generated here because the crate sources are fetched during the
 Mesa build; `build/build_nvk.sh` is the place to write `licenses/nvk-rust-crates.txt` from `subprojects/packagecache`.
 
+> Status (2.9): resolved. The fixture is compiled from `fixtures/shadow_pcf/shadow_pcf_gather_compare.metal`, written for the test; the game-derived file is removed.
+
 **P9. Test fixture reduced from a game shader.** `translator/translator/tests/fixtures/civ6/gather_compare_depth_2d_offsets.ll`
 is a 44-line reduction of one fragment shader of a commercial game (a four-tap shadow filter). It holds a standard technique
 and generic names. Low exposure; rewrite it from a Metal source written for the purpose if the owner wants no game-derived
-bytes in the repository.
+bytes in the repository (done).
 
 ## 6. Reviewed, nothing to change
 
