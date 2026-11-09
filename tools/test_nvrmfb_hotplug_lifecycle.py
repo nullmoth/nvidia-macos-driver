@@ -24,10 +24,10 @@ assert 'scheduleCall(fConnectNotify, deadline)' in notify and 'thread_call_enter
 assert 'NVRMCallReference callReference(me)' in callback and 'me->fConnect.proc(me->fConnect.target, me->fConnect.ref)' in callback
 assert '&fConnectNotify' in extract(src, 'void NVRMNVDAFramebuffer::stop(')
 assert src.index('fConnectNotify = nvrmfbCall(connectNotifyFire, this)') < src.index('super::start(provider)')
-assert 'return !fDpyLost && fEdidSize >= 128;' in src
+assert 'return !fDpyLost && !fHidden && fEdidSize >= 128;' in src
 hotplug = extract(src, 'void NVRMNVDAFramebuffer::hotplugFire(')
 missing = hotplug[hotplug.index('for (int k = 0; k < gNDpy; k++'):]
-missing = missing[:missing.index('if (!added) return;')]
+missing = missing[:missing.index('surroundCheck();')]
 assert 'if (!me->fKms->getDynamicDisplayInfo(me->fDev, dd) || dd->connected) continue;' in missing
 assert 'fb->fDpyLost = true;' in missing and 'fb->fEdidSize = 0;' in missing and 'fb->clearDisplayAudioProperties();' in missing
 assert hotplug.index('if (sl) IORecursiveLockUnlock(sl);') < hotplug.index('notify[f]->notifyConnectionChanged(500);')
@@ -54,7 +54,7 @@ static void clock_interval_to_deadline(unsigned ms,int,std::uint64_t*d){*d=ms;} 
 struct OSObject{int refs=1;void retain(){++refs;}void release(){--refs;}};
 class Base{public:IOReturn getAttributeForConnection(IOIndex,IOSelect,std::uintptr_t*){return 77;}};
 struct NVRMNVDAFramebuffer:OSObject,Base{
-using super=Base; bool fDpyLost=false,fInternal=false,fConnectFired=false; unsigned fEdidSize=0,fIndex=0; UInt8 fEdid[256]={};
+using super=Base; bool fDpyLost=false,fHidden=false,fInternal=false,fConnectFired=false; unsigned fEdidSize=0,fIndex=0; UInt8 fEdid[256]={};
 volatile int fStopping=0; thread_call_t fConnectNotify=reinterpret_cast<void*>(1);
 struct{void(*proc)(void*,void*);void*target;void*ref;}fConnect{}; unsigned scheduled=0;std::uint64_t deadline=0;
 void scheduleCall(thread_call_t,std::uint64_t d){++scheduled;deadline=d;retain();}
