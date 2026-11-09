@@ -48,6 +48,7 @@ kConnectionSupportsHLDDCSense=10,kConnectionSupportsAppleSense=11,kConnectionSup
 kConnectionDisplayParameterCount=13,kConnectionDisplayParameters=14,kIOConnectionBuiltIn=1,kIODDCBlockTypeEDID=1 };
 #define FBSEL(a) char _s[5]={(char)((a)>>24),(char)((a)>>16),(char)((a)>>8),(char)(a),0}
 #define FBLOG(...) ((void)0)
+#define FBLOGV(...) ((void)0)
 static void nvu_copy(void*d,const void*s,size_t n){std::memcpy(d,s,n);}
 static void clock_interval_to_deadline(unsigned ms,int,std::uint64_t*d){*d=ms;} static int kMillisecondScale=1;
 struct OSObject{int refs=1;void retain(){++refs;}void release(){--refs;}};
