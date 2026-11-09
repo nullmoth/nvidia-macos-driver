@@ -150,3 +150,10 @@ See the README, *Build from source*. The kexts need NVIDIA's `open-gpu-kernel-mo
 Mesa `17ca6174` with, in order, `nvk/nvk-macos.patch`, `nvk/nvk-fixes-after-def16.patch`, `nvk/nvk-620-kernel.patch` and
 `nvk/nvk-perf-boost-burst.patch` (`patch -p1` from the Mesa root). NVK compiles against the `open-gpu-kernel-modules` 610.57.04 headers with
 `nvk/ogkm-nvos-620.patch` applied to that tree; 620's `nv.h` does not compile in user space, so the rest stays 610.
+
+The video codecs in `libnvencvt.dylib` are built from `vendor/nvenc` (mickys/nvenc, MIT) by `build/build_nvencvt.sh`. The
+package puts the library beside the plugin in `NVMTLDriver.bundle/Contents/MacOS/`; the plugin loads it only when it and
+its folder are root-owned. `NVMTL_NVENCVT` in `nvrm610.conf` decides where it registers: unset is automatic on Ada and
+Ampere, `0` is never, `1` is every process on any card the library accepts, and a list of process names limits it to those.
+The GPU's boost policy is `NVRM_610_BOOST`: unset is a short lease renewed while work is submitted, `hold` keeps one boost
+for the device's life, `0` never boosts.
