@@ -1,0 +1,5 @@
+Bluetooth:
+      Bluetooth Controller:
+          State: On
+          Chipset: BCM_4387
+          Supported services: 0x1390039 < HFP AVRCP A2DP HID LEA AACP GATT SerialPort SCO >
