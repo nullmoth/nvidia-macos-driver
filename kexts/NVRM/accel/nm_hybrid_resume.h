@@ -208,13 +208,16 @@ static const uint32_t nmr_plane_off[NMR_N_PLANE] = { 0x00, 0x08, 0x0C, 0x10, 0x2
 /* ---- AUX channel, native transactions (Linux intel_dp_aux.c) */
 #define NMR_AUX_NATIVE_WRITE 8u
 #define NMR_AUX_NATIVE_READ  9u
-static inline int nmr_aux_xfer(const struct nmr_ops *o, unsigned port, int write, uint32_t addr, uint8_t *buf, unsigned len)
+/* One AUX transaction. cmd is the 4-bit request: 8 native write, 9 native read, 0 I2C write, 1 I2C read, with 4 added for
+ * "middle of transaction" (the I2C bus is kept). Writes carry buf out, reads bring it in. */
+static inline int nmr_aux_raw(const struct nmr_ops *o, unsigned port, unsigned cmd, uint32_t addr, uint8_t *buf, unsigned len)
 {
+    const int write = !(cmd & 1);
     unsigned i, tries, got = 0;
     const uint32_t CTL = NMR_AUX_CTL(port), DATA = NMR_AUX_DATA(port);
     uint8_t msg[20];
     if (len == 0 || len > 16) return -1;
-    msg[0] = (uint8_t)(((write ? NMR_AUX_NATIVE_WRITE : NMR_AUX_NATIVE_READ) << 4) | ((addr >> 16) & 0xF));
+    msg[0] = (uint8_t)((cmd << 4) | ((addr >> 16) & 0xF));
     msg[1] = (uint8_t)(addr >> 8); msg[2] = (uint8_t)addr; msg[3] = (uint8_t)(len - 1);
     unsigned send = 4 + (write ? len : 0);
     if (write) for (i = 0; i < len; i++) msg[4 + i] = buf[i];
@@ -242,12 +245,25 @@ static inline int nmr_aux_xfer(const struct nmr_ops *o, unsigned port, int write
                 uint32_t w = o->rd(o->ctx, DATA + k); unsigned j;
                 for (j = 0; j < 4 && k + j < n; j++) rep[k + j] = (uint8_t)(w >> (24 - 8 * j));
             }
-            if ((rep[0] >> 4) != 0) { o->delay_us(o->ctx, 400); continue; }        /* NACK or DEFER: try again */
+            if ((rep[0] >> 4) != 0 || (cmd < 8 && (rep[0] & 0xC))) { o->delay_us(o->ctx, 400); continue; }        /* NACK or DEFER: try again */
             if (!write) { for (got = 0; got < n - 1 && got < len; got++) buf[got] = rep[1 + got]; return (int)got; }
             return (int)len;
         }
     }
     return -1;
+}
+static inline int nmr_aux_xfer(const struct nmr_ops *o, unsigned port, int write, uint32_t addr, uint8_t *buf, unsigned len)
+{
+    return nmr_aux_raw(o, port, write ? NMR_AUX_NATIVE_WRITE : NMR_AUX_NATIVE_READ, addr, buf, len);
+}
+/* The panel's identifier: bytes 8 to 17 of its EDID (manufacturer, product code, serial, week, year), read over I2C-over-AUX from
+ * address 0x50 with a repeated start. These are the 10 bytes the video BIOS's panel table holds. Returns 0 or -1. */
+static inline int nmr_edid_id(const struct nmr_ops *o, unsigned port, uint8_t *id10)
+{
+    uint8_t off = 8;
+    if (nmr_aux_raw(o, port, 4, 0x50, &off, 1) != 1) return -1;       /* I2C write, offset 8, bus kept */
+    if (nmr_aux_raw(o, port, 1, 0x50, id10, 10) != 10) return -1;     /* I2C read, bus released */
+    return 0;
 }
 static inline int nmr_dpcd_rd(const struct nmr_ops *o, unsigned port, uint32_t a, uint8_t *b, unsigned n) { return nmr_aux_xfer(o, port, 0, a, b, n); }
 static inline int nmr_dpcd_wr(const struct nmr_ops *o, unsigned port, uint32_t a, const uint8_t *b, unsigned n)
