@@ -18,6 +18,7 @@ xcrun clang++ "${FLAGS[@]}" -Wno-deprecated-declarations -Wno-inconsistent-missi
 xcrun clang++ "${FLAGS[@]}" -Wno-sign-conversion -Wno-shadow -c "$SDK/Library/plugin_start.cpp" -o "$OUT/plugin_start.o" 2>> "$OUT/NMHDA.err" || { cat "$OUT/NMHDA.err"; exit 1; }
 bash ../../build/warn_ceiling.sh nmhda "$(grep -c ': warning:' "$OUT/NMHDA.err" || true)" "$OUT/NMHDA.err"
 xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xlinker -kext -L"$MKSDK/Library/x86_64" -lkmodc++ -lkmod -lcc_kext \
-  "$OUT/nmhda.o" "$OUT/nmhda_volume.o" "$OUT/plugin_start.o" -o "$OUT/NMHDA.kext/Contents/MacOS/NMHDA"
+  "$OUT/nmhda.o" "$OUT/nmhda_volume.o" "$OUT/plugin_start.o" -o "$OUT/NMHDA.kext/Contents/MacOS/NMHDA" 2> "$OUT/link.err" || { cat "$OUT/link.err"; exit 1; }
+bash ../../build/warn_ceiling.sh nmhda-link "$(grep -c 'warning' "$OUT/link.err" || true)" "$OUT/link.err"
 cp Info.plist "$OUT/NMHDA.kext/Contents/Info.plist"
 echo "NMHDA $(shasum -a 256 "$OUT/NMHDA.kext/Contents/MacOS/NMHDA" | cut -c1-8) $(stat -f %z "$OUT/NMHDA.kext/Contents/MacOS/NMHDA") B"

@@ -66,6 +66,7 @@ OBJS+=("$OUT/nvrm_pmgr.o")
 bash "$HERE/warn_ceiling.sh" nvrm "$(cat "$OUT"/*.o.err "$OUT/kapi.err" "$OUT/pageoff.err" "$OUT/pmgr.err" | grep -c ': warning:')" || exit 4
 xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "${OBJS[@]}" \
   "$NV/_out/Darwin_x86_64/libnvkernel.a" "$KMSLIB" -o "$OUT/NVRM.kext/Contents/MacOS/NVRM" 2>"$OUT/link.err" || { echo "STOP: link failed"; grep -v "built for newer" "$OUT/link.err" | head; exit 1; }
+bash "$HERE/warn_ceiling.sh" nvrm-link "$(grep -c 'warning' "$OUT/link.err")" "$OUT/link.err" || exit 4
 cp "$SRC/Info.plist" "$OUT/NVRM.kext/Contents/Info.plist"
 xcrun nm -u "$OUT/NVRM.kext/Contents/MacOS/NVRM" > "$OUT/imports.txt"
 xcrun nm "$OUT/NVRM.kext/Contents/MacOS/NVRM" > "$OUT/symbols.txt"
