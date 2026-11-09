@@ -25,6 +25,11 @@ GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images are not 
              to the user's Mac and checks each against a pinned SHA-256. They stay under NVIDIA's licence
              (licenses/NVIDIA-firmware-LICENCE.txt is the text that applies to those files).
 
+kexts/NMGopFB  Finding the firmware framebuffer, checking it against the GPU's memory BARs and mapping it write-combined
+             follow PrimeBridge by myvoow, https://github.com/myvoow/PrimeBridge (BootFramebuffer.cpp), MIT License,
+             Copyright (c) 2026 myvoow (licenses/PrimeBridge-LICENSE.txt), whose author allowed this project to use and link it.
+             The panel-provider design is NullMoth's own; PrimeBridge's patched NVRMFB is not used.
+
 kexts/NMIntelFB  Panel brightness follows the method of WhateverXe's panel PWM (XELP::PanelPWM) by b00t0x,
              https://github.com/b00t0x/WhateverXe, BSD-3-Clause, Copyright (c) 2018 vit9696
              (licenses/WhateverXe-LICENSE.txt). Register layout from Linux i915/xe display headers, MIT.
