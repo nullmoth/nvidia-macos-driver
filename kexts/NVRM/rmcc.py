@@ -14,6 +14,10 @@ toks[toks.index("arch/nvalloc/unix/src/osapi.c")] = src
 for i, t in enumerate(toks):
     if t == "-o": toks[i + 1] = out
     if t in ("-MF", "-MT"): toks[i + 1] = out + ".d"
+# laptop (arm64) build host: RM's recorded line came from an x86_64 host and carries no -arch; pin the kext's target
+if os.uname().machine == "arm64" and "-arch" not in toks:
+    toks[1:1] = ["-arch", "x86_64"]
+toks[1:1] = ["-mmacosx-version-min=15.0", "-g0", "-ffile-prefix-map="+os.path.dirname(src)+"=driver", "-ffile-prefix-map="+os.environ["OGKM"]+"=nvidia", "-ffile-prefix-map="+os.path.expanduser("~")+"=/build", "-fdebug-prefix-map="+os.path.expanduser("~")+"=/build"]
 r = subprocess.run(toks, cwd=rm, capture_output=True, text=True)
 sys.stderr.write(r.stderr[-6000:])
 sys.exit(r.returncode)
