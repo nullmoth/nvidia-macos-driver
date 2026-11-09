@@ -3804,7 +3804,7 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
         // lookup (ANGLE and GL renderers draw hundreds of times with one set). NVMTL_NO_SV_MEMO=1 looks it up every draw.
         static int svMemo = -1;
         if (svMemo < 0) svMemo = !nvmtl_switch_is_off(getenv("NVMTL_NO_SV_MEMO"));
-        if (nvmtl_sv_memo_hit(svMemo, _svFor, _ps, _svKey, key, _svSel != nil)) return _svSel == (id)[NSNull null] ? nil : _svSel;
+        if (nvmtl_sv_memo_hit(svMemo, (__bridge const void *)_svFor, (__bridge const void *)_ps, (__bridge const void *)_svKey, (__bridge const void *)key, _svSel != nil)) return _svSel == (id)[NSNull null] ? nil : _svSel;
         _svFor=nil; _svKey=nil; _svSel=nil;
         @synchronized(_ps) {
             if(!_ps->_samplerVariants) _ps->_samplerVariants=[NSMutableDictionary new];
@@ -4085,7 +4085,7 @@ static MTLPixelFormat nvmtl_swizzle_twin_mtl(MTLPixelFormat f) { return (MTLPixe
     // GL games paid a full bind per draw (the GL-on-Metal per-draw overhead). Not inside an open pass-time pool.
     static int psoSkip = -1;   // NVMTL_NO_PSO_SKIP=1 (nvrm610.conf) sets the pipeline every time again, to A/B a glitch against the saving
     if (psoSkip < 0) psoSkip = !nvmtl_switch_is_off(getenv("NVMTL_NO_PSO_SKIP"));
-    if (nvmtl_pso_skip(psoSkip, ps, _ps, _begun, _cb->_c.pt_open && _cb->_c.pt_pool)) return;
+    if (nvmtl_pso_skip(psoSkip, (__bridge const void *)ps, (__bridge const void *)_ps, _begun, _cb->_c.pt_open && _cb->_c.pt_pool)) return;
     // NVMTL_DUMP_PSO=<text>: the first encoder that sets a pipeline whose label contains it has the fragment buffers bound
     // at its end dumped, as NVMTL_DUMP_GROUP does, for apps that label pipelines but push no debug groups (diagnostic)
     // Only asked for when the switch is set: this runs on every pipeline bind, and an unconditional `ps.label` was a message
