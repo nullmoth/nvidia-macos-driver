@@ -78,6 +78,19 @@ int main() {
     NVRMNVDAFramebuffer uwSmall;uwSmall.fKms=&wide;uwSmall.fBootW=2560;uwSmall.fBootH=1440;uwSmall.fBootMode=wide.modes[0];
     uwSmall.fMemBytes=16ULL<<20;
     assert(uwSmall.addKmsRefreshModes(0)==1);
+    // derived rates: a native 240 Hz mode also offers 120 and 60 Hz; 165 Hz (below 240) offers none
+    Kms hi;hi.modes={mode(2560,1600,240)};
+    NVRMNVDAFramebuffer d;d.fKms=&hi;d.fBootMode=hi.modes[0];
+    unsigned dn=d.addKmsRefreshModes(0);
+    assert(dn==3);
+    assert(d.fDT[1].detailedTimingModeID==0x10001 && d.fDT[2].detailedTimingModeID==0x10002);
+    auto rate=[&](const IODetailedTimingInformationV2 &t){UInt64 tot=(UInt64)(t.horizontalActive+t.horizontalBlanking)*(t.verticalActive+t.verticalBlanking);return (unsigned)((t.pixelClock+tot/2)/tot);};
+    assert(rate(d.fDT[0])==240 && rate(d.fDT[1])==120 && rate(d.fDT[2])==60);
+    assert(d.fDT[1].horizontalBlanking==d.fDT[0].horizontalBlanking && !d.fDT[1].dscCompressedBitsPerPixel);
+    assert(d.addKmsRefreshModes(dn)==dn);   // idempotent: nothing listed twice
+    Kms lo;lo.modes={mode(2560,1600,165)};
+    NVRMNVDAFramebuffer l;l.fKms=&lo;l.fBootMode=lo.modes[0];
+    assert(l.addKmsRefreshModes(0)==1);
     puts("PASS: boot 165 Hz desktop timing, stable IDs, no duplicate, scaled mode coexistence, smaller-raster exclusion, memory and timing guards, ultrawide wider than the scaler but not past the raster limit or memory");
 }
 '''
