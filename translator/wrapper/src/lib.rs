@@ -511,6 +511,117 @@ pub extern "C" fn nvmtl_translate_fc(
     }
 }
 
+/// Fixes the function-constant values of a module made by nvmtl_translate_spec (no translation, one pass over the words).
+/// `table` is the table nvmtl_translate_spec returned for that module, `table_len` its length in BYTES; the values are the
+/// ones nvmtl_translate_fc takes. A constant left out of the set reads as zero and as not defined.
+#[no_mangle]
+pub extern "C" fn nvmtl_spec_apply(
+    spv: *const u8, spv_len: usize, table: *const u8, table_len: usize,
+    indices: *const u32, sizes: *const u32, payloads: *const *const u8, n: usize,
+    out: *mut *mut u8, out_len: *mut usize, err: *mut c_char, err_len: usize,
+) -> i32 {
+    let set_err = |msg: &str| unsafe {
+        if !err.is_null() && err_len > 0 {
+            let b = msg.as_bytes();
+            let k = b.len().min(err_len - 1);
+            std::ptr::copy_nonoverlapping(b.as_ptr(), err as *mut u8, k);
+            *err.add(k) = 0;
+        }
+    };
+    if spv.is_null() || table.is_null() || out.is_null() || out_len.is_null() || table_len % 20 != 0 { return -1; }
+    if n > 0 && (indices.is_null() || sizes.is_null() || payloads.is_null()) { return -1; }
+    let tb = unsafe { std::slice::from_raw_parts(table, table_len) };
+    let w = |c: &[u8], i: usize| u32::from_le_bytes([c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]]);
+    let entries: Vec<metal2vulkan::SpecConstantEntry> = tb.chunks_exact(20).map(|c| metal2vulkan::SpecConstantEntry {
+        fc_index: w(c, 0), lane: w(c, 1), spec_id: w(c, 2), size: w(c, 3), byte_offset: w(c, 4) }).collect();
+    let mut values: Vec<(u32, Vec<u8>)> = Vec::with_capacity(n);
+    for i in 0..n {
+        let (idx, len, ptr) = unsafe { (*indices.add(i), *sizes.add(i) as usize, *payloads.add(i)) };
+        if ptr.is_null() { set_err("null payload"); return -1; }
+        values.push((idx, unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()));
+    }
+    match metal2vulkan::apply_function_constant_values(unsafe { std::slice::from_raw_parts(spv, spv_len) }, &entries, &values) {
+        Ok(v) => {
+            let mut b = v.into_boxed_slice();
+            unsafe { *out = b.as_mut_ptr(); *out_len = b.len(); }
+            std::mem::forget(b);
+            0
+        }
+        Err(e) => { set_err(&e); -1 }
+    }
+}
+
+/// How much of the AIR text survives the function-constant fold for this set of values, in percent (the folded text's
+/// length over the original's). The fold is text-level and cheap. A set whose config struct folds away leaves a few
+/// percent of the module; one that folds nothing leaves nearly all of it, and a translation per such set repeats the
+/// same work, which is what nvmtl_translate_spec avoids. Returns -1 on error.
+#[no_mangle]
+pub extern "C" fn nvmtl_fc_fold_percent(
+    ll: *const c_char, indices: *const u32, sizes: *const u32, payloads: *const *const u8, n: usize,
+) -> i32 {
+    if ll.is_null() || (n > 0 && (indices.is_null() || sizes.is_null() || payloads.is_null())) { return -1; }
+    let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => return -1 };
+    let mut values: Vec<(u32, Vec<u8>)> = Vec::with_capacity(n);
+    for i in 0..n {
+        let (idx, len, ptr) = unsafe { (*indices.add(i), *sizes.add(i) as usize, *payloads.add(i)) };
+        if ptr.is_null() { return -1; }
+        values.push((idx, unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()));
+    }
+    match metal2vulkan::specialize_air_function_constants(ll, &values) {
+        Ok(v) if !ll.is_empty() => ((v.as_ref() as &str).len() as u64 * 100 / ll.len() as u64).min(1000) as i32,
+        _ => -1,
+    }
+}
+
+/// Translates AIR once, whatever its function constants will be, into SPIR-V whose function constants are
+/// specialization constants (see `specialize_function_constants_as_spec_ids`). `table` receives five u32 per constant:
+/// function-constant index, lane, SpecId, size in bytes, byte offset inside that constant's payload; `table_len` is its
+/// length in BYTES. Free both with nvmtl_translate_free. A module without function constants is an error (-1): it has
+/// nothing to specialize and goes through nvmtl_translate.
+#[no_mangle]
+pub extern "C" fn nvmtl_translate_spec(
+    ll: *const c_char, stage: *const c_char,
+    out: *mut *mut u8, out_len: *mut usize, table: *mut *mut u8, table_len: *mut usize,
+    err: *mut c_char, err_len: usize,
+) -> i32 {
+    let set_err = |msg: &str| unsafe {
+        if !err.is_null() && err_len > 0 {
+            let b = msg.as_bytes();
+            let k = b.len().min(err_len - 1);
+            std::ptr::copy_nonoverlapping(b.as_ptr(), err as *mut u8, k);
+            *err.add(k) = 0;
+        }
+    };
+    if ll.is_null() || stage.is_null() || out.is_null() || out_len.is_null() || table.is_null() || table_len.is_null() { return -1; }
+    let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let st = match unsafe { CStr::from_ptr(stage) }.to_str() {
+        Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
+        _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
+    };
+    // the same visible-function closure as nvmtl_translate_fc: an unsupplied stub must not stay a live reference
+    let closed = match metal2vulkan::linked_functions::specialize_visible_function_references(
+        ll, &metal2vulkan::linked_functions::LinkedFunctionLinkage::default(),
+    ) {
+        Ok(v) => v,
+        Err(e) => { set_err(&format!("visible function reference: {e}")); return -1; }
+    };
+    let spv = match translate_one(closed.as_str(), st) { Ok(v) => v, Err(e) => { set_err(&e); return -1; } };
+    let (spv, entries) = match metal2vulkan::specialize_function_constants_as_spec_ids(&spv) {
+        Ok(v) => v,
+        Err(e) => { set_err(&e); return -1; }
+    };
+    let mut tb: Vec<u8> = Vec::with_capacity(entries.len() * 20);
+    for e in &entries {
+        for w in [e.fc_index, e.lane, e.spec_id, e.size, e.byte_offset] { tb.extend_from_slice(&w.to_le_bytes()); }
+    }
+    let mut b = spv.into_boxed_slice();
+    let mut t = tb.into_boxed_slice();
+    unsafe { *out = b.as_mut_ptr(); *out_len = b.len(); *table = t.as_mut_ptr(); *table_len = t.len(); }
+    std::mem::forget(b);
+    std::mem::forget(t);
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn nvmtl_reflect(
     ll: *const c_char, stage: *const c_char,

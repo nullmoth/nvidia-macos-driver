@@ -32,8 +32,8 @@ pub(crate) mod types;
 
 pub use fc_air_specialize::specialize_air_function_constants;
 pub use fc_specialize::{
-    specialize_function_constant_bytes, specialize_function_constants,
-    specialize_function_constants_zero,
+    apply_function_constant_values, fc_spec_id, specialize_function_constant_bytes, specialize_function_constants,
+    specialize_function_constants_as_spec_ids, specialize_function_constants_zero, SpecConstantEntry,
 };
 pub use passthrough::{
     translate_passthrough, translate_passthrough_specialized, translate_vertex_observer,
