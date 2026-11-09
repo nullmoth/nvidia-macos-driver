@@ -116,6 +116,26 @@ pub(in crate::passes) fn recover_inlined_local_pointer_fields(ctx: &mut Ctx, ent
             replacements.push((result, source));
         }
     }
+    // A load through the address that a replaced load produced (a texture or sampler read out of an element
+    // of a by-value array whose element address a helper took from a local object) names that address as its
+    // root. The address is an access chain with constant indices, and the resource passes recognise an array
+    // element only by the array and the path, so the fact is re-rooted on the chain's own root with the
+    // chain's indices in front of its own. The chain itself can be dead once the loads are replaced.
+    let element_roots: HashMap<Word, LocalPointerFieldKey> = replacements
+        .iter()
+        .filter_map(|(result, source)| Some((*result, access_keys.get(source)?.clone())))
+        .collect();
+    if !element_roots.is_empty() {
+        for fact in &mut ctx.emit_sidecar.local_pointer_field_loads {
+            let Some(base) = element_roots.get(&fact.root) else {
+                continue;
+            };
+            let mut indices = base.indices.clone();
+            indices.extend_from_slice(&fact.indices);
+            fact.root = base.root;
+            fact.indices = indices;
+        }
+    }
     if !replacements.is_empty() {
         let replacement_map = replacements.iter().copied().collect();
         ctx.emit_sidecar.remap_ids(&replacement_map);

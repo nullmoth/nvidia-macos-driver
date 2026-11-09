@@ -1482,6 +1482,9 @@ pub(in crate::passes) fn lower_one(
     if let Some(global) = cl_size_query(name) {
         return lower_cl_size(ctx, name, global, res, rty, args);
     }
+    if name.starts_with("air.interpolate_") {
+        return lower_pull_interpolation(ctx, name, res, rty, args);
+    }
     if name == "air.get_sample_position.v2f32" {
         return lower_sample_position(ctx, res, rty, args);
     }

@@ -21,6 +21,84 @@ pub enum Stage {
     Kernel,
 }
 
+/// How a kernel's `[[stage_in]]` attribute is stored in the buffer the application binds, from the compute pipeline's
+/// `MTLStageInputOutputDescriptor`. Without it a stage-in member is read as an array of its own type at its natural size,
+/// which is wrong for any other stride (a float3 attribute at a 12-byte stride was read at 16).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageInFormat {
+    Float,
+    Float2,
+    Float3,
+    Float4,
+    Int,
+    Int2,
+    Int3,
+    Int4,
+    UInt,
+    UInt2,
+    UInt3,
+    UInt4,
+    Half2,
+    Half4,
+    UChar4Normalized,
+}
+
+impl StageInFormat {
+    pub fn bytes(self) -> u32 {
+        match self {
+            Self::Float | Self::Int | Self::UInt | Self::Half2 | Self::UChar4Normalized => 4,
+            Self::Float2 | Self::Int2 | Self::UInt2 | Self::Half4 => 8,
+            Self::Float3 | Self::Int3 | Self::UInt3 => 12,
+            Self::Float4 | Self::Int4 | Self::UInt4 => 16,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StageInAttribute {
+    pub attribute: u32,
+    pub buffer_index: u32,
+    pub offset: u32,
+    pub format: StageInFormat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageInStep {
+    /// Every thread reads the first element.
+    Constant,
+    /// Element `thread_position_in_grid.x / rate` (or `.y`).
+    GridX,
+    GridY,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StageInLayout {
+    pub buffer_index: u32,
+    pub stride: u32,
+    pub step: StageInStep,
+    pub rate: u32,
+}
+
+pub const STAGE_IN_MAX_ATTRIBUTES: usize = 16;
+pub const STAGE_IN_MAX_LAYOUTS: usize = 31;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct KernelStageIn {
+    pub attributes: [Option<StageInAttribute>; STAGE_IN_MAX_ATTRIBUTES],
+    pub layouts: [Option<StageInLayout>; STAGE_IN_MAX_LAYOUTS],
+}
+
+impl KernelStageIn {
+    pub fn is_empty(&self) -> bool {
+        self.attributes.iter().all(Option::is_none)
+    }
+    pub fn attribute(&self, index: u32) -> Option<(StageInAttribute, StageInLayout)> {
+        let attribute = self.attributes.iter().flatten().find(|a| a.attribute == index).copied()?;
+        let layout = self.layouts.iter().flatten().find(|l| l.buffer_index == attribute.buffer_index).copied()?;
+        Some((attribute, layout))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TransformOptions {
     pub descriptor_layout: crate::reflect::DescriptorLayout,
@@ -38,6 +116,8 @@ pub struct TransformOptions {
     pub runtime_storage_image_states:
         [Option<RuntimeStorageImageState>; TEXTURE_ARGUMENT_COUNT_USIZE],
     pub vertex_amplification_count: u32,
+    /// The compute pipeline's stage-in layout; empty when the application gave none.
+    pub kernel_stage_in: KernelStageIn,
     pub threadgroup_memory_lengths: [Option<u32>; THREADGROUP_BUFFER_ARGUMENT_COUNT_USIZE],
     /// Colour attachments bound as Metal A8Unorm (bit per location). Vulkan has no A8 format, so the plugin backs
     /// them with R8 and the fragment output's alpha is written to every lane; the red lane is what the target keeps.
@@ -55,6 +135,7 @@ impl Default for TransformOptions {
             no_rasterization_rate_maps: false,
             typed_dummy_slots: false,
             vertex_amplification_count: 1,
+            kernel_stage_in: KernelStageIn::default(),
             runtime_sampler_states: [None; SAMPLER_ARGUMENT_COUNT_USIZE],
             runtime_storage_image_states: [None; TEXTURE_ARGUMENT_COUNT_USIZE],
             threadgroup_memory_lengths: [None; THREADGROUP_BUFFER_ARGUMENT_COUNT_USIZE],
@@ -336,6 +417,7 @@ struct Ctx {
     no_rasterization_rate_maps: bool,
     typed_dummy_slots: bool,
     vertex_amplification_count: u32,
+    kernel_stage_in: KernelStageIn,
     runtime_sampler_states: [Option<RuntimeSamplerState>; SAMPLER_ARGUMENT_COUNT_USIZE],
     runtime_storage_image_states: [Option<RuntimeStorageImageState>; TEXTURE_ARGUMENT_COUNT_USIZE],
     threadgroup_memory_lengths: [Option<u32>; THREADGROUP_BUFFER_ARGUMENT_COUNT_USIZE],
@@ -430,6 +512,7 @@ impl Ctx {
             no_rasterization_rate_maps: options.no_rasterization_rate_maps,
             typed_dummy_slots: options.typed_dummy_slots,
             vertex_amplification_count: options.vertex_amplification_count,
+            kernel_stage_in: options.kernel_stage_in,
             runtime_sampler_states: options.runtime_sampler_states,
             runtime_storage_image_states: options.runtime_storage_image_states,
             threadgroup_memory_lengths: options.threadgroup_memory_lengths,

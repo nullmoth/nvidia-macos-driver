@@ -2223,6 +2223,11 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     }
     NSError *le = nil; id<MTLFunction> kfn = nvmtl_link_kernel(d, &le);
     if (!kfn) { if (err) *err = le; if (r) *r = nil; return nil; }
+    if (d.stageInputDescriptor && [(id)kfn isKindOfClass:[NVMTLFunction class]]) {
+        NSError *se = nil; NVMTLFunction *sf = nvmtl_kernel_with_stage_in((NVMTLFunction *)kfn, d.stageInputDescriptor, &se);
+        if (!sf) { if (err) *err = se; if (r) *r = nil; return nil; }
+        kfn = sf;
+    }
     NSString *tgWhy = nvmtl_tg_mismatch(kfn, d.maxTotalThreadsPerThreadgroup, "compute pipeline");
     if (tgWhy) { if (r) *r = nil; return nvmtl_fail(err, tgWhy); }
     id<MTLComputePipelineState> ps = [self newComputePipelineStateWithFunction:kfn error:err];

@@ -49,6 +49,10 @@ pub(in crate::passes) fn lower_air_calls(ctx: &mut Ctx, entry_idx: usize) -> Res
             let res = inst.result_id;
             let rty = inst.result_type;
 
+            if let Err(error) = refuse_texture_from_unforwarded_field(ctx, name, &args) {
+                ctx.air_call_body = None;
+                return Err(error);
+            }
             let lowered = match lower_one(ctx, name, res, rty, &args, v4) {
                 Ok(lowered) => lowered,
                 Err(error) => {
@@ -70,6 +74,59 @@ pub(in crate::passes) fn lower_air_calls(ctx: &mut Ctx, entry_idx: usize) -> Res
     }
     ctx.air_call_body = None;
     Ok(())
+}
+
+/// A texture a call samples, gathers, reads or writes that came out of a field of a local object as a placeholder.
+///
+/// An operand that resolves to no image is read as a texture the shader never bound, and the call folds to zero (a read) or
+/// to nothing (a write). That is true of a handle Metal itself left null, and false of a handle the emitter could not see
+/// through: a helper that was not inlined reads the texture address out of the object its caller filled, and when the
+/// caller's stores were not matched to the helper's loads the same fold hides a texture that is bound. The whole shader then
+/// draws nothing and no error says why (a terminal with its background and no text). Facts recorded for such a load say
+/// where the placeholder came from, so a call whose texture operand is one is refused, with the words the inline retry
+/// looks for; the retry inlines the helper and forwards the fields, and the call is lowered again from the text it makes.
+fn refuse_texture_from_unforwarded_field(
+    ctx: &Ctx,
+    name: &str,
+    args: &[Word],
+) -> Result<(), String> {
+    let loses_data_when_absent = name.starts_with("air.sample_texture")
+        || name.starts_with("air.sample_depth")
+        || name.starts_with("air.sample_compare_depth")
+        || name.starts_with("air.gather_")
+        || name.starts_with("air.read_texture")
+        || name.starts_with("air.read_depth")
+        || name.starts_with("air.write_texture");
+    let Some(&handle) = args.first() else {
+        return Ok(());
+    };
+    if !loses_data_when_absent
+        || !ctx
+            .emit_sidecar
+            .local_pointer_field_loads
+            .iter()
+            .any(|fact| fact.id == handle)
+    {
+        return Ok(());
+    }
+    let img = resolve_image_value(ctx, handle);
+    if !texture_operand_is_absent(ctx, img) || operand_is_variant_absent_texture(ctx, img) {
+        return Ok(());
+    }
+    let recoverable = [
+        ImageOperandUse::Sampled,
+        ImageOperandUse::Storage,
+        ImageOperandUse::Query,
+    ]
+    .into_iter()
+    .any(|use_as| recovered_image_for_private_operand(ctx, img, name, use_as).is_some());
+    if recoverable {
+        return Ok(());
+    }
+    Err(format!(
+        "{name}: the texture operand is a pointer placeholder for a field of a local object whose store was not \
+         forwarded to the load; folding the call to zero would hide a texture that may be bound"
+    ))
 }
 
 fn record_read_sampler_values(ctx: &mut Ctx, entry_idx: usize, names: &HashMap<Word, String>) {

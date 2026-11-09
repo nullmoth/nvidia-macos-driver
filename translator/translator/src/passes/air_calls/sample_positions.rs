@@ -179,3 +179,39 @@ pub(in crate::passes) fn lower_sample_position(
         ),
     ])
 }
+
+/// `air.interpolate_{offset,sample,centroid}_{perspective,no_perspective}.<type>(interpolant, ...)`: the value of a
+/// fragment input at a pixel offset, at a sample index, or at the centroid. The interpolant is the Input variable
+/// itself (see stage_input); its perspective setting is the decoration on that variable.
+pub(in crate::passes) fn lower_pull_interpolation(
+    ctx: &mut Ctx,
+    name: &str,
+    res: Option<Word>,
+    rty: Option<Word>,
+    args: &[Word],
+) -> Result<Vec<Instruction>, String> {
+    let (Some(res), Some(rty)) = (res, rty) else {
+        return Err(format!("{name} has no result"));
+    };
+    if name.contains("f16") {
+        return Err(format!("{name}: half-precision interpolants are not supported"));
+    }
+    let (op, expected_args) = if name.starts_with("air.interpolate_offset_") {
+        (GLSLstd450::InterpolateAtOffset, 2)
+    } else if name.starts_with("air.interpolate_sample_") {
+        (GLSLstd450::InterpolateAtSample, 2)
+    } else if name.starts_with("air.interpolate_centroid_") {
+        (GLSLstd450::InterpolateAtCentroid, 1)
+    } else {
+        return Err(format!("{name}: not a pull-model interpolation"));
+    };
+    if args.len() != expected_args {
+        return Err(format!("{name} expects {expected_args} operand(s), got {}", args.len()));
+    }
+    let ext = ctx.glsl();
+    let mut operands = vec![Operand::IdRef(ext), Operand::LiteralExtInstInteger(op as u32), Operand::IdRef(args[0])];
+    if let Some(&extra) = args.get(1) {
+        operands.push(Operand::IdRef(extra));
+    }
+    Ok(vec![Instruction::new(Op::ExtInst, Some(rty), Some(res), operands)])
+}

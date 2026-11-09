@@ -955,6 +955,19 @@ pub(in crate::passes) fn apply_bindings(
                 ));
                 splices.push((pid, value));
             }
+            ParamBinding::StageInAttribute {
+                var,
+                value_ty,
+                index_var,
+                dispatch_var,
+                attribute,
+                layout,
+            } => {
+                let value = load_stage_in_attribute(
+                    ctx, &mut loads, var, value_ty, index_var, dispatch_var, attribute, layout,
+                )?;
+                splices.push((pid, value));
+            }
             ParamBinding::WorkgroupMemory { var } => {
                 splices.push((pid, var));
                 workgroup_vars.push(var);
@@ -2407,4 +2420,145 @@ mod tests {
             Some(2)
         );
     }
+}
+
+/// The value of one kernel stage-in attribute for the invocation: the words of its element, read from the application's
+/// buffer at `element * stride + offset` and converted from the attribute format to the parameter's type. A lane the
+/// format lacks is 0, and a missing fourth lane is 1, as Metal fills a vertex-style fetch.
+#[allow(clippy::too_many_arguments)]
+fn load_stage_in_attribute(
+    ctx: &mut Ctx,
+    loads: &mut Vec<Instruction>,
+    var: Word,
+    value_ty: Word,
+    index_var: Word,
+    dispatch_var: Option<Word>,
+    attribute: crate::passes::StageInAttribute,
+    layout: crate::passes::StageInLayout,
+) -> Result<Word, String> {
+    use crate::passes::air_calls::GLSLstd450;
+    use crate::passes::{StageInFormat as F, StageInStep};
+    let uint_ty = ctx.ty_uint();
+    let v3u = ctx.ty_vec_uint(3);
+    let emit = |ctx: &mut Ctx, loads: &mut Vec<Instruction>, op: Op, ty: Word, operands: Vec<Operand>| {
+        let id = ctx.module.fresh_id();
+        loads.push(Instruction::new(op, Some(ty), Some(id), operands));
+        id
+    };
+    let element = match layout.step {
+        StageInStep::Constant => ctx.const_uint(0),
+        StageInStep::GridX | StageInStep::GridY => {
+            let axis = u32::from(layout.step == StageInStep::GridY);
+            let gid = emit(ctx, loads, Op::Load, v3u, vec![Operand::IdRef(index_var)]);
+            let relative = emit(ctx, loads, Op::CompositeExtract, uint_ty, vec![Operand::IdRef(gid), Operand::LiteralBit32(axis)]);
+            let absolute = match dispatch_var {
+                Some(dispatch) => {
+                    let base = load_kernel_dispatch_component(ctx, loads, dispatch, 3 + axis);
+                    emit(ctx, loads, Op::IAdd, uint_ty, vec![Operand::IdRef(relative), Operand::IdRef(base)])
+                }
+                None => relative,
+            };
+            if layout.rate > 1 {
+                let rate = ctx.const_uint(layout.rate);
+                emit(ctx, loads, Op::UDiv, uint_ty, vec![Operand::IdRef(absolute), Operand::IdRef(rate)])
+            } else {
+                absolute
+            }
+        }
+    };
+    let stride_words = ctx.const_uint(layout.stride / 4);
+    let scaled = emit(ctx, loads, Op::IMul, uint_ty, vec![Operand::IdRef(element), Operand::IdRef(stride_words)]);
+    let offset_words = ctx.const_uint(attribute.offset / 4);
+    let first = emit(ctx, loads, Op::IAdd, uint_ty, vec![Operand::IdRef(scaled), Operand::IdRef(offset_words)]);
+
+    let word_count = attribute.format.bytes() / 4;
+    let ptr_ty = ctx.ty_ptr(StorageClass::StorageBuffer, uint_ty);
+    let zero = ctx.const_uint(0);
+    let mut words = Vec::new();
+    for k in 0..word_count {
+        let index = if k == 0 {
+            first
+        } else {
+            let step = ctx.const_uint(k);
+            emit(ctx, loads, Op::IAdd, uint_ty, vec![Operand::IdRef(first), Operand::IdRef(step)])
+        };
+        let pointer = emit(ctx, loads, Op::AccessChain, ptr_ty, vec![Operand::IdRef(var), Operand::IdRef(zero), Operand::IdRef(index)]);
+        words.push(emit(ctx, loads, Op::Load, uint_ty, vec![Operand::IdRef(pointer)]));
+    }
+
+    let (element_ty, lanes) = scalar_or_vector_component_live(ctx, value_ty)
+        .ok_or_else(|| format!("kernel stage_in attribute {} has a parameter type that is not a scalar or vector", attribute.attribute))?;
+    let float_ty = ctx.ty_float();
+    let want_float = element_ty == float_ty;
+    let int_class = matches!(attribute.format, F::Int | F::Int2 | F::Int3 | F::Int4 | F::UInt | F::UInt2 | F::UInt3 | F::UInt4);
+    let signed_format = matches!(attribute.format, F::Int | F::Int2 | F::Int3 | F::Int4);
+    if int_class == want_float {
+        return Err(format!(
+            "kernel stage_in attribute {} is {:?} but the shader takes {}",
+            attribute.attribute,
+            attribute.format,
+            if want_float { "floats" } else { "integers" }
+        ));
+    }
+    let mut components: Vec<Word> = Vec::new();
+    match attribute.format {
+        F::Float | F::Float2 | F::Float3 | F::Float4 => {
+            for w in &words {
+                components.push(emit(ctx, loads, Op::Bitcast, float_ty, vec![Operand::IdRef(*w)]));
+            }
+        }
+        F::Int | F::Int2 | F::Int3 | F::Int4 | F::UInt | F::UInt2 | F::UInt3 | F::UInt4 => {
+            let sint_ty = ctx.ty_sint();
+            let component_ty = if signed_format { sint_ty } else { uint_ty };
+            for w in &words {
+                if component_ty == uint_ty {
+                    components.push(*w);
+                } else {
+                    components.push(emit(ctx, loads, Op::Bitcast, component_ty, vec![Operand::IdRef(*w)]));
+                }
+            }
+            if element_ty != component_ty {
+                for c in components.iter_mut() {
+                    *c = emit(ctx, loads, Op::Bitcast, element_ty, vec![Operand::IdRef(*c)]);
+                }
+            }
+        }
+        F::Half2 | F::Half4 => {
+            let v2 = ctx.ty_vecf(2);
+            let ext = ctx.glsl();
+            for w in &words {
+                let pair = emit(ctx, loads, Op::ExtInst, v2, vec![
+                    Operand::IdRef(ext),
+                    Operand::LiteralExtInstInteger(GLSLstd450::UnpackHalf2x16 as u32),
+                    Operand::IdRef(*w),
+                ]);
+                for lane in 0..2 {
+                    components.push(emit(ctx, loads, Op::CompositeExtract, float_ty, vec![Operand::IdRef(pair), Operand::LiteralBit32(lane)]));
+                }
+            }
+        }
+        F::UChar4Normalized => {
+            let v4 = ctx.ty_vecf(4);
+            let ext = ctx.glsl();
+            let quad = emit(ctx, loads, Op::ExtInst, v4, vec![
+                Operand::IdRef(ext),
+                Operand::LiteralExtInstInteger(GLSLstd450::UnpackUnorm4x8 as u32),
+                Operand::IdRef(words[0]),
+            ]);
+            for lane in 0..4 {
+                components.push(emit(ctx, loads, Op::CompositeExtract, float_ty, vec![Operand::IdRef(quad), Operand::LiteralBit32(lane)]));
+            }
+        }
+    }
+    let wanted = lanes.unwrap_or(1) as usize;
+    while components.len() < wanted {
+        let fill = if components.len() == 3 { 1 } else { 0 };
+        let constant = if want_float { ctx.const_float(fill as f32) } else { ctx.const_int_of(element_ty, fill) };
+        components.push(constant);
+    }
+    components.truncate(wanted);
+    if lanes.is_none() {
+        return Ok(components[0]);
+    }
+    Ok(emit(ctx, loads, Op::CompositeConstruct, value_ty, components.into_iter().map(Operand::IdRef).collect()))
 }
