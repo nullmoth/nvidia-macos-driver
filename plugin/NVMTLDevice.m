@@ -2537,6 +2537,16 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 - (id<MTLEvent>)newEvent { NVMTLEvent *e = [NVMTLEvent new]; e->_dev = self; return e; }
 - (id<MTLSharedEvent>)newSharedEvent { NVMTLSharedEvent *e = [NVMTLSharedEvent new]; e->_dev = self; return e; }
 - (MTLArgumentBuffersTier)argumentBuffersSupport { return MTLArgumentBuffersTier2; }
+// Whether this process is a game, by what macOS's own Game Mode daemon reads from the app's Info.plist: the games category, or
+// LSSupportsGameMode. Used only by the opt-in Game Mode GPU priority (nvmtl_game_priority.h).
+int nvmtl_process_is_game(void)
+{
+    NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
+    if (![info isKindOfClass:[NSDictionary class]]) return 0;
+    if ([[info objectForKey:@"LSApplicationCategoryType"] isEqual:@"public.app-category.games"]) return 1;
+    id opt = [info objectForKey:@"LSSupportsGameMode"];
+    return [opt respondsToSelector:@selector(boolValue)] && [opt boolValue];
+}
 // NVMTL_APPLE_FAMILY=<n>: also answer YES for MTLGPUFamilyApple1..Apple<n> (default 0: none).
 // Measured on Cyberpunk 2077: its whole GPU capability decision is five queries - supportsFamily
 // Apple6 (asked exactly once), name (twice), supportsRaytracing and supportsRaytracingFromRender -
