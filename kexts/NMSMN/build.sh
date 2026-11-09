@@ -30,6 +30,7 @@ xcrun clang++ -arch x86_64 -mmacosx-version-min="$MIN" -fapple-kext -nostdlib \
     -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "$OUT/$NAME.o" -o "$K/Contents/MacOS/$NAME" 2> "$OUT/$NAME.link.err"
 lrc=$?
 if [ $lrc -ne 0 ]; then echo "LINK FAILED (rc=$lrc)"; head -12 "$OUT/$NAME.link.err"; exit 1; fi
+bash "$SRC/../../build/warn_ceiling.sh" nmsmn-link "$(grep -c 'warning' "$OUT/$NAME.link.err")" "$OUT/$NAME.link.err" || exit 4
 cp "$SRC/Info.plist" "$K/Contents/Info.plist"
 echo "$(shasum -a 256 "$K/Contents/MacOS/$NAME" | cut -c1-16)  $(stat -f %z "$K/Contents/MacOS/$NAME") B"
 echo "kmod_info:    $(nm "$K/Contents/MacOS/$NAME" | grep -c "_kmod_info")"
