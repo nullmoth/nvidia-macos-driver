@@ -40,6 +40,8 @@ struct NVRMNVDAFramebuffer {
     void *fSurf=this;
     unsigned fHead=0, sleeps=0, wakes=0, notifications=0, audioPublishes=0;
     void publishDisplayAudioProperties() { audioPublishes++; }
+    unsigned ddcCalls=0; bool ddcLast=true;
+    void ddcSetPowered(bool on) { ddcCalls++; ddcLast=on; }   // DDC/CI follows display power (w29-display)
     int fStopping=0, fReflipRc=0;
     bool headOff() { sleeps++; return sleepOK; }
     bool reflip() { wakes++; return wakeOK; }
@@ -88,6 +90,9 @@ int main() {
     assert(!f.fHeadSlept && f.wakes==wakes+1 && f.familyWakes==1 && !f.fSysSlept && f.pagingState);
     assert(f.notifications==notes+1);
     f.setPowerState(1,nullptr); assert(f.familyWakes==1 && f.notifications==notes+2);
+    // DDC/CI is told about every power transition, awake or asleep, so a sleeping monitor is not sent commands
+    unsigned dc=f.ddcCalls; f.setPowerState(0,nullptr); assert(f.ddcCalls==dc+1 && !f.ddcLast);
+    f.setPowerState(1,nullptr); assert(f.ddcCalls==dc+2 && f.ddcLast);
     puts("PASS: failed sleep, failed wake retry with notification, audio republished only on a real wake, connection power no-op, repeated requests, opt-out, shutdown, unavailable gate, GPU standby, wake before resume, system wake");
 }
 '''

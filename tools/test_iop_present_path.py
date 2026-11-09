@@ -38,7 +38,7 @@ fixture = r'''
 #include <cstdio>
 #include <cstring>
 typedef int IOReturn; typedef int32_t SInt32; typedef int64_t SInt64;
-enum : int { kIOReturnSuccess = 0, kIOReturnBusy = (int)0xe00002d5, kIOReturnIOError = (int)0xe00002ca, kIOReturnNoMemory = (int)0xe00002bd };
+enum : int { kIOReturnSuccess = 0, kIOReturnBusy = (int)0xe00002d5, kIOReturnIOError = (int)0xe00002ca, kIOReturnNoMemory = (int)0xe00002bd, kIOReturnNotReady = (int)0xe00002d4 };
 #define ALOG(...) ((void)0)
 #define NVRM_FLIP_ABI_VERSION 1
 struct NVRMFlipRequest { unsigned int version, flags; void *kapiMemory; unsigned int width, height, pitch; int flipResult; unsigned long long allocationCookie; };
@@ -120,6 +120,14 @@ int main() {
     assert(gCntIopLate == 1 && gCntIopAsyncRefused == 0 && gIopAsync == 1 && E.rc == 1 && gIopFlipFront[0] == &D);
     assert(gSignals == signals0 + 3 && !nvAccelIopAsyncBusy(&pipe) && "a kept frame still completes its transaction");
     fb.answer = kIOReturnSuccess;
+    // A frame answered NotReady (display asleep, GPU in standby): completed, not a refusal and not counted late (#470).
+    { const SInt64 lateBefore = gCntIopLate; const int signalsBefore = gSignals;
+      fb.answer = kIOReturnNotReady;
+      assert(nvAccelIopAsyncStart(&pipe, &fb, 0, &E, &f));
+      runWorker();
+      assert(gCntIopAsyncRefused == 0 && gIopAsync == 1 && gCntIopLate == lateBefore && "a sleeping display is not a refusal");
+      assert(gSignals == signalsBefore + 1 && !nvAccelIopAsyncBusy(&pipe) && "the frame still completes its transaction");
+      fb.answer = kIOReturnSuccess; }
     // A present from another pipe is not queued behind this head's flip.
     assert(nvAccelIopAsyncStart(&pipe, &fb, 0, &A, &f));
     const SInt64 drops = gCntIopAsyncDrop;
