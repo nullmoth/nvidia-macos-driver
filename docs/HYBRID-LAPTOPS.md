@@ -256,6 +256,8 @@ machine takes.
 
 ## Switching it on and off
 
+The order to try every switch in, with what to send back, is in `docs/HYBRID-TESTER-PLAN.md`.
+
     sudo tools/hybrid_switch.sh copy      # nmhybrid=1
     sudo tools/hybrid_switch.sh import    # nmhybrid=2
     sudo tools/hybrid_switch.sh off       # removes nmhybrid
