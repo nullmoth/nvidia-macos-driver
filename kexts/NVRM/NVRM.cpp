@@ -1220,6 +1220,13 @@ static bool nvrmBusRangeHasOtherDevices(UInt8 first, UInt8 last, IOPCIDevice *se
     return found;
 }
 
+// -nvrmkeepbar1: leave a BAR1 the firmware sized above 8 GB at that size (the behaviour before the 8 GB cap)
+static bool nvrmKeepBar1Size()
+{
+    char nb[8] = { 0 };
+    return PE_parse_boot_argn("-nvrmkeepbar1", nb, sizeof nb);
+}
+
 bool NVRM::placeLargeBar1()
 {
     static const UInt64 kBigBase = 0x10000000000ULL;
@@ -1261,6 +1268,10 @@ bool NVRM::placeLargeBar1()
         newSize = 256ULL << 20;
         LOG("bar1: -nvrmsmallbar set — BAR1 %llu MB will be sized to 256 MB, as on a card without Resizable BAR", bar1Size >> 20);
         bar1Size = newSize;
+    } else if (const UInt64 shrunk = nvrmBar1ShrinkTarget(bar1Size, rbSupported, nvrmKeepBar1Size())) {
+        if (!rbCtlOff) { LOG("bar1: BAR1 is %llu MB and larger than the proven 8 GB, but no resize control was found - left as is", bar1Size >> 20); return false; }
+        LOG("bar1: BAR1 is %llu MB; will resize it to %llu MB (the size proven on hardware; -nvrmkeepbar1 keeps the firmware's)", bar1Size >> 20, shrunk >> 20);
+        newSize = shrunk; bar1Size = shrunk;
     } else if (bar1Size < (4ULL << 30)) {
         for (int k = 13; k >= 12; k--) if (rbCtlOff && (rbSupported >> k) & 1) { newSize = 1ULL << (20 + k); break; }
         // Turing cards offer 64-256 MB only (sizes mask 0x1c0), and some firmware leaves them at 64 MB: a GTX 1630, a

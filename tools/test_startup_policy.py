@@ -36,6 +36,12 @@ int main() {
     CHECK("placed BAR1 on Turing waits 10 s, on others 0.5 s", nvrmAutoGoSettleMs(true, true, false, 0) == 10000 && nvrmAutoGoSettleMs(true, false, false, 0) == 500);
     CHECK("nvrmsettle=10000 overrides the 100 s default on an unplaced BAR1", nvrmAutoGoSettleMs(false, false, true, 10000) == 10000);
     CHECK("nvrmsettle=0 is honoured", nvrmAutoGoSettleMs(false, true, true, 0) == 0);
+    CHECK("a 16 GB BAR1 on a card offering 8 GB is resized down to 8 GB", nvrmBar1ShrinkTarget(16ULL << 30, 0x3fe0, false) == (8ULL << 30));
+    CHECK("a 32 GB BAR1 is resized down to 8 GB as well", nvrmBar1ShrinkTarget(32ULL << 30, 0x7fe0, false) == (8ULL << 30));
+    CHECK("an 8 GB BAR1 is left alone", nvrmBar1ShrinkTarget(8ULL << 30, 0x3fe0, false) == 0);
+    CHECK("a 256 MB BAR1 is not touched by the shrink rule", nvrmBar1ShrinkTarget(256ULL << 20, 0x3fe0, false) == 0);
+    CHECK("a card that does not offer 8 GB keeps its size", nvrmBar1ShrinkTarget(16ULL << 30, 0x2000 >> 1, false) == 0);
+    CHECK("-nvrmkeepbar1 keeps the firmware size", nvrmBar1ShrinkTarget(16ULL << 30, 0x3fe0, true) == 0);
     return bad;
 }
 '''
@@ -54,6 +60,7 @@ arm("NVAccel no longer compares against the fixed 60 s constant", "me->fHeadless
 arm("NVRM publishes its settle delay on the PCI device for NVAccel", 'fPCI->setProperty("nvrm-autogo-settle-ms"' in nvrm)
 arm("NVRM takes its settle delay from the policy (nvrmsettle override included)", "nvrmAutoGoSettleMs(" in nvrm)
 arm("auto-go stops waiting for heads when no connector carries a display", "nvrmNoDisplayAnywhere()" in nvrm and "not waiting for heads" in nvrm)
+arm("placeLargeBar1 resizes a firmware BAR1 above 8 GB through the proven path", "nvrmBar1ShrinkTarget(bar1Size, rbSupported, nvrmKeepBar1Size())" in nvrm)
 
 if failures:
     print("FAILED:", ", ".join(failures))
