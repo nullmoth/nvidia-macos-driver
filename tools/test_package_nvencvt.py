@@ -44,6 +44,8 @@ if stage.exists() and platform.system() == 'Darwin' and shutil.which('clang'):
                         hashlib.sha256(b'b').hexdigest(), str(pkg)], check=True, capture_output=True)
         # install.sh runs sums_complete.sh, so the gate wants it in the tree and listed (as finish_package.sh does)
         shutil.copy(root / 'package/sums_complete.sh', pkg / 'sums_complete.sh')
+        (m / 'nvmtl-air-dis').write_bytes(b'#!/bin/sh\n'); (m / 'nvmtl-air-dis').chmod(0o755)
+        subprocess.run(['bash', str(root / 'package/sums_refresh.sh'), str(pkg), 'Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/nvmtl-air-dis'], check=True, capture_output=True)
         (pkg / 'other').write_text('o')
         (pkg / 'SHA256SUMS').write_text((pkg / 'SHA256SUMS').read_text().replace('0000  ./other', hashlib.sha256(b'o').hexdigest() + '  ./other'))
         subprocess.run(['bash', str(root / 'package/sums_refresh.sh'), str(pkg), 'sums_complete.sh'], check=True, capture_output=True)

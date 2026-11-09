@@ -31,6 +31,22 @@ else
     grep -qE "^$w  (\./)?$f\$" "$ROOT/SHA256SUMS" 2>/dev/null || { echo "STOP: SHA256SUMS has no matching line for $f"; fail=1; }
   done < <(cd "$ROOT" && find "$N" "Library/NullMoth/ryzenadj" -type f | LC_ALL=C sort)
 fi
+# The plugin's AIR decoder must be the package's own (build/build_air_dis.sh).
+[ -x "$ROOT/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/nvmtl-air-dis" ] || { echo "STOP: the plugin bundle lacks nvmtl-air-dis"; fail=1; }
+# Every executable file we ship is ours or built from licensed open source. A program signed by Apple (the Metal toolchain's
+# air-opt shipped in 2.0 to 2.8.1 this way) is not ours to redistribute, and no library may load from outside the system
+# and the folders this package installs (a build machine's path, Homebrew or MacPorts would load whatever is there).
+while IFS= read -r -d '' f; do
+  head -c 4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n' | grep -qE '^(cffaedfe|cefaedfe|cafebabe|feedfacf)$' || continue
+  sig=$(codesign -dv "$f" 2>&1)
+  case "$sig" in *"Identifier=com.apple."*|*"TeamIdentifier=59GAB85EFG"*|*"Authority=Apple Code Signing"*|*"Authority=Software Signing"*)
+    echo "STOP: ${f#"$ROOT/"} is signed by Apple; it cannot ship"; fail=1;; esac
+  own=$(otool -D "$f" 2>/dev/null | tail -n +2)
+  while IFS= read -r dep; do
+    case "$dep" in ''|/usr/lib/*|/System/Library/*|@rpath/*|@loader_path/*|@executable_path/*|/Library/GPUBundles/*|/Library/NullMoth/*) ;;
+      *) [ "$dep" = "$own" ] || { echo "STOP: ${f#"$ROOT/"} loads $dep, outside the system and this package"; fail=1; };; esac
+  done < <(otool -L "$f" 2>/dev/null | awk 'NR>1 {print $1}')
+done < <(find "$ROOT" -type f -print0)
 # Every regular file must be listed: install.sh refuses a package whose SHA256SUMS leaves a file out (sums_complete.sh).
 HERE=$(cd "$(dirname "$0")" && pwd)
 bash "$HERE/sums_complete.sh" "$ROOT" || fail=1

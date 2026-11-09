@@ -90,6 +90,8 @@ class Stage(unittest.TestCase):
         self.assertIn("Ryzen power parts are missing", r.stdout)
         self.assertEqual(stage(t, sha)[0].returncode, 0)
         shutil.copy(ROOT / "package/sums_complete.sh", root / "sums_complete.sh")
+        (m / "nvmtl-air-dis").write_bytes(b"#!/bin/sh\n"); (m / "nvmtl-air-dis").chmod(0o755)
+        subprocess.run(["bash", str(ROOT / "package/sums_refresh.sh"), str(root), "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/nvmtl-air-dis"], check=True, capture_output=True)
         subprocess.run(["bash", str(ROOT / "package/sums_refresh.sh"), str(root), "sums_complete.sh"], check=True, capture_output=True)
         self.assertEqual(gate().returncode, 0, gate().stdout)
         (root / "Library/NullMoth/ryzenadj/ryzenadj").write_bytes(b"changed")

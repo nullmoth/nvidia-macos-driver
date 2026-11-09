@@ -39,6 +39,7 @@ source, which this audit could not fetch, so the owner's statement that none was
 | Zstandard decoder in `dlss/zstd`, used by `nm_unzstd` | facebook/zstd 1.5.6 lib/common and lib/decompress, unmodified | BSD-3-Clause (the GPL alternative is not used) | `NOTICE`, `licenses/zstd-LICENSE.txt` (new) |
 | BLAKE3 in `dlss/blake3`, used by `dlss_cache` | BLAKE3 1.8.2 as vendored by Mesa | CC0-1.0 (Apache-2.0 alternative not used) | `NOTICE`, `licenses/BLAKE3-LICENSE-CC0.txt` (new) |
 | `air-runtime` in the plugin bundle | LLVM, Zstandard | Apache-2.0 with LLVM exception, BSD-3-Clause | `NOTICE` |
+| `nvmtl-air-dis` in the plugin bundle | NullMoth (`plugin/air_dis.c`), uses `air-runtime` | NullMoth | — |
 
 Downloaded on the user's Mac, never shipped: NVIDIA's DLSS runtimes (SDK 310.9.16, from NVIDIA's GitHub), the NGX core
 (one file from NVIDIA's Linux 620.70.06 package) and `libnvJitLink` (from NVIDIA's PyPI wheel). `package/dlss_fetch.sh` pins
