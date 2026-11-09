@@ -7,7 +7,7 @@ static float bf(uint32_t b) { float f; memcpy(&f, &b, 4); return f; }
 int main(int argc, char **argv)
 {
    FILE *f = fopen(argv[1], "r"); if (!f) return 2;
-   struct curve_case cases[4]; int nc = sw_cases(cases); static struct oracle_ray rs[SW_BATCH];
+   struct curve_case cases[8]; int nc = sw_cases(cases); static struct oracle_ray rs[SW_BATCH];
    char line[200]; int cur = -1, batch = -1; static char map[SW_N][SW_N + 1]; int cnt[5] = { 0 };
    int fail_total = 0;
    while (fgets(line, sizeof line, f)) {
