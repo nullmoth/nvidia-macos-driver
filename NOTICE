@@ -49,7 +49,7 @@ Community ideas  The shared family-VRAM import cache and the browser surface-pub
              proposed to this project by GeekAudio in pull requests 463 and 481. The code here is NullMoth's own.
 
 plugin       Opt-in VRAM working copies for buffers (nvmtl_shared_wc.h, NVMTL_SHARED_VRAM, NVMTL_MANAGED_OWNED_VRAM) follow
-             ideas from pull request 524 by emretascii (owned staging for unimportable caller pages, skipping the copy-back of
-             buffers a command buffer only reads). The code here is NullMoth's own.
+             ideas from pull request 524 by emretascii (owned staging memory for caller pages that cannot be imported, with the
+             GPU working in VRAM). The code here is NullMoth's own.
 
 nvk          nvk/nvk-upstream-nak.patch carries commits from the Mesa project (MIT licence), listed in the patch header.
