@@ -94,6 +94,7 @@ static int gNvAccelArmed = 0;
 // 1 once the headless check restored the plugin name without arming (no NVIDIA display head). The Metal plugin reads it:
 // a headless GPU hands frames to another GPU's WindowServer through system memory, so IOSurfaces must be copied out.
 static int gNvHeadless = 0;
+static int gNmHybrid = 0;   // boot-arg nmhybrid (nm_hybrid.h): 0 off, 1 copy, 2 import; default off
 #ifdef NMX_ACCEL
 SYSCTL_INT(_debug, OID_AUTO, nmxaccel_headless, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gNvHeadless, 0,
            "1 = AMD/Intel Metal device for apps; frames are copied to the framebuffer WindowServer draws");
@@ -411,6 +412,8 @@ public:
             strlcpy(owner, s->getMetaClass()->getClassName(), len);
             // the Intel panel driver publishes as a head of this accelerator, so it is not another GPU's desktop here
             if (s->metaCast("NMIntelFB")) break;
+            // with the hybrid switch on, an AMD or Intel panel driven by NMXGPU is also a head of this accelerator
+            if (gNmHybrid && s->metaCast("NMXGPUFB")) break;
             IORegistryEntry *e = s->getProvider();
             for (int up = 0; e && up < 8 && !e->metaCast("IOPCIDevice"); up++) e = e->getParentEntry(gIOServicePlane);
             OSData *v = e ? OSDynamicCast(OSData, e->getProperty("vendor-id")) : nullptr;
@@ -1255,8 +1258,7 @@ static int    gNvIop = 0;
 static SInt64 gCntIopOk, gCntIopFail, gCntIopEmpty, gCntIopSrcRes, gCntIopSrcSurf, gCntIopBlank;
 static SInt64 gCntIopOkHead[kNvMaxFB];
 static SInt64 gCntIopL10r;                 // frames narrowed from 10-bit l10r (login window, lock screen)
-// hybrid laptops (nm_hybrid.h): boot-arg nmhybrid, default off
-static int gNmHybrid = 0;
+// hybrid laptops (nm_hybrid.h)
 static SInt64 gCntHyFrames, gCntHyWords, gCntHyWordsSkipped, gCntHyFlips, gCntHyImportFail;
 #define NVIOP_LOG_MAX 40
 static unsigned gIopLogs = 0;
