@@ -88,7 +88,9 @@ static constexpr unsigned kNvTempIntervalMs  = 250;
 // Nothing touches BAR0 until the GPU has settled: bring-up still runs for a while after start().
 static constexpr unsigned kNvTempFirstMs     = 5000;
 static constexpr unsigned kNvUtilIntervalMs  = 1000;
+#ifndef NMX_ACCEL   // read only by the NVIDIA build's utilisation publisher
 static constexpr uint64_t kNvUtilMaxAgeNs    = 5000000000ULL;
+#endif
 
 extern "C" {   // kern/thread_call.h and kern/clock.h clash with the family headers here, so the KPIs are declared by hand
 struct thread_call *thread_call_allocate(void (*func)(void *, void *), void *param0);
