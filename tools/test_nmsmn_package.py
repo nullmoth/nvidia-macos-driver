@@ -89,6 +89,8 @@ class Stage(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("Ryzen power parts are missing", r.stdout)
         self.assertEqual(stage(t, sha)[0].returncode, 0)
+        shutil.copy(ROOT / "package/sums_complete.sh", root / "sums_complete.sh")
+        subprocess.run(["bash", str(ROOT / "package/sums_refresh.sh"), str(root), "sums_complete.sh"], check=True, capture_output=True)
         self.assertEqual(gate().returncode, 0, gate().stdout)
         (root / "Library/NullMoth/ryzenadj/ryzenadj").write_bytes(b"changed")
         r = gate()

@@ -42,6 +42,11 @@ if stage.exists() and platform.system() == 'Darwin' and shutil.which('clang'):
         (d / 'ryzenadj').write_bytes(b'b')
         subprocess.run(['bash', str(root / 'package/stage_nmsmn.sh'), str(d / 'NMSMN.kext'), str(d / 'ryzenadj'),
                         hashlib.sha256(b'b').hexdigest(), str(pkg)], check=True, capture_output=True)
+        # install.sh runs sums_complete.sh, so the gate wants it in the tree and listed (as finish_package.sh does)
+        shutil.copy(root / 'package/sums_complete.sh', pkg / 'sums_complete.sh')
+        (pkg / 'other').write_text('o')
+        (pkg / 'SHA256SUMS').write_text((pkg / 'SHA256SUMS').read_text().replace('0000  ./other', hashlib.sha256(b'o').hexdigest() + '  ./other'))
+        subprocess.run(['bash', str(root / 'package/sums_refresh.sh'), str(pkg), 'sums_complete.sh'], check=True, capture_output=True)
         r = subprocess.run(['bash', str(chk), str(pkg)], capture_output=True, text=True)
         check('the package check passes a staged tree', r.returncode == 0, r.stdout.strip()[-80:])
         (m / 'libnvencvt.dylib').write_bytes((m / 'libnvencvt.dylib').read_bytes() + b'x')

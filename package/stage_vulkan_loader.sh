@@ -10,4 +10,6 @@ mkdir -p "$ROOT/Library/NullMoth/vulkan"
 cp "$SRC/libvulkan.1.dylib" "$ROOT/Library/NullMoth/vulkan/"
 cp "$HERE/../licenses/Vulkan-Loader-LICENSE.txt" "$ROOT/Library/NullMoth/vulkan/LICENSE.txt"
 cp "$HERE/vulkan-for-apps.sh" "$ROOT/Library/NullMoth/vulkan/"
+bash "$HERE/sums_refresh.sh" "$ROOT" Library/NullMoth/vulkan/libvulkan.1.dylib Library/NullMoth/vulkan/LICENSE.txt \
+  Library/NullMoth/vulkan/vulkan-for-apps.sh
 echo "staged the Vulkan loader $(shasum -a 256 "$ROOT/Library/NullMoth/vulkan/libvulkan.1.dylib" | cut -c1-8)"
