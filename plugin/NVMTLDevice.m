@@ -1155,6 +1155,94 @@ static void nvmtl_busy_wait(IOSurfaceRef surf, NSUInteger plane)
         if (now - t0 > NVMTL_BUSY_WAIT_NS || (t.stamp_ns <= now && now - t.stamp_ns > NVMTL_BUSY_STALE_NS)) return;
     }
 }
+// Shared family-VRAM imports (nvmtl_import_cache.h). OFF unless NVMTL_SURF_IMPORT_CACHE=1: it is proven by
+// tools/test_import_cache.c, but its effect on screen capture has to be measured on a card before it is the default.
+// NVMTL_SURF_IMPORT_CACHE_IDLE_MS (default 2000) is how long an import outlives its last wrapper; surfaces larger than
+// NVMTL_SURF_IMPORT_CACHE_MAX_MB (default 64, 16 below 8 GB of VRAM) are imported per wrapper as without the cache.
+#include "nvmtl_import_cache.h"
+#include <os/lock.h>
+_Static_assert(sizeof(nvk_buffer) <= NVMTL_IC_PAYLOAD, "an import cache slot must hold a whole nvk_buffer");
+static nvmtl_ic g_ic;
+static os_unfair_lock g_ic_lock = OS_UNFAIR_LOCK_INIT;
+static uint64_t nvmtl_ic_env_u64(const char *name, uint64_t def)
+{
+    const char *e = getenv(name); if (!e || !*e) return def;
+    char *end; const unsigned long long v = strtoull(e, &end, 10); return end == e ? def : v;
+}
+static int nvmtl_ic_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_SURF_IMPORT_CACHE"); on = e && e[0] == '1';
+                  nvlog("family VRAM import cache %s (NVMTL_SURF_IMPORT_CACHE=%s)", on ? "on" : "off", e ?: "unset"); }
+    return on;
+}
+static uint64_t nvmtl_ic_idle_ns(void) { static uint64_t v; static dispatch_once_t o; dispatch_once(&o, ^{ v = nvmtl_ic_env_u64("NVMTL_SURF_IMPORT_CACHE_IDLE_MS", 2000) * 1000000ull; }); return v; }
+static uint64_t nvmtl_ic_max_bytes(void)
+{
+    static uint64_t v; static dispatch_once_t o;
+    dispatch_once(&o, ^{ v = nvmtl_ic_env_u64("NVMTL_SURF_IMPORT_CACHE_MAX_MB", nvmtl_vk_vram_bytes() >= (8ull << 30) ? 64 : 16) << 20; });
+    return v;
+}
+// The cookie an import stores in its surface; a surface id that is reused after the surface is freed carries none.
+static CFStringRef nvmtl_ic_key(void)
+{
+    static CFStringRef k; static dispatch_once_t o;
+    dispatch_once(&o, ^{ k = CFStringCreateWithFormat(NULL, NULL, CFSTR("NVMTLImport.%d"), (int)getpid()); });
+    return k;
+}
+static uint64_t nvmtl_ic_cookie_read(IOSurfaceRef surf)
+{
+    uint64_t c = 0; CFTypeRef v = IOSurfaceCopyValue(surf, nvmtl_ic_key());
+    if (v && CFGetTypeID(v) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)v, kCFNumberSInt64Type, &c);
+    if (v) CFRelease(v);
+    return c;
+}
+static void nvmtl_ic_destroy_all(unsigned char (*gone)[NVMTL_IC_PAYLOAD], int n)
+{
+    for (int i = 0; i < n; i++) { nvk_buffer b; memcpy(&b, gone[i], sizeof b); nvmtl_vk_buffer_destroy(&b); }
+}
+static void nvmtl_ic_expire_now(void)
+{
+    unsigned char gone[NVMTL_IC_SLOTS][NVMTL_IC_PAYLOAD];
+    os_unfair_lock_lock(&g_ic_lock);
+    const int n = nvmtl_ic_expire(&g_ic, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), nvmtl_ic_idle_ns(), 0, gone, NVMTL_IC_SLOTS);
+    os_unfair_lock_unlock(&g_ic_lock);
+    nvmtl_ic_destroy_all(gone, n);
+}
+// The plane-0 family VRAM of `surf` as a buffer: the shared import when the cache is on and has one, else a new import.
+// Release with nvmtl_ic_put. 0 = ok.
+static int nvmtl_ic_get(IOSurfaceRef surf, size_t need, nvk_buffer *out)
+{
+    const uint32_t sid = IOSurfaceGetID(surf);
+    if (!nvmtl_ic_on() || need > nvmtl_ic_max_bytes()) return nvmtl_vk_surface_vram(sid, 0, need, out);
+    nvmtl_ic_expire_now();
+    const uint64_t have = nvmtl_ic_cookie_read(surf);
+    os_unfair_lock_lock(&g_ic_lock);
+    const int hit = have && nvmtl_ic_acquire(&g_ic, sid, need, have, out, sizeof *out);
+    os_unfair_lock_unlock(&g_ic_lock);
+    if (hit) return 0;
+    if (nvmtl_vk_surface_vram(sid, 0, need, out)) return -1;
+    static _Atomic uint64_t next = 1;
+    const uint64_t cookie = ((uint64_t)getpid() << 32) | (atomic_fetch_add(&next, 1) & 0xffffffffu);
+    CFNumberRef cn = CFNumberCreate(NULL, kCFNumberSInt64Type, &cookie); IOSurfaceSetValue(surf, nvmtl_ic_key(), cn); CFRelease(cn);
+    unsigned char evicted[NVMTL_IC_PAYLOAD]; uintptr_t evicted_id = 0;
+    os_unfair_lock_lock(&g_ic_lock);
+    nvmtl_ic_insert(&g_ic, sid, need, cookie, (uintptr_t)out->buf, out, sizeof *out, evicted, &evicted_id);
+    os_unfair_lock_unlock(&g_ic_lock);
+    if (evicted_id) nvmtl_ic_destroy_all(&evicted, 1);
+    return 0;
+}
+// A wrapper lets go of its buffer: 1 = the cache owns it now, 0 = it was never cached (destroy it).
+static int nvmtl_ic_put(nvk_buffer *b)
+{
+    unsigned char gone[NVMTL_IC_PAYLOAD];
+    os_unfair_lock_lock(&g_ic_lock);
+    const int r = nvmtl_ic_release(&g_ic, (uintptr_t)b->buf, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), gone);
+    os_unfair_lock_unlock(&g_ic_lock);
+    if (r == 2) nvmtl_ic_destroy_all(&gone, 1);
+    if (r) memset(b, 0, sizeof *b);
+    return r != 0;
+}
 static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInteger plane, uint32_t w, uint32_t h,
                                       uint32_t vkf, uint32_t bpp, int a8, int stex)
 {
@@ -1162,7 +1250,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
         size_t row = IOSurfaceGetBytesPerRow(surf), sh = IOSurfaceGetHeight(surf);
         if ((size_t)w * (bpp ? bpp : 4) <= row && h <= sh && row % 32 == 0) {
             nvk_buffer vb;
-            if (!nvmtl_vk_surface_vram(IOSurfaceGetID(surf), 0, row * h, &vb)) {
+            if (!nvmtl_ic_get(surf, row * h, &vb)) {
                 if (!nvmtl_vk_image_create_buffer_alias(w, h, vkf, bpp, a8, stex, 1, &vb, 0, row, &t->_i)) {
                     t->_vramBuf = vb; t->_vramOn = YES; g_surf_vram++;
                     uint32_t seed = IOSurfaceGetSeed(surf);
@@ -1173,7 +1261,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
                               w, h, row, current ? ", already current (no upload)" : "", g_surf_vram, g_surf_private);
                     return 0;
                 }
-                nvmtl_vk_buffer_destroy(&vb);
+                if (!nvmtl_ic_put(&vb)) nvmtl_vk_buffer_destroy(&vb);
             }
         }
     }
