@@ -239,4 +239,21 @@ declare void @air.store.implicit_imageblock.f32(float, i32, <2 x i16>, i32, i16)
         assert!(rewrite(&format!("{TILE}\ndeclare i32 @air.get_imageblock_width()"), [32, 32]).unwrap_err().contains("not carried"));
         assert!(rewrite("define void @k() {\n ret void\n}\n", [32, 32]).is_err());
     }
+
+    #[test]
+    fn the_rewritten_tile_kernel_translates_to_valid_spirv_with_two_storage_images() {
+        let out = rewrite(TILE, [32, 32]).unwrap();
+        let tmp = std::env::temp_dir().join(format!("tile_rewrite_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let bytes = crate::translate_sanitized_native(&out, crate::passes::Stage::Kernel, &tmp).unwrap_or_else(|e| panic!("translate: {e}\n{out}"));
+        crate::tools::spirv_val_bytes(&bytes, &tmp).expect("spirv-val");
+        let asm = crate::disassemble(&bytes).expect("disassemble");
+        assert!(asm.matches("OpImageWrite").count() >= 2, "both attachments are written:\n{asm}");
+        assert!(asm.contains("OpImageRead") || asm.contains("OpImageFetch"), "the attachments are read:\n{asm}");
+        assert!(asm.contains("WorkgroupId") || asm.contains("GlobalInvocationId"), "the tile index is the workgroup id");
+        let reflection = crate::reflect_sanitized(&out, crate::passes::Stage::Kernel, crate::passes::TransformOptions::default()).expect("reflect");
+        let textures: Vec<u32> = reflection.bindings.iter().filter(|b| format!("{:?}", b.kind).contains("Image")).map(|b| b.metal_index as u32).collect();
+        assert!(textures.contains(&120) && textures.contains(&121), "texture bindings at 120 and 121, got {textures:?}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
