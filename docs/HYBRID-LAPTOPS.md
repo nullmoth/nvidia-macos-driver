@@ -160,8 +160,10 @@ Lake have one; Rocket Lake and Alder Lake S do not), makes sure the verified fil
 it to `debug.nmintelfb_dmc` (root only). The driver parses and range-checks the bytes itself before keeping anything, writes the
 program and the register list with every event handler left disabled, and loads it again after sleep. Run the helper once per
 boot after the panel driver has started. Linux keeps the main program's events enabled for the deep display power states; this
-driver never enables those states, so the loaded program has nothing to do. The stepping is not read: the generic entry of the
-package is used, as Linux does when the stepping is unknown.
+driver never enables those states, so the loaded program has nothing to do. The display stepping picks the package entry as in Linux: the PCI revision id through the
+sub-platform's table on versions 12 and 13 (Tiger Lake U/Y and H, Alder Lake P, N, Raptor Lake P), the display step register on
+version 14, the generic entry for a part not listed. (Reading no stepping picked the A-stepping program on every Alder Lake P;
+the real file shows two different main programs.) The program is loaded first on wake, before any power well, as Linux does.
 
 ## Which GPU an application gets
 
