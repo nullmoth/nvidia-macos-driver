@@ -45,7 +45,7 @@ The two limits that shape most rows:
 | MetalFX temporal upscaling and frame interpolation | the Macs Apple lists | served by DLSS on RTX cards (`plugin/NVMTLMetalFXDLSS.m`, `dlss/`; Blackwell default, Turing, Ampere and Ada opt-in) | Partial. GTX 16 has no tensor cores, so there is no DLSS path there |
 | MetalFX spatial upscaler on cards without DLSS | same | no source for it in `plugin/` | Not built. A compute-shader upscaler from a permissively licensed algorithm is buildable and needs a card to prove; tracked with the DLSS work |
 | Ray tracing (Metal intersection and acceleration structures) | the Macs Apple lists | software path; the hardware path is the ray-tracing area's own BVH builder (`docs/WINDOWS-PARITY.md`, Gaming) | Partial |
-| Game Mode | Apple lists Apple silicon Macs | The Intel build of the Game Mode daemon decides four things at start-up, in this order: Game Mode (a fixed "no"), model-manager game assertions, dynamic power splitting and sustained execution (each a MobileGestalt device-type test). The daemon also reads Apple's own preference `ignoreDeviceRestrictions` and treats all four as supported when it is true. `nullmoth-mac-parity.sh gamemode on` sets that preference (opt-in, root) | Built, off. It cannot enable Game Mode alone: the three Apple-silicon features switch on with it, and the kernel setting Game Mode relies on (`kern.console_mode`) is not on this kernel, so expect session tracking and the Game Mode indicator, not a scheduling change. The preference domain was read from the daemon's code and has not been tried on a PC |
+| Game Mode | Apple lists Apple silicon Macs | The Intel build of the Game Mode daemon decides four things at start-up: Game Mode (a fixed "no"), model-manager game assertions, dynamic power splitting and sustained execution; Apple's own preference `ignoreDeviceRestrictions` makes all four pass. The scheduling change itself is a write to `kern.console_mode`, which exists on Apple-silicon kernels and not on this PC's | Built, off. `nullmoth-mac-parity.sh gamemode on` sets the preference (its domain was read from the daemon's code, not tried on a PC). Because the kernel setting is absent, `nullmoth-gamemode-policy.py` does the work with the PC's own tools while a game is in the foreground: the game gets nice -5 and the background indexing and analysis jobs go to the background class, all undone from a record. The GPU side is not built: the Vulkan driver advertises one queue priority (medium), so raising a game's GPU work needs a change in the driver's channel scheduling |
 | Game Porting Toolkit (D3DMetal) | Apple silicon only | none | Blocked: Apple distributes it for Apple silicon and the licence is Apple's. Wine with DXVK or MoltenVK over the Vulkan driver is separate and unproven |
 | Multiple displays, hot-plug, high refresh, HiDPI | yes | `nvfbheads`, hot-plug re-read, `nvfbhidpi`, refresh above 60 Hz (`docs/WINDOWS-PARITY.md`, Display) | Have |
 | HDR10 / EDR output | XDR and HDR displays | `nvfbhdr=1`, opt-in (`kexts/NVRMFB/fb/nvrm-fb.cpp`, `tools/test_fb_hdr.py`) | Built, off. Needs an HDR display to confirm |
@@ -115,7 +115,7 @@ The two limits that shape most rows:
 | Sleep and wake | yes | system sleep and wake with GPU resume (`docs/SLEEP-WAKE.md`) | Have on NVIDIA; the board's BIOS wake sources still matter |
 | Power Nap, standby, hibernate | Intel Macs support them | PC firmware often mishandles the wake they cause | Built, off: `nullmoth-mac-parity.sh power check` shows the settings, `power apply` writes a profile after saving the previous values, `power restore` undoes it |
 | Battery health, Low Power Mode, battery charge | SMC battery keys | SMCBatteryManager is selected for laptops by the engine | Have where the embedded controller is standard |
-| Display brightness keys, keyboard backlight | HID and SMC | BrightnessKeys is selected by the engine for laptops; `kexts/NMKbdBacklight` (opt-in `nmkbl=1`) receives the SMC key `LKSB` that Apple's AppleLMUController writes and forwards it to the ASUS WMI method | Brightness keys Have. Keyboard backlight: Built, off, ASUS only, SMC route only (33 of 648 uploaded tables handle the ASUS interface). macOS 26 on T2-era models reaches the backlight through an HID element (usage page 0xFF00, usage 0x0F, feature report 0xBF) instead, so the slider needs a virtual HID keyboard that carries it, which is not built. Other vendors are in the kext's README with the reason each is not built. On most laptops the Fn key already changes the light in the embedded controller |
+| Display brightness keys, keyboard backlight | HID and SMC | BrightnessKeys is selected by the engine for laptops; `kexts/NMKbdBacklight` (opt-in `nmkbl=1`) receives the SMC key `LKSB` that Apple's AppleLMUController writes and forwards it to the laptop: ASUS WMI, Lenovo IdeaPad/Legion/LOQ (`KBLC`, `HALS`/`SALS`) and ThinkPad (`MLCG`/`MLCS`); it stands aside when VirtualSMC's SMCLightSensor owns the key | Brightness keys Have. Keyboard backlight: Built, off, SMC route only. Of 648 uploaded tables 33 carry the ASUS interface and 98 the Lenovo IdeaPad ones; MSI, HP, Dell and Acer are not built (reasons in the kext README). macOS 26 on T2-era models reaches the backlight through an HID element (usage page 0xFF00, usage 0x0F, feature report 0xBF), so the slider needs a virtual HID keyboard that carries it, which is not built. On most laptops the Fn key already changes the light in the embedded controller |
 | Trackpad gestures | Apple multitouch | VoodooI2C / VoodooPS2 by the engine | Partial: gestures depend on the touchpad's HID report |
 | Thunderbolt, USB | yes | USB port mapping by UTBDefault; Thunderbolt hot-plug depends on the board | Partial; not measured |
 | NFC | none on a Mac | n/a | n/a |
@@ -128,6 +128,25 @@ The two limits that shape most rows:
 | iPhone and iPad apps on the Mac | Apple silicon only | `ipa2mac` (ARM translator tree, `ipa/`) and the Mac app's ARM apps picker: an unencrypted .ipa becomes a Mac Catalyst bundle (platform stamp, `/System/iOSSupport` dependency paths, Mac layout, ad hoc signature). The translator (`xlat2.py`) now links a Catalyst program as a Catalyst x86_64 image, because dyld will not load iOSSupport frameworks into a macOS-platform image | Built, opt-in. Proven on a test app built for iOS: after conversion it runs natively on Apple silicon, and after translation the x86_64 Catalyst image starts and prints its line (run under Rosetta on an Apple-silicon Mac, not on an Intel Mac). Apps from the App Store are FairPlay-encrypted and are refused; this tool will not remove that. App extensions are refused for now |
 | Xcode simulators | Intel and Apple-silicon runtimes | Apple's own | Unverified for macOS 26 on an Intel Mac |
 | Universal apps | yes | yes (Intel slice) | Have |
+
+## Which Apple-silicon Mac a translated program sees
+
+`identity/profiles.py` in the ARM translator tree (branch `w29-identity`) maps the PC's NVIDIA GPU, by PCI device id and
+architecture rather than marketing number, to the Apple-silicon chip a translated program is told it runs on:
+
+| NVIDIA die | Chip | Reason |
+|---|---|---|
+| Turing without RT cores (GTX 16, GTX 1630/1650, MX450, MX550, T400 to T1200) | M1 | no hardware ray tracing, no AV1 decode |
+| Turing with RT cores (RTX 20, TITAN RTX, Quadro RTX) | M2 | RT cores but no AV1 decode, as the M2 |
+| Ampere GA10x (RTX 30, RTX 2050, MX570, RTX A) | M3 | first Apple chip with hardware RT and AV1 decode |
+| Ada AD10x (RTX 40, RTX Ada, L4, L40; also the RTX 3050 A) | M4 | AV1 encode and newer RT cores |
+| Blackwell GB20x (RTX 50, RTX PRO Blackwell) | M5 | fifth-generation tensor cores, as the M5's GPU neural accelerators |
+
+Corrections to the name-based guess: the MX550 is Turing (device ids 1F9F and 1FA0), not Ampere; the RTX 2050 and MX570 are
+Ampere; the "RTX 3050 A" (ids 2822 and 28A3) is an Ada part. An id outside the table (datacenter, mining, non-NVIDIA) changes
+nothing. A chip the running macOS does not know is stepped down to the newest one it does (macOS 15 stops at the M4). The
+Metal family claimed is capped at what the plugin implements (Apple6), whatever the chip's real family. Fields without a
+verified source (the M5's core family) are left at the base answer. Off unless `ARM2X86_IDENTITY_PROFILE=1`.
 
 ## What this branch adds
 
