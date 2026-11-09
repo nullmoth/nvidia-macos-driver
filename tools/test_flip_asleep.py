@@ -9,7 +9,7 @@ root = pathlib.Path(__file__).resolve().parents[1]
 acc = (root / 'kexts/NVRM/accel/nvrm-accel.cpp').read_text(); fb = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
 assert fb.count('(fHeadSlept || !rmGpuReady()) ? kIOReturnNotReady') == 2
 assert 'outcome == kNvFlipAsleep' in acc and 'nvAccelFlipOutcome(rr) == kNvFlipAsleep) return true' in acc
-a = acc.index('enum { kNvFlipShown'); b = acc.index('static bool nvAccelIopAsyncBusy')
+a = acc.index('enum { kNvFlipShown'); b = acc.index('static bool nvAccelIopAsyncBusy', a)
 fixture = r'''
 #include <cassert>
 #include <cstdio>
