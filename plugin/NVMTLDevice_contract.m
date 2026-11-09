@@ -119,7 +119,15 @@ static void nvbt(const char *tag, int *count, int max);
 - (NSUInteger)resourcePatchingTypeForResourceType:(NSUInteger)a0 { return 0; }
 - (void)setMetalAssertionsEnabled:(BOOL)a0 { nvlog("setMetalAssertionsEnabled: (ignored)"); }
 - (NSUInteger)singleFPConfig { return 0; }
-- (MTLSize)sparseTileSizeWithTextureType:(NSUInteger)a0 pixelFormat:(NSUInteger)a1 sampleCount:(NSUInteger)a2 { return MTLSizeMake(32, 32, 1); }
-- (MTLSize)sparseTileSizeWithTextureType:(NSUInteger)a0 pixelFormat:(NSUInteger)a1 sampleCount:(NSUInteger)a2 sparsePageSize:(NSInteger)a3 { return MTLSizeMake(32, 32, 1); }
-- (MTLSize)tileSizeWithTextureType:(NSUInteger)a0 pixelFormat:(NSUInteger)a1 sampleCount:(NSUInteger)a2 { return MTLSizeMake(32, 32, 1); }
+// Sparse tile sizes are the device's own sparse block shapes (nvmtl_sparse_query.h); a format the device reports none for has size (0, 0, 0).
+static MTLSize nvmtl_sparse_size(NSUInteger type, NSUInteger pixelFormat, NSUInteger samples) {
+    uint32_t vk = 0, bpp = 0, g[3] = { 0, 0, 0 }; int a8 = 0;
+    if (nvmtl_pixfmt((MTLPixelFormat)pixelFormat, &vk, &bpp, &a8) || a8 || nvmtl_vk_sparse_granularity(vk, type == MTLTextureType3D, (uint32_t)samples, g)) return MTLSizeMake(0, 0, 0);
+    return MTLSizeMake(g[0], g[1], g[2]);
+}
+- (MTLSize)sparseTileSizeWithTextureType:(NSUInteger)a0 pixelFormat:(NSUInteger)a1 sampleCount:(NSUInteger)a2 { return nvmtl_sparse_size(a0, a1, a2); }
+- (MTLSize)sparseTileSizeWithTextureType:(NSUInteger)a0 pixelFormat:(NSUInteger)a1 sampleCount:(NSUInteger)a2 sparsePageSize:(NSInteger)a3 { return nvmtl_sparse_size(a0, a1, a2); }
+- (MTLSize)tileSizeWithTextureType:(NSUInteger)a0 pixelFormat:(NSUInteger)a1 sampleCount:(NSUInteger)a2 { return nvmtl_sparse_size(a0, a1, a2); }
+- (NSUInteger)sparseTileSizeInBytes { uint32_t g[3]; return (NSUInteger)nvmtl_sparse_tile_bytes(nvmtl_vk_sparse_granularity(VK_FORMAT_R8G8B8A8_UNORM, 0, 1, g) == 0); }
+- (NSUInteger)sparseTileSizeInBytesForSparsePageSize:(NSInteger)pageSize { return [self sparseTileSizeInBytes]; }
 @end

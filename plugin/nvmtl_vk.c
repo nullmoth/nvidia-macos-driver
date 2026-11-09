@@ -25,6 +25,8 @@
 #include "nvmtl_cmd_refusal.h"
 #include "nvmtl_loss.h"
 #include "nvmtl_multiview.h"
+#include "nvmtl_caps_query.h"
+#include "nvmtl_sparse_query.h"
 #include "nvmtl_icb_range.h"
 #include "nvmtl_y422_convert.h"
 #include "nvmtl_icb_record.h"
@@ -419,6 +421,7 @@ static int g_indep;
 static int g_a2one;
 static int g_depth_bounds;   /* the depthBounds feature: Metal's setDepthTestMinBound:maxBound: */
 static int g_dual;
+static int g_cap_f32_filter, g_cap_f32_msaa, g_cap_pull;   // MTLDevice capability answers decided from the bits queried at device creation (nvmtl_caps_query.h)
 static int g_wide;
 static PFN_vkCmdSetLineWidth pvkCmdSetLineWidth;
 static int g_pstat;
@@ -1425,6 +1428,22 @@ static int nvmtl_vk_initialize(void)
     }
     nvlog("vk: depthBounds %s", g_depth_bounds ? "AVAILABLE" : "ABSENT - setDepthTestMinBound:maxBound: is refused");
     enabled.dualSrcBlend = supported.dualSrcBlend; g_dual = supported.dualSrcBlend == VK_TRUE;
+    enabled.sampleRateShading = supported.sampleRateShading;
+    {   // what the MTLDevice capability queries answer: the format features, sample counts and feature bits of this device
+        PFN_vkGetPhysicalDeviceFormatProperties gfp = (PFN_vkGetPhysicalDeviceFormatProperties)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFormatProperties");
+        PFN_vkGetPhysicalDeviceImageFormatProperties gip = (PFN_vkGetPhysicalDeviceImageFormatProperties)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceImageFormatProperties");
+        const VkFormat fm[3] = { VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT };
+        uint32_t feat[3] = { 0, 0, 0 }, cnt[3] = { 0, 0, 0 };
+        for (int i = 0; gfp && i < 3; i++) {
+            VkFormatProperties fp; memset(&fp, 0, sizeof fp); gfp(g_pdev, fm[i], &fp); feat[i] = fp.optimalTilingFeatures;
+            VkImageFormatProperties ip; memset(&ip, 0, sizeof ip);
+            if (gip && gip(g_pdev, fm[i], VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 0, &ip) == VK_SUCCESS) cnt[i] = ip.sampleCounts;
+        }
+        const nvmtl_format_bits fb = { feat[0], feat[1], feat[2] }, sb = { cnt[0], cnt[1], cnt[2] };
+        g_cap_f32_filter = nvmtl_cap_float32_filtering(&fb); g_cap_f32_msaa = nvmtl_cap_float32_msaa(&fb, &sb);
+        g_cap_pull = nvmtl_cap_pull_model_interpolation(supported.sampleRateShading == VK_TRUE);
+        nvlog("vk: capability bits: 32-bit float filtering %d, 32-bit MSAA %d, pull-model interpolation %d (sampleRateShading)", g_cap_f32_filter, g_cap_f32_msaa, g_cap_pull);
+    }
     enabled.wideLines = supported.wideLines; g_wide = supported.wideLines == VK_TRUE;
     nvlog("vk: sel1 wideLines %s (range %g..%g)", g_wide ? "AVAILABLE" : "ABSENT", (double)g_lim.lineWidthRange[0], (double)g_lim.lineWidthRange[1]);
     nvlog("vk: par2 dualSrcBlend %s", g_dual ? "AVAILABLE" : "ABSENT");
@@ -2566,6 +2585,26 @@ static int nvmtl_vk_image_create_ms_lifetime_body(uint32_t w, uint32_t h, uint32
     return 0;
 }
 int nvmtl_vk_ms_storage_ok(void) { return g_ms_storage; }
+// The texel shape of one sparse block for a format / dimensionality / sample count, as the device reports it. 0 on success.
+int nvmtl_vk_sparse_granularity(uint32_t vkfmt, int is3d, uint32_t samples, uint32_t out[3])
+{
+    out[0] = out[1] = out[2] = 0;
+    if (nvmtl_vk_init()) return -1;
+    PFN_vkGetPhysicalDeviceSparseImageFormatProperties f = (PFN_vkGetPhysicalDeviceSparseImageFormatProperties)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceSparseImageFormatProperties");
+    if (!f) return -1;
+    VkSampleCountFlagBits sc = samples >= 8 ? VK_SAMPLE_COUNT_8_BIT : samples >= 4 ? VK_SAMPLE_COUNT_4_BIT : samples >= 2 ? VK_SAMPLE_COUNT_2_BIT : VK_SAMPLE_COUNT_1_BIT;
+    uint32_t n = 0; f(g_pdev, (VkFormat)vkfmt, is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, sc, VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_TILING_OPTIMAL, &n, NULL);
+    if (!n) return -1;
+    VkSparseImageFormatProperties props[8]; if (n > 8) n = 8;
+    f(g_pdev, (VkFormat)vkfmt, is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, sc, VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_TILING_OPTIMAL, &n, props);
+    for (uint32_t i = 0; i < n; i++) if (props[i].aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
+        const uint32_t g[3] = { props[i].imageGranularity.width, props[i].imageGranularity.height, props[i].imageGranularity.depth };
+        nvmtl_sparse_tile_size(1, g, out); return 0; }
+    return -1;
+}
+int nvmtl_vk_cap_float32_filtering(void) { return g_cap_f32_filter; }
+int nvmtl_vk_cap_float32_msaa(void) { return g_cap_f32_msaa; }
+int nvmtl_vk_cap_pull_model(void) { return g_cap_pull; }
 // A multisampled colour image that can also be a storage image: the twin a tile function reads and writes (the attachment itself is
 // created without storage usage, which costs nothing for the passes that never run a tile function).
 int nvmtl_vk_image_create_ms_storage(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, uint32_t samples, nvk_image *out)
