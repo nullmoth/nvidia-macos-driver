@@ -28,6 +28,7 @@
 #include "nvmtl_caps_query.h"
 #include "nvmtl_sparse_query.h"
 #include "nvmtl_sparse_map.h"
+#include "nvmtl_counter_heap.h"
 #include "nvmtl_icb_range.h"
 #include "nvmtl_y422_convert.h"
 #include "nvmtl_icb_record.h"
@@ -2594,6 +2595,8 @@ static int nvmtl_vk_image_create_ms_lifetime_body(uint32_t w, uint32_t h, uint32
 }
 int nvmtl_vk_ms_storage_ok(void) { return g_ms_storage; }
 int nvmtl_vk_sparse_textures_ok(void) { return g_sparse_img; }
+// ticks per second of the GPU timestamps (0 when the device has none); queried once the device exists
+uint64_t nvmtl_vk_timestamp_frequency(void) { return nvmtl_vk_init() ? 0 : nvmtl_ts_frequency((double)g_lim.timestampPeriod, g_timestamp_bits); }
 // A 2D (array) image whose memory is bound block by block. Its requirements say where the mip tail starts.
 int nvmtl_vk_image_create_sparse(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, uint32_t mips, uint32_t layers, nvk_image *out)
 {
