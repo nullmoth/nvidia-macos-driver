@@ -301,9 +301,18 @@ declare void @air.reset_render_command(ptr addrspace(1), i32)
     #[test]
     fn the_lowered_encoder_kernel_translates_to_valid_spirv() {
         let lowered = lower_command_encoders(KERNEL).into_owned();
-        let bytes = super::super::emit_vulkan_spirv(&lowered).unwrap_or_else(|e| panic!("emit: {e}\n{lowered}"));
         let tmp = std::env::temp_dir().join(format!("icb_encode_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
+        // the full pipeline, which validates its own output: the encoder kernel with its buffers as plain arguments
+        let ll = format!("{KERNEL}\n!air.kernel = !{{!0}}\n!0 = !{{ptr @encode, !1, !2}}\n!1 = !{{}}\n!2 = !{{!3, !4, !5, !6, !7}}\n\
+            !3 = !{{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 8, !\"air.arg_type_align_size\", i32 8, !\"air.arg_type_name\", !\"uchar\", !\"air.arg_name\", !\"cb\"}}\n\
+            !4 = !{{i32 1, !\"air.buffer\", !\"air.location_index\", i32 1, i32 1, !\"air.read\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"verts\"}}\n\
+            !5 = !{{i32 2, !\"air.buffer\", !\"air.location_index\", i32 2, i32 1, !\"air.read\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"ib\"}}\n\
+            !6 = !{{i32 3, !\"air.buffer\", !\"air.location_index\", i32 3, i32 1, !\"air.read\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 8, !\"air.arg_type_align_size\", i32 8, !\"air.arg_type_name\", !\"uchar\", !\"air.arg_name\", !\"pso\"}}\n\
+            !7 = !{{i32 4, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"i\"}}\n");
+        let lowered_probe = lower_command_encoders(&ll);
+        assert!(!lowered_probe.contains("tail call void @air.draw_primitives_render_command"));
+        let bytes = crate::translate_sanitized_native(&ll, crate::passes::Stage::Kernel, &tmp).unwrap_or_else(|e| panic!("translate: {e}"));
         crate::tools::spirv_val_bytes(&bytes, &tmp).expect("spirv-val");
         let _ = std::fs::remove_dir_all(&tmp);
     }

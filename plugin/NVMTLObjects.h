@@ -192,6 +192,12 @@ extern id gNVMTLMainDevice;
 @interface NVMTLIndirectCommandBuffer : NSObject <MTLIndirectCommandBuffer> {
   @public NSMutableArray<NVMTLIndirectCommand *> *_cmds; id<MTLDevice> _dev; NSString *_label;
 } @end
+@class NVMTLBuffer;
+@interface NVMTLIndirectCommandBuffer () { @public NVMTLBuffer *_recBuf; } @end   // GPU-encoded commands (NVMTL_GPU_ICB=1): the record array a kernel writes
+// the pipelines made with supportIndirectCommandBuffers: the candidates a GPU-written command can name
+void nvmtl_icb_register_pipeline(id ps, BOOL compute);
+NSArray *nvmtl_icb_pipelines(BOOL compute);
+int nvmtl_gpu_icb_on(void);
 #ifndef NVMTL_NBUFAT
 #define NVMTL_NBUFAT 32   /* buffer argument indices an encoder tracks (Metal has 31) */
 #endif
@@ -383,3 +389,4 @@ extern unsigned nvmtl_apps1_resolve_miss, nvmtl_apps1_resolve_extra, nvmtl_apps1
 NSDictionary *nvmtl_index_argument_fields(NSArray *fields);
 // a blit that names a 4:2:2 texture is refused (its packed bytes are not the image's bytes); 1 = refused
 int nvmtl_y422_blit_refused(id tex, const char *what);
+#include "nvmtl_icb_record.h"
