@@ -83,6 +83,10 @@ static bool nvrmMultiGpu(void)
 }
 #include "nv_rtd3_policy.h"
 extern "C" void nv_rtd3_arm(const struct nv_rtd3_ops *ops);
+extern "C" void nvrm_power_start(nv_state_t *nv);   // nvrm_power.cpp
+extern "C" void nvrm_power_stop(void);
+extern "C" void nvrm_power_suspend(void);
+extern "C" void nvrm_power_resume(void);
 extern "C" int  nv_rtd3_before_system_resume(void);
 extern "C" int  nv_rtd3_power_off(IOACPIPlatformDevice *acpi);
 extern "C" int  nv_rtd3_power_on(IOACPIPlatformDevice *acpi);
@@ -1919,6 +1923,7 @@ IOReturn NVRM::go(uint32_t pass)
         }
         publishGpuProfile();
         if (nvkms_xnu_load()) nvrm_display_publish(this, fNv.gpu_id);
+        nvrm_power_start(&fNv);   // boot-arg nvrmtgp=1: the notebook power budget while on mains power (nvrm_power.cpp)
     }
     return kIOReturnSuccess;
 }
@@ -1941,6 +1946,7 @@ void NVRM::interruptOccurred(IOInterruptEventSource *src, int count)
 
 void NVRM::stop(IOService *provider)
 {
+    nvrm_power_stop();
     // Keep the lock until free(): another service can retain this object and
     // call its platform interface after stop(), when it must answer NotReady.
     if (fUtilizationLock) {
@@ -2142,6 +2148,7 @@ void NVRM::gpuSuspend()
 {
     uint64_t t0 = mach_absolute_time();
     fPmCycles++;
+    nvrm_power_suspend();
     OSCompareAndSwap(kGpuPmRunning, kGpuPmSuspended, &fGpuPm);
     setProperty("nvrm-pm", "suspended");
     LOG("sleep #%u: suspending the GPU (NVKMS, then RM standby)", fPmCycles);
@@ -2179,6 +2186,7 @@ void NVRM::gpuResume()
     OSCompareAndSwap(kGpuPmSuspended, ok ? kGpuPmRunning : kGpuPmLost, &fGpuPm);
     nvkms_xnu_resume(fNv.gpu_id, ok);
     nv_xnu_pm_open();   // also when lost: RM then answers the waiting calls with errors instead of leaving them blocked
+    if (ok) nvrm_power_resume();
     setProperty("nvrm-pm", ok ? "running" : "lost (resume failed)");
     uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     LOG("wake #%u: rm_power_management(RESUME) -> 0x%x, user channels restarted -> 0x%x, %llu ms - %s", fPmCycles,
