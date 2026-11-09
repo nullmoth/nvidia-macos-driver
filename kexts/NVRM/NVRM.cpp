@@ -956,7 +956,7 @@ void NVRM::measureBootRaster()
             h, wraps, moves, maxv, mhz / 1000, mhz % 1000, ok ? "MEASURED" : "(not running / unknown)", ht, vt, pc, calc / 1000, calc % 1000);
         if (ok && fBootHead < 0 && ht && vt && pc) { fBootHead = (int)h; fBootPclk = pc; fBootHt = ht; fBootVt = vt; }
         if (ok && gSmoothHead < 0 && ht && vt && pc) { gSmoothHead = (int)h; gSmoothPclk = pc; gSmoothHt = ht; gSmoothVt = vt; }
-        if (ok && o < (int)sizeof(out) - 40) o += snprintf(out + o, sizeof(out) - o, "%shead%u %u.%03uHz", o ? " " : "", h, mhz / 1000, mhz % 1000);
+        if (ok && o < (int)sizeof(out) - 40) o += snprintf(out + o, sizeof(out) - (size_t)o, "%shead%u %u.%03uHz", o ? " " : "", h, mhz / 1000, mhz % 1000);
     }
     setProperty("nvrm-boot-raster", o ? out : "unknown");
     map->release(); md->release();
@@ -1688,7 +1688,7 @@ void NVRM::publishGpuProfile()
     const bool staticBar1 = vram && bar1 >= vram;
     OSDictionary *d = OSDictionary::withCapacity(16);
     if (!d) return;
-    auto num = [&](const char *k, UInt64 v, int bits) { if (OSNumber *o = OSNumber::withNumber(v, bits)) { d->setObject(k, o); o->release(); } };
+    auto num = [&](const char *k, UInt64 v, int bits) { if (OSNumber *o = OSNumber::withNumber(v, (unsigned)bits)) { d->setObject(k, o); o->release(); } };
     auto str = [&](const char *k, const char *v) { if (OSString *o = OSString::withCString(v)) { d->setObject(k, o); o->release(); } };
     num("arch", arch, 32); num("impl", impl, 32);
     str("chip", chip); str("generation", gen);
@@ -1734,7 +1734,7 @@ void NVRM::readBARs()
             bool is64 = ((lo >> 1) & 3) == 2;
             UInt64 a = lo & ~0xFULL;
             if (is64 && bar < 5) a |= (UInt64)fPCI->configRead32(0x14 + bar * 4) << 32;
-            if (a == (phys & ~0xFULL)) { off = 0x10 + bar * 4; break; }
+            if (a == (phys & ~0xFULL)) { off = (UInt8)(0x10 + bar * 4); break; }   // BAR registers 0x10..0x24
             if (is64) bar++;
         }
         if (off == 0 || size == 0) { kprintf("NVRM-xnu: aperture idx %u phys 0x%llx size 0x%llx: %s — skipped\n", idx, phys, size, off == 0 ? "no BAR register matches" : "zero length"); continue; }
@@ -1746,7 +1746,7 @@ void NVRM::readBARs()
         nv->bars[curNvBar].offset      = off;
         nv->bars[curNvBar].cpu_address = phys;
         nv->bars[curNvBar].size        = size;
-        tn += snprintf(table + tn, sizeof table - tn, "bar%u@0x%02x:0x%llx+0x%llx ", curNvBar, off, phys, size);
+        tn += (unsigned)snprintf(table + tn, sizeof table - tn, "bar%u@0x%02x:0x%llx+0x%llx ", curNvBar, off, phys, size);
     }
     // A BIOS without Above 4G Decoding or Resizable BAR can leave the device memory list empty while the BARs are
     // programmed ("BARS (empty)", os_map_kernel_space start=0x0, RM refuses the device). Take each missing BAR from
@@ -2873,16 +2873,16 @@ IOReturn NVRMUserClient::esc(uint32_t cmd, void *data, uint32_t size)
         if (!fIsCtl) return kIOReturnBadArgument;
         nvu_memset(data, 0, size);
         if (size < sizeof(nv_ioctl_card_info_t)) return kIOReturnBadArgument;
-        nv_state_t *g = &fOwner->fNv;
+        nv_state_t *ad = &fOwner->fNv;
         nv_ioctl_card_info_t *ci = (nv_ioctl_card_info_t *)data;
         ci->valid              = NV_TRUE;
-        ci->pci_info           = g->pci_info;
-        ci->gpu_id             = g->gpu_id;
-        ci->interrupt_line     = (NvU16)g->interrupt_line;
-        ci->reg_address        = g->bars[NV_GPU_BAR_INDEX_REGS].cpu_address;
-        ci->reg_size           = g->bars[NV_GPU_BAR_INDEX_REGS].size;
-        ci->fb_address         = g->bars[NV_GPU_BAR_INDEX_FB].cpu_address;
-        ci->fb_size            = g->bars[NV_GPU_BAR_INDEX_FB].size;
+        ci->pci_info           = ad->pci_info;
+        ci->gpu_id             = ad->gpu_id;
+        ci->interrupt_line     = (NvU16)ad->interrupt_line;
+        ci->reg_address        = ad->bars[NV_GPU_BAR_INDEX_REGS].cpu_address;
+        ci->reg_size           = ad->bars[NV_GPU_BAR_INDEX_REGS].size;
+        ci->fb_address         = ad->bars[NV_GPU_BAR_INDEX_FB].cpu_address;
+        ci->fb_size            = ad->bars[NV_GPU_BAR_INDEX_FB].size;
         ci->minor_number       = 0;
         return kIOReturnSuccess;
     }

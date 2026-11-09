@@ -23,6 +23,7 @@ ssh "$H" "cd $R/src && xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -bundl
   || { ssh "$H" "grep ' error:' $R/out/build.err | head -20"; exit 1; }
 mkdir -p "$OUT"
 scp -q "$H:$R/out/NVMTLDriver" "$H:$R/out/build.err" "$OUT/"
+bash "$HERE/build/warn_ceiling.sh" plugin "$(grep -c ': warning:' "$OUT/build.err" || true)" "$OUT/build.err" || exit 4
 minos=$(vtool -show-build "$OUT/NVMTLDriver" | awk '/minos/{print $2; exit}')
 [ "$minos" = 15.0 ] || { echo "STOP: minos $minos, not 15.0"; exit 1; }
 echo "NVMTLDriver $(git -C "$HERE" rev-parse --short "$REV") sha $(shasum -a 256 "$OUT/NVMTLDriver" | cut -c1-8) minos $minos warnings $(grep -c ': warning:' "$OUT/build.err" || true)"

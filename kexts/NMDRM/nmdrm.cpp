@@ -82,7 +82,7 @@ static int slotForMinor(int minor)
 
 static int nmdrm_open(dev_t dev, int flags, int devtype, struct proc *p)
 {
-    int s = slotForMinor(minor(dev));
+    int s = slotForMinor(minor((__uint32_t)dev));
     if (s < 0) return ENXIO;
     IOLockLock(gLock);
     int err = (gSlots[s].used && !gSlots[s].gone) ? 0 : ENXIO;
@@ -109,7 +109,7 @@ static int copyString(const char *s, uint64_t *len, uint64_t uaddr)
 
 static int nmdrm_ioctl(dev_t dev, u_long cmd, caddr_t data, int fflag, struct proc *p)
 {
-    int s = slotForMinor(minor(dev));
+    int s = slotForMinor(minor((__uint32_t)dev));
     if (s < 0) return ENXIO;
 
     IOLockLock(gLock);
@@ -215,8 +215,8 @@ bool NMDRMDevice::start(IOService *provider)
 
     // devfs creates the dri/ directory with the first node. Render nodes are world-usable as on Linux; primary nodes are
     // for the owner (root) and the video group, since modesetting will live there.
-    void *card = devfs_make_node(makedev(gMajor, s), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0660, "dri/card%d", s);
-    void *render = devfs_make_node(makedev(gMajor, kRenderMinorBase + s), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666,
+    void *card = devfs_make_node(makedev((__uint32_t)gMajor, (__uint32_t)s), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0660, "dri/card%d", s);
+    void *render = devfs_make_node(makedev((__uint32_t)gMajor, (__uint32_t)(kRenderMinorBase + s)), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666,
                                    "dri/renderD%d", kRenderMinorBase + s);
     if (!card || !render) {
         if (card) devfs_remove(card);

@@ -12,6 +12,9 @@
 #endif
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
+// IOPCIDevice (with its setBusMasterEnable) is marked deprecated in favour of PCIDriverKit, which runs in user space and
+// cannot replace a kernel extension's PCI access; that deprecation is ignored from here on in this kext's sources.
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #include <IOKit/pci/IOPCIDevice.h>
 #include <pexpert/pexpert.h>
 #include <libkern/OSKextLib.h>
@@ -56,7 +59,15 @@ static bool nvaccel_verbose() { static int v = -1; if (v < 0) { int x = 0; v = P
 #include <IOKit/IODeviceMemory.h>
 #include "tahoe_fwd.h"   // macOS 26: inherited slots Apple no longer exports, forwarded through its vtables
 #include "nvaccel_stubs.h"
+// NVIDIA's open-gpu-kernel-modules headers (third-party) carry their own integer-conversion warnings under the kernel
+// compiler's defaults; the exception is scoped to these includes and our code below stays checked.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wsign-conversion"
+#pragma clang diagnostic ignored "-Wimplicit-int-conversion"
+#pragma clang diagnostic ignored "-Wshorten-64-to-32"
+#pragma clang diagnostic ignored "-Wc99-designator"
 #include "nvkms-kapi.h"
+#pragma clang diagnostic pop
 #include <sys/sysctl.h>
 #include <libkern/OSAtomic.h>
 #include "nv_iop_pixel.h"
@@ -80,7 +91,9 @@ static constexpr unsigned kNvTempIntervalMs  = 250;
 // Nothing touches BAR0 until the GPU has settled: bring-up still runs for a while after start().
 static constexpr unsigned kNvTempFirstMs     = 5000;
 static constexpr unsigned kNvUtilIntervalMs  = 1000;
+#ifndef NMX_ACCEL   // read only by the NVIDIA build's utilisation publisher
 static constexpr uint64_t kNvUtilMaxAgeNs    = 5000000000ULL;
+#endif
 
 extern "C" {   // kern/thread_call.h and kern/clock.h clash with the family headers here, so the KPIs are declared by hand
 struct thread_call *thread_call_allocate(void (*func)(void *, void *), void *param0);
@@ -2899,7 +2912,7 @@ static bool nvAccelHybridImport(IOService *fb, unsigned head, IOSurface *s, NVVi
 #undef HYFAIL
 }
 
-static unsigned nvVaAllocLogged, nvVaMapLogged;
+static unsigned nvVaAllocLogged;
 
 static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
                                             unsigned long long len, unsigned long long align)

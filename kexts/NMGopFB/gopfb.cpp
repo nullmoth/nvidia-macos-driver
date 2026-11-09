@@ -21,6 +21,9 @@
 // start, so a machine without the switch behaves exactly as before. -nmgopfboff turns it off even with the switch on.
 
 #include <IOKit/IOLib.h>
+// IOPCIDevice (with its setBusMasterEnable) is marked deprecated in favour of PCIDriverKit, which runs in user space and
+// cannot replace a kernel extension's PCI access; that deprecation is ignored from here on in this kext's sources.
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/graphics/IOFramebuffer.h>
 #include <IOKit/ndrvsupport/IOMacOSVideo.h>

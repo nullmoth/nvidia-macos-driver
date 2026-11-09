@@ -1,10 +1,17 @@
 #ifndef NM_KBD_BACKLIGHT_HPP
 #define NM_KBD_BACKLIGHT_HPP
 
+// Lilu's and VirtualSMC's SDK headers (third-party) carry their own conversion, shadowing and struct/class tag warnings;
+// the exception is scoped to these includes and this plugin's own code stays checked.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wsign-conversion"
+#pragma clang diagnostic ignored "-Wshadow"
+#pragma clang diagnostic ignored "-Wmismatched-tags"
 #include <Headers/kern_util.hpp>
 #include <IOKit/IOService.h>
 #include <IOKit/acpi/IOACPIPlatformDevice.h>
 #include <VirtualSMCSDK/kern_vsmcapi.hpp>
+#pragma clang diagnostic pop
 #include "kbl_core.h"
 
 /* Publishes the keyboard backlight the way an Intel MacBook does, through the SMC key LKSB, and forwards it to the

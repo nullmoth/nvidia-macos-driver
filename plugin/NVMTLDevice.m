@@ -184,6 +184,7 @@ static void nvmtl_alloc_failed(const char *what) {
 @interface NVMTLDevice : MTLIOAccelDevice <MTLDevice, MTLDeviceSPI>
 @end
 #import "NVMTLObjects.h"
+#import "NVMTLLibraryLoad.h"
 void nvmtl_vendor_compile_airs(NSDictionary<NSString *, NSString *> *airs,
                                NSDictionary<NSString *, NSString *> *stages);
 void nvmtl_vendor_attach_sass(id device, id pipelineState, id function);
@@ -795,6 +796,7 @@ static uint64_t nvmtl_rt_gate_working_set(uint64_t ws)
     return (uint64_t)floor_mb << 20;
 }
 @implementation NVMTLDevice
+@dynamic depth24Stencil8PixelFormatSupported, headless, location, locationNumber, lowPower, maxArgumentBufferSamplerCount, maxTransferRate, peerCount, peerGroupID, peerIndex, registryID, removable, sparseTileSizeInBytes, supportsPlacementSparse;
 + (void)load {
     char me[1200], ts[40] = "?"; time_t now = time(NULL); struct tm tm;
     if (localtime_r(&now, &tm)) strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%S%z", &tm);
@@ -2289,7 +2291,8 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
         rt.view_mask = mask;
         static _Atomic unsigned nmv; if (atomic_fetch_add(&nmv, 1) < 8) nvlog("pipeline: vertex amplification %u views (mask 0x%x) for %s / %s", want, mask, vf->_fname.UTF8String ?: "?", ff->_fname.UTF8String ?: "?");
     }
-    uint32_t rsc = (uint32_t)([d respondsToSelector:@selector(rasterSampleCount)] ? d.rasterSampleCount : d.sampleCount); if (!rsc) rsc = 1;
+    // a descriptor without rasterSampleCount answers the older sampleCount message, sent by name since that property is deprecated
+    uint32_t rsc = (uint32_t)([d respondsToSelector:@selector(rasterSampleCount)] ? d.rasterSampleCount : ((NSUInteger (*)(id, SEL))objc_msgSend)(d, @selector(sampleCount))); if (!rsc) rsc = 1;
     NSData *flk = nvmtl_varying_link(vf, ffx); const void *fsb = flk ? flk.bytes : ffx->_spirv.bytes; size_t fsl = flk ? flk.length : ffx->_spirv.length;
     uint32_t tpt = 0, tcps = 0; int prc;
     if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps)) {
@@ -2903,7 +2906,7 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
     if ((NSInteger)f >= 1001 && (NSInteger)f <= 1000 + nvmtl_apple_family_max()) return YES;
     return NO;
 }
-- (BOOL)supportsFeatureSet:(MTLFeatureSet)fs { return fs >= 10000 && fs <= 10005; }
+- (BOOL)supportsFeatureSet:(MTLFeatureSet)fs API_DEPRECATED("Use supportsFamily instead", macos(10.11, 13.0), ios(8.0, 16.0), tvos(9.0, 16.0)) { return fs >= 10000 && fs <= 10005; }
 - (id<MTLHeap>)newHeapWithDescriptor:(MTLHeapDescriptor *)hd {
     if (!hd || !hd.size) { nvlog("newHeapWithDescriptor: no size"); return nil; }
     if (hd.type == MTLHeapTypeSparse) {   // NVMTL_SPARSE_TEXTURES=1: one device memory carved into 64 KiB pages
@@ -3098,6 +3101,124 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
     if (!sm) { static int said; if (!said++) nvlog("gpuCoreCount: NVK reported no SM count; answering 1 so MPS divides by something real"); return 1; }
     return sm; }
 
+// mesh shaders (formerly the B42Mesh category in NVMTLLibraryLoad.m)
+- (NVMTLRenderPipelineState *)nvmtlMeshVariant:(NVMTLFunction *)mf object:(NVMTLFunction *)of fragment:(id)ffn desc:(MTLMeshRenderPipelineDescriptor *)md
+    mode:(uint32_t)mode cap:(uint32_t)cap layout:(uint32_t *)lay kernel:(NVMTLComputePipelineState **)kout object:(NVMTLComputePipelineState **)oout why:(NSString **)why {
+    uint8_t *oo = NULL, *ko = NULL, *vo = NULL; size_t on = 0, kn = 0, vn = 0; char e[1024] = {0};
+    if (xlate_lower_mesh2(of ? of->_air.UTF8String : NULL, of ? of->_fname.UTF8String : NULL, mf->_air.UTF8String, mf->_fname.UTF8String,
+                          mode, cap, &oo, &on, &ko, &kn, &vo, &vn, lay, e, sizeof e) != 0 || !ko || !vo || (mode == 1 && !oo)) {
+        if (oo) xlate_free(oo, on); if (ko) xlate_free(ko, kn); if (vo) xlate_free(vo, vn);
+        *why = [NSString stringWithFormat:@"\"%@\"%@ did not lower (mode %u): %s", mf->_fname, of ? [NSString stringWithFormat:@" behind \"%@\"", of->_fname] : @"", mode, e[0] ? e : "no reason given"];
+        return nil;
+    }
+    NSString *oll = nvmtl_mesh_text(oo, on), *kll = nvmtl_mesh_text(ko, kn), *vll = nvmtl_mesh_text(vo, vn);
+    if (!kll || !vll || (mode == 1 && !oll)) { *why = @"lowered AIR is not UTF-8"; return nil; }
+    if (getenv("NVMTL_MESH_DUMP")) {
+        NSString *dir = @(getenv("NVMTL_MESH_DUMP"));
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+        [kll writeToFile:[dir stringByAppendingFormat:@"/%@.m%u.kernel.ll", mf->_fname, mode] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [vll writeToFile:[dir stringByAppendingFormat:@"/%@.m%u.vertex.ll", mf->_fname, mode] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        if (oll) [oll writeToFile:[dir stringByAppendingFormat:@"/%@.object.ll", of->_fname] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    }
+    NSString *w = nil; NSError *pe = nil;
+    if (mode == 1) {
+        NSData *ospv = nvmtl_mesh_translate_fc(oll, @"kernel", of->_fc, &w);
+        if (!ospv) { *why = [NSString stringWithFormat:@"object \"%@\" lowered kernel did not translate: %@", of->_fname, w]; return nil; }
+        NVMTLFunction *okf = [NVMTLFunction new];
+        okf->_spirv = ospv; okf->_fname = of->_fname; okf->_stage = @"kernel"; okf->_air = oll; okf->_lib = of->_lib;
+        NVMTLComputePipelineState *op = (NVMTLComputePipelineState *)[self newComputePipelineStateWithFunction:okf error:&pe];
+        if (!op) { *why = [NSString stringWithFormat:@"object \"%@\": no compute pipeline (%@)", of->_fname, pe.localizedDescription ?: @"?"]; return nil; }
+        *oout = op;
+    }
+    NSData *kspv = nvmtl_mesh_translate_fc(kll, @"kernel", mf->_fc, &w);
+    if (!kspv) { *why = [NSString stringWithFormat:@"\"%@\" lowered kernel (mode %u) did not translate: %@", mf->_fname, mode, w]; return nil; }
+    NSData *vspv = nvmtl_mesh_translate(vll, @"vertex", &w);
+    if (!vspv) { *why = [NSString stringWithFormat:@"\"%@\" generated vertex (mode %u) did not translate: %@", mf->_fname, mode, w]; return nil; }
+    NVMTLFunction *kf = [NVMTLFunction new];
+    kf->_spirv = kspv; kf->_fname = mf->_fname; kf->_stage = @"kernel"; kf->_air = kll; kf->_lib = mf->_lib;
+    NVMTLComputePipelineState *kp = (NVMTLComputePipelineState *)[self newComputePipelineStateWithFunction:kf error:&pe];
+    if (!kp) { *why = [NSString stringWithFormat:@"\"%@\" lowered kernel: no compute pipeline (%@)", mf->_fname, pe.localizedDescription ?: @"?"]; return nil; }
+    NVMTLFunction *vf = [NVMTLFunction new];
+    vf->_spirv = vspv; vf->_fname = @"m2v_mesh_vs"; vf->_stage = @"vertex"; vf->_air = vll; vf->_lib = mf->_lib;
+    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+    if (md.label) d.label = md.label;
+    d.vertexFunction = vf; d.fragmentFunction = ffn;
+    for (NSUInteger i = 0; i < 8; i++) {
+        MTLRenderPipelineColorAttachmentDescriptor *a = md.colorAttachments[i], *b = d.colorAttachments[i];
+        b.pixelFormat = a.pixelFormat; b.blendingEnabled = a.blendingEnabled; b.writeMask = a.writeMask;
+        b.sourceRGBBlendFactor = a.sourceRGBBlendFactor; b.destinationRGBBlendFactor = a.destinationRGBBlendFactor; b.rgbBlendOperation = a.rgbBlendOperation;
+        b.sourceAlphaBlendFactor = a.sourceAlphaBlendFactor; b.destinationAlphaBlendFactor = a.destinationAlphaBlendFactor; b.alphaBlendOperation = a.alphaBlendOperation;
+    }
+    d.depthAttachmentPixelFormat = md.depthAttachmentPixelFormat; d.stencilAttachmentPixelFormat = md.stencilAttachmentPixelFormat;
+    d.rasterSampleCount = md.rasterSampleCount ?: 1; d.alphaToCoverageEnabled = md.alphaToCoverageEnabled;
+    d.fragmentLinkedFunctions = md.fragmentLinkedFunctions;
+    d.supportIndirectCommandBuffers = md.supportIndirectCommandBuffers;
+    NVMTLRenderPipelineState *ps = (NVMTLRenderPipelineState *)[self newRenderPipelineStateWithDescriptor:d error:&pe];
+    if (!ps) { *why = [NSString stringWithFormat:@"\"%@\" + \"%@\": no render pipeline (%@)", mf->_fname, [ffn name], pe.localizedDescription ?: @"?"]; return nil; }
+    *kout = kp;
+    nvlog("mesh pipeline: \"%s\" mode %u -> %s%lu B kernel + %lu B vertex SPIR-V, block %u B (NV %u NP %u k %u) tr %u rs %u cap %u",
+          mf->_fname.UTF8String, mode, of ? "object + " : "", (unsigned long)kspv.length, (unsigned long)vspv.length,
+          lay[6], lay[0], lay[1], lay[2], lay[7], lay[8], cap);
+    return ps;
+}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithMeshDescriptor:(MTLMeshRenderPipelineDescriptor *)md options:(MTLPipelineOption)o
+    reflection:(MTLAutoreleasedRenderPipelineReflection *)r error:(NSError **)err {
+    if (err) *err = nil;
+    if (r) *r = nil;
+    id ofn = md.objectFunction, mfn = md.meshFunction, ffn = md.fragmentFunction;
+    if (![mfn isKindOfClass:[NVMTLFunction class]] || ![ffn isKindOfClass:[NVMTLFunction class]] || (ofn && ![ofn isKindOfClass:[NVMTLFunction class]]))
+        return nvmtl_mesh_fail(err, [NSString stringWithFormat:@"REFUSED - these functions are not ours: object %s, mesh %s, fragment %s",
+                                     ofn ? object_getClassName(ofn) : "-", object_getClassName(mfn), object_getClassName(ffn)]);
+    NVMTLFunction *mf = (NVMTLFunction *)mfn, *of = (NVMTLFunction *)ofn;
+    if (![mf->_stage isEqualToString:@"mesh"] || !mf->_air.length)
+        return nvmtl_mesh_fail(err, [NSString stringWithFormat:@"REFUSED - \"%@\" is a %@ function with %lu B of AIR, not a [[mesh]] function",
+                                     mf->_fname, mf->_stage, (unsigned long)mf->_air.length]);
+    if (of && (![of->_stage isEqualToString:@"object"] || !of->_air.length))
+        return nvmtl_mesh_fail(err, [NSString stringWithFormat:@"REFUSED - \"%@\" is a %@ function with %lu B of AIR, not an [[object]] function",
+                                     of->_fname, of->_stage, (unsigned long)of->_air.length]);
+    { NSString *tw = nvmtl_tg_mismatch(mf, md.maxTotalThreadsPerMeshThreadgroup, "mesh pipeline");
+      if (!tw && of) tw = nvmtl_tg_mismatch(of, md.maxTotalThreadsPerObjectThreadgroup, "object pipeline");
+      if (tw) return nvmtl_fail(err, tw); }
+    if (!nvmtl_xlate_ready() || !xlate_lower_mesh2)
+        return nvmtl_mesh_fail(err, @"REFUSED - this translator has no nvmtl_lower_mesh2 (rebuild nvmtl_translate-merge with patch_xl_mesh2.py)");
+    uint32_t cap = of ? (uint32_t)(md.maxTotalThreadgroupsPerMeshGrid ?: 1024) : 0;
+    NVMTLMeshInfo *mi = [NVMTLMeshInfo new]; mi->_name = mf->_fname; mi->_cap = cap;
+    NSString *why = nil; NVMTLComputePipelineState *kp = nil, *op = nil;
+    NVMTLRenderPipelineState *ps = [self nvmtlMeshVariant:mf object:of fragment:ffn desc:md mode:(of ? 1 : 0) cap:cap layout:mi->_lay kernel:&kp object:&op why:&why];
+    if (!ps) return nvmtl_mesh_fail(err, why);
+    mi->_k = kp; mi->_o = op;
+    mi->_tgMesh = nvmtl_air_max_tg(mf) ?: md.maxTotalThreadsPerMeshThreadgroup;
+    mi->_tgObj = of ? (nvmtl_air_max_tg(of) ?: md.maxTotalThreadsPerObjectThreadgroup) : 0;
+    mi->_gridAsk = md.maxTotalThreadgroupsPerMeshGrid;
+    ps->_reqMesh = nvmtl_desc_size(md, @selector(requiredThreadsPerMeshThreadgroup));
+    ps->_reqObj = of ? nvmtl_desc_size(md, @selector(requiredThreadsPerObjectThreadgroup)) : MTLSizeMake(0, 0, 0);
+    if (!of) {
+        mi->_capi = 16384;
+        NVMTLComputePipelineState *ki = nil, *unused = nil; NSString *w2 = nil;
+        NVMTLRenderPipelineState *psi = [self nvmtlMeshVariant:mf object:nil fragment:ffn desc:md mode:2 cap:mi->_capi layout:mi->_layi kernel:&ki object:&unused why:&w2];
+        if (psi) { mi->_psi = psi; mi->_ki = ki; }
+        else { mi->_indWhy = w2; nvlog("mesh pipeline: \"%s\" has NO indirect variant (%s) - drawMeshThreadgroupsWithIndirectBuffer: will be refused; direct draws are unaffected",
+                                       mf->_fname.UTF8String, w2.UTF8String); }
+    }
+    objc_setAssociatedObject(ps, &kNVMTLMeshInfo, mi, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    nvlog("mesh pipeline: \"%s\"%s%s / fragment %s -> %p (indirect variant %s, %lu+%lu constant(s))", mf->_fname.UTF8String, of ? " behind " : "",
+          of ? of->_fname.UTF8String : "", [[ffn name] UTF8String], (__bridge void *)ps, of ? "n/a" : (mi->_psi ? "yes" : "NO"),
+          (unsigned long)(of ? of->_fc.count : 0), (unsigned long)mf->_fc.count);
+    if (r && ps) {
+        NVMTLRenderPipelineReflection *rr = [NVMTLRenderPipelineReflection new];
+        rr->_o = of ? nvmtl_lowered_stage_arguments(mi->_o, of) : @[];
+        rr->_m = nvmtl_lowered_stage_arguments(mi->_k, mf);
+        rr->_f = nvmtl_arguments_for_function((NVMTLFunction *)ffn);
+        *r = (MTLRenderPipelineReflection *)rr;
+    }
+    return ps;
+}
+- (void)newRenderPipelineStateWithMeshDescriptor:(MTLMeshRenderPipelineDescriptor *)md options:(MTLPipelineOption)o
+    completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)h {
+    NSError *e = nil; MTLRenderPipelineReflection *rf = nil;
+    id<MTLRenderPipelineState> ps = [self newRenderPipelineStateWithMeshDescriptor:md options:o reflection:&rf error:&e];
+    if (h) dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ h(ps, rf, e); });
+}
 @end
 
 #import "NVMTLDevice_contract.m"

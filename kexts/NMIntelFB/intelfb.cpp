@@ -11,6 +11,9 @@
 // SIZE +0x10, SURF +0x1C. Transcoder T timings at 0x60000 + T*0x1000, TRANSCONF at 0x70008 + P*0x1000, PIPESRC 0x6001C.
 
 #include <IOKit/IOLib.h>
+// IOPCIDevice (with its setBusMasterEnable) is marked deprecated in favour of PCIDriverKit, which runs in user space and
+// cannot replace a kernel extension's PCI access; that deprecation is ignored from here on in this kext's sources.
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/graphics/IOFramebuffer.h>
 #include <IOKit/graphics/IODisplay.h>
@@ -571,7 +574,7 @@ bool NMIntelFB::start(IOService *provider)
     IFBLOG("hybrid: provider NMIntelFB %ux%u pitch %u display version %u level %d (CPU-mapped scanout, no VRAM)",
            fWidth, fHeight, fRowBytes, fVer, fHyLevel);
     setProperty("NMIntelFBHybridLevel", (unsigned long long)fHyLevel, 32);
-    setProperty("NMIntelFBPipe", fPipe, 32);
+    setProperty("NMIntelFBPipe", (unsigned long long)fPipe, 32);
     setProperty("NMIntelFBDisplayVersion", fVer, 32);
     setProperty("built-in", kOSBooleanTrue);   // the panel is the laptop's own (kConnectionFlags says so too)
     armVbl();
@@ -1033,15 +1036,15 @@ int NMIntelFB::extBringUp(void *c, void *o, unsigned port)
     const uint64_t top = (me->fHyReady && me->fRing.base / NMH_PAGE < top0) ? me->fRing.base / NMH_PAGE : top0;
     const uint64_t fwLo = me->fSurf >> 12, fwHi = (((uint64_t)me->fSurf + (uint64_t)me->fRowBytes * me->fHeight) - 1) >> 12;
     const int64_t first = nmh_find_free_run(ggttRead, (void *)me->fGsm, top, 65536, pages, fwLo, fwHi);
-    if (first < 0 || (uint64_t)(first + pages) * NMH_PAGE > (1ull << 32)) { IFBLOG("hybrid: external head: no free run of %llu graphics-table entries", (unsigned long long)pages); return -1; }
+    if (first < 0 || ((uint64_t)first + pages) * NMH_PAGE > (1ull << 32)) { IFBLOG("hybrid: external head: no free run of %llu graphics-table entries", (unsigned long long)pages); return -1; }
     for (uint64_t i = 0; i < pages; i++) {
         IOByteCount seg = 0;
         const addr64_t a = x->md->getPhysicalSegment((IOByteCount)i * 4096, &seg, kIOMemoryMapperNone);
         const uint64_t pte = (a && seg >= 4096) ? nmh_ggtt_pte(a) : 0;
-        if (!pte) { for (uint64_t k = 0; k < i; k++) me->fGsm[first + k] = me->fExtScratch; return -1; }
-        me->fGsm[first + i] = pte;
+        if (!pte) { for (uint64_t k = 0; k < i; k++) me->fGsm[(uint64_t)first + k] = me->fExtScratch; return -1; }
+        me->fGsm[(uint64_t)first + i] = pte;
     }
-    (void)me->fGsm[first + pages - 1];
+    (void)me->fGsm[(uint64_t)first + pages - 1];
     me->wr(kGfxFlshCntl, 1);
     x->first = (uint64_t)first; x->count = pages; x->pipe = pipe;
     struct nmr_ops ops = { me,
@@ -1057,7 +1060,7 @@ int NMIntelFB::extBringUp(void *c, void *o, unsigned port)
     unsigned fs, fe; nmw_free_run(nmw_dbuf_total(me->fVer), ds, de, &fs, &fe);
     if (nmo_init(&ops, &x->m, me->fVer, port, pipe, refclk)) return -1;
     const int rc = nmo_enable(&ops, &x->m, (uint32_t)(x->first * NMH_PAGE), (uint32_t)bytes, fs, fe);
-    if (rc) { IFBLOG("hybrid: external head on Type-C port %u failed: %s", port + 1, nmo_err_name(rc)); for (uint64_t k = 0; k < pages; k++) me->fGsm[first + k] = me->fExtScratch; me->wr(kGfxFlshCntl, 1); return -1; }
+    if (rc) { IFBLOG("hybrid: external head on Type-C port %u failed: %s", port + 1, nmo_err_name(rc)); for (uint64_t k = 0; k < pages; k++) me->fGsm[(uint64_t)first + k] = me->fExtScratch; me->wr(kGfxFlshCntl, 1); return -1; }
     // colour bars in the buffer, then out of the CPU caches for the display engine
     { uint32_t *px = (uint32_t *)x->md->getBytesNoCopy(); static const uint32_t bars[8] = { 0xFFFFFF, 0xFFFF00, 0x00FFFF, 0x00FF00, 0xFF00FF, 0xFF0000, 0x0000FF, 0x000000 };
       const unsigned w = x->m.t.hactive, h = x->m.t.vactive, pitch = x->m.pitch / 4;
@@ -1319,7 +1322,7 @@ static int nmintelfb_attach_sysctl SYSCTL_HANDLER_ARGS
     IOService *nub = OSDynamicCast(IOService, OSMetaClass::allocClassWithName("NVRMDisplay"));
     if (!nub || !nub->init()) { OSSafeReleaseNULL(nub); nub0->release(); nvrm->release(); return ENOMEM; }
     static const char *const kCopy[] = {"gpu-id"};
-    for (const char *k : kCopy) if (OSObject *v = nub0->getProperty(k)) nub->setProperty(k, v);
+    for (const char *k : kCopy) if (OSObject *pv = nub0->getProperty(k)) nub->setProperty(k, pv);
     nub->setProperty("fb-index", 4ull, 32);
     nub->setProperty("nm-intel-panel", kOSBooleanTrue);
     nub0->release();

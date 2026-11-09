@@ -18,6 +18,7 @@ CFLAGS=( -arch x86_64 -fapple-kext -mkernel -nostdinc -I"$KHDR" -I"$SRC" "${RMIN
   -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common
   -Wall -Wno-unused-parameter -Wno-inconsistent-missing-override -Wno-unused-function -O2 )
 xcrun clang++ "${CFLAGS[@]}" -I"$SRC/accel" -I"$SRC/accel/iofam" -I"$RE" -c "$SRC/accel/nvrm-accel.cpp" -o "$OUT/nvrm-accel.o" 2>"$OUT/accel.err" || { grep error "$OUT/accel.err" | head; exit 1; }
+bash "$(dirname "$0")/warn_ceiling.sh" nvaccel "$(grep -c ': warning:' "$OUT/accel.err")" "$OUT/accel.err" || exit 4
 xcrun clang++ -arch x86_64 -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "$OUT/nvrm-accel.o" -o "$OUT/NVAccel.kext/Contents/MacOS/NVAccel" 2>"$OUT/accelld.err" || { cat "$OUT/accelld.err" | head; exit 1; }
 cp "$SRC/accel/Info.plist" "$OUT/NVAccel.kext/Contents/Info.plist"
 echo "NVAccel $(md5 -q "$OUT/NVAccel.kext/Contents/MacOS/NVAccel") $(stat -f %z "$OUT/NVAccel.kext/Contents/MacOS/NVAccel") B  ($(xcrun clang++ --version | head -1))"

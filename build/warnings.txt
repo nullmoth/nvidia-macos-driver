@@ -1,0 +1,17 @@
+# Compiler warning ceilings, read by build/warn_ceiling.sh: "<component> <most warnings allowed>". A build with more stops.
+# Lower a number when warnings are fixed; never raise one to let a new warning through.
+# Every non-zero line names what is left and why it is not fixed in source.
+#
+plugin 0
+nvencvt 0
+nvrm 0
+nvaccel 0
+primary-selector 0
+nmgopfb 0
+nmintelfb 0
+nvrmfb 0
+nvrmagdc 0
+nmsmn 0
+nmhda 0
+nmkbdbacklight 0
+translator 0
