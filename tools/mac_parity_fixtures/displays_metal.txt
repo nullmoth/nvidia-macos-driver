@@ -1,0 +1,4 @@
+Graphics/Displays:
+    Example GPU:
+      Type: GPU
+      Metal Support: Metal 3
