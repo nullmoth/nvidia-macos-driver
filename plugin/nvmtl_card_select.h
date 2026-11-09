@@ -10,6 +10,7 @@
    Pure over its inputs, so tools/test_card_select.c proves the rules without a GPU. */
 #ifndef NVMTL_CARD_SELECT_H
 #define NVMTL_CARD_SELECT_H
+#include <stdio.h>
 #include <string.h>
 
 /* The card number for one executable from a setting string, or -1 for "no assignment" (use the primary). A malformed entry is
@@ -65,5 +66,35 @@ static inline int nvmtl_card_ordinal(const unsigned long long *ids, unsigned n, 
 static inline int nvmtl_card_nmx_primary(int nvidia_count)
 {
     return nvidia_count > 0 ? 0 : -1;
+}
+
+/* Naming one of several GPUs of the same model. Mesa's device-select layer takes "vendor:device" (the last matching GPU wins,
+   so two identical cards cannot be told apart) or, in DRI_PRIME, a PCI location tag "pci-DDDD_BB_SS_F". The accelerator's PCI
+   parent publishes its location as "pcidebug" ("bus:device:function", decimal). */
+static inline int nvmtl_pci_loc_parse(const char *s, unsigned *bus, unsigned *dev, unsigned *fn)
+{
+    unsigned v[3] = {0, 0, 0}; int k = 0;
+    if (!s || !*s) return 0;
+    for (const char *p = s; ; p++) {
+        if (*p >= '0' && *p <= '9') { v[k] = v[k] * 10 + (unsigned)(*p - '0'); if (v[k] > 255) return 0; }
+        else if (*p == ':' && k < 2 && p != s && p[-1] != ':') k++;
+        else if (*p == 0 && k == 2 && p[-1] != ':') break;
+        else return 0;
+    }
+    if (v[1] > 31 || v[2] > 7) return 0;
+    *bus = v[0]; *dev = v[1]; *fn = v[2];
+    return 1;
+}
+
+static inline void nvmtl_pci_tag(char *out, size_t n, unsigned bus, unsigned dev, unsigned fn)
+{
+    snprintf(out, n, "pci-0000_%02x_%02x_%1x", bus, dev, fn);
+}
+
+/* What names this GPU to RADV/ANV. same_model is how many AMD/Intel GPUs in the machine share this one's vendor and device id.
+   Returns 1 when the PCI tag must be used (DRI_PRIME), 0 when "vendor:device" is enough and keeps working as before. */
+static inline int nvmtl_gpu_use_pci_tag(int same_model, int have_loc)
+{
+    return same_model > 1 && have_loc;
 }
 #endif
