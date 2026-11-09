@@ -5,7 +5,8 @@ use spirv::StorageClass;
 
 pub(in crate::native) fn addrspace_default_storage(addrspace: u32) -> Option<StorageClass> {
     match addrspace {
-        0 | 4 => Some(StorageClass::Private),
+        // 5 is AIR's ray-data space: a [[payload]] pointer into the calling kernel's own storage.
+        0 | 4 | 5 => Some(StorageClass::Private),
         1 | 2 => Some(StorageClass::UniformConstant),
         3 => Some(StorageClass::Workgroup),
         _ => None,

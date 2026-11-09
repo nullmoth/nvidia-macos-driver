@@ -23,5 +23,9 @@ kexts/NMIntelFB  Panel brightness follows the method of WhateverXe's panel PWM (
              (licenses/WhateverXe-LICENSE.txt). Register layout from Linux i915/xe display headers, MIT.
              No Apple driver code is used or shipped.
 
+NMXAudio     The HD Audio controller and codec layers are FreeBSD's snd_hda (sys/dev/sound/pci/hda: hdac.c,
+             hdaa.c, hdacc.c, hdaa_patches.c), BSD-2-Clause (licenses/FreeBSD-snd_hda-LICENSE.txt).
+             Installed on macOS 26 only, where macOS has no HD Audio driver.
+
 air-runtime  LLVM (Apache-2.0 with LLVM exceptions) and Zstandard (BSD-3-Clause); their licence texts are in
              NVMTLDriver.bundle/Contents/Resources/air-runtime.

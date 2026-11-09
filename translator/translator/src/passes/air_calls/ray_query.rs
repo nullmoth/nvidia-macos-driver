@@ -116,6 +116,11 @@ enum Structure {
         storage: StorageClass,
         word_index: u32,
     },
+    /// A 64-bit device address already in hand. Apple's shader converter does not bind the acceleration
+    /// structure as a descriptor: it passes its GPU address through the dispatch-rays arguments, and the
+    /// shader dereferences it. So the operand arrives as an integer and becomes a structure the same way the
+    /// argument-buffer case does, by conversion.
+    DeviceAddress(Word),
 }
 
 impl Lowering {
@@ -173,10 +178,46 @@ impl Lowering {
         let mut cursor = operand;
         let mut chain = Vec::new();
         for _ in 0..16 {
-            let Some(def) = defining_instruction(ctx, entry_idx, cursor) else {
-                return Err(format!(
-                    "ray query: the acceleration structure operand %{operand} has no definition in the entry function or the globals"
-                ));
+            let def = match defining_instruction(ctx, entry_idx, cursor) {
+                Some(def) => def,
+                None => {
+                    // A DEVICE POINTER THE EMITTER REPLACED WITH ITS ADDRESS. Logical SPIR-V
+                    //    cannot hold `load ptr addrspace(1), ptr addrspace(1) %q`, so the emitter emits a
+                    //    ulong load for the address and leaves the pointer-typed id defined by nothing.
+                    //    The game's acceleration structure arrives exactly that way, and every RT pipeline
+                    //    was refused here. The sidecar records which address stands for the pointer; the
+                    //    address IS a real instruction, so the walk continues and lands on
+                    //    Structure::DeviceAddress below, which is already what this pass wants.
+                    // PICK A FACT WHOSE ADDRESS STILL EXISTS. Inlining adds a remapped CLONE and leaves
+                    //    the original in the list (clone_inlined_facts keys the clone on the address,
+                    //    because the pointer is a placeholder that is never in the remap), so one pointer
+                    //    can have several facts and the stale one's address was removed with the function
+                    //    it came from. Following the first match landed on an id defined by nothing and
+                    //    reported the same refusal one step further along.
+                    let resolved = ctx
+                        .emit_sidecar
+                        .bda_pointer_addresses
+                        .iter()
+                        .filter(|fact| fact.pointer == cursor)
+                        .map(|fact| fact.address)
+                        .find(|address| defining_instruction(ctx, entry_idx, *address).is_some());
+                    if let Some(address) = resolved {
+                        cursor = address;
+                        continue;
+                    }
+                    return Err(format!(
+                        "ray query: the acceleration structure operand %{operand} has no definition in the entry function or the globals ({}); bda facts: {} [{}]",
+                        where_defined(ctx, cursor),
+                        ctx.emit_sidecar.bda_pointer_addresses.len(),
+                        ctx.emit_sidecar
+                            .bda_pointer_addresses
+                            .iter()
+                            .take(6)
+                            .map(|f| format!("{}->{}", f.pointer, f.address))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ));
+                }
             };
             match def.class.opcode {
                 Op::Variable => {
@@ -237,9 +278,14 @@ impl Lowering {
                     cursor = id_operand(&def, 0)?;
                 }
                 other => {
+                    // An operand that is already the structure's 64-bit device address, not a pointer to it.
+                    if is_ulong(ctx, &def) {
+                        self.dead_chains.extend(chain);
+                        return Ok(Structure::DeviceAddress(cursor));
+                    }
                     return Err(format!(
                         "ray query: the acceleration structure operand comes through {other:?}, which this pass does not follow"
-                    ))
+                    ));
                 }
             }
         }
@@ -354,6 +400,16 @@ impl Lowering {
         structure: Structure,
     ) -> Word {
         match structure {
+            Structure::DeviceAddress(address) => {
+                let id = ctx.module.fresh_id();
+                out.push(Instruction::new(
+                    Op::ConvertUToAccelerationStructureKHR,
+                    Some(self.as_ty),
+                    Some(id),
+                    vec![Operand::IdRef(address)],
+                ));
+                id
+            }
             Structure::Variable(var) => {
                 let id = ctx.module.fresh_id();
                 out.push(Instruction::new(
@@ -920,6 +976,55 @@ impl Lowering {
             accept_any_intersection: id_operand(call, n - 1)?,
         })
     }
+}
+
+/// Whether an instruction produces a 64-bit integer.
+fn is_ulong(ctx: &Ctx, def: &Instruction) -> bool {
+    def.result_type
+        .and_then(|rty| type_def_of(ctx, rty))
+        .is_some_and(|ty| {
+            ty.class.opcode == Op::TypeInt
+                && ty.operands.first() == Some(&Operand::LiteralBit32(64))
+        })
+}
+
+/// Where an id IS defined, for a message that would otherwise only say it is not where we looked.
+fn where_defined(ctx: &Ctx, id: Word) -> String {
+    for (idx, function) in ctx.module.functions.iter().enumerate() {
+        if function
+            .parameters
+            .iter()
+            .any(|p| p.result_id == Some(id))
+        {
+            return format!("it is parameter of function #{idx}");
+        }
+        for block in &function.blocks {
+            if let Some(inst) = block.instructions.iter().find(|i| i.result_id == Some(id)) {
+                return format!("it is {:?} in function #{idx}", inst.class.opcode);
+            }
+        }
+    }
+    // "nowhere" is not enough to act on. The acceleration structure arrives as
+    //    `%as = load ptr addrspace(1), ptr addrspace(1) %p` — a device pointer loaded out of device
+    //    memory, which Logical SPIR-V cannot hold as a pointer, so the emitter turns it into a 64-bit
+    //    address. If the id handed to this pass is the pointer-typed value the emitter replaced, it was
+    //    never emitted and no amount of searching finds it. Say whether the id was ever ALLOCATED (is it
+    //    inside the module's id range) and whether anything else references it: an id above the bound is
+    //    a fresh id someone allocated and never defined, which names the culprit instead of the symptom.
+    let bound = ctx.module.header.as_ref().map_or(0, |h| h.bound);
+    let referenced = ctx
+        .module
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.instructions.iter())
+        .filter(|i| i.operands.contains(&Operand::IdRef(id)))
+        .count();
+    format!(
+        "it is defined nowhere in the module (id {id}, module id bound {bound}, referenced by \
+         {referenced} instruction(s)){}",
+        if id >= bound { " - ABOVE THE BOUND: allocated but never emitted" } else { "" }
+    )
 }
 
 fn defining_instruction(ctx: &Ctx, entry_idx: usize, id: Word) -> Option<Instruction> {

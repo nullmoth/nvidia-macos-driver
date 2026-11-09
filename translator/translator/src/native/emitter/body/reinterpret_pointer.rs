@@ -226,9 +226,18 @@ impl Emitter {
         instructions: &mut Vec<Instruction>,
     ) -> Result<bool, String> {
         let object_ty = self.resolve_type(&object.ty)?;
-        if !local_pointer_field_pointee(pointee) || !matches!(object_ty, LlType::Ptr(_)) {
+        if !matches!(object_ty, LlType::Ptr(_)) {
             return Ok(false);
         }
+        let leaf = if local_pointer_field_pointee(pointee) {
+            None
+        } else {
+            match first_field_pointer_leaf(pointee) {
+                Some((_, leaf)) => Some(leaf.clone()),
+                None => return Ok(false),
+            }
+        };
+        let pointee = leaf.as_ref().unwrap_or(pointee);
         let Some(key) = self.local_pointer_field_key(ptr)? else {
             return Ok(false);
         };
@@ -396,6 +405,8 @@ impl Emitter {
             });
         let Some(stored) = stored else {
             self.emit_unmodeled_byte_pointer_copy(result_name, result, *addrspace, instructions)?;
+            self.unresolved_local_field_loads
+                .insert(result_name.to_string(), key.clone());
             self.emit_sidecar.local_pointer_field_loads.push(
                 crate::emit_sidecar::LocalPointerFieldLoad {
                     id: result,
@@ -1581,6 +1592,23 @@ impl Emitter {
                     indices: Vec::new(),
                 }));
             }
+            // A pointer written to the FIRST field needs no getelementptr: with opaque pointers the struct's
+            // own pointer is the field's address, so the store names the aggregate and means member zero.
+            // Apple's shader converter writes the dispatch-rays pointer into the ray payload's header that
+            // way, and without this the store reached SPIR-V as a pointer stored into a struct, which Logical
+            // SPIR-V has no way to express.
+            if storage == StorageClass::Function {
+                if let Some((indices, _)) = self
+                    .pointer_pointees
+                    .get(name)
+                    .and_then(first_field_pointer_leaf)
+                {
+                    return Ok(self.values.get(name).map(|(root, _)| LocalPointerField {
+                        root: *root,
+                        indices,
+                    }));
+                }
+            }
             return Ok(None);
         };
         let Some(mut indices) = provenance
@@ -1674,4 +1702,19 @@ impl Emitter {
 
 fn local_pointer_field_pointee(pointee: &LlType) -> bool {
     matches!(pointee, LlType::Ptr(_) | LlType::Int(64))
+}
+
+/// The field a store through a struct's own pointer means, with the index path to reach it. With opaque
+/// pointers the aggregate's address IS its first field's address, so a store that names the aggregate and
+/// hands over a pointer is writing member zero - Apple's shader converter writes the dispatch-rays pointer
+/// into the ray payload's header exactly that way. Returns None unless descending member zero reaches a
+/// field this machinery can carry.
+fn first_field_pointer_leaf(pointee: &LlType) -> Option<(Vec<u32>, &LlType)> {
+    let mut indices = Vec::new();
+    let mut leaf = pointee;
+    while let LlType::Struct(members) = leaf {
+        leaf = members.first()?;
+        indices.push(0);
+    }
+    (!indices.is_empty() && local_pointer_field_pointee(leaf)).then_some((indices, leaf))
 }
