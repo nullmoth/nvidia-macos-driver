@@ -2,7 +2,7 @@
  * nvk_hwrt_layout.h - the hardware structure the RT cores walk, layout generation NVK_HWRT_LAYOUT_PROVISIONAL.
  *
  * Every row of docs/HWRT.md "Layout table" says whether a field here was MEASURED on the card or is PROVISIONAL (written by
- * our own rule until the studio procedure measures it). Shared between C and GLSL.
+ * our own rule until the measurement procedure in docs/HWRT.md measures it). Shared between C and GLSL.
  */
 #ifndef NVK_HWRT_LAYOUT_H
 #define NVK_HWRT_LAYOUT_H
