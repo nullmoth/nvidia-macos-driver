@@ -62,5 +62,11 @@ int main(void)
         arm("a user's own timeslice is kept", !strcmp(getenv("NVRM_TSG_TIMESLICE_US"), "77"));
         unsetenv("NVRM_TSG_Q0_HIGH"); unsetenv("NVRM_TSG_TIMESLICE_US");
     }
+    /* one state */
+    arm("with the service installed the switch defaults to on", nvmtl_game_switch(0, 1) && !strcmp(nvmtl_game_switch(0, 1), "1") && !strcmp(nvmtl_game_switch("", 1), "1"));
+    arm("without the service and without a setting the switch is off", nvmtl_game_switch(0, 0) == 0);
+    arm("an explicit 0 wins over the service and an explicit 1 works without it", !strcmp(nvmtl_game_switch("0", 1), "0") && !strcmp(nvmtl_game_switch("1", 0), "1"));
+    p = nvmtl_game_priority_decide(nvmtl_game_switch("0", 1), 1, 0);
+    arm("an explicit 0 therefore applies nothing even for a game", !p.apply);
     return fails ? 1 : 0;
 }
