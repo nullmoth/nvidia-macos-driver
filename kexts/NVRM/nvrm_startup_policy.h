@@ -38,4 +38,16 @@ static inline unsigned nvrmAutoGoSettleMs(bool bar1Placed, bool turing, bool hav
     return ms;
 }
 
+// A firmware that sizes BAR1 above 8 GB (16 GB on an RTX 4060 Ti 16 GB, 32 GB on the largest cards) leaves a window
+// the bring-up has not run on: an RTX 3060 and an RTX 5080 resized to 16 GB both stopped during bring-up, and 8 GB is
+// the size proven on hardware. Returns the size to resize to (8 GB), or 0 to leave BAR1 as it is: already 8 GB or
+// smaller, the card does not offer 8 GB (bit 13 of the supported-sizes mask, 2^(20+13) bytes), or the user asked to
+// keep the firmware's size.
+static inline unsigned long long nvrmBar1ShrinkTarget(unsigned long long currentSize, unsigned supportedMask, bool keepFirmwareSize)
+{
+    const unsigned long long k8GB = 8ULL << 30;
+    if (keepFirmwareSize || currentSize <= k8GB) return 0;
+    return ((supportedMask >> 13) & 1) ? k8GB : 0;
+}
+
 #endif
