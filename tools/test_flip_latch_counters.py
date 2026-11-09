@@ -80,6 +80,7 @@ using NvU32=uint32_t; using SInt32=int32_t; using NvBool=bool;
 enum { NV_TRUE=1, NV_FALSE=0, NVKMS_KAPI_LAYER_PRIMARY_IDX=0 };
 enum NvKmsFlipResult { NV_KMS_FLIP_RESULT_SUCCESS = 0, NV_KMS_FLIP_RESULT_INVALID_PARAMS, NV_KMS_FLIP_RESULT_IN_PROGRESS };
 #define FBLOG(...) ((void)0)
+#define FBLOGV(...) ((void)0)
 static int64_t gClock = 0;   // nanoseconds, the absolute-time unit here
 static uint64_t mach_absolute_time() { gClock += 1000; return (uint64_t)gClock; } // +1 us per call
 static void IOSleep(unsigned) { gClock += 1000000; }

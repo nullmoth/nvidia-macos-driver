@@ -17,6 +17,7 @@ fixture = r'''
 using NvU32=uint32_t;using NvU64=uint64_t;using UInt64=uint64_t;using UInt16=uint16_t;using NvBool=bool;
 enum { NV_TRUE=1,NV_FALSE=0,kIODigitalSignal=1 };
 #define FBLOG(...) ((void)0)
+#define FBLOGV(...) ((void)0)
 static void nvu_zero(void *p,size_t n){memset(p,0,n);}
 struct NvKmsKapiDisplayModeTimings {
     NvU32 pixelClockHz,hVisible,hSyncStart,hSyncEnd,hTotal,vVisible,vSyncStart,vSyncEnd,vTotal,refreshRate;
