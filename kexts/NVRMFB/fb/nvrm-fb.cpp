@@ -493,6 +493,8 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     int priorFlipState();
     void publishFlipWait();
     unsigned fRejected = 0;     // commits NVKMS refused on this head, for NVRMRejectedCommits
+    uint64_t fEnableAbs = 0;    // when enableController ran, for the first-primary-flip timing line
+    bool fFirstPrimaryLogged = false;   // a login screen that never gets one is the black-screen-with-cursor signature
     NvBool submitConfig(struct NvKmsKapiRequestedModeSetConfig *cfg, struct NvKmsKapiModeSetReplyConfig *rep, NvBool commit,
                         bool bootstrap = false, bool cursorOnly = false, bool frame = false);
     thread_call_t fReflip = nullptr;
@@ -823,8 +825,20 @@ static void nvrmHeadOlut(struct NvKmsKapiHeadRequestedConfig *hr, struct NvKmsKa
     hr->modeSetConfig.olut.lutEntries = olut ? NVKMS_LUT_ARRAY_SIZE + 1 : 0;
     hr->flags.olutChanged = NV_TRUE;
 }
+// NVIDIA 620 added NvKmsKapiHeadModeSetConfig::colorFormat and applies it on EVERY full mode set ("always specify the
+// color format" in nvkms-kapi.c). Its zero is RGB, and a specified RGB never falls back: a mode that only fits the link
+// as YCbCr (4K at high refresh over HDMI 2.0) would be refused, a black screen. Through 615 the format was never
+// specified, so NVKMS tried RGB and fell back. UNKNOWN keeps that exact behaviour (it is what Linux DRM's "auto" maps
+// to). Member detection keeps this file building against 615 headers, which have no such field, for baseline builds.
+// 3 = NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_FORMAT_UNKNOWN (620 nvkms-api-types.h; 615 has no such constant).
+static const NvU32 kNvrmColorFormatAuto = 3;
+template <typename C> static auto nvrmAutoColorFormat(C *c, int) -> decltype(c->colorFormat = kNvrmColorFormatAuto, void())
+{ c->colorFormat = kNvrmColorFormatAuto; }
+template <typename C> static void nvrmAutoColorFormat(C *, long) {}
+
 static void nvrmHeadConfigBaseline(struct NvKmsKapiHeadRequestedConfig *hr, struct NvKmsKapiSurface *olut = NULL)
 {
+    nvrmAutoColorFormat(&hr->modeSetConfig, 0);   // colorBpc 0 = UNKNOWN and allmMode 0 = DISABLED already match 615
     hr->modeSetConfig.olutFpNormScale = NVKMS_OLUT_FP_NORM_SCALE_DEFAULT;
     hr->flags.olutFpNormScaleChanged = NV_TRUE;
     if (olut) nvrmHeadOlut(hr, olut);
@@ -1912,11 +1926,29 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
                   (unsigned)p->config.dstHeight, h->cursorRequestedConfig.surface ? 1u : 0u,
                   (unsigned)h->cursorRequestedConfig.flags.surfaceChanged);
         }
+        // Until this head has shown one primary flip, every rejected primary is logged with the surface it carried:
+        // the login window's first frame being refused is the one case the counters above cannot tell apart.
+        if (!fFirstPrimaryLogged && tracked) {
+            const struct NvKmsKapiLayerConfig *pc =
+                &cfg->headRequestedConfig[fHead].layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX].config;
+            FBLOG("primary rejected before the first shown flip on head %u: result %d src %ux%u+%u+%u dst %ux%u%+d%+d",
+                  fHead, (int)rep->flipResult, (unsigned)pc->srcWidth, (unsigned)pc->srcHeight, (unsigned)pc->srcX,
+                  (unsigned)pc->srcY, (unsigned)pc->dstWidth, (unsigned)pc->dstHeight, (int)pc->dstX,
+                  (int)pc->dstY);
+        }
         setProperty("NVRMRejectedCommits", (unsigned long long)fRejected, 32);
         return NV_FALSE;
     }
     if (cursorOnly) return NV_TRUE;
     if (!tracked) { fSubmissionSeen = false; return NV_TRUE; }
+    if (!fFirstPrimaryLogged) {
+        fFirstPrimaryLogged = true;
+        uint64_t ns = 0;
+        if (fEnableAbs) absolutetime_to_nanoseconds(submit0 - fEnableAbs, &ns);
+        FBLOG("first accepted primary flip on head %u, %llu ms after enableController (%u rejected before it)%s",
+              fHead, (unsigned long long)(ns / 1000000), fRejected, bootstrap ? " [bootstrap]" : "");
+        setProperty("NVRMFirstPrimaryFlipMs", (unsigned long long)(ns / 1000000), 64);
+    }
     fSubmissionSeen = true;
     fFlipSubmitAbs = submit0;
     // Initial acceptance permits console handoff, never surface retirement. The owned boot surface remains pinned.
@@ -2686,7 +2718,13 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     }
     fFlipCacheLock = IOSimpleLockAlloc();
     if (!fFlipCacheLock) return false;
-    fKms = (struct NvKmsKapiFunctionsTable *)(uintptr_t)propU64(provider, "nvkms-kapi");
+    struct NVRMDisplayPointers displayPtrs = {};
+    displayPtrs.version = NVRM_DISPLAY_PTRS_ABI_VERSION;
+    {
+        const OSSymbol *displayPtrsFn = OSSymbol::withCString(NVRM_DISPLAY_PTRS_FN);
+        if (displayPtrsFn) { provider->callPlatformFunction(displayPtrsFn, false, &displayPtrs, NULL, NULL, NULL); displayPtrsFn->release(); }
+    }
+    fKms = (struct NvKmsKapiFunctionsTable *)displayPtrs.kapi;
     fGpuId = (NvU32)propU64(provider, "gpu-id");
     fIndex = (unsigned)propU64(provider, "fb-index");
     fConnectNotify = nvrmfbCall(connectNotifyFire, this);
@@ -2724,7 +2762,7 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     // has a mode -- see connectNotifyFire and enableController.
     fHotplugBorn = (gNDpyBoot >= 0 && (int)fIndex >= gNDpyBoot);
     if (fHotplugBorn) FBLOG("fb%u: a display appeared after boot -- the connect interrupt will be fired once the head has a mode", fIndex);
-    fPhysForVa = (nvrm_phys_for_va_t)(uintptr_t)propU64(provider, "phys-for-va");
+    fPhysForVa = (nvrm_phys_for_va_t)displayPtrs.physForVa;
     if (!fKms || !fPhysForVa || !fKms->getFlipPendingStatus || !fKms->dupMemory) { FBLOG("nub lacks nvkms-kapi/phys-for-va properties"); return false; }
     setProperty("IOFBDependentID", (unsigned long long)0x4E56524D00000001ull, 64);
     setProperty("IOFBDependentIndex", (unsigned long long)fIndex, 32);
@@ -2883,6 +2921,7 @@ void NVRMNVDAFramebuffer::free()
 IOReturn NVRMNVDAFramebuffer::enableController()
 {
     FBLOG("enableController");
+    fEnableAbs = mach_absolute_time();
     const bool ok = applyMode();
     if (ok) refreshDisplayAudioProperties();
     // A display that appeared after boot: tell the framework, through the connect handler it registered (fConnect),

@@ -206,6 +206,7 @@ pub(in crate::native::emitter) fn is_air_texture_operation(callee: &str) -> bool
         || callee.starts_with("air.sample_compare_depth")
         || callee.starts_with("air.gather_texture")
         || callee.starts_with("air.gather_depth")
+        || callee.starts_with("air.gather_compare_depth")
         || callee.starts_with("air.read_texture")
         || callee.starts_with("air.read_depth")
         || callee.starts_with("air.write_texture")
@@ -391,6 +392,7 @@ impl Emitter {
         self.vector_word_roots.clear();
         self.vector_word_pointers.clear();
         self.local_pointer_fields.clear();
+        self.unresolved_local_field_loads.clear();
         self.pointer_forward_values.clear();
         self.raw_memcpy_shadows.clear();
         self.dynamic_pointer_tables.clear();
@@ -1233,7 +1235,15 @@ impl Emitter {
                 }
             }
             self.tir_use_pointees = tir.use_pointees.clone();
-            let mut direct_load_pointers = HashSet::default();
+            // A pointer is load-only when every use is the address of a load, or the base of a GEP whose result
+            // is itself load-only. The incompatible-pointee select reads this set: it lowers a select of two
+            // pointers with different element types to a select of the values loaded through each arm, which is
+            // exact as long as the selected pointer is only ever loaded - directly or after a GEP, which the
+            // selected-pointer GEP path already distributes over both arms. Counting direct loads only refused a
+            // select that was loaded once directly and once after a GEP, so it fell through to the pointer merge
+            // and failed the whole kernel (an MPS convolution selecting a buffer base or a bfloat element).
+            let mut loaded = HashSet::default();
+            let mut gep_children: HashMap<String, Vec<String>> = HashMap::default();
             let mut other_pointer_uses = HashSet::default();
             for block in &tir.blocks {
                 for inst in &block.insts {
@@ -1245,16 +1255,45 @@ impl Emitter {
                                 _ => None,
                             });
                     if let Some(name) = load_pointer {
-                        direct_load_pointers.insert(name.to_string());
+                        loaded.insert(name.to_string());
+                    }
+                    let gep_base = if inst.opcode == TirOpcode::GetElementPtr {
+                        inst.gep().as_ref().and_then(|gep| match &gep.base.value {
+                            LlValue::Local(name) => Some(name.clone()),
+                            _ => None,
+                        })
+                    } else {
+                        None
+                    };
+                    if let (Some(base), Some(result)) = (&gep_base, &inst.result) {
+                        gep_children.entry(base.clone()).or_default().push(result.clone());
                     }
                     inst.visit_uses(|name| {
-                        if load_pointer != Some(name) {
+                        if load_pointer != Some(name) && gep_base.as_deref() != Some(name) {
                             other_pointer_uses.insert(name.to_string());
                         }
                     });
                 }
             }
-            direct_load_pointers.retain(|name| !other_pointer_uses.contains(name));
+            let mut direct_load_pointers: HashSet<String> = loaded
+                .iter()
+                .chain(gep_children.keys())
+                .filter(|name| !other_pointer_uses.contains(*name))
+                .cloned()
+                .collect();
+            // Drop any pointer with a GEP child that is not itself load-only, until nothing changes. A GEP result
+            // that is never loaded is not in the set, so its base leaves it: unused or escaping offsets stay refused.
+            loop {
+                let snapshot = direct_load_pointers.clone();
+                direct_load_pointers.retain(|name| {
+                    gep_children
+                        .get(name)
+                        .map_or(true, |children| children.iter().all(|child| snapshot.contains(child)))
+                });
+                if direct_load_pointers.len() == snapshot.len() {
+                    break;
+                }
+            }
             self.tir_direct_load_pointers = direct_load_pointers;
             self.byte_view_pointers = tir.byte_view_pointers.clone();
             self.pointer_phi_values = tir.pointer_phi_results.clone();
@@ -2784,6 +2823,9 @@ impl Emitter {
         let key = (func.to_string(), name.to_string());
         if !self.ir.raw_buffer_params.contains(&key)
             || self.ir.param_connected_raw_params.contains(&key)
+            // Byte GEPs must retain byte offsets, including offsets carried by pointer phis.
+            // A concrete vector view would interpret those offsets as vector indices.
+            || self.ir.byte_addressed_raw_params.contains(&key)
         {
             return None;
         }

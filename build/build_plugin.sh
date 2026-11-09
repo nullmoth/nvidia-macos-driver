@@ -8,8 +8,8 @@ C=$(git rev-parse --short HEAD); O=$N/LIVE/out/plugin-$C${RELEASE:+-release}; mk
 RDEF=""; [ -n "${RELEASE:-}" ] && RDEF="-DNVMTL_RELEASE=1"
 until mkdir $L 2>/dev/null; do sleep 5; done; echo "build_plugin $C $$" > $L/owner; trap 'rm -rf "$L"' EXIT
 xcrun clang -arch x86_64 -bundle -fobjc-arc -O1 $RDEF -Wno-protocol -Wno-incomplete-implementation \
-  -I"$HOME/Vulkan-Headers/include" -o $O/NVMTLDriver NVMTLDevice.m \
-  -framework Foundation -framework Metal -framework IOSurface 2>$O/NVMTLDriver.err \
+  -I"$HOME/Vulkan-Headers/include" -o $O/NVMTLDriver NVMTLDevice.m nvmtl_dlss.c dlss/elfhost.c dlss/lnxlibc.c \
+  -framework Foundation -framework Metal -framework IOSurface -framework MetalFX -liconv 2>$O/NVMTLDriver.err \
   || { echo "STOP: compile failed"; grep -A2 ': error:' $O/NVMTLDriver.err | head -30; exit 5; }
 codesign -f -s - $O/NVMTLDriver 2>/dev/null
 miss=0
@@ -30,6 +30,7 @@ fps file|nvmtl-fps-
 passtime instrument|nvmtl-passtime-request
 library key memo (xlate)|library key memo: hit
 res2-evict (Apple order: newest wins the card)|on the allocating thread
+DLSS behind the MetalFX temporal scaler|served by DLSS
 M
 echo "plugin-$C  sha $(shasum -a256 $O/NVMTLDriver | cut -c1-8)  uuid $(otool -l $O/NVMTLDriver | awk '/uuid/{print $2; exit}')  warnings $(grep -c ': warning:' $O/NVMTLDriver.err)  markers-missing $miss"
 [ $miss = 0 ] || { echo "STOP: a live feature is missing from this build — do NOT stage it"; exit 6; }

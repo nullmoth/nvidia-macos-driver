@@ -167,6 +167,12 @@ pub const REGISTRY: &[EnvVar] = &[
                  (skip the b78 retype to 32-bit words that keeps Mesa from one u8 phi per byte)",
     },
     EnvVar {
+        name: "METAL2VULKAN_NO_RRM_IDENTITY",
+        default: "off",
+        effect: "refuse air.map_screen_to_physical_coordinates / air.map_physical_to_screen_coordinates \
+                 again instead of lowering them to the identity (the driver has no rasterization rate maps)",
+    },
+    EnvVar {
         name: "METAL2VULKAN_NO_LOAD_HOIST",
         default: "off",
         effect: "measurement override: keep each device load where the emitter put it \
@@ -316,6 +322,9 @@ pub fn no_wide_half_load() -> bool {
 }
 pub fn no_byte_words() -> bool {
     present("METAL2VULKAN_NO_BYTE_WORDS")
+}
+pub fn no_rrm_identity() -> bool {
+    present("METAL2VULKAN_NO_RRM_IDENTITY")
 }
 pub fn no_load_hoist() -> bool {
     present("METAL2VULKAN_NO_LOAD_HOIST")
