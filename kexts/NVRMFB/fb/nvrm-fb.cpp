@@ -693,6 +693,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
             hotplugKick();
     }
     static void hotplugKick();
+    static void hotplugPollFire(thread_call_param_t, thread_call_param_t);
     static void hotplugFire(thread_call_param_t p0, thread_call_param_t);
     static void flipWake(unsigned head);
     bool waitFlipDone(uint64_t limitUs);
@@ -1750,6 +1751,18 @@ void NVRMNVDAFramebuffer::hotplugKick()
     if (!gHotplug) return;
     uint64_t d; clock_interval_to_deadline(1500, kMillisecondScale, &d);
     thread_call_enter_delayed(gHotplug, d);
+}
+// Boot-arg nvfbhotplugpoll=<seconds> (1..60): look for added and removed displays on a timer as well. Some laptops (a GTX 1660 Ti
+// with its mini-DP and HDMI wired to the GPU, issue 327) never deliver the display-change event while the GPU sleeps, so a
+// plug or unplug at run time is not noticed at all. The poll is the same scan the event runs (hotplugFire), so a quiet bus costs
+// one display query per period and changes nothing.
+static thread_call_t gHotplugPoll = nullptr;
+static uint32_t gHotplugPollSec = 0;
+void NVRMNVDAFramebuffer::hotplugPollFire(thread_call_param_t, thread_call_param_t)
+{
+    hotplugKick();
+    uint64_t d; clock_interval_to_deadline(gHotplugPollSec, kSecondScale, &d);
+    if (gHotplugPoll) thread_call_enter_delayed(gHotplugPoll, d);
 }
 void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
 {
@@ -2968,6 +2981,14 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
           (unsigned long long)(nvrmVramBudget(fBarLen) >> 20));
     if (fIndex == 0 && gFB != this) { retain(); gFB = this; }
     if (fIndex == 0 && !gHotplug) gHotplug = nvrmfbCall(hotplugFire, nullptr);
+    if (fIndex == 0 && gHotplug && !gHotplugPoll) {
+        UInt32 sec = 0;
+        if (PE_parse_boot_argn("nvfbhotplugpoll", &sec, sizeof sec) && nvrmHotplugPollValid(sec)) {
+            gHotplugPollSec = sec; gHotplugPoll = nvrmfbCall(hotplugPollFire, nullptr);
+            if (gHotplugPoll) { uint64_t d; clock_interval_to_deadline(sec, kSecondScale, &d); thread_call_enter_delayed(gHotplugPoll, d); }
+            FBLOG("hot-plug poll every %u s (nvfbhotplugpoll)", sec);
+        }
+    }
     if (!gNubParent && provider->getProvider()) { gNubParent = provider->getProvider(); gNubParent->retain(); }
     // WhateverGreen (with Lilu) replaces IOFramebuffer::initFB. Unless boot-arg gfxrst=4 is set, the first initFB of any
     // framebuffer copies the boot console from the address WhateverGreen saved at boot. macOS frees that mapping when

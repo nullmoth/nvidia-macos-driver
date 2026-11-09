@@ -288,3 +288,5 @@ static inline bool nvrmDsrSize(unsigned nativeW, unsigned nativeH, unsigned i, u
 // as the panel's own timing (issue 429: the mode is enumerated as valid, the panel goes black). NVKMS still validates every
 // commit, so a higher bound only stops macOS from refusing or rewriting timings the hardware takes.
 enum { kNvrmMaxPixelClockMHz = 2700 };
+// nvfbhotplugpoll=<seconds>: valid periods are 1 to 60.
+static inline bool nvrmHotplugPollValid(unsigned sec) { return sec >= 1 && sec <= 60; }
