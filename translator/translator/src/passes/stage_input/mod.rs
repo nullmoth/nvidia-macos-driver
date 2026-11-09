@@ -1301,6 +1301,35 @@ pub(super) fn build_stage_input(
             }
             bindings.push((*pid, ParamBinding::Buffer { var, wrap }));
             buffer_structs.push((var, struct_ty));
+        } else if role_is("varying")
+            && matches!(stage, Stage::Fragment)
+            && frag.is_some_and(|m| m.varying_interpolation(loc).pull)
+        {
+            // An `interpolant<T>`: the shader receives a handle and asks for the value at an offset, a sample or the
+            // centroid, so the parameter is the Input variable itself and the value is never loaded as a whole.
+            let name = frag.and_then(|m| m.varying_type(loc)).unwrap_or("");
+            let Some(value_ty) = pull_interpolant_value_type(ctx, name) else {
+                return Err(format!(
+                    "fragment input at location {loc} is an interpolant of {name:?}, which pull-model interpolation does not support"
+                ));
+            };
+            let pptr = ctx.ty_ptr(StorageClass::Input, value_ty);
+            let var = ctx.module.fresh_id();
+            ctx.new_globals.push(Instruction::new(
+                Op::Variable,
+                Some(pptr),
+                Some(var),
+                vec![Operand::StorageClass(StorageClass::Input)],
+            ));
+            decorate_location(&mut ctx.module, var, loc);
+            decorate_interpolation(
+                &mut ctx.module,
+                var,
+                frag.map(|m| m.varying_interpolation(loc)).unwrap_or_default(),
+                false,
+            );
+            ctx.interface.push(var);
+            bindings.push((*pid, ParamBinding::Value { val: var }));
         } else if role_is("varying") {
             if matches!(stage, Stage::Fragment) && is_scalar_bool(&defs, *pty) {
                 let uint_ty = ctx.ty_uint();
@@ -3258,5 +3287,16 @@ mod tests {
             Some(&Operand::IdRef(1)),
             "independently bound root remains unchanged"
         );
+    }
+}
+
+/// The value type of an `interpolant<T>` input: the 32-bit float scalar and vectors Vulkan can interpolate at run time.
+fn pull_interpolant_value_type(ctx: &mut Ctx, air_type_name: &str) -> Option<Word> {
+    match air_type_name {
+        "float" => Some(ctx.ty_float()),
+        "float2" => Some(ctx.ty_vecf(2)),
+        "float3" => Some(ctx.ty_vecf(3)),
+        "float4" => Some(ctx.ty_vecf(4)),
+        _ => None,
     }
 }

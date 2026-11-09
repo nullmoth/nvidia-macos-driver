@@ -2246,11 +2246,21 @@ enum GlslExtInstContract {
     Ldexp,
     Pack { lanes: u32 },
     Unpack { lanes: u32 },
+    /// InterpolateAtCentroid (no extra operand), AtSample (a 32-bit integer) and AtOffset (a 2-lane float): the first
+    /// operand is the Input variable and the result has its value type.
+    Interpolate { extra: InterpolateExtra },
+}
+
+#[derive(Clone, Copy)]
+enum InterpolateExtra {
+    None,
+    Sample,
+    Offset,
 }
 
 fn glsl_ext_inst_contract(number: u32) -> Option<GlslExtInstContract> {
     use spirv::GlslStd450Op as Glsl;
-    use GlslExtInstContract::{FloatSame, IntegerShapeSame, Ldexp, Pack, Unpack};
+    use GlslExtInstContract::{FloatSame, IntegerShapeSame, Interpolate, Ldexp, Pack, Unpack};
 
     match Glsl::from_u32(number)? {
         Glsl::Round
@@ -2316,6 +2326,9 @@ fn glsl_ext_inst_contract(number: u32) -> Option<GlslExtInstContract> {
             Some(Unpack { lanes: 2 })
         }
         Glsl::UnpackSnorm4x8 | Glsl::UnpackUnorm4x8 => Some(Unpack { lanes: 4 }),
+        Glsl::InterpolateAtCentroid => Some(Interpolate { extra: InterpolateExtra::None }),
+        Glsl::InterpolateAtSample => Some(Interpolate { extra: InterpolateExtra::Sample }),
+        Glsl::InterpolateAtOffset => Some(Interpolate { extra: InterpolateExtra::Offset }),
         Glsl::FindILsb => Some(IntegerShapeSame {
             arity: 1,
             width_32: true,
@@ -2416,6 +2429,31 @@ fn owned_glsl_ext_inst_error(
                     numeric_type_shape(argument_types[0], definitions),
                     Some((Op::TypeFloat, 32, argument_lanes)) if argument_lanes == lanes
                 )
+        }
+        GlslExtInstContract::Interpolate { extra } => {
+            let wanted = if matches!(extra, InterpolateExtra::None) { 1 } else { 2 };
+            arguments.len() == wanted
+                && matches!(
+                    numeric_type_shape(result_type, definitions),
+                    Some((Op::TypeFloat, 32, _))
+                )
+                && definitions.get(&argument_types[0]).is_some_and(|pointer| {
+                    pointer.class.opcode == Op::TypePointer
+                        && pointer.operands.first()
+                            == Some(&Operand::StorageClass(spirv::StorageClass::Input))
+                        && pointer.operands.get(1) == Some(&Operand::IdRef(result_type))
+                })
+                && match extra {
+                    InterpolateExtra::None => true,
+                    InterpolateExtra::Sample => matches!(
+                        numeric_type_shape(argument_types[1], definitions),
+                        Some((Op::TypeInt, 32, 1))
+                    ),
+                    InterpolateExtra::Offset => matches!(
+                        numeric_type_shape(argument_types[1], definitions),
+                        Some((Op::TypeFloat, 32, 2))
+                    ),
+                }
         }
         GlslExtInstContract::Unpack { lanes } => {
             arguments.len() == 1
