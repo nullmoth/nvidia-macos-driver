@@ -51,6 +51,7 @@ is supported and rewrites the structure's own address (`mode 1` of `encode_ttu.c
 | `hwrt_layout_check.py` | judges recorded structures against the measured rows of the layout table |
 | `run_host_tests.sh` | all of the above that need no GPU and no NVK build |
 | `run_cpu_checks.sh` | machine-code checks that need a built NVK tree (see below) |
+| `probe/hwrt_probe.c`, `probe/hwrt_probe.comp` | the on-card test for the measurement procedure |
 
 NVK patch order (appended to the chain in `docs/HOW-IT-WORKS.md` section 7, applied by `build/build_nvk.sh` for 2.9):
 `nvk-macos`, `nvk-fixes-after-def16`, `nvk-620-kernel`, `nvk-recycle`, `nvk-slab`, `nvk-slabdef`, `nvk-hubfix`,
