@@ -1,0 +1,4 @@
+2026-11-08 20:00:00.000 Df kernel[0]: (NVAccel) hybrid: switch level 2 (boot-arg nmhybrid=2)
+2026-11-08 20:00:03.100 Df kernel[0]: (NMIntelFB) NMIntelFB: hybrid: provider NMIntelFB 2880x1800 pitch 11520 display version 14 level 2 (CPU-mapped scanout, no VRAM)
+2026-11-08 20:00:03.900 Df kernel[0]: (NMIntelFB) NMIntelFB: hybrid: import unavailable: display version 14
+2026-11-08 20:00:00.000 Df kernel[0]: (NVAccel) hybrid: first frame presented by copy (1800 rows, 5184000 pixels, head 4)

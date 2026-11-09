@@ -58,6 +58,8 @@ static bool nvaccel_verbose() { static int v = -1; if (v < 0) { int x = 0; v = P
 #include <sys/sysctl.h>
 #include <libkern/OSAtomic.h>
 #include "nv_iop_pixel.h"
+#include "nm_hybrid.h"
+#include "nm_hybrid_abi.h"
 
 // ---- GPU core temperature, published into PerformanceStatistics -------------
 // Same register the out-of-tree NvidiaSensor.kext reads. nouveau's gp100_temp_get() reads
@@ -93,6 +95,7 @@ static int gNvAccelArmed = 0;
 // 1 once the headless check restored the plugin name without arming (no NVIDIA display head). The Metal plugin reads it:
 // a headless GPU hands frames to another GPU's WindowServer through system memory, so IOSurfaces must be copied out.
 static int gNvHeadless = 0;
+static int gNmHybrid = 0;   // boot-arg nmhybrid (nm_hybrid.h): 0 off, 1 copy, 2 import; default off
 #ifdef NMX_ACCEL
 SYSCTL_INT(_debug, OID_AUTO, nmxaccel_headless, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gNvHeadless, 0,
            "1 = AMD/Intel Metal device for apps; frames are copied to the framebuffer WindowServer draws");
@@ -417,6 +420,8 @@ public:
             strlcpy(owner, s->getMetaClass()->getClassName(), len);
             // the Intel panel driver publishes as a head of this accelerator, so it is not another GPU's desktop here
             if (s->metaCast("NMIntelFB")) break;
+            // with the hybrid switch on, an AMD or Intel panel driven by NMXGPU is also a head of this accelerator
+            if (gNmHybrid && s->metaCast("NMXGPUFB")) break;
             IORegistryEntry *e = s->getProvider();
             for (int up = 0; e && up < 8 && !e->metaCast("IOPCIDevice"); up++) e = e->getParentEntry(gIOServicePlane);
             OSData *v = e ? OSDynamicCast(OSData, e->getProperty("vendor-id")) : nullptr;
@@ -480,7 +485,7 @@ public:
             // refuses WindowServer on a headless GPU, and WindowServer aborted at start ("Failed to create MetalDevice")
             // every ten seconds. With no other GPU there is no display to hand frames to, so the name stays withheld:
             // WindowServer runs unaccelerated on the firmware framebuffer and the desktop comes up, as before the check.
-            if (!other && strcmp(owner, "NMIntelFB") != 0) {
+            if (!other && strcmp(owner, "NMIntelFB") != 0 && !(gNmHybrid && strcmp(owner, "NMXGPUFB") == 0)) {
                 ALOG("headless check: no NVIDIA display head after %u s and no other GPU shows the desktop (%s) -- "
                      "MetalPluginName stays withheld so WindowServer starts on the firmware framebuffer",
                      me->fHeadlessWaited, owner);
@@ -1263,6 +1268,8 @@ static SInt64 gCntIopOk, gCntIopFail, gCntIopEmpty, gCntIopSrcRes, gCntIopSrcSur
 static SInt64 gCntIopOkHead[kNvMaxFB];
 static SInt64 gCntIop30, gCntIopHalf;       // frames written to a 30-bit scanout; frames converted from half-float RGhA
 static SInt64 gCntIopL10r;                 // frames narrowed from 10-bit l10r (login window, lock screen)
+// hybrid laptops (nm_hybrid.h)
+static SInt64 gCntHyFrames, gCntHyWords, gCntHyWordsSkipped, gCntHyFlips, gCntHyImportFail;
 #define NVIOP_LOG_MAX 40
 static unsigned gIopLogs = 0;
 #define NVIOPLOG(fmt, ...) do { if (gIopLogs < NVIOP_LOG_MAX) { gIopLogs++; ALOG("iop: " fmt, ##__VA_ARGS__); } } while (0)
@@ -1317,6 +1324,9 @@ static void nvAccelSurfScanoutSync(IOSurface *s);
 static bool nvAccelSurfCopyReady(IOSurface *s, unsigned head);
 static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe);
 static bool nvSurfWaitReady(unsigned int id);
+static bool nvAccelHybridImport(IOService *fb, unsigned head, IOSurface *s);
+static struct nmh_shadow *nvAccelHybridShadow(unsigned head, unsigned w, unsigned h);
+static void nvAccelHybridHome(IOService *fb, unsigned head);
 static void nvAccelIopHome(IOService *fb, unsigned head);
 IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
 {
@@ -1358,6 +1368,9 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     } else if (s && nvAccelIopFlip(fb, head, s, this)) {
         OSAddAtomic64(1, &gCntIopSrcSurf); OSAddAtomic64(1, &gCntIopOk); OSAddAtomic64(1, &gCntIopOkHead[head]);
         return kIOReturnSuccess;
+    } else if (s && gNmHybrid >= NMH_IMPORT && nvAccelHybridImport(fb, head, s)) {
+        OSAddAtomic64(1, &gCntIopSrcSurf); OSAddAtomic64(1, &gCntIopOk); OSAddAtomic64(1, &gCntIopOkHead[head]);
+        return kIOReturnSuccess;
     } else if (s) {
         // A copied frame must come from the surface's newest pixels. Copying while they were still only in VRAM put a
         // stale, one-colour buffer on the panel every other frame: full-screen flicker, 5 of 40 flicker recordings
@@ -1397,10 +1410,26 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     if (q.pitch < 4u * w) NVIOP_FAIL(kIOReturnBadArgument, "scanout pitch %u is under 4*%u", q.pitch, w);
     const unsigned spr = pitch / 4, dpr = q.pitch / 4;
     volatile unsigned int *d = (volatile unsigned int *)q.kva;
+    // the hybrid copy takes 8-bit BGRA and l10r into an 8-bit panel; HDR sources (half float) or a 30-bit scanout use the
+    // general converter below
+    if (gNmHybrid >= NMH_COPY && !q.phys && !fb->metaCast("NVRMNVDAFramebuffer") && !dst30
+        && (srcFmt == NV_IOP_FMT_BGRA || srcFmt == NV_IOP_FMT_L10R)) {
+        // another GPU's panel (nm_hybrid.h): store only the pixels that changed since the previous frame
+        struct nmh_shadow *sh = nvAccelHybridShadow(head, w, h);
+        nvAccelHybridHome(fb, head);
+        struct nmh_stats st;
+        if (nmh_present(sh, src, w, h, pitch, from10 ? 1 : 0, d, q.pitch, &st))
+            NVIOP_FAIL(kIOReturnBadArgument, "hybrid: source %ux%u pitch %u cannot be presented to a scanout of pitch %u", w, h, pitch, q.pitch);
+        const SInt64 nf = OSAddAtomic64(1, &gCntHyFrames);
+        OSAddAtomic64(st.words, &gCntHyWords);
+        OSAddAtomic64((SInt64)(w < spr ? w : spr) * h - st.words, &gCntHyWordsSkipped);
+        if (nf == 0) ALOG("hybrid: first frame presented by copy (%u rows, %u pixels, head %u)", st.rows, st.words, head);
+    } else {
     for (unsigned y = 0; y < h; y++) {
         const volatile unsigned int *sp = src + (unsigned long)y * spr;
         volatile unsigned int *dp = d + (unsigned long)y * dpr;
         (void)nv_iop_convert_row(dp, sp, w, srcFmt, dst30);
+    }
     }
     (void)bppSrc;
     if (dst30) OSAddAtomic64(1, &gCntIop30);
@@ -1511,6 +1540,14 @@ NVACCEL_CNT(nvaccel_iop_flip_novram,  gCntIopFlipNo[4],   "copied because the su
 NVACCEL_CNT(nvaccel_iop_flip_stale,   gCntIopFlipNo[5],   "copied because system memory holds the newest copy");
 NVACCEL_CNT(nvaccel_iop_flip_refused, gCntIopFlipNo[7],   "copied because the framebuffer refused the flip");
 static SInt64 gCntIopUnwritten, gCntIopCopyUnwritten;
+// hybrid laptops (nm_hybrid.h): boot-arg nmhybrid, default off
+SYSCTL_INT(_debug, OID_AUTO, nmhybrid, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gNmHybrid, 0,
+           "hybrid laptop path: 0 off, 1 copy changed pixels to the other GPU's panel, 2 scan out the composited surface in place");
+NVACCEL_CNT(nmhybrid_frames,        gCntHyFrames,       "hybrid: frames presented by copy to another GPU's panel");
+NVACCEL_CNT(nmhybrid_words,         gCntHyWords,        "hybrid: pixels stored to the other GPU's scan-out");
+NVACCEL_CNT(nmhybrid_words_skipped, gCntHyWordsSkipped, "hybrid: pixels not stored because they had not changed");
+NVACCEL_CNT(nmhybrid_flips,         gCntHyFlips,        "hybrid: frames scanned out in place (zero copy)");
+NVACCEL_CNT(nmhybrid_import_fail,   gCntHyImportFail,   "hybrid: surfaces that could not be scanned out in place (copied instead)");
 NVACCEL_CNT(nvaccel_iop_flip_unwritten, gCntIopUnwritten,     "copied because the family marked VRAM newest on a copy the plugin never wrote");
 NVACCEL_CNT(nvaccel_iop_copy_unwritten, gCntIopCopyUnwritten, "copied frames that skipped the page-off because the plugin never wrote the VRAM copy");
 // The two decisions the display pipe makes from the family's validity bits, kept as pure functions so they can be
@@ -1682,6 +1719,13 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_late);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h0);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h1);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h2);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h3);
+    { int lv = 0; const int present = PE_parse_boot_argn("nmhybrid", &lv, sizeof lv);
+      gNmHybrid = nmh_level_parse(present, lv);
+      if (present) ALOG("hybrid: switch level %d (boot-arg nmhybrid=%d)%s", gNmHybrid, lv, gNmHybrid ? "" : " -- not 1 or 2, so OFF"); }
+    sysctl_register_oid(&sysctl__debug_nmhybrid);
+    sysctl_register_oid(&sysctl__debug_nmhybrid_frames);        sysctl_register_oid(&sysctl__debug_nmhybrid_words);
+    sysctl_register_oid(&sysctl__debug_nmhybrid_words_skipped); sysctl_register_oid(&sysctl__debug_nmhybrid_flips);
+    sysctl_register_oid(&sysctl__debug_nmhybrid_import_fail);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h4);      sysctl_register_oid(&sysctl__debug_nvaccel_igpu);
     sysctl_register_oid(&sysctl__debug_nvaccel_heads_published); sysctl_register_oid(&sysctl__debug_nvaccel_heads_registered);
     sysctl_register_oid(&sysctl__debug_nvaccel_heads_piped);
@@ -2435,6 +2479,106 @@ static bool nvAccelSurfCopyReady(IOSurface *s, unsigned head)
     if (++gIopCopyHeld[head] > 4) { gIopCopyHeld[head] = 0; return true; }
     OSAddAtomic64(1, &gCntIopCopySkip);
     return false;
+}
+
+// ---- hybrid laptops (nm_hybrid.h) ---------------------------------------------------------------------------------------
+// Shadow of the previous frame sent to another GPU's panel, one per head: ordinary cached memory, so finding what changed
+// costs reads, and the write-combined scan-out gets stores only for those pixels.
+static struct { struct nmh_shadow sh; unsigned long long bytes; } gHyShadow[kNvMaxFB];
+static struct nmh_shadow *nvAccelHybridShadow(unsigned head, unsigned w, unsigned h)
+{
+    if (head >= kNvMaxFB) return nullptr;
+    const unsigned long long need = (unsigned long long)w * h * 4;
+    if (gHyShadow[head].sh.buf && gHyShadow[head].bytes != need) {
+        IOFree(gHyShadow[head].sh.buf, gHyShadow[head].bytes); gHyShadow[head].sh.buf = nullptr; gHyShadow[head].bytes = 0;
+    }
+    if (!gHyShadow[head].sh.buf) {
+        gHyShadow[head].sh.buf = (uint32_t *)IOMalloc(need);
+        if (!gHyShadow[head].sh.buf) return nullptr;     // no shadow: every frame is a full copy, as before
+        gHyShadow[head].bytes = need; gHyShadow[head].sh.valid = 0;
+    }
+    gHyShadow[head].sh.w = w; gHyShadow[head].sh.h = h;
+    return &gHyShadow[head].sh;
+}
+
+// import slots: the memory descriptor behind each slot is held (wired, retained) while the other GPU's table maps its pages
+static IOMemoryDescriptor *gHyMd[kNvMaxFB][NMH_SLOTS];
+static unsigned gHyMdId[kNvMaxFB][NMH_SLOTS];
+static bool gHyOnSlot[kNvMaxFB];      // the panel's plane is on an imported surface, not the boot surface
+static unsigned gHyFailLogs;
+
+static void nvAccelHybridRelease(unsigned head, int slot)
+{
+    if (gHyMd[head][slot]) { gHyMd[head][slot]->complete(); gHyMd[head][slot]->release(); gHyMd[head][slot] = nullptr; }
+    gHyMdId[head][slot] = 0;
+}
+
+// The copy path writes into the boot surface, so the plane has to be there first, and the shadow no longer describes it.
+static void nvAccelHybridHome(IOService *fb, unsigned head)
+{
+    if (head >= kNvMaxFB || !gHyOnSlot[head]) return;
+    NMHybridReq q; nvSVZero(&q, sizeof q);
+    q.version = NMH_ABI_VERSION; q.op = NMH_OP_HOME;
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(NMH_FN_IMPORT);
+    IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
+    if (sym) sym->release();
+    gHyOnSlot[head] = false;
+    nmh_shadow_invalidate(&gHyShadow[head].sh);
+    if (rr != kIOReturnSuccess && gHyFailLogs < 8) { gHyFailLogs++; ALOG("hybrid: HOME refused (0x%x) head %u", (unsigned)rr, head); }
+}
+
+// Scan the composited surface out in place. Returns true when the frame is dealt with (shown, or deliberately held back),
+// false when the caller must copy it.
+static bool nvAccelHybridImport(IOService *fb, unsigned head, IOSurface *s)
+{
+    if (!fb || !s || head >= kNvMaxFB || fb->metaCast("NVRMNVDAFramebuffer")) return false;
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(NMH_FN_IMPORT);
+    if (!sym) return false;
+    struct Guard { const OSSymbol *s; ~Guard() { s->release(); } } guard = { sym };
+    const unsigned id = s->getSurfaceID();
+    NMHybridReq q; nvSVZero(&q, sizeof q);
+    q.version = NMH_ABI_VERSION; q.op = NMH_OP_QUERY; q.surfaceId = id; q.format = s->getPixelFormat();
+    q.width = (unsigned)s->getWidth(); q.height = (unsigned)s->getHeight(); q.pitch = (unsigned)s->getBytesPerRow();
+    IOReturn rr = fb->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr);
+#define HYFAIL(why) do { OSAddAtomic64(1, &gCntHyImportFail); \
+        if (gHyFailLogs < 8) { gHyFailLogs++; ALOG("hybrid: fallback to copy: %s (surface 0x%x, 0x%x)", nmh_why_name(why), id, (unsigned)rr); } \
+        return false; } while (0)
+    if (rr != kIOReturnSuccess) HYFAIL(q.result ? q.result : NMH_E_PROVIDER);
+    const int slot = q.slot;
+    if (slot < 0 || slot >= NMH_SLOTS) HYFAIL(NMH_E_BUSY);
+    if (q.evictedId) for (int i = 0; i < NMH_SLOTS; i++) if (gHyMd[head][i] && gHyMdId[head][i] == q.evictedId) nvAccelHybridRelease(head, i);
+    // the surface's pixels must be final: the GPU done with them, and in system memory where the other GPU reads them
+    nvSurfWaitReady(id);
+    if (!nvAccelSurfCopyReady(s, head)) return true;       // keep the previous picture, as the copy path does
+    IOMemoryDescriptor *md = s->getMemoryDescriptor();
+    const unsigned long long len = (unsigned long long)q.pitch * q.height;
+    if (!md || md->getLength() < len) HYFAIL(NMH_E_PAGES);
+    if (q.needMap) {
+        nvAccelHybridRelease(head, slot);
+        const unsigned npages = (unsigned)nmh_pages_for(q.pitch, q.height);
+        unsigned long long *pa = (unsigned long long *)IOMalloc((size_t)npages * sizeof *pa);
+        if (!pa) HYFAIL(NMH_E_PAGES);
+        if (md->prepare() != kIOReturnSuccess) { IOFree(pa, (size_t)npages * sizeof *pa); HYFAIL(NMH_E_PAGES); }
+        bool ok = true;
+        for (unsigned i = 0; i < npages && ok; i++) {
+            IOByteCount seg = 0;
+            addr64_t a = md->getPhysicalSegment((IOByteCount)i * 4096, &seg, kIOMemoryMapperNone);
+            if (!a || seg < 4096 || (a & 4095)) ok = false; else pa[i] = a;
+        }
+        if (ok) { q.op = NMH_OP_MAP; q.npages = npages; q.pages = pa; rr = fb->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr); ok = rr == kIOReturnSuccess; }
+        IOFree(pa, (size_t)npages * sizeof *pa);
+        if (!ok) { md->complete(); HYFAIL(q.result ? q.result : NMH_E_PAGES); }
+        md->retain(); gHyMd[head][slot] = md; gHyMdId[head][slot] = id;
+    }
+    // the plugin wrote these pixels with the CPU; the other GPU reads memory, so they have to have left the CPU's caches
+    md->performOperation(kIOMemoryIncoherentIOFlush, 0, (IOByteCount)len);
+    q.op = NMH_OP_FLIP; q.slot = slot;
+    rr = fb->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr);
+    if (rr != kIOReturnSuccess) { gHyOnSlot[head] = true; HYFAIL(q.result ? q.result : NMH_E_STUCK); }   // HOME on the copy that follows
+    gHyOnSlot[head] = true;
+    OSAddAtomic64(1, &gCntHyFlips);
+    return true;
+#undef HYFAIL
 }
 
 static unsigned nvVaAllocLogged, nvVaMapLogged;
