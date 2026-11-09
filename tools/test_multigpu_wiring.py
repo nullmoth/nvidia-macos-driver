@@ -11,7 +11,7 @@ fails = 0
 def arm(w, ok):
     global fails
     print(("PASS  " if ok else "FAIL  ") + w); fails += 0 if ok else 1
-i = dev.index("- (instancetype)initWithAcceleratorPort:")
+i = dev.index("- (instancetype)initWithAcceleratorPort:", dev.index("@implementation NVMTLDevice"))
 body = dev[i:i + 2500]
 arm("the plugin decides whether this accelerator is its card before it creates the device", body.index("nvmtl_card_wanted(port)") < body.index("[super initWithAcceleratorPort:port]"))
 j = dev.index("static BOOL nvmtl_card_wanted")
