@@ -244,6 +244,10 @@ pub fn relooper_max_blocks(fallback: usize) -> usize {
         .unwrap_or(fallback)
 }
 
+pub fn nest_stages() -> Option<OsString> {
+    std::env::var_os("METAL2VULKAN_NEST")
+}
+
 pub fn repro_dir() -> Option<OsString> {
     std::env::var_os("METAL2VULKAN_REPRO_DIR")
 }

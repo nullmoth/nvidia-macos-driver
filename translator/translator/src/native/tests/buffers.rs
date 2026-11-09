@@ -12391,6 +12391,70 @@ rhs:
     }
 }
 
+/// The same forward-GEP phi shape as the test above, as a real kernel: the table, the condition and the index come from
+/// buffers. The selected arm's device address must be (table entry for that arm) + index * 24, merged by a phi of
+/// 64-bit addresses (no pointer phi), and the read must go through the guarded load of that merged address.
+#[test]
+fn native_forward_gep_phi_of_table_pointers_merges_arm_addresses_and_loads_through_the_merge() {
+    let ll = r#"target triple = "spirv-unknown-vulkan1.2"
+%struct.Box = type { [3 x float], [3 x float] }
+%struct.Table = type { ptr addrspace(1), ptr addrspace(1) }
+
+define void @k(ptr addrspace(1) %table, ptr addrspace(1) %params, ptr addrspace(1) %out) {
+entry:
+  %pc = getelementptr inbounds i32, ptr addrspace(1) %params, i64 0
+  %c32 = load i32, ptr addrspace(1) %pc, align 4
+  %cond = icmp ne i32 %c32, 0
+  %pi = getelementptr inbounds i32, ptr addrspace(1) %params, i64 1
+  %i32v = load i32, ptr addrspace(1) %pi, align 4
+  %idx = zext i32 %i32v to i64
+  %f0 = getelementptr inbounds %struct.Table, ptr addrspace(1) %table, i64 0, i32 0
+  %b0 = load ptr addrspace(1), ptr addrspace(1) %f0, align 8
+  %f1 = getelementptr inbounds %struct.Table, ptr addrspace(1) %table, i64 0, i32 1
+  %b1 = load ptr addrspace(1), ptr addrspace(1) %f1, align 8
+  br i1 %cond, label %lhs, label %rhs
+
+merge:
+  %p = phi ptr addrspace(1) [ %lp, %lhs ], [ %rp, %rhs ]
+  %x = getelementptr inbounds %struct.Box, ptr addrspace(1) %p, i64 0, i32 0, i64 0
+  %v = load float, ptr addrspace(1) %x, align 4
+  store float %v, ptr addrspace(1) %out, align 4
+  ret void
+
+lhs:
+  %lp = getelementptr inbounds %struct.Box, ptr addrspace(1) %b0, i64 %idx
+  br label %merge
+
+rhs:
+  %rp = getelementptr inbounds %struct.Box, ptr addrspace(1) %b1, i64 %idx
+  br label %merge
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 16, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"ulong2", !"air.arg_name", !"table"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 8, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint2", !"air.arg_name", !"params"}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 2, i32 1, !"air.write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"float", !"air.arg_name", !"out"}
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_native_forward_gep_phi_real_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let out = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
+    let asm = disassemble(&out).expect("disassemble");
+    assert!(!asm.lines().any(|l| l.contains("OpPhi %_ptr_")), "{asm}");
+    // one 64-bit address phi, fed by an add of the arm's table entry and index * 24 in each arm
+    let phis: Vec<&str> = asm.lines().filter(|l| l.contains("OpPhi")).collect();
+    assert!(!phis.is_empty(), "{asm}");
+    assert!(asm.matches("OpIMul").count() >= 2, "{asm}");
+    // the load is guarded by a null test of the merged address and happens through OpConvertUToPtr
+    assert!(asm.contains("OpConvertUToPtr") && asm.contains("OpINotEqual"), "{asm}");
+    assert!(asm.contains("OpLoad") && asm.contains("OpStore"), "{asm}");
+}
+
 const VECTOR_ALLOCATION_STRIDE_LL: &str = r#"
 target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-n8:16:32"
 target triple = "air64-apple-macosx10.15.0"
