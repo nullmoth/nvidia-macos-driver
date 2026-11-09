@@ -17,7 +17,9 @@
 #define NVK_CURVE_MATH_H
 #include <stdint.h>
 
-#define CV_SUBDIV 8
+#ifndef CV_SUBDIV
+#define CV_SUBDIV 16     /* measured against an Apple GPU: docs/CURVES.md */
+#endif
 
 typedef uintptr_t V;
 typedef struct { V x, y, z; } V3;
@@ -135,6 +137,16 @@ static inline void cv_roots(const struct cv_ops *o, V a, V b, V c, V *t0, V *t1,
 
 static inline V cv_clamp01(const struct cv_ops *o, V x) { return max_(o, k_(o, 0.0f), min_(o, k_(o, 1.0f), x)); }
 
+/* With disk or no end caps the whole curve is cut by the plane through its first point perpendicular to the first piece and the plane
+ * through its last point perpendicular to the last piece: nothing of any piece lies behind either plane. */
+static inline V cv_end_clip(const struct cv_ops *o, const struct cv_ray *ray, V3 q0, V3 a0, V3 qn, V3 an, V notsphere, V t)
+{
+   V3 p = v3add(o, ray->o, v3mul(o, ray->d, t));
+   V x0 = v3dot(o, v3sub(o, p, q0), a0), xn = v3dot(o, v3sub(o, p, qn), an);
+   V inside = and_(o, le_(o, k_(o, 0.0f), x0), le_(o, xn, k_(o, 0.0f)));
+   return o->bor(o->ctx, o->bnot(o->ctx, notsphere), inside);
+}
+
 static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv_curve *c, const struct cv_ray *ray)
 {
    const V zero = k_(o, 0.0f), one = k_(o, 1.0f);
@@ -146,11 +158,19 @@ static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv
       for (int i = 0; i < 4; i++) { q = v3add(o, q, v3mul(o, c->p[i], w[i])); rr = add_(o, rr, mul_(o, c->r[i], w[i])); }
       Q[k] = q; R[k] = rr;
    }
+   /* axes of the first and last piece, for the end planes */
+   V3 axis0 = v3_(zero, zero, zero), axisN = axis0;
+   {
+      V3 e0 = v3sub(o, Q[1], Q[0]), eN = v3sub(o, Q[CV_SUBDIV], Q[CV_SUBDIV - 1]);
+      V l0 = sqrt_(o, v3dot(o, e0, e0)), lN = sqrt_(o, v3dot(o, eN, eN));
+      V ok0 = lt_(o, k_(o, 1e-6f), l0), okN = lt_(o, k_(o, 1e-6f), lN);
+      axis0 = v3mul(o, e0, sdiv_(o, one, l0, ok0));
+      axisN = v3mul(o, eN, sdiv_(o, one, lN, okN));
+   }
    V notsphere = o->bnot(o->ctx, eq_(o, c->caps, k_(o, 2.0f)));
    V isdisk = eq_(o, c->caps, one);
    struct cv_best round = { 0, ray->tmax, zero }, flat = { 0, ray->tmax, zero };
    round.hit = lt_(o, one, zero); flat.hit = round.hit;       /* false */
-   V3 axis0 = v3_(zero, zero, zero), axisN = axis0;
    V okc0 = round.hit, Ln = zero, okcn = round.hit, xan = zero, xbn = zero, rhoAn = zero, mn = zero;
 
    for (int k = 0; k < CV_SUBDIV; k++) {
@@ -175,13 +195,13 @@ static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv
       V qc = sub_(o, v3dot(o, ow, ow), mul_(o, c0, c0));
       V t0, t1, okq;
       cv_roots(o, qa, qb, qc, &t0, &t1, &okq);
-      V lo_x = (k == 0) ? sel_(o, notsphere, max_(o, xa, zero), xa) : xa;
-      V hi_x = (k == CV_SUBDIV - 1) ? sel_(o, notsphere, min_(o, xb, L), xb) : xb;
+      V lo_x = xa, hi_x = xb;
       for (int rt = 0; rt < 2; rt++) {
          V t = rt ? t1 : t0;
          V x = add_(o, ox, mul_(o, t, dx));
          V rad = add_(o, c0, mul_(o, c1, t));
          V valid = and_(o, and_(o, okc, okq), and_(o, and_(o, le_(o, lo_x, x), le_(o, x, hi_x)), lt_(o, zero, rad)));
+         valid = and_(o, valid, cv_end_clip(o, ray, Q[0], axis0, Q[CV_SUBDIV], axisN, notsphere, t));
          V u = mul_(o, add_(o, k_(o, (float)k), cv_clamp01(o, sdiv_(o, x, L, okL))), k_(o, 1.0f / CV_SUBDIV));
          cv_consider(o, &round, ray, valid, t, u);
       }
@@ -194,21 +214,12 @@ static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv
          cv_roots(o, sa, sb, sc, &s0, &s1, &oks);
          for (int rt = 0; rt < 2; rt++) {
             V t = rt ? s1 : s0;
-            V valid = oks;
-            if (k == 0 && !end) {          /* start of the segment: cut by the plane through it unless the cap is a sphere */
-               V x = add_(o, v3dot(o, rp, a), mul_(o, t, dx));
-               valid = and_(o, valid, o->bor(o->ctx, o->bnot(o->ctx, notsphere), le_(o, zero, x)));
-               valid = and_(o, valid, o->bor(o->ctx, o->bnot(o->ctx, notsphere), le_(o, zero, x)));
-            }
-            if (k == CV_SUBDIV - 1 && end) {
-               V x = add_(o, v3dot(o, rp, a), mul_(o, t, dx));
-               valid = and_(o, valid, o->bor(o->ctx, o->bnot(o->ctx, notsphere), le_(o, x, zero)));
-            }
+            V valid = and_(o, oks, cv_end_clip(o, ray, Q[0], axis0, Q[CV_SUBDIV], axisN, notsphere, t));
             cv_consider(o, &round, ray, valid, t, k_(o, (float)(k + end) / CV_SUBDIV));
          }
       }
-      if (k == 0) { axis0 = a; okc0 = okL; }
-      if (k == CV_SUBDIV - 1) { axisN = a; Ln = L; okcn = okc; xan = xa; xbn = xb; rhoAn = rhoA; mn = m; }
+      if (k == 0) { okc0 = okL; }
+      if (k == CV_SUBDIV - 1) { Ln = L; okcn = okc; xan = xa; xbn = xb; rhoAn = rhoA; mn = m; }
 
       /* ribbon */
       {
@@ -238,7 +249,7 @@ static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv
       }
    }
 
-   /* flat end disks when the cap is a disk: plane through the end point, accepted when the point lies in the end piece's hull */
+   /* flat end disks when the cap is a disk: the plane through the end point, a disk of the end point's own radius */
    for (int end = 0; end < 2; end++) {
       V3 P = end ? Q[CV_SUBDIV] : Q[0]; V3 a = end ? axisN : axis0; V rP = end ? R[CV_SUBDIV] : R[0];
       V3 rp = v3sub(o, ray->o, P);
@@ -248,12 +259,6 @@ static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv
       V3 q = v3add(o, rp, v3mul(o, ray->d, t));          /* relative to P, lies in the plane */
       V rho2 = v3dot(o, q, q);
       V inside = le_(o, rho2, mul_(o, rP, rP));
-      if (end) {
-         /* cone part of the last piece: axial coordinate from the piece start is Ln */
-         V rad = add_(o, rhoAn, mul_(o, mn, sub_(o, Ln, xan)));
-         V cone = and_(o, okcn, and_(o, and_(o, le_(o, xan, Ln), le_(o, Ln, xbn)), le_(o, rho2, mul_(o, rad, rad))));
-         inside = or_(o, inside, cone);
-      }
       V valid = and_(o, and_(o, okp, isdisk), inside);
       (void)okc0;
       cv_consider(o, &round, ray, valid, t, end ? one : zero);
