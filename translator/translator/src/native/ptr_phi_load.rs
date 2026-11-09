@@ -185,11 +185,27 @@ fn sole_prologue_load(lines: &[&str], phi: &PtrPhi) -> Option<(usize, String, St
             continue;
         }
         if !uses_value(raw, &phi.name) {
-            // once a non-phi instruction appears after the phi, the prologue is over
-            if i > phi.line && raw.starts_with(' ') {
+            // Between the phi and its load only instructions that cannot change what the load reads may sit:
+            // phis, other loads, address/value arithmetic. A store, a call, an atomic, a fence, a terminator or a
+            // new block ends the window. The replacement value phi still goes where the POINTER phi sat, so it
+            // stays in the block's phi prologue whatever lies between.
+            // A rule of "any non-phi ends the window" refused shaders with several pointer phis in a row followed
+            // by their loads: each load sits after its siblings' loads, and every one of them failed with
+            // "Function pointer phi %.in has differing structural sources".
+            if i > phi.line && prologue {
                 let t = raw.trim();
-                if !t.is_empty() && !t.starts_with(';') && !t.contains(" = phi ") {
+                if block_label(raw).is_some() {
                     prologue = false;
+                } else if raw.starts_with(' ') && !t.is_empty() && !t.starts_with(';') {
+                    let rhs = t.split_once(" = ").map(|(_, r)| r).unwrap_or(t);
+                    let writes_or_leaves = rhs.starts_with("store ") || rhs.starts_with("call ")
+                        || rhs.starts_with("tail call ") || rhs.starts_with("musttail call ")
+                        || rhs.starts_with("notail call ") || rhs.starts_with("invoke ")
+                        || rhs.starts_with("atomicrmw ") || rhs.starts_with("cmpxchg ") || rhs.starts_with("fence ")
+                        || TERMINATORS.iter().any(|k| rhs.starts_with(k));
+                    if writes_or_leaves {
+                        prologue = false;
+                    }
                 }
             }
             continue;
@@ -247,8 +263,15 @@ fn rewrite(ll: &str) -> Option<String> {
         }
         let mut arms = Vec::new();
         for ((value, label), at) in phi.incoming.iter().zip(ats) {
-            let name = format!("%ptrphi.sunk.{fresh}");
-            fresh += 1;
+            // Earlier lowering attempts may already have inserted sunk loads.
+            // Keep their SSA names distinct when this pass runs again.
+            let name = loop {
+                let candidate = format!("%ptrphi.sunk.{fresh}");
+                fresh += 1;
+                if !uses_value(ll, &candidate) {
+                    break candidate;
+                }
+            };
             let loaded = if tail.is_empty() {
                 format!("  {name} = load {ty}, ptr {value}")
             } else {
@@ -305,6 +328,47 @@ pub(crate) fn sink_pointer_phi_loads_owned(ll: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repeated_lowering_preserves_unique_sunk_load_names() {
+        let input = r#"
+define float @two_pointer_phis(i1 %pick) {
+entry:
+  %a = alloca float
+  %b = alloca float
+  %c = alloca float
+  %d = alloca float
+  br i1 %pick, label %left, label %right
+left:
+  br label %merge
+right:
+  br label %merge
+merge:
+  %p = phi ptr [ %a, %left ], [ %b, %right ]
+  %q = phi ptr [ %c, %left ], [ %d, %right ]
+  %x = load float, ptr %p, align 4
+  %y = load float, ptr %q, align 4
+  %sum = fadd float %x, %y
+  ret float %sum
+}
+"#;
+        let first = rewrite(input).expect("first pointer phi");
+        // None means nothing was left to lower: the first pass already sank every pointer phi, and
+        // the phi assertion below is what proves it. A second pass must not mint duplicate names.
+        let second = rewrite(&first).unwrap_or_else(|| first.clone());
+        let mut names = std::collections::HashSet::new();
+        let mut loads = 0;
+        for line in second.lines() {
+            if let Some((name, rhs)) = line.trim().split_once(" = ") {
+                assert!(names.insert(name), "duplicate SSA definition {name}");
+                if name.starts_with("%ptrphi.sunk.") && rhs.starts_with("load ") {
+                    loads += 1;
+                }
+            }
+        }
+        assert_eq!(loads, 4);
+        assert!(!second.contains("phi ptr "));
+    }
+
     use super::*;
 
     /// The shape a refused module has, reduced: a pointer phi over two alloca-derived GEPs whose
@@ -391,15 +455,77 @@ mod tests {
         assert!(rewrite(&ll).is_none(), "two uses must refuse");
     }
 
-    /// A load that is NOT in the phi prologue refuses: the replacement phi would land after a non-phi
-    /// instruction, which is invalid LLVM.
+    /// Arithmetic between the phi and its load is fine: the value phi still goes where the pointer phi sat
+    /// (the prologue), and nothing in between can change what the load reads.
     #[test]
-    fn a_load_after_a_non_phi_refuses() {
+    fn arithmetic_between_phi_and_load_still_rewrites() {
         let ll = GAME.replace(
             "  %272 = phi float [ %266, %259 ], [ %240, %9 ]\n",
             "  %272 = phi float [ %266, %259 ], [ %240, %9 ]\n  %273 = fadd float 1.0, 1.0\n",
         );
-        assert!(rewrite(&ll).is_none(), "a load outside the prologue must refuse");
+        let out = rewrite(&ll).expect("arithmetic in between must not block the rewrite");
+        assert!(!out.contains("phi ptr "), "{out}");
+    }
+
+    /// A STORE between the phi and its load refuses: it may change what the load reads, so the value loaded in
+    /// the predecessor is no longer a faithful stand-in.
+    #[test]
+    fn a_store_between_phi_and_load_refuses() {
+        let ll = GAME.replace(
+            "  %272 = phi float [ %266, %259 ], [ %240, %9 ]\n",
+            "  %272 = phi float [ %266, %259 ], [ %240, %9 ]\n  store float 0.0, ptr %244, align 4\n",
+        );
+        assert!(rewrite(&ll).is_none(), "a store in the window must refuse");
+    }
+
+    /// A call between the phi and its load refuses (it may write memory).
+    #[test]
+    fn a_call_between_phi_and_load_refuses() {
+        let ll = GAME.replace(
+            "  %272 = phi float [ %266, %259 ], [ %240, %9 ]\n",
+            "  %272 = phi float [ %266, %259 ], [ %240, %9 ]\n  call void @g()\n",
+        );
+        assert!(rewrite(&ll).is_none(), "a call in the window must refuse");
+    }
+
+    /// Four pointer phis over four different local arrays, then their four loads in reverse order, so each load
+    /// sits after its siblings' loads (a shape seen in shipping game fragment shaders). All four must become value phis.
+    #[test]
+    fn four_sibling_pointer_phis_then_their_loads_all_rewrite() {
+        let ll = concat!(
+            "define void @ps() {\n",
+            "14:\n",
+            "  %43 = alloca [4 x float], align 4\n  %45 = alloca [4 x float], align 4\n",
+            "  %47 = alloca [4 x float], align 4\n  %49 = alloca [4 x float], align 4\n",
+            "  %285 = getelementptr [4 x float], ptr %43, i64 0, i64 1\n",
+            "  %287 = getelementptr [4 x float], ptr %45, i64 0, i64 1\n",
+            "  %289 = getelementptr [4 x float], ptr %47, i64 0, i64 1\n",
+            "  %291 = getelementptr [4 x float], ptr %49, i64 0, i64 1\n",
+            "  br i1 true, label %306, label %315\n",
+            "306:                                              ; preds = %14\n",
+            "  %308 = getelementptr [4 x float], ptr %47, i64 0, i64 2\n",
+            "  %310 = getelementptr [4 x float], ptr %45, i64 0, i64 2\n",
+            "  %312 = getelementptr [4 x float], ptr %49, i64 0, i64 2\n",
+            "  %314 = getelementptr [4 x float], ptr %43, i64 0, i64 2\n",
+            "  br label %315\n",
+            "315:                                              ; preds = %306, %14\n",
+            "  %.in = phi ptr [ %308, %306 ], [ %285, %14 ]\n",
+            "  %.in202 = phi ptr [ %310, %306 ], [ %287, %14 ]\n",
+            "  %.in203 = phi ptr [ %312, %306 ], [ %289, %14 ]\n",
+            "  %.in204 = phi ptr [ %314, %306 ], [ %291, %14 ]\n",
+            "  %316 = load float, ptr %.in204, align 4\n",
+            "  %317 = load float, ptr %.in203, align 4\n",
+            "  %318 = load float, ptr %.in202, align 4\n",
+            "  %319 = load float, ptr %.in, align 4\n",
+            "  ret void\n",
+            "}\n",
+        );
+        let out = rewrite(ll).expect("the Cyberpunk shape must rewrite");
+        assert!(!out.contains("phi ptr "), "every pointer phi must be gone:\n{out}");
+        for r in ["%316 = phi float", "%317 = phi float", "%318 = phi float", "%319 = phi float"] {
+            assert!(out.contains(r), "{r} missing:\n{out}");
+        }
+        assert!(!out.contains("load float, ptr %.in"), "no load through a pointer phi may remain:\n{out}");
     }
 
     /// A module with no pointer phi is returned untouched, and borrows rather than copying.

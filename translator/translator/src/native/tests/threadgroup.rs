@@ -1973,6 +1973,40 @@ entry:
 }
 
 #[test]
+fn native_byte_addressed_workgroup_vector_view_is_valid_before_retries() {
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+
+define void @k(ptr addrspace(3) %tile, ptr addrspace(1) %out, i32 %index) {
+entry:
+  %wide = getelementptr <4 x half>, ptr addrspace(3) %tile, i32 %index
+  %alias = getelementptr i8, ptr addrspace(3) %wide, i64 8
+  %value = load <3 x half>, ptr addrspace(3) %alias, align 8
+  store <3 x half> %value, ptr addrspace(1) %out, align 8
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 3, !"air.arg_type_size", i32 8, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"half4", !"air.arg_name", !"tile"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.write", !"air.address_space", i32 1, !"air.arg_type_name", !"half3*", !"air.arg_name", !"out"}
+!5 = !{i32 2, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"uint", !"air.arg_name", !"index"}
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_byte_addressed_workgroup_vector_view_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let spv = crate::translate_native_no_retry(ll, Stage::Kernel).expect("primary translate");
+    tools::spirv_val_bytes(&spv, &tmp).expect("primary SPIR-V validates");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert!(asm.contains("Workgroup"), "{asm}");
+    assert!(asm.contains("OpBitcast"), "{asm}");
+}
+
+#[test]
 fn native_kernel_threadgroup_param_direct_scalar_load_uses_element_zero() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
@@ -2877,6 +2911,45 @@ declare void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float>, ptr addr
 }
 
 #[test]
+fn native_simdgroup_matrix_init_filled_translates() {
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+define void @main(ptr addrspace(1) %in_h, ptr addrspace(1) %out) {
+entry:
+  %pv1 = insertelement <2 x i64> <i64 poison, i64 8>, i64 8, i64 0
+  %pv2 = insertelement <2 x i64> <i64 1, i64 poison>, i64 8, i64 1
+  %ph = getelementptr inbounds half, ptr addrspace(1) %in_h, i64 0
+  %po = getelementptr inbounds float, ptr addrspace(1) %out, i64 0
+  %A = call <64 x half> @air.simdgroup_matrix_8x8_load.v64f16.p1f16(ptr addrspace(1) %ph, <2 x i64> %pv1, <2 x i64> %pv2, <2 x i64> zeroinitializer)
+  %C = call <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(float 2.500000e-01)
+  %D = call <64 x float> @air.simdgroup_matrix_8x8_multiply_accumulate.v64f32.v64f16.v64f16.v64f32(<64 x half> %A, <64 x half> %A, <64 x float> %C)
+  call void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float> %D, ptr addrspace(1) %po, <2 x i64> %pv1, <2 x i64> %pv2, <2 x i64> zeroinitializer)
+  ret void
+}
+
+declare <64 x half> @air.simdgroup_matrix_8x8_load.v64f16.p1f16(ptr addrspace(1), <2 x i64>, <2 x i64>, <2 x i64>)
+declare <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(float)
+declare <64 x float> @air.simdgroup_matrix_8x8_multiply_accumulate.v64f32.v64f16.v64f16.v64f32(<64 x half>, <64 x half>, <64 x float>)
+declare void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float>, ptr addrspace(1), <2 x i64>, <2 x i64>, <2 x i64>)
+
+!air.kernel = !{!0}
+!0 = !{ptr @main, !1, !2}
+!1 = !{}
+!2 = !{!3, !4}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_name", !"half", !"air.arg_name", !"in_h"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_name", !"float", !"air.arg_name", !"out"}
+"#;
+    let tmp = std::env::temp_dir().join(format!("metal2vulkan_native_init_filled_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let out = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
+    let asm = disassemble(&out).expect("disassemble transformed");
+    assert!(!asm.contains("init_filled"), "{asm}");
+    if std::process::Command::new("spirv-val").arg("--version").output().is_ok() {
+        tools::spirv_val_bytes(&out, &tmp).expect("spirv-val");
+    }
+}
+
+#[test]
 fn native_declared_simdgroup_lane_is_the_lane_the_shuffle_reads() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
@@ -2945,7 +3018,7 @@ declare i1 @air.simd_is_first()
 }
 
 #[test]
-fn native_barrier_execution_scope_comes_from_the_operand_not_the_callee() {
+fn native_barrier_execution_scope_comes_from_the_callee_memory_scope_from_the_operand() {
     fn barrier_scopes(ll: &str, label: &str) -> Vec<(u32, u32, u32)> {
         let tmp = std::env::temp_dir().join(format!(
             "metal2vulkan_barrier_scope_{label}_{}",
@@ -3027,9 +3100,11 @@ declare void @air.simdgroup.barrier(i32, i32)
                  tail call void @air.simdgroup.barrier(i32 2, i32 4)"),
             "simd"
         ),
+        // simdgroup_barrier(mem_threadgroup, thread_scope_threadgroup): a simdgroup barrier whose memory scope is
+        // the threadgroup - it must never become a workgroup (BAR.SYNC) barrier.
         vec![
             (
-                Scope::Workgroup as u32,
+                Scope::Subgroup as u32,
                 Scope::Workgroup as u32,
                 workgroup_memory
             ),
@@ -3039,6 +3114,15 @@ declare void @air.simdgroup.barrier(i32, i32)
                 workgroup_memory
             ),
         ]
+    );
+    // threadgroup_barrier(mem_threadgroup, thread_scope_simdgroup): still a whole-threadgroup execution barrier.
+    assert_eq!(
+        barrier_scopes(&ll("  tail call void @air.wg.barrier(i32 2, i32 4)"), "wgsimd"),
+        vec![(
+            Scope::Workgroup as u32,
+            Scope::Subgroup as u32,
+            workgroup_memory
+        )]
     );
     assert_eq!(
         barrier_scopes(&ll("  tail call void @air.wg.barrier(i32 8, i32 1)"), "wg"),
@@ -3055,12 +3139,12 @@ declare void @air.simdgroup.barrier(i32, i32)
     ));
     let _ = std::fs::create_dir_all(&tmp);
     let err = crate::translate_sanitized_native(
-        &ll("  tail call void @air.wg.barrier(i32 2, i32 2)"),
+        &ll("  tail call void @air.wg.barrier(i32 2, i32 3)"),
         Stage::Kernel,
         &tmp,
     )
     .expect_err("undefined barrier scope");
-    assert!(err.contains("execution scope 2"), "{err}");
+    assert!(err.contains("memory scope 3"), "{err}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -3274,3 +3358,12 @@ declare i32 @air.atomic.local.add.u.i32(ptr addrspace(3), i32, i32, i32, i1)
     );
     let _ = std::fs::remove_dir_all(tmp);
 }
+
+// Three dispatch-tail-guard arms lived here and were removed with the pass itself. They are
+// worth naming because they all PASSED while the thing they guarded was wrong, which is the trap: each arm
+// tested the pass against its own premise instead of against the plugin. The premise was that a Metal
+// dispatchThreads: grid launches lanes Metal would not create, so the translator had to retire them. It
+// does not - nvmtl_vk_cmd_dispatch_threads dispatches a smaller-workgroup pipeline variant for the partial
+// group, so the launched set is already exactly Metal's - and the push constants the guard compared against
+// are pushed by only two of the four compute dispatch paths. An arm that had asked "does the plugin push
+// this region on every path it can be reached through" would have killed the pass before it was installed.
