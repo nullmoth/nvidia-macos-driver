@@ -204,7 +204,7 @@ bool NMGopFB::adoptFirmwareFramebuffer(IOPCIDevice *pci)
     nmgop_bar bars[6]; unsigned n = 0;
     static const int kRegs[6] = { kIOPCIConfigBaseAddress0, kIOPCIConfigBaseAddress1, kIOPCIConfigBaseAddress2,
                                   kIOPCIConfigBaseAddress3, kIOPCIConfigBaseAddress4, kIOPCIConfigBaseAddress5 };
-    for (int r : kRegs) if (IODeviceMemory *m = pci->getDeviceMemoryWithRegister(r)) { bars[n].phys = m->getPhysicalAddress(); bars[n].len = m->getLength(); n++; }
+    for (int r : kRegs) if (IODeviceMemory *m = pci->getDeviceMemoryWithRegister((UInt8)r)) { bars[n].phys = m->getPhysicalAddress(); bars[n].len = m->getLength(); n++; }
     nmgop_geom g;
     const int why = nmgop_geometry((uint64_t)v.v_baseAddr, v.v_width, v.v_height, v.v_rowBytes, v.v_depth, bars, n, &g);
     if (why != NMGOP_OK) { GFBLOG("%s - leaving the firmware screen", nmgop_why_name(why)); return false; }
