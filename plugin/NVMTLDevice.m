@@ -2168,7 +2168,9 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
         nvlog("pipeline FAILED: %s / %s — see the vk: line above for the VkResult", vf->_fname.UTF8String ?: "?", ff->_fname.UTF8String ?: "?");
         return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: vkCreateGraphicsPipelines FAILED (%@ / %@)", vf->_fname, ff->_fname]); }
     nvlog("newRenderPipelineStateWithDescriptor: -> %p (VkPipeline from %lu+%lu B of SPIR-V)",
-          (__bridge void *)ps, (unsigned long)vf->_spirv.length, (unsigned long)ff->_spirv.length); nvmtl_render_keep_linked(ps, vf, ff); return ps; }
+          (__bridge void *)ps, (unsigned long)vf->_spirv.length, (unsigned long)ff->_spirv.length); nvmtl_render_keep_linked(ps, vf, ff);
+          if (d.supportIndirectCommandBuffers) nvmtl_icb_register_pipeline(ps, NO);
+          return ps; }
 
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d options:(MTLPipelineOption)o
                                                           reflection:(MTLAutoreleasedRenderPipelineReflection *)r error:(NSError **)err {
@@ -2312,6 +2314,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     if (tgWhy) { if (r) *r = nil; return nvmtl_fail(err, tgWhy); }
     id<MTLComputePipelineState> ps = [self newComputePipelineStateWithFunction:kfn error:err];
     if ([(id)ps isKindOfClass:[NVMTLComputePipelineState class]]) { ((NVMTLComputePipelineState *)ps)->_icb = d.supportIndirectCommandBuffers;
+        if (d.supportIndirectCommandBuffers) nvmtl_icb_register_pipeline(ps, YES);
         ((NVMTLComputePipelineState *)ps)->_askT = d.maxTotalThreadsPerThreadgroup;
         ((NVMTLComputePipelineState *)ps)->_reqTG = nvmtl_desc_size(d, @selector(requiredThreadsPerThreadgroup));
         ((NVMTLComputePipelineState *)ps)->_label = [d.label copy]; }
@@ -2691,6 +2694,10 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
     NVMTLIndirectCommandBuffer *icb = [NVMTLIndirectCommandBuffer new];
     icb->_dev = self; icb->_cmds = [NSMutableArray arrayWithCapacity:n];
     icb->_opts = o;
+    if (nvmtl_gpu_icb_on() && nvmtl_icb_slots(n)) {   // the record array a kernel writes with the encode intrinsics; its address is the buffer's resource id
+        icb->_recBuf = (NVMTLBuffer *)[self newBufferWithLength:n * NVMTL_ICB_REC_BYTES options:MTLResourceStorageModeShared];
+        if (icb->_recBuf) memset(((id<MTLBuffer>)icb->_recBuf).contents, 0, n * NVMTL_ICB_REC_BYTES); else nvlog("newIndirectCommandBuffer: the GPU record array of %lu slots FAILED - CPU-encoded commands only", (unsigned long)n);
+    }
     for (NSUInteger i = 0; i < n; i++) [icb->_cmds addObject:[NVMTLIndirectCommand new]];
     nvlog("newIndirectCommandBufferWithDescriptor: %lu slots -> %p", (unsigned long)n, (__bridge void *)icb);
     return icb;

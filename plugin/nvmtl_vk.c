@@ -26,6 +26,7 @@
 #include "nvmtl_multiview.h"
 #include "nvmtl_icb_range.h"
 #include "nvmtl_y422_convert.h"
+#include "nvmtl_icb_record.h"
 #include "nvmtl_copy_compat.h"
 #include "nvmtl_sampler_state.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
@@ -9830,6 +9831,54 @@ int nvmtl_vk_cmd_icb_mask(nvk_cmdbuf *c, nvk_buffer *args, nvk_buffer *range, si
     pvkCmdPushConstants(c->cb, g_icb_mask_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 28, &a);
     pvkCmdDispatch(c->cb, nvmtl_icb_mask_groups(slots), 1, 1);
     nvmtl_vk_cmd_barrier(c);   // the indirect draws and dispatches read the records next
+    return 0;
+}
+
+// Gathers the GPU-written ICB records (nvmtl_icb_record.h) into 5-word indirect arguments for one candidate pipeline.
+static pthread_mutex_t g_icb_gather_lock = PTHREAD_MUTEX_INITIALIZER;
+static VkPipeline g_icb_gather_pipeline;
+static VkPipelineLayout g_icb_gather_layout;
+static int nvmtl_icb_gather_init(void)
+{
+    int rc = -1;
+    pthread_mutex_lock(&g_icb_gather_lock);
+    if (g_icb_gather_pipeline) { rc = 0; goto done; }
+    VkShaderModule mod = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo sm = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_icb_gather_spv, nvmtl_icb_gather_spv };
+    if (pvkCreateShaderModule(g_dev, &sm, NULL, &mod) != VK_SUCCESS) goto done;
+    VkPushConstantRange push = { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(nvmtl_icb_gather_args) };
+    VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL, 1, &push };
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (pvkCreatePipelineLayout(g_dev, &li, NULL, &layout) == VK_SUCCESS) {
+        VkPipelineShaderStageCreateInfo stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", NULL };
+        VkComputePipelineCreateInfo pi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, stage, layout, VK_NULL_HANDLE, -1 };
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        if (nvmtl_create_compute_pipeline(g_dev, VK_NULL_HANDLE, &pi, NULL, &pipeline) == VK_SUCCESS) {
+            g_icb_gather_layout = layout; g_icb_gather_pipeline = pipeline; rc = 0;
+        } else {
+            if (pipeline) pvkDestroyPipeline(g_dev, pipeline, NULL);
+            pvkDestroyPipelineLayout(g_dev, layout, NULL);
+        }
+    }
+    pvkDestroyShaderModule(g_dev, mod, NULL);
+done:
+    pthread_mutex_unlock(&g_icb_gather_lock);
+    return rc;
+}
+// range: either {loc, len} from the caller (range == NULL) or the two words at range+range_off. Outside a render pass.
+int nvmtl_vk_cmd_icb_gather(nvk_cmdbuf *c, nvk_buffer *records, nvk_buffer *out, size_t out_off, uint32_t slots, uint32_t compute, uint64_t pso, uint32_t ptype,
+                            uint32_t loc, uint32_t len, nvk_buffer *range, size_t range_off)
+{
+    if (!c || c->in_rp || !records || !out || !slots || slots > NVMTL_ICB_MAX_SLOTS || records->size < (size_t)slots * NVMTL_ICB_REC_BYTES ||
+        (out_off & 3) || out_off > out->size || out->size - out_off < (size_t)slots * NVMTL_ICB_RECORD_BYTES || (range && ((range_off & 3) || range_off > range->size || range->size - range_off < 8)) || nvmtl_icb_gather_init()) return -1;
+    nvmtl_icb_gather_args a = { nvmtl_vk_buffer_address(records), range ? nvmtl_vk_buffer_address(range) + range_off : 0, nvmtl_vk_buffer_address(out) + out_off,
+        slots, compute, (uint32_t)pso, (uint32_t)(pso >> 32), range ? NVMTL_ICB_GATHER_RANGE_FROM_BUFFER : loc, range ? NVMTL_ICB_GATHER_RANGE_FROM_BUFFER : len, ptype, 0 };
+    if (!a.rec || !a.out || (range && !a.rng)) return -1;
+    nvmtl_vk_cmd_barrier(c);   // the kernel that encoded the records ran in an earlier pass
+    pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_icb_gather_pipeline);
+    pvkCmdPushConstants(c->cb, g_icb_gather_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof a, &a);
+    pvkCmdDispatch(c->cb, nvmtl_icb_mask_groups(slots), 1, 1);
+    nvmtl_vk_cmd_barrier(c);
     return 0;
 }
 
