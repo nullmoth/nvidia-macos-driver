@@ -128,3 +128,10 @@ static inline bool nvrmFileTrusted(unsigned uid, unsigned mode)
 {
     return uid == 0 && !(mode & 022);
 }
+// The service whose children are the display nubs. A framebuffer that refused to start (no display connected at boot) is
+// detached from its nub by IOKit, so getProvider() on it returns nothing and a later hot-plug could not reach the idle
+// nubs to start again. The parent remembered when a framebuffer first started is the fallback. (Diagnosed in issue 288.)
+template <class T> static inline T *nvrmPickNubParent(T *viaProvider, T *remembered)
+{
+    return viaProvider ? viaProvider : remembered;
+}
