@@ -3764,15 +3764,43 @@ static void nvmtl_tile_ignored(const char *what) { static _Atomic unsigned n; if
 - (void)setTileTextures:(const id<MTLTexture> __unsafe_unretained [])textures withRange:(NSRange)range {
     for (NSUInteger k = 0; k < range.length; k++) [self setTileTexture:textures ? textures[k] : nil atIndex:range.location + k];
 }
-- (void)setTileSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileSamplerState"); }
-- (void)setTileSamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])samplers withRange:(NSRange)range { nvmtl_tile_ignored("setTileSamplerStates"); }
-- (void)setTileSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lo lodMaxClamp:(float)hi atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileSamplerState"); }
-- (void)setTileSamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])samplers lodMinClamps:(const float [])lo lodMaxClamps:(const float [])hi withRange:(NSRange)range { nvmtl_tile_ignored("setTileSamplerStates"); }
-- (void)setTileVisibleFunctionTable:(id<MTLVisibleFunctionTable>)t atBufferIndex:(NSUInteger)i { nvmtl_tile_ignored("setTileVisibleFunctionTable"); }
-- (void)setTileVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __unsafe_unretained [])ts withBufferRange:(NSRange)r { nvmtl_tile_ignored("setTileVisibleFunctionTables"); }
-- (void)setTileIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)t atBufferIndex:(NSUInteger)i { nvmtl_tile_ignored("setTileIntersectionFunctionTable"); }
-- (void)setTileIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __unsafe_unretained [])ts withBufferRange:(NSRange)r { nvmtl_tile_ignored("setTileIntersectionFunctionTables"); }
-- (void)setTileAccelerationStructure:(id<MTLAccelerationStructure>)a atBufferIndex:(NSUInteger)i { nvmtl_tile_ignored("setTileAccelerationStructure"); }
+- (void)setTileSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
+    if (!nvmtl_tile_on()) { nvmtl_tile_ignored("setTileSamplerState"); return; }
+    if (!_tileSmp) _tileSmp = [NSMutableDictionary new];
+    if (sampler) _tileSmp[@(index)] = @[sampler, [NSNull null], [NSNull null]]; else [_tileSmp removeObjectForKey:@(index)];
+}
+- (void)setTileSamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])samplers withRange:(NSRange)range {
+    for (NSUInteger k = 0; k < range.length; k++) [self setTileSamplerState:samplers ? samplers[k] : nil atIndex:range.location + k];
+}
+- (void)setTileSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lo lodMaxClamp:(float)hi atIndex:(NSUInteger)index {
+    if (!nvmtl_tile_on()) { nvmtl_tile_ignored("setTileSamplerState"); return; }
+    if (!_tileSmp) _tileSmp = [NSMutableDictionary new];
+    if (sampler) _tileSmp[@(index)] = @[sampler, @(lo), @(hi)]; else [_tileSmp removeObjectForKey:@(index)];
+}
+- (void)setTileSamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])samplers lodMinClamps:(const float [])lo lodMaxClamps:(const float [])hi withRange:(NSRange)range {
+    for (NSUInteger k = 0; k < range.length; k++) [self setTileSamplerState:samplers ? samplers[k] : nil lodMinClamp:lo ? lo[k] : 0 lodMaxClamp:hi ? hi[k] : FLT_MAX atIndex:range.location + k];
+}
+- (void)setTileVisibleFunctionTable:(id<MTLVisibleFunctionTable>)t atBufferIndex:(NSUInteger)i {
+    if (!nvmtl_tile_on()) { nvmtl_tile_ignored("setTileVisibleFunctionTable"); return; }
+    if (!_tileVft) _tileVft = [NSMutableDictionary new];
+    if (t) _tileVft[@(i)] = t; else [_tileVft removeObjectForKey:@(i)];
+}
+- (void)setTileVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __unsafe_unretained [])ts withBufferRange:(NSRange)r {
+    for (NSUInteger k = 0; k < r.length; k++) [self setTileVisibleFunctionTable:ts ? ts[k] : nil atBufferIndex:r.location + k];
+}
+- (void)setTileIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)t atBufferIndex:(NSUInteger)i {
+    if (!nvmtl_tile_on()) { nvmtl_tile_ignored("setTileIntersectionFunctionTable"); return; }
+    if (!_tileIft) _tileIft = [NSMutableDictionary new];
+    if (t) _tileIft[@(i)] = t; else [_tileIft removeObjectForKey:@(i)];
+}
+- (void)setTileIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __unsafe_unretained [])ts withBufferRange:(NSRange)r {
+    for (NSUInteger k = 0; k < r.length; k++) [self setTileIntersectionFunctionTable:ts ? ts[k] : nil atBufferIndex:r.location + k];
+}
+- (void)setTileAccelerationStructure:(id<MTLAccelerationStructure>)a atBufferIndex:(NSUInteger)i {
+    if (!nvmtl_tile_on()) { nvmtl_tile_ignored("setTileAccelerationStructure"); return; }
+    if (!_tileAs) _tileAs = [NSMutableDictionary new];
+    if (a) _tileAs[@(i)] = a; else [_tileAs removeObjectForKey:@(i)];
+}
 // A tile function runs as a compute kernel between two render-pass segments (translator/src/native/tile_imageblock.rs): the pass so far
 // is ended with every attachment kept, one threadgroup per tile runs over the render area with the colour attachments bound as storage
 // images (the compute encoder's storage twins copy them in and out), and the pass resumes with those attachments loaded.
@@ -3807,6 +3835,10 @@ static void nvmtl_tile_ignored(const char *what) { static _Atomic unsigned n; if
     for (NSNumber *k in _tileBuf) { NSArray *e = _tileBuf[k]; [ce setBuffer:e[0] offset:[e[1] unsignedLongValue] atIndex:k.unsignedLongValue]; }
     for (NSNumber *k in _tileTex) [ce setTexture:_tileTex[k] atIndex:k.unsignedLongValue];
     for (NSNumber *k in _tileTg) [ce setThreadgroupMemoryLength:[_tileTg[k] unsignedLongValue] atIndex:k.unsignedLongValue];
+    for (NSNumber *k in _tileSmp) { NSArray *e = _tileSmp[k]; if ([e[1] isKindOfClass:[NSNumber class]]) [ce setSamplerState:e[0] lodMinClamp:[e[1] floatValue] lodMaxClamp:[e[2] floatValue] atIndex:k.unsignedLongValue]; else [ce setSamplerState:e[0] atIndex:k.unsignedLongValue]; }
+    for (NSNumber *k in _tileVft) [ce setVisibleFunctionTable:_tileVft[k] atBufferIndex:k.unsignedLongValue];
+    for (NSNumber *k in _tileIft) [ce setIntersectionFunctionTable:_tileIft[k] atBufferIndex:k.unsignedLongValue];
+    for (NSNumber *k in _tileAs) [ce setAccelerationStructure:_tileAs[k] atBufferIndex:k.unsignedLongValue];
     [ce dispatchThreadgroups:MTLSizeMake((w + tw - 1) / tw, (h + th - 1) / th, 1) threadsPerThreadgroup:threadsPerTile];
     [ce endEncoding];
     if (_ps) [self setRenderPipelineState:_ps];   // the pass resumes with the attachments loaded
