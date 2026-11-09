@@ -595,6 +595,21 @@ pub(super) fn add_needed_capabilities(ctx: &mut Ctx, variable_pointer_requiremen
     if has_sample_id || has_sample_interpolation {
         want.push(Capability::SampleRateShading);
     }
+    // GLSL.std.450 InterpolateAtCentroid / AtSample / AtOffset are 76, 77 and 78
+    let has_pull_interpolation = ctx.module.functions.iter().any(|function| {
+        function.blocks.iter().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                instruction.class.opcode == Op::ExtInst
+                    && matches!(
+                        instruction.operands.get(1),
+                        Some(Operand::LiteralExtInstInteger(76..=78))
+                    )
+            })
+        })
+    });
+    if has_pull_interpolation {
+        want.push(Capability::InterpolationFunction);
+    }
     let has_barycentric = ctx.module.annotations.iter().any(|instruction| {
         instruction.class.opcode == Op::Decorate
             && instruction.operands.get(1) == Some(&Operand::Decoration(Decoration::BuiltIn))
