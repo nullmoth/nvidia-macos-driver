@@ -1,0 +1,22 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+// Per-command buffers of a GPU-encoded ICB. Render shaders reach their buffers through an address table (binding 640), one entry per
+// Metal buffer index; the CPU fills one table copy per slot from the encoder's own bindings (the inherited ones). This pass overwrites
+// the first 31 entries of slot t's copy with the addresses command t recorded for that stage (plugin/nvmtl_icb_record.h): a zero
+// address means the command did not set that index and the inherited entry stays.
+layout(buffer_reference, std430) buffer Words { uint v[]; };
+layout(push_constant) uniform Args { Words rec; Words dsts; uint n; uint fragment; } a;
+layout(local_size_x = 64) in;
+void main()
+{
+    uint g = gl_GlobalInvocationID.x;
+    if (g >= a.n * 31u) return;
+    uint t = g / 31u, e = g % 31u;
+    uint src = t * 144u + (a.fragment != 0u ? 82u : 20u) + e * 2u;     // byte 328 / byte 80 of the record
+    uint lo = a.rec.v[src], hi = a.rec.v[src + 1u];
+    if ((lo | hi) == 0u) return;
+    Words dst = Words(uint64_t(a.dsts.v[t * 2u]) | (uint64_t(a.dsts.v[t * 2u + 1u]) << 32));
+    dst.v[e * 2u] = lo;
+    dst.v[e * 2u + 1u] = hi;
+}

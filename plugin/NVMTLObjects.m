@@ -4689,6 +4689,14 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     }
     if (cap && nvmtl_vk_cmd_icb_index_copy(&_cb->_c, &b->_recBuf->_b, &idxBuf->_b, slots, cap, loc, len, rb ? &rb->_b : NULL, ro)) { nvlog("GPU ICB: the index copy pass FAILED - indexed commands are skipped"); cap = 0; }
     if (idxBuf) nvmtl_retain_resource(_cb, idxBuf);
+    // per-command buffers: one patched address-table copy per slot and stage (nvmtl_icb_record.h); pipelines that reach their buffers
+    // through descriptors instead of the table (address lowering refused them) keep the encoder's own bindings
+    BOOL tabs = NO;
+    if (slots <= NVMTL_ICB_MAX_PATCH_SLOTS) {
+        NVMTLBuffer *dsts = nvmtl_icb_scratch_bytes((NSUInteger)slots * 16u);
+        if (dsts) { nvmtl_retain_resource(_cb, dsts); tabs = nvmtl_vk_cmd_icb_tables(&_cb->_c, &b->_recBuf->_b, &dsts->_b, slots) == 0; }
+    }
+    if (!tabs) { static int said; if (!said++) nvlog("GPU ICB: the per-command buffer tables could not be prepared - draws use the encoder's own buffer bindings"); }
     NSUInteger drawn = 0;
     for (NSUInteger k = 0; k < cands.count; k++) {
         NVMTLRenderPipelineState *p = k ? (NVMTLRenderPipelineState *)cands[k] : orig;
@@ -4699,11 +4707,13 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
                 for (uint32_t i = 0; i < slots; i++) {
                     const NSUInteger at = ((((NSUInteger)k * TYPES + t) * kinds + ix) * slots + i) * NVMTL_ICB_RECORD_BYTES;
                     if (ix && !cap) continue;
+                    nvmtl_vk_cmd_icb_use(&_cb->_c, tabs ? i + 1u : 0u);
                     if (ix) [self drawIndexedPrimitives:(MTLPrimitiveType)t indexType:MTLIndexTypeUInt32 indexBuffer:idxBuf indexBufferOffset:0 indirectBuffer:big indirectBufferOffset:at];
                     else [self drawPrimitives:(MTLPrimitiveType)t indirectBuffer:big indirectBufferOffset:at];
                     drawn++;
                 }
     }
+    nvmtl_vk_cmd_icb_use(&_cb->_c, 0); nvmtl_vk_cmd_icb_tables_free(&_cb->_c);
     if (orig && _ps != orig) [self setRenderPipelineState:orig];
     nvlog("GPU ICB: %lu indirect draw(s) recorded for %u slot(s), %lu candidate pipeline(s)", (unsigned long)drawn, slots, (unsigned long)cands.count);
 }
