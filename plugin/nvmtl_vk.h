@@ -209,6 +209,7 @@ int  nvmtl_vk_image_create_ms(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t b
 typedef struct { uint32_t gran[3], first_tail, mips, layers, w, h; uint64_t tail_size, tail_offset, tail_stride; int single_tail, strict; } nvmtl_vk_sparse_info;
 typedef struct { uint32_t mip, layer, x, y, z, w, h, d; uint64_t mem_off; } nvmtl_vk_sparse_blk;
 int  nvmtl_vk_sparse_textures_ok(void);
+uint64_t nvmtl_vk_timestamp_frequency(void);
 int  nvmtl_vk_image_create_sparse(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, uint32_t mips, uint32_t layers, nvk_image *out);
 /* binds (mem != NULL) or unbinds (mem == NULL) the blocks, and the mip tail when tail_size_to_bind != 0 (at tail_mem_off); waits for the bind */
 int  nvmtl_vk_image_sparse_bind(nvk_image *img, void *mem, const nvmtl_vk_sparse_blk *blk, uint32_t n, uint64_t tail_mem_off, int bind_tail);
