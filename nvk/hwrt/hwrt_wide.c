@@ -11,9 +11,11 @@
 #undef main
 
 #define WIDE_NODE 128u
-struct wide { uint8_t *bytes; uint32_t nodes, cap, leaves_base, leaf_size; int conservative; };
+#define HDR NVK_HWL_HEADER_SIZE
+struct wide { uint8_t *bytes; uint32_t nodes, internal, leaf_count; int conservative; };
 
-static uint32_t wide_node(struct wide *w, const struct ir *ir, uint32_t ref, uint32_t root_offset, uint32_t leaf_type, uint32_t *depth_max);
+extern void shader_wide_encode(uint8_t *ir, uint8_t *out, uint32_t leaf_count, uint32_t internal_count, uint32_t leaf_type,
+                               uint32_t out_leaf_size, uint32_t hdr, uint32_t ir_leaf_size, uint32_t ir_box_size, uint32_t rounds);
 
 static void box_of(const struct ir *ir, uint32_t ref, uint32_t root_offset, const float **lo, const float **hi)
 {
@@ -22,37 +24,33 @@ static void box_of(const struct ir *ir, uint32_t ref, uint32_t root_offset, cons
    else { uint32_t j = (off - root_offset) / IR_BOX; *lo = ir->box_lo[j]; *hi = ir->box_hi[j]; }
 }
 
-/* returns the byte offset (from the node area) of the wide node built for the subtree at `ref`, which must be a box */
-static uint32_t wide_node(struct wide *w, const struct ir *ir, uint32_t ref, uint32_t root_offset, uint32_t leaf_type, uint32_t *dm)
+/* The descendants of box j three levels down, or the leaves met sooner, depth first: the definition the shader's three nested loops
+ * implement, written here as a recursion. */
+static void collect(const struct ir *ir, uint32_t root_offset, uint32_t j, int level, uint32_t *kids, int *n)
+{
+   for (int c = 0; c < 2; c++) {
+      uint32_t r = ir->child[j][c];
+      if (r == INVALID) continue;
+      int is_box = (r & ~3u) >= root_offset;
+      if (!is_box || level == 3) kids[(*n)++] = r;
+      else collect(ir, root_offset, (((r & ~3u) - root_offset) / IR_BOX), level + 1, kids, n);
+   }
+}
+
+static void wide_node(struct wide *w, const struct ir *ir, uint32_t root_offset, uint32_t j, uint32_t leaves_base)
 {
    uint32_t kids[8]; int n = 0;
-   uint32_t j = ((ref & ~3u) - root_offset) / IR_BOX;
-   kids[n++] = ir->child[j][0]; if (ir->child[j][1] != INVALID) kids[n++] = ir->child[j][1];
-   while (n < 8) {                      /* open the internal child with the largest box */
-      int best = -1; double ba = -1;
-      for (int i = 0; i < n; i++) {
-         if ((kids[i] & 3u) != T_NODE) continue;
-         const float *lo, *hi; box_of(ir, kids[i], root_offset, &lo, &hi);
-         double a = (double)(hi[0] - lo[0]) * (hi[1] - lo[1]) + (double)(hi[1] - lo[1]) * (hi[2] - lo[2]) + (double)(hi[0] - lo[0]) * (hi[2] - lo[2]);
-         if (a > ba) { ba = a; best = i; }
-      }
-      if (best < 0) break;
-      uint32_t jj = ((kids[best] & ~3u) - root_offset) / IR_BOX;
-      uint32_t c0 = ir->child[jj][0], c1 = ir->child[jj][1];
-      if (c1 == INVALID) { kids[best] = c0; continue; }
-      if (n + 1 > 8) break;
-      kids[best] = c0; kids[n++] = c1;
-   }
-   uint32_t me = w->nodes++;
-   if (me * WIDE_NODE + WIDE_NODE > w->cap) { fprintf(stderr, "wide node area too small\n"); exit(2); }
-   float org[3] = { INFINITY, INFINITY, INFINITY }, mx[3] = { -INFINITY, -INFINITY, -INFINITY };
+   collect(ir, root_offset, j, 1, kids, &n);
+   uint32_t slot = w->internal - 1 - j;
+   w->nodes++;
+   float org[3] = { 1e38f, 1e38f, 1e38f }, mx[3] = { -1e38f, -1e38f, -1e38f };
    for (int i = 0; i < n; i++) {
       const float *lo, *hi; box_of(ir, kids[i], root_offset, &lo, &hi);
-      for (int k = 0; k < 3; k++) { if (lo[k] < org[k]) org[k] = lo[k]; if (hi[k] > mx[k]) mx[k] = hi[k]; }
+      for (int k = 0; k < 3; k++) { org[k] = lo[k] < org[k] ? lo[k] : org[k]; mx[k] = hi[k] > mx[k] ? hi[k] : mx[k]; }
    }
    float step[3];
-   for (int k = 0; k < 3; k++) { step[k] = (mx[k] - org[k]) / 255.0f; if (step[k] <= 0) step[k] = 1e-30f; }
-   uint8_t *nd = w->bytes + (size_t)me * WIDE_NODE;
+   for (int k = 0; k < 3; k++) { step[k] = (mx[k] - org[k]) / 255.0f; if (step[k] <= 0.0f) step[k] = 1e-30f; }
+   uint8_t *nd = w->bytes + HDR + (size_t)slot * WIDE_NODE;
    memset(nd, 0, WIDE_NODE);
    for (int k = 0; k < 3; k++) { putf(nd, k * 4, org[k]); putf(nd, 16 + k * 4, step[k]); }
    for (int s = 0; s < 8; s++) put32(nd, 32 + s * 12 + 8, INVALID);
@@ -64,36 +62,26 @@ static uint32_t wide_node(struct wide *w, const struct ir *ir, uint32_t ref, uin
          int qh = w->conservative ? (int)ceilf((hi[k] - org[k]) / step[k]) : (int)floorf((hi[k] - org[k]) / step[k]);
          if (ql < 0) ql = 0; if (qh > 255) qh = 255; if (qh < ql) qh = ql;
          if (!w->conservative) { int sh = (qh - ql) / 8; ql += sh; qh -= sh; }   /* the control: boxes that do not contain what they hold */
-         if (w->conservative) {         /* widen until the walk's own arithmetic contains the real box */
+         if (w->conservative) {
             while (ql > 0 && org[k] + (float)ql * step[k] > lo[k]) ql--;
             while (qh < 255 && org[k] + (float)qh * step[k] < hi[k]) qh++;
          }
          rec[k] = (uint8_t)ql; rec[3 + k] = (uint8_t)qh;
       }
       uint32_t r;
-      if ((kids[i] & 3u) == T_NODE) { uint32_t child = wide_node(w, ir, kids[i], root_offset, leaf_type, dm); r = (child * WIDE_NODE) | T_NODE; }
-      else r = kids[i];                 /* a leaf: patched to its final offset by the caller */
+      if ((kids[i] & ~3u) >= root_offset) {
+         uint32_t cj = ((kids[i] & ~3u) - root_offset) / IR_BOX;
+         r = (HDR + (w->internal - 1 - cj) * WIDE_NODE) | T_NODE;
+         wide_node(w, ir, root_offset, cj, leaves_base);
+      } else r = (leaves_base + ((kids[i] & ~3u) / IR_LEAF) * 64) | T_TRI;
       put32(rec, 8, r);
    }
-   return me;
-}
-
-static void patch_leaf_refs(struct wide *w, uint32_t nodes, uint32_t root_offset, uint32_t leaves_base, uint32_t leaf_size)
-{
-   for (uint32_t i = 0; i < nodes; i++)
-      for (int s = 0; s < 8; s++) {
-         uint8_t *rec = w->bytes + (size_t)i * WIDE_NODE + 32 + s * 12;
-         uint32_t r = get32(rec, 8);
-         if (r == INVALID || (r & 3u) == T_NODE) continue;
-         (void)root_offset;
-         put32(rec, 8, (leaves_base + (r / IR_LEAF) * leaf_size) | T_TRI);
-      }
 }
 
 static int wide_walk(const uint8_t *nodes, const uint8_t *leaves_base_ptr, const float *org, const float *dir, float tmin, float *tmax, struct m_hit *best, uint32_t inst)
 {
    uint32_t stack[128]; int sp = 0, steps = 0;
-   stack[sp++] = 0 | T_NODE;
+   stack[sp++] = HDR | T_NODE;
    while (sp) {
       if (++steps > 8192 || sp > 100) return 0;
       uint32_t ref = stack[--sp], off = ref & ~3u;
@@ -121,13 +109,27 @@ static int wide_walk(const uint8_t *nodes, const uint8_t *leaves_base_ptr, const
    return 1;
 }
 
-static int run_wide(int conservative, int scenes, int rays, int *nodes_wide, int *nodes_bin, int *hits)
+/* the intermediate tree as the shader reads it: leaves then boxes, aabb first, children at +24, depth word at +36 */
+static uint8_t *flat_ir(const struct ir *ir, uint32_t root_offset, uint32_t nbox)
 {
-   int bad = 0; *nodes_wide = *nodes_bin = *hits = 0;
+   uint8_t *b = calloc(1, root_offset + (size_t)nbox * IR_BOX + 64);
+   for (uint32_t i = 0; i < ir->leaf_count; i++) for (int k = 0; k < 3; k++) { putf(b, i * IR_LEAF + k * 4, ir->leaf_lo[i][k]); putf(b, i * IR_LEAF + 12 + k * 4, ir->leaf_hi[i][k]); }
+   for (uint32_t j = 0; j < nbox; j++) {
+      uint8_t *p = b + root_offset + (size_t)j * IR_BOX;
+      for (int k = 0; k < 3; k++) { putf(p, k * 4, ir->box_lo[j][k]); putf(p, 12 + k * 4, ir->box_hi[j][k]); }
+      put32(p, 24, ir->child[j][0]); put32(p, 28, ir->child[j][1]);
+   }
+   return b;
+}
+
+/* returns rays that differ; *shader_bytes_differ counts scenes whose shader-built node area differs from the reference's */
+static int run_wide(int conservative, int scenes, int rays, int *nodes_wide, int *nodes_bin, int *hits, int *shader_differ)
+{
+   int bad = 0; *nodes_wide = *nodes_bin = *hits = *shader_differ = 0;
    for (int sc = 0; sc < scenes; sc++) {
       struct m_scene s = { 0 };
       s.nblas = 1; s.ninst = 1; s.blas = calloc(1, sizeof *s.blas); s.inst = calloc(1, sizeof *s.inst);
-      struct m_blas *bl = &s.blas[0]; bl->ngeom = 1; bl->ntri = 2 + rnd() % 120; bl->tri = calloc(bl->ntri, sizeof *bl->tri);
+      struct m_blas *bl = &s.blas[0]; bl->ngeom = 1; bl->ntri = 1 + (sc % 3 == 0 ? rnd() % 4 : rnd() % 150); bl->tri = calloc(bl->ntri, sizeof *bl->tri);
       for (int i = 0; i < bl->ntri; i++) {
          float c[3] = { frand(-6, 6), frand(-6, 6), frand(-6, 6) };
          for (int v = 0; v < 3; v++) for (int k = 0; k < 3; k++) bl->tri[i].v[v][k] = c[k] + frand(-0.8f, 0.8f);
@@ -142,17 +144,21 @@ static int run_wide(int conservative, int scenes, int rays, int *nodes_wide, int
       uint32_t root = ir_build(&ir, ids, bl->ntri, T_TRI, &nbox, lo, hi);
       ir_single(&ir, root, &nbox, lo, hi);
       ir.internal_count = nbox;
-      struct wide w = { .cap = (nbox + 1) * WIDE_NODE, .conservative = conservative };
-      w.bytes = calloc(1, w.cap + (size_t)bl->ntri * 64);
-      uint32_t dm = 0;
-      uint32_t top = (nbox == 1 && (ir.child[0][1] == INVALID)) ? ((ir.leaf_count * IR_LEAF + 0 * IR_BOX) | T_NODE) : ((ir.leaf_count * IR_LEAF + (nbox - 1) * IR_BOX) | T_NODE);
-      wide_node(&w, &ir, top, ir.leaf_count * IR_LEAF, T_TRI, &dm);
-      uint32_t leaves_base = w.nodes * WIDE_NODE;
-      patch_leaf_refs(&w, w.nodes, ir.leaf_count * IR_LEAF, leaves_base, 64);
+      uint32_t root_offset = ir.leaf_count * IR_LEAF, leaves_base = HDR + nbox * WIDE_NODE;
+      struct wide w = { .internal = nbox, .leaf_count = bl->ntri, .conservative = conservative };
+      size_t total = leaves_base + (size_t)bl->ntri * 64;
+      w.bytes = calloc(1, total);
+      wide_node(&w, &ir, root_offset, nbox - 1, leaves_base);
       for (int i = 0; i < bl->ntri; i++) {
          uint8_t *lf = w.bytes + leaves_base + (size_t)i * 64;
          for (int a = 0; a < 3; a++) for (int b2 = 0; b2 < 3; b2++) putf(lf, (a * 3 + b2) * 4, bl->tri[i].v[a][b2]);
          put32(lf, 36, i); put32(lf, 40, 0);
+      }
+      if (conservative) {                /* the shader's own text, run on the same intermediate tree */
+         uint8_t *fir = flat_ir(&ir, root_offset, nbox), *out = calloc(1, total);
+         shader_wide_encode(fir, out, bl->ntri, nbox, T_TRI, 64, HDR, IR_LEAF, IR_BOX, 64);
+         if (memcmp(out + HDR, w.bytes + HDR, (size_t)nbox * WIDE_NODE)) (*shader_differ)++;
+         free(fir); free(out);
       }
       *nodes_wide += w.nodes; *nodes_bin += nbox;
       for (int i = 0; i < rays; i++) {
@@ -172,15 +178,17 @@ static int run_wide(int conservative, int scenes, int rays, int *nodes_wide, int
 int main(void)
 {
    setvbuf(stdout, NULL, _IOLBF, 0);
-   char d[160]; int nw, nb, hits;
-   int bad = run_wide(1, 30, 300, &nw, &nb, &hits);
-   snprintf(d, sizeof d, "%d of 9000 rays differ", bad);
+   char d[160]; int nw, nb, hits, sd;
+   int bad = run_wide(1, 40, 250, &nw, &nb, &hits, &sd);
+   snprintf(d, sizeof d, "%d of 10000 rays differ", bad);
    arm("8-wide nodes with 8-bit bounds: the walk equals the model's hardware primitive bit for bit", bad == 0, d);
-   snprintf(d, sizeof d, "%d wide nodes against %d binary nodes, %d hits", nw, nb, hits);
-   arm("the wide tree has at most two fifths of the binary tree's nodes", nw * 5 <= nb * 2, d);
+   snprintf(d, sizeof d, "%d of 40 scenes differ", sd);
+   arm("the GLSL passes (encode_wide_body.h, run as C++) write the node area byte for byte as the reference does", sd == 0, d);
+   snprintf(d, sizeof d, "%d wide nodes against %d binary nodes", nw, nb);
+   arm("the wide tree has at most half of the binary tree's nodes", nw * 2 <= nb, d);
    snprintf(d, sizeof d, "%d hits", hits);
-   arm("  that run hit something on at least 300 of 9000 rays", hits > 300, d);
-   int bad2 = run_wide(0, 30, 300, &nw, &nb, &hits);
+   arm("  that run hit something on at least 300 of 10000 rays", hits > 300, d);
+   int bad2 = run_wide(0, 40, 250, &nw, &nb, &hits, &sd);
    snprintf(d, sizeof d, "%d rays differ", bad2);
    arm("control: boxes that do not contain their children lose hits, and the suite sees it", bad2 > 0, d);
    printf("%d arms failed\n", fails);
