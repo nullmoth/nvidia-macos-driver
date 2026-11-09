@@ -22,6 +22,7 @@
 #include "nvmtl_dlss.h"
 #include "nvmtl_tex_upload.h"
 #include "nvmtl_cmd_refusal.h"
+#include "nvmtl_loss.h"
 #include "nvmtl_copy_compat.h"
 #include "nvmtl_sampler_state.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
@@ -144,6 +145,10 @@ static char g_name[256];
 static VkPhysicalDeviceLimits g_lim;
 static uint32_t g_sm_count;
 static _Atomic int g_state;
+/* device-loss bookkeeping (nvmtl_vk_note_loss) */
+static _Atomic int g_lost_after_up;
+static _Atomic uint64_t g_up_ns;
+static const char *g_last_submit_who;
 static _Atomic long g_slow_submit_ms;
 static _Atomic uint64_t g_submit_wait_ns, g_submit_waits;
 void nvmtl_vk_submit_wait_stats(uint64_t *total_ns, uint64_t *waits)
@@ -1491,6 +1496,7 @@ static int nvmtl_vk_initialize(void)
     nvlog("vk: apps-dyn dynamic vertex strides (vkCmdBindVertexBuffers2): %s", pvkCmdBindVertexBuffers2 ? "yes" : "NO — MTLBufferLayoutStrideDynamic pipelines are refused");
     pvkGetDeviceQueue(g_dev, g_qfam, 0, &g_queue);
 
+    atomic_store(&g_up_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW));
     g_state = 1;
     nvlog("vk: UP in this Metal process — \"%s\" api %u.%u.%u, queue family %u", g_name,
           VK_VERSION_MAJOR(pp.apiVersion), VK_VERSION_MINOR(pp.apiVersion), VK_VERSION_PATCH(pp.apiVersion), g_qfam);
@@ -1500,6 +1506,38 @@ static pthread_once_t g_vk_once = PTHREAD_ONCE_INIT;
 static void nvmtl_vk_initialize_once(void) { (void)nvmtl_vk_initialize(); }
 /* 1 once the backend is down in this process: a failed submit or fence wait disabled it, or it never started. */
 int nvmtl_vk_lost(void) { return atomic_load(&g_state) == -1; }
+/* The device was up and then lost, as opposed to never starting. After a loss the Vulkan queue is dead for the rest of the
+   process, but the caller still gets command buffers: they record nothing and complete with a "device removed" error,
+   as Metal reports a removed GPU, instead of nil (WindowServer asserts on nil and the session goes). */
+static char g_dead_cb_token;
+static void nvmtl_noop_cmd(void) {}
+/* Recording calls made on a dead command buffer, and on one that was being recorded when the loss was noticed, do
+   nothing: a void function taking any arguments is the same machine code as this stub on x86-64. */
+static void nvmtl_vk_stub_recording(void)
+{
+#define STUB_CMD(f) if (!strncmp(#f, "vkCmd", 5)) p##f = (PFN_##f)nvmtl_noop_cmd;
+    DEVICE_FNS(STUB_CMD)
+#undef STUB_CMD
+    if (pvkCmdSetLineWidth) pvkCmdSetLineWidth = (PFN_vkCmdSetLineWidth)nvmtl_noop_cmd;
+    if (pvkCmdBindVertexBuffers2) pvkCmdBindVertexBuffers2 = (PFN_vkCmdBindVertexBuffers2)nvmtl_noop_cmd;
+    if (pvkCmdSetSampleLocationsEXT) pvkCmdSetSampleLocationsEXT = (PFN_vkCmdSetSampleLocationsEXT)nvmtl_noop_cmd;
+    if (pvkCmdSetPolygonModeEXT) pvkCmdSetPolygonModeEXT = (PFN_vkCmdSetPolygonModeEXT)nvmtl_noop_cmd;
+    if (pvkCmdSetProvokingVertexModeEXT) pvkCmdSetProvokingVertexModeEXT = (PFN_vkCmdSetProvokingVertexModeEXT)nvmtl_noop_cmd;
+    if (pvkCmdSetDepthClipEnableEXT) pvkCmdSetDepthClipEnableEXT = (PFN_vkCmdSetDepthClipEnableEXT)nvmtl_noop_cmd;
+    if (pvkCmdBuildAccelerationStructuresKHR) pvkCmdBuildAccelerationStructuresKHR = (PFN_vkCmdBuildAccelerationStructuresKHR)nvmtl_noop_cmd;
+    if (pvkCmdCopyAccelerationStructureKHR) pvkCmdCopyAccelerationStructureKHR = (PFN_vkCmdCopyAccelerationStructureKHR)nvmtl_noop_cmd;
+}
+/* Called once, by whichever thread first sees the device go: names the cause in the log and turns recording into no-ops. */
+static void nvmtl_vk_note_loss(const char *where, int vkresult, long waited_ms)
+{
+    if (atomic_exchange(&g_lost_after_up, 1)) return;
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), up = atomic_load(&g_up_ns);
+    char cause[512];
+    nvmtl_loss_cause(cause, sizeof cause, where, vkresult, waited_ms, g_last_submit_who, up ? (long)((now - up) / 1000000000ull) : -1, getprogname());
+    nvlog("vk: %s", cause);
+    nvlog("vk: every command buffer made in %s from now on records nothing and completes with a device-removed error; objects made before the loss stay inert", getprogname());
+    nvmtl_vk_stub_recording();
+}
 int nvmtl_vk_init(void) {
     pthread_once(&g_vk_once, nvmtl_vk_initialize_once);
     return g_state == 1 ? 0 : -1;
@@ -6860,7 +6898,14 @@ static int nvmtl_cmd_refused(nvmtl_refusal why, int vkresult)
 int nvmtl_vk_cmd_begin(nvk_queue *q, nvk_cmdbuf *out)
 {
     (void)q;
-    if (nvmtl_vk_init()) return nvmtl_cmd_refused(NVMTL_REFUSE_BACKEND_DOWN, 0);
+    if (nvmtl_vk_init()) {
+        if (!atomic_load(&g_lost_after_up)) return nvmtl_cmd_refused(NVMTL_REFUSE_BACKEND_DOWN, 0);
+        memset(out, 0, sizeof *out); out->dead = 1; out->cb = &g_dead_cb_token;   // a token, never dereferenced
+        static _Atomic unsigned long dead_made;
+        const unsigned long n = atomic_fetch_add(&dead_made, 1) + 1;
+        if (n < 4 || n % 1000 == 0) nvlog("vk: command buffer #%lu made after the device was lost in %s: it records nothing and completes with a device-removed error", n, getprogname());
+        return 0;
+    }
     const uint64_t b0 = nvmtl_perf_now();
     memset(out, 0, sizeof *out);
     VkCommandPool pool = nvmtl_keep_pool_pop();
@@ -7949,8 +7994,10 @@ int nvmtl_vk_submit_wait_at(nvk_cmdbuf *c, const char *who)
 int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
 {
     nvmtl_subwho_note(who, 0);
+    g_last_submit_who = who;
     memset(f, 0, sizeof *f); f->c = c;
     uint64_t *const pt = f->pt;
+    if (c && c->dead) return -3;   // made after the loss: nothing was recorded, nothing is in flight
     if (g_state != 1 || !c || !c->cb) return -2;
     if (c->counter_error || nvmtl_counter_flush(c)) { nvmtl_cmd_retire(c); return -1; }
     VkCommandBuffer counter_reset = VK_NULL_HANDLE;
@@ -8013,6 +8060,7 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     if (result != VK_SUCCESS) {
         g_state = -1;
         nvlog("vk: queue submit -> %d; disabling backend and retaining uncertain in-flight resources", result);
+        nvmtl_vk_note_loss("submit", (int)result, 0);
         nvmtl_fx_dump("queue submit failed");
         return -2;
     }
@@ -8059,6 +8107,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     }
     if (wr != VK_SUCCESS || g_state != 1) {
         g_state = -1;
+        nvmtl_vk_note_loss("fence", (int)wr, waited_ms);
         nvlog("vk: fence wait -> %d after %ld ms (budget %ld ms); the device is lost, disabling backend without retiring in-flight resources", wr, waited_ms, budget_ms);
         nvmtl_fx_dump("fence wait failed: the device is lost");
         {   // the binding-table pages this command buffer's draws and dispatches read, and the cached pages, by GPU address
