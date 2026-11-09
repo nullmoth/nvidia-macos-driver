@@ -128,6 +128,7 @@ class Finish(unittest.TestCase):
         subprocess.run(["clang", "-arch", "x86_64", "-dynamiclib", "-o", str(t / "nvencvt.dylib"), str(t / "c.c")], check=True, capture_output=True)
         (t / "b.c").write_text("int main(void){return 0;}\n")
         subprocess.run(["clang", "-arch", "x86_64", "-o", str(t / "nvmtl-boost"), str(t / "b.c")], check=True, capture_output=True)
+        shutil.copy(t / "nvmtl-boost", t / "nvmtl-air-dis")
         k = t / "NMSMN.kext/Contents"; (k / "MacOS").mkdir(parents=True)
         (k / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.nullmoth.NMSMN"})); (k / "MacOS/NMSMN").write_bytes(b"k")
         (t / "ryzenadj").write_bytes(b"r")
@@ -138,7 +139,7 @@ class Finish(unittest.TestCase):
 
     def finish(self, *extra):
         t = self.t
-        return run(PKG / "finish_package.sh", self.root, "--nvencvt", t / "nvencvt.dylib",
+        return run(PKG / "finish_package.sh", self.root, "--nvencvt", t / "nvencvt.dylib", "--air-dis", t / "nvmtl-air-dis",
                    "--nmsmn", t / "NMSMN.kext", t / "ryzenadj", hashlib.sha256(b"r").hexdigest(), *extra)
 
     def test_a_full_package_is_finished_and_passes_its_own_checks(self):
@@ -165,7 +166,7 @@ class Finish(unittest.TestCase):
         self.assertIn("is not package/install.sh", r.stderr)
 
     def test_the_ryzen_parts_are_required(self):
-        r = run(PKG / "finish_package.sh", self.root, "--nvencvt", self.t / "nvencvt.dylib")
+        r = run(PKG / "finish_package.sh", self.root, "--nvencvt", self.t / "nvencvt.dylib", "--air-dis", self.t / "nvmtl-air-dis")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("--nmsmn is required", r.stderr)
 

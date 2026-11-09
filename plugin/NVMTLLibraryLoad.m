@@ -23,7 +23,20 @@ extern char **environ;
 void nvlog(const char *fmt, ...);
 
 #import <CommonCrypto/CommonDigest.h>
-#define NVMTL_AIR_OPT   "/Library/GPUBundles/nvmtl/air-opt"
+// The out-of-process AIR decoder: nvmtl-air-dis (plugin/air_dis.c) beside this plugin, built on the same upstream LLVM as the
+// in-process reader (air-runtime/libLLVM.dylib). Earlier packages ran a copy of the Metal toolchain's air-opt from
+// /Library/GPUBundles/nvmtl; that program is not ours to redistribute and is no longer looked for.
+static const char *nvmtl_air_dis_path(void) {
+    static char path[PATH_MAX]; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Dl_info info;
+        if (dladdr((const void *)&nvmtl_air_dis_path, &info) && info.dli_fname) {
+            NSString *p = [[@(info.dli_fname) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"nvmtl-air-dis"];
+            strlcpy(path, p.fileSystemRepresentation, sizeof path);
+        }
+    });
+    return path[0] ? path : NULL;
+}
 #include <unistd.h>
 static inline const char *nvmtl_pick_ll(const char *staged, const char *dev) {
     return access(staged, R_OK) == 0 ? staged : dev;
@@ -645,25 +658,29 @@ static BOOL nvmtl_run_air_opt(const char *input, const char *output) {
     rc = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
     if (!rc) rc = posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
     pid_t child = -1;
-    char *argv[] = { NVMTL_AIR_OPT, "-S", (char *)input, "-o", (char *)output, NULL };
-    if (!rc) rc = posix_spawn(&child, NVMTL_AIR_OPT, &actions, NULL, argv, environ);
+    const char *tool = nvmtl_air_dis_path();
+    if (!tool) { posix_spawn_file_actions_destroy(&actions); nvlog("library: nvmtl-air-dis not found beside the plugin"); return NO; }
+    char *argv[] = { (char *)tool, "-S", (char *)input, "-o", (char *)output, NULL };
+    // an empty environment: the tool needs none, and the caller's DYLD_ and other variables are not handed on
+    char *noenv[] = { NULL };
+    if (!rc) rc = posix_spawn(&child, tool, &actions, NULL, argv, noenv);
     posix_spawn_file_actions_destroy(&actions);
-    if (rc) { nvlog("library: air-opt spawn failed: %s", strerror(rc)); return NO; }
+    if (rc) { nvlog("library: nvmtl-air-dis spawn failed: %s", strerror(rc)); return NO; }
     uint64_t deadline = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) + 20ull * 1000000000ull;
     int status = 0;
     for (;;) {
         pid_t result = waitpid(child, &status, WNOHANG);
         if (result == child) {
             if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return YES;
-            nvlog("library: air-opt failed (wait status %d)", status); return NO;
+            nvlog("library: nvmtl-air-dis failed (wait status %d)", status); return NO;
         }
         if (result < 0 && errno != EINTR) {
-            nvlog("library: air-opt wait failed: %s", strerror(errno)); return NO;
+            nvlog("library: nvmtl-air-dis wait failed: %s", strerror(errno)); return NO;
         }
         if (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) >= deadline) {
             kill(child, SIGKILL);
             while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-            nvlog("library: air-opt exceeded 20-second limit"); return NO;
+            nvlog("library: nvmtl-air-dis exceeded 20-second limit"); return NO;
         }
         usleep(10000);
     }
