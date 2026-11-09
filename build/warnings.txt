@@ -15,3 +15,14 @@ nmsmn 0
 nmhda 0
 nmkbdbacklight 0
 translator 0
+# link notes, counted on their own
+nvrm-link 0
+nvaccel-link 0
+nvrmfb-link 0
+nvrmagdc-link 0
+nmgopfb-link 0
+nmsmn-link 0
+nmintelfb-link 0
+nmdrm-link 0
+primary-selector-link 0
+nmhda-link 0
