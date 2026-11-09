@@ -182,10 +182,17 @@ static inline int nmd_is_evt_ctl(unsigned id, unsigned display_version, uint32_t
 static inline uint32_t nmd_load_plan(const struct nmd_fw *fw, unsigned display_version, struct nmd_write *w, uint32_t cap)
 {
     uint32_t n = 0, i, h; unsigned id;
+    uint64_t need = 0;
+    /* The plan writes every part's event entries first and every part's words afterwards, so the bound has to be
+       the total over all present parts, checked once before anything is written. */
+    for (id = 0; id < NMD_MAX_IDS; id++) {
+        const struct nmd_part *p = &fw->part[id];
+        if (p->present) need += 2ull * NMD_EVT_COUNT + (uint64_t)p->words + (uint64_t)p->mmio_count;
+    }
+    if (need > cap) return 0;
     for (id = 0; id < NMD_MAX_IDS; id++) {
         const struct nmd_part *p = &fw->part[id];
         if (!p->present) continue;
-        if (n + 2 * NMD_EVT_COUNT + p->words + p->mmio_count > cap) return 0;
         for (h = 0; h < NMD_EVT_COUNT; h++) {
             w[n].reg = nmd_base(id, display_version) + NMD_EVT_CTL_OFF + 4 * h; w[n].val = NMD_EVT_DISABLED; n++;
             w[n].reg = nmd_base(id, display_version) + NMD_EVT_HTP_OFF + 4 * h; w[n].val = 0; n++;

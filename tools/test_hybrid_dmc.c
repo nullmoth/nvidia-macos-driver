@@ -95,7 +95,17 @@ int main(void)
         ARM("no event handler is ever enabled by the plan, including through the firmware's own register list", ok); }
       ARM("the program words follow, each at its own address", ({ int ok = 0; for (uint32_t k = 0; k < c; k++) if (w[k].reg == 0x80000u + 4 * 5 && w[k].val == 0xC0000005u) ok = 1; ok; }));
       ARM("pipe programs use the version 13 base on version 13 and the older base before", nmd_base(1, 13) == 0x5F000u && nmd_base(2, 13) == 0x5F400u && nmd_base(1, 12) == 0x92000u);
-      ARM("a plan that does not fit is refused whole", nmd_load_plan(&fw, 12, w, 30) == 0); }
+      ARM("a plan that does not fit is refused whole", nmd_load_plan(&fw, 12, w, 30) == 0);
+      { /* two programs, each fitting on its own, together one entry too many: the bound must be the total */
+        static struct nmd_fw two; static uint8_t pay[4 * 16]; static struct nmd_write g[4 * NMD_EVT_COUNT + 20 + 64];
+        memset(&two, 0, sizeof two);
+        for (unsigned k = 0; k < 2; k++) { two.part[k].present = 1; two.part[k].id = (uint8_t)k; two.part[k].payload = pay; two.part[k].words = 10; two.part[k].start_mmio = 0x80000u + 0x1000u * k; }
+        const uint32_t need = 4 * NMD_EVT_COUNT + 20, gcap = need - 1;
+        for (uint32_t k = 0; k < sizeof g / sizeof g[0]; k++) { g[k].reg = 0xDEADBEEFu; g[k].val = 0xDEADBEEFu; }
+        uint32_t got2 = nmd_load_plan(&two, 12, g, gcap);
+        int clean = 1; for (uint32_t k = gcap; k < sizeof g / sizeof g[0]; k++) if (g[k].reg != 0xDEADBEEFu) clean = 0;
+        ARM("two programs that fit one at a time but not together are refused, with nothing written past the end", got2 == 0 && clean);
+        ARM("the same two programs with room for both give exactly the total", nmd_load_plan(&two, 12, g, need) == need); } }
     ARM("Tiger Lake, Alder Lake P and Meteor Lake each get their own file",
         !strcmp(nmd_file_for(12, 0x9a49), "tgl_dmc_ver2_12.bin") && !strcmp(nmd_file_for(13, 0x46a6), "adlp_dmc_ver2_16.bin") && !strcmp(nmd_file_for(14, 0x7d55), "mtl_dmc.bin"));
     ARM("Arrow Lake uses the Meteor Lake file", !strcmp(nmd_file_for(14, 0x7d67), "mtl_dmc.bin"));
