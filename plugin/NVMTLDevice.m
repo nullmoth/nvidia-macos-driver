@@ -191,6 +191,7 @@ int  nvmtl_sass_dispatch(id encoder, MTLSize grid, MTLSize group, uint32_t kind,
 NSDictionary<NSString *, NSData *> *nvmtl_translate_metallib(NSData *lib, NSDictionary **stages, NSDictionary **airs);
 void nvmtl_vendor_compile_airs(NSDictionary<NSString *, NSString *> *airs,
                                NSDictionary<NSString *, NSString *> *stages);
+#include <fcntl.h>
 #include <sys/stat.h>
 NSDictionary<NSString *, NSData *> *nvmtl_translate_metallib_k(NSData *lib, NSData *knownKey, NSDictionary **stages, NSDictionary **airs);
 NSData *nvmtl_lib_sha256(NSData *lib);
@@ -660,8 +661,16 @@ static bool nvmtl_gpu_policy_allows(const char *me)
     int lv = 0; size_t ln = sizeof lv;
     if (sysctlbyname("debug.nmhybrid", &lv, &ln, NULL, 0) != 0 || lv <= 0) return true;
     char text[4096] = {0};
-    FILE *f = fopen("/Library/GPUBundles/nvmtl-gpu-policy.txt", "r");
-    if (f) { size_t n = fread(text, 1, sizeof text - 1, f); text[n] = 0; fclose(f); }
+    // Read only a regular file owned by root and not writable by group or others, opened without following a link,
+    // as the DLSS kernel cache is: the policy decides which processes get the GPU.
+    int pfd = open("/Library/GPUBundles/nvmtl-gpu-policy.txt", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (pfd >= 0) {
+        struct stat pst;
+        if (fstat(pfd, &pst) == 0 && S_ISREG(pst.st_mode) && pst.st_uid == 0 && !(pst.st_mode & (S_IWGRP | S_IWOTH))) {
+            ssize_t n = read(pfd, text, sizeof text - 1); text[n > 0 ? n : 0] = 0;
+        } else nvlog("  gpu policy file ignored: not a root-owned regular file closed to other writers");
+        close(pfd);
+    }
     int apple = 0;
     int pref = nmp_parse(text, me, &apple);
     int autosw = -1;
