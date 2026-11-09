@@ -20,6 +20,7 @@
 #include "nm_hybrid.h"
 #include "nm_hybrid_abi.h"
 #include "nm_hybrid_resume.h"
+#include "nm_hybrid_resume14.h"
 #include "nm_hybrid_vbt.h"
 #include "nvrm_off.h"
 #include <IOKit/IODeviceTreeSupport.h>
@@ -819,8 +820,8 @@ void NMIntelFB::resumeCapture()
 {
     long long v = 0; int a = 0; const int present = PE_parse_boot_argn("nmhybridresume", &a, sizeof a); v = a;
     if (!nmr_enabled(present, v)) return;
-    if (!nmh_gen_ok(fVer) || fPipe < 0 || fPipe > 3) { IFBLOG("hybrid: resume unavailable: display version %u pipe %d (version 12 or 13, pipes A to D)", fVer, fPipe); return; }
-    if (!ggttMap()) return;
+    if (!(fVer == 12 || fVer == 13 || fVer == 14) || fPipe < 0 || fPipe > 3) { IFBLOG("hybrid: resume unavailable: display version %u pipe %d (versions 12 to 14, pipes A to D)", fVer, fPipe); return; }
+    if (fVer <= 13 && !ggttMap()) return;
     fSnap = (struct nmr_snap *)IOMalloc(sizeof *fSnap);
     if (!fSnap) return;
     bzero(fSnap, sizeof *fSnap);
@@ -832,11 +833,12 @@ void NMIntelFB::resumeCapture()
         nullptr };
     struct nmr_edp edp = {};
     readVbt(&edp);
-    const int rc = nmr_snapshot(&ops, fSnap, (unsigned)fPipe, fVer, &edp);
+    const int rc = fVer == 14 ? nmr14_snapshot(&ops, fSnap, (unsigned)fPipe, &edp) : nmr_snapshot(&ops, fSnap, (unsigned)fPipe, fVer, &edp);
     if (rc != NMR_OK) { IFBLOG("hybrid: resume unavailable: %s", nmr_result_name(rc)); IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; return; }
-    // the firmware surface's entries in the graphics table: restored first on wake
+    // the firmware surface's entries in the graphics table: restored first on wake (versions 12 and 13; on version 14 the table
+    // sits in system memory and is not touched)
     fFwPteFirst = fSurf >> 12; fFwPteCount = (((uint64_t)fRowBytes * fHeight) + 4095) / 4096;
-    if (fFwPteFirst + fFwPteCount <= fGsmEntries) {
+    if (fVer <= 13 && fFwPteFirst + fFwPteCount <= fGsmEntries) {
         fFwPte = (uint64_t *)IOMalloc((size_t)(fFwPteCount * sizeof(uint64_t)));
         if (fFwPte) for (uint64_t i = 0; i < fFwPteCount; i++) fFwPte[i] = fGsm[fFwPteFirst + i];
     }
@@ -857,7 +859,7 @@ void NMIntelFB::resumeRun()
         [](void *, unsigned us) { IODelay(us); },
         [](void *, const char *st) { IFBLOG("hybrid: resume step: %s", st); },
         nullptr };      // swing and pre-emphasis levels are programmed by nmr_drive_apply (nm_hybrid_resume.h)
-    const int rc = nmr_resume(&ops, fSnap, fVer);
+    const int rc = fVer == 14 ? nmr14_resume(&ops, fSnap) : nmr_resume(&ops, fSnap, fVer);
     IFBLOG("hybrid: resume: %s", nmr_result_name(rc));
     ifbStep(rc == NMR_OK || rc == NMR_ALREADY_LIT ? NMH_STEP_RESUME_DONE : NMH_STEP_RESUME_FAILED);
     if (rc == NMR_OK || rc == NMR_ALREADY_LIT) {
