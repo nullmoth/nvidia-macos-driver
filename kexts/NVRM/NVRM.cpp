@@ -652,6 +652,14 @@ bool NVRM::start(IOService *provider)
     nv->regs = &nv->bars[NV_GPU_BAR_INDEX_REGS];
     nv->fb   = &nv->bars[NV_GPU_BAR_INDEX_FB];
     snapshotBootScreen();
+    // Firmware leaves bus mastering on for the card it used as console. Until pass 2 the RM has not touched the GPU, and
+    // the first kernel panics of a fresh install were "element modified after free" in 16-byte kalloc elements (values 1
+    // and 0x8040) inside rm_init_rm and rm_init_adapter, on a boot-to-boot random pattern (#529). Bus mastering stays
+    // off until pass 2 turns it on, so nothing the card might still write can reach memory the kernel is reusing.
+    {
+        const UInt16 cmd0 = fPCI->configRead16(0x04);
+        if (cmd0 & 0x4) { fPCI->configWrite16(0x04, (UInt16)(cmd0 & ~0x4u)); LOG("bus mastering was on from firmware (command 0x%04x): off until the RM starts the card", cmd0); }
+    }
     const bool bar1Placed = placeLargeBar1();
     fBar1Placed = bar1Placed;
     readBARs();
