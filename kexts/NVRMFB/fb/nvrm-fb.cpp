@@ -361,8 +361,9 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     NvU16 fEdidMmW = 0, fEdidMmH = 0;
     bool fModeSet = false;
     unsigned fHomePure = 0;
-    IODetailedTimingInformationV2 fDT[256]; unsigned fNDT = 0;
-    static const unsigned kMaxMacTimings = 224;
+    IODetailedTimingInformationV2 fDT[512]; unsigned fNDT = 0;
+    // 64 slots stay free for the refresh rates NVKMS adds and the alias of the mode on the head.
+    static const unsigned kMaxMacTimings = 448;
     IODisplayModeID fCurId = 1;
     struct NvKmsKapiDisplayMode fBootMode = {};
     NvU32 fBootW = 0, fBootH = 0, fBootPitch = 0;
@@ -3354,12 +3355,36 @@ IOReturn NVRMNVDAFramebuffer::setDetailedTimings(OSArray *array)
         return kIOReturnSuccess;
     }
     unsigned n = 0, bad = 0;
-    if (array->getCount() > kMaxMacTimings) FBLOG("fb%u setDetailedTimings: %u timings from macOS, only %u kept", fIndex, array->getCount(), kMaxMacTimings);
-    for (unsigned i = 0; i < array->getCount() && n < kMaxMacTimings; i++) {
+    // More timings than fit: keep the highest refresh rates (and the mode on the head), not the first ones in
+    // arrival order, which dropped every 144-240 Hz scaled mode on panels macOS lists 500+ timings for.
+    const unsigned offered = array->getCount();
+    unsigned char *keep = nullptr; unsigned *rate = nullptr; unsigned char *must = nullptr;
+    if (offered > kMaxMacTimings) {
+        keep = (unsigned char *)IOMalloc(offered); must = (unsigned char *)IOMalloc(offered);
+        rate = (unsigned *)IOMalloc(offered * sizeof(unsigned));
+        if (keep && must && rate) {
+            for (unsigned i = 0; i < offered; i++) {
+                rate[i] = 0; must[i] = 0;
+                OSData *data = OSDynamicCast(OSData, array->getObject(i));
+                if (!data || data->getLength() < sizeof(IODetailedTimingInformationV2)) continue;
+                IODetailedTimingInformationV2 t; nvu_copy(&t, data->getBytesNoCopy(), sizeof t);
+                const UInt64 tot = (UInt64)(t.horizontalActive + t.horizontalBlanking) * (t.verticalActive + t.verticalBlanking);
+                rate[i] = tot ? (unsigned)((t.pixelClock + tot / 2) / tot) : 0;
+                must[i] = dtIsCurrent(t) || dtIsBootRaster(t);
+            }
+            nvrmPickTimings(rate, must, offered, kMaxMacTimings, keep);
+        }
+        FBLOG("fb%u setDetailedTimings: %u timings from macOS, %u kept (highest refresh rates first)", fIndex, offered, kMaxMacTimings);
+    }
+    for (unsigned i = 0; i < offered && n < kMaxMacTimings; i++) {
+        if (keep && rate && must && !keep[i]) continue;
         OSData *data = OSDynamicCast(OSData, array->getObject(i));
         if (!data || data->getLength() < sizeof(IODetailedTimingInformationV2)) { bad++; continue; }
         nvu_copy(&fDT[n++], data->getBytesNoCopy(), sizeof(IODetailedTimingInformationV2));
     }
+    if (keep) IOFree(keep, offered);
+    if (must) IOFree(must, offered);
+    if (rate) IOFree(rate, offered * sizeof(unsigned));
     const unsigned fromMac = n;
     publishRotatedSizes();
     fNewIdOnce = 0;
