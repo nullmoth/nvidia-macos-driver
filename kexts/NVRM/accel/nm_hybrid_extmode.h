@@ -18,6 +18,7 @@
 #ifndef NM_HYBRID_EXTMODE_H
 #define NM_HYBRID_EXTMODE_H
 
+#include <string.h>
 #include "nm_hybrid_tc.h"
 #include "nm_hybrid_ext.h"
 #include "nm_hybrid_dkl.h"
@@ -104,7 +105,7 @@ static inline int nmo_fail(const struct nmr_ops *o, struct nmo *m, int err)
     return err;
 }
 
-/* ---- bring it up. surf and pitch name the scan-out surface; ddb_start/ddb_end the display-buffer range this pipe may use (nmw_free_run). Returns 0 or NMO_E_*. */
+/* ---- bring it up. surf is the scan-out surface's graphics-table address and capacity its size in bytes (the pitch follows from the mode); ddb_start/ddb_end the display-buffer range this pipe may use (nmw_free_run). Returns 0 or NMO_E_*. */
 static inline int nmo_init(const struct nmr_ops *o, struct nmo *m, unsigned ver, unsigned tc, unsigned pipe, unsigned refclk_khz)
 {
     memset(m, 0, sizeof *m);
@@ -112,13 +113,14 @@ static inline int nmo_init(const struct nmr_ops *o, struct nmo *m, unsigned ver,
     m->ver = (uint8_t)ver; m->pipe = (uint8_t)pipe; m->ddi = (uint8_t)(3 + tc); m->refclk_khz = refclk_khz;
     return NMO_OK;
 }
-static inline int nmo_enable(const struct nmr_ops *o, struct nmo *m, uint32_t surf, uint32_t pitch, unsigned ddb_start, unsigned ddb_end)
+static inline int nmo_enable(const struct nmr_ops *o, struct nmo *m, uint32_t surf, uint32_t capacity, unsigned ddb_start, unsigned ddb_end)
 {
+    uint32_t pitch = 0;
     struct nmr_ops o2 = *o;
     const unsigned p = m->pipe, t = m->pipe, ddi = m->ddi, tc = m->tc.tc;
     uint8_t dp[16], edid[128]; uint32_t regs[11]; struct nme_mn mn; struct nmw_in win; unsigned i;
     if (m->state == NMO_UP) return NMO_E_BUSY;
-    m->done = 0; m->err = 0; m->surf = surf; m->pitch = pitch; m->ddb_start = ddb_start; m->ddb_end = ddb_end;
+    m->done = 0; m->err = 0; m->surf = surf; m->ddb_start = ddb_start; m->ddb_end = ddb_end;
 
     nmr_note(o, "external display: PHY");
     if (!nmt_connect(o, &m->tc, 1)) return nmo_fail(o, m, NMO_E_PHY);
@@ -136,6 +138,8 @@ static inline int nmo_enable(const struct nmr_ops *o, struct nmo *m, uint32_t su
     if (!nmo_alive(o, m)) return nmo_fail(o, m, NMO_E_UNPLUGGED);
 
     nmr_note(o, "external display: mode");
+    pitch = ((uint32_t)m->t.hactive * 4u + 63u) & ~63u; m->pitch = pitch;                                // linear XRGB8888, rows on 64-byte units
+    if ((uint64_t)pitch * m->t.vactive > capacity) return nmo_fail(o, m, NMO_E_MODE);                  // the buffer given is too small for the preferred mode
     if (nme_link(&m->c, &m->t, 24, &m->rate, &m->lanes)) return nmo_fail(o, m, NMO_E_MODE);
     if (nmt_max_lanes(o, &m->tc) < m->lanes) return nmo_fail(o, m, NMO_E_MODE);                       /* the cable gives fewer lanes than the link needs */
     memset(&win, 0, sizeof win); win.pixel_khz = m->t.clock_khz; win.hactive = m->t.hactive; win.htotal = (uint16_t)(m->t.hactive + m->t.hblank); win.ver = m->ver;
@@ -196,9 +200,9 @@ static inline int nmo_enable(const struct nmr_ops *o, struct nmo *m, uint32_t su
     return NMO_OK;
 }
 /* Hot-plug: call with the result of nmt_poll. A plug brings the display up; an unplug takes it down. Returns the NMO_E_* of the attempt, or 0. */
-static inline int nmo_event(const struct nmr_ops *o, struct nmo *m, int ev, uint32_t surf, uint32_t pitch, unsigned ddb_start, unsigned ddb_end)
+static inline int nmo_event(const struct nmr_ops *o, struct nmo *m, int ev, uint32_t surf, uint32_t capacity, unsigned ddb_start, unsigned ddb_end)
 {
-    if ((ev == 1 || ev == 3) && m->state != NMO_UP) return nmo_enable(o, m, surf, pitch, ddb_start, ddb_end);
+    if ((ev == 1 || ev == 3) && m->state != NMO_UP) return nmo_enable(o, m, surf, capacity, ddb_start, ddb_end);
     if (ev == 2 && (m->state == NMO_UP || m->done)) { nmo_teardown(o, m); return 0; }
     return 0;
 }
