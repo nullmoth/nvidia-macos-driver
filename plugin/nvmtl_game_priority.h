@@ -119,4 +119,38 @@ static inline void nvmtl_bg_priority_apply(const struct nvmtl_bg_priority *p)
     }
 }
 
+/* ---- live re-prioritisation of a client that is already running -----------------------------------------------------------
+ * The knobs above are read when a queue's context is made. For a client that is already running, the NVK driver exports
+ * nvmtl_nvk_tsg_reprioritise_v1(level, timeslice_us), which re-applies the interleave level and timeslice on this process's
+ * existing channel groups and, with level -1, puts them back to what they were. This decides when to call it. The plugin
+ * calls it again each time the notify(3) key com.nullmoth.gamemode.active changes.
+ *
+ *   a game process (raise switch on)       active  -> HIGH with the game timeslice;  inactive -> restore
+ *   another client (lower switch on)       active  -> LOW with the background timeslice; inactive -> restore
+ *   a system process / unknown path        never touched
+ *   a user who set NVRM_TSG_Q0_HIGH or NVRM_TSG_TIMESLICE_US themselves   never touched (their value wins)
+ * `applied` is the caller's memory of whether it has changed the groups, so a repeated notification does nothing. */
+enum { NVMTL_LIVE_NONE = 0, NVMTL_LIVE_SET = 1, NVMTL_LIVE_RESTORE = 2 };
+struct nvmtl_live_action { int kind; int level; unsigned long timeslice_us; };
+
+static inline struct nvmtl_live_action nvmtl_live_decide(const char *raise_sw, const char *lower_sw, int process_is_game, int game_active,
+                                                         const char *exe_path, int user_pinned, int applied,
+                                                         const char *game_ts_env, const char *bg_ts_env)
+{
+    struct nvmtl_live_action a = { NVMTL_LIVE_NONE, 0, 0 };
+    if (user_pinned) return a;
+    if (process_is_game) {
+        struct nvmtl_game_priority g = nvmtl_game_priority_decide(raise_sw, 1, game_ts_env);
+        if (!g.apply) return a;
+        if (game_active && !applied) { a.kind = NVMTL_LIVE_SET; a.level = 2; a.timeslice_us = g.timeslice_us; }
+        else if (!game_active && applied) { a.kind = NVMTL_LIVE_RESTORE; a.level = -1; }
+        return a;
+    }
+    struct nvmtl_bg_priority b = nvmtl_bg_priority_decide(lower_sw, 0, 1, exe_path, bg_ts_env);   /* what it WOULD do while a game is active */
+    if (!b.apply) return a;
+    if (game_active && !applied) { a.kind = NVMTL_LIVE_SET; a.level = 0; a.timeslice_us = b.timeslice_us; }
+    else if (!game_active && applied) { a.kind = NVMTL_LIVE_RESTORE; a.level = -1; }
+    return a;
+}
+
 #endif

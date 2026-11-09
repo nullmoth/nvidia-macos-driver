@@ -1,0 +1,271 @@
+--- nak_nir.c.pre-predload	2026-11-01 01:46:19
++++ nak_nir.c	2026-11-01 02:06:33
+@@ -2253,6 +2253,7 @@
+    nir_def *n;               /* loop-invariant bound */
+    nir_op exit_op;           /* nir_op_ieq, nir_op_ige or nir_op_uge: the loop exits when exit_op(t, n) */
+    unsigned f;
++   unsigned step;            /* the counter's constant increment (speed267 predload: was always 1) */
+ };
+ 
+ static bool
+@@ -2264,6 +2265,7 @@
+    case nir_intrinsic_load_shared:
+    case nir_intrinsic_load_ubo:
+    case nir_intrinsic_load_ssbo:
++   case nir_intrinsic_load_global_nv:   /* speed267: punroll also runs after nak_cg_predload */
+       return true;
+    default:
+       return false;
+@@ -2335,8 +2337,10 @@
+ }
+ 
+ /* The header phi p whose back-edge value is p + 1, if def is p (d = 0) or that p + 1 (d = 1). */
++static bool nak_cg_predload_enabled(void);
++
+ static nir_phi_instr *
+-nak_cg_punroll_counter(nir_block *a, nir_block *z, nir_def *def, unsigned *d)
++nak_cg_punroll_counter(nir_block *a, nir_block *z, nir_def *def, unsigned *d, unsigned *step)
+ {
+    nir_foreach_phi(phi, a) {
+       if (phi->def.bit_size != 32 || phi->def.num_components != 1)
+@@ -2351,20 +2355,26 @@
+       if (add->op != nir_op_iadd || add->def.num_components != 1)
+          continue;
+       bool ok = false;
++      uint64_t st = 0;
+       for (unsigned s = 0; s < 2; s++) {
+          if (add->src[s].src.ssa == &phi->def && add->src[s].swizzle[0] == 0 &&
+-             nir_src_is_const(add->src[1 - s].src) &&
+-             nir_alu_src_as_uint(add->src[1 - s]) == 1)
+-            ok = true;
++             nir_src_is_const(add->src[1 - s].src)) {
++            st = nir_alu_src_as_uint(add->src[1 - s]);
++            /* speed267: a grid-stride loop (i += threads per group) is as countable as i++; particle steps 64 */
++            if (st == 1 || (nak_cg_predload_enabled() && st >= 2 && st <= 4096))
++               ok = true;
++         }
+       }
+       if (!ok)
+          continue;
+       if (def == &phi->def) {
+          *d = 0;
++         *step = st;
+          return phi;
+       }
+       if (def == &add->def) {
+          *d = 1;
++         *step = st;
+          return phi;
+       }
+    }
+@@ -2438,22 +2448,24 @@
+    if (op != nir_op_ieq && op != nir_op_ige && op != nir_op_uge)
+       return false;
+ 
+-   unsigned d = 0;
++   unsigned d = 0, step = 1;
+    nir_phi_instr *iv = NULL;
+    nir_def *n = NULL;
+    for (unsigned s = 0; s < 2 && iv == NULL; s++) {
+       if (s == 1 && op != nir_op_ieq)
+          break;   /* ige / uge are exit when t >= n: the counter must be the left operand */
+-      iv = nak_cg_punroll_counter(a, z, cmp->src[s].src.ssa, &d);
++      iv = nak_cg_punroll_counter(a, z, cmp->src[s].src.ssa, &d, &step);
+       n = cmp->src[1 - s].src.ssa;
+    }
+    if (iv == NULL || n->bit_size != 32 || n->num_components != 1)
+       return false;
++   if (step != 1 && op == nir_op_ieq)
++      return false;   /* t == n can be stepped over by a stride > 1 */
+    /* n is loop-invariant: defined in a block that comes before the loop */
+    if (nir_def_block(n)->index >= nir_loop_first_block(loop)->index)
+       return false;
+ 
+-   *p = (struct nak_cg_punroll_plan){ loop, a, z, iv, d, n, op, f };
++   *p = (struct nak_cg_punroll_plan){ loop, a, z, iv, d, n, op, f, step };
+    return true;
+ }
+ 
+@@ -2505,8 +2517,9 @@
+    }
+ 
+    nir_builder b = nir_builder_at(nir_after_block(mh));
+-   nir_def *t0 = p->d ? nir_iadd_imm(&b, &mphi[ivk]->def, 1) : &mphi[ivk]->def;
+-   nir_def *g = nir_uge(&b, nir_isub(&b, p->n, t0), nir_imm_int(&b, p->f));
++   /* a chunk of f bodies at iv, iv+step, ... needs iv + (f-1)*step < n; (n - t0) >= f*step is that, conservatively */
++   nir_def *t0 = p->d ? nir_iadd_imm(&b, &mphi[ivk]->def, p->step) : &mphi[ivk]->def;
++   nir_def *g = nir_uge(&b, nir_isub(&b, p->n, t0), nir_imm_int(&b, p->f * p->step));
+    if (p->exit_op == nir_op_ige)
+       g = nir_iand(&b, nir_ilt(&b, t0, p->n), g);
+    else if (p->exit_op == nir_op_uge)
+@@ -2554,7 +2567,156 @@
+    ralloc_free(lphi);
+ }
+ 
++/* speed267 (patch_predload.py): NVMTL_NAK_NO_PREDLOAD=1 turns off nak_cg_predload and the stride-n punroll. */
+ static bool
++nak_cg_predload_enabled(void)
++{
++   static int enabled = -1;
++   if (enabled < 0) {
++      const char *e = getenv("NVMTL_NAK_NO_PREDLOAD");
++      enabled = !(e != NULL && e[0] == '1');
++   }
++   return enabled;
++}
++
++/* Instructions of one if side that nak_cg_predload may move above the if: pure ALU, constants, and global loads
++ * that are neither volatile nor coherent (those become predicated). -1 for anything else. */
++static int
++nak_cg_predload_side(nir_block *blk, unsigned *loads)
++{
++   int n = 0;
++   nir_foreach_instr(instr, blk) {
++      switch (instr->type) {
++      case nir_instr_type_alu:
++         n++;
++         break;
++      case nir_instr_type_load_const:
++      case nir_instr_type_undef:
++         break;
++      case nir_instr_type_intrinsic: {
++         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++         if (intr->intrinsic != nir_intrinsic_load_global &&
++             intr->intrinsic != nir_intrinsic_load_global_constant)
++            return -1;
++         if (nir_intrinsic_access(intr) & (ACCESS_VOLATILE | ACCESS_COHERENT))
++            return -1;
++         (*loads)++;
++         n++;
++         break;
++      }
++      default:
++         return -1;
++      }
++   }
++   return n;
++}
++
++static unsigned
++nak_cg_predload_max(void)
++{
++   static int max = -1;
++   if (max < 0) {
++      const char *e = getenv("NVMTL_NAK_PREDLOAD_MAX");
++      max = e && *e ? atoi(e) : 32;
++      if (max < 0)
++         max = 0;
++   }
++   return max;
++}
++
++static void
++nak_cg_predload_hoist(nir_shader *nir, nir_block *side, nir_block *dest, nir_def *pred)
++{
++   nir_builder b = nir_builder_create(nir_cf_node_get_function(&dest->cf_node));
++   nir_foreach_instr_safe(instr, side) {
++      if (instr->type != nir_instr_type_intrinsic) {
++         nir_instr_move(nir_after_block(dest), instr);
++         continue;
++      }
++      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++      b.cursor = nir_after_block(dest);
++      nir_def *addr = intr->src[0].ssa;
++      nir_def *res = nir_load_global_nv(&b, intr->def.num_components, intr->def.bit_size, addr,
++                                        nir_imm_zero(&b, 1, addr->bit_size), pred);
++      nir_intrinsic_instr *nv = nir_def_as_intrinsic(res);
++      enum gl_access_qualifier access = nir_intrinsic_access(intr);
++      if (intr->intrinsic == nir_intrinsic_load_global_constant)
++         access |= ACCESS_CAN_REORDER;
++      nir_intrinsic_set_access(nv, access);
++      nir_intrinsic_set_align_mul(nv, nir_intrinsic_align_mul(intr));
++      nir_intrinsic_set_align_offset(nv, nir_intrinsic_align_offset(intr));
++      if (nir_intrinsic_has_base(intr))
++         nir_intrinsic_set_base(nv, nir_intrinsic_base(intr));
++      nir_def_rewrite_uses(&intr->def, res);
++      nir_instr_remove(instr);
++   }
++}
++
++/* speed267: a divergent if costs bclear + bssy + bsync + a branch, every trip of a loop, and it keeps the loop
++ * out of nak_cg_punroll (which only takes straight-line bodies). GB7 particle's inner loop is
++ * `if (j != i) { load p[j]; if (0 < d2 < r2) { f += m*rsq(d2)*d; } }` for 64 trips per thread: one load in flight,
++ * two branch regions per trip. NVIDIA's compiler runs it in 47 us; we took 69 us.
++ * A small side with only ALU and plain global loads runs unconditionally instead, each load predicated on the
++ * branch condition, which LDG does in hardware: a false predicate makes no access and returns 0, so nothing
++ * is read that the program would not have read. The phis become selects in peephole_select. */
++static bool
++nak_cg_predload_once(nir_shader *nir)
++{
++   bool progress = false;
++   nir_divergence_analysis(nir);
++   nir_foreach_function_impl(impl, nir) {
++      bool p = false;
++      nir_foreach_block(block, impl) {
++         nir_if *nif = nir_block_get_following_if(block);
++         if (nif == NULL || !nir_src_is_divergent(&nif->condition))
++            continue;
++         nir_block *tb = nir_if_first_then_block(nif), *eb = nir_if_first_else_block(nif);
++         if (tb != nir_if_last_then_block(nif) || eb != nir_if_last_else_block(nif))
++            continue;
++         const bool t_empty = exec_list_is_empty(&tb->instr_list);
++         const bool e_empty = exec_list_is_empty(&eb->instr_list);
++         if (t_empty == e_empty)
++            continue;   /* both empty: peephole_select's job; both full: not a guard */
++         nir_block *side = t_empty ? eb : tb;
++         unsigned loads = 0;
++         const int n = nak_cg_predload_side(side, &loads);
++         /* a guard around a few taps, not a slow path: <= NVMTL_NAK_PREDLOAD_MAX instructions (default 32: particle's
++          * j != i side needs more than 20; the census at 12/20/32 differs only by the unrolls 32 enables) and <= 2 loads */
++         if (n < 0 || n > (int)nak_cg_predload_max() || loads > 2)
++            continue;
++         nir_def *pred = nif->condition.ssa;
++         if (t_empty) {
++            nir_builder b = nir_builder_at(nir_after_block(block));
++            pred = nir_inot(&b, pred);
++         }
++         nak_cg_predload_hoist(nir, side, block, pred);
++         p = true;
++      }
++      progress |= nir_progress(p, impl, nir_metadata_control_flow);
++   }
++   return progress;
++}
++
++static bool
++nak_cg_predload(nir_shader *nir)
++{
++   if (!nak_cg_predload_enabled() ||
++       (nir->info.stage != MESA_SHADER_COMPUTE && nir->info.stage != MESA_SHADER_KERNEL))
++      return false;
++   const nir_opt_peephole_select_options sel = { .limit = 0 };
++   bool progress = false;
++   /* inner ifs first: once an inner side is hoisted and its if folded, the outer side is one block again */
++   for (unsigned it = 0; it < 4; it++) {
++      if (!nak_cg_predload_once(nir))
++         break;
++      progress = true;
++      nir_opt_peephole_select(nir, &sel);
++      nir_opt_dce(nir);
++   }
++   return progress;
++}
++
++static bool
+ nak_cg_punroll(nir_shader *nir)
+ {
+    if (!nak_cg_punroll_enabled() || (nir->info.stage != MESA_SHADER_COMPUTE && nir->info.stage != MESA_SHADER_KERNEL))
+@@ -2689,6 +2851,13 @@
+    vectorize_opts.callback = nak_mem_vectorize_cb;
+    vectorize_opts.robust_modes = robust2_modes;
+    OPT(nir, nir_opt_load_store_vectorize, &vectorize_opts);
++
++   /* speed267: after the vectorizer, so a hoisted b32 pair is already one b64 when it becomes predicated */
++   if (!raw_pressure && OPT(nir, nak_cg_predload)) {
++      nak_optimize_nir(nir, nak);
++      if (OPT(nir, nak_cg_punroll))
++         nak_optimize_nir(nir, nak);
++   }
+ 
+    nir_lower_mem_access_bit_sizes_options mem_bit_size_options = {
+       .modes = nir_var_mem_constant | nir_var_mem_ubo | nir_var_mem_generic |
