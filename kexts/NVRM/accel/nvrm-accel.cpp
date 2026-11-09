@@ -1255,6 +1255,9 @@ static int    gNvIop = 0;
 static SInt64 gCntIopOk, gCntIopFail, gCntIopEmpty, gCntIopSrcRes, gCntIopSrcSurf, gCntIopBlank;
 static SInt64 gCntIopOkHead[kNvMaxFB];
 static SInt64 gCntIopL10r;                 // frames narrowed from 10-bit l10r (login window, lock screen)
+// hybrid laptops (nm_hybrid.h): boot-arg nmhybrid, default off
+static int gNmHybrid = 0;
+static SInt64 gCntHyFrames, gCntHyWords, gCntHyWordsSkipped, gCntHyFlips, gCntHyImportFail;
 #define NVIOP_LOG_MAX 40
 static unsigned gIopLogs = 0;
 #define NVIOPLOG(fmt, ...) do { if (gIopLogs < NVIOP_LOG_MAX) { gIopLogs++; ALOG("iop: " fmt, ##__VA_ARGS__); } } while (0)
@@ -1513,8 +1516,6 @@ NVACCEL_CNT(nvaccel_iop_flip_stale,   gCntIopFlipNo[5],   "copied because system
 NVACCEL_CNT(nvaccel_iop_flip_refused, gCntIopFlipNo[7],   "copied because the framebuffer refused the flip");
 static SInt64 gCntIopUnwritten, gCntIopCopyUnwritten;
 // hybrid laptops (nm_hybrid.h): boot-arg nmhybrid, default off
-static int gNmHybrid = 0;
-static SInt64 gCntHyFrames, gCntHyWords, gCntHyWordsSkipped, gCntHyFlips, gCntHyImportFail;
 SYSCTL_INT(_debug, OID_AUTO, nmhybrid, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gNmHybrid, 0,
            "hybrid laptop path: 0 off, 1 copy changed pixels to the other GPU's panel, 2 scan out the composited surface in place");
 NVACCEL_CNT(nmhybrid_frames,        gCntHyFrames,       "hybrid: frames presented by copy to another GPU's panel");
