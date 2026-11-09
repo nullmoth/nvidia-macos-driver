@@ -6564,16 +6564,26 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
             if (nvmtl_vk_cmd_icb_gather(&_cb->_c, &b->_recBuf->_b, &big->_b, at * slots * NVMTL_ICB_RECORD_BYTES, slots, 1, ((id<MTLComputePipelineState>)cands[k]).gpuResourceID._impl, 0, loc, len, tg, 0, 0, rb ? &rb->_b : NULL, ro)) { nvlog("GPU ICB compute: the gather pass FAILED"); return; }
             at++;
         }
+    // per-command buffers: kernel buffers are the set-0 address table, patched per slot from the records (nvmtl_icb_record.h)
+    BOOL tabs = NO;
+    if (slots <= NVMTL_ICB_MAX_PATCH_SLOTS) {
+        NVMTLBuffer *dsts = nvmtl_icb_scratch_bytes((NSUInteger)slots * 16u);
+        if (dsts) { nvmtl_retain_resource(_cb, dsts); tabs = nvmtl_vk_cmd_icb_tables(&_cb->_c, &b->_recBuf->_b, &dsts->_b, slots) == 0; }
+    }
+    if (!tabs) { static int said; if (!said++) nvlog("GPU ICB compute: the per-command buffer tables could not be prepared - dispatches use the encoder's own buffer bindings"); }
     at = 0; NSUInteger run = 0;
     for (NSUInteger k = 0; k < cands.count; k++) {
         [self setComputePipelineState:cands[k]];
         for (NSArray *sz in sizes[k]) {
             const MTLSize tg = MTLSizeMake([sz[0] unsignedLongValue], [sz[1] unsignedLongValue], [sz[2] unsignedLongValue]);
-            for (uint32_t i = 0; i < slots; i++, run++)
+            for (uint32_t i = 0; i < slots; i++, run++) {
+                nvmtl_vk_cmd_icb_use(&_cb->_c, tabs ? i + 1u : 0u);
                 [self dispatchThreadgroupsWithIndirectBuffer:big indirectBufferOffset:(at * slots + i) * NVMTL_ICB_RECORD_BYTES threadsPerThreadgroup:tg];
+            }
             at++;
         }
     }
+    nvmtl_vk_cmd_icb_use(&_cb->_c, 0); nvmtl_vk_cmd_icb_tables_free(&_cb->_c);
     if (orig) [self setComputePipelineState:orig];
     nvlog("GPU ICB compute: %lu indirect dispatch(es) recorded for %u slot(s), %lu candidate kernel(s); commands recorded with another threadgroup size do not run", (unsigned long)run, slots, (unsigned long)cands.count);
 }

@@ -2482,6 +2482,17 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 }
 - (BOOL)areBarycentricCoordsSupported { return YES; }
 - (BOOL)supportsPrimitiveMotionBlur { return NO; }
+// Capability answers that were left to the base class. Each is a property of the Vulkan device, not a guess:
+// vertex amplification runs as multiview (NVMTL_VERTEX_AMPLIFICATION=1) up to the device's multiview view count
+- (BOOL)supportsVertexAmplificationCount:(NSUInteger)count { return count <= 1 || (nvmtl_vk_multiview_views() && count <= nvmtl_vk_multiview_views()); }
+// 32-bit float textures filter linearly and multisample on every NVIDIA GPU this driver supports (Turing and newer), and the translator
+// lowers pull-model interpolation (interpolate_at_offset / sample / centroid) and the texture LOD query
+- (BOOL)supports32BitFloatFiltering { return YES; }
+- (BOOL)supports32BitMSAA { return YES; }
+- (BOOL)supportsPullModelInterpolation { return YES; }
+- (BOOL)supportsQueryTextureLOD { return YES; }
+// the pipeline builds this driver runs at once (nvmtl_pipeline_compile_width)
+- (NSUInteger)maximumConcurrentCompilationTaskCount { return (NSUInteger)nvmtl_pipeline_compile_width(); }
 - (NSMutableDictionary *)copyIOSurfaceSharedTextureProperties:(MTLTextureDescriptor *)d {
     const char *why = NULL; uint32_t vkf = 0, bpp = 0; int a8 = 0; MTLPixelFormat f = d ? d.pixelFormat : MTLPixelFormatInvalid;
     if (!d) why = "no descriptor";
