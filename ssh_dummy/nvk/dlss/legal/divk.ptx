@@ -1,0 +1,20 @@
+// Test input written for NullMoth: one kernel whose division forces the compiler to emit its out-of-line division helpers.
+// Used to record, from our own compiler output, the code relocation kinds and the launch constant-buffer layout.
+.version 8.7
+.target sm_75
+.address_size 64
+.visible .entry divk(.param .u64 p, .param .u32 n)
+{
+ .reg .u64 %rd<4>; .reg .u16 %h<4>; .reg .u32 %r<6>; .reg .f64 %d<4>;
+ ld.param.u64 %rd1,[p]; cvta.to.global.u64 %rd1,%rd1;
+ mov.u32 %r1,%tid.x;
+ ld.param.u32 %r2,[n];
+ cvt.u16.u32 %h1,%r1; cvt.u16.u32 %h2,%r2;
+ div.u16 %h3,%h1,%h2;
+ cvt.u32.u16 %r3,%h3;
+ cvt.rn.f64.u32 %d1,%r1; cvt.rn.f64.u32 %d2,%r2;
+ div.rn.f64 %d3,%d1,%d2;
+ cvt.rzi.u32.f64 %r4,%d3; add.u32 %r5,%r3,%r4;
+ st.global.u32 [%rd1],%r5;
+ ret;
+}

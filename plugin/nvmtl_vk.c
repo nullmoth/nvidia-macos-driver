@@ -6,6 +6,8 @@
 
 #include "nvmtl_game_priority.h"
 #include <dlfcn.h>
+#include <notify.h>
+#include <dispatch/dispatch.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
 #include <mach/mach.h>
@@ -789,6 +791,44 @@ typedef struct { uint32_t version, surfaceID, plane, pad; uint64_t size_B; } nvm
 static void (*pnvk_stage_import)(const nvmtl_vram_rec *);
 static uint32_t (*pnvk_surface_dirty)(VkDevice, uint32_t, uint32_t);
 static int (*pnvk_sparse)(void);
+
+// Game Mode, live: NVK's nvmtl_nvk_tsg_reprioritise_v1(level, timeslice_us) re-applies the interleave level and timeslice on
+// this process's existing channel groups (level -1 restores what they had). The decision is nvmtl_live_decide; this keeps
+// the caller's memory ("applied") and re-runs it each time com.nullmoth.gamemode.active changes. Off unless a switch is on.
+static int (*pnvk_reprio)(int, unsigned long);
+static struct {
+    pthread_mutex_t mu; int applied; int started; int pinned; int is_game;
+    const char *raise_sw, *lower_sw; int token;
+} g_live = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 0, 0, 0, 0, 0 };
+static struct { const char *raise_sw, *lower_sw; int is_game, pinned; } g_live_pre;   // taken BEFORE the creation-time knobs are set
+static void nvmtl_live_evaluate(int active)
+{
+    extern const char *nvmtl_process_exe_path(void);
+    if (!pnvk_reprio) return;
+    pthread_mutex_lock(&g_live.mu);
+    struct nvmtl_live_action a = nvmtl_live_decide(g_live.raise_sw, g_live.lower_sw, g_live.is_game, active, nvmtl_process_exe_path(),
+                                                   g_live.pinned, g_live.applied, getenv("NVMTL_GAME_TIMESLICE_US"),
+                                                   getenv("NVMTL_GAME_BACKGROUND_TIMESLICE_US"));
+    if (a.kind != NVMTL_LIVE_NONE) {
+        int n = pnvk_reprio(a.level, a.timeslice_us);
+        nvlog("vk: Game Mode live: %s -> %d channel group(s) %s", a.kind == NVMTL_LIVE_SET ? (a.level == 2 ? "raise to HIGH" : "lower to LOW") : "restore", n,
+              n < 0 ? "REFUSED" : "changed");
+        if (n >= 0) g_live.applied = a.kind == NVMTL_LIVE_SET;
+    }
+    pthread_mutex_unlock(&g_live.mu);
+}
+static void nvmtl_live_start(const char *raise_sw, const char *lower_sw, int is_game, int pinned)
+{
+    extern int nvmtl_game_active(void);
+    if (g_live.started || !pnvk_reprio || (!raise_sw && !lower_sw) || pinned) return;
+    g_live.started = 1; g_live.raise_sw = raise_sw; g_live.lower_sw = lower_sw; g_live.is_game = is_game; g_live.pinned = pinned;
+    nvmtl_live_evaluate(nvmtl_game_active());       // a game already active when this client starts: the creation-time knobs cover
+                                                    // new groups, this covers the case where the state is read after they were made
+    notify_register_dispatch("com.nullmoth.gamemode.active", &g_live.token, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(int t) {
+        uint64_t st = 0;
+        if (notify_get_state(t, &st) == NOTIFY_STATUS_OK) nvmtl_live_evaluate(st == 1);
+    });
+}
 static int g_qsparse, g_sparse;
 static int g_extfd;
 
@@ -1099,6 +1139,7 @@ static int nvmtl_vk_initialize(void)
             pnvk_sample_depth_contract = (VkResult (*)(VkDevice, uint32_t *, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_contract_v1");
             pnvk_sample_depth_image = (VkResult (*)(VkDevice, VkImage, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_image_v1");
             pnvk_sparse = (int (*)(void))dlsym(g_lib, "nvmtl_nvk_sparse_bind_v1");
+            pnvk_reprio = (int (*)(int, unsigned long))dlsym(g_lib, "nvmtl_nvk_tsg_reprioritise_v1");
         }
         else { nvlog("vk: %s has no vkGetInstanceProcAddr", NVMTL_ICD_LIB); dlclose(g_lib); g_lib = NULL; }
     } else {
@@ -1466,6 +1507,9 @@ static int nvmtl_vk_initialize(void)
       const int gm_service = access("/Library/NullMoth/gamemode/nullmoth-gamemode-policy.py", R_OK) == 0;
       const char *gm_raise = nvmtl_game_switch(getenv("NVMTL_GAME_GPU_PRIORITY"), gm_service);
       const char *gm_lower = nvmtl_game_switch(getenv("NVMTL_GAME_LOWER_BACKGROUND"), gm_service);
+      g_live_pre.raise_sw = gm_raise; g_live_pre.lower_sw = gm_lower;
+      g_live_pre.is_game = (gm_raise || gm_lower) ? nvmtl_process_is_game() : 0;
+      g_live_pre.pinned = getenv("NVRM_TSG_Q0_HIGH") != NULL || getenv("NVRM_TSG_TIMESLICE_US") != NULL;   // the user's own value wins
       struct nvmtl_game_priority gp = nvmtl_game_priority_decide(gm_raise, gm_raise ? nvmtl_process_is_game() : 0, getenv("NVMTL_GAME_TIMESLICE_US"));
       nvmtl_game_priority_apply(&gp);
       { extern int nvmtl_game_active(void); extern const char *nvmtl_process_exe_path(void);
@@ -1475,6 +1519,7 @@ static int nvmtl_vk_initialize(void)
         if (bg.apply) nvlog("vk: a game is active: this client lowers its own channel group (interleave LOW, timeslice %lu us)", bg.timeslice_us); }
       if (gp.apply) nvlog("vk: Game Mode GPU priority: interleave HIGH, timeslice %lu us for this process", gp.timeslice_us); }
     VKCK(pvkCreateDevice(g_pdev, &dci, NULL, &g_dev), "vkCreateDevice");
+    nvmtl_live_start(g_live_pre.raise_sw, g_live_pre.lower_sw, g_live_pre.is_game, g_live_pre.pinned);
     DEVICE_FNS(LOAD_D)
     g_storage_raw_create_view = pvkCreateImageView; pvkCreateImageView = nvmtl_storage_CreateImageView;
     g_storage_raw_destroy_image = pvkDestroyImage; pvkDestroyImage = nvmtl_storage_DestroyImage;

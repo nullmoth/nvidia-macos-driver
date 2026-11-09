@@ -1,0 +1,596 @@
+diff --git a/src/nouveau/vulkan/nvk_cmd_mem_recycle.h b/src/nouveau/vulkan/nvk_cmd_mem_recycle.h
+new file mode 100644
+index 0000000..7b4b806
+--- /dev/null
++++ b/src/nouveau/vulkan/nvk_cmd_mem_recycle.h
+@@ -0,0 +1,189 @@
++/*
++ * Copyright 2026 NullMoth Systems
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef NVK_CMD_MEM_RECYCLE_H
++#define NVK_CMD_MEM_RECYCLE_H
++
++/* Device-wide recycler for command-pool chunks (the 64 KB push/upload buffers of nvk_cmd_pool).
++ *
++ * Why: a VkCommandPool keeps its chunks only while it lives. The Metal layer creates and destroys pools as its command
++ * buffers retire, and every chunk of a destroyed pool was an RM free + VA free + CPU unmap, and every chunk of a new
++ * pool an RM alloc + VA bind + user-client open + CPU map. On macOS each CPU mapping is its own IOKit connection, so
++ * both ends cross the accelerator's arbitration lock. In a 20 s Cyberpunk sample that was ~3,000 samples on the
++ * recording threads and ~1,800 on the completion thread. This list keeps a destroyed pool's chunks - still allocated,
++ * still mapped - and hands them to the next pool that needs one.
++ *
++ * Two limits, because every kept chunk also keeps its connection open and the process has a hard ceiling on those:
++ *   - cap:      at most this many chunks wait here at once;
++ *   - live_max: a chunk is only kept while the process holds no more than this many chunks in all (in use + waiting).
++ * Past either, the chunk is destroyed exactly as before.
++ *
++ * GPU safety: a chunk is put here with a fence snapshot taken at that moment (the same one the deferred-free path
++ * takes: every channel's last flushed sequence number) and is handed out again only once that snapshot has passed.
++ * So a chunk never goes back to the CPU while any submission that existed when it was given up can still read it -
++ * the same rule as freeing it, just without the free.
++ *
++ * The logic is here, free of NVK types, so the unit test drives the same code the driver runs. The includer defines
++ * NVK_CMR_FENCE (the snapshot type) before including this file. */
++
++#include <pthread.h>
++#include <stdatomic.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdlib.h>
++
++#ifndef NVK_CMR_FENCE
++#error "define NVK_CMR_FENCE to the fence snapshot type before including nvk_cmd_mem_recycle.h"
++#endif
++
++/* How many of the oldest matching entries one take looks at before giving up and creating a chunk. Entries are in
++ * the order they were given up, so the oldest is the most likely to have passed its fence. */
++#define NVK_CMR_SCAN 8
++
++struct nvk_cmr_entry {
++   struct nvk_cmr_entry *next;
++   void *mem;             /* the backend memory object, still mapped */
++   const void *dev;       /* the backend device it belongs to; never handed to another device */
++   bool gart;
++   NVK_CMR_FENCE fence;
++};
++
++struct nvk_cmr_stats {
++   uint64_t takes, hits, misses, not_ready, kept, refused_cap, refused_live, drained;
++};
++
++struct nvk_cmr {
++   pthread_mutex_t lock;
++   struct nvk_cmr_entry *head, *tail;   /* FIFO: oldest at head */
++   unsigned n;
++   unsigned cap;                        /* 0 = off: every put is refused, every take misses */
++   unsigned live_max;
++   _Atomic int64_t live;                /* chunks alive in the process: created minus really destroyed */
++   struct nvk_cmr_stats st;
++};
++
++#define NVK_CMR_INIT { PTHREAD_MUTEX_INITIALIZER, NULL, NULL, 0, 0, 0, 0, { 0 } }
++
++/* Every chunk the pool creates counts +1, every chunk it really destroys -1. */
++static inline void
++nvk_cmr_live_add(struct nvk_cmr *r, int64_t d)
++{
++   atomic_fetch_add_explicit(&r->live, d, memory_order_relaxed);
++}
++
++/* Offer a chunk given up by a pool. true = kept (the caller drops only its wrapper); false = the caller destroys it.
++ * `fence_now` fills the snapshot; it runs only when the chunk will be kept. */
++static inline bool
++nvk_cmr_put(struct nvk_cmr *r, void *mem, const void *dev, bool gart,
++            void (*fence_now)(const void *dev, NVK_CMR_FENCE *out))
++{
++   if (r->cap == 0)
++      return false;
++   struct nvk_cmr_entry *e = (struct nvk_cmr_entry *)calloc(1, sizeof(*e));
++   if (e == NULL)
++      return false;
++   e->mem = mem; e->dev = dev; e->gart = gart;
++   fence_now(dev, &e->fence);
++   pthread_mutex_lock(&r->lock);
++   bool keep = false;
++   if (r->n >= r->cap)
++      r->st.refused_cap++;
++   else if (atomic_load_explicit(&r->live, memory_order_relaxed) > (int64_t)r->live_max)
++      r->st.refused_live++;
++   else
++      keep = true;
++   if (keep) {
++      if (r->tail) r->tail->next = e; else r->head = e;
++      r->tail = e;
++      r->n++;
++      r->st.kept++;
++   }
++   pthread_mutex_unlock(&r->lock);
++   if (!keep)
++      free(e);
++   return keep;
++}
++
++/* A chunk for `dev` whose fence has passed, or NULL (the caller creates one). */
++static inline void *
++nvk_cmr_take(struct nvk_cmr *r, const void *dev, bool gart,
++             bool (*passed)(const NVK_CMR_FENCE *f))
++{
++   if (r->cap == 0)
++      return NULL;
++   void *mem = NULL;
++   struct nvk_cmr_entry *hit = NULL;
++   pthread_mutex_lock(&r->lock);
++   r->st.takes++;
++   unsigned looked = 0;
++   bool any = false;
++   for (struct nvk_cmr_entry **pp = &r->head, *prev = NULL; *pp != NULL && looked < NVK_CMR_SCAN;) {
++      struct nvk_cmr_entry *e = *pp;
++      if (e->dev == dev && e->gart == gart) {
++         any = true;
++         looked++;
++         if (passed(&e->fence)) {
++            *pp = e->next;
++            if (r->tail == e) r->tail = prev;
++            r->n--;
++            hit = e;
++            break;
++         }
++      }
++      prev = e;
++      pp = &e->next;
++   }
++   if (hit) { r->st.hits++; mem = hit->mem; }
++   else if (any) r->st.not_ready++;
++   else r->st.misses++;
++   pthread_mutex_unlock(&r->lock);
++   free(hit);
++   return mem;
++}
++
++/* Hand back every chunk of `dev` (device teardown). `destroy` runs outside the lock. Returns how many. */
++static inline unsigned
++nvk_cmr_drain(struct nvk_cmr *r, const void *dev, void (*destroy)(void *mem))
++{
++   struct nvk_cmr_entry *mine = NULL;
++   pthread_mutex_lock(&r->lock);
++   for (struct nvk_cmr_entry **pp = &r->head, *prev = NULL; *pp != NULL;) {
++      struct nvk_cmr_entry *e = *pp;
++      if (e->dev == dev) {
++         *pp = e->next;
++         if (r->tail == e) r->tail = prev;
++         r->n--;
++         e->next = mine; mine = e;
++      } else {
++         prev = e;
++         pp = &e->next;
++      }
++   }
++   pthread_mutex_unlock(&r->lock);
++   unsigned k = 0;
++   while (mine) {
++      struct nvk_cmr_entry *e = mine;
++      mine = e->next;
++      destroy(e->mem);
++      free(e);
++      k++;
++   }
++   pthread_mutex_lock(&r->lock);
++   r->st.drained += k;
++   pthread_mutex_unlock(&r->lock);
++   return k;
++}
++
++static inline struct nvk_cmr_stats
++nvk_cmr_snapshot(struct nvk_cmr *r, unsigned *n_out, int64_t *live_out)
++{
++   pthread_mutex_lock(&r->lock);
++   struct nvk_cmr_stats s = r->st;
++   *n_out = r->n;
++   pthread_mutex_unlock(&r->lock);
++   *live_out = atomic_load_explicit(&r->live, memory_order_relaxed);
++   return s;
++}
++
++#endif /* NVK_CMD_MEM_RECYCLE_H */
+diff --git a/src/nouveau/vulkan/nvk_cmd_mem_recycle_test.c b/src/nouveau/vulkan/nvk_cmd_mem_recycle_test.c
+new file mode 100644
+index 0000000..1427ed9
+--- /dev/null
++++ b/src/nouveau/vulkan/nvk_cmd_mem_recycle_test.c
+@@ -0,0 +1,141 @@
++/*
++ * Copyright 2026 NullMoth Systems
++ * SPDX-License-Identifier: MIT
++ *
++ * Unit test for nvk_cmd_mem_recycle.h - the same code nvk_cmd_pool.c runs, with a mock fence:
++ * a chunk's fence is the GPU sequence number current when it was given up; it has passed once `gpu_done` reaches it.
++ *   cc -O1 -pthread -o /tmp/cmr_test nvk_cmd_mem_recycle_test.c && /tmp/cmr_test
++ */
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++
++typedef struct { uint64_t seq; } mock_fence;
++#define NVK_CMR_FENCE mock_fence
++#include "nvk_cmd_mem_recycle.h"
++
++static _Atomic uint64_t gpu_submitted, gpu_done;
++static void fence_now(const void *dev, mock_fence *f) { (void)dev; f->seq = atomic_load(&gpu_submitted); }
++static bool passed(const mock_fence *f) { return f->seq <= atomic_load(&gpu_done); }
++static unsigned destroyed;
++static void destroy(void *m) { (void)m; destroyed++; }
++
++static int fails, arms;
++#define ARM(name, cond) do { arms++; if (!(cond)) { fails++; printf("FAIL  %s\n", name); } else printf("ok    %s\n", name); } while (0)
++
++static void reset(struct nvk_cmr *r, unsigned cap, unsigned live_max)
++{
++   struct nvk_cmr z = NVK_CMR_INIT; *r = z; r->cap = cap; r->live_max = live_max;
++   atomic_store(&gpu_submitted, 0); atomic_store(&gpu_done, 0); destroyed = 0;
++}
++
++/* stress: chunks are ints in a table; a chunk is "in use" between take/create and put/destroy */
++#define NCHUNK_MAX 100000
++static _Atomic int in_use[NCHUNK_MAX];
++static _Atomic uint64_t given_up_at[NCHUNK_MAX];
++static _Atomic int next_chunk = 1, early_handouts, double_handouts;
++static struct nvk_cmr S;
++static const int DEVA = 1;
++static void *stress(void *arg)
++{
++   unsigned s = (unsigned)(uintptr_t)arg * 2654435761u;
++   for (int it = 0; it < 20000; it++) {
++      s = s * 1103515245u + 12345u;
++      bool gart = (s >> 9) & 1;
++      void *m = nvk_cmr_take(&S, &DEVA, gart, passed);
++      int id;
++      if (m) {
++         id = (int)(intptr_t)m;
++         if (atomic_load(&given_up_at[id]) > atomic_load(&gpu_done)) atomic_fetch_add(&early_handouts, 1);
++      } else {
++         id = atomic_fetch_add(&next_chunk, 1);
++         if (id >= NCHUNK_MAX) return NULL;
++         nvk_cmr_live_add(&S, 1);
++      }
++      if (atomic_exchange(&in_use[id], 1) != 0) atomic_fetch_add(&double_handouts, 1);
++      atomic_fetch_add(&gpu_submitted, 1);                         /* the chunk is "submitted" */
++      if ((s >> 13) % 3 == 0) {   /* the GPU completes up to 4 behind; completion only moves forward */
++         uint64_t sub = atomic_load(&gpu_submitted), want = sub > 4 ? sub - 4 : 0, cur = atomic_load(&gpu_done);
++         while (cur < want && !atomic_compare_exchange_weak(&gpu_done, &cur, want)) {}
++      }
++      atomic_store(&in_use[id], 0);
++      atomic_store(&given_up_at[id], atomic_load(&gpu_submitted));
++      if (!nvk_cmr_put(&S, (void *)(intptr_t)id, &DEVA, gart, fence_now)) nvk_cmr_live_add(&S, -1);
++   }
++   return NULL;
++}
++
++int main(void)
++{
++   struct nvk_cmr r;
++   static const int A = 1, B = 2;
++   void *m1 = (void *)0x1000, *m2 = (void *)0x2000, *m3 = (void *)0x3000;
++
++   reset(&r, 0, 512);
++   ARM("switched off (cap 0): a chunk is refused, so its pool frees it as before", !nvk_cmr_put(&r, m1, &A, false, fence_now));
++   ARM("switched off: a take always misses", nvk_cmr_take(&r, &A, false, passed) == NULL);
++
++   reset(&r, 4, 512);
++   atomic_store(&gpu_submitted, 10); atomic_store(&gpu_done, 5);
++   ARM("a chunk given up while the GPU may still read it is kept", nvk_cmr_put(&r, m1, &A, false, fence_now));
++   ARM("it is NOT handed out before its fence passes", nvk_cmr_take(&r, &A, false, passed) == NULL && r.st.not_ready == 1);
++   atomic_store(&gpu_done, 10);
++   ARM("it IS handed out once the fence passes", nvk_cmr_take(&r, &A, false, passed) == m1 && r.n == 0);
++   ARM("a chunk is handed out once, not twice", nvk_cmr_take(&r, &A, false, passed) == NULL);
++
++   reset(&r, 4, 512);
++   nvk_cmr_put(&r, m1, &A, false, fence_now); nvk_cmr_put(&r, m2, &A, false, fence_now);
++   ARM("oldest first (FIFO)", nvk_cmr_take(&r, &A, false, passed) == m1 && nvk_cmr_take(&r, &A, false, passed) == m2);
++
++   reset(&r, 4, 512);
++   nvk_cmr_put(&r, m1, &A, false, fence_now);
++   ARM("a chunk never goes to another device", nvk_cmr_take(&r, &B, false, passed) == NULL);
++   ARM("GART and non-GART requests are kept apart", nvk_cmr_take(&r, &A, true, passed) == NULL);
++   ARM("...and the right request still gets it", nvk_cmr_take(&r, &A, false, passed) == m1);
++
++   reset(&r, 2, 512);
++   ARM("cap: the first two are kept", nvk_cmr_put(&r, m1, &A, false, fence_now) && nvk_cmr_put(&r, m2, &A, false, fence_now));
++   ARM("cap: the third is refused (its pool frees it)", !nvk_cmr_put(&r, m3, &A, false, fence_now) && r.st.refused_cap == 1 && r.n == 2);
++
++   reset(&r, 8, 3);
++   nvk_cmr_live_add(&r, 4);   /* the process holds 4 chunks, more than live_max 3 */
++   ARM("connection ceiling: nothing is kept while the process holds more chunks than NVK_CMDMEM_LIVE_MAX",
++       !nvk_cmr_put(&r, m1, &A, false, fence_now) && r.st.refused_live == 1);
++   nvk_cmr_live_add(&r, -1);
++   ARM("connection ceiling: kept again once back at the limit", nvk_cmr_put(&r, m1, &A, false, fence_now));
++
++   reset(&r, 8, 512);
++   nvk_cmr_put(&r, m1, &A, false, fence_now); nvk_cmr_put(&r, m2, &B, false, fence_now); nvk_cmr_put(&r, m3, &A, true, fence_now);
++   unsigned k = nvk_cmr_drain(&r, &A, destroy);
++   ARM("device teardown frees exactly that device's chunks", k == 2 && destroyed == 2 && r.n == 1);
++   ARM("...and leaves the other device's", nvk_cmr_take(&r, &B, false, passed) == m2 && r.head == NULL && r.tail == NULL);
++
++   reset(&r, 16, 512);
++   atomic_store(&gpu_submitted, 100);
++   for (int i = 0; i < NVK_CMR_SCAN; i++) nvk_cmr_put(&r, (void *)(intptr_t)(0x100 + i), &A, false, fence_now);
++   atomic_store(&gpu_done, 100); atomic_store(&gpu_submitted, 200);
++   nvk_cmr_put(&r, m1, &A, false, fence_now);   /* newer, still pending */
++   ARM("after the oldest is taken the list stays consistent (tail kept right)",
++       nvk_cmr_take(&r, &A, false, passed) == (void *)0x100 && r.n == NVK_CMR_SCAN);
++
++   /* stress: 8 threads, the GPU completing at random, cap 64, live ceiling 200 */
++   struct nvk_cmr z = NVK_CMR_INIT; S = z; S.cap = 64; S.live_max = 200;
++   atomic_store(&gpu_submitted, 0); atomic_store(&gpu_done, 0);
++   pthread_t t[8];
++   for (int i = 0; i < 8; i++) pthread_create(&t[i], NULL, stress, (void *)(uintptr_t)(i + 1));
++   for (int i = 0; i < 8; i++) pthread_join(t[i], NULL);
++   unsigned n; int64_t live;
++   struct nvk_cmr_stats st = nvk_cmr_snapshot(&S, &n, &live);
++   printf("      stress: %llu takes, %llu hits, %llu not ready, %llu misses, %d chunks created, %u waiting, live %lld\n",
++          (unsigned long long)st.takes, (unsigned long long)st.hits, (unsigned long long)st.not_ready,
++          (unsigned long long)st.misses, atomic_load(&next_chunk) - 1, n, (long long)live);
++   ARM("stress: no chunk handed out before its fence passed", atomic_load(&early_handouts) == 0);
++   ARM("stress: no chunk handed to two users at once", atomic_load(&double_handouts) == 0);
++   ARM("stress: waiting never exceeds the cap", n <= S.cap);
++   ARM("stress: the live count is exactly the chunks still waiting (all others were freed)", live == (int64_t)n);
++   ARM("stress: recycling did happen (hits > 0) and saved creations",
++       st.hits > 0 && (uint64_t)(atomic_load(&next_chunk) - 1) < st.takes);
++
++   printf("%d arms, %d failed\n", arms, fails);
++   return fails != 0;
++}
+diff --git a/src/nouveau/vulkan/nvk_cmd_pool.c b/src/nouveau/vulkan/nvk_cmd_pool.c
+index 9a370ff..2a99f03 100644
+--- a/src/nouveau/vulkan/nvk_cmd_pool.c
++++ b/src/nouveau/vulkan/nvk_cmd_pool.c
+@@ -10,6 +10,82 @@
+ #include "nvk_physical_device.h"
+ #include "nvkmd/nvkmd.h"
+ #include "nvmtl_cfg.h"
++#include "nvkmd/nvrm/nvkmd_nvrm_fence.h"
++
++#define NVK_CMR_FENCE struct nvkmd_nvrm_fence
++#include "nvk_cmd_mem_recycle.h"
++
++/* Command-pool chunk recycler (see nvk_cmd_mem_recycle.h for why and for the GPU-safety rule).
++ * NVK_CMDMEM_RECYCLE=<n>  keep up to n chunks of destroyed pools for reuse (unset or 0 = off: every chunk is freed when
++ *                         its pool is, as before). Each kept chunk holds one kernel connection, so n is capped at 256.
++ * NVK_CMDMEM_LIVE_MAX=<n> only keep a chunk while the process holds at most n chunks in all (default 512, cap 768):
++ *                         the process ceiling is ~1,024 connections and command-pool chunks are not the only mappings.
++ * NVK_CMDMEM_CENSUS=<n>   one stderr line every n chunk requests (default 4096, 0 = never).
++ * Read from the environment or /Library/GPUBundles/nvmtl/nvrm610.conf like every other NVK switch. */
++static struct nvk_cmr nvk_cmr = NVK_CMR_INIT;
++static pthread_once_t nvk_cmr_once = PTHREAD_ONCE_INIT;
++static unsigned nvk_cmr_census_every = 4096;
++static _Atomic uint64_t nvk_cmr_requests, nvk_cmr_created, nvk_cmr_freed;
++
++static unsigned
++nvk_cmr_knob(const char *name, unsigned dflt, unsigned max)
++{
++   const char *e = nvmtl_cfg_getenv(name);
++   if (e == NULL || *e == 0)
++      return dflt;
++   long v = strtol(e, NULL, 10);
++   if (v < 0) v = 0;
++   if ((unsigned long)v > max) v = (long)max;
++   return (unsigned)v;
++}
++
++static void
++nvk_cmr_load(void)
++{
++   nvk_cmr.cap = nvk_cmr_knob("NVK_CMDMEM_RECYCLE", 0, 256);
++   nvk_cmr.live_max = nvk_cmr_knob("NVK_CMDMEM_LIVE_MAX", 512, 768);
++   nvk_cmr_census_every = nvk_cmr_knob("NVK_CMDMEM_CENSUS", 4096, 1u << 30);
++   fprintf(stderr, "nvk: command-pool chunk recycler %s (NVK_CMDMEM_RECYCLE=%u, NVK_CMDMEM_LIVE_MAX=%u)\n",
++           nvk_cmr.cap ? "ON" : "off", nvk_cmr.cap, nvk_cmr.live_max);
++}
++
++static void
++nvk_cmr_fence_now(const void *dev, struct nvkmd_nvrm_fence *out)
++{
++   nvkmd_nvrm_fence_snapshot((struct nvkmd_dev *)dev, out);
++}
++
++static void
++nvk_cmr_destroy_mem(void *mem)
++{
++   nvkmd_mem_unref((struct nvkmd_mem *)mem);
++   nvk_cmr_live_add(&nvk_cmr, -1);
++   atomic_fetch_add_explicit(&nvk_cmr_freed, 1, memory_order_relaxed);
++}
++
++/* hits = kernel allocations avoided (each one an RM alloc, a VA bind and a connection open + map). */
++static void
++nvk_cmr_census(void)
++{
++   const uint64_t q = atomic_fetch_add_explicit(&nvk_cmr_requests, 1, memory_order_relaxed) + 1;
++   if (nvk_cmr_census_every == 0 || q % nvk_cmr_census_every != 0)
++      return;
++   unsigned n; int64_t live;
++   const struct nvk_cmr_stats s = nvk_cmr_snapshot(&nvk_cmr, &n, &live);
++   fprintf(stderr, "nvk: cmd chunks: requests=%llu created=%llu freed=%llu | recycler hits=%llu (kernel allocs avoided) "
++           "misses=%llu not_ready=%llu kept=%llu refused_cap=%llu refused_live=%llu waiting=%u/%u live=%lld/%u\n",
++           (unsigned long long)q, (unsigned long long)atomic_load(&nvk_cmr_created), (unsigned long long)atomic_load(&nvk_cmr_freed),
++           (unsigned long long)s.hits, (unsigned long long)s.misses, (unsigned long long)s.not_ready,
++           (unsigned long long)s.kept, (unsigned long long)s.refused_cap, (unsigned long long)s.refused_live,
++           n, nvk_cmr.cap, (long long)live, nvk_cmr.live_max);
++}
++
++void
++nvk_cmd_mem_recycler_drain(struct nvk_device *dev)
++{
++   pthread_once(&nvk_cmr_once, nvk_cmr_load);
++   nvk_cmr_drain(&nvk_cmr, dev->nvkmd, nvk_cmr_destroy_mem);
++}
+ 
+ 
+ /* b80 B3: nvk69's GPU-cacheable flag (bit 6, see nvk_device_memory.c / nvkmd_nvrm_mem.c) for the driver's own
+@@ -44,14 +120,22 @@ nvk_cmd_mem_create(struct nvk_cmd_pool *pool, bool force_gart, struct nvk_cmd_me
+    uint32_t flags = nvk_b80_gart_flags();   /* b80 B3: GART, GPU-cacheable */
+    if (force_gart)
+       assert(flags & NVKMD_MEM_GART);
+-   result = nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &pool->vk.base,
+-                                       NVK_CMD_MEM_SIZE, 0,
+-                                       flags, NVKMD_MEM_MAP_WR,
+-                                       &mem->mem);
+-   if (result != VK_SUCCESS) {
+-      vk_free(&pool->vk.alloc, mem);
+-      return result;
++   pthread_once(&nvk_cmr_once, nvk_cmr_load);
++   mem->mem = (struct nvkmd_mem *)nvk_cmr_take(&nvk_cmr, dev->nvkmd, force_gart, nvkmd_nvrm_fence_passed);
++   if (mem->mem == NULL) {
++      result = nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &pool->vk.base,
++                                          NVK_CMD_MEM_SIZE, 0,
++                                          flags, NVKMD_MEM_MAP_WR,
++                                          &mem->mem);
++      if (result != VK_SUCCESS) {
++         vk_free(&pool->vk.alloc, mem);
++         return result;
++      }
++      nvk_cmr_live_add(&nvk_cmr, 1);
++      atomic_fetch_add_explicit(&nvk_cmr_created, 1, memory_order_relaxed);
+    }
++   mem->gart = force_gart;
++   nvk_cmr_census();
+ 
+    *mem_out = mem;
+    return VK_SUCCESS;
+@@ -60,7 +144,12 @@ nvk_cmd_mem_create(struct nvk_cmd_pool *pool, bool force_gart, struct nvk_cmd_me
+ static void
+ nvk_cmd_mem_destroy(struct nvk_cmd_pool *pool, struct nvk_cmd_mem *mem)
+ {
+-   nvkmd_mem_unref(mem->mem);
++   struct nvk_device *dev = nvk_cmd_pool_device(pool);
++   pthread_once(&nvk_cmr_once, nvk_cmr_load);
++   /* Kept still mapped, behind a fence snapshot; otherwise freed as before (the free itself defers behind the same
++    * kind of snapshot inside nvkmd_nvrm_mem_free). */
++   if (!nvk_cmr_put(&nvk_cmr, mem->mem, dev->nvkmd, mem->gart, nvk_cmr_fence_now))
++      nvk_cmr_destroy_mem(mem->mem);
+    vk_free(&pool->vk.alloc, mem);
+ }
+ 
+diff --git a/src/nouveau/vulkan/nvk_cmd_pool.h b/src/nouveau/vulkan/nvk_cmd_pool.h
+index 6d556ef..2103ada 100644
+--- a/src/nouveau/vulkan/nvk_cmd_pool.h
++++ b/src/nouveau/vulkan/nvk_cmd_pool.h
+@@ -19,6 +19,9 @@ struct nvk_cmd_mem {
+ 
+    /** Link in nvk_cmd_pool::free_bos or nvk_cmd_buffer::bos */
+    struct list_head link;
++
++   /** Which free list it belongs on (free_gart_mem vs free_mem); the recycler keeps the two apart too */
++   bool gart;
+ };
+ 
+ #define NVK_CMD_QMD_SIZE 256
+@@ -59,6 +62,10 @@ void nvk_cmd_pool_free_mem_list(struct nvk_cmd_pool *pool,
+                                 struct list_head *mem_list);
+ void nvk_cmd_pool_free_gart_mem_list(struct nvk_cmd_pool *pool,
+                                      struct list_head *mem_list);
++struct nvk_device;
++/* Frees every recycled command-pool chunk of this device; call before its nvkmd device goes. */
++void nvk_cmd_mem_recycler_drain(struct nvk_device *dev);
++
+ void nvk_cmd_pool_free_qmd_list(struct nvk_cmd_pool *pool,
+                                 struct list_head *mem_list);
+ #endif /* NVK_CMD_POOL_H */
+diff --git a/src/nouveau/vulkan/nvk_device.c b/src/nouveau/vulkan/nvk_device.c
+index 3aae655..bd81885 100644
+--- a/src/nouveau/vulkan/nvk_device.c
++++ b/src/nouveau/vulkan/nvk_device.c
+@@ -500,6 +500,9 @@ nvk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+       /* Idle the upload queue before we tear down heaps */
+       nvk_upload_queue_sync(dev, &dev->upload);
+ 
++      /* chunks kept from destroyed command pools still hold this device's memory and mappings */
++      nvk_cmd_mem_recycler_drain(dev);
++
+       nvk_slm_area_finish(&dev->slm);
+       if (pdev->info.cls_eng3d < MAXWELL_B)
+          nvk_heap_finish(dev, &dev->qmd_heap);
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
+index 5de1a43..9e92f09 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
+@@ -403,6 +403,45 @@ nvkmd_nvrm_defer(struct nvkmd_dev *dev, void (*fn)(void *), void *arg)
+    return true;
+ }
+ 
++#include "nvkmd_nvrm_fence.h"
++_Static_assert(NVKMD_NVRM_FENCE_CTX == NVRM_CTX_MAX, "the fence snapshot must cover every channel slot");
++
++/* The snapshot a deferred free would take now, without queueing anything: see nvkmd_nvrm_fence.h. With asynchronous
++ * submission off every flush has completed before it returns, so nothing is owed and the snapshot passes at once. */
++void
++nvkmd_nvrm_fence_snapshot(struct nvkmd_dev *dev, struct nvkmd_nvrm_fence *out)
++{
++   memset(out, 0, sizeof(*out));
++   if (!nvkmd_nvrm_async_on())
++      return;
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   for (unsigned i = 0; i < NVRM_CTX_MAX; i++) {
++      const struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[i];
++      if (s->ctx != NULL && s->dev == dev && __atomic_load_n(s->sem, __ATOMIC_ACQUIRE) < s->flushed) {
++         out->gen[i] = s->gen;
++         out->seq[i] = s->flushed;
++      }
++   }
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++}
++
++bool
++nvkmd_nvrm_fence_passed(const struct nvkmd_nvrm_fence *f)
++{
++   bool owed = false;
++   for (unsigned i = 0; i < NVRM_CTX_MAX && !owed; i++)
++      owed = f->seq[i] != 0;
++   if (!owed)
++      return true;
++   bool done = true;
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   for (unsigned i = 0; i < NVRM_CTX_MAX && done; i++)
++      if (f->seq[i] != 0 && !nvkmd_nvrm_seq_done(i, f->gen[i], f->seq[i]))
++         done = false;
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   return done;
++}
++
+ void
+ nvkmd_nvrm_reap_deferred(void)
+ {
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_fence.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_fence.h
+new file mode 100644
+index 0000000..b38e59f
+--- /dev/null
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_fence.h
+@@ -0,0 +1,28 @@
++/*
++ * Copyright 2026 NullMoth Systems
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef NVKMD_NVRM_FENCE_H
++#define NVKMD_NVRM_FENCE_H
++
++/* A point in every channel's submission stream, for memory that is kept instead of freed (nvk_cmd_mem_recycle.h).
++ * It is the snapshot nvkmd_nvrm_defer takes for a free: for each of the device's channels with work in flight, the
++ * last sequence number flushed. It has passed once every one of those channels has completed that sequence (or was
++ * idled and unregistered, which the generation records). Kept in its own header so nvkmd.h, which every object
++ * includes, does not change. */
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#define NVKMD_NVRM_FENCE_CTX 32   /* = NVRM_CTX_MAX, checked in nvkmd_nvrm_ctx.c */
++
++struct nvkmd_dev;
++struct nvkmd_nvrm_fence {
++   uint32_t gen[NVKMD_NVRM_FENCE_CTX];
++   uint64_t seq[NVKMD_NVRM_FENCE_CTX];   /* 0 = that channel owed nothing */
++};
++
++void nvkmd_nvrm_fence_snapshot(struct nvkmd_dev *dev, struct nvkmd_nvrm_fence *out);
++bool nvkmd_nvrm_fence_passed(const struct nvkmd_nvrm_fence *f);
++
++#endif

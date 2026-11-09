@@ -1,0 +1,91 @@
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.c
+@@ -149,17 +149,17 @@
+ 	return v;
+ }
+ // One line per process when write-combining is first used, so a run proves which path it took (absent under the
+-// control); NVRM_XNU_WC_LOG=1 adds the first 8 decisions with RM's caching type.
+-static void nvrm_wc_note(bool isSysMem, NvU32 cachingType, int wc)
++// control); NVRM_XNU_WC_LOG=1 adds the first 8 decisions.
++static void nvrm_wc_note(bool isSysMem, bool registers, int wc)
+ {
+ 	static int told, n, logv = -1;
+ 	if (logv < 0) { const char *e = nvmtl_cfg_getenv("NVRM_XNU_WC_LOG"); logv = e && e[0] == '1'; }
+-	if (wc && !told) { told = 1; fprintf(stderr, "nvrm: BAR1 CPU mappings write-combined (RM caching type WRITECOMBINED; NVRM_XNU_NO_WC=1 maps them uncached)\n"); }
+-	if (logv && n < 8) { n++; fprintf(stderr, "nvrm: map %s caching type %u -> %s\n", isSysMem ? "sysmem" : "vidmem", cachingType, wc ? "write-combined" : "default"); }
++	if (wc && !told) { told = 1; fprintf(stderr, "nvrm: BAR1 CPU mappings write-combined (NVRM_XNU_NO_WC=1 maps them uncached)\n"); }
++	if (logv && n < 8) { n++; fprintf(stderr, "nvrm: map %s -> %s\n", registers ? "registers" : (isSysMem ? "sysmem" : "vidmem"), wc ? "write-combined" : "default"); }
+ }
+ #endif
+ 
+-NvU32 nvRmApiMapMemory(NvRmApi *api, NvU32 hDevice, NvU32 hMemory, NvU64 offset, NvU64 length, bool isSysMem, NvU32 flags, NvRmApiMapping *mapping)
++static NvU32 nvrm_map_memory(NvRmApi *api, NvU32 hDevice, NvU32 hMemory, NvU64 offset, NvU64 length, bool isSysMem, bool registers, NvU32 flags, NvRmApiMapping *mapping)
+ {
+ 	const char *nodeName;
+ 	if (isSysMem) {
+@@ -215,12 +215,11 @@
+ 	mapping->area = ret;
+ 	mapping->address = mapParams.address;
+ #else
+-	// batch 56 (patch_nvk_wc.py): map with the caching type RM just chose (flags 25:23): WRITECOMBINED for a BAR1
+-	// framebuffer mapping, UNCACHED when RM needs BAR1 coherence, DEFAULT for register space (the usermode doorbell).
+-	// System memory keeps the cache mode its buffer was created with.
+-	NvU32 cachingType = DRF_VAL(OS33, _FLAGS, _CACHING_TYPE, p.params.flags);
+-	int wc = !isSysMem && cachingType == NVOS33_FLAGS_CACHING_TYPE_WRITECOMBINED && !nvrm_no_wc();
+-	nvrm_wc_note(isSysMem, cachingType, wc);
++	// A BAR1 framebuffer mapping is write-combined; register space (the usermode doorbell) is not. System memory
++	// keeps the cache mode its buffer was created with. RM 610 reported its choice in NVOS33 flags 25:23; RM 620
++	// removed that field and never writes it, so the decision is made here from what is being mapped.
++	int wc = !isSysMem && !registers && !nvrm_no_wc();
++	nvrm_wc_note(isSysMem, registers, wc);
+ 	mapping->address = (void*)NVRM_MMAP_WC(memFd, length, wc);
+ 	if (mapping->address == MAP_FAILED) {
+ 		p.params.status = NV_ERR_GENERIC;
+@@ -234,6 +233,17 @@
+ 	return p.params.status;
+ }
+ 
++NvU32 nvRmApiMapMemory(NvRmApi *api, NvU32 hDevice, NvU32 hMemory, NvU64 offset, NvU64 length, bool isSysMem, NvU32 flags, NvRmApiMapping *mapping)
++{
++	return nvrm_map_memory(api, hDevice, hMemory, offset, length, isSysMem, false, flags, mapping);
++}
++
++/* A CPU mapping of device register space (the usermode doorbell): never write-combined. */
++NvU32 nvRmApiMapRegisters(NvRmApi *api, NvU32 hDevice, NvU32 hMemory, NvU64 offset, NvU64 length, NvRmApiMapping *mapping)
++{
++	return nvrm_map_memory(api, hDevice, hMemory, offset, length, false, true, 0, mapping);
++}
++
+ NvU32 nvRmApiUnmapMemory(NvRmApi *api, NvU32 hDevice, NvU32 hMemory, NvU32 flags, NvRmApiMapping *mapping)
+ {
+ 	if (mapping->address == NULL) {
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.h
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.h
+@@ -64,6 +64,7 @@
+ NvU32 nvRmApiMapMemoryDma(NvRmApi *api, NvU32 hDevice, NvU32 hDma, NvU32 hMemory, NvU64 offset, NvU64 length, NvU32 flags, NvU64 *dmaOffset);
+ NvU32 nvRmApiUnmapMemoryDma(NvRmApi *api, NvU32 hDevice, NvU32 hDma, NvU32 hMemory, NvU32 flags, NvU64 dmaOffset);
+ NvU32 nvRmApiMapMemory(NvRmApi *api, NvU32 hDevice, NvU32 hMemory, NvU64 offset, NvU64 length, bool isSysMem, NvU32 flags, NvRmApiMapping *mapping);
++NvU32 nvRmApiMapRegisters(NvRmApi *api, NvU32 hDevice, NvU32 hMemory, NvU64 offset, NvU64 length, NvRmApiMapping *mapping);
+ NvU32 nvRmApiUnmapMemory(NvRmApi *api, NvU32 hDevice, NvU32 hMemory, NvU32 flags, NvRmApiMapping *mapping);
+ NvU32 nvRmApiRegisterFd(NvRmApi *api, int ctlFd);
+ NvU32 nvRmApiAllocOsEvent(NvRmApi *api, int fd);
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
+@@ -611,7 +611,7 @@
+          NV_HOPPER_USERMODE_A_PARAMS up = { .bBar1Mapping = NV_FALSE, .bPriv = NV_FALSE };
+          us = nvRmApiAlloc(&rm, pdev->hSubdevice, &pdev->hUsermode, HOPPER_USERMODE_A, &up);
+          if (us == NV_OK) {
+-            us = nvRmApiMapMemory(&rm, pdev->hSubdevice, pdev->hUsermode, 0, 0x10000, false, 0, &pdev->usermodeMap);
++            us = nvRmApiMapRegisters(&rm, pdev->hSubdevice, pdev->hUsermode, 0, 0x10000, &pdev->usermodeMap);
+             if (us != NV_OK) { nvRmApiFree(&rm, pdev->hUsermode); pdev->hUsermode = 0; }
+          }
+          if (us != NV_OK)
+@@ -619,7 +619,7 @@
+       }
+       if (us != NV_OK) {
+          NV_CHECK(nvRmApiAlloc(&rm, pdev->hSubdevice, &pdev->hUsermode, usermodeClass, NULL));
+-         NV_CHECK(nvRmApiMapMemory(&rm, pdev->hSubdevice, pdev->hUsermode, 0, 4096, false, 0, &pdev->usermodeMap));
++         NV_CHECK(nvRmApiMapRegisters(&rm, pdev->hSubdevice, pdev->hUsermode, 0, 4096, &pdev->usermodeMap));
+       }
+    }
+    // (RTX 5060 under macOS, NVRM 610): NVK programs the SM's shared-memory window at 4 GiB on Hopper+

@@ -119,10 +119,14 @@ int main(void)
     {
         arm("a firmware the msi-ec table names is found", kbl_msi_find("14C1EMS1.012") && kbl_msi_find("14C1EMS1.012")->addr == 0xf3 && kbl_msi_find("14C1EMS1.012")->base == 0x80);
         arm("a firmware the table does not name is refused", !kbl_msi_find("99ZZEMS9.999") && !kbl_msi_find("14C1EMS1.013"));
-        arm("a firmware whose light the driver marks not functional is not in the table", KBL_MSI_ROWS == 22);
+        arm("the table carries the out-of-tree driver's firmware list", KBL_MSI_ROWS >= 200);
         const struct kbl_msi_row *r = kbl_msi_find("14C1EMS1.012");
-        arm("a level is the base value plus the level, clamped to the highest state", kbl_msi_value(r, 0) == 0x80 && kbl_msi_value(r, 2) == 0x82 && kbl_msi_value(r, 9) == 0x83 && kbl_msi_value(r, -1) == 0x80);
-        arm("a controller byte outside base .. base + max is no level", kbl_msi_level(r, 0x81) == 1 && kbl_msi_level(r, 0x7F) == -1 && kbl_msi_level(r, 0x84) == -1);
+        arm("a level is the base value OR-ed with the level, clamped to the highest state", kbl_msi_value(r, 0) == 0x80 && kbl_msi_value(r, 2) == 0x82 && kbl_msi_value(r, 9) == 0x83 && kbl_msi_value(r, -1) == 0x80);
+        struct kbl_msi_row odd = { "TESTFW000000", 0xf3, 0x83, 3 };
+        arm("OR, not addition: a base with low bits set keeps them (0x83 | 1 is 0x83, never 0x84)", kbl_msi_value(&odd, 1) == 0x83 && kbl_msi_value(&odd, 0) == 0x83 && kbl_msi_value(&odd, 3) == 0x83);
+        struct kbl_msi_row base4 = { "TESTFW000001", 0xf3, 0x84, 3 };
+        arm("a base of 0x84 with level 3 gives 0x87 by OR", kbl_msi_value(&base4, 3) == 0x87);
+        arm("the level read is the low two bits of the byte, whatever the base", kbl_msi_level(r, 0x82) == 2 && kbl_msi_level(r, 0x03) == 3 && kbl_msi_level(r, 0x80) == 0 && kbl_msi_level(&odd, 0x83) == 3);
     }
     /* Dell descriptor */
     {
