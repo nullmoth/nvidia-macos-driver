@@ -22,6 +22,16 @@ int main(void)
     arm("a number above 7, text, or an empty setting is no assignment",
         nvmtl_card_for("8", "G") == -1 && nvmtl_card_for("x", "G") == -1 && nvmtl_card_for("", "G") == -1 && nvmtl_card_for("G=9", "G") == -1 && nvmtl_card_for("G=ab", "G") == -1);
     arm("a malformed entry costs only that entry", nvmtl_card_for("G=x,H=2", "H") == 2 && nvmtl_card_for("G=x,H=2", "G") == -1);
+    {   /* the single-vendor path is unchanged: with NVIDIA cards only, the ordinal is the sorted position the old code computed */
+        unsigned long long ids[3] = { 33, 7, 21 };
+        int old[3];
+        for (int i = 0; i < 3; i++) { int o = 0; for (int j = 0; j < 3; j++) if (ids[j] < ids[i]) o++; old[i] = o; }
+        arm("NVIDIA cards only: ordinals equal the old sorted position, and an NVAccelPrimary-less machine still takes the first",
+            nvmtl_card_ordinal(ids, 3, 33) == old[0] && nvmtl_card_ordinal(ids, 3, 7) == old[1] && nvmtl_card_ordinal(ids, 3, 21) == old[2]
+            && nvmtl_card_accept(1, -1, -1, nvmtl_card_ordinal(ids, 3, 7)) && !nvmtl_card_accept(1, -1, -1, nvmtl_card_ordinal(ids, 3, 21)));
+        arm("an AMD/Intel GPU alone (no NVIDIA card) is the first accelerator and is accepted with no assignment",
+            nvmtl_card_accept(1, -1, nvmtl_card_nmx_primary(0), nvmtl_card_ordinal(ids, 1, 33)));
+    }
     {   /* an NVIDIA card (id 40) with two AMD/Intel GPUs NMXGPU drives (ids 10 and 90) */
         unsigned long long ids[3] = { 90, 40, 10 };
         arm("one order across both classes: the AMD/Intel GPU with the lowest id is card 0, the NVIDIA card 1, the other GPU 2",
