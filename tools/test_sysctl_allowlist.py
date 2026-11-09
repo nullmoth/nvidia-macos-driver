@@ -26,7 +26,9 @@ WRITABLE = {"nvaccel_igpu", "nvaccel_iop", "nvaccelfb", "nvaccel_vm_sticky", "nv
             # Reviewed 2.9: the high-refresh latch switch (an on/off integer) and the output colour controls. The colour
             # handler rejects any value outside the enumerated bpc / format / range sets and -100..100 for vibrance
             # (EINVAL), and all five are root-only.
-            "nvrmfb_flip_latch_auto", "nvrmfb_color_bpc", "nvrmfb_color_format", "nvrmfb_color_range", "nvrmfb_color_vibrance"}
+            "nvrmfb_flip_latch_auto", "nvrmfb_color_bpc", "nvrmfb_color_format", "nvrmfb_color_range", "nvrmfb_color_vibrance",
+            # Reviewed 2.9: the opt-in unlocked page-off wait, an on/off integer read only as zero/non-zero; root-only.
+            "nvaccel_pageoff_unlocked_wait"}
 # Read-only diagnostics that print physical addresses or memory: registered only with boot-arg nvrmdiag=1, root only.
 PHYSICAL = {"nvrm_watchpage", "nvrm_physmap", "nvrm_pvsentinel", "nvrm_winwhy", "nvrm_pvchain", "nvrm_winraw"}
 DECL = re.compile(r"SYSCTL_(?:INT|UINT|QUAD|PROC|STRING|OPAQUE|LONG|ULONG)\s*\(\s*_debug\s*,\s*OID_AUTO\s*,\s*(\w+)\s*,(.*?)\)\s*;", re.S)
