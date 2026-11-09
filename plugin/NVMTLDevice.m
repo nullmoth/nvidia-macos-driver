@@ -27,6 +27,7 @@
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_log_failure.h"
 #include "nvmtl_env_knobs.h"
+#include "nvmtl_shared_wc.h"
 #include "nvmtl_app_profile.h"
 #import "nvmtl_osver_install.h"
 #include "nvmtl_claims.h"
@@ -896,13 +897,27 @@ static int nvmtl_managed_sysmem(void)
     }
     return on;
 }
+// NVMTL_SHARED_VRAM=1: a Shared buffer between NVMTL_SHARED_VRAM_MIN and NVMTL_SHARED_VRAM_MAX bytes (defaults 4096 and
+// 64 MiB) is kept in VRAM for the GPU, with its system-memory side as contents (nvmtl_shared_wc.h). Off by default.
+static int nvmtl_shared_vram_wants(NSUInteger len) {
+    static int on = -1; static size_t lo = 4096, hi = (size_t)64 << 20;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_SHARED_VRAM"), *a = getenv("NVMTL_SHARED_VRAM_MIN"), *z = getenv("NVMTL_SHARED_VRAM_MAX");
+        on = e && e[0] == '1';
+        if (a && *a) lo = (size_t)strtoull(a, NULL, 0);
+        if (z && *z) hi = (size_t)strtoull(z, NULL, 0);
+        nvlog("buffers: Shared buffers of %zu..%zu bytes %s (NVMTL_SHARED_VRAM=%s)", lo, hi, on ? "get a VRAM working copy" : "stay in system memory", e ? e : "unset");
+    }
+    return nvmtl_swc_wants(on, 1, len, lo, hi);
+}
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)len options:(MTLResourceOptions)opt {
     if (nvmtl_vk_init()) return nil;
     if (nvmtl_alloc_blocked()) return nil;
     NVMTLBuffer *b = [NVMTLBuffer new];
     b->_storage = (MTLStorageMode)((opt >> MTLResourceStorageModeShift) & 0xF);
     b->_ropt = opt & ((MTLResourceOptions)0xF | ((MTLResourceOptions)0x3 << MTLResourceHazardTrackingModeShift));
-    int hv = (b->_storage == MTLStorageModeShared) || (b->_storage == MTLStorageModeManaged && nvmtl_managed_sysmem());
+    int swc = b->_storage == MTLStorageModeShared && nvmtl_shared_vram_wants(len);
+    int hv = ((b->_storage == MTLStorageModeShared) && !swc) || (b->_storage == MTLStorageModeManaged && nvmtl_managed_sysmem());
     if (b->_storage == MTLStorageModeManaged && hv) {
         static _Atomic int said;
         if (!atomic_exchange(&said, 1)) nvlog("buffers: first Managed buffer (%lu bytes) placed in system memory by NVMTL_MANAGED_SYSMEM=1", (unsigned long)len);
@@ -913,13 +928,25 @@ static int nvmtl_managed_sysmem(void)
         if (nvmtl_vk_buffer_create(len, 1, &b->_b)) { nvmtl_alloc_failed("newBufferWithLength"); nvlog("newBufferWithLength: FAILED"); return nil; }
     }
     nvmtl_alloc_ok();
+    if (swc && b->_b.map) swc = 0;   // VRAM refused and the buffer landed in system memory: it is the plain Shared case
+    if (swc) {
+        nvmtl_swc *s = (nvmtl_swc *)calloc(1, sizeof *s);
+        if (s && nvmtl_swc_init(s, len) == 0 && nvmtl_vk_buffer_create(len, 1, &b->_shadow) == 0 && b->_shadow.map) b->_swc = s;
+        else {
+            nvlog("newBufferWithLength:%lu shared: VRAM working copy refused - placing it in system memory", (unsigned long)len);
+            if (s) { nvmtl_swc_free(s); free(s); }
+            if (b->_shadow.buf) nvmtl_vk_buffer_destroy(&b->_shadow);
+            memset(&b->_shadow, 0, sizeof b->_shadow); nvmtl_vk_buffer_destroy(&b->_b);
+            if (nvmtl_vk_buffer_create(len, 2, &b->_b)) { nvmtl_alloc_failed("newBufferWithLength"); return nil; }
+        }
+    }
     if (b->_storage == MTLStorageModeManaged && !b->_b.map && nvmtl_vk_buffer_create(len, 1, &b->_shadow)) {
         nvlog("newBufferWithLength:%lu managed: shadow refused - placing it in system memory", (unsigned long)len);
         memset(&b->_shadow, 0, sizeof b->_shadow); nvmtl_vk_buffer_destroy(&b->_b);
         if (nvmtl_vk_buffer_create(len, 1, &b->_b)) { nvmtl_alloc_failed("newBufferWithLength"); return nil; }
     }
     if (!gZeroSkip) nvmtl_zero_new_buffer(b, len);
-    nvlog("newBufferWithLength:%lu storage %d -> %p%s", (unsigned long)len, (int)b->_storage, (__bridge void *)b, b->_b.map ? "" : " VRAM"); return b; }
+    nvlog("newBufferWithLength:%lu storage %d -> %p%s", (unsigned long)len, (int)b->_storage, (__bridge void *)b, b->_b.map ? "" : (b->_swc ? " VRAM working copy" : " VRAM")); return b; }
 
 - (id<MTLBuffer>)newBufferWithBytes:(const void *)bytes length:(NSUInteger)len options:(MTLResourceOptions)opt {
     int priv = (((opt >> MTLResourceStorageModeShift) & 0xF) == MTLStorageModePrivate);

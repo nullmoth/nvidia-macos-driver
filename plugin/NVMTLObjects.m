@@ -107,6 +107,7 @@ static void nvmtl_res2_note_use(NVMTLTexture *t);
 static uint64_t nvmtl_res2_evict(uint64_t want);
 extern uint64_t (*nvmtl_res2_evict_hook)(uint64_t want);
 #include "nvmtl_env_knobs.h"
+#include "nvmtl_shared_wc.h"
 // The keys the user's own block of nvrm610.conf set ("my settings, kept on update"): an application profile never
 // replaces them. The shipped lines above that block are defaults, which a profile does replace.
 static char g_conf_mine[64][48];
@@ -1073,6 +1074,7 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
     for (uint32_t k = 0; k < _nbpk; k++) nvmtl_vk_image_destroy(&_bpk[k].img);
     free(_bpk); _bpk = NULL; _nbpk = 0;
     nvmtl_vk_buffer_retire(&_b); if (_shadow.buf) nvmtl_vk_buffer_retire(&_shadow);
+    if (_swc) { nvmtl_swc_free((nvmtl_swc *)_swc); free(_swc); _swc = NULL; }
     if (_subHeap) { NVMTLHeap *h = _subHeap; NSUInteger c = _subCharge; _subHeap = nil; _subCharge = 0;
                     if (_subPlaced && c) { _subPlaced = NO; [h nvmtlGiveRange:_heapOffset length:c]; }
                     [h nvmtlReleaseSubAllocation:c]; }
@@ -7782,8 +7784,34 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
 - (void)sampleCountersInBuffer:(id<MTLCounterSampleBuffer>)b atSampleIndex:(NSUInteger)i withBarrier:(BOOL)w { nvmtl_sample_counter(_cb, b, i, self, w); }
 @end
 
+// Shared buffers with a VRAM working copy (NVMTL_SHARED_VRAM=1, see nvmtl_shared_wc.h). One lock: the diff and the copy
+// for a buffer must not interleave with another command buffer's, and the copies are synchronous and ordered.
+static os_unfair_lock gSwcLock = OS_UNFAIR_LOCK_INIT;
+static void nvmtl_swc_sync_in(NVMTLBuffer *b)
+{
+    nvmtl_buf_settle(b);
+    nvmtl_swc_range r[16]; int n;
+    os_unfair_lock_lock(&gSwcLock);
+    n = nvmtl_swc_before_submit((nvmtl_swc *)b->_swc, b->_shadow.map, r, 16);
+    for (int i = 0; i < n; i++)
+        if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_shadow, r[i].lo, &b->_b, r[i].lo, r[i].hi - r[i].lo)) {
+            // the GPU keeps the old bytes: force a full upload at the next submit rather than trust the hashes
+            ((nvmtl_swc *)b->_swc)->vram_valid = 0;
+            nvlog("shared VRAM copy: upload of %zu bytes at %zu FAILED - the next submit uploads everything", r[i].hi - r[i].lo, r[i].lo);
+            break; }
+    os_unfair_lock_unlock(&gSwcLock);
+}
+static void nvmtl_swc_sync_out(NVMTLBuffer *b)
+{
+    os_unfair_lock_lock(&gSwcLock);
+    if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_b, 0, &b->_shadow, 0, b->_shadow.size < b->_b.size ? b->_shadow.size : b->_b.size))
+        nvlog("shared VRAM copy: copy-back of %zu bytes FAILED - contents keeps the CPU's last bytes", b->_b.size);
+    else nvmtl_swc_after_complete((nvmtl_swc *)b->_swc, b->_shadow.map);
+    os_unfair_lock_unlock(&gSwcLock);
+}
 static void nvmtl_buffer_sync_in(NVMTLBuffer *b)
 {
+    if (b && b->_swc && b->_shadow.map) { nvmtl_swc_sync_in(b); return; }
     if (!b || !b->_hostPtr || !b->_b.map || !b->_hostLen) return;
     const uint64_t t0 = nvmtl_perf_now();
     memcpy(b->_b.map, b->_hostPtr, b->_hostLen);
@@ -7792,6 +7820,7 @@ static void nvmtl_buffer_sync_in(NVMTLBuffer *b)
 
 static void nvmtl_buffer_sync_out(NVMTLBuffer *b)
 {
+    if (b && b->_swc && b->_shadow.map) { nvmtl_swc_sync_out(b); return; }
     if (b && b->_shadow.map) {
         if (b->_syncOut) { b->_syncOut = 0; __atomic_store_n(&b->_zshadow, 0, __ATOMIC_RELEASE);
             if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_b, 0, &b->_shadow, 0, b->_b.size)) nvlog("commit: managed sync-out of %zu bytes FAILED", b->_b.size); }
