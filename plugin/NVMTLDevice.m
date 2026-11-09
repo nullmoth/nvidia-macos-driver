@@ -1175,6 +1175,27 @@ static inline BOOL nvmtl_bgr10_storage_remap(MTLTextureDescriptor *d, uint32_t *
     { static int said; if (!said++) nvlog("texture: writable BGR10A2Unorm is held as R10G10B10A2 so kernels can store to it"); }
     return YES;
 }
+// GBGR422 / BGRG422 (NVMTL_YUV422=1): a full-width RGBA8 image holding what Metal's sampler returns, with the packed bytes
+// kept beside it (nvmtl_yuv422.h). Sampling works for any shader; the texture is filled by replaceRegion and read by
+// getBytes. Blits, views, render targets and IOSurface backing are refused, each with a log line.
+static id<MTLTexture> nvmtl_make_y422_texture(MTLTextureDescriptor *d, NVMTLTexture *t) {
+    const char *on = getenv("NVMTL_YUV422");
+    if (!on || on[0] != '1') { static int said; if (!said++) nvlog("newTextureWithDescriptor: 4:2:2 pixel format %lu is not carried (NVMTL_YUV422=1 turns it on) -> nil", (unsigned long)d.pixelFormat); return nil; }
+    if (d.textureType != MTLTextureType2D || d.mipmapLevelCount != 1 || d.arrayLength > 1 || d.depth != 1 || d.sampleCount > 1 ||
+        !d.width || !d.height || (d.width & 1u) || d.width > 16384 || d.height > 16384 ||
+        (d.usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget))) {
+        nvlog("newTextureWithDescriptor: 4:2:2 texture refused (needs a 2D one-level texture of even width, sampled only): %lux%lu type %lu usage 0x%lx",
+              (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.textureType, (unsigned long)d.usage);
+        return nil; }
+    if (nvmtl_vk_image_create_typed((uint32_t)d.width, (uint32_t)d.height, 37u, 4u, 0, 1, 0, 2u, 1u, &t->_i)) { nvmtl_alloc_failed("newTextureWithDescriptor"); return nil; }
+    nvmtl_alloc_ok();
+    t->_q = nvmtl_device_queue(); t->_usage = d.usage; t->_y422 = (uint32_t)d.pixelFormat;
+    t->_y422Raw = [NSMutableData dataWithLength:nvmtl_y422_row_bytes((uint32_t)d.width) * (size_t)d.height];
+    nvmtl_texture_desc_swizzle(t, d);
+    [t nvmtlY422Upload:0 rows:(uint32_t)d.height];
+    nvlog("newTextureWithDescriptor: %lux%lu 4:2:2 format %lu as full-width RGBA8 -> %p", (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.pixelFormat, (__bridge void *)t);
+    return t;
+}
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
     if (nvmtl_vk_init()) return nil;
     if (d.textureType == MTLTextureTypeTextureBuffer) {
@@ -1201,6 +1222,7 @@ static inline BOOL nvmtl_bgr10_storage_remap(MTLTextureDescriptor *d, uint32_t *
         nvlog("newTextureWithDescriptor: %lux%lu DEPTH32F type %lu layers %u mips %u -> %p", (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.textureType, t->_i.layers, t->_i.mips, (__bridge void *)t);
         return t;
     }
+    if (nvmtl_y422_is_format((uint32_t)d.pixelFormat)) return nvmtl_make_y422_texture(d, t);
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     const BOOL rbSwap = nvmtl_bgr10_storage_remap(d, &vkf);
@@ -1945,6 +1967,13 @@ static NVMTLFunction *nvmtl_empty_fragment(void) {
 }
 MTLRenderPipelineDescriptor *nvmtl_gl_rewrite_descriptor(MTLRenderPipelineDescriptor *d, NSError **err);
 NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, NSString **err);
+NSData *nvmtl_translate_samplers_amp(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, uint32_t amp, NSString **err);
+// A copy of a translated stage that carries different SPIR-V (a variant of the same entry point).
+static NVMTLFunction *nvmtl_function_with_spirv(NVMTLFunction *src, NSData *spv) {
+    NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = spv; f->_fname = src->_fname; f->_stage = src->_stage; f->_fc = src->_fc;
+    f->_refl = src->_refl; f->_airNames = src->_airNames; f->_arguments = src->_arguments; f->_embedded = src->_embedded; return f;
+}
+
 void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
 // One line per function the first time it goes into a pipeline: the kernel/stage name, the FNV-1a of its SPIR-V (what a
 // per-kernel GPU profile keys a row on) and the sha256 of its AIR (what the translator caches key a module on), so a
@@ -2074,6 +2103,30 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
                 nvlog("pipeline: %s writes alpha into A8 target(s) mask %#x (%lu B variant)", ff->_fname.UTF8String, a8mask, (unsigned long)fa.length);
         }
     }
+    // Vertex amplification (NVMTL_VERTEX_AMPLIFICATION=1): the descriptor's maxVertexAmplificationCount is the number of
+    // views the pipeline's render pass runs. Both stages are re-translated for that count so the view index reads the
+    // Vulkan view index; a stage with no AIR left is already a variant and is used as it is.
+    if (nvmtl_vk_multiview_views() && [d respondsToSelector:@selector(maxVertexAmplificationCount)] && d.maxVertexAmplificationCount > 1) {
+        const uint32_t want = (uint32_t)d.maxVertexAmplificationCount, mask = nvmtl_mv_mask_for_count(want, nvmtl_vk_multiview_views());
+        if (!mask) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: REFUSED - vertex amplification count %u is more views than this device can run in one pass (%u)", want, nvmtl_vk_multiview_views()]);
+        if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &(uint32_t){0}, &(uint32_t){0}))
+            return nvmtl_fail(err, @"pipeline: REFUSED - vertex amplification with tessellation is not carried");
+        const char *mvwhy = nvmtl_mv_vertex_refusal(vf->_spirv.bytes, vf->_spirv.length / 4);
+        if (mvwhy) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: REFUSED - %s (%@)", mvwhy, vf->_fname]);
+        NSString *mw = nil;
+        if (vf->_air) {
+            NSData *va = nvmtl_translate_samplers_amp(vf, nil, 0, want, &mw);
+            if (!va) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: amplified variant of %@ REFUSED: %@", vf->_fname, mw ?: @"?"]);
+            vf = nvmtl_function_with_spirv(vf, va);
+        }
+        if (!noFrag && ff->_air) {
+            NSData *fa = nvmtl_translate_samplers_amp(ff, nil, a8mask, want, &mw);
+            if (!fa) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: amplified variant of %@ REFUSED: %@", ff->_fname, mw ?: @"?"]);
+            ffx = nvmtl_function_with_spirv(ff, fa);
+        }
+        rt.view_mask = mask;
+        static _Atomic unsigned nmv; if (atomic_fetch_add(&nmv, 1) < 8) nvlog("pipeline: vertex amplification %u views (mask 0x%x) for %s / %s", want, mask, vf->_fname.UTF8String ?: "?", ff->_fname.UTF8String ?: "?");
+    }
     uint32_t rsc = (uint32_t)([d respondsToSelector:@selector(rasterSampleCount)] ? d.rasterSampleCount : d.sampleCount); if (!rsc) rsc = 1;
     NSData *flk = nvmtl_varying_link(vf, ffx); const void *fsb = flk ? flk.bytes : ffx->_spirv.bytes; size_t fsl = flk ? flk.length : ffx->_spirv.length;
     uint32_t tpt = 0, tcps = 0; int prc;
@@ -2153,6 +2206,26 @@ static NSOperationQueue *nvmtl_pipeline_compile_queue(void) {
         nvlog("pipeline compile: %ld asynchronous builds at a time", (long)queue.maxConcurrentOperationCount);
     });
     return queue;
+}
+// Tile shading (a tile function run over the pixels of a tile, with the colour attachments as the imageblock) needs the
+// translator to lower imageblock access to the attachments and the render pass to be split around a compute dispatch;
+// neither exists here. The pipeline is refused with a reason an application can show, instead of an unrecognised
+// selector taking the process down. What does work: a fragment function that reads [[color(n)]] (framebuffer fetch) and
+// a compute kernel that uses imageblock memory (MPS).
+static NSString *nvmtl_tile_refusal(MTLTileRenderPipelineDescriptor *d) {
+    return [NSString stringWithFormat:@"tile render pipeline (%@): REFUSED - tile shading is not carried by this driver (a tile function needs imageblock "
+            "access to the colour attachments and a render pass split around a per-tile dispatch)", d.tileFunction.name ?: @"no tile function"];
+}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)d options:(MTLPipelineOption)o
+                                                            reflection:(MTLAutoreleasedRenderPipelineReflection *)r error:(NSError **)err {
+    if (r) *r = nil;
+    NSString *why = nvmtl_tile_refusal(d); nvlog("%s", why.UTF8String);
+    return nvmtl_fail(err, why);
+}
+- (void)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)d options:(MTLPipelineOption)o
+                                completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)h {
+    NSError *e = nil; (void)[self newRenderPipelineStateWithTileDescriptor:d options:o reflection:NULL error:&e];
+    if (h) dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ h(nil, nil, e); });
 }
 - (void)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d completionHandler:(MTLNewRenderPipelineStateCompletionHandler)h {
     MTLRenderPipelineDescriptor *snapshot = [d copy];
