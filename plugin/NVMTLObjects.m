@@ -4562,7 +4562,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
         const uint64_t token = k ? ((id<MTLRenderPipelineState>)cands[k]).gpuResourceID._impl : 0;
         for (uint32_t t = 0; t < TYPES; t++) {
             const size_t off = (((size_t)k * TYPES + t) * slots) * NVMTL_ICB_RECORD_BYTES;
-            if (nvmtl_vk_cmd_icb_gather(&_cb->_c, &b->_recBuf->_b, &big->_b, off, slots, 0, token, t, loc, len, rb ? &rb->_b : NULL, ro)) { nvlog("GPU ICB: the gather pass FAILED - nothing runs"); return; }
+            if (nvmtl_vk_cmd_icb_gather(&_cb->_c, &b->_recBuf->_b, &big->_b, off, slots, 0, token, t, loc, len, NULL, rb ? &rb->_b : NULL, ro)) { nvlog("GPU ICB: the gather pass FAILED - nothing runs"); return; }
         }
     }
     NSUInteger drawn = 0;
@@ -6384,6 +6384,53 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     else     [_tgLen removeObjectForKey:@(i).stringValue];
     if (was != len) { _e78Key = nil; _e78VarSel = nil; }
 }
+// GPU-encoded dispatches (NVMTL_GPU_ICB=1). The threadgroup size a kernel recorded is only in the GPU record, and Vulkan needs it when the
+// dispatch is recorded, so every candidate pipeline is tried at the sizes an encoder normally uses (the pipeline's thread execution width,
+// its maximum, and its required size when it has one); a command recorded with any other size does not run, and that is logged.
+// Buffers are the encoder's own bindings, as for draws.
+- (void)nvmtlGpuIcb:(NVMTLIndirectCommandBuffer *)b loc:(uint32_t)loc len:(uint32_t)len range:(NVMTLBuffer *)rb offset:(NSUInteger)ro {
+    if (!b->_recBuf) return;
+    const uint32_t slots = nvmtl_icb_slots(b->_cmds.count);
+    NSMutableArray *cands = [NSMutableArray array];
+    if (_ps) [cands addObject:_ps];
+    for (id p in nvmtl_icb_pipelines(YES)) if (p != _ps) [cands addObject:p];
+    NSMutableArray *sizes = [NSMutableArray arrayWithCapacity:cands.count * 3];   // per candidate: up to three distinct sizes
+    uint64_t total = 0;
+    for (id<MTLComputePipelineState> c in cands) {
+        NSMutableArray *mine = [NSMutableArray array];
+        const MTLSize req = [(id)c isKindOfClass:[NVMTLComputePipelineState class]] ? ((NVMTLComputePipelineState *)c)->_reqTG : MTLSizeMake(0, 0, 0);
+        const NSUInteger cand[3][3] = { { c.threadExecutionWidth, 1, 1 }, { c.maxTotalThreadsPerThreadgroup, 1, 1 }, { req.width, req.height, req.depth } };
+        for (int k = 0; k < 3; k++) {
+            if (!cand[k][0] || cand[k][0] > UINT32_MAX) continue;
+            BOOL dup = NO; for (NSArray *m in mine) if ([m[0] unsignedLongValue] == cand[k][0] && [m[1] unsignedLongValue] == cand[k][1] && [m[2] unsignedLongValue] == cand[k][2]) dup = YES;
+            if (!dup) [mine addObject:@[@(cand[k][0]), @(cand[k][1]), @(cand[k][2])]];
+        }
+        [sizes addObject:mine]; total += (uint64_t)mine.count * slots;
+    }
+    if (!slots || !cands.count || total > 262144u) { nvlog("GPU ICB compute: %u slot(s), %lu candidate kernel(s): nothing to run or over the 262144 indirect dispatches one execution may record", slots, (unsigned long)cands.count); return; }
+    NVMTLBuffer *big = nvmtl_icb_scratch_bytes((NSUInteger)total * NVMTL_ICB_RECORD_BYTES);
+    if (!big) { nvlog("GPU ICB compute: scratch FAILED"); return; }
+    nvmtl_retain_resource(_cb, big); nvmtl_retain_resource(_cb, b->_recBuf); if (rb) nvmtl_retain_resource(_cb, rb);
+    NVMTLComputePipelineState *orig = _ps; size_t at = 0;
+    for (NSUInteger k = 0; k < cands.count; k++)
+        for (NSArray *sz in sizes[k]) {
+            const uint32_t tg[3] = { (uint32_t)[sz[0] unsignedLongValue], (uint32_t)[sz[1] unsignedLongValue], (uint32_t)[sz[2] unsignedLongValue] };
+            if (nvmtl_vk_cmd_icb_gather(&_cb->_c, &b->_recBuf->_b, &big->_b, at * slots * NVMTL_ICB_RECORD_BYTES, slots, 1, ((id<MTLComputePipelineState>)cands[k]).gpuResourceID._impl, 0, loc, len, tg, rb ? &rb->_b : NULL, ro)) { nvlog("GPU ICB compute: the gather pass FAILED"); return; }
+            at++;
+        }
+    at = 0; NSUInteger run = 0;
+    for (NSUInteger k = 0; k < cands.count; k++) {
+        [self setComputePipelineState:cands[k]];
+        for (NSArray *sz in sizes[k]) {
+            const MTLSize tg = MTLSizeMake([sz[0] unsignedLongValue], [sz[1] unsignedLongValue], [sz[2] unsignedLongValue]);
+            for (uint32_t i = 0; i < slots; i++, run++)
+                [self dispatchThreadgroupsWithIndirectBuffer:big indirectBufferOffset:(at * slots + i) * NVMTL_ICB_RECORD_BYTES threadsPerThreadgroup:tg];
+            at++;
+        }
+    }
+    if (orig) [self setComputePipelineState:orig];
+    nvlog("GPU ICB compute: %lu indirect dispatch(es) recorded for %u slot(s), %lu candidate kernel(s); commands recorded with another threadgroup size do not run", (unsigned long)run, slots, (unsigned long)cands.count);
+}
 - (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)icb withRange:(NSRange)r {
     NVMTLIndirectCommandBuffer *b = (NVMTLIndirectCommandBuffer *)icb;
     if (!b) { nvlog("compute executeCommandsInBuffer: nil"); return; }
@@ -6396,7 +6443,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
         [self dispatchThreadgroups:c->_grid threadsPerThreadgroup:c->_tg];
         n++;
     }
-    if (b->_recBuf) { static int said; if (!said++) nvlog("compute executeCommandsInBuffer: GPU-encoded dispatches are not carried (the threadgroup size is chosen at record time and Vulkan needs it at replay) - only CPU-encoded commands ran"); }
+    if (b->_recBuf && r.length <= UINT32_MAX && r.location <= UINT32_MAX) [self nvmtlGpuIcb:b loc:(uint32_t)r.location len:(uint32_t)r.length range:nil offset:0];
     nvlog("compute executeCommandsInBuffer: replayed %lu of %lu slot(s)", (unsigned long)n, (unsigned long)r.length);
 }
 - (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)icb indirectBuffer:(id<MTLBuffer>)ib indirectBufferOffset:(NSUInteger)ioff {
@@ -6422,6 +6469,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
         n++;
     }
     nvlog("compute executeCommandsInBuffer:indirectBuffer: %lu armed slot(s) of %u recorded as range-masked indirect dispatches", (unsigned long)n, slots);
+    if (b->_recBuf) [self nvmtlGpuIcb:b loc:0 len:0 range:rb offset:ioff];
 }
 - (void)setSamplerState:(id<MTLSamplerState>)ss atIndex:(NSUInteger)i {
     NVMTLSamplerState *ns = (NVMTLSamplerState *)ss;
