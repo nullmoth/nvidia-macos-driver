@@ -426,6 +426,39 @@ static bool nvmtl_nvencvt_selected(const char *sel, const char *me, const char *
     return false;
 }
 // decodersOnly is the decode service (VTDecoderXPCService): it decodes for the sandboxed Apple clients and never encodes.
+/* Hardware AV1 and VP9 decoding on AMD and Intel GPUs through Vulkan video decode (RADV, ANV): libnmxvt.dylib registers VideoToolbox
+   decoders. Off unless NMXVT=1 in the environment or nmxvt=1 on the boot line, only for the AMD/Intel vendor, never in WindowServer,
+   and only a root-owned library inside a root-owned directory is loaded. */
+static void nvmtl_nmxvt_register(void)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *e = getenv("NMXVT");
+        int on = (e && !strcmp(e, "1")) ? 1 : 0;
+        char bootargs[1024] = {0}; size_t n = sizeof bootargs - 1;
+        if (!on && sysctlbyname("kern.bootargs", bootargs, &n, NULL, 0) == 0) {
+            for (char *t = strtok(bootargs, " "); t; t = strtok(NULL, " ")) if (!strcmp(t, "nmxvt=1")) on = 1;
+        }
+        if (!on) return;
+        if (!strcmp(getprogname(), "WindowServer")) return;
+        Dl_info di;
+        if (!dladdr((const void *)nvmtl_nmxvt_register, &di) || !di.dli_fname) { nvlog("nmxvt: dladdr failed - not registering"); return; }
+        char dir[1024], path[1200];
+        strlcpy(dir, di.dli_fname, sizeof dir);
+        snprintf(path, sizeof path, "%s/libnmxvt.dylib", dirname(dir));
+        if (!nvmtl_loadable_root_only(path))   /* not beside the plugin: where the AMD/Intel package puts it */
+            snprintf(path, sizeof path, "/Library/NullMoth/gpu-userland/video/libnmxvt.dylib");
+        if (!nvmtl_loadable_root_only(path)) { nvlog("nmxvt: %s is absent, or is not a root-owned file inside a root-owned directory - REFUSED", path); return; }
+        setenv("NMXVT", "1", 1);
+        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (!h) { nvlog("nmxvt: dlopen %s FAILED: %s", path, dlerror()); return; }
+        typedef int32_t (*RegFn)(int);
+        RegFn r = (RegFn)dlsym(h, "NMXVT_Register");
+        if (!r) { nvlog("nmxvt: %s has no NMXVT_Register", path); return; }
+        int32_t st = r(1100);
+        nvlog("nmxvt: AV1 and VP9 decoders %s in %s (%d)", st ? "NOT registered" : "REGISTERED", getprogname(), (int)st);
+    });
+}
 static void nvmtl_nvencvt_register(bool decodersOnly)
 {
     static dispatch_once_t once;
@@ -783,6 +816,25 @@ static int nvmtl_multi_gpu_on(void)
 static int cmp_u64(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
 /* Is `port` the accelerator this process should use? With several NVIDIA cards and nvmultigpu=1 the process takes the card
    its assignment (NVMTL_CARD) or the primary names, tells NVK which one through NVK_ACCEL_ID, and refuses the rest. */
+/* vendor, device id and PCI location of the GPU behind an NMXAccel, read from its PCI parent in the registry */
+static void nvmtl_nmx_pci(io_service_t accel, uint16_t *vid, uint16_t *did, unsigned *bus, unsigned *dev, unsigned *fn, int *have_loc)
+{
+    *vid = *did = 0; *bus = *dev = *fn = 0; *have_loc = 0;
+    io_registry_entry_t pci = 0;
+    if (IORegistryEntryGetParentEntry(accel, kIOServicePlane, &pci) != KERN_SUCCESS) return;
+    CFTypeRef d;
+    if ((d = IORegistryEntryCreateCFProperty(pci, CFSTR("vendor-id"), kCFAllocatorDefault, 0))) {
+        if (CFGetTypeID(d) == CFDataGetTypeID() && CFDataGetLength(d) >= 2) { const UInt8 *p = CFDataGetBytePtr(d); *vid = (uint16_t)(p[0] | (p[1] << 8)); } CFRelease(d); }
+    if ((d = IORegistryEntryCreateCFProperty(pci, CFSTR("device-id"), kCFAllocatorDefault, 0))) {
+        if (CFGetTypeID(d) == CFDataGetTypeID() && CFDataGetLength(d) >= 2) { const UInt8 *p = CFDataGetBytePtr(d); *did = (uint16_t)(p[0] | (p[1] << 8)); } CFRelease(d); }
+    if ((d = IORegistryEntryCreateCFProperty(pci, CFSTR("pcidebug"), kCFAllocatorDefault, 0))) {
+        char buf[32] = {0};
+        if (CFGetTypeID(d) == CFStringGetTypeID() && CFStringGetCString((CFStringRef)d, buf, sizeof buf, kCFStringEncodingUTF8))
+            *have_loc = nvmtl_pci_loc_parse(buf, bus, dev, fn);
+        CFRelease(d);
+    }
+    IOObjectRelease(pci);
+}
 static BOOL nvmtl_card_wanted(mach_port_t port)
 {
     const BOOL nv = port && IOObjectConformsTo(port, "NVAccel"), nmx = port && IOObjectConformsTo(port, "NMXAccel");
@@ -814,16 +866,23 @@ static BOOL nvmtl_card_wanted(mach_port_t port)
         char b[32]; snprintf(b, sizeof b, "%llu", (unsigned long long)mine);
         if (nv) setenv("NVK_ACCEL_ID", b, 1);
         else {   /* RADV and ANV choose among the GPUs they find: name this one by its PCI ids (Mesa's device-select layer) */
-            io_registry_entry_t pci = 0;
-            if (IORegistryEntryGetParentEntry(port, kIOServicePlane, &pci) == KERN_SUCCESS) {
-                uint16_t vid = 0, did = 0; CFTypeRef d;
-                if ((d = IORegistryEntryCreateCFProperty(pci, CFSTR("vendor-id"), kCFAllocatorDefault, 0))) {
-                    if (CFGetTypeID(d) == CFDataGetTypeID() && CFDataGetLength(d) >= 2) { const UInt8 *p = CFDataGetBytePtr(d); vid = (uint16_t)(p[0] | (p[1] << 8)); } CFRelease(d); }
-                if ((d = IORegistryEntryCreateCFProperty(pci, CFSTR("device-id"), kCFAllocatorDefault, 0))) {
-                    if (CFGetTypeID(d) == CFDataGetTypeID() && CFDataGetLength(d) >= 2) { const UInt8 *p = CFDataGetBytePtr(d); did = (uint16_t)(p[0] | (p[1] << 8)); } CFRelease(d); }
-                IOObjectRelease(pci);
-                if (vid && did) { char sel[32]; snprintf(sel, sizeof sel, "%04x:%04x", vid, did); setenv("MESA_VK_DEVICE_SELECT", sel, 1); }
+            uint16_t vid = 0, did = 0; unsigned bus = 0, dev = 0, fn = 0; int have_loc = 0;
+            nvmtl_nmx_pci(port, &vid, &did, &bus, &dev, &fn, &have_loc);
+            int same = 0;   /* GPUs of the same model: "vendor:device" cannot tell them apart, the PCI location can */
+            io_iterator_t it = 0;
+            if (vid && IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("NMXAccel"), &it) == KERN_SUCCESS) {
+                for (io_service_t s; (s = IOIteratorNext(it)); IOObjectRelease(s)) {
+                    uint16_t v2 = 0, d2 = 0; unsigned b2, e2, f2; int h2;
+                    nvmtl_nmx_pci(s, &v2, &d2, &b2, &e2, &f2, &h2);
+                    if (v2 == vid && d2 == did) same++;
+                }
+                IOObjectRelease(it);
             }
+            if (nvmtl_gpu_use_pci_tag(same, have_loc)) {
+                char tag[32]; nvmtl_pci_tag(tag, sizeof tag, bus, dev, fn);
+                unsetenv("MESA_VK_DEVICE_SELECT"); setenv("DRI_PRIME", tag, 1);
+                nvlog("nvmultigpu: %d GPUs of model %04x:%04x, this one is %s", same, vid, did, tag);
+            } else if (vid && did) { char sel[32]; snprintf(sel, sizeof sel, "%04x:%04x", vid, did); setenv("MESA_VK_DEVICE_SELECT", sel, 1); }
         }
         nvmtl_card_registry_id = mine;
     }
@@ -884,6 +943,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
         return nil;
     }
     nvmtl_gl_caps_enable();
+    if (nvmtl_vk_vendor() == 0x1002 || nvmtl_vk_vendor() == 0x8086) nvmtl_nmxvt_register();
     if (nvmtl_vk_vendor() == 0x10de) {   /* NVDEC/NVENC are NVIDIA engines reached through NVRM */
         nvmtl_nvdec_register();
         nvmtl_nvenc_register();
