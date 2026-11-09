@@ -85,6 +85,214 @@ pub(in crate::passes) fn lower_gather_depth(
     )
 }
 
+/// `air.gather_compare_depth_{2d,2d_array,cube,cube_array}.f32`: Metal's `depth*::gather_compare(sampler, coord,
+/// [array,] compare_value[, offset])`. Operands: texture, sampler, coordinate-space flag, coord, [layer,] reference,
+/// then for the 2D forms `i1` + `<2 x i32>` offset (+ a trailing `i32`). The result is the four compare results in
+/// the gather footprint order, which is the same in Metal and Vulkan (x = (u0,v1), y = (u1,v1), z = (u1,v0),
+/// w = (u0,v0)), so no swizzle. With a runtime sampler (its compare function comes with the Vulkan sampler) it is
+/// `OpImageDrefGather`; with a sampler whose state the translator knows (constexpr samplers, compared in the shader as
+/// `air.sample_compare_depth` does) the plain gather of component 0 is compared lane by lane.
+pub(in crate::passes) fn lower_gather_compare_depth(
+    ctx: &mut Ctx,
+    name: &str,
+    res: Option<Word>,
+    rty: Option<Word>,
+    args: &[Word],
+    _v4: Word,
+) -> Result<Vec<Instruction>, String> {
+    let (res, rty) = match (res, rty) {
+        (Some(r), Some(t)) => (r, t),
+        _ => return Err("air.gather_compare_depth has no result".into()),
+    };
+    if args.len() < 5 {
+        return Err("air.gather_compare_depth missing texture/sampler/coord/reference".into());
+    }
+    let samp = args[1];
+    let mut img = resolve_image_value(ctx, args[0]);
+    if texture_operand_is_absent(ctx, img) {
+        if let Some(sampled_img) =
+            recovered_image_for_private_operand(ctx, img, name, ImageOperandUse::Sampled)
+        {
+            img = sampled_img;
+        } else {
+            return lower_null_texture_result(ctx, res, rty);
+        }
+    }
+    let mut out = vec![];
+    img = load_image_if_pointer(ctx, img, &mut out);
+    let (name_dim, name_arrayed) =
+        intrinsic_texture_shape(name).ok_or("air.gather_compare_depth has no texture shape")?;
+    let (_, _, fallback_comp) = image_shape_or_recorded(ctx, img);
+    let (img_ty, dim, arrayed, comp) =
+        sampled_operand_image_info(ctx, img, name_dim, name_arrayed, fallback_comp);
+    if comp != crate::passes::ImageComp::Float {
+        return Err("air.gather_compare_depth on non-float texture".into());
+    }
+    let spatial = match dim {
+        Dim::Dim2D => 2,
+        Dim::DimCube => 3,
+        _ => return Err(format!("air.gather_compare_depth does not support {dim:?} textures")),
+    };
+    let coord = args[3];
+    let (layer, ref_index) = if name_arrayed {
+        (Some(*args.get(4).ok_or("air.gather_compare_depth array form missing layer")?), 5)
+    } else {
+        (None, 4)
+    };
+    let reference = *args
+        .get(ref_index)
+        .ok_or("air.gather_compare_depth missing reference")?;
+    // Offsets exist on the 2D forms only: `i1` then the `<2 x i32>` offset after the reference.
+    let offset = if dim == Dim::Dim2D {
+        args.get(ref_index + 2).copied()
+    } else {
+        None
+    };
+
+    let sampler_state = ctx.sampler_states.get(&samp).copied();
+    if let Some(state) = sampler_state {
+        use crate::reflect::SamplerCompareFunction as Cmp;
+        if state.compare_function == Cmp::None {
+            return Err(
+                "air.gather_compare_depth requires a sampler with comparison enabled".into(),
+            );
+        }
+        if dim != Dim::Dim2D {
+            return Err(
+                "air.gather_compare_depth with a known sampler state supports 2D textures only"
+                    .into(),
+            );
+        }
+        // Gather the raw depths (component 0), then compare each lane: reference OP texel.
+        let v4f = ctx.ty_vecf(4);
+        let depths = ctx.module.fresh_id();
+        let component = ctx.const_uint(0);
+        let zero_offset = const_sint_vec(ctx, &[0, 0]);
+        out.extend(lower_gather_2d(
+            ctx,
+            depths,
+            v4f,
+            img,
+            dim,
+            arrayed,
+            samp,
+            coord,
+            layer,
+            offset.unwrap_or(zero_offset),
+            component,
+            v4f,
+        )?);
+        let bool4 = ctx.ty_vec_bool(4);
+        let one = ctx.const_float(1.0);
+        let zero = ctx.const_float(0.0);
+        let splat = |ctx: &mut Ctx, out: &mut Vec<Instruction>, value: Word, ty: Word| {
+            let id = ctx.module.fresh_id();
+            out.push(Instruction::new(
+                Op::CompositeConstruct,
+                Some(ty),
+                Some(id),
+                vec![Operand::IdRef(value); 4],
+            ));
+            id
+        };
+        let passed = match state.compare_function {
+            Cmp::None | Cmp::Never => {
+                let bool_ty = ctx.ty_bool();
+                let f = ctx.const_bool_of(bool_ty, false);
+                splat(ctx, &mut out, f, bool4)
+            }
+            Cmp::Always => {
+                let bool_ty = ctx.ty_bool();
+                let t = ctx.const_bool_of(bool_ty, true);
+                splat(ctx, &mut out, t, bool4)
+            }
+            compare => {
+                let opcode = match compare {
+                    Cmp::Less => Op::FOrdLessThan,
+                    Cmp::LessEqual => Op::FOrdLessThanEqual,
+                    Cmp::Greater => Op::FOrdGreaterThan,
+                    Cmp::GreaterEqual => Op::FOrdGreaterThanEqual,
+                    Cmp::Equal => Op::FOrdEqual,
+                    Cmp::NotEqual => Op::FOrdNotEqual,
+                    Cmp::None | Cmp::Always | Cmp::Never => unreachable!(),
+                };
+                let refs = splat(ctx, &mut out, reference, v4f);
+                let passed = ctx.module.fresh_id();
+                out.push(Instruction::new(
+                    opcode,
+                    Some(bool4),
+                    Some(passed),
+                    vec![Operand::IdRef(refs), Operand::IdRef(depths)],
+                ));
+                passed
+            }
+        };
+        let ones = splat(ctx, &mut out, one, v4f);
+        let zeros = splat(ctx, &mut out, zero, v4f);
+        let color = ctx.module.fresh_id();
+        out.push(Instruction::new(
+            Op::Select,
+            Some(v4f),
+            Some(color),
+            vec![
+                Operand::IdRef(passed),
+                Operand::IdRef(ones),
+                Operand::IdRef(zeros),
+            ],
+        ));
+        return finish_sample_result(ctx, res, rty, color, v4f, out);
+    }
+
+    let si_ty = ctx.ty_sampled_image(img_ty);
+    let samp = valid_sampler_value(ctx, samp, &mut out)?;
+    let si = ctx.module.fresh_id();
+    out.push(Instruction::new(
+        Op::SampledImage,
+        Some(si_ty),
+        Some(si),
+        vec![Operand::IdRef(img), Operand::IdRef(samp)],
+    ));
+    let mut coord_for_gather = match layer {
+        Some(layer) => build_arrayed_sample_coord(ctx, spatial, coord, layer, &mut out)?,
+        None => coord,
+    };
+    let mut const_offset = None;
+    if let Some(offset) = offset {
+        let (constant, dynamic) = gather_const_or_dynamic_offset(ctx, offset)?;
+        const_offset = constant.filter(|offset| *offset != [0, 0]);
+        if let Some(offset) = dynamic {
+            coord_for_gather = apply_dynamic_sample_offset(
+                ctx,
+                img,
+                arrayed,
+                coord_for_gather,
+                offset,
+                2,
+                &mut out,
+            )?;
+        }
+    }
+    let v4f = ctx.ty_vecf(4);
+    let color = ctx.module.fresh_id();
+    let mut ops = vec![
+        Operand::IdRef(si),
+        Operand::IdRef(coord_for_gather),
+        Operand::IdRef(reference),
+    ];
+    if let Some(offset) = const_offset {
+        let offset_id = const_sint_vec(ctx, &offset);
+        ops.push(Operand::ImageOperands(spirv::ImageOperands::CONST_OFFSET));
+        ops.push(Operand::IdRef(offset_id));
+    }
+    out.push(Instruction::new(
+        Op::ImageDrefGather,
+        Some(v4f),
+        Some(color),
+        ops,
+    ));
+    finish_sample_result(ctx, res, rty, color, v4f, out)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::passes) fn lower_gather_2d(
     ctx: &mut Ctx,
