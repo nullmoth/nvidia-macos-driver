@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key><string>en</string>
+	<key>CFBundleExecutable</key><string>NMSMN</string>
+	<key>CFBundleIdentifier</key><string>com.nullmoth.NMSMN</string>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>CFBundleName</key><string>NMSMN</string>
+	<key>CFBundlePackageType</key><string>KEXT</string>
+	<key>CFBundleShortVersionString</key><string>1.0.0</string>
+	<key>CFBundleVersion</key><string>1.0.0</string>
+	<key>IOKitPersonalities</key>
+	<dict>
+		<key>NMSMN</key>
+		<dict>
+			<key>CFBundleIdentifier</key><string>com.nullmoth.NMSMN</string>
+			<key>IOClass</key><string>NMSMN</string>
+			<key>IOProviderClass</key><string>IOPCIDevice</string>
+			<key>IOPCIMatch</key><string>0x00001022&amp;0x0000ffff</string>
+			<key>IOPCIClassMatch</key><string>0x06000000&amp;0xffffff00</string>
+			<key>IOUserClientClass</key><string>NMSMNClient</string>
+			<key>IOMatchCategory</key><string>NMSMN</string>
+		</dict>
+	</dict>
+	<key>NSHumanReadableCopyright</key><string>Copyright NullMoth Systems</string>
+	<key>OSBundleCompatibleVersion</key><string>1.0.0</string>
+	<key>OSBundleLibraries</key>
+	<dict>
+		<key>com.apple.iokit.IOPCIFamily</key><string>1.0.0b1</string>
+		<key>com.apple.kpi.bsd</key><string>12.0.0</string>
+		<key>com.apple.kpi.iokit</key><string>12.0.0</string>
+		<key>com.apple.kpi.libkern</key><string>12.0.0</string>
+		<key>com.apple.kpi.mach</key><string>12.0.0</string>
+		<key>com.apple.kpi.unsupported</key><string>12.0.0</string>
+	</dict>
+</dict>
+</plist>
