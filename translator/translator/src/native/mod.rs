@@ -12,6 +12,7 @@ mod emit_tiers;
 mod imageblock;
 mod inline;
 mod inline_sampler;
+mod sampler_table;
 pub(crate) mod ir;
 mod lex;
 mod opaque_image_select;
@@ -44,8 +45,11 @@ use crate::spirv_module::Operand;
 pub(crate) fn lower_air_text(san_ll: &str) -> std::borrow::Cow<'_, str> {
     // first: older toolchains write a constexpr sampler as an integer in the call, which reflection and the sampler pass
     // only know in the metadata form
-    match inline_sampler::lower_inline_sampler_constants(san_ll) {
-        std::borrow::Cow::Borrowed(borrowed) => lower_air_text_rest(borrowed),
+    let san_ll = sampler_table::lower_global_sampler_tables(san_ll);
+    match inline_sampler::lower_inline_sampler_constants(&san_ll) {
+        std::borrow::Cow::Borrowed(borrowed) => {
+            std::borrow::Cow::Owned(lower_air_text_rest(borrowed).into_owned())
+        }
         std::borrow::Cow::Owned(owned) => {
             std::borrow::Cow::Owned(lower_air_text_rest(&owned).into_owned())
         }
@@ -100,6 +104,10 @@ fn lower_air_text_rest(san_ll: &str) -> std::borrow::Cow<'_, str> {
 }
 
 pub(crate) fn lower_air_text_owned(san_ll: String) -> String {
+    let san_ll = match sampler_table::lower_global_sampler_tables(&san_ll) {
+        std::borrow::Cow::Borrowed(_) => san_ll,
+        std::borrow::Cow::Owned(lowered) => lowered,
+    };
     let san_ll = match inline_sampler::lower_inline_sampler_constants(&san_ll) {
         std::borrow::Cow::Borrowed(_) => san_ll,
         std::borrow::Cow::Owned(lowered) => lowered,

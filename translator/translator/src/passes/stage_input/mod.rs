@@ -118,6 +118,15 @@ pub(in crate::passes) enum ParamBinding {
         multisampled: bool,
     },
     LoadVar { var: Word, ty: Word },
+    /// A kernel stage-in attribute read from the application's buffer by the pipeline's stage-in layout.
+    StageInAttribute {
+        var: Word,
+        value_ty: Word,
+        index_var: Word,
+        dispatch_var: Option<Word>,
+        attribute: StageInAttribute,
+        layout: StageInLayout,
+    },
     LoadVarBoolFromUint { var: Word, bool_ty: Word },
     LoadVarBoolToInt {
         var: Word,
@@ -361,6 +370,7 @@ pub(super) fn build_stage_input(
         bind_kernel_grid_push_constant_once(ctx, &mut kernel_grid_push_constant_var, range.offset);
     }
     let stage_input_bindings = kern.map(KernMeta::stage_input_bindings).unwrap_or_default();
+    let mut stage_in_buffer_vars: HashMap<u32, Word> = HashMap::default();
 
     let unmodelled = match stage {
         Stage::Fragment => frag.map(|meta| meta.unmodelled_input_params.as_slice()),
@@ -634,7 +644,56 @@ pub(super) fn build_stage_input(
         let texture_handle_shape = texture_type_name.map(crate::meta::texture_shape_from_name);
         let is_array_texture = texture_handle_shape.is_some_and(|shape| shape.array_ref);
 
-        if let (Stage::Kernel, Some(KernRole::StageInput(_))) =
+        let described_stage_in = match (stage, kern.and_then(|m| m.role_of(idx))) {
+            (Stage::Kernel, Some(KernRole::StageInput(location))) => ctx.kernel_stage_in.attribute(*location),
+            _ => None,
+        };
+        if let Some((attribute, layout)) = described_stage_in {
+            if attribute.offset % 4 != 0 || layout.stride % 4 != 0 || layout.stride == 0 {
+                return Err(format!(
+                    "kernel stage_in attribute {} at offset {} with stride {}: only 4-byte aligned layouts are supported",
+                    attribute.attribute, attribute.offset, layout.stride
+                ));
+            }
+            let var = match stage_in_buffer_vars.get(&attribute.buffer_index) {
+                Some(var) => *var,
+                None => {
+                    let uint_ty = ctx.ty_uint();
+                    let rta = ctx.ty_runtime_array(uint_ty);
+                    let block_ty = ctx.module.fresh_id();
+                    ctx.new_globals.push(type_inst(Op::TypeStruct, block_ty, vec![Operand::IdRef(rta)]));
+                    let pptr = ctx.ty_ptr(StorageClass::StorageBuffer, block_ty);
+                    let var = ctx.module.fresh_id();
+                    ctx.new_globals.push(Instruction::new(
+                        Op::Variable,
+                        Some(pptr),
+                        Some(var),
+                        vec![Operand::StorageClass(StorageClass::StorageBuffer)],
+                    ));
+                    let binding = buffer_resource_binding(descriptor_layout, attribute.buffer_index)?;
+                    decorate_binding(&mut ctx.module, var, descriptor_layout.set, binding);
+                    buffer_structs.push((var, block_ty));
+                    stage_in_buffer_vars.insert(attribute.buffer_index, var);
+                    var
+                }
+            };
+            let index_var = bind_kernel_v3uint_builtin_once(
+                ctx,
+                &mut global_invocation_id_var,
+                BuiltIn::GlobalInvocationId,
+            );
+            bindings.push((
+                *pid,
+                ParamBinding::StageInAttribute {
+                    var,
+                    value_ty: *pty,
+                    index_var,
+                    dispatch_var: kernel_grid_push_constant_var,
+                    attribute,
+                    layout,
+                },
+            ));
+        } else if let (Stage::Kernel, Some(KernRole::StageInput(_))) =
             (stage, kern.and_then(|m| m.role_of(idx)))
         {
             let rta = ctx.ty_runtime_array(*pty);
@@ -1301,6 +1360,35 @@ pub(super) fn build_stage_input(
             }
             bindings.push((*pid, ParamBinding::Buffer { var, wrap }));
             buffer_structs.push((var, struct_ty));
+        } else if role_is("varying")
+            && matches!(stage, Stage::Fragment)
+            && frag.is_some_and(|m| m.varying_interpolation(loc).pull)
+        {
+            // An `interpolant<T>`: the shader receives a handle and asks for the value at an offset, a sample or the
+            // centroid, so the parameter is the Input variable itself and the value is never loaded as a whole.
+            let name = frag.and_then(|m| m.varying_type(loc)).unwrap_or("");
+            let Some(value_ty) = pull_interpolant_value_type(ctx, name) else {
+                return Err(format!(
+                    "fragment input at location {loc} is an interpolant of {name:?}, which pull-model interpolation does not support"
+                ));
+            };
+            let pptr = ctx.ty_ptr(StorageClass::Input, value_ty);
+            let var = ctx.module.fresh_id();
+            ctx.new_globals.push(Instruction::new(
+                Op::Variable,
+                Some(pptr),
+                Some(var),
+                vec![Operand::StorageClass(StorageClass::Input)],
+            ));
+            decorate_location(&mut ctx.module, var, loc);
+            decorate_interpolation(
+                &mut ctx.module,
+                var,
+                frag.map(|m| m.varying_interpolation(loc)).unwrap_or_default(),
+                false,
+            );
+            ctx.interface.push(var);
+            bindings.push((*pid, ParamBinding::Value { val: var }));
         } else if role_is("varying") {
             if matches!(stage, Stage::Fragment) && is_scalar_bool(&defs, *pty) {
                 let uint_ty = ctx.ty_uint();
@@ -3258,5 +3346,16 @@ mod tests {
             Some(&Operand::IdRef(1)),
             "independently bound root remains unchanged"
         );
+    }
+}
+
+/// The value type of an `interpolant<T>` input: the 32-bit float scalar and vectors Vulkan can interpolate at run time.
+fn pull_interpolant_value_type(ctx: &mut Ctx, air_type_name: &str) -> Option<Word> {
+    match air_type_name {
+        "float" => Some(ctx.ty_float()),
+        "float2" => Some(ctx.ty_vecf(2)),
+        "float3" => Some(ctx.ty_vecf(3)),
+        "float4" => Some(ctx.ty_vecf(4)),
+        _ => None,
     }
 }

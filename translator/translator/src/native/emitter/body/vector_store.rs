@@ -1058,6 +1058,32 @@ impl Emitter {
         Ok(true)
     }
 
+    /// A vector loaded through a pointer to an aggregate that starts with a scalar array of the vector's size (a buffer of
+    /// `struct { packed_uint4 header; }` slots, `{ { [4 x i32] } }`, read as float4): the load is of that array, reached by
+    /// an access chain, and each element becomes a lane.
+    pub(in crate::native::emitter) fn emit_leading_array_vector_load(
+        &mut self,
+        result: Word,
+        pointee: &LlType,
+        result_ty: &LlType,
+        ptr_value: &TypedValue,
+        ptr: Word,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<bool, String> {
+        if !matches!(pointee, LlType::Struct(_)) {
+            return Ok(false);
+        }
+        let Some((array_ty, path)) = leading_array_covered_by_vector(pointee, result_ty) else {
+            return Ok(false);
+        };
+        let LlType::Ptr(addrspace) = self.resolve_type(&ptr_value.ty)? else {
+            return Ok(false);
+        };
+        let storage = self.pointer_storage_for(&ptr_value.value, addrspace)?;
+        let array_ptr = self.emit_aggregate_field_pointer(storage, &array_ty, ptr, &path, instructions)?;
+        self.emit_scalar_array_as_vector_load(result, &array_ty, result_ty, array_ptr, instructions)
+    }
+
     pub(in crate::native::emitter) fn emit_first_vector_aggregate_reinterpret_load(
         &mut self,
         result: Word,

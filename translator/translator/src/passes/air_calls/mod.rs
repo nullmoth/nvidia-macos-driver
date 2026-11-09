@@ -9,7 +9,7 @@ mod dispatch_texture;
 pub(in crate::passes) use dispatch_texture::*;
 pub(in crate::passes) use images::intrinsic_texture_shape;
 mod sample_positions;
-use sample_positions::lower_sample_position;
+use sample_positions::{lower_pull_interpolation, lower_sample_position};
 mod integer_simd;
 pub(in crate::passes) use integer_simd::*;
 mod float_imageblock;

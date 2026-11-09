@@ -87,6 +87,8 @@ pub enum VaryingSampling {
 pub struct VaryingInterpolation {
     pub flat: bool,
     pub no_perspective: bool,
+    /// The shader names the input as an `interpolant<T>` and asks for the value at an offset, a sample or the centroid.
+    pub pull: bool,
     pub sampling: VaryingSampling,
 }
 
@@ -96,6 +98,7 @@ impl VaryingInterpolation {
         Self {
             flat: has("flat"),
             no_perspective: has("no_perspective"),
+            pull: has("interpolation_function"),
             sampling: if has("centroid") {
                 VaryingSampling::Centroid
             } else if has("sample") {
