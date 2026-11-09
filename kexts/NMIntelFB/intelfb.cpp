@@ -21,6 +21,7 @@
 #include "nm_hybrid_abi.h"
 #include "nm_hybrid_resume.h"
 #include "nm_hybrid_resume14.h"
+#include "nm_hybrid_tc.h"
 #include "nm_hybrid_vbt.h"
 #include "nm_hybrid_dmc.h"
 #include "nvrm_off.h"
@@ -268,6 +269,11 @@ private:
     void resumeCapture();
     void resumeRun();
     static void resumeFire(thread_call_param_t p0, thread_call_param_t) { ((NMIntelFB *)p0)->resumeRun(); }
+    // Type-C ports (nm_hybrid_tc.h), observe only: boot-arg nmhybridtc=1 logs the live status of the four Type-C ports as cables come and
+    // go (display versions 12 and 13). It never takes a PHY, so a dock keeps its USB lanes.
+    thread_call_t fTcTimer = nullptr; struct nmt_port fTcPort[4]; uint32_t fTcLast[4] = {0, 0, 0, 0}; unsigned fTcN = 0;
+    void tcStart();
+    static void tcFire(thread_call_param_t p0, thread_call_param_t);
 
     uint32_t rd(uint32_t off) const { return *(volatile uint32_t *)(fRegs + off); }
     void wr(uint32_t off, uint32_t v) const { *(volatile uint32_t *)(fRegs + off) = v; }
@@ -529,6 +535,7 @@ bool NMIntelFB::start(IOService *provider)
     if (!adoptFirmwareMode()) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false; }
     ifbStep(NMH_STEP_ADOPT);
     resumeCapture();
+    tcStart();
     { int a = 0; fDmcOn = PE_parse_boot_argn("nmhybriddmc", &a, sizeof a) && a == 1;
       const char *want = nmd_file_for(fVer, fPCI->configRead16(kIOPCIConfigDeviceID));
       snprintf(fDmcWant, sizeof fDmcWant, "%s", want ? want : "none");
@@ -572,6 +579,7 @@ void NMIntelFB::stop(IOService *provider)
     if (gDmcTarget == this) gDmcTarget = nullptr;
     if (fDmcBlob) { IOFree(fDmcBlob, fDmcLen); fDmcBlob = nullptr; }
     if (gDmcLock) IOLockUnlock(gDmcLock);
+    if (fTcTimer) { thread_call_cancel(fTcTimer); while (!thread_call_free(fTcTimer)) { thread_call_cancel(fTcTimer); IOSleep(5); } fTcTimer = nullptr; }
     if (fResumeCall) { thread_call_cancel(fResumeCall); while (!thread_call_free(fResumeCall)) { thread_call_cancel(fResumeCall); IOSleep(5); } fResumeCall = nullptr; }
     if (fSnap) { IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; }
     if (fFwPte) { IOFree(fFwPte, (size_t)(fFwPteCount * sizeof(uint64_t))); fFwPte = nullptr; }
@@ -980,6 +988,47 @@ void NMIntelFB::resumeCapture()
     fResumeOn = fResumeCall != nullptr;
     IFBLOG("hybrid: resume armed: panel state captured (pipe %c, DDI %c, sink link 0x%02x x%u, %s)", 'A' + fSnap->topo.pipe, 'A' + fSnap->topo.port, fSnap->dpcd[0], fSnap->dpcd[1] & 0x1F,
            fSnap->no_handshake ? "no AUX handshake" : "AUX link training");
+}
+
+static const char *tcModeName(unsigned m) { return m == NMT_DPALT ? "DisplayPort-alt" : m == NMT_TBT ? "Thunderbolt-alt" : m == NMT_LEGACY ? "legacy" : "disconnected"; }
+void NMIntelFB::tcFire(thread_call_param_t p0, thread_call_param_t)
+{
+    NMIntelFB *me = (NMIntelFB *)p0;
+    if (me->fStopping) return;
+    struct nmr_ops ops = { me,
+        [](void *c, uint32_t o) { return ((NMIntelFB *)c)->rd(o); },
+        [](void *c, uint32_t o, uint32_t x) { ((NMIntelFB *)c)->wr(o, x); },
+        [](void *, unsigned us) { IODelay(us); },
+        [](void *, const char *) {},
+        nullptr };
+    for (unsigned i = 0; i < me->fTcN; i++) {
+        const int ev = nmt_poll(&ops, &me->fTcPort[i], &me->fTcLast[i]);
+        if (ev) IFBLOG("hybrid: Type-C port %u: %s, live mode %s", i + 1, ev == 1 ? "cable plugged" : ev == 2 ? "cable unplugged" : "cable changed",
+                       tcModeName(nmt_mask_to_mode(me->fTcLast[i])));
+    }
+    uint64_t d; clock_interval_to_deadline(2000, kMillisecondScale, &d);
+    if (!me->fStopping) thread_call_enter_delayed(me->fTcTimer, d);
+}
+void NMIntelFB::tcStart()
+{
+    int a = 0;
+    if (!PE_parse_boot_argn("nmhybridtc", &a, sizeof a) || a != 1) return;
+    if (fVer != 12 && fVer != 13) { IFBLOG("hybrid: Type-C monitor: display version %u is not supported (versions 12 and 13)", fVer); return; }
+    struct nmr_ops ops = { this,
+        [](void *c, uint32_t o) { return ((NMIntelFB *)c)->rd(o); },
+        [](void *c, uint32_t o, uint32_t x) { ((NMIntelFB *)c)->wr(o, x); },
+        [](void *, unsigned us) { IODelay(us); },
+        [](void *, const char *) {},
+        nullptr };
+    for (unsigned i = 0; i < 4; i++) {
+        if (nmt_init(&ops, &fTcPort[fTcN], fVer, i, 0) == 0) { fTcLast[fTcN] = 0; fTcN++; }
+        else IFBLOG("hybrid: Type-C monitor: port %u unavailable (PHY in TC-cold or the platform controller did not answer)", i + 1);
+    }
+    if (!fTcN) return;
+    fTcTimer = thread_call_allocate(tcFire, this);
+    if (!fTcTimer) return;
+    IFBLOG("hybrid: Type-C monitor armed for %u ports (observe only)", fTcN);
+    thread_call_enter(fTcTimer);
 }
 
 void NMIntelFB::resumeRun()
