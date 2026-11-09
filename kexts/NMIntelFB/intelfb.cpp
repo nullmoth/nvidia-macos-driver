@@ -21,6 +21,7 @@
 #include "nm_hybrid_abi.h"
 #include "nm_hybrid_resume.h"
 #include "nm_hybrid_resume14.h"
+#include "nm_hybrid_tc.h"
 #include "nm_hybrid_vbt.h"
 #include "nm_hybrid_dmc.h"
 #include "nvrm_off.h"
@@ -268,6 +269,11 @@ private:
     void resumeCapture();
     void resumeRun();
     static void resumeFire(thread_call_param_t p0, thread_call_param_t) { ((NMIntelFB *)p0)->resumeRun(); }
+    // Type-C ports (nm_hybrid_tc.h), observe only: boot-arg nmhybridtc=1 logs the live status of the four Type-C ports as cables come and
+    // go (display versions 12 and 13). It never takes a PHY, so a dock keeps its USB lanes.
+    thread_call_t fTcTimer = nullptr; struct nmt_port fTcPort[4]; uint32_t fTcLast[4] = {0, 0, 0, 0}; unsigned fTcN = 0;
+    void tcStart();
+    static void tcFire(thread_call_param_t p0, thread_call_param_t);
 
     uint32_t rd(uint32_t off) const { return *(volatile uint32_t *)(fRegs + off); }
     void wr(uint32_t off, uint32_t v) const { *(volatile uint32_t *)(fRegs + off) = v; }
@@ -529,6 +535,7 @@ bool NMIntelFB::start(IOService *provider)
     if (!adoptFirmwareMode()) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false; }
     ifbStep(NMH_STEP_ADOPT);
     resumeCapture();
+    tcStart();
     { int a = 0; fDmcOn = PE_parse_boot_argn("nmhybriddmc", &a, sizeof a) && a == 1;
       const char *want = nmd_file_for(fVer, fPCI->configRead16(kIOPCIConfigDeviceID));
       snprintf(fDmcWant, sizeof fDmcWant, "%s", want ? want : "none");
@@ -572,6 +579,7 @@ void NMIntelFB::stop(IOService *provider)
     if (gDmcTarget == this) gDmcTarget = nullptr;
     if (fDmcBlob) { IOFree(fDmcBlob, fDmcLen); fDmcBlob = nullptr; }
     if (gDmcLock) IOLockUnlock(gDmcLock);
+    if (fTcTimer) { thread_call_cancel(fTcTimer); while (!thread_call_free(fTcTimer)) { thread_call_cancel(fTcTimer); IOSleep(5); } fTcTimer = nullptr; }
     if (fResumeCall) { thread_call_cancel(fResumeCall); while (!thread_call_free(fResumeCall)) { thread_call_cancel(fResumeCall); IOSleep(5); } fResumeCall = nullptr; }
     if (fSnap) { IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; }
     if (fFwPte) { IOFree(fFwPte, (size_t)(fFwPteCount * sizeof(uint64_t))); fFwPte = nullptr; }
@@ -934,7 +942,14 @@ void NMIntelFB::resumeCapture()
 {
     long long v = 0; int a = 0; const int present = PE_parse_boot_argn("nmhybridresume", &a, sizeof a); v = a;
     if (!nmr_enabled(present, v)) return;
-    if (!(fVer == 12 || fVer == 13 || fVer == 14) || fPipe < 0 || fPipe > 3) { IFBLOG("hybrid: resume unavailable: display version %u pipe %d (versions 12 to 14, pipes A to D)", fVer, fPipe); return; }
+    // Lunar Lake and Panther Lake (display 20 and 30, nm_hybrid_resume14.h, the C20 PHY): ported from Linux's xe display code, never run on
+    // hardware, so they stay behind their own boot-arg.
+    const bool xe2 = fVer == 20 || fVer >= 30;
+    if (xe2) {
+        int a20 = 0;
+        if (!PE_parse_boot_argn("nmhybrid20", &a20, sizeof a20) || a20 != 1) { IFBLOG("hybrid: resume unavailable: display version %u needs the boot-arg nmhybrid20=1 (not yet run on hardware)", fVer); return; }
+    }
+    if (!((fVer >= 12 && fVer <= 14) || xe2) || fPipe < 0 || fPipe > 3) { IFBLOG("hybrid: resume unavailable: display version %u pipe %d (versions 12 to 14, 20 and 30, pipes A to D)", fVer, fPipe); return; }
     if (fVer <= 13 && !ggttMap()) return;
     fSnap = (struct nmr_snap *)IOMalloc(sizeof *fSnap);
     if (!fSnap) return;
@@ -948,14 +963,14 @@ void NMIntelFB::resumeCapture()
     struct nmr_edp edp = {};
     uint8_t *vbtKeep = nullptr; uint32_t vbtKeepLen = 0;
     readVbt(&edp, &vbtKeep, &vbtKeepLen);
-    const int rc = fVer == 14 ? nmr14_snapshot(&ops, fSnap, (unsigned)fPipe, &edp) : nmr_snapshot(&ops, fSnap, (unsigned)fPipe, fVer, &edp);
+    const int rc = fVer >= 14 ? nmr20_snapshot(&ops, fSnap, (unsigned)fPipe, &edp, fVer) : nmr_snapshot(&ops, fSnap, (unsigned)fPipe, fVer, &edp);
     if (rc != NMR_OK) { IFBLOG("hybrid: resume unavailable: %s", nmr_result_name(rc)); IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; if (vbtKeep) IOFree(vbtKeep, vbtKeepLen); return; }
     if (vbtKeep) {
         // the video BIOS named no panel type: the panel's own identifier picks the entry (Linux pnpid_get_panel_type)
         uint8_t id[10]; struct nmv_edp e; struct nmr_ops o2 = ops; bool got;
-        if (fVer == 14) { o2.aux_ctl_or = NMX_AUX_POWER_REQ; nmx_aux_power(&ops, fSnap->topo.port, 1); }
+        if (fVer >= 14) { o2.aux_ctl_or = NMX_AUX_POWER_REQ; nmx_aux_power(&ops, fSnap->topo.port, 1); }
         got = nmr_edid_id(&o2, fSnap->topo.port, id) == 0;
-        if (fVer == 14) nmx_aux_power(&ops, fSnap->topo.port, 0);
+        if (fVer >= 14) nmx_aux_power(&ops, fSnap->topo.port, 0);
         if (got && nmv_edp(vbtKeep, vbtKeepLen, id, &e)) {
             fSnap->edp.known = 1; fSnap->edp.low_vswing = (uint8_t)e.low_vswing; fSnap->edp.hobl = (uint8_t)e.hobl;
             IFBLOG("hybrid: video BIOS: panel type %u by the panel's identifier, low-swing table %s, reduced-power table %s", e.panel_type, e.low_vswing ? "yes" : "no", e.hobl ? "yes" : "no");
@@ -975,6 +990,47 @@ void NMIntelFB::resumeCapture()
            fSnap->no_handshake ? "no AUX handshake" : "AUX link training");
 }
 
+static const char *tcModeName(unsigned m) { return m == NMT_DPALT ? "DisplayPort-alt" : m == NMT_TBT ? "Thunderbolt-alt" : m == NMT_LEGACY ? "legacy" : "disconnected"; }
+void NMIntelFB::tcFire(thread_call_param_t p0, thread_call_param_t)
+{
+    NMIntelFB *me = (NMIntelFB *)p0;
+    if (me->fStopping) return;
+    struct nmr_ops ops = { me,
+        [](void *c, uint32_t o) { return ((NMIntelFB *)c)->rd(o); },
+        [](void *c, uint32_t o, uint32_t x) { ((NMIntelFB *)c)->wr(o, x); },
+        [](void *, unsigned us) { IODelay(us); },
+        [](void *, const char *) {},
+        nullptr };
+    for (unsigned i = 0; i < me->fTcN; i++) {
+        const int ev = nmt_poll(&ops, &me->fTcPort[i], &me->fTcLast[i]);
+        if (ev) IFBLOG("hybrid: Type-C port %u: %s, live mode %s", i + 1, ev == 1 ? "cable plugged" : ev == 2 ? "cable unplugged" : "cable changed",
+                       tcModeName(nmt_mask_to_mode(me->fTcLast[i])));
+    }
+    uint64_t d; clock_interval_to_deadline(2000, kMillisecondScale, &d);
+    if (!me->fStopping) thread_call_enter_delayed(me->fTcTimer, d);
+}
+void NMIntelFB::tcStart()
+{
+    int a = 0;
+    if (!PE_parse_boot_argn("nmhybridtc", &a, sizeof a) || a != 1) return;
+    if (fVer != 12 && fVer != 13) { IFBLOG("hybrid: Type-C monitor: display version %u is not supported (versions 12 and 13)", fVer); return; }
+    struct nmr_ops ops = { this,
+        [](void *c, uint32_t o) { return ((NMIntelFB *)c)->rd(o); },
+        [](void *c, uint32_t o, uint32_t x) { ((NMIntelFB *)c)->wr(o, x); },
+        [](void *, unsigned us) { IODelay(us); },
+        [](void *, const char *) {},
+        nullptr };
+    for (unsigned i = 0; i < 4; i++) {
+        if (nmt_init(&ops, &fTcPort[fTcN], fVer, i, 0) == 0) { fTcLast[fTcN] = 0; fTcN++; }
+        else IFBLOG("hybrid: Type-C monitor: port %u unavailable (PHY in TC-cold or the platform controller did not answer)", i + 1);
+    }
+    if (!fTcN) return;
+    fTcTimer = thread_call_allocate(tcFire, this);
+    if (!fTcTimer) return;
+    IFBLOG("hybrid: Type-C monitor armed for %u ports (observe only)", fTcN);
+    thread_call_enter(fTcTimer);
+}
+
 void NMIntelFB::resumeRun()
 {
     if (!fResumeOn || !fSnap || fStopping) return;
@@ -987,7 +1043,7 @@ void NMIntelFB::resumeRun()
         [](void *, unsigned us) { IODelay(us); },
         [](void *, const char *st) { IFBLOG("hybrid: resume step: %s", st); },
         nullptr };      // swing and pre-emphasis levels are programmed by nmr_drive_apply (nm_hybrid_resume.h)
-    const int rc = fVer == 14 ? nmr14_resume(&ops, fSnap) : nmr_resume(&ops, fSnap, fVer);
+    const int rc = fVer >= 14 ? nmr20_resume(&ops, fSnap) : nmr_resume(&ops, fSnap, fVer);
     IFBLOG("hybrid: resume: %s", nmr_result_name(rc));
     ifbStep(rc == NMR_OK || rc == NMR_ALREADY_LIT ? NMH_STEP_RESUME_DONE : NMH_STEP_RESUME_FAILED);
     if (rc == NMR_OK || rc == NMR_ALREADY_LIT) {
