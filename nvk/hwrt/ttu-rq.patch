@@ -33,8 +33,8 @@
 +
 +/* Hardware traversal (NVK_HWRT_QUERY=1).
 + *
-+ * The query instruction walks a structure built by the vendor's own builder (header, node and instance layout measured
-+ * on the card), NOT the structure nvk_acceleration_structure.c builds: switching this on with a structure from the
++ * The query instruction walks a structure in the hardware layout (docs/HWRT.md; header, node and instance layout measured
++ * on the card), NOT the software structure nvk_acceleration_structure.c builds: switching this on with a structure from the
 + * software builder reads garbage and faults. Scope: ONE closest-hit query over opaque triangles. Not covered, and
 + * silently ignored here: ray flags (all of them), non-opaque candidates and any-hit, procedural primitives, the
 + * triangle vertex positions of a hit, and a query that starts at a bottom-level structure. The request and result word

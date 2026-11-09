@@ -91,8 +91,8 @@ diff -ruN tree.orig/src/nouveau/compiler/nak/ir.rs tree/src/nouveau/compiler/nak
 +/// read and write without naming it, so the whole sequence is a single op:
 +/// register allocation and scheduling can place its inputs before it and its
 +/// results after it, but never put an instruction inside it. The encoder
-+/// emits the 15-instruction region NVIDIA's compiler emits for the same
-+/// query (TTUOPEN, TTUCCTL, 5 TTUST, TTUGO, 6 TTULD, scoreboard drain).
++/// emits the 15-instruction region measured on an RTX 5060 for one query
++/// (TTUOPEN, TTUCCTL, 5 TTUST, TTUGO, 6 TTULD, scoreboard drain).
 +///
 +/// srcs are the TTU input blocks at offsets 0, 64, 80, 128 and 512. dsts[0]
 +/// and dsts[1] receive the blocks at 896 and 960 (loaded because the protocol
@@ -230,12 +230,12 @@ diff -ruN tree.orig/src/nouveau/compiler/nak/sm70_encode.rs tree/src/nouveau/com
 +    )
 +}
 +
-+/// Emits the region NVIDIA's compiler emits for one SM120 hardware query.
-+/// Field positions and the delays between the instructions are the ones
-+/// NVIDIA's own encoder produces for the same sequence (checked against its
-+/// output instruction by instruction); the region waits on whatever
-+/// calc_instr_deps asked for, uses scoreboards 0-5 for its six result loads
-+/// and waits on all six before the next instruction.
++/// Emits the 15-instruction region for one SM120 hardware query. Opcodes,
++/// field positions and delays were measured on an RTX 5060 (32 of 32 rays
++/// exact); check_ttu_region.py judges every emitted word against the field
++/// table in docs/HWRT.md. The region waits on whatever calc_instr_deps asked
++/// for, uses scoreboards 0-5 for its six result loads and waits on all six
++/// before the next instruction.
 +fn encode_ttu_query(
 +    sm: u8,
 +    op: &OpTtuQuery,

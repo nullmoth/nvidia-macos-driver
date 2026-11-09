@@ -3,7 +3,7 @@
 
 on  = ttu_rq_cpu run with NVK_HWRT_QUERY=1; off = the same shader with the switch unset (the software walk).
 Arms: the switched-on code holds exactly one 14-word hardware query region followed by its drain; the switched-off code
-holds none (so the count means something); and the region is the one the card ran (check_region.py against ref_region).
+holds none (so the count means something); and the region matches the measured field table (check_ttu_region.py).
 """
 import os, struct, subprocess, sys
 
@@ -31,8 +31,8 @@ n_off = sum(1 for lo, hi in off if lo & 0xfff in TTU)
 arm("switched on: exactly 14 hardware-query words (one region)", n_on == 14, str(n_on))
 arm("control: switched off (software walk): no hardware-query word at all", n_off == 0, str(n_off))
 arm("control: the software walk is the long code, the hardware query the short one", len(off) > 4 * len(on), "%d vs %d" % (len(off), len(on)))
-r = subprocess.run([sys.executable, os.path.join(here, "check_region.py"), os.path.join(here, "ref_region.sass.bin"), sys.argv[1]],
+r = subprocess.run([sys.executable, os.path.join(here, "check_ttu_region.py"), sys.argv[1]],
                    capture_output=True, text=True)
-arm("the region equals the one proven on the card (register fields masked)", r.returncode == 0 and "REGION_MATCH" in r.stdout, r.stdout[-200:] + r.stderr[-200:])
+arm("the region matches the field table measured on the card", r.returncode == 0 and "REGION_MATCH" in r.stdout, r.stdout[-200:] + r.stderr[-200:])
 print("%d arms failed" % fails)
 sys.exit(1 if fails else 0)
