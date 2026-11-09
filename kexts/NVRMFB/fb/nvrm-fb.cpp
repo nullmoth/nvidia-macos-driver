@@ -4471,7 +4471,7 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
                                f->width, f->height, f->pitch, &rc, !home || pureHome, f->allocationCookie);
         f->flipResult = rc;
         // Busy: the previous flip is still on its way to the panel; the caller keeps its frame and presents the next.
-        return ok ? kIOReturnSuccess : rc == (int)NV_KMS_FLIP_RESULT_IN_PROGRESS ? kIOReturnBusy : kIOReturnIOError;
+        return ok ? kIOReturnSuccess : rc == (int)NV_KMS_FLIP_RESULT_IN_PROGRESS ? kIOReturnBusy : (fHeadSlept || !rmGpuReady()) ? kIOReturnNotReady : kIOReturnIOError;
     }
     if (functionName && functionName->isEqualTo(NVRM_FLIP_FN)) {
         struct NVRMFlipRequest *f = (struct NVRMFlipRequest *)param1;
@@ -4480,7 +4480,7 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
         bool ok = flipToMemory((struct NvKmsKapiMemory *)f->kapiMemory,
                                f->width, f->height, f->pitch, &rc, false, f->allocationCookie);
         f->flipResult = rc;
-        return ok ? kIOReturnSuccess : rc == (int)NV_KMS_FLIP_RESULT_IN_PROGRESS ? kIOReturnBusy : kIOReturnIOError;
+        return ok ? kIOReturnSuccess : rc == (int)NV_KMS_FLIP_RESULT_IN_PROGRESS ? kIOReturnBusy : (fHeadSlept || !rmGpuReady()) ? kIOReturnNotReady : kIOReturnIOError;
     }
     const char *name = functionName ? functionName->getCStringNoCopy() : "(null)";
     if (!isAlloc && !isFree)
