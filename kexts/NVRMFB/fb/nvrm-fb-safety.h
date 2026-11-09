@@ -300,3 +300,22 @@ static inline bool nvrmKeepFrontSurface(bool enabled, bool haveFront, bool front
 {
     return enabled && haveFront && !frontIsScanout && oldW == newW && oldH == newH && oldTransform == newTransform;
 }
+// ---- Rotated desktops of other sizes (issue 138: no resolution change once rotated) ----
+// The refusal of rotated scaled desktops is not a hardware limit: WindowServer composites the turned desktop into raster-oriented
+// frames in its GPU pass (the rotation commit says so) and CoreDisplay's own scaled-mode generator makes only mirror-only rotated
+// products, so a rotated head offers just the driver's own modes. nvfbrotscale=1 makes the driver offer, next to each rotated
+// native-raster mode, turned desktops at 80%, 2/3 and 50% of the raster.
+enum { kNvrmRotFactors = 3 };
+static inline bool nvrmRotatedDesktop(unsigned turnedW, unsigned turnedH, unsigned i, unsigned *w, unsigned *h)
+{
+    static const unsigned f[kNvrmRotFactors] = { 800, 667, 500 };
+    if (i >= kNvrmRotFactors || !turnedW || !turnedH) return false;
+    const unsigned dw = ((unsigned)((unsigned long long)turnedW * f[i] / 1000)) & ~1u, dh = ((unsigned)((unsigned long long)turnedH * f[i] / 1000)) & ~1u;
+    if (dw < 640 || dh < 480) return false;
+    *w = dw; *h = dh; return true;
+}
+// A rotated scaled desktop is acceptable when it is no larger than the turned raster (nvfbrotscale=1).
+static inline bool nvrmRotatedDesktopOk(bool enabled, unsigned deskW, unsigned deskH, unsigned turnedW, unsigned turnedH)
+{
+    return deskW == turnedW && deskH == turnedH ? true : (enabled && deskW && deskH && deskW <= turnedW && deskH <= turnedH && !(deskW & 1) && !(deskH & 1));
+}

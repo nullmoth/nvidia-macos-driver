@@ -548,6 +548,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     bool edidModeFor(const IODetailedTimingInformationV2 *d, struct NvKmsKapiDisplayMode *m);
     unsigned addKmsRefreshModes(unsigned n);
     unsigned addDsrModes(unsigned n);
+    unsigned addRotatedDesktops(unsigned n);
     void computeScanoutCaps(NvU32 pitchAlign);
     unsigned fEdidHits = 0;
     static void dtToKapi(const IODetailedTimingInformationV2 *d, struct NvKmsKapiDisplayMode *m);
@@ -1014,6 +1015,7 @@ template <typename C> static void nvrmAutoColorFormat(C *, long) {}
 // Output colour controls. Set from boot-args nvfbbpc (6/8/10/12), nvfbformat (0 RGB, 1 YCbCr 4:2:2, 2 YCbCr 4:4:4),
 // nvfbrange (1 full, 2 limited) and nvfbvib (0..200, 100 = off; below is duller, above more vivid), and live through the
 // debug.nvrmfb_color_* sysctls. All default to "automatic": NVKMS decides, as before. They apply to every head.
+static bool gRotScale = false;                 // boot-arg nvfbrotscale
 static bool gHdrOn = false, gTenBit = false;   // boot-args nvfbhdr / nvfb10bit
 static int gColorBpc = 0, gColorFormat = (int)kNvrmColorFormatAuto, gColorRange = 0, gVibrance = 0;
 // The range field exists only in headers carrying 620-color-range.patch; detection keeps baseline builds compiling.
@@ -3048,6 +3050,7 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
             if (PE_parse_boot_argn("nvfbrange", &v, sizeof v) && nvrmColorRangeValid(v)) gColorRange = (int)v;
             if (PE_parse_boot_argn("nvfbvib", &v, sizeof v) && v <= 200) gVibrance = (int)v - 100;
             gHdrOn = PE_parse_boot_argn("nvfbhdr", &v, sizeof v) && v;
+            gRotScale = PE_parse_boot_argn("nvfbrotscale", &v, sizeof v) && v;
             gTenBit = PE_parse_boot_argn("nvfb10bit", &v, sizeof v) && v;
             if (gHdrOn || gTenBit) FBLOG("%s%s", gTenBit ? "10-bit scanout on mode changes (nvfb10bit=1) " : "", gHdrOn ? "HDR10 advertised for PQ displays (nvfbhdr=1)" : "");
             if (gColorBpc || gColorFormat != 3 || gColorRange || gVibrance)
@@ -3702,7 +3705,7 @@ IOReturn NVRMNVDAFramebuffer::validateDetailedTiming(void *description, IOByteCo
     else if (d->horizontalScaled || d->verticalScaled) {
         NvU32 rw = 0, rh = 0; dtRasterTurned(d, &rw, &rh);
         if (!d->horizontalScaled || !d->verticalScaled) why = "one scaled axis";
-        else if ((d->scalerFlags & kIOScaleRotateFlags) && (d->horizontalScaled != rw || d->verticalScaled != rh)) why = "scaled rotated desktop";
+        else if ((d->scalerFlags & kIOScaleRotateFlags) && !nvrmRotatedDesktopOk(gRotScale, d->horizontalScaled, d->verticalScaled, rw, rh)) why = "scaled rotated desktop";
         else if ((d->horizontalScaled > rw || d->verticalScaled > rh) && (d->horizontalActive != fBootW || d->verticalActive != fBootH))
             why = "desktop larger than a raster smaller than the panel";
         else if (d->horizontalActive > fScalerMaxW || d->verticalActive > fScalerMaxH) why = "raster larger than the scanout allocation";
@@ -3811,6 +3814,37 @@ void NVRMNVDAFramebuffer::probeScalerLimit()
     }
     IOFree(loads, kMax * sizeof *loads); IOFree(idx, kMax * sizeof *idx);
 }
+// nvfbrotscale=1: while the head is rotated, turned desktops smaller than the raster next to each native one (see
+// nvrmRotatedDesktop). IDs 0x30000 | factor << 12 | refresh rate.
+unsigned NVRMNVDAFramebuffer::addRotatedDesktops(unsigned n)
+{
+    const unsigned cap = sizeof fDT / sizeof fDT[0], base = n;
+    if (!gRotScale || !fCurTransform) return n;
+    for (unsigned s = 0; s < base; s++) {
+        const IODetailedTimingInformationV2 src = fDT[s];
+        if ((src.scalerFlags & kIOScaleRotateFlags) != fCurTransform || !src.horizontalScaled || !src.pixelClock) continue;
+        NvU32 rw = 0, rh = 0; dtRasterTurned(&src, &rw, &rh);
+        if (src.horizontalScaled != rw || src.verticalScaled != rh) continue;   // only the native-desktop entries seed new ones
+        const UInt64 tot = (UInt64)(src.horizontalActive + src.horizontalBlanking) * (src.verticalActive + src.verticalBlanking);
+        const unsigned hz = tot ? (unsigned)((src.pixelClock + tot / 2) / tot) : 0;
+        if (!hz || hz > 0xfff) continue;
+        for (unsigned f = 0; f < kNvrmRotFactors && n < cap; f++) {
+            unsigned dw = 0, dh = 0;
+            if (!nvrmRotatedDesktop(rw, rh, f, &dw, &dh)) continue;
+            bool listed = false;
+            for (unsigned j = 0; j < n && !listed; j++)
+                listed = fDT[j].horizontalActive == src.horizontalActive && fDT[j].verticalActive == src.verticalActive &&
+                         fDT[j].horizontalScaled == dw && fDT[j].verticalScaled == dh && fDT[j].pixelClock == src.pixelClock;
+            if (listed) continue;
+            IODetailedTimingInformationV2 b = src;
+            b.horizontalScaled = dw; b.verticalScaled = dh;
+            b.detailedTimingModeID = 0x30000u | (f << 12) | hz;
+            fDT[n++] = b;
+        }
+    }
+    if (n != base) FBLOG("fb%u: %u rotated desktop(s) of other sizes added (nvfbrotscale=1)", fIndex, n - base);
+    return n;
+}
 // DSR-style supersampled desktops (boot-arg nvfbdsr=1, which also reserves the scanout memory nvfbhidpi does): for every refresh
 // rate the panel runs at its native raster, desktops of 1.20x to 4.00x the pixel count that the head scales down. Only sizes
 // that fit the scaler cap and the scanout memory, and only where macOS did not already list that desktop at that rate. IDs are
@@ -3894,6 +3928,7 @@ IOReturn NVRMNVDAFramebuffer::setDetailedTimings(OSArray *array)
     fNewIdOnce = 0;
     n = addKmsRefreshModes(n);
     { UInt32 dsr = 0; if (PE_parse_boot_argn("nvfbdsr", &dsr, sizeof dsr) && dsr) n = addDsrModes(n); }
+    n = addRotatedDesktops(n);
     fNDT = n;
     setProperty(kIOFBDetailedTimingsKey, array);
     fBootInDT = false;
