@@ -8,9 +8,13 @@ surface and the other displays stayed dark."""
 import pathlib, subprocess, tempfile
 root = pathlib.Path(__file__).resolve().parents[1]
 src = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
-for need in ['PE_parse_boot_argn("nvfbsurround"', 'fSpareIndex = true; return false;', 'surroundReplicate(cfg);', 'result = dtIndex(mode) >= 0 ? switchSurround(mode)',
-             '!fSurActive) ? 1 : 0;   // one cursor plane cannot span heads', 'if (fSurN) n = addSurroundMode(0);']:
+for need in ['PE_parse_boot_argn("nvfbsurround"', 'fHidden = nvrmSurroundIsMember(gSurroundMask, fIndex', 'static void surroundCheck();', 'surroundCheck();\n    if (!added)', 'hasDDCConnect(IOIndex) override { return !fDpyLost && !fHidden', 'surroundReplicate(cfg);', 'result = dtIndex(mode) >= 0 ? switchSurround(mode)',
+             '!fSurActive) ? 1 : 0;   // one cursor plane cannot span heads', 'const unsigned s = addSurroundMode(0); if (s) n = s;']:
     assert need in src, need
+# members keep their own framebuffer, so HDMI/DP audio (published per framebuffer at start) is untouched: nothing in the audio path looks at fHidden
+aud = src[src.index('void NVRMNVDAFramebuffer::publishDisplayAudioPropertiesNow'):src.index('static bool nvrmEdidSerialString')]
+assert 'fHidden' not in aud and 'fSurN' not in aud, 'audio publication must not depend on the surround state'
+assert 'return false;   // surround member' not in src, 'members must not decline to start (audio would go)'
 a = src.index('void NVRMNVDAFramebuffer::surroundReplicate'); fn = src[a:src.index('\n}\n', a) + 3]
 fixture = r'''
 #include <cassert>

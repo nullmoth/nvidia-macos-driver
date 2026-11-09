@@ -38,6 +38,17 @@ int main() {
     unsigned idx[4]; assert(nvrmSurroundMembers(0x5, 3, idx) == 2 && idx[0] == 0 && idx[1] == 2);
     assert(nvrmSurroundMembers(0x6, 2, idx) == 1 && idx[0] == 1);       // only one member left: the group will not form
     assert(nvrmSurroundMembers(0, 4, idx) == 0);
+    // master and members by index
+    assert(nvrmSurroundMaster(0x5, 3) == 0 && nvrmSurroundMaster(0x6, 3) == 1 && nvrmSurroundMaster(0x6, 1) == 8);
+    assert(!nvrmSurroundIsMember(0x5, 0, 3) && nvrmSurroundIsMember(0x5, 2, 3) && !nvrmSurroundIsMember(0x5, 1, 3));   // index 1 is not in the mask
+    assert(!nvrmSurroundIsMember(0x3, 1, 1));                                         // only one display connected: no group, no member
+    assert(nvrmSurroundIsMember(0x7, 1, 3) && nvrmSurroundIsMember(0x7, 2, 3) && !nvrmSurroundIsMember(0x7, 0, 3));
+    // hot-plug: a member leaves a formed group -> degrade; all return -> re-form; nothing else acts
+    assert(nvrmSurroundNext(true, false, 3, 3) == kSurNone);
+    assert(nvrmSurroundNext(true, false, 3, 2) == kSurDegrade);                        // one of three unplugged
+    assert(nvrmSurroundNext(false, true, 3, 2) == kSurNone);                           // still short: stay separate
+    assert(nvrmSurroundNext(false, true, 3, 3) == kSurReform);                         // all back
+    assert(nvrmSurroundNext(false, true, 1, 1) == kSurNone && nvrmSurroundNext(false, false, 3, 3) == kSurNone);   // no group configured
     puts("PASS: surround picks a shared height and refresh rate, widest mode per member, offsets by width, refuses when nothing is shared");
 }
 '''
