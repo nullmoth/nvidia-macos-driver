@@ -72,6 +72,7 @@ arm("NVRM publishes its settle delay on the PCI device for NVAccel", 'fPCI->setP
 arm("NVRM takes its settle delay from the policy (nvrmsettle override included)", "nvrmAutoGoSettleMs(" in nvrm)
 arm("auto-go stops waiting for heads when no connector carries a display", "nvrmNoDisplayAnywhere()" in nvrm and "not waiting for heads" in nvrm)
 arm("an early release still runs the arming that serves a later hotplug", "if (earlyRelease) s->releaseBootHold(" in nvrm and nvrm.index("if (earlyRelease) s->releaseBootHold(") < nvrm.index('nvrmSysW("debug.nvaccelfb", 1)') and "if (!earlyRelease) s->releaseBootHold(" in nvrm)
+arm("bus mastering from firmware is switched off until pass 2 enables it", "off until the RM starts the card" in nvrm and nvrm.index("off until the RM starts the card") < nvrm.index("fPCI->setBusMasterEnable(true)"))
 arm("a card the RM cannot name gets a model from the GPU profile", "nvrmFallbackModelName(" in nvrm)
 arm("a BAR1 that must grow past 4 GB is no longer refused outright when nothing but the window is missing", "nvrmFallbackWindowAllowed(fwBar1, newSize" in nvrm)
 arm("placeLargeBar1 resizes a firmware BAR1 above 8 GB through the proven path", "nvrmBar1ShrinkTarget(bar1Size, rbSupported, nvrmKeepBar1Size())" in nvrm)
