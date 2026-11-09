@@ -5781,7 +5781,8 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
 // a dummy buffer, so a shader that reads its arguments through that slot reads zeros (Photoshop's duplicate-layer kernel, slot 1
 // at offset 4100, then dereferenced a null pointer). With NVMTL_MISALIGNED_BUFFER_COPY=1 a CPU-visible buffer at such an
 // offset is bound as a copy of the bytes from the offset on (up to 4 MB), the way setBytes binds, which is correct for data the
-// kernel only reads and was written before encoding. Writes to the copy are not carried back. Off unless set.
+// kernel only reads. Bytes the kernel writes are carried back after completion. A buffer another GPU command writes earlier in
+// the same command buffer is read as it was at encode time. Off unless set.
 static int nvmtl_misaligned_copy_on(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("NVMTL_MISALIGNED_BUFFER_COPY"); on = e && *e && *e != '0'; }
@@ -5863,7 +5864,21 @@ static int nvmtl_zprobe_on(void);
     if (nb && (off & 15) && nvmtl_misaligned_copy_on() && nb->_b.map && nb->_b.size > off) {
         size_t n = nb->_b.size - off; if (n > ((size_t)4 << 20)) n = (size_t)4 << 20;
         static int said; if (!said++) nvlog("compute setBuffer: slot %lu at offset %lu is not 16-aligned - bound as a %lu-byte copy (NVMTL_MISALIGNED_BUFFER_COPY)", (unsigned long)i, (unsigned long)off, (unsigned long)n);
-        [self setBytes:(const uint8_t *)nb->_b.map + off length:n atIndex:i];
+        NSData *orig = [NSData dataWithBytes:(const uint8_t *)nb->_b.map + off length:n];
+        [self setBytes:orig.bytes length:n atIndex:i];
+        // Bytes the kernel changed are carried back into the real buffer once the command buffer completes. Only changed
+        // bytes move, so a write by anyone else to the rest of the range in the meantime is not undone.
+        if (i < NVMTL_NBUFAT && _baObj[i] && ((NVMTLBuffer *)_baObj[i])->_b.map && _baLen[i] == n) {
+            NVMTLBuffer *copy = (NVMTLBuffer *)_baObj[i]; size_t coff = _baOff[i]; NVMTLBuffer *home = nb; size_t hoff = off;
+            [_cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+                (void)done;
+                if (!copy->_b.map || !home->_b.map || home->_b.size < hoff + n) return;
+                const uint8_t *now = (const uint8_t *)copy->_b.map + coff, *was = orig.bytes; uint8_t *dst = (uint8_t *)home->_b.map + hoff;
+                for (size_t k = 0; k < n; k++) if (now[k] != was[k]) dst[k] = now[k];
+            }];
+        } else {
+            static int said2; if (!said2++) nvlog("compute setBuffer: the copy of an unaligned buffer could not be located - its writes are not carried back");
+        }
         return;
     }
     if (!nb) {
