@@ -18,5 +18,12 @@ xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -O2 -std=gnu2x -D_LIBRYZENADJ
   -I"$SRC/lib" "$HERE/osdep_macos.c" "$SRC/lib/nb_smu_ops.c" "$SRC/lib/api.c" "$SRC/lib/cpuid.c" "$SRC/argparse.c" "$SRC/main.c" \
   -framework IOKit -framework CoreFoundation -o "$OUT/ryzenadj"
 strip -x "$OUT/ryzenadj"
+# the entitlement NMSMN requires of its caller, in an ad-hoc signature (deterministic: no timestamp, no identity)
+cat > "$OUT/ryzenadj.entitlements" <<'ENT'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>com.nullmoth.ryzenadj</key><true/></dict></plist>
+ENT
+codesign --force -s - --entitlements "$OUT/ryzenadj.entitlements" -i com.nullmoth.ryzenadj "$OUT/ryzenadj"
 echo "RyzenAdj $TAG $COMMIT"
 shasum -a 256 "$OUT/ryzenadj"
