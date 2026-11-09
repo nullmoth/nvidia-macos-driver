@@ -3711,6 +3711,26 @@ static nvk_cmdbuf *nvmtl_hz_blit_open(NVMTLCommandBuffer *cb, id src, id dst) {
 @implementation NVMTLRenderCommandEncoder
 // NVMTL_HAZARD: end the pass, take a full barrier and begin it again with every attachment loaded (as a pipeline with
 // fewer attachments does). forceFull: this encoder keeps render passes from here on.
+// Framebuffer fetch emulated by copies (nvmtl_fetch_copy.h): the pass ends, the colour attachments this pipeline reads are
+// copied, and the pass begins again with every attachment loaded, so the draw reads what the earlier draws wrote. The
+// pipeline, viewport, scissor, cull and depth state are set again by the same path a hazard restart uses.
+- (BOOL)nvmtlFetchCopy:(nvk_pipeline *)p {
+    if (!_begun) return NO;
+    uint32_t keep = 0;
+    for (uint32_t i = 0; i < _passSig.ncol; i++) if (_passSig.cfmts[i]) keep |= NVMTL_LOAD_COLOUR(i);
+    if (_passSig.has_depth) keep |= NVMTL_LOAD_DEPTH;
+    if (_ps && _ps->_p.has_stencil) keep |= NVMTL_LOAD_STENCIL;
+    const BOOL visibility = _visActive || _visPending;
+    [self nvmtlCloseVisibility];
+    nvmtl_vk_cmd_end_render(&_cb->_c);
+    const int cr = nvmtl_vk_fetch_copy(&_cb->_c, &_pass, p->fetch_copy);
+    _begun = NO; _pass.load |= keep; _load |= keep; _visPending = visibility;
+    NVMTLRenderPipelineState *resume = _ps;
+    if (resume) [self setRenderPipelineState:resume];
+    if (!_begun) { nvlog("encoder: the render pass could not RESUME after a fetch copy - the rest of this encoder is not drawn"); return NO; }
+    if (cr) { static _Atomic unsigned said; if (atomic_fetch_add(&said, 1) < 4) nvlog("encoder: a fetch copy failed - the draw is skipped"); return NO; }
+    return YES;
+}
 - (void)nvmtlHzRestart:(BOOL)forceFull {
     if (forceFull) _hzFull = YES;
     if (!_begun) return;
@@ -3968,6 +3988,7 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
         if (!selected) return NO;
     }
     if(!_cb->_resources)_cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:selected];
+    if (selected->_p.fetch_copy && _begun && ![self nvmtlFetchCopy:&selected->_p]) return NO;
     nvmtl_vk_cmd_bind_pipeline(&_cb->_c,&selected->_p);
     nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX,   (NVMTLFunction *)_ps->_descriptor.vertexFunction,   _vbufAt, _vbufOff);
     nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, (NVMTLFunction *)_ps->_descriptor.fragmentFunction, _fbufAt, _fbufOff);
