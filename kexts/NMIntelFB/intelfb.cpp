@@ -19,6 +19,9 @@
 #include "nvrm_vram_abi.h"
 #include "nm_hybrid.h"
 #include "nm_hybrid_abi.h"
+#include "nm_hybrid_resume.h"
+#include "nvrm_off.h"
+#include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
@@ -38,6 +41,11 @@ extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NMIntelFB, "0.1", _start, _stop) }
 #endif
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d) { return KERN_SUCCESS; }
 extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return KERN_SUCCESS; }
+
+// last step reached (see ifbStep in the namespace below)
+char gIfbStepStr[48] = "none";
+SYSCTL_STRING(_debug, OID_AUTO, nmintelfb_step, CTLFLAG_RD | CTLFLAG_LOCKED, gIfbStepStr, sizeof gIfbStepStr,
+              "last step the Intel panel driver reached (nmhybrid)");
 
 namespace {
 // display version by PCI device ID, from Linux include/drm/intel/pciids.h (MIT); 0 = not ours
@@ -71,6 +79,35 @@ constexpr uint32_t PLANE_SURFLIVE(int p) { return 0x701ACu + (uint32_t)p * 0x100
 // graphics translation table invalidate after entries change (Linux GFX_FLSH_CNTL_GEN6, enable bit 0)
 [[maybe_unused]] constexpr uint32_t kGfxFlshCntl = 0x101008u;
 uint64_t ggttRead(void *ctx, uint64_t idx) { return ((volatile uint64_t *)ctx)[idx]; }
+
+// Where the panel driver got to, for a boot that froze: a sysctl and a registry property, and the NVRAM variable
+// nullmoth-ifb-step where the platform lets a kext write it at that point (read it with: nvram nullmoth-ifb-step).
+int gIfbStep = NMH_STEP_NONE;
+bool gIfbStepRegistered = false;
+void ifbStep(int step)
+{
+    gIfbStep = step;
+    snprintf(gIfbStepStr, sizeof gIfbStepStr, "%d %s", step, nmh_step_name(step));
+    if (!gIfbStepRegistered) { gIfbStepRegistered = true; sysctl_register_oid(&sysctl__debug_nmintelfb_step); }
+    IOLog("NMIntelFB: hybrid: step %s\n", gIfbStepStr);
+    if (IORegistryEntry *opt = IORegistryEntry::fromPath("/options", gIODTPlane)) {
+        if (OSData *d = OSData::withBytes(gIfbStepStr, (unsigned)strlen(gIfbStepStr))) { opt->setProperty("nullmoth-ifb-step", d); d->release(); }
+        opt->release();
+    }
+}
+// the boot guard's verdict, read the way NVRM does (nvrm_off.h)
+int ifbStandDownWhy()
+{
+    char arg[8];
+    const int nvoff = PE_parse_boot_argn("-nvoff", arg, sizeof arg) ? 1 : 0;
+    int remove = 0; unsigned starts = 0;
+    if (IORegistryEntry *opt = IORegistryEntry::fromPath("/options", gIODTPlane)) {
+        if (OSObject *f = opt->copyProperty("nullmoth-remove")) { remove = 1; f->release(); }
+        starts = nvrm_guard_starts(opt);
+        opt->release();
+    }
+    return nmh_stand_down_why(nvoff, remove, starts, NVRM_GUARD_LIMIT);
+}
 
 // PLANE_CTL (display 11+): enable bit 31, format bits 27:23 (8 = XRGB 8:8:8:8, Linux PLANE_CTL_FORMAT_XRGB_8888 on
 // ICL+), tiling bits 12:10 (0 = linear)
@@ -184,6 +221,21 @@ private:
     void hybridWriteSurf(uint32_t surf, uint32_t strideReg);
     void hybridHome();
     IOReturn hybridImport(NMHybridReq *q);
+    // level 3: buffers this driver owns (nm_hybrid.h, struct nmh_own)
+    struct nmh_own fOwn;
+    IOBufferMemoryDescriptor *fOwnMd[NMH_OWN_BUFS] = {};
+    bool fOwnReady = false;
+    bool ownSetup();
+    void ownRelease();
+    // sleep and wake (nm_hybrid_resume.h): boot-arg nmhybridresume=1
+    bool fResumeOn = false, fSlept = false;
+    struct nmr_snap *fSnap = nullptr;
+    uint64_t *fFwPte = nullptr; uint64_t fFwPteFirst = 0, fFwPteCount = 0;
+    thread_call_t fResumeCall = nullptr;
+    bool ggttMap();
+    void resumeCapture();
+    void resumeRun();
+    static void resumeFire(thread_call_param_t p0, thread_call_param_t) { ((NMIntelFB *)p0)->resumeRun(); }
 
     uint32_t rd(uint32_t off) const { return *(volatile uint32_t *)(fRegs + off); }
     void wr(uint32_t off, uint32_t v) const { *(volatile uint32_t *)(fRegs + off) = v; }
@@ -248,6 +300,10 @@ public:
     // first WindowServer restart froze every display.
     IOReturn setPowerState(unsigned long ordinal, IOService *) override {
         handleEvent(ordinal ? kIOFBNotifyDidPowerOn : kIOFBNotifyWillPowerOff);
+        if (fResumeOn) {
+            if (!ordinal) { fSlept = true; ifbStep(NMH_STEP_SUSPEND); }
+            else if (fSlept) { fSlept = false; thread_call_enter(fResumeCall); }   // off this thread: the replay waits on hardware
+        }
         return kIOPMAckImplied;
     }
     IOReturn setAttribute(IOSelect attribute, uintptr_t value) override {
@@ -312,6 +368,11 @@ IOService *NMIntelFB::probe(IOService *provider, SInt32 *score)
     { int lv = 0; const int present = PE_parse_boot_argn("nmhybrid", &lv, sizeof lv);
       fHyLevel = nmh_level_parse(present, lv);
       if (!fHyLevel) return nullptr; }
+    ifbStep(NMH_STEP_PROBE);
+    // The NVIDIA driver is off (removed from the boot picker, or the boot guard tripped): nothing will composite for this
+    // panel, so the firmware framebuffer keeps it.
+    { const int why = ifbStandDownWhy();
+      if (why) { ifbStep(NMH_STEP_STOOD_DOWN); IFBLOG("hybrid: standing down, the firmware framebuffer keeps the panel: %s", nmh_stay_name(why)); return nullptr; } }
     uint16_t dev = pci->configRead16(kIOPCIConfigDeviceID);
     fVer = displayVersion(dev);
     if (!fVer) return nullptr;   // an Intel GPU this driver does not know (older ones have Apple's own driver)
@@ -391,18 +452,33 @@ bool NMIntelFB::start(IOService *provider)
 #endif
     fPCI = OSDynamicCast(IOPCIDevice, provider);
     if (!fPCI) return false;
+    // nmhybriddelay=<s>: wait before taking the panel (some machines froze without it). Bounded at 120 s; the guard's
+    // verdict is read again afterwards, because a long wait is exactly when it can change.
+    { long long dv = 0; int dl = 0; const int present = PE_parse_boot_argn("nmhybriddelay", &dl, sizeof dl); dv = dl;
+      const unsigned secs = nmh_delay_parse(present, dv);
+      if (secs) {
+          ifbStep(NMH_STEP_DELAY);
+          IFBLOG("hybrid: waiting %u s before taking the panel (boot-arg nmhybriddelay)", secs);
+          for (unsigned i = 0; i < secs; i++) IOSleep(1000);
+          const int why = ifbStandDownWhy();
+          if (why) { ifbStep(NMH_STEP_STOOD_DOWN); IFBLOG("hybrid: standing down after the wait: %s", nmh_stay_name(why)); return false; }
+      } }
     fPCI->setMemoryEnable(true);
     fMMIO = fPCI->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
     IODeviceMemory *ap = fPCI->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress2);
     if (!fMMIO || !ap) { IFBLOG("BAR0 or BAR2 is not mapped - leaving the firmware screen"); OSSafeReleaseNULL(fMMIO); return false; }
     fRegs = (volatile uint8_t *)fMMIO->getVirtualAddress();
     fApertureBase = ap->getPhysicalAddress(); fApertureLen = ap->getLength();
+    ifbStep(NMH_STEP_MMIO);
     if (!adoptFirmwareMode()) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false; }
+    ifbStep(NMH_STEP_ADOPT);
+    resumeCapture();
     publishBacklight();   // before IOFramebuffer::start: IOFramebuffer::open looks for a service named "backlight"
     if (!IOFramebuffer::start(provider)) {
         if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
         OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false;
     }
+    ifbStep(NMH_STEP_FB_START);
     // Head 4 of the NVIDIA accelerator (NVAccel): WindowServer composites this panel on the NVIDIA card and the
     // display pipe copies each frame into fSurfMap. Without NVAccel the panel stays a plain framebuffer.
     if (IODeviceMemory *sm = IODeviceMemory::withRange(fApertureBase + fSurf, (IOPhysicalLength)fRowBytes * fHeight)) {
@@ -412,6 +488,7 @@ bool NMIntelFB::start(IOService *provider)
         setProperty("IOFBDependentID", 0x4E56524D00000001ull, 64);
         setProperty("IOFBDependentIndex", 4ull, 32);
     } else IFBLOG("the surface would not map write-combined: NVIDIA rendering stays off for this panel");
+    ifbStep(NMH_STEP_PUBLISHED);
     IFBLOG("hybrid: provider NMIntelFB %ux%u pitch %u display version %u level %d (CPU-mapped scanout, no VRAM)",
            fWidth, fHeight, fRowBytes, fVer, fHyLevel);
     setProperty("NMIntelFBHybridLevel", (unsigned long long)fHyLevel, 32);
@@ -428,6 +505,11 @@ void NMIntelFB::stop(IOService *provider)
 {
     fStopping = true;
     if (fHyReady && fRing.live != -1) hybridHome();
+    if (fOwnReady && nmh_own_may_free(&fOwn)) ownRelease();
+    fResumeOn = false;
+    if (fResumeCall) { thread_call_cancel(fResumeCall); while (!thread_call_free(fResumeCall)) { thread_call_cancel(fResumeCall); IOSleep(5); } fResumeCall = nullptr; }
+    if (fSnap) { IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; }
+    if (fFwPte) { IOFree(fFwPte, (size_t)(fFwPteCount * sizeof(uint64_t))); fFwPte = nullptr; }
 #ifdef NMINTELFB_VIRTUAL
     if (gVirt == this) { sysctl_unregister_oid(&sysctl__debug_nmintelfb_sample); gVirt = nullptr; }
 #endif
@@ -583,20 +665,29 @@ IOReturn NMIntelFB::getAttributeForConnection(IOIndex idx, IOSelect attr, uintpt
 // half of BAR0 (one 64-bit entry per 4 KiB page, bit 0 present, bits 45:12 the page address), its size in GMCH_CTRL
 // (config 0x50, bits 7:6, in MiB as a power of two). Entries are written only inside a range that already reads as one
 // repeated value (the unused scratch or zero entries); the firmware's own surface and every other mapping are left alone.
+// the graphics translation table: upper half of BAR0, size from GMCH_CTRL (display versions 12 and 13)
+bool NMIntelFB::ggttMap()
+{
+    if (fGsm) return true;
+    if (!nmh_gen_ok(fVer)) return false;
+    const uint64_t len = fMMIO ? fMMIO->getLength() : 0;
+    if (len < (16ull << 20)) { IFBLOG("hybrid: BAR0 is %llu MiB, the table is expected in the upper half of 16 MiB", (unsigned long long)(len >> 20)); return false; }
+    const unsigned ggms = (fPCI->configRead16(0x50) >> 6) & 3;
+    const uint64_t gsmBytes = ggms ? ((uint64_t)1 << ggms) << 20 : 0;
+    if (!gsmBytes || gsmBytes > len / 2) { IFBLOG("hybrid: graphics table size field %u does not fit BAR0", ggms); return false; }
+    fGsm = (volatile uint64_t *)(fRegs + len / 2);
+    fGsmEntries = gsmBytes / 8;
+    return true;
+}
+
 bool NMIntelFB::hybridSetup(uint32_t pitch, uint32_t height)
 {
     if (fHyReady) return true;
     if (fHyBad) return false;
 #define HYFAIL(...) do { fHyBad = true; IFBLOG("hybrid: import unavailable: " __VA_ARGS__); return false; } while (0)
     if (!nmh_gen_ok(fVer)) HYFAIL("display version %u", fVer);
-    const uint64_t len = fMMIO ? fMMIO->getLength() : 0;
-    if (len < (16ull << 20)) HYFAIL("BAR0 is %llu MiB, the table is expected in the upper half of 16 MiB", (unsigned long long)(len >> 20));
-    const unsigned ggms = (fPCI->configRead16(0x50) >> 6) & 3;
-    const uint64_t gsmBytes = ggms ? ((uint64_t)1 << ggms) << 20 : 0;
-    if (!gsmBytes || gsmBytes > len / 2) HYFAIL("graphics table size field %u does not fit BAR0", ggms);
-    fGsm = (volatile uint64_t *)(fRegs + len / 2);
-    fGsmEntries = gsmBytes / 8;
-    const uint64_t slotPages = nmh_pages_for(pitch, height), need = slotPages * NMH_SLOTS;
+    if (!ggttMap()) HYFAIL("the graphics table is not reachable");
+    const uint64_t slotPages = nmh_pages_for(pitch, height), need = slotPages * (NMH_SLOTS + (fHyLevel >= NMH_OWNED ? NMH_OWN_BUFS : 0));
     const uint64_t top = fGsmEntries > 512 ? fGsmEntries - 512 : 0;      // keep clear of the top 2 MiB
     const uint64_t fwLo = fSurf >> 12, fwHi = (((uint64_t)fSurf + (uint64_t)fRowBytes * fHeight) - 1) >> 12;
     const int64_t firstS = nmh_find_free_run(ggttRead, (void *)fGsm, top, 65536, need, fwLo, fwHi);
@@ -604,6 +695,7 @@ bool NMIntelFB::hybridSetup(uint32_t pitch, uint32_t height)
     const uint64_t first = (uint64_t)firstS;
     if ((first + need) * NMH_PAGE > (1ull << 32)) HYFAIL("range ends past the 32-bit plane address");
     nmh_ring_init(&fRing, first * NMH_PAGE, slotPages * NMH_PAGE);
+    ifbStep(NMH_STEP_RING);
     fHyPitch = pitch; fHyHeight = height; fHyReady = true;
     IFBLOG("hybrid: import ring %d slots x %llu KiB at table offset 0x%llx (entries %lld..%lld of %llu)", NMH_SLOTS,
            (unsigned long long)(slotPages * 4), (unsigned long long)fRing.base, (long long)first, (long long)(first + need - 1),
@@ -641,6 +733,94 @@ void NMIntelFB::hybridHome()
     if (nmh_flip_begin(&fRing, -1) != NMH_OK) return;
     hybridWriteSurf(fSurf, fStrideReg);
     if (hybridWaitLive(-1)) IFBLOG("hybrid: plane back on the boot surface");
+    if (fOwnReady) nmh_own_home(&fOwn);
+}
+
+// Three buffers of ordinary cached memory, mapped into the graphics table after the import slots, same size as the
+// firmware's surface so the plane's stride never changes. The CPU writes them (fast, no write-combined stores) and the
+// panel driver flushes a buffer from the CPU caches before the plane is flipped to it.
+bool NMIntelFB::ownSetup()
+{
+    if (fOwnReady) return true;
+    if (fHyLevel < NMH_OWNED || !hybridSetup(fRowBytes, fHeight)) return false;
+    if (nmh_pages_for(fRowBytes, fHeight) * NMH_PAGE != fRing.slot_bytes) { IFBLOG("hybrid: owned buffers unavailable: ring slots were sized for another pitch"); return false; }
+    const uint64_t pages = fRing.slot_bytes / NMH_PAGE;
+    for (int i = 0; i < NMH_OWN_BUFS; i++) {
+        IOBufferMemoryDescriptor *b = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, kIODirectionInOut, (mach_vm_size_t)fRing.slot_bytes, 0xFFFFFFFFFFFFF000ull);
+        if (!b || b->prepare() != kIOReturnSuccess) { OSSafeReleaseNULL(b); ownRelease(); IFBLOG("hybrid: owned buffers unavailable: allocation failed"); return false; }
+        bzero(b->getBytesNoCopy(), b->getLength());
+        fOwnMd[i] = b;
+        const uint64_t at = fRing.base / NMH_PAGE + (uint64_t)(NMH_SLOTS + i) * pages;
+        for (uint64_t p = 0; p < pages; p++) {
+            addr64_t a = b->getPhysicalSegment((IOByteCount)(p * NMH_PAGE), nullptr, kIOMemoryMapperNone);
+            if (!nmh_ggtt_pte(a)) { ownRelease(); IFBLOG("hybrid: owned buffers unavailable: a page is out of the table's reach"); return false; }
+            fGsm[at + p] = nmh_ggtt_pte(a);
+        }
+    }
+    (void)fGsm[fRing.base / NMH_PAGE];
+    wr(kGfxFlshCntl, 1);
+    nmh_own_init(&fOwn);
+    fOwnReady = true;
+    IFBLOG("hybrid: %d owned buffers x %llu KiB mapped after the import slots", NMH_OWN_BUFS, (unsigned long long)(fRing.slot_bytes / 1024));
+    return true;
+}
+void NMIntelFB::ownRelease()
+{
+    for (int i = 0; i < NMH_OWN_BUFS; i++) if (fOwnMd[i]) { fOwnMd[i]->complete(); fOwnMd[i]->release(); fOwnMd[i] = nullptr; }
+    fOwnReady = false;
+}
+
+// ---- sleep and wake ----------------------------------------------------------------------------------------------------
+
+void NMIntelFB::resumeCapture()
+{
+    long long v = 0; int a = 0; const int present = PE_parse_boot_argn("nmhybridresume", &a, sizeof a); v = a;
+    if (!nmr_enabled(present, v)) return;
+    if (!nmh_gen_ok(fVer) || fPipe != 0) { IFBLOG("hybrid: resume unavailable: display version %u pipe %d (version 12 or 13, pipe A only)", fVer, fPipe); return; }
+    if (!ggttMap()) return;
+    fSnap = (struct nmr_snap *)IOMalloc(sizeof *fSnap);
+    if (!fSnap) return;
+    bzero(fSnap, sizeof *fSnap);
+    struct nmr_ops ops = { this,
+        [](void *c, uint32_t o) { return ((NMIntelFB *)c)->rd(o); },
+        [](void *c, uint32_t o, uint32_t x) { ((NMIntelFB *)c)->wr(o, x); },
+        [](void *, unsigned us) { IODelay(us); },
+        [](void *, const char *st) { IFBLOG("hybrid: resume step: %s", st); },
+        nullptr };
+    const int rc = nmr_snapshot(&ops, fSnap);
+    if (rc != NMR_OK) { IFBLOG("hybrid: resume unavailable: %s", nmr_result_name(rc)); IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; return; }
+    // the firmware surface's entries in the graphics table: restored first on wake
+    fFwPteFirst = fSurf >> 12; fFwPteCount = (((uint64_t)fRowBytes * fHeight) + 4095) / 4096;
+    if (fFwPteFirst + fFwPteCount <= fGsmEntries) {
+        fFwPte = (uint64_t *)IOMalloc((size_t)(fFwPteCount * sizeof(uint64_t)));
+        if (fFwPte) for (uint64_t i = 0; i < fFwPteCount; i++) fFwPte[i] = fGsm[fFwPteFirst + i];
+    }
+    fResumeCall = thread_call_allocate(resumeFire, this);
+    fResumeOn = fResumeCall != nullptr;
+    IFBLOG("hybrid: resume armed: panel state captured (sink link 0x%02x x%u, %s)", fSnap->dpcd[0], fSnap->dpcd[1] & 0x1F,
+           fSnap->no_handshake ? "no AUX handshake" : "AUX link training");
+}
+
+void NMIntelFB::resumeRun()
+{
+    if (!fResumeOn || !fSnap || fStopping) return;
+    ifbStep(NMH_STEP_RESUME_BEGIN);
+    if (fFwPte) { for (uint64_t i = 0; i < fFwPteCount; i++) fGsm[fFwPteFirst + i] = fFwPte[i]; wr(kGfxFlshCntl, 1); }
+    struct nmr_ops ops = { this,
+        [](void *c, uint32_t o) { return ((NMIntelFB *)c)->rd(o); },
+        [](void *c, uint32_t o, uint32_t x) { ((NMIntelFB *)c)->wr(o, x); },
+        [](void *, unsigned us) { IODelay(us); },
+        [](void *, const char *st) { IFBLOG("hybrid: resume step: %s", st); },
+        // pre-emphasis and swing beyond what the firmware programmed need the per-level tables of the PHY: not available
+        [](void *, unsigned v, unsigned p) { return (v == 0 && p == 0) ? 0 : -1; } };
+    const int rc = nmr_resume(&ops, fSnap, fVer);
+    IFBLOG("hybrid: resume: %s", nmr_result_name(rc));
+    ifbStep(rc == NMR_OK || rc == NMR_ALREADY_LIT ? NMH_STEP_RESUME_DONE : NMH_STEP_RESUME_FAILED);
+    if (rc == NMR_OK || rc == NMR_ALREADY_LIT) {
+        // the plane is on the firmware surface again; import slots and owned buffers must be mapped anew
+        if (fHyReady) { nmh_ring_init(&fRing, fRing.base, fRing.slot_bytes); }
+        if (fOwnReady) { nmh_own_home(&fOwn); }
+    }
 }
 
 IOReturn NMIntelFB::hybridImport(NMHybridReq *q)
@@ -657,12 +837,41 @@ IOReturn NMIntelFB::hybridImport(NMHybridReq *q)
     if (q->op == NMH_OP_QUERY) {
         q->result = nmh_import_check(fHyLevel, fVer, q->format, q->width, q->height, q->pitch, fWidth, fHeight);
         if (q->result != NMH_OK) return kIOReturnUnsupported;
-        if (!hybridSetup(q->pitch, q->height)) { q->result = NMH_E_NOSPACE; return kIOReturnUnsupported; }
+        if (!(fHyLevel >= NMH_OWNED ? hybridSetup(fRowBytes, fHeight) : hybridSetup(q->pitch, q->height))) { q->result = NMH_E_NOSPACE; return kIOReturnUnsupported; }
         if (nmh_pages_for(q->pitch, q->height) * NMH_PAGE != fRing.slot_bytes) { q->result = NMH_E_SIZE; return kIOReturnUnsupported; }
         int need = 0; uint32_t ev = 0;
         q->slot = nmh_ring_acquire(&fRing, q->surfaceId, &need, &ev);
         if (q->slot < 0) { q->result = NMH_E_BUSY; return kIOReturnBusy; }
         q->needMap = (unsigned)need; q->evictedId = ev;
+        return kIOReturnSuccess;
+    }
+    if (q->op == NMH_OP_ACQUIRE || q->op == NMH_OP_PRESENT || q->op == NMH_OP_ABORT) {
+        if (fHyLevel < NMH_OWNED || !ownSetup()) { q->result = NMH_E_NOSPACE; return kIOReturnUnsupported; }
+        if (q->op == NMH_OP_ACQUIRE) {
+            const int b = nmh_own_acquire(&fOwn);
+            if (b < 0) { q->result = NMH_E_BUSY; return kIOReturnBusy; }
+            q->slot = b; q->kva = fOwnMd[b]->getBytesNoCopy(); q->pitch = fRowBytes;
+            return kIOReturnSuccess;
+        }
+        if (q->slot < 0 || q->slot >= NMH_OWN_BUFS) { q->result = NMH_E_BUSY; return kIOReturnBadArgument; }
+        if (q->op == NMH_OP_ABORT) { nmh_own_abort(&fOwn, q->slot); return kIOReturnSuccess; }
+        // PRESENT: flush, queue, flip, wait for the live register
+        fOwnMd[q->slot]->performOperation(kIOMemoryIncoherentIOFlush, 0, (IOByteCount)fRing.slot_bytes);
+        if (nmh_own_present(&fOwn, q->slot) != NMH_OK) { q->result = NMH_E_BUSY; return kIOReturnBusy; }
+        const int rs = NMH_SLOTS + q->slot;
+        if (nmh_flip_begin(&fRing, rs) != NMH_OK) { nmh_own_flip_failed(&fOwn); q->result = NMH_E_BUSY; return kIOReturnBusy; }
+        if (fRing.pending == NMH_NONE) { nmh_own_landed(&fOwn); return kIOReturnSuccess; }
+        hybridWriteSurf((uint32_t)nmh_slot_surf(&fRing, rs), fStrideReg);
+        if (!hybridWaitLive(rs)) {
+            fHyLevel = NMH_COPY;
+            hybridWriteSurf(fSurf, fStrideReg);
+            fRing.live = -3;
+            nmh_own_flip_failed(&fOwn);
+            q->result = NMH_E_STUCK;
+            IFBLOG("hybrid: fallback to copy: %s", nmh_why_name(NMH_E_STUCK));
+            return kIOReturnTimeout;
+        }
+        nmh_own_landed(&fOwn);
         return kIOReturnSuccess;
     }
     if (!fHyReady || q->slot < 0 || q->slot >= NMH_SLOTS) { q->result = NMH_E_BUSY; return kIOReturnBadArgument; }
@@ -692,6 +901,7 @@ IOReturn NMIntelFB::hybridImport(NMHybridReq *q)
             IFBLOG("hybrid: fallback to copy: %s", nmh_why_name(NMH_E_STUCK));
             return kIOReturnTimeout;
         }
+        if (fHyFlips == 0) ifbStep(NMH_STEP_FLIP);
         if (++fHyFlips == 1) IFBLOG("hybrid: zero-copy flip #1 surface 0x%x slot %d live", q->surfaceId, q->slot);
         return kIOReturnSuccess;
     }
