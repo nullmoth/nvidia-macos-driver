@@ -98,7 +98,7 @@ MIT), which runs on a Radeon 680M laptop with NullMoth 2.6.3.
   framebuffer-started, published, import-ring, first-flip, suspend, resume-begin, resume-done or resume-failed; `stood-down`
   if it declined. `tools/hybrid_verify.sh` prints the last one it finds.
 - **`nmhybrid20=1`**: allow the wake replay on display versions 20 and 30 (Lunar Lake, Panther Lake); **`nmhybridtc=1`**: log Type-C
-  cable events (versions 12 and 13); **`nmhybridp2p=1|2`**: the zero-copy decision (see its section).
+  cable events (versions 12 and 13); **`nmhybridext=1`**: also light a plugged Type-C monitor with colour bars on a second pipe; **`nmhybridp2p=1|2`**: the zero-copy decision (see its section).
 - **`nmflatskip=<n>`** (0 to 8, default 0): on the NVIDIA GPU's own display path, a composited frame that is one flat
   colour (64 samples equal) is not flipped to for up to n frames in a row, so a momentary black frame never reaches the
   screen; the n+1th flat frame is shown. A surface is judged only when its system-memory copy is the newest one. Counter:
@@ -345,13 +345,28 @@ i915, MIT): the EDID read over I2C-over-AUX and its preferred mode, the DPCD cap
 PLL (divider search for 1.62 to 8.1 Gb/s on 19.2, 24 and 38.4 MHz references, checked by computing the rate back from the registers;
 the banked register writes through the HIP index; power, program, enable, lock). Without the library nothing drives these ports.
 
-What is still missing for an external Type-C display to light in mirror or extend mode, exactly: (1) the Dekel lane programming
-(`DKL_TX_*` signal levels, lane reset and soft-reset in `DKL_PCS_DW5`) and the DDI clock select that routes the PLL to the port;
-(2) the plane, its display-buffer allocation and watermarks for the second pipe, and the pipe and transcoder enable order around the
-words above; (3) the orchestrating sequence tying hot-plug, the PHY handshake, EDID, mode set and link training together, tested the way
-the panel resume is; (4) a second framebuffer published to the window system: NMIntelFB is a one-panel driver, so this is a second
-`IOFramebuffer` instance per connector, with its hot-plug notification, and the PHY must be taken only while the display is on, since
-display ownership takes the dock's USB 3 lanes.
+Also built, each with a model test (formulas and sequences from Linux's i915, MIT): the Dekel transmitter lanes (swing and pre-emphasis for
+both lanes from the generation's own tables, `nm_hybrid_dkl.h`) and the clock routing from the PLL to the port and the port to the transcoder;
+the second pipe's watermarks and display-buffer fit (`nm_hybrid_wm.h`: memory latencies from the platform controller, methods 1 and 2, the
+level fit, the buffer range taken from the free part of the display buffer, with a floating-point cross-check that every enabled level holds
+the lines the pipe reads during its latency, and a refusal when level 0 cannot be met); and the whole bring-up as one sequence that is undone
+in reverse from any step (`nm_hybrid_extmode.h`: PHY ownership, power wells, sink and EDID, mode and link, buffer fit, PLL and lanes, clocks,
+pipe and plane, transcoder function and DDI buffer, link training, transcoder on). `tools/test_hybrid_extmode.c` unplugs the cable at every AUX
+transaction of the bring-up (EDID, DPCD and link training included) and checks that the result is "unplugged" and that no register is left enabled,
+for versions 12 and 13. `nm_hybrid_heads.h` is the framebuffer lifecycle for any number of heads sharing the device (create, bring up, publish; unpublish,
+take down, release; replug during teardown; stop order), tested in `tools/test_hybrid_heads.c`.
+
+With the boot-arg `nmhybridext=1` (versions 12 and 13) the panel driver runs this for real: when a cable is plugged into a Type-C port it allocates a
+1920x1080 buffer, maps it into free graphics-table entries, brings the display up on a free pipe, fills it with colour bars, and takes everything down
+on unplug and when the driver stops. This lights a monitor for a tester without touching the window system. Log lines start with
+`hybrid: external head on Type-C port N`.
+
+What is not built, and why. (1) Publishing the head to the window system: the NVIDIA accelerator has five framebuffer slots (four NVIDIA heads and the
+panel at index 4), and its pipe count is exposed to the system as five; an external head needs the count raised and per-head state added, which changes the
+topology every hybrid user sees and cannot be shown without hardware, so it is left until a tester has confirmed the colour bars; the second
+`IOFramebuffer` per connector is the other half of the same step. (2) Unverified assumptions that only a machine settles: the Type-C AUX channel
+register layout on Alder Lake P (taken to follow Tiger Lake's), how the display-buffer range maps to the hardware's slices for a second pipe, and
+the SAGV and transition watermarks (left as the firmware had them, transition off).
 
 ## Zero-copy scan-out from the NVIDIA GPU's memory (`nmhybridp2p`)
 
@@ -401,7 +416,8 @@ open row.
 - `tools/test_hybrid_resume20.c`: display versions 20 and 30 and the C20 PHY (register range, D2D in the DDI buffer, MBUS and GMBUS
   steps, SRAM context switch, table self-check), `tools/test_hybrid_tc.c`: the Type-C handshake and hot-plug, and
   `tools/test_hybrid_p2p.c`: the zero-copy decision.
-- `tools/test_hybrid_ext.c`: EDID over AUX, preferred mode, link choice, M/N, transcoder words, and the Dekel PLL.
+- `tools/test_hybrid_ext.c`: EDID over AUX, preferred mode, link choice, M/N, transcoder words, the Dekel PLL and lanes, clock routing, watermarks.
+- `tools/test_hybrid_extmode.c`, `tools/test_hybrid_heads.c`: the external-display bring-up and teardown (unplug at every step) and the head lifecycle.
 - `tools/test_hybrid_resume.c`: the wake replay against a model of the display engine, panel power sequencer, combo PHY drive
   registers, AUX channel and sink, for a panel on pipe A / DDI A, pipe B / DDI B, pipe D / DDI A and pipe C / DDI B (order,
   handshakes, the sink's swing and pre-emphasis requests reaching the PHY registers, every failure stops at its handshake);
