@@ -6,17 +6,14 @@
 #   pointer, intersection-table and mesh categories of NVMTLLibraryLoad.m (moving them into the primary @implementation
 #   is code motion across files, not a warning fix)
 plugin 44
-# nvrm, nvaccel, primary-selector, nmgopfb, nmintelfb: IOPCIDevice is marked deprecated in favour of PCIDriverKit, which
-#   is user space and cannot replace a kernel extension's PCI access; nvrm also calls setBusMasterEnable, whose
-#   replacement setBusLeadEnable is not virtual, so changing the call is not a like-for-like change
-nvrm 58
-nvaccel 21
-primary-selector 6
-nmgopfb 8
-nmintelfb 6
 # nvencvt: the linker's unaligned-pointer notes for gBase/gDBase, CoreMedia's CMBaseClass, whose layout is packed to
 #   4 bytes by Apple's ABI
 nvencvt 22
+nvrm 0
+nvaccel 0
+primary-selector 0
+nmgopfb 0
+nmintelfb 0
 nvrmfb 0
 nvrmagdc 0
 nmsmn 0
