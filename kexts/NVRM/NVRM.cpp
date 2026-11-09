@@ -1636,7 +1636,7 @@ void NVRM::readBARs()
             }
             if (!sz) { kprintf("NVRM-xnu: BAR @0x%02x at 0x%llx: size unknown - not recovered\n", off, a); continue; }
             nv->bars[slot].offset = off; nv->bars[slot].cpu_address = a; nv->bars[slot].size = sz;
-            tn += snprintf(table + tn, sizeof table - tn, "bar%u@0x%02x:0x%llx+0x%llx(%s) ", slot, off, a, sz, src);
+            tn += (unsigned)snprintf(table + tn, sizeof table - tn, "bar%u@0x%02x:0x%llx+0x%llx(%s) ", slot, off, a, sz, src);
             kprintf("NVRM-xnu: BAR @0x%02x recovered from %s: 0x%llx+0x%llx\n", off, src, a, sz);
             if (nMade < 3) made[nMade++] = IODeviceMemory::withRange(a, sz);
         }
