@@ -258,6 +258,7 @@ private:
     // loads it (with every event handler left disabled). The kext cannot read a file, and never trusts the bytes: they are parsed
     // and range-checked here before anything is kept or written.
     uint8_t *fDmcBlob = nullptr; uint32_t fDmcLen = 0; bool fDmcOn = false;
+    struct nmd_step dmcStep() const;
 public:
     int dmcAccept(const uint8_t *buf, uint32_t len);
     char fDmcWant[40] = "none";
@@ -888,17 +889,25 @@ int NMIntelFB::dmcAccept(const uint8_t *buf, uint32_t len)
 {
     struct nmd_fw fw;
     if (!fRegs || fVer < 12 || fVer > 14) return ENXIO;
-    const int rc = nmd_parse(buf, len, '*', '*', nmd_max_words(fVer), &fw);
+    const struct nmd_step stp = dmcStep();
+    const int rc = nmd_parse(buf, len, stp.st, stp.sub, nmd_max_words(fVer), &fw);
     if (rc != NMD_OK) { IFBLOG("hybrid: display firmware refused: %s", nmd_err(rc)); return EINVAL; }
     uint8_t *copy = (uint8_t *)IOMalloc(len);
     if (!copy) return ENOMEM;
     memcpy(copy, buf, len);
     if (fDmcBlob) IOFree(fDmcBlob, fDmcLen);
     fDmcBlob = copy; fDmcLen = len;
-    IFBLOG("hybrid: display firmware accepted: %u words for the main program, version %u.%u%s", fw.part[0].words, fw.version >> 16, fw.version & 0xFFFF,
+    IFBLOG("hybrid: display firmware accepted for stepping %c%c: %u words for the main program, version %u.%u%s", stp.st, stp.sub, fw.part[0].words, fw.version >> 16, fw.version & 0xFFFF,
            fDmcOn ? "" : " (not loaded: boot-arg nmhybriddmc is not 1)");
     if (fDmcOn) dmcApplyLocked();
     return 0;
+}
+// the display stepping that picks the package entry (Linux intel_step.c): the PCI revision id through the sub-platform's table,
+// or the display step register on version 14
+struct nmd_step NMIntelFB::dmcStep() const
+{
+    const uint32_t gmd = fVer == 14 ? rd(0x510A0u) : 0;
+    return nmd_stepping(fVer, fPCI->configRead16(kIOPCIConfigDeviceID), fPCI->configRead8(kIOPCIConfigRevisionID), gmd);
 }
 void NMIntelFB::dmcApply()
 {
@@ -910,7 +919,8 @@ void NMIntelFB::dmcApply()
 void NMIntelFB::dmcApplyLocked()
 {
     struct nmd_fw fw;
-    if (!fDmcBlob || nmd_parse(fDmcBlob, fDmcLen, '*', '*', nmd_max_words(fVer), &fw) != NMD_OK) return;
+    const struct nmd_step stp = dmcStep();
+    if (!fDmcBlob || nmd_parse(fDmcBlob, fDmcLen, stp.st, stp.sub, nmd_max_words(fVer), &fw) != NMD_OK) return;
     const uint32_t cap = 1u << 15;
     struct nmd_write *w = (struct nmd_write *)IOMalloc(cap * sizeof *w);
     if (!w) return;
@@ -969,6 +979,7 @@ void NMIntelFB::resumeRun()
 {
     if (!fResumeOn || !fSnap || fStopping) return;
     ifbStep(NMH_STEP_RESUME_BEGIN);
+    if (fDmcOn) dmcApply();     // first, as Linux does: before any power well or display clock is brought back
     if (fFwPte) { for (uint64_t i = 0; i < fFwPteCount; i++) fGsm[fFwPteFirst + i] = fFwPte[i]; wr(kGfxFlshCntl, 1); }
     struct nmr_ops ops = { this,
         [](void *c, uint32_t o) { return ((NMIntelFB *)c)->rd(o); },
@@ -980,7 +991,6 @@ void NMIntelFB::resumeRun()
     IFBLOG("hybrid: resume: %s", nmr_result_name(rc));
     ifbStep(rc == NMR_OK || rc == NMR_ALREADY_LIT ? NMH_STEP_RESUME_DONE : NMH_STEP_RESUME_FAILED);
     if (rc == NMR_OK || rc == NMR_ALREADY_LIT) {
-        if (fDmcOn) dmcApply();             // the display microcontroller lost its program too
         // the plane is on the firmware surface again; import slots and owned buffers must be mapped anew
         if (fHyReady) { nmh_ring_init(&fRing, fRing.base, fRing.slot_bytes); }
         if (fOwnReady) { nmh_own_home(&fOwn); }
