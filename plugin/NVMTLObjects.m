@@ -108,6 +108,8 @@ static uint64_t nvmtl_res2_evict(uint64_t want);
 extern uint64_t (*nvmtl_res2_evict_hook)(uint64_t want);
 #include "nvmtl_env_knobs.h"
 #include "nvmtl_repeat_bind.h"
+#include "nvmtl_late_frames.h"
+#include <IOKit/IOKitLib.h>
 #include "nvmtl_fps_limit.h"
 #include "nvmtl_shared_wc.h"
 // The keys the user's own block of nvrm610.conf set ("my settings, kept on update"): an application profile never
@@ -7176,8 +7178,39 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     if (![e nvmtlBuildPass:d]) e->_refused = YES;
     return e;
 }
+// Late frames reported to the integrated GPU's service (nvmtl_late_frames.h). Only when the GPU service says it wants them:
+// the kext publishes "nullmoth-floor-percent" when boot-arg nmxintel_floor is set, and a Mac without it pays one registry
+// lookup per process. A failed report switches the reporting off for the process.
+static io_service_t nvmtl_late_service(void) {
+    io_iterator_t it = 0; io_service_t found = 0, svc;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("NMXGPU"), &it) != KERN_SUCCESS) return 0;
+    while (!found && (svc = IOIteratorNext(it))) {
+        CFTypeRef pct = IORegistryEntryCreateCFProperty(svc, CFSTR("nullmoth-floor-percent"), kCFAllocatorDefault, 0);
+        if (pct) { CFRelease(pct); found = svc; } else IOObjectRelease(svc);
+    }
+    IOObjectRelease(it);
+    return found;
+}
+static void nvmtl_late_present(void) {
+    static int state = -1; static io_service_t svc; static struct nvmtl_late late; static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
+    if (state < 0) { os_unfair_lock_lock(&lk); if (state < 0) { svc = nvmtl_late_service(); state = svc ? 1 : 0; } os_unfair_lock_unlock(&lk); }
+    if (state != 1) return;
+    os_unfair_lock_lock(&lk);
+    const uint32_t n = nvmtl_late_note(&late, clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW));
+    os_unfair_lock_unlock(&lk);
+    if (!n) return;
+    CFNumberRef cn = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &n);
+    CFStringRef key = CFSTR("nullmoth-frame-late");
+    CFDictionaryRef d = CFDictionaryCreate(kCFAllocatorDefault, (const void **)&key, (const void **)&cn, 1,
+                                           &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    kern_return_t kr = d ? IORegistryEntrySetCFProperties(svc, d) : KERN_FAILURE;
+    if (d) CFRelease(d);
+    if (cn) CFRelease(cn);
+    if (kr != KERN_SUCCESS) { state = 0; nvlog("late-frame report refused (0x%x): reporting is off for this process", kr); }
+}
 - (void)nvmtlRecordDrawable:(id<MTLDrawable>)drawable presentation:(dispatch_block_t)action {
     if (!drawable || _committed) return;
+    nvmtl_late_present();
     {
         // Frame-rate limiter (NVMTL_FPS_LIMIT in the user's conf block; see nvmtl_fps_limit.h). The wait happens on the
         // application's own thread, as the Windows driver's maximum frame rate does, so its render loop slows down and
