@@ -1,0 +1,88 @@
+PROPOSAL - NOT APPLIED, NOT BUILT. For review before any kext work.
+One user-client connection carries many CPU mappings (NVRM kext + nvrm_xnu).
+
+WHY
+  Every CPU mapping a process makes today costs one IOKit user-client connection for as long as the mapping
+  lives. nvRmApiMapMemory does open(node) -> RM_MAP_MEMORY(ctl fd, memFd) -> mmap(memFd) -> close(memFd), and
+  under IOKit the "fd" is a connection: the kext keeps ONE mapping context per client (NVRMUserClient::fMapList;
+  a second RM_MAP_MEMORY on the same client finds the node in place and RM refuses it with NV_ERR_STATE_IN_USE),
+  and clientMemoryForType maps whatever node is at the head. The context is never consumed, so a connection
+  with a live mapping can never take another one, and nvrm_xnu_close parks it until its mapping goes.
+  Measured: Cyberpunk held ~990 command-chunk mappings (so ~990 connections) before NVK slabs; with slabs the
+  whole process holds 275 connections / 272 mappings. Every buffer the app maps is still one connection, and
+  each open/close crosses the accelerator's arbitration lock (the WindowServer watchdog stall noted in
+  nvrm_xnu.c). Linux does not have this limit because nv_mmap CONSUMES the context.
+
+THE CHANGE (two parts, gated so either side can ship first)
+  Kext (kexts/NVRM/NVRM.cpp):
+   K1. clientMemoryForType: after the descriptor is built from the snapshot, consume the node it was built from -
+       under fMapLock, and only if fMapList is still that node in the same fMapGen: pop it, free it with
+       nvMapListFree on a one-element list, clear fMapLen/fMapLenNode, ++fMapGen. A mapping already made does not
+       need the node (the descriptor holds its own copy of the ranges: withPhysicalAddress / withOptions copy them,
+       nv_pm_ram_submd takes start+size).
+   K2. New selector 7 sCaps -> scalar out bit0 = "mapping context is consumed at map time". The dispatch table
+       grows by one entry; selectors 0..6 unchanged.
+   K3. sBindFd's stale-context clear stays as is (it now almost never finds one).
+  Userspace (nvkmd/nvrm/nvrm_xnu.c, nvRmApi.c):
+   U1. On first use, ask selector 7 on a fresh connection. Without bit0 (old kext) nothing changes.
+   U2. With bit0: keep a small set of hub connections per node type (default 4, NVRM_XNU_HUBS=n, 0 = off), each
+       with one permanently bound fd and a mutex. nvrm_map_memory takes a hub's mutex across RM_MAP_MEMORY + mmap
+       (another thread's RM_MAP_MEMORY on the same hub between the two would replace the context), uses the hub
+       fd as memFd, and does not close it. If mmap fails after RM_MAP_MEMORY succeeded, issue RM_UNMAP_MEMORY
+       and re-bind the hub fd (sBindFd clears the stale context) before releasing the mutex.
+   U3. nvrm_xnu_munmap already unmaps by address (IOConnectUnmapMemory64(conn, 0, task, addr)); a hub is never
+       closed or pooled while the process lives, so close/maps_on/pending_close never see hub connections.
+   U4. Census: nvrm_xnu_live() already reports connections and mappings; add hub hits.
+
+SKETCH OF K1 (illustrative; anchors from NVRM.cpp as of agent-cpuhot 97931d7)
+--- a/kexts/NVRM/NVRM.cpp
++++ b/kexts/NVRM/NVRM.cpp
+@@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
+     nv_alloc_mapping_context_t snapshot;
+     NvU64 snapLen = 0;
+     MemoryRange *ranges = NULL;
++    nv_alloc_mapping_list_node_t *snapNode = NULL; NvU64 snapGen = 0;
+     IOLockLock(fMapLock);
+@@
+     snapshot = fMapList->context;
++    snapNode = fMapList; snapGen = fMapGen;
+@@
+     if (!md) return kIOReturnNoMemory;
++    // Consume the context this mapping was made from, as Linux nv_mmap does, so the next RM_MAP_MEMORY on this
++    // client is accepted. Only the node we copied, and only if nothing replaced it meanwhile.
++    IOLockLock(fMapLock);
++    if (fMapList == snapNode && fMapGen == snapGen) {
++        nv_alloc_mapping_list_node_t *one = fMapList; fMapList = one->pNext; one->pNext = NULL;
++        nvMapListFree(&one);
++        fMapLen = 0; fMapLenNode = nullptr; fMapGen++;
++    }
++    IOLockUnlock(fMapLock);
+     if (caching == NV_MEMORY_UNCACHED) *options |= kIOMapInhibitCache;
+
+RISKS (each needs a check or an arm before install)
+  R1. Unmap bookkeeping. sBindFd's comment records that clearing the context on DETACH left live mappings
+      unreleasable (VRAM filled and stayed full after exit). It must be shown that RM_UNMAP_MEMORY (issued on the
+      ctl fd with pLinearAddress) and rm_cleanup_file_private do not need the per-file node after the map. Test:
+      map/unmap 10,000 sysmem and vidmem buffers through one hub, then exit; RM's FB free must return to baseline,
+      on the ctl and the device node.
+  R2. Timing of the consume. If IOKit calls clientMemoryForType more than once per IOConnectMapMemory64, or a
+      failed createMapping after a successful clientMemoryForType loses the context, the second mapping would
+      find nothing. Check IOUserClient::mapClientMemory64 on this macOS (it calls clientMemoryForType once, then
+      createMappingInTask); on failure userspace re-issues RM_MAP_MEMORY (U2).
+  R3. Hub serialization. RM_MAP_MEMORY + mmap under one mutex per hub; with 4 hubs and nine render threads this
+      must not become the new hot lock. Measure the hold time (two kernel calls) under the game.
+  R4. Old/new mixing. New kext + old userspace: one map per connection, the node is consumed after it - harmless,
+      but the "stale context" log in sBindFd goes quiet (expected). Old kext + new userspace: selector 7 is
+      kIOReturnBadArgument -> hubs off. Both orders must be tested.
+  R5. fMapLen / fMapLenNode / fMapGen. The length RM validated is bound to one node; consuming must reset it, or a
+      later node at the same address could inherit a length (the existing generation logic exists for exactly
+      that). nv_xnu_note_map_len must still find its node: it runs inside RM_MAP_MEMORY, before the map.
+  R6. Ctl node path (sysmem through nv_xnu_alloc_md + snapLen): same consume; the "no validated length - refused"
+      path must still refuse rather than map a consumed node.
+  R7. Lifetime of hub connections. They are never pooled or closed until exit, so their RM state lives for the
+      process; rm_cleanup_file_private at exit must free everything mapped through them (R1 test covers it).
+  R8. Sandbox and WindowServer. Hubs are the same NVAccel-vended connection type, so the sandbox rule is unchanged,
+      but WindowServer must still pass the gate: HEALTHY + steady pid + no new WindowServer .ips, and its own
+      connection count should fall (census line).
+  R9. Install path: kext/AuxKC = guarded install + dead-man, ONE component, reboot, WindowServer gate; never
+      inside an IOP arm window. Userspace part ships with NVK and stays off against an old kext (U1).
