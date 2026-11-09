@@ -102,7 +102,7 @@ wide_pass_write(W_ARGS, uint32_t gid)
       step[k] = (mx[k] - org[k]) / 255.0f;
       if (step[k] <= 0.0f) step[k] = 1.0e-30f;
    }
-   uint64_t dst = a.out + uint64_t(a.hdr) + uint64_t(a.internal_count - 1u - gid) * uint64_t(W_NODE);
+   uint64_t dst = a.dst + uint64_t(a.hdr) + uint64_t(a.internal_count - 1u - gid) * uint64_t(W_NODE);
    for (uint32_t b = 0u; b < W_NODE; b += 4u) st32(dst + uint64_t(b), 0u);
    for (uint32_t k = 0u; k < 3u; k++) { stf(dst + uint64_t(4u * k), org[k]); stf(dst + uint64_t(16u + 4u * k), step[k]); }
    for (uint32_t s = 0u; s < 8u; s++) st32(dst + uint64_t(32u + 12u * s + 8u), W_INVALID);

@@ -25,7 +25,7 @@ struct nvk_wide_u8 { uint8_t v; };
 TYPE(nvk_wide_u8, 1);
 
 struct wide_args {
-   uint64_t ir, out, header;
+   uint64_t ir, dst, header;
    uint32_t leaf_count, internal_count, leaf_type, out_leaf_size, hdr, ir_leaf_size, ir_box_size, pass;
 };
 layout(push_constant) uniform CONSTS { wide_args pc; };
