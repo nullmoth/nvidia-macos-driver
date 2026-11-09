@@ -11,6 +11,7 @@
 #include "nvrm_startup_policy.h"
 #include "nvrm_bar_recover.h"
 #include "nvrm_shutdown_plan.h"
+#include "nvrm_aspm.h"
 
 extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <IOKit/IOService.h>
@@ -134,6 +135,12 @@ public:
     virtual IOReturn setPowerState(unsigned long ordinal, IOService *device) override;
     virtual void systemWillShutdown(IOOptionBits specifier) override;
 private:
+    // PCIe link power (ASPM L1) and the BAR facts published for the app (nvrm-aspm, nvrm-bar1-*, nvrm-above-4g)
+    UInt16 fOrigEpLnkCtl = 0xffff, fOrigUpLnkCtl = 0xffff;   // what the firmware left; 0xffff = not changed by us
+    void enableAspmL1();
+    void restoreAspm();
+    void publishBarFacts();
+    struct RebarFacts { bool cap; UInt32 supported; UInt64 firmwareSize; } fRebar = {};
     NvrmBarUndo fBarUndo = {};          // what placeLargeBar1 changed, for systemWillShutdown
     volatile SInt32 fShutdownDone = 0;  // the quiesce thread's finish flag
     bool fShutdownHandled = false;
@@ -663,6 +670,7 @@ bool NVRM::start(IOService *provider)
     const bool bar1Placed = placeLargeBar1();
     fBar1Placed = bar1Placed;
     readBARs();
+    publishBarFacts();
     {
         const char *nm = rm_get_device_name(nv->pci_info.device_id, nv->subsystem_vendor, nv->subsystem_id);
         if (nm && nm[0] && !nvrmNameIsUnknown(nm)) {
@@ -1279,6 +1287,7 @@ bool NVRM::placeLargeBar1()
         if ((h & 0xffff) == 0x15) { cap = off; break; }
         off = h >> 20;
     }
+    fRebar = {};
     if (!cap) { LOG("bar1: no Resizable BAR capability — BAR1 left as IOPCIFamily placed it"); return false; }
     UInt32 nbars = (fPCI->extendedConfigRead32(cap + 8) >> 5) & 7;
     UInt64 bar1Size = 0;
@@ -1292,6 +1301,7 @@ bool NVRM::placeLargeBar1()
     }
     LOG("bar1: Resizable BAR capability @0x%x says BAR1 = %llu MB (sizes supported mask 0x%x)", cap, bar1Size >> 20, rbSupported);
     const UInt64 fwBar1Size = bar1Size;   // the size the firmware decoded, before any resize below
+    fRebar.cap = true; fRebar.supported = rbSupported; fRebar.firmwareSize = bar1Size;
     // 10-07: with "Resizable BAR" off in the BIOS (or a card the firmware leaves at 256 MB) the firmware places a small
     // BAR1 over the boot screen and the driver had nothing to move. The card itself can resize: take the largest size it
     // supports between 4 GB and 8 GB, written below once the destination is proven free.
@@ -1795,6 +1805,7 @@ IOReturn NVRM::go(uint32_t pass)
         fAdapter = true;
         LOG("PASS 2 REACHED: the adapter is up — GSP-RM is running on the card under macOS");
         fPassDone = 2;
+        enableAspmL1();
         {
             NvU32 ramKb = 0, totalKb = 0, qst = 0;
             if (nvrm_query_vram_kb(nv->gpu_id, &ramKb, &totalKb, &qst) && ramKb) {
@@ -1909,7 +1920,79 @@ void NVRM::systemWillShutdown(IOOptionBits specifier)
             LOG("shutdown: bus mastering off (the BAR layout was never changed)");
         }
     }
+    restoreAspm();
     super::systemWillShutdown(specifier);
+}
+
+// ---- PCIe link power (ASPM L1) -------------------------------------------------------------------------------------
+// The PCI Express capability's offset in a device's config space, 0 when there is none.
+template <class D> static UInt8 nvrmPcieCap(D *d)
+{
+    for (UInt8 c = d->configRead8(0x34) & 0xfc, n = 0; c && n < 48; c = d->configRead8(c + 1) & 0xfc, n++)
+        if (d->configRead8(c) == 0x10) return c;
+    return 0;
+}
+
+void NVRM::enableAspmL1()
+{
+    char off[8] = { 0 };
+    if (PE_parse_boot_argn("-nvrmnoaspm", off, sizeof off)) { fPCI->setProperty("nvrm-aspm", "off (-nvrmnoaspm)"); return; }
+    decltype(fPCI) up = NULL;   // the port above the card (IOPCIDevice is deprecated: spelled through fPCI)
+    if (IOService *pp = fPCI->getProvider())
+        if (IOService *u = pp->getProvider()) if (u->metaCast("IOPCIDevice")) up = static_cast<decltype(fPCI)>(u);
+    const UInt8 ec = nvrmPcieCap(fPCI), uc = up ? nvrmPcieCap(up) : 0;
+    NvrmAspmEnd ep = {}, ue = {};
+    if (ec) { ep.present = true; ep.devCap = fPCI->configRead32(ec + 4); ep.lnkCap = fPCI->configRead32(ec + 0x0c); ep.lnkCtl = fPCI->configRead16(ec + 0x10); }
+    if (uc) { ue.present = true; ue.devCap = up->configRead32(uc + 4); ue.lnkCap = up->configRead32(uc + 0x0c); ue.lnkCtl = up->configRead16(uc + 0x10); }
+    unsigned epCtl = 0, upCtl = 0;
+    const NvrmAspmWhy why = nvrmAspmPlan(&ep, &ue, &epCtl, &upCtl);
+    if (why == kAspmEnabled) {
+        if (fOrigEpLnkCtl == 0xffff) { fOrigEpLnkCtl = (UInt16)ep.lnkCtl; fOrigUpLnkCtl = (UInt16)ue.lnkCtl; }
+        up->configWrite16(uc + 0x10, (UInt16)upCtl);   // upstream first, as the PCI core does
+        fPCI->configWrite16(ec + 0x10, (UInt16)epCtl);
+        const bool ok = (fPCI->configRead16(ec + 0x10) & 2) && (up->configRead16(uc + 0x10) & 2);
+        fPCI->setProperty("nvrm-aspm", ok ? "L1" : "L1 requested, not accepted");
+        LOG("aspm: L1 %s on the card's link (card Link Control 0x%04x, upstream 0x%04x)", ok ? "enabled" : "requested but not accepted",
+            fPCI->configRead16(ec + 0x10), up->configRead16(uc + 0x10));
+    } else {
+        fPCI->setProperty("nvrm-aspm", nvrmAspmWhyString(why));
+        LOG("aspm: L1 not changed - %s", nvrmAspmWhyString(why));
+    }
+}
+
+// Puts the firmware's ASPM setting back before power-off, so the next start sees the link as it left it.
+void NVRM::restoreAspm()
+{
+    if (fOrigEpLnkCtl == 0xffff) return;
+    decltype(fPCI) up = NULL;
+    if (IOService *pp = fPCI->getProvider())
+        if (IOService *u = pp->getProvider()) if (u->metaCast("IOPCIDevice")) up = static_cast<decltype(fPCI)>(u);
+    const UInt8 ec = nvrmPcieCap(fPCI), uc = up ? nvrmPcieCap(up) : 0;
+    if (ec) fPCI->configWrite16(ec + 0x10, fOrigEpLnkCtl);
+    if (uc) up->configWrite16(uc + 0x10, fOrigUpLnkCtl);
+    fOrigEpLnkCtl = 0xffff;
+}
+
+// What the app shows about the BAR: sizes in MB and whether the platform decodes above 4 GB. Keys on the PCI device:
+//   nvrm-bar1-firmware-mb  BAR1 as the firmware sized it (0 when the card has no Resizable BAR capability and it was not read)
+//   nvrm-bar1-mb           BAR1 now
+//   nvrm-bar1-addr         BAR1 base address now
+//   nvrm-rebar             "none" (no capability), "off" (capability, BAR1 not above 256 MB), "on" (BAR1 above 256 MB from firmware)
+//   nvrm-rebar-max-mb      the largest size the card offers (0 when there is no capability)
+//   nvrm-above-4g          "yes" when anything is decoded above 4 GB, "no" otherwise
+void NVRM::publishBarFacts()
+{
+    const UInt64 now = fNv.bars[NV_GPU_BAR_INDEX_FB].size;
+    UInt64 maxSz = 0;
+    for (int k = 31; fRebar.cap && k >= 0; k--) if ((fRebar.supported >> k) & 1) { maxSz = 1ULL << (20 + k); break; }
+    const UInt64 fw = fRebar.cap ? fRebar.firmwareSize : 0;
+    fPCI->setProperty("nvrm-bar1-mb", now >> 20, 64);
+    fPCI->setProperty("nvrm-bar1-firmware-mb", fw >> 20, 64);
+    fPCI->setProperty("nvrm-bar1-addr", fNv.bars[NV_GPU_BAR_INDEX_FB].cpu_address, 64);
+    fPCI->setProperty("nvrm-rebar-max-mb", maxSz >> 20, 64);
+    fPCI->setProperty("nvrm-rebar", nvrmRebarState(fRebar.cap, fw));
+    const UInt64 bar3 = fNv.bars[NV_GPU_BAR_INDEX_IMEM].cpu_address;
+    fPCI->setProperty("nvrm-above-4g", nvrmAbove4GRouted(bar3 > fNv.bars[NV_GPU_BAR_INDEX_FB].cpu_address ? bar3 : fNv.bars[NV_GPU_BAR_INDEX_FB].cpu_address) ? "yes" : "no");
 }
 
 void NVRM::free()
@@ -1966,6 +2049,7 @@ void NVRM::gpuResume()
     LOG("wake #%u: resuming the GPU", fPmCycles);
     nv_xnu_pm_take();
     bool ok = pciRestoreAfterWake() && gpuAnswers();
+    if (ok) enableAspmL1();   // the link comes back with whatever IOPCIFamily restored
     if (fIntSrc) fIntSrc->enable();
     NV_STATUS st = ok ? rm_power_management(NULL, &fNv, NV_PM_ACTION_RESUME) : NV_ERR_GPU_IS_LOST;
     ok = st == NV_OK;
