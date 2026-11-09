@@ -11,6 +11,16 @@ Changes made here, in this order of importance:
                  with no B pictures. Without the declaration VideoToolbox drops the encoder from the candidates of any
                  client that asks for low-latency rate control (FFmpeg's low_delay, Sunshine), and answers -12902.
 
+  src/hevcparse.c, src/h264parse.c, src/av1parse.c  Fixes found by running the parsers under AddressSanitizer with a coverage-guided
+                 fuzzer (tools/test_nvenc_parsers.py holds one case for each; to be sent upstream):
+                 - ue() clamps to 2^28: a code up to 2^32 - 2 became a negative int, passed "id > max" checks and indexed the SPS / PPS
+                   arrays (an out-of-bounds write when the parameter set was stored);
+                 - scaling_list_data(): pred_matrix_id_delta checked against 0..matrixId before it indexes the list array;
+                 - st_ref_pic_set(): the inter-predicted lists were written past 32 entries before the limit was checked;
+                 - hrd_parameters(): cpb_cnt_minus1 limited to 31 (a stream that had ended still ran 2^28 loop rounds);
+                 - hevc_parse_sps() / h264_parse_sps(): the sizes, bit depths and block sizes of the specification's ranges are
+                   checked before the SPS is stored (16 * width overflowed int); av1 decode_unsigned_subexp_with_ref() shifts unsigned.
+
 Build inputs (fetched at build time by build/build_nvencvt.sh, not vendored):
   NVIDIA open-gpu-kernel-modules 610.57.04   RM API headers, MIT
   NVIDIA open-gpu-doc 9fdf5c4062007929d9f4e6cbad9c9771fe61b880   video class headers, MIT

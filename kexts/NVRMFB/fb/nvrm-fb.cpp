@@ -5377,7 +5377,7 @@ IOReturn NVRMNVDAFramebuffer::doI2CRequest(UInt32 bus, struct IOI2CBusTiming *, 
         else {
             if (send) {
                 const unsigned a = nvrmDdcAddr7(rq->sendAddress, false);
-                res = a ? ddcTransfer(kNvrmDdcWrite, a, (unsigned char *)(uintptr_t)rq->sendBuffer, rq->sendBytes) : kIOReturnBadArgument;
+                res = (a && nvrmDdcWriteLenAllowed(a, rq->sendBytes)) ? ddcTransfer(kNvrmDdcWrite, a, (unsigned char *)(uintptr_t)rq->sendBuffer, rq->sendBytes) : kIOReturnBadArgument;
                 if (res != kIOReturnSuccess && res != kIOReturnBadArgument) res = kIOReturnNoDevice;
             }
             if (res == kIOReturnSuccess && reply) {

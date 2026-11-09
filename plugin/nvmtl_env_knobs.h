@@ -13,12 +13,12 @@
 #include <sys/stat.h>
 
 /* a driver knob: one of our prefixes, including the translator's (METAL2VULKAN_) and the Mesa / RADV / ACO / NIR
-   switches the bundled Vulkan drivers read. Several of them name files that get written or libraries that get
+   switches the bundled Vulkan drivers read, and the DLSS host's own (ELFHOST_PATH names folders it loads libraries from). Several of them name files that get written or libraries that get
    loaded, so none may reach a process that did not set them for itself. */
 static inline int nvmtl_env_knob_prefixed(const char *kv)
 {
     return !strncmp(kv, "NVMTL_", 6) || !strncmp(kv, "NVK_", 4) || !strncmp(kv, "NAK_", 4) || !strncmp(kv, "NVRM_", 5)
-        || !strncmp(kv, "METAL2VULKAN_", 13) || !strncmp(kv, "MESA_", 5) || !strncmp(kv, "NIR_", 4)
+        || !strncmp(kv, "METAL2VULKAN_", 13) || !strncmp(kv, "ELFHOST_", 8) || !strncmp(kv, "MESA_", 5) || !strncmp(kv, "NIR_", 4)
         || !strncmp(kv, "RADV_", 5) || !strncmp(kv, "ACO_", 4);
 }
 

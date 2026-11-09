@@ -79,6 +79,13 @@ int main() {
     FB off; off.fDdcOn = false; assert(off.doI2CRequest(0, nullptr, &q) == kIOReturnUnsupported && gCalls.empty());   // opt-in
     gFail = -5; IOI2CRequest dead = req(w, 6, nullptr, 0);                     // the display does not answer
     assert(fb.doI2CRequest(0, nullptr, &dead) == kIOReturnNoDevice); gFail = 0;
+    // the EDID EEPROM takes only the one-byte read offset; a longer write would program it
+    gCalls.clear(); unsigned char off1[1] = {0}, eep[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    IOI2CRequest rd = req(off1, 1, nullptr, 0); rd.sendAddress = 0xA0;
+    assert(fb.doI2CRequest(0, nullptr, &rd) == kIOReturnSuccess && gCalls.size() == 1 && gCalls[0].addr == 0x50);
+    gCalls.clear(); IOI2CRequest prog = req(eep, 8, nullptr, 0); prog.sendAddress = 0xA0;
+    assert(fb.doI2CRequest(0, nullptr, &prog) != kIOReturnSuccess && gCalls.empty() && prog.result == kIOReturnBadArgument);
+    assert(nvrmDdcWriteLenAllowed(0x37, 6) && nvrmDdcWriteLenAllowed(0x50, 1) && !nvrmDdcWriteLenAllowed(0x50, 2));
     // ABI helpers
     assert(nvrmDdcAddr7(0x6E, false) == 0x37 && nvrmDdcAddr7(0x6F, true) == 0x37 && nvrmDdcAddr7(0xA0, false) == 0x50);
     assert(nvrmDdcAddr7(0x6F, false) == 0 && nvrmDdcAddr7(0xA8, false) == 0);

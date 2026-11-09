@@ -77,6 +77,15 @@ int main(void)
     arm("METAL2VULKAN_/MESA_/NIR_/RADV_/ACO_ variables are forgotten like ours",
         !getenv("METAL2VULKAN_OWNED_DUMP") && !getenv("MESA_LOG_FILE") && !getenv("NIR_DEBUG") && !getenv("RADV_DEBUG") && !getenv("ACO_DEBUG"));
     arm("a name that only starts like one (MESAX_) is untouched", getenv("MESAX_NOT_OURS") != NULL);
+    /* the DLSS host loads libraries from the folders ELFHOST_PATH names: an inherited one must not reach another app */
+    fresh(); setenv("ELFHOST_PATH", "/tmp/evil", 1); setenv("ELFHOST_TRACE", "1", 1);
+    n = nvmtl_release_forget_env(environ);
+    arm("ELFHOST_PATH and ELFHOST_TRACE, the DLSS host's library search path and trace, are forgotten like our knobs",
+        !getenv("ELFHOST_PATH") && !getenv("ELFHOST_TRACE") && n == 7);
+    fresh(); setenv("NVMTL_PROCESS_ENV", "1", 1); setenv("ELFHOST_PATH", "/tmp/dev", 1);
+    nvmtl_release_forget_env(environ);
+    arm("negative control: a process that opted in keeps ELFHOST_PATH", getenv("ELFHOST_PATH") != NULL);
+    unsetenv("ELFHOST_PATH");
 
     /* library paths: a release plugin loads only root-owned files in root-only folders */
     arm("a root-owned library path in a root-only folder is allowed", nvmtl_code_path_allowed("/usr/lib/libSystem.B.dylib") || nvmtl_code_path_allowed("/bin/sh"));
