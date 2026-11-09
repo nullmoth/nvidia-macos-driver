@@ -76,6 +76,11 @@ kexts/NMHDA  Volume and mute controls for display audio sinks (nmhda_gain.h, nmh
 tools        The field census names Raptor Lake-U 8086:A7AC after the Intel Core 5 120U driver project by pongpan-bk
              (no licence file), which reported the id. Nothing of that project is used.
 
+kexts/NMSMN  Opt-in (nmsmn=1) root-only access to the SMU mailbox registers of an AMD host bridge, so a power-limit tool can run.
+             tools/ryzenadj-macos holds NullMoth's macOS layer for RyzenAdj v0.19.0 (FlyGoat/RyzenAdj, LGPL-3.0, commit
+             ea71739b4a3e1a0a624dfd1c9c268a31cb2a4182), which upstream does not have; it is combined with the unmodified tag and
+             its complete source is that folder plus the tag. Idea: LuneFlu/AMDHelper (no licence file).
+
 Community ideas  The hybrid-laptop notes on the Intel panel (sleep leaves the display engine unlit, flat frames before a
              first image, a start-up delay) come from kitsuneislife/nmx-intel; they were handed to the hybrid work and nothing
              of that repository is used.
