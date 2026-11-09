@@ -3226,6 +3226,49 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
         FBLOG("fb%u refresh rate from NVKMS: %ux%u @%u Hz (pclk %u) as dt 0x%x", fIndex, k.hVisible, k.vVisible, hz,
               k.pixelClockHz, b.detailedTimingModeID);
     }
+    // Derived refresh rates: a 240/300 Hz panel is also driven at half and a quarter of its rate (same blanking, pixel
+    // clock divided), so a desktop that does not need the rate can run at 120/60 Hz at lower power. Only for a native
+    // NVKMS mode of 240 Hz and up whose raster is already listed unscaled, and only where the rate is not listed yet.
+    // IDs use the copy byte: 1 = half, 2 = quarter.
+    for (NvU32 i = 0; i < 256 && n < cap; i++) {
+        struct NvKmsKapiDisplayMode m = {}; NvBool valid = NV_FALSE, pref = NV_FALSE;
+        int r = fKms->getDisplayMode(fDev, fDisplay, i, &m, &valid, &pref);
+        if (r < 0) break;
+        if (r == 0 || !valid) continue;
+        const struct NvKmsKapiDisplayModeTimings &k = m.timings;
+        if (k.flags.interlaced || k.flags.doubleScan || !k.pixelClockHz || k.hTotal <= k.hVisible || k.vTotal <= k.vVisible ||
+            k.hSyncStart < k.hVisible || k.hSyncEnd < k.hSyncStart || k.vSyncStart < k.vVisible || k.vSyncEnd < k.vSyncStart) continue;
+        const NvU64 tot = (NvU64)k.hTotal * k.vTotal;
+        const NvU32 hz = (NvU32)((k.pixelClockHz + tot / 2) / tot);
+        if (hz < kNvrmDerivedRateMinHz) continue;
+        for (unsigned copy = 1; copy <= 2 && n < cap; copy++) {
+            const NvU32 div = copy == 1 ? 2 : 4, dhzWant = (hz + div / 2) / div;
+            if (dhzWant < kNvrmDerivedRateFloorHz) continue;
+            int tmpl = -1; bool listed = false;
+            for (unsigned j = 0; j < n; j++) {
+                const IODetailedTimingInformationV2 &d = fDT[j];
+                if (d.horizontalActive != k.hVisible || d.verticalActive != k.vVisible || d.horizontalScaled || d.verticalScaled) continue;
+                const UInt64 dt = (UInt64)(d.horizontalActive + d.horizontalBlanking) * (d.verticalActive + d.verticalBlanking);
+                const NvU32 dhz = dt ? (NvU32)((d.pixelClock + dt / 2) / dt) : 0;
+                if (dhz + 1 >= dhzWant && dhz <= dhzWant + 1) listed = true;
+                if (tmpl < 0) tmpl = (int)j;
+            }
+            // the raster must already be offered (it passed the memory and scaler checks above), and the rate not
+            if (listed || tmpl < 0) continue;
+            IODetailedTimingInformationV2 b = fDT[tmpl];
+            b.pixelClock = b.minPixelClock = b.maxPixelClock = k.pixelClockHz / div;
+            b.horizontalBlanking = k.hTotal - k.hVisible; b.horizontalSyncOffset = k.hSyncStart - k.hVisible;
+            b.horizontalSyncPulseWidth = k.hSyncEnd - k.hSyncStart;
+            b.verticalBlanking = k.vTotal - k.vVisible; b.verticalSyncOffset = k.vSyncStart - k.vVisible;
+            b.verticalSyncPulseWidth = k.vSyncEnd - k.vSyncStart;
+            b.horizontalSyncConfig = k.flags.hSyncPos ? 1 : 0; b.verticalSyncConfig = k.flags.vSyncPos ? 1 : 0;
+            b.dscCompressedBitsPerPixel = 0; b.dscSliceWidth = 0; b.dscSliceHeight = 0;
+            b.detailedTimingModeID = 0x10000u | (i << 8) | copy;
+            fDT[n++] = b; added++;
+            FBLOG("fb%u derived refresh rate: %ux%u @%u Hz (native %u Hz / %u) as dt 0x%x", fIndex, k.hVisible, k.vVisible,
+                  dhzWant, hz, div, b.detailedTimingModeID);
+        }
+    }
     if (!fromMac) fKmsModesLogged = true;
     setProperty("NVRMRefreshModesAdded", (unsigned long long)added, 32);
     return n;

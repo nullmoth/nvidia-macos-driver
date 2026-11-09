@@ -79,3 +79,5 @@ static inline int nvrmFlipLatchMode(int setting, int autoDefer, unsigned long lo
     if (setting == 1 && autoDefer && periodNs && periodNs <= 2800000ull) return 2;
     return setting;
 }
+// Native refresh rate from which half and quarter rates are derived, and the lowest derived rate offered.
+enum { kNvrmDerivedRateMinHz = 240, kNvrmDerivedRateFloorHz = 48 };
