@@ -15,11 +15,11 @@ public:
 protected:
     SMC_RESULT readAccess() override {
         int level = 0;
-        if (owner->getLevel(&level)) data[0] = kbl_level_to_smc(level, owner->maxLevel());
+        if (owner->getLevel(&level)) kbl_smc_encode(kbl_level_to_smc(level, owner->maxLevel()), &data[0], &data[1]);
         return SmcSuccess;
     }
     SMC_RESULT writeAccess() override {
-        owner->setLevel(kbl_smc_to_level(data[0], owner->maxLevel()));
+        owner->setLevel(kbl_smc_to_level(kbl_smc_decode(data[0], data[1]), owner->maxLevel()));
         return SmcSuccess;
     }
 };

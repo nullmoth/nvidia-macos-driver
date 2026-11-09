@@ -13,14 +13,31 @@ SMC keys `LKSB` and `LKSS`, which CoreBrightness reads and writes. Off unless th
 | MSI | embedded controller fields (`KBBL`, `KBL0`), written directly | Not built: a write to controller memory with no method behind it |
 | HP, Dell, Acer, Razer | HP and Dell expose vendor WMI buffers whose layout differs per model; no keyboard-backlight method was found that takes a plain level | Not built |
 
+## How macOS finds a keyboard backlight (read from a real Intel Mac Pro on macOS 26.7)
+
+Two routes exist in the Intel build of macOS, and a PC's SMBIOS model decides which one applies:
+
+1. SMC route, for Macs without a T2 chip. `AppleLMUController` (it matches the ambient light sensor, ACPI0008) writes the
+   SMC key `LKSB`. Its `setLEDBrightness` packs a 12-bit brightness as `((v & 0xF) << 12) | ((v >> 4) & 0xFF)`, little-endian,
+   and it needs the SMC to report mode `A` (`RMde`) and the ambient-light keys, which VirtualSMC provides. This plugin is
+   that route's other end: it receives the `LKSB` write and forwards it to the laptop.
+2. HID route, for T2-era Macs, which are every Intel Mac that macOS 26 supports. The HID keyboard driver
+   (`AppleHIDKeyboardEventDriverV2::initKeyboardBacklight`) scans the keyboard's HID elements for usage page `0xFF00`
+   (65280), usage `0x0F`, and talks to it with feature report id `0xBF` (191). CoreBrightness then finds the backlight as an
+   HID service with a primary usage page and usage, not through the SMC. The SMBIOS models 1401 picks (MacPro7,1,
+   iMac20,x, MacBookPro16,x) are T2-era models, so this is the route macOS 26 takes for them.
+
+This plugin implements route 1 only. Route 2 needs a virtual HID keyboard that carries the vendor element and answers
+report `0xBF`; the report's byte layout is not yet read, so it is not built. It is the missing piece for the PC's
+macOS 26 slider to work, and route 1 alone should not be expected to move the slider on a T2-era model.
+
 ## What is unverified
 
-* Which of the two bytes of `LKSB` carries the brightness. VirtualSMC defines the key and the two-byte type and does not
-  say. The first byte is treated as 0 to 255.
-* That CoreBrightness on the macOS versions this driver supports drives the backlight from `LKSB` on a PC at all. On
-  Apple silicon it finds the light through an HID device instead.
+* Whether CoreBrightness on a T2-era SMBIOS ever looks at `LKSB` (see route 2 above).
 * VirtualSMC's `SMCLightSensor` also registers `LKSB` and `LKSS` as plain stored values; which registration wins when both
   load has not been run.
+* Whether the ASUS method behaves as the table reads on every ASUS model (it was read from one table and matched by name
+  and device id in 33).
 
 ## Build check
 
