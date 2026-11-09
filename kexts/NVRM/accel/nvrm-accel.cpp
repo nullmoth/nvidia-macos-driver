@@ -2876,7 +2876,7 @@ static bool nvAccelHybridImport(IOService *fb, unsigned head, IOSurface *s, NVVi
         if (!p2p && md->prepare() != kIOReturnSuccess) { IOFree(pa, (size_t)npages * sizeof *pa); HYFAIL(NMH_E_PAGES); }
         bool ok = true;
         for (unsigned i = 0; i < npages && ok; i++) {
-            if (p2p) { pa[i] = vram->fPhys + (unsigned long long)i * 4096ull; continue; }
+            if (p2p) { if (i == 0 && !nmp_pages(vram->fPhys, vram->fBytes, len, pa, npages)) ok = false; continue; }
             IOByteCount seg = 0;
             addr64_t a = md->getPhysicalSegment((IOByteCount)i * 4096, &seg, kIOMemoryMapperNone);
             if (!a || seg < 4096 || (a & 4095)) ok = false; else pa[i] = a;

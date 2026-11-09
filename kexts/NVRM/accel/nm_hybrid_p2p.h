@@ -51,6 +51,15 @@ static inline int nmp_decide(int mode, const struct nmp_topo *t, uint64_t frame_
     if (nmp_is_listed(t->host_vendor, t->host_device)) return NMP_OK_LISTED;
     return mode == NMP_FORCE ? NMP_OK_FORCED : NMP_NOT_LISTED;
 }
+/* The page list of a frame that stays in the NVIDIA GPU's BAR1 window: consecutive 4 KiB pages from the window address. 0 when the frame cannot be
+ * scanned out that way: not page aligned, longer than the allocation, or a page beyond what a graphics-table entry can address (bits 45:12). */
+static inline int nmp_pages(uint64_t phys, uint64_t alloc_bytes, uint64_t len, uint64_t *out, unsigned n)
+{
+    unsigned i;
+    if (!phys || (phys & 4095ull) || len > alloc_bytes || n != (len + 4095ull) / 4096ull) return 0;
+    for (i = 0; i < n; i++) { out[i] = phys + 4096ull * i; if (out[i] >> 46) return 0; }
+    return 1;
+}
 static inline int nmp_allowed(int verdict) { return verdict == NMP_OK_LISTED || verdict == NMP_OK_FORCED; }
 static inline const char *nmp_name(int v)
 {
