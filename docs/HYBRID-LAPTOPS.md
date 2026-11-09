@@ -97,6 +97,8 @@ MIT), which runs on a Radeon 680M laptop with NullMoth 2.6.3.
   a frozen boot with `nvram nullmoth-ifb-step`). Steps in order: probe, delay, mmio-mapped, mode-adopted,
   framebuffer-started, published, import-ring, first-flip, suspend, resume-begin, resume-done or resume-failed; `stood-down`
   if it declined. `tools/hybrid_verify.sh` prints the last one it finds.
+- **`nmhybrid20=1`**: allow the wake replay on display versions 20 and 30 (Lunar Lake, Panther Lake); **`nmhybridtc=1`**: log Type-C
+  cable events (versions 12 and 13); **`nmhybridp2p=1|2`**: the zero-copy decision (see its section).
 - **`nmflatskip=<n>`** (0 to 8, default 0): on the NVIDIA GPU's own display path, a composited frame that is one flat
   colour (64 samples equal) is not flipped to for up to n frames in a row, so a momentary black frame never reaches the
   screen; the n+1th flat frame is shown. A surface is judged only when its system-memory copy is the newest one. Counter:
@@ -124,10 +126,9 @@ the sink; five tries at one swing, ten loops, at most six equalisation rounds, a
 combo PHY register block (768 words) is captured and replayed.
 
 Limits, all untested on hardware: display versions 12, 13 and 14 (version 14 below), a panel on a combo port (DDI A to C on
-version 12, A and B on version 13 and 14), any pipe A to D. Type-C ports (DDI D and later on version 12, C and later on 13) need
-the port's PHY ownership handshake and the Type-C subsystem; no laptop wires its internal panel to one, so they are refused with
-a log line, not driven blind. Display version 20 and later (Lunar Lake, Panther Lake) keep these registers elsewhere and are
-refused.
+version 12, A and B on version 13 and 14), any pipe A to D. Type-C ports (DDI D and later on version 12, C and later on 13) are not
+driven as the panel: no laptop wires its internal panel to one (the connect and hot-plug half is in the Type-C section below).
+Display versions 20 and 30 (Lunar Lake, Panther Lake) have their own section below and their own boot-arg.
 
 **Drive tables for eDP panels.** The video BIOS names, per panel type, whether the panel uses the low-voltage-swing table and
 whether it uses the reduced-power table. The panel driver reads the BIOS tables through the OpRegion (`nm_hybrid_vbt.h`: every
@@ -144,8 +145,31 @@ on wake replays them in the order of Linux's `intel_cx0pll_enable` and `mtl_ddi_
 power-management demand, panel power, the port clock control, lane reset and power state ready, the PLL registers (lane 0
 master), the transmitters, the clock frequency, the PLL request and acknowledge, the sink, the pipe registers, the D2D link, the
 port buffer width, the DDI buffer, link training with the C10 override registers as the source levels, the transcoder and the
-backlight. Log lines: `Cx0 PHY` and `power-management demand` join the step list. Not covered: C20 PHYs (Thunderbolt/Type-C
-ports and the faster eDP rates are C20 on some parts). Version 14 has no display-clock voltage handshake in Linux, so none is sent.
+backlight. Log lines: `Cx0 PHY` and `power-management demand` join the step list. Version 14 has no display-clock voltage
+handshake in Linux, so none is sent. On version 14 the PHY latches the firmware holds across sleep (`HOLD_PHY_PG1_LATCH`,
+`HOLD_PHY_CLKREQ_PG1_LATCH`) are released once power well 1 is up, as Linux's display core init does.
+
+**Display versions 20 and 30 (Lunar Lake, Panther Lake) and the C20 PHY (`nmhybrid20=1`).** Ported from Linux's xe display
+code (`intel_cx0_phy.c`, `intel_cx0_phy_regs.h`, `intel_ddi.c`, `intel_cdclk.c`, `intel_display_power.c`; MIT), run by the same
+replay as version 14 with these differences, each with an arm in `tools/test_hybrid_resume20.c`:
+
+- The PHY port registers (port buffer control 1 to 3, message bus, bus timer, clock control) sit in the second register range,
+  at 0x16F200 + 0x200 x (4 + port), not at 0x64000 + 0x100 x port.
+- The D2D link is enabled in the DDI buffer control register (bits 29 and 28) before the DDI buffer, not in port buffer control.
+- Version 20 pulses the GMBUS unit clock gate once in core init; the MDCLK-to-CDCLK ratio throttle and MBUS join register is
+  replayed. The display clock's own MDCLK source bit travels in the clock control register that is already replayed.
+- Version 30 does not reset the message bus after every transaction, and its DDI clock select field is one bit wider.
+- PHY kind follows Linux: C10 on ports A and B for Lunar Lake, C10 on port A only for Panther Lake (port B is C20).
+- C20: the PHY's PLL state is 16-bit words in its own SRAM, two contexts. The panel driver reads the active context while the
+  panel is lit (transmit 3 words, common 4, MPLLB 11 or MPLLA 10) and works out the link rate from them (Linux's
+  `intel_c20pll_calc_port_clock`). A rate that none of Linux's C20 tables carries is refused, not guessed. On wake the words are
+  written into the idle context through the SRAM window registers, the DisplayPort custom width and serdes rate are set, and
+  the context bit is toggled. The tables (`nm_hybrid_c20tables.h`, 13 states and 4 lists) are copied value for value from
+  Linux by `tools/igfx/gen_c20_tables.py`; the test computes each entry's link rate back from its words. Signal levels use the
+  C20 DisplayPort table (`mtl_c20_trans_dp14`) through the same override registers as C10.
+
+Lunar Lake and Panther Lake PCI ids are in the table the panel driver reads. Not run on any hardware: without `nmhybrid20=1`
+the resume declines on these parts with a log line. The Intel display firmware (DMC) for these parts is not part of this path.
 
 **Display clock handshake and core init (versions 12 and 13).** Before the display clock PLL is touched the platform controller
 is asked to prepare (mailbox 0x7, ready-for-change), and after the clock is set the voltage level for it is sent (level from the
@@ -302,17 +326,39 @@ total is the share of the screen that did not need storing.
 - NVRM waits up to 20 s for head 4 before arming, only when the switch is on. Arming without it leaves the panel without a
   pipe until a second arm and a WindowServer restart.
 
-## Known limits
+## Type-C ports (versions 12 and 13): what is built and what is not
 
-- Not built, with the reason: (a) display version 20 and later (Lunar Lake, Panther Lake) and the C20 PHY: the register map,
-  the display buffer, MBUS, power well and clock blocks all differ, and the C20 PLL needs a generated table per link rate plus
-  its own message-bus sequence; none of it can be checked against a register dump or a sink without such a machine, and a
-  guessed write sequence to a display engine can leave the panel dark. The resume refuses these parts with a log line.
-  (b) Type-C ports on versions 12 and 13: the panel driver drives only the internal panel; an external Type-C output needs the
-  PHY ownership handshake, the Type-C subsystem, hot-plug, EDID and mode setting for a second display, which is a display driver
-  of its own, not a resume step. (c) Zero-copy scan-out of the NVIDIA GPU's buffer by the integrated GPU's display engine:
-  needs peer reads from the NVIDIA aperture, which depends on the chipset and cannot be shown offline; the shipped paths (copy,
-  import ring, owned buffers, copy engine) are the supported ones.
+`kexts/NVRM/accel/nm_hybrid_tc.h` is Linux's Type-C connect flow (`intel_tc.c`, `intel_display_power_well.c`; MIT) for Tiger Lake
+(version 12) and Alder Lake P (version 13): the FIA instance and index, the live status of the cable (DisplayPort-alt,
+Thunderbolt-alt, legacy), the target mode with Linux's legacy-flag correction and its fall back to Thunderbolt-alt, the PHY
+ownership handshake (version 12: block TC-cold with the platform controller, check ready, set not-safe in the FIA; version 13:
+set the ownership bit in the DDI buffer control, check ready in the TCSS status, then block TC-cold), the lane check, the
+disconnect order, and hot-plug events. `tools/test_hybrid_tc.c` runs it against a model of the Type-C subsystem's side.
+
+With the boot-arg `nmhybridtc=1` the panel driver starts an observe-only monitor on versions 12 and 13: every 2 s it reads the live
+status of the four Type-C ports and logs `hybrid: Type-C port N: cable plugged/unplugged/changed, live mode ...`. It never
+takes a PHY, so a dock keeps its USB lanes. That is the hardware check of the hot-plug decoding.
+
+What is missing for an external Type-C display to light in mirror or extend mode, exactly: (1) the Type-C PHY's PLL and lane
+programming for the mode being set (the Dekel PHY on these versions, `intel_dkl_phy*.c`, plus the DPLL for the port clock); (2) EDID
+and DPCD over the port's own AUX channel; (3) a mode set for a second head (transcoder, pipe, plane, timing from the EDID) and its
+link training on a Type-C lane count; (4) publishing that head to the window system as a second framebuffer, and taking the
+PHY (the handshake above) only for the time the display is on, since display ownership takes the dock's USB 3 lanes. NMIntelFB
+is a one-panel driver today, so (1) to (4) are a second display driver, not a step of this one.
+
+## Zero-copy scan-out from the NVIDIA GPU's memory (decision only)
+
+`kexts/NVRM/accel/nm_hybrid_p2p.h` decides whether the integrated GPU's display engine may read a frame straight out of the NVIDIA
+GPU's BAR1 window: refused unless the boot-arg `nmhybridp2p` is 1 (host bridge on a known-good list) or 2 (forced, for testers),
+and refused in every case when the NVIDIA GPU is not on the integrated GPU's root complex, its BAR1 is not a 64-bit prefetchable
+window bigger than the frame, or the integrated GPU's DMA is translated. Linux's peer-to-peer rule is the model (a path across
+the host bridge only on a known-good chipset, never by default); the list starts empty because no client chipset has a measured
+result, so by the rule no laptop qualifies until one is measured. `tools/test_hybrid_p2p.c` tests the decision. What is not built:
+the page list from the NVIDIA resource's BAR1 physical range into the import path, and the table-entry flags for a bus address
+that is not RAM; both need a run on a machine where the read works to be anything but a guess, and the existing system-memory
+import and the copy-engine paths stay the supported ones.
+
+## Known limits
 
 - A copy into the single scan-out buffer can tear. The only cure is the import path (the plane switches surface at a
   vertical blank).
@@ -342,6 +388,9 @@ open row.
   this change.
 - `tools/test_hybrid_scripts.sh`: the switch script against a stub `nvram`, and the verifier against saved logs
   (`tools/hybrid_fixtures`), including a log where the flip never lands.
+- `tools/test_hybrid_resume20.c`: display versions 20 and 30 and the C20 PHY (register range, D2D in the DDI buffer, MBUS and GMBUS
+  steps, SRAM context switch, table self-check), `tools/test_hybrid_tc.c`: the Type-C handshake and hot-plug, and
+  `tools/test_hybrid_p2p.c`: the zero-copy decision.
 - `tools/test_hybrid_resume.c`: the wake replay against a model of the display engine, panel power sequencer, combo PHY drive
   registers, AUX channel and sink, for a panel on pipe A / DDI A, pipe B / DDI B, pipe D / DDI A and pipe C / DDI B (order,
   handshakes, the sink's swing and pre-emphasis requests reaching the PHY registers, every failure stops at its handshake);

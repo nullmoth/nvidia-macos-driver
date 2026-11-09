@@ -333,6 +333,46 @@
    "display_version": 13,
    "family": "RPLU"
   },
+  "b080": {
+   "display_version": 30,
+   "family": "PTL"
+  },
+  "b081": {
+   "display_version": 30,
+   "family": "PTL"
+  },
+  "b082": {
+   "display_version": 30,
+   "family": "PTL"
+  },
+  "b090": {
+   "display_version": 30,
+   "family": "PTL"
+  },
+  "b091": {
+   "display_version": 30,
+   "family": "PTL"
+  },
+  "b092": {
+   "display_version": 30,
+   "family": "PTL"
+  },
+  "b0a0": {
+   "display_version": 30,
+   "family": "PTL"
+  },
+  "b0a1": {
+   "display_version": 30,
+   "family": "PTL"
+  },
+  "b0a2": {
+   "display_version": 30,
+   "family": "PTL"
+  },
+  "b0b0": {
+   "display_version": 30,
+   "family": "PTL"
+  },
   "b640": {
    "display_version": 14,
    "family": "ARL"
