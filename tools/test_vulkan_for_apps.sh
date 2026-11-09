@@ -13,7 +13,7 @@ arm "install without the driver's NVK library stops and writes nothing" bash -c 
 mkdir -p "$T/lib"; : > "$T/lib/libvulkan_nouveau.dylib"
 arm "install with the library present succeeds" runs --install
 arm "the manifest is valid JSON naming the NVK library" python3 -c "import json; d=json.load(open('$M')); assert d['ICD']['library_path']=='$T/lib/libvulkan_nouveau.dylib' and d['file_format_version']=='1.0.0'"
-arm "no temporary file is left in the loader folder" bash -c "[ \"\$(ls -A '$T/prefix/share/vulkan/icd.d' | wc -l)\" = 1 ]"
+arm "no temporary file is left in the loader folder" bash -c "[ \$(ls -A '$T/prefix/share/vulkan/icd.d' | wc -l) -eq 1 ]"
 arm "installing twice is harmless" runs --install
 arm "status reports it installed" bash -c "bash '$S' --status | grep -q 'manifest: installed'"
 runs --remove
