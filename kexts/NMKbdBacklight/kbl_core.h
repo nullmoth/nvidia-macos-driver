@@ -179,6 +179,71 @@ static inline int kbl_dell_wdg_find(const uint8_t *wdg, unsigned len, char obj[2
     return 0;
 }
 
+/* ---- MSI: the embedded controller, by firmware ---------------------------------------------------------------------------
+ * The public msi-ec driver keeps, for each known MSI embedded-controller firmware, the controller address of the keyboard
+ * light's state and the base value it sits on (msi_table.h is generated from that table). The firmware string is 12
+ * characters at controller address 0xA0. An unknown firmware is REFUSED: the plugin writes controller memory only on a
+ * firmware that table names. The controller is reached through ACPI's embedded-controller address space. The table gives the
+ * address, the base value and the highest state; that the light's state is  base + level  is read from those field names,
+ * the driver has no light-control code of its own to confirm it. */
+#define KBL_MSI_FW_ADDRESS 0xA0
+#define KBL_MSI_FW_LENGTH  12
+#include "msi_table.h"
+
+/* the table row for a firmware string of KBL_MSI_FW_LENGTH characters (not terminated), or 0 */
+static inline const struct kbl_msi_row *kbl_msi_find(const char *fw)
+{
+    for (unsigned i = 0; i < KBL_MSI_ROWS; i++) {
+        const char *a = kKblMsiTable[i].fw;
+        int same = 1;
+        for (int k = 0; k < KBL_MSI_FW_LENGTH; k++) if (a[k] == 0 || a[k] != fw[k]) { same = 0; break; }
+        if (same && a[KBL_MSI_FW_LENGTH] == 0) return &kKblMsiTable[i];
+    }
+    return 0;
+}
+
+static inline unsigned char kbl_msi_value(const struct kbl_msi_row *r, int level)
+{
+    if (level < 0) level = 0;
+    if (level > r->max_state) level = r->max_state;
+    return (unsigned char)(r->base + level);
+}
+
+/* the level a controller byte holds, or -1 when it is outside base .. base + max_state */
+static inline int kbl_msi_level(const struct kbl_msi_row *r, unsigned char v)
+{
+    int l = (int)v - (int)r->base;
+    return l >= 0 && l <= r->max_state ? l : -1;
+}
+
+/* ---- Dell's descriptor: how big a buffer the BIOS expects ------------------------------------------------------------------
+ * A WMI data block on the descriptor GUID 8D9DDCBC-A997-11DA-B012-B622A1EF5492 holds 20 bytes: "DELL" " WMI", the interface
+ * version, the buffer length (4096 or 32768) and the hotfix number, all little-endian from offset 8. */
+static const uint8_t kKblDellDescGuid[16] = { 0xBC, 0xDC, 0x9D, 0x8D, 0x97, 0xA9, 0xDA, 0x11, 0xB0, 0x12, 0xB6, 0x22, 0xA1, 0xEF, 0x54, 0x92 };
+
+static inline int kbl_wdg_find(const uint8_t *wdg, unsigned len, const uint8_t guid[16], char obj[2], int *flags)
+{
+    for (unsigned o = 0; o + 20 <= len; o += 20) {
+        int same = 1;
+        for (int i = 0; i < 16; i++) if (wdg[o + i] != guid[i]) { same = 0; break; }
+        if (same) { obj[0] = (char)wdg[o + 16]; obj[1] = (char)wdg[o + 17]; *flags = wdg[o + 19]; return 1; }
+    }
+    return 0;
+}
+
+/* 1 and the buffer length and hotfix when the block is a valid descriptor with a length the SMBIOS call can use, else 0 */
+static inline int kbl_dell_parse_descriptor(const uint8_t *b, unsigned len, uint32_t *size, uint32_t *hotfix)
+{
+    if (len < 20) return 0;
+    static const char sig[8] = { 'D', 'E', 'L', 'L', ' ', 'W', 'M', 'I' };
+    for (int i = 0; i < 8; i++) if ((char)b[i] != sig[i]) return 0;
+    uint32_t n = (uint32_t)b[12] | (uint32_t)b[13] << 8 | (uint32_t)b[14] << 16 | (uint32_t)b[15] << 24;
+    if (n < KBL_DELL_BUF || n > 65536) return 0;
+    *size = n;
+    *hotfix = (uint32_t)b[16] | (uint32_t)b[17] << 8 | (uint32_t)b[18] << 16 | (uint32_t)b[19] << 24;
+    return 1;
+}
+
 /* macOS keeps the keyboard brightness in the SMC key LKSB as a 2-byte value. Read out of Apple's own AppleLMUController on
  * an Intel Mac Pro (setLEDBrightness): the brightness is 12 bits; byte 0 is bits 11..4 and the high nibble of byte 1 is
  * bits 3..0, that is  word = ((v & 0xF) << 12) | ((v >> 4) & 0xFF)  stored little-endian. These functions convert between
