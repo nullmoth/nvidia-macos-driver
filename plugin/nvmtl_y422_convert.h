@@ -10,6 +10,23 @@
 #define NVMTL_Y422_CONVERT_H
 #include <stdint.h>
 typedef struct { uint64_t src, dst; uint32_t width, height, pitch_words, fmt; } nvmtl_y422_convert_args;
+#include <stddef.h>
+/* Every product the conversion depends on is checked for overflow, and everything the shader indexes with 32 bits
+   (w*h pixels, (h-1)*pitch_words + pairs words) must fit 32 bits. NULL when the request is safe, else why not. */
+static inline const char *nvmtl_y422_convert_check(uint64_t w, uint64_t h, uint64_t pitch, uint64_t src_off, uint64_t src_size, uint64_t dst_size)
+{
+    uint64_t px, dstb, span, last, need, end;
+    if (!w || !h || (w & 1u) || w > 0xFFFFFFFFull || h > 0xFFFFFFFFull) return "size";
+    if ((src_off & 3u) || (pitch & 3u)) return "alignment";
+    if (__builtin_mul_overflow(w, h, &px) || px > 0xFFFFFFFFull) return "pixel count does not fit 32 bits";
+    if (__builtin_mul_overflow(px, (uint64_t)4, &dstb) || dst_size < dstb) return "destination too small";
+    if (__builtin_mul_overflow(w, (uint64_t)2, &span) || pitch < span) return "pitch below one row";
+    if (pitch / 4u > 0xFFFFFFFFull) return "pitch does not fit 32 bits of words";
+    if (__builtin_mul_overflow(h - 1u, pitch / 4u, &last) || last > 0xFFFFFFFFull - w / 2u) return "row offset does not fit 32 bits of words";
+    if (__builtin_mul_overflow(h - 1u, pitch, &need) || __builtin_add_overflow(need, span, &need) || __builtin_add_overflow(need, src_off, &end)) return "source extent overflows";
+    if (end > src_size) return "source buffer too small";
+    return NULL;
+}
 static inline uint32_t nvmtl_y422_convert_groups(uint32_t w, uint32_t h) { return (uint32_t)(((uint64_t)w * h + 63u) / 64u); }
 static const uint32_t nvmtl_y422_convert_spv[] = {
 0x07230203u, 0x00010500u, 0x0008000bu, 0x000000e5u, 0x00000000u, 0x00020011u, 0x00000001u, 0x00020011u,

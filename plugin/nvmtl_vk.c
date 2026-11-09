@@ -9866,9 +9866,7 @@ done:
 }
 int nvmtl_vk_cmd_y422_convert(nvk_cmdbuf *c, nvk_buffer *src, size_t src_off, size_t pitch, nvk_buffer *dst, uint32_t w, uint32_t h, uint32_t mtl_format)
 {
-    if (!c || c->in_rp || !src || !dst || !w || !h || (w & 1u) || (src_off & 3) || (pitch & 3) || pitch < (size_t)w * 2u ||
-        src_off > src->size || src->size - src_off < pitch * (h - 1u) + (size_t)w * 2u || dst->size < (size_t)w * h * 4u ||
-        nvmtl_y422_init()) return -1;
+    if (!c || c->in_rp || !src || !dst || nvmtl_y422_convert_check(w, h, pitch, src_off, src->size, dst->size) || nvmtl_y422_init()) return -1;
     nvmtl_y422_convert_args a = { nvmtl_vk_buffer_address(src) + src_off, nvmtl_vk_buffer_address(dst), w, h, (uint32_t)(pitch / 4u), mtl_format };
     if (!a.src || !a.dst) return -1;
     nvmtl_vk_cmd_barrier(c);

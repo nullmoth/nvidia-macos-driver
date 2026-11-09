@@ -6640,7 +6640,7 @@ static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbS
                       slice:(NSUInteger)ds level:(NSUInteger)dl origin:(MTLOrigin)dof {
     NVMTLBuffer *b = (NVMTLBuffer *)src; NVMTLTexture *t = (NVMTLTexture *)dst;
     const uint32_t w = t->_i.w;
-    if (!b || ds || dl || dof.x || dof.z || size.depth > 1 || size.width != w || !size.height || dof.y + size.height > t->_i.h) {
+    if (!b || ds || dl || dof.x || dof.z || size.depth > 1 || size.width != w || !size.height || dof.y > t->_i.h || size.height > t->_i.h - dof.y) {
         nvlog("blit copyFromBuffer:toTexture: a 4:2:2 copy must be whole-width rows of level 0 - REFUSED"); return; }
     NVMTLBuffer *sc = nvmtl_icb_scratch_bytes((NSUInteger)w * size.height * 4u);
     if (!sc) { nvlog("blit copyFromBuffer:toTexture: 4:2:2 scratch FAILED"); return; }
