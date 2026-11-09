@@ -14,6 +14,7 @@ FLAGS=(-arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -mkernel -nostdinc -i
        -Wno-deprecated-declarations -Wno-inconsistent-missing-override)
 xcrun clang++ "${FLAGS[@]}" -c nmdrm.cpp -o "$OUT/nmdrm.o"
 xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext \
-  "$OUT/nmdrm.o" -o "$OUT/NMDRM.kext/Contents/MacOS/NMDRM"
+  "$OUT/nmdrm.o" -o "$OUT/NMDRM.kext/Contents/MacOS/NMDRM" 2> "$OUT/link.err" || { cat "$OUT/link.err"; exit 1; }
+bash ../../build/warn_ceiling.sh nmdrm-link "$(grep -c 'warning' "$OUT/link.err" || true)" "$OUT/link.err"
 cp Info.plist "$OUT/NMDRM.kext/Contents/Info.plist"
 echo "NMDRM $(shasum -a 256 "$OUT/NMDRM.kext/Contents/MacOS/NMDRM" | cut -c1-8) $(stat -f %z "$OUT/NMDRM.kext/Contents/MacOS/NMDRM") B"

@@ -43,6 +43,7 @@ for VARIANT in real virtual; do
     if [ $lrc -ne 0 ]; then
         echo "  LINK FAILED (rc=$lrc)"; head -12 "$OUT/$NAME.link.err"; continue
     fi
+    bash "$SRC/../../build/warn_ceiling.sh" nmintelfb-link "$(grep -c 'warning' "$OUT/$NAME.link.err")" "$OUT/$NAME.link.err" || exit 4
     cp "$PLIST" "$K/Contents/Info.plist"
     # A kext without _kmod_info is silently left out of a kernel collection, and the metaclasses are what prove
     # the IOKit classes survived the link.
