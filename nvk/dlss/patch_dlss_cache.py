@@ -17,10 +17,18 @@ others, opened without following links and checked on the open descriptor."""
 import os
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "legal"))
+import nak_stub  # noqa: E402  instruction words generated from NAK's own encoder source
+
 root = sys.argv[1]
 
 
+STUB75 = nak_stub.c_array(root, 75)   # the __assertfail stand-in, encoded by NAK's rules (see legal/nak_stub.py)
+STUB80 = nak_stub.c_array(root, 80)
+
+
 def edit(rel, old, new, count=1):
+    new = new.replace("@@STUB75@@", STUB75).replace("@@STUB80@@", STUB80)
     p = os.path.join(root, rel)
     s = open(p).read()
     if new in s:
@@ -238,11 +246,16 @@ edit("src/nouveau/vulkan/nvk_image_view.c",
 
 # 8. link a cubin the way NVIDIA's driver does before it runs it. Mesa uploaded each kernel's own .text section alone,
 #    applied no relocations and bound only constant bank 0. In the RTX 50 kernel cache (259 cubins, nvJitLink output):
-#    - 43 hold code relocations, and only three kinds: 56/57 = low/high 32 bits of an absolute address into a MOV
-#      immediate (instruction bits 32..63), 75 = a CALL.ABS target (address bits 8..55 at instruction bits 32..79; bits
-#      16..23 carry address bits 2..9 and stay 0, so call targets are placed 256-byte aligned). Measured with nvdisasm on
-#      cuda_reduce_sum_kernel (MOV R20/R21 = return address, CALL.ABS __cuda_sm20_div_u16, RET.ABS R20). Unrelocated,
-#      every such call jumped to GPU address 0: the DLSS 4 transformer layers (72 relocations each) faulted at VA 0x0.
+#    - 43 hold code relocations, and only these kinds, numbered and defined as in LLVM's public ELF definitions for CUDA
+#      (llvm/include/llvm/BinaryFormat/ELFRelocs/CUDA.def, added by LLVM PR 133076):
+#        56 R_CUDA_ABS32_LO_32  low 32 bits of the absolute address  -> instruction bits 32..63
+#        57 R_CUDA_ABS32_HI_32  high 32 bits of the absolute address -> instruction bits 32..63
+#        58 R_CUDA_ABS47_34     (address >> 2), 47 bits             -> instruction bits 34..80
+#        75 R_CUDA_ABS55_16_34  (address >> 2), 55 bits             -> instruction bits 16..23 (the low 8) and 34..80
+#      The same kinds, with unpatched call and MOV-immediate words, come out of the nvJitLink run of NullMoth's own PTX in
+#      legal/divk.ptx (legal/README.md has the commands and legal/cubin_relocs.py lists them): a MOV immediate pair that
+#      forms the return address, then a call to the compiler's division helper. Unrelocated, every such call jumped to GPU
+#      address 0: the DLSS 4 transformer layers (72 relocations each) faulted at VA 0x0.
 #    - 46 kernels read constant bank 2 (.nv.constant2.<kernel>: the compiler's branch tables; hiluma_engine_input_*
 #      does LDC c[0x2] then BRX) and 4 read bank 3 (.nv.constant3, module __constant__ data). Unbound, BRX jumped
 #      through garbage.
@@ -324,6 +337,17 @@ struct nvk_link_shdr {
 };
 
 #define NVK_LINK_PLACE_ALIGN 0x100   /* CALL.ABS targets and constant banks */
+
+/* Store the low n bits of v at bit lo.. of a 16-byte instruction (little-endian bit order). */
+static void
+nvk_link_put_bits(uint8_t *ins, unsigned lo, unsigned n, uint64_t v)
+{
+   for (unsigned i = 0; i < n; i++) {
+      const unsigned bit = lo + i;
+      const uint8_t m = (uint8_t)(1u << (bit % 8));
+      ins[bit / 8] = (ins[bit / 8] & ~m) | (((v >> i) & 1) ? m : 0);
+   }
+}
 
 static VkResult
 nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
@@ -418,21 +442,21 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
       if (place[i] && sh[i].type != 8)
          memcpy(map + place[i] - 1, b + sh[i].offset, sh[i].size);
 
-   /* The cubins NVIDIA ships as native SASS (sm_75 .. sm_90) import __assertfail and reach it through a pointer in
-    * .nv.constant4 (an R_CUDA_64 against the undefined symbol; every internal call is CALL.REL and the one indirect
-    * call is CALL.ABS.NOINC through that pointer). CUDA's runtime would supply the function. Here it is a stub of
-    * BPT.TRAP then EXIT: the kernel stops with a clean channel fault instead of a call to address 0. The encodings
-    * are the same on sm_75, 80, 86, 89 and 90 (nvdisasm -hex of the shipped DLSS kernels: BPT.TRAP 0x1 =
-    * 0x000000040000795c / 0x000fea0000300000, EXIT = 0x000000000000794d / 0x000fea0003800000). */
+   /* The cubins NVIDIA ships as native SASS (sm_75 .. sm_90) import __assertfail: the ELF symbol table lists it as an
+    * undefined symbol, and a relocation against it (R_CUDA_64 / R_CUDA_32 in a data section) is where the kernel finds
+    * the function's address. CUDA's runtime would supply the function. Here it is a stand-in that stores to address 0
+    * (a clean channel fault) and then exits, instead of a call to address 0. The words are produced from NAK's own
+    * encoder source when this patch is applied (nvk/dlss/legal/nak_stub.py): ST with a zero address, then EXIT. */
    const bool have_stub = module->info->sm >= 75 && module->info->sm <= 90;
    if (have_stub) {
-      static const uint64_t trap_stub[8] = {
-         0x000000040000795cull, 0x000fea0000300000ull,   /* BPT.TRAP 0x1 */
-         0x000000000000794dull, 0x000fea0003800000ull,   /* EXIT */
-         0x000000000000794dull, 0x000fea0003800000ull,   /* EXIT (never reached) */
-         0x000000000000794dull, 0x000fea0003800000ull,
+      static const uint64_t trap_stub_sm75[8] = {
+         @@STUB75@@
       };
-      memcpy(map + stub_off, trap_stub, sizeof(trap_stub));
+      static const uint64_t trap_stub_sm80[8] = {
+         @@STUB80@@
+      };
+      const uint64_t *trap_stub = module->info->sm < 80 ? trap_stub_sm75 : trap_stub_sm80;
+      memcpy(map + stub_off, trap_stub, sizeof(trap_stub_sm75));
    }
 
    for (uint32_t r = 0; r < shnum; r++) {
@@ -516,15 +540,21 @@ nvk_cubin_module_link(struct nvk_device *dev, struct nvk_cubin_module *module,
          } else if (type == 56 || type == 57) {   /* MOV imm32 = low / high half */
             const uint32_t w = type == 56 ? (uint32_t)v : (uint32_t)(v >> 32);
             memcpy(ins + 4, &w, 4);
-         } else if (type == 75) {                 /* CALL.ABS: address bits 8..55 at instruction bits 32..79 */
-            if ((v & 0xff) || ins[2] != 0 || (v >> 56)) {
+         } else if (type == 58 || type == 75) {   /* R_CUDA_ABS47_34 / R_CUDA_ABS55_16_34 */
+            /* a = address >> 2 (the low 2 address bits must be 0). Type 58 puts 47 bits of a at instruction bits 34..80;
+             * type 75 puts the low 8 bits of a at bits 16..23 and the next 47 bits at bits 34..80. */
+            const uint64_t a = v >> 2;
+            if ((v & 3) || (type == 58 ? (a >> 47) != 0 : (a >> 55) != 0)) {
                result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
-                                  "cubin link: CALL.ABS target 0x%" PRIx64 " not encodable in %s", v, names[t]);
+                                  "cubin link: call target 0x%" PRIx64 " not encodable in %s", v, names[t]);
                goto out;
             }
-            const uint64_t f = v >> 8;
-            for (int k = 0; k < 6; k++)
-               ins[4 + k] = (uint8_t)(f >> (8 * k));
+            if (type == 75) {
+               nvk_link_put_bits(ins, 16, 8, a & 0xff);
+               nvk_link_put_bits(ins, 34, 47, a >> 8);
+            } else {
+               nvk_link_put_bits(ins, 34, 47, a);
+            }
          } else {
             result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
                                "cubin link: relocation type %u in %s is not supported", type, names[t]);
