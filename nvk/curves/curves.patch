@@ -1,0 +1,614 @@
+diff -ruN a/src/nouveau/vulkan/bvh/curve_aabb.comp b/src/nouveau/vulkan/bvh/curve_aabb.comp
+--- a/src/nouveau/vulkan/bvh/curve_aabb.comp	1969-12-31 16:00:00
++++ b/src/nouveau/vulkan/bvh/curve_aabb.comp	2026-11-09 00:30:42
+@@ -0,0 +1,90 @@
++/*
++ * curve_aabb.comp - one box per curve segment: the control points of the segment in Bezier form (Catmull-Rom is converted, the
++ * others lie in the hull of their own points), grown by the largest radius. One invocation per segment.
++ */
++#version 460
++#extension GL_GOOGLE_include_directive : require
++#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
++#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
++#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
++#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
++#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
++#extension GL_EXT_scalar_block_layout : require
++#extension GL_EXT_buffer_reference : require
++#extension GL_EXT_buffer_reference2 : require
++
++layout(local_size_x = 64) in;
++
++#define VK_USED_BUILD_FLAGS 0
++#include "vk_bvh_helpers.h"
++#include "nvk_curve.h"
++
++struct nvk_curve_f32 { float v; };
++struct nvk_curve_u16 { uint16_t v; };
++struct nvk_curve_u32 { uint32_t v; };
++TYPE(nvk_curve_f32, 4);
++TYPE(nvk_curve_u16, 2);
++TYPE(nvk_curve_u32, 4);
++
++struct nvk_curve_aabb_args {
++   uint64_t control_points;
++   uint64_t radii;
++   uint64_t indices;
++   uint64_t out_boxes;
++   uint32_t control_point_stride;
++   uint32_t radius_stride;
++   uint32_t flags;
++   uint32_t segment_count;
++};
++layout(push_constant) uniform CONSTS { nvk_curve_aabb_args args; };
++
++float
++load_f(uint64_t addr, bool half_format)
++{
++   if (half_format)
++      return float(uint16BitsToFloat16(DEREF(REF(nvk_curve_u16)(addr)).v));
++   return DEREF(REF(nvk_curve_f32)(addr)).v;
++}
++
++void
++main()
++{
++   uint32_t gid = gl_GlobalInvocationID.x;
++   if (gid >= args.segment_count) return;
++   uint32_t basis = (args.flags >> NVK_CURVE_BASIS_SHIFT) & 3u;
++   uint32_t count = (args.flags >> NVK_CURVE_COUNT_SHIFT) & 7u;
++   bool cp_half = ((args.flags >> NVK_CURVE_CPFMT_SHIFT) & 1u) != 0u;
++   bool rad_half = ((args.flags >> NVK_CURVE_RADFMT_SHIFT) & 1u) != 0u;
++   bool idx32 = ((args.flags >> NVK_CURVE_IDXTYPE_SHIFT) & 1u) != 0u;
++   uint32_t first = idx32 ? DEREF(REF(nvk_curve_u32)(OFFSET(args.indices, gid * 4u))).v
++                          : uint32_t(DEREF(REF(nvk_curve_u16)(OFFSET(args.indices, gid * 2u))).v);
++   vec3 p[4];
++   float r[4];
++   for (uint32_t i = 0; i < 4u; i++) {
++      uint32_t k = first + (i < count ? i : 0u);
++      uint64_t cp = OFFSET(args.control_points, k * args.control_point_stride);
++      uint32_t es = cp_half ? 2u : 4u;
++      p[i] = vec3(load_f(cp, cp_half), load_f(OFFSET(cp, es), cp_half), load_f(OFFSET(cp, 2u * es), cp_half));
++      r[i] = load_f(OFFSET(args.radii, k * args.radius_stride), rad_half);
++   }
++   if (basis == 1u && count == 4u) {
++      /* Catmull-Rom segment (P1 to P2) as a Bezier: the control points leave the hull of the originals */
++      vec3 b1 = p[1] + (p[2] - p[0]) / 6.0, b2 = p[2] - (p[3] - p[1]) / 6.0;
++      float s1 = r[1] + (r[2] - r[0]) / 6.0, s2 = r[2] - (r[3] - r[1]) / 6.0;
++      p[0] = p[1]; p[3] = p[2]; p[1] = b1; p[2] = b2;
++      r[0] = r[1]; r[3] = r[2]; r[1] = s1; r[2] = s2;
++   }
++   vec3 lo = p[0], hi = p[0];
++   float rmax = abs(r[0]);
++   for (uint32_t i = 1u; i < 4u; i++) {
++      if (i < count) { lo = min(lo, p[i]); hi = max(hi, p[i]); rmax = max(rmax, abs(r[i])); }
++   }
++   float g = rmax * 1.0001 + 1.0e-6;
++   uint64_t box = OFFSET(args.out_boxes, gid * 24u);
++   DEREF(REF(nvk_curve_f32)(box)).v = lo.x - g;
++   DEREF(REF(nvk_curve_f32)(OFFSET(box, 4u))).v = lo.y - g;
++   DEREF(REF(nvk_curve_f32)(OFFSET(box, 8u))).v = lo.z - g;
++   DEREF(REF(nvk_curve_f32)(OFFSET(box, 12u))).v = hi.x + g;
++   DEREF(REF(nvk_curve_f32)(OFFSET(box, 16u))).v = hi.y + g;
++   DEREF(REF(nvk_curve_f32)(OFFSET(box, 20u))).v = hi.z + g;
++}
+diff -ruN a/src/nouveau/vulkan/bvh/encode_ttu.comp b/src/nouveau/vulkan/bvh/encode_ttu.comp
+--- a/src/nouveau/vulkan/bvh/encode_ttu.comp	2026-11-09 00:30:42
++++ b/src/nouveau/vulkan/bvh/encode_ttu.comp	2026-11-09 00:30:42
+@@ -83,8 +83,8 @@
+          DEREF(a).geometry_table_offset = 0u;
+          DEREF(a).geometry_count = 0u;
+          DEREF(a).has_procedural = 0u;
+-         DEREF(a).padding[0] = 0u;
+-         DEREF(a).padding[1] = 0u;
++         DEREF(a).curve_table_offset = 0u;
++         DEREF(a).curve_geometry_count = 0u;
+       }
+       return;
+    }
+diff -ruN a/src/nouveau/vulkan/bvh/meson.build b/src/nouveau/vulkan/bvh/meson.build
+--- a/src/nouveau/vulkan/bvh/meson.build	2026-11-09 00:30:42
++++ b/src/nouveau/vulkan/bvh/meson.build	2026-11-09 00:30:42
+@@ -8,6 +8,10 @@
+     'encode_ttu.comp',
+     'nvk_encode_ttu',
+   ],
++  [
++    'curve_aabb.comp',
++    'nvk_curve_aabb',
++  ],
+ ]
+ 
+ nvk_bvh_include_dir = dir_source_root + '/src/nouveau/vulkan/bvh'
+@@ -19,6 +23,7 @@
+   '../nvk_bvh.h',
+   '../nvk_hwrt.h',
+   '../nvk_hwrt_layout.h',
++  '../nvk_curve.h',
+   nvk_vk_bvh_include_dir + '/vk_bvh_helpers.h',
+   nvk_vk_bvh_include_dir + '/vk_bvh_defines.h',
+ )
+diff -ruN a/src/nouveau/vulkan/meson.build b/src/nouveau/vulkan/meson.build
+--- a/src/nouveau/vulkan/meson.build	2026-11-09 00:30:42
++++ b/src/nouveau/vulkan/meson.build	2026-11-09 00:30:42
+@@ -34,6 +34,9 @@
+   'nvk_bvh.h',
+   'nvk_hwrt.h',
+   'nvk_hwrt_layout.h',
++  'nvk_curve.h',
++  'nvk_curve_math.h',
++  'nvk_curve_nir.h',
+   'nvk_nir_lower_ray_queries.c',
+   'nvk_nir_ray_tracing.c',
+   'nvk_nir_ray_tracing.h',
+diff -ruN a/src/nouveau/vulkan/nvk_acceleration_structure.c b/src/nouveau/vulkan/nvk_acceleration_structure.c
+--- a/src/nouveau/vulkan/nvk_acceleration_structure.c	2026-11-09 00:30:42
++++ b/src/nouveau/vulkan/nvk_acceleration_structure.c	2026-11-09 00:30:42
+@@ -31,6 +31,7 @@
+ #include "bvh/nvk_build_interface.h"
+ #include "nvk_hwrt.h"
+ #include "nvk_hwrt_layout.h"
++#include "nvk_curve.h"
+ 
+ #include "nvtypes.h"
+ #include "nv_push_cl90b5.h"
+@@ -43,6 +44,10 @@
+ #include "nvk_encode_ttu.spv.h"
+ };
+ 
++static const uint32_t nvk_curve_aabb_spv[] = {
++#include "nvk_curve_aabb.spv.h"
++};
++
+ static_assert(sizeof(struct nvk_bvh_header) == NVK_BVH_HEADER_SIZE, "nvk_bvh_header size drifted from NVK_BVH_HEADER_SIZE");
+ static_assert(sizeof(struct nvk_bvh_triangle_node) % 8 == 0, "nvk_bvh_triangle_node is not padded");
+ static_assert(sizeof(struct nvk_bvh_aabb_node) % 8 == 0, "nvk_bvh_aabb_node is not padded");
+@@ -54,6 +59,7 @@
+ enum nvk_meta_object_key_type {
+    NVK_META_OBJECT_KEY_BVH_ENCODE = VK_META_OBJECT_KEY_DRIVER_OFFSET,
+    NVK_META_OBJECT_KEY_BVH_ENCODE_TTU,
++  NVK_META_OBJECT_KEY_CURVE_AABB,
+ };
+ 
+ /* NVK_HWRT_QUERY switches the hardware ray-traversal part on for the whole process: structures then carry the appendix and
+@@ -134,13 +140,78 @@
+    return p;
+ }
+ 
++/* NVK_CURVES switches Metal-style curve geometry on (docs/CURVES.md): a box geometry that carries a VkNvkCurveGeometryMESA in
++ * its pNext chain is built as curves. Off, the chain is ignored and the geometry is the plain box geometry it also is. */
++static bool
++nvk_curves_enabled(void)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("NVK_CURVES");
++      on = e && e[0] != '\0' && e[0] != '0';
++   }
++   return on;
++}
++
++static const VkAccelerationStructureGeometryKHR *
++nvk_geom_at(const VkAccelerationStructureBuildGeometryInfoKHR *bi, uint32_t i)
++{
++   return bi->pGeometries ? &bi->pGeometries[i] : bi->ppGeometries[i];
++}
++
++static const VkNvkCurveGeometryMESA *
++nvk_curve_of(const VkAccelerationStructureGeometryKHR *g)
++{
++   if (g->geometryType != VK_GEOMETRY_TYPE_AABBS_KHR)
++      return NULL;
++   for (const VkBaseInStructure *s = g->geometry.aabbs.pNext; s; s = s->pNext)
++      if (s->sType == VK_STRUCTURE_TYPE_NVK_CURVE_GEOMETRY_MESA)
++         return (const VkNvkCurveGeometryMESA *)s;
++   return NULL;
++}
++
++static bool
++nvk_build_has_curves(const VkAccelerationStructureBuildGeometryInfoKHR *bi)
++{
++   if (!nvk_curves_enabled() || bi->type != VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
++      return false;
++   for (uint32_t i = 0; i < bi->geometryCount; i++)
++      if (nvk_curve_of(nvk_geom_at(bi, i)))
++         return true;
++   return false;
++}
++
++/* The whole structure: software BVH, then (when either switch is on) the appendix with the hardware part and the curve table. */
++struct nvk_as_layout {
++   bool hw, curve;
++   struct nvk_hwrt_place place;     /* hw_size is 0 without the hardware part */
++   uint32_t curve_table;            /* from the appendix */
++   uint64_t total;
++};
++
++static struct nvk_as_layout
++nvk_as_layout(const VkAccelerationStructureBuildGeometryInfoKHR *bi, VkGeometryTypeKHR type, uint32_t leaf_node_count)
++{
++   struct nvk_as_layout l = { .hw = nvk_hwrt_build_enabled(), .curve = nvk_build_has_curves(bi) };
++   if (!l.hw && !l.curve) {
++      l.total = nvk_get_as_size_internal(type, leaf_node_count);
++      return l;
++   }
++   l.place = nvk_hwrt_place(type, leaf_node_count, bi->geometryCount);
++   if (!l.hw) {
++      l.place.hw_size = 0;
++      l.place.geometry_table_offset = NVK_HWRT_STRUCT_OFFSET;
++   }
++   l.curve_table = (uint32_t)align64(l.place.geometry_table_offset + (uint64_t)l.place.geometry_count * sizeof(struct nvk_hwrt_geometry), 16);
++   l.total = (uint64_t)l.place.hw_offset + l.curve_table + (l.curve ? (uint64_t)bi->geometryCount * sizeof(struct nvk_curve_entry) : 0);
++   return l;
++}
++
+ static VkDeviceSize
+ nvk_get_as_size(VkDevice device, const struct vk_acceleration_structure_build_state *state)
+ {
+    const VkGeometryTypeKHR type = vk_get_as_geometry_type(state->build_info);
+-   if (nvk_hwrt_build_enabled())
+-      return nvk_hwrt_place(type, state->leaf_node_count, state->build_info->geometryCount).total;
+-   return nvk_get_as_size_internal(type, state->leaf_node_count);
++   return nvk_as_layout(state->build_info, type, state->leaf_node_count).total;
+ }
+ 
+ /* ---- the device hooks the shared builder calls ------------------------------------------------------------------ */
+@@ -392,6 +463,15 @@
+    VK_FROM_HANDLE(nvk_device, dev, _device);
+ 
+    vk_get_as_build_sizes(_device, buildType, pBuildInfo, pMaxPrimitiveCounts, pSizeInfo, &dev->accel.args);
++
++   /* curve boxes are written into the tail of the scratch buffer, each geometry's region 128-byte aligned */
++   if (nvk_build_has_curves(pBuildInfo)) {
++      uint64_t scratch = align64(pSizeInfo->buildScratchSize, 128);
++      for (uint32_t i = 0; i < pBuildInfo->geometryCount; i++)
++         if (nvk_curve_of(nvk_geom_at(pBuildInfo, i)))
++            scratch += align64((uint64_t)pMaxPrimitiveCounts[i] * NVK_CURVE_BOX_BYTES, 128);
++      pSizeInfo->buildScratchSize = scratch;
++   }
+ }
+ 
+ struct nvk_accel_saved_state {
+@@ -456,6 +536,134 @@
+    nvk_accel_restore(cmd, &saved);
+ }
+ 
++/* ---- curve geometry --------------------------------------------------------------------------------------------- */
++
++struct nvk_curve_aabb_args {
++   uint64_t control_points, radii, indices, out_boxes;
++   uint32_t control_point_stride, radius_stride, flags, segment_count;
++};
++
++/* Before the build: one box per segment of every curve geometry, written into the tail of the scratch buffer. Returns a copy of
++ * the build info whose curve geometries point at those boxes (the box stride is the 24 bytes the shader wrote); the geometries are
++ * copied into *geoms, freed by the caller. */
++static bool
++nvk_curve_prepare(struct nvk_cmd_buffer *cmd, struct nvk_device *dev, const VkAccelerationStructureBuildGeometryInfoKHR *bi,
++                  const VkAccelerationStructureBuildRangeInfoKHR *ranges, VkAccelerationStructureBuildGeometryInfoKHR *out,
++                  VkAccelerationStructureGeometryKHR **geoms)
++{
++   VkCommandBuffer commandBuffer = nvk_cmd_buffer_to_handle(cmd);
++   uint32_t counts[bi->geometryCount ? bi->geometryCount : 1];
++   for (uint32_t i = 0; i < bi->geometryCount; i++)
++      counts[i] = ranges[i].primitiveCount;
++   VkAccelerationStructureBuildSizesInfoKHR sz = { .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
++   vk_get_as_build_sizes(nvk_device_to_handle(dev), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, bi, counts, &sz, &dev->accel.args);
++
++   *geoms = malloc(sizeof(VkAccelerationStructureGeometryKHR) * bi->geometryCount);
++   if (!*geoms) {
++      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++      return false;
++   }
++   *out = *bi;
++   out->pGeometries = *geoms;
++   out->ppGeometries = NULL;
++   VkDeviceAddress boxes = bi->scratchData.deviceAddress + align64(sz.buildScratchSize, 128);
++
++   VkPipeline pipeline = VK_NULL_HANDLE;
++   VkPipelineLayout layout = VK_NULL_HANDLE;
++   bool bound = false;
++   for (uint32_t i = 0; i < bi->geometryCount; i++) {
++      (*geoms)[i] = *nvk_geom_at(bi, i);
++      const VkNvkCurveGeometryMESA *c = nvk_curve_of(&(*geoms)[i]);
++      if (!c)
++         continue;
++      if (!bound) {
++         VkResult r = vk_get_bvh_build_pipeline_spv(&dev->vk, &dev->meta, (enum vk_meta_object_key_type)NVK_META_OBJECT_KEY_CURVE_AABB,
++                                                    nvk_curve_aabb_spv, sizeof(nvk_curve_aabb_spv), sizeof(struct nvk_curve_aabb_args),
++                                                    &dev->accel.args, 0, &pipeline, false);
++         if (r == VK_SUCCESS)
++            r = vk_get_bvh_build_pipeline_layout(&dev->vk, &dev->meta, sizeof(struct nvk_curve_aabb_args), &layout);
++         if (r != VK_SUCCESS) {
++            vk_command_buffer_set_error(&cmd->vk, r);
++            return false;
++         }
++         dev->vk.dispatch_table.CmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
++         bound = true;
++      }
++      const struct nvk_curve_aabb_args args = {
++         .control_points = c->controlPoints, .radii = c->radii, .indices = c->indices, .out_boxes = boxes,
++         .control_point_stride = c->controlPointStride, .radius_stride = c->radiusStride, .flags = c->flags,
++         .segment_count = counts[i],
++      };
++      dev->vk.dispatch_table.CmdPushConstants(commandBuffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(args), &args);
++      dev->vk.dispatch_table.CmdDispatchBase(commandBuffer, 0, 0, 0, DIV_ROUND_UP(MAX2(counts[i], 1), 64), 1, 1);
++      (*geoms)[i].geometry.aabbs.pNext = NULL;
++      (*geoms)[i].geometry.aabbs.data.deviceAddress = boxes;
++      (*geoms)[i].geometry.aabbs.stride = NVK_CURVE_BOX_BYTES;
++      boxes += align64((uint64_t)counts[i] * NVK_CURVE_BOX_BYTES, 128);
++   }
++   if (bound)
++      vk_bvh_build_barrier_compute_to_compute(commandBuffer, true);
++   return true;
++}
++
++/* After the build: the appendix words and the curve table the lowering reads. They are written by the copy engine, so the
++ * compute passes that wrote the header (hw_offset = 0) must be finished first. */
++static void
++nvk_curve_finalize(struct nvk_cmd_buffer *cmd, struct nvk_device *dev, const VkAccelerationStructureBuildGeometryInfoKHR *bi,
++                   const VkAccelerationStructureBuildRangeInfoKHR *ranges)
++{
++   VkCommandBuffer commandBuffer = nvk_cmd_buffer_to_handle(cmd);
++   uint32_t leaves = 0;
++   for (uint32_t i = 0; i < bi->geometryCount; i++)
++      leaves += ranges[i].primitiveCount;
++   const struct nvk_as_layout l = nvk_as_layout(bi, VK_GEOMETRY_TYPE_AABBS_KHR, leaves);
++   VK_FROM_HANDLE(vk_acceleration_structure, dst, bi->dstAccelerationStructure);
++   const uint64_t va = vk_acceleration_structure_get_va(dst);
++   const uint64_t app = va + l.place.hw_offset;
++
++   VkMemoryBarrier2 mb = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
++      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
++      .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
++      .dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
++      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
++   };
++   VkDependencyInfo di = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb };
++   dev->vk.dispatch_table.CmdPipelineBarrier2(commandBuffer, &di);
++
++   if (!l.hw) {
++      /* no hardware part: the appendix is ours alone, generation 0 so the lowering never takes the hardware path */
++      struct nvk_hwrt_appendix a = {
++         .magic = NVK_HWRT_APPENDIX_MAGIC, .generation = 0, .structure_size = 0, .geometry_table_offset = 0, .geometry_count = 0,
++         .has_procedural = 1, .curve_table_offset = l.curve_table, .curve_geometry_count = bi->geometryCount,
++      };
++      nvk_cmd_write_buffer_cp(commandBuffer, app, &a, sizeof a);
++      uint32_t off = l.place.hw_offset;
++      nvk_cmd_write_buffer_cp(commandBuffer, va + offsetof(struct nvk_bvh_header, hw_offset), &off, sizeof off);
++   } else {
++      uint32_t w[2] = { l.curve_table, bi->geometryCount };
++      nvk_cmd_write_buffer_cp(commandBuffer, app + offsetof(struct nvk_hwrt_appendix, curve_table_offset), w, sizeof w);
++   }
++
++   struct nvk_curve_entry *table = calloc(bi->geometryCount ? bi->geometryCount : 1, sizeof *table);
++   if (!table) {
++      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++      return;
++   }
++   for (uint32_t i = 0; i < bi->geometryCount; i++) {
++      const VkNvkCurveGeometryMESA *c = nvk_curve_of(nvk_geom_at(bi, i));
++      if (!c)
++         continue;
++      table[i] = (struct nvk_curve_entry){
++         .control_points = c->controlPoints, .radii = c->radii, .indices = c->indices,
++         .control_point_stride = c->controlPointStride, .radius_stride = c->radiusStride, .flags = c->flags,
++         .magic = NVK_CURVE_ENTRY_MAGIC, .segment_count = ranges[i].primitiveCount,
++      };
++   }
++   nvk_cmd_write_buffer_cp(commandBuffer, app + l.curve_table, table, bi->geometryCount * sizeof *table);
++   free(table);
++}
++
+ VKAPI_ATTR void VKAPI_CALL
+ nvk_CmdBuildAccelerationStructuresKHR(VkCommandBuffer commandBuffer, uint32_t infoCount,
+                                       const VkAccelerationStructureBuildGeometryInfoKHR *pInfos,
+@@ -467,9 +675,44 @@
+    struct nvk_accel_saved_state saved;
+    nvk_accel_save(cmd, &saved);
+ 
+-   vk_cmd_build_acceleration_structures(commandBuffer, &dev->vk, &dev->meta, infoCount, pInfos,
+-                                        ppBuildRangeInfos, &dev->accel.args);
++   bool any_curves = false;
++   for (uint32_t i = 0; i < infoCount && !any_curves; i++)
++      any_curves = nvk_build_has_curves(&pInfos[i]);
+ 
++   if (!any_curves) {
++      vk_cmd_build_acceleration_structures(commandBuffer, &dev->vk, &dev->meta, infoCount, pInfos,
++                                           ppBuildRangeInfos, &dev->accel.args);
++      nvk_accel_restore(cmd, &saved);
++      return;
++   }
++
++   VkAccelerationStructureBuildGeometryInfoKHR *infos = malloc(sizeof *infos * infoCount);
++   VkAccelerationStructureGeometryKHR **owned = calloc(infoCount, sizeof *owned);
++   if (!infos || !owned) {
++      free(infos);
++      free(owned);
++      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++      nvk_accel_restore(cmd, &saved);
++      return;
++   }
++   bool ok = true;
++   for (uint32_t i = 0; i < infoCount && ok; i++) {
++      if (nvk_build_has_curves(&pInfos[i]))
++         ok = nvk_curve_prepare(cmd, dev, &pInfos[i], ppBuildRangeInfos[i], &infos[i], &owned[i]);
++      else
++         infos[i] = pInfos[i];
++   }
++   if (ok) {
++      vk_cmd_build_acceleration_structures(commandBuffer, &dev->vk, &dev->meta, infoCount, infos,
++                                           ppBuildRangeInfos, &dev->accel.args);
++      for (uint32_t i = 0; i < infoCount; i++)
++         if (nvk_build_has_curves(&pInfos[i]))
++            nvk_curve_finalize(cmd, dev, &pInfos[i], ppBuildRangeInfos[i]);
++   }
++   for (uint32_t i = 0; i < infoCount; i++)
++      free(owned[i]);
++   free(owned);
++   free(infos);
+    nvk_accel_restore(cmd, &saved);
+ }
+ 
+diff -ruN a/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c b/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c
+--- a/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c	2026-11-09 00:30:42
++++ b/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c	2026-11-09 00:30:42
+@@ -6,6 +6,8 @@
+ #include "nvk_nir_ray_tracing.h"
+ #include "nvk_bvh.h"
+ #include "nvk_hwrt.h"
++#include "nvk_curve.h"
++#include "nvk_curve_nir.h"
+ 
+ #include "compiler/spirv/spirv.h"
+ 
+@@ -584,7 +586,108 @@
+    nir_def *index;
+ };
+ 
++static bool
++nvk_curves_enabled(void)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("NVK_CURVES");
++      on = e && e[0] != '\0' && e[0] != '0';
++   }
++   return on;
++}
++
++/* float or half value at addr, as a float */
++static nir_def *
++curve_load_f(nir_builder *b, nir_def *addr, nir_def *is_half)
++{
++   nir_variable *v = nir_local_variable_create(b->impl, glsl_float_type(), "curve_f");
++   nir_push_if(b, is_half);
++   {
++      nir_def *h = nir_u2u32(b, nir_build_load_global(b, 1, 16, addr, .align_mul = 2));
++      nir_store_var(b, v, nir_channel(b, nir_unpack_half_2x16(b, h), 0), 0x1);
++   }
++   nir_push_else(b, NULL);
++   {
++      nir_store_var(b, v, nir_build_load_global(b, 1, 32, addr, .align_mul = 4), 0x1);
++   }
++   nir_pop_if(b, NULL);
++   return nir_load_var(b, v);
++}
++
++/* The box belongs to a curve geometry: intersect the curve itself (nvk_curve_math.h) and, on a hit, commit it like an opaque
++ * triangle. The traversal goes on from the box; the shader never sees the box as a candidate. curve_parameter is returned in the
++ * first barycentric. */
+ static void
++curve_intersect_and_commit(nir_builder *b, nir_def *entry, struct nvk_leaf_intersection *intersection,
++                           const struct nvk_ray_traversal_args *args, struct ray_query_vars *vars, nir_def *index)
++{
++   nir_def *cp = hw_load_u64(b, entry, offsetof(struct nvk_curve_entry, control_points));
++   nir_def *rad = hw_load_u64(b, entry, offsetof(struct nvk_curve_entry, radii));
++   nir_def *idx = hw_load_u64(b, entry, offsetof(struct nvk_curve_entry, indices));
++   nir_def *cp_stride = hw_load_u32(b, entry, offsetof(struct nvk_curve_entry, control_point_stride));
++   nir_def *rad_stride = hw_load_u32(b, entry, offsetof(struct nvk_curve_entry, radius_stride));
++   nir_def *flags = hw_load_u32(b, entry, offsetof(struct nvk_curve_entry, flags));
++   nir_def *basis = nir_ubitfield_extract_imm(b, flags, NVK_CURVE_BASIS_SHIFT, 2);
++   nir_def *count = nir_ubitfield_extract_imm(b, flags, NVK_CURVE_COUNT_SHIFT, 3);
++   nir_def *is_flat = nir_ine_imm(b, nir_ubitfield_extract_imm(b, flags, NVK_CURVE_FLAT_SHIFT, 1), 0);
++   nir_def *caps = nir_ubitfield_extract_imm(b, flags, NVK_CURVE_CAPS_SHIFT, 2);
++   nir_def *cp_half = nir_ine_imm(b, nir_ubitfield_extract_imm(b, flags, NVK_CURVE_CPFMT_SHIFT, 1), 0);
++   nir_def *rad_half = nir_ine_imm(b, nir_ubitfield_extract_imm(b, flags, NVK_CURVE_RADFMT_SHIFT, 1), 0);
++   nir_def *idx32 = nir_ine_imm(b, nir_ubitfield_extract_imm(b, flags, NVK_CURVE_IDXTYPE_SHIFT, 1), 0);
++
++   nir_variable *first_v = nir_local_variable_create(b->impl, glsl_uint_type(), "curve_first");
++   nir_push_if(b, idx32);
++   {
++      nir_def *a = nir_iadd(b, idx, nir_u2u64(b, nir_imul_imm(b, intersection->primitive_id, 4)));
++      nir_store_var(b, first_v, nir_build_load_global(b, 1, 32, a, .align_mul = 4), 0x1);
++   }
++   nir_push_else(b, NULL);
++   {
++      nir_def *a = nir_iadd(b, idx, nir_u2u64(b, nir_imul_imm(b, intersection->primitive_id, 2)));
++      nir_store_var(b, first_v, nir_u2u32(b, nir_build_load_global(b, 1, 16, a, .align_mul = 2)), 0x1);
++   }
++   nir_pop_if(b, NULL);
++   nir_def *first = nir_load_var(b, first_v);
++
++   struct cv_ops ops = cv_nir_ops(b);
++   struct cv_curve c;
++   nir_def *es = nir_bcsel(b, cp_half, nir_imm_int(b, 2), nir_imm_int(b, 4));
++   for (unsigned i = 0; i < 4; i++) {
++      /* control points past the segment's count are not read: they alias the first */
++      nir_def *k = nir_iadd(b, first, nir_bcsel(b, nir_ilt_imm(b, count, i + 1), nir_imm_int(b, 0), nir_imm_int(b, i)));
++      nir_def *a = nir_iadd(b, cp, nir_u2u64(b, nir_imul(b, k, cp_stride)));
++      nir_def *x = curve_load_f(b, a, cp_half);
++      nir_def *y = curve_load_f(b, nir_iadd(b, a, nir_u2u64(b, es)), cp_half);
++      nir_def *z = curve_load_f(b, nir_iadd(b, a, nir_u2u64(b, nir_imul_imm(b, es, 2))), cp_half);
++      c.p[i] = v3_((V)x, (V)y, (V)z);
++      c.r[i] = (V)curve_load_f(b, nir_iadd(b, rad, nir_u2u64(b, nir_imul(b, k, rad_stride))), rad_half);
++   }
++   c.basis = (V)nir_u2f32(b, basis);
++   c.count = (V)nir_u2f32(b, count);
++   c.flat = (V)is_flat;
++   c.caps = (V)nir_u2f32(b, caps);
++
++   nir_def *o = nir_load_deref(b, args->vars.origin), *d = nir_load_deref(b, args->vars.dir);
++   struct cv_ray r;
++   r.o = v3_((V)nir_channel(b, o, 0), (V)nir_channel(b, o, 1), (V)nir_channel(b, o, 2));
++   r.d = v3_((V)nir_channel(b, d, 0), (V)nir_channel(b, d, 1), (V)nir_channel(b, d, 2));
++   r.tmin = (V)args->tmin;
++   r.tmax = (V)nir_load_deref(b, args->vars.tmax);
++   struct cv_hit h = cv_intersect(&ops, &c, &r);
++
++   nir_push_if(b, (nir_def *)h.hit);
++   {
++      rq_store_var(b, index, vars->candidate.t, (nir_def *)h.t, 0x1);
++      rq_store_var(b, index, vars->candidate.barycentrics, nir_vec2(b, (nir_def *)h.u, nir_imm_float(b, 0.0f)), 0x3);
++      rq_store_var(b, index, vars->candidate.opaque, nir_imm_true(b), 0x1);
++      copy_candidate_to_closest(b, index, vars);
++      insert_terminate_on_first_hit(b, index, vars, true);
++   }
++   nir_pop_if(b, NULL);
++}
++
++static void
+ handle_candidate_aabb(nir_builder *b, struct nvk_leaf_intersection *intersection,
+                       const struct nvk_ray_traversal_args *args,
+                       const struct nvk_ray_flags *ray_flags)
+@@ -600,7 +703,38 @@
+    rq_store_var(b, index, vars->candidate.intersection_type, nir_imm_int(b, intersection_type_aabb),
+                 0x1);
+ 
+-   nir_jump(b, nir_jump_break);
++   if (!nvk_curves_enabled()) {
++      nir_jump(b, nir_jump_break);
++      return;
++   }
++
++   /* Is this box one of a curve geometry? The table is in the appendix of the structure being walked. */
++   nir_def *base = nir_load_deref(b, args->vars.bvh_base);
++   nir_def *app_off = hw_load_u32(b, base, offsetof(struct nvk_bvh_header, hw_offset));
++   nir_def *app = nir_iadd(b, base, nir_u2u64(b, app_off));
++   nir_def *table = hw_load_u32(b, app, offsetof(struct nvk_hwrt_appendix, curve_table_offset));
++   nir_def *ngeo = hw_load_u32(b, app, offsetof(struct nvk_hwrt_appendix, curve_geometry_count));
++   nir_def *geom = nir_iand_imm(b, intersection->geometry_id_and_flags, 0xffffff);
++   nir_def *have = nir_iand(b, nir_ine_imm(b, app_off, 0),
++                            nir_iand(b, nir_ieq_imm(b, hw_load_u32(b, app, offsetof(struct nvk_hwrt_appendix, magic)), NVK_HWRT_APPENDIX_MAGIC),
++                                     nir_iand(b, nir_ine_imm(b, table, 0), nir_ult(b, geom, ngeo))));
++   nir_variable *is_curve = nir_local_variable_create(b->impl, glsl_bool_type(), "is_curve");
++   nir_store_var(b, is_curve, nir_imm_false(b), 0x1);
++   nir_def *entry = nir_iadd(b, app, nir_u2u64(b, nir_iadd(b, table, nir_imul_imm(b, geom, sizeof(struct nvk_curve_entry)))));
++   nir_push_if(b, have);
++   {
++      nir_store_var(b, is_curve, nir_ieq_imm(b, hw_load_u32(b, entry, offsetof(struct nvk_curve_entry, magic)), NVK_CURVE_ENTRY_MAGIC), 0x1);
++   }
++   nir_pop_if(b, NULL);
++   nir_push_if(b, nir_load_var(b, is_curve));
++   {
++      curve_intersect_and_commit(b, entry, intersection, args, vars, index);
++   }
++   nir_push_else(b, NULL);
++   {
++      nir_jump(b, nir_jump_break);
++   }
++   nir_pop_if(b, NULL);
+ }
+ 
+ static void

@@ -34,7 +34,7 @@ JOBS=${NVK_JOBS:-6}
 
 case $REL in
   2.9) FIXES=$NVK/nvk-fixes-after-def16.patch
-       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq" ;;
+       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves" ;;
   2.8) FIXES=$NVK/release-2.8/nvk-fixes-after-def16.patch
        CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef" ;;
   *) echo "STOP: release must be 2.9 or 2.8"; exit 2 ;;
@@ -59,7 +59,9 @@ for p in $CHAIN; do
   echo "applied $(basename "$f")"
 done
 # the shared layout headers of the hardware ray-traversal part live in nvk/hwrt (the host tests include them too)
-cp "$NVK/hwrt/nvk_hwrt.h" "$NVK/hwrt/nvk_hwrt_layout.h" "$S/src/nouveau/vulkan/"
+cp "$NVK/hwrt/nvk_hwrt.h" "$NVK/hwrt/nvk_hwrt_layout.h" "$NVK/curves/nvk_curve.h" "$S/src/nouveau/vulkan/"
+cp "$NVK/curves/curve_math.h" "$S/src/nouveau/vulkan/nvk_curve_math.h"
+sed 's/#include "curve_math.h"/#include "nvk_curve_math.h"/' "$NVK/curves/curve_nir.h" > "$S/src/nouveau/vulkan/nvk_curve_nir.h"
 # the nvrm directory comes from nvk-macos.patch
 ln -s "$OUT/ogkm" "$S/src/nouveau/vulkan/nvkmd/nvrm/open-gpu-kernel-modules"
 python3 "$NVK/dlss/patch_dlss_cache.py" "$S"

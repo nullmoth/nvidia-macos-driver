@@ -7829,6 +7829,34 @@ static void nvmtl_geom_make_empty(nvmtl_geom *o)
     o->vertex_format = 106; o->stride = 12; o->index_type = 1000165000u; o->max_vertex = 0;
 }
 
+// MTLAccelerationStructureCurveGeometryDescriptor into the fields NVK reads. Properties are read by key so the plugin builds against
+// SDKs and deployment targets that predate the class. Returns 0 when the geometry is carried; nonzero leaves it to the EMPTY path.
+static int nvmtl_curve_from_descriptor(id g, nvmtl_geom *o, NSMutableSet *track)
+{
+    NVMTLBuffer *cpb = (NVMTLBuffer *)[g valueForKey:@"controlPointBuffer"], *rb = (NVMTLBuffer *)[g valueForKey:@"radiusBuffer"],
+                *ib = (NVMTLBuffer *)[g valueForKey:@"indexBuffer"];
+    if (!cpb || !rb || !ib) { nvlog("acceleration structure: curve geometry without a control point, radius or index buffer - built EMPTY"); return 1; }
+    long seg = [[g valueForKey:@"segmentCount"] longValue], cnt = [[g valueForKey:@"segmentControlPointCount"] longValue];
+    long basis = [[g valueForKey:@"curveBasis"] longValue], type = [[g valueForKey:@"curveType"] longValue], caps = [[g valueForKey:@"curveEndCaps"] longValue];
+    long cpf = [[g valueForKey:@"controlPointFormat"] longValue], rf = [[g valueForKey:@"radiusFormat"] longValue], it = [[g valueForKey:@"indexType"] longValue];
+    // control points: float3 or half3; radii: float or half; indices uint16 or uint32. Anything else is refused, never guessed.
+    int cph = cpf == MTLAttributeFormatHalf3, rh = rf == MTLAttributeFormatHalf;
+    if (!(cpf == MTLAttributeFormatFloat3 || cph) || !(rf == MTLAttributeFormatFloat || rh)) {
+        nvlog("acceleration structure: curve control point format %ld / radius format %ld is not carried - built EMPTY", cpf, rf); return 1; }
+    if (seg <= 0 || cnt < 2 || cnt > 4 || basis < 0 || basis > 3 || (basis == 2 && cnt != 2) || (basis == 1 && cnt != 4) || type < 0 || type > 1 || caps < 0 || caps > 2) {
+        nvlog("acceleration structure: curve geometry with %ld segments of %ld control points, basis %ld - not carried, built EMPTY", seg, cnt, basis); return 1; }
+    if (track) { [track addObject:cpb]; [track addObject:rb]; [track addObject:ib]; }
+    long cps = [[g valueForKey:@"controlPointStride"] longValue], rs = [[g valueForKey:@"radiusStride"] longValue];
+    o->is_boxes = 1; o->is_curve = 1; o->count = (uint32_t)seg; o->box_stride = 24;
+    o->cp_stride = (uint32_t)(cps ? cps : (cph ? 6 : 12)); o->radius_stride = (uint32_t)(rs ? rs : (rh ? 2 : 4));
+    o->cp_addr = nvmtl_vk_buffer_address(&cpb->_b) + [[g valueForKey:@"controlPointBufferOffset"] unsignedLongValue];
+    o->radius_addr = nvmtl_vk_buffer_address(&rb->_b) + [[g valueForKey:@"radiusBufferOffset"] unsignedLongValue];
+    o->curve_indices = nvmtl_vk_buffer_address(&ib->_b) + [[g valueForKey:@"indexBufferOffset"] unsignedLongValue];
+    // the flags word of nvk/curves/nvk_curve.h
+    o->curve_flags = (uint32_t)basis | (uint32_t)cnt << 2 | (uint32_t)type << 5 | (uint32_t)caps << 6 | (cph ? 1u << 8 : 0) | (rh ? 1u << 9 : 0) | (it == MTLIndexTypeUInt32 ? 1u << 10 : 0);
+    return 0;
+}
+
 uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int *instance, uint32_t *instance_count, NSMutableSet *track)
 {
     *instance = 0; *instance_count = 0;
@@ -7910,6 +7938,9 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
             if (track) [track addObject:bb];
             o->is_boxes = 1; o->boxes = nvmtl_vk_buffer_address(&bb->_b) + b.boundingBoxBufferOffset;
             o->box_stride = (uint32_t)(b.boundingBoxStride ? b.boundingBoxStride : 24); o->count = (uint32_t)b.boundingBoxCount;
+        } else if ([NSStringFromClass([g class]) containsString:@"Curve"] && getenv("NVK_CURVES") && getenv("NVK_CURVES")[0] == '1'
+                   && !nvmtl_curve_from_descriptor(g, o, track)) {
+            // carried as a curve geometry: the driver writes its boxes (NVK_CURVES=1 in NVK, same process)
         } else {
             nvlog("acceleration structure: geometry %u is a %s, not carried (motion / curves) - built EMPTY, keeping its index",
                   n, NSStringFromClass([g class]).UTF8String);
