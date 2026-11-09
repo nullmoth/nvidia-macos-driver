@@ -2088,6 +2088,28 @@ impl Emitter {
     ) -> Result<(), String> {
         let result_type = self.type_id(&result_ty)?;
         let result = self.result_id(&name, &result_ty)?;
+        // DIAGNOSTIC (NVMTL_DEVHANDLE_TRACE=1): the id is allocated HERE, before any branch below picks
+        // how (or whether) to emit a defining instruction. Several branches record a fact and return
+        // without defining it, which is how the ray-query lowering ends up reading an id that nothing
+        // defines. Naming the branch each load takes is what says which one did it.
+        if std::env::var_os("NVMTL_DEVHANDLE_TRACE").is_some() {
+            if let LlValue::Local(p) = &load.ptr.value {
+                let branch = if self.selected_access_trees.contains_key(p) {
+                    "selected_access_tree"
+                } else if self.selected_load_pointers.contains_key(p) {
+                    "selected_load_pointer"
+                } else if self.selected_pointers.contains_key(p) {
+                    "selected_pointer_direct"
+                } else if self.vector_word_pointers.contains_key(p) {
+                    "vector_word"
+                } else if self.raw_offsets.contains_key(p) {
+                    "raw_offsets (bindless fact or BDA address)"
+                } else {
+                    "generic load"
+                };
+                eprintln!("[load] {name} id={result} ty={result_ty:?} ptr={p} branch={branch}");
+            }
+        }
         if let LlValue::Local(ptr_name) = &load.ptr.value {
             if let Some(tree) = self.selected_access_trees.get(ptr_name).cloned() {
                 self.emit_selected_access_tree_load(
@@ -2153,6 +2175,18 @@ impl Emitter {
                         Some(slot),
                         vec![Operand::IdRef(low), Operand::IdRef(mask)],
                     ));
+                    // DIAGNOSTIC (NVMTL_DEVHANDLE_TRACE=1): this branch records a FACT and returns
+                    // without ever defining `result`, so the id is allocated, mapped, and defined by no
+                    // instruction. A later pass that reads it — the ray-query lowering reads the
+                    // acceleration structure operand this way — then reports "defined nowhere in the
+                    // module". Printing the name says which value took this path instead of the BDA
+                    // address path below, which does emit a real 64-bit load.
+                    if std::env::var_os("NVMTL_DEVHANDLE_TRACE").is_some() {
+                        eprintln!(
+                            "[devhandle] {name} -> fact id={result} slot={slot} sampler={sampler} \
+                             (no instruction defines id={result})"
+                        );
+                    }
                     self.emit_sidecar.device_handle_heap_loads.push(
                         crate::emit_sidecar::DeviceHandleHeapLoad {
                             id: result,
@@ -2167,6 +2201,19 @@ impl Emitter {
                         let addr = self.result_id(&bda_address_name(&name), &LlType::Int(64))?;
                         self.emit_raw_load(addr, &LlType::Int(64), &raw, load.align, instructions)?;
                         self.bda_address_values.insert(addr);
+                        // RECORD THAT `result` STANDS FOR `addr`. The pointer-typed id is in the
+                        // value map and is defined by NOTHING - deliberately, since Logical SPIR-V has no
+                        // pointer loaded out of device memory - so a later pass handed that id has no way
+                        // back to the value. The game's acceleration structure arrives exactly like this
+                        // (`%acceleration_structure = load ptr addrspace(1), ptr addrspace(1) %q`) and the
+                        // ray-query lowering refused every RT pipeline with "the acceleration structure
+                        // operand %N has no definition in the entry function or the globals".
+                        self.emit_sidecar.bda_pointer_addresses.push(
+                            crate::emit_sidecar::BdaPointerAddress {
+                                pointer: result,
+                                address: addr,
+                            },
+                        );
                         self.emit_device_address_nullness(&name, addr, instructions)?;
                         self.used_device_address = true;
                         let mut dev = RawBufferOffset::root(format!(".bda_{addr}"), 1);

@@ -50,10 +50,12 @@ rollback_install() {
   done
   rm -rf /Library/NullMoth/kexts "$FW" || failed=1
   [ ! -d "$BK/kexts" ] || ditto "$BK/kexts" /Library/NullMoth/kexts || failed=1
-  # Restore the firmware to both locations: a driver older than this one looks for it in /Users/Shared,
-  # and root writing that directory is harmless (root-owned, inside a sticky parent).
+  # Restore the firmware to both locations: a driver older than this one looks for it in /Users/Shared.
+  # /Users/Shared is writable by every account, so the old location is written only when root creates it here:
+  # mkdir -p adopted a folder or symlink another account had put there and ditto then wrote through it as root.
+  # mkdir without -p fails on anything that exists, and a root-owned folder in the sticky parent cannot be swapped.
   [ ! -d "$BK/nvfw" ] || ditto "$BK/nvfw" "$FW" || failed=1
-  [ ! -d "$BK/nvfw" ] || { mkdir -p "$FWOLD" && ditto "$BK/nvfw" "$FWOLD"; } || failed=1
+  [ ! -d "$BK/nvfw" ] || ! mkdir -m 0755 "$FWOLD" 2>/dev/null || ditto "$BK/nvfw" "$FWOLD" || failed=1
   if [ -f "$BK/AuxiliaryKernelExtensions.kc" ]; then cp -p "$BK/AuxiliaryKernelExtensions.kc" "$KC" || failed=1
   else rm -f "$KC" || failed=1; fi
   if [ -f "$BK/os-major" ]; then cp -p "$BK/os-major" /Library/NullMoth/os-major || failed=1
@@ -143,7 +145,8 @@ kpath() {
 }
 ioreg -r -c IOPCIDevice -d 1 | grep -q '"vendor-id" = <de100000>' || die "no NVIDIA GPU found on PCI"
 # The driver runs the cards NVIDIA's GSP firmware supports (Turing and later). The same list the Windows builder uses
-# (open-gpu-kernel-modules 615.78.08, p1401/nvidia_gsp_ids.json). Installing it for an older card (GTX 10 and before)
+# (open-gpu-kernel-modules 620.70.06: 615's list + 2BBD RTX PRO 5500 Blackwell, 2E13 RTX Spark N1X; the datacenter
+# VR NVL72 3041 left out like the other datacenter parts). Installing it for an older card (GTX 10 and before)
 # would switch the firmware screen off and leave nothing to draw: those PCs run macOS in basic display instead.
 SUPPORTED_IDS="
 1E02 1E04 1E07 1E30 1E36 1E78 1E81 1E82 1E84 1E87 1E89 1E90 1E91 1E93 1EB0 1EB1 1EB5 1EB6 1EC2 1EC7 1ED0 1ED1 1ED3
@@ -155,8 +158,8 @@ SUPPORTED_IDS="
 25AD 25B0 25B2 25B8 25B9 25BA 25BB 25BC 25BD 25E0 25E2 25E5 25EC 25ED 25F9 25FA 25FB 2684 2685 2689 26B1 26B2 26B3
 2702 2704 2705 2709 2717 2730 2757 2770 2782 2783 2786 2788 27A0 27B0 27B1 27B2 27BA 27BB 27E0 27FB 2803 2805 2808
 2820 2822 2838 2860 2882 28A0 28A1 28A3 28B0 28B8 28B9 28BA 28BB 28E0 28E1 28E3 28F8 2B85 2B87 2B8C 2BB1 2BB3 2BB4
-2BB5 2BB9 2C02 2C05 2C09 2C18 2C19 2C31 2C33 2C34 2C38 2C39 2C3A 2C58 2C59 2C77 2C79 2D04 2D05 2D18 2D19 2D30 2D39
-2D58 2D59 2D79 2D83 2D98 2DB8 2DB9 2DD8 2DF9 2E03 2E06 2E12 2F04 2F06 2F18 2F38 2F58
+2BB5 2BB9 2BBD 2C02 2C05 2C09 2C18 2C19 2C31 2C33 2C34 2C38 2C39 2C3A 2C58 2C59 2C77 2C79 2D04 2D05 2D18 2D19 2D30
+2D39 2D58 2D59 2D79 2D83 2D98 2DB8 2DB9 2DD8 2DF9 2E03 2E06 2E12 2E13 2F04 2F06 2F18 2F38 2F58
 "
 NV_IDS=$(ioreg -r -c IOPCIDevice -d 1 | awk '/"vendor-id" = <de100000>/{nv=1} /"device-id" = </{ if (match($0, /<[0-9a-f]+>/)) d=substr($0, RSTART+1, 4) }
   /^\+-o|^ *\}/{ if (nv && d != "") print toupper(substr(d,3,2) substr(d,1,2)); nv=0; d="" }' | sort -u)
@@ -282,6 +285,22 @@ if [ "$PRIMARY" = 1 ]; then
   codesign --verify --strict "$SELECTOR_SOURCE" || die "primary selector signature invalid; no files changed"
   KEXTS="$KEXTS NVPrimarySelector"
 fi
+# The audio driver. macOS 26 ships no HD Audio driver at all, so on a PC running it nothing binds to the sound
+# controller and there is no output device: 2,866 of 4,078 no-sound reports from 10-27 to 11-02 were macOS 26 with
+# "codecs none attached". NMXAudio is that driver (FreeBSD's HD Audio driver on the BSD-on-xnu layer), and it rides in
+# this package so every install and update gets it. It is installed only where it is needed and cannot collide: macOS 26
+# or later (15 has Apple's own HD Audio driver, and both would match the same controller), and an HD Audio controller
+# (PCI class 0x0403) on the bus. It goes through the same backup, collection build and verification as every kext above.
+AUDIO_NOTE=""
+if [ "$MAJ" -ge 26 ]; then
+  if ! ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | grep -q '"class-code" = <00030400>'; then
+    AUDIO_NOTE="no HD Audio controller on PCI, so the audio driver was not installed"
+  elif [ ! -f "$HERE/Library/Extensions/NMXAudio.kext/Contents/MacOS/NMXAudio" ]; then
+    AUDIO_NOTE="this package carries no audio driver"
+  else
+    KEXTS="$KEXTS NMXAudio"
+  fi
+fi
 # kmutil builds the auxiliary collection from every kext in /Library/Extensions, so one that names a dependency this
 # macOS lacks stops the build for all of them. 2.5.3 report: a Realtek USB Wi-Fi kext (RtWlanU1827) needed
 # com.apple.iokit.IOUSBFamily, which macOS 15 no longer has, and the stop said only "test kernel collection build
@@ -336,7 +355,10 @@ for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do [ ! -e
 # $BK/nvfw, so an empty backup made them no-ops: the fallback put the previous driver back with NO
 # firmware at all and the Mac came up with no display and no way out. Measured on the test Mac.
 if [ -d "$FW" ]; then backup_copy firmware ditto "$FW" "$BK/nvfw"
-elif [ -d "$FWOLD" ]; then backup_copy firmware ditto "$FWOLD" "$BK/nvfw"
+# The old location is backed up only if root owns it and no one else can write it: a folder another account planted in
+# /Users/Shared would otherwise become the backup, and a rollback would copy that account's files into $FW, which the
+# kernel reads.
+elif [ -d "$FWOLD" ] && [ ! -L "$FWOLD" ] && [ "$(stat -f '%u %Lp' "$FWOLD" | awk '{g=substr($2,length($2)-1,1); o=substr($2,length($2),1); print ($1==0 && g !~ /[2367]/ && o !~ /[2367]/) ? "ours" : "not"}')" = ours ]; then backup_copy firmware ditto "$FWOLD" "$BK/nvfw"
 fi
 ok "backup written"
 
@@ -459,6 +481,9 @@ ok "installed"
 # the licences and notices of everything this package carries, beside the driver they cover
 if [ -d "$HERE/licenses" ]; then rm -rf /Library/NullMoth/licenses && ditto "$HERE/licenses" /Library/NullMoth/licenses \
   && chmod -R go-w /Library/NullMoth/licenses || echo "   note: the licence texts could not be copied to /Library/NullMoth/licenses"; fi
+# /Library/NullMoth must stay traversable by every user: ARM apps' nm-arm lives under it and runs as the user. A root
+# shell with umask 077 (the Mac app's privileged steps) left it 700 in 2.7, which hid nm-arm from its own user.
+mkdir -p /Library/NullMoth && chmod 755 /Library/NullMoth || echo "   note: /Library/NullMoth could not be made readable (ARM apps may not start)"
 if [ -f "$HERE/VERSION" ]; then mkdir -p /Library/NullMoth && tr -cd '0-9.\n' < "$HERE/VERSION" | head -n 1 > /Library/NullMoth/driver-version.tmp \
   && chmod 644 /Library/NullMoth/driver-version.tmp && mv /Library/NullMoth/driver-version.tmp /Library/NullMoth/driver-version; fi
 
@@ -498,7 +523,7 @@ rm -rf /Library/NullMoth/kexts "$FW"
 [ ! -d "\$BK/kexts" ] || ditto "\$BK/kexts" /Library/NullMoth/kexts
 [ ! -d "\$BK/nvfw" ] || ditto "\$BK/nvfw" "$FW"
 # the previous driver may be one that reads the old location
-[ ! -d "\$BK/nvfw" ] || { mkdir -p "$FWOLD" && ditto "\$BK/nvfw" "$FWOLD"; }
+[ ! -d "\$BK/nvfw" ] || ! mkdir -m 0755 "$FWOLD" 2>/dev/null || ditto "\$BK/nvfw" "$FWOLD"
 if [ -f "\$BK/AuxiliaryKernelExtensions.kc" ]; then cp -p "\$BK/AuxiliaryKernelExtensions.kc" "$KC"; else rm -f "$KC"; fi
 [ ! -f "\$BK/os-major" ] || cp -p "\$BK/os-major" /Library/NullMoth/os-major
 if [ -f "\$BK/driver-version" ]; then cp -p "\$BK/driver-version" /Library/NullMoth/driver-version; else rm -f /Library/NullMoth/driver-version; fi
@@ -562,13 +587,38 @@ ok "a start counts as good once the desktop is up"
 
 ba=$(nvram boot-args 2>/dev/null | cut -f2-)
 for a in nvfb=1 nvaccel=1; do case " $ba " in *" $a "*) ;; *) echo "   NOTE: boot-args lack '$a' — add it in your OpenCore config.plist (README: Install — by hand), or let the 1401 Mac app set OpenCore up";; esac; done
+# WindowServer is a platform binary: with AMFI enforcing it refuses the Metal plugin ("mapping process is a platform
+# binary, but mapped file is not"), reaches the desktop with no Metal device and asserts "Failed to create MetalDevice".
+# Two reports had boot-args with nvfb/nvaccel but neither AMFI argument.
+amfi_note() {
+  case " $1 " in *" amfi_get_out_of_my_way="*|*" amfi="*) ;;
+    *) echo "   NOTE: boot-args lack 'amfi_get_out_of_my_way=0x1 amfi=0x80' — without them WindowServer refuses the NVIDIA Metal plugin and the desktop has no Metal device; add them in your OpenCore config.plist, or let the 1401 Mac app set OpenCore up";;
+  esac
+}
+amfi_note "$ba"
 # WhateverGreen's boot screen copy (on unless gfxrst=4) reads a console mapping macOS may already have freed when this
 # driver's display first opens, and the Mac panics in IOFramebuffer::postOpen.
 if kmutil showloaded --list-only --bundle-identifier as.vit9696.WhateverGreen 2>/dev/null | grep -q WhateverGreen; then
   case " $ba " in *" gfxrst=4 "*) ;; *) echo "   NOTE: WhateverGreen is loaded and boot-args lack 'gfxrst=4' — add it in your OpenCore config.plist, or the Mac can panic when the NVIDIA display first opens";; esac
 fi
 
+# Optional DLSS 4 / 4.5 files: downloaded from NVIDIA on this Mac and checked against pinned hashes. A failure here
+# never undoes the driver install.
+# dlss_fetch.sh runs as root from the private copy; it is only trusted when SHA256SUMS covered it and its tools.
+if [ -f "$HERE/dlss_fetch.sh" ] && ! { grep -qE '[ *]dlss_fetch\.sh$' "$HERE/SHA256SUMS" && grep -qE '[ *]dlss/dlss_cache$' "$HERE/SHA256SUMS" \
+      && grep -qE '[ *]dlss/nm_unzstd$' "$HERE/SHA256SUMS" && grep -qE '[ *]dlss/assertfail_trap\.ptx$' "$HERE/SHA256SUMS"; }; then
+  echo "   NOTE: this package's SHA256SUMS does not cover the DLSS step; skipping it."
+elif [ -f "$HERE/dlss_fetch.sh" ]; then
+  if [ "${NULLMOTH_DLSS:-0}" = 1 ]; then
+    step "DLSS 4 / 4.5 files"
+    /bin/bash "$HERE/dlss_fetch.sh" --yes || echo "   NOTE: the DLSS files were not installed; the driver itself is. Run again later: sudo env NULLMOTH_DLSS=1 ./install.sh"
+  else
+    echo "   DLSS 4 / 4.5 is optional: install with sudo env NULLMOTH_DLSS=1 ./install.sh (dlss_fetch.sh runs only from the installer's checked root-owned copy)."
+  fi
+fi
+
 echo; echo "Done. Reboot now: sudo shutdown -r now"
+[ -z "$AUDIO_NOTE" ] || echo "Audio: $AUDIO_NOTE."
 if [ "$ALLOWED" = "$(echo $KEXTS | wc -w | tr -d ' ')" ]; then
   echo "This is an update of extensions you already allowed: one restart is enough. macOS may show a notice that they were"
   echo "updated; the new driver loads on this restart without allowing them again."

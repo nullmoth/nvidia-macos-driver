@@ -3020,6 +3020,30 @@ pub(in crate::passes) fn lower_simdgroup_matrix_8x8_init_diag(
     Ok(insts)
 }
 
+// make_filled_simdgroup_matrix: every element of the 8x8 matrix is the operand, so each lane's two slots are it.
+pub(in crate::passes) fn lower_simdgroup_matrix_8x8_init_filled(
+    ctx: &mut Ctx,
+    res: Word,
+    rty: Word,
+    args: &[Word],
+) -> Result<Vec<Instruction>, String> {
+    if args.len() != 1 {
+        return Err(format!(
+            "air.simdgroup_matrix_8x8_init_filled expects 1 operand, got {}",
+            args.len()
+        ));
+    }
+    let (elem, lanes) = composite_shape(ctx, rty).ok_or_else(|| {
+        "air.simdgroup_matrix init_filled result is not a 64-lane composite".to_string()
+    })?;
+    if lanes != 64 {
+        return Err("air.simdgroup_matrix init_filled result is not 64-lane".to_string());
+    }
+    let mut insts = Vec::with_capacity(4);
+    matrix8_pack(ctx, &mut insts, elem, rty, res, [args[0], args[0]]);
+    Ok(insts)
+}
+
 enum MatrixBlockBase {
     Element,
     Block(Word),
