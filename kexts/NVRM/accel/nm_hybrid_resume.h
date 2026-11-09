@@ -63,6 +63,12 @@ struct nmr_ops {
 #define NMR_BW_BUDDY_MASK(i) ((i) == 0 ? 0x45134u : 0x45144u)
 #define NMR_PHY_MISC(p)    (0x64C00u + 4u * (p))
 #define NMR_DCPR2          0x46434u
+#define NMR_MBUS_CTL       0x4438Cu       /* version 20 and later: MDCLK to CDCLK ratio throttle and MBUS join */
+#define NMR_DC_STATE       0x45504u
+#define NMR_DC_HOLD        (3u << 20)     /* HOLD_PHY_PG1_LATCH and HOLD_PHY_CLKREQ_PG1_LATCH */
+#define NMR_XE2_D2D_ENABLE (1u << 29)     /* version 20 and later: the D2D link is controlled in the DDI buffer register */
+#define NMR_XE2_D2D_STATE  (1u << 28)
+#define NMR_GMBUS_GATE     (1u << 31)     /* SOUTH_DSPCLK_GATE_D: GMBUS unit clock gate disable */
 #define NMR_ERR_FATAL      0x4421Cu
 #define NMR_DSPCLK_GATE    0xC2020u
 #define NMR_PCODE_MAILBOX  0x138124u
@@ -191,6 +197,8 @@ static inline unsigned nmr_last_combo_port(unsigned display_version) { return di
 /* ---- display version 14: the C10 PHY's register file as the firmware left it (read over the message bus, nm_hybrid_resume14.h) */
 struct nmx_snap {
     uint8_t  valid, reversal, lanes;
+    uint8_t  ver, is_c20, c20_serdes, c20_width;   /* display version this was captured on; 1 when the port's PHY is a C20 */
+    uint16_t c20_tx[3], c20_cmn[4], c20_mp[11]; uint32_t c20_clock;     /* the C20 register file (kHz port clock computed from it) */
     uint8_t  pll[20], cmn[4], tx[2], width, ovrd[2];
     uint8_t  vdrovrd[2][2][3];                   /* [lane][tx][control] */
     uint8_t  ctl1;
@@ -242,7 +250,7 @@ struct nmr_snap {
     struct nmr_topo topo;
     uint32_t pw_driver, pw_aux, pw_ddi;
     uint32_t de_pll, cdclk, squash, dssm;
-    uint32_t nde, dbuf[4], abox[3], buddy[4], phymisc, dcpr2, err_fatal, dspclk;   /* display core init state */
+    uint32_t nde, dbuf[4], abox[3], buddy[4], phymisc, dcpr2, err_fatal, dspclk, mbus;   /* display core init state */
     uint8_t  volt;                               /* the voltage level the platform controller was told for this display clock */
     uint32_t dpll_en[2], cfgcr0[2], cfgcr1[2], div0[2], dpclka;
     uint32_t phy[NMR_PHY_WORDS];
@@ -434,11 +442,12 @@ static inline int nmr_snap_impl(const struct nmr_ops *o, struct nmr_snap *s, uns
     { unsigned sel = (s->func & NMR_TRANS_PORT_MASK) >> NMR_TRANS_PORT_SHIFT;    /* port + 1, 0 = none */
       if (!sel) return NMR_E_NO_SNAPSHOT;
       port = sel - 1; }
-    if (!(display_version == 12 || display_version == 13 || display_version == 14) || port > nmr_last_combo_port(display_version)) return NMR_E_GEN;   /* Type-C and later ports: refused */
+    if (!((display_version >= 12 && display_version <= 14) || display_version == 20 || display_version >= 30) || port > nmr_last_combo_port(display_version)) return NMR_E_GEN;   /* Type-C and later ports: refused */
     if (!(o->rd(o->ctx, NMR_DDI_BUF_CTL(port)) & NMR_DDI_ENABLE)) return NMR_E_NO_SNAPSHOT;
     s->topo.pipe = (uint8_t)pipe; s->topo.port = (uint8_t)port;
     s->pw_driver = o->rd(o->ctx, NMR_PW_DRIVER); s->pw_aux = o->rd(o->ctx, NMR_PW_AUX); s->pw_ddi = o->rd(o->ctx, NMR_PW_DDI);
     s->de_pll = o->rd(o->ctx, NMR_DE_PLL_ENABLE); s->cdclk = o->rd(o->ctx, NMR_CDCLK_CTL);
+    if (display_version >= 20) s->mbus = o->rd(o->ctx, NMR_MBUS_CTL);
     s->nde = o->rd(o->ctx, NMR_NDE_RSTWRN); s->dspclk = o->rd(o->ctx, NMR_DSPCLK_GATE);
     for (i = 0; i < 4; i++) s->dbuf[i] = o->rd(o->ctx, NMR_DBUF_CTL(i));
     if (display_version <= 13) {
@@ -660,6 +669,13 @@ static inline int nmr_st_core_late(const struct nmr_ops *o, const struct nmr_sna
         for (i = 0; i < 2; i++) { o->wr(o->ctx, NMR_BW_BUDDY_MASK(i), s->buddy[2 * i + 1]); o->wr(o->ctx, NMR_BW_BUDDY_CTL(i), s->buddy[2 * i]); }
         o->wr(o->ctx, NMR_DCPR2, s->dcpr2);
         if (display_version == 13) o->wr(o->ctx, NMR_ERR_FATAL, s->err_fatal);
+    }
+    if (display_version >= 20) {          /* the MDCLK to CDCLK ratio throttle and the MBUS join the firmware had */
+        o->wr(o->ctx, NMR_MBUS_CTL, s->mbus);
+        if (display_version == 20) {      /* Wa_15013987218: pulse the GMBUS unit clock gate */
+            o->wr(o->ctx, NMR_DSPCLK_GATE, o->rd(o->ctx, NMR_DSPCLK_GATE) | NMR_GMBUS_GATE);
+            o->wr(o->ctx, NMR_DSPCLK_GATE, o->rd(o->ctx, NMR_DSPCLK_GATE) & ~NMR_GMBUS_GATE);
+        }
     }
     return NMR_OK;
 }

@@ -934,7 +934,14 @@ void NMIntelFB::resumeCapture()
 {
     long long v = 0; int a = 0; const int present = PE_parse_boot_argn("nmhybridresume", &a, sizeof a); v = a;
     if (!nmr_enabled(present, v)) return;
-    if (!(fVer == 12 || fVer == 13 || fVer == 14) || fPipe < 0 || fPipe > 3) { IFBLOG("hybrid: resume unavailable: display version %u pipe %d (versions 12 to 14, pipes A to D)", fVer, fPipe); return; }
+    // Lunar Lake and Panther Lake (display 20 and 30, nm_hybrid_resume14.h, the C20 PHY): ported from Linux's xe display code, never run on
+    // hardware, so they stay behind their own boot-arg.
+    const bool xe2 = fVer == 20 || fVer >= 30;
+    if (xe2) {
+        int a20 = 0;
+        if (!PE_parse_boot_argn("nmhybrid20", &a20, sizeof a20) || a20 != 1) { IFBLOG("hybrid: resume unavailable: display version %u needs the boot-arg nmhybrid20=1 (not yet run on hardware)", fVer); return; }
+    }
+    if (!((fVer >= 12 && fVer <= 14) || xe2) || fPipe < 0 || fPipe > 3) { IFBLOG("hybrid: resume unavailable: display version %u pipe %d (versions 12 to 14, 20 and 30, pipes A to D)", fVer, fPipe); return; }
     if (fVer <= 13 && !ggttMap()) return;
     fSnap = (struct nmr_snap *)IOMalloc(sizeof *fSnap);
     if (!fSnap) return;
@@ -948,14 +955,14 @@ void NMIntelFB::resumeCapture()
     struct nmr_edp edp = {};
     uint8_t *vbtKeep = nullptr; uint32_t vbtKeepLen = 0;
     readVbt(&edp, &vbtKeep, &vbtKeepLen);
-    const int rc = fVer == 14 ? nmr14_snapshot(&ops, fSnap, (unsigned)fPipe, &edp) : nmr_snapshot(&ops, fSnap, (unsigned)fPipe, fVer, &edp);
+    const int rc = fVer >= 14 ? nmr20_snapshot(&ops, fSnap, (unsigned)fPipe, &edp, fVer) : nmr_snapshot(&ops, fSnap, (unsigned)fPipe, fVer, &edp);
     if (rc != NMR_OK) { IFBLOG("hybrid: resume unavailable: %s", nmr_result_name(rc)); IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; if (vbtKeep) IOFree(vbtKeep, vbtKeepLen); return; }
     if (vbtKeep) {
         // the video BIOS named no panel type: the panel's own identifier picks the entry (Linux pnpid_get_panel_type)
         uint8_t id[10]; struct nmv_edp e; struct nmr_ops o2 = ops; bool got;
-        if (fVer == 14) { o2.aux_ctl_or = NMX_AUX_POWER_REQ; nmx_aux_power(&ops, fSnap->topo.port, 1); }
+        if (fVer >= 14) { o2.aux_ctl_or = NMX_AUX_POWER_REQ; nmx_aux_power(&ops, fSnap->topo.port, 1); }
         got = nmr_edid_id(&o2, fSnap->topo.port, id) == 0;
-        if (fVer == 14) nmx_aux_power(&ops, fSnap->topo.port, 0);
+        if (fVer >= 14) nmx_aux_power(&ops, fSnap->topo.port, 0);
         if (got && nmv_edp(vbtKeep, vbtKeepLen, id, &e)) {
             fSnap->edp.known = 1; fSnap->edp.low_vswing = (uint8_t)e.low_vswing; fSnap->edp.hobl = (uint8_t)e.hobl;
             IFBLOG("hybrid: video BIOS: panel type %u by the panel's identifier, low-swing table %s, reduced-power table %s", e.panel_type, e.low_vswing ? "yes" : "no", e.hobl ? "yes" : "no");
@@ -987,7 +994,7 @@ void NMIntelFB::resumeRun()
         [](void *, unsigned us) { IODelay(us); },
         [](void *, const char *st) { IFBLOG("hybrid: resume step: %s", st); },
         nullptr };      // swing and pre-emphasis levels are programmed by nmr_drive_apply (nm_hybrid_resume.h)
-    const int rc = fVer == 14 ? nmr14_resume(&ops, fSnap) : nmr_resume(&ops, fSnap, fVer);
+    const int rc = fVer >= 14 ? nmr20_resume(&ops, fSnap) : nmr_resume(&ops, fSnap, fVer);
     IFBLOG("hybrid: resume: %s", nmr_result_name(rc));
     ifbStep(rc == NMR_OK || rc == NMR_ALREADY_LIT ? NMH_STEP_RESUME_DONE : NMH_STEP_RESUME_FAILED);
     if (rc == NMR_OK || rc == NMR_ALREADY_LIT) {
