@@ -31,9 +31,9 @@ arm("the panel driver writes translation-table entries only in a run of equal un
 arm("the panel driver never edits entries of the firmware surface", "fwLo, fwHi" in ifb)
 arm("a flip that never lands ends import for the boot and puts the firmware surface back", "fHyLevel = NMH_COPY;" in ifb and "hybridWriteSurf(fSurf, fStrideReg);" in ifb)
 arm("going home is honoured even after import was switched off", 0 <= ifb.find("q->op == NMH_OP_HOME") < ifb.find("fHyLevel < NMH_IMPORT || !fRegs"))
-arm("auto-go waits for head 4 only when the switch is on", "hyWait = present && lv >= 1 && lv <= 3" in nvrm and "if (hyWait) {" in nvrm)
+arm("auto-go waits for head 4 only when the switch is on", "hyWait = present && lv >= 1 && lv <= 4" in nvrm and "if (hyWait) {" in nvrm)
 arm("that wait is bounded by the same 20 iterations as the NVIDIA heads", re.search(r"for \(i = 0; i < 20; i\+\+\) \{\n[^\n]*\n\s*if \(hyWait\)", nvrm) is not None)
-arm("the ABI header names one entry point and a version", "NMH_FN_IMPORT" in abi and "NMH_ABI_VERSION    2u" in abi)
+arm("the ABI header names one entry point and a version", "NMH_FN_IMPORT" in abi and "NMH_ABI_VERSION    3u" in abi)
 arm("the logic header is plain C (no kernel headers)", "#include <IOKit" not in hdr and "#include <stdint.h>" in hdr)
 
 arm("the panel driver stands down when the boot guard has the NVIDIA driver off", "const int why = ifbStandDownWhy();" in ifb and "standing down, the firmware framebuffer keeps the panel" in ifb)

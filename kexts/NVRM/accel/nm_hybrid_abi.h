@@ -18,7 +18,7 @@
 #pragma once
 
 #define NMH_FN_IMPORT      "nmHybridImport"
-#define NMH_ABI_VERSION    2u
+#define NMH_ABI_VERSION    3u
 
 #define NMH_OP_QUERY 1u
 #define NMH_OP_MAP   2u
@@ -29,6 +29,12 @@
 #define NMH_OP_ACQUIRE 5u
 #define NMH_OP_PRESENT 6u
 #define NMH_OP_ABORT   7u
+/* level 4: the copy engine writes the frame into the owned buffer. ACQUIRE with NMH_REQ_DEVICE_WRITES in q.flags flushes the
+ * buffer from the CPU caches and returns its pages (q.pages, q.npages: bus addresses, valid until the panel driver stops).
+ * QUARANTINE is sent instead of ABORT when the copy timed out: the engine may still be writing, so the buffer is never
+ * handed out again. */
+#define NMH_OP_QUARANTINE 8u
+#define NMH_REQ_DEVICE_WRITES 1u
 
 struct NMHybridReq {
     unsigned int       version;     /* NMH_ABI_VERSION */
@@ -39,8 +45,9 @@ struct NMHybridReq {
     int                slot;        /* QUERY out; MAP and FLIP in */
     unsigned int       needMap;     /* QUERY out: 1 when the slot must be mapped before it is flipped to */
     unsigned int       evictedId;   /* QUERY out: the surface that lost the slot (release what was held for it), or 0 */
-    unsigned int       npages;      /* MAP in: number of 4 KiB pages */
-    const unsigned long long *pages;/* MAP in: bus address of each page */
+    unsigned int       flags;       /* ACQUIRE in: NMH_REQ_* */
+    unsigned int       npages;      /* MAP in: number of 4 KiB pages; ACQUIRE out with NMH_REQ_DEVICE_WRITES */
+    const unsigned long long *pages;/* MAP in: bus address of each page; ACQUIRE out with NMH_REQ_DEVICE_WRITES */
     void              *kva;         /* ACQUIRE out: the buffer */
     int                result;      /* out: enum nmh_why, 0 = ok */
 };
