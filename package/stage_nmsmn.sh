@@ -4,7 +4,8 @@
 #   <pkgroot>/Library/NullMoth/ryzenadj/ryzenadj     NullMoth's RyzenAdj build (tools/ryzenadj-macos/build.sh)
 # Both are only carried: install.sh copies /Library/NullMoth/kexts as a whole and never loads NMSMN. The kext is inert until
 # the boot argument nmsmn=1 is set, which only the Mac app's Ryzen power profile does, and the binary is installed by
-# nullmoth-ryzen-power.sh only if its SHA-256 is pinned there. Run before SHA256SUMS is written. Refuses a kext that is not
+# nullmoth-ryzen-power.sh only if its SHA-256 is pinned there. Refreshes the staged files' lines in SHA256SUMS when it exists;
+# package/check_package.sh, the last step of a package build, refuses a package that lacks these parts. Refuses a kext that is not
 # NullMoth's NMSMN, a binary that does not match <sha256>, and links anywhere.
 set -eu
 KEXT=${1:?usage: stage_nmsmn.sh <NMSMN.kext> <ryzenadj> <sha256> <pkgroot>}
@@ -24,4 +25,12 @@ ditto "$KEXT" "$ROOT/Library/NullMoth/kexts/NMSMN.kext"
 cp "$BIN" "$ROOT/Library/NullMoth/ryzenadj/ryzenadj"
 chmod 755 "$ROOT/Library/NullMoth/ryzenadj/ryzenadj"
 [ "$(shasum -a 256 "$ROOT/Library/NullMoth/ryzenadj/ryzenadj" | cut -d' ' -f1)" = "$SHA" ] || die "the staged copy does not match"
+# SHA256SUMS: replace every line of the staged files (install.sh and the Mac app both verify against it)
+if [ -f "$ROOT/SHA256SUMS" ]; then
+  grep -vF -e "  ./Library/NullMoth/kexts/NMSMN.kext/" -e "  Library/NullMoth/kexts/NMSMN.kext/" \
+       -e "  ./Library/NullMoth/ryzenadj/" -e "  Library/NullMoth/ryzenadj/" "$ROOT/SHA256SUMS" > "$ROOT/SHA256SUMS.new" || true
+  (cd "$ROOT" && find Library/NullMoth/kexts/NMSMN.kext Library/NullMoth/ryzenadj -type f | LC_ALL=C sort | while IFS= read -r f; do
+     printf '%s  ./%s\n' "$(shasum -a 256 "$f" | cut -d' ' -f1)" "$f"; done) >> "$ROOT/SHA256SUMS.new"
+  mv -f "$ROOT/SHA256SUMS.new" "$ROOT/SHA256SUMS"
+fi
 echo "staged NMSMN.kext and ryzenadj ($SHA)"
