@@ -25,6 +25,9 @@ def check(name, ok, detail=''):
 def resset(objects, header):
     impl = objects[objects.index('@implementation NVMTLResSet'):]
     impl = impl[:impl.index('@end') + 4]
+    # the identity-hashed set the class allocates sits just above it in NVMTLObjects.m
+    if 'static NSMutableSet *nvmtl_identity_set(' in objects:   # the old build (negative control) predates it
+        impl = objects[objects.index('static NSMutableSet *nvmtl_identity_set('):objects.index('@implementation NVMTLResSet')] + impl
     iface = re.search(r'@interface NVMTLResSet : NSMutableSet .*?@end', header, re.S).group(0)
     return iface + '\n' + impl
 

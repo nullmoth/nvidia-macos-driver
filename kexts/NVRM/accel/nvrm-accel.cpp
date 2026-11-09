@@ -2268,8 +2268,13 @@ static int nvaccel_crc_sysctl SYSCTL_HANDLER_ARGS
     NVAccel *a = NVAccel::gAccel;
     IOService *fb = a ? a->fFB : nullptr;
     IOService *nub = fb ? fb->getProvider() : nullptr;
-    OSNumber *n = nub ? OSDynamicCast(OSNumber, nub->getProperty("nvkms-kapi")) : nullptr;
-    struct NvKmsKapiFunctionsTable *k = n ? (struct NvKmsKapiFunctionsTable *)(uintptr_t)n->unsigned64BitValue() : nullptr;
+    struct NVRMDisplayPointers displayPtrs = {};
+    displayPtrs.version = NVRM_DISPLAY_PTRS_ABI_VERSION;
+    if (nub) {
+        const OSSymbol *displayPtrsFn = OSSymbol::withCString(NVRM_DISPLAY_PTRS_FN);
+        if (displayPtrsFn) { nub->callPlatformFunction(displayPtrsFn, false, &displayPtrs, NULL, NULL, NULL); displayPtrsFn->release(); }
+    }
+    struct NvKmsKapiFunctionsTable *k = (struct NvKmsKapiFunctionsTable *)displayPtrs.kapi;
     struct NVRMRmHandles h; nvSVZero(&h, sizeof h);
     if (k && k->getCRC32 && gCrcHead >= 0 && gCrcHead < 8 && nvAccelRmHandles(&h) && h.kapiDevice) {
         struct NvKmsKapiCrcs c; nvSVZero(&c, sizeof c);

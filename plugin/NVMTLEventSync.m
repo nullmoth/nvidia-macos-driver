@@ -497,6 +497,7 @@ static int nvmtl_skip_empty_on(void) {
         // Metal HUD creating its font texture) waits for a command buffer queued behind this one. WAS: inline here, a
         // deadlock (No Man's Sky with MetalForceHudEnabled: white window, main thread in waitUntilCompleted, the execution
         // queue in present). NVMTL_PRESENT_INLINE=1: the old inline presents.
+        if (_present) nvmtl_present_dump(_present->_parent ?: _present);   // the finished drawable, before it is handed over
         static dispatch_queue_t presentQ; static int inl = -1; static dispatch_once_t once;
         dispatch_once(&once, ^{
             const char *e = getenv("NVMTL_PRESENT_INLINE"); inl = e && *e && *e != '0';
@@ -531,6 +532,13 @@ static int nvmtl_skip_empty_on(void) {
     [self nvmtlReleaseCapacity];
 }
 - (void)nvmtlFinishCallbacks {
+    if (nvmtl_cbt_on() && _cbtSeq)
+        // C seq create commit firstSubmit gpuStart gpuEnd fenceSeen done nDispatch firstKernel (ns, CLOCK_UPTIME_RAW)
+        nvmtl_cbt_line("C %llu %llu %llu %llu %llu %llu %llu %llu %u %s\n", (unsigned long long)_cbtSeq,
+            (unsigned long long)_cbtCreate, (unsigned long long)_cbtCommit, (unsigned long long)(_legacyKernelStart * 1e9),
+            (unsigned long long)(_gpuStart * 1e9), (unsigned long long)(_gpuEnd * 1e9),
+            (unsigned long long)(_gpuTimingSeen ? _gpuTiming.host_after_ns : 0), (unsigned long long)nvmtl_cbt_now(),
+            _cbtND, _cbtK[0] ? _cbtK : "-");
     [_completionCondition lock];
     NSArray *handlers = [_handlers copy]; [_handlers removeAllObjects];
     [self nvmtlDispatchHandlers:handlers scheduled:NO];
@@ -585,6 +593,12 @@ static void nvmtl_gsub_census(void) {
 static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL writtenOnly) {
     NSMutableSet<NVMTLBuffer *> *copies = nil;
     for (id resource in resources) {
+        if ([resource isKindOfClass:[NVMTLHeapPin class]]) {   // a used heap: its members with a host copy
+            NVMTLHeapPin *pin = resource;
+            NSArray *nested = nvmtl_submission_copies([NSSet setWithArray:[pin allCopyCandidates]], writtenOnly);
+            if (nested.count) { if (!copies) copies = [NSMutableSet new]; [copies addObjectsFromArray:nested]; }
+            continue;
+        }
         NVMTLBuffer *buffer = nil;
         if ([resource isKindOfClass:[NVMTLBuffer class]]) buffer = resource;
         else if ([resource isKindOfClass:[NVMTLTexture class]]) {
@@ -626,7 +640,7 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
         }
         if (!part->commands.cb) return NO;
         if (!part->encoders && !part->resources.count && !part->surfaces.count && !part->scratch.count && nvmtl_skip_empty_on()) {
-            if (!nvmtl_evfold_on() || _nextSubmit + 1 >= _parts.count) return NO;
+            if (!nvmtl_evfold_on() || (_nextSubmit + 1 >= _parts.count && (part->signalEvent || part->signals.count))) return NO;
             [self nvmtlMarkScheduled];
         if (!_legacyKernelStart) _legacyKernelStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
             nvmtl_vk_cmd_abandon(&part->commands);
@@ -662,6 +676,7 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
     }
     return YES;
 }
+static void nvmtl_ahead_kick(void);
 static void nvmtl_gsub_ahead_pass1(void);
 static void nvmtl_gsub_ahead_pass(void) {
     for (int round = 0; round < 64; round++) {
@@ -715,7 +730,25 @@ static void nvmtl_gsub_ahead_pass1(void) {
         else {
             nvmtl_prepare_submission_copies(part);
             for (NVMTLBuffer *buffer in part->copyInputs) nvmtl_buffer_sync_in(buffer);
-            result = nvmtl_vk_submit_wait(&part->commands);
+            // A worker-owned part is an ordering barrier until QueueSubmit has
+            // accepted it. Publish that progress before waiting on its fence so
+            // the ahead lane can issue later parts in the same queue.
+            nvmtl_inflight *f = nvmtl_vk_inflight_new();
+            if (!f) result = nvmtl_vk_submit_wait(&part->commands);
+            else {
+                result = nvmtl_vk_submit_begin(&part->commands, f);
+                if (!result) {
+                    @synchronized ([NVMTLCommandBuffer class]) {
+                        if (_nextSubmit <= _nextPart) _nextSubmit = _nextPart + 1;
+                        nvmtl_evfold_promise_part(part);
+                    }
+                    if (nvmtl_gsub_ahead_on()) nvmtl_ahead_kick();
+                    result = nvmtl_vk_submit_finish(f);
+                }
+                // Retain uncertain submission state on an error, as the ahead
+                // path does; the owning part enters quarantine on device loss.
+                if (!result) nvmtl_vk_inflight_free(f);
+            }
         }
         if (result == -2) {
             if (!nvmtl_quarantined_parts) nvmtl_quarantined_parts = [NSMutableArray new];

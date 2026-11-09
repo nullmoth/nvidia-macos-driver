@@ -1,0 +1,22 @@
+//
+// Device-side assert handler for DLSS kernels compiled at install time: CUDA's runtime normally supplies
+// __assertfail; here an assert that fires stops the kernel with a trap (a clean channel fault) instead of a call
+// through an unresolved address.
+// .target is the OLDEST arch DLSS supports (sm_75): ptxas refuses a .target newer than -arch, so sm_89 failed every
+// sm_86 (RTX 30) build with "SM version specified by .target is higher than default".
+//
+.version 8.7
+.target sm_75
+.address_size 64
+
+.visible .func __assertfail(
+    .param .b64 __assertfail_param_0,
+    .param .b64 __assertfail_param_1,
+    .param .b32 __assertfail_param_2,
+    .param .b64 __assertfail_param_3,
+    .param .b64 __assertfail_param_4
+)
+{
+    trap;
+    ret;
+}

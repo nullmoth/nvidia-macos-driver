@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::reflect::SamplerAddressMode;
+use crate::reflect::{SamplerAddressMode, SamplerCoordinates, SamplerMipFilter};
 
 fn is_gradient_family(name: &str) -> bool {
     name.split('.').any(|token| token.ends_with("_grad"))
@@ -210,6 +210,20 @@ pub(in crate::passes) fn lower_sample(
                     "{name} samples through a pixel-coordinate sampler, whose emulation has no \
                      place for the gradient the call carries"
                 ));
+            }
+            if pixel_linear && !arrayed && dim == Dim::Dim2D {
+                if let Some(uv) = pixel_linear_hw_coord(ctx, sampler_state, img, coord, args, &mut out) {
+                    // The sampler behind a pixel-coordinate Metal sampler is a normalized VkSampler with the same filter
+                    // and address modes, so the hardware filter at uv = coord / size gives the pixel-space result.
+                    let mut hw_args = args.to_vec();
+                    hw_args[2] = uv;
+                    let normalized = StaticSamplerState { coordinates: SamplerCoordinates::Normalized, ..sampler_state };
+                    ctx.sampler_states.insert(samp, normalized);
+                    let lowered = lower_sample(ctx, name, Some(res), Some(rty), &hw_args, v4);
+                    ctx.sampler_states.insert(samp, sampler_state);
+                    out.extend(lowered?);
+                    return Ok(out);
+                }
             }
             let lod = match find_sample_lod(ctx, arrayed, args, &mut out) {
                 Some(lod) => sample_lod_to_fetch_lod(ctx, lod, &mut out)?,
@@ -849,6 +863,58 @@ fn nclamp_float(ctx: &mut Ctx, x: Word, lo: Word, hi: Word, out: &mut Vec<Instru
         ],
     ));
     clamped
+}
+
+/// The normalized coordinate for a pixel-coordinate linear sample the hardware filter can take as is: a 2D float2
+/// coordinate, clamp-to-edge on both axes, no mip filter, level 0 (or none) and no offset. The emulation below fetches
+/// four texels and blends them per sample, which ran 2.2x slower than the hardware filter for MPS's Gaussian blur on
+/// NVIDIA. None leaves every other case to the emulation.
+fn pixel_linear_hw_coord(
+    ctx: &mut Ctx,
+    sampler_state: StaticSamplerState,
+    img: Word,
+    coord: Word,
+    args: &[Word],
+    out: &mut Vec<Instruction>,
+) -> Option<Word> {
+    // NVMTL_NO_PIXEL_HW_FILTER=1 keeps the exact four-fetch emulation for every pixel-coordinate sample (diagnostic:
+    // the hardware filter is the one remaining difference against the translator that renders Cyberpunk correctly,
+    // in MetalFX's temporal unified pass, ten samples per module).
+    if std::env::var_os("NVMTL_NO_PIXEL_HW_FILTER").is_some() {
+        return None;
+    }
+    if sampler_state.address_mode_s != SamplerAddressMode::ClampToEdge
+        || sampler_state.address_mode_t != SamplerAddressMode::ClampToEdge
+        || sampler_state.mip_filter != SamplerMipFilter::None
+    {
+        return None;
+    }
+    let vec2 = ctx.ty_vecf(2);
+    if value_result_type(ctx, coord) != Some(vec2) {
+        return None;
+    }
+    match classify_sample_level(ctx, false, args) {
+        // A fragment sample with no level is an implicit-LOD sample in SPIR-V: the hardware would pick a mip level from
+        // the uv derivatives, while a Metal pixel-coordinate sample always reads level 0. The VkSampler behind a pixel
+        // sampler is created with linear mips and no LOD clamp, so MetalFX's MFX_NORMALIZE (full-screen, implicit)
+        // blended mip levels and the whole colour chain after it came out wrong. Compute has no implicit LOD.
+        None if ctx.stage == Stage::Fragment => return None,
+        None => {}
+        Some(SampleLevel::Explicit(lod)) if float_operand_is_constant_zero(ctx, lod) => {}
+        _ => return None,
+    }
+    match sample_const_or_dynamic_offset(ctx, false, args, 2) {
+        Ok((None, None)) => {}
+        Ok((Some(offset), None)) if offset.iter().all(|&v| v == 0) => {}
+        _ => return None,
+    }
+    let lod0 = ctx.const_uint(0);
+    let size = query_image_size(ctx, img, 2, false, lod0, out);
+    let sizef = ctx.module.fresh_id();
+    out.push(Instruction::new(Op::ConvertUToF, Some(vec2), Some(sizef), vec![Operand::IdRef(size)]));
+    let uv = ctx.module.fresh_id();
+    out.push(Instruction::new(Op::FDiv, Some(vec2), Some(uv), vec![Operand::IdRef(coord), Operand::IdRef(sizef)]));
+    Some(uv)
 }
 
 #[allow(clippy::too_many_arguments)]

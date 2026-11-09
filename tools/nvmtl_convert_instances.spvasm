@@ -1,0 +1,247 @@
+OpCapability Shader
+OpCapability Int64
+OpCapability PhysicalStorageBufferAddresses
+OpExtension "SPV_KHR_physical_storage_buffer"
+OpMemoryModel PhysicalStorageBuffer64 GLSL450
+OpEntryPoint GLCompute %main "main" %push %gid
+OpExecutionMode %main LocalSize 64 1 1
+OpDecorate %arr_u32 ArrayStride 4
+OpMemberDecorate %U32 0 Offset 0
+OpDecorate %U32 Block
+OpMemberDecorate %Push 0 Offset 0
+OpMemberDecorate %Push 1 Offset 8
+OpMemberDecorate %Push 2 Offset 16
+OpMemberDecorate %Push 3 Offset 24
+OpMemberDecorate %Push 4 Offset 32
+OpMemberDecorate %Push 5 Offset 36
+OpMemberDecorate %Push 6 Offset 40
+OpMemberDecorate %Push 7 Offset 44
+OpDecorate %Push Block
+OpDecorate %gid BuiltIn GlobalInvocationId
+%void = OpTypeVoid
+%fnty = OpTypeFunction %void
+%bool = OpTypeBool
+%u32 = OpTypeInt 32 0
+%u64 = OpTypeInt 64 0
+%v3u = OpTypeVector %u32 3
+%arr_u32 = OpTypeRuntimeArray %u32
+%U32 = OpTypeStruct %arr_u32
+%pU32 = OpTypePointer PhysicalStorageBuffer %U32
+%pu32 = OpTypePointer PhysicalStorageBuffer %u32
+%Push = OpTypeStruct %u64 %u64 %u64 %u64 %u32 %u32 %u32 %u32
+%pcPush = OpTypePointer PushConstant %Push
+%pcU64 = OpTypePointer PushConstant %u64
+%pcU32 = OpTypePointer PushConstant %u32
+%inV3u = OpTypePointer Input %v3u
+%c0 = OpConstant %u32 0
+%c1 = OpConstant %u32 1
+%c2 = OpConstant %u32 2
+%c3 = OpConstant %u32 3
+%c4 = OpConstant %u32 4
+%c5 = OpConstant %u32 5
+%c6 = OpConstant %u32 6
+%c7 = OpConstant %u32 7
+%c8 = OpConstant %u32 8
+%c9 = OpConstant %u32 9
+%c10 = OpConstant %u32 10
+%c11 = OpConstant %u32 11
+%c12 = OpConstant %u32 12
+%c13 = OpConstant %u32 13
+%c14 = OpConstant %u32 14
+%c15 = OpConstant %u32 15
+%c16 = OpConstant %u32 16
+%c17 = OpConstant %u32 17
+%c24 = OpConstant %u32 24
+%c255 = OpConstant %u32 255
+%c8388607 = OpConstant %u32 8388607
+%c8388608 = OpConstant %u32 8388608
+%c16777215 = OpConstant %u32 16777215
+%push = OpVariable %pcPush PushConstant
+%gid = OpVariable %inV3u Input
+%main = OpFunction %void None %fnty
+%entry = OpLabel
+%p_src = OpAccessChain %pcU64 %push %c0
+%src = OpLoad %u64 %p_src
+%p_dst = OpAccessChain %pcU64 %push %c1
+%dst = OpLoad %u64 %p_dst
+%p_uid = OpAccessChain %pcU64 %push %c2
+%uid = OpLoad %u64 %p_uid
+%p_astab = OpAccessChain %pcU64 %push %c3
+%astab = OpLoad %u64 %p_astab
+%p_stride = OpAccessChain %pcU32 %push %c4
+%stride = OpLoad %u32 %p_stride
+%p_count = OpAccessChain %pcU32 %push %c5
+%count = OpLoad %u32 %p_count
+%p_mtype = OpAccessChain %pcU32 %push %c6
+%mtype = OpLoad %u32 %p_mtype
+%p_nas = OpAccessChain %pcU32 %push %c7
+%nas = OpLoad %u32 %p_nas
+%srcp = OpConvertUToPtr %pU32 %src
+%dstp = OpConvertUToPtr %pU32 %dst
+%uidp = OpConvertUToPtr %pU32 %uid
+%astabp = OpConvertUToPtr %pU32 %astab
+%gidv = OpLoad %v3u %gid
+%i = OpCompositeExtract %u32 %gidv 0
+%inrange = OpULessThan %bool %i %count
+OpSelectionMerge %done None
+OpBranchConditional %inrange %work %done
+%work = OpLabel
+%stridew = OpShiftRightLogical %u32 %stride %c2
+%sb = OpIMul %u32 %i %stridew
+%db = OpIMul %u32 %i %c16
+%si_0_0 = OpCopyObject %u32 %sb
+%di_0_0 = OpCopyObject %u32 %db
+%pr_t_0_0 = OpAccessChain %pu32 %srcp %c0 %si_0_0
+%t_0_0 = OpLoad %u32 %pr_t_0_0 Aligned 4
+%pw_t_0_0 = OpAccessChain %pu32 %dstp %c0 %di_0_0
+OpStore %pw_t_0_0 %t_0_0 Aligned 4
+%si_0_1 = OpIAdd %u32 %sb %c1
+%di_0_1 = OpIAdd %u32 %db %c1
+%pr_t_0_1 = OpAccessChain %pu32 %srcp %c0 %si_0_1
+%t_0_1 = OpLoad %u32 %pr_t_0_1 Aligned 4
+%pw_t_0_1 = OpAccessChain %pu32 %dstp %c0 %di_0_1
+OpStore %pw_t_0_1 %t_0_1 Aligned 4
+%si_0_2 = OpIAdd %u32 %sb %c2
+%di_0_2 = OpIAdd %u32 %db %c2
+%pr_t_0_2 = OpAccessChain %pu32 %srcp %c0 %si_0_2
+%t_0_2 = OpLoad %u32 %pr_t_0_2 Aligned 4
+%pw_t_0_2 = OpAccessChain %pu32 %dstp %c0 %di_0_2
+OpStore %pw_t_0_2 %t_0_2 Aligned 4
+%si_0_3 = OpIAdd %u32 %sb %c3
+%di_0_3 = OpIAdd %u32 %db %c3
+%pr_t_0_3 = OpAccessChain %pu32 %srcp %c0 %si_0_3
+%t_0_3 = OpLoad %u32 %pr_t_0_3 Aligned 4
+%pw_t_0_3 = OpAccessChain %pu32 %dstp %c0 %di_0_3
+OpStore %pw_t_0_3 %t_0_3 Aligned 4
+%si_1_0 = OpIAdd %u32 %sb %c4
+%di_1_0 = OpIAdd %u32 %db %c4
+%pr_t_1_0 = OpAccessChain %pu32 %srcp %c0 %si_1_0
+%t_1_0 = OpLoad %u32 %pr_t_1_0 Aligned 4
+%pw_t_1_0 = OpAccessChain %pu32 %dstp %c0 %di_1_0
+OpStore %pw_t_1_0 %t_1_0 Aligned 4
+%si_1_1 = OpIAdd %u32 %sb %c5
+%di_1_1 = OpIAdd %u32 %db %c5
+%pr_t_1_1 = OpAccessChain %pu32 %srcp %c0 %si_1_1
+%t_1_1 = OpLoad %u32 %pr_t_1_1 Aligned 4
+%pw_t_1_1 = OpAccessChain %pu32 %dstp %c0 %di_1_1
+OpStore %pw_t_1_1 %t_1_1 Aligned 4
+%si_1_2 = OpIAdd %u32 %sb %c6
+%di_1_2 = OpIAdd %u32 %db %c6
+%pr_t_1_2 = OpAccessChain %pu32 %srcp %c0 %si_1_2
+%t_1_2 = OpLoad %u32 %pr_t_1_2 Aligned 4
+%pw_t_1_2 = OpAccessChain %pu32 %dstp %c0 %di_1_2
+OpStore %pw_t_1_2 %t_1_2 Aligned 4
+%si_1_3 = OpIAdd %u32 %sb %c7
+%di_1_3 = OpIAdd %u32 %db %c7
+%pr_t_1_3 = OpAccessChain %pu32 %srcp %c0 %si_1_3
+%t_1_3 = OpLoad %u32 %pr_t_1_3 Aligned 4
+%pw_t_1_3 = OpAccessChain %pu32 %dstp %c0 %di_1_3
+OpStore %pw_t_1_3 %t_1_3 Aligned 4
+%si_2_0 = OpIAdd %u32 %sb %c8
+%di_2_0 = OpIAdd %u32 %db %c8
+%pr_t_2_0 = OpAccessChain %pu32 %srcp %c0 %si_2_0
+%t_2_0 = OpLoad %u32 %pr_t_2_0 Aligned 4
+%pw_t_2_0 = OpAccessChain %pu32 %dstp %c0 %di_2_0
+OpStore %pw_t_2_0 %t_2_0 Aligned 4
+%si_2_1 = OpIAdd %u32 %sb %c9
+%di_2_1 = OpIAdd %u32 %db %c9
+%pr_t_2_1 = OpAccessChain %pu32 %srcp %c0 %si_2_1
+%t_2_1 = OpLoad %u32 %pr_t_2_1 Aligned 4
+%pw_t_2_1 = OpAccessChain %pu32 %dstp %c0 %di_2_1
+OpStore %pw_t_2_1 %t_2_1 Aligned 4
+%si_2_2 = OpIAdd %u32 %sb %c10
+%di_2_2 = OpIAdd %u32 %db %c10
+%pr_t_2_2 = OpAccessChain %pu32 %srcp %c0 %si_2_2
+%t_2_2 = OpLoad %u32 %pr_t_2_2 Aligned 4
+%pw_t_2_2 = OpAccessChain %pu32 %dstp %c0 %di_2_2
+OpStore %pw_t_2_2 %t_2_2 Aligned 4
+%si_2_3 = OpIAdd %u32 %sb %c11
+%di_2_3 = OpIAdd %u32 %db %c11
+%pr_t_2_3 = OpAccessChain %pu32 %srcp %c0 %si_2_3
+%t_2_3 = OpLoad %u32 %pr_t_2_3 Aligned 4
+%pw_t_2_3 = OpAccessChain %pu32 %dstp %c0 %di_2_3
+OpStore %pw_t_2_3 %t_2_3 Aligned 4
+%i_options = OpIAdd %u32 %sb %c12
+%i_mask = OpIAdd %u32 %sb %c13
+%i_ift = OpIAdd %u32 %sb %c14
+%i_w3 = OpIAdd %u32 %sb %c15
+%pr_options = OpAccessChain %pu32 %srcp %c0 %i_options
+%options = OpLoad %u32 %pr_options Aligned 4
+%pr_mask = OpAccessChain %pu32 %srcp %c0 %i_mask
+%mask = OpLoad %u32 %pr_mask Aligned 4
+%pr_ift = OpAccessChain %pu32 %srcp %c0 %i_ift
+%ift = OpLoad %u32 %pr_ift Aligned 4
+%pr_w3 = OpAccessChain %pu32 %srcp %c0 %i_w3
+%w3 = OpLoad %u32 %pr_w3 Aligned 4
+%is_t1 = OpIEqual %bool %mtype %c1
+%is_t3 = OpIEqual %bool %mtype %c3
+%i16_real = OpIAdd %u32 %sb %c16
+%i17_real = OpIAdd %u32 %sb %c17
+%i_w4 = OpSelect %u32 %is_t1 %i16_real %i_w3
+%i_reflo = OpSelect %u32 %is_t3 %i16_real %i_w3
+%i_refhi = OpSelect %u32 %is_t3 %i17_real %i_w3
+%pr_w4 = OpAccessChain %pu32 %srcp %c0 %i_w4
+%w4 = OpLoad %u32 %pr_w4 Aligned 4
+%pr_reflo_raw = OpAccessChain %pu32 %srcp %c0 %i_reflo
+%reflo_raw = OpLoad %u32 %pr_reflo_raw Aligned 4
+%pr_refhi_raw = OpAccessChain %pu32 %srcp %c0 %i_refhi
+%refhi_raw = OpLoad %u32 %pr_refhi_raw Aligned 4
+%user_t3 = OpSelect %u32 %is_t3 %w3 %c0
+%user = OpSelect %u32 %is_t1 %w4 %user_t3
+%idx_ok = OpULessThan %bool %w3 %nas
+%use_tab = OpLogicalNot %bool %is_t3
+%tab_ok = OpLogicalAnd %bool %use_tab %idx_ok
+%tab_base = OpIMul %u32 %w3 %c4
+%tab_safe = OpSelect %u32 %tab_ok %tab_base %c0
+%i_tab_lo = OpCopyObject %u32 %tab_safe
+%i_tab_hi = OpIAdd %u32 %tab_safe %c1
+%i_tab_ift = OpIAdd %u32 %tab_safe %c2
+%pr_tab_lo = OpAccessChain %pu32 %astabp %c0 %i_tab_lo
+%tab_lo = OpLoad %u32 %pr_tab_lo Aligned 4
+%pr_tab_hi = OpAccessChain %pu32 %astabp %c0 %i_tab_hi
+%tab_hi = OpLoad %u32 %pr_tab_hi Aligned 4
+%pr_tab_ift_raw = OpAccessChain %pu32 %astabp %c0 %i_tab_ift
+%tab_ift_raw = OpLoad %u32 %pr_tab_ift_raw Aligned 4
+%have_tab = OpLogicalAnd %bool %use_tab %idx_ok
+%add = OpSelect %u32 %have_tab %tab_ift_raw %c0
+%add_low = OpBitwiseAnd %u32 %add %c8388607
+%ift64 = OpUConvert %u64 %ift
+%addlow64 = OpUConvert %u64 %add_low
+%slot64 = OpIAdd %u64 %ift64 %addlow64
+%lim64 = OpUConvert %u64 %c8388607
+%slot_big = OpUGreaterThan %bool %slot64 %lim64
+%slot_sum = OpUConvert %u32 %slot64
+%ift_clamped = OpBitwiseAnd %u32 %ift %c8388607
+%slot = OpSelect %u32 %slot_big %ift_clamped %slot_sum
+%add_hi = OpBitwiseAnd %u32 %add %c8388608
+%sbt = OpBitwiseOr %u32 %slot %add_hi
+%cust = OpBitwiseAnd %u32 %user %c16777215
+%mask8 = OpBitwiseAnd %u32 %mask %c255
+%mask_sh = OpShiftLeftLogical %u32 %mask8 %c24
+%word12 = OpBitwiseOr %u32 %cust %mask_sh
+%sbt24 = OpBitwiseAnd %u32 %sbt %c16777215
+%flags4 = OpBitwiseAnd %u32 %options %c15
+%flags_sh = OpShiftLeftLogical %u32 %flags4 %c24
+%word13 = OpBitwiseOr %u32 %sbt24 %flags_sh
+%ref_lo_tab = OpSelect %u32 %have_tab %tab_lo %c0
+%ref_hi_tab = OpSelect %u32 %have_tab %tab_hi %c0
+%ref_lo = OpSelect %u32 %is_t3 %reflo_raw %ref_lo_tab
+%ref_hi = OpSelect %u32 %is_t3 %refhi_raw %ref_hi_tab
+%o12 = OpIAdd %u32 %db %c12
+%o13 = OpIAdd %u32 %db %c13
+%o14 = OpIAdd %u32 %db %c14
+%o15 = OpIAdd %u32 %db %c15
+%pw_o12 = OpAccessChain %pu32 %dstp %c0 %o12
+OpStore %pw_o12 %word12 Aligned 4
+%pw_o13 = OpAccessChain %pu32 %dstp %c0 %o13
+OpStore %pw_o13 %word13 Aligned 4
+%pw_o14 = OpAccessChain %pu32 %dstp %c0 %o14
+OpStore %pw_o14 %ref_lo Aligned 4
+%pw_o15 = OpAccessChain %pu32 %dstp %c0 %o15
+OpStore %pw_o15 %ref_hi Aligned 4
+%pw_uid = OpAccessChain %pu32 %uidp %c0 %i
+OpStore %pw_uid %user Aligned 4
+OpBranch %done
+%done = OpLabel
+OpReturn
+OpFunctionEnd
