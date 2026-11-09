@@ -1160,8 +1160,11 @@ static void *nvmtl_storage_view_for(NVMTLCommandBuffer *cb, NVMTLTexture *t, BOO
     const MTLTextureUsage usage = (MTLTextureUsage)t->_usage;   // not -usage, which answers ShaderRead for Unknown
     if (!writes || !cb || cb->_c.in_rp || t->_parent || (usage && !(usage & MTLTextureUsageShaderWrite))) return NULL;
     nvk_image *im = [t nvi];
+    // a multisampled attachment gets a storage twin only for a tile function (NVMTL_TILE_SHADING=1, shaderStorageImageMultisample)
+    const BOOL ms = im && (im->samples ? im->samples : 1) > 1;
+    const BOOL msOk = ms && im->mtl_type == 4 && nvmtl_tile_on() && nvmtl_vk_ms_storage_ok();
     if (!im || !im->img || !im->w || !im->h || (im->mips ? im->mips : 1) > 1 || (im->layers ? im->layers : 1) > 1
-        || im->mtl_type != 2 || (im->samples ? im->samples : 1) > 1 || im->bw > 1) return NULL;
+        || (ms ? !msOk : im->mtl_type != 2) || im->bw > 1) return NULL;
     // Created once per texture; two command buffers may encode the same texture on different threads at once.
     @synchronized (t) {
         if (!t->_stTwin.img) {
@@ -1171,7 +1174,10 @@ static void *nvmtl_storage_view_for(NVMTLCommandBuffer *cb, NVMTLTexture *t, BOO
             // blits that decode and encode sRGB, so a kernel writes linear values and the texture ends up sRGB-encoded,
             // as a write to an sRGB texture does on Apple GPUs (Blender's edit-mode overlay wrote RGBA8Unorm_sRGB).
             const int srgb = nvmtl_vk_srgb_format(im->fmt);
-            if (nvmtl_vk_image_create_typed(im->w, im->h, srgb ? 97u : im->fmt, srgb ? 8u : im->bpp, 0, 1, 1, 2, 1, &t->_stTwin) || !t->_stTwin.storage) {
+            int made = ms ? (srgb ? -1 : nvmtl_vk_image_create_ms_storage(im->w, im->h, im->fmt, im->bpp, im->samples, &t->_stTwin))
+                          : nvmtl_vk_image_create_typed(im->w, im->h, srgb ? 97u : im->fmt, srgb ? 8u : im->bpp, 0, 1, 1, 2, 1, &t->_stTwin);
+            if (ms && !made) t->_stTwin.storage = 1;
+            if (made || !t->_stTwin.storage) {
                 if (t->_stTwin.img) nvmtl_vk_image_destroy(&t->_stTwin);
                 memset(&t->_stTwin, 0, sizeof t->_stTwin);
                 nvlog("storage twin: VkFormat %u %ux%u cannot be a storage image in optimal tiling either - shader writes to it are LOST", im->fmt, im->w, im->h);
@@ -3811,12 +3817,14 @@ static void nvmtl_tile_ignored(const char *what) { static _Atomic unsigned n; if
     if (!tp) { nvmtl_tile_ignored("dispatchThreadsPerTile with no tile pipeline set"); return; }
     const uint32_t tw = _tileW ? _tileW : 32, th = _tileH ? _tileH : 32, w = _pass.w, h = _pass.h;
     if (!w || !h || threadsPerTile.width * threadsPerTile.height * threadsPerTile.depth > 1024) { nvlog("dispatchThreadsPerTile: %ux%u area / %lu threads per tile - REFUSED", w, h, (unsigned long)(threadsPerTile.width * threadsPerTile.height * threadsPerTile.depth)); return; }
-    NSString *why = nil; id<MTLComputePipelineState> cps = nvmtl_tile_compute_pipeline(tp, tw, th, &why);
+    NSString *why = nil; id<MTLComputePipelineState> cps = nvmtl_tile_compute_pipeline(tp, tw, th, &why);   // for the sample count the pipeline was made with
     if (!cps) { nvlog("dispatchThreadsPerTile: %s", why.UTF8String); return; }
     uint32_t keep = 0;
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
         if (!_colTex[i]) continue;
-        if (_colTex[i]->_i.samples > 1 || _colTex[i]->_i.mtl_type != 2) { nvlog("dispatchThreadsPerTile: attachment %u is multisampled or not a plain 2D texture - REFUSED", i); return; }
+        const uint32_t as = _colTex[i]->_i.samples > 1 ? _colTex[i]->_i.samples : 1u;
+        if (as != tp->_tileSamples || (as > 1 ? _colTex[i]->_i.mtl_type != 4 : _colTex[i]->_i.mtl_type != 2)) {
+            nvlog("dispatchThreadsPerTile: attachment %u has %u sample(s) and the tile pipeline was made for %u, or it is not a plain 2D texture - REFUSED", i, as, tp->_tileSamples); return; }
         keep |= NVMTL_LOAD_COLOUR(i);
     }
     if (_pass.ds) keep |= NVMTL_LOAD_DEPTH | (_ps && _ps->_p.has_stencil ? NVMTL_LOAD_STENCIL : 0u);
@@ -4689,6 +4697,14 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     }
     if (cap && nvmtl_vk_cmd_icb_index_copy(&_cb->_c, &b->_recBuf->_b, &idxBuf->_b, slots, cap, loc, len, rb ? &rb->_b : NULL, ro)) { nvlog("GPU ICB: the index copy pass FAILED - indexed commands are skipped"); cap = 0; }
     if (idxBuf) nvmtl_retain_resource(_cb, idxBuf);
+    // per-command buffers: one patched address-table copy per slot and stage (nvmtl_icb_record.h); pipelines that reach their buffers
+    // through descriptors instead of the table (address lowering refused them) keep the encoder's own bindings
+    BOOL tabs = NO;
+    if (slots <= NVMTL_ICB_MAX_PATCH_SLOTS) {
+        NVMTLBuffer *dsts = nvmtl_icb_scratch_bytes((NSUInteger)slots * 16u);
+        if (dsts) { nvmtl_retain_resource(_cb, dsts); tabs = nvmtl_vk_cmd_icb_tables(&_cb->_c, &b->_recBuf->_b, &dsts->_b, slots) == 0; }
+    }
+    if (!tabs) { static int said; if (!said++) nvlog("GPU ICB: the per-command buffer tables could not be prepared - draws use the encoder's own buffer bindings"); }
     NSUInteger drawn = 0;
     for (NSUInteger k = 0; k < cands.count; k++) {
         NVMTLRenderPipelineState *p = k ? (NVMTLRenderPipelineState *)cands[k] : orig;
@@ -4699,11 +4715,13 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
                 for (uint32_t i = 0; i < slots; i++) {
                     const NSUInteger at = ((((NSUInteger)k * TYPES + t) * kinds + ix) * slots + i) * NVMTL_ICB_RECORD_BYTES;
                     if (ix && !cap) continue;
+                    nvmtl_vk_cmd_icb_use(&_cb->_c, tabs ? i + 1u : 0u);
                     if (ix) [self drawIndexedPrimitives:(MTLPrimitiveType)t indexType:MTLIndexTypeUInt32 indexBuffer:idxBuf indexBufferOffset:0 indirectBuffer:big indirectBufferOffset:at];
                     else [self drawPrimitives:(MTLPrimitiveType)t indirectBuffer:big indirectBufferOffset:at];
                     drawn++;
                 }
     }
+    nvmtl_vk_cmd_icb_use(&_cb->_c, 0); nvmtl_vk_cmd_icb_tables_free(&_cb->_c);
     if (orig && _ps != orig) [self setRenderPipelineState:orig];
     nvlog("GPU ICB: %lu indirect draw(s) recorded for %u slot(s), %lu candidate pipeline(s)", (unsigned long)drawn, slots, (unsigned long)cands.count);
 }
