@@ -46,11 +46,26 @@ impl Emitter {
         let LlType::Ptr(addrspace @ 0..=2) = result_ty else {
             return Ok(None);
         };
-        if !self.bda_device_pointers
-            || !incoming
-                .iter()
-                .all(|(value, _)| self.bda_phi_value_is_addressable(value))
-        {
+        if !self.bda_device_pointers {
+            return Ok(None);
+        }
+        // A phi that joins a bare loaded device pointer with a constant-offset GEP of one (`phi [gep i8 %p, 16], [%q]`)
+        // is also an address phi: bda_phi_address_id materializes the GEP arm on its edge. The provenance lowering it
+        // used to fall to converted only the GEP arm and left the bare arm's pointer id undefined ("owned Select
+        // references undefined id", three Cyberpunk G-buffer material shaders in the argument-buffer sampler mode).
+        // Only that mixed shape: phis whose every arm is a GEP keep the lowering they already translated with
+        // (widening it to all of them changed 302 passing Cyberpunk modules).
+        let all_bare = incoming
+            .iter()
+            .all(|(value, _)| self.bda_phi_value_is_addressable(value));
+        let mixed = !all_bare
+            && incoming.iter().any(|(value, _)| {
+                matches!(value, LlValue::Local(_)) && self.bda_phi_value_is_addressable(value)
+            })
+            && incoming.iter().all(|(value, _)| {
+                self.bda_phi_value_is_addressable(value) || self.bda_const_offset_address(value)
+            });
+        if !all_bare && !mixed {
             return Ok(None);
         }
 
@@ -72,6 +87,14 @@ impl Emitter {
         Ok(Some(result))
     }
 
+    /// A device address plus a constant byte offset, already modeled: bda_phi_address_id materializes it exactly.
+    fn bda_const_offset_address(&self, value: &LlValue) -> bool {
+        let LlValue::Local(name) = value else { return false };
+        self.raw_offsets.get(name).is_some_and(|raw| {
+            raw.dyn_terms.is_empty() && !raw.unmodelable && raw.device_addr_base.is_some()
+        })
+    }
+
     pub(in crate::native::emitter) fn bda_phi_value_is_addressable(&self, value: &LlValue) -> bool {
         self.bda_phi_value_is_addressable_inner(value, &mut HashSet::default())
     }
@@ -88,10 +111,11 @@ impl Emitter {
                     || self.bda_forward_addresses.contains(name)
                     || self.bda_direct_addresses.contains_key(name)
                     || self.raw_offsets.get(name).is_some_and(|raw| {
-                        raw.const_off == 0
-                            && raw.dyn_terms.is_empty()
-                            && (raw.device_addr_base.is_some()
-                                || self.bda_direct_addresses.contains_key(&raw.root))
+                        // Address materialization below already handles byte offsets and strides.
+                        (raw.device_addr_base.is_some() && !raw.unmodelable)
+                            || (raw.const_off == 0
+                                && raw.dyn_terms.is_empty()
+                                && self.bda_direct_addresses.contains_key(&raw.root))
                     })
                 {
                     return true;
@@ -937,6 +961,25 @@ impl Emitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bda_phi_offset_arm_is_materialized() {
+        let ir = LlModule::parse("define void @k() {\nentry:\n  ret void\n}\n").unwrap();
+        let mut emitter = Emitter::new(ir);
+        let base = emitter.const_signed_int(64, 4096).unwrap();
+        let mut raw = RawBufferOffset::root("%base".into(), 2);
+        raw.device_addr_base = Some(base);
+        raw.const_off = 16;
+        emitter.raw_offsets.insert("%offset".into(), raw);
+        let value = LlValue::Local("%offset".into());
+        assert!(emitter.bda_phi_value_is_addressable(&value));
+        let mut instructions = Vec::new();
+        let address = emitter.bda_phi_address_id(&value, &mut instructions).unwrap();
+        assert_ne!(address, base);
+        assert!(instructions.iter().any(|i| i.class.opcode == Op::IAdd
+            && i.result_id == Some(address)
+            && i.operands.first() == Some(&Operand::IdRef(base))));
+    }
+
 
     #[test]
     fn incompatible_defined_phi_arm_does_not_leave_reserved_index() {

@@ -366,6 +366,10 @@ impl LlModule {
                 }
             }
             for (param, seen) in sources {
+                if seen.contains(&LlType::Int(8)) {
+                    self.byte_addressed_raw_params
+                        .insert((f.name.clone(), param.clone()));
+                }
                 let metadata_byte_buffer = self
                     .metadata_byte_buffer_params
                     .contains(&(f.name.clone(), param.clone()));
@@ -561,6 +565,7 @@ impl LlModule {
     pub(in crate::native) fn propagate_raw_buffer_params(&mut self) {
         let call_edges = self.raw_param_call_edges();
         Self::propagate_param_fact(&call_edges, &mut self.raw_buffer_params);
+        Self::propagate_param_fact(&call_edges, &mut self.byte_addressed_raw_params);
         Self::propagate_param_fact(&call_edges, &mut self.call_connected_raw_params);
         for edge in call_edges {
             let caller = (edge.caller_func, edge.caller_param);
