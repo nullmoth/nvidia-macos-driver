@@ -30,6 +30,18 @@ static inline int nv_rtd3_may_power_off(const struct nv_rtd3 *s, int rm_suspende
            idle_s >= NV_RTD3_IDLE_SECONDS;
 }
 
+/* What counts as "a head is lit" and "a client is attached" on a laptop.
+ * nvidia_heads: framebuffers of this GPU's own outputs. foreign_heads: panels of another GPU that this GPU composites for
+ * (hybrid switch nmhybrid on: the NVIDIA GPU draws the desktop, so it is never idle while such a panel is up). With the
+ * switch off the other GPU draws its own desktop and a foreign panel says nothing about this GPU.
+ * rm_clients: user clients of the resource manager service. accel_clients: user clients of the accelerator, which is where
+ * every Metal application attaches; without them an app using the GPU would look like an idle GPU. */
+static inline int nv_rtd3_heads_lit(int nvidia_heads, int foreign_heads, int hybrid_level)
+{
+    return nvidia_heads + (hybrid_level > 0 ? foreign_heads : 0);
+}
+static inline int nv_rtd3_clients_total(int rm_clients, int accel_clients) { return rm_clients + accel_clients; }
+
 /* The GPU must not be touched while its resource is off: 1 when a register access or an RM call is allowed */
 static inline int nv_rtd3_gpu_reachable(const struct nv_rtd3 *s) { return s->state == NV_RTD3_ON; }
 
