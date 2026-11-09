@@ -10,7 +10,7 @@ source = (root / 'plugin/NVMTLDevice.m').read_text()
 # The constructor calls the Chrome-family helper defined just above it, so both are lifted together. The test binary is
 # named "policy", which is not a Chrome process, so the six cases below are the default-off path.
 start = source.index('static bool nvmtl_angle_chrome_family(void)')
-end = source.index('static bool nvmtl_process_is_allowed(void)', start)
+end = source.index('// Another GPU that offers Metal', start)   # the ANGLE rule ends where the hybrid GPU choice begins
 constructor = source[start:end]
 with tempfile.TemporaryDirectory() as directory:
     file = pathlib.Path(directory) / 'policy.c'
