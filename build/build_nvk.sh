@@ -18,6 +18,7 @@
 #   PKG_CONFIG_PATH must reach LLVMSPIRVLib.pc (SPIRV-LLVM-Translator matching the LLVM) for the native mesa_clc build
 #   NVK_SYSROOT     x86_64 prefix holding lib/pkgconfig for zlib (and any other library the build needs)
 #   NVK_JOBS        parallel jobs (default 6)
+#   NVK_EXTRA_PATCHES  space-separated names of extra patches in nvk/ applied last (e.g. nvk-upstream-nak)
 #   NVK_REF_EXPORTS optional file with the exported symbols to compare against (one name per line, sorted)
 #
 # The Mesa git must contain commit 17ca6174 (nvk/MESA_BASE). The tree is exported with git archive, so no .git is
@@ -37,6 +38,10 @@ case $REL in
        CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef" ;;
   *) echo "STOP: release must be 2.9 or 2.8"; exit 2 ;;
 esac
+
+# NVK_EXTRA_PATCHES="nvk-upstream-nak" appends patch files from nvk/ to the chain (upstream NAK/NVK fixes newer than
+# MESA_BASE; off by default until measured on the target card).
+CHAIN="$CHAIN ${NVK_EXTRA_PATCHES:-}"
 
 git -C "$MESA_GIT" cat-file -e "$BASE^{commit}" || { echo "STOP: $MESA_GIT has no commit $BASE"; exit 2; }
 mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
