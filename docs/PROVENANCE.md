@@ -29,6 +29,7 @@ source, which this audit could not fetch, so the owner's statement that none was
 | Shader translator | `steelbrain/metal2vulkan` (Anees Iqbal) | LGPL-3.0-or-later | `NOTICE`, `translator/LICENSE`, `translator/COPYING` |
 | The Rust crates linked into the translator | crates.io | MIT, Apache-2.0, Unlicense or MIT, Unicode-3.0 | `licenses/translator-rust-crates.txt` (new) |
 | GSP firmware | NVIDIA 620.70.06 driver package, unmodified | NVIDIA "License For Customer Use of NVIDIA Software" | `licenses/NVIDIA-firmware-LICENCE.txt`; fetched on the user's Mac, see P1 (resolved) |
+| Intel display firmware (optional, hybrid laptops) | Intel via linux-firmware at commit a42217fc, unmodified, fetched on the user's Mac by `package/dmc_fetch.sh` | Intel i915 firmware licence (binary redistribution unmodified; no reverse engineering) | `licenses/Intel-i915-firmware-LICENSE.txt` |
 | Video encoders and decoders `vendor/nvenc` | `mickys/nvenc` 0.9.5, commit `1e91845` | MIT | `vendor/nvenc/SOURCE`, `licenses/mickys-nvenc-LICENSE.txt` |
 | Headers `libnvencvt` is built against (fetched, not shipped) | NVIDIA open-gpu-kernel-modules 610.57.04, open-gpu-doc `9fdf5c4` (classes/video), WebKit `CMBaseObjectSPI.h` and `VTVideoDecoderSPI.h` | MIT, MIT, BSD | `vendor/nvenc/SOURCE` |
 | Firmware-framebuffer mapping and checks `NMGopFB` | `PrimeBridge` (myvoow), `BootFramebuffer.cpp` method | MIT | `NOTICE`, `licenses/PrimeBridge-LICENSE.txt` |

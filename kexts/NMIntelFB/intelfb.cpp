@@ -224,6 +224,8 @@ private:
     // level 3: buffers this driver owns (nm_hybrid.h, struct nmh_own)
     struct nmh_own fOwn;
     IOBufferMemoryDescriptor *fOwnMd[NMH_OWN_BUFS] = {};
+    unsigned long long *fOwnPages[NMH_OWN_BUFS] = {};    // bus address of each page, kept for the copy engine (level 4)
+    uint32_t fOwnPageCount = 0;
     bool fOwnReady = false;
     bool ownSetup();
     void ownRelease();
@@ -750,11 +752,15 @@ bool NMIntelFB::ownSetup()
         if (!b || b->prepare() != kIOReturnSuccess) { OSSafeReleaseNULL(b); ownRelease(); IFBLOG("hybrid: owned buffers unavailable: allocation failed"); return false; }
         bzero(b->getBytesNoCopy(), b->getLength());
         fOwnMd[i] = b;
+        fOwnPages[i] = (unsigned long long *)IOMalloc((size_t)(pages * sizeof(unsigned long long)));
+        if (!fOwnPages[i]) { ownRelease(); IFBLOG("hybrid: owned buffers unavailable: no memory for the page list"); return false; }
+        fOwnPageCount = (uint32_t)pages;
         const uint64_t at = fRing.base / NMH_PAGE + (uint64_t)(NMH_SLOTS + i) * pages;
         for (uint64_t p = 0; p < pages; p++) {
             addr64_t a = b->getPhysicalSegment((IOByteCount)(p * NMH_PAGE), nullptr, kIOMemoryMapperNone);
             if (!nmh_ggtt_pte(a)) { ownRelease(); IFBLOG("hybrid: owned buffers unavailable: a page is out of the table's reach"); return false; }
             fGsm[at + p] = nmh_ggtt_pte(a);
+            fOwnPages[i][p] = a;
         }
     }
     (void)fGsm[fRing.base / NMH_PAGE];
@@ -766,7 +772,10 @@ bool NMIntelFB::ownSetup()
 }
 void NMIntelFB::ownRelease()
 {
-    for (int i = 0; i < NMH_OWN_BUFS; i++) if (fOwnMd[i]) { fOwnMd[i]->complete(); fOwnMd[i]->release(); fOwnMd[i] = nullptr; }
+    for (int i = 0; i < NMH_OWN_BUFS; i++) {
+        if (fOwnMd[i]) { fOwnMd[i]->complete(); fOwnMd[i]->release(); fOwnMd[i] = nullptr; }
+        if (fOwnPages[i]) { IOFree(fOwnPages[i], (size_t)(fOwnPageCount * sizeof(unsigned long long))); fOwnPages[i] = nullptr; }
+    }
     fOwnReady = false;
 }
 
@@ -776,7 +785,7 @@ void NMIntelFB::resumeCapture()
 {
     long long v = 0; int a = 0; const int present = PE_parse_boot_argn("nmhybridresume", &a, sizeof a); v = a;
     if (!nmr_enabled(present, v)) return;
-    if (!nmh_gen_ok(fVer) || fPipe != 0) { IFBLOG("hybrid: resume unavailable: display version %u pipe %d (version 12 or 13, pipe A only)", fVer, fPipe); return; }
+    if (!nmh_gen_ok(fVer) || fPipe < 0 || fPipe > 3) { IFBLOG("hybrid: resume unavailable: display version %u pipe %d (version 12 or 13, pipes A to D)", fVer, fPipe); return; }
     if (!ggttMap()) return;
     fSnap = (struct nmr_snap *)IOMalloc(sizeof *fSnap);
     if (!fSnap) return;
@@ -787,7 +796,7 @@ void NMIntelFB::resumeCapture()
         [](void *, unsigned us) { IODelay(us); },
         [](void *, const char *st) { IFBLOG("hybrid: resume step: %s", st); },
         nullptr };
-    const int rc = nmr_snapshot(&ops, fSnap);
+    const int rc = nmr_snapshot(&ops, fSnap, (unsigned)fPipe);
     if (rc != NMR_OK) { IFBLOG("hybrid: resume unavailable: %s", nmr_result_name(rc)); IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; return; }
     // the firmware surface's entries in the graphics table: restored first on wake
     fFwPteFirst = fSurf >> 12; fFwPteCount = (((uint64_t)fRowBytes * fHeight) + 4095) / 4096;
@@ -797,7 +806,7 @@ void NMIntelFB::resumeCapture()
     }
     fResumeCall = thread_call_allocate(resumeFire, this);
     fResumeOn = fResumeCall != nullptr;
-    IFBLOG("hybrid: resume armed: panel state captured (sink link 0x%02x x%u, %s)", fSnap->dpcd[0], fSnap->dpcd[1] & 0x1F,
+    IFBLOG("hybrid: resume armed: panel state captured (pipe %c, DDI %c, sink link 0x%02x x%u, %s)", 'A' + fSnap->topo.pipe, 'A' + fSnap->topo.port, fSnap->dpcd[0], fSnap->dpcd[1] & 0x1F,
            fSnap->no_handshake ? "no AUX handshake" : "AUX link training");
 }
 
@@ -811,8 +820,7 @@ void NMIntelFB::resumeRun()
         [](void *c, uint32_t o, uint32_t x) { ((NMIntelFB *)c)->wr(o, x); },
         [](void *, unsigned us) { IODelay(us); },
         [](void *, const char *st) { IFBLOG("hybrid: resume step: %s", st); },
-        // pre-emphasis and swing beyond what the firmware programmed need the per-level tables of the PHY: not available
-        [](void *, unsigned v, unsigned p) { return (v == 0 && p == 0) ? 0 : -1; } };
+        nullptr };      // swing and pre-emphasis levels are programmed by nmr_drive_apply (nm_hybrid_resume.h)
     const int rc = nmr_resume(&ops, fSnap, fVer);
     IFBLOG("hybrid: resume: %s", nmr_result_name(rc));
     ifbStep(rc == NMR_OK || rc == NMR_ALREADY_LIT ? NMH_STEP_RESUME_DONE : NMH_STEP_RESUME_FAILED);
@@ -845,16 +853,22 @@ IOReturn NMIntelFB::hybridImport(NMHybridReq *q)
         q->needMap = (unsigned)need; q->evictedId = ev;
         return kIOReturnSuccess;
     }
-    if (q->op == NMH_OP_ACQUIRE || q->op == NMH_OP_PRESENT || q->op == NMH_OP_ABORT) {
+    if (q->op == NMH_OP_ACQUIRE || q->op == NMH_OP_PRESENT || q->op == NMH_OP_ABORT || q->op == NMH_OP_QUARANTINE) {
         if (fHyLevel < NMH_OWNED || !ownSetup()) { q->result = NMH_E_NOSPACE; return kIOReturnUnsupported; }
         if (q->op == NMH_OP_ACQUIRE) {
             const int b = nmh_own_acquire(&fOwn);
             if (b < 0) { q->result = NMH_E_BUSY; return kIOReturnBusy; }
             q->slot = b; q->kva = fOwnMd[b]->getBytesNoCopy(); q->pitch = fRowBytes;
+            if (q->flags & NMH_REQ_DEVICE_WRITES) {
+                // the copy engine will write these pages: no dirty CPU line may be left to land over its data
+                fOwnMd[b]->performOperation(kIOMemoryIncoherentIOFlush, 0, (IOByteCount)fRing.slot_bytes);
+                q->pages = fOwnPages[b]; q->npages = fOwnPageCount;
+            }
             return kIOReturnSuccess;
         }
         if (q->slot < 0 || q->slot >= NMH_OWN_BUFS) { q->result = NMH_E_BUSY; return kIOReturnBadArgument; }
         if (q->op == NMH_OP_ABORT) { nmh_own_abort(&fOwn, q->slot); return kIOReturnSuccess; }
+        if (q->op == NMH_OP_QUARANTINE) { nmh_own_quarantine(&fOwn, q->slot); IFBLOG("hybrid: owned buffer %d quarantined (a copy timed out; it is not used again)", q->slot); return kIOReturnSuccess; }
         // PRESENT: flush, queue, flip, wait for the live register
         fOwnMd[q->slot]->performOperation(kIOMemoryIncoherentIOFlush, 0, (IOByteCount)fRing.slot_bytes);
         if (nmh_own_present(&fOwn, q->slot) != NMH_OK) { q->result = NMH_E_BUSY; return kIOReturnBusy; }
