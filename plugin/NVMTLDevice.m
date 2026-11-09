@@ -446,6 +446,8 @@ static void nvmtl_nmxvt_register(void)
         char dir[1024], path[1200];
         strlcpy(dir, di.dli_fname, sizeof dir);
         snprintf(path, sizeof path, "%s/libnmxvt.dylib", dirname(dir));
+        if (!nvmtl_loadable_root_only(path))   /* not beside the plugin: where the AMD/Intel package puts it */
+            snprintf(path, sizeof path, "/Library/NullMoth/gpu-userland/video/libnmxvt.dylib");
         if (!nvmtl_loadable_root_only(path)) { nvlog("nmxvt: %s is absent, or is not a root-owned file inside a root-owned directory - REFUSED", path); return; }
         setenv("NMXVT", "1", 1);
         void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);

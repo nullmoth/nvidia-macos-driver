@@ -23,6 +23,7 @@ check("a registration function for the AMD/Intel decoders exists", bool(fn))
 check("it does nothing unless NMXVT=1 or nmxvt=1 is set (off by default)", 'getenv("NMXVT")' in fn and '"nmxvt=1"' in fn and "if (!on) return;" in fn)
 check("it stays out of WindowServer", 'strcmp(getprogname(), "WindowServer")' in fn)
 check("it loads only a root-owned library inside a root-owned directory", "nvmtl_loadable_root_only(path)" in fn)
+check("the library is looked for beside the plugin, then in the AMD/Intel package's video directory", "/Library/NullMoth/gpu-userland/video/libnmxvt.dylib" in fn)
 check("it registers at rating 1100, above the system's own decoders", "r(1100)" in fn)
 check("it is called only for the AMD (0x1002) and Intel (0x8086) vendors, before the NVIDIA registrations",
       "if (nvmtl_vk_vendor() == 0x1002 || nvmtl_vk_vendor() == 0x8086) nvmtl_nmxvt_register();" in src)
