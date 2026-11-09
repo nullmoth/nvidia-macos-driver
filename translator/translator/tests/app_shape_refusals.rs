@@ -32,3 +32,22 @@ fn two_different_buffer_arguments_still_compare_unequal() {
     assert_ne!(ll, PTRCMP);
     translate(&ll, Stage::Fragment).expect("translate");
 }
+
+const SAMP1: &str = include_str!("fixtures/app_shapes/samp1.ll");
+const SAMP3: &str = include_str!("fixtures/app_shapes/samp3.ll");
+
+/// "sampler operand is a pointer whose exact sampler state was not recovered" -- a fragment function picked one of two
+/// runtime samplers with a condition read from a constant buffer.
+#[test]
+fn a_sampler_chosen_by_a_condition_samples_with_each_candidate() {
+    let asm = translate(SAMP1, Stage::Fragment).expect("translate");
+    let samples = asm.lines().filter(|l| l.contains("OpImageSample")).count();
+    assert!(samples >= 2, "one sample per candidate sampler, {samples} found:\n{asm}");
+    assert!(asm.contains("OpSelect"), "the chosen result is selected:\n{asm}");
+}
+
+/// The same refusal for samplers picked out of an array by a runtime index.
+#[test]
+fn a_sampler_picked_from_an_array_by_a_runtime_index_translates() {
+    translate(SAMP3, Stage::Fragment).expect("translate");
+}
