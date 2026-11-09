@@ -54,6 +54,10 @@ SYSCTL_STRING(_debug, OID_AUTO, nmintelfb_step, CTLFLAG_RD | CTLFLAG_LOCKED, gIf
 // file this GPU needs
 class NMIntelFB;
 static NMIntelFB *gDmcTarget = nullptr;
+// Serialises the firmware upload (sysctl, any thread), the reload after a resume (thread call) and stop: all three touch
+// gDmcTarget and the target's fDmcBlob. Allocated once on first start and kept for the life of the kext, so no path can
+// race its free.
+static IOLock *gDmcLock = nullptr;
 static int nmintelfb_dmc_write SYSCTL_HANDLER_ARGS;
 SYSCTL_PROC(_debug, OID_AUTO, nmintelfb_dmc, CTLTYPE_OPAQUE | CTLFLAG_WR | CTLFLAG_LOCKED, nullptr, 0, nmintelfb_dmc_write, "-",
             "Intel display firmware for the panel driver (root only; parsed and checked before use)");
@@ -258,7 +262,8 @@ public:
     int dmcAccept(const uint8_t *buf, uint32_t len);
     char fDmcWant[40] = "none";
 private:
-    void dmcApply();
+    void dmcApply();          // takes gDmcLock
+    void dmcApplyLocked();    // caller holds gDmcLock
     void resumeCapture();
     void resumeRun();
     static void resumeFire(thread_call_param_t p0, thread_call_param_t) { ((NMIntelFB *)p0)->resumeRun(); }
@@ -369,19 +374,25 @@ OSDefineMetaClassAndStructors(NMIntelFB, IOFramebuffer)
 static int nmintelfb_dmc_write SYSCTL_HANDLER_ARGS
 {
     if (!req->newptr) return 0;
-    if (!gDmcTarget) return ENXIO;
     if (req->newlen < 1024 || req->newlen > 160 * 1024) return EINVAL;
     uint8_t *buf = (uint8_t *)IOMalloc(req->newlen);
     if (!buf) return ENOMEM;
     int err = SYSCTL_IN(req, buf, req->newlen);
-    if (!err) err = gDmcTarget->dmcAccept(buf, (uint32_t)req->newlen);
+    if (!err) {
+        if (!gDmcLock) err = ENXIO;
+        else {
+            IOLockLock(gDmcLock);
+            err = gDmcTarget ? gDmcTarget->dmcAccept(buf, (uint32_t)req->newlen) : ENXIO;
+            IOLockUnlock(gDmcLock);
+        }
+    }
     IOFree(buf, req->newlen);
     return err;
 }
 static int nmintelfb_dmc_want_read SYSCTL_HANDLER_ARGS
 {
     char b[40] = "none";
-    if (gDmcTarget) snprintf(b, sizeof b, "%s", gDmcTarget->fDmcWant);
+    if (gDmcLock) { IOLockLock(gDmcLock); if (gDmcTarget) snprintf(b, sizeof b, "%s", gDmcTarget->fDmcWant); IOLockUnlock(gDmcLock); }
     return sysctl_handle_string(oidp, b, sizeof b, req);
 }
 #ifdef NMINTELFB_VIRTUAL
@@ -520,7 +531,8 @@ bool NMIntelFB::start(IOService *provider)
     { int a = 0; fDmcOn = PE_parse_boot_argn("nmhybriddmc", &a, sizeof a) && a == 1;
       const char *want = nmd_file_for(fVer, fPCI->configRead16(kIOPCIConfigDeviceID));
       snprintf(fDmcWant, sizeof fDmcWant, "%s", want ? want : "none");
-      gDmcTarget = this; }
+      if (!gDmcLock) { IOLock *l = IOLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void * volatile *)&gDmcLock)) IOLockFree(l); }
+      if (gDmcLock) { IOLockLock(gDmcLock); gDmcTarget = this; IOLockUnlock(gDmcLock); } }
     publishBacklight();   // before IOFramebuffer::start: IOFramebuffer::open looks for a service named "backlight"
     if (!IOFramebuffer::start(provider)) {
         if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
@@ -555,8 +567,10 @@ void NMIntelFB::stop(IOService *provider)
     if (fHyReady && fRing.live != -1) hybridHome();
     if (fOwnReady && nmh_own_may_free(&fOwn)) ownRelease();
     fResumeOn = false;
+    if (gDmcLock) IOLockLock(gDmcLock);
     if (gDmcTarget == this) gDmcTarget = nullptr;
     if (fDmcBlob) { IOFree(fDmcBlob, fDmcLen); fDmcBlob = nullptr; }
+    if (gDmcLock) IOLockUnlock(gDmcLock);
     if (fResumeCall) { thread_call_cancel(fResumeCall); while (!thread_call_free(fResumeCall)) { thread_call_cancel(fResumeCall); IOSleep(5); } fResumeCall = nullptr; }
     if (fSnap) { IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; }
     if (fFwPte) { IOFree(fFwPte, (size_t)(fFwPteCount * sizeof(uint64_t))); fFwPte = nullptr; }
@@ -875,10 +889,17 @@ int NMIntelFB::dmcAccept(const uint8_t *buf, uint32_t len)
     fDmcBlob = copy; fDmcLen = len;
     IFBLOG("hybrid: display firmware accepted: %u words for the main program, version %u.%u%s", fw.part[0].words, fw.version >> 16, fw.version & 0xFFFF,
            fDmcOn ? "" : " (not loaded: boot-arg nmhybriddmc is not 1)");
-    if (fDmcOn) dmcApply();
+    if (fDmcOn) dmcApplyLocked();
     return 0;
 }
 void NMIntelFB::dmcApply()
+{
+    if (!gDmcLock) return;
+    IOLockLock(gDmcLock);
+    if (!fStopping) dmcApplyLocked();
+    IOLockUnlock(gDmcLock);
+}
+void NMIntelFB::dmcApplyLocked()
 {
     struct nmd_fw fw;
     if (!fDmcBlob || nmd_parse(fDmcBlob, fDmcLen, '*', '*', nmd_max_words(fVer), &fw) != NMD_OK) return;
