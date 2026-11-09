@@ -8,7 +8,7 @@ import pathlib, subprocess, tempfile
 root = pathlib.Path(__file__).resolve().parents[1]
 src = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
 for need in ['if (full) nvrmApplyColorPrefs(vh);', 'nvrmfb_color_vibrance', 'PE_parse_boot_argn("nvfbbpc"', 'PE_parse_boot_argn("nvfbrange"',
-             'nvrmSaturationMatrix(gVibrance, sm)', 'static void colorChanged(bool needsModeset)']:
+             'nvrmSaturationMatrix(gVibrance, sm)', 'friend void nvrmfbColorChanged(bool needsModeset)']:
     assert need in src, 'missing: ' + need
 a = src.index('template <typename C> static auto nvrmSetColorFormat'); b = src.index('static void nvrmHeadConfigBaseline')
 lifted = src[a:b].replace('static void nvrmApplyColorPrefs(struct NvKmsKapiHeadRequestedConfig *hr)', 'template <class H> static void nvrmApplyColorPrefs(H *hr)')   # same body, any config type

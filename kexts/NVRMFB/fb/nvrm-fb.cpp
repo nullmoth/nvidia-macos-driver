@@ -415,7 +415,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     bool fVrrSupported = false, fVrrOn = false; unsigned fVrrMinHz = 0, fVrrMaxHz = 0;
     static bool vrrAllowed();
     IOReturn setVrr(bool on);
-    static void colorChanged(bool needsModeset);   // a debug.nvrmfb_color_* sysctl changed: apply to every lit head
+    friend void nvrmfbColorChanged(bool needsModeset);   // a debug.nvrmfb_color_* sysctl changed: apply to every lit head
     bool applyVibrance();
     NVRMBacklightHandler *fBacklight = nullptr;   // the panel's brightness control, see NVRMBacklightHandler
     void publishBacklight();
@@ -3897,7 +3897,7 @@ static int nvrmfbColorSysctl SYSCTL_HANDLER_ARGS
         (which == 2 && !(v >= 0 && nvrmColorRangeValid((unsigned)v))) || (which == 3 && (v < -100 || v > 100))) return EINVAL;
     if (v == *(int *)arg1) return 0;
     *(int *)arg1 = v;
-    NVRMNVDAFramebuffer::colorChanged(which != 3);
+    nvrmfbColorChanged(which != 3);
     return 0;
 }
 SYSCTL_PROC(_debug, OID_AUTO, nvrmfb_color_bpc, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &gColorBpc, 0, nvrmfbColorSysctl, "I", "output bits per channel: 0 automatic, 6, 8, 10, 12");
@@ -4436,7 +4436,7 @@ bool NVRMNVDAFramebuffer::applyVibrance()
     IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
     return ok;
 }
-void NVRMNVDAFramebuffer::colorChanged(bool needsModeset)
+void nvrmfbColorChanged(bool needsModeset)
 {
     for (unsigned i = 0; i < 16; i++) {
         NVRMNVDAFramebuffer *fb = gFBs[i];
