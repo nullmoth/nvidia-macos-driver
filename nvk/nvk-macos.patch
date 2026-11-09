@@ -13633,15 +13633,15 @@ diff -ruN a/src/nouveau/vulkan/nvmtl_nvk_sass.c b/src/nouveau/vulkan/nvmtl_nvk_s
 + * THE CBUF0 IS NVIDIA'S, NOT NVK'S. `nvk_root_descriptor_table` is NAK's own convention: it has
 + * nothing at 0x358, 0x37c or 0x380 and no global memory descriptor at all. An nvcc/ptxas cubin
 + * reads all four. So this builds a SECOND, nvcc-shaped constant buffer and binds it to the QMD's
-+ * cbuf0 slot — never the root table. Offsets below were measured by disassembling cubins
-+ * (reference_nvcc_cbuf0_layout_sm120), and cross-checked from the other side on: a cubin
++ * cbuf0 slot — never the root table. Offsets below come from cubins compiled from our own sources
++ * and from tinygrad's launcher (MIT, runtime/ops_nv.py), and are cross-checked from the other side: a cubin
 + * our own compiler produced has .nv.constant0 = 904 bytes = 0x380 + 8 for one 8-byte parameter,
 + * and 912 = 0x380 + 16 for two.
 + *
 + * THE DESCRIPTOR AT 0x358 IS NOT OPTIONAL AND IT MUST NOT BE ZERO. Every nvcc global access on
 + * sm_90+ assembles to `STG.E desc[UR4][R2.64]`, with UR4:UR5 loaded by
 + * `LDCU.64 UR4, c[0x0][0x358]`. With the pair zero the SM raises "Invalid Address Space" before
-+ * touching memory — that cost a GPU run (18:14:35, Xid 13, ESR 0x505730=0x10).
++ * touching memory — the fault reported is Xid 13, ESR 0x505730=0x10.
 + * 1 << 60 is the smallest valid descriptor with no cache policy attached.
 + */
 +
