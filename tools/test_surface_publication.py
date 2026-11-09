@@ -12,6 +12,8 @@ methods = source[start:end]
 fixture = r'''
 #import <Foundation/Foundation.h>
 #include <assert.h>
+#include <os/lock.h>
+#include <stdatomic.h>
 #include <dispatch/dispatch.h>
 #include <stdint.h>
 #include <string.h>
@@ -53,6 +55,12 @@ static int dirtyAnswer=1, tryAnswer=-1; static unsigned blockingDirties, tries;
 static int nvmtl_vk_surface_dirty(unsigned s, unsigned p) { blockingDirties++; return dirtyAnswer; }
 static int nvmtl_vk_surface_dirty_try(unsigned s, unsigned p) { tries++; return tryAnswer; }
 static int nvmtl_noseed(void) { return 0; }
+// own-write tracking across planes (nvmtl_plane_seed.h) is off unless NVMTL_PLANE_SEED=1; its surface-property and page-key
+// calls are stubs here, so every arm below runs the default path
+static size_t IOSurfaceGetPlaneCount(IOSurfaceRef s) { (void)s; return 1; }
+static CFTypeRef IOSurfaceCopyValue(IOSurfaceRef s, CFStringRef k) { (void)s; (void)k; return NULL; }
+static void IOSurfaceSetValue(IOSurfaceRef s, CFStringRef k, CFTypeRef v) { (void)s; (void)k; (void)v; }
+static void nvmtl_vk_host_pages_key(uint32_t surface, uint64_t cookie) { (void)surface; (void)cookie; }
 // cross-process busy marks (PR #398): who wrote the surface last, and the waits for another process's write
 static int busyForeign=0, busyWaits=0;
 static int nvmtl_busy_foreign(IOSurfaceRef s, NSUInteger p) { (void)s; (void)p; return busyForeign; }
@@ -152,7 +160,7 @@ int main(int argc, char **argv) { @autoreleasepool {
 with tempfile.TemporaryDirectory() as directory:
     path = pathlib.Path(directory)
     (path / 'test.m').write_text(fixture + methods + checks)
-    subprocess.run(['clang', '-fobjc-arc', '-framework', 'Foundation',
+    subprocess.run(['clang', '-fobjc-arc', '-I', str(root / 'plugin'), '-framework', 'Foundation',
                     str(path / 'test.m'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)
     subprocess.run([str(path / 'test'), 'shared'], check=True)
