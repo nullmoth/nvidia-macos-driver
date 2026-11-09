@@ -223,6 +223,56 @@ static NSString *nvmtl_aircache_dir(void) {
     });
     return dir;
 }
+
+// The AIR of a function the translator refused is kept (bounded, see nvmtl_failed_air.h) so a log report carries the
+// shader that failed, not only the reason. Nothing leaves the machine until the user presses Send logs. The folder is the
+// first of the shared one and the process's own cache folder that takes a real write. NVMTL_NO_FAILED_AIR=1, or the file
+// /Library/GPUBundles/nvmtl/no-failed-air, turns the capture off.
+static NSString *nvmtl_failed_air_dir(void) {
+    static NSString *dir; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *off = getenv("NVMTL_NO_FAILED_AIR");
+        if ((off && *off && *off != '0') || access("/Library/GPUBundles/nvmtl/no-failed-air", F_OK) == 0) return;
+        NSMutableArray<NSString *> *c = [NSMutableArray arrayWithObject:@"/Library/GPUBundles/nvmtl/failed-air"];
+        char ucd[PATH_MAX];
+        const size_t n = confstr(_CS_DARWIN_USER_CACHE_DIR, ucd, sizeof ucd);
+        if (n > 0 && n <= sizeof ucd) {
+            [c addObject:[@(ucd) stringByAppendingPathComponent:@"nvmtl/failed-air"]];
+            [c addObject:[[@(ucd) stringByAppendingPathComponent:@(getprogname())] stringByAppendingPathComponent:@"nvmtl/failed-air"]];
+        }
+        for (NSString *d in c) if (nvmtl_dir_writable(d)) { dir = d; return; }
+    });
+    return dir;
+}
+static void nvmtl_failed_air_store(NSString *function, const char *stage, const char *reason, NSString *text) {
+    NSString *dir = nvmtl_failed_air_dir();
+    if (!dir || !text.length) return;
+    static NSLock *lock; static dispatch_once_t once; static size_t files, bytes;
+    dispatch_once(&once, ^{
+        lock = [NSLock new];
+        for (NSString *f in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil]) {
+            NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath:[dir stringByAppendingPathComponent:f] error:nil];
+            if (a) { files++; bytes += (size_t)[a fileSize]; }
+        }
+    });
+    NSData *body = [text dataUsingEncoding:NSUTF8StringEncoding];
+    char head[480], file[160];
+    if (!body || !nvmtl_failed_air_header(head, sizeof head, stage, reason)) return;
+    if (!nvmtl_failed_air_file_name(file, sizeof file, function.UTF8String, nvmtl_failed_air_digest((const char *)body.bytes, body.length))) return;
+    NSString *path = [dir stringByAppendingPathComponent:@(file)];
+    [lock lock];
+    BOOL have = [[NSFileManager defaultManager] fileExistsAtPath:path];
+    const int admit = have ? NVMTL_FAILED_AIR_ADMIT : nvmtl_failed_air_admit(files, bytes, body.length + strlen(head));
+    if (!have && admit == NVMTL_FAILED_AIR_ADMIT) {
+        NSMutableData *out = [NSMutableData dataWithBytes:head length:strlen(head)];
+        [out appendData:body];
+        if ([out writeToFile:path atomically:YES]) { files++; bytes += out.length; }
+    }
+    [lock unlock];
+    if (!have && admit != NVMTL_FAILED_AIR_ADMIT)
+        nvlog("library: refused %s not kept for the report (%s)", function.UTF8String,
+              admit == NVMTL_FAILED_AIR_TOO_BIG ? "larger than the per-function limit" : "the failed-air folder is full");
+}
 static _Atomic unsigned long gSpvHit, gSpvMiss, gSpvStored;
 static _Atomic unsigned long gFcHit, gFcMiss, gFcStored;
 static _Atomic unsigned long gFcMemoHit, gFcLookups;
@@ -1161,6 +1211,7 @@ NSData *nvmtl_compile_library_entry(NSData *air, NSString *ll, NSString *stage, 
             if (xlate(ll.UTF8String, stage.UTF8String, &spv, &spvn, err, sizeof err) != 0) {
                 nvlog("library: translate %s (%s) FAILED: %s", name.UTF8String, stage.UTF8String, err);
                 nvmtl_translate_failure_note(sfKey, @(err));
+                nvmtl_failed_air_store(name, stage.UTF8String, err, ll);
                 nvmtl_sf_publish(sf, sfKey.UTF8String, NULL); nvmtl_sf_retire(sf, sfKey.UTF8String);
                 if (error) *error = @(err); return nil;
             }
