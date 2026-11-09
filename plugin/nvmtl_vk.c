@@ -28,6 +28,8 @@
 #include "nvmtl_multiview.h"
 #include "nvmtl_caps_query.h"
 #include "nvmtl_sparse_query.h"
+#include "nvmtl_sparse_map.h"
+#include "nvmtl_counter_heap.h"
 #include "nvmtl_icb_range.h"
 #include "nvmtl_y422_convert.h"
 #include "nvmtl_icb_record.h"
@@ -404,7 +406,7 @@ void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, siz
     X(vkCreateImageView) X(vkCreateRenderPass) X(vkCreateFramebuffer) X(vkCreateShaderModule) X(vkDestroyShaderModule) X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) \
     X(vkDestroyPipeline) X(vkDestroyRenderPass) X(vkCreateGraphicsPipelines) X(vkCreateComputePipelines) X(vkCmdDispatch) X(vkCmdPushConstants) X(vkCreateCommandPool) X(vkAllocateCommandBuffers) X(vkBeginCommandBuffer) \
     X(vkCmdBeginRenderPass) X(vkCmdBindPipeline) X(vkCmdDraw) X(vkCmdEndRenderPass) X(vkEndCommandBuffer) \
-    X(vkQueueSubmit) X(vkQueueBindSparse) X(vkCreateFence) X(vkWaitForFences) X(vkResetFences) X(vkDestroyFence) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyBuffer) \
+    X(vkQueueSubmit) X(vkQueueBindSparse) X(vkGetImageSparseMemoryRequirements) X(vkCreateFence) X(vkWaitForFences) X(vkResetFences) X(vkDestroyFence) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyBuffer) \
     X(vkCmdPipelineBarrier) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkDeviceWaitIdle) X(vkFreeCommandBuffers) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetPrimitiveTopology) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdBindVertexBuffers) X(vkCreateDescriptorSetLayout) X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkDestroyDescriptorSetLayout) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets) X(vkCreateSampler) X(vkDestroySampler) X(vkFreeDescriptorSets) X(vkCmdSetBlendConstants) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdFillBuffer) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkGetBufferDeviceAddress) X(vkCmdWriteTimestamp) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdBeginQuery) X(vkCmdEndQuery) X(vkCmdCopyQueryPoolResults) X(vkGetQueryPoolResults) X(vkDestroyQueryPool) X(vkResetQueryPool) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatchIndirect) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) \
     X(vkDestroyBuffer) X(vkFreeMemory) X(vkDestroyImage) X(vkDestroyImageView) X(vkDestroyFramebuffer) X(vkDestroyCommandPool) \
     X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetDepthBiasEnable) \
@@ -412,6 +414,7 @@ void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, siz
 static int g_dyn3;
 static int g_provoking;   /* provoking vertex is per-draw dynamic state, and the last vertex can provoke */
 static _Thread_local int t_ms_storage;   // set around the one creation in nvmtl_vk_image_create_ms_storage
+static int g_sparse_img;   // sparse textures: NVMTL_SPARSE_TEXTURES=1, the queue binds sparse, and the device has sparseBinding + sparseResidencyImage2D
 static int g_ms_storage;   // multisampled storage images (NVMTL_TILE_SHADING=1 and the device offers shaderStorageImageMultisample)
 static uint32_t g_mv_views;   /* multiview view count the device offers while NVMTL_VERTEX_AMPLIFICATION=1; 0 = off */
 static int g_divisor;     /* per-instance step rates (VK_KHR_vertex_attribute_divisor), up to g_max_divisor */
@@ -1420,6 +1423,12 @@ static int nvmtl_vk_initialize(void)
     enabled.independentBlend = supported.independentBlend; g_indep = supported.independentBlend == VK_TRUE;
     enabled.alphaToOne = supported.alphaToOne; g_a2one = supported.alphaToOne == VK_TRUE;
     enabled.depthBounds = supported.depthBounds; g_depth_bounds = supported.depthBounds == VK_TRUE;
+    {   const char *st = getenv("NVMTL_SPARSE_TEXTURES");
+        if (st && st[0] == '1' && g_qsparse && supported.sparseBinding && supported.sparseResidencyImage2D) {
+            enabled.sparseBinding = VK_TRUE; enabled.sparseResidencyImage2D = VK_TRUE; g_sparse_img = 1; }
+        if (st && st[0] == '1') nvlog("vk: sparse textures %s (queue sparse %d, sparseBinding %d, sparseResidencyImage2D %d)", g_sparse_img ? "ON" : "OFF - the device cannot",
+                                     g_qsparse, (int)supported.sparseBinding, (int)supported.sparseResidencyImage2D);
+    }
     {   // a tile function's multisampled attachment is a multisampled storage image (translator/src/native/tile_imageblock.rs)
         const char *ts = getenv("NVMTL_TILE_SHADING");
         if (ts && ts[0] == '1') {
@@ -2591,6 +2600,84 @@ static int nvmtl_vk_image_create_ms_lifetime_body(uint32_t w, uint32_t h, uint32
     return 0;
 }
 int nvmtl_vk_ms_storage_ok(void) { return g_ms_storage; }
+int nvmtl_vk_sparse_textures_ok(void) { return g_sparse_img; }
+// ticks per second of the GPU timestamps (0 when the device has none); queried once the device exists
+uint64_t nvmtl_vk_timestamp_frequency(void) { return nvmtl_vk_init() ? 0 : nvmtl_ts_frequency((double)g_lim.timestampPeriod, g_timestamp_bits); }
+// A 2D (array) image whose memory is bound block by block. Its requirements say where the mip tail starts.
+int nvmtl_vk_image_create_sparse(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, uint32_t mips, uint32_t layers, nvk_image *out)
+{
+    memset(out, 0, sizeof *out);
+    if (!g_sparse_img || nvmtl_vk_init() || !w || !h || !layers) return -1;
+    if (!mips) mips = 1;
+    const uint32_t storage = nvmtl_vk_format_is_storage(vkfmt) ? 1u : 0u;
+    VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, VK_IMAGE_CREATE_SPARSE_BINDING_BIT | VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT, VK_IMAGE_TYPE_2D, (VkFormat)vkfmt,
+        { w, h, 1 }, mips, layers, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0u),
+        VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
+    VkImage img = VK_NULL_HANDLE;
+    if (pvkCreateImage(g_dev, &ici, NULL, &img) != VK_SUCCESS) { nvlog("sparse image %ux%u format %u: vkCreateImage refused it", w, h, vkfmt); return -1; }
+    uint32_t nreq = 0; pvkGetImageSparseMemoryRequirements(g_dev, img, &nreq, NULL);
+    VkSparseImageMemoryRequirements req[8]; if (nreq > 8) nreq = 8;
+    pvkGetImageSparseMemoryRequirements(g_dev, img, &nreq, req);
+    int found = -1; for (uint32_t i = 0; i < nreq; i++) if (req[i].formatProperties.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) { found = (int)i; break; }
+    if (found < 0) { pvkDestroyImage(g_dev, img, NULL); nvlog("sparse image: the device reports no sparse requirements for format %u", vkfmt); return -1; }
+    nvmtl_vk_sparse_info *si = calloc(1, sizeof *si);
+    if (!si) { pvkDestroyImage(g_dev, img, NULL); return -1; }
+    const VkSparseImageMemoryRequirements *r = &req[found];
+    si->gran[0] = r->formatProperties.imageGranularity.width; si->gran[1] = r->formatProperties.imageGranularity.height; si->gran[2] = r->formatProperties.imageGranularity.depth;
+    si->first_tail = r->imageMipTailFirstLod; si->mips = mips; si->layers = layers; si->w = w; si->h = h;
+    si->tail_size = r->imageMipTailSize; si->tail_offset = r->imageMipTailOffset; si->tail_stride = r->imageMipTailStride;
+    si->single_tail = (r->formatProperties.flags & VK_SPARSE_IMAGE_FORMAT_SINGLE_MIPTAIL_BIT) != 0;
+    {   PFN_vkGetPhysicalDeviceProperties gpp = (PFN_vkGetPhysicalDeviceProperties)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceProperties");
+        VkPhysicalDeviceProperties pp; memset(&pp, 0, sizeof pp); if (gpp) gpp(g_pdev, &pp);
+        si->strict = pp.sparseProperties.residencyNonResidentStrict == VK_TRUE; }
+    VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, img, layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D, (VkFormat)vkfmt,
+        { 0, 0, 0, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers } };
+    void *view = NULL;
+    if (nvmtl_opaque_CreateImageView(g_dev, &vci, NULL, &view) != VK_SUCCESS) { pvkDestroyImage(g_dev, img, NULL); free(si); return -1; }
+    out->img = (void *)img; out->view = view; out->w = w; out->h = h; out->mips = mips; out->fmt = vkfmt; out->bpp = bpp ? bpp : 4; out->mtl_type = layers > 1 ? 3u : 2u;
+    out->layers = layers; out->samples = 1; out->storage = storage; out->sparse = si;
+    nvlog("sparse image: %ux%u format %u, %u level(s), block %ux%u, mip tail from level %u (%llu bytes)", w, h, vkfmt, mips, si->gran[0], si->gran[1], si->first_tail, (unsigned long long)si->tail_size);
+    return 0;
+}
+// One batch of binds, waited for. An unbind drains the queue first, as the buffer path does: NVK applies sparse binds on the CPU at
+// submission, and an unbind would pull pages from under work still running. A failed bind leaves the queue lost (see
+// nvmtl_vk_sparse_bind); the caller is told and nothing is retried.
+int nvmtl_vk_image_sparse_bind(nvk_image *img, void *mem, const nvmtl_vk_sparse_blk *blk, uint32_t n, uint64_t tail_mem_off, int bind_tail)
+{
+    nvmtl_vk_sparse_info *si = img ? (nvmtl_vk_sparse_info *)img->sparse : NULL;
+    if (!si || !img->img || g_state != 1 || (!n && !bind_tail) || n > 4096) return NVMTL_SPARSE_NOT_SUBMITTED;
+    VkSparseImageMemoryBind *mb = calloc(n ? n : 1, sizeof *mb); VkSparseMemoryBind tb;
+    if (!mb) return NVMTL_SPARSE_NOT_SUBMITTED;
+    for (uint32_t i = 0; i < n; i++)
+        mb[i] = (VkSparseImageMemoryBind){ { VK_IMAGE_ASPECT_COLOR_BIT, blk[i].mip, blk[i].layer }, { (int32_t)blk[i].x, (int32_t)blk[i].y, (int32_t)blk[i].z },
+                                           { blk[i].w, blk[i].h, blk[i].d }, (VkDeviceMemory)mem, mem ? blk[i].mem_off : 0, 0 };
+    VkSparseImageMemoryBindInfo ibi = { (VkImage)img->img, n, mb };
+    VkSparseImageOpaqueMemoryBindInfo obi = { (VkImage)img->img, 0, &tb };
+    if (bind_tail) {
+        if (si->single_tail) { tb = (VkSparseMemoryBind){ si->tail_offset, si->tail_size, (VkDeviceMemory)mem, mem ? tail_mem_off : 0, 0 }; obi.bindCount = 1; }
+        else { free(mb); nvlog("sparse image: a per-layer mip tail is not carried"); return NVMTL_SPARSE_NOT_SUBMITTED; }
+    }
+    VkBindSparseInfo bsi = { VK_STRUCTURE_TYPE_BIND_SPARSE_INFO, NULL, 0, NULL, 0, NULL, bind_tail ? 1u : 0u, bind_tail ? &obi : NULL, n ? 1u : 0u, n ? &ibi : NULL, 0, NULL };
+    VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, NULL, 0 }; VkFence f = VK_NULL_HANDLE;
+    if (pvkCreateFence(g_dev, &fci, NULL, &f) != VK_SUCCESS) { free(mb); return NVMTL_SPARSE_NOT_SUBMITTED; }
+    pthread_mutex_lock(&nvmtl_submit_mutex);
+    if (!mem) {   // an unbind: drain first
+        VkFence d = VK_NULL_HANDLE; VkResult dr = pvkCreateFence(g_dev, &fci, NULL, &d);
+        if (dr == VK_SUCCESS) dr = pvkQueueSubmit(g_queue, 0, NULL, d);
+        if (dr == VK_SUCCESS) dr = pvkWaitForFences(g_dev, 1, &d, VK_TRUE, 2000000000ull);
+        if (d) pvkDestroyFence(g_dev, d, NULL);
+        if (dr != VK_SUCCESS) { pthread_mutex_unlock(&nvmtl_submit_mutex); pvkDestroyFence(g_dev, f, NULL); free(mb); nvlog("sparse image: the queue did not drain before an unbind (%d) - nothing changed", dr); return NVMTL_SPARSE_NOT_SUBMITTED; }
+    }
+    VkResult r = pvkQueueBindSparse(g_queue, 1, &bsi, f);
+    pthread_mutex_unlock(&nvmtl_submit_mutex);
+    int outcome = NVMTL_SPARSE_OK;
+    if (r != VK_SUCCESS) outcome = NVMTL_SPARSE_FAILED;
+    else { r = pvkWaitForFences(g_dev, 1, &f, VK_TRUE, 5000000000ull); if (r != VK_SUCCESS) outcome = NVMTL_SPARSE_FAILED; }
+    if (outcome != NVMTL_SPARSE_OK) nvlog("sparse image: vkQueueBindSparse(%u block(s)%s, %s) -> %d: the bound state is indeterminate", n, bind_tail ? " + mip tail" : "", mem ? "bind" : "unbind", r);
+    pvkDestroyFence(g_dev, f, NULL); free(mb);
+    return outcome;
+}
 // The texel shape of one sparse block for a format / dimensionality / sample count, as the device reports it. 0 on success.
 int nvmtl_vk_sparse_granularity(uint32_t vkfmt, int is3d, uint32_t samples, uint32_t out[3])
 {
@@ -8613,6 +8700,7 @@ void nvmtl_vk_image_destroy(nvk_image *i)
 }
 static void nvmtl_vk_image_destroy_now(nvk_image *i)
 {
+    if (i->sparse) { free(i->sparse); i->sparse = NULL; }
     if (!i->img) { if (i->view) { nvmtl_vw_note_died(i->view); pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); i->view = NULL; } return; }   // a view held by the grace (texel entries: nvmtl_image_grace_reap)
     nvmtl_vk_image_upload_barrier(i);   // an async upload must finish before we free this image's memory (#96)
     if (i->view) { nvmtl_vw_note_died(i->view); pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); }

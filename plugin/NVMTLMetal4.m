@@ -139,6 +139,17 @@ static void nvmtl_m4_unresolved(const char *what, uint64_t addr)
 
 // ---- allocator, argument table ------------------------------------------------------------------------------------------
 API_AVAILABLE(macos(26.0))
+// A counter heap is a timestamp sample buffer (the Vulkan query pool behind the Metal 3 counters). Timestamps are recorded through
+// the underlying Metal 3 encoders; a heap resolve into a buffer happens when the command buffer completes, into CPU-visible memory.
+@interface NVMTL4CounterHeap : NSObject <MTL4CounterHeap> { @public id<MTLCounterSampleBuffer> _sb; NSUInteger _count; NSString *_label; } @end
+@implementation NVMTL4CounterHeap
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)l { _label = [l copy]; }
+- (NSUInteger)count { return _count; }
+- (MTL4CounterHeapType)type { return MTL4CounterHeapTypeTimestamp; }
+- (NSData *)resolveCounterRange:(NSRange)r { return [_sb resolveCounterRange:r]; }
+- (void)invalidateCounterRange:(NSRange)r {}   // entries are overwritten by the next write; there is nothing to clear
+@end
 @interface NVMTL4Allocator : NSObject <MTL4CommandAllocator> { @public id<MTLDevice> _dev; NSString *_label; } @end
 @implementation NVMTL4Allocator
 - (id<MTLDevice>)device { return _dev; }
@@ -373,7 +384,10 @@ static NSSet<NSString *> *nvmtl_m4_blit_selectors(void)
 - (void)insertDebugSignpost:(NSString *)s {}
 - (void)pushDebugGroup:(NSString *)s {}
 - (void)popDebugGroup {}
-- (void)writeTimestampWithGranularity:(MTL4TimestampGranularity)g intoHeap:(id<MTL4CounterHeap>)h atIndex:(NSUInteger)i { nvlog("Metal 4: counter heaps are not implemented - timestamp dropped"); }
+- (void)writeTimestampWithGranularity:(MTL4TimestampGranularity)g intoHeap:(id<MTL4CounterHeap>)h atIndex:(NSUInteger)i {
+    if (![(id)h isKindOfClass:[NVMTL4CounterHeap class]]) { nvlog("Metal 4: writeTimestamp into a heap this device did not make - dropped"); return; }
+    [self nvmtlPush]; [(id<MTLComputeCommandEncoder>)_enc sampleCountersInBuffer:((NVMTL4CounterHeap *)h)->_sb atSampleIndex:i withBarrier:g == MTL4TimestampGranularityPrecise];
+}
 - (void)buildAccelerationStructure:(id<MTLAccelerationStructure>)a descriptor:(MTL4AccelerationStructureDescriptor *)d scratchBuffer:(MTL4BufferRange)s { nvlog("Metal 4: MTL4 acceleration structure builds are not implemented"); }
 - (void)endEncoding { if (_ended) return; _ended = YES; [self nvmtlCloseUnderlying]; _cb->_openEnc = nil; }
 - (void)dealloc { if (!_ended) [self nvmtlCloseUnderlying]; }
@@ -462,7 +476,10 @@ API_AVAILABLE(macos(26.0))
 - (void)insertDebugSignpost:(NSString *)s {}
 - (void)pushDebugGroup:(NSString *)s {}
 - (void)popDebugGroup {}
-- (void)writeTimestampWithGranularity:(MTL4TimestampGranularity)g afterStage:(MTLRenderStages)st intoHeap:(id<MTL4CounterHeap>)h atIndex:(NSUInteger)i { nvlog("Metal 4: counter heaps are not implemented - timestamp dropped"); }
+- (void)writeTimestampWithGranularity:(MTL4TimestampGranularity)g afterStage:(MTLRenderStages)st intoHeap:(id<MTL4CounterHeap>)h atIndex:(NSUInteger)i {
+    if (![(id)h isKindOfClass:[NVMTL4CounterHeap class]]) { nvlog("Metal 4: writeTimestamp into a heap this device did not make - dropped"); return; }
+    [self nvmtlFlush]; [(id<MTLRenderCommandEncoder>)_enc sampleCountersInBuffer:((NVMTL4CounterHeap *)h)->_sb atSampleIndex:i withBarrier:st != MTLRenderStageVertex];
+}
 - (void)endEncoding { if (_ended) return; _ended = YES; [_enc endEncoding]; _cb->_openEnc = nil; }
 - (void)dealloc { if (!_ended) [_enc endEncoding]; }
 @end
@@ -515,8 +532,23 @@ API_AVAILABLE(macos(26.0))
 - (void)useResidencySets:(const id<MTLResidencySet> __unsafe_unretained [])s count:(NSUInteger)n { for (NSUInteger i = 0; i < n; i++) [self useResidencySet:s[i]]; }
 - (void)pushDebugGroup:(NSString *)s { [[self nvmtlUnderlying] pushDebugGroup:s]; }
 - (void)popDebugGroup { [[self nvmtlUnderlying] popDebugGroup]; }
-- (void)writeTimestampIntoHeap:(id<MTL4CounterHeap>)h atIndex:(NSUInteger)i { nvlog("Metal 4: counter heaps are not implemented - timestamp dropped"); }
-- (void)resolveCounterHeap:(id<MTL4CounterHeap>)h withRange:(NSRange)r intoBuffer:(MTL4BufferRange)b waitFence:(id<MTLFence>)w updateFence:(id<MTLFence>)u { nvlog("Metal 4: counter heaps are not implemented - resolve dropped"); }
+- (void)writeTimestampIntoHeap:(id<MTL4CounterHeap>)h atIndex:(NSUInteger)i {
+    if (![(id)h isKindOfClass:[NVMTL4CounterHeap class]]) { nvlog("Metal 4: writeTimestamp into a heap this device did not make - dropped"); return; }
+    id<MTLBlitCommandEncoder> e = [[self nvmtlUnderlying] blitCommandEncoder];   // a command buffer level timestamp sits between encoders
+    [e sampleCountersInBuffer:((NVMTL4CounterHeap *)h)->_sb atSampleIndex:i withBarrier:YES]; [e endEncoding];
+}
+// The resolve is done on the CPU when this command buffer has completed (the timestamps are read back then, as the Metal 3 counters
+// are), so the destination must be CPU-visible; the fences are not needed for that order and are ignored.
+- (void)resolveCounterHeap:(id<MTL4CounterHeap>)h withRange:(NSRange)r intoBuffer:(MTL4BufferRange)b waitFence:(id<MTLFence>)w updateFence:(id<MTLFence>)u {
+    id<MTLBuffer> dst = nil; NSUInteger off = 0;
+    if (![(id)h isKindOfClass:[NVMTL4CounterHeap class]] || !nvmtl_m4_resolve(b.bufferAddress, &dst, &off) || !dst.contents || !nvmtl_heap_resolve_fits(r.length, off, dst.length)) {
+        nvlog("Metal 4: resolveCounterHeap: unusable heap, range or destination (it must be CPU-visible and hold %lu entries) - dropped", (unsigned long)r.length); return; }
+    id<MTL4CounterHeap> heap = h;
+    [[self nvmtlUnderlying] addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+        NSData *d = [heap resolveCounterRange:r];
+        if (d.length == r.length * 8u) memcpy((uint8_t *)dst.contents + off, d.bytes, d.length); else nvlog("Metal 4: resolveCounterHeap: the timestamps could not be read back");
+    }];
+}
 @end
 
 // ---- commit feedback ----------------------------------------------------------------------------------------------------
@@ -832,8 +864,27 @@ static void nvmtl_m4_convert_attachments(MTL4RenderPipelineColorAttachmentDescri
     return nil;
 }
 - (id)newCounterHeapWithDescriptor:(id)descriptor error:(NSError **)err {
-    if (err) *err = [NSError errorWithDomain:MTLCounterErrorDomain code:MTLCounterSampleBufferErrorInvalid userInfo:@{ NSLocalizedDescriptionKey: @"Metal 4: counter heaps are not implemented" }];
+    if (@available(macOS 26.0, *)) {
+    MTL4CounterHeapDescriptor *d = descriptor;
+    const char *why = nvmtl_heap_refusal((int)d.type, d.count, nvmtl_vk_timestamp_frequency());
+    id<MTLCounterSampleBuffer> sb = nil;
+    if (!why) {
+        MTLCounterSampleBufferDescriptor *sd = [MTLCounterSampleBufferDescriptor new];
+        sd.counterSet = [(NSArray *)[(id<MTLDevice>)self counterSets] firstObject]; sd.sampleCount = d.count; sd.storageMode = MTLStorageModeShared;
+        NSError *e = nil; sb = [(id<MTLDevice>)self newCounterSampleBufferWithDescriptor:sd error:&e];
+        if (!sb) why = "the query pool behind the heap could not be made";
+    }
+    if (why) {
+        nvlog("Metal 4: newCounterHeap refused - %s", why);
+        if (err) *err = [NSError errorWithDomain:MTLCounterErrorDomain code:MTLCounterSampleBufferErrorInvalid userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"counter heap refused: %s", why] }];
+        return nil;
+    }
+    NVMTL4CounterHeap *h = [NVMTL4CounterHeap new]; h->_sb = sb; h->_count = d.count;
+    if (err) *err = nil;
+    return h;
+    }
     return nil;
 }
+
 @end
 #pragma clang attribute pop
