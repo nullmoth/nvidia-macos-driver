@@ -1,0 +1,35 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+// Turns the records a kernel wrote with the ICB encode intrinsics (plugin/nvmtl_icb_record.h) into indirect-argument
+// records for ONE candidate pipeline: a slot that is armed, inside the execution range, of the wanted kind (draw or
+// dispatch) and bound to the wanted pipeline keeps its counts; every other slot gets zero counts, which do nothing.
+// Indexed draws are always emptied: an index buffer is bound by the CPU and the record only holds an address.
+layout(buffer_reference, std430) buffer Words { uint v[]; };
+layout(push_constant) uniform Args { Words rec; Words rng; Words out_; uint count; uint compute; uint pso_lo; uint pso_hi; uint loc; uint len; uint ptype; uint pad_; } a;
+layout(local_size_x = 64) in;
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= a.count) return;
+    uint o = i * 5u, r = i * 144u;                    // 5 argument words, 576/4 record words
+    for (uint w = 0u; w < 5u; w++) a.out_.v[o + w] = 0u;
+    uint location = a.loc, length = a.len;
+    if (a.len == 0xFFFFFFFFu) { location = a.rng.v[0]; length = a.rng.v[1]; }
+    if (i < location || i - location >= length) return;
+    uint flags = a.rec.v[r];
+    if ((flags & 1u) == 0u) return;
+    bool isCompute = (flags & 2u) != 0u;
+    if (isCompute != (a.compute != 0u)) return;
+    if (a.rec.v[r + 8u] != a.pso_lo || a.rec.v[r + 9u] != a.pso_hi) return;   // pso at byte 32
+    if (isCompute) {
+        a.out_.v[o] = a.rec.v[r + 12u]; a.out_.v[o + 1u] = a.rec.v[r + 13u]; a.out_.v[o + 2u] = a.rec.v[r + 14u];   // grid at byte 48
+    } else {
+        if ((flags & 4u) != 0u) return;
+        if (a.rec.v[r + 1u] != a.ptype) return;   // the primitive type is CPU state in Vulkan: one candidate per type
+        a.out_.v[o] = a.rec.v[r + 2u];      // count at byte 8
+        a.out_.v[o + 1u] = a.rec.v[r + 3u]; // instances
+        a.out_.v[o + 2u] = a.rec.v[r + 4u]; // start
+        a.out_.v[o + 3u] = a.rec.v[r + 5u]; // base instance
+    }
+}
