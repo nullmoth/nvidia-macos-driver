@@ -1448,6 +1448,8 @@ static NVRMNVDAFramebuffer *gFBs[16];
 // framebuffer; this does the same: the display is added to the table and the idle nubs are matched again, so the next
 // framebuffer starts exactly as it would have at boot with the monitor already on.
 static thread_call_t gHotplug = nullptr;
+// The parent of the display nubs, remembered when a framebuffer first starts; see nvrmPickNubParent.
+static IOService *gNubParent = nullptr;
 // Tell the framework to re-sense this connection after its state changes. The per-framebuffer call uses the registered
 // kIOFBConnectInterruptType handler; scheduleCall supplies its queued-work retain and stop-time cancellation.
 void NVRMNVDAFramebuffer::notifyConnectionChanged(unsigned delayMs)
@@ -1760,7 +1762,7 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
         fb->release();
     }
     if (!added) return;
-    IOService *nub0 = me->getProvider(), *gpu = nub0 ? nub0->getProvider() : nullptr;
+    IOService *nub0 = me->getProvider(), *gpu = nvrmPickNubParent<IOService>(nub0 ? nub0->getProvider() : nullptr, gNubParent);
     OSIterator *it = gpu ? gpu->getChildIterator(gIOServicePlane) : nullptr;
     unsigned matched = 0;
     if (it) {
@@ -2812,6 +2814,7 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
           (unsigned long long)(nvrmVramBudget(fBarLen) >> 20));
     if (fIndex == 0 && gFB != this) { retain(); gFB = this; }
     if (fIndex == 0 && !gHotplug) gHotplug = nvrmfbCall(hotplugFire, nullptr);
+    if (!gNubParent && provider->getProvider()) { gNubParent = provider->getProvider(); gNubParent->retain(); }
     // WhateverGreen (with Lilu) replaces IOFramebuffer::initFB. Unless boot-arg gfxrst=4 is set, the first initFB of any
     // framebuffer copies the boot console from the address WhateverGreen saved at boot. macOS frees that mapping when
     // the console moves (to a framebuffer, or to a new PCI window), and the copy then faults: a kernel panic in
