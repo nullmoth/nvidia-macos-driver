@@ -64,6 +64,16 @@ static inline bool nvrm_backlight_read(IORegistryEntry *options, UInt32 *level)
     return true;
 }
 
+// A request for exactly the maximum that arrives as the FIRST user request, while a saved level below the maximum exists,
+// is the display stack initialising its parameters to full brightness (it was seen repeating at every start), not a
+// choice: a person moves through intermediate levels with the keys or the slider. Such a request is applied like a power
+// request (clamped to the saved target) and never persisted, which used to overwrite the saved level with the maximum on
+// every boot.
+static inline bool nvrm_backlight_startup_default(bool userRequest, UInt32 level, bool haveSaved, bool userSeen, SInt32 userLevel)
+{
+    return userRequest && haveSaved && !userSeen && level == (UInt32)kNVRMBacklightMax && userLevel < (SInt32)kNVRMBacklightMax;
+}
+
 static inline bool nvrm_backlight_write(IORegistryEntry *options, UInt32 level)
 {
     if (!options || level > kNVRMBacklightMax) return false;
