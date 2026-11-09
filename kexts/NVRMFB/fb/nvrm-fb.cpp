@@ -31,6 +31,7 @@
 #include <libkern/c++/OSData.h>
 #include <libkern/OSAtomic.h>
 #include "../nvrm_eld.h"
+#include "../nvrm_igpu_proxy.h"
 #include "../nvrm_audio_match.h"
 #include "../../NMHDA/nmhda_topology.h"
 #include <libkern/c++/OSArray.h>
@@ -454,6 +455,16 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     NvKmsKapiDisplay fDisplay = 0; NvKmsKapiConnector fConnector = 0; NvU32 fHead = 0;
     unsigned fIndex = 0; bool fOwnsHead = false;
     bool fBootConsole = false;
+    // Integrated-GPU panel proxy (boot-arg nvfbigpu=1, BIOS Hybrid): no NVIDIA display is connected and the panel is lit
+    // by the integrated GPU in stolen memory. Head 0 still starts, so the accelerator gets its NVIDIA device and VRAM
+    // through it as usual; the scanout it reports is a CPU mapping of the panel's framebuffer, so the accelerator
+    // takes its copy path and NVKMS never sees a flip. Decision logic: nvrm_igpu_proxy.h.
+    bool fProxy = false;
+    uint64_t fPxBase = 0, fPxBytes = 0;
+    uint32_t fPxW = 0, fPxH = 0, fPxPitch = 0;
+    IOMemoryMap *fPxMap = nullptr;
+    bool proxyFind();
+    bool proxyMap();
     bool fInternal = false;     // NVKMS static display info: laptop panel (eDP/LVDS)
     // Variable refresh rate (boot-arg nvfbvrr=1): the display supports it, WindowServer asked for it, and the vertical range
     // the EDID gives. fVrrOn follows the last kIOFBVariableRefreshRate set and is carried by every full mode set.
@@ -733,6 +744,7 @@ public:
     // mode added only in setDetailedTimings never reached WindowServer (36 added, 0 shown). So the
     // display's native-raster modes at every refresh rate NVKMS validated are offered from the first query on.
     IOItemCount getDisplayModeCount() override {
+        if (fProxy) return 1;
         if (!fNDT) {
             unsigned n = 0;
             if (fModeSet && fCurId != kModeId && fCurDT.pixelClock) { fDT[0] = fCurDT; fDT[0].detailedTimingModeID = (UInt32)fCurId; n = 1; }
@@ -741,6 +753,7 @@ public:
         return (listBootMode() ? 1 : 0) + fNDT; }
     IOReturn getDisplayModes(IODisplayModeID *allDisplayModes) override {
         unsigned k = 0;
+        if (fProxy) { allDisplayModes[0] = kModeId; return kIOReturnSuccess; }
         if (listBootMode()) allDisplayModes[k++] = kModeId;
         for (unsigned i = 0; i < fNDT; i++) allDisplayModes[k++] = (IODisplayModeID)fDT[i].detailedTimingModeID;
         return kIOReturnSuccess; }
@@ -1242,6 +1255,12 @@ bool NVRMNVDAFramebuffer::kapiInit()
     // The boot enumeration is done: remember its size. Any framebuffer that starts later (a display plugged in after
     // boot) has fIndex >= gNDpyBoot, which is how it knows it is the new one.
     if (gNDpyBoot < 0) gNDpyBoot = gNDpy;
+    if (gNDpy <= 0 && fIndex == 0 && proxyFind()) {
+        fProxy = true; fCurId = kModeId; fBootConsole = true;
+        FBLOG("fb0: no NVIDIA display; PROXY for the integrated GPU's panel %ux%u pitch %u: the NVIDIA GPU renders and "
+              "frames are copied to the panel's framebuffer", fPxW, fPxH, fPxPitch);
+        return true;
+    }
     if (gNDpy <= 0 || fIndex >= (unsigned)gNDpy) {
         FBLOG("index %u: only %d display(s) connected -- nothing to drive, not starting", fIndex, gNDpy);
         fSpareIndex = gNDpy > 0;
@@ -2425,6 +2444,7 @@ struct NvKmsKapiSurface *NVRMNVDAFramebuffer::olutFromGamma()
 }
 IOReturn NVRMNVDAFramebuffer::nvrmSetGamma(UInt32 channels, UInt32 count, UInt32 width, const void *data)
 {
+    if (fProxy) return kIOReturnSuccess;
     char nb[8] = { 0 };
     if (PE_parse_boot_argn("-nvrmnogamma", nb, sizeof nb)) return kIOReturnSuccess;
     if (!data || (channels != 1 && channels != 3) || count < 2 || count > 4096 || width < 1 || width > 16) {
@@ -3098,6 +3118,16 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
         return false;
     }
     setName("NVRMFramebuffer");
+    if (fProxy) {
+        if (!super::start(provider)) { FBLOG("proxy: super::start failed"); return false; }
+        fVblTimer = nvrmfbCall(vblFire, this);
+        if (fVblTimer) { uint64_t d; clock_interval_to_deadline(16667, kMicrosecondScale, &d); scheduleCall(fVblTimer, d); }
+        fHwVblWanted = false;
+        registerPowerDriver(this, kFBPowerStates, 2);
+        FBLOG("proxy: started on %s (vbl timer %s)", provider->getName(), fVblTimer ? "armed" : "ALLOCATE FAILED");
+        fbGuardCleared("the integrated-GPU panel proxy started");
+        return true;
+    }
     { char loc[12]; if (nvrmFbLocation(fIndex, loc, sizeof loc)) setLocation(loc); }   // distinct registry path per head
     if (fInternal) publishBacklight();   // before super::start(): IOFramebuffer::open looks for "backlight"
     {   // output colour controls from the boot line (see gColorBpc); invalid values are ignored
@@ -3281,12 +3311,70 @@ void NVRMNVDAFramebuffer::free()
     if (fFlipCacheLock) { IOSimpleLockFree(fFlipCacheLock); fFlipCacheLock = nullptr; }
     if (fCurStateLock) { IOSimpleLockFree(fCurStateLock); fCurStateLock = nullptr; }
     fConsKva = nullptr; OSSafeReleaseNULL(fConsMap); OSSafeReleaseNULL(fConsMem);
+    OSSafeReleaseNULL(fPxMap);
     super::free();
+}
+
+// The panel this head stands in for: boot-arg nvfbigpu=1, an Intel display-class device on the bus, and a 32-bit firmware
+// console that is not inside this GPU's own BARs (nvrm_proxy_decide).
+bool NVRMNVDAFramebuffer::proxyFind()
+{
+    int on = 0;
+    PE_parse_boot_argn("nvfbigpu", &on, sizeof on);
+    PE_Video v; nvu_zero(&v, sizeof v);
+    struct nvrm_proxy_console c = {};
+    if (on && getPlatform() && getPlatform()->getConsoleInfo(&v) == kIOReturnSuccess) {
+        c.base = (uint64_t)v.v_baseAddr & ~3ull; c.width = (uint32_t)v.v_width; c.height = (uint32_t)v.v_height;
+        c.pitch = (uint32_t)v.v_rowBytes; c.depth = (uint32_t)v.v_depth;
+    }
+    int intel = 0;
+    if (on) {
+        if (OSDictionary *m = IOService::serviceMatching("IOPCIDevice")) {
+            if (OSIterator *it = IOService::getMatchingServices(m)) {
+                while (OSObject *o = it->getNextObject()) {
+                    IOService *d = OSDynamicCast(IOService, o);
+                    OSData *ven = d ? OSDynamicCast(OSData, d->getProperty("vendor-id")) : nullptr;
+                    OSData *cls = d ? OSDynamicCast(OSData, d->getProperty("class-code")) : nullptr;
+                    if (!ven || !cls || ven->getLength() < 2 || cls->getLength() < 3) continue;
+                    const uint8_t *vb = (const uint8_t *)ven->getBytesNoCopy(), *cb = (const uint8_t *)cls->getBytesNoCopy();
+                    if ((vb[0] | (vb[1] << 8)) == 0x8086 && cb[2] == 0x03) { intel = 1; break; }
+                }
+                it->release();
+            }
+            m->release();
+        }
+    }
+    struct nvrm_proxy_range bars[NVRM_PROXY_MAX_BARS] = {};
+    unsigned nb = 0;
+    if (on) if (IOService *nub = pciNub()) {
+        IOItemCount n = nub->getDeviceMemoryCount();
+        for (IOItemCount i = 0; i < n && nb < NVRM_PROXY_MAX_BARS; i++) {
+            IODeviceMemory *m = (IODeviceMemory *)nub->getDeviceMemoryWithIndex(i);
+            if (m) { bars[nb].base = (uint64_t)m->getPhysicalAddress(); bars[nb].size = (uint64_t)m->getLength(); nb++; }
+        }
+    }
+    const enum nvrm_proxy_verdict why = nvrm_proxy_decide(on, &c, intel, bars, nb);
+    if (why != NVRM_PROXY_OK) {
+        if (on) FBLOG("nvfbigpu=1 but no proxy (reason %d: 1 off, 2 no console, 3 bad format, 4 too large, 5 no Intel GPU, 6 own console)", (int)why);
+        return false;
+    }
+    fPxBase = c.base; fPxW = c.width; fPxH = c.height; fPxPitch = c.pitch;
+    fPxBytes = ((uint64_t)fPxPitch * fPxH + 0xfffull) & ~0xfffull;
+    return true;
+}
+bool NVRMNVDAFramebuffer::proxyMap()
+{
+    unsigned c = 1; PE_parse_boot_argn("nvfbigpucache", &c, sizeof c);   // 1 write-combined (default), 2 uncached
+    IODeviceMemory *dm = IODeviceMemory::withRange((IOPhysicalAddress)fPxBase, (IOPhysicalLength)fPxBytes);
+    if (dm) { fPxMap = dm->map(c == 2 ? kIOMapInhibitCache : kIOMapWriteCombineCache); dm->release(); }
+    FBLOG("proxy: panel framebuffer mapped %s -> %s", c == 2 ? "uncached" : "write-combined", fPxMap ? "ok" : "FAILED");
+    return fPxMap != nullptr;
 }
 
 IOReturn NVRMNVDAFramebuffer::enableController()
 {
     FBLOG("enableController");
+    if (fProxy) return kIOReturnSuccess;
     fEnableAbs = mach_absolute_time();
     const bool ok = applyMode();
     // A failed boot mode set must not fail the open. IOFramebuffer::open() marks a framebuffer whose enableController
@@ -3310,6 +3398,7 @@ IOReturn NVRMNVDAFramebuffer::enableController()
 IOReturn NVRMNVDAFramebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth)
 {
     FBLOG("fb%u setDisplayMode 0x%x depth %d (current 0x%x)", fIndex, (unsigned)mode, (int)depth, (unsigned)fCurId);
+    if (fProxy) return (mode == kModeId && depth == 0) ? kIOReturnSuccess : kIOReturnUnsupportedMode;
     NVRMBoundedGate modeGate(kModeChangeGateMs);   // held to the end of the call; the inner gates are recursive
     if (!modeGate.held()) {
         FBLOG("fb%u setDisplayMode 0x%x: the display gate was not free in %u ms (another framebuffer is starting, relighting or "
@@ -3752,6 +3841,7 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
 IOReturn NVRMNVDAFramebuffer::validateDetailedTiming(void *description, IOByteCount descripSize)
 {
     if (!description) return kIOReturnBadArgument;
+    if (fProxy) return kIOReturnUnsupportedMode;
     IODetailedTimingInformationV2 *d = nullptr;
     if (descripSize == sizeof(IOFBDisplayModeDescription))
         d = &((IOFBDisplayModeDescription *)description)->timingInfo.detailedInfo.v2;
@@ -4075,6 +4165,7 @@ unsigned NVRMNVDAFramebuffer::addDsrModes(unsigned n)
 }
 IOReturn NVRMNVDAFramebuffer::setDetailedTimings(OSArray *array)
 {
+    if (fProxy) return kIOReturnSuccess;
     if (!array) {
         fNDT = 0; fBootInDT = false; fNewIdOnce = 0; removeProperty(kIOFBDetailedTimingsKey);
         if (fCurId != kModeId) FBLOG("setDetailedTimings(NULL) while 0x%x is on the head -- it stays until the next setDisplayMode", (unsigned)fCurId);
@@ -4207,6 +4298,13 @@ void NVRMNVDAFramebuffer::publishTimingCaps()
 IOReturn NVRMNVDAFramebuffer::getInformationForDisplayMode(IODisplayModeID mode, IODisplayModeInformation *info)
 {
     if (!info) return kIOReturnBadArgument;
+    if (fProxy) {
+        if (mode != kModeId) return kIOReturnBadArgument;
+        nvu_zero(info, sizeof *info);
+        info->nominalWidth = fPxW; info->nominalHeight = fPxH; info->refreshRate = 60u << 16; info->maxDepthIndex = 0;
+        info->flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeDefaultFlag;
+        return kIOReturnSuccess;
+    }
     if (mode != kModeId) {
         int i = dtIndex(mode); if (i < 0) return kIOReturnBadArgument;
         const IODetailedTimingInformationV2 &d = fDT[i];
@@ -4283,6 +4381,15 @@ IOReturn NVRMNVDAFramebuffer::getTimingInfoForDisplayMode(IODisplayModeID mode, 
 IOReturn NVRMNVDAFramebuffer::getPixelInformation(IODisplayModeID mode, IOIndex depth, IOPixelAperture aperture, IOPixelInformation *pi)
 {
     if (depth != 0 || aperture != kIOFBSystemAperture || !pi) return kIOReturnUnsupportedMode;
+    if (fProxy) {
+        if (mode != kModeId) return kIOReturnUnsupportedMode;
+        nvu_zero(pi, sizeof *pi);
+        pi->bytesPerRow = fPxPitch; pi->activeWidth = fPxW; pi->activeHeight = fPxH;
+        pi->bitsPerPixel = 32; pi->pixelType = kIORGBDirectPixels; pi->componentCount = 3; pi->bitsPerComponent = 8;
+        pi->componentMasks[0] = 0x00ff0000; pi->componentMasks[1] = 0x0000ff00; pi->componentMasks[2] = 0x000000ff;
+        strlcpy(pi->pixelFormat, IO32BitDirectPixels, sizeof pi->pixelFormat);
+        return kIOReturnSuccess;
+    }
     NvU32 pw = fBootW ? fBootW : fW, ph = fBootH ? fBootH : fH, pp = fBootPitch ? fBootPitch : fPitch;
     if (mode != kModeId) {
         int i = dtIndex(mode); if (i < 0) return kIOReturnUnsupportedMode;
@@ -4681,9 +4788,17 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
         }
         return kIOReturnSuccess;
     }
+    if (fProxy && functionName && (functionName->isEqualTo("nvFlipToSurfacePure") || functionName->isEqualTo(NVRM_FLIP_FN)))
+        return kIOReturnUnsupported;   // nothing to flip: the panel belongs to the integrated GPU
     if (functionName && functionName->isEqualTo(NVRM_VRAM_FN_SCANOUT)) {
         struct NVRMVramRequest *r = (struct NVRMVramRequest *)param1;
         if (!r || r->version != NVRM_VRAM_ABI_VERSION) return kIOReturnBadArgument;
+        if (fProxy) {   // CPU-only scanout (phys 0): the accelerator copies each frame into kva
+            if (!fPxMap && !proxyMap()) return kIOReturnNotReady;
+            r->phys = 0; r->kva = (void *)fPxMap->getVirtualAddress(); r->handle = nullptr;
+            r->actualSize = fPxBytes; r->width = fPxW; r->height = fPxH; r->pitch = fPxPitch;
+            return kIOReturnSuccess;
+        }
         if (!fPhys || !fKva || !fPitch || !fH) { FBLOG("nvScanoutInfo: no scanout yet"); return kIOReturnNotReady; }
         r->phys       = fPhys;
         r->kva        = fKva;
@@ -4875,6 +4990,7 @@ IOReturn NVRMNVDAFramebuffer::newUserClient(task_t owningTask, void *securityID,
 
 IODeviceMemory *NVRMNVDAFramebuffer::getVRAMRange()
 {
+    if (fProxy) return IODeviceMemory::withRange((IOPhysicalAddress)fPxBase, (IOPhysicalLength)fPxBytes);
     NvU64 target = fPhys ? fPhys : fConsPhys;
     IOService *nub = pciNub();
     if (nub && target) {
@@ -4902,6 +5018,7 @@ IODeviceMemory *NVRMNVDAFramebuffer::getVRAMRange()
 IODeviceMemory *NVRMNVDAFramebuffer::getApertureRange(IOPixelAperture aperture)
 {
     if (aperture != kIOFBSystemAperture) return NULL;
+    if (fProxy) return IODeviceMemory::withRange((IOPhysicalAddress)fPxBase, (IOPhysicalLength)fPxBytes);
     NvU64 target = (fConsoleAperture && fConsPhys) ? fConsPhys : fPhys;
     if (!target) return NULL;
     const NvU64 owned = fConsoleAperture ? fConsSize : fMemBytes;
