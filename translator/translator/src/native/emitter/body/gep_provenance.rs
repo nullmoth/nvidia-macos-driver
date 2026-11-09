@@ -567,6 +567,51 @@ impl Emitter {
             } else {
                 pointee.clone()
             };
+        // `gep <N x T>, base, 0, lane` on workgroup memory that is an array of <N x T>: a scalar view of the vectors
+        // (a threadgroup float4 array indexed as float). The index counts scalars across the whole array, so it splits into
+        // the vector it falls in and the lane inside it.
+        if base_storage == StorageClass::Workgroup && indices.len() == 2 && const_index(indices.first()) == Some(0) {
+            let backing_vector = match base_pointee.as_ref() {
+                Some(LlType::Array(elem, _)) => Some(elem.as_ref().clone()),
+                Some(other @ LlType::Vector(_, _)) => Some(other.clone()),
+                _ => None,
+            };
+            if let (LlType::Vector(lane_ty, lanes), Some(array_elem)) = (&source_ty, backing_vector.as_ref()) {
+                if *lanes > 1 && types_compatible(array_elem, &source_ty) {
+                    let lane_ty = lane_ty.as_ref().clone();
+                    let lanes = *lanes;
+                    let uint = self.type_id(&LlType::Int(32))?;
+                    let raw = self.value_id(&indices[1].value, &indices[1].ty)?;
+                    let flat = if self.resolve_type(&indices[1].ty)? == LlType::Int(32) {
+                        raw
+                    } else {
+                        let narrowed = self.fresh();
+                        instructions.push(Self::inst(Op::UConvert, Some(uint), Some(narrowed), vec![Operand::IdRef(raw)]));
+                        narrowed
+                    };
+                    let count = self.const_uint(lanes)?;
+                    let element = self.fresh();
+                    instructions.push(Self::inst(Op::UDiv, Some(uint), Some(element), vec![Operand::IdRef(flat), Operand::IdRef(count)]));
+                    let lane = self.fresh();
+                    instructions.push(Self::inst(Op::UMod, Some(uint), Some(lane), vec![Operand::IdRef(flat), Operand::IdRef(count)]));
+                    let ptr_type = self.ptr_type_id(StorageClass::Workgroup, &lane_ty)?;
+                    let result = self.result_id(name, &LlType::Ptr(addrspace))?;
+                    instructions.push(Self::inst(
+                        Op::InBoundsAccessChain,
+                        Some(ptr_type),
+                        Some(result),
+                        vec![Operand::IdRef(base), Operand::IdRef(element), Operand::IdRef(lane)],
+                    ));
+                    self.pointer_storage.insert(name.to_string(), StorageClass::Workgroup);
+                    self.pointer_pointees.insert(name.to_string(), lane_ty);
+                    if !self.pointer_phi_values.is_empty() {
+                        let is_null = self.const_bool(false)?;
+                        self.record_pointer_nullness(name.to_string(), is_null);
+                    }
+                    return Ok(Some(result));
+                }
+            }
+        }
         let ptr_type = self.ptr_type_id(access_storage, &access_pointee)?;
         let result = self.result_id(name, &LlType::Ptr(addrspace))?;
         if !was_composed
