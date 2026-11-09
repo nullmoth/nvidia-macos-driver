@@ -90,6 +90,8 @@ pkg_config_libdir = '$SYS/lib/pkgconfig'
 bindgen_clang_arguments = ['--target=x86_64-apple-darwin', '-mmacosx-version-min=15.0']
 EOT
 
+# -oso_prefix makes the object paths in the unstripped output (which the linker hashes into LC_UUID) relative to the
+# build directory, so the UUID does not depend on where the build ran.
 # The build directory sits inside the source tree: Rust and some C debug paths are recorded relative to it
 # ("../src/..."), so a build directory elsewhere gives a different binary (and LC_UUID).
 B=$S/build
@@ -98,7 +100,8 @@ meson setup "$B" "$S" --cross-file="$X" -Dbuildtype=release -Db_ndebug=true -Dvu
   -Dvulkan-layers= -Dtools= -Dbuild-tests=false -Dexpat=disabled -Dzstd=disabled -Dlibunwind=disabled \
   -Dlmsensors=disabled -Dvalgrind=disabled -Dxlib-lease=disabled -Dgallium-rusticl=false -Dspirv-tools=disabled \
   "-Dc_args=-ffile-prefix-map=$S=/src -ffile-prefix-map=$HOME=/build" "-Dcpp_args=-ffile-prefix-map=$S=/src -ffile-prefix-map=$HOME=/build" \
-  "-Drust_args=--remap-path-prefix=$S=/src --remap-path-prefix=$HOME=/build" > "$OUT/setup.log" 2>&1
+  "-Drust_args=--remap-path-prefix=$S=/src --remap-path-prefix=$HOME=/build" \
+  "-Dc_link_args=-Wl,-oso_prefix,$B" "-Dcpp_link_args=-Wl,-oso_prefix,$B" > "$OUT/setup.log" 2>&1
 ninja -C "$B" -j"$JOBS" src/nouveau/vulkan/libvulkan_nouveau.dylib > "$OUT/build.log" 2>&1
 
 D=$B/src/nouveau/vulkan/libvulkan_nouveau.dylib
