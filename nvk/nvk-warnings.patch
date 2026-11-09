@@ -1,0 +1,55 @@
+diff -ru a/src/nouveau/headers/drf.h b/src/nouveau/headers/drf.h
+--- a/src/nouveau/headers/drf.h	2026-11-09 03:32:38
++++ b/src/nouveau/headers/drf.h	2026-11-09 03:33:16
+@@ -28,6 +28,8 @@
+ #define DRF_LO(drf)    (0 ? drf)
+ #define DRF_HI(drf)    (1 ? drf)
+ #define DRF_BITS(drf)  (DRF_HI(drf) - DRF_LO(drf) + 1)
++/* NVIDIA's nvmisc.h defines its own DRF_MASK; whichever header comes later wins, as it always did */
++#undef DRF_MASK
+ #define DRF_MASK(drf)  (~UINT64_C(0) >> (64 - DRF_BITS(drf)))
+ #define DRF_SMASK(drf) (DRF_MASK(drf) << DRF_LO(drf))
+ 
+diff -ru a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c	2026-11-09 03:32:38
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c	2026-11-09 03:33:16
+@@ -247,7 +247,7 @@
+ #define NV_CHECK(nvRes) {NV_STATUS _nvRes = nvRes; if (_nvRes != NV_OK) {vkRes = vk_error(log_obj, VK_ERROR_UNKNOWN); goto error;}}
+ 
+ 
+-static /* 26.3: verbatim from upstream src/nouveau/winsys/nouveau_device.c (17ca6174), which macOS does not build.
++/* 26.3: verbatim from upstream src/nouveau/winsys/nouveau_device.c (17ca6174), which macOS does not build.
+  * NAK's QMD smem sizing (gv100_get_hw_smem_sizes) indexes sm_smem_sizes_kB[count-1] and unwraps .last, so a
+  * zero count PANICS on the first compute dispatch. Keep these in sync with upstream when it changes. */
+ static uint8_t
+@@ -588,9 +588,12 @@
+    pdev->base.dev_info.has_transfer_queue = false;
+    pdev->base.dev_info.has_zcull_info = false;
+ 
+-   // TODO: bounds check
+-   strcpy(pdev->base.dev_info.device_name, getNameParams.gpuNameString.ascii);
+-   strcpy(pdev->base.dev_info.chipset_name, getShortNameParams.gpuShortNameString);
++   /* The resource manager's names are 64-byte fields with no guaranteed terminator, and chipset_name holds 16:
++    * copy at most what fits and what the source holds, always terminated. */
++   snprintf(pdev->base.dev_info.device_name, sizeof(pdev->base.dev_info.device_name), "%.*s",
++            (int)sizeof(getNameParams.gpuNameString.ascii), (const char *)getNameParams.gpuNameString.ascii);
++   snprintf(pdev->base.dev_info.chipset_name, sizeof(pdev->base.dev_info.chipset_name), "%.*s",
++            (int)sizeof(getShortNameParams.gpuShortNameString), (const char *)getShortNameParams.gpuShortNameString);
+ 
+ 
+    pdev->base.kmd_info = (struct nvkmd_info) {
+diff -ru a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_sync.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_sync.c
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_sync.c	2026-11-09 03:32:38
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_sync.c	2026-11-09 03:33:16
+@@ -58,9 +58,9 @@
+    VK_CHECK(nvkmd_dev_alloc_mapped_mem(&dev->base, log_obj,  0x1000,  0x1000, NVKMD_MEM_GART, NVKMD_MEM_MAP_RDWR,  &sync->sem));
+    uint64_t *semAdr = (uint64_t*)sync->sem->map;
+    *semAdr = initial_value;
+-#endif
+ 
+-error:
++error:   /* VK_CHECK above jumps here */
++#endif
+    return vkRes;
+ }
+ 
