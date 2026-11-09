@@ -50,7 +50,7 @@ private:
     int maxLevel_ {KBL_ASUS_MAX_LEVEL};
     IONotifier *vsmcNotifier {nullptr};
     VirtualSMCAPI::Plugin vsmcPlugin {
-        xStringify(PRODUCT_NAME), parseModuleVersion(xStringify(MODULE_VERSION)), VirtualSMCAPI::Version,
+        xStringify(PRODUCT_NAME), parseModuleVersion(xStringify(MODULE_VERSION)), VirtualSMCAPI::Version, {}, {},
     };
 };
 

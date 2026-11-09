@@ -66,3 +66,7 @@ touch the kernel.
 The plugin follows the structure of VirtualSMC's own `SMCLightSensor` plugin and builds against Lilu and the VirtualSMC SDK,
 all by acidanthera and all BSD-3-Clause. Build check revisions: Lilu 0249c3a, VirtualSMC b5c62c2, MacKernelSDK 3f75008.
 The ASUS interface was read out of ASUS DSDTs with Intel's ACPICA disassembler; no ASUS or Linux driver code was copied.
+
+## Compile baseline
+
+`build_check.sh` compiles both translation units with `-Wall -Wextra`. None of the remaining warnings is in this plugin's code: they are in the Lilu and VirtualSMC headers (`kern_util.hpp` lines 445 and 1012, `kern_keyvalue.hpp` line 15, `kern_vsmcapi.hpp` lines 255 and 277). Baseline: 9 distinct warnings per translation unit, 18 warning lines for the two, all third-party (checked 2026-11-09). A warning in `kbl_core.h`, `NMKbdBacklight.*` or `NMKbdBacklightHID.*` is new and must be fixed.
