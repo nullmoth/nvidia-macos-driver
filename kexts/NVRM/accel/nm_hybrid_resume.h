@@ -53,6 +53,18 @@ struct nmr_ops {
 #define NMR_CDCLK_CTL      0x46000u
 #define NMR_CDCLK_SQUASH   0x46008u
 #define NMR_DSSM           0x51004u
+/* display core init (Linux icl_display_core_init): the state the firmware's own core init left, which sleep also clears */
+#define NMR_NDE_RSTWRN     0x46408u      /* HSW_NDE_RSTWRN_OPT: the reset handshake with the PCH (and, from version 14, with the PICA) */
+#define NMR_DBUF_CTL(i)    ((i) == 0 ? 0x45008u : ((i) == 1 ? 0x44FE8u : ((i) == 2 ? 0x44300u : 0x44304u)))
+#define NMR_DBUF_REQ       (1u << 31)
+#define NMR_DBUF_STATE     (1u << 30)
+#define NMR_MBUS_ABOX(i)   ((i) == 0 ? 0x45038u : ((i) == 1 ? 0x45048u : 0x4504Cu))
+#define NMR_BW_BUDDY_CTL(i)  ((i) == 0 ? 0x45130u : 0x45140u)
+#define NMR_BW_BUDDY_MASK(i) ((i) == 0 ? 0x45134u : 0x45144u)
+#define NMR_PHY_MISC(p)    (0x64C00u + 4u * (p))
+#define NMR_DCPR2          0x46434u
+#define NMR_ERR_FATAL      0x4421Cu
+#define NMR_DSPCLK_GATE    0xC2020u
 #define NMR_PCODE_MAILBOX  0x138124u
 #define NMR_PCODE_DATA     0x138128u
 #define NMR_PCODE_DATA1    0x13812Cu
@@ -230,6 +242,7 @@ struct nmr_snap {
     struct nmr_topo topo;
     uint32_t pw_driver, pw_aux, pw_ddi;
     uint32_t de_pll, cdclk, squash, dssm;
+    uint32_t nde, dbuf[4], abox[3], buddy[4], phymisc, dcpr2, err_fatal, dspclk;   /* display core init state */
     uint8_t  volt;                               /* the voltage level the platform controller was told for this display clock */
     uint32_t dpll_en[2], cfgcr0[2], cfgcr1[2], div0[2], dpclka;
     uint32_t phy[NMR_PHY_WORDS];
@@ -426,6 +439,13 @@ static inline int nmr_snap_impl(const struct nmr_ops *o, struct nmr_snap *s, uns
     s->topo.pipe = (uint8_t)pipe; s->topo.port = (uint8_t)port;
     s->pw_driver = o->rd(o->ctx, NMR_PW_DRIVER); s->pw_aux = o->rd(o->ctx, NMR_PW_AUX); s->pw_ddi = o->rd(o->ctx, NMR_PW_DDI);
     s->de_pll = o->rd(o->ctx, NMR_DE_PLL_ENABLE); s->cdclk = o->rd(o->ctx, NMR_CDCLK_CTL);
+    s->nde = o->rd(o->ctx, NMR_NDE_RSTWRN); s->dspclk = o->rd(o->ctx, NMR_DSPCLK_GATE);
+    for (i = 0; i < 4; i++) s->dbuf[i] = o->rd(o->ctx, NMR_DBUF_CTL(i));
+    if (display_version <= 13) {
+        for (i = 0; i < 3; i++) s->abox[i] = o->rd(o->ctx, NMR_MBUS_ABOX(i));
+        for (i = 0; i < 2; i++) { s->buddy[2 * i] = o->rd(o->ctx, NMR_BW_BUDDY_CTL(i)); s->buddy[2 * i + 1] = o->rd(o->ctx, NMR_BW_BUDDY_MASK(i)); }
+        s->phymisc = o->rd(o->ctx, NMR_PHY_MISC(port)); s->dcpr2 = o->rd(o->ctx, NMR_DCPR2); s->err_fatal = o->rd(o->ctx, NMR_ERR_FATAL);
+    }
     s->dssm = o->rd(o->ctx, NMR_DSSM); s->squash = display_version >= 13 ? o->rd(o->ctx, NMR_CDCLK_SQUASH) : 0;
     s->volt = nmr_cdclk_voltage(nmr_cdclk_khz(s->dssm, s->de_pll, s->cdclk, s->squash));
     s->n_dpll = 2;
@@ -616,6 +636,33 @@ static inline int nmr_st_cdclk(const struct nmr_ops *o, const struct nmr_snap *s
     if (pcode) { uint32_t v = s->volt; if (nmr_pcode(o, NMR_PCODE_CDCLK, &v, 0)) return NMR_E_CDCLK; }
     return NMR_OK;
 }
+/* The display core init steps that come before and after the power wells and the display clock. Registers are written back as the
+ * firmware's own core init left them. */
+static inline void nmr_st_core_early(const struct nmr_ops *o, const struct nmr_snap *s, unsigned display_version)
+{
+    nmr_note(o, "display core init");
+    o->wr(o->ctx, NMR_DSPCLK_GATE, s->dspclk);
+    o->wr(o->ctx, NMR_NDE_RSTWRN, s->nde);                                  /* the reset handshake first */
+    if (display_version <= 13) o->wr(o->ctx, NMR_PHY_MISC(s->topo.port), s->phymisc);   /* combo PHY out of power-down */
+}
+static inline int nmr_st_core_late(const struct nmr_ops *o, const struct nmr_snap *s, unsigned display_version)
+{
+    unsigned i;
+    for (i = 0; i < 4; i++) {                                               /* display buffer slices: request, then wait for the state */
+        uint32_t cur;
+        if (!(s->dbuf[i] & NMR_DBUF_REQ)) continue;
+        cur = o->rd(o->ctx, NMR_DBUF_CTL(i));
+        o->wr(o->ctx, NMR_DBUF_CTL(i), (s->dbuf[i] & ~NMR_DBUF_STATE) | (cur & 0) | NMR_DBUF_REQ);
+        if (!nmr_wait(o, NMR_DBUF_CTL(i), NMR_DBUF_STATE, NMR_DBUF_STATE, 1000)) return NMR_E_POWER;
+    }
+    if (display_version <= 13) {
+        for (i = 0; i < 3; i++) if (s->abox[i]) o->wr(o->ctx, NMR_MBUS_ABOX(i), s->abox[i]);
+        for (i = 0; i < 2; i++) { o->wr(o->ctx, NMR_BW_BUDDY_MASK(i), s->buddy[2 * i + 1]); o->wr(o->ctx, NMR_BW_BUDDY_CTL(i), s->buddy[2 * i]); }
+        o->wr(o->ctx, NMR_DCPR2, s->dcpr2);
+        if (display_version == 13) o->wr(o->ctx, NMR_ERR_FATAL, s->err_fatal);
+    }
+    return NMR_OK;
+}
 static inline int nmr_st_combo(const struct nmr_ops *o, const struct nmr_snap *s)
 {
     unsigned i, k; const uint32_t phy = nmr_phy_base(s->topo.port);
@@ -698,8 +745,10 @@ static inline int nmr_resume(const struct nmr_ops *o, const struct nmr_snap *s, 
     if (display_version != 12 && display_version != 13) return NMR_E_GEN;
     if (!s || !s->valid) return NMR_E_NO_SNAPSHOT;
     if (nmr_st_lit(o, s)) return NMR_ALREADY_LIT;                       /* a panel that is still running needs nothing */
+    nmr_st_core_early(o, s, display_version);
     if ((rc = nmr_st_power(o, s))) return rc;
     if ((rc = nmr_st_cdclk(o, s, display_version))) return rc;
+    if ((rc = nmr_st_core_late(o, s, display_version))) return rc;
     if ((rc = nmr_st_combo(o, s))) return rc;
     if ((rc = nmr_st_panel(o, s))) return rc;
     if ((rc = nmr_st_sink(o, s))) return rc;
