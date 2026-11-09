@@ -6,7 +6,7 @@
 // dispatch) and bound to the wanted pipeline keeps its counts; every other slot gets zero counts, which do nothing.
 // Indexed draws are always emptied: an index buffer is bound by the CPU and the record only holds an address.
 layout(buffer_reference, std430) buffer Words { uint v[]; };
-layout(push_constant) uniform Args { Words rec; Words rng; Words out_; uint count; uint compute; uint pso_lo; uint pso_hi; uint loc; uint len; uint ptype; uint tgcheck; uint tg0; uint tg1; uint tg2; uint pad_; } a;
+layout(push_constant) uniform Args { Words rec; Words rng; Words out_; uint count; uint compute; uint pso_lo; uint pso_hi; uint loc; uint len; uint ptype; uint tgcheck; uint tg0; uint tg1; uint tg2; uint indexed; uint cap; } a;
 layout(local_size_x = 64) in;
 void main()
 {
@@ -27,11 +27,18 @@ void main()
         if (a.tgcheck != 0u && (a.rec.v[r + 16u] != a.tg0 || a.rec.v[r + 17u] != a.tg1 || a.rec.v[r + 18u] != a.tg2)) return;
         a.out_.v[o] = a.rec.v[r + 12u]; a.out_.v[o + 1u] = a.rec.v[r + 13u]; a.out_.v[o + 2u] = a.rec.v[r + 14u];   // grid at byte 48
     } else {
-        if ((flags & 4u) != 0u) return;
+        if (((flags & 4u) != 0u) != (a.indexed != 0u)) return;   // plain and indexed draws are different CPU calls
         if (a.rec.v[r + 1u] != a.ptype) return;   // the primitive type is CPU state in Vulkan: one candidate per type
         a.out_.v[o] = a.rec.v[r + 2u];      // count at byte 8
         a.out_.v[o + 1u] = a.rec.v[r + 3u]; // instances
-        a.out_.v[o + 2u] = a.rec.v[r + 4u]; // start
-        a.out_.v[o + 3u] = a.rec.v[r + 5u]; // base instance
+        if (a.indexed != 0u) {
+            if (a.rec.v[r + 2u] > a.cap) { a.out_.v[o] = 0u; a.out_.v[o + 1u] = 0u; return; }   // over the cap: skipped whole
+            a.out_.v[o + 2u] = i * a.cap;   // first index: this slot's block of the scratch index buffer
+            a.out_.v[o + 3u] = a.rec.v[r + 6u]; // base vertex
+            a.out_.v[o + 4u] = a.rec.v[r + 5u]; // base instance
+        } else {
+            a.out_.v[o + 2u] = a.rec.v[r + 4u]; // start
+            a.out_.v[o + 3u] = a.rec.v[r + 5u]; // base instance
+        }
     }
 }
