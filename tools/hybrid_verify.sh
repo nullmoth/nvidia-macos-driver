@@ -7,6 +7,7 @@
 #   S1 switch seen by the accelerator      S2 the other GPU's driver published the panel
 #   S3 first frame reached the panel       S4 only changed pixels are being stored
 #   S5 import ring built (level 2)         S6 first zero-copy flip landed (level 2)
+#   R1 the panel was relit after sleep (only when nmhybridresume=1 armed it and the log holds a wake)
 set -u
 LOG=$(mktemp "${TMPDIR:-/tmp}/nmh.XXXXXX") || exit 2
 trap 'rm -f "$LOG"' EXIT
@@ -53,6 +54,20 @@ if [ "$LEVEL" = 2 ]; then
         step S6 0 "a flip never reached the screen: import ended for this boot, copy took over"
     fi
     grep -- 'hybrid: fallback to copy' "$LOG" | sed 's/.*hybrid: /note  /' | sort | uniq -c | sed 's/^ *//' | head -5
+fi
+
+# stood down, delayed, or flat-frame notes
+grep -- 'hybrid: standing down' "$LOG" | tail -1 | sed 's/.*hybrid: /note  /'
+grep -- 'hybrid: waiting [0-9]* s before taking the panel' "$LOG" | tail -1 | sed 's/.*hybrid: /note  /'
+LASTSTEP=$(sed -n 's/.*hybrid: step \(.*\)$/\1/p' "$LOG" | tail -1)
+[ -n "$LASTSTEP" ] && echo "note  last step the panel driver logged: $LASTSTEP"
+# sleep and wake (nmhybridresume=1): only judged when it was armed
+if has 'hybrid: resume armed'; then
+    if has 'hybrid: resume step:'; then
+        step R1 $(has 'hybrid: resume: panel relit\|hybrid: resume: panel was already lit' && echo 1 || echo 0) "after sleep the panel was relit (steps: $(grep -c 'hybrid: resume step:' "$LOG") logged)"
+    else
+        echo "skip  R1  no sleep and wake in this log"
+    fi
 fi
 
 if [ "$fail" = 0 ]; then
