@@ -33,6 +33,11 @@ kexts/NMGopFB  Finding the firmware framebuffer, checking it against the GPU's m
 kexts/NMIntelFB  Panel brightness follows the method of WhateverXe's panel PWM (XELP::PanelPWM) by b00t0x,
              https://github.com/b00t0x/WhateverXe, BSD-3-Clause, Copyright (c) 2018 vit9696
              (licenses/WhateverXe-LICENSE.txt). Register layout from Linux i915/xe display headers, MIT.
+             The hybrid-laptop sleep and wake replay (nm_hybrid_resume*.h: display core init, display clock, combo and Cx0 PHY
+             sequences, link training, drive tables), the Type-C connect flow (nm_hybrid_tc.h), and the C20 PHY PLL tables
+             (nm_hybrid_c20tables.h, copied value for value) are ported from the Linux kernel's i915/xe display driver
+             (drivers/gpu/drm/i915/display), MIT, Copyright (c) Intel Corporation and the i915 contributors
+             (licenses/Linux-i915-display-LICENSE.txt).
              No Apple driver code is used or shipped.
 
 NMXAudio     The HD Audio controller and codec layers are FreeBSD's snd_hda (sys/dev/sound/pci/hda: hdac.c,
