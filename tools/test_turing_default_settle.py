@@ -14,8 +14,9 @@ root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__)
 src = (root / 'kexts/NVRM/NVRM.cpp').read_text()
 h0 = src.index('static inline bool nvrmIsTuringDeviceId')
 helper = src[h0:src.index('\n}\n', h0) + 3]
-line = [l for l in src.splitlines() if l.strip().startswith('fAutoGoSettleMs = bar1Placed')]
+line = [l for l in src.splitlines() if l.strip().startswith('fAutoGoSettleMs = nvrmAutoGoSettleMs(')]
 assert len(line) == 1, 'expected exactly one default-settle line'
+expr_new = line[0].strip(); expr_new = expr_new[:expr_new.rindex(';') + 1]   # the source line ends with the closing brace of its block
 fails = 0
 
 
@@ -25,21 +26,22 @@ def check(name, ok, detail=''):
     fails += not ok
 
 
-def run(expr, cases):
-    prog = ('#include <stdio.h>\n' + helper +
+def run(expr, cases, arg=None):
+    prog = ('#include <stdio.h>\n#include "nvrm_startup_policy.h"\n' + helper +
             'int main(){unsigned ids[]={%s};int placed[]={%s};for(int i=0;i<%d;i++){unsigned fAutoGoSettleMs;'
-            'int bar1Placed=placed[i];struct{unsigned device_id;} pci={ids[i]};struct{decltype(pci)&pci_info;} n{pci};'
+            'int bar1Placed=placed[i];bool haveArg=%s;unsigned ms=%d;struct{unsigned device_id;} pci={ids[i]};struct{decltype(pci)&pci_info;} n{pci};'
             'auto *nv=&n;%s printf("%%u\\n",fAutoGoSettleMs);}}\n') % (
-        ','.join(hex(c[0]) for c in cases), ','.join(str(c[1]) for c in cases), len(cases), expr)
+        ','.join(hex(c[0]) for c in cases), ','.join(str(c[1]) for c in cases), len(cases),
+        'true' if arg is not None else 'false', arg or 0, expr)
     with tempfile.TemporaryDirectory() as d:
         f = pathlib.Path(d, 't.cpp'); f.write_text(prog)
-        subprocess.run(['/usr/bin/clang++', '-std=c++17', '-o', d + '/t', str(f)], check=True)
+        subprocess.run(['/usr/bin/clang++', '-std=c++17', '-I', str(root / 'kexts/NVRM'), '-o', d + '/t', str(f)], check=True)
         return [int(x) for x in subprocess.run([d + '/t'], capture_output=True, text=True, check=True).stdout.split()]
 
 
 cases = [(0x1F08, 1), (0x1F15, 1), (0x1E87, 1), (0x2191, 1), (0x2504, 1), (0x2D04, 1), (0x1F08, 0), (0x2504, 0),
          (0x1F82, 1), (0x1DFF, 1), (0x2000, 1), (0x217F, 1), (0x2200, 1), (0x2882, 1)]
-new = run(line[0].strip(), cases)
+new = run(expr_new, cases)
 check('RTX 2060 desktop (1F08), BAR1 placed: 10 s', new[0] == 10000, new[0])
 check('RTX 2060 Mobile (1F15): 10 s', new[1] == 10000, new[1])
 check('RTX 2080 (1E87): 10 s', new[2] == 10000, new[2])
@@ -53,4 +55,10 @@ for nm, i, want in (('TU117 (1F82)', 8, 10000), ('just below 1E00 (1DFF)', 9, 50
     check(nm + ' -> %d ms' % want, new[i] == want, new[i])
 old = run('fAutoGoSettleMs = bar1Placed ? 500 : 100000;', cases)
 check('negative control: the previous default gives a Turing card 0.5 s', old[0] == 500, old[0])
+# the nvrmsettle boot argument overrides the default (the order matters: the argument is read after the default is chosen)
+ov = run(expr_new, cases, 10000)
+check('nvrmsettle=10000 overrides the 100 s default of an unplaced BAR1', ov[6] == 10000 and ov[7] == 10000, (ov[6], ov[7]))
+check('nvrmsettle=10000 also replaces the 0.5 s default', ov[4] == 10000, ov[4])
+ign = run('fAutoGoSettleMs = bar1Placed ? 500 : 100000;', cases, 10000)
+check('negative control: an expression that ignores the argument keeps 100 s', ign[6] == 100000, ign[6])
 sys.exit(1 if fails else 0)
