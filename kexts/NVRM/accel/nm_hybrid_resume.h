@@ -51,6 +51,15 @@ struct nmr_ops {
 #define NMR_PW_DDI         0x45450u
 #define NMR_DE_PLL_ENABLE  0x46070u
 #define NMR_CDCLK_CTL      0x46000u
+#define NMR_CDCLK_SQUASH   0x46008u
+#define NMR_DSSM           0x51004u
+#define NMR_PCODE_MAILBOX  0x138124u
+#define NMR_PCODE_DATA     0x138128u
+#define NMR_PCODE_DATA1    0x13812Cu
+#define NMR_PCODE_READY    (1u << 31)
+#define NMR_PCODE_CDCLK    0x7u
+#define NMR_PCODE_PREPARE  0x3u
+#define NMR_PCODE_READY_FOR_CHANGE 0x1u
 #define NMR_DPLL_ENABLE(n) (0x46010u + 4u * (n))
 #define NMR_DPLL_CFGCR0(n) (0x164284u + 8u * (n))
 #define NMR_DPLL_CFGCR1(n) (0x164288u + 8u * (n))
@@ -176,6 +185,43 @@ struct nmx_snap {
     uint32_t clock_ctl, valfreq, buf1, buf2, buf3, pmdemand[2];
 };
 
+/* ---- the display clock and the voltage level the platform controller is told for it (Linux intel_cdclk.c bxt_get_cdclk,
+ * tgl_calc_voltage_level). The voltage level cannot be read back, so it is computed from the clock, as Linux does. */
+static inline unsigned nmr_cdclk_khz(uint32_t dssm, uint32_t de_pll, uint32_t ctl, uint32_t squash)
+{
+    const unsigned sel = (dssm >> 29) & 7;
+    const unsigned ref = sel == 1 ? 19200u : (sel == 2 ? 38400u : 24000u);
+    const unsigned long vco = (unsigned long)ref * (de_pll & 0xFFu);
+    const unsigned divs[4] = { 2, 3, 4, 8 }, div = divs[(ctl >> 22) & 3];
+    if (!(de_pll & (1u << 31)) || !(de_pll & (1u << 30)) || !vco) return ref / 2;          /* PLL off: the bypass clock */
+    if (squash & (1u << 31)) {
+        const unsigned size = ((squash >> 24) & 0xF) + 1;
+        unsigned wave = (squash & 0xFFFFu) >> (16 - size), pop = 0;
+        while (wave) { pop += wave & 1; wave >>= 1; }
+        return (unsigned)((pop * vco + (size * div) / 2) / (size * div));
+    }
+    return (unsigned)((vco + div / 2) / div);
+}
+static inline uint8_t nmr_cdclk_voltage(unsigned khz)
+{
+    static const unsigned max[4] = { 312000, 326400, 556800, 652800 };
+    unsigned l;
+    for (l = 0; l < 4; l++) if (khz <= max[l]) return (uint8_t)l;
+    return 3;
+}
+/* One platform-controller mailbox transaction (Linux __snb_pcode_rw): wait for the mailbox to be free, write data and command,
+ * wait for it to be taken, read the data back, and check the status byte. 0 on success. */
+static inline int nmr_pcode(const struct nmr_ops *o, uint32_t mbox, uint32_t *val, int is_read)
+{
+    uint32_t m;
+    if (o->rd(o->ctx, NMR_PCODE_MAILBOX) & NMR_PCODE_READY) return -1;
+    o->wr(o->ctx, NMR_PCODE_DATA, *val); o->wr(o->ctx, NMR_PCODE_DATA1, 0);
+    o->wr(o->ctx, NMR_PCODE_MAILBOX, NMR_PCODE_READY | mbox);
+    if (!nmr_wait(o, NMR_PCODE_MAILBOX, NMR_PCODE_READY, 0, 20000)) return -1;
+    m = o->rd(o->ctx, NMR_PCODE_MAILBOX);
+    if (is_read) *val = o->rd(o->ctx, NMR_PCODE_DATA);
+    return (m & 0xFFu) ? -1 : 0;
+}
 /* ---- the snapshot */
 #define NMR_N_TIMING 11
 #define NMR_N_PLANE  5
@@ -183,7 +229,8 @@ struct nmr_snap {
     uint8_t  valid, have_sink, no_handshake, n_dpll;
     struct nmr_topo topo;
     uint32_t pw_driver, pw_aux, pw_ddi;
-    uint32_t de_pll, cdclk;
+    uint32_t de_pll, cdclk, squash, dssm;
+    uint8_t  volt;                               /* the voltage level the platform controller was told for this display clock */
     uint32_t dpll_en[2], cfgcr0[2], cfgcr1[2], div0[2], dpclka;
     uint32_t phy[NMR_PHY_WORDS];
     uint32_t pp_ctl, pp_on, pp_off, pp_div;
@@ -379,6 +426,8 @@ static inline int nmr_snap_impl(const struct nmr_ops *o, struct nmr_snap *s, uns
     s->topo.pipe = (uint8_t)pipe; s->topo.port = (uint8_t)port;
     s->pw_driver = o->rd(o->ctx, NMR_PW_DRIVER); s->pw_aux = o->rd(o->ctx, NMR_PW_AUX); s->pw_ddi = o->rd(o->ctx, NMR_PW_DDI);
     s->de_pll = o->rd(o->ctx, NMR_DE_PLL_ENABLE); s->cdclk = o->rd(o->ctx, NMR_CDCLK_CTL);
+    s->dssm = o->rd(o->ctx, NMR_DSSM); s->squash = display_version >= 13 ? o->rd(o->ctx, NMR_CDCLK_SQUASH) : 0;
+    s->volt = nmr_cdclk_voltage(nmr_cdclk_khz(s->dssm, s->de_pll, s->cdclk, s->squash));
     s->n_dpll = 2;
     if (with_combo) for (i = 0; i < 2; i++) {
         s->dpll_en[i] = o->rd(o->ctx, NMR_DPLL_ENABLE(i)); s->cfgcr0[i] = o->rd(o->ctx, NMR_DPLL_CFGCR0(i));
@@ -543,14 +592,28 @@ static inline int nmr_st_power(const struct nmr_ops *o, const struct nmr_snap *s
     }
     return NMR_OK;
 }
-static inline int nmr_st_cdclk(const struct nmr_ops *o, const struct nmr_snap *s)
+static inline int nmr_st_cdclk(const struct nmr_ops *o, const struct nmr_snap *s, unsigned display_version)
 {
+    const int pcode = display_version >= 11 && display_version < 14;       /* versions 14 and later have no mailbox handshake */
+    unsigned t;
     nmr_note(o, "display clock");
+    if (pcode) {
+        /* Linux skl_pcode_request: ask until the platform controller says it is ready for a display clock change */
+        int ready = 0;
+        for (t = 0; t < 60 && !ready; t++) {
+            uint32_t v = NMR_PCODE_PREPARE;
+            if (nmr_pcode(o, NMR_PCODE_CDCLK, &v, 1) == 0 && (v & NMR_PCODE_READY_FOR_CHANGE) == NMR_PCODE_READY_FOR_CHANGE) ready = 1;
+            else o->delay_us(o->ctx, 1000);
+        }
+        if (!ready) return NMR_E_CDCLK;
+    }
     if (s->de_pll & NMR_PLL_ENABLE) {
         o->wr(o->ctx, NMR_DE_PLL_ENABLE, (s->de_pll & ~NMR_PLL_LOCK) | NMR_PLL_ENABLE);   /* the lock bit is a status */
         if (!nmr_wait(o, NMR_DE_PLL_ENABLE, NMR_PLL_LOCK, NMR_PLL_LOCK, 5000)) return NMR_E_CDCLK;
     }
+    if (display_version >= 13) o->wr(o->ctx, NMR_CDCLK_SQUASH, s->squash);                 /* before the clock control, as Linux */
     o->wr(o->ctx, NMR_CDCLK_CTL, s->cdclk);
+    if (pcode) { uint32_t v = s->volt; if (nmr_pcode(o, NMR_PCODE_CDCLK, &v, 0)) return NMR_E_CDCLK; }
     return NMR_OK;
 }
 static inline int nmr_st_combo(const struct nmr_ops *o, const struct nmr_snap *s)
@@ -636,7 +699,7 @@ static inline int nmr_resume(const struct nmr_ops *o, const struct nmr_snap *s, 
     if (!s || !s->valid) return NMR_E_NO_SNAPSHOT;
     if (nmr_st_lit(o, s)) return NMR_ALREADY_LIT;                       /* a panel that is still running needs nothing */
     if ((rc = nmr_st_power(o, s))) return rc;
-    if ((rc = nmr_st_cdclk(o, s))) return rc;
+    if ((rc = nmr_st_cdclk(o, s, display_version))) return rc;
     if ((rc = nmr_st_combo(o, s))) return rc;
     if ((rc = nmr_st_panel(o, s))) return rc;
     if ((rc = nmr_st_sink(o, s))) return rc;
