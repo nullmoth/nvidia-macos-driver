@@ -734,7 +734,7 @@ void nvmtl_m4_note_buffer_cached(id buf, uint64_t addr, uint64_t length, _Atomic
 
 // NVMTL_WS_RT_GATE_MB=<n>: while ray tracing is available, the working-set answer is raised to at least n MB. Black-box
 // behaviour of the game, found by changing the reported recommendedMaxWorkingSetSize and watching whether the ray tracing
-// options appear: below about 6145 MB they stay off, above it they are offered. The same figure also coincides with the
+// options appear: below roughly 6 GB they stay off, above it they are offered (exact figure: see the measurements table). The same figure also coincides with the
 // game's low-memory sizing, so one number serves both. The procedure to re-measure the threshold on a given card is in
 // docs/RT-WORKING-SET-GATE.md.
 // Default 0: off.
