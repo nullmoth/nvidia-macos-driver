@@ -84,6 +84,31 @@ int main(void)
                      snprintf(nm, sizeof nm, "real %s: %u words at 0x%x, %u register writes, plan of %u writes", real[r].name, fw.part[0].words, fw.part[0].start_mmio, fw.part[0].mmio_count, c);
                      ARM(nm, c == fw.part[0].words + fw.part[0].mmio_count); }
       } }
+
+    /* the load plan and the file choice */
+    { static struct nmd_write w[1 << 15]; uint32_t c;
+      n = build(f, 100, 0x80000u, 0x8F034u);
+      ARM("a parse for the plan", nmd_parse(f, n, '*', '*', 0x20000, &fw) == NMD_OK);
+      c = nmd_load_plan(&fw, 12, w, 1 << 15);
+      ARM("the plan starts by disabling every event handler of every program", c > 0 && w[0].reg == 0x8F034u && w[0].val == NMD_EVT_DISABLED && w[1].reg == 0x8F004u && w[1].val == 0);
+      { int ok = 1; for (uint32_t k = 0; k < c; k++) if (w[k].reg >= 0x8F034u && w[k].reg < 0x8F054u && w[k].val != NMD_EVT_DISABLED && w[k].val != 0) ok = 0;
+        ARM("no event handler is ever enabled by the plan, including through the firmware's own register list", ok); }
+      ARM("the program words follow, each at its own address", ({ int ok = 0; for (uint32_t k = 0; k < c; k++) if (w[k].reg == 0x80000u + 4 * 5 && w[k].val == 0xC0000005u) ok = 1; ok; }));
+      ARM("pipe programs use the version 13 base on version 13 and the older base before", nmd_base(1, 13) == 0x5F000u && nmd_base(2, 13) == 0x5F400u && nmd_base(1, 12) == 0x92000u);
+      ARM("a plan that does not fit is refused whole", nmd_load_plan(&fw, 12, w, 30) == 0); }
+    ARM("Tiger Lake, Alder Lake P and Meteor Lake each get their own file",
+        !strcmp(nmd_file_for(12, 0x9a49), "tgl_dmc_ver2_12.bin") && !strcmp(nmd_file_for(13, 0x46a6), "adlp_dmc_ver2_16.bin") && !strcmp(nmd_file_for(14, 0x7d55), "mtl_dmc.bin"));
+    ARM("Arrow Lake uses the Meteor Lake file", !strcmp(nmd_file_for(14, 0x7d67), "mtl_dmc.bin"));
+    ARM("a part of the same generation with no fetched file gets none", nmd_file_for(12, 0x4c8a) == 0 && nmd_file_for(12, 0x4680) == 0 && nmd_file_for(20, 0x64a0) == 0);
+    ARM("program size limits follow the generation", nmd_max_words(12) == 0x6000 / 4 && nmd_max_words(13) == 0x20000 / 4 && nmd_max_words(14) == 0x7000 / 4);
+    { const char *dir = getenv("NMH_DMC_DIR");
+      if (dir) { static const struct { const char *name; unsigned ver; } real[] = { {"tgl_dmc_ver2_12.bin", 12}, {"adlp_dmc_ver2_16.bin", 13}, {"mtl_dmc.bin", 14} };
+        for (unsigned r = 0; r < 3; r++) { char path[512], nm[200]; snprintf(path, sizeof path, "%s/%s", dir, real[r].name);
+          FILE *fp = fopen(path, "rb"); static uint8_t big[1 << 20]; size_t got = fp ? fread(big, 1, sizeof big, fp) : 0; if (fp) fclose(fp);
+          static struct nmd_write w[1 << 15];
+          int rc = got ? nmd_parse(big, (uint32_t)got, '*', '*', nmd_max_words(real[r].ver), &fw) : -1; uint32_t c = rc == NMD_OK ? nmd_load_plan(&fw, real[r].ver, w, 1 << 15) : 0;
+          int evt_ok = c > 0; for (uint32_t k = 0; k < c; k++) for (unsigned id = 0; id < NMD_MAX_IDS; id++) if (fw.part[id].present && nmd_is_evt_ctl(id, real[r].ver, w[k].reg) && w[k].val != NMD_EVT_DISABLED && w[k].val != 0) evt_ok = 0;
+          snprintf(nm, sizeof nm, "real %s: load plan of %u writes, every event handler left disabled", real[r].name, c); ARM(nm, c > 0 && evt_ok); } } }
     printf("%d failed\n", fails);
     return fails != 0;
 }
