@@ -180,6 +180,23 @@ static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv
       axisN = v3mul(o, eN, sdiv_(o, one, lN, okN));
    }
    V notsphere = o->bnot(o->ctx, eq_(o, c->caps, k_(o, 2.0f)));
+   /* An open end (no cap) has no surface across it: a ray that passes through the end plane inside the end radius, heading in, is inside the
+    * solid from there on, and every surface it meets next is one it leaves through. Hits beyond that crossing do not exist. */
+   V tblock = ray->tmax;
+   {
+      V isnone = eq_(o, c->caps, zero);
+      for (int end = 0; end < 2; end++) {
+         V3 P = end ? Q[CV_SUBDIV] : Q[0]; V3 a = end ? axisN : axis0; V rP = end ? R[CV_SUBDIV] : R[0];
+         V3 rp = v3sub(o, ray->o, P);
+         V dxa = v3dot(o, ray->d, a);
+         V okp = lt_(o, k_(o, 1e-9f), abs_(o, dxa));
+         V tp = sdiv_(o, sub_(o, zero, v3dot(o, rp, a)), dxa, okp);
+         V3 q = v3add(o, rp, v3mul(o, ray->d, tp));
+         V inward = end ? lt_(o, dxa, zero) : lt_(o, zero, dxa);
+         V blocks = and_(o, and_(o, isnone, okp), and_(o, inward, and_(o, le_(o, v3dot(o, q, q), mul_(o, rP, rP)), le_(o, ray->tmin, tp))));
+         tblock = sel_(o, blocks, min_(o, tblock, tp), tblock);
+      }
+   }
    V isdisk = eq_(o, c->caps, one);
    struct cv_best round = { 0, ray->tmax, zero }, flat = { 0, ray->tmax, zero };
    round.hit = lt_(o, one, zero); flat.hit = round.hit;       /* false */
@@ -215,6 +232,9 @@ static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv
          V valid = and_(o, and_(o, okc, okq), and_(o, and_(o, le_(o, lo_x, x), le_(o, x, hi_x)), lt_(o, zero, rad)));
          valid = and_(o, valid, cv_end_clip(o, ray, Q[0], axis0, Q[CV_SUBDIV], axisN, notsphere, t, k < CV_SUBDIV / 4, k >= CV_SUBDIV - CV_SUBDIV / 4));
          V u = mul_(o, add_(o, k_(o, (float)k), cv_clamp01(o, sdiv_(o, x, L, okL))), k_(o, 1.0f / CV_SUBDIV));
+         /* only the surface a ray enters through: a ray inside an open-ended tube does not hit its inner wall */
+         valid = and_(o, valid, lt_(o, add_(o, mul_(o, qa, t), qb), zero));
+         valid = and_(o, valid, lt_(o, t, tblock));
          cv_consider(o, &round, ray, valid, t, u);
       }
       /* sphere at the start of this piece (k = 0..7); the last piece also owns the sphere at the end */
@@ -227,6 +247,8 @@ static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv
          for (int rt = 0; rt < 2; rt++) {
             V t = rt ? s1 : s0;
             V valid = and_(o, oks, cv_end_clip(o, ray, Q[0], axis0, Q[CV_SUBDIV], axisN, notsphere, t, (k + end) <= CV_SUBDIV / 4, (k + end) >= CV_SUBDIV - CV_SUBDIV / 4));
+            valid = and_(o, valid, lt_(o, add_(o, mul_(o, sa, t), sb), zero));
+            valid = and_(o, valid, lt_(o, t, tblock));
             cv_consider(o, &round, ray, valid, t, k_(o, (float)(k + end) / CV_SUBDIV));
          }
       }
@@ -272,9 +294,34 @@ static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv
       V rho2 = v3dot(o, q, q);
       V inside = le_(o, rho2, mul_(o, rP, rP));
       V valid = and_(o, and_(o, okp, isdisk), inside);
+      /* entering only: the start disk faces against the first piece's direction, the end disk along the last piece's */
+      valid = and_(o, valid, end ? lt_(o, dxa, zero) : lt_(o, zero, dxa));
       (void)okc0;
       cv_consider(o, &round, ray, valid, t, end ? one : zero);
    }
+
+#ifdef CV_FLAT_DISC
+   /* experiment: a flat curve with sphere end caps ends in a disc in the ribbon plane, of the end point's radius */
+   for (int end = 0; end < 2; end++) {
+      V3 P = end ? Q[CV_SUBDIV] : Q[0]; V3 a = end ? axisN : axis0; V rP = end ? R[CV_SUBDIV] : R[0];
+#ifdef CV_FLAT_DISC_FACING
+      V3 n = ray->d;                                                   /* the disc faces the ray */
+#else
+      V3 n = v3sub(o, v3mul(o, a, v3dot(o, a, ray->d)), ray->d);
+#endif
+      V nn = v3dot(o, n, n), dn = v3dot(o, ray->d, n);
+      V okn = and_(o, lt_(o, k_(o, 1e-10f), nn), lt_(o, k_(o, 1e-10f), abs_(o, dn)));
+      V t = sdiv_(o, v3dot(o, v3sub(o, P, ray->o), n), dn, okn);
+      V3 q = v3sub(o, v3add(o, ray->o, v3mul(o, ray->d, t)), P);
+      V valid = and_(o, and_(o, okn, eq_(o, c->caps, k_(o, 2.0f))), le_(o, v3dot(o, q, q), mul_(o, rP, rP)));
+#ifdef CV_FLAT_HALF
+      /* only the half beyond the end point: the ribbon itself covers the rest */
+      V qa_ = v3dot(o, q, a);
+      valid = and_(o, valid, end ? le_(o, zero, qa_) : le_(o, qa_, zero));
+#endif
+      cv_consider(o, &flat, ray, valid, t, end ? one : zero);
+   }
+#endif
 
    struct cv_hit h;
    h.hit = sel_(o, c->flat, flat.hit, round.hit);
