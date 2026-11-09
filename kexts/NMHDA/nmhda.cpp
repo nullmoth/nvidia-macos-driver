@@ -26,12 +26,24 @@
 #include <sys/sysctl.h>
 
 #include "nmhda_topology.inc"
+#include "nmhda_volume.h"
 
 static const char *kHdaPath[] {
     "/System/Library/Extensions/AppleHDA.kext/Contents/PlugIns/AppleHDAController.kext/Contents/MacOS/AppleHDAController"
 };
 static KernelPatcher::KextInfo kHda { "com.apple.driver.AppleHDAController", kHdaPath, arrsize(kHdaPath), {true}, {},
                                        KernelPatcher::KextInfo::Unloaded };
+
+// Volume and mute for display audio (nmhdavol=1): AppleHDA's engine class and IOAudioFamily's control constructors.
+static const char *kAppleHdaPath[] { "/System/Library/Extensions/AppleHDA.kext/Contents/MacOS/AppleHDA" };
+static KernelPatcher::KextInfo kAppleHda { "com.apple.driver.AppleHDA", kAppleHdaPath, arrsize(kAppleHdaPath), {true}, {},
+                                            KernelPatcher::KextInfo::Unloaded };
+static const char *kAudioFamilyPath[] { "/System/Library/Extensions/IOAudioFamily.kext/Contents/MacOS/IOAudioFamily" };
+static KernelPatcher::KextInfo kAudioFamily { "com.apple.iokit.IOAudioFamily", kAudioFamilyPath, arrsize(kAudioFamilyPath),
+                                               {true}, {}, KernelPatcher::KextInfo::Unloaded };
+static bool gClipRouted;
+static NMHDAVolumeApi gVolumeApi;
+static mach_vm_address_t orgClipOutputSamples;
 
 // Kepler entries replaced in this order, one per NVIDIA audio function found.
 static const uint16_t kKepler[] { 0x0E0A, 0x0E0B, 0x0E1B, 0x0E1A, 0x0E08 };
@@ -239,11 +251,53 @@ static void topologyFamilyLoaded(void *, KernelPatcher &patcher, size_t index,
     report("topology-verb", "topology GET ready in runtime image %lu (registered %lu)",
            (unsigned long)index, (unsigned long)topologyFamily.loadIndex);
 }
+// AppleHDAEngine::clipOutputSamples is IOAudioEngine's public virtual: it converts the mixed samples into the engine's
+// ring. After it returns, a display sink's window of the ring is scaled by the volume and mute set in Sound settings.
+static IOReturn wrapClipOutputSamples(void *self, const void *mixBuf, void *sampleBuf, uint32_t firstFrame,
+                                      uint32_t numFrames, const void *format, void *stream) {
+    IOReturn r = FunctionCast(wrapClipOutputSamples, orgClipOutputSamples)(self, mixBuf, sampleBuf, firstFrame, numFrames,
+                                                                         format, stream);
+    if (r == kIOReturnSuccess)
+        nmhdaVolumeClip(self, sampleBuf, firstFrame, numFrames, format);
+    return r;
+}
+static void startVolumeWhenReady() {
+    // controls are added only once the samples can be scaled, and only when both constructors were found
+    if (gClipRouted && gVolumeApi.createVolumeControl && gVolumeApi.createMuteControl)
+        report("vol", nmhdaVolumeStart(gVolumeApi, report) ? "watching for display audio engines" : "could not start");
+}
+static void onAppleHdaLoaded(void *, KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+    if (gClipRouted) return;
+    if (!patcher.solveSymbol(index, "__ZN14AppleHDAEngine17clipOutputSamplesEPKvPvjjPK20_IOAudioStreamFormatP13IOAudioStream",
+                             address, size)) { patcher.clearError(); return; }
+    KernelPatcher::RouteRequest route { "__ZN14AppleHDAEngine17clipOutputSamplesEPKvPvjjPK20_IOAudioStreamFormatP13IOAudioStream",
+                                         wrapClipOutputSamples, orgClipOutputSamples };
+    gClipRouted = patcher.routeMultiple(index, &route, 1);
+    patcher.clearError();
+    report("vol", gClipRouted ? "sample hook installed" : "could not hook clipOutputSamples");
+    startVolumeWhenReady();
+}
+static void onAudioFamilyLoaded(void *, KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+    if (gVolumeApi.createVolumeControl) return;
+    auto vol = patcher.solveSymbol(index, "__ZN19IOAudioLevelControl19createVolumeControlEiiiiijPKcjj", address, size);
+    patcher.clearError();
+    auto mute = patcher.solveSymbol(index, "__ZN19IOAudioToggleControl17createMuteControlEbjPKcjj", address, size);
+    patcher.clearError();
+    if (!vol || !mute) return;
+    gVolumeApi.createVolumeControl = reinterpret_cast<void *>(vol);
+    gVolumeApi.createMuteControl = reinterpret_cast<void *>(mute);
+    startVolumeWhenReady();
+}
 static void pluginStart() {
     sysctl_register_oid(&sysctl__debug_nmhda);
     report("nmhda-started", "waiting for AppleHDAController");
     lilu.onKextLoadForce(&topologyFamily, 1, topologyFamilyLoaded);
     lilu.onKextLoadForce(&kHda, 1, onHdaLoaded);
+    if (nmhdaVolumeRequested()) {
+        report("vol", "nmhdavol=1: display audio volume and mute requested");
+        lilu.onKextLoadForce(&kAppleHda, 1, onAppleHdaLoaded);
+        lilu.onKextLoadForce(&kAudioFamily, 1, onAudioFamilyLoaded);
+    }
 }
 
 static const char *bootargOff[] { "-nmhdaoff" };
