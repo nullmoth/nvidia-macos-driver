@@ -366,3 +366,25 @@ static inline unsigned nvrmSurroundMembers(unsigned mask, unsigned connected, un
 }
 // The slice offset of member m: the widths of the members before it.
 static inline unsigned nvrmSurroundOffset(const unsigned *widths, unsigned m) { unsigned o = 0; for (unsigned i = 0; i < m; i++) o += widths[i]; return o; }
+// Boot with nothing connected (issue 88: a Dell on DisplayPort, every AUX read of the first query timed out within 14 ms of the
+// firmware coming up; the same card on HDMI was fine): ask again a few times, 3 s apart, through the hot-plug scan (which
+// starts a framebuffer for a display that appears). 6 tries, then it stays quiet like before. 0 = stop.
+enum { kNvrmBootRetries = 6 };
+static inline unsigned nvrmBootRetryDelayMs(unsigned attempt) { return attempt < kNvrmBootRetries ? 3000u : 0u; }
+// The master of a surround mask is its lowest connected index; a member is any other connected index in the mask.
+static inline unsigned nvrmSurroundMaster(unsigned mask, unsigned connected) { for (unsigned i = 0; i < 8 && i < connected; i++) if (mask & (1u << i)) return i; return 8; }
+static inline bool nvrmSurroundIsMember(unsigned mask, unsigned index, unsigned connected)
+{
+    unsigned idx[kNvrmSurMaxMembers];
+    return nvrmSurroundMembers(mask, connected, idx) >= 2 && index != nvrmSurroundMaster(mask, connected) && index < 8 && (mask & (1u << index));
+}
+// What a hot-plug scan does to a group. `total` = members in the mask, `up` = how many of them are connected now.
+//   Formed and a member went away      -> Degrade: every display is its own again (members un-hidden).
+//   Degraded and all members are back  -> Reform: members hidden, the master offers the combined mode again.
+enum NvrmSurAction { kSurNone = 0, kSurDegrade = 1, kSurReform = 2 };
+static inline NvrmSurAction nvrmSurroundNext(bool formed, bool degraded, unsigned total, unsigned up)
+{
+    if (formed && up < total) return kSurDegrade;
+    if (degraded && total >= 2 && up == total) return kSurReform;
+    return kSurNone;
+}
