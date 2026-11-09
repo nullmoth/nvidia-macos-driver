@@ -69,7 +69,7 @@ constexpr uint32_t FRMCOUNT(int p)     { return 0x70040u + (uint32_t)p * 0x1000u
 // the surface the plane is scanning out right now (Linux PLANE_SURFLIVE, display 9+); PLANE_SURF is the one being armed
 constexpr uint32_t PLANE_SURFLIVE(int p) { return 0x701ACu + (uint32_t)p * 0x1000u; }
 // graphics translation table invalidate after entries change (Linux GFX_FLSH_CNTL_GEN6, enable bit 0)
-constexpr uint32_t kGfxFlshCntl = 0x101008u;
+[[maybe_unused]] constexpr uint32_t kGfxFlshCntl = 0x101008u;
 uint64_t ggttRead(void *ctx, uint64_t idx) { return ((volatile uint64_t *)ctx)[idx]; }
 
 // PLANE_CTL (display 11+): enable bit 31, format bits 27:23 (8 = XRGB 8:8:8:8, Linux PLANE_CTL_FORMAT_XRGB_8888 on
@@ -177,7 +177,8 @@ private:
     volatile uint64_t *fGsm = nullptr;
     uint64_t fGsmEntries = 0;
     struct nmh_ring fRing;
-    uint32_t fHyPitch = 0, fHyHeight = 0, fHyFlips = 0;
+    uint32_t fHyPitch = 0, fHyHeight = 0;
+    [[maybe_unused]] uint32_t fHyFlips = 0;
     bool hybridSetup(uint32_t pitch, uint32_t height);
     bool hybridWaitLive(int slot);
     void hybridWriteSurf(uint32_t surf, uint32_t strideReg);
@@ -598,10 +599,11 @@ bool NMIntelFB::hybridSetup(uint32_t pitch, uint32_t height)
     const uint64_t slotPages = nmh_pages_for(pitch, height), need = slotPages * NMH_SLOTS;
     const uint64_t top = fGsmEntries > 512 ? fGsmEntries - 512 : 0;      // keep clear of the top 2 MiB
     const uint64_t fwLo = fSurf >> 12, fwHi = (((uint64_t)fSurf + (uint64_t)fRowBytes * fHeight) - 1) >> 12;
-    const int64_t first = nmh_find_free_run(ggttRead, (void *)fGsm, top, 65536, need, fwLo, fwHi);
-    if (first < 0) HYFAIL("no run of %llu unused entries in the top 256 MiB of %llu entries", (unsigned long long)need, (unsigned long long)fGsmEntries);
-    if ((uint64_t)(first + need) * NMH_PAGE > (1ull << 32)) HYFAIL("range ends past the 32-bit plane address");
-    nmh_ring_init(&fRing, (uint64_t)first * NMH_PAGE, slotPages * NMH_PAGE);
+    const int64_t firstS = nmh_find_free_run(ggttRead, (void *)fGsm, top, 65536, need, fwLo, fwHi);
+    if (firstS < 0) HYFAIL("no run of %llu unused entries in the top 256 MiB of %llu entries", (unsigned long long)need, (unsigned long long)fGsmEntries);
+    const uint64_t first = (uint64_t)firstS;
+    if ((first + need) * NMH_PAGE > (1ull << 32)) HYFAIL("range ends past the 32-bit plane address");
+    nmh_ring_init(&fRing, first * NMH_PAGE, slotPages * NMH_PAGE);
     fHyPitch = pitch; fHyHeight = height; fHyReady = true;
     IFBLOG("hybrid: import ring %d slots x %llu KiB at table offset 0x%llx (entries %lld..%lld of %llu)", NMH_SLOTS,
            (unsigned long long)(slotPages * 4), (unsigned long long)fRing.base, (long long)first, (long long)(first + need - 1),
@@ -660,7 +662,7 @@ IOReturn NMIntelFB::hybridImport(NMHybridReq *q)
         int need = 0; uint32_t ev = 0;
         q->slot = nmh_ring_acquire(&fRing, q->surfaceId, &need, &ev);
         if (q->slot < 0) { q->result = NMH_E_BUSY; return kIOReturnBusy; }
-        q->needMap = need; q->evictedId = ev;
+        q->needMap = (unsigned)need; q->evictedId = ev;
         return kIOReturnSuccess;
     }
     if (!fHyReady || q->slot < 0 || q->slot >= NMH_SLOTS) { q->result = NMH_E_BUSY; return kIOReturnBadArgument; }
