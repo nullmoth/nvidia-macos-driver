@@ -2,7 +2,8 @@
 # vulkan-for-apps.sh: make the driver's Vulkan implementation (NVK) visible to macOS applications that use the standard
 # Vulkan loader. Off by default; this script is the switch.
 #
-#   sudo bash vulkan-for-apps.sh --install     write the loader manifest
+#   sudo bash vulkan-for-apps.sh --install [--with-loader <libvulkan.1.dylib>]
+#                                              write the loader manifest; with the loader, also install it
 #   sudo bash vulkan-for-apps.sh --remove      delete it
 #        bash vulkan-for-apps.sh --status      say whether it is installed and whether its library exists
 #
@@ -11,9 +12,12 @@
 # (/usr/local/share/vulkan/icd.d is on its default search path), so no environment variable is needed. It changes nothing
 # else and never touches the Metal path: WindowServer and Metal applications keep using the driver exactly as before.
 #
-# Not included: the Vulkan loader itself (install the LunarG / Khronos loader or the Homebrew "vulkan-loader" package),
-# and window-system integration. Compute and off-screen rendering work; presenting to a window needs the surface
-# extension the driver's NVK build does not carry yet, so a Vulkan application that draws to a window needs it first.
+# The Vulkan loader is the Khronos Vulkan-Loader (Apache-2.0, which allows redistribution with its licence text and notice kept;
+# see NOTICE). A package that carries an x86_64 build of it passes it with --with-loader and it is installed to
+# <prefix>/lib/libvulkan.1.dylib; without that option a loader already on the Mac (LunarG SDK, Homebrew vulkan-loader) is used.
+# Windows: the driver's NVK exposes VK_EXT_metal_surface (nvk/nvk-metal-wsi.patch) and presents through the CAMetalLayer
+# helper in Mesa's Metal swapchain. Frames reach the layer through a host-visible copy, so it is correct but not the
+# fastest path; compute and off-screen rendering are unaffected.
 set -euo pipefail
 PREFIX=${NULLMOTH_VK_PREFIX:-/usr/local}
 LIBDIR=${NULLMOTH_VK_LIBDIR:-/Library/GPUBundles/nvmtl}
@@ -30,6 +34,13 @@ case "${1:-}" in
     # same trust rule as the plugin: a user-writable library would hand every Vulkan program to whoever can write it
     if [ -z "${NULLMOTH_VK_PREFIX:-}" ]; then
       [ "$(stat -f %u "$LIB")" = 0 ] && [ -z "$(find "$LIB" -perm -020 -o -perm -002 2>/dev/null)" ] || die "$LIB is not root-owned and write-protected"
+    fi
+    if [ "${2:-}" = "--with-loader" ]; then
+      L=${3:?--with-loader needs the path of libvulkan.1.dylib}
+      [ -f "$L" ] && lipo -archs "$L" 2>/dev/null | grep -qw x86_64 || die "$L is not an x86_64 library"
+      mkdir -p "$PREFIX/lib"; cp "$L" "$PREFIX/lib/.libvulkan.new" && chmod 755 "$PREFIX/lib/.libvulkan.new" \
+        && mv "$PREFIX/lib/.libvulkan.new" "$PREFIX/lib/libvulkan.1.dylib" || die "could not install the loader"
+      echo "installed $PREFIX/lib/libvulkan.1.dylib"
     fi
     mkdir -p "$DIR"
     tmp=$(mktemp "$DIR/.nullmoth.XXXXXX")

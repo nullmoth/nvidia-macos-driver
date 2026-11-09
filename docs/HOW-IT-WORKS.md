@@ -149,9 +149,11 @@ Nothing is sent; you can upload the file on the site yourself.
 See the README, *Build from source*. The kexts need NVIDIA's `open-gpu-kernel-modules` at tag `615.78.08`; NVK needs
 Mesa `17ca6174` with, in order, `nvk/nvk-macos.patch`, `nvk/nvk-fixes-after-def16.patch`, `nvk/nvk-620-kernel.patch`,
 `nvk/nvk-recycle.patch`, `nvk/nvk-slab.patch`, `nvk/nvk-slabdef.patch`, `nvk/nvk-hubfix.patch`, `nvk/nvk-perf-boost-burst.patch`,
-`nvk/nvk-rated-tdp.patch` and `nvk/nvk-gps-maxpower.patch` (`patch -p1` from the Mesa root), then
+`nvk/nvk-rated-tdp.patch`, `nvk/nvk-gps-maxpower.patch` and `nvk/nvk-metal-wsi.patch` (`patch -p1` from the Mesa root), then
 `nvk/dlss/patch_dlss_cache.py <mesa tree>`. NVK compiles against the `open-gpu-kernel-modules` 610.57.04 headers with
 `nvk/ogkm-nvos-620.patch` applied to that tree; 620's `nv.h` does not compile in user space, so the rest stays 610.
+
+`nvk/nvk-metal-wsi.patch` (last in the chain) turns on `VK_EXT_metal_surface`: it adds the extension to NVK's instance table, counts the Metal platform as a window system, and runs Mesa's Metal swapchain in its software mode (a linear host-visible image copied into the `CAMetalLayer` drawable by Mesa's layer helper, because the hardware mode needs a driver that can bind a Metal texture to a `VkImage`). The build therefore uses `-Dplatforms=macos` for the NVK build and still `-Dplatforms=` for the native `mesa_clc` tool build.
 
 `build/build_nvk.sh <mesa git> <610.57.04 tree> <out> [2.9|2.8]` does all of it: it exports Mesa `17ca6174` with `git archive`,
 applies the header patch and the chain above, builds `mesa_clc` and `vtn_bindgen2` from that same tree (tools from another Mesa
