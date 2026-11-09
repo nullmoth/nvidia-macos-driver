@@ -15,7 +15,7 @@ ahead = events[events.index('- (BOOL)nvmtlSubmitAhead'):events.index('static voi
 advance = events[events.index('- (BOOL)nvmtlAdvancePart'):events.index('- (void)nvmtlSubmitWithEvents')]
 ws = events[events.index('static const void *const nvmtl_ws_marks_key'):events.index('static void nvmtl_surface_finish_writes(')]
 objects = (root / 'plugin/NVMTLObjects.m').read_text()
-start = objects.index('static void nvmtl_buffer_sync_in(NVMTLBuffer *b)\n{')
+start = objects.index('static os_unfair_lock gSwcLock = OS_UNFAIR_LOCK_INIT;')   # the shared-VRAM working copy and the sync routines that use it
 sync = objects[start:]
 fixture = r'''
 #import <Foundation/Foundation.h>
@@ -23,9 +23,11 @@ fixture = r'''
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>
+#include <os/lock.h>
+#include "nvmtl_shared_wc.h"
 typedef struct { void *map; size_t size; } Buffer;
 @interface NVMTLBuffer : NSObject { @public
-    void *_hostPtr; size_t _hostLen; Buffer _b, _shadow; unsigned _syncOut, _zshadow;
+    void *_hostPtr; size_t _hostLen; Buffer _b, _shadow; unsigned _syncOut, _zshadow; void *_swc;
 } @end
 @implementation NVMTLBuffer @end
 @interface NVMTLTexture : NSObject { @public
@@ -43,6 +45,7 @@ static void nvmtl_perf_note(int kind, uint64_t time, size_t size) {
     if (kind == NVP_SYNCIN) uploads++; else downloads++;
 }
 static void *nvmtl_device_queue(void) { return NULL; }
+static void nvmtl_buf_settle(NVMTLBuffer *b) { (void)b; }
 static int nvmtl_vk_copy_buffer(void *q, Buffer *from, size_t off,
                                Buffer *to, size_t dst, size_t size) {
     memcpy((char *)to->map + dst, (char *)from->map + off, size); managedCopies++; return 0;
@@ -92,6 +95,21 @@ int main(void) { @autoreleasepool {
     NVMTLBuffer *imported=[NVMTLBuffer new]; imported->_b=(Buffer){gpu,16};
     assert(!nvmtl_submission_copies([NSSet setWithObjects:imported,ordinary,nil],NO));
     assert(!nvmtl_submission_copies([NSSet set],YES));
+    // A Shared buffer with a VRAM working copy (NVMTL_SHARED_VRAM=1): the first submit uploads it whole, later submits only
+    // the pages the CPU changed, and the GPU's result comes back into the caller's pages.
+    { enum { N = 3 * 4096 };
+      static unsigned char host[N], vram[N], stage[N];
+      NVMTLBuffer *w=[NVMTLBuffer new]; nvmtl_swc *sw=(nvmtl_swc *)calloc(1,sizeof *sw);
+      assert(nvmtl_swc_init(sw,N)==0);
+      w->_hostPtr=host; w->_hostLen=N; w->_b=(Buffer){vram,N}; w->_shadow=(Buffer){stage,N}; w->_swc=sw;
+      memset(host,5,N); unsigned c0=managedCopies; nvmtl_buffer_sync_in(w);
+      assert(!memcmp(host,vram,N) && managedCopies>c0 && "the first submit uploads the buffer");
+      c0=managedCopies; nvmtl_buffer_sync_in(w); assert(managedCopies==c0 && "an unchanged buffer uploads nothing");
+      host[4096+7]=9; c0=managedCopies; nvmtl_buffer_sync_in(w);
+      assert(vram[4096+7]==9 && managedCopies==c0+1 && "one changed page is one copy");
+      memset(vram,77,N); nvmtl_buffer_sync_out(w);
+      assert(host[0]==77 && host[N-1]==77 && "the GPU's bytes come back into the caller's pages");
+      nvmtl_swc_free(sw); free(sw); }
     puts("PASS: post-creation pixels, texture views, one copy per backing, read-only protection, unknown usage, managed writeback, zero-copy exclusion");
 } }
 '''
@@ -345,12 +363,12 @@ int main(void) { @autoreleasepool {
 with tempfile.TemporaryDirectory() as directory:
     path = pathlib.Path(directory)
     (path / 'test.m').write_text(fixture + helper + sync + checks)
-    subprocess.run(['clang', '-fobjc-arc', '-framework', 'Foundation',
+    subprocess.run(['clang', '-fobjc-arc', '-I', str(root / 'plugin'), '-framework', 'Foundation',
                     '-framework', 'Metal', str(path / 'test.m'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)
 
     (path / 'submission.m').write_text(fixture + helper + sync + submission_fixture.replace('/*WS*/', ws) + prepare + ahead + advance + submission_checks)
-    subprocess.run(['clang', '-fobjc-arc', '-framework', 'Foundation', '-framework', 'IOSurface',
+    subprocess.run(['clang', '-fobjc-arc', '-I', str(root / 'plugin'), '-framework', 'Foundation', '-framework', 'IOSurface',
                     '-framework', 'Metal', str(path / 'submission.m'), '-o', str(path / 'submission')], check=True)
     for half in ('1', '0'):
         env = dict(os.environ, KERNEL_HALF=half)
