@@ -494,6 +494,8 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     // Surround (boot-arg nvfbsurround=<mask of framebuffer indices>): this framebuffer is the master of a group of displays that
     // appear as one wide display. fSur[0] is the master itself. See nvrmSurroundPlan.
     struct SurMember { NvKmsKapiDisplay display; NvU32 head; struct NvKmsKapiDisplayMode mode; NvU32 x, w; };
+    static void surroundCheck();   // after a hot-plug scan: degrade or re-form the surround group
+    bool fHidden = false;   // a surround member: offline as far as WindowServer is concerned, audio and head still its own
     SurMember fSur[kNvrmSurMaxMembers]; unsigned fSurN = 0; bool fSurActive = false; unsigned fSurTotalW = 0, fSurH = 0, fSurHz = 0;
     bool planSurround(unsigned masterIndex);
     unsigned addSurroundMode(unsigned n);
@@ -789,7 +791,7 @@ public:
           return kIOReturnSuccess; }
     IOReturn setAttributeForConnection(IOIndex connectIndex, IOSelect attribute, uintptr_t value) override;
     IOItemCount getConnectionCount() override { return 1; }
-    bool hasDDCConnect(IOIndex) override { return !fDpyLost && fEdidSize >= 128; }
+    bool hasDDCConnect(IOIndex) override { return !fDpyLost && !fHidden && fEdidSize >= 128; }
     IOReturn getDDCBlock(IOIndex connectIndex, UInt32 blockNumber, IOSelect blockType, IOOptionBits options, UInt8 *data, IOByteCount *length) override;
     // DDC/CI (boot-arg nvrmfbddc=1): one I2C bus per external display, transfers run by NVRM (nvrm_ddc.cpp).
     IOReturn doI2CRequest(UInt32 bus, struct IOI2CBusTiming *timing, struct IOI2CRequest *request) override;
@@ -1024,7 +1026,7 @@ template <typename C> static void nvrmAutoColorFormat(C *, long) {}
 // Output colour controls. Set from boot-args nvfbbpc (6/8/10/12), nvfbformat (0 RGB, 1 YCbCr 4:2:2, 2 YCbCr 4:4:4),
 // nvfbrange (1 full, 2 limited) and nvfbvib (0..200, 100 = off; below is duller, above more vivid), and live through the
 // debug.nvrmfb_color_* sysctls. All default to "automatic": NVKMS decides, as before. They apply to every head.
-static NvU32 gSurroundMask = 0;                // boot-arg nvfbsurround
+static NvU32 gSurroundMask = 0, gSurroundMaskOrig = 0;   // boot-arg nvfbsurround; the active mask is 0 while the group is degraded
 static bool gRotScale = false;                 // boot-arg nvfbrotscale
 static bool gHdrOn = false, gTenBit = false;   // boot-args nvfbhdr / nvfb10bit
 static int gColorBpc = 0, gColorFormat = (int)kNvrmColorFormatAuto, gColorRange = 0, gVibrance = 0;
@@ -1245,13 +1247,8 @@ bool NVRMNVDAFramebuffer::kapiInit()
         fSpareIndex = gNDpy > 0;
         return false;
     }
-    {   // Surround: the members past the first decline to start; the first plans the group
-        static bool maskRead; if (!maskRead) { maskRead = true; UInt32 v = 0; if (PE_parse_boot_argn("nvfbsurround", &v, sizeof v)) gSurroundMask = v & 0xff; }
-        unsigned idx[kNvrmSurMaxMembers]; const unsigned n = gSurroundMask ? nvrmSurroundMembers(gSurroundMask, (unsigned)gNDpy, idx) : 0;
-        if (n >= 2) for (unsigned k = 1; k < n; k++) if (idx[k] == fIndex) {
-            FBLOG("index %u: member of the surround group led by index %u -- not a framebuffer of its own", fIndex, idx[0]);
-            fSpareIndex = true; return false;
-        }
+    {   // Surround (nvfbsurround): read the mask once. Members start as ordinary framebuffers, hidden from WindowServer (fHidden).
+        static bool maskRead; if (!maskRead) { maskRead = true; UInt32 v = 0; if (PE_parse_boot_argn("nvfbsurround", &v, sizeof v)) gSurroundMask = gSurroundMaskOrig = v & 0xff; }
     }
     {
         struct nvrm_dpy_rec *r = &gDpy[fIndex];
@@ -1276,7 +1273,8 @@ bool NVRMNVDAFramebuffer::kapiInit()
         FBLOG("index %u -> display 0x%x connector 0x%x headMask 0x%x -> head %u (taken now 0x%x)",
               fIndex, fDisplay, (unsigned)fConnector, (unsigned)r->headMask, fHead,
               (unsigned)gHeadsTaken);
-        if (gSurroundMask) (void)planSurround(fIndex);
+        fHidden = nvrmSurroundIsMember(gSurroundMask, fIndex, (unsigned)gNDpy);
+        if (fHidden) FBLOG("fb%u: member of the surround group led by index %u -- hidden from WindowServer, its head serves the group", fIndex, nvrmSurroundMaster(gSurroundMask, (unsigned)gNDpy));
     }
     // This mode becomes the head's boot raster (fBootW/fBootH below), which decides the scaler and
     // raster ceilings and which refresh rates addKmsRefreshModes() can publish. A NVKMS-preferred mode
@@ -1791,6 +1789,33 @@ void NVRMNVDAFramebuffer::hotplugPollFire(thread_call_param_t, thread_call_param
     uint64_t d; clock_interval_to_deadline(gHotplugPollSec, kSecondScale, &d);
     if (gHotplugPoll) thread_call_enter_delayed(gHotplugPoll, d);
 }
+// A member display went away: every display is its own again. All members are back: the group re-forms. Runs on the hot-plug thread.
+void NVRMNVDAFramebuffer::surroundCheck()
+{
+    if (!gSurroundMaskOrig) return;
+    unsigned idx[kNvrmSurMaxMembers]; const unsigned total = nvrmSurroundMembers(gSurroundMaskOrig, (unsigned)gNDpy, idx);
+    if (total < 2) return;
+    unsigned up = 0;
+    for (unsigned k = 0; k < total; k++) if (gDpy[idx[k]].connected && gFBs[idx[k]] && !gFBs[idx[k]]->fDpyLost) up++;
+    NVRMNVDAFramebuffer *master = gFBs[idx[0]];
+    if (!master) return;
+    const bool formed = gSurroundMask != 0, degraded = !formed;
+    const NvrmSurAction act = nvrmSurroundNext(formed, degraded, total, up);
+    if (act == kSurNone) return;
+    if (act == kSurDegrade) {
+        FBLOG("surround: %u of %u members connected -- the displays become separate again", up, total);
+        gSurroundMask = 0;
+        master->fSurActive = false; master->fSurN = 0;
+        for (unsigned k = 1; k < total; k++) if (gFBs[idx[k]]) { gFBs[idx[k]]->fHidden = false; gFBs[idx[k]]->notifyConnectionChanged(500); }
+        master->notifyConnectionChanged(500);
+    } else {
+        FBLOG("surround: all %u members are back -- the group re-forms", total);
+        gSurroundMask = gSurroundMaskOrig;
+        master->fSurActive = false; master->fSurN = 0;   // re-planned when WindowServer reads the mode list again
+        for (unsigned k = 1; k < total; k++) if (gFBs[idx[k]]) { gFBs[idx[k]]->fHidden = true; gFBs[idx[k]]->notifyConnectionChanged(500); }
+        master->notifyConnectionChanged(500);
+    }
+}
 void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
 {
     NVRMNVDAFramebuffer *me = gFB;
@@ -1925,6 +1950,7 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
         }
         fb->release();
     }
+    surroundCheck();
     if (!added) {   // still nothing: a boot that found no display keeps looking, 3 s apart, a few times
         if (gNDpy == 0 && gBootRetry < kNvrmBootRetries) {
             const unsigned ms = nvrmBootRetryDelayMs(gBootRetry++);
@@ -3093,6 +3119,10 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
         FBLOG("super::start failed after kapiInit succeeded"); return false;
     }
     fSleepTap = addFramebufferNotification(&NVRMNVDAFramebuffer::sleepTap, this, nullptr);
+    if (fHidden) {   // the group's master offers the combined mode once every member is up: tell it this one is
+        NVRMNVDAFramebuffer *master = gFBs[nvrmSurroundMaster(gSurroundMask, (unsigned)gNDpy) & 7];
+        if (master && master != this) master->notifyConnectionChanged(500);
+    }
     if (!fSleepTap) FBLOG("sleep/wake notification tap not registered - a wake after dark wakes may leave the accelerator off");
     fVblTimer = nvrmfbCall(vblFire, this);
     if (fVblTimer) { uint64_t d; clock_interval_to_deadline(16667, kMicrosecondScale, &d); scheduleCall(fVblTimer, d); }
@@ -3872,27 +3902,22 @@ bool NVRMNVDAFramebuffer::planSurround(unsigned masterIndex)
     }
     unsigned pick[kNvrmSurMaxMembers], total = 0, height = 0, hz = 0;
     if (!nvrmSurroundPlan(modes, count, n, pick, &total, &height, &hz)) { FBLOG("surround: the %u displays share no height and refresh rate -- not grouped", n); return false; }
-    NvU32 taken = gHeadsTaken | (1u << fHead), x = 0;
-    for (unsigned k = 0; k < n; k++) {
+    NvU32 x = 0;
+    for (unsigned k = 0; k < n; k++) {   // each member's head is the one its own (hidden) framebuffer took
         const struct nvrm_dpy_rec &r = gDpy[idx[k]];
-        NvU32 head = fHead;
-        if (k) {
-            NvU32 avail = r.headMask & ~taken;
-            if (!avail) { FBLOG("surround: display 0x%x has no free head (mask 0x%x, taken 0x%x) -- not grouped", (unsigned)r.handle, (unsigned)r.headMask, (unsigned)taken); return false; }
-            head = 0; while (head < 32 && !(avail & (1u << head))) head++;
-            taken |= 1u << head;
-        }
-        fSur[k].display = r.handle; fSur[k].head = head; fSur[k].mode = kmodes[k][pick[k]]; fSur[k].x = x; fSur[k].w = modes[k][pick[k]].w;
+        NVRMNVDAFramebuffer *mf = k ? gFBs[idx[k]] : this;
+        if (!mf || mf->fDisplay != r.handle || mf->fDpyLost) { FBLOG("surround: member index %u is not up yet -- not grouped", idx[k]); return false; }
+        fSur[k].display = r.handle; fSur[k].head = mf->fHead; fSur[k].mode = kmodes[k][pick[k]]; fSur[k].x = x; fSur[k].w = modes[k][pick[k]].w;
         x += fSur[k].w;
     }
-    gHeadsTaken = taken & ~0u;   // the member heads belong to this group
     fSurN = n; fSurTotalW = total; fSurH = height; fSurHz = hz;
-    FBLOG("surround: %u displays as one %ux%u @%u Hz display (heads taken 0x%x)", n, total, height, hz, (unsigned)gHeadsTaken);
+    FBLOG("surround: %u displays as one %ux%u @%u Hz display", n, total, height, hz);
     return true;
 }
 // The one mode a surround group offers, in place of the master's own: the combined raster. IDs 0x40000 | refresh rate.
 unsigned NVRMNVDAFramebuffer::addSurroundMode(unsigned n)
 {
+    if (!fSurN && gSurroundMask && !fHidden) (void)planSurround(fIndex);   // planned when the list is built: every member is up by now, or the master offers its own modes
     if (!fSurN) return n;
     const struct NvKmsKapiDisplayModeTimings &k = fSur[0].mode.timings;
     IODetailedTimingInformationV2 b; nvu_zero(&b, sizeof b);
@@ -4092,7 +4117,7 @@ IOReturn NVRMNVDAFramebuffer::setDetailedTimings(OSArray *array)
     n = addKmsRefreshModes(n);
     { UInt32 dsr = 0; if (PE_parse_boot_argn("nvfbdsr", &dsr, sizeof dsr) && dsr) n = addDsrModes(n); }
     n = addRotatedDesktops(n);
-    if (fSurN) n = addSurroundMode(0);   // a surround group offers its combined mode only
+    if (gSurroundMask && !fHidden) { const unsigned s = addSurroundMode(0); if (s) n = s; }   // a surround group offers its combined mode only
     fNDT = n;
     setProperty(kIOFBDetailedTimingsKey, array);
     fBootInDT = false;
@@ -5046,14 +5071,14 @@ IOReturn NVRMNVDAFramebuffer::getAttributeForConnection(IOIndex connectIndex, IO
 {
     FBSEL(attribute);
     switch (attribute) {
-    case kConnectionEnable: if (value) *value = fDpyLost ? 0 : 1; FBLOGV("getAFC '%s' -> enable %u", _s, (unsigned)(fDpyLost ? 0 : 1)); return kIOReturnSuccess;
+    case kConnectionEnable: if (value) *value = (fDpyLost || fHidden) ? 0 : 1; FBLOGV("getAFC '%s' -> enable %u", _s, (unsigned)((fDpyLost || fHidden) ? 0 : 1)); return kIOReturnSuccess;
     case kConnectionFlags:  if (value) *value = fInternal ? kIOConnectionBuiltIn : 0; return kIOReturnSuccess;
     case kConnectionColorModesSupported:       if (value) *value = 0x00000001; return kIOReturnSuccess;
     case kConnectionColorDepthsSupported:      if (value) *value = 0x00000002; return kIOReturnSuccess;
     case kConnectionControllerColorDepth:      if (value) *value = 0x00000002; return kIOReturnSuccess;
     case kConnectionControllerDepthsSupported: if (value) *value = 0x00000002; return kIOReturnSuccess;
     case kConnectionColorMode:                 if (value) *value = 0x00000001; return kIOReturnSuccess;
-    case kConnectionCheckEnable:               if (value) *value = fDpyLost ? 0 : 1; return kIOReturnSuccess;
+    case kConnectionCheckEnable:               if (value) *value = (fDpyLost || fHidden) ? 0 : 1; return kIOReturnSuccess;
     case kConnectionDisplayFlags:              if (value) *value = 0; return kIOReturnSuccess;
     case kConnectionSupportsHLDDCSense:
         FBLOGV("fb%u getAFC HLDDCSense -> %s (EDID %u B)", fIndex, fEdidSize >= 128 ? "YES" : "no", (unsigned)fEdidSize);
