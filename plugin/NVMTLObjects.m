@@ -1517,6 +1517,31 @@ static bool nvmtl_surfout_import(void) {
     if (on < 0) { const char *u = getenv("NVMTL_SURFOUT_READBACK"); on = !(u && !strcmp(u, "cpu")); }
     return on;
 }
+// Own-write tracking across the planes of one IOSurface (nvmtl_plane_seed.h). OFF unless NVMTL_PLANE_SEED=1 until it has
+// been measured on a card with screen capture running; the seed behaviour it relies on (a read-write lock moves the seed by
+// exactly one, unlock reports the same value) is measured on macOS.
+#include "nvmtl_plane_seed.h"
+static nvmtl_ps g_ps;
+static os_unfair_lock g_ps_lock = OS_UNFAIR_LOCK_INIT;
+static BOOL nvmtl_plane_seed_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_PLANE_SEED"); on = e && e[0] == '1'; nvlog("plane seed %s (NVMTL_PLANE_SEED=%s)", on ? "on" : "off", e ?: "unset"); }
+    return on;
+}
+// A value kept in the surface itself, so a surface id that is reused after the surface is freed never matches a record.
+static uint64_t nvmtl_plane_cookie(IOSurfaceRef s, BOOL create)
+{
+    static CFStringRef key; static dispatch_once_t once; static _Atomic uint64_t next = 1;
+    dispatch_once(&once, ^{ key = CFStringCreateWithFormat(NULL, NULL, CFSTR("NVMTLPlaneSeed.%d"), (int)getpid()); });
+    uint64_t v = 0; CFTypeRef c = IOSurfaceCopyValue(s, key);
+    if (c && CFGetTypeID(c) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)c, kCFNumberSInt64Type, &v);
+    if (c) CFRelease(c);
+    if (!v && create) { v = ((uint64_t)getpid() << 32) | (atomic_fetch_add(&next, 1) & 0xffffffffu);
+        CFNumberRef n = CFNumberCreate(NULL, kCFNumberSInt64Type, &v); IOSurfaceSetValue(s, key, n); CFRelease(n); }
+    return v;
+}
+static unsigned long long g_surfin_plane_skip;
 - (void)nvmtlSurfaceIn {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return;
@@ -1525,6 +1550,19 @@ static bool nvmtl_surfout_import(void) {
     const uint32_t vgen = r->_vramOn ? 0 : nvmtl_vram_gen(r->_surf, r->_plane);
     if (r->_surfSynced && IOSurfaceGetSeed(r->_surf) == r->_surfSeed && (r->_vramOn || vgen == r->_surfGen)) return;
     if (!r->_clientWritten && nvmtl_busy_foreign(r->_surf, r->_plane)) { r->_clientWritten = YES; nvmtl_busy_wait(r->_surf, r->_plane); }
+    if (r->_surfSynced && !r->_vramOn && vgen == r->_surfGen && nvmtl_plane_seed_on()) {
+        // the seed moved, but only through our own surface-outs of other planes: this plane's image is still current
+        const uint32_t now = IOSurfaceGetSeed(r->_surf);
+        os_unfair_lock_lock(&g_ps_lock);
+        const int covered = nvmtl_ps_covers(&g_ps, (uint32_t)IOSurfaceGetID(r->_surf), nvmtl_plane_cookie(r->_surf, NO), (uint32_t)r->_plane,
+                                           r->_surfSeed, now, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), 2000000000ull);
+        os_unfair_lock_unlock(&g_ps_lock);
+        if (covered) {
+            r->_surfSeed = now; g_surfin_plane_skip++;
+            static unsigned no; if (no++ < 6 || no % 5000 == 0) nvlog("surface-in SKIPPED (only our own writes to other planes since the last sync): %llu so far", g_surfin_plane_skip);
+            return;
+        }
+    }
     if (![r nvmtlSurfaceCopyable]) return;
     { uint32_t now = IOSurfaceGetSeed(r->_surf);
       if (r->_vramOn && nvmtl_vram_tag_current(r->_surf, r->_plane, now)) {
@@ -1598,7 +1636,8 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
     }
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     uint32_t lockopt = nvmtl_noseed() ? kIOSurfaceLockReadOnly : 0;
-    if (IOSurfaceLock(r->_surf, lockopt, NULL) != kIOReturnSuccess) { nvlog("G13 surface-out: IOSurfaceLock FAILED"); return NO; }
+    uint32_t lockSeed = 0;
+    if (IOSurfaceLock(r->_surf, lockopt, &lockSeed) != kIOReturnSuccess) { nvlog("G13 surface-out: IOSurfaceLock FAILED"); return NO; }
     void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
     size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);
     int rc = -1;
@@ -1609,6 +1648,12 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
     if (rc) rc = (base && row) ? nvmtl_vk_image_read(r->_q, &r->_i, base, row) : -1;
     if (!rc && r->_i.bpp == 4) { char tag[24]; snprintf(tag, sizeof tag, "out%u-", (unsigned)IOSurfaceGetID(r->_surf)); nvmtl_frame_dump(tag, base, row, r->_i.w, r->_i.h); }
     uint32_t seed = 0; IOReturn unlocked = IOSurfaceUnlock(r->_surf, lockopt, &seed); if (lockopt) seed = IOSurfaceGetSeed(r->_surf);
+    if (nvmtl_plane_seed_on() && !lockopt && unlocked == kIOReturnSuccess && IOSurfaceGetPlaneCount(r->_surf) > 1) {
+        const uint64_t cookie = nvmtl_plane_cookie(r->_surf, YES);
+        os_unfair_lock_lock(&g_ps_lock);
+        nvmtl_ps_record(&g_ps, (uint32_t)IOSurfaceGetID(r->_surf), cookie, (uint32_t)r->_plane, lockSeed, seed, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+        os_unfair_lock_unlock(&g_ps_lock);
+    }
     if (rc || unlocked != kIOReturnSuccess) { nvlog("G13 surface-out: readback FAILED (%ux%u)", r->_i.w, r->_i.h); return NO; }
     r->_surfSeed = seed; r->_surfSynced = YES;
     r->_surfGen = r->_vramOn ? r->_surfGen : nvmtl_vram_gen(r->_surf, r->_plane);
