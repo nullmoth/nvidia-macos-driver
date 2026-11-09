@@ -24,7 +24,7 @@ assert 'scheduleCall(fConnectNotify, deadline)' in notify and 'thread_call_enter
 assert 'NVRMCallReference callReference(me)' in callback and 'me->fConnect.proc(me->fConnect.target, me->fConnect.ref)' in callback
 assert '&fConnectNotify' in extract(src, 'void NVRMNVDAFramebuffer::stop(')
 assert src.index('fConnectNotify = nvrmfbCall(connectNotifyFire, this)') < src.index('super::start(provider)')
-assert 'return !fDpyLost && fEdidSize >= 128;' in src
+assert 'return !fDpyLost && !fHidden && fEdidSize >= 128;' in src
 hotplug = extract(src, 'void NVRMNVDAFramebuffer::hotplugFire(')
 missing = hotplug[hotplug.index('for (int k = 0; k < gNDpy; k++'):]
 missing = missing[:missing.index('if (!added) return;')]
