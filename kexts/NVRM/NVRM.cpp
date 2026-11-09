@@ -10,6 +10,7 @@
 #include "nvrm_bar_limits.h"
 #include "nvrm_startup_policy.h"
 #include "nvrm_bar_recover.h"
+#include "nvrm_shutdown_plan.h"
 
 extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <IOKit/IOService.h>
@@ -131,7 +132,12 @@ public:
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait,
                                          void *p1, void *p2, void *p3, void *p4) override;
     virtual IOReturn setPowerState(unsigned long ordinal, IOService *device) override;
+    virtual void systemWillShutdown(IOOptionBits specifier) override;
 private:
+    NvrmBarUndo fBarUndo = {};          // what placeLargeBar1 changed, for systemWillShutdown
+    volatile SInt32 fShutdownDone = 0;  // the quiesce thread's finish flag
+    bool fShutdownHandled = false;
+    static void shutdownQuiesce(void *p0, wait_result_t w);
     // System sleep (S3). NVRM is a power child of the GPU's IOPCIDevice, so it is told to power off before the slot
     // loses power and to power on once IOPCIFamily has the device back in D0.
     enum { kGpuPmRunning = 0, kGpuPmSuspended = 1, kGpuPmLost = 2 };
@@ -1458,6 +1464,10 @@ bool NVRM::placeLargeBar1()
         bar1Size >> 20, bar1Base, bar3Size >> 20, bar3Base, bar1Base, winEnd, rp24, rp28, rp2c);
 
     UInt16 cmd = fPCI->configRead16(0x04);
+    NvrmBarUndo undo = {};
+    undo.cmd = cmd; undo.resized = newSize != 0; undo.rbCtlOff = rbCtlOff; undo.rbCtlOld = rbCtlOld;
+    undo.lo14 = lo14; undo.hi18 = old18; undo.lo1c = lo1c; undo.hi20 = hi20;
+    undo.rp24 = rp24; undo.rp28 = rp28; undo.rp2c = rp2c;
     fPCI->configWrite16(0x04, cmd & ~0x2);
     if (newSize) {   // PCIe 7.8.6: change the size only while memory decode is off
         fPCI->extendedConfigWrite32(rbCtlOff, (rbCtlOld & ~0x3f00u) | ((UInt32)(__builtin_ctzll(newSize) - 20) << 8));
@@ -1491,6 +1501,7 @@ bool NVRM::placeLargeBar1()
     fPCI->configWrite16(0x04, cmd | 0x2);
 
     fPCI->setDeviceMemory(arr);
+    undo.valid = true; fBarUndo = undo;
     fPCI->setProperty("nvrm-bar1-placed", bar1Base, 64);
     LOG("bar1: PLACED — BAR1 %llu MB live at 0x%llx", bar1Size >> 20, bar1Base);
     {
@@ -1815,6 +1826,59 @@ void NVRM::stop(IOService *provider)
     if (fWorkLoop) { fWorkLoop->release(); fWorkLoop = NULL; }
     if (fPrivateState) { rm_free_private_state(NULL, &fNv); fPrivateState = false; }
     super::stop(provider);
+}
+
+// System power-off and restart. Nothing used to run here: the GPU was left running, mastering the bus, with the BAR
+// layout placeLargeBar1 made, and the platform firmware found that on the next start. This does what Linux's
+// nv_pci_shutdown does in spirit: bring the GPU down the way system sleep does (display, user channels, RM standby),
+// then hand the device back (bus mastering off, the firmware's own BAR and root port values restored). The RM step is
+// bounded: a hang there must not turn into a shutdown that never finishes. -nvrmnoshutdown keeps the old behaviour.
+void NVRM::shutdownQuiesce(void *p0, wait_result_t)
+{
+    NVRM *s = (NVRM *)p0;
+    s->gpuSuspend();
+    OSCompareAndSwap(0, 1, &s->fShutdownDone);
+    s->release();   // the retain taken before the thread started
+    thread_terminate(current_thread());
+}
+
+void NVRM::systemWillShutdown(IOOptionBits specifier)
+{
+    char off[8] = { 0 };
+    if (!fShutdownHandled && !PE_parse_boot_argn("-nvrmnoshutdown", off, sizeof off) && fPCI) {
+        fShutdownHandled = true;
+        LOG("shutdown: %s - quiescing the GPU", specifier == kIOMessageSystemWillRestart ? "restart" : "power off");
+        if (fIntSrc) fIntSrc->disable();
+        if (fAdapter && OSAddAtomic(0, &fGpuPm) == kGpuPmRunning) {
+            thread_t th = THREAD_NULL;
+            retain();
+            if (kernel_thread_start(&NVRM::shutdownQuiesce, this, &th) == KERN_SUCCESS) {
+                thread_deallocate(th);
+                unsigned waited = 0;
+                while (!OSAddAtomic(0, &fShutdownDone) && waited < 8000) { IOSleep(10); waited += 10; }
+                LOG("shutdown: GPU %s after %u ms", OSAddAtomic(0, &fShutdownDone) ? "in standby" : "did not finish standby in time, going on", waited);
+            } else { release(); LOG("shutdown: could not start the quiesce thread - going on"); }
+        }
+        NvrmStep plan[16];
+        const unsigned n = nvrmBuildShutdownPlan(&fBarUndo, plan, 16);
+        if (n) {
+            IOPCIDevice *rp = NULL;
+            if (IOService *pp = fPCI->getProvider()) rp = OSDynamicCast(IOPCIDevice, pp->getProvider());
+            for (unsigned i = 0; i < n; i++) {
+                switch (plan[i].kind) {
+                    case kStepCmd16:     fPCI->configWrite16((IOByteCount)plan[i].off, (UInt16)plan[i].value); break;
+                    case kStepExt32:     fPCI->extendedConfigWrite32(plan[i].off, plan[i].value); break;
+                    case kStepCfg32:     fPCI->configWrite32((IOByteCount)plan[i].off, plan[i].value); break;
+                    case kStepRootPort32: if (rp) rp->configWrite32((IOByteCount)plan[i].off, plan[i].value); break;
+                }
+            }
+            LOG("shutdown: BAR1/BAR3 and the root port window put back as the firmware left them (%u writes)", n);
+        } else {
+            fPCI->configWrite16(0x04, (UInt16)(fPCI->configRead16(0x04) & ~0x4u));   // bus mastering off, nothing else moved
+            LOG("shutdown: bus mastering off (the BAR layout was never changed)");
+        }
+    }
+    super::systemWillShutdown(specifier);
 }
 
 void NVRM::free()
