@@ -32,12 +32,55 @@ pipe sees that, and for every composited frame does one of two things.
 | copy | `nmhybrid=1` | the pixels that changed since the previous frame are written into the panel's scan-out buffer. A copy of the previous frame, held in ordinary memory, is compared with the new one so the write-combined scan-out receives stores only for changed pixels (a blinking cursor is one store). |
 | import | `nmhybrid=2` | the composited surface's own pages are written into unused entries of the Intel GPU's graphics translation table and the display plane is pointed at them. No pixel is copied. Intel display versions 12 and 13 only (Tiger, Rocket, Alder and Raptor Lake). Every other panel, every login-window frame (10-bit), and any surface that does not fit is copied instead, one frame at a time. |
 
-Panels covered: Intel display versions 12 to 20 through `NMIntelFB` (copy, import on 12 and 13); AMD and Intel through
-`NMXGPU` (copy). The NMXGPU part is in the NMX tree: `xkpi/xnu/nmx_hybrid.h` holds the answer the panel gives the display
+Panels covered: Intel display versions 12 to 20 through `NMIntelFB` (copy, import on 12 and 13); AMD integrated GPUs macOS
+has no driver for through `NMGopFB` (copy, see the next section); AMD and Intel through `NMXGPU` (copy). The NMXGPU part is in the NMX tree: `xkpi/xnu/nmx_hybrid.h` holds the answer the panel gives the display
 pipe, `xkpi/xnu/nmx_fb.cpp` has the three-hunk hook that uses it.
 
 Not part of this path: acceleration on the integrated GPU (apps do not run on it as a Metal device) and switching the
 panel to the NVIDIA GPU (see "Mux switching" below).
+
+## AMD integrated GPUs: NMGopFB
+
+Laptops with a Ryzen processor and an NVIDIA card usually wire the panel to the Radeon in the processor, and macOS has no
+driver for it. `NMGopFB` is the panel provider for them. It does not drive the Radeon at all: the firmware lit the panel and
+left the GPU scanning out a plain 32-bit framebuffer, and `NMGopFB` publishes that framebuffer as head 4 (the same slot
+`NMIntelFB` uses), mapped write-combined, so the accelerator copies each composited frame into it as in level 1 above. It
+writes no display register, no PCI config space and nothing else on the Radeon. If the framebuffer is not 32 bits per pixel,
+has a pitch below width times four, or is not wholly inside one of the Radeon's memory ranges, it refuses, logs why, and the
+firmware framebuffer keeps the screen.
+
+Which driver takes which GPU (`kexts/NMGopFB/nm_gopfb.h`, tested on the host):
+
+| GPU | Driver |
+|---|---|
+| Intel with a display version from 12 to 20 | `NMIntelFB` |
+| AMD integrated: Van Gogh `163F`, Mendocino `1506`, Rembrandt `1681`, Raphael `164E`, Granite Ridge `13C0`, Phoenix and Hawk Point `15BF 15C8 1900`, Strix Point `150E`, Strix Halo `1586` | `NMGopFB` |
+| AMD discrete RDNA 3 and 4 (`7448-745F`, `7470-749F`, `7550-756F`, `7590-75AF`) | `NMGopFB` |
+| Everything macOS drives itself (Polaris, Vega, Navi 1x and 2x, Raven Ridge and older Vega APUs, older Intel) | none: the driver declines |
+| Any GPU while the AMD / Intel test driver (`NMXGPU`) is loaded | none: `NMXGPU` owns the display |
+
+### What a tester on an AMD-iGPU laptop does
+
+1. Install the NVIDIA driver and the optional `NMGopFB.kext` component (it is not in the standard package; it does nothing
+   without the switch).
+2. In the BIOS, give the integrated GPU the primary display if there is a setting for it, and leave a UEFI GOP framebuffer
+   in the firmware (the default).
+3. In OpenCore, turn the `Fix PAT` kernel patch off (the AMD Vanilla `_mtrr_update_action | Fix PAT` entry). With it on,
+   macOS maps write-combined memory as uncached and every row of the copy takes about twenty times longer. (PrimeBridge,
+   the community project this follows, measured 39.7 microseconds per 7680-byte row with the patch on against 2.0 with it
+   off.) Test from a USB stick first.
+4. Switch it on: `sudo tools/hybrid_switch.sh copy` (boot-arg `nmhybrid=1`). Level 2 behaves as level 1 here.
+5. Restart. To see the log: `log show --last boot --predicate 'eventMessage CONTAINS "NMGopFB"'`. A healthy start prints
+   `selected (hybrid level 1)`, `firmware framebuffer WxH pitch P at 0x... (BARn +0x...)`, `provider NMGopFB ...` and
+   `built-in panel published`. `tools/hybrid_verify.sh` then reports `copy proven` when the first frame arrives.
+6. Black panel afterwards: plug a monitor into the NVIDIA card, or remove `nmhybrid` (OpenCore picker, NVRAM reset), or add
+   `-nmgopfboff` for one boot. A GPU the table does not know can be named with `nmgopid=0xVVVVDDDD` (for example
+   `nmgopid=0x10021681`); this is for reports, not for daily use.
+
+Limits, as for any copy path: the single scan-out buffer can tear; the pacing timer is 60 Hz because the Radeon's display
+engine is not read; no backlight slider (the panel is not driven by this kext, the keys still reach the firmware on many
+laptops); the Radeon's resolution is the firmware's. Proven on no laptop yet. The method comes from PrimeBridge (myvoow,
+MIT), which runs on a Radeon 680M laptop with NullMoth 2.6.3.
 
 ## Which GPU an application gets
 
@@ -191,6 +234,9 @@ open row.
 - `tools/test_hybrid_present.c`: the present logic (changed-pixel copy, pitches, 10-bit narrowing, import checks, table
   entries, free-run search, slot cache, flip tracking, state machine). Build line in the file. A `-DLEGACY_COPY` build runs
   the same arms against the old full-frame loop and fails the changed-pixel arms.
+- `tools/test_gopfb.c`: the NMGopFB decisions on the host: which driver takes which GPU, and the firmware framebuffer's
+  geometry (32 bpp, pitch, wholly inside a BAR, no wrap-around). `tools/test_gopfb_wiring.py`: the provider is off by default,
+  never writes the Radeon, and the accelerator counts it as a head only with the switch on.
 - `tools/test_hybrid_wiring.py`: the switch is off by default, bounded waits, guarded table writes. Fails on a tree without
   this change.
 - `tools/test_hybrid_scripts.sh`: the switch script against a stub `nvram`, and the verifier against saved logs

@@ -31,6 +31,7 @@ source, which this audit could not fetch, so the owner's statement that none was
 | GSP firmware | NVIDIA 620.70.06 driver package, unmodified | NVIDIA "License For Customer Use of NVIDIA Software" | `licenses/NVIDIA-firmware-LICENCE.txt`; **see P1** |
 | Video encoders and decoders `vendor/nvenc` | `mickys/nvenc` 0.9.5, commit `1e91845` | MIT | `vendor/nvenc/SOURCE`, `licenses/mickys-nvenc-LICENSE.txt` |
 | Headers `libnvencvt` is built against (fetched, not shipped) | NVIDIA open-gpu-kernel-modules 610.57.04, open-gpu-doc `9fdf5c4` (classes/video), WebKit `CMBaseObjectSPI.h` and `VTVideoDecoderSPI.h` | MIT, MIT, BSD | `vendor/nvenc/SOURCE` |
+| Firmware-framebuffer mapping and checks `NMGopFB` | `PrimeBridge` (myvoow), `BootFramebuffer.cpp` method | MIT | `NOTICE`, `licenses/PrimeBridge-LICENSE.txt` |
 | Panel brightness method `NMIntelFB` | `WhateverXe` (b00t0x), idea and register sequence; register layout from Linux i915/xe headers | BSD-3-Clause, MIT | `NOTICE`, `licenses/WhateverXe-LICENSE.txt` |
 | HD Audio (NMXAudio, separate product) | FreeBSD `snd_hda` | BSD-2-Clause | `NOTICE`, `licenses/FreeBSD-snd_hda-LICENSE.txt` |
 | Zstandard decoder in `dlss/zstd`, used by `nm_unzstd` | facebook/zstd 1.5.6 lib/common and lib/decompress, unmodified | BSD-3-Clause (the GPL alternative is not used) | `NOTICE`, `licenses/zstd-LICENSE.txt` (new) |
