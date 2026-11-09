@@ -26,7 +26,7 @@ firmware = (root / 'licenses/NVIDIA-firmware-LICENCE.txt').read_text(errors='rep
 check('the firmware licence is NVIDIA\'s', 'License For Customer Use of NVIDIA Software' in firmware)
 notice = (root / 'NOTICE').read_text()
 check('NOTICE names the NVIDIA release the driver is built on, not an older one',
-      '615.78.08' in notice and 'r610' not in notice)
+      '620.70.06' in notice and '615.78.08' not in notice and 'r610' not in notice)
 check('NOTICE points at each licence text', all(f in notice for f in ('NVIDIA-firmware-LICENCE.txt',
       'NVIDIA-open-gpu-kernel-modules-COPYING.txt', 'Mesa-license.rst', 'translator/LICENSE')))
 install = (root / 'package/install.sh').read_text()

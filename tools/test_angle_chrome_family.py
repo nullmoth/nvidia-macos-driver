@@ -12,7 +12,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 source = (ROOT / "plugin/NVMTLDevice.m").read_text()
 
 start = source.index("static bool nvmtl_angle_chrome_family(void)")
-end = source.index("static bool nvmtl_process_is_allowed(void)")
+end = source.index("// Another GPU that offers Metal", start)   # the ANGLE rule ends where the hybrid GPU choice begins
 region = source[start:end].replace("__attribute__((constructor)) ", "")
 
 fixture = r"""

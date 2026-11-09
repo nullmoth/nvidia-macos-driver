@@ -51,12 +51,20 @@ check('the hand-over never arms WindowServer', 'NVAccelHeadless' in hc and 'nvac
 # 2.5.3 field logs: a desktop whose only GPU is this card had the name restored at the deadline, CoreDisplay asked the
 # plugin for WindowServer's device, the plugin refused a headless GPU, and WindowServer aborted every ten seconds.
 dl = hc.split('if (!early && me->fHeadlessWaited < me->fHeadlessDeadlineSec)')[1]
-withhold = dl.find('if (!other && strcmp(owner, "NMIntelFB") != 0)')
+withhold = dl.find('if (!other && strcmp(owner, "NMIntelFB") != 0')
 check('at the deadline with no other GPU showing the desktop, the plugin name stays withheld',
       withhold != -1 and withhold < dl.index('setProperty("MetalPluginName"'))
 check('and that path releases the registration lock and returns before the hand-over',
       'IOLockUnlock(me->fRegLock);\n                return;' in dl[withhold:dl.index('setProperty("MetalPluginName"')])
 check('the Intel panel driver case keeps the hand-over', 'strcmp(owner, "NMIntelFB") != 0' in dl)
+# a hybrid laptop (gNmHybrid) whose desktop is shown by the AMD/Intel GPU's own head (NMXGPUFB) or the firmware framebuffer
+# claimed by NMGopFB hands its Metal device over too; without the hybrid flag those owners still keep the name withheld
+cond = dl[withhold:dl.index('{', withhold)]
+check('hybrid: the hand-over is allowed for NMXGPUFB and NMGopFB only when gNmHybrid is set',
+      '!(gNmHybrid && (strcmp(owner, "NMXGPUFB") == 0 || strcmp(owner, "NMGopFB") == 0))' in cond)
+check('hybrid: the exception cannot widen to a plain desktop (it needs !other first and every owner test is a negation)',
+      cond.startswith('if (!other &&') and cond.count('gNmHybrid') == 1)
+check('negative control: without the hybrid flag NMGopFB would hand over', 'strcmp(owner, "NMGopFB") == 0' in cond and 'gNmHybrid &&' in cond)
 # the deadline starts after auto-go's settle delay: NVAccel starts at once, heads only publish once the settle has passed
 check('the deadline is the base wait plus the settle delay NVRM published on the PCI device',
       'nvrmHeadlessDeadlineSec(kHeadlessDeadlineSec, settleMs)' in src and '"nvrm-autogo-settle-ms"' in src)
