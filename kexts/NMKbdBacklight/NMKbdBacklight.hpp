@@ -8,7 +8,7 @@
 #include "kbl_core.h"
 
 /* Publishes the keyboard backlight the way an Intel MacBook does, through the SMC key LKSB, and forwards it to the
- * laptop's own ACPI WMI method. Opt-in: nothing happens unless the boot argument nmkbl=1 is present. */
+ * laptop's own ACPI method. Opt-in: nothing happens unless the boot argument nmkbl=1 is present. */
 class NMKbdBacklight : public IOService {
     OSDeclareDefaultStructors(NMKbdBacklight)
 
@@ -20,13 +20,23 @@ public:
     /* the backend, called from the SMC value */
     bool setLevel(int level);
     bool getLevel(int *level);
-    int maxLevel() const { return KBL_ASUS_MAX_LEVEL; }
+    int maxLevel() const { return maxLevel_; }
 
 private:
-    static bool vsmcNotificationHandler(void *sensors, void *refCon, IOService *vsmc, IONotifier *notifier);
-    bool callAsus(uint32_t method, uint32_t argument, uint32_t *result);
+    enum Backend { None, Asus, IdeaPad, IdeaPadPlain, ThinkPad };
 
-    IOACPIPlatformDevice *wmi {nullptr};
+    static bool vsmcNotificationHandler(void *sensors, void *refCon, IOService *vsmc, IONotifier *notifier);
+    IOACPIPlatformDevice *find(const char *nameMatch, const char *method);
+    bool callAsus(uint32_t method, uint32_t argument, uint32_t *result);
+    bool evalInt(const char *method, uint32_t arg, uint32_t *result, bool noArgument = false);
+    bool probeAsus();
+    bool probeIdeaPad();
+    bool probeThinkPad();
+
+    IOACPIPlatformDevice *dev {nullptr};
+    Backend backend {None};
+    int lenovoType {0};
+    int maxLevel_ {KBL_ASUS_MAX_LEVEL};
     IONotifier *vsmcNotifier {nullptr};
     VirtualSMCAPI::Plugin vsmcPlugin {
         xStringify(PRODUCT_NAME), parseModuleVersion(xStringify(MODULE_VERSION)), VirtualSMCAPI::Version,

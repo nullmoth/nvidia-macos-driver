@@ -31,6 +31,25 @@ int main(void)
     ok = 1;
     for (int v = 0; v <= 0xFFF; v++) { int l = kbl_smc_to_level(v, 3); if (l < 0 || l > 3) ok = 0; }
     arm("no 12-bit value maps outside the levels", ok);
+    /* Lenovo IdeaPad / Legion / LOQ (KBLC) */
+    arm("the keyboard query answers 5 (three levels), 7 (three levels with automatic) or something else (plain)",
+        kbl_lenovo_type(5) == 2 && kbl_lenovo_type(7) == 3 && kbl_lenovo_type(1) == 0 && kbl_lenovo_type(0) == 0);
+    arm("a plain light has two levels, a tri-state one has three", kbl_lenovo_max_level(0) == 1 && kbl_lenovo_max_level(2) == 2 && kbl_lenovo_max_level(3) == 2);
+    arm("the get command is (type << 4) | 2", kbl_lenovo_get_command(2) == 0x22 && kbl_lenovo_get_command(3) == 0x32);
+    arm("the set command is (level << 16) | (type << 4) | 3", kbl_lenovo_set_command(2, 1) == 0x10023 && kbl_lenovo_set_command(3, 2) == 0x20033);
+    arm("a level above the maximum is set as the maximum and a negative one as off", kbl_lenovo_set_command(2, 9) == 0x20023 && kbl_lenovo_set_command(2, -1) == 0x23);
+    arm("the answer holds the level in bits 15..1", kbl_lenovo_level_from_answer(0x2) == 1 && kbl_lenovo_level_from_answer(0x4) == 2 && kbl_lenovo_level_from_answer(0x0) == 0);
+    arm("the automatic value reads as off and an unknown one as an error", kbl_lenovo_level_from_answer(0x6) == 0 && kbl_lenovo_level_from_answer(0x20) == -1);
+    arm("a plain light: HALS bit 4 is support, bit 5 is on, SALS 8 is on and 9 is off",
+        kbl_lenovo_plain_supported(0x10) && !kbl_lenovo_plain_supported(0x20) && kbl_lenovo_plain_level(0x20) == 1 && kbl_lenovo_plain_level(0x10) == 0
+        && kbl_lenovo_plain_set_argument(1) == 8 && kbl_lenovo_plain_set_argument(0) == 9);
+    /* Lenovo ThinkPad (MLCG / MLCS) */
+    arm("a ThinkPad has the light when MLCG bit 9 is set, and the level is the low two bits",
+        kbl_thinkpad_present(0x00000202) && kbl_thinkpad_level(0x00000202) == 2 && !kbl_thinkpad_present(0x00000002) && !kbl_thinkpad_present(0xFFFFFFFFu));
+    arm("a ThinkPad level above two is clamped", kbl_thinkpad_level(0x203) == 2);
+    /* coexistence */
+    arm("the plugin stands aside only when SMCLightSensor is loaded with a working _ALI and it was not forced",
+        kbl_should_decline(1, 1, 0) && !kbl_should_decline(1, 0, 0) && !kbl_should_decline(0, 1, 0) && !kbl_should_decline(1, 1, 1));
     arm("the method ids are the ASCII of their names", KBL_ASUS_METHOD_DSTS == ('D' | 'S' << 8 | 'T' << 16 | 'S' << 24)
                                                     && KBL_ASUS_METHOD_DEVS == ('D' | 'E' << 8 | 'V' << 16 | 'S' << 24));
     return fails ? 1 : 0;
