@@ -45,7 +45,7 @@ arm("a surface is judged flat only when its system-memory copy is the newest", "
 arm("level 3 uses the panel driver's own buffers only for frames import did not take", accel.find("gNmHybrid >= NMH_IMPORT && nvAccelHybridImport") < accel.find("gNmHybrid >= NMH_OWNED && !q.phys"))
 arm("a failed owned present sends the next copy home first", "gHyOnSlot[head] = true;     // the plane may be on a buffer" in accel)
 arm("resume is off unless nmhybridresume=1", "nmr_enabled(present, v)" in ifb and "fResumeOn = fResumeCall != nullptr;" in ifb)
-arm("resume replays only for display versions 12 and 13 on pipe A", "!nmh_gen_ok(fVer) || fPipe != 0" in ifb)
+arm("resume replays only for display versions 12 and 13, pipes A to D", "!nmh_gen_ok(fVer) || fPipe < 0 || fPipe > 3" in ifb)
 arm("the wake work runs off the power-management thread", "thread_call_enter(fResumeCall)" in ifb)
 arm("the firmware surface's table entries are restored before the replay", ifb.find("fGsm[fFwPteFirst + i] = fFwPte[i]") < ifb.find("nmr_resume(&ops, fSnap, fVer)"))
 arm("the panel driver lists the BSD KPI it now needs", "com.apple.kpi.bsd" in rd("kexts/NMIntelFB/Info.plist"))

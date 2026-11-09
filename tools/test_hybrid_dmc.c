@@ -1,0 +1,89 @@
+/* The Intel display firmware package reader (kexts/NVRM/accel/nm_hybrid_dmc.h), on the host.
+ *   cc -O1 -Wall -I../kexts/NVRM/accel test_hybrid_dmc.c -o /tmp/t && /tmp/t                     synthetic packages
+ *   NMH_DMC_DIR=<folder with the fetched files> /tmp/t                                          also the real ones */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "nm_hybrid_dmc.h"
+
+static int fails;
+#define ARM(name, cond) do { if (cond) printf("ok   %s\n", name); else { printf("FAIL %s\n", name); fails++; } } while (0)
+static void put32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
+
+/* a package with a main program (header v3, 'words' program words) and one pipe program, package header version 2 */
+static uint32_t build(uint8_t *f, uint32_t words, uint32_t main_addr, uint32_t mmio_addr)
+{
+    const uint32_t pkg = NMD_PKG_BYTES + 32 * NMD_FWINFO_BYTES, h3 = NMD_HDR_V3_BYTES;
+    uint32_t off = NMD_CSS_BYTES + pkg, i, total;
+    memset(f, 0, 1 << 20);
+    put32(f + 4, NMD_CSS_BYTES / 4); put32(f + 0x50, (2u << 16) | 12u);
+    f[NMD_CSS_BYTES] = (uint8_t)(pkg / 4); f[NMD_CSS_BYTES + 1] = 2; put32(f + NMD_CSS_BYTES + 12, 2);
+    /* entries: main at offset 0, pipe A (id 1) after it */
+    { uint8_t *e = f + NMD_CSS_BYTES + NMD_PKG_BYTES; e[1] = 0; e[2] = '*'; e[3] = '*'; put32(e + 4, 0);
+      e += NMD_FWINFO_BYTES; e[1] = 1; e[2] = '*'; e[3] = '*'; put32(e + 4, (h3 + words * 4) / 4); }
+    for (int part = 0; part < 2; part++) {
+        uint8_t *h = f + off + (part ? h3 + words * 4 : 0);
+        put32(h, 0x40403E3Eu); h[4] = (uint8_t)(h3 / 4); h[5] = 3; put32(h + 12, words);
+        put32(h + 20, part ? 0x92000u : main_addr);
+        put32(h + 92, 2); put32(h + 96, part ? 0x92004u : mmio_addr); put32(h + 96 + 4, part ? 0x92100u : 0x8F010u);
+        put32(h + 176, 0xAA55AA55u); put32(h + 180, 0x12345678u);
+        for (i = 0; i < words; i++) put32(h + h3 + 4 * i, 0xC0000000u + (part << 16) + i);
+    }
+    total = off + 2 * (h3 + words * 4);
+    return total;
+}
+
+int main(void)
+{
+    static uint8_t f[1 << 20]; struct nmd_fw fw; uint32_t n;
+    n = build(f, 100, 0x8F000u, 0x8F004u);
+    ARM("a well-formed package parses", nmd_parse(f, n, '*', '*', 0x20000, &fw) == NMD_OK);
+    ARM("the main program is found with its size and address", fw.part[0].present && fw.part[0].words == 100 && fw.part[0].start_mmio == 0x8F000u);
+    ARM("the pipe program is found too", fw.part[1].present && fw.part[1].words == 100 && fw.part[1].start_mmio == 0x92000u);
+    ARM("the CSS version is read", fw.version == ((2u << 16) | 12u));
+    { static struct nmd_write w[512]; uint32_t c = nmd_plan(&fw.part[0], w, 512);
+      ARM("the load plan is the program words then the register list", c == 102 && w[0].reg == 0x8F000u && w[0].val == 0xC0000000u && w[99].reg == 0x8F000u + 4 * 99 && w[100].reg == 0x8F004u && w[100].val == 0xAA55AA55u);
+      ARM("a plan that does not fit the buffer is refused", nmd_plan(&fw.part[0], w, 50) == 0); }
+    ARM("a file cut short is refused at every length", ({ int ok = 1; for (uint32_t cut = 0; cut < n; cut += 97) { if (nmd_parse(f, cut, '*', '*', 0x20000, &fw) == NMD_OK) ok = 0; } ok; }));
+    ARM("a program larger than the generation allows is refused", nmd_parse(f, n, '*', '*', 99, &fw) == NMD_E_SIZE);
+    n = build(f, 100, 0x8F000u, 0x7000u);
+    ARM("a register the firmware asks to write outside the DMC blocks is refused", nmd_parse(f, n, '*', '*', 0x20000, &fw) == NMD_E_RANGE);
+    n = build(f, 100, 0x8F000u, 0x8F004u); f[NMD_CSS_BYTES + 1] = 9;
+    ARM("an unknown package version is refused", nmd_parse(f, n, '*', '*', 0x20000, &fw) == NMD_E_PKG);
+    n = build(f, 100, 0x8F000u, 0x8F004u); put32(f + 4, 3);
+    ARM("a wrong CSS length is refused", nmd_parse(f, n, '*', '*', 0x20000, &fw) == NMD_E_CSS);
+    n = build(f, 100, 0x8F000u, 0x8F004u); put32(f + NMD_CSS_BYTES + NMD_PKG_BYTES + 4, 0x3FFFFFFFu);
+    ARM("an entry offset past the end of the file is refused", nmd_parse(f, n, '*', '*', 0x20000, &fw) == NMD_E_SHORT);
+    n = build(f, 100, 0x8F000u, 0x8F004u); { uint32_t off = NMD_CSS_BYTES + NMD_PKG_BYTES + 32 * NMD_FWINFO_BYTES; put32(f + off, 0); }
+    ARM("a bad DMC signature is refused", nmd_parse(f, n, '*', '*', 0x20000, &fw) == NMD_E_HDR);
+    n = build(f, 100, 0x8F000u, 0x8F004u); { uint32_t off = NMD_CSS_BYTES + NMD_PKG_BYTES + 32 * NMD_FWINFO_BYTES; put32(f + off + 92, 21); }
+    ARM("more register writes than the format allows are refused", nmd_parse(f, n, '*', '*', 0x20000, &fw) == NMD_E_HDR);
+    n = build(f, 100, 0x8F000u, 0x8F004u); f[NMD_CSS_BYTES + NMD_PKG_BYTES + 2] = 'B'; f[NMD_CSS_BYTES + NMD_PKG_BYTES + 3] = '0';
+    ARM("an entry for another stepping is not taken as the main program", nmd_parse(f, n, 'A', '0', 0x20000, &fw) == NMD_E_NO_MAIN);
+    ARM("the matching stepping is taken", nmd_parse(f, n, 'B', '0', 0x20000, &fw) == NMD_OK);
+    srand(5);
+    { int bad = 0;
+      for (int t = 0; t < 4000; t++) {
+          n = build(f, 40, 0x8F000u, 0x8F004u);
+          for (int k = 0; k < 6; k++) f[rand() % n] = (uint8_t)rand();
+          (void)nmd_parse(f, n, '*', '*', 0x20000, &fw);          /* must not read outside f[0..n): run under the sanitiser to prove */
+          if (fw.part[0].present && (fw.part[0].payload < f || fw.part[0].payload + fw.part[0].words * 4 > f + n)) bad++;
+      }
+      ARM("4000 corrupted packages: a program that parses always lies inside the file", bad == 0); }
+
+    /* the real files, when they are at hand */
+    { const char *dir = getenv("NMH_DMC_DIR");
+      static const struct { const char *name; uint32_t words_max; } real[] = { {"tgl_dmc_ver2_12.bin", 0x6000 / 4}, {"adlp_dmc_ver2_16.bin", 0x20000 / 4}, {"mtl_dmc.bin", 0x7000 / 4} };
+      for (unsigned r = 0; dir && r < 3; r++) {
+          char path[512]; snprintf(path, sizeof path, "%s/%s", dir, real[r].name);
+          FILE *fp = fopen(path, "rb"); static uint8_t big[1 << 20]; size_t got = fp ? fread(big, 1, sizeof big, fp) : 0; if (fp) fclose(fp);
+          char nm[160];
+          snprintf(nm, sizeof nm, "real %s parses (main program %s)", real[r].name, got ? "found" : "FILE MISSING");
+          ARM(nm, got && nmd_parse(big, (uint32_t)got, '*', '*', real[r].words_max, &fw) == NMD_OK && fw.part[0].words > 100 && fw.part[0].words <= real[r].words_max);
+          if (got) { static struct nmd_write w[1 << 16]; uint32_t c = nmd_plan(&fw.part[0], w, 1 << 16);
+                     snprintf(nm, sizeof nm, "real %s: %u words at 0x%x, %u register writes, plan of %u writes", real[r].name, fw.part[0].words, fw.part[0].start_mmio, fw.part[0].mmio_count, c);
+                     ARM(nm, c == fw.part[0].words + fw.part[0].mmio_count); }
+      } }
+    printf("%d failed\n", fails);
+    return fails != 0;
+}
