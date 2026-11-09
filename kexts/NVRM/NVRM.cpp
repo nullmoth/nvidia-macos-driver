@@ -1883,6 +1883,7 @@ void NVRM::shutdownQuiesce(void *p0, wait_result_t)
     thread_terminate(current_thread());
 }
 
+extern "C" { void nvkms_xnu_suspend(NvU32 gpuId); }
 // The full path: display off, user channels stopped, then the RM's own adapter shutdown (what stop() runs after the
 // clients have gone). Reached only through nvrmShutdownMode.
 void NVRM::shutdownFull(void *p0, wait_result_t)
