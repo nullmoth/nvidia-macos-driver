@@ -9,6 +9,7 @@
 #include "nvrm_utilization.h"
 #include "nvrm_bar_limits.h"
 #include "nvrm_startup_policy.h"
+#include "nvrm_bar_recover.h"
 
 extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <IOKit/IOService.h>
@@ -1589,6 +1590,57 @@ void NVRM::readBARs()
         nv->bars[curNvBar].cpu_address = phys;
         nv->bars[curNvBar].size        = size;
         tn += snprintf(table + tn, sizeof table - tn, "bar%u@0x%02x:0x%llx+0x%llx ", curNvBar, off, phys, size);
+    }
+    // A BIOS without Above 4G Decoding or Resizable BAR can leave the device memory list empty while the BARs are
+    // programmed ("BARS (empty)", os_map_kernel_space start=0x0, RM refuses the device). Take each missing BAR from
+    // assigned-addresses, then from the BAR register itself, and publish the recovered apertures so the framebuffer
+    // and accelerator see the same list as RM.
+    {
+        static const struct { unsigned slot; UInt8 off; } kSlots[] = {
+            { NV_GPU_BAR_INDEX_REGS, 0x10 }, { NV_GPU_BAR_INDEX_FB, 0x14 }, { NV_GPU_BAR_INDEX_IMEM, 0x1c } };
+        OSData *aa = OSDynamicCast(OSData, fPCI->getProperty("assigned-addresses"));
+        const UInt32 *cells = aa ? (const UInt32 *)aa->getBytesNoCopy() : NULL;
+        const unsigned nCells = aa ? aa->getLength() / 4 : 0;
+        IODeviceMemory *made[3] = { NULL, NULL, NULL }; unsigned nMade = 0;
+        for (unsigned k = 0; k < 3; k++) {
+            const unsigned slot = kSlots[k].slot; const UInt8 off = kSlots[k].off;
+            if (nv->bars[slot].size) continue;
+            const UInt32 lo = fPCI->configRead32(off);
+            if (lo & 1) continue;                                   // an I/O BAR, not a memory aperture
+            const bool is64 = ((lo >> 1) & 3) == 2;
+            UInt64 live = lo & ~0xFULL;
+            if (is64) live |= (UInt64)fPCI->configRead32(off + 4) << 32;
+            if (!live) { kprintf("NVRM-xnu: BAR @0x%02x has no address in config space - nothing to recover\n", off); continue; }
+            UInt64 a = 0, sz = 0; const char *src = "assigned-addresses";
+            if (!nvrmAssignedLookup(cells, nCells, off, &a, &sz) || a != live) {
+                // Size it the way firmware does: all ones with memory decode off, then put everything back.
+                src = "config space";
+                const UInt16 cmd = fPCI->configRead16(0x04);
+                const UInt32 hiOld = is64 ? fPCI->configRead32(off + 4) : 0;
+                fPCI->configWrite16(0x04, cmd & ~0x3);
+                fPCI->configWrite32(off, 0xffffffffU); if (is64) fPCI->configWrite32(off + 4, 0xffffffffU);
+                const UInt32 loP = fPCI->configRead32(off), hiP = is64 ? fPCI->configRead32(off + 4) : 0;
+                fPCI->configWrite32(off, lo); if (is64) fPCI->configWrite32(off + 4, hiOld);
+                fPCI->configWrite16(0x04, cmd);
+                a = live; sz = nvrmBarSizeFromProbe(loP, hiP, is64);
+            }
+            if (!sz) { kprintf("NVRM-xnu: BAR @0x%02x at 0x%llx: size unknown - not recovered\n", off, a); continue; }
+            nv->bars[slot].offset = off; nv->bars[slot].cpu_address = a; nv->bars[slot].size = sz;
+            tn += snprintf(table + tn, sizeof table - tn, "bar%u@0x%02x:0x%llx+0x%llx(%s) ", slot, off, a, sz, src);
+            kprintf("NVRM-xnu: BAR @0x%02x recovered from %s: 0x%llx+0x%llx\n", off, src, a, sz);
+            if (nMade < 3) made[nMade++] = IODeviceMemory::withRange(a, sz);
+        }
+        if (nMade) {
+            OSArray *cur = fPCI->getDeviceMemory();
+            OSArray *arr = OSArray::withCapacity((cur ? cur->getCount() : 0) + nMade);
+            bool okArr = arr != NULL;
+            for (unsigned i = 0; okArr && cur && i < cur->getCount(); i++) okArr = arr->setObject(cur->getObject(i));
+            for (unsigned i = 0; i < nMade; i++) { if (okArr && made[i]) okArr = arr->setObject(made[i]); else if (!made[i]) okArr = false; }
+            if (okArr) { fPCI->setDeviceMemory(arr); LOG("bar recovery: %u aperture%s added to the device memory list", nMade, nMade == 1 ? "" : "s"); }
+            else LOG("bar recovery: could not build the aperture list - RM still has the recovered addresses");
+            for (unsigned i = 0; i < nMade; i++) OSSafeReleaseNULL(made[i]);
+            OSSafeReleaseNULL(arr);
+        }
     }
     if (!nv->bars[NV_GPU_BAR_INDEX_FB].size)
         LOG("BAR1 (the VRAM window) has no address from macOS: the GPU cannot start. Enable \"Above 4G Decoding\" in the BIOS, "
