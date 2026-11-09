@@ -50,6 +50,14 @@ static inline unsigned long long nvrmBar1ShrinkTarget(unsigned long long current
     return ((supportedMask >> 13) & 1) ? k8GB : 0;
 }
 
+// auto-go holds the registry until the display stack is armed so WindowServer does not start on a half-armed GPU. With
+// no head published and no display on any connector, WindowServer runs on another GPU, so the hold is released before
+// arming and the arming still runs, which keeps a display plugged in later working. Any head published: arm, then release.
+static inline bool nvrmReleaseBeforeArming(unsigned headMask, bool noDisplayAnywhere)
+{
+    return headMask == 0 && noDisplayAnywhere;
+}
+
 // With no 64-bit memory window in the host bridge's ACPI _CRS, BAR1 is placed from a fixed fallback range only when
 // something above 4 GB is known to be routed. A BAR1 the firmware left below 4 GB on a host that decodes nothing above
 // 4 GB (Above 4G Decoding off) is fine where it is, and moving it made a board start; but a card whose BAR1 must grow
