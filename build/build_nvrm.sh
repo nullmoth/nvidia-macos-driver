@@ -21,7 +21,7 @@ KMSLIB=${KMS_ARCHIVE:-$KMS/_out/Darwin_x86_64/libnvkms.a}
 [ -f "$KMSLIB" ] || { echo "STOP: no NVKMS archive at $KMSLIB"; exit 1; }
 # Every C++ source the kext needs, listed; a new .cpp that is not named here stops the build instead of being left out.
 CXX_SOURCES=( NVRM.cpp nv_xnu_power.cpp nv_xnu_stubs.cpp nvkms_shaders.cpp nvrm_fbinfo.cpp nvrm_gpuva.cpp
-              nvrm_surfshare.cpp os-nvkms-xnu.cpp os-xnu.cpp os-xnu2.cpp )
+              nvrm_power.cpp nvrm_surfshare.cpp os-nvkms-xnu.cpp os-xnu.cpp os-xnu2.cpp )
 # Sources that later trees added and earlier ones do not have (so an older tag can be rebuilt with this script): nv_rtd3.cpp
 # (D3cold monitor) and nvrm_ddc.cpp (DDC/CI). The check below keeps the list honest either way.
 for s in nv_rtd3.cpp nvrm_ddc.cpp; do [ -f "$SRC/$s" ] && CXX_SOURCES+=( "$s" ); done
@@ -60,6 +60,9 @@ OBJS+=("$OUT/nvrm_kapi_fields.o")
 # nvrm_pageoff.c includes RM-internal headers: compiled with the RM's own command line for osapi.c (rmcc.py)
 OGKM="$OGKM" python3 -B "$HERE/../kexts/NVRM/rmcc.py" "$SRC/nvrm_pageoff.c" "$OUT/nvrm_pageoff.o" 2>"$OUT/pageoff.err" || { echo "STOP: nvrm_pageoff.c did not compile"; tail "$OUT/pageoff.err"; exit 1; }
 OBJS+=("$OUT/nvrm_pageoff.o")
+# nvrm_pmgr.c (the notebook power-budget control) needs the GPU object too
+OGKM="$OGKM" python3 -B "$HERE/../kexts/NVRM/rmcc.py" "$SRC/nvrm_pmgr.c" "$OUT/nvrm_pmgr.o" 2>"$OUT/pmgr.err" || { echo "STOP: nvrm_pmgr.c did not compile"; tail "$OUT/pmgr.err"; exit 1; }
+OBJS+=("$OUT/nvrm_pmgr.o")
 xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "${OBJS[@]}" \
   "$NV/_out/Darwin_x86_64/libnvkernel.a" "$KMSLIB" -o "$OUT/NVRM.kext/Contents/MacOS/NVRM" 2>"$OUT/link.err" || { echo "STOP: link failed"; grep -v "built for newer" "$OUT/link.err" | head; exit 1; }
 cp "$SRC/Info.plist" "$OUT/NVRM.kext/Contents/Info.plist"
