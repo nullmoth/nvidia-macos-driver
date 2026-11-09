@@ -6596,7 +6596,11 @@ mod tests {
 
     fn assert_owned_invalid(module: &Module, expected: &str) {
         match owned_module_failure(module) {
-            Some(OwnedModuleFailure::Invalid(error)) => assert_eq!(error, expected),
+            // the message may carry a bracketed diagnostic after the contract it names
+            Some(OwnedModuleFailure::Invalid(error)) => assert!(
+                error == expected || error.starts_with(&format!("{expected} [")),
+                "{error}"
+            ),
             Some(OwnedModuleFailure::CfgConstruction(error)) => {
                 panic!("invalid value contract was misclassified as CFG construction: {error}")
             }
