@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key><string>com.nullmoth.nvmtl-boost</string>
-    <key>ProgramArguments</key><array><string>/usr/local/libexec/nullmoth/nvmtl-boost</string></array>
+    <key>ProgramArguments</key><array><string>/Library/NullMoth/boost/nvmtl-boost</string></array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
 </dict>

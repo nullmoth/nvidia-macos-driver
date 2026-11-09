@@ -693,6 +693,20 @@ if [ "${NULLMOTH_SAFARI_GPU_COPY:-0}" = 1 ]; then
   fi
 fi
 
+# Optional, off by default: the GPU boost daemon (a run-time switch for the system-wide boost request). Run only from the
+# checked root-owned copy; a failure never undoes the driver install.
+if [ "${NULLMOTH_GPU_BOOST:-0}" = 1 ]; then
+  if [ -f "$HERE/boost_daemon.sh" ] && grep -qE '[ *]boost_daemon\.sh$' "$HERE/SHA256SUMS" 2>/dev/null \
+     && grep -qE '[ *]Library/NullMoth/boost/nvmtl-boost$' "$HERE/SHA256SUMS" 2>/dev/null; then
+    step "GPU boost daemon"
+    /bin/bash "$HERE/boost_daemon.sh" install "$HERE" || echo "   NOTE: the boost daemon was not installed; the driver itself is."
+  else
+    echo "   NOTE: this package's SHA256SUMS does not cover the boost daemon; it was skipped."
+  fi
+else
+  echo "   The GPU boost switch is optional: install with sudo env NULLMOTH_GPU_BOOST=1 ./install.sh (turn it on or off later from the Mac app)."
+fi
+
 echo; echo "Done. Reboot now: sudo shutdown -r now"
 [ -z "$AUDIO_NOTE" ] || echo "Audio: $AUDIO_NOTE."
 if [ "$ALLOWED" = "$(echo $KEXTS | wc -w | tr -d ' ')" ]; then

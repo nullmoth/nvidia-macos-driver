@@ -22,6 +22,7 @@
 #include "nvmtl_vk.h"
 #include "nvmtl_dlss.h"
 #include "nvmtl_tex_upload.h"
+#include "nvmtl_fetch_copy.h"
 #include "nvmtl_cmd_refusal.h"
 #include "nvmtl_loss.h"
 #include "nvmtl_multiview.h"
@@ -4635,6 +4636,179 @@ static VkDescriptorSet nvmtl_fetch_set_make(nvk_cmdbuf *c, uint32_t mask)
     return set;
 }
 
+
+/* Framebuffer fetch emulated by copies (nvmtl_fetch_copy.h). On with fetch off and either NVMTL_FETCH_COPY=1 in the
+   environment or boot-arg nvfetchcopy=1 in WindowServer (a boot-arg, so booting without it is the rollback). Only a
+   pipeline whose fragment shader reads [[color(n)]] is changed; every other pipeline and pass stays as it was. */
+static int nvmtl_fetch_copy_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_FETCH_COPY");
+        on = e && e[0] == '1';
+        if (!on && getprogname() && !strcmp(getprogname(), "WindowServer")) {
+            char ba[1024] = { 0 }; size_t n = sizeof ba - 1;
+            if (sysctlbyname("kern.bootargs", ba, &n, NULL, 0) == 0 && strstr(ba, "nvfetchcopy=1")) on = 1;
+        }
+        if (on) nvlog("vk: framebuffer fetch emulated by copies");
+    }
+    return on && !nvmtl_fbfetch_on();
+}
+static VkDescriptorSetLayout g_fcopyLayout;
+static VkDescriptorPool g_fcopyPools[64]; static unsigned g_nfcopyPools;
+static int nvmtl_fcopy_layout_locked(void)
+{
+    if (g_fcopyLayout) return 0;
+    VkDescriptorSetLayoutBinding fb[NVMTL_NCOL];
+    for (uint32_t i = 0; i < NVMTL_NCOL; i++)
+        fb[i] = (VkDescriptorSetLayoutBinding){ NVMTL_FETCH_BINDING + i, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+    VkDescriptorSetLayoutCreateInfo li = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, NVMTL_NCOL, fb };
+    if (pvkCreateDescriptorSetLayout(g_dev, &li, NULL, &g_fcopyLayout) != VK_SUCCESS) { g_fcopyLayout = VK_NULL_HANDLE; return -1; }
+    if (!g_emptyLayout) {
+        VkDescriptorSetLayoutCreateInfo eli = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL };
+        if (pvkCreateDescriptorSetLayout(g_dev, &eli, NULL, &g_emptyLayout) != VK_SUCCESS) { g_emptyLayout = VK_NULL_HANDLE; return -1; }
+    }
+    return 0;
+}
+/* Copy images are pooled by format and size; a command buffer holds the ones it used until it retires, so a copy is
+   never overwritten while a draw that reads it may still run. */
+typedef struct { nvk_image img; uint32_t fmt, bpp, w, h; int busy; } nvmtl_fcopy_entry;
+static nvmtl_fcopy_entry *g_fcopy[64]; static unsigned g_nfcopy;
+static pthread_mutex_t g_fcopy_lock = PTHREAD_MUTEX_INITIALIZER;
+static nvmtl_fcopy_entry *nvmtl_fcopy_get(uint32_t fmt, uint32_t bpp, uint32_t w, uint32_t h)
+{
+    nvmtl_fcopy_entry *e = NULL;
+    pthread_mutex_lock(&g_fcopy_lock);
+    for (unsigned k = 0; k < g_nfcopy && !e; k++)
+        if (!g_fcopy[k]->busy && g_fcopy[k]->fmt == fmt && g_fcopy[k]->w == w && g_fcopy[k]->h == h) e = g_fcopy[k];
+    if (e) e->busy = 1;
+    pthread_mutex_unlock(&g_fcopy_lock);
+    if (e) return e;
+    e = (nvmtl_fcopy_entry *)calloc(1, sizeof *e);
+    if (!e) return NULL;
+    if (nvmtl_vk_image_create_typed(w, h, fmt, bpp, 0, 1, 0, 2, 1, &e->img)) { free(e); return NULL; }
+    e->fmt = fmt; e->bpp = bpp; e->w = w; e->h = h; e->busy = 1;
+    pthread_mutex_lock(&g_fcopy_lock);
+    if (g_nfcopy < 64) g_fcopy[g_nfcopy++] = e;
+    else {   /* pool full: the first idle entry of another shape makes room */
+        unsigned k = 0; while (k < g_nfcopy && g_fcopy[k]->busy) k++;
+        if (k < g_nfcopy) { nvmtl_fcopy_entry *old = g_fcopy[k]; g_fcopy[k] = e; pthread_mutex_unlock(&g_fcopy_lock);
+                            nvmtl_vk_image_destroy(&old->img); free(old); pthread_mutex_lock(&g_fcopy_lock); }
+    }
+    pthread_mutex_unlock(&g_fcopy_lock);
+    { static int said; if (said++ < 8) nvlog("vk: fetch copy image %ux%u format %u made (%u in the pool)", w, h, fmt, g_nfcopy); }
+    return e;
+}
+static void nvmtl_fcopy_release(nvk_cmdbuf *c)
+{
+    if (!c->nfcp) return;
+    pthread_mutex_lock(&g_fcopy_lock);
+    for (unsigned i = 0; i < c->nfcp; i++) ((nvmtl_fcopy_entry *)c->fcp[i])->busy = 0;
+    pthread_mutex_unlock(&g_fcopy_lock);
+    c->nfcp = 0;
+}
+/* After the pass has ended (colour attachments in TRANSFER_SRC_OPTIMAL, the pass's final layout): copy each attachment in
+   mask to a pooled image and leave the copy in SHADER_READ_ONLY_OPTIMAL and the attachment as the resumed pass expects. */
+int nvmtl_vk_fetch_copy(nvk_cmdbuf *c, const nvk_pass *ps, uint32_t mask)
+{
+    if (!c || !ps || c->in_rp) return -1;
+    for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
+        c->fcopyview[i] = NULL;
+        if (!(mask & (1u << i))) continue;
+        nvk_image *src = ps->col[i];
+        if (src && src->samples > 1) return -1;
+        const int stand_in = !src || !ps->colw[i] || !ps->colh[i];   /* the shader reads a colour this pass does not have */
+        nvk_image *ref = src ? src : ps->col[0];
+        const uint32_t fmt = stand_in ? (ref ? (ps->colfmt[0] ? ps->colfmt[0] : ref->fmt) : (uint32_t)VK_FORMAT_B8G8R8A8_UNORM)
+                                      : (ps->colfmt[i] ? ps->colfmt[i] : src->fmt);
+        nvmtl_fcopy_entry *e = nvmtl_fcopy_get(fmt, ref && ref->bpp ? ref->bpp : 4, stand_in ? 1u : ps->colw[i], stand_in ? 1u : ps->colh[i]);
+        if (!e) return -1;
+        if (c->nfcp == c->capfcp) {
+            unsigned cap = c->capfcp ? c->capfcp * 2 : 8;
+            void **g = (void **)realloc(c->fcp, cap * sizeof *g);
+            if (!g) { pthread_mutex_lock(&g_fcopy_lock); e->busy = 0; pthread_mutex_unlock(&g_fcopy_lock); return -1; }
+            c->fcp = g; c->capfcp = cap;
+        }
+        c->fcp[c->nfcp++] = e;
+        VkImageSubresourceRange dr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        if (stand_in) {   /* Metal leaves such a read undefined: a cleared 1x1 image, not a skipped draw */
+            VkImageMemoryBarrier b0 = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)e->img.img, dr };
+            pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b0);
+            VkClearColorValue zero; memset(&zero, 0, sizeof zero);
+            pvkCmdClearColorImage(c->cb, (VkImage)e->img.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &dr);
+            VkImageMemoryBarrier b1 = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)e->img.img, dr };
+            pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &b1);
+            e->img.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            c->fcopyview[i] = e->img.view;
+            continue;
+        }
+        VkImageSubresourceRange sr = { VK_IMAGE_ASPECT_COLOR_BIT, ps->col_level[i], 1, ps->col_layer[i], 1 };
+        VkImageMemoryBarrier pre[2] = {
+            { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)src->img, sr },
+            { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+              VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)e->img.img, dr } };
+        pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, pre);
+        VkImageCopy rg = { { VK_IMAGE_ASPECT_COLOR_BIT, ps->col_level[i], ps->col_layer[i], 1 }, { 0, 0, 0 },
+                           { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { ps->colw[i], ps->colh[i], 1 } };
+        pvkCmdCopyImage(c->cb, (VkImage)src->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, (VkImage)e->img.img,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &rg);
+        VkImageMemoryBarrier post[2] = {
+            { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_READ_BIT,
+              VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)src->img, sr },
+            { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)e->img.img, dr } };
+        pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 2, post);
+        e->img.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        c->fcopyview[i] = e->img.view;
+    }
+    return 0;
+}
+static VkDescriptorSet nvmtl_fcopy_set(nvk_cmdbuf *c, uint32_t mask)
+{
+    VkDescriptorSet set = VK_NULL_HANDLE; VkDescriptorPool pool = VK_NULL_HANDLE;
+    pthread_mutex_lock(&g_desc_lock);
+    VkResult r = VK_ERROR_OUT_OF_POOL_MEMORY;
+    for (unsigned k = g_nfcopyPools; k-- > 0 && r != VK_SUCCESS;) {
+        VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, g_fcopyPools[k], 1, &g_fcopyLayout };
+        pool = g_fcopyPools[k]; r = pvkAllocateDescriptorSets(g_dev, &ai, &set);
+    }
+    if (r != VK_SUCCESS && g_nfcopyPools < 64) {
+        VkDescriptorPoolSize psz = { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NVMTL_NCOL * 1024 };
+        VkDescriptorPoolCreateInfo pci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 1024, 1, &psz };
+        if (pvkCreateDescriptorPool(g_dev, &pci, NULL, &g_fcopyPools[g_nfcopyPools]) == VK_SUCCESS) {
+            pool = g_fcopyPools[g_nfcopyPools++];
+            VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, pool, 1, &g_fcopyLayout };
+            r = pvkAllocateDescriptorSets(g_dev, &ai, &set);
+        }
+    }
+    pthread_mutex_unlock(&g_desc_lock);
+    if (r != VK_SUCCESS) return VK_NULL_HANDLE;
+    if (c->nsets == c->capsets) {
+        unsigned cap = c->capsets ? c->capsets * 2 : 64;
+        nvk_setref *grown = (nvk_setref *)realloc(c->sets, cap * sizeof *grown);
+        if (!grown) { pthread_mutex_lock(&g_desc_lock); pvkFreeDescriptorSets(g_dev, pool, 1, &set); pthread_mutex_unlock(&g_desc_lock); return VK_NULL_HANDLE; }
+        c->sets = grown; c->capsets = cap;
+    }
+    c->sets[c->nsets++] = (nvk_setref){ pool, set };
+    VkDescriptorImageInfo ii[NVMTL_NCOL]; VkWriteDescriptorSet w[NVMTL_NCOL]; uint32_t nw = 0;
+    for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
+        if (!(mask & (1u << i))) continue;
+        if (!c->fcopyview[i]) return VK_NULL_HANDLE;
+        ii[nw] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, (VkImageView)c->fcopyview[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        w[nw] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, NVMTL_FETCH_BINDING + i, 0, 1,
+                                        VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ii[nw], NULL, NULL };
+        nw++;
+    }
+    if (nw) pvkUpdateDescriptorSets(g_dev, nw, w, 0, NULL);
+    return set;
+}
+
 /* With framebuffer fetch off (the WindowServer default) a fragment shader that reads [[color(n)]] still has the input
  * attachment descriptors at set 3, and nothing was bound there: the read was undefined. Core Animation's uber fragment
  * shader reads color(0..2) at its entry, so every compositor pass that uses it depends on that read. One set, made once,
@@ -4708,6 +4882,12 @@ void nvmtl_vk_cmd_bind_set(nvk_cmdbuf *c, nvk_pipeline *p)
     c->semu_layout = p->stencil_emu ? p->layout : NULL;
     c->fetch_draw = 0;
     if (p->skip_draws) { c->nobind = 1; return; }
+    if (p->fetch_copy && c->in_rp) {
+        /* the encoder copied the attachments just before this draw (nvmtlFetchCopy) */
+        VkDescriptorSet cs = nvmtl_fcopy_set(c, p->fetch_copy);
+        if (!cs) { static int said; if (said++ < 4) nvlog("vk: fetch copy set could not be made (mask 0x%x) - this draw is skipped", p->fetch_copy); c->nobind = 1; return; }
+        pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipelineLayout)p->layout, NVMTL_FETCH_SET, 1, &cs, 0, NULL);
+    }
     if (p->fetch_zero) {
         VkDescriptorSet zs = nvmtl_fetch_zero_set();
         if (zs) pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipelineLayout)p->layout, NVMTL_FETCH_SET, 1, &zs, 0, NULL);
@@ -5605,7 +5785,15 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     if (!g_heapSet && (nvmtl_spirv_uses_set(vs, vn / 4, 2) || nvmtl_spirv_uses_set(fs, fn / 4, 2))) {
         free(fcopy); nvlog("vk: render pipeline REFUSED - a shader indexes the bindless heap (set 2) and this device has none"); return -1; }
     nvmtl_spirv_retarget_set(fcopy, fn / 4, 1);
-    VkShaderModuleCreateInfo fsm = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, fn, fcopy };
+    size_t fbytes = fn; uint32_t fetch_copy_mask = 0;
+    if (!nvmtl_fbfetch_on() && nvmtl_fetch_copy_on()) {   /* a colour-reading fragment shader: its reads become texel fetches of copies */
+        const uint32_t m = nvmtl_spirv_fetch_mask(fs, fn);
+        size_t nw2 = 0; uint32_t *rw = m ? nvmtl_spirv_fetch_to_texture(fcopy, fn / 4, &nw2) : NULL;
+        if (rw) { free(fcopy); fcopy = rw; fbytes = nw2 * 4; fetch_copy_mask = m;
+                  static int said; if (said++ < 8) nvlog("vk: fragment shader reads colour 0x%x through copies", m); }
+        else if (m) { static int said; if (said++ < 8) nvlog("vk: could not rewrite a colour-reading fragment shader - it keeps the dummy image"); }
+    }
+    VkShaderModuleCreateInfo fsm = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, fbytes, fcopy };
     VkShaderModule vmod = VK_NULL_HANDLE, fmod = VK_NULL_HANDLE, tvm = VK_NULL_HANDLE, tcm = VK_NULL_HANDLE;
     NVMTL_PIPELINE_STAGE(pvkCreateShaderModule(g_dev, &vsm, NULL, &vmod), "vkCreateShaderModule(vertex)");
     NVMTL_PIPELINE_STAGE(pvkCreateShaderModule(g_dev, &fsm, NULL, &fmod), "vkCreateShaderModule(fragment)");
@@ -5628,7 +5816,14 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     uint32_t nsl = g_heapSet ? 3 : 2;
     out->fetch_mask = nvmtl_fbfetch_on() ? nvmtl_spirv_fetch_mask(fs, fn) : 0;
     out->fetch_zero = nvmtl_fbfetch_on() ? 0 : nvmtl_spirv_fetch_mask(fs, fn);
-    if (out->fetch_mask || out->fetch_zero) {
+    out->fetch_copy = fetch_copy_mask;   /* decided before the module was made: the rewrite changes the module */
+    if (out->fetch_copy) out->fetch_zero = 0;
+    if (out->fetch_copy) {
+        pthread_mutex_lock(&g_desc_lock); const int fl = nvmtl_fcopy_layout_locked(); pthread_mutex_unlock(&g_desc_lock);
+        if (fl) { nvlog("vk: fetch copy layout could not be made - pipeline refused"); return -1; }
+        if (!g_heapSet) sl2[2] = g_emptyLayout;
+        sl2[3] = g_fcopyLayout; nsl = 4;
+    } else if (out->fetch_mask || out->fetch_zero) {
         pthread_mutex_lock(&g_desc_lock); const int fl = nvmtl_fetch_layouts_locked(); pthread_mutex_unlock(&g_desc_lock);
         if (fl) { nvlog("vk: framebuffer fetch layouts could not be made - pipeline refused"); return -1; }
         if (!g_heapSet) sl2[2] = g_emptyLayout;
@@ -7928,6 +8123,7 @@ void nvmtl_vk_cmd_end_render(nvk_cmdbuf *c) {
 
 static void nvmtl_cmd_retire(nvk_cmdbuf *c)
 {
+    nvmtl_fcopy_release(c);
     nvmtl_counter_retire(c);
     nvmtl_vk_cmd_retire_occlusion(c);
     if (c->timing_pool) {
