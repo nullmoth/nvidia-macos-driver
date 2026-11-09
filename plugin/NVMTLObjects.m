@@ -107,6 +107,7 @@ static void nvmtl_res2_note_use(NVMTLTexture *t);
 static uint64_t nvmtl_res2_evict(uint64_t want);
 extern uint64_t (*nvmtl_res2_evict_hook)(uint64_t want);
 #include "nvmtl_env_knobs.h"
+#include "nvmtl_repeat_bind.h"
 #include "nvmtl_fps_limit.h"
 #include "nvmtl_shared_wc.h"
 // The keys the user's own block of nvrm610.conf set ("my settings, kept on update"): an application profile never
@@ -3799,10 +3800,16 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
             }
         }
         NSData *key=_pixelSamplerKey;
+        // The same pipeline with the same sampler values as this encoder's last draw: its choice stands, with no lock and no
+        // lookup (ANGLE and GL renderers draw hundreds of times with one set). NVMTL_NO_SV_MEMO=1 looks it up every draw.
+        static int svMemo = -1;
+        if (svMemo < 0) svMemo = !nvmtl_switch_is_off(getenv("NVMTL_NO_SV_MEMO"));
+        if (nvmtl_sv_memo_hit(svMemo, _svFor, _ps, _svKey, key, _svSel != nil)) return _svSel == (id)[NSNull null] ? nil : _svSel;
+        _svFor=nil; _svKey=nil; _svSel=nil;
         @synchronized(_ps) {
             if(!_ps->_samplerVariants) _ps->_samplerVariants=[NSMutableDictionary new];
             id cached=_ps->_samplerVariants[key];
-            if(cached==[NSNull null]) return nil;
+            if(cached==[NSNull null]) { _svFor=_ps; _svKey=key; _svSel=cached; return nil; }
             selected=cached;
             if(!selected) {
                 // Reusing the key across pipelines still performs each pipeline's own variant lookup.
@@ -3824,11 +3831,12 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
                     if(!selected)why=error.description;
                     else nvmtl_sampvar_put(gk,selected,vf,ff);
                 }
-                if(!selected){nvlog("pixel sampler specialization REFUSED %s: %s",_ps->_fname.UTF8String,why.UTF8String);_ps->_samplerVariants[key]=[NSNull null];return nil;}
+                if(!selected){nvlog("pixel sampler specialization REFUSED %s: %s",_ps->_fname.UTF8String,why.UTF8String);_ps->_samplerVariants[key]=[NSNull null];_svFor=_ps;_svKey=key;_svSel=[NSNull null];return nil;}
                 _ps->_samplerVariants[key]=selected;
                 nvlog("pixel sampler variant built: %s / %s",_ps->_vname.UTF8String,_ps->_fname.UTF8String);
             }
         }
+        _svFor=_ps; _svKey=key; _svSel=selected;
     }
     return selected;
 }
@@ -4075,7 +4083,9 @@ static MTLPixelFormat nvmtl_swizzle_twin_mtl(MTLPixelFormat f) { return (MTLPixe
     ps = (id<MTLRenderPipelineState>)[self nvmtlColourTwinPipeline:(NVMTLRenderPipelineState *)ps];
     // The same pipeline again inside a begun pass changes nothing: Apple's OpenGL renderer sets it before every draw, so
     // GL games paid a full bind per draw (the GL-on-Metal per-draw overhead). Not inside an open pass-time pool.
-    if (ps && (NVMTLRenderPipelineState *)ps == _ps && _begun && !(_cb->_c.pt_open && _cb->_c.pt_pool)) return;
+    static int psoSkip = -1;   // NVMTL_NO_PSO_SKIP=1 (nvrm610.conf) sets the pipeline every time again, to A/B a glitch against the saving
+    if (psoSkip < 0) psoSkip = !nvmtl_switch_is_off(getenv("NVMTL_NO_PSO_SKIP"));
+    if (nvmtl_pso_skip(psoSkip, ps, _ps, _begun, _cb->_c.pt_open && _cb->_c.pt_pool)) return;
     // NVMTL_DUMP_PSO=<text>: the first encoder that sets a pipeline whose label contains it has the fragment buffers bound
     // at its end dumped, as NVMTL_DUMP_GROUP does, for apps that label pipelines but push no debug groups (diagnostic)
     // Only asked for when the switch is set: this runs on every pipeline bind, and an unconditional `ps.label` was a message
@@ -4417,6 +4427,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 }
 - (void)endEncoding {
     _cb->_nEnd++;
+    _svFor=nil; _svKey=nil; _svSel=nil;   // nothing of this encoder's sampler choice outlives it
     if (_dumpPso) { _dumpPso = NO; [self nvmtlDumpBoundFragmentBuffers]; }
     [self nvmtlCloseVisibility];
     if (_begun) nvmtl_vk_cmd_end_render(&_cb->_c);
