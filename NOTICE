@@ -8,13 +8,13 @@ translator/  Based on metal2vulkan, Copyright (C) Anees Iqbal
              (translator/LICENSE, translator/COPYING). Modifications by NullMoth Systems
              are released under the same licence.
 
-kexts/       Builds against NVIDIA's open GPU kernel modules 615.78.08, MIT (with GPL-2.0 alternatives
+kexts/       Builds against NVIDIA's open GPU kernel modules 620.70.06, MIT (with GPL-2.0 alternatives
              where noted), https://github.com/NVIDIA/open-gpu-kernel-modules
              (licenses/NVIDIA-open-gpu-kernel-modules-COPYING.txt).
 
 NVK          Vulkan driver from Mesa, MIT (licenses/Mesa-license.rst). NullMoth's changes ship as patches.
 
-GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images from NVIDIA's 615.78.08 driver,
+GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images from NVIDIA's 620.70.06 driver,
              redistributed unmodified under NVIDIA's licence (licenses/NVIDIA-firmware-LICENCE.txt), the same
              terms under which linux-firmware redistributes these images.
 
@@ -32,6 +32,14 @@ vendor/nvenc  Video encoders and decoders for NVIDIA's NVENC and NVDEC engines, 
              (licenses/mickys-nvenc-LICENSE.txt). The source is imported unchanged apart from one added
              function; vendor/nvenc/SOURCE lists the commit and the change. Builds against NVIDIA's MIT-licensed
              open-gpu-kernel-modules and open-gpu-doc headers and Apple's decoder interface as published in WebKit (BSD).
+
+translator/  The Rust crates linked into the translator (bitflags, itoa, libc, memchr, serde, syn and others, all MIT and/or
+             Apache-2.0, one Unlicense-or-MIT) keep their licences: licenses/translator-rust-crates.txt has each licence text.
+
+dlss/        dlss/zstd is the Zstandard 1.5.6 reference decoder, BSD-3-Clause (licenses/zstd-LICENSE.txt); dlss/blake3 is BLAKE3 1.8.2 as
+             vendored by Mesa, used under CC0 1.0 (licenses/BLAKE3-LICENSE-CC0.txt). The package carries no NVIDIA DLSS code: NVIDIA's
+             DLSS runtimes, NGX core and nvJitLink are downloaded by the user's Mac from NVIDIA's public sources, checked against
+             pinned hashes, and stay under NVIDIA's licences (package/dlss_fetch.sh).
 
 air-runtime  LLVM (Apache-2.0 with LLVM exceptions) and Zstandard (BSD-3-Clause); their licence texts are in
              NVMTLDriver.bundle/Contents/Resources/air-runtime.
