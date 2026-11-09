@@ -8668,8 +8668,58 @@ void nvmtl_vk_host_pages_drop(nvk_buffer *cache)
     if (cache->buf) { atomic_fetch_sub(&g_host_pages_kept, (uint64_t)cache->size); nvmtl_vk_buffer_destroy(cache); }
     memset(cache, 0, sizeof *cache);
 }
+// NVMTL_HOST_PAGES_SHARE=1: wrappers of one surface share one import of its pages (nvmtl_import_cache.h). CoreAnimation
+// wraps the same surfaces in a new texture every frame and each new texture's private cache starts empty, so each frame
+// imported the pages again (two resource-manager calls each way). A lease is found by surface id, size and the cookie
+// the caller keeps in the surface, and by the address the pages are mapped at; it outlives its last user by two seconds.
+// OFF by default until it has been measured with screen capture running.
+#include "nvmtl_import_cache.h"
+static nvmtl_ic g_hp_ic;
+static pthread_mutex_t g_hp_lock = PTHREAD_MUTEX_INITIALIZER;
+static __thread struct { int set; uint32_t sid; uint64_t cookie; } t_hp_key;
+static __thread void *t_hp_leased;   // the buffer pointer of the lease this thread's current copy holds, else NULL
+void nvmtl_vk_host_pages_key(uint32_t sid, uint64_t cookie) { t_hp_key.set = cookie != 0; t_hp_key.sid = sid; t_hp_key.cookie = cookie; }
+static int nvmtl_hp_share_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_HOST_PAGES_SHARE"); on = e && e[0] == '1'; nvlog("host pages: shared leases %s (NVMTL_HOST_PAGES_SHARE=%s)", on ? "on" : "off", e ?: "unset"); }
+    return on;
+}
+static void nvmtl_hp_expire(void)
+{
+    unsigned char gone[NVMTL_IC_SLOTS][NVMTL_IC_PAYLOAD];
+    pthread_mutex_lock(&g_hp_lock);
+    const int n = nvmtl_ic_expire(&g_hp_ic, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), 2000000000ull, 0, gone, NVMTL_IC_SLOTS);
+    pthread_mutex_unlock(&g_hp_lock);
+    for (int i = 0; i < n; i++) { nvk_buffer b; memcpy(&b, gone[i], sizeof b); nvmtl_vk_buffer_destroy(&b); }
+}
+/* 1 and *tmp filled when a lease serves these pages; 0 when the caller imports them itself. */
+static int nvmtl_hp_lease(void *base, size_t bytes, nvk_buffer *tmp)
+{
+    if (!t_hp_key.set || !nvmtl_hp_share_on() || bytes > (64u << 20)) return 0;
+    nvmtl_hp_expire();
+    pthread_mutex_lock(&g_hp_lock);
+    const int hit = nvmtl_ic_acquire(&g_hp_ic, t_hp_key.sid, bytes, t_hp_key.cookie, tmp, sizeof *tmp);
+    pthread_mutex_unlock(&g_hp_lock);
+    if (hit && tmp->map == base) { t_hp_leased = tmp->buf; return 1; }
+    if (hit) {   // the surface's pages moved under a live cookie: give the lease back and import afresh
+        unsigned char gone[NVMTL_IC_PAYLOAD];
+        pthread_mutex_lock(&g_hp_lock);
+        (void)nvmtl_ic_release(&g_hp_ic, (uintptr_t)tmp->buf, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), gone);
+        pthread_mutex_unlock(&g_hp_lock);
+    }
+    if (nvmtl_vk_buffer_import_host(base, bytes, tmp)) { memset(tmp, 0, sizeof *tmp); return 0; }
+    unsigned char evicted[NVMTL_IC_PAYLOAD]; uintptr_t evicted_id = 0;
+    pthread_mutex_lock(&g_hp_lock);
+    const int kept = nvmtl_ic_insert(&g_hp_ic, t_hp_key.sid, bytes, t_hp_key.cookie, (uintptr_t)tmp->buf, tmp, sizeof *tmp, evicted, &evicted_id);
+    pthread_mutex_unlock(&g_hp_lock);
+    if (evicted_id) { nvk_buffer b; memcpy(&b, evicted, sizeof b); nvmtl_vk_buffer_destroy(&b); }
+    if (kept) t_hp_leased = tmp->buf;
+    return 1;
+}
 static nvk_buffer *nvmtl_host_pages(nvk_buffer *cache, void *base, size_t bytes, nvk_buffer *tmp)
 {
+    if (nvmtl_hp_lease(base, bytes, tmp)) return tmp;
     if (cache && cache->buf && cache->map == base && cache->size == bytes) return cache;
     if (cache && cache->buf) nvmtl_vk_host_pages_drop(cache);   // the surface's pages moved or it was resized
     nvk_buffer *b = tmp;
@@ -8681,7 +8731,19 @@ static nvk_buffer *nvmtl_host_pages(nvk_buffer *cache, void *base, size_t bytes,
     }
     return b;
 }
-static void nvmtl_host_pages_done(nvk_buffer *cache, nvk_buffer *hb) { if (hb && hb != cache) nvmtl_vk_buffer_destroy(hb); }
+static void nvmtl_host_pages_done(nvk_buffer *cache, nvk_buffer *hb)
+{
+    if (!hb || hb == cache) return;
+    if (t_hp_leased && hb->buf == t_hp_leased) {   // a lease: give it back, the table destroys it when idle
+        unsigned char gone[NVMTL_IC_PAYLOAD]; t_hp_leased = NULL;
+        pthread_mutex_lock(&g_hp_lock);
+        const int r = nvmtl_ic_release(&g_hp_ic, (uintptr_t)hb->buf, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), gone);
+        pthread_mutex_unlock(&g_hp_lock);
+        if (r == 2) { nvk_buffer b; memcpy(&b, gone, sizeof b); nvmtl_vk_buffer_destroy(&b); }
+        if (r) return;
+    }
+    nvmtl_vk_buffer_destroy(hb);
+}
 // NVMTL_SURFIN_ORDERED (on by default, =0 off): the surface-in copy is ordered after earlier GPU reads of the image. Its
 // layout transition started from top-of-pipe with no source access, so a composite still sampling the previous frame
 // was not waited for (write-after-read: a possible torn frame).
