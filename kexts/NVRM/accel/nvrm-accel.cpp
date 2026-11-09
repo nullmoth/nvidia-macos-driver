@@ -477,7 +477,7 @@ public:
             // refuses WindowServer on a headless GPU, and WindowServer aborted at start ("Failed to create MetalDevice")
             // every ten seconds. With no other GPU there is no display to hand frames to, so the name stays withheld:
             // WindowServer runs unaccelerated on the firmware framebuffer and the desktop comes up, as before the check.
-            if (!other && strcmp(owner, "NMIntelFB") != 0) {
+            if (!other && strcmp(owner, "NMIntelFB") != 0 && !(gNmHybrid && strcmp(owner, "NMXGPUFB") == 0)) {
                 ALOG("headless check: no NVIDIA display head after %u s and no other GPU shows the desktop (%s) -- "
                      "MetalPluginName stays withheld so WindowServer starts on the firmware framebuffer",
                      me->fHeadlessWaited, owner);
