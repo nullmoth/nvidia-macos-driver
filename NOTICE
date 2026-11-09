@@ -29,3 +29,7 @@ NMXAudio     The HD Audio controller and codec layers are FreeBSD's snd_hda (sys
 
 air-runtime  LLVM (Apache-2.0 with LLVM exceptions) and Zstandard (BSD-3-Clause); their licence texts are in
              NVMTLDriver.bundle/Contents/Resources/air-runtime.
+
+Community ideas  The shared family-VRAM import cache and the browser surface-publication default follow ideas first
+             published by mickys (https://github.com/mickys/nvidia-macos-driver, PolyForm Noncommercial 1.0.0) and
+             proposed to this project by GeekAudio in pull requests 463 and 481. The code here is NullMoth's own.
