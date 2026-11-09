@@ -53,14 +53,20 @@ half-width equal to the radius, facing the ray. This is an approximation of the 
   selects the first piece's axis instead). Measured on the probe: the disk hits are at an axial distance of 0.000 from the end plane and
   inside the end radius, as modelled. Other variants tried and rejected because they pass fewer cases: a plane behind the end point by a
   fixed slack (0.02 to 0.15 times the end radius), the chord direction as the normal, more steps (32 to 128 do not help).
-- **Two cases still fail, cause not found:**
-  - `catmull4_round_nocap`: 15 to 27 rays of 576 where the model has a hit on a joint sphere near an end (0.0006 to 0.03 from the start
-    plane, 0.016 to 0.10 from the end plane) and Apple has none; every other ray agrees (95th percentile 0.003). The same curve with sphere
-    caps passes, so Apple removes a small region beyond the cut that the model keeps.
-  - `catmull4_flat`: about 50 rays of 576 where Apple has a ribbon hit and the model has none, at the curve's ends (axial distance
-    -0.02 to -0.1 behind the end point, `curve_parameter` clamped to 0 or 1). The other three flat cases agree to 1e-4, so the ribbon
-    reaches past the end point for this basis. A ribbon whose end edge is not perpendicular to the tangent would do it; the data so far
-    does not say what the edge is.
+- **The end sweep** (`oracle/curve_sweep.m`, `oracle/sweep.h`, `oracle/sweep_analyze.c`; dumps `fixtures/sweep_apple_m6.txt` and `sweep_apple_m4.txt`):
+  one Catmull-Rom curve, nocap and flat, 64 x 64 parallel rays in a 1.2-wide box around each end point, from three sides (along each of the
+  two normals, and head-on), 49,152 rays per device. M4 and M6 differ on 39 of them (last bit of a distance or parameter).
+  - **Open ends: solved.** The side views agree to within 2 rays of 4,096. Head-on, looking into the open end, Apple has no hit at all where
+    the model had 287 and 732: a ray that passes the end plane inside the end radius is inside the solid, and every surface it meets next
+    is one it leaves through, so it does not hit. `curve_math.h` now (a) keeps only the surface a ray enters through (front faces of the
+    cone, the spheres and the disks) and (b) for no caps, ends all hits beyond a crossing of the end plane inside the end radius heading in.
+    After that `catmull4_round_nocap` passes and the head-on maps agree to within 3 rays.
+  - **Flat ribbons: characterised, not solved.** Apple's flat curve continues past each end point by about the end radius with a rounded
+    outline (the side-view maps show a lens narrowing to the end). A disc of the end point's radius in the ribbon plane (`CV_FLAT_DISC`,
+    off) brings the Catmull side views to within 7 and 4 rays of 4,096, but it breaks the B-spline flat cases (95th percentile 0.10 and
+    0.05: Apple's hit is a little behind the disc), and the disc's plane (ribbon plane or facing the ray, `CV_FLAT_DISC_FACING`) makes no
+    difference in these data. Because it makes cases that pass fail, it is not adopted.
+- **Result: 23 of 24 cases pass on both the M6 and the M4 fixtures** (the failing one is `catmull4_flat`).
 - **M4 mini (macOS 26.5.1): the same.** One short oracle process on the M4 (24 cases, then the probe), 120 s alarm, scratch directory, removed afterwards:
   all 24 cases accepted, no refusal, no hiccup. `oracle/fixtures/fixture_apple_m4.txt` and `fixture_apple_m4_probe.txt` are the dumps. Against the
   model it passes and fails the same 22 and 2 cases as the M6. M4 against M6, ray by ray: identical hit type, primitive id and parameter on all

@@ -64,7 +64,7 @@ int main(int argc, char **argv)
          struct cv_hit mh = cv_intersect(&cv_float_ops, &cc, &rr);
          printf("  AXIAL %s end %d ray %3d: x_tangent %.4f x_piece %.4f rho %.4f (end radius %.3f) u %.4f t %.4f | model %s t %.4f\n", cases[cur].name, endc, i, x, xp, rho, cases[cur].r[endc ? cases[cur].count - 1 : 0], bf(ub), bf(tb), mh.hit ? "hit" : "miss", mh.hit ? fv_(mh.t) : 0.0);
       }
-      if (getenv("ORACLE_DIFF") && probe && i < 3 * PROBE_GROUP) {
+      if (getenv("ORACLE_DIFF") && (probe ? i < 3 * PROBE_GROUP : !strcmp(cases[cur].name, getenv("ORACLE_DIFF")))) {
          int mh = (int)h.hit, ah = hit != 0;
          double dd = (mh && ah) ? fabs(fv_(h.t) - bf(tb)) : 0;
          if (mh && !ah) {
