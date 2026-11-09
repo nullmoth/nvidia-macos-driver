@@ -153,6 +153,15 @@ Mesa `17ca6174` with, in order, `nvk/nvk-macos.patch`, `nvk/nvk-fixes-after-def1
 `nvk/dlss/patch_dlss_cache.py <mesa tree>`. NVK compiles against the `open-gpu-kernel-modules` 610.57.04 headers with
 `nvk/ogkm-nvos-620.patch` applied to that tree; 620's `nv.h` does not compile in user space, so the rest stays 610.
 
+`build/build_nvk.sh <mesa git> <610.57.04 tree> <out> [2.9|2.8]` does all of it: it exports Mesa `17ca6174` with `git archive`,
+applies the header patch and the chain above, builds `mesa_clc` and `vtn_bindgen2` from that same tree (tools from another Mesa
+revision deserialize NVK's internal shaders as garbage), cross-builds `libvulkan_nouveau.dylib` for x86_64 and prints its
+LC_UUID and export count. The `2.8` argument builds the set the 2.8 / 2.8.1 package was made from (no hubfix, boost, rated-tdp
+or gps-maxpower patches; `nvk/release-2.8/nvk-fixes-after-def16.patch`). Rebuilding 2.8 gives the shipped library byte for byte
+except the 16 LC_UUID bytes: the linker derives the UUID from the unstripped file, which records the absolute path of every
+object, so a different build directory gives a different UUID. `build/nvk_compare.py` states exactly which bytes differ.
+The NAK changes under `nvk/speed267` are already contained in `nvk-macos.patch`; the scripts there record how they were made.
+
 The video codecs in `libnvencvt.dylib` are built from `vendor/nvenc` (mickys/nvenc, MIT) by `build/build_nvencvt.sh`. The
 package puts the library beside the plugin in `NVMTLDriver.bundle/Contents/MacOS/`; the plugin loads it only when it and
 its folder are root-owned. `NVMTL_NVENCVT` in `nvrm610.conf` decides where it registers: unset is automatic on Ada and
