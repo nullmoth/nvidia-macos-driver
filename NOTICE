@@ -90,3 +90,9 @@ plugin       Opt-in VRAM working copies for buffers (nvmtl_shared_wc.h, NVMTL_SH
              GPU working in VRAM). The code here is NullMoth's own.
 
 nvk          nvk/nvk-upstream-nak.patch carries commits from the Mesa project (MIT licence), listed in the patch header.
+
+kexts/NVRM, kexts/NVRMFB, plugin
+             The notebook power budget (nvrmtgp, with the GPS and NVPCF _DSM families behind nvrmgps and nvrmnvpcf), the
+             integrated-GPU panel proxy head (nvfbigpu) and the switches for the repeat pipeline bind and the encoder's
+             sampler-variant memo (NVMTL_NO_PSO_SKIP, NVMTL_NO_SV_MEMO) follow ideas first published in
+             watchthelight-labs/NvGfx (PolyForm Noncommercial 1.0.0), a fork of this project. The code here is NullMoth's own.
