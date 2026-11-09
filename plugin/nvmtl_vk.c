@@ -407,6 +407,8 @@ void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, siz
     X(vkCmdSetDepthBoundsTestEnable) X(vkCmdSetDepthBounds)
 static int g_dyn3;
 static int g_provoking;   /* provoking vertex is per-draw dynamic state, and the last vertex can provoke */
+static _Thread_local int t_ms_storage;   // set around the one creation in nvmtl_vk_image_create_ms_storage
+static int g_ms_storage;   // multisampled storage images (NVMTL_TILE_SHADING=1 and the device offers shaderStorageImageMultisample)
 static uint32_t g_mv_views;   /* multiview view count the device offers while NVMTL_VERTEX_AMPLIFICATION=1; 0 = off */
 static int g_divisor;     /* per-instance step rates (VK_KHR_vertex_attribute_divisor), up to g_max_divisor */
 static uint32_t g_max_divisor;
@@ -1413,6 +1415,13 @@ static int nvmtl_vk_initialize(void)
     enabled.independentBlend = supported.independentBlend; g_indep = supported.independentBlend == VK_TRUE;
     enabled.alphaToOne = supported.alphaToOne; g_a2one = supported.alphaToOne == VK_TRUE;
     enabled.depthBounds = supported.depthBounds; g_depth_bounds = supported.depthBounds == VK_TRUE;
+    {   // a tile function's multisampled attachment is a multisampled storage image (translator/src/native/tile_imageblock.rs)
+        const char *ts = getenv("NVMTL_TILE_SHADING");
+        if (ts && ts[0] == '1') {
+            enabled.shaderStorageImageMultisample = supported.shaderStorageImageMultisample; g_ms_storage = supported.shaderStorageImageMultisample == VK_TRUE;
+            nvlog("vk: multisampled storage images %s (tile shading)", g_ms_storage ? "AVAILABLE" : "ABSENT - tile functions on multisampled attachments are refused");
+        }
+    }
     nvlog("vk: depthBounds %s", g_depth_bounds ? "AVAILABLE" : "ABSENT - setDepthTestMinBound:maxBound: is refused");
     enabled.dualSrcBlend = supported.dualSrcBlend; g_dual = supported.dualSrcBlend == VK_TRUE;
     enabled.wideLines = supported.wideLines; g_wide = supported.wideLines == VK_TRUE;
@@ -2537,7 +2546,7 @@ static int nvmtl_vk_image_create_ms_lifetime_body(uint32_t w, uint32_t h, uint32
     if (nvmtl_vk_init()) return -1;
     memset(out, 0, sizeof *out); out->w = w; out->h = h; out->mips = 1; out->fmt = vkfmt; out->bpp = bpp ? bpp : 4; out->mtl_type = mtl_type; out->layers = layers; out->samples = samples;
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, (VkFormat)vkfmt, { w, h, 1 }, 1, layers,
-        (VkSampleCountFlagBits)samples, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        (VkSampleCountFlagBits)samples, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (t_ms_storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0u),
         VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
     nvmtl_vk_image_mutable(&ici, out);
     VKCK(nvmtl_opaque_CreateImage(g_dev, &ici, NULL, &out->img), "vkCreateImage(ms)");
@@ -2550,6 +2559,17 @@ static int nvmtl_vk_image_create_ms_lifetime_body(uint32_t w, uint32_t h, uint32
     VKCK(nvmtl_opaque_CreateImageView(g_dev, &vci, NULL, &out->view), "vkCreateImageView(ms)");
     nvlog("image_create: %ux%u %u-sample colour target", w, h, samples);
     return 0;
+}
+int nvmtl_vk_ms_storage_ok(void) { return g_ms_storage; }
+// A multisampled colour image that can also be a storage image: the twin a tile function reads and writes (the attachment itself is
+// created without storage usage, which costs nothing for the passes that never run a tile function).
+int nvmtl_vk_image_create_ms_storage(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, uint32_t samples, nvk_image *out)
+{
+    if (!g_ms_storage || !nvmtl_vk_format_is_storage(vkfmt)) return -1;
+    t_ms_storage = 1;
+    const int r = nvmtl_vk_image_create_ms_full(w, h, vkfmt, bpp, samples, 4, 1, out);
+    t_ms_storage = 0;
+    return r;
 }
 static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out);
 int nvmtl_vk_image_create_typed(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out)

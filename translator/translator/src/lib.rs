@@ -87,8 +87,8 @@ pub fn translate_sanitized_native(
 
 /// Rewrites a tile function (implicit imageblock access) into a compute kernel that reads and writes the colour attachments
 /// as storage images, one threadgroup per `tile`; see native/tile_imageblock.rs.
-pub fn rewrite_tile_kernel(san_ll: &str, tile: [u32; 2]) -> Result<String, String> {
-    native::tile_imageblock::rewrite(san_ll, tile)
+pub fn rewrite_tile_kernel(san_ll: &str, tile: [u32; 2], samples: u32) -> Result<String, String> {
+    native::tile_imageblock::rewrite(san_ll, tile, samples)
 }
 pub const TILE_TEXTURE_BASE: u32 = native::tile_imageblock::TILE_TEXTURE_BASE;
 

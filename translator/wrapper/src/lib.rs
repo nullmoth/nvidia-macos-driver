@@ -1151,14 +1151,15 @@ attributes #0 = { nounwind }
 // nvmtl_translate_free (len bytes). The attachments appear as read_write textures at metal index 120 + attachment.
 #[no_mangle]
 pub unsafe extern "C" fn nvmtl_tile_rewrite(
-    ll: *const c_char, tile_w: u32, tile_h: u32,
+    ll: *const c_char, tile_w: u32, tile_h: u32, samples: u32,
     out: *mut *mut u8, out_len: *mut usize, err: *mut c_char, err_len: usize,
 ) -> i32 {
     let result = (|| -> Result<String, String> {
         if ll.is_null() || out.is_null() || out_len.is_null() { return Err("null tile argument".into()) }
         if tile_w == 0 || tile_h == 0 || tile_w > 1024 || tile_h > 1024 { return Err(format!("tile {tile_w}x{tile_h} is outside 1..1024")) }
         let ll = CStr::from_ptr(ll).to_str().map_err(|e| e.to_string())?;
-        metal2vulkan::rewrite_tile_kernel(ll, [tile_w, tile_h])
+        if !matches!(samples, 1 | 2 | 4 | 8) { return Err(format!("{samples} samples is not a Metal sample count")) }
+        metal2vulkan::rewrite_tile_kernel(ll, [tile_w, tile_h], samples)
     })();
     match result {
         Ok(text) => { let mut b = text.into_bytes().into_boxed_slice(); *out = b.as_mut_ptr(); *out_len = b.len(); std::mem::forget(b); 0 }
@@ -1219,7 +1220,7 @@ define internal void @_GLOBAL__sub_I_fc.metal() #3 section "air.static_init" {
 
     #[test]
     fn a_tile_function_with_a_function_constant_specializes_after_the_rewrite() {
-        let text = metal2vulkan::rewrite_tile_kernel(TILE_FC, [32, 32]).expect("the rewrite keeps the function constant machinery intact");
+        let text = metal2vulkan::rewrite_tile_kernel(TILE_FC, [32, 32], 1).expect("the rewrite keeps the function constant machinery intact");
         assert!(text.contains("@_Z5boost.MTL_FC_INIT_0_b") && text.contains("!air.function_constants"), "the constants survive the rewrite:\n{text}");
         let (on, off) = (translate(&text, Some(1)).expect("boost = true"), translate(&text, Some(0)).expect("boost = false"));
         for m in [&on, &off] { spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2)).validate(m, None).expect("valid"); }

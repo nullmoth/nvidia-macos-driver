@@ -120,7 +120,7 @@ static nvmtl_lower_mesh2_fn xlate_lower_mesh2;
 typedef int (*nvmtl_promote_uniform_fn)(const uint8_t *, size_t, uint32_t, uint32_t,
                                        uint8_t **, size_t *, uint32_t *, char *, size_t);
 static nvmtl_promote_uniform_fn xlate_promote_uniform;
-typedef int (*nvmtl_tile_rewrite_fn)(const char *, uint32_t, uint32_t, uint8_t **, size_t *, char *, size_t);
+typedef int (*nvmtl_tile_rewrite_fn)(const char *, uint32_t, uint32_t, uint32_t, uint8_t **, size_t *, char *, size_t);
 static nvmtl_tile_rewrite_fn xlate_tile_rewrite;
 static char kNVMTLTableFns;
 
@@ -2570,10 +2570,10 @@ NSData *nvmtl_translate_variant(NVMTLFunction *fn, NSDictionary *states, NSDicti
 }
 
 // A tile function's AIR rewritten into a compute kernel over the colour attachments (tile_rewrite in the translator).
-NSString *nvmtl_tile_rewrite(NSString *ll, uint32_t tw, uint32_t th, NSString **err) {
+NSString *nvmtl_tile_rewrite(NSString *ll, uint32_t tw, uint32_t th, uint32_t samples, NSString **err) {
     if (!nvmtl_xlate_ready() || !xlate_tile_rewrite) { if (err) *err = @"this translator cannot rewrite tile functions"; return nil; }
     uint8_t *out = NULL; size_t len = 0; char e[512] = {0};
-    if (xlate_tile_rewrite(ll.UTF8String, tw, th, &out, &len, e, sizeof e)) { if (err) *err = @(e); return nil; }
+    if (xlate_tile_rewrite(ll.UTF8String, tw, th, samples, &out, &len, e, sizeof e)) { if (err) *err = @(e); return nil; }
     NSString *text = [[NSString alloc] initWithBytes:out length:len encoding:NSUTF8StringEncoding]; xlate_free(out, len);
     return text;
 }
