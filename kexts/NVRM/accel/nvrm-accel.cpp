@@ -2126,10 +2126,13 @@ static uint64_t nvAccelFlipWaitUs(IOService *fb)
 }
 // What the framebuffer's answer to a flip means for the frame: on the panel, kept (busy: the flip before it is still
 // landing, the next present follows it), or refused (copied, and three in a row turn the asynchronous swap off).
-enum { kNvFlipShown = 0, kNvFlipKept = 1, kNvFlipRefused = 2 };
+enum { kNvFlipShown = 0, kNvFlipKept = 1, kNvFlipRefused = 2, kNvFlipAsleep = 3 };
 static int nvAccelFlipOutcome(IOReturn rr)
 {
-    return rr == kIOReturnSuccess ? kNvFlipShown : rr == kIOReturnBusy ? kNvFlipKept : kNvFlipRefused;
+    // NotReady: the framebuffer's head is in display sleep or the GPU is in standby (NVKMS answers "pm running"). That is not a
+    // refusal: the frame has nowhere to go, and three of them in a row used to switch the asynchronous swap off for the rest of
+    // the boot (issue 470: the hang after display sleep followed that switch).
+    return rr == kIOReturnSuccess ? kNvFlipShown : rr == kIOReturnBusy ? kNvFlipKept : rr == kIOReturnNotReady ? kNvFlipAsleep : kNvFlipRefused;
 }
 static bool nvAccelIopAsyncBusy(const void *pipe)
 {
@@ -2159,6 +2162,8 @@ static void nvAccelIopAsyncRun(void *p0, void *)
     } else if (outcome == kNvFlipKept) {
         OSAddAtomic64(1, &gCntIopLate);
         ((OSObject *)s)->release();
+    } else if (outcome == kNvFlipAsleep) {
+        ((OSObject *)s)->release();   // dropped without a strike against the asynchronous swap
     } else {
         OSAddAtomic64(1, &gCntIopAsyncRefused); OSAddAtomic64(1, &gCntIopFlipNo[7]);
         if (gIopFlipLogs < 8) { gIopFlipLogs++; ALOG("iop: async flip REFUSED (0x%x, flipResult %d) head %u -- that frame is not on the panel",
@@ -2273,7 +2278,8 @@ static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pip
     const OSSymbol *sym = OSSymbol::withCStringNoCopy("nvFlipToSurfacePure");
     IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
-    if (nvAccelFlipOutcome(rr) == kNvFlipKept) { OSAddAtomic64(1, &gCntIopLate); return true; }   // the frame on the panel stays
+    if (nvAccelFlipOutcome(rr) == kNvFlipKept) { OSAddAtomic64(1, &gCntIopLate); return true; }
+    if (nvAccelFlipOutcome(rr) == kNvFlipAsleep) return true;   // display asleep: nothing to show, nothing to copy   // the frame on the panel stays
     if (rr != kIOReturnSuccess) {
         if (gIopFlipLogs < 8) { gIopFlipLogs++; ALOG("iop: flip REFUSED (0x%x, flipResult %d) head %u %llux%llu pitch %llu -- copying",
                                                      (unsigned)rr, f.flipResult, head, W, H, P); }
