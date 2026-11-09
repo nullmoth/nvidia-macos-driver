@@ -321,6 +321,8 @@ public:
     static NVAccel *gAccel;                // the primary card's accelerator: what the single-card code paths read
     static NvrmDevTab<NVAccel> gAccelTab;  // every accelerator (more than the primary only with nvmultigpu=1)
     static NvrmStartGate gAccelGate;
+    static NvrmWaitQueue<IOService> gAccelWait;   // providers refused by the gate, offered again when a start finishes
+    static void reofferNext() { if (IOService *p = gAccelWait.next()) { p->registerService(kIOServiceAsynchronous); p->release(); } }
     static unsigned count() { return gAccelTab.count(); }
     static NVAccel *at(unsigned i) { return gAccelTab.at(i); }
     friend struct NVAccelStartScope;
@@ -771,8 +773,10 @@ public:
             uint32_t selector = 0; PE_parse_boot_argn("nvselector", &selector, sizeof selector);
             const bool marked = provider && provider->getProperty("nullmoth-auto-primary") == kOSBooleanTrue;
             if (!nvrm_gate_enter(&gAccelGate, scope.multi, marked, selector != 0)) {
-                ALOG("nvmultigpu: another card is starting, or the primary card is not running yet; no accelerator for this one");
+                ALOG("nvmultigpu: another card is starting, or the primary card is not running yet; this one waits to be offered again");
                 scope.multi = false;   // nothing was entered, so nothing to leave
+                if (provider && gAccelWait.add(provider)) provider->retain();
+                if (!__atomic_load_n(&gAccelGate.starting, __ATOMIC_ACQUIRE)) reofferNext();
                 return false;
             }
         }
@@ -1070,7 +1074,8 @@ OSDefineMetaClassAndStructors(NVAccel, IOGraphicsAccelerator2)
 NVAccel *NVAccel::gAccel = nullptr;
 NvrmDevTab<NVAccel> NVAccel::gAccelTab;
 NvrmStartGate NVAccel::gAccelGate;
-NVAccelStartScope::~NVAccelStartScope() { nvrm_gate_leave(&NVAccel::gAccelGate, multi, started); }
+NvrmWaitQueue<IOService> NVAccel::gAccelWait;
+NVAccelStartScope::~NVAccelStartScope() { nvrm_gate_leave(&NVAccel::gAccelGate, multi, started); if (multi) NVAccel::reofferNext(); }
 
 IOAccelMemory *NVDisplayPipe::initFramebufferResource(unsigned int index, IOAccelResource2 *res)
 {
