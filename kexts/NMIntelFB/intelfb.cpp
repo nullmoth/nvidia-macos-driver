@@ -20,6 +20,7 @@
 #include "nm_hybrid.h"
 #include "nm_hybrid_abi.h"
 #include "nm_hybrid_resume.h"
+#include "nm_hybrid_vbt.h"
 #include "nvrm_off.h"
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -235,6 +236,7 @@ private:
     uint64_t *fFwPte = nullptr; uint64_t fFwPteFirst = 0, fFwPteCount = 0;
     thread_call_t fResumeCall = nullptr;
     bool ggttMap();
+    bool readVbt(struct nmr_edp *out);
     void resumeCapture();
     void resumeRun();
     static void resumeFire(thread_call_param_t p0, thread_call_param_t) { ((NMIntelFB *)p0)->resumeRun(); }
@@ -781,6 +783,38 @@ void NMIntelFB::ownRelease()
 
 // ---- sleep and wake ----------------------------------------------------------------------------------------------------
 
+// The video BIOS tables through the OpRegion (PCI config 0xFC holds its physical address): the panel type, and from it whether
+// this panel uses the low-swing or reduced-power drive table. Nothing is guessed: any failure leaves the DisplayPort tables.
+bool NMIntelFB::readVbt(struct nmr_edp *out)
+{
+    const uint32_t asls = fPCI->configRead32(0xFC);
+    if (!asls) return false;
+    IOMemoryDescriptor *od = IOMemoryDescriptor::withPhysicalAddress(asls, NMV_OPREGION_SIZE, kIODirectionIn);
+    IOMemoryMap *om = od ? od->map() : nullptr;
+    bool ok = false;
+    if (om) {
+        const uint8_t *op = (const uint8_t *)om->getVirtualAddress();
+        uint32_t io = 0, is = 0; struct nmv_loc loc; struct nmv_edp e;
+        if (nmv_locate(op, asls, &io, &is, &loc)) {
+            if (loc.kind == 1) ok = nmv_edp(op + io, is, &e);
+            else if (loc.kind == 2) {
+                IOMemoryDescriptor *vd = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)loc.phys, loc.size, kIODirectionIn);
+                IOMemoryMap *vm = vd ? vd->map() : nullptr;
+                if (vm) ok = nmv_edp((const uint8_t *)vm->getVirtualAddress(), loc.size, &e);
+                if (vm) vm->release();
+                if (vd) vd->release();
+            }
+        }
+        if (ok) { out->known = 1; out->low_vswing = (uint8_t)e.low_vswing; out->hobl = (uint8_t)e.hobl;
+                  IFBLOG("hybrid: video BIOS: panel type %u, low-swing table %s, reduced-power table %s (VBT %u, BDB %u)", e.panel_type,
+                         e.low_vswing ? "yes" : "no", e.hobl ? "yes" : "no", e.vbt_version, e.bdb_version); }
+        else IFBLOG("hybrid: video BIOS: no panel type found; the DisplayPort drive tables are used");
+        om->release();
+    }
+    if (od) od->release();
+    return ok;
+}
+
 void NMIntelFB::resumeCapture()
 {
     long long v = 0; int a = 0; const int present = PE_parse_boot_argn("nmhybridresume", &a, sizeof a); v = a;
@@ -796,7 +830,9 @@ void NMIntelFB::resumeCapture()
         [](void *, unsigned us) { IODelay(us); },
         [](void *, const char *st) { IFBLOG("hybrid: resume step: %s", st); },
         nullptr };
-    const int rc = nmr_snapshot(&ops, fSnap, (unsigned)fPipe);
+    struct nmr_edp edp = {};
+    readVbt(&edp);
+    const int rc = nmr_snapshot(&ops, fSnap, (unsigned)fPipe, fVer, &edp);
     if (rc != NMR_OK) { IFBLOG("hybrid: resume unavailable: %s", nmr_result_name(rc)); IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; return; }
     // the firmware surface's entries in the graphics table: restored first on wake
     fFwPteFirst = fSurf >> 12; fFwPteCount = (((uint64_t)fRowBytes * fHeight) + 4095) / 4096;

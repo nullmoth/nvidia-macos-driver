@@ -53,6 +53,7 @@ struct nmr_ops {
 #define NMR_DPCLKA_CFGCR0  0x164280u
 #define NMR_PHY_A_BASE     0x162000u
 #define NMR_PHY_B_BASE     0x6C000u
+#define NMR_PHY_C_BASE     0x160000u
 #define NMR_PHY_WORDS      768u       /* 0xC00 bytes: CL, COMP, AUX, PCS and TX groups and the four lanes */
 #define NMR_PP_STATUS      0xC7200u
 #define NMR_PP_CONTROL     0xC7204u
@@ -150,9 +151,14 @@ static inline int nmr_wait(const struct nmr_ops *o, uint32_t reg, uint32_t mask,
     return 0;
 }
 
+struct nmr_edp { uint8_t known, low_vswing, hobl; };     /* from the video BIOS (nm_hybrid_vbt.h); known = 0: not known */
 /* ---- where the panel is: pipe A to D, its transcoder (same index), a combo port (DDI A or B) with its PHY and AUX channel */
 struct nmr_topo { uint8_t pipe, port; };
-static inline uint32_t nmr_phy_base(unsigned port) { return port == 0 ? NMR_PHY_A_BASE : NMR_PHY_B_BASE; }
+static inline uint32_t nmr_phy_base(unsigned port) { return port == 0 ? NMR_PHY_A_BASE : (port == 1 ? NMR_PHY_B_BASE : NMR_PHY_C_BASE); }
+/* Combo ports: DDI A to C on display 12 (Tiger Lake, Rocket Lake, Alder Lake S), A and B on display 13 (Alder Lake P, whose C and
+ * later are Type-C). Type-C ports need the port's PHY ownership handshake and the Type-C subsystem; an internal panel is never
+ * wired to one on any laptop, so they are refused rather than driven blind. */
+static inline unsigned nmr_last_combo_port(unsigned display_version) { return display_version == 12 ? 2u : 1u; }
 
 /* ---- the snapshot */
 #define NMR_N_TIMING 11
@@ -172,6 +178,7 @@ struct nmr_snap {
     uint32_t surf, func, tp, ddi, transconf;
     uint32_t blc[3];
     uint8_t  dpcd[8];                            /* 0x100 0x101 0x107 0x108 0x115, max lane (0x002), downspread cap (0x003), interval (0x00E) */
+    struct nmr_edp edp;                          /* the video BIOS's word on the panel's drive table; known = 0 keeps the DisplayPort tables */
 };
 static const uint32_t nmr_timing_off[NMR_N_TIMING] = {
     0x000, 0x004, 0x008, 0x00C, 0x010, 0x014, 0x01C, 0x030, 0x034, 0x040, 0x044 };   /* from the transcoder's 0x60000 + 0x1000 * t */
@@ -258,22 +265,59 @@ static inline int nmr_level_index(unsigned v, unsigned p)
     if (v > 3 || p > 3 || v + p > 3) return -1;
     switch (v) { case 0: return (int)p; case 1: return 4 + (int)p; case 2: return 7 + (int)p; default: return 9; }
 }
-static inline const struct nmr_trans *nmr_table(unsigned display_version, unsigned rate_khz)
+static const struct nmr_trans nmr_icl_dp_edp_hbr3[10] = {
+    {0xA,0x35,0x3F,0x00,0x00},{0xA,0x4F,0x37,0x00,0x08},{0xC,0x71,0x2F,0x00,0x10},{0x6,0x7F,0x2B,0x00,0x14},{0xA,0x4C,0x3F,0x00,0x00},{0xC,0x73,0x34,0x00,0x0B},{0x6,0x7F,0x2F,0x00,0x10},{0xC,0x6C,0x3C,0x00,0x03},{0x6,0x7F,0x35,0x00,0x0A},{0x6,0x7F,0x3F,0x00,0x00} };
+static const struct nmr_trans nmr_icl_edp_hbr2[10] = {
+    {0x0,0x7F,0x3F,0x00,0x00},{0x8,0x7F,0x38,0x00,0x07},{0x1,0x7F,0x33,0x00,0x0C},{0x9,0x7F,0x31,0x00,0x0E},{0x8,0x7F,0x3F,0x00,0x00},{0x1,0x7F,0x38,0x00,0x07},{0x9,0x7F,0x35,0x00,0x0A},{0x1,0x7F,0x3F,0x00,0x00},{0x9,0x7F,0x38,0x00,0x07},{0x9,0x7F,0x3F,0x00,0x00} };
+static const struct nmr_trans nmr_tgl_edp_hobl[9] = {
+    {0x6,0x7F,0x3F,0x00,0x00},{0x6,0x7F,0x3F,0x00,0x00},{0x6,0x7F,0x3F,0x00,0x00},{0x6,0x7F,0x3F,0x00,0x00},{0x6,0x7F,0x3F,0x00,0x00},{0x6,0x7F,0x3F,0x00,0x00},{0x6,0x7F,0x3F,0x00,0x00},{0x6,0x7F,0x3F,0x00,0x00},{0x6,0x7F,0x3F,0x00,0x00} };
+static const struct nmr_trans nmr_adlp_edp_hbr2[10] = {
+    {0x4,0x50,0x38,0x00,0x07},{0x4,0x58,0x35,0x00,0x0A},{0x4,0x60,0x34,0x00,0x0B},{0x4,0x6A,0x32,0x00,0x0D},{0x4,0x5E,0x38,0x00,0x07},{0x4,0x61,0x36,0x00,0x09},{0x4,0x6B,0x34,0x00,0x0B},{0x4,0x69,0x39,0x00,0x06},{0x4,0x73,0x37,0x00,0x08},{0x4,0x7A,0x38,0x00,0x07} };
+static const struct nmr_trans nmr_adlp_edp_hbr3[10] = {
+    {0xA,0x35,0x3F,0x00,0x00},{0xA,0x4F,0x37,0x00,0x08},{0xC,0x71,0x30,0x00,0x0f},{0x6,0x7F,0x2B,0x00,0x14},{0xA,0x4C,0x3F,0x00,0x00},{0xC,0x73,0x34,0x00,0x0B},{0x6,0x7F,0x30,0x00,0x0F},{0xC,0x63,0x3F,0x00,0x00},{0x6,0x7F,0x38,0x00,0x07},{0x6,0x7F,0x3F,0x00,0x00} };
+/* eDP panels use their own tables when the video BIOS says so (low voltage swing, reduced-power), and above 5.4 Gb/s a table of
+ * their own (Linux tgl_get_combo_buf_trans_edp, adlp_get_combo_buf_trans_edp). 'n' is the number of rows: a row past it is a
+ * level the table does not have, which caps the swing the source can offer. */
+struct nmr_sel { const struct nmr_trans *t; unsigned n; int hobl; };
+static inline struct nmr_sel nmr_select(unsigned display_version, unsigned rate_khz, const struct nmr_edp *edp)
 {
-    if (display_version == 13) return rate_khz > 270000 ? nmr_adlp_hbr2 : nmr_adlp_hbr;
-    return rate_khz > 270000 ? nmr_tgl_hbr2 : nmr_tgl_hbr;
+    struct nmr_sel r;
+    const int is_edp = edp && edp->known;
+    r.hobl = 0; r.n = 10;
+    if (display_version == 13) {
+        r.t = rate_khz > 270000 ? nmr_adlp_hbr2 : nmr_adlp_hbr;
+        if (is_edp) {
+            if (rate_khz > 540000) r.t = nmr_adlp_edp_hbr3;
+            else if (edp->hobl) { r.t = nmr_tgl_edp_hobl; r.n = 9; r.hobl = 1; }
+            else if (edp->low_vswing) r.t = nmr_adlp_edp_hbr2;
+        }
+    } else {
+        r.t = rate_khz > 270000 ? nmr_tgl_hbr2 : nmr_tgl_hbr;
+        if (is_edp) {
+            if (rate_khz > 540000) r.t = nmr_icl_dp_edp_hbr3;
+            else if (edp->hobl) { r.t = nmr_tgl_edp_hobl; r.n = 9; r.hobl = 1; }
+            else if (edp->low_vswing) r.t = nmr_icl_edp_hbr2;
+        }
+    }
+    return r;
 }
+static inline const struct nmr_trans *nmr_table(unsigned display_version, unsigned rate_khz) { return nmr_select(display_version, rate_khz, 0).t; }
+
 /* the field edit of one register, as Linux's intel_de_rmw */
 static inline void nmr_rmw(const struct nmr_ops *o, uint32_t reg, uint32_t mask, uint32_t val) { o->wr(o->ctx, reg, (o->rd(o->ctx, reg) & ~mask) | (val & mask)); }
-/* Program all four lanes for (v, p). Level 0 with the firmware's own table is left as it is. Returns 0, or -1 for an invalid pair. */
-static inline int nmr_drive_apply(const struct nmr_ops *o, unsigned port, unsigned display_version, unsigned rate_khz, unsigned v, unsigned p)
+/* Program all four lanes for (v, p). Level 0 with the firmware's own table is left as it is. Returns 0, or -1 for a pair DP does
+ * not allow or one the chosen table has no row for. */
+static inline int nmr_drive_apply(const struct nmr_ops *o, unsigned port, unsigned display_version, unsigned rate_khz,
+                                  const struct nmr_edp *edp, unsigned v, unsigned p)
 {
     int idx = nmr_level_index(v, p), ln;
     const uint32_t base = nmr_phy_base(port);
-    if (idx < 0) return -1;
+    struct nmr_sel sel = nmr_select(display_version, rate_khz, edp);
+    if (idx < 0 || (unsigned)idx >= sel.n) return -1;
+    if (sel.hobl) nmr_rmw(o, base + 10 * 4, (1u << 3) | (1u << 2), (1u << 3) | (1u << 2));   /* EDP4K2K_MODE_OVRD_EN | OPTIMIZED in PORT_CL_DW10 */
     if (idx == 0) return 0;
     {
-        const struct nmr_trans *t = &nmr_table(display_version, rate_khz)[idx];
+        const struct nmr_trans *t = &sel.t[idx];
         for (ln = 0; ln < 4; ln++) {
             const uint32_t lane = base + 0x880u + 0x100u * (unsigned)ln;
             nmr_rmw(o, lane + 2 * 4, (1u << 15) | (7u << 11) | 0xFFu, ((uint32_t)(t->sw >> 3) << 15) | ((uint32_t)(t->sw & 7) << 11) | 0x98u);
@@ -285,17 +329,18 @@ static inline int nmr_drive_apply(const struct nmr_ops *o, unsigned port, unsign
 }
 
 /* ---- capture, while the firmware's mode is lit. 'pipe' is the pipe the adopted plane belongs to. */
-static inline int nmr_snapshot(const struct nmr_ops *o, struct nmr_snap *s, unsigned pipe)
+static inline int nmr_snapshot(const struct nmr_ops *o, struct nmr_snap *s, unsigned pipe, unsigned display_version, const struct nmr_edp *edp)
 {
     unsigned i, port, t = pipe; uint8_t b[4];
     s->valid = s->have_sink = s->no_handshake = 0;
+    if (edp) s->edp = *edp; else { s->edp.known = s->edp.low_vswing = s->edp.hobl = 0; }
     if (pipe > 3) return NMR_E_GEN;
     if (!(o->rd(o->ctx, NMR_TRANSCONF(pipe)) & NMR_TRANS_ENABLE)) return NMR_E_NO_SNAPSHOT;
     s->func = o->rd(o->ctx, NMR_FUNC_CTL(t));
     { unsigned sel = (s->func & NMR_TRANS_PORT_MASK) >> NMR_TRANS_PORT_SHIFT;    /* port + 1, 0 = none */
       if (!sel) return NMR_E_NO_SNAPSHOT;
       port = sel - 1; }
-    if (port > 1) return NMR_E_GEN;                                             /* DDI A and B are combo ports; C and later may be Type-C */
+    if (!(display_version == 12 || display_version == 13) || port > nmr_last_combo_port(display_version)) return NMR_E_GEN;   /* Type-C and later ports: refused */
     if (!(o->rd(o->ctx, NMR_DDI_BUF_CTL(port)) & NMR_DDI_ENABLE)) return NMR_E_NO_SNAPSHOT;
     s->topo.pipe = (uint8_t)pipe; s->topo.port = (uint8_t)port;
     s->pw_driver = o->rd(o->ctx, NMR_PW_DRIVER); s->pw_aux = o->rd(o->ctx, NMR_PW_AUX); s->pw_ddi = o->rd(o->ctx, NMR_PW_DDI);
@@ -341,14 +386,14 @@ static inline void nmr_note(const struct nmr_ops *o, const char *s) { if (o->log
  * intel_dp_link_training.c): the source repeats a level until the sink reports lock, follows the sink's adjust requests, gives
  * up after five tries at one voltage swing, ten loops in all, and at the maximum swing and pre-emphasis the sink can ask for.
  * Levels are applied to the source first (nmr_drive_apply), then written to the sink's TRAINING_LANEx_SET. */
-static inline uint8_t nmr_lane_set(unsigned v, unsigned p)
+static inline uint8_t nmr_lane_set(unsigned v, unsigned p, unsigned vmax)
 {
-    return (uint8_t)((v & 3) | (v >= 3 ? 4 : 0) | ((p & 3) << 3) | (p >= 3 || v + p >= 3 ? 0x20 : 0));
+    return (uint8_t)((v & 3) | (v >= vmax ? 4 : 0) | ((p & 3) << 3) | (p >= 3 || v + p >= 3 ? 0x20 : 0));
 }
 static inline int nmr_apply_level(const struct nmr_ops *o, const struct nmr_snap *s, unsigned v, unsigned p, unsigned display_version)
 {
     const unsigned rate = (s->dpcd[0] ? s->dpcd[0] : 0x14) * 27000u;
-    if (nmr_drive_apply(o, s->topo.port, display_version, rate, v, p)) return -1;
+    if (nmr_drive_apply(o, s->topo.port, display_version, rate, &s->edp, v, p)) return -1;
     if (o->set_drive && o->set_drive(o->ctx, v, p)) return -1;     /* an observer (tests) may refuse */
     return 0;
 }
@@ -371,7 +416,10 @@ static inline int nmr_train(const struct nmr_ops *o, const struct nmr_snap *s, u
     unsigned tries, loops, i, cur_v = 0, cur_p = 0, same_v_tries = 0;
     uint8_t lane_set[4], st[2], adj[2], al;
     uint32_t tp;
-    const unsigned cr_us = (s->dpcd[7] & 0x7F) ? 100u : 100u;
+    const unsigned cr_us = 100u;
+    /* the highest swing the source's table has a row for: the sink is told when it asks for more */
+    const struct nmr_sel sel = nmr_select(display_version, (s->dpcd[0] ? s->dpcd[0] : 0x14) * 27000u, &s->edp);
+    const unsigned vmax = sel.n >= 10 ? 3u : (sel.n >= 9 ? 2u : (sel.n >= 7 ? 1u : 0u));
     const unsigned eq_us = (s->dpcd[7] & 0x7F) ? (unsigned)(s->dpcd[7] & 0x7F) * 4000u : 400u;
     /* sink link settings, as the firmware had them */
     if (nmr_dpcd_wr1(o, port, NMR_DPCD_LINK_BW, s->dpcd[0]) != 1) return 0;
@@ -384,7 +432,7 @@ static inline int nmr_train(const struct nmr_ops *o, const struct nmr_snap *s, u
     o->wr(o->ctx, NMR_DP_TP_CTL(t), (tp & ~NMR_TP_PAT_MASK) | NMR_TP_ENABLE | NMR_TP_PAT1);
     if (nmr_dpcd_wr1(o, port, NMR_DPCD_TRAIN_PAT, 0x21) != 1) return 0;
     for (loops = 0; loops < 10; loops++) {
-        for (i = 0; i < lanes; i++) lane_set[i] = nmr_lane_set(cur_v, cur_p);
+        for (i = 0; i < lanes; i++) lane_set[i] = nmr_lane_set(cur_v, cur_p, vmax);
         if (nmr_dpcd_wr(o, port, NMR_DPCD_LANE0_SET, lane_set, lanes) != (int)lanes) return 0;
         o->delay_us(o->ctx, cr_us);
         if (nmr_dpcd_rd(o, port, NMR_DPCD_LANE01_STATUS, st, 2) != 2 || nmr_dpcd_rd(o, port, NMR_DPCD_ADJUST01, adj, 2) != 2) return 0;
@@ -424,7 +472,7 @@ static inline int nmr_train(const struct nmr_ops *o, const struct nmr_snap *s, u
             if (rv != cur_v || rp != cur_p) {
                 if (nmr_apply_level(o, s, rv, rp, display_version)) break;
                 cur_v = rv; cur_p = rp;
-                for (i = 0; i < lanes; i++) lane_set[i] = nmr_lane_set(cur_v, cur_p);
+                for (i = 0; i < lanes; i++) lane_set[i] = nmr_lane_set(cur_v, cur_p, vmax);
                 if (nmr_dpcd_wr(o, port, NMR_DPCD_LANE0_SET, lane_set, lanes) != (int)lanes) return 0;
             }
         }
