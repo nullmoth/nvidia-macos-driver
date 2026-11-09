@@ -89,6 +89,24 @@ int main(void)
       }
       ARM("the control (upload only once) leaves the GPU with stale bytes in the same cycle", stale > 0); }
 
+    /* the caller-pages variant (an unimportable managed no-copy range): the host side is the caller's memory and an owned
+       staging buffer carries both transfers */
+    { static unsigned char caller[N], staging[N], gpu[N]; nvmtl_swc c; int ok = 1; nvmtl_swc_init(&c, N);
+      for (size_t i = 0; i < N; i++) caller[i] = (unsigned char)(i ^ 0x33);
+      for (int it = 0; it < 20; it++) {
+          caller[(it * 1013) % N] ^= (unsigned char)(it + 1);                       /* the app writes its own pages */
+          unsigned char want[N]; memcpy(want, caller, N); for (size_t i = 0; i < N; i++) want[i] = (unsigned char)(want[i] * 3);
+          nvmtl_swc_range r[16]; int n = nvmtl_swc_before_submit(&c, caller, r, 16);
+          for (int i = 0; i < n; i++) { memcpy(staging + r[i].lo, caller + r[i].lo, r[i].hi - r[i].lo); memcpy(gpu + r[i].lo, staging + r[i].lo, r[i].hi - r[i].lo); }
+          for (size_t i = 0; i < N; i++) gpu[i] = (unsigned char)(gpu[i] * 3);       /* the kernel */
+          memcpy(staging, gpu, N); memcpy(caller, staging, N); nvmtl_swc_after_complete(&c, caller);
+          if (memcmp(caller, want, N) != 0) ok = 0;
+          memcpy(caller, want, N); memcpy(gpu, want, N);                             /* the app keeps what it read */
+          nvmtl_swc_after_complete(&c, caller);
+      }
+      ARM("caller pages with owned staging: 20 rounds of an app edit and a kernel pass return exactly the kernel's result", ok);
+      nvmtl_swc_free(&c); }
+
     /* eligibility */
     ARM("a Shared buffer inside the window qualifies when enabled", nvmtl_swc_wants(1, 1, 1 << 20, 4096, 64 << 20));
     ARM("  not when disabled (the default)", !nvmtl_swc_wants(0, 1, 1 << 20, 4096, 64 << 20));
