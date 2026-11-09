@@ -159,6 +159,8 @@ def current(s, bootargs, conf):
 
 def main(argv):
     if "--selftest" in argv: return selftest()
+    if "--catalog-json" in argv: sys.stdout.write(catalog_json()); return 0
+    if "--vectors-json" in argv: sys.stdout.write(vectors_json()); return 0
     if len(argv) < 2 or argv[1] not in ("list", "get", "set"): sys.exit(__doc__)
     ba, conf = read_bootargs(), read_conf()
     if argv[1] == "list":
@@ -178,6 +180,35 @@ def main(argv):
         if r.returncode: return r.returncode
     else: write_conf_atomic(new)
     print("set %s; takes effect after: %s" % (s["id"], s["effect"])); return 0
+
+def catalog_json():
+    """The catalogue as data, for the Mac app (mac/Resources/settings_catalog.json): one list, so the two cannot drift."""
+    import json
+    return json.dumps({"conf_path": CONF, "block_start": BLOCK_START, "block_end": BLOCK_END, "kept_pattern": KEPT.pattern,
+                       "settings": CATALOG}, indent=1, sort_keys=True) + "\n"
+
+def vectors_json():
+    """Inputs with the answers THIS implementation gives, for the app's test: its Swift port must give the same ones."""
+    import json
+    cases = []
+    vals = ["on", "off", "default", "auto", "1", "0", "maybe", "", " 60 ", "5", "10", "60", "1000", "1001", "-1", "3", "255", "256",
+            "150", "200", "201", "4", "32", "33", "4096", "Game=60,*=0", "*=30", "=60", "Game=abc", "G=60;rm -rf /", "60 fps",
+            "rgb", "ycbcr422", "ycbcr444", "full", "limited", "6", "8", "9", "12", "10bit", "x" * 200]
+    for st in CATALOG:
+        for v in vals:
+            try: cases.append({"fn": "normalize", "id": st["id"], "value": v, "expect": normalize(st, v)})
+            except ValueError: cases.append({"fn": "normalize", "id": st["id"], "value": v, "error": True})
+    for line in ["", "-v keepsyms=1 nvfbhdr=1 debug=0x144", "nvfbhdr=1 x nvfbhdr=0", "nvfbhdrx=1", "nvfbvrr"]:
+        for key, v in [("nvfbhdr", "1"), ("nvfbhdr", None), ("nvfbvrr", "0"), ("nvfbbpc", "10")]:
+            cases.append({"fn": "bootargs_set", "line": line, "key": key, "value": v, "expect": bootargs_set(line, key, v)})
+            cases.append({"fn": "bootargs_get", "line": line, "key": key, "expect": bootargs_get(line, key)})
+    texts = ["", "NVMTL_A=1\nNVK_B=2\n", "NVMTL_A=1\n" + BLOCK_START + "\nNVMTL_FPS_LIMIT=60\nNVK_X=1\n" + BLOCK_END + "\nNVK_Z=3\n",
+             BLOCK_START + "\n" + BLOCK_END + "\n", "NVMTL_FPS_LIMIT=30\n"]
+    for t in texts:
+        for key, v in [("NVMTL_FPS_LIMIT", "90"), ("NVMTL_FPS_LIMIT", None), ("NVK_X", None), ("NVMTL_GSUB_INFLIGHT", "4")]:
+            cases.append({"fn": "conf_set", "text": t, "key": key, "value": v, "expect": conf_set(t, key, v)})
+            cases.append({"fn": "conf_get", "text": t, "key": key, "expect": conf_get(t, key)})
+    return json.dumps(cases, indent=0) + "\n"
 
 def selftest():
     fails = []
