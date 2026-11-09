@@ -12,8 +12,10 @@ Matched by what the machine's ACPI tables carry, not by vendor name. Counts are 
 | ASUS | WMI device (`PNP0C14`, `_UID` "ATK"), `WMNB`, device id `0x00050021`, methods `DSTS` and `DEVS` | 33 | Built. Read from a real ASUS table: `WMNB`, `GLKB`/`SLKB`, level in the low 7 bits, `0x80` = on |
 | Lenovo IdeaPad, Legion, LOQ | device `VPC2004`: `KBLC` for three-level lights, `HALS`/`SALS` for plain on/off ones | 44 with `KBLC`, 54 with `HALS`/`SALS` | Built from the public ideapad-laptop driver's documented encodings, written again. Checked against a real table: its `HALS` does not set the keyboard-light support bit, so the plugin correctly finds no light on that model |
 | Lenovo ThinkPad | `HKEY` (`IBM0068`, `LEN0068` or `LEN0268`): `MLCG` and `MLCS` | 0 | Built from the public thinkpad_acpi driver's documented encodings (present = bit 9, level = low two bits). No ThinkPad table was in the uploads, so it has never met a real one |
-| MSI | embedded-controller fields (`KBBL`, `KBL0`), written directly | 27 | Not built: a write to controller memory with no method behind it, at a per-model address (the public msi-ec driver keeps a table per model). I did not read that table |
-| HP, Dell, Acer, Razer | HP and Dell use vendor WMI buffers (Dell's keyboard light goes through SMBIOS calls), Acer's through its own WMI | 33 HP, 31 Dell, 29 Acer | Not built. I did not read the HP, Dell or Acer drivers, and no Razer table was in the sample |
+| Dell | the SMBIOS calling interface through the Dell WMI GUID, class 4 select 11 | 31 tables carry Dell WMI methods | Built from the public dell-laptop and dell-smbios-wmi drivers' documented encodings, written again. Never run: the BIOS-side buffer size (4096 or 32768) is tried in turn, not queried through Dell's descriptor, and the tool was not tried on a Dell |
+| MSI | embedded-controller fields (`KBBL`, `KBL0`), written directly | 27 | Not built. The public msi-ec driver holds a per-firmware table of the controller address and a base value for the light, but implements no keyboard-light control of its own, so the meaning of the value written is not documented there; and a kext has no supported way to write controller memory without going around macOS's own controller driver |
+| HP, Acer | no keyboard-backlight method | 33 HP, 29 Acer | Not built. The public hp-wmi and acer-wmi drivers implement none (hp-wmi's lighting is a key event and a four-zone colour call for gaming models; acer-wmi has none), so there is no encoding to take |
+| Razer | a USB HID feature report | none in ACPI | `tools/razer/razer_kbd_backlight.c`, a user-space setter built from OpenRazer's documented 90-byte report, with a test that rebuilds the report from the description. Never run on a Razer: macOS asks for Input Monitoring permission, and which USB interface takes the report is per model |
 
 The plugin stands aside when VirtualSMC's `SMCLightSensor` is loaded and the machine has an ambient-light device with a
 working `_ALI`, because that plugin already registers `LKSB` and `LKSS`; `nmkblforce=1` registers anyway.
@@ -32,15 +34,24 @@ Two routes exist in the Intel build of macOS, and a PC's SMBIOS model decides wh
    HID service with a primary usage page and usage, not through the SMC. The SMBIOS models 1401 picks (MacPro7,1,
    iMac20,x, MacBookPro16,x) are T2-era models, so this is the route macOS 26 takes for them.
 
-This plugin implements route 1 only. Route 2 needs a virtual HID keyboard that carries the vendor element and answers
-report `0xBF`; the report's byte layout is not yet read, so it is not built. It is the missing piece for the PC's
-macOS 26 slider to work, and route 1 alone should not be expected to move the slider on a T2-era model.
+This plugin implements both. Route 2 is a virtual built-in keyboard (`NMKbdBacklightHID`, an IOHIDDevice) whose report
+descriptor carries the vendor element 0xFF00:0x0F as an input, a feature report 0xBF that answers `{ version 1, off, on_min,
+on_max }`, and an output report 0xB0 that takes `{ version 1, brightness, rate }`; the layouts are the ones the public Linux
+hid-apple driver documents and the macOS driver's own calls match. A set report is passed to the laptop through the same
+backend as the SMC route. `nmkblhid=0` turns the HID route off.
+
+## How the two routes meet VirtualSMC
+
+Read from VirtualSMC's keystore source: a plugin key that is already in VirtualSMC's own table is an override, and a second
+plugin overriding the same key panics; `LKSB` and `LKSS` are not in that table. Two plugins that both add them are merged in
+the order they loaded, with the first one found on a read. So the order, not a rule, would decide. This plugin therefore
+checks twice, at probe time and again just before it submits its keys, whether SMCLightSensor is loaded on a machine with an
+ambient-light `_ALI`; if it is, this plugin gives up only the SMC keys and keeps the HID route, which does not collide.
+`nmkblforce=1` registers the SMC keys anyway, and then the plugin that loaded first answers.
 
 ## What is unverified
 
-* Whether CoreBrightness on a T2-era SMBIOS ever looks at `LKSB` (see route 2 above).
-* VirtualSMC's `SMCLightSensor` also registers `LKSB` and `LKSS` as plain stored values; which registration wins when both
-  load has not been run.
+* Whether macOS 26 on a PC, with no T2 chip behind the keyboard, accepts a virtual keyboard as the built-in one and drives its backlight from it. The descriptor, the report layouts and the registry flags follow what the macOS driver was read to expect; the whole route has not run.
 * Whether the ASUS method behaves as the table reads on every ASUS model (it was read from one table and matched by name
   and device id in 33).
 

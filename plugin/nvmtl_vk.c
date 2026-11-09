@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
  */
 
+#include "nvmtl_game_priority.h"
 #include <dlfcn.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
@@ -1432,6 +1433,10 @@ static int nvmtl_vk_initialize(void)
     nvlog("vk: tessellation %s, vertex-stage stores %s", g_tess ? "AVAILABLE" : "ABSENT", supported.vertexPipelineStoresAndAtomics ? "on" : "off");
     VkDeviceCreateInfo dci = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, g_dyn3 ? (const void *)&dyn3 : (const void *)&v11, 0,
                                1, &qci, 0, NULL, next, next ? exts : NULL, &enabled };
+    { extern int nvmtl_process_is_game(void);   // Game Mode on a PC: raise this game process's GPU channel group (NVMTL_GAME_GPU_PRIORITY=1)
+      struct nvmtl_game_priority gp = nvmtl_game_priority_decide(getenv("NVMTL_GAME_GPU_PRIORITY"), getenv("NVMTL_GAME_GPU_PRIORITY") ? nvmtl_process_is_game() : 0, getenv("NVMTL_GAME_TIMESLICE_US"));
+      nvmtl_game_priority_apply(&gp);
+      if (gp.apply) nvlog("vk: Game Mode GPU priority: interleave HIGH, timeslice %lu us for this process", gp.timeslice_us); }
     VKCK(pvkCreateDevice(g_pdev, &dci, NULL, &g_dev), "vkCreateDevice");
     DEVICE_FNS(LOAD_D)
     g_storage_raw_create_view = pvkCreateImageView; pvkCreateImageView = nvmtl_storage_CreateImageView;
