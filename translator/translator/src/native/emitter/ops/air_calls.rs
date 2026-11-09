@@ -103,9 +103,9 @@ impl Emitter {
                 Ok(true)
             }
             "air.atomic.local.store.i32" | "air.atomic.global.store.i32" => {
-                if call.args.len() != 5 {
+                if !Self::atomic_arity_ok(call, 5) {
                     return Err(format!(
-                        "native emitter: {} expects 5 operands",
+                        "native emitter: {} expects 5 operands (or 6 from the newer toolchain)",
                         call.callee
                     ));
                 }
@@ -320,9 +320,9 @@ impl Emitter {
                 Ok(true)
             }
             "air.atomic.local.load.i32" | "air.atomic.global.load.i32" => {
-                if call.args.len() != 4 {
+                if !Self::atomic_arity_ok(call, 4) {
                     return Err(format!(
-                        "native emitter: {} expects 4 operands",
+                        "native emitter: {} expects 4 operands (or 5 from the newer toolchain)",
                         call.callee
                     ));
                 }
@@ -354,9 +354,9 @@ impl Emitter {
                 Ok(true)
             }
             "air.atomic.global.add.f32" => {
-                if call.args.len() != 5 {
+                if !Self::atomic_arity_ok(call, 5) {
                     return Err(format!(
-                        "native emitter: {} expects 5 operands",
+                        "native emitter: {} expects 5 operands (or 6 from the newer toolchain)",
                         call.callee
                     ));
                 }
@@ -390,9 +390,9 @@ impl Emitter {
                 Ok(true)
             }
             "air.atomic.global.sub.f32" => {
-                if call.args.len() != 5 {
+                if !Self::atomic_arity_ok(call, 5) {
                     return Err(format!(
-                        "native emitter: {} expects 5 operands",
+                        "native emitter: {} expects 5 operands (or 6 from the newer toolchain)",
                         call.callee
                     ));
                 }
@@ -433,9 +433,9 @@ impl Emitter {
                 Ok(true)
             }
             "air.atomic.local.cmpxchg.weak.i32" | "air.atomic.global.cmpxchg.weak.i32" => {
-                if call.args.len() != 7 {
+                if !Self::atomic_arity_ok(call, 7) {
                     return Err(format!(
-                        "native emitter: {} expects 7 operands",
+                        "native emitter: {} expects 7 operands (or 8 from the newer toolchain)",
                         call.callee
                     ));
                 }
@@ -502,6 +502,19 @@ impl Emitter {
             _ => Ok(false),
         }
     }
+    /// Atomic intrinsics take `base` operands in AIR up to 2.8. The AIR 2.9 toolchain inserts one more i32 ahead of the
+    /// trailing volatile flag; everything the lowering reads (pointer, values) keeps its position, so both lengths lower
+    /// the same way as long as the extra operand really is an i32.
+    fn atomic_arity_ok(call: &LlCall, base: usize) -> bool {
+        match call.args.len() {
+            n if n == base => true,
+            n if n == base + 1 => {
+                matches!(call.args[n - 2].ty, LlType::Int(32)) && matches!(call.args[n - 1].ty, LlType::Int(1))
+            }
+            _ => false,
+        }
+    }
+
     fn emit_integer_atomic_rmw(
         &mut self,
         call: &LlCall,
@@ -510,9 +523,9 @@ impl Emitter {
     ) -> Result<(), String> {
         let (op, width) = crate::air_intrinsics::integer_atomic_rmw(&call.callee)
             .ok_or("native emitter: missing integer atomic ABI")?;
-        if call.args.len() != 5 {
+        if !Self::atomic_arity_ok(call, 5) {
             return Err(format!(
-                "native emitter: {} expects 5 operands",
+                "native emitter: {} expects 5 operands (or 6 from the newer toolchain)",
                 call.callee
             ));
         }
