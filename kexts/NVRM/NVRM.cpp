@@ -1102,7 +1102,7 @@ void NVRM::autoGo(void *p0, wait_result_t)
         // accelerator. Arming before it exists leaves it without a pipe until a second write and a WindowServer restart,
         // so wait for it, bounded by the same 20 s as the NVIDIA heads.
         bool hyWait = false;
-        { int lv = 0; const int present = PE_parse_boot_argn("nmhybrid", &lv, sizeof(lv)); hyWait = present && lv >= 1 && lv <= 3; }
+        { int lv = 0; const int present = PE_parse_boot_argn("nmhybrid", &lv, sizeof(lv)); hyWait = present && lv >= 1 && lv <= 4; }
         int mask = 0, last = -1, still = 0, i;
         for (i = 0; i < 20; i++) {
             if (nvrmSysR("debug.nvaccel_heads_published", &mask) != 0) mask = 0;
@@ -2196,7 +2196,7 @@ static IOACPIPlatformDevice *rtd3Acpi(NVRM *n)
 }
 static int rtd3Heads(void *) {
     // Every framebuffer: this GPU's own heads, and (hybrid switch on) another GPU's panel published as a head of ours.
-    int hy = 0; { int lv = 0; const int present = PE_parse_boot_argn("nmhybrid", &lv, sizeof(lv)); hy = present && lv >= 1 && lv <= 3; }
+    int hy = 0; { int lv = 0; const int present = PE_parse_boot_argn("nmhybrid", &lv, sizeof(lv)); hy = present && lv >= 1 && lv <= 4; }
     OSDictionary *m = IOService::serviceMatching("IOFramebuffer"); if (!m) return 1;   // cannot look: treat as lit
     OSIterator *it = IOService::getMatchingServices(m); m->release();
     int own = 0, foreign = 0;
