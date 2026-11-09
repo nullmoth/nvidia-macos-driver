@@ -61,12 +61,18 @@ half-width equal to the radius, facing the ray. This is an approximation of the 
     is one it leaves through, so it does not hit. `curve_math.h` now (a) keeps only the surface a ray enters through (front faces of the
     cone, the spheres and the disks) and (b) for no caps, ends all hits beyond a crossing of the end plane inside the end radius heading in.
     After that `catmull4_round_nocap` passes and the head-on maps agree to within 3 rays.
-  - **Flat ribbons: characterised, not solved.** Apple's flat curve continues past each end point by about the end radius with a rounded
-    outline (the side-view maps show a lens narrowing to the end). A disc of the end point's radius in the ribbon plane (`CV_FLAT_DISC`,
-    off) brings the Catmull side views to within 7 and 4 rays of 4,096, but it breaks the B-spline flat cases (95th percentile 0.10 and
-    0.05: Apple's hit is a little behind the disc), and the disc's plane (ribbon plane or facing the ray, `CV_FLAT_DISC_FACING`) makes no
-    difference in these data. Because it makes cases that pass fail, it is not adopted.
-- **Result: 23 of 24 cases pass on both the M6 and the M4 fixtures** (the failing one is `catmull4_flat`).
+  - **Flat ribbons: solved.** The sweep was repeated for B-spline (4 and 3 control points), Bezier (4 and 3) and linear flat curves
+    (`oracle/fixtures/sweep_apple_*.txt` now hold seven cases, 42 batches). The extension past the end points is the same for every
+    basis, linear included, so it is not basis dependent. Its shape: a **half disc of the end point's radius that faces the ray** (its plane
+    is perpendicular to the ray through the end point), only beyond the end point, `curve_parameter` 0 or 1. Fitted on the 43 cap hits in the
+    24-case fixture: the facing plane matches 43 of 43 distances to 2e-3; the ribbon's own plane matches 4, the plane perpendicular to the
+    tangent matches 2. The earlier disc failed on B-spline because it sat in the ribbon plane, and because the whole disc (not only the half
+    beyond the end) hid ribbon hits in front of it. Flat curves only get it with sphere caps (the case the oracle measures; the other cap
+    modes for flat were not measured and get no extension).
+- **Result: all 24 cases pass on both the M6 and the M4 fixtures, and on the probe.** Flat cases agree to 0.0000 at the 95th percentile.
+  Residual in the sweeps: the side views agree to within 40 of 4,096 rays per batch (at the rim of the half disc, one batch of Bezier-4 has
+  40, B-spline-4 13); the head-on views (ray along the end tangent, where a ribbon has no orientation) differ by up to 15 percent of
+  the rays that hit (t of the near disc against the far end's), not matched, and not a configuration the oracle's cases reach.
 - **M4 mini (macOS 26.5.1): the same.** One short oracle process on the M4 (24 cases, then the probe), 120 s alarm, scratch directory, removed afterwards:
   all 24 cases accepted, no refusal, no hiccup. `oracle/fixtures/fixture_apple_m4.txt` and `fixture_apple_m4_probe.txt` are the dumps. Against the
   model it passes and fails the same 22 and 2 cases as the M6. M4 against M6, ray by ray: identical hit type, primitive id and parameter on all

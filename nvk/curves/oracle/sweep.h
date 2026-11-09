@@ -43,8 +43,8 @@ static inline void sw_rays(const struct curve_case *c, int batch, struct oracle_
 static inline int sw_cases(struct curve_case *out)
 {
    struct curve_case all[32]; int n = oracle_cases(all), m = 0;
-   const char *want[] = { "catmull4_round_nocap", "catmull4_flat" };
-   for (int w = 0; w < 2; w++) for (int i = 0; i < n; i++) if (!strcmp(all[i].name, want[w])) out[m++] = all[i];
+   const char *want[] = { "catmull4_round_nocap", "catmull4_flat", "bspline4_flat", "bezier4_flat", "linear2_flat", "bspline3_flat", "bezier3_flat" };
+   for (int w = 0; w < 7; w++) for (int i = 0; i < n; i++) if (!strcmp(all[i].name, want[w])) out[m++] = all[i];
    return m;
 }
 #endif

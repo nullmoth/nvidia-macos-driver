@@ -300,28 +300,22 @@ static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv
       cv_consider(o, &round, ray, valid, t, end ? one : zero);
    }
 
-#ifdef CV_FLAT_DISC
-   /* experiment: a flat curve with sphere end caps ends in a disc in the ribbon plane, of the end point's radius */
+   /* A flat curve with sphere end caps continues past each end point as a half disc of the end point's radius that faces the ray (a billboard:
+    * its plane is perpendicular to the ray through the end point). Measured on Apple GPUs: 43 of 43 cap hits at curve_parameter 0 or 1 lie in
+    * that plane, and no other plane (the ribbon's, perpendicular to the tangent) fits. Only the half beyond the end point exists; the ribbon
+    * itself is there in front of it. A ray along the tangent sees the whole disc, hence the small tolerance on "beyond". */
    for (int end = 0; end < 2; end++) {
       V3 P = end ? Q[CV_SUBDIV] : Q[0]; V3 a = end ? axisN : axis0; V rP = end ? R[CV_SUBDIV] : R[0];
-#ifdef CV_FLAT_DISC_FACING
-      V3 n = ray->d;                                                   /* the disc faces the ray */
-#else
-      V3 n = v3sub(o, v3mul(o, a, v3dot(o, a, ray->d)), ray->d);
-#endif
-      V nn = v3dot(o, n, n), dn = v3dot(o, ray->d, n);
-      V okn = and_(o, lt_(o, k_(o, 1e-10f), nn), lt_(o, k_(o, 1e-10f), abs_(o, dn)));
-      V t = sdiv_(o, v3dot(o, v3sub(o, P, ray->o), n), dn, okn);
+      V dd = v3dot(o, ray->d, ray->d);
+      V okn = lt_(o, k_(o, 1e-20f), dd);
+      V t = sdiv_(o, v3dot(o, v3sub(o, P, ray->o), ray->d), dd, okn);
       V3 q = v3sub(o, v3add(o, ray->o, v3mul(o, ray->d, t)), P);
-      V valid = and_(o, and_(o, okn, eq_(o, c->caps, k_(o, 2.0f))), le_(o, v3dot(o, q, q), mul_(o, rP, rP)));
-#ifdef CV_FLAT_HALF
-      /* only the half beyond the end point: the ribbon itself covers the rest */
-      V qa_ = v3dot(o, q, a);
-      valid = and_(o, valid, end ? le_(o, zero, qa_) : le_(o, qa_, zero));
-#endif
+      V tol = mul_(o, rP, k_(o, 1e-3f));
+      V qa = v3dot(o, q, a);
+      V beyond = end ? le_(o, sub_(o, zero, tol), qa) : le_(o, qa, tol);
+      V valid = and_(o, and_(o, okn, beyond), and_(o, eq_(o, c->caps, k_(o, 2.0f)), le_(o, v3dot(o, q, q), mul_(o, rP, rP))));
       cv_consider(o, &flat, ray, valid, t, end ? one : zero);
    }
-#endif
 
    struct cv_hit h;
    h.hit = sel_(o, c->flat, flat.hit, round.hit);
