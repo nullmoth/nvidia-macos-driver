@@ -21,6 +21,15 @@
 
 #define NVMTL_GAME_DEFAULT_TIMESLICE_US 4000UL
 
+/* One state drives all of it. When the Game Mode service is installed (1401 turned it on: the root-owned folder
+ * /Library/NullMoth/gamemode exists), the two switches below default to on; an explicit value in the environment, 0 or 1,
+ * always wins. So the CPU side, the game's own GPU priority and the lowering of other clients all follow one setting. */
+static inline const char *nvmtl_game_switch(const char *env_value, int service_installed)
+{
+    if (env_value && *env_value) return env_value;
+    return service_installed ? "1" : 0;
+}
+
 struct nvmtl_game_priority {
     int apply;                  /* 0: set nothing */
     int interleave_high;        /* NVRM_TSG_Q0_HIGH=1 */
