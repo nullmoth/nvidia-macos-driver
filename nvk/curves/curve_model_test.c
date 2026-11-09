@@ -219,6 +219,42 @@ int main(void)
       printf("info cut accuracy: 8 pieces against 48 pieces, %s\n", d);
       arm("the 8-piece cut stays within 0.05 of a 48-piece cut on at least 90 percent of common hits (scene scale 3, radius 0.08 to 0.35)", n > 10 && agree * 10 >= n * 9, d);
    }
+   /* bounds: a port of curve_aabb.comp must contain every sphere of the curve, for every basis */
+   {
+      int contained = 1, total = 0;
+      for (int combo = 0; combo < 6; combo++) {
+         for (int k = 0; k < 300; k++) {
+            struct curve c = rand_curve(combos[combo].basis, combos[combo].count, 2);
+            D3 p[4]; double r[4]; for (int i = 0; i < 4; i++) { p[i] = c.p[i]; r[i] = c.r[i]; }
+            int n = c.count;
+            if (c.basis == 1 && n == 4) {
+               D3 b1 = add3(p[1], mul3(sub3(p[2], p[0]), 1 / 6.0)), b2 = sub3(p[2], mul3(sub3(p[3], p[1]), 1 / 6.0));
+               double s1 = r[1] + (r[2] - r[0]) / 6, s2 = r[2] - (r[3] - r[1]) / 6;
+               p[0] = p[1]; p[3] = p[2]; p[1] = b1; p[2] = b2; r[0] = r[1]; r[3] = r[2]; r[1] = s1; r[2] = s2;
+            }
+            D3 lo = p[0], hi = p[0]; double rmax = fabs(r[0]);
+            for (int i = 1; i < n; i++) { lo = d3(fmin(lo.x, p[i].x), fmin(lo.y, p[i].y), fmin(lo.z, p[i].z)); hi = d3(fmax(hi.x, p[i].x), fmax(hi.y, p[i].y), fmax(hi.z, p[i].z)); rmax = fmax(rmax, fabs(r[i])); }
+            double g = rmax * 1.0001 + 1e-6;
+            for (int s = 0; s <= 64; s++) {
+               D3 q; double rr; eval(&c, s / 64.0, &q, &rr);
+               total++;
+               if (q.x - rr < lo.x - g || q.x + rr > hi.x + g || q.y - rr < lo.y - g || q.y + rr > hi.y + g || q.z - rr < lo.z - g || q.z + rr > hi.z + g) contained = 0;
+            }
+         }
+      }
+      snprintf(d, sizeof d, "%d spheres checked", total);
+      arm("the segment box contains every sphere of the curve, for every basis (Catmull-Rom through its Bezier form)", contained, d);
+      /* control: without the Bezier conversion the Catmull-Rom box is too small for some curves */
+      int escaped = 0;
+      for (int k = 0; k < 600 && !escaped; k++) {
+         struct curve c = rand_curve(1, 4, 2);
+         D3 lo = c.p[0], hi = c.p[0]; double rmax = fabs(c.r[0]);
+         for (int i = 1; i < 4; i++) { lo = d3(fmin(lo.x, c.p[i].x), fmin(lo.y, c.p[i].y), fmin(lo.z, c.p[i].z)); hi = d3(fmax(hi.x, c.p[i].x), fmax(hi.y, c.p[i].y), fmax(hi.z, c.p[i].z)); rmax = fmax(rmax, c.r[i]); }
+         for (int s = 0; s <= 64; s++) { D3 q; double rr; eval(&c, s / 64.0, &q, &rr);
+            if (q.x < lo.x - rmax || q.x > hi.x + rmax || q.y < lo.y - rmax || q.y > hi.y + rmax || q.z < lo.z - rmax || q.z > hi.z + rmax) escaped = 1; }
+      }
+      arm("control: a Catmull-Rom segment can leave the box of its own control points, which is why the conversion exists", escaped, "never escaped: the conversion is untested");
+   }
    printf("%d arms failed\n", fails);
    return fails != 0;
 }

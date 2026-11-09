@@ -1,0 +1,90 @@
+/*
+ * curve_aabb.comp - one box per curve segment: the control points of the segment in Bezier form (Catmull-Rom is converted, the
+ * others lie in the hull of their own points), grown by the largest radius. One invocation per segment.
+ */
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+
+layout(local_size_x = 64) in;
+
+#define VK_USED_BUILD_FLAGS 0
+#include "vk_bvh_helpers.h"
+#include "nvk_curve.h"
+
+struct nvk_curve_f32 { float v; };
+struct nvk_curve_u16 { uint16_t v; };
+struct nvk_curve_u32 { uint32_t v; };
+TYPE(nvk_curve_f32, 4);
+TYPE(nvk_curve_u16, 2);
+TYPE(nvk_curve_u32, 4);
+
+struct nvk_curve_aabb_args {
+   uint64_t control_points;
+   uint64_t radii;
+   uint64_t indices;
+   uint64_t out_boxes;
+   uint32_t control_point_stride;
+   uint32_t radius_stride;
+   uint32_t flags;
+   uint32_t segment_count;
+};
+layout(push_constant) uniform CONSTS { nvk_curve_aabb_args args; };
+
+float
+load_f(uint64_t addr, bool half_format)
+{
+   if (half_format)
+      return float(uint16BitsToFloat16(DEREF(REF(nvk_curve_u16)(addr)).v));
+   return DEREF(REF(nvk_curve_f32)(addr)).v;
+}
+
+void
+main()
+{
+   uint32_t gid = gl_GlobalInvocationID.x;
+   if (gid >= args.segment_count) return;
+   uint32_t basis = (args.flags >> NVK_CURVE_BASIS_SHIFT) & 3u;
+   uint32_t count = (args.flags >> NVK_CURVE_COUNT_SHIFT) & 7u;
+   bool cp_half = ((args.flags >> NVK_CURVE_CPFMT_SHIFT) & 1u) != 0u;
+   bool rad_half = ((args.flags >> NVK_CURVE_RADFMT_SHIFT) & 1u) != 0u;
+   bool idx32 = ((args.flags >> NVK_CURVE_IDXTYPE_SHIFT) & 1u) != 0u;
+   uint32_t first = idx32 ? DEREF(REF(nvk_curve_u32)(OFFSET(args.indices, gid * 4u))).v
+                          : uint32_t(DEREF(REF(nvk_curve_u16)(OFFSET(args.indices, gid * 2u))).v);
+   vec3 p[4];
+   float r[4];
+   for (uint32_t i = 0; i < 4u; i++) {
+      uint32_t k = first + (i < count ? i : 0u);
+      uint64_t cp = OFFSET(args.control_points, k * args.control_point_stride);
+      uint32_t es = cp_half ? 2u : 4u;
+      p[i] = vec3(load_f(cp, cp_half), load_f(OFFSET(cp, es), cp_half), load_f(OFFSET(cp, 2u * es), cp_half));
+      r[i] = load_f(OFFSET(args.radii, k * args.radius_stride), rad_half);
+   }
+   if (basis == 1u && count == 4u) {
+      /* Catmull-Rom segment (P1 to P2) as a Bezier: the control points leave the hull of the originals */
+      vec3 b1 = p[1] + (p[2] - p[0]) / 6.0, b2 = p[2] - (p[3] - p[1]) / 6.0;
+      float s1 = r[1] + (r[2] - r[0]) / 6.0, s2 = r[2] - (r[3] - r[1]) / 6.0;
+      p[0] = p[1]; p[3] = p[2]; p[1] = b1; p[2] = b2;
+      r[0] = r[1]; r[3] = r[2]; r[1] = s1; r[2] = s2;
+   }
+   vec3 lo = p[0], hi = p[0];
+   float rmax = abs(r[0]);
+   for (uint32_t i = 1u; i < 4u; i++) {
+      if (i < count) { lo = min(lo, p[i]); hi = max(hi, p[i]); rmax = max(rmax, abs(r[i])); }
+   }
+   float g = rmax * 1.0001 + 1.0e-6;
+   uint64_t box = OFFSET(args.out_boxes, gid * 24u);
+   DEREF(REF(nvk_curve_f32)(box)).v = lo.x - g;
+   DEREF(REF(nvk_curve_f32)(OFFSET(box, 4u))).v = lo.y - g;
+   DEREF(REF(nvk_curve_f32)(OFFSET(box, 8u))).v = lo.z - g;
+   DEREF(REF(nvk_curve_f32)(OFFSET(box, 12u))).v = hi.x + g;
+   DEREF(REF(nvk_curve_f32)(OFFSET(box, 16u))).v = hi.y + g;
+   DEREF(REF(nvk_curve_f32)(OFFSET(box, 20u))).v = hi.z + g;
+}
