@@ -11,9 +11,17 @@
 #include <mach/task.h>
 #include <sys/proc.h>
 extern "C" {
+// NVIDIA's open-gpu-kernel-modules headers (third-party) carry their own integer-conversion warnings under the kernel
+// compiler's defaults; the exception is scoped to these includes and our code below stays checked.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wsign-conversion"
+#pragma clang diagnostic ignored "-Wimplicit-int-conversion"
+#pragma clang diagnostic ignored "-Wshorten-64-to-32"
+#pragma clang diagnostic ignored "-Wc99-designator"
 #include "nvidia-modeset-os-interface.h"
 #include "nv-gpu-info.h"
 #include "nvUnixVersion.h"
+#pragma clang diagnostic pop
 }
 
 static inline void nvu_memset(void *p, int c, size_t n) { __asm__ __volatile__("rep stosb" : "+D"(p), "+c"(n) : "a"(c) : "memory"); }

@@ -4,7 +4,12 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOPlatformExpert.h>
+// the SDK's IOPCIDevice.h overrides without 'override' (the other kexts pass -Wno-inconsistent-missing-override for it);
+// scoped to that one header here so this file's own declarations stay checked
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winconsistent-missing-override"
 #include <IOKit/pci/IOPCIDevice.h>
+#pragma clang diagnostic pop
 #include <mach/kmod.h>
 #include <libkern/version.h>
 #include "nvrm_gpu_select.h"
