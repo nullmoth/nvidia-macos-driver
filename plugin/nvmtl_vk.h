@@ -407,6 +407,8 @@ int  nvmtl_vk_copy_buffer_to_image(nvk_queue *q, nvk_buffer *b, size_t off, uint
 int  nvmtl_vk_copy_image_to_buffer(nvk_queue *q, nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                    nvk_buffer *b, size_t off, uint32_t row_bytes);
 void nvmtl_vk_cmd_draw_indirect(nvk_cmdbuf *c, nvk_buffer *b, size_t off);
+/* empties the indirect-argument records (5 words each) outside the {location, length} range the GPU wrote at range+range_off */
+int nvmtl_vk_cmd_icb_mask(nvk_cmdbuf *c, nvk_buffer *args, nvk_buffer *range, size_t range_off, uint32_t slots, uint32_t zero);
 void nvmtl_vk_cmd_draw_indexed_indirect(nvk_cmdbuf *c, nvk_buffer *idx, size_t idxOff, int is32, nvk_buffer *b, size_t off);
 void nvmtl_vk_cmd_dispatch_indirect(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *b, size_t off);
 void nvmtl_vk_cmd_barrier(nvk_cmdbuf *c);

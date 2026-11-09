@@ -24,6 +24,7 @@
 #include "nvmtl_cmd_refusal.h"
 #include "nvmtl_loss.h"
 #include "nvmtl_multiview.h"
+#include "nvmtl_icb_range.h"
 #include "nvmtl_copy_compat.h"
 #include "nvmtl_sampler_state.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
@@ -9782,6 +9783,52 @@ int nvmtl_vk_cmd_sum_occlusion(nvk_cmdbuf *c, nvk_buffer *src, size_t first, uin
     pvkCmdPushConstants(c->cb, g_visibility_sum_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof args, &args);
     pvkCmdDispatch(c->cb, 1, 1, 1);
     nvmtl_vk_cmd_barrier(c);
+    return 0;
+}
+
+// Zeroes the leading `zero` words of every indirect-argument record of `args` (stride NVMTL_ICB_RECORD_WORDS) that lies
+// outside the {location, length} range the GPU wrote at `range` (nvmtl_icb_range.h). Outside a render pass.
+static pthread_mutex_t g_icb_mask_lock = PTHREAD_MUTEX_INITIALIZER;
+static VkPipeline g_icb_mask_pipeline;
+static VkPipelineLayout g_icb_mask_layout;
+static int nvmtl_icb_mask_init(void)
+{
+    int rc = -1;
+    pthread_mutex_lock(&g_icb_mask_lock);
+    if (g_icb_mask_pipeline) { rc = 0; goto done; }
+    VkShaderModule mod = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo sm = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_icb_mask_spv, nvmtl_icb_mask_spv };
+    if (pvkCreateShaderModule(g_dev, &sm, NULL, &mod) != VK_SUCCESS) goto done;
+    VkPushConstantRange push = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 28 };
+    VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL, 1, &push };
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (pvkCreatePipelineLayout(g_dev, &li, NULL, &layout) == VK_SUCCESS) {
+        VkPipelineShaderStageCreateInfo stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", NULL };
+        VkComputePipelineCreateInfo pi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, stage, layout, VK_NULL_HANDLE, -1 };
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        if (nvmtl_create_compute_pipeline(g_dev, VK_NULL_HANDLE, &pi, NULL, &pipeline) == VK_SUCCESS) {
+            g_icb_mask_layout = layout; g_icb_mask_pipeline = pipeline; rc = 0;
+        } else {
+            if (pipeline) pvkDestroyPipeline(g_dev, pipeline, NULL);
+            pvkDestroyPipelineLayout(g_dev, layout, NULL);
+        }
+    }
+    pvkDestroyShaderModule(g_dev, mod, NULL);
+done:
+    pthread_mutex_unlock(&g_icb_mask_lock);
+    return rc;
+}
+int nvmtl_vk_cmd_icb_mask(nvk_cmdbuf *c, nvk_buffer *args, nvk_buffer *range, size_t range_off, uint32_t slots, uint32_t zero)
+{
+    if (!c || c->in_rp || !args || !range || !slots || (range_off & 3) || range_off > range->size || range->size - range_off < 8 ||
+        args->size < (size_t)slots * NVMTL_ICB_RECORD_BYTES || nvmtl_icb_mask_init()) return -1;
+    nvmtl_icb_mask_args a = { nvmtl_vk_buffer_address(args), nvmtl_vk_buffer_address(range) + range_off, slots, NVMTL_ICB_RECORD_WORDS, zero, 0 };
+    if (!a.records || !a.range) return -1;
+    nvmtl_vk_cmd_barrier(c);   // the GPU wrote the range in an earlier pass; the CPU wrote the records before submission
+    pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_icb_mask_pipeline);
+    pvkCmdPushConstants(c->cb, g_icb_mask_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 28, &a);
+    pvkCmdDispatch(c->cb, nvmtl_icb_mask_groups(slots), 1, 1);
+    nvmtl_vk_cmd_barrier(c);   // the indirect draws and dispatches read the records next
     return 0;
 }
 
