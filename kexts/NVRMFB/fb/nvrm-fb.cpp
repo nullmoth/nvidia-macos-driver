@@ -1781,6 +1781,8 @@ bool NVRMNVDAFramebuffer::waitFlipDone(uint64_t limitUs)
 // its flip latches, i.e. reintroduces the strobe). The counters report the real wait the compositor
 // path takes, which is what an on-machine flicker check reads.
 static int gFlipLatch = 1;
+// 1 = at 357 Hz and above a latch setting of 1 is run as 2 (see nvrmFlipLatchMode); 0 keeps the synchronous wait at any rate.
+static int gFlipLatchAuto = 1;
 static int gFlipLatchWaits = 0, gFlipLatchTimeouts = 0, gFlipLatchMaxUs = 0, gFlipLatchLate = 0;
 // gFlipLatch == 2 (opt in): priorFlipState() at the head of the next submit verifies the flip instead of this submit
 // waiting for it. The wait costs half a refresh period on the present path (2.08 ms of a 4.17 ms 240 Hz frame, #300).
@@ -1954,7 +1956,7 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
     fFlipSubmitAbs = submit0;
     // Initial acceptance permits console handoff, never surface retirement. The owned boot surface remains pinned.
     if (bootstrap || !gFlipLatch) return NV_TRUE;
-    if (gFlipLatch == 2) { OSIncrementAtomic((volatile SInt32 *)&gFlipLatchDeferred); return NV_TRUE; }
+    if (nvrmFlipLatchMode(gFlipLatch, gFlipLatchAuto, flipWaitUs() * 800ull) == 2) { OSIncrementAtomic((volatile SInt32 *)&gFlipLatchDeferred); return NV_TRUE; }
     OSIncrementAtomic((volatile SInt32 *)&gFlipLatchWaits);
     const uint64_t latch0 = mach_absolute_time();
     if (waitFlipDone(flipWaitUs())) {
@@ -3445,7 +3447,7 @@ void NVRMNVDAFramebuffer::publishTimingCaps()
     r.minPixelClock = 25000000ull; r.maxPixelClock = 1200000000ull; r.maxPixelError = 0;
     r.supportedSyncFlags = kIORangeSupportsSeparateSyncs;
     r.supportedSignalLevels = 0; r.supportedSignalConfigs = kIODigitalSignal;
-    r.minFrameRate = 23; r.maxFrameRate = 500; r.minLineRate = 10000; r.maxLineRate = 1000000;
+    r.minFrameRate = 23; r.maxFrameRate = kNvrmMaxFrameRate; r.minLineRate = 10000; r.maxLineRate = 1000000;
     r.maxHorizontalTotal = 16384; r.maxVerticalTotal = 16384;
     r.charSizeHorizontalActive = r.charSizeHorizontalBlanking = r.charSizeHorizontalSyncOffset = r.charSizeHorizontalSyncPulse = 1;
     r.charSizeVerticalActive = r.charSizeVerticalBlanking = r.charSizeVerticalSyncOffset = r.charSizeVerticalSyncPulse = 1;
@@ -3465,8 +3467,8 @@ void NVRMNVDAFramebuffer::publishTimingCaps()
     OSData *g = OSData::withBytes(&r, sizeof r);
     if (g) { setProperty(kIOFBTimingRangeKey, g); g->release(); }
     setProperty(kIOFBProbeOptionsKey, (unsigned long long)kNVRMFBSetTransform, 32);
-    FBLOG("fbmodes: published IOFBScalerInfo (up+down+rotate, max %ux%u) + IOFBTimingRange (25 MHz..1.2 GHz, 23..500 Hz) + IOFBProbeOptions 0x%x",
-          fScalerMaxW, fScalerMaxH, (unsigned)kNVRMFBSetTransform);
+    FBLOG("fbmodes: published IOFBScalerInfo (up+down+rotate, max %ux%u) + IOFBTimingRange (25 MHz..1.2 GHz, 23..%u Hz) + IOFBProbeOptions 0x%x",
+          fScalerMaxW, fScalerMaxH, (unsigned)kNvrmMaxFrameRate, (unsigned)kNVRMFBSetTransform);
 }
 IOReturn NVRMNVDAFramebuffer::getInformationForDisplayMode(IODisplayModeID mode, IODisplayModeInformation *info)
 {
@@ -3671,6 +3673,7 @@ SYSCTL_INT(_debug, OID_AUTO, nvrmfb_vramtest_mode, CTLFLAG_RW | CTLFLAG_LOCKED, 
 static int gFlipInterval = 1;
 // gFlipLatch and the counters are defined above submitConfig, where the completion wait drives them.
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch, CTLFLAG_RW | CTLFLAG_LOCKED, &gFlipLatch, 0, "1 = a committed flip waits for its completion before a surface retires (0 = debug bypass, 2 = deferred: the next submit verifies it)");
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_auto, CTLFLAG_RW | CTLFLAG_LOCKED, &gFlipLatchAuto, 0, "1 = at 357 Hz and above latch mode 1 runs as 2 (deferred); 0 = always wait");
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_deferred, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchDeferred, 0, "flips verified by the next submit instead of waited for");
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_waits, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchWaits, 0, "flips that waited for completion");
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_guard_cleared, CTLFLAG_RD | CTLFLAG_LOCKED, &gGuardCleared, 0, "1 once the boot guard was cleared this boot");
@@ -3707,7 +3710,7 @@ static void nvrmfbInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_lean);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_waits);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_timeouts); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_max_us);
-    sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_late); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_deferred);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_late); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_deferred); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_auto);
 }
 
 bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
