@@ -1,0 +1,51 @@
+/*
+ * encode_wide.comp - the 8-wide node option of the hardware encoder (docs/HWRT.md). NVK_HWRT_WIDE=1 runs it after encode_ttu.comp,
+ * overwriting the node area with wide nodes (same bytes reserved, sparse slots) and leaving the leaves and the header as they are.
+ * The passes are in encode_wide_body.h, which the host test also compiles and runs.
+ */
+#version 460
+
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#define VK_USED_BUILD_FLAGS 0
+#include "vk_bvh_helpers.h"
+#include "nvk_hwrt.h"
+
+struct nvk_wide_u8 { uint8_t v; };
+TYPE(nvk_wide_u8, 1);
+
+struct wide_args {
+   uint64_t ir, dst, header;
+   uint32_t leaf_count, internal_count, leaf_type, out_leaf_size, hdr, ir_leaf_size, ir_box_size, pass;
+};
+layout(push_constant) uniform CONSTS { wide_args pc; };
+
+#define W_ARGS wide_args a
+uint32_t ld32(uint64_t p) { return DEREF(REF(nvk_hwrt_word32)(p)).v; }
+float ldf(uint64_t p) { return uintBitsToFloat(DEREF(REF(nvk_hwrt_word32)(p)).v); }
+void st32(uint64_t p, uint32_t v) { DEREF(REF(nvk_hwrt_word32)(p)).v = v; }
+void stf(uint64_t p, float v) { DEREF(REF(nvk_hwrt_word32)(p)).v = floatBitsToUint(v); }
+void st8(uint64_t p, uint32_t v) { DEREF(REF(nvk_wide_u8)(p)).v = uint8_t(v); }
+#include "encode_wide_body.h"
+
+void
+main()
+{
+   uint32_t gid = gl_GlobalInvocationID.x;
+   /* the box count is a GPU value, the one encode_ttu.comp used for the node area and the leaf offsets */
+   wide_args a = pc;
+   a.internal_count = max(DEREF(REF(vk_ir_header)(pc.header)).ir_internal_node_count, 1u);
+   if (pc.pass == 0u) wide_pass_init(a, gid);
+   else if (pc.pass == 1u) wide_pass_round(a, gid);
+   else wide_pass_write(a, gid);
+}
