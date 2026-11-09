@@ -24,6 +24,10 @@ k1 = source.index('} else {', k0)
 kept = source[k0:k1]
 assert 'gIopAsyncRefuseRun' not in kept and 'gCntIopAsyncRefused' not in kept, 'a busy flip counts as a refusal again'
 assert 'gCntIopLate' in kept, 'a kept frame is no longer counted'
+# a flip with nowhere to go (display asleep, GPU in standby) is dropped without counting as a refusal (#470)
+a0 = source.index('} else if (outcome == kNvFlipAsleep) {')
+asleep = source[a0:source.index('} else {', a0)]
+assert 'gIopAsyncRefuseRun' not in asleep and 'gCntIopAsyncRefused' not in asleep, 'a flip into a sleeping display counts as a refusal again'
 assert 'sysctl_register_oid(&sysctl__debug_nvaccel_iop_late);' in source, 'the kept-frame counter is defined but never registered as a sysctl'
 # the synchronous path keeps the frame too, before the refusal branch copies it
 s0 = source.index('static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe)\n{')
@@ -46,7 +50,7 @@ fb = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
 assert fb.count('publishFlipWait();') >= 2 and 'setProperty("NVRMFlipWaitUs"' in fb, 'the framebuffer does not publish its period'
 
 control = r'''
-enum { kNvFlipShown = 0, kNvFlipKept = 1, kNvFlipRefused = 2 };
+enum { kNvFlipShown = 0, kNvFlipKept = 1, kNvFlipRefused = 2, kNvFlipAsleep = 3 };
 static int nvAccelFlipOutcome(IOReturn rr) { return rr == kIOReturnSuccess ? kNvFlipShown : kNvFlipRefused; }
 '''
 
@@ -60,7 +64,7 @@ int main() {
     assert(nvAccelFlipOutcome(kIOReturnSuccess) == kNvFlipShown && "a flip NVKMS took is on the panel");
     assert(nvAccelFlipOutcome(kIOReturnBusy) == kNvFlipKept && "busy keeps the frame: the previous flip is still landing");
     assert(nvAccelFlipOutcome(kIOReturnIOError) == kNvFlipRefused && "an I/O error is a refusal (copy)");
-    assert(nvAccelFlipOutcome(kIOReturnNotReady) == kNvFlipRefused && "a faulted head is a refusal (copy)");
+    assert(nvAccelFlipOutcome(kIOReturnNotReady) == kNvFlipAsleep && "a sleeping display or a GPU in standby is not a refusal: the frame has nowhere to go");
     printf("OK\n");
     return 0;
 }
