@@ -1,0 +1,178 @@
+--- nak_nir_lower_non_uniform_ldcx.c.pre-pinwhole	2026-10-05 15:46:08
++++ nak_nir_lower_non_uniform_ldcx.c	2026-11-01 01:47:43
+@@ -457,20 +457,83 @@
+    }
+ }
+ 
+-/* Returns the uniform 64-bit operand of the access's iadd address, or NULL. */
++/* div_idx values for an address with no per-thread part. */
++#define PIN_ADDR_KEEP 2u /* base already in the uniform slot, offset is 0 */
++#define PIN_ADDR_SWAP 3u /* base in the offset slot, uniform slot is 0 */
++
++static bool
++pin_addr_whole_enabled(void)
++{
++   static int enabled = -1;
++   if (enabled < 0) {
++      const char *e = getenv("NVMTL_NAK_NO_PIN_WHOLE");
++      enabled = !(e != NULL && e[0] == '1');
++   }
++   return enabled;
++}
++
++/* Minimum uses before a whole-only base is pinned (census-chosen default). */
++static unsigned
++pin_addr_whole_min(void)
++{
++   static int min = -1;
++   if (min < 0) {
++      const char *e = getenv("NVMTL_NAK_PIN_WHOLE_MIN");
++      min = e && *e ? atoi(e) : 2;
++      if (min < 1)
++         min = 1;
++   }
++   return min;
++}
++
++static nir_def *
++pin_addr_check_base(nir_def *base, nir_block *pred)
++{
++   if (base->bit_size != 64 || base->num_components != 1 || base->divergent)
++      return NULL;
++   if (!can_hoist_def(base, pred))
++      return NULL;
++   return base;
++}
++
++/* Returns the uniform 64-bit operand of the access's address, or NULL.
++ *
++ * Besides iadd(per-thread, uniform), an address can be uniform as a whole:
++ * a kernel-argument pointer read at a fixed offset. GB7 raw_process does 50
++ * such loads inside its bounds check, and unpinned, legalize copied the
++ * base into a fresh GPR pair before every one (84 of its 664 instructions
++ * were those movs). NVMTL_NAK_NO_PIN_WHOLE=1 turns this case off. */
+ static nir_def *
+ pin_addr_uniform_base(nir_intrinsic_instr *intr, nir_block *pred,
+                       unsigned *div_idx)
+ {
+    nir_src *offset_src = pin_addr_offset_src(intr);
+-   if (offset_src == NULL || offset_src->ssa->bit_size != 64)
++   if (offset_src == NULL)
+       return NULL;
+ 
+    nir_src *uniform_src = nir_get_io_uniform_offset_src(intr);
+-   if (uniform_src == NULL || !nir_src_is_const(*uniform_src) ||
+-       nir_src_as_uint(*uniform_src) != 0)
++   if (uniform_src == NULL)
++      return NULL;
++
++   const bool uslot_zero = nir_src_is_const(*uniform_src) &&
++                           nir_src_as_uint(*uniform_src) == 0;
++   if (!uslot_zero) {
++      if (!pin_addr_whole_enabled() || !nir_src_is_const(*offset_src) ||
++          nir_src_as_uint(*offset_src) != 0)
++         return NULL;
++      *div_idx = PIN_ADDR_KEEP;
++      return pin_addr_check_base(uniform_src->ssa, pred);
++   }
++
++   if (offset_src->ssa->bit_size != 64)
+       return NULL;
+ 
++   if (pin_addr_whole_enabled() && !nir_src_is_const(*offset_src) &&
++       !nir_def_is_divergent_at_use_block(offset_src->ssa, intr->instr.block)) {
++      *div_idx = PIN_ADDR_SWAP;
++      return pin_addr_check_base(offset_src->ssa, pred);
++   }
++
+    nir_alu_instr *iadd = nir_def_as_alu_or_null(offset_src->ssa);
+    if (iadd == NULL || iadd->op != nir_op_iadd)
+       return NULL;
+@@ -522,11 +585,13 @@
+          nir_def *base = pin_addr_uniform_base(nir_instr_as_intrinsic(instr), pred, &div_idx);
+          if (base == NULL)
+             continue;
++         /* low 16 bits: whole-address uses, high bits: iadd-split uses */
++         const uintptr_t inc = div_idx >= PIN_ADDR_KEEP ? 1 : 0x10000;
+          struct hash_entry *e = _mesa_hash_table_search(uses, base);
+          if (e)
+-            e->data = (void *)((uintptr_t)e->data + 1);
++            e->data = (void *)((uintptr_t)e->data + inc);
+          else
+-            _mesa_hash_table_insert(uses, base, (void *)(uintptr_t)1);
++            _mesa_hash_table_insert(uses, base, (void *)inc);
+       }
+    }
+ 
+@@ -536,20 +601,31 @@
+       return false;
+    }
+ 
+-   /* Most-used bases first, ties by SSA index so the choice is deterministic. */
++   /* Largest saving first, ties by SSA index so the choice is deterministic.
++    * A split access saves iadd3 + iadd3.x + 2 movs, a whole one only the 2
++    * movs, so split uses weigh 2. A base seen only whole and only once is
++    * left alone: its pin copy costs what it saves. */
+    NIR_VLA(struct handle, bases, n);
+    unsigned i = 0;
+    hash_table_foreach(uses, e) {
+       nir_def *base = (nir_def *)e->key;
++      const uintptr_t d = (uintptr_t)e->data;
++      const uint32_t split = d >> 16, whole = d & 0xffff;
++      if (split == 0 && whole < pin_addr_whole_min())
++         continue;
+       bases[i++] = (struct handle) {
+          .handle = base,
+-         .sort_key = ((uint64_t)(UINT32_MAX - (uint32_t)(uintptr_t)e->data) << 32) | base->index,
++         .sort_key = ((uint64_t)(UINT32_MAX - (2 * split + whole)) << 32) | base->index,
+       };
+    }
+-   qsort(bases, n, sizeof(*bases), cmp_handles);
++   if (i == 0) {
++      _mesa_hash_table_destroy(uses, NULL);
++      return false;
++   }
++   qsort(bases, i, sizeof(*bases), cmp_handles);
+    _mesa_hash_table_clear(uses, NULL);
+ 
+-   const unsigned npin = MIN2(n, max_bases);
++   const unsigned npin = MIN2(i, max_bases);
+    for (i = 0; i < npin; i++) {
+       hoist_def(bases[i].handle, pred);
+       _mesa_hash_table_insert(uses, bases[i].handle, bases[i].handle);
+@@ -569,6 +645,15 @@
+          if (base == NULL || _mesa_hash_table_search(uses, base) == NULL)
+             continue;
+ 
++         if (div_idx == PIN_ADDR_KEEP)
++            continue; /* already reads the pinned base */
++         if (div_idx == PIN_ADDR_SWAP) {
++            b->cursor = nir_before_instr(&intr->instr);
++            nir_src_rewrite(pin_addr_offset_src(intr), nir_imm_int64(b, 0));
++            nir_src_rewrite(nir_get_io_uniform_offset_src(intr), base);
++            continue;
++         }
++
+          nir_alu_instr *iadd = nir_def_as_alu(pin_addr_offset_src(intr)->ssa);
+          b->cursor = nir_before_instr(&intr->instr);
+          nir_def *addr = nir_ssa_for_alu_src(b, iadd, div_idx);
+@@ -582,9 +667,16 @@
+       }
+    }
+ 
+-   b->cursor = nir_before_block_after_phis(succ);
+-   for (i = 0; i < npin; i++)
+-      nir_unpin_cx_handle_nv(b, bases[i].handle);
++   /* A pin with no unpin stays pinned to the end of the program, which is
++    * where we already are when succ is the last block of the function. */
++   const bool succ_is_end = succ->cf_node.parent->type == nir_cf_node_function &&
++                            nir_cf_node_is_last(&succ->cf_node) &&
++                            exec_list_is_empty(&succ->instr_list);
++   if (!succ_is_end || !pin_addr_whole_enabled()) {
++      b->cursor = nir_before_block_after_phis(succ);
++      for (i = 0; i < npin; i++)
++         nir_unpin_cx_handle_nv(b, bases[i].handle);
++   }
+ 
+    _mesa_hash_table_destroy(uses, NULL);
+    return true;

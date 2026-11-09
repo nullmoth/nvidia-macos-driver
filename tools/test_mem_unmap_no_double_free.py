@@ -22,6 +22,17 @@ patch = (root / 'nvk/nvk-macos.patch').read_text().splitlines()
 
 # pull the unmap function's post-image ('+' lines) out of the new-file diff for nvkmd_nvrm_mem.c
 plus = [l[1:] for l in patch if l.startswith('+') and not l.startswith('+++')]
+# the fix ships in nvk-fixes-after-def16.patch, which goes on top of nvk-macos.patch: insert its added lines
+# before the free() of the mapping, which is where that hunk puts them
+fix = (root / 'nvk/nvk-fixes-after-def16.patch').read_text().splitlines()
+k = next(i for i, l in enumerate(fix) if l.startswith('+') and '_mesa_hash_table_remove(dev->mappings, ent)' in l)
+a = k
+while fix[a - 1].startswith('+'): a -= 1
+b = k
+while fix[b + 1].startswith('+'): b += 1
+added = [l[1:] for l in fix[a:b + 1]]
+at = max(i for i, l in enumerate(plus) if l.strip() == 'free(mapping);')
+plus[at:at] = added
 src = '\n'.join(plus)
 m = re.search(r'\nnvkmd_nvrm_mem_unmap\(struct nvkmd_mem \*_mem,.*?\n\}\n', src, re.S)
 assert m, 'nvkmd_nvrm_mem_unmap not found in patch'

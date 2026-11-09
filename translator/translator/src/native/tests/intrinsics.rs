@@ -830,6 +830,38 @@ declare i32 @llvm.agx2.cluster.num()
 }
 
 #[test]
+fn native_empty_inline_asm_keeps_surrounding_instructions() {
+    for call in [
+        "call void asm \"\", \"\"()",
+        "tail call void asm sideeffect \"\", \"\"() #0, !srcloc !0",
+        "call void asm sideeffect \"\" , \"\" ( )",
+    ] {
+        let ll = format!(
+            "target triple = \"spirv-unknown-vulkan1.2\"\ndefine i32 @main(i32 %x) {{\nentry:\n  {call}\n  %next = add i32 %x, 1\n  ret i32 %next\n}}\nattributes #0 = {{ nounwind }}\n!0 = !{{i32 1}}\n"
+        );
+        let bytes = emit_vulkan_spirv(&ll).expect("empty assembly is a no-op");
+        let asm = disassemble(&bytes).expect("disassemble");
+        assert!(asm.contains("OpIAdd"), "{asm}");
+    }
+}
+
+#[test]
+fn native_nonempty_inline_asm_is_still_refused() {
+    for call in [
+        "call void asm sideeffect \"nop\", \"\"()",
+        "call void asm sideeffect \"\", \"~{memory}\"()",
+        "call void asm sideeffect \"\", \"r\"(i32 %x)",
+        "%result = call i32 asm sideeffect \"\", \"=r\"()",
+        "call void asm sideeffect \"\", \"\"() [ \"deopt\"(i32 %x) ]",
+    ] {
+        let ll = format!(
+            "target triple = \"spirv-unknown-vulkan1.2\"\ndefine void @main(i32 %x) {{\nentry:\n  {call}\n  ret void\n}}\n"
+        );
+        assert!(emit_vulkan_spirv(&ll).is_err(), "assembly must not be discarded: {call}");
+    }
+}
+
+#[test]
 fn native_void_air_call_is_emitted_for_lowering() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
