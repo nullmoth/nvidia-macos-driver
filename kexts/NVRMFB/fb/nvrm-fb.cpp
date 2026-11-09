@@ -3591,6 +3591,7 @@ bool NVRMNVDAFramebuffer::verifyAperture(NvU64 phys, const char *label)
 }
 
 static volatile SInt64 gVramMappedBytes = 0;
+#include "nvrm-vram-class.h"
 
 // Parked = allocations NVKMS placed over the scanout or the boot console. WAS 24 MB / 24 slots: a 2560x1440 console is
 // 25 MB, so the last MB could never be parked and every allocation landing there was refused, about once a second
@@ -3690,6 +3691,7 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
     if (!fKms || !fDev) { FBLOG("nvAllocVram: no NVKMS device yet"); return false; }
     NvU64 want = (r->size + 0xFFFFull) & ~0xFFFFull;
     if (!want) return false;
+    if (fBarLen && fBarLen <= (512ull << 20)) want = nvrmVramSizeClass(want);   // few hole sizes in a small window (see nvrm-vram-class.h)
 
     const SInt64 budget = (SInt64)nvrmSurfaceBudget(fBarLen, gVramDisplayBytes);
     gVramBudgetBytes = budget;
