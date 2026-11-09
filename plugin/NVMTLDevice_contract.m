@@ -67,6 +67,31 @@ static void nvbt(const char *tag, int *count, int max);
         b->_b = b->_shadow; memset(&b->_shadow, 0, sizeof b->_shadow);
         return b;
     }
+    // NVMTL_MANAGED_OWNED_VRAM=1: a Managed range the driver cannot import (an unaligned pointer or an unpadded length)
+    // used to fall to the copy below, where the GPU reads a system-memory copy over PCIe. It now gets a VRAM working
+    // copy like an importable one: owned staging memory carries the transfers and the caller's pages stay what contents
+    // returns (nvmtl_shared_wc.h finds the changed pages at each submit).
+    if (sm == MTLStorageModeManaged && a1 >= vramMin) {
+        static int owned = -1;
+        if (owned < 0) { const char *e = getenv("NVMTL_MANAGED_OWNED_VRAM"); owned = e && e[0] == '1';
+                         nvlog("newBufferWithBytesNoCopy: unimportable managed ranges %s (NVMTL_MANAGED_OWNED_VRAM=%s)", owned ? "get a VRAM copy with owned staging" : "use the system-memory copy", e ? e : "unset"); }
+        if (owned) {
+            nvmtl_swc *s = (nvmtl_swc *)calloc(1, sizeof *s);
+            memset(&b->_shadow, 0, sizeof b->_shadow);
+            if (s && nvmtl_swc_init(s, a1) == 0 && nvmtl_vk_buffer_create(a1, 1, &b->_shadow) == 0 && b->_shadow.map &&
+                nvmtl_vk_buffer_create(a1, 0, &b->_b) == 0 && !b->_b.map) {
+                b->_hostPtr = a0; b->_hostLen = (size_t)a1; b->_swc = s;
+                { static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: managed %lu bytes at %p cannot be imported -> VRAM copy with owned staging", (unsigned long)a1, a0); }
+                return b;
+            }
+            if (s) { nvmtl_swc_free(s); free(s); }
+            if (b->_shadow.buf) nvmtl_vk_buffer_destroy(&b->_shadow);
+            memset(&b->_shadow, 0, sizeof b->_shadow);
+            if (b->_b.buf) nvmtl_vk_buffer_destroy(&b->_b);
+            memset(&b->_b, 0, sizeof b->_b);
+            nvlog("newBufferWithBytesNoCopy: managed %lu bytes: VRAM copy refused - the system-memory copy", (unsigned long)a1);
+        }
+    }
     if (nvmtl_vk_buffer_import_host(a0, a1, &b->_b) == 0) {
         static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: IMPORTED the caller's pages (%lu bytes at %p) \u2014 zero copy", (unsigned long)a1, a0);
         return b;

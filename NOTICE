@@ -47,3 +47,9 @@ kexts/NVRM   BAR1 placement is clipped to the range IOKit can describe and the a
 Community ideas  The shared family-VRAM import cache and the browser surface-publication default follow ideas first
              published by mickys (https://github.com/mickys/nvidia-macos-driver, PolyForm Noncommercial 1.0.0) and
              proposed to this project by GeekAudio in pull requests 463 and 481. The code here is NullMoth's own.
+
+plugin       Opt-in VRAM working copies for buffers (nvmtl_shared_wc.h, NVMTL_SHARED_VRAM, NVMTL_MANAGED_OWNED_VRAM) follow
+             ideas from pull request 524 by emretascii (owned staging memory for caller pages that cannot be imported, with the
+             GPU working in VRAM). The code here is NullMoth's own.
+
+nvk          nvk/nvk-upstream-nak.patch carries commits from the Mesa project (MIT licence), listed in the patch header.
