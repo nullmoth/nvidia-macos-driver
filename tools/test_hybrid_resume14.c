@@ -175,6 +175,7 @@ static void s3(void)
 {
     pw_fail = bus_fail = pll_ack_fail = sink_deaf = soc_fail = d2d_fail = idle_fail = pmd_fail = train_fail = dbuf_fail = 0; sink_needs_v = sink_needs_p = 0; bus_errs_left = 0;
     memset(reg, 0, sizeof reg); memset(phy, 0, sizeof phy); memset(dpcd, 0, sizeof dpcd); dpcd[0x002] = 0x84; dpcd[0x003] = 0x01; nw = 0; nsteps = 0;
+    reg[NMR_DC_STATE / 4] = NMR_DC_HOLD | 1u;
 }
 static int first_write(uint32_t off) { for (int i = 0; i < nw; i++) if (wlog[i].off == off) return i; return -1; }
 
@@ -222,6 +223,7 @@ static void suite(void)
     s3(); rc = nmr14_resume(&ops, &snap);
     ARM("the platform reset handshake is replayed before the power wells", rc == NMR_OK && first_write(NMR_NDE_RSTWRN) >= 0 && first_write(NMR_NDE_RSTWRN) < first_write(NMR_PW_DRIVER));
     ARM("the display buffer slice is requested after the display clock and before the PHY", first_write(NMR_DBUF_CTL(0)) > first_write(NMR_CDCLK_CTL) && first_write(NMR_DBUF_CTL(0)) < first_write(NMX_CLOCK_CTL(port)));
+    ARM("the PHY latches that firmware holds across sleep are released once power well 1 is up (version 14)", (*R(NMR_DC_STATE) & NMR_DC_HOLD) == 0 && first_write(NMR_DC_STATE) > first_write(NMR_PW_DRIVER));
     s3(); dbuf_fail = 1; ARM("a display buffer slice that never powers stops the resume before the PHY", nmr14_resume(&ops, &snap) == NMR_E_POWER && first_write(NMX_CLOCK_CTL(port)) < 0);
     s3(); pw_fail = 1; ARM("a power well that never answers stops the resume before the PHY", nmr14_resume(&ops, &snap) == NMR_E_POWER && first_write(NMX_CLOCK_CTL(port)) < 0);
     s3(); pmd_fail = 1; ARM("a power-management demand that is not acknowledged stops the resume before the panel is powered", nmr14_resume(&ops, &snap) == NMR_E_PMDEMAND && first_write(NMR_PP_CONTROL) < 0);
@@ -251,7 +253,7 @@ int main(void)
         printf("-- display version 14, panel on pipe %c, DDI %c\n", 'A' + T_PIPE, 'A' + T_PORT);
         suite();
     }
-    ARM("display version 20 is refused", ({ struct nmr_snap sx; memset(&sx, 0, sizeof sx); T_PORT = 0; T_PIPE = 0; lit_state(); nmr_snapshot(&ops, &sx, 0, 20, 0) == NMR_E_GEN; }));
+    ARM("the plain MMIO entry point refuses display version 20 (it has its own entry point)", ({ struct nmr_snap sx; memset(&sx, 0, sizeof sx); T_PORT = 0; T_PIPE = 0; lit_state(); nmr_snapshot(&ops, &sx, 0, 20, 0) == NMR_E_GEN; }));
     printf("%d failed\n", fails);
     return fails != 0;
 }
