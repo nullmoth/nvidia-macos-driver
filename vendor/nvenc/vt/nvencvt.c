@@ -80,6 +80,7 @@ typedef struct {
     int entropy;                    // H264EntropyMode asked for: 0 CAVLC, 1 CABAC, -1 not set
     bool fullRange;                 // input 420f / xf20 (full range, encoded as is): VUI video_full_range_flag (T7.01)
     bool c444;                      // first frame 444v / 444f (or x444 / xf44 for HEVC Main 10): 4:4:4 stream (M13)
+    bool want444;                   // ProfileLevel HEVC_Main444_AutoLevel / HEVC_Main44410_AutoLevel asked for (behind NVMTL_NVENC_HEVC_444)
     bool opened, failed;
     int engine;
     Enc enc;
@@ -216,6 +217,17 @@ static int num(CFTypeRef v, int dflt)
 // Profiles we produce: H.264 Baseline/Main/High (a P-only CAVLC Main stream decodes on all three) at every level,
 // HEVC Main and Main 10 (T6.14). Registered as SupportedSelectionProperties, so VideoToolbox picks another encoder
 // (Apple's) when an app asks for a profile not listed (HEVC Main10, H.264 High 4:2:2 ...), as Apple's encoders declare.
+// HEVC Main 4:4:4 as a requested profile. The encoder has produced 4:4:4 since the input format could select it; what a
+// client such as the Screen Sharing host needs is to NAME the profile: it sets ProfileLevel to HEVC_Main444_AutoLevel and
+// VideoToolbox only offers it to an encoder that lists the profile. The constants are not in the public SDK headers, so
+// their strings are spelled out. Behind NVMTL_NVENC_HEVC_444=1; off, the encoder lists exactly what it listed before.
+#define NV_PROFILE_MAIN444   CFSTR("HEVC_Main444_AutoLevel")
+#define NV_PROFILE_MAIN44410 CFSTR("HEVC_Main44410_AutoLevel")
+static bool hevc444_enabled(void)
+{
+    const char *e = getenv("NVMTL_NVENC_HEVC_444");
+    return e && e[0] == '1' && !e[1];
+}
 static CFArrayRef profiles(bool hevc)
 {
     static CFArrayRef list[2]; static dispatch_once_t once;
@@ -228,6 +240,7 @@ static CFArrayRef profiles(bool hevc)
         }
         CFArrayAppendValue(h, CFSTR("H264_ConstrainedBaseline_AutoLevel")); CFArrayAppendValue(h, CFSTR("H264_ConstrainedHigh_AutoLevel"));
         CFArrayAppendValue(v, kVTProfileLevel_HEVC_Main_AutoLevel); CFArrayAppendValue(v, kVTProfileLevel_HEVC_Main10_AutoLevel);
+        if (hevc444_enabled()) { CFArrayAppendValue(v, NV_PROFILE_MAIN444); CFArrayAppendValue(v, NV_PROFILE_MAIN44410); }
         list[0] = h; list[1] = v;
     });
     return list[hevc];
@@ -291,8 +304,9 @@ static OSStatus b_setProperty(CMBaseObjectRef o, CFStringRef key, CFTypeRef v)
     else if (CFEqual(key, kVTCompressionPropertyKey_H264EntropyMode) && v && CFGetTypeID(v) == CFStringGetTypeID())
         s->entropy = CFEqual(v, kVTH264EntropyMode_CABAC) ? 1 : 0;
     else if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) && s->hevc) {
-        bool ten = CFEqual(v, kVTProfileLevel_HEVC_Main10_AutoLevel);
-        if (ten != s->ten && !s->opened) { s->ten = ten; set_pixel_attrs(s); }
+        bool w444 = CFEqual(v, NV_PROFILE_MAIN444) || CFEqual(v, NV_PROFILE_MAIN44410);
+        bool ten = CFEqual(v, kVTProfileLevel_HEVC_Main10_AutoLevel) || CFEqual(v, NV_PROFILE_MAIN44410);
+        if ((ten != s->ten || w444 != s->want444) && !s->opened) { s->ten = ten; s->want444 = w444; set_pixel_attrs(s); }
     }
     else if (CFEqual(key, kVTCompressionPropertyKey_DataRateLimits)) {   // [bytes, seconds, ...]: the first pair caps the rate (VBR)
         s->maxRate = 0;
@@ -353,6 +367,7 @@ static OSStatus b_copyProperty(CMBaseObjectRef o, CFStringRef key, CFAllocatorRe
     else if (CFEqual(key, kVTCompressionPropertyKey_RealTime)) v = CFRetain(s->realTime ? kCFBooleanTrue : kCFBooleanFalse);
     else if (CFEqual(key, kVTVideoEncoderSpecification_EnableLowLatencyRateControl)) v = CFRetain(s->lowLatency ? kCFBooleanTrue : kCFBooleanFalse);
     else if (CFEqual(key, kVTCompressionPropertyKey_AllowFrameReordering)) v = CFRetain((s->opened ? s->bf > 0 : s->reorder) ? kCFBooleanTrue : kCFBooleanFalse);
+    else if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) && s->hevc && s->want444) v = CFRetain(s->ten ? NV_PROFILE_MAIN44410 : NV_PROFILE_MAIN444);
     else if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) && !s->av1) v = CFRetain(s->hevc ? (s->ten ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel)
                                                                              : h264_high(s) ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_H264_Main_AutoLevel);
     else if (CFEqual(key, kVTCompressionPropertyKey_H264EntropyMode) && !s->hevc && !s->av1) v = CFRetain(h264_cabac(s) ? kVTH264EntropyMode_CABAC : kVTH264EntropyMode_CAVLC);
@@ -381,7 +396,11 @@ static OSStatus set_pixel_attrs(State *s)
     // through Metal on its serial queue, 20+ ms per 4K frame and frames queued behind it, T6.14)
     if (s->ten) { f[0] = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange; f[1] = kCVPixelFormatType_420YpCbCr10BiPlanarFullRange; f[2] = kCVPixelFormatType_ARGB2101010LEPacked; }
     int nf = 3;
-    if (s->av1) {   // AV1: 8 or 10-bit, decided by the first frame (VideoToolbox converts only buffers in none of these)
+    if (s->want444 && !s->av1) {   // a 4:4:4 profile was asked for: offer only 4:4:4, so VideoToolbox converts other input to it
+        nf = 0;
+        f[nf++] = s->ten ? kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange;
+        f[nf++] = s->ten ? kCVPixelFormatType_444YpCbCr10BiPlanarFullRange : kCVPixelFormatType_444YpCbCr8BiPlanarFullRange;
+    } else if (s->av1) {   // AV1: 8 or 10-bit, decided by the first frame (VideoToolbox converts only buffers in none of these)
         f[0] = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange; f[1] = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange; f[2] = kCVPixelFormatType_32BGRA;
         f[3] = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange; f[4] = kCVPixelFormatType_420YpCbCr10BiPlanarFullRange; f[5] = kCVPixelFormatType_ARGB2101010LEPacked;
         nf = 6;
@@ -733,9 +752,10 @@ static OSStatus e_encodeFrame(VTVideoEncoderRef e, VTEncoderFrameRef frame, CVIm
     bool l10r = pf == kCVPixelFormatType_ARGB2101010LEPacked;
     bool nv24 = pf == kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange || pf == kCVPixelFormatType_444YpCbCr8BiPlanarFullRange;
     bool x444 = pf == kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange || pf == kCVPixelFormatType_444YpCbCr10BiPlanarFullRange;
-    if (s->c444 ? !(s->ten ? x444 : nv24) :   // a 4:4:4 session takes only its own format, a 4:2:0 one none of them
+    if ((s->want444 && !s->c444) ||   // a 4:4:4 profile was asked for and the frame is not 4:4:4: refuse it, never encode 4:2:0 under that name
+        (s->c444 ? !(s->ten ? x444 : nv24) :   // a 4:4:4 session takes only its own format, a 4:2:0 one none of them
         ((pf != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange && pf != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange && !bgra && !((p010 || l10r) && s->ten)) ||
-         (bgra && s->ten)) ||
+         (bgra && s->ten))) ||
         (int)CVPixelBufferGetWidth(img) < s->width || (int)CVPixelBufferGetHeight(img) < s->height) {
         { OSType be = CFSwapInt32HostToBig(pf); LOG("unexpected pixel buffer %.4s %zux%zu", (char *)&be, CVPixelBufferGetWidth(img), CVPixelBufferGetHeight(img)); }
         pthread_mutex_unlock(&s->lock);
