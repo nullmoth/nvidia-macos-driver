@@ -5,8 +5,9 @@
  * is this file plus the pinned upstream tag.
  *
  * RyzenAdj reaches the SMU through the host bridge's SMN index/data registers. On macOS that needs the NMSMN kext
- * (boot argument nmsmn=1), whose user client reads and writes only the SMU mailbox registers. The SMU power table
- * (--info) needs physical memory, which NMSMN does not give: those calls fail and setting limits is unaffected.
+ * (boot argument nmsmn=1), whose user client reads and writes only the SMU mailbox registers and reads the power table at
+ * the address the SMU reported. The kext lets only a process named ryzenadj that carries the entitlement
+ * com.nullmoth.ryzenadj, run as root, connect (build.sh signs the binary that way).
  */
 #include <IOKit/IOKitLib.h>
 #include <stdio.h>
@@ -68,23 +69,49 @@ void smn_reg_write(const os_access_obj_t *obj, uint32_t addr, uint32_t data)
         fprintf(stderr, "SMN write of 0x%x refused (0x%x)\n", addr, kr);
 }
 
-// No physical-memory access on purpose: the power table (--info) is not available.
+// The power table (--info): NMSMN reads it at the address the SMU itself reported, never at one we name, so the address
+// RyzenAdj passes is not used. A refused read fails the call and nothing else.
+enum { kTable = 2, kChunk = 4096 };
+
+static int read_table(const os_access_obj_t *obj, size_t off, void *buffer, size_t len)
+{
+    uint64_t in[2] = { off, len };
+    size_t outSize = len;
+    kern_return_t kr = IOConnectCallMethod((io_connect_t)obj->access.kmod.smn_fd, kTable, in, 2, NULL, 0, NULL, NULL,
+                                           buffer, &outSize);
+    return kr == KERN_SUCCESS && outSize == len ? 0 : -1;
+}
+
+static const os_access_obj_t *g_table_obj;
+
 int init_mem_obj(os_access_obj_t *os_access, uintptr_t physAddr)
 {
-    (void)os_access; (void)physAddr;
-    return -1;
+    (void)physAddr;
+    char probe[8];
+    if (read_table(os_access, 0, probe, sizeof probe) != 0)
+        return -1;
+    g_table_obj = os_access;
+    return 0;
 }
 
 int copy_pm_table(const os_access_obj_t *obj, void *buffer, size_t size)
 {
-    (void)obj; (void)buffer; (void)size;
-    return -1;
+    if (obj == NULL || buffer == NULL || size == 0 || size > 0x10000)
+        return -1;
+    for (size_t off = 0; off < size; off += kChunk) {
+        size_t n = size - off < kChunk ? size - off : kChunk;
+        if (read_table(obj, off, (char *)buffer + off, n) != 0)
+            return -1;
+    }
+    return 0;
 }
 
 int compare_pm_table(const void *buffer, size_t size)
 {
-    (void)buffer; (void)size;
-    return -1;
+    char probe[24];
+    if (g_table_obj == NULL || size > sizeof probe || read_table(g_table_obj, 0, probe, size) != 0)
+        return -1;
+    return memcmp(buffer, probe, size);
 }
 
 bool is_using_smu_driver(void)
