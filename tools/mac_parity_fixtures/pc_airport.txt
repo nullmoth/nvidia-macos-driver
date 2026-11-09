@@ -1,0 +1,6 @@
+Wi-Fi:
+      Interfaces:
+        en1:
+          Card Type: Wi-Fi  (0x10EC, 0x8922)
+          Supported PHY Modes: 802.11 a/b/g/n/ac/ax
+          Status: Connected
