@@ -14,6 +14,11 @@ kexts/       Builds against NVIDIA's open GPU kernel modules 620.70.06, MIT (wit
 
 NVK          Vulkan driver from Mesa, MIT (licenses/Mesa-license.rst). NullMoth's changes ship as patches.
 
+Vulkan loader  The Khronos Vulkan-Loader v1.4.367 (commit aa6dee8385afe4b2cc0152d086af2184743e16fd), built unmodified from source
+             for x86_64 by build/build_vulkan_loader.sh and offered to applications by package/vulkan-for-apps.sh,
+             Apache-2.0 (licenses/Vulkan-Loader-LICENSE.txt), https://github.com/KhronosGroup/Vulkan-Loader. Built against
+             Vulkan-Headers v1.4.367 (commit 9fbc2a782ee3f8a4db64e7d991e23da75e893f44), Apache-2.0.
+
 GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images from NVIDIA's 620.70.06 driver,
              redistributed unmodified under NVIDIA's licence (licenses/NVIDIA-firmware-LICENCE.txt), the same
              terms under which linux-firmware redistributes these images.
