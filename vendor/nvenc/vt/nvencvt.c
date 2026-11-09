@@ -171,6 +171,7 @@ static CFDictionaryRef prop(CFStringRef type, CFStringRef rw)
     const void *k[] = { kVTPropertyTypeKey, kVTPropertyReadWriteStatusKey }, *v[] = { type, rw };
     return CFDictionaryCreate(NULL, k, v, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
 }
+#define NV_MAX_ENCODER_PIXEL_RATE_KEY CFSTR("MaxEncoderPixelRate")
 void build(void)
 {
     CFMutableDictionaryRef d = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
@@ -191,6 +192,7 @@ void build(void)
     CFDictionarySetValue(d, kVTCompressionPropertyKey_H264EntropyMode, enm);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_DataRateLimits, prop(kVTPropertyType_Enumeration, kVTPropertyReadWriteStatus_ReadWrite));
     CFDictionarySetValue(d, kVTCompressionPropertyKey_NumberOfPendingFrames, numRO);
+    CFDictionarySetValue(d, NV_MAX_ENCODER_PIXEL_RATE_KEY, numRO);
     // colour description and HDR metadata (T7.05), exact CBR and speed over quality (macOS 12-13 keys)
     CFDictionarySetValue(d, kVTCompressionPropertyKey_ColorPrimaries, enm);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_TransferFunction, enm);
@@ -323,9 +325,27 @@ static OSStatus b_setProperty(CMBaseObjectRef o, CFStringRef key, CFTypeRef v)
 static bool h264_high(const State *s) { return s->h264Profile == 0 || s->h264Profile == 100; }
 static bool h264_cabac(const State *s) { return s->h264Profile != 66 && s->entropy != 0; }
 
+// Pixels per second the encoder is offered as able to encode. The Screen Sharing host reads this to decide whether to offer
+// its high-performance mode. The default is 1080p at 120 frames per second, below what the encoder measured (1080p at about
+// 277 frames per second, 4K Main10 at about 38); NVMTL_NVENC_MAX_PIXEL_RATE replaces it. The key is not in the public SDK headers.
+static int64_t nv_max_encoder_pixel_rate(void)
+{
+    const char *e = getenv("NVMTL_NVENC_MAX_PIXEL_RATE");
+    if (e && *e) {
+        char *end = NULL;
+        long long v = strtoll(e, &end, 10);
+        if (end && !*end && v > 0) return (int64_t)v;
+    }
+    return (int64_t)1920 * 1080 * 120;
+}
 static OSStatus b_copyProperty(CMBaseObjectRef o, CFStringRef key, CFAllocatorRef al, void *out)
 {
     State *s = state(o); CFTypeRef v = NULL; int n;
+    if (CFEqual(key, NV_MAX_ENCODER_PIXEL_RATE_KEY)) {
+        int64_t rate = nv_max_encoder_pixel_rate();
+        *(CFTypeRef *)out = CFNumberCreate(al, kCFNumberSInt64Type, &rate);
+        return *(CFTypeRef *)out ? noErr : kCMBaseObjectError_ValueNotAvailable;
+    }
     if (CFEqual(key, kVTCompressionPropertyKey_AverageBitRate)) { n = s->bitrate; v = CFNumberCreate(al, kCFNumberIntType, &n); }
     else if (CFEqual(key, kVTCompressionPropertyKey_MaxKeyFrameInterval)) { n = s->maxKeyInterval; v = CFNumberCreate(al, kCFNumberIntType, &n); }
     else if (CFEqual(key, kVTCompressionPropertyKey_ExpectedFrameRate)) { n = s->fps; v = CFNumberCreate(al, kCFNumberIntType, &n); }
