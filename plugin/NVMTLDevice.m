@@ -426,6 +426,37 @@ static bool nvmtl_nvencvt_selected(const char *sel, const char *me, const char *
     return false;
 }
 // decodersOnly is the decode service (VTDecoderXPCService): it decodes for the sandboxed Apple clients and never encodes.
+/* Hardware AV1 and VP9 decoding on AMD and Intel GPUs through Vulkan video decode (RADV, ANV): libnmxvt.dylib registers VideoToolbox
+   decoders. Off unless NMXVT=1 in the environment or nmxvt=1 on the boot line, only for the AMD/Intel vendor, never in WindowServer,
+   and only a root-owned library inside a root-owned directory is loaded. */
+static void nvmtl_nmxvt_register(void)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *e = getenv("NMXVT");
+        int on = (e && !strcmp(e, "1")) ? 1 : 0;
+        char bootargs[1024] = {0}; size_t n = sizeof bootargs - 1;
+        if (!on && sysctlbyname("kern.bootargs", bootargs, &n, NULL, 0) == 0) {
+            for (char *t = strtok(bootargs, " "); t; t = strtok(NULL, " ")) if (!strcmp(t, "nmxvt=1")) on = 1;
+        }
+        if (!on) return;
+        if (!strcmp(getprogname(), "WindowServer")) return;
+        Dl_info di;
+        if (!dladdr((const void *)nvmtl_nmxvt_register, &di) || !di.dli_fname) { nvlog("nmxvt: dladdr failed - not registering"); return; }
+        char dir[1024], path[1200];
+        strlcpy(dir, di.dli_fname, sizeof dir);
+        snprintf(path, sizeof path, "%s/libnmxvt.dylib", dirname(dir));
+        if (!nvmtl_loadable_root_only(path)) { nvlog("nmxvt: %s is absent, or is not a root-owned file inside a root-owned directory - REFUSED", path); return; }
+        setenv("NMXVT", "1", 1);
+        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (!h) { nvlog("nmxvt: dlopen %s FAILED: %s", path, dlerror()); return; }
+        typedef int32_t (*RegFn)(int);
+        RegFn r = (RegFn)dlsym(h, "NMXVT_Register");
+        if (!r) { nvlog("nmxvt: %s has no NMXVT_Register", path); return; }
+        int32_t st = r(1100);
+        nvlog("nmxvt: AV1 and VP9 decoders %s in %s (%d)", st ? "NOT registered" : "REGISTERED", getprogname(), (int)st);
+    });
+}
 static void nvmtl_nvencvt_register(bool decodersOnly)
 {
     static dispatch_once_t once;
@@ -910,6 +941,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
         return nil;
     }
     nvmtl_gl_caps_enable();
+    if (nvmtl_vk_vendor() == 0x1002 || nvmtl_vk_vendor() == 0x8086) nvmtl_nmxvt_register();
     if (nvmtl_vk_vendor() == 0x10de) {   /* NVDEC/NVENC are NVIDIA engines reached through NVRM */
         nvmtl_nvdec_register();
         nvmtl_nvenc_register();
