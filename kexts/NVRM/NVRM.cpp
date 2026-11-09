@@ -1234,6 +1234,24 @@ static bool nvrmKeepBar1Size()
     return PE_parse_boot_argn("-nvrmkeepbar1", nb, sizeof nb);
 }
 
+// True when something is known to be decoded above 4 GB on this machine: this card's own BAR3, or any PCI device's
+// memory aperture. Firmware with Above 4G Decoding off places every BAR below 4 GB.
+static bool nvrmAbove4GRouted(UInt64 ownBar3)
+{
+    if (ownBar3 >= (4ULL << 30)) return true;
+    bool above = false;
+    if (OSIterator *it = IOService::getMatchingServices(IOService::serviceMatching("IOPCIDevice"))) {
+        while (!above) {
+            IOService *d = OSDynamicCast(IOService, it->getNextObject());
+            if (!d) break;
+            for (unsigned i = 0, n = d->getDeviceMemoryCount(); i < n && !above; i++)
+                if (IODeviceMemory *dm = d->getDeviceMemoryWithIndex(i)) above = dm->getPhysicalAddress() >= (4ULL << 30);
+        }
+        it->release();
+    }
+    return above;
+}
+
 bool NVRM::placeLargeBar1()
 {
     static const UInt64 kBigBase = 0x10000000000ULL;
@@ -1375,8 +1393,9 @@ bool NVRM::placeLargeBar1()
         // Do not invent an address outside that resource or touch live BARs.
         LOG("bar1: advertised host windows exceed CPU/IOKit physical range; keeping firmware BARs untouched");
         return false;
-    } else if (fwBar1 < (4ULL << 30)) {
-        // Its BAR1 is fine where it is: with no 64-bit window in _CRS and BAR1 below 4 GB, nothing above 4 GB is routed.
+    } else if (!nvrmFallbackWindowAllowed(fwBar1, newSize, newSize >= (4ULL << 30) && nvrmAbove4GRouted(bar3Old))) {
+        // Its BAR1 is fine where it is: with no 64-bit window in _CRS and BAR1 below 4 GB, nothing above 4 GB is routed,
+        // unless the card must grow past 4 GB and other devices already sit above it (see nvrmFallbackWindowAllowed).
         LOG("bar1: no 64-bit window in the host bridge's _CRS and the firmware left BAR1 below 4 GB (0x%llx) - not placing", fwBar1);
         return false;
     } else if (const char *why = nvrmIntel39Window(physBits, fwBar1)) {

@@ -45,6 +45,11 @@ int main() {
     CHECK("-nvrmkeepbar1 keeps the firmware size", nvrmBar1ShrinkTarget(16ULL << 30, 0x3fe0, true) == 0);
     {char b[64]; int n = nvrmFallbackModelName(b, sizeof b, "Turing", "TU106", 0x1F08);
      CHECK("an unnamed RTX 20 id reads as its generation, chip and PCI id", n > 0 && std::string(b) == "NVIDIA Turing GPU (TU106, 10DE:1F08)");}
+    CHECK("a 64 MB laptop BAR1 that must grow to 8 GB uses the fallback range when devices already sit above 4 GB", nvrmFallbackWindowAllowed(64ULL << 20, 8ULL << 30, true));
+    CHECK("a BAR1 left below 4 GB on a host that routes nothing higher stays put", !nvrmFallbackWindowAllowed(512ULL << 20, 8ULL << 30, false));
+    CHECK("a same-size move of a BAR1 below 4 GB with no window stays refused", !nvrmFallbackWindowAllowed(512ULL << 20, 0, true));
+    CHECK("a resize that stays under 4 GB with no window stays refused", !nvrmFallbackWindowAllowed(64ULL << 20, 256ULL << 20, true));
+    CHECK("a BAR1 the firmware put above 4 GB keeps the old behaviour", nvrmFallbackWindowAllowed(8ULL << 30, 0, false));
     return bad;
 }
 '''
@@ -64,6 +69,7 @@ arm("NVRM publishes its settle delay on the PCI device for NVAccel", 'fPCI->setP
 arm("NVRM takes its settle delay from the policy (nvrmsettle override included)", "nvrmAutoGoSettleMs(" in nvrm)
 arm("auto-go stops waiting for heads when no connector carries a display", "nvrmNoDisplayAnywhere()" in nvrm and "not waiting for heads" in nvrm)
 arm("a card the RM cannot name gets a model from the GPU profile", "nvrmFallbackModelName(" in nvrm)
+arm("a BAR1 that must grow past 4 GB is no longer refused outright when nothing but the window is missing", "nvrmFallbackWindowAllowed(fwBar1, newSize" in nvrm)
 arm("placeLargeBar1 resizes a firmware BAR1 above 8 GB through the proven path", "nvrmBar1ShrinkTarget(bar1Size, rbSupported, nvrmKeepBar1Size())" in nvrm)
 
 if failures:
