@@ -828,6 +828,11 @@ public:
             // accelerator that does not wait, that mark would let a CPU lock or a copied present read a surface before
             // its pixels landed, so the plugin keeps marking them after the GPU finishes.
             setProperty("NVAccelSurfaceWait", 1ULL, 32);
+            // Properties an Apple accelerator publishes that programs read when they walk the registry for the GPU in use
+            // (game engines list IOAccelerator services to pick the primary GPU, and the OpenGL renderer id ties a
+            // display GPU to a CGL renderer). Only added when nothing else has set them.
+            if (!getProperty("IOAccelRevision")) setProperty("IOAccelRevision", 2ULL, 32);
+            if (!getProperty("IOVARendererID")) setProperty("IOVARendererID", 0x01020000ULL | (gAccelTab.count() & 0xffff), 32);
             registerService(); ALOG("registerService() called — Metal can now find MetalPluginName=%s", "NVMTLDriver");
             gAccelTab.add(this, scope.multi, provider->getProperty("nullmoth-auto-primary") == kOSBooleanTrue);
             gAccel = gAccelTab.primary(); gEnableAccel = &NVAccel::enableFromHook;
