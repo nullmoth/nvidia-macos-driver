@@ -53,6 +53,11 @@ int main() {
     CHECK("order A: a head published before arming keeps arm-then-release", !nvrmReleaseBeforeArming(1, false) && !nvrmReleaseBeforeArming(1, true));
     CHECK("order B: no head and no display anywhere releases first", nvrmReleaseBeforeArming(0, true));
     CHECK("no head yet but connectors not enumerated keeps the hold", !nvrmReleaseBeforeArming(0, false));
+    CHECK("a crash report fails the RPC at once, slow or not", nvrmGspTimeoutFatal(true, false, true, 0, 3) && nvrmGspTimeoutFatal(true, true, true, 0, 3));
+    CHECK("a dead heartbeat with classification on is fatal at the first timeout", nvrmGspTimeoutFatal(false, true, false, 1, 3));
+    CHECK("a dead heartbeat with classification off waits for the third timeout (the 6 s x 3 stall)", !nvrmGspTimeoutFatal(false, false, false, 1, 3) && nvrmGspTimeoutFatal(false, false, false, 3, 3));
+    CHECK("a slow but healthy GSP keeps today's count with classification on", !nvrmGspTimeoutFatal(false, true, true, 1, 3) && !nvrmGspTimeoutFatal(false, true, true, 2, 3));
+    CHECK("a slow but healthy GSP that keeps timing out is still failed at the threshold", nvrmGspTimeoutFatal(false, true, true, 3, 3));
     return bad;
 }
 '''
@@ -73,6 +78,7 @@ arm("NVRM takes its settle delay from the policy (nvrmsettle override included)"
 arm("auto-go stops waiting for heads when no connector carries a display", "nvrmNoDisplayAnywhere()" in nvrm and "not waiting for heads" in nvrm)
 arm("an early release still runs the arming that serves a later hotplug", "if (earlyRelease) s->releaseBootHold(" in nvrm and nvrm.index("if (earlyRelease) s->releaseBootHold(") < nvrm.index('nvrmSysW("debug.nvaccelfb", 1)') and "if (!earlyRelease) s->releaseBootHold(" in nvrm)
 arm("bus mastering from firmware is switched off until pass 2 enables it", "off until the RM starts the card" in nvrm and nvrm.index("off until the RM starts the card") < nvrm.index("fPCI->setBusMasterEnable(true)"))
+arm("GSP timeout classification is on by default and a boot-arg override still wins", 'rm_write_registry_dword(NULL, NULL, "RmGspTimeoutClassification", 1)' in nvrm and nvrm.index('"RmGspTimeoutClassification"') < nvrm.index('rm_parse_option_string(NULL, regdw)'))
 arm("a card the RM cannot name gets a model from the GPU profile", "nvrmFallbackModelName(" in nvrm)
 arm("a BAR1 that must grow past 4 GB is no longer refused outright when nothing but the window is missing", "nvrmFallbackWindowAllowed(fwBar1, newSize" in nvrm)
 arm("placeLargeBar1 resizes a firmware BAR1 above 8 GB through the proven path", "nvrmBar1ShrinkTarget(bar1Size, rbSupported, nvrmKeepBar1Size())" in nvrm)

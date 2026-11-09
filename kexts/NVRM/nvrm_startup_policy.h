@@ -58,6 +58,20 @@ static inline bool nvrmReleaseBeforeArming(unsigned headMask, bool noDisplayAnyw
     return headMask == 0 && noDisplayAnywhere;
 }
 
+// GSP stall handling in the RM (kernel_gsp.c, _kgspIsRpcTimeoutFatal and _kgspCheckAndLogTimeout), modelled here so the
+// decision can be tested. An RPC that times out is classed by the GSP's heartbeat: a dead heartbeat is GSP_ERROR (the GSP
+// is wedged or crashed), a live one is GSP_RPC_TIMEOUT (GSP-RM is slow). A crash report from CrashCat is always fatal and
+// is looked at on every poll. With timeout classification off, which is the RM default, a dead heartbeat is not fatal
+// until the same RPC has timed out `threshold` times, so a wedged GSP kept WindowServer polling for 6 s per RPC until
+// then (#454). With it on, a dead heartbeat is fatal at the first timeout and a slow GSP keeps the old count.
+static inline bool nvrmGspTimeoutFatal(bool crashReport, bool classificationOn, bool heartbeatAlive, unsigned timeoutCount, unsigned threshold)
+{
+    if (crashReport) return true;
+    if (timeoutCount == threshold) return true;
+    if (!heartbeatAlive) return classificationOn;
+    return false;
+}
+
 // With no 64-bit memory window in the host bridge's ACPI _CRS, BAR1 is placed from a fixed fallback range only when
 // something above 4 GB is known to be routed. A BAR1 the firmware left below 4 GB on a host that decodes nothing above
 // 4 GB (Above 4G Decoding off) is fine where it is, and moving it made a board start; but a card whose BAR1 must grow
