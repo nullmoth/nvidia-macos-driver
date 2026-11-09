@@ -2244,6 +2244,30 @@ static NSOperationQueue *nvmtl_pipeline_compile_queue(void) {
 // neither exists here. The pipeline is refused with a reason an application can show, instead of an unrecognised
 // selector taking the process down. What does work: a fragment function that reads [[color(n)]] (framebuffer fetch) and
 // a compute kernel that uses imageblock memory (MPS).
+int nvmtl_tile_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_TILE_SHADING"); on = e && e[0] == '1'; } return on; }
+NSString *nvmtl_tile_rewrite(NSString *ll, uint32_t tw, uint32_t th, NSString **err);
+NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *idx, const uint32_t *sizes, const uint8_t *const *payloads, size_t n, NSString **err);
+// The tile function rewritten for one tile size and built as a compute pipeline (cached on the tile pipeline per size).
+id nvmtl_tile_compute_pipeline(NVMTLRenderPipelineState *tp, uint32_t tw, uint32_t th, NSString **why) {
+    NSNumber *key = @((uint64_t)tw << 32 | th);
+    @synchronized (tp) {
+        id hit = tp->_tileCps[key]; if (hit) return hit == [NSNull null] ? nil : hit;
+        NSString *w = nil;
+        NSString *text = nvmtl_tile_rewrite(tp->_tileFn->_air, tw, th, &w);
+        NSData *spv = text ? nvmtl_translate_with_fc(text, @"kernel", NULL, NULL, NULL, 0, &w) : nil;
+        id<MTLComputePipelineState> cps = nil;
+        if (spv) {
+            NVMTLFunction *v = [NVMTLFunction new]; v->_air = text; v->_spirv = spv; v->_fname = tp->_tileFn->_fname; v->_stage = @"kernel";
+            NSError *e = nil; cps = [(id<MTLDevice>)gNVMTLMainDevice newComputePipelineStateWithFunction:v error:&e];
+            if (!cps) w = e.localizedDescription ?: @"the compute pipeline for the tile function was refused";
+        }
+        if (!tp->_tileCps) tp->_tileCps = [NSMutableDictionary new];
+        tp->_tileCps[key] = cps ?: (id)[NSNull null];
+        if (!cps && why) *why = w ?: @"tile function translation failed";
+        if (cps) nvlog("tile function %s: compute pipeline for %ux%u tiles built", tp->_tileFn->_fname.UTF8String ?: "?", tw, th);
+        return cps;
+    }
+}
 static NSString *nvmtl_tile_refusal(MTLTileRenderPipelineDescriptor *d) {
     return [NSString stringWithFormat:@"tile render pipeline (%@): REFUSED - tile shading is not carried by this driver (a tile function needs imageblock "
             "access to the colour attachments and a render pass split around a per-tile dispatch)", d.tileFunction.name ?: @"no tile function"];
@@ -2251,6 +2275,14 @@ static NSString *nvmtl_tile_refusal(MTLTileRenderPipelineDescriptor *d) {
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)d options:(MTLPipelineOption)o
                                                             reflection:(MTLAutoreleasedRenderPipelineReflection *)r error:(NSError **)err {
     if (r) *r = nil;
+    if (nvmtl_tile_on() && [(id)d.tileFunction isKindOfClass:[NVMTLFunction class]] && ((NVMTLFunction *)d.tileFunction)->_air.length) {
+        NVMTLFunction *tf = (NVMTLFunction *)d.tileFunction;
+        if (tf->_fc.count) return nvmtl_fail(err, @"tile render pipeline: REFUSED - a tile function with function constants is not carried");
+        NVMTLRenderPipelineState *tp = [NVMTLRenderPipelineState new]; tp->_tileFn = tf;
+        NSString *w = nil;   // translate once now (32x32 tiles) so a function that cannot be carried is refused here, with the reason
+        if (!nvmtl_tile_compute_pipeline(tp, 32, 32, &w)) { NSString *why = [NSString stringWithFormat:@"tile render pipeline (%@): REFUSED - %@", tf->_fname, w]; nvlog("%s", why.UTF8String); return nvmtl_fail(err, why); }
+        return tp;
+    }
     NSString *why = nvmtl_tile_refusal(d); nvlog("%s", why.UTF8String);
     return nvmtl_fail(err, why);
 }

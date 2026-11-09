@@ -11,6 +11,7 @@ mod emitter;
 mod emit_tiers;
 mod icb_encode;
 mod imageblock;
+pub(crate) mod tile_imageblock;
 mod inline;
 mod inline_sampler;
 mod sampler_table;

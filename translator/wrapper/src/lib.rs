@@ -1145,3 +1145,23 @@ attributes #0 = { nounwind }
         spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2)).validate(&two, None).expect("the amplified module validates");
     }
 }
+
+// A tile function (implicit imageblock access) as AIR text for a compute kernel over the colour attachments, one threadgroup per
+// tile of tile_w x tile_h pixels. The returned text is what the ordinary translation entry points take; free it with
+// nvmtl_translate_free (len bytes). The attachments appear as read_write textures at metal index 120 + attachment.
+#[no_mangle]
+pub unsafe extern "C" fn nvmtl_tile_rewrite(
+    ll: *const c_char, tile_w: u32, tile_h: u32,
+    out: *mut *mut u8, out_len: *mut usize, err: *mut c_char, err_len: usize,
+) -> i32 {
+    let result = (|| -> Result<String, String> {
+        if ll.is_null() || out.is_null() || out_len.is_null() { return Err("null tile argument".into()) }
+        if tile_w == 0 || tile_h == 0 || tile_w > 1024 || tile_h > 1024 { return Err(format!("tile {tile_w}x{tile_h} is outside 1..1024")) }
+        let ll = CStr::from_ptr(ll).to_str().map_err(|e| e.to_string())?;
+        metal2vulkan::rewrite_tile_kernel(ll, [tile_w, tile_h])
+    })();
+    match result {
+        Ok(text) => { let mut b = text.into_bytes().into_boxed_slice(); *out = b.as_mut_ptr(); *out_len = b.len(); std::mem::forget(b); 0 }
+        Err(e) => { if !err.is_null() && err_len > 0 { let n = e.len().min(err_len - 1); std::ptr::copy_nonoverlapping(e.as_ptr(), err.cast(), n); *err.add(n) = 0; } -1 }
+    }
+}
