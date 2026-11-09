@@ -109,6 +109,11 @@ meson setup "$B" "$S" --cross-file="$X" -Dbuildtype=release -Db_ndebug=true -Dvu
   "-Dc_link_args=-Wl,-oso_prefix,$B" "-Dcpp_link_args=-Wl,-oso_prefix,$B" > "$OUT/setup.log" 2>&1
 ninja -C "$B" -j"$JOBS" src/nouveau/vulkan/libvulkan_nouveau.dylib > "$OUT/build.log" 2>&1
 
+# Licence texts of the Rust crates Mesa fetched for NAK (meson setup downloads them into subprojects/packagecache).
+# licenses/nvk-rust-crates.txt in the package must equal this; a different crate set stops the build until it is updated.
+python3 -I "$HERE/build/gen_nvk_rust_crates.py" "$S/subprojects/packagecache" "$OUT/nvk-rust-crates.txt"
+cmp -s "$OUT/nvk-rust-crates.txt" "$HERE/licenses/nvk-rust-crates.txt" || { echo "STOP: licenses/nvk-rust-crates.txt is out of date; copy $OUT/nvk-rust-crates.txt over it"; exit 6; }
+
 D=$B/src/nouveau/vulkan/libvulkan_nouveau.dylib
 U=$(nm -m "$D" | grep '(undefined)' | grep -v weak | grep 'dynamically looked up' || true)
 [ -z "$U" ] || { echo "STOP: unresolved strong references (dlopen fails in WindowServer):"; echo "$U"; exit 5; }

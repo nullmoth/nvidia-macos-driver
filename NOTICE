@@ -13,6 +13,7 @@ kexts/       Builds against NVIDIA's open GPU kernel modules 620.70.06, MIT (wit
              (licenses/NVIDIA-open-gpu-kernel-modules-COPYING.txt).
 
 NVK          Vulkan driver from Mesa, MIT (licenses/Mesa-license.rst). NullMoth's changes ship as patches.
+             NAK's Rust crates (paste, proc-macro2, quote, rustc-hash, syn, unicode-ident; MIT and/or Apache-2.0): licenses/nvk-rust-crates.txt.
 
 GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images from NVIDIA's 620.70.06 driver,
              redistributed unmodified under NVIDIA's licence (licenses/NVIDIA-firmware-LICENCE.txt), the same
