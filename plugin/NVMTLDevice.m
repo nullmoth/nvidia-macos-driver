@@ -783,6 +783,25 @@ static int nvmtl_multi_gpu_on(void)
 static int cmp_u64(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
 /* Is `port` the accelerator this process should use? With several NVIDIA cards and nvmultigpu=1 the process takes the card
    its assignment (NVMTL_CARD) or the primary names, tells NVK which one through NVK_ACCEL_ID, and refuses the rest. */
+/* vendor, device id and PCI location of the GPU behind an NMXAccel, read from its PCI parent in the registry */
+static void nvmtl_nmx_pci(io_service_t accel, uint16_t *vid, uint16_t *did, unsigned *bus, unsigned *dev, unsigned *fn, int *have_loc)
+{
+    *vid = *did = 0; *bus = *dev = *fn = 0; *have_loc = 0;
+    io_registry_entry_t pci = 0;
+    if (IORegistryEntryGetParentEntry(accel, kIOServicePlane, &pci) != KERN_SUCCESS) return;
+    CFTypeRef d;
+    if ((d = IORegistryEntryCreateCFProperty(pci, CFSTR("vendor-id"), kCFAllocatorDefault, 0))) {
+        if (CFGetTypeID(d) == CFDataGetTypeID() && CFDataGetLength(d) >= 2) { const UInt8 *p = CFDataGetBytePtr(d); *vid = (uint16_t)(p[0] | (p[1] << 8)); } CFRelease(d); }
+    if ((d = IORegistryEntryCreateCFProperty(pci, CFSTR("device-id"), kCFAllocatorDefault, 0))) {
+        if (CFGetTypeID(d) == CFDataGetTypeID() && CFDataGetLength(d) >= 2) { const UInt8 *p = CFDataGetBytePtr(d); *did = (uint16_t)(p[0] | (p[1] << 8)); } CFRelease(d); }
+    if ((d = IORegistryEntryCreateCFProperty(pci, CFSTR("pcidebug"), kCFAllocatorDefault, 0))) {
+        char buf[32] = {0};
+        if (CFGetTypeID(d) == CFStringGetTypeID() && CFStringGetCString((CFStringRef)d, buf, sizeof buf, kCFStringEncodingUTF8))
+            *have_loc = nvmtl_pci_loc_parse(buf, bus, dev, fn);
+        CFRelease(d);
+    }
+    IOObjectRelease(pci);
+}
 static BOOL nvmtl_card_wanted(mach_port_t port)
 {
     const BOOL nv = port && IOObjectConformsTo(port, "NVAccel"), nmx = port && IOObjectConformsTo(port, "NMXAccel");
@@ -814,16 +833,23 @@ static BOOL nvmtl_card_wanted(mach_port_t port)
         char b[32]; snprintf(b, sizeof b, "%llu", (unsigned long long)mine);
         if (nv) setenv("NVK_ACCEL_ID", b, 1);
         else {   /* RADV and ANV choose among the GPUs they find: name this one by its PCI ids (Mesa's device-select layer) */
-            io_registry_entry_t pci = 0;
-            if (IORegistryEntryGetParentEntry(port, kIOServicePlane, &pci) == KERN_SUCCESS) {
-                uint16_t vid = 0, did = 0; CFTypeRef d;
-                if ((d = IORegistryEntryCreateCFProperty(pci, CFSTR("vendor-id"), kCFAllocatorDefault, 0))) {
-                    if (CFGetTypeID(d) == CFDataGetTypeID() && CFDataGetLength(d) >= 2) { const UInt8 *p = CFDataGetBytePtr(d); vid = (uint16_t)(p[0] | (p[1] << 8)); } CFRelease(d); }
-                if ((d = IORegistryEntryCreateCFProperty(pci, CFSTR("device-id"), kCFAllocatorDefault, 0))) {
-                    if (CFGetTypeID(d) == CFDataGetTypeID() && CFDataGetLength(d) >= 2) { const UInt8 *p = CFDataGetBytePtr(d); did = (uint16_t)(p[0] | (p[1] << 8)); } CFRelease(d); }
-                IOObjectRelease(pci);
-                if (vid && did) { char sel[32]; snprintf(sel, sizeof sel, "%04x:%04x", vid, did); setenv("MESA_VK_DEVICE_SELECT", sel, 1); }
+            uint16_t vid = 0, did = 0; unsigned bus = 0, dev = 0, fn = 0; int have_loc = 0;
+            nvmtl_nmx_pci(port, &vid, &did, &bus, &dev, &fn, &have_loc);
+            int same = 0;   /* GPUs of the same model: "vendor:device" cannot tell them apart, the PCI location can */
+            io_iterator_t it = 0;
+            if (vid && IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("NMXAccel"), &it) == KERN_SUCCESS) {
+                for (io_service_t s; (s = IOIteratorNext(it)); IOObjectRelease(s)) {
+                    uint16_t v2 = 0, d2 = 0; unsigned b2, e2, f2; int h2;
+                    nvmtl_nmx_pci(s, &v2, &d2, &b2, &e2, &f2, &h2);
+                    if (v2 == vid && d2 == did) same++;
+                }
+                IOObjectRelease(it);
             }
+            if (nvmtl_gpu_use_pci_tag(same, have_loc)) {
+                char tag[32]; nvmtl_pci_tag(tag, sizeof tag, bus, dev, fn);
+                unsetenv("MESA_VK_DEVICE_SELECT"); setenv("DRI_PRIME", tag, 1);
+                nvlog("nvmultigpu: %d GPUs of model %04x:%04x, this one is %s", same, vid, did, tag);
+            } else if (vid && did) { char sel[32]; snprintf(sel, sizeof sel, "%04x:%04x", vid, did); setenv("MESA_VK_DEVICE_SELECT", sel, 1); }
         }
         nvmtl_card_registry_id = mine;
     }

@@ -51,6 +51,22 @@ int main(void)
         for (int i = 0; i < 3; i++) n += nvmtl_card_accept(0, 2, i == 1, nvmtl_card_ordinal(ids, 3, ids[i]));
         arm("without nvmultigpu=1 every accelerator is accepted, whatever the vendors", n == 3);
     }
+    {   /* two GPUs of one model: told apart by PCI location */
+        unsigned bus, dev, fn; char tag[32];
+        arm("the registry's location string \"3:0:0\" parses to bus 3, device 0, function 0",
+            nvmtl_pci_loc_parse("3:0:0", &bus, &dev, &fn) && bus == 3 && dev == 0 && fn == 0);
+        arm("\"66:1:7\" is bus 66 (0x42), device 1, function 7 and its tag is pci-0000_42_01_7",
+            nvmtl_pci_loc_parse("66:1:7", &bus, &dev, &fn) && (nvmtl_pci_tag(tag, sizeof tag, bus, dev, fn), !strcmp(tag, "pci-0000_42_01_7")));
+        arm("the tag has the length Mesa's device-select layer compares (pci-xxxx_yy_zz_w)", strlen(tag) == strlen("pci-xxxx_yy_zz_w"));
+        arm("malformed locations are refused: empty, text, two fields, four fields, trailing colon, device above 31, function above 7, bus above 255",
+            !nvmtl_pci_loc_parse("", &bus, &dev, &fn) && !nvmtl_pci_loc_parse(NULL, &bus, &dev, &fn) && !nvmtl_pci_loc_parse("a:b:c", &bus, &dev, &fn)
+            && !nvmtl_pci_loc_parse("3:0", &bus, &dev, &fn) && !nvmtl_pci_loc_parse("1:2:3:4", &bus, &dev, &fn) && !nvmtl_pci_loc_parse("3:0:", &bus, &dev, &fn)
+            && !nvmtl_pci_loc_parse("3:32:0", &bus, &dev, &fn) && !nvmtl_pci_loc_parse("3:0:8", &bus, &dev, &fn) && !nvmtl_pci_loc_parse("256:0:0", &bus, &dev, &fn));
+        arm("a single GPU of its model keeps today's \"vendor:device\" selection, with or without a location",
+            !nvmtl_gpu_use_pci_tag(1, 1) && !nvmtl_gpu_use_pci_tag(1, 0) && !nvmtl_gpu_use_pci_tag(0, 1));
+        arm("two GPUs of one model use the PCI tag when the location is known, and fall back to \"vendor:device\" when it is not",
+            nvmtl_gpu_use_pci_tag(2, 1) && nvmtl_gpu_use_pci_tag(3, 1) && !nvmtl_gpu_use_pci_tag(2, 0));
+    }
     printf(fails ? "FAILED %d\n" : "PASS all arms\n", fails);
     return fails != 0;
 }
