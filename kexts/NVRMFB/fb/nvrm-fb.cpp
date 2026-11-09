@@ -3209,7 +3209,9 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
         // the panel goes black (issue #77, RTX 5080 4K@120: 7 offline / 35 virtual framebuffers -> 0 / 0 with these
         // values). 257 = 16.06 bpp x16, what NVKMS itself picked there ("EVO-DSC bppX16 257 sliceCount 4"); the slices
         // follow its count for 4K, two below; the reporter's slice height (the full frame) is kept.
-        if ((NvU64)k.pixelClockHz * 24 > 25920000000ull && !b.dscCompressedBitsPerPixel) {
+        const NvU64 dscLimit = nvrmDscThresholdBps(fIndex < (unsigned)gNDpy && gNDpy > 0 ? gDpy[fIndex].hdaConnectorType : 0,
+                                                   fInternal);
+        if (dscLimit && (NvU64)k.pixelClockHz * 24 > dscLimit && !b.dscCompressedBitsPerPixel) {
             const UInt16 slices = k.hVisible >= 3840 ? 4 : 2;
             b.dscCompressedBitsPerPixel = 257;
             b.dscSliceWidth = (UInt16)((k.hVisible + slices - 1) / slices);

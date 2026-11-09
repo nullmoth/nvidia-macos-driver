@@ -17,6 +17,9 @@ fixture = r'''
 using NvU32=uint32_t;using NvU64=uint64_t;using UInt64=uint64_t;using UInt16=uint16_t;using NvBool=bool;
 enum { NV_TRUE=1,NV_FALSE=0,kIODigitalSignal=1 };
 #define FBLOG(...) ((void)0)
+#include "nvrm-fb-safety.h"
+struct DpyRec { unsigned hdaConnectorType = 0; };
+static DpyRec gDpy[4]; static int gNDpy = 1;
 static void nvu_zero(void *p,size_t n){memset(p,0,n);}
 struct NvKmsKapiDisplayModeTimings {
     NvU32 pixelClockHz,hVisible,hSyncStart,hSyncEnd,hTotal,vVisible,vSyncStart,vSyncEnd,vTotal,refreshRate;
@@ -38,7 +41,7 @@ struct Kms {
     }
 };
 struct NVRMNVDAFramebuffer {
-    Kms *fKms=nullptr;void *fDev=this;unsigned fDisplay=1,fIndex=0;
+    bool fInternal=false;Kms *fKms=nullptr;void *fDev=this;unsigned fDisplay=1,fIndex=0;
     unsigned fBootW=2560,fBootH=1600,fScalerMaxW=3840,fScalerMaxH=2160,fRasterMaxW=5120,fPitchAlign=256;
     NvU64 fMemBytes=64ULL<<20;NvKmsKapiDisplayMode fBootMode;bool fKmsModesLogged=false;
     IODetailedTimingInformationV2 fDT[16];

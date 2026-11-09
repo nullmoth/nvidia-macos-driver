@@ -45,3 +45,13 @@ static inline unsigned nvrmPickTimings(const unsigned *hz, const unsigned char *
     }
     return kept;
 }
+// The uncompressed payload a link carries, in bits per second, above which a mode is driven with DSC. DP 1.4 is
+// HBR3 x4 (25.92 Gbit/s); an HDMI 2.1 FRL link (48 Gbit/s, 16b/18b) carries 42.67 Gbit/s. Other connectors (TMDS DVI,
+// analog, unknown) never get DSC hints: the commit would be refused for bandwidth there, not compressed. An internal
+// panel is eDP, which follows the DP limit. 0 = no DSC hint for this connector.
+static inline unsigned long long nvrmDscThresholdBps(unsigned hdaConnectorType, bool internal)
+{
+    if (internal || hdaConnectorType == 0x400) return 25920000000ull;
+    if (hdaConnectorType == 0x800) return 42670000000ull;
+    return 0;
+}
