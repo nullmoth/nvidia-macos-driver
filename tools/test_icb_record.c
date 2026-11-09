@@ -74,7 +74,7 @@ int main(void)
             nvmtl_icb_record kr; memset(&kr, 0, sizeof kr); kr.flags = NVMTL_ICB_REC_ARMED | NVMTL_ICB_REC_COMPUTE; kr.buffers[0] = 0xE1; kr.buffers[3] = 0xE4;
             nvmtl_icb_table_patch_ref(k0, &kr, 0); nvmtl_icb_table_patch_ref(k1, &kr, 1);
             arm("a dispatch's recorded kernel buffers replace the inherited entries of the set-0 table", k0[0] == 0xE1 && k0[3] == 0xE4 && k0[1] == 0x2001);
-            arm("the set-1 table of a dispatch stays exactly the inherited one (no fragment entries were recorded)", memcmp(k1, (uint64_t[1]){0}, 0) == 0 && k1[0] == 0x2000 && k1[3] == 0x2003);
+            arm("the set-1 table of a dispatch stays exactly the inherited one (no fragment entries were recorded)", k1[0] == 0x2000 && k1[3] == 0x2003);
         }
         arm("a patch pass of 1000 slots needs ceil(31000/64) = 485 groups", nvmtl_icb_patch_groups(1000) == 485);
         arm("the largest patch fits the 65535-group dispatch limit", nvmtl_icb_patch_groups(NVMTL_ICB_MAX_PATCH_SLOTS) <= 65535u);
