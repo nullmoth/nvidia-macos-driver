@@ -2314,10 +2314,21 @@ id nvmtl_tile_compute_pipeline(NVMTLRenderPipelineState *tp, uint32_t tw, uint32
         id hit = tp->_tileCps[key]; if (hit) return hit == [NSNull null] ? nil : hit;
         NSString *w = nil;
         NSString *text = nvmtl_tile_rewrite(tp->_tileFn->_air, tw, th, &w);
-        NSData *spv = text ? nvmtl_translate_with_fc(text, @"kernel", NULL, NULL, NULL, 0, &w) : nil;
+        // the function's constant values apply to the rewritten kernel exactly as they would to the original
+        NSDictionary *fcs = tp->_tileFn->_fc; const size_t nfc = fcs.count;
+        uint32_t *fidx = calloc(nfc ? nfc : 1, sizeof *fidx), *fsz = calloc(nfc ? nfc : 1, sizeof *fsz); uint8_t **fpay = calloc(nfc ? nfc : 1, sizeof *fpay);
+        size_t nf = 0;
+        for (NSString *key in fcs) {
+            NSArray *bytes = fcs[key]; if (![bytes isKindOfClass:[NSArray class]] || !bytes.count || bytes.count > 64) continue;
+            uint8_t *b = malloc(bytes.count); for (NSUInteger j = 0; j < bytes.count; j++) b[j] = (uint8_t)[bytes[j] unsignedIntValue];
+            fidx[nf] = (uint32_t)key.integerValue; fsz[nf] = (uint32_t)bytes.count; fpay[nf] = b; nf++;
+        }
+        NSData *spv = text ? nvmtl_translate_with_fc(text, @"kernel", fidx, fsz, (const uint8_t *const *)fpay, nf, &w) : nil;
+        for (size_t j = 0; j < nf; j++) free(fpay[j]);
+        free(fidx); free(fsz); free(fpay);
         id<MTLComputePipelineState> cps = nil;
         if (spv) {
-            NVMTLFunction *v = [NVMTLFunction new]; v->_air = text; v->_spirv = spv; v->_fname = tp->_tileFn->_fname; v->_stage = @"kernel";
+            NVMTLFunction *v = [NVMTLFunction new]; v->_air = text; v->_spirv = spv; v->_fc = tp->_tileFn->_fc; v->_fname = tp->_tileFn->_fname; v->_stage = @"kernel";
             NSError *e = nil; cps = [(id<MTLDevice>)gNVMTLMainDevice newComputePipelineStateWithFunction:v error:&e];
             if (!cps) w = e.localizedDescription ?: @"the compute pipeline for the tile function was refused";
         }
@@ -2337,7 +2348,6 @@ static NSString *nvmtl_tile_refusal(MTLTileRenderPipelineDescriptor *d) {
     if (r) *r = nil;
     if (nvmtl_tile_on() && [(id)d.tileFunction isKindOfClass:[NVMTLFunction class]] && ((NVMTLFunction *)d.tileFunction)->_air.length) {
         NVMTLFunction *tf = (NVMTLFunction *)d.tileFunction;
-        if (tf->_fc.count) return nvmtl_fail(err, @"tile render pipeline: REFUSED - a tile function with function constants is not carried");
         NVMTLRenderPipelineState *tp = [NVMTLRenderPipelineState new]; tp->_tileFn = tf;
         NSString *w = nil;   // translate once now (32x32 tiles) so a function that cannot be carried is refused here, with the reason
         if (!nvmtl_tile_compute_pipeline(tp, 32, 32, &w)) { NSString *why = [NSString stringWithFormat:@"tile render pipeline (%@): REFUSED - %@", tf->_fname, w]; nvlog("%s", why.UTF8String); return nvmtl_fail(err, why); }

@@ -9867,18 +9867,69 @@ done:
 }
 // range: either {loc, len} from the caller (range == NULL) or the two words at range+range_off. Outside a render pass.
 int nvmtl_vk_cmd_icb_gather(nvk_cmdbuf *c, nvk_buffer *records, nvk_buffer *out, size_t out_off, uint32_t slots, uint32_t compute, uint64_t pso, uint32_t ptype,
-                            uint32_t loc, uint32_t len, const uint32_t *tg, nvk_buffer *range, size_t range_off)
+                            uint32_t loc, uint32_t len, const uint32_t *tg, uint32_t indexed, uint32_t cap, nvk_buffer *range, size_t range_off)
 {
     if (!c || c->in_rp || !records || !out || !slots || slots > NVMTL_ICB_MAX_SLOTS || records->size < (size_t)slots * NVMTL_ICB_REC_BYTES ||
         (out_off & 3) || out_off > out->size || out->size - out_off < (size_t)slots * NVMTL_ICB_RECORD_BYTES || (range && ((range_off & 3) || range_off > range->size || range->size - range_off < 8)) || nvmtl_icb_gather_init()) return -1;
     nvmtl_icb_gather_args a = { nvmtl_vk_buffer_address(records), range ? nvmtl_vk_buffer_address(range) + range_off : 0, nvmtl_vk_buffer_address(out) + out_off,
-        slots, compute, (uint32_t)pso, (uint32_t)(pso >> 32), range ? NVMTL_ICB_GATHER_RANGE_FROM_BUFFER : loc, range ? NVMTL_ICB_GATHER_RANGE_FROM_BUFFER : len, ptype, tg ? 1u : 0u, { tg ? tg[0] : 0u, tg ? tg[1] : 0u, tg ? tg[2] : 0u }, 0 };
+        slots, compute, (uint32_t)pso, (uint32_t)(pso >> 32), range ? NVMTL_ICB_GATHER_RANGE_FROM_BUFFER : loc, range ? NVMTL_ICB_GATHER_RANGE_FROM_BUFFER : len, ptype, tg ? 1u : 0u, { tg ? tg[0] : 0u, tg ? tg[1] : 0u, tg ? tg[2] : 0u }, indexed, cap };
     if (!a.rec || !a.out || (range && !a.rng)) return -1;
     nvmtl_vk_cmd_barrier(c);   // the kernel that encoded the records ran in an earlier pass
     pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_icb_gather_pipeline);
     pvkCmdPushConstants(c->cb, g_icb_gather_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof a, &a);
     pvkCmdDispatch(c->cb, nvmtl_icb_mask_groups(slots), 1, 1);
     nvmtl_vk_cmd_barrier(c);
+    return 0;
+}
+
+// Copies the indices of the armed indexed commands of a GPU-written ICB into `dst` (cap 32-bit indices per slot).
+static pthread_mutex_t g_icb_index_lock = PTHREAD_MUTEX_INITIALIZER;
+static VkPipeline g_icb_index_pipeline;
+static VkPipelineLayout g_icb_index_layout;
+static int nvmtl_icb_index_init(void)
+{
+    int rc = -1;
+    pthread_mutex_lock(&g_icb_index_lock);
+    if (g_icb_index_pipeline) { rc = 0; goto done; }
+    VkShaderModule mod = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo sm = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_icb_index_spv, nvmtl_icb_index_spv };
+    if (pvkCreateShaderModule(g_dev, &sm, NULL, &mod) != VK_SUCCESS) goto done;
+    VkPushConstantRange push = { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(nvmtl_icb_index_args) };
+    VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL, 1, &push };
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (pvkCreatePipelineLayout(g_dev, &li, NULL, &layout) == VK_SUCCESS) {
+        VkPipelineShaderStageCreateInfo stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", NULL };
+        VkComputePipelineCreateInfo pi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, stage, layout, VK_NULL_HANDLE, -1 };
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        if (nvmtl_create_compute_pipeline(g_dev, VK_NULL_HANDLE, &pi, NULL, &pipeline) == VK_SUCCESS) {
+            g_icb_index_layout = layout; g_icb_index_pipeline = pipeline; rc = 0;
+        } else {
+            if (pipeline) pvkDestroyPipeline(g_dev, pipeline, NULL);
+            pvkDestroyPipelineLayout(g_dev, layout, NULL);
+        }
+    }
+    pvkDestroyShaderModule(g_dev, mod, NULL);
+done:
+    pthread_mutex_unlock(&g_icb_index_lock);
+    return rc;
+}
+int nvmtl_vk_cmd_icb_index_copy(nvk_cmdbuf *c, nvk_buffer *records, nvk_buffer *dst, uint32_t slots, uint32_t cap, uint32_t loc, uint32_t len, nvk_buffer *range, size_t range_off)
+{
+    uint64_t need;
+    if (!c || c->in_rp || !records || !dst || !slots || !cap || slots > NVMTL_ICB_MAX_SLOTS || records->size < (size_t)slots * NVMTL_ICB_REC_BYTES ||
+        __builtin_mul_overflow((uint64_t)slots, (uint64_t)cap, &need) || need > 0xFFFFFFFFull || dst->size < need * 4u ||
+        (range && ((range_off & 3) || range_off > range->size || range->size - range_off < 8)) || nvmtl_icb_index_init()) return -1;
+    nvmtl_icb_index_args a = { nvmtl_vk_buffer_address(records), range ? nvmtl_vk_buffer_address(range) + range_off : 0, nvmtl_vk_buffer_address(dst),
+        slots, cap, range ? NVMTL_ICB_GATHER_RANGE_FROM_BUFFER : loc, range ? NVMTL_ICB_GATHER_RANGE_FROM_BUFFER : len };
+    if (!a.rec || !a.dst || (range && !a.rng)) return -1;
+    const uint64_t groups = (need + 63u) / 64u;
+    const uint32_t gx = groups > 65535u ? 65535u : (uint32_t)groups, gy = (uint32_t)((groups + gx - 1u) / gx);
+    if (gy > 65535u) return -1;
+    nvmtl_vk_cmd_barrier(c);
+    pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_icb_index_pipeline);
+    pvkCmdPushConstants(c->cb, g_icb_index_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof a, &a);
+    pvkCmdDispatch(c->cb, gx, gy, 1);
+    nvmtl_vk_cmd_barrier(c);   // the indexed draws read the scratch indices as an index buffer next
     return 0;
 }
 
