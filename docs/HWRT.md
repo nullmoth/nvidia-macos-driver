@@ -114,6 +114,15 @@ Generation 1 writes, for the rows it has no measurement for: 2-child nodes of 12
 leaves. Row R04 is honoured (the root sits at 0x380 and is node 0), R03/R08/R11 are written, and all header words listed as
 MEASURED are written with their measured values.
 
+### 8-wide node option
+
+`nvk/hwrt/hwrt_wide.c` is the 8-wide variant as a host reference: the binary tree is collapsed to up to eight children per 128-byte
+node with 8-bit bounds in the node's own frame, rounded outward in the arithmetic the walk uses. The walk over it equals the model
+bit for bit (0 of 9000 rays differ), it uses under two fifths of the binary tree's nodes, and boxes that do not contain their children
+are caught. It models the shape rows R21/R22 suggest and is unmeasured like them. The GLSL encoder writes only the 2-wide variant: a
+parallel collapse needs the depth of each node, which the intermediate tree does not carry, so it would be a multi-pass encoder; P3
+builds the 2-wide variant on the card first and the 8-wide encoder follows only if the card prefers that shape.
+
 ## Query region (what `check_ttu_region.py` judges)
 
 Fifteen instructions, SM120, in this order. Offsets are in the 40..55 bit field of the low word; registers are aligned
