@@ -68,3 +68,14 @@ static inline bool nvrmFbLocation(unsigned index, char *out, unsigned size)
     out[n] = 0;
     return true;
 }
+// Highest frame rate published in IOFBTimingRange. macOS drops EDID timings above it, and 500 hid 540 Hz panels' own rate.
+enum { kNvrmMaxFrameRate = 1000 };
+// The flip latch mode in effect. `setting` is the debug.nvrmfb_flip_latch value (1 = wait for every flip). At 357 Hz and
+// above the wait costs more than a third of the frame (a 540 Hz frame is 1.85 ms, the wait was measured at 1.15 ms
+// average), so with `autoDefer` set a setting of 1 becomes 2: the flip is verified at the head of the next submit
+// instead, still before its predecessor's surface can be reused. An explicit 0 or 2 is never changed.
+static inline int nvrmFlipLatchMode(int setting, int autoDefer, unsigned long long periodNs)
+{
+    if (setting == 1 && autoDefer && periodNs && periodNs <= 2800000ull) return 2;
+    return setting;
+}
