@@ -347,6 +347,18 @@ static void nvmtl_nvdec_register(void)
               st ? "NOT registered" : "REGISTERED", me, (int)st, path);
     });
 }
+// A client that asks for low-latency rate control (FFmpeg's low_delay, Sunshine) gets -12902 from an encoder that does not
+// declare the key as a selection property. NVMTL_ENCODER_LLRC=1 declares it for the built-in encoders; it is off by
+// default because those libraries are closed and what they do with the property when VideoToolbox sets it is unmeasured.
+static NSDictionary *nvmtl_encoder_registration_info(NSString *ident, NSString *name)
+{
+    NSMutableDictionary *d = [@{ @"CMClassImplementationID": ident, @"CMClassImplementationName": name,
+                                 @"VTRating": @1000, @"VTIsHardwareAccelerated": @YES } mutableCopy];
+    const char *on = getenv("NVMTL_ENCODER_LLRC");
+    if (on && *on && *on != '0')
+        d[@"SupportedSelectionProperties"] = @{ @"EnableLowLatencyRateControl": @[ @YES, @NO ] };
+    return d;
+}
 static void nvmtl_nvenc_register(void)
 {
     static dispatch_once_t once;
@@ -368,9 +380,7 @@ static void nvmtl_nvenc_register(void)
         if (!h) { nvlog("nvenc: dlopen %s FAILED: %s", path, dlerror()); return; }
         void *fac = dlsym(h, "NVEncH264_CreateInstance");
         if (!fac) { nvlog("nvenc: %s has no NVEncH264_CreateInstance", path); return; }
-        NSDictionary *info = @{ @"CMClassImplementationID": @"com.nvmtl.videoencoder.avc.nvenc",
-                                @"CMClassImplementationName": @"NVIDIA NVENC H.264",
-                                @"VTRating": @1000, @"VTIsHardwareAccelerated": @YES };
+        NSDictionary *info = nvmtl_encoder_registration_info(@"com.nvmtl.videoencoder.avc.nvenc", @"NVIDIA NVENC H.264");
         int32_t st = reg('avc1', (__bridge CFDictionaryRef)info, fac);
         nvlog("nvenc: H.264 encoder %s in %s (VTRegisterVideoEncoderWithInfo -> %d, rating 1000, %s)",
               st ? "NOT registered" : "REGISTERED", me, (int)st, path);
@@ -539,9 +549,7 @@ static void nvmtl_nvenc_hevc_register(void)
         if (!h) { nvlog("nvenc: dlopen %s FAILED: %s", path, dlerror()); return; }
         void *fac = dlsym(h, "NVEncHEVC_CreateInstance");
         if (!fac) { nvlog("nvenc: %s has no NVEncHEVC_CreateInstance", path); return; }
-        NSDictionary *info = @{ @"CMClassImplementationID": @"com.nvmtl.videoencoder.hevc.nvenc",
-                                @"CMClassImplementationName": @"NVIDIA NVENC HEVC",
-                                @"VTRating": @1000, @"VTIsHardwareAccelerated": @YES };
+        NSDictionary *info = nvmtl_encoder_registration_info(@"com.nvmtl.videoencoder.hevc.nvenc", @"NVIDIA NVENC HEVC");
         int32_t st = reg('hvc1', (__bridge CFDictionaryRef)info, fac);
         nvlog("nvenc: HEVC encoder %s in %s (VTRegisterVideoEncoderWithInfo -> %d, rating 1000, %s)",
               st ? "NOT registered" : "REGISTERED", me, (int)st, path);
