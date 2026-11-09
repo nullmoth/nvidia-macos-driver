@@ -336,7 +336,7 @@ public:
     // the maker IS the primary, so every answer equals the single global the code used to read (tools/check_accel_resolution.py
     // keeps raw uses of the global out of everything else). Display, scanout and flip paths belong to the primary: it is the only
     // card with a display (NVKMS binds the primary).
-    static NVAccel *resolve(NVAccel *owner) { return owner ? owner : gAccel; }
+    static NVAccel *resolve(NVAccel *owner) { return nvrm_resolve(owner, gAccel); }
     static NVAccel *forDisplay() { return gAccel; }
     struct NVRMRmHandles fRmHandles;
     bool fRmHandlesValid = false;

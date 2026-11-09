@@ -59,6 +59,48 @@ int main() {
     arm("multi: an unmarked card waits for the marked one when a selector is active", !nvrm_gate_enter(&gate, true, false, true) && gate.starting == 0);
     arm("multi: without a selector the first card to ask goes ahead", nvrm_gate_enter(&gate, true, false, false));
 
+    /* slice 2: which object an operation runs against */
+    reset();
+    tab.add(&a, false, false);
+    arm("one card: an operation on an object made by the card, and one with no owner, both resolve to the card the old global named",
+        nvrm_resolve(&a, tab.primary()) == &a && nvrm_resolve((Dev *)0, tab.primary()) == &a);
+    reset(); tab.add(&a, true, false); tab.add(&b, true, false);
+    arm("two cards: an object made by the second card runs against the second card, not the primary",
+        nvrm_resolve(&b, tab.primary()) == &b && nvrm_resolve(&a, tab.primary()) == &a);
+    arm("two cards: code with no owner (display, scanout) runs against the primary", nvrm_resolve((Dev *)0, tab.primary()) == &a);
+    reset();
+    arm("no card at all: nothing resolves", nvrm_resolve((Dev *)0, tab.primary()) == 0);
+    /* slice 4b: re-offering the cards the gate refused (IOKit does not retry a refused start) */
+    {
+        struct Card { int id; bool canStart; int starts; };
+        Card cards[4] = { {0, true, 0}, {1, true, 0}, {2, true, 0}, {3, true, 0} };
+        NvrmStartGate g = NvrmStartGate(); NvrmWaitQueue<Card> q = NvrmWaitQueue<Card>();
+        int order[16], norder = 0, inflight = 0, maxInflight = 0;
+        /* one start attempt by IOKit's matching: refused -> queued; otherwise runs to its end, then the next waiting card is re-offered */
+        auto offer = [&](Card *c, bool marked) {
+            Card *cur = c; bool mk = marked;
+            for (;;) {
+                if (!nvrm_gate_enter(&g, true, mk, true)) { q.add(cur); return; }
+                inflight++; if (inflight > maxInflight) maxInflight = inflight;
+                bool ok = cur->canStart; if (ok) { cur->starts++; order[norder++] = cur->id; }
+                inflight--; nvrm_gate_leave(&g, true, ok);
+                cur = q.next(); if (!cur) return;
+                mk = false;
+            }
+        };
+        offer(&cards[3], false); offer(&cards[2], false); offer(&cards[1], false);
+        arm("four cards, primary last to be offered: the three unmarked ones are refused and queued, nothing has started", norder == 0 && q.n == 3);
+        offer(&cards[0], true);
+        arm("once the primary has started, the waiting cards are re-offered in the order they were refused: 0, 3, 2, 1",
+            norder == 4 && order[0] == 0 && order[1] == 3 && order[2] == 2 && order[3] == 1);
+        arm("exactly one start was ever in flight, and every card started once", maxInflight == 1 && cards[0].starts + cards[1].starts + cards[2].starts + cards[3].starts == 4);
+        arm("the queue is empty at the end and a card already waiting is not queued twice", q.n == 0 && q.add(&cards[1]) && !q.add(&cards[1]));
+        q.next();
+        Card dead = { 9, false, 0 }; NvrmStartGate g2 = NvrmStartGate(); NvrmWaitQueue<Card> q2 = NvrmWaitQueue<Card>();
+        int offers = 0; Card *cur = &dead;
+        while (cur) { offers++; nvrm_gate_enter(&g2, true, true, true); nvrm_gate_leave(&g2, true, false); cur = q2.add(&dead) ? q2.next() : 0; }
+        arm("a card that can never start is offered once and re-offered NVRM_REOFFER_TRIES times, then left alone (no loop)", offers == NVRM_REOFFER_TRIES + 1);
+    }
     printf(fails ? "FAILED %d\n" : "PASS all arms\n", fails);
     return fails != 0;
 }
