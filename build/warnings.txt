@@ -2,10 +2,7 @@
 # Lower a number when warnings are fixed; never raise one to let a new warning through.
 # Every non-zero line names what is left and why it is not fixed in source.
 #
-# plugin: -Wobjc-protocol-method-implementation for Metal protocol methods that are implemented only in the function-
-#   pointer, intersection-table and mesh categories of NVMTLLibraryLoad.m (moving them into the primary @implementation
-#   is code motion across files, not a warning fix)
-plugin 44
+plugin 0
 # nvencvt: the linker's unaligned-pointer notes for gBase/gDBase, CoreMedia's CMBaseClass, whose layout is packed to
 #   4 bytes by Apple's ABI
 nvencvt 22
