@@ -77,6 +77,6 @@ nvk          nvk/nvk-upstream-nak.patch carries commits from the Mesa project (M
 kexts/NMKbdBacklight  The keyboard backlight plugin follows the structure of VirtualSMC's SMCLightSensor plugin and builds
              against Lilu and the VirtualSMC SDK (acidanthera, BSD-3-Clause). The report layouts and method encodings it uses
              were read from the public Linux drivers hid-apple (Apple keyboard backlight reports), ideapad-laptop (Lenovo KBLC,
-             HALS, SALS), thinkpad_acpi (MLCG, MLCS), dell-laptop and dell-smbios-wmi (Dell SMBIOS keyboard light calls), msi-ec (BeardOverflow/msi-ec, GPL-2.0: the source of the MSI firmware-string table facts and the setter encoding; our code is our own), and
-             OpenRazer (the Razer feature report, tools/razer), which are GPL-2.0, and from the ACPI tables of laptops whose owners sent
+             HALS, SALS), thinkpad_acpi (MLCG, MLCS), dell-laptop and dell-smbios-wmi (Dell SMBIOS keyboard light calls), msi-ec (BeardOverflow/msi-ec, GPL-2.0: the source of the MSI firmware-string table facts and the setter encoding; our code is our own), hid-asus (drivers/hid/hid-asus.c: the ASUS N-KEY handshake and brightness
+             feature reports, tools/asus), and OpenRazer (the Razer feature report, tools/razer), which are GPL-2.0, and from the ACPI tables of laptops whose owners sent
              them in. No code was copied from them; the code here is NullMoth's own.
