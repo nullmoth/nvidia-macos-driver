@@ -445,6 +445,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     bool fInternal = false;     // NVKMS static display info: laptop panel (eDP/LVDS)
     // Variable refresh rate (boot-arg nvfbvrr=1): the display supports it, WindowServer asked for it, and the vertical range
     // the EDID gives. fVrrOn follows the last kIOFBVariableRefreshRate set and is carried by every full mode set.
+    uintptr_t fGammaScale[3] = { 0x10000, 0x10000, 0x10000 };   // 'gslr' 'gslg' 'gslb': 1.0 in 16.16 until WindowServer sets one
     bool fVrrSupported = false, fVrrOn = false; unsigned fVrrMinHz = 0, fVrrMaxHz = 0;
     // 10-bit and HDR10 (boot-args nvfb10bit=1, nvfbhdr=1). fHdrCapable: the display's EDID lists PQ. fHdrActive: the mode on the
     // head (or being set) is an HDR10 timing. fScan30: the scanout surface is X2B10G10R10 (told to the accelerator in the
@@ -4743,6 +4744,14 @@ void nvrmfbColorChanged(bool needsModeset)
 IOReturn NVRMNVDAFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
 {
     FBSEL(attribute);
+    if (attribute == kIOFBRedGammaScaleAttribute || attribute == kIOFBGreenGammaScaleAttribute || attribute == kIOFBBlueGammaScaleAttribute) {
+        // CoreDisplay asks for the per-channel gamma scale at the login window and, with no answer, logs "can't get framebuffer
+        // red gamma scaling factor" and skips the display's calibration profile until a user session sets it (issue 413). The
+        // scale is 1.0 (16.16 fixed point) unless WindowServer set another one.
+        const unsigned c = attribute == kIOFBRedGammaScaleAttribute ? 0 : attribute == kIOFBGreenGammaScaleAttribute ? 1 : 2;
+        if (value) *value = fGammaScale[c];
+        return kIOReturnSuccess;
+    }
     if (attribute == kIOFBVariableRefreshRate) {
         if (!fVrrSupported || !fVrrMinHz) return kIOReturnUnsupported;
         if (value) *value = fVrrOn ? 1 : 0;
@@ -4880,6 +4889,10 @@ IOReturn NVRMNVDAFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
 {
     char c[5] = { (char)(attribute >> 24), (char)(attribute >> 16), (char)(attribute >> 8), (char)attribute, 0 };
     if (attribute == kIOFBVariableRefreshRate) return setVrr(value != 0);
+    if (attribute == kIOFBRedGammaScaleAttribute || attribute == kIOFBGreenGammaScaleAttribute || attribute == kIOFBBlueGammaScaleAttribute) {
+        fGammaScale[attribute == kIOFBRedGammaScaleAttribute ? 0 : attribute == kIOFBGreenGammaScaleAttribute ? 1 : 2] = value;   // remembered and answered back
+        return kIOReturnSuccess;
+    }
     if (attribute == kIOFBHDRMetaDataAttribute) return value > 0x1000 ? setHdrMeta((const void *)value) : kIOReturnBadArgument;
     if (attribute == kIOWindowServerActiveAttribute) {
         FBLOG("setAttribute 'wsrv' %lu -> success", (unsigned long)value);
