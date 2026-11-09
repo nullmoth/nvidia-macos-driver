@@ -832,6 +832,7 @@ static int gBootHead = -2;
 static NvKmsKapiDisplay gBootDpy = 0;
 static struct NvKmsKapiDisplayMode gBootMode;
 static NvU32 gHeadsTaken;
+static unsigned gBootRetry = kNvrmBootRetries;   // boot-time "nothing connected" retries done; kNvrmBootRetries = none left
 static NvU32 gNumHeads;
 // Flip-cache allocation epoch. The cache is keyed by the NvKmsKapiMemory pointer, and a buffer allocated after a free can
 // land at the freed one's address; a cache hit then scanned out the old surface over freed memory, and after a refresh or
@@ -1175,6 +1176,12 @@ bool NVRMNVDAFramebuffer::kapiInit()
         if (getProvider()) getProvider()->setProperty("connected-displays", (unsigned long long)gNDpy, 32);
         FBLOG("ENUMERATED: %d connected display(s) of %u handle(s), %u heads available",
               gNDpy, n, fNumHeads);
+        if (gNDpy == 0 && n > 0) {   // nothing answered yet: look again shortly (nvfbbootretry=0 turns this off)
+            UInt32 off = 1; PE_parse_boot_argn("nvfbbootretry", &off, sizeof off);
+            gBootRetry = off ? 0 : kNvrmBootRetries;    // the counter counts up; kNvrmBootRetries = already used up
+            if (off) FBLOG("no display answered at start: will look again %u times, %u s apart", (unsigned)kNvrmBootRetries, nvrmBootRetryDelayMs(0) / 1000);
+            if (off) hotplugKick();
+        }
         // NVKMS answered and nothing is plugged into this card (its displays are on another GPU): the driver is up as
         // far as it will go, so this start counts as good for the boot guard (nvrm_off.h)
         if (n > 0 && gNDpy == 0) fbGuardCleared("NVKMS lists this card's connectors and none has a display");
@@ -1918,7 +1925,13 @@ void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
         }
         fb->release();
     }
-    if (!added) return;
+    if (!added) {   // still nothing: a boot that found no display keeps looking, 3 s apart, a few times
+        if (gNDpy == 0 && gBootRetry < kNvrmBootRetries) {
+            const unsigned ms = nvrmBootRetryDelayMs(gBootRetry++);
+            if (ms && gHotplug) { uint64_t d; clock_interval_to_deadline(ms, kMillisecondScale, &d); thread_call_enter_delayed(gHotplug, d); }
+        }
+        return;
+    }
     IOService *nub0 = me->getProvider(), *gpu = nvrmPickNubParent<IOService>(nub0 ? nub0->getProvider() : nullptr, gNubParent);
     OSIterator *it = gpu ? gpu->getChildIterator(gIOServicePlane) : nullptr;
     unsigned matched = 0;
