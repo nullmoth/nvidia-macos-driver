@@ -26,6 +26,7 @@
 #include "nvmtl_loss.h"
 #include "nvmtl_multiview.h"
 #include "nvmtl_caps_query.h"
+#include "nvmtl_sparse_query.h"
 #include "nvmtl_icb_range.h"
 #include "nvmtl_y422_convert.h"
 #include "nvmtl_icb_record.h"
@@ -2584,6 +2585,23 @@ static int nvmtl_vk_image_create_ms_lifetime_body(uint32_t w, uint32_t h, uint32
     return 0;
 }
 int nvmtl_vk_ms_storage_ok(void) { return g_ms_storage; }
+// The texel shape of one sparse block for a format / dimensionality / sample count, as the device reports it. 0 on success.
+int nvmtl_vk_sparse_granularity(uint32_t vkfmt, int is3d, uint32_t samples, uint32_t out[3])
+{
+    out[0] = out[1] = out[2] = 0;
+    if (nvmtl_vk_init()) return -1;
+    PFN_vkGetPhysicalDeviceSparseImageFormatProperties f = (PFN_vkGetPhysicalDeviceSparseImageFormatProperties)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceSparseImageFormatProperties");
+    if (!f) return -1;
+    VkSampleCountFlagBits sc = samples >= 8 ? VK_SAMPLE_COUNT_8_BIT : samples >= 4 ? VK_SAMPLE_COUNT_4_BIT : samples >= 2 ? VK_SAMPLE_COUNT_2_BIT : VK_SAMPLE_COUNT_1_BIT;
+    uint32_t n = 0; f(g_pdev, (VkFormat)vkfmt, is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, sc, VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_TILING_OPTIMAL, &n, NULL);
+    if (!n) return -1;
+    VkSparseImageFormatProperties props[8]; if (n > 8) n = 8;
+    f(g_pdev, (VkFormat)vkfmt, is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, sc, VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_TILING_OPTIMAL, &n, props);
+    for (uint32_t i = 0; i < n; i++) if (props[i].aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
+        const uint32_t g[3] = { props[i].imageGranularity.width, props[i].imageGranularity.height, props[i].imageGranularity.depth };
+        nvmtl_sparse_tile_size(1, g, out); return 0; }
+    return -1;
+}
 int nvmtl_vk_cap_float32_filtering(void) { return g_cap_f32_filter; }
 int nvmtl_vk_cap_float32_msaa(void) { return g_cap_f32_msaa; }
 int nvmtl_vk_cap_pull_model(void) { return g_cap_pull; }
