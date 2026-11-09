@@ -43,3 +43,7 @@ kexts/NVRMFB EDID override files and the opt-in smaller boot rasters follow an i
 kexts/NVRM   BAR1 placement is clipped to the range IOKit can describe and the aperture list is built before any
              PCI write (nvrm_bar_limits.h, placeLargeBar1). Community contribution: pull requests #431 (GeekAudio)
              and #473 (Giraffe12311), based on the bar-preflight experiment by yuanjing-hash.
+
+Community ideas  The shared family-VRAM import cache and the browser surface-publication default follow ideas first
+             published by mickys (https://github.com/mickys/nvidia-macos-driver, PolyForm Noncommercial 1.0.0) and
+             proposed to this project by GeekAudio in pull requests 463 and 481. The code here is NullMoth's own.

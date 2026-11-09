@@ -389,6 +389,333 @@ pub fn specialize_function_constants_zero(spv: &[u8]) -> Result<Vec<u8>, String>
         .collect())
 }
 
+/// One specialization constant of a module made by [`specialize_function_constants_as_spec_ids`]: lane `lane` of
+/// function constant `fc_index`, the SPIR-V `SpecId` it carries, and the bytes it occupies in that constant's
+/// little-endian payload (`byte_offset`, `size`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpecConstantEntry {
+    pub fc_index: u32,
+    pub lane: u32,
+    pub spec_id: u32,
+    pub size: u32,
+    pub byte_offset: u32,
+}
+
+/// The first `SpecId` of the function-constant range. The plugin's own specialization constants (the threadgroup
+/// linearization uses SpecId 3) sit below it.
+pub const FC_SPEC_ID_BASE: u32 = 0x4000;
+
+/// The `SpecId` of lane `lane` of function constant `fc_index`: sixteen ids per constant, lane 15 being its
+/// "is defined" flag.
+pub const fn fc_spec_id(fc_index: u32, lane: u32) -> u32 {
+    FC_SPEC_ID_BASE + fc_index * 16 + lane
+}
+
+/// Turns the function-constant globals of a module that was translated WITHOUT specialization into SPIR-V
+/// specialization constants, so one translation serves every set of values: the initializer of each
+/// `MTL_FC_INIT_<n>` variable becomes an `OpSpecConstant` (an `OpSpecConstantComposite` of them for a vector) whose
+/// `SpecId` is [`fc_spec_id`], and each `is_function_constant_defined` marker becomes a boolean specialization constant
+/// at lane 15 of its constant (the value is a VkBool32; a constant left out of the set is simply not defined).
+/// Nothing is pruned: the branches the values decide stay in the module for the consumer to fold when it applies them.
+pub fn specialize_function_constants_as_spec_ids(
+    spv: &[u8],
+) -> Result<(Vec<u8>, Vec<SpecConstantEntry>), String> {
+    use crate::spirv_module::{Instruction, Operand};
+    use spirv::{Decoration, Op};
+
+    let mut module = load_bytes(spv).map_err(|e| format!("SPIR-V load: {e:?}"))?;
+    let mut var_index: crate::fxhash::HashMap<u32, u32> = crate::fxhash::HashMap::default();
+    for inst in &module.debug_names {
+        if inst.class.opcode != Op::Name {
+            continue;
+        }
+        if let (Some(Operand::IdRef(id)), Some(Operand::LiteralString(s))) =
+            (inst.operands.first(), inst.operands.get(1))
+        {
+            if let Some(idx) = fc_init_index(s) {
+                var_index.insert(*id, idx);
+            }
+        }
+    }
+    let mut pointee: crate::fxhash::HashMap<u32, u32> = crate::fxhash::HashMap::default();
+    let mut scalar_width: crate::fxhash::HashMap<u32, u32> = crate::fxhash::HashMap::default();
+    let mut numeric_vectors: crate::fxhash::HashMap<u32, (u32, u32)> =
+        crate::fxhash::HashMap::default();
+    for inst in &module.types_global_values {
+        match inst.class.opcode {
+            Op::TypePointer => {
+                if let (Some(rid), Some(Operand::IdRef(p))) = (inst.result_id, inst.operands.get(1)) {
+                    pointee.insert(rid, *p);
+                }
+            }
+            Op::TypeInt | Op::TypeFloat => {
+                if let (Some(rid), Some(Operand::LiteralBit32(w))) =
+                    (inst.result_id, inst.operands.first())
+                {
+                    scalar_width.insert(rid, *w);
+                }
+            }
+            Op::TypeVector => {
+                if let (
+                    Some(rid),
+                    Some(Operand::IdRef(component_ty)),
+                    Some(Operand::LiteralBit32(count)),
+                ) = (inst.result_id, inst.operands.first(), inst.operands.get(1))
+                {
+                    numeric_vectors.insert(rid, (*component_ty, *count));
+                }
+            }
+            _ => {}
+        }
+    }
+    numeric_vectors.retain(|_, (component_ty, _)| scalar_width.contains_key(component_ty));
+
+    let mut next_id = module.header.as_ref().map(|h| h.bound).unwrap_or(1);
+    let mut table: Vec<SpecConstantEntry> = vec![];
+    let mut decorations: Vec<Instruction> = vec![];
+    // per variable: the instructions to put before it, and the id its initializer becomes
+    let mut edits: crate::fxhash::HashMap<u32, (Vec<Instruction>, u32)> =
+        crate::fxhash::HashMap::default();
+    for inst in &module.types_global_values {
+        if inst.class.opcode != Op::Variable {
+            continue;
+        }
+        let Some(vid) = inst.result_id else { continue };
+        let Some(&idx) = var_index.get(&vid) else { continue };
+        let ptr_ty = inst.result_type.ok_or_else(|| format!("FC var %{vid} has no result type"))?;
+        let value_ty = *pointee
+            .get(&ptr_ty)
+            .ok_or_else(|| format!("FC var %{vid}: pointer type %{ptr_ty} has no pointee"))?;
+        let (lane_ty, count, composite) = if scalar_width.contains_key(&value_ty) {
+            (value_ty, 1u32, false)
+        } else if let Some(&(c, n)) = numeric_vectors.get(&value_ty) {
+            (c, n, true)
+        } else {
+            return Err(format!("FC index {idx}: pointee %{value_ty} is not a scalar or vector numeric type"));
+        };
+        if count > 16 {
+            return Err(format!("FC index {idx}: {count} lanes do not fit sixteen spec ids"));
+        }
+        let width = scalar_width[&lane_ty];
+        if width > 64 {
+            return Err(format!("FC index {idx}: {width}-bit lanes are not supported"));
+        }
+        let lane_bytes = (width as usize).div_ceil(8) as u32;
+        let mut before = Vec::with_capacity(count as usize + 1);
+        let mut lanes = Vec::with_capacity(count as usize);
+        for lane in 0..count {
+            let id = next_id;
+            next_id += 1;
+            let zero = if width > 32 { Operand::LiteralBit64(0) } else { Operand::LiteralBit32(0) };
+            before.push(Instruction::new(Op::SpecConstant, Some(lane_ty), Some(id), vec![zero]));
+            let spec_id = fc_spec_id(idx, lane);
+            decorations.push(Instruction::new(
+                Op::Decorate,
+                None,
+                None,
+                vec![Operand::IdRef(id), Operand::Decoration(Decoration::SpecId), Operand::LiteralBit32(spec_id)],
+            ));
+            table.push(SpecConstantEntry { fc_index: idx, lane, spec_id, size: lane_bytes, byte_offset: lane * lane_bytes });
+            lanes.push(id);
+        }
+        let init = if composite {
+            let id = next_id;
+            next_id += 1;
+            before.push(Instruction::new(
+                Op::SpecConstantComposite,
+                Some(value_ty),
+                Some(id),
+                lanes.iter().copied().map(Operand::IdRef).collect(),
+            ));
+            id
+        } else {
+            lanes[0]
+        };
+        edits.insert(vid, (before, init));
+    }
+    if edits.is_empty() {
+        return Err("specialize_function_constants_as_spec_ids: the module has no MTL_FC_INIT global".to_string());
+    }
+    let mut rebuilt: Vec<Instruction> = Vec::with_capacity(module.types_global_values.len() + table.len() * 2);
+    for mut inst in module.types_global_values.clone() {
+        if inst.class.opcode == Op::Variable {
+            if let Some((before, init)) = inst.result_id.as_ref().and_then(|v| edits.remove(v)) {
+                rebuilt.extend(before);
+                if inst.operands.len() >= 2 {
+                    inst.operands[1] = Operand::IdRef(init);
+                } else {
+                    inst.operands.push(Operand::IdRef(init));
+                }
+            }
+        }
+        rebuilt.push(inst);
+    }
+    module.types_global_values = rebuilt;
+    // A variable's initial value is not a constant to a consumer that folds: every load of a function-constant global
+    // reads the specialization constant itself, so the values decide the branches that depend on them.
+    {
+        let mut init_of: crate::fxhash::HashMap<u32, u32> = crate::fxhash::HashMap::default();
+        for inst in &module.types_global_values {
+            if inst.class.opcode == Op::Variable {
+                if let (Some(vid), Some(Operand::IdRef(init))) = (inst.result_id, inst.operands.get(1)) {
+                    if var_index.contains_key(&vid) { init_of.insert(vid, *init); }
+                }
+            }
+        }
+        for function in module.functions.iter_mut() {
+            for block in function.blocks.iter_mut() {
+                for inst in block.instructions.iter_mut() {
+                    if inst.class.opcode != Op::Load { continue; }
+                    let Some(Operand::IdRef(ptr)) = inst.operands.first() else { continue };
+                    let Some(&init) = init_of.get(ptr) else { continue };
+                    *inst = Instruction::new(Op::CopyObject, inst.result_type, inst.result_id, vec![Operand::IdRef(init)]);
+                }
+            }
+        }
+    }
+    module.annotations.extend(decorations);
+    if let Some(h) = module.header.as_mut() {
+        h.bound = next_id;
+    }
+    // `is_function_constant_defined`: one boolean specialization constant per constant (lane 15, a VkBool32), so a set that
+    // leaves some constants out needs no module of its own
+    {
+        let markers = fc_defined_marker_indices(&module);
+        let mut edits: Vec<(usize, usize, usize, u32, u32)> = vec![];
+        for (fi, function) in module.functions.iter().enumerate() {
+            for (bi, block) in function.blocks.iter().enumerate() {
+                for (ii, inst) in block.instructions.iter().enumerate() {
+                    if inst.class.opcode != Op::CopyObject { continue; }
+                    let (Some(rid), Some(bool_ty)) = (inst.result_id, inst.result_type) else { continue };
+                    if let Some(&idx) = markers.get(&rid) { edits.push((fi, bi, ii, idx, bool_ty)); }
+                }
+            }
+        }
+        let mut flag_for: crate::fxhash::HashMap<u32, u32> = crate::fxhash::HashMap::default();
+        for (fi, bi, ii, idx, bool_ty) in edits {
+            let flag = *flag_for.entry(idx).or_insert_with(|| {
+                let id = module.fresh_id();
+                let spec_id = fc_spec_id(idx, 15);
+                module.types_global_values.push(Instruction::new(Op::SpecConstantFalse, Some(bool_ty), Some(id), vec![]));
+                module.annotations.push(Instruction::new(
+                    Op::Decorate, None, None,
+                    vec![Operand::IdRef(id), Operand::Decoration(Decoration::SpecId), Operand::LiteralBit32(spec_id)],
+                ));
+                table.push(SpecConstantEntry { fc_index: idx, lane: 15, spec_id, size: 4, byte_offset: 0 });
+                id
+            });
+            module.functions[fi].blocks[bi].instructions[ii].operands = vec![Operand::IdRef(flag)];
+        }
+    }
+    table.sort_by_key(|e| e.spec_id);
+    Ok((module.assemble().iter().flat_map(|w| w.to_le_bytes()).collect(), table))
+}
+
+/// Fixes the values of a module made by [`specialize_function_constants_as_spec_ids`]: every specialization constant in
+/// `entries` becomes an ordinary constant holding the value `values` gives its function constant (zero, or false for a
+/// "defined" flag, when the set leaves the constant out), and its `SpecId` decoration goes. This is a single pass over
+/// the words of the module, no translation, so one specialization-constant module serves every set of values. Other
+/// specialization constants of the module are left as they are.
+pub fn apply_function_constant_values(
+    spv: &[u8],
+    entries: &[SpecConstantEntry],
+    values: &[(u32, Vec<u8>)],
+) -> Result<Vec<u8>, String> {
+    if spv.len() % 4 != 0 || spv.len() < 20 {
+        return Err("SPIR-V: not a whole number of words".to_string());
+    }
+    let words: Vec<u32> = spv.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    if words[0] != 0x0723_0203 {
+        return Err("SPIR-V: bad magic".to_string());
+    }
+    let have: crate::fxhash::HashMap<u32, &[u8]> = values.iter().map(|(i, b)| (*i, b.as_slice())).collect();
+    // spec id -> the value it takes
+    let mut value_of: crate::fxhash::HashMap<u32, u64> = crate::fxhash::HashMap::default();
+    for e in entries {
+        let v = if e.lane == 15 {
+            u64::from(have.contains_key(&e.fc_index))
+        } else if let Some(b) = have.get(&e.fc_index) {
+            let (lo, hi) = (e.byte_offset as usize, (e.byte_offset + e.size) as usize);
+            if hi > b.len() {
+                return Err(format!(
+                    "function constant {}: payload has {} bytes, lane {} needs bytes {lo}..{hi}",
+                    e.fc_index, b.len(), e.lane
+                ));
+            }
+            let mut w = [0u8; 8];
+            w[..(hi - lo).min(8)].copy_from_slice(&b[lo..hi.min(lo + 8)]);
+            u64::from_le_bytes(w)
+        } else {
+            0
+        };
+        value_of.insert(e.spec_id, v);
+    }
+    // pass 1: the type widths, and which result ids carry one of our SpecIds
+    let mut int_type: crate::fxhash::HashMap<u32, (u32, bool)> = crate::fxhash::HashMap::default();
+    let mut float_type: crate::fxhash::HashMap<u32, u32> = crate::fxhash::HashMap::default();
+    let mut spec_of_id: crate::fxhash::HashMap<u32, u32> = crate::fxhash::HashMap::default();
+    let mut at = 5;
+    while at < words.len() {
+        let (wc, op) = ((words[at] >> 16) as usize, words[at] & 0xffff);
+        if wc == 0 || at + wc > words.len() {
+            return Err("SPIR-V: truncated instruction".to_string());
+        }
+        match op {
+            21 if wc >= 4 => { int_type.insert(words[at + 1], (words[at + 2], words[at + 3] != 0)); }
+            22 if wc >= 3 => { float_type.insert(words[at + 1], words[at + 2]); }
+            71 if wc == 4 && words[at + 2] == 1 && value_of.contains_key(&words[at + 3]) => {
+                spec_of_id.insert(words[at + 1], words[at + 3]);
+            }
+            _ => {}
+        }
+        at += wc;
+    }
+    // pass 2: rewrite
+    let mut out: Vec<u32> = Vec::with_capacity(words.len());
+    let mut converted: crate::fxhash::HashSet<u32> = crate::fxhash::HashSet::default();
+    out.extend_from_slice(&words[..5]);
+    at = 5;
+    while at < words.len() {
+        let (wc, op) = ((words[at] >> 16) as usize, words[at] & 0xffff);
+        let ins = &words[at..at + wc];
+        at += wc;
+        match op {
+            71 if wc == 4 && ins[2] == 1 && spec_of_id.get(&ins[1]) == Some(&ins[3]) => {}   // the SpecId decoration goes
+            48 | 49 if spec_of_id.contains_key(&ins[2]) => {
+                let v = value_of[&spec_of_id[&ins[2]]] != 0;
+                out.push((3 << 16) | if v { 41 } else { 42 });
+                out.extend_from_slice(&ins[1..]);
+                converted.insert(ins[2]);
+            }
+            50 if spec_of_id.contains_key(&ins[2]) => {
+                let v = value_of[&spec_of_id[&ins[2]]];
+                let ty = ins[1];
+                let (width, signed) = if let Some(&(w, s)) = int_type.get(&ty) { (w, s) } else if let Some(&w) = float_type.get(&ty) { (w, false) } else {
+                    return Err(format!("specialization constant %{}: type %{ty} is neither int nor float", ins[2]));
+                };
+                if width > 64 { return Err(format!("specialization constant %{}: {width}-bit values are not supported", ins[2])); }
+                let masked = if width >= 64 { v } else { v & ((1u64 << width) - 1) };
+                let mut lit = vec![masked as u32];
+                if width <= 32 {
+                    if signed && width < 32 && (masked >> (width - 1)) & 1 == 1 { lit[0] = (masked as u32) | (u32::MAX << width); }
+                } else {
+                    lit.push((masked >> 32) as u32);
+                }
+                out.push((((3 + lit.len()) as u32) << 16) | 43);
+                out.extend_from_slice(&ins[1..3]);
+                out.extend_from_slice(&lit);
+                converted.insert(ins[2]);
+            }
+            // a composite made only of constants that are now plain is a plain composite
+            51 if ins[3..].iter().all(|o| converted.contains(o)) => {
+                out.push((ins[0] & 0xffff0000) | 44); out.extend_from_slice(&ins[1..]); converted.insert(ins[2]);
+            }
+            _ => out.extend_from_slice(ins),
+        }
+    }
+    Ok(out.iter().flat_map(|w| w.to_le_bytes()).collect())
+}
+
 pub fn specialize_function_constants(spv: &[u8], values: &[(u32, u64)]) -> Result<Vec<u8>, String> {
     let bytes = values
         .iter()

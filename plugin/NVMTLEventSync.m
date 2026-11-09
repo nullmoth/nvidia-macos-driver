@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
  */
 
+#include "nvmtl_schedule_policy.h"
+
 @interface NVMTLQueueReservation : NSObject { @public __weak NVMTLCommandBuffer *buffer; } @end
 @implementation NVMTLQueueReservation @end
 @interface NVMTLSubmissionPart : NSObject {
@@ -370,10 +372,14 @@ static int nvmtl_skip_empty_on(void) {
     // waits for the GPU): a capture client (Parsec's encoder, a screen recorder) read the two-plane NV12 capture surface
     // before the copy-out, so it got the surface's previous frame, and now and then the new one when the copy-out won the
     // race: frames out of order. Such a command buffer reports "scheduled" once its writes are published.
-    // NVMTL_SCHEDULE_AFTER_SURFACE_WRITES=3 (default) does it only for two-plane surfaces written through private images (the
+    // Chromium, Chrome and Edge hand their layers to another process from the scheduled callback, and shared family VRAM gives
+    // that process no queue dependency on ours: reporting scheduled before the write is published flickered whole pages
+    // there. Those processes default to 1; all others to 3.
+    // NVMTL_SCHEDULE_AFTER_SURFACE_WRITES=3 does it only for two-plane surfaces written through private images (the
     // NV12 surfaces WindowServer draws captured frames into, so it costs nothing without capture), =2 for every private one,
     // =1 for every surface write, =0 for none.
-    static int after = -1; if (after < 0) { const char *e = getenv("NVMTL_SCHEDULE_AFTER_SURFACE_WRITES"); after = e && *e ? e[0] - '0' : 3; }
+    static int after = -1;
+    if (after < 0) after = nvmtl_schedule_after_mode(getenv("NVMTL_SCHEDULE_AFTER_SURFACE_WRITES"), getprogname());
     NVMTLTexture *drawable = _present ? (_present->_parent ?: _present) : nil;
     for (NVMTLTexture *s in part->surfaces) {
         if (s == drawable || !after) continue;
@@ -765,6 +771,12 @@ static void nvmtl_gsub_ahead_pass1(void) {
             for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, YES)) nvmtl_buffer_sync_out(buffer);
         }
         if (!published) {
+            // -3: the command buffer was made after the GPU was lost. Metal reports a removed GPU as DeviceRemoved (11).
+            if (result == -3) {
+                [self nvmtlFinishExecution:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:11
+                    userInfo:@{NSLocalizedDescriptionKey:@"The GPU was lost; this command buffer was not executed"}]];
+                return YES;
+            }
             [self nvmtlFinishExecution:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
                 userInfo:@{NSLocalizedDescriptionKey:result ? @"GPU event segment submission failed" : @"Could not publish event segment writes"}]];
             return YES;
