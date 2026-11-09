@@ -3887,6 +3887,7 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_flip_us_sum, CTLFLAG_RD | CTLFLAG_LOCKED, (
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_flip_n, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gFlipN, "pure flips timed");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_flip_us_max, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gFlipUsMax, "the slowest pure flip, us");
 static bool gFbSysctl = false;
+void nvrmfbColorChanged(bool needsModeset);
 static int nvrmfbColorSysctl SYSCTL_HANDLER_ARGS
 {
     int v = *(int *)arg1;
