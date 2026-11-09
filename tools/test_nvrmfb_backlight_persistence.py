@@ -146,6 +146,8 @@ struct NVRMBacklightHandler : IODisplayParameterHandler {
     volatile SInt32 fPersistPending = -1;
     volatile UInt64 fPersistDeadline = 0;
     SInt32 fRestoreLevel = -1;
+    bool fHaveSaved = false;
+    volatile bool fUserSeen = false;
     OSDictionary *fParameters = nullptr;
     static const OSSymbol *sBrightnessProbe, *sLinearBrightnessProbe;
     bool init() { return true; }
@@ -289,6 +291,33 @@ int main() {
     IORegistryEntry::options->values.erase(NVRM_BACKLIGHT_VAR);
     auto missing = NVRMBacklightHandler::withRM(&rm, 71);
     assert(missing->fUserLevel == (SInt32)nvrm_backlight_from_percent(71) && missing->fRestoreLevel == -1);
+    // The display stack's start-up default of 100% must not overwrite the saved level (saved 02 E5 43 became 02 FF FF).
+    IORegistryEntry::options->values[NVRM_BACKLIGHT_VAR] = {2, 0xE5, 0x43};
+    auto boot = NVRMBacklightHandler::withRM(&rm, 100);
+    IODisplay bootDisplay;
+    assert(boot->setDisplay(&bootDisplay));
+    for (int i = 0; i < 3; ++i) {
+        assert(boot->doIntegerSet(&user, gIODisplayBrightnessKey, 65535));
+        NVRMBacklightHandler::applyFire(boot, nullptr);
+    }
+    assert(savedValue() == 0x43E5 && boot->fPersist->enters == 0);          // nothing queued to be saved
+    assert(rm.lastPercent == nvrm_backlight_to_percent(0x43E5));           // the panel stays at the saved level
+    assert(boot->fUserLevel == 0x43E5);
+    // a real choice afterwards is honoured, including the maximum
+    assert(boot->doIntegerSet(&user, gIODisplayBrightnessKey, 30000));
+    NVRMBacklightHandler::applyFire(boot, nullptr); fireSave(boot);
+    assert(savedValue() == 30000);
+    assert(boot->doIntegerSet(&user, gIODisplayBrightnessKey, 65535));
+    NVRMBacklightHandler::applyFire(boot, nullptr); fireSave(boot);
+    assert(savedValue() == 65535 && rm.lastPercent == 100);
+    // with nothing saved, a first request for the maximum is a real choice
+    IORegistryEntry::options->values.erase(NVRM_BACKLIGHT_VAR);
+    auto fresh = NVRMBacklightHandler::withRM(&rm, 50);
+    IODisplay freshDisplay;
+    assert(fresh->setDisplay(&freshDisplay));
+    assert(fresh->doIntegerSet(&user, gIODisplayBrightnessKey, 65535));
+    NVRMBacklightHandler::applyFire(fresh, nullptr); fireSave(fresh);
+    assert(savedValue() == 65535);
     puts("PASS: fractional targets survive probes, hardware-percent quantization, power requests and restart; legacy storage, endpoints and failed writes are covered.");
 }
 '''

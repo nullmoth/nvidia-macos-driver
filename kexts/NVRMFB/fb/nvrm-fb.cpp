@@ -231,6 +231,8 @@ class NVRMBacklightHandler : public IODisplayParameterHandler {
     volatile SInt32 fPersistPending = -1;
     volatile UInt64 fPersistDeadline = 0;
     SInt32 fRestoreLevel = -1;
+    bool fHaveSaved = false;            // NVRAM held a saved level when this handler was made
+    volatile bool fUserSeen = false;    // a user request other than a start-up default has arrived
     OSDictionary *fParameters = nullptr;
     static void applyFire(thread_call_param_t me, thread_call_param_t);
     static void persistFire(thread_call_param_t me, thread_call_param_t);
@@ -263,6 +265,7 @@ NVRMBacklightHandler *NVRMBacklightHandler::withRM(IOService *rm, NvU32 level)
     if (options && nvrm_backlight_read(options, &saved)) {
         h->fUserLevel = (SInt32)saved;
         h->fRestoreLevel = (SInt32)saved;
+        h->fHaveSaved = true;
     } else {
         h->fUserLevel = h->fLevel;
     }
@@ -325,7 +328,11 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
         return fParameters && IODisplay::setParameter(fParameters,
             paramName == sBrightnessProbe ? sLinearBrightnessProbe : sBrightnessProbe, level);
     }
-    const bool userRequest = params && params->getObject(gIODisplayValueKey);
+    bool userRequest = params && params->getObject(gIODisplayValueKey);
+    if (nvrm_backlight_startup_default(userRequest, (UInt32)level, fHaveSaved, fUserSeen, OSAddAtomic(0, &fUserLevel))) {
+        BLLOG("backlight: first user request is the maximum with a saved level -- start-up default, not saved");
+        userRequest = false;
+    } else if (userRequest) fUserSeen = true;
     if (userRequest) {
         uint64_t deadline;
         clock_interval_to_deadline(kNVRMBacklightSaveDelaySeconds, kSecondScale, &deadline);
