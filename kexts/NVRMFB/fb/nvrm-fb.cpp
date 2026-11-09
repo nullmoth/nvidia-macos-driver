@@ -415,9 +415,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     bool fVrrSupported = false, fVrrOn = false; unsigned fVrrMinHz = 0, fVrrMaxHz = 0;
     static bool vrrAllowed();
     IOReturn setVrr(bool on);
-public:
     static void colorChanged(bool needsModeset);   // a debug.nvrmfb_color_* sysctl changed: apply to every lit head
-private:
     bool applyVibrance();
     NVRMBacklightHandler *fBacklight = nullptr;   // the panel's brightness control, see NVRMBacklightHandler
     void publishBacklight();
