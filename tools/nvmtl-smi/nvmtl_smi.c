@@ -11,7 +11,9 @@
 #include "ctrl/ctrl0000/ctrl0000gpu.h"
 #include "class/cl0080.h"
 #include "class/cl2080.h"
+#include <sys/sysctl.h>
 #include "rusd_format.h"
+#include "tgp_format.h"
 
 int main(int argc, char **argv)
 {
@@ -44,5 +46,16 @@ int main(int argc, char **argv)
     NV00DE_SHARED_DATA snap;
     memcpy(&snap, map.address, sizeof snap);
     rusd_format(&snap, stdout);
+    /* the notebook power budget manager (boot-arg nvrmtgp=1) publishes its state as sysctls */
+    struct tgp_view tv; memset(&tv, 0, sizeof tv);
+    size_t len = sizeof tv.state;
+    tv.present = sysctlbyname("debug.nvrm_tgp_state", &tv.state, &len, NULL, 0) == 0;
+    if (tv.present) {
+        len = sizeof tv.enable;      sysctlbyname("debug.nvrm_tgp_enable", &tv.enable, &len, NULL, 0);
+        len = sizeof tv.ac;          sysctlbyname("debug.nvrm_tgp_ac", &tv.ac, &len, NULL, 0);
+        len = sizeof tv.last_status; sysctlbyname("debug.nvrm_tgp_last_status", &tv.last_status, &len, NULL, 0);
+        len = sizeof tv.applies;     sysctlbyname("debug.nvrm_tgp_applies", &tv.applies, &len, NULL, 0);
+    }
+    tgp_format(&tv, stdout);
     return 0;
 }
