@@ -127,8 +127,16 @@ Everything below uses our own driver and our own data. Nothing is read from, dec
 binary. Run every GPU step through the bounded runner (own log directory, fault and WindowServer watch) and reboot after any
 fault, as for every other GPU run. Only the process that sets `NVK_HWRT_QUERY` is affected; WindowServer never sees it.
 
+**The probe.** `nvk/hwrt/probe/hwrt_probe.c` with `hwrt_probe.comp` builds a bottom and top level structure through the
+driver under test, queries 256 rays under four flag sets (opaque, cull back, cull front, non-opaque with every candidate
+confirmed) and compares each ray with a CPU reference; `--dump <dir>` writes `blas_<case>.bin` for `hwrt_layout_check.py`.
+Cases `A`, `nNN` (NN triangles in a strip) and `big`. It compiles clean against the Vulkan headers and its shader compiles
+with glslang; it has not been run on a card.
+`glslangValidator -V --target-env vulkan1.2 hwrt_probe.comp -o hwrt_probe.spv`, then
+`NVK_HWRT_QUERY=1 ./hwrt_probe <loader dylib> hwrt_probe.spv A`.
+
 **P0 safety ladder.** One compute dispatch, one lane, `NVK_HWRT_QUERY=1`, a structure built by `encode_ttu.comp` for one
-triangle. Pass: no fault, and a miss or a hit is returned. A fault stops the session: record the first faulting address
+triangle (`hwrt_probe ... A`). Pass: no fault, and a miss or a hit is returned. A fault stops the session: record the first faulting address
 against the structure (it names the field the hardware read) and fix the layout row, not the lowering.
 
 **P1 fit the measured rows.** Capture bottom-level structures for the cases `A`, `B`, `n02` .. `n64` and the nine `poke_*`
