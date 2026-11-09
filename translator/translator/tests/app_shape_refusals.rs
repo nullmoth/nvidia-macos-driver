@@ -44,3 +44,13 @@ fn a_sampler_chosen_by_a_condition_samples_with_each_candidate() {
     assert!(samples >= 2, "one sample per candidate sampler, {samples} found:\n{asm}");
     assert!(asm.contains("OpSelect"), "the chosen result is selected:\n{asm}");
 }
+
+const WGPTR1: &str = include_str!("fixtures/app_shapes/wgptr1.ll");
+
+/// "owned Load violates its pointer-pointee and value-type contract ... points at TypeVector, but the result type is
+/// TypeFloat" -- a threadgroup float4 array read through a float pointer (a filter kernel's scalar view of its tile).
+#[test]
+fn a_threadgroup_vector_array_indexed_as_scalars_splits_into_vector_and_lane() {
+    let asm = translate(WGPTR1, Stage::Kernel).expect("translate");
+    assert!(asm.contains("OpUDiv") && asm.contains("OpUMod"), "the scalar index splits into vector and lane:\n{asm}");
+}
