@@ -341,6 +341,17 @@ for k in $KEXTS; do printf '%s\n' "$INS" | grep -oE '(com\.nullmoth\.[A-Za-z0-9]
 ok "test collection holds all four kexts"
 [ "${CHECK:-0}" = 1 ] && { rm -rf "$T"; echo; echo "CHECK PASS (nothing changed)"; exit 0; }
 
+# The GPU firmware is NVIDIA's and is not part of this download: it is read from NVIDIA's own driver package, or reused
+# from an earlier install when it still matches its pinned SHA-256 (package/fw_fetch.sh). A package that does carry it
+# (Users/Shared/nvfw, e.g. a stick prepared by the 1401 app) is used as it is. This happens before anything is changed,
+# so a Mac with no network and no earlier install stops here with nothing touched.
+FWSRC="$HERE/Users/Shared/nvfw"
+if [ ! -d "$FWSRC" ]; then
+  [ -x "$HERE/fw_fetch.sh" ] || die "this package lacks fw_fetch.sh; no changes made"
+  mkdir -m 700 "$T/fw" && "$HERE/fw_fetch.sh" --dest "$T/fw" --installed "$FW" || die "the GPU firmware is not available (see above); no changes made"
+  FWSRC="$T/fw"
+fi
+
 BK=$(mktemp -d "/Library/NullMoth/backup-$(date +%Y%m%d-%H%M%S).XXXXXX") && [ -n "$BK" ] && [ -d "$BK" ] || die "create unique backup directory"
 [ "${CHECK:-0}" = 1 ] || printf 'bk=%s\n' "$BK" >> "$LOCKDIR/owner" || die "cannot record the backup in the installer guard"
 step "4. back up what is there now -> $BK"
@@ -422,7 +433,7 @@ if [ -d "$EXT/NMXGPU.kext" ] && [ -d /Library/NullMoth/gpu-userland ]; then
   ditto /Library/NullMoth/gpu-userland "$GB/nvmtl" || die "copy the AMD/Intel Vulkan drivers (restore from $BK)"
 fi
 cp "$HERE/Library/GPUBundles/nvmtl-allow.txt" "$GB/" || die "copy bundle allow list"
-ditto "$HERE/Users/Shared/nvfw" "$FW" || die "copy firmware"
+ditto "$FWSRC" "$FW" || die "copy firmware"
 chown -R root:wheel "$FW" && chmod -R go-w,a+rX "$FW" || die "firmware permissions"
 # nothing reads the old location any more; leaving it behind leaves a writable folder with our name on it
 rm -rf "$FWOLD" 2>/dev/null || true
