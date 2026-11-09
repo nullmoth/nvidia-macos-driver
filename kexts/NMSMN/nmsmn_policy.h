@@ -43,39 +43,40 @@ static inline int nmsmn_allowed(uint32_t addr)
 }
 
 // ---- the power table ----------------------------------------------------------------------------------------------
-// The SMU's power table lives in DRAM at an address the SMU itself reports. A client is never allowed to name a physical
-// address: the policy watches the platform SMU's exchange and remembers the address the SMU answers with, and only that
-// address (and at most NMSMN_PM_MAX bytes of it) can be read. Message 0xB answers with a 32-bit address in argument 0;
-// message 0x66 with a 64-bit one in arguments 0 and 1 (RyzenAdj's request_table_addr). The answer counts only after the
-// response register read 1 (success). A client cannot forge that: the response register accepts only the value 0 from a
-// client, and the argument registers it writes are overwritten by the SMU's answer before they are read back.
+// The SMU's power table lives in DRAM at an address the SMU itself reports. A client NEVER takes part in that exchange:
+//  * a client may not send the table-address message to the platform SMU (nmsmn_check_write refuses it), so it cannot
+//    steer the reply, and it cannot have the kext latch values it wrote itself into the argument registers;
+//  * the kext sends that message itself (NMSMN::tableInit), under its lock, with the argument registers it chose, polls the
+//    response register with a bound, reads the answer, and keeps only that result;
+//  * the answer is used only if nmsmn_table_accept approves it: page aligned, under 2^48, and entirely inside a region the
+//    firmware's own memory map marks reserved (not RAM the kernel manages). The readable window is that region's remainder,
+//    capped at 64 KiB.
+// Message 0xB answers a 32-bit address in argument 0 (argument 0 is set to 3 first); message 0x66 a 64-bit address in
+// arguments 0 and 1 (RyzenAdj request_table_addr, FlyGoat/RyzenAdj v0.19.0, LGPL-3.0).
 #define NMSMN_MSG_TABLE_ADDR32 0xBu
 #define NMSMN_MSG_TABLE_ADDR64 0x66u
 #define NMSMN_RESP_OK 1u
 #define NMSMN_PM_MAX 0x10000u
+#define NMSMN_PAGE 0x1000u
 
 struct nmsmn_state {
-    int pending;            // index of the mailbox a table-address request is in flight on, or -1
-    int wide;               // that request answers with a 64-bit address
-    int resp_ok;            // the response register has read OK since the request
-    int have_lo;
-    uint32_t lo;
     int table_valid;
-    uint64_t table;         // the SMU's own answer
+    uint64_t table;         // the SMU's own answer, approved
+    uint32_t limit;         // readable bytes from it
 };
 
 static inline void nmsmn_state_init(struct nmsmn_state *s)
 {
-    s->pending = -1; s->wide = 0; s->resp_ok = 0; s->have_lo = 0; s->lo = 0; s->table_valid = 0; s->table = 0;
+    s->table_valid = 0; s->table = 0; s->limit = 0;
 }
 
 // which = 0 message, 1 response, 2.. argument (2 + index); the mailbox index, or -1
 static inline int nmsmn_mailbox_of(uint32_t addr, int *which)
 {
+    if (addr & 3u)
+        return -1;
     for (unsigned i = 0; i < sizeof kNmsmnMailboxes / sizeof kNmsmnMailboxes[0]; i++) {
         const struct nmsmn_mailbox *m = &kNmsmnMailboxes[i];
-        if (addr & 3u)
-            return -1;
         if (addr == m->msg) { *which = 0; return (int)i; }
         if (addr == m->rsp) { *which = 1; return (int)i; }
         if (addr >= m->arg && addr < m->arg + 4u * NMSMN_ARGS) { *which = 2 + (int)((addr - m->arg) / 4u); return (int)i; }
@@ -83,8 +84,9 @@ static inline int nmsmn_mailbox_of(uint32_t addr, int *which)
     return -1;
 }
 
-// 0 = the write may happen. Refused: any register outside the mailboxes, and a response register set to anything but 0.
-static inline int nmsmn_check_write(struct nmsmn_state *s, uint32_t addr, uint32_t value)
+// 0 = the write may happen. Refused: any register outside the mailboxes, a response register set to anything but 0, and the
+// table-address message to a platform-SMU message register.
+static inline int nmsmn_check_write(uint32_t addr, uint32_t value)
 {
     int which = 0;
     int i = nmsmn_mailbox_of(addr, &which);
@@ -92,39 +94,78 @@ static inline int nmsmn_check_write(struct nmsmn_state *s, uint32_t addr, uint32
         return -1;
     if (which == 1 && value != 0)
         return -1;
-    if (which == 0) {                           // a new message ends whatever request was in flight
-        s->pending = -1; s->resp_ok = 0; s->have_lo = 0;
-        if (kNmsmnMailboxes[i].psmu && (value == NMSMN_MSG_TABLE_ADDR32 || value == NMSMN_MSG_TABLE_ADDR64)) {
-            s->pending = i;
-            s->wide = value == NMSMN_MSG_TABLE_ADDR64;
-            s->table_valid = 0;                 // the old address stays unreadable until the SMU answers again
+    if (which == 0 && kNmsmnMailboxes[i].psmu && (value == NMSMN_MSG_TABLE_ADDR32 || value == NMSMN_MSG_TABLE_ADDR64))
+        return -1;
+    return 0;
+}
+
+// The message the kext itself sends to learn the table address, by CPU family and model (RyzenAdj cpuid.c / api.c).
+// Returns 0 and fills *msg (0xB or 0x66), *arg0 (the value argument 0 starts with) and *wide, or -1 when the CPU has none.
+static inline int nmsmn_table_message(unsigned family, unsigned model, uint32_t *msg, uint32_t *arg0, int *wide)
+{
+    *arg0 = 0;
+    if (family == 0x17 && (model == 17 || model == 24 || model == 32)) {               // Raven, Picasso, Dali
+        *msg = NMSMN_MSG_TABLE_ADDR32; *arg0 = 3; *wide = 0; return 0;
+    }
+    if ((family == 0x17 && (model == 96 || model == 104)) ||                           // Renoir, Lucienne
+        (family == 0x19 && (model == 80 || model == 64 || model == 68 || model == 116 || model == 117 || model == 120)) ||
+        (family == 0x1A && (model == 32 || model == 36 || model == 96 || model == 112))) {   // Cezanne .. Strix Halo
+        *msg = NMSMN_MSG_TABLE_ADDR64; *wide = 1; return 0;
+    }
+    return -1;
+}
+
+// ---- the firmware's memory map ---------------------------------------------------------------------------------
+// UEFI memory descriptors as boot.efi hands them to the kernel: type (u32), padding, physical start (u64), virtual start
+// (u64), page count (u64), attributes (u64); 'stride' is the descriptor size the firmware reported.
+enum { kEfiReserved = 0, kEfiRuntimeCode = 5, kEfiRuntimeData = 6, kEfiAcpiNvs = 10 };
+
+static inline uint32_t nmsmn_rd32(const unsigned char *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+static inline uint64_t nmsmn_rd64(const unsigned char *p) { return nmsmn_rd32(p) | ((uint64_t)nmsmn_rd32(p + 4) << 32); }
+
+// 1 and *limit set when [addr, addr + 1) lies in a descriptor whose type the SMU's table can be in (reserved, runtime
+// services, ACPI NVS). Everything else - conventional memory, loader and boot services memory, ACPI reclaim, unknown - is
+// RAM the kernel may manage, and is refused. A descriptor list that is malformed (stride too small, truncated) refuses all.
+static inline int nmsmn_reserved_region(const unsigned char *map, uint32_t size, uint32_t stride, uint64_t addr, uint64_t *end)
+{
+    if (map == 0 || stride < 40 || size < stride)
+        return 0;
+    for (uint32_t off = 0; off + stride <= size; off += stride) {
+        uint32_t type = nmsmn_rd32(map + off);
+        uint64_t start = nmsmn_rd64(map + off + 8), pages = nmsmn_rd64(map + off + 24);
+        if (pages == 0 || pages > (1ull << 36) || start > (1ull << 48))
+            continue;
+        uint64_t stop = start + pages * NMSMN_PAGE;
+        if (addr >= start && addr < stop) {
+            if (type == kEfiReserved || type == kEfiRuntimeCode || type == kEfiRuntimeData || type == kEfiAcpiNvs) {
+                *end = stop;
+                return 1;
+            }
+            return 0;           // the first descriptor that holds the address decides; managed RAM refuses
         }
     }
     return 0;
 }
 
-// Called with the value a permitted read returned.
-static inline void nmsmn_note_read(struct nmsmn_state *s, uint32_t addr, uint32_t value)
+// Approves the SMU's answer 'addr' and records it. 0 = accepted.
+static inline int nmsmn_table_accept(struct nmsmn_state *s, uint64_t addr, const unsigned char *map, uint32_t size, uint32_t stride)
 {
-    int which = 0;
-    int i = nmsmn_mailbox_of(addr, &which);
-    if (i < 0 || i != s->pending)
-        return;
-    if (which == 1) {
-        s->resp_ok = value == NMSMN_RESP_OK;
-    } else if (which == 2 && s->resp_ok) {      // argument 0
-        s->lo = value; s->have_lo = 1;
-        if (!s->wide && value != 0) { s->table = value; s->table_valid = 1; s->pending = -1; }
-    } else if (which == 3 && s->resp_ok && s->wide && s->have_lo) {   // argument 1
-        uint64_t a = ((uint64_t)value << 32) | s->lo;
-        if (a != 0 && a < (1ull << 48)) { s->table = a; s->table_valid = 1; }
-        s->pending = -1;
-    }
+    uint64_t end = 0;
+    nmsmn_state_init(s);
+    if (addr == 0 || (addr & (NMSMN_PAGE - 1)) || addr >= (1ull << 48))
+        return -1;
+    if (!nmsmn_reserved_region(map, size, stride, addr, &end))
+        return -1;
+    uint64_t room = end - addr;
+    s->table = addr;
+    s->limit = room > NMSMN_PM_MAX ? NMSMN_PM_MAX : (uint32_t)room;
+    s->table_valid = 1;
+    return 0;
 }
 
-// Whether 'len' bytes at 'off' of the remembered table may be read: inside NMSMN_PM_MAX, and only after the SMU gave one.
+// Whether 'len' bytes at 'off' of the approved table may be read.
 static inline int nmsmn_table_range_ok(const struct nmsmn_state *s, uint32_t off, uint32_t len)
 {
-    return s->table_valid && len > 0 && len <= NMSMN_PM_MAX && off <= NMSMN_PM_MAX - len;
+    return s->table_valid && len > 0 && len <= s->limit && off <= s->limit - len;
 }
 #endif
