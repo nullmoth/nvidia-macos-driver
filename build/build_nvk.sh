@@ -44,13 +44,14 @@ git -C "$MESA_GIT" archive "$BASE" | tar -x -C "$S"
 # Headers: NVK compiles against the 610 open kernel module headers with the 620 nvos.h change applied.
 cp -R "$OGKM" "$OUT/ogkm"
 patch -p1 -s --no-backup-if-mismatch -d "$OUT/ogkm" < "$NVK/ogkm-nvos-620.patch"
-ln -s "$OUT/ogkm" "$S/src/nouveau/vulkan/nvkmd/nvrm/open-gpu-kernel-modules"
 
 for p in $CHAIN; do
   f=$NVK/$p.patch; [ "$p" = "@FIXES" ] && f=$FIXES
   patch -p1 -s --no-backup-if-mismatch -d "$S" < "$f" || { echo "STOP: $f does not apply"; exit 3; }
   echo "applied $(basename "$f")"
 done
+# the nvrm directory comes from nvk-macos.patch
+ln -s "$OUT/ogkm" "$S/src/nouveau/vulkan/nvkmd/nvrm/open-gpu-kernel-modules"
 if [ "$REL" = 2.9 ]; then
   python3 "$NVK/dlss/patch_dlss_cache.py" "$S"
 fi
