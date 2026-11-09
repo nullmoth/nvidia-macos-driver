@@ -22,6 +22,25 @@ int main(void)
     arm("a number above 7, text, or an empty setting is no assignment",
         nvmtl_card_for("8", "G") == -1 && nvmtl_card_for("x", "G") == -1 && nvmtl_card_for("", "G") == -1 && nvmtl_card_for("G=9", "G") == -1 && nvmtl_card_for("G=ab", "G") == -1);
     arm("a malformed entry costs only that entry", nvmtl_card_for("G=x,H=2", "H") == 2 && nvmtl_card_for("G=x,H=2", "G") == -1);
+    {   /* an NVIDIA card (id 40) with two AMD/Intel GPUs NMXGPU drives (ids 10 and 90) */
+        unsigned long long ids[3] = { 90, 40, 10 };
+        arm("one order across both classes: the AMD/Intel GPU with the lowest id is card 0, the NVIDIA card 1, the other GPU 2",
+            nvmtl_card_ordinal(ids, 3, 10) == 0 && nvmtl_card_ordinal(ids, 3, 40) == 1 && nvmtl_card_ordinal(ids, 3, 90) == 2);
+        arm("an id not in the list is card 0, as the NVIDIA-only code did", nvmtl_card_ordinal(ids, 3, 77) == 0 && nvmtl_card_ordinal(ids, 0, 5) == 0);
+        arm("with an NVIDIA card present an NMXAccel is never the primary; alone it falls back to the first accelerator",
+            nvmtl_card_nmx_primary(1) == 0 && nvmtl_card_nmx_primary(2) == 0 && nvmtl_card_nmx_primary(0) == -1);
+        int n = 0, got = -1;
+        for (int i = 0; i < 3; i++) { int prim = (ids[i] == 40) ? 1 : nvmtl_card_nmx_primary(1);
+            if (nvmtl_card_accept(1, -1, prim, nvmtl_card_ordinal(ids, 3, ids[i]))) { n++; got = (int)ids[i]; } }
+        arm("multi, mixed vendors, no assignment: exactly one card, the NVIDIA primary, is accepted", n == 1 && got == 40);
+        n = 0; got = -1;
+        for (int i = 0; i < 3; i++) { int prim = (ids[i] == 40) ? 1 : nvmtl_card_nmx_primary(1);
+            if (nvmtl_card_accept(1, 0, prim, nvmtl_card_ordinal(ids, 3, ids[i]))) { n++; got = (int)ids[i]; } }
+        arm("multi, mixed vendors, NVMTL_CARD=0: exactly one card, the AMD/Intel GPU with the lowest id", n == 1 && got == 10);
+        n = 0;
+        for (int i = 0; i < 3; i++) n += nvmtl_card_accept(0, 2, i == 1, nvmtl_card_ordinal(ids, 3, ids[i]));
+        arm("without nvmultigpu=1 every accelerator is accepted, whatever the vendors", n == 3);
+    }
     printf(fails ? "FAILED %d\n" : "PASS all arms\n", fails);
     return fails != 0;
 }
