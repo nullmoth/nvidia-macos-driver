@@ -156,7 +156,7 @@ scene differ in a short list of offsets; change them one at a time. Record each 
 repeat P1/P2 for the instance record, the transform (3x4, row order), and the mask and flag bytes.
 
 **P4 ray set.** The 32-ray corpus in `data/ray_cases_fresh.json` plus 1000 random rays per scene, queried through the
-compute probe (`NVK_HWRT_QUERY=1`) and through `NVK_HWRT_QUERY` unset on the same structure build. Pass: distances equal to
+`hwrt_probe` (`NVK_HWRT_QUERY=1`) and through `NVK_HWRT_QUERY` unset on the same structure build. Pass: distances equal to
 within 1 ulp, same instance, geometry and primitive, same facing; software and hardware agree on every ray that is not a
 bit-identical tie. Run the ray flags and non-opaque cases of `hwrt_model_test.c` as a Vulkan compute test with a glTF-free
 synthetic scene.
