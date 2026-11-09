@@ -17,6 +17,7 @@ pub enum AirIntersectionResultField {
     InstanceLevel,
     Barycentrics,
     FrontFacing,
+    CurveParameter,
     WorldSpaceVector(u8),
 }
 
@@ -30,6 +31,7 @@ impl AirIntersectionResultField {
             Self::InstanceLevel => "i8",
             Self::Barycentrics => "<2 x float>",
             Self::FrontFacing => "i1",
+            Self::CurveParameter => "float",
             Self::WorldSpaceVector(_) => "<3 x float>",
         }
     }
@@ -40,6 +42,7 @@ pub struct AirIntersectionFamily {
     pub intersection_function_buffer: bool,
     pub instancing: AirIntersectionInstancing,
     pub triangle_data: bool,
+    pub curve_data: bool,
     pub world_space_data: bool,
     pub user_data: bool,
     pub primitive_motion: bool,
@@ -59,6 +62,7 @@ impl AirIntersectionFamily {
             intersection_function_buffer: false,
             instancing: AirIntersectionInstancing::None,
             triangle_data: false,
+            curve_data: false,
             world_space_data: false,
             user_data: false,
             primitive_motion: false,
@@ -79,6 +83,7 @@ impl AirIntersectionFamily {
                     family.instancing = AirIntersectionInstancing::MultiLevel;
                 }
                 "triangle_data" if !family.triangle_data => family.triangle_data = true,
+                "curve_data" if !family.curve_data => family.curve_data = true,
                 "world_space_data" if !family.world_space_data => {
                     family.world_space_data = true;
                 }
@@ -129,6 +134,10 @@ impl AirIntersectionFamily {
         }
         if self.triangle_data {
             fields.extend([Field::Barycentrics, Field::FrontFacing]);
+        }
+        if self.curve_data {
+            // measured from the compiler: the curve parameter follows the instance ids
+            fields.push(Field::CurveParameter);
         }
         if self.world_space_data {
             fields.extend((0..8).map(Field::WorldSpaceVector));
@@ -182,6 +191,21 @@ impl AirIntersectionFamily {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn curve_data_adds_one_float_after_the_instance_ids() {
+        let family = AirIntersectionFamily::parse("air.intersect.instancing.curve_data").unwrap().unwrap();
+        assert!(family.curve_data && !family.triangle_data);
+        assert_eq!(family.argument_count(), 20);
+        assert_eq!(
+            family.llvm_result_type(),
+            "{ i32, float, i32, i32, ptr addrspace(1), i32, i32, float }"
+        );
+        assert_eq!(family.result_field(7), Some(AirIntersectionResultField::CurveParameter));
+        let both = AirIntersectionFamily::parse("air.intersect.triangle_data.curve_data").unwrap().unwrap();
+        assert_eq!(both.result_fields().len(), 8);
+        assert!(AirIntersectionFamily::parse("air.intersect.curve_data.curve_data").is_err());
+    }
 
     #[test]
     fn parses_composed_multi_level_callback_family() {
