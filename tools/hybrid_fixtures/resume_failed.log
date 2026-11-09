@@ -1,0 +1,10 @@
+2026-11-08 20:00:00.000 Df kernel[0]: (NVAccel) hybrid: switch level 1 (boot-arg nmhybrid=1)
+2026-11-08 20:00:03.100 Df kernel[0]: (NMIntelFB) NMIntelFB: hybrid: provider NMIntelFB 1920x1080 pitch 7680 display version 12 level 1 (CPU-mapped scanout, no VRAM)
+2026-11-08 20:00:03.200 Df kernel[0]: (NMIntelFB) NMIntelFB: hybrid: resume armed: panel state captured (sink link 0x14 x2, AUX link training)
+2026-11-08 20:00:04.000 Df kernel[0]: (NVAccel) hybrid: first frame presented by copy (1080 rows, 2073600 pixels, head 4)
+2026-11-08 20:30:00.000 Df kernel[0]: (NMIntelFB) NMIntelFB: hybrid: step 11 suspend
+2026-11-08 20:35:00.000 Df kernel[0]: (NMIntelFB) NMIntelFB: hybrid: step 12 resume-begin
+2026-11-08 20:35:00.100 Df kernel[0]: (NMIntelFB) NMIntelFB: hybrid: resume step: power wells
+2026-11-08 20:35:01.100 Df kernel[0]: (NMIntelFB) NMIntelFB: hybrid: resume step: link training
+2026-11-08 20:35:01.900 Df kernel[0]: (NMIntelFB) NMIntelFB: hybrid: resume: link training failed
+2026-11-08 20:35:01.901 Df kernel[0]: (NMIntelFB) NMIntelFB: hybrid: step 13 resume-done

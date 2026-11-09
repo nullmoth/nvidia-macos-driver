@@ -42,6 +42,12 @@ out=$(V hybrid_fixtures/import_unavailable.log); rc=$?
 arm "a generation without import is a proven copy, with the reason shown" "$([ $rc = 0 ] && echo "$out" | grep -q 'import unavailable: display version 14' && echo "$out" | grep -q 'VERDICT  copy proven' && echo 1 || echo 0)"
 out=$(V hybrid_fixtures/no_provider.log); rc=$?
 arm "a log with no panel driver fails at S2" "$([ $rc = 1 ] && echo "$out" | grep -q 'FAIL  S2' && echo "$out" | grep -q 'VERDICT  not proven: S2' && echo 1 || echo 0)"
+out=$(V hybrid_fixtures/resume_ok.log); rc=$?
+arm "a wake that relit the panel is proven (R1)" "$([ $rc = 0 ] && echo "$out" | grep -q 'PASS  R1' && echo "$out" | grep -q 'last step the panel driver logged: 13 resume-done' && echo 1 || echo 0)"
+out=$(V hybrid_fixtures/resume_failed.log); rc=$?
+arm "a wake that did not relight the panel fails R1 and says why in the step trail" "$([ $rc = 1 ] && echo "$out" | grep -q 'FAIL  R1' && echo 1 || echo 0)"
+out=$(V hybrid_fixtures/copy_ok.log)
+arm "a log without resume armed says nothing about R1" "$(echo "$out" | grep -q 'R1' && echo 0 || echo 1)"
 export NMH_SYSCTL_FILE=hybrid_fixtures/sysctl_full.txt
 out=$(V hybrid_fixtures/copy_ok.log); rc=$?
 arm "every frame stored in full (nothing skipped) fails S4: the changed-pixels path is not working" "$([ $rc = 1 ] && echo "$out" | grep -q 'FAIL  S4' && echo 1 || echo 0)"
@@ -52,7 +58,7 @@ arm "an empty log with the switch off says off and is not a failure" "$([ $rc = 
 # ---- the log lines the verifier looks for must still be written by the kernel code
 SRC="../kexts/NVRM/accel/nvrm-accel.cpp ../kexts/NMIntelFB/intelfb.cpp"
 for phrase in 'hybrid: switch level' 'hybrid: provider NMIntelFB' 'hybrid: first frame presented by copy' 'hybrid: import ring' \
-              'hybrid: zero-copy flip #1' 'hybrid: import unavailable' 'did not reach the screen' 'hybrid: fallback to copy'; do
+              'hybrid: zero-copy flip #1' 'hybrid: resume armed' 'hybrid: resume: ' 'hybrid: standing down' 'hybrid: step ' 'hybrid: import unavailable' 'did not reach the screen' 'hybrid: fallback to copy'; do
     # shellcheck disable=SC2086
     arm "the kernel still logs: $phrase" "$(grep -q -- "$phrase" $SRC && echo 1 || echo 0)"
 done
