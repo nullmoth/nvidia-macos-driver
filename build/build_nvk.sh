@@ -4,8 +4,9 @@
 # usage: build_nvk.sh <mesa git dir> <open-gpu-kernel-modules 610.57.04 tree> <out dir> [2.9|2.8]
 #
 # The release argument selects the patch set (default 2.9):
+#   Both end with nvk/dlss/patch_dlss_cache.py.
 #   2.9  nvk-macos, nvk-fixes-after-def16, nvk-620-kernel, nvk-recycle, nvk-slab, nvk-slabdef, nvk-hubfix,
-#        nvk-perf-boost-burst, nvk-rated-tdp, nvk-gps-maxpower, then nvk/dlss/patch_dlss_cache.py
+#        nvk-perf-boost-burst, nvk-rated-tdp, nvk-gps-maxpower
 #   2.8  the set the 2.8 / 2.8.1 package was built from: the same chain without hubfix, perf-boost-burst, rated-tdp and
 #        gps-maxpower, and with nvk/release-2.8/nvk-fixes-after-def16.patch (the copy-engine retry still logged to stderr)
 # The NAK changes (nvk/speed267) are already part of nvk-macos.patch; the scripts there are the history of how they
@@ -53,9 +54,7 @@ for p in $CHAIN; do
 done
 # the nvrm directory comes from nvk-macos.patch
 ln -s "$OUT/ogkm" "$S/src/nouveau/vulkan/nvkmd/nvrm/open-gpu-kernel-modules"
-if [ "$REL" = 2.9 ]; then
-  python3 "$NVK/dlss/patch_dlss_cache.py" "$S"
-fi
+python3 "$NVK/dlss/patch_dlss_cache.py" "$S"
 find "$S" -name '*.orig' -o -name '*.rej' | grep . && { echo "STOP: patch left .orig/.rej files"; exit 3; } || true
 
 # mesa_clc and vtn_bindgen2 precompile NVK's internal CL shaders to serialized NIR. They MUST be built from this same
