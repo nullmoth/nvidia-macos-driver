@@ -1,7 +1,7 @@
 /* The hardware ray query's request and result words, as measured on the RTX 5060.
  *
  * One query is five 16-byte request blocks in (ttu_query_nv inputs 0..4) and sixteen result words out. The layout below
- * was read from 32-ray runs against acceleration structures built by the vendor's own builder, and every field is
+ * was read from 32-ray runs against hardware-layout acceleration structures on the card, and every field is
  * checked against recorded device output by nvk/hwrt/check_ttu_abi.py.
  *
  * Scope: one closest hit over opaque triangles through a top-level structure or a bottom-level structure. Candidate
