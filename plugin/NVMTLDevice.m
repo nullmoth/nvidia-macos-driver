@@ -376,11 +376,12 @@ static void nvmtl_nvenc_register(void)
               st ? "NOT registered" : "REGISTERED", me, (int)st, path);
     });
 }
-// An encoder built outside this driver can register itself beside ours and let VTRating decide which
-// one an app gets, so both can be installed and compared. The one this was written for reports H.264
-// at about 5 ms where the library we ship takes about 12, and it runs on Turing, Ampere and Ada,
-// which nvmtl_nvenc_register above turns away for not being Blackwell.
-// Off unless NVMTL_NVENCVT names this process (or is 1), from nvrm610.conf or the environment.
+// libnvencvt (vendor/nvenc) registers H.264, HEVC and AV1 encoders and the decoders for H.264, HEVC, VP9, AV1 and MPEG
+// beside ours and lets VTRating decide which one an app gets. It is the only hardware encoder on Ada, which
+// nvmtl_nvenc_register above turns away, and the only VP9 and AV1 decoder on Ada and consumer Ampere. It reports H.264
+// encoding at about 5 ms where the library we ship takes about 12.
+// NVMTL_NVENCVT, from nvrm610.conf or the environment: unset = automatic on Ada and Ampere, 0 = never, 1 = every
+// process and any card the library accepts (GTX 16 included), a list of process names = only those.
 // This loads code into every app that encodes, so the library and the directory holding it must be
 // ours and nobody else's. The firmware taught this: it used to sit in /Users/Shared, which is mode
 // 1777, and the only permission step was a chmod that adds read bits and never takes write away, so
@@ -397,19 +398,26 @@ static bool nvmtl_loadable_root_only(const char *path)
     if (!d || lstat(d, &ds) != 0 || !S_ISDIR(ds.st_mode)) return false;
     return ds.st_uid == 0 && !(ds.st_mode & (S_IWGRP | S_IWOTH));
 }
-static void nvmtl_nvencvt_register(void)
+// Whether libnvencvt registers in the process `me` on a card of generation `gen` (the profile's string, NULL when the
+// driver publishes none) under the selector `sel`. Automatic is limited to the generations the library was measured on.
+static bool nvmtl_nvencvt_selected(const char *sel, const char *me, const char *gen)
+{
+    if (sel && !strcmp(sel, "0")) return false;
+    if (!sel || !*sel) return gen && (nvmtl_gen_is(gen, "Ada") || nvmtl_gen_is(gen, "Ampere"));
+    if (!strcmp(sel, "1")) return true;
+    char list[512]; strlcpy(list, sel, sizeof list);   // a process list, so one app can be moved over at a time
+    for (char *t = strtok(list, ", :"); t; t = strtok(NULL, ", :")) if (!strcmp(t, me)) return true;
+    return false;
+}
+// decodersOnly is the decode service (VTDecoderXPCService): it decodes for the sandboxed Apple clients and never encodes.
+static void nvmtl_nvencvt_register(bool decodersOnly)
 {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         const char *me = getprogname();
-        const char *sel = getenv("NVMTL_NVENCVT");
-        if (!sel || !*sel || !strcmp(sel, "0")) return;
-        if (strcmp(sel, "1")) {                      // a process list, so one app can be moved over at a time
-            char list[512]; strlcpy(list, sel, sizeof list);
-            bool named = false;
-            for (char *t = strtok(list, ", :"); t && !named; t = strtok(NULL, ", :")) named = !strcmp(t, me);
-            if (!named) return;
-        }
+        char gen[32] = "";
+        bool haveGen = nvmtl_gpu_profile_string(CFSTR("generation"), gen, sizeof gen);
+        if (!nvmtl_nvencvt_selected(getenv("NVMTL_NVENCVT"), me, haveGen ? gen : NULL)) return;
         if (!strcmp(me, "WindowServer")) return;     // the codec registrars all stay out of it
         Dl_info di;
         if (!dladdr((const void *)nvmtl_nvencvt_register, &di) || !di.dli_fname) { nvlog("nvencvt: dladdr failed - not registering"); return; }
@@ -423,14 +431,15 @@ static void nvmtl_nvencvt_register(void)
         void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
         if (!h) { nvlog("nvencvt: dlopen %s FAILED: %s", path, dlerror()); return; }
         typedef int32_t (*RegFn)(int);
-        RegFn r = (RegFn)dlsym(h, "NVEncVT_Register");
-        if (!r) { nvlog("nvencvt: %s has no NVEncVT_Register", path); return; }
+        const char *entry = decodersOnly ? "NVEncVT_RegisterDecoders" : "NVEncVT_Register";
+        RegFn r = (RegFn)dlsym(h, entry);
+        if (!r) { nvlog("nvencvt: %s has no %s", path, entry); return; }
         int rating = 1100;                           // above our own 1000, so the opt-in one wins where it is asked for
         const char *rv = getenv("NVMTL_NVENCVT_RATING");
         if (rv) { int v = atoi(rv); if (v > 0) rating = v; }
         int32_t st = r(rating);
-        nvlog("nvencvt: external encoder %s in %s (NVEncVT_Register -> %d, rating %d, %s)",
-              st ? "NOT registered" : "REGISTERED", me, (int)st, rating, path);
+        nvlog("nvencvt: %s %s in %s (%s -> %d, rating %d, %s)", decodersOnly ? "decoders" : "codecs",
+              st ? "NOT registered" : "REGISTERED", me, entry, (int)st, rating, path);
     });
 }
 static void nvmtl_nvdec_hevc_register(void)
@@ -473,9 +482,12 @@ static void nvmtl_nvdec_hevc_register(void);
 __attribute__((constructor)) static void nvmtl_nvdec_in_decode_service(void)
 {
     const char *me = getprogname();
-    if (!nvmtl_is_decode_service(me) || getenv("NVMTL_NO_NVDEC")) return;
-    // off the loader's thread: the registration dlopens the decoder library
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    if (!nvmtl_is_decode_service(me)) return;
+    nvmtl_conf_settle();   // nvrm610.conf's NVMTL_NO_NVDEC and NVMTL_NVENCVT apply here as in every other process
+    if (getenv("NVMTL_NO_NVDEC")) return;
+    // Off the loader's thread: the registration dlopens the decoder library. Not a utility queue: a client that opens its
+    // first decode session while the machine is busy would find no hardware decoder and keep Apple's software one.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         uint32_t dev = 0;
         io_iterator_t it = IO_OBJECT_NULL;
         if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOPCIDevice"), &it) == KERN_SUCCESS) {
@@ -500,6 +512,10 @@ __attribute__((constructor)) static void nvmtl_nvdec_in_decode_service(void)
               g_video_blackwell ? "Blackwell" : "before Blackwell");
         nvmtl_nvdec_register();
         nvmtl_nvdec_hevc_register();
+        // Safari's GPU process, QuickTime and FaceTime decode here. Our own H.264 decoder hands out buffers with fixed
+        // attributes, and in these clients the picture comes out green; libnvencvt reads the client's attributes. It is
+        // rated above ours, so where it applies it is the one chosen.
+        nvmtl_nvencvt_register(true);
     });
 }
 static void nvmtl_nvenc_hevc_register(void)
@@ -747,7 +763,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
         nvmtl_nvenc_register();
         nvmtl_nvdec_hevc_register();
         nvmtl_nvenc_hevc_register();
-        nvmtl_nvencvt_register();   // last, so an opt-in external encoder registers above ours
+        nvmtl_nvencvt_register(false);   // last, so the external codecs register above ours
     }
     SEL il = sel_registerName("initLimits");
     if ([self respondsToSelector:il]) {
