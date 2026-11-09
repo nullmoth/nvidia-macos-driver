@@ -29,3 +29,6 @@ Applying the chain: every patch here applies with `--fuzz=0` to a pristine open-
 inserted before `FramebufferConsoleDisabled`, and the function table entry was added; the 620 header already declares
 `getFlipPendingStatus`). `610-fsp-timer-double-destroy.patch` keeps only its `timer_ostimer.c` hunk: 620 already guards the
 poll event in `kern_fsp.c`. `tools/test_patch_chain.sh` runs the whole chain against a pristine tree.
+
+The check is `tools/test_patch_chain.py` (SKIP without a pristine tree) and an optional step of `build/build_nvrm.sh`:
+`NVRM_PRISTINE_OGKM=<pristine 620.70.06 tree> bash build/build_nvrm.sh ...` stops before building if any patch no longer applies.
