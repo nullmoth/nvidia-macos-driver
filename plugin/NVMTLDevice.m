@@ -732,11 +732,11 @@ int nvmtl_m4_note_current(_Atomic uint64_t note[3], uint64_t addr, uint64_t leng
 void nvmtl_m4_note_buffer_cached(id buf, uint64_t addr, uint64_t length, _Atomic uint64_t note[3]);
 #include "nvmtl_mfx_native_profile.inc"
 
-// NVMTL_WS_RT_GATE_MB=<n>: while ray tracing is available, the working-set answer is raised to at least n MB. Measured in the
-// disassembly of Cyberpunk 2077's device set-up (0x104978280..0x104978540 in the arm64 slice): it asks
-// recommendedMaxWorkingSetSize FIRST and keeps the value, then asks supportsRaytracing and the device name, and enables
-// ray tracing only if the saved figure is above 0x1800FFFFF bytes (6145 MB). The same figure also sets a low-memory flag
-// (figure below 0x180100000) that the game stores for its own sizing, so this is one number for both decisions.
+// NVMTL_WS_RT_GATE_MB=<n>: while ray tracing is available, the working-set answer is raised to at least n MB. Black-box
+// behaviour of the game, found by changing the reported recommendedMaxWorkingSetSize and watching whether the ray tracing
+// options appear: below about 6145 MB they stay off, above it they are offered. The same figure also coincides with the
+// game's low-memory sizing, so one number serves both. The procedure to re-measure the threshold on a given card is in
+// docs/RT-WORKING-SET-GATE.md.
 // Default 0: off.
 static uint64_t nvmtl_rt_gate_working_set(uint64_t ws)
 {
