@@ -3765,15 +3765,43 @@ static void nvmtl_tile_ignored(const char *what) { static _Atomic unsigned n; if
 - (void)setTileTextures:(const id<MTLTexture> __unsafe_unretained [])textures withRange:(NSRange)range {
     for (NSUInteger k = 0; k < range.length; k++) [self setTileTexture:textures ? textures[k] : nil atIndex:range.location + k];
 }
-- (void)setTileSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileSamplerState"); }
-- (void)setTileSamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])samplers withRange:(NSRange)range { nvmtl_tile_ignored("setTileSamplerStates"); }
-- (void)setTileSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lo lodMaxClamp:(float)hi atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileSamplerState"); }
-- (void)setTileSamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])samplers lodMinClamps:(const float [])lo lodMaxClamps:(const float [])hi withRange:(NSRange)range { nvmtl_tile_ignored("setTileSamplerStates"); }
-- (void)setTileVisibleFunctionTable:(id<MTLVisibleFunctionTable>)t atBufferIndex:(NSUInteger)i { nvmtl_tile_ignored("setTileVisibleFunctionTable"); }
-- (void)setTileVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __unsafe_unretained [])ts withBufferRange:(NSRange)r { nvmtl_tile_ignored("setTileVisibleFunctionTables"); }
-- (void)setTileIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)t atBufferIndex:(NSUInteger)i { nvmtl_tile_ignored("setTileIntersectionFunctionTable"); }
-- (void)setTileIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __unsafe_unretained [])ts withBufferRange:(NSRange)r { nvmtl_tile_ignored("setTileIntersectionFunctionTables"); }
-- (void)setTileAccelerationStructure:(id<MTLAccelerationStructure>)a atBufferIndex:(NSUInteger)i { nvmtl_tile_ignored("setTileAccelerationStructure"); }
+- (void)setTileSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
+    if (!nvmtl_tile_on()) { nvmtl_tile_ignored("setTileSamplerState"); return; }
+    if (!_tileSmp) _tileSmp = [NSMutableDictionary new];
+    if (sampler) _tileSmp[@(index)] = @[sampler, [NSNull null], [NSNull null]]; else [_tileSmp removeObjectForKey:@(index)];
+}
+- (void)setTileSamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])samplers withRange:(NSRange)range {
+    for (NSUInteger k = 0; k < range.length; k++) [self setTileSamplerState:samplers ? samplers[k] : nil atIndex:range.location + k];
+}
+- (void)setTileSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lo lodMaxClamp:(float)hi atIndex:(NSUInteger)index {
+    if (!nvmtl_tile_on()) { nvmtl_tile_ignored("setTileSamplerState"); return; }
+    if (!_tileSmp) _tileSmp = [NSMutableDictionary new];
+    if (sampler) _tileSmp[@(index)] = @[sampler, @(lo), @(hi)]; else [_tileSmp removeObjectForKey:@(index)];
+}
+- (void)setTileSamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])samplers lodMinClamps:(const float [])lo lodMaxClamps:(const float [])hi withRange:(NSRange)range {
+    for (NSUInteger k = 0; k < range.length; k++) [self setTileSamplerState:samplers ? samplers[k] : nil lodMinClamp:lo ? lo[k] : 0 lodMaxClamp:hi ? hi[k] : FLT_MAX atIndex:range.location + k];
+}
+- (void)setTileVisibleFunctionTable:(id<MTLVisibleFunctionTable>)t atBufferIndex:(NSUInteger)i {
+    if (!nvmtl_tile_on()) { nvmtl_tile_ignored("setTileVisibleFunctionTable"); return; }
+    if (!_tileVft) _tileVft = [NSMutableDictionary new];
+    if (t) _tileVft[@(i)] = t; else [_tileVft removeObjectForKey:@(i)];
+}
+- (void)setTileVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __unsafe_unretained [])ts withBufferRange:(NSRange)r {
+    for (NSUInteger k = 0; k < r.length; k++) [self setTileVisibleFunctionTable:ts ? ts[k] : nil atBufferIndex:r.location + k];
+}
+- (void)setTileIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)t atBufferIndex:(NSUInteger)i {
+    if (!nvmtl_tile_on()) { nvmtl_tile_ignored("setTileIntersectionFunctionTable"); return; }
+    if (!_tileIft) _tileIft = [NSMutableDictionary new];
+    if (t) _tileIft[@(i)] = t; else [_tileIft removeObjectForKey:@(i)];
+}
+- (void)setTileIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __unsafe_unretained [])ts withBufferRange:(NSRange)r {
+    for (NSUInteger k = 0; k < r.length; k++) [self setTileIntersectionFunctionTable:ts ? ts[k] : nil atBufferIndex:r.location + k];
+}
+- (void)setTileAccelerationStructure:(id<MTLAccelerationStructure>)a atBufferIndex:(NSUInteger)i {
+    if (!nvmtl_tile_on()) { nvmtl_tile_ignored("setTileAccelerationStructure"); return; }
+    if (!_tileAs) _tileAs = [NSMutableDictionary new];
+    if (a) _tileAs[@(i)] = a; else [_tileAs removeObjectForKey:@(i)];
+}
 // A tile function runs as a compute kernel between two render-pass segments (translator/src/native/tile_imageblock.rs): the pass so far
 // is ended with every attachment kept, one threadgroup per tile runs over the render area with the colour attachments bound as storage
 // images (the compute encoder's storage twins copy them in and out), and the pass resumes with those attachments loaded.
@@ -3808,6 +3836,10 @@ static void nvmtl_tile_ignored(const char *what) { static _Atomic unsigned n; if
     for (NSNumber *k in _tileBuf) { NSArray *e = _tileBuf[k]; [ce setBuffer:e[0] offset:[e[1] unsignedLongValue] atIndex:k.unsignedLongValue]; }
     for (NSNumber *k in _tileTex) [ce setTexture:_tileTex[k] atIndex:k.unsignedLongValue];
     for (NSNumber *k in _tileTg) [ce setThreadgroupMemoryLength:[_tileTg[k] unsignedLongValue] atIndex:k.unsignedLongValue];
+    for (NSNumber *k in _tileSmp) { NSArray *e = _tileSmp[k]; if ([e[1] isKindOfClass:[NSNumber class]]) [ce setSamplerState:e[0] lodMinClamp:[e[1] floatValue] lodMaxClamp:[e[2] floatValue] atIndex:k.unsignedLongValue]; else [ce setSamplerState:e[0] atIndex:k.unsignedLongValue]; }
+    for (NSNumber *k in _tileVft) [ce setVisibleFunctionTable:_tileVft[k] atBufferIndex:k.unsignedLongValue];
+    for (NSNumber *k in _tileIft) [ce setIntersectionFunctionTable:_tileIft[k] atBufferIndex:k.unsignedLongValue];
+    for (NSNumber *k in _tileAs) [ce setAccelerationStructure:_tileAs[k] atBufferIndex:k.unsignedLongValue];
     [ce dispatchThreadgroups:MTLSizeMake((w + tw - 1) / tw, (h + th - 1) / th, 1) threadsPerThreadgroup:threadsPerTile];
     [ce endEncoding];
     if (_ps) [self setRenderPipelineState:_ps];   // the pass resumes with the attachments loaded
@@ -4622,8 +4654,18 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     const uint32_t slots = nvmtl_icb_slots(b->_cmds.count);
     NSMutableArray *cands = [NSMutableArray arrayWithObject:[NSNull null]]; [cands addObjectsFromArray:nvmtl_icb_pipelines(NO)];
     enum { TYPES = 5 };
-    if (!slots || (uint64_t)slots * cands.count * TYPES > 262144u) { nvlog("GPU ICB: %u slot(s) x %lu candidate pipeline(s) x 5 types is over the 262144 indirect draws one execution may record - REFUSED", slots, (unsigned long)cands.count); return; }
-    NVMTLBuffer *big = nvmtl_icb_scratch_bytes((NSUInteger)slots * cands.count * TYPES * NVMTL_ICB_RECORD_BYTES);
+    // indexed commands: their indices are copied into a scratch index buffer of `cap` indices per slot (NVMTL_ICB_INDEX_CAP, default 65536,
+    // shrunk to fit a 256 MiB budget); a command over the cap is skipped whole and logged here, never truncated
+    uint32_t cap = 0; NVMTLBuffer *idxBuf = nil;
+    { static uint32_t want; if (!want) { const char *e = getenv("NVMTL_ICB_INDEX_CAP"); long v = e ? strtol(e, NULL, 10) : 0; want = v > 0 && v <= 0x7FFFFFFF ? (uint32_t)v : 65536u; }
+      cap = nvmtl_icb_index_cap(slots, want);
+      if (!cap) nvlog("GPU ICB: %u slots leave no room for an index block each within the 256 MiB scratch budget - indexed commands are skipped", slots);
+      else if (cap < want) nvlog("GPU ICB: the index cap is %u per slot, not the %u asked for, to keep the scratch index buffer within 256 MiB; indexed commands with more indices are skipped", cap, want);
+      else { static int said; if (!said++) nvlog("GPU ICB: indexed commands with more than %u indices are skipped whole (NVMTL_ICB_INDEX_CAP raises the cap)", cap); }
+      if (cap) { idxBuf = nvmtl_icb_scratch_bytes((NSUInteger)slots * cap * 4u); if (!idxBuf) { nvlog("GPU ICB: the %u x %u index scratch FAILED - indexed commands are skipped", slots, cap); cap = 0; } } }
+    const uint32_t kinds = cap ? 2u : 1u;
+    if (!slots || (uint64_t)slots * cands.count * TYPES * kinds > 262144u) { nvlog("GPU ICB: %u slot(s) x %lu candidate pipeline(s) x 5 types is over the 262144 indirect draws one execution may record - REFUSED", slots, (unsigned long)cands.count); return; }
+    NVMTLBuffer *big = nvmtl_icb_scratch_bytes((NSUInteger)slots * cands.count * TYPES * kinds * NVMTL_ICB_RECORD_BYTES);
     if (!big) { nvlog("GPU ICB: scratch FAILED"); return; }
     nvmtl_retain_resource(_cb, big); nvmtl_retain_resource(_cb, b->_recBuf); if (rb) nvmtl_retain_resource(_cb, rb);
     NVMTLRenderPipelineState *orig = _ps;
@@ -4639,21 +4681,28 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     }
     for (NSUInteger k = 0; k < cands.count; k++) {
         const uint64_t token = k ? ((id<MTLRenderPipelineState>)cands[k]).gpuResourceID._impl : 0;
-        for (uint32_t t = 0; t < TYPES; t++) {
-            const size_t off = (((size_t)k * TYPES + t) * slots) * NVMTL_ICB_RECORD_BYTES;
-            if (nvmtl_vk_cmd_icb_gather(&_cb->_c, &b->_recBuf->_b, &big->_b, off, slots, 0, token, t, loc, len, NULL, rb ? &rb->_b : NULL, ro)) { nvlog("GPU ICB: the gather pass FAILED - nothing runs"); return; }
-        }
+        for (uint32_t t = 0; t < TYPES; t++)
+            for (uint32_t ix = 0; ix < kinds; ix++) {
+                const size_t off = ((((size_t)k * TYPES + t) * kinds + ix) * slots) * NVMTL_ICB_RECORD_BYTES;
+                if (nvmtl_vk_cmd_icb_gather(&_cb->_c, &b->_recBuf->_b, &big->_b, off, slots, 0, token, t, loc, len, NULL, ix, cap, rb ? &rb->_b : NULL, ro)) { nvlog("GPU ICB: the gather pass FAILED - nothing runs"); return; }
+            }
     }
+    if (cap && nvmtl_vk_cmd_icb_index_copy(&_cb->_c, &b->_recBuf->_b, &idxBuf->_b, slots, cap, loc, len, rb ? &rb->_b : NULL, ro)) { nvlog("GPU ICB: the index copy pass FAILED - indexed commands are skipped"); cap = 0; }
+    if (idxBuf) nvmtl_retain_resource(_cb, idxBuf);
     NSUInteger drawn = 0;
     for (NSUInteger k = 0; k < cands.count; k++) {
         NVMTLRenderPipelineState *p = k ? (NVMTLRenderPipelineState *)cands[k] : orig;
         if (!p) continue;
         [self setRenderPipelineState:p];
         for (uint32_t t = 0; t < TYPES; t++)
-            for (uint32_t i = 0; i < slots; i++) {
-                [self drawPrimitives:(MTLPrimitiveType)t indirectBuffer:big indirectBufferOffset:(((NSUInteger)k * TYPES + t) * slots + i) * NVMTL_ICB_RECORD_BYTES];
-                drawn++;
-            }
+            for (uint32_t ix = 0; ix < kinds; ix++)
+                for (uint32_t i = 0; i < slots; i++) {
+                    const NSUInteger at = ((((NSUInteger)k * TYPES + t) * kinds + ix) * slots + i) * NVMTL_ICB_RECORD_BYTES;
+                    if (ix && !cap) continue;
+                    if (ix) [self drawIndexedPrimitives:(MTLPrimitiveType)t indexType:MTLIndexTypeUInt32 indexBuffer:idxBuf indexBufferOffset:0 indirectBuffer:big indirectBufferOffset:at];
+                    else [self drawPrimitives:(MTLPrimitiveType)t indirectBuffer:big indirectBufferOffset:at];
+                    drawn++;
+                }
     }
     if (orig && _ps != orig) [self setRenderPipelineState:orig];
     nvlog("GPU ICB: %lu indirect draw(s) recorded for %u slot(s), %lu candidate pipeline(s)", (unsigned long)drawn, slots, (unsigned long)cands.count);
@@ -6494,7 +6543,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     for (NSUInteger k = 0; k < cands.count; k++)
         for (NSArray *sz in sizes[k]) {
             const uint32_t tg[3] = { (uint32_t)[sz[0] unsignedLongValue], (uint32_t)[sz[1] unsignedLongValue], (uint32_t)[sz[2] unsignedLongValue] };
-            if (nvmtl_vk_cmd_icb_gather(&_cb->_c, &b->_recBuf->_b, &big->_b, at * slots * NVMTL_ICB_RECORD_BYTES, slots, 1, ((id<MTLComputePipelineState>)cands[k]).gpuResourceID._impl, 0, loc, len, tg, rb ? &rb->_b : NULL, ro)) { nvlog("GPU ICB compute: the gather pass FAILED"); return; }
+            if (nvmtl_vk_cmd_icb_gather(&_cb->_c, &b->_recBuf->_b, &big->_b, at * slots * NVMTL_ICB_RECORD_BYTES, slots, 1, ((id<MTLComputePipelineState>)cands[k]).gpuResourceID._impl, 0, loc, len, tg, 0, 0, rb ? &rb->_b : NULL, ro)) { nvlog("GPU ICB compute: the gather pass FAILED"); return; }
             at++;
         }
     at = 0; NSUInteger run = 0;

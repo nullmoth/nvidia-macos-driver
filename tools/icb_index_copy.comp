@@ -1,0 +1,35 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+// Copies the indices of every armed, in-range indexed command of a GPU-written ICB (plugin/nvmtl_icb_record.h) into one scratch
+// index buffer of `cap` 32-bit indices per slot, widening 16-bit indices. Vulkan binds an index buffer on the CPU, and the record only
+// holds an address, so the indices are brought to a buffer the CPU knows. A command with more than `cap` indices is not copied
+// (tools/icb_gather.comp empties its draw too): it is skipped whole, never truncated.
+layout(buffer_reference, std430) buffer Words { uint v[]; };
+layout(push_constant) uniform Args { Words rec; Words rng; Words dst; uint slots; uint cap; uint loc; uint len; } a;
+layout(local_size_x = 64) in;
+void main()
+{
+    uint n = gl_NumWorkGroups.x;
+    uint g = (gl_WorkGroupID.y * n + gl_WorkGroupID.x) * 64u + gl_LocalInvocationID.x;
+    uint s = g / a.cap, k = g % a.cap;
+    if (s >= a.slots) return;
+    uint r = s * 144u;
+    uint location = a.loc, length = a.len;
+    if (a.len == 0xFFFFFFFFu) { location = a.rng.v[0]; length = a.rng.v[1]; }
+    if (s < location || s - location >= length) return;
+    uint flags = a.rec.v[r];
+    if ((flags & 7u) != 5u) return;                  // armed, not compute, indexed
+    uint count = a.rec.v[r + 2u];
+    if (count > a.cap || k >= count) return;
+    uint64_t base = uint64_t(a.rec.v[r + 10u]) | (uint64_t(a.rec.v[r + 11u]) << 32);   // index address at byte 40
+    uint value;
+    if ((flags & 8u) != 0u) {
+        value = Words(base).v[k];
+    } else {
+        uint64_t at = base + uint64_t(k) * 2ul;
+        uint word = Words(at & ~uint64_t(3)).v[0];
+        value = ((at & 2ul) != 0ul) ? (word >> 16) : (word & 0xFFFFu);
+    }
+    a.dst.v[s * a.cap + k] = value;
+}
