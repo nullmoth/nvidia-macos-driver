@@ -10,6 +10,7 @@ import pathlib, platform, shutil, subprocess, sys, tempfile
 
 root = pathlib.Path(__file__).resolve().parents[1]
 src = (root / 'vendor/nvenc/vt/nvencvt_dec.c').read_text()
+enc = (root / 'vendor/nvenc/vt/nvencvt.c').read_text()
 fails = 0
 
 
@@ -27,6 +28,10 @@ check('the key is spelled as macOS spells it', 'CFSTR("MaxDecoderPixelRate")' in
 check('the default is 4K at 120 frames per second', '(int64_t)3840 * 2160 * 120' in src)
 check('NVMTL_NVDEC_MAX_PIXEL_RATE replaces it, and a value that is not a positive number is ignored',
       'NVMTL_NVDEC_MAX_PIXEL_RATE' in src and 'v > 0' in src and '!*end' in src)
+
+check('the encoder answers MaxEncoderPixelRate (the Screen Sharing host reads it) and lists it', 
+      'CFEqual(key, NV_MAX_ENCODER_PIXEL_RATE_KEY)' in enc and 'CFDictionarySetValue(d, NV_MAX_ENCODER_PIXEL_RATE_KEY, numRO)' in enc)
+check('the encoder default is below what it measured, 1080p at 120 frames per second', '(int64_t)1920 * 1080 * 120' in enc)
 
 if '--run' in sys.argv and platform.system() == 'Darwin' and shutil.which('clang'):
     with tempfile.TemporaryDirectory() as d:
