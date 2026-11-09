@@ -23,6 +23,9 @@ struct NVRMDdcRequest {
 // The slave addresses a framebuffer I2C client may reach: the DDC/CI channel and the EDID EEPROM. Nothing else on a
 // display's DDC lines (scalers' firmware, HDCP ports) is reachable.
 static inline bool nvrmDdcAddrAllowed(unsigned addr7) { return addr7 == 0x37 || addr7 == 0x50; }
+// A write to the EDID EEPROM (0x50) is only the one-byte offset that precedes a read. Any longer write would program the
+// part on a display whose write-protect pin is not tied, and a framebuffer I2C client can be any local user.
+static inline bool nvrmDdcWriteLenAllowed(unsigned addr7, unsigned len) { return addr7 != 0x50 || len == 1; }
 // IOI2CRequest addresses are 8-bit: write 0x6E / read 0x6F for DDC/CI. Returns the 7-bit address, or 0 when the address is
 // not an allowed one or its direction bit contradicts the part of the request it is used for.
 static inline unsigned nvrmDdcAddr7(unsigned addr8, bool forRead)
