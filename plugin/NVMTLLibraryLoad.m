@@ -2403,9 +2403,23 @@ static void nvmtl_air_argbuf_walk(NSDictionary *nodes, NSString *node, NSUIntege
             NSString *kind = [leaf rangeOfString:@"!\"air.indirect_constant\""].location != NSNotFound ? @"constant"
                            : [leaf rangeOfString:@"!\"air.texture\""].location != NSNotFound ? @"texture"
                            : [leaf rangeOfString:@"!\"air.sampler\""].location != NSNotFound ? @"sampler" : @"other";
-            if (rel >= 0)
-                [out addObject:@{ @"buffer_index": @(bufferIndex), @"argument_index": @(baseId + (NSUInteger)rel), @"field_offset": @(baseOff + off),
-                                  @"size": @(size), @"kind": kind, @"name": name }];
+            if (rel >= 0) {
+                NSMutableDictionary *fld = [@{ @"buffer_index": @(bufferIndex), @"argument_index": @(baseId + (NSUInteger)rel), @"field_offset": @(baseOff + off),
+                                               @"size": @(size), @"kind": kind, @"name": name } mutableCopy];
+                // a pointer to another argument buffer (`constant Inner *p [[id(n)]]`): its own struct's members, so that
+                // -newArgumentEncoderForBufferAtIndex: can encode the buffer it points at
+                if (leaf && [leaf rangeOfString:@"!\"air.indirect_buffer\""].location != NSNotFound) {
+                    NSString *inner = nvmtl_air_node_after(leaf, @"air.struct_type_info", 0, NULL);
+                    if (inner) {
+                        NSMutableArray *nested = [NSMutableArray array];
+                        nvmtl_air_argbuf_walk(nodes, inner, 0, 0, depth + 1, bufferIndex, nested);
+                        fld[@"nested_fields"] = nested;
+                        fld[@"nested_size"] = @(MAX(0, nvmtl_air_i32_after(leaf, @"air.arg_type_size")));
+                        fld[@"nested_align"] = @(MAX(0, nvmtl_air_i32_after(leaf, @"air.arg_type_align_size")));
+                    }
+                }
+                [out addObject:fld];
+            }
         }
         i = j + 7;
     }
