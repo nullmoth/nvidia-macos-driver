@@ -205,6 +205,10 @@ uint64_t nvmtl_vk_vram_bytes(void);
 void     nvmtl_vk_mem_split(uint64_t *vram, uint64_t *sys);
 int  nvmtl_vk_image_create_ms(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, uint32_t samples, nvk_image *out);
 int  nvmtl_vk_ms_storage_ok(void);
+int  nvmtl_vk_sparse_granularity(uint32_t vkfmt, int is3d, uint32_t samples, uint32_t out[3]);   /* the device's sparse block shape, 0 on success */
+int  nvmtl_vk_cap_float32_filtering(void);   /* MTLDevice capability answers decided from the Vulkan bits (nvmtl_caps_query.h) */
+int  nvmtl_vk_cap_float32_msaa(void);
+int  nvmtl_vk_cap_pull_model(void);
 int  nvmtl_vk_image_create_ms_storage(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, uint32_t samples, nvk_image *out);
 int  nvmtl_vk_image_create_ms_full(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, uint32_t samples, uint32_t mtl_type, uint32_t layers, nvk_image *out);
 int  nvmtl_vk_depth_create_ms(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t aspect, uint32_t samples, nvk_image *out);

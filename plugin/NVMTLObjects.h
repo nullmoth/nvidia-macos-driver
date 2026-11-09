@@ -10,6 +10,8 @@
 #import <IOSurface/IOSurface.h>
 #include "nvmtl_vk.h"
 #include "nvmtl_multiview.h"
+#include "nvmtl_caps_query.h"
+#include "nvmtl_sparse_query.h"
 #include "nvmtl_icb_range.h"
 #include "nvmtl_yuv422.h"
 #include "nvmtl_cmd_refusal.h"
