@@ -49,7 +49,14 @@ static nvmtl_lower_ex_fn xlate_lower_ex;
 typedef int (*nvmtl_to_uniform_fn)(const uint8_t *, size_t, uint8_t **, size_t *, char *, size_t);
 static nvmtl_to_uniform_fn xlate_to_uniform;   /* the table of an unlowered module moved to a Uniform block */
 static nvmtl_translate_fn xlate;
-static char gXlateTag[80] = "untagged";
+#include "nvmtl_spvcache_name.h"
+// The cache tag: the translator build (sha256-<64 hex>, 71 characters) plus every mode suffix. This buffer was 80 bytes,
+// so a tag with -u2 and -p5 had room for only "-a" of "-as1", and any suffix after it was silently dropped: entries
+// translated with and without the switches that follow shared one name, and a lookup could be served a module made in
+// the other mode. nvmtl_spvcache_mode_tag refuses a tag that does not fit instead of cutting it.
+static char gXlateTag[NVMTL_SPVCACHE_TAG_MAX] = "untagged";
+// The translator build alone, without the mode suffixes (-u2, -p5, ...) gXlateTag adds: the stale-entry sweep keys on it.
+static char gXlateBuildTag[NVMTL_SPVCACHE_TAG_MAX] = "untagged";
 static void nvmtl_translator_cache_tag(const char *path, char *tag, size_t capacity) {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     CC_SHA256_CTX context; CC_SHA256_Init(&context);
@@ -111,7 +118,22 @@ static int nvmtl_xlate_ready(void) {
         const char *xpath = bundled && access(bundled.fileSystemRepresentation,R_OK)==0 ? bundled.fileSystemRepresentation : NVMTL_XLATE_LIB;
         void *h = dlopen(xpath, RTLD_NOW | RTLD_LOCAL);
         if (h) nvmtl_translator_cache_tag(xpath, gXlateTag, sizeof gXlateTag);
-        if (!getenv("NVMTL_NO_AIR_UNROLL")) strlcat(gXlateTag, "-u2", sizeof gXlateTag);
+        strlcpy(gXlateBuildTag, gXlateTag, sizeof gXlateBuildTag);
+        // Each mode below changes the SPIR-V a module translates to, so a cache entry written in one mode must never be
+        // served in another: unrolled AIR, canonical pointers, argument-buffer samplers, and the two translator switches
+        // an application profile sets.
+        { const char *as = getenv("NVMTL_ARGBUF_SAMPLERS");
+          if (h && !nvmtl_spvcache_mode_tag(gXlateTag, sizeof gXlateTag, gXlateBuildTag, !getenv("NVMTL_NO_AIR_UNROLL"),
+                                       getenv("NVMTL_CANONICAL_POINTERS") != NULL, as && !strcmp(as, "1"),
+                                       getenv("NVMTL_NO_PTR_PHI_LOAD") != NULL, getenv("NVMTL_NO_PIXEL_HW_FILTER") != NULL)) {
+              // A tag that cannot name every mode cannot keep the modes apart: no cache entry is read or written.
+              strlcpy(gXlateTag, "untagged", sizeof gXlateTag);
+              nvlog("translate: cache tag does not fit - the shader cache is OFF in this process");
+          } }
+        // Typed dummy slots change every module that indexes the heap (a null resource id is redirected), so their
+        // SPIR-V never shares a cache entry with the other mode.
+        { extern int nvmtl_typed_dummies_wanted(void);
+          if (h && strcmp(gXlateTag, "untagged") && nvmtl_typed_dummies_wanted()) strlcat(gXlateTag, "-td1", sizeof gXlateTag); }
         if (!h) { nvlog("translate: dlopen(%s): %s", NVMTL_XLATE_LIB, dlerror()); return; }
         xlate = (nvmtl_translate_fn)dlsym(h, "nvmtl_translate");
         { char tid[1200];
@@ -142,7 +164,10 @@ static int nvmtl_xlate_ready(void) {
         xlate_refl_fc = (nvmtl_refl_fc_fn)dlsym(h, "nvmtl_reflect_fc");
         void (*setcaps)(uint32_t) = (void (*)(uint32_t))dlsym(h, "nvmtl_translate_set_caps");
         // Bits 0/1: formatless storage images. Bit 2: this plugin has no rasterization rate maps.
-        if (setcaps) setcaps(3u | 4u); else nvlog("translate: no nvmtl_translate_set_caps in this translator — written textures stay R32f-declared (one channel)");
+        // Bit 3: heap slots 1..5 are reserved for typed dummies (nvmtl_vk.c), a null resource id may be redirected to them.
+        { extern int nvmtl_typed_dummies_wanted(void);
+          if (setcaps) setcaps(3u | 4u | (nvmtl_typed_dummies_wanted() ? 8u : 0u)); }
+        if (!setcaps) nvlog("translate: no nvmtl_translate_set_caps in this translator — written textures stay R32f-declared (one channel)");
         if (!xlate) { nvlog("translate: no nvmtl_translate symbol"); return; }
         nvlog("translate: in-process AIR->SPIR-V library loaded");
     });
@@ -371,13 +396,15 @@ static BOOL nvmtl_dir_writable(NSString *d) {
 // The sweep must not run before the translator has been opened. Until then the build tag is "untagged", nothing would
 // match it, and a cache the running driver can use would be deleted.
 static void nvmtl_spvcache_drop_stale(const char *dirc) {
-    if (!dirc || !strcmp(gXlateTag, "untagged")) {
+    if (!dirc || !strcmp(gXlateBuildTag, "untagged")) {
         nvlog("spvcache: stale-tag sweep SKIPPED - the translator has no cache tag yet; nothing was deleted");
         return;
     }
-    char suffix[128];
-    snprintf(suffix, sizeof suffix, ".%s.c3.spv", gXlateTag);
-    const size_t sn = strlen(suffix);
+    // Every process shares this folder unless it names its own cache, and each process's modes (canonical pointers,
+    // argument-buffer samplers, an application profile's translator switches) give its entries a different tag. Only
+    // entries from another translator BUILD are stale; an entry of the same build in another mode belongs to a process
+    // that runs in that mode, and deleting it made each process wipe the others' caches on every start.
+
     DIR *eh = opendir(dirc);
     if (!eh) {
         nvlog("spvcache: stale-tag sweep CANNOT READ %s: %s - entries from older drivers are left in place",
@@ -390,7 +417,7 @@ static void nvmtl_spvcache_drop_stale(const char *dirc) {
     while ((de = readdir(eh)) != NULL) {
         const size_t n = strlen(de->d_name);
         if (n < 7 || strcmp(de->d_name + n - 7, ".c3.spv") != 0) continue;   /* not one of ours */
-        if (n >= sn && strcmp(de->d_name + n - sn, suffix) == 0) { kept++; continue; }
+        if (nvmtl_spvcache_same_build(de->d_name, gXlateBuildTag)) { kept++; continue; }
         char full[1200];
         if (snprintf(full, sizeof full, "%s/%s", dirc, de->d_name) >= (int)sizeof full) continue;
         struct stat st;
@@ -399,8 +426,8 @@ static void nvmtl_spvcache_drop_stale(const char *dirc) {
     }
     closedir(eh);
     if (gone || failed)
-        nvlog("spvcache: dropped %lu entries / %llu MiB left by earlier drivers (%lu match %s, %lu could not be removed)",
-              gone, freed >> 20, kept, gXlateTag, failed);
+        nvlog("spvcache: dropped %lu entries / %llu MiB left by earlier drivers (%lu of build %s kept, %lu could not be removed)",
+              gone, freed >> 20, kept, gXlateBuildTag, failed);
 }
 static NSString *nvmtl_spvcache_dir(void) {
     static NSString *dir; static dispatch_once_t once;
@@ -420,6 +447,8 @@ static NSString *nvmtl_spvcache_dir(void) {
     return dir;
 }
 static NSString *nvmtl_spvcache_path_digest(const unsigned char h[CC_SHA256_DIGEST_LENGTH], NSString *stage) {
+    // No tag, no file: an entry named without its modes could be served to a process in another mode.
+    if (!strcmp(gXlateTag, "untagged")) return nil;
     NSString *d = nvmtl_spvcache_dir();
     if (!d) return nil;
     // Sweep the folder clear of other builds' entries once, here rather than where the folder is chosen: a process
@@ -532,7 +561,8 @@ static NSString *nvmtl_aircache_path(NSData *air) {
     char hex[2 * CC_SHA256_DIGEST_LENGTH + 1];
     for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) snprintf(hex + 2 * i, 3, "%02x", h[i]);
     return [[nvmtl_aircache_dir() stringByAppendingPathComponent:@(hex)] stringByAppendingPathExtension:
-            nvmtl_air_unroll_wanted(air) ? @"u2.ll" : @"ll"];
+            getenv("NVMTL_CANONICAL_POINTERS") ? (nvmtl_air_unroll_wanted(air) ? @"p5.u2.ll" : @"p5.ll")
+                                               : (nvmtl_air_unroll_wanted(air) ? @"u2.ll" : @"ll")];
 }
 
 static BOOL nvmtl_run_air_opt(const char *input, const char *output) {
@@ -590,13 +620,26 @@ struct nvmtl_llvm_walk {
     void *(*GetElementType)(void *); unsigned long long (*GetArrayLength2)(void *); void *(*GetModuleContext)(void *);
     void *(*Int64TypeInContext)(void *); void *(*ConstInt)(void *, unsigned long long, int);
     void *(*ConstInBoundsGEP2)(void *, void *, void **, unsigned); void (*ReplaceAllUsesWith)(void *, void *);
+    void *(*GetFirstFunction)(void *); void *(*GetNextFunction)(void *); int (*GetLinkage)(void *);
+    void *(*IsACallInst)(void *); void *(*GetCalledValue)(void *);
+    unsigned (*GetEnumAttributeKindForName)(const char *, size_t); void *(*CreateEnumAttribute)(void *, unsigned, uint64_t);
+    void (*AddAttributeAtIndex)(void *, unsigned, void *); void *(*GetEnumAttributeAtIndex)(void *, unsigned, unsigned);
+    void *(*GetInstructionParent)(void *); void *(*GetBasicBlockParent)(void *);
+    void *(*GetFirstBasicBlock)(void *); void *(*GetNextBasicBlock)(void *);
+    void *(*GetFirstInstruction)(void *); void *(*GetNextInstruction)(void *);
+    void *(*IsAPHINode)(void *); void *(*IsASelectInst)(void *); void *(*TypeOf)(void *);
 };
 typedef struct nvmtl_llvm_walk nvmtl_llvm_walk;
 #define NVMTL_LLVM_WALK_NAMES "LLVMGetFirstGlobal", "LLVMGetNextGlobal", "LLVMGlobalGetValueType", "LLVMGetFirstUse", \
     "LLVMGetNextUse", "LLVMGetUser", "LLVMIsAConstantExpr", "LLVMGetConstOpcode", "LLVMGetGEPSourceElementType", \
     "LLVMGetNumOperands", "LLVMGetOperand", "LLVMIsAConstantInt", "LLVMConstIntGetSExtValue", "LLVMGetTypeKind", \
     "LLVMGetIntTypeWidth", "LLVMGetElementType", "LLVMGetArrayLength2", "LLVMGetModuleContext", "LLVMInt64TypeInContext", \
-    "LLVMConstInt", "LLVMConstInBoundsGEP2", "LLVMReplaceAllUsesWith"
+    "LLVMConstInt", "LLVMConstInBoundsGEP2", "LLVMReplaceAllUsesWith", \
+    "LLVMGetFirstFunction", "LLVMGetNextFunction", "LLVMGetLinkage", "LLVMIsACallInst", "LLVMGetCalledValue", \
+    "LLVMGetEnumAttributeKindForName", "LLVMCreateEnumAttribute", "LLVMAddAttributeAtIndex", "LLVMGetEnumAttributeAtIndex", \
+    "LLVMGetInstructionParent", "LLVMGetBasicBlockParent", \
+    "LLVMGetFirstBasicBlock", "LLVMGetNextBasicBlock", "LLVMGetFirstInstruction", "LLVMGetNextInstruction", \
+    "LLVMIsAPHINode", "LLVMIsASelectInst", "LLVMTypeOf"
 static int nvmtl_scalar_bytes(const nvmtl_llvm_walk *w, void *t) {
     switch (w->GetTypeKind(t)) {
     case 1: case 18: return 2; case 2: return 4; case 3: return 8;
@@ -635,6 +678,35 @@ static int nvmtl_llvm_walk_load(nvmtl_llvm_walk *w, void *library) {
     return 1;
 }
 static nvmtl_llvm_walk gLLVMWalk;
+
+static BOOL nvmtl_has_pointer_choice(const nvmtl_llvm_walk *w, void *module) {
+    for (void *fn = w->GetFirstFunction(module); fn; fn = w->GetNextFunction(fn))
+        for (void *bb = w->GetFirstBasicBlock(fn); bb; bb = w->GetNextBasicBlock(bb))
+            for (void *i = w->GetFirstInstruction(bb); i; i = w->GetNextInstruction(i))
+                if ((w->IsAPHINode(i) || w->IsASelectInst(i)) && w->GetTypeKind(w->TypeOf(i)) == 12) return YES;
+    return NO;
+}
+
+// Marks every internal helper with exactly one direct caller always-inline, so the pointer it returns or takes is
+// visible as SSA to the translator instead of crossing a call. One caller means no helper body is duplicated.
+static unsigned nvmtl_inline_single_use_helpers(const nvmtl_llvm_walk *w, void *module) {
+    unsigned inl = w->GetEnumAttributeKindForName("alwaysinline", strlen("alwaysinline"));
+    unsigned no = w->GetEnumAttributeKindForName("noinline", strlen("noinline"));
+    if (!inl || !no) return 0;
+    void *context = w->GetModuleContext(module); unsigned count = 0;
+    for (void *fn = w->GetFirstFunction(module); fn; fn = w->GetNextFunction(fn)) {
+        int linkage = w->GetLinkage(fn);
+        if (linkage != 8 && linkage != 9) continue; // LLVMInternalLinkage and LLVMPrivateLinkage
+        void *use = w->GetFirstUse(fn);
+        if (!use || w->GetNextUse(use)) continue;
+        void *call = w->GetUser(use);
+        if (!w->IsACallInst(call) || w->GetCalledValue(call) != fn) continue;
+        if (w->GetBasicBlockParent(w->GetInstructionParent(call)) == fn) continue;
+        if (w->GetEnumAttributeAtIndex(fn, ~0u, no)) continue;
+        w->AddAttributeAtIndex(fn, ~0u, w->CreateEnumAttribute(context, inl, 0)); count++;
+    }
+    return count;
+}
 
 // Set only when the reader reports an ERROR about a module - it used to only log, so a module the reader
 // had rejected was still compiled. Severity matters: the same handler carries warnings, remarks and notes,
@@ -717,8 +789,37 @@ static NSString *nvmtl_air_in_memory(NSData *air) {
             else { int rt = nvmtl_retype_byte_geps(&gLLVMWalk, module);
                    nvlog("library: air unroll: simdgroup_matrix module (%lu bytes) unrolled + sroa, %d byte GEPs retyped", (unsigned long)air.length, rt); }
         }
-        char *text = nvLLVMPrintModuleToString(module);
-        if (text) { result = [NSString stringWithUTF8String:text]; nvLLVMDisposeMessage(text); }
+        // NVMTL_CANONICAL_POINTERS: inline single-use helpers and SROA so pointers reach the translator as plain SSA;
+        // instcombine only when a pointer phi/select exists (it also rewrites typed GEPs to byte GEPs).
+        if (getenv("NVMTL_CANONICAL_POINTERS")) {
+            if (!nvLLVMRunPasses) { gAirError = 1; nvlog("library: pointer canonicalization requires the LLVM pass-builder API"); }
+            else {
+                unsigned helpers = nvmtl_inline_single_use_helpers(&gLLVMWalk, module);
+                void *opts = nvLLVMCreatePassBuilderOptions();
+                void *err = nvLLVMRunPasses(module, "always-inline,function(sroa,simplifycfg)", NULL, opts);
+                nvlog("library: pointer canonicalization exposed %u single-use helpers", helpers);
+                nvLLVMDisposePassBuilderOptions(opts);
+                if (!err && nvmtl_has_pointer_choice(&gLLVMWalk, module)) {
+                    opts = nvLLVMCreatePassBuilderOptions();
+                    err = nvLLVMRunPasses(module, "function(instcombine,simplifycfg)", NULL, opts);
+                    nvLLVMDisposePassBuilderOptions(opts);
+                    nvlog("library: pointer selection simplification applied");
+                }
+                if (err) {
+                    gAirError = 1;
+                    char *m = nvLLVMGetErrorMessage(err);
+                    nvlog("library: pointer canonicalization refused: %s", m ? m : "unknown LLVM error");
+                    if (m) nvLLVMDisposeErrorMessage(m);
+                }
+            }
+        }
+        char *text = gAirError ? NULL : nvLLVMPrintModuleToString(module);
+        if (text) {
+            result = [NSString stringWithUTF8String:text]; nvLLVMDisposeMessage(text);
+            // samesign only restricts defined inputs; the translator reads the plain integer predicate.
+            if (getenv("NVMTL_CANONICAL_POINTERS"))
+                result = [result stringByReplacingOccurrencesOfString:@"icmp samesign " withString:@"icmp "];
+        }
     }
     if (module) nvLLVMDisposeModule(module);
     if (buffer) nvLLVMDisposeMemoryBuffer(buffer);
@@ -738,6 +839,10 @@ static NSString *nvmtl_air_to_text(NSData *air) {
         return nvmtl_air_text_made(memoryIR);
     }
 
+    if (getenv("NVMTL_CANONICAL_POINTERS")) {
+        nvlog("library: canonical AIR unavailable; decoder fallback cannot satisfy this contract");
+        return nil;
+    }
     NSString *dir = NSTemporaryDirectory();
     NSString *inp = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"nvmtl-%d-%p.air", getpid(), air]];
     NSString *outp = [inp stringByAppendingPathExtension:@"ll"];
@@ -901,7 +1006,7 @@ NSSet<NSString *> *nvmtl_mtlb_extern_names_uncached(NSData *raw)
     const uint8_t *b = raw.bytes; NSUInteger n = raw.length;
     if (n < 0x28 || memcmp(b, "MTLB", 4) != 0) return out;
     uint64_t off = 0; memcpy(&off, b + 0x18, 8);
-    if (off + 4 > n) return out;
+    if (off > n - 4) return out;   /* n >= 0x28 above; off + 4 would wrap for an offset near 2^64 */
     uint32_t count = 0; memcpy(&count, b + off, 4);
     NSUInteger pos = (NSUInteger)off + 4;
     for (uint32_t k = 0; k < count && pos + 4 <= n; k++) {
@@ -1047,10 +1152,17 @@ NSDictionary<NSString *, NSData *> *nvmtl_index_metallib_uncached(NSData *lib, N
     return (out.count || visible) ? [out copy] : nil;
 }
 
+// A library-index record carries the externs read from the library's AIR text, and that text depends on this process's
+// modes (canonical pointers inline helpers). It is named by the library AND the full cache tag, so a record written in
+// one mode is never read in another; without a tag there is no record.
 static NSString *nvmtl_idx_path(NSData *key) {
+    (void)nvmtl_xlate_ready();   // the tag is made there
+    if (!strcmp(gXlateTag, "untagged")) return nil;
     NSMutableString *h = [NSMutableString stringWithString:@"idx2-"]; const uint8_t *d = key.bytes;
     for (NSUInteger i = 0; i < key.length; i++) [h appendFormat:@"%02x", d[i]];
-    return [nvmtl_aircache_dir() stringByAppendingPathComponent:[h stringByAppendingString:@".plist"]];
+    char name[NVMTL_SPVCACHE_TAG_MAX + 160];
+    if (!nvmtl_idx_record_name(name, sizeof name, h.UTF8String, gXlateTag)) return nil;
+    return [nvmtl_aircache_dir() stringByAppendingPathComponent:@(name)];
 }
 static _Atomic unsigned long gLazyLibs, gLazyNames, gLazyForced, gLazyFail;
 @interface NVMTLLazyAirs : NSDictionary { NSDictionary *_slot; NSArray *_blob; NSMutableArray *_text; os_unfair_lock _lk; }
@@ -1772,6 +1884,47 @@ static NSArray<NSString *> *nvmtl_air_tuple_tokens(NSString *line)
     }
     return tok;
 }
+// YES when a kernel cannot tell how its threads are grouped: every argument is a buffer outside threadgroup memory, a
+// texture, a sampler, thread_position_in_grid or threads_per_grid, and the module has no threadgroup memory, barrier,
+// SIMD-group or quad operation and no imageblock. The dispatch may then run the same threads in smaller groups.
+// Anything the scan does not recognise answers NO, which only costs the reshape.
+static BOOL nvmtl_air_grid_only_scan(NSString *ll, NSString *fname)
+{
+    if (!ll.length || !fname.length) return NO;
+    for (NSString *bad in @[@"addrspace(3)", @"@air.wg.barrier", @"@air.simdgroup", @"@air.simd_", @"@air.quad_",
+                            @"imageblock", @"@air.atomic.local", @"air.visible_function_table", @"air.intersection_function_table"])
+        if ([ll rangeOfString:bad options:NSLiteralSearch].location != NSNotFound) return NO;
+    NSArray *allowed = @[@"!\"air.buffer\"", @"!\"air.texture\"", @"!\"air.sampler\"", @"!\"air.thread_position_in_grid\"",
+                         @"!\"air.threads_per_grid\""];
+    for (NSString *needle in @[[NSString stringWithFormat:@"@%@, ", fname], [NSString stringWithFormat:@"@\"%@\", ", fname]])
+    for (NSRange r = NSMakeRange(0, ll.length);;) {
+        NSRange m = [ll rangeOfString:needle options:NSLiteralSearch range:r];
+        if (m.location == NSNotFound) break;
+        NSRange ln = [ll lineRangeForRange:m];
+        r = NSMakeRange(NSMaxRange(ln), ll.length - NSMaxRange(ln));
+        if ([ll characterAtIndex:ln.location] != '!' || [ll rangeOfString:@" = !{" options:NSLiteralSearch range:ln].location == NSNotFound) continue;
+        // `!K = !{ptr @fname, !outputs, !args, ...}`: the third token is the argument list
+        NSArray<NSString *> *kt = nvmtl_air_tuple_tokens([ll substringWithRange:ln]);
+        if (kt.count < 3 || ![kt[2] hasPrefix:@"!"]) return NO;
+        NSRange al = [ll rangeOfString:[NSString stringWithFormat:@"\n%@ = !{", kt[2]] options:NSLiteralSearch];
+        if (al.location == NSNotFound) return NO;
+        for (NSString *arg in nvmtl_air_tuple_tokens([ll substringWithRange:[ll lineRangeForRange:NSMakeRange(al.location + 1, 1)]])) {
+            NSRange an = [ll rangeOfString:[NSString stringWithFormat:@"\n%@ = !{", arg] options:NSLiteralSearch];
+            if (an.location == NSNotFound) return NO;
+            NSArray<NSString *> *at = nvmtl_air_tuple_tokens([ll substringWithRange:[ll lineRangeForRange:NSMakeRange(an.location + 1, 1)]]);
+            if (at.count < 2 || ![allowed containsObject:at[1]]) return NO;
+            NSUInteger as = [at indexOfObject:@"!\"air.address_space\""];
+            if (as != NSNotFound && as + 1 < at.count && [at[as + 1] isEqualToString:@"i32 3"]) return NO;
+        }
+        return YES;
+    }
+    return NO;
+}
+BOOL nvmtl_air_grid_only(NVMTLFunction *fn)
+{
+    return fn ? nvmtl_air_grid_only_scan(fn->_air, fn->_fname) : NO;
+}
+
 // One `air.struct_type_info` tuple: members of `i32 offset, i32 size, i32 count, !"type", !"name",
 // !"air.indirect_argument", leaf`. A leaf is either a node with the member's `air.location_index` (its [[id]] inside the
 // struct), or, for a nested struct - whose member starts with `!"air.struct_type_info", !child` - `i32 id`, the
@@ -2188,6 +2341,36 @@ static NVMTLFunction *nvmtl_link_dylibs(NVMTLFunction *fn, NSArray *dylibs, NSEr
     return df;
 }
 
+// Whether this AIR reads a visible or an intersection function table. Both callers below used to decide that by
+// searching for the argument metadata string !"air.visible_function_table", which a ray-tracing kernel from
+// Apple's shader converter never carries: its table is a field of the dispatch-rays argument struct, not a
+// kernel argument, so the only trace of it in the module is the intrinsic that reads it. Measured over 76
+// ray-tracing kernels captured from a running game: 76 of 76 call
+// air.get_function_pointer_visible_function_table, 0 of 76 carry the metadata either caller looked for. The
+// table branch was therefore never taken, the plain link ran with no table candidates, the handle lookup
+// survived specialization, and translation refused the module on the null compare its result feeds - 76
+// refusals and not one "reads a visible function table" line in the run. Ask for the intrinsics, which are what
+// actually reads the table; the metadata stays as a second form so a module that does carry it still matches.
+BOOL nvmtl_air_reads_function_table(NSString *air)
+{
+    if (!air.length) return NO;
+    static NSArray<NSString *> *forms;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        forms = @[@"@air.get_function_pointer_visible_function_table",
+                  @"@air.get_size_visible_function_table",
+                  @"@air.is_null_visible_function_table",
+                  @"@air.get_null_intersection_function_table",
+                  @"@air.set_buffer_intersection_function_table",
+                  @"@air.set_intersection_function_table",
+                  @"!\"air.visible_function_table\"",
+                  @"!\"air.intersection_function_table\""];
+    });
+    for (NSString *f in forms)
+        if ([air rangeOfString:f].location != NSNotFound) return YES;
+    return NO;
+}
+
 // Whether a function needs linking before it can be translated: it calls visible functions it does not define,
 // so the pipeline's linked functions have to supply them. This used to be decided by reading the translator's
 // error text, and when the translator stopped refusing every visible-function reference outright, its message for
@@ -2206,9 +2389,7 @@ BOOL nvmtl_needs_visible_link(NSString *air, NSString *why)
             // the query lists direct references only; a function that calls through a visible or intersection
             // function table has none, and nvmtl_link_stage links it from the table candidates
             if ([refs isKindOfClass:[NSArray class]])
-                return [(NSArray *)refs count] > 0
-                    || [air rangeOfString:@"!\"air.visible_function_table\""].location != NSNotFound
-                    || [air rangeOfString:@"!\"air.intersection_function_table\""].location != NSNotFound;
+                return [(NSArray *)refs count] > 0 || nvmtl_air_reads_function_table(air);
         }
     }
     return why && ([why rangeOfString:@"visible function reference"].location != NSNotFound
@@ -2240,7 +2421,33 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
         if (!df) { if (err) *err = de; return nil; }
         fn = df;
     }
-    if (!fn->_needsLink) return k;
+    // A PIPELINE'S LINKED FUNCTIONS MUST BE RECORDED EVEN WHEN NOTHING NEEDS LINKING.
+    //    This early return skips the whole link - correctly, there is nothing to resolve - but it also
+    //    threw away the descriptor's linkedFunctions, so the pipeline never learned them and
+    //    functionHandleWithFunction had nothing to answer from. MEASURED: the game creates
+    //    rgs_reference_wavefront_trace with needsLink=no and 24 linkedFunctions, then asks that pipeline
+    //    for handles to ahs_main / chs_main_0..5 and gets nil for all 8 - after which it binds no visible
+    //    function table, no intersection table and no acceleration structure, which is where ray tracing
+    //    stopped. A shader that dispatches only through handles the HOST writes needs no link of its own.
+    // The list is attached to the object the pipeline will hold (`k`), because that is what
+    //    functionHandleWithFunction reads; only functions with AIR are recorded, since a handle is a
+    //    name-to-index mapping and an AIR-less candidate could never be dispatched anyway.
+    if (!fn->_needsLink) {
+        NSMutableArray *handleFns = [NSMutableArray new];
+        for (id c in (lfIn.functions ?: @[]))
+            if ([c isKindOfClass:[NVMTLFunction class]] && ((NVMTLFunction *)c)->_air.length)
+                [handleFns addObject:c];
+        if (handleFns.count && !objc_getAssociatedObject(k, &kNVMTLTableFns)) {
+            objc_setAssociatedObject(k, &kNVMTLTableFns, [handleFns copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            FILE *lg = fopen(nvmtl_log_path(), "a");
+            if (lg) {
+                fprintf(lg, "pid %d NVMTL: link: \"%s\" needs no link but carries %lu linked function(s) for its handles\n",
+                        getpid(), fn->_fname.UTF8String, (unsigned long)handleFns.count);
+                fclose(lg);
+            }
+        }
+        return k;
+    }
     if (!nvmtl_xlate_ready() || !xlate_vrefs || !xlate_link) {
         if (err) *err = nvmtl_link_err(@"this translator has no nvmtl_link_visible - rebuild nvmtl_translate-merge with patch_xl_link.py");
         return nil;
@@ -2257,6 +2464,28 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     }
     NSMutableArray *cands = [NSMutableArray new];
     MTLLinkedFunctions *lf = lfIn;
+    // PER-LINK, WITH THE ENTRY NAME. computePipelineDescriptor's line is deduped by format
+    //    string (nvlog_dropped), so after a few cs_main_ pipelines every later one is suppressed and the
+    //    RT entries' counts never appear. This says what THIS link was actually given, which is the only
+    //    way to tell "the game passed no linked functions" from "we were called on a path that drops
+    //    them" - rgs_reference_wavefront_trace gets 0 candidates and then 8 nil handle requests.
+    // AND IT MUST BYPASS nvlog: nvlog_dropped dedupes by FORMAT-STRING POINTER, keeping the first
+    //    few per call site and then every Nth, so one busy site hides everything after it. That is why
+    //    the descriptor line only ever showed cs_main_ - the RT pipelines came later and were dropped -
+    //    and it would silently do the same here, which already made one run read as "never linked".
+    {
+        FILE *lg = fopen(nvmtl_log_path(), "a");
+        if (lg) {
+            fprintf(lg, "pid %d NVMTL: link: \"%s\" given linkedFunctions=%s functions=%lu private=%lu binary=%lu groups=%lu, %lu dylib(s)\n",
+                    getpid(), ((NVMTLFunction *)kIn)->_fname.UTF8String, lf ? "YES" : "nil",
+                    (unsigned long)lf.functions.count,
+                    (unsigned long)([lf respondsToSelector:@selector(privateFunctions)]
+                                    ? [(NSArray *)[(id)lf valueForKey:@"privateFunctions"] count] : 0),
+                    (unsigned long)lf.binaryFunctions.count, (unsigned long)lf.groups.count,
+                    (unsigned long)[dylibs count]);
+            fclose(lg);
+        }
+    }
     if (lf.functions) [cands addObjectsFromArray:lf.functions];
     if ([lf respondsToSelector:@selector(privateFunctions)]) { NSArray *pf = [(id)lf valueForKey:@"privateFunctions"]; if ([pf isKindOfClass:[NSArray class]]) [cands addObjectsFromArray:pf]; }
     for (NSArray *g in lf.groups.allValues) if ([g isKindOfClass:[NSArray class]]) [cands addObjectsFromArray:g];
@@ -2296,8 +2525,24 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     const char **syms = calloc(n ? n : 1, sizeof *syms), **mls = calloc(n ? n : 1, sizeof *mls);
     if (!syms || !mls) { free(syms); free(mls); if (err) *err = nvmtl_link_err(@"link table allocation failed"); return nil; }
     for (size_t i = 0; i < n; i++) { syms[i] = [keys[i] UTF8String]; mls[i] = [mods[keys[i]] UTF8String]; }
-    BOOL usesTable = [fn->_air rangeOfString:@"!\"air.visible_function_table\""].location != NSNotFound
-                  || [fn->_air rangeOfString:@"!\"air.intersection_function_table\""].location != NSNotFound;
+    // A REFERENCED FUNCTION CAN BE THE ONE THAT READS THE TABLE, and testing only the entry's
+    //    own AIR missed every one of them. MEASURED on the game's refused RT kernels: 60 of 60 surviving
+    //    `air.get_function_pointer_visible_function_table` calls live in a LINKED-IN define, not in the
+    //    entry — so this returned NO, the plain xlate_link path ran, it pulled that function in, and the
+    //    lookup reached the emitter, where `icmp eq ptr %fp, null` refuses with "pointer nullness is not
+    //    tracked". The table path has to be chosen on what the LINKED module will contain, which is the
+    //    entry plus every module linked into it.
+    BOOL usesTable = nvmtl_air_reads_function_table(fn->_air);
+    if (!usesTable) {
+        for (NSString *s in mods) {
+            if (nvmtl_air_reads_function_table(mods[s])) {
+                usesTable = YES;
+                nvlog("link: \"%s\": the table is read by linked function %s, not by the entry - taking the visible-table path",
+                      fn->_fname.UTF8String, s.UTF8String);
+                break;
+            }
+        }
+    }
     id failKey = nvmtl_link_failure_key(fn, mods, usesTable ? (lf.functions ?: @[]) : @[], fc);
     NSString *known = [nvmtl_link_failures() objectForKey:failKey];
     if (known) {
@@ -2405,7 +2650,31 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     NVMTLFunction *nf = [NVMTLFunction new];
     nf->_spirv = spv; nf->_fname = fn->_fname; nf->_stage = fn->_stage; nf->_air = linked; nf->_fc = [fc copy];
     nf->_lib = fn->_lib; nf->_fcv = fn->_fcv; nf->_specName = fn->_specName;
-    if (usesTable) objc_setAssociatedObject(nf, &kNVMTLTableFns, [tc copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // THE HANDLE API IS PIPELINE-LEVEL, NOT TABLE-LEVEL. functionHandleWithFunction: must
+    //    answer for ANY function in the descriptor's linkedFunctions, whether or not the entry's own AIR
+    //    reads a visible function table. MEASURED: `rgs_reference_wavefront_trace` never appears in a
+    //    "reads a visible function table" line - it links 24 hit shaders but reads no table itself - so
+    //    usesTable was NO, nothing was recorded, and all 8 handle requests for ahs_main / chs_main_0..5
+    //    came back nil with "(0 linked)". The game then binds no table and sets no acceleration
+    //    structure, which is where ray tracing stopped.
+    // The candidates are collected here WITHOUT the usesTable branch's validation, which must stay
+    //    an error only on the table path: a function with no AIR cannot be dispatched from a table, but
+    //    it must not newly refuse a pipeline that never dispatches one.
+    if (!tc.count) {
+        for (id c in (lf.functions ?: @[]))
+            if ([c isKindOfClass:[NVMTLFunction class]] && ((NVMTLFunction *)c)->_air.length)
+                [tc addObject:c];
+        if (tc.count)
+            nvlog("link: \"%s\" reads no table but links %lu function(s) - recorded so their handles resolve",
+                  nf->_fname.UTF8String, (unsigned long)tc.count);
+    }
+    if (tc.count) {
+        objc_setAssociatedObject(nf, &kNVMTLTableFns, [tc copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // say WHICH function object carries the candidate list, so a pipeline that later
+        //    reports "(0 linked)" can be matched against it by name and object identity.
+        nvlog("link: \"%s\" carries %lu table candidate(s) on function %p",
+              nf->_fname.UTF8String, (unsigned long)tc.count, (__bridge void *)nf);
+    }
     return nf;
 }
 
@@ -2420,6 +2689,7 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
 @interface NVMTLVisibleFunctionTable : NSObject <MTLVisibleFunctionTable> { @public id<MTLBuffer> _buf; NSUInteger _n; } @end
 @implementation NVMTLVisibleFunctionTable
 - (void)setFunction:(id<MTLFunctionHandle>)f atIndex:(NSUInteger)i {
+    { static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 8) { FILE *lg = fopen(nvmtl_log_path(), "a"); if (lg) { fprintf(lg, "pid %d NVMTL: RTBIND visible table setFunction slot %lu <- %s id %llu\n", getpid(), (unsigned long)i, f ? [[f name] UTF8String] : "nil", f && [(id)f isKindOfClass:[NVMTLFunctionHandle class]] ? (unsigned long long)((NVMTLFunctionHandle *)f)->_id : 0ull); fclose(lg); } } }
     if (i >= _n) { nvlog("visible function table: setFunction atIndex:%lu beyond %lu slots - IGNORED", (unsigned long)i, (unsigned long)_n); return; }
     if (f && ![(id)f isKindOfClass:[NVMTLFunctionHandle class]]) { nvlog("visible function table: foreign handle %s - slot %lu set NULL", NSStringFromClass([(id)f class]).UTF8String, (unsigned long)i); f = nil; }
     ((uint64_t *)_buf.contents)[i] = f ? ((NVMTLFunctionHandle *)f)->_id : 0;
@@ -2534,7 +2804,32 @@ static id<MTLIntersectionFunctionTable> nvmtl_ift_new(MTLIntersectionFunctionTab
             NVMTLFunctionHandle *h = [NVMTLFunctionHandle new]; h->_id = k + 1; h->_fn = f; return h;
         }
     }
-    nvlog("functionHandleWithFunction: \"%s\" is not a linked function of this pipeline (%lu linked) -> nil", f.name.UTF8String, (unsigned long)c.count);
+    // THE PIPELINE'S OWN FUNCTION IS PART OF THE PIPELINE, so a handle for it is a legitimate
+    //    request and nil is what stopped ray tracing. MEASURED on the game: it asks only for the ray
+    //    generation shader's own handle (rgs_diffuse_main / rgs_importance_main), and on nil it goes no
+    //    further - setVisibleFunctionTable, setIntersectionFunctionTable and setAccelerationStructure are
+    //    called ZERO times in a whole run, so without a handle it cannot fill the table it just built and
+    //    abandons RT entirely.
+    // The id handed back is the table's RESERVED UNBOUND INDEX 0, not a dispatch slot: the linkage
+    //    sizes the table as entries+1 with candidates at 1..N, so 0 is "no entry here" and the shader's
+    //    own null test is what reads it. That is the truthful answer - the entry is not one of the table's
+    //    candidates and the dispatcher has no case for it - and it lets the game proceed instead of
+    //    giving up. If a frame shows the ray generation shader needed to be CALLED through this slot, the
+    //    fix is to add the entry to the dispatcher, not to invent a slot number here.
+    if (_function && (f == (id)_function
+                      || [f.name isEqualToString:((NVMTLFunction *)_function)->_fname])) {
+        NVMTLFunctionHandle *h = [NVMTLFunctionHandle new];
+        h->_id = 0;
+        h->_fn = f;
+        nvlog("functionHandleWithFunction: \"%s\" IS this pipeline's own function - handle with the reserved unbound index 0 (%lu table candidate(s), none of them the entry)",
+              f.name.UTF8String, (unsigned long)c.count);
+        return h;
+    }
+    // "(0 linked)" alone cannot distinguish "the candidate list was never attached" from "this pipeline
+    // was built from a different function object than the one it was attached to", so name both.
+    nvlog("functionHandleWithFunction: \"%s\" is not a linked function of this pipeline (%lu linked, pipeline function \"%s\") -> nil",
+          f.name.UTF8String, (unsigned long)c.count,
+          _function ? ((NVMTLFunction *)_function)->_fname.UTF8String : "(none)");
     return nil;
 }
 - (id<MTLVisibleFunctionTable>)newVisibleFunctionTableWithDescriptor:(MTLVisibleFunctionTableDescriptor *)d {
@@ -2550,6 +2845,7 @@ static id<MTLIntersectionFunctionTable> nvmtl_ift_new(MTLIntersectionFunctionTab
 @implementation NVMTLComputeCommandEncoder (B39FunctionPointers)
 - (void)setVisibleFunctionTable:(id<MTLVisibleFunctionTable>)t atBufferIndex:(NSUInteger)i {
     if (t && ![(id)t isKindOfClass:[NVMTLVisibleFunctionTable class]]) { nvlog("setVisibleFunctionTable: foreign %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
+    { static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 4) { FILE *lg = fopen(nvmtl_log_path(), "a"); if (lg) { fprintf(lg, "pid %d NVMTL: RTBIND setVisibleFunctionTable index %lu %s\n", getpid(), (unsigned long)i, t ? "table" : "nil"); fclose(lg); } } }
     [self setBuffer:t ? ((NVMTLVisibleFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
 }
 - (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
@@ -2930,6 +3226,8 @@ static NSString *nvmtl_mesh_text(uint8_t *p, size_t n) {
     mi->_tgMesh = nvmtl_air_max_tg(mf) ?: md.maxTotalThreadsPerMeshThreadgroup;
     mi->_tgObj = of ? (nvmtl_air_max_tg(of) ?: md.maxTotalThreadsPerObjectThreadgroup) : 0;
     mi->_gridAsk = md.maxTotalThreadgroupsPerMeshGrid;
+    ps->_reqMesh = nvmtl_desc_size(md, @selector(requiredThreadsPerMeshThreadgroup));
+    ps->_reqObj = of ? nvmtl_desc_size(md, @selector(requiredThreadsPerObjectThreadgroup)) : MTLSizeMake(0, 0, 0);
     if (!of) {
         mi->_capi = 16384;
         NVMTLComputePipelineState *ki = nil, *unused = nil; NSString *w2 = nil;

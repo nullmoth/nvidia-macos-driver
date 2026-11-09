@@ -7,6 +7,10 @@
 #import <Foundation/Foundation.h>
 #import <IOKit/IOKitLib.h>   // the decode service finds the GPU in the I/O registry (#175)
 #import <Metal/Metal.h>
+#import <MetalFX/MetalFX.h>
+#ifdef I
+#undef I
+#endif
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <mach/mach.h>
@@ -22,6 +26,19 @@
 #include <time.h>
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_log_failure.h"
+#include "nvmtl_env_knobs.h"
+#include "nvmtl_app_profile.h"
+#import "nvmtl_osver_install.h"
+#include "nvmtl_claims.h"
+// The application profile matched for this process (nvmtl_app_profile.h), or NULL. Set once by nvmtl_conf_settle
+// (NVMTLObjects.m), which reads nvrm610.conf and applies the profile before any knob is read.
+static const nvmtl_app_profile *g_app_profile;
+static void nvmtl_conf_settle(void);
+// Set by the last compute pipeline creation on this thread: 1 when the profile's kernel edit was applied to its module.
+static __thread int g_app_edit_last;
+// Marks a pipeline state whose module carried the kernel edit, so a variant later built for it can say what it did.
+static char g_app_edit_ps_key;
+#include <CommonCrypto/CommonDigest.h>
 #include <sys/sysctl.h>
 #import <libproc.h>
 #import <mach-o/dyld.h>
@@ -86,7 +103,8 @@ static int nvlog_dropped(const char *fmt, uint64_t *rep) {
 }
 const char *nvmtl_log_path(void) {
 #if NVMTL_RELEASE
-    return "/private/tmp/nvmtl-off.log";
+    // A release plugin writes no log unless this process opted into its own knobs (NVMTL_PROCESS_ENV=1).
+    if (!nvmtl_process_env_on()) return "/private/tmp/nvmtl-off.log";
 #endif
     // A diagnostic probe needs its own file even when the system log is writable.
     // Otherwise the per-run fault watcher reads an empty file and misses GPU faults.
@@ -101,18 +119,29 @@ const char *nvmtl_log_path(void) {
     }
     return path;
 }
+static void nvlog_line(const char *t);
 void nvlog(const char *fmt, ...) {
     uint64_t rep; if (nvlog_dropped(fmt, &rep)) return;
     char b[512]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
     char t[640];
     if (rep) snprintf(t, sizeof t, "%s   [logged %llu times now]", b, (unsigned long long)rep);
     else     snprintf(t, sizeof t, "%s", b);
+    nvlog_line(t);
+}
+// A periodic census line: the same format every window, so the repeat limiter above would drop it after a few windows
+// (a run's gameplay windows were lost that way). It goes to the log every time; the caller keeps its own period.
+void nvlog_every(const char *fmt, ...) {
+    char t[640]; va_list a; va_start(a, fmt); vsnprintf(t, sizeof t, fmt, a); va_end(a);
+    nvlog_line(t);
+}
+static void nvlog_line(const char *t) {
 #if NVMTL_RELEASE
     if (nvmtl_log_failure(t)) syslog(LOG_ERR, "NullMoth: %s", t);
+    if (!nvmtl_process_env_on()) return;   // the file below is written only for a process that opted in
 #else
     syslog(LOG_NOTICE, "NVMTL: %s", t);
-    FILE *f = fopen(nvmtl_log_path(), "a"); if (f) { fprintf(f, "pid %d NVMTL: %s\n", getpid(), t); fclose(f); }
 #endif
+    FILE *f = fopen(nvmtl_log_path(), "a"); if (f) { fprintf(f, "pid %d NVMTL: %s\n", getpid(), t); fclose(f); }
 }
 
 #define NVMTL_OOM_STREAK      32
@@ -613,9 +642,44 @@ static bool nvmtl_process_is_allowed(void)
     }
     fclose(f);
     if (ok) nvlog("  allow-listed: %s", me);
+    // a list that was read but grants nothing to this process said so nowhere, so a field log showed only the final
+    // refusal and could not tell an empty or replaced list from a deny rule
+    else nvlog("  no rule in nvmtl-allow.txt matches %s: no device (the list was read; it needs a '*' or '%s' line)", me, me);
     return ok;
 }
 
+#include "nvmtl_dlss.h"
+static BOOL nvmtl_m4_enabled(void);   // NVMTLMetal4.m, later in this translation unit
+static id<MTLCommandBuffer> nvmtl_m4_underlying(id cb);
+void nvmtl_m4_note_buffer(id buf, uint64_t addr, uint64_t length);
+int nvmtl_m4_note_current(_Atomic uint64_t note[3], uint64_t addr, uint64_t length);
+void nvmtl_m4_note_buffer_cached(id buf, uint64_t addr, uint64_t length, _Atomic uint64_t note[3]);
+#include "nvmtl_mfx_native_profile.inc"
+
+// NVMTL_WS_RT_GATE_MB=<n>: while ray tracing is available, the working-set answer is raised to at least n MB. Measured in the
+// disassembly of Cyberpunk 2077's device set-up (0x104978280..0x104978540 in the arm64 slice): it asks
+// recommendedMaxWorkingSetSize FIRST and keeps the value, then asks supportsRaytracing and the device name, and enables
+// ray tracing only if the saved figure is above 0x1800FFFFF bytes (6145 MB). The same figure also sets a low-memory flag
+// (figure below 0x180100000) that the game stores for its own sizing, so this is one number for both decisions.
+// Default 0: off.
+static uint64_t nvmtl_rt_gate_working_set(uint64_t ws)
+{
+    static long long floor_mb = -1;
+    if (floor_mb < 0) { const char *e = getenv("NVMTL_WS_RT_GATE_MB"); floor_mb = (e && *e) ? atoll(e) : 0; }
+    if (floor_mb <= 0 || ws >= ((uint64_t)floor_mb << 20) || !nvmtl_vk_rt_available()) return ws;
+    // The floor is a figure for 8 GB and larger cards. A card with less than 1 GB of memory above it (a 6 GB card) keeps
+    // its own answer: telling the game it may use more than the card holds would let it place ray tracing it cannot fit.
+    uint64_t card = nvmtl_vk_vram_bytes();
+    if (card < ((uint64_t)floor_mb << 20) + (1024ull << 20)) {
+        static int refused;
+        if (!refused++) nvlog("working set: the %lld MB ray tracing floor is not applied on this %llu MB card (it needs %lld MB)",
+                              floor_mb, (unsigned long long)(card >> 20), floor_mb + 1024);
+        return ws;
+    }
+    static int said;
+    if (!said++) nvlog("working set: answered %lld MB instead of %llu MB while ray tracing is available (NVMTL_WS_RT_GATE_MB)", floor_mb, (unsigned long long)(ws >> 20));
+    return (uint64_t)floor_mb << 20;
+}
 @implementation NVMTLDevice
 + (void)load {
     char me[1200], ts[40] = "?"; time_t now = time(NULL); struct tm tm;
@@ -653,6 +717,12 @@ static void nvmtl_install_hw_resource_pools(id dev)
 }
 - (instancetype)initWithAcceleratorPort:(mach_port_t)port {
     nvlog("-[NVMTLDevice initWithAcceleratorPort:%u] in %s", port, getprogname());
+    {   /* the 2.x driver is built for macOS 15 and 26 only: on any later macOS, or when the version cannot be
+           read, it creates no device, before touching the accelerator */
+        char v[32] = {0}; size_t n = sizeof v - 1;
+        int major = sysctlbyname("kern.osproductversion", v, &n, NULL, 0) == 0 ? atoi(v) : 0;
+        if (major < 15 || major > 26) { nvlog("  macOS %s is not supported by this driver: no device", v[0] ? v : "unknown"); return nil; }
+    }
     self = [super initWithAcceleratorPort:port];
     if (!self) { nvlog("  super initWithAcceleratorPort: returned nil"); return nil; }
     {   /* one GPU per process: the plugin runs a single Vulkan device, so a second Metal device on another vendor's
@@ -736,13 +806,32 @@ static void nvmtl_install_hw_resource_pools(id dev)
 
 static void nvmtl_zero_new_buffer(NVMTLBuffer *b, NSUInteger len);
 static __thread int gZeroSkip;
+// NVMTL_MANAGED_SYSMEM=1: a Managed buffer lives in mapped system memory (no VRAM copy + shadow pair). This was a bare
+// getenv() on every call, so any value - "0" included - switched it on, nothing said whether it had, and a release
+// plugin forgets the variable unless the process also sets NVMTL_PROCESS_ENV=1 (or the conf file sets it), which made a
+// run with it look identical to a run without it. Now read once, only "1" enables it, and it says so: once when read,
+// and once when the first Managed buffer is actually placed by it (an app that makes no Managed buffers is unaffected).
+static int nvmtl_managed_sysmem(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_MANAGED_SYSMEM");
+        on = e && e[0] == '1';
+        if (e || on) nvlog("buffers: Managed buffers %s (NVMTL_MANAGED_SYSMEM=%s)", on ? "go to mapped system memory" : "keep VRAM + shadow", e ? e : "unset");
+    }
+    return on;
+}
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)len options:(MTLResourceOptions)opt {
     if (nvmtl_vk_init()) return nil;
     if (nvmtl_alloc_blocked()) return nil;
     NVMTLBuffer *b = [NVMTLBuffer new];
     b->_storage = (MTLStorageMode)((opt >> MTLResourceStorageModeShift) & 0xF);
     b->_ropt = opt & ((MTLResourceOptions)0xF | ((MTLResourceOptions)0x3 << MTLResourceHazardTrackingModeShift));
-    int hv = (b->_storage == MTLStorageModeShared) || (b->_storage == MTLStorageModeManaged && getenv("NVMTL_MANAGED_SYSMEM"));
+    int hv = (b->_storage == MTLStorageModeShared) || (b->_storage == MTLStorageModeManaged && nvmtl_managed_sysmem());
+    if (b->_storage == MTLStorageModeManaged && hv) {
+        static _Atomic int said;
+        if (!atomic_exchange(&said, 1)) nvlog("buffers: first Managed buffer (%lu bytes) placed in system memory by NVMTL_MANAGED_SYSMEM=1", (unsigned long)len);
+    }
     if (nvmtl_vk_buffer_create(len, (hv && b->_storage == MTLStorageModeShared) ? 2 : hv, &b->_b)) {
         if (hv) { nvmtl_alloc_failed("newBufferWithLength"); nvlog("newBufferWithLength: FAILED"); return nil; }
         nvlog("newBufferWithLength:%lu private: VRAM refused - placing it in system memory", (unsigned long)len);
@@ -928,6 +1017,18 @@ static BOOL nvmtl_desc_fbo(MTLTextureDescriptor *d) {
     SEL s = sel_registerName("framebufferOnly");
     return d && [d respondsToSelector:s] && ((BOOL (*)(id, SEL))objc_msgSend)(d, s);
 }
+// BGR10A2Unorm (VkFormat 58) cannot be a storage image on NVIDIA; a writable private texture of it is created as
+// R10G10B10A2 (VkFormat 64): same bits per channel, storage-capable. YES when the format was swapped. Without this a
+// kernel's stores to such a texture went to the dummy storage image (Cyberpunk's tonemapped output is BGR10A2).
+static inline BOOL nvmtl_bgr10_storage_remap(MTLTextureDescriptor *d, uint32_t *vkf)
+{
+    if (!d || !vkf || *vkf != 58u || d.pixelFormat != MTLPixelFormatBGR10A2Unorm) return NO;
+    if (!(d.usage & MTLTextureUsageShaderWrite) || d.storageMode != MTLStorageModePrivate) return NO;
+    if (getenv("NVMTL_NO_BGR10_REMAP")) return NO;
+    *vkf = 64u;
+    { static int said; if (!said++) nvlog("texture: writable BGR10A2Unorm is held as R10G10B10A2 so kernels can store to it"); }
+    return YES;
+}
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
     if (nvmtl_vk_init()) return nil;
     if (d.textureType == MTLTextureTypeTextureBuffer) {
@@ -956,6 +1057,7 @@ static BOOL nvmtl_desc_fbo(MTLTextureDescriptor *d) {
     }
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
+    const BOOL rbSwap = nvmtl_bgr10_storage_remap(d, &vkf);
     int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
     if (d.textureType == MTLTextureType2DMultisample || d.textureType == MTLTextureType2DMultisampleArray) {
         if (d.mipmapLevelCount != 1 || d.depth != 1) { nvlog("newTextureWithDescriptor: invalid multisample color descriptor"); return nil; }
@@ -966,7 +1068,8 @@ static BOOL nvmtl_desc_fbo(MTLTextureDescriptor *d) {
     if (nvmtl_vk_image_create_typed((uint32_t)d.width, (uint32_t)d.height, vkf, bpp, a8, (uint32_t)d.mipmapLevelCount, wantStex, (uint32_t)d.textureType, nvmtl_vk_layers_for_desc((uint32_t)d.textureType, (uint32_t)d.arrayLength, (uint32_t)d.depth), &t->_i)) { nvmtl_alloc_failed("newTextureWithDescriptor"); nvlog("newTextureWithDescriptor: FAILED"); return nil; }
     nvmtl_alloc_ok();
     t->_q = nvmtl_device_queue();
-    t->_stex = t->_i.storage != 0;
+    t->_stex = t->_i.storage == 1;
+    t->_rbSwap = rbSwap;
     t->_usage = d.usage;
     if (wantStex && !t->_stex) { static unsigned long lost; lost++;
         if (!(lost & (lost - 1))) nvlog("newTextureWithDescriptor: pixel format %lu asked for ShaderWrite and NVK cannot make it a storage image — shader writes to it will be LOST (%lu texture(s) so far in this process)", (unsigned long)d.pixelFormat, lost); }
@@ -1094,6 +1197,10 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
 // image is already writable whenever its format allows (see nvmtl_surface_image_create), so say so.
 // WindowServer keeps the usage it asked for: it wraps hundreds of surfaces a second, none of them Core Image targets.
 static NSUInteger nvmtl_surface_usage(NSUInteger usage, BOOL fbo, BOOL storage) {
+    // Unknown permits shader writes too. Adding only ShaderRead/RenderTarget to a
+    // non-storage surface would forbid its optimal-tiled storage twin below
+    // (ImageIO's RGBA16Unorm outputs), silently sending those writes to a dummy.
+    if (usage == MTLTextureUsageUnknown) return usage;
     static int ws = -1;
     if (ws < 0) { const char *me = getprogname(); ws = me && !strcmp(me, "WindowServer"); }
     if (!fbo && !ws) {
@@ -1144,7 +1251,7 @@ static char nvmtl_surface_cache_key;
     t->_surf = surf; if (surf) { CFRetain(surf); t->_surfOwned = YES; t->_clientWritten = nvmtl_busy_foreign(surf, plane) != 0; }
     t->_plane = plane;
     t->_fmt = d.pixelFormat;
-    t->_stex = t->_i.storage != 0;
+    t->_stex = t->_i.storage == 1;
     t->_usage = nvmtl_surface_usage(d.usage, t->_fbo, t->_stex);
     nvmtl_texture_desc_swizzle(t, d);
     if (key && !t->_vramOn) [cache setObject:t forKey:key];
@@ -1602,6 +1709,23 @@ static NVMTLFunction *nvmtl_empty_fragment(void) {
 MTLRenderPipelineDescriptor *nvmtl_gl_rewrite_descriptor(MTLRenderPipelineDescriptor *d, NSError **err);
 NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, NSString **err);
 void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
+// One line per function the first time it goes into a pipeline: the kernel/stage name, the FNV-1a of its SPIR-V (what a
+// per-kernel GPU profile keys a row on) and the sha256 of its AIR (what the translator caches key a module on), so a
+// profile row maps to a translator module without guessing.
+uint32_t nvmtl_function_spv_fnv(id f);
+uint64_t nvmtl_function_air_key(id f);
+static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
+{
+    if (![f isKindOfClass:[NVMTLFunction class]]) return;
+    NVMTLFunction *fn = f; static char kKey;
+    if (objc_getAssociatedObject(fn, &kKey)) return;
+    objc_setAssociatedObject(fn, &kKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    const uint32_t x = nvmtl_function_spv_fnv(fn);
+    char air[17] = "-";
+    if (fn->_air.length) snprintf(air, sizeof air, "%016llx", (unsigned long long)nvmtl_function_air_key(fn));
+    nvlog_every("pipeline key: %s %s spv-fnv %08x air %s%s%s pipe %p", stage, fn->_fname.UTF8String ?: "-", x, air,
+          fn->_specName.length ? " fc " : "", fn->_specName.length ? fn->_specName.UTF8String : "", pipe);
+}
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)err {
     if (err) *err = nil;
     // Work on a copy: some descriptor getters (vertexLinkedFunctions, ...) create their object on first read, and the
@@ -1631,6 +1755,7 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
     if ([samplePayload isKindOfClass:[NSDictionary class]] && !nvmtl_vk_sample_positions_backend())
         return nvmtl_fail(err, @"pipeline: fragment sample positions require the checked NVIDIA runtime payload contract");
     NVMTLRenderPipelineState *ps = [NVMTLRenderPipelineState new];
+    nvmtl_pipeline_key_log(d.vertexFunction, "vertex", &ps->_p); nvmtl_pipeline_key_log(d.fragmentFunction, "fragment", &ps->_p);
     nvk_rt rt; memset(&rt, 0, sizeof rt); uint32_t a8mask = 0;
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
         MTLRenderPipelineColorAttachmentDescriptor *ca = d.colorAttachments[i];
@@ -1866,6 +1991,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     id<MTLComputePipelineState> ps = [self newComputePipelineStateWithFunction:kfn error:err];
     if ([(id)ps isKindOfClass:[NVMTLComputePipelineState class]]) { ((NVMTLComputePipelineState *)ps)->_icb = d.supportIndirectCommandBuffers;
         ((NVMTLComputePipelineState *)ps)->_askT = d.maxTotalThreadsPerThreadgroup;
+        ((NVMTLComputePipelineState *)ps)->_reqTG = nvmtl_desc_size(d, @selector(requiredThreadsPerThreadgroup));
         ((NVMTLComputePipelineState *)ps)->_label = [d.label copy]; }
     if (r) *r = ps ? (MTLComputePipelineReflection *)nvmtl_compute_reflection(kfn) : nil;
     return ps;
@@ -1898,7 +2024,10 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 - (id<MTLDynamicLibrary>)newDynamicLibrary:(id<MTLLibrary>)lib error:(NSError **)err { return nvmtl_new_dylib(lib, err); }
 - (id<MTLDynamicLibrary>)newDynamicLibraryWithURL:(NSURL *)url error:(NSError **)err { return nvmtl_new_dylib_url(url, err); }
 - (id<MTLBinaryArchive>)newBinaryArchiveWithDescriptor:(MTLBinaryArchiveDescriptor *)d error:(NSError **)err { return nvmtl_new_binary_archive(d, err); }
-- (BOOL)supportsShaderBarycentricCoordinates { return YES; }
+- (BOOL)supportsShaderBarycentricCoordinates {
+    struct nvmtl_caps c = { nvmtl_vk_barycentrics_available(), nvmtl_vk_rt_available() };
+    return nvmtl_claim_barycentrics(&c) ? YES : NO;
+}
 - (BOOL)areBarycentricCoordsSupported { return YES; }
 - (BOOL)supportsPrimitiveMotionBlur { return NO; }
 - (NSMutableDictionary *)copyIOSurfaceSharedTextureProperties:(MTLTextureDescriptor *)d {
@@ -1999,6 +2128,19 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
         return nvmtl_fail(err, [NSString stringWithFormat:
             @"newComputePipelineState: REFUSED - this function is not ours: %s", object_getClassName(fn)]);
     NVMTLFunction *f = (NVMTLFunction *)fn;
+    // EVERY compute pipeline, named, bypassing nvlog's per-site dedupe (which hid the RT
+    //    pipelines behind cs_main_ and made a run read as "never linked"). This is the only way to tell a
+    //    pipeline created from a DESCRIPTOR (which carries linkedFunctions) from one created with a bare
+    //    function - the latter reaches the relink below with nil linked functions, so its handles can
+    //    never resolve. rgs_reference_wavefront_trace asks for 8 handles and gets nil on exactly that path.
+    {
+        FILE *lg = fopen(nvmtl_log_path(), "a");
+        if (lg) {
+            fprintf(lg, "pid %d NVMTL: computePipelineFromFunction: \"%s\" needsLink=%s\n", getpid(),
+                    f ? f->_fname.UTF8String : "(nil)", (f && f->_needsLink) ? "YES" : "no");
+            fclose(lg);
+        }
+    }
     if (f && f->_needsLink) { NSError *le = nil; id<MTLFunction> lk = nvmtl_link_stage(fn, nil, nil, &le); if (!lk) { if (err) *err = le; return nil; } f = (NVMTLFunction *)lk; fn = lk; }
     // Machine code compiled ahead of time (NVMTLSass.m), from the linker or looked up for this function, runs
     // instead of a Vulkan pipeline, which is then never built for it.
@@ -2011,6 +2153,25 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
         return ps;
     }
     if (!f || !f->_spirv) return nvmtl_fail(err, @"newComputePipelineState: function has no SPIR-V");
+    // A replacement module for one translated kernel, from a whole file (a developer override). The application profile's
+    // kernel edit is applied later, where every compute pipeline is created (nvmtl_vk_compute_pipeline_create_g).
+    const char *compatPath = getenv("NVMTL_BDA_PROBE_FILE");
+    static char compatShaderKey;
+    if (compatPath && !objc_getAssociatedObject(f, &compatShaderKey)) {
+        uint32_t hash = 2166136261u;
+        for (NSUInteger i = 0; i < f->_spirv.length; i++) { hash ^= ((const uint8_t *)f->_spirv.bytes)[i]; hash *= 16777619u; }
+        const char *targetText = getenv("NVMTL_BDA_PROBE_HASH");
+        uint32_t target = targetText ? (uint32_t)strtoul(targetText, NULL, 16) : 0xd57e32ceu;
+        if (hash == target) {
+            NSData *replacement = [NSData dataWithContentsOfFile:@(compatPath)];
+            if (replacement.length < 20 || (replacement.length & 3u) || ((const uint32_t *)replacement.bytes)[0] != 0x07230203u)
+                return nvmtl_fail(err, @"Configured shader compatibility module is unavailable");
+            f->_spirv = replacement;
+            objc_setAssociatedObject(f, &compatShaderKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            nvlog("replacement module for %08x: %lu bytes from NVMTL_BDA_PROBE_FILE", hash, (unsigned long)replacement.length);
+        }
+    }
+
     if (f.functionType != MTLFunctionTypeKernel) {
         nvlog("newComputePipelineState: \"%s\" is a %s, not a kernel — REFUSED",
               f->_fname.UTF8String, f->_stage.length ? f->_stage.UTF8String : "non-kernel");
@@ -2020,20 +2181,29 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     }
     NVMTLComputePipelineState *ps = [NVMTLComputePipelineState new];
     ps->_function = f;
+    nvmtl_pipeline_key_log(f, "kernel", &ps->_p);
     ps->_attrT = nvmtl_air_max_tg(f);
     if (nvmtl_vk_compute_pipeline_create(f->_spirv.bytes, f->_spirv.length, &ps->_p)) {
         return nvmtl_fail(err, @"newComputePipelineState: vkCreateComputePipelines FAILED"); }
+    if (g_app_edit_last) {
+        objc_setAssociatedObject(ps, &g_app_edit_ps_key, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        nvlog("profile: %s: edited kernel %s (module %08x -> %08x)", g_app_profile->exe, f->_fname.UTF8String,
+              g_app_profile->shader_from, g_app_profile->shader_to);
+    }
     nvlog("newComputePipelineStateWithFunction: %s -> %p (%lu B of SPIR-V)",
           f->_fname.UTF8String, (__bridge void *)ps, (unsigned long)f->_spirv.length);
     nvmtl_vendor_attach_sass(self, ps, f);
     { id apple = nvmtl_vendor_apple_pipeline(self, f); if (apple) return apple; }
     return ps; }
 
-- (BOOL)supportsRaytracing { return nvmtl_vk_rt_available() != 0; }
-- (BOOL)supportsRaytracingFromRender { return nvmtl_vk_rt_available() != 0; }
+- (BOOL)supportsRaytracing { const BOOL y = nvmtl_vk_rt_available() != 0; static int said; if (!said++) nvlog("QUERY supportsRaytracing -> %s", y ? "YES" : "NO"); return y; }
+- (BOOL)supportsRaytracingFromRender { const BOOL y = nvmtl_vk_rt_available() != 0; static int said; if (!said++) nvlog("QUERY supportsRaytracingFromRender -> %s", y ? "YES" : "NO"); return y; }
 - (MTLAccelerationStructureSizes)accelerationStructureSizesWithDescriptor:(MTLAccelerationStructureDescriptor *)desc {
     MTLAccelerationStructureSizes s = { 0, 0, 0 };
-    static nvmtl_geom geoms[NVMTL_MAX_GEOMS]; int instance = 0; uint32_t icount = 0;
+    // One per thread: these are filled from the descriptor and read by the build, and the game
+    // encodes from nine threads at once. Shared, two builds in flight overwrite each other's
+    // geometry and a structure gets built from another mesh.
+    static _Thread_local nvmtl_geom geoms[NVMTL_MAX_GEOMS]; int instance = 0; uint32_t icount = 0;
     uint32_t n = nvmtl_geoms_from_descriptor(desc, geoms, NVMTL_MAX_GEOMS, &instance, &icount, nil);
     size_t as = 0, sc = 0;
     if (nvmtl_vk_accel_sizes(geoms, n, instance, icount, &as, &sc)) {
@@ -2046,7 +2216,23 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     if (nvmtl_vk_init() || !nvmtl_vk_rt_available()) { nvlog("newAccelerationStructureWithSize: no ray tracing on this NVK"); return nil; }
     NVMTLAccelerationStructure *a = [NVMTLAccelerationStructure new];
     a->_storage = MTLStorageModePrivate;
-    if (nvmtl_vk_buffer_create(size < 256 ? 256 : size, 0, &a->_b)) { nvlog("newAccelerationStructureWithSize: FAILED"); return nil; }
+    const size_t as_len = size < 256 ? 256 : size;
+    if (nvmtl_vk_buffer_create(as_len, 0, &a->_b)) {
+        // Every other resource falls back to system memory when VRAM refuses it; this one used to
+        // return nil instead. A nil acceleration structure is far worse than a slow one: the game
+        // keeps the nil, hands it back at build time (the "nil structure" refusal), and the
+        // structure its instance descriptors still name is never built - so the traversal reads
+        // uninitialised memory and the channel faults at an address that moves from run to run.
+        nvlog("newAccelerationStructureWithSize:%lu: VRAM refused - placing it in system memory", (unsigned long)size);
+        if (nvmtl_vk_buffer_create(as_len, 1, &a->_b)) {
+            nvmtl_alloc_failed("newAccelerationStructureWithSize");
+            nvmtl_rt_count_bump(NVMTL_RT_AS_FAILED);
+            nvlog("newAccelerationStructureWithSize: FAILED in system memory too");
+            return nil;
+        }
+        nvmtl_rt_count_bump(NVMTL_RT_AS_SYSMEM);
+    } else nvmtl_rt_count_bump(NVMTL_RT_AS_VRAM);
+    nvmtl_alloc_ok();
     nvlog("newAccelerationStructureWithSize:%lu -> %p", (unsigned long)size, (__bridge void *)a); return a;
 }
 - (id<MTLAccelerationStructure>)newAccelerationStructureWithDescriptor:(MTLAccelerationStructureDescriptor *)desc {
@@ -2109,13 +2295,42 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 - (id<MTLEvent>)newEvent { NVMTLEvent *e = [NVMTLEvent new]; e->_dev = self; return e; }
 - (id<MTLSharedEvent>)newSharedEvent { NVMTLSharedEvent *e = [NVMTLSharedEvent new]; e->_dev = self; return e; }
 - (MTLArgumentBuffersTier)argumentBuffersSupport { return MTLArgumentBuffersTier2; }
+// NVMTL_APPLE_FAMILY=<n>: also answer YES for MTLGPUFamilyApple1..Apple<n> (default 0: none).
+// Measured on Cyberpunk 2077: its whole GPU capability decision is five queries - supportsFamily
+// Apple6 (asked exactly once), name (twice), supportsRaytracing and supportsRaytracingFromRender -
+// and a NO to Apple6 puts it on the minimal tier with ray tracing refused before any acceleration
+// structure is touched. Six is also the most that is safe to claim: Apple7 and above promise
+// simdgroup matrices, and claiming them makes MPS select its A14 convolution kernels, which this
+// translator refuses. Any Apple family also implies tile shaders, imageblocks and memoryless
+// textures, which this driver does not implement, so the claim stays off unless asked for and is
+// a per-process measurement knob, not a default identity.
+static NSInteger nvmtl_apple_family_max(void)
+{
+    static NSInteger n = -1;
+    if (n < 0) { const char *e = getenv("NVMTL_APPLE_FAMILY"); n = (e && *e) ? atoi(e) : 0; if (n < 0) n = 0; if (n > 9) n = 9; }
+    return n;
+}
+// The answer to each family query, logged once per family: whether an application's ray-tracing option is offered is decided
+// by these answers, and the only way to tell a refused family from a refused ray-tracing capability is to see both.
+static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
+{
+    static _Atomic uint32_t seen; const uint32_t bit = 1u << ((f % 1000) & 15);
+    if (!(atomic_fetch_or(&seen, bit) & bit))
+        nvlog("QUERY supportsFamily %ld -> %s (%s; claim up to Apple%ld)", (long)f, yes ? "YES" : "NO", why, (long)nvmtl_apple_family_max());
+    return yes;
+}
 - (BOOL)supportsFamily:(MTLGPUFamily)f {
+    if (nvmtl_mfx_profile_depth && (NSInteger)f >= 1001 && (NSInteger)f <= 1009) return NO;
     switch ((NSInteger)f) {
         case MTLGPUFamilyMac2: case MTLGPUFamilyCommon1: case MTLGPUFamilyCommon2: case MTLGPUFamilyCommon3: return YES;
         case 2001 : return YES;
-        case 5001 : return YES;
-        default: return NO;
+        case 5001 : { struct nvmtl_caps c = { 0, 0 }; return nvmtl_claim_metal3(&c) ? YES : NO; }   // MTLGPUFamilyMetal3
+        case 5002 : { struct nvmtl_caps c = { 0, 0 }; return nvmtl_claim_metal3(&c) && nvmtl_m4_enabled() ? YES : NO; }   // MTLGPUFamilyMetal4: the Metal 4 command model in NVMTLMetal4.m, on top of Metal 3
+        default: break;
     }
+    if ((NSInteger)f >= 1001 && (NSInteger)f <= 1009) return nvmtl_family_answer(f, (NSInteger)f <= 1000 + nvmtl_apple_family_max(), "Apple family");
+    if ((NSInteger)f >= 1001 && (NSInteger)f <= 1000 + nvmtl_apple_family_max()) return YES;
+    return NO;
 }
 - (BOOL)supportsFeatureSet:(MTLFeatureSet)fs { return fs >= 10000 && fs <= 10005; }
 - (id<MTLHeap>)newHeapWithDescriptor:(MTLHeapDescriptor *)hd {
@@ -2188,7 +2403,14 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 }
 - (NSUInteger)currentAllocatedSize { return (NSUInteger)nvmtl_vk_allocated_bytes(); }
 - (uint64_t)recommendedMaxWorkingSetSize {
-    uint64_t ws = nvmtl_vk_working_set();
+    uint64_t ws = nvmtl_vk_recommended_working_set();
+    ws = nvmtl_rt_gate_working_set(ws);
+    // The same hole as maxBufferLength, and it matters more here: a streaming engine sizes its pools
+    // from this number, and the working set reads 0 when the budget is unknown. The old code could
+    // never answer under 1 GB. An unknown budget falls back to the card rather than telling the app
+    // that nothing fits.
+    if (!ws) { ws = nvmtl_vk_vram_bytes();
+        static int said; if (!said++) nvlog("recommendedMaxWorkingSetSize: working set UNKNOWN - answering the card's %llu MB", (unsigned long long)(ws >> 20)); }
     nvlog("recommendedMaxWorkingSetSize -> %llu MB", (unsigned long long)(ws >> 20));
     return ws;
 }
@@ -2207,7 +2429,12 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 - (NSUInteger)maxBufferLength {
     uint64_t range = 0; nvmtl_vk_pubcaps(NULL, NULL, &range, NULL);
     if (!range) { static int said; if (!said++) nvlog("maxBufferLength: NVK limits unavailable - answering 0 (UNKNOWN)"); return 0; }
-    uint64_t three_q = nvmtl_vk_working_set() / 4 * 3;
+    // A zero working set means the budget is UNKNOWN, not that no buffer can be made. maxBufferLength
+    // is a capability an app may treat as hard, and three quarters of zero is zero, so an unknown
+    // budget leaves NVK's own range as the answer rather than reporting that nothing fits.
+    const uint64_t ws = nvmtl_vk_working_set();
+    uint64_t three_q = ws / 4 * 3;
+    if (!ws) { static int saidws; if (!saidws++) nvlog("maxBufferLength: working set UNKNOWN - answering NVK's maxStorageBufferRange alone"); three_q = range; }
     uint64_t v = range < three_q ? range : three_q;
     static int said;
     if (!said++) nvlog("maxBufferLength -> %llu MB (NVK maxStorageBufferRange %llu MB, 3/4 of working set %llu MB)",
@@ -2289,11 +2516,13 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 #import "NVMTLDevice_contract.m"
 
 #import "NVMTLObjects.m"
+#import "NVMTLMetalFXDLSS.m"
 #import "NVMTLForward.m"
 #import "NVMTLLibraryLoad.m"
 #import "NVMTLGL.m"
 #import "NVMTLGLVBlank.m"
 #import "NVMTLEmbedded.m"
+#import "NVMTLMetal4.m"
 #import "NVMTLVendorCompiler.m"
 #include "nvmtl_vk.c"
 #import "NVMTLSass.m"

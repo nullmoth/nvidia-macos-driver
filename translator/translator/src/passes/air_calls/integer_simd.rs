@@ -1655,6 +1655,9 @@ pub(in crate::passes) fn lower_one(
     if name.starts_with("air.simdgroup_matrix_8x8_init_diag.") {
         return lower_simdgroup_matrix_8x8_init_diag(ctx, res, rty, args);
     }
+    if name.starts_with("air.simdgroup_matrix_8x8_init_filled.") {
+        return lower_simdgroup_matrix_8x8_init_filled(ctx, res, rty, args);
+    }
     if name.starts_with("air.simdgroup_matrix_8x8_load.") {
         return lower_simdgroup_matrix_8x8_load(ctx, res, rty, args);
     }

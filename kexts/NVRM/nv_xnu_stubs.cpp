@@ -93,12 +93,6 @@ __attribute__((weak)) void NV_API_CALL nv_acquire_mmap_lock(nv_state_t *)
 
 }
 
-__attribute__((weak)) NV_STATUS NV_API_CALL nv_add_mapping_context_to_file(nv_state_t *, nv_usermap_access_params_t*, NvU32, void *, NvU64, NvU32)
-{
-    NV_XNU_STUB_HIT("nv_add_mapping_context_to_file");
-    return NV_ERR_NOT_SUPPORTED;
-}
-
 __attribute__((weak)) NV_STATUS NV_API_CALL nv_alias_pages(nv_state_t *, NvU32, NvU64, NvU32, NvU32, NvU64, NvU64 *, NvBool, void **)
 {
     NV_XNU_STUB_HIT("nv_alias_pages");
@@ -355,12 +349,6 @@ __attribute__((weak)) NvS32 NV_API_CALL nv_get_event(nv_file_private_t *, nv_eve
 {
     NV_XNU_STUB_HIT("nv_get_event");
     return (NvS32)0;
-}
-
-__attribute__((weak)) nv_file_private_t* NV_API_CALL nv_get_file_private(NvS32, NvBool, void **)
-{
-    NV_XNU_STUB_HIT("nv_get_file_private");
-    return NULL;
 }
 
 __attribute__((weak)) const void* NV_API_CALL nv_get_firmware(nv_state_t *, nv_firmware_type_t, nv_firmware_chip_family_t, const void **, NvU32 *)

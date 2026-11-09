@@ -563,11 +563,36 @@ pub(super) fn is_ignored_intrinsic(name: &str) -> bool {
         || name.starts_with("llvm.usub.sat.")
 }
 
+fn is_empty_inline_asm_call(line: &str) -> bool {
+    let line = super::lex::instruction_without_attachments(line).trim();
+    let Some(rest) = line.strip_prefix("call void asm ") else {
+        return false;
+    };
+    let mut rest = rest.trim_start();
+    rest = rest.strip_prefix("sideeffect ").unwrap_or(rest);
+    // Empty assembly with no operands or clobbers has no GPU operation to emit.
+    // Keep rejecting real assembly, including an empty memory-clobber barrier.
+    for token in ["\"\"", ",", "\"\"", "(", ")"] {
+        let Some(next) = rest.trim_start().strip_prefix(token) else {
+            return false;
+        };
+        rest = next;
+    }
+    let suffix = rest.trim();
+    suffix.is_empty()
+        || suffix.strip_prefix('#').is_some_and(|index| {
+            !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
 pub(super) fn is_ignored_call_line(line: &str) -> bool {
     let line = line.trim();
     let line = line.strip_prefix("tail ").unwrap_or(line);
     if !line.starts_with("call ") {
         return false;
+    }
+    if is_empty_inline_asm_call(line) {
+        return true;
     }
     if line.contains("@llvm.lifetime.") {
         return true;
@@ -1051,6 +1076,14 @@ fn strip_leading_fast_math_flags(mut s: &str) -> &str {
 }
 
 pub(super) fn parse_struct_fields(s: &str) -> Result<Vec<LlType>, String> {
+    // `{}` is a real type and not a parse failure. The shader converter uses it for the user payload inside a
+    // ray's fat payload when the function it is handing the payload to does not know the payload's type: an
+    // intersection function reads only the header, so the second member is declared empty there and spelled
+    // out in the hit shaders. Parsing it as no fields keeps the two views of that memory compatible; without
+    // this the whole type failed to parse, and the GEP through it was reported as an unhandled instruction.
+    if s.trim().is_empty() {
+        return Ok(Vec::new());
+    }
     split_top_level(s, ',')
         .into_iter()
         .map(parse_type)
