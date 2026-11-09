@@ -90,7 +90,9 @@ pkg_config_libdir = '$SYS/lib/pkgconfig'
 bindgen_clang_arguments = ['--target=x86_64-apple-darwin', '-mmacosx-version-min=15.0']
 EOT
 
-B=$OUT/build
+# The build directory sits inside the source tree: Rust and some C debug paths are recorded relative to it
+# ("../src/..."), so a build directory elsewhere gives a different binary (and LC_UUID).
+B=$S/build
 meson setup "$B" "$S" --cross-file="$X" -Dbuildtype=release -Db_ndebug=true -Dvulkan-drivers=nouveau -Dgallium-drivers= -Dplatforms= \
   -Degl=disabled -Dglx=disabled -Dglvnd=disabled -Dllvm=disabled -Dmesa-clc=system -Dshared-glapi=disabled \
   -Dvulkan-layers= -Dtools= -Dbuild-tests=false -Dexpat=disabled -Dzstd=disabled -Dlibunwind=disabled \
