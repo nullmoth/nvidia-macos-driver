@@ -14,7 +14,7 @@ root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__)
 src = (root / 'plugin/NVMTLLibraryLoad.m').read_text()
 if 'static NSString *nvmtl_spvcache_dir(void)' not in src:
     sys.exit('FAIL the SPIR-V cache folder is not chosen by a write test (nvmtl_spvcache_dir missing)')
-start = src.index('static BOOL nvmtl_dir_writable(NSString *d)')
+start = src.index('static BOOL nvmtl_dir_writable(NSString *d) {')
 end = src.index('static NSString *nvmtl_spvcache_path(NSData *air, NSString *stage)')
 funcs = src[start:end]
 
