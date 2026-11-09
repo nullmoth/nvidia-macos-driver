@@ -1862,8 +1862,10 @@ void NVRM::systemWillShutdown(IOOptionBits specifier)
         NvrmStep plan[16];
         const unsigned n = nvrmBuildShutdownPlan(&fBarUndo, plan, 16);
         if (n) {
-            IOPCIDevice *rp = NULL;
-            if (IOService *pp = fPCI->getProvider()) rp = OSDynamicCast(IOPCIDevice, pp->getProvider());
+            // the root port above the bridge this card sits behind (type spelled through fPCI: IOPCIDevice is deprecated)
+            decltype(fPCI) rp = NULL;
+            if (IOService *pp = fPCI->getProvider())
+                if (IOService *up = pp->getProvider()) if (up->metaCast("IOPCIDevice")) rp = static_cast<decltype(fPCI)>(up);
             for (unsigned i = 0; i < n; i++) {
                 switch (plan[i].kind) {
                     case kStepCmd16:     fPCI->configWrite16((IOByteCount)plan[i].off, (UInt16)plan[i].value); break;
