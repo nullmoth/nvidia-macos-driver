@@ -9,6 +9,7 @@ root = pathlib.Path(__file__).resolve().parents[1]
 src = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
 assert 'r.maxFrameRate = kNvrmMaxFrameRate' in src, 'the timing range still has a hard-coded frame-rate cap'
 assert 'nvrmFlipLatchMode(gFlipLatch, gFlipLatchAuto, flipWaitUs() * 800ull) == 2' in src, 'submit path no longer picks the latch mode by rate'
+assert 'r.maxPixelClock = (UInt64)kNvrmMaxPixelClockMHz * 1000000ull' in src, 'the pixel-clock cap is hard-coded again'
 assert 'sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_auto)' in src, 'the auto switch is not registered'
 fixture = r'''
 #include <cassert>
@@ -17,6 +18,7 @@ fixture = r'''
 static unsigned long long ns(unsigned hz) { return 1000000000ull / hz; }
 int main() {
     assert(kNvrmMaxFrameRate >= 540 && kNvrmMaxFrameRate > 500);
+    assert(kNvrmMaxPixelClockMHz >= 2100 && 1370 < kNvrmMaxPixelClockMHz);   // 2560x1600@300 (1.37 GHz) and 4K@240 DSC (2.1 GHz) fit
     assert(nvrmFlipLatchMode(1, 1, ns(540)) == 2);   // 540 Hz: deferred
     assert(nvrmFlipLatchMode(1, 1, ns(360)) == 2);
     assert(nvrmFlipLatchMode(1, 1, ns(240)) == 1);   // 240 Hz and below: unchanged synchronous wait
