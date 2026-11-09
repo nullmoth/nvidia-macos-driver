@@ -22,9 +22,9 @@ static float fr(float a, float b) { st = st * 1664525u + 1013904223u; return a +
 
 static int folded(nir_def *d, float *out)
 {
-   if (!d || d->parent_instr->type != nir_instr_type_load_const) return 0;
-   nir_load_const_instr *lc = nir_instr_as_load_const(d->parent_instr);
-   if (d->bit_size == 1) *out = lc->value[0].b ? 1.0f : 0.0f; else *out = lc->value[0].f32;
+   if (!d || nir_def_instr(d)->type != nir_instr_type_load_const) return 0;
+   nir_const_value *v = nir_instr_as_load_const(nir_def_instr(d))->value;
+   if (d->bit_size == 1) *out = v[0].b ? 1.0f : 0.0f; else *out = v[0].f32;
    return 1;
 }
 
