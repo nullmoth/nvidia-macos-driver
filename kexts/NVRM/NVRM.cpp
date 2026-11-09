@@ -1559,7 +1559,7 @@ void NVRM::publishGpuProfile()
         char nm[64];
         const int len = nvrmFallbackModelName(nm, sizeof nm, gen, chip, fNv.pci_info.device_id);
         if (len > 0 && (unsigned)len < sizeof nm) {
-            fPCI->setProperty("model", (void *)nm, len + 1);
+            fPCI->setProperty("model", (void *)nm, (unsigned)len + 1);
             LOG("published model=\"%s\" from the GPU profile (the RM's released-chip table has no name for this id)", nm);
         }
     }
