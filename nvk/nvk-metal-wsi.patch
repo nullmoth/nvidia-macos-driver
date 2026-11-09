@@ -47,3 +47,15 @@ diff -ruN a/src/nouveau/vulkan/nvk_wsi.c b/src/nouveau/vulkan/nvk_wsi.c
     };
     result = wsi_device_init(&pdev->wsi_device,
                              nvk_physical_device_to_handle(pdev),
+diff -ruN a/src/vulkan/meson.build b/src/vulkan/meson.build
+--- a/src/vulkan/meson.build	2026-10-05 06:47:14
++++ b/src/vulkan/meson.build	2026-11-08 21:57:20
+@@ -73,7 +73,7 @@
+   vulkan_wsi_list += '-DVK_USE_PLATFORM_METAL_EXT'
+   vulkan_wsi_deps += dependency(
+     'appleframeworks',
+-    modules : ['QuartzCore', 'Metal']
++    modules : ['QuartzCore', 'Metal', 'CoreGraphics']
+   )
+ endif
+ 
