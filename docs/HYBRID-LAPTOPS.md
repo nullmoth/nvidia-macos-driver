@@ -36,8 +36,56 @@ Panels covered: Intel display versions 12 to 20 through `NMIntelFB` (copy, impor
 `NMXGPU` (copy). The NMXGPU part is in the NMX tree: `xkpi/xnu/nmx_hybrid.h` holds the answer the panel gives the display
 pipe, `xkpi/xnu/nmx_fb.cpp` has the three-hunk hook that uses it.
 
-Not part of this path: acceleration on the integrated GPU (apps do not run on it as a Metal device), switching the panel to
-the NVIDIA GPU, per-application GPU choice, powering the NVIDIA GPU down when idle.
+Not part of this path: acceleration on the integrated GPU (apps do not run on it as a Metal device) and switching the
+panel to the NVIDIA GPU (see "Mux switching" below).
+
+## Which GPU an application gets
+
+With the switch on and a second Metal GPU present (an integrated GPU macOS still drives, such as Coffee Lake), the plugin
+decides per process whether to offer the NVIDIA device. With no second Metal GPU the NVIDIA device is always offered,
+because hiding it would leave the process without Metal.
+
+Optional file `/Library/GPUBundles/nvmtl-gpu-policy.txt`:
+
+    mode nvidia        # default: every process gets the NVIDIA device
+    mode apple         # Apple's rule: an app whose Info.plist sets NSSupportsAutomaticGraphicsSwitching to true is
+                       # content with the low-power GPU and does not get the NVIDIA device; every other app keeps it
+    igpu Safari        # this process never gets the NVIDIA device
+    nvidia Blender     # this process always gets it
+
+A per-process line beats the mode, the last matching line wins. Each decision is logged as `gpu policy for <process>: ...`
+in the plugin log. The plugin can offer a device or not; it cannot list a device without making it the default, so a
+process sent to the low-power GPU does not see the NVIDIA device in `MTLCopyAllDevices` either. That is why the default is
+`mode nvidia`. WindowServer is never offered the device when the NVIDIA GPU is headless (unchanged).
+
+Apple's System Settings "automatic graphics switching" checkbox and the Activity Monitor GPU column come from Apple's
+graphics-control kexts, which a PC laptop does not have, so they do not appear; the policy file is the replacement. A
+per-process GPU-time figure is not published by the accelerator and is an open feature item.
+
+## Idle power-down
+
+The opt-in D3cold monitor (boot-args `nvrtd3=1` and `nvrtd3res=<ACPI path>`, `kexts/NVRM/nv_rtd3.cpp`) powers the GPU's
+power resource off after 60 s with no lit head and no client. On a hybrid laptop it now counts the right things:
+
+- Clients include the user clients of the accelerator, where every Metal application attaches (before, only clients of the
+  resource-manager service were counted, so a running app looked like an idle GPU).
+- Framebuffers include the NVIDIA GPU's own outputs (the check used a class name that matches nothing) and, with
+  `nmhybrid` on, the other GPU's panel, because then the NVIDIA GPU draws the desktop and is never idle.
+
+So the combinations are: `nmhybrid` off plus `nvrtd3=1`: the integrated GPU draws the desktop, the NVIDIA GPU powers off
+after 60 s without a Metal application and powers on when one starts. `nmhybrid` on: the GPU stays on, with or without
+`nvrtd3`. Not measured on hardware: the wake latency of the first Metal application, and whether the power resource path
+is right for a given laptop (the 1401 scan reports the candidates).
+
+## Mux switching (Advanced Optimus)
+
+Not built, for these reasons. (1) There is no common interface: each vendor exposes the display mux through its own ACPI,
+WMI or embedded-controller method, with its own method numbers, and a wrong write can blank the only panel. (2) Most laptops
+apply the change only after a restart, through a firmware setting; the no-restart switch on Windows is done by NVIDIA's
+closed display-mux driver, which may not be disassembled (licence 2.2/2.3). (3) The result a user wants is already reached
+by the BIOS setting in "Before you start": set to discrete, the panel is on the NVIDIA GPU and the normal driver drives it.
+What the 1401 scan records per machine (mux present, its setting, which GPU owns each port) is what decides which path a
+machine takes.
 
 ## Before you start
 
@@ -133,9 +181,10 @@ total is the share of the screen that did not need storing.
 
 ## Windows comparison (features this does not have)
 
-NVIDIA's Windows driver on the same laptop also offers per-application GPU choice, Advanced Optimus mux switching without
-restart, powering the GPU down when idle, and variable refresh on the internal panel. None of these exist on macOS here;
-they are listed in the release notes as open items, not as part of this switch.
+NVIDIA's Windows driver on the same laptop also offers per-application GPU choice (here: the policy file), powering the GPU
+down when idle (here: opt-in D3cold), Advanced Optimus switching without restart (not possible, see above), and variable
+refresh on the internal panel. The last has no equivalent on a panel the other GPU owns; per-process GPU time is the other
+open row.
 
 ## Tests (host, no hardware)
 
@@ -146,6 +195,7 @@ they are listed in the release notes as open items, not as part of this switch.
   this change.
 - `tools/test_hybrid_scripts.sh`: the switch script against a stub `nvram`, and the verifier against saved logs
   (`tools/hybrid_fixtures`), including a log where the flip never lands.
+- `tools/test_gpu_policy.c`: the per-process choice. `tools/test_hybrid_rtd3.c`: idle power-down counts.
 - NMX tree: `tools/test_nmx_hybrid.cpp`.
 - `tools/hy_nometal_bucket.py`: sorts kernel logs from machines with no Metal device into the causes the accelerator logs
   (accelerator never started, no head and no other accelerated GPU, panel on a GPU macOS cannot accelerate, late head).
