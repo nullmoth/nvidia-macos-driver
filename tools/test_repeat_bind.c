@@ -9,7 +9,7 @@ static void arm(const char *what, int ok) { printf("%s  %s\n", ok ? "ok  " : "FA
 
 int main(void)
 {
-    int a, b, k1, k2;
+    int a = 0, b = 0, k1 = 0, k2 = 0;
     arm("an unset switch leaves the saving on", !nvmtl_switch_is_off(NULL));
     arm("an empty switch leaves the saving on", !nvmtl_switch_is_off(""));
     arm("a switch set to 0 leaves the saving on", !nvmtl_switch_is_off("0"));
