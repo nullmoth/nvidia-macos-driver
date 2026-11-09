@@ -1175,6 +1175,27 @@ static inline BOOL nvmtl_bgr10_storage_remap(MTLTextureDescriptor *d, uint32_t *
     { static int said; if (!said++) nvlog("texture: writable BGR10A2Unorm is held as R10G10B10A2 so kernels can store to it"); }
     return YES;
 }
+// GBGR422 / BGRG422 (NVMTL_YUV422=1): a full-width RGBA8 image holding what Metal's sampler returns, with the packed bytes
+// kept beside it (nvmtl_yuv422.h). Sampling works for any shader; the texture is filled by replaceRegion and read by
+// getBytes. Blits, views, render targets and IOSurface backing are refused, each with a log line.
+static id<MTLTexture> nvmtl_make_y422_texture(MTLTextureDescriptor *d, NVMTLTexture *t) {
+    const char *on = getenv("NVMTL_YUV422");
+    if (!on || on[0] != '1') { static int said; if (!said++) nvlog("newTextureWithDescriptor: 4:2:2 pixel format %lu is not carried (NVMTL_YUV422=1 turns it on) -> nil", (unsigned long)d.pixelFormat); return nil; }
+    if (d.textureType != MTLTextureType2D || d.mipmapLevelCount != 1 || d.arrayLength > 1 || d.depth != 1 || d.sampleCount > 1 ||
+        !d.width || !d.height || (d.width & 1u) || d.width > 16384 || d.height > 16384 ||
+        (d.usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget))) {
+        nvlog("newTextureWithDescriptor: 4:2:2 texture refused (needs a 2D one-level texture of even width, sampled only): %lux%lu type %lu usage 0x%lx",
+              (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.textureType, (unsigned long)d.usage);
+        return nil; }
+    if (nvmtl_vk_image_create_typed((uint32_t)d.width, (uint32_t)d.height, 37u, 4u, 0, 1, 0, 2u, 1u, &t->_i)) { nvmtl_alloc_failed("newTextureWithDescriptor"); return nil; }
+    nvmtl_alloc_ok();
+    t->_q = nvmtl_device_queue(); t->_usage = d.usage; t->_y422 = (uint32_t)d.pixelFormat;
+    t->_y422Raw = [NSMutableData dataWithLength:nvmtl_y422_row_bytes((uint32_t)d.width) * (size_t)d.height];
+    nvmtl_texture_desc_swizzle(t, d);
+    [t nvmtlY422Upload:0 rows:(uint32_t)d.height];
+    nvlog("newTextureWithDescriptor: %lux%lu 4:2:2 format %lu as full-width RGBA8 -> %p", (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.pixelFormat, (__bridge void *)t);
+    return t;
+}
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
     if (nvmtl_vk_init()) return nil;
     if (d.textureType == MTLTextureTypeTextureBuffer) {
@@ -1201,6 +1222,7 @@ static inline BOOL nvmtl_bgr10_storage_remap(MTLTextureDescriptor *d, uint32_t *
         nvlog("newTextureWithDescriptor: %lux%lu DEPTH32F type %lu layers %u mips %u -> %p", (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.textureType, t->_i.layers, t->_i.mips, (__bridge void *)t);
         return t;
     }
+    if (nvmtl_y422_is_format((uint32_t)d.pixelFormat)) return nvmtl_make_y422_texture(d, t);
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     const BOOL rbSwap = nvmtl_bgr10_storage_remap(d, &vkf);
