@@ -263,7 +263,11 @@ fn parse_def_header(header: &str) -> Option<DefSig> {
     }
     let pre = rest[..at].trim();
     let pre_words: Vec<&str> = pre.split_whitespace().collect();
-    let internal = pre_words.contains(&"internal");
+    // Apple's OpenGL links its helpers (gld.cube_vector_to_uv, gld.compute_lod_texture2d_array_cubeAsArray, ...) into the
+    // shader as external definitions, though nothing outside the module calls them. A descriptor-backed pointer (a texture
+    // unit's state in the GL uniform block) passed to one cannot cross the call, so they must be splice-able like internal
+    // helpers ("byte cursor cannot cross the call"; Stellaris's system view).
+    let internal = pre_words.contains(&"internal") || name.starts_with("@gld.");
     let ret_ty = ret_type_from_pre(pre).unwrap_or_default();
     let close = matching_paren(rest, paren)?;
     let params_str = &rest[paren + 1..close];
@@ -2129,12 +2133,15 @@ pub(crate) fn inline_and_forward_object_fields(san_ll: &str) -> Option<String> {
     for item in &mut items {
         let Item::Func(f) = item else { continue };
         // a second round sees the objects the first one emptied of readers (the texture env) as write-only (#419)
+        // a forwarded pointer can be the base of a further field address (#449), so each round re-spells addresses first
         for _ in 0..4 {
+            changed |= canonicalize_local_field_addresses_in(f, &named_types);
             if !forward_object_fields_in(f, &named_types) {
                 break;
             }
             changed = true;
         }
+        changed |= canonicalize_local_field_addresses_in(f, &named_types);
         if fold_switches_to_branches_in(f) {
             changed = true;
         }
@@ -2463,6 +2470,256 @@ fn split_sampler_phi_samples_in(f: &mut FuncBlock) -> bool {
         }
         changed = true;
         i += 1;
+    }
+    changed
+}
+
+/// A field of a local object written through one spelling of its address and read through another is still one field.
+/// Metal's front end does both for ANGLE's texture environments once the helper that reads them is inlined (#449): the
+/// entry stores a sampler-array element's address through `bitcast ptr (getelementptr %Envs, %envs, 0, 1, 0, 0, 1) to
+/// ptr`, and the inlined helper reads it back through `getelementptr %Env, (getelementptr %array, (getelementptr %Envs,
+/// %envs, 0, 1), 0, 0, 0), 0, 1`. Forwarding keys a field by the indices of one GEP on the alloca, so that read never met
+/// its store and the sample call kept a sampler whose state it could not recover.
+///
+/// The same helper then reads the element itself as `getelementptr %"metal::sampler", (getelementptr [2 x ptr
+/// addrspace(2)], %samplers, 0, 1), 0, 0`, a GEP through the one-member wrapper struct. The emitter recognises an element
+/// of a byval resource array only as one GEP on the parameter: through the wrapper, the sampler load stayed unresolved
+/// and the texture load was taken for an absent texture, its samples folded to zero.
+///
+/// Every address derived from an alloca or a byval parameter through no-op pointer bitcasts and chained constant GEPs is
+/// rewritten as one GEP on that root, struct indices as i32 and array indices as i64. An address used only to load or
+/// store a pointer is also extended with zero indices down to that pointer member (the first member sits at the same
+/// address), so that `0, 1` and `0, 1, 0, 0, 0` name one field. A chained GEP is composed only when its first index is 0
+/// and its source type has the layout of the type at that address, of one of its first members, or of a struct whose
+/// first members lead to it through the GEP's own zero indices; anything else is left as written.
+fn canonicalize_local_field_addresses_in(f: &mut FuncBlock, named: &HashMap<String, super::ir::LlType>) -> bool {
+    use super::ir::LlType;
+    struct Addr {
+        root: String,
+        root_ty: String,
+        path: Vec<(bool, i64)>, // (struct member, index) after the leading 0
+        ty: LlType,
+        inbounds: bool,
+    }
+    fn resolve<'a>(mut ty: &'a LlType, named: &'a HashMap<String, LlType>) -> Option<&'a LlType> {
+        for _ in 0..32 {
+            match ty {
+                LlType::Named(name) => ty = named.get(name)?,
+                other => return Some(other),
+            }
+        }
+        None
+    }
+    fn member(ty: &LlType, index: i64, named: &HashMap<String, LlType>) -> Option<(bool, LlType)> {
+        let index = usize::try_from(index).ok()?;
+        match resolve(ty, named)? {
+            LlType::Struct(fields) => fields.get(index).map(|t| (true, t.clone())),
+            LlType::Array(element, count) if index < *count as usize => Some((false, (**element).clone())),
+            _ => None,
+        }
+    }
+    fn same_layout(a: &LlType, b: &LlType, named: &HashMap<String, LlType>, depth: u32) -> bool {
+        if a == b {
+            return true;
+        }
+        if depth > 16 {
+            return false;
+        }
+        match (resolve(a, named), resolve(b, named)) {
+            (Some(LlType::Struct(x)), Some(LlType::Struct(y))) => {
+                x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same_layout(p, q, named, depth + 1))
+            }
+            (Some(LlType::Array(x, n)), Some(LlType::Array(y, m))) => n == m && same_layout(x, y, named, depth + 1),
+            (Some(x), Some(y)) => x == y,
+            _ => false,
+        }
+    }
+    fn render(addr: &Addr) -> String {
+        let mut out = format!(
+            "getelementptr {}{}, ptr {}, i64 0",
+            if addr.inbounds { "inbounds " } else { "" },
+            addr.root_ty,
+            addr.root
+        );
+        for (is_struct, index) in &addr.path {
+            out.push_str(if *is_struct { ", i32 " } else { ", i64 " });
+            out.push_str(&index.to_string());
+        }
+        out
+    }
+    fn constant_indices(text: &str) -> Option<Vec<i64>> {
+        text.split(',')
+            .map(|index| {
+                let mut words = index.split_whitespace();
+                let ty = words.next()?;
+                let value = words.next()?;
+                (ty.starts_with('i') && words.next().is_none()).then(|| value.parse::<i64>().ok()).flatten()
+            })
+            .collect()
+    }
+    // used, and only as the address of a pointer load or store, never as the stored value
+    let pointer_access_only = |body: &[String], name: &str| {
+        let mut uses = body
+            .iter()
+            .map(|line| super::lex::strip_comment(line).trim())
+            .filter(|t| mentions(t, name) && def_lhs(t) != Some(name))
+            .peekable();
+        uses.peek().is_some() && uses.all(|t| {
+            if let Some((_, rest)) = t.split_once(" = ") {
+                if let Some(load) = rest.strip_prefix("load ") {
+                    return load.starts_with("ptr") && load.rsplit_once(", ptr ").is_some_and(|(ty, address)| {
+                        !mentions(ty, name) && address.split(',').next().unwrap_or("").trim() == name
+                    });
+                }
+                return false;
+            }
+            t.strip_prefix("store ").and_then(|stored| stored.rsplit_once(", ptr ")).is_some_and(|(value, address)| {
+                value.starts_with("ptr") && !mentions(value, name) && address.split(',').next().unwrap_or("").trim() == name
+            })
+        })
+    };
+
+    let mut addrs: HashMap<String, Addr> = HashMap::default();
+    // byval parameters: `ptr byval([2 x ptr addrspace(2)]) %5`
+    // the parameter list opens after the function's name, not inside a return type such as `ptr addrspace(2)`
+    if let Some(params) = f.header.find(" @").and_then(|at| f.header[at..].find('(').map(|open| at + open)).and_then(|open| {
+        matching_paren(&f.header, open).map(|close| &f.header[open + 1..close])
+    }) {
+        for chunk in split_top_level_commas(params) {
+            let Some(at) = chunk.find("byval(") else { continue };
+            let open = at + "byval".len();
+            let Some(close) = matching_paren(chunk, open) else { continue };
+            let ty_text = chunk[open + 1..close].trim();
+            let (Some(name), Ok(ty)) = (last_local_token(chunk), super::parse::parse_type(ty_text)) else { continue };
+            addrs.insert(name.to_string(), Addr {
+                root: name.to_string(),
+                root_ty: ty_text.to_string(),
+                path: Vec::new(),
+                ty,
+                inbounds: true,
+            });
+        }
+    }
+    let mut rewrites: Vec<(usize, String)> = Vec::new();
+    for (i, line) in f.body.iter().enumerate() {
+        let t = super::lex::strip_comment(line).trim();
+        let Some((name, rest)) = t.split_once(" = ") else { continue };
+        if !name.starts_with('%') {
+            continue;
+        }
+        if let Some(allocated) = rest.strip_prefix("alloca ") {
+            // a single object: `alloca T` or `alloca T, align N`, never an element count
+            let ty_text = allocated.split(", align ").next().unwrap_or(allocated).trim();
+            if allocated.contains(", i32 ") || allocated.contains(", i64 ") {
+                continue;
+            }
+            if let Ok(ty) = super::parse::parse_type(ty_text) {
+                addrs.insert(name.to_string(), Addr {
+                    root: name.to_string(),
+                    root_ty: ty_text.to_string(),
+                    path: Vec::new(),
+                    ty,
+                    inbounds: true,
+                });
+            }
+            continue;
+        }
+        let derived = if let Some(cast) = rest.strip_prefix("bitcast ptr ") {
+            let Some(base) = cast.strip_suffix(" to ptr").map(str::trim) else { continue };
+            let Some(base) = addrs.get(base) else { continue };
+            if base.path.is_empty() {
+                continue; // the object itself, as lifetime markers take it
+            }
+            Addr { root: base.root.clone(), root_ty: base.root_ty.clone(), path: base.path.clone(), ty: base.ty.clone(), inbounds: base.inbounds }
+        } else {
+            let (inbounds, gep) = match rest.strip_prefix("getelementptr inbounds ") {
+                Some(gep) => (true, gep),
+                None => match rest.strip_prefix("getelementptr ") {
+                    Some(gep) => (false, gep),
+                    None => continue,
+                },
+            };
+            // `<source type>, ptr %base, <indices>`, split at the top level: a literal struct type has commas of its own
+            let parts = split_top_level_commas(gep);
+            let [source_text, base, indices @ ..] = parts.as_slice() else { continue };
+            let Some(base) = base.trim().strip_prefix("ptr ").and_then(|base| addrs.get(base.trim())) else { continue };
+            let Ok(source) = super::parse::parse_type(source_text.trim()) else { continue };
+            let Some(indices) = constant_indices(&indices.join(",")) else { continue };
+            if indices.first() != Some(&0) {
+                continue;
+            }
+            // The source type sits at the base address when it has the layout of the type there or of one of its first
+            // members, or when it is a struct whose first members lead down to one of those, the GEP's own leading
+            // zero indices stepping back down to it (`getelementptr %"metal::sampler", %element, 0, 0`).
+            let mut wrappers = vec![source.clone()];
+            while wrappers.len() < 16 {
+                let Some((_, first)) = member(wrappers.last().unwrap(), 0, named) else { break };
+                wrappers.push(first);
+            }
+            let mut path = base.path.clone();
+            let mut ty = base.ty.clone();
+            let mut matched = false;
+            let mut skip = 0;
+            'descend: for _ in 0..16 {
+                for (depth, wrapper) in wrappers.iter().enumerate() {
+                    if same_layout(&ty, wrapper, named, 0) {
+                        if indices.len() > depth && indices[1..=depth].iter().all(|index| *index == 0) {
+                            matched = true;
+                            skip = depth;
+                        }
+                        break 'descend;
+                    }
+                }
+                let Some((is_struct, first)) = member(&ty, 0, named) else { break };
+                path.push((is_struct, 0));
+                ty = first;
+            }
+            if !matched {
+                continue;
+            }
+            let mut ok = true;
+            for index in &indices[1 + skip..] {
+                match member(&ty, *index, named) {
+                    Some((is_struct, next)) => {
+                        path.push((is_struct, *index));
+                        ty = next;
+                    }
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                continue;
+            }
+            Addr { root: base.root.clone(), root_ty: base.root_ty.clone(), path, ty, inbounds: inbounds && base.inbounds }
+        };
+        let mut canonical = derived;
+        if pointer_access_only(&f.body, name) {
+            let mut path = canonical.path.clone();
+            let mut ty = canonical.ty.clone();
+            while !matches!(resolve(&ty, named), Some(LlType::Ptr(_))) {
+                let Some((is_struct, first)) = member(&ty, 0, named) else { break };
+                path.push((is_struct, 0));
+                ty = first;
+            }
+            if matches!(resolve(&ty, named), Some(LlType::Ptr(_))) {
+                canonical.path = path;
+                canonical.ty = ty;
+            }
+        }
+        if !canonical.path.is_empty() {
+            let text = format!("{name} = {}", render(&canonical));
+            if text != t {
+                rewrites.push((i, format!("{}{text}", leading_ws(line))));
+            }
+        }
+        addrs.insert(name.to_string(), canonical);
+    }
+    let changed = !rewrites.is_empty();
+    for (i, line) in rewrites {
+        f.body[i] = line;
     }
     changed
 }

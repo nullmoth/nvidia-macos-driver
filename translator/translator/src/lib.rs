@@ -162,6 +162,7 @@ fn options_for_air(
     Ok(options)
 }
 
+#[derive(Clone)]
 struct StageMeta {
     frag: Option<meta::FragMeta>,
     vert: Option<meta::VertMeta>,
@@ -169,7 +170,39 @@ struct StageMeta {
     entry_name: Option<String>,
 }
 
+thread_local! {
+    /// `parse_stage_meta` results for the translation in progress (`with_parse_cache`): reflection and translation read
+    /// the same lowered text, and parsing its metadata again was 3-7% of translation time. Keyed by the whole text.
+    static STAGE_META: std::cell::RefCell<Vec<(String, passes::Stage, StageMeta)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn parse_stage_meta(san_ll: &str, stage: passes::Stage) -> StageMeta {
+    if !native::ir::parse_cache::is_active() {
+        return parse_stage_meta_uncached(san_ll, stage);
+    }
+    let hit = STAGE_META.with(|cache| {
+        cache
+            .borrow()
+            .iter()
+            .find(|(text, s, _)| *s == stage && text == san_ll)
+            .map(|(_, _, m)| m.clone())
+    });
+    if let Some(m) = hit {
+        return m;
+    }
+    let m = parse_stage_meta_uncached(san_ll, stage);
+    STAGE_META.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() == 2 {
+            cache.remove(0);
+        }
+        cache.push((san_ll.to_owned(), stage, m.clone()));
+    });
+    m
+}
+
+fn parse_stage_meta_uncached(san_ll: &str, stage: passes::Stage) -> StageMeta {
     match stage {
         passes::Stage::Fragment => {
             let (frag, entry_name) = meta::parse_air_fragment_meta_with_entry(san_ll);
@@ -548,7 +581,12 @@ pub fn specialize_runtime_table_module(
         v.dedup();
         v
     };
-    let rewritten = linked_functions::rewrite_runtime_table_lookups(san_ll, &entry_name, &indices)?;
+    // A table with no argument of its own: Apple's shader converter loads it out of the dispatch-rays
+    // argument struct, so the kernel's argument metadata names none and the intrinsic is the only trace of it.
+    let from_body = indices.is_empty()
+        && san_ll.contains("@air.get_function_pointer_visible_function_table(");
+    let rewritten =
+        linked_functions::rewrite_runtime_table_lookups(san_ll, &entry_name, &indices, from_body)?;
     let rewritten =
         ift_runtime::rewrite_runtime_intersection_tables(&rewritten, &entry_name, candidates)?;
     let entries: Vec<linked_functions::LinkedFunction> = candidates
@@ -562,7 +600,7 @@ pub fn specialize_runtime_table_module(
             },
         )
         .collect();
-    if entries.is_empty() && !indices.is_empty() {
+    if entries.is_empty() && (!indices.is_empty() || from_body) {
         return Err(
             "the kernel reads a visible function table but the pipeline links no functions".into(),
         );
@@ -571,7 +609,9 @@ pub fn specialize_runtime_table_module(
         visible_references: references,
         visible_tables: indices
             .iter()
-            .map(|&parameter_index| linked_functions::LinkedFunctionTable {
+            .copied()
+            .chain(from_body.then_some(linked_functions::TABLE_FROM_BODY))
+            .map(|parameter_index| linked_functions::LinkedFunctionTable {
                 parameter_index,
                 size: entries.len() as u32 + 1,
                 entries: entries.clone(),
@@ -580,7 +620,37 @@ pub fn specialize_runtime_table_module(
         intersection_tables: Vec::new(),
     };
     let _dedupe = linked_functions::DedupeDependencies::on();
-    specialize_linked_module(&rewritten, stage, &linkage)
+    let mut text = specialize_linked_module(&rewritten, stage, &linkage)?;
+    // A function the table dispatches can itself dispatch from the table - the shader converter's any-hit
+    // wrapper looks up the any-hit shader exactly that way. Its body only joins the module once the first pass
+    // has appended it, so specialize again until no lookup is left. A module already appended is skipped, so a
+    // later round adds nothing twice, and a round that changes nothing ends the loop.
+    const ROUNDS: usize = 8;
+    // A declaration of the intrinsic is not a use of it: only a CALL still needs specializing, and the
+    // declaration is left behind unused once the last call is gone.
+    let lookup = |t: &str| {
+        t.lines().any(|l| {
+            l.contains("@air.get_function_pointer_visible_function_table(") && l.contains("call ")
+        })
+    };
+    let mut rounds = 0;
+    while lookup(&text) && rounds < ROUNDS {
+        rounds += 1;
+        let again =
+            linked_functions::rewrite_runtime_table_lookups(&text, &entry_name, &indices, from_body)?;
+        let next = specialize_linked_module(&again, stage, &linkage)?;
+        if next == text {
+            break;
+        }
+        text = next;
+    }
+    if lookup(&text) {
+        return Err(format!(
+            "a visible function-table lookup is still live after {rounds} specialization round(s): \
+             the function it reaches dispatches from the table in a way this pass does not follow"
+        ));
+    }
+    Ok(text)
 }
 
 pub fn translate_sanitized_native_linked_specialized_with_options(
@@ -1126,6 +1196,7 @@ fn finish_module(
     native::construct_cfg_functions_module(&mut out, &cfg_construction_functions)
         .map_err(FinishFailure::cfg)?;
     native::construct_physical_atomic_pointer_lvalues_module(&mut out);
+    native::construct_composite_atomic_pointer_lvalues_module(&mut out);
     native::split_mismatched_copy_memory_module(&mut out);
     native::lower_stencil_export_module(&mut out);
     passes::drop_unreferenced_global_variables(&mut out);
@@ -1139,6 +1210,7 @@ fn finish_module(
     reflect::decorate_unwritten_descriptors(&mut out);
     let _ = b78_tcg::state_readonly_psb(&mut out, kern, options.descriptor_layout);
     native::decay_short_access_chains_module(&mut out);
+    native::retype_punned_access_chains_module(&mut out);
     if let Some(failure) = native::owned_module_failure(&out) {
         if let Some(path) = env_vars::retry_dump() {
             let _ = std::fs::write(path, assemble_finished_module(&out));
@@ -1775,6 +1847,23 @@ thread_local! {
 /// tried; outside it the typed construction comes first, as it always has.
 pub(crate) fn raw_buffers_first_on() -> bool {
     RAW_BUFFERS_FIRST.with(|c| c.get())
+}
+
+/// Runs one translation `f` with a parse cache: each text it parses more than once (the module as written, then again by
+/// every construction tier and by reflection) is parsed once on this thread and handed out as a clone. Emptied when `f`
+/// returns, so nothing parsed in one translation reaches the next.
+pub fn with_parse_cache<R>(f: impl FnOnce() -> R) -> R {
+    struct ClearStageMeta;
+    impl Drop for ClearStageMeta {
+        fn drop(&mut self) {
+            if !native::ir::parse_cache::is_active() {
+                STAGE_META.with(|cache| cache.borrow_mut().clear());
+            }
+        }
+    }
+    let _clear = ClearStageMeta;
+    let _scope = native::ir::parse_cache::ParseScope::enter();
+    f()
 }
 
 pub(crate) fn argument_buffer_samplers_on() -> bool {
