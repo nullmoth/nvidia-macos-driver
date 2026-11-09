@@ -146,6 +146,7 @@ struct NVRMBacklightHandler : IODisplayParameterHandler {
     volatile SInt32 fPersistPending = -1;
     volatile UInt64 fPersistDeadline = 0;
     SInt32 fRestoreLevel = -1;
+    bool fEdp = false;
     bool fHaveSaved = false;
     volatile bool fUserSeen = false;
     OSDictionary *fParameters = nullptr;
@@ -160,6 +161,7 @@ struct NVRMBacklightHandler : IODisplayParameterHandler {
 };
 const OSSymbol *NVRMBacklightHandler::sBrightnessProbe = nullptr;
 const OSSymbol *NVRMBacklightHandler::sLinearBrightnessProbe = nullptr;
+static IOReturn nvrmEdpSet(NVRMBacklightHandler *, IOService *, unsigned) { return kIOReturnSuccess; }   // the DPCD fallback has its own test
 '''
 
 
