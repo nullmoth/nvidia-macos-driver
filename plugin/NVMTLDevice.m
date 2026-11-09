@@ -1484,6 +1484,13 @@ static char nvmtl_surface_cache_key;
     t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)d.hazardTrackingMode << MTLResourceHazardTrackingModeShift)
              | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
     t->_fbo = nvmtl_desc_fbo(d);
+    t->_fmt = d.pixelFormat;
+    if (nvmtl_y422_is_format((uint32_t)d.pixelFormat)) {   // a video frame: NVMTL_YUV422=1, decoded on use, never cached or written back
+        if (!surf || w != IOSurfaceGetWidthOfPlane(surf, (uint32_t)plane) || h != IOSurfaceGetHeightOfPlane(surf, (uint32_t)plane)) { nvlog("4:2:2 texture over an IOSurface plane: size mismatch or no surface - nil"); return nil; }
+        id<MTLTexture> made = nvmtl_make_y422_texture(d, t);
+        if (made) { t->_y422Surf = (IOSurfaceRef)CFRetain(surf); t->_y422Plane = plane; }
+        return made;
+    }
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
