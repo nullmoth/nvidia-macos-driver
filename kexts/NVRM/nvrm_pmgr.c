@@ -11,6 +11,12 @@
  * (watchthelight-labs/NvGfx); this implementation is our own.
  */
 
+// NVIDIA's open-gpu-kernel-modules headers (third-party) carry their own integer-conversion warnings under the kernel
+// compiler's defaults; the exception is scoped to these includes and our code below stays checked.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wsign-conversion"
+#pragma clang diagnostic ignored "-Wimplicit-int-conversion"
+#pragma clang diagnostic ignored "-Wshorten-64-to-32"
 #include <nv.h>
 #include <nv-priv.h>
 #include <os/os.h>
@@ -20,6 +26,7 @@
 #include <core/locks.h>
 #include "rmapi/rmapi.h"
 #include "ctrl/ctrl2080/ctrl2080internal.h"
+#pragma clang diagnostic pop
 
 NV_STATUS nvrm_pmgr_configure_tgp(nv_state_t *nv, NvU8 enable);
 

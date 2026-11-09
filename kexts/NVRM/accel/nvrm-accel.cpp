@@ -56,7 +56,15 @@ static bool nvaccel_verbose() { static int v = -1; if (v < 0) { int x = 0; v = P
 #include <IOKit/IODeviceMemory.h>
 #include "tahoe_fwd.h"   // macOS 26: inherited slots Apple no longer exports, forwarded through its vtables
 #include "nvaccel_stubs.h"
+// NVIDIA's open-gpu-kernel-modules headers (third-party) carry their own integer-conversion warnings under the kernel
+// compiler's defaults; the exception is scoped to these includes and our code below stays checked.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wsign-conversion"
+#pragma clang diagnostic ignored "-Wimplicit-int-conversion"
+#pragma clang diagnostic ignored "-Wshorten-64-to-32"
+#pragma clang diagnostic ignored "-Wc99-designator"
 #include "nvkms-kapi.h"
+#pragma clang diagnostic pop
 #include <sys/sysctl.h>
 #include <libkern/OSAtomic.h>
 #include "nv_iop_pixel.h"
@@ -2899,7 +2907,7 @@ static bool nvAccelHybridImport(IOService *fb, unsigned head, IOSurface *s, NVVi
 #undef HYFAIL
 }
 
-static unsigned nvVaAllocLogged, nvVaMapLogged;
+static unsigned nvVaAllocLogged;
 
 static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
                                             unsigned long long len, unsigned long long align)

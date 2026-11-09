@@ -133,7 +133,7 @@ extern "C" int nvrm_gpuva_alloc(struct NVRMGpuVaRequest *r)
 
     NvU32 hVa = 0;
     NvV32 st = nvGpuVaSpaceFor(r->hClient, r->hDevice, &hVa);
-    if (st != 0) { r->status = st; return -1; }
+    if (st != 0) { r->status = (int)st; return -1; }
 
     NV_MEMORY_ALLOCATION_PARAMS vp;
     nvGvZero(&vp, sizeof vp);
@@ -150,7 +150,7 @@ extern "C" int nvrm_gpuva_alloc(struct NVRMGpuVaRequest *r)
     NvU32 hVirt = 0;
     st = nvGpuVaRmAlloc(r->hClient, r->hDevice, NVRM_CLS_NV50_MEMORY_VIRTUAL, &vp, sizeof vp, &hVirt);
     if (st != 0 || !hVirt) {
-        r->status = st ? st : NV_ERR_GENERIC;
+        r->status = st ? (int)st : NV_ERR_GENERIC;
         if (gAllocLogged < 8) { gAllocLogged++;
             GVLOG("NV50_MEMORY_VIRTUAL refused %llu bytes (align %llu) -> status 0x%x",
                   (unsigned long long)r->size, (unsigned long long)r->align, st); }
@@ -188,7 +188,7 @@ extern "C" int nvrm_gpuva_map(struct NVRMGpuVaRequest *r)
                                                    : DRF_DEF(OS46, _FLAGS, _CACHE_SNOOP, _ENABLE));
     ops.params.mapMemoryDma.dmaOffset = 0;
     rm_kernel_rmapi_op(NULL, &ops);
-    r->status = ops.params.mapMemoryDma.status;
+    r->status = (int)ops.params.mapMemoryDma.status;
     if (r->status != 0) {
         if (gMapLogged < 8) { gMapLogged++;
             GVLOG("MAP_MEMORY_DMA hVirt 0x%x hMem 0x%x %llu bytes %s -> status 0x%x",
@@ -227,6 +227,6 @@ extern "C" int nvrm_gpuva_free(struct NVRMGpuVaRequest *r)
                   r->hVirt, ops.params.unmapMemoryDma.status);
     }
     if (r->flags & NVRM_GPUVA_FLAG_UNMAP_ONLY) return 0;
-    r->status = nvGpuVaRmFree(r->hClient, r->hDevice, r->hVirt);
+    r->status = (int)nvGpuVaRmFree(r->hClient, r->hDevice, r->hVirt);
     return r->status ? -1 : 0;
 }
