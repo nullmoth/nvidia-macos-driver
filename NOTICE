@@ -15,9 +15,10 @@ kexts/       Builds against NVIDIA's open GPU kernel modules 620.70.06, MIT (wit
 NVK          Vulkan driver from Mesa, MIT (licenses/Mesa-license.rst). NullMoth's changes ship as patches.
              NAK's Rust crates (paste, proc-macro2, quote, rustc-hash, syn, unicode-ident; MIT and/or Apache-2.0): licenses/nvk-rust-crates.txt.
 
-GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images from NVIDIA's 620.70.06 driver,
-             redistributed unmodified under NVIDIA's licence (licenses/NVIDIA-firmware-LICENCE.txt), the same
-             terms under which linux-firmware redistributes these images.
+GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images are not part of this package. The installer
+             (package/fw_fetch.sh) reads them, unmodified, from NVIDIA's own 620.70.06 Linux driver package downloaded
+             to the user's Mac and checks each against a pinned SHA-256. They stay under NVIDIA's licence
+             (licenses/NVIDIA-firmware-LICENCE.txt is the text that applies to those files).
 
 kexts/NMIntelFB  Panel brightness follows the method of WhateverXe's panel PWM (XELP::PanelPWM) by b00t0x,
              https://github.com/b00t0x/WhateverXe, BSD-3-Clause, Copyright (c) 2018 vit9696
