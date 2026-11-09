@@ -148,7 +148,7 @@ Nothing is sent; you can upload the file on the site yourself.
 
 See the README, *Build from source*. The kexts need NVIDIA's `open-gpu-kernel-modules` at tag `615.78.08`; NVK needs
 Mesa `17ca6174` with, in order, `nvk/nvk-macos.patch`, `nvk/nvk-fixes-after-def16.patch`, `nvk/nvk-620-kernel.patch` and
-`nvk/nvk-perf-boost-burst.patch` and `nvk/nvk-rated-tdp.patch` (`patch -p1` from the Mesa root). NVK compiles against the `open-gpu-kernel-modules` 610.57.04 headers with
+`nvk/nvk-perf-boost-burst.patch`, `nvk/nvk-rated-tdp.patch` and `nvk/nvk-gps-maxpower.patch` (`patch -p1` from the Mesa root). NVK compiles against the `open-gpu-kernel-modules` 610.57.04 headers with
 `nvk/ogkm-nvos-620.patch` applied to that tree; 620's `nv.h` does not compile in user space, so the rest stays 610.
 
 The video codecs in `libnvencvt.dylib` are built from `vendor/nvenc` (mickys/nvenc, MIT) by `build/build_nvencvt.sh`. The
@@ -157,4 +157,9 @@ its folder are root-owned. `NVMTL_NVENCVT` in `nvrm610.conf` decides where it re
 Ampere, `0` is never, `1` is every process on any card the library accepts, and a list of process names limits it to those.
 The GPU's boost policy is `NVRM_610_BOOST`: unset is a short lease renewed while work is submitted, `hold` keeps one boost
 for the device's life, `0` never boosts.
+`NVRM_610_MAXPOWER_MW=<mW>` (off unless set) asks the GPU performance-scaling code for that maximum power through the public root-client GPS control and reads it back.
 `NVRM_610_RATEDTDP` is off unless set: `l` holds the card at its rated TDP performance state (a power and clock cap), `k` locks it, `x` allows the turbo ceiling.
+
+`package/stage_nvencvt.sh <pkgroot> <libnvencvt.dylib>` puts the video codec library into a package tree, signs it and refreshes `SHA256SUMS`; `install.sh` stops before changing anything if a package lacks it.
+`tools/nvmtl-smi` (build with `tools/nvmtl-smi/build.sh <patched Mesa tree> <out>`) prints the GPU's temperature, power, clocks, pstate, utilisation, throttle reasons and fan from the resource manager's shared-data block.
+The opt-in D3cold code is `kexts/NVRM/nv_rtd3.cpp` (`nvrtd3=1` and `nvrtd3res=<ACPI path>` on the boot line).
