@@ -15,7 +15,7 @@ int main(int argc, char **argv)
       id<MTLComputePipelineState> pso = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"curve_oracle"] error:&err] : nil;
       if (!pso) { fprintf(stderr, "REFUSED: %s\n", err.localizedDescription.UTF8String); return 3; }
       id<MTLCommandQueue> q = [dev newCommandQueue];
-      struct curve_case cases[4]; int nc = sw_cases(cases);
+      struct curve_case cases[8]; int nc = sw_cases(cases);
       static struct oracle_ray rs[SW_BATCH]; static RayIn rin[SW_BATCH];
       id<MTLBuffer> rb = [dev newBufferWithLength:sizeof rin options:MTLResourceStorageModeShared];
       id<MTLBuffer> ob = [dev newBufferWithLength:sizeof(HitOut) * SW_BATCH options:MTLResourceStorageModeShared];
