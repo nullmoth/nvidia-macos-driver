@@ -9867,12 +9867,12 @@ done:
 }
 // range: either {loc, len} from the caller (range == NULL) or the two words at range+range_off. Outside a render pass.
 int nvmtl_vk_cmd_icb_gather(nvk_cmdbuf *c, nvk_buffer *records, nvk_buffer *out, size_t out_off, uint32_t slots, uint32_t compute, uint64_t pso, uint32_t ptype,
-                            uint32_t loc, uint32_t len, nvk_buffer *range, size_t range_off)
+                            uint32_t loc, uint32_t len, const uint32_t *tg, nvk_buffer *range, size_t range_off)
 {
     if (!c || c->in_rp || !records || !out || !slots || slots > NVMTL_ICB_MAX_SLOTS || records->size < (size_t)slots * NVMTL_ICB_REC_BYTES ||
         (out_off & 3) || out_off > out->size || out->size - out_off < (size_t)slots * NVMTL_ICB_RECORD_BYTES || (range && ((range_off & 3) || range_off > range->size || range->size - range_off < 8)) || nvmtl_icb_gather_init()) return -1;
     nvmtl_icb_gather_args a = { nvmtl_vk_buffer_address(records), range ? nvmtl_vk_buffer_address(range) + range_off : 0, nvmtl_vk_buffer_address(out) + out_off,
-        slots, compute, (uint32_t)pso, (uint32_t)(pso >> 32), range ? NVMTL_ICB_GATHER_RANGE_FROM_BUFFER : loc, range ? NVMTL_ICB_GATHER_RANGE_FROM_BUFFER : len, ptype, 0 };
+        slots, compute, (uint32_t)pso, (uint32_t)(pso >> 32), range ? NVMTL_ICB_GATHER_RANGE_FROM_BUFFER : loc, range ? NVMTL_ICB_GATHER_RANGE_FROM_BUFFER : len, ptype, tg ? 1u : 0u, { tg ? tg[0] : 0u, tg ? tg[1] : 0u, tg ? tg[2] : 0u }, 0 };
     if (!a.rec || !a.out || (range && !a.rng)) return -1;
     nvmtl_vk_cmd_barrier(c);   // the kernel that encoded the records ran in an earlier pass
     pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_icb_gather_pipeline);
