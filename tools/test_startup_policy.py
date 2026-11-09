@@ -20,6 +20,7 @@ arm("the policy header exists", header.exists())
 if header.exists():
     harness = r'''
 #include <cstdio>
+#include <string>
 #include "nvrm_startup_policy.h"
 #define CHECK(name, cond) do { std::printf("%s %s\n", (cond) ? "ok  " : "FAIL", name); if (!(cond)) bad++; } while (0)
 int main() {
@@ -42,6 +43,8 @@ int main() {
     CHECK("a 256 MB BAR1 is not touched by the shrink rule", nvrmBar1ShrinkTarget(256ULL << 20, 0x3fe0, false) == 0);
     CHECK("a card that does not offer 8 GB keeps its size", nvrmBar1ShrinkTarget(16ULL << 30, 0x2000 >> 1, false) == 0);
     CHECK("-nvrmkeepbar1 keeps the firmware size", nvrmBar1ShrinkTarget(16ULL << 30, 0x3fe0, true) == 0);
+    {char b[64]; int n = nvrmFallbackModelName(b, sizeof b, "Turing", "TU106", 0x1F08);
+     CHECK("an unnamed RTX 20 id reads as its generation, chip and PCI id", n > 0 && std::string(b) == "NVIDIA Turing GPU (TU106, 10DE:1F08)");}
     return bad;
 }
 '''
@@ -60,6 +63,7 @@ arm("NVAccel no longer compares against the fixed 60 s constant", "me->fHeadless
 arm("NVRM publishes its settle delay on the PCI device for NVAccel", 'fPCI->setProperty("nvrm-autogo-settle-ms"' in nvrm)
 arm("NVRM takes its settle delay from the policy (nvrmsettle override included)", "nvrmAutoGoSettleMs(" in nvrm)
 arm("auto-go stops waiting for heads when no connector carries a display", "nvrmNoDisplayAnywhere()" in nvrm and "not waiting for heads" in nvrm)
+arm("a card the RM cannot name gets a model from the GPU profile", "nvrmFallbackModelName(" in nvrm)
 arm("placeLargeBar1 resizes a firmware BAR1 above 8 GB through the proven path", "nvrmBar1ShrinkTarget(bar1Size, rbSupported, nvrmKeepBar1Size())" in nvrm)
 
 if failures:

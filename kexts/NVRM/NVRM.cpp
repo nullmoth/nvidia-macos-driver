@@ -1553,6 +1553,16 @@ void NVRM::publishGpuProfile()
     str("native-shaders", arch == 0x1B0 ? "sm_120" : "none");
     fPCI->setProperty("nvrm-gpu-profile", d);
     d->release();
+    // The RM named no model for this PCI id at start (see start()), so the card would show as 10DE:xxxx only. The
+    // profile knows the generation and chip; publish those so System Information and the app say what the card is.
+    if (!fPCI->getProperty("model")) {
+        char nm[64];
+        const int len = nvrmFallbackModelName(nm, sizeof nm, gen, chip, fNv.pci_info.device_id);
+        if (len > 0 && (unsigned)len < sizeof nm) {
+            fPCI->setProperty("model", (void *)nm, len + 1);
+            LOG("published model=\"%s\" from the GPU profile (the RM's released-chip table has no name for this id)", nm);
+        }
+    }
     LOG("gpu profile: %s %s, 3d 0x%x copy 0x%x nvenc 0x%x nvdec 0x%x, BAR1 %llu MB of %llu MB VRAM -> scanout %s",
         gen, chip, (unsigned)c3d, (unsigned)ccopy, (unsigned)cenc, (unsigned)cdec, bar1 >> 20, vram >> 20,
         staticBar1 ? "static-bar1" : "by-handle");
