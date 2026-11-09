@@ -15,7 +15,7 @@ pub(crate) fn structure_selected_functions(
 ) -> HashSet<Word> {
     // METAL2VULKAN_NEST: unset = every stage; "0" = never nest; otherwise a comma list of
     // kernel,fragment,vertex naming the stages that may nest (the rest keep the raw relooper).
-    if let Some(allowed) = std::env::var_os("METAL2VULKAN_NEST") {
+    if let Some(allowed) = crate::env_vars::nest_stages() {
         let allowed = allowed.to_string_lossy().to_ascii_lowercase();
         let model = module.entry_points.first().and_then(|ep| match ep.operands.first() {
             Some(crate::spirv_module::Operand::ExecutionModel(model)) => Some(*model),
