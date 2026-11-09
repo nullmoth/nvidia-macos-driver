@@ -1,0 +1,651 @@
+diff --git a/src/nouveau/vulkan/nvk_cmd_pool.c b/src/nouveau/vulkan/nvk_cmd_pool.c
+index 812e4ab..2b8498a 100644
+--- a/src/nouveau/vulkan/nvk_cmd_pool.c
++++ b/src/nouveau/vulkan/nvk_cmd_pool.c
+@@ -150,16 +150,18 @@ static const struct nvk_slab_backend nvk_slab_be = {
+ static void
+ nvk_slab_census(uint64_t q)
+ {
+-   unsigned live; int64_t conns = 0, maps = 0;
++   unsigned live; int64_t conns = 0, maps = 0; uint64_t hub_maps = 0, hub_fallbacks = 0; int hubs = 0;
+    const struct nvk_slab_stats s = nvk_slab_snapshot(&nvk_slabs, &live);
+    nvrm_xnu_live(&conns, &maps);
++   nvrm_xnu_hub_stats(&hub_maps, &hub_fallbacks, &hubs);
+    fprintf(stderr, "nvk: cmd chunks (slabs of %llu KB): requests=%llu reused=%llu carved=%llu not_ready=%llu returned=%llu "
+-           "slabs live=%u (%llu MB) created=%llu released=%llu (idle %llu) failed=%llu | process connections=%lld mappings=%lld\n",
++           "slabs live=%u (%llu MB) created=%llu released=%llu (idle %llu) failed=%llu | process connections=%lld mappings=%lld hubs=%d hub_maps=%llu hub_fallbacks=%llu\n",
+            (unsigned long long)(nvk_slabs.slab_bytes >> 10), (unsigned long long)q, (unsigned long long)s.reused,
+            (unsigned long long)s.carved, (unsigned long long)s.not_ready, (unsigned long long)s.returned, live,
+            (unsigned long long)(((uint64_t)live * nvk_slabs.slab_bytes) >> 20),
+            (unsigned long long)s.slabs_created, (unsigned long long)s.slabs_released, (unsigned long long)s.released_idle,
+-           (unsigned long long)s.create_failed, (long long)conns, (long long)maps);
++           (unsigned long long)s.create_failed, (long long)conns, (long long)maps,
++           hubs, (unsigned long long)hub_maps, (unsigned long long)hub_fallbacks);
+ }
+ 
+ void
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.c b/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.c
+index 4f8c58f..16d894f 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.c
+@@ -159,7 +159,12 @@ static void nvrm_wc_note(bool isSysMem, bool registers, int wc)
+ }
+ #endif
+ 
++static NvU32 nvrm_map_memory_on(NvRmApi *api, NvU32 hDevice, NvU32 hMemory, NvU64 offset, NvU64 length, bool isSysMem, bool registers, NvU32 flags, NvRmApiMapping *mapping, bool allowHub);
+ static NvU32 nvrm_map_memory(NvRmApi *api, NvU32 hDevice, NvU32 hMemory, NvU64 offset, NvU64 length, bool isSysMem, bool registers, NvU32 flags, NvRmApiMapping *mapping)
++{
++	return nvrm_map_memory_on(api, hDevice, hMemory, offset, length, isSysMem, registers, flags, mapping, true);
++}
++static NvU32 nvrm_map_memory_on(NvRmApi *api, NvU32 hDevice, NvU32 hMemory, NvU64 offset, NvU64 length, bool isSysMem, bool registers, NvU32 flags, NvRmApiMapping *mapping, bool allowHub)
+ {
+ 	const char *nodeName;
+ 	if (isSysMem) {
+@@ -169,10 +174,21 @@ static NvU32 nvrm_map_memory(NvRmApi *api, NvU32 hDevice, NvU32 hMemory, NvU64 o
+ 	}
+ 
+ 	mapping->address = NULL;
+-	int memFd = NVRM_OPEN(nodeName);
++#if defined(__APPLE__) && !defined(__HAIKU__)
++	// a hub connection when the kext supports them (nvrm_xnu.c, HUB CONNECTIONS); -1 = one connection for this map
++	const int hubFd = allowHub ? nvrm_xnu_hub_begin(nodeName) : -1;
++#else
++	const int hubFd = -1;
++#endif
++	int memFd = hubFd >= 0 ? hubFd : NVRM_OPEN(nodeName);
+ 	if (memFd < 0) {
+ 		return NV_ERR_GENERIC;
+ 	}
++	(void)allowHub;
++	// hub only: whether the hub fd may still hold a context from this call (RM_MAP_MEMORY failed, or the map did), which
++	// the hub's release clears by re-binding. A refused RM_MAP_MEMORY may still have left one, so it counts too.
++	bool stale = hubFd >= 0;
++	int hubFallback = 0;
+ 
+ 	nv_ioctl_nvos33_parameters_with_fd p = {
+ 		.params = {
+@@ -220,15 +236,33 @@ static NvU32 nvrm_map_memory(NvRmApi *api, NvU32 hDevice, NvU32 hMemory, NvU64 o
+ 	// removed that field and never writes it, so the decision is made here from what is being mapped.
+ 	int wc = !isSysMem && !registers && !nvrm_no_wc();
+ 	nvrm_wc_note(isSysMem, registers, wc);
+-	mapping->address = (void*)NVRM_MMAP_WC(memFd, length, wc);
++	mapping->address = hubFd >= 0 ? nvrm_xnu_hub_mmap(memFd, length, wc, &hubFallback) : (void*)NVRM_MMAP_WC(memFd, length, wc);
+ 	if (mapping->address == MAP_FAILED) {
++#if defined(__APPLE__) && !defined(__HAIKU__)
++		if (hubFd >= 0 && hubFallback) {
++			// The kext could not take this mapping as a token and the hub is retired with its context left pending (no
++			// re-bind: nvrm_xnu.c, retired). RM's half of the map is undone on the ctl fd by handle and address, and the
++			// mapping is made again on a connection of its own, the path every map took before hubs.
++			NVOS34_PARAMETERS u = { .hClient = api->hClient, .hDevice = hDevice, .hMemory = hMemory,
++			                        .pLinearAddress = mapping->stubLinearAddress, .flags = 0 };
++			if (nvRmIoctl(api->fd, NV_ESC_RM_UNMAP_MEMORY, &u, sizeof(u)) < 0 || u.status != NV_OK)
++				fprintf(stderr, "nvrm: undoing the RM map before the own-connection retry failed (status 0x%x)\n", u.status);
++			nvrm_xnu_hub_end(hubFd, 0);
++			return nvrm_map_memory_on(api, hDevice, hMemory, offset, length, isSysMem, registers, flags, mapping, false);
++		}
++#endif
+ 		p.params.status = NV_ERR_GENERIC;
+ 		goto done1;
+ 	}
++	stale = false;   /* the context became this mapping */
+ 	mapping->size = length;
+ #endif
+ 
+ done1:
++#if defined(__APPLE__) && !defined(__HAIKU__)
++	if (hubFd >= 0) { nvrm_xnu_hub_end(hubFd, stale); return p.params.status; }
++#endif
++	(void)stale; (void)hubFallback;
+ 	NVRM_CLOSE(memFd);
+ 	return p.params.status;
+ }
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
+index 509deef..546be8d 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
+@@ -36,9 +36,10 @@ static int gTrace = -1;   // NVRM_XNU_TRACE=1: one line per escape with the RM's
+ // never be unmapped, a connection that can never be closed, and a table that never recovers.
+ // Every overflow below now SAYS SO, once, with a count.
+ #define NVRM_XNU_MAX_MAP 16384
+-enum { SEL_GO = 0, SEL_ESC = 1, SEL_GETFD = 2, SEL_BINDFD = 3 };
++enum { SEL_GO = 0, SEL_ESC = 1, SEL_GETFD = 2, SEL_BINDFD = 3, SEL_CAPS = 7, SEL_FORGET_TOKEN = 8 };
+ static io_connect_t gConn[NVRM_XNU_MAX_FD];
+-static struct { void *addr; size_t len; io_connect_t conn; } gMaps[NVRM_XNU_MAX_MAP];
++// token != 0: a hub mapping (see HUB CONNECTIONS below), unmapped by its token and never closing its connection
++static struct { void *addr; size_t len; io_connect_t conn; uint32_t token; } gMaps[NVRM_XNU_MAX_MAP];
+ static pthread_mutex_t gLock = PTHREAD_MUTEX_INITIALIZER;
+ // THE CONNECTION POOL — .
+ // NVK does open(node) → RM_MAP_MEMORY(fd) → mmap(fd) → close(fd) PER MAPPING, because on Linux an
+@@ -218,6 +219,154 @@ void *nvrm_xnu_mmap_wc(int fd, size_t length, int writeCombine)
+     }
+     return (void *)(uintptr_t)addr;
+ }
++// ═══ HUB CONNECTIONS - many mappings on one connection ═══════════════════════════════════════════════════════════════
++// The kext keeps one pending mapping context per connection, so the old contract (above and below) is one connection
++// per live mapping: Cyberpunk held ~275, every one an IOKit user client opened and closed across the accelerator's
++// arbitration lock. A kext that answers selector 7 with bit0 consumes the context when a mapping is made with a token
++// memory type (bit 31 set, unique per mapping on that connection) and keeps the descriptor under the token, so:
++//   - RM_MAP_MEMORY on a hub fd is accepted again right after its mapping is made;
++//   - the unmap, which IOKit resolves by asking clientMemoryForType for the same type and finding the mapping on the
++//     descriptor it gets back, finds it - type 0 on a reused connection would get a fresh descriptor, find nothing,
++//     and leave the mapping (and its VRAM) until the connection closed;
++//   - selector 8 then forgets the token.
++// A hub is NVRM_XNU_HUBS connections per node type (default 4), each serialised across RM_MAP_MEMORY + map by its own
++// mutex (between the two the context is the only thing naming what to map). Hubs are never closed or pooled.
++// Old kext (selector 7 refused) or NVRM_ONE_CONN_PER_MAP=1: every map takes the old path, code path for code path.
++#define NVRM_XNU_HUBS_MAX 16
++#define NVRM_XNU_HUB_LIVE_MAX 3840   // per hub; the kext keeps at most 4096 tokens per client
++// retired: the kext refused a token map on this hub (its token table full, or the context moved), so its context may still
++// be pending. It keeps serving the unmaps of its live mappings but takes no new map; re-binding it to clear the context is
++// not done, because a re-bind would also drop what those mappings depend on.
++static struct nvrm_hub { int fd; io_connect_t conn; pthread_mutex_t mu; uint32_t next; int live; int retired; } gHub[2][NVRM_XNU_HUBS_MAX];
++// Hubs per type; 0 = old path, -1 = not decided yet. Published with a release store only after every gHub entry is set
++// up, and read with an acquire load: a thread making its first map while another is still in hub_setup used to see the
++// count before the entries existed, lock a zeroed mutex (EINVAL on macOS, so no lock at all) and map through fd 0.
++static int gHubN = -1;
++static pthread_mutex_t gHubInit = PTHREAD_MUTEX_INITIALIZER;
++static unsigned gHubRR;
++static uint64_t gHubMaps, gHubFallbacks;
++static void hub_setup(const char *node)
++{
++    pthread_mutex_lock(&gHubInit);
++    if (gHubN < 0) {
++        const char *off = nvmtl_cfg_getenv("NVRM_ONE_CONN_PER_MAP");
++        const char *hn = nvmtl_cfg_getenv("NVRM_XNU_HUBS");
++        long n = hn && *hn ? strtol(hn, NULL, 10) : 4;
++        if (n < 0) n = 0;
++        if (n > NVRM_XNU_HUBS_MAX) n = NVRM_XNU_HUBS_MAX;
++        uint64_t caps = 0; int asked = 0;
++        if (!(off && off[0] == '1') && n > 0) {
++            int fd = nvrm_xnu_open(node);
++            io_connect_t c = fd >= 0 ? gConn[fd] : 0;
++            uint32_t one = 1;
++            asked = c && IOConnectCallScalarMethod(c, SEL_CAPS, NULL, 0, &caps, &one) == KERN_SUCCESS;
++            if (fd >= 0) nvrm_xnu_close(fd);
++        }
++        const int hubs = (asked && (caps & 1)) ? (int)n : 0;
++        for (int t = 0; t < 2; t++) for (int i = 0; i < NVRM_XNU_HUBS_MAX; i++) {
++            gHub[t][i].fd = -1; pthread_mutex_init(&gHub[t][i].mu, NULL); gHub[t][i].next = 1;
++        }
++        fprintf(stderr, "nvrm_xnu: %s (NVRM_ONE_CONN_PER_MAP=%s, kext token maps %s)\n",
++                hubs ? "CPU mappings share hub connections" : "one connection per CPU mapping",
++                off ? off : "unset", asked ? ((caps & 1) ? "yes" : "no") : "not asked or refused");
++        __atomic_store_n(&gHubN, hubs, __ATOMIC_RELEASE);
++    }
++    pthread_mutex_unlock(&gHubInit);
++}
++// A hub fd for this node with its mutex held, or -1 (take the old path). The hub's connection is opened on first use.
++int nvrm_xnu_hub_begin(const char *node)
++{
++    int hubs = __atomic_load_n(&gHubN, __ATOMIC_ACQUIRE);
++    if (hubs < 0) { hub_setup(node); hubs = __atomic_load_n(&gHubN, __ATOMIC_ACQUIRE); }
++    if (hubs == 0) return -1;
++    const int type = (node && strstr(node, "ctl")) ? 0 : 1;
++    const unsigned start = __atomic_fetch_add(&gHubRR, 1, __ATOMIC_RELAXED);
++    struct nvrm_hub *h = NULL;
++    for (int k = 0; k < hubs && !h; k++) {   // an idle hub first
++        struct nvrm_hub *x = &gHub[type][(start + (unsigned)k) % (unsigned)hubs];
++        if (__atomic_load_n(&x->retired, __ATOMIC_ACQUIRE)) continue;
++        if (pthread_mutex_trylock(&x->mu) == 0) h = x;
++    }
++    for (int k = 0; k < hubs && !h; k++) {   // all busy: wait for the first one that is not retired
++        struct nvrm_hub *x = &gHub[type][(start + (unsigned)k) % (unsigned)hubs];
++        if (!__atomic_load_n(&x->retired, __ATOMIC_ACQUIRE)) { pthread_mutex_lock(&x->mu); h = x; }
++    }
++    if (!h) { __atomic_add_fetch(&gHubFallbacks, 1, __ATOMIC_RELAXED); return -1; }   // every hub retired: old path
++    if (__atomic_load_n(&h->retired, __ATOMIC_ACQUIRE)) {   // retired while this thread waited for it
++        pthread_mutex_unlock(&h->mu); __atomic_add_fetch(&gHubFallbacks, 1, __ATOMIC_RELAXED); return -1;
++    }
++    if (__atomic_load_n(&h->live, __ATOMIC_RELAXED) >= NVRM_XNU_HUB_LIVE_MAX) { pthread_mutex_unlock(&h->mu); __atomic_add_fetch(&gHubFallbacks, 1, __ATOMIC_RELAXED); return -1; }
++    if (h->fd < 0) {
++        int fd = nvrm_xnu_open(node);
++        if (fd < 0) { pthread_mutex_unlock(&h->mu); return -1; }
++        h->fd = fd; h->conn = gConn[fd];
++    }
++    return h->fd;
++}
++static struct nvrm_hub *hub_of_fd(int fd)
++{
++    for (int t = 0; t < 2; t++) for (int i = 0; i < NVRM_XNU_HUBS_MAX; i++) if (gHub[t][i].fd == fd) return &gHub[t][i];
++    return NULL;
++}
++// Map the context RM just put on this hub (caller holds the hub from nvrm_xnu_hub_begin). On MAP_FAILED, *fallback = 1
++// means the kext kept the context (no room for the token, or the context moved): the hub is retired and the caller
++// makes this mapping on a connection of its own instead. *fallback = 0 is an ordinary failure.
++void *nvrm_xnu_hub_mmap(int fd, size_t length, int writeCombine, int *fallback)
++{
++    *fallback = 0;
++    struct nvrm_hub *h = hub_of_fd(fd);
++    if (!h) { errno = EBADF; return MAP_FAILED; }
++    uint32_t token = 0x80000000u | (h->next++ & 0x7FFFFFFFu);
++    if (token == 0x80000000u) token = 0x80000000u | (h->next++ & 0x7FFFFFFFu);
++    mach_vm_address_t addr = 0; mach_vm_size_t len = 0;
++    kern_return_t kr = IOConnectMapMemory64(h->conn, token, mach_task_self(), &addr, &len,
++                                            kIOMapAnywhere | (writeCombine ? kIOMapWriteCombineCache : 0));
++    if (kr != KERN_SUCCESS) {
++        fprintf(stderr, "nvrm_xnu: IOConnectMapMemory64 (hub token 0x%08x) -> 0x%08x\n", token, kr);
++        // The kext may have kept the token before the mapping itself failed (the descriptor is registered first, then
++        // IOKit maps it): forget it, or the token and its descriptor stay until the process exits and fill the table.
++        // An unknown token is not an error.
++        uint64_t in = token; IOConnectCallScalarMethod(h->conn, SEL_FORGET_TOKEN, &in, 1, NULL, NULL);
++        if (kr == kIOReturnNoResources || kr == kIOReturnBusy) {
++            __atomic_store_n(&h->retired, 1, __ATOMIC_RELEASE);
++            __atomic_add_fetch(&gHubFallbacks, 1, __ATOMIC_RELAXED);
++            fprintf(stderr, "nvrm_xnu: hub fd %d retired (%s); this mapping takes its own connection\n", fd,
++                    kr == kIOReturnNoResources ? "kext token table full" : "mapping context moved");
++            *fallback = 1;
++        }
++        errno = EIO; return MAP_FAILED;
++    }
++    pthread_mutex_lock(&gLock);
++    int stored = 0;
++    for (int i = 0; i < NVRM_XNU_MAX_MAP; i++) if (!gMaps[i].addr) { gMaps[i].addr = (void *)(uintptr_t)addr; gMaps[i].len = (size_t)len; gMaps[i].conn = h->conn; gMaps[i].token = token; stored = 1; break; }
++    pthread_mutex_unlock(&gLock);
++    if (!stored) {
++        // untracked: it could never be unmapped. Undo it now rather than leak it.
++        IOConnectUnmapMemory64(h->conn, token, mach_task_self(), addr);
++        uint64_t in = token; IOConnectCallScalarMethod(h->conn, SEL_FORGET_TOKEN, &in, 1, NULL, NULL);
++        errno = ENOMEM; return MAP_FAILED;
++    }
++    __atomic_add_fetch(&gMapsLive, 1, __ATOMIC_RELAXED);
++    __atomic_add_fetch(&gHubMaps, 1, __ATOMIC_RELAXED);
++    __atomic_add_fetch(&h->live, 1, __ATOMIC_RELAXED);
++    return (void *)(uintptr_t)addr;
++}
++// Release the hub. `stale`: RM_MAP_MEMORY succeeded but no mapping was made, so its context is still pending on this
++// connection and the next RM_MAP_MEMORY would be refused - re-binding the fd is what clears a stale context (sBindFd).
++void nvrm_xnu_hub_end(int fd, int stale)
++{
++    struct nvrm_hub *h = hub_of_fd(fd);
++    if (!h) return;
++    if (stale) { uint64_t in = (uint64_t)fd; IOConnectCallScalarMethod(h->conn, SEL_BINDFD, &in, 1, NULL, NULL); }
++    pthread_mutex_unlock(&h->mu);
++}
++void nvrm_xnu_hub_stats(uint64_t *maps, uint64_t *fallbacks, int *hubs)
++{
++    *maps = __atomic_load_n(&gHubMaps, __ATOMIC_RELAXED); *fallbacks = __atomic_load_n(&gHubFallbacks, __ATOMIC_RELAXED);
++    const int n = __atomic_load_n(&gHubN, __ATOMIC_ACQUIRE);
++    *hubs = n < 0 ? 0 : n;
++}
++
+ // NVK does open(node) → RM_MAP_MEMORY(fd) → mmap(fd) → close(fd) and keeps using the mapping: on Linux a mapping
+ // outlives its fd. Here a mapping belongs to the IOKit CONNECTION, and IOServiceClose unmaps it (first triangle run
+ // died in memset on a page that had just been mapped). So close only releases the fd number; the connection is
+@@ -227,14 +376,24 @@ static int maps_on(io_connect_t conn) { int n = 0; for (int i = 0; i < NVRM_XNU_
+ static int pending_close(io_connect_t conn) { for (int i = 0; i < NVRM_XNU_MAX_MAP; i++) if (gPendingClose[i] == conn) return i; return -1; }
+ int nvrm_xnu_munmap(void *addr, size_t length)
+ {
+-    io_connect_t conn = 0;
++    io_connect_t conn = 0; uint32_t token = 0;
+     pthread_mutex_lock(&gLock);
+-    for (int i = 0; i < NVRM_XNU_MAX_MAP; i++) if (gMaps[i].addr == addr) { conn = gMaps[i].conn; gMaps[i].addr = NULL; break; }
++    for (int i = 0; i < NVRM_XNU_MAX_MAP; i++) if (gMaps[i].addr == addr) { conn = gMaps[i].conn; token = gMaps[i].token; gMaps[i].addr = NULL; gMaps[i].token = 0; break; }
+     int closeNow = 0, pi = -1;
+-    if (conn && maps_on(conn) == 0 && (pi = pending_close(conn)) >= 0) { gPendingClose[pi] = 0; closeNow = 1; }
++    if (conn && !token && maps_on(conn) == 0 && (pi = pending_close(conn)) >= 0) { gPendingClose[pi] = 0; closeNow = 1; }
+     pthread_mutex_unlock(&gLock);
+     if (!conn) { errno = EINVAL; return -1; }
+     __atomic_sub_fetch(&gMapsLive, 1, __ATOMIC_RELAXED);
++    if (token) {   // a hub mapping: unmap by its token, then the kext drops the descriptor; the hub stays open
++        kern_return_t kr = IOConnectUnmapMemory64(conn, token, mach_task_self(), (mach_vm_address_t)(uintptr_t)addr);
++        if (kr != KERN_SUCCESS) {
++            static int told; if (!told) { told = 1; fprintf(stderr, "nvrm_xnu: hub unmap of token 0x%08x -> 0x%08x (mapping stays until exit)\n", token, kr); }
++        }
++        uint64_t in = token; IOConnectCallScalarMethod(conn, SEL_FORGET_TOKEN, &in, 1, NULL, NULL);
++        for (int t = 0; t < 2; t++) for (int i = 0; i < NVRM_XNU_HUBS_MAX; i++)
++            if (gHub[t][i].conn == conn) __atomic_sub_fetch(&gHub[t][i].live, 1, __ATOMIC_RELAXED);
++        return kr == KERN_SUCCESS ? 0 : (errno = EIO, -1);
++    }
+     IOConnectUnmapMemory64(conn, 0, mach_task_self(), (mach_vm_address_t)(uintptr_t)addr);
+     if (closeNow) conn_close(conn);
+     return 0;
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.h b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.h
+index 7824294..edc02b9 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.h
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.h
+@@ -17,6 +17,11 @@ int   nvrm_xnu_munmap(void *addr, size_t length);
+ int   nvrm_xnu_close(int fd);
+ int64_t nvrm_xnu_wait_event(int fd, uint32_t seen, uint32_t timeout_us);   /* b73: kext selector 6; -1 = no such selector */
+ void  nvrm_xnu_live(int64_t *conns, int64_t *maps);   /* connections open, CPU mappings alive (census) */
++/* hub connections (many mappings per connection; kext selector 7 bit0): begin returns a hub fd with its lock held or -1 */
++int   nvrm_xnu_hub_begin(const char *node);
++void *nvrm_xnu_hub_mmap(int fd, size_t length, int writeCombine, int *fallback);   /* fallback: map on an own connection */
++void  nvrm_xnu_hub_end(int fd, int stale);   /* stale: re-bind the hub fd to clear a context RM may have left */
++void  nvrm_xnu_hub_stats(uint64_t *maps, uint64_t *fallbacks, int *hubs);
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu_hub_test.c b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu_hub_test.c
+new file mode 100644
+index 0000000..0e923f8
+--- /dev/null
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu_hub_test.c
+@@ -0,0 +1,328 @@
++/*
++ * Copyright 2026 NullMoth Systems
++ * SPDX-License-Identifier: MIT
++ *
++ * Unit test for hub connections (nvrm_xnu.c + nvRmApi.c, unmodified, linked against this file's mock IOKit + mock
++ * NVRM kext). The mock models the parts of the kext and of IOKit the change depends on:
++ *   - one pending mapping context per connection; RM_MAP_MEMORY on an fd whose connection has one is refused
++ *     (NV_ERR_STATE_IN_USE); binding a connection to a real fd clears a stale one (sBindFd);
++ *   - clientMemoryForType: type 0 maps the pending context and leaves it (old contract); a token type (new kext only)
++ *     consumes it and keeps the descriptor under the token; selector 7 = caps, selector 8 = forget token;
++ *   - IOKit's unmap: clientMemoryForType(type) is asked again and the mapping is found only on the descriptor it
++ *     returns (kIOMapReference); a connection's mappings all go when it is closed.
++ * Run one scenario per process (nvrm_xnu keeps static state):
++ *   new-new | old-kext | old-nvk | forced-old | stress | neg-fresh-md | neg-no-forget
++ *   map-fails | kext-full | rm-fails | race
++ * The last four each have a negative control: built against the sources of 1a6a490 (before these fixes) the arm named
++ * for the fix fails. tools: build with -DHUB_TEST_SRC to say which sources were linked, only for the banner.
++ *   map-fails  every 7th token map: the kext keeps the token, then the mapping fails (createMappingInTask refused)
++ *   kext-full  the kext keeps at most 3 tokens per connection and answers NoResources past that
++ *   rm-fails   every 5th RM_MAP_MEMORY is refused but leaves a context pending on the fd
++ *   race       a second thread makes its first map while the first thread is still inside hub set-up
++ */
++#include <IOKit/IOKitLib.h>
++#include <pthread.h>
++#include <stdatomic.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include "nvRmApi.h"
++#include "nv_escape.h"
++#include "nv-unix-nvos-params-wrappers.h"
++#include "nvstatus.h"
++
++/* ---- mock kext ---------------------------------------------------------------------------------------------------- */
++static int KEXT_NEW = 1, KEXT_FRESH_MD = 0, KEXT_IGNORE_FORGET = 0, KEXT_FAIL_AFTER_REG = 0, KEXT_TOKEN_CAP = 0, RM_FAIL_LEAVES = 0;
++static atomic_int rebinds, token_maps, rm_calls;
++#define MAXC 4096
++#define MAXM 65536
++struct mconn { int open, bound; int pending; uint32_t pend_hmem; uint32_t ntok; struct { uint32_t tok, md; } tok[8192]; };
++static struct mconn C[MAXC];
++static struct { int live; io_connect_t conn; uint64_t addr; uint32_t md, hmem; } M[MAXM];
++static uint32_t md_hmem[1 << 20];
++static pthread_mutex_t K = PTHREAD_MUTEX_INITIALIZER;
++static atomic_int conns_open, conns_peak, kmaps_live, kmaps_peak, in_use_refusals, wrong_memory, rm_unmaps, rm_maps;
++static uint32_t next_md = 1; static uint64_t next_addr = 0x200000000ull;
++static void peak(atomic_int *v, atomic_int *p) { int x = atomic_load(v), q = atomic_load(p); while (x > q && !atomic_compare_exchange_weak(p, &q, x)) {} }
++
++const mach_port_t kIOMainPortDefault = 0;
++CFMutableDictionaryRef IOServiceMatching(const char *name) { (void)name; return NULL; }
++io_service_t IOServiceGetMatchingService(mach_port_t p, CFDictionaryRef m) { (void)p; (void)m; return 1; }
++kern_return_t IOObjectRelease(io_object_t o) { (void)o; return 0; }
++kern_return_t IOServiceOpen(io_service_t s, task_port_t t, uint32_t type, io_connect_t *out)
++{
++   (void)s; (void)t; (void)type;
++   pthread_mutex_lock(&K);
++   int i = 1; while (i < MAXC && C[i].open) i++;
++   if (i == MAXC) { pthread_mutex_unlock(&K); return kIOReturnNoResources; }
++   memset(&C[i], 0, sizeof C[i]); C[i].open = 1; C[i].bound = -1;
++   pthread_mutex_unlock(&K);
++   atomic_fetch_add(&conns_open, 1); peak(&conns_open, &conns_peak);
++   *out = (io_connect_t)i; return 0;
++}
++kern_return_t IOServiceClose(io_connect_t c)
++{
++   pthread_mutex_lock(&K);
++   for (int i = 0; i < MAXM; i++) if (M[i].live && M[i].conn == c) { M[i].live = 0; atomic_fetch_sub(&kmaps_live, 1); }
++   C[c].open = 0; C[c].ntok = 0; C[c].pending = 0;
++   pthread_mutex_unlock(&K);
++   atomic_fetch_sub(&conns_open, 1);
++   return 0;
++}
++static int conn_by_fd(int fd) { for (int i = 1; i < MAXC; i++) if (C[i].open && C[i].bound == fd) return i; return 0; }
++kern_return_t IOConnectCallScalarMethod(mach_port_t c, uint32_t sel, const uint64_t *in, uint32_t nin, uint64_t *out, uint32_t *nout)
++{
++   (void)nin;
++   pthread_mutex_lock(&K);
++   kern_return_t r = 0;
++   if (sel == 3) {                     /* bind fd */
++      int64_t v = (int64_t)in[0]; if (v >= 0 && C[c].bound >= 0) atomic_fetch_add(&rebinds, 1); C[c].bound = (int)v;
++      if (v >= 0) C[c].pending = 0;    /* a real bind clears a stale context */
++   } else if (sel == 6) { if (out) out[0] = 0; }
++   else if (sel == 7) { if (KEXT_NEW) { out[0] = 1; if (nout) *nout = 1; } else r = kIOReturnBadArgument; }
++   else if (sel == 8) {
++      if (!KEXT_NEW) r = kIOReturnBadArgument;
++      else if (!KEXT_IGNORE_FORGET)
++         for (uint32_t i = 0; i < C[c].ntok; i++) if (C[c].tok[i].tok == (uint32_t)in[0]) { C[c].tok[i] = C[c].tok[--C[c].ntok]; break; }
++   } else r = kIOReturnBadArgument;
++   pthread_mutex_unlock(&K);
++   return r;
++}
++kern_return_t IOConnectCallMethod(mach_port_t c, uint32_t sel, const uint64_t *in, uint32_t nin, const void *is, size_t isz,
++                                  uint64_t *out, uint32_t *nout, void *os, size_t *osz)
++{
++   (void)c; (void)nin; (void)isz; (void)out; (void)nout; (void)osz; (void)is;
++   if (sel != 1) return kIOReturnBadArgument;
++   const uint32_t cmd = (uint32_t)in[0];
++   pthread_mutex_lock(&K);
++   if (cmd == NV_ESC_RM_MAP_MEMORY) {
++      nv_ioctl_nvos33_parameters_with_fd *p = os;
++      int t = conn_by_fd(p->fd);
++      if (!t) p->params.status = NV_ERR_INVALID_ARGUMENT;
++      else if (C[t].pending) { p->params.status = NV_ERR_STATE_IN_USE; atomic_fetch_add(&in_use_refusals, 1); }
++      else if (RM_FAIL_LEAVES && (atomic_fetch_add(&rm_calls, 1) + 1) % 5 == 0) {
++         C[t].pending = 1; C[t].pend_hmem = 0; p->params.status = NV_ERR_GENERIC;   /* refused, context left behind */
++      }
++      else { C[t].pending = 1; C[t].pend_hmem = p->params.hMemory; p->params.status = NV_OK;
++             p->params.pLinearAddress = (void *)(uintptr_t)(0x1000ull * p->params.hMemory); atomic_fetch_add(&rm_maps, 1); }
++   } else if (cmd == NV_ESC_RM_UNMAP_MEMORY) {
++      NVOS34_PARAMETERS *p = os; p->status = NV_OK; atomic_fetch_add(&rm_unmaps, 1);   /* by handle + address: no fd */
++   }
++   pthread_mutex_unlock(&K);
++   return 0;
++}
++/* the kext's clientMemoryForType; K held */
++static kern_return_t cmft(io_connect_t c, uint32_t type, uint32_t *md)
++{
++   const int token = (type & 0x80000000u) != 0;
++   if (type && !token) return kIOReturnBadArgument;
++   if (token && !KEXT_NEW) return kIOReturnBadArgument;
++   if (token && !KEXT_FRESH_MD)
++      for (uint32_t i = 0; i < C[c].ntok; i++) if (C[c].tok[i].tok == type) { *md = C[c].tok[i].md; return 0; }
++   if (!C[c].pending) return kIOReturnBadArgument;
++   if (token && KEXT_TOKEN_CAP && C[c].ntok >= (uint32_t)KEXT_TOKEN_CAP) return kIOReturnNoResources;   /* context kept */
++   *md = next_md++; md_hmem[*md & ((1 << 20) - 1)] = C[c].pend_hmem;
++   if (token) {
++      C[c].pending = 0;                                         /* consumed */
++      if (!KEXT_FRESH_MD) { C[c].tok[C[c].ntok].tok = type; C[c].tok[C[c].ntok].md = *md; C[c].ntok++; }
++   }
++   return 0;
++}
++kern_return_t IOConnectMapMemory64(io_connect_t c, uint32_t type, task_port_t t, mach_vm_address_t *addr, mach_vm_size_t *len, IOOptionBits o)
++{
++   (void)t; (void)o;
++   pthread_mutex_lock(&K);
++   uint32_t md; kern_return_t r = cmft(c, type, &md);
++   /* the kext registered the token and consumed the context, then IOKit could not map it */
++   if (r == 0 && (type & 0x80000000u) && KEXT_FAIL_AFTER_REG && (atomic_fetch_add(&token_maps, 1) + 1) % 7 == 0) r = kIOReturnNoMemory;
++   if (r == 0) {
++      int i = 0; while (i < MAXM && M[i].live) i++;
++      M[i].live = 1; M[i].conn = c; M[i].addr = next_addr; M[i].md = md; M[i].hmem = md_hmem[md & ((1 << 20) - 1)];
++      *addr = next_addr; *len = 0x10000; next_addr += 0x100000;
++      atomic_fetch_add(&kmaps_live, 1); peak(&kmaps_live, &kmaps_peak);
++   }
++   pthread_mutex_unlock(&K);
++   return r;
++}
++kern_return_t IOConnectUnmapMemory64(io_connect_t c, uint32_t type, task_port_t t, mach_vm_address_t addr)
++{
++   (void)t;
++   pthread_mutex_lock(&K);
++   uint32_t md; kern_return_t r = cmft(c, type, &md);
++   if (r == 0) {
++      r = kIOReturnBadArgument;   /* kIOMapReference: only a mapping of THIS descriptor at this address */
++      for (int i = 0; i < MAXM; i++) if (M[i].live && M[i].conn == c && M[i].addr == addr && M[i].md == md) {
++         M[i].live = 0; atomic_fetch_sub(&kmaps_live, 1); r = 0; break; }
++   }
++   pthread_mutex_unlock(&K);
++   return r;
++}
++static uint32_t hmem_at(void *addr)
++{
++   uint32_t h = 0; pthread_mutex_lock(&K);
++   for (int i = 0; i < MAXM; i++) if (M[i].live && M[i].addr == (uint64_t)(uintptr_t)addr) { h = M[i].hmem; break; }
++   pthread_mutex_unlock(&K); return h;
++}
++
++/* ---- driver ------------------------------------------------------------------------------------------------------- */
++static int fails, arms;
++#define ARM(name, cond) do { arms++; if (!(cond)) { fails++; printf("FAIL  %s\n", name); } else printf("ok    %s\n", name); } while (0)
++static NvRmApi api;
++static void *worker(void *arg)
++{
++   unsigned s = (unsigned)(uintptr_t)arg * 2654435761u;
++   NvRmApiMapping held[16]; uint32_t hm[16]; int n = 0;
++   for (int it = 0; it < 3000; it++) {
++      s = s * 1103515245u + 12345u;
++      if (n < 16 && (n == 0 || (s >> 9) & 1)) {
++         uint32_t h = 1 + (s % 100000);
++         NvRmApiMapping m = { 0 };
++         if (nvRmApiMapMemory(&api, 1, h, 0, 0x10000, (s >> 3) & 1, 0, &m) == NV_OK) {
++            if (hmem_at(m.address) != h) atomic_fetch_add(&wrong_memory, 1);
++            held[n] = m; hm[n] = h; n++;
++         }
++      } else if (n) {
++         int k = (int)((s >> 5) % (unsigned)n);
++         nvRmApiUnmapMemory(&api, 1, hm[k], 0, &held[k]); held[k] = held[n - 1]; hm[k] = hm[n - 1]; n--;
++      }
++   }
++   while (n) { n--; nvRmApiUnmapMemory(&api, 1, hm[n], 0, &held[n]); }
++   return NULL;
++}
++static int total_tokens(void) { int t = 0; for (int i = 1; i < MAXC; i++) if (C[i].open) t += (int)C[i].ntok; return t; }
++
++/* race: stderr is replaced by a stream whose writer, when hub set-up announces its decision, starts a second thread that
++   makes its first map and waits (up to 300 ms) for it. Before the fix the decision was published before that line and
++   the hub entries set up after it, so the second thread saw hubs that did not exist yet. */
++static pthread_mutex_t RaceMu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t RaceCv = PTHREAD_COND_INITIALIZER;
++static int race_started, race_done; static NvU32 race_b_status = 0xFFFFFFFF; static uint32_t race_b_hmem; static NvRmApiMapping race_b_map;
++static void *race_b(void *arg)
++{
++   (void)arg;
++   race_b_status = nvRmApiMapMemory(&api, 1, 222, 0, 0x10000, false, 0, &race_b_map);
++   race_b_hmem = race_b_status == NV_OK ? hmem_at(race_b_map.address) : 0;
++   pthread_mutex_lock(&RaceMu); race_done = 1; pthread_cond_broadcast(&RaceCv); pthread_mutex_unlock(&RaceMu);
++   return NULL;
++}
++static int race_write(void *cookie, const char *buf, int n)
++{
++   (void)cookie;
++   write(2, buf, (size_t)n);
++   if (!race_started && memmem(buf, (size_t)n, "share hub connections", 21)) {
++      race_started = 1; pthread_t t; pthread_create(&t, NULL, race_b, NULL); pthread_detach(t);
++      struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 300000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
++      pthread_mutex_lock(&RaceMu); while (!race_done) if (pthread_cond_timedwait(&RaceCv, &RaceMu, &ts)) break; pthread_mutex_unlock(&RaceMu);
++   }
++   return n;
++}
++
++int main(int argc, char **argv)
++{
++   const char *sc = argc > 1 ? argv[1] : "new-new";
++   const int stress = !strcmp(sc, "stress");
++   if (!strcmp(sc, "old-kext")) KEXT_NEW = 0;
++   if (!strcmp(sc, "old-nvk") || !strcmp(sc, "forced-old")) setenv("NVRM_ONE_CONN_PER_MAP", "1", 1);
++   if (!strcmp(sc, "neg-fresh-md")) KEXT_FRESH_MD = 1;
++   if (!strcmp(sc, "neg-no-forget")) KEXT_IGNORE_FORGET = 1;
++   if (!strcmp(sc, "map-fails")) KEXT_FAIL_AFTER_REG = 1;
++   if (!strcmp(sc, "kext-full")) KEXT_TOKEN_CAP = 3;
++   if (!strcmp(sc, "rm-fails")) RM_FAIL_LEAVES = 1;
++#ifdef HUB_TEST_SRC
++   printf("sources: %s\n", HUB_TEST_SRC);
++#endif
++   api.fd = nvrm_xnu_open("/dev/nvidiactl"); api.hClient = 1; api.nodeName = "/dev/nvidia0";
++   const int ctl_conns = atomic_load(&conns_open);
++   printf("scenario %s (kext %s)\n", sc, KEXT_NEW ? "new" : "old");
++
++   if (!strcmp(sc, "race")) {
++      stderr = funopen(NULL, NULL, race_write, NULL, NULL); setvbuf(stderr, NULL, _IONBF, 0);
++      NvRmApiMapping a = { 0 };
++      const NvU32 sa = nvRmApiMapMemory(&api, 1, 111, 0, 0x10000, false, 0, &a);
++      const uint32_t ha = sa == NV_OK ? hmem_at(a.address) : 0;
++      pthread_mutex_lock(&RaceMu); while (race_started && !race_done) pthread_cond_wait(&RaceCv, &RaceMu); pthread_mutex_unlock(&RaceMu);
++      printf("      first map: status 0x%x memory %u; racing first map: status 0x%x memory %u\n", sa, ha, race_b_status, race_b_hmem);
++      ARM("race: the second thread really did start inside hub set-up", race_started && race_done);
++      ARM("race: the first thread's map succeeds and shows its own memory", sa == NV_OK && ha == 111);
++      ARM("race: the racing first map succeeds and shows its own memory (no zeroed hub, no fd 0)", race_b_status == NV_OK && race_b_hmem == 222);
++      if (sa == NV_OK) nvRmApiUnmapMemory(&api, 1, 111, 0, &a);
++      if (race_b_status == NV_OK) nvRmApiUnmapMemory(&api, 1, 222, 0, &race_b_map);
++      ARM("race: nothing left mapped and no token left", atomic_load(&kmaps_live) == 0 && total_tokens() == 0);
++      printf("%d arms, %d failed\n", arms, fails);
++      return fails != 0;
++   }
++   if (!strcmp(sc, "map-fails") || !strcmp(sc, "kext-full") || !strcmp(sc, "rm-fails")) {
++      enum { N = 200 };
++      static NvRmApiMapping m[N]; static int okm[N];
++      int nok = 0, wrong = 0;
++      for (int i = 0; i < N; i++) {
++         okm[i] = nvRmApiMapMemory(&api, 1, 100 + i, 0, 0x10000, i & 1, 0, &m[i]) == NV_OK;
++         if (okm[i]) { nok++; if (hmem_at(m[i].address) != (uint32_t)(100 + i)) wrong++; }
++      }
++      const int tokens_mapped = total_tokens();
++      uint64_t hm = 0, hf = 0; int hubs = 0; nvrm_xnu_hub_stats(&hm, &hf, &hubs);
++      for (int i = 0; i < N; i++) if (okm[i]) nvRmApiUnmapMemory(&api, 1, 100 + i, 0, &m[i]);
++      printf("      %d of %d maps succeeded, %d wrong memory, %d tokens while mapped (%d live maps), %d tokens left, %d refused for a "
++             "pending context, %d re-binds, RM maps %d / unmaps %d, hub maps %llu fallbacks %llu\n", nok, N, wrong, tokens_mapped, nok,
++             total_tokens(), atomic_load(&in_use_refusals), atomic_load(&rebinds), atomic_load(&rm_maps), atomic_load(&rm_unmaps),
++             (unsigned long long)hm, (unsigned long long)hf);
++      ARM("every map that succeeded shows the memory its own RM_MAP_MEMORY named", wrong == 0);
++      ARM("no mapping left in the kernel after unmap", atomic_load(&kmaps_live) == 0);
++      if (!strcmp(sc, "map-fails")) {
++         ARM("map-fails: the maps the kext let fail are the only failures (every 7th token map)", nok == N - (int)(atomic_load(&token_maps) / 7));
++         ARM("map-fails: a failed map leaves no token behind - selector 8 is sent for it", total_tokens() == 0);
++         ARM("map-fails: the hub keeps mapping after a failure (nothing refused for a pending context)", atomic_load(&in_use_refusals) == 0);
++      } else if (!strcmp(sc, "kext-full")) {
++         ARM("kext-full: every map succeeds - past the kext's token limit maps take their own connection", nok == N);
++         ARM("kext-full: no hub was re-bound for it", atomic_load(&rebinds) == 0);
++         ARM("kext-full: RM's half of every retried map was undone (RM maps == RM unmaps)", atomic_load(&rm_maps) == atomic_load(&rm_unmaps));
++         ARM("kext-full: the fallback is counted", hf > 0);
++      } else {
++         ARM("rm-fails: exactly the maps RM refused failed (every 5th RM_MAP_MEMORY)", nok == N - atomic_load(&rm_calls) / 5);
++         ARM("rm-fails: a refused RM_MAP_MEMORY that left a context does not block the next map (re-bound)", atomic_load(&in_use_refusals) == 0);
++         ARM("rm-fails: no token left", total_tokens() == 0);
++      }
++      printf("%d arms, %d failed\n", arms, fails);
++      return fails != 0;
++   }
++   if (stress) {
++      pthread_t t[8];
++      for (int i = 0; i < 8; i++) pthread_create(&t[i], NULL, worker, (void *)(uintptr_t)(i + 1));
++      for (int i = 0; i < 8; i++) pthread_join(t[i], NULL);
++      printf("      stress: %d RM maps, peak %d kernel mappings on peak %d connections\n",
++             atomic_load(&rm_maps), atomic_load(&kmaps_peak), atomic_load(&conns_peak));
++      ARM("stress: every mapping shows the memory its own RM_MAP_MEMORY named (hub serialisation holds)", atomic_load(&wrong_memory) == 0);
++      ARM("stress: no RM_MAP_MEMORY refused for a context still pending", atomic_load(&in_use_refusals) == 0);
++      ARM("stress: every mapping released after unmap", atomic_load(&kmaps_live) == 0);
++      ARM("stress: connections stay at the hubs (<= 2 types x 4 + ctl)", atomic_load(&conns_peak) <= ctl_conns + 8);
++      ARM("stress: tokens all forgotten", total_tokens() == 0);
++      printf("%d arms, %d failed\n", arms, fails);
++      return fails != 0;
++   }
++
++   enum { N = 200 };
++   static NvRmApiMapping m[N];
++   int ok = 1;
++   for (int i = 0; i < N; i++) {
++      ok &= nvRmApiMapMemory(&api, 1, 100 + i, 0, 0x10000, i & 1, 0, &m[i]) == NV_OK;
++      ok &= hmem_at(m[i].address) == (uint32_t)(100 + i);
++   }
++   const int conns_mapped = atomic_load(&conns_open) - ctl_conns;
++   const int maps_mapped = atomic_load(&kmaps_live);
++   for (int i = 0; i < N; i++) ok &= nvRmApiUnmapMemory(&api, 1, 100 + i, 0, &m[i]) == NV_OK;
++   const int conns_after = atomic_load(&conns_open) - ctl_conns;
++   printf("      %d mappings: %d connections while mapped, %d kernel mappings live after unmap, %d connections after, "
++          "%d tokens left, %d RM unmaps\n", N, conns_mapped, atomic_load(&kmaps_live), conns_after, total_tokens(), atomic_load(&rm_unmaps));
++   ARM("every map succeeds and maps the memory RM named", ok);
++   ARM("RM's own unmap ran for every mapping (by handle and address, no fd)", atomic_load(&rm_unmaps) == N);
++   ARM("no mapping left in the kernel after unmap", atomic_load(&kmaps_live) == 0);
++   ARM("no RM_MAP_MEMORY refused for a pending context", atomic_load(&in_use_refusals) == 0);
++   if (!strcmp(sc, "new-new") || !strcmp(sc, "neg-fresh-md") || !strcmp(sc, "neg-no-forget")) {
++      ARM("hubs: 200 live mappings on at most 8 connections (was 200)", maps_mapped == N && conns_mapped <= 8);
++      ARM("hubs: every token forgotten after its unmap", total_tokens() == 0);
++   } else {
++      ARM("old path: one connection per live mapping, exactly as before", conns_mapped == N);
++      ARM("old path: every connection closed with its mapping", conns_after == 0);
++   }
++   printf("%d arms, %d failed\n", arms, fails);
++   return fails != 0;
++}
