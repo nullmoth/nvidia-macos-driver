@@ -69,6 +69,25 @@ bool NMKbdBacklight::callAsus(uint32_t method, uint32_t argument, uint32_t *resu
     return ok;
 }
 
+// Dell: one SMBIOS call through the WMI method named from _WDG, with the buffer layout in kbl_core.h.
+bool NMKbdBacklight::dellCall(uint32_t in0, uint32_t in1, uint32_t in2, uint32_t *out1, uint32_t *out2) {
+    uint8_t *raw = (uint8_t *)IOMalloc(dellBuf);
+    if (!raw) return false;
+    bzero(raw, dellBuf);
+    kbl_dell_fill(raw, in0, in1, in2, 0);
+    OSObject *params[3] = { OSNumber::withNumber(0ULL, 32), OSNumber::withNumber(1ULL, 32), OSData::withBytes(raw, dellBuf) };
+    OSObject *out = nullptr;
+    IOReturn ret = (params[0] && params[1] && params[2]) ? dev->evaluateObject(dellMethod, &out, params, 3) : kIOReturnNoMemory;
+    for (auto p : params) if (p) p->release();
+    IOFree(raw, dellBuf);
+    if (ret != kIOReturnSuccess) { DBGLOG("nmkbl", "%s failed %x", dellMethod, ret); return false; }
+    auto d = OSDynamicCast(OSData, out);
+    bool ok = d && d->getLength() >= KBL_DELL_BUF;
+    if (ok) { if (out1) *out1 = kbl_dell_output((const uint8_t *)d->getBytesNoCopy(), 1); if (out2) *out2 = kbl_dell_output((const uint8_t *)d->getBytesNoCopy(), 2); }
+    if (out) out->release();
+    return ok;
+}
+
 bool NMKbdBacklight::setLevel(int level) {
     if (!dev) return false;
     switch (backend) {
@@ -76,6 +95,14 @@ bool NMKbdBacklight::setLevel(int level) {
     case IdeaPad: return evalInt("KBLC", kbl_lenovo_set_command(lenovoType, level), nullptr);
     case IdeaPadPlain: return evalInt("SALS", kbl_lenovo_plain_set_argument(level), nullptr);
     case ThinkPad: return evalInt("MLCS", (uint32_t)level, nullptr);
+    case Dell: {
+        uint32_t o1 = 0, o2 = 0;
+        if (!dellCall(1, 0, 0, &o1, &o2)) return false;
+        struct kbl_dell_state st; kbl_dell_parse_state(o1, o2, &st);
+        st.level = level;
+        uint32_t i1, i2; kbl_dell_set_inputs(&st, &i1, &i2);
+        return dellCall(2, i1, i2, nullptr, nullptr);
+    }
     default: return false;
     }
 }
@@ -99,6 +126,12 @@ bool NMKbdBacklight::getLevel(int *level) {
     case ThinkPad:
         if (!evalInt("MLCG", 0, &r) || !kbl_thinkpad_present(r)) return false;
         *level = kbl_thinkpad_level(r); return true;
+    case Dell: {
+        uint32_t o1 = 0, o2 = 0;
+        if (!dellCall(1, 0, 0, &o1, &o2)) return false;
+        struct kbl_dell_state st; kbl_dell_parse_state(o1, o2, &st);
+        *level = st.level > maxLevel_ ? maxLevel_ : st.level; return true;
+    }
     default: return false;
     }
 }
@@ -134,6 +167,39 @@ bool NMKbdBacklight::probeThinkPad() {
     int l; return getLevel(&l);
 }
 
+bool NMKbdBacklight::probeDell() {
+    auto dict = IOService::nameMatching("PNP0C14");
+    if (!dict) return false;
+    auto it = IOService::getMatchingServices(dict);
+    dict->release();
+    if (!it) return false;
+    bool found = false;
+    while (auto obj = it->getNextObject()) {
+        auto d = OSDynamicCast(IOACPIPlatformDevice, obj);
+        OSObject *wdg = nullptr;
+        if (!d || d->evaluateObject("_WDG", &wdg) != kIOReturnSuccess) continue;
+        auto data = OSDynamicCast(OSData, wdg);
+        char name[2];
+        if (data && kbl_dell_wdg_find((const uint8_t *)data->getBytesNoCopy(), data->getLength(), name)) {
+            dev = d;
+            snprintf(dellMethod, sizeof dellMethod, "WM%c%c", name[0], name[1]);
+            found = true;
+        }
+        if (wdg) wdg->release();
+        if (found) break;
+    }
+    it->release();
+    if (!found) return false;
+    backend = Dell;
+    uint32_t o1 = 0, o2 = 0;
+    static const unsigned sizes[2] = { 4096u, 32768u };
+    for (unsigned k = 0; k < 2; k++) {
+        dellBuf = sizes[k];
+        if (dellCall(0, 0, 0, &o1, &o2)) { maxLevel_ = kbl_dell_info_levels(o2); return maxLevel_ > 0; }
+    }
+    return false;
+}
+
 IOService *NMKbdBacklight::probe(IOService *provider, SInt32 *score) {
     if (!IOService::probe(provider, score)) return nullptr;
     uint32_t on = 0;
@@ -149,7 +215,7 @@ IOService *NMKbdBacklight::probe(IOService *provider, SInt32 *score) {
     skipSmc_ = kbl_should_decline(sensor, ali, forced_);   // only the SMC keys are given up; the HID route does not collide
     if (skipSmc_) SYSLOG("nmkbl", "SMCLightSensor owns LKSB/LKSS on this machine; not registering the SMC keys (nmkblforce=1 registers anyway)");
 
-    if (!probeAsus() && !probeIdeaPad() && !probeThinkPad()) { SYSLOG("nmkbl", "no supported keyboard backlight interface found"); dev = nullptr; return nullptr; }
+    if (!probeAsus() && !probeIdeaPad() && !probeThinkPad() && !probeDell()) { SYSLOG("nmkbl", "no supported keyboard backlight interface found"); dev = nullptr; return nullptr; }
     DBGLOG("nmkbl", "backend %d, max level %d", (int)backend, maxLevel_);
 
     setProperty("VersionInfo", kextVersion);
