@@ -28,6 +28,12 @@ pub struct TransformOptions {
     pub kernel_dispatch: Option<crate::reflect::KernelDispatch>,
     pub denorm_flush_to_zero_f32: bool,
     pub raster_sample_count: Option<u32>,
+    /// The caller guarantees that no rasterization rate map can be bound.
+    /// Generic translation must keep rejecting undecoded runtime map data.
+    pub no_rasterization_rate_maps: bool,
+    /// The plugin reserved heap slots 1..5 for typed dummies: a null resource id reads the dummy of the declared
+    /// image dimensionality instead of slot 0 (reflect::BINDLESS_DUMMY_SLOT_*).
+    pub typed_dummy_slots: bool,
     pub runtime_sampler_states: [Option<RuntimeSamplerState>; SAMPLER_ARGUMENT_COUNT_USIZE],
     pub runtime_storage_image_states:
         [Option<RuntimeStorageImageState>; TEXTURE_ARGUMENT_COUNT_USIZE],
@@ -46,6 +52,8 @@ impl Default for TransformOptions {
             kernel_dispatch: None,
             denorm_flush_to_zero_f32: false,
             raster_sample_count: None,
+            no_rasterization_rate_maps: false,
+            typed_dummy_slots: false,
             vertex_amplification_count: 1,
             runtime_sampler_states: [None; SAMPLER_ARGUMENT_COUNT_USIZE],
             runtime_storage_image_states: [None; TEXTURE_ARGUMENT_COUNT_USIZE],
@@ -325,6 +333,8 @@ struct Ctx {
     kernel_workgroup_size_id: Option<Word>,
     kernel_dispatch: crate::reflect::KernelDispatch,
     raster_sample_count: Option<u32>,
+    no_rasterization_rate_maps: bool,
+    typed_dummy_slots: bool,
     vertex_amplification_count: u32,
     runtime_sampler_states: [Option<RuntimeSamplerState>; SAMPLER_ARGUMENT_COUNT_USIZE],
     runtime_storage_image_states: [Option<RuntimeStorageImageState>; TEXTURE_ARGUMENT_COUNT_USIZE],
@@ -417,6 +427,8 @@ impl Ctx {
                 .kernel_dispatch
                 .unwrap_or_else(crate::reflect::KernelDispatch::safe_default),
             raster_sample_count: options.raster_sample_count,
+            no_rasterization_rate_maps: options.no_rasterization_rate_maps,
+            typed_dummy_slots: options.typed_dummy_slots,
             vertex_amplification_count: options.vertex_amplification_count,
             runtime_sampler_states: options.runtime_sampler_states,
             runtime_storage_image_states: options.runtime_storage_image_states,
@@ -2959,6 +2971,7 @@ pub(crate) fn transform_with_options_and_sidecar(
     decorate_ptr_access_chain_base_strides(&mut ctx);
     ctx.emit_sidecar.buffer_root_source_types.clear();
     neutralize_private_placeholder_access_chains(&mut ctx, entry_idx)?;
+    resources::redirect_zero_heap_slots(&mut ctx);
     ctx.phase_type_positions = None;
     ctx.module.types_global_values.append(&mut ctx.new_globals);
     let preserved_pointer_facts = ctx
@@ -3042,6 +3055,23 @@ pub(crate) fn transform_with_options_and_sidecar(
             );
         }
     }
+    // A dispatch-tail guard used to run here: an entry-block test that retired the lanes a Metal
+    // dispatchThreads: grid never creates, by comparing GlobalInvocationId + thread_base against the
+    // threads_per_grid in the dispatch-region push constants. It was removed because both
+    // of its premises were false, and it cost a game run and two crashes to learn that:
+    //  - There is no overshoot to discard. nvmtl_vk_cmd_dispatch_threads already reproduces Metal's exact
+    //    thread count by dispatching a SMALLER-WORKGROUP pipeline variant for the partial group
+    //    (local[d] = threads[d] % tg[d]), so every launched invocation is one Metal would have created.
+    //    That emulation is also strictly better than a guard: it keeps the workgroup size honest, so
+    //    threadgroup-shared reductions and barriers in the tail group still see the right extent.
+    //  - The push constants it read are not always there. Only dispatch_threads and
+    //    dispatch_indirect_tg push the 12-uint region; nvmtl_vk_cmd_dispatch (dispatchThreadgroups:)
+    //    and nvmtl_vk_cmd_dispatch_indirect push nothing, and a kernel reached through either one read
+    //    whatever the previous compute dispatch had left in push-constant state. Lanes of a live kernel
+    //    were retired against a stale grid, which in Cyberpunk showed up as submits/frame climbing 2.5
+    //    -> 30.8 over four seconds and then FAULT_PDE at an unmapped 0x2ef3a2000.
+    // Read the region for POSITION (stage_input/kernel_grid.rs), never for a correctness decision about
+    // which lanes should run.
     debug_phase!("complete");
 
     let placeholder_descriptor_bindings = surviving_placeholder_bindings(&ctx);

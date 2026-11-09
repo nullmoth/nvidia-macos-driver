@@ -17,6 +17,9 @@ def section(text, start, end):
 
 cache = section(vk, 'static VkDescriptorSet nvmtl_snapshot_set_c(', '\nint nvmtl_vk_bind_buffer(')
 macros = section(vk, '#define NVMTL_NBUF ', '#define NVMTL_DISPATCH_PC_BYTES')
+# The slot type and the handle check come from the plugin: the GL uniform path reads its slot through
+# nvmtl_slot_checked, so a hand copy here would test a slot read the plugin no longer does.
+slots = '#define nvlog(...) ((void)0)\n' + section(vk, 'enum { NVMTL_SLOT_NONE', '#define NVMTL_EMB_KEYMAX')
 fixture = r'''
 #include <assert.h>
 #include <stdint.h>
@@ -30,8 +33,7 @@ fixture = r'''
 #define NVMTL_E78_HAS(m,i) (!(m) || (((m)[(i)>>6] >> ((i)&63)) & 1))
 #define NVMTL_TABLES_PER_PAGE 256
 enum { NVMTL_E78_H3, E78C_SETREUSE, E78C_SETNEW };
-enum { NVMTL_SLOT_BUF=1 };
-typedef struct { uint8_t kind; void *h; size_t off,size; uint64_t address; } nvmtl_slot;
+''' + slots + r'''
 static nvk_buffer g_dummyBuf={.buf=(void *)1,.size=256};
 typedef struct {
     nvmtl_slot s[2][NVMTL_NBIND];
@@ -69,7 +71,9 @@ static VkDescriptorSet nvmtl_snapshot_set_t(nvk_cmdbuf *c, uint32_t which, uint3
     return nvmtl_snapshot_set_md(c,which,hi,NULL,tb,VK_NULL_HANDLE,NULL,NULL);
 }
 '''
-mask = section(vk, 'static int nvmtl_spirv_bmask(', '\nenum { NVMTL_SLOT_NONE')
+# The mask helpers start at nvmtl_spirv_bmask_x's forward declaration: nvmtl_spirv_bmask calls it, and it logs whether
+# the framebuffer-fetch set is skipped, so a no-op nvlog stands in for the plugin's logger here.
+mask = '#define nvlog(...) ((void)0)\n' + section(vk, 'static int nvmtl_spirv_bmask_x(const void *p, size_t n, uint64_t out[4], int skip_fetch);', '\nenum { NVMTL_SLOT_NONE')
 checks = r'''
 int main(void) {
     // Bindless heap binding 0 belongs to set 2, not to the stage's buffer 0. Decoration order is arbitrary.
@@ -119,7 +123,7 @@ int main(void) {
     enabled=0; nvmtl_snapshot_set_c(&c,0,&p); assert(allocations==10);
     enabled=1; p.bmask[0]&=~1ull; p.gl_uniform_layout=1;
     p.gl_uniform_slot[0]=8; p.gl_uniform_range[0]=80;
-    table.s[0][7]=(nvmtl_slot){.kind=NVMTL_SLOT_BUF,.h=(void *)77,.size=65536};
+    table.s[0][7]=(nvmtl_slot){.kind=NVMTL_SLOT_BUF,.h=(void *)0x770000,.size=65536};
     c.address_count=1;
     VkDescriptorSet uniform=nvmtl_snapshot_set_c(&c,0,&p); assert(allocations==11);
     for(unsigned i=1;i<16;i++) {
@@ -129,16 +133,21 @@ int main(void) {
     }
     p.gl_uniform_range[0]=96;
     assert(nvmtl_snapshot_set_c(&c,0,&p)!=uniform && allocations==12);
-    table.s[0][7].h=(void *)78;
+    table.s[0][7].h=(void *)0x780000;
     nvmtl_snapshot_set_c(&c,0,&p); assert(allocations==13);
     p.gl_uniform_layout=0;
     nvmtl_snapshot_set_c(&c,0,&p); assert(allocations==14);
+    // A handle that cannot be a live object is not handed on (the dummy is bound instead).
+    nvmtl_slot bad={.kind=NVMTL_SLOT_BUF,.h=(void *)0xa3,.size=65536};
+    assert(nvmtl_slot_checked(&bad,0,7)==NULL && nvmtl_slot_checked(&table.s[0][7],0,7)==&table.s[0][7]);
     puts("PASS: unchanged/offset-only reuse, table-page rollover, texel/image masks, direct buffers, recycled sets, growing masks, opt-out");
 }
 '''
 
 iface = re.search(r'@interface NVMTLResSet : NSMutableSet .*?@end', header, re.S).group(0)
 impl = section(objects, '@implementation NVMTLResSet', '\n@end') + '\n@end\n'
+# the identity-hashed set the class allocates sits just above it in NVMTLObjects.m
+impl = objects[objects.index('static NSMutableSet *nvmtl_identity_set('):objects.index('@implementation NVMTLResSet')] + impl
 resources = r'''
 #import <Foundation/Foundation.h>
 #include <assert.h>
@@ -156,10 +165,13 @@ static void nvmtl_resref(id o,int d) { refs+=d; if(d<0) lastReleased=o; }
 @end
 int main(void) { @autoreleasepool {
     NVMTLResSet *set=[NVMTLResSet new]; EqualResource *a=[EqualResource new], *alias=[EqualResource new];
-    a->key=alias->key=1; [set addObject:a]; [set addObject:alias];
+    // Metal objects are equal only to themselves, so the set dedupes by identity: the same object twice is one
+    // member, and an equal-but-distinct object is a second member (it never stands in for the first)
+    a->key=alias->key=1; [set addObject:a]; [set addObject:a];
     assert(set.count==1 && refs==1);
     for(unsigned i=0;i<8;i++) assert(!set->_mru[i] || set->_mru[i]==(__bridge const void *)a);
-    [set removeObject:alias]; assert(!set.count && !refs && lastReleased==a);
+    [set removeObject:alias]; assert(set.count==1 && refs==1);
+    [set removeObject:a]; assert(!set.count && !refs && lastReleased==a);
     for(unsigned i=0;i<8;i++) assert(!set->_mru[i]);
     lastReleased=nil;
     for(unsigned i=0;i<32;i++) [set addObject:[NSObject new]];
@@ -169,7 +181,7 @@ int main(void) { @autoreleasepool {
     [set addObject:a]; assert(set.count==1 && refs==33);
     [set removeAllObjects]; assert(!set.count && refs==32);
     [taken removeAllObjects]; assert(!refs);
-    puts("PASS: MRU retains canonical members, equal-object removal, sealing, clearing, residency balance");
+    puts("PASS: MRU retains canonical members, identity membership, sealing, clearing, residency balance");
 } }
 '''
 
@@ -199,7 +211,8 @@ int main(void) {
 '''
 
 bias = section(vk, 'void nvmtl_vk_cmd_set_depth_bias(', '\nvoid nvmtl_vk_cmd_set_line_width(')
-pipeline_states = section(vk, '    VkDynamicState dyn[24]', '    // Metal has no depth-bias enable switch.')
+# the array grows as dynamic states are added (24 -> 26 with depth bounds), so the anchor names no size
+pipeline_states = section(vk, '    VkDynamicState dyn[', '    // Metal has no depth-bias enable switch.')
 bias_check = r'''
 #include <assert.h>
 #include <stdio.h>
@@ -210,7 +223,7 @@ static int enabled; static float constant_value,slope_value,clamp_value;
 static void pvkCmdSetDepthBiasEnable(void *c,int value) { enabled=value; }
 static void pvkCmdSetDepthBias(void *c,float b,float cl,float s) { constant_value=b;clamp_value=cl;slope_value=s; }
 ''' + bias + r'''
-static int g_dyn3,g_provoking,g_clip,g_wide,g_sample_locations;
+static int g_dyn3,g_provoking,g_clip,g_wide,g_sample_locations,g_depth_bounds;
 static unsigned states(int hasDepth,nvk_pipeline *out,unsigned samples) {
 ''' + pipeline_states + r'''
     assert(dsci.dynamicStateCount<=sizeof dyn/sizeof dyn[0]);
@@ -223,14 +236,15 @@ int main(void) {
     nvmtl_vk_cmd_set_depth_bias(&c,1,2,3); assert(enabled && constant_value==1 && slope_value==2 && clamp_value==3);
     nvmtl_vk_cmd_set_depth_bias(&c,0,2,0); assert(enabled);
     nvmtl_vk_cmd_set_depth_bias(&c,0,0,0); assert(!enabled);
-    for(unsigned flags=0;flags<128;flags++) {
-        g_dyn3=flags&1;g_provoking=flags&2;g_clip=flags&4;g_wide=flags&8;g_sample_locations=flags&16;
+    for(unsigned flags=0;flags<256;flags++) {
+        g_dyn3=flags&1;g_provoking=flags&2;g_clip=flags&4;g_wide=flags&8;g_sample_locations=flags&16;g_depth_bounds=!!(flags&128);
         nvk_pipeline p={.has_stencil=!!(flags&32),.vin_dyn=!!(flags&64)};
         states(0,&p,1);states(1,&p,4);
     }
-    g_dyn3=g_provoking=g_clip=g_wide=g_sample_locations=1;
-    nvk_pipeline p={.has_stencil=1,.vin_dyn=1}; assert(states(1,&p,4)==23);
-    puts("PASS: depth bias is disabled at zero; all 128 dynamic-state combinations fit without duplicates");
+    g_dyn3=g_provoking=g_clip=g_wide=g_sample_locations=g_depth_bounds=1;
+    /* 16 depth/stencil + depth-bias enable + 2 depth bounds + polygon, provoking, clip, stride, width, sample locations */
+    nvk_pipeline p={.has_stencil=1,.vin_dyn=1}; assert(states(1,&p,4)==25);
+    puts("PASS: depth bias is disabled at zero; all 256 dynamic-state combinations fit without duplicates");
 }
 '''
 
