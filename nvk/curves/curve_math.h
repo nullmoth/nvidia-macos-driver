@@ -139,12 +139,14 @@ static inline V cv_clamp01(const struct cv_ops *o, V x) { return max_(o, k_(o, 0
 
 /* With disk or no end caps the whole curve is cut by the plane through its first point perpendicular to the first piece and the plane
  * through its last point perpendicular to the last piece: nothing of any piece lies behind either plane. */
-static inline V cv_end_clip(const struct cv_ops *o, const struct cv_ray *ray, V3 q0, V3 a0, V3 qn, V3 an, V notsphere, V t)
+static inline V cv_end_clip(const struct cv_ops *o, const struct cv_ray *ray, V3 q0, V3 a0, V3 qn, V3 an, V notsphere, V t,
+                            int near_start, int near_end)
 {
    V3 p = v3add(o, ray->o, v3mul(o, ray->d, t));
-   V x0 = v3dot(o, v3sub(o, p, q0), a0), xn = v3dot(o, v3sub(o, p, qn), an);
-   V inside = and_(o, le_(o, k_(o, 0.0f), x0), le_(o, xn, k_(o, 0.0f)));
-   return o->bor(o->ctx, o->bnot(o->ctx, notsphere), inside);
+   V ok = lt_(o, k_(o, 0.0f), k_(o, 1.0f));                                   /* true */
+   if (near_start) ok = and_(o, ok, le_(o, k_(o, 0.0f), v3dot(o, v3sub(o, p, q0), a0)));
+   if (near_end) ok = and_(o, ok, le_(o, v3dot(o, v3sub(o, p, qn), an), k_(o, 0.0f)));
+   return o->bor(o->ctx, o->bnot(o->ctx, notsphere), ok);
 }
 
 static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv_curve *c, const struct cv_ray *ray)
@@ -161,7 +163,17 @@ static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv
    /* axes of the first and last piece, for the end planes */
    V3 axis0 = v3_(zero, zero, zero), axisN = axis0;
    {
+#ifdef CV_END_PIECE_AXIS
       V3 e0 = v3sub(o, Q[1], Q[0]), eN = v3sub(o, Q[CV_SUBDIV], Q[CV_SUBDIV - 1]);
+#else
+      /* the curve's own tangent at the end points, from two close evaluations */
+      V3 q0e, qne; V w0[4], wn[4];
+      cv_weights(o, c->basis, c->count, k_(o, 0.002f), w0);
+      cv_weights(o, c->basis, c->count, k_(o, 0.998f), wn);
+      q0e = v3_(zero, zero, zero); qne = q0e;
+      for (int i = 0; i < 4; i++) { q0e = v3add(o, q0e, v3mul(o, c->p[i], w0[i])); qne = v3add(o, qne, v3mul(o, c->p[i], wn[i])); }
+      V3 e0 = v3sub(o, q0e, Q[0]), eN = v3sub(o, Q[CV_SUBDIV], qne);
+#endif
       V l0 = sqrt_(o, v3dot(o, e0, e0)), lN = sqrt_(o, v3dot(o, eN, eN));
       V ok0 = lt_(o, k_(o, 1e-6f), l0), okN = lt_(o, k_(o, 1e-6f), lN);
       axis0 = v3mul(o, e0, sdiv_(o, one, l0, ok0));
@@ -201,7 +213,7 @@ static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv
          V x = add_(o, ox, mul_(o, t, dx));
          V rad = add_(o, c0, mul_(o, c1, t));
          V valid = and_(o, and_(o, okc, okq), and_(o, and_(o, le_(o, lo_x, x), le_(o, x, hi_x)), lt_(o, zero, rad)));
-         valid = and_(o, valid, cv_end_clip(o, ray, Q[0], axis0, Q[CV_SUBDIV], axisN, notsphere, t));
+         valid = and_(o, valid, cv_end_clip(o, ray, Q[0], axis0, Q[CV_SUBDIV], axisN, notsphere, t, k < CV_SUBDIV / 4, k >= CV_SUBDIV - CV_SUBDIV / 4));
          V u = mul_(o, add_(o, k_(o, (float)k), cv_clamp01(o, sdiv_(o, x, L, okL))), k_(o, 1.0f / CV_SUBDIV));
          cv_consider(o, &round, ray, valid, t, u);
       }
@@ -214,7 +226,7 @@ static inline struct cv_hit cv_intersect(const struct cv_ops *o, const struct cv
          cv_roots(o, sa, sb, sc, &s0, &s1, &oks);
          for (int rt = 0; rt < 2; rt++) {
             V t = rt ? s1 : s0;
-            V valid = and_(o, oks, cv_end_clip(o, ray, Q[0], axis0, Q[CV_SUBDIV], axisN, notsphere, t));
+            V valid = and_(o, oks, cv_end_clip(o, ray, Q[0], axis0, Q[CV_SUBDIV], axisN, notsphere, t, (k + end) <= CV_SUBDIV / 4, (k + end) >= CV_SUBDIV - CV_SUBDIV / 4));
             cv_consider(o, &round, ray, valid, t, k_(o, (float)(k + end) / CV_SUBDIV));
          }
       }
