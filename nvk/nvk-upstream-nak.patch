@@ -1,0 +1,341 @@
+Upstream Mesa fixes (MIT) for NAK and NVK that postdate nvk/MESA_BASE, applied after the rest of the 2.9 chain:
+  716eb010 nak: Ignore texture_offset for input attachments
+  61f3a1d0 nak: use correct src_type for OpBSSy bar_in
+  77781ae8 nak: fix insert order when annotate is off
+  93746520 nak: never encode IDP.4A with an immediate source
+  a79e3fc7 nak: Move FutureReadyInstr::new into postpass.rs
+  b6b973d0 nak: Fix ready_cycle calculation in prepass sched
+  5e4bcb1c nak,nvk: Increase nir_opt_peephole limit
+  801952de nak: Fix missing scoreboard for uniform Ldcg on SM120
+  83a732aa nak: Increase sm120 imma/hmma latencies
+  3b3084bf nak: Derive copy and clone in lat_rs_gen
+  cb0e7868 nak: Always apply opt_fall_through
+
+--- a/src/nouveau/compiler/latencies/lat_rs_gen.py
++++ b/src/nouveau/compiler/latencies/lat_rs_gen.py
+@@ -30,7 +30,7 @@
+ 
+ % for reg_file, cats in file_cats.items():
+ <% enum_name = to_camel(reg_file) + 'Latency' + sm.upper() %>
+-#[derive(PartialEq)]
++#[derive(Copy, Clone, PartialEq)]
+ pub enum ${enum_name} {
+ % for category in cats[0].header.cats:
+    ${to_camel(category)},
+
+--- a/src/nouveau/compiler/nak/ir.rs
++++ b/src/nouveau/compiler/nak/ir.rs
+@@ -7125,7 +7125,7 @@
+     #[dst_type(Bar)]
+     pub bar_out: Dst,
+ 
+-    #[src_type(Pred)]
++    #[src_type(Bar)]
+     pub bar_in: Src,
+ 
+     #[src_type(Pred)]
+
+--- a/src/nouveau/compiler/nak/opt_bar_prop.rs
++++ b/src/nouveau/compiler/nak/opt_bar_prop.rs
+@@ -242,8 +242,10 @@
+                                         .into(),
+                                 }),
+                             );
++                            bmovs.insert(1, instr);
++                        } else {
++                            bmovs.insert(0, instr);
+                         }
+-                        bmovs.insert(1, instr);
+                         bmovs.into()
+                     }
+                 }
+
+--- a/src/nouveau/compiler/nak/opt_instr_sched_common.rs
++++ b/src/nouveau/compiler/nak/opt_instr_sched_common.rs
+@@ -416,19 +416,6 @@
+     pub index: usize,
+ }
+ 
+-impl FutureReadyInstr {
+-    pub fn new<E>(g: &graph::Graph<NodeLabel, E>, i: usize) -> Self {
+-        let label = &g.nodes[i].label;
+-        // NodeLabel::ready_cycle is the earliest beginning cycle for the
+-        // instruction, but we need the earliest end cycle for the instruction.
+-        let ready_cycle = label.ready_cycle.saturating_sub(label.exec_latency);
+-        FutureReadyInstr {
+-            ready_cycle: Reverse(ready_cycle),
+-            index: i,
+-        }
+-    }
+-}
+-
+ #[allow(dead_code)]
+ pub fn save_graphviz(
+     instrs: &[Box<Instr>],
+
+--- a/src/nouveau/compiler/nak/opt_instr_sched_postpass.rs
++++ b/src/nouveau/compiler/nak/opt_instr_sched_postpass.rs
+@@ -137,6 +137,20 @@
+     g
+ }
+ 
++fn new_future_ready_instr<E>(
++    g: &graph::Graph<NodeLabel, E>,
++    i: usize,
++) -> FutureReadyInstr {
++    let label = &g.nodes[i].label;
++    // NodeLabel::ready_cycle is the earliest beginning cycle for the
++    // instruction, but we need the earliest end cycle for the instruction.
++    let ready_cycle = label.ready_cycle.saturating_sub(label.exec_latency);
++    FutureReadyInstr {
++        ready_cycle: Reverse(ready_cycle),
++        index: i,
++    }
++}
++
+ fn generate_order(
+     g: &mut DepGraph,
+     init_ready_list: Vec<usize>,
+@@ -144,7 +158,7 @@
+     let mut ready_instrs: BinaryHeap<ReadyInstr> = BinaryHeap::new();
+     let mut future_ready_instrs: BinaryHeap<FutureReadyInstr> = init_ready_list
+         .into_iter()
+-        .map(|i| FutureReadyInstr::new(g, i))
++        .map(|i| new_future_ready_instr(g, i))
+         .collect();
+ 
+     let mut current_cycle = 0u32;
+@@ -192,7 +206,7 @@
+             dep_instr.num_uses -= 1;
+             if dep_instr.num_uses == 0 {
+                 future_ready_instrs
+-                    .push(FutureReadyInstr::new(g, edge.head_idx));
++                    .push(new_future_ready_instr(g, edge.head_idx));
+             }
+         }
+     }
+
+--- a/src/nouveau/compiler/nak/opt_instr_sched_prepass.rs
++++ b/src/nouveau/compiler/nak/opt_instr_sched_prepass.rs
+@@ -579,8 +579,17 @@
+                 );
+                 dep_instr.num_uses -= 1;
+                 if dep_instr.num_uses <= 0 {
+-                    future_ready_instrs
+-                        .insert(FutureReadyInstr::new(g, edge.head_idx));
++                    let label = &g.nodes[edge.head_idx].label;
++                    // dep_instr.ready_cycle is the earliest beginning cycle for the
++                    // instruction, but we need the earliest end cycle for the instruction.
++                    let ready_cycle = dep_instr
++                        .ready_cycle
++                        .saturating_sub(label.exec_latency);
++
++                    future_ready_instrs.insert(FutureReadyInstr {
++                        ready_cycle: Reverse(ready_cycle),
++                        index: edge.head_idx,
++                    });
+                 }
+             }
+ 
+
+--- a/src/nouveau/compiler/nak/opt_jump_thread.rs
++++ b/src/nouveau/compiler/nak/opt_jump_thread.rs
+@@ -17,7 +17,7 @@
+     }
+ }
+ 
+-fn jump_thread(func: &mut Function) -> bool {
++fn jump_thread(func: &mut Function) {
+     // Let's call a basic block "trivial" if its only instruction is an
+     // unconditional branch. If a block is trivial, we can update all of its
+     // predecessors to jump to its sucessor.
+@@ -105,8 +105,6 @@
+         // We don't update the CFG above, so rewrite it if we made progress
+         rewrite_cfg(func);
+     }
+-
+-    progress
+ }
+ 
+ fn rewrite_cfg(func: &mut Function) {
+@@ -157,9 +155,8 @@
+ 
+ impl Function {
+     pub fn opt_jump_thread(&mut self) {
+-        if jump_thread(self) {
+-            opt_fall_through(self);
+-        }
++        jump_thread(self);
++        opt_fall_through(self);
+     }
+ }
+ 
+
+--- a/src/nouveau/compiler/nak/sm120_instr_latencies.rs
++++ b/src/nouveau/compiler/nak/sm120_instr_latencies.rs
+@@ -5,6 +5,7 @@
+ use crate::ir::*;
+ 
+ use nak_latencies::sm100::*;
++use std::cmp::max;
+ 
+ // This contains the register scheduling information provided by NVIDIA.  This
+ // file is for Blackwell only.
+@@ -254,11 +255,11 @@
+         Op::ALd(_)
+         | Op::ASt(_)
+         | Op::Ld(_)
+-        | Op::Ldcg(_)
+         | Op::Ldsm(_)
+         | Op::St(_)
+         | Op::Atom(_) => decoupled,
+         Op::SuLd(_) | Op::SuSt(_) | Op::SuAtom(_) => decoupled,
++        Op::Ldcg(_) => ToUr,
+         Op::Ldc(_) => {
+             if uniform_op {
+                 ToUr
+@@ -421,6 +422,20 @@
+         }
+     }
+ 
++    // The latency table is for sm100, but sm120 has larger latencies. The
++    // hmma/imma values are reverse engineered from disassembling cuda
++    // programs and looking at RaW latencies. Hopefully adding the same amount
++    // to WaW/WaR latencies will be fine
++    // RE code:
++    // https://gitlab.freedesktop.org/mhenning/re/-/tree/main/latency_cuda
++    fn latency_adjust(first_latency: RegLatencySM100) -> u32 {
++        match first_latency {
++            RegLatencySM100::Hmma => 9,
++            RegLatencySM100::Imma => 7,
++            _ => 0,
++        }
++    }
++
+     pub fn raw(
+         write: &Op,
+         dst_idx: usize,
+@@ -438,19 +453,15 @@
+                     Some(op) => op_reg_latency(op, true, src_idx),
+                     None => RegLatencySM100::RedirectedFp64,
+                 };
+-                // The latencies are for SM100 docs, but some chips need large
+-                // one just override here.
+-                if write_latency == RegLatencySM100::Hmma
+-                    || read_latency == RegLatencySM100::Hmma
+-                {
+-                    RegLatencySM100::raw(write_latency, read_latency, false) + 9
+-                } else if write_latency == RegLatencySM100::Imma
+-                    || read_latency == RegLatencySM100::Imma
+-                {
+-                    RegLatencySM100::raw(write_latency, read_latency, false) + 5
+-                } else {
+-                    RegLatencySM100::raw(write_latency, read_latency, false) + 1
+-                }
++
++                RegLatencySM100::raw(write_latency, read_latency, false)
++                    + max(
++                        max(
++                            Self::latency_adjust(write_latency),
++                            Self::latency_adjust(read_latency),
++                        ),
++                        1,
++                    )
+             }
+             RegFile::UGPR => {
+                 let write_latency = op_ureg_latency(write, false, dst_idx);
+@@ -491,13 +502,11 @@
+                 let write_latency = op_reg_latency(write, false, dst_idx);
+                 let read_latency = op_reg_latency(read, true, src_idx);
+ 
+-                if write_latency == RegLatencySM100::Hmma
+-                    || read_latency == RegLatencySM100::Hmma
+-                {
+-                    RegLatencySM100::war(read_latency, write_latency, false) + 7
+-                } else {
+-                    RegLatencySM100::war(read_latency, write_latency, false)
+-                }
++                RegLatencySM100::war(read_latency, write_latency, false)
++                    + max(
++                        Self::latency_adjust(read_latency),
++                        Self::latency_adjust(write_latency),
++                    )
+             }
+             RegFile::UGPR => {
+                 let write_latency = op_ureg_latency(write, false, dst_idx);
+@@ -533,21 +542,12 @@
+             RegFile::GPR => {
+                 let write1_latency = op_reg_latency(a, false, a_dst_idx);
+                 let write2_latency = op_reg_latency(b, false, b_dst_idx);
+-                if write1_latency == RegLatencySM100::Hmma
+-                    || write2_latency == RegLatencySM100::Hmma
+-                {
+-                    RegLatencySM100::waw(
+-                        write1_latency,
+-                        write2_latency,
+-                        a_op_pred,
+-                    ) + 7
+-                } else {
+-                    RegLatencySM100::waw(
+-                        write1_latency,
+-                        write2_latency,
+-                        a_op_pred,
++
++                RegLatencySM100::waw(write1_latency, write2_latency, a_op_pred)
++                    + max(
++                        Self::latency_adjust(write1_latency),
++                        Self::latency_adjust(write2_latency),
+                     )
+-                }
+             }
+             RegFile::UGPR => {
+                 let write1_latency = op_ureg_latency(a, false, a_dst_idx);
+
+--- a/src/nouveau/compiler/nak/sm70_encode.rs
++++ b/src/nouveau/compiler/nak/sm70_encode.rs
+@@ -1716,7 +1716,7 @@
+             std::mem::swap(src_type0, src_type1);
+         }
+         b.copy_alu_src_if_not_reg(src0, gpr, SrcType::ALU);
+-        b.copy_alu_src_if_ineg_imm(src1, gpr, SrcType::I32);
++        b.copy_alu_src_if_imm(src1, gpr, SrcType::I32);
+         b.copy_alu_src_if_not_reg(src2, gpr, SrcType::ALU);
+     }
+ 
+
+--- a/src/nouveau/compiler/nak_nir.c
++++ b/src/nouveau/compiler/nak_nir.c
+@@ -270,7 +270,7 @@
+       LOOP_OPT(nir, nir_opt_cse);
+ 
+       nir_opt_peephole_select_options peephole_select_options = {
+-         .limit = 0,
++         .limit = 8,
+          .discard_ok = true,
+       };
+       LOOP_OPT_NOT_IDEMPOTENT(nir, nir_opt_peephole_select,
+
+--- a/src/nouveau/compiler/nak_nir_lower_tex.c
++++ b/src/nouveau/compiler/nak_nir_lower_tex.c
+@@ -358,6 +358,9 @@
+       case nir_tex_src_min_lod:        min_lod =   tex->src[i].src.ssa; break;
+       case nir_tex_src_ddx:            ddx =       tex->src[i].src.ssa; break;
+       case nir_tex_src_ddy:            ddy =       tex->src[i].src.ssa; break;
++      case nir_tex_src_texture_offset:
++         assert(tex->input_attachment_index);
++         break;
+       default:
+          UNREACHABLE("Unsupported texture source");
+       }
+
+--- a/src/nouveau/vulkan/nvk_shader.c
++++ b/src/nouveau/vulkan/nvk_shader.c
+@@ -1304,7 +1304,7 @@
+ 
+       NIR_PASS(progress, nir, nir_opt_peephole_select,
+                &(nir_opt_peephole_select_options){
+-                  .limit = 0,
++                  .limit = 8,
+                   .discard_ok = true,
+                });
+ 
