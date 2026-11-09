@@ -22,6 +22,8 @@
 #define NMV_BDB_EDP        27
 #define NMV_BDB_LFP_OPTS   40
 #define NMV_BDB_LFP_POWER  44
+#define NMV_BDB_LFP_PTRS   41
+#define NMV_BDB_LFP_DATA   42
 
 struct nmv_edp { int known; unsigned panel_type; int low_vswing; int hobl; unsigned vbt_version, bdb_version; };
 
@@ -64,9 +66,39 @@ static inline const uint8_t *nmv_block(const uint8_t *v, uint32_t size, unsigned
     return 0;
 }
 
-/* The built-in panel's eDP drive-table choice. Needs the panel type from the LFP options block (a value of 0xff means the
- * VBT names none, and Linux then falls back to a lookup by the panel's EDID identifier, which this does not do). */
-static inline int nmv_edp(const uint8_t *v, uint32_t size, struct nmv_edp *out)
+/* The panel type by the panel's own identifier (Linux pnpid_get_panel_type): the table of 16 LFP entries each carries the 10 bytes
+ * the panel's EDID has at offset 8 (manufacturer, product code, serial, week, year). A full match wins; a match with the date
+ * cleared is accepted when no full match exists and the entry has no date. 'id' is those 10 bytes of the EDID. Returns the entry,
+ * or -1. Offsets in the pointer block are from the start of the BDB; every one is bounds-checked against the data block. */
+static inline int nmv_pnp_match(const uint8_t *v, uint32_t size, const uint8_t *id)
+{
+    uint32_t off, len, pn, dn, i, k; unsigned bver; int best = -1;
+    const uint8_t *ptrs, *data; uint8_t nodate[10];
+    if (!id || !nmv_bdb(v, size, &off, &len, &bver)) return -1;
+    ptrs = nmv_block(v, size, NMV_BDB_LFP_PTRS, &pn);
+    data = nmv_block(v, size, NMV_BDB_LFP_DATA, &dn);
+    if (!ptrs || !data || pn < 1 + 16 * 9 || ptrs[0] != 3) return -1;
+    {   /* where the data block's data starts, counted from the start of the BDB */
+        const int64_t base = (int64_t)(data - v) - (int64_t)nmv_u32(v + 28);      /* offsets in the pointer block count from the start of the BDB */
+        for (k = 0; k < 10; k++) nodate[k] = id[k];
+        nodate[8] = nodate[9] = 0;
+        for (i = 0; i < 16; i++) {
+            const uint8_t *e = ptrs + 1 + 9 * i;                /* fp_timing, dvo_timing, panel_pnp_id: 3 bytes each (offset u16, size u8) */
+            const unsigned poff = nmv_u16(e + 6), psz = e[8];
+            int64_t rel = (int64_t)poff - base;
+            int full = 1, nod = 1;
+            if (psz != 10 || rel < 0 || rel + 10 > (int64_t)dn) return -1;
+            for (k = 0; k < 10; k++) { if (data[rel + k] != id[k]) full = 0; if (data[rel + k] != nodate[k]) nod = 0; }
+            if (full) return (int)i;
+            if (best < 0 && nod) best = (int)i;
+        }
+    }
+    return best;
+}
+
+/* The built-in panel's eDP drive-table choice. The panel type comes from the LFP options block; a value of 0xff means the VBT
+ * names none, and then the panel's EDID identifier (edid_id, 10 bytes, or NULL when unknown) picks the entry. */
+static inline int nmv_edp(const uint8_t *v, uint32_t size, const uint8_t *edid_id, struct nmv_edp *out)
 {
     uint32_t off, len, n; unsigned bver;
     const uint8_t *b;
@@ -76,7 +108,11 @@ static inline int nmv_edp(const uint8_t *v, uint32_t size, struct nmv_edp *out)
     b = nmv_block(v, size, NMV_BDB_LFP_OPTS, &n);
     if (!b || n < 1) return 0;
     out->panel_type = b[0];
-    if (b[0] > 15) return 0;
+    if (b[0] > 15) {                       /* 0xff: the VBT names none; try the panel's identifier */
+        int m = nmv_pnp_match(v, size, edid_id);
+        if (m < 0) return 0;
+        out->panel_type = (unsigned)m;
+    }
     b = nmv_block(v, size, NMV_BDB_EDP, &n);
     if (!b) return 0;
     /* block 27: power_seqs[16] (10 bytes each), color_depth (4), fast_link_params[16] (2 each), sdrrs (4), s3d (2),

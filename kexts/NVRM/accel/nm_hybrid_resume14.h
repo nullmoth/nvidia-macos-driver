@@ -346,8 +346,10 @@ static inline int nmr14_resume(const struct nmr_ops *o, const struct nmr_snap *s
     if (!s || !s->valid || !s->cx0.valid) return NMR_E_NO_SNAPSHOT;
     if (nmr_st_lit(o, s)) return NMR_ALREADY_LIT;
     o2.aux_ctl_or = NMX_AUX_POWER_REQ; o2.apply_level = nmx_level_cb;
+    nmr_st_core_early(o, s, 14);
     if ((rc = nmr_st_power(o, s))) return rc;
-    if ((rc = nmr_st_cdclk(o, s))) return rc;
+    if ((rc = nmr_st_cdclk(o, s, 14))) return rc;
+    if ((rc = nmr_st_core_late(o, s, 14))) return rc;
     nmr_note(o, "power-management demand");
     if (!nmr_wait(o, NMX_PMDEMAND(1), NMX_PMD_REQ, 0, 10000) || !nmr_wait(o, NMX_DCPR_STATUS_1, NMX_PMD_INFLIGHT, 0, 10000)) return NMR_E_PMDEMAND;
     d1 = s->pmdemand[1] & ~NMX_PMD_REQ;
