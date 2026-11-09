@@ -1,0 +1,135 @@
+--- a/kapi/src/nvkms-kapi.c
++++ b/kapi/src/nvkms-kapi.c
+@@ -2528,6 +2528,25 @@
+     params->overrides = NVKMS_MODE_VALIDATION_NO_RRX1K_CHECK;
+ }
+ 
++/*
++ * HDMI 4K60 that RGB 4:4:4 cannot carry (a DisplayPort-to-HDMI adapter or a TMDS link limited to HDMI 1.4 rates): NVKMS
++ * refuses the mode with its default preference, but validates the very same timing when asked to prefer YUV 4:2:0 and
++ * the GPU can do it in hardware. A mode refused as RGB is therefore listed, validated and set again with that
++ * preference, and only when the retry
++ *   - is valid, and
++ *   - was decided as HARDWARE 4:2:0 (software 4:2:0 would need the client to convert the surface, which none does), and
++ *   - describes the same timing as the one that was refused.
++ * Modes that RGB already accepts are never touched.
++ */
++static NvBool Y420SameTiming(const NvModeTimings *a, const NvModeTimings *b)
++{
++    return a->pixelClockHz == b->pixelClockHz &&
++           a->hVisible == b->hVisible && a->hSyncStart == b->hSyncStart && a->hSyncEnd == b->hSyncEnd &&
++           a->hTotal == b->hTotal && a->vVisible == b->vVisible && a->vSyncStart == b->vSyncStart &&
++           a->vSyncEnd == b->vSyncEnd && a->vTotal == b->vTotal &&
++           a->interlaced == b->interlaced && a->doubleScan == b->doubleScan;
++}
++
+ static int GetDisplayMode
+ (
+     struct NvKmsKapiDevice *device,
+@@ -2563,6 +2582,25 @@
+             "Failed to get validated mode index 0x%x for NvKmsKapiDisplay 0x%08x",
+             modeIndex, display);
+         return -1;
++    }
++
++    if (!paramsValidate.reply.end && !paramsValidate.reply.valid) {
++        struct NvKmsValidateModeIndexParams *retry = nvKmsKapiCalloc(1, sizeof(*retry));
++
++        if (retry != NULL) {
++            retry->request = paramsValidate.request;
++            retry->request.modeValidation.preferYUV420 = NV_TRUE;
++
++            if (nvkms_ioctl_from_kapi(device->pKmsOpen, NVKMS_IOCTL_VALIDATE_MODE_INDEX,
++                                      retry, sizeof(*retry)) &&
++                !retry->reply.end && retry->reply.valid &&
++                retry->reply.yuv420Mode == NV_YUV420_MODE_HW &&
++                Y420SameTiming(&retry->reply.mode.timings, &paramsValidate.reply.mode.timings)) {
++                paramsValidate.reply = retry->reply;
++            }
++
++            nvKmsKapiFree(retry);
++        }
+     }
+ 
+     if (mode != NULL) {
+@@ -2619,12 +2657,43 @@
+     timings->sizeMM.h = mode->timings.heightMM;
+ }
+ 
+-static NvBool ValidateDisplayMode
++static NvBool Y420HwValidateMode
+ (
+     struct NvKmsKapiDevice *device,
+     NvKmsKapiDisplay display, const struct NvKmsKapiDisplayMode *mode
+ )
+ {
++    struct NvKmsValidateModeParams *params = nvKmsKapiCalloc(1, sizeof(*params));
++    NvBool ok = NV_FALSE;
++
++    if (params == NULL) {
++        return NV_FALSE;
++    }
++
++    params->request.deviceHandle = device->hKmsDevice;
++    params->request.dispHandle   = device->hKmsDisp;
++    params->request.dpyId        = nvNvU32ToDpyId(display);
++    InitNvKmsModeValidationParams(device, &params->request.modeValidation);
++    params->request.modeValidation.preferYUV420 = NV_TRUE;
++    NvKmsKapiDisplayModeToKapi(mode, &params->request.mode);
++
++    if (nvkms_ioctl_from_kapi(device->pKmsOpen, NVKMS_IOCTL_VALIDATE_MODE,
++                              params, sizeof(*params)) &&
++        params->reply.valid &&
++        params->reply.yuv420Mode == NV_YUV420_MODE_HW) {
++        ok = NV_TRUE;
++    }
++
++    nvKmsKapiFree(params);
++    return ok;
++}
++
++static NvBool ValidateDisplayModeRgb
++(
++    struct NvKmsKapiDevice *device,
++    NvKmsKapiDisplay display, const struct NvKmsKapiDisplayMode *mode
++)
++{
+     struct NvKmsValidateModeParams paramsValidate;
+     NvBool status;
+ 
+@@ -2663,6 +2732,16 @@
+     return paramsValidate.reply.valid;
+ }
+ 
++static NvBool ValidateDisplayMode
++(
++    struct NvKmsKapiDevice *device,
++    NvKmsKapiDisplay display, const struct NvKmsKapiDisplayMode *mode
++)
++{
++    return ValidateDisplayModeRgb(device, display, mode) ||
++           Y420HwValidateMode(device, display, mode);
++}
++
+ static NvBool AssignSyncObjectConfig(
+     struct NvKmsKapiDevice *device,
+     const struct NvKmsKapiLayerConfig *pLayerConfig,
+@@ -3396,6 +3475,18 @@
+         }
+ 
+         NvKmsKapiDisplayModeToKapi(&headModeSetConfig->mode, &paramsHead->mode);
++
++        /*
++         * A mode RGB cannot carry but hardware YUV 4:2:0 can (see Y420HwValidateMode) is set as such: the same
++         * preference for validation and the decided disposition for the head.
++         */
++        if (headModeSetConfig->bActive && headModeSetConfig->numDisplays == 1 &&
++            !ValidateDisplayModeRgb(device, headModeSetConfig->displays[0], &headModeSetConfig->mode) &&
++            Y420HwValidateMode(device, headModeSetConfig->displays[0], &headModeSetConfig->mode)) {
++            paramsHead->modeValidationParams.preferYUV420 = NV_TRUE;
++            paramsHead->yuv420Mode.specified = NV_TRUE;
++            paramsHead->yuv420Mode.val = NV_YUV420_MODE_HW;
++        }
+ 
+         if (device->lutCaps.olut.supported) {
+             paramsHead->flip.olut.specified = TRUE;

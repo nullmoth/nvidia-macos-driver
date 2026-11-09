@@ -8,6 +8,7 @@
 #include "nv-xnu.h"
 #include "nvrm_utilization.h"
 #include "nvrm_bar_limits.h"
+#include "nvrm_off_bar.h"
 #include "nvrm_startup_policy.h"
 #include "nvrm_bar_recover.h"
 #include "nvrm_shutdown_plan.h"
@@ -69,6 +70,10 @@ extern "C" int  nv_rtd3_before_system_resume(void);
 extern "C" int  nv_rtd3_power_off(IOACPIPlatformDevice *acpi);
 extern "C" int  nv_rtd3_power_on(IOACPIPlatformDevice *acpi);
 extern "C" nv_state_t *nv_xnu_gpu_state(void);
+struct NVRMDdcRequest;
+extern "C" int nvrm_ddc_transfer(struct NVRMDdcRequest *r);   // nvrm_ddc.cpp
+struct NVRMDpAuxRequest;
+extern "C" int nvrm_dpaux_transfer(struct NVRMDpAuxRequest *r);   // nvrm_ddc.cpp
 extern "C" void nv_xnu_log_init(void);
 extern "C" bool nv_xnu_maps_init(void);
 extern "C" void *nvkms_xnu_kapi_table(void);
@@ -596,9 +601,23 @@ static inline bool nvrmNameIsUnknown(const char *s)
     return true;
 }
 
+// Driver off with nvoffbar=1 and this card's BAR1 lost (nvrm_off_bar.h): NVRM claims the card only to repair BAR1.
+static bool nvrmOffBarWanted(IOService *provider)
+{
+    UInt32 on = 0;
+    if (!nvrm_driver_off() || !PE_parse_boot_argn("nvoffbar", &on, sizeof on) || !on) return false;
+    IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
+    if (!pci || pci->getProperty("nvrm-bar1-placed")) return false;       // not a PCI device, or already repaired this boot
+    if (pci->configRead16(0x00) != 0x10de || pci->configRead8(0x0B) != 0x03) return false;
+    NvrmApertureSpan ap[8]; unsigned n = 0;
+    for (IOItemCount i = 0; i < pci->getDeviceMemoryCount() && n < 8; i++)
+        if (IOMemoryDescriptor *m = pci->getDeviceMemoryWithIndex(i)) { ap[n].base = (UInt64)m->getPhysicalSegment(0, 0, kIOMemoryMapperNone); ap[n].length = m->getLength(); n++; }
+    return nvrmBar64Lost(pci->configRead32(0x10 + 4), pci->configRead32(0x10 + 8), ap, n);    // BAR1 is the 64-bit BAR at 0x14/0x18
+}
+
 IOService *NVRM::probe(IOService *provider, SInt32 *score)
 {
-    { if (nvrm_driver_off()) return NULL; }
+    if (nvrm_driver_off()) return nvrmOffBarWanted(provider) ? super::probe(provider, score) : NULL;
     if (!nvrm_kernel_supported()) { LOG("Darwin %d is not supported by this driver: not claiming the GPU", version_major); return NULL; }
     IOService *res = super::probe(provider, score);
     IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
@@ -621,7 +640,21 @@ IOService *NVRM::probe(IOService *provider, SInt32 *score)
 
 bool NVRM::start(IOService *provider)
 {
-    { if (nvrm_driver_off()) return false; }
+    if (nvrm_driver_off()) {
+        if (nvrmOffBarWanted(provider) && super::start(provider)) {
+            fPCI = OSDynamicCast(IOPCIDevice, provider);
+            if (fPCI) {
+                LOG("driver off, BAR1 lost: placing it so the firmware screen can be shown (nvoffbar=1)");
+                const bool placed = placeLargeBar1();
+                LOG("driver off: BAR1 placement %s", placed ? "done" : "not possible; left as IOPCIFamily had it");
+                fPCI->registerService(kIOServiceAsynchronous);        // matching runs again: NVRMBootFB reads nvrm-bar1-placed
+                // Stay attached with nothing started: systemWillShutdown() puts BAR1, BAR3 and the root port window back as the
+                // firmware left them (fBarUndo), without which some boards do not POST after a shutdown.
+                if (placed) return true;
+            }
+        }
+        return false;
+    }
     if (!nvrm_kernel_supported()) return false;
     nvrm_guard_count_start();
     if (!super::start(provider)) return false;
@@ -2287,6 +2320,16 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
     if (fn && fn->isEqualTo("NVRMBacklight")) {      // NVRMFB: laptop panel brightness. p1 = NvU32 *percent, p2 != NULL sets it
         NvU32 *percent = (NvU32 *)p1; if (!percent) return kIOReturnBadArgument;
         return nvkms_xnu_backlight(p2 != NULL, percent) ? kIOReturnSuccess : kIOReturnNotFound;
+    }
+    if (fn && fn->isEqualTo("NVRMDdcTransfer")) {     // NVRMFB: one DDC/CI write or read for a display (nvrm_ddc.cpp)
+        if (!p1) return kIOReturnBadArgument;
+        NvXnuPmUse pmUse(true);
+        return nvrm_ddc_transfer((struct NVRMDdcRequest *)p1) == 0 ? kIOReturnSuccess : kIOReturnIOError;
+    }
+    if (fn && fn->isEqualTo("NVRMDpAux")) {            // NVRMFB: one DPCD transaction (eDP backlight fallback, nvrm_ddc.cpp)
+        if (!p1) return kIOReturnBadArgument;
+        NvXnuPmUse pmUse(true);
+        return nvrm_dpaux_transfer((struct NVRMDpAuxRequest *)p1) == 0 ? kIOReturnSuccess : kIOReturnIOError;
     }
     if (fn && fn->isEqualTo("NVRMGpuReady"))         // NVRMFB: may the display engine be touched (not in system sleep)?
         return OSAddAtomic(0, &fGpuPm) == kGpuPmRunning ? kIOReturnSuccess : kIOReturnNotReady;
