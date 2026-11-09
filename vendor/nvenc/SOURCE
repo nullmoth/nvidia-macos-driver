@@ -11,6 +11,10 @@ Changes made here, in this order of importance:
                  with no B pictures. Without the declaration VideoToolbox drops the encoder from the candidates of any
                  client that asks for low-latency rate control (FFmpeg's low_delay, Sunshine), and answers -12902.
 
+  src/hevcparse.c  scaling_list_data(): scaling_list_pred_matrix_id_delta is checked against its range (0..matrixId, matrixId / 3
+                 for 32x32) before it is used as an index; a hostile SPS or PPS used to read outside the list array.
+                 tools/test_nvenc_parsers.py. To be sent upstream.
+
 Build inputs (fetched at build time by build/build_nvencvt.sh, not vendored):
   NVIDIA open-gpu-kernel-modules 610.57.04   RM API headers, MIT
   NVIDIA open-gpu-doc 9fdf5c4062007929d9f4e6cbad9c9771fe61b880   video class headers, MIT
