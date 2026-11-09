@@ -366,3 +366,8 @@ static inline unsigned nvrmSurroundMembers(unsigned mask, unsigned connected, un
 }
 // The slice offset of member m: the widths of the members before it.
 static inline unsigned nvrmSurroundOffset(const unsigned *widths, unsigned m) { unsigned o = 0; for (unsigned i = 0; i < m; i++) o += widths[i]; return o; }
+// Boot with nothing connected (issue 88: a Dell on DisplayPort, every AUX read of the first query timed out within 14 ms of the
+// firmware coming up; the same card on HDMI was fine): ask again a few times, 3 s apart, through the hot-plug scan (which
+// starts a framebuffer for a display that appears). 6 tries, then it stays quiet like before. 0 = stop.
+enum { kNvrmBootRetries = 6 };
+static inline unsigned nvrmBootRetryDelayMs(unsigned attempt) { return attempt < kNvrmBootRetries ? 3000u : 0u; }
