@@ -16,7 +16,19 @@
 
 #include "nb_smu_ops.h"
 
-enum { kRead = 0, kWrite = 1 };
+enum { kRead = 0, kWrite = 1, kTableInit = 3 };
+
+/*
+ * The power table's address. RyzenAdj learns it by sending message 0xB or 0x66 to the platform SMU and reading the answer.
+ * NMSMN does not let a client take part in that exchange (a client could steer it into reading any physical memory): the
+ * kext sends the message itself, keeps the address, and only ever reads the table at it. So when RyzenAdj writes one of
+ * those messages, this layer asks the kext to do it and then plays the exchange back to RyzenAdj: response OK, and a
+ * placeholder non-zero address that RyzenAdj passes on and nothing uses.
+ */
+static const uint32_t kPsmuMsg[2] = { 0x3B10A20, 0x3B10524 };
+static const uint32_t kPsmuRsp[2] = { 0x3B10A80, 0x3B10570 };
+static const uint32_t kPsmuArg[2] = { 0x3B10A88, 0x3B10A40 };
+static struct { int set; int active; int ok; } g_shadow = { 0, 0, 0 };
 
 os_access_obj_t *init_os_access_obj(void)
 {
@@ -51,6 +63,14 @@ void free_os_access_obj(os_access_obj_t *obj)
 
 uint32_t smn_reg_read(const os_access_obj_t *obj, uint32_t addr)
 {
+    if (g_shadow.active) {
+        if (addr == kPsmuRsp[g_shadow.set])
+            return g_shadow.ok ? 1u : 0xFFu;                 // success, or "failed"
+        if (addr == kPsmuArg[g_shadow.set])
+            return g_shadow.ok ? 0x1000u : 0u;               // a placeholder address, not the real one
+        if (addr == kPsmuArg[g_shadow.set] + 4u)
+            return 0u;
+    }
     uint64_t in = addr & ~3u, out = 0;
     uint32_t outCount = 1;
     kern_return_t kr = IOConnectCallScalarMethod((io_connect_t)obj->access.kmod.smn_fd, kRead, &in, 1, &out, &outCount);
@@ -63,6 +83,22 @@ uint32_t smn_reg_read(const os_access_obj_t *obj, uint32_t addr)
 
 void smn_reg_write(const os_access_obj_t *obj, uint32_t addr, uint32_t data)
 {
+    for (int i = 0; i < 2; i++) {
+        if (addr != kPsmuMsg[i])
+            continue;
+        g_shadow.active = 0;                                 // any new message ends a played-back exchange
+        if (data == 0xB || data == 0x66) {
+            uint64_t limit = 0;
+            uint32_t n = 1;
+            kern_return_t kr = IOConnectCallScalarMethod((io_connect_t)obj->access.kmod.smn_fd, kTableInit, NULL, 0, &limit, &n);
+            g_shadow.set = i;
+            g_shadow.active = 1;
+            g_shadow.ok = kr == KERN_SUCCESS;
+            if (kr != KERN_SUCCESS)
+                fprintf(stderr, "the power table is not available (0x%x)\n", kr);
+            return;
+        }
+    }
     uint64_t in[2] = { addr, data };
     kern_return_t kr = IOConnectCallScalarMethod((io_connect_t)obj->access.kmod.smn_fd, kWrite, in, 2, NULL, NULL);
     if (kr != KERN_SUCCESS)
