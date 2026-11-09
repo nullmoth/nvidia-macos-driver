@@ -9239,6 +9239,12 @@ void nvmtl_vk_cmd_barrier_c2c(nvk_cmdbuf *c)
 int nvmtl_vk_rt_available(void) { return nvmtl_vk_init() ? 0 : g_rt; }
 int nvmtl_vk_barycentrics_available(void) { return nvmtl_vk_init() ? 0 : g_bary; }
 
+// The build-time curve description NVK reads from the pNext chain of a box geometry (nvk/curves/nvk_curve.h, same layout).
+#define NVMTL_VK_STRUCTURE_TYPE_NVK_CURVE_GEOMETRY ((VkStructureType)1000999101)
+typedef struct { VkStructureType sType; const void *pNext; VkDeviceAddress controlPoints, radii, indices;
+                 uint32_t controlPointStride, radiusStride, flags, segmentCount; } nvmtl_vk_curve_desc;
+static _Thread_local nvmtl_vk_curve_desc g_curve_desc[NVMTL_MAX_GEOMS];
+
 static uint32_t nvmtl_fill_geometries(const nvmtl_geom *g, uint32_t n, uint64_t instances_addr, uint32_t instance_count, int instance,
                                       VkAccelerationStructureGeometryKHR *out, uint32_t *counts)
 {
@@ -9252,7 +9258,12 @@ static uint32_t nvmtl_fill_geometries(const nvmtl_geom *g, uint32_t n, uint64_t 
     for (uint32_t i = 0; i < n; i++) {
         out[i] = (VkAccelerationStructureGeometryKHR){ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, NULL,
                                                         g[i].is_boxes ? VK_GEOMETRY_TYPE_AABBS_KHR : VK_GEOMETRY_TYPE_TRIANGLES_KHR };
-        if (g[i].is_boxes)
+        if (g[i].is_curve) {
+            g_curve_desc[i] = (nvmtl_vk_curve_desc){ NVMTL_VK_STRUCTURE_TYPE_NVK_CURVE_GEOMETRY, NULL, g[i].cp_addr, g[i].radius_addr,
+                g[i].curve_indices, g[i].cp_stride, g[i].radius_stride, g[i].curve_flags, g[i].count };
+            out[i].geometry.aabbs = (VkAccelerationStructureGeometryAabbsDataKHR){
+                VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR, &g_curve_desc[i], { .deviceAddress = 0 }, 24 };
+        } else if (g[i].is_boxes)
             out[i].geometry.aabbs = (VkAccelerationStructureGeometryAabbsDataKHR){
                 VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR, NULL, { .deviceAddress = g[i].boxes }, g[i].box_stride };
         else
