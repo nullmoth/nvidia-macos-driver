@@ -49,6 +49,10 @@ int main() {
     n = nvrmBuildShutdownPlan(&u2, s, 16);
     CHECK("a layout that was only moved (no resize) writes no Resizable BAR control", n > 0 && indexOf(s, n, kStepExt32, 0x254) < 0);
     CHECK("a plan buffer that is too small is refused rather than overrun", nvrmBuildShutdownPlan(&u, s, 4) == 0);
+    CHECK("standby is the default", nvrmShutdownMode(false, 0, true) == kShutdownStandby);
+    CHECK("full shutdown needs the request, no open user client and a live adapter", nvrmShutdownMode(true, 0, true) == kShutdownFull);
+    CHECK("an open user client falls back to standby", nvrmShutdownMode(true, 1, true) == kShutdownStandby);
+    CHECK("no adapter falls back to standby", nvrmShutdownMode(true, 0, false) == kShutdownStandby);
     return bad;
 }
 '''
@@ -65,6 +69,7 @@ int main() {
 arm("NVRM handles system power-off and restart", "void NVRM::systemWillShutdown(IOOptionBits specifier)" in nvrm)
 arm("the shutdown handler runs the plan placeLargeBar1's undo record feeds", "nvrmBuildShutdownPlan(&fBarUndo" in nvrm and "undo.valid = true; fBarUndo = undo;" in nvrm)
 arm("the RM standby on shutdown is bounded", "waited < 8000" in nvrm)
+arm("a full RM shutdown runs only when asked for and every user client has closed", "nvrmShutdownMode(askedFull, open, fAdapter)" in nvrm and "rm_shutdown_adapter(NULL, &s->fNv)" in nvrm)
 arm("-nvrmnoshutdown keeps the old behaviour", '"-nvrmnoshutdown"' in nvrm)
 
 if failures:

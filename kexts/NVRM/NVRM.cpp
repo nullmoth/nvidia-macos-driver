@@ -145,6 +145,7 @@ private:
     volatile SInt32 fShutdownDone = 0;  // the quiesce thread's finish flag
     bool fShutdownHandled = false;
     static void shutdownQuiesce(void *p0, wait_result_t w);
+    static void shutdownFull(void *p0, wait_result_t w);
     // System sleep (S3). NVRM is a power child of the GPU's IOPCIDevice, so it is told to power off before the slot
     // loses power and to power on once IOPCIFamily has the device back in D0.
     enum { kGpuPmRunning = 0, kGpuPmSuspended = 1, kGpuPmLost = 2 };
@@ -1882,6 +1883,23 @@ void NVRM::shutdownQuiesce(void *p0, wait_result_t)
     thread_terminate(current_thread());
 }
 
+// The full path: display off, user channels stopped, then the RM's own adapter shutdown (what stop() runs after the
+// clients have gone). Reached only through nvrmShutdownMode.
+void NVRM::shutdownFull(void *p0, wait_result_t)
+{
+    NVRM *s = (NVRM *)p0;
+    OSCompareAndSwap(kGpuPmRunning, kGpuPmSuspended, &s->fGpuPm);
+    s->notifyFramebuffers(0);
+    nvkms_xnu_suspend(s->fNv.gpu_id);
+    const int busy = nv_xnu_pm_close(3000);
+    if (busy) LOG("shutdown: %d RM call(s) still running after 3 s", busy);
+    rm_stop_user_channels(NULL, &s->fNv);
+    if (s->fAdapter) { rm_shutdown_adapter(NULL, &s->fNv); s->fAdapter = false; }
+    OSCompareAndSwap(0, 1, &s->fShutdownDone);
+    s->release();
+    thread_terminate(current_thread());
+}
+
 void NVRM::systemWillShutdown(IOOptionBits specifier)
 {
     char off[8] = { 0 };
@@ -1891,12 +1909,17 @@ void NVRM::systemWillShutdown(IOOptionBits specifier)
         if (fIntSrc) fIntSrc->disable();
         if (fAdapter && OSAddAtomic(0, &fGpuPm) == kGpuPmRunning) {
             thread_t th = THREAD_NULL;
+            char mode[16] = { 0 }; unsigned open = 0;
+            for (int i = 0; i < NV_XNU_MAX_CLIENTS; i++) if (gNvClients[i]) open++;
+            const bool askedFull = PE_parse_boot_argn("nvrmshutdown", mode, sizeof mode) && mode[0] == 'f';
+            const bool full = nvrmShutdownMode(askedFull, open, fAdapter) == kShutdownFull;
+            if (askedFull && !full) LOG("shutdown: full shutdown asked for but %u user client(s) are still open - standby instead", open);
             retain();
-            if (kernel_thread_start(&NVRM::shutdownQuiesce, this, &th) == KERN_SUCCESS) {
+            if (kernel_thread_start(full ? &NVRM::shutdownFull : &NVRM::shutdownQuiesce, this, &th) == KERN_SUCCESS) {
                 thread_deallocate(th);
                 unsigned waited = 0;
                 while (!OSAddAtomic(0, &fShutdownDone) && waited < 8000) { IOSleep(10); waited += 10; }
-                LOG("shutdown: GPU %s after %u ms", OSAddAtomic(0, &fShutdownDone) ? "in standby" : "did not finish standby in time, going on", waited);
+                LOG("shutdown: GPU %s after %u ms", OSAddAtomic(0, &fShutdownDone) ? (full ? "shut down" : "in standby") : "did not finish in time, going on", waited);
             } else { release(); LOG("shutdown: could not start the quiesce thread - going on"); }
         }
         NvrmStep plan[16];

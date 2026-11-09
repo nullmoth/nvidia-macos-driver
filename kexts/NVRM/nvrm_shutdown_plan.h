@@ -39,4 +39,15 @@ static inline unsigned nvrmBuildShutdownPlan(const NvrmBarUndo *u, NvrmStep *out
     return n;
 }
 
+// Two ways to bring the GPU down at power-off. Standby is the path system sleep exercises on every machine. Full is
+// rm_shutdown_adapter, as Linux's nv_pci_shutdown ends up there: it frees the RM's adapter state and is only safe once no
+// user client holds RM objects. It is not exercised anywhere on macOS before the unload path, so it runs only when the
+// user asks for it (boot argument nvrmshutdown=full) and every user client has closed; otherwise, and whenever either
+// condition fails, standby runs.
+enum NvrmShutdownMode { kShutdownStandby = 0, kShutdownFull = 1 };
+static inline NvrmShutdownMode nvrmShutdownMode(bool fullRequested, unsigned openUserClients, bool adapterUp)
+{
+    return (fullRequested && openUserClients == 0 && adapterUp) ? kShutdownFull : kShutdownStandby;
+}
+
 #endif
