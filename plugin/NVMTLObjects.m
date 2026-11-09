@@ -3698,6 +3698,26 @@ static nvk_cmdbuf *nvmtl_hz_blit_open(NVMTLCommandBuffer *cb, id src, id dst) {
 }
 - (NSUInteger)tileWidth { return 0; }
 - (NSUInteger)tileHeight { return 0; }
+// The tile entry points. No tile pipeline can exist (the device refuses to make one), so a call here is an application
+// error; each is logged and ignored rather than raising an unrecognised-selector exception.
+static void nvmtl_tile_ignored(const char *what) { static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 8) nvlog("render encoder %s: tile shading is not carried - ignored", what); }
+- (void)setTileBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileBytes"); }
+- (void)setTileBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileBuffer"); }
+- (void)setTileBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileBufferOffset"); }
+- (void)setTileBuffers:(const id<MTLBuffer> __unsafe_unretained [])buffers offsets:(const NSUInteger [])offsets withRange:(NSRange)range { nvmtl_tile_ignored("setTileBuffers"); }
+- (void)setTileTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileTexture"); }
+- (void)setTileTextures:(const id<MTLTexture> __unsafe_unretained [])textures withRange:(NSRange)range { nvmtl_tile_ignored("setTileTextures"); }
+- (void)setTileSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileSamplerState"); }
+- (void)setTileSamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])samplers withRange:(NSRange)range { nvmtl_tile_ignored("setTileSamplerStates"); }
+- (void)setTileSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lo lodMaxClamp:(float)hi atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileSamplerState"); }
+- (void)setTileSamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])samplers lodMinClamps:(const float [])lo lodMaxClamps:(const float [])hi withRange:(NSRange)range { nvmtl_tile_ignored("setTileSamplerStates"); }
+- (void)setTileVisibleFunctionTable:(id<MTLVisibleFunctionTable>)t atBufferIndex:(NSUInteger)i { nvmtl_tile_ignored("setTileVisibleFunctionTable"); }
+- (void)setTileVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __unsafe_unretained [])ts withBufferRange:(NSRange)r { nvmtl_tile_ignored("setTileVisibleFunctionTables"); }
+- (void)setTileIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)t atBufferIndex:(NSUInteger)i { nvmtl_tile_ignored("setTileIntersectionFunctionTable"); }
+- (void)setTileIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __unsafe_unretained [])ts withBufferRange:(NSRange)r { nvmtl_tile_ignored("setTileIntersectionFunctionTables"); }
+- (void)setTileAccelerationStructure:(id<MTLAccelerationStructure>)a atBufferIndex:(NSUInteger)i { nvmtl_tile_ignored("setTileAccelerationStructure"); }
+- (void)dispatchThreadsPerTile:(MTLSize)threadsPerTile { nvmtl_tile_ignored("dispatchThreadsPerTile"); }
+- (void)setThreadgroupMemoryLength:(NSUInteger)length offset:(NSUInteger)offset atIndex:(NSUInteger)index { nvmtl_tile_ignored("setThreadgroupMemoryLength"); }
 - (unsigned long long)globalTraceObjectID { return nvmtl_global_trace_id(self); }
 static NSMutableDictionary *g_sampvar; static pthread_mutex_t g_sampvar_lock = PTHREAD_MUTEX_INITIALIZER;
 extern unsigned char *CC_SHA256(const void *data, uint32_t len, unsigned char *md);

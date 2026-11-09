@@ -2207,6 +2207,26 @@ static NSOperationQueue *nvmtl_pipeline_compile_queue(void) {
     });
     return queue;
 }
+// Tile shading (a tile function run over the pixels of a tile, with the colour attachments as the imageblock) needs the
+// translator to lower imageblock access to the attachments and the render pass to be split around a compute dispatch;
+// neither exists here. The pipeline is refused with a reason an application can show, instead of an unrecognised
+// selector taking the process down. What does work: a fragment function that reads [[color(n)]] (framebuffer fetch) and
+// a compute kernel that uses imageblock memory (MPS).
+static NSString *nvmtl_tile_refusal(MTLTileRenderPipelineDescriptor *d) {
+    return [NSString stringWithFormat:@"tile render pipeline (%@): REFUSED - tile shading is not carried by this driver (a tile function needs imageblock "
+            "access to the colour attachments and a render pass split around a per-tile dispatch)", d.tileFunction.name ?: @"no tile function"];
+}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)d options:(MTLPipelineOption)o
+                                                            reflection:(MTLAutoreleasedRenderPipelineReflection *)r error:(NSError **)err {
+    if (r) *r = nil;
+    NSString *why = nvmtl_tile_refusal(d); nvlog("%s", why.UTF8String);
+    return nvmtl_fail(err, why);
+}
+- (void)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)d options:(MTLPipelineOption)o
+                                completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)h {
+    NSError *e = nil; (void)[self newRenderPipelineStateWithTileDescriptor:d options:o reflection:NULL error:&e];
+    if (h) dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ h(nil, nil, e); });
+}
 - (void)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d completionHandler:(MTLNewRenderPipelineStateCompletionHandler)h {
     MTLRenderPipelineDescriptor *snapshot = [d copy];
     [nvmtl_pipeline_compile_queue() addOperationWithBlock:^{ @autoreleasepool {
