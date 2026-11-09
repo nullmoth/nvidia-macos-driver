@@ -5,13 +5,18 @@ SMC keys `LKSB` and `LKSS`, which CoreBrightness reads and writes. Off unless th
 
 ## What it covers
 
-| Laptop family | How the light is reached | State |
-|---|---|---|
-| ASUS | ACPI WMI device (`PNP0C14`, `_UID` "ATK"), method `WMNB`, device id `0x00050021`, methods `DSTS` and `DEVS` | Built. Read from ASUS DSDTs sent in by users: 33 of 648 tables handle the device id, all with OEM id `_ASUS_` |
-| Lenovo IdeaPad, Legion, LOQ | `VPC0.KBLC` on the `VPC2004` device. The method takes a packed command whose capability bits come from the embedded controller (`KBGC`) | Not built: the packing of the set command is not documented outside Lenovo and the table alone does not give the level encoding |
-| Lenovo ThinkPad | `HKEY.MLCG` / `MLCS` | Not built: present in the tables, argument layout not confirmed |
-| MSI | embedded controller fields (`KBBL`, `KBL0`), written directly | Not built: a write to controller memory with no method behind it |
-| HP, Dell, Acer, Razer | HP and Dell expose vendor WMI buffers whose layout differs per model; no keyboard-backlight method was found that takes a plain level | Not built |
+Matched by what the machine's ACPI tables carry, not by vendor name. Counts are from 648 DSDTs in user uploads.
+
+| Laptop family | How the light is reached | Tables | State |
+|---|---|---|---|
+| ASUS | WMI device (`PNP0C14`, `_UID` "ATK"), `WMNB`, device id `0x00050021`, methods `DSTS` and `DEVS` | 33 | Built. Read from a real ASUS table: `WMNB`, `GLKB`/`SLKB`, level in the low 7 bits, `0x80` = on |
+| Lenovo IdeaPad, Legion, LOQ | device `VPC2004`: `KBLC` for three-level lights, `HALS`/`SALS` for plain on/off ones | 44 with `KBLC`, 54 with `HALS`/`SALS` | Built from the public ideapad-laptop driver's documented encodings, written again. Checked against a real table: its `HALS` does not set the keyboard-light support bit, so the plugin correctly finds no light on that model |
+| Lenovo ThinkPad | `HKEY` (`IBM0068`, `LEN0068` or `LEN0268`): `MLCG` and `MLCS` | 0 | Built from the public thinkpad_acpi driver's documented encodings (present = bit 9, level = low two bits). No ThinkPad table was in the uploads, so it has never met a real one |
+| MSI | embedded-controller fields (`KBBL`, `KBL0`), written directly | 27 | Not built: a write to controller memory with no method behind it, at a per-model address (the public msi-ec driver keeps a table per model). I did not read that table |
+| HP, Dell, Acer, Razer | HP and Dell use vendor WMI buffers (Dell's keyboard light goes through SMBIOS calls), Acer's through its own WMI | 33 HP, 31 Dell, 29 Acer | Not built. I did not read the HP, Dell or Acer drivers, and no Razer table was in the sample |
+
+The plugin stands aside when VirtualSMC's `SMCLightSensor` is loaded and the machine has an ambient-light device with a
+working `_ALI`, because that plugin already registers `LKSB` and `LKSS`; `nmkblforce=1` registers anyway.
 
 ## How macOS finds a keyboard backlight (read from a real Intel Mac Pro on macOS 26.7)
 
