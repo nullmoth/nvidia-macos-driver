@@ -88,6 +88,33 @@ int main(void)
         arm("every HID brightness maps to a level", ok);
         arm("full HID brightness is the top level and zero is off", kbl_smc_to_level(kbl_hid_to_v12(255), 3) == 3 && kbl_smc_to_level(kbl_hid_to_v12(0), 3) == 0);
     }
+    /* Dell */
+    {
+        uint8_t b[KBL_DELL_BUF];
+        kbl_dell_fill(b, 1, 0x11223344, 0xAABBCCDD, 0);
+        arm("the Dell buffer is class 4, select 11, then four little-endian inputs", b[0] == 4 && b[1] == 0 && b[2] == 11 && b[3] == 0 && b[4] == 1 && b[8] == 0x44 && b[11] == 0x11 && b[12] == 0xDD && b[15] == 0xAA);
+        for (int j = 0; j < 4; j++) b[20 + 4 + j] = (uint8_t)(0x01020304u >> (8 * j));
+        arm("an output is read back little-endian from byte 20", kbl_dell_output(b, 1) == 0x01020304u);
+        struct kbl_dell_state st;
+        kbl_dell_parse_state(0x0A3F0004u, 0x8B030201u, &st);
+        arm("the state parses as dell-laptop reads it", st.mode_bit == 2 && st.triggers == 0x3F && st.idle_value == 10 && st.idle_unit == 0
+            && st.als_setting == 1 && st.als_value == 2 && st.level == 3 && st.idle_value_ac == 0x0B && st.idle_unit_ac == 2);
+        uint32_t i1, i2;
+        kbl_dell_set_inputs(&st, &i1, &i2);
+        arm("a set sends the same state back, without the ambient-light value (dell-laptop does not send it)", i1 == 0x0A3F0004u && i2 == 0x8B030001u);
+        st.level = 1; kbl_dell_set_inputs(&st, &i1, &i2);
+        arm("only the level changes", ((i2 >> 16) & 0xFF) == 1 && i1 == 0x0A3F0004u && (i2 & 0xFFFF) == 0x0001 && (i2 >> 24) == 0x8B);
+        arm("the number of levels is bits 23..16 of output 2", kbl_dell_info_levels(0x00030000u) == 3 && kbl_dell_info_levels(0) == 0);
+        uint8_t wdg[40] = {0};
+        for (int i = 0; i < 16; i++) wdg[20 + i] = kKblDellGuid[i];
+        wdg[36] = 'A'; wdg[37] = 'A'; wdg[38] = 1; wdg[39] = 0x02;
+        char obj[2] = {0, 0};
+        arm("the Dell SMBIOS method is found in a _WDG buffer and named from its object characters", kbl_dell_wdg_find(wdg, 40, obj) && obj[0] == 'A' && obj[1] == 'A');
+        wdg[39] = 0x00;
+        arm("an entry that is not a method is ignored", !kbl_dell_wdg_find(wdg, 40, obj));
+        wdg[39] = 0x02; wdg[25] ^= 1;
+        arm("a different GUID is ignored", !kbl_dell_wdg_find(wdg, 40, obj));
+    }
     arm("the method ids are the ASCII of their names", KBL_ASUS_METHOD_DSTS == ('D' | 'S' << 8 | 'T' << 16 | 'S' << 24)
                                                     && KBL_ASUS_METHOD_DEVS == ('D' | 'E' << 8 | 'V' << 16 | 'S' << 24));
     return fails ? 1 : 0;
