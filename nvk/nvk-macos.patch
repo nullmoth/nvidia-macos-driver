@@ -10232,10 +10232,10 @@ diff -ruN a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/
 +                  NV_STATUS r = nvRmApiControl(&rm, ctx->hTsg, 0xa06c0103 /* NVA06C_CTRL_CMD_SET_TIMESLICE */, &tsp, sizeof tsp);
 +                  fprintf(stderr, "nvrm: tsgsched TSG 0x%x (gfx queue %d) timeslice %llu us -> 0x%x\n", (unsigned)ctx->hTsg, qidx, (unsigned long long)tsp.timesliceUs, (unsigned)r);
 +               }
-+               if (qidx == 0 && hie && hie[0] == '1') {
-+                  NvU32 lv = 2; /* NVA06C_CTRL_INTERLEAVE_LEVEL_HIGH */
++               if (qidx == 0 && hie && (hie[0] == '1' || hie[0] == '0')) {
++                  NvU32 lv = hie[0] == '1' ? 2 : 0; /* NVA06C_CTRL_INTERLEAVE_LEVEL_HIGH, or _LOW for 0 */
 +                  NV_STATUS r = nvRmApiControl(&rm, ctx->hTsg, 0xa06c0107 /* NVA06C_CTRL_CMD_SET_INTERLEAVE_LEVEL */, &lv, sizeof lv);
-+                  fprintf(stderr, "nvrm: tsgsched TSG 0x%x (gfx queue 0) interleave HIGH -> 0x%x\n", (unsigned)ctx->hTsg, (unsigned)r);
++                  fprintf(stderr, "nvrm: tsgsched TSG 0x%x (gfx queue 0) interleave %s -> 0x%x\n", (unsigned)ctx->hTsg, lv == 2 ? "HIGH" : "LOW", (unsigned)r);
 +               }
 +            }
 +         } else {

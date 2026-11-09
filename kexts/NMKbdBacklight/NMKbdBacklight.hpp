@@ -23,7 +23,7 @@ public:
     int maxLevel() const { return maxLevel_; }
 
 private:
-    enum Backend { None, Asus, IdeaPad, IdeaPadPlain, ThinkPad, Dell };
+    enum Backend { None, Asus, IdeaPad, IdeaPadPlain, ThinkPad, Dell, Msi };
 
     friend class NMKbdBacklightHID;
     static bool vsmcNotificationHandler(void *sensors, void *refCon, IOService *vsmc, IONotifier *notifier);
@@ -34,6 +34,9 @@ private:
     bool probeIdeaPad();
     bool probeThinkPad();
     bool probeDell();
+    bool probeMsi();
+    bool ecRead(uint8_t addr, uint8_t *v);
+    bool ecWrite(uint8_t addr, uint8_t v);
     bool dellCall(uint32_t in0, uint32_t in1, uint32_t in2, uint32_t *out1, uint32_t *out2);
 
     IOACPIPlatformDevice *dev {nullptr};
@@ -42,6 +45,7 @@ private:
     Backend backend {None};
     int lenovoType {0};
     char dellMethod[8] {};
+    const struct kbl_msi_row *msiRow {nullptr};
     unsigned dellBuf {4096};
     int maxLevel_ {KBL_ASUS_MAX_LEVEL};
     IONotifier *vsmcNotifier {nullptr};

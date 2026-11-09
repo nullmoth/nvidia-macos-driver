@@ -115,6 +115,33 @@ int main(void)
         wdg[39] = 0x02; wdg[25] ^= 1;
         arm("a different GUID is ignored", !kbl_dell_wdg_find(wdg, 40, obj));
     }
+    /* MSI */
+    {
+        arm("a firmware the msi-ec table names is found", kbl_msi_find("14C1EMS1.012") && kbl_msi_find("14C1EMS1.012")->addr == 0xf3 && kbl_msi_find("14C1EMS1.012")->base == 0x80);
+        arm("a firmware the table does not name is refused", !kbl_msi_find("99ZZEMS9.999") && !kbl_msi_find("14C1EMS1.013"));
+        arm("a firmware whose light the driver marks not functional is not in the table", KBL_MSI_ROWS == 22);
+        const struct kbl_msi_row *r = kbl_msi_find("14C1EMS1.012");
+        arm("a level is the base value plus the level, clamped to the highest state", kbl_msi_value(r, 0) == 0x80 && kbl_msi_value(r, 2) == 0x82 && kbl_msi_value(r, 9) == 0x83 && kbl_msi_value(r, -1) == 0x80);
+        arm("a controller byte outside base .. base + max is no level", kbl_msi_level(r, 0x81) == 1 && kbl_msi_level(r, 0x7F) == -1 && kbl_msi_level(r, 0x84) == -1);
+    }
+    /* Dell descriptor */
+    {
+        uint8_t d[20] = { 'D', 'E', 'L', 'L', ' ', 'W', 'M', 'I', 1, 0, 0, 0, 0x00, 0x10, 0, 0, 7, 0, 0, 0 };
+        uint32_t size = 0, hot = 0;
+        arm("a valid descriptor gives the buffer length and the hotfix", kbl_dell_parse_descriptor(d, 20, &size, &hot) && size == 4096 && hot == 7);
+        d[13] = 0x80;
+        arm("a 32 KB buffer is read as 32768", kbl_dell_parse_descriptor(d, 20, &size, &hot) && size == 32768);
+        d[4] = 'X';
+        arm("a wrong signature is refused", !kbl_dell_parse_descriptor(d, 20, &size, &hot));
+        d[4] = ' '; d[12] = 0; d[13] = 0; d[14] = 0; d[15] = 0;
+        arm("a length too small for the call is refused", !kbl_dell_parse_descriptor(d, 20, &size, &hot));
+        arm("a block shorter than a descriptor is refused", !kbl_dell_parse_descriptor(d, 10, &size, &hot));
+        uint8_t wdg[20] = {0};
+        for (int i = 0; i < 16; i++) wdg[i] = kKblDellDescGuid[i];
+        wdg[16] = 'B'; wdg[17] = 'A'; wdg[19] = 0x00;
+        char obj[2]; int fl = -1;
+        arm("the descriptor block is found in a _WDG buffer with its object characters and flags", kbl_wdg_find(wdg, 20, kKblDellDescGuid, obj, &fl) && obj[0] == 'B' && obj[1] == 'A' && fl == 0);
+    }
     arm("the method ids are the ASCII of their names", KBL_ASUS_METHOD_DSTS == ('D' | 'S' << 8 | 'T' << 16 | 'S' << 24)
                                                     && KBL_ASUS_METHOD_DEVS == ('D' | 'E' << 8 | 'V' << 16 | 'S' << 24));
     return fails ? 1 : 0;
