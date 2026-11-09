@@ -69,6 +69,9 @@ check('the decode service reads nvrm610.conf before it reads any selector',
       svc is not None and 'nvmtl_conf_settle()' in svc and svc.index('nvmtl_conf_settle()') < svc.index('getenv("NVMTL_NO_NVDEC")'))
 check('the decode service registers on a queue that is not starved under load',
       svc is not None and 'QOS_CLASS_USER_INITIATED' in svc and 'QOS_CLASS_UTILITY' not in svc)
+check('the built-in encoders declare low-latency rate control only when NVMTL_ENCODER_LLRC asks',
+      'NVMTL_ENCODER_LLRC' in src and src.count('nvmtl_encoder_registration_info(@"com.nvmtl.videoencoder') == 2
+      and '"EnableLowLatencyRateControl"' in src or '@"EnableLowLatencyRateControl"' in src)
 check('device initialisation still registers the full library', 'nvmtl_nvencvt_register(false)' in src)
 
 print(f'{fails} failed' if fails else 'all passed')
