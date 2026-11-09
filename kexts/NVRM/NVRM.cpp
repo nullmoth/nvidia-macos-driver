@@ -63,13 +63,25 @@ __private_extern__ int _kext_apple_cc = __APPLE_CC__;
 #define LOG(fmt, ...) do { kprintf("NVRM-xnu: " fmt "\n", ##__VA_ARGS__); IOLog("NVRM-xnu: " fmt "\n", ##__VA_ARGS__); } while (0)
 
 extern "C" { NvBool nvkms_xnu_load(void); }
-static class NVRM *gNVRMService;
+class NVRM;
+#include "nvrm_devtab.h"
+// The GPU objects, newest-start-wins and never cleared unless the boot argument nvmultigpu=1 is present (nvrm_devtab.h).
+static NvrmDevTab<NVRM> gNVRMTab;
+static NvrmStartGate gNVRMGate;
+static bool nvrmMultiGpu(void)
+{
+    static int on = -1;
+    if (on < 0) { uint32_t v = 0; on = (PE_parse_boot_argn("nvmultigpu", &v, sizeof v) && v) ? 1 : 0; if (on) kprintf("NVRM-xnu: nvmultigpu=1: more than one card may be accelerated, one start-up at a time\n"); }
+    return on == 1;
+}
 #include "nv_rtd3_policy.h"
 extern "C" void nv_rtd3_arm(const struct nv_rtd3_ops *ops);
 extern "C" int  nv_rtd3_before_system_resume(void);
 extern "C" int  nv_rtd3_power_off(IOACPIPlatformDevice *acpi);
 extern "C" int  nv_rtd3_power_on(IOACPIPlatformDevice *acpi);
 extern "C" nv_state_t *nv_xnu_gpu_state(void);
+extern "C" nv_state_t *nv_xnu_gpu_state_at(unsigned index);
+extern "C" void *nv_xnu_gpu_os_device_at(unsigned index);
 struct NVRMDdcRequest;
 extern "C" int nvrm_ddc_transfer(struct NVRMDdcRequest *r);   // nvrm_ddc.cpp
 struct NVRMDpAuxRequest;
@@ -116,6 +128,9 @@ class NVRM : public IOService {
     OSDeclareDefaultStructors(NVRM)
     friend class NVRMUserClient;
     friend nv_state_t *nv_xnu_gpu_state(void);
+    friend nv_state_t *nv_xnu_gpu_state_at(unsigned index);
+    friend void *nv_xnu_gpu_os_device_at(unsigned index);
+    bool startGPU(IOService *provider);
 public:
     virtual IOService *probe(IOService *provider, SInt32 *score) override;
     virtual bool start(IOService *provider) override;
@@ -640,6 +655,22 @@ IOService *NVRM::probe(IOService *provider, SInt32 *score)
 
 bool NVRM::start(IOService *provider)
 {
+    // Without nvmultigpu=1 the gate is not there and this is startGPU() unchanged. With it, one card starts at a time and a
+    // card the primary selector did not mark waits for the marked one (the overlapping start-up of the four-card report).
+    const bool multi = nvrmMultiGpu();
+    uint32_t selector = 0; PE_parse_boot_argn("nvselector", &selector, sizeof selector);
+    const bool marked = provider && provider->getProperty("nullmoth-auto-primary") == kOSBooleanTrue;
+    if (!nvrm_gate_enter(&gNVRMGate, multi, marked, selector != 0)) {
+        LOG("nvmultigpu: another card is starting, or the primary card is not running yet; this card is left unaccelerated");
+        return false;
+    }
+    const bool ok = startGPU(provider);
+    nvrm_gate_leave(&gNVRMGate, multi, ok);
+    return ok;
+}
+
+bool NVRM::startGPU(IOService *provider)
+{
     if (nvrm_driver_off()) {
         if (nvrmOffBarWanted(provider) && super::start(provider)) {
             fPCI = OSDynamicCast(IOPCIDevice, provider);
@@ -662,7 +693,7 @@ bool NVRM::start(IOService *provider)
     if (!fPCI) return false;
     // An unavailable telemetry lock disables this optional interface, not the GPU.
     fUtilizationLock = IOLockAlloc();
-    gNVRMService = this;
+    gNVRMTab.add(this, nvrmMultiGpu(), provider->getProperty("nullmoth-auto-primary") == kOSBooleanTrue);
     nv_xnu_log_init();
     // The kernel mapping table is serialised, so its lock has to exist before RM maps anything.
     if (!nv_xnu_maps_init()) { LOG("IOLockAlloc FAILED for the kernel mapping table"); return false; }
@@ -1921,6 +1952,7 @@ void NVRM::stop(IOService *provider)
     if (fIntSrc) { fIntSrc->disable(); if (fWorkLoop) fWorkLoop->removeEventSource(fIntSrc); fIntSrc->release(); fIntSrc = NULL; }
     if (fWorkLoop) { fWorkLoop->release(); fWorkLoop = NULL; }
     if (fPrivateState) { rm_free_private_state(NULL, &fNv); fPrivateState = false; }
+    gNVRMTab.remove(this, nvrmMultiGpu());   // a no-op without nvmultigpu=1: the old pointer was never cleared
     super::stop(provider);
 }
 
@@ -2681,8 +2713,12 @@ IOReturn NVRMUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
     IOExternalMethodDispatch d = tbl[selector];
     return super::externalMethod(selector, args, &d, this, reference);
 }
-extern "C" nv_state_t *nv_xnu_gpu_state(void) { return gNVRMService ? &gNVRMService->fNv : NULL; }
-extern "C" void *nv_xnu_gpu_os_device(void) { return gNVRMService; }
+extern "C" nv_state_t *nv_xnu_gpu_state(void) { NVRM *s = gNVRMTab.primary(); return s ? &s->fNv : NULL; }
+extern "C" void *nv_xnu_gpu_os_device(void) { return gNVRMTab.primary(); }
+// the same answers for card number `index` (0 is the first started); only meaningful with nvmultigpu=1, where the table holds every card
+extern "C" nv_state_t *nv_xnu_gpu_state_at(unsigned index) { NVRM *s = gNVRMTab.at(index); return s ? &s->fNv : NULL; }
+extern "C" void *nv_xnu_gpu_os_device_at(unsigned index) { return gNVRMTab.at(index); }
+extern "C" unsigned nv_xnu_gpu_count(void) { return gNVRMTab.count(); }
 
 // Selectors 4 and 5 handed a caller's buffer to NVKMS as a kernel-space client, which trusts the pointers inside it
 // (flip heads, LUT ramps, clip lists) as kernel addresses: root could make the kernel read and write where it chose.
