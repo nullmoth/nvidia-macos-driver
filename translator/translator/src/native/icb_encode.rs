@@ -300,7 +300,8 @@ declare void @air.reset_render_command(ptr addrspace(1), i32)
 
     #[test]
     fn the_lowered_encoder_kernel_translates_to_valid_spirv() {
-        let lowered = lower_command_encoders(KERNEL).into_owned();
+        // lowered once on its own before the full pipeline below; the result itself is not inspected
+        let _lowered = lower_command_encoders(KERNEL).into_owned();
         let tmp = std::env::temp_dir().join(format!("icb_encode_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         // the full pipeline, which validates its own output: the encoder kernel with its buffers as plain arguments
