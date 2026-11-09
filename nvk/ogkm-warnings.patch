@@ -1,0 +1,11 @@
+diff -ru oa/src/common/sdk/nvidia/inc/nvmisc.h ob/src/common/sdk/nvidia/inc/nvmisc.h
+--- a/src/common/sdk/nvidia/inc/nvmisc.h	2026-11-09 03:34:28
++++ b/src/common/sdk/nvidia/inc/nvmisc.h	2026-11-09 03:34:28
+@@ -237,6 +237,7 @@
+ #define DRF_SHIFT(drf)          ((DRF_ISBIT(0,drf)) % 32)
+ #define DRF_SHIFT_RT(drf)       ((DRF_ISBIT(1,drf)) % 32)
+ #define DRF_SIZE(drf)           (DRF_EXTENT(drf)-DRF_BASE(drf)+1U)
++#undef DRF_MASK   /* Mesa's drf.h defines its own; the later definition wins, as it always did */
+ #define DRF_MASK(drf)           (0xFFFFFFFFU>>(31-((DRF_ISBIT(1,drf)) % 32)+((DRF_ISBIT(0,drf)) % 32)))
+ #define DRF_DEF(d,r,f,c)        ((NV ## d ## r ## f ## c)<<DRF_SHIFT(NV ## d ## r ## f))
+ #define DRF_NUM(d,r,f,n)        (((n)&DRF_MASK(NV ## d ## r ## f))<<DRF_SHIFT(NV ## d ## r ## f))
