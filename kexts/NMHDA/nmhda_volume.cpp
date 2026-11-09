@@ -60,7 +60,8 @@ IOReturn muteChanged(OSObject *target, IOAudioControl *, SInt32, SInt32 now)
 // Runs on the engine's work loop, where IOAudioFamily expects an engine's controls to be added.
 IOReturn attachControls(OSObject *owner, void *a0, void *, void *, void *)
 {
-    IOAudioEngine *engine = OSDynamicCast(IOAudioEngine, owner);
+    // matched by class name when published, so a plain cast is enough (OSDynamicCast would need IOAudioFamily's symbols)
+    IOAudioEngine *engine = find(owner) != nullptr ? static_cast<IOAudioEngine *>(owner) : nullptr;
     Slot *slot = (Slot *)a0;
     if (engine == nullptr || slot == nullptr)
         return kIOReturnBadArgument;
@@ -88,9 +89,9 @@ IOReturn attachControls(OSObject *owner, void *a0, void *, void *, void *)
 
 bool published(void *, void *, IOService *service, IONotifier *)
 {
-    IOAudioEngine *engine = OSDynamicCast(IOAudioEngine, service);
-    if (engine == nullptr || strcmp(engine->getMetaClass()->getClassName(), kEngineClass) != 0)
+    if (service == nullptr || strcmp(service->getMetaClass()->getClassName(), kEngineClass) != 0)
         return true;
+    IOAudioEngine *engine = static_cast<IOAudioEngine *>(service);
     Slot *slot = nullptr;
     IOLockLock(gLock);
     if (find(engine) == nullptr)
