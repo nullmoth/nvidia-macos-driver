@@ -106,7 +106,8 @@ with tempfile.TemporaryDirectory() as td:
     open(inst + "/gsp_ga10x.bin", "wb").write(b"tampered")
     d = td + "/d4"; os.makedirs(d)
     r = run(pkg, {"FW_TEST_PINS": td + "/dead.pins"}, "--dest", d, "--installed", td + "/inst")
-    check("a changed installed file is not trusted and, with no network, the run stops with the download address", r.returncode == 1 and "download.nvidia.com" in r.stderr + "x" or ("does-not-exist" in r.stderr + r.stdout) or r.returncode == 1, r.stdout + r.stderr)
+    check("a changed installed file is not trusted and, with no network, the run stops with the download address",
+          r.returncode == 1 and "To supply it by hand: download" in r.stderr, r.stdout + r.stderr)
     check("a failed run leaves the destination empty", dest_files(d) == [], str(dest_files(d)))
 
     bad = dict(good); bad["ucodes_ga10x.bin"] = "0" * 64
