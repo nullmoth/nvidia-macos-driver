@@ -551,28 +551,6 @@ pub extern "C" fn nvmtl_spec_apply(
     }
 }
 
-/// How much of the AIR text survives the function-constant fold for this set of values, in percent (the folded text's
-/// length over the original's). The fold is text-level and cheap. A set whose config struct folds away leaves a few
-/// percent of the module; one that folds nothing leaves nearly all of it, and a translation per such set repeats the
-/// same work, which is what nvmtl_translate_spec avoids. Returns -1 on error.
-#[no_mangle]
-pub extern "C" fn nvmtl_fc_fold_percent(
-    ll: *const c_char, indices: *const u32, sizes: *const u32, payloads: *const *const u8, n: usize,
-) -> i32 {
-    if ll.is_null() || (n > 0 && (indices.is_null() || sizes.is_null() || payloads.is_null())) { return -1; }
-    let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => return -1 };
-    let mut values: Vec<(u32, Vec<u8>)> = Vec::with_capacity(n);
-    for i in 0..n {
-        let (idx, len, ptr) = unsafe { (*indices.add(i), *sizes.add(i) as usize, *payloads.add(i)) };
-        if ptr.is_null() { return -1; }
-        values.push((idx, unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()));
-    }
-    match metal2vulkan::specialize_air_function_constants(ll, &values) {
-        Ok(v) if !ll.is_empty() => ((v.as_ref() as &str).len() as u64 * 100 / ll.len() as u64).min(1000) as i32,
-        _ => -1,
-    }
-}
-
 /// Translates AIR once, whatever its function constants will be, into SPIR-V whose function constants are
 /// specialization constants (see `specialize_function_constants_as_spec_ids`). `table` receives five u32 per constant:
 /// function-constant index, lane, SpecId, size in bytes, byte offset inside that constant's payload; `table_len` is its
