@@ -57,6 +57,8 @@ for p in $CHAIN; do
   patch -p1 -s --no-backup-if-mismatch -d "$S" < "$f" || { echo "STOP: $f does not apply"; exit 3; }
   echo "applied $(basename "$f")"
 done
+# the shared layout headers of the hardware ray-traversal part live in nvk/hwrt (the host tests include them too)
+cp "$NVK/hwrt/nvk_hwrt.h" "$NVK/hwrt/nvk_hwrt_layout.h" "$S/src/nouveau/vulkan/"
 # the nvrm directory comes from nvk-macos.patch
 ln -s "$OUT/ogkm" "$S/src/nouveau/vulkan/nvkmd/nvrm/open-gpu-kernel-modules"
 python3 "$NVK/dlss/patch_dlss_cache.py" "$S"
