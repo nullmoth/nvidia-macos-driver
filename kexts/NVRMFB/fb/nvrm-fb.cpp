@@ -693,6 +693,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
             hotplugKick();
     }
     static void hotplugKick();
+    static void hotplugPollFire(thread_call_param_t, thread_call_param_t);
     static void hotplugFire(thread_call_param_t p0, thread_call_param_t);
     static void flipWake(unsigned head);
     bool waitFlipDone(uint64_t limitUs);
@@ -1750,6 +1751,18 @@ void NVRMNVDAFramebuffer::hotplugKick()
     if (!gHotplug) return;
     uint64_t d; clock_interval_to_deadline(1500, kMillisecondScale, &d);
     thread_call_enter_delayed(gHotplug, d);
+}
+// Boot-arg nvfbhotplugpoll=<seconds> (1..60): look for added and removed displays on a timer as well. Some laptops (a GTX 1660 Ti
+// with its mini-DP and HDMI wired to the GPU, issue 327) never deliver the display-change event while the GPU sleeps, so a
+// plug or unplug at run time is not noticed at all. The poll is the same scan the event runs (hotplugFire), so a quiet bus costs
+// one display query per period and changes nothing.
+static thread_call_t gHotplugPoll = nullptr;
+static uint32_t gHotplugPollSec = 0;
+void NVRMNVDAFramebuffer::hotplugPollFire(thread_call_param_t, thread_call_param_t)
+{
+    hotplugKick();
+    uint64_t d; clock_interval_to_deadline(gHotplugPollSec, kSecondScale, &d);
+    if (gHotplugPoll) thread_call_enter_delayed(gHotplugPoll, d);
 }
 void NVRMNVDAFramebuffer::hotplugFire(thread_call_param_t, thread_call_param_t)
 {
@@ -2968,6 +2981,14 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
           (unsigned long long)(nvrmVramBudget(fBarLen) >> 20));
     if (fIndex == 0 && gFB != this) { retain(); gFB = this; }
     if (fIndex == 0 && !gHotplug) gHotplug = nvrmfbCall(hotplugFire, nullptr);
+    if (fIndex == 0 && gHotplug && !gHotplugPoll) {
+        UInt32 sec = 0;
+        if (PE_parse_boot_argn("nvfbhotplugpoll", &sec, sizeof sec) && nvrmHotplugPollValid(sec)) {
+            gHotplugPollSec = sec; gHotplugPoll = nvrmfbCall(hotplugPollFire, nullptr);
+            if (gHotplugPoll) { uint64_t d; clock_interval_to_deadline(sec, kSecondScale, &d); thread_call_enter_delayed(gHotplugPoll, d); }
+            FBLOG("hot-plug poll every %u s (nvfbhotplugpoll)", sec);
+        }
+    }
     if (!gNubParent && provider->getProvider()) { gNubParent = provider->getProvider(); gNubParent->retain(); }
     // WhateverGreen (with Lilu) replaces IOFramebuffer::initFB. Unless boot-arg gfxrst=4 is set, the first initFB of any
     // framebuffer copies the boot console from the address WhateverGreen saved at boot. macOS frees that mapping when
@@ -3604,6 +3625,10 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
     struct NvKmsKapiModeSetReplyConfig *rep = (struct NvKmsKapiModeSetReplyConfig *)IOMalloc(sizeof *rep);
     if (!cfg || !rep) { if (cfg) IOFree(cfg, sizeof *cfg); if (rep) IOFree(rep, sizeof *rep); fKms->destroySurface(fDev, ns); return kIOReturnNoMemory; }
     NvBool ok = NV_FALSE;
+    // Boot-arg nvfbkeepfront=1: carry the frame on screen through the mode set (see nvrmKeepFrontSurface).
+    UInt32 keepArg = 0; PE_parse_boot_argn("nvfbkeepfront", &keepArg, sizeof keepArg);
+    const bool keepFront = nvrmKeepFrontSurface(keepArg != 0, fFrontSurf != nullptr, fFrontSurf == fSurf, fW, fH, w, h, fCurTransform, transform);
+    struct NvKmsKapiSurface *shown = keepFront ? fFrontSurf : ns;
     for (int commit = 0; commit < 2; commit++) {
         nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
         cfg->headsMask = 1u << fHead;
@@ -3613,7 +3638,7 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
         hr->modeSetConfig.mode = m;
         hr->flags.activeChanged = hr->flags.displaysChanged = hr->flags.modeChanged = NV_TRUE;
         struct NvKmsKapiLayerRequestedConfig *lr = &hr->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX];
-        lr->config.surface = ns; lr->config.srcWidth = (NvU16)w; lr->config.srcHeight = (NvU16)h;
+        lr->config.surface = shown; lr->config.srcWidth = (NvU16)w; lr->config.srcHeight = (NvU16)h;
         lr->config.dstWidth = (NvU16)m.timings.hVisible; lr->config.dstHeight = (NvU16)m.timings.vVisible;
         lr->config.compParams.compMode = NVKMS_COMPOSITION_BLENDING_MODE_OPAQUE; lr->config.minPresentInterval = 1;
         lr->flags.surfaceChanged = lr->flags.srcXYChanged = lr->flags.srcWHChanged = lr->flags.dstXYChanged = lr->flags.dstWHChanged = NV_TRUE;
@@ -3637,7 +3662,7 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
     }
     struct NvKmsKapiSurface *old = fSurf;
     fScan30 = ten;
-    fSurf = ns; fFrontSurf = ns; fMode = m; fW = w; fH = h; fPitch = pitch;
+    fSurf = ns; fFrontSurf = shown; fMode = m; fW = w; fH = h; fPitch = pitch;
     fRasterW = m.timings.hVisible; fRasterH = m.timings.vVisible; fCurId = id; fModeSet = true; fModeSwitches++;
     fCurShownKnown = false;   // the mode set named no cursor
     publishFlipWait();
