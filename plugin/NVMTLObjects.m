@@ -108,6 +108,7 @@ static uint64_t nvmtl_res2_evict(uint64_t want);
 extern uint64_t (*nvmtl_res2_evict_hook)(uint64_t want);
 #include "nvmtl_env_knobs.h"
 #include "nvmtl_fps_limit.h"
+#include "nvmtl_shared_wc.h"
 // The keys the user's own block of nvrm610.conf set ("my settings, kept on update"): an application profile never
 // replaces them. The shipped lines above that block are defaults, which a profile does replace.
 static char g_conf_mine[64][48];
@@ -1074,18 +1075,20 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
     for (uint32_t k = 0; k < _nbpk; k++) nvmtl_vk_image_destroy(&_bpk[k].img);
     free(_bpk); _bpk = NULL; _nbpk = 0;
     nvmtl_vk_buffer_retire(&_b); if (_shadow.buf) nvmtl_vk_buffer_retire(&_shadow);
+    if (_swc) { nvmtl_swc_free((nvmtl_swc *)_swc); free(_swc); _swc = NULL; }
     if (_subHeap) { NVMTLHeap *h = _subHeap; NSUInteger c = _subCharge; _subHeap = nil; _subCharge = 0;
                     if (_subPlaced && c) { _subPlaced = NO; [h nvmtlGiveRange:_heapOffset length:c]; }
                     [h nvmtlReleaseSubAllocation:c]; }
     if (_hostDealloc) { void (^d)(void *, NSUInteger) = _hostDealloc; _hostDealloc = nil;
                         d(_hostPtr ?: _b.map, (NSUInteger)(_hostLen ?: _b.size)); } }
 - (MTLStorageMode)storageMode { return _storage; }
-- (void *)contents { nvmtl_buf_settle(self); return _shadow.map ? _shadow.map : (_hostPtr ? _hostPtr : _b.map); }
+- (void *)contents { nvmtl_buf_settle(self); if (_swc && _hostPtr) return _hostPtr; return _shadow.map ? _shadow.map : (_hostPtr ? _hostPtr : _b.map); }
 - (id<MTLHeap>)heap { return _heap ?: _subHeap; }
 - (NSUInteger)heapOffset { return _heapOffset; }
 - (NSUInteger)length { return _b.size; }
 - (void)didModifyRange:(NSRange)r {
     nvmtl_buf_settle(self);
+    if (_swc && _hostPtr) return;   // the caller's pages are diffed at the next submit; _shadow is only staging and holds old bytes
     if (_shadow.map) {
         if (r.location >= _b.size) return;
         NSUInteger n = MIN(r.length, _b.size - r.location);
@@ -4190,9 +4193,15 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     nvmtl_hz_bind_storage(&_cb->_c, [nt nvi], nvmtl_hz_untracked_tex(nt), NVMTL_SET_FRAGMENT, (uint32_t)i, nt->_stex ? [nt nvview] : NULL);
     if (!nt->_stex && (nt.usage & MTLTextureUsageShaderWrite)) {
         // a fragment shader writing a texture that has no storage view writes the dummy: say which texture, once per shape
-        static NSMutableSet *seen; static os_unfair_lock sl = OS_UNFAIR_LOCK_INIT;
-        NSString *k = [NSString stringWithFormat:@"%lu/%lu/%lu", (unsigned long)nt.pixelFormat, (unsigned long)nt.usage, (unsigned long)nt.textureType];
-        os_unfair_lock_lock(&sl); if (!seen) seen = [NSMutableSet new]; BOOL fresh = ![seen containsObject:k]; if (fresh) [seen addObject:k]; os_unfair_lock_unlock(&sl);
+        // OpenGL rebinds every texture before each draw, and its textures carry ShaderWrite: this runs thousands of times
+        // a frame, so the shape is a packed integer in a small table, with no string or object made per bind.
+        static uint64_t seen[64]; static int nseen; static os_unfair_lock sl = OS_UNFAIR_LOCK_INIT;
+        const uint64_t k = ((uint64_t)nt.pixelFormat << 40) ^ ((uint64_t)nt.usage << 8) ^ (uint64_t)nt.textureType ^ 0x8000000000000000ull;
+        BOOL fresh = YES;
+        os_unfair_lock_lock(&sl);
+        for (int q = 0; q < nseen; q++) if (seen[q] == k) { fresh = NO; break; }
+        if (fresh && nseen < 64) seen[nseen++] = k; else if (fresh) fresh = NO;   // a full table says nothing more
+        os_unfair_lock_unlock(&sl);
         if (fresh) nvlog("setFragmentTexture: texture %lu is ShaderWrite but has no storage view (pixelFormat %lu, usage 0x%lx, type %lu, image storage %u) - a fragment write to it goes to the dummy",
                          (unsigned long)i, (unsigned long)nt.pixelFormat, (unsigned long)nt.usage, (unsigned long)nt.textureType, [nt nvi]->storage);
     }
@@ -7800,8 +7809,40 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
 - (void)sampleCountersInBuffer:(id<MTLCounterSampleBuffer>)b atSampleIndex:(NSUInteger)i withBarrier:(BOOL)w { nvmtl_sample_counter(_cb, b, i, self, w); }
 @end
 
+// Shared buffers with a VRAM working copy (NVMTL_SHARED_VRAM=1, see nvmtl_shared_wc.h). One lock: the diff and the copy
+// for a buffer must not interleave with another command buffer's, and the copies are synchronous and ordered.
+static os_unfair_lock gSwcLock = OS_UNFAIR_LOCK_INIT;
+static void nvmtl_swc_sync_in(NVMTLBuffer *b)
+{
+    nvmtl_buf_settle(b);
+    nvmtl_swc_range r[16]; int n;
+    os_unfair_lock_lock(&gSwcLock);
+    // the host side is the caller's pages when there are any (then _shadow is staging for the transfer), else _shadow itself
+    const uint8_t *host = b->_hostPtr ? (const uint8_t *)b->_hostPtr : (const uint8_t *)b->_shadow.map;
+    n = nvmtl_swc_before_submit((nvmtl_swc *)b->_swc, host, r, 16);
+    if (b->_hostPtr) for (int i = 0; i < n; i++) memcpy((uint8_t *)b->_shadow.map + r[i].lo, host + r[i].lo, r[i].hi - r[i].lo);
+    for (int i = 0; i < n; i++)
+        if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_shadow, r[i].lo, &b->_b, r[i].lo, r[i].hi - r[i].lo)) {
+            // the GPU keeps the old bytes: force a full upload at the next submit rather than trust the hashes
+            ((nvmtl_swc *)b->_swc)->vram_valid = 0;
+            nvlog("shared VRAM copy: upload of %zu bytes at %zu FAILED - the next submit uploads everything", r[i].hi - r[i].lo, r[i].lo);
+            break; }
+    os_unfair_lock_unlock(&gSwcLock);
+}
+static void nvmtl_swc_sync_out(NVMTLBuffer *b)
+{
+    os_unfair_lock_lock(&gSwcLock);
+    if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_b, 0, &b->_shadow, 0, b->_shadow.size < b->_b.size ? b->_shadow.size : b->_b.size))
+        nvlog("shared VRAM copy: copy-back of %zu bytes FAILED - contents keeps the CPU's last bytes", b->_b.size);
+    else {
+        if (b->_hostPtr) memcpy(b->_hostPtr, b->_shadow.map, b->_hostLen < b->_shadow.size ? b->_hostLen : b->_shadow.size);
+        nvmtl_swc_after_complete((nvmtl_swc *)b->_swc, b->_hostPtr ? b->_hostPtr : b->_shadow.map);
+    }
+    os_unfair_lock_unlock(&gSwcLock);
+}
 static void nvmtl_buffer_sync_in(NVMTLBuffer *b)
 {
+    if (b && b->_swc && b->_shadow.map) { nvmtl_swc_sync_in(b); return; }
     if (!b || !b->_hostPtr || !b->_b.map || !b->_hostLen) return;
     const uint64_t t0 = nvmtl_perf_now();
     memcpy(b->_b.map, b->_hostPtr, b->_hostLen);
@@ -7810,6 +7851,7 @@ static void nvmtl_buffer_sync_in(NVMTLBuffer *b)
 
 static void nvmtl_buffer_sync_out(NVMTLBuffer *b)
 {
+    if (b && b->_swc && b->_shadow.map) { nvmtl_swc_sync_out(b); return; }
     if (b && b->_shadow.map) {
         if (b->_syncOut) { b->_syncOut = 0; __atomic_store_n(&b->_zshadow, 0, __ATOMIC_RELEASE);
             if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_b, 0, &b->_shadow, 0, b->_b.size)) nvlog("commit: managed sync-out of %zu bytes FAILED", b->_b.size); }
