@@ -5,7 +5,7 @@
 #include <cstring>
 
 struct wide_args {
-   uint64_t ir, out;
+   uint64_t ir, dst;
    uint32_t leaf_count, internal_count, leaf_type, out_leaf_size, hdr, ir_leaf_size, ir_box_size, pad;
 };
 #define W_ARGS const wide_args &a

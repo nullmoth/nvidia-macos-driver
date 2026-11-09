@@ -1,0 +1,134 @@
+diff -ruN a/src/nouveau/vulkan/bvh/meson.build b/src/nouveau/vulkan/bvh/meson.build
+--- a/src/nouveau/vulkan/bvh/meson.build	2026-11-09 00:48:07
++++ b/src/nouveau/vulkan/bvh/meson.build	2026-11-09 00:48:07
+@@ -12,6 +12,10 @@
+     'curve_aabb.comp',
+     'nvk_curve_aabb',
+   ],
++  [
++    'encode_wide.comp',
++    'nvk_encode_wide',
++  ],
+ ]
+ 
+ nvk_bvh_include_dir = dir_source_root + '/src/nouveau/vulkan/bvh'
+@@ -24,6 +28,7 @@
+   '../nvk_hwrt.h',
+   '../nvk_hwrt_layout.h',
+   '../nvk_curve.h',
++  'encode_wide_body.h',
+   nvk_vk_bvh_include_dir + '/vk_bvh_helpers.h',
+   nvk_vk_bvh_include_dir + '/vk_bvh_defines.h',
+ )
+diff -ruN a/src/nouveau/vulkan/nvk_acceleration_structure.c b/src/nouveau/vulkan/nvk_acceleration_structure.c
+--- a/src/nouveau/vulkan/nvk_acceleration_structure.c	2026-11-09 00:48:07
++++ b/src/nouveau/vulkan/nvk_acceleration_structure.c	2026-11-09 00:48:07
+@@ -44,6 +44,10 @@
+ #include "nvk_encode_ttu.spv.h"
+ };
+ 
++static const uint32_t nvk_encode_wide_spv[] = {
++#include "nvk_encode_wide.spv.h"
++};
++
+ static const uint32_t nvk_curve_aabb_spv[] = {
+ #include "nvk_curve_aabb.spv.h"
+ };
+@@ -60,6 +64,7 @@
+    NVK_META_OBJECT_KEY_BVH_ENCODE = VK_META_OBJECT_KEY_DRIVER_OFFSET,
+    NVK_META_OBJECT_KEY_BVH_ENCODE_TTU,
+   NVK_META_OBJECT_KEY_CURVE_AABB,
++  NVK_META_OBJECT_KEY_HWRT_WIDE,
+ };
+ 
+ /* NVK_HWRT_QUERY switches the hardware ray-traversal part on for the whole process: structures then carry the appendix and
+@@ -300,6 +305,79 @@
+    /* defaults: 32-bit morton keys, no quads (encode.comp writes single triangles), no update path */
+ }
+ 
++/* NVK_HWRT_WIDE=1 (with NVK_HWRT_QUERY=1): the hardware node area is written as 8-wide nodes instead of 2-wide ones, so the card
++ * can be asked which shape it reads (docs/HWRT.md, P3). Same bytes reserved, same header, same leaves. */
++static bool
++nvk_hwrt_wide_enabled(void)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("NVK_HWRT_WIDE");
++      on = e && e[0] != '\0' && e[0] != '0';
++   }
++   return on;
++}
++
++struct nvk_wide_args {
++   uint64_t ir, dst, header;
++   uint32_t leaf_count, internal_count, leaf_type, out_leaf_size, hdr, ir_leaf_size, ir_box_size, pass;
++};
++static_assert(offsetof(struct vk_ir_box_node, children) == 24 && offsetof(struct vk_ir_box_node, flags) == 36,
++              "encode_wide_body.h reads the box children at +24 and keeps a depth word in flags at +36");
++
++/* After the 2-wide nodes and the leaves exist: rewrite the node area. Passes: init, 64 rounds of depth propagation, write. */
++static void
++nvk_hwrt_wide(VkCommandBuffer commandBuffer, struct vk_device *vk_device, struct vk_meta_device *meta,
++              const struct vk_acceleration_structure_build_args *build_args,
++              struct vk_acceleration_structure_build_state *states, uint32_t build_count)
++{
++   VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
++   struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
++   VkPipeline pipeline;
++   VkResult result = vk_get_bvh_build_pipeline_spv(vk_device, meta, (enum vk_meta_object_key_type)NVK_META_OBJECT_KEY_HWRT_WIDE,
++                                                   nvk_encode_wide_spv, sizeof(nvk_encode_wide_spv), sizeof(struct nvk_wide_args),
++                                                   build_args, 0, &pipeline, false);
++   VkPipelineLayout layout;
++   if (result == VK_SUCCESS)
++      result = vk_get_bvh_build_pipeline_layout(vk_device, meta, sizeof(struct nvk_wide_args), &layout);
++   if (result != VK_SUCCESS) {
++      vk_command_buffer_set_error(&cmd->vk, result);
++      return;
++   }
++   dev->vk.dispatch_table.CmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
++   const uint32_t rounds = 64;                      /* the traversal stack is 64 deep: no tree here is deeper */
++   for (uint32_t pass = 0; pass < rounds + 2; pass++) {
++      vk_bvh_build_barrier_compute_to_compute(commandBuffer, true);
++      for (uint32_t i = 0; i < build_count; i++) {
++         const struct vk_acceleration_structure_build_state *state = &states[i];
++         VK_FROM_HANDLE(vk_acceleration_structure, dst, state->build_info->dstAccelerationStructure);
++         const VkGeometryTypeKHR type = vk_get_as_geometry_type(state->build_info);
++         const struct nvk_hwrt_place place = nvk_hwrt_place(type, state->leaf_node_count, state->build_info->geometryCount);
++         uint32_t ir_leaf = 0, out_leaf = 0, leaf_type = 0;
++         nvk_get_leaf_node_size(type, &ir_leaf, &out_leaf);
++         switch (type) {
++         case VK_GEOMETRY_TYPE_TRIANGLES_KHR: out_leaf = NVK_HWL_TRI_LEAF_SIZE; leaf_type = nvk_bvh_node_triangle; break;
++         case VK_GEOMETRY_TYPE_AABBS_KHR: out_leaf = NVK_HWL_BOX_LEAF_SIZE; leaf_type = nvk_bvh_node_aabb; break;
++         default: out_leaf = NVK_HWL_INST_LEAF_SIZE; leaf_type = nvk_bvh_node_instance; break;
++         }
++         const struct nvk_wide_args args = {
++            .ir = state->build_info->scratchData.deviceAddress + state->scratch.ir_offset,
++            .dst = vk_acceleration_structure_get_va(dst) + place.hw_offset + NVK_HWRT_STRUCT_OFFSET,
++            .header = state->build_info->scratchData.deviceAddress + state->scratch.header_offset,
++            .leaf_count = state->leaf_node_count,
++            .leaf_type = leaf_type,
++            .out_leaf_size = out_leaf,
++            .hdr = NVK_HWL_HEADER_SIZE,
++            .ir_leaf_size = ir_leaf,
++            .ir_box_size = sizeof(struct vk_ir_box_node),
++            .pass = pass == 0 ? 0 : (pass == rounds + 1 ? 2 : 1),
++         };
++         dev->vk.dispatch_table.CmdPushConstants(commandBuffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(args), &args);
++         dev->vk.dispatch_table.CmdDispatchBase(commandBuffer, 0, 0, 0, DIV_ROUND_UP(MAX2(state->leaf_node_count, 1), 64), 1, 1);
++      }
++   }
++}
++
+ /* The hardware part: clear each appendix, then write it from the same intermediate BVH the software encode just read. */
+ static void
+ nvk_hwrt_encode(VkCommandBuffer commandBuffer, struct vk_device *vk_device, struct vk_meta_device *meta,
+@@ -354,6 +432,9 @@
+       if (pass == 0)
+          vk_bvh_build_barrier_compute_to_compute(commandBuffer, true);
+    }
++
++   if (nvk_hwrt_wide_enabled())
++      nvk_hwrt_wide(commandBuffer, vk_device, meta, build_args, states, build_count);
+ }
+ 
+ /* 26.3: one encode callback for every build (tu_encode's shape): bind the pipeline once, then per build push the args
