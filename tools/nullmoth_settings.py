@@ -57,6 +57,11 @@ CATALOG = [
       "Applies to every application, the desktop included.", rng=(1, 32), effect="restart"),
     S("shader-cache-mb", "Performance", "Shader cache size limit (MB)", "conf", "NVMTL_SPVCACHE_MAX_MB", "int",
       "Size at which the shader cache is trimmed (default 2048). 0 turns trimming off.", rng=(64, 1000000), effect="relaunch the application"),
+    S("multigpu", "Performance", "More than one NVIDIA card (experimental)", "bootarg", "nvmultigpu", "bool",
+      "Accelerate every NVIDIA card, one start-up at a time. A process drives one card: the primary, or the one assigned below."),
+    S("card", "Performance", "Card for an application", "conf", "NVMTL_CARD", "text",
+      "With more than one card: 0 is the primary, 1 the second and so on (up to 7), for every application (1) or per application (Game=1,*=0).",
+      effect="relaunch the application"),
     S("app-profiles", "Performance", "Built-in per-application profiles", "conf", "NVMTL_APP_PROFILE", "bool",
       "On by default; off turns every shipped per-application profile off.", effect="relaunch the application"),
     S("local-map-sysmem", "Performance", "Keep CPU-written memory in system RAM", "conf", "NVK_LOCAL_MAP_SYSMEM", "bool",
@@ -82,6 +87,11 @@ def normalize(s, value):
         if not v.isdigit() or not (s["rng"][0] <= int(v) <= s["rng"][1]) and not (zero_ok and int(v) == 0):
             raise ValueError("%s takes a number from %d to %d, or default, not %r" % (s["id"], s["rng"][0], s["rng"][1], value))
         return str(int(v))
+    if s["id"] == "card":
+        for e in ([v] if "=" not in v else v.split(",")):
+            num = e.split("=", 1)[1] if "=" in e else e
+            if "=" in e and not e.split("=", 1)[0]: raise ValueError("card: an entry needs an application name or *")
+            if not (len(num) == 1 and "0" <= num <= "7"): raise ValueError("card: %r is not a card number from 0 to 7" % num)
     if s["id"] == "fps-limit":
         entries = [v] if "=" not in v else v.split(",")
         for e in entries:
@@ -246,8 +256,10 @@ def selftest():
     arm("queue depth is 1 to 32 and refuses 0 or 33 (0 would mean 'off' to nobody)", normalize(BY_ID["queue-depth"], "4") == "4" and refuses("queue-depth", "33") and refuses("queue-depth", "0"))
     arm("the shader cache limit takes megabytes, 0 turns trimming off, 10 is refused as too small", normalize(BY_ID["shader-cache-mb"], "4096") == "4096"
         and normalize(BY_ID["shader-cache-mb"], "0") == "0" and refuses("shader-cache-mb", "10"))
+    arm("card takes 0 to 7 or a per-application list, and refuses 8, text and an empty name", normalize(BY_ID["card"], "1") == "1" and normalize(BY_ID["card"], "Game=1,*=0") == "Game=1,*=0"
+        and refuses("card", "8") and refuses("card", "x") and refuses("card", "=1") and refuses("card", "Game=12"))
     arm("plan() routes boot arguments and conf settings to the right place", plan(BY_ID["hdr"], "on", "", "")[0] == "bootarg" and plan(BY_ID["fps-limit"], "60", "", "")[0] == "conf")
-    arm("every catalogued id is unique and every boot-arg key is an nvfb name", len(BY_ID) == len(CATALOG) and all(s["key"].startswith("nvfb") for s in CATALOG if s["where"] == "bootarg"))
+    arm("every catalogued id is unique and every boot-arg key is an nvfb name", len(BY_ID) == len(CATALOG) and all(s["key"].startswith(("nvfb", "nvmultigpu")) for s in CATALOG if s["where"] == "bootarg"))
     print("FAILED %d" % len(fails) if fails else "PASS all arms")
     return 1 if fails else 0
 
