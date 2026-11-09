@@ -491,6 +491,14 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     IOService *pciNub();
     IOMemoryDescriptor *fBarMem = nullptr; IOMemoryMap *fBarMap = nullptr;
     void *fBarKva = nullptr; NvU64 fBarLen = 0;
+    // Surround (boot-arg nvfbsurround=<mask of framebuffer indices>): this framebuffer is the master of a group of displays that
+    // appear as one wide display. fSur[0] is the master itself. See nvrmSurroundPlan.
+    struct SurMember { NvKmsKapiDisplay display; NvU32 head; struct NvKmsKapiDisplayMode mode; NvU32 x, w; };
+    SurMember fSur[kNvrmSurMaxMembers]; unsigned fSurN = 0; bool fSurActive = false; unsigned fSurTotalW = 0, fSurH = 0, fSurHz = 0;
+    bool planSurround(unsigned masterIndex);
+    unsigned addSurroundMode(unsigned n);
+    IOReturn switchSurround(IODisplayModeID id);
+    void surroundReplicate(struct NvKmsKapiRequestedModeSetConfig *cfg);
     bool fSpareIndex = false;   // kapiInit stopped because this index has no display to drive (expected, not a failure)
     void surveyBar1();
     bool fConsoleAperture = false;
@@ -1015,6 +1023,7 @@ template <typename C> static void nvrmAutoColorFormat(C *, long) {}
 // Output colour controls. Set from boot-args nvfbbpc (6/8/10/12), nvfbformat (0 RGB, 1 YCbCr 4:2:2, 2 YCbCr 4:4:4),
 // nvfbrange (1 full, 2 limited) and nvfbvib (0..200, 100 = off; below is duller, above more vivid), and live through the
 // debug.nvrmfb_color_* sysctls. All default to "automatic": NVKMS decides, as before. They apply to every head.
+static NvU32 gSurroundMask = 0;                // boot-arg nvfbsurround
 static bool gRotScale = false;                 // boot-arg nvfbrotscale
 static bool gHdrOn = false, gTenBit = false;   // boot-args nvfbhdr / nvfb10bit
 static int gColorBpc = 0, gColorFormat = (int)kNvrmColorFormatAuto, gColorRange = 0, gVibrance = 0;
@@ -1229,6 +1238,14 @@ bool NVRMNVDAFramebuffer::kapiInit()
         fSpareIndex = gNDpy > 0;
         return false;
     }
+    {   // Surround: the members past the first decline to start; the first plans the group
+        static bool maskRead; if (!maskRead) { maskRead = true; UInt32 v = 0; if (PE_parse_boot_argn("nvfbsurround", &v, sizeof v)) gSurroundMask = v & 0xff; }
+        unsigned idx[kNvrmSurMaxMembers]; const unsigned n = gSurroundMask ? nvrmSurroundMembers(gSurroundMask, (unsigned)gNDpy, idx) : 0;
+        if (n >= 2) for (unsigned k = 1; k < n; k++) if (idx[k] == fIndex) {
+            FBLOG("index %u: member of the surround group led by index %u -- not a framebuffer of its own", fIndex, idx[0]);
+            fSpareIndex = true; return false;
+        }
+    }
     {
         struct nvrm_dpy_rec *r = &gDpy[fIndex];
         fDisplay = r->handle; fConnector = r->connector; fInternal = r->internal; fVrrSupported = r->vrr && vrrAllowed();
@@ -1252,6 +1269,7 @@ bool NVRMNVDAFramebuffer::kapiInit()
         FBLOG("index %u -> display 0x%x connector 0x%x headMask 0x%x -> head %u (taken now 0x%x)",
               fIndex, fDisplay, (unsigned)fConnector, (unsigned)r->headMask, fHead,
               (unsigned)gHeadsTaken);
+        if (gSurroundMask) (void)planSurround(fIndex);
     }
     // This mode becomes the head's boot raster (fBootW/fBootH below), which decides the scaler and
     // raster ceilings and which refresh rates addKmsRefreshModes() can publish. A NVKMS-preferred mode
@@ -2124,6 +2142,7 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
             if (vh->flags.modeChanged || vh->flags.activeChanged) vh->flags.vrrEnabledChanged = NV_TRUE;
         }
     }
+    surroundReplicate(cfg);
     if (!commit) return fKms->applyModeSetConfig(fDev, cfg, rep, NV_FALSE);
     // A cursor-only request leaves the primary layer alone: KAPI does not advance the primary layer's completion slot
     // for it, so there is no primary flip to wait for and the primary tracking below stays as the last present left it.
@@ -3258,7 +3277,9 @@ IOReturn NVRMNVDAFramebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth
     fNewIdOnce = 0;
     if (depth != 0) return kIOReturnUnsupportedMode;
     IOReturn result;
-    if (mode == kModeId) {
+    if ((mode >> 16) == 4 && fSurN) {
+        result = dtIndex(mode) >= 0 ? switchSurround(mode) : kIOReturnUnsupportedMode;
+    } else if (mode == kModeId) {
         fPendingScaled = false;
         result = fCurId == kModeId
             ? (applyMode() ? kIOReturnSuccess : kIOReturnError)
@@ -3350,6 +3371,7 @@ void NVRMNVDAFramebuffer::publishRotatedSizes(bool force)
 }
 bool NVRMNVDAFramebuffer::dtIsCurrent(const IODetailedTimingInformationV2 &d) const
 {
+    if (fSurActive || (d.detailedTimingModeID >> 16) == 4) return fSurActive && fModeSet && (d.detailedTimingModeID >> 16) == 4 && (d.detailedTimingModeID & 0xfff) == fSurHz;
     NvU32 w = 0, h = 0; dtSurfaceSize(&d, &w, &h);
     return fModeSet && w == fW && h == fH && d.horizontalActive == fRasterW && d.verticalActive == fRasterH
         && (d.scalerFlags & kIOScaleRotateFlags) == fCurTransform && d.pixelClock == fMode.timings.pixelClockHz
@@ -3814,6 +3836,134 @@ void NVRMNVDAFramebuffer::probeScalerLimit()
     }
     IOFree(loads, kMax * sizeof *loads); IOFree(idx, kMax * sizeof *idx);
 }
+// Surround planning (master only): the members' valid modes, one common height and refresh rate, one head each.
+bool NVRMNVDAFramebuffer::planSurround(unsigned masterIndex)
+{
+    unsigned idx[kNvrmSurMaxMembers]; const unsigned n = nvrmSurroundMembers(gSurroundMask, (unsigned)gNDpy, idx);
+    fSurN = 0;
+    if (n < 2 || idx[0] != masterIndex || !fKms || !fDev) return false;
+    static NvrmSurMode modes[kNvrmSurMaxMembers][kNvrmSurMaxModes]; static struct NvKmsKapiDisplayMode kmodes[kNvrmSurMaxMembers][kNvrmSurMaxModes];
+    unsigned count[kNvrmSurMaxMembers] = {};
+    for (unsigned k = 0; k < n; k++) {
+        const NvKmsKapiDisplay h = gDpy[idx[k]].handle;
+        for (NvU32 i = 0; i < 256 && count[k] < kNvrmSurMaxModes; i++) {
+            struct NvKmsKapiDisplayMode m = {}; NvBool valid = NV_FALSE, pref = NV_FALSE;
+            const int r = fKms->getDisplayMode(fDev, h, i, &m, &valid, &pref);
+            if (r < 0) break;
+            const struct NvKmsKapiDisplayModeTimings &t = m.timings;
+            if (r == 0 || !valid || t.flags.interlaced || t.flags.doubleScan || !t.pixelClockHz || !t.hTotal || !t.vTotal) continue;
+            const NvU64 tot = (NvU64)t.hTotal * t.vTotal;
+            modes[k][count[k]] = { t.hVisible, t.vVisible, (unsigned)((t.pixelClockHz + tot / 2) / tot) };
+            kmodes[k][count[k]] = m; count[k]++;
+        }
+    }
+    unsigned pick[kNvrmSurMaxMembers], total = 0, height = 0, hz = 0;
+    if (!nvrmSurroundPlan(modes, count, n, pick, &total, &height, &hz)) { FBLOG("surround: the %u displays share no height and refresh rate -- not grouped", n); return false; }
+    NvU32 taken = gHeadsTaken | (1u << fHead), x = 0;
+    for (unsigned k = 0; k < n; k++) {
+        const struct nvrm_dpy_rec &r = gDpy[idx[k]];
+        NvU32 head = fHead;
+        if (k) {
+            NvU32 avail = r.headMask & ~taken;
+            if (!avail) { FBLOG("surround: display 0x%x has no free head (mask 0x%x, taken 0x%x) -- not grouped", (unsigned)r.handle, (unsigned)r.headMask, (unsigned)taken); return false; }
+            head = 0; while (head < 32 && !(avail & (1u << head))) head++;
+            taken |= 1u << head;
+        }
+        fSur[k].display = r.handle; fSur[k].head = head; fSur[k].mode = kmodes[k][pick[k]]; fSur[k].x = x; fSur[k].w = modes[k][pick[k]].w;
+        x += fSur[k].w;
+    }
+    gHeadsTaken = taken & ~0u;   // the member heads belong to this group
+    fSurN = n; fSurTotalW = total; fSurH = height; fSurHz = hz;
+    FBLOG("surround: %u displays as one %ux%u @%u Hz display (heads taken 0x%x)", n, total, height, hz, (unsigned)gHeadsTaken);
+    return true;
+}
+// The one mode a surround group offers, in place of the master's own: the combined raster. IDs 0x40000 | refresh rate.
+unsigned NVRMNVDAFramebuffer::addSurroundMode(unsigned n)
+{
+    if (!fSurN) return n;
+    const struct NvKmsKapiDisplayModeTimings &k = fSur[0].mode.timings;
+    IODetailedTimingInformationV2 b; nvu_zero(&b, sizeof b);
+    b.horizontalActive = fSurTotalW; b.verticalActive = fSurH; b.signalConfig = kIODigitalSignal;
+    b.horizontalBlanking = k.hTotal - k.hVisible; b.horizontalSyncOffset = k.hSyncStart - k.hVisible; b.horizontalSyncPulseWidth = k.hSyncEnd - k.hSyncStart;
+    b.verticalBlanking = k.vTotal - k.vVisible; b.verticalSyncOffset = k.vSyncStart - k.vVisible; b.verticalSyncPulseWidth = k.vSyncEnd - k.vSyncStart;
+    // a pixel clock for the combined raster, only so the numbers add up for macOS (each head runs its own timing)
+    const UInt64 tot = (UInt64)(b.horizontalActive + b.horizontalBlanking) * (b.verticalActive + b.verticalBlanking);
+    b.pixelClock = b.minPixelClock = b.maxPixelClock = tot * fSurHz;
+    b.detailedTimingModeID = 0x40000u | fSurHz;
+    fDT[0] = b;
+    FBLOG("fb%u: surround mode %ux%u @%u Hz offered (dt 0x%x)", fIndex, fSurTotalW, fSurH, fSurHz, b.detailedTimingModeID);
+    return 1;
+}
+// Copy the master's head config to every other member, each with its display, its mode and its slice of the shared surface.
+void NVRMNVDAFramebuffer::surroundReplicate(struct NvKmsKapiRequestedModeSetConfig *cfg)
+{
+    if (!fSurActive || !(cfg->headsMask & (1u << fHead))) return;
+    const struct NvKmsKapiHeadRequestedConfig master = cfg->headRequestedConfig[fHead];
+    for (unsigned k = 0; k < fSurN; k++) {
+        const SurMember &m = fSur[k];
+        struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[m.head];
+        if (k) {
+            if (cfg->headsMask & (1u << m.head)) continue;           // the caller already filled this head in
+            *hr = master; cfg->headsMask |= 1u << m.head;
+            hr->modeSetConfig.displays[0] = m.display; hr->modeSetConfig.mode = m.mode;
+            hr->cursorRequestedConfig.surface = NULL; hr->cursorRequestedConfig.flags.surfaceChanged = NV_FALSE; hr->cursorRequestedConfig.flags.dstXYChanged = NV_FALSE;
+        }
+        struct NvKmsKapiLayerConfig &lc = hr->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX].config;
+        if (lc.surface && lc.srcWidth == fSurTotalW) {
+            lc.srcX = (NvU16)m.x; lc.srcWidth = (NvU16)m.w; lc.dstWidth = (NvU16)m.mode.timings.hVisible; lc.dstHeight = (NvU16)m.mode.timings.vVisible;
+            hr->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX].flags.srcXYChanged = hr->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX].flags.srcWHChanged =
+                hr->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX].flags.dstWHChanged = NV_TRUE;
+        }
+    }
+}
+// Light every member head with its slice of one surface as wide as the group (tiled-display style).
+IOReturn NVRMNVDAFramebuffer::switchSurround(IODisplayModeID id)
+{
+    if (!fSurN) return kIOReturnUnsupportedMode;
+    NvU32 pitch = 0; const NvU32 w = fSurTotalW, h = fSurH;
+    if (!nvrmCheckedPitch(w, fPitchAlign, &pitch) || (NvU64)pitch * h > fMemBytes) {
+        FBLOG("surround 0x%x: %ux%u needs %llu B, the scanout holds %llu -- REFUSED", (unsigned)id, w, h, (unsigned long long)pitch * h, (unsigned long long)fMemBytes);
+        return kIOReturnNoMemory;
+    }
+    struct NvKmsKapiCreateSurfaceParams sp = {};
+    sp.planes[0].memory = fMem; sp.planes[0].offset = 0; sp.planes[0].pitch = pitch;
+    sp.width = w; sp.height = h; sp.format = NvKmsSurfaceMemoryFormatX8R8G8B8;
+    struct NvKmsKapiSurface *ns = fKms->createSurface(fDev, &sp);
+    if (!ns) return kIOReturnNoMemory;
+    struct NvKmsKapiRequestedModeSetConfig *cfg = (struct NvKmsKapiRequestedModeSetConfig *)IOMalloc(sizeof *cfg);
+    struct NvKmsKapiModeSetReplyConfig *rep = (struct NvKmsKapiModeSetReplyConfig *)IOMalloc(sizeof *rep);
+    if (!cfg || !rep) { if (cfg) IOFree(cfg, sizeof *cfg); if (rep) IOFree(rep, sizeof *rep); fKms->destroySurface(fDev, ns); return kIOReturnNoMemory; }
+    NvBool ok = NV_FALSE;
+    for (int commit = 0; commit < 2; commit++) {
+        nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
+        for (unsigned k = 0; k < fSurN; k++) {
+            const SurMember &m = fSur[k];
+            cfg->headsMask |= 1u << m.head;
+            struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[m.head];
+            nvrmHeadConfigBaseline(hr, fGammaOn && fGamma ? olutFromGamma() : NULL);
+            hr->modeSetConfig.bActive = NV_TRUE; hr->modeSetConfig.numDisplays = 1; hr->modeSetConfig.displays[0] = m.display;
+            hr->modeSetConfig.mode = m.mode;
+            hr->flags.activeChanged = hr->flags.displaysChanged = hr->flags.modeChanged = NV_TRUE;
+            struct NvKmsKapiLayerRequestedConfig *lr = &hr->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX];
+            lr->config.surface = ns; lr->config.srcX = (NvU16)m.x; lr->config.srcY = 0; lr->config.srcWidth = (NvU16)m.w; lr->config.srcHeight = (NvU16)h;
+            lr->config.dstWidth = (NvU16)m.mode.timings.hVisible; lr->config.dstHeight = (NvU16)m.mode.timings.vVisible;
+            lr->config.compParams.compMode = NVKMS_COMPOSITION_BLENDING_MODE_OPAQUE; lr->config.minPresentInterval = 1;
+            lr->flags.surfaceChanged = lr->flags.srcXYChanged = lr->flags.srcWHChanged = lr->flags.dstXYChanged = lr->flags.dstWHChanged = NV_TRUE;
+        }
+        nvrmUnownedHeadsOff(cfg);
+        ok = submitConfig(cfg, rep, commit ? NV_TRUE : NV_FALSE);
+        FBLOG("surround 0x%x: %s %ux%u over %u heads -> %u (flipResult %d)", (unsigned)id, commit ? "COMMIT" : "test", w, h, fSurN, (unsigned)ok, (int)rep->flipResult);
+        if (!ok) break;
+    }
+    IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
+    if (!ok) { if (!fSubmissionFaulted) fKms->destroySurface(fDev, ns); return kIOReturnUnsupportedMode; }
+    struct NvKmsKapiSurface *old = fSurf;
+    fSurf = ns; fFrontSurf = ns; fSurActive = true; fMode = fSur[0].mode; fW = w; fH = h; fPitch = pitch;
+    fRasterW = w; fRasterH = h; fCurId = id; fModeSet = true; fModeSwitches++; fCurShownKnown = false;
+    publishFlipWait(); fHwVblTries = 0; fCurTransform = 0;
+    if (old && old != ns) fKms->destroySurface(fDev, old);
+    return kIOReturnSuccess;
+}
 // nvfbrotscale=1: while the head is rotated, turned desktops smaller than the raster next to each native one (see
 // nvrmRotatedDesktop). IDs 0x30000 | factor << 12 | refresh rate.
 unsigned NVRMNVDAFramebuffer::addRotatedDesktops(unsigned n)
@@ -3929,6 +4079,7 @@ IOReturn NVRMNVDAFramebuffer::setDetailedTimings(OSArray *array)
     n = addKmsRefreshModes(n);
     { UInt32 dsr = 0; if (PE_parse_boot_argn("nvfbdsr", &dsr, sizeof dsr) && dsr) n = addDsrModes(n); }
     n = addRotatedDesktops(n);
+    if (fSurN) { fDT[0] = fDT[0]; n = addSurroundMode(0); }   // a surround group offers its combined mode only
     fNDT = n;
     setProperty(kIOFBDetailedTimingsKey, array);
     fBootInDT = false;
@@ -4858,7 +5009,7 @@ IOReturn NVRMNVDAFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
     }
     if (attribute == kIOWindowServerActiveAttribute) { if (value) *value = 1; FBLOGV("getAttribute 'wsrv' -> 1"); return kIOReturnSuccess; }
     if (attribute == kIOHardwareCursorAttribute) {
-        uintptr_t v = (fCursorEnabled && fCurSurf && fCurKva) ? 1 : 0;
+        uintptr_t v = (fCursorEnabled && fCurSurf && fCurKva && !fSurActive) ? 1 : 0;   // one cursor plane cannot span heads: software cursor
         if (value) *value = v;
         FBLOGV("getAttribute '%s' -> %lu (hardware cursor)", _s, (unsigned long)v);
         return kIOReturnSuccess;

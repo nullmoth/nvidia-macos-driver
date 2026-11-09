@@ -319,3 +319,48 @@ static inline bool nvrmRotatedDesktopOk(bool enabled, unsigned deskW, unsigned d
 {
     return deskW == turnedW && deskH == turnedH ? true : (enabled && deskW && deskH && deskW <= turnedW && deskH <= turnedH && !(deskW & 1) && !(deskH & 1));
 }
+// ---- Surround: several heads, one logical display (nvfbsurround) ----
+// Tiled 5K/6K panels work this way on a Mac: one framebuffer with a raster as wide as the tiles together, each head scanning its
+// slice of the same surface. Members sit side by side in index order and must run the same height and the same refresh rate.
+struct NvrmSurMode { unsigned w, h, hz; };
+enum { kNvrmSurMaxMembers = 4, kNvrmSurMaxModes = 64 };
+// Choose one mode per member: the tallest height every member has, then the highest refresh rate every member has at that height
+// (within 1 Hz), and for each member the widest mode at that height and rate. Returns false when the members share nothing.
+static inline bool nvrmSurroundPlan(const NvrmSurMode modes[][kNvrmSurMaxModes], const unsigned *count, unsigned members,
+                                    unsigned *pick, unsigned *totalW, unsigned *height, unsigned *hz)
+{
+    if (members < 2 || members > kNvrmSurMaxMembers) return false;
+    unsigned bestH = 0, bestHz = 0;
+    for (unsigned a = 0; a < count[0]; a++) {
+        const unsigned h = modes[0][a].h, r = modes[0][a].hz;
+        if (h < bestH || (h == bestH && r <= bestHz)) continue;
+        bool all = true;
+        for (unsigned m = 1; m < members && all; m++) {
+            bool has = false;
+            for (unsigned b = 0; b < count[m] && !has; b++) has = modes[m][b].h == h && modes[m][b].hz + 1 >= r && modes[m][b].hz <= r + 1;
+            all = has;
+        }
+        if (all) { bestH = h; bestHz = r; }
+    }
+    if (!bestH) return false;
+    unsigned sum = 0;
+    for (unsigned m = 0; m < members; m++) {
+        int at = -1; unsigned bw = 0;
+        for (unsigned b = 0; b < count[m]; b++)
+            if (modes[m][b].h == bestH && modes[m][b].hz + 1 >= bestHz && modes[m][b].hz <= bestHz + 1 && modes[m][b].w > bw) { bw = modes[m][b].w; at = (int)b; }
+        if (at < 0) return false;
+        pick[m] = (unsigned)at; sum += bw;
+    }
+    *totalW = sum; *height = bestH; *hz = bestHz;
+    return true;
+}
+// Members from a bit mask of framebuffer indices: the master is the lowest index, the rest are members that do not start as their
+// own framebuffer. Only indices below `connected` count.
+static inline unsigned nvrmSurroundMembers(unsigned mask, unsigned connected, unsigned *idx)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < 8 && i < connected && n < kNvrmSurMaxMembers; i++) if (mask & (1u << i)) idx[n++] = i;
+    return n;
+}
+// The slice offset of member m: the widths of the members before it.
+static inline unsigned nvrmSurroundOffset(const unsigned *widths, unsigned m) { unsigned o = 0; for (unsigned i = 0; i < m; i++) o += widths[i]; return o; }
