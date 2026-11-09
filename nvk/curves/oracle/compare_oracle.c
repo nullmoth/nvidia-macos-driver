@@ -14,7 +14,8 @@ int main(int argc, char **argv)
 {
    if (argc < 2) return 2;
    FILE *f = fopen(argv[1], "r"); if (!f) { perror("open"); return 2; }
-   struct curve_case cases[32]; int nc = oracle_cases(cases);
+   int probe = getenv("ORACLE_PROBE") != NULL;
+   struct curve_case cases[32]; int nc = probe ? oracle_probe_cases(cases) : oracle_cases(cases);
    static struct oracle_ray rs[ORACLE_RAYS]; oracle_ray_set(rs);
    char line[256]; int cur = -1, fails = 0, refused = 0;
    int agree[32] = { 0 }, total[32] = { 0 }, typeseen[32] = { 0 }; double dt[32] = { 0 }, du[32] = { 0 }; static double edt[32][ORACLE_RAYS], edu[32][ORACLE_RAYS]; int ne[32] = { 0 };
@@ -24,6 +25,7 @@ int main(int argc, char **argv)
       if (!strncmp(line, "case ", 5)) {
          sscanf(line + 5, "%63s", name);
          cur = -1; for (int c = 0; c < nc; c++) if (!strcmp(cases[c].name, name)) cur = c;
+         if (probe && cur >= 0) oracle_probe_rays(&cases[cur], rs);
          if (strstr(line, "REFUSED")) { printf("REFUSED  %s: %s", name, line); refused++; cur = -1; }
          continue;
       }
@@ -37,6 +39,44 @@ int main(int argc, char **argv)
       r.tmin = vf_(rs[i].tmin); r.tmax = vf_(rs[i].tmax);
       struct cv_hit h = cv_intersect(&cv_float_ops, &c, &r);
       total[cur]++;
+      if (getenv("ORACLE_RESID") && hit) {
+         const struct curve_case *kk = &cases[cur]; struct curve_case rc = *kk;
+         for (int a = 0; a < 4; a++) { rc.p[a][0] = kk->r[a]; rc.p[a][1] = rc.p[a][2] = 0; }
+         double pt[3]; for (int a = 0; a < 3; a++) pt[a] = rs[i].o[a] + bf(tb) * rs[i].d[a];
+         double best = 1e9; for (int s = 0; s <= 2000; s++) { double u = s / 2000.0, q[3], r3[3]; oracle_eval(kk, u, q); oracle_eval(&rc, u, r3);
+            double dd = sqrt((pt[0]-q[0])*(pt[0]-q[0]) + (pt[1]-q[1])*(pt[1]-q[1]) + (pt[2]-q[2])*(pt[2]-q[2])) - r3[0]; if (dd < best) best = dd; }
+         if (kk->type == 0) { static double res[32][ORACLE_RAYS]; static int nr[32]; res[cur][nr[cur]++] = fabs(best);
+            if (fabs(best) > 0.004) printf("  RESID %s ray %3d: apple u %.4f t %.4f, field at its hit point %.4f\n", kk->name, i, bf(ub), bf(tb), best);
+            (void)res; }
+      }
+      if (getenv("ORACLE_AXIAL") && probe && hit && (bf(ub) < 0.07f || bf(ub) > 0.93f)) {
+         int endc = bf(ub) > 0.5f; double E[3], E2[3], T[3];
+         oracle_eval(&cases[cur], endc ? 1.0 : 0.0, E); oracle_eval(&cases[cur], endc ? 0.999 : 0.001, E2);
+         double tl = 0; for (int a = 0; a < 3; a++) { T[a] = E2[a] - E[a]; tl += T[a] * T[a]; } tl = sqrt(tl); for (int a = 0; a < 3; a++) T[a] /= tl;
+         double p[3], x = 0, rho = 0; for (int a = 0; a < 3; a++) { p[a] = rs[i].o[a] + bf(tb) * rs[i].d[a] - E[a]; x += p[a] * T[a]; }
+         for (int a = 0; a < 3; a++) { double q = p[a] - x * T[a]; rho += q * q; } rho = sqrt(rho);
+         double Ep[3], Tp[3], xp = 0, tpl = 0; oracle_eval(&cases[cur], endc ? 1.0 - 1.0 / 16 : 1.0 / 16, Ep);
+         for (int a = 0; a < 3; a++) { Tp[a] = Ep[a] - E[a]; tpl += Tp[a] * Tp[a]; } tpl = sqrt(tpl); for (int a = 0; a < 3; a++) xp += p[a] * Tp[a] / tpl;
+         struct cv_curve cc; struct cv_ray rr; const struct curve_case *k = &cases[cur];
+         for (int a = 0; a < 4; a++) { cc.p[a] = v3_(vf_(k->p[a][0]), vf_(k->p[a][1]), vf_(k->p[a][2])); cc.r[a] = vf_(k->r[a]); }
+         cc.basis = vf_((float)k->basis); cc.count = vf_((float)k->count); cc.flat = k->type; cc.caps = vf_((float)k->caps);
+         rr.o = v3_(vf_(rs[i].o[0]), vf_(rs[i].o[1]), vf_(rs[i].o[2])); rr.d = v3_(vf_(rs[i].d[0]), vf_(rs[i].d[1]), vf_(rs[i].d[2])); rr.tmin = vf_(0); rr.tmax = vf_(100);
+         struct cv_hit mh = cv_intersect(&cv_float_ops, &cc, &rr);
+         printf("  AXIAL %s end %d ray %3d: x_tangent %.4f x_piece %.4f rho %.4f (end radius %.3f) u %.4f t %.4f | model %s t %.4f\n", cases[cur].name, endc, i, x, xp, rho, cases[cur].r[endc ? cases[cur].count - 1 : 0], bf(ub), bf(tb), mh.hit ? "hit" : "miss", mh.hit ? fv_(mh.t) : 0.0);
+      }
+      if (getenv("ORACLE_DIFF") && probe && i < 3 * PROBE_GROUP) {
+         int mh = (int)h.hit, ah = hit != 0;
+         double dd = (mh && ah) ? fabs(fv_(h.t) - bf(tb)) : 0;
+         if (mh && !ah) {
+            double E0[3], E1[3], F0[3], F1[3], p[3], x0 = 0, x1 = 0, tl0 = 0, tl1 = 0;
+            oracle_eval(&cases[cur], 0.0, E0); oracle_eval(&cases[cur], 0.002, F0); oracle_eval(&cases[cur], 1.0, E1); oracle_eval(&cases[cur], 0.998, F1);
+            for (int a = 0; a < 3; a++) { p[a] = rs[i].o[a] + fv_(h.t) * rs[i].d[a]; tl0 += (F0[a]-E0[a])*(F0[a]-E0[a]); tl1 += (E1[a]-F1[a])*(E1[a]-F1[a]); }
+            tl0 = sqrt(tl0); tl1 = sqrt(tl1);
+            for (int a = 0; a < 3; a++) { x0 += (p[a]-E0[a]) * (F0[a]-E0[a]) / tl0; x1 += (p[a]-E1[a]) * (E1[a]-F1[a]) / tl1; }
+            printf("  EXTRA %s ray %3d: model-only hit at u %.4f, axial from start %.4f, from end %.4f\n", cases[cur].name, i, fv_(h.u), x0, x1);
+         }
+         if (mh != ah || dd > 0.02) printf("  %s group %d ray %3d: apple %s t %.4f u %.4f | model %s t %.4f u %.4f\n", cases[cur].name, i / PROBE_GROUP, i, ah ? "hit" : "miss", bf(tb), bf(ub), mh ? "hit" : "miss", mh ? fv_(h.t) : 0.0, mh ? fv_(h.u) : 0.0);
+      }
       if (hit && hit != 3) typeseen[cur] = (int)hit;
       hit = hit != 0;
       if ((int)h.hit == (int)hit) {

@@ -23,8 +23,9 @@ int main(int argc, char **argv)
       if (!pso) { fprintf(stderr, "REFUSED: pipeline: %s\n", err.localizedDescription.UTF8String); return 3; }
       id<MTLCommandQueue> q = [dev newCommandQueue];
 
-      struct curve_case cases[32]; int nc = oracle_cases(cases);
-      static struct oracle_ray rs[ORACLE_RAYS]; oracle_ray_set(rs);
+      int probe = getenv("ORACLE_PROBE") != NULL;
+      struct curve_case cases[32]; int nc = probe ? oracle_probe_cases(cases) : oracle_cases(cases);
+      static struct oracle_ray rs[ORACLE_RAYS]; if (!probe) oracle_ray_set(rs);
       RayIn rin[ORACLE_RAYS];
       for (int i = 0; i < ORACLE_RAYS; i++) { memcpy(rin[i].o, rs[i].o, 12); memcpy(rin[i].d, rs[i].d, 12); rin[i].tmin = rs[i].tmin; rin[i].tmax = rs[i].tmax; }
       id<MTLBuffer> rb = [dev newBufferWithBytes:rin length:sizeof rin options:MTLResourceStorageModeShared];
@@ -34,6 +35,7 @@ int main(int argc, char **argv)
       int refused = 0;
       for (int c = 0; c < nc; c++) {
          struct curve_case *k = &cases[c];
+         if (probe) { oracle_probe_rays(k, rs); for (int i = 0; i < ORACLE_RAYS; i++) { memcpy(rin[i].o, rs[i].o, 12); memcpy(rin[i].d, rs[i].d, 12); rin[i].tmin = rs[i].tmin; rin[i].tmax = rs[i].tmax; } memcpy([rb contents], rin, sizeof rin); }
          float cp[4][3]; float rad[4]; uint32_t idx[1] = { 0 };
          for (int i = 0; i < 4; i++) { memcpy(cp[i], k->p[i], 12); rad[i] = k->r[i]; }
          MTLAccelerationStructureCurveGeometryDescriptor *g = [MTLAccelerationStructureCurveGeometryDescriptor descriptor];
