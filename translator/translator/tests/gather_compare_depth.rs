@@ -1,8 +1,8 @@
-//! Civilization VI's model, fire and terrain fragment shaders (D3D shaders converted to Metal) filter shadows with
-//! `depth2d::gather_compare(sampler, coord, reference, offset)`, AIR `air.gather_compare_depth_2d.f32`. The translator
-//! did not know the family ("unrecognized AIR intrinsic family"), so every such shader was refused and units,
-//! buildings and terrain features were missing from the map. With a runtime sampler the call is
+//! `depth2d::gather_compare(sampler, coord, reference, offset)` (AIR `air.gather_compare_depth_2d.f32`) is the usual way a
+//! Metal shader takes four depth comparisons in one fetch for a shadow filter. The translator once did not know the family
+//! ("unrecognized AIR intrinsic family"), so every shader using it was refused. With a runtime sampler the call is
 //! `OpImageDrefGather` (the Vulkan sampler carries the compare function), the constant offset as `ConstOffset`.
+//! The fixture is compiled from `fixtures/shadow_pcf/shadow_pcf_gather_compare.metal`, a shader written for this test.
 use metal2vulkan::passes::Stage;
 use metal2vulkan::{disassemble, translate_native_no_retry_constructed_with_options};
 use metal2vulkan::passes::TransformOptions;
@@ -16,8 +16,8 @@ fn spirv_val(spv: &[u8]) {
 
 #[test]
 fn a_depth2d_gather_compare_with_offsets_is_a_dref_gather_on_the_first_attempt() {
-    let ll = include_str!("fixtures/civ6/gather_compare_depth_2d_offsets.ll");
-    // The plugin's first attempt (as written, no pointer retry): Civ VI's shaders must not need the retry.
+    let ll = include_str!("fixtures/shadow_pcf/shadow_pcf_gather_compare.ll");
+    // The plugin's first attempt (as written, no pointer retry): a plain shadow filter must not need the retry.
     let spv = translate_native_no_retry_constructed_with_options(ll, Stage::Fragment, TransformOptions::default())
         .expect("the gather_compare shadow taps must translate");
     let asm = disassemble(&spv).expect("disassemble");

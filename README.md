@@ -38,7 +38,7 @@ Metal app ─► NVMTLDriver.bundle ─► translator (Apple AIR → SPIR-V) ─
 | Shader translator | inside the plugin (`libnvmtl_translate.dylib`) | `translator/` (LGPL-3.0, based on metal2vulkan) |
 | Vulkan back end (NVK) | `/Library/GPUBundles/nvmtl/` | `nvk/nvk-macos.patch` on Mesa `17ca6174` |
 | Kernel extensions | `/Library/Extensions/NVRM, NVAccel, NVRMFB, NVRMAGDC` | `kexts/` |
-| GPU firmware (GSP) | `/Library/NullMoth/nvfw/nvidia/620.70.06` | NVIDIA, unmodified |
+| GPU firmware (GSP) | `/Library/NullMoth/nvfw/nvidia/620.70.06` | NVIDIA, unmodified; fetched from NVIDIA's driver package at install (`package/fw_fetch.sh`) |
 
 The kernel side runs NVIDIA's own open GPU kernel modules (r610) under macOS. NVRMFB is the display framebuffer,
 NVAccel the accelerator WindowServer composites through, NVRMAGDC the display-policy shim.
