@@ -146,7 +146,7 @@ int main(void)
       c.caps = 0; struct cv_hit n0 = run(&c, d3(0.1, 0, -3), d3(0, 0, 1), 0, 100);
       snprintf(d, sizeof d, "hit %d t %g, outside radius hit %d, far disk hit %d t %g, open end hit %d t %g", (int)h0.hit, fv_(h0.t), (int)h1.hit, (int)h2.hit, fv_(h2.t), (int)n0.hit, fv_(n0.t));
       arm("a ray along the axis hits the start disk at the start point, not outside the end point's radius, and the far disk at 4 from the far side", h0.hit && fabsf(fv_(h0.t) - 3.0f) < 1e-4 && !h1.hit && h2.hit && fabsf(fv_(h2.t) - 4.0f) < 1e-4, d);
-      arm("control: the same ray into an open end does not stop at the plane", !n0.hit || fabsf(fv_(n0.t) - 3.0f) > 0.01, d);
+      arm("control: the same ray into an open end passes through it and meets only surfaces it would leave through, so it misses (measured on Apple GPUs)", !n0.hit, d);
    }
    /* open ends: identical to disk caps except where the disk is what the ray meets first */
    {
