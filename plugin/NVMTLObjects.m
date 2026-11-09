@@ -980,6 +980,7 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
     return t;
 }
 @implementation NVMTLBuffer
+@dynamic sparseBufferTier;
 - (IOSurfaceRef)iosurface { return NULL; }
 - (id<MTLTexture>)newTiledTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bpr {
     id<MTLTexture> t = [self newTextureWithDescriptor:d offset:offset bytesPerRow:bpr];
@@ -2364,7 +2365,8 @@ static NSDictionary *nvmtl_ci_stitch_entry(NVMTLFunction *fn)
     NSNumber *k = [tr isKindOfClass:[NSDictionary class]] && [tr[@"control_point_count"] isKindOfClass:[NSNumber class]] ? tr[@"control_point_count"] : nil;
     return k.integerValue > 0 ? k.integerValue : (NSInteger)n;
 }
-- (id<MTLArgumentEncoder>)newArgumentEncoderWithBufferIndex:(NSUInteger)index reflection:(MTLAutoreleasedArgument *)reflection {
+- (id<MTLArgumentEncoder>)newArgumentEncoderWithBufferIndex:(NSUInteger)index reflection:(MTLAutoreleasedArgument *)reflection
+    API_DEPRECATED("Use MTLDevice's newArgumentEncoderWithBufferBinding: instead", macos(10.13, 13.0), ios(11.0, 16.0)) {
     if (reflection) *reflection = (MTLArgument *)nvmtl_argument_for_buffer(self, index);
     id<MTLArgumentEncoder> e = [self newArgumentEncoderWithBufferIndex:index];
     nvlog("newArgumentEncoderWithBufferIndex:%lu reflection: -> %p (%s)", (unsigned long)index, (__bridge void *)e, _fname.UTF8String);
@@ -2458,7 +2460,7 @@ static NSArray *nvmtl_vertex_attributes_for(NVMTLFunction *fn) {
 @end
 @implementation NVMTLArgument
 - (NSString *)name { return _name ?: @""; }
-- (MTLArgumentType)type { return _type; }
+- (NSUInteger)type { return _type; }
 - (MTLBindingAccess)access { return _access; }
 - (NSUInteger)index { return _index; }
 - (BOOL)isActive { return _active; }
@@ -2478,9 +2480,9 @@ static NSArray *nvmtl_vertex_attributes_for(NVMTLFunction *fn) {
 - (NSString *)description { return [NSString stringWithFormat:@"<arg %@ type %lu index %lu size %lu members %lu>", _name, (unsigned long)_type, (unsigned long)_index, (unsigned long)_bufSize, (unsigned long)_bufStruct->_members.count]; }
 @end
 @interface NVMTLBufferArgument : NVMTLArgument <MTLBufferBinding> @end
-@implementation NVMTLBufferArgument @end
+@implementation NVMTLBufferArgument @dynamic access, argument, bufferAlignment, bufferDataSize, bufferDataType, bufferPointerType, bufferStructType, index, name, type, used; @end
 @interface NVMTLTextureArgument : NVMTLArgument <MTLTextureBinding> @end
-@implementation NVMTLTextureArgument @end
+@implementation NVMTLTextureArgument @dynamic access, argument, arrayLength, depthTexture, index, name, textureDataType, textureType, type, used; @end
 @interface NVMTLStageInArgument : NVMTLBufferArgument @end
 @implementation NVMTLStageInArgument
 - (BOOL)isArgument { return NO; }
@@ -2546,7 +2548,7 @@ static MTLDataType nvmtl_texdatatype_for_air_name(NSString *tn) {
 static BOOL nvmtl_binding_active(NSDictionary *b) { id acc = b[@"access"]; return !([acc isKindOfClass:[NSString class]] && [acc isEqualToString:@"Unused"]); }
 static NVMTLArgument *nvmtl_build_buffer_argument(NVMTLFunction *fn, NSUInteger index, NSDictionary *binding, NSDictionary *refl, NSDictionary *names) {
     NVMTLArgument *a = [NVMTLBufferArgument new];
-    a->_type = MTLArgumentTypeBuffer; a->_index = index; a->_active = nvmtl_binding_active(binding); a->_arrayLength = 1; a->_bufAlign = 16;
+    a->_type = MTLBindingTypeBuffer; a->_index = index; a->_active = nvmtl_binding_active(binding); a->_arrayLength = 1; a->_bufAlign = 16;
     NSString *key = [NSString stringWithFormat:@"buffer:%lu", (unsigned long)index];
     a->_name = names[@"args"][key] ?: [NSString stringWithFormat:@"buffer%lu", (unsigned long)index];
     a->_access = nvmtl_access_for(binding[@"access"]);
@@ -2644,7 +2646,7 @@ NSArray<NVMTLArgument *> *nvmtl_arguments_for_function(NVMTLFunction *fn)
                 [seenBuf addObject:@(idx)];
                 [out addObject:nvmtl_build_buffer_argument(fn, idx, b, refl, names)];
             } else if ([kind isEqualToString:@"Texture"] || [kind isEqualToString:@"TextureArray"] || [kind isEqualToString:@"StorageImage"]) {
-                NVMTLArgument *a = [NVMTLTextureArgument new]; a->_type = MTLArgumentTypeTexture; a->_index = idx; a->_active = nvmtl_binding_active(b);
+                NVMTLArgument *a = [NVMTLTextureArgument new]; a->_type = MTLBindingTypeTexture; a->_index = idx; a->_active = nvmtl_binding_active(b);
                 a->_name = names[@"args"][[NSString stringWithFormat:@"texture:%lu", (unsigned long)idx]] ?: [NSString stringWithFormat:@"texture%lu", (unsigned long)idx];
                 a->_access = [kind isEqualToString:@"StorageImage"] ? MTLBindingAccessReadWrite : nvmtl_access_for(b[@"access"]);
                 a->_texType = nvmtl_textype_for_shape(b[@"texture_shape"]);
@@ -2658,7 +2660,7 @@ NSArray<NVMTLArgument *> *nvmtl_arguments_for_function(NVMTLFunction *fn)
                 id loc = b[@"descriptor"]; a->_arrayLength = [loc isKindOfClass:[NSDictionary class]] && [loc[@"count"] unsignedLongValue] > 1 ? [loc[@"count"] unsignedLongValue] : 1;
                 [out addObject:a];
             } else if ([kind isEqualToString:@"Sampler"]) {
-                NVMTLArgument *a = [NVMTLArgument new]; a->_type = MTLArgumentTypeSampler; a->_index = idx; a->_active = nvmtl_binding_active(b); a->_arrayLength = 1;
+                NVMTLArgument *a = [NVMTLArgument new]; a->_type = MTLBindingTypeSampler; a->_index = idx; a->_active = nvmtl_binding_active(b); a->_arrayLength = 1;
                 a->_name = names[@"args"][[NSString stringWithFormat:@"sampler:%lu", (unsigned long)idx]] ?: [NSString stringWithFormat:@"sampler%lu", (unsigned long)idx];
                 [out addObject:a];
             }
@@ -2667,7 +2669,7 @@ NSArray<NVMTLArgument *> *nvmtl_arguments_for_function(NVMTLFunction *fn)
             if (x->_type != y->_type) return x->_type < y->_type ? NSOrderedAscending : NSOrderedDescending;
             return x->_index < y->_index ? NSOrderedAscending : x->_index > y->_index ? NSOrderedDescending : NSOrderedSame; }];
         NSMutableString *s = [NSMutableString new];
-        for (NVMTLArgument *a in out) [s appendFormat:@" %@(%lu)=%@%@", a->_type == MTLArgumentTypeBuffer ? @"buffer" : a->_type == MTLArgumentTypeTexture ? @"texture" : @"sampler",
+        for (NVMTLArgument *a in out) [s appendFormat:@" %@(%lu)=%@%@", a->_type == MTLBindingTypeBuffer ? @"buffer" : a->_type == MTLBindingTypeTexture ? @"texture" : @"sampler",
                                        (unsigned long)a->_index, a->_name, a->_bufStruct ? [NSString stringWithFormat:@"[%lu members, %lu B]", (unsigned long)a->_bufStruct->_members.count, (unsigned long)a->_bufSize] : @""];
         nvlog("REFL %s (%s): %lu argument(s)%s", fn->_fname.UTF8String ?: "?", fn->_stage.UTF8String ?: "?", (unsigned long)out.count, s.UTF8String);
         fn->_arguments = out;
@@ -2676,7 +2678,7 @@ NSArray<NVMTLArgument *> *nvmtl_arguments_for_function(NVMTLFunction *fn)
 }
 NVMTLArgument *nvmtl_argument_for_buffer(NVMTLFunction *fn, NSUInteger index)
 {
-    for (NVMTLArgument *a in nvmtl_arguments_for_function(fn)) if (a->_type == MTLArgumentTypeBuffer && a->_index == index) return a;
+    for (NVMTLArgument *a in nvmtl_arguments_for_function(fn)) if (a->_type == MTLBindingTypeBuffer && a->_index == index) return a;
     return nil;
 }
 static NSArray *nvmtl_stage_in_arguments(MTLRenderPipelineDescriptor *d)
@@ -2693,7 +2695,7 @@ static NSArray *nvmtl_stage_in_arguments(MTLRenderPipelineDescriptor *d)
     NSMutableArray *out = [NSMutableArray array]; __block NSUInteger n = 0;
     [bufs enumerateIndexesUsingBlock:^(NSUInteger bi, BOOL *stop) {
         NVMTLStageInArgument *a = [NVMTLStageInArgument new];
-        a->_type = MTLArgumentTypeBuffer; a->_index = bi; a->_active = [live containsIndex:bi]; a->_arrayLength = 1; a->_bufAlign = 4;
+        a->_type = MTLBindingTypeBuffer; a->_index = bi; a->_active = [live containsIndex:bi]; a->_arrayLength = 1; a->_bufAlign = 4;
         a->_access = MTLBindingAccessReadOnly; a->_bufSize = vd.layouts[bi].stride; a->_bufDataType = MTLDataTypeStruct;
         a->_name = [NSString stringWithFormat:@"vertexBuffer.%lu", (unsigned long)n++];
         [out addObject:a];
@@ -3151,6 +3153,7 @@ static uint64_t nvmtl_resid_pipe(id o, uint64_t *slot) {
 
 #pragma mark - pipeline state
 @implementation NVMTLRenderPipelineState
+@dynamic allocatedSize, maxTotalThreadgroupsPerMeshGrid, maxTotalThreadsPerMeshThreadgroup, maxTotalThreadsPerObjectThreadgroup, meshThreadExecutionWidth, objectThreadExecutionWidth, reflection;
 - (void)dealloc { nvmtl_vk_pipeline_destroy(&_p); }
 - (id<MTLDevice>)device { return (id<MTLDevice>)gNVMTLMainDevice; }
 - (NSUInteger)maxTotalThreadsPerThreadgroup { return 1024; }
@@ -5587,6 +5590,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
 @end
 
 @implementation NVMTLDepthStencilState
+@dynamic gpuResourceID;
 - (NSString *)label { return _label; }
 - (id<MTLDevice>)device { return (id<MTLDevice>)gNVMTLMainDevice; }
 - (void)setLabel:(NSString *)l {}
@@ -5608,6 +5612,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
 
 #pragma mark - compute / blit
 @implementation NVMTLComputePipelineState
+@dynamic allocatedSize, reflection;
 - (void)dealloc { nvmtl_vk_pipeline_destroy(&_p); }
 - (BOOL)supportIndirectCommandBuffers { return _icb; }
 - (MTLResourceID)gpuResourceID {

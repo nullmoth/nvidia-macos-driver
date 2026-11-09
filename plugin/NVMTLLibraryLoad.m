@@ -3262,7 +3262,7 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     if (f && ![(id)f isKindOfClass:[NVMTLFunctionHandle class]]) { nvlog("visible function table: foreign handle %s - slot %lu set NULL", NSStringFromClass([(id)f class]).UTF8String, (unsigned long)i); f = nil; }
     ((uint64_t *)_buf.contents)[i] = f ? ((NVMTLFunctionHandle *)f)->_id : 0;
 }
-- (void)setFunctions:(const id<MTLFunctionHandle> __nullable [])fs withRange:(NSRange)r {
+- (void)setFunctions:(const id<MTLFunctionHandle> [])fs withRange:(NSRange)r {
     for (NSUInteger k = 0; k < r.length; k++) [self setFunction:fs[k] atIndex:r.location + k];
 }
 - (MTLResourceID)gpuResourceID { MTLResourceID r; r._impl = _buf.gpuAddress; return r; }
@@ -3293,7 +3293,7 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     if (f && ![(id)f isKindOfClass:[NVMTLFunctionHandle class]]) { nvlog("intersection function table: foreign handle %s - slot %lu set NULL", NSStringFromClass([(id)f class]).UTF8String, (unsigned long)i); f = nil; }
     [self nvmtlWords][NVMTL_IFT_BUFFERS + i] = f ? ((NVMTLFunctionHandle *)f)->_id : 0;
 }
-- (void)setFunctions:(const id<MTLFunctionHandle> __nullable [])fs withRange:(NSRange)r {
+- (void)setFunctions:(const id<MTLFunctionHandle> [])fs withRange:(NSRange)r {
     for (NSUInteger k = 0; k < r.length; k++) [self setFunction:fs[k] atIndex:r.location + k];
 }
 - (void)setOpaqueTriangleIntersectionFunctionWithSignature:(MTLIntersectionFunctionSignature)s atIndex:(NSUInteger)i {
@@ -3313,14 +3313,14 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     if (i >= NVMTL_IFT_BUFFERS) { nvlog("intersection function table: setBuffer atIndex:%lu beyond Metal's 31 - IGNORED", (unsigned long)i); return; }
     [self nvmtlWords][i] = b ? b.gpuAddress + off : 0;
 }
-- (void)setBuffers:(const id<MTLBuffer> __nullable [])bs offsets:(const NSUInteger [])offs withRange:(NSRange)r {
+- (void)setBuffers:(const id<MTLBuffer> [])bs offsets:(const NSUInteger [])offs withRange:(NSRange)r {
     for (NSUInteger k = 0; k < r.length; k++) [self setBuffer:bs[k] offset:offs[k] atIndex:r.location + k];
 }
 - (void)setVisibleFunctionTable:(id<MTLVisibleFunctionTable>)t atBufferIndex:(NSUInteger)i {
     if (t && ![(id)t isKindOfClass:[NVMTLVisibleFunctionTable class]]) { nvlog("intersection function table: foreign visible table %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
     [self setBuffer:t ? ((NVMTLVisibleFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
 }
-- (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
+- (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> [])ts withBufferRange:(NSRange)r {
     for (NSUInteger k = 0; k < r.length; k++) [self setVisibleFunctionTable:ts[k] atBufferIndex:r.location + k];
 }
 - (MTLResourceID)gpuResourceID { MTLResourceID r; r._impl = _buf.gpuAddress; return r; }
@@ -3359,7 +3359,7 @@ static id<MTLIntersectionFunctionTable> nvmtl_ift_new(MTLIntersectionFunctionTab
     if (t && ![(id)t isKindOfClass:[NVMTLIntersectionFunctionTable class]]) { nvlog("setIntersectionFunctionTable: foreign %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
     [self setBuffer:t ? ((NVMTLIntersectionFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
 }
-- (void)setIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
+- (void)setIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> [])ts withBufferRange:(NSRange)r {
     for (NSUInteger k = 0; k < r.length; k++) [self setIntersectionFunctionTable:ts[k] atBufferIndex:r.location + k];
 }
 @end
@@ -3416,7 +3416,7 @@ static id<MTLIntersectionFunctionTable> nvmtl_ift_new(MTLIntersectionFunctionTab
     { static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 4) { FILE *lg = fopen(nvmtl_log_path(), "a"); if (lg) { fprintf(lg, "pid %d NVMTL: RTBIND setVisibleFunctionTable index %lu %s\n", getpid(), (unsigned long)i, t ? "table" : "nil"); fclose(lg); } } }
     [self setBuffer:t ? ((NVMTLVisibleFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
 }
-- (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
+- (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> [])ts withBufferRange:(NSRange)r {
     for (NSUInteger k = 0; k < r.length; k++) [self setVisibleFunctionTable:ts[k] atBufferIndex:r.location + k];
 }
 @end
@@ -3502,14 +3502,14 @@ static id<MTLVisibleFunctionTable> nvmtl_vft_new(MTLVisibleFunctionTableDescript
     if (t && ![(id)t isKindOfClass:[NVMTLVisibleFunctionTable class]]) { nvlog("setFragmentVisibleFunctionTable: foreign %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
     [self setFragmentBuffer:t ? ((NVMTLVisibleFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
 }
-- (void)setFragmentVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
+- (void)setFragmentVisibleFunctionTables:(const id<MTLVisibleFunctionTable> [])ts withBufferRange:(NSRange)r {
     for (NSUInteger k = 0; k < r.length; k++) [self setFragmentVisibleFunctionTable:ts[k] atBufferIndex:r.location + k];
 }
 - (void)setVertexVisibleFunctionTable:(id<MTLVisibleFunctionTable>)t atBufferIndex:(NSUInteger)i {
     if (t && ![(id)t isKindOfClass:[NVMTLVisibleFunctionTable class]]) { nvlog("setVertexVisibleFunctionTable: foreign %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
     [self setVertexBuffer:t ? ((NVMTLVisibleFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
 }
-- (void)setVertexVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
+- (void)setVertexVisibleFunctionTables:(const id<MTLVisibleFunctionTable> [])ts withBufferRange:(NSRange)r {
     for (NSUInteger k = 0; k < r.length; k++) [self setVertexVisibleFunctionTable:ts[k] atBufferIndex:r.location + k];
 }
 @end
@@ -3528,10 +3528,10 @@ static id<MTLVisibleFunctionTable> nvmtl_vft_new(MTLVisibleFunctionTableDescript
     if (t && ![(id)t isKindOfClass:[NVMTLIntersectionFunctionTable class]]) { nvlog("setFragmentIntersectionFunctionTable: foreign %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
     [self setFragmentBuffer:t ? ((NVMTLIntersectionFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
 }
-- (void)setVertexIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
+- (void)setVertexIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> [])ts withBufferRange:(NSRange)r {
     for (NSUInteger k = 0; k < r.length; k++) [self setVertexIntersectionFunctionTable:ts[k] atBufferIndex:r.location + k];
 }
-- (void)setFragmentIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
+- (void)setFragmentIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> [])ts withBufferRange:(NSRange)r {
     for (NSUInteger k = 0; k < r.length; k++) [self setFragmentIntersectionFunctionTable:ts[k] atBufferIndex:r.location + k];
 }
 @end
@@ -3631,8 +3631,8 @@ static NSArray *nvmtl_lowered_stage_arguments(NVMTLComputePipelineState *kp, NVM
     NSDictionary *names = nvmtl_air_names(stageFn);
     NSMutableArray *out = [NSMutableArray new];
     for (NVMTLArgument *a in nvmtl_arguments_for_function(kp->_function)) {
-        if (a->_type == MTLArgumentTypeBuffer && (a->_index == 29 || a->_index == 30)) continue;
-        NSString *k = [NSString stringWithFormat:@"%@:%lu", a->_type == MTLArgumentTypeBuffer ? @"buffer" : a->_type == MTLArgumentTypeTexture ? @"texture" : @"sampler", (unsigned long)a->_index];
+        if (a->_type == MTLBindingTypeBuffer && (a->_index == 29 || a->_index == 30)) continue;
+        NSString *k = [NSString stringWithFormat:@"%@:%lu", a->_type == MTLBindingTypeBuffer ? @"buffer" : a->_type == MTLBindingTypeTexture ? @"texture" : @"sampler", (unsigned long)a->_index];
         NSString *n = names[@"args"][k]; if ([n isKindOfClass:[NSString class]]) a->_name = n;
         [out addObject:a];
     }
@@ -3644,7 +3644,7 @@ static NSArray *nvmtl_lowered_stage_arguments(NVMTLComputePipelineState *kp, NVM
 } @end
 @implementation NVMTLMeshInfo @end
 static char kNVMTLMeshInfo;
-static NSUInteger nvmtl_mesh_stage_max(NVMTLMeshInfo *_Nonnull mi, NVMTLComputePipelineState *_Nullable k, NSUInteger rec, const char *_Nonnull stage) {
+static NSUInteger nvmtl_mesh_stage_max(NVMTLMeshInfo *mi, NVMTLComputePipelineState *k, NSUInteger rec, const char *stage) {
     if (rec) return rec;
     if (k) return [k maxTotalThreadsPerThreadgroup];
     uint32_t inv = 0; nvmtl_vk_limits(NULL, NULL, NULL, &inv, NULL);
