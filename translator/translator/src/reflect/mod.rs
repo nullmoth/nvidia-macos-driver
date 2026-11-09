@@ -194,6 +194,14 @@ pub const BINDLESS_STORAGE_BINDING: u32 = 2;
 pub const BINDLESS_UTEXEL_BINDING: u32 = 3;
 pub const BINDLESS_STEXEL_BINDING: u32 = 4;
 pub const BINDLESS_HEAP_SLOTS: u32 = 131072;
+/// Heap slots the plugin reserves for typed dummies when it tells the translator so (cap bit 8): a null resource id
+/// is redirected to the dummy of the image dimensionality the shader declares (passes/resources/dummy_slots.rs).
+pub const BINDLESS_DUMMY_SLOT_2D: u32 = 1;
+pub const BINDLESS_DUMMY_SLOT_2D_ARRAY: u32 = 2;
+pub const BINDLESS_DUMMY_SLOT_3D: u32 = 3;
+pub const BINDLESS_DUMMY_SLOT_CUBE: u32 = 4;
+pub const BINDLESS_DUMMY_SLOT_CUBE_ARRAY: u32 = 5;
+pub const BINDLESS_RESERVED_SLOTS: u32 = 6;
 pub fn bindless_fixed_fields_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| !matches!(std::env::var("NVMTL_NO_TIER2_FIXED").as_deref(), Ok(v) if !v.is_empty() && v != "0"))

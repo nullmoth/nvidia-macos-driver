@@ -144,18 +144,41 @@ NV_STATUS NV_API_CALL os_acquire_mutex(void *p) { NV_XNU_TRC; IOLockLock((IOLock
 NV_STATUS NV_API_CALL os_cond_acquire_mutex(void *p) { NV_XNU_TRC; return IOLockTryLock((IOLock *)p) ? NV_OK : NV_ERR_TIMEOUT_RETRY; }
 void      NV_API_CALL os_release_mutex(void *p) { NV_XNU_TRC; IOLockUnlock((IOLock *)p); }
 
-struct nv_xnu_spin { IOSimpleLock *l; IOInterruptState s; };
+// The saved interrupt state is CARRIED BY THE CALLER, never stored in the lock.
+//
+// This used to hold the state in the lock object: acquire did `sp->s = IOSimpleLockLockDisableInterrupt(...)`
+// and returned 0, and release passed `sp->s` back. That is a kernel panic, and it was reported 37 times in the
+// Support logs as
+//     panic [kalloc.type.varN.16]: element modified after free (off:8, val:0x0000000000000002, sz:16)
+// with the trace NVRM::autoGo -> rm_init_rm -> RmInitRm -> nvlogInit -> tlsInitialize ->
+// portSyncSpinlockCreate -> os_alloc_spinlock -> kern_os_malloc -> kalloc_ext. The figures identify it
+// exactly: the old struct was 16 bytes, `s` sat at offset 8, and a saved interrupt mask is a small integer
+// like 0x2 - so the allocator was reporting OUR write at offset 8 of a 16-byte block that had already been
+// freed. Two ways it goes wrong, and both were live:
+//   - two CPUs holding the same lock overwrite each other's saved state, so one of them restores the wrong
+//     interrupt mask on release;
+//   - a lock freed while a thread sits between acquire and release gets `sp->s` written after the free,
+//     which is the poison the allocator catches at the next 16-byte allocation - usually the next spinlock
+//     this very driver asks for during init, which is why the panic kept landing on NVRM's own start-up.
+// The allocator reports corruption at the NEXT allocation of that size class, so a trace like the one above
+// names the finder, not always the culprit; here they are the same code, and the numbers (size 16, offset 8,
+// a small mask value) tie the report to this struct rather than to a guess.
+//
+// NVIDIA's own contract is plain in the signatures it declares for us: acquire RETURNS the state and release
+// is handed it back as `old`. Honouring it removes the shared mutable field altogether, so the lock object is
+// immutable once created and there is nothing for a late writer to corrupt.
+struct nv_xnu_spin { IOSimpleLock *l; };
 NV_STATUS NV_API_CALL os_alloc_spinlock(void **pp)
 { NV_XNU_TRC;
     nv_xnu_spin *sp = (nv_xnu_spin *)kern_os_malloc(sizeof *sp);
     if (!sp) return NV_ERR_NO_MEMORY;
-    sp->l = IOSimpleLockAlloc(); sp->s = 0;
+    sp->l = IOSimpleLockAlloc();
     if (!sp->l) { kern_os_free(sp); return NV_ERR_NO_MEMORY; }
     *pp = sp; return NV_OK;
 }
 void  NV_API_CALL os_free_spinlock(void *p) { NV_XNU_TRC; nv_xnu_spin *sp = (nv_xnu_spin *)p; if (sp) { IOSimpleLockFree(sp->l); kern_os_free(sp); } }
-NvU64 NV_API_CALL os_acquire_spinlock(void *p) { NV_XNU_TRC; nv_xnu_spin *sp = (nv_xnu_spin *)p; sp->s = IOSimpleLockLockDisableInterrupt(sp->l); return 0; }
-void  NV_API_CALL os_release_spinlock(void *p, NvU64 old) { NV_XNU_TRC; nv_xnu_spin *sp = (nv_xnu_spin *)p; IOSimpleLockUnlockEnableInterrupt(sp->l, sp->s); }
+NvU64 NV_API_CALL os_acquire_spinlock(void *p) { NV_XNU_TRC; nv_xnu_spin *sp = (nv_xnu_spin *)p; return (NvU64)IOSimpleLockLockDisableInterrupt(sp->l); }
+void  NV_API_CALL os_release_spinlock(void *p, NvU64 old) { NV_XNU_TRC; nv_xnu_spin *sp = (nv_xnu_spin *)p; IOSimpleLockUnlockEnableInterrupt(sp->l, (IOInterruptState)old); }
 
 void     *NV_API_CALL os_alloc_rwlock(void) { NV_XNU_TRC; return IORWLockAlloc(); }
 void      NV_API_CALL os_free_rwlock(void *p) { NV_XNU_TRC; if (p) IORWLockFree((IORWLock *)p); }

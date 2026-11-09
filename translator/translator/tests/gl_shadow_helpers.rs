@@ -76,3 +76,45 @@ fn edge_local_sampler_does_not_become_an_unconditional_read() {
     assert!(output.contains("phi ptr addrspace(2)"));
     assert_eq!(output.matches("@air.sample_compare_depth_2d.f32(").count(), 1);
 }
+
+// #449: one field of a local object, written through a bitcast of one GEP and read back through a GEP of another.
+fn env_field(read_ty: &str) -> String {
+    format!("\
+%Envs = type {{ {{ ptr, ptr }}, [2 x {{ ptr, ptr }}] }}
+define ptr addrspace(2) @main(ptr byval([2 x ptr addrspace(2)]) %samplers) {{
+  %envs = alloca %Envs, align 8
+  %array = getelementptr inbounds %Envs, ptr %envs, i64 0, i32 1
+  %slot = getelementptr inbounds %Envs, ptr %envs, i64 0, i32 1, i64 1, i32 1
+  %slot.cast = bitcast ptr %slot to ptr
+  %element = getelementptr inbounds [2 x ptr addrspace(2)], ptr %samplers, i64 0, i64 1
+  store ptr %element, ptr %slot.cast, align 8
+  %env = getelementptr inbounds [2 x {{ ptr, ptr }}], ptr %array, i64 0, i64 1
+  %field = getelementptr inbounds {read_ty}, ptr %env, i64 0, i32 1
+  %sampler.ptr = load ptr, ptr %field, align 8
+  %wrapped = getelementptr inbounds {{ ptr addrspace(2) }}, ptr %sampler.ptr, i64 0, i32 0
+  %sampler = load ptr addrspace(2), ptr %wrapped, align 8
+  ret ptr addrspace(2) %sampler
+}}
+")
+}
+
+#[test]
+fn a_field_read_through_another_spelling_of_its_address_is_forwarded() {
+    let output = inline_and_forward_object_fields(&env_field("{ ptr, ptr }")).expect("the field is forwarded");
+    assert!(!output.contains("%sampler.ptr = load"), "the env read must take the stored element:\n{output}");
+    assert!(
+        output.contains("%wrapped = getelementptr inbounds [2 x ptr addrspace(2)], ptr %samplers, i64 0, i64 1"),
+        "the element is one GEP on the byval array, through its wrapper:\n{output}"
+    );
+}
+
+#[test]
+fn a_read_whose_type_is_not_the_field_layout_is_not_forwarded() {
+    // member 1 of `{ i32, i32, ptr }` is at byte 4, member 1 of `{ ptr, ptr }` at byte 8: the same index path, another
+    // field, so it must not meet the store
+    let output = inline_and_forward_object_fields(&env_field("{ i32, i32, ptr }")).unwrap_or_default();
+    assert!(
+        output.is_empty() || output.contains("%sampler.ptr = load ptr, ptr %field"),
+        "a differently laid out read must keep its load:\n{output}"
+    );
+}

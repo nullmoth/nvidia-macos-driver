@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::reflect::SamplerAddressMode;
+use crate::reflect::{SamplerAddressMode, SamplerCoordinates, SamplerMipFilter};
 
 fn is_gradient_family(name: &str) -> bool {
     name.split('.').any(|token| token.ends_with("_grad"))
@@ -67,6 +67,77 @@ fn sample_gradient_pair(
     Ok(Some((dx, dy, min_lod)))
 }
 
+// Cube direction -> (face coordinates vec2, face int) in Metal's face order (+X -X +Y -Y +Z -Z) with the major axis chosen as
+// gld.cube_vector_to_uv does (x on ties with y or z, then y over z): u = sc/|ma|/2 + 1/2, v = tc/|ma|/2 + 1/2.
+fn cube_direction_to_face_uv(ctx: &mut Ctx, coord: Word, out: &mut Vec<Instruction>) -> Result<(Word, Word), String> {
+    let is_vec3f = value_result_type(ctx, coord)
+        .and_then(|ty| vector_type_shape(ctx, ty))
+        .is_some_and(|(elem, lanes)| lanes == 3 && is_f32_scalar(ctx, elem));
+    if !is_vec3f {
+        return Err("air.sample_texture_cube on a 2D-array view: the direction is not a float3".into());
+    }
+    let (f, b, i) = (ctx.ty_float(), ctx.ty_bool(), ctx.ty_sint());
+    let glsl = ctx.glsl();
+    let mut emit = |ctx: &mut Ctx, op: Op, ty: Word, ops: Vec<Operand>| {
+        let id = ctx.module.fresh_id();
+        out.push(Instruction::new(op, Some(ty), Some(id), ops));
+        // later lowering (the 2D-array sample's layer and coordinate) asks for these values' types before they are placed
+        ctx.phase_value_types.get_or_insert_with(Default::default).insert(id, ty);
+        id
+    };
+    let comp = |ctx: &mut Ctx, emit: &mut dyn FnMut(&mut Ctx, Op, Word, Vec<Operand>) -> Word, c: u32| {
+        emit(ctx, Op::CompositeExtract, f, vec![Operand::IdRef(coord), Operand::LiteralBit32(c)])
+    };
+    let (x, y, z) = (comp(ctx, &mut emit, 0), comp(ctx, &mut emit, 1), comp(ctx, &mut emit, 2));
+    let abs = |ctx: &mut Ctx, emit: &mut dyn FnMut(&mut Ctx, Op, Word, Vec<Operand>) -> Word, v: Word| {
+        emit(ctx, Op::ExtInst, f, vec![Operand::IdRef(glsl), Operand::LiteralExtInstInteger(GLSLstd450::FAbs as u32), Operand::IdRef(v)])
+    };
+    let (ax, ay, az) = (abs(ctx, &mut emit, x), abs(ctx, &mut emit, y), abs(ctx, &mut emit, z));
+    let ge_xy = emit(ctx, Op::FOrdGreaterThanEqual, b, vec![Operand::IdRef(ax), Operand::IdRef(ay)]);
+    let ge_xz = emit(ctx, Op::FOrdGreaterThanEqual, b, vec![Operand::IdRef(ax), Operand::IdRef(az)]);
+    let xmaj = emit(ctx, Op::LogicalAnd, b, vec![Operand::IdRef(ge_xy), Operand::IdRef(ge_xz)]);
+    let ymaj = emit(ctx, Op::FOrdGreaterThanEqual, b, vec![Operand::IdRef(ay), Operand::IdRef(az)]);
+    let zero = ctx.const_float(0.0);
+    let neg = |ctx: &mut Ctx, emit: &mut dyn FnMut(&mut Ctx, Op, Word, Vec<Operand>) -> Word, v: Word| {
+        emit(ctx, Op::FOrdLessThan, b, vec![Operand::IdRef(v), Operand::IdRef(zero)])
+    };
+    let (negx, negy, negz) = (neg(ctx, &mut emit, x), neg(ctx, &mut emit, y), neg(ctx, &mut emit, z));
+    let minus = |ctx: &mut Ctx, emit: &mut dyn FnMut(&mut Ctx, Op, Word, Vec<Operand>) -> Word, v: Word| {
+        emit(ctx, Op::FNegate, f, vec![Operand::IdRef(v)])
+    };
+    let (mx, my, mz) = (minus(ctx, &mut emit, x), minus(ctx, &mut emit, y), minus(ctx, &mut emit, z));
+    let sel = |ctx: &mut Ctx, emit: &mut dyn FnMut(&mut Ctx, Op, Word, Vec<Operand>) -> Word, ty: Word, c: Word, t: Word, e: Word| {
+        emit(ctx, Op::Select, ty, vec![Operand::IdRef(c), Operand::IdRef(t), Operand::IdRef(e)])
+    };
+    // x major: sc = -z (+X) / z (-X), tc = -y; y major: sc = x, tc = z (+Y) / -z (-Y); z major: sc = x (+Z) / -x (-Z), tc = -y
+    let sc_x = sel(ctx, &mut emit, f, negx, z, mz);
+    let sc_z = sel(ctx, &mut emit, f, negz, mx, x);
+    let sc_yz = sel(ctx, &mut emit, f, ymaj, x, sc_z);
+    let sc = sel(ctx, &mut emit, f, xmaj, sc_x, sc_yz);
+    let tc_y = sel(ctx, &mut emit, f, negy, mz, z);
+    let tc_yz = sel(ctx, &mut emit, f, ymaj, tc_y, my);
+    let tc = sel(ctx, &mut emit, f, xmaj, my, tc_yz);
+    let ma_yz = sel(ctx, &mut emit, f, ymaj, ay, az);
+    let ma = sel(ctx, &mut emit, f, xmaj, ax, ma_yz);
+    let face_of = |ctx: &mut Ctx, emit: &mut dyn FnMut(&mut Ctx, Op, Word, Vec<Operand>) -> Word, negative: Word, pos: i64| {
+        let (p, n) = (ctx.const_int_of(i, pos), ctx.const_int_of(i, pos + 1));
+        emit(ctx, Op::Select, i, vec![Operand::IdRef(negative), Operand::IdRef(n), Operand::IdRef(p)])
+    };
+    let (fx, fy, fz) = (face_of(ctx, &mut emit, negx, 0), face_of(ctx, &mut emit, negy, 2), face_of(ctx, &mut emit, negz, 4));
+    let face_yz = sel(ctx, &mut emit, i, ymaj, fy, fz);
+    let face = sel(ctx, &mut emit, i, xmaj, fx, face_yz);
+    let half = ctx.const_float(0.5);
+    let to_unit = |ctx: &mut Ctx, emit: &mut dyn FnMut(&mut Ctx, Op, Word, Vec<Operand>) -> Word, s: Word| {
+        let q = emit(ctx, Op::FDiv, f, vec![Operand::IdRef(s), Operand::IdRef(ma)]);
+        let h = emit(ctx, Op::FMul, f, vec![Operand::IdRef(q), Operand::IdRef(half)]);
+        emit(ctx, Op::FAdd, f, vec![Operand::IdRef(h), Operand::IdRef(half)])
+    };
+    let (u, v) = (to_unit(ctx, &mut emit, sc), to_unit(ctx, &mut emit, tc));
+    let v2 = ctx.ty_vecf(2);
+    let uv = emit(ctx, Op::CompositeConstruct, v2, vec![Operand::IdRef(u), Operand::IdRef(v)]);
+    Ok((uv, face))
+}
+
 pub(in crate::passes) fn lower_sample(
     ctx: &mut Ctx,
     name: &str,
@@ -97,6 +168,24 @@ pub(in crate::passes) fn lower_sample(
     let (fallback_dim, fallback_arrayed, fallback_comp) = image_shape_or_recorded(ctx, img);
     let (img_ty, dim, arrayed, comp) =
         sampled_operand_image_info(ctx, img, fallback_dim, fallback_arrayed, fallback_comp);
+    // Apple's OpenGL samples a cube map one face at a time, with no filtering across faces, through a 2D-array view of it ("cubeAsArray": face and
+    // face coordinates from gld.cube_vector_to_uv, layer = face), and keeps the real cube sample on a branch chosen by a
+    // per-unit mask. A helper that takes the sampler as an argument carries both calls on the same texture, so the texture
+    // is typed as a 2D array and its cube call reached the array path, reading the cube's LOD flag as a layer ("layer is not
+    // scalar int/float"; Stellaris's planet shaders). The cube call becomes the same 2D-array sample of the face it hits.
+    if name.starts_with("air.sample_texture_cube.") && dim == Dim::Dim2D && arrayed && !is_gradient_family(name)
+        && args.len() >= 7
+    {
+        let mut pre = vec![];
+        let (uv, face) = cube_direction_to_face_uv(ctx, coord, &mut pre)?;
+        let bool_ty = ctx.ty_bool();
+        let no_offset = ctx.const_bool_of(bool_ty, false);
+        let offset = const_sint_vec(ctx, &[0, 0]);
+        let array_args = [args[0], args[1], uv, face, no_offset, offset, args[3], args[4], args[5], args[6]];
+        let array_name = name.replacen("sample_texture_cube", "sample_texture_2d_array", 1);
+        pre.extend(lower_sample(ctx, &array_name, Some(res), Some(rty), &array_args, v4)?);
+        return Ok(pre);
+    }
     let sample_v4 = image_fetch_v4(ctx, img, v4);
     let is_int_tex = comp != crate::passes::ImageComp::Float;
 
@@ -121,6 +210,20 @@ pub(in crate::passes) fn lower_sample(
                     "{name} samples through a pixel-coordinate sampler, whose emulation has no \
                      place for the gradient the call carries"
                 ));
+            }
+            if pixel_linear && !arrayed && dim == Dim::Dim2D {
+                if let Some(uv) = pixel_linear_hw_coord(ctx, sampler_state, img, coord, args, &mut out) {
+                    // The sampler behind a pixel-coordinate Metal sampler is a normalized VkSampler with the same filter
+                    // and address modes, so the hardware filter at uv = coord / size gives the pixel-space result.
+                    let mut hw_args = args.to_vec();
+                    hw_args[2] = uv;
+                    let normalized = StaticSamplerState { coordinates: SamplerCoordinates::Normalized, ..sampler_state };
+                    ctx.sampler_states.insert(samp, normalized);
+                    let lowered = lower_sample(ctx, name, Some(res), Some(rty), &hw_args, v4);
+                    ctx.sampler_states.insert(samp, sampler_state);
+                    out.extend(lowered?);
+                    return Ok(out);
+                }
             }
             let lod = match find_sample_lod(ctx, arrayed, args, &mut out) {
                 Some(lod) => sample_lod_to_fetch_lod(ctx, lod, &mut out)?,
@@ -760,6 +863,58 @@ fn nclamp_float(ctx: &mut Ctx, x: Word, lo: Word, hi: Word, out: &mut Vec<Instru
         ],
     ));
     clamped
+}
+
+/// The normalized coordinate for a pixel-coordinate linear sample the hardware filter can take as is: a 2D float2
+/// coordinate, clamp-to-edge on both axes, no mip filter, level 0 (or none) and no offset. The emulation below fetches
+/// four texels and blends them per sample, which ran 2.2x slower than the hardware filter for MPS's Gaussian blur on
+/// NVIDIA. None leaves every other case to the emulation.
+fn pixel_linear_hw_coord(
+    ctx: &mut Ctx,
+    sampler_state: StaticSamplerState,
+    img: Word,
+    coord: Word,
+    args: &[Word],
+    out: &mut Vec<Instruction>,
+) -> Option<Word> {
+    // NVMTL_NO_PIXEL_HW_FILTER=1 keeps the exact four-fetch emulation for every pixel-coordinate sample (diagnostic:
+    // the hardware filter is the one remaining difference against the translator that renders Cyberpunk correctly,
+    // in MetalFX's temporal unified pass, ten samples per module).
+    if std::env::var_os("NVMTL_NO_PIXEL_HW_FILTER").is_some() {
+        return None;
+    }
+    if sampler_state.address_mode_s != SamplerAddressMode::ClampToEdge
+        || sampler_state.address_mode_t != SamplerAddressMode::ClampToEdge
+        || sampler_state.mip_filter != SamplerMipFilter::None
+    {
+        return None;
+    }
+    let vec2 = ctx.ty_vecf(2);
+    if value_result_type(ctx, coord) != Some(vec2) {
+        return None;
+    }
+    match classify_sample_level(ctx, false, args) {
+        // A fragment sample with no level is an implicit-LOD sample in SPIR-V: the hardware would pick a mip level from
+        // the uv derivatives, while a Metal pixel-coordinate sample always reads level 0. The VkSampler behind a pixel
+        // sampler is created with linear mips and no LOD clamp, so MetalFX's MFX_NORMALIZE (full-screen, implicit)
+        // blended mip levels and the whole colour chain after it came out wrong. Compute has no implicit LOD.
+        None if ctx.stage == Stage::Fragment => return None,
+        None => {}
+        Some(SampleLevel::Explicit(lod)) if float_operand_is_constant_zero(ctx, lod) => {}
+        _ => return None,
+    }
+    match sample_const_or_dynamic_offset(ctx, false, args, 2) {
+        Ok((None, None)) => {}
+        Ok((Some(offset), None)) if offset.iter().all(|&v| v == 0) => {}
+        _ => return None,
+    }
+    let lod0 = ctx.const_uint(0);
+    let size = query_image_size(ctx, img, 2, false, lod0, out);
+    let sizef = ctx.module.fresh_id();
+    out.push(Instruction::new(Op::ConvertUToF, Some(vec2), Some(sizef), vec![Operand::IdRef(size)]));
+    let uv = ctx.module.fresh_id();
+    out.push(Instruction::new(Op::FDiv, Some(vec2), Some(uv), vec![Operand::IdRef(coord), Operand::IdRef(sizef)]));
+    Some(uv)
 }
 
 #[allow(clippy::too_many_arguments)]
