@@ -2,7 +2,7 @@
 
 ## Mesa base
 
-`nvk/MESA_BASE` is Mesa commit 17ca6174 (2026-10-05, version 26.3.0-devel). The NAK features that matter for compute speed
+`nvk/MESA_BASE` is Mesa commit 90a959eb, the mesa-26.3.0-rc3 tag (2.9). 2.8 and 2.8.1 were built on 17ca6174 (2026-10-05, 26.3.0-devel); 32 nouveau commits separate the two and the whole patch chain applies to both without fuzz. The NAK features that matter for compute speed
 are in that base, not behind a future update: the uniform base address on global loads (`uniform_addr`, `set_ureg_addr`,
 `nak_nir_opt_uniform_address`, `nir_opt_offsets` for SM73 and newer), LDSM, and the cooperative-matrix lowering.
 A rebase onto a newer Mesa therefore buys only the upstream commits made since. There are 62 of them touching

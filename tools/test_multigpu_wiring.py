@@ -21,5 +21,6 @@ arm("the plugin's accelerator lookup uses the bound card only when one is bound"
 arm("the kernel publishes NVAccelPrimary only under nvmultigpu", "if (!nvaccelMultiGpu()) return;" in acc[acc.index("static void publishPrimary"):][:200] and 'setProperty("NVAccelPrimary"' in acc)
 arm("NVK refuses to fall back to another card when NVK_ACCEL_ID names none", "names no NVAccel" in nvkp and "(want_id && *want_id) ? 0" in nvkp)
 arm("both gates re-offer refused cards through registerService", "registerService(kIOServiceAsynchronous)" in nvrm and "registerService(kIOServiceAsynchronous)" in acc)
-arm("the card-select patch is last in the 2.9 chain", "nvk-metal-wsi nvk-card-select\" ;;" in bld)
+_chain = next((l for l in bld.splitlines() if l.strip().startswith('CHAIN="nvk-macos') and "nvk-card-select" in l), "")
+arm("the card-select patch is in the 2.9 chain, right after the Metal surface patch", "nvk-metal-wsi nvk-card-select" in _chain)
 print("FAILED %d" % fails if fails else "PASS all arms"); sys.exit(1 if fails else 0)
