@@ -1742,6 +1742,10 @@ IOReturn NVRM::go(uint32_t pass)
             LOG("event locks created for the control device and the GPU");
             rm_write_registry_string(NULL, NULL, "RmMsg", ":", 1);
             rm_write_registry_dword(NULL, NULL, "ResmanDebugLevel", 0);
+            // Tell a wedged GSP from a slow one: with classification on, an RPC that times out while the GSP heartbeat is
+            // dead fails the GPU at the first timeout instead of the third (see nvrmGspTimeoutFatal). A live heartbeat keeps
+            // the RM's own count. Set before nvregdwords so RmGspTimeoutClassification=0 there still wins.
+            rm_write_registry_dword(NULL, NULL, "RmGspTimeoutClassification", 1);
             {   // NVIDIA's registry options, as NVreg_RegistryDwords: nvregdwords=Key=Value;Key2=Value2
                 static char regdw[256];
                 if (PE_parse_boot_argn("nvregdwords", regdw, sizeof regdw) && regdw[0]) {
