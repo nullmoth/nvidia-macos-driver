@@ -72,8 +72,11 @@ static void scaling_list_data(Br *r, HevcScaling *sl, int chroma_format_idc)
                 const unsigned delta = ue(r);
                 if (delta == 0) default_list(sl, size, m);
                 else {
-                    const int ref = m - (int)delta * (size == 3 ? 3 : 1);
-                    if (ref < 0) { r->err = true; return; }
+                    // scaling_list_pred_matrix_id_delta is 0..matrixId (matrixId / 3 for the 32x32 lists); a larger value,
+                    // including one that wraps negative as an int, would index outside the list array
+                    const unsigned step = size == 3 ? 3u : 1u;
+                    if (delta > (unsigned)m / step) { r->err = true; return; }
+                    const int ref = m - (int)(delta * step);
                     memcpy(sl->list[size][m], sl->list[size][ref], (size_t)n);
                     if (size >= 2) sl->dc[size - 2][m] = sl->dc[size - 2][ref];
                 }
