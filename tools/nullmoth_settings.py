@@ -52,6 +52,11 @@ CATALOG = [
     S("fps-limit", "Performance", "Frame-rate limit", "conf", "NVMTL_FPS_LIMIT", "text",
       "One number for every application (60) or a list per application (Game=60,*=0). 10 to 1000; 0 is unlimited. Never applies to WindowServer.",
       effect="relaunch the application"),
+    S("queue-depth", "Performance", "Low-latency mode (GPU work queued ahead)", "conf", "NVMTL_GSUB_INFLIGHT", "int",
+      "How many parts of GPU work may be queued ahead, 1 to 32 (default 16). A low number cuts input lag and can cost frame rate. "
+      "Applies to every application, the desktop included.", rng=(1, 32), effect="restart"),
+    S("shader-cache-mb", "Performance", "Shader cache size limit (MB)", "conf", "NVMTL_SPVCACHE_MAX_MB", "int",
+      "Size at which the shader cache is trimmed (default 2048). 0 turns trimming off.", rng=(64, 1000000), effect="relaunch the application"),
     S("app-profiles", "Performance", "Built-in per-application profiles", "conf", "NVMTL_APP_PROFILE", "bool",
       "On by default; off turns every shipped per-application profile off.", effect="relaunch the application"),
     S("local-map-sysmem", "Performance", "Keep CPU-written memory in system RAM", "conf", "NVK_LOCAL_MAP_SYSMEM", "bool",
@@ -73,7 +78,8 @@ def normalize(s, value):
         if v in s["values"].values(): return v
         raise ValueError("%s takes one of %s or default, not %r" % (s["id"], ", ".join(s["values"]), value))
     if k == "int":
-        if not v.isdigit() or not (s["rng"][0] <= int(v) <= s["rng"][1]) and int(v) != 0:
+        zero_ok = s["id"] in ("surround", "vibrance", "shader-cache-mb")   # 0 means off / monochrome-free minimum / no trimming
+        if not v.isdigit() or not (s["rng"][0] <= int(v) <= s["rng"][1]) and not (zero_ok and int(v) == 0):
             raise ValueError("%s takes a number from %d to %d, or default, not %r" % (s["id"], s["rng"][0], s["rng"][1], value))
         return str(int(v))
     if s["id"] == "fps-limit":
@@ -206,6 +212,9 @@ def selftest():
     arm("removing the last setting removes the empty block", conf_set(c2, "NVMTL_FPS_LIMIT", None) == conf)
     arm("every line this tool writes passes the installer's keep rule",
         all(KEPT.match("%s=%s" % (s["key"], normalize(s, v))) for s, v in [(BY_ID["fps-limit"], "Game=60,*=0"), (BY_ID["app-profiles"], "off"), (BY_ID["local-map-sysmem"], "on")]))
+    arm("queue depth is 1 to 32 and refuses 0 or 33 (0 would mean 'off' to nobody)", normalize(BY_ID["queue-depth"], "4") == "4" and refuses("queue-depth", "33") and refuses("queue-depth", "0"))
+    arm("the shader cache limit takes megabytes, 0 turns trimming off, 10 is refused as too small", normalize(BY_ID["shader-cache-mb"], "4096") == "4096"
+        and normalize(BY_ID["shader-cache-mb"], "0") == "0" and refuses("shader-cache-mb", "10"))
     arm("plan() routes boot arguments and conf settings to the right place", plan(BY_ID["hdr"], "on", "", "")[0] == "bootarg" and plan(BY_ID["fps-limit"], "60", "", "")[0] == "conf")
     arm("every catalogued id is unique and every boot-arg key is an nvfb name", len(BY_ID) == len(CATALOG) and all(s["key"].startswith("nvfb") for s in CATALOG if s["where"] == "bootarg"))
     print("FAILED %d" % len(fails) if fails else "PASS all arms")
