@@ -1280,6 +1280,18 @@ impl Ctx {
         fmt: ImageFormat,
         comp: ImageComp,
     ) -> Word {
+        self.ty_storage_image_ms(dim, arrayed, fmt, comp, false)
+    }
+
+    /// A storage image that may be multisampled (a tile function's access to a multisampled attachment).
+    fn ty_storage_image_ms(
+        &mut self,
+        dim: Dim,
+        arrayed: bool,
+        fmt: ImageFormat,
+        comp: ImageComp,
+        multisampled: bool,
+    ) -> Word {
         let sampled = match comp {
             ImageComp::Float => self.ty_float(),
             ImageComp::Uint => self.ty_uint(),
@@ -1293,7 +1305,7 @@ impl Ctx {
                 Operand::Dim(dim),
                 Operand::LiteralBit32(0),
                 Operand::LiteralBit32(arrayed as u32),
-                Operand::LiteralBit32(0),
+                Operand::LiteralBit32(multisampled as u32),
                 Operand::LiteralBit32(2),
                 Operand::ImageFormat(fmt),
             ],

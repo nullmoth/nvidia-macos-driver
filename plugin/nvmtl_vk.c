@@ -407,6 +407,8 @@ void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, siz
     X(vkCmdSetDepthBoundsTestEnable) X(vkCmdSetDepthBounds)
 static int g_dyn3;
 static int g_provoking;   /* provoking vertex is per-draw dynamic state, and the last vertex can provoke */
+static _Thread_local int t_ms_storage;   // set around the one creation in nvmtl_vk_image_create_ms_storage
+static int g_ms_storage;   // multisampled storage images (NVMTL_TILE_SHADING=1 and the device offers shaderStorageImageMultisample)
 static uint32_t g_mv_views;   /* multiview view count the device offers while NVMTL_VERTEX_AMPLIFICATION=1; 0 = off */
 static int g_divisor;     /* per-instance step rates (VK_KHR_vertex_attribute_divisor), up to g_max_divisor */
 static uint32_t g_max_divisor;
@@ -1413,6 +1415,13 @@ static int nvmtl_vk_initialize(void)
     enabled.independentBlend = supported.independentBlend; g_indep = supported.independentBlend == VK_TRUE;
     enabled.alphaToOne = supported.alphaToOne; g_a2one = supported.alphaToOne == VK_TRUE;
     enabled.depthBounds = supported.depthBounds; g_depth_bounds = supported.depthBounds == VK_TRUE;
+    {   // a tile function's multisampled attachment is a multisampled storage image (translator/src/native/tile_imageblock.rs)
+        const char *ts = getenv("NVMTL_TILE_SHADING");
+        if (ts && ts[0] == '1') {
+            enabled.shaderStorageImageMultisample = supported.shaderStorageImageMultisample; g_ms_storage = supported.shaderStorageImageMultisample == VK_TRUE;
+            nvlog("vk: multisampled storage images %s (tile shading)", g_ms_storage ? "AVAILABLE" : "ABSENT - tile functions on multisampled attachments are refused");
+        }
+    }
     nvlog("vk: depthBounds %s", g_depth_bounds ? "AVAILABLE" : "ABSENT - setDepthTestMinBound:maxBound: is refused");
     enabled.dualSrcBlend = supported.dualSrcBlend; g_dual = supported.dualSrcBlend == VK_TRUE;
     enabled.wideLines = supported.wideLines; g_wide = supported.wideLines == VK_TRUE;
@@ -2537,7 +2546,7 @@ static int nvmtl_vk_image_create_ms_lifetime_body(uint32_t w, uint32_t h, uint32
     if (nvmtl_vk_init()) return -1;
     memset(out, 0, sizeof *out); out->w = w; out->h = h; out->mips = 1; out->fmt = vkfmt; out->bpp = bpp ? bpp : 4; out->mtl_type = mtl_type; out->layers = layers; out->samples = samples;
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, (VkFormat)vkfmt, { w, h, 1 }, 1, layers,
-        (VkSampleCountFlagBits)samples, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        (VkSampleCountFlagBits)samples, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (t_ms_storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0u),
         VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
     nvmtl_vk_image_mutable(&ici, out);
     VKCK(nvmtl_opaque_CreateImage(g_dev, &ici, NULL, &out->img), "vkCreateImage(ms)");
@@ -2550,6 +2559,17 @@ static int nvmtl_vk_image_create_ms_lifetime_body(uint32_t w, uint32_t h, uint32
     VKCK(nvmtl_opaque_CreateImageView(g_dev, &vci, NULL, &out->view), "vkCreateImageView(ms)");
     nvlog("image_create: %ux%u %u-sample colour target", w, h, samples);
     return 0;
+}
+int nvmtl_vk_ms_storage_ok(void) { return g_ms_storage; }
+// A multisampled colour image that can also be a storage image: the twin a tile function reads and writes (the attachment itself is
+// created without storage usage, which costs nothing for the passes that never run a tile function).
+int nvmtl_vk_image_create_ms_storage(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, uint32_t samples, nvk_image *out)
+{
+    if (!g_ms_storage || !nvmtl_vk_format_is_storage(vkfmt)) return -1;
+    t_ms_storage = 1;
+    const int r = nvmtl_vk_image_create_ms_full(w, h, vkfmt, bpp, samples, 4, 1, out);
+    t_ms_storage = 0;
+    return r;
 }
 static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out);
 int nvmtl_vk_image_create_typed(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out)
@@ -3978,6 +3998,11 @@ static void nvmtl_perf_submit(unsigned sets, const uint64_t *pt)
             (unsigned long long)g_wit_blind, (unsigned long long)g_wit_ctl_fired, (unsigned long long)g_wit_ctl_run, s);
 }
 static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBufferInfo *out) {
+    if (c->icb_slot && c->icb_slot <= c->icb_ntabs && which < 2 && c->icb_tabs[which]) {   // GPU-encoded ICB replay: this slot's prepared table
+        const uint64_t *e = c->icb_tabs[which] + 2u * (c->icb_slot - 1u);
+        *out = (VkDescriptorBufferInfo){ (VkBuffer)(uintptr_t)e[0], (VkDeviceSize)e[1], NVMTL_TABLE_BYTES };
+        return 0;
+    }
     unsigned slot = c->address_count % NVMTL_TABLES_PER_PAGE;
     nvmtl_address_page *page = c->address_pages;
     if (slot == 0) {
@@ -4300,7 +4325,7 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
         const int samePage = !table || (t->lasttab[which] && page && (c->address_count % NVMTL_TABLES_PER_PAGE) != 0
                                         && (void *)page->buffer.buf == t->lasttab[which]);
         VkDescriptorBufferInfo ai;
-        if (covered && samePage && (!table || !nvmtl_address_snapshot(c, which, &ai))) {
+        if (covered && samePage && !c->icb_slot && (!table || !nvmtl_address_snapshot(c, which, &ai))) {
             if (table) t->lastdyn[which] = (uint32_t)ai.offset;
             t->dirty[which] = 0; memset(t->chg[which], 0, sizeof t->chg[which]);
             c->dyn_out[which] = t->lastdyn[which]; c->tab_out[which] = t->lasttab[which];
@@ -9941,6 +9966,83 @@ int nvmtl_vk_cmd_icb_index_copy(nvk_cmdbuf *c, nvk_buffer *records, nvk_buffer *
     pvkCmdPushConstants(c->cb, g_icb_index_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof a, &a);
     pvkCmdDispatch(c->cb, gx, gy, 1);
     nvmtl_vk_cmd_barrier(c);   // the indexed draws read the scratch indices as an index buffer next
+    return 0;
+}
+
+// Per-command buffers of a GPU-encoded ICB (nvmtl_icb_record.h): the ordinary table snapshot is taken once per slot and stage, before
+// the render pass resumes, and a compute pass overwrites the entries the slot's command recorded.
+static pthread_mutex_t g_icb_patch_lock = PTHREAD_MUTEX_INITIALIZER;
+static VkPipeline g_icb_patch_pipeline;
+static VkPipelineLayout g_icb_patch_layout;
+static int nvmtl_icb_patch_init(void)
+{
+    int rc = -1;
+    pthread_mutex_lock(&g_icb_patch_lock);
+    if (g_icb_patch_pipeline) { rc = 0; goto done; }
+    VkShaderModule mod = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo sm = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_icb_patch_spv, nvmtl_icb_patch_spv };
+    if (pvkCreateShaderModule(g_dev, &sm, NULL, &mod) != VK_SUCCESS) goto done;
+    VkPushConstantRange push = { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(nvmtl_icb_patch_args) };
+    VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL, 1, &push };
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (pvkCreatePipelineLayout(g_dev, &li, NULL, &layout) == VK_SUCCESS) {
+        VkPipelineShaderStageCreateInfo stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", NULL };
+        VkComputePipelineCreateInfo pi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, stage, layout, VK_NULL_HANDLE, -1 };
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        if (nvmtl_create_compute_pipeline(g_dev, VK_NULL_HANDLE, &pi, NULL, &pipeline) == VK_SUCCESS) {
+            g_icb_patch_layout = layout; g_icb_patch_pipeline = pipeline; rc = 0;
+        } else {
+            if (pipeline) pvkDestroyPipeline(g_dev, pipeline, NULL);
+            pvkDestroyPipelineLayout(g_dev, layout, NULL);
+        }
+    }
+    pvkDestroyShaderModule(g_dev, mod, NULL);
+done:
+    pthread_mutex_unlock(&g_icb_patch_lock);
+    return rc;
+}
+void nvmtl_vk_cmd_icb_tables_free(nvk_cmdbuf *c)
+{
+    if (!c) return;
+    for (int w = 0; w < 2; w++) { free(c->icb_tabs[w]); c->icb_tabs[w] = NULL; }
+    c->icb_ntabs = 0; c->icb_slot = 0;
+}
+void nvmtl_vk_cmd_icb_use(nvk_cmdbuf *c, uint32_t slot)
+{
+    if (!c) return;
+    c->icb_slot = slot <= c->icb_ntabs ? slot : 0;
+    nvmtl_bindtable *t = (nvmtl_bindtable *)c->table;
+    if (t) { t->dirty[0] = 1; t->dirty[1] = 1; }   // the next draw must take its set again, with this slot's table
+}
+int nvmtl_vk_cmd_icb_tables(nvk_cmdbuf *c, nvk_buffer *records, nvk_buffer *dsts, uint32_t slots)
+{
+    if (!c || c->in_rp || !records || !dsts || !slots || slots > NVMTL_ICB_MAX_PATCH_SLOTS || records->size < (size_t)slots * NVMTL_ICB_REC_BYTES ||
+        dsts->size < (size_t)slots * 16u || !dsts->map || nvmtl_icb_patch_init()) return -1;
+    nvmtl_vk_cmd_icb_tables_free(c);
+    uint64_t *list = (uint64_t *)dsts->map;
+    for (int w = 0; w < 2; w++) {
+        c->icb_tabs[w] = calloc((size_t)slots * 2u, sizeof(uint64_t));
+        if (!c->icb_tabs[w]) { nvmtl_vk_cmd_icb_tables_free(c); return -1; }
+        for (uint32_t i = 0; i < slots; i++) {
+            VkDescriptorBufferInfo bi;
+            c->icb_ntabs = 0;   // the snapshots here are the ordinary ones
+            if (nvmtl_address_snapshot(c, (uint32_t)w, &bi)) { nvmtl_vk_cmd_icb_tables_free(c); return -1; }
+            const nvmtl_address_page *page = (const nvmtl_address_page *)c->address_pages;
+            const unsigned slot = (c->address_count - 1u) % NVMTL_TABLES_PER_PAGE;
+            c->icb_tabs[w][2u * i] = (uint64_t)(uintptr_t)bi.buffer; c->icb_tabs[w][2u * i + 1u] = (uint64_t)bi.offset;
+            list[(size_t)w * slots + i] = nvmtl_vk_buffer_address((nvk_buffer *)&page->buffer) + (uint64_t)slot * NVMTL_TABLE_BYTES;
+        }
+    }
+    nvmtl_vk_cmd_barrier(c);   // the records were written by an earlier pass
+    for (int w = 0; w < 2; w++) {
+        nvmtl_icb_patch_args a = { nvmtl_vk_buffer_address(records), nvmtl_vk_buffer_address(dsts) + (uint64_t)w * slots * 8u, slots, (uint32_t)w };
+        if (!a.rec || !a.dsts) { nvmtl_vk_cmd_icb_tables_free(c); return -1; }
+        pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_icb_patch_pipeline);
+        pvkCmdPushConstants(c->cb, g_icb_patch_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof a, &a);
+        pvkCmdDispatch(c->cb, nvmtl_icb_patch_groups(slots), 1, 1);
+        nvmtl_vk_cmd_barrier(c);   // each stage's patch before the next, and before the draws read the tables
+    }
+    c->icb_ntabs = slots;
     return 0;
 }
 

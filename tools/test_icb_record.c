@@ -56,6 +56,23 @@ int main(void)
     r.pso = 0; nvmtl_icb_gather_ref(&r, 3, 0, 0, 3, 0, 10, NULL, 0, 0, o);
     arm("a command that set no pipeline (inherited) matches pipeline 0", o[0] == 36);
     arm("the SPIR-V has its magic and push constants are 80 bytes", nvmtl_icb_gather_spv[0] == 0x07230203u && sizeof(nvmtl_icb_gather_args) == 80);
+    {   /* per-command buffers: the table patch over a slot's table copy */
+        uint64_t table[64]; for (int i = 0; i < 64; i++) table[i] = 0x1000 + i;   /* the inherited bindings, then self-pointers and sizes after 31 */
+        nvmtl_icb_record rec; memset(&rec, 0, sizeof rec);
+        rec.buffers[0] = 0xAAAA; rec.buffers[5] = 0xBBBB; rec.buffers[30] = 0xCCCC; rec.fragment_buffers[2] = 0xDDDD;
+        nvmtl_icb_table_patch_ref(table, &rec, 0);
+        arm("a vertex table takes the addresses the command recorded at their buffer indices", table[0] == 0xAAAA && table[5] == 0xBBBB && table[30] == 0xCCCC);
+        arm("an index the command did not set keeps the inherited address", table[1] == 0x1001 && table[29] == 0x101d);
+        arm("entries past the 31 buffers (self pointers, texture sizes) are never touched", table[31] == 0x101f && table[40] == 0x1028 && table[63] == 0x103f);
+        arm("the vertex patch does not take the fragment record's entries", table[2] == 0x1002);
+        nvmtl_icb_table_patch_ref(table, &rec, 1);
+        arm("the fragment patch takes the fragment record's entries", table[2] == 0xDDDD);
+        arm("the record's tables are 8-byte entries at bytes 80 and 328, 31 each, matching the shader's word offsets 20 and 82",
+            offsetof(nvmtl_icb_record, buffers) / 4 == 20 && offsetof(nvmtl_icb_record, fragment_buffers) / 4 == 82 && sizeof rec.buffers == 31 * 8);
+        arm("a patch pass of 1000 slots needs ceil(31000/64) = 485 groups", nvmtl_icb_patch_groups(1000) == 485);
+        arm("the largest patch fits the 65535-group dispatch limit", nvmtl_icb_patch_groups(NVMTL_ICB_MAX_PATCH_SLOTS) <= 65535u);
+        arm("push constants are 24 bytes and the SPIR-V has its magic", sizeof(nvmtl_icb_patch_args) == 24 && nvmtl_icb_patch_spv[0] == 0x07230203u);
+    }
     printf("%s (%d failed)\n", fails ? "FAILED" : "ALL ARMS HOLD", fails);
     return fails != 0;
 }
