@@ -3,6 +3,12 @@
 Status in 2.9: written, tested offline, **off by default**. Software traversal on the shader cores is what runs until the
 measurements at the end of this document pass on a card.
 
+What is proven and what is not: the lowering's algorithm (flags, candidates, boxes) is checked against a brute-force reference
+on the CPU; the machine code of the query and of the lowering is checked on the CPU; the encode pass compiles and its index
+mapping is checked by a C port. **The node and leaf contents the encoder writes (layout generation 1) have never been run on a
+card**: the header rows R01..R13 are measured, the rest are our own rule. A structure the card cannot read faults the GPU
+channel, so the first run follows the P0 ladder below and nothing else turns the switch on.
+
 - `NVK_HWRT_QUERY=1` in the process environment (or in the user's block of `nvrm610.conf`) switches the hardware part on for
   that process: acceleration structures then carry a second part for the RT cores, and ray queries use it.
 - `NVMTL_HWRT=1` does the same for the Cyberpunk 2077 profile only (`plugin/nvmtl_app_profile.h`). A user's own
@@ -33,7 +39,7 @@ the second is not offered. For opaque triangles this cannot matter (the nearest 
 behaviour so a change shows up.
 
 Not applicable to Metal: `VK_KHR_ray_tracing_pipeline` (NVK does not implement it, and Metal's ray tracing is inline queries
-with intersection functions, which the translator specializes into the query loop). Compaction queries and update builds
+with intersection functions, which the translator already specializes into the query loop (`translator/src/linked_functions.rs`)). Compaction queries and update builds
 are not advertised by NVK for software structures either, so there is nothing to carry over; a copy of a finished structure
 is supported and rewrites the structure's own address (`mode 1` of `encode_ttu.comp`).
 
