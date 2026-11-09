@@ -52,6 +52,7 @@ typedef struct { void *rp; void *pipe; void *layout; int has_depth; uint32_t dfm
     uint64_t tbm[2][4]; uint32_t tbany;
     uint32_t fetch_mask;   /* colour attachments the fragment shader reads ([[color(n)]], set 3 binding 192+n) */
     uint32_t fetch_zero;   /* framebuffer fetch is off but the fragment shader reads [[color(n)]]: set 3 holds the dummy image */
+    uint32_t fetch_copy;   /* the colour attachments it reads through copies (fetch off, NVMTL_FETCH_COPY): nvmtl_fetch_copy.h */
     uint32_t stencil_emu;  /* the fragment shader's stencil export was lowered to a per-bit discard (push constant 160) */
     uint32_t skip_draws;   /* NVMTL_SKIP_FS names this fragment shader: its draws are not recorded (hang bisection) */
     void *gl_uniform_alt; /* optional owned GL-only pipeline; the original remains the draw-time fallback */
@@ -87,6 +88,8 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  void *dcache[32]; void *dcachepool; unsigned ndcache, dcache_gl_uniform;
                  unsigned in_rp, occlusion_reset; uint32_t wseq;
                  void *fetchview[NVMTL_NCOL];   /* the open pass's colour views, read by [[color(n)]] framebuffer fetch */
+                 void *fcopyview[NVMTL_NCOL];   /* copies of the colour attachments, for fetch_copy pipelines */
+                 void **fcp; unsigned nfcp, capfcp;   /* copy images this command buffer holds until it retires */
                  unsigned fetch_draw, topo;   /* the bound pipeline reads [[color(n)]] in this pass; last MTLPrimitiveType set */
                  /* the last framebuffer fetch set made in this command buffer and what it points at: a draw whose pass
                     and mask are the same reuses it (Core Animation draws hundreds of fetch draws per pass) */
@@ -372,6 +375,7 @@ int  nvmtl_vk_pipeline_create_rt(const void *vs, size_t vn, const void *fs, size
 void nvmtl_vk_pipeline_try_gl_uniform(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vi, uint32_t fi,
                                      const nvk_rt *rt, const void *vin, uint32_t samples, nvk_pipeline *base);
 int  nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p);
+int  nvmtl_vk_fetch_copy(nvk_cmdbuf *c, const nvk_pass *ps, uint32_t mask);   /* after the pass has ended: copy the colour attachments in mask */
 int  nvmtl_vk_cmd_empty_pass(nvk_cmdbuf *c, const nvk_pass *ps);
 int  nvmtl_vk_pass_kind(const nvk_pass *ps);
 void nvmtl_vk_cmd_set_stencil(nvk_cmdbuf *c, int enable, const uint32_t *front6, const uint32_t *back6);
