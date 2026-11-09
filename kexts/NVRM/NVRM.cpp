@@ -68,6 +68,13 @@ class NVRM;
 // The GPU objects, newest-start-wins and never cleared unless the boot argument nvmultigpu=1 is present (nvrm_devtab.h).
 static NvrmDevTab<NVRM> gNVRMTab;
 static NvrmStartGate gNVRMGate;
+static NvrmWaitQueue<IOService> gNVRMWait;
+// Offers the oldest refused card to IOKit again. registerService on its PCI device runs matching on it once more, which is
+// how a start() that returned false is retried; the queue holds a reference until then.
+static void nvrmReofferNext(void)
+{
+    if (IOService *p = gNVRMWait.next()) { p->registerService(kIOServiceAsynchronous); p->release(); }
+}
 static bool nvrmMultiGpu(void)
 {
     static int on = -1;
@@ -661,11 +668,15 @@ bool NVRM::start(IOService *provider)
     uint32_t selector = 0; PE_parse_boot_argn("nvselector", &selector, sizeof selector);
     const bool marked = provider && provider->getProperty("nullmoth-auto-primary") == kOSBooleanTrue;
     if (!nvrm_gate_enter(&gNVRMGate, multi, marked, selector != 0)) {
-        LOG("nvmultigpu: another card is starting, or the primary card is not running yet; this card is left unaccelerated");
+        if (provider && gNVRMWait.add(provider)) provider->retain();
+        LOG("nvmultigpu: another card is starting, or the primary card is not running yet; this card waits to be offered again");
+        // the start that refused us may have finished while we queued: then nobody is left to re-offer us
+        if (!__atomic_load_n(&gNVRMGate.starting, __ATOMIC_ACQUIRE)) nvrmReofferNext();
         return false;
     }
     const bool ok = startGPU(provider);
     nvrm_gate_leave(&gNVRMGate, multi, ok);
+    if (multi) nvrmReofferNext();   // one waiting card per finished start
     return ok;
 }
 
