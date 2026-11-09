@@ -2738,6 +2738,18 @@ NSDictionary *nvmtl_index_argument_fields(NSArray *fields) {
 }
 - (NSUInteger)alignment { return _airAlign ?: 8; }
 - (void)setArgumentBuffer:(id<MTLBuffer>)b offset:(NSUInteger)off { _dst = (NVMTLBuffer *)b; _dstOffset = off; nvtrace("AE argbuf %p off %lu (%lu fields)", (__bridge void *)b, (unsigned long)off, (unsigned long)_fields.count); }
+// The encoder of the argument buffer that the pointer member [[id(index)]] points at. Metal answers nil for a member that is not
+// such a pointer (measured on an Apple GPU: tools/argbuf_oracle/nested_oracle.m, outer 16/8, nested 16/8, member 1 nil).
+- (id<MTLArgumentEncoder>)newArgumentEncoderForBufferAtIndex:(NSUInteger)index {
+    NSDictionary *f = [self nvmtlFieldAt:index];
+    NSArray *nested = f[@"nested_fields"];
+    if (![nested isKindOfClass:[NSArray class]]) { nvlog("newArgumentEncoderForBufferAtIndex:%lu - member %lu is not a pointer to an argument buffer - nil", (unsigned long)index, (unsigned long)index); return nil; }
+    NVMTLArgumentEncoder *e = [NVMTLArgumentEncoder new];
+    e->_fields = nested; e->_fieldByIndex = nvmtl_index_argument_fields(nested);
+    e->_airSize = [f[@"nested_size"] unsignedLongValue]; e->_airAlign = [f[@"nested_align"] unsignedLongValue];
+    nvlog("newArgumentEncoderForBufferAtIndex:%lu -> %lu field(s), %lu bytes", (unsigned long)index, (unsigned long)nested.count, (unsigned long)e->_airSize);
+    return e;
+}
 - (void)setArgumentBuffer:(id<MTLBuffer>)b startOffset:(NSUInteger)off arrayElement:(NSUInteger)i {
     [self setArgumentBuffer:b offset:off + i * [self encodedLength]];
 }
