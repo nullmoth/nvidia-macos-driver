@@ -2,7 +2,7 @@
 """check_gpu_id_coverage.py: prove that every Intel/AMD GPU and NPU PCI id real users report is bound by the
 upstream id tables the ports compile. Field ids come from the 1401 scan-evidence and macOS hardware-map uploads
 (tools/gpu_field_ids.json). The id tables are upstream Linux/Mesa source and live on the build host, so their
-paths are given as arguments; on the mini they are under /Volumes/MiniData/build/gpu-src.
+paths are given as arguments; on the build Mac they are under its build folder (build/gpu-src).
 
 Coverage model (checked against the 6.14/drm-kmod sources on 2026-10-14):
   Intel i915/xe  - explicit lists. An id is covered when it is reachable (transitively) from an INTEL_*_IDS macro

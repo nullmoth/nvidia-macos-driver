@@ -12,6 +12,16 @@
 #define NVMTL_RESID_HEAP    (1ull << 62)
 
 _Static_assert(sizeof(uintptr_t) == sizeof(uint64_t), "resource ID keys require 64-bit pointers");
+// An argument buffer owned by a Managed buffer: its texture and sampler handles are read from the CPU copy and the
+// embedded slots bound (default), or the slot is refused and cleared to the dummy as it was before the ray-tracing
+// batch (NVMTL_EMBEDDED_MANAGED=0). One switch so a run can split the two.
+static int nvmtl_embedded_managed_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_EMBEDDED_MANAGED"); on = !(e && e[0] == '0');
+        if (!on) nvlog("embedded: argument buffers owned by Managed buffers are REFUSED as before (NVMTL_EMBEDDED_MANAGED=0)"); }
+    return on;
+}
 static NSMapTable *nvmtl_resid_map;
 static os_unfair_lock nvmtl_resid_lock = OS_UNFAIR_LOCK_INIT;
 static uint64_t nvmtl_resid_seq;
@@ -23,7 +33,10 @@ static uint64_t nvmtl_resid_assign(id resource, uint64_t tag, uint32_t heapSlot)
     if (!nvmtl_resid_map) nvmtl_resid_map = [[NSMapTable alloc]
         initWithKeyOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsIntegerPersonality
         valueOptions:NSPointerFunctionsWeakMemory capacity:0];
-    uint64_t token = heapSlot ? (NVMTL_RESID_HEAP | heapSlot) : ((++nvmtl_resid_seq) | tag);
+    // A token without a slot keeps its low 17 bits zero: the translated shader masks a handle's low word to a heap slot
+    // (BINDLESS_HEAP_SLOTS = 131072) with no way to tell the two apart, so a bare sequence number there made a kernel read
+    // or write through another texture's slot, or a slot whose storage descriptor nobody had written. Slot 0 is the dummy.
+    uint64_t token = heapSlot ? (NVMTL_RESID_HEAP | heapSlot) : (((++nvmtl_resid_seq) << 17) | tag);
     [nvmtl_resid_map setObject:resource forKey:(__bridge id)(void *)(uintptr_t)token];
     uint64_t censusIssued = 0; NSUInteger censusLive = 0; BOOL doCensus = ((nvmtl_resid_seq & 0xFFF) == 0);
     if (doCensus) { censusIssued = nvmtl_resid_seq & ~NVMTL_RESID_SAMPLER; censusLive = nvmtl_resid_map.count; }
@@ -43,7 +56,34 @@ static id nvmtl_resid_lookup(uint64_t token)
     return resource;
 }
 
-uint64_t nvmtl_resid_for_texture(id t) { return nvmtl_resid_assign(t, 0, nvmtl_vk_bindless_put([(NVMTLTexture *)t nvsampleview])); }
+// The same slot carries the storage descriptor (heap binding 2) for a texture a kernel may write - a shader reaches a
+// written texture only through this handle in memory.
+// A texture that gets no slot is read by a shader as slot 0, the dummy (nvmtl_resid_assign): its reads come back black
+// and its writes are lost. The first 8 are logged verbatim with the reason, then a census every 256, so a run shows
+// the population instead of guessing it.
+static void nvmtl_resid_no_slot(NVMTLTexture *x, const char *why)
+{
+    static _Atomic unsigned long long n; const unsigned long long k = atomic_fetch_add(&n, 1) + 1;
+    if (k <= 8) nvlog("resid: NO SLOT #%llu for texture %p %ux%u type %lu pixelFormat %lu usage 0x%lx storage %lu mips %u stex %d - %s",
+                     k, (__bridge void *)x, x->_i.w, x->_i.h, (unsigned long)x.textureType, (unsigned long)x->_fmt, (unsigned long)x->_usage,
+                     (unsigned long)x.storageMode, x->_i.mips, x->_stex ? 1 : 0, why);
+    else if ((k & 255) == 0) nvlog("resid: NO SLOT census - %llu textures so far read as the dummy (last: %s)", k, why);
+}
+uint64_t nvmtl_resid_for_texture(id t)
+{
+    NVMTLTexture *x = (NVMTLTexture *)t;
+    // a texture buffer has no image view: its slot holds the buffer view in the texel bindings instead
+    if (x->_tbView) {
+        const uint32_t ts = nvmtl_vk_bindless_put_texel(x->_tbView, x->_tbStorage);
+        if (!ts) nvmtl_resid_no_slot(x, "texture buffer: the heap has no texel bindings (NVMTL_NO_HEAP_STORAGE) or no buffer view");
+        return nvmtl_resid_assign(t, 0, ts);
+    }
+    void *sample = [x nvsampleview];
+    const uint32_t slot = nvmtl_vk_bindless_put(sample);
+    if (slot) nvmtl_vk_bindless_put_storage(slot, x->_stex ? [x nvview] : NULL);
+    else nvmtl_resid_no_slot(x, sample ? "heap full, or no heap in this process" : "the image has no sample view");
+    return nvmtl_resid_assign(t, 0, slot);
+}
 // A sampler's gpuResourceID carries its bindless heap slot in the low 32 bits (what a shader reading an argument buffer
 // indexes the sampler heap with) and a sequence number above them, so every sampler object keeps a unique token.
 uint64_t nvmtl_resid_for_sampler(id s)
@@ -60,6 +100,27 @@ uint64_t nvmtl_resid_for_sampler(id s)
     return token;
 }
 void nvmtl_resid_texture_gone(uint64_t token) { if (token & NVMTL_RESID_HEAP) nvmtl_vk_bindless_drop((uint32_t)(token & 0xffffffffu)); }
+// For the fault report: the live texture object whose gpuResourceID carries this heap slot, or that none does.
+int nvmtl_resid_describe_slot(uint32_t slot, char *out, size_t cap)
+{
+    id o = nvmtl_resid_lookup(NVMTL_RESID_HEAP | slot);
+    if (!o) { snprintf(out, cap, "no live texture object holds slot %u", slot); return 0; }
+    if ([o isKindOfClass:[NVMTLTexture class]]) {
+        NVMTLTexture *t = o;
+        if (t->_parent || t->_viewParent) {
+            NVMTLTexture *p = t->_parent ? t->_parent : t->_viewParent; nvk_image *pi = [p nvi];
+            snprintf(out, cap, "VIEW NVMTLTexture %p (mtl fmt %lu type %lu usage 0x%lx storage view %s own view %p swizzle view %p) of parent NVMTLTexture %p (%ux%u vkfmt %u image %p view %p \"%s\")",
+                     (__bridge void *)t, (unsigned long)t->_fmt, (unsigned long)t.textureType, (unsigned long)t.usage, t->_stex ? "yes" : "no", t->_ownView, t->_swzView,
+                     (__bridge void *)p, pi->w, pi->h, pi->fmt, pi->img, pi->view, p.label.UTF8String ?: "");
+            return 1;
+        }
+        snprintf(out, cap, "NVMTLTexture %p %ux%u vkfmt %u mtl fmt %lu type %lu usage 0x%lx storage view %s image %p view %p \"%s\"", (__bridge void *)t, t->_i.w, t->_i.h, t->_i.fmt,
+                 (unsigned long)t->_fmt, (unsigned long)t.textureType, (unsigned long)t.usage, t->_stex ? "yes" : "no", t->_i.img, t->_i.view, t.label.UTF8String ?: "");
+        return 1;
+    }
+    snprintf(out, cap, "%s %p holds slot %u", object_getClassName(o), (__bridge void *)o, slot);
+    return 1;
+}
 
 static NSUInteger nvmtl_ss_enum(NSDictionary *st, NSString *key, NSDictionary<NSString *, NSNumber *> *map, NSUInteger fallback, BOOL *bad)
 {
@@ -244,8 +305,12 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
             NVMTLBuffer *owner = plan->ownerIndex < NVMTL_NBUFAT ? bufAt[plan->ownerIndex] : nil;
             if (!owner) { embKeyed = NO; break; }
             NSUInteger base = offAt[plan->ownerIndex]; size_t msize = owner->_b.size;
-            if (!owner->_b.map || base > msize || plan->fieldOffset > msize - base || sizeof(uint64_t) > msize - base - plan->fieldOffset) { embKeyed = NO; break; }
-            uint64_t h = 0; memcpy(&h, (const uint8_t *)owner->_b.map + base + plan->fieldOffset, sizeof h);
+            // nvmtl_buf_cpu, not _b.map: a Managed buffer keeps its CPU copy in _shadow and _b.map is
+            // null there, so reading the raw map refused every slot such a buffer owns. It also
+            // settles the buffer first. NVMTL_EMBEDDED_MANAGED=0 restores the old refusal (a split switch).
+            const uint8_t *ocpu = (const uint8_t *)(nvmtl_embedded_managed_on() ? nvmtl_buf_cpu(owner) : owner->_b.map);
+            if (!ocpu || base > msize || plan->fieldOffset > msize - base || sizeof(uint64_t) > msize - base - plan->fieldOffset) { embKeyed = NO; break; }
+            uint64_t h = 0; memcpy(&h, ocpu + base + plan->fieldOffset, sizeof h);
             embKey[embN++] = (uint64_t)(uintptr_t)(__bridge void *)owner; embKey[embN++] = base; embKey[embN++] = h;
         }
         if (embKeyed && nvmtl_vk_emb_same(&cb->_c, set, (__bridge void *)fn, embKey, embN)) return;
@@ -266,7 +331,10 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
         }
         NSUInteger base = offAt[ownerIndex];
         size_t msize = owner->_b.size;
-        if (!owner->_b.map || base > msize || fieldOffset > msize - base ||
+        // See above: a Managed buffer's CPU copy lives in _shadow, so _b.map is null and the slot was
+        // refused although the handle was readable.
+        const uint8_t *ocpu = (const uint8_t *)(nvmtl_embedded_managed_on() ? nvmtl_buf_cpu(owner) : owner->_b.map);
+        if (!ocpu || base > msize || fieldOffset > msize - base ||
             sizeof(uint64_t) > msize - base - fieldOffset) {
             nvlog("embedded %s slot %u: buffer(%lu) offset %lu+%lu does not fit its %zu-byte mapping — REFUSED",
                   what, slot, (unsigned long)ownerIndex, (unsigned long)base,
@@ -274,7 +342,7 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
             nvmtl_clear_embedded_slot(cb, set, slot, wantSampler); continue;
         }
         uint64_t handle = 0;
-        memcpy(&handle, (const uint8_t *)owner->_b.map + base + fieldOffset, sizeof handle);
+        memcpy(&handle, ocpu + base + fieldOffset, sizeof handle);
         if (!handle) {
             if (nvmtl_embedded_info_due(&nvmtl_embedded_empty_count))
                 nvlog("embedded %s slot %u: buffer(%lu)+%lu holds a zero handle — binding cleared",
@@ -319,13 +387,11 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
 }
 // the compute encoder keeps its bindings as index -> (buffer, offset, ...) arrays; the tables are built only for a
 // kernel that has embedded arguments
-void nvmtl_bind_embedded_dict(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NSDictionary *bufferAtIndex)
+void nvmtl_bind_embedded_enc(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NVMTLComputeCommandEncoder *e)
 {
     NVMTLBuffer *bufs[NVMTL_NBUFAT] = { nil }; NSUInteger offs[NVMTL_NBUFAT] = { 0 };
-    if (fn && nvmtl_embedded_plan(fn).count)
-        for (NSNumber *k in bufferAtIndex) {
-            NSUInteger i = k.unsignedIntegerValue; NSArray *e = bufferAtIndex[k];
-            if (i < NVMTL_NBUFAT && e.count >= 2) { bufs[i] = e[0]; offs[i] = [e[1] unsignedLongValue]; }
-        }
+    if (e && fn && nvmtl_embedded_plan(fn).count)
+        for (NSUInteger i = 0; i < NVMTL_NBUFAT; i++)
+            if (e->_baN[i] && e->_baObj[i]) { bufs[i] = e->_baObj[i]; offs[i] = e->_baOff[i]; }
     nvmtl_bind_embedded(cb, set, fn, bufs, offs);
 }

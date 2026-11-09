@@ -31,6 +31,7 @@ mod vec_scalar_merge;
 mod atomic_image_format;
 mod copy_memory_logical;
 mod stencil_export;
+mod punned_access_chain;
 mod short_access_chain;
 mod wg_atomic;
 
@@ -79,12 +80,16 @@ fn lower_air_text_rest(san_ll: &str) -> std::borrow::Cow<'_, str> {
     };
     // a Function-storage pointer phi has no legal form under Logical addressing, so the input is rewritten
     // instead: the phi's single load is hoisted into each predecessor and the phi carries the VALUES
-    let lowered = match lowered {
+    // NVMTL_NO_PTR_PHI_LOAD=1 skips this rewrite (diagnostic: it changes 46 Cyberpunk material shaders against the
+    // translator that renders the game correctly).
+    let lowered = if std::env::var_os("NVMTL_NO_PTR_PHI_LOAD").is_some() {
+        lowered
+    } else { match lowered {
         std::borrow::Cow::Borrowed(borrowed) => ptr_phi_load::sink_pointer_phi_loads(borrowed),
         std::borrow::Cow::Owned(owned) => {
             std::borrow::Cow::Owned(ptr_phi_load::sink_pointer_phi_loads_owned(owned))
         }
-    };
+    } };
     match lowered {
         std::borrow::Cow::Borrowed(borrowed) => inline::forward_builder_pointer_fields(borrowed),
         std::borrow::Cow::Owned(owned) => match inline::forward_builder_pointer_fields(&owned) {
@@ -160,6 +165,7 @@ pub(crate) use rewrites::{
     construct_interface_cross_binding_pointer_values_module, construct_opaque_image_selects_module,
     construct_atomic_storage_image_formats_module,
     split_mismatched_copy_memory_module,
+    construct_composite_atomic_pointer_lvalues_module,
     construct_physical_atomic_pointer_lvalues_module, construct_workgroup_atomic_floats_module,
     eliminate_dead_pointer_values_module, eliminate_dead_values_module,
     lower_unobserved_bda_aggregate_pointer_fields_module, prune_constant_branches_module,
@@ -237,4 +243,9 @@ pub(crate) fn lower_stencil_export_module(module: &mut crate::spirv_module::Modu
 /// See short_access_chain: an access chain that stops short of its result pointee by first-member descent only.
 pub(crate) fn decay_short_access_chains_module(module: &mut crate::spirv_module::Module) -> usize {
     short_access_chain::decay_short_access_chains(module)
+}
+
+/// See punned_access_chain: a chain landing on a member whose scalar type differs from its result pointee.
+pub(crate) fn retype_punned_access_chains_module(module: &mut crate::spirv_module::Module) -> usize {
+    punned_access_chain::retype_punned_access_chains(module)
 }

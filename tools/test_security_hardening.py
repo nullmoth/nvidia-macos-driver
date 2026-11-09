@@ -32,8 +32,17 @@ check('RM administrator check reads the caller uid', 'return (kauth_getuid() == 
       and 'os_is_administrator(void) { NV_XNU_TRC; return NV_TRUE; }' not in osx)
 check('first-time GPU bring-up refuses non-root callers', 'if (pass > fPassDone && kauth_getuid() != 0)' in nvrm)
 check('event waiters are capped', 'kNvEvtMaxSleepers = 256' in nvrm and 'OSDecrementAtomic(&gNvEvtSleepers)' in nvrm)
-check('bind-fd rejects out-of-range values and clears a stale context when bound to a real fd',
-      'if (v > 0x7FFFFFFFLL || v < -0x80000000LL) return kIOReturnBadArgument;' in nvrm and 'if (me->fBound >= 0 && me->fMmap.valid)' in nvrm)
+# NVIDIA 620 replaced the one per-client context (fMmap) with RM's list of mapping nodes (fMapList). A re-bind drops
+# every pending node, valid or not, so nothing an earlier fd parked can be mapped through the new one.
+def bind_clears(src):
+    return ('if (v > 0x7FFFFFFFLL || v < -0x80000000LL) return kIOReturnBadArgument;' in src
+            and 'if (me->fBound >= 0) {\n        IOLockLock(me->fMapLock);\n        if (me->fMapList) {' in src
+            and 'nvMapListFree(&me->fMapList);' in src)
+check('bind-fd rejects out-of-range values and clears a stale context when bound to a real fd', bind_clears(nvrm))
+check('negative control: bind-fd without the range check is caught',
+      not bind_clears(nvrm.replace('if (v > 0x7FFFFFFFLL || v < -0x80000000LL) return kIOReturnBadArgument;', '')))
+check('negative control: a bind that keeps the stale list is caught',
+      not bind_clears(nvrm.replace('nvMapListFree(&me->fMapList);', '')))
 
 # --- 2.3.7: the gates added after the driver was audited against Apple's and NVIDIA's own bug classes ---
 fb = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
@@ -87,10 +96,18 @@ check('GPU address resolution never takes the caller handles',
 check('the cleanup flag cannot be won by two threads', 'OSCompareAndSwap(0, 1, &fCleaned)' in nvrm)
 check('each client has a gate held across its methods and its teardown',
       'IOLock *fGate' in nvrm and nvrm.count('Gate g(fGate);') >= 3)
-check('the mapping ranges are released in free(), not in clientClose',
-      'void NVRMUserClient::free(void)' in nvrm
-      and 'kern_os_free(fMmap.memArea.pRanges)' in nvrm.split('void NVRMUserClient::free(void)')[1]
-      and 'kern_os_free(fMmap.memArea.pRanges)' not in nvrm.split('IOReturn NVRMUserClient::clientClose')[1].split('terminate();')[0])
+# 620: the ranges hang off RM's mapping nodes and go back through os_free_mem in nvMapListFree.
+def frees_in_free_only(src):
+    if 'void NVRMUserClient::free(void)' not in src or 'IOReturn NVRMUserClient::clientClose' not in src:
+        return False
+    fr = src.split('void NVRMUserClient::free(void)')[1].split('\n}\n')[0]
+    cl = src.split('IOReturn NVRMUserClient::clientClose')[1].split('terminate();')[0]
+    return ('nvMapListFree(&fMapList);' in fr
+            and not any(k in cl for k in ('nvMapListFree', 'os_free_mem', 'kern_os_free')))
+check('the mapping ranges are released in free(), not in clientClose', frees_in_free_only(nvrm))
+check('negative control: a close that frees the list is caught',
+      not frees_in_free_only(nvrm.replace('        if (fMapList) fMapList->context.valid = NV_FALSE;\n',
+                                          '        if (fMapList) fMapList->context.valid = NV_FALSE;\n        nvMapListFree(&fMapList);\n', 1)))
 
 # A card range mapped into a process must at least land inside one of this card's bars, so a caller
 # cannot hand over an arbitrary physical address and have it mapped.
@@ -199,7 +216,8 @@ check('deferring a function to pipeline creation asks the translator for its vis
       bool(_vl) and _vl.index('xlate_vrefs(') < _vl.index('rangeOfString:')
       and 'no linked function supplies it' in _vl)
 check('no caller decides it from the error text any more',
-      obj.count('nvmtl_needs_visible_link(_airs[name]') == 2
+      # two callers pass the error text as the fallback; the link-first probe passes nil (no text at all)
+      obj.count('nvmtl_needs_visible_link(_airs[name]') == 3 and obj.count('nvmtl_needs_visible_link(_airs[name], nil)') == 1
       and 'rangeOfString:@"visible function reference"' not in obj
       and 'rangeOfString:@"Metal visible function table"' not in obj)
 check('the expected first attempt is not logged as a failure, and only on the path that defers',
@@ -217,7 +235,98 @@ check('every kext, the accelerator included, is installed from the checked priva
 # the new location does not exist yet, so a backup that only looked there saved nothing and the
 # boot-guard fallback restored the previous driver with no firmware at all - a dark Mac, no recovery.
 check('the firmware backup falls back to the old location on an upgrade',
-      'elif [ -d "$FWOLD" ]; then backup_copy firmware ditto "$FWOLD" "$BK/nvfw"' in inst)
+      'then backup_copy firmware ditto "$FWOLD" "$BK/nvfw"' in inst and 'elif [ -d "$FWOLD" ] && [ ! -L "$FWOLD" ]' in inst)
+
+# Kernel review, 2.7.2. The registry is readable by every process, so a kernel pointer there defeats address randomisation.
+nvrmfb = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
+nvrmfb2 = (root / 'kexts/NVRM/fb/nvrm-fb.cpp').read_text()
+intel = (root / 'kexts/NMIntelFB/intelfb.cpp').read_text()
+for name, text in (('NVRM', nvrm), ('NVRMFB', nvrmfb), ('NVRM fb', nvrmfb2), ('NVRM accel', accel), ('NMIntelFB', intel)):
+    check(f'{name} neither publishes nor reads a kernel pointer as a registry property',
+          '"nvkms-kapi"' not in text and '"phys-for-va"' not in text)
+check('both display kexts ask NVRM for the pointers through a kernel-only call',
+      all('NVRM_DISPLAY_PTRS_FN' in t for t in (nvrmfb, nvrmfb2, accel)) and 'isEqualTo(NVRM_DISPLAY_PTRS_FN)' in nvrm)
+abi1 = (root / 'kexts/NVRM/nvrm_gpuva_abi.h').read_text()
+abi2 = (root / 'kexts/NVRMFB/nvrm_gpuva_abi.h').read_text()
+check('the two copies of the display ABI header agree', abi1 == abi2)
+
+def body(text, start, end):
+    i = text.find(start)
+    j = text.find(end, i + len(start)) if i >= 0 else -1
+    return text[i:j] if i >= 0 and j >= 0 else ''
+
+bind = body(nvrm, 'IOReturn NVRMUserClient::sBindFd(', 'IOReturn NVRMUserClient::')
+def bind_locked(b):
+    return (b.find('IOLockLock(me->fMapLock)') >= 0 and
+            b.find('IOLockLock(me->fMapLock)') < b.find('nvMapListFree') < b.find('IOLockUnlock(me->fMapLock)'))
+check('a bind clears the mapping context only under the mapping lock', bind_locked(bind))
+check('negative control: a bind that frees the list after the unlock is caught',
+      not bind_locked(bind.replace('        IOLockUnlock(me->fMapLock);\n', '', 1).replace(
+          '        IOLockLock(me->fMapLock);\n', '        IOLockLock(me->fMapLock);\n        IOLockUnlock(me->fMapLock);\n', 1)))
+cmft = body(nvrm, 'IOReturn NVRMUserClient::clientMemoryForType(', 'IOReturn NVRMUserClient::externalMethod(')
+copied = cmft.find('snapshot.memArea.pRanges = ranges;')
+check('a map reads the live context only under the mapping lock, then only its private copy',
+      copied > 0 and 'nvu_memcpy(ranges,' in cmft[:copied] and 'fMmap' not in cmft[copied:]
+      and 'fMapList' not in cmft[copied:]
+      and 'c = &snapshot' in cmft[copied:] and 'c = &fMmap' not in cmft)
+check('a map refuses an empty range list before reading its first entry',
+      'count == 0 || count > 4096' in cmft)
+close = body(nvrm, 'IOReturn NVRMUserClient::clientClose(', 'void NVRMUserClient::free(')
+check('close marks the context dead under the mapping lock',
+      'IOLockLock(fMapLock);\n        if (fMapList) fMapList->context.valid = NV_FALSE;' in close)
+
+look = body(nvrm, 'nv_file_private_t *nv_xnu_lookup_fd(', '\n}\n')
+check('a looked-up client is retained before the table lock is dropped',
+      0 <= look.find('c->retain()') < look.find('IOLockUnlock(gNvClientsLock)'))
+check('a client being closed is not handed out', 'c->cleaned()' in look)
+check('putting a client releases it', 'void NV_API_CALL nv_put_file_private(void *os_private) { TRC; nv_xnu_put_client(os_private); }' in osx2)
+# NVIDIA 620 took the control/device argument out of nv_get_file_private. Each RM caller that needs one kind checks it
+# with nv_verify_nvfp_control_or_put (nv.h): it asks nv_get_state_ptr_from_nvfp, and on a NULL state or the wrong
+# NV_FLAG_CONTROL it puts the client and NULLs both pointers. Our part is the answer: NULL for a file that is not one of
+# our clients, the control state (the only one with NV_FLAG_CONTROL) for a control client. The two escapes that take
+# either kind (ALLOC_MEMORY and MAP_MEMORY name the fd a later map goes through, as on Linux) are decided at map time,
+# and a context of the other kind fails closed there: a device context on a control fd has no alloc, a system-memory
+# context on a device fd has no ranges (the empty-range-list arm above).
+def kind_checked(n, o):
+    st = body(n, 'nv_state_t *NV_API_CALL nv_get_state_ptr_from_nvfp(', '\n}\n')
+    fr = body(n, 'NVRMUserClient *NVRMUserClient::fromNvfp(', '\n}\n')
+    md = body(o, 'extern "C" IOMemoryDescriptor *nv_xnu_alloc_md(void *priv, NvU64 *bytes, NvU32 *cache)\n{', '\n}\n')
+    cm = body(n, 'IOReturn NVRMUserClient::clientMemoryForType(', 'IOReturn NVRMUserClient::externalMethod(')
+    return ('return c ? c->nvState() : NULL;' in st
+            and 'if (!p) return NULL;' in fr and "? c : NULL;" in fr
+            and 'nv_state_t *NVRMUserClient::nvState() { return fIsCtl ? nv_get_ctl_state() : &fOwner->fNv; }' in n
+            and 'nv_xnu_ctl_state.flags |= NV_FLAG_CONTROL;' in o
+            and 'if (!a) return NULL;' in md and 'if (!base) return kIOReturnBadArgument;' in cm)
+check('the wrong kind of client is released, and the caller gets no pointer to it', kind_checked(nvrm, osx2))
+check('negative control: a state answer for a stranger file is caught',
+      not kind_checked(nvrm.replace('return c ? c->nvState() : NULL;', 'return c ? c->nvState() : nv_get_ctl_state();'), osx2))
+check('negative control: a control-kind map with no allocation that is not refused is caught',
+      not kind_checked(nvrm.replace('if (!base) return kIOReturnBadArgument;', ''), osx2))
+
+# 620: RM writes another client's list only between nv_acquire_file_va and nv_release_file_va (os.c
+# _osAddMappingContext), and escape.c puts the client it looked up after the call. Acquire takes that client's
+# fMapLock before handing the list out; a file that is not ours gets a list that already holds a node, so RM refuses
+# and frees its own node. Release unlocks on every path that acquire locked.
+def map_list_locked(n):
+    acq = body(n, 'nv_alloc_mapping_list_node_t **NV_API_CALL nv_acquire_file_va(', '\n}\n')
+    rel = body(n, 'void NV_API_CALL nv_release_file_va(', '\n}\n')
+    guard = 'if (!c || !c->mapLock())'
+    tail = rel.split(guard + ' return;', 1)[1] if guard + ' return;' in rel else ''
+    return (guard + ' { gNvMapBusy = &gNvMapBusyNode; return &gNvMapBusy; }' in acq
+            and 0 <= acq.find('IOLockLock(c->mapLock());') < acq.find('return c->mapList();')
+            and tail.rstrip().endswith('IOLockUnlock(c->mapLock());') and 'return' not in tail)
+check("another client's context is written under that client's lock and every exit puts it",
+      map_list_locked(nvrm))
+check('negative control: a release that can leave the lock held is caught',
+      not map_list_locked(nvrm.replace('        if (drop) drop->release();   // not the last reference',
+                                       '        if (!now) return;\n        if (drop) drop->release();   // not the last reference', 1)))
+check('negative control: a stranger file handed an empty list is caught',
+      not map_list_locked(nvrm.replace('{ gNvMapBusy = &gNvMapBusyNode; return &gNvMapBusy; }', '{ return nullptr; }')))
+
+access = body(osx2, 'NvBool NV_API_CALL os_check_access(', 'NvU32  NV_API_CALL os_get_current_process_flags')
+check('GPU profiling and channel priority are for administrators; any other right is refused',
+      'RS_ACCESS_PERFMON' in access and 'RS_ACCESS_NICE' in access and 'os_is_administrator()' in access
+      and 'NV_FALSE' in access and 'return NV_TRUE' not in access)
 
 print('FAILED' if fails else 'PASS')
 sys.exit(1 if fails else 0)

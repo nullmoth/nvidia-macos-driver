@@ -30,7 +30,31 @@ impl LlModule {
         Self::parse_inner(ll, true, kern, entry_name)
     }
 
+    /// `parse_inner_uncached`, served from the parse cache while a `ParseScope` is held on this thread. One translation
+    /// parses the same text several times (the primary emit, each raw construction tier, the storage-image reflection),
+    /// which was 10-14% of translation time on No Man's Sky's and Cyberpunk's shaders. Parsing reads nothing but its
+    /// arguments, so an entry with the same text, flag, kernel metadata and entry name is the same module.
     pub(in crate::native) fn parse_inner(
+        ll: &str,
+        primitive_phi_metadata: bool,
+        kern: Option<&meta::KernMeta>,
+        entry_name: Option<&str>,
+    ) -> Result<Self, String> {
+        if !parse_cache::active() {
+            return Self::parse_inner_uncached(ll, primitive_phi_metadata, kern, entry_name);
+        }
+        // KernMeta has no equality; its debug text is the key. A map inside it may print in another order for an equal
+        // value, which only misses the cache.
+        let kern_key = kern.map(|k| format!("{k:?}"));
+        if let Some(module) = parse_cache::get(ll, primitive_phi_metadata, kern_key.as_deref(), entry_name) {
+            return Ok(module);
+        }
+        let module = Self::parse_inner_uncached(ll, primitive_phi_metadata, kern, entry_name)?;
+        parse_cache::put(ll, primitive_phi_metadata, kern_key, entry_name, &module);
+        Ok(module)
+    }
+
+    pub(super) fn parse_inner_uncached(
         ll: &str,
         primitive_phi_metadata: bool,
         kern: Option<&meta::KernMeta>,
@@ -229,6 +253,7 @@ impl LlModule {
             metadata_primitive_buffer_pointees,
             metadata_fc_buffer_locations,
             raw_buffer_params: HashSet::default(),
+            byte_addressed_raw_params: HashSet::default(),
             call_connected_raw_params: HashSet::default(),
             param_connected_raw_params: HashSet::default(),
         };
@@ -794,6 +819,10 @@ entry:
         assert_eq!(
             threaded.call_connected_raw_params,
             reparsed.call_connected_raw_params
+        );
+        assert_eq!(
+            threaded.byte_addressed_raw_params,
+            reparsed.byte_addressed_raw_params
         );
         assert_eq!(
             threaded.param_connected_raw_params,
