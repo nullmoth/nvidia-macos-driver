@@ -74,6 +74,21 @@ static inline int nvmtl_page_alloc(nvmtl_page_pool *p)
     }
     return -1;
 }
+/* n consecutive free pages (a mip tail is one contiguous range); the first page index, or -1 */
+static inline int nvmtl_page_alloc_run(nvmtl_page_pool *p, uint32_t n)
+{
+    if (!n || n > p->npages - p->used) return -1;
+    uint32_t run = 0;
+    for (uint32_t i = 0; i < p->npages; i++) {
+        if (p->bits[i >> 6] & (1ull << (i & 63))) { run = 0; continue; }
+        if (++run == n) {
+            const uint32_t first = i + 1 - n;
+            for (uint32_t k = first; k <= i; k++) p->bits[k >> 6] |= 1ull << (k & 63);
+            p->used += n; return (int)first;
+        }
+    }
+    return -1;
+}
 /* 1 when the page was in use and is free now */
 static inline int nvmtl_page_free(nvmtl_page_pool *p, uint32_t i)
 {

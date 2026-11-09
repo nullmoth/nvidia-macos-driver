@@ -2619,11 +2619,14 @@ int nvmtl_vk_image_create_sparse(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_
     si->first_tail = r->imageMipTailFirstLod; si->mips = mips; si->layers = layers; si->w = w; si->h = h;
     si->tail_size = r->imageMipTailSize; si->tail_offset = r->imageMipTailOffset; si->tail_stride = r->imageMipTailStride;
     si->single_tail = (r->formatProperties.flags & VK_SPARSE_IMAGE_FORMAT_SINGLE_MIPTAIL_BIT) != 0;
+    {   PFN_vkGetPhysicalDeviceProperties gpp = (PFN_vkGetPhysicalDeviceProperties)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceProperties");
+        VkPhysicalDeviceProperties pp; memset(&pp, 0, sizeof pp); if (gpp) gpp(g_pdev, &pp);
+        si->strict = pp.sparseProperties.residencyNonResidentStrict == VK_TRUE; }
     VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, img, layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D, (VkFormat)vkfmt,
         { 0, 0, 0, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers } };
-    VkImageView view = VK_NULL_HANDLE;
+    void *view = NULL;
     if (nvmtl_opaque_CreateImageView(g_dev, &vci, NULL, &view) != VK_SUCCESS) { pvkDestroyImage(g_dev, img, NULL); free(si); return -1; }
-    out->img = (void *)img; out->view = (void *)view; out->w = w; out->h = h; out->mips = mips; out->fmt = vkfmt; out->bpp = bpp ? bpp : 4; out->mtl_type = layers > 1 ? 3u : 2u;
+    out->img = (void *)img; out->view = view; out->w = w; out->h = h; out->mips = mips; out->fmt = vkfmt; out->bpp = bpp ? bpp : 4; out->mtl_type = layers > 1 ? 3u : 2u;
     out->layers = layers; out->samples = 1; out->storage = storage; out->sparse = si;
     nvlog("sparse image: %ux%u format %u, %u level(s), block %ux%u, mip tail from level %u (%llu bytes)", w, h, vkfmt, mips, si->gran[0], si->gran[1], si->first_tail, (unsigned long long)si->tail_size);
     return 0;

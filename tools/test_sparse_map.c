@@ -36,6 +36,12 @@ int main(void)
     int last = 0; for (int i = 0; i < 69; i++) last = nvmtl_page_alloc(&p);
     arm("the pool hands out all 70 pages and then says no", last >= 0 && p.used == 70 && nvmtl_page_alloc(&p) == -1);
     arm("a page beyond the pool cannot be freed", nvmtl_page_free(&p, 70) == 0 && nvmtl_page_free(&p, 1000) == 0);
+    { uint64_t st2[1]; nvmtl_page_pool q; nvmtl_page_pool_init(&q, st2, 10);
+      nvmtl_page_alloc(&q); nvmtl_page_alloc(&q); nvmtl_page_alloc(&q); nvmtl_page_free(&q, 1);   /* used: 0 and 2 */
+      arm("a run of 2 skips the single free page at 1 and starts at 3", nvmtl_page_alloc_run(&q, 2) == 3 && q.used == 4);
+      arm("a run of 1 can take the hole at page 1", nvmtl_page_alloc_run(&q, 1) == 1);
+      arm("a run longer than any free stretch is refused and takes nothing", nvmtl_page_alloc_run(&q, 7) == -1 && q.used == 5);
+      arm("a run of 5 fits the rest (pages 5..9)", nvmtl_page_alloc_run(&q, 5) == 5 && q.used == 10); }
     arm("the tier is 1 with the strict zero read and 0 without it (not sparse)", nvmtl_sparse_tier(1) == 1 && nvmtl_sparse_tier(0) == 0);
     printf("%s (%d failed)\n", fails ? "FAILED" : "ALL ARMS HOLD", fails);
     return fails != 0;

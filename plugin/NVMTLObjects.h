@@ -12,6 +12,7 @@
 #include "nvmtl_multiview.h"
 #include "nvmtl_caps_query.h"
 #include "nvmtl_sparse_query.h"
+#include "nvmtl_sparse_map.h"
 #include "nvmtl_icb_range.h"
 #include "nvmtl_yuv422.h"
 #include "nvmtl_cmd_refusal.h"
@@ -400,3 +401,9 @@ int nvmtl_y422_blit_refused(id tex, const char *what);
 int nvmtl_tile_on(void);
 #define NVMTL_TILE_TEXTURE_BASE 120u   /* the translator's TILE_TEXTURE_BASE: attachment A is texture 120 + A */
 id nvmtl_tile_compute_pipeline(NVMTLRenderPipelineState *tp, uint32_t tw, uint32_t th, NSString **why);
+// sparse textures and heaps (NVMTL_SPARSE_TEXTURES=1)
+@interface NVMTLHeap () { @public BOOL _sparse; nvmtl_page_pool _pool; uint64_t *_poolBits; } @end
+@interface NVMTLTexture () { @public NVMTLHeap *_sparseHeap; NSMutableDictionary *_sparseTiles; int _sparseTailFirst; uint32_t _sparseTailPages; } @end
+@interface NVMTLResourceStateCommandEncoder : NSObject <MTLResourceStateCommandEncoder> { @public NVMTLCommandBuffer *_cb; NSString *_label; } @end
+id nvmtl_sparse_heap_texture(NVMTLHeap *heap, MTLTextureDescriptor *d);
+void nvmtl_sparse_update(id<MTLTexture> tex, MTLSparseTextureMappingMode mode, MTLRegion region, NSUInteger mip, NSUInteger slice);
