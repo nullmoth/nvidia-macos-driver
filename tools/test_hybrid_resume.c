@@ -18,6 +18,7 @@ static unsigned T_PIPE = 0, T_PORT = 0, T_VER = 12;
 static struct nmr_edp T_EDP;                /* what the video BIOS says about the panel's drive table */
 static uint32_t reg[NREG];
 static uint8_t dpcd[0x800];
+static uint8_t edid[128]; static unsigned edid_off;      /* the panel's EDID, read over I2C-over-AUX */
 static struct { uint32_t off; uint32_t v; } wlog[6000]; static int nw;
 static unsigned long now_us;
 static int pw_fail, pll_fail, panel_fail, sink_deaf, train_fail_level, sink_needs_v, sink_needs_p, no_drive;
@@ -52,6 +53,14 @@ static void aux_process(void)
     if (sink_deaf || !panel_on) { *R(CTL) = (ctl & ~(1u << 31)) | (1u << 28); return; }       /* time out */
     unsigned cmd = m[0] >> 4, len = m[3] + 1; uint32_t addr = ((m[0] & 0xF) << 16) | (m[1] << 8) | m[2];
     uint8_t rep[20] = {0};
+    if (cmd == 0 || cmd == 4) {          /* I2C write: sets the EDID read offset */
+        if (addr != 0x50) { *R(CTL) = (ctl & ~(1u << 31)) | (1u << 28); return; }
+        edid_off = m[4]; *R(CTL) = (ctl & ~(1u << 31) & ~(0x1Fu << 20)) | (1u << 30) | (1u << 20); *R(DATA) = 0; return; }
+    if (cmd == 1 || cmd == 5) {          /* I2C read of the EDID */
+        for (i = 0; i < len; i++) rep[1 + i] = edid[(edid_off + i) & 127];
+        *R(CTL) = (ctl & ~(1u << 31) & ~(0x1Fu << 20)) | (1u << 30) | ((len + 1) << 20);
+        for (i = 0; i < len + 1; i += 4) *R(DATA + i) = ((uint32_t)rep[i] << 24) | ((uint32_t)rep[i + 1] << 16) | ((uint32_t)rep[i + 2] << 8) | rep[i + 3];
+        return; }
     if (cmd == 8) {
         for (i = 0; i < len; i++) dpcd[addr + i] = m[4 + i];
         *R(CTL) = (ctl & ~(1u << 31) & ~(0x1Fu << 20)) | (1u << 30) | (1u << 20);
@@ -160,6 +169,9 @@ static void suite(void)
     ARM("a panel that uses the AUX handshake is recognised", !snap.no_handshake);
     lit_state(); reg[NMR_PW_AUX / 4] = 0; { static struct nmr_snap s2; ARM("a firmware that left the AUX well off still gets its sink captured", nmr_snapshot(&ops, &s2, p, T_VER, &T_EDP) == NMR_OK && s2.have_sink && reg[NMR_PW_AUX / 4] == 0); }
     lit_state(); nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP);
+    { uint8_t id[10] = {0}; for (unsigned i = 0; i < 128; i++) edid[i] = (uint8_t)(0x40 + i);
+      ARM("the panel's identifier (EDID bytes 8 to 17) is read over I2C-over-AUX", nmr_edid_id(&ops, port, id) == 0 && !memcmp(id, edid + 8, 10));
+      sink_deaf = 1; ARM("a panel that does not answer gives no identifier", nmr_edid_id(&ops, port, id) == -1); sink_deaf = 0; }
 
     s3(); int rc = nmr_resume(&ops, &snap, T_VER);
     ARM("resume after S3 lights the panel", rc == NMR_OK);

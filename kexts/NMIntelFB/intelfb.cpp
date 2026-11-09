@@ -253,7 +253,7 @@ private:
     uint64_t *fFwPte = nullptr; uint64_t fFwPteFirst = 0, fFwPteCount = 0;
     thread_call_t fResumeCall = nullptr;
     bool ggttMap();
-    bool readVbt(struct nmr_edp *out);
+    bool readVbt(struct nmr_edp *out, uint8_t **keep, uint32_t *keepLen);
     // Intel display firmware (nm_hybrid_dmc.h), handed over by a root helper through debug.nmintelfb_dmc; boot-arg nmhybriddmc=1
     // loads it (with every event handler left disabled). The kext cannot read a file, and never trusts the bytes: they are parsed
     // and range-checked here before anything is kept or written.
@@ -845,8 +845,9 @@ void NMIntelFB::ownRelease()
 
 // The video BIOS tables through the OpRegion (PCI config 0xFC holds its physical address): the panel type, and from it whether
 // this panel uses the low-swing or reduced-power drive table. Nothing is guessed: any failure leaves the DisplayPort tables.
-bool NMIntelFB::readVbt(struct nmr_edp *out)
+bool NMIntelFB::readVbt(struct nmr_edp *out, uint8_t **keep, uint32_t *keepLen)
 {
+    *keep = nullptr; *keepLen = 0;
     const uint32_t asls = fPCI->configRead32(0xFC);
     if (!asls) return false;
     IOMemoryDescriptor *od = IOMemoryDescriptor::withPhysicalAddress(asls, NMV_OPREGION_SIZE, kIODirectionIn);
@@ -856,11 +857,18 @@ bool NMIntelFB::readVbt(struct nmr_edp *out)
         const uint8_t *op = (const uint8_t *)om->getVirtualAddress();
         uint32_t io = 0, is = 0; struct nmv_loc loc; struct nmv_edp e;
         if (nmv_locate(op, asls, &io, &is, &loc)) {
-            if (loc.kind == 1) ok = nmv_edp(op + io, is, &e);
+            if (loc.kind == 1) {
+                ok = nmv_edp(op + io, is, nullptr, &e);
+                if (!ok && is <= 65536 && (*keep = (uint8_t *)IOMalloc(is))) { memcpy(*keep, op + io, is); *keepLen = is; }
+            }
             else if (loc.kind == 2) {
                 IOMemoryDescriptor *vd = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)loc.phys, loc.size, kIODirectionIn);
                 IOMemoryMap *vm = vd ? vd->map() : nullptr;
-                if (vm) ok = nmv_edp((const uint8_t *)vm->getVirtualAddress(), loc.size, &e);
+                if (vm) {
+                    const uint8_t *vb = (const uint8_t *)vm->getVirtualAddress();
+                    ok = nmv_edp(vb, loc.size, nullptr, &e);
+                    if (!ok && loc.size <= 65536 && (*keep = (uint8_t *)IOMalloc(loc.size))) { memcpy(*keep, vb, loc.size); *keepLen = loc.size; }
+                }
                 if (vm) vm->release();
                 if (vd) vd->release();
             }
@@ -868,7 +876,7 @@ bool NMIntelFB::readVbt(struct nmr_edp *out)
         if (ok) { out->known = 1; out->low_vswing = (uint8_t)e.low_vswing; out->hobl = (uint8_t)e.hobl;
                   IFBLOG("hybrid: video BIOS: panel type %u, low-swing table %s, reduced-power table %s (VBT %u, BDB %u)", e.panel_type,
                          e.low_vswing ? "yes" : "no", e.hobl ? "yes" : "no", e.vbt_version, e.bdb_version); }
-        else IFBLOG("hybrid: video BIOS: no panel type found; the DisplayPort drive tables are used");
+        else IFBLOG("hybrid: video BIOS: no panel type named; trying the panel's identifier");
         om->release();
     }
     if (od) od->release();
@@ -928,9 +936,22 @@ void NMIntelFB::resumeCapture()
         [](void *, const char *st) { IFBLOG("hybrid: resume step: %s", st); },
         nullptr };
     struct nmr_edp edp = {};
-    readVbt(&edp);
+    uint8_t *vbtKeep = nullptr; uint32_t vbtKeepLen = 0;
+    readVbt(&edp, &vbtKeep, &vbtKeepLen);
     const int rc = fVer == 14 ? nmr14_snapshot(&ops, fSnap, (unsigned)fPipe, &edp) : nmr_snapshot(&ops, fSnap, (unsigned)fPipe, fVer, &edp);
-    if (rc != NMR_OK) { IFBLOG("hybrid: resume unavailable: %s", nmr_result_name(rc)); IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; return; }
+    if (rc != NMR_OK) { IFBLOG("hybrid: resume unavailable: %s", nmr_result_name(rc)); IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; if (vbtKeep) IOFree(vbtKeep, vbtKeepLen); return; }
+    if (vbtKeep) {
+        // the video BIOS named no panel type: the panel's own identifier picks the entry (Linux pnpid_get_panel_type)
+        uint8_t id[10]; struct nmv_edp e; struct nmr_ops o2 = ops; bool got;
+        if (fVer == 14) { o2.aux_ctl_or = NMX_AUX_POWER_REQ; nmx_aux_power(&ops, fSnap->topo.port, 1); }
+        got = nmr_edid_id(&o2, fSnap->topo.port, id) == 0;
+        if (fVer == 14) nmx_aux_power(&ops, fSnap->topo.port, 0);
+        if (got && nmv_edp(vbtKeep, vbtKeepLen, id, &e)) {
+            fSnap->edp.known = 1; fSnap->edp.low_vswing = (uint8_t)e.low_vswing; fSnap->edp.hobl = (uint8_t)e.hobl;
+            IFBLOG("hybrid: video BIOS: panel type %u by the panel's identifier, low-swing table %s, reduced-power table %s", e.panel_type, e.low_vswing ? "yes" : "no", e.hobl ? "yes" : "no");
+        } else IFBLOG("hybrid: video BIOS: the panel's identifier matched no entry; the DisplayPort drive tables are used");
+        IOFree(vbtKeep, vbtKeepLen);
+    }
     // the firmware surface's entries in the graphics table: restored first on wake (versions 12 and 13; on version 14 the table
     // sits in system memory and is not touched)
     fFwPteFirst = fSurf >> 12; fFwPteCount = (((uint64_t)fRowBytes * fHeight) + 4095) / 4096;
