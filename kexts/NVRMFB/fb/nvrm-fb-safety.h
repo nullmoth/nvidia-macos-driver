@@ -288,3 +288,15 @@ static inline bool nvrmDsrSize(unsigned nativeW, unsigned nativeH, unsigned i, u
 // as the panel's own timing (issue 429: the mode is enumerated as valid, the panel goes black). NVKMS still validates every
 // commit, so a higher bound only stops macOS from refusing or rewriting timings the hardware takes.
 enum { kNvrmMaxPixelClockMHz = 2700 };
+// nvfbhotplugpoll=<seconds>: valid periods are 1 to 60.
+static inline bool nvrmHotplugPollValid(unsigned sec) { return sec >= 1 && sec <= 60; }
+// After a mode change the head must keep showing the frame WindowServer last presented. That frame lives in a surface of the
+// accelerator's (zero-copy flips), not in the scanout memory; a mode set that attaches the empty scanout surface shows black
+// until WindowServer presents again, and a static desktop does not (issues 153, 161: cursor-only desktop after a refresh-rate
+// change, fixed by anything that makes WindowServer redraw). The front surface is carried through when the raster, the desktop
+// size and the rotation are unchanged, as for a refresh-rate-only change.
+static inline bool nvrmKeepFrontSurface(bool enabled, bool haveFront, bool frontIsScanout, unsigned oldW, unsigned oldH, unsigned newW, unsigned newH,
+                                        unsigned oldTransform, unsigned newTransform)
+{
+    return enabled && haveFront && !frontIsScanout && oldW == newW && oldH == newH && oldTransform == newTransform;
+}
