@@ -14,4 +14,10 @@ xcrun clang++ -arch x86_64 -std=c++17 -mmacosx-version-min=10.13 -mkernel -fno-r
   -DNMKbdBacklight_kern_start=NMKbdBacklight_kern_start \
   -I MacKernelSDK/Headers -I Lilu/Lilu -I VirtualSMC -I "$HERE" \
   -c "$HERE/NMKbdBacklight.cpp" -o NMKbdBacklight.o
+xcrun clang++ -arch x86_64 -std=c++17 -mmacosx-version-min=10.13 -mkernel -fno-rtti -fno-exceptions -fno-builtin -nostdinc -nostdinc++ \
+  -isysroot "$SDK" -Wall -Wextra -Wno-unused-parameter -Werror=return-type \
+  -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT -DPRODUCT_NAME=NMKbdBacklight -DMODULE_VERSION=1.0.0 \
+  -I MacKernelSDK/Headers -I Lilu/Lilu -I VirtualSMC -I "$HERE" \
+  -c "$HERE/NMKbdBacklightHID.cpp" -o NMKbdBacklightHID.o
+echo "compiled NMKbdBacklightHID.o"
 echo "compiled NMKbdBacklight.o"

@@ -107,6 +107,78 @@ static inline int kbl_should_decline(int smc_light_sensor_loaded, int ambient_li
     return !forced && smc_light_sensor_loaded && ambient_light_has_ali;
 }
 
+/* ---- Dell: the SMBIOS calling interface through ACPI WMI ----------------------------------------------------------------
+ * (read from the public dell-laptop and dell-smbios-wmi drivers, written again.) The call is WMI method 1, instance 0, on the
+ * Dell SMBIOS GUID, with a buffer that begins with  { u16 class, u16 select, u32 input[4], u32 output[4] }  (36 bytes,
+ * little-endian), padded to the size the BIOS expects (4096 or 32768). The keyboard light is class 4, select 11:
+ *   input[0] = 0  info   -> output[2] bits 23..16 = number of levels (0 means no settable level)
+ *   input[0] = 1  get    -> output[1] bits 15..0 = mode bits, 23..16 triggers, 29..24 idle value, 31..30 idle unit;
+ *                           output[2] bits 7..0 = ALS setting, 15..8 = ALS value, 23..16 = level, 29..24 / 31..30 = AC idle
+ *   input[0] = 2  set    -> input[1] = the mode bit as a mask | triggers << 16 | idle value << 24 | unit << 30,
+ *                           input[2] = ALS setting | level << 16 | AC idle value << 24 | AC unit << 30
+ * A set sends back the whole state with only the level changed. */
+#define KBL_DELL_CLASS  4
+#define KBL_DELL_SELECT 11
+#define KBL_DELL_BUF    36
+
+struct kbl_dell_state { int mode_bit, triggers, idle_value, idle_unit, als_setting, als_value, level, idle_value_ac, idle_unit_ac; };
+
+static inline int kbl_dell_info_levels(uint32_t out2) { return (int)((out2 >> 16) & 0xFF); }
+
+static inline void kbl_dell_parse_state(uint32_t out1, uint32_t out2, struct kbl_dell_state *st)
+{
+    uint32_t m = out1 & 0xFFFF;
+    int bit = 0;
+    if (m) { while (!((m >> bit) & 1)) bit++; }
+    st->mode_bit = bit;
+    st->triggers = (int)((out1 >> 16) & 0xFF);
+    st->idle_value = (int)((out1 >> 24) & 0x3F);
+    st->idle_unit = (int)((out1 >> 30) & 0x3);
+    st->als_setting = (int)(out2 & 0xFF);
+    st->als_value = (int)((out2 >> 8) & 0xFF);
+    st->level = (int)((out2 >> 16) & 0xFF);
+    st->idle_value_ac = (int)((out2 >> 24) & 0x3F);
+    st->idle_unit_ac = (int)((out2 >> 30) & 0x3);
+}
+
+static inline void kbl_dell_set_inputs(const struct kbl_dell_state *st, uint32_t *in1, uint32_t *in2)
+{
+    *in1 = ((1u << st->mode_bit) & 0xFFFFu) | ((uint32_t)(st->triggers & 0xFF) << 16) | ((uint32_t)(st->idle_value & 0x3F) << 24)
+         | ((uint32_t)(st->idle_unit & 3) << 30);
+    *in2 = (uint32_t)(st->als_setting & 0xFF) | ((uint32_t)(st->level & 0xFF) << 16) | ((uint32_t)(st->idle_value_ac & 0x3F) << 24)
+         | ((uint32_t)(st->idle_unit_ac & 3) << 30);
+}
+
+static inline void kbl_dell_fill(uint8_t b[KBL_DELL_BUF], uint32_t in0, uint32_t in1, uint32_t in2, uint32_t in3)
+{
+    uint32_t in[4] = { in0, in1, in2, in3 };
+    for (int i = 0; i < KBL_DELL_BUF; i++) b[i] = 0;
+    b[0] = KBL_DELL_CLASS; b[2] = KBL_DELL_SELECT;
+    for (int k = 0; k < 4; k++) for (int j = 0; j < 4; j++) b[4 + 4 * k + j] = (uint8_t)(in[k] >> (8 * j));
+}
+
+static inline uint32_t kbl_dell_output(const uint8_t b[KBL_DELL_BUF], int k)
+{
+    uint32_t v = 0;
+    for (int j = 0; j < 4; j++) v |= (uint32_t)b[20 + 4 * k + j] << (8 * j);
+    return v;
+}
+
+/* A _WDG entry is 20 bytes: the GUID in mixed-endian order, two characters naming the object (the method is "WM" + them),
+ * an instance count and flags (bit 1 = a method). This is the Dell SMBIOS GUID A80593CE-A997-11DA-B012-B622A1EF5492. */
+static const uint8_t kKblDellGuid[16] = { 0xCE, 0x93, 0x05, 0xA8, 0x97, 0xA9, 0xDA, 0x11, 0xB0, 0x12, 0xB6, 0x22, 0xA1, 0xEF, 0x54, 0x92 };
+
+/* the two object characters of the first Dell SMBIOS method entry in a _WDG buffer, or 0 */
+static inline int kbl_dell_wdg_find(const uint8_t *wdg, unsigned len, char obj[2])
+{
+    for (unsigned o = 0; o + 20 <= len; o += 20) {
+        int same = 1;
+        for (int i = 0; i < 16; i++) if (wdg[o + i] != kKblDellGuid[i]) { same = 0; break; }
+        if (same && (wdg[o + 19] & 0x02)) { obj[0] = (char)wdg[o + 16]; obj[1] = (char)wdg[o + 17]; return 1; }
+    }
+    return 0;
+}
+
 /* macOS keeps the keyboard brightness in the SMC key LKSB as a 2-byte value. Read out of Apple's own AppleLMUController on
  * an Intel Mac Pro (setLEDBrightness): the brightness is 12 bits; byte 0 is bits 11..4 and the high nibble of byte 1 is
  * bits 3..0, that is  word = ((v & 0xF) << 12) | ((v >> 4) & 0xFF)  stored little-endian. These functions convert between
@@ -135,5 +207,56 @@ static inline int kbl_level_to_smc(int level, int max_level)
     if (level >= max_level) return 0xFFF;
     return (level * 4095 + max_level / 2) / max_level;
 }
+
+/* ---- The HID route (macOS 26 on T2-era Mac models) ------------------------------------------------------------------
+ * Apple's HID keyboard driver looks for a keyboard that carries the vendor element usage page 0xFF00, usage 0x0F in an input
+ * report, then reads the light's range with feature report 0xBF and sets it with output report 0xB0. The layouts below are
+ * the ones the public Linux hid-apple driver documents and the macOS driver's own calls match (feature report 191, vendor
+ * page 65280, usage 15), written again here:
+ *   feature 0xBF (get):  { 0xBF, version = 1, u16 off, u16 on_min, u16 on_max }          8 bytes with the id
+ *   output  0xB0 (set):  { 0xB0, version = 1, u16 brightness, u16 rate }                 6 bytes with the id
+ * The brightness here runs 0 to KBL_HID_MAX. All fields are little-endian. */
+#define KBL_HID_REPORT_CONFIG 0xBF
+#define KBL_HID_REPORT_SET    0xB0
+#define KBL_HID_VERSION       1
+#define KBL_HID_MAX           255
+#define KBL_HID_CONFIG_BYTES  8
+#define KBL_HID_SET_BYTES     6
+
+static const uint8_t kKblHidDescriptor[] = {
+    0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,                                   /* Generic Desktop, Keyboard, Application */
+    0x85, 0x01,                                                           /*   Report ID 1 */
+    0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02,   /* modifier keys */
+    0x95, 0x01, 0x75, 0x08, 0x81, 0x01,                                   /* reserved byte */
+    0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00,               /* key array */
+    0x06, 0x00, 0xFF, 0x09, 0x0F, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 0x01, 0x81, 0x02,   /* vendor 0xFF00:0x0F input */
+    0x85, 0xBF, 0x06, 0x00, 0xFF, 0x09, 0x10, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 0x07, 0xB1, 0x02,  /* feature 0xBF */
+    0x85, 0xB0, 0x06, 0x00, 0xFF, 0x09, 0x11, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 0x05, 0x91, 0x02,  /* output 0xB0 */
+    0xC0
+};
+
+static inline void kbl_hid_config_report(uint8_t out[KBL_HID_CONFIG_BYTES])
+{
+    out[0] = KBL_HID_REPORT_CONFIG; out[1] = KBL_HID_VERSION;
+    out[2] = 0; out[3] = 0;                          /* off */
+    out[4] = 1; out[5] = 0;                          /* on_min */
+    out[6] = KBL_HID_MAX; out[7] = 0;                /* on_max */
+}
+
+/* 1 with the brightness and rate when the buffer is a valid set report (with its id byte, or 5 bytes when the transport
+ * already took the id off), else 0 */
+static inline int kbl_hid_parse_set(const uint8_t *b, unsigned len, int *brightness, int *rate)
+{
+    if (len == KBL_HID_SET_BYTES) { if (b[0] != KBL_HID_REPORT_SET) return 0; b++; }
+    else if (len != KBL_HID_SET_BYTES - 1) return 0;
+    if (b[0] != KBL_HID_VERSION) return 0;
+    *brightness = b[1] | (b[2] << 8);
+    *rate = b[3] | (b[4] << 8);
+    return 1;
+}
+
+/* HID brightness 0..255 to the 12-bit value kbl_smc_to_level() takes, and back */
+static inline int kbl_hid_to_v12(int hid) { return hid <= 0 ? 0 : hid >= KBL_HID_MAX ? 0xFFF : (hid * 4095 + 127) / 255; }
+static inline int kbl_v12_to_hid(int v12) { return v12 <= 0 ? 0 : v12 >= 0xFFF ? KBL_HID_MAX : (v12 * 255 + 2047) / 4095; }
 
 #endif

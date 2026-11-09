@@ -23,8 +23,9 @@ public:
     int maxLevel() const { return maxLevel_; }
 
 private:
-    enum Backend { None, Asus, IdeaPad, IdeaPadPlain, ThinkPad };
+    enum Backend { None, Asus, IdeaPad, IdeaPadPlain, ThinkPad, Dell };
 
+    friend class NMKbdBacklightHID;
     static bool vsmcNotificationHandler(void *sensors, void *refCon, IOService *vsmc, IONotifier *notifier);
     IOACPIPlatformDevice *find(const char *nameMatch, const char *method);
     bool callAsus(uint32_t method, uint32_t argument, uint32_t *result);
@@ -32,10 +33,16 @@ private:
     bool probeAsus();
     bool probeIdeaPad();
     bool probeThinkPad();
+    bool probeDell();
+    bool dellCall(uint32_t in0, uint32_t in1, uint32_t in2, uint32_t *out1, uint32_t *out2);
 
     IOACPIPlatformDevice *dev {nullptr};
+    IOService *hidDevice {nullptr};
+    bool forced_ {false}, skipSmc_ {false};
     Backend backend {None};
     int lenovoType {0};
+    char dellMethod[8] {};
+    unsigned dellBuf {4096};
     int maxLevel_ {KBL_ASUS_MAX_LEVEL};
     IONotifier *vsmcNotifier {nullptr};
     VirtualSMCAPI::Plugin vsmcPlugin {
