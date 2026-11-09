@@ -65,8 +65,9 @@ struct nmr_ops {
 #define NMR_WM_LINETIME(p)   (0x45270u + 4u * (p))
 #define NMR_MSA_MISC(t)      (0x60410u + 0x1000u * (t))
 #define NMR_FUNC_CTL(t)      (0x60400u + 0x1000u * (t))
-#define NMR_DP_TP_CTL(d)     (0x64040u + 0x100u * (d))
-#define NMR_DP_TP_STATUS(d)  (0x64044u + 0x100u * (d))
+/* display 12 and later: the DisplayPort transport registers are per transcoder (Linux TGL_DP_TP_CTL / TGL_DP_TP_STATUS) */
+#define NMR_DP_TP_CTL(t)     (0x60540u + 0x1000u * (t))
+#define NMR_DP_TP_STATUS(t)  (0x60544u + 0x1000u * (t))
 #define NMR_DDI_BUF_CTL(d)   (0x64000u + 0x100u * (d))
 #define NMR_TRANSCONF(p)     (0x70008u + 0x1000u * (p))
 #define NMR_FRMCOUNT(p)      (0x70040u + 0x1000u * (p))
@@ -313,7 +314,7 @@ static inline int nmr_snapshot(const struct nmr_ops *o, struct nmr_snap *s, unsi
     s->wm_linetime = o->rd(o->ctx, NMR_WM_LINETIME(pipe)); s->msa = o->rd(o->ctx, NMR_MSA_MISC(t));
     for (i = 0; i < NMR_N_PLANE; i++) s->plane[i] = o->rd(o->ctx, NMR_PLANE(pipe, i));
     for (i = 0; i < NMR_PLANE_WM_WORDS; i++) s->plane_wm[i] = o->rd(o->ctx, NMR_PLANE_WM_BASE(pipe) + 4 * i);
-    s->surf = o->rd(o->ctx, NMR_SURF(pipe)); s->tp = o->rd(o->ctx, NMR_DP_TP_CTL(port));
+    s->surf = o->rd(o->ctx, NMR_SURF(pipe)); s->tp = o->rd(o->ctx, NMR_DP_TP_CTL(t));
     s->ddi = o->rd(o->ctx, NMR_DDI_BUF_CTL(port)); s->transconf = o->rd(o->ctx, NMR_TRANSCONF(pipe));
     s->blc[0] = o->rd(o->ctx, NMR_BLC_PWM_CTL); s->blc[1] = o->rd(o->ctx, NMR_BLC_PWM_FREQ); s->blc[2] = o->rd(o->ctx, NMR_BLC_PWM_DUTY);
     /* the sink: its capabilities and the link settings the firmware gave it. The AUX channel needs its power well, which the
@@ -366,7 +367,7 @@ static inline void nmr_request(const uint8_t adj[2], unsigned lanes, unsigned *v
 }
 static inline int nmr_train(const struct nmr_ops *o, const struct nmr_snap *s, unsigned lanes, unsigned display_version)
 {
-    const unsigned port = s->topo.port;
+    const unsigned port = s->topo.port, t = s->topo.pipe;     /* the transport registers belong to the transcoder, which has the pipe's index */
     unsigned tries, loops, i, cur_v = 0, cur_p = 0, same_v_tries = 0;
     uint8_t lane_set[4], st[2], adj[2], al;
     uint32_t tp;
@@ -379,8 +380,8 @@ static inline int nmr_train(const struct nmr_ops *o, const struct nmr_snap *s, u
     if (nmr_dpcd_wr1(o, port, NMR_DPCD_CODING, s->dpcd[3]) != 1) return 0;
     if (s->dpcd[4] && nmr_dpcd_wr1(o, port, NMR_DPCD_LINK_RATE_SET, s->dpcd[4]) != 1) return 0;
     /* clock recovery: pattern 1 on both ends, scrambling off */
-    tp = o->rd(o->ctx, NMR_DP_TP_CTL(port));
-    o->wr(o->ctx, NMR_DP_TP_CTL(port), (tp & ~NMR_TP_PAT_MASK) | NMR_TP_ENABLE | NMR_TP_PAT1);
+    tp = o->rd(o->ctx, NMR_DP_TP_CTL(t));
+    o->wr(o->ctx, NMR_DP_TP_CTL(t), (tp & ~NMR_TP_PAT_MASK) | NMR_TP_ENABLE | NMR_TP_PAT1);
     if (nmr_dpcd_wr1(o, port, NMR_DPCD_TRAIN_PAT, 0x21) != 1) return 0;
     for (loops = 0; loops < 10; loops++) {
         for (i = 0; i < lanes; i++) lane_set[i] = nmr_lane_set(cur_v, cur_p);
@@ -406,7 +407,7 @@ static inline int nmr_train(const struct nmr_ops *o, const struct nmr_snap *s, u
     if (loops >= 10) { nmr_dpcd_wr1(o, port, NMR_DPCD_TRAIN_PAT, 0); return 0; }
     nmr_note(o, "link training: clock recovery done");
     /* channel equalisation: pattern 2 (scrambling off); a lost lock restarts clock recovery, up to five times in all */
-    o->wr(o->ctx, NMR_DP_TP_CTL(port), (o->rd(o->ctx, NMR_DP_TP_CTL(port)) & ~NMR_TP_PAT_MASK) | NMR_TP_PAT2);
+    o->wr(o->ctx, NMR_DP_TP_CTL(t), (o->rd(o->ctx, NMR_DP_TP_CTL(t)) & ~NMR_TP_PAT_MASK) | NMR_TP_PAT2);
     if (nmr_dpcd_wr1(o, port, NMR_DPCD_TRAIN_PAT, 0x22) != 1) return 0;
     for (tries = 0; tries < 6; tries++) {
         unsigned ok = 0;
@@ -489,7 +490,7 @@ static inline int nmr_resume(const struct nmr_ops *o, const struct nmr_snap *s, 
         o->wr(o->ctx, NMR_SURF(pipe), s->surf);       /* the surface register arms the plane: last */
         nmr_note(o, "transcoder function and DDI buffer");
         o->wr(o->ctx, NMR_FUNC_CTL(t), s->func);
-        o->wr(o->ctx, NMR_DP_TP_CTL(port), (s->tp & ~NMR_TP_PAT_MASK) | NMR_TP_ENABLE | NMR_TP_PAT1);
+        o->wr(o->ctx, NMR_DP_TP_CTL(t), (s->tp & ~NMR_TP_PAT_MASK) | NMR_TP_ENABLE | NMR_TP_PAT1);
         o->wr(o->ctx, NMR_DDI_BUF_CTL(port), s->ddi | NMR_DDI_ENABLE);
         o->delay_us(o->ctx, 600);                      /* buffer enable to first pattern */
         lanes = s->dpcd[1] & 0x1F;
@@ -498,19 +499,19 @@ static inline int nmr_resume(const struct nmr_ops *o, const struct nmr_snap *s, 
             nmr_note(o, "link training skipped (the panel does not use the AUX handshake)");
             if (nmr_dpcd_wr1(o, port, NMR_DPCD_LINK_BW, s->dpcd[0]) != 1 || nmr_dpcd_wr1(o, port, NMR_DPCD_LANE_COUNT, s->dpcd[1]) != 1) return NMR_E_SINK;
             o->delay_us(o->ctx, 1000);
-            o->wr(o->ctx, NMR_DP_TP_CTL(port), (o->rd(o->ctx, NMR_DP_TP_CTL(port)) & ~NMR_TP_PAT_MASK) | NMR_TP_PAT2);
+            o->wr(o->ctx, NMR_DP_TP_CTL(t), (o->rd(o->ctx, NMR_DP_TP_CTL(t)) & ~NMR_TP_PAT_MASK) | NMR_TP_PAT2);
             o->delay_us(o->ctx, 1000);
         } else {
             nmr_note(o, "link training");
             if (!nmr_train(o, s, lanes, display_version)) {
                 o->wr(o->ctx, NMR_DDI_BUF_CTL(port), s->ddi & ~NMR_DDI_ENABLE);
-                o->wr(o->ctx, NMR_DP_TP_CTL(port), s->tp & ~NMR_TP_ENABLE);
+                o->wr(o->ctx, NMR_DP_TP_CTL(t), s->tp & ~NMR_TP_ENABLE);
                 return NMR_E_TRAIN;
             }
         }
-        o->wr(o->ctx, NMR_DP_TP_CTL(port), (o->rd(o->ctx, NMR_DP_TP_CTL(port)) & ~NMR_TP_PAT_MASK) | NMR_TP_IDLE);
-        nmr_wait(o, NMR_DP_TP_STATUS(port), NMR_TP_IDLE_DONE, NMR_TP_IDLE_DONE, 5000);
-        o->wr(o->ctx, NMR_DP_TP_CTL(port), (o->rd(o->ctx, NMR_DP_TP_CTL(port)) & ~NMR_TP_PAT_MASK) | NMR_TP_NORMAL);
+        o->wr(o->ctx, NMR_DP_TP_CTL(t), (o->rd(o->ctx, NMR_DP_TP_CTL(t)) & ~NMR_TP_PAT_MASK) | NMR_TP_IDLE);
+        nmr_wait(o, NMR_DP_TP_STATUS(t), NMR_TP_IDLE_DONE, NMR_TP_IDLE_DONE, 5000);
+        o->wr(o->ctx, NMR_DP_TP_CTL(t), (o->rd(o->ctx, NMR_DP_TP_CTL(t)) & ~NMR_TP_PAT_MASK) | NMR_TP_NORMAL);
         nmr_note(o, "transcoder on");
         o->wr(o->ctx, NMR_TRANSCONF(pipe), s->transconf | NMR_TRANS_ENABLE);
         fc = o->rd(o->ctx, NMR_FRMCOUNT(pipe));
