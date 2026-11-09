@@ -41,19 +41,33 @@ static inline uint32_t kbl_asus_set_argument(int level)
     return KBL_ASUS_ON_BIT | (uint32_t)level;
 }
 
-/* macOS keeps the keyboard brightness in the SMC key LKSB as a 2-byte value. VirtualSMC documents the key but not the
- * meaning of its bytes; the first byte is taken as the brightness, 0 to 255. These two functions map it to and from the
- * firmware's levels and round to the nearest level. */
-static inline int kbl_smc_to_level(uint8_t brightness, int max_level)
+/* macOS keeps the keyboard brightness in the SMC key LKSB as a 2-byte value. Read out of Apple's own AppleLMUController on
+ * an Intel Mac Pro (setLEDBrightness): the brightness is 12 bits; byte 0 is bits 11..4 and the high nibble of byte 1 is
+ * bits 3..0, that is  word = ((v & 0xF) << 12) | ((v >> 4) & 0xFF)  stored little-endian. These functions convert between
+ * that pair of bytes and the firmware's levels, rounding to the nearest level. */
+static inline int kbl_smc_decode(uint8_t b0, uint8_t b1)
 {
-    return ((int)brightness * max_level + 127) / 255;
+    return ((int)b0 << 4) | (b1 >> 4);
 }
 
-static inline uint8_t kbl_level_to_smc(int level, int max_level)
+static inline void kbl_smc_encode(int v12, uint8_t *b0, uint8_t *b1)
+{
+    if (v12 < 0) v12 = 0;
+    if (v12 > 0xFFF) v12 = 0xFFF;
+    *b0 = (uint8_t)(v12 >> 4);
+    *b1 = (uint8_t)((v12 & 0xF) << 4);
+}
+
+static inline int kbl_smc_to_level(int v12, int max_level)
+{
+    return (v12 * max_level + 2047) / 4095;
+}
+
+static inline int kbl_level_to_smc(int level, int max_level)
 {
     if (level <= 0) return 0;
-    if (level >= max_level) return 255;
-    return (uint8_t)((level * 255 + max_level / 2) / max_level);
+    if (level >= max_level) return 0xFFF;
+    return (level * 4095 + max_level / 2) / max_level;
 }
 
 #endif

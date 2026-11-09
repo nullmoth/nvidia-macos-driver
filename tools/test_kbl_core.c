@@ -15,14 +15,22 @@ int main(void)
     arm("off is argument 0", kbl_asus_set_argument(0) == 0 && kbl_asus_set_argument(-1) == 0);
     arm("a level is 0x80 | level", kbl_asus_set_argument(1) == 0x81 && kbl_asus_set_argument(3) == 0x83);
     arm("a level above the maximum is set as the maximum", kbl_asus_set_argument(9) == 0x83);
-    arm("0 maps to level 0 and 255 to the maximum", kbl_smc_to_level(0, 3) == 0 && kbl_smc_to_level(255, 3) == 3);
-    arm("the middle of the range maps to the middle level", kbl_smc_to_level(128, 3) == 2 || kbl_smc_to_level(128, 3) == 1);
+    arm("0 maps to level 0 and the largest value to the maximum", kbl_smc_to_level(0, 3) == 0 && kbl_smc_to_level(0xFFF, 3) == 3);
+    uint8_t b0, b1;
+    kbl_smc_encode(0xABC, &b0, &b1);
+    arm("a 12-bit brightness is byte 0 = bits 11..4 and the high nibble of byte 1 = bits 3..0 (Apple's setLEDBrightness)", b0 == 0xAB && b1 == 0xC0);
+    arm("the word Apple writes, ((v & 0xF) << 12) | ((v >> 4) & 0xFF) little-endian, is the same two bytes",
+        (uint8_t)((((0xABC & 0xF) << 12) | ((0xABC >> 4) & 0xFF)) & 0xFF) == b0 && (uint8_t)((((0xABC & 0xF) << 12) | ((0xABC >> 4) & 0xFF)) >> 8) == b1);
+    arm("decoding gives the value back", kbl_smc_decode(b0, b1) == 0xABC);
     int ok = 1;
-    for (int l = 0; l <= 3; l++) if (kbl_smc_to_level(kbl_level_to_smc(l, 3), 3) != l) ok = 0;
-    arm("every level survives a round trip through the SMC byte", ok);
+    for (int l = 0; l <= 3; l++) {
+        kbl_smc_encode(kbl_level_to_smc(l, 3), &b0, &b1);
+        if (kbl_smc_to_level(kbl_smc_decode(b0, b1), 3) != l) ok = 0;
+    }
+    arm("every level survives a round trip through the two SMC bytes", ok);
     ok = 1;
-    for (int v = 0; v < 256; v++) { int l = kbl_smc_to_level((uint8_t)v, 3); if (l < 0 || l > 3) ok = 0; }
-    arm("no SMC byte maps outside the levels", ok);
+    for (int v = 0; v <= 0xFFF; v++) { int l = kbl_smc_to_level(v, 3); if (l < 0 || l > 3) ok = 0; }
+    arm("no 12-bit value maps outside the levels", ok);
     arm("the method ids are the ASCII of their names", KBL_ASUS_METHOD_DSTS == ('D' | 'S' << 8 | 'T' << 16 | 'S' << 24)
                                                     && KBL_ASUS_METHOD_DEVS == ('D' | 'E' << 8 | 'V' << 16 | 'S' << 24));
     return fails ? 1 : 0;
