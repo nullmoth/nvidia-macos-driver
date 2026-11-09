@@ -15,6 +15,7 @@
 #ifndef NM_HYBRID_WM_H
 #define NM_HYBRID_WM_H
 
+#include <string.h>
 #include "nm_hybrid_resume.h"
 
 #define NMW_LEVELS 8
@@ -88,6 +89,8 @@ static inline uint32_t nmw_word(const struct nmw_level *l) { return l->enable ? 
 static inline uint32_t nmw_buf_cfg(unsigned start, unsigned end) { return ((end - 1u) << 16) | start; }
 static inline uint32_t nmw_linetime(const struct nmw_in *in) { uint32_t v = (in->htotal * 1000u * 8u + in->pixel_khz - 1u) / in->pixel_khz; return v < 0x1FFu ? v : 0x1FFu; }
 
+/* The total display buffer in blocks: 2048 on version 12 (two slices), 4096 on version 13 (four) (Linux intel_display_device.c). */
+static inline unsigned nmw_dbuf_total(unsigned ver) { return ver >= 13 ? 4096u : 2048u; }
 /* The largest free run of the display buffer, given the total (blocks) and the range the other pipe's plane already holds. */
 static inline void nmw_free_run(unsigned total, unsigned used_start, unsigned used_end, unsigned *start, unsigned *end)
 {

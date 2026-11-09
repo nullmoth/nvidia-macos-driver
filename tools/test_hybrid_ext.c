@@ -192,6 +192,7 @@ int main(void)
       ARM("the line time is 8 x htotal x 1000 / pixel clock rounded up, at most 0x1ff", ({ struct nmw_in x = in; nmw_linetime(&x) == 119u; }));
       { unsigned s, e; nmw_free_run(2048, 0, 1024, &s, &e); ARM("the second pipe takes the free half above the first pipe's range", s == 1024 && e == 2048);
         nmw_free_run(2048, 1024, 2048, &s, &e); ARM("or below it", s == 0 && e == 1024); nmw_free_run(2048, 0, 0, &s, &e); ARM("or everything when the first pipe holds none", s == 0 && e == 2048); }
+      ARM("the display buffer is 2048 blocks on version 12 and 4096 on version 13", nmw_dbuf_total(12) == 2048 && nmw_dbuf_total(13) == 4096);
       ARM("a buffer range is written as end - 1 in the high half and start in the low half", nmw_buf_cfg(1024, 2048) == ((2047u << 16) | 1024u)); }
     { uint16_t wm[8]; int rc;
       memset(reg, 0, sizeof reg);

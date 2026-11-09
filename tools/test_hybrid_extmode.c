@@ -152,11 +152,11 @@ static int all_off(unsigned pipe, unsigned ddi, unsigned tc)
 
 static void suite(unsigned ver)
 {
-    struct nmo m; int rc; const unsigned ddb_s = 1024, ddb_e = 2048; const uint32_t surf = 0x00400000u, pitch = 1920 * 4;
+    struct nmo m; int rc; const unsigned ddb_s = 1024, ddb_e = 2048; const uint32_t surf = 0x00400000u, pitch = 1920 * 4, cap = 1920 * 4 * 1080;
     printf("-- display version %u, Type-C port %u, pipe %c\n", ver, TC + 1, 'A' + PIPE);
     world(ver);
     ARM("init finds the FIA and names the DDI", nmo_init(&ops, &m, ver, TC, PIPE, 38400) == 0 && m.ddi == 3 + TC);
-    rc = nmo_enable(&ops, &m, surf, pitch, ddb_s, ddb_e);
+    rc = nmo_enable(&ops, &m, surf, cap, ddb_s, ddb_e);
     if (rc) printf("   rc %d: %s\n", rc, nmo_err_name(rc));
     ARM("a DisplayPort-alt monitor comes up", rc == 0 && m.state == NMO_UP);
     ARM("the mode is the EDID's 1080p60 on the cheapest link (1.62 Gb/s, 4 lanes)", m.t.hactive == 1920 && m.t.clock_khz == 148500 && m.rate == 162000 && m.lanes == 4);
@@ -170,7 +170,8 @@ static void suite(unsigned ver)
       { int k; for (k = 0; k < nw; k++) if (wlog[k].off == NMR_DDI_BUF_CTL(DDI) && (wlog[k].v & NMR_DDI_ENABLE)) { db = k; break; } }
       ARM("order: power wells, PLL, clocks, pipe, DDI buffer, transcoder", pw >= 0 && pw < pl && pl < cs && cs < pe && pe < db && db < tr); }
     ARM("the internal panel's backlight and panel power registers are never written", first_write(NMR_BLC_PWM_CTL) < 0 && first_write(NMR_BLC_PWM_DUTY) < 0 && first_write(NMR_PP_CONTROL) < 0);
-    ARM("a second enable while up is refused", nmo_enable(&ops, &m, surf, pitch, ddb_s, ddb_e) == NMO_E_BUSY);
+    ARM("the pitch follows the mode: 1920 pixels x 4 bytes", m.pitch == pitch);
+    ARM("a second enable while up is refused", nmo_enable(&ops, &m, surf, cap, ddb_s, ddb_e) == NMO_E_BUSY);
     unplug(); { uint32_t last = 0xFFFFFFFFu; (void)last; }
     nmo_event(&ops, &m, 2, 0, 0, 0, 0);
     ARM("an unplug takes everything down in reverse", m.state == NMO_IDLE && all_off(PIPE, DDI, TC));
@@ -180,45 +181,47 @@ static void suite(unsigned ver)
 
     /* replug works again */
     world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); plug(NMT_DPALT, 0xF);
-    ARM("a plug event brings it up through the event entry", nmo_event(&ops, &m, 1, surf, pitch, ddb_s, ddb_e) == 0 && m.state == NMO_UP);
-    nmo_event(&ops, &m, 1, surf, pitch, ddb_s, ddb_e); ARM("a second plug event while up changes nothing", m.state == NMO_UP);
+    ARM("a plug event brings it up through the event entry", nmo_event(&ops, &m, 1, surf, cap, ddb_s, ddb_e) == 0 && m.state == NMO_UP);
+    nmo_event(&ops, &m, 1, surf, cap, ddb_s, ddb_e); ARM("a second plug event while up changes nothing", m.state == NMO_UP);
     nmo_teardown(&ops, &m); nmo_teardown(&ops, &m); ARM("teardown twice is harmless", all_off(PIPE, DDI, TC));
 
     /* failures, each leaving nothing enabled */
-#define FAIL_CASE(name, setup, want) do { world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); setup; rc = nmo_enable(&ops, &m, surf, pitch, ddb_s, ddb_e); \
+#define FAIL_CASE(name, setup, want) do { world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); setup; rc = nmo_enable(&ops, &m, surf, cap, ddb_s, ddb_e); \
         ARM(name, rc == (want) && m.state == NMO_FAILED && m.err == (want) && all_off(PIPE, DDI, TC)); } while (0)
     FAIL_CASE("a Thunderbolt cable is not driven here, and nothing is left owned", plug(NMT_TBT, 0), NMO_E_PHY);
     FAIL_CASE("a PHY that is not ready connects as Thunderbolt and is refused", iom_ready = 0; plug(NMT_DPALT, 0xF), NMO_E_PHY);
-    world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); exit_fail = 1; rc = nmo_enable(&ops, &m, surf, pitch, ddb_s, ddb_e);
+    world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); exit_fail = 1; rc = nmo_enable(&ops, &m, surf, cap, ddb_s, ddb_e);
     ARM("a platform controller that refuses the TC-cold block fails the PHY step (on version 12 the cable cannot even be read without it)", (rc == NMO_E_PHY || (ver == 12 && rc == NMO_E_UNPLUGGED)) && m.state == NMO_FAILED && all_off(PIPE, DDI, TC));
     FAIL_CASE("a power well that never comes up", pw_fail = 1, NMO_E_POWER);
     FAIL_CASE("a sink that does not answer on AUX", aux_deaf = 1, NMO_E_SINK);
     FAIL_CASE("an EDID with a bad checksum", edid[20] ^= 1, NMO_E_EDID);
     FAIL_CASE("a cable with two lanes cannot carry a mode that needs four", plug(NMT_DPALT, 0x3); dpcd[1] = 0x06; dpcd[2] = 0x82; edid[54] = 0x02, NMO_E_MODE) ;
     FAIL_CASE("memory latencies the platform controller will not give", lat_fail = 1, NMO_E_MODE);
-    world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); rc = nmo_enable(&ops, &m, surf, pitch, 0, 8);
+    world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); rc = nmo_enable(&ops, &m, surf, cap, 0, 8);
     ARM("a display-buffer range too small for level 0 would underrun: refused before anything is programmed", rc == NMO_E_MODE && all_off(PIPE, DDI, TC) && first_write(NMR_FUNC_CTL(PIPE)) < 0 && first_write(NMK_PLL_ENABLE_REG(ver, TC)) < 0);
+    world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); rc = nmo_enable(&ops, &m, surf, cap - 4096, ddb_s, ddb_e);
+    ARM("a scan-out buffer too small for the preferred mode is refused before the PLL is touched", rc == NMO_E_MODE && all_off(PIPE, DDI, TC) && first_write(NMK_PLL_ENABLE_REG(ver, TC)) < 0);
     FAIL_CASE("a PLL that never powers", pll_pwr_fail = 1, NMO_E_PLL);
     FAIL_CASE("a PLL that never locks", pll_lock_fail = 1, NMO_E_PLL);
     FAIL_CASE("a sink that never trains", train_fail = 1, NMO_E_TRAIN);
     /* unplug at every AUX transaction: wherever it lands, the result is an unplug and nothing stays enabled */
     { unsigned n, ok = 1, seen = 0, total; 
-      world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); sink_needs_v = 1; sink_needs_p = 1; nmo_enable(&ops, &m, surf, pitch, ddb_s, ddb_e); total = (unsigned)aux_count;
+      world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); sink_needs_v = 1; sink_needs_p = 1; nmo_enable(&ops, &m, surf, cap, ddb_s, ddb_e); total = (unsigned)aux_count;
       for (n = 1; n < total; n++) {
           world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); sink_needs_v = 1; sink_needs_p = 1; unplug_after_aux = (int)n; aux_count = 0;
-          rc = nmo_enable(&ops, &m, surf, pitch, ddb_s, ddb_e);
+          rc = nmo_enable(&ops, &m, surf, cap, ddb_s, ddb_e);
           if (rc != NMO_E_UNPLUGGED || m.state != NMO_FAILED || !all_off(PIPE, DDI, TC)) { ok = 0; printf("   unplug at AUX transaction %u of %u: rc %d (%s), clean %d\n", n, total, rc, nmo_err_name(rc), all_off(PIPE, DDI, TC)); }
           else seen++; }
       ARM("an unplug at any of the AUX transactions (EDID, DPCD, link training included) ends as 'unplugged' with nothing left enabled", ok && seen == total - 1 && total > 20); }
     { unsigned mid;
-      world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); sink_needs_v = 2; sink_needs_p = 1; nmo_enable(&ops, &m, surf, pitch, ddb_s, ddb_e);
+      world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); sink_needs_v = 2; sink_needs_p = 1; nmo_enable(&ops, &m, surf, cap, ddb_s, ddb_e);
       mid = (unsigned)aux_count - 4;
       world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); sink_needs_v = 2; sink_needs_p = 1; unplug_after_aux = (int)mid; aux_count = 0;
-      rc = nmo_enable(&ops, &m, surf, pitch, ddb_s, ddb_e);
+      rc = nmo_enable(&ops, &m, surf, cap, ddb_s, ddb_e);
       ARM("an unplug in the middle of equalisation: the DDI buffer is switched off before the PLL, and the transcoder never came on", rc == NMO_E_UNPLUGGED && all_off(PIPE, DDI, TC) && (*R(NMR_TRANSCONF(PIPE)) & NMR_TRANS_ENABLE) == 0); }
     /* training reaches the sink's level request */
     world(ver); nmo_init(&ops, &m, ver, TC, PIPE, 38400); sink_needs_v = 2; sink_needs_p = 1;
-    { unsigned dv, dp; rc = nmo_enable(&ops, &m, surf, pitch, ddb_s, ddb_e); level_now(&dv, &dp); ARM("the sink's swing and pre-emphasis request reaches the Dekel transmitter registers", rc == 0 && dv == 2 && dp == 1); }
+    { unsigned dv, dp; rc = nmo_enable(&ops, &m, surf, cap, ddb_s, ddb_e); level_now(&dv, &dp); ARM("the sink's swing and pre-emphasis request reaches the Dekel transmitter registers", rc == 0 && dv == 2 && dp == 1); }
     nmo_teardown(&ops, &m);
 }
 
