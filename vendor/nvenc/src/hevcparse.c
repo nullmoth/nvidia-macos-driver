@@ -16,7 +16,16 @@ static void br_init(Br *r, const uint8_t *nal, size_t len)   // skips the 2-byte
 }
 static unsigned u1(Br *r) { if (r->bit >= r->n * 8) { r->err = true; return 0; } unsigned v = r->buf[r->bit >> 3] >> (7 - (r->bit & 7)) & 1; r->bit++; return v; }
 static unsigned u(Br *r, int n) { unsigned v = 0; while (n-- > 0) v = v << 1 | u1(r); return v; }
-static unsigned ue(Br *r) { int z = 0; while (!u1(r)) { if (++z > 31 || r->err) { r->err = true; return 0; } } return ((1u << z) - 1) + u(r, z); }
+// Exp-Golomb. A code can encode up to 2^32 - 2, which every `(int)ue(...)` in this file turned into a negative number that
+// passed a plain "id > max" test and then indexed an array. No syntax element is anywhere near 2^28 (the HRD rates that
+// can be are only skipped), so larger values are clamped and every cast to int stays non-negative with room to add 1.
+static unsigned ue(Br *r)
+{
+    int z = 0;
+    while (!u1(r)) { if (++z > 31 || r->err) { r->err = true; return 0; } }
+    const unsigned v = ((1u << z) - 1) + u(r, z);
+    return v > 0x0FFFFFFFu ? 0x0FFFFFFFu : v;
+}
 static int se(Br *r) { unsigned k = ue(r); return (k & 1) ? (int)((k + 1) >> 1) : -(int)(k >> 1); }
 static int ceil_log2(unsigned x) { int k = 0; while ((1u << k) < x) k++; return k; }
 
@@ -130,6 +139,7 @@ static void hrd_parameters(Br *r, int common, int max_sub)
         if (!u1(r)) fixed_within = (int)u1(r);                 // fixed_pic_rate_general_flag, within_cvs
         if (fixed_within) ue(r); else low_delay = (int)u1(r);
         if (!low_delay) cpb_cnt = (int)ue(r);
+        if (cpb_cnt > 31) { r->err = true; return; }
         if (nal) sub_layer_hrd(r, cpb_cnt, sub_pic);
         if (vcl) sub_layer_hrd(r, cpb_cnt, sub_pic);
     }
@@ -166,28 +176,29 @@ static int st_ref_pic_set(Br *r, HevcStRps *sets, int idx, int num_sets, HevcStR
         if (ref_num_delta) *ref_num_delta = R->num_negative + R->num_positive;
         const int sign = (int)u1(r), deltaRps = (1 - 2 * sign) * ((int)ue(r) + 1);
         const int nd = R->num_negative + R->num_positive;
+        if (nd > 32) return -1;
         int used[33], use_delta[33];
         for (int j = 0; j <= nd; j++) { used[j] = (int)u1(r); use_delta[j] = used[j] ? 1 : (int)u1(r); }
         int i = 0;
         for (int j = R->num_positive - 1; j >= 0; j--) {
             const int d = R->delta_poc[R->num_negative + j] + deltaRps;
-            if (d < 0 && use_delta[R->num_negative + j]) { rps.delta_poc[i] = d; rps.used[i++] = used[R->num_negative + j]; }
+            if (d < 0 && use_delta[R->num_negative + j]) { if (i >= 32) return -1; rps.delta_poc[i] = d; rps.used[i++] = used[R->num_negative + j]; }
         }
-        if (deltaRps < 0 && use_delta[nd]) { rps.delta_poc[i] = deltaRps; rps.used[i++] = used[nd]; }
+        if (deltaRps < 0 && use_delta[nd]) { if (i >= 32) return -1; rps.delta_poc[i] = deltaRps; rps.used[i++] = used[nd]; }
         for (int j = 0; j < R->num_negative; j++) {
             const int d = R->delta_poc[j] + deltaRps;
-            if (d < 0 && use_delta[j]) { rps.delta_poc[i] = d; rps.used[i++] = used[j]; }
+            if (d < 0 && use_delta[j]) { if (i >= 32) return -1; rps.delta_poc[i] = d; rps.used[i++] = used[j]; }
         }
         rps.num_negative = i;
         int s1[32], u1v[32], k = 0;
         for (int j = R->num_negative - 1; j >= 0; j--) {
             const int d = R->delta_poc[j] + deltaRps;
-            if (d > 0 && use_delta[j]) { s1[k] = d; u1v[k++] = used[j]; }
+            if (d > 0 && use_delta[j]) { if (k >= 32) return -1; s1[k] = d; u1v[k++] = used[j]; }
         }
-        if (deltaRps > 0 && use_delta[nd]) { s1[k] = deltaRps; u1v[k++] = used[nd]; }
+        if (deltaRps > 0 && use_delta[nd]) { if (k >= 32) return -1; s1[k] = deltaRps; u1v[k++] = used[nd]; }
         for (int j = 0; j < R->num_positive; j++) {
             const int d = R->delta_poc[R->num_negative + j] + deltaRps;
-            if (d > 0 && use_delta[R->num_negative + j]) { s1[k] = d; u1v[k++] = used[R->num_negative + j]; }
+            if (d > 0 && use_delta[R->num_negative + j]) { if (k >= 32) return -1; s1[k] = d; u1v[k++] = used[R->num_negative + j]; }
         }
         rps.num_positive = k;
         if (i + k > 32) return -1;
@@ -205,6 +216,21 @@ static int st_ref_pic_set(Br *r, HevcStRps *sets, int idx, int num_sets, HevcStR
 }
 
 // ---- SPS (7.3.2.2) ----
+// The ranges of H.265 7.4.3.2 that the rest of the code relies on (array sizes, shifts, divisions). A stream outside them
+// is not decodable by any conforming decoder, so refusing it loses nothing.
+static bool sps_semantics_ok(const HevcSps *s)
+{
+    if (s->max_sub_layers_minus1 > 6 || s->chroma_format_idc > 3) return false;
+    if (s->width < 1 || s->width > 16384 || s->height < 1 || s->height > 16384) return false;
+    if (s->conf_win_left + s->conf_win_right >= s->width || s->conf_win_top + s->conf_win_bottom >= s->height) return false;
+    if (s->bit_depth_luma > 16 || s->bit_depth_chroma > 16 || s->log2_max_poc_lsb > 16) return false;
+    if (s->log2_min_cb < 3 || s->log2_max_cb < s->log2_min_cb || s->log2_max_cb > 6) return false;
+    if (s->log2_min_tb < 2 || s->log2_min_tb >= s->log2_min_cb || s->log2_max_tb < s->log2_min_tb || s->log2_max_tb > 5) return false;
+    if (s->log2_max_tb > s->log2_max_cb || s->max_th_depth_inter > s->log2_max_cb - s->log2_min_tb || s->max_th_depth_intra > s->log2_max_cb - s->log2_min_tb) return false;
+    if (s->pcm_enabled && (s->pcm_bit_depth_luma > s->bit_depth_luma || s->pcm_bit_depth_chroma > s->bit_depth_chroma
+        || s->log2_min_pcm_cb < 3 || s->log2_max_pcm_cb < s->log2_min_pcm_cb || s->log2_max_pcm_cb > 5 || s->log2_max_pcm_cb > s->log2_max_cb)) return false;
+    return true;
+}
 int hevc_parse_sps(HevcParams *p, const uint8_t *nal, size_t len)
 {
     static Br r; br_init(&r, nal, len);
@@ -266,7 +292,7 @@ int hevc_parse_sps(HevcParams *p, const uint8_t *nal, size_t len)
         }
         if (multilayer) u1(&r);                                // inter_view_mv_vert_constraint_flag (F.7.3.2.2.5)
     }
-    if (r.err) return -1;
+    if (r.err || !sps_semantics_ok(&s)) return -1;
     s.end_bit = ext_data ? 0 : (int)r.bit; s.valid = true;
     p->sps[s.sps_id] = s;
     return s.sps_id;

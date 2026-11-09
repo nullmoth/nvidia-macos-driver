@@ -53,7 +53,16 @@ static void br_init(Br *r, const uint8_t *nal, size_t len)   // skips the 1-byte
 }
 static unsigned u1(Br *r) { if (r->bit >= r->n * 8) { r->err = true; return 0; } unsigned v = r->buf[r->bit >> 3] >> (7 - (r->bit & 7)) & 1; r->bit++; return v; }
 static unsigned u(Br *r, int n) { unsigned v = 0; while (n-- > 0) v = v << 1 | u1(r); return v; }
-static unsigned ue(Br *r) { int z = 0; while (!u1(r)) { if (++z > 31 || r->err) { r->err = true; return 0; } } return ((1u << z) - 1) + u(r, z); }
+// Exp-Golomb. A code can encode up to 2^32 - 2, which every `(int)ue(...)` in this file turned into a negative number that
+// passed a plain "id > max" test and then indexed an array. No syntax element is anywhere near 2^28 (the HRD rates that
+// can be are only skipped), so larger values are clamped and every cast to int stays non-negative with room to add 1.
+static unsigned ue(Br *r)
+{
+    int z = 0;
+    while (!u1(r)) { if (++z > 31 || r->err) { r->err = true; return 0; } }
+    const unsigned v = ((1u << z) - 1) + u(r, z);
+    return v > 0x0FFFFFFFu ? 0x0FFFFFFFu : v;
+}
 static int se(Br *r) { unsigned k = ue(r); return (k & 1) ? (int)((k + 1) >> 1) : -(int)(k >> 1); }
 static bool more_rbsp_data(Br *r)
 {
@@ -160,10 +169,15 @@ int h264_parse_sps(H264Params *p, const uint8_t *nal, size_t len)
     if (s.frame_cropping_flag) { s.crop_left = (int)ue(&r); s.crop_right = (int)ue(&r); s.crop_top = (int)ue(&r); s.crop_bottom = (int)ue(&r); }
     if (u1(&r)) vui(&r, &s);
     if (r.err || s.log2_max_frame_num_minus4 > 12 || s.pic_order_cnt_type > 2 || s.log2_max_pic_order_cnt_lsb_minus4 > 12) return -1;
+    // ranges of H.264 7.4.2.1.1 that the size arithmetic below and the decoder set-up rely on (16384 samples, 14-bit video)
+    if (s.chroma_format_idc > 3 || s.bit_depth_luma_minus8 > 6 || s.bit_depth_chroma_minus8 > 6 || s.max_num_ref_frames > 16
+        || s.pic_width_in_mbs_minus1 > 1023 || s.pic_height_in_map_units_minus1 > 1023
+        || s.crop_left > 16384 || s.crop_right > 16384 || s.crop_top > 16384 || s.crop_bottom > 16384) return -1;
     int cat = s.separate_colour_plane_flag ? 0 : s.chroma_format_idc;
     int ux = cat == 0 ? 1 : (cat == 3 ? 1 : 2), uy = (cat == 0 ? 1 : (cat == 1 ? 2 : 1)) * (2 - s.frame_mbs_only_flag);
     s.width = 16 * (s.pic_width_in_mbs_minus1 + 1) - ux * (s.crop_left + s.crop_right);
     s.height = 16 * (s.pic_height_in_map_units_minus1 + 1) * (2 - s.frame_mbs_only_flag) - uy * (s.crop_top + s.crop_bottom);
+    if (s.width < 1 || s.height < 1) return -1;
     s.crop_x0 = ux * s.crop_left; s.crop_y0 = uy * s.crop_top;
     if (!s.bitstream_restriction_flag) s.max_dec_frame_buffering = s.max_num_reorder_frames = 16;
     s.valid = true;

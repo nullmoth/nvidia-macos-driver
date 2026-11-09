@@ -220,7 +220,7 @@ static int decode_subexp(Br *r, int num)
 static int decode_unsigned_subexp_with_ref(Br *r, int mx, int ref)
 {
     const int v = decode_subexp(r, mx);
-    return (ref << 1) <= mx ? inverse_recenter(ref, v) : mx - 1 - inverse_recenter(mx - 1 - ref, v);
+    return (int)((unsigned)ref << 1) <= mx ? inverse_recenter(ref, v) : mx - 1 - inverse_recenter(mx - 1 - ref, v);
 }
 static int decode_signed_subexp_with_ref(Br *r, int low, int high, int ref) { return decode_unsigned_subexp_with_ref(r, high - low, ref - low) + low; }
 

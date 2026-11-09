@@ -33,6 +33,9 @@ vendor/nvenc  Video encoders and decoders for NVIDIA's NVENC and NVDEC engines, 
              function; vendor/nvenc/SOURCE lists the commit and the change. Builds against NVIDIA's MIT-licensed
              open-gpu-kernel-modules and open-gpu-doc headers and Apple's decoder interface as published in WebKit (BSD).
 
+translator/  The Rust crates linked into the translator (bitflags, itoa, libc, memchr, serde, syn and others, all MIT and/or
+             Apache-2.0, one Unlicense-or-MIT) keep their licences: licenses/translator-rust-crates.txt has each licence text.
+
 air-runtime  LLVM (Apache-2.0 with LLVM exceptions) and Zstandard (BSD-3-Clause); their licence texts are in
              NVMTLDriver.bundle/Contents/Resources/air-runtime.
 
