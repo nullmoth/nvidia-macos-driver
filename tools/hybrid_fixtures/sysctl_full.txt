@@ -1,0 +1,2 @@
+debug.nmhybrid_frames 120
+debug.nmhybrid_words_skipped 0

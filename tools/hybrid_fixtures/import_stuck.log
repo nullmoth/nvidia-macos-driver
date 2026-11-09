@@ -1,0 +1,6 @@
+2026-11-08 20:00:00.000 Df kernel[0]: (NVAccel) hybrid: switch level 2 (boot-arg nmhybrid=2)
+2026-11-08 20:00:03.100 Df kernel[0]: (NMIntelFB) NMIntelFB: hybrid: provider NMIntelFB 1920x1080 pitch 7680 display version 12 level 2 (CPU-mapped scanout, no VRAM)
+2026-11-08 20:00:00.000 Df kernel[0]: (NVAccel) hybrid: first frame presented by copy (1080 rows, 2073600 pixels, head 4)
+2026-11-08 20:00:04.000 Df kernel[0]: (NMIntelFB) NMIntelFB: hybrid: import ring 4 slots x 8100 KiB at table offset 0xf0000000 (entries 983040..1015439 of 1048576)
+2026-11-08 20:00:09.000 Df kernel[0]: (NMIntelFB) NMIntelFB: hybrid: flip to an import slot did not reach the screen in 40 ms
+2026-11-08 20:00:09.001 Df kernel[0]: (NMIntelFB) NMIntelFB: hybrid: fallback to copy: a flip never reached the screen

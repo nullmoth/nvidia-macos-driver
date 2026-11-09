@@ -1,0 +1,3 @@
+debug.nmhybrid_frames 9120
+debug.nmhybrid_words_skipped 17000000
+debug.nmhybrid 1
