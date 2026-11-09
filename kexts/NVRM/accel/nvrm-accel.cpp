@@ -29,6 +29,7 @@
 #include "IOAccelMemoryMap.h"
 #include "../nvrm_gpuva_abi.h"
 #include "nvaccel_lock_owner.h"
+#include "../nvrm_devtab.h"
 #include "../nvrm_utilization_abi.h"
 class NVMemoryMap;
 static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
@@ -211,6 +212,19 @@ class IOAccelNVRMCarrier : public IOService {
 };
 OSDefineMetaClassAndStructors(IOAccelNVRMCarrier, IOService)
 
+// More than one accelerated card is opt-in (boot argument nvmultigpu=1). Without it the table below behaves as the single
+// static pointer it replaces: every start sets it, nothing clears it (nvrm_devtab.h).
+static bool nvaccelMultiGpu(void)
+{
+    static int on = -1;
+    if (on < 0) { uint32_t v = 0; on = (PE_parse_boot_argn("nvmultigpu", &v, sizeof v) && v) ? 1 : 0; }
+    return on == 1;
+}
+class NVAccel;
+struct NVAccelStartScope {   // releases the start gate on every way out of start()
+    bool multi; bool started;
+    ~NVAccelStartScope();
+};
 class NVAccel : public IOGraphicsAccelerator2 {
     OSDeclareDefaultStructors(NVAccel)
     NM_TAHOE_FWD(NVAccel)
@@ -301,7 +315,12 @@ public:
     bool                fUtilValid = false;
     IONotifier *fFBNote = nullptr;
     IONotifier *fIntelNote = nullptr;
-    static NVAccel *gAccel;
+    static NVAccel *gAccel;                // the primary card's accelerator: what the single-card code paths read
+    static NvrmDevTab<NVAccel> gAccelTab;  // every accelerator (more than the primary only with nvmultigpu=1)
+    static NvrmStartGate gAccelGate;
+    static unsigned count() { return gAccelTab.count(); }
+    static NVAccel *at(unsigned i) { return gAccelTab.at(i); }
+    friend struct NVAccelStartScope;
     // Which thread holds the accelerator lock, kept from the family's own did-lock / will-unlock calls (nvFamLock and
     // nvFamUnlock call them too). A page-off lets go of the lock for its GPU wait only when the current thread is the
     // recorded owner at one level (debug.nvaccel_pageoff_unlocked_wait).
@@ -735,6 +754,18 @@ public:
     }
     virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE {
         { if (nvrm_driver_off()) return false; }
+        // Without nvmultigpu=1 the gate is absent. With it, one accelerator starts at a time and an unmarked card waits for the
+        // marked one, so cards never run overlapping start-ups (the four-card report).
+        NVAccelStartScope scope = { nvaccelMultiGpu(), false };
+        {
+            uint32_t selector = 0; PE_parse_boot_argn("nvselector", &selector, sizeof selector);
+            const bool marked = provider && provider->getProperty("nullmoth-auto-primary") == kOSBooleanTrue;
+            if (!nvrm_gate_enter(&gAccelGate, scope.multi, marked, selector != 0)) {
+                ALOG("nvmultigpu: another card is starting, or the primary card is not running yet; no accelerator for this one");
+                scope.multi = false;   // nothing was entered, so nothing to leave
+                return false;
+            }
+        }
 #ifdef NMX_ACCEL
         // NMXGPU decides which AMD/Intel GPUs are driven (nmxamd=1 / nmxintel=1 / nullmoth-gpu); this accelerator only
         // starts on a device it has claimed, so a GPU macOS drives itself never gets a second accelerator
@@ -773,7 +804,9 @@ public:
             // its pixels landed, so the plugin keeps marking them after the GPU finishes.
             setProperty("NVAccelSurfaceWait", 1ULL, 32);
             registerService(); ALOG("registerService() called — Metal can now find MetalPluginName=%s", "NVMTLDriver");
-            gAccel = this; gEnableAccel = &NVAccel::enableFromHook;
+            gAccelTab.add(this, scope.multi, provider->getProperty("nullmoth-auto-primary") == kOSBooleanTrue);
+            gAccel = gAccelTab.primary(); gEnableAccel = &NVAccel::enableFromHook;
+            scope.started = true;
             for (unsigned i = 0; i < NV_CARRIERS; i++) {
                 IOAccelNVRMCarrier *c = OSTypeAlloc(IOAccelNVRMCarrier);
                 if (!c) break;
@@ -1017,12 +1050,17 @@ public:
         ALOG("stop");
         stopTemperature();
         stopUtilization();
+        gAccelTab.remove(this, nvaccelMultiGpu());   // a no-op without nvmultigpu=1
+        gAccel = gAccelTab.primary();
         IOGraphicsAccelerator2::stop(provider);
     }
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) APPLE_KEXT_OVERRIDE;
 };
 OSDefineMetaClassAndStructors(NVAccel, IOGraphicsAccelerator2)
 NVAccel *NVAccel::gAccel = nullptr;
+NvrmDevTab<NVAccel> NVAccel::gAccelTab;
+NvrmStartGate NVAccel::gAccelGate;
+NVAccelStartScope::~NVAccelStartScope() { nvrm_gate_leave(&NVAccel::gAccelGate, multi, started); }
 nvaccel_lock_owner NVAccel::gLockOwner;
 
 IOAccelMemory *NVDisplayPipe::initFramebufferResource(unsigned int index, IOAccelResource2 *res)
