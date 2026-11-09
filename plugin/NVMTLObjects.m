@@ -3733,17 +3733,37 @@ static nvk_cmdbuf *nvmtl_hz_blit_open(NVMTLCommandBuffer *cb, id src, id dst) {
     if (m == 1 && _cb->_c.hz_dyn) [self nvmtlHzRestart:YES];
     else { _hzFull = YES; nvmtl_hz_force_full(&_cb->_c, 0); }
 }
-- (NSUInteger)tileWidth { return 0; }
-- (NSUInteger)tileHeight { return 0; }
+- (NSUInteger)tileWidth { return _tileW ? _tileW : 32; }
+- (NSUInteger)tileHeight { return _tileH ? _tileH : 32; }
 // The tile entry points. No tile pipeline can exist (the device refuses to make one), so a call here is an application
 // error; each is logged and ignored rather than raising an unrecognised-selector exception.
 static void nvmtl_tile_ignored(const char *what) { static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 8) nvlog("render encoder %s: tile shading is not carried - ignored", what); }
-- (void)setTileBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileBytes"); }
-- (void)setTileBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileBuffer"); }
-- (void)setTileBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileBufferOffset"); }
-- (void)setTileBuffers:(const id<MTLBuffer> __unsafe_unretained [])buffers offsets:(const NSUInteger [])offsets withRange:(NSRange)range { nvmtl_tile_ignored("setTileBuffers"); }
-- (void)setTileTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileTexture"); }
-- (void)setTileTextures:(const id<MTLTexture> __unsafe_unretained [])textures withRange:(NSRange)range { nvmtl_tile_ignored("setTileTextures"); }
+- (void)setTileBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index {
+    if (!nvmtl_tile_on()) { nvmtl_tile_ignored("setTileBytes"); return; }
+    if (!_tileByt) _tileByt = [NSMutableDictionary new];
+    if (bytes && length) _tileByt[@(index)] = [NSData dataWithBytes:bytes length:length]; else [_tileByt removeObjectForKey:@(index)];
+    [_tileBuf removeObjectForKey:@(index)];
+}
+- (void)setTileBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
+    if (!nvmtl_tile_on()) { nvmtl_tile_ignored("setTileBuffer"); return; }
+    if (!_tileBuf) _tileBuf = [NSMutableDictionary new];
+    if (buffer) _tileBuf[@(index)] = @[buffer, @(offset)]; else [_tileBuf removeObjectForKey:@(index)];
+    [_tileByt removeObjectForKey:@(index)];
+}
+- (void)setTileBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index {
+    NSArray *e = _tileBuf[@(index)]; if (e) _tileBuf[@(index)] = @[e[0], @(offset)]; else nvmtl_tile_ignored("setTileBufferOffset with no buffer");
+}
+- (void)setTileBuffers:(const id<MTLBuffer> __unsafe_unretained [])buffers offsets:(const NSUInteger [])offsets withRange:(NSRange)range {
+    for (NSUInteger k = 0; k < range.length; k++) [self setTileBuffer:buffers ? buffers[k] : nil offset:offsets ? offsets[k] : 0 atIndex:range.location + k];
+}
+- (void)setTileTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
+    if (!nvmtl_tile_on()) { nvmtl_tile_ignored("setTileTexture"); return; }
+    if (!_tileTex) _tileTex = [NSMutableDictionary new];
+    if (texture) _tileTex[@(index)] = texture; else [_tileTex removeObjectForKey:@(index)];
+}
+- (void)setTileTextures:(const id<MTLTexture> __unsafe_unretained [])textures withRange:(NSRange)range {
+    for (NSUInteger k = 0; k < range.length; k++) [self setTileTexture:textures ? textures[k] : nil atIndex:range.location + k];
+}
 - (void)setTileSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileSamplerState"); }
 - (void)setTileSamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])samplers withRange:(NSRange)range { nvmtl_tile_ignored("setTileSamplerStates"); }
 - (void)setTileSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lo lodMaxClamp:(float)hi atIndex:(NSUInteger)index { nvmtl_tile_ignored("setTileSamplerState"); }
@@ -3753,8 +3773,50 @@ static void nvmtl_tile_ignored(const char *what) { static _Atomic unsigned n; if
 - (void)setTileIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)t atBufferIndex:(NSUInteger)i { nvmtl_tile_ignored("setTileIntersectionFunctionTable"); }
 - (void)setTileIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __unsafe_unretained [])ts withBufferRange:(NSRange)r { nvmtl_tile_ignored("setTileIntersectionFunctionTables"); }
 - (void)setTileAccelerationStructure:(id<MTLAccelerationStructure>)a atBufferIndex:(NSUInteger)i { nvmtl_tile_ignored("setTileAccelerationStructure"); }
-- (void)dispatchThreadsPerTile:(MTLSize)threadsPerTile { nvmtl_tile_ignored("dispatchThreadsPerTile"); }
-- (void)setThreadgroupMemoryLength:(NSUInteger)length offset:(NSUInteger)offset atIndex:(NSUInteger)index { nvmtl_tile_ignored("setThreadgroupMemoryLength"); }
+// A tile function runs as a compute kernel between two render-pass segments (translator/src/native/tile_imageblock.rs): the pass so far
+// is ended with every attachment kept, one threadgroup per tile runs over the render area with the colour attachments bound as storage
+// images (the compute encoder's storage twins copy them in and out), and the pass resumes with those attachments loaded.
+- (void)dispatchThreadsPerTile:(MTLSize)threadsPerTile {
+    if (!nvmtl_tile_on()) { nvmtl_tile_ignored("dispatchThreadsPerTile"); return; }
+    NVMTLRenderPipelineState *tp = _tilePs;
+    if (!tp) { nvmtl_tile_ignored("dispatchThreadsPerTile with no tile pipeline set"); return; }
+    const uint32_t tw = _tileW ? _tileW : 32, th = _tileH ? _tileH : 32, w = _pass.w, h = _pass.h;
+    if (!w || !h || threadsPerTile.width * threadsPerTile.height * threadsPerTile.depth > 1024) { nvlog("dispatchThreadsPerTile: %ux%u area / %lu threads per tile - REFUSED", w, h, (unsigned long)(threadsPerTile.width * threadsPerTile.height * threadsPerTile.depth)); return; }
+    NSString *why = nil; id<MTLComputePipelineState> cps = nvmtl_tile_compute_pipeline(tp, tw, th, &why);
+    if (!cps) { nvlog("dispatchThreadsPerTile: %s", why.UTF8String); return; }
+    uint32_t keep = 0;
+    for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
+        if (!_colTex[i]) continue;
+        if (_colTex[i]->_i.samples > 1 || _colTex[i]->_i.mtl_type != 2) { nvlog("dispatchThreadsPerTile: attachment %u is multisampled or not a plain 2D texture - REFUSED", i); return; }
+        keep |= NVMTL_LOAD_COLOUR(i);
+    }
+    if (_pass.ds) keep |= NVMTL_LOAD_DEPTH | (_ps && _ps->_p.has_stencil ? NVMTL_LOAD_STENCIL : 0u);
+    if (_begun) {
+        BOOL visibility = _visActive || _visPending;
+        [self nvmtlCloseVisibility];
+        nvmtl_vk_cmd_end_render(&_cb->_c);
+        _begun = NO; _visPending = visibility;
+    } else if (nvmtl_vk_pass_kind(&_pass) == 2) {   // no draw yet: the pass's clears have to happen before the tile function reads the attachments
+        if (nvmtl_vk_cmd_empty_pass(&_cb->_c, &_pass)) nvlog("dispatchThreadsPerTile: the pass's clears FAILED");
+    }
+    _pass.load |= keep; _load |= keep;
+    NVMTLComputeCommandEncoder *ce = (NVMTLComputeCommandEncoder *)[_cb computeCommandEncoder];
+    [ce setComputePipelineState:cps];
+    for (uint32_t i = 0; i < NVMTL_NCOL; i++) if (_colTex[i]) [ce setTexture:_colTex[i] atIndex:NVMTL_TILE_TEXTURE_BASE + i];
+    for (NSNumber *k in _tileByt) { NSData *d = _tileByt[k]; [ce setBytes:d.bytes length:d.length atIndex:k.unsignedLongValue]; }
+    for (NSNumber *k in _tileBuf) { NSArray *e = _tileBuf[k]; [ce setBuffer:e[0] offset:[e[1] unsignedLongValue] atIndex:k.unsignedLongValue]; }
+    for (NSNumber *k in _tileTex) [ce setTexture:_tileTex[k] atIndex:k.unsignedLongValue];
+    for (NSNumber *k in _tileTg) [ce setThreadgroupMemoryLength:[_tileTg[k] unsignedLongValue] atIndex:k.unsignedLongValue];
+    [ce dispatchThreadgroups:MTLSizeMake((w + tw - 1) / tw, (h + th - 1) / th, 1) threadsPerThreadgroup:threadsPerTile];
+    [ce endEncoding];
+    if (_ps) [self setRenderPipelineState:_ps];   // the pass resumes with the attachments loaded
+    nvlog("dispatchThreadsPerTile: %ux%u area, %ux%u tiles, %lu threads per tile", w, h, tw, th, (unsigned long)(threadsPerTile.width * threadsPerTile.height));
+}
+- (void)setThreadgroupMemoryLength:(NSUInteger)length offset:(NSUInteger)offset atIndex:(NSUInteger)index {
+    if (!nvmtl_tile_on() || offset) { nvmtl_tile_ignored("setThreadgroupMemoryLength"); return; }
+    if (!_tileTg) _tileTg = [NSMutableDictionary new];
+    _tileTg[@(index)] = @(length);
+}
 - (unsigned long long)globalTraceObjectID { return nvmtl_global_trace_id(self); }
 static NSMutableDictionary *g_sampvar; static pthread_mutex_t g_sampvar_lock = PTHREAD_MUTEX_INITIALIZER;
 extern unsigned char *CC_SHA256(const void *data, uint32_t len, unsigned char *md);
@@ -3914,6 +3976,8 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
 - (BOOL)nvmtlBuildPass:(MTLRenderPassDescriptor *)d {
     NVMTLCommandBuffer *cb = _cb;
     memset(&_pass, 0, sizeof _pass); cb->_c.depth_view = NULL; _hzAttSkip = 0;
+    for (int i = 0; i < NVMTL_NCOL; i++) _colTex[i] = nil;
+    _tileW = (uint32_t)d.tileWidth; _tileH = (uint32_t)d.tileHeight; _tilePs = nil;
     MTLSamplePosition sample[8];
     NSUInteger sampleCount = [d getSamplePositions:NULL count:0];
     if (sampleCount && sampleCount <= 8) [d getSamplePositions:sample count:sampleCount];
@@ -3943,6 +4007,7 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
         if (!tx) continue;
         if (![(id)tx isKindOfClass:[NVMTLTexture class]]) { nvlog("encoder: apps2 colour %u is a %s, not our texture — pass REFUSED", i, object_getClassName(tx)); return NO; }
         NVMTLTexture *t = (NVMTLTexture *)tx; uint32_t cw = 0, ch = 0;
+        _colTex[i] = t;
         uint32_t zslice = [t nvi]->mtl_type == 7 ? (uint32_t)ca.depthPlane : (uint32_t)ca.slice;
         if (ca.depthPlane && [t nvi]->mtl_type != 7) { static int said;
             if (said++ < 4) nvlog("encoder: apps2 colour %u sets depthPlane %lu on a texture of type %u, which is not 3D — depthPlane IGNORED, its slice %lu is used", i, (unsigned long)ca.depthPlane, [t nvi]->mtl_type, (unsigned long)ca.slice); }
@@ -4145,6 +4210,7 @@ static MTLPixelFormat nvmtl_swizzle_twin_mtl(MTLPixelFormat f) { return (MTLPixe
       } }
     NVMTLRenderPipelineState *p = (NVMTLRenderPipelineState *)ps;
     if (!p) { nvlog("encoder: nil render pipeline refused"); return; }
+    if (p->_tileFn) { _tilePs = p; return; }   // a tile pipeline: dispatchThreadsPerTile runs it between render-pass segments
     if (_begun && !nvmtl_vk_pipeline_compatible(&_passSig, &p->_p)) {
         static int refuse = -1;   // NVMTL_NO_PASS_TRANSITION=1: the old refusal instead of the transition below (a split switch)
         if (refuse < 0) { const char *e = getenv("NVMTL_NO_PASS_TRANSITION"); refuse = e && e[0] == '1';
