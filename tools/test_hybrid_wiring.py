@@ -18,7 +18,8 @@ def arm(name, ok):
 arm("the accelerator's switch starts at 0 (off)", re.search(r"static int gNmHybrid = 0;", accel) is not None)
 arm("the accelerator reads the switch only through nmh_level_parse", "gNmHybrid = nmh_level_parse(present, lv)" in accel)
 arm("the changed-pixel copy runs only when the switch is on and the panel is another GPU's (no VRAM address)",
-    re.search(r"if \(gNmHybrid >= NMH_COPY && !q\.phys && !fb->metaCast\(\"NVRMNVDAFramebuffer\"\)\)", accel) is not None)
+    re.search(r"if \(gNmHybrid >= NMH_COPY && !q\.phys && !fb->metaCast\(\"NVRMNVDAFramebuffer\"\) && !dst30\s*&& \(srcFmt == NV_IOP_FMT_BGRA \|\| srcFmt == NV_IOP_FMT_L10R\)\)", accel) is not None)
+arm("an HDR source (half float) or a 30-bit scanout never takes the 8-bit hybrid copy", "!dst30" in accel and "srcFmt == NV_IOP_FMT_BGRA || srcFmt == NV_IOP_FMT_L10R)) {" in accel)
 arm("the old copy loop is still the else branch, so switch off is the old behaviour", "    } else {\n    for (unsigned y = 0; y < h; y++) {" in accel)
 arm("import is tried only at level 2 and only on a framebuffer that is not NVIDIA's", "gNmHybrid >= NMH_IMPORT && nvAccelHybridImport(fb, head, s)" in accel and "fb->metaCast(\"NVRMNVDAFramebuffer\")) return false;" in accel)
 arm("a copied frame after an imported one takes the plane home first", "nvAccelHybridHome(fb, head);" in accel and "nmh_shadow_invalidate(&gHyShadow[head].sh)" in accel)
