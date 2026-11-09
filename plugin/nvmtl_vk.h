@@ -82,6 +82,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  void **fbs; unsigned nfb, capfb;
                  nvk_setref *sets; unsigned nsets, capsets;
                  void *address_pages; unsigned address_count;
+                 uint64_t *icb_tabs[2]; unsigned icb_ntabs, icb_slot;   /* GPU-encoded ICB replay: per-slot address table copies (vertex, fragment) and the one in use, 1-based, 0 = none */
                  unsigned nobind, skipped;
                  void *dcache[32]; void *dcachepool; unsigned ndcache, dcache_gl_uniform;
                  unsigned in_rp, occlusion_reset; uint32_t wseq;
@@ -412,6 +413,11 @@ int nvmtl_vk_cmd_y422_convert(nvk_cmdbuf *c, nvk_buffer *src, size_t src_off, si
 int nvmtl_vk_cmd_icb_gather(nvk_cmdbuf *c, nvk_buffer *records, nvk_buffer *out, size_t out_off, uint32_t slots, uint32_t compute, uint64_t pso, uint32_t ptype,
                             uint32_t loc, uint32_t len, const uint32_t *tg, uint32_t indexed, uint32_t cap, nvk_buffer *range, size_t range_off);
 int nvmtl_vk_cmd_icb_index_copy(nvk_cmdbuf *c, nvk_buffer *records, nvk_buffer *dst, uint32_t slots, uint32_t cap, uint32_t loc, uint32_t len, nvk_buffer *range, size_t range_off);
+/* per-command buffers of a GPU-encoded ICB: one table copy per slot for each stage, patched on the GPU from the records; outside a render pass.
+   dsts: scratch of 2*slots*8 bytes. nvmtl_vk_cmd_icb_use(slot) makes the next draws read slot's tables (0 = the ordinary tables). */
+int  nvmtl_vk_cmd_icb_tables(nvk_cmdbuf *c, nvk_buffer *records, nvk_buffer *dsts, uint32_t slots);
+void nvmtl_vk_cmd_icb_use(nvk_cmdbuf *c, uint32_t slot);
+void nvmtl_vk_cmd_icb_tables_free(nvk_cmdbuf *c);
 int nvmtl_vk_cmd_icb_mask(nvk_cmdbuf *c, nvk_buffer *args, nvk_buffer *range, size_t range_off, uint32_t slots, uint32_t zero);
 void nvmtl_vk_cmd_draw_indexed_indirect(nvk_cmdbuf *c, nvk_buffer *idx, size_t idxOff, int is32, nvk_buffer *b, size_t off);
 void nvmtl_vk_cmd_dispatch_indirect(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *b, size_t off);

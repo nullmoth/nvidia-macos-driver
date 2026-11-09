@@ -3978,6 +3978,11 @@ static void nvmtl_perf_submit(unsigned sets, const uint64_t *pt)
             (unsigned long long)g_wit_blind, (unsigned long long)g_wit_ctl_fired, (unsigned long long)g_wit_ctl_run, s);
 }
 static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBufferInfo *out) {
+    if (c->icb_slot && c->icb_slot <= c->icb_ntabs && which < 2 && c->icb_tabs[which]) {   // GPU-encoded ICB replay: this slot's prepared table
+        const uint64_t *e = c->icb_tabs[which] + 2u * (c->icb_slot - 1u);
+        *out = (VkDescriptorBufferInfo){ (VkBuffer)(uintptr_t)e[0], (VkDeviceSize)e[1], NVMTL_TABLE_BYTES };
+        return 0;
+    }
     unsigned slot = c->address_count % NVMTL_TABLES_PER_PAGE;
     nvmtl_address_page *page = c->address_pages;
     if (slot == 0) {
@@ -4300,7 +4305,7 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
         const int samePage = !table || (t->lasttab[which] && page && (c->address_count % NVMTL_TABLES_PER_PAGE) != 0
                                         && (void *)page->buffer.buf == t->lasttab[which]);
         VkDescriptorBufferInfo ai;
-        if (covered && samePage && (!table || !nvmtl_address_snapshot(c, which, &ai))) {
+        if (covered && samePage && !c->icb_slot && (!table || !nvmtl_address_snapshot(c, which, &ai))) {
             if (table) t->lastdyn[which] = (uint32_t)ai.offset;
             t->dirty[which] = 0; memset(t->chg[which], 0, sizeof t->chg[which]);
             c->dyn_out[which] = t->lastdyn[which]; c->tab_out[which] = t->lasttab[which];
@@ -9930,6 +9935,83 @@ int nvmtl_vk_cmd_icb_index_copy(nvk_cmdbuf *c, nvk_buffer *records, nvk_buffer *
     pvkCmdPushConstants(c->cb, g_icb_index_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof a, &a);
     pvkCmdDispatch(c->cb, gx, gy, 1);
     nvmtl_vk_cmd_barrier(c);   // the indexed draws read the scratch indices as an index buffer next
+    return 0;
+}
+
+// Per-command buffers of a GPU-encoded ICB (nvmtl_icb_record.h): the ordinary table snapshot is taken once per slot and stage, before
+// the render pass resumes, and a compute pass overwrites the entries the slot's command recorded.
+static pthread_mutex_t g_icb_patch_lock = PTHREAD_MUTEX_INITIALIZER;
+static VkPipeline g_icb_patch_pipeline;
+static VkPipelineLayout g_icb_patch_layout;
+static int nvmtl_icb_patch_init(void)
+{
+    int rc = -1;
+    pthread_mutex_lock(&g_icb_patch_lock);
+    if (g_icb_patch_pipeline) { rc = 0; goto done; }
+    VkShaderModule mod = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo sm = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_icb_patch_spv, nvmtl_icb_patch_spv };
+    if (pvkCreateShaderModule(g_dev, &sm, NULL, &mod) != VK_SUCCESS) goto done;
+    VkPushConstantRange push = { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(nvmtl_icb_patch_args) };
+    VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL, 1, &push };
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (pvkCreatePipelineLayout(g_dev, &li, NULL, &layout) == VK_SUCCESS) {
+        VkPipelineShaderStageCreateInfo stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", NULL };
+        VkComputePipelineCreateInfo pi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, stage, layout, VK_NULL_HANDLE, -1 };
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        if (nvmtl_create_compute_pipeline(g_dev, VK_NULL_HANDLE, &pi, NULL, &pipeline) == VK_SUCCESS) {
+            g_icb_patch_layout = layout; g_icb_patch_pipeline = pipeline; rc = 0;
+        } else {
+            if (pipeline) pvkDestroyPipeline(g_dev, pipeline, NULL);
+            pvkDestroyPipelineLayout(g_dev, layout, NULL);
+        }
+    }
+    pvkDestroyShaderModule(g_dev, mod, NULL);
+done:
+    pthread_mutex_unlock(&g_icb_patch_lock);
+    return rc;
+}
+void nvmtl_vk_cmd_icb_tables_free(nvk_cmdbuf *c)
+{
+    if (!c) return;
+    for (int w = 0; w < 2; w++) { free(c->icb_tabs[w]); c->icb_tabs[w] = NULL; }
+    c->icb_ntabs = 0; c->icb_slot = 0;
+}
+void nvmtl_vk_cmd_icb_use(nvk_cmdbuf *c, uint32_t slot)
+{
+    if (!c) return;
+    c->icb_slot = slot <= c->icb_ntabs ? slot : 0;
+    nvmtl_bindtable *t = (nvmtl_bindtable *)c->table;
+    if (t) { t->dirty[0] = 1; t->dirty[1] = 1; }   // the next draw must take its set again, with this slot's table
+}
+int nvmtl_vk_cmd_icb_tables(nvk_cmdbuf *c, nvk_buffer *records, nvk_buffer *dsts, uint32_t slots)
+{
+    if (!c || c->in_rp || !records || !dsts || !slots || slots > NVMTL_ICB_MAX_PATCH_SLOTS || records->size < (size_t)slots * NVMTL_ICB_REC_BYTES ||
+        dsts->size < (size_t)slots * 16u || !dsts->map || nvmtl_icb_patch_init()) return -1;
+    nvmtl_vk_cmd_icb_tables_free(c);
+    uint64_t *list = (uint64_t *)dsts->map;
+    for (int w = 0; w < 2; w++) {
+        c->icb_tabs[w] = calloc((size_t)slots * 2u, sizeof(uint64_t));
+        if (!c->icb_tabs[w]) { nvmtl_vk_cmd_icb_tables_free(c); return -1; }
+        for (uint32_t i = 0; i < slots; i++) {
+            VkDescriptorBufferInfo bi;
+            c->icb_ntabs = 0;   // the snapshots here are the ordinary ones
+            if (nvmtl_address_snapshot(c, (uint32_t)w, &bi)) { nvmtl_vk_cmd_icb_tables_free(c); return -1; }
+            const nvmtl_address_page *page = (const nvmtl_address_page *)c->address_pages;
+            const unsigned slot = (c->address_count - 1u) % NVMTL_TABLES_PER_PAGE;
+            c->icb_tabs[w][2u * i] = (uint64_t)(uintptr_t)bi.buffer; c->icb_tabs[w][2u * i + 1u] = (uint64_t)bi.offset;
+            list[(size_t)w * slots + i] = nvmtl_vk_buffer_address((nvk_buffer *)&page->buffer) + (uint64_t)slot * NVMTL_TABLE_BYTES;
+        }
+    }
+    nvmtl_vk_cmd_barrier(c);   // the records were written by an earlier pass
+    for (int w = 0; w < 2; w++) {
+        nvmtl_icb_patch_args a = { nvmtl_vk_buffer_address(records), nvmtl_vk_buffer_address(dsts) + (uint64_t)w * slots * 8u, slots, (uint32_t)w };
+        if (!a.rec || !a.dsts) { nvmtl_vk_cmd_icb_tables_free(c); return -1; }
+        pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_icb_patch_pipeline);
+        pvkCmdPushConstants(c->cb, g_icb_patch_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof a, &a);
+        pvkCmdDispatch(c->cb, nvmtl_icb_patch_groups(slots), 1, 1);
+        nvmtl_vk_cmd_barrier(c);   // each stage's patch before the next, and before the draws read the tables
+    }
+    c->icb_ntabs = slots;
     return 0;
 }
 
