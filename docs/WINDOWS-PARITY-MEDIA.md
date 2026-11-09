@@ -16,5 +16,5 @@ Each row names the Windows feature, the state in this tree, and what closes it o
 | Laptop dGPU power-off (Optimus RTD3 / GC6) | none | needs ACPI power-resource evaluation on a hybrid laptop; no such machine to prove it on |
 | Power limit and clock lock (NVML, nvidia-smi) | none | the public 620 headers carry no control for either; RATED_TDP SET_CONTROL was reported to change nothing, and the PFM controls answer NOT_SUPPORTED to a user client |
 | Fan curve, clock and voltage offsets (NVAPI) | none | no public control in the 620 headers (ctrl2080fan.h is read-side); fans on a desktop card are VBIOS-controlled |
-| Telemetry (power, clocks, temperature, utilisation, throttle reasons) | none | RUSD is public (class 0xde, cl00de.h); a reader needs RM client set-up that cannot be proven without a card |
-| Video engine utilisation counters | none | same as telemetry (RUSD_ENG_UTILIZATION) |
+| Telemetry (power, clocks, temperature, utilisation, throttle reasons, fan) | `tools/nvmtl-smi` (read-only, from the RUSD block, class 0xde) | a graphical overlay is not built; readings on a real card are a studio check |
+| Video engine utilisation counters | `tools/nvmtl-smi` prints what RUSD reports for the video engines | the same studio check |
