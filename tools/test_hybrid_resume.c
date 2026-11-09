@@ -23,6 +23,7 @@ static struct { uint32_t off; uint32_t v; } wlog[6000]; static int nw;
 static unsigned long now_us;
 static int pw_fail, pll_fail, panel_fail, sink_deaf, train_fail_level, sink_needs_v, sink_needs_p, no_drive;
 static int drive_calls;
+static int pcode_fail, pcode_prepare_at, pcode_volt_at, pcode_volt = -1;      /* the platform controller's display-clock mailbox */
 static const char *steps[32]; static int nsteps;
 static uint32_t *R(uint32_t o) { return &reg[o / 4]; }
 
@@ -97,6 +98,16 @@ static void m_wr(void *c, uint32_t o, uint32_t v)
         if (v & (1u << 31)) { *R(o) = v; aux_process(); return; }
         *R(o) &= ~(v & ((1u << 30) | (1u << 29) | (1u << 28) | (1u << 25))); return;
     }
+    if (o == NMR_PCODE_MAILBOX) {
+        *R(o) = v;
+        if ((v & NMR_PCODE_READY) && (v & 0xFF) == NMR_PCODE_CDCLK && !pcode_fail) {
+            uint32_t d = *R(NMR_PCODE_DATA);
+            if (d == NMR_PCODE_PREPARE) { *R(NMR_PCODE_DATA) = NMR_PCODE_READY_FOR_CHANGE; if (!pcode_prepare_at) pcode_prepare_at = nw; }
+            else { pcode_volt = (int)d; pcode_volt_at = nw; }
+            *R(o) = v & ~NMR_PCODE_READY & ~0xFFu;      /* done: the low byte now carries the status, 0 = success */
+        }
+        return;
+    }
     *R(o) = v;
     if (o == NMR_PW_DRIVER || o == NMR_PW_AUX || o == NMR_PW_DDI) { if (!pw_fail) *R(o) = v | ((v & 0x55555555u) << 1); }
     if (o == NMR_DE_PLL_ENABLE && (v & NMR_PLL_ENABLE) && !pll_fail) *R(o) |= NMR_PLL_LOCK;
@@ -114,7 +125,9 @@ static void lit_state(void)
     memset(reg, 0, sizeof reg); memset(dpcd, 0, sizeof dpcd);
     const unsigned t = T_PIPE, p = T_PIPE, port = T_PORT;
     reg[NMR_PW_DRIVER / 4] = 0x0000001Fu | 0x2Au; reg[NMR_PW_AUX / 4] = 3u << (2 * port); reg[NMR_PW_DDI / 4] = 3u << (2 * port);
-    reg[NMR_DE_PLL_ENABLE / 4] = NMR_PLL_ENABLE | NMR_PLL_LOCK | 0x23; reg[NMR_CDCLK_CTL / 4] = 0x00000BB8;
+    reg[NMR_DSSM / 4] = 2u << 29;                                          /* 38.4 MHz reference */
+    reg[NMR_DE_PLL_ENABLE / 4] = NMR_PLL_ENABLE | NMR_PLL_LOCK | 25; reg[NMR_CDCLK_CTL / 4] = 0x00000BB8;      /* vco 960 MHz / 2 = 480 MHz */
+    if (T_VER >= 13) reg[NMR_CDCLK_SQUASH / 4] = (1u << 31) | (7u << 24) | 0xFF00u;       /* 8 of 8: the same 480 MHz */
     reg[NMR_DPLL_ENABLE(port & 1) / 4] = NMR_PLL_POWER | NMR_PLL_PSTATE | NMR_PLL_ENABLE | NMR_PLL_LOCK;
     for (unsigned k = 0; k < 2; k++) {
         reg[NMR_DPLL_CFGCR0(k) / 4] = 0x1234567 + k; reg[NMR_DPLL_CFGCR1(k) / 4] = 0x89AB + k; reg[NMR_DPLL_DIV0(k) / 4] = 0x5 + k;
@@ -136,10 +149,12 @@ static void lit_state(void)
     /* lane registers hold the firmware's level 0, which is not one of the table rows */
     for (int ln = 0; ln < 4; ln++) { uint32_t l = nmr_phy_base(port) + 0x880 + 0x100 * ln; reg[(l + 8) / 4] = 0; reg[(l + 16) / 4] = 0; reg[(l + 28) / 4] = 0; }
     sink_needs_v = sink_needs_p = 0; train_fail_level = 0; pw_fail = pll_fail = panel_fail = sink_deaf = no_drive = 0;
+    pcode_fail = 0; pcode_prepare_at = pcode_volt_at = 0; pcode_volt = -1;
 }
 static void s3(void)   /* the display engine and the sink lose everything */
 {
     memset(reg, 0, sizeof reg); memset(dpcd, 0, sizeof dpcd); dpcd[0x002] = 0x82; dpcd[0x003] = 0x01; nw = 0; nsteps = 0; drive_calls = 0;
+    pcode_prepare_at = pcode_volt_at = 0; pcode_volt = -1;
 }
 static int first_write(uint32_t off) { for (int i = 0; i < nw; i++) if (wlog[i].off == off) return i; return -1; }
 static int last_write(uint32_t off) { int r = -1; for (int i = 0; i < nw; i++) if (wlog[i].off == off) r = i; return r; }
@@ -197,6 +212,16 @@ static void suite(void)
       int ok = nsteps == 12; for (int i = 0; ok && i < 12; i++) if (strcmp(steps[i], want_steps[i])) ok = 0;
       ARM("each step is logged in order (these are the lines a tester sends)", ok); }
     ARM("the other port's registers are never written", port == 0 ? first_write(NMR_DDI_BUF_CTL(1)) < 0 : first_write(NMR_DDI_BUF_CTL(0)) < 0);
+
+
+    /* the display clock: the platform controller's handshake and the squash register */
+    ARM("the display clock and its voltage level are computed from the registers (480 MHz is level 2)", snap.volt == 2 && nmr_cdclk_khz(snap.dssm, snap.de_pll, snap.cdclk, snap.squash) == 480000);
+    { s3(); rc = nmr_resume(&ops, &snap, T_VER); int dp = first_write(NMR_DE_PLL_ENABLE), cc = first_write(NMR_CDCLK_CTL);
+      ARM("the platform controller is asked to prepare before the display clock PLL is touched", rc == NMR_OK && pcode_prepare_at > 0 && pcode_prepare_at <= dp);
+      ARM("the voltage level is sent after the display clock is set", pcode_volt == 2 && pcode_volt_at > cc);
+      ARM("the squash register is replayed from version 13, between the PLL and the clock control", T_VER >= 13 ? (first_write(NMR_CDCLK_SQUASH) > dp && first_write(NMR_CDCLK_SQUASH) < cc) : first_write(NMR_CDCLK_SQUASH) < 0); }
+    { s3(); pcode_fail = 1; rc = nmr_resume(&ops, &snap, T_VER);
+      ARM("a platform controller that never says ready stops the resume before the PLL and the PHY", rc == NMR_E_CDCLK && first_write(NMR_DE_PLL_ENABLE) < 0 && first_write(nmr_phy_base(port)) < 0); pcode_fail = 0; }
 
     lit_state(); nmr_snapshot(&ops, &snap, p, T_VER, &T_EDP); nw = 0;
     ARM("a panel that is still lit is not touched", nmr_resume(&ops, &snap, T_VER) == NMR_ALREADY_LIT && nw == 0);
