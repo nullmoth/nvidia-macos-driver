@@ -59,7 +59,7 @@ check('and that path releases the registration lock and returns before the hand-
 check('the Intel panel driver case keeps the hand-over', 'strcmp(owner, "NMIntelFB") != 0' in dl)
 # the deadline starts after auto-go's settle delay: NVAccel starts at once, heads only publish once the settle has passed
 check('the deadline is the base wait plus the settle delay NVRM published on the PCI device',
-      'nvrmHeadlessDeadlineSec(kHeadlessDeadlineSec, settleMs)' in acc and '"nvrm-autogo-settle-ms"' in acc)
+      'nvrmHeadlessDeadlineSec(kHeadlessDeadlineSec, settleMs)' in src and '"nvrm-autogo-settle-ms"' in src)
 check('negative control: a deadline compared against the fixed constant is not accepted',
       'me->fHeadlessWaited < kHeadlessDeadlineSec' not in hc)
 sys.exit(1 if fails else 0)
