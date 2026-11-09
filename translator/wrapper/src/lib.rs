@@ -891,13 +891,17 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
         let mut opts=formatless_options(ll,st,CAPS.load(Ordering::Relaxed)).unwrap_or_default();
         let a8=j["a8_targets"].as_u64().unwrap_or(0) as u32;   // Metal A8Unorm colour attachments, bit per location
         opts=opts.with_a8_render_targets(a8);
+        // Vertex amplification: the pipeline's render pass runs this many views (VK_KHR_multiview); the shader's view
+        // index reads the Vulkan view index. 0 or 1 keeps the single-view translation (a view index reads constant 0).
+        let amp=j["vertex_amplification"].as_u64().unwrap_or(0).min(32) as u32;
+        if amp>1 { opts.vertex_amplification_count=amp; }
         let mut used=0;
         for (idx,state) in states {
             if reflection.bindings.iter().any(|b| b.kind==metal2vulkan::reflect::ResourceKind::Sampler && b.metal_index==idx) {
                 opts=opts.with_runtime_sampler(idx,state)?;used+=1;
             }
         }
-        if used==0 && a8==0{return translate_one(ll,st)}
+        if used==0 && a8==0 && amp<=1{return translate_one(ll,st)}
         let opts=apply_tg(opts);
         translate_with_pointer_retry(ll, |ll| {
             metal2vulkan::translate_native_no_retry_constructed_with_options(ll,st,opts)
@@ -1073,5 +1077,71 @@ mod stage_in_tests {
         let indexed_step = [1u32, 0, 1, 0, 30, 1, 1, 12, 7, 1];
         assert_eq!(nvmtl_translate_set_kernel_stage_in(indexed_step.as_ptr(), 10), 0);
         assert!(apply_tg(Default::default()).kernel_stage_in.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod vertex_amplification_tests {
+    use super::*;
+    use spirv_tools::val::Validator;
+
+    const VERT: &str = r#"
+source_filename = "synth_vertex_amplification_id"
+target datalayout = "e-p:64:64:64"
+target triple = "air64-apple-macosx14.0.0"
+
+define <4 x float> @vert(i16 %amp) local_unnamed_addr #0 {
+  %wide = zext i16 %amp to i32
+  %f = uitofp i32 %wide to float
+  %v = insertelement <4 x float> zeroinitializer, float %f, i64 0
+  ret <4 x float> %v
+}
+
+attributes #0 = { nounwind }
+
+!air.vertex = !{!0}
+!0 = !{ptr @vert, !1, !3}
+!1 = !{!2}
+!2 = !{i32 0, !"air.position", !"air.arg_type_name", !"float4", !"air.arg_name", !"pos"}
+!3 = !{!4}
+!4 = !{i32 0, !"air.amplification_id", !"air.arg_type_name", !"ushort", !"air.arg_name", !"amp"}
+"#;
+
+    fn words(b: &[u8]) -> Vec<u32> { b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect() }
+    // true when the module declares OpCapability MultiView (4439) and decorates a variable BuiltIn ViewIndex (4440)
+    fn multiview(w: &[u32]) -> (bool, bool) {
+        let (mut cap, mut view) = (false, false);
+        let mut i = 5;
+        while i < w.len() {
+            let (op, len) = (w[i] & 0xffff, (w[i] >> 16) as usize);
+            if len == 0 || i + len > w.len() { break; }
+            if op == 17 && len == 2 && w[i + 1] == 4439 { cap = true; }
+            if op == 71 && len >= 4 && w[i + 2] == 11 && w[i + 3] == 4440 { view = true; }
+            i += len;
+        }
+        (cap, view)
+    }
+    fn run(json: serde_json::Value) -> Vec<u32> {
+        let ll = std::ffi::CString::new(VERT).unwrap();
+        let stage = std::ffi::CString::new("vertex").unwrap();
+        let j = std::ffi::CString::new(json.to_string()).unwrap();
+        let (mut out, mut len) = (std::ptr::null_mut(), 0usize);
+        let mut err = [0i8; 2048];
+        let rc = unsafe { nvmtl_translate_samplers(ll.as_ptr(), stage.as_ptr(), j.as_ptr(), &mut out, &mut len, err.as_mut_ptr(), err.len()) };
+        assert_eq!(rc, 0, "{}", unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy());
+        let w = words(unsafe { std::slice::from_raw_parts(out, len) });
+        nvmtl_translate_free(out, len);
+        w
+    }
+
+    #[test]
+    fn a_pipeline_that_amplifies_gets_a_multiview_shader_and_one_that_does_not_keeps_constant_zero() {
+        let plain = run(serde_json::json!({"samplers": {}, "constants": {}}));
+        assert_eq!(multiview(&plain), (false, false), "an ordinary pipeline's shader must not use the view index");
+        let one = run(serde_json::json!({"samplers": {}, "constants": {}, "vertex_amplification": 1}));
+        assert_eq!(multiview(&one), (false, false), "count 1 is the ordinary shader");
+        let two = run(serde_json::json!({"samplers": {}, "constants": {}, "vertex_amplification": 2}));
+        assert_eq!(multiview(&two), (true, true), "count 2 must declare MultiView and read the ViewIndex builtin");
+        spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2)).validate(&two, None).expect("the amplified module validates");
     }
 }
