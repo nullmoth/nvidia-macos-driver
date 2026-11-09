@@ -33,6 +33,9 @@ static size_t test_confstr(char *buf, size_t len) { const char *u = getenv("TEST
 #include <CommonCrypto/CommonDigest.h>
 // defined elsewhere in NVMTLLibraryLoad.m, outside the extracted functions
 static char gXlateTag[80] = "test";
+// the build tag the stale-cache sweep keeps (the sweep sits inside the extracted range since the per-app cache)
+#include "nvmtl_spvcache_name.h"
+static char gXlateBuildTag[NVMTL_SPVCACHE_TAG_MAX] = "test";
 static void nvmtl_spvcache_trim_async(NSString *dir) { (void)dir; }
 ''' + funcs + r'''
 int main(void) { NSString *d = nvmtl_spvcache_dir(); printf("%s\n", d ? d.UTF8String : "(none)"); return 0; }
@@ -51,7 +54,7 @@ with tempfile.TemporaryDirectory() as d:
     d = pathlib.Path(d)
     c, exe = d / 'spv.m', d / 'spv'
     c.write_text(HARNESS)
-    r = subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-o', str(exe), str(c), '-framework', 'Foundation'],
+    r = subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-I', str(root / 'plugin'), '-o', str(exe), str(c), '-framework', 'Foundation'],
                        capture_output=True, text=True)
     if r.returncode:
         print(r.stderr[-1500:])
