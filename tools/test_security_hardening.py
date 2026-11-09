@@ -169,8 +169,9 @@ check('the external encoder loads only from a root-owned, non-writable path',
       and 'st.st_uid != 0' in _guard and 'ds.st_uid == 0' in _guard
       and _guard.count('S_IWGRP | S_IWOTH') == 2
       and 'S_ISREG' in _guard and 'S_ISDIR' in _guard)
-check('the external encoder is off unless a conf knob names the process',
-      bool(_nvcvt) and 'getenv("NVMTL_NVENCVT")' in _nvcvt and 'return;' in _nvcvt)
+check('the external encoder follows NVMTL_NVENCVT: automatic on Ada and Ampere, 0 turns it off, a list names processes',
+      bool(_nvcvt) and 'getenv("NVMTL_NVENCVT")' in _nvcvt and 'return;' in _nvcvt
+      and 'strcmp(sel, "0")) return false' in dev)
 check('the external encoder stays out of WindowServer, like the other codec registrars',
       bool(_nvcvt) and 'strcmp(me, "WindowServer")' in _nvcvt)
 
@@ -265,10 +266,22 @@ check('negative control: a bind that frees the list after the unlock is caught',
           '        IOLockLock(me->fMapLock);\n', '        IOLockLock(me->fMapLock);\n        IOLockUnlock(me->fMapLock);\n', 1)))
 cmft = body(nvrm, 'IOReturn NVRMUserClient::clientMemoryForType(', 'IOReturn NVRMUserClient::externalMethod(')
 copied = cmft.find('snapshot.memArea.pRanges = ranges;')
+# After the copy the live list may only be touched inside the mapping lock: token mode (selector 7) consumes the node it
+# copied, after proving under the lock that it is still the same node of the same generation.
+def live_list_only_under_lock(post):
+    i = 0
+    while True:
+        i = post.find('fMapList', i)
+        if i < 0: return True
+        lk, ul = post.rfind('IOLockLock(fMapLock);', 0, i), post.rfind('IOLockUnlock(fMapLock);', 0, i)
+        if lk < 0 or ul > lk: return False
+        i += 8
+post = cmft[copied:]
 check('a map reads the live context only under the mapping lock, then only its private copy',
-      copied > 0 and 'nvu_memcpy(ranges,' in cmft[:copied] and 'fMmap' not in cmft[copied:]
-      and 'fMapList' not in cmft[copied:]
-      and 'c = &snapshot' in cmft[copied:] and 'c = &fMmap' not in cmft)
+      copied > 0 and 'nvu_memcpy(ranges,' in cmft[:copied] and 'fMmap' not in post
+      and live_list_only_under_lock(post)
+      and ('fMapList' not in post or 'if (fMapList != snapNode || fMapGen != snapGen) r = kIOReturnBusy;' in post)
+      and 'c = &snapshot' in post and 'c = &fMmap' not in cmft)
 check('a map refuses an empty range list before reading its first entry',
       'count == 0 || count > 4096' in cmft)
 close = body(nvrm, 'IOReturn NVRMUserClient::clientClose(', 'void NVRMUserClient::free(')

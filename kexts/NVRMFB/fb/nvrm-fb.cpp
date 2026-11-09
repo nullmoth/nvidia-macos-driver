@@ -153,6 +153,17 @@ static inline void nvu_zero_wide(void *p, size_t n) { size_t q = n >> 3; __asm__
 #define FBSEL(a) char _s[5] = { (char)((a) >> 24), (char)((a) >> 16), (char)((a) >> 8), (char)(a), 0 }
 #define FBLOG(fmt, ...) do { IOLog("NVRM-fb: " fmt "\n", ##__VA_ARGS__); kprintf("NVRM-fb: " fmt "\n", ##__VA_ARGS__); \
     { char _tb[220]; snprintf(_tb, sizeof _tb, fmt, ##__VA_ARGS__); FBTRACE(_tb); } } while (0)
+// Kernel log volume. The lines that fire once per query or per allocation (the attribute and timing answers WindowServer
+// asks for again and again, every video memory grant) reach the kernel log only with the boot argument nvfblog=1. They
+// still go to the diagnostic trace that Send logs collects. Start-up, mode changes, errors and warnings always log.
+static int gFbVerbose = -1;
+static inline bool fbVerbose(void)
+{
+    if (gFbVerbose < 0) { uint32_t g = 0; gFbVerbose = PE_parse_boot_argn("nvfblog", &g, sizeof g) && g ? 1 : 0; }
+    return gFbVerbose == 1;
+}
+#define FBLOGV(fmt, ...) do { if (fbVerbose()) { IOLog("NVRM-fb: " fmt "\n", ##__VA_ARGS__); kprintf("NVRM-fb: " fmt "\n", ##__VA_ARGS__); } \
+    { char _tb[220]; snprintf(_tb, sizeof _tb, fmt, ##__VA_ARGS__); FBTRACE(_tb); } } while (0)
 static const char kPixelFormats[] = IO32BitDirectPixels "\0";
 static const UInt32 kNVRMFBSetTransform = 0x00000400;   // kIOFBSetTransform
 static const IODisplayModeID kModeId = 1;
@@ -2369,7 +2380,7 @@ IOReturn NVRMNVDAFramebuffer::nvrmSetGamma(UInt32 channels, UInt32 count, UInt32
     const NvBool ok = submitConfig(cfg, rep, NV_TRUE, false, true);
     if (ok) fGammaCommits++; else fGammaFails++;
     if (fGammaCommits + fGammaFails <= 3 || !ok)
-        FBLOG("gamma: %u-channel %u x %u-bit table on head %u -> %s (flipResult %d; %u applied, %u failed)", channels, count,
+        FBLOGV("gamma: %u-channel %u x %u-bit table on head %u -> %s (flipResult %d; %u applied, %u failed)", channels, count,
               width, fHead, ok ? "applied" : "NOT applied, previous LUT kept", (int)rep->flipResult, fGammaCommits, fGammaFails);
     IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
     return kIOReturnSuccess;
@@ -2381,7 +2392,7 @@ void NVRMNVDAFramebuffer::reflipFire(thread_call_param_t p0, thread_call_param_t
     if (OSAddAtomic(0, &me->fStopping)) return;
     if (!me->fReflip) return;
     bool rok = me->reflip(); me->fReflips++;
-    FBLOG("reflip %u -> ok %u rc %d (head %u display 0x%x surface %s)",
+    FBLOGV("reflip %u -> ok %u rc %d (head %u display 0x%x surface %s)",
           me->fReflips, (unsigned)rok, me->fReflipRc, me->fHead, me->fDisplay, me->fSurf ? "set" : "null");
     static const unsigned kGap[8] = { 12, 12, 12, 12, 12, 15, 15, 30 };
     if (me->fReflips >= 8) { return; }
@@ -3413,7 +3424,7 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
         // The first pass (before macOS proposes anything) lists every mode NVKMS enumerated and what became of it, so
         // a report with one refresh rate shows whether the panel's EDID offered another or NVKMS dropped it.
         if (!fromMac && !fKmsModesLogged)
-            FBLOG("fb%u NVKMS mode %u: %ux%u @%u Hz pclk %u valid %u preferred %u%s%s", fIndex, i, k.hVisible, k.vVisible, hz,
+            FBLOGV("fb%u NVKMS mode %u: %ux%u @%u Hz pclk %u valid %u preferred %u%s%s", fIndex, i, k.hVisible, k.vVisible, hz,
                   k.pixelClockHz, (unsigned)valid, (unsigned)pref, r == 0 ? " (empty slot)" : "",
                   (k.flags.interlaced || k.flags.doubleScan) ? " interlaced/doublescan" : "");
         if (r == 0 || !valid) continue;
@@ -3455,7 +3466,7 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
         }
         if (have || !raster) {
             if (!fromMac && !fKmsModesLogged)
-                FBLOG("fb%u NVKMS mode %u: not offered (%s)", fIndex, i, have ? "already listed at this rate"
+                FBLOGV("fb%u NVKMS mode %u: not offered (%s)", fIndex, i, have ? "already listed at this rate"
                       : !fBootW ? "no boot raster yet" : (!bootRaster && !larger && !smaller) ? "smaller than the boot raster (desktops that size come from macOS's scaled modes; nvfbsmall=1 offers it)"
                       : "does not fit the scanout memory or the scaler");
             continue;
@@ -3659,7 +3670,7 @@ IOReturn NVRMNVDAFramebuffer::validateDetailedTiming(void *description, IOByteCo
         }
     }
     if (fValidateCalls <= 48 || why == nullptr)
-        FBLOG("fb%u validateDetailedTiming #%u id 0x%x %ux%u%s%ux%u rotation 0x%x pclk %llu -> %s", fIndex, fValidateCalls, (unsigned)d->detailedTimingModeID,
+        FBLOGV("fb%u validateDetailedTiming #%u id 0x%x %ux%u%s%ux%u rotation 0x%x pclk %llu -> %s", fIndex, fValidateCalls, (unsigned)d->detailedTimingModeID,
               d->horizontalActive, d->verticalActive, d->horizontalScaled ? " desktop " : "", d->horizontalScaled, d->verticalScaled,
               (unsigned)(d->scalerFlags & kIOScaleRotateFlags), (unsigned long long)d->pixelClock, why ? why : "OK");
     if (why) return kIOReturnUnsupportedMode;
@@ -3867,7 +3878,7 @@ IOReturn NVRMNVDAFramebuffer::setDetailedTimings(OSArray *array)
     FBLOG("fb%u setDetailedTimings: %u timing(s) installed (%u from macOS, %u refresh rates from NVKMS; %u malformed, %u offered), current 0x%x, EDID matches so far %u",
           fIndex, n, fromMac, n - fromMac, bad, array->getCount(), (unsigned)fCurId, fEdidHits);
     for (unsigned i = 0; i < n && i < 24; i++)
-        FBLOG("  dt 0x%x raster %ux%u desktop %ux%u rotation 0x%x pclk %llu", fDT[i].detailedTimingModeID, fDT[i].horizontalActive, fDT[i].verticalActive,
+        FBLOGV("  dt 0x%x raster %ux%u desktop %ux%u rotation 0x%x pclk %llu", fDT[i].detailedTimingModeID, fDT[i].horizontalActive, fDT[i].verticalActive,
               fDT[i].horizontalScaled, fDT[i].verticalScaled, (unsigned)(fDT[i].scalerFlags & kIOScaleRotateFlags), (unsigned long long)fDT[i].pixelClock);
     setProperty("NVRMDetailedTimings", (unsigned long long)n, 32);
     {   // optional active probe of the head scaler (boot-arg nvfbscalerprobe=1), once per head
@@ -3986,12 +3997,12 @@ IOReturn NVRMNVDAFramebuffer::getTimingInfoForDisplayMode(IODisplayModeID mode, 
             d.detailedTimingModeID = (UInt32)kModeId;
             info->flags = kIODetailedTimingValid;
             if (swapped) { d.horizontalScaled = d.horizontalActive; d.verticalScaled = d.verticalActive; info->flags |= kIOScalingInfoValid; }
-            FBLOG("getTimingInfoForDisplayMode(%d) -> detailed %ux%u pclk %u Hz total %ux%u (%u mHz)", (int)mode,
+            FBLOGV("getTimingInfoForDisplayMode(%d) -> detailed %ux%u pclk %u Hz total %ux%u (%u mHz)", (int)mode,
                   t.hVisible, t.vVisible, t.pixelClockHz, t.hTotal, t.vTotal, t.refreshRate);
             return kIOReturnSuccess;
         }
     }
-    FBLOG("getTimingInfoForDisplayMode(%d) -> success", (int)mode);
+    FBLOGV("getTimingInfoForDisplayMode(%d) -> success", (int)mode);
     return kIOReturnSuccess;
 }
 IOReturn NVRMNVDAFramebuffer::getPixelInformation(IODisplayModeID mode, IOIndex depth, IOPixelAperture aperture, IOPixelInformation *pi)
@@ -4010,7 +4021,7 @@ IOReturn NVRMNVDAFramebuffer::getPixelInformation(IODisplayModeID mode, IOIndex 
     pi->componentMasks[0] = 0x00ff0000; pi->componentMasks[1] = 0x0000ff00; pi->componentMasks[2] = 0x000000ff;
     strlcpy(pi->pixelFormat, IO32BitDirectPixels, sizeof pi->pixelFormat);
     pi->flags = 0;
-    FBLOG("getPixelInformation 0x%x ap %d -> %ux%u bytesPerRow %u", (unsigned)mode, (int)aperture, pw, ph, pp);
+    FBLOGV("getPixelInformation 0x%x ap %d -> %ux%u bytesPerRow %u", (unsigned)mode, (int)aperture, pw, ph, pp);
     return kIOReturnSuccess;
 }
 IOService *NVRMNVDAFramebuffer::pciNub()
@@ -4075,6 +4086,7 @@ bool NVRMNVDAFramebuffer::verifyAperture(NvU64 phys, const char *label)
 }
 
 static volatile SInt64 gVramMappedBytes = 0;
+#include "nvrm-vram-class.h"
 
 // Parked = allocations NVKMS placed over the scanout or the boot console. WAS 24 MB / 24 slots: a 2560x1440 console is
 // 25 MB, so the last MB could never be parked and every allocation landing there was refused, about once a second
@@ -4195,6 +4207,7 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
     if (!fKms || !fDev) { FBLOG("nvAllocVram: no NVKMS device yet"); return false; }
     NvU64 want = (r->size + 0xFFFFull) & ~0xFFFFull;
     if (!want) return false;
+    if (fBarLen && fBarLen <= (512ull << 20)) want = nvrmVramSizeClass(want);   // few hole sizes in a small window (see nvrm-vram-class.h)
 
     const SInt64 budget = (SInt64)nvrmSurfaceBudget(fBarLen, gVramDisplayBytes);
     gVramBudgetBytes = budget;
@@ -4354,7 +4367,7 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
     fVramGrants++;
     OSAddAtomic64(1, &gCntGrant); OSAddAtomic64((SInt64)want, &gCntGrantBytes);
     if (fVramGrantLogged < 16) { fVramGrantLogged++;
-        FBLOG("nvAllocVram #%u: %llu bytes REAL VRAM — kva %s phys <phys>  [BAR1 %llu / %llu]",
+        FBLOGV("nvAllocVram #%u: %llu bytes REAL VRAM — kva %s phys <phys>  [BAR1 %llu / %llu]",
               fVramGrants, (unsigned long long)want, kva ? "set" : "null",
               r->mappedTotal, (unsigned long long)budget); }
     return true;
@@ -4407,7 +4420,7 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
         // 67 s of history. Log only when the answer changes.
         if (fPhys != fScanLogPhys || fW != fScanLogW || fH != fScanLogH || fPitch != fScanLogPitch) {
             fScanLogPhys = fPhys; fScanLogW = fW; fScanLogH = fH; fScanLogPitch = fPitch;
-            FBLOG("nvScanoutInfo -> phys 0x%llx %ux%u pitch %u (%llu bytes)",
+            FBLOGV("nvScanoutInfo -> phys 0x%llx %ux%u pitch %u (%llu bytes)",
                   (unsigned long long)fPhys, fW, fH, fPitch, (unsigned long long)r->actualSize);
         }
         return kIOReturnSuccess;
@@ -4418,7 +4431,7 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
         if (!fDev) { FBLOG("nvRmHandles: no kapi device yet"); return kIOReturnNotReady; }
         h->kapiDevice = fDev;
         h->hClient = 0; h->hDevice = 0; h->hSubDevice = 0;
-        FBLOG("nvRmHandles -> kapiDevice %s", fDev ? "set" : "null");
+        FBLOGV("nvRmHandles -> kapiDevice %s", fDev ? "set" : "null");
         return kIOReturnSuccess;
     }
     if (functionName && functionName->isEqualTo("nvFlipToSurfacePure")) {
@@ -4599,7 +4612,7 @@ IODeviceMemory *NVRMNVDAFramebuffer::getVRAMRange()
             if (target < (NvU64)pa || target >= ((NvU64)pa + len)) continue;
             m->retain();
             if (fVramLogged < 3) { fVramLogged++;
-                FBLOG("getVRAMRange -> WHOLE BAR%u pa 0x%llx len %llu (was the %llu-byte scanout subrange)",
+                FBLOGV("getVRAMRange -> WHOLE BAR%u pa 0x%llx len %llu (was the %llu-byte scanout subrange)",
                       (unsigned)i, (unsigned long long)pa, (unsigned long long)len,
                       (unsigned long long)((NvU64)fPitch * fH + 128)); }
             return m;
@@ -4632,7 +4645,7 @@ IODeviceMemory *NVRMNVDAFramebuffer::getApertureRange(IOPixelAperture aperture)
                 m, (IOByteCount)(target - (NvU64)pa), bytes, kIODirectionNone);
             if (sub) {
                 if (fApertureLogged < 3) { fApertureLogged++;
-                    FBLOG("getApertureRange -> SUBRANGE of BAR%u (pa 0x%llx len %llu) off 0x%llx size %llu",
+                    FBLOGV("getApertureRange -> SUBRANGE of BAR%u (pa 0x%llx len %llu) off 0x%llx size %llu",
                           (unsigned)i, (unsigned long long)pa, (unsigned long long)len,
                           target - (NvU64)pa, (unsigned long long)bytes); }
                 return (IODeviceMemory *)sub;
@@ -4645,7 +4658,7 @@ IODeviceMemory *NVRMNVDAFramebuffer::getApertureRange(IOPixelAperture aperture)
         FBLOG("getApertureRange: no IOPCIDevice ancestor found");
     }
     if (fApertureLogged < 3) { fApertureLogged++;
-        FBLOG("getApertureRange -> FALLBACK withAddressRange 0x%llx size %llu (MapperNone)",
+        FBLOGV("getApertureRange -> FALLBACK withAddressRange 0x%llx size %llu (MapperNone)",
               target, (unsigned long long)bytes); }
     return (IODeviceMemory *)IOMemoryDescriptor::withAddressRange(
         target, bytes, kIODirectionNone | kIOMemoryMapperNone, NULL);
@@ -4757,11 +4770,11 @@ IOReturn NVRMNVDAFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
         if (value) *value = fVrrOn ? 1 : 0;
         return kIOReturnSuccess;
     }
-    if (attribute == kIOWindowServerActiveAttribute) { if (value) *value = 1; FBLOG("getAttribute 'wsrv' -> 1"); return kIOReturnSuccess; }
+    if (attribute == kIOWindowServerActiveAttribute) { if (value) *value = 1; FBLOGV("getAttribute 'wsrv' -> 1"); return kIOReturnSuccess; }
     if (attribute == kIOHardwareCursorAttribute) {
         uintptr_t v = (fCursorEnabled && fCurSurf && fCurKva) ? 1 : 0;
         if (value) *value = v;
-        FBLOG("getAttribute '%s' -> %lu (hardware cursor)", _s, (unsigned long)v);
+        FBLOGV("getAttribute '%s' -> %lu (hardware cursor)", _s, (unsigned long)v);
         return kIOReturnSuccess;
     }
     IOReturn r = super::getAttribute(attribute, value);
@@ -4773,7 +4786,7 @@ IOReturn NVRMNVDAFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
     unsigned i = 0;
     while (i < nseen && seen[i].a != attribute) i++;
     if (i == nseen || seen[i].r != r || seen[i].v != v) {
-        FBLOG("getAttribute '%s' -> 0x%x val %lu", _s, r, (unsigned long)v);
+        FBLOGV("getAttribute '%s' -> 0x%x val %lu", _s, r, (unsigned long)v);
         if (i == nseen && nseen < 16) nseen++;
         if (i < 16) { seen[i].a = attribute; seen[i].r = r; seen[i].v = v; }
     }
@@ -4783,7 +4796,7 @@ IOReturn NVRMNVDAFramebuffer::getAttributeForConnection(IOIndex connectIndex, IO
 {
     FBSEL(attribute);
     switch (attribute) {
-    case kConnectionEnable: if (value) *value = fDpyLost ? 0 : 1; FBLOG("getAFC '%s' -> enable %u", _s, (unsigned)(fDpyLost ? 0 : 1)); return kIOReturnSuccess;
+    case kConnectionEnable: if (value) *value = fDpyLost ? 0 : 1; FBLOGV("getAFC '%s' -> enable %u", _s, (unsigned)(fDpyLost ? 0 : 1)); return kIOReturnSuccess;
     case kConnectionFlags:  if (value) *value = fInternal ? kIOConnectionBuiltIn : 0; return kIOReturnSuccess;
     case kConnectionColorModesSupported:       if (value) *value = 0x00000001; return kIOReturnSuccess;
     case kConnectionColorDepthsSupported:      if (value) *value = 0x00000002; return kIOReturnSuccess;
@@ -4793,7 +4806,7 @@ IOReturn NVRMNVDAFramebuffer::getAttributeForConnection(IOIndex connectIndex, IO
     case kConnectionCheckEnable:               if (value) *value = fDpyLost ? 0 : 1; return kIOReturnSuccess;
     case kConnectionDisplayFlags:              if (value) *value = 0; return kIOReturnSuccess;
     case kConnectionSupportsHLDDCSense:
-        FBLOG("fb%u getAFC HLDDCSense -> %s (EDID %u B)", fIndex, fEdidSize >= 128 ? "YES" : "no", (unsigned)fEdidSize);
+        FBLOGV("fb%u getAFC HLDDCSense -> %s (EDID %u B)", fIndex, fEdidSize >= 128 ? "YES" : "no", (unsigned)fEdidSize);
         return fEdidSize >= 128 ? kIOReturnSuccess : kIOReturnUnsupported;
     case kConnectionDisplayParameterCount: if (value) *value = 0; return kIOReturnSuccess;
     case kConnectionDisplayParameters: return kIOReturnSuccess;
@@ -4801,7 +4814,7 @@ IOReturn NVRMNVDAFramebuffer::getAttributeForConnection(IOIndex connectIndex, IO
         return kIOReturnUnsupported;
     default: {
         IOReturn r = super::getAttributeForConnection(connectIndex, attribute, value);
-        FBLOG("getAFC '%s' -> super 0x%x val %lu", _s, r, value ? (unsigned long)*value : 0ul);
+        FBLOGV("getAFC '%s' -> super 0x%x val %lu", _s, r, value ? (unsigned long)*value : 0ul);
         return r;
     }
     }
@@ -4895,10 +4908,10 @@ IOReturn NVRMNVDAFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
     }
     if (attribute == kIOFBHDRMetaDataAttribute) return value > 0x1000 ? setHdrMeta((const void *)value) : kIOReturnBadArgument;
     if (attribute == kIOWindowServerActiveAttribute) {
-        FBLOG("setAttribute 'wsrv' %lu -> success", (unsigned long)value);
+        FBLOGV("setAttribute 'wsrv' %lu -> success", (unsigned long)value);
         return kIOReturnSuccess; }
     if (attribute == kIOPowerAttribute) {
-        FBLOG("setAttribute POWER '%s' -> %lu", c, (unsigned long)value);
+        FBLOGV("setAttribute POWER '%s' -> %lu", c, (unsigned long)value);
         if (value) {
             IOReturn r = super::setAttribute(attribute, value);
             handleEvent(kIOFBNotifyDidPowerOn);
@@ -4909,7 +4922,7 @@ IOReturn NVRMNVDAFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
         return (r == kIOReturnUnsupported) ? kIOReturnSuccess : r;
     }
     IOReturn r = super::setAttribute(attribute, value);
-    FBLOG("setAttribute '%s' value %lu -> 0x%x", c, (unsigned long)value, r);
+    FBLOGV("setAttribute '%s' value %lu -> 0x%x", c, (unsigned long)value, r);
     return r;
 }
 // What IOGraphics does when a framebuffer powers on after system sleep (IOFBController::computeState, then
@@ -4992,7 +5005,7 @@ IOReturn NVRMNVDAFramebuffer::setAttributeForConnection(IOIndex connectIndex, IO
     publishRotatedSizes(false);
     // Head power follows setPowerState only, the one path that has shipped; a second path here was new on every monitor
     // with no report asking for it, and its errors were new to callers that always got success (1.15 review).
-    if (attribute == kConnectionPower) { FBLOG("setAFC '%s' POWER %lu -> success", _s, (unsigned long)value); return kIOReturnSuccess; }
+    if (attribute == kConnectionPower) { FBLOGV("setAFC '%s' POWER %lu -> success", _s, (unsigned long)value); return kIOReturnSuccess; }
     switch (attribute) {
     case kConnectionColorModesSupported:
     case kConnectionColorDepthsSupported:
@@ -5001,12 +5014,12 @@ IOReturn NVRMNVDAFramebuffer::setAttributeForConnection(IOIndex connectIndex, IO
     case kConnectionColorMode:
     case kConnectionDisplayFlags:
     case kConnectionFlags:
-        FBLOG("setAFC '%s' value %lu -> ACCEPTED", _s, (unsigned long)value);
+        FBLOGV("setAFC '%s' value %lu -> ACCEPTED", _s, (unsigned long)value);
         return kIOReturnSuccess;
     default: break;
     }
     IOReturn r = super::setAttributeForConnection(connectIndex, attribute, value);
-    FBLOG("setAFC '%s' value %lu -> 0x%x", _s, (unsigned long)value, r);
+    FBLOGV("setAFC '%s' value %lu -> 0x%x", _s, (unsigned long)value, r);
     return r;
 }
 

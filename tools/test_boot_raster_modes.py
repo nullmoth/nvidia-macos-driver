@@ -28,6 +28,7 @@ static bool PE_parse_boot_argn(const char *, uint32_t *v, size_t) { *v = 1; retu
 static bool PE_parse_boot_argn(const char *, uint32_t *, size_t) { return false; }
 #endif
 static bool nvrmRootFile(const char *) { return false; }
+#define FBLOGV(...) ((void)0)
 static void nvu_zero(void *p,size_t n){memset(p,0,n);}
 struct NvKmsKapiDisplayModeTimings {
     NvU32 pixelClockHz,hVisible,hSyncStart,hSyncEnd,hTotal,vVisible,vSyncStart,vSyncEnd,vTotal,refreshRate;

@@ -35,6 +35,7 @@ HARNESS = r'''
 typedef int IOReturn;
 static const IOReturn kIOReturnSuccess = 0, kIOReturnError = (IOReturn)0xe00002bc;
 #define FBLOG(...) (printf(__VA_ARGS__), printf("\n"))
+#define FBLOGV(...) (printf(__VA_ARGS__), printf("\n"))
 static unsigned long long mach_absolute_time() { return 1; }
 struct NVRMNVDAFramebuffer {
     bool modeOk; unsigned long long fEnableAbs = 0; bool fHotplugBorn = true, fConnectFired = false; unsigned fIndex = 0;
