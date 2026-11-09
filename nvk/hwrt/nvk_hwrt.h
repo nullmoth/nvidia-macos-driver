@@ -43,7 +43,8 @@ struct nvk_hwrt_appendix {
     * of the scene and the whole structure is walked in software. The bits are formed by the encoder from the bottom levels'
     * own words. */
    uint32_t has_procedural;
-   uint32_t padding[2];
+   uint32_t curve_table_offset;     /* from the appendix: struct nvk_curve_entry[curve_geometry_count] (nvk_curve.h); 0 = none */
+   uint32_t curve_geometry_count;
 };
 
 /* One entry per geometry of a bottom-level structure, read by the lowering for every hit the hardware reports. */

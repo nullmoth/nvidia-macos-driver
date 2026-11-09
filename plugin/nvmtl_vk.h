@@ -147,7 +147,10 @@ size_t nvmtl_vk_host_import_align(void);
 typedef struct { void *as; uint64_t addr; size_t size; int instance; } nvk_accel;
 typedef struct { uint64_t vertices; uint32_t stride; uint32_t count; uint32_t vertex_format; uint32_t max_vertex;
                  uint64_t indices; uint32_t index_type; uint32_t opaque;
-                 uint64_t boxes; uint32_t box_stride; uint32_t is_boxes; } nvmtl_geom;
+                 uint64_t boxes; uint32_t box_stride; uint32_t is_boxes;
+                 /* curve geometry (NVK_CURVES=1): a box geometry whose boxes the driver writes from the control points */
+                 uint32_t is_curve; uint32_t curve_flags; uint32_t cp_stride; uint32_t radius_stride;
+                 uint64_t cp_addr; uint64_t radius_addr; uint64_t curve_indices; } nvmtl_geom;
 int  nvmtl_vk_rt_available(void);
 int  nvmtl_vk_barycentrics_available(void);   // VK_KHR_fragment_shader_barycentric present and enabled-capable
 int  nvmtl_vk_accel_sizes(const nvmtl_geom *g, uint32_t ngeom, int instance, uint32_t instance_count, size_t *as_size, size_t *scratch_size);
