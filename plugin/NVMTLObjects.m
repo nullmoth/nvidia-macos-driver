@@ -107,6 +107,7 @@ static void nvmtl_res2_note_use(NVMTLTexture *t);
 static uint64_t nvmtl_res2_evict(uint64_t want);
 extern uint64_t (*nvmtl_res2_evict_hook)(uint64_t want);
 #include "nvmtl_env_knobs.h"
+#include "nvmtl_fps_limit.h"
 // The keys the user's own block of nvrm610.conf set ("my settings, kept on update"): an application profile never
 // replaces them. The shipped lines above that block are defaults, which a profile does replace.
 static char g_conf_mine[64][48];
@@ -6635,6 +6636,23 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 }
 - (void)nvmtlRecordDrawable:(id<MTLDrawable>)drawable presentation:(dispatch_block_t)action {
     if (!drawable || _committed) return;
+    {
+        // Frame-rate limiter (NVMTL_FPS_LIMIT in the user's conf block; see nvmtl_fps_limit.h). The wait happens on the
+        // application's own thread, as the Windows driver's maximum frame rate does, so its render loop slows down and
+        // the GPU idles between frames. Resolved once per process: a process with no limit pays one load.
+        static int fps = -1; static nvmtl_fps_pacer pacer; static os_unfair_lock pace_lock = OS_UNFAIR_LOCK_INIT;
+        if (fps < 0) {
+            fps = nvmtl_fps_limit_for(getenv("NVMTL_FPS_LIMIT"), getprogname());
+            nvmtl_fps_pacer_init(&pacer, fps);
+            if (fps) nvlog("frame-rate limit %d fps for %s", fps, getprogname());
+        }
+        if (fps) {
+            os_unfair_lock_lock(&pace_lock);
+            const uint64_t wait = nvmtl_fps_pace(&pacer, clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW));
+            os_unfair_lock_unlock(&pace_lock);
+            if (wait) { struct timespec ts = { (time_t)(wait / 1000000000ull), (long)(wait % 1000000000ull) }; nanosleep(&ts, NULL); }
+        }
+    }
     {
         extern void nvmtl_vk_submit_wait_stats(uint64_t *total_ns, uint64_t *waits);
         static int off = -1;
