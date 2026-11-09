@@ -44,11 +44,11 @@ static double implicit(const struct curve *c, int pieces, D3 q, int cap_mode)
          D3 dq = sub3(q, P); double dd = sqrt(dot3(dq, dq)) - rr;
          if (dd < piece) piece = dd;
       }
+      if (cap_mode != 2) {                      /* the pieces near an end are cut by that end's plane (a quarter of the curve each) */
+         if (i < pieces / 4) piece = fmax(piece, -dot3(sub3(q, q0), a0));
+         if (i >= pieces - pieces / 4) piece = fmax(piece, dot3(sub3(q, qn), an));
+      }
       if (piece < best) best = piece;
-   }
-   if (cap_mode != 2) {                         /* nothing of any piece lies behind the end planes */
-      double x0 = dot3(sub3(q, q0), a0), xn = dot3(sub3(q, qn), an);
-      best = fmax(best, fmax(-x0, xn));
    }
    return best;
 }

@@ -42,12 +42,25 @@ half-width equal to the radius, facing the ray. This is an approximation of the 
   sphere caps converges to 0.001 in distance at 32 steps), so the basis weights are right.
 - **Steps.** The error is the straight-piece approximation: Bezier-4 round sphere has a 95th percentile distance error of 0.046 at 8
   steps, 0.014 at 16, 0.003 at 32. 16 was chosen (two times the 8-step cost); 32 would be four times.
-- **21 of 24 cases pass** (hit/miss on 98 percent of rays, 95th percentile of distance and parameter error within 0.03).
-- **Three do not, and the cause is not known:** `bezier4_round_disk` (95th percentile distance 0.17, the end-disk rays), `catmull4_round_nocap`
-  (95th percentile fine, a few rays with errors up to 0.11) and `catmull4_flat` (0.047, worst 0.4 with parameter errors up to 0.86). Bezier-4
-  with disk and open ends gets worse as the steps get finer, which says Apple's end cut is not the plane perpendicular to the first piece
-  (the chord of the curve was tried and is worse for B-spline). The Catmull-Rom flat case may be a self-overlapping sample curve where
-  the nearest of several ribbon hits differs. These need a targeted oracle run (one curve, rays at the ends), not more guessing.
+- **22 of 24 cases pass** (hit/miss on 98 percent of rays, 95th percentile of distance and parameter error within 0.03).
+- **Apple's round curves are the exact swept sphere.** The targeted probe (`oracle/fixtures/fixture_apple_m6_probe.txt`: one curve per
+  failing case, 192 rays aimed at each end and 192 at the middle) shows every Apple hit on a round curve lies within 0.004 of the exact
+  swept sphere (distance to the curve minus the radius, minimum over the parameter), except the end-disk hits. So the radius law, the
+  basis and the shape are right, and the remaining differences are my straight pieces and the end rules.
+- **The end cut was the bug in `bezier4_round_disk`.** The plane through each end point applied to the whole curve, which cuts away real
+  surface when a curve bends back on itself (the sample Bezier does). Apple does not. Each plane now applies only to the pieces in its own
+  quarter of the curve. The plane is perpendicular to the curve's tangent at the end point (two close evaluations; `CV_END_PIECE_AXIS`
+  selects the first piece's axis instead). Measured on the probe: the disk hits are at an axial distance of 0.000 from the end plane and
+  inside the end radius, as modelled. Other variants tried and rejected because they pass fewer cases: a plane behind the end point by a
+  fixed slack (0.02 to 0.15 times the end radius), the chord direction as the normal, more steps (32 to 128 do not help).
+- **Two cases still fail, cause not found:**
+  - `catmull4_round_nocap`: 15 to 27 rays of 576 where the model has a hit on a joint sphere near an end (0.0006 to 0.03 from the start
+    plane, 0.016 to 0.10 from the end plane) and Apple has none; every other ray agrees (95th percentile 0.003). The same curve with sphere
+    caps passes, so Apple removes a small region beyond the cut that the model keeps.
+  - `catmull4_flat`: about 50 rays of 576 where Apple has a ribbon hit and the model has none, at the curve's ends (axial distance
+    -0.02 to -0.1 behind the end point, `curve_parameter` clamped to 0 or 1). The other three flat cases agree to 1e-4, so the ribbon
+    reaches past the end point for this basis. A ribbon whose end edge is not perpendicular to the tangent would do it; the data so far
+    does not say what the edge is.
 - **M4 mini: not run.** The workflow classifier on this machine refused the Metal run on the M4 (Raven shares it) although the lead allowed small
   bounded tests; I did not work around it. Only the M6 is measured; there is no comparison between generations.
 - **The oracle needed two fixes before it measured anything**: a Metal `float3` member takes 16 bytes in a struct, so the 32-byte ray
