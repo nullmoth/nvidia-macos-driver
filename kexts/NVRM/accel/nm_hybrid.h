@@ -17,6 +17,9 @@
  *   2            import: the composited surface's own pages are mapped into the display GPU and the plane is flipped to
  *                them (no pixel copy). Any surface that cannot be imported falls back to level 1 for that frame, and a
  *                flip that never lands switches level 2 off for the rest of the boot.
+ *   3            as 2, and a surface that cannot be imported is written into one of three buffers the panel driver owns
+ *                (ordinary cached memory mapped into its graphics table) which is then flipped to; no write-combined
+ *                stores and no tearing, for frames import refuses (10-bit login window, odd pitch).
  * Any other value is treated as 0.
  */
 #ifndef NM_HYBRID_H
@@ -31,13 +34,13 @@
 /* ---------------------------------------------------------------------------------------------------------------------
  * the switch
  */
-enum { NMH_OFF = 0, NMH_COPY = 1, NMH_IMPORT = 2 };
+enum { NMH_OFF = 0, NMH_COPY = 1, NMH_IMPORT = 2, NMH_OWNED = 3 };
 
 /* 'present' is the boot-arg parse result, 'value' what it parsed to. */
 static inline int nmh_level_parse(int present, long long value)
 {
     if (!present) return NMH_OFF;
-    return (value == NMH_COPY || value == NMH_IMPORT) ? (int)value : NMH_OFF;
+    return (value >= NMH_COPY && value <= NMH_OWNED) ? (int)value : NMH_OFF;
 }
 
 /* ---------------------------------------------------------------------------------------------------------------------
@@ -270,6 +273,75 @@ static inline void nmh_flip_abandon(struct nmh_ring *r) { r->pending = NMH_NONE;
 static inline int nmh_need_home(const struct nmh_ring *r) { return r->live != -1 || r->pending != NMH_NONE; }
 
 /* ---------------------------------------------------------------------------------------------------------------------
+ * level 3: buffers the panel driver owns. The panel driver allocates NMH_OWN_BUFS buffers, maps them into the graphics
+ * table once, and lends them out: a writer takes a free buffer, fills it, and presents it, which flips the plane to it;
+ * the buffer that was on screen is free again when the new one is live. Nobody writes a buffer that is on screen or about
+ * to be.
+ */
+#define NMH_OWN_BUFS 3
+enum { NMH_OB_FREE = 0, NMH_OB_WRITER, NMH_OB_QUEUED, NMH_OB_LIVE };
+struct nmh_own {
+    uint8_t st[NMH_OWN_BUFS];
+    int     live;       /* buffer on screen, -1 = the boot surface */
+    int     queued;     /* buffer a flip was submitted for, -1 = none */
+};
+static inline void nmh_own_init(struct nmh_own *o)
+{
+    unsigned i;
+    for (i = 0; i < NMH_OWN_BUFS; i++) o->st[i] = NMH_OB_FREE;
+    o->live = -1; o->queued = -1;
+}
+/* A free buffer for one writer, or -1 when every buffer is taken (the caller copies the old way for that frame). */
+static inline int nmh_own_acquire(struct nmh_own *o)
+{
+    int i;
+    for (i = 0; i < NMH_OWN_BUFS; i++) if (o->st[i] == NMH_OB_WRITER) return -1;     /* one writer at a time */
+    for (i = 0; i < NMH_OWN_BUFS; i++) if (o->st[i] == NMH_OB_FREE) { o->st[i] = NMH_OB_WRITER; return i; }
+    return -1;
+}
+/* The writer is done: the buffer waits for its flip. Only the writer's own buffer, and only with no flip already queued. */
+static inline int nmh_own_present(struct nmh_own *o, int idx)
+{
+    if (idx < 0 || idx >= NMH_OWN_BUFS || o->st[idx] != NMH_OB_WRITER || o->queued != -1) return NMH_E_BUSY;
+    o->st[idx] = NMH_OB_QUEUED; o->queued = idx;
+    return NMH_OK;
+}
+/* The writer gave up (the copy failed): the buffer goes back, nothing was shown. */
+static inline void nmh_own_abort(struct nmh_own *o, int idx)
+{
+    if (idx >= 0 && idx < NMH_OWN_BUFS && o->st[idx] == NMH_OB_WRITER) o->st[idx] = NMH_OB_FREE;
+}
+/* The queued flip reached the screen. */
+static inline void nmh_own_landed(struct nmh_own *o)
+{
+    if (o->queued < 0) return;
+    if (o->live >= 0) o->st[o->live] = NMH_OB_FREE;
+    o->st[o->queued] = NMH_OB_LIVE; o->live = o->queued; o->queued = -1;
+}
+/* The flip never landed: the buffer is not on screen and is not queued; whatever the plane shows is unknown. */
+static inline void nmh_own_flip_failed(struct nmh_own *o)
+{
+    if (o->queued >= 0) o->st[o->queued] = NMH_OB_FREE;
+    o->queued = -1;
+    if (o->live >= 0) { o->st[o->live] = NMH_OB_FREE; }
+    o->live = -1;
+}
+/* The plane is back on the boot surface (HOME): every buffer is free. */
+static inline void nmh_own_home(struct nmh_own *o)
+{
+    unsigned i;
+    for (i = 0; i < NMH_OWN_BUFS; i++) if (o->st[i] != NMH_OB_WRITER) o->st[i] = NMH_OB_FREE;
+    o->live = -1; o->queued = -1;
+}
+/* Buffers may be released (module unload, mode change) only when nobody writes and nothing is on screen from them. */
+static inline int nmh_own_may_free(const struct nmh_own *o)
+{
+    unsigned i;
+    for (i = 0; i < NMH_OWN_BUFS; i++) if (o->st[i] == NMH_OB_WRITER || o->st[i] == NMH_OB_QUEUED) return 0;
+    return o->live < 0;
+}
+
+/* ---------------------------------------------------------------------------------------------------------------------
  * the path as a whole, one state per thing a tester can see in the log
  */
 enum nmh_state { NMH_S_OFF, NMH_S_ARMED, NMH_S_COPY, NMH_S_IMPORT, NMH_S_FALLBACK };
@@ -313,6 +385,76 @@ static inline int nmh_sm_step(struct nmh_sm *m, int ev, int why)
     case NMH_EV_PROVIDER_GONE: m->state = NMH_S_ARMED; break;
     }
     return m->state;
+}
+
+/* ---------------------------------------------------------------------------------------------------------------------
+ * start-up controls of the panel driver
+ */
+
+/* nmhybriddelay=<seconds>: wait before taking the panel from the firmware. Some machines froze without a wait after the
+ * NVIDIA driver started. 0 to 120; anything else is 0. */
+static inline unsigned nmh_delay_parse(int present, long long value)
+{
+    return (present && value > 0 && value <= 120) ? (unsigned)value : 0;
+}
+
+/* Why the panel driver should leave the panel to the firmware because the NVIDIA boot guard has the driver off:
+ * the "-nvoff" boot-arg, the nullmoth-remove NVRAM flag, or 'limit' starts in a row that never lit a display. */
+enum { NMH_STAY_NONE = 0, NMH_STAY_NVOFF = 1, NMH_STAY_REMOVE = 2, NMH_STAY_GUARD = 3 };
+static inline int nmh_stand_down_why(int nvoff_bootarg, int remove_flag, unsigned starts, unsigned limit)
+{
+    if (nvoff_bootarg) return NMH_STAY_NVOFF;
+    if (remove_flag) return NMH_STAY_REMOVE;
+    if (limit && starts >= limit) return NMH_STAY_GUARD;
+    return NMH_STAY_NONE;
+}
+static inline const char *nmh_stay_name(int why)
+{
+    switch (why) {
+    case NMH_STAY_NVOFF:  return "boot-arg -nvoff";
+    case NMH_STAY_REMOVE: return "the NVIDIA driver was removed from the boot picker (nullmoth-remove)";
+    case NMH_STAY_GUARD:  return "the NVIDIA boot guard has the driver off";
+    default:              return "";
+    }
+}
+
+/* The last step the panel driver reached, kept as a sysctl and a registry property, and (where the platform allows it at
+ * that stage) written to the NVRAM variable nullmoth-ifb-step, so a boot that froze says where. */
+enum {
+    NMH_STEP_NONE = 0, NMH_STEP_PROBE, NMH_STEP_STOOD_DOWN, NMH_STEP_DELAY, NMH_STEP_MMIO, NMH_STEP_ADOPT, NMH_STEP_SURF,
+    NMH_STEP_FB_START, NMH_STEP_PUBLISHED, NMH_STEP_RING, NMH_STEP_FLIP, NMH_STEP_SUSPEND, NMH_STEP_RESUME_BEGIN,
+    NMH_STEP_RESUME_DONE, NMH_STEP_RESUME_FAILED, NMH_STEP__COUNT
+};
+static inline const char *nmh_step_name(int step)
+{
+    static const char *const n[NMH_STEP__COUNT] = {
+        "none", "probe", "stood-down", "delay", "mmio-mapped", "mode-adopted", "scanout-mapped", "framebuffer-started",
+        "published", "import-ring", "first-flip", "suspend", "resume-begin", "resume-done", "resume-failed" };
+    return (step >= 0 && step < NMH_STEP__COUNT) ? n[step] : "?";
+}
+
+/* nmflatskip=<n>: a composited frame that is one flat colour is not flipped to for up to n frames in a row, so a
+ * momentary black frame never reaches the screen; after n the flat frame is shown. 0 (off) to 8. */
+static inline unsigned nmh_flat_parse(int present, long long value)
+{
+    return (present && value > 0 && value <= 8) ? (unsigned)value : 0;
+}
+struct nmh_flat { unsigned held; };
+/* 1 = keep the previous picture for this frame */
+static inline int nmh_flat_hold(struct nmh_flat *st, int frame_is_flat, unsigned max_hold)
+{
+    if (!max_hold || !frame_is_flat) { st->held = 0; return 0; }
+    if (st->held < max_hold) { st->held++; return 1; }
+    st->held = 0;
+    return 0;
+}
+/* 64 samples taken from a frame; 1 when they are all the same colour (alpha ignored) */
+static inline int nmh_samples_flat(const uint32_t *sample, unsigned n)
+{
+    unsigned i;
+    if (!n) return 0;
+    for (i = 1; i < n; i++) if ((sample[i] & 0xffffffu) != (sample[0] & 0xffffffu)) return 0;
+    return 1;
 }
 
 #endif

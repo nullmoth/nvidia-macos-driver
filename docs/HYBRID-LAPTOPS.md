@@ -32,6 +32,8 @@ pipe sees that, and for every composited frame does one of two things.
 | copy | `nmhybrid=1` | the pixels that changed since the previous frame are written into the panel's scan-out buffer. A copy of the previous frame, held in ordinary memory, is compared with the new one so the write-combined scan-out receives stores only for changed pixels (a blinking cursor is one store). |
 | import | `nmhybrid=2` | the composited surface's own pages are written into unused entries of the Intel GPU's graphics translation table and the display plane is pointed at them. No pixel is copied. Intel display versions 12 and 13 only (Tiger, Rocket, Alder and Raptor Lake). Every other panel, every login-window frame (10-bit), and any surface that does not fit is copied instead, one frame at a time. |
 
+| owned | `nmhybrid=3` | as import, and a frame import refuses (10-bit login window, a pitch the plane cannot take) is written into one of three buffers the panel driver owns (cached memory, mapped into the graphics table) which the plane is then flipped to. No write-combined stores and no tearing for those frames. The buffers are lent to one writer at a time, never written while on screen or queued, and all freed when the plane goes back to the boot surface. Intel display versions 12 and 13. |
+
 Panels covered: Intel display versions 12 to 20 through `NMIntelFB` (copy, import on 12 and 13); AMD integrated GPUs macOS
 has no driver for through `NMGopFB` (copy, see the next section); AMD and Intel through `NMXGPU` (copy). The NMXGPU part is in the NMX tree: `xkpi/xnu/nmx_hybrid.h` holds the answer the panel gives the display
 pipe, `xkpi/xnu/nmx_fb.cpp` has the three-hunk hook that uses it.
@@ -81,6 +83,46 @@ Limits, as for any copy path: the single scan-out buffer can tear; the pacing ti
 engine is not read; no backlight slider (the panel is not driven by this kext, the keys still reach the firmware on many
 laptops); the Radeon's resolution is the firmware's. Proven on no laptop yet. The method comes from PrimeBridge (myvoow,
 MIT), which runs on a Radeon 680M laptop with NullMoth 2.6.3.
+
+## Start-up controls and diagnosis
+
+- **Stands down on its own.** If the NVIDIA boot guard has the driver off (boot-arg `-nvoff`, the boot picker's remove
+  flag, or two starts in a row that never lit a display) the panel driver does not take the panel; the firmware framebuffer
+  keeps it. Log: `hybrid: standing down, the firmware framebuffer keeps the panel: <reason>`.
+- **`nmhybriddelay=<s>`** (0 to 120, default 0): wait before taking the panel. Some machines froze without a wait after
+  the NVIDIA driver started. The guard's verdict is read again after the wait.
+- **Where did it freeze?** The panel driver records the last step it reached: sysctl `debug.nmintelfb_step`, the log line
+  `hybrid: step <n> <name>`, and the NVRAM variable `nullmoth-ifb-step` where the platform lets a kext write it (read after
+  a frozen boot with `nvram nullmoth-ifb-step`). Steps in order: probe, delay, mmio-mapped, mode-adopted,
+  framebuffer-started, published, import-ring, first-flip, suspend, resume-begin, resume-done or resume-failed; `stood-down`
+  if it declined. `tools/hybrid_verify.sh` prints the last one it finds.
+- **`nmflatskip=<n>`** (0 to 8, default 0): on the NVIDIA GPU's own display path, a composited frame that is one flat
+  colour (64 samples equal) is not flipped to for up to n frames in a row, so a momentary black frame never reaches the
+  screen; the n+1th flat frame is shown. A surface is judged only when its system-memory copy is the newest one. Counter:
+  `debug.nmflat_held`.
+
+## Sleep and wake (`nmhybridresume=1`)
+
+After S3 the Intel display engine returns with every register zero and the panel's link state gone. With this switch on,
+the panel driver captures the firmware's mode while the panel is lit (the registers that make it up, and the sink's link
+settings read over the AUX channel) and on wake replays it in the order Linux's i915 enables an eDP panel, waiting for
+each handshake and stopping at the first that does not come: power wells, display clock PLL, DPLL and clock select, the
+combo PHY block, the panel power sequence, sink to D0, transcoder and plane registers (plane surface last), transcoder
+function and DDI buffer with training pattern 1, link training (clock recovery, channel equalisation; skipped for panels
+that declare no AUX handshake), idle then normal pattern, transcoder on, backlight. The firmware surface's entries in the
+graphics table are restored first. A panel that is still lit on wake (display sleep, not S3) is left alone.
+Logs: `hybrid: resume armed: panel state captured (sink link 0x14 x2, ...)` at start, then on wake
+`hybrid: resume step: <step>` for each step and `hybrid: resume: panel relit` or the reason it stopped
+(`a power well did not come up`, `the display clock PLL did not lock`, `the DPLL did not come up or lock`, `the panel power
+sequence did not complete`, `the sink did not answer on the AUX channel`, `link training failed`, `the pipe is not scanning
+out after the link came up`). On a failed training the DDI buffer is switched off again.
+
+Limits, all untested on hardware: display versions 12 and 13 with the panel on DDI A, pipe A, AUX A only (anything else is
+refused, not guessed); voltage swing and pre-emphasis stay at what the firmware programmed (the per-level PHY tables are
+not carried, so a sink that asks for more fails the training); the fast link training of panels without an AUX handshake
+uses fixed 1 ms patterns; the display microcontroller firmware and the voltage request to the platform controller are not
+reloaded. **Until a tester confirms a wake on their machine, turn sleep off** (`sudo pmset -a sleep 0 disablesleep 1`) and
+leave `nmhybridresume` unset; with the switch off, sleep behaves as before. Send the `hybrid: resume` lines with the result.
 
 ## Which GPU an application gets
 
@@ -241,6 +283,9 @@ open row.
   this change.
 - `tools/test_hybrid_scripts.sh`: the switch script against a stub `nvram`, and the verifier against saved logs
   (`tools/hybrid_fixtures`), including a log where the flip never lands.
+- `tools/test_hybrid_resume.c`: the wake replay against a model of the display engine, panel power sequencer, AUX channel
+  and sink (order, handshakes, link training, every failure stops at its handshake); `-DNAIVE_RESTORE` runs the same arms
+  against a plain register restore and fails 19.
 - `tools/test_gpu_policy.c`: the per-process choice. `tools/test_hybrid_rtd3.c`: idle power-down counts.
 - NMX tree: `tools/test_nmx_hybrid.cpp`.
 - `tools/hy_nometal_bucket.py`: sorts kernel logs from machines with no Metal device into the causes the accelerator logs

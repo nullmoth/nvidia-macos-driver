@@ -44,7 +44,8 @@ int main(void)
     ARM("no boot-arg: off", nmh_level_parse(0, 1) == NMH_OFF);
     ARM("nmhybrid=1: copy", nmh_level_parse(1, 1) == NMH_COPY);
     ARM("nmhybrid=2: import", nmh_level_parse(1, 2) == NMH_IMPORT);
-    ARM("nmhybrid=0, 3 and -1 are off", nmh_level_parse(1, 0) == NMH_OFF && nmh_level_parse(1, 3) == NMH_OFF && nmh_level_parse(1, -1) == NMH_OFF);
+    ARM("nmhybrid=3: owned buffers", nmh_level_parse(1, 3) == NMH_OWNED);
+    ARM("nmhybrid=0, 4 and -1 are off", nmh_level_parse(1, 0) == NMH_OFF && nmh_level_parse(1, 4) == NMH_OFF && nmh_level_parse(1, -1) == NMH_OFF);
 
     /* ---- level 1: the copy */
     memset(&shadow, 0, sizeof shadow); sh.valid = 0; memset(dst, 0, sizeof dst);
@@ -206,6 +207,64 @@ int main(void)
       ARM("losing the provider re-arms", nmh_sm_step(&m, NMH_EV_PROVIDER_GONE, 0) == NMH_S_ARMED);
       ARM("every refusal has a name", strcmp(nmh_why_name(NMH_E_STUCK), "a flip never reached the screen") == 0 && strcmp(nmh_why_name(NMH_E_FMT), "surface is not 8-bit BGRA") == 0); }
 
+
+
+    /* ---- level 3: buffers the panel driver owns */
+    { struct nmh_own o; nmh_own_init(&o);
+      int a = nmh_own_acquire(&o);
+      ARM("a writer gets a free buffer", a == 0 && o.st[0] == NMH_OB_WRITER);
+      ARM("only one writer at a time", nmh_own_acquire(&o) == -1);
+      ARM("a buffer another writer holds cannot be presented", nmh_own_present(&o, 1) == NMH_E_BUSY);
+      ARM("presenting the writer's own buffer queues the flip", nmh_own_present(&o, a) == NMH_OK && o.queued == 0 && o.st[0] == NMH_OB_QUEUED);
+      int b = nmh_own_acquire(&o);
+      ARM("the next writer gets another buffer while the flip is queued", b == 1);
+      ARM("a second flip cannot be queued before the first lands", nmh_own_present(&o, b) == NMH_E_BUSY);
+      nmh_own_landed(&o);
+      ARM("a landed flip makes its buffer live", o.live == 0 && o.st[0] == NMH_OB_LIVE && o.queued == -1);
+      ARM("now the second buffer can be presented", nmh_own_present(&o, b) == NMH_OK);
+      nmh_own_landed(&o);
+      ARM("the buffer that was on screen is free again, the new one is live", o.st[0] == NMH_OB_FREE && o.st[1] == NMH_OB_LIVE && o.live == 1);
+      int c = nmh_own_acquire(&o), d;
+      ARM("the live buffer is never handed to a writer", c == 0);
+      nmh_own_abort(&o, c);
+      ARM("a writer that gives up returns the buffer without showing it", o.st[0] == NMH_OB_FREE && o.live == 1);
+      c = nmh_own_acquire(&o); nmh_own_present(&o, c); d = -9;
+      ARM("buffers cannot be freed while a flip is queued", !nmh_own_may_free(&o));
+      nmh_own_landed(&o); (void)d;
+      ARM("nor while one is on screen", !nmh_own_may_free(&o));
+      nmh_own_home(&o);
+      ARM("going home frees every buffer and the buffers may then be released", o.live == -1 && o.st[0] == NMH_OB_FREE && o.st[1] == NMH_OB_FREE && nmh_own_may_free(&o));
+      c = nmh_own_acquire(&o); nmh_own_present(&o, c); nmh_own_flip_failed(&o);
+      ARM("a flip that never landed leaves nothing queued and nothing assumed live", o.queued == -1 && o.live == -1 && o.st[c] == NMH_OB_FREE);
+      ARM("a writer in progress keeps its buffer through home", (c = nmh_own_acquire(&o), nmh_own_home(&o), o.st[c] == NMH_OB_WRITER));
+      struct nmh_own full; nmh_own_init(&full); full.st[0] = full.st[1] = full.st[2] = NMH_OB_LIVE; full.live = 0;
+      ARM("with every buffer taken the caller is told to copy the old way", nmh_own_acquire(&full) == -1); }
+    /* ---- start-up controls */
+    ARM("nmhybriddelay absent is 0", nmh_delay_parse(0, 45) == 0);
+    ARM("nmhybriddelay=45 waits 45 s", nmh_delay_parse(1, 45) == 45);
+    ARM("nmhybriddelay is capped: 121, 0 and -3 mean no wait", nmh_delay_parse(1, 121) == 0 && nmh_delay_parse(1, 0) == 0 && nmh_delay_parse(1, -3) == 0);
+    ARM("nmhybriddelay=120 is the longest", nmh_delay_parse(1, 120) == 120);
+    ARM("a healthy NVIDIA driver: the panel driver goes ahead", nmh_stand_down_why(0, 0, 0, 2) == NMH_STAY_NONE && nmh_stand_down_why(0, 0, 1, 2) == NMH_STAY_NONE);
+    ARM("-nvoff: stands down", nmh_stand_down_why(1, 0, 0, 2) == NMH_STAY_NVOFF);
+    ARM("the picker's remove flag: stands down", nmh_stand_down_why(0, 1, 0, 2) == NMH_STAY_REMOVE);
+    ARM("two starts that never lit a display: stands down", nmh_stand_down_why(0, 0, 2, 2) == NMH_STAY_GUARD && nmh_stand_down_why(0, 0, 5, 2) == NMH_STAY_GUARD);
+    ARM("every stand-down reason has a name for the log", nmh_stay_name(NMH_STAY_NVOFF)[0] && nmh_stay_name(NMH_STAY_REMOVE)[0] && nmh_stay_name(NMH_STAY_GUARD)[0] && !nmh_stay_name(NMH_STAY_NONE)[0]);
+    { int ok = 1; for (int i = 1; i < NMH_STEP__COUNT; i++) if (!nmh_step_name(i)[0] || !strcmp(nmh_step_name(i), "?") || !strcmp(nmh_step_name(i), nmh_step_name(i - 1))) ok = 0;
+      ARM("every step has its own name", ok && !strcmp(nmh_step_name(NMH_STEP__COUNT), "?")); }
+
+    /* ---- flat frames */
+    { struct nmh_flat f = {0}; int held = 0, shown_after = -1;
+      ARM("nmflatskip off: a flat frame is never held", nmh_flat_hold(&f, 1, 0) == 0);
+      for (int i = 0; i < 10; i++) { if (nmh_flat_hold(&f, 1, 3)) held++; else { shown_after = i; break; } }
+      ARM("three flat frames in a row are held, the fourth is shown", held == 3 && shown_after == 3);
+      ARM("a frame with content is never held and resets the count", nmh_flat_hold(&f, 0, 3) == 0 && f.held == 0);
+      ARM("a one-frame black blink is hidden", nmh_flat_hold(&f, 1, 3) == 1 && nmh_flat_hold(&f, 0, 3) == 0);
+      ARM("a steady flat screen still reaches the panel (one frame in four)", (nmh_flat_hold(&f, 1, 3), nmh_flat_hold(&f, 1, 3), nmh_flat_hold(&f, 1, 3), nmh_flat_hold(&f, 1, 3)) == 0);
+      ARM("nmflatskip is 0 to 8", nmh_flat_parse(1, 3) == 3 && nmh_flat_parse(1, 9) == 0 && nmh_flat_parse(0, 3) == 0 && nmh_flat_parse(1, 8) == 8);
+      uint32_t a[64], b[64]; for (int i = 0; i < 64; i++) { a[i] = 0xff102030u; b[i] = a[i]; } b[40] = 0xff102031u;
+      ARM("64 equal samples are flat, alpha ignored", nmh_samples_flat(a, 64) && (a[3] = 0x00102030u, nmh_samples_flat(a, 64)));
+      ARM("one different sample is not flat", !nmh_samples_flat(b, 64));
+    }
     printf("%d failed\n", fails);
     return fails != 0;
 }

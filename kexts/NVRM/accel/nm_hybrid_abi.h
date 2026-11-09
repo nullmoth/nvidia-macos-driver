@@ -18,12 +18,17 @@
 #pragma once
 
 #define NMH_FN_IMPORT      "nmHybridImport"
-#define NMH_ABI_VERSION    1u
+#define NMH_ABI_VERSION    2u
 
 #define NMH_OP_QUERY 1u
 #define NMH_OP_MAP   2u
 #define NMH_OP_FLIP  3u
 #define NMH_OP_HOME  4u
+/* level 3, buffers the panel driver owns: ACQUIRE lends a free buffer (kva, in q.kva; pitch is the scan-out's), the caller
+ * fills it and sends PRESENT (flip to it) or ABORT (give it back unshown) */
+#define NMH_OP_ACQUIRE 5u
+#define NMH_OP_PRESENT 6u
+#define NMH_OP_ABORT   7u
 
 struct NMHybridReq {
     unsigned int       version;     /* NMH_ABI_VERSION */
@@ -36,5 +41,6 @@ struct NMHybridReq {
     unsigned int       evictedId;   /* QUERY out: the surface that lost the slot (release what was held for it), or 0 */
     unsigned int       npages;      /* MAP in: number of 4 KiB pages */
     const unsigned long long *pages;/* MAP in: bus address of each page */
+    void              *kva;         /* ACQUIRE out: the buffer */
     int                result;      /* out: enum nmh_why, 0 = ok */
 };
