@@ -61,8 +61,12 @@ half-width equal to the radius, facing the ray. This is an approximation of the 
     -0.02 to -0.1 behind the end point, `curve_parameter` clamped to 0 or 1). The other three flat cases agree to 1e-4, so the ribbon
     reaches past the end point for this basis. A ribbon whose end edge is not perpendicular to the tangent would do it; the data so far
     does not say what the edge is.
-- **M4 mini: not run.** The workflow classifier on this machine refused the Metal run on the M4 (Raven shares it) although the lead allowed small
-  bounded tests; I did not work around it. Only the M6 is measured; there is no comparison between generations.
+- **M4 mini (macOS 26.5.1): the same.** One short oracle process on the M4 (24 cases, then the probe), 120 s alarm, scratch directory, removed afterwards:
+  all 24 cases accepted, no refusal, no hiccup. `oracle/fixtures/fixture_apple_m4.txt` and `fixture_apple_m4_probe.txt` are the dumps. Against the
+  model it passes and fails the same 22 and 2 cases as the M6. M4 against M6, ray by ray: identical hit type, primitive id and parameter on all
+  13,824 rays of the 24-case run except 3 rays whose distance differs in the last bit (`408b2bc1` against `408b2bc2`), and 11 of the 1,728
+  probe rays that differ by 1 to 6 units in the last place of the distance or the parameter. No difference between the two Apple generations
+  is visible at this resolution, so the Catmull-Rom end behaviour is Apple's, not the M6's.
 - **The oracle needed two fixes before it measured anything**: a Metal `float3` member takes 16 bytes in a struct, so the 32-byte ray
   on the host did not line up (every ray missed); the ray is now two `float4`. `intersector<curve_data>` alone works for a primitive
   acceleration structure, without instancing.
