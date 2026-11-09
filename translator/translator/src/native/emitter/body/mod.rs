@@ -232,6 +232,28 @@ fn narrowing_vector_store_target(
         .then_some((target, indices))
 }
 
+/// The scalar array at the start of an aggregate that a vector load reads whole: one array element per lane, each as wide as
+/// a lane, so the array and the vector cover the same bytes.
+fn leading_array_covered_by_vector(pointee: &LlType, vector: &LlType) -> Option<(LlType, Vec<u32>)> {
+    let LlType::Vector(lane_ty, lanes) = vector else {
+        return None;
+    };
+    first_aggregate_leaf(
+        pointee,
+        &|candidate| match candidate {
+            LlType::Array(element, count) => {
+                count == lanes
+                    && is_scalar_storage_type(element)
+                    && is_scalar_storage_type(lane_ty)
+                    && bitcast_width(element).is_some()
+                    && bitcast_width(element) == bitcast_width(lane_ty)
+            }
+            _ => false,
+        },
+        false,
+    )
+}
+
 fn leading_vector_store_target(pointee: &LlType) -> Option<(LlType, Vec<u32>)> {
     first_aggregate_leaf(pointee, &|t| matches!(t, LlType::Vector(_, _)), false)
 }

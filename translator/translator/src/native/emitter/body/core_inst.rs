@@ -2466,6 +2466,16 @@ impl Emitter {
                 )? {
                     return Ok(());
                 }
+                if self.emit_leading_array_vector_load(
+                    result,
+                    &pointee,
+                    &result_ty,
+                    &load.ptr,
+                    ptr,
+                    instructions,
+                )? {
+                    return Ok(());
+                }
                 if self.emit_first_pointer_aggregate_reinterpret_load(
                     &name,
                     result,
