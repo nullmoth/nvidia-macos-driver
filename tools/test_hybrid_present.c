@@ -41,11 +41,14 @@ static uint64_t rd_tab(void *c, uint64_t i) { return ((uint64_t *)c)[i]; }
 
 /* fakes for the level-4 order test: they record the order of the calls and use the real ownership model */
 static struct nmh_own own; static char order[16]; static int on, ce_result, render_result, present_result, acquired_idx;
+static int lock_depth, lock_at_present, lock_at_copy, lock_at_render, lock_leaks, lookup_result;
 static void rec(char c) { if (on < 15) order[on++] = c; order[on] = 0; }
-static int f_render(void *c) { (void)c; rec('W'); return render_result; }
+static int f_lookup(void *c) { (void)c; rec('L'); if (lookup_result) return -1; lock_depth++; return 0; }
+static void f_unlock(void *c) { (void)c; rec('U'); lock_depth--; if (lock_depth < 0) lock_leaks++; }
+static int f_render(void *c) { (void)c; rec('W'); lock_at_render = lock_depth; return render_result; }
 static int f_acquire(void *c, int *i) { (void)c; rec('A'); *i = nmh_own_acquire(&own); acquired_idx = *i; return *i < 0; }
-static int f_copy(void *c, int i) { (void)c; (void)i; rec('C'); return ce_result; }
-static int f_present(void *c, int i) { (void)c; rec('P'); if (present_result) return -1; nmh_own_present(&own, i); nmh_own_landed(&own); return 0; }
+static int f_copy(void *c, int i) { (void)c; (void)i; rec('C'); lock_at_copy = lock_depth; return ce_result; }
+static int f_present(void *c, int i) { (void)c; rec('P'); lock_at_present = lock_depth; if (present_result) return -1; nmh_own_present(&own, i); nmh_own_landed(&own); return 0; }
 static void f_abort(void *c, int i) { (void)c; rec('X'); nmh_own_abort(&own, i); }
 static void f_quar(void *c, int i) { (void)c; rec('Q'); nmh_own_quarantine(&own, i); }
 
@@ -260,23 +263,28 @@ int main(void)
     ARM("a surface longer than the GPU memory behind it or the buffer is refused", nmh_dma_eligible(NMH_DMA, 1, NMH_FMT_BGRA, 1920, 1080, 7680, 1920, 1080, 7680, 7u << 20, 9u << 20) == NMH_E_DMALEN && nmh_dma_eligible(NMH_DMA, 1, NMH_FMT_BGRA, 1920, 1080, 7680, 1920, 1080, 7680, 9u << 20, 7u << 20) == NMH_E_DMALEN);
     ARM("an eligible frame is accepted", nmh_dma_eligible(NMH_DMA, 1, NMH_FMT_BGRA, 1920, 1080, 7680, 1920, 1080, 7680, 9u << 20, 9u << 20) == NMH_OK);
     {   /* fakes that record the order of the calls and use the real ownership model */
-        struct nmh_dma_ops ops = { &own, f_render, f_acquire, f_copy, f_present, f_abort, f_quar };
-        nmh_own_init(&own); on = 0; order[0] = 0; ce_result = 0; render_result = 0; present_result = 0;
-        ARM("a good frame: render wait, acquire, copy, then present, in that order", nmh_dma_frame(&ops) == NMH_DMA_DONE && !strcmp(order, "WACP") && own.live == acquired_idx);
+        struct nmh_dma_ops ops = { &own, f_render, f_lookup, f_unlock, f_acquire, f_copy, f_present, f_abort, f_quar };
+        nmh_own_init(&own); on = 0; order[0] = 0; ce_result = 0; render_result = 0; present_result = 0; lookup_result = 0; lock_depth = 0; lock_leaks = 0;
+        ARM("a good frame: render wait, acquire, copy, then present, in that order", nmh_dma_frame(&ops) == NMH_DMA_DONE && !strcmp(order, "WLACUP") && own.live == acquired_idx);
+        ARM("the accelerator lock is not held while the GPU is waited for", lock_at_render == 0);
+        ARM("the accelerator lock is held across the lookup and the copy", lock_at_copy == 1);
+        ARM("the accelerator lock is released before the flip wait", lock_at_present == 0 && lock_depth == 0);
         nmh_own_init(&own); on = 0; render_result = 1;
-        ARM("a surface the GPU is still drawing is not copied: nothing is acquired", nmh_dma_frame(&ops) == NMH_DMA_RENDER && !strcmp(order, "W"));
+        ARM("a surface the GPU is still drawing is not copied: nothing is acquired", nmh_dma_frame(&ops) == NMH_DMA_RENDER && !strcmp(order, "W") && lock_depth == 0);
         nmh_own_init(&own); on = 0; render_result = 0; ce_result = 1;
-        ARM("a copy that failed cleanly gives the buffer back and presents nothing", nmh_dma_frame(&ops) == NMH_DMA_COPY_FAILED && !strcmp(order, "WACX") && own.st[0] == NMH_OB_FREE);
+        ARM("a copy that failed cleanly gives the buffer back and presents nothing", nmh_dma_frame(&ops) == NMH_DMA_COPY_FAILED && !strcmp(order, "WLACUX") && own.st[0] == NMH_OB_FREE && lock_depth == 0);
         nmh_own_init(&own); on = 0; ce_result = 2;
-        ARM("a copy that timed out is quarantined and never presented", nmh_dma_frame(&ops) == NMH_DMA_COPY_TIMEOUT && !strcmp(order, "WACQ") && own.st[0] == NMH_OB_QUARANTINE);
+        ARM("a copy that timed out is quarantined and never presented", nmh_dma_frame(&ops) == NMH_DMA_COPY_TIMEOUT && !strcmp(order, "WLACUQ") && own.st[0] == NMH_OB_QUARANTINE && lock_depth == 0);
         int a = nmh_own_acquire(&own); nmh_own_abort(&own, a); int b = nmh_own_acquire(&own); nmh_own_present(&own, b); nmh_own_landed(&own);
         int c = nmh_own_acquire(&own); nmh_own_abort(&own, c); int d = nmh_own_acquire(&own);
         ARM("a quarantined buffer is never handed out again", a == 1 && b == 1 && c == 2 && d == 2);
         ARM("and the buffers cannot be released while one may still be written", !nmh_own_may_free(&own) && (nmh_own_home(&own), own.st[0] == NMH_OB_QUARANTINE));
         nmh_own_init(&own); on = 0; ce_result = 0; present_result = 1;
-        ARM("a flip that fails after a good copy gives the buffer back", nmh_dma_frame(&ops) == NMH_DMA_PRESENT_FAILED && !strcmp(order, "WACPX") && own.st[0] == NMH_OB_FREE);
+        ARM("a flip that fails after a good copy gives the buffer back", nmh_dma_frame(&ops) == NMH_DMA_PRESENT_FAILED && !strcmp(order, "WLACUPX") && own.st[0] == NMH_OB_FREE && lock_depth == 0);
         nmh_own_init(&own); own.st[0] = own.st[1] = own.st[2] = NMH_OB_LIVE; on = 0; present_result = 0;
-        ARM("with every buffer taken nothing is copied", nmh_dma_frame(&ops) == NMH_DMA_NO_BUFFER && !strcmp(order, "WA"));
+        ARM("with every buffer taken nothing is copied and the lock is given back", nmh_dma_frame(&ops) == NMH_DMA_NO_BUFFER && !strcmp(order, "WLAU") && lock_depth == 0);
+        nmh_own_init(&own); on = 0; lookup_result = 1;
+        ARM("a frame that is not eligible takes no buffer and leaves no lock", nmh_dma_frame(&ops) == NMH_DMA_NOT_ELIGIBLE && !strcmp(order, "WL") && lock_depth == 0 && lock_leaks == 0);
     }
     /* ---- start-up controls */
     ARM("nmhybriddelay absent is 0", nmh_delay_parse(0, 45) == 0);
