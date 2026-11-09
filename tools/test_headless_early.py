@@ -43,18 +43,23 @@ check('the Intel panel driver (a head of this accelerator) never triggers the ea
       'metaCast("NMIntelFB")) break' in own and own.index('NMIntelFB') < own.index('vendor-id'))
 hc = body('static void headlessCheck(void *p0, void *)')
 check('early hand-over needs both conditions', 'const bool early = other && headlessNoDisplayHere();' in hc)
-check('without them it polls again until the deadline', 'if (!early && me->fHeadlessWaited < kHeadlessDeadlineSec)' in hc
+check('without them it polls again until the deadline', 'if (!early && me->fHeadlessWaited < me->fHeadlessDeadlineSec)' in hc
       and 'thread_call_enter_delayed(me->fHeadlessCall' in hc)
 check('the re-poll path releases the registration lock', hc.count('IOLockUnlock(me->fRegLock)') >= 2)
 check('a published head still stops the check', 'me->fFB ? "a display head published"' in hc)
 check('the hand-over never arms WindowServer', 'NVAccelHeadless' in hc and 'nvaccelfb' not in hc.split('const bool early')[1])
 # 2.5.3 field logs: a desktop whose only GPU is this card had the name restored at the deadline, CoreDisplay asked the
 # plugin for WindowServer's device, the plugin refused a headless GPU, and WindowServer aborted every ten seconds.
-dl = hc.split('if (!early && me->fHeadlessWaited < kHeadlessDeadlineSec)')[1]
+dl = hc.split('if (!early && me->fHeadlessWaited < me->fHeadlessDeadlineSec)')[1]
 withhold = dl.find('if (!other && strcmp(owner, "NMIntelFB") != 0)')
 check('at the deadline with no other GPU showing the desktop, the plugin name stays withheld',
       withhold != -1 and withhold < dl.index('setProperty("MetalPluginName"'))
 check('and that path releases the registration lock and returns before the hand-over',
       'IOLockUnlock(me->fRegLock);\n                return;' in dl[withhold:dl.index('setProperty("MetalPluginName"')])
 check('the Intel panel driver case keeps the hand-over', 'strcmp(owner, "NMIntelFB") != 0' in dl)
+# the deadline starts after auto-go's settle delay: NVAccel starts at once, heads only publish once the settle has passed
+check('the deadline is the base wait plus the settle delay NVRM published on the PCI device',
+      'nvrmHeadlessDeadlineSec(kHeadlessDeadlineSec, settleMs)' in acc and '"nvrm-autogo-settle-ms"' in acc)
+check('negative control: a deadline compared against the fixed constant is not accepted',
+      'me->fHeadlessWaited < kHeadlessDeadlineSec' not in hc)
 sys.exit(1 if fails else 0)
