@@ -6897,7 +6897,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 - (NSUInteger)getBackgroundGPUPriority { return 2; }
 - (void)setSubmissionQueue:(id)q { static int said; if (!said++) nvlog("setSubmissionQueue: %s ignored - this backend has no submission queue (said once)", q ? "a queue" : "nil"); }
 - (BOOL)setGPUPriority:(NSUInteger)priority {
-    nvlog("queue: GPU priority hint %lu unavailable; retaining fixed backend priority", (unsigned long)priority);
+    nvlog("queue: GPU priority hint %lu: a command queue cannot change its channel group once made; a game process is raised at device creation with NVMTL_GAME_GPU_PRIORITY=1 (nvmtl_game_priority.h)", (unsigned long)priority);
     return NO;
 }
 - (BOOL)setBackgroundGPUPriority:(NSUInteger)priority {
