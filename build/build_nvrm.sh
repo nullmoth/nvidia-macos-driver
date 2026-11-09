@@ -16,10 +16,11 @@ NV="$OGKM/src/nvidia"; KMS="$OGKM/src/nvidia-modeset"
 KMSLIB=${KMS_ARCHIVE:-$KMS/_out/Darwin_x86_64/libnvkms.a}
 [ -f "$KMSLIB" ] || { echo "STOP: no NVKMS archive at $KMSLIB"; exit 1; }
 # Every C++ source the kext needs, listed; a new .cpp that is not named here stops the build instead of being left out.
-CXX_SOURCES=( NVRM.cpp nv_rtd3.cpp nv_xnu_power.cpp nv_xnu_stubs.cpp nvkms_shaders.cpp nvrm_fbinfo.cpp nvrm_gpuva.cpp
+CXX_SOURCES=( NVRM.cpp nv_xnu_power.cpp nv_xnu_stubs.cpp nvkms_shaders.cpp nvrm_fbinfo.cpp nvrm_gpuva.cpp
               nvrm_surfshare.cpp os-nvkms-xnu.cpp os-xnu.cpp os-xnu2.cpp )
-# nvrm_ddc.cpp joins the list when it exists (w29-display); the check below keeps the list honest either way.
-[ -f "$SRC/nvrm_ddc.cpp" ] && CXX_SOURCES+=( nvrm_ddc.cpp )
+# Sources that later trees added and earlier ones do not have (so an older tag can be rebuilt with this script): nv_rtd3.cpp
+# (D3cold monitor) and nvrm_ddc.cpp (DDC/CI). The check below keeps the list honest either way.
+for s in nv_rtd3.cpp nvrm_ddc.cpp; do [ -f "$SRC/$s" ] && CXX_SOURCES+=( "$s" ); done
 for f in "$SRC"/*.cpp; do
   b=$(basename "$f"); found=0
   for s in "${CXX_SOURCES[@]}"; do [ "$s" = "$b" ] && found=1; done
