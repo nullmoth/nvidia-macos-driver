@@ -28,6 +28,9 @@ def main():
         sh = rd(b)
         print("==", path)
         for r in sh:
+            if r["name"].startswith(".nv.constant0"):
+                print("%s size=0x%x   (0x380 + parameter bytes on sm_100 and later, 0x160 + parameter bytes before sm_90)" % (r["name"], r["sz"]))
+        for r in sh:
             if r["t"] not in (4, 9) or not r["sz"]:
                 continue
             tgt, sym = sh[r["inf"]], sh[r["lk"]]
