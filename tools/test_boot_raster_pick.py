@@ -41,6 +41,7 @@ fixture = r'''
 using NvU32=uint32_t; using NvU64=uint64_t; using NvBool=bool;
 enum { NV_TRUE=1, NV_FALSE=0 };
 #define FBLOG(...) ((void)0)
+#define FBLOGV(...) ((void)0)
 struct NvKmsKapiDisplayModeTimings { NvU32 pixelClockHz=0,hVisible=0,vVisible=0,hTotal=0,vTotal=0,refreshRate=0; };
 struct NvKmsKapiDisplayMode { NvKmsKapiDisplayModeTimings timings; };
 struct Row { NvKmsKapiDisplayMode m; bool valid; bool preferred; };
