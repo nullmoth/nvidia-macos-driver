@@ -2152,15 +2152,37 @@ static IOACPIPlatformDevice *rtd3Acpi(NVRM *n)
     return a;
 }
 static int rtd3Heads(void *) {
-    OSDictionary *m = IOService::serviceMatching("NVRMFramebuffer"); if (!m) return 1;
+    // Every framebuffer: this GPU's own heads, and (hybrid switch on) another GPU's panel published as a head of ours.
+    int hy = 0; { int lv = 0; const int present = PE_parse_boot_argn("nmhybrid", &lv, sizeof(lv)); hy = present && (lv == 1 || lv == 2); }
+    OSDictionary *m = IOService::serviceMatching("IOFramebuffer"); if (!m) return 1;   // cannot look: treat as lit
     OSIterator *it = IOService::getMatchingServices(m); m->release();
-    int n = 0; if (it) { while (it->getNextObject()) n++; it->release(); }
-    return n;
+    int own = 0, foreign = 0;
+    if (it) {
+        while (OSObject *o = it->getNextObject()) {
+            IOService *s = OSDynamicCast(IOService, o); if (!s) continue;
+            if (s->metaCast("NVRMNVDAFramebuffer")) own++;
+            else if (OSNumber *id = OSDynamicCast(OSNumber, s->getProperty("IOFBDependentID"))) { if (id->unsigned64BitValue() == 0x4E56524D00000001ull) foreign++; }
+        }
+        it->release();
+    }
+    return nv_rtd3_heads_lit(own, foreign, hy);
 }
 static int rtd3Clients(void *ctx) {
-    IOService *n = (IOService *)ctx; int c = 0;
-    if (OSIterator *it = n->getClientIterator()) { while (OSObject *o = it->getNextObject()) if (OSDynamicCast(IOUserClient, o)) c++; it->release(); }
-    return c;
+    IOService *n = (IOService *)ctx; int rm = 0, accel = 0;
+    if (OSIterator *it = n->getClientIterator()) { while (OSObject *o = it->getNextObject()) if (OSDynamicCast(IOUserClient, o)) rm++; it->release(); }
+    // Metal applications attach to the accelerator, not to NVRM
+    if (OSDictionary *m = IOService::serviceMatching("IOAccelerator")) {
+        if (OSIterator *it = IOService::getMatchingServices(m)) {
+            while (OSObject *o = it->getNextObject()) {
+                IOService *a = OSDynamicCast(IOService, o); const char *cn = a ? a->getMetaClass()->getClassName() : nullptr;
+                if (!cn || strncmp(cn, "NV", 2)) continue;
+                if (OSIterator *ci = a->getClientIterator()) { while (OSObject *c = ci->getNextObject()) if (OSDynamicCast(IOUserClient, c)) accel++; ci->release(); }
+            }
+            it->release();
+        }
+        m->release();
+    }
+    return nv_rtd3_clients_total(rm, accel);
 }
 void NVRM::rtd3Arm()
 {
