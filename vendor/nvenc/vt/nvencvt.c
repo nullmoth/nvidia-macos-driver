@@ -901,11 +901,16 @@ static void b_finalize(CMBaseObjectRef o)
 }
 static CFStringRef b_desc(CMBaseObjectRef o) { (void)o; return CFSTR("nvenc H.264 encoder"); }
 
-static CMBaseClass gBase = { .version = 1, .derivedStorageSize = sizeof(void *), .invalidate = b_invalidate, .finalize = b_finalize,
-                             .copyDebugDescription = b_desc, .copyProperty = b_copyProperty, .setProperty = b_setProperty };
-static const EncoderClass gEnc = { .version = 1, .startSession = e_startSession, .encodeFrame = e_encodeFrame,
-                                   .completeFrames = e_completeFrames, .copySupportedPropertyDictionary = e_copySupported };
-static const EncoderVTable gVT = { .base = { NULL, &gBase }, .encoderClass = &gEnc };
+// CMBaseClass is packed to 4 bytes (CoreMedia's layout), so its function pointers sit at offsets 12 + 8n. Held 4 bytes
+// into an 8-byte-aligned wrapper they fall on 8-byte boundaries, which lets the linker bind them with chained fixups;
+// the class itself is unchanged.
+static struct { uint32_t pad; CMBaseClass c; } __attribute__((aligned(8))) gBaseHeld = { 0, { .version = 1, .derivedStorageSize = sizeof(void *), .invalidate = b_invalidate, .finalize = b_finalize,
+                             .copyDebugDescription = b_desc, .copyProperty = b_copyProperty, .setProperty = b_setProperty } };
+// packed to 4 bytes like CMBaseClass above: the same 8-byte-aligned wrapper puts its function pointers (offsets 4 + 8n) on
+// 8-byte boundaries; the table itself is unchanged.
+static const struct { uint32_t pad; EncoderClass c; } __attribute__((aligned(8))) gEncHeld = { 0, { .version = 1, .startSession = e_startSession, .encodeFrame = e_encodeFrame,
+                                   .completeFrames = e_completeFrames, .copySupportedPropertyDictionary = e_copySupported } };
+static const EncoderVTable gVT = { .base = { NULL, &gBaseHeld.c }, .encoderClass = &gEncHeld.c };
 
 __attribute__((visibility("default"))) OSStatus NVEncVT_CreateInstance(FourCharCode codec, CFAllocatorRef al, VTVideoEncoderRef *out)
 {

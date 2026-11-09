@@ -3,9 +3,7 @@
 # Every non-zero line names what is left and why it is not fixed in source.
 #
 plugin 0
-# nvencvt: the linker's unaligned-pointer notes for gBase/gDBase, CoreMedia's CMBaseClass, whose layout is packed to
-#   4 bytes by Apple's ABI
-nvencvt 22
+nvencvt 0
 nvrm 0
 nvaccel 0
 primary-selector 0
