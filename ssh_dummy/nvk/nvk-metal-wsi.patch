@@ -1,0 +1,61 @@
+diff -ruN a/src/nouveau/vulkan/nvk_instance.c b/src/nouveau/vulkan/nvk_instance.c
+--- a/src/nouveau/vulkan/nvk_instance.c	2026-11-08 21:51:25
++++ b/src/nouveau/vulkan/nvk_instance.c	2026-11-08 21:52:52
+@@ -43,6 +43,9 @@
+ #ifdef VK_USE_PLATFORM_WAYLAND_KHR
+    .KHR_wayland_surface = true,
+ #endif
++#ifdef VK_USE_PLATFORM_METAL_EXT
++   .EXT_metal_surface = true,
++#endif
+ #ifdef VK_USE_PLATFORM_XCB_KHR
+    .KHR_xcb_surface = true,
+ #endif
+diff -ruN a/src/nouveau/vulkan/nvk_physical_device.h b/src/nouveau/vulkan/nvk_physical_device.h
+--- a/src/nouveau/vulkan/nvk_physical_device.h	2026-11-08 21:51:25
++++ b/src/nouveau/vulkan/nvk_physical_device.h	2026-11-08 21:52:52
+@@ -106,7 +106,8 @@
+ #if defined(VK_USE_PLATFORM_WAYLAND_KHR) || \
+     defined(VK_USE_PLATFORM_XCB_KHR) || \
+     defined(VK_USE_PLATFORM_XLIB_KHR) || \
+-    defined(VK_USE_PLATFORM_DISPLAY_KHR)
++    defined(VK_USE_PLATFORM_DISPLAY_KHR) || \
++    defined(VK_USE_PLATFORM_METAL_EXT)
+ #define NVK_USE_WSI_PLATFORM
+ #endif
+ 
+diff -ruN a/src/nouveau/vulkan/nvk_wsi.c b/src/nouveau/vulkan/nvk_wsi.c
+--- a/src/nouveau/vulkan/nvk_wsi.c	2026-10-05 06:47:14
++++ b/src/nouveau/vulkan/nvk_wsi.c	2026-11-08 21:52:52
+@@ -22,8 +22,18 @@
+    int display_fd = -1;
+    if (pdev->vk.instance->enabled_extensions.KHR_display)
+       display_fd = nvkmd_pdev_get_drm_primary_fd(pdev->nvkmd);
++   /* Windows on macOS are CAMetalLayers. The Metal swapchain's hardware path
++    * binds a drawable texture to a VkImage, which only a Metal-native driver
++    * can do. The software path renders into a linear host-visible buffer
++    * image and the layer helper copies that into the drawable, which any
++    * driver can provide. */
++#ifdef VK_USE_PLATFORM_METAL_EXT
++   const bool sw_present = true;
++#else
++   const bool sw_present = false;
++#endif
+    struct wsi_device_options wsi_options = {
+-      .sw_device = false
++      .sw_device = sw_present
+    };
+    result = wsi_device_init(&pdev->wsi_device,
+                             nvk_physical_device_to_handle(pdev),
+diff -ruN a/src/vulkan/meson.build b/src/vulkan/meson.build
+--- a/src/vulkan/meson.build	2026-10-05 06:47:14
++++ b/src/vulkan/meson.build	2026-11-08 21:57:20
+@@ -73,7 +73,7 @@
+   vulkan_wsi_list += '-DVK_USE_PLATFORM_METAL_EXT'
+   vulkan_wsi_deps += dependency(
+     'appleframeworks',
+-    modules : ['QuartzCore', 'Metal']
++    modules : ['QuartzCore', 'Metal', 'CoreGraphics']
+   )
+ endif
+ 

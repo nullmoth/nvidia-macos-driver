@@ -184,8 +184,7 @@ static inline int kbl_dell_wdg_find(const uint8_t *wdg, unsigned len, char obj[2
  * light's state and the base value it sits on (msi_table.h is generated from that table). The firmware string is 12
  * characters at controller address 0xA0. An unknown firmware is REFUSED: the plugin writes controller memory only on a
  * firmware that table names. The controller is reached through ACPI's embedded-controller address space. The table gives the
- * address, the base value and the highest state; that the light's state is  base + level  is read from those field names,
- * the driver has no light-control code of its own to confirm it. */
+ * address, the base value and the highest state. The driver BeardOverflow/msi-ec (GPL-2.0) carries the setter and getter. */
 #define KBL_MSI_FW_ADDRESS 0xA0
 #define KBL_MSI_FW_LENGTH  12
 #include "msi_table.h"
@@ -202,18 +201,21 @@ static inline const struct kbl_msi_row *kbl_msi_find(const char *fw)
     return 0;
 }
 
+/* what the msi-ec driver's keyboard-light setter writes: the base value OR-ed with the level 0 to 3 (not added: a base with low
+ * bits set gives a different byte), and what its getter reads: the low two bits of the byte (MSI_EC_KBD_BL_STATE_MASK 0x3). */
+#define KBL_MSI_STATE_MASK 0x03
 static inline unsigned char kbl_msi_value(const struct kbl_msi_row *r, int level)
 {
     if (level < 0) level = 0;
     if (level > r->max_state) level = r->max_state;
-    return (unsigned char)(r->base + level);
+    if (level > KBL_MSI_STATE_MASK) level = KBL_MSI_STATE_MASK;
+    return (unsigned char)(r->base | level);
 }
 
-/* the level a controller byte holds, or -1 when it is outside base .. base + max_state */
 static inline int kbl_msi_level(const struct kbl_msi_row *r, unsigned char v)
 {
-    int l = (int)v - (int)r->base;
-    return l >= 0 && l <= r->max_state ? l : -1;
+    int l = v & KBL_MSI_STATE_MASK;
+    return l <= r->max_state ? l : r->max_state;
 }
 
 /* ---- Dell's descriptor: how big a buffer the BIOS expects ------------------------------------------------------------------

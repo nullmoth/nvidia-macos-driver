@@ -1,0 +1,35 @@
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
+index 41cf695..eaac763 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
+@@ -11,6 +11,7 @@
+ 
+ #include "util/os_misc.h"
+ #include "util/os_time.h"
++#include "ctrl/ctrl0000/ctrl0000system.h" // NV0000_CTRL_CMD_SYSTEM_GPS_CONTROL
+ #include "util/u_memory.h"
+ #include "vk_log.h"
+ 
+@@ -686,6 +687,22 @@ nvkmd_nvrm_create_pdev(struct vk_object_base *log_obj,
+       }
+    }
+ 
++   /* System power budget. NVRM_610_MAXPOWER_MW=<milliwatts> asks the GPU performance-scaling code for that maximum
++    * power (GPS_CONTROL, command SYS_SET_MAX_POWER, the public root-client control) and reads it back. Unset = nothing is
++    * sent. Whether a board honours it, and whether it can go above the VBIOS default, depends on the firmware. */
++   {
++      const char *mw = nvmtl_cfg_getenv("NVRM_610_MAXPOWER_MW");
++      unsigned long want = mw ? strtoul(mw, NULL, 10) : 0;
++      if (want >= 1000 && want <= 1000000) {
++         NV0000_CTRL_SYSTEM_GPS_CONTROL_PARAMS gp = { .command = NV0000_CTRL_CMD_SYSTEM_GPS_SYS_SET_MAX_POWER, .locale = 0, .data = (NvU32)want };
++         NV_STATUS gs = nvRmApiControl(&rm, pdev->hClient, NV0000_CTRL_CMD_SYSTEM_GPS_CONTROL, &gp, sizeof gp);
++         NV0000_CTRL_SYSTEM_GPS_CONTROL_PARAMS gr = { .command = NV0000_CTRL_CMD_SYSTEM_GPS_SYS_GET_MAX_POWER, .locale = 0, .data = 0 };
++         NV_STATUS gq = gs == NV_OK ? nvRmApiControl(&rm, pdev->hClient, NV0000_CTRL_CMD_SYSTEM_GPS_CONTROL, &gr, sizeof gr) : gs;
++         if (nvkmd_nvrm_diag_on())
++            fprintf(stderr, "nvrm: GPS max power %lu mW set rc 0x%x, reads back %u mW (rc 0x%x)\n", want, (unsigned)gs, (unsigned)gr.data, (unsigned)gq);
++      }
++   }
++
+    /* b72 host-pointer import PROBE: pin ONE page as OS-descriptor memory. VK_EXT_external_memory_host is advertised
+     * only if the running kext implements os_lock_user_pages (b72+);  an older kext answers NV_ERR_NOT_SUPPORTED
+     * (the weak stubs) and the plugin keeps its copy path — never a half-working import. NVK_HOST_IMPORT=0 skips it. */
