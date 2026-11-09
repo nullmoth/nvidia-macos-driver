@@ -163,3 +163,7 @@ for the device's life, `0` never boosts.
 `package/stage_nvencvt.sh <pkgroot> <libnvencvt.dylib>` puts the video codec library into a package tree, signs it and refreshes `SHA256SUMS`; `install.sh` stops before changing anything if a package lacks it.
 `tools/nvmtl-smi` (build with `tools/nvmtl-smi/build.sh <patched Mesa tree> <out>`) prints the GPU's temperature, power, clocks, pstate, utilisation, throttle reasons and fan from the resource manager's shared-data block.
 The opt-in D3cold code is `kexts/NVRM/nv_rtd3.cpp` (`nvrtd3=1` and `nvrtd3res=<ACPI path>` on the boot line).
+
+Kernel log volume: start-up, mode changes, sleep and wake, errors and warnings always log. The per-query lines of NVRMFB are on with the boot argument `nvfblog=1`, those of NVAccel with `-nvaccelverbose`. NVRM's lines are all boot, sleep and wake events. The plugin's log lines are rate-limited per call site.
+Opt-in D3cold: `nvrtd3=1` and `nvrtd3res=<ACPI path of the GPU's power resource>` on the boot line. After 60 idle seconds (no framebuffer, no user client) the driver runs its sleep path and then the resource's `_OFF`; the first client or framebuffer runs `_ON` and then the wake path; system wake runs `_ON` before the resume.
+`package/check_package.sh <pkgroot>` is the last step of a package build and fails if `libnvencvt.dylib` is missing, unsigned or not in `SHA256SUMS`.

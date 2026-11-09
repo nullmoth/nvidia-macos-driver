@@ -23,7 +23,7 @@ struct nv_rtd3 {
 
 #define NV_RTD3_IDLE_SECONDS 60
 
-/* 1 when the resource may be switched off now */
+/* 1 when the resource may be switched off now (rm_suspended: the driver is about to be, or is, suspended) */
 static inline int nv_rtd3_may_power_off(const struct nv_rtd3 *s, int rm_suspended, int heads_lit, int clients, unsigned idle_s)
 {
     return s->enabled && s->have_resource && s->state == NV_RTD3_ON && rm_suspended && heads_lit == 0 && clients == 0 &&
@@ -37,3 +37,41 @@ static inline int nv_rtd3_gpu_reachable(const struct nv_rtd3 *s) { return s->sta
  * nothing touches it, and the caller reports the error. */
 static inline void nv_rtd3_off_done(struct nv_rtd3 *s, int ok) { if (ok) s->state = NV_RTD3_OFF; }
 static inline void nv_rtd3_on_done(struct nv_rtd3 *s, int ok) { if (ok) s->state = NV_RTD3_ON; }
+
+/* What the monitor needs from the driver, so a host test can drive the same sequence with fakes. */
+struct nv_rtd3_ops {
+    void *ctx;
+    int  (*heads_lit)(void *ctx);   /* a framebuffer exists for this GPU */
+    int  (*clients)(void *ctx);     /* user clients are attached */
+    void (*suspend)(void *ctx);     /* the driver's system-sleep path: NVKMS, RM standby */
+    void (*resume)(void *ctx);      /* the driver's wake path: RM resume, NVKMS */
+    int  (*acpi_off)(void *ctx);    /* power resource _OFF, 1 on success */
+    int  (*acpi_on)(void *ctx);     /* power resource _ON, 1 on success */
+};
+
+enum { NV_RTD3_TICK_NONE = 0, NV_RTD3_TICK_POWERED_OFF = 1, NV_RTD3_TICK_OFF_FAILED = -1, NV_RTD3_TICK_WOKE = 2, NV_RTD3_TICK_WAKE_FAILED = -2 };
+
+/* One poll. `idle_s` is the seconds the GPU has been idle, kept by the caller; `period_s` is the seconds this tick stands for.
+ * Idle long enough: suspend the driver, then switch the resource off; if that fails the driver is resumed at once and the
+ * GPU stays on. Off and something wants the GPU: switch the resource on first, resume only after it. */
+static inline int nv_rtd3_tick(struct nv_rtd3 *s, const struct nv_rtd3_ops *o, unsigned *idle_s, unsigned period_s)
+{
+    int busy = o->heads_lit(o->ctx) || o->clients(o->ctx);
+    if (s->state == NV_RTD3_ON) {
+        if (busy) { *idle_s = 0; return NV_RTD3_TICK_NONE; }
+        *idle_s += period_s;
+        if (!nv_rtd3_may_power_off(s, 1, 0, 0, *idle_s)) return NV_RTD3_TICK_NONE;
+        o->suspend(o->ctx);
+        int ok = o->acpi_off(o->ctx);
+        nv_rtd3_off_done(s, ok);
+        if (!ok) { o->resume(o->ctx); *idle_s = 0; return NV_RTD3_TICK_OFF_FAILED; }
+        return NV_RTD3_TICK_POWERED_OFF;
+    }
+    if (!busy) return NV_RTD3_TICK_NONE;
+    int ok = o->acpi_on(o->ctx);
+    nv_rtd3_on_done(s, ok);
+    if (!ok) return NV_RTD3_TICK_WAKE_FAILED;
+    o->resume(o->ctx);
+    *idle_s = 0;
+    return NV_RTD3_TICK_WOKE;
+}

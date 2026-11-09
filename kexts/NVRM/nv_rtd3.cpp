@@ -68,3 +68,53 @@ extern "C" int nv_rtd3_power_on(IOACPIPlatformDevice *acpi)
     nv_rtd3_on_done(&g_rtd3, ok);
     return ok;
 }
+
+/* ---- the monitor: a thread call that polls once a second while the GPU is on and four times a second while it is off,
+ * so the first client or framebuffer after power-off wakes it promptly (calls that arrive meanwhile wait at the RM gate
+ * the suspend closed). Armed by the driver once the adapter is up; does nothing unless nvrtd3=1. */
+#include <kern/thread_call.h>
+static thread_call_t g_call;
+static struct nv_rtd3_ops g_ops;
+static unsigned g_idle;
+static volatile int g_stop;
+
+static void nv_rtd3_poll(thread_call_param_t, thread_call_param_t)
+{
+    if (g_stop) return;
+    const unsigned period_ms = g_rtd3.state == NV_RTD3_ON ? 1000 : 250;
+    int r = nv_rtd3_tick(&g_rtd3, &g_ops, &g_idle, 1);
+    if (r == NV_RTD3_TICK_POWERED_OFF) kprintf("NVRM-xnu: RTD3 GPU powered off after %u s idle\n", NV_RTD3_IDLE_SECONDS);
+    else if (r == NV_RTD3_TICK_OFF_FAILED) kprintf("NVRM-xnu: RTD3 power-off failed, GPU resumed and left on\n");
+    else if (r == NV_RTD3_TICK_WOKE) kprintf("NVRM-xnu: RTD3 GPU powered on for a client\n");
+    else if (r == NV_RTD3_TICK_WAKE_FAILED) kprintf("NVRM-xnu: RTD3 power-on FAILED, the GPU stays unreachable\n");
+    uint64_t dl; clock_interval_to_deadline(period_ms, kMillisecondScale, &dl);
+    if (!g_stop) thread_call_enter_delayed(g_call, dl);
+}
+
+extern "C" void nv_rtd3_arm(const struct nv_rtd3_ops *ops)
+{
+    nv_rtd3_init();
+    if (!g_rtd3.enabled || !g_rtd3.have_resource || g_call) return;
+    g_ops = *ops;
+    g_call = thread_call_allocate(nv_rtd3_poll, nullptr);
+    if (!g_call) return;
+    uint64_t dl; clock_interval_to_deadline(1000, kMillisecondScale, &dl);
+    thread_call_enter_delayed(g_call, dl);
+    kprintf("NVRM-xnu: RTD3 armed (idle %u s, resource %s)\n", NV_RTD3_IDLE_SECONDS, g_res);
+}
+
+extern "C" void nv_rtd3_disarm(void)
+{
+    g_stop = 1;
+    if (g_call) { thread_call_cancel_wait(g_call); thread_call_free(g_call); g_call = nullptr; }
+}
+
+/* System wake: the resource must be on before the driver's own resume touches the GPU. */
+extern "C" int nv_rtd3_before_system_resume(void)
+{
+    if (g_rtd3.state != NV_RTD3_OFF) return 1;
+    int ok = g_ops.acpi_on ? g_ops.acpi_on(g_ops.ctx) : 0;
+    nv_rtd3_on_done(&g_rtd3, ok);
+    g_idle = 0;
+    return ok;
+}
