@@ -19,7 +19,7 @@ asked about, and writes conf settings only into the block the installer keeps ac
 | Pre-Turing | out of scope | no GSP firmware; see CARD-SUPPORT.md |
 | eGPU over Thunderbolt | supported with limits | the BAR bridge-window code handles a card behind a downstream port (`kexts/NVRM/NVRM.cpp`, an RTX 3070 eGPU case); hot-unplug runs the device-removed path (`docs/NVRMFB-HOTPLUG-LIFECYCLE.md`, device-lost recovery in the plugin); `tools/nvmtl_gpus.py` marks a card as external. The tunnel carries PCIe x4 at most, so a link below x16 is normal there, not a fault. Not proven on hardware. |
 | PCIe generation and link width | reported by `tools/nvmtl_gpus.py` | reads `IOPCIExpressLinkStatus` against `IOPCIExpressLinkCapabilities`; a narrower link is flagged LOW, a lower speed at full width is reported as idle step-down (cards drop their link speed at idle). `--selftest` has 10 named arms. |
-| Multi-GPU boxes | one accelerated card; the others are visible on the bus | `NVPrimarySelector` picks the card that owns the console (AUTO-PRIMARY-GPU.md). Full multi-GPU acceleration needs NVRM and NVAccel to stop using one global service and one global accelerator object (`gNVRMService` 4 uses, `gAccel` 34 uses in `kexts/NVRM`), one Metal device per card in the plugin, and a registry-entry-keyed RM client. That refactor changes the load path of every card and cannot be proven without a multi-card machine. **Not built in 2.9**; the work and the reason it is withheld are written here so nothing is hidden. |
+| Multi-GPU boxes | one accelerated card; the others are visible on the bus | `NVPrimarySelector` picks the card that owns the console (AUTO-PRIMARY-GPU.md). Acceleration of more than one card is **not built**: [MULTI-GPU-DESIGN.md](MULTI-GPU-DESIGN.md) is the measured inventory (global service and accelerator objects, a one-slot NVKMS table, a first-match plugin lookup) and the five slices that keep the single-card path unchanged. Slices 3 to 5 need a two-card machine. |
 
 ## Display
 
@@ -36,7 +36,7 @@ asked about, and writes conf settings only into the block the installer keeps ac
 | Surround / multi-monitor | `nvfbsurround=<mask>` with hot-plug and audio (`tools/test_fb_surround_wiring.py`) | none |
 | Laptop panel brightness | NVKMS path, eDP AUX path (`nvfbedpbl`) | none |
 | HDMI/DP audio | ELD mapping (`docs/DISPLAY-AUDIO-MAPPING.md`) | none |
-| Control panel | `tools/nullmoth_settings.py` (this release): one catalogue of 17 settings with validation. | A graphical panel in the Mac app is not built (see the report). |
+| Control panel | `tools/nullmoth_settings.py` (this release): one catalogue of 17 settings with validation. | The Mac app has a Driver settings window over the same catalogue (`mac/Sources/SettingsPanel.swift`, branch w29-panel). |
 
 ## Video and compute
 
@@ -47,7 +47,7 @@ asked about, and writes conf settings only into the block the installer keeps ac
 | CUDA | **blocked.** libcuda and the CUDA driver API are NVIDIA's closed code (licence 2.2/2.3 forbids modifying or disassembling it) and there is no open CUDA runtime for NVK. | The open route is not CUDA: OpenCL on NVK compute (Rusticl) and Vulkan compute, both tracked in the compute/OpenCL area. |
 | OpenCL | owned by the compute/OpenCL area (`rel/driver-opencl`) | see that area's report |
 | DirectML-equivalent | Metal Performance Shaders and Core ML run on the Metal path | none |
-| Vulkan for applications | **built:** `package/vulkan-for-apps.sh --install` writes a loader manifest for the driver's NVK library, off by default (`tools/test_vulkan_for_apps.sh`, 9 arms). | Window-system integration is not in the NVK build, so windowed Vulkan needs it first; compute and off-screen work. The Vulkan loader is not bundled. |
+| Vulkan for applications | **built:** `package/vulkan-for-apps.sh --install` writes a loader manifest for the driver's NVK library, off by default (`tools/test_vulkan_for_apps.sh`, 12 arms). `nvk/nvk-metal-wsi.patch` adds `VK_EXT_metal_surface` windows (copy-based present into a `CAMetalLayer`). | Window presentation is proven to build only (see the report); the copy path is slower than a native one. The Khronos loader (Apache-2.0) can be installed with `--with-loader`; the package does not carry one yet. |
 | OpenGL | translation layer `plugin/NVMTLGL.m` over the Metal path | no native OpenGL driver; version is whatever Apple's OpenGL front end reports |
 
 ## Gaming
@@ -70,7 +70,7 @@ asked about, and writes conf settings only into the block the installer keeps ac
 | Power limit, clock offsets, fan curve | none | the public 620 headers carry no write control for them; desktop fans are VBIOS-controlled: blocked |
 | Telemetry overlay | `tools/nvmtl-smi` reads power, clocks, temperature, pstate, utilisation, throttle reasons and fan from RUSD | a graphical overlay is not built |
 | Crash recovery (TDR equivalent) | GPU fault handling and device-lost recovery in the plugin; boot guard switches the driver off after a failed boot | none |
-| Driver control panel | CLI above | graphical panel not built |
+| Driver control panel | CLI above and the Mac app's Driver settings window | none |
 
 ## How to prove these locally
 
