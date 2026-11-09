@@ -22,6 +22,7 @@
 #include "nvmtl_dlss.h"
 #include "nvmtl_tex_upload.h"
 #include "nvmtl_cmd_refusal.h"
+#include "nvmtl_loss.h"
 #include "nvmtl_copy_compat.h"
 #include "nvmtl_sampler_state.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
@@ -144,6 +145,10 @@ static char g_name[256];
 static VkPhysicalDeviceLimits g_lim;
 static uint32_t g_sm_count;
 static _Atomic int g_state;
+/* device-loss bookkeeping (nvmtl_vk_note_loss) */
+static _Atomic int g_lost_after_up;
+static _Atomic uint64_t g_up_ns;
+static const char *g_last_submit_who;
 static _Atomic long g_slow_submit_ms;
 static _Atomic uint64_t g_submit_wait_ns, g_submit_waits;
 void nvmtl_vk_submit_wait_stats(uint64_t *total_ns, uint64_t *waits)
@@ -1491,6 +1496,7 @@ static int nvmtl_vk_initialize(void)
     nvlog("vk: apps-dyn dynamic vertex strides (vkCmdBindVertexBuffers2): %s", pvkCmdBindVertexBuffers2 ? "yes" : "NO — MTLBufferLayoutStrideDynamic pipelines are refused");
     pvkGetDeviceQueue(g_dev, g_qfam, 0, &g_queue);
 
+    atomic_store(&g_up_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW));
     g_state = 1;
     nvlog("vk: UP in this Metal process — \"%s\" api %u.%u.%u, queue family %u", g_name,
           VK_VERSION_MAJOR(pp.apiVersion), VK_VERSION_MINOR(pp.apiVersion), VK_VERSION_PATCH(pp.apiVersion), g_qfam);
@@ -1500,6 +1506,38 @@ static pthread_once_t g_vk_once = PTHREAD_ONCE_INIT;
 static void nvmtl_vk_initialize_once(void) { (void)nvmtl_vk_initialize(); }
 /* 1 once the backend is down in this process: a failed submit or fence wait disabled it, or it never started. */
 int nvmtl_vk_lost(void) { return atomic_load(&g_state) == -1; }
+/* The device was up and then lost, as opposed to never starting. After a loss the Vulkan queue is dead for the rest of the
+   process, but the caller still gets command buffers: they record nothing and complete with a "device removed" error,
+   as Metal reports a removed GPU, instead of nil (WindowServer asserts on nil and the session goes). */
+static char g_dead_cb_token;
+static void nvmtl_noop_cmd(void) {}
+/* Recording calls made on a dead command buffer, and on one that was being recorded when the loss was noticed, do
+   nothing: a void function taking any arguments is the same machine code as this stub on x86-64. */
+static void nvmtl_vk_stub_recording(void)
+{
+#define STUB_CMD(f) if (!strncmp(#f, "vkCmd", 5)) p##f = (PFN_##f)nvmtl_noop_cmd;
+    DEVICE_FNS(STUB_CMD)
+#undef STUB_CMD
+    if (pvkCmdSetLineWidth) pvkCmdSetLineWidth = (PFN_vkCmdSetLineWidth)nvmtl_noop_cmd;
+    if (pvkCmdBindVertexBuffers2) pvkCmdBindVertexBuffers2 = (PFN_vkCmdBindVertexBuffers2)nvmtl_noop_cmd;
+    if (pvkCmdSetSampleLocationsEXT) pvkCmdSetSampleLocationsEXT = (PFN_vkCmdSetSampleLocationsEXT)nvmtl_noop_cmd;
+    if (pvkCmdSetPolygonModeEXT) pvkCmdSetPolygonModeEXT = (PFN_vkCmdSetPolygonModeEXT)nvmtl_noop_cmd;
+    if (pvkCmdSetProvokingVertexModeEXT) pvkCmdSetProvokingVertexModeEXT = (PFN_vkCmdSetProvokingVertexModeEXT)nvmtl_noop_cmd;
+    if (pvkCmdSetDepthClipEnableEXT) pvkCmdSetDepthClipEnableEXT = (PFN_vkCmdSetDepthClipEnableEXT)nvmtl_noop_cmd;
+    if (pvkCmdBuildAccelerationStructuresKHR) pvkCmdBuildAccelerationStructuresKHR = (PFN_vkCmdBuildAccelerationStructuresKHR)nvmtl_noop_cmd;
+    if (pvkCmdCopyAccelerationStructureKHR) pvkCmdCopyAccelerationStructureKHR = (PFN_vkCmdCopyAccelerationStructureKHR)nvmtl_noop_cmd;
+}
+/* Called once, by whichever thread first sees the device go: names the cause in the log and turns recording into no-ops. */
+static void nvmtl_vk_note_loss(const char *where, int vkresult, long waited_ms)
+{
+    if (atomic_exchange(&g_lost_after_up, 1)) return;
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), up = atomic_load(&g_up_ns);
+    char cause[512];
+    nvmtl_loss_cause(cause, sizeof cause, where, vkresult, waited_ms, g_last_submit_who, up ? (long)((now - up) / 1000000000ull) : -1, getprogname());
+    nvlog("vk: %s", cause);
+    nvlog("vk: every command buffer made in %s from now on records nothing and completes with a device-removed error; objects made before the loss stay inert", getprogname());
+    nvmtl_vk_stub_recording();
+}
 int nvmtl_vk_init(void) {
     pthread_once(&g_vk_once, nvmtl_vk_initialize_once);
     return g_state == 1 ? 0 : -1;
@@ -6860,7 +6898,14 @@ static int nvmtl_cmd_refused(nvmtl_refusal why, int vkresult)
 int nvmtl_vk_cmd_begin(nvk_queue *q, nvk_cmdbuf *out)
 {
     (void)q;
-    if (nvmtl_vk_init()) return nvmtl_cmd_refused(NVMTL_REFUSE_BACKEND_DOWN, 0);
+    if (nvmtl_vk_init()) {
+        if (!atomic_load(&g_lost_after_up)) return nvmtl_cmd_refused(NVMTL_REFUSE_BACKEND_DOWN, 0);
+        memset(out, 0, sizeof *out); out->dead = 1; out->cb = &g_dead_cb_token;   // a token, never dereferenced
+        static _Atomic unsigned long dead_made;
+        const unsigned long n = atomic_fetch_add(&dead_made, 1) + 1;
+        if (n < 4 || n % 1000 == 0) nvlog("vk: command buffer #%lu made after the device was lost in %s: it records nothing and completes with a device-removed error", n, getprogname());
+        return 0;
+    }
     const uint64_t b0 = nvmtl_perf_now();
     memset(out, 0, sizeof *out);
     VkCommandPool pool = nvmtl_keep_pool_pop();
@@ -7949,8 +7994,10 @@ int nvmtl_vk_submit_wait_at(nvk_cmdbuf *c, const char *who)
 int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
 {
     nvmtl_subwho_note(who, 0);
+    g_last_submit_who = who;
     memset(f, 0, sizeof *f); f->c = c;
     uint64_t *const pt = f->pt;
+    if (c && c->dead) return -3;   // made after the loss: nothing was recorded, nothing is in flight
     if (g_state != 1 || !c || !c->cb) return -2;
     if (c->counter_error || nvmtl_counter_flush(c)) { nvmtl_cmd_retire(c); return -1; }
     VkCommandBuffer counter_reset = VK_NULL_HANDLE;
@@ -8013,6 +8060,7 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     if (result != VK_SUCCESS) {
         g_state = -1;
         nvlog("vk: queue submit -> %d; disabling backend and retaining uncertain in-flight resources", result);
+        nvmtl_vk_note_loss("submit", (int)result, 0);
         nvmtl_fx_dump("queue submit failed");
         return -2;
     }
@@ -8059,6 +8107,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     }
     if (wr != VK_SUCCESS || g_state != 1) {
         g_state = -1;
+        nvmtl_vk_note_loss("fence", (int)wr, waited_ms);
         nvlog("vk: fence wait -> %d after %ld ms (budget %ld ms); the device is lost, disabling backend without retiring in-flight resources", wr, waited_ms, budget_ms);
         nvmtl_fx_dump("fence wait failed: the device is lost");
         {   // the binding-table pages this command buffer's draws and dispatches read, and the cached pages, by GPU address
@@ -8619,8 +8668,58 @@ void nvmtl_vk_host_pages_drop(nvk_buffer *cache)
     if (cache->buf) { atomic_fetch_sub(&g_host_pages_kept, (uint64_t)cache->size); nvmtl_vk_buffer_destroy(cache); }
     memset(cache, 0, sizeof *cache);
 }
+// NVMTL_HOST_PAGES_SHARE=1: wrappers of one surface share one import of its pages (nvmtl_import_cache.h). CoreAnimation
+// wraps the same surfaces in a new texture every frame and each new texture's private cache starts empty, so each frame
+// imported the pages again (two resource-manager calls each way). A lease is found by surface id, size and the cookie
+// the caller keeps in the surface, and by the address the pages are mapped at; it outlives its last user by two seconds.
+// OFF by default until it has been measured with screen capture running.
+#include "nvmtl_import_cache.h"
+static nvmtl_ic g_hp_ic;
+static pthread_mutex_t g_hp_lock = PTHREAD_MUTEX_INITIALIZER;
+static __thread struct { int set; uint32_t sid; uint64_t cookie; } t_hp_key;
+static __thread void *t_hp_leased;   // the buffer pointer of the lease this thread's current copy holds, else NULL
+void nvmtl_vk_host_pages_key(uint32_t sid, uint64_t cookie) { t_hp_key.set = cookie != 0; t_hp_key.sid = sid; t_hp_key.cookie = cookie; }
+static int nvmtl_hp_share_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_HOST_PAGES_SHARE"); on = e && e[0] == '1'; nvlog("host pages: shared leases %s (NVMTL_HOST_PAGES_SHARE=%s)", on ? "on" : "off", e ?: "unset"); }
+    return on;
+}
+static void nvmtl_hp_expire(void)
+{
+    unsigned char gone[NVMTL_IC_SLOTS][NVMTL_IC_PAYLOAD];
+    pthread_mutex_lock(&g_hp_lock);
+    const int n = nvmtl_ic_expire(&g_hp_ic, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), 2000000000ull, 0, gone, NVMTL_IC_SLOTS);
+    pthread_mutex_unlock(&g_hp_lock);
+    for (int i = 0; i < n; i++) { nvk_buffer b; memcpy(&b, gone[i], sizeof b); nvmtl_vk_buffer_destroy(&b); }
+}
+/* 1 and *tmp filled when a lease serves these pages; 0 when the caller imports them itself. */
+static int nvmtl_hp_lease(void *base, size_t bytes, nvk_buffer *tmp)
+{
+    if (!t_hp_key.set || !nvmtl_hp_share_on() || bytes > (64u << 20)) return 0;
+    nvmtl_hp_expire();
+    pthread_mutex_lock(&g_hp_lock);
+    const int hit = nvmtl_ic_acquire(&g_hp_ic, t_hp_key.sid, bytes, t_hp_key.cookie, tmp, sizeof *tmp);
+    pthread_mutex_unlock(&g_hp_lock);
+    if (hit && tmp->map == base) { t_hp_leased = tmp->buf; return 1; }
+    if (hit) {   // the surface's pages moved under a live cookie: give the lease back and import afresh
+        unsigned char gone[NVMTL_IC_PAYLOAD];
+        pthread_mutex_lock(&g_hp_lock);
+        (void)nvmtl_ic_release(&g_hp_ic, (uintptr_t)tmp->buf, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), gone);
+        pthread_mutex_unlock(&g_hp_lock);
+    }
+    if (nvmtl_vk_buffer_import_host(base, bytes, tmp)) { memset(tmp, 0, sizeof *tmp); return 0; }
+    unsigned char evicted[NVMTL_IC_PAYLOAD]; uintptr_t evicted_id = 0;
+    pthread_mutex_lock(&g_hp_lock);
+    const int kept = nvmtl_ic_insert(&g_hp_ic, t_hp_key.sid, bytes, t_hp_key.cookie, (uintptr_t)tmp->buf, tmp, sizeof *tmp, evicted, &evicted_id);
+    pthread_mutex_unlock(&g_hp_lock);
+    if (evicted_id) { nvk_buffer b; memcpy(&b, evicted, sizeof b); nvmtl_vk_buffer_destroy(&b); }
+    if (kept) t_hp_leased = tmp->buf;
+    return 1;
+}
 static nvk_buffer *nvmtl_host_pages(nvk_buffer *cache, void *base, size_t bytes, nvk_buffer *tmp)
 {
+    if (nvmtl_hp_lease(base, bytes, tmp)) return tmp;
     if (cache && cache->buf && cache->map == base && cache->size == bytes) return cache;
     if (cache && cache->buf) nvmtl_vk_host_pages_drop(cache);   // the surface's pages moved or it was resized
     nvk_buffer *b = tmp;
@@ -8632,7 +8731,19 @@ static nvk_buffer *nvmtl_host_pages(nvk_buffer *cache, void *base, size_t bytes,
     }
     return b;
 }
-static void nvmtl_host_pages_done(nvk_buffer *cache, nvk_buffer *hb) { if (hb && hb != cache) nvmtl_vk_buffer_destroy(hb); }
+static void nvmtl_host_pages_done(nvk_buffer *cache, nvk_buffer *hb)
+{
+    if (!hb || hb == cache) return;
+    if (t_hp_leased && hb->buf == t_hp_leased) {   // a lease: give it back, the table destroys it when idle
+        unsigned char gone[NVMTL_IC_PAYLOAD]; t_hp_leased = NULL;
+        pthread_mutex_lock(&g_hp_lock);
+        const int r = nvmtl_ic_release(&g_hp_ic, (uintptr_t)hb->buf, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), gone);
+        pthread_mutex_unlock(&g_hp_lock);
+        if (r == 2) { nvk_buffer b; memcpy(&b, gone, sizeof b); nvmtl_vk_buffer_destroy(&b); }
+        if (r) return;
+    }
+    nvmtl_vk_buffer_destroy(hb);
+}
 // NVMTL_SURFIN_ORDERED (on by default, =0 off): the surface-in copy is ordered after earlier GPU reads of the image. Its
 // layout transition started from top-of-pipe with no source access, so a composite still sampling the previous frame
 // was not waited for (write-after-read: a possible torn frame).
