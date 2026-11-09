@@ -52,7 +52,11 @@ static inline unsigned long long nvrmBar1ShrinkTarget(unsigned long long current
 
 // The name the registry carries when the RM's released-chip table has no entry for a PCI id (a newer board revision):
 // the generation and chip the RM itself reports, never a made-up retail name. snprintf semantics; returns the length.
+#ifdef KERNEL
+#include <libkern/libkern.h>
+#else
 #include <stdio.h>
+#endif
 static inline int nvrmFallbackModelName(char *out, unsigned long outLen, const char *gen, const char *chip, unsigned deviceId)
 {
     return snprintf(out, outLen, "NVIDIA %s GPU (%s, 10DE:%04X)", gen, chip, deviceId & 0xffff);
