@@ -59,6 +59,8 @@ __private_extern__ int _kext_apple_cc = __APPLE_CC__;
 extern "C" { NvBool nvkms_xnu_load(void); }
 static class NVRM *gNVRMService;
 extern "C" nv_state_t *nv_xnu_gpu_state(void);
+struct NVRMDdcRequest;
+extern "C" int nvrm_ddc_transfer(struct NVRMDdcRequest *r);   // nvrm_ddc.cpp
 extern "C" void nv_xnu_log_init(void);
 extern "C" bool nv_xnu_maps_init(void);
 extern "C" void *nvkms_xnu_kapi_table(void);
@@ -1924,6 +1926,11 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
     if (fn && fn->isEqualTo("NVRMBacklight")) {      // NVRMFB: laptop panel brightness. p1 = NvU32 *percent, p2 != NULL sets it
         NvU32 *percent = (NvU32 *)p1; if (!percent) return kIOReturnBadArgument;
         return nvkms_xnu_backlight(p2 != NULL, percent) ? kIOReturnSuccess : kIOReturnNotFound;
+    }
+    if (fn && fn->isEqualTo("NVRMDdcTransfer")) {     // NVRMFB: one DDC/CI write or read for a display (nvrm_ddc.cpp)
+        if (!p1) return kIOReturnBadArgument;
+        NvXnuPmUse pmUse(true);
+        return nvrm_ddc_transfer((struct NVRMDdcRequest *)p1) == 0 ? kIOReturnSuccess : kIOReturnIOError;
     }
     if (fn && fn->isEqualTo("NVRMGpuReady"))         // NVRMFB: may the display engine be touched (not in system sleep)?
         return OSAddAtomic(0, &fGpuPm) == kGpuPmRunning ? kIOReturnSuccess : kIOReturnNotReady;

@@ -45,6 +45,8 @@ static inline thread_call_t nvrmfbCall(thread_call_func_t fn, thread_call_param_
 }
 #include "nvrm-hud.h"
 #include "nvrm-fb-safety.h"
+#include <IOKit/i2c/IOI2CInterface.h>
+#include "../nvrm_ddc_abi.h"
 #include "nvrm-allocation-table.h"
 static IORecursiveLock *startLock();
 class NVRMCallReference {
@@ -714,6 +716,13 @@ public:
     IOItemCount getConnectionCount() override { return 1; }
     bool hasDDCConnect(IOIndex) override { return !fDpyLost && fEdidSize >= 128; }
     IOReturn getDDCBlock(IOIndex connectIndex, UInt32 blockNumber, IOSelect blockType, IOOptionBits options, UInt8 *data, IOByteCount *length) override;
+    // DDC/CI (boot-arg nvrmfbddc=1): one I2C bus per external display, transfers run by NVRM (nvrm_ddc.cpp).
+    IOReturn doI2CRequest(UInt32 bus, struct IOI2CBusTiming *timing, struct IOI2CRequest *request) override;
+    bool fDdcOn = false;
+    void publishDdcBus();
+    IOReturn ddcTransfer(unsigned op, unsigned addr7, unsigned char *data, unsigned len);
+    IOReturn ddcPowerGated(void *on, void *, void *, void *);
+    void ddcSetPowered(bool on);
     IOReturn registerForInterruptType(IOSelect type, IOFBInterruptProc proc, OSObject *target, void *ref, void **interruptRef) override;
     IOReturn unregisterInterrupt(void *interruptRef) override { return kIOReturnSuccess; }
     IOReturn setInterruptState(void *interruptRef, UInt32 state) override { return kIOReturnSuccess; }
@@ -2865,6 +2874,7 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     setName("NVRMFramebuffer");
     { char loc[12]; if (nvrmFbLocation(fIndex, loc, sizeof loc)) setLocation(loc); }   // distinct registry path per head
     if (fInternal) publishBacklight();   // before super::start(): IOFramebuffer::open looks for "backlight"
+    publishDdcBus();                     // before super::start() too: IOFramebuffer::open creates the I2C interface from it
     if (!super::start(provider)) {
         NVRMDisplayGate gate; if (gate.valid() && fOwnsHead) { gHeadsTaken &= ~(1u << fHead); fOwnsHead = false; }
         FBLOG("super::start failed after kapiInit succeeded"); return false;
@@ -4411,6 +4421,7 @@ bool NVRMNVDAFramebuffer::setHeadPower(bool awake)
 IOReturn NVRMNVDAFramebuffer::setPowerState(unsigned long ordinal, IOService *device)
 {
     FBLOG("setPowerState %lu", (unsigned long)ordinal);
+    ddcSetPowered(ordinal != 0);
     if (ordinal) {
         fPowerOn = true;
         // a failed wake stays retryable (fHeadSlept kept) but WindowServer is still told the display is on, as 1.14.7 did:
@@ -4549,6 +4560,106 @@ IOReturn NVRMNVDAFramebuffer::setAttributeForConnection(IOIndex connectIndex, IO
     IOReturn r = super::setAttributeForConnection(connectIndex, attribute, value);
     FBLOG("setAFC '%s' value %lu -> 0x%x", _s, (unsigned long)value, r);
     return r;
+}
+
+// ---- DDC/CI ----------------------------------------------------------------------------------------------------
+// IOGraphics creates an IOFramebufferI2CInterface in IOFramebuffer::open() from the IOFBI2CInterfaceInfo property, so the
+// property has to exist before super::start(). Publishing makes no RM call; the resource manager is reached on the first
+// request. Off unless boot-arg nvrmfbddc=1 (NVRM reads the same switch before it registers its I2C adapters).
+void NVRMNVDAFramebuffer::publishDdcBus()
+{
+    UInt32 on = 0;
+    fDdcOn = false;
+    if (fInternal || !PE_parse_boot_argn("nvrmfbddc", &on, sizeof on) || !on) return;
+    OSArray *buses = OSArray::withCapacity(1);
+    OSDictionary *bus = OSDictionary::withCapacity(3);
+    OSNumber *type = OSNumber::withNumber((UInt64)kIOI2CBusTypeI2C, 32);
+    OSNumber *tx = OSNumber::withNumber((UInt64)((1u << kIOI2CNoTransactionType) | (1u << kIOI2CSimpleTransactionType) |
+                                                 (1u << kIOI2CDDCciReplyTransactionType)), 32);
+    OSNumber *flags = OSNumber::withNumber((UInt64)0, 32);
+    if (buses && bus && type && tx && flags) {
+        bus->setObject(kIOI2CBusTypeKey, type); bus->setObject(kIOI2CTransactionTypesKey, tx);
+        bus->setObject(kIOI2CSupportedCommFlagsKey, flags);
+        buses->setObject(bus);
+        setProperty(kIOFBI2CInterfaceInfoKey, buses);
+        fDdcOn = true;
+        FBLOG("fb%u: DDC/CI bus published (nvrmfbddc=1)", fIndex);
+    }
+    OSSafeReleaseNULL(flags); OSSafeReleaseNULL(tx); OSSafeReleaseNULL(type); OSSafeReleaseNULL(bus); OSSafeReleaseNULL(buses);
+}
+// IOFramebufferI2CInterface::startIO refuses a request while !isPowered() (pendingPowerState == 0). This class replaces
+// setPowerState, which is what sets it in the family, so it stayed 0 and every request was answered "offline" before it
+// reached doI2CRequest. Set it from the framebuffer's own gate: 1 = on, 0 = off, never 2 (restoreFramebuffer's branch),
+// and pendingPowerChange is left alone so no power work starts.
+IOReturn NVRMNVDAFramebuffer::ddcPowerGated(void *on, void *, void *, void *)
+{
+    pendingPowerState = on ? 1 : 0;
+    return kIOReturnSuccess;
+}
+void NVRMNVDAFramebuffer::ddcSetPowered(bool on)
+{
+    if (!fDdcOn) return;
+    IOWorkLoop *wl = getWorkLoop();
+    if (!fWakeGate && wl) {
+        fWakeGate = IOCommandGate::commandGate(this);
+        if (fWakeGate && wl->addEventSource(fWakeGate) != kIOReturnSuccess) OSSafeReleaseNULL(fWakeGate);
+    }
+    if (fWakeGate) fWakeGate->runAction(OSMemberFunctionCast(IOCommandGate::Action, this, &NVRMNVDAFramebuffer::ddcPowerGated),
+                                        on ? (void *)1 : (void *)0);
+}
+IOReturn NVRMNVDAFramebuffer::ddcTransfer(unsigned op, unsigned addr7, unsigned char *data, unsigned len)
+{
+    IOService *rm = getProvider();
+    const OSSymbol *fn = OSSymbol::withCString(NVRM_DDC_FN);
+    if (!rm || !fn) { OSSafeReleaseNULL(fn); return kIOReturnNotFound; }
+    struct NVRMDdcRequest *q = (struct NVRMDdcRequest *)IOMalloc(sizeof *q);
+    if (!q) { fn->release(); return kIOReturnNoMemory; }
+    nvu_zero(q, sizeof *q);
+    q->gpuId = fGpuId; q->displayId = (unsigned)fDisplay; q->op = op; q->addr7 = addr7; q->len = len;
+    if (op == kNvrmDdcWrite) nvu_copy(q->data, data, len);
+    IOReturn r = rm->callPlatformFunction(fn, false, q, NULL, NULL, NULL);
+    if (r == kIOReturnSuccess && op == kNvrmDdcRead) nvu_copy(data, q->data, len);
+    if (r != kIOReturnSuccess) FBLOG("fb%u: DDC %s 0x%02x len %u failed: rc 0x%x, RM status 0x%x", fIndex, op == kNvrmDdcWrite ? "write" : "read",
+                                     addr7, len, (unsigned)r, q->status);
+    IOFree(q, sizeof *q);
+    fn->release();
+    return r;
+}
+IOReturn NVRMNVDAFramebuffer::doI2CRequest(UInt32 bus, struct IOI2CBusTiming *, struct IOI2CRequest *rq)
+{
+    if (!rq) return kIOReturnBadArgument;
+    IOReturn res = kIOReturnSuccess;
+    if (!fDdcOn || bus != 0 || fDpyLost || !fKms) res = kIOReturnUnsupported;
+    else if (rq->commFlags & kIOI2CUseSubAddressCommFlag) res = kIOReturnUnsupportedMode;
+    else {
+        const bool send = rq->sendTransactionType != kIOI2CNoTransactionType && rq->sendBytes;
+        const bool reply = rq->replyTransactionType != kIOI2CNoTransactionType && rq->replyBytes;
+        const bool simpleSend = rq->sendTransactionType == kIOI2CSimpleTransactionType;
+        const bool okReply = rq->replyTransactionType == kIOI2CSimpleTransactionType || rq->replyTransactionType == kIOI2CDDCciReplyTransactionType;
+        if ((send && !simpleSend) || (reply && !okReply) || (!send && !reply)) res = kIOReturnUnsupportedMode;
+        else if ((send && (rq->sendBytes > kNvrmDdcMax || !rq->sendBuffer)) || (reply && !rq->replyBuffer)) res = kIOReturnBadArgument;
+        else {
+            if (send) {
+                const unsigned a = nvrmDdcAddr7(rq->sendAddress, false);
+                res = a ? ddcTransfer(kNvrmDdcWrite, a, (unsigned char *)(uintptr_t)rq->sendBuffer, rq->sendBytes) : kIOReturnBadArgument;
+                if (res != kIOReturnSuccess && res != kIOReturnBadArgument) res = kIOReturnNoDevice;
+            }
+            if (res == kIOReturnSuccess && reply) {
+                const unsigned a = nvrmDdcAddr7(rq->replyAddress ? rq->replyAddress : rq->sendAddress | 1, true);
+                uint64_t ns = 0; absolutetime_to_nanoseconds(rq->minReplyDelay, &ns);
+                if (send) IOSleep(nvrmDdcReplyDelayMs(ns));
+                unsigned want = rq->replyBytes > kNvrmDdcMax ? kNvrmDdcMax : rq->replyBytes;
+                res = a ? ddcTransfer(kNvrmDdcRead, a, (unsigned char *)(uintptr_t)rq->replyBuffer, want) : kIOReturnBadArgument;
+                if (res == kIOReturnSuccess)
+                    rq->replyBytes = rq->replyTransactionType == kIOI2CDDCciReplyTransactionType
+                        ? nvrmDdcReplyLength((const unsigned char *)(uintptr_t)rq->replyBuffer, want) : want;
+                else if (res != kIOReturnBadArgument) res = kIOReturnNoDevice;
+            }
+        }
+    }
+    rq->result = res;
+    if (rq->completion) (*rq->completion)(rq);
+    return res == kIOReturnSuccess ? kIOReturnSuccess : res;
 }
 IOReturn NVRMNVDAFramebuffer::getDDCBlock(IOIndex, UInt32 blockNumber, IOSelect blockType, IOOptionBits, UInt8 *data, IOByteCount *length)
 {
