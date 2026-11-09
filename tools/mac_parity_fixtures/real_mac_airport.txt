@@ -1,0 +1,11 @@
+Wi-Fi:
+      Interfaces:
+        en0:
+          Card Type: Wi-Fi  (0x14E4, 0x4387)
+          Supported PHY Modes: 802.11 a/b/g/n/ac/ax
+          Wake On Wireless: Supported
+          AirDrop: Supported
+          Auto Unlock: Supported
+          Status: Connected
+        awdl0:
+          Supported Channels: 1 (2GHz), 6 (2GHz), 36 (5GHz)
