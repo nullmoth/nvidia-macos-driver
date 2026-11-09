@@ -1401,11 +1401,14 @@ static int nvmtl_vk_initialize(void)
     VkDeviceCreateInfo dci = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, g_dyn3 ? (const void *)&dyn3 : (const void *)&v11, 0,
                                1, &qci, 0, NULL, next, next ? exts : NULL, &enabled };
     { extern int nvmtl_process_is_game(void);   // Game Mode on a PC: raise this game process's GPU channel group (NVMTL_GAME_GPU_PRIORITY=1)
-      struct nvmtl_game_priority gp = nvmtl_game_priority_decide(getenv("NVMTL_GAME_GPU_PRIORITY"), getenv("NVMTL_GAME_GPU_PRIORITY") ? nvmtl_process_is_game() : 0, getenv("NVMTL_GAME_TIMESLICE_US"));
+      const int gm_service = access("/Library/NullMoth/gamemode/nullmoth-gamemode-policy.py", R_OK) == 0;
+      const char *gm_raise = nvmtl_game_switch(getenv("NVMTL_GAME_GPU_PRIORITY"), gm_service);
+      const char *gm_lower = nvmtl_game_switch(getenv("NVMTL_GAME_LOWER_BACKGROUND"), gm_service);
+      struct nvmtl_game_priority gp = nvmtl_game_priority_decide(gm_raise, gm_raise ? nvmtl_process_is_game() : 0, getenv("NVMTL_GAME_TIMESLICE_US"));
       nvmtl_game_priority_apply(&gp);
       { extern int nvmtl_game_active(void); extern const char *nvmtl_process_exe_path(void);
-        struct nvmtl_bg_priority bg = nvmtl_bg_priority_decide(getenv("NVMTL_GAME_LOWER_BACKGROUND"), getenv("NVMTL_GAME_GPU_PRIORITY") && nvmtl_process_is_game(),
-                                                               getenv("NVMTL_GAME_LOWER_BACKGROUND") ? nvmtl_game_active() : 0, nvmtl_process_exe_path(), getenv("NVMTL_GAME_BACKGROUND_TIMESLICE_US"));
+        struct nvmtl_bg_priority bg = nvmtl_bg_priority_decide(gm_lower, gm_raise && nvmtl_process_is_game(),
+                                                               gm_lower ? nvmtl_game_active() : 0, nvmtl_process_exe_path(), getenv("NVMTL_GAME_BACKGROUND_TIMESLICE_US"));
         nvmtl_bg_priority_apply(&bg);
         if (bg.apply) nvlog("vk: a game is active: this client lowers its own channel group (interleave LOW, timeslice %lu us)", bg.timeslice_us); }
       if (gp.apply) nvlog("vk: Game Mode GPU priority: interleave HIGH, timeslice %lu us for this process", gp.timeslice_us); }
