@@ -1,6 +1,6 @@
 --- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
 +++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
-@@ -3003,6 +3003,11 @@
+@@ -3027,6 +3027,11 @@
           * only validated configuration is expected
           * to commit.
           */
@@ -12,7 +12,7 @@
          device->layerState[head][layer].
              currFlipNotifierIndex = nextIndex;
      }
-@@ -3203,6 +3208,11 @@
+@@ -3235,6 +3240,11 @@
           * only validated configuration is expected
           * to commit.
           */
@@ -24,8 +24,8 @@
          device->layerState[head][NVKMS_MAIN_LAYER].
              currFlipNotifierIndex = nextIndex;
      }
-@@ -4015,6 +4025,35 @@
-     return !status || params.reply.complete;
+@@ -4054,6 +4064,35 @@
+     }
  }
  
 +static NvBool GetFlipPendingStatus(
@@ -60,7 +60,7 @@
  static void FramebufferConsoleDisabled
  (
      struct NvKmsKapiDevice *device
-@@ -4181,6 +4220,7 @@
+@@ -4220,6 +4259,7 @@
      funcsTable->validateDisplayMode = ValidateDisplayMode;
  
      funcsTable->applyModeSetConfig   = ApplyModeSetConfig;
