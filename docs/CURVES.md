@@ -69,6 +69,14 @@ half-width equal to the radius, facing the ray. This is an approximation of the 
     tangent matches 2. The earlier disc failed on B-spline because it sat in the ribbon plane, and because the whole disc (not only the half
     beyond the end) hid ribbon hits in front of it. Flat curves only get it with sphere caps (the case the oracle measures; the other cap
     modes for flat were not measured and get no extension).
+- **Head-on residual: measured, not a rule.** A ray along the end tangent of a straight flat curve (`oracle/headon.c`, the 64 x 64 head-on
+  batches of the sweep) meets two caps, the near one at distance 2.000 and the far end's at 4.492. Apple returns the near cap for 267 of the
+  415 pixels it hits and the far cap for the other 148, and the choice is a speckle with no radial or angular pattern (near-cap pixels reach
+  rho 0.227 = the near radius, far-cap pixels sit at rho 0.16 to 0.20 inside it). Apple's near-disc radius is the end radius, so the extent
+  is as modelled; which of two coplanar caps a ray exactly parallel to the ribbon plane reports is not the nearest, and it is the same on
+  the M6 and the M4 (the two dumps agree on every one of those pixels), so it is deterministic but depends on the ray's rounding, not on
+  geometry. The model reports the nearest. **Known limit:** for rays within rounding of parallel to an end tangent, the distance may differ
+  from Apple's (the near-versus-far cap choice); the hit and its `curve_parameter` (0 or 1) are right. Adopted: nothing.
 - **Result: all 24 cases pass on both the M6 and the M4 fixtures, and on the probe.** Flat cases agree to 0.0000 at the 95th percentile.
   Residual in the sweeps: the side views agree to within 40 of 4,096 rays per batch (at the rim of the half disc, one batch of Bezier-4 has
   40, B-spline-4 13); the head-on views (ray along the end tangent, where a ribbon has no orientation) differ by up to 15 percent of
