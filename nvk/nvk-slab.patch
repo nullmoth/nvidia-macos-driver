@@ -1,0 +1,793 @@
+diff --git a/src/nouveau/vulkan/nvk_cmd_buffer.c b/src/nouveau/vulkan/nvk_cmd_buffer.c
+index ad42eae..ddc2596 100644
+--- a/src/nouveau/vulkan/nvk_cmd_buffer.c
++++ b/src/nouveau/vulkan/nvk_cmd_buffer.c
+@@ -190,11 +190,11 @@ nvk_cmd_buffer_flush_push(struct nvk_cmd_buffer *cmd, bool incomplete)
+ {
+    if (likely(cmd->push_mem != NULL)) {
+       const uint32_t mem_offset =
+-         (char *)cmd->push.start - (char *)cmd->push_mem->mem->map;
++         (char *)cmd->push.start - (char *)cmd->push_mem->map;
+ 
+       struct nvk_cmd_push push = {
+          .map = cmd->push.start,
+-         .addr = cmd->push_mem->mem->va->addr + mem_offset,
++         .addr = cmd->push_mem->addr + mem_offset,
+          .range = nv_push_dw_count(&cmd->push) * 4,
+          .incomplete = incomplete,
+       };
+@@ -225,9 +225,9 @@ nvk_cmd_buffer_new_push(struct nvk_cmd_buffer *cmd)
+       nv_push_init(&cmd->push, push_runout, 0, subc_mask);
+       cmd->push_mem_limit = &push_runout[NVK_CMD_BUFFER_MAX_PUSH];
+    } else {
+-      nv_push_init(&cmd->push, cmd->push_mem->mem->map, 0, subc_mask);
++      nv_push_init(&cmd->push, cmd->push_mem->map, 0, subc_mask);
+       cmd->push_mem_limit =
+-         (uint32_t *)((char *)cmd->push_mem->mem->map + NVK_CMD_MEM_SIZE);
++         (uint32_t *)((char *)cmd->push_mem->map + NVK_CMD_MEM_SIZE);
+    }
+ }
+ 
+@@ -261,8 +261,8 @@ nvk_cmd_buffer_upload_alloc(struct nvk_cmd_buffer *cmd,
+ 
+    assert(offset <= NVK_CMD_MEM_SIZE);
+    if (cmd->upload_mem != NULL && size <= NVK_CMD_MEM_SIZE - offset) {
+-      *addr = cmd->upload_mem->mem->va->addr + offset;
+-      *ptr = (char *)cmd->upload_mem->mem->map + offset;
++      *addr = cmd->upload_mem->addr + offset;
++      *ptr = (char *)cmd->upload_mem->map + offset;
+ 
+       cmd->upload_offset = offset + size;
+ 
+@@ -274,8 +274,8 @@ nvk_cmd_buffer_upload_alloc(struct nvk_cmd_buffer *cmd,
+    if (unlikely(result != VK_SUCCESS))
+       return result;
+ 
+-   *addr = mem->mem->va->addr;
+-   *ptr = mem->mem->map;
++   *addr = mem->addr;
++   *ptr = mem->map;
+ 
+    /* Pick whichever of the current upload BO and the new BO will have more
+     * room left to be the BO for the next upload.  If our upload size is
+@@ -390,7 +390,7 @@ static void
+ flush_mem_list(struct nvk_cmd_buffer *cmd, struct list_head *mem_list)
+ {
+    list_for_each_entry_safe(struct nvk_cmd_mem, mem, mem_list, link)
+-      nvkmd_mem_sync_map_to_gpu(mem->mem, 0, mem->mem->size_B);
++      nvkmd_mem_sync_map_to_gpu(mem->mem, mem->off_B, mem->size_B);
+ }
+ 
+ VKAPI_ATTR VkResult VKAPI_CALL
+diff --git a/src/nouveau/vulkan/nvk_cmd_draw.c b/src/nouveau/vulkan/nvk_cmd_draw.c
+index f49cb84..9842973 100644
+--- a/src/nouveau/vulkan/nvk_cmd_draw.c
++++ b/src/nouveau/vulkan/nvk_cmd_draw.c
+@@ -5989,10 +5989,10 @@ nvk_cmd_begin_cond_render_copy_engine(struct nvk_cmd_buffer *cmd,
+       /* Zero-initialize the beginning of the buffer. As an invariant, the bytes
+        * for operand B and the upper half of operand A are always zero.
+        */
+-      assert(cmd->cond_render_mem->mem->size_B > 32);
+-      memset(cmd->cond_render_mem->mem->map, 0x00, 32);
++      assert(cmd->cond_render_mem->size_B > 32);
++      memset(cmd->cond_render_mem->map, 0x00, 32);
+    }
+-   const uint64_t tmp_addr = cmd->cond_render_mem->mem->va->addr;
++   const uint64_t tmp_addr = cmd->cond_render_mem->addr;
+ 
+    /* Frustratingly, the u64s are not packed together */
+    const uint64_t operand_a_addr = tmp_addr + 0;
+diff --git a/src/nouveau/vulkan/nvk_cmd_indirect.c b/src/nouveau/vulkan/nvk_cmd_indirect.c
+index 5f9ca03..714cda7 100644
+--- a/src/nouveau/vulkan/nvk_cmd_indirect.c
++++ b/src/nouveau/vulkan/nvk_cmd_indirect.c
+@@ -1353,7 +1353,7 @@ nvk_CmdCopyMemoryIndirectKHR(VkCommandBuffer commandBuffer,
+       const struct nvk_copy_indirect_push push_constants = {
+          .in = info->copyAddressRange.address + i * info->copyAddressRange.stride,
+          .in_stride = info->copyAddressRange.stride,
+-         .out = temp_mem->mem->va->addr,
++         .out = temp_mem->addr,
+          .count = count
+       };
+ 
+@@ -1377,7 +1377,7 @@ nvk_CmdCopyMemoryIndirectKHR(VkCommandBuffer commandBuffer,
+                                 struct nvk_cmd_mem*, i / cmds_per_buffer);
+       uint32_t count = MIN2(cmds_per_buffer, info->copyCount - i);
+ 
+-      nvk_cmd_buffer_push_indirect(cmd, temp_mem->mem->va->addr,
++      nvk_cmd_buffer_push_indirect(cmd, temp_mem->addr,
+                                    NVK_COPY_INDIRECT_CMD_BYTES * count);
+    }
+ }
+diff --git a/src/nouveau/vulkan/nvk_cmd_pool.c b/src/nouveau/vulkan/nvk_cmd_pool.c
+index 2a99f03..c710fd2 100644
+--- a/src/nouveau/vulkan/nvk_cmd_pool.c
++++ b/src/nouveau/vulkan/nvk_cmd_pool.c
+@@ -14,6 +14,8 @@
+ 
+ #define NVK_CMR_FENCE struct nvkmd_nvrm_fence
+ #include "nvk_cmd_mem_recycle.h"
++#include "nvk_cmd_slab.h"
++#include "nvkmd/nvrm/nvrm_xnu.h"
+ 
+ /* Command-pool chunk recycler (see nvk_cmd_mem_recycle.h for why and for the GPU-safety rule).
+  * NVK_CMDMEM_RECYCLE=<n>  keep up to n chunks of destroyed pools for reuse (unset or 0 = off: every chunk is freed when
+@@ -80,12 +82,6 @@ nvk_cmr_census(void)
+            n, nvk_cmr.cap, (long long)live, nvk_cmr.live_max);
+ }
+ 
+-void
+-nvk_cmd_mem_recycler_drain(struct nvk_device *dev)
+-{
+-   pthread_once(&nvk_cmr_once, nvk_cmr_load);
+-   nvk_cmr_drain(&nvk_cmr, dev->nvkmd, nvk_cmr_destroy_mem);
+-}
+ 
+ 
+ /* b80 B3: nvk69's GPU-cacheable flag (bit 6, see nvk_device_memory.c / nvkmd_nvrm_mem.c) for the driver's own
+@@ -102,6 +98,70 @@ nvk_b80_gart_flags(void)
+    return uncached ? NVKMD_MEM_GART : (enum nvkmd_mem_flags)(NVKMD_MEM_GART | NVK69_MEM_GPU_CACHED);
+ }
+ 
++/* Slab mode (nvk_cmd_slab.h for why). NVK_CMDMEM_SLAB_KB=<kb> carves chunks from shared slabs of that size (a multiple
++ * of 64, 128..16384; unset or 0 = off: one allocation per chunk, as before). NVK_CMDMEM_SLAB_SPARE=<n> fully idle slabs
++ * kept per device before one is released (default 4). When slabs are on, the per-chunk recycler is not used: a returned
++ * slab chunk is reused by the same fence rule, without holding a connection of its own. The slab key is the nvk_device,
++ * so slabs never cross devices. */
++static struct nvk_slab_alloc nvk_slabs = NVK_SLAB_ALLOC_INIT;
++static void
++nvk_slab_load(void)
++{
++   unsigned kb = nvk_cmr_knob("NVK_CMDMEM_SLAB_KB", 0, 16384);
++   kb -= kb % (NVK_CMD_MEM_SIZE / 1024);
++   if (kb && kb < 2 * (NVK_CMD_MEM_SIZE / 1024)) kb = 0;   /* one chunk per slab is the old mode with extra steps */
++   nvk_slabs.chunk_bytes = NVK_CMD_MEM_SIZE;
++   nvk_slabs.slab_bytes = (uint64_t)kb * 1024;
++   nvk_slabs.spare = nvk_cmr_knob("NVK_CMDMEM_SLAB_SPARE", 4, 64);
++   fprintf(stderr, "nvk: command-pool chunks %s (NVK_CMDMEM_SLAB_KB=%u, %u chunks per slab, spare %u)\n",
++           kb ? "carved from shared slabs" : "one allocation each", kb, kb ? kb / (NVK_CMD_MEM_SIZE / 1024) : 1,
++           nvk_slabs.spare);
++}
++static pthread_once_t nvk_slab_once = PTHREAD_ONCE_INIT;
++static bool
++nvk_slab_be_create(const void *key, bool gart, uint64_t bytes, void **backing, uint64_t *addr, char **map)
++{
++   struct nvk_device *dev = (struct nvk_device *)key;
++   (void)gart;   /* every command chunk is GART, GPU-cacheable (b80); the key only keeps the two free lists apart */
++   struct nvkmd_mem *m = NULL;
++   if (nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &dev->vk.base, bytes, 0, nvk_b80_gart_flags(),
++                                  NVKMD_MEM_MAP_WR, &m) != VK_SUCCESS)
++      return false;
++   *backing = m; *addr = m->va->addr; *map = (char *)m->map;
++   return true;
++}
++static void nvk_slab_be_destroy(void *backing) { nvkmd_mem_unref((struct nvkmd_mem *)backing); }
++static void nvk_slab_be_fence(const void *key, struct nvkmd_nvrm_fence *out)
++{
++   nvkmd_nvrm_fence_snapshot(((struct nvk_device *)key)->nvkmd, out);
++}
++static const struct nvk_slab_backend nvk_slab_be = {
++   nvk_slab_be_create, nvk_slab_be_destroy, nvk_slab_be_fence, nvkmd_nvrm_fence_passed,
++};
++static void
++nvk_slab_census(uint64_t q)
++{
++   unsigned live; int64_t conns = 0, maps = 0;
++   const struct nvk_slab_stats s = nvk_slab_snapshot(&nvk_slabs, &live);
++   nvrm_xnu_live(&conns, &maps);
++   fprintf(stderr, "nvk: cmd chunks (slabs of %llu KB): requests=%llu reused=%llu carved=%llu not_ready=%llu returned=%llu "
++           "slabs live=%u created=%llu released=%llu failed=%llu | process connections=%lld mappings=%lld\n",
++           (unsigned long long)(nvk_slabs.slab_bytes >> 10), (unsigned long long)q, (unsigned long long)s.reused,
++           (unsigned long long)s.carved, (unsigned long long)s.not_ready, (unsigned long long)s.returned, live,
++           (unsigned long long)s.slabs_created, (unsigned long long)s.slabs_released,
++           (unsigned long long)s.create_failed, (long long)conns, (long long)maps);
++}
++
++void
++nvk_cmd_mem_recycler_drain(struct nvk_device *dev)
++{
++   pthread_once(&nvk_cmr_once, nvk_cmr_load);
++   nvk_cmr_drain(&nvk_cmr, dev->nvkmd, nvk_cmr_destroy_mem);
++   unsigned busy = nvk_slab_drain(&nvk_slabs, &nvk_slab_be, dev);
++   if (busy)
++      fprintf(stderr, "nvk: device teardown: %u command-pool slab(s) still have chunks in use - left allocated\n", busy);
++}
++
+ static VkResult
+ nvk_cmd_mem_create(struct nvk_cmd_pool *pool, bool force_gart, struct nvk_cmd_mem **mem_out)
+ {
+@@ -114,6 +174,25 @@ nvk_cmd_mem_create(struct nvk_cmd_pool *pool, bool force_gart, struct nvk_cmd_me
+    if (mem == NULL)
+       return vk_error(pool, VK_ERROR_OUT_OF_HOST_MEMORY);
+ 
++   pthread_once(&nvk_slab_once, nvk_slab_load);
++   if (nvk_slabs.slab_bytes) {
++      struct nvk_slab_chunk ch;
++      if (!nvk_slab_take(&nvk_slabs, &nvk_slab_be, dev, force_gart, &ch)) {
++         vk_free(&pool->vk.alloc, mem);
++         return vk_error(pool, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      }
++      mem->mem = (struct nvkmd_mem *)ch.backing;
++      mem->off_B = ch.off; mem->addr = ch.addr; mem->map = ch.map; mem->size_B = NVK_CMD_MEM_SIZE;
++      mem->slab = ch.slab; mem->slab_idx = ch.idx;
++      mem->gart = force_gart;
++      const uint64_t q = atomic_fetch_add_explicit(&nvk_cmr_requests, 1, memory_order_relaxed) + 1;
++      pthread_once(&nvk_cmr_once, nvk_cmr_load);
++      if (nvk_cmr_census_every && q % nvk_cmr_census_every == 0)
++         nvk_slab_census(q);
++      *mem_out = mem;
++      return VK_SUCCESS;
++   }
++
+    /* nvmtl b80: upstream 26.3 puts the command pool in VRAM (NVKMD_MEM_LOCAL) unless force_gart. That is
+     * the placement that hung WindowServer's GFX channel in its own submission (r3, 35 s-30 min); Apple keeps
+     * CPU-written churn system-side, so the pool stays GART, GPU-cacheable, whatever force_gart says. */
+@@ -135,6 +214,7 @@ nvk_cmd_mem_create(struct nvk_cmd_pool *pool, bool force_gart, struct nvk_cmd_me
+       atomic_fetch_add_explicit(&nvk_cmr_created, 1, memory_order_relaxed);
+    }
+    mem->gart = force_gart;
++   mem->off_B = 0; mem->addr = mem->mem->va->addr; mem->map = mem->mem->map; mem->size_B = mem->mem->size_B;
+    nvk_cmr_census();
+ 
+    *mem_out = mem;
+@@ -145,6 +225,11 @@ static void
+ nvk_cmd_mem_destroy(struct nvk_cmd_pool *pool, struct nvk_cmd_mem *mem)
+ {
+    struct nvk_device *dev = nvk_cmd_pool_device(pool);
++   if (mem->slab) {   /* back to its slab, behind a fence snapshot */
++      nvk_slab_put(&nvk_slabs, &nvk_slab_be, (struct nvk_slab *)mem->slab, mem->slab_idx);
++      vk_free(&pool->vk.alloc, mem);
++      return;
++   }
+    pthread_once(&nvk_cmr_once, nvk_cmr_load);
+    /* Kept still mapped, behind a fence snapshot; otherwise freed as before (the free itself defers behind the same
+     * kind of snapshot inside nvkmd_nvrm_mem_free). */
+@@ -259,7 +344,7 @@ nvk_cmd_pool_alloc_mem(struct nvk_cmd_pool *pool, bool force_gart,
+    }
+ 
+    if (unlikely(pdev->debug_flags & NVK_DEBUG_TRASH_MEMORY)) {
+-      memset(mem->mem->map, 0xF1, mem->mem->size_B);
++      memset(mem->map, 0xF1, mem->size_B);
+    }
+ 
+    *mem_out = mem;
+diff --git a/src/nouveau/vulkan/nvk_cmd_pool.h b/src/nouveau/vulkan/nvk_cmd_pool.h
+index 2103ada..1a993da 100644
+--- a/src/nouveau/vulkan/nvk_cmd_pool.h
++++ b/src/nouveau/vulkan/nvk_cmd_pool.h
+@@ -15,8 +15,18 @@ struct nvkmd_mem;
+ 
+ /* Recyclable command buffer BO, used for both push buffers and upload */
+ struct nvk_cmd_mem {
++   /** The backing allocation: this chunk's own, or the slab it was carved from (NVK_CMDMEM_SLAB_KB) */
+    struct nvkmd_mem *mem;
+ 
++   /** Where this chunk lives in `mem`, and its GPU and CPU addresses. Every user goes through these, never through
++    *  mem->va->addr / mem->map / mem->size_B, because a slab chunk is only part of `mem`. */
++   uint64_t off_B, addr, size_B;
++   void *map;
++
++   /** Non-NULL for a slab chunk: the slab and the chunk's index in it */
++   void *slab;
++   uint32_t slab_idx;
++
+    /** Link in nvk_cmd_pool::free_bos or nvk_cmd_buffer::bos */
+    struct list_head link;
+ 
+diff --git a/src/nouveau/vulkan/nvk_cmd_slab.h b/src/nouveau/vulkan/nvk_cmd_slab.h
+new file mode 100644
+index 0000000..d8af4fa
+--- /dev/null
++++ b/src/nouveau/vulkan/nvk_cmd_slab.h
+@@ -0,0 +1,236 @@
++/*
++ * Copyright 2026 NullMoth Systems
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef NVK_CMD_SLAB_H
++#define NVK_CMD_SLAB_H
++
++/* Command-pool chunks carved from shared slabs: one RM allocation, one VA range and one CPU mapping per slab, many
++ * 64 KB chunks inside it.
++ *
++ * Why: on macOS every CPU mapping is its own IOKit user-client connection (the kext keeps one mapping context per
++ * client), so a process holds as many connections as it has mapped allocations. Command-pool chunks were one
++ * allocation each, and Cyberpunk held ~990 of them alive at once - at the process's connection ceiling before
++ * anything else maps. The chunk recycler on its own could only keep 25% of them because there was no room left
++ * under that ceiling. With 1 MB slabs the same 990 chunks are ~62 connections, and every chunk after the first in
++ * a slab costs no kernel call at all.
++ *
++ * GPU safety is the recycler's rule: a returned chunk carries the fence snapshot taken when it was returned and is
++ * handed out again only after that snapshot has passed. A slab is released only when none of its chunks is in use,
++ * and its free goes through the backend's own deferred free, which waits for the GPU on its own.
++ *
++ * The logic is free of NVK types so the unit test runs the same code. Define NVK_CMR_FENCE first. */
++
++#include <pthread.h>
++#include <stdatomic.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdlib.h>
++
++#ifndef NVK_CMR_FENCE
++#error "define NVK_CMR_FENCE before including nvk_cmd_slab.h"
++#endif
++#ifndef NVK_CMR_SCAN
++#define NVK_CMR_SCAN 8
++#endif
++
++struct nvk_slab {
++   struct nvk_slab *next;
++   void *backing;            /* backend memory object (one allocation, one mapping) */
++   const void *dev;
++   bool gart;
++   uint64_t addr;            /* GPU VA of chunk 0 */
++   char *map;                /* CPU map of chunk 0 */
++   uint32_t nchunks, carved, outstanding;
++};
++
++struct nvk_slab_free {
++   struct nvk_slab_free *next;
++   struct nvk_slab *slab;
++   uint32_t idx;
++   NVK_CMR_FENCE fence;
++};
++
++/* What a caller gets: chunk `idx` of `slab`. */
++struct nvk_slab_chunk {
++   struct nvk_slab *slab;
++   uint32_t idx;
++   void *backing;
++   uint64_t off, addr;
++   char *map;
++};
++
++struct nvk_slab_backend {
++   /* Make one slab of `bytes` for (dev, gart). Returns false on failure. Called without the allocator lock. */
++   bool (*create)(const void *dev, bool gart, uint64_t bytes, void **backing, uint64_t *addr, char **map);
++   void (*destroy)(void *backing);   /* called without the lock */
++   void (*fence_now)(const void *dev, NVK_CMR_FENCE *out);
++   bool (*passed)(const NVK_CMR_FENCE *f);
++};
++
++struct nvk_slab_stats {
++   uint64_t takes, reused, carved, not_ready, slabs_created, slabs_released, create_failed, returned;
++};
++
++struct nvk_slab_alloc {
++   pthread_mutex_t lock;
++   struct nvk_slab *slabs;
++   struct nvk_slab_free *head, *tail;   /* returned chunks, oldest first */
++   uint64_t chunk_bytes, slab_bytes;    /* slab_bytes == 0: off */
++   unsigned spare;                      /* fully idle slabs kept per (dev, gart) before one is released */
++   unsigned live_slabs;
++   struct nvk_slab_stats st;
++};
++
++#define NVK_SLAB_ALLOC_INIT { PTHREAD_MUTEX_INITIALIZER, NULL, NULL, NULL, 0, 0, 0, 0, { 0 } }
++
++static inline void
++nvk_slab_fill(struct nvk_slab_alloc *a, struct nvk_slab *s, uint32_t idx, struct nvk_slab_chunk *out)
++{
++   out->slab = s; out->idx = idx; out->backing = s->backing;
++   out->off = (uint64_t)idx * a->chunk_bytes;
++   out->addr = s->addr + out->off;
++   out->map = s->map + out->off;
++}
++
++/* A chunk for (dev, gart): a returned one whose fence has passed, else a fresh one from a slab with room, else a new
++ * slab. false only when a new slab was needed and could not be made. */
++static inline bool
++nvk_slab_take(struct nvk_slab_alloc *a, const struct nvk_slab_backend *be, const void *dev, bool gart,
++              struct nvk_slab_chunk *out)
++{
++   pthread_mutex_lock(&a->lock);
++   a->st.takes++;
++   unsigned looked = 0;
++   bool any = false;
++   for (struct nvk_slab_free **pp = &a->head, *prev = NULL; *pp != NULL && looked < NVK_CMR_SCAN;) {
++      struct nvk_slab_free *f = *pp;
++      if (f->slab->dev == dev && f->slab->gart == gart) {
++         any = true; looked++;
++         if (be->passed(&f->fence)) {
++            *pp = f->next;
++            if (a->tail == f) a->tail = prev;
++            f->slab->outstanding++;
++            nvk_slab_fill(a, f->slab, f->idx, out);
++            a->st.reused++;
++            pthread_mutex_unlock(&a->lock);
++            free(f);
++            return true;
++         }
++      }
++      prev = f; pp = &f->next;
++   }
++   if (any) a->st.not_ready++;
++   for (struct nvk_slab *s = a->slabs; s; s = s->next) {
++      if (s->dev == dev && s->gart == gart && s->carved < s->nchunks) {
++         uint32_t idx = s->carved++;
++         s->outstanding++;
++         nvk_slab_fill(a, s, idx, out);
++         a->st.carved++;
++         pthread_mutex_unlock(&a->lock);
++         return true;
++      }
++   }
++   pthread_mutex_unlock(&a->lock);
++
++   struct nvk_slab *s = (struct nvk_slab *)calloc(1, sizeof(*s));
++   void *backing = NULL; uint64_t addr = 0; char *map = NULL;
++   if (s == NULL || !be->create(dev, gart, a->slab_bytes, &backing, &addr, &map)) {
++      free(s);
++      pthread_mutex_lock(&a->lock); a->st.create_failed++; pthread_mutex_unlock(&a->lock);
++      return false;
++   }
++   s->backing = backing; s->dev = dev; s->gart = gart; s->addr = addr; s->map = map;
++   s->nchunks = (uint32_t)(a->slab_bytes / a->chunk_bytes);
++   s->carved = 1; s->outstanding = 1;
++   pthread_mutex_lock(&a->lock);
++   s->next = a->slabs; a->slabs = s;
++   a->live_slabs++; a->st.slabs_created++; a->st.carved++;
++   nvk_slab_fill(a, s, 0, out);
++   pthread_mutex_unlock(&a->lock);
++   return true;
++}
++
++/* Unlink slab `s` and every returned chunk of it. Lock held. */
++static inline void
++nvk_slab_unlink_locked(struct nvk_slab_alloc *a, struct nvk_slab *s, struct nvk_slab_free **freed)
++{
++   for (struct nvk_slab **pp = &a->slabs; *pp; pp = &(*pp)->next)
++      if (*pp == s) { *pp = s->next; break; }
++   for (struct nvk_slab_free **pp = &a->head, *prev = NULL; *pp != NULL;) {
++      struct nvk_slab_free *f = *pp;
++      if (f->slab == s) {
++         *pp = f->next;
++         if (a->tail == f) a->tail = prev;
++         f->next = *freed; *freed = f;
++      } else {
++         prev = f; pp = &f->next;
++      }
++   }
++   a->live_slabs--;
++}
++
++/* Give a chunk back (its pool is gone or trimmed). */
++static inline void
++nvk_slab_put(struct nvk_slab_alloc *a, const struct nvk_slab_backend *be, struct nvk_slab *s, uint32_t idx)
++{
++   struct nvk_slab_free *f = (struct nvk_slab_free *)calloc(1, sizeof(*f));
++   if (f) { f->slab = s; f->idx = idx; be->fence_now(s->dev, &f->fence); }
++   struct nvk_slab *release = NULL;
++   struct nvk_slab_free *dropped = NULL;
++   pthread_mutex_lock(&a->lock);
++   a->st.returned++;
++   s->outstanding--;
++   if (f) {
++      if (a->tail) a->tail->next = f; else a->head = f;
++      a->tail = f;
++   }
++   /* With no host memory for the record the chunk is simply never handed out again; its slab is still released
++    * normally once idle, and the backend's deferred free covers the GPU. */
++   if (s->outstanding == 0) {
++      unsigned idle = 0;
++      for (struct nvk_slab *k = a->slabs; k; k = k->next)
++         if (k->dev == s->dev && k->gart == s->gart && k->outstanding == 0) idle++;
++      if (idle > a->spare) {
++         nvk_slab_unlink_locked(a, s, &dropped);
++         release = s;
++         a->st.slabs_released++;
++      }
++   }
++   pthread_mutex_unlock(&a->lock);
++   while (dropped) { struct nvk_slab_free *n = dropped->next; free(dropped); dropped = n; }
++   if (release) { be->destroy(release->backing); free(release); }
++}
++
++/* Device teardown: release every slab of `dev`. A slab with chunks still in use is left alone (counted, not freed:
++ * freeing it would pull memory out from under a live pool). Returns the number still in use. */
++static inline unsigned
++nvk_slab_drain(struct nvk_slab_alloc *a, const struct nvk_slab_backend *be, const void *dev)
++{
++   struct nvk_slab *mine = NULL; struct nvk_slab_free *dropped = NULL; unsigned busy = 0;
++   pthread_mutex_lock(&a->lock);
++   for (struct nvk_slab *s = a->slabs, *n; s; s = n) {
++      n = s->next;
++      if (s->dev != dev) continue;
++      if (s->outstanding) { busy++; continue; }
++      nvk_slab_unlink_locked(a, s, &dropped);
++      s->next = mine; mine = s;
++      a->st.slabs_released++;
++   }
++   pthread_mutex_unlock(&a->lock);
++   while (dropped) { struct nvk_slab_free *n = dropped->next; free(dropped); dropped = n; }
++   while (mine) { struct nvk_slab *n = mine->next; be->destroy(mine->backing); free(mine); mine = n; }
++   return busy;
++}
++
++static inline struct nvk_slab_stats
++nvk_slab_snapshot(struct nvk_slab_alloc *a, unsigned *live_slabs)
++{
++   pthread_mutex_lock(&a->lock);
++   struct nvk_slab_stats s = a->st;
++   *live_slabs = a->live_slabs;
++   pthread_mutex_unlock(&a->lock);
++   return s;
++}
++
++#endif /* NVK_CMD_SLAB_H */
+diff --git a/src/nouveau/vulkan/nvk_cmd_slab_test.c b/src/nouveau/vulkan/nvk_cmd_slab_test.c
+new file mode 100644
+index 0000000..e95a2ff
+--- /dev/null
++++ b/src/nouveau/vulkan/nvk_cmd_slab_test.c
+@@ -0,0 +1,189 @@
++/*
++ * Copyright 2026 NullMoth Systems
++ * SPDX-License-Identifier: MIT
++ *
++ * Unit test for nvk_cmd_slab.h - the code nvk_cmd_pool.c runs with NVK_CMDMEM_SLAB_KB set - against a mock backend.
++ * A slab is one mock allocation (= one kernel connection on macOS); a fence is the GPU sequence number current when a
++ * chunk was returned, passed once `gpu_done` reaches it.
++ *   cc -O1 -pthread -o /tmp/slab_test nvk_cmd_slab_test.c && /tmp/slab_test
++ */
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++typedef struct { uint64_t seq; } mock_fence;
++#define NVK_CMR_FENCE mock_fence
++#include "nvk_cmd_slab.h"
++
++#define CHUNK (64u * 1024u)
++static _Atomic uint64_t gpu_submitted, gpu_done;
++static _Atomic int conns, conns_peak, creates, fail_next;
++static uint64_t next_va = 0x100000000ull;
++static pthread_mutex_t va_lock = PTHREAD_MUTEX_INITIALIZER;
++static bool be_create(const void *dev, bool gart, uint64_t bytes, void **backing, uint64_t *addr, char **map)
++{
++   (void)dev; (void)gart;
++   if (atomic_exchange(&fail_next, 0)) return false;
++   char *m = calloc(1, 16);   /* stands in for the mapping; only its identity matters */
++   if (!m) return false;
++   pthread_mutex_lock(&va_lock); *addr = next_va; next_va += bytes + 0x10000000ull; pthread_mutex_unlock(&va_lock);
++   *backing = m; *map = (char *)(uintptr_t)(0x700000000000ull + (*addr - 0x100000000ull));
++   int c = atomic_fetch_add(&conns, 1) + 1, p = atomic_load(&conns_peak);
++   while (c > p && !atomic_compare_exchange_weak(&conns_peak, &p, c)) {}
++   atomic_fetch_add(&creates, 1);
++   return true;
++}
++static void be_destroy(void *backing) { free(backing); atomic_fetch_sub(&conns, 1); }
++static void be_fence(const void *dev, mock_fence *f) { (void)dev; f->seq = atomic_load(&gpu_submitted); }
++static bool be_passed(const mock_fence *f) { return f->seq <= atomic_load(&gpu_done); }
++static const struct nvk_slab_backend BE = { be_create, be_destroy, be_fence, be_passed };
++
++static int fails, arms;
++#define ARM(name, cond) do { arms++; if (!(cond)) { fails++; printf("FAIL  %s\n", name); } else printf("ok    %s\n", name); } while (0)
++
++static void reset(struct nvk_slab_alloc *a, unsigned slab_kb, unsigned spare)
++{
++   struct nvk_slab_alloc z = NVK_SLAB_ALLOC_INIT; *a = z;
++   a->chunk_bytes = CHUNK; a->slab_bytes = (uint64_t)slab_kb * 1024; a->spare = spare;
++   atomic_store(&gpu_submitted, 0); atomic_store(&gpu_done, 0); atomic_store(&conns, 0); atomic_store(&conns_peak, 0);
++   atomic_store(&creates, 0);
++}
++
++/* stress */
++static struct nvk_slab_alloc SA;
++static const int DEVS = 1;
++#define MAXSLAB 4096
++static _Atomic int busy[MAXSLAB][16];
++static _Atomic uint64_t returned_at[MAXSLAB][16];
++static _Atomic int early, overlap, outstanding, out_peak;
++static void *stress(void *arg)
++{
++   unsigned s = (unsigned)(uintptr_t)arg * 2654435761u;
++   struct nvk_slab_chunk held[24]; int nh = 0;
++   for (int it = 0; it < 30000; it++) {
++      s = s * 1103515245u + 12345u;
++      if (nh < 24 && (nh == 0 || (s >> 7) % 2)) {
++         struct nvk_slab_chunk c;
++         if (!nvk_slab_take(&SA, &BE, &DEVS, (s >> 11) & 1, &c)) continue;
++         const uint64_t slot = (c.addr - 0x100000000ull) / (SA.slab_bytes + 0x10000000ull);
++         if (slot >= MAXSLAB) continue;
++         if (atomic_exchange(&busy[slot][c.idx], 1)) atomic_fetch_add(&overlap, 1);
++         if (atomic_load(&returned_at[slot][c.idx]) > atomic_load(&gpu_done)) atomic_fetch_add(&early, 1);
++         int o = atomic_fetch_add(&outstanding, 1) + 1, p = atomic_load(&out_peak);
++         while (o > p && !atomic_compare_exchange_weak(&out_peak, &p, o)) {}
++         held[nh++] = c;
++         atomic_fetch_add(&gpu_submitted, 1);
++      } else if (nh) {
++         int k = (int)((s >> 5) % (unsigned)nh);
++         struct nvk_slab_chunk c = held[k]; held[k] = held[--nh];
++         const uint64_t slot = (c.addr - 0x100000000ull) / (SA.slab_bytes + 0x10000000ull);
++         atomic_store(&busy[slot][c.idx], 0);
++         atomic_store(&returned_at[slot][c.idx], atomic_load(&gpu_submitted));
++         atomic_fetch_sub(&outstanding, 1);
++         nvk_slab_put(&SA, &BE, c.slab, c.idx);
++      }
++      if ((s >> 13) % 4 == 0) {
++         uint64_t sub = atomic_load(&gpu_submitted), want = sub > 8 ? sub - 8 : 0, cur = atomic_load(&gpu_done);
++         while (cur < want && !atomic_compare_exchange_weak(&gpu_done, &cur, want)) {}
++      }
++   }
++   while (nh) { struct nvk_slab_chunk c = held[--nh];
++      const uint64_t slot = (c.addr - 0x100000000ull) / (SA.slab_bytes + 0x10000000ull);
++      atomic_store(&busy[slot][c.idx], 0); atomic_fetch_sub(&outstanding, 1); nvk_slab_put(&SA, &BE, c.slab, c.idx); }
++   return NULL;
++}
++/* a reused chunk must have passed its fence: check through a wrapper backend */
++static bool be_passed_checked(const mock_fence *f) { bool p = be_passed(f); return p; }
++
++int main(void)
++{
++   struct nvk_slab_alloc a;
++   static const int A = 1, B = 2;
++   struct nvk_slab_chunk c[40];
++
++   reset(&a, 1024, 4);   /* 1 MB slabs = 16 chunks */
++   bool ok = true;
++   for (int i = 0; i < 16; i++) ok &= nvk_slab_take(&a, &BE, &A, false, &c[i]);
++   ARM("16 chunks from a 1 MB slab cost ONE allocation (one connection)", ok && atomic_load(&creates) == 1 && a.live_slabs == 1);
++   bool distinct = true;
++   for (int i = 0; i < 16; i++) {
++      distinct &= c[i].addr == c[0].addr + (uint64_t)i * CHUNK && c[i].map == c[0].map + (uint64_t)i * CHUNK;
++      distinct &= c[i].off == (uint64_t)i * CHUNK && c[i].backing == c[0].backing;
++   }
++   ARM("chunks are disjoint 64 KB windows of the slab (GPU address, CPU map and offset agree)", distinct);
++   nvk_slab_take(&a, &BE, &A, false, &c[16]);
++   ARM("the 17th chunk opens a second slab", atomic_load(&creates) == 2 && c[16].backing != c[0].backing);
++
++   atomic_store(&gpu_submitted, 50); atomic_store(&gpu_done, 40);
++   nvk_slab_put(&a, &BE, c[3].slab, c[3].idx);
++   for (int i = 1; i < 16; i++) if (i != 3) nvk_slab_take(&a, &BE, &A, false, &c[20]);   /* drain the second slab's room */
++   struct nvk_slab_chunk r;
++   nvk_slab_take(&a, &BE, &A, false, &r);
++   ARM("a returned chunk is NOT handed out while its fence is pending", !(r.slab == c[3].slab && r.idx == c[3].idx) && a.st.not_ready >= 1);
++   atomic_store(&gpu_done, 50);
++   nvk_slab_take(&a, &BE, &A, false, &r);
++   ARM("it IS handed out once the fence passes, with no new allocation", r.slab == c[3].slab && r.idx == 3 && a.st.reused == 1);
++
++   reset(&a, 1024, 4);
++   nvk_slab_take(&a, &BE, &A, false, &c[0]);
++   nvk_slab_take(&a, &BE, &B, false, &c[1]);
++   nvk_slab_take(&a, &BE, &A, true, &c[2]);
++   ARM("slabs never cross devices or the GART/non-GART split", atomic_load(&creates) == 3 &&
++       c[0].backing != c[1].backing && c[0].backing != c[2].backing);
++
++   reset(&a, 128, 1);    /* 2 chunks per slab, keep 1 idle slab */
++   for (int i = 0; i < 6; i++) nvk_slab_take(&a, &BE, &A, false, &c[i]);   /* 3 slabs */
++   nvk_slab_put(&a, &BE, c[0].slab, c[0].idx);
++   ARM("a slab with a chunk still in use is never released", a.live_slabs == 3 && atomic_load(&conns) == 3);
++   nvk_slab_put(&a, &BE, c[1].slab, c[1].idx);
++   ARM("the first fully idle slab is kept as the spare", a.live_slabs == 3);
++   nvk_slab_put(&a, &BE, c[2].slab, c[2].idx); nvk_slab_put(&a, &BE, c[3].slab, c[3].idx);
++   ARM("a second fully idle slab beyond the spare is released (connection closed)", a.live_slabs == 2 && atomic_load(&conns) == 2 && a.st.slabs_released == 1);
++   bool stale = false;
++   for (struct nvk_slab_free *f = a.head; f; f = f->next) stale |= (f->slab != c[0].slab && f->slab != c[2].slab);
++   ARM("a released slab leaves no returned chunk behind in the free list", !stale);
++
++   reset(&a, 1024, 4);
++   nvk_slab_take(&a, &BE, &A, false, &c[0]); nvk_slab_take(&a, &BE, &B, false, &c[1]);
++   nvk_slab_put(&a, &BE, c[1].slab, c[1].idx);
++   unsigned busy_left = nvk_slab_drain(&a, &BE, &A);
++   ARM("device teardown leaves a slab whose chunk is still in use allocated, and says so", busy_left == 1 && a.live_slabs == 2);
++   busy_left = nvk_slab_drain(&a, &BE, &B);
++   ARM("device teardown releases an idle device's slab", busy_left == 0 && a.live_slabs == 1 && atomic_load(&conns) == 1);
++
++   reset(&a, 1024, 4);
++   atomic_store(&fail_next, 1);
++   ARM("a slab that cannot be allocated fails the take (the pool reports out of device memory)",
++       !nvk_slab_take(&a, &BE, &A, false, &c[0]) && a.st.create_failed == 1 && a.live_slabs == 0);
++
++   /* the Cyberpunk number: ~990 chunks alive at once */
++   reset(&a, 1024, 4);
++   static struct nvk_slab_chunk many[990];
++   for (int i = 0; i < 990; i++) nvk_slab_take(&a, &BE, &A, i & 1, &many[i]);
++   printf("      990 live chunks, 1 MB slabs: %d connections (was 990)\n", atomic_load(&conns));
++   ARM("990 live chunks in 1 MB slabs hold at most 64 connections", atomic_load(&conns) <= 64);
++   for (int i = 0; i < 990; i++) nvk_slab_put(&a, &BE, many[i].slab, many[i].idx);
++   ARM("...and when every chunk comes back only the spares stay open", atomic_load(&conns) <= 2 * 4);
++
++   /* stress */
++   (void)be_passed_checked;
++   struct nvk_slab_alloc z = NVK_SLAB_ALLOC_INIT; SA = z; SA.chunk_bytes = CHUNK; SA.slab_bytes = 1024 * 1024; SA.spare = 4;
++   atomic_store(&gpu_submitted, 0); atomic_store(&gpu_done, 0); atomic_store(&conns, 0); atomic_store(&conns_peak, 0);
++   pthread_t t[8];
++   for (int i = 0; i < 8; i++) pthread_create(&t[i], NULL, stress, (void *)(uintptr_t)(i + 1));
++   for (int i = 0; i < 8; i++) pthread_join(t[i], NULL);
++   unsigned live; struct nvk_slab_stats st = nvk_slab_snapshot(&SA, &live);
++   printf("      stress: %llu takes, %llu reused, %llu carved, %llu not ready, slabs created %llu released %llu, "
++          "peak chunks in use %d, peak connections %d\n",
++          (unsigned long long)st.takes, (unsigned long long)st.reused, (unsigned long long)st.carved,
++          (unsigned long long)st.not_ready, (unsigned long long)st.slabs_created, (unsigned long long)st.slabs_released,
++          atomic_load(&out_peak), atomic_load(&conns_peak));
++   ARM("stress: no chunk handed to two users at once", atomic_load(&overlap) == 0);
++   ARM("stress: connections stay far below chunks in use (peak connections <= peak chunks / 16 + threads x2 + spares)",
++       atomic_load(&conns_peak) <= atomic_load(&out_peak) / 16 + 16 + 8);
++   ARM("stress: everything returned -> only spare slabs remain", live <= 8 && atomic_load(&conns) == (int)live);
++   ARM("stress: no returned chunk handed out before its fence passed", atomic_load(&early) == 0);
++
++   printf("%d arms, %d failed\n", arms, fails);
++   return fails != 0;
++}
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
+index 3123233..509deef 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
+@@ -67,6 +67,15 @@ static uint32_t     gPoolType[NVRM_XNU_POOL];
+ static int          gPoolN;
+ static uint32_t     gConnType[NVRM_XNU_MAX_FD];
+ static unsigned long gPoolHit, gPoolMiss, gPoolPut, gPoolDrop;
++// Live counts for the census lines (nvrm_xnu_live): user-client connections this process holds open, and CPU mappings
++// alive on them. Each mapping keeps its connection open, so these are the numbers the per-process ceiling counts.
++static int64_t gConnOpen, gMapsLive;
++static void conn_close(io_connect_t c) { IOServiceClose(c); __atomic_sub_fetch(&gConnOpen, 1, __ATOMIC_RELAXED); }
++void nvrm_xnu_live(int64_t *conns, int64_t *maps)
++{
++    *conns = __atomic_load_n(&gConnOpen, __ATOMIC_RELAXED);
++    *maps = __atomic_load_n(&gMapsLive, __ATOMIC_RELAXED);
++}
+ 
+ // take a pooled connection of this type, or 0. gLock MUST be held.
+ static io_connect_t pool_take(uint32_t type)
+@@ -116,7 +125,7 @@ int nvrm_xnu_open(const char *node)
+         if (rfd < 0 || rfd >= NVRM_XNU_MAX_FD) {
+             if (rfd >= 0) close(rfd);
+             pthread_mutex_lock(&gLock);
+-            if (!pool_put(reuse, type)) { pthread_mutex_unlock(&gLock); IOServiceClose(reuse); pthread_mutex_lock(&gLock); }
++            if (!pool_put(reuse, type)) { pthread_mutex_unlock(&gLock); conn_close(reuse); pthread_mutex_lock(&gLock); }
+             pthread_mutex_unlock(&gLock);
+             errno = EMFILE; return -1;
+         }
+@@ -143,8 +152,9 @@ int nvrm_xnu_open(const char *node)
+     }
+     if (svc) IOObjectRelease(svc);
+     if (kr != KERN_SUCCESS) { fprintf(stderr, "nvrm_xnu: IOServiceOpen(type %u) 0x%08x\n", type, kr); errno = EIO; return -1; }
++    __atomic_add_fetch(&gConnOpen, 1, __ATOMIC_RELAXED);
+     int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+-    if (fd < 0 || fd >= NVRM_XNU_MAX_FD) { IOServiceClose(conn); if (fd >= 0) close(fd); errno = EMFILE; return -1; }
++    if (fd < 0 || fd >= NVRM_XNU_MAX_FD) { conn_close(conn); if (fd >= 0) close(fd); errno = EMFILE; return -1; }
+     uint64_t in = (uint64_t)fd;
+     IOConnectCallScalarMethod(conn, SEL_BINDFD, &in, 1, NULL, NULL);
+     pthread_mutex_lock(&gLock); gConn[fd] = conn; gConnType[fd] = type; pthread_mutex_unlock(&gLock);
+@@ -198,6 +208,7 @@ void *nvrm_xnu_mmap_wc(int fd, size_t length, int writeCombine)
+     pthread_mutex_lock(&gLock);
+     int stored = 0;
+     for (int i = 0; i < NVRM_XNU_MAX_MAP; i++) if (!gMaps[i].addr) { gMaps[i].addr = (void *)(uintptr_t)addr; gMaps[i].len = (size_t)len; gMaps[i].conn = conn; stored = 1; break; }
++    __atomic_add_fetch(&gMapsLive, 1, __ATOMIC_RELAXED);
+     pthread_mutex_unlock(&gLock);
+     if (!stored) {
+         // an untracked mapping can never be unmapped and its connection can never be closed. Say it.
+@@ -223,8 +234,9 @@ int nvrm_xnu_munmap(void *addr, size_t length)
+     if (conn && maps_on(conn) == 0 && (pi = pending_close(conn)) >= 0) { gPendingClose[pi] = 0; closeNow = 1; }
+     pthread_mutex_unlock(&gLock);
+     if (!conn) { errno = EINVAL; return -1; }
++    __atomic_sub_fetch(&gMapsLive, 1, __ATOMIC_RELAXED);
+     IOConnectUnmapMemory64(conn, 0, mach_task_self(), (mach_vm_address_t)(uintptr_t)addr);
+-    if (closeNow) IOServiceClose(conn);
++    if (closeNow) conn_close(conn);
+     return 0;
+ }
+ int nvrm_xnu_close(int fd)
+@@ -257,7 +269,7 @@ int nvrm_xnu_close(int fd)
+             int pooled = kr == KERN_SUCCESS && pool_put(conn, gConnType[fd]);
+             if (pooled) gPoolPut++; else gPoolDrop++;
+             pthread_mutex_unlock(&gLock);
+-            if (!pooled) IOServiceClose(conn);
++            if (!pooled) conn_close(conn);
+         }
+     }
+     return close(fd);
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.h b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.h
+index 19886d3..7824294 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.h
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.h
+@@ -16,6 +16,7 @@ void *nvrm_xnu_mmap_wc(int fd, size_t length, int writeCombine);         /* patc
+ int   nvrm_xnu_munmap(void *addr, size_t length);
+ int   nvrm_xnu_close(int fd);
+ int64_t nvrm_xnu_wait_event(int fd, uint32_t seen, uint32_t timeout_us);   /* b73: kext selector 6; -1 = no such selector */
++void  nvrm_xnu_live(int64_t *conns, int64_t *maps);   /* connections open, CPU mappings alive (census) */
+ #ifdef __cplusplus
+ }
+ #endif
