@@ -183,27 +183,30 @@ static int nvmtl_xlate_ready(void) {
 
 static _Atomic unsigned long gAirHit, gAirMiss, gAirStored;
 
+static BOOL nvmtl_dir_writable(NSString *d);   // defined with the SPIR-V cache folder below
+
+// The AIR cache folder is chosen once, by writing to it. access(W_OK) answers yes for a folder a sandbox then refuses to
+// open for writing, which is what WindowServer's sandbox does to the shared folder (it allows writes only inside its own
+// named folders), so every AIR decode ran again on each boot. The first folder that takes a real write wins.
 static NSString *nvmtl_aircache_dir(void) {
     static NSString *dir; static dispatch_once_t once;
     dispatch_once(&once, ^{
         const char *e = getenv("NVMTL_AIRCACHE");
         if (e) { dir = @(e); return; }
-        if (access(NVMTL_AIRCACHE_DIR, W_OK) == 0) { dir = @NVMTL_AIRCACHE_DIR; return; }
-        NSArray *c = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
-        NSString *base = c.count ? c[0] : NSTemporaryDirectory();
-        dir = [base stringByAppendingPathComponent:@"nvmtl/aircache"];
-        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-        if (access(dir.fileSystemRepresentation, W_OK) != 0) {
-            char ucd[PATH_MAX];
-            const size_t n = confstr(_CS_DARWIN_USER_CACHE_DIR, ucd, sizeof ucd);
-            NSString *alt = (n > 0 && n <= sizeof ucd) ? [@(ucd) stringByAppendingPathComponent:@"nvmtl/aircache"] : nil;
-            if (alt) [[NSFileManager defaultManager] createDirectoryAtPath:alt withIntermediateDirectories:YES attributes:nil error:nil];
-            if (alt && access(alt.fileSystemRepresentation, W_OK) == 0) dir = alt;
-            else {
-                dir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"nvmtl/aircache"];
-                [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-            }
+        NSMutableArray<NSString *> *c = [NSMutableArray arrayWithObject:@NVMTL_AIRCACHE_DIR];
+        NSArray *caches = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+        if (caches.count) [c addObject:[caches[0] stringByAppendingPathComponent:@"nvmtl/aircache"]];
+        char ucd[PATH_MAX];
+        const size_t n = confstr(_CS_DARWIN_USER_CACHE_DIR, ucd, sizeof ucd);
+        if (n > 0 && n <= sizeof ucd) {
+            [c addObject:[@(ucd) stringByAppendingPathComponent:@"nvmtl/aircache"]];
+            // WindowServer's own named folder under the user cache folder
+            [c addObject:[[@(ucd) stringByAppendingPathComponent:@(getprogname())] stringByAppendingPathComponent:@"nvmtl/aircache"]];
         }
+        NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:@"nvmtl/aircache"];
+        [c addObject:tmp];
+        for (NSString *d in c) if (nvmtl_dir_writable(d)) { dir = d; return; }
+        dir = tmp;   // nothing takes a write: the stores fail and are counted, as before
     });
     return dir;
 }
