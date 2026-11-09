@@ -173,7 +173,7 @@ static inline int kbl_dell_wdg_find(const uint8_t *wdg, unsigned len, char obj[2
 {
     for (unsigned o = 0; o + 20 <= len; o += 20) {
         int same = 1;
-        for (int i = 0; i < 16; i++) if (wdg[o + i] != kKblDellGuid[i]) { same = 0; break; }
+        for (unsigned i = 0; i < 16; i++) if (wdg[o + i] != kKblDellGuid[i]) { same = 0; break; }
         if (same && (wdg[o + 19] & 0x02)) { obj[0] = (char)wdg[o + 16]; obj[1] = (char)wdg[o + 17]; return 1; }
     }
     return 0;
@@ -227,7 +227,7 @@ static inline int kbl_wdg_find(const uint8_t *wdg, unsigned len, const uint8_t g
 {
     for (unsigned o = 0; o + 20 <= len; o += 20) {
         int same = 1;
-        for (int i = 0; i < 16; i++) if (wdg[o + i] != guid[i]) { same = 0; break; }
+        for (unsigned i = 0; i < 16; i++) if (wdg[o + i] != guid[i]) { same = 0; break; }
         if (same) { obj[0] = (char)wdg[o + 16]; obj[1] = (char)wdg[o + 17]; *flags = wdg[o + 19]; return 1; }
     }
     return 0;
