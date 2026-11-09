@@ -55,3 +55,16 @@ static inline unsigned long long nvrmDscThresholdBps(unsigned hdaConnectorType, 
     if (hdaConnectorType == 0x800) return 42670000000ull;
     return 0;
 }
+// Registry location for framebuffer instance `index`. Every instance is named NVRMFramebuffer, so two heads shared the
+// path NVRMFramebuffer/display0 and macOS merged their display preferences (colour profiles, identity). Apple
+// framebuffers carry a unit location (@0, @1 ...). Instance 0 keeps its old, unnumbered path so the preferences already
+// stored for a single display stay valid; every other instance gets "@<index>". Returns false when no location is set.
+static inline bool nvrmFbLocation(unsigned index, char *out, unsigned size)
+{
+    if (!index || !out || size < 12) return false;
+    char tmp[12]; unsigned n = 0;
+    for (unsigned v = index; v && n < sizeof tmp; v /= 10) tmp[n++] = (char)('0' + v % 10);
+    for (unsigned i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    out[n] = 0;
+    return true;
+}
