@@ -11,6 +11,9 @@
 #define NVRM_VRAM_FN_FREE     "nvFreeVram"
 
 #define NVRM_VRAM_FN_SCANOUT  "nvScanoutInfo"
+// Reply flag of nvScanoutInfo (NVRMVramRequest::flags): the scanout is 30-bit X2B10G10R10, not 8-bit X8R8G8B8. A framebuffer that
+// never sets it leaves the 8-bit layout, which is what every accelerator assumed before.
+#define NVRM_VRAM_SCANOUT_30BIT 0x1u
 
 #define NVRM_VRAM_BAR1_BUDGET (192ull * 1024ull * 1024ull)
 

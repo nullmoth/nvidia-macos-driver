@@ -1,0 +1,49 @@
+--- a/kapi/src/nvkms-kapi.c
++++ b/kapi/src/nvkms-kapi.c
+@@ -3604,6 +3604,14 @@
+         paramsHead->colorBpcSpecified =
+             (headModeSetConfig->colorBpc !=
+              NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_UNKNOWN);
++
++        /* 0 = leave the range to NVKMS; 1 = full; 2 = limited. */
++        if (headModeSetConfig->colorRange == 1 || headModeSetConfig->colorRange == 2) {
++            paramsHead->colorRange = (headModeSetConfig->colorRange == 1) ?
++                NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_FULL :
++                NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_LIMITED;
++            paramsHead->colorRangeSpecified = NV_TRUE;
++        }
+     }
+ 
+     return NV_TRUE;
+@@ -3971,7 +3979,8 @@
+             headRequestedConfig->flags.displaysChanged     ||
+             headRequestedConfig->flags.modeChanged         ||
+             headRequestedConfig->flags.colorFormatChanged  ||
+-            headRequestedConfig->flags.colorBpcChanged;
++            headRequestedConfig->flags.colorBpcChanged     ||
++            headRequestedConfig->flags.colorRangeChanged;
+ 
+         if (!device->caps.supportsFlipSynchronizedInfoframes) {
+             bRequiredModeset |=
+--- a/kapi/interface/nvkms-kapi.h
++++ b/kapi/interface/nvkms-kapi.h
+@@ -439,6 +439,11 @@
+      * preference" -- NVKMS chooses based on its own heuristics.
+      */
+     NvU32 colorBpc;
++
++    /*!
++     * Output color range: 0 = no preference (NVKMS chooses), 1 = full, 2 = limited (16-235).
++     */
++    NvU32 colorRange;
+ };
+ 
+ struct NvKmsKapiHeadRequestedConfig {
+@@ -458,6 +463,7 @@
+         NvBool colorFormatChanged              : 1;
+         NvBool colorBpcChanged                 : 1;
+         NvBool vrrEnabledChanged               : 1;
++        NvBool colorRangeChanged               : 1;
+     } flags;
+ 
+     struct NvKmsKapiCursorRequestedConfig cursorRequestedConfig;

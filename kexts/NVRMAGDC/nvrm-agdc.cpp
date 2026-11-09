@@ -56,6 +56,13 @@ enum { kAgdcFBMapBytes = 3 + kAgdcMaxFB * 25 + 52 + 1 };
 static_assert(kAgdcMaxFB >= 1 && kAgdcMaxFB <= 8, "IOPresentment's map holds 8 (kext 0x31b3), and kAgdcFBMapBytes assumes one digit for n and each slot index");
 static char   gAgdcFBMap[kAgdcFBMapBytes] = "never scanned";
 static int    gAgdcMaxFBOut = 0;
+// The maximum to report: at least the started count, up to the head slots the driver publishes, never above the table.
+static inline unsigned nvrmAgdcMaxFramebuffers(unsigned started, int heads, unsigned tableMax)
+{
+    unsigned want = heads < 1 ? 1u : (unsigned)heads;
+    if (want > tableMax) want = tableMax;
+    return want > started ? want : started;
+}
 static int    gAgdcK5Asked = 0, gAgdcK5LinkMask = 0, gAgdcK5CapsMask = 0;
 static int    gAgdcK5LastRefusedIdx = -1;
 
@@ -141,6 +148,15 @@ IOReturn NVDADeviceControl::vendor_doDeviceAttribute(unsigned int cmd, unsigned 
             c->countA = c->countB = c->countC = c->countD = n;
             c->maxFramebuffers = n; c->pciDevice = fPci;
         }
+        // Boot-arg nvagdcheads=1: report the framebuffer slots that CAN exist (nvfbheads) as the maximum, not only the ones
+        // started now. With one display at boot the reply said 1, and macOS then refused the framebuffer a later hot-plug
+        // starts (1401 issue 146, "AGDC maxfb=1"). The framebuffer[] list and port mask still name only the started ones.
+        {   UInt32 on = 0; int heads = 1;
+            if (PE_parse_boot_argn("nvagdcheads", &on, sizeof on) && on) {
+                PE_parse_boot_argn("nvfbheads", &heads, sizeof heads);
+                const unsigned mx = nvrmAgdcMaxFramebuffers(c->maxFramebuffers, heads, kAgdcMaxFB);
+                if (mx != c->maxFramebuffers) { c->maxFramebuffers = mx; }
+            } }
         gAgdcMaxFBOut = (int)c->maxFramebuffers;
         return kIOReturnSuccess;
     }
