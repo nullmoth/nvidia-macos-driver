@@ -393,7 +393,7 @@ int nvmtl_y422_blit_refused(id tex, const char *what);
 // tile shading (NVMTL_TILE_SHADING=1): a tile pipeline is a render pipeline state object that holds the tile function; its compute
 // pipelines (the function rewritten for one tile size) are made on first use
 @interface NVMTLRenderPipelineState () { @public NVMTLFunction *_tileFn; NSMutableDictionary *_tileCps; } @end
-@interface NVMTLRenderCommandEncoder () { @public NVMTLRenderPipelineState *_tilePs; NVMTLTexture *_colTex[NVMTL_NCOL]; NSMutableDictionary *_tileBuf, *_tileByt, *_tileTex, *_tileTg; uint32_t _tileW, _tileH; } @end
+@interface NVMTLRenderCommandEncoder () { @public NVMTLRenderPipelineState *_tilePs; NVMTLTexture *_colTex[NVMTL_NCOL]; NSMutableDictionary *_tileBuf, *_tileByt, *_tileTex, *_tileTg; uint32_t _tileW, _tileH; NSMutableDictionary *_tileSmp, *_tileVft, *_tileIft, *_tileAs; } @end
 int nvmtl_tile_on(void);
 #define NVMTL_TILE_TEXTURE_BASE 120u   /* the translator's TILE_TEXTURE_BASE: attachment A is texture 120 + A */
 id nvmtl_tile_compute_pipeline(NVMTLRenderPipelineState *tp, uint32_t tw, uint32_t th, NSString **why);
