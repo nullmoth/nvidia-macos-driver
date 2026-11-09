@@ -4508,6 +4508,64 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     }
     nvlog("executeCommandsInBuffer: replayed %lu of %lu slot(s)", (unsigned long)n, (unsigned long)r.length);
 }
+// executeCommandsInBuffer:indirectBuffer:indirectBufferOffset: - the commands to run are chosen by a range the GPU wrote
+// (nvmtl_icb_range.h). Every armed slot becomes an indirect draw whose count is zeroed outside that range.
+// GPU-encoded commands (a kernel writing the ICB) are not carried: this ICB is the list the CPU encoded.
+static NVMTLBuffer *nvmtl_icb_scratch(uint32_t slots) {
+    id<MTLBuffer> b = [(id<MTLDevice>)gNVMTLMainDevice newBufferWithLength:(NSUInteger)slots * NVMTL_ICB_RECORD_BYTES options:MTLResourceStorageModeShared];
+    if (b) memset(b.contents, 0, (size_t)slots * NVMTL_ICB_RECORD_BYTES);
+    return (NVMTLBuffer *)b;
+}
+- (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)icb indirectBuffer:(id<MTLBuffer>)ib indirectBufferOffset:(NSUInteger)ioff {
+    NVMTLIndirectCommandBuffer *b = (NVMTLIndirectCommandBuffer *)icb; NVMTLBuffer *rb = (NVMTLBuffer *)ib;
+    const uint32_t slots = b ? nvmtl_icb_slots(b->_cmds.count) : 0;
+    if (!b || !rb || !slots || ioff + 8 > rb.length || (ioff & 3)) { nvlog("executeCommandsInBuffer:indirectBuffer: unusable arguments (icb %p, buffer %p, %u slot(s), offset %lu) - nothing runs", b, rb, slots, (unsigned long)ioff); return; }
+    NVMTLBuffer *sc = nvmtl_icb_scratch(slots);
+    if (!sc) { nvlog("executeCommandsInBuffer:indirectBuffer: scratch of %u records FAILED - nothing runs", slots); return; }
+    uint32_t *rec = (uint32_t *)sc.contents;
+    for (uint32_t i = 0; i < slots; i++) {
+        NVMTLIndirectCommand *c = b->_cmds[i]; uint32_t *r = rec + i * NVMTL_ICB_RECORD_WORDS;
+        if (!c->_armed || c->_isCompute) continue;
+        if (c->_indexed) nvmtl_icb_record_draw_indexed(r, (uint32_t)c->_count, (uint32_t)c->_instances, (int32_t)c->_baseVertex, (uint32_t)c->_baseInstance);
+        else nvmtl_icb_record_draw(r, (uint32_t)c->_count, (uint32_t)c->_instances, (uint32_t)c->_start, (uint32_t)c->_baseInstance);
+    }
+    [self nvmtlHzForceFull];
+    nvmtl_retain_resource(_cb, sc); nvmtl_retain_resource(_cb, rb);
+    if (_begun) {   // the masking pass is a compute dispatch: leave the render pass, keeping every attachment's contents
+        uint32_t keep = 0;
+        for (uint32_t i = 0; i < _passSig.ncol; i++) if (_passSig.cfmts[i]) keep |= NVMTL_LOAD_COLOUR(i);
+        if (_passSig.has_depth) keep |= NVMTL_LOAD_DEPTH;
+        if (_ps && _ps->_p.has_stencil) keep |= NVMTL_LOAD_STENCIL;
+        BOOL visibility = _visActive || _visPending;
+        [self nvmtlCloseVisibility];
+        nvmtl_vk_cmd_end_render(&_cb->_c);
+        _begun = NO; _pass.load |= keep; _load |= keep; _visPending = visibility;
+    }
+    if (nvmtl_vk_cmd_icb_mask(&_cb->_c, &sc->_b, &rb->_b, ioff, slots, NVMTL_ICB_ZERO_DRAW)) { nvlog("executeCommandsInBuffer:indirectBuffer: the range pass FAILED - nothing runs"); return; }
+    if (_ps) [self setRenderPipelineState:_ps];   // begins the pass again with the attachments kept
+    NSUInteger n = 0;
+    for (uint32_t i = 0; i < slots; i++) {
+        NVMTLIndirectCommand *c = b->_cmds[i];
+        if (!c->_armed || c->_isCompute) continue;
+        if (c->_ps) [self setRenderPipelineState:c->_ps];
+        if (c->_hasCull) [self setCullMode:c->_cull];
+        if (c->_hasWinding) [self setFrontFacingWinding:c->_winding];
+        if (c->_hasFill) [self setTriangleFillMode:c->_fill];
+        if (c->_hasClip) [self setDepthClipMode:c->_clip];
+        if (c->_ds) [self setDepthStencilState:c->_ds];
+        if (c->_hasBias) [self setDepthBias:c->_bias slopeScale:c->_slope clamp:c->_clamp];
+        for (NSArray *e in c->_vbufs) {
+            if (e.count > 3) [self setVertexBuffer:e[0] offset:[e[1] unsignedLongValue] attributeStride:[e[3] unsignedLongValue] atIndex:[e[2] unsignedLongValue]];
+            else [self setVertexBuffer:e[0] offset:[e[1] unsignedLongValue] atIndex:[e[2] unsignedLongValue]]; }
+        for (NSArray *e in c->_fbufs) [self setFragmentBuffer:e[0] offset:[e[1] unsignedLongValue] atIndex:[e[2] unsignedLongValue]];
+        if (c->_indexed)
+            [self drawIndexedPrimitives:c->_type indexType:c->_itype indexBuffer:c->_ibuf indexBufferOffset:c->_ioff indirectBuffer:sc indirectBufferOffset:(NSUInteger)i * NVMTL_ICB_RECORD_BYTES];
+        else
+            [self drawPrimitives:c->_type indirectBuffer:sc indirectBufferOffset:(NSUInteger)i * NVMTL_ICB_RECORD_BYTES];
+        n++;
+    }
+    nvlog("executeCommandsInBuffer:indirectBuffer: %lu armed slot(s) of %u recorded as range-masked indirect draws", (unsigned long)n, slots);
+}
 - (void)setDepthClipMode:(MTLDepthClipMode)mode {
     if (nvmtl_vk_cmd_set_depth_clip(&_cb->_c, mode == MTLDepthClipModeClip))
         nvlog("setDepthClipMode:%lu REFUSED — VK_EXT_depth_clip_enable is not enabled on this device",
@@ -6232,6 +6290,30 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
         n++;
     }
     nvlog("compute executeCommandsInBuffer: replayed %lu of %lu slot(s)", (unsigned long)n, (unsigned long)r.length);
+}
+- (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)icb indirectBuffer:(id<MTLBuffer>)ib indirectBufferOffset:(NSUInteger)ioff {
+    NVMTLIndirectCommandBuffer *b = (NVMTLIndirectCommandBuffer *)icb; NVMTLBuffer *rb = (NVMTLBuffer *)ib;
+    const uint32_t slots = b ? nvmtl_icb_slots(b->_cmds.count) : 0;
+    if (!b || !rb || !slots || ioff + 8 > rb.length || (ioff & 3)) { nvlog("compute executeCommandsInBuffer:indirectBuffer: unusable arguments (icb %p, buffer %p, %u slot(s), offset %lu) - nothing runs", b, rb, slots, (unsigned long)ioff); return; }
+    NVMTLBuffer *sc = nvmtl_icb_scratch(slots);
+    if (!sc) { nvlog("compute executeCommandsInBuffer:indirectBuffer: scratch of %u records FAILED - nothing runs", slots); return; }
+    uint32_t *rec = (uint32_t *)sc.contents;
+    for (uint32_t i = 0; i < slots; i++) {
+        NVMTLIndirectCommand *c = b->_cmds[i];
+        if (c->_armed && c->_isCompute) nvmtl_icb_record_dispatch(rec + i * NVMTL_ICB_RECORD_WORDS, (uint32_t)c->_grid.width, (uint32_t)c->_grid.height, (uint32_t)c->_grid.depth);
+    }
+    nvmtl_retain_resource(_cb, sc); nvmtl_retain_resource(_cb, rb);
+    if (nvmtl_vk_cmd_icb_mask(&_cb->_c, &sc->_b, &rb->_b, ioff, slots, NVMTL_ICB_ZERO_DISPATCH)) { nvlog("compute executeCommandsInBuffer:indirectBuffer: the range pass FAILED - nothing runs"); return; }
+    NSUInteger n = 0;
+    for (uint32_t i = 0; i < slots; i++) {
+        NVMTLIndirectCommand *c = b->_cmds[i];
+        if (!c->_armed || !c->_isCompute) continue;
+        if (c->_cps) [self setComputePipelineState:c->_cps];
+        for (NSArray *e in c->_kbufs) [self setBuffer:e[0] offset:[e[1] unsignedLongValue] atIndex:[e[2] unsignedLongValue]];
+        [self dispatchThreadgroupsWithIndirectBuffer:sc indirectBufferOffset:(NSUInteger)i * NVMTL_ICB_RECORD_BYTES threadsPerThreadgroup:c->_tg];
+        n++;
+    }
+    nvlog("compute executeCommandsInBuffer:indirectBuffer: %lu armed slot(s) of %u recorded as range-masked indirect dispatches", (unsigned long)n, slots);
 }
 - (void)setSamplerState:(id<MTLSamplerState>)ss atIndex:(NSUInteger)i {
     NVMTLSamplerState *ns = (NVMTLSamplerState *)ss;
