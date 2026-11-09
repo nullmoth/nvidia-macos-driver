@@ -47,9 +47,15 @@ M-series reference run that settles it is listed below.
 
 ## Measurements still to take (M-series, then a card)
 
-1. On an M-series Mac: ground truth for the cut and cap rules: one curve of each basis and each cap mode, a grid of rays, compare
-   `distance` and `curve_parameter` with `curve_math.h` (the test harness takes the same curve description). Adjust `CV_SUBDIV`, the cap
-   rule or the flat orientation if they differ; each is one place in `curve_math.h`.
+1. On an M-series Mac: ground truth for the cut and cap rules. The oracle is written and compiles: `nvk/curves/oracle/` builds a curve
+   acceleration structure for each of 24 cases (six basis and count pairs, round with three cap modes, flat) on the machine's own GPU,
+   intersects 576 fixed rays, and dumps hit, distance, `curve_parameter` and primitive id as bits. `compare_oracle` judges the dump against
+   `curve_math.h` (hit/miss on 98 percent of rays, distance within 0.02, parameter within 0.03) and is proven without a GPU
+   (`oracle/selftest.sh`: a dump made from the same curves passes, one made from curves with 1.5 times the radii fails 24 of 24 cases).
+   `oracle/run_oracle.sh <dir>` runs it and refuses while the Mac is near swap. **It has not been run**: the laptop was at 84 to 92 percent
+   of its swap file with a load of 58 to 84 when this was written, and the other Apple machines are not allowed Metal work. Run it, check the
+   dump in as `oracle/fixture_<device>.txt`, and adjust `CV_SUBDIV`, the cap rule or the flat orientation where it differs; each is one
+   place in `curve_math.h`. If the GPU refuses curves, the dump names the error on the case line.
 2. On the card with `NVK_CURVES=1`: the 14 blocks of the hybrid ray-query probe plus a curve scene; compare against the float model.
 3. Cost: curves are tested with 8 pieces and about 2,800 instructions per candidate box. Measure before turning anything on by default.
 
