@@ -61,5 +61,7 @@ arm("versions 14 and later resume by a separate path from versions 12 and 13", "
 arm("the video BIOS is read only through the checked reader", "nmv_locate(op, asls, &io, &is, &loc)" in ifb and "nmv_edp(" in ifb)
 arm("zero copy from VRAM is off by default and the import gets the VRAM resource only when nmhybridp2p is set", "static int gNmHybridP2P = 0;" in accel and "nvAccelHybridImport(fb, head, s, gNmHybridP2P ? vm : nullptr)" in accel)
 arm("a VRAM frame is scanned out only after the allowlist decision, and without a CPU flush or page-out", "nvAccelP2pAllowed(fb, head, len)" in accel and "if (md) md->performOperation(kIOMemoryIncoherentIOFlush" in accel and "if (!p2p && !nvAccelSurfCopyReady(s, head))" in accel)
+arm("external test heads are behind their own boot-arg and are not published to the window system", 'PE_parse_boot_argn("nmhybridext", &e, sizeof e) && e == 1' in ifb and "if (nmhd_panel_up(&fHeads, &fHeadOps) == 0) fExtOn = true;" in ifb)
+arm("stopping takes the external heads down before the rest is released", ifb.find("nmhd_stop(&fHeads, &fHeadOps)") > ifb.find("thread_call_free(fTcTimer)") > 0)
 print(f"{len(fails)} failed")
 sys.exit(1 if fails else 0)

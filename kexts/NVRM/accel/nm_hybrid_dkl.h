@@ -133,4 +133,65 @@ static inline int nmk_enable(const struct nmr_ops *o, unsigned ver, unsigned tc,
     return 0;
 }
 
+/* ---- the transmitter lanes (intel_ddi.c tgl_dkl_phy_set_signal_levels; tables from intel_ddi_buf_trans.c). Each of the two PHY lanes serves two of
+ * the four link lanes through TX_DPCNTL0 and TX_DPCNTL1; the lane suspend register is cleared first, and from version 13 the load-generator select
+ * is zeroed for DisplayPort. */
+#define NMK_TX_DPCNTL0(ln)    ((ln) ? 0x12C0u : 0x02C0u)
+#define NMK_TX_DPCNTL1(ln)    ((ln) ? 0x12C4u : 0x02C4u)
+#define NMK_TX_DPCNTL2(ln)    ((ln) ? 0x12C8u : 0x02C8u)
+#define NMK_TX_PMD_LANE_SUS(ln) ((ln) ? 0x1D00u : 0x0D00u)
+#define NMK_PCS_DW5(ln)       ((ln) ? 0x1014u : 0x0014u)
+#define NMK_PCS_SOFTRESET     (1u << 11)
+#define NMK_DPCNTL_MASK       ((0x1Fu << 13) | (0x1Fu << 8) | 7u)
+#define NMK_DP20BITMODE       (1u << 2)
+#define NMK_LOADGEN_MASK      ((3u << 3) | (3u << 5))
+struct nmk_trans { uint8_t vswing, preshoot, de_emphasis; };
+static const struct nmk_trans nmk_tgl_hbr[10] = { {7,0,0x00},{5,0,0x05},{2,0,0x0B},{0,0,0x18},{5,0,0x00},{2,0,0x08},{0,0,0x14},{2,0,0x00},{0,0,0x0B},{0,0,0x00} };
+static const struct nmk_trans nmk_tgl_hbr2[10] = { {7,0,0x00},{5,0,0x05},{2,0,0x0B},{0,0,0x19},{5,0,0x00},{2,0,0x08},{0,0,0x14},{2,0,0x00},{0,0,0x0B},{0,0,0x00} };
+static const struct nmk_trans nmk_adlp_hbr[10] = { {7,0,0x01},{5,0,0x06},{2,0,0x0B},{0,0,0x17},{5,0,0x00},{2,0,0x08},{0,0,0x14},{2,0,0x00},{0,0,0x0B},{0,0,0x00} };
+static const struct nmk_trans nmk_adlp_hbr2[10] = { {7,0,0x00},{5,0,0x04},{2,0,0x0A},{0,0,0x18},{5,0,0x00},{2,0,0x06},{0,0,0x14},{2,0,0x00},{0,0,0x09},{0,0,0x00} };
+static inline const struct nmk_trans *nmk_table(unsigned ver, uint32_t rate)
+{
+    if (ver == 13) return rate > 270000 ? nmk_adlp_hbr2 : nmk_adlp_hbr;
+    return rate > 270000 ? nmk_tgl_hbr2 : nmk_tgl_hbr;
+}
+/* Set the swing (0 to 3) and pre-emphasis (0 to 3) on every lane. 0, or -1 for a combination DisplayPort does not allow. */
+static inline int nmk_set_levels(const struct nmr_ops *o, unsigned ver, unsigned tc, uint32_t rate, unsigned v, unsigned p)
+{
+    const int idx = nmr_level_index(v, p);
+    const struct nmk_trans *t;
+    unsigned ln;
+    if (idx < 0) return -1;
+    t = &nmk_table(ver, rate)[idx];
+    for (ln = 0; ln < 2; ln++) {
+        const uint32_t set = ((uint32_t)t->preshoot << 13) | ((uint32_t)t->de_emphasis << 8) | t->vswing;
+        nmk_wr(o, tc, NMK_TX_PMD_LANE_SUS(ln), 0);
+        nmk_rmw(o, tc, NMK_TX_DPCNTL0(ln), NMK_DPCNTL_MASK, set);
+        nmk_rmw(o, tc, NMK_TX_DPCNTL1(ln), NMK_DPCNTL_MASK, set);
+        nmk_rmw(o, tc, NMK_TX_DPCNTL2(ln), NMK_DP20BITMODE, 0);
+        if (ver == 13) nmk_rmw(o, tc, NMK_TX_DPCNTL2(ln), NMK_LOADGEN_MASK, 0);
+    }
+    return 0;
+}
+/* The soft-reset bit of both lanes' PCS register cleared (adlp_tbt_to_dp_alt_switch_wa), needed when a port moves from Thunderbolt to DisplayPort-alt. */
+static inline void nmk_lane_unreset(const struct nmr_ops *o, unsigned tc) { unsigned ln; for (ln = 0; ln < 2; ln++) nmk_rmw(o, tc, NMK_PCS_DW5(ln), NMK_PCS_SOFTRESET, 0); }
+
+/* ---- routing the PLL to the port and the port to the transcoder (icl_ddi_tc_enable_clock, intel_ddi_enable_transcoder_clock) */
+#define NMK_PORT_CLK_SEL(ddi)  (0x46100u + 4u * (ddi))
+#define NMK_CLK_SEL_MG         (0x8u << 28)
+#define NMK_DPCLKA_CFGCR0      0x164280u
+#define NMK_TC_CLK_OFF(tc)     (1u << ((tc) < 4 ? (tc) + 12 : (tc) - 4 + 21))
+#define NMK_TRANS_CLK_SEL(t)   (0x46140u + 4u * (t))
+static inline void nmk_clock_on(const struct nmr_ops *o, unsigned ddi, unsigned tc)
+{
+    o->wr(o->ctx, NMK_PORT_CLK_SEL(ddi), NMK_CLK_SEL_MG);
+    o->wr(o->ctx, NMK_DPCLKA_CFGCR0, o->rd(o->ctx, NMK_DPCLKA_CFGCR0) & ~NMK_TC_CLK_OFF(tc));
+}
+static inline void nmk_clock_off(const struct nmr_ops *o, unsigned ddi, unsigned tc)
+{
+    o->wr(o->ctx, NMK_DPCLKA_CFGCR0, o->rd(o->ctx, NMK_DPCLKA_CFGCR0) | NMK_TC_CLK_OFF(tc));
+    o->wr(o->ctx, NMK_PORT_CLK_SEL(ddi), 0);
+}
+static inline void nmk_trans_clock(const struct nmr_ops *o, unsigned t, unsigned ddi, int on) { o->wr(o->ctx, NMK_TRANS_CLK_SEL(t), on ? ((ddi + 1u) << 28) : 0u); }
+
 #endif
