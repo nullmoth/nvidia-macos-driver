@@ -98,6 +98,7 @@ typedef struct {
     // diagnostic dump (flag file /tmp/nvencvt.dump): encoded stream from a forced IDR on, and the first 30 input frames
     FILE *dumpEs, *dumpYuv; int dumpYuvLeft; bool dumpIdr;
     bool realTime;
+    bool lowLatency;                // EnableLowLatencyRateControl (encoder specification): P pictures only, no look-ahead
     bool reorder;                   // AllowFrameReordering (true unless the client turns it off)
     unsigned frames;
     // B pictures (T7.03; AllowFrameReordering true and RealTime not true, H.264 Main/High 4:2:0 and HEVC): up to bf
@@ -184,6 +185,7 @@ void build(void)
     CFDictionarySetValue(d, kVTCompressionPropertyKey_Quality, num);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_ReferenceBufferCount, num);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_RealTime, bol);
+    CFDictionarySetValue(d, kVTVideoEncoderSpecification_EnableLowLatencyRateControl, bol);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_AllowFrameReordering, bol);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_ProfileLevel, enm);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_H264EntropyMode, enm);
@@ -273,8 +275,12 @@ static OSStatus b_setProperty(CMBaseObjectRef o, CFStringRef key, CFTypeRef v)
     else if (CFEqual(key, kVTCompressionPropertyKey_ExpectedFrameRate)) { s->fps = num(v, 0); s->fpsKnown = s->fps > 0; }
     else if (CFEqual(key, kVTCompressionPropertyKey_ReferenceBufferCount)) s->refs = num(v, 0);
     else if (CFEqual(key, kVTCompressionPropertyKey_Quality)) { double q = 0; if (v && CFGetTypeID(v) == CFNumberGetTypeID()) CFNumberGetValue(v, kCFNumberDoubleType, &q); s->quality = (int)(q * 100); }
-    else if (CFEqual(key, kVTCompressionPropertyKey_RealTime)) s->realTime = v && CFGetTypeID(v) == CFBooleanGetTypeID() && CFBooleanGetValue(v);
-    else if (CFEqual(key, kVTCompressionPropertyKey_AllowFrameReordering)) s->reorder = v && CFGetTypeID(v) == CFBooleanGetTypeID() && CFBooleanGetValue(v);
+    else if (CFEqual(key, kVTCompressionPropertyKey_RealTime)) s->realTime = s->lowLatency || (v && CFGetTypeID(v) == CFBooleanGetTypeID() && CFBooleanGetValue(v));
+    else if (CFEqual(key, kVTVideoEncoderSpecification_EnableLowLatencyRateControl)) {
+        s->lowLatency = v && CFGetTypeID(v) == CFBooleanGetTypeID() && CFBooleanGetValue(v);
+        if (s->lowLatency) { s->realTime = true; s->reorder = false; }   // the session is real-time and has no B pictures
+    }
+    else if (CFEqual(key, kVTCompressionPropertyKey_AllowFrameReordering)) s->reorder = !s->lowLatency && v && CFGetTypeID(v) == CFBooleanGetTypeID() && CFBooleanGetValue(v);
     else if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) && !profile_ok(s, v)) st = kVTPropertyNotSupportedErr;
     else if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) && !s->hevc && !s->av1) {
         char pr[64] = ""; CFStringGetCString(v, pr, sizeof pr, kCFStringEncodingUTF8);
@@ -325,6 +331,7 @@ static OSStatus b_copyProperty(CMBaseObjectRef o, CFStringRef key, CFAllocatorRe
     else if (CFEqual(key, kVTCompressionPropertyKey_ExpectedFrameRate)) { n = s->fps; v = CFNumberCreate(al, kCFNumberIntType, &n); }
     else if (CFEqual(key, kVTCompressionPropertyKey_ReferenceBufferCount)) { n = s->enc.cfg.num_refs ? s->enc.cfg.num_refs : (s->refs ? s->refs : ENC_MAX_REFS); v = CFNumberCreate(al, kCFNumberIntType, &n); }
     else if (CFEqual(key, kVTCompressionPropertyKey_RealTime)) v = CFRetain(s->realTime ? kCFBooleanTrue : kCFBooleanFalse);
+    else if (CFEqual(key, kVTVideoEncoderSpecification_EnableLowLatencyRateControl)) v = CFRetain(s->lowLatency ? kCFBooleanTrue : kCFBooleanFalse);
     else if (CFEqual(key, kVTCompressionPropertyKey_AllowFrameReordering)) v = CFRetain((s->opened ? s->bf > 0 : s->reorder) ? kCFBooleanTrue : kCFBooleanFalse);
     else if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) && !s->av1) v = CFRetain(s->hevc ? (s->ten ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel)
                                                                              : h264_high(s) ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_H264_Main_AutoLevel);
@@ -893,15 +900,20 @@ static int gpu_nvenc_kind(void)
 static OSStatus register_one(FourCharCode codec, CFStringRef id, CFStringRef name, int rating)
 {
     CFNumberRef r = CFNumberCreate(NULL, kCFNumberIntType, &rating);
-    const void *sk[] = { kVTCompressionPropertyKey_ProfileLevel }, *sv[] = { profiles(codec == kCMVideoCodecType_HEVC) };
-    CFDictionaryRef sel = CFDictionaryCreate(NULL, sk, sv, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    // EnableLowLatencyRateControl is listed so a client that asks for it (FFmpeg's low_delay, Sunshine) still reaches this
+    // encoder: VideoToolbox drops an encoder from the candidates when the specification names a key it does not declare.
+    const void *llv[] = { kCFBooleanTrue, kCFBooleanFalse };
+    CFArrayRef llrc = CFArrayCreate(NULL, llv, 2, &kCFTypeArrayCallBacks);
+    const void *sk[] = { kVTCompressionPropertyKey_ProfileLevel, kVTVideoEncoderSpecification_EnableLowLatencyRateControl },
+               *sv[] = { profiles(codec == kCMVideoCodecType_HEVC), llrc };
+    CFDictionaryRef sel = CFDictionaryCreate(NULL, sk, sv, codec == CODEC_AV1 ? 1 : 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     const void *k[] = { CFSTR("CMClassImplementationID"), CFSTR("CMClassImplementationName"), CFSTR("VTRating"), CFSTR("VTIsHardwareAccelerated"),
                         kVTVideoEncoderList_SupportedSelectionProperties };
     const void *v[] = { id, name, r, kCFBooleanTrue, sel };
     // AV1: no profile list (Main, 8 / 10-bit, is all there is)
     CFDictionaryRef info = CFDictionaryCreate(NULL, k, v, codec == CODEC_AV1 ? 4 : 5, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     OSStatus st = VTRegisterVideoEncoderWithInfo(codec, info, (void *)NVEncVT_CreateInstance);
-    CFRelease(info); CFRelease(sel); CFRelease(r);
+    CFRelease(info); CFRelease(sel); CFRelease(llrc); CFRelease(r);
     return st;
 }
 
