@@ -24,6 +24,7 @@ typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int
 typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vfl;  uint64_t up_token;
                  void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */
                  size_t hz_off, hz_len;   /* placed: the image's byte range of mem, for the hazard model (0 = all of mem) */
+                 void *sparse;   /* a sparse image (NVMTL_SPARSE_TEXTURES=1): its nvmtl_vk_sparse_info, freed with the image */
                  uint8_t hz_ut; } nvk_image;   /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */
 #define NVMTL_NVAR 16
 #define NVMTL_NVAR_MAX 4096
@@ -204,6 +205,13 @@ uint64_t nvmtl_vk_recommended_working_set(void);
 uint64_t nvmtl_vk_vram_bytes(void);
 void     nvmtl_vk_mem_split(uint64_t *vram, uint64_t *sys);
 int  nvmtl_vk_image_create_ms(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, uint32_t samples, nvk_image *out);
+/* Sparse textures (NVMTL_SPARSE_TEXTURES=1). The image is made without memory; blocks are bound to a sparse heap's VkDeviceMemory. */
+typedef struct { uint32_t gran[3], first_tail, mips, layers, w, h; uint64_t tail_size, tail_offset, tail_stride; int single_tail, strict; } nvmtl_vk_sparse_info;
+typedef struct { uint32_t mip, layer, x, y, z, w, h, d; uint64_t mem_off; } nvmtl_vk_sparse_blk;
+int  nvmtl_vk_sparse_textures_ok(void);
+int  nvmtl_vk_image_create_sparse(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, uint32_t mips, uint32_t layers, nvk_image *out);
+/* binds (mem != NULL) or unbinds (mem == NULL) the blocks, and the mip tail when tail_size_to_bind != 0 (at tail_mem_off); waits for the bind */
+int  nvmtl_vk_image_sparse_bind(nvk_image *img, void *mem, const nvmtl_vk_sparse_blk *blk, uint32_t n, uint64_t tail_mem_off, int bind_tail);
 int  nvmtl_vk_ms_storage_ok(void);
 int  nvmtl_vk_sparse_granularity(uint32_t vkfmt, int is3d, uint32_t samples, uint32_t out[3]);   /* the device's sparse block shape, 0 on success */
 int  nvmtl_vk_cap_float32_filtering(void);   /* MTLDevice capability answers decided from the Vulkan bits (nvmtl_caps_query.h) */
