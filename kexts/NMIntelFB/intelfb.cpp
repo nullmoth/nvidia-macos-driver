@@ -22,6 +22,7 @@
 #include <IOKit/IOWorkLoop.h>
 #include <kern/thread_call.h>
 #include <sys/sysctl.h>
+#include <libkern/version.h>
 
 #define IFBLOG(fmt, ...) IOLog("NMIntelFB: " fmt "\n", ##__VA_ARGS__)
 
@@ -274,6 +275,7 @@ SYSCTL_PROC(_debug, OID_AUTO, nmintelfb_sample, CTLTYPE_STRING | CTLFLAG_RD | CT
 
 IOService *NMIntelFB::probe(IOService *provider, SInt32 *score)
 {
+    if (version_major != 24 && version_major != 25) return nullptr;   /* the 2.x line supports macOS 15 (Darwin 24) and macOS 26 (Darwin 25) only */
 #ifdef NMINTELFB_VIRTUAL
     if (!provider->getProperty("nm-intel-panel")) return nullptr;   // only the nub the loader published
     // test build: a virtual 1920x1080 "panel" in system memory, so the NVIDIA -> Intel frame path can be proven on a
@@ -594,7 +596,7 @@ static int nmintelfb_attach_sysctl SYSCTL_HANDLER_ARGS
     if (!nub0 || !nvrm) { OSSafeReleaseNULL(nub0); OSSafeReleaseNULL(nvrm); IFBLOG("attach: no NVRMDisplay 0 / NVRM"); return ENODEV; }
     IOService *nub = OSDynamicCast(IOService, OSMetaClass::allocClassWithName("NVRMDisplay"));
     if (!nub || !nub->init()) { OSSafeReleaseNULL(nub); nub0->release(); nvrm->release(); return ENOMEM; }
-    static const char *const kCopy[] = {"nvkms-kapi", "gpu-id", "phys-for-va"};
+    static const char *const kCopy[] = {"gpu-id"};
     for (const char *k : kCopy) if (OSObject *v = nub0->getProperty(k)) nub->setProperty(k, v);
     nub->setProperty("fb-index", 4ull, 32);
     nub->setProperty("nm-intel-panel", kOSBooleanTrue);
@@ -611,6 +613,7 @@ SYSCTL_PROC(_debug, OID_AUTO, nmintelfb_attach, CTLTYPE_INT | CTLFLAG_RW | CTLFL
             nmintelfb_attach_sysctl, "I", "1 = attach the virtual panel under the NVIDIA display device (test build)");
 bool NMIntelFBLoader::start(IOService *provider)
 {
+    if (version_major != 24 && version_major != 25) return false;   /* the 2.x line supports macOS 15 (Darwin 24) and macOS 26 (Darwin 25) only */
     if (!IOService::start(provider)) return false;
     sysctl_register_oid(&sysctl__debug_nmintelfb_attach);
     IFBLOG("loader idle until debug.nmintelfb_attach=1");

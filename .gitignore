@@ -1,2 +1,8 @@
 __pycache__/
 *.pyc
+
+# Patch-script backups: working-tree safety nets, never part of a build.
+*.bak-*
+
+# Cargo build output: never committed.
+translator/translator/target/

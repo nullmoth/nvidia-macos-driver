@@ -14,6 +14,16 @@
 #define NVRM_GPUVA_FN_MAP     "nvGpuVaMap"
 #define NVRM_GPUVA_FN_FREE    "nvGpuVaFree"
 
+// Asks NVRM for the two kernel pointers a display kext needs. They were IORegistry properties, which any process can
+// read, and that gave away the kernel's address layout.
+#define NVRM_DISPLAY_PTRS_ABI_VERSION 1u
+#define NVRM_DISPLAY_PTRS_FN "nvDisplayPointers"
+struct NVRMDisplayPointers {
+    unsigned int version;
+    void        *kapi;
+    void        *physForVa;
+};
+
 #define NVRM_FLIP_ABI_VERSION 2u
 
 #define NVRM_FLIP_FN  "nvFlipToSurface"

@@ -9,10 +9,13 @@
 //
 // The emitter turns each candidate into a loaded image/sampler and the phis keep LLVM's pointer type, so the sample
 // lowering finds a sampler operand it cannot recover ("sampler operand is a pointer whose exact sampler state was not
-// recovered") and the vertex shader fails: Apple's GL then runs it on the CPU. The selector is a constant, stored
-// once into a function variable; this pass evaluates the branch that feeds such a phi and replaces the phi by the
-// value on the edge that is taken. Phis of other types, and branches whose condition is not a constant, are left
-// alone.
+// recovered") and the vertex shader fails: Apple's GL then runs it on the CPU. The selector is a constant stored into
+// a function variable (once, or the same constant before each call of the helper: Dome Keeper's Godot
+// `make_outline(vec2, sampler2D, vec2)` is called twice with unit 3); this pass finds the edges that run when every
+// branch on a known condition takes its one target, and replaces a phi with a single live incoming value by that
+// value. The emitter may lower the switch to a chain of compares with one header per case and the last cases
+// joined by an inner phi first; reachability covers that as well as the plain switch. Phis of other types, and
+// branches whose condition is not a constant, are left alone.
 use crate::spirv_module::{Instruction, Operand};
 use spirv::{Op, StorageClass, Word};
 use std::collections::{HashMap, HashSet};
@@ -62,79 +65,112 @@ pub(super) fn fold_constant_resource_phis(ctx: &mut Ctx, entry_idx: usize) -> us
         .iter()
         .filter_map(|b| Some((label(b)?, b.instructions.last()?)))
         .collect();
-    let mut preds: HashMap<Word, Vec<Word>> = HashMap::new();
-    for (&block, term) in &terminators {
-        for target in branch_targets(term) {
-            preds.entry(target).or_default().push(block);
+
+    // The edges that can run: from the entry block, a terminator whose condition is known follows only its taken
+    // target, any other follows all of them. The emitter may have turned the switch into a chain of compares, each
+    // case leaving from a header of its own, so a phi's taken edge is found by reachability rather than by one header.
+    let Some(entry) = function.blocks.first().and_then(label) else {
+        return 0;
+    };
+    let mut executable_blocks: HashSet<Word> = HashSet::from([entry]);
+    let mut executable_edges: HashSet<(Word, Word)> = HashSet::new();
+    let mut work = vec![entry];
+    while let Some(block) = work.pop() {
+        let Some(term) = terminators.get(&block) else {
+            continue;
+        };
+        let targets = match eval.taken_target(term) {
+            Some(target) => vec![target],
+            None => branch_targets(term),
+        };
+        for target in targets {
+            executable_edges.insert((block, target));
+            if executable_blocks.insert(target) {
+                work.push(target);
+            }
         }
     }
 
-    let mut replace: HashMap<Word, Word> = HashMap::new();
-    for (block_index, block) in function.blocks.iter().enumerate() {
-        let Some(merge) = label(block) else { continue };
-        for (phi_index, phi) in block
-            .instructions
-            .iter()
-            .enumerate()
-            .take_while(|(_, i)| i.class.opcode == Op::Phi)
-        {
-            let (Some(result), Some(_)) = (phi.result_id, phi.result_type) else {
-                continue;
-            };
-            let incoming: Vec<(Word, Word)> = phi
-                .operands
-                .chunks(2)
-                .filter_map(|pair| match pair {
-                    [Operand::IdRef(v), Operand::IdRef(b)] => Some((*v, *b)),
-                    _ => None,
+    // Resource phis: every incoming value is an image/sampler, or another resource phi (a switch lowered to nested
+    // selections joins its last cases first).
+    let phis: Vec<(usize, usize, Word, Word, Vec<(Word, Word)>)> = function
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(b, block)| Some((b, label(block)?, block)))
+        .flat_map(|(b, merge, block)| {
+            block
+                .instructions
+                .iter()
+                .enumerate()
+                .take_while(|(_, i)| i.class.opcode == Op::Phi)
+                .filter_map(move |(p, phi)| {
+                    phi.result_type?;
+                    let incoming = phi
+                        .operands
+                        .chunks(2)
+                        .filter_map(|pair| match pair {
+                            [Operand::IdRef(v), Operand::IdRef(b)] => Some((*v, *b)),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    Some((b, p, merge, phi.result_id?, incoming))
                 })
-                .collect();
-            if incoming.len() < 2
-                || !incoming.iter().all(|(v, _)| {
-                    defs.get(v)
-                        .and_then(|d| d.result_type)
-                        .is_some_and(|t| opaque_types.contains(&t))
+        })
+        .collect();
+    let mut resource_phis: HashSet<Word> = HashSet::new();
+    loop {
+        let before = resource_phis.len();
+        for (_, _, _, result, incoming) in &phis {
+            if incoming.len() >= 2
+                && incoming.iter().all(|(v, _)| {
+                    resource_phis.contains(v)
+                        || defs
+                            .get(v)
+                            .and_then(|d| d.result_type)
+                            .is_some_and(|t| opaque_types.contains(&t))
                 })
             {
-                continue;
+                resource_phis.insert(*result);
             }
-            // every edge leaves the same header, directly or through a block that only branches on to the merge
-            let header_of = |pred: Word| -> Option<Word> {
-                let term = terminators.get(&pred)?;
-                if term.class.opcode == Op::Branch {
-                    match preds.get(&pred).map(Vec::as_slice) {
-                        Some([only]) => Some(*only),
-                        _ => None,
-                    }
-                } else {
-                    Some(pred)
-                }
-            };
-            let headers: HashSet<Option<Word>> =
-                incoming.iter().map(|(_, p)| header_of(*p)).collect();
-            let [Some(header)] = headers.into_iter().collect::<Vec<_>>()[..] else {
-                continue;
-            };
-            let Some(taken) = terminators.get(&header).and_then(|t| eval.taken_target(t)) else {
-                continue;
-            };
-            let chosen = incoming
-                .iter()
-                .find(|(_, pred)| {
-                    if taken == merge {
-                        *pred == header
-                    } else {
-                        *pred == taken
-                    }
-                })
-                .map(|(v, _)| *v);
-            if let Some(value) = chosen {
-                // The branch is not removed. A value defined only in the chosen arm still does not dominate the
-                // merge in SPIR-V's CFG, even when that arm's condition is constant. Keep that phi intact.
-                if flow.value_dominates(value, (block_index, phi_index)) {
-                    replace.insert(result, value);
-                }
+        }
+        if resource_phis.len() == before {
+            break;
+        }
+    }
+
+    let mut chosen: HashMap<Word, (Word, (usize, usize))> = HashMap::new();
+    for (block_index, phi_index, merge, result, incoming) in &phis {
+        if !resource_phis.contains(result) || !executable_blocks.contains(merge) {
+            continue;
+        }
+        let live: HashSet<Word> = incoming
+            .iter()
+            .filter(|(_, pred)| executable_edges.contains(&(*pred, *merge)))
+            .map(|(v, _)| *v)
+            .collect();
+        if let [value] = live.into_iter().collect::<Vec<_>>()[..] {
+            chosen.insert(*result, (value, (*block_index, *phi_index)));
+        }
+    }
+    let resolve = |mut id: Word| {
+        let mut steps = 0;
+        while let Some((next, _)) = chosen.get(&id) {
+            id = *next;
+            steps += 1;
+            if steps > chosen.len() {
+                break;
             }
+        }
+        id
+    };
+    let mut replace: HashMap<Word, Word> = HashMap::new();
+    for (&result, &(_, at)) in &chosen {
+        let value = resolve(result);
+        // The branches are not removed. A value defined only in the chosen arm still does not dominate the merge in
+        // SPIR-V's CFG, even when that arm's condition is constant. Keep that phi intact.
+        if value != result && flow.value_dominates(value, at) {
+            replace.insert(result, value);
         }
     }
     if replace.is_empty() {
@@ -286,20 +322,25 @@ impl<'a> Eval<'a> {
         let stored = stores
             .into_iter()
             .filter(|(ptr, values)| {
-                if values.len() != 1 || !is_function_var(ptr) || escaped.contains(ptr) {
+                if values.is_empty() || !is_function_var(ptr) || escaped.contains(ptr) {
                     return false;
                 }
-                let (value, position) = values[0];
-                // A single store is insufficient if it runs after a load or on only one path to it. Restrict its
-                // source to literal constants as well, so cyclic stores/loads cannot recurse during evaluation.
-                defs.get(&value).is_some_and(|d| {
-                    matches!(
-                        d.class.opcode,
-                        Op::Constant | Op::ConstantNull | Op::ConstantTrue | Op::ConstantFalse
-                    )
-                }) && loads
-                    .get(ptr)
-                    .is_some_and(|uses| uses.iter().all(|&at| flow.dominates(position, at)))
+                // Every store writes the same literal constant (a GLSL helper taking a sampler, called from several
+                // places with the same texture unit, stores that unit before each call) and every load runs after one
+                // of them on all paths to it. A store after a load, or on only one path to it, proves nothing.
+                // Literal constants only, so cyclic stores/loads cannot recurse during evaluation.
+                let value = values[0].0;
+                values.iter().all(|(v, _)| *v == value)
+                    && defs.get(&value).is_some_and(|d| {
+                        matches!(
+                            d.class.opcode,
+                            Op::Constant | Op::ConstantNull | Op::ConstantTrue | Op::ConstantFalse
+                        )
+                    })
+                    && loads.get(ptr).is_some_and(|uses| {
+                        uses.iter()
+                            .all(|&at| values.iter().any(|&(_, position)| flow.dominates(position, at)))
+                    })
             })
             .map(|(ptr, values)| (ptr, values[0].0))
             .collect();
@@ -593,6 +634,117 @@ mod tests {
     #[test]
     fn cyclic_selector_loads_are_not_evaluated_recursively() {
         let mut ctx = fixture(41);
+        assert_eq!(fold_constant_resource_phis(&mut ctx, 0), 0);
+    }
+    // The switch as the emitter lowers it: a chain of compares, one header per case, the last two cases joined by an
+    // inner phi before the outer one.
+    fn chain_fixture(selector: Word) -> Ctx {
+        let mut ctx = fixture(selector);
+        ctx.module
+            .types_global_values
+            .push(inst(Op::TypeBool, None, Some(4), vec![]));
+        let body = &mut ctx.module.functions[0].blocks;
+        body[0].instructions.pop(); // the switch
+        body[0]
+            .instructions
+            .push(inst(Op::Load, Some(1), Some(52), vec![Operand::IdRef(72)]));
+        body[0].instructions.push(inst(
+            Op::IEqual,
+            Some(4),
+            Some(43),
+            vec![Operand::IdRef(41), Operand::IdRef(5)],
+        ));
+        body[0].instructions.push(inst(
+            Op::BranchConditional,
+            None,
+            None,
+            vec![Operand::IdRef(43), Operand::IdRef(11), Operand::IdRef(13)],
+        ));
+        body.insert(
+            2,
+            block(
+                13,
+                vec![
+                    inst(
+                        Op::IEqual,
+                        Some(4),
+                        Some(44),
+                        vec![Operand::IdRef(41), Operand::IdRef(6)],
+                    ),
+                    inst(
+                        Op::BranchConditional,
+                        None,
+                        None,
+                        vec![Operand::IdRef(44), Operand::IdRef(14), Operand::IdRef(15)],
+                    ),
+                ],
+            ),
+        );
+        body.insert(
+            3,
+            block(
+                14,
+                vec![inst(Op::Branch, None, None, vec![Operand::IdRef(15)])],
+            ),
+        );
+        body.insert(
+            4,
+            block(
+                15,
+                vec![
+                    inst(
+                        Op::Phi,
+                        Some(1),
+                        Some(62),
+                        vec![
+                            Operand::IdRef(51),
+                            Operand::IdRef(13),
+                            Operand::IdRef(52),
+                            Operand::IdRef(14),
+                        ],
+                    ),
+                    inst(Op::Branch, None, None, vec![Operand::IdRef(12)]),
+                ],
+            ),
+        );
+        let phi = &mut body[5].instructions[0];
+        phi.operands = vec![
+            Operand::IdRef(50),
+            Operand::IdRef(11),
+            Operand::IdRef(62),
+            Operand::IdRef(15),
+        ];
+        ctx
+    }
+    #[test]
+    fn a_switch_lowered_to_a_compare_chain_folds_through_the_inner_phi() {
+        for (selector, value) in [(5, 50), (6, 52)] {
+            let mut ctx = chain_fixture(selector);
+            assert!(fold_constant_resource_phis(&mut ctx, 0) >= 1);
+            assert_eq!(source(&ctx), value);
+        }
+    }
+    #[test]
+    fn a_compare_chain_on_an_unknown_selector_is_left_alone() {
+        let mut ctx = chain_fixture(5);
+        ctx.module.functions[0].blocks[0].instructions.remove(1); // the store
+        assert_eq!(fold_constant_resource_phis(&mut ctx, 0), 0);
+        assert_eq!(source(&ctx), 60);
+    }
+    #[test]
+    fn the_same_constant_stored_before_each_load_still_folds() {
+        let mut ctx = fixture(6);
+        let store = ctx.module.functions[0].blocks[0].instructions[1].clone();
+        ctx.module.functions[0].blocks[0].instructions.insert(3, store);
+        assert_eq!(fold_constant_resource_phis(&mut ctx, 0), 1);
+        assert_eq!(source(&ctx), 51);
+    }
+    #[test]
+    fn different_constants_stored_into_the_selector_do_not_fold() {
+        let mut ctx = fixture(6);
+        let mut store = ctx.module.functions[0].blocks[0].instructions[1].clone();
+        store.operands[1] = Operand::IdRef(5);
+        ctx.module.functions[0].blocks[0].instructions.insert(3, store);
         assert_eq!(fold_constant_resource_phis(&mut ctx, 0), 0);
     }
     #[test]
