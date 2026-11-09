@@ -35,6 +35,13 @@ if stage.exists() and platform.system() == 'Darwin' and shutil.which('clang'):
         lines = [l for l in sums.split('\n') if 'libnvencvt' in l]
         check('SHA256SUMS keeps its other lines and has exactly one fresh libnvencvt line', './other' in sums and len(lines) == 1 and '1111' not in sums)
         chk = root / 'package/check_package.sh'
+        # the package gate also needs the Ryzen power parts (package/stage_nmsmn.sh); stage a minimal pair here
+        import hashlib, plistlib
+        k = d / 'NMSMN.kext/Contents'; (k / 'MacOS').mkdir(parents=True)
+        (k / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.nullmoth.NMSMN'})); (k / 'MacOS/NMSMN').write_bytes(b'k')
+        (d / 'ryzenadj').write_bytes(b'b')
+        subprocess.run(['bash', str(root / 'package/stage_nmsmn.sh'), str(d / 'NMSMN.kext'), str(d / 'ryzenadj'),
+                        hashlib.sha256(b'b').hexdigest(), str(pkg)], check=True, capture_output=True)
         r = subprocess.run(['bash', str(chk), str(pkg)], capture_output=True, text=True)
         check('the package check passes a staged tree', r.returncode == 0, r.stdout.strip()[-80:])
         (m / 'libnvencvt.dylib').write_bytes((m / 'libnvencvt.dylib').read_bytes() + b'x')

@@ -101,6 +101,10 @@ static inline int nmsmn_check_write(uint32_t addr, uint32_t value)
 
 // The message the kext itself sends to learn the table address, by CPU family and model (RyzenAdj cpuid.c / api.c).
 // Returns 0 and fills *msg (0xB or 0x66), *arg0 (the value argument 0 starts with) and *wide, or -1 when the CPU has none.
+// Van Gogh, Mendocino, Dragon Range and Fire Range have none because RyzenAdj v0.19.0 has none: its request_table_ver_and_size
+// and request_table_addr (lib/api.c) switch on the family and fall to "not supported on this family" for exactly those four,
+// while its limit setters (stapm, fast, slow, ...) do handle them. So on those CPUs limits work through the mailboxes and only
+// the power-table readout (--info) is unavailable, as upstream.
 static inline int nmsmn_table_message(unsigned family, unsigned model, uint32_t *msg, uint32_t *arg0, int *wide)
 {
     *arg0 = 0;
