@@ -1263,6 +1263,76 @@ static inline BOOL nvmtl_bgr10_storage_remap(MTLTextureDescriptor *d, uint32_t *
 // GBGR422 / BGRG422 (NVMTL_YUV422=1): a full-width RGBA8 image holding what Metal's sampler returns, with the packed bytes
 // kept beside it (nvmtl_yuv422.h). Sampling works for any shader; the texture is filled by replaceRegion and read by
 // getBytes. Blits, views, render targets and IOSurface backing are refused, each with a log line.
+// ---- sparse heaps and textures (NVMTL_SPARSE_TEXTURES=1; nvmtl_sparse_map.h) ----
+// A sparse heap is one VkDeviceMemory carved into 64 KiB pages. A sparse texture owns no memory until updateTextureMapping binds
+// tile blocks to pages; its mip tail is bound to a contiguous run of pages when it is made.
+id nvmtl_sparse_heap_texture(NVMTLHeap *heap, MTLTextureDescriptor *d) {
+    if ((d.textureType != MTLTextureType2D && d.textureType != MTLTextureType2DArray) || d.sampleCount > 1) {
+        nvlog("sparse heap: only single-sample 2D and 2D-array textures are carried (type %lu, %lu samples) -> nil", (unsigned long)d.textureType, (unsigned long)d.sampleCount); return nil; }
+    uint32_t vkf = 0, bpp = 0; int a8 = 0;
+    if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8) || a8) { nvlog("sparse heap: pixel format %lu is not carried -> nil", (unsigned long)d.pixelFormat); return nil; }
+    NVMTLTexture *t = [NVMTLTexture new];
+    t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)d.hazardTrackingMode << MTLResourceHazardTrackingModeShift) | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
+    t->_fmt = d.pixelFormat;
+    const uint32_t layers = d.textureType == MTLTextureType2DArray ? (uint32_t)d.arrayLength : 1u;
+    if (nvmtl_vk_image_create_sparse((uint32_t)d.width, (uint32_t)d.height, vkf, bpp, (uint32_t)(d.mipmapLevelCount ? d.mipmapLevelCount : 1), layers, &t->_i)) return nil;
+    t->_q = nvmtl_device_queue(); t->_usage = d.usage; t->_stex = t->_i.storage == 1;
+    nvmtl_texture_desc_swizzle(t, d);
+    const nvmtl_vk_sparse_info *si = t->_i.sparse;
+    if (si->tail_size && si->first_tail < si->mips) {
+        const uint32_t pages = (uint32_t)((si->tail_size + NVMTL_SPARSE_BLOCK_BYTES - 1) / NVMTL_SPARSE_BLOCK_BYTES);
+        int first;
+        @synchronized (heap) { first = nvmtl_page_alloc_run(&heap->_pool, pages); heap->_used = (NSUInteger)heap->_pool.used * NVMTL_SPARSE_BLOCK_BYTES; }
+        if (first < 0) { nvlog("sparse heap: no room for the %u-page mip tail -> nil", pages); nvmtl_vk_image_destroy(&t->_i); return nil; }
+        t->_sparseTailFirst = first; t->_sparseTailPages = pages;
+        if (nvmtl_vk_image_sparse_bind(&t->_i, heap->_hm.mem, NULL, 0, (uint64_t)first * NVMTL_SPARSE_BLOCK_BYTES, 1) != 0) {
+            t->_sparseTailPages = 0;
+            @synchronized (heap) { for (uint32_t k = 0; k < pages; k++) nvmtl_page_free(&heap->_pool, (uint32_t)first + k); heap->_used = (NSUInteger)heap->_pool.used * NVMTL_SPARSE_BLOCK_BYTES; }
+            nvmtl_vk_image_destroy(&t->_i); return nil; }
+    }
+    t->_sparseHeap = heap; t->_sparseTiles = [NSMutableDictionary new];
+    nvlog("sparse heap: %lux%lu texture, %u level(s), block %ux%u, tail from level %u -> %p", (unsigned long)d.width, (unsigned long)d.height, si->mips, si->gran[0], si->gran[1], si->first_tail, (__bridge void *)t);
+    return t;
+}
+void nvmtl_sparse_update(id<MTLTexture> tex, MTLSparseTextureMappingMode mode, MTLRegion r, NSUInteger mip, NSUInteger slice) {
+    NVMTLTexture *t = [(id)tex isKindOfClass:[NVMTLTexture class]] ? (NVMTLTexture *)tex : nil;
+    NVMTLHeap *heap = t ? t->_sparseHeap : nil; const nvmtl_vk_sparse_info *si = t ? t->_i.sparse : NULL;
+    if (!heap || !si) { nvlog("updateTextureMapping: not a texture of a sparse heap - ignored"); return; }
+    const uint32_t org[3] = { (uint32_t)r.origin.x, (uint32_t)r.origin.y, 0 }, size[3] = { (uint32_t)r.size.width, (uint32_t)r.size.height, 1 };
+    if (r.origin.x > UINT32_MAX || r.origin.y > UINT32_MAX || r.size.width > UINT32_MAX || r.size.height > UINT32_MAX || r.origin.z || r.size.depth > 1 || mip > 31 || slice >= si->layers) {
+        nvlog("updateTextureMapping: region/level/slice outside what a 2D sparse texture has - ignored"); return; }
+    const char *why = nvmtl_sparse_region_refusal(si->w, si->h, 1, (uint32_t)mip, si->first_tail, si->gran, org, size);
+    if (why) { nvlog("updateTextureMapping: %s - ignored", why); return; }
+    const uint64_t count = (uint64_t)((size[0] + si->gran[0] - 1) / si->gran[0]) * ((size[1] + si->gran[1] - 1) / si->gran[1]);
+    if (count > 65536) { nvlog("updateTextureMapping: %llu tile blocks in one call is over the 65536 limit - ignored", (unsigned long long)count); return; }
+    nvmtl_sparse_tile *tiles = calloc((size_t)count, sizeof *tiles);
+    nvmtl_vk_sparse_blk *blk = calloc((size_t)count, sizeof *blk); uint64_t *keys = calloc((size_t)count, sizeof *keys); int *pages = calloc((size_t)count, sizeof *pages);
+    if (!tiles || !blk || !keys || !pages) { free(tiles); free(blk); free(keys); free(pages); return; }
+    const int n = nvmtl_sparse_tiles(si->w, si->h, 1, (uint32_t)mip, si->gran, org, size, tiles, (int)count);
+    const BOOL map = mode == MTLSparseTextureMappingModeMap;
+    @synchronized (heap) {
+        int m = 0;
+        for (int i = 0; i < n; i++) {
+            const uint64_t key = ((uint64_t)(mip & 0xff) << 56) | ((uint64_t)(slice & 0xff) << 48) | ((uint64_t)tiles[i].ty << 24) | tiles[i].tx;
+            NSNumber *have = t->_sparseTiles[@(key)];
+            if (map == (have != nil)) continue;   // already mapped, or already unmapped
+            int page = map ? nvmtl_page_alloc(&heap->_pool) : have.intValue;
+            if (page < 0) { nvlog("updateTextureMapping: the sparse heap is full (%u pages) - the rest of the region stays unmapped", heap->_pool.npages); break; }
+            blk[m] = (nvmtl_vk_sparse_blk){ (uint32_t)mip, (uint32_t)slice, tiles[i].x, tiles[i].y, 0, tiles[i].w, tiles[i].h, 1, (uint64_t)page * NVMTL_SPARSE_BLOCK_BYTES };
+            keys[m] = key; pages[m] = page; m++;
+        }
+        for (int off = 0; off < m; off += 4096) {
+            const int chunk = m - off < 4096 ? m - off : 4096;
+            const int rc = nvmtl_vk_image_sparse_bind(&t->_i, map ? heap->_hm.mem : NULL, blk + off, (uint32_t)chunk, 0, 0);
+            for (int k = off; k < off + chunk; k++) {
+                if (rc == 0) { if (map) t->_sparseTiles[@(keys[k])] = @(pages[k]); else { [t->_sparseTiles removeObjectForKey:@(keys[k])]; nvmtl_page_free(&heap->_pool, (uint32_t)pages[k]); } }
+                else if (map) nvmtl_page_free(&heap->_pool, (uint32_t)pages[k]);   // the bind failed: the page goes back
+            }
+        }
+        heap->_used = (NSUInteger)heap->_pool.used * NVMTL_SPARSE_BLOCK_BYTES;
+    }
+    free(tiles); free(blk); free(keys); free(pages);
+}
 static id<MTLTexture> nvmtl_make_y422_texture(MTLTextureDescriptor *d, NVMTLTexture *t) {
     const char *on = getenv("NVMTL_YUV422");
     if (!on || on[0] != '1') { static int said; if (!said++) nvlog("newTextureWithDescriptor: 4:2:2 pixel format %lu is not carried (NVMTL_YUV422=1 turns it on) -> nil", (unsigned long)d.pixelFormat); return nil; }
@@ -2484,6 +2554,11 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 }
 - (BOOL)areBarycentricCoordsSupported { return YES; }
 - (BOOL)supportsPrimitiveMotionBlur { return NO; }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+- (NSUInteger)sizeOfCounterHeapEntry:(MTL4CounterHeapType)type { return (NSUInteger)nvmtl_heap_entry_size((int)type); }   // macOS 26; the build targets 15
+#pragma clang diagnostic pop
+- (uint64_t)queryTimestampFrequency { return nvmtl_vk_timestamp_frequency(); }
 // Capability answers that were left to the base class. Each is a property of the Vulkan device, not a guess:
 // vertex amplification runs as multiview (NVMTL_VERTEX_AMPLIFICATION=1) up to the device's multiview view count
 - (BOOL)supportsVertexAmplificationCount:(NSUInteger)count { return nvmtl_cap_vertex_amplification((uint32_t)MIN(count, (NSUInteger)UINT32_MAX), nvmtl_vk_multiview_views()); }
@@ -2831,6 +2906,18 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
 - (BOOL)supportsFeatureSet:(MTLFeatureSet)fs { return fs >= 10000 && fs <= 10005; }
 - (id<MTLHeap>)newHeapWithDescriptor:(MTLHeapDescriptor *)hd {
     if (!hd || !hd.size) { nvlog("newHeapWithDescriptor: no size"); return nil; }
+    if (hd.type == MTLHeapTypeSparse) {   // NVMTL_SPARSE_TEXTURES=1: one device memory carved into 64 KiB pages
+        if (!nvmtl_vk_sparse_textures_ok()) { nvlog("newHeapWithDescriptor: a sparse heap needs NVMTL_SPARSE_TEXTURES=1 and sparse residency on this device -> nil"); return nil; }
+        const NSUInteger size = (hd.size + NVMTL_SPARSE_BLOCK_BYTES - 1) / NVMTL_SPARSE_BLOCK_BYTES * NVMTL_SPARSE_BLOCK_BYTES;
+        NVMTLHeap *sh = [NVMTLHeap new];
+        sh->_dev = self; sh->_size = size; sh->_used = 0; sh->_storage = MTLStorageModePrivate; sh->_cache = hd.cpuCacheMode; sh->_type = MTLHeapTypeSparse; sh->_hazard = hd.hazardTrackingMode;
+        if (nvmtl_vk_heap_create(size, 0, &sh->_hm)) { nvlog("newHeapWithDescriptor: SPARSE %lu bytes FAILED", (unsigned long)size); return nil; }
+        const uint32_t npages = (uint32_t)(size / NVMTL_SPARSE_BLOCK_BYTES);
+        sh->_poolBits = calloc(nvmtl_page_pool_words(npages), sizeof(uint64_t)); if (!sh->_poolBits) return nil;
+        nvmtl_page_pool_init(&sh->_pool, sh->_poolBits, npages); sh->_sparse = YES;
+        nvlog("newHeapWithDescriptor: SPARSE %lu bytes, %u pages -> %p", (unsigned long)size, npages, (__bridge void *)sh);
+        return sh;
+    }
     NVMTLHeap *h = [NVMTLHeap new];
     h->_dev = self; h->_size = hd.size; h->_used = 0; h->_storage = hd.storageMode; h->_cache = hd.cpuCacheMode; h->_type = hd.type;
     h->_hazard = hd.hazardTrackingMode;
