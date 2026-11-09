@@ -8,6 +8,7 @@
 #include "nv-xnu.h"
 #include "nvrm_utilization.h"
 #include "nvrm_bar_limits.h"
+#include "nvrm_startup_policy.h"
 
 extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <IOKit/IOService.h>
@@ -665,8 +666,8 @@ bool NVRM::start(IOService *provider)
     {
         char nogo[8] = { 0 };
         thread_t th = THREAD_NULL;
-        fAutoGoSettleMs = bar1Placed ? (nvrmIsTuringDeviceId(nv->pci_info.device_id) ? 10000 : 500) : 100000;
-        { uint32_t ms = 0; if (PE_parse_boot_argn("nvrmsettle", &ms, sizeof(ms))) fAutoGoSettleMs = ms; }
+        { uint32_t ms = 0; const bool haveArg = PE_parse_boot_argn("nvrmsettle", &ms, sizeof(ms));
+          fAutoGoSettleMs = nvrmAutoGoSettleMs(bar1Placed, nvrmIsTuringDeviceId(nv->pci_info.device_id), haveArg, ms); }
         if (PE_parse_boot_argn("-nvrmnogo", nogo, sizeof(nogo))) {
             setProperty("nvrm-autogo", "off (-nvrmnogo)"); LOG("auto-go OFF (-nvrmnogo): idle until `nvrmctl go <pass>`");
         } else {
@@ -687,6 +688,9 @@ bool NVRM::start(IOService *provider)
             if (kernel_thread_start(&NVRM::autoGo, this, &th) == KERN_SUCCESS) {
                 thread_deallocate(th);
                 setProperty("nvrm-autogo-settle-ms", fAutoGoSettleMs, 32);
+                // NVAccel reads it from the PCI device it shares with this service to place its headless deadline
+                // after the settle delay instead of inside it.
+                fPCI->setProperty("nvrm-autogo-settle-ms", fAutoGoSettleMs, 32);
                 setProperty("nvrm-autogo", "scheduled");
                 LOG("auto-go: go(2) in %u ms on its own thread (BAR1 %s); registry held busy until the display is armed (cap settle + 40 s)",
                     fAutoGoSettleMs, bar1Placed ? "placed outside the console" : "not placed");
@@ -928,6 +932,22 @@ void NVRM::bootHoldCap(thread_call_param_t p0, thread_call_param_t)
     s->release();
 }
 
+// connected-displays of every display nub NVRMFB has enumerated; see nvrmNoDisplayOnAnyConnector
+static bool nvrmNoDisplayAnywhere()
+{
+    int counts[8]; unsigned n = 0;
+    if (OSIterator *it = IOService::getMatchingServices(IOService::serviceMatching("NVRMDisplay"))) {
+        while (OSObject *o = it->getNextObject()) {
+            IOService *sv = OSDynamicCast(IOService, o);
+            if (!sv || n >= 8) continue;
+            OSNumber *cd = OSDynamicCast(OSNumber, sv->getProperty("connected-displays"));
+            counts[n++] = cd ? (int)cd->unsigned32BitValue() : -1;
+        }
+        it->release();
+    }
+    return nvrmNoDisplayOnAnyConnector(counts, n);
+}
+
 void NVRM::autoGo(void *p0, wait_result_t)
 {
     NVRM *s = (NVRM *)p0;
@@ -983,6 +1003,9 @@ void NVRM::autoGo(void *p0, wait_result_t)
                 OSNumber *cd = OSDynamicCast(OSNumber, gDisplayNub0->getProperty("connected-displays"));
                 if (cd && cd->unsigned32BitValue() > 0 && (int)nvrmPop((unsigned)mask) >= (int)cd->unsigned32BitValue()) break;
             }
+            // Every connector list is enumerated and none carries a display (a panel on the Intel or AMD GPU): no head
+            // will ever publish, so waiting out the full twenty seconds only holds the registry for nothing.
+            if (!mask && nvrmNoDisplayAnywhere()) { LOG("auto-go: no display on any NVIDIA connector - not waiting for heads"); break; }
             IOSleep(1000);
         }
         LOG("auto-go: heads published mask 0x%x (%u of nvfbheads %d) after %d s", mask, nvrmPop((unsigned)mask), want, i);
