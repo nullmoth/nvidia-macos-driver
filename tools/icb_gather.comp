@@ -6,7 +6,7 @@
 // dispatch) and bound to the wanted pipeline keeps its counts; every other slot gets zero counts, which do nothing.
 // Indexed draws are always emptied: an index buffer is bound by the CPU and the record only holds an address.
 layout(buffer_reference, std430) buffer Words { uint v[]; };
-layout(push_constant) uniform Args { Words rec; Words rng; Words out_; uint count; uint compute; uint pso_lo; uint pso_hi; uint loc; uint len; uint ptype; uint pad_; } a;
+layout(push_constant) uniform Args { Words rec; Words rng; Words out_; uint count; uint compute; uint pso_lo; uint pso_hi; uint loc; uint len; uint ptype; uint tgcheck; uint tg0; uint tg1; uint tg2; uint pad_; } a;
 layout(local_size_x = 64) in;
 void main()
 {
@@ -23,6 +23,8 @@ void main()
     if (isCompute != (a.compute != 0u)) return;
     if (a.rec.v[r + 8u] != a.pso_lo || a.rec.v[r + 9u] != a.pso_hi) return;   // pso at byte 32
     if (isCompute) {
+        // the threadgroup size is chosen at record time; Vulkan needs it at replay, so one candidate per size
+        if (a.tgcheck != 0u && (a.rec.v[r + 16u] != a.tg0 || a.rec.v[r + 17u] != a.tg1 || a.rec.v[r + 18u] != a.tg2)) return;
         a.out_.v[o] = a.rec.v[r + 12u]; a.out_.v[o + 1u] = a.rec.v[r + 13u]; a.out_.v[o + 2u] = a.rec.v[r + 14u];   // grid at byte 48
     } else {
         if ((flags & 4u) != 0u) return;
