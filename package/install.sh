@@ -682,6 +682,17 @@ elif [ -f "$HERE/dlss_fetch.sh" ]; then
   fi
 fi
 
+# Optional, off by default: a copy of the driver bundle where Safari's sandboxed graphics process looks for GPU bundles
+# (WebGL in Safari). Run only from the checked root-owned copy; a failure never undoes the driver install.
+if [ "${NULLMOTH_SAFARI_GPU_COPY:-0}" = 1 ]; then
+  if [ -f "$HERE/safari_gpu_copy.sh" ] && grep -qE '[ *]safari_gpu_copy\.sh$' "$HERE/SHA256SUMS" 2>/dev/null; then
+    step "Safari WebGL: driver copy for Safari's graphics process"
+    /bin/bash "$HERE/safari_gpu_copy.sh" install "$GB/NVMTLDriver.bundle" || echo "   NOTE: the Safari copy was not made; the driver itself is installed."
+  else
+    echo "   NOTE: this package's SHA256SUMS does not cover safari_gpu_copy.sh; the Safari copy was skipped."
+  fi
+fi
+
 echo; echo "Done. Reboot now: sudo shutdown -r now"
 [ -z "$AUDIO_NOTE" ] || echo "Audio: $AUDIO_NOTE."
 if [ "$ALLOWED" = "$(echo $KEXTS | wc -w | tr -d ' ')" ]; then

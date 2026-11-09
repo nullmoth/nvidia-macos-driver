@@ -713,6 +713,20 @@ impl Emitter {
                 return Ok(());
             }
         }
+        if let Some(equal) =
+            self.selected_pointer_equality(&lhs.value, &rhs.value, instructions, 0)?
+        {
+            let result_ty = LlType::Bool;
+            let result_type = self.type_id(&result_ty)?;
+            let result = self.result_id(&name, &result_ty)?;
+            instructions.push(Self::inst(
+                if is_equal { Op::CopyObject } else { Op::LogicalNot },
+                Some(result_type),
+                Some(result),
+                vec![Operand::IdRef(equal)],
+            ));
+            return Ok(());
+        }
         if self.emit_raw_pointer_icmp(pred, &name, &lhs.value, &rhs.value, instructions)? {
             return Ok(());
         }
@@ -795,6 +809,63 @@ impl Emitter {
             ));
         }
         Ok(())
+    }
+
+    /// Equality of two pointers where either one is `select cond, a, b` and every leaf is a distinct-or-identical
+    /// buffer argument. Two different arguments are different allocations, so each leaf pair has a fixed answer
+    /// and the select of pointers becomes a select of those answers under the same condition.
+    fn selected_pointer_equality(
+        &mut self,
+        lhs: &LlValue,
+        rhs: &LlValue,
+        instructions: &mut Vec<Instruction>,
+        depth: u32,
+    ) -> Result<Option<Word>, String> {
+        if depth > 4 {
+            return Ok(None);
+        }
+        let selected_of = |this: &Self, v: &LlValue| match v {
+            LlValue::Local(n) => this.selected_pointers.get(n).cloned(),
+            _ => None,
+        };
+        let (selected, other) = match (selected_of(self, lhs), selected_of(self, rhs)) {
+            (Some(sel), _) => (sel, rhs.clone()),
+            (None, Some(sel)) => (sel, lhs.clone()),
+            (None, None) => {
+                return match (lhs, rhs) {
+                    (LlValue::Local(a), LlValue::Local(b))
+                        if self.direct_param_values.contains(a)
+                            && self.direct_param_values.contains(b) =>
+                    {
+                        Ok(Some(self.const_bool(a == b)?))
+                    }
+                    _ => Ok(None),
+                };
+            }
+        };
+        let Some(when_true) =
+            self.selected_pointer_equality(&selected.true_value, &other, instructions, depth + 1)?
+        else {
+            return Ok(None);
+        };
+        let Some(when_false) =
+            self.selected_pointer_equality(&selected.false_value, &other, instructions, depth + 1)?
+        else {
+            return Ok(None);
+        };
+        let result_type = self.type_id(&LlType::Bool)?;
+        let result = self.fresh();
+        instructions.push(Self::inst(
+            Op::Select,
+            Some(result_type),
+            Some(result),
+            vec![
+                Operand::IdRef(selected.cond),
+                Operand::IdRef(when_true),
+                Operand::IdRef(when_false),
+            ],
+        ));
+        Ok(Some(result))
     }
 
     pub(in crate::native::emitter) fn emit_icmp_int_resolved(
