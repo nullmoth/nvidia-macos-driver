@@ -145,17 +145,18 @@ kpath() {
 }
 ioreg -r -c IOPCIDevice -d 1 | grep -q '"vendor-id" = <de100000>' || die "no NVIDIA GPU found on PCI"
 # The driver runs the cards NVIDIA's GSP firmware supports (Turing and later). The same list the Windows builder uses
-# (open-gpu-kernel-modules 620.70.06: 615's list + 2BBD RTX PRO 5500 Blackwell, 2E13 RTX Spark N1X; the datacenter
+# (open-gpu-kernel-modules 620.70.06: 615's list + 2BBD RTX PRO 5500 Blackwell, 2E13 RTX Spark N1X, and the two data-centre cards that carry
+# DisplayPort outputs, A40 2235 and L40 26B5; the datacenter
 # VR NVL72 3041 left out like the other datacenter parts). Installing it for an older card (GTX 10 and before)
 # would switch the firmware screen off and leave nothing to draw: those PCs run macOS in basic display instead.
 SUPPORTED_IDS="
 1E02 1E04 1E07 1E30 1E36 1E78 1E81 1E82 1E84 1E87 1E89 1E90 1E91 1E93 1EB0 1EB1 1EB5 1EB6 1EC2 1EC7 1ED0 1ED1 1ED3
 1EF5 1F02 1F03 1F06 1F07 1F08 1F0A 1F10 1F11 1F12 1F14 1F15 1F36 1F42 1F47 1F50 1F51 1F54 1F55 1F76 1F82 1F83 1F91
 1F95 1F96 1F97 1F98 1F99 1F9C 1F9D 1F9F 1FA0 1FB0 1FB1 1FB2 1FB6 1FB7 1FB8 1FB9 1FBA 1FBB 1FBC 1FDD 1FF0 1FF2 1FF9
-2182 2184 2187 2188 2191 2192 21C4 21D1 2203 2204 2206 2207 2208 220A 2216 2230 2231 2232 2233 2414 2420 2438 2460
+2182 2184 2187 2188 2191 2192 21C4 21D1 2203 2204 2206 2207 2208 220A 2216 2230 2231 2232 2233 2235 2414 2420 2438 2460
 2482 2484 2486 2487 2488 2489 249C 249D 24A0 24B0 24B1 24B6 24B7 24B8 24B9 24BA 24BB 24C7 24C9 24DC 24DD 24E0 24FA
 2503 2504 2507 2508 2520 2521 2523 2531 2544 2560 2563 2571 2582 2584 25A0 25A2 25A5 25A6 25A7 25A9 25AA 25AB 25AC
-25AD 25B0 25B2 25B8 25B9 25BA 25BB 25BC 25BD 25E0 25E2 25E5 25EC 25ED 25F9 25FA 25FB 2684 2685 2689 26B1 26B2 26B3
+25AD 25B0 25B2 25B8 25B9 25BA 25BB 25BC 25BD 25E0 25E2 25E5 25EC 25ED 25F9 25FA 25FB 2684 2685 2689 26B1 26B2 26B3 26B5
 2702 2704 2705 2709 2717 2730 2757 2770 2782 2783 2786 2788 27A0 27B0 27B1 27B2 27BA 27BB 27E0 27FB 2803 2805 2808
 2820 2822 2838 2860 2882 28A0 28A1 28A3 28B0 28B8 28B9 28BA 28BB 28E0 28E1 28E3 28F8 2B85 2B87 2B8C 2BB1 2BB3 2BB4
 2BB5 2BB9 2BBD 2C02 2C05 2C09 2C18 2C19 2C31 2C33 2C34 2C38 2C39 2C3A 2C58 2C59 2C77 2C79 2D04 2D05 2D18 2D19 2D30
@@ -405,10 +406,11 @@ for c in aircache spvcache; do
 done
 # A user's own settings survive updates: the lines between these two markers in nvrm610.conf are put back after the
 # copy below. An RTX 3050 (GA106, GH #130) ran only with NVMTL_NO_SURFACE_PAGEOFF=1 and uncached command pools, and every
-# update wrote the file fresh and dropped them. Only driver knobs (NVMTL_/NVK_/NVRM_ with plain values) are kept.
+# update wrote the file fresh and dropped them. Only driver knobs (NVMTL_/NVK_/NVRM_ with plain values) are kept; a value may carry , = * so that
+# the per-application frame-rate list (NVMTL_FPS_LIMIT=Game=60,*=0) survives, and no shell metacharacter.
 MYCONF_START='# --- my settings, kept on update ---'; MYCONF_END='# --- end my settings ---'
 [ ! -f "$GB/nvmtl/nvrm610.conf" ] || sed -n "/^$MYCONF_START\$/,/^$MYCONF_END\$/p" "$GB/nvmtl/nvrm610.conf" \
-  | grep -E "^($MYCONF_START|$MYCONF_END|(NVMTL|NVK|NVRM)_[A-Z0-9_]+=[A-Za-z0-9._-]{0,64})\$" > "$T/my-conf" || : > "$T/my-conf"
+  | grep -E "^($MYCONF_START|$MYCONF_END|(NVMTL|NVK|NVRM)_[A-Z0-9_]+=[A-Za-z0-9._,=*-]{0,160})\$" > "$T/my-conf" || : > "$T/my-conf"
 for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl; do rm -rf "$GB/$b" && ditto "$HERE/Library/GPUBundles/$b" "$GB/$b" || die "copy $b (restore from $BK)"; done
 if [ -s "$T/my-conf" ] && [ -f "$GB/nvmtl/nvrm610.conf" ]; then
   cat "$T/my-conf" >> "$GB/nvmtl/nvrm610.conf" || die "keep your settings in nvrm610.conf (restore from $BK)"
