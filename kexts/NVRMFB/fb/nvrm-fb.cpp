@@ -62,6 +62,19 @@ public:
     ~NVRMDisplayGate() { if (lock) IORecursiveLockUnlock(lock); }
     bool valid() const { return lock != nullptr; }
 };
+// The display gate with a deadline, for entry points a WindowServer thread sits in (mode changes). The recursive lock is shared by
+// every framebuffer and held across slow work (start-up enumeration, hot-plug relights, flip waits); an unbounded wait here
+// was a WindowServer watchdog kill after two minutes. A timeout fails the call and says who is waiting.
+class NVRMBoundedGate {
+    IORecursiveLock *lock; bool got;
+public:
+    explicit NVRMBoundedGate(unsigned ms) : lock(startLock()), got(false) {
+        if (lock) got = nvrmTryUntil([this] { return IORecursiveLockTryLock(lock) != 0; }, [](unsigned step) { IOSleep(step); }, ms, 2);
+    }
+    ~NVRMBoundedGate() { if (lock && got) IORecursiveLockUnlock(lock); }
+    bool held() const { return got; }
+};
+static const unsigned kModeChangeGateMs = 20000;
 static NVRMAllocationTable<struct NvKmsKapiMemory, 4096> gAllocations;
 // The bundled NVKMS headers emit conversion warnings; keep them scoped to these external declarations.
 #pragma clang diagnostic push
@@ -417,6 +430,10 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     // head (or being set) is an HDR10 timing. fScan30: the scanout surface is X2B10G10R10 (told to the accelerator in the
     // nvScanoutInfo reply). fHdrMeta: the mastering metadata WindowServer last sent (kIOFBHDRMetaDataAttribute).
     bool fHdrWant = false;   // the mode being set is HDR10
+    bool fPendingScaled = false; unsigned long long fPendingLoad = 0;   // set by setDisplayMode for the mode about to be switched to
+    unsigned long long fScalerLimit = 0;   // learned head-scaler load limit (nvrmScalerLoad), 0 = none known
+    bool trialScaledMode(const IODetailedTimingInformationV2 &d);
+    void probeScalerLimit();
     bool fHdrCapable = false, fHdrActive = false, fScan30 = false, fHdrMetaSet = false; unsigned fHdrMaxLumCode = 0;
     struct NvKmsHDRStaticMetadata fHdrMeta = {};
     IOReturn setHdrMeta(const void *meta);
@@ -497,6 +514,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     int dtIndex(IODisplayModeID id) const;
     bool edidModeFor(const IODetailedTimingInformationV2 *d, struct NvKmsKapiDisplayMode *m);
     unsigned addKmsRefreshModes(unsigned n);
+    unsigned addDsrModes(unsigned n);
     void computeScanoutCaps(NvU32 pitchAlign);
     unsigned fEdidHits = 0;
     static void dtToKapi(const IODetailedTimingInformationV2 *d, struct NvKmsKapiDisplayMode *m);
@@ -3116,10 +3134,18 @@ IOReturn NVRMNVDAFramebuffer::enableController()
 IOReturn NVRMNVDAFramebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth)
 {
     FBLOG("fb%u setDisplayMode 0x%x depth %d (current 0x%x)", fIndex, (unsigned)mode, (int)depth, (unsigned)fCurId);
+    NVRMBoundedGate modeGate(kModeChangeGateMs);   // held to the end of the call; the inner gates are recursive
+    if (!modeGate.held()) {
+        FBLOG("fb%u setDisplayMode 0x%x: the display gate was not free in %u ms (another framebuffer is starting, relighting or "
+              "waiting on a flip) -- the mode change is refused so WindowServer is not left in the kernel; it will ask again",
+              fIndex, (unsigned)mode, kModeChangeGateMs);
+        return kIOReturnTimeout;
+    }
     fNewIdOnce = 0;
     if (depth != 0) return kIOReturnUnsupportedMode;
     IOReturn result;
     if (mode == kModeId) {
+        fPendingScaled = false;
         result = fCurId == kModeId
             ? (applyMode() ? kIOReturnSuccess : kIOReturnError)
             : (fHdrWant = false, switchMode(kModeId, fBootMode, fBootW, fBootH, 0));
@@ -3134,6 +3160,12 @@ IOReturn NVRMNVDAFramebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth
             NvU32 w = 0, h = 0; dtSurfaceSize(&fDT[i], &w, &h);
             const IODetailedTimingInformationV2 dt = fDT[i];
             fHdrWant = gHdrOn && fHdrCapable && dt.dynamicRange == kIODynamicRangeHDR10;
+            {   // is it a scaled mode, and how heavy
+                const UInt64 tot = (UInt64)(dt.horizontalActive + dt.horizontalBlanking) * (dt.verticalActive + dt.verticalBlanking);
+                const unsigned hz = tot ? (unsigned)((dt.pixelClock + tot / 2) / tot) : 0;
+                fPendingScaled = dt.horizontalScaled && dt.verticalScaled;
+                fPendingLoad = nvrmScalerLoad(dt.horizontalActive, dt.verticalActive, dt.horizontalScaled, dt.verticalScaled, hz);
+            }
             result = switchMode(mode, m, w, h, dt.scalerFlags & kIOScaleRotateFlags);
             if (result == kIOReturnSuccess) fCurDT = dt;
         }
@@ -3294,7 +3326,8 @@ void NVRMNVDAFramebuffer::computeScanoutCaps(NvU32 pitchAlign)
     // scanout, so it stays opt-in until owners of HiDPI panels report it; a reserve that cannot be allocated falls back
     // to the boot size below.
     { uint32_t hidpi = 0;
-      if (PE_parse_boot_argn("nvfbhidpi", &hidpi, sizeof hidpi) && hidpi) {
+      uint32_t dsrOn = 0; PE_parse_boot_argn("nvfbdsr", &dsrOn, sizeof dsrOn);
+      if ((PE_parse_boot_argn("nvfbhidpi", &hidpi, sizeof hidpi) && hidpi) || dsrOn) {
           fScalerMaxW = mw * 2 > 7680 ? 7680 : mw * 2;
           fScalerMaxH = mh * 2 > 4320 ? 4320 : mh * 2;
           FBLOG("nvfbhidpi: scaled desktops up to %ux%u on a %ux%u raster", fScalerMaxW, fScalerMaxH, mw, mh);
@@ -3502,7 +3535,16 @@ IOReturn NVRMNVDAFramebuffer::switchMode(IODisplayModeID id, const struct NvKmsK
         if (!ok) break;
     }
     IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
-    if (!ok) { fHdrActive = hdrBefore; if (!fSubmissionFaulted) fKms->destroySurface(fDev, ns); return kIOReturnUnsupportedMode; }
+    if (!ok) {
+        fHdrActive = hdrBefore;
+        if (!fSubmissionFaulted) fKms->destroySurface(fDev, ns);
+        if (fPendingScaled) {   // a scaled mode the head refused: remember how heavy, so validateDetailedTiming stops offering such modes
+            const unsigned long long before = fScalerLimit;
+            fScalerLimit = nvrmScalerLearn(fScalerLimit, fPendingLoad);
+            if (fScalerLimit != before) FBLOG("fb%u: the head refused a scaled mode of load %llu pixels/s; scaled modes above %llu are no longer offered", fIndex, fPendingLoad, fScalerLimit);
+        }
+        return kIOReturnUnsupportedMode;
+    }
     struct NvKmsKapiSurface *old = fSurf;
     fScan30 = ten;
     fSurf = ns; fFrontSurf = ns; fMode = m; fW = w; fH = h; fPitch = pitch;
@@ -3549,6 +3591,12 @@ IOReturn NVRMNVDAFramebuffer::validateDetailedTiming(void *description, IOByteCo
         else if ((d->horizontalScaled > rw || d->verticalScaled > rh) && (d->horizontalActive != fBootW || d->verticalActive != fBootH))
             why = "desktop larger than a raster smaller than the panel";
         else if (d->horizontalActive > fScalerMaxW || d->verticalActive > fScalerMaxH) why = "raster larger than the scanout allocation";
+        else if (fScalerLimit) {   // the head already refused a scaled mode this heavy
+            const UInt64 tot = (UInt64)(d->horizontalActive + d->horizontalBlanking) * (d->verticalActive + d->verticalBlanking);
+            const unsigned hz = tot ? (unsigned)((d->pixelClock + tot / 2) / tot) : 0;
+            if (!nvrmScalerAllows(fScalerLimit, nvrmScalerLoad(d->horizontalActive, d->verticalActive, d->horizontalScaled, d->verticalScaled, hz)))
+                why = "beyond the head scaler's pixel rate";
+        }
     }
     if (!why) {
         struct NvKmsKapiDisplayMode m = {};
@@ -3576,6 +3624,117 @@ IOReturn NVRMNVDAFramebuffer::validateDetailedTiming(void *description, IOByteCo
         info->flags |= kDisplayModeAcceleratorBackedFlag;
     }
     return kIOReturnSuccess;
+}
+// One non-committing trial of a scaled timing: the same config switchMode would test, with a throw-away surface. true = the head
+// could scan it. Used by probeScalerLimit() (boot-arg nvfbscalerprobe=1).
+bool NVRMNVDAFramebuffer::trialScaledMode(const IODetailedTimingInformationV2 &d)
+{
+    struct NvKmsKapiDisplayMode m = {};
+    if (!edidModeFor(&d, &m)) dtToKapi(&d, &m);
+    NvU32 w = 0, h = 0, pitch = 0; dtSurfaceSize(&d, &w, &h);
+    if (!nvrmKmsRasterValid(w, h) || !nvrmCheckedPitch(w, fPitchAlign, &pitch) || (NvU64)pitch * h > fMemBytes) return false;
+    struct NvKmsKapiCreateSurfaceParams sp = {};
+    sp.planes[0].memory = fMem; sp.planes[0].offset = 0; sp.planes[0].pitch = pitch;
+    sp.width = w; sp.height = h; sp.format = fScan30 ? NvKmsSurfaceMemoryFormatX2B10G10R10 : NvKmsSurfaceMemoryFormatX8R8G8B8;
+    struct NvKmsKapiSurface *ns = fKms->createSurface(fDev, &sp);
+    if (!ns) return false;
+    struct NvKmsKapiRequestedModeSetConfig *cfg = (struct NvKmsKapiRequestedModeSetConfig *)IOMalloc(sizeof *cfg);
+    struct NvKmsKapiModeSetReplyConfig *rep = (struct NvKmsKapiModeSetReplyConfig *)IOMalloc(sizeof *rep);
+    NvBool ok = NV_FALSE;
+    if (cfg && rep) {
+        nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
+        cfg->headsMask = 1u << fHead;
+        struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
+        nvrmHeadConfigBaseline(hr, fGammaOn && fGamma ? olutFromGamma() : NULL);
+        hr->modeSetConfig.bActive = NV_TRUE; hr->modeSetConfig.numDisplays = 1; hr->modeSetConfig.displays[0] = fDisplay;
+        hr->modeSetConfig.mode = m;
+        hr->flags.activeChanged = hr->flags.displaysChanged = hr->flags.modeChanged = NV_TRUE;
+        struct NvKmsKapiLayerRequestedConfig *lr = &hr->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX];
+        lr->config.surface = ns; lr->config.srcWidth = (NvU16)w; lr->config.srcHeight = (NvU16)h;
+        lr->config.dstWidth = (NvU16)m.timings.hVisible; lr->config.dstHeight = (NvU16)m.timings.vVisible;
+        lr->config.compParams.compMode = NVKMS_COMPOSITION_BLENDING_MODE_OPAQUE; lr->config.minPresentInterval = 1;
+        lr->flags.surfaceChanged = lr->flags.srcXYChanged = lr->flags.srcWHChanged = lr->flags.dstXYChanged = lr->flags.dstWHChanged = NV_TRUE;
+        nvrmUnownedHeadsOff(cfg);
+        ok = submitConfig(cfg, rep, NV_FALSE);
+    }
+    if (cfg) IOFree(cfg, sizeof *cfg);
+    if (rep) IOFree(rep, sizeof *rep);
+    if (!fSubmissionFaulted) fKms->destroySurface(fDev, ns);
+    return ok != NV_FALSE;
+}
+// Find the head's scaler limit by binary search over the scaled timings' loads: about log2(n) trials instead of one refused mode
+// set per timing. Only with the head lit and idle; the result is the same fScalerLimit the refusals teach.
+void NVRMNVDAFramebuffer::probeScalerLimit()
+{
+    if (!fModeSet || !fSurf || fHeadSlept || fConsoleAperture || fSubmissionFaulted || !rmGpuReady() || !fKms || !fDev) return;
+    static const unsigned kMax = 512;
+    unsigned long long *loads = (unsigned long long *)IOMalloc(kMax * sizeof *loads);
+    unsigned *idx = (unsigned *)IOMalloc(kMax * sizeof *idx);
+    if (!loads || !idx) { if (loads) IOFree(loads, kMax * sizeof *loads); if (idx) IOFree(idx, kMax * sizeof *idx); return; }
+    unsigned n = 0;
+    for (unsigned i = 0; i < fNDT && n < kMax; i++) {
+        const IODetailedTimingInformationV2 &d = fDT[i];
+        if (!d.horizontalScaled || !d.verticalScaled || (d.scalerFlags & kIOScaleRotateFlags)) continue;
+        const UInt64 tot = (UInt64)(d.horizontalActive + d.horizontalBlanking) * (d.verticalActive + d.verticalBlanking);
+        const unsigned hz = tot ? (unsigned)((d.pixelClock + tot / 2) / tot) : 0;
+        const unsigned long long load = nvrmScalerLoad(d.horizontalActive, d.verticalActive, d.horizontalScaled, d.verticalScaled, hz);
+        // ascending insertion by load; the index remembers one timing that has that load
+        unsigned j = n; while (j > 0 && loads[j - 1] > load) { loads[j] = loads[j - 1]; idx[j] = idx[j - 1]; j--; }
+        loads[j] = load; idx[j] = i; n++;
+    }
+    if (n >= 2) {
+        unsigned trials = 0;
+        auto test = [&](unsigned long long load) {
+            for (unsigned k = 0; k < n; k++) if (loads[k] == load) return trialScaledMode(fDT[idx[k]]);
+            return false;
+        };
+        const unsigned long long limit = nvrmScalerSearch(loads, n, test, &trials);
+        if (limit != ~0ull) fScalerLimit = nvrmScalerLearn(0, limit + 1);
+        FBLOG("fb%u: scaler probe: %u scaled timings, %u trial(s) -> %s", fIndex, n, trials,
+              limit == ~0ull ? "no limit" : "limit found");
+        if (limit != ~0ull) FBLOG("fb%u: scaled modes above %llu pixels/s are not offered", fIndex, fScalerLimit);
+    }
+    IOFree(loads, kMax * sizeof *loads); IOFree(idx, kMax * sizeof *idx);
+}
+// DSR-style supersampled desktops (boot-arg nvfbdsr=1, which also reserves the scanout memory nvfbhidpi does): for every refresh
+// rate the panel runs at its native raster, desktops of 1.20x to 4.00x the pixel count that the head scales down. Only sizes
+// that fit the scaler cap and the scanout memory, and only where macOS did not already list that desktop at that rate. IDs are
+// 0x20000 | factor << 12 | refresh rate, below Apple's reserved 0x80000000 range and stable across calls.
+unsigned NVRMNVDAFramebuffer::addDsrModes(unsigned n)
+{
+    const unsigned cap = sizeof fDT / sizeof fDT[0], base = n;
+    if (!fBootW || !fBootH) return n;
+    for (unsigned s = 0; s < base; s++) {
+        const IODetailedTimingInformationV2 src = fDT[s];
+        if (src.horizontalActive != fBootW || src.verticalActive != fBootH || src.horizontalScaled || src.verticalScaled || !src.pixelClock) continue;
+        const UInt64 tot = (UInt64)(src.horizontalActive + src.horizontalBlanking) * (src.verticalActive + src.verticalBlanking);
+        const unsigned hz = tot ? (unsigned)((src.pixelClock + tot / 2) / tot) : 0;
+        if (!hz || hz > 0xfff) continue;
+        UInt32 flags = 0;   // scaler flags macOS used for its own scaled modes on this raster, if it has any
+        for (unsigned j = 0; j < base; j++)
+            if (fDT[j].horizontalActive == fBootW && fDT[j].verticalActive == fBootH && fDT[j].horizontalScaled) { flags = fDT[j].scalerFlags; break; }
+        for (unsigned f = 0; f < kNvrmDsrFactors && n < cap; f++) {
+            unsigned dw = 0, dh = 0;
+            if (!nvrmDsrSize(fBootW, fBootH, f, fScalerMaxW, fScalerMaxH, &dw, &dh)) continue;
+            NvU32 pitch = 0;
+            if (!nvrmCheckedPitch(fBootW, fPitchAlign, &pitch) || !fMemBytes || (NvU64)pitch * fBootH > fMemBytes) continue;
+            bool listed = false;
+            for (unsigned j = 0; j < n && !listed; j++) {
+                const IODetailedTimingInformationV2 &d = fDT[j];
+                if (d.horizontalActive != fBootW || d.verticalActive != fBootH || d.horizontalScaled != dw || d.verticalScaled != dh) continue;
+                const UInt64 dt = (UInt64)(d.horizontalActive + d.horizontalBlanking) * (d.verticalActive + d.verticalBlanking);
+                const unsigned dhz = dt ? (unsigned)((d.pixelClock + dt / 2) / dt) : 0;
+                if (dhz + 1 >= hz && dhz <= hz + 1) listed = true;
+            }
+            if (listed) continue;
+            IODetailedTimingInformationV2 b = src;
+            b.horizontalScaled = dw; b.verticalScaled = dh; b.scalerFlags = flags;
+            b.detailedTimingModeID = 0x20000u | (f << 12) | hz;
+            fDT[n++] = b;
+        }
+    }
+    if (n != base) FBLOG("fb%u: %u supersampled desktop(s) added (nvfbdsr=1)", fIndex, n - base);
+    return n;
 }
 IOReturn NVRMNVDAFramebuffer::setDetailedTimings(OSArray *array)
 {
@@ -3619,6 +3778,7 @@ IOReturn NVRMNVDAFramebuffer::setDetailedTimings(OSArray *array)
     publishRotatedSizes();
     fNewIdOnce = 0;
     n = addKmsRefreshModes(n);
+    { UInt32 dsr = 0; if (PE_parse_boot_argn("nvfbdsr", &dsr, sizeof dsr) && dsr) n = addDsrModes(n); }
     fNDT = n;
     setProperty(kIOFBDetailedTimingsKey, array);
     fBootInDT = false;
@@ -3657,6 +3817,12 @@ IOReturn NVRMNVDAFramebuffer::setDetailedTimings(OSArray *array)
         FBLOG("  dt 0x%x raster %ux%u desktop %ux%u rotation 0x%x pclk %llu", fDT[i].detailedTimingModeID, fDT[i].horizontalActive, fDT[i].verticalActive,
               fDT[i].horizontalScaled, fDT[i].verticalScaled, (unsigned)(fDT[i].scalerFlags & kIOScaleRotateFlags), (unsigned long long)fDT[i].pixelClock);
     setProperty("NVRMDetailedTimings", (unsigned long long)n, 32);
+    {   // optional active probe of the head scaler (boot-arg nvfbscalerprobe=1), once per head
+        UInt32 pr = 0; static bool probed[16];
+        if (!fScalerLimit && fIndex < 16 && !probed[fIndex] && PE_parse_boot_argn("nvfbscalerprobe", &pr, sizeof pr) && pr) {
+            probed[fIndex] = true; probeScalerLimit();
+        }
+    }
     publishStartupTiming();
     return kIOReturnSuccess;
 }

@@ -217,3 +217,69 @@ static inline unsigned nvrmHdrLuminanceFromCode(unsigned code)
     v = v * frac[code % 32] / 1000;
     return v > 65535 ? 65535 : (unsigned)v;
 }
+// ---- Bounded waits ----
+// Try `tryFn()` until it succeeds or `totalMs` has passed, sleeping `stepMs` between tries. Returns whether it succeeded.
+// A WindowServer thread that waits forever on a lock someone else holds is killed by the watchdog after two minutes
+// (taking the session with it); a wait that gives up lets the mode change fail and be retried.
+template <class TryFn, class SleepFn>
+static inline bool nvrmTryUntil(TryFn tryFn, SleepFn sleepFn, unsigned totalMs, unsigned stepMs)
+{
+    if (tryFn()) return true;
+    if (!stepMs) stepMs = 1;
+    for (unsigned waited = 0; waited < totalMs; waited += stepMs) {
+        sleepFn(stepMs);
+        if (tryFn()) return true;
+    }
+    return false;
+}
+// ---- Head scaler throughput ----
+// A scaled (HiDPI or downscaled) mode is refused at the mode set when the head's scaler cannot move that many pixels per
+// second; the limit is ~1.1-1.5 Gpixel/s but differs per card and per DSC link, so it is learned: from the refusals, and
+// optionally by a binary search of test commits. The load of a timing is the larger of the raster and the desktop, times the
+// refresh rate.
+static inline unsigned long long nvrmScalerLoad(unsigned rasterW, unsigned rasterH, unsigned deskW, unsigned deskH, unsigned hz)
+{
+    const unsigned long long r = (unsigned long long)rasterW * rasterH, d = (unsigned long long)deskW * deskH;
+    return (r > d ? r : d) * hz;
+}
+// A refusal at `load` means everything at or above it is too much; keeps the smallest refused load minus one. 0 = unknown.
+static inline unsigned long long nvrmScalerLearn(unsigned long long limit, unsigned long long refusedLoad)
+{
+    if (!refusedLoad) return limit;
+    const unsigned long long l = refusedLoad - 1;
+    return (!limit || l < limit) ? l : limit;
+}
+static inline bool nvrmScalerAllows(unsigned long long limit, unsigned long long load) { return !limit || load <= limit; }
+// Largest passing load among `loads` (ascending), assuming monotonic pass-then-fail; test(load) runs a non-committing trial.
+// Returns the limit (the largest passing load, or 0 if the smallest already fails; ~0 if all pass = no limit).
+template <class T>
+static inline unsigned long long nvrmScalerSearch(const unsigned long long *loads, unsigned n, T test, unsigned *trials)
+{
+    unsigned lo = 0, hi = n, t = 0;           // answer in [lo, hi): loads[lo-1] passes, loads[hi] fails
+    while (lo < hi) {
+        const unsigned mid = lo + (hi - lo) / 2;
+        t++;
+        if (test(loads[mid])) lo = mid + 1; else hi = mid;
+    }
+    if (trials) *trials = t;
+    if (lo == n) return ~0ull;
+    return lo ? loads[lo - 1] : 0;
+}
+// ---- DSR-style supersampled desktops ----
+// NVIDIA's driver offers desktops larger than the panel (DSR: 1.20x to 4.00x the pixel count) that the display engine scales
+// down to the native raster. Per-axis factors are the square roots of 1.20, 1.50, 1.78, 2.00, 2.25, 3.00, 4.00, in 1/1000.
+enum { kNvrmDsrFactors = 7 };
+static inline unsigned nvrmDsrAxisFactorMilli(unsigned i)
+{
+    static const unsigned f[kNvrmDsrFactors] = { 1095, 1225, 1333, 1414, 1500, 1732, 2000 };
+    return i < kNvrmDsrFactors ? f[i] : 0;
+}
+// The desktop size for factor i on a native raster, each axis rounded to an even number; false when it exceeds the scaler cap.
+static inline bool nvrmDsrSize(unsigned nativeW, unsigned nativeH, unsigned i, unsigned maxW, unsigned maxH, unsigned *w, unsigned *h)
+{
+    const unsigned f = nvrmDsrAxisFactorMilli(i);
+    if (!f || !nativeW || !nativeH) return false;
+    const unsigned dw = (unsigned)(((unsigned long long)nativeW * f + 500) / 1000 + 1) & ~1u, dh = (unsigned)(((unsigned long long)nativeH * f + 500) / 1000 + 1) & ~1u;
+    if (dw > maxW || dh > maxH || dw <= nativeW || dh <= nativeH) return false;
+    *w = dw; *h = dh; return true;
+}
