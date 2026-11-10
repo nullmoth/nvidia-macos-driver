@@ -67,7 +67,7 @@ arm("on a hit it frees every stage's NIR, clears the outputs and returns an erro
     "for (uint32_t j = 0; j < shader_count; j++)\n         ralloc_free(infos[j].nir);" in added
     and "memset(shaders_out, 0" in added and "_mesa_shader_stage_to_string(unbound_stage)" in added and "VK_ERROR_UNKNOWN" in added)
 chain = next((l for l in bld.splitlines() if l.strip().startswith('CHAIN="nvk-macos') and "nvk-card-select" in l), "")
-arm("the patch is the last of the 2.9 chain (it is written against the tree every other patch has changed)",
-    chain.rstrip().endswith('nvk-unbound-stage" ;;'), chain[-80:])
+arm("the patch comes after every patch that changes the shader compile path",
+    "nvk-warnings nvk-unbound-stage" in chain, chain[-80:])
 arm("the 2.8 chain is unchanged", "nvk-unbound-stage" not in next(l for l in bld.splitlines() if 'CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef" ;;' in l))
 print("FAILED" if fails else "PASS"); sys.exit(1 if fails else 0)

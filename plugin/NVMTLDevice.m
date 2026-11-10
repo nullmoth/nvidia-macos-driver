@@ -53,11 +53,23 @@ static char g_app_edit_ps_key;
 #define NVMTL_RELEASE 0
 #endif
 #if NVMTL_RELEASE
+#include <fcntl.h>
 static inline int nvmtl_rel_devpath(const char *p) {
     return p && (!strncmp(p, "/tmp/nvmtl-", 11) || !strncmp(p, "/private/tmp/nvmtl-", 19));
 }
 static inline int nvmtl_rel_access(const char *p, int m) { return nvmtl_rel_devpath(p) ? -1 : access(p, m); }
-static inline FILE *nvmtl_rel_fopen(const char *p, const char *m) { return nvmtl_rel_devpath(p) ? NULL : fopen(p, m); }
+// Files a release plugin writes (a log a process opted into, a report) are created without following a link: the default
+// log is a fixed name in a folder every user can write, where a link planted by someone else would send this process's
+// writes into any file its user can write. Reads are unchanged.
+static inline FILE *nvmtl_rel_fopen(const char *p, const char *m) {
+    if (nvmtl_rel_devpath(p)) return NULL;
+    if (m[0] != 'a' && m[0] != 'w') return fopen(p, m);
+    const int fd = open(p, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC | (m[0] == 'a' ? O_APPEND : O_TRUNC), 0644);
+    if (fd < 0) return NULL;
+    FILE *f = fdopen(fd, m[0] == 'a' ? "a" : "w");
+    if (!f) close(fd);
+    return f;
+}
 // Function-like on purpose: an object-like `#define access` also renamed every Objective-C `-access` method in this
 // one-TU plugin, so release builds answered -[MTLBinding access] with nothing (selector nvmtl_rel_access in the
 // shipped binary). Apple's OpenCL then read every image as read-only and refused write-only images (-38).
