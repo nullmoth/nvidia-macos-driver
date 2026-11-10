@@ -25,7 +25,7 @@ with tempfile.TemporaryDirectory() as d:
     d = pathlib.Path(d)
     src = d / 'guard.c'
     exe = d / 'guard'
-    src.write_text('#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n' + block + '''
+    src.write_text('#include <fcntl.h>\n#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n' + block + '''
 int main(int argc, char **argv) {
     int a = access(argv[1], F_OK);
     FILE *f = fopen(argv[1], "r");
