@@ -1043,6 +1043,13 @@ static NvU32 gSurroundMask = 0, gSurroundMaskOrig = 0;   // boot-arg nvfbsurroun
 static bool gRotScale = false;                 // boot-arg nvfbrotscale
 static bool gHdrOn = false, gTenBit = false;   // boot-args nvfbhdr / nvfb10bit
 static int gColorBpc = 0, gColorFormat = (int)kNvrmColorFormatAuto, gColorRange = 0, gVibrance = 0;
+// The fallbacks below let this file compile against an NVKMS interface without the fields, and then the colour controls do
+// nothing at all: every build did exactly that while the archives came from a tree missing 620-color-range.patch. A build
+// of this kext must see the fields; build_rm620.sh makes the tree that has them.
+template <typename C> static auto nvrmHasColorFields(int) -> decltype(((C *)0)->colorRange, ((C *)0)->colorFormat, char());
+template <typename C> static long nvrmHasColorFields(long);
+static_assert(sizeof(nvrmHasColorFields<decltype(((struct NvKmsKapiHeadRequestedConfig *)0)->modeSetConfig)>(0)) == 1,
+              "nvkms-kapi.h has no colorRange/colorFormat: build against the tree build_rm620.sh patched");
 // The range field exists only in headers carrying 620-color-range.patch; detection keeps baseline builds compiling.
 template <typename C> static auto nvrmSetColorFormat(C *c, NvU32 v, int) -> decltype(c->colorFormat = v, void()) { c->colorFormat = v; }
 template <typename C> static void nvrmSetColorFormat(C *, NvU32, long) {}
@@ -1056,13 +1063,6 @@ static void nvrmApplyColorPrefs(struct NvKmsKapiHeadRequestedConfig *hr)
     if (gColorBpc) hr->modeSetConfig.colorBpc = (NvU32)gColorBpc;
     if (gColorRange) nvrmSetColorRange(&hr->modeSetConfig, (unsigned)gColorRange, 0);
 }
-// The fallbacks before nvrmApplyColorPrefs let this file compile against an NVKMS interface without the fields, and then the colour controls do
-// nothing at all: every build did exactly that while the archives came from a tree missing 620-color-range.patch. A build
-// of this kext must see the fields; build_rm620.sh makes the tree that has them.
-template <typename C> static auto nvrmHasColorFields(int) -> decltype(((C *)0)->colorRange, ((C *)0)->colorFormat, char());
-template <typename C> static long nvrmHasColorFields(long);
-static_assert(sizeof(nvrmHasColorFields<decltype(((struct NvKmsKapiHeadRequestedConfig *)0)->modeSetConfig)>(0)) == 1,
-              "nvkms-kapi.h has no colorRange/colorFormat: build against the tree build_rm620.sh patched");
 static void nvrmHeadConfigBaseline(struct NvKmsKapiHeadRequestedConfig *hr, struct NvKmsKapiSurface *olut = NULL)
 {
     nvrmAutoColorFormat(&hr->modeSetConfig, 0);   // colorBpc 0 = UNKNOWN and allmMode 0 = DISABLED already match 615
