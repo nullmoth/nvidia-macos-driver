@@ -1678,6 +1678,10 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
 // by the same completion thread that would be blocked here. Taken, the commit's mark stands and the re-mark is retried
 // off this thread (nvmtl_surface_remark_later).
 - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied {
+    return [self nvmtlSurfaceOutDirtied:dirtied copied:NO];
+}
+// copied is supplied only by the successfully completed submission that wrote these pages.
+- (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied copied:(BOOL)copied {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
     @synchronized (nvmtl_surface_sync(r)) {
@@ -1700,8 +1704,8 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
     if (IOSurfaceLock(r->_surf, lockopt, &lockSeed) != kIOReturnSuccess) { nvlog("G13 surface-out: IOSurfaceLock FAILED"); return NO; }
     void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
     size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);
-    int rc = -1;
-    if (base && row && nvmtl_surfout_import()) {
+    int rc = copied ? 0 : -1;
+    if (!copied && base && row && nvmtl_surfout_import()) {
         const size_t off = (size_t)((uint8_t *)base - (uint8_t *)IOSurfaceGetBaseAddress(r->_surf));
         nvmtl_vk_host_pages_key((uint32_t)IOSurfaceGetID(r->_surf), nvmtl_host_pages_cookie(r->_surf));
         rc = nvmtl_vk_image_read_host(r->_q, &r->_i, base, row, IOSurfaceGetAllocSize(r->_surf) - off, &r->_hostPages);
@@ -7425,6 +7429,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 @end
 
 #pragma mark - command buffer / queue
+#import "NVMTLCapture.m"
 #import "NVMTLEventSync.m"
 @implementation NVMTLCommandBuffer
 // Never a lock on the command buffer itself: apps may hold @synchronized(commandBuffer) around -waitUntilCompleted
