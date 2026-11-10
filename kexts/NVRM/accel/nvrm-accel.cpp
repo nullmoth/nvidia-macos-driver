@@ -1767,8 +1767,8 @@ static bool nvSurfIsPending(unsigned int id)
 // NVResource::pageoff, which the family calls with the accelerator lock held; the wait (up to 100 ms) held that lock and
 // every RM call that needs it (VRAM imports, allocations, dirty marks) queued behind it. With this on, the page-off lets go
 // of the lock while it waits, only when the current thread owns it at one level, and takes it back before it goes on.
-// Off by default until it has run on a card: debug.nvaccel_pageoff_unlocked_wait=1 turns it on.
-static int gPoUnlocked = 0;
+// On by default; debug.nvaccel_pageoff_unlocked_wait=0 restores the locked wait.
+static int gPoUnlocked = 1;
 static SInt64 gCntPoUnlocked, gCntPoNotOwner;
 static int gPoUnlockedMaxUs;
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_pageoff_unlocked_wait, CTLFLAG_RW | CTLFLAG_LOCKED, &gPoUnlocked, 0, "1 = a page-off waits for the GPU without the accelerator lock");
