@@ -50,6 +50,9 @@ while IFS= read -r -d '' f; do
   [ "$magic" != 7f454c46 ] || { echo "STOP: ${f#"$ROOT/"} is a Linux ELF binary; nothing built here is, so it cannot ship"; fail=1; continue; }
   printf '%s' "$magic" | grep -qE '^(cffaedfe|cefaedfe|cafebabe|feedfacf)$' || continue
   sig=$(codesign -dv "$f" 2>&1)
+  # every program and library outside the kexts is signed (ad hoc): four went out unsigned, which an Intel Mac runs, but
+  # a signature is what lets the system notice a file changed after it was built
+  case "$f" in *.kext/Contents/MacOS/*) ;; *) codesign -v "$f" >/dev/null 2>&1 || { echo "STOP: ${f#"$ROOT/"} is not signed"; fail=1; };; esac
   case "$sig" in *"Identifier=com.apple."*|*"TeamIdentifier=59GAB85EFG"*|*"Authority=Apple Code Signing"*|*"Authority=Software Signing"*)
     echo "STOP: ${f#"$ROOT/"} is signed by Apple; it cannot ship"; fail=1;; esac
   own=$(otool -D "$f" 2>/dev/null | tail -n +2)

@@ -195,6 +195,16 @@ class Finish(unittest.TestCase):
         self.assertNotEqual(bad.returncode, 0)
         self.assertIn("seal does not verify", bad.stdout)
 
+    def test_an_unsigned_program_is_refused(self):
+        rel = "dlss/nm_unzstd"
+        (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(self.t / "nvmtl-boost", self.root / rel)      # a linked program straight from the compiler: no signature
+        subprocess.run(["codesign", "--remove-signature", str(self.root / rel)], capture_output=True)
+        listing(self.root, ["install.sh", "Library/GPUBundles/NVMTLDriver.bundle/Contents/Info.plist", rel])
+        r = self.finish()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("dlss/nm_unzstd is not signed", r.stdout)
+
     def test_a_stale_installer_is_refused(self):
         (self.root / "install.sh").write_text("#!/bin/bash\necho old\n")
         listing(self.root, ["install.sh", "Library/GPUBundles/NVMTLDriver.bundle/Contents/Info.plist"])

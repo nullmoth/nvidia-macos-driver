@@ -104,6 +104,7 @@ class Gate(unittest.TestCase):
         sh("codesign", "-f", "-s", "-", self.macos / "libnvencvt.dylib")
         (t / "m.c").write_text("int main(void){return 0;}\n")
         sh("clang", "-arch", "x86_64", "-o", self.macos / "nvmtl-air-dis", t / "m.c")
+        sh("codesign", "-f", "-s", "-", self.macos / "nvmtl-air-dis")   # the gate requires every program and library signed
         k = t / "NMSMN.kext/Contents"; (k / "MacOS").mkdir(parents=True)
         import plistlib, hashlib
         (k / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.nullmoth.NMSMN"})); (k / "MacOS/NMSMN").write_bytes(b"k")
@@ -138,6 +139,7 @@ class Gate(unittest.TestCase):
         sh("clang", "-arch", "x86_64", "-dynamiclib", "-install_name", "/opt/homebrew/lib/libdep.dylib", "-o", self.t / "libdep.dylib", lib)
         use = self.t / "use.c"; use.write_text("int dep(void); int use(void){return dep();}\n")
         sh("clang", "-arch", "x86_64", "-dynamiclib", "-o", self.macos / "libuse.dylib", use, self.t / "libdep.dylib")
+        sh("codesign", "-f", "-s", "-", self.macos / "libuse.dylib")   # the gate requires every program and library signed
         self.relist()
         r = self.gate()
         self.assertNotEqual(r.returncode, 0)
@@ -146,6 +148,7 @@ class Gate(unittest.TestCase):
     def test_a_library_naming_itself_by_a_build_path_is_not_a_dependency(self):
         lib = self.t / "own.c"; lib.write_text("int own(void){return 1;}\n")
         sh("clang", "-arch", "x86_64", "-dynamiclib", "-install_name", "/Volumes/Build/libown.dylib", "-o", self.macos / "libown.dylib", lib)
+        sh("codesign", "-f", "-s", "-", self.macos / "libown.dylib")   # the gate requires every program and library signed
         self.relist()
         self.assertEqual(self.gate().returncode, 0, self.gate().stdout)
 
