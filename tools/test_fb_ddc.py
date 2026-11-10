@@ -43,6 +43,8 @@ struct FB {
         if (op == kNvrmDdcWrite) c.w.assign(d, d + len); else memcpy(d, gReply.data(), len < gReply.size() ? len : gReply.size());
         gCalls.push_back(c); return gFail;
     }
+    bool fDdcFunction = false;
+    IOReturn doDdcBrightnessRequest(UInt32, IOI2CBusTiming *, IOI2CRequest *) { return kIOReturnBadArgumentX; }
     IOReturn doI2CRequest(UInt32 bus, IOI2CBusTiming *, IOI2CRequest *rq);
 };
 '''
@@ -52,7 +54,11 @@ static IOI2CRequest req(unsigned char *w, unsigned wn, unsigned char *r, unsigne
     q.replyTransactionType = rn ? kIOI2CDDCciReplyTransactionType : 0; q.replyAddress = 0x6F; q.replyBytes = rn; q.replyBuffer = (uintptr_t)r; return q;
 }
 int main() {
-    FB fb; unsigned char w[6] = {0x51, 0x82, 0x01, 0x10, 0x00, 0x00}, r[40] = {};
+    FB fb;
+    fb.fDdcFunction = true;
+    assert(fb.doI2CRequest(0, nullptr, nullptr) == kIOReturnBadArgumentX);
+    fb.fDdcFunction = false;
+    unsigned char w[6] = {0x51, 0x82, 0x01, 0x10, 0x00, 0x00}, r[40] = {};
     // DDC/CI "get VCP 0x10": write 0x6E, wait, read 0x6F; the reply says 8 payload bytes of 40 asked for
     gReply = {0x6E, 0x88, 0x02, 0x00, 0x10, 0x00, 0x00, 0x64, 0x00, 0x32, 0xAA};
     IOI2CRequest q = req(w, 6, r, 40);

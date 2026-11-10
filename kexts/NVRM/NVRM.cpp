@@ -13,6 +13,7 @@
 #include "nvrm_bar_recover.h"
 #include "nvrm_shutdown_plan.h"
 #include "nvrm_aspm.h"
+#include "../NVRMFB/nvrm_ddcci.h"
 
 extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <IOKit/IOService.h>
@@ -35,6 +36,10 @@ extern "C" {
 #include <sys/kauth.h>
 #include <sys/sysctl.h>
 #include <libkern/version.h>
+#include "nv-kernel-rmapi-ops.h"
+#include "ctrl/ctrl0073/ctrl0073dp.h"
+#include "ctrl/ctrl0073/ctrl0073specific.h"
+#include "ctrl/ctrl402c.h"
 
 // The 2.x driver is built for macOS 15 (Darwin 24) and macOS 26 (Darwin 25) only; on any other kernel NVRM
 // claims nothing, so NVRMFB and NVRMAGDC, which attach to it, never start either.
@@ -205,6 +210,7 @@ private:
     bool         fPrivateState = false;
     bool         fAdapter = false;
     IOLock      *fUtilizationLock = nullptr;
+    uint64_t     fDpDdcReadCompleted[32] = {}; // indexed by the one-bit display ID, under fUtilizationLock
     void        *fUtilizationState = nullptr;
     bool         fUtilizationStopping = false;
     uint32_t     fPassDone = 0;
@@ -2380,8 +2386,149 @@ public:
 };
 OSDefineMetaClassAndStructors(IOAccelNVRMBridge, NVRMUserClient)
 
+static NvU32 nvrmDdcControl(NvU32 client, NvU32 object, NvU32 command, void *params, NvU32 size)
+{
+    // The caller already holds PM admission. The NVKMS RM wrapper would enter it again.
+    nvidia_kernel_rmapi_ops_t op = {};
+    op.op = NV04_CONTROL;
+    op.params.control.hClient = client;
+    op.params.control.hObject = object;
+    op.params.control.cmd = command;
+    op.params.control.params = NV_PTR_TO_NvP64(params);
+    op.params.control.paramsSize = size;
+    rm_kernel_rmapi_op(nullptr, &op);
+    return op.params.control.status;
+}
+
+static NvU32 nvrmDdcAux(const nv_state_t &nv, NVRMDdcBrightnessRequest &request, bool write, bool addressOnly = false)
+{
+    const NvU32 size = addressOnly ? 0 : (write ? request.sendLength : sizeof request.reply);
+    NV0073_CTRL_DP_AUXCH_CTRL_PARAMS aux = {};
+    aux.displayId = request.displayId;
+    aux.addr = 0x37; // DP AUX uses the seven-bit address.
+    aux.bAddrOnly = addressOnly;
+    // A DDC/CI packet fits in one AUX message. I2C with MOT clear ends it with STOP.
+    aux.cmd = write ? NV0073_CTRL_DP_AUXCH_CMD_REQ_TYPE_WRITE : NV0073_CTRL_DP_AUXCH_CMD_REQ_TYPE_READ;
+    aux.size = addressOnly ? 0 : size - 1;
+    if (write && size) memcpy(aux.data, request.send, size);
+    const NvU32 status = nvrmDdcControl(nv.rmapi.hClient, nv.rmapi.hDisp,
+                                      NV0073_CTRL_CMD_DP_AUXCH_CTRL, &aux, sizeof aux);
+    if (status != NV_OK) return status;
+    if (aux.replyType == NV0073_CTRL_DP_AUXCH_REPLYTYPE_DEFER ||
+        aux.replyType == NV0073_CTRL_DP_AUXCH_REPLYTYPE_I2CDEFER) return NV_ERR_BUSY_RETRY;
+    if (aux.replyType != NV0073_CTRL_DP_AUXCH_REPLYTYPE_ACK) return NV_ERR_I2C_ERROR;
+    if (aux.size != size) return NV_ERR_INVALID_DATA;
+    if (!write && size) memcpy(request.reply, aux.data, size);
+    return NV_OK;
+}
+
+static NvU32 nvrmDdcTransfer(const nv_state_t &nv, NVRMDdcBrightnessRequest &request, bool write)
+{
+    if (request.displayPort) return nvrmDdcAux(nv, request, write);
+    const NvU32 size = write ? request.sendLength : sizeof request.reply;
+    NV402C_CTRL_I2C_TRANSACTION_PARAMS gpio = {};
+    gpio.portId = (NvU8)(request.port - 1); // RM's display query is one-based, the transaction is zero-based.
+    gpio.deviceAddress = 0x6e;
+    gpio.transType = NV402C_CTRL_I2C_TRANSACTION_TYPE_I2C_BLOCK_RW;
+    gpio.transData.i2cBlockData.bWrite = write;
+    gpio.transData.i2cBlockData.messageLength = size;
+    gpio.transData.i2cBlockData.pMessage = NV_PTR_TO_NvP64(write ? request.send : request.reply);
+    const NvU32 status = nvrmDdcControl(nv.rmapi.hClient, nv.rmapi.hI2C,
+                                      NV402C_CTRL_CMD_I2C_TRANSACTION, &gpio, sizeof gpio);
+    if (status == NV_OK && gpio.transData.i2cBlockData.messageLength != size) return NV_ERR_INVALID_DATA;
+    return status;
+}
+
+static NvU32 nvrmDdcGetBrightness(const nv_state_t &nv, NVRMDdcBrightnessRequest &request)
+{
+    request.stage = kNVRMDdcWrite;
+    NvU32 status = nvrmDdcTransfer(nv, request, true);
+    if (status != NV_OK) return status;
+    IOSleep(request.delayMs < 40 ? 40 : request.delayMs);
+    request.stage = kNVRMDdcRead;
+    status = nvrmDdcTransfer(nv, request, false);
+    if (request.displayPort && status == NV_ERR_BUSY_RETRY) {
+        // A deferred read still belongs to the same GetVCP command.
+        IOSleep(10);
+        status = nvrmDdcTransfer(nv, request, false);
+    }
+    if (status == NV_OK && request.displayPort && !nvrmDdcBrightnessReply(request.reply))
+        return NV_ERR_INVALID_DATA;
+    return status;
+}
+
+static IOReturn nvrmDdcBrightness(const nv_state_t &nv, NVRMDdcBrightnessRequest &request)
+{
+    request.rmStatus = NV_ERR_NOT_READY;
+    if (!nv.rmapi.hClient || !nv.rmapi.hDisp) return kIOReturnNotReady;
+    if (!request.displayPort) {
+        request.stage = kNVRMDdcPortLookup;
+        NV0073_CTRL_SPECIFIC_GET_I2C_PORTID_PARAMS port = {};
+        port.displayId = request.displayId;
+        request.rmStatus = nvrmDdcControl(nv.rmapi.hClient, nv.rmapi.hDisp,
+                                         NV0073_CTRL_CMD_SPECIFIC_GET_I2C_PORTID, &port, sizeof port);
+        if (request.rmStatus != NV_OK) return kIOReturnIOError;
+        request.port = port.ddcPortId;
+        if (!request.port || request.port > NV402C_CTRL_NUM_I2C_PORTS || !nv.rmapi.hI2C) {
+            request.rmStatus = NV_ERR_NOT_SUPPORTED;
+            return kIOReturnUnsupported;
+        }
+    }
+    if (request.sendLength == 5) {
+        request.rmStatus = nvrmDdcGetBrightness(nv, request);
+        if (request.displayPort && request.stage == kNVRMDdcRead && request.rmStatus == NV_ERR_INVALID_DATA) {
+            // Clear any incomplete I2C-over-AUX transaction and retry only the read command.
+            (void)nvrmDdcAux(nv, request, true, true);
+            IOSleep(10);
+            request.rmStatus = nvrmDdcGetBrightness(nv, request);
+        }
+    } else {
+        request.stage = kNVRMDdcWrite;
+        request.rmStatus = nvrmDdcTransfer(nv, request, true);
+    }
+    if (request.rmStatus != NV_OK) return kIOReturnIOError;
+    request.stage = kNVRMDdcComplete;
+    return kIOReturnSuccess;
+}
+
+static void nvrmDdcWaitAfterDpRead(uint64_t completed)
+{
+    if (!completed) return;
+    // A SetVCP sent directly after an ACKed DP GetVCP can fail at RM with NV_ERR_GENERIC.
+    // Leave the sink the interval verified on the affected DisplayPort path.
+    constexpr uint64_t quietNs = kNVRMDdcDpReadToWriteMs * 1000000ull;
+    uint64_t elapsedNs = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time() - completed, &elapsedNs);
+    if (elapsedNs < quietNs)
+        IOSleep(static_cast<unsigned>((quietNs - elapsedNs + 999999) / 1000000));
+}
+
 IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4)
 {
+    if (fn && fn->isEqualTo(NVRM_DDCCI_FN)) {
+        auto *request = static_cast<NVRMDdcBrightnessRequest *>(p1);
+        if (!request || !request->displayId || (request->displayId & (request->displayId - 1)) ||
+            request->delayMs > 200 || !nvrmDdcBrightnessCommand(request->send, request->sendLength))
+            return kIOReturnBadArgument;
+        int enabled = 0;
+        if (!PE_parse_boot_argn("nvddcci", &enabled, sizeof enabled) || enabled != 1)
+            return kIOReturnUnsupported;
+        if (!fUtilizationLock || isInactive()) return kIOReturnNotReady;
+        int counted = 0;
+        if (!nv_xnu_pm_try_enter(&counted)) return kIOReturnNotReady;
+        IOLockLock(fUtilizationLock);
+        const bool ready = !fUtilizationStopping && !isInactive() && fAdapter && fPassDone >= 2 &&
+                           request->gpuId == fNv.gpu_id && OSAddAtomic(0, &fGpuPm) == kGpuPmRunning;
+        uint64_t *dpReadCompleted = ready && request->displayPort
+            ? &fDpDdcReadCompleted[__builtin_ctz(request->displayId)] : nullptr;
+        if (dpReadCompleted && request->sendLength == 7) nvrmDdcWaitAfterDpRead(*dpReadCompleted);
+        const IOReturn result = ready ? nvrmDdcBrightness(fNv, *request) : kIOReturnNotReady;
+        if (dpReadCompleted && request->sendLength == 5 && result == kIOReturnSuccess)
+            *dpReadCompleted = mach_absolute_time();
+        IOLockUnlock(fUtilizationLock);
+        nv_xnu_pm_exit(counted);
+        return result;
+    }
     if (fn && fn->isEqualTo(NVRM_UTILIZATION_FN)) {
         NVRMUtilization *sample = (NVRMUtilization *)p1;
         if (!sample || sample->version != NVRM_UTILIZATION_ABI_VERSION) return kIOReturnBadArgument;
