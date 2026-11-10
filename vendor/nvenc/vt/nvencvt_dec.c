@@ -5,6 +5,7 @@
 // src/mpeg4dec.c (MPEG-4 Part 2) on NVDEC.
 // Registered by NVEncVT_Register next to the encoders (NVENCVT_NO_DEC=1 leaves it out), so every way the encoder gets
 // into a process (NullMoth's NVMTL_NVENCVT hook, nvenc-run) brings the decoder too.
+#include "nvencvt_diag.h"
 #include "dec.h"
 #include "vp9dec.h"
 #include "av1dec.h"
@@ -966,7 +967,7 @@ static NvU32 nvdec_class(void)
 OSStatus NVDecVT_Register(int rating)
 {
     gDLog = getenv("NVENCVT_LOG") != NULL;
-    if (!gDLog && access("/tmp/nvencvt.log", F_OK) == 0) { char p[64]; snprintf(p, sizeof p, "/tmp/nvencvt-%d.log", (int)getpid()); if ((gDLogF = fopen(p, "a"))) gDLog = true; }
+    if (!gDLog && nvencvt_flag("/tmp/nvencvt.log") == 0) { char p[64]; snprintf(p, sizeof p, "/tmp/nvencvt-%d.log", (int)getpid()); if ((gDLogF = nvencvt_out(p, "a"))) gDLog = true; }
     if (getenv("NVENCVT_NO_DEC")) return kVTCouldNotFindVideoDecoderErr;
     extern int gNvencvtGpu;   // vt/nvencvt.c: 1 Ada, 2 TU117 (GTX 1650: NVDEC 0xc4b0 has no AV1), 3 GA10x (RTX 30)
     const bool ampere = gNvencvtGpu == 3;
