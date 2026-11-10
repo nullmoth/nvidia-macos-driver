@@ -5,6 +5,7 @@
 // NVEncVT_CreateInstance as the factory yourself. Environment: NVENCVT_RATING (default 1100,
 // above nullmoth's 1000), NVENCVT_NO_REGISTER, NVENCVT_LOG, NVENCVT_DEPTH, NVENCVT_ENGINE, NVENCVT_STATS=<file> (or touch
 // /tmp/nvencvt.stats: statistics every 2 s to /tmp/nvencvt-stats.log, also in apps that get no environment).
+#include "nvencvt_diag.h"
 #include "enc.h"
 #include "av1hdr.h"
 #include "rm.h"
@@ -410,7 +411,7 @@ static OSStatus set_pixel_attrs(State *s)
         f[nf++] = s->ten ? kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange;
         f[nf++] = s->ten ? kCVPixelFormatType_444YpCbCr10BiPlanarFullRange : kCVPixelFormatType_444YpCbCr8BiPlanarFullRange;
     }
-    if (access("/tmp/nvencvt.anyfmt", F_OK) == 0) {   // diagnostics: offer every format a capture source might deliver, log what comes
+    if (nvencvt_flag("/tmp/nvencvt.anyfmt") == 0) {   // diagnostics: offer every format a capture source might deliver, log what comes
         int all[] = { kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
                       kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVPixelFormatType_32BGRA,
                       kCVPixelFormatType_ARGB2101010LEPacked, kCVPixelFormatType_64RGBAHalf, kCVPixelFormatType_30RGB,
@@ -468,14 +469,14 @@ static OSStatus open_encoder(State *s)
     // (window switching, blinking content) cost far less with more references: 1080p, three pictures cycling, HEVC:
     // 27.8 Mbit/s with one, 1.7 with three (T6.11); steady motion about -2 %, +0.1 ms per frame. No reordering, no added latency.
     int refs = s->refs > 0 ? s->refs : getenv("NVENCVT_REFS") ? atoi(getenv("NVENCVT_REFS")) : 3;
-    { FILE *rf = fopen("/tmp/nvencvt.refs", "r"); int v = 0;   // diagnostics: overrides everything, read at each session start
+    { FILE *rf = nvencvt_flag_open("/tmp/nvencvt.refs"); int v = 0;   // diagnostics: overrides everything, read at each session start
       if (rf) { if (fscanf(rf, "%d", &v) == 1 && v > 0) refs = v; fclose(rf); } }
     refs = refs < 1 ? 1 : refs > ENC_MAX_REFS ? ENC_MAX_REFS : refs;
     // HEVC: announce 2 pictures more than the references need in the VPS/SPS DPB size. With exactly refs + 1, a hardware
     // decoder (AMD Polaris through macOS Sonoma, Parsec client) overwrote references still in use: moving windows showed
     // content ahead of the background (T6.12). NVENCVT_DPB_EXTRA or /tmp/nvencvt.dpb (0..2) override.
     int dpb_extra = getenv("NVENCVT_DPB_EXTRA") ? atoi(getenv("NVENCVT_DPB_EXTRA")) : 2;
-    { FILE *df = fopen("/tmp/nvencvt.dpb", "r"); int v = 0;
+    { FILE *df = nvencvt_flag_open("/tmp/nvencvt.dpb"); int v = 0;
       if (df) { if (fscanf(df, "%d", &v) == 1 && v >= 0) dpb_extra = v; fclose(df); } }
     dpb_extra = dpb_extra < 0 ? 0 : dpb_extra > 2 ? 2 : dpb_extra;
     if (!s->av1 && refs > 3) refs = 3;   // AV1 takes 4 (LAST .. GOLDEN), H.264 / HEVC 3
@@ -576,7 +577,7 @@ opened:
     s->opened = true;
     s->stop = false;
     const char *sf = getenv("NVENCVT_STATS");
-    if (sf || access("/tmp/nvencvt.stats", F_OK) == 0) { s->statsFile = fopen(sf ? sf : "/tmp/nvencvt-stats.log", "a"); s->statsT0 = now_ms(); }
+    if (sf || nvencvt_flag("/tmp/nvencvt.stats") == 0) { s->statsFile = nvencvt_out(sf ? sf : "/tmp/nvencvt-stats.log", "a"); s->statsT0 = now_ms(); }
     s->threadOn = pthread_create(&s->thread, NULL, completion, s) == 0;
     if (!s->threadOn) { enc_close(&s->enc); s->opened = false; return kVTVideoEncoderMalfunctionErr; }
     return noErr;
@@ -770,9 +771,9 @@ static OSStatus e_encodeFrame(VTVideoEncoderRef e, VTEncoderFrameRef frame, CVIm
     s->lastPf = pf;
     { IOSurfaceRef ps = CVPixelBufferGetIOSurface(img); s->bcSeedPre = ps ? IOSurfaceGetSeed(ps) : 0; }   // diagnostics: the seed before our lock
     CVPixelBufferLockBaseAddress(img, kCVPixelBufferLock_ReadOnly);
-    if (!s->dumpEs && (s->frames % 30) == 0 && access("/tmp/nvencvt.dump", F_OK) == 0) {   // start a dump (diagnostics)
-        char p[128]; snprintf(p, sizeof p, "/tmp/nvencvt-dump-%d.es", (int)getpid()); s->dumpEs = fopen(p, "wb");
-        snprintf(p, sizeof p, "/tmp/nvencvt-dump-%d.nv12", (int)getpid()); s->dumpYuv = bgra || p010 || l10r || s->c444 ? NULL : fopen(p, "wb");
+    if (!s->dumpEs && (s->frames % 30) == 0 && nvencvt_flag("/tmp/nvencvt.dump") == 0) {   // start a dump (diagnostics)
+        char p[128]; snprintf(p, sizeof p, "/tmp/nvencvt-dump-%d.es", (int)getpid()); s->dumpEs = nvencvt_out(p, "wb");
+        snprintf(p, sizeof p, "/tmp/nvencvt-dump-%d.nv12", (int)getpid()); s->dumpYuv = bgra || p010 || l10r || s->c444 ? NULL : nvencvt_out(p, "wb");
         s->dumpYuvLeft = 30; s->dumpIdr = true;
         if (s->dumpEs) { uint8_t h[256]; size_t n = enc_headers(&s->enc, h); fwrite(h, 1, n, s->dumpEs); }
         LOG("dump started (%dx%d, %s)", s->width, s->height, bgra ? "BGRA: stream only" : "NV12");
@@ -781,8 +782,8 @@ static OSStatus e_encodeFrame(VTVideoEncoderRef e, VTEncoderFrameRef frame, CVIm
     // pixels from (x, y) in the luma plane (vm/tahoe/bench/metal-anim.m draws one). Logs to /tmp/nvencvt-barcode.log when the
     // counter goes backwards (an older frame reached the encoder), repeats or skips, with a summary every 2 s.
     if ((s->frames % 120) == 0 && !s->bcFile) {
-        FILE *f = fopen("/tmp/nvencvt.barcode", "r");
-        if (f) { if (fscanf(f, "%d %d %d %d", &s->bcX, &s->bcY, &s->bcS, &s->bcAll) >= 3 && s->bcS >= 4) { s->bcFile = fopen("/tmp/nvencvt-barcode.log", "a"); s->bcLast = -1; s->bcT0 = now_ms();
+        FILE *f = nvencvt_flag_open("/tmp/nvencvt.barcode");
+        if (f) { if (fscanf(f, "%d %d %d %d", &s->bcX, &s->bcY, &s->bcS, &s->bcAll) >= 3 && s->bcS >= 4) { s->bcFile = nvencvt_out("/tmp/nvencvt-barcode.log", "a"); s->bcLast = -1; s->bcT0 = now_ms();
                      if (s->bcFile) fprintf(s->bcFile, "pid %d session %dx%d: checking a counter at %d,%d block %d\n", (int)getpid(), s->width, s->height, s->bcX, s->bcY, s->bcS); }
                  fclose(f); }
     }
@@ -1212,9 +1213,9 @@ __attribute__((constructor)) static void init(void)
     // register by itself only when injected (DYLD_INSERT_LIBRARIES); loaded by the Metal plugin (NVMTL_NVENCVT),
     // the plugin calls NVEncVT_Register
     gLog = getenv("NVENCVT_LOG") != NULL;
-    if (!gLog && access("/tmp/nvencvt.log", F_OK) == 0) {
+    if (!gLog && nvencvt_flag("/tmp/nvencvt.log") == 0) {
         char p[64]; snprintf(p, sizeof p, "/tmp/nvencvt-%d.log", (int)getpid());
-        if ((gLogF = fopen(p, "a"))) gLog = true;
+        if ((gLogF = nvencvt_out(p, "a"))) gLog = true;
     }
     const char *ins = getenv("DYLD_INSERT_LIBRARIES");
     if (ins && strstr(ins, "nvencvt") && !getenv("NVENCVT_NO_REGISTER"))
