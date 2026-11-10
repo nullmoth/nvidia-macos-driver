@@ -9,7 +9,17 @@ import pathlib, subprocess, tempfile
 root = pathlib.Path(__file__).resolve().parents[1]
 src = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
 assert 'nvrmFbLocation(fIndex, loc, sizeof loc)) setLocation(loc)' in src, 'start() no longer gives each head its own location'
-assert src.index('setLocation(loc)') < src.index('if (!super::start(provider))', src.index('setName("NVRMFramebuffer")')), 'location set after super::start'
+# start() has two super::start calls: the proxy head for another GPU's panel returns from its own, earlier branch; every
+# NVIDIA head goes through the one after setLocation.
+name = src.index('setName("NVRMFramebuffer")'); loc = src.index('setLocation(loc)', name)
+starts = []
+i = name
+while len(starts) < 2:
+    i = src.find('if (!super::start(provider))', i + 1)
+    if i < 0: break
+    starts.append(i)
+assert len(starts) == 2 and 'proxy: super::start failed' in src[starts[0]:starts[0] + 120], 'start() changed shape: read it and update this test'
+assert starts[0] < loc < starts[1], 'location set after super::start'
 fixture = r'''
 #include <cassert>
 #include <cstdio>

@@ -9,6 +9,11 @@ source = (root / 'plugin/NVMTLObjects.m').read_text()
 start = source.index('static id nvmtl_surface_sync(')
 end = source.index('- (NSUInteger)width ', start)
 methods = source[start:end]
+# The 4:2:2 surface reader (packed video frames, decoded by the CPU) sits in this stretch and has its own tests
+# (tools/test_yuv422.c, tools/test_y422_convert.c); the stand-in texture below is not a 4:2:2 one, so the method is left out and its flag stays NULL.
+y0 = methods.index('- (void)nvmtlY422SurfaceIn {'); y1 = methods.index('\n}\n', y0) + 3
+assert methods[y1:].startswith('- (void)nvmtlSurfaceIn {'), 'the 4:2:2 reader is no longer right before nvmtlSurfaceIn'
+methods = methods[:y0] + methods[y1:]
 fixture = r'''
 #import <Foundation/Foundation.h>
 #include <assert.h>
@@ -82,7 +87,9 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) {
 @interface NVMTLTexture : NSObject {
 @public NVMTLTexture *_parent; IOSurfaceRef _surf; BOOL _vramOn, _surfSynced, _clientWritten; void *_hostPages;
     uint32_t _surfSeed, _surfGen; NSUInteger _plane; Image _i; void *_q;
+    IOSurfaceRef _y422Surf;   // NULL: not a 4:2:2 texture
 }
+- (void)nvmtlY422SurfaceIn;
 - (BOOL)nvmtlSurfaceCopyable;
 - (void)nvmtlSurfaceIn;
 - (BOOL)nvmtlSurfaceOut;
@@ -90,6 +97,7 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) {
 @end
 @implementation NVMTLTexture
 - (BOOL)nvmtlSurfaceCopyable { return YES; }
+- (void)nvmtlY422SurfaceIn { assert(!"a non-4:2:2 texture took the 4:2:2 path"); }
 '''
 checks = r'''
 @end

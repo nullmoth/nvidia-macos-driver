@@ -27,6 +27,7 @@ static size_t test_confstr(char *buf, size_t len) { const char *u = getenv("TEST
 #define NSSearchPathForDirectoriesInDomains(a, b, c) (@[ @(getenv("TEST_CACHES")) ])
 #define getprogname() "WindowServer"
 #define NVMTL_AIRCACHE_DIR "__SHARED__"
+#include "nvmtl_failed_air.h"   /* the slice below also holds the keeper for AIR the translator refused */
 ''' + writable + funcs + r'''
 int main(void) { NSString *d = nvmtl_aircache_dir(); printf("%s\n", d ? d.UTF8String : "(none)"); return 0; }
 '''
@@ -43,7 +44,7 @@ with tempfile.TemporaryDirectory() as d:
     tmp = d / 'tmp'; tmp.mkdir()
     exe = d / 'a'
     (d / 'a.m').write_text(HARNESS.replace('__SHARED__', str(shared)))
-    r = subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-o', str(exe), str(d / 'a.m'), '-framework', 'Foundation'], capture_output=True, text=True)
+    r = subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-I', str(root / 'plugin'), '-o', str(exe), str(d / 'a.m'), '-framework', 'Foundation'], capture_output=True, text=True)
     if r.returncode:
         print(r.stderr[-1500:]); sys.exit('could not compile nvmtl_aircache_dir - check is UNKNOWN, not clean')
     def run():
