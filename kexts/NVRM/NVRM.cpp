@@ -2011,7 +2011,8 @@ void NVRM::systemWillShutdown(IOOptionBits specifier)
     if (!fShutdownHandled && !PE_parse_boot_argn("-nvrmnoshutdown", off, sizeof off) && fPCI) {
         fShutdownHandled = true;
         LOG("shutdown: %s - quiescing the GPU", specifier == kIOMessageSystemWillRestart ? "restart" : "power off");
-        if (fIntSrc) fIntSrc->disable();
+        // The interrupt stays on through the standby, as it does on the system-sleep path this reuses (gpuSuspend turns it
+        // off itself once the RM is in standby); it is switched off below, before the BAR layout goes back.
         if (fAdapter && OSAddAtomic(0, &fGpuPm) == kGpuPmRunning) {
             thread_t th = THREAD_NULL;
             char mode[16] = { 0 }; unsigned open = 0;
@@ -2027,6 +2028,7 @@ void NVRM::systemWillShutdown(IOOptionBits specifier)
                 LOG("shutdown: GPU %s after %u ms", OSAddAtomic(0, &fShutdownDone) ? (full ? "shut down" : "in standby") : "did not finish in time, going on", waited);
             } else { release(); LOG("shutdown: could not start the quiesce thread - going on"); }
         }
+        if (fIntSrc) fIntSrc->disable();
         NvrmStep plan[16];
         const unsigned n = nvrmBuildShutdownPlan(&fBarUndo, plan, 16);
         if (n) {
@@ -2065,6 +2067,10 @@ void NVRM::enableAspmL1()
 {
     char off[8] = { 0 };
     if (PE_parse_boot_argn("-nvrmnoaspm", off, sizeof off)) { fPCI->setProperty("nvrm-aspm", "off (-nvrmnoaspm)"); return; }
+    // Opt-in (nvrmaspm=1). Linux's default policy keeps the link as the firmware set it, and NVIDIA's own driver turns
+    // L1 on only for chipsets it lists; a desktop link pushed into L1 without the common-clock, L1 substate and LTR set-up
+    // the PCI core does can drop the card off the bus when it idles. Laptop firmware that wants L1 has already set it.
+    { uint32_t on = 0; if (!PE_parse_boot_argn("nvrmaspm", &on, sizeof on) || on != 1) { fPCI->setProperty("nvrm-aspm", "as the firmware set it (nvrmaspm=1 asks for L1)"); return; } }
     decltype(fPCI) up = NULL;   // the port above the card (IOPCIDevice is deprecated: spelled through fPCI)
     if (IOService *pp = fPCI->getProvider())
         if (IOService *u = pp->getProvider()) if (u->metaCast("IOPCIDevice")) up = static_cast<decltype(fPCI)>(u);
