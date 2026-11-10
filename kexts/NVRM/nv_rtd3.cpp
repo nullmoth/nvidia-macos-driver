@@ -109,7 +109,13 @@ extern "C" void nv_rtd3_arm(const struct nv_rtd3_ops *ops)
 extern "C" void nv_rtd3_disarm(void)
 {
     g_stop = 1;
-    if (g_call) { thread_call_cancel_wait(g_call); thread_call_free(g_call); g_call = nullptr; }
+    // thread_call_cancel_wait is not exported to kexts (a kext that names it cannot be linked into the kernel collection):
+    // cancel, and retry the free until a tick that was already running is out. The tick never re-arms once g_stop is set.
+    if (g_call) {
+        thread_call_cancel(g_call);
+        for (int i = 0; i < 100 && !thread_call_free(g_call); i++) { IOSleep(10); thread_call_cancel(g_call); }
+        g_call = nullptr;
+    }
 }
 
 /* System wake: the resource must be on before the driver's own resume touches the GPU. */
