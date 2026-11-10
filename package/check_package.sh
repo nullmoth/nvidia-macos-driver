@@ -58,8 +58,14 @@ while IFS= read -r -d '' f; do
       *) [ "$dep" = "$own" ] || { echo "STOP: ${f#"$ROOT/"} loads $dep, outside the system and this package"; fail=1; };; esac
   done < <(otool -L "$f" 2>/dev/null | awk 'NR>1 {print $1}')
 done < <(find "$ROOT" -type f -print0)
-# Every regular file must be listed: install.sh refuses a package whose SHA256SUMS leaves a file out (sums_complete.sh).
 HERE=$(cd "$(dirname "$0")" && pwd)
+# Every kext names the IOKit families it imports from, or it never loads (build/check_kext_libraries.sh).
+while IFS= read -r -d '' k; do
+  n=$(basename "$k" .kext)
+  head -c 4 "$k/Contents/MacOS/$n" 2>/dev/null | od -An -tx1 | tr -d ' \n' | grep -qE '^(cffaedfe|cafebabe)$' || continue   # a test tree's stand-in
+  bash "$HERE/../build/check_kext_libraries.sh" "$k" >/dev/null || { bash "$HERE/../build/check_kext_libraries.sh" "$k" | grep STOP; fail=1; }
+done < <(find "$ROOT/Library" -type d -name '*.kext' -print0 2>/dev/null)
+# Every regular file must be listed: install.sh refuses a package whose SHA256SUMS leaves a file out (sums_complete.sh).
 bash "$HERE/sums_complete.sh" "$ROOT" || fail=1
 [ -f "$ROOT/sums_complete.sh" ] || { echo "STOP: the package lacks sums_complete.sh, which install.sh runs"; fail=1; }
 [ "$fail" = 0 ] && echo "package carries libnvencvt.dylib ${want:0:8} and the Ryzen power parts"
