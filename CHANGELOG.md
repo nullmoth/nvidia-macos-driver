@@ -1,5 +1,152 @@
 # Changelog
 
+## 2.9
+
+2.9 is the last 2.x release for macOS 15 Sequoia and macOS 26 Tahoe. It carries every fix we had for both systems, on GTX 16 and RTX 20, 30, 40, and 50 cards, plus a large set of new features. New features that have not been proven on enough hardware are **off by default** and listed under "Experimental" below: you switch them on one at a time from the 1401 Mac app.
+
+Update from the 1401 Mac app, or download the package below. Restart after installing.
+
+### Fixes
+
+#### Login, desktop, and stability
+- Login window on macOS 26 that showed a black screen with only a cursor: the login window's 10-bit frames now reach the panel.
+- WindowServer hang after display sleep: a frame with nowhere to go is dropped instead of switching the asynchronous swap off (#470, #353).
+- After a GPU loss, apps get a proper "device removed" error instead of a nil command buffer that made WindowServer abort. The log names the cause.
+- Login hangs while shaders translate: Core Animation shader variants translate about three times faster (1.6 s to 0.48 s each), new libraries translate in the background once, and recorded variants are warmed into the cache before they are asked for.
+- WindowServer keeps its shader cache across restarts (the cache folder is now chosen by a real write, so a sandboxed WindowServer no longer loses it). Settings panes open faster.
+- Shader cache entries prove they are whole before they are used.
+- Boot guard: the start counter is saved on every change, so a start that panics still counts (#529), and a WindowServer that keeps dying no longer counts as a good desktop.
+- A failed mode set at boot no longer kills the framebuffer.
+- A stuck GSP fails its call at the first timeout instead of holding the system.
+- A texture that owns a view of its image is never moved between memory homes.
+- Static samplers are created on the shader's own device (PR #530).
+
+#### Boot, BAR1, and shutdown
+- **Shutdown and restart**: the GPU is quiesced and the BAR layout is handed back to firmware at power-off and restart. This is aimed at the boards that would not POST after a macOS shutdown (#488) and at shutdowns that hung on the last frame.
+- BAR1 placement is clipped to the limit macOS can map (Legion and other laptops whose BAR1 landed above it), and apertures are staged before any PCI write.
+- A BAR missing from the device's memory list is recovered from assigned-addresses or the BAR register (boards without Above 4G / Resizable BAR, #344, #346).
+- A firmware BAR1 above 8 GB is resized to 8 GB (16 GB BAR1 stalls, #23, #105, #155). A BAR1 that must grow past 4 GB is placed from the fallback range when other devices already sit above 4 GB.
+- The headless deadline starts after the settle delay, and the boot hold is released when no connector has a display (hybrid laptops with the panel on the integrated GPU waited 40 s, #516).
+- Bus mastering that firmware leaves on is switched off until the card is started.
+- A card the model table lacks is named from its GPU profile instead of showing only a PCI id.
+- A40 and L40 added to the device table. The table is checked against NVIDIA's 620.70.06 list.
+- Small BAR1 windows: surface requests are rounded to size classes to reduce fragmentation.
+- One user-client connection can carry many CPU mappings, which removes a per-mapping connection cost.
+
+#### Displays
+- 240 Hz, 300 Hz, and faster internal panels that were black above 60 Hz: the timing range now reaches 2.7 GHz pixel clock and 540 Hz (#429).
+- HiDPI at high refresh: the highest refresh rates are kept when macOS lists more timings than fit (180 Hz HiDPI modes, #359), and the head-scaler limit is learned instead of assumed (#360).
+- Derived half and quarter refresh rates for 240 Hz and faster panels (#478).
+- 4K over DisplayPort-to-HDMI adapters: hardware YUV 4:2:0 for modes RGB cannot carry (general port of PR #459).
+- DSC decisions follow the connector's own limit (DisplayPort versus HDMI), which fixes dual-screen flicker on some cards (#77).
+- Two identical monitors each get their own registry location, so their colour profiles and identities no longer merge (#509).
+- Login-window gamma is applied before login (#413).
+- Hot-plug after a boot with no display attached now reaches the idle display ports (#288). A boot that finds no display looks again, 6 times, 3 s apart (#88).
+- Mode changes wait a bounded time for the display gate instead of hanging in the kernel.
+- Laptop brightness: a start-up request for full brightness no longer overwrites your saved level (#525). Internal panels with no registered backlight get eDP backlight control over DPCD.
+- Rotated displays can offer other resolutions (`nvfbrotscale=1`, #138).
+- EDID override files and smaller boot rasters are supported (idea from PR #468).
+
+#### Video
+- Hardware video encode on RTX 40 (Ada) and RTX 30 (Ampere): NVENC registers on those cards, and in the system decode service. VP9 and AV1 decode added (vendored mickys/nvenc 0.9.5, MIT).
+- FFmpeg and other clients that ask for low-latency rate control are accepted (#275).
+- Screen Sharing high-performance mode: the encoders and decoders answer the pixel-rate questions the Screen Sharing host and viewer ask.
+- HEVC Main 4:4:4 profiles are named for clients that request them (opt-in).
+- Hostile-stream fixes in the HEVC, H.264, and AV1 parsers, found by fuzzing.
+
+#### Audio
+- HDMI and DisplayPort volume and mute for display audio (opt-in `nmhdavol=1`, #501).
+- The audio driver is built from the repository's own sources at release, with its pin table.
+
+#### Apps and shaders
+- Roblox and Photoshop compute shaders built with the newest Metal toolchain were refused: the translator now accepts the extra operand AIR 2.9 adds to atomics.
+- Apps that build render shaders at start-up and then opened no document (#511): program-scope sampler tables are lowered.
+- WebGL terminals that drew no text: texture and sampler reads are kept.
+- DaVinci Resolve viewer shader: vectors loaded from struct-wrapped scalar arrays.
+- Samplers chosen by a condition or an index are sampled per candidate instead of refused.
+- Compute pipelines honour the stage-input descriptor (strides, offsets, formats).
+- Pull-model interpolation (`interpolant<T>`), nested argument encoders, threadgroup vector arrays indexed as scalars, pointer-select comparisons.
+- OpenGL: binding a texture or sampler no longer formats a string on every draw (#531).
+- Compute kernels that write through unaligned buffer offsets get their bytes back (#498, opt-in).
+- The accelerator publishes the revision and renderer id fields Apple's accelerators publish (#384, #379).
+- Device capability answers (vertex amplification count, 32-bit float filtering, MSAA, texture LOD and others) are decided from what the Vulkan device really reports.
+
+#### Power
+- The GPU is boosted per burst of work instead of for the whole life of every app, so it can drop to its idle state between bursts (#522, #500, #314).
+- Kernel logging is quieter: per-frame, per-query, and per-client lines appear only when asked for.
+
+### New features
+- **NVIDIA 620.70.06 base with a reproducible patch chain**: the kernel parts are built from NVIDIA's pristine open source release with every patch applied by the build, and the build refuses any other tree.
+- **NVK on Mesa 26.3.0-rc3.**
+- **Frame-rate limiter** per application (`NVMTL_FPS_LIMIT`), and your per-application list survives updates.
+- **Driver settings** window in the 1401 Mac app: one catalogue of display and performance settings, with your card's PCIe link and BAR facts. Every change is confirmed.
+- **Game Mode** (NullMoth's own): a full-screen game in front raises its own GPU priority and lowers background GPU work; everything is restored when you leave. Off by default, with a menu-bar indicator.
+- **Colour controls**: output depth, format, range, and vibrance.
+- **Metal features**: Metal 4 counter heaps, GPU-written indirect command buffer ranges, nested argument encoders, GBGR422/BGRG422 textures, framebuffer-fetch emulation for colour-reading pipelines.
+- **Vulkan for apps** (opt-in): a Khronos loader built from pinned source, so applications can use the driver's Vulkan directly, including windows through `VK_EXT_metal_surface`.
+- **Tools**: `nvmtl-smi` (read-only GPU report), `nvmtl_gpus` (cards, link speed, driver state), `nullmoth_settings` (safe settings editor), `nvmtl-boost` (run-time boost switch).
+- **Fan speeds on every desktop**: 1401 gives AMD desktops SMCSuperIO too, with VirtualSMC and its sensor plugins built from source.
+- **Ryzen laptops**: an optional power-limit profile (pinned, verified RyzenAdj build with a root-only kernel helper).
+- **iPhone and iPad apps**: the Mac app's ARM apps page can take an unencrypted `.ipa` and turn it into a Mac app.
+
+### Experimental (off by default)
+The 1401 Mac app has a new pane, **Experimental drivers and features**, with a switch per item and Select all / Deselect all. The 1401 builder now places NullMoth's own EFI drivers that fit your PC into the EFI switched off, and this pane turns each one on or off. Please report what works.
+
+- HDR10 and 30-bit output (`nvfbhdr=1`, `nvfb10bit=1`), variable refresh rate (`nvfbvrr=1`).
+- Hardware ray tracing on the RT cores (`NVK_HWRT_QUERY=1`), including an 8-wide encoder and curve geometry.
+- Hybrid laptops: render on NVIDIA and present on the integrated GPU's panel (Intel and AMD panel drivers, `nmhybrid`), per-app GPU policy.
+- Idle GPU deep sleep on laptops (`nvrtd3=1`) and idle PCIe link power saving (`nvrmaspm=1`).
+- Notebook power budget (`nvrmtgp=1`), power cap.
+- Keyboard backlight for ASUS, Lenovo, Dell, and MSI laptops (`nmkbl=1`).
+- Display audio volume (`nmhdavol=1`).
+- DDC/CI monitor control (`nvrmfbddc=1`), surround (several displays as one, `nvfbsurround`), hot-plug polling for cards that send no display-change event (`nvfbhotplugpoll`), keep the frame on screen across mode changes (`nvfbkeepfront=1`).
+- Multi-GPU: one card per process (`nvmultigpu=1`).
+- Sparse textures, tile shading, vertex amplification, GPU-encoded indirect command buffers, 4:2:2 video textures, one-module function constants.
+- Full shutdown of the resource manager at power-off (`nvrmshutdown=full`).
+- Driver off on a Resizable BAR card with the firmware screen kept (`nvoffbar=1`).
+- H.264 hardware decode in the system decode service on RTX 50 (green video in Safari; opt-in while we test it).
+
+### Security
+- A user client's token table grows as needed instead of pinning about 1.8 GB of kernel memory on first use.
+- A use-after-free window in the accelerator's page-off wait is closed.
+- DisplayPort AUX and EDID writes from user space are range-checked.
+- Every file the driver writes under a fixed name is created without following links. Diagnostic switch files in `/tmp` count only when root made them.
+- The GPU policy file and the experimental-driver source folder are honoured only when root owns them and nobody else can write them.
+- The 1401 Mac app's root actions resolve their package against the app's own pinned list, never from the page.
+- Firmware calls added in 2.9 check their own opt-in where they are made.
+
+### Package and licensing
+- NVIDIA's GSP firmware is no longer shipped. The installer fetches it from NVIDIA's own driver package (pinned SHA-256), and a 1401 stick carries that package for offline installs.
+- The package no longer contains any third-party closed compiler components. Shader decoding uses NullMoth's own out-of-process decoder built from upstream LLVM.
+- Every file in the package is listed in `SHA256SUMS`; the installer and the release gate refuse an unlisted file. Every program and library is signed.
+- Licence texts and NOTICE credits added for every component and every community idea used. `docs/PROVENANCE.md` says what ships, from where, and under which licence.
+- All compiler warnings fixed across kexts, plugin, translator, NVK, and apps, and every build stops if warnings rise.
+
+### 1401 (Mac and Windows apps)
+- Arrow Lake: a corrected MADT when firmware lists only x2APIC processors (#252, #64); extra processor devices hidden on HX laptops (#141, #110).
+- AMD laptops: ALIB fix built per machine, 0xFF000000 MMIO whitelist, SSDT-PLUG tables off, relocation block when the installer needs it.
+- DSDT repair: each deferred Scope is guarded, so macOS no longer drops the whole DSDT on some Lenovo and Dell laptops.
+- Coffee Lake-H laptops: the firmware page every reported panic named is reserved (#328, #451).
+- Resizable BAR: an installed EFI never resizes the GPU window above 8 GB, and the BIOS guide no longer contradicts itself.
+- VMD and unusable internal drives are planned for (BIOS path per maker, reversible Windows preparation, external-drive option) instead of stopping the build.
+- Full macOS installer option (verified, resumable download) for PCs where the online Recovery install fails. Finish a new macOS 26 install from Recovery when setup cannot draw (#86).
+- Apple ID: every PCI Ethernet controller is marked built-in so it is en0.
+- USB map import (your own UTBMap.kext), new serial, own recovery image, and own config.plist options.
+- After a macOS update that left the driver parked, the Mac app says so (#484), retries the kernel collection build, and turns the driver back on.
+- Updates keep your hidden auxiliary boot entries (#371). Vault is set to Optional (#153).
+- Send logs: no more hang on "Waiting for your Mac password" (#369, #373, #525); flicker samples, display traces, WindowServer watchdog samples, and failed shaders are included; a per-frame log line can no longer fill the kernel log (#16).
+- Clearer stops in the writer: antivirus removing built files, Windows "Access is denied" on the stick, Apple download failures, installer download errors.
+- Stick logs name the board and CPU. The first-login report says whether the accelerator offered its Metal plugin.
+- Intel Xe support updated (WhateverXe 0.8.0, 60 GPU ids). Community drivers reviewed against their licences.
+- AMD/Intel side: H.264 and HEVC decode through Vulkan video where macOS has no hardware decoder, Mesa 26.3.0-rc3.
+
+### Known limits
+- Pre-GTX 16 cards (Maxwell, Pascal, Volta, Kepler) are not supported; the installer says so.
+- Experimental items are unproven across cards. Turn on one at a time.
+- Cyberpunk 2077 interior lighting on first launch is unchanged from 2.8.
+
+Thank you to everyone who sent logs, issues, and pull requests. Donations help keep this going.
+
 ## 2.8.1
 
 - Updates no longer fail when GitHub's downloads are down. The Mac app now falls back to a copy of each release on nullmothsystems.com when a GitHub download fails, for both driver updates and its own updates. 1401 for Windows does the same for the driver package it puts on the stick. Every file is checked against the release's SHA-256 list and the NullMoth release signature, wherever it came from, and a file that differs by one byte is refused.
