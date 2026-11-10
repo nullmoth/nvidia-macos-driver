@@ -5,7 +5,7 @@ When WindowServer cannot get a Metal device for a display this driver drives, Co
 MetalDevice" and launchd restarts WindowServer every ten seconds: a black screen with only the cursor. The head is lit,
 so the kernel's guard was already cleared, and the job saw *a* WindowServer at both of its looks and called the start
 good, so nothing ever turned the driver off. The job is lifted out of install.sh and run against fake pgrep, sysctl,
-nvram, stat, sleep and shutdown. The negative control is the job as rel-28 ships it, which must call the looping
+nvram, stat, sleep and shutdown. The negative control is the job as 2.8.1 shipped it (tag v2.8.1), which must call the looping
 WindowServer good."""
 import os
 import pathlib
@@ -132,14 +132,14 @@ arm("two crashes at boot and then a steady WindowServer still counts as good", "
 p, log, calls = run(job, pids=loop, crashes=0)
 arm("a WindowServer seen as four processes counts as a loop even with no reports", "nv-starts=%02" in calls, log + calls)
 
-# negative control: the job as rel-28 ships it calls the looping WindowServer good
-base = subprocess.run(["git", "-C", str(ROOT), "show", "rel-28:package/install.sh"], capture_output=True, text=True)
+# negative control: the job as 2.8.1 shipped it (tag v2.8.1) calls the looping WindowServer good
+base = subprocess.run(["git", "-C", str(ROOT), "show", "v2.8.1:package/install.sh"], capture_output=True, text=True)
 if base.returncode == 0:
     p, log, calls = run(job_from(base.stdout), pids=loop, crashes=99)
-    arm("negative control: the rel-28 job calls a WindowServer that keeps dying good (the bug)",
+    arm("negative control: the 2.8.1 job calls a WindowServer that keeps dying good (the bug)",
         "counts as good" in log and "nv-starts=%02" not in calls, log + calls)
 else:
-    arm("negative control: rel-28's install.sh is readable", False, base.stderr)
+    arm("negative control: 2.8.1's install.sh is readable", False, base.stderr)
 
 print(f"{fails} failed")
 sys.exit(1 if fails else 0)
