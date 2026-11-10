@@ -25,6 +25,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <wchar.h>
 
 void nvlog(const char *fmt, ...);
@@ -168,7 +169,8 @@ static void tr(const char *fmt, ...)
     if (!g_trf) {
         char path[600]; const char *t = getenv("TMPDIR");
         snprintf(path, sizeof path, "%s/dlss-trace.txt", t && *t ? t : "/tmp");
-        g_trf = fopen(path, "a");
+        /* never through a link: without TMPDIR this is a fixed name in a folder every user can write */
+        { const int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600); g_trf = fd < 0 ? NULL : fdopen(fd, "a"); if (fd >= 0 && !g_trf) close(fd); }
         if (g_trf) { setvbuf(g_trf, NULL, _IOLBF, 0); nvlog("dlss: trace file %s", path); }
     }
     if (g_trf) { va_list ap; va_start(ap, fmt); vfprintf(g_trf, fmt, ap); va_end(ap); fputc('\n', g_trf); }
