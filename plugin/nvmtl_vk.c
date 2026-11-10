@@ -8723,9 +8723,74 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b)
     nvmtl_perf_note(NVP_BUFDEL, t0, n);
 }
 
-void nvmtl_vk_image_destroy(nvk_image *i)
+// Serialize operations that record or consume work for one image. This closes the submit-to-token-publication window:
+// a consumer cannot pass the upload barrier while an upload is being submitted but not yet published. Recursive locks
+// allow existing helpers (write -> region-write -> upload barrier) to keep their public call structure.
+typedef struct nvmtl_image_gate {
+    nvk_image *img;
+    pthread_mutex_t mutex;
+    unsigned refs;
+    struct nvmtl_image_gate *next;
+} nvmtl_image_gate;
+static pthread_mutex_t g_image_gate_mutex = PTHREAD_MUTEX_INITIALIZER;
+static nvmtl_image_gate *g_image_gates;
+static nvmtl_image_gate *nvmtl_image_gate_find(nvk_image *img)
+{
+    for (nvmtl_image_gate *gate = g_image_gates; gate; gate = gate->next) if (gate->img == img) return gate;
+    return NULL;
+}
+static int nvmtl_image_op_enter(nvk_image *img)
+{
+    if (!img) return -1;
+    pthread_mutex_lock(&g_image_gate_mutex);
+    nvmtl_image_gate *gate = nvmtl_image_gate_find(img);
+    if (!gate) {
+        gate = calloc(1, sizeof *gate);
+        if (gate) {
+            pthread_mutexattr_t attr;
+            int rc = pthread_mutexattr_init(&attr);
+            const int attr_ok = !rc;
+            if (attr_ok) rc = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+            if (!rc) rc = pthread_mutex_init(&gate->mutex, &attr);
+            if (rc) { free(gate); gate = NULL; }
+            if (attr_ok) pthread_mutexattr_destroy(&attr);
+            if (gate) { gate->img = img; gate->next = g_image_gates; g_image_gates = gate; }
+        }
+    }
+    if (gate) gate->refs++;
+    pthread_mutex_unlock(&g_image_gate_mutex);
+    if (!gate) return -1;
+    if (pthread_mutex_lock(&gate->mutex)) {
+        pthread_mutex_lock(&g_image_gate_mutex);
+        gate->refs--;
+        pthread_mutex_unlock(&g_image_gate_mutex);
+        return -1;
+    }
+    return 0;
+}
+static void nvmtl_image_op_leave(nvk_image *img)
+{
+    pthread_mutex_lock(&g_image_gate_mutex);
+    nvmtl_image_gate *gate = nvmtl_image_gate_find(img);
+    pthread_mutex_unlock(&g_image_gate_mutex);
+    if (!gate) return;
+    pthread_mutex_unlock(&gate->mutex);
+    pthread_mutex_lock(&g_image_gate_mutex);
+    if (gate->refs) gate->refs--;
+    if (!gate->refs) {
+        nvmtl_image_gate **link = &g_image_gates;
+        while (*link && *link != gate) link = &(*link)->next;
+        if (*link == gate) *link = gate->next;
+        pthread_mutex_destroy(&gate->mutex);
+        free(gate);
+    }
+    pthread_mutex_unlock(&g_image_gate_mutex);
+}
+
+static void nvmtl_vk_image_destroy_body(nvk_image *i)
 {
     if (g_state != 1 || !i || !i->img) return;
+    if (nvmtl_vk_image_upload_barrier(i)) return; // a failed wait quarantines the backing; do not retire uncertain in-flight memory
     g_img_gone++;
     pthread_mutex_lock(&g_sl_lock); nvmtl_im_died(&g_im, i->img, g_cmd_submitted); pthread_mutex_unlock(&g_sl_lock);
     pthread_mutex_lock(&g_fx_lock);
@@ -8758,15 +8823,21 @@ static void nvmtl_vk_image_destroy_now(nvk_image *i)
     if (!i->placed && i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); g_alloc_bytes -= i->alloc; if (i->sysmem) { g_sys_bytes -= i->alloc; g_sys_align -= (i->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= i->alloc; g_img_align -= (i->alloc + 65535ull) & ~65535ull; nvmtl_vk_budget_discharge(i->alloc); }    }
     memset(i, 0, sizeof *i);
 }
+void nvmtl_vk_image_destroy(nvk_image *i)
+{
+    if (g_state != 1 || !i || !i->img || nvmtl_image_op_enter(i)) return;
+    nvmtl_vk_image_destroy_body(i);
+    nvmtl_image_op_leave(i);
+}
 
 static uint64_t g_res1_off, g_res1_on, g_res1_refused, g_res1_off_b, g_res1_on_b;
 void nvmtl_vk_res1_stats(uint64_t out[6]) { out[0] = g_res1_off; out[1] = g_res1_on; out[2] = g_res1_refused;
     out[3] = g_res1_off_b >> 20; out[4] = g_res1_on_b >> 20; out[5] = g_res1_calls; }
-int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
+static int nvmtl_vk_image_reback_body(nvk_image *i, int to_sysmem, int a8)
 {
     if (g_state != 1 || !i || !i->img || i->placed || !i->usage || i->vfl || i->samples > 1 || i->mtl_type == 4 || i->mtl_type > 7
         || (i->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) return -1;
-    nvmtl_vk_image_upload_barrier(i);   // migrating the image recreates its memory: drain a pending upload first
+    if (nvmtl_vk_image_upload_barrier(i)) return -1; // migrating the image recreates its memory: drain uploads first
     if (!to_sysmem == !i->sysmem) return 1;
     const uint32_t t = i->mtl_type;
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, (VkImageCreateFlags)i->vkflags,
@@ -8807,6 +8878,13 @@ int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
     nvmtl_im_add(&g_im, img, mem, 0, mr.size, view, i->w, i->h, i->fmt, i->storage, 0, 0, g_cmd_submitted); nvmtl_vw_add(&g_vw, view, img); nvmtl_vw_tic_note(view);
     pthread_mutex_unlock(&g_sl_lock);
     return 0;
+}
+int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
+{
+    if (nvmtl_image_op_enter(i)) return -1;
+    const int rc = nvmtl_vk_image_reback_body(i, to_sysmem, a8);
+    nvmtl_image_op_leave(i);
+    return rc;
 }
 
 static uint64_t g_res2_off, g_res2_on, g_res2_off_b, g_res2_on_b, g_res2_fail;
@@ -8857,11 +8935,12 @@ int nvmtl_vk_mig_batch_end(void)
     if (r) nvlog("residency (res2): evict-batch of %u copies FAILED to complete (%d) - those textures now read undefined contents", n, r);
     return r;
 }
-int nvmtl_vk_image_migrate(nvk_image *i, int to_sysmem, int a8, nvk_image *old_out)
+static int nvmtl_vk_image_migrate_body(nvk_image *i, int to_sysmem, int a8, nvk_image *old_out)
 {
     if (g_state != 1 || !i || !i->img || i->placed || !i->usage || i->vfl || i->samples > 1 || i->mtl_type == 4 || i->mtl_type > 7
         || (i->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) return -1;
     if (!to_sysmem == !i->sysmem) return 1;
+    if (nvmtl_vk_image_upload_barrier(i)) return -1; // queued uploads must finish before backing is replaced
     const uint32_t t = i->mtl_type, mips = i->mips ? i->mips : 1, nl = t == 7 ? 1 : (i->layers ? i->layers : 1);
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, (VkImageCreateFlags)i->vkflags,
         t == 7 ? VK_IMAGE_TYPE_3D : t < 2 ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D, (VkFormat)i->fmt,
@@ -8924,6 +9003,13 @@ fail:
     pvkFreeMemory(g_dev, mem, NULL);
     g_res2_fail++;
     return -1;
+}
+int nvmtl_vk_image_migrate(nvk_image *i, int to_sysmem, int a8, nvk_image *old_out)
+{
+    if (nvmtl_image_op_enter(i)) return -1;
+    const int rc = nvmtl_vk_image_migrate_body(i, to_sysmem, a8, old_out);
+    nvmtl_image_op_leave(i);
+    return rc;
 }
 
 int nvmtl_vk_buffer_migrate(nvk_buffer *b, int to_sysmem)
@@ -9200,42 +9286,319 @@ static void nvmtl_host_pages_done(nvk_buffer *cache, nvk_buffer *hb)
     }
     nvmtl_vk_buffer_destroy(hb);
 }
-// NVMTL_SURFIN_ORDERED (on by default, =0 off): the surface-in copy is ordered after earlier GPU reads of the image. Its
-// layout transition started from top-of-pipe with no source access, so a composite still sampling the previous frame
-// was not waited for (write-after-read: a possible torn frame).
+// NVMTL_SURFIN_ORDERED (on by default, =0 off): order a surface-in copy after earlier GPU reads and writes of the image.
+// The barrier uses the tracked old layout as well as the execution/memory dependency; a same-layout barrier is still
+// emitted so a previous shader read cannot overlap the transfer write.
 static int nvmtl_surfin_ordered_on(void)
 {
     static int on = -1;
     if (on < 0) { const char *e = getenv("NVMTL_SURFIN_ORDERED"); on = !(e && e[0] == '0'); nvlog("ordered surface-in %s (NVMTL_SURFIN_ORDERED=%s)", on ? "on" : "off", e ? e : "unset"); }
     return on;
 }
-int nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache)
+static int nvmtl_surfin_async_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_SURFIN_ASYNC");
+        const char *me = getprogname();
+        on = e && !strcmp(e, "1");
+        nvlog("deferred surface-in %s (NVMTL_SURFIN_ASYNC=%s; process=%s; default off)",
+              on ? "on" : "off", e ? e : "unset", me && *me ? me : "unknown");
+    }
+    return on;
+}
+static void nvmtl_surfin_to_transfer(nvk_cmdbuf *c, nvk_image *img)
+{
+    VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, img->mips ? img->mips : 1, 0, img->layers ? img->layers : 1 };
+    VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+        VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+        (VkImageLayout)img->layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                          0, 0, NULL, 0, NULL, 1, &barrier);
+    img->layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+}
+
+// Deferred surface-in uploads retain the Objective-C lease that owns the cached host import. The record is also kept on
+// the image so readback/re-upload/migration/destruction can finish it before touching that image. A separate bounded
+// list lets a nonblocking timer reap completed records, including windows that stop changing.
+typedef struct nvmtl_asyncup {
+    nvmtl_inflight infl;
+    nvk_buffer stage;
+    nvk_cmdbuf cb;
+    nvk_image *img;
+    void *lease;
+    nvmtl_vk_lease_release_fn release_lease;
+    struct nvmtl_asyncup *pending_next;
+    unsigned surfin : 1;
+    unsigned surfin_slot : 1;
+    unsigned finishing : 1;
+    unsigned submitted : 1;
+} nvmtl_asyncup;
+static pthread_mutex_t g_asyncup_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_surfin_cond = PTHREAD_COND_INITIALIZER;
+#define NVMTL_SURFIN_HOST_INFLIGHT 4
+static nvmtl_asyncup *g_asyncup_pending;
+static unsigned g_surfin_npend, g_surfin_live;
+static dispatch_source_t g_surfin_timer;
+static void nvmtl_asyncup_finish(uint64_t token);
+static void nvmtl_surfin_reap(void);
+static void nvmtl_surfin_tick_start(void);
+
+static void nvmtl_asyncup_unlist(nvmtl_asyncup *au)
+{
+    nvmtl_asyncup **link = &g_asyncup_pending;
+    while (*link && *link != au) link = &(*link)->pending_next;
+    if (*link == au) {
+        *link = au->pending_next;
+        au->pending_next = NULL;
+        if (g_surfin_npend) g_surfin_npend--;
+    }
+}
+static void nvmtl_surfin_slot_release(nvmtl_asyncup *au)
+{
+    if (!au) return;
+    pthread_mutex_lock(&g_asyncup_mutex);
+    if (au->surfin_slot) {
+        au->surfin_slot = 0;
+        if (g_surfin_live) g_surfin_live--;
+        pthread_cond_broadcast(&g_surfin_cond);
+    }
+    pthread_mutex_unlock(&g_asyncup_mutex);
+}
+static uint64_t nvmtl_asyncup_take(nvk_image *img)
+{
+    if (!img) return 0;
+    for (;;) {
+        pthread_mutex_lock(&g_asyncup_mutex);
+        nvmtl_asyncup *au = NULL;
+        for (nvmtl_asyncup *it = g_asyncup_pending; it; it = it->pending_next)
+            if (it->img == img) { au = it; break; }
+        if (!au) { pthread_mutex_unlock(&g_asyncup_mutex); return 0; }
+        if (au->finishing || !au->submitted) {
+            pthread_cond_wait(&g_surfin_cond, &g_asyncup_mutex);
+            pthread_mutex_unlock(&g_asyncup_mutex);
+            continue;
+        }
+        au->finishing = 1;
+        pthread_mutex_unlock(&g_asyncup_mutex);
+        return (uint64_t)(uintptr_t)au;
+    }
+}
+static uint64_t nvmtl_asyncup_publish(nvk_image *img, nvmtl_asyncup *au)
+{
+    pthread_mutex_lock(&g_asyncup_mutex);
+    au->img = img;
+    au->submitted = 1;
+    img->up_token = (uint64_t)(uintptr_t)au;
+    nvmtl_asyncup **link = &g_asyncup_pending;
+    while (*link) link = &(*link)->pending_next;
+    *link = au;
+    g_surfin_npend++;
+    pthread_cond_broadcast(&g_surfin_cond);
+    pthread_mutex_unlock(&g_asyncup_mutex);
+    return 0;
+}
+static void nvmtl_asyncup_store(nvk_image *img, uint64_t token)
+{
+    nvmtl_asyncup *au = (nvmtl_asyncup *)(uintptr_t)token;
+    (void)nvmtl_asyncup_publish(img, au);
+}
+static void nvmtl_asyncup_unpublish(nvmtl_asyncup *au, uint64_t token)
+{
+    pthread_mutex_lock(&g_asyncup_mutex);
+    if (au->img && au->img->up_token == token) au->img->up_token = 0;
+    nvmtl_asyncup_unlist(au);
+    au->img = NULL;
+    au->finishing = 0;
+    pthread_cond_broadcast(&g_surfin_cond);
+    pthread_mutex_unlock(&g_asyncup_mutex);
+}
+static void nvmtl_surfin_drop(nvmtl_asyncup *au)
+{
+    if (!au) return;
+    if (au->lease && au->release_lease) au->release_lease(au->lease);
+    au->lease = NULL;
+    nvmtl_surfin_slot_release(au);
+    free(au);
+}
+static void nvmtl_asyncup_finish(uint64_t token)
+{
+    if (!token) return;
+    nvmtl_asyncup *au = (nvmtl_asyncup *)(uintptr_t)token;
+    const int rc = nvmtl_vk_submit_finish(&au->infl);
+    nvmtl_asyncup_unpublish(au, token);
+    if (rc) {
+        // The backend intentionally does not retire resources when a fence wait fails. Keep the staging/lease alive too;
+        // the device may still have an uncertain reference to the submitted command buffer.
+        if (au->surfin) nvmtl_surfin_slot_release(au);
+        return;
+    }
+    if (au->surfin) { nvmtl_surfin_drop(au); return; }
+    nvmtl_vk_buffer_destroy(&au->stage);
+    free(au);
+}
+int nvmtl_vk_image_upload_barrier(nvk_image *img)
+{
+    if (!img || nvmtl_image_op_enter(img)) return -1;
+    uint64_t token;
+    while ((token = nvmtl_asyncup_take(img)) != 0) nvmtl_asyncup_finish(token);
+    const int rc = g_state == 1 ? 0 : -1;
+    nvmtl_image_op_leave(img);
+    return rc;
+}
+
+static void nvmtl_surfin_reap(void)
+{
+    for (;;) {
+        nvmtl_asyncup *done = NULL;
+        pthread_mutex_lock(&g_asyncup_mutex);
+        if (g_state == 1) for (nvmtl_asyncup *au = g_asyncup_pending; au; au = au->pending_next)
+            if (au->surfin && au->submitted && !au->finishing && au->infl.fence
+                && pvkWaitForFences(g_dev, 1, &au->infl.fence, VK_TRUE, 0) == VK_SUCCESS) {
+                au->finishing = 1; done = au; break;
+            }
+        pthread_mutex_unlock(&g_asyncup_mutex);
+        if (!done) break;
+        nvmtl_asyncup_finish((uint64_t)(uintptr_t)done);
+    }
+}
+static void nvmtl_surfin_tick_start(void)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                          dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+        if (!timer) return;
+        dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
+                                  500 * NSEC_PER_MSEC, 50 * NSEC_PER_MSEC);
+        dispatch_source_set_event_handler(timer, ^{ nvmtl_surfin_reap(); });
+        g_surfin_timer = timer; // ARC must keep the source alive after this block returns
+        dispatch_resume(timer);
+    });
+}
+static nvmtl_asyncup *nvmtl_surfin_record_new(void)
+{
+    nvmtl_surfin_tick_start();
+    nvmtl_surfin_reap();
+    for (;;) {
+        nvmtl_asyncup *oldest = NULL;
+        pthread_mutex_lock(&g_asyncup_mutex);
+        if (g_surfin_live < NVMTL_SURFIN_HOST_INFLIGHT) {
+            g_surfin_live++;
+            pthread_mutex_unlock(&g_asyncup_mutex);
+            break;
+        }
+        for (oldest = g_asyncup_pending; oldest && !oldest->surfin; oldest = oldest->pending_next) {}
+        if (oldest) {
+            if (oldest->finishing) {
+                pthread_cond_wait(&g_surfin_cond, &g_asyncup_mutex);
+                pthread_mutex_unlock(&g_asyncup_mutex);
+                continue;
+            }
+            oldest->finishing = 1;
+            pthread_mutex_unlock(&g_asyncup_mutex);
+            nvmtl_asyncup_finish((uint64_t)(uintptr_t)oldest);
+            continue;
+        }
+        pthread_cond_wait(&g_surfin_cond, &g_asyncup_mutex); // another caller is still recording a reserved slot
+        pthread_mutex_unlock(&g_asyncup_mutex);
+    }
+    nvmtl_asyncup *au = (nvmtl_asyncup *)calloc(1, sizeof *au);
+    if (!au) {
+        pthread_mutex_lock(&g_asyncup_mutex);
+        if (g_surfin_live) g_surfin_live--;
+        pthread_cond_broadcast(&g_surfin_cond);
+        pthread_mutex_unlock(&g_asyncup_mutex);
+        return NULL;
+    }
+    au->surfin = 1;
+    au->surfin_slot = 1;
+    return au;
+}
+static void nvmtl_surfin_store(nvk_image *img, nvmtl_asyncup *au)
+{
+    (void)nvmtl_asyncup_publish(img, au);
+}
+static void nvmtl_surfin_quarantine(nvmtl_asyncup *au)
+{
+    static _Atomic unsigned said;
+    nvmtl_surfin_slot_release(au);
+    if (atomic_fetch_add(&said, 1) < 4)
+        nvlog("vk: deferred surface upload submit uncertain; retaining its host-page lease");
+    // Leak the record intentionally: queue submission failed after the backend lost certainty about resource use.
+}
+
+static int nvmtl_vk_image_write_host_body(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache,
+                                          void *lease, nvmtl_vk_lease_retain_fn retain_lease, nvmtl_vk_lease_release_fn release_lease)
 {
     const size_t bpp = img->bpp ? img->bpp : 4;
-    // bufferRowLength counts texels, so the row pitch has to be a whole number of them
     if (img->bw > 1 || img->bh > 1 || !row_bytes || row_bytes % bpp || row_bytes < (size_t)img->w * bpp) return -1;
     if (g_host_align) bytes = (bytes + g_host_align - 1) & ~(g_host_align - 1);
     if ((size_t)img->h * row_bytes > bytes) return -1;
+    if (nvmtl_vk_image_upload_barrier(img)) return -1; // a previous upload must land before this overwrite
     nvk_buffer tmp, *hp = nvmtl_host_pages(cache, base, bytes, &tmp);
     if (!hp) return -1;
+
+    const int async_ok = nvmtl_surfin_async_on() && lease && retain_lease && release_lease && cache && hp == cache
+        && img->samples <= 1 && img->mips <= 1 && img->layers <= 1;
+    nvmtl_asyncup *au = async_ok ? nvmtl_surfin_record_new() : NULL;
+    if (au) {
+        au->lease = retain_lease(lease);
+        if (au->lease) au->release_lease = release_lease;
+        else { nvmtl_surfin_drop(au); au = NULL; } // allocation/retain failure keeps the synchronous path
+    }
     nvk_buffer hb = *hp;
-    nvk_cmdbuf c;
-    if (nvmtl_vk_cmd_begin(q, &c)) { nvmtl_host_pages_done(cache, hp); return -1; }
-    VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };
-    VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, nvmtl_surfin_ordered_on() ? (VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_SHADER_READ_BIT) : 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
-    pvkCmdPipelineBarrier(c.cb, nvmtl_surfin_ordered_on() ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst);
-    VkBufferImageCopy bic = { 0, (uint32_t)(row_bytes / bpp), 0, { nvmtl_copy_aspect(img), 0, 0, 1 }, { 0, 0, 0 }, { img->w, img->h, 1 } };
-    pvkCmdCopyBufferToImage(c.cb, (VkBuffer)hb.buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
-    VkImageMemoryBarrier toRead = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
-        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+    nvk_cmdbuf local, *c = au ? &au->cb : &local;
+    if (nvmtl_vk_cmd_begin(q, c)) {
+        nvmtl_host_pages_done(cache, hp);
+        if (au) nvmtl_surfin_drop(au);
+        return -1;
+    }
+    const int ordered = nvmtl_surfin_ordered_on();
+    VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, img->mips ? img->mips : 1, 0, img->layers ? img->layers : 1 };
+    if (ordered) nvmtl_surfin_to_transfer(c, img);
+    else {
+        VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
+        pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              0, 0, NULL, 0, NULL, 1, &toDst);
+        img->layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    }
+    VkBufferImageCopy bic = { 0, (uint32_t)(row_bytes / bpp), 0, { nvmtl_copy_aspect(img), 0, 0, 1 },
+        { 0, 0, 0 }, { img->w, img->h, 1 } };
+    pvkCmdCopyBufferToImage(c->cb, (VkBuffer)hb.buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    VkImageMemoryBarrier toRead = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT,
+        au ? (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_MEMORY_READ_BIT) : VK_ACCESS_SHADER_READ_BIT,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
-    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &toRead);
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                          au ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                          0, 0, NULL, 0, NULL, 1, &toRead);
     img->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    const int rc = nvmtl_vk_submit_wait_at(&c, "surface upload (imported pages)");
+    if (au) {
+        const int submit = nvmtl_vk_submit_begin_at(c, &au->infl, "surface upload (imported pages, deferred)");
+        if (submit) {
+            nvmtl_host_pages_done(cache, hp);
+            if (submit == -2) nvmtl_surfin_quarantine(au);
+            else nvmtl_surfin_drop(au);
+            return -1;
+        }
+        nvmtl_surfin_store(img, au);
+        nvmtl_host_pages_done(cache, hp);
+        return 0;
+    }
+    const int rc = nvmtl_vk_submit_wait_at(c, "surface upload (imported pages)");
     nvmtl_host_pages_done(cache, hp);
+    return rc;
+}
+int nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache,
+                              void *lease, nvmtl_vk_lease_retain_fn retain_lease, nvmtl_vk_lease_release_fn release_lease)
+{
+    if (nvmtl_image_op_enter(img)) return -1;
+    const int rc = nvmtl_vk_image_write_host_body(q, img, base, row_bytes, bytes, cache, lease, retain_lease, release_lease);
+    nvmtl_image_op_leave(img);
     return rc;
 }
 
@@ -9243,8 +9606,8 @@ int nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t r
 // into every bind of a changed surface: Chromium with CPU raster binds a fresh tile surface per draw and its GPU
 // process spent its scroll frames in these waits. The copy now takes the async region
 // path: it has its own staging buffer, queue order and its SHADER_READ barrier put it before the draw that samples
-// the image, and the handle is finished before a readback, destroy or re-upload. Apps only: WindowServer's surfaces
-// keep the synchronous upload. NVMTL_ASYNC_SURFACE_UPLOAD=0 turns it off.
+// the image, and the handle is finished before a readback, destroy or re-upload. The CPU-copy path defaults to apps
+// only: WindowServer's surfaces stay synchronous unless NVMTL_ASYNC_SURFACE_UPLOAD=1 explicitly enables it.
 static __thread int g_up_force_async;   // set by nvmtl_vk_image_write for one surface upload
 static int nvmtl_async_surface_upload(void)
 {
@@ -9252,12 +9615,14 @@ static int nvmtl_async_surface_upload(void)
     if (on < 0) {
         const char *e = getenv("NVMTL_ASYNC_SURFACE_UPLOAD"), *me = getprogname();
         on = e ? e[0] == '1' : !(me && !strcmp(me, "WindowServer"));
-        nvlog("vk: async surface upload %s (NVMTL_ASYNC_SURFACE_UPLOAD=%s)", on ? "ON" : "OFF", e ? e : "unset");
+        nvlog("vk: async surface upload %s (NVMTL_ASYNC_SURFACE_UPLOAD=%s, process=%s)",
+              on ? "ON" : "OFF", e ? e : "unset", me && *me ? me : "unknown");
     }
     return on;
 }
-int nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes)
+static int nvmtl_vk_image_write_body(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes)
 {
+    if (nvmtl_vk_image_upload_barrier(img)) return -1;
     if (nvmtl_async_surface_upload() && img->bw <= 1 && img->bh <= 1 && (img->layers ? img->layers : 1) == 1) {
         g_up_force_async = 1;
         const int rc = nvmtl_vk_image_write_region_level_layer(q, img, src, row_bytes, 0, 0, img->w, img->h, 0, 0);
@@ -9293,6 +9658,13 @@ int nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t r
     if (sl->buf.size > NVMTL_UPSTAGE_KEEP) { nvmtl_vk_buffer_destroy(&sl->buf); memset(&sl->buf, 0, sizeof sl->buf); }
     return rc;
 }
+int nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes)
+{
+    if (nvmtl_image_op_enter(img)) return -1;
+    const int rc = nvmtl_vk_image_write_body(q, img, src, row_bytes);
+    nvmtl_image_op_leave(img);
+    return rc;
+}
 
 int nvmtl_vk_copy_buffer(nvk_queue *q, nvk_buffer *src, size_t srcOff, nvk_buffer *dst, size_t dstOff, size_t size)
 {
@@ -9306,9 +9678,9 @@ int nvmtl_vk_copy_buffer(nvk_queue *q, nvk_buffer *src, size_t srcOff, nvk_buffe
     return r;
 }
 
-int nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes)
+static int nvmtl_vk_image_read_body(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes)
 {
-    nvmtl_vk_image_upload_barrier(img);   // a readback must observe a pending async upload: finish it first
+    if (nvmtl_vk_image_upload_barrier(img)) return -1; // readback must observe pending uploads
     const size_t bpp = img->bpp ? img->bpp : 4;
     const uint32_t cols = nvmtl_blocks(img->w, img->bw), rows = nvmtl_blocks(img->h, img->bh);
     if (row_bytes < (size_t)cols * bpp) { nvlog("image_read: bytesPerRow %zu < %u blocks * %zu B", row_bytes, cols, bpp); return -1; }
@@ -9333,16 +9705,23 @@ int nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_byte
     for (uint32_t y = 0; y < rows; y++) memcpy((uint8_t *)dst + y * row_bytes, src + (size_t)y * cols * bpp, (size_t)cols * bpp);
     return 0;
 }
+int nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes)
+{
+    if (nvmtl_image_op_enter(img)) return -1;
+    const int rc = nvmtl_vk_image_read_body(q, img, dst, row_bytes);
+    nvmtl_image_op_leave(img);
+    return rc;
+}
 // The readback counterpart of nvmtl_vk_image_write_host: the GPU copies the image straight into the surface's own
 // pages (imported as a buffer), so a surface without family VRAM (a 256 MB BAR1 that is full refuses whole windows)
 // costs one copy on the GPU instead of a copy into the staging buffer plus a CPU memcpy of every row.
-int nvmtl_vk_image_read_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache)
+static int nvmtl_vk_image_read_host_body(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache)
 {
     const size_t bpp = img->bpp ? img->bpp : 4;
     if (img->bw > 1 || img->bh > 1 || !row_bytes || row_bytes % bpp || row_bytes < (size_t)img->w * bpp) return -1;
     if (g_host_align) bytes = bytes & ~(g_host_align - 1);   // never import past the surface's allocation
     if (!img->h || (size_t)(img->h - 1) * row_bytes + (size_t)img->w * bpp > bytes) return -1;
-    nvmtl_vk_image_upload_barrier(img);   // a readback must observe a pending async upload: finish it first
+    if (nvmtl_vk_image_upload_barrier(img)) return -1; // readback must observe pending uploads
     nvk_buffer tmp, *hp = nvmtl_host_pages(cache, base, bytes, &tmp);
     if (!hp) return -1;
     nvk_buffer hb = *hp;
@@ -9363,6 +9742,13 @@ int nvmtl_vk_image_read_host(nvk_queue *q, nvk_image *img, void *base, size_t ro
     pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, NULL, 0, NULL);
     const int rc = nvmtl_vk_submit_wait_at(&c, "surface readback (imported pages)");
     nvmtl_host_pages_done(cache, hp);
+    return rc;
+}
+int nvmtl_vk_image_read_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache)
+{
+    if (nvmtl_image_op_enter(img)) return -1;
+    const int rc = nvmtl_vk_image_read_host_body(q, img, base, row_bytes, bytes, cache);
+    nvmtl_image_op_leave(img);
     return rc;
 }
 
@@ -9388,7 +9774,7 @@ int nvmtl_vk_record_image_to_host(nvk_cmdbuf *c, nvk_image *img, const nvk_buffe
         || row_bytes / bpp > UINT32_MAX || offset % 4 || offset % bpp || offset > host->size) return -1;
     const size_t remaining = host->size - offset, last_row = (size_t)img->w * bpp;
     if (last_row > remaining || (size_t)(img->h - 1) > (remaining - last_row) / row_bytes) return -1;
-    nvmtl_vk_image_upload_barrier(img);
+    if (nvmtl_vk_image_upload_barrier(img)) return -1;
     const VkImageLayout layout = (VkImageLayout)img->layout;
     if (layout == VK_IMAGE_LAYOUT_UNDEFINED || layout == VK_IMAGE_LAYOUT_PREINITIALIZED) return -1;
     VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
@@ -9439,6 +9825,15 @@ static void img_to(nvk_cmdbuf *c, nvk_image *img, VkImageLayout to,
     img->layout = to;
 }
 
+// The CPU surface fallback uses this ordered transition when nvmtl_vk_image_write forces an async region upload. Keep
+// ordinary texture writes on their existing img_to path; they are controlled by the separate async-texture switch.
+static void nvmtl_upload_region_to_transfer(nvk_cmdbuf *c, nvk_image *img)
+{
+    if (g_up_force_async && nvmtl_surfin_ordered_on()) nvmtl_surfin_to_transfer(c, img);
+    else img_to(c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+}
+
 static void nvmtl_private_depth_layout(nvk_cmdbuf *c, nvk_image *img, VkImageLayout to)
 {
     VkSampleLocationEXT positions[8]; nvmtl_sample_pattern pattern;
@@ -9471,8 +9866,8 @@ int nvmtl_vk_cmd_prepare_sampled_image(nvk_cmdbuf *c, nvk_image *img, int storag
 // waited, staging freed) before anything overwrites, reads back or frees that image's memory -- see
 // plugin/nvmtl_tex_upload.h for the invariants (unit-tested in tools/test_tex_upload.c). An earlier attempt
 // (community PR #96) deferred the wait without this lifetime guard and corrupted IOSurface textures that are
-// uploaded then destroyed; the guard below is what makes it safe, and it is a no-op on the synchronous path
-// because up_token is only ever set here.
+// uploaded then destroyed. The image operation gate and pending-record list protect async writes; the sync path has no
+// pending record after its submit-and-wait completes.
 static int nvmtl_async_tex_upload(void)
 {
     static int on = -1;
@@ -9483,44 +9878,10 @@ static int nvmtl_async_tex_upload(void)
     }
     return on;
 }
-typedef struct { nvmtl_inflight infl; nvk_buffer stage; nvk_cmdbuf cb; } nvmtl_asyncup;
-static pthread_mutex_t g_asyncup_mutex = PTHREAD_MUTEX_INITIALIZER;
-// Atomically read and clear an image's pending async-upload handle (the consume/finish-first decision).
-static uint64_t nvmtl_asyncup_take(nvk_image *img)
-{
-    if (!img) return 0;
-    pthread_mutex_lock(&g_asyncup_mutex);
-    nvmtl_up_state s = { img->up_token };
-    const uint64_t token = nvmtl_up_before_consume(&s);
-    img->up_token = 0;
-    pthread_mutex_unlock(&g_asyncup_mutex);
-    return token;
-}
-static void nvmtl_asyncup_store(nvk_image *img, uint64_t token)
-{
-    pthread_mutex_lock(&g_asyncup_mutex);
-    nvmtl_up_state s = { img->up_token };
-    nvmtl_up_set(&s, token);
-    img->up_token = s.infl;
-    pthread_mutex_unlock(&g_asyncup_mutex);
-}
-// Finish (fence-wait) and free a handle taken from an image. Called OUTSIDE the lock so one image's wait
-// never blocks uploads to another; a no-op on 0 (which is every call on the synchronous path).
-static void nvmtl_asyncup_finish(uint64_t token)
-{
-    if (!token) return;
-    nvmtl_asyncup *au = (nvmtl_asyncup *)(uintptr_t)token;
-    nvmtl_vk_submit_finish(&au->infl);
-    nvmtl_vk_buffer_destroy(&au->stage);
-    free(au);
-}
-// Public guard for the consumers (readback, surface-out, migration, destroy): finish a pending upload first.
-void nvmtl_vk_image_upload_barrier(nvk_image *img) { nvmtl_asyncup_finish(nvmtl_asyncup_take(img)); }
-
 int nvmtl_vk_image_write_region_level(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes,
                                       uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level)
 { return nvmtl_vk_image_write_region_level_layer(q, img, src, row_bytes, x, y, w, h, level, 0); }
-int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes,
+static int nvmtl_vk_image_write_region_level_layer_body(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes,
                                       uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level, uint32_t layer)
 {
     if (layer >= (img->layers ? img->layers : 1)) { nvlog("image_write_region: layer %u — this image has %u", layer, img->layers ? img->layers : 1); return -1; }
@@ -9531,9 +9892,12 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
     if (img->bw > 1 && ((x % img->bw) || (y % img->bh))) { nvlog("image_write_region: origin (%u,%u) is not block-aligned (%ux%u blocks)", x, y, img->bw, img->bh); return -1; }
     if (row_bytes < (size_t)cols * bpp) { nvlog("image_write_region: bytesPerRow %zu < %u blocks * %zu B", row_bytes, cols, bpp); return -1; }
     const size_t bytes = (size_t)cols * rows * bpp;
+    if (nvmtl_vk_image_upload_barrier(img)) return -1; // complete earlier writers before changing layout or contents
     // Decide sync vs async. Async gives the upload its own staging buffer + command buffer so the submission
     // can be left in flight; sync keeps the shared per-thread staging buffer and waits (the default path).
+    pthread_mutex_lock(&g_asyncup_mutex);
     nvmtl_up_state upst = { img->up_token };
+    pthread_mutex_unlock(&g_asyncup_mutex);
     uint64_t finish_first = 0;
     const nvmtl_up_submit mode = nvmtl_up_before_upload(&upst, nvmtl_async_tex_upload() || g_up_force_async, &finish_first);
     nvmtl_asyncup *au = NULL;
@@ -9553,8 +9917,7 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
     uint8_t *dst = (uint8_t *)stageb->map;
     for (uint32_t r = 0; r < rows; r++) memcpy(dst + (size_t)r * cols * bpp, (const uint8_t *)src + (size_t)r * row_bytes, (size_t)cols * bpp);
     if (nvmtl_vk_cmd_begin(q, c)) { if (au) { nvmtl_vk_buffer_destroy(&au->stage); free(au); } return -1; }
-    img_to(c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-           VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    nvmtl_upload_region_to_transfer(c, img);
     VkBufferImageCopy bic = { 0, 0, 0, { nvmtl_copy_aspect(img), level, img->mtl_type == 7 ? 0u : layer, 1 }, { (int32_t)x, (int32_t)y, img->mtl_type == 7 ? (int32_t)layer : 0 }, { w, h, 1 } };
     pvkCmdCopyBufferToImage(c->cb, (VkBuffer)stageb->buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
     img_to(c, img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
@@ -9568,14 +9931,22 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
     }
     return nvmtl_vk_submit_wait(c);
 }
+int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes,
+                                      uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level, uint32_t layer)
+{
+    if (nvmtl_image_op_enter(img)) return -1;
+    const int rc = nvmtl_vk_image_write_region_level_layer_body(q, img, src, row_bytes, x, y, w, h, level, layer);
+    nvmtl_image_op_leave(img);
+    return rc;
+}
 
 int nvmtl_vk_image_read_region_level(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes,
                                      uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level)
 { return nvmtl_vk_image_read_region_level_layer(q, img, dst, row_bytes, x, y, w, h, level, 0); }
-int nvmtl_vk_image_read_region_level_layer(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes,
+static int nvmtl_vk_image_read_region_level_layer_body(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes,
                                      uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level, uint32_t layer)
 {
-    nvmtl_vk_image_upload_barrier(img);   // a readback must observe a pending async upload: finish it first
+    if (nvmtl_vk_image_upload_barrier(img)) return -1; // readback must observe pending uploads
     if (layer >= (img->layers ? img->layers : 1)) { nvlog("image_read_region: layer %u — this image has %u", layer, img->layers ? img->layers : 1); return -1; }
     { const uint32_t lw = img->w >> level ? img->w >> level : 1, lh = img->h >> level ? img->h >> level : 1;
       if (!w || !h || x > lw || w > lw - x || y > lh || h > lh - y) { nvlog("image_read_region: %ux%u at (%u,%u) is outside %ux%u (level %u)", w, h, x, y, lw, lh, level); return -1; } }
@@ -9594,6 +9965,14 @@ int nvmtl_vk_image_read_region_level_layer(nvk_queue *q, nvk_image *img, void *d
     const uint8_t *src = (const uint8_t *)stage.map;
     for (uint32_t r = 0; r < rows; r++) memcpy((uint8_t *)dst + (size_t)r * row_bytes, src + (size_t)r * cols * bpp, (size_t)cols * bpp);
     return 0;
+}
+int nvmtl_vk_image_read_region_level_layer(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes,
+                                     uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level, uint32_t layer)
+{
+    if (nvmtl_image_op_enter(img)) return -1;
+    const int rc = nvmtl_vk_image_read_region_level_layer_body(q, img, dst, row_bytes, x, y, w, h, level, layer);
+    nvmtl_image_op_leave(img);
+    return rc;
 }
 
 int nvmtl_vk_copy_image(nvk_queue *q, nvk_image *src, uint32_t sx, uint32_t sy,

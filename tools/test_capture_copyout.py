@@ -15,6 +15,7 @@ event = (root / "plugin/NVMTLEventSync.m").read_text()
 start = event.index("static void nvmtl_ws_gpu_copyout(")
 copyout = event[start:event.index("\n@interface NVMTLPendingSurfaceWrite", start)]
 capture = (root / "plugin/NVMTLCapture.m").read_text()
+capture = capture[:capture.index("// The upload holds")] + capture[capture.index("@implementation NVMTLTexture (CaptureCopyout)"):]
 
 c_fixture = r'''
 #include <assert.h>
@@ -39,7 +40,7 @@ int nvmtl_vk_buffer_import_host(void *base,size_t bytes,nvk_buffer *b) {
 void nvmtl_vk_buffer_destroy(nvk_buffer *b) { memset(b,0,sizeof *b); }
 static uint32_t aspect = VK_IMAGE_ASPECT_COLOR_BIT;
 static uint32_t nvmtl_copy_aspect(nvk_image *i) { (void)i; return aspect; }
-void nvmtl_vk_image_upload_barrier(nvk_image *i) { (void)i; uploads++; }
+int nvmtl_vk_image_upload_barrier(nvk_image *i) { (void)i; uploads++; return 0; }
 #define nvlog(...) ((void)0)
 static void pvkCmdPipelineBarrier(VkCommandBuffer c, VkPipelineStageFlags src, VkPipelineStageFlags dst,
     VkDependencyFlags flags, uint32_t nm, const VkMemoryBarrier *mb, uint32_t nb,

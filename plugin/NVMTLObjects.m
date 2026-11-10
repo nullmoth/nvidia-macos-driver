@@ -1405,6 +1405,11 @@ unsigned long long nvmtl_tex_objs_live(void) {
     return made > gone ? made - gone : 0;
 }
 unsigned long long nvmtl_tex_objs_released(void) { return nvmtl_tex_objs_gone; }
+@interface NVMTLSurfaceUploadLease : NSObject {
+@public IOSurfaceRef surface; uint32_t options; id pages;
+}
+- (instancetype)initWithSurface:(IOSurfaceRef)surface options:(uint32_t)options pages:(id)pages;
+@end
 @implementation NVMTLTexture
 // sparse textures (NVMTL_SPARSE_TEXTURES=1): where the mip tail starts, how big it is, and whether unmapped tiles read as zero
 - (NSUInteger)firstMipmapInTail { const nvmtl_vk_sparse_info *si = _i.sparse; return si ? si->first_tail : 0; }
@@ -1536,6 +1541,10 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
     }
 }
 // NVMTL_SURFIN_UPLOAD=cpu: surface-in copies with the CPU (nvmtl_vk_image_write) instead of importing the pages
+static nvk_buffer *nvmtl_surface_host_pages(NVMTLTexture *r, void *base, size_t bytes);
+static id nvmtl_surface_page_lease(NVMTLTexture *r, nvk_buffer *pages);
+static void *nvmtl_surface_upload_lease_retain(void *lease);
+static void nvmtl_surface_upload_lease_release(void *lease);
 static bool nvmtl_surfin_import(void) {
     static int on = -1;
     if (on < 0) { const char *u = getenv("NVMTL_SURFIN_UPLOAD"); on = !(u && !strcmp(u, "cpu")); }
@@ -1632,15 +1641,28 @@ static uint64_t nvmtl_host_pages_cookie(IOSurfaceRef s)
     void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
     size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);
     int rc = -1;
+    NVMTLSurfaceUploadLease *uploadLease = nil;
     if (base && row && nvmtl_surfin_import()) {
         const size_t off = (size_t)((uint8_t *)base - (uint8_t *)IOSurfaceGetBaseAddress(r->_surf));
-        nvmtl_vk_host_pages_key((uint32_t)IOSurfaceGetID(r->_surf), nvmtl_host_pages_cookie(r->_surf));
-        rc = nvmtl_vk_image_write_host(r->_q, &r->_i, base, row, IOSurfaceGetAllocSize(r->_surf) - off, &r->_hostPages);
-        nvmtl_vk_host_pages_key(0, 0);
+        const size_t bytes = IOSurfaceGetAllocSize(r->_surf) - off;
+        const char *asyncSetting = getenv("NVMTL_SURFIN_ASYNC");
+        if (asyncSetting && !strcmp(asyncSetting, "1")) {
+            nvk_buffer *pages = nvmtl_surface_host_pages(r, base, bytes);
+            id pageLease = nvmtl_surface_page_lease(r, pages);
+            if (pageLease)
+                uploadLease = [[NVMTLSurfaceUploadLease alloc] initWithSurface:r->_surf options:kIOSurfaceLockReadOnly pages:pageLease];
+            rc = nvmtl_vk_image_write_host(r->_q, &r->_i, base, row, bytes, pages, (__bridge void *)uploadLease,
+                                           nvmtl_surface_upload_lease_retain, nvmtl_surface_upload_lease_release);
+        } else {
+            nvmtl_vk_host_pages_key((uint32_t)IOSurfaceGetID(r->_surf), nvmtl_host_pages_cookie(r->_surf));
+            rc = nvmtl_vk_image_write_host(r->_q, &r->_i, base, row, bytes, &r->_hostPages, NULL, NULL, NULL);
+            nvmtl_vk_host_pages_key(0, 0);
+        }
     }
     if (rc) rc = (base && row) ? nvmtl_vk_image_write(r->_q, &r->_i, base, row) : -1;
     if (!rc && r->_i.bpp == 4) { char tag[24]; snprintf(tag, sizeof tag, "in%u-", (unsigned)IOSurfaceGetID(r->_surf)); nvmtl_frame_dump(tag, base, row, r->_i.w, r->_i.h); }
-    IOSurfaceUnlock(r->_surf, kIOSurfaceLockReadOnly, NULL);
+    if (uploadLease) uploadLease = nil; // an async record may keep this lock/lease until its fence completes
+    else IOSurfaceUnlock(r->_surf, kIOSurfaceLockReadOnly, NULL);
     if (rc) { nvlog("G13 surface-in: upload FAILED (%ux%u) — retried at the next use", r->_i.w, r->_i.h); return; }
     r->_surfSeed = seed; r->_surfSynced = YES; r->_surfGen = vgen;
     g_surfin_copy++; if (r->_vramOn) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
