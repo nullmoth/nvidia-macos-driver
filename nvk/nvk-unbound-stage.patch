@@ -1,42 +1,61 @@
 --- a/src/nouveau/vulkan/nvk_shader.c
 +++ b/src/nouveau/vulkan/nvk_shader.c
-@@ -1332,6 +1332,12 @@
+@@ -1332,6 +1332,15 @@
     nir_shader *shaders[shader_count];
     struct nvk_cbuf_map cbuf_maps[shader_count];
     memset(cbuf_maps, 0, sizeof(cbuf_maps));
-+   /* A live read of a binding the pipeline layout leaves empty, by any stage. nvk_compile_shader also looks for one, but
-+    * by then every stage has been lowered below and each lowering starts by clearing the record, so only the last
-+    * stage's read reached it: a vertex shader's was forgotten as soon as the fragment shader was lowered. */
-+   bool unbound_hit = false;
++   /* A live read of a binding the pipeline layout leaves empty. Every stage is lowered below before any is compiled, and
++    * each lowering starts by clearing the record, so nvk_compile_shader only ever saw the LAST stage's read: that one
++    * fails the pipeline, an earlier stage's (a vertex shader's) was forgotten and its pipeline built. What ships keeps
++    * exactly that outcome, because pipelines that build today must keep building until this has run on real
++    * applications; an earlier stage's read is now reported once, so a log shows how often it happens.
++    * NVK_UNBOUND_STAGE_STRICT=1 refuses it like the last stage's. */
++   bool unbound_last = false, unbound_earlier = false;
 +   uint32_t unbound_set = 0, unbound_binding = 0;
 +   mesa_shader_stage unbound_stage = MESA_SHADER_VERTEX;
  
     /* Lower shaders, notably lowering I/O. This is a prerequisite for
      * intershader optimization.
-@@ -1361,6 +1367,16 @@
-       nvk_lower_nir(dev, nir, info->flags, info->robustness,
+@@ -1362,6 +1371,22 @@
                      info->set_layout_count, info->set_layouts,
                      &cbuf_maps[i]);
-+
+ 
 +      {
 +         uint32_t ub_set, ub_binding;
-+         if (nvk_nir_lower_descriptors_take_unbound(&ub_set, &ub_binding) && !unbound_hit) {
-+            unbound_hit = true;
-+            unbound_set = ub_set;
-+            unbound_binding = ub_binding;
-+            unbound_stage = nir->info.stage;
++         if (nvk_nir_lower_descriptors_take_unbound(&ub_set, &ub_binding)) {
++            const bool last = i + 1 == shader_count;
++            if (last)
++               unbound_last = true;
++            else
++               unbound_earlier = true;
++            if (last || !unbound_last) {
++               unbound_set = ub_set;
++               unbound_binding = ub_binding;
++               unbound_stage = nir->info.stage;
++            }
 +         }
 +      }
- 
++
        if (nir->xfb_info) {
           /* Fold constant offset srcs for IO. */
-@@ -1370,6 +1386,16 @@
-       }
- 
+          NIR_PASS(_, nir, nir_opt_constant_folding);
+@@ -1372,6 +1397,28 @@
        shaders[i] = nir;
+    }
+ 
++   if (unbound_earlier && !unbound_last) {
++      static bool said;
++      const char *strict = getenv("NVK_UNBOUND_STAGE_STRICT");
++      if (strict && strict[0] == '1')
++         unbound_last = true;
++      else if (!said) {
++         said = true;
++         fprintf(stderr, "nvk: a %s shader reads set %u binding %u, which its pipeline layout leaves empty; "
++                         "the pipeline is built as before (reported once)\n",
++                 _mesa_shader_stage_to_string(unbound_stage), unbound_set, unbound_binding);
++      }
 +   }
-+
-+   if (unbound_hit) {
++   if (unbound_last) {
 +      /* nothing has been compiled yet: every stage's NIR is still ours to free */
 +      for (uint32_t j = 0; j < shader_count; j++)
 +         ralloc_free(infos[j].nir);
@@ -44,6 +63,8 @@
 +      return vk_errorf(dev, VK_ERROR_UNKNOWN,
 +                       "%s shader reads set %u binding %u, which its pipeline layout leaves empty",
 +                       _mesa_shader_stage_to_string(unbound_stage), unbound_set, unbound_binding);
-    }
- 
++   }
++
     nir_opt_varyings_bulk(shaders, shader_count, true, UINT32_MAX, UINT32_MAX,
+                          nir_opts, NULL);
+ 
