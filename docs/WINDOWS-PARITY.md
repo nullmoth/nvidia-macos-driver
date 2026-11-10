@@ -65,7 +65,7 @@ asked about, and writes conf settings only into the block the installer keeps ac
 
 | Windows feature | State in 2.9 | Gap |
 |---|---|---|
-| Idle power states | NVK burst boost, RM standby, ASPM L1 on by default | measured idle clocks need hardware |
+| Idle power states | NVK burst boost, RM standby; ASPM L1 on request (nvrmaspm=1), the link otherwise stays as the firmware set it | measured idle clocks need hardware |
 | Laptop dGPU power-off | opt-in D3cold monitor (`nvrtd3=1`, `nvrtd3res=`) | needs a hybrid laptop to prove |
 | Power limit, clock offsets, fan curve | none | the public 620 headers carry no write control for them; desktop fans are VBIOS-controlled: blocked |
 | Notebook power budget (Dynamic Boost's TGP step) | opt-in `nvrmtgp=1`: the GPU firmware is told to run at the platform limit while on mains power and released on battery, live switch `debug.nvrm_tgp_enable`, state in `debug.nvrm_tgp_*` and `nvmtl-smi` (`kexts/NVRM/nvrm_power.cpp`, policy `nvrm_power_policy.h`) | needs a notebook to measure the enforced limit; the CPU/GPU power split (NVPCF) is `nvrmnvpcf=1` and the platform request handler (GPS) is `nvrmgps=1`, both served from the firmware's own ACPI methods (`nvrm_dsm_route.h`) |
