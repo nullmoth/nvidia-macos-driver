@@ -105,7 +105,7 @@ extern "C" int nvrm_dpaux_transfer(struct NVRMDpAuxRequest *r)
 {
     if (!r) return -1;
     r->status = 0;
-    if (!r->len || r->len > kNvrmDpAuxMax || r->addr < 0x700 || r->addr + r->len > 0x800) { r->status = NV_ERR_INVALID_ARGUMENT; return -1; }
+    if (!r->len || r->len > kNvrmDpAuxMax || r->addr < 0x700 || r->addr >= 0x800 || r->addr + r->len > 0x800) { r->status = NV_ERR_INVALID_ARGUMENT; return -1; }
     nv_state_t *nv = nv_xnu_gpu_state();
     if (!nv || nv->gpu_id != r->gpuId || !nv->rmapi.hClient || !nv->rmapi.hDisp) { r->status = NV_ERR_OBJECT_NOT_FOUND; return -1; }
     NV0073_CTRL_DP_AUXCH_CTRL_PARAMS p;
