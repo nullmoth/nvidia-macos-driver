@@ -3,7 +3,7 @@
 // probabilities in a buffer of its own; the frame header is parsed here only as far as reference management needs it
 // (RFC 6386 9.2-9.8: golden / altref refresh and copies, refresh_last). Sources: open-gpu-doc's nvdec_drv.h / clc9b0.h,
 // RFC 6386 (tables), and for what no header says (the probability buffer's layout, the bitstream start, strides) averne's
-// FFmpeg "nvtegra" hwaccel (GPL, Tegra NVDEC; used as a reference for facts only, user's decision 2026-10-20).
+// FFmpeg "nvtegra" hwaccel (GPL, Tegra NVDEC; used as a reference for facts only).
 #pragma once
 #include "rm.h"
 #include "channel.h"

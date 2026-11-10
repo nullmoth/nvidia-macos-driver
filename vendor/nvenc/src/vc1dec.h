@@ -3,7 +3,7 @@
 // Advanced: sequence header + entry point) is parsed here, and the picture header only as far as reference management
 // and output order need it (frame coding mode, picture type). Sources: open-gpu-doc's nvdec_drv.h / clc9b0.h, SMPTE 421M,
 // and for what no header says (which setup fields the engine uses, the bitstream framing, buffer sizes) averne's FFmpeg
-// "nvtegra" hwaccel (GPL, Tegra NVDEC; facts only, user's decision 2026-10-20).
+// "nvtegra" hwaccel (GPL, Tegra NVDEC; facts only).
 #pragma once
 #include "rm.h"
 #include "channel.h"

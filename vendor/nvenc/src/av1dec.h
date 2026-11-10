@@ -2,7 +2,7 @@
 // engine's buffers (CDF tables, tile info / tile stream info, filter, intra top, temporal MV, segment ID) and decodes each
 // frame into a surface. Sources: open-gpu-doc's nvdec_drv.h / clc9b0.h, the AV1 specification, and, for what the headers
 // do not say (CDF layout, tile entries, picture slots, global motion, film grain buffers), mesa-nova's NVK AV1 decoder
-// (MIT; user's decision 2026-10-19, docs/tasks.md M9).
+// (MIT; docs/tasks.md M9).
 #pragma once
 #include "rm.h"
 #include "channel.h"

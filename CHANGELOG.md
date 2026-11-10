@@ -145,7 +145,7 @@ The 1401 Mac app has a new pane, **Experimental drivers and features**, with a s
 - Experimental items are unproven across cards. Turn on one at a time.
 - Cyberpunk 2077 interior lighting on first launch is unchanged from 2.8.
 
-Thank you to everyone who sent logs, issues, and pull requests. Donations help keep this going.
+Thanks to WatchAndyTW (DaVinci Resolve viewer shader), backdash756 (YUV 4:2:0 over DisplayPort-to-HDMI, PR #459), GeekAudio (BAR1 placement, EDID overrides), and steve12311 (static samplers, PR #530), and to everyone who sent logs, issues, and pull requests. Donations help keep this going.
 
 ## 2.8.1
 
