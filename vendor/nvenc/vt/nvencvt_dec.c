@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <dispatch/dispatch.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,6 +69,78 @@ enum { CODEC_HEV1 = 0x68657631, CODEC_AVC3 = 0x61766333 };  // 'hev1', 'avc3': s
 static bool gDLog; static FILE *gDLogF;
 #define DLOG(...) do { if (gDLog) { FILE *lf_ = gDLogF ? gDLogF : stderr; fprintf(lf_, "nvdecvt: " __VA_ARGS__); fputc('\n', lf_); fflush(lf_); } } while (0)
 
+#define DEVICE_EVIDENCE_KEY CFSTR("org.nvenc.decoder-device.v1")
+
+// Match the hardware described by NV_ESC_CARD_INFO against the PCI endpoint
+// of the two opened RM services. BAR0 disambiguates identical BDFs on separate PCI domains.
+static bool matching_bar0(CFTypeRef property, const nv_ioctl_card_info_t *card)
+{
+    if (!card->reg_address || !card->reg_size || !property || CFGetTypeID(property) != CFDataGetTypeID()) return false;
+    const CFIndex length = CFDataGetLength(property);
+    const uint32_t address = (uint32_t)card->pci_info.bus << 16 | (uint32_t)card->pci_info.slot << 11 |
+                             (uint32_t)card->pci_info.function << 8 | 0x10;
+    if (length % (5 * sizeof(uint32_t))) return false;
+    unsigned matches = 0;
+    for (CFIndex offset = 0; offset < length; offset += 5 * sizeof(uint32_t)) {
+        uint32_t cells[5];
+        CFDataGetBytes(property, CFRangeMake(offset, sizeof cells), (UInt8 *)cells);
+        const uint32_t space = (cells[0] >> 24) & 3;
+        const uint64_t base = (uint64_t)cells[1] << 32 | cells[2];
+        const uint64_t size = (uint64_t)cells[3] << 32 | cells[4];
+        if (space >= 2 && (cells[0] & 0xffffff) == address && base == card->reg_address && size == card->reg_size)
+            matches++;
+    }
+    return matches == 1;
+}
+
+static uint64_t connected_gpu(uint64_t serviceID, const nv_ioctl_card_info_t *card)
+{
+    if (!serviceID) return 0;
+    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IORegistryEntryIDMatching(serviceID));
+    if (!service) return 0;
+    io_iterator_t parents = IO_OBJECT_NULL;
+    kern_return_t kr = IORegistryEntryGetParentIterator(service, kIOServicePlane, &parents);
+    IOObjectRelease(service);
+    if (kr != KERN_SUCCESS) return 0;
+    io_registry_entry_t pci = IO_OBJECT_NULL;
+    unsigned count = 0;
+    for (io_registry_entry_t parent; (parent = IOIteratorNext(parents)); IOObjectRelease(parent)) {
+        if (IOObjectConformsTo(parent, "IOPCIDevice") && ++count == 1) {
+            pci = parent;
+            IOObjectRetain(pci);
+        }
+    }
+    IOObjectRelease(parents);
+    if (count != 1) { if (pci) IOObjectRelease(pci); return 0; }
+
+    CFTypeRef vendor = IORegistryEntryCreateCFProperty(pci, CFSTR("vendor-id"), NULL, 0);
+    CFTypeRef device = IORegistryEntryCreateCFProperty(pci, CFSTR("device-id"), NULL, 0);
+    CFTypeRef addresses = IORegistryEntryCreateCFProperty(pci, CFSTR("assigned-addresses"), NULL, 0);
+    uint64_t id = 0;
+    if (vendor && CFGetTypeID(vendor) == CFDataGetTypeID() && CFDataGetLength(vendor) == 4 &&
+        device && CFGetTypeID(device) == CFDataGetTypeID() && CFDataGetLength(device) == 4) {
+        uint32_t vid, did;
+        CFDataGetBytes(vendor, CFRangeMake(0, 4), (UInt8 *)&vid);
+        CFDataGetBytes(device, CFRangeMake(0, 4), (UInt8 *)&did);
+        if (vid == 0x10de && vid == card->pci_info.vendor_id && did == card->pci_info.device_id &&
+            matching_bar0(addresses, card))
+            IORegistryEntryGetRegistryEntryID(pci, &id);
+    }
+    if (addresses) CFRelease(addresses);
+    if (device) CFRelease(device);
+    if (vendor) CFRelease(vendor);
+    IOObjectRelease(pci);
+    return id;
+}
+
+static uint64_t session_device_id(const Rm *rm)
+{
+    if (!rm->card.valid || !rm->subdevice) return 0;
+    uint64_t ctlGPU = connected_gpu(rm->ctlServiceID, &rm->card);
+    uint64_t devGPU = rm->ctlServiceID == rm->devServiceID ? ctlGPU : connected_gpu(rm->devServiceID, &rm->card);
+    return ctlGPU == devGPU ? ctlGPU : 0;
+}
+
 typedef struct {
     pthread_mutex_t lock;
     VTVideoDecoderSession session;
@@ -75,6 +148,7 @@ typedef struct {
     FourCharCode codec;
     Rm rm; H264Dec dec; bool opened;
     Rm *vrm; Vp9Dec *vp9;           // VP9: on the heap, so that the next session can take them over (park_vp9)
+    atomic_uint_fast64_t pciID;
     Av1Dec *av1;                    // AV1: likewise (with vrm)
     HevcDec *hevc;                  // HEVC (with rm)
     Mpeg2Dec *m2;                   // MPEG-1/2 (with rm)
@@ -191,6 +265,7 @@ static OSStatus b_invalidate(CMBaseObjectRef o)
         else if (s->codec == kCMVideoCodecType_MPEG4Video) { mpeg4dec_close(s->m4); free(s->m4); s->m4 = NULL; rm_close(&s->rm); }
         else { h264dec_close(&s->dec); rm_close(&s->rm); }
         s->opened = false;
+        atomic_store(&s->pciID, 0);
     }
     if (s->fmt) { CFRelease(s->fmt); s->fmt = NULL; }
     if (s->ownPool) { CVPixelBufferPoolRelease(s->ownPool); s->ownPool = NULL; }
@@ -233,13 +308,21 @@ static int64_t nv_max_decoder_pixel_rate(void)
 }
 static OSStatus b_copyProperty(CMBaseObjectRef o, CFStringRef key, CFAllocatorRef al, void *out)
 {
-    (void)o; (void)al;
     if (CFEqual(key, NV_MAX_DECODER_PIXEL_RATE_KEY)) {
         int64_t rate = nv_max_decoder_pixel_rate();
         *(CFTypeRef *)out = CFNumberCreate(NULL, kCFNumberSInt64Type, &rate);
         return *(CFTypeRef *)out ? noErr : kCMBaseObjectError_ValueNotAvailable;
     }
     if (CFEqual(key, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder)) { *(CFTypeRef *)out = kCFBooleanTrue; return noErr; }
+    if (CFEqual(key, DEVICE_EVIDENCE_KEY)) {
+        const int64_t id = (int64_t)atomic_load(&dstate(o)->pciID);
+        if (id > 0) {
+            CFNumberRef number = CFNumberCreate(al, kCFNumberSInt64Type, &id);
+            if (!number) return kVTAllocationFailedErr;
+            *(CFTypeRef *)out = number;
+            return noErr;
+        }
+    }
     if (gDLog) { char k[128]; CFStringGetCString(key, k, sizeof k, kCFStringEncodingUTF8); DLOG("copy %s: not available", k); }
     return kCMBaseObjectError_ValueNotAvailable;
 }
@@ -462,6 +545,9 @@ static OSStatus set_output(DState *s, VTVideoDecoderSession session, CMVideoForm
 {
     OSStatus st;
     s->pf = pf;
+    const uint64_t pciID = session_device_id(s->vrm ? s->vrm : &s->rm);
+    atomic_store(&s->pciID, pciID);
+    DLOG("decoder device evidence: PCI 0x%llx", (unsigned long long)pciID);
     if (gDLog) {   // what the client asked for (T8.06: matching it avoids a conversion inside EmitDecodedFrame)
         CFDictionaryRef dst = VTDecoderSessionGetDestinationPixelBufferAttributes(session);
         CFStringRef ds = dst ? CFCopyDescription(dst) : NULL; char buf[2048] = "(none)";
@@ -890,9 +976,9 @@ static OSStatus d_copySupported(VTVideoDecoderRef o, CFDictionaryRef *out)
     const void *nk[] = { kVTPropertyTypeKey, kVTPropertyReadWriteStatusKey };
     const void *nv[] = { kVTPropertyType_Number, kVTPropertyReadWriteStatus_ReadOnly };
     CFDictionaryRef rn = CFDictionaryCreate(NULL, nk, nv, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    const void *k[] = { kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder, NV_MAX_DECODER_PIXEL_RATE_KEY };
-    const void *v[] = { ro, rn };
-    *out = CFDictionaryCreate(NULL, k, v, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    const void *k[] = { kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder, NV_MAX_DECODER_PIXEL_RATE_KEY, DEVICE_EVIDENCE_KEY };
+    const void *v[] = { ro, rn, rn };
+    *out = CFDictionaryCreate(NULL, k, v, 3, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFRelease(ro);
     CFRelease(rn);
     return noErr;
@@ -934,6 +1020,7 @@ __attribute__((visibility("default"))) OSStatus NVDecVT_CreateInstance(FourCharC
     OSStatus st = CMDerivedObjectCreate(al, &gDVT.base, VTVideoDecoderGetClassID(), &obj);
     if (st) return st;
     DState *s = calloc(1, sizeof *s);
+    atomic_init(&s->pciID, 0);
     pthread_mutex_init(&s->lock, NULL); pthread_cond_init(&s->cv, NULL);
     s->codec = codec;
     *(DState **)CMBaseObjectGetDerivedStorage(obj) = s;
@@ -959,11 +1046,9 @@ static NvU32 nvdec_class(void)
 
 // Called by NVEncVT_Register once the GPU checked out (Ada, GA10x or TU117). Rated above NullMoth's own H.264 / HEVC decoders (1000). HEVC,
 // VP9 and AV1 too (NVENCVT_NO_HEVCDEC / _VP9DEC / _AV1DEC=1 leave one out).
-// On GA10x (RTX 30) the VP9 and AV1 decoders register: their method IDs are the same as Ada's (clc7b0.h and clc9b0.h
-// agree on every one of them) and GA10x's NVDEC has both. The H.264 / HEVC / MPEG decoders were written for Ada's NVDEC
-// (0xc9b0) and Turing's (0xc4b0) and were not tried on 0xc7b0, and a decoder that registers and then fails is worse than
-// none (VideoToolbox does not fall back to another decoder once it picked ours). NVENCVT_AMPERE_ALL_DEC=1 registers
-// them all anyway.
+// GA10x H.264 and hvc1 can use the validated C7B0 path in ordinary apps.
+// The decode service keeps its own selection unless explicitly overridden.
+// NVENCVT_AMPERE_ALL_DEC retains the broader opt-in, including legacy MPEG.
 OSStatus NVDecVT_Register(int rating)
 {
     gDLog = getenv("NVENCVT_LOG") != NULL;
@@ -971,7 +1056,12 @@ OSStatus NVDecVT_Register(int rating)
     if (getenv("NVENCVT_NO_DEC")) return kVTCouldNotFindVideoDecoderErr;
     extern int gNvencvtGpu;   // vt/nvencvt.c: 1 Ada, 2 TU117 (GTX 1650: NVDEC 0xc4b0 has no AV1), 3 GA10x (RTX 30)
     const bool ampere = gNvencvtGpu == 3;
-    const bool av1Vp9Only = ampere && !getenv("NVENCVT_AMPERE_ALL_DEC");
+    const bool fullDecode = !ampere || getenv("NVENCVT_AMPERE_ALL_DEC");
+    const bool ampereApp = ampere && strcmp(getprogname(), "VTDecoderXPCService") && nvdec_class() == 0xc7b0;
+    const char *h264Setting = getenv("NVENCVT_AMPERE_H264_DEC");
+    const bool h264 = !ampere || (h264Setting ? nvdec_class() == 0xc7b0 && !strcmp(h264Setting, "1")
+                                             : fullDecode || ampereApp);
+    const bool hevc = fullDecode || (ampereApp && !getenv("NVMTL_NO_NVDEC_HEVC"));
     // Blackwell (4): H.264 alone. Its channel and NVDEC classes and the layout of its decoded planes are public
     // (open-gpu-kernel-modules, Mesa NIL) and the H.264 picture setup is nvdec_drv.h's, but no public header lists the
     // methods of class 0xcfb0, and the other codecs' decoders here untile every plane as Turing's.
@@ -983,17 +1073,17 @@ OSStatus NVDecVT_Register(int rating)
     const void *k[] = { CFSTR("CMClassImplementationID"), CFSTR("CMClassImplementationName"), CFSTR("VTRating"), CFSTR("VTIsHardwareAccelerated") };
     const void *v[] = { CFSTR(DECODER_ID), CFSTR("NVDEC - H.264 - mickys/nvenc"), nr, kCFBooleanTrue };
     CFDictionaryRef info = CFDictionaryCreate(NULL, k, v, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    OSStatus st = av1Vp9Only ? kVTCouldNotFindVideoDecoderErr : reg(kCMVideoCodecType_H264, info, (void *)NVDecVT_CreateInstance);
+    OSStatus st = h264 ? reg(kCMVideoCodecType_H264, info, (void *)NVDecVT_CreateInstance) : kVTCouldNotFindVideoDecoderErr;
     // 'avc3' / 'hev1' sample entries (ffmpeg writes hev1 for HEVC in MP4 by default): VideoToolbox has no decoder for them
     // at all (-12906, Apple's included); ours decodes them like avc1 / hvc1 (NVENCVT_NO_HEV1=1 leaves both out)
-    if (!av1Vp9Only && !getenv("NVENCVT_NO_HEV1")) { OSStatus s3 = reg(CODEC_AVC3, info, (void *)NVDecVT_CreateInstance); DLOG("registered %s for avc3 -> %d", DECODER_ID, (int)s3); }
+    if (h264 && !getenv("NVENCVT_NO_HEV1")) { OSStatus s3 = reg(CODEC_AVC3, info, (void *)NVDecVT_CreateInstance); DLOG("registered %s for avc3 -> %d", DECODER_ID, (int)s3); }
     CFRelease(info);
     DLOG("registered %s -> %d (rating %d)", DECODER_ID, (int)st, rating);
-    if (!av1Vp9Only && !h264Only && !getenv("NVENCVT_NO_HEVCDEC")) {   // HEVC (NVENCVT_NO_HEVCDEC=1 leaves it out): above NullMoth's own HEVC decoder too
+    if (hevc && !h264Only && !getenv("NVENCVT_NO_HEVCDEC")) {   // HEVC (NVENCVT_NO_HEVCDEC=1 leaves it out): above NullMoth's own HEVC decoder too
         const void *vh[] = { CFSTR(DECODER_ID_HEVC), CFSTR("NVDEC - HEVC - mickys/nvenc"), nr, kCFBooleanTrue };
         CFDictionaryRef ih = CFDictionaryCreate(NULL, k, vh, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         OSStatus sh = reg(kCMVideoCodecType_HEVC, ih, (void *)NVDecVT_CreateInstance);
-        if (!getenv("NVENCVT_NO_HEV1")) { OSStatus s1 = reg(CODEC_HEV1, ih, (void *)NVDecVT_CreateInstance); DLOG("registered %s for hev1 -> %d", DECODER_ID_HEVC, (int)s1); }
+        if (fullDecode && !getenv("NVENCVT_NO_HEV1")) { OSStatus s1 = reg(CODEC_HEV1, ih, (void *)NVDecVT_CreateInstance); DLOG("registered %s for hev1 -> %d", DECODER_ID_HEVC, (int)s1); }
         CFRelease(ih);
         DLOG("registered %s -> %d (rating %d)", DECODER_ID_HEVC, (int)sh, rating);
     }
@@ -1027,7 +1117,7 @@ OSStatus NVDecVT_Register(int rating)
         SuppFn supp = (SuppFn)dlsym(RTLD_DEFAULT, "VTRegisterSupplementalVideoDecoderIfAvailable");
         if (supp && !getenv("NVENCVT_NO_VP9SUPP")) { supp(CODEC_AV1); DLOG("opted in to AV1 decoding for this process"); }
     }
-    if (!av1Vp9Only && !h264Only && !getenv("NVENCVT_NO_MPEG2DEC")) {   // MPEG-1 / MPEG-2 and MPEG-4 Part 2 (M14): above Apple's software decoders
+    if (fullDecode && !h264Only && !getenv("NVENCVT_NO_MPEG2DEC")) {   // MPEG-1 / MPEG-2 and MPEG-4 Part 2 (M14): above Apple's software decoders
         const struct { FourCharCode c; const char *id, *name; } m[] = {
             { kCMVideoCodecType_MPEG2Video, DECODER_ID_MPEG2, "NVDEC - MPEG-2 - mickys/nvenc" },
             { kCMVideoCodecType_MPEG1Video, DECODER_ID_MPEG1, "NVDEC - MPEG-1 - mickys/nvenc" },
