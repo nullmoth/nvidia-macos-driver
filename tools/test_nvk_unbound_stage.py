@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""A shader that reads a binding its pipeline layout leaves empty must fail pipeline creation, whichever stage it is.
+"""A shader that reads a binding its pipeline layout leaves empty: what NVK does with it, per stage.
 
 NVK notes such a read in a per-thread record while it lowers a stage's descriptors, and each lowering clears the record
-first. Mesa lowers every stage of a pipeline before it compiles any (nvk_compile_shaders), while our check sat in
-nvk_compile_shader: by the time it ran, only the last stage's record was left. A vertex shader's read was forgotten as
-soon as the fragment shader was lowered, and the pipeline was built. nvk/nvk-unbound-stage.patch takes the record after
-each stage. The flow is modelled here in C with the record's real rules (clear at the start of a lowering, first note
-wins, take clears); the old order must build the bad pipeline and the new one must refuse it."""
+first. Mesa lowers every stage of a pipeline before it compiles any (nvk_compile_shaders), so the check in
+nvk_compile_shader only ever saw the last stage's record: the last stage's read fails the pipeline, an earlier stage's
+(a vertex shader's) was forgotten and the pipeline built. That has been the shipped behaviour since 2.8.
+nvk/nvk-unbound-stage.patch takes the record after each stage and keeps the shipped outcome exactly (pipelines that
+build today keep building until this has run on real applications): the last stage's read fails as before, an earlier
+stage's is reported once, and NVK_UNBOUND_STAGE_STRICT=1 refuses it too. The flow is modelled in C with the record's
+real rules; the model of the shipped order is the reference the default must equal."""
 import pathlib, shutil, subprocess, sys, tempfile
 
 R = pathlib.Path(__file__).resolve().parents[1]
@@ -34,15 +36,15 @@ static int old_flow(const bool *bad, int n) {
     for (int i = 0; i < n; i++) { unsigned s, b; if (take(&s, &b)) return 1; }
     return 0;
 }
-/* new: take the record after each stage is lowered; -1 none, else the first stage that read an empty binding */
-static int new_flow(const bool *bad, int n) {
-    int first = -1;
-    for (int i = 0; i < n; i++) { lower(bad[i], 10 + i); unsigned s, b; if (take(&s, &b) && first < 0) first = i; }
-    return first;
+/* new: take the record after each stage; the last stage's read fails, an earlier one's only when strict. 1 = refused */
+static int new_flow(const bool *bad, int n, int strict) {
+    int last = 0, earlier = 0;
+    for (int i = 0; i < n; i++) { lower(bad[i], 10 + i); unsigned s, b; if (take(&s, &b)) { if (i + 1 == n) last = 1; else earlier = 1; } }
+    return last || (earlier && strict);
 }
 int main(void) {
     const bool cases[4][2] = { { false, false }, { true, false }, { false, true }, { true, true } };
-    for (int c = 0; c < 4; c++) printf("%d %d %d %d\n", cases[c][0], cases[c][1], old_flow(cases[c], 2), new_flow(cases[c], 2));
+    for (int c = 0; c < 4; c++) printf("%d %d %d %d %d\n", cases[c][0], cases[c][1], old_flow(cases[c], 2), new_flow(cases[c], 2, 0), new_flow(cases[c], 2, 1));
     return 0;
 }
 '''
@@ -52,18 +54,21 @@ if not cc:
 with tempfile.TemporaryDirectory() as d:
     d = pathlib.Path(d); (d / "m.c").write_text(MODEL)
     subprocess.run([cc, "-Wall", "-Werror", "-o", str(d / "m"), str(d / "m.c")], check=True)
-    rows = {(int(a), int(b)): (int(o), int(n)) for a, b, o, n in (l.split() for l in subprocess.run([str(d / "m")], capture_output=True, text=True).stdout.splitlines())}
-arm("a clean vertex and fragment shader build either way", rows[(0, 0)] == (0, -1), str(rows[(0, 0)]))
-arm("control: the old order builds a pipeline whose vertex shader reads an empty binding", rows[(1, 0)][0] == 0, str(rows[(1, 0)]))
-arm("taking the record after each stage refuses it and names the vertex stage", rows[(1, 0)][1] == 0, str(rows[(1, 0)]))
-arm("a fragment shader's read is refused by both orders", rows[(0, 1)] == (1, 1), str(rows[(0, 1)]))
-arm("with both stages bad the first one is the one named", rows[(1, 1)][1] == 0, str(rows[(1, 1)]))
+    rows = {(int(a), int(b)): (int(o), int(n), int(st)) for a, b, o, n, st in (l.split() for l in subprocess.run([str(d / "m")], capture_output=True, text=True).stdout.splitlines())}
+arm("by default every case ends as the shipped order ends it (no pipeline that builds today stops building)",
+    all(r[0] == r[1] for r in rows.values()), str(rows))
+arm("the shipped order builds a pipeline whose vertex shader reads an empty binding, and so does the default", rows[(1, 0)][:2] == (0, 0), str(rows[(1, 0)]))
+arm("the last stage's read fails the pipeline, as shipped", rows[(0, 1)][:2] == (1, 1) and rows[(1, 1)][:2] == (1, 1))
+arm("strict refuses an earlier stage's read too", rows[(1, 0)][2] == 1)
+arm("clean shaders build in every mode", rows[(0, 0)] == (0, 0, 0))
 
 added = "\n".join(l[1:] for l in patch.splitlines() if l.startswith("+") and not l.startswith("+++"))
 arm("the patch takes the record inside the lowering loop, before the cross-stage pass",
-    "nvk_nir_lower_descriptors_take_unbound(&ub_set, &ub_binding) && !unbound_hit" in added
+    "if (nvk_nir_lower_descriptors_take_unbound(&ub_set, &ub_binding)) {" in added
     and patch.index("take_unbound(&ub_set") < patch.index("nir_opt_varyings_bulk"))
-arm("on a hit it frees every stage's NIR, clears the outputs and returns an error naming the stage",
+arm("an earlier stage's read is reported once and refused only with NVK_UNBOUND_STAGE_STRICT=1",
+    'getenv("NVK_UNBOUND_STAGE_STRICT")' in added and "the pipeline is built as before (reported once)" in added and "static bool said;" in added)
+arm("a refusal frees every stage's NIR, clears the outputs and names the stage",
     "for (uint32_t j = 0; j < shader_count; j++)\n         ralloc_free(infos[j].nir);" in added
     and "memset(shaders_out, 0" in added and "_mesa_shader_stage_to_string(unbound_stage)" in added and "VK_ERROR_UNKNOWN" in added)
 chain = next((l for l in bld.splitlines() if l.strip().startswith('CHAIN="nvk-macos') and "nvk-card-select" in l), "")
