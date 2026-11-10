@@ -7,8 +7,10 @@
 #include <time.h>
 #include "class/clc56f.h"
 #include "class/cl2080_notification.h"
-#include "clc9b0.h"
+#include "dec_iface.h"
 #include "nvdec_drv.h"
+
+_Static_assert(DEC_SURFACES == NVDEC_IFACE_H264_SURFACE_COUNT, "H.264 surface offsets do not cover DEC_SURFACES");
 
 static NvU32 hi(NvU64 a) { return (NvU32)(a >> 8); }
 static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }

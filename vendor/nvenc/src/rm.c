@@ -1,5 +1,6 @@
 // rm.c: see rm.h.
 #include "rm.h"
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,26 +21,46 @@
 
 enum { SEL_ESC = 1, SEL_BINDFD = 3, SEL_EVWAIT = 6 };
 
-static io_connect_t open_conn_fd(NvU32 type, int *fdOut)
+// The fd number the user client keys its RM file on. Firefox's media (RDD) sandbox refuses /dev/null; there the read
+// end of an empty pipe stands in for it, as in the NullMoth plugin (plugin/nvmtl_fd_token.h).
+static int rm_fd_token(void)
+{
+    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0 || (errno != EACCES && errno != EPERM)) return fd;
+    int ends[2];
+    if (pipe(ends)) return -1;
+    close(ends[1]);
+    if (fcntl(ends[0], F_SETFD, FD_CLOEXEC) < 0) { close(ends[0]); return -1; }
+    return ends[0];
+}
+
+static io_connect_t open_conn_fd(NvU32 type, int *fdOut, uint64_t *serviceID)
 {
     // NVAccel's bridge first (0x4E56xxxx), then NVRM itself, as NVK's nvrm_xnu_open does
     io_connect_t conn = 0; kern_return_t kr = KERN_FAILURE;
     io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"));
-    if (svc) { kr = IOServiceOpen(svc, mach_task_self(), 0x4E560000u | type, &conn); IOObjectRelease(svc); }
+    if (svc) {
+        kr = IOServiceOpen(svc, mach_task_self(), 0x4E560000u | type, &conn);
+        if (kr == KERN_SUCCESS && serviceID) IORegistryEntryGetRegistryEntryID(svc, serviceID);
+        IOObjectRelease(svc);
+    }
     if (kr != KERN_SUCCESS) {
         svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVRM"));
         if (!svc) return 0;
-        kr = IOServiceOpen(svc, mach_task_self(), type, &conn); IOObjectRelease(svc);
+        kr = IOServiceOpen(svc, mach_task_self(), type, &conn);
+        if (kr == KERN_SUCCESS && serviceID) IORegistryEntryGetRegistryEntryID(svc, serviceID);
+        IOObjectRelease(svc);
         if (kr != KERN_SUCCESS) return 0;
     }
-    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);   // the user client keys its RM file on an fd number
+    int fd = rm_fd_token();
+    if (fd < 0) { IOServiceClose(conn); return 0; }
     uint64_t in = (uint64_t)fd;
     IOConnectCallScalarMethod(conn, SEL_BINDFD, &in, 1, NULL, NULL);
     if (fdOut) *fdOut = fd;
     return conn;
 }
 
-int rm_conn_open(RmConn *c, NvU32 type) { c->fd = -1; c->conn = open_conn_fd(type, &c->fd); return c->conn ? 0 : -1; }
+int rm_conn_open(RmConn *c, NvU32 type) { c->fd = -1; c->conn = open_conn_fd(type, &c->fd, NULL); return c->conn ? 0 : -1; }
 void rm_conn_close(RmConn *c) { if (c->conn) IOServiceClose(c->conn); if (c->fd >= 0) close(c->fd); c->conn = 0; c->fd = -1; }
 
 int rm_esc(Rm *rm, io_connect_t conn, NvU32 cmd, void *data, size_t size)
@@ -80,7 +101,8 @@ NV_STATUS rm_ctrl(Rm *rm, NvHandle obj, NvU32 cmd, void *params, NvU32 size)
 int rm_open(Rm *rm)
 {
     bool v = rm->verbose; memset(rm, 0, sizeof *rm); rm->verbose = v;
-    rm->ctl = open_conn_fd(0, &rm->ctlFd); rm->dev = open_conn_fd(1, &rm->devFd);
+    rm->ctl = open_conn_fd(0, &rm->ctlFd, &rm->ctlServiceID);
+    rm->dev = open_conn_fd(1, &rm->devFd, &rm->devServiceID);
     if (!rm->ctl || !rm->dev) { fprintf(stderr, "rm: no NVAccel/NVRM user client\n"); return -1; }
     if (rm_esc(rm, rm->ctl, NV_ESC_CARD_INFO, &rm->card, sizeof rm->card) || !rm->card.valid) { fprintf(stderr, "rm: card info failed\n"); return -1; }
     NVOS21_PARAMETERS p = { .hClass = NV01_ROOT_CLIENT };

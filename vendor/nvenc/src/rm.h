@@ -12,6 +12,7 @@
 
 typedef struct {
     io_connect_t ctl, dev;            // control and device user clients
+    uint64_t ctlServiceID, devServiceID; // registry entries passed to IOServiceOpen
     int ctlFd, devFd;                 // the fd numbers they are bound to (closed by rm_close)
     NvHandle client, device, subdevice;
     NvHandle vaspace;                 // our GPU address space (rm_va_init)
