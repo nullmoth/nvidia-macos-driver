@@ -43,6 +43,8 @@ def c_command(path, out):
         words = shlex.split(m.group(2))
         if path.name not in [Path(w).name for w in words] or "-o" not in words:
             continue
+        if any("<" in w or ">" in w for w in words):
+            return "placeholder"      # the line names something to fill in (a header folder, a library)
         cwd = ROOT if f"tools/{path.name}" in words else TOOLS
         i = words.index("-o")
         words[i + 1] = str(out)
@@ -63,6 +65,8 @@ def run_one(path):
         else:
             with tempfile.TemporaryDirectory(prefix="nmtest-") as t:
                 cmd = c_command(path, Path(t) / "t")
+                if cmd == "placeholder":
+                    return name, "norun", "its build line needs a path filled in (see its header)"
                 if not cmd:
                     return name, "norun", "its header names no build line"
                 b = subprocess.run(cmd[0], cwd=cmd[1], capture_output=True, text=True, timeout=TIMEOUT)

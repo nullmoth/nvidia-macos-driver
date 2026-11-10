@@ -43,7 +43,13 @@ o=$(run NVMTL_OSVER_TEST_REAL=26.1 "$OTHER")
 # "loaded", not "answered": the library ran and installed nothing (the version printed is this Mac's real one)
 [[ $o == "version ${REAL}"* || $o == "version ${REAL}.0 "* ]] && [[ $o == *" lib loaded" ]]; arm "the same executable name in another bundle loads the library and is told nothing" $((! $?)) "$o"
 o=$(run "$GAME")
-[[ $o == *" lib loaded" ]]; arm "on this Mac's real macOS $REAL the game keeps the real answer (never lowered)" $((! $?)) "$o"
+# What the game is told on this Mac itself depends on this Mac: at 27 or later the real answer stands (it is never lowered),
+# below that it is raised like the pretend versions above.
+if [ "${REAL%%.*}" -ge 27 ]; then
+  [[ $o == *" lib loaded" ]]; arm "on this Mac's real macOS $REAL the game keeps the real answer (never lowered)" $((! $?)) "$o"
+else
+  [[ $o == "version 27.0.0 "*" lib answered" ]]; arm "on this Mac's real macOS $REAL the game is told 27.0.0, as on the pretend versions" $((! $?)) "$o"
+fi
 o=$(run NVMTL_OSVER_TEST_REAL=26.1 NVMTL_PROCESS_ENV=1 NVMTL_APP_PROFILE=0 "$GAME")
 [[ $o == *" lib loaded" ]]; arm "NVMTL_APP_PROFILE=0 in the kept environment turns it off" $((! $?)) "$o"
 o=$(run NVMTL_OSVER_TEST_REAL=26.1 NVMTL_PROCESS_ENV=1 NVMTL_OS_VERSION=0 "$GAME")
