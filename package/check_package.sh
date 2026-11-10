@@ -36,8 +36,19 @@ fi
 # Every executable file we ship is ours or built from licensed open source. A program signed by Apple (the Metal toolchain's
 # air-opt shipped in 2.0 to 2.8.1 this way) is not ours to redistribute, and no library may load from outside the system
 # and the folders this package installs (a build machine's path, Homebrew or MacPorts would load whatever is there).
+# NVIDIAShared.bundle (in packages up to 2.8.1) held two of NVIDIA's closed compiler libraries, one of them altered. They are
+# Linux ELF files, which the Mach-O checks below never looked at; nothing this package builds is ELF, so any ELF file is
+# somebody else's binary carried in from an older package tree.
+[ ! -e "$ROOT/Library/GPUBundles/NVIDIAShared.bundle" ] || { echo "STOP: the package carries NVIDIAShared.bundle (NVIDIA's closed compiler libraries); it cannot ship"; fail=1; }
+# A file added to the plugin bundle after it was sealed breaks the seal; finish_package.sh seals it again.
+PB="Library/GPUBundles/NVMTLDriver.bundle"
+if [ -f "$ROOT/$PB/Contents/MacOS/NVMTLDriver" ]; then
+  codesign --verify --deep --strict "$ROOT/$PB" >/dev/null 2>&1 || { echo "STOP: the plugin bundle's seal does not verify (a file changed after it was sealed)"; fail=1; }
+fi
 while IFS= read -r -d '' f; do
-  head -c 4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n' | grep -qE '^(cffaedfe|cefaedfe|cafebabe|feedfacf)$' || continue
+  magic=$(head -c 4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+  [ "$magic" != 7f454c46 ] || { echo "STOP: ${f#"$ROOT/"} is a Linux ELF binary; nothing built here is, so it cannot ship"; fail=1; continue; }
+  printf '%s' "$magic" | grep -qE '^(cffaedfe|cefaedfe|cafebabe|feedfacf)$' || continue
   sig=$(codesign -dv "$f" 2>&1)
   case "$sig" in *"Identifier=com.apple."*|*"TeamIdentifier=59GAB85EFG"*|*"Authority=Apple Code Signing"*|*"Authority=Software Signing"*)
     echo "STOP: ${f#"$ROOT/"} is signed by Apple; it cannot ship"; fail=1;; esac

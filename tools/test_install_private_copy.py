@@ -34,6 +34,8 @@ def package(t, links=()):
     lib.parent.mkdir(parents=True); lib.write_bytes(b"vulkan")
     for name, target in links:
         (lib.parent / name).symlink_to(target)
+    # install.sh runs the package's own sums_complete.sh after shasum -c, and refuses a package that does not list it
+    (here / "sums_complete.sh").write_bytes((ROOT / "package/sums_complete.sh").read_bytes())
     files = sorted(p for p in here.rglob("*") if p.is_file() and not p.is_symlink())
     (here / "SHA256SUMS").write_text("".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(here)}\n" for p in files))
     return here
@@ -48,6 +50,10 @@ def run(t, here, after="", payload=False):
     where = t / "elsewhere" if payload else here
     where.mkdir(exist_ok=True)
     (where / "install.sh").write_text(script)
+    if where == here:   # the stand-in installer is a package file: list it (its line only; no other file is re-hashed)
+        sums = [l for l in (here / "SHA256SUMS").read_text().splitlines() if not l.endswith("  install.sh")]
+        sums.append(f"{hashlib.sha256(script.encode()).hexdigest()}  install.sh")
+        (here / "SHA256SUMS").write_text("\n".join(sums) + "\n")
     r = subprocess.run(["/bin/bash", str(where / "install.sh")], capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
 

@@ -71,7 +71,7 @@ class Install(unittest.TestCase):
             (b.parent.parent/'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'com.nullmoth.NVAccel','NMTargetOSMajor':major}))
         for k in KEXTS:
             b=self.payload/f'Library/Extensions/{k}.kext/Contents/MacOS/{k}';b.parent.mkdir(parents=True);b.write_bytes(('new-'+k).encode())
-        for b in ['NVMTLDriver.bundle','NVIDIAShared.bundle','nvmtl']:
+        for b in ['NVMTLDriver.bundle','nvmtl']:   # the package carries no NVIDIAShared.bundle; the old install below does
             p=self.payload/'Library/GPUBundles'/b;p.mkdir(parents=True);(p/'fixture').write_text('new-'+b)
         lib=self.payload/'Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib';lib.parent.mkdir(parents=True);lib.write_text('new-codecs')
         (self.payload/'Library/GPUBundles/nvmtl-allow.txt').write_text('new-allow')
@@ -85,6 +85,7 @@ class Install(unittest.TestCase):
             helper.write_bytes((REPO/'tools/primary_runtime_fixture.sh').read_bytes());helper.chmod(0o755)
 
         fw=self.payload/'Users/Shared/nvfw';fw.mkdir(parents=True);(fw/'fixture').write_text('new-firmware')
+        (self.payload/'sums_complete.sh').write_bytes((REPO/'package/sums_complete.sh').read_bytes())   # install.sh runs the package's own copy
         lines=[hashlib.sha256(p.read_bytes()).hexdigest()+'  '+str(p.relative_to(self.payload)) for p in self.payload.rglob('*') if p.is_file()]
         (self.payload/'SHA256SUMS').write_text('\n'.join(lines)+'\n')
         self.old={}
@@ -107,6 +108,7 @@ class Install(unittest.TestCase):
             source=source.replace('$HERE/__PAYLOAD_'+prefix.replace('/','_')+'__','$HERE/'+prefix)
         source=source.replace('require_install_directory /Library\n','require_install_directory '+str(self.root/'Library')+'\n')
         self.script=self.payload/'install.sh';self.script.write_text(source)
+        with open(self.payload/'SHA256SUMS','a') as fh: fh.write(hashlib.sha256(source.encode()).hexdigest()+'  install.sh\n')   # the installer is a package file too
         self.env=dict(os.environ,FIXTURE_ROOT=str(self.root),PATH=str(self.bin)+':/usr/bin:/bin:/usr/sbin:/sbin')
     def tearDown(self):self.temp.cleanup()
     def run_install(self,**faults):return subprocess.run(['/bin/bash',str(self.script)],env=dict(self.env,**faults),capture_output=True,text=True)

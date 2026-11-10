@@ -45,8 +45,26 @@ Downloaded on the user's Mac, never shipped: NVIDIA's DLSS runtimes (SDK 310.9.1
 (one file from NVIDIA's Linux 620.70.06 package) and `libnvJitLink` (from NVIDIA's PyPI wheel). `package/dlss_fetch.sh` pins
 each by SHA-256, asks before downloading, and installs them root-owned. They stay under NVIDIA's licences.
 
-No closed NVIDIA library is linked into the package. `libnvencvt` talks to the card through the RM interface of the open
+No closed NVIDIA library is in the package. `libnvencvt` talks to the card through the RM interface of the open
 modules and the open-gpu-doc class headers.
+
+Carried in older packages and removed in 2.9. The release build starts each package from the previous one and replaces
+what it rebuilds, so a file nothing rebuilds rides along; an audit of the source tree alone does not see it. Two such
+files were not ours to ship:
+
+* `Library/GPUBundles/nvmtl/air-opt`, Apple's Metal toolchain program (2.0.3 to 2.8.1). Replaced by `nvmtl-air-dis`.
+* `Library/GPUBundles/NVIDIAShared.bundle` (to 2.8.1): `libnvidia-ptxjitcompiler.so.610.57.04` and
+  `libnvidia-nvvm.nocanary.so`, NVIDIA's closed compiler libraries from its Linux driver, the second one altered, with
+  the host program that loaded them. The plugin reached them only with the developer switch `NVMTL_VENDOR_COMPILER`.
+  2.9 does not carry the bundle; `install.sh` removes an installed copy; `check_package.sh` refuses the bundle and any
+  ELF file anywhere in the tree.
+
+Carried and still shipped, built outside this tree: NullMoth's own hardware video libraries in the plugin bundle
+(`libnvdec_h264.dylib`, `libnvdec_h264_t2d.dylib`, `libnvdec_hevc.dylib`, `libnvenc_h264*.dylib`, `libnvenc_hevc*.dylib`),
+the Vulkan loader `nvmtl/libvulkan.1.4.362.dylib` (Khronos, Apache-2.0) and `nullmoth-runtime-check`. Their sources are
+not in this repository yet, so a 2.9 package does not rebuild them. Open item for the release owner: bring the video
+libraries' sources and build scripts into the tree (or let `libnvencvt` serve every generation), and build the loader
+from the pinned source `package/stage_vulkan_loader.sh` already uses.
 
 ## 3. GPL and PolyForm in the dependency list
 

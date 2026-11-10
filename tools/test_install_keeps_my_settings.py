@@ -7,7 +7,7 @@ SRC = (pathlib.Path(__file__).resolve().parents[1] / "package/install.sh").read_
 start = SRC.index("MYCONF_START=")
 end = SRC.index("if [ -d \"$EXT/NMXGPU.kext\" ]", start)
 block = SRC[start:end].replace(
-    'for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl; do rm -rf "$GB/$b" && ditto "$HERE/Library/GPUBundles/$b" "$GB/$b" || die "copy $b (restore from $BK)"; done',
+    'for b in NVMTLDriver.bundle nvmtl; do rm -rf "$GB/$b" && ditto "$HERE/Library/GPUBundles/$b" "$GB/$b" || die "copy $b (restore from $BK)"; done',
     'rm -rf "$GB/nvmtl" && cp -R "$HERE/Library/GPUBundles/nvmtl" "$GB/nvmtl"')
 assert "cp -R" in block, "the copy line moved: update this test's anchor"
 fails = []
