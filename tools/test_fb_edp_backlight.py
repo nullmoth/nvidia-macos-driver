@@ -12,7 +12,7 @@ fb = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
 rm = (root / 'kexts/NVRM/nvrm_ddc.cpp').read_text()
 for need in ['PE_parse_boot_argn("nvfbedpbl"', 'me->fEdp ? nvrmEdpSet(', 'fBacklight->useEdpAux(']:
     assert need in fb, need
-assert 'r->addr < 0x700 || r->addr + r->len > 0x800' in rm, 'the AUX pass-through must stay inside the eDP panel-control range'
+assert 'r->addr < 0x700 || r->addr >= 0x800 || r->addr + r->len > 0x800' in rm, 'the AUX pass-through must stay inside the eDP panel-control range'
 fixture = r'''
 #include <cassert>
 #include <cstdio>
