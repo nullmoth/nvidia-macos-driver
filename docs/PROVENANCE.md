@@ -62,9 +62,51 @@ files were not ours to ship:
 Carried and still shipped, built outside this tree: NullMoth's own hardware video libraries in the plugin bundle
 (`libnvdec_h264.dylib`, `libnvdec_h264_t2d.dylib`, `libnvdec_hevc.dylib`, `libnvenc_h264*.dylib`, `libnvenc_hevc*.dylib`),
 the Vulkan loader `nvmtl/libvulkan.1.4.362.dylib` (Khronos, Apache-2.0) and `nullmoth-runtime-check`. Their sources are
-not in this repository yet, so a 2.9 package does not rebuild them. Open item for the release owner: bring the video
-libraries' sources and build scripts into the tree (or let `libnvencvt` serve every generation), and build the loader
-from the pinned source `package/stage_vulkan_loader.sh` already uses.
+not in this repository yet, so a 2.9 package does not rebuild them. Section 2a says which card needs which of the nine
+video libraries and what `libnvencvt` would have to learn before each can go.
+
+## 2a. Hardware video: who serves what, by generation
+
+Two providers register with VideoToolbox: NullMoth's own libraries (carried binaries, rating 1000) and `libnvencvt`
+(`vendor/nvenc`, built from this tree, rating 1100). "auto" is what a user gets with nothing set; "opt-in" needs
+`NVMTL_NVENCVT=1` (or a list of process names) in `nvrm610.conf`. A dash is a codec nobody serves in hardware.
+
+| Generation (NVENC / NVDEC class) | H.264 decode | HEVC decode | VP9, AV1 decode | MPEG-1/2/4 decode | H.264 / HEVC encode | AV1 encode |
+|---|---|---|---|---|---|---|
+| Turing GTX 16, TU117 (b4b7 / c4b0) | own `_t2d`; nvencvt opt-in | own; nvencvt opt-in | VP9 nvencvt opt-in; no AV1 in hardware | nvencvt opt-in | own `_tu10x`; nvencvt opt-in | none in hardware |
+| Turing TU116, TU10x: GTX 1660, RTX 20 (c4b7 / c4b0) | own `_t2d`; nvencvt opt-in (new) | own; nvencvt opt-in (new) | VP9 nvencvt opt-in (new) | nvencvt opt-in (new) | own `_tu10x` only | none in hardware |
+| Ampere GA10x (c7b7 / c7b0) | own `_t2d`; nvencvt with `NVENCVT_AMPERE_ALL_DEC=1` | own; nvencvt with the same switch | nvencvt auto | nvencvt with the same switch | own `_ga10x`; nvencvt with `NVENCVT_AMPERE_ENC=1`, untried | none in hardware |
+| Ada (c9b7 / c9b0) | nvencvt auto (own `_t2d` registers below it) | nvencvt auto (own below it) | nvencvt auto | nvencvt auto | nvencvt auto (own: none) | nvencvt auto |
+| Blackwell (cfb7 / cfb0) | own `libnvdec_h264`; nvencvt opt-in (new, not yet run on a card) | own only | - | - | own `libnvenc_h264`, `libnvenc_hevc` only | - |
+
+What each carried library is still needed for, and what is missing before `libnvencvt` can replace it:
+
+* `libnvdec_h264.dylib`: Blackwell H.264 decode. Replaced once the new opt-in path has decoded correctly on an RTX 50
+  card (the classes, the plane layout and the picture setup are public; no public header lists class 0xcfb0's methods,
+  so whether Ada's method list is enough is a question for the card).
+* `libnvdec_h264_t2d.dylib`: H.264 decode on Turing and Ampere by default. `libnvencvt` decodes there only by switch:
+  upstream ran its H.264 decoder on TU117 and Ada, not on GA10x.
+* `libnvdec_hevc.dylib`: HEVC decode on Turing, Ampere and Blackwell. Blackwell is the hard one: `libnvencvt`'s HEVC
+  decoder is written to Ada's method list (open-gpu-doc `clc9b0.h`), and open-gpu-doc has no header for 0xcfb0.
+* `libnvenc_h264.dylib`, `libnvenc_hevc.dylib`: Blackwell encode. `nvenc_drv.h` lists no picture-setup magic for
+  0xcfb7 and upstream has no setup for it.
+* `libnvenc_h264_ga10x.dylib`, `libnvenc_hevc_ga10x.dylib`: Ampere encode (upstream's setups are Ada's and TU117's).
+* `libnvenc_h264_tu10x.dylib`, `libnvenc_hevc_tu10x.dylib`: encode on TU10x and TU116 (class 0xc4b7; upstream has
+  0xb4b7 only). TU117 alone could move to `libnvencvt`.
+
+So none of the nine can leave the package yet, and no default changed in this pass. Two facts for the owner's decision
+on "our own libraries or `libnvencvt`":
+
+1. `libnvencvt`'s encoders are not free of NVIDIA's closed driver either. Their per-picture control blocks
+   (`vendor/nvenc/src/h264enctmpl.h`, `hevcenctmpl.h`, `av1enctmpl.h`) are byte tables upstream generated from traces
+   of NVIDIA's Linux driver encoding on the same cards, and `enc.c` cites such traces for buffer sizes. Its licence is
+   MIT and the method is observation of output, not disassembly, but it is the same kind of source as our own encoder
+   libraries' templates. Its decoders are written to `nvdec_drv.h` and are the cleaner half.
+2. The route with no observed bytes at all is to write the encoder control blocks field by field from `nvenc_drv.h`
+   (MIT; it documents every field of the motion-estimation, mode-decision and rate-control structures) with values
+   chosen and tuned here. That is new work that needs each generation's card to verify; it was not attempted blind.
+
+The vendored library's own changes are listed in `vendor/nvenc/SOURCE`.
 
 ## 3. GPL and PolyForm in the dependency list
 
