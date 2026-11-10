@@ -280,7 +280,7 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
   uint64_t _useEp;
   BOOL _texSeen;
 } @end
-@interface NVMTLTexture () { @public NSString *_label; MTLResourceOptions _ropt; BOOL _shareable; BOOL _fbo;
+@interface NVMTLTexture () { @public NSString *_label; MTLResourceOptions _ropt; BOOL _shareable; BOOL _fbo; BOOL _drawable;
   MTLTextureSwizzleChannels _swz; BOOL _hasSwz; void *_swzView;
   void *_tbView, *_tbAlias; BOOL _tbStorage;
   int _resRefs;

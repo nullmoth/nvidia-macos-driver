@@ -1258,6 +1258,10 @@ static NSData *nvmtl_varying_link(NVMTLFunction *vf, NVMTLFunction *ff) {
               vf->_fname.UTF8String ?: "?", ff->_fname.UTF8String ?: "?", moved, unmatched, told);
     return md;
 }
+static BOOL nvmtl_desc_drawable(MTLTextureDescriptor *d) {
+    SEL selector = sel_registerName("isDrawable");
+    return d && [d respondsToSelector:selector] && ((BOOL (*)(id, SEL))objc_msgSend)(d, selector);
+}
 static BOOL nvmtl_desc_fbo(MTLTextureDescriptor *d) {
     SEL s = sel_registerName("framebufferOnly");
     return d && [d respondsToSelector:s] && ((BOOL (*)(id, SEL))objc_msgSend)(d, s);
@@ -1379,7 +1383,7 @@ static id<MTLTexture> nvmtl_make_y422_texture(MTLTextureDescriptor *d, NVMTLText
     NVMTLTexture *t = [NVMTLTexture new];
     t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)d.hazardTrackingMode << MTLResourceHazardTrackingModeShift)
              | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
-    t->_fbo = nvmtl_desc_fbo(d);
+    t->_fbo = nvmtl_desc_fbo(d); t->_drawable = nvmtl_desc_drawable(d);
     t->_fmt = d.pixelFormat;
     uint32_t dvk = 0, dasp = 0;
     if (nvmtl_depthfmt(d.pixelFormat, &dvk, &dasp) == 0) {
@@ -1616,21 +1620,30 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
     return nvmtl_vk_image_create_typed(w, h, vkf, bpp, a8, 1, stex, 2u, 1u, &t->_i);
 }
 
+static BOOL nvmtl_surface_can_shader_write(NVMTLTexture *texture) {
+    if (texture->_stex) return YES;
+    nvk_image *image = [texture nvi];
+    // nvmtl_storage_view_for can write a linear surface through an optimal-tiled
+    // twin. Its eligibility also determines the capability Core Image sees.
+    if (texture->_parent || !image || !image->img || !image->w || !image->h
+        || (image->mips ? image->mips : 1) > 1 || (image->layers ? image->layers : 1) > 1
+        || image->mtl_type != 2 || (image->samples ? image->samples : 1) > 1 || image->bw > 1) return NO;
+    return nvmtl_vk_format_is_storage(nvmtl_vk_srgb_format(image->fmt) ? VK_FORMAT_R16G16B16A16_SFLOAT : image->fmt) != 0;
+}
+
 // A CAMetalLayer drawable with framebufferOnly=NO is, on real Metal, usable as a render target AND a compute/Core Image
 // destination. QuartzCore hands this driver a descriptor whose usage is only ShaderRead for it, so Core Image refuses the
 // texture ("texture usage must include MTLTextureUsageShaderWrite") and Photo Booth's preview stays black. The surface's
 // image is already writable whenever its format allows (see nvmtl_surface_image_create), so say so.
 // WindowServer keeps the usage it asked for: it wraps hundreds of surfaces a second, none of them Core Image targets.
-static NSUInteger nvmtl_surface_usage(NSUInteger usage, BOOL fbo, BOOL storage) {
-    // Unknown permits shader writes too. Adding only ShaderRead/RenderTarget to a
-    // non-storage surface would forbid its optimal-tiled storage twin below
-    // (ImageIO's RGBA16Unorm outputs), silently sending those writes to a dummy.
+static NSUInteger nvmtl_surface_usage(NSUInteger usage, BOOL fbo, BOOL writable) {
+    // Unknown already permits shader writes, including the storage-twin path.
     if (usage == MTLTextureUsageUnknown) return usage;
     static int ws = -1;
     if (ws < 0) { const char *me = getprogname(); ws = me && !strcmp(me, "WindowServer"); }
     if (!fbo && !ws) {
         usage |= MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
-        if (storage) usage |= MTLTextureUsageShaderWrite;
+        if (writable) usage |= MTLTextureUsageShaderWrite;
     }
     return usage;
 }
@@ -1652,7 +1665,7 @@ static char nvmtl_surface_cache_key;
     NVMTLTexture *t = [NVMTLTexture new];
     t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)d.hazardTrackingMode << MTLResourceHazardTrackingModeShift)
              | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
-    t->_fbo = nvmtl_desc_fbo(d);
+    t->_fbo = nvmtl_desc_fbo(d); t->_drawable = nvmtl_desc_drawable(d);
     t->_fmt = d.pixelFormat;
     if (nvmtl_y422_is_format((uint32_t)d.pixelFormat)) {   // a video frame: NVMTL_YUV422=1, decoded on use, never cached or written back
         if (!surf || w != IOSurfaceGetWidthOfPlane(surf, (uint32_t)plane) || h != IOSurfaceGetHeightOfPlane(surf, (uint32_t)plane)) { nvlog("4:2:2 texture over an IOSurface plane: size mismatch or no surface - nil"); return nil; }
@@ -1663,7 +1676,7 @@ static char nvmtl_surface_cache_key;
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
-    NSArray *key = surf ? @[@(IOSurfaceGetID(surf)), @(plane), @(w), @(h), @(d.pixelFormat), @(t->_ropt), @(t->_fbo)] : nil;
+    NSArray *key = surf ? @[@(IOSurfaceGetID(surf)), @(plane), @(w), @(h), @(d.pixelFormat), @(t->_ropt), @(t->_fbo), @(t->_drawable)] : nil;
     NVMTLTexture *backing = key ? [cache objectForKey:key] : nil;
     // Failed BAR imports use a private image. Repeated wrappers of the same
     // surface must share that image, just as successful family imports do,
@@ -1672,7 +1685,7 @@ static char nvmtl_surface_cache_key;
     if (backing && !backing->_vramOn) {
         NVMTLTexture *alias = (NVMTLTexture *)[backing newTextureViewWithPixelFormat:d.pixelFormat];
         if (alias) {
-            alias->_viewParent = nil; alias->_usage = nvmtl_surface_usage(d.usage, t->_fbo, alias->_stex); alias->_ropt = t->_ropt; alias->_fbo = t->_fbo;
+            alias->_viewParent = nil; alias->_usage = nvmtl_surface_usage(d.usage, t->_fbo, nvmtl_surface_can_shader_write(alias)); alias->_ropt = t->_ropt; alias->_fbo = t->_fbo;
             nvmtl_texture_desc_swizzle(alias, d);
             return alias;
         }
@@ -1684,7 +1697,7 @@ static char nvmtl_surface_cache_key;
     t->_plane = plane;
     t->_fmt = d.pixelFormat;
     t->_stex = t->_i.storage == 1;
-    t->_usage = nvmtl_surface_usage(d.usage, t->_fbo, t->_stex);
+    t->_usage = nvmtl_surface_usage(d.usage, t->_fbo, nvmtl_surface_can_shader_write(t));
     nvmtl_texture_desc_swizzle(t, d);
     if (key && !t->_vramOn) [cache setObject:t forKey:key];
     nvlog("newTextureWithDescriptor:iosurface:%p plane:%lu -> %p (%zux%zu fmt %lu)",
