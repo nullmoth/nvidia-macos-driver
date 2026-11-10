@@ -2,14 +2,36 @@
 # build_rm620.sh: NVIDIA's RM core 615.71.10 compiled for macOS (libnvkernel.a), the way the 610 archive was made:
 # NVIDIA's own Makefile dry-run with TARGET_OS=Darwin, then cc -> clang -mkernel, -DNV_DARWIN, -fcf-protection=branch,
 # without -mcmodel=kernel / -fno-pic, for macOS 15.0 like the kext that links it (built for the SDK's macOS instead, every
-# object drew a linker note against NVRM's 15.0 target). Four headers learn NV_DARWIN; our OS-timer fix is applied.
+# object drew a linker note against NVRM's 15.0 target). Four headers learn NV_DARWIN; the patch chain is applied first.
 # Usage: build_rm620.sh <work dir> <pristine open-gpu-kernel-modules-<version> tree>; the work dir gets ogkm-<version>.
 set -uo pipefail
 B=$(cd "${1:?work dir}" && pwd); V=${NV_VERSION:-620.70.06}
 SRC=${2:?pristine open-gpu-kernel-modules tree}
 T=$B/ogkm-$V
 JOBS=${JOBS:-6}
-if [ ! -d "$T" ]; then cp -R "$SRC" "$T" || exit 2; fi
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+# The work tree is the pristine tree plus every patch in kexts/NVRM/patches, applied here, in file-name order, with no
+# fuzz. They used to be applied by hand: the tree the archives were built from had five of the seven, and the two newest
+# (hardware YUV 4:2:0, the colour-range control) were in the repository but in no binary. The names applied are recorded in
+# the tree; a tree without that record was patched by hand and is refused.
+if [ ! -d "$T" ]; then
+  cp -R "$SRC" "$T" || exit 2
+  : > "$T/.nm-patches"
+  for f in "$HERE"/kexts/NVRM/patches/*.patch; do
+    ok=0
+    for root in "" "src/nvidia-modeset"; do
+      ( cd "$T/$root" && patch -p1 --fuzz=0 --dry-run < "$f" >/dev/null 2>&1 && patch -p1 --fuzz=0 --no-backup-if-mismatch < "$f" >/dev/null ) && { ok=1; break; }
+    done
+    [ $ok = 1 ] || { echo "STOP: $(basename "$f") does not apply to $SRC"; rm -rf "$T"; exit 2; }
+    basename "$f" >> "$T/.nm-patches"
+  done
+  find "$T/src" -name '*.orig' -delete
+fi
+[ -f "$T/.nm-patches" ] || { echo "STOP: $T has no record of the patches applied to it (patched by hand?); use a new work dir"; exit 2; }
+want=$(cd "$HERE/kexts/NVRM/patches" && ls *.patch | LC_ALL=C sort | tr '\n' ' ')
+have=$(LC_ALL=C sort "$T/.nm-patches" | tr '\n' ' ')
+[ "$want" = "$have" ] || { echo "STOP: $T was built with [$have], this tree has [$want]; use a new work dir"; exit 2; }
+echo "patch chain applied: $have"
 python3 - "$T" <<'PY' || exit 3
 import os, sys
 t = sys.argv[1]
@@ -22,11 +44,8 @@ edit("src/common/sdk/nvidia/inc/cpuopsys.h", "defined(__INTEGRITY) ) && !defined
 for rel in ("src/common/inc/nvVer.h", "src/common/inc/nvUnixVersion.h"):
     edit(rel, "defined(NV_QNX) || defined(NV_INTEGRITY) || \\", "defined(NV_QNX) || defined(NV_INTEGRITY) || defined(NV_DARWIN) || \\")
 edit("src/common/inc/nvBldVer.h", "#if defined(NV_LINUX) || defined(NV_BSD) || defined(NV_SUNOS)\n", "#if defined(NV_LINUX) || defined(NV_BSD) || defined(NV_SUNOS) || defined(NV_DARWIN)\n")
-edit("src/nvidia/src/kernel/gpu/timer/timer_ostimer.c",
-     "        status = osDestroyNanoTimer(pGpu->pOsGpuInfo, pTmrEvent->super.pOSTmrCBdata);\n        pTmrEvent->super.flags &= ~TMR_FLAG_OS_TIMER_QUEUED;",
-     "        status = osDestroyNanoTimer(pGpu->pOsGpuInfo, pTmrEvent->super.pOSTmrCBdata);\n"
-     "        // A second destroy of the same event (FSP boot cleanup runs twice on a failed boot) faulted on the stale handle.\n"
-     "        pTmrEvent->super.pOSTmrCBdata = NULL;\n        pTmrEvent->super.flags &= ~TMR_FLAG_OS_TIMER_QUEUED;")
+# the OS-timer fix comes from the patch chain (610-fsp-timer-double-destroy.patch); it must be there
+assert "pTmrEvent->super.pOSTmrCBdata = NULL;" in open(os.path.join(t, "src/nvidia/src/kernel/gpu/timer/timer_ostimer.c")).read(), "the OS-timer fix is missing"
 print("source edits applied")
 PY
 cd "$T/src/nvidia" || exit 2

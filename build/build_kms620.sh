@@ -1,9 +1,10 @@
 #!/bin/bash
-# build_kms620.sh: NVIDIA's modeset core 615 compiled for macOS (libnvkms.a), with our three modeset patches already
-# applied by hand to the tree (display completion, set-mode reason, backlight register log). Same transform as RM,
-# for macOS 15.0. Usage: build_kms620.sh <work dir> (the one build_rm620.sh filled).
+# build_kms620.sh: NVIDIA's modeset core compiled for macOS (libnvkms.a) from the work tree build_rm620.sh made, which
+# already carries every patch in kexts/NVRM/patches. Same transform as RM, for macOS 15.0.
+# Usage: build_kms620.sh <work dir> (the one build_rm620.sh filled).
 set -uo pipefail
 B=$(cd "${1:?work dir}" && pwd); JOBS=${JOBS:-6}; V=${NV_VERSION:-620.70.06}
+[ -f "$B/ogkm-$V/.nm-patches" ] || { echo "STOP: $B/ogkm-$V has no record of the patches applied to it; run build_rm620.sh in a new work dir"; exit 2; }
 cd "$B/ogkm-$V/src/nvidia-modeset" || exit 2
 O=_out/Darwin_x86_64; mkdir -p "$O"
 make -n TARGET_OS=Darwin TARGET_ARCH=x86_64 NV_VERBOSE=1 2>/dev/null > "$B/kms-make-n.txt"
