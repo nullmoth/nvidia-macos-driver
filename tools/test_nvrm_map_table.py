@@ -41,7 +41,7 @@ class MapTable(unittest.TestCase):
             self.assertEqual(problems(f.read()), [])
 
     def test_negative_control_the_previous_source_fails(self):
-        old = subprocess.run(["git", "-C", ROOT, "show", "042bebe:" + SRC], capture_output=True, text=True, check=True).stdout
+        old = subprocess.run(["git", "-C", ROOT, "show", "b6b25a9f^:" + SRC], capture_output=True, text=True, check=True).stdout
         found = problems(old)
         self.assertIn("table smaller than 8192 entries", found)
         self.assertTrue(any("does not raise" in p for p in found), found)

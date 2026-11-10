@@ -56,7 +56,9 @@ int main() {
 def main():
     source = SOURCE.read_text(encoding="utf-8")
     start = source.index("static void topologyFamilyLoaded(")
-    callback = source[start:source.index("static void pluginStart()", start)]
+    # the callback alone: the display-audio volume routing that follows it in the file has its own test
+    callback = source[start:source.index("\n}\n", start) + 3]
+    assert "gTopologyVerb" in callback and "wrapClipOutputSamples" not in callback, "the slice is not the topology callback"
     command = os.environ.get("CXX")
     compiler = shlex.split(command) if command else None
     if not compiler:

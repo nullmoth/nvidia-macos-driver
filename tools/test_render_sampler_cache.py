@@ -11,7 +11,9 @@ start = source.index('static NSDictionary *nvmtl_pixel_sampler_norm(')
 end = source.index('- (NVMTLRenderPipelineState *)nvmtlSamplerPipeline', start)
 helpers = source[start:end]
 start = source.index('        NSDictionary *vS=nil,*fS=nil;', end)
-end = source.index('        @synchronized(_ps)', start)
+# up to the key itself; the per-encoder memo that follows it (nvmtl_repeat_bind.h) has its own test
+anchor = '        NSData *key=_pixelSamplerKey;\n'
+end = source.index(anchor, start) + len(anchor)
 key_path = source[start:end]
 assert source.count('if (nvmtl_pixel_sampler_update(') == 4
 assert '_fragmentSamplers[key]=state' not in source

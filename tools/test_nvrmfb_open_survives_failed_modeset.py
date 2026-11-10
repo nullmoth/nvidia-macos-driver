@@ -39,6 +39,7 @@ static const IOReturn kIOReturnSuccess = 0, kIOReturnError = (IOReturn)0xe00002b
 static unsigned long long mach_absolute_time() { return 1; }
 struct NVRMNVDAFramebuffer {
     bool modeOk; unsigned long long fEnableAbs = 0; bool fHotplugBorn = true, fConnectFired = false; unsigned fIndex = 0;
+    bool fProxy = false;   // an NVIDIA head, not the proxy for another GPU's panel (which returns before the mode set)
     int notified = 0, audio = 0;
     explicit NVRMNVDAFramebuffer(bool ok) : modeOk(ok) {}
     bool applyMode() { return modeOk; }
