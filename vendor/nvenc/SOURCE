@@ -21,6 +21,24 @@ Changes made here, in this order of importance:
                  - hevc_parse_sps() / h264_parse_sps(): the sizes, bit depths and block sizes of the specification's ranges are
                    checked before the SPS is stored (16 * width overflowed int); av1 decode_unsigned_subexp_with_ref() shifts unsigned.
 
+  Blackwell and the other Turing chips (tools/test_nvencvt_blackwell.py), written from public sources only:
+                 - src/rm.c: Blackwell's classes 0xcfb7, 0xcfb0, 0xc96f (open-gpu-kernel-modules clcfb7.h, clcfb0.h, clc96f.h);
+                 - src/blocklinear.c: gob_offset / gob_untile_plane / gob_layout_for, the Blackwell8Bit and Blackwell16Bit plane
+                   layouts and the rule that picks one by element size (Mesa NIL, src/nouveau/nil/tiling.rs and copy.rs, MIT);
+                 - src/dec.c: the H.264 decoder untiles in the card's layout;
+                 - src/channel.c: methods that do not fit the push buffer are dropped and the submission fails (it wrote past
+                   the mapping when a channel stopped fetching); the buffer is reused after a completion the decoder saw,
+                   because clc96f.h documents no GPGet word;
+                 - vt/: card kinds for Blackwell (H.264 decoder only) and TU10x / TU116 (decoders only), by PCI device ID.
+                 Not run on a card yet. Nothing registers on these cards unless NVMTL_NVENCVT names the process or is 1.
+
+Where upstream's own facts come from (read before calling this library clean of NVIDIA's closed driver): the decoders'
+picture setups are open-gpu-doc's nvdec_drv.h. The ENCODERS' per-picture control blocks (src/h264enctmpl.h,
+hevcenctmpl.h, av1enctmpl.h) are byte tables that upstream generated from traces of NVIDIA's Linux driver encoding on
+the same cards, and src/enc.c, la.h and two decoder comments cite such traces for buffer sizes and method use; the
+input layout in blocklinear.h was measured from a working client's surface. That is observation of a driver's output,
+not disassembly, but it is the same kind of source as NullMoth's own encoder libraries.
+
 Build inputs (fetched at build time by build/build_nvencvt.sh, not vendored):
   NVIDIA open-gpu-kernel-modules 610.57.04   RM API headers, MIT
   NVIDIA open-gpu-doc 9fdf5c4062007929d9f4e6cbad9c9771fe61b880   video class headers, MIT

@@ -34,6 +34,8 @@ int h264dec_open(H264Dec *d, Rm *rm, unsigned maxW, unsigned maxH)
             rm_mem_alloc(rm, &d->chroma[i], (chroma + 0xfff) & ~(size_t)0xfff, 0x1000, true, true, true)) { fprintf(stderr, "dec: surface alloc failed\n"); return -1; }
     memset(d->coloc.cpu, 0, d->coloc.size); memset(d->hist.cpu, 0, d->hist.size); memset(d->mbhist.cpu, 0, d->mbhist.size);
     chan_mthd(&d->chan, 0, NVC56F_SET_OBJECT, 1, rm_class(rm, RM_CLS_NVDEC));
+    // NV12: luma is a plane of 1-byte elements, chroma one of 2-byte (Cb Cr) elements
+    d->gobY = gob_layout_for(rm_class(rm, RM_CLS_NVDEC), 1); d->gobC = gob_layout_for(rm_class(rm, RM_CLS_NVDEC), 2);
     d->auN = 0; d->auSlices = 0;
     return 0;
 }
@@ -53,15 +55,15 @@ void h264dec_read_nv12(H264Dec *d, int surf, uint8_t *y, size_t ystride, uint8_t
 {
     const unsigned x0 = (unsigned)d->x0[surf], y0 = (unsigned)d->y0[surf];
     if (!x0 && !y0) {
-        nvenc_in_untile_plane(y, ystride, d->luma[surf].cpu, w, h, d->pitch);
-        nvenc_in_untile_plane(uv, uvstride, d->chroma[surf].cpu, w, h / 2, d->pitch);
+        gob_untile_plane(d->gobY, y, ystride, d->luma[surf].cpu, w, h, d->pitch);
+        gob_untile_plane(d->gobC, uv, uvstride, d->chroma[surf].cpu, w, h / 2, d->pitch);
         return;
     }
     // cropped on the left / top (rare): sample by sample
     for (unsigned r = 0; r < h; r++) for (unsigned x = 0; x < w; x++)
-        y[r * ystride + x] = ((const uint8_t *)d->luma[surf].cpu)[nvenc_in_offset(x0 + x, y0 + r, d->pitch)];
+        y[r * ystride + x] = ((const uint8_t *)d->luma[surf].cpu)[gob_offset(d->gobY, x0 + x, y0 + r, d->pitch)];
     for (unsigned r = 0; r < h / 2; r++) for (unsigned x = 0; x < w; x++)
-        uv[r * uvstride + x] = ((const uint8_t *)d->chroma[surf].cpu)[nvenc_in_offset((x0 & ~1u) + x, y0 / 2 + r, d->pitch)];
+        uv[r * uvstride + x] = ((const uint8_t *)d->chroma[surf].cpu)[gob_offset(d->gobC, (x0 & ~1u) + x, y0 / 2 + r, d->pitch)];
 }
 
 void h264dec_read_i420(H264Dec *d, int surf, uint8_t *dst, unsigned w, unsigned h)
@@ -69,9 +71,9 @@ void h264dec_read_i420(H264Dec *d, int surf, uint8_t *dst, unsigned w, unsigned 
     const uint8_t *L = d->luma[surf].cpu, *C = d->chroma[surf].cpu;
     uint8_t *u = dst + (size_t)w * h, *v = u + (size_t)w * h / 4;
     const unsigned x0 = (unsigned)d->x0[surf], y0 = (unsigned)d->y0[surf];
-    for (unsigned y = 0; y < h; y++) for (unsigned x = 0; x < w; x++) dst[(size_t)y * w + x] = L[nvenc_in_offset(x0 + x, y0 + y, d->pitch)];
+    for (unsigned y = 0; y < h; y++) for (unsigned x = 0; x < w; x++) dst[(size_t)y * w + x] = L[gob_offset(d->gobY, x0 + x, y0 + y, d->pitch)];
     for (unsigned y = 0; y < h / 2; y++) for (unsigned x = 0; x < w; x++) {
-        uint8_t c = C[nvenc_in_offset((x0 & ~1u) + x, y0 / 2 + y, d->pitch)];
+        uint8_t c = C[gob_offset(d->gobC, (x0 & ~1u) + x, y0 / 2 + y, d->pitch)];
         if (x & 1) v[(size_t)y * (w / 2) + x / 2] = c; else u[(size_t)y * (w / 2) + x / 2] = c;
     }
 }
@@ -308,6 +310,7 @@ static int decode_pending(H264Dec *d)
     while (sv[0] != val && now_ms() - t0 < 1000) { }
     d->engine_ms = now_ms() - t0;
     if (sv[0] != val) { fprintf(stderr, "dec: no completion (error notifier 0x%x)\n", chan_error(c)); return -1; }
+    chan_done(c);
     const nvdec_status_s *st = d->status.cpu;
     d->mbs_ok = st->mbs_correctly_decoded; d->mbs_err = st->mbs_in_error; d->err_status = st->error_status;
     if (d->verbose)

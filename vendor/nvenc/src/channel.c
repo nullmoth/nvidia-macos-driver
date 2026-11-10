@@ -29,6 +29,7 @@ NV_STATUS chan_create(Rm *rm, Chan *c, NvU32 engineType, NvU32 objClass, void *o
     CHK(rm_mem_alloc(rm, &c->gpfifo, c->entries * 8, 0x1000, true, true, true));
     CHK(rm_mem_alloc(rm, &c->push, 0x10000, 0x1000, true, true, true));
     c->cur = c->segStart = c->push.cpu;
+    c->end = (NvU32 *)c->push.cpu + c->push.size / 4;
 
     NV_CONTEXT_DMA_ALLOCATION_PARAMS cd = { .flags = DRF_DEF(OS03, _FLAGS, _MAPPING, _KERNEL) | DRF_DEF(OS03, _FLAGS, _HASH_TABLE, _DISABLE),
                                            .hMemory = c->notifier.hPhys, .offset = 0, .limit = c->notifier.size - 1 };
@@ -67,6 +68,9 @@ void chan_destroy(Chan *c)
 
 void chan_mthd(Chan *c, int subch, NvU32 mthd, int count, ...)
 {
+    // The push buffer is reused only once the host has fetched it. A channel that stops fetching (a fault, a lost
+    // GPU) must not make the next pictures write past the mapping: drop the method and fail the submission.
+    if (count < 0 || c->overflow || (size_t)(c->end - c->cur) < (size_t)count + 1) { c->overflow = true; return; }
     *c->cur++ = DRF_NUM(C56F, _DMA, _SEC_OP, NVC56F_DMA_SEC_OP_INC_METHOD) | DRF_NUM(C56F, _DMA, _METHOD_COUNT, count) |
                 DRF_NUM(C56F, _DMA, _METHOD_SUBCHANNEL, subch) | DRF_NUM(C56F, _DMA, _METHOD_ADDRESS, mthd >> 2);
     va_list ap; va_start(ap, count);
@@ -78,7 +82,9 @@ NV_STATUS chan_submit(Chan *c)
 {
     NvU64 va = c->push.gpu + (NvU64)((NvU8 *)c->segStart - (NvU8 *)c->push.cpu);
     NvU32 dwords = (NvU32)(c->cur - c->segStart);
+    if (c->overflow) { fprintf(stderr, "chan: push buffer full (the channel stopped fetching): not submitted\n"); return NV_ERR_INSUFFICIENT_RESOURCES; }
     if (!dwords) return NV_OK;
+    c->settled = false;
     NvU32 *e = (NvU32 *)c->gpfifo.cpu + 2 * c->gpPut;
     e[0] = DRF_NUM(C56F, _GP_ENTRY0, _GET, (NvU32)va >> 2);
     e[1] = DRF_NUM(C56F, _GP_ENTRY1, _GET_HI, (NvU32)(va >> 32)) | DRF_NUM(C56F, _GP_ENTRY1, _LENGTH, dwords);
@@ -94,10 +100,12 @@ NV_STATUS chan_submit(Chan *c)
 bool chan_rewind(Chan *c)
 {
     // the push buffer is linear: start over once the channel has fetched everything (GPGet == GPPut)
-    if (c->cur != c->segStart || chan_gpget(c) != c->gpPut) return false;
+    if (c->cur != c->segStart || (!c->settled && chan_gpget(c) != c->gpPut)) return false;
     c->cur = c->segStart = c->push.cpu;
     return true;
 }
+
+void chan_done(Chan *c) { c->settled = true; }
 
 NvU32 chan_gpget(Chan *c) { return ((volatile AmpereAControlGPFifo *)c->userd.cpu)->GPGet; }
 NvU32 chan_error(Chan *c) { return ((volatile NvNotification *)c->notifier.cpu)[0].status; }

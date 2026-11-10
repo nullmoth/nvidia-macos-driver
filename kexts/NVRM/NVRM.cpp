@@ -395,6 +395,7 @@ private:
     struct NvMapToken { uint32_t token; IOOptionBits options; IOMemoryDescriptor *md; };
     NvMapToken *fTok = nullptr;
     unsigned fNTok = 0;
+    unsigned fTokCap = 0;                // entries fTok has room for (nvrm_tok_table.h)
     bool fIsCtl = true;
     int  fFd = -1;
     int  fPid = 0;
@@ -2562,7 +2563,7 @@ void NVRMUserClient::free(void)
     fMapLen = 0; fMapLenNode = nullptr; fMapGen++;
     if (fTok) {
         for (unsigned i = 0; i < fNTok; i++) if (fTok[i].md) fTok[i].md->release();
-        kern_os_free(fTok); fTok = nullptr; fNTok = 0;
+        kern_os_free(fTok); fTok = nullptr; fNTok = 0; fTokCap = 0;
     }
     if (fMapLock) IOLockUnlock(fMapLock);
     if (fGate) { IOLockFree(fGate); fGate = nullptr; }
@@ -2583,6 +2584,7 @@ void NVRMUserClient::free(void)
 // (NV_ESC_RM_UNMAP_MEMORY -> Nv04UnmapMemoryWithSecInfo, on the ctl fd, by hClient/hDevice/hMemory/pLinearAddress) never
 // reads the per-file list, and nv_free_user_mapping is a no-op here, so consuming the node takes nothing RM needs.
 // The pages stay alive through the descriptor, not the node (see nv_inc_alloc_refcount in os-xnu2.cpp).
+#include "nvrm_tok_table.h"
 static const uint32_t kNvMapTokenBit = 0x80000000u;
 static const unsigned kNvMapTokensPerClient = 4096;
 IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
@@ -2680,8 +2682,19 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
         IOReturn r = kIOReturnSuccess;
         IOLockLock(fMapLock);
         if (fMapList != snapNode || fMapGen != snapGen) r = kIOReturnBusy;   // RM replaced the context meanwhile
-        else if (fNTok >= kNvMapTokensPerClient) r = kIOReturnNoResources;
-        else if (!fTok && !(fTok = (NvMapToken *)kern_os_malloc(sizeof(NvMapToken) * kNvMapTokensPerClient))) r = kIOReturnNoMemory;
+        else {
+            // room for one more: the table grows with what the client holds (nvrm_tok_table.h says why)
+            const unsigned cap = nvrm_tok_next_capacity(fTokCap, fNTok, kNvMapTokensPerClient);
+            if (!cap) r = kIOReturnNoResources;
+            else if (cap != fTokCap) {
+                NvMapToken *grown = (NvMapToken *)kern_os_malloc(sizeof(NvMapToken) * cap);
+                if (!grown) r = kIOReturnNoMemory;
+                else {
+                    if (fTok) { nvu_memcpy(grown, fTok, sizeof(NvMapToken) * fNTok); kern_os_free(fTok); }
+                    fTok = grown; fTokCap = cap;
+                }
+            }
+        }
         if (r == kIOReturnSuccess) {
             nv_alloc_mapping_list_node_t *one = fMapList;
             fMapList = one->pNext; one->pNext = nullptr;
