@@ -971,6 +971,10 @@ OSStatus NVDecVT_Register(int rating)
     extern int gNvencvtGpu;   // vt/nvencvt.c: 1 Ada, 2 TU117 (GTX 1650: NVDEC 0xc4b0 has no AV1), 3 GA10x (RTX 30)
     const bool ampere = gNvencvtGpu == 3;
     const bool av1Vp9Only = ampere && !getenv("NVENCVT_AMPERE_ALL_DEC");
+    // Blackwell (4): H.264 alone. Its channel and NVDEC classes and the layout of its decoded planes are public
+    // (open-gpu-kernel-modules, Mesa NIL) and the H.264 picture setup is nvdec_drv.h's, but no public header lists the
+    // methods of class 0xcfb0, and the other codecs' decoders here untile every plane as Turing's.
+    const bool h264Only = gNvencvtGpu == 4;
     typedef OSStatus (*RegFn)(FourCharCode, CFDictionaryRef, void *);
     RegFn reg = (RegFn)dlsym(RTLD_DEFAULT, "VTRegisterVideoDecoderWithInfo");
     if (!reg) { DLOG("VTRegisterVideoDecoderWithInfo not found"); return kVTCouldNotFindVideoDecoderErr; }
@@ -984,7 +988,7 @@ OSStatus NVDecVT_Register(int rating)
     if (!av1Vp9Only && !getenv("NVENCVT_NO_HEV1")) { OSStatus s3 = reg(CODEC_AVC3, info, (void *)NVDecVT_CreateInstance); DLOG("registered %s for avc3 -> %d", DECODER_ID, (int)s3); }
     CFRelease(info);
     DLOG("registered %s -> %d (rating %d)", DECODER_ID, (int)st, rating);
-    if (!av1Vp9Only && !getenv("NVENCVT_NO_HEVCDEC")) {   // HEVC (NVENCVT_NO_HEVCDEC=1 leaves it out): above NullMoth's own HEVC decoder too
+    if (!av1Vp9Only && !h264Only && !getenv("NVENCVT_NO_HEVCDEC")) {   // HEVC (NVENCVT_NO_HEVCDEC=1 leaves it out): above NullMoth's own HEVC decoder too
         const void *vh[] = { CFSTR(DECODER_ID_HEVC), CFSTR("NVDEC - HEVC - mickys/nvenc"), nr, kCFBooleanTrue };
         CFDictionaryRef ih = CFDictionaryCreate(NULL, k, vh, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         OSStatus sh = reg(kCMVideoCodecType_HEVC, ih, (void *)NVDecVT_CreateInstance);
@@ -992,7 +996,7 @@ OSStatus NVDecVT_Register(int rating)
         CFRelease(ih);
         DLOG("registered %s -> %d (rating %d)", DECODER_ID_HEVC, (int)sh, rating);
     }
-    if (!getenv("NVENCVT_NO_VP9DEC")) {
+    if (!h264Only && !getenv("NVENCVT_NO_VP9DEC")) {
         const void *v9[] = { CFSTR(DECODER_ID_VP9), CFSTR("NVDEC - VP9 - mickys/nvenc"), nr, kCFBooleanTrue };
         CFDictionaryRef i9 = CFDictionaryCreate(NULL, k, v9, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         OSStatus s9 = reg(CODEC_VP9, i9, (void *)NVDecVT_CreateInstance);
@@ -1009,7 +1013,7 @@ OSStatus NVDecVT_Register(int rating)
     // a decoder that registers on a card without AV1 would take the session away from Apple's own decoder and then fail.
     // Ada's and Turing's class is known from the card (the PCI device ID), so RM is asked only for GA10x and for cards the
     // registry does not name - and RM answering 0 (no driver) means no AV1 decoder at all.
-    const NvU32 nvcls = gNvencvtGpu == 1 ? 0xc9b0 : gNvencvtGpu == 2 ? 0xc4b0 : nvdec_class();
+    const NvU32 nvcls = gNvencvtGpu == 1 ? 0xc9b0 : gNvencvtGpu == 2 || gNvencvtGpu == 5 ? 0xc4b0 : gNvencvtGpu == 4 ? 0xcfb0 : nvdec_class();
     const bool hasAv1 = nvcls == 0xc7b0 || nvcls == 0xc9b0;
     DLOG("NVDEC class 0x%x%s", nvcls, hasAv1 ? " (AV1)" : " (no AV1)");
     if (!getenv("NVENCVT_NO_AV1DEC") && hasAv1) {   // AV1 likewise (NVENCVT_NO_AV1DEC=1 leaves it out)
@@ -1022,7 +1026,7 @@ OSStatus NVDecVT_Register(int rating)
         SuppFn supp = (SuppFn)dlsym(RTLD_DEFAULT, "VTRegisterSupplementalVideoDecoderIfAvailable");
         if (supp && !getenv("NVENCVT_NO_VP9SUPP")) { supp(CODEC_AV1); DLOG("opted in to AV1 decoding for this process"); }
     }
-    if (!av1Vp9Only && !getenv("NVENCVT_NO_MPEG2DEC")) {   // MPEG-1 / MPEG-2 and MPEG-4 Part 2 (M14): above Apple's software decoders
+    if (!av1Vp9Only && !h264Only && !getenv("NVENCVT_NO_MPEG2DEC")) {   // MPEG-1 / MPEG-2 and MPEG-4 Part 2 (M14): above Apple's software decoders
         const struct { FourCharCode c; const char *id, *name; } m[] = {
             { kCMVideoCodecType_MPEG2Video, DECODER_ID_MPEG2, "NVDEC - MPEG-2 - mickys/nvenc" },
             { kCMVideoCodecType_MPEG1Video, DECODER_ID_MPEG1, "NVDEC - MPEG-1 - mickys/nvenc" },
