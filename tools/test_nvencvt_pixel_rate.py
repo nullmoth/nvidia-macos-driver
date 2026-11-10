@@ -23,7 +23,7 @@ def check(name, ok, detail=''):
 check('the decoder answers MaxDecoderPixelRate with a 64-bit number', 'CFEqual(key, NV_MAX_DECODER_PIXEL_RATE_KEY)' in src
       and 'CFNumberCreate(NULL, kCFNumberSInt64Type, &rate)' in src)
 check('the key is listed in the decoder\'s supported properties, which is the only way VideoToolbox forwards a query',
-      'UsingHardwareAcceleratedVideoDecoder, NV_MAX_DECODER_PIXEL_RATE_KEY }' in src)
+      'NV_MAX_DECODER_PIXEL_RATE_KEY' in src[src.index('static OSStatus d_copySupported('):src.index('static OSStatus d_setProperties(')])
 check('the key is spelled as macOS spells it', 'CFSTR("MaxDecoderPixelRate")' in src)
 check('the default is 4K at 120 frames per second', '(int64_t)3840 * 2160 * 120' in src)
 check('NVMTL_NVDEC_MAX_PIXEL_RATE replaces it, and a value that is not a positive number is ignored',
