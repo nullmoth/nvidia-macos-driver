@@ -31,6 +31,7 @@ bash "$HERE/stage_nvencvt.sh" "$ROOT" "$NVENC"
 AD="Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/nvmtl-air-dis"
 lipo -archs "$AIRDIS" | grep -qx x86_64 || { echo "finish_package: $AIRDIS is not x86_64" >&2; exit 1; }
 cp "$AIRDIS" "$ROOT/$AD" && chmod 755 "$ROOT/$AD"
+codesign -f -s - "$ROOT/$AD" >/dev/null 2>&1 || { echo "finish_package: could not sign nvmtl-air-dis" >&2; exit 1; }
 bash "$HERE/sums_refresh.sh" "$ROOT" "$AD"
 # The two files above went into a bundle that was sealed before they existed. Seal it again and check the seal, then
 # refresh the lines of the seal's own files and of files that already had a line (signing rewrites a Mach-O's signature);

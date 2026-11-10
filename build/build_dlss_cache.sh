@@ -18,5 +18,6 @@ strip -S "$OUT/dlss/nm_unzstd"
 cp "$SRC/zstd/LICENSE" "$OUT/dlss/nm_unzstd.LICENSE"
 cp "$SRC/assertfail_trap.ptx" "$OUT/dlss/assertfail_trap.ptx"
 cp "$(dirname "$0")/../package/dlss_fetch.sh" "$OUT/dlss_fetch.sh"
+codesign -f -s - "$OUT/dlss/dlss_cache" >/dev/null && codesign -f -s - "$OUT/dlss/nm_unzstd" >/dev/null   # every program the package carries is signed (ad hoc)
 chmod 755 "$OUT/dlss/dlss_cache" "$OUT/dlss/nm_unzstd" "$OUT/dlss_fetch.sh"
 echo "dlss_cache $(shasum -a 256 "$OUT/dlss/dlss_cache" | cut -c1-8) arch $(lipo -archs "$OUT/dlss/dlss_cache")"
