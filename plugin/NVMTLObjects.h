@@ -56,6 +56,7 @@ static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); if (b->
   uint32_t _surfSeed, _surfGen; BOOL _surfSynced, _surfOwned;
   nvk_buffer _vramBuf; BOOL _vramOn;
   nvk_buffer _hostPages;   // this surface's pages imported for the host copies (nvmtl_host_pages), kept while they hold
+  BOOL _vramMulti;   // fork: one plane of a multi-plane surface aliased in the whole surface's family VRAM (kernel / tag state: plane 0)
   BOOL _stex;
   uint64_t _resid;
   NSUInteger _usage;

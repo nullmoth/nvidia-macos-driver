@@ -37,7 +37,8 @@ static void nvmtl_busy_write(IOSurfaceRef s,NSUInteger p,uint64_t seq,int done){
 static unsigned IOSurfaceGetID(IOSurfaceRef s){return s->id;}
 static unsigned IOSurfaceGetSeed(IOSurfaceRef s){return s->seed;}
 @class NVMTLCommandBuffer;
-@interface NVMTLTexture:NSObject{@public IOSurfaceRef _surf; BOOL _vramOn;NSUInteger _plane;}@end
+@interface NVMTLTexture:NSObject{@public IOSurfaceRef _surf; BOOL _vramOn, _vramMulti;NSUInteger _plane;}@end
+#define NVMTL_VP(t) ((t)->_vramMulti ? 0 : (t)->_plane)
 @implementation NVMTLTexture
 - (BOOL)nvmtlSurfaceOut{return YES;}
 - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied{(void)dirtied;return YES;}
