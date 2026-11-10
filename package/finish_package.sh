@@ -32,6 +32,19 @@ AD="Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/nvmtl-air-dis"
 lipo -archs "$AIRDIS" | grep -qx x86_64 || { echo "finish_package: $AIRDIS is not x86_64" >&2; exit 1; }
 cp "$AIRDIS" "$ROOT/$AD" && chmod 755 "$ROOT/$AD"
 bash "$HERE/sums_refresh.sh" "$ROOT" "$AD"
+# The two files above went into a bundle that was sealed before they existed. Seal it again and check the seal, then
+# refresh the lines of the seal's own files and of files that already had a line (signing rewrites a Mach-O's signature);
+# a file with no line stays without one, so the completeness check below still refuses it.
+B="Library/GPUBundles/NVMTLDriver.bundle"
+if [ -f "$ROOT/$B/Contents/MacOS/NVMTLDriver" ]; then
+  codesign --force -s - --deep "$ROOT/$B" >/dev/null 2>&1 || { echo "finish_package: could not seal $B" >&2; exit 1; }
+  codesign --verify --deep --strict "$ROOT/$B" >/dev/null 2>&1 || { echo "finish_package: the seal of $B does not verify" >&2; exit 1; }
+  listed=$(sed -E 's/^[0-9a-f]{64} [ *](\.\/)?//' "$ROOT/SHA256SUMS")
+  while IFS= read -r f; do
+    case "$f" in "$B/Contents/_CodeSignature/"*) bash "$HERE/sums_refresh.sh" "$ROOT" "$f";;
+      *) ! printf '%s\n' "$listed" | grep -qxF "$f" || bash "$HERE/sums_refresh.sh" "$ROOT" "$f";; esac
+  done < <(cd "$ROOT" && find "$B" -type f | LC_ALL=C sort)
+fi
 bash "$HERE/stage_nmsmn.sh" "$NKEXT" "$NBIN" "$NSHA" "$ROOT"
 [ -z "$BOOST" ] || bash "$HERE/stage_boost.sh" "$ROOT" "$BOOST"
 [ -z "$VLOAD" ] || bash "$HERE/stage_vulkan_loader.sh" "$ROOT" "$VLOAD"

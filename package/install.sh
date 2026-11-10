@@ -429,7 +429,10 @@ done
 MYCONF_START='# --- my settings, kept on update ---'; MYCONF_END='# --- end my settings ---'
 [ ! -f "$GB/nvmtl/nvrm610.conf" ] || sed -n "/^$MYCONF_START\$/,/^$MYCONF_END\$/p" "$GB/nvmtl/nvrm610.conf" \
   | grep -E "^($MYCONF_START|$MYCONF_END|(NVMTL|NVK|NVRM)_[A-Z0-9_]+=[A-Za-z0-9._,=*-]{0,160})\$" > "$T/my-conf" || : > "$T/my-conf"
-for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl; do rm -rf "$GB/$b" && ditto "$HERE/Library/GPUBundles/$b" "$GB/$b" || die "copy $b (restore from $BK)"; done
+for b in NVMTLDriver.bundle nvmtl; do rm -rf "$GB/$b" && ditto "$HERE/Library/GPUBundles/$b" "$GB/$b" || die "copy $b (restore from $BK)"; done
+# Packages up to 2.8.1 installed NVIDIAShared.bundle, which held two of NVIDIA's closed compiler libraries. This package
+# does not carry it (the plugin only ever used it when a developer switch was set), and an update takes the old copy away.
+rm -rf "$GB/NVIDIAShared.bundle" || die "remove the old NVIDIAShared.bundle (restore from $BK)"
 if [ -s "$T/my-conf" ] && [ -f "$GB/nvmtl/nvrm610.conf" ]; then
   cat "$T/my-conf" >> "$GB/nvmtl/nvrm610.conf" || die "keep your settings in nvrm610.conf (restore from $BK)"
   ok "kept your settings in nvrm610.conf ($(grep -cvE '^#' "$T/my-conf") line(s))"
@@ -466,11 +469,11 @@ if [ -f "$KPDB" ] && [ -x /usr/bin/sqlite3 ]; then
       || echo "   note: the approval record for $k is read-only here; macOS may ask to allow it again"
   done
 fi
-chown -R root:wheel "$GB/NVMTLDriver.bundle" "$GB/NVIDIAShared.bundle" "$GB/nvmtl" "$GB/nvmtl-allow.txt" || die "bundle permissions"
+chown -R root:wheel "$GB/NVMTLDriver.bundle" "$GB/nvmtl" "$GB/nvmtl-allow.txt" || die "bundle permissions"
 # WindowServer runs as _windowserver and must read the bundles and the allow list. WAS: cp under the app's privileged
 # helper (umask 077) left nvmtl-allow.txt at 0600, WindowServer got no Metal device, and CoreDisplay aborted
 # ("Failed to create MetalDevice") on every start: the crash loop after install on many machines.
-chmod -R go-w,a+rX "$GB/NVMTLDriver.bundle" "$GB/NVIDIAShared.bundle" "$GB/nvmtl" && chmod 644 "$GB/nvmtl-allow.txt" || die "bundle permissions"
+chmod -R go-w,a+rX "$GB/NVMTLDriver.bundle" "$GB/nvmtl" && chmod 644 "$GB/nvmtl-allow.txt" || die "bundle permissions"
 sudo -u _windowserver /bin/test -r "$GB/nvmtl-allow.txt" || die "WindowServer cannot read $GB/nvmtl-allow.txt (restore from $BK)"
 # Create the shared shader caches the plugin looks for. Without them NVMTL_AIRCACHE_DIR never resolves, so
 # WindowServer, which compiles the compositor's pipelines on demand, re-translates them from scratch at every start

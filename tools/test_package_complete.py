@@ -158,6 +158,43 @@ class Finish(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("stray", r.stdout)
 
+    def test_a_carried_linux_library_is_refused(self):
+        # packages up to 2.8.1 carried NVIDIA's closed compiler libraries as ELF files; the Mach-O checks never saw them
+        rel = "Library/NullMoth/kexts/libcarried.so"
+        (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / rel).write_bytes(b"\x7fELF" + b"\0" * 60)
+        listing(self.root, ["install.sh", "Library/GPUBundles/NVMTLDriver.bundle/Contents/Info.plist", rel])
+        r = self.finish()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("libcarried.so is a Linux ELF binary", r.stdout)
+
+    def test_the_vendor_compiler_bundle_is_refused(self):
+        rel = "Library/GPUBundles/NVIDIAShared.bundle/Contents/PlugIns/air2nvvm.py"
+        (self.root / rel).parent.mkdir(parents=True)
+        (self.root / rel).write_bytes(b"# text\n")
+        listing(self.root, ["install.sh", "Library/GPUBundles/NVMTLDriver.bundle/Contents/Info.plist", rel])
+        r = self.finish()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("NVIDIAShared.bundle", r.stdout)
+
+    def test_the_plugin_bundle_is_sealed_again_after_staging_and_a_later_change_is_refused(self):
+        m = self.root / "Library/GPUBundles/NVMTLDriver.bundle/Contents"
+        m.joinpath("Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.nullmoth.test", "CFBundleExecutable": "NVMTLDriver",
+                                                             "CFBundlePackageType": "BNDL"}))
+        shutil.copy(self.t / "nvmtl-boost", m / "MacOS/NVMTLDriver")
+        listing(self.root, ["install.sh", "Library/GPUBundles/NVMTLDriver.bundle/Contents/Info.plist",
+                            "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver"])
+        r = self.finish()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        seal = subprocess.run(["codesign", "--verify", "--deep", "--strict", str(m.parent)], capture_output=True, text=True)
+        self.assertEqual(seal.returncode, 0, seal.stderr)
+        ok = subprocess.run(["shasum", "-a", "256", "--strict", "-c", "SHA256SUMS", "--quiet"], cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(ok.returncode, 0, ok.stdout)
+        with open(m / "MacOS/libnvencvt.dylib", "ab") as fh: fh.write(b"x")      # changed after the seal
+        bad = run(PKG / "check_package.sh", self.root)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("seal does not verify", bad.stdout)
+
     def test_a_stale_installer_is_refused(self):
         (self.root / "install.sh").write_text("#!/bin/bash\necho old\n")
         listing(self.root, ["install.sh", "Library/GPUBundles/NVMTLDriver.bundle/Contents/Info.plist"])
