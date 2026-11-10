@@ -34,6 +34,9 @@ static void nv_rtd3_init(void)
 
 static bool evalMethod(IOACPIPlatformDevice *acpi, const char *method)
 {
+    // The firmware's power-resource methods are called only with nvrtd3=1 on the boot line, read here as well as by the
+    // policy above: a method of this kind behaves differently on every board.
+    { uint32_t on = 0; if (!PE_parse_boot_argn("nvrtd3", &on, sizeof on) || on != 1) return false; }
     char name[128];
     snprintf(name, sizeof name, "%s.%s", g_res, method);
     OSObject *o = nullptr;

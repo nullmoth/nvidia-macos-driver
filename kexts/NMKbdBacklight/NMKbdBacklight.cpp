@@ -42,6 +42,7 @@ IOACPIPlatformDevice *NMKbdBacklight::find(const char *nameMatch, const char *me
 }
 
 bool NMKbdBacklight::evalInt(const char *method, uint32_t arg, uint32_t *result, bool noArgument) {
+    { uint32_t on = 0; if (!PE_parse_boot_argn("nmkbl", &on, sizeof on) || on != 1) return false; }   // firmware is called only with nmkbl=1
     OSObject *params[1] = { noArgument ? nullptr : OSNumber::withNumber(arg, 32) };
     OSObject *out = nullptr;
     IOReturn ret = noArgument ? dev->evaluateObject(method, &out, nullptr, 0)
@@ -56,6 +57,7 @@ bool NMKbdBacklight::evalInt(const char *method, uint32_t arg, uint32_t *result,
 }
 
 bool NMKbdBacklight::callAsus(uint32_t method, uint32_t argument, uint32_t *result) {
+    { uint32_t on = 0; if (!PE_parse_boot_argn("nmkbl", &on, sizeof on) || on != 1) return false; }   // firmware is called only with nmkbl=1
     uint32_t buf[2] = { KBL_ASUS_DEVID, argument };
     OSObject *params[3] = { OSNumber::withNumber(0ULL, 32), OSNumber::withNumber(method, 32), OSData::withBytes(buf, sizeof buf) };
     OSObject *out = nullptr;
@@ -71,6 +73,7 @@ bool NMKbdBacklight::callAsus(uint32_t method, uint32_t argument, uint32_t *resu
 
 // Dell: one SMBIOS call through the WMI method named from _WDG, with the buffer layout in kbl_core.h.
 bool NMKbdBacklight::dellCall(uint32_t in0, uint32_t in1, uint32_t in2, uint32_t *out1, uint32_t *out2) {
+    { uint32_t on = 0; if (!PE_parse_boot_argn("nmkbl", &on, sizeof on) || on != 1) return false; }   // firmware is called only with nmkbl=1
     uint8_t *raw = (uint8_t *)IOMalloc(dellBuf);
     if (!raw) return false;
     bzero(raw, dellBuf);
@@ -206,6 +209,7 @@ bool NMKbdBacklight::probeThinkPad() {
 }
 
 bool NMKbdBacklight::probeDell() {
+    { uint32_t on = 0; if (!PE_parse_boot_argn("nmkbl", &on, sizeof on) || on != 1) return false; }   // firmware is called only with nmkbl=1
     auto dict = IOService::nameMatching("PNP0C14");
     if (!dict) return false;
     auto it = IOService::getMatchingServices(dict);
