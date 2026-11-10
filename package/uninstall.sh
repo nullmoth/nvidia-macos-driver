@@ -7,7 +7,7 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 # the NVIDIA driver and the audio driver it carries (install.sh puts NMXAudio in on macOS 26). The AMD/Intel GPU and
 # NPU drivers are separate products with their own uninstallers, and removing another product's kext from this one
 # would take out a driver the user still wants.
-KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NVPrimarySelector NMXAudio"; EXT=/Library/Extensions; GB=/Library/GPUBundles
+KEXTS="NVRM NVAccel NVRMFB NVRMAGDC NVPrimarySelector NMXAudio NMIntelFB NMGopFB"; EXT=/Library/Extensions; GB=/Library/GPUBundles
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 K=/System/Library/Kernels/kernel
 KARG=(--allow-missing-kdk); [ -f "$K" ] && KARG+=(--kernel "$K")   # without a matching Kernel Debug Kit, kmutil needs --allow-missing-kdk
