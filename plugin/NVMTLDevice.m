@@ -1491,7 +1491,7 @@ static void nvmtl_busy_wait(IOSurfaceRef surf, NSUInteger plane)
         if (now - t0 > NVMTL_BUSY_WAIT_NS || (t.stamp_ns <= now && now - t.stamp_ns > NVMTL_BUSY_STALE_NS)) return;
     }
 }
-// Shared family-VRAM imports (nvmtl_import_cache.h). OFF unless NVMTL_SURF_IMPORT_CACHE=1: it is proven by
+// Shared family-VRAM imports (nvmtl_import_cache.h). On by default; NVMTL_SURF_IMPORT_CACHE=0 keeps per-wrapper imports. The cache is checked by
 // tools/test_import_cache.c, but its effect on screen capture has to be measured on a card before it is the default.
 // NVMTL_SURF_IMPORT_CACHE_IDLE_MS (default 2000) is how long an import outlives its last wrapper; surfaces larger than
 // NVMTL_SURF_IMPORT_CACHE_MAX_MB (default 64, 16 below 8 GB of VRAM) are imported per wrapper as without the cache.
@@ -1508,7 +1508,7 @@ static uint64_t nvmtl_ic_env_u64(const char *name, uint64_t def)
 static int nvmtl_ic_on(void)
 {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("NVMTL_SURF_IMPORT_CACHE"); on = e && e[0] == '1';
+    if (on < 0) { const char *e = getenv("NVMTL_SURF_IMPORT_CACHE"); on = !e || e[0] == '1';
                   nvlog("family VRAM import cache %s (NVMTL_SURF_IMPORT_CACHE=%s)", on ? "on" : "off", e ?: "unset"); }
     return on;
 }

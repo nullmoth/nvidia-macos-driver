@@ -1548,8 +1548,8 @@ static bool nvmtl_surfout_import(void) {
     if (on < 0) { const char *u = getenv("NVMTL_SURFOUT_READBACK"); on = !(u && !strcmp(u, "cpu")); }
     return on;
 }
-// Own-write tracking across the planes of one IOSurface (nvmtl_plane_seed.h). OFF unless NVMTL_PLANE_SEED=1 until it has
-// been measured on a card with screen capture running; the seed behaviour it relies on (a read-write lock moves the seed by
+// Own-write tracking across the planes of one IOSurface (nvmtl_plane_seed.h). NVMTL_PLANE_SEED=0 disables it.
+// The seed behaviour it relies on (a read-write lock moves the seed by
 // exactly one, unlock reports the same value) is measured on macOS.
 #include "nvmtl_plane_seed.h"
 static nvmtl_ps g_ps;
@@ -1557,7 +1557,7 @@ static os_unfair_lock g_ps_lock = OS_UNFAIR_LOCK_INIT;
 static BOOL nvmtl_plane_seed_on(void)
 {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("NVMTL_PLANE_SEED"); on = e && e[0] == '1'; nvlog("plane seed %s (NVMTL_PLANE_SEED=%s)", on ? "on" : "off", e ?: "unset"); }
+    if (on < 0) { const char *e = getenv("NVMTL_PLANE_SEED"); on = !e || e[0] == '1'; nvlog("plane seed %s (NVMTL_PLANE_SEED=%s)", on ? "on" : "off", e ?: "unset"); }
     return on;
 }
 // A value kept in the surface itself, so a surface id that is reused after the surface is freed never matches a record.
