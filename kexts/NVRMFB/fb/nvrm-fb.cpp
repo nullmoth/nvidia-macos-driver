@@ -1050,6 +1050,13 @@ template <typename C> static auto nvrmSetColorRange(C *c, unsigned v, int) -> de
 template <typename C> static void nvrmSetColorRange(C *, unsigned, long) {}
 template <typename F> static auto nvrmFlagColorRange(F *f, int) -> decltype(f->colorRangeChanged = NV_TRUE, void()) { f->colorRangeChanged = NV_TRUE; }
 template <typename F> static void nvrmFlagColorRange(F *, long) {}
+// The fallbacks above let this file compile against an NVKMS interface without the fields, and then the colour controls do
+// nothing at all: every build did exactly that while the archives came from a tree missing 620-color-range.patch. A build
+// of this kext must see the fields; build_rm620.sh makes the tree that has them.
+template <typename C> static auto nvrmHasColorFields(int) -> decltype(((C *)0)->colorRange, ((C *)0)->colorFormat, char());
+template <typename C> static long nvrmHasColorFields(long);
+static_assert(sizeof(nvrmHasColorFields<decltype(((struct NvKmsKapiHeadRequestedConfig *)0)->modeSetConfig)>(0)) == 1,
+              "nvkms-kapi.h has no colorRange/colorFormat: build against the tree build_rm620.sh patched");
 static void nvrmApplyColorPrefs(struct NvKmsKapiHeadRequestedConfig *hr)
 {
     if ((NvU32)gColorFormat != kNvrmColorFormatAuto) nvrmSetColorFormat(&hr->modeSetConfig, (NvU32)gColorFormat, 0);
