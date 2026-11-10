@@ -21,4 +21,5 @@ xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xli
   "$OUT/nmhda.o" "$OUT/nmhda_volume.o" "$OUT/plugin_start.o" -o "$OUT/NMHDA.kext/Contents/MacOS/NMHDA" 2> "$OUT/link.err" || { cat "$OUT/link.err"; exit 1; }
 bash ../../build/warn_ceiling.sh nmhda-link "$(grep -c 'warning' "$OUT/link.err" || true)" "$OUT/link.err"
 cp Info.plist "$OUT/NMHDA.kext/Contents/Info.plist"
+bash ../../build/check_kext_libraries.sh "$OUT/NMHDA.kext"
 echo "NMHDA $(shasum -a 256 "$OUT/NMHDA.kext/Contents/MacOS/NMHDA" | cut -c1-8) $(stat -f %z "$OUT/NMHDA.kext/Contents/MacOS/NMHDA") B"
