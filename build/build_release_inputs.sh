@@ -68,7 +68,8 @@ step airdis bash "$HERE/build/build_air_dis.sh" "$OUT/userland"
 step dlss   bash "$HERE/build/build_dlss_cache.sh" "$OUT/dlss-pkg"
 step nvk    nvk
 step boost  boost
-step vulkan bash "$HERE/build/build_vulkan_loader.sh" "$OUT/vulkan-loader"
+# cmake and ninja for the loader are among NVK's build tools
+step vulkan env PATH="${NVK_PATH:+$NVK_PATH:}$PATH" bash "$HERE/build/build_vulkan_loader.sh" "$OUT/vulkan-loader"
 # every kext a step built must be whole: the binary and its Info.plist
 want() { case " $STEPS " in *" $1 "*) shift; for k in "$@"; do n=${k##*/}
   [ -f "$OUT/kexts/$k.kext/Contents/MacOS/$n" ] && [ -f "$OUT/kexts/$k.kext/Contents/Info.plist" ] || { echo "STOP: $OUT/kexts/$k.kext is not complete"; exit 1; }
