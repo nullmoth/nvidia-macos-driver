@@ -13,6 +13,7 @@
 #include "nvrm_bar_recover.h"
 #include "nvrm_shutdown_plan.h"
 #include "nvrm_aspm.h"
+#include "nvrm_telemetry.h"
 
 extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <IOKit/IOService.h>
@@ -206,6 +207,7 @@ private:
     bool         fAdapter = false;
     IOLock      *fUtilizationLock = nullptr;
     void        *fUtilizationState = nullptr;
+    void        *fTelemetryState = nullptr;
     bool         fUtilizationStopping = false;
     uint32_t     fPassDone = 0;
     IOWorkLoop  *fWorkLoop = NULL;
@@ -1953,7 +1955,7 @@ void NVRM::stop(IOService *provider)
     if (fUtilizationLock) {
         IOLockLock(fUtilizationLock);
         fUtilizationStopping = true;
-        const bool haveState = fUtilizationState != nullptr;
+        const bool haveState = fUtilizationState != nullptr || fTelemetryState != nullptr;
         IOLockUnlock(fUtilizationLock);
         if (haveState) {
             // Match the query lock order: PM admission, then the state lock.
@@ -1962,6 +1964,7 @@ void NVRM::stop(IOService *provider)
             NvXnuPmUse pmUse;
             IOLockLock(fUtilizationLock);
             nvrm_free_utilization(&fUtilizationState);
+            nvrm_free_telemetry(&fTelemetryState);
             IOLockUnlock(fUtilizationLock);
         }
     }
@@ -2382,6 +2385,23 @@ OSDefineMetaClassAndStructors(IOAccelNVRMBridge, NVRMUserClient)
 
 IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4)
 {
+    if (fn && fn->isEqualTo(NVRM_TELEMETRY_FN)) {
+        NVRMTelemetry *sample = (NVRMTelemetry *)p1;
+        if (!sample || sample->version != NVRM_TELEMETRY_ABI_VERSION) return kIOReturnBadArgument;
+        sample->validMask = 0;
+        if (!fUtilizationLock || isInactive()) return kIOReturnNotReady;
+        int counted = 0;
+        // Monitoring must not wait for a sleeping GPU or hold up the graphics work loop.
+        if (!nv_xnu_pm_try_enter(&counted)) return kIOReturnNotReady;
+        IOLockLock(fUtilizationLock);
+        const bool ready = !fUtilizationStopping && !isInactive() && fAdapter && fPassDone >= 2 &&
+                           OSAddAtomic(0, &fGpuPm) == kGpuPmRunning;
+        const NV_STATUS status = ready ? nvrm_query_telemetry(&fNv, fPmCycles, &fTelemetryState, sample)
+                                       : NV_ERR_NOT_READY;
+        IOLockUnlock(fUtilizationLock);
+        nv_xnu_pm_exit(counted);
+        return status == NV_OK ? kIOReturnSuccess : (ready ? kIOReturnIOError : kIOReturnNotReady);
+    }
     if (fn && fn->isEqualTo(NVRM_UTILIZATION_FN)) {
         NVRMUtilization *sample = (NVRMUtilization *)p1;
         if (!sample || sample->version != NVRM_UTILIZATION_ABI_VERSION) return kIOReturnBadArgument;

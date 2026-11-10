@@ -68,6 +68,8 @@ OBJS+=("$OUT/nvrm_pageoff.o")
 # nvrm_pmgr.c (the notebook power-budget control) needs the GPU object too
 OGKM="$OGKM" python3 -B "$HERE/../kexts/NVRM/rmcc.py" "$SRC/nvrm_pmgr.c" "$OUT/nvrm_pmgr.o" 2>"$OUT/pmgr.err" || { echo "STOP: nvrm_pmgr.c did not compile"; tail "$OUT/pmgr.err"; exit 1; }
 OBJS+=("$OUT/nvrm_pmgr.o")
+OGKM="$OGKM" python3 -B "$HERE/../kexts/NVRM/rmcc.py" "$SRC/nvrm_telemetry.c" "$OUT/nvrm_telemetry.o" 2>"$OUT/telemetry.err" || { echo "STOP: nvrm_telemetry.c did not compile"; tail "$OUT/telemetry.err"; exit 1; }
+OBJS+=("$OUT/nvrm_telemetry.o")
 bash "$HERE/warn_ceiling.sh" nvrm "$(cat "$OUT"/*.o.err "$OUT/kapi.err" "$OUT/pageoff.err" "$OUT/pmgr.err" | grep -c ': warning:')" || exit 4
 xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "${OBJS[@]}" \
   "$NV/_out/Darwin_x86_64/libnvkernel.a" "$KMSLIB" -o "$OUT/NVRM.kext/Contents/MacOS/NVRM" 2>"$OUT/link.err" || { echo "STOP: link failed"; grep -v "built for newer" "$OUT/link.err" | head; exit 1; }
