@@ -16,6 +16,9 @@
 #   NM_OGKM610           open-gpu-kernel-modules 610.57.04 (headers NVK is built against)
 #                                                                            default .../build/ogkm620/open-gpu-kernel-modules-610.57.04
 #   NM_MESA_GIT          a Mesa git clone holding nvk/MESA_BASE              default .../build/gpu-src/mesa
+#   NM_LILU_DEBUG_KEXT, NM_VIRTUALSMC_SRC, NM_MACKERNELSDK   the Lilu DEBUG kext, the VirtualSMC source and MacKernelSDK
+#                        at the commits the EFI's VirtualSMC set is built from; with all three set the keyboard backlight
+#                        plugin is built too (<out>/kexts/nmkbl/NMKbdBacklight.kext), otherwise that step is skipped
 # build_nvk.sh reads its own tool paths from the environment (NVK_PATH, NVK_SYSROOT, PKG_CONFIG_PATH, LIBCLANG_PATH).
 # STEPS="nvrm fb ..." builds only those. Each step logs to <out>/logs/<step>.log; the first failure stops the run.
 set -uo pipefail
@@ -26,7 +29,7 @@ OGKM=${NM_OGKM620:-$R/build/rm620/ogkm-620.70.06}
 PRISTINE=${NM_OGKM620_PRISTINE:-$R/build/ogkm620/open-gpu-kernel-modules-620.70.06}
 OGKM610=${NM_OGKM610:-$R/build/ogkm620/open-gpu-kernel-modules-610.57.04}
 MESA=${NM_MESA_GIT:-$R/build/gpu-src/mesa}
-STEPS=${STEPS:-nvrm fb accel agdc nmsmn airdis dlss nvk boost vulkan}
+STEPS=${STEPS:-nvrm fb accel agdc nmsmn nmkbl airdis dlss nvk boost vulkan}
 for d in "$OGKM/src/nvidia" "$PRISTINE/src/nvidia" "$OGKM610/src/common" "$MESA/.git"; do
   [ -e "$d" ] || { echo "STOP: $d does not exist (see the paths at the top of this script)"; exit 2; }
 done
@@ -64,6 +67,9 @@ step fb     env OGKM="$OGKM" bash "$HERE/build/fb_build.sh" "$HERE/kexts" "$OUT/
 step accel  accel
 step agdc   bash "$HERE/build/build_agdc.sh" "$HERE/kexts/NVRMAGDC" "$OUT/kexts/agdc"
 step nmsmn  bash "$HERE/kexts/NMSMN/build.sh" "$OUT/kexts/nmsmn" 15.0
+if [ -n "${NM_LILU_DEBUG_KEXT:-}" ] && [ -n "${NM_VIRTUALSMC_SRC:-}" ] && [ -n "${NM_MACKERNELSDK:-}" ]; then
+  step nmkbl bash "$HERE/kexts/NMKbdBacklight/build.sh" "$NM_LILU_DEBUG_KEXT" "$NM_VIRTUALSMC_SRC" "$NM_MACKERNELSDK" "$OUT/kexts/nmkbl"
+else echo "nmkbl: skipped (NM_LILU_DEBUG_KEXT, NM_VIRTUALSMC_SRC and NM_MACKERNELSDK are not all set)" | tee -a "$OUT/BUILD.txt"; fi
 step airdis bash "$HERE/build/build_air_dis.sh" "$OUT/userland"
 step dlss   bash "$HERE/build/build_dlss_cache.sh" "$OUT/dlss-pkg"
 step nvk    nvk

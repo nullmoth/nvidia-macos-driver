@@ -26,3 +26,4 @@ nmintelfb-link 0
 nmdrm-link 0
 primary-selector-link 0
 nmhda-link 0
+nmkbdbacklight-link 0
