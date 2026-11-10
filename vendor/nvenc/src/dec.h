@@ -43,6 +43,7 @@ typedef struct {
     unsigned mbs_ok, mbs_err, err_status;
     double engine_ms;
     bool verbose;
+    int gobY, gobC;                 // how the bytes of a decoded luma / chroma plane lie (blocklinear.h, by generation)
     // the access unit being collected (slices with start codes, as NVDEC reads them)
     uint8_t *au; size_t auCap, auN; NvU32 auOff[1024]; int auSlices; H264Slice auFirst, auLast;
 } H264Dec;

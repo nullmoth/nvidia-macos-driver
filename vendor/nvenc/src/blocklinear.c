@@ -2,6 +2,7 @@
 // bytes, 2 column quarters of 16 bytes (32 bytes each), 2 rows of 16 bytes.
 #include "blocklinear.h"
 #include <string.h>
+#include <stdbool.h>
 #include <dispatch/dispatch.h>
 #include <stdlib.h>
 #include <emmintrin.h>
@@ -81,6 +82,50 @@ void nvenc_in_untile_plane(uint8_t *dst, size_t dst_stride, const uint8_t *src, 
             for (size_t b = k * per; b < (k + 1) * per && b < bands; b++) untile_band(dst, dst_stride, src, width, b, rows, pitch); });
     } else
         for (size_t b = 0; b < bands; b++) untile_band(dst, dst_stride, src, width, b, rows, pitch);
+}
+
+// ---- the layouts by generation (blocklinear.h) ----
+int gob_layout_for(unsigned nvdecClass, unsigned elemBytes)
+{
+    bool blackwell = nvdecClass == 0xcfb0;
+    const char *e = getenv("NVDEC_GOB");
+    if (e && !strcmp(e, "turing")) blackwell = false;
+    else if (e && !strcmp(e, "blackwell")) blackwell = true;
+    if (!blackwell) return GOB_TURING;
+    return elemBytes == 1 ? GOB_BLACKWELL8 : elemBytes == 2 ? GOB_BLACKWELL16 : GOB_TURING;
+}
+
+// Inside a GOB (x 0..63, y 0..7). Blackwell8Bit: eight 8-byte columns, each stored top to bottom (64 bytes a column).
+// Blackwell16Bit: two 32-byte halves of 256 bytes; in a half, four 64-byte groups of four 16-byte rows: left upper,
+// left lower, right upper, right lower. TuringColor2D has the same groups in the order left upper, right upper,
+// left lower, right lower.
+static size_t gob_inner(int layout, size_t x, size_t y)
+{
+    if (layout == GOB_BLACKWELL8) return (x / 8) * 64 + y * 8 + x % 8;
+    return (x / 32) * 256 + ((y / 4) % 2) * 64 + ((x / 16) % 2) * 128 + (y % 4) * 16 + x % 16;
+}
+
+size_t gob_offset(int layout, size_t x, size_t y, size_t pitch)
+{
+    if (layout == GOB_TURING) return nvenc_in_offset(x, y, pitch);
+    return (y / 16) * pitch * 16 + (x / 64) * 1024 + ((y / 8) % 2) * 512 + gob_inner(layout, x % 64, y % 8);
+}
+
+void gob_untile_plane(int layout, uint8_t *dst, size_t dst_stride, const uint8_t *src, size_t width, size_t rows, size_t pitch)
+{
+    if (layout == GOB_TURING) { nvenc_in_untile_plane(dst, dst_stride, src, width, rows, pitch); return; }
+    const size_t run = layout == GOB_BLACKWELL8 ? 8 : 16;   // bytes that lie together in both the plane and the picture
+    const size_t bands = (rows + 15) / 16;
+    void (^band)(size_t) = ^(size_t b) {
+        const size_t y1 = b * 16 + 16 < rows ? b * 16 + 16 : rows;
+        for (size_t y = b * 16; y < y1; y++)
+            for (size_t x = 0; x < width; x += run) {
+                const size_t n = width - x < run ? width - x : run;
+                memcpy(dst + y * dst_stride + x, src + gob_offset(layout, x, y, pitch), n);
+            }
+    };
+    if (bands >= 32) dispatch_apply(bands, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), band);
+    else for (size_t b = 0; b < bands; b++) band(b);
 }
 
 static void tile_band_slow(uint8_t *dst, const uint8_t *src, size_t src_stride, size_t x0, size_t width, size_t y0, size_t y1, size_t pitch)
