@@ -66,7 +66,9 @@ static FILE *gLogF;   // NVENCVT_LOG: stderr; flag file /tmp/nvencvt.log (apps s
 #define LOG(...) do { if (gLog) { FILE *lf_ = gLogF ? gLogF : stderr; fprintf(lf_, "nvencvt: " __VA_ARGS__); fputc('\n', lf_); fflush(lf_); } } while (0)
 
 enum { VT_MAX_B = 3 };
-enum { GPU_NONE = 0, GPU_ADA = 1, GPU_TU117 = 2, GPU_AMPERE = 3 };   // the GPUs the codecs register on
+// The GPUs the codecs register on. GPU_BLACKWELL (RTX 50) and GPU_TURING (TU10x and TU116: RTX 20, GTX 1660) get
+// decoders only: this library has no encoder setup for their NVENC classes (0xcfb7, 0xc4b7).
+enum { GPU_NONE = 0, GPU_ADA = 1, GPU_TU117 = 2, GPU_AMPERE = 3, GPU_BLACKWELL = 4, GPU_TURING = 5 };
 extern int gNvencvtGpu;                               // which of them (set by NVEncVT_Register)
 
 typedef struct {
@@ -939,7 +941,8 @@ static int gpu_nvenc_kind(void)
     if (rm_open(&rm)) { LOG("no NVIDIA RM device"); return GPU_NONE; }
     const NvU32 cls = rm_class(&rm, RM_CLS_NVENC);
     rm_close(&rm);
-    return cls == 0xc9b7 ? GPU_ADA : cls == 0xb4b7 ? GPU_TU117 : cls == 0xc7b7 ? GPU_AMPERE : GPU_NONE;
+    return cls == 0xc9b7 ? GPU_ADA : cls == 0xb4b7 ? GPU_TU117 : cls == 0xc7b7 ? GPU_AMPERE
+         : cls == 0xcfb7 ? GPU_BLACKWELL : cls == 0xc4b7 ? GPU_TURING : GPU_NONE;
 }
 
 static OSStatus register_one(FourCharCode codec, CFStringRef id, CFStringRef name, int rating)
@@ -988,6 +991,16 @@ static void card_name_from(io_object_t d)
 
 int gNvencvtGpu = GPU_NONE;   // what NVEncVT_Register found (vt/nvencvt_dec.c: AV1 on Ada and on GA10x)
 
+// The card's kind from its PCI device ID (NVIDIA's ID blocks, as the PCI ID database lists them): Ada 0x2600-0x28ff,
+// consumer Ampere 0x2200-0x25ff, TU117 0x1f80-0x1fff, the other Turing chips 0x1e00-0x1f7f (TU102 / TU104 / TU106) and
+// 0x2180-0x21ff (TU116), Blackwell 0x2b00-0x2fff.
+static int gpu_kind_for_device(unsigned id)
+{
+    return id >= 0x2600 && id <= 0x28ff ? GPU_ADA : id >= 0x1f80 && id <= 0x1fff ? GPU_TU117
+         : id >= 0x2200 && id <= 0x25ff ? GPU_AMPERE : id >= 0x2b00 && id <= 0x2fff ? GPU_BLACKWELL
+         : (id >= 0x1e00 && id <= 0x1f7f) || (id >= 0x2180 && id <= 0x21ff) ? GPU_TURING : GPU_NONE;
+}
+
 static int pci_gpu_kind(void)
 {
     io_iterator_t it = 0; io_object_t d; int found = -1;
@@ -1000,8 +1013,7 @@ static int pci_gpu_kind(void)
         if (ven) CFRelease(ven);
         if (dev) CFRelease(dev);
         if (v == 0x10de && found < 1) {
-            found = id >= 0x2600 && id <= 0x28ff ? GPU_ADA : id >= 0x1f80 && id <= 0x1fff ? GPU_TU117
-                  : id >= 0x2200 && id <= 0x25ff ? GPU_AMPERE : GPU_NONE;
+            found = gpu_kind_for_device(id);
             if (found > 0) card_name_from(d);
         }
         IOObjectRelease(d);
@@ -1101,7 +1113,7 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
     int gpu = getenv("NVENCVT_ANY_GPU") ? GPU_ADA : pci_gpu_kind();
     if (gpu < 0) gpu = gpu_nvenc_kind();   // no PCI match (unusual): ask RM for the class list
     if (gpu <= 0) {
-        LOG("GPU is neither Ada, TU117 nor GA10x (NVENC class c9b7 / b4b7 / c7b7): not registering");
+        LOG("GPU is not one this library knows (Ada, Ampere GA10x, Turing, Blackwell): not registering");
         return kVTCouldNotFindVideoEncoderErr;
     }
     gNvencvtGpu = gpu;
@@ -1136,8 +1148,9 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
     // GA10x (RTX 30): the NVENC there is not Ada's, and our encoder setups are written for NVENC 8.2 (Ada) and 6.6
     // (TU117). Registering them anyway would make VideoToolbox pick an encoder that cannot start (NullMoth's own
     // encoders stay for these cards), so only the decoders register on GA10x. NVENCVT_AMPERE_ENC=1 tries them anyway.
-    const bool encoders = gpu != GPU_AMPERE || getenv("NVENCVT_AMPERE_ENC");
-    if (!encoders) LOG("GA10x (RTX 30): the decoders only (NVENCVT_AMPERE_ENC=1 registers the encoders too)");
+    const bool encoders = gpu == GPU_ADA || gpu == GPU_TU117 || (gpu == GPU_AMPERE && getenv("NVENCVT_AMPERE_ENC"));
+    if (gpu == GPU_AMPERE && !encoders) LOG("GA10x (RTX 30): the decoders only (NVENCVT_AMPERE_ENC=1 registers the encoders too)");
+    if (gpu == GPU_BLACKWELL || gpu == GPU_TURING) LOG("%s: the decoders only (no encoder setup for this NVENC class)", gpu == GPU_BLACKWELL ? "Blackwell" : "Turing");
     OSStatus st = encoders ? register_one(kCMVideoCodecType_H264, CFSTR(ENCODER_ID), na, rating) : kVTCouldNotFindVideoEncoderErr;
     OSStatus sh = !encoders || getenv("NVENCVT_NO_HEVC") ? kVTCouldNotFindVideoEncoderErr
                 : register_one(kCMVideoCodecType_HEVC, CFSTR(ENCODER_ID_HEVC), nh, rating);
@@ -1163,7 +1176,7 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_RegisterDecoders(int rat
     int gpu = getenv("NVENCVT_ANY_GPU") ? GPU_ADA : pci_gpu_kind();
     if (gpu < 0) gpu = gpu_nvenc_kind();
     if (gpu <= 0) {
-        LOG("GPU is neither Ada, TU117 nor GA10x: no decoders to register");
+        LOG("GPU is not one this library knows (Ada, Ampere GA10x, Turing, Blackwell): no decoders to register");
         return kVTCouldNotFindVideoDecoderErr;
     }
     gNvencvtGpu = gpu;

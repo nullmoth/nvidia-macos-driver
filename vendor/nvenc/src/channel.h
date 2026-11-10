@@ -12,6 +12,9 @@ typedef struct {
     NvU32 token, gpPut, entries;
     NvU32 *cur;                        // write position in push
     NvU32 *segStart;                   // start of the not yet submitted commands
+    NvU32 *end;                        // one past the push buffer
+    bool overflow;                     // a method did not fit and was dropped: the next chan_submit fails
+    bool settled;                      // the engine reported everything submitted as done (chan_done)
 } Chan;
 
 // engineType: NV2080_ENGINE_TYPE_*; objClass/objParams: the engine object (e.g. 0xc9b7 + NV_NVENC_ALLOCATION_PARAMETERS)
@@ -22,6 +25,10 @@ void chan_mthd(Chan *c, int subch, NvU32 mthd, int count, ...);
 NV_STATUS chan_submit(Chan *c);                // everything since the last submit
 NvU32 chan_gpget(Chan *c);                     // how far the channel has fetched
 bool chan_rewind(Chan *c);                     // reuse the push buffer from its start (only when everything was fetched)
+// The caller saw the engine's completion of its last submission (a semaphore release that was the last method of it).
+// The host has then fetched every command, whatever the channel's GPGet word says: Blackwell's channel header
+// (clc96f.h) documents GPPut alone, so GPGet cannot be what permits reuse there.
+void chan_done(Chan *c);
 size_t chan_push_used(Chan *c);                // bytes of push buffer in use
 NvU32 chan_error(Chan *c);                     // RM's error notifier status (0 = none)
 // the channel's last MMU fault (NV906F_CTRL_CMD_GET_MMU_FAULT_INFO; RM clears it on read)
