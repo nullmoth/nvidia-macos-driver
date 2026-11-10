@@ -5,7 +5,7 @@ IOFramebuffer::open() marks a framebuffer whose enableController() failed as dea
 then fails (xnu's IOService::newUserClient masks the error as 0xe00002c7) and CoreDisplay aborts in
 CGXMappedDisplayStart ("Driver Error: FB: x of y opened"). On 2.7.2 "applyModeSetConfig -> 0" came 0.7 s before
 "IOServiceOpen failed(0xe00002c7), index(0)". NVRMNVDAFramebuffer::enableController is lifted out of nvrm-fb.cpp and
-compiled against a stand-in framebuffer whose applyMode() succeeds or fails. The negative control is rel-28's version,
+compiled against a stand-in framebuffer whose applyMode() succeeds or fails. The negative control is the 2.8.1 release's version (tag v2.8.1, which every clone has; a branch name it may not),
 which returns kIOReturnError on a failed mode set."""
 import os
 import pathlib
@@ -78,11 +78,11 @@ arm("  nor publish its audio properties", "bad_audio=0" in out, out)
 # the base file can be named directly where the tree has no git history (a build host's copy)
 base_file = os.environ.get("NVRMFB_BASE_SRC")
 old = (subprocess.CompletedProcess([], 0, pathlib.Path(base_file).read_text(), "") if base_file else
-       subprocess.run(["git", "-C", str(ROOT), "show", f"rel-28:{SRC}"], capture_output=True, text=True))
+       subprocess.run(["git", "-C", str(ROOT), "show", f"v2.8.1:{SRC}"], capture_output=True, text=True))
 if old.returncode == 0:
     o = run(old.stdout)
-    arm("negative control: rel-28's enableController fails the open on a failed mode set", "bad=0xe00002bc" in o, o)
+    arm("negative control: 2.8.1's enableController fails the open on a failed mode set", "bad=0xe00002bc" in o, o)
 else:
-    arm("negative control: rel-28's nvrm-fb.cpp is readable", False, old.stderr)
+    arm("negative control: 2.8.1's nvrm-fb.cpp is readable", False, old.stderr)
 print(f"{fails} failed")
 sys.exit(1 if fails else 0)
