@@ -2187,10 +2187,16 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
     }
     // a CPU lock that arrives while WindowServer's GPU is still writing this surface waits for that write first, as a
     // normal IOSurfaceLock does on Apple's drivers (the commit marked it pending; see nvmtl_ws_mark_pending)
+    // While the accelerator lock is free (the unlocked wait below) another thread may drop the last reference to this
+    // resource or to its accelerator. Both are held until this function returns, so nothing here ever reads freed memory;
+    // whatever the family changed meanwhile is read again after the lock is back.
+    struct NVHold { OSObject *o = nullptr; ~NVHold() { if (o) o->release(); } } holdRes, holdAccel;
     {   const unsigned sid = _ZNK9IOSurface12getSurfaceIDEv(surf);
         NVAccel *a = NVAccel::resolve(fAccel);
         if (gPoUnlocked && a && nvSurfIsPending(sid) && a->mayRelease()) {
             const uint64_t t0 = mach_absolute_time();
+            retain(); holdRes.o = this;
+            a->retain(); holdAccel.o = a;
             nvFamUnlock(a);
             nvSurfWaitReady(sid);
             nvFamLock(a, false);
