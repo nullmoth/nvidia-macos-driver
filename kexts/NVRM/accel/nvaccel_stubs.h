@@ -15,6 +15,7 @@ class NVAccel;
 #include "IOAccel2DContext2.h"
 #include "IOAccelCLContext2.h"
 #include "IOAccelVideoContext2.h"
+#include "nvres_fields.h"
 class NVResource : public IOAccelResource2 {
     OSDeclareDefaultStructors(NVResource)
     NM_TAHOE_FWD(NVResource)
@@ -25,25 +26,31 @@ public:
     uint64_t getLevelOffset(unsigned char a0, unsigned char a1, int* a2) APPLE_KEXT_OVERRIDE {
         const unsigned char *r = (const unsigned char *)this;
         if (a2) {
-            unsigned long long pitch = *(const volatile unsigned long long *)(r + 0xb8);
-            unsigned base = r[0xae];
+            unsigned long long pitch = nvResPitch(r);
+            unsigned base = r[kNvResBaseLevel];
             *a2 = (int)(pitch >> ((a1 >= base) ? (unsigned)(a1 - base) : 0u));
         }
-        return (unsigned long long)a0 * *(const volatile unsigned long long *)(r + 0xd0);
+        return (unsigned long long)a0 * nvResFaceSize(r);
     }
     uint64_t getBackingLevelOffset(unsigned char a0, unsigned char a1, int* a2) APPLE_KEXT_OVERRIDE {
         const unsigned char *r = (const unsigned char *)this;
         if (a2) {
-            unsigned long long pitch = *(const volatile unsigned long long *)(r + 0xc0);
-            unsigned base = r[0xae];
+            unsigned long long pitch = nvResBackingPitch(r);
+            unsigned base = r[kNvResBaseLevel];
             *a2 = (int)(pitch >> ((a1 >= base) ? (unsigned)(a1 - base) : 0u));
         }
-        return (unsigned long long)a0 * *(const volatile unsigned long long *)(r + 0xd0);
+        return (unsigned long long)a0 * nvResFaceSize(r);
     }
     uint64_t calculateIOSurfaceDeviceCacheVRAMBytes(unsigned long long* a0, unsigned long long* a1) APPLE_KEXT_OVERRIDE {
         const unsigned char *r = (const unsigned char *)this;
-        unsigned long long size = *(const volatile unsigned long long *)(r + 0xd0);
+        unsigned long long size = nvResFaceSize(r);
+#if defined(NM_ERA) && NM_ERA < 1014
+        // Before 10.14 the second result is a 32-bit count (Apple's own driver declares it so); writing 8 bytes would
+        // run past the caller's variable.
+        if (a1) *(unsigned int *)a1 = 1;
+#else
         if (a1) *a1 = 1;
+#endif
         if (a0) *a0 = size;
         return size;
     }
