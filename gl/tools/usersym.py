@@ -16,7 +16,8 @@ for root in roots:
             for m in re.finditer(r"(?:symbols|re-exports|weak-symbols|weak-def-symbols):\s*\[([^\]]*)\]", t, re.S):
                 have |= {s.strip().strip("'\"") for s in m.group(1).split(",") if s.strip()}
             files += len(have) > n; continue
-        if os.path.islink(p) or not (p.endswith(".dylib") or "." not in os.path.basename(p)): continue
+        # a file named on the command line is read whatever it is called
+        if not os.path.isfile(root) and (os.path.islink(p) or not (p.endswith(".dylib") or "." not in os.path.basename(p))): continue
         out = run(["nm", "-arch", "x86_64", "-gU", p])
         syms = {l.split()[-1] for l in out.splitlines() if l.strip() and not l.endswith(":")}
         # re-exported aliases (memcpy and friends from 10.9 on) exist only in the export trie, which nm does not print

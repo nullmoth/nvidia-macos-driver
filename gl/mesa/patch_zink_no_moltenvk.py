@@ -15,7 +15,15 @@ EDITS = {
                     ("  c_args: zink_c_args,\n)", "  c_args: zink_c_args,\n  cpp_args: zink_cpp_args,\n)", 1)],
     "zink_instance.py": [("#ifdef __APPLE__\n#include \"MoltenVK/mvk_vulkan.h\"", "#if defined(__APPLE__) && !defined(ZINK_NO_MOLTENVK)\n#include \"MoltenVK/mvk_vulkan.h\"", 1)],
     "zink_resource.c": [("#ifdef __APPLE__\n#include \"MoltenVK/mvk_vulkan.h\"", "#if defined(__APPLE__) && !defined(ZINK_NO_MOLTENVK)\n#include \"MoltenVK/mvk_vulkan.h\"", 1)],
-    "zink_screen.c": [("#ifdef __APPLE__\n#include \"MoltenVK/mvk_vulkan.h\"", "#if defined(__APPLE__) && !defined(ZINK_NO_MOLTENVK)\n#include \"MoltenVK/mvk_vulkan.h\"", 1)],
+    "zink_screen.c": [("#ifdef __APPLE__\n#include \"MoltenVK/mvk_vulkan.h\"", "#if defined(__APPLE__) && !defined(ZINK_NO_MOLTENVK)\n#include \"MoltenVK/mvk_vulkan.h\"", 1),
+        # Without MoltenVK there is no Vulkan loader on the system either: zink opens the Vulkan driver itself, from
+        # the folder of the image that contains zink, and enters it through the driver's own entry point.
+        ("#define VK_LIBNAME \"@rpath/libvulkan.1.dylib\"\n",
+         "#ifdef ZINK_NO_MOLTENVK\n#define VK_LIBNAME \"@loader_path/libvulkan_nouveau.dylib\"\n#define ZINK_DIRECT_DRIVER 1\n#else\n#define VK_LIBNAME \"@rpath/libvulkan.1.dylib\"\n#endif\n", 1),
+        ("   screen->vk_GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)util_dl_get_proc_address(screen->loader_lib, \"vkGetInstanceProcAddr\");\n   screen->vk_GetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)util_dl_get_proc_address(screen->loader_lib, \"vkGetDeviceProcAddr\");\n   if (!screen->vk_GetInstanceProcAddr ||\n       !screen->vk_GetDeviceProcAddr) {\n",
+         "#ifdef ZINK_DIRECT_DRIVER\n   /* a driver exports its instance entry point under the loader-interface name; the device entry point is asked\n    * of the instance once it exists */\n   screen->vk_GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)util_dl_get_proc_address(screen->loader_lib, \"vk_icdGetInstanceProcAddr\");\n   screen->vk_GetDeviceProcAddr = NULL;\n   if (!screen->vk_GetInstanceProcAddr) {\n#else\n   screen->vk_GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)util_dl_get_proc_address(screen->loader_lib, \"vkGetInstanceProcAddr\");\n   screen->vk_GetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)util_dl_get_proc_address(screen->loader_lib, \"vkGetDeviceProcAddr\");\n   if (!screen->vk_GetInstanceProcAddr ||\n       !screen->vk_GetDeviceProcAddr) {\n#endif\n", 1),
+        ("   screen->instance = instance;\n",
+         "   screen->instance = instance;\n#ifdef ZINK_DIRECT_DRIVER\n   screen->vk_GetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)screen->vk_GetInstanceProcAddr(instance, \"vkGetDeviceProcAddr\");\n   if (!screen->vk_GetDeviceProcAddr) {\n      mesa_loge(\"ZINK: the driver has no device entry point\");\n      goto fail;\n   }\n#endif\n", 1)],
 }
 new = {}
 for f, edits in EDITS.items():
