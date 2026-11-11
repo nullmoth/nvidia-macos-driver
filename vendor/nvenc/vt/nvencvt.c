@@ -129,7 +129,7 @@ typedef struct {
     pthread_cond_t cv;
 } State;
 
-static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+static double now_ms(void) { struct timespec t; NV_CLOCK_GETTIME(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 
 static void stats_print(State *s);
 static void stats_frame(State *s, double call, double tile, double eng, double total, size_t bytes, bool idr, bool fail)
@@ -203,8 +203,9 @@ void build(void)
     CFDictionarySetValue(d, kVTCompressionPropertyKey_TransferFunction, enm);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_YCbCrMatrix, enm);
     CFDictionaryRef dat = prop(kVTPropertyType_Enumeration, kVTPropertyReadWriteStatus_ReadWrite);
-    CFDictionarySetValue(d, kVTCompressionPropertyKey_MasteringDisplayColorVolume, dat);
-    CFDictionarySetValue(d, kVTCompressionPropertyKey_ContentLightLevelInfo, dat);
+    (void)dat;   // unused in a build without the HDR keys
+    NV13_DO(CFDictionarySetValue(d, kVTCompressionPropertyKey_MasteringDisplayColorVolume, dat);)
+    NV13_DO(CFDictionarySetValue(d, kVTCompressionPropertyKey_ContentLightLevelInfo, dat);)
     NV_SET(13_0, 13.0, d, kVTCompressionPropertyKey_ConstantBitRate, num);
     NV_SET(11_0, 11.0, d, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, bol);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder, prop(kVTPropertyType_Boolean, kVTPropertyReadWriteStatus_ReadOnly));
@@ -243,7 +244,7 @@ static CFArrayRef profiles(bool hevc)
             CFStringRef x = CFStringCreateWithFormat(NULL, NULL, CFSTR("H264_%s_%s"), prof[i], lev[j]); CFArrayAppendValue(h, x); CFRelease(x);
         }
         CFArrayAppendValue(h, CFSTR("H264_ConstrainedBaseline_AutoLevel")); CFArrayAppendValue(h, CFSTR("H264_ConstrainedHigh_AutoLevel"));
-        CFArrayAppendValue(v, kVTProfileLevel_HEVC_Main_AutoLevel); CFArrayAppendValue(v, kVTProfileLevel_HEVC_Main10_AutoLevel);
+        NV13_DO(CFArrayAppendValue(v, kVTProfileLevel_HEVC_Main_AutoLevel); CFArrayAppendValue(v, kVTProfileLevel_HEVC_Main10_AutoLevel);)
         if (hevc444_enabled()) { CFArrayAppendValue(v, NV_PROFILE_MAIN444); CFArrayAppendValue(v, NV_PROFILE_MAIN44410); }
         list[0] = h; list[1] = v;
     });
@@ -262,8 +263,8 @@ static const struct { int kind, code; const CFStringRef *str; } gColour[] = {
     { 0, 1, &kCVImageBufferColorPrimaries_ITU_R_709_2 }, { 0, 5, &kCVImageBufferColorPrimaries_EBU_3213 }, { 0, 6, &kCVImageBufferColorPrimaries_SMPTE_C },
     { 0, 9, &kCVImageBufferColorPrimaries_ITU_R_2020 }, { 0, 11, &kCVImageBufferColorPrimaries_DCI_P3 }, { 0, 12, &kCVImageBufferColorPrimaries_P3_D65 },
     { 1, 1, &kCVImageBufferTransferFunction_ITU_R_709_2 }, { 1, 7, &kCVImageBufferTransferFunction_SMPTE_240M_1995 }, { 1, 8, &kCVImageBufferTransferFunction_Linear },
-    { 1, 13, &kCVImageBufferTransferFunction_sRGB }, { 1, 14, &kCVImageBufferTransferFunction_ITU_R_2020 }, { 1, 16, &kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ },
-    { 1, 17, &kCVImageBufferTransferFunction_SMPTE_ST_428_1 }, { 1, 18, &kCVImageBufferTransferFunction_ITU_R_2100_HLG },
+    NV13_DO({ 1, 13, &kCVImageBufferTransferFunction_sRGB },) { 1, 14, &kCVImageBufferTransferFunction_ITU_R_2020 }, NV13_DO({ 1, 16, &kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ },)
+    NV12_DO({ 1, 17, &kCVImageBufferTransferFunction_SMPTE_ST_428_1 },) NV13_DO({ 1, 18, &kCVImageBufferTransferFunction_ITU_R_2100_HLG },)
     { 2, 1, &kCVImageBufferYCbCrMatrix_ITU_R_709_2 }, { 2, 6, &kCVImageBufferYCbCrMatrix_ITU_R_601_4 }, { 2, 7, &kCVImageBufferYCbCrMatrix_SMPTE_240M_1995 },
     { 2, 9, &kCVImageBufferYCbCrMatrix_ITU_R_2020 } };
 static int colour_code(int kind, CFTypeRef v)
@@ -309,7 +310,7 @@ static OSStatus b_setProperty(CMBaseObjectRef o, CFStringRef key, CFTypeRef v)
         s->entropy = CFEqual(v, kVTH264EntropyMode_CABAC) ? 1 : 0;
     else if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) && s->hevc) {
         bool w444 = CFEqual(v, NV_PROFILE_MAIN444) || CFEqual(v, NV_PROFILE_MAIN44410);
-        bool ten = CFEqual(v, kVTProfileLevel_HEVC_Main10_AutoLevel) || CFEqual(v, NV_PROFILE_MAIN44410);
+        bool ten = NV13(CFEqual(v, kVTProfileLevel_HEVC_Main10_AutoLevel), false) || CFEqual(v, NV_PROFILE_MAIN44410);
         if ((ten != s->ten || w444 != s->want444) && !s->opened) { s->ten = ten; s->want444 = w444; set_pixel_attrs(s); }
     }
     else if (CFEqual(key, kVTCompressionPropertyKey_DataRateLimits)) {   // [bytes, seconds, ...]: the first pair caps the rate (VBR)
@@ -327,8 +328,8 @@ static OSStatus b_setProperty(CMBaseObjectRef o, CFStringRef key, CFTypeRef v)
     else if (CFEqual(key, kVTCompressionPropertyKey_ColorPrimaries)) s->colour[0] = colour_code(0, v);
     else if (CFEqual(key, kVTCompressionPropertyKey_TransferFunction)) s->colour[1] = colour_code(1, v);
     else if (CFEqual(key, kVTCompressionPropertyKey_YCbCrMatrix)) s->colour[2] = colour_code(2, v);
-    else if (CFEqual(key, kVTCompressionPropertyKey_MasteringDisplayColorVolume)) s->hasMdcv = copy_data(v, s->mdcv, 24);
-    else if (CFEqual(key, kVTCompressionPropertyKey_ContentLightLevelInfo)) s->hasCll = copy_data(v, s->cll, 4);
+    else if (NV13(CFEqual(key, kVTCompressionPropertyKey_MasteringDisplayColorVolume), false)) s->hasMdcv = copy_data(v, s->mdcv, 24);
+    else if (NV13(CFEqual(key, kVTCompressionPropertyKey_ContentLightLevelInfo), false)) s->hasCll = copy_data(v, s->cll, 4);
     else if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) || CFEqual(key, kVTCompressionPropertyKey_H264EntropyMode)) { /* accepted */ }
     else st = kVTPropertyNotSupportedErr;
     if (gLog) { CFStringRef d = v ? CFCopyDescription(v) : NULL; char k[128], vb[256] = "";
@@ -372,7 +373,7 @@ static OSStatus b_copyProperty(CMBaseObjectRef o, CFStringRef key, CFAllocatorRe
     else if (NV_IS(11_3, 11.3, key, kVTVideoEncoderSpecification_EnableLowLatencyRateControl)) v = CFRetain(s->lowLatency ? kCFBooleanTrue : kCFBooleanFalse);
     else if (CFEqual(key, kVTCompressionPropertyKey_AllowFrameReordering)) v = CFRetain((s->opened ? s->bf > 0 : s->reorder) ? kCFBooleanTrue : kCFBooleanFalse);
     else if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) && s->hevc && s->want444) v = CFRetain(s->ten ? NV_PROFILE_MAIN44410 : NV_PROFILE_MAIN444);
-    else if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) && !s->av1) v = CFRetain(s->hevc ? (s->ten ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel)
+    else if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) && !s->av1) v = CFRetain(s->hevc ? NV13((s->ten ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel), kVTProfileLevel_H264_Main_AutoLevel)
                                                                              : h264_high(s) ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_H264_Main_AutoLevel);
     else if (CFEqual(key, kVTCompressionPropertyKey_H264EntropyMode) && !s->hevc && !s->av1) v = CFRetain(h264_cabac(s) ? kVTH264EntropyMode_CABAC : kVTH264EntropyMode_CAVLC);
     else if (NV_IS(13_0, 13.0, key, kVTCompressionPropertyKey_ConstantBitRate)) { n = s->cbr ? s->bitrate : 0; v = CFNumberCreate(al, kCFNumberIntType, &n); }
@@ -381,8 +382,8 @@ static OSStatus b_copyProperty(CMBaseObjectRef o, CFStringRef key, CFAllocatorRe
              (CFEqual(key, kVTCompressionPropertyKey_YCbCrMatrix) && colour_str(2, s->colour[2])))
         v = CFRetain(colour_str(CFEqual(key, kVTCompressionPropertyKey_ColorPrimaries) ? 0 : CFEqual(key, kVTCompressionPropertyKey_TransferFunction) ? 1 : 2,
                                 s->colour[CFEqual(key, kVTCompressionPropertyKey_ColorPrimaries) ? 0 : CFEqual(key, kVTCompressionPropertyKey_TransferFunction) ? 1 : 2]));
-    else if (CFEqual(key, kVTCompressionPropertyKey_MasteringDisplayColorVolume) && s->hasMdcv) v = CFDataCreate(al, s->mdcv, 24);
-    else if (CFEqual(key, kVTCompressionPropertyKey_ContentLightLevelInfo) && s->hasCll) v = CFDataCreate(al, s->cll, 4);
+    else if (NV13(CFEqual(key, kVTCompressionPropertyKey_MasteringDisplayColorVolume), false) && s->hasMdcv) v = CFDataCreate(al, s->mdcv, 24);
+    else if (NV13(CFEqual(key, kVTCompressionPropertyKey_ContentLightLevelInfo), false) && s->hasCll) v = CFDataCreate(al, s->cll, 4);
     else if (CFEqual(key, kVTCompressionPropertyKey_NumberOfPendingFrames)) { n = s->npend; v = CFNumberCreate(al, kCFNumberIntType, &n); }
     else if (CFEqual(key, kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder)) v = CFRetain(kCFBooleanTrue);
     else { if (gLog) { char k[128]; CFStringGetCString(key, k, sizeof k, kCFStringEncodingUTF8); LOG("copy %s: not available", k); } return kCMBaseObjectError_ValueNotAvailable; }
@@ -456,8 +457,8 @@ static void add_fmt_extensions(State *s)
     CFMutableDictionaryRef m = ext ? CFDictionaryCreateMutableCopy(NULL, 0, ext) : CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     const CFStringRef keys[3] = { kCMFormatDescriptionExtension_ColorPrimaries, kCMFormatDescriptionExtension_TransferFunction, kCMFormatDescriptionExtension_YCbCrMatrix };
     for (int k = 0; k < 3; k++) { CFStringRef v = colour_str(k, s->enc.cfg.colour[k] ? s->enc.cfg.colour[k] : 1); if (v) CFDictionarySetValue(m, keys[k], v); }
-    if (s->enc.cfg.has_mdcv) { CFDataRef d = CFDataCreate(NULL, s->enc.cfg.mdcv, 24); CFDictionarySetValue(m, kCMFormatDescriptionExtension_MasteringDisplayColorVolume, d); CFRelease(d); }
-    if (s->enc.cfg.has_cll) { CFDataRef d = CFDataCreate(NULL, s->enc.cfg.cll, 4); CFDictionarySetValue(m, kCMFormatDescriptionExtension_ContentLightLevelInfo, d); CFRelease(d); }
+    NV13_DO(if (s->enc.cfg.has_mdcv) { CFDataRef d = CFDataCreate(NULL, s->enc.cfg.mdcv, 24); CFDictionarySetValue(m, kCMFormatDescriptionExtension_MasteringDisplayColorVolume, d); CFRelease(d); })
+    NV13_DO(if (s->enc.cfg.has_cll) { CFDataRef d = CFDataCreate(NULL, s->enc.cfg.cll, 4); CFDictionarySetValue(m, kCMFormatDescriptionExtension_ContentLightLevelInfo, d); CFRelease(d); })
     CMVideoDimensions dm = CMVideoFormatDescriptionGetDimensions(s->fmt);
     CMVideoFormatDescriptionRef f2 = NULL;
     if (!CMVideoFormatDescriptionCreate(NULL, CMFormatDescriptionGetMediaSubType(s->fmt), dm.width, dm.height, m, &f2)) { CFRelease(s->fmt); s->fmt = f2; }
@@ -567,7 +568,7 @@ static OSStatus open_encoder(State *s)
         if (!hdr[i] && !hdr[i + 1] && !hdr[i + 2] && hdr[i + 3] == 1) { ps[cnt++] = hdr + i + 4; i += 3; }
     for (int k = 0; k < cnt; k++) pl[k] = (size_t)((k + 1 < cnt ? ps[k + 1] - 4 : hdr + n) - ps[k]);
     OSStatus st = cnt != want ? kVTVideoEncoderMalfunctionErr : s->hevc
-        ? CMVideoFormatDescriptionCreateFromHEVCParameterSets(NULL, 3, ps, pl, 4, NULL, &s->fmt)
+        ? NV13(CMVideoFormatDescriptionCreateFromHEVCParameterSets(NULL, 3, ps, pl, 4, NULL, &s->fmt), kVTCouldNotFindVideoEncoderErr)
         : CMVideoFormatDescriptionCreateFromH264ParameterSets(NULL, 2, ps, pl, 4, &s->fmt);
     LOG("%s%s%s encoder open on NVENC%d: %dx%d refs %d dpb+%d range %s profile %d cabac %d rc_mode %d bitrate %d vbv %d qp %d/%d idr_period %d fps %d bframes %d quality %d -> fmt %d", s->hevc ? "HEVC" : "H.264", s->ten ? " Main10" : "", s->c444 ? " 4:4:4" : "", c.engine, c.width, c.height, c.num_refs, c.dpb_extra, c.full_range ? "full" : "video", s->hevc ? 0 : s->enc.cfg.chroma444 ? 244 : c.h264_profile, s->hevc ? 0 : (int)s->enc.cfg.cabac,
         c.rc_mode, c.bitrate, c.vbv_bits, c.qp_i, c.qp_p, c.idr_period, c.fps, c.bframes, (int)c.quality, (int)st);
@@ -919,6 +920,7 @@ static const EncoderVTable gVT = { .base = { NULL, &gBaseHeld.c }, .encoderClass
 __attribute__((visibility("default"))) OSStatus NVEncVT_CreateInstance(FourCharCode codec, CFAllocatorRef al, VTVideoEncoderRef *out)
 {
     if (codec != kCMVideoCodecType_H264 && codec != kCMVideoCodecType_HEVC && codec != CODEC_AV1) return kVTCouldNotFindVideoEncoderErr;
+    if (!NV_HEVC_HDR && codec == kCMVideoCodecType_HEVC) return kVTCouldNotFindVideoEncoderErr;   // a system before macOS 10.13 has no HEVC
     CMBaseObjectRef obj = NULL;
     OSStatus st = CMDerivedObjectCreate(al, &gVT.base, VTVideoEncoderGetClassID(), &obj);
     if (st) return st;
@@ -1154,7 +1156,7 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
     if (gpu == GPU_AMPERE && !encoders) LOG("GA10x (RTX 30): the decoders only (NVENCVT_AMPERE_ENC=1 registers the encoders too)");
     if (gpu == GPU_BLACKWELL || gpu == GPU_TURING) LOG("%s: the decoders only (no encoder setup for this NVENC class)", gpu == GPU_BLACKWELL ? "Blackwell" : "Turing");
     OSStatus st = encoders ? register_one(kCMVideoCodecType_H264, CFSTR(ENCODER_ID), na, rating) : kVTCouldNotFindVideoEncoderErr;
-    OSStatus sh = !encoders || getenv("NVENCVT_NO_HEVC") ? kVTCouldNotFindVideoEncoderErr
+    OSStatus sh = !NV_HEVC_HDR || !encoders || getenv("NVENCVT_NO_HEVC") ? kVTCouldNotFindVideoEncoderErr
                 : register_one(kCMVideoCodecType_HEVC, CFSTR(ENCODER_ID_HEVC), nh, rating);
     CFStringRef n1 = CFStringCreateWithCString(NULL, nameAv1, kCFStringEncodingUTF8);
     // AV1: Ada only (NVENC 6.6 has none)

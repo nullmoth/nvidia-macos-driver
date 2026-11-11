@@ -1,5 +1,6 @@
 // mpeg4dec.c: see mpeg4dec.h. Section numbers refer to ISO/IEC 14496-2.
 #include "mpeg4dec.h"
+#include "nv_floor.h"
 #include "blocklinear.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,7 +12,7 @@
 #include "nvdec_drv.h"
 
 static NvU32 hi(NvU64 a) { return (NvU32)(a >> 8); }
-static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+static double now_ms(void) { struct timespec t; NV_CLOCK_GETTIME(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 
 static const uint8_t zigzag[64] = {
     0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
