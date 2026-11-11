@@ -9,6 +9,7 @@
 #include "enc.h"
 #include "av1hdr.h"
 #include "rm.h"
+#include "nv_floor.h"
 #include "ctrl/ctrl0080/ctrl0080gpu.h"
 #include "clc9b7.h"
 #include <CoreFoundation/CoreFoundation.h>
@@ -188,9 +189,9 @@ void build(void)
     CFDictionarySetValue(d, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, num);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_ExpectedFrameRate, num);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_Quality, num);
-    CFDictionarySetValue(d, kVTCompressionPropertyKey_ReferenceBufferCount, num);
+    NV_SET(13_0, 13.0, d, kVTCompressionPropertyKey_ReferenceBufferCount, num);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_RealTime, bol);
-    CFDictionarySetValue(d, kVTVideoEncoderSpecification_EnableLowLatencyRateControl, bol);
+    NV_SET(11_3, 11.3, d, kVTVideoEncoderSpecification_EnableLowLatencyRateControl, bol);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_AllowFrameReordering, bol);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_ProfileLevel, enm);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_H264EntropyMode, enm);
@@ -204,8 +205,8 @@ void build(void)
     CFDictionaryRef dat = prop(kVTPropertyType_Enumeration, kVTPropertyReadWriteStatus_ReadWrite);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_MasteringDisplayColorVolume, dat);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_ContentLightLevelInfo, dat);
-    CFDictionarySetValue(d, kVTCompressionPropertyKey_ConstantBitRate, num);
-    CFDictionarySetValue(d, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, bol);
+    NV_SET(13_0, 13.0, d, kVTCompressionPropertyKey_ConstantBitRate, num);
+    NV_SET(11_0, 11.0, d, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, bol);
     CFDictionarySetValue(d, kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder, prop(kVTPropertyType_Boolean, kVTPropertyReadWriteStatus_ReadOnly));
     gSupported = d;
 }
@@ -268,12 +269,12 @@ static const struct { int kind, code; const CFStringRef *str; } gColour[] = {
 static int colour_code(int kind, CFTypeRef v)
 {
     if (!v || CFGetTypeID(v) != CFStringGetTypeID()) return 0;
-    for (size_t i = 0; i < sizeof gColour / sizeof gColour[0]; i++) if (gColour[i].kind == kind && CFEqual(v, *gColour[i].str)) return gColour[i].code;
+    for (size_t i = 0; i < sizeof gColour / sizeof gColour[0]; i++) if (gColour[i].kind == kind && NV_ENTRY_PRESENT(gColour[i].str) && CFEqual(v, *gColour[i].str)) return gColour[i].code;
     return 0;
 }
 static CFStringRef colour_str(int kind, int code)
 {
-    for (size_t i = 0; i < sizeof gColour / sizeof gColour[0]; i++) if (gColour[i].kind == kind && gColour[i].code == code) return *gColour[i].str;
+    for (size_t i = 0; i < sizeof gColour / sizeof gColour[0]; i++) if (gColour[i].kind == kind && gColour[i].code == code && NV_ENTRY_PRESENT(gColour[i].str)) return *gColour[i].str;
     return NULL;
 }
 static bool copy_data(CFTypeRef v, uint8_t *dst, CFIndex n)
@@ -291,10 +292,10 @@ static OSStatus b_setProperty(CMBaseObjectRef o, CFStringRef key, CFTypeRef v)
     else if (CFEqual(key, kVTCompressionPropertyKey_MaxKeyFrameInterval)) s->maxKeyInterval = num(v, 0);
     else if (CFEqual(key, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration)) { if (!s->maxKeyInterval && num(v, 0) > 0) s->maxKeyInterval = num(v, 0) * (s->fps ? s->fps : 60); }
     else if (CFEqual(key, kVTCompressionPropertyKey_ExpectedFrameRate)) { s->fps = num(v, 0); s->fpsKnown = s->fps > 0; }
-    else if (CFEqual(key, kVTCompressionPropertyKey_ReferenceBufferCount)) s->refs = num(v, 0);
+    else if (NV_IS(13_0, 13.0, key, kVTCompressionPropertyKey_ReferenceBufferCount)) s->refs = num(v, 0);
     else if (CFEqual(key, kVTCompressionPropertyKey_Quality)) { double q = 0; if (v && CFGetTypeID(v) == CFNumberGetTypeID()) CFNumberGetValue(v, kCFNumberDoubleType, &q); s->quality = (int)(q * 100); }
     else if (CFEqual(key, kVTCompressionPropertyKey_RealTime)) s->realTime = s->lowLatency || (v && CFGetTypeID(v) == CFBooleanGetTypeID() && CFBooleanGetValue(v));
-    else if (CFEqual(key, kVTVideoEncoderSpecification_EnableLowLatencyRateControl)) {
+    else if (NV_IS(11_3, 11.3, key, kVTVideoEncoderSpecification_EnableLowLatencyRateControl)) {
         s->lowLatency = v && CFGetTypeID(v) == CFBooleanGetTypeID() && CFBooleanGetValue(v);
         if (s->lowLatency) { s->realTime = true; s->reorder = false; }   // the session is real-time and has no B pictures
     }
@@ -321,8 +322,8 @@ static OSStatus b_setProperty(CMBaseObjectRef o, CFStringRef key, CFTypeRef v)
             }
         }
     }
-    else if (CFEqual(key, kVTCompressionPropertyKey_ConstantBitRate)) { s->bitrate = num(v, 0); s->cbr = s->bitrate > 0; }
-    else if (CFEqual(key, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality)) s->speed = v && CFGetTypeID(v) == CFBooleanGetTypeID() && CFBooleanGetValue(v);
+    else if (NV_IS(13_0, 13.0, key, kVTCompressionPropertyKey_ConstantBitRate)) { s->bitrate = num(v, 0); s->cbr = s->bitrate > 0; }
+    else if (NV_IS(11_0, 11.0, key, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality)) s->speed = v && CFGetTypeID(v) == CFBooleanGetTypeID() && CFBooleanGetValue(v);
     else if (CFEqual(key, kVTCompressionPropertyKey_ColorPrimaries)) s->colour[0] = colour_code(0, v);
     else if (CFEqual(key, kVTCompressionPropertyKey_TransferFunction)) s->colour[1] = colour_code(1, v);
     else if (CFEqual(key, kVTCompressionPropertyKey_YCbCrMatrix)) s->colour[2] = colour_code(2, v);
@@ -366,16 +367,16 @@ static OSStatus b_copyProperty(CMBaseObjectRef o, CFStringRef key, CFAllocatorRe
     if (CFEqual(key, kVTCompressionPropertyKey_AverageBitRate)) { n = s->bitrate; v = CFNumberCreate(al, kCFNumberIntType, &n); }
     else if (CFEqual(key, kVTCompressionPropertyKey_MaxKeyFrameInterval)) { n = s->maxKeyInterval; v = CFNumberCreate(al, kCFNumberIntType, &n); }
     else if (CFEqual(key, kVTCompressionPropertyKey_ExpectedFrameRate)) { n = s->fps; v = CFNumberCreate(al, kCFNumberIntType, &n); }
-    else if (CFEqual(key, kVTCompressionPropertyKey_ReferenceBufferCount)) { n = s->enc.cfg.num_refs ? s->enc.cfg.num_refs : (s->refs ? s->refs : ENC_MAX_REFS); v = CFNumberCreate(al, kCFNumberIntType, &n); }
+    else if (NV_IS(13_0, 13.0, key, kVTCompressionPropertyKey_ReferenceBufferCount)) { n = s->enc.cfg.num_refs ? s->enc.cfg.num_refs : (s->refs ? s->refs : ENC_MAX_REFS); v = CFNumberCreate(al, kCFNumberIntType, &n); }
     else if (CFEqual(key, kVTCompressionPropertyKey_RealTime)) v = CFRetain(s->realTime ? kCFBooleanTrue : kCFBooleanFalse);
-    else if (CFEqual(key, kVTVideoEncoderSpecification_EnableLowLatencyRateControl)) v = CFRetain(s->lowLatency ? kCFBooleanTrue : kCFBooleanFalse);
+    else if (NV_IS(11_3, 11.3, key, kVTVideoEncoderSpecification_EnableLowLatencyRateControl)) v = CFRetain(s->lowLatency ? kCFBooleanTrue : kCFBooleanFalse);
     else if (CFEqual(key, kVTCompressionPropertyKey_AllowFrameReordering)) v = CFRetain((s->opened ? s->bf > 0 : s->reorder) ? kCFBooleanTrue : kCFBooleanFalse);
     else if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) && s->hevc && s->want444) v = CFRetain(s->ten ? NV_PROFILE_MAIN44410 : NV_PROFILE_MAIN444);
     else if (CFEqual(key, kVTCompressionPropertyKey_ProfileLevel) && !s->av1) v = CFRetain(s->hevc ? (s->ten ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel)
                                                                              : h264_high(s) ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_H264_Main_AutoLevel);
     else if (CFEqual(key, kVTCompressionPropertyKey_H264EntropyMode) && !s->hevc && !s->av1) v = CFRetain(h264_cabac(s) ? kVTH264EntropyMode_CABAC : kVTH264EntropyMode_CAVLC);
-    else if (CFEqual(key, kVTCompressionPropertyKey_ConstantBitRate)) { n = s->cbr ? s->bitrate : 0; v = CFNumberCreate(al, kCFNumberIntType, &n); }
-    else if (CFEqual(key, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality)) v = CFRetain(s->speed ? kCFBooleanTrue : kCFBooleanFalse);
+    else if (NV_IS(13_0, 13.0, key, kVTCompressionPropertyKey_ConstantBitRate)) { n = s->cbr ? s->bitrate : 0; v = CFNumberCreate(al, kCFNumberIntType, &n); }
+    else if (NV_IS(11_0, 11.0, key, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality)) v = CFRetain(s->speed ? kCFBooleanTrue : kCFBooleanFalse);
     else if ((CFEqual(key, kVTCompressionPropertyKey_ColorPrimaries) && colour_str(0, s->colour[0])) || (CFEqual(key, kVTCompressionPropertyKey_TransferFunction) && colour_str(1, s->colour[1])) ||
              (CFEqual(key, kVTCompressionPropertyKey_YCbCrMatrix) && colour_str(2, s->colour[2])))
         v = CFRetain(colour_str(CFEqual(key, kVTCompressionPropertyKey_ColorPrimaries) ? 0 : CFEqual(key, kVTCompressionPropertyKey_TransferFunction) ? 1 : 2,
@@ -728,7 +729,7 @@ static OSStatus e_encodeFrame(VTVideoEncoderRef e, VTEncoderFrameRef frame, CVIm
         s->ten = p0 == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange || p0 == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange || p0 == kCVPixelFormatType_ARGB2101010LEPacked; }
     if (!s->opened) {   // colour not given as properties: the first frame's attachments (T7.05); its format for the RGB rule
         static const CFStringRef *keys[3] = { &kCVImageBufferColorPrimariesKey, &kCVImageBufferTransferFunctionKey, &kCVImageBufferYCbCrMatrixKey };
-        for (int k = 0; k < 3; k++) if (!s->colour[k]) { CFTypeRef a = CVBufferCopyAttachment(img, *keys[k], NULL); s->colour[k] = colour_code(k, a); if (a) CFRelease(a); }
+        for (int k = 0; k < 3; k++) if (!s->colour[k]) { CFTypeRef a = NV_COPY_ATTACHMENT(img, *keys[k], NULL); s->colour[k] = colour_code(k, a); if (a) CFRelease(a); }
         s->lastPf = CVPixelBufferGetPixelFormatType(img);
     }
     if (!s->opened && !s->fpsKnown) {   // the frame rate from the first frame's duration, if it has one
@@ -765,7 +766,7 @@ static OSStatus e_encodeFrame(VTVideoEncoderRef e, VTEncoderFrameRef frame, CVIm
         VTEncoderSessionEmitEncodedFrame(s->session, frame, kVTPixelTransferNotSupportedErr, 0, NULL);
         return noErr;
     }
-    if (gLog && s->frames == 0) { OSType be = CFSwapInt32HostToBig(pf); CFTypeRef m = CVBufferCopyAttachment(img, kCVImageBufferYCbCrMatrixKey, NULL), t = CVBufferCopyAttachment(img, kCVImageBufferTransferFunctionKey, NULL);
+    if (gLog && s->frames == 0) { OSType be = CFSwapInt32HostToBig(pf); CFTypeRef m = NV_COPY_ATTACHMENT(img, kCVImageBufferYCbCrMatrixKey, NULL), t = NV_COPY_ATTACHMENT(img, kCVImageBufferTransferFunctionKey, NULL);
         char ms[64] = "-", ts[64] = "-"; if (m) { CFStringGetCString(m, ms, sizeof ms, kCFStringEncodingUTF8); CFRelease(m); } if (t) { CFStringGetCString(t, ts, sizeof ts, kCFStringEncodingUTF8); CFRelease(t); }
         LOG("first frame %.4s %zux%zu matrix %s transfer %s", (char *)&be, CVPixelBufferGetWidth(img), CVPixelBufferGetHeight(img), ms, ts); }
     s->lastPf = pf;
@@ -953,14 +954,14 @@ static OSStatus register_one(FourCharCode codec, CFStringRef id, CFStringRef nam
     // encoder: VideoToolbox drops an encoder from the candidates when the specification names a key it does not declare.
     const void *llv[] = { kCFBooleanTrue, kCFBooleanFalse };
     CFArrayRef llrc = CFArrayCreate(NULL, llv, 2, &kCFTypeArrayCallBacks);
-    const void *sk[] = { kVTCompressionPropertyKey_ProfileLevel, kVTVideoEncoderSpecification_EnableLowLatencyRateControl },
+    const void *sk[] = { kVTCompressionPropertyKey_ProfileLevel, NV_SYM(11_3, 11.3, kVTVideoEncoderSpecification_EnableLowLatencyRateControl) },
                *sv[] = { profiles(codec == kCMVideoCodecType_HEVC), llrc };
-    CFDictionaryRef sel = CFDictionaryCreate(NULL, sk, sv, codec == CODEC_AV1 ? 1 : 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionaryRef sel = CFDictionaryCreate(NULL, sk, sv, codec == CODEC_AV1 ? 1 : NV_PICK(11_3, 11.3, 2, 1), &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     const void *k[] = { CFSTR("CMClassImplementationID"), CFSTR("CMClassImplementationName"), CFSTR("VTRating"), CFSTR("VTIsHardwareAccelerated"),
-                        kVTVideoEncoderList_SupportedSelectionProperties };
+                        NV_SYM(10_14, 10.14, kVTVideoEncoderList_SupportedSelectionProperties) };
     const void *v[] = { id, name, r, kCFBooleanTrue, sel };
     // AV1: no profile list (Main, 8 / 10-bit, is all there is)
-    CFDictionaryRef info = CFDictionaryCreate(NULL, k, v, codec == CODEC_AV1 ? 4 : 5, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionaryRef info = CFDictionaryCreate(NULL, k, v, codec == CODEC_AV1 ? 4 : NV_PICK(10_14, 10.14, 5, 4), &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     OSStatus st = VTRegisterVideoEncoderWithInfo(codec, info, (void *)NVEncVT_CreateInstance);
     CFRelease(info); CFRelease(sel); CFRelease(llrc); CFRelease(r);
     return st;
@@ -1005,7 +1006,7 @@ static int gpu_kind_for_device(unsigned id)
 static int pci_gpu_kind(void)
 {
     io_iterator_t it = 0; io_object_t d; int found = -1;
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOPCIDevice"), &it) != KERN_SUCCESS) return -1;
+    if (IOServiceGetMatchingServices(NV_IO_MAIN_PORT, IOServiceMatching("IOPCIDevice"), &it) != KERN_SUCCESS) return -1;
     while ((d = IOIteratorNext(it))) {
         CFTypeRef ven = IORegistryEntryCreateCFProperty(d, CFSTR("vendor-id"), NULL, 0), dev = IORegistryEntryCreateCFProperty(d, CFSTR("device-id"), NULL, 0);
         unsigned v = 0, id = 0;

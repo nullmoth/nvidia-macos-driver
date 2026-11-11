@@ -1,6 +1,7 @@
 // blocklinear.c: see blocklinear.h. Inside a GOB: 2 column halves of 32 bytes (256 bytes each), 4 row pairs of 64
 // bytes, 2 column quarters of 16 bytes (32 bytes each), 2 rows of 16 bytes.
 #include "blocklinear.h"
+#include "nv_floor.h"
 #include <string.h>
 #include <stdbool.h>
 #include <dispatch/dispatch.h>
@@ -191,7 +192,7 @@ void nvenc_in_tile_bgra(uint8_t *dst_luma, uint8_t *dst_chroma, const uint8_t *s
     size_t sbands = (rows + 31) / 32, bw = (((width + 1) & ~(size_t)1) + 63) & ~(size_t)63, crows = (rows + 1) / 2;
     size_t chunks = sbands >= 16 ? 2 : 1, per = (sbands + chunks - 1) / chunks;
     dispatch_apply(chunks, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^(size_t k) {
-        uint8_t *buf = aligned_alloc(64, bw * 48);   // 32 luma rows + 16 chroma rows (bw is a multiple of 64)
+        uint8_t *buf = NV_ALIGNED_ALLOC(64, bw * 48);   // 32 luma rows + 16 chroma rows (bw is a multiple of 64)
         if (!buf) return;
         uint8_t *uvb = buf + bw * 32;
         const uint8_t permute[4] = { 3, 2, 1, 0 };   // BGRA in memory -> ARGB order for vImage
@@ -243,7 +244,7 @@ void nvenc_in_tile_l10r(uint8_t *dst_luma, uint8_t *dst_chroma, const uint8_t *s
     size_t sbands = (rows + 31) / 32, bw = (((width + 1) & ~(size_t)1) * 2 + 63) & ~(size_t)63, crows = (rows + 1) / 2;
     size_t chunks = sbands >= 16 ? 4 : 1, per = (sbands + chunks - 1) / chunks;
     dispatch_apply(chunks, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^(size_t k) {
-        uint8_t *buf = aligned_alloc(64, bw * 48);   // 32 luma rows + 16 chroma rows
+        uint8_t *buf = NV_ALIGNED_ALLOC(64, bw * 48);   // 32 luma rows + 16 chroma rows
         if (!buf) return;
         uint8_t *uvb = buf + bw * 32;
         for (size_t sb = k * per; sb < (k + 1) * per && sb < sbands; sb++) {

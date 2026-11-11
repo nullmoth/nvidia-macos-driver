@@ -7,6 +7,7 @@
 // into a process (NullMoth's NVMTL_NVENCVT hook, nvenc-run) brings the decoder too.
 #include "nvencvt_diag.h"
 #include "dec.h"
+#include "nv_floor.h"
 #include "vp9dec.h"
 #include "av1dec.h"
 #include "hevcdec.h"
@@ -850,7 +851,7 @@ static OSStatus d_decodeFrame(VTVideoDecoderRef o, VTVideoDecoderFrame frame, CM
                 if (ds) { CFStringGetCString(ds, buf, sizeof buf, kCFStringEncodingUTF8); CFRelease(ds); }
                 for (char *c = buf; *c; c++) if (*c == '\n') *c = ' ';
                 DLOG("  pool attributes: %s", buf);
-                CFDictionaryRef ios = CVBufferCopyAttachment(pb, kCVPixelBufferIOSurfacePropertiesKey, NULL);
+                CFDictionaryRef ios = NV_COPY_ATTACHMENT(pb, kCVPixelBufferIOSurfacePropertiesKey, NULL);
                 DLOG("  buffer: IOSurface %p, bytes per row %zu/%zu", CVPixelBufferGetIOSurface(pb), CVPixelBufferGetBytesPerRowOfPlane(pb, 0), CVPixelBufferGetBytesPerRowOfPlane(pb, 1));
                 if (ios) CFRelease(ios);
                 CFIndex n = CFDictionaryGetCount(dst); const void **ks = malloc(sizeof(void *) * (size_t)n), **vs = malloc(sizeof(void *) * (size_t)n);
