@@ -1,0 +1,17 @@
+gliAttachDrawable
+gliAttachDrawableWithOptions
+gliChoosePixelFormat
+gliCopyAttributes
+gliCreateContext
+gliCreateContextWithShared
+gliDestroyContext
+gliDestroyPixelFormat
+gliDestroyRendererInfo
+gliGetAttribute
+gliGetInteger
+gliGetVersion
+gliInitializeLibrary
+gliQueryRendererInfo
+gliSetAttribute
+gliSetInteger
+gliTerminateLibrary
