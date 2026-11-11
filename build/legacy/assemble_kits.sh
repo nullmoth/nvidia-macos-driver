@@ -55,6 +55,10 @@ echo "$LIST" | while read rel kd md gd; do
       grep -E "controls linked|negative control" "$B/kxld/results/$rel.txt" | sed 's/^-- /               /'
       cp "$B/kxld/results/$rel.txt" "$D/kexts/link-test.txt"
     fi
+    # the symbol check that writes the not-exported lists sees fewer libraries than the link test; where the linker
+    # accepted the kext, its verdict stands and the stale list is dropped
+    for x in NVRM NVRMFB NVRMAGDC NVAccel; do f="$D/kexts/$x.not-exported.txt"
+      [ -f "$f" ] && grep -qE "^  com\.nullmoth\.$x: LINKED" "$B/kxld/results/$rel.txt" 2>/dev/null && rm -f "$f"; done
     for x in NVRM NVRMFB NVRMAGDC NVAccel; do f="$D/kexts/$x.not-exported.txt"; [ -s "$f" ] && echo "             $x: $(wc -l < "$f" | tr -d ' ') names the kernel or Apple's kexts do not export on this release (listed in kexts/$x.not-exported.txt)"; done
     case " $have_k " in *" NVRMAGDC "*) ;; *) echo "             No NVRMAGDC: the graphics-control family it attaches to does not exist on this release.";; esac
     echo "userland/  : $( [ $have_m = yes ] && echo "Metal plugin, translator, NVK, loader, codec library, daemon; payload/ mirrors the install paths (MANIFEST.txt)" || echo "none (Metal does not exist on this release)")"
