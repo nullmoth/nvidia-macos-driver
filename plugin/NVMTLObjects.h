@@ -377,8 +377,17 @@ static inline MTLPurgeableState nvmtl_purge(uint32_t *st, MTLPurgeableState s) {
     uint32_t prev = s == MTLPurgeableStateKeepCurrent ? __atomic_load_n(st, __ATOMIC_ACQUIRE) : __atomic_exchange_n(st, (uint32_t)s, __ATOMIC_ACQ_REL);
     return prev ? (MTLPurgeableState)prev : MTLPurgeableStateNonVolatile;
 }
+#if defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED < 120000
+// The identity-token call arrives with macOS 12 and its header carries no availability, so a build for an older floor
+// would bind it as a required symbol. Declared weak here, it is a null address on an older system and is checked.
+extern kern_return_t task_identity_token_get_task_port(task_id_token_t, task_flavor_t, mach_port_t *) __attribute__((weak_import));
+#define NVMTL_NO_IDENTITY_TOKENS() (task_identity_token_get_task_port == NULL)
+#else
+#define NVMTL_NO_IDENTITY_TOKENS() 0
+#endif
 static inline kern_return_t nvmtl_owner_check(task_id_token_t tok) {
     mach_port_t p = MACH_PORT_NULL;
+    if (NVMTL_NO_IDENTITY_TOKENS()) return kIOReturnUnsupported;
     if (task_identity_token_get_task_port(tok, TASK_FLAVOR_NAME, &p) != KERN_SUCCESS) return kIOReturnBadArgument;
     mach_port_deallocate(mach_task_self(), p);
     return KERN_SUCCESS;
