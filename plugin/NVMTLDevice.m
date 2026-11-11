@@ -939,7 +939,16 @@ static void nvmtl_install_hw_resource_pools(id dev)
            read, it creates no device, before touching the accelerator */
         char v[32] = {0}; size_t n = sizeof v - 1;
         int major = sysctlbyname("kern.osproductversion", v, &n, NULL, 0) == 0 ? atoi(v) : 0;
+#if defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED < 150000
+        /* a test build for an older floor: its lowest system is the floor it was built for (the loader refuses anything
+           older), so the lower bound moves to that floor's major version. The version key does not exist before
+           macOS 10.13.4; only a build whose floor is below 10.14 accepts an unreadable version. */
+        const int lowest = __MAC_OS_X_VERSION_MIN_REQUIRED >= 110000 ? __MAC_OS_X_VERSION_MIN_REQUIRED / 10000 : 10;
+        const int unreadable = major == 0 && __MAC_OS_X_VERSION_MIN_REQUIRED < 101400;
+        if (!unreadable && (major < lowest || major > 26)) { nvlog("  macOS %s is not supported by this build: no device", v[0] ? v : "unknown"); return nil; }
+#else
         if (major < 15 || major > 26) { nvlog("  macOS %s is not supported by this driver: no device", v[0] ? v : "unknown"); return nil; }
+#endif
     }
     if (!nvmtl_card_wanted(port)) return nil;   // nvmultigpu=1 only: this process drives another card
     self = [super initWithAcceleratorPort:port];
