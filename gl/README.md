@@ -27,8 +27,10 @@ the kernel accelerator's bodies are not written, and nothing here is part of a p
 | `context/nm_compat.c` | two C library calls Mesa needs that 10.11 lacks |
 | `context/build_context.sh` | builds the engine with the context layer for 10.11, checks exports and imports, and runs the end-to-end test that draws through the table on the CPU rasteriser and counts pixels |
 | `mesa/build_mesa_gl.sh` | builds Mesa's static libraries (API layer, state tracker, zink, CPU rasteriser) for a deployment target |
-| `context/build_releases.sh` | runs the context build and its tests for every release from 10.13 down to 10.7 with that release's headers, lists and libraries |
+| `context/build_releases.sh` | runs the context build and its tests for every release from 10.13 down to 10.6 with that release's headers, lists and libraries |
 | `package/stage.sh` | assembles the per-release folder tree and manifest; copies build outputs only |
+| `mesa/patch_mesa_no_tls.py`, `mesa/nm_tls.h` | per-thread-key variants of the tree's 13 compiler thread-local lines, for the 10.6 floor only |
+| `context/nm_cxx_min.cpp` | the nine C++ library symbols 10.6's older library lacks |
 | `tools/usersym.py` | import checker used by the build scripts |
 | `build_skeleton.sh` | builds both skeletons for every release and both user architectures against the 10.6 SDK and compares exports |
 
