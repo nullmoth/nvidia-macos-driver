@@ -1,0 +1,149 @@
+NVK for a macOS floor below 12: applied last with NVK_EXTRA_PATCHES=nvk-legacy-floor (build/build_nvk.sh, NVK_FLOOR=<floor>).
+The device open no longer reads the main-port data symbol that only macOS 12 and later export, and the window-surface
+code checks at run time for the layer and colour-space features that arrived after the floor. A build for macOS 15
+behaves as before: every check is constant there.
+
+diff -ruN a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c	2026-11-11 04:21:16
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c	2026-11-11 04:21:35
+@@ -1,6 +1,9 @@
+ #include "../../nvmtl_cfg.h"
+ #include "nvrm_xnu.h"
+ #include <IOKit/IOKitLib.h>
++/* The I/O Kit calls take a null port to mean the default main port. kIOMainPortDefault is the named form of that null
++ * and is a data symbol only macOS 12 and later export, so a build for an older floor must not read it. */
++#define NVRM_IO_MAIN_PORT ((mach_port_t)MACH_PORT_NULL)
+ #include <mach/mach.h>
+ #include <sys/mman.h>
+ #include <fcntl.h>
+@@ -143,16 +146,16 @@
+     if (want_id && *want_id) {
+         char *end = NULL; unsigned long long id = strtoull(want_id, &end, 10);
+         if (*end == 0 && id) {
+-            svc = IOServiceGetMatchingService(kIOMainPortDefault, IORegistryEntryIDMatching(id));
++            svc = IOServiceGetMatchingService(NVRM_IO_MAIN_PORT, IORegistryEntryIDMatching(id));
+             if (svc && !IOObjectConformsTo(svc, "NVAccel")) { IOObjectRelease(svc); svc = 0; }
+         }
+         if (!svc) { fprintf(stderr, "nvrm_xnu: NVK_ACCEL_ID=%s names no NVAccel\n", want_id); errno = ENODEV; return -1; }
+     } else {
+-        svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"));
++        svc = IOServiceGetMatchingService(NVRM_IO_MAIN_PORT, IOServiceMatching("NVAccel"));
+     }
+     uint32_t open_type = 0x4E560000u | type;
+     if (!svc) {
+-        svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVRM"));
++        svc = IOServiceGetMatchingService(NVRM_IO_MAIN_PORT, IOServiceMatching("NVRM"));
+         open_type = type;
+     }
+     if (!svc) { fprintf(stderr, "nvrm_xnu: no NVAccel and no NVRM service\n"); errno = ENODEV; return -1; }
+@@ -162,7 +165,7 @@
+         // the accelerator is there but would not vend one — fall back rather than lose the GPU
+         fprintf(stderr, "nvrm_xnu: IOServiceOpen(NVAccel, 0x%08x) 0x%08x — falling back to NVRM\n", open_type, kr);
+         IOObjectRelease(svc);
+-        svc = (want_id && *want_id) ? 0 : IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVRM"));
++        svc = (want_id && *want_id) ? 0 : IOServiceGetMatchingService(NVRM_IO_MAIN_PORT, IOServiceMatching("NVRM"));
+         if (svc) kr = IOServiceOpen(svc, mach_task_self(), type, &conn);
+     }
+     if (svc) IOObjectRelease(svc);
+diff -ruN a/src/vulkan/wsi/wsi_common_metal_layer.m b/src/vulkan/wsi/wsi_common_metal_layer.m
+--- a/src/vulkan/wsi/wsi_common_metal_layer.m	2026-11-11 04:21:15
++++ b/src/vulkan/wsi/wsi_common_metal_layer.m	2026-11-11 04:21:35
+@@ -87,7 +87,11 @@
+          *wants_edr = true;
+          break;
+       case VK_COLOR_SPACE_DISPLAY_P3_LINEAR_EXT:
+-         color_space_name = kCGColorSpaceLinearDisplayP3;
++         /* a colour space name that arrived in a later macOS is a null symbol on an older one */
++         if (@available(macOS 12.0, *))
++            color_space_name = kCGColorSpaceLinearDisplayP3;
++         else
++            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+          *wants_edr = true;
+          break;
+       case VK_COLOR_SPACE_DCI_P3_NONLINEAR_EXT:
+@@ -99,15 +103,24 @@
+          *wants_edr = false;
+          break;
+       case VK_COLOR_SPACE_BT2020_LINEAR_EXT:
+-         color_space_name = kCGColorSpaceLinearITUR_2020;
++         if (@available(macOS 12.0, *))
++            color_space_name = kCGColorSpaceLinearITUR_2020;
++         else
++            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+          *wants_edr = false;
+          break;
+       case VK_COLOR_SPACE_HDR10_ST2084_EXT:
+-         color_space_name = kCGColorSpaceITUR_2100_PQ;
++         if (@available(macOS 11.0, *))
++            color_space_name = kCGColorSpaceITUR_2100_PQ;
++         else
++            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+          *wants_edr = true;
+          break;
+       case VK_COLOR_SPACE_HDR10_HLG_EXT:
+-         color_space_name = kCGColorSpaceITUR_2100_HLG;
++         if (@available(macOS 11.0, *))
++            color_space_name = kCGColorSpaceITUR_2100_HLG;
++         else
++            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+          *wants_edr = true;
+          break;
+       case VK_COLOR_SPACE_ADOBERGB_NONLINEAR_EXT:
+@@ -160,14 +173,20 @@
+       if (result != VK_SUCCESS)
+          return result;
+ 
+-      if (metal_layer.device == nil)
+-         metal_layer.device = metal_layer.preferredDevice;
++      if (metal_layer.device == nil) {
++         /* a layer has no preferred device before macOS 10.15: take the system default there */
++         if (@available(macOS 10.15, *))
++            metal_layer.device = metal_layer.preferredDevice;
++         else
++            metal_layer.device = [MTLCreateSystemDefaultDevice() autorelease];
++      }
+ 
+       /* So acquire timeout works */
+       metal_layer.allowsNextDrawableTimeout = YES;
+       metal_layer.framebufferOnly = framebuffer_only;
+ 
+-      metal_layer.maximumDrawableCount = image_count;
++      if (@available(macOS 10.13.2, *))
++         metal_layer.maximumDrawableCount = image_count;
+       metal_layer.drawableSize = (CGSize){.width = width, .height = height};
+       metal_layer.opaque = enable_opaque;
+       metal_layer.displaySyncEnabled = !enable_immediate;
+@@ -260,10 +279,13 @@
+       NSData* content_info = [NSData dataWithBytesNoCopy:&light_level
+                                                   length:sizeof(light_level)
+                                             freeWhenDone:false];
+-      CAEDRMetadata* edr_metadata = [CAEDRMetadata HDR10MetadataWithDisplayInfo:display_info
+-                                                                    contentInfo:content_info
+-                                                             opticalOutputScale:1];
+-      metal_layer.EDRMetadata = edr_metadata;
++      /* extended-range metadata arrives with macOS 10.15; an older layer has nowhere to put it */
++      if (@available(macOS 10.15, *)) {
++         CAEDRMetadata* edr_metadata = [CAEDRMetadata HDR10MetadataWithDisplayInfo:display_info
++                                                                       contentInfo:content_info
++                                                                opticalOutputScale:1];
++         metal_layer.EDRMetadata = edr_metadata;
++      }
+    }
+ }
+ 
+@@ -289,9 +311,12 @@
+ {
+    @autoreleasepool {
+       id<CAMetalDrawable> drawable = (id<CAMetalDrawable>)drawable_ptr;
+-      [drawable addPresentedHandler: ^(id<MTLDrawable> mtlDrwbl) {
+-         presented_handler(present_info_ptr, present_id);
+-      }];
++      /* a drawable reports its presentation from macOS 10.15.4; before that the handler is never called */
++      if (@available(macOS 10.15.4, *)) {
++         [drawable addPresentedHandler: ^(id<MTLDrawable> mtlDrwbl) {
++            presented_handler(present_info_ptr, present_id);
++         }];
++      }
+    }
+ }
+ 
