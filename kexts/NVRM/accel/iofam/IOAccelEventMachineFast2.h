@@ -44,7 +44,9 @@ public:
     virtual void deviceTerminatedUnlocked() APPLE_KEXT_OVERRIDE;
     virtual void enableEventStampInterrupts(IOAccelEvent const *) APPLE_KEXT_OVERRIDE;
     virtual void disableEventStampInterrupts(IOAccelEvent const *) APPLE_KEXT_OVERRIDE;
+#if !defined(NM_ERA) || NM_ERA >= 1100
     virtual void scrubEvent(IOAccelEvent *) APPLE_KEXT_OVERRIDE;
+#endif
     virtual void triage(char **, unsigned long long *) APPLE_KEXT_OVERRIDE;
     virtual void writeStamp(int, vendevtCommandRec *, unsigned int) = 0;
     virtual void prepareBarrier(vendevtBarrierRec *) = 0;

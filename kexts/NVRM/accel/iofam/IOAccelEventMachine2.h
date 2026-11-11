@@ -54,7 +54,11 @@ public:
     virtual void enableEventStampInterrupts(IOAccelEvent const *) = 0;
     virtual void disableEventStampInterrupts(IOAccelEvent const *) = 0;
     virtual void stop();
+#if defined(NM_ERA) && NM_ERA < 1100   // macOS 10.15: still the family's reserved pad
+    virtual void _RESERVEDIOAccelEventMachine0();
+#else
     virtual void scrubEvent(IOAccelEvent *) = 0;
+#endif
     virtual void triage(char **, unsigned long long *) = 0;
     virtual void _RESERVEDIOAccelEventMachine2();
     virtual void _RESERVEDIOAccelEventMachine3();

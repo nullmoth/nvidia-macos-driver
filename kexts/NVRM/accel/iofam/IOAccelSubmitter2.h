@@ -26,7 +26,9 @@ public:
     virtual void _RESERVEDIOAccelSubmitter3();
     virtual void _RESERVEDIOAccelSubmitter4();
     virtual void _RESERVEDIOAccelSubmitter5();
+#if !defined(NM_ERA) || NM_ERA >= 1100   // macOS 10.15 has no such slot: its table ends one entry earlier
     virtual bool isOpportunisticWorkload() const;
+#endif
 private:
     uint8_t _opaque[kIOAccelSubmitter2Size - sizeof(IOUserClient)];
 };
