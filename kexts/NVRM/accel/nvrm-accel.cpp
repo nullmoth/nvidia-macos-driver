@@ -589,9 +589,24 @@ public:
         reportPipeGates("after deliverModeChange");
     }
     void reportPipeGates(const char *when) {
-        uint8_t accelFlags = *(const volatile uint8_t *)((const uint8_t *)this + 0xc78);
-        ALOG("  GATES %s: accel+0xc78 = 0x%02x (enabled bit 0x2 %s)",
-             when, accelFlags, (accelFlags & 0x2) ? "SET" : "CLEAR <- kIOReturnNotReady");
+        // Log-only read of the family's accelerator flags byte. Its offset moves per release: read in the family's
+        // unlock_busy on 10.11 to 10.14; not located on 10.15, where the line is skipped instead of guessed.
+#if defined(NM_ERA) && NM_ERA == 1015
+        const unsigned kGateOff = 0;
+#elif defined(NM_ERA) && NM_ERA < 1012
+        const unsigned kGateOff = 0xbd0;
+#elif defined(NM_ERA) && NM_ERA < 1013
+        const unsigned kGateOff = 0xc48;
+#elif defined(NM_ERA) && NM_ERA < 1015
+        const unsigned kGateOff = 0xc58;
+#else
+        const unsigned kGateOff = 0xc78;
+#endif
+        if (kGateOff) {
+            uint8_t accelFlags = *(const volatile uint8_t *)((const uint8_t *)this + kGateOff);
+            ALOG("  GATES %s: accel+0x%x = 0x%02x (enabled bit 0x2 %s)",
+                 when, kGateOff, accelFlags, (accelFlags & 0x2) ? "SET" : "CLEAR <- kIOReturnNotReady");
+        }
         if (!fDM) return;
         uint8_t *dm = (uint8_t *)fDM;
         uint32_t n = *(const volatile uint32_t *)(dm + 0x108);
