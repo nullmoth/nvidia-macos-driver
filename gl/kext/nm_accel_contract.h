@@ -77,6 +77,9 @@ enum {
 
 #define NM_GL_CONTRACT_VERSION 1u
 
+/* Memory mapping on the private client: the mapping type IS the surface id. While surfaces are backed by ordinary
+ * memory this is how the engine reaches the pixels; nm_gl_surface_buffer.memory_handle is 0 in that case. */
+
 struct nm_gl_version {
     uint32_t contract;                /* NM_GL_CONTRACT_VERSION; the engine refuses to run against another */
     uint32_t reserved;
