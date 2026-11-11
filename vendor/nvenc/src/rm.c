@@ -1,5 +1,6 @@
 // rm.c: see rm.h.
 #include "rm.h"
+#include "nv_floor.h"
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,10 +25,10 @@ static io_connect_t open_conn_fd(NvU32 type, int *fdOut)
 {
     // NVAccel's bridge first (0x4E56xxxx), then NVRM itself, as NVK's nvrm_xnu_open does
     io_connect_t conn = 0; kern_return_t kr = KERN_FAILURE;
-    io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"));
+    io_service_t svc = IOServiceGetMatchingService(NV_IO_MAIN_PORT, IOServiceMatching("NVAccel"));
     if (svc) { kr = IOServiceOpen(svc, mach_task_self(), 0x4E560000u | type, &conn); IOObjectRelease(svc); }
     if (kr != KERN_SUCCESS) {
-        svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVRM"));
+        svc = IOServiceGetMatchingService(NV_IO_MAIN_PORT, IOServiceMatching("NVRM"));
         if (!svc) return 0;
         kr = IOServiceOpen(svc, mach_task_self(), type, &conn); IOObjectRelease(svc);
         if (kr != KERN_SUCCESS) return 0;
