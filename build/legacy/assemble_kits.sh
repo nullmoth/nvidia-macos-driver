@@ -51,6 +51,7 @@ echo "$LIST" | while read rel kd md gd; do
     for x in NVRM NVRMFB NVRMAGDC NVAccel; do f="$D/kexts/$x.not-exported.txt"; [ -s "$f" ] && echo "             $x: $(wc -l < "$f" | tr -d ' ') names the kernel or Apple's kexts do not export on this release (listed in kexts/$x.not-exported.txt)"; done
     case " $have_k " in *" NVRMAGDC "*) ;; *) echo "             No NVRMAGDC: the graphics-control family it attaches to does not exist on this release.";; esac
     echo "userland/  : $( [ $have_m = yes ] && echo "Metal plugin, translator, NVK, loader, codec library, daemon; payload/ mirrors the install paths (MANIFEST.txt)" || echo "none (Metal does not exist on this release)")"
+    [ $have_m = yes ] && echo "             The data files in payload (bundle property list, ICD manifest, settings, allow list) are reference copies from a test package; the allow list must not ship."
     echo "opengl/    : $( [ $have_g = yes ] && echo "OpenGL engine + its accelerator kext (MANIFEST.json says where each file goes and the two steps before placing)" || echo "none staged here (10.14 and later use Apple's OpenGL-on-Metal over our Metal device; see options/)")"
     [ -f "$D/boot-config-changes.txt" ] && echo "boot       : boot-config-changes.txt lists what an OpenCore config for a current release must change for this one, and this release's limits (disk, USB, processor)"
     echo "options/   : $( [ -d "$D/options" ] && ls "$D/options" | tr '\n' ' ' || echo none)"
@@ -72,7 +73,7 @@ echo "$LIST" | while read rel kd md gd; do
     echo
     echo "KNOWN OPEN ITEMS FOR THIS RELEASE"
     case $rel in
-      10.6) echo "  - OpenGL: only the pass-through engine unless opengl/ says context layer; 32-bit kernels are not supported (64-bit kernel only)."
+      10.6) echo "  - OpenGL: context layer built for x86_64 (CPU rasteriser path); the GPU path waits on a Rust standard library without thread-local storage. 64-bit kernel only."
             echo "  - AMD processors need a patched kernel below 10.13 (not part of this kit).";;
       10.7|10.8|10.9|10.10) echo "  - Two accelerators exist for 10.11 to 10.13 only; here the OpenGL accelerator is the only one."
             echo "  - AMD processors need a patched kernel below 10.13 (not part of this kit).";;
