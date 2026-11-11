@@ -77,7 +77,8 @@ static void quad(struct ws_context *c, float x0, float y0, float x1, float y1, f
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) return 2;
+    if (argc < 3) return 2;
+    unsigned want_slots = (unsigned)atoi(argv[2]);   /* table slots of the release the bundle was built for */
     void *e = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!e) { fprintf(stderr, "cannot open: %s\n", dlerror()); return 2; }
 #define SYM(ret, name, args) ret (*name) args = (ret (*) args)dlsym(e, #name); if (!name) { fprintf(stderr, "missing %s\n", #name); return 2; }
@@ -106,7 +107,7 @@ int main(int argc, char **argv)
 
     uint32_t tsize = 0; intptr_t r = gliGetInteger(NULL, 224, &tsize);
     snprintf(d, sizeof d, "returned %ld, size %u, structure %zu, slots %zu", (long)r, tsize, sizeof(GLIFunctionDispatch), sizeof(GLIFunctionDispatch) / sizeof(void *));
-    arm(r == 0 && tsize == sizeof(GLIFunctionDispatch) && tsize == 974 * 8, "the table-size query with a null context returns the 10.11 table: 974 slots", d);
+    arm(r == 0 && tsize == sizeof(GLIFunctionDispatch) && tsize == want_slots * 8, "the table-size query with a null context returns the release's table size", d);
 
     static const uint32_t attribs[16] = { 0 };
     void *pf = NULL; r = gliChoosePixelFormat(&pf, attribs);
