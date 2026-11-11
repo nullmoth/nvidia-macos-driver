@@ -320,7 +320,7 @@ static inline MTLSize nvmtl_desc_size(id d, SEL sel) {
     MTLSize s = { 0, 0, 0 };
     if (!d || ![d respondsToSelector:sel]) return s;
     id v = [d valueForKey:NSStringFromSelector(sel)];
-    if ([v isKindOfClass:[NSValue class]] && !strcmp([(NSValue *)v objCType], @encode(MTLSize))) [(NSValue *)v getValue:&s size:sizeof s];
+    if ([v isKindOfClass:[NSValue class]] && !strcmp([(NSValue *)v objCType], @encode(MTLSize))) { if (@available(macOS 10.13, *)) [(NSValue *)v getValue:&s size:sizeof s]; else [(NSValue *)v getValue:&s]; }
     return s;
 }
 @interface NVMTLIndirectCommandBuffer () { @public uint64_t _resid; } @end

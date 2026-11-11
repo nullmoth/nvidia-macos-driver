@@ -5,6 +5,7 @@
  */
 
 #include "nvmtl_game_priority.h"
+#include "nvmtl_avail.h"
 #include <dlfcn.h>
 #include <notify.h>
 #include <dispatch/dispatch.h>
@@ -115,9 +116,9 @@ uint16_t nvmtl_vk_set_accelerator(mach_port_t accel)
 uint16_t nvmtl_vk_vendor(void)
 {
     if (g_vendor) return g_vendor;
-    io_service_t s = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"));
+    io_service_t s = IOServiceGetMatchingService(NVMTL_IO_MAIN_PORT, IOServiceMatching("NVAccel"));
     if (s) { IOObjectRelease(s); g_vendor = 0x10de; return g_vendor; }
-    s = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NMXAccel"));
+    s = IOServiceGetMatchingService(NVMTL_IO_MAIN_PORT, IOServiceMatching("NMXAccel"));
     uint16_t v = s ? nvmtl_pci_vendor_of(s) : 0;
     if (s) IOObjectRelease(s);
     g_vendor = (v == 0x1002 || v == 0x8086) ? v : 0x10de;
@@ -2871,8 +2872,8 @@ uint32_t nvmtl_vk_surface_gpu_mark(uint32_t surfaceID, int pending)
 int nvmtl_vk_accel_surface_wait(void)
 {
     /* the card this process was bound to (nvmultigpu=1), else the first accelerator as always */
-    io_service_t s = nvmtl_card_registry_id ? IOServiceGetMatchingService(kIOMainPortDefault, IORegistryEntryIDMatching(nvmtl_card_registry_id))
-                                            : IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"));
+    io_service_t s = nvmtl_card_registry_id ? IOServiceGetMatchingService(NVMTL_IO_MAIN_PORT, IORegistryEntryIDMatching(nvmtl_card_registry_id))
+                                            : IOServiceGetMatchingService(NVMTL_IO_MAIN_PORT, IOServiceMatching("NVAccel"));
     if (!s) return 0;
     CFTypeRef v = IORegistryEntryCreateCFProperty(s, CFSTR("NVAccelSurfaceWait"), kCFAllocatorDefault, 0);
     int on = 0;

@@ -582,7 +582,7 @@ id nvmtl_vendor_apple_pipeline(id device, id function)
 
     NSError *fe = nil;
     id af = nil;
-    if (f->_fcv) af = [twin newFunctionWithName:f->_fname constantValues:f->_fcv error:&fe];
+    if (f->_fcv) { if (@available(macOS 10.12, *)) af = [twin newFunctionWithName:f->_fname constantValues:f->_fcv error:&fe]; }
     if (!af) af = [twin newFunctionWithName:f->_fname];
     if (!af) {
         nvlog("apple pipeline: the twin has no function \"%s\" — refusing rather than handing "

@@ -154,7 +154,8 @@ static id<MTLSamplerState> nvmtl_static_sampler_from(NSDictionary *st, id<MTLDev
     d.tAddressMode = (MTLSamplerAddressMode)nvmtl_ss_enum(st, @"address_mode_t", addr, MTLSamplerAddressModeClampToEdge, &bad);
     d.rAddressMode = (MTLSamplerAddressMode)nvmtl_ss_enum(st, @"address_mode_r", addr, MTLSamplerAddressModeClampToEdge, &bad);
     d.compareFunction = (MTLCompareFunction)nvmtl_ss_enum(st, @"compare_function", cmp, MTLCompareFunctionNever, &bad);
-    d.borderColor = (MTLSamplerBorderColor)nvmtl_ss_enum(st, @"border_color", border, MTLSamplerBorderColorTransparentBlack, &bad);
+    const NSUInteger borderColor = nvmtl_ss_enum(st, @"border_color", border, MTLSamplerBorderColorTransparentBlack, &bad);
+    if (@available(macOS 10.12, *)) d.borderColor = (MTLSamplerBorderColor)borderColor;   // samplers have no border colour before macOS 10.12
     d.normalizedCoordinates = ![st[@"coordinates"] isEqual:@"Pixel"];
     NSNumber *an = st[@"max_anisotropy"], *lo = st[@"lod_min_clamp"], *hi = st[@"lod_max_clamp"];
     if ([an isKindOfClass:[NSNumber class]]) d.maxAnisotropy = MAX(1u, an.unsignedIntegerValue);
