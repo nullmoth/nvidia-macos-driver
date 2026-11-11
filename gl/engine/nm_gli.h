@@ -24,7 +24,8 @@ enum {
     NM_CP_SWAP_INTERVAL       = 222,  /* public: one int */
     NM_CP_DISPATCH_TABLE_SIZE = 224,  /* public: read once at start-up, with a null context, to size the table */
     NM_CP_SURFACE_OPACITY     = 236,  /* public: sent by the framework when a surface is attached */
-    NM_CP_QUERY_320           = 320,  /* read once by the window server's context description (10.11 and later) */
+    NM_CP_QUERY_320           = 320,  /* read once by the window server's context description (10.11 and later);
+                                         Apple's own 10.11 engine has no case for it */
     NM_CP_CONTEXT_OPTION      = 701,  /* one int; the window server sends 7 right after creating its context */
     NM_CP_TEX_IOSURFACE       = 910,  /* nm_tex_iosurface: texture level backed by an IOSurface */
     NM_CP_TEX_SURFACE         = 997,  /* nm_tex_surface: texture level backed by a kernel accelerator surface */
@@ -49,7 +50,7 @@ typedef struct {            /* 997: 7 stores */
     uint32_t internal_format;
     uint32_t width, height;
     uint32_t format;
-    uint32_t mode;          /* 0x404 or 0x405, chosen by one byte of the window's backing record */
+    uint32_t buffer;        /* GL_FRONT (0x404) or GL_BACK (0x405): which buffer of the surface to show */
 } nm_tex_surface;
 
 typedef struct {            /* 999: 5 stores */
@@ -86,22 +87,38 @@ static inline size_t nm_cp_block_size(int pname)
 }
 
 /*
- * Drawable types (second argument of gliAttachDrawableWithOptions) and the size of the descriptor the window
- * server fills for each. Apple's engine tests only 0, 2, 3 and 255 itself and hands the others to the renderer.
+ * Drawable types (second argument of gliAttachDrawableWithOptions) and the descriptor of each.
+ * Read from the window server's call sites and from Apple's software renderer (10.11.6), which interprets the
+ * descriptor itself: for 0x50 it passes the three words to CGSGetSurfaceBounds(connection, window, surface).
+ * The framework's own surface attach (CGLSetSurface) passes 0x50; the window server passes zeros for connection
+ * and window, naming one of its own surfaces. Apple's engine tests only 0, 2, 3 and 255 and hands the others to
+ * the renderer; the software renderer refuses 0x36 and does not know 0x5a, which exist for accelerators only.
  */
 enum {
-    NM_DRAWABLE_NONE            = 0,
-    NM_DRAWABLE_FULLSCREEN      = 0x35,  /* three 64-bit values */
-    NM_DRAWABLE_FULLSCREEN_EXCL = 0x36,  /* two 64-bit values and one 32-bit */
-    NM_DRAWABLE_SURFACE         = 0x50,  /* {0, 0, surface id}, three 32-bit (10.7) */
-    NM_DRAWABLE_SURFACE_UNFLIP  = 0x5a   /* three 64-bit values, the third the surface (10.10 and later) */
+    NM_DRAWABLE_NONE           = 0,
+    NM_DRAWABLE_OFFSCREEN      = 0x35,  /* client memory: {width, height, row bytes, pad, base address} */
+    NM_DRAWABLE_FULLSCREEN     = 0x36,  /* exclusive full screen: two 64-bit values and one 32-bit (not decoded) */
+    NM_DRAWABLE_SURFACE        = 0x50,  /* nm_drawable_surface */
+    NM_DRAWABLE_SURFACE_UNFLIP = 0x5a,  /* nm_drawable_surface followed by three zero words (10.10 and later) */
+    NM_DRAWABLE_WINDOW_BITS    = 0x5c,  /* software renderer only: {width, height, ...} */
+    NM_DRAWABLE_PBUFFER        = 0x5d   /* offscreen buffer record; the options argument carries the level */
 };
+typedef struct {
+    uint32_t connection_id;     /* window-server connection of the owner; 0 from the window server itself */
+    uint32_t window_id;         /* 0 from the window server itself */
+    uint32_t surface_id;        /* the id the kernel surface client was given with SetIDMode */
+} nm_drawable_surface;
+typedef struct {
+    int32_t  width, height, row_bytes, pad;
+    void    *base;
+} nm_drawable_offscreen;
 static inline size_t nm_drawable_desc_size(int type)
 {
     switch (type) {
-    case NM_DRAWABLE_FULLSCREEN: case NM_DRAWABLE_SURFACE_UNFLIP: return 24;
-    case NM_DRAWABLE_FULLSCREEN_EXCL: return 20;
-    case NM_DRAWABLE_SURFACE: return 12;
+    case NM_DRAWABLE_OFFSCREEN: return 16 + sizeof(void *);
+    case NM_DRAWABLE_SURFACE_UNFLIP: return 24;
+    case NM_DRAWABLE_FULLSCREEN: return 20;
+    case NM_DRAWABLE_SURFACE: return sizeof(nm_drawable_surface);
     default: return 0;
     }
 }
