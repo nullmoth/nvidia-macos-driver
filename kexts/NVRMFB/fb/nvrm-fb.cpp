@@ -793,7 +793,9 @@ public:
     bool isConsoleDevice(void) override { return fBootConsole; }
     // WAS: both returned success and did nothing, so Night Shift, True Tone and calibration changed nothing on screen.
     IOReturn setGammaTable(UInt32 ch, UInt32 n, UInt32 w, void *d) override { return nvrmSetGamma(ch, n, w, d); }
+#if !defined(NM_ERA) || defined(NM_ERA_HAS_GAMMA_SYNC)   // the five-argument form exists from 10.13
     IOReturn setGammaTable(UInt32 ch, UInt32 n, UInt32 w, void *d, bool) override { return nvrmSetGamma(ch, n, w, d); }
+#endif
     IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnSuccess; }
     IOReturn setApertureEnable(IOPixelAperture, IOOptionBits) override { return kIOReturnSuccess; }
     IOReturn setStartupDisplayMode(IODisplayModeID, IOIndex) override { return kIOReturnSuccess; }
