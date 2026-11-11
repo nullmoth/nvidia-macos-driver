@@ -1,11 +1,11 @@
 NVK for a macOS floor below 12: applied last with NVK_EXTRA_PATCHES=nvk-legacy-floor (build/build_nvk.sh, NVK_FLOOR=<floor>).
-The device open no longer reads the main-port data symbol that only macOS 12 and later export, and the window-surface
-code checks at run time for the layer and colour-space features that arrived after the floor. A build for macOS 15
-behaves as before: every check is constant there.
+The device open no longer reads the main-port data symbol that only macOS 12 and later export; the window-surface
+code and the memory stream check at run time for what arrived after the floor; and a build for OS X 10.11 defines
+inside the library the two libSystem calls of macOS 10.12 that its Rust half binds (nvrm_floor_shim.c, empty at any
+other floor). The release build does not apply this patch.
 
-diff -ruN a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
---- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c	2026-11-11 04:21:16
-+++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c	2026-11-11 04:21:35
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
 @@ -1,6 +1,9 @@
  #include "../../nvmtl_cfg.h"
  #include "nvrm_xnu.h"
@@ -45,9 +45,82 @@ diff -ruN a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c b/src/nouveau/vulkan/nvkmd/
          if (svc) kr = IOServiceOpen(svc, mach_task_self(), type, &conn);
      }
      if (svc) IOObjectRelease(svc);
-diff -ruN a/src/vulkan/wsi/wsi_common_metal_layer.m b/src/vulkan/wsi/wsi_common_metal_layer.m
---- a/src/vulkan/wsi/wsi_common_metal_layer.m	2026-11-11 04:21:15
-+++ b/src/vulkan/wsi/wsi_common_metal_layer.m	2026-11-11 04:21:35
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_floor_shim.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_floor_shim.c
+@@ -0,0 +1,44 @@
++/* nvrm_floor_shim.c: two libSystem calls that arrive with macOS 10.12, for a build whose floor is OS X 10.11.
++ *
++ * The Rust standard library inside this driver is built for 10.12 and binds clock_gettime and fclonefileat as required
++ * symbols; 10.11 exports neither, so the library would not load there. Defined here, both names resolve inside the
++ * library itself. On a system that has the real call it is used (looked up in the next image); on 10.11 the clock is
++ * the Mach absolute time (wall time for the real-time clock) and the clone call reports "not supported", which makes
++ * its caller copy the file the ordinary way. A build for 10.12 or later compiles nothing from this file. */
++#include <Availability.h>
++#if defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED < 101200
++#include <dlfcn.h>
++#include <errno.h>
++#include <stdint.h>
++#include <time.h>
++#include <sys/time.h>
++#include <mach/mach_time.h>
++
++int clock_gettime(clockid_t id, struct timespec *ts)
++{
++    static int (*real)(clockid_t, struct timespec *); static int looked;
++    if (!looked) { real = (int (*)(clockid_t, struct timespec *))dlsym(RTLD_NEXT, "clock_gettime"); looked = 1; }
++    if (real) return real(id, ts);
++    if (!ts) { errno = EINVAL; return -1; }
++    if (id == _CLOCK_REALTIME) {
++        struct timeval tv; gettimeofday(&tv, NULL);
++        ts->tv_sec = tv.tv_sec; ts->tv_nsec = (long)tv.tv_usec * 1000; return 0;
++    }
++    static mach_timebase_info_data_t tb;
++    if (!tb.denom) mach_timebase_info(&tb);
++    const uint64_t ns = mach_absolute_time() * tb.numer / tb.denom;
++    ts->tv_sec = (time_t)(ns / 1000000000ull); ts->tv_nsec = (long)(ns % 1000000000ull);
++    return 0;
++}
++
++int fclonefileat(int srcfd, int dst_dirfd, const char *dst, uint32_t flags);
++int fclonefileat(int srcfd, int dst_dirfd, const char *dst, uint32_t flags)
++{
++    static int (*real)(int, int, const char *, uint32_t); static int looked;
++    if (!looked) { real = (int (*)(int, int, const char *, uint32_t))dlsym(RTLD_NEXT, "fclonefileat"); looked = 1; }
++    if (real) return real(srcfd, dst_dirfd, dst, flags);
++    errno = ENOTSUP; return -1;
++}
++#else
++typedef int nvrm_floor_shim_is_empty_at_this_floor;
++#endif
+--- a/src/nouveau/vulkan/meson.build
++++ b/src/nouveau/vulkan/meson.build
+@@ -127,7 +127,7 @@
+ )
+ 
+ if host_machine.system() == 'darwin'
+-  nvrm_files += files('nvkmd/nvrm/nvrm_xnu.c')
++  nvrm_files += files('nvkmd/nvrm/nvrm_xnu.c', 'nvkmd/nvrm/nvrm_floor_shim.c')
+ endif
+ nvk_files += nvrm_files
+ 
+--- a/src/util/memstream.c
++++ b/src/util/memstream.c
+@@ -64,7 +64,12 @@
+ 
+    return success;
+ #else
+-   FILE *const f = open_memstream(bufp, sizep);
++   /* open_memstream arrives with macOS 10.13; before it there is no memory stream and the caller gets "failed" */
++   FILE *f = NULL;
++#ifdef __APPLE__
++   if (__builtin_available(macOS 10.13, *))
++#endif
++      f = open_memstream(bufp, sizep);
+    mem->f = f;
+    return f != NULL;
+ #endif
+--- a/src/vulkan/wsi/wsi_common_metal_layer.m
++++ b/src/vulkan/wsi/wsi_common_metal_layer.m
 @@ -87,7 +87,11 @@
           *wants_edr = true;
           break;
@@ -89,7 +162,17 @@ diff -ruN a/src/vulkan/wsi/wsi_common_metal_layer.m b/src/vulkan/wsi/wsi_common_
           *wants_edr = true;
           break;
        case VK_COLOR_SPACE_ADOBERGB_NONLINEAR_EXT:
-@@ -160,14 +173,20 @@
+@@ -139,7 +152,8 @@
+ wsi_metal_layer_set_immediate(const CAMetalLayer *metal_layer,
+                               bool enable_immediate)
+ {
+-   metal_layer.displaySyncEnabled = !enable_immediate;
++   if (@available(macOS 10.13, *))
++      metal_layer.displaySyncEnabled = !enable_immediate;
+ }
+ 
+ VkResult
+@@ -160,17 +174,25 @@
        if (result != VK_SUCCESS)
           return result;
  
@@ -104,7 +187,9 @@ diff -ruN a/src/vulkan/wsi/wsi_common_metal_layer.m b/src/vulkan/wsi/wsi_common_
 +      }
  
        /* So acquire timeout works */
-       metal_layer.allowsNextDrawableTimeout = YES;
+-      metal_layer.allowsNextDrawableTimeout = YES;
++      if (@available(macOS 10.13, *))
++         metal_layer.allowsNextDrawableTimeout = YES;
        metal_layer.framebufferOnly = framebuffer_only;
  
 -      metal_layer.maximumDrawableCount = image_count;
@@ -112,8 +197,13 @@ diff -ruN a/src/vulkan/wsi/wsi_common_metal_layer.m b/src/vulkan/wsi/wsi_common_
 +         metal_layer.maximumDrawableCount = image_count;
        metal_layer.drawableSize = (CGSize){.width = width, .height = height};
        metal_layer.opaque = enable_opaque;
-       metal_layer.displaySyncEnabled = !enable_immediate;
-@@ -260,10 +279,13 @@
+-      metal_layer.displaySyncEnabled = !enable_immediate;
++      if (@available(macOS 10.13, *))
++         metal_layer.displaySyncEnabled = !enable_immediate;
+       metal_layer.pixelFormat = metal_format;
+ 
+       metal_layer.colorspace = cg_color_space;
+@@ -260,10 +282,13 @@
        NSData* content_info = [NSData dataWithBytesNoCopy:&light_level
                                                    length:sizeof(light_level)
                                              freeWhenDone:false];
@@ -131,7 +221,7 @@ diff -ruN a/src/vulkan/wsi/wsi_common_metal_layer.m b/src/vulkan/wsi/wsi_common_
     }
  }
  
-@@ -289,9 +311,12 @@
+@@ -289,9 +314,12 @@
  {
     @autoreleasepool {
        id<CAMetalDrawable> drawable = (id<CAMetalDrawable>)drawable_ptr;
