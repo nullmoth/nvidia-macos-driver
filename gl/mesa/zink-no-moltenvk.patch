@@ -1,0 +1,62 @@
+--- a/src/gallium/drivers/zink/meson.build
++++ b/src/gallium/drivers/zink/meson.build
+@@ -55,6 +55,7 @@
+ )
+ 
+ zink_c_args = []
++zink_cpp_args = []
+ inc_zink_vk = []
+ zink_link_args = []
+ 
+@@ -77,7 +78,9 @@
+     endif
+     inc_zink_vk += include_directories(moltenvk_includes)
+   else
+-    error('moltenvk-dir is required but not set.')
++    # no MoltenVK: the Vulkan driver underneath is not a Metal translation layer
++    zink_c_args += ['-DZINK_NO_MOLTENVK']
++    zink_cpp_args += ['-DZINK_NO_MOLTENVK']
+   endif
+ 
+   zink_c_args += ['-x','objective-c'] # Put compiler into objective-C mode to allow for MacOS types, like IOSurface and CAMetalLayer
+@@ -106,6 +109,7 @@
+     idep_vulkan_wsi_defines, idep_vulkan_util, dep_libdrm, vulkan_wsi_deps, idep_ntv,
+   ],
+   c_args: zink_c_args,
++  cpp_args: zink_cpp_args,
+ )
+ 
+ zink_deps = [libzink]
+--- a/src/gallium/drivers/zink/zink_instance.py
++++ b/src/gallium/drivers/zink/zink_instance.py
+@@ -81,7 +81,7 @@
+ 
+ #include <vulkan/vulkan_core.h>
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(ZINK_NO_MOLTENVK)
+ #include "MoltenVK/mvk_vulkan.h"
+ // Source of MVK_VERSION
+ #include "MoltenVK/mvk_config.h"
+--- a/src/gallium/drivers/zink/zink_resource.c
++++ b/src/gallium/drivers/zink/zink_resource.c
+@@ -60,7 +60,7 @@
+ #define DRM_FORMAT_MOD_LINEAR 0
+ #endif
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(ZINK_NO_MOLTENVK)
+ #include "MoltenVK/mvk_vulkan.h"
+ // Source of MVK_VERSION
+ #include "MoltenVK/mvk_config.h"
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -80,7 +80,7 @@
+ #endif
+ #endif
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(ZINK_NO_MOLTENVK)
+ #include "MoltenVK/mvk_vulkan.h"
+ // Source of MVK_VERSION
+ #include "MoltenVK/mvk_config.h"
