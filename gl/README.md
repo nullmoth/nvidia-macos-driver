@@ -13,7 +13,7 @@ part of a package.
 | `skeleton/gld_skeleton.c` | a renderer bundle that exports exactly the names of one release and declines to load |
 | `skeleton/gli_skeleton.c` | an engine bundle that exports exactly the names of one release and declines to load |
 | `engine/nm_gli.h` | the engine-level contract as read from the binaries: parameter numbers, argument blocks, drawable types, renderer-info and pixel-format layouts, with compile-time offset checks |
-| `engine/nm_engine.c` | the engine bundle: forwards every entry to Apple's renamed engine and, with `NM_GL_LOG` set, records each call with its parameter number and argument bytes |
+| `engine/nm_engine.c` | the engine bundle: forwards every entry to Apple's renamed engine at a fixed path. A default build reads nothing from the environment and writes no file; `NM_ENGINE_SYSLOG` records each call to the system log; `NM_ENGINE_TEST` (host tests only, never packaged) accepts a stand-in engine and a record file from two variables |
 | `engine/build_engine.sh` | builds the bundle for x86_64 and i386 against the 10.6 SDK, compares exports with the measured lists, runs the host tests, checks imports |
 | `glue/gen_dispatch.py` | generates the file that fills Apple's per-context function table for one release: a thunk into Mesa, one of our Apple-extension entries, or a refusal per slot |
 | `glue/nm_apple_ext.c` | the Apple-extension entries Mesa lacks (fences, object tests, purgeable objects, texture range, flush-render) |
