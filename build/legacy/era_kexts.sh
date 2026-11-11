@@ -25,7 +25,8 @@ cc() { local o=$1 f=$2; shift 2
     -Wno-everything -ferror-limit=0 -O2 -c "$f" -o "$O/$o.o" > "$O/$o.err" 2>&1; }
 fail=0
 for f in "$SRC"/NVRM/*.cpp; do cc NVRM-$(basename "$f" .cpp) "$f" -I"$SRC/NVRM"; done
-cc NVRMFB "$SRC/NVRMFB/fb/nvrm-fb.cpp" -I"$SRC/NVRMFB" -I"$SRC/NVRMFB/fb"
+# NVRMFB_EXTRA: extra flags for the framebuffer only (e.g. the optional marker service for 10.13 and 10.14)
+cc NVRMFB "$SRC/NVRMFB/fb/nvrm-fb.cpp" -I"$SRC/NVRMFB" -I"$SRC/NVRMFB/fb" ${NVRMFB_EXTRA:-}
 cc NVRMAGDC "$SRC/NVRMAGDC/nvrm-agdc.cpp" -I"$SRC/NVRMAGDC"
 # NVAccel is built against our own reconstruction of Apple's accelerator family (made from macOS 15), so a clean
 # compile says nothing about fit: the symbol check against the release's real family is the measure.

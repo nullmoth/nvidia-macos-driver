@@ -887,6 +887,24 @@ public:
 };
 OSDefineMetaClassAndStructors(NVRMFBClaim, IOService)
 
+// CoreDisplay of macOS 10.13 and 10.14 decides whether to use IOPresentment (and with it the Metal compositor) by
+// looking for a service of class AppleIntelFramebuffer, NVDA or AMDFramebuffer. This marker carries that class name
+// beside our framebuffer; it does nothing else. Built only where the install-time option asks for it, because the
+// name collides with Apple's own NVIDIA kext if an older NVIDIA card makes that kext load.
+#ifdef NVRMFB_PUBLISH_CLASS_NVDA
+class NVDA : public IOService
+{
+    OSDeclareDefaultStructors(NVDA)
+public:
+    bool start(IOService *provider) APPLE_KEXT_OVERRIDE {
+        if (!IOService::start(provider)) return false;
+        registerService();
+        return true;
+    }
+};
+OSDefineMetaClassAndStructors(NVDA, IOService)
+#endif
+
 // With the driver off ("Start once without NVIDIA driver", "Remove NVIDIA driver") the claim above steps aside, but the
 // install excludes IONDRVSupport in OpenCore so Apple's firmware framebuffer never takes this display: nothing lit the
 // screen and both driver-off starts came up black (1.14.0/1.14.1 reports). This is what IONDRVFramebuffer does for a card
