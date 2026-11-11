@@ -56,6 +56,17 @@ link() { local name=$1; shift; mkdir -p "$O/$name.kext/Contents/MacOS"
   xcrun clang++ -arch x86_64 -mmacosx-version-min=$MV -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "$@" \
     -o "$O/$name.kext/Contents/MacOS/$name" > "$O/$name.ld.err" 2>&1
   local rc=$?; [ $rc = 0 ] || { echo "era $ERA $name: LINK FAILED"; grep -v "built for newer" "$O/$name.ld.err" | head -8; fail=1; return; }
+  # A kext may not define, as a global, a name the kernel also exports: the kernel's kext linker refuses it
+  # ("defined more than once"). Any such name is linked again as a private one; the kext keeps using its own copy.
+  if [ -n "${KERN_SYMS:-}" ] && [ -s "$KERN_SYMS" ]; then
+    xcrun nm -arch x86_64 -gU "$O/$name.kext/Contents/MacOS/$name" | awk '{print $NF}' | sort -u | comm -12 - "$KERN_SYMS" | grep -v -e '^_kmod_info$' -e '^__start$' -e '^__stop$' > "$O/$name.hidden.txt"
+    if [ -s "$O/$name.hidden.txt" ]; then
+      xcrun clang++ -arch x86_64 -mmacosx-version-min=$MV -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "$@" \
+        -Xlinker -unexported_symbols_list -Xlinker "$O/$name.hidden.txt" -o "$O/$name.kext/Contents/MacOS/$name" > "$O/$name.ld.err" 2>&1 \
+        || { echo "era $ERA $name: RELINK FAILED"; head -8 "$O/$name.ld.err"; fail=1; return; }
+      echo "era $ERA $name: $(wc -l < "$O/$name.hidden.txt" | tr -d ' ') globals the kernel also exports made private ($(head -3 "$O/$name.hidden.txt" | tr '\n' ' '))"
+    fi
+  fi
   xcrun nm -arch x86_64 -u "$O/$name.kext/Contents/MacOS/$name" > "$O/$name.imports.txt"
   echo "era $ERA $name: linked, $(stat -f %z "$O/$name.kext/Contents/MacOS/$name") bytes, $(wc -l < "$O/$name.imports.txt" | tr -d ' ') imports, min version $(xcrun otool -l "$O/$name.kext/Contents/MacOS/$name" | grep -A3 -E 'LC_VERSION_MIN_MACOSX|LC_BUILD_VERSION' | awk '/minos|version /{print $2; exit}')"
 }

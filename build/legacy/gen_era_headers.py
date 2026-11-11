@@ -29,7 +29,32 @@ def inline_body(mangled, ret):
                 continue
             if cur is not None and "\t" in l: _dis[cur].append(l.split("\t", 1)[1].strip())
     ins = [x for x in _dis.get(mangled, []) if not x.startswith("nop")]
-    if not ins or "retq" not in ins[-2:]: return None, ret
+    if not ins: return None, ret
+    # Forwarders that end in a jump instead of a return. @ARGS@ / @CALL@ are filled in by the caller with the
+    # method's own parameters; a jump passes every argument register through, so forwarding all of them is the same call.
+    fw = [x for x in ins if not re.match(r"(pushq\s+%rbp|movq\s+%rsp, %rbp|popq\s+%rbp|movzbl\s+%(dl|sil|cl), %e(dx|si|cx))$", x)]
+    r2 = ret        # the declared type stays: classes of ours override some of these
+    def slot(rest):
+        if len(rest) == 1:
+            m = re.match(r"jmpq\s+\*0x([0-9a-f]+)\(%rax\)$", rest[0]); return m and int(m.group(1), 16)
+        if len(rest) == 2 and re.match(r"jmpq\s+\*%rax$", rest[1]):
+            m = re.match(r"movq\s+0x([0-9a-f]+)\(%rax\), %rax$", rest[0]); return m and int(m.group(1), 16)
+        return None
+    if len(fw) >= 2 and re.match(r"movq\s+\(%rdi\), %rax$", fw[0]):
+        off = slot(fw[1:])
+        if off is not None and off % 8 == 0:      # this object's own virtual at that table offset
+            return "{ typedef %s (*F_)(void *@ARGS@); return ((F_)(*(void ***)this)[%d])((void *)this@CALL@); }" % (r2, off // 8), r2
+    if len(fw) >= 3 and re.match(r"movq\s+\(%rdi\), %rax$", fw[1]):
+        m = re.match(r"movq\s+0x([0-9a-f]+)\(%rdi\), %rdi$", fw[0]); off = slot(fw[2:])
+        if m and off is not None and off % 8 == 0:  # a virtual of the object this one holds at that field
+            return "{ void *o_ = *(void **)((unsigned char *)this + 0x%s); typedef %s (*F_)(void *@ARGS@); return ((F_)(*(void ***)o_)[%d])(o_@CALL@); }" % (m.group(1), r2, off // 8), r2
+    if len(fw) == 2 and fw[1] == "retq":
+        m = re.match(r"mov([lqb])\s+%(esi|rsi|sil), 0x([0-9a-f]+)\(%rdi\)$", fw[0])
+        if m:                                       # stores its first argument in a field
+            ty = {"l": "unsigned int", "q": "unsigned long long", "b": "unsigned char"}[m.group(1)]
+            tail = "" if ret == "void" else "return (%s)0; " % ret      # the family's body returns nothing meaningful
+            return "{ *(%s *)((unsigned char *)this + 0x%s) = (%s)a0; %s@NAMED@}" % (ty, m.group(3), ty, tail), ret
+    if "retq" not in ins[-2:]: return None, ret
     core = [x for x in ins if not re.match(r"(pushq\s+%rbp|movq\s+%rsp, %rbp|popq\s+%rbp|retq)$", x)]
     if len(core) == 0: return ("{ }" if ret == "void" else None), ret
     if len(core) == 1:
@@ -144,6 +169,14 @@ for c, base, olds, hdr in PLAN:
             ret0 = ret; body, ret = inline_body(S[i], ret)
             if body and ret != ret0: revealed[(name, norm(args), const)] = ret
             if body: inlined.append(c + "::" + name)
+        if body and "@" in body:
+            # the body uses the parameters: name them a0, a1, ... (plain types only; anything else keeps the declaration)
+            parts = [p.strip() for p in args.split(",")] if args.strip() and args.strip() != "void" else []
+            if "(" in args: body = None
+            else:
+                named_args = ", ".join(f"{p} a{k}" for k, p in enumerate(parts))
+                body = body.replace("@ARGS@", "".join(", " + p for p in parts)).replace("@CALL@", "".join(f", a{k}" for k in range(len(parts)))).replace("@NAMED@", "")
+                if body: return f"    virtual {ret} {name}({named_args}){' const' if const else ''}{' APPLE_KEXT_OVERRIDE' if override else ''} {body}   // inline in Apple's header on this release (body read from the family)"
         if body: return f"    virtual {ret} {name}({args}){' const' if const else ''}{' APPLE_KEXT_OVERRIDE' if override else ''} {body}   // inline in Apple's header on this release (body read from the family)"
         return f"    virtual {ret} {name}({args}){' const' if const else ''}{' = 0' if i in P else ''}{' APPLE_KEXT_OVERRIDE' if override else ''};"
     # overrides inside the base's range that this class itself defines and the base left pure or defined in the family

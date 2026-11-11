@@ -9,6 +9,13 @@ while read era mv kit tag khdr; do
   rm -rf "$B/out/$mv"; echo "=================== macOS $mv"
   # headers regenerated for this release from its own tables (gen_era_headers.py), when they exist
   if [ -d "$B/gen-$era" ]; then export ACCEL_HDR="$B/gen-$era"; else unset ACCEL_HDR; fi
+  # names the release's kernel exports, for the duplicate-global rule of the kernel's kext linker (before 11 only:
+  # from 11 on kexts are linked into a collection by a different tool that has no such rule)
+  unset KERN_SYMS
+  if [ $era -lt 1100 ]; then
+    kern=$(find "$B/kdk/$kit" -type f \( -name kernel -o -name mach_kernel \) -not -path "*dSYM*" -not -path "*DEBUG*" -size +1000k | head -1)
+    [ -n "$kern" ] && { xcrun nm -arch x86_64 -gU "$kern" | awk '{print $NF}' | sort -u > "$B/vt/kernsyms-$mv.txt"; export KERN_SYMS="$B/vt/kernsyms-$mv.txt"; }
+  fi
   bash "$H/era_kexts.sh" $era $mv "$S/$khdr" "$B/out/$mv" 2>&1 | cut -c1-200
   python3 "$H/era_symcheck.py" "$B/out/$mv" "$B/kdk/$kit" "$tag" 2>&1 | cut -c1-140
 done <<LIST
