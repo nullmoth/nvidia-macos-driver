@@ -102,8 +102,8 @@ echo "$LIST" | while read rel kd md gd; do
              echo "    checked against the release's kernel collection instead (map, section 2j/2k).";;
       10.8) echo "  - NVRMAGDC is in held-back/, not kexts/: this release has no graphics-control class, so it cannot link here."
              echo "    It only adds GPU selection and power policy; the display and the accelerator do not depend on it.";;
-      10.6) echo "  - Link test: NVRM names one class of the ACPI family (IOACPIPlatformDevice); no copy of the 10.6 ACPI family"
-             echo "    kext was on hand, so that one name is not verified here. Everything else in NVRM resolved.";;
+      10.6) echo "  - Link test: the ACPI family binary is the one from Apple's 10.6.8 update, which ships it without its property"
+             echo "    list; the test used a stand-in list (identifier and libraries stated by hand). All three kexts linked.";;
     esac
   } > "$D/README.txt"
   ( cd "$D" && find . -type f ! -name MANIFEST.sha256 -print0 | sort -z | xargs -0 shasum -a 256 > MANIFEST.sha256 )
