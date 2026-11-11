@@ -31,6 +31,13 @@ print(json.dumps({"release": rel, "engine": tier, "status": "staged only; not in
   "before_placing": ["rename the system's GLEngine.bundle to NMOriginalEngine.bundle in the same folder (the engine forwards to it by that fixed path)",
                      "on 10.11 and later the folder is covered by system integrity protection, which must be off for the copy"],
   "kext_gate": "the personality's IOProviderClass names a class that does not exist; the kext cannot attach until that is changed for an approved run",
+  "gpu_path": {"engine": "Mesa state tracker with zink linked in; it takes the Vulkan path only when the accelerator's private client is found, otherwise the CPU rasteriser",
+               "vulkan_driver": "libvulkan_nouveau.dylib beside the engine, opened by a path relative to the engine's own file",
+               "kext": "surfaces in system memory by default (video memory with NMGPUSurfaces in the personality); a privileged client's flush is copied into the framebuffer kext's scanout",
+               "frame_route": "rendered on the card, read back into the surface's pages at flush; no shared GPU buffer between the Vulkan driver and the accelerator yet"},
+  "checked": {"linked_and_import_checked": "engine and Vulkan driver against this release's own libraries; kext against this release's kernel and graphics family",
+              "run_on_the_build_host_cpu": "context and pixel tests through the CPU rasteriser; surface-table and scanout-copy tests of the kext's logic",
+              "never_run": "zink, the Vulkan driver, the kext, and anything on a GPU or on this release"},
   "files": files}, indent=1))
 PY
   n=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))['files']))" "$d/MANIFEST.json")
