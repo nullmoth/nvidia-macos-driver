@@ -46,7 +46,7 @@ public:
     virtual void dirtyBufferRange(unsigned int, unsigned int);
     virtual void zeroVidMemory(IOAccelEvent*, unsigned long long);
     virtual void scrubEvents();
-#if defined(NM_ERA) && NM_ERA < 1200   // macOS 11: these two slots are still the family's reserved pads
+#if defined(NM_ERA) && NM_ERA < 1200   // macOS 10.15 and 11: these two slots are still the family's reserved pads
     virtual void _RESERVEDIOAccelResource0();
     virtual void _RESERVEDIOAccelResource1();
 #else

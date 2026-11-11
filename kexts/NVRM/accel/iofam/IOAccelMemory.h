@@ -16,7 +16,9 @@ public:
     virtual uint64_t getDirtySize() const = 0;
     virtual uint64_t getResidentSize() const = 0;
     virtual OSObject * createMappingInTask(IOAccelTask*, unsigned int);
+#if !defined(NM_ERA) || NM_ERA >= 1100   // macOS 10.15 has no such slot
     virtual OSObject * createMappingInTaskAtAddressLength(IOAccelTask*, unsigned int, unsigned long long, unsigned long long);
+#endif
     virtual bool prepare();
     virtual bool complete();
     virtual uint64_t getPhysicalSegment(unsigned long long, unsigned long long*) = 0;

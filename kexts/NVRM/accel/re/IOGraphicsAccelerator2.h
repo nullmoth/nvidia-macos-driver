@@ -71,7 +71,11 @@ class IOPCIDevice;
 class IOSurface;
 
 /* From the kernel's registry, cross-checked against the metaclass constructor. */
+#if defined(NM_ERA) && NM_ERA < 1100   /* macOS 10.15 registers 3552 bytes for this class */
+enum { kIOGraphicsAccelerator2Size = 0xde0 };
+#else
 enum { kIOGraphicsAccelerator2Size = 0xdd8 };   /* 3544 */
+#endif
 
 class IOGraphicsAccelerator2 : public IOAccelerator
 {
@@ -178,7 +182,11 @@ public:
     virtual OSObject * newRemoteMemory();   /* slot 341 — factory — returns a pointer */
     virtual OSObject * createRemoteMemory(IOAccelShared2*, unsigned long long, unsigned int, unsigned int);   /* slot 342 — factory — returns a pointer */
     virtual OSObject * newContextEventFence();   /* slot 343 — factory — returns a pointer */
+#if defined(NM_ERA) && NM_ERA < 1100   /* macOS 10.15: still the family's reserved pad */
+    virtual void _RESERVEDIOGraphicsAccelerator1();
+#else
     virtual OSObject * createIODMACommand();   /* slot 344 — factory — returns a pointer */
+#endif
     virtual void triage(char**, unsigned long long*);   /* slot 345 */
     virtual void _RESERVEDIOGraphicsAccelerator3();   /* slot 346 — reserved padding */
     virtual void _RESERVEDIOGraphicsAccelerator4();   /* slot 347 — reserved padding */
