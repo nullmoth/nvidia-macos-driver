@@ -80,7 +80,7 @@ echo "$LIST" | while read rel kd md gd; do
     echo
     echo "KNOWN OPEN ITEMS FOR THIS RELEASE"
     case $rel in
-      10.6) echo "  - OpenGL: context layer built for x86_64 (CPU rasteriser path); the GPU path waits on a Rust standard library without thread-local storage. 64-bit kernel only."
+      10.6) echo "  - OpenGL: the GPU path (Vulkan backend and driver) is linked for this release and import-clean, never executed; only the CPU rasteriser path has run. 64-bit kernel only."
             echo "  - AMD processors need a patched kernel below 10.13 (not part of this kit).";;
       10.7|10.8|10.9|10.10) echo "  - Two accelerators exist for 10.11 to 10.13 only; here the OpenGL accelerator is the only one."
             echo "  - AMD processors need a patched kernel below 10.13 (not part of this kit).";;
