@@ -240,7 +240,7 @@ void nm_gl_refuse(GLIContext ctx, const char *entry)
 
 /* ---- kernel surfaces -------------------------------------------------------------------------------------- */
 
-struct nm_surface { uint32_t id; int width, height, row_bytes; void *base; };
+struct nm_surface { uint32_t id; int width, height, row_bytes; void *base; int writable; };
 
 /* NM SOFTWARE SURFACE FALLBACK: host tests register memory under a surface id. A normal build has no entries and
  * no way to add one. */
@@ -251,7 +251,7 @@ int nm_test_register_surface(uint32_t id, int width, int height, int row_bytes, 
 {
     for (int i = 0; i < 16; i++)
         if (!nm_test_surface[i].base || nm_test_surface[i].id == id) {
-            nm_test_surface[i] = (struct nm_surface){ id, width, height, row_bytes, base };
+            nm_test_surface[i] = (struct nm_surface){ id, width, height, row_bytes, base, 1 };
             return 0;
         }
     return -1;
@@ -298,7 +298,7 @@ static int nm_surface_lookup(uint32_t id, struct nm_surface *s)
             slot = free_slot; map[slot].id = id; map[slot].generation = b.generation; map[slot].addr = addr; map[slot].size = size;
         }
     }
-    if (slot >= 0) { *s = (struct nm_surface){ id, (int)b.width, (int)b.height, (int)b.row_bytes, (void *)(uintptr_t)map[slot].addr }; rc = 0; }
+    if (slot >= 0) { *s = (struct nm_surface){ id, (int)b.width, (int)b.height, (int)b.row_bytes, (void *)(uintptr_t)map[slot].addr, b.access == 2 }; rc = 0; }
     pthread_mutex_unlock(&map_lock);
     if (rc != 0) nm_log("surface %u: its pages could not be mapped", id);
     return rc;
@@ -328,6 +328,8 @@ long nm_own_attach_drawable(void *rend, int type, const void *desc, int screen, 
         struct nm_surface s;
         if (!d) return NM_BAD_DRAWABLE;
         if (nm_surface_lookup(d->surface_id, &s) != 0) return NM_BAD_DRAWABLE;
+        /* another process's surface is mapped read-only by the accelerator: it can be shown, never drawn into */
+        if (!s.writable) { nm_log("attach: surface %u belongs to another process and is read-only here", d->surface_id); return NM_BAD_DRAWABLE; }
         if (nm_mesa_set_memory_drawable(c->mesa, s.width, s.height, s.row_bytes, s.base) != 0) return NM_BAD_DRAWABLE;
         c->drawable_type = type;
         return NM_OK;

@@ -18,13 +18,15 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOMemoryDescriptor.h>
-#include <libkern/c++/OSArray.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOUserClient.h>
 #include <IOKit/graphics/IOAccelerator.h>
 #include <IOKit/graphics/IOAccelSurfaceConnect.h>
 
 #include "nm_accel_contract.h"
+#include "nm_surface_table.h"
+
+extern "C" int proc_selfpid(void);
 
 /* The table in the contract header was written from the user library's source; these tie it to the kernel's own
  * headers of the release being built, so a difference between the two stops the build. */
@@ -113,15 +115,19 @@ class NMLegacyAccelerator : public IOAccelerator
 {
     OSDeclareDefaultStructors(NMLegacyAccelerator)
     IOLock *fLock;
-    OSArray *fSurfaces;
+    nm_surface_table *fTable;                    /* who owns which id, and who was granted what */
+    NMLegacySurface *fSurf[NM_TABLE_SLOTS];      /* the surface in each table slot */
 public:
     virtual bool start(IOService *provider);
     virtual void stop(IOService *provider);
     virtual IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler);
-    /* The table of every process's surfaces. find returns a retained surface or NULL. */
-    IOReturn addSurface(NMLegacySurface *s);
+    /* The table of every process's surfaces, keyed by (owning process, id). */
+    IOReturn addSurface(NMLegacySurface *s, int32_t ownerPid);
     void removeSurface(NMLegacySurface *s);
-    NMLegacySurface *findSurface(uint32_t id);
+    /* The surface `callerPid` reaches by `id` under the rules of nm_surface_table.h: retained, with the access it
+     * is allowed, or NULL with the reason in *why. */
+    NMLegacySurface *findSurface(int32_t callerPid, bool privileged, uint32_t id, int *access, IOReturn *why);
+    IOReturn grant(int32_t callerPid, bool privileged, const nm_gl_surface_grant *g);
     void lock() { IOLockLock(fLock); }
     void unlock() { IOLockUnlock(fLock); }
 };
@@ -135,6 +141,10 @@ class NMLegacySurfaceClient : public IOUserClient
     NMLegacySurface *fSurface;
     IOMemoryMap *fMap;      /* the buffer mapped into the client while it holds a CPU lock */
     task_t fTask;
+    int32_t fPid;           /* the opening process: the owner of the surface this connection creates */
+    IOLock *fCallLock;      /* one external method at a time per connection; stop() takes it to wait out a call in flight */
+    bool fStopped;
+    IOReturn dispatch(uint32_t selector, IOExternalMethodArguments *a);
     IOReturn setIDMode(uint32_t id, uint32_t mode);
     IOReturn setShape(const IOAccelDeviceRegion *region);
     IOReturn lockSurface(IOExternalMethodArguments *a);
@@ -152,8 +162,10 @@ OSDefineMetaClassAndStructors(NMLegacySurfaceClient, IOUserClient)
 bool NMLegacySurfaceClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
 {
     if (type != NM_SURFACE_CLIENT_TYPE || !IOUserClient::initWithTask(owningTask, securityID, type)) return false;
-    fTask = owningTask; fSurface = NULL; fMap = NULL; fAccel = NULL;
-    return true;
+    fTask = owningTask; fSurface = NULL; fMap = NULL; fAccel = NULL; fStopped = false;
+    fPid = proc_selfpid();               /* initWithTask runs in the opening process's context */
+    fCallLock = IOLockAlloc();
+    return fCallLock != NULL;
 }
 
 bool NMLegacySurfaceClient::start(IOService *provider)
@@ -164,8 +176,13 @@ bool NMLegacySurfaceClient::start(IOService *provider)
 
 void NMLegacySurfaceClient::stop(IOService *provider)
 {
+    /* Taking the call lock waits for an external method that is still running on another thread; after the flag
+     * is set no later call touches the surface or the mapping. */
+    IOLockLock(fCallLock);
+    fStopped = true;
     unlockSurface();
     if (fSurface) { if (fAccel) fAccel->removeSurface(fSurface); fSurface->release(); fSurface = NULL; }
+    IOLockUnlock(fCallLock);
     IOUserClient::stop(provider);
 }
 
@@ -184,7 +201,7 @@ IOReturn NMLegacySurfaceClient::setIDMode(uint32_t id, uint32_t mode)
     }
     NMLegacySurface *s = NMLegacySurface::withID(id, mode, this);
     if (!s) return kIOReturnNoMemory;
-    IOReturn r = fAccel->addSurface(s);
+    IOReturn r = fAccel->addSurface(s, fPid);
     if (r != kIOReturnSuccess) { s->release(); return r; }
     fSurface = s;
     return kIOReturnSuccess;
@@ -205,16 +222,23 @@ IOReturn NMLegacySurfaceClient::lockSurface(IOExternalMethodArguments *a)
 {
     if (!fSurface || !fSurface->fBuffer) return kIOReturnNotReady;
     if (!a->structureOutput || a->structureOutputSize < sizeof(IOAccelSurfaceInformation)) return kIOReturnBadArgument;
-    if (!fMap) {
-        fMap = fSurface->fBuffer->createMappingInTask(fTask, 0, kIOMapAnywhere);
-        if (!fMap) return kIOReturnVMError;
-    }
+    /* The buffer pointer and the geometry are read under the accelerator's lock, with the buffer retained, so a
+     * reshape from this or any other path cannot free it between the read and the mapping. */
+    fAccel->lock();
+    IOBufferMemoryDescriptor *buf = fSurface->fBuffer;
+    uint32_t rowBytes = fSurface->fRowBytes, width = fSurface->fWidth, height = fSurface->fHeight;
+    if (buf) buf->retain();
+    fAccel->unlock();
+    if (!buf) return kIOReturnNotReady;
+    if (!fMap) fMap = buf->createMappingInTask(fTask, 0, kIOMapAnywhere);
+    buf->release();                      /* the mapping keeps the pages alive from here */
+    if (!fMap) return kIOReturnVMError;
     IOAccelSurfaceInformation info;
     bzero(&info, sizeof info);
     info.address[0] = fMap->getAddress();
-    info.rowBytes = fSurface->fRowBytes;
-    info.width = fSurface->fWidth;
-    info.height = fSurface->fHeight;
+    info.rowBytes = rowBytes;
+    info.width = width;
+    info.height = height;
     info.pixelFormat = 0x42475241;       /* 'BGRA' */
     bcopy(&info, a->structureOutput, sizeof info);
     a->structureOutputSize = sizeof info;
@@ -228,6 +252,14 @@ void NMLegacySurfaceClient::unlockSurface()
 
 IOReturn NMLegacySurfaceClient::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
                                                IOExternalMethodDispatch *, OSObject *, void *)
+{
+    IOLockLock(fCallLock);
+    IOReturn r = fStopped ? kIOReturnOffline : dispatch(selector, a);
+    IOLockUnlock(fCallLock);
+    return r;
+}
+
+IOReturn NMLegacySurfaceClient::dispatch(uint32_t selector, IOExternalMethodArguments *a)
 {
     if (selector >= NM_SURFACE_METHOD_COUNT) return kIOReturnBadArgument;
     if (!nm_shape_ok(gSurfaceShape[selector], a)) return kIOReturnBadArgument;
@@ -251,8 +283,13 @@ IOReturn NMLegacySurfaceClient::externalMethod(uint32_t selector, IOExternalMeth
         a->scalarOutput[0] = kIOAccelSurfaceStateIdleBit;   /* CPU-drawn surfaces never have GPU work pending */
         a->scalarOutputCount = 1;
         return kIOReturnSuccess;
-    case kIOAccelSurfaceQueryLock:
-        return fSurface && fSurface->fBuffer ? kIOReturnSuccess : kIOReturnNotReady;
+    case kIOAccelSurfaceQueryLock: {
+        if (!fSurface) return kIOReturnNotReady;
+        fAccel->lock();
+        bool ready = fSurface->fBuffer != NULL;
+        fAccel->unlock();
+        return ready ? kIOReturnSuccess : kIOReturnNotReady;
+    }
     case kIOAccelSurfaceSetScale:
         return fSurface ? kIOReturnSuccess : kIOReturnNotReady;   /* accepted; scaling is applied at presentation */
     case kIOAccelSurfaceControl:
@@ -277,7 +314,13 @@ class NMLegacyGLClient : public IOUserClient
 {
     OSDeclareDefaultStructors(NMLegacyGLClient)
     NMLegacyAccelerator *fAccel;
+    int32_t fPid;           /* the opening process: what every lookup is judged against */
+    bool fPrivileged;       /* administrator privilege at open, as the kernel's user-client check reports it */
+    IOLock *fCallLock;
+    bool fStopped;
+    IOReturn dispatch(uint32_t selector, IOExternalMethodArguments *a);
 public:
+    virtual void stop(IOService *provider);
     virtual bool initWithTask(task_t owningTask, void *securityID, UInt32 type);
     virtual bool start(IOService *provider);
     virtual IOReturn clientClose(void);
@@ -289,8 +332,22 @@ OSDefineMetaClassAndStructors(NMLegacyGLClient, IOUserClient)
 
 bool NMLegacyGLClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
 {
-    fAccel = NULL;
-    return type == NM_GL_CLIENT_TYPE && IOUserClient::initWithTask(owningTask, securityID, type);
+    fAccel = NULL; fStopped = false;
+    if (type != NM_GL_CLIENT_TYPE || !IOUserClient::initWithTask(owningTask, securityID, type)) return false;
+    /* Opening is not restricted (Apple's accelerators of these releases do not restrict theirs either: every
+     * application's GL needs one). What the connection may reach is: see nm_surface_table.h. */
+    fPid = proc_selfpid();
+    fPrivileged = IOUserClient::clientHasPrivilege(securityID, kIOClientPrivilegeAdministrator) == kIOReturnSuccess;
+    fCallLock = IOLockAlloc();
+    return fCallLock != NULL;
+}
+
+void NMLegacyGLClient::stop(IOService *provider)
+{
+    IOLockLock(fCallLock);               /* waits for a call in flight */
+    fStopped = true;
+    IOLockUnlock(fCallLock);
+    IOUserClient::stop(provider);
 }
 
 bool NMLegacyGLClient::start(IOService *provider)
@@ -309,18 +366,36 @@ IOReturn NMLegacyGLClient::clientClose(void)
  * the CPU form of "the buffer behind a surface id"; with GPU-backed surfaces the handle in the reply replaces it. */
 IOReturn NMLegacyGLClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
 {
-    NMLegacySurface *s = fAccel->findSurface(type);
-    if (!s) return kIOReturnNotFound;
-    IOReturn r = kIOReturnNotReady;
-    fAccel->lock();
-    if (s->fBuffer) { s->fBuffer->retain(); *memory = s->fBuffer; *options = 0; r = kIOReturnSuccess; }
-    fAccel->unlock();
-    s->release();
+    IOLockLock(fCallLock);
+    IOReturn r = kIOReturnOffline;
+    int access = NM_ACCESS_NONE;
+    NMLegacySurface *s = fStopped ? NULL : fAccel->findSurface(fPid, fPrivileged, type, &access, &r);
+    if (s) {
+        r = kIOReturnNotReady;
+        fAccel->lock();
+        if (s->fBuffer) {
+            s->fBuffer->retain(); *memory = s->fBuffer;
+            /* only the owner draws into its surface; everyone else who may reach it reads */
+            *options = (access == NM_ACCESS_WRITE) ? 0 : kIOMapReadOnly;
+            r = kIOReturnSuccess;
+        }
+        fAccel->unlock();
+        s->release();
+    }
+    IOLockUnlock(fCallLock);
     return r;
 }
 
 IOReturn NMLegacyGLClient::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
                                           IOExternalMethodDispatch *, OSObject *, void *)
+{
+    IOLockLock(fCallLock);
+    IOReturn r = fStopped ? kIOReturnOffline : dispatch(selector, a);
+    IOLockUnlock(fCallLock);
+    return r;
+}
+
+IOReturn NMLegacyGLClient::dispatch(uint32_t selector, IOExternalMethodArguments *a)
 {
     switch (selector) {
     case NM_GL_METHOD_GET_VERSION: {
@@ -334,8 +409,9 @@ IOReturn NMLegacyGLClient::externalMethod(uint32_t selector, IOExternalMethodArg
         if (a->structureInputSize != sizeof(nm_gl_surface_query) || !a->structureInput ||
             a->structureOutputSize < sizeof(nm_gl_surface_buffer) || !a->structureOutput) return kIOReturnBadArgument;
         const nm_gl_surface_query *q = (const nm_gl_surface_query *)a->structureInput;
-        NMLegacySurface *s = fAccel->findSurface(q->surface_id);
-        if (!s) return kIOReturnNotFound;
+        int access = NM_ACCESS_NONE; IOReturn why = kIOReturnNotFound;
+        NMLegacySurface *s = fAccel->findSurface(fPid, fPrivileged, q->surface_id, &access, &why);
+        if (!s) return why;
         nm_gl_surface_buffer b;
         bzero(&b, sizeof b);
         fAccel->lock();
@@ -345,6 +421,7 @@ IOReturn NMLegacyGLClient::externalMethod(uint32_t selector, IOExternalMethodArg
         b.width = s->fWidth; b.height = s->fHeight; b.row_bytes = s->fRowBytes;
         b.format = s->fMode & kIOAccelSurfaceModeColorDepthBits;
         b.generation = s->fGeneration;
+        b.access = (uint32_t)access;
         fAccel->unlock();
         s->release();
         if (r != kIOReturnSuccess) return r;
@@ -354,11 +431,15 @@ IOReturn NMLegacyGLClient::externalMethod(uint32_t selector, IOExternalMethodArg
     }
     case NM_GL_METHOD_SURFACE_PRESENTED: {
         if (a->structureInputSize != sizeof(nm_gl_surface_query) || !a->structureInput) return kIOReturnBadArgument;
-        NMLegacySurface *s = fAccel->findSurface(((const nm_gl_surface_query *)a->structureInput)->surface_id);
-        if (!s) return kIOReturnNotFound;
+        int access = NM_ACCESS_NONE; IOReturn why = kIOReturnNotFound;
+        NMLegacySurface *s = fAccel->findSurface(fPid, fPrivileged, ((const nm_gl_surface_query *)a->structureInput)->surface_id, &access, &why);
+        if (!s) return why;
         s->release();                    /* CPU drawing is complete when the call arrives; nothing to wait for */
-        return kIOReturnSuccess;
+        return access == NM_ACCESS_WRITE ? kIOReturnSuccess : kIOReturnNotPermitted;   /* only the owner presents */
     }
+    case NM_GL_METHOD_SURFACE_GRANT:
+        if (a->structureInputSize != sizeof(nm_gl_surface_grant) || !a->structureInput) return kIOReturnBadArgument;
+        return fAccel->grant(fPid, fPrivileged, (const nm_gl_surface_grant *)a->structureInput);
     default:
         return kIOReturnBadArgument;
     }
@@ -372,8 +453,10 @@ bool NMLegacyAccelerator::start(IOService *provider)
 {
     if (!IOAccelerator::start(provider)) return false;
     fLock = IOLockAlloc();
-    fSurfaces = OSArray::withCapacity(16);
-    if (!fLock || !fSurfaces) return false;
+    fTable = (nm_surface_table *)IOMalloc(sizeof(nm_surface_table));
+    if (!fLock || !fTable) return false;
+    bzero(fTable, sizeof(nm_surface_table));
+    bzero(fSurf, sizeof fSurf);
     /* No IOGLBundleName: Apple's engine must not look for a renderer bundle for this accelerator. The engine at
      * the framework's engine path recognises the accelerator by class instead. */
     registerService();
@@ -382,40 +465,56 @@ bool NMLegacyAccelerator::start(IOService *provider)
 
 void NMLegacyAccelerator::stop(IOService *provider)
 {
-    if (fSurfaces) { fSurfaces->release(); fSurfaces = NULL; }
+    if (fTable) { IOFree(fTable, sizeof(nm_surface_table)); fTable = NULL; }
     if (fLock) { IOLockFree(fLock); fLock = NULL; }
     IOAccelerator::stop(provider);
 }
 
-IOReturn NMLegacyAccelerator::addSurface(NMLegacySurface *s)
+static IOReturn nm_table_error(int e)
 {
-    IOReturn r = kIOReturnSuccess;
+    switch (e) {
+    case NM_T_FULL: return kIOReturnNoResources;
+    case NM_T_EXISTS: return kIOReturnExclusiveAccess;
+    case NM_T_DENIED: return kIOReturnNotPermitted;
+    case NM_T_AMBIGUOUS: return kIOReturnNotPermitted;   /* an id two other processes use is never guessed */
+    default: return kIOReturnNotFound;
+    }
+}
+
+IOReturn NMLegacyAccelerator::addSurface(NMLegacySurface *s, int32_t ownerPid)
+{
     lock();
-    for (unsigned i = 0; i < fSurfaces->getCount(); i++)
-        if (((NMLegacySurface *)fSurfaces->getObject(i))->fID == s->fID) { r = kIOReturnExclusiveAccess; break; }
-    if (r == kIOReturnSuccess && !fSurfaces->setObject(s)) r = kIOReturnNoMemory;
+    int slot = nm_table_add(fTable, ownerPid, s->fID);
+    if (slot >= 0) { s->retain(); fSurf[slot] = s; }
     unlock();
-    return r;
+    return slot >= 0 ? kIOReturnSuccess : nm_table_error(slot);
 }
 
 void NMLegacyAccelerator::removeSurface(NMLegacySurface *s)
 {
     lock();
-    for (unsigned i = 0; i < fSurfaces->getCount(); i++)
-        if (fSurfaces->getObject(i) == s) { fSurfaces->removeObject(i); break; }
+    for (int i = 0; i < NM_TABLE_SLOTS; i++)
+        if (fSurf[i] == s) { nm_table_remove(fTable, i); fSurf[i] = NULL; s->release(); break; }
     unlock();
 }
 
-NMLegacySurface *NMLegacyAccelerator::findSurface(uint32_t id)
+NMLegacySurface *NMLegacyAccelerator::findSurface(int32_t callerPid, bool privileged, uint32_t id, int *access, IOReturn *why)
 {
     NMLegacySurface *found = NULL;
     lock();
-    for (unsigned i = 0; i < fSurfaces->getCount() && !found; i++) {
-        NMLegacySurface *s = (NMLegacySurface *)fSurfaces->getObject(i);
-        if (s->fID == id) { s->retain(); found = s; }
-    }
+    int slot = nm_table_lookup(fTable, callerPid, privileged ? 1 : 0, id, access);
+    if (slot >= 0 && fSurf[slot]) { found = fSurf[slot]; found->retain(); }
+    else if (why) *why = nm_table_error(slot);
     unlock();
     return found;
+}
+
+IOReturn NMLegacyAccelerator::grant(int32_t callerPid, bool privileged, const nm_gl_surface_grant *g)
+{
+    lock();
+    int e = nm_table_grant(fTable, callerPid, privileged ? 1 : 0, g->owner_pid ? g->owner_pid : callerPid, g->surface_id, g->grantee_pid, g->revoke != 0);
+    unlock();
+    return e == NM_T_OK ? kIOReturnSuccess : nm_table_error(e);
 }
 
 IOReturn NMLegacyAccelerator::newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler)

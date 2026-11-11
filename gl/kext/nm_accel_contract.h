@@ -72,13 +72,16 @@ enum {
     NM_GL_METHOD_GET_VERSION = 0,     /* out: nm_gl_version */
     NM_GL_METHOD_SURFACE_BUFFER,      /* in: nm_gl_surface_query, out: nm_gl_surface_buffer */
     NM_GL_METHOD_SURFACE_PRESENTED,   /* in: nm_gl_surface_query: the engine finished drawing into the buffer */
+    NM_GL_METHOD_SURFACE_GRANT,       /* in: nm_gl_surface_grant: the owner (or a privileged caller) lets another process read a surface */
     NM_GL_METHOD_COUNT
 };
 
 #define NM_GL_CONTRACT_VERSION 1u
 
 /* Memory mapping on the private client: the mapping type IS the surface id. While surfaces are backed by ordinary
- * memory this is how the engine reaches the pixels; nm_gl_surface_buffer.memory_handle is 0 in that case. */
+ * memory this is how the engine reaches the pixels; nm_gl_surface_buffer.memory_handle is 0 in that case.
+ * Which surface an id reaches, and whether the mapping is writable, is decided by nm_surface_table.h: a process
+ * reaches its own surfaces read-write, and another process's only read-only and only when granted or privileged. */
 
 struct nm_gl_version {
     uint32_t contract;                /* NM_GL_CONTRACT_VERSION; the engine refuses to run against another */
@@ -97,15 +100,22 @@ struct nm_gl_surface_buffer {
     uint32_t row_bytes;
     uint32_t format;                  /* one of the kIOAccelSurfaceModeColorDepth values of the surface's mode */
     uint32_t generation;              /* changes when the surface is reshaped and the buffer replaced */
-    uint32_t reserved;
+    uint32_t access;                  /* 1 read-only, 2 read-write: what the caller's mapping of the pages will allow */
+};
+
+struct nm_gl_surface_grant {
+    uint32_t surface_id;
+    int32_t  owner_pid;               /* 0 = the caller itself */
+    int32_t  grantee_pid;
+    uint32_t revoke;                  /* 0 grant, 1 revoke */
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(nm_gl_surface_query) == 8 && sizeof(nm_gl_surface_buffer) == 40 && sizeof(nm_gl_version) == 8,
+static_assert(sizeof(nm_gl_surface_query) == 8 && sizeof(nm_gl_surface_buffer) == 40 && sizeof(nm_gl_version) == 8 && sizeof(nm_gl_surface_grant) == 16,
               "private client structures have the same layout for 32-bit and 64-bit callers");
 #else
 _Static_assert(sizeof(struct nm_gl_surface_query) == 8 && sizeof(struct nm_gl_surface_buffer) == 40 &&
-               sizeof(struct nm_gl_version) == 8, "private client structures have the same layout for 32-bit and 64-bit callers");
+               sizeof(struct nm_gl_version) == 8 && sizeof(struct nm_gl_surface_grant) == 16, "private client structures have the same layout for 32-bit and 64-bit callers");
 #endif
 
 #endif

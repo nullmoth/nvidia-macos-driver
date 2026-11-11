@@ -39,4 +39,14 @@ done <<LIST
 1012 10.12 10.12 xnu-3789.70.16 Command-Line-Tools-macOS-10-12-for-Xcode-8-3-2/DevSDK_OSX1012.pkg/Payload/$K
 1013 10.13 10.13 xnu-4570.71.2 Command-Line-Tools-macOS-10-13-for-Xcode-9-4-1/DevSDK_macOS1013_Public.pkg/Payload/$K
 LIST
+# host test of the ownership and grant rules, and its control: the same test built with the first version's logic
+# (global ids, any caller) must fail
+mkdir -p "$OUT/host"
+if clang -std=c11 -Wall -Wextra -Werror -o "$OUT/host/table_test" "$H/test/table_test.c" > "$OUT/host/build.log" 2>&1 &&
+   clang -std=c11 -Wall -Wextra -Werror -DNM_TABLE_OLD_LOGIC -o "$OUT/host/table_test_old" "$H/test/table_test.c" >> "$OUT/host/build.log" 2>&1; then
+  "$OUT/host/table_test" || fail=1
+  "$OUT/host/table_test_old" > "$OUT/host/old.out" 2>&1; orc=$?
+  echo "control (first version's logic): exit $orc, $(grep -c '^FAIL' "$OUT/host/old.out") arms fail: $(grep '^FAIL' "$OUT/host/old.out" | cut -c7-60 | tr '\n' ';')"
+  [ $orc != 0 ] && [ "$(grep -c '^FAIL' "$OUT/host/old.out")" -ge 3 ] || { echo "control did not fail on the old logic"; fail=1; }
+else echo "host test build failed"; head -5 "$OUT/host/build.log"; fail=1; fi
 echo "result: $([ $fail = 0 ] && echo PASS || echo FAIL)"; exit $fail
