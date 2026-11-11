@@ -48,7 +48,15 @@ static struct {
     uint32_t next_id;
 } nm = { PTHREAD_MUTEX_INITIALIZER, {0}, NULL, NM_BACKEND_SOFTWARE, 0 };
 
+/* The calling thread's current context. Below 10.7 the compiler has no thread-local storage, so the 10.6 build
+ * keeps it under a per-thread key (the same switch and helper as the Mesa patch). */
+#ifdef NM_NO_COMPILER_TLS
+#include "nm_tls.h"
+NM_TLS_KEY(nm_tls_current);
+#define nm_tls_current NM_TLS_REF(struct nm_mesa_ctx *, nm_tls_current)
+#else
 static __thread struct nm_mesa_ctx *nm_tls_current;
+#endif
 
 const char *nm_mesa_backend_name(void)
 {

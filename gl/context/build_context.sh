@@ -37,15 +37,21 @@ PY
 # frameworks have no top-level Headers link, so they cannot be used with -F)
 mkdir -p "$OUT/inc"; ln -sfn "$GLH" "$OUT/inc/OpenGL"; ln -sfn "$IOSH" "$OUT/inc/IOSurface"
 A="-arch x86_64 -mmacosx-version-min=$TGT"
+# The 10.6 floor: no compiler thread-local storage (per-thread keys instead, the same switch as the Mesa build) and
+# no newer C++ library on the system (the nine symbols it would supply are in nm_cxx_min.cpp; the rest come from the
+# older library, linked through the 10.6 SDK's stub named by NM_LIBSTDCXX).
+X6=""; CXXLIB=""; LINKER=clang++
+if [ "$TGT" = 10.6 ]; then X6="-DNM_NO_COMPILER_TLS"; LINKER=clang; CXXLIB="$OUT/nm_cxx_min.o ${NM_LIBSTDCXX:?path of the 10.6 SDK libstdc++.6.dylib}"; fi
 W="-Wall -Wextra -Werror -Wno-deprecated-declarations -fvisibility=hidden -O2"
 cc_apple() { clang $A -std=c11 $W -I"$OUT/inc" -I"$G/glue" "$@"; }
 obj() { # <name> <log> <command...>
   local n=$1; shift; "$@" > "$OUT/$n.log" 2>&1; local rc=$?
   echo "compile $n: rc=$rc errors=$(grep -cE "$ERR" "$OUT/$n.log")"; [ $rc = 0 ] || { fail=1; grep -E 'error' "$OUT/$n.log" | head -6 | cut -c1-230; }; }
-eval "obj nm_mesa clang $A $W -Wno-unused-parameter -Wno-missing-field-initializers $(cat "$OUT/mesa.flags") -I'$MS/src/gallium/winsys' -I'$MS/src/gallium/drivers' -I'$MS/src/mesa' -I'$MS/src/mapi' -c '$H/nm_mesa.c' -o '$OUT/nm_mesa.o'"
+eval "obj nm_mesa clang $A $X6 -I'$G/mesa' $W -Wno-unused-parameter -Wno-missing-field-initializers $(cat "$OUT/mesa.flags") -I'$MS/src/gallium/winsys' -I'$MS/src/gallium/drivers' -I'$MS/src/mesa' -I'$MS/src/mapi' -c '$H/nm_mesa.c' -o '$OUT/nm_mesa.o'"
 obj nm_dispatch   cc_apple -c "$OUT/nm_dispatch.c" -o "$OUT/nm_dispatch.o"
 obj nm_apple_ext  cc_apple -c "$G/glue/nm_apple_ext.c" -o "$OUT/nm_apple_ext.o"
 obj nm_compat     clang $A -std=c11 -Wall -Wextra -Werror -fvisibility=hidden -O2 -c "$H/nm_compat.c" -o "$OUT/nm_compat.o"
+[ "$TGT" = 10.6 ] && obj nm_cxx_min clang++ $A -std=c++17 -Wall -Wextra -Werror -fvisibility=hidden -O2 -c "$H/nm_cxx_min.cpp" -o "$OUT/nm_cxx_min.o"
 for v in product test; do
   D="-DNM_ENGINE_OWNER"; [ $v = test ] && D="$D -DNM_ENGINE_TEST"
   obj nm_context-$v cc_apple $D -c "$H/nm_context.c" -o "$OUT/nm_context-$v.o"
@@ -59,7 +65,7 @@ echo "Mesa static libraries linked: $(echo $LIBS | wc -w | xargs)"
 (sed 's/^/_/' "$G/names/gli-framework-$REL.txt"; echo _gliSwapBuffers; echo _gliCreateContextWithShared; echo _gliGetMemoryAnnotationList) | sort -u > "$OUT/exports-product.txt"
 (cat "$OUT/exports-product.txt"; echo _nm_test_own_software; echo _nm_test_register_surface) > "$OUT/exports-test.txt"
 for v in product test; do
-  clang++ $A -bundle -Wl,-exported_symbols_list,"$OUT/exports-$v.txt" -o "$OUT/GLEngine-$v" "$OUT/nm_engine-$v.o" "$OUT/nm_context-$v.o" "$OUT/nm_dispatch.o" "$OUT/nm_apple_ext.o" "$OUT/nm_mesa.o" "$OUT/nm_compat.o" \
+  $LINKER $A -bundle -Wl,-exported_symbols_list,"$OUT/exports-$v.txt" -o "$OUT/GLEngine-$v" $CXXLIB "$OUT/nm_engine-$v.o" "$OUT/nm_context-$v.o" "$OUT/nm_dispatch.o" "$OUT/nm_apple_ext.o" "$OUT/nm_mesa.o" "$OUT/nm_compat.o" \
     $LIBS -framework IOSurface -framework IOKit -framework CoreFoundation -lz -Wl,-dead_strip -Wl,-no_warn_duplicate_libraries > "$OUT/link-$v.log" 2>&1; rc=$?
   echo "link $v bundle: rc=$rc, undefined symbols reported $(grep -c '^  "_' "$OUT/link-$v.log"), size $(stat -f %z "$OUT/GLEngine-$v" 2>/dev/null || echo 0) bytes"
   [ $rc = 0 ] || { fail=1; grep -A1 '^  "_' "$OUT/link-$v.log" | head -24 | cut -c1-200; }

@@ -130,3 +130,21 @@ int mkostemp(char *tmpl, int flags)
     if (fd >= 0 && (flags & O_CLOEXEC)) (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
     return fd;
 }
+
+/* 10.6 lacks these two string calls (they arrived in 10.7). */
+size_t strnlen(const char *s, size_t max)
+{
+    size_t n = 0;
+    while (n < max && s[n]) n++;
+    return n;
+}
+
+char *strndup(const char *s, size_t max)
+{
+    size_t n = strnlen(s, max);
+    char *d = malloc(n + 1);
+    if (!d) return NULL;
+    memcpy(d, s, n);
+    d[n] = 0;
+    return d;
+}
