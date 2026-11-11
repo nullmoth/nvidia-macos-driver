@@ -56,6 +56,12 @@ static inline void *nm_era_malloc_zero(vm_size_t size)
 #define kPEBaseAddressChange 8
 #endif
 
+// The clock that keeps counting through sleep arrived in 10.12. Before it, the uptime clock stands in: the only use
+// is the age of a utilisation sample, which is discarded across sleep anyway.
+#if NM_ERA < 1012
+#define mach_continuous_time mach_absolute_time
+#endif
+
 // IOFramebuffer's connection member was renamed.
 #if NM_ERA < 1013
 #define fServerConnect serverConnect

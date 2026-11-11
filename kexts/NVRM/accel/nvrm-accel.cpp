@@ -987,8 +987,13 @@ public:
         if (!fPCI || fUtilLoop) return;
         fUtilLock = IOLockAlloc();
         fUtilLoop = IOWorkLoop::workLoop();
+#if defined(NM_ERA) && NM_ERA < 1013
+        // The options form arrived in 10.13; the plain timer runs on the same private work loop.
+        fUtilTimer = IOTimerEventSource::timerEventSource(this, &NVAccel::utilTimerFired);
+#else
         fUtilTimer = IOTimerEventSource::timerEventSource(kIOTimerEventSourceOptionsPriorityWorkLoop,
                                                         this, &NVAccel::utilTimerFired);
+#endif
         if (!fUtilLock || !fUtilLoop || !fUtilTimer ||
             fUtilLoop->addEventSource(fUtilTimer) != kIOReturnSuccess) {
             ALOG("utilization: cannot create sampling work loop");
@@ -2200,6 +2205,13 @@ static IOBufferMemoryDescriptor *nvSVStage(unsigned long long len)
     return b;
 }
 
+// The family's own page-off. From 10.12 on it forwards to the short form, whose base body is empty; before 10.12 the
+// family has no body at all, so there is nothing to call.
+#if defined(NM_ERA) && NM_ERA < 1012
+#define NV_FAM_PAGEOFF(ev, a1, out, a3) ((void)(ev), (void)(a1), (void)(out), (void)(a3))
+#else
+#define NV_FAM_PAGEOFF(ev, a1, out, a3) IOAccelResource2::pageoff(ev, a1, out, a3)
+#endif
 void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long long a3)
 {
     volatile unsigned char *r = (volatile unsigned char *)this;
@@ -2213,7 +2225,7 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
              (unsigned)r[0x14], vm ? 1 : 0, (vm && vm->fRmHandle) ? 1 : 0, vm ? (int)vm->fScanout : -1, vd ? vd[0] : 0xffff, vd ? vd[6] : 0xffff);
     }
     if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(fAccel, &h)) {
-        IOAccelResource2::pageoff(ev, a1, out, a3);
+        NV_FAM_PAGEOFF(ev, a1, out, a3);
         return;
     }
     // a CPU lock that arrives while WindowServer's GPU is still writing this surface waits for that write first, as a
@@ -2238,7 +2250,7 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             cache = *(void *volatile *)(r + 0xe0);
             vm = nvres_vidmem(this);
             surf = (r[0x14] == 0xc0 && cache) ? *(void *volatile *)((unsigned char *)cache + 0x10) : nullptr;
-            if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(fAccel, &h)) { IOAccelResource2::pageoff(ev, a1, out, a3); return; }
+            if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(fAccel, &h)) { NV_FAM_PAGEOFF(ev, a1, out, a3); return; }
         } else {
             if (gPoUnlocked && a && nvSurfIsPending(sid)) OSAddAtomic64(1, &gCntPoNotOwner);
             nvSurfWaitReady(sid);
@@ -2248,7 +2260,7 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
     if (!md || md->prepare(kIODirectionNone) != kIOReturnSuccess) {
         gNVSVPageoffFail++;
         ALOG("surfvram pageoff: res %p surface pages could not be wired (md %p) -- family pageoff instead", this, md);
-        IOAccelResource2::pageoff(ev, a1, out, a3);
+        NV_FAM_PAGEOFF(ev, a1, out, a3);
         return;
     }
     bool mayUnwire = true;

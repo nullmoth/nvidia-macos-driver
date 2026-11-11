@@ -9,6 +9,8 @@ for l in run(["nm", "-arch", "x86_64", "-n", b]).splitlines():
     p = l.split()
     if len(p) == 3 and p[1] not in "Uu": syms.append((int(p[0], 16), p[2]))
 syms.sort(); addrs = [a for a, _ in syms]
+addr_of = {}
+for a_, n_ in syms: addr_of.setdefault(n_, a_)
 byaddr = {}
 for a, n in syms: byaddr.setdefault(a, n)
 # external relocations: address -> symbol
@@ -57,6 +59,18 @@ for l in dis.splitlines():
     if cur:
         m = re.search(r"movl\t\$0x([0-9a-f]+), %ecx", l)
         if m: last = int(m.group(1), 16)
+        # the disassembler prints an immediate as a symbol when a symbol happens to sit at that address
+        m = re.search(r"movl\t\$(_\w+), %ecx", l)
+        if m and m.group(1) in addr_of: last = addr_of[m.group(1)]
         if "OSMetaClassC2EPKcPKS_j" in l and last is not None and cur in res and "size" not in res[cur]: res[cur]["size"] = last
+# second source for the size: the metaclass alloc() passes it to operator new (some classes register through a
+# shared helper, which the first reader does not see)
+cur = None
+for l in dis.splitlines():
+    if l.endswith(":") and not l.startswith("\t"):
+        m = re.fullmatch(r"__ZNK(\d+)(\w+?)9MetaClass5allocEv:", l); cur = m.group(2) if m else None; continue
+    if cur and cur in res and "size" not in res[cur]:
+        m = re.search(r"movl\t\$0x([0-9a-f]+), %edi", l)
+        if m: res[cur]["size"] = int(m.group(1), 16)
 json.dump(res, open(out, "w"), indent=0)
 print(f"{b.split('/')[-1]}: {len(res)} classes with a vtable, {sum(1 for c in res.values() if 'size' in c)} with a size; relocations read: {len(ext)}")

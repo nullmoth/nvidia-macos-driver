@@ -51,7 +51,14 @@ public:
     void removeFromAperture() APPLE_KEXT_OVERRIDE;
     void *getApertureMemoryDescriptor(unsigned long long *a0) APPLE_KEXT_OVERRIDE;
     void free() APPLE_KEXT_OVERRIDE;
+#if defined(NM_ERA) && NM_ERA < 1012
+    // Before 10.12 the family declares only the two short forms, both pure; the driver supplies them.
+    void pageon(IOAccelEvent *, bool) APPLE_KEXT_OVERRIDE { }
+    void pageoff(IOAccelEvent *ev, bool a1, bool *out) APPLE_KEXT_OVERRIDE { pageoff(ev, a1, out, 0ull); }
+    void pageoff(IOAccelEvent *, bool, bool *, unsigned long long);
+#else
     void pageoff(IOAccelEvent *, bool, bool *, unsigned long long) APPLE_KEXT_OVERRIDE;
+#endif
     unsigned int fApLogged = 0;
     IOMemoryDescriptor *fApDesc = nullptr;
     // Set by the plugin's surface-dirty escape: the allocation cookie of the VRAM the GPU wrote for this resource. The
@@ -178,8 +185,9 @@ public:
     // the same four pure slots, under the names the 10.14 vendor drivers give them
     void addDrawableToChannel(IOAccelDrawable2* a0) APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::addDrawableToChannel"); }
     void removeDrawableFromChannel(IOAccelDrawable2* a0) APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::removeDrawableFromChannel"); }
-    void setCompatibleSurfaceMode(unsigned long long* a0, unsigned long long a1, int a2) APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::setCompatibleSurfaceMode"); }
-    void get_temp_allocation_info(IOAccelDrawable2* a0, unsigned int* a1, unsigned int* a2) APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::get_temp_allocation_info"); }
+    // Out-parameters are always written: the family reads them after the call.
+    void setCompatibleSurfaceMode(unsigned long long* a0, unsigned long long a1, int a2) APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::setCompatibleSurfaceMode"); if (a0) *a0 = 0; }
+    void get_temp_allocation_info(IOAccelDrawable2* a0, unsigned int* a1, unsigned int* a2) APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::get_temp_allocation_info"); if (a1) *a1 = 0; if (a2) *a2 = 0; }
 #else
     void _pure362() APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::_pure362"); }
     void _pure363() APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::_pure363"); }
