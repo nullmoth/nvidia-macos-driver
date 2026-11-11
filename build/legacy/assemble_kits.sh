@@ -32,6 +32,8 @@ echo "$LIST" | while read rel kd md gd; do
   [ "$md" != "-" ] && [ -d "$B/metal/stage/$md/options" ] && cp -R "$B/metal/stage/$md/options" "$D/options"
   [ -d "$B/out-options/$kd/route-B" ] && { mkdir -p "$D/options/compositor-route-B-service-name-and-preference"; cp -R "$B/out-options/$kd/route-B/NVRMFB.kext" "$D/options/compositor-route-B-service-name-and-preference/"; }
   have_g=no; [ "$gd" != "-" ] && [ -d "$B/gl/stage/$gd" ] && { cp -R "$B/gl/stage/$gd" "$D/opengl"; have_g=yes; }
+  # boot-config changes for releases below the builder's floor (written by the boot converter; a list, not a config)
+  [ -f "$B/boot/variants/config-$rel.changes.txt" ] && cp "$B/boot/variants/config-$rel.changes.txt" "$D/boot-config-changes.txt"
   slots=""; [ -f "$B/vt/ours-$kd.json" ] && [ -f "$B/vt/fam-$kd.json" ] && slots=$(python3 "$B/vtfit.py" "$B/vt/ours-$kd.json" "$B/vt/fam-$kd.json" $( [ -f "$B/vt/base-$kd.json" ] && echo "$B/vt/base-$kd.json" ) 2>/dev/null | tail -1)
   {
     echo "macOS $rel: driver kit built offline"
@@ -47,6 +49,7 @@ echo "$LIST" | while read rel kd md gd; do
     case " $have_k " in *" NVRMAGDC "*) ;; *) echo "             No NVRMAGDC: the graphics-control family it attaches to does not exist on this release.";; esac
     echo "userland/  : $( [ $have_m = yes ] && echo "Metal plugin, translator, NVK, loader, codec library, daemon; payload/ mirrors the install paths (MANIFEST.txt)" || echo "none (Metal does not exist on this release)")"
     echo "opengl/    : $( [ $have_g = yes ] && echo "OpenGL engine + its accelerator kext (MANIFEST.json says where each file goes and the two steps before placing)" || echo "none staged here (10.14 and later use Apple's OpenGL-on-Metal over our Metal device; see options/)")"
+    [ -f "$D/boot-config-changes.txt" ] && echo "boot       : boot-config-changes.txt lists what an OpenCore config for a current release must change for this one, and this release's limits (disk, USB, processor)"
     echo "options/   : $( [ -d "$D/options" ] && ls "$D/options" | tr '\n' ' ' || echo none)"
     echo
     echo "DESKTOP COMPOSITOR ON THIS RELEASE"
