@@ -2793,7 +2793,7 @@ NVMTLFunction *nvmtl_kernel_with_stage_in(NVMTLFunction *fn, MTLStageInputOutput
 
 id<MTLFunction> nvmtl_link_kernel(MTLComputePipelineDescriptor *d, NSError **err)
 {
-    return nvmtl_link_stage(d.computeFunction, d.linkedFunctions, d.preloadedLibraries, err);
+    return nvmtl_link_stage(d.computeFunction, NVMTL_SINCE(11.0, MTLLinkedFunctions *, d.linkedFunctions, nil), NVMTL_SINCE(12.0, NSArray *, d.preloadedLibraries, nil), err);
 }
 
 #pragma mark - batch 41: dynamic libraries
