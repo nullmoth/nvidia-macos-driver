@@ -50,4 +50,13 @@ link() { local name=$1; shift; mkdir -p "$O/$name.kext/Contents/MacOS"
 [ "$(cat "$O"/NVRM-*.err | grep -cE "$RX")" = 0 ] && link NVRM "$O"/NVRM-*.o "$NV/_out/Darwin_x86_64/libnvkernel.a" "$KMS/_out/Darwin_x86_64/libnvkms.a"
 [ "$(grep -cE "$RX" "$O/NVRMFB.err")" = 0 ] && link NVRMFB "$O/NVRMFB.o"
 [ "$(grep -cE "$RX" "$O/NVRMAGDC.err")" = 0 ] && link NVRMAGDC "$O/NVRMAGDC.o"
+# Bundle what linked: the property lists name kernel interface version 8.0 (10.4), so one list serves every release.
+plist() { case $1 in NVRM) echo "$SRC/NVRM/Info.plist";; NVRMFB) echo "$SRC/NVRMFB/fb/Info.plist";; NVRMAGDC) echo "$SRC/NVRMAGDC/Info.plist";; esac; }
+KX=()
+for k in NVRM NVRMFB NVRMAGDC; do
+  [ -f "$O/$k.kext/Contents/MacOS/$k" ] || continue
+  cp "$(plist $k)" "$O/$k.kext/Contents/Info.plist"; xcrun strip -S "$O/$k.kext/Contents/MacOS/$k" 2>/dev/null; KX+=("$O/$k.kext")
+done
+[ ${#KX[@]} -gt 0 ] && { bash "$(dirname "$0")/../check_kext_libraries.sh" "${KX[@]}" || fail=1; }
+( cd "$O" && rm -f kexts-$MV.tar.gz && tar czf kexts-$MV.tar.gz $(for k in "${KX[@]}"; do basename "$k"; done) ) && echo "era $ERA: packed $(ls "$O"/kexts-$MV.tar.gz) $(stat -f %z "$O/kexts-$MV.tar.gz") bytes: $(for k in "${KX[@]}"; do basename "$k" .kext; done | tr '\n' ' ')"
 exit $fail
