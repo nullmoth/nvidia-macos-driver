@@ -2,8 +2,9 @@
 # stage.sh <build outputs folder (holds rel-out/, engine-out/, kext-out/)> <stage dir>
 # Assembles, per release, the folder tree of what would be placed on that release, plus a manifest. It only copies
 # build outputs into the stage dir: nothing is installed, no system path is written, no installer is run.
-#   10.6 to 10.13: engine with the context layer (x86_64) joined with the pass-through engine (i386), so 32-bit
-#                  applications keep Apple's renderers; the accelerator kext of that release.
+#   10.6 to 10.13: engine with the context layer and zink (x86_64) joined with the pass-through engine (i386), so
+#                  32-bit applications keep Apple's renderers; the Vulkan driver of that release's floor beside
+#                  it; the accelerator kext of that release.
 set -uo pipefail
 IN=${1:?}; ST=${2:?}; H=$(cd "$(dirname "$0")" && pwd); fail=0
 E=System/Library/Frameworks/OpenGL.framework/Versions/A/Resources
@@ -13,6 +14,9 @@ for rel in 10.06 10.07 10.08 10.09 10.10 10.11 10.12 10.13; do
   if [ -f "$own" ] && [ -f "$pt" ]; then lipo -create "$own" "$pt" -o "$d/$E/GLEngine.bundle/GLEngine" || fail=1
   else echo "$rel: missing build output"; fail=1; continue; fi
   sed "s/@REL@/$short/" "$H/GLEngine-Info.plist" > "$d/$E/GLEngine.bundle/Info.plist"
+  # the Vulkan driver sits beside the engine: zink opens it by a path relative to the engine's own file
+  case $rel in 10.06) fl=10.6;; 10.07|10.08|10.09|10.10) fl=10.7;; *) fl=10.11;; esac
+  [ -f "$IN/nvk-out/$fl/libvulkan_nouveau.dylib" ] && cp "$IN/nvk-out/$fl/libvulkan_nouveau.dylib" "$d/$E/GLEngine.bundle/" || { echo "$rel: no Vulkan driver for floor $fl"; fail=1; }
   k=$IN/kext-out/$short/NMLegacyAccel.kext; [ -d "$k" ] && /bin/cp -R "$k" "$d/System/Library/Extensions/" || { echo "$rel: no kext"; fail=1; }
   python3 - "$d" "$rel" "$tier" > "$d/MANIFEST.json" <<'PY'
 import hashlib, json, os, subprocess, sys

@@ -47,7 +47,7 @@ cc_apple() { clang $A -std=c11 $W -I"$OUT/inc" -I"$G/glue" "$@"; }
 obj() { # <name> <log> <command...>
   local n=$1; shift; "$@" > "$OUT/$n.log" 2>&1; local rc=$?
   echo "compile $n: rc=$rc errors=$(grep -cE "$ERR" "$OUT/$n.log")"; [ $rc = 0 ] || { fail=1; grep -E 'error' "$OUT/$n.log" | head -6 | cut -c1-230; }; }
-eval "obj nm_mesa clang $A $X6 -I'$G/mesa' $W -Wno-unused-parameter -Wno-missing-field-initializers $(cat "$OUT/mesa.flags") -I'$MS/src/gallium/winsys' -I'$MS/src/gallium/drivers' -I'$MS/src/mesa' -I'$MS/src/mapi' -c '$H/nm_mesa.c' -o '$OUT/nm_mesa.o'"
+eval "obj nm_mesa clang $A $X6 -DNM_WITH_ZINK -I'$G/mesa' $W -Wno-unused-parameter -Wno-missing-field-initializers $(cat "$OUT/mesa.flags") -I'$MS/src/gallium/winsys' -I'$MS/src/gallium/drivers' -I'$MS/src/mesa' -I'$MS/src/mapi' -c '$H/nm_mesa.c' -o '$OUT/nm_mesa.o'"
 obj nm_dispatch   cc_apple -c "$OUT/nm_dispatch.c" -o "$OUT/nm_dispatch.o"
 obj nm_apple_ext  cc_apple -c "$G/glue/nm_apple_ext.c" -o "$OUT/nm_apple_ext.o"
 obj nm_compat     clang $A -std=c11 -Wall -Wextra -Werror -fvisibility=hidden -O2 -c "$H/nm_compat.c" -o "$OUT/nm_compat.o"
@@ -58,8 +58,8 @@ for v in product test; do
   obj nm_engine-$v  cc_apple $D -c "$G/engine/nm_engine.c" -o "$OUT/nm_engine-$v.o"
 done
 [ $fail = 0 ] || { echo "result: FAIL"; exit 1; }
-# every static library of the Mesa build except the Vulkan-on-GL driver, which the software and host builds do not use
-LIBS=$(find "$MB/src" -name '*.a' | grep -v '/drivers/zink/' | sort | tr '\n' ' ')
+# every static library of the Mesa build: API layer, state tracker, CPU rasteriser and zink (GL on Vulkan)
+LIBS=$(find "$MB/src" -name '*.a' | sort | tr '\n' ' ')
 echo "Mesa static libraries linked: $(echo $LIBS | wc -w | xargs)"
 # only the engine entry points leave the bundle (Mesa's own symbols stay inside); the test build adds its two hooks
 (sed 's/^/_/' "$G/names/gli-framework-$REL.txt"; echo _gliSwapBuffers; echo _gliCreateContextWithShared; echo _gliGetMemoryAnnotationList) | sort -u > "$OUT/exports-product.txt"

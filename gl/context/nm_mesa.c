@@ -75,8 +75,15 @@ int nm_mesa_init(enum nm_backend backend)
         }
 #ifdef NM_WITH_ZINK
         else if (backend == NM_BACKEND_VULKAN) {
-            /* zink opens the Vulkan loader itself; with no window system of its own it renders to images only */
+            /* zink opens the Vulkan driver that sits beside this bundle; with no window system of its own it
+             * renders to images only. If the driver is absent or finds no card, the CPU rasteriser takes over:
+             * the caller asked for a renderer, and the name it reports says which one it got. */
             s = zink_create_screen(NULL, NULL);
+            if (!s) {
+                struct sw_winsys *ws = null_sw_create();
+                if (ws) s = softpipe_create_screen(ws);
+                backend = NM_BACKEND_SOFTWARE;
+            }
         }
 #endif
         if (s) {

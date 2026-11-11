@@ -119,7 +119,9 @@ void nm_own_library_init(const uint32_t *services, const uint8_t *framebuffer_in
             nm_accel_connect = c;
         }
         own.display_mask |= 1u << i;
-        own.backend = NM_BACKEND_SOFTWARE;   /* memory-backed surfaces: the CPU rasteriser draws; zink replaces it with GPU-backed ones */
+        /* The Vulkan backend draws on the card and its result is copied into the surface's pages at flush (the
+         * same copy the CPU rasteriser uses); if the Vulkan driver cannot start, the CPU rasteriser draws. */
+        own.backend = NM_BACKEND_VULKAN;
         own.active = 1;
     }
     if (!own.active) nm_log("context layer: no accelerator of ours among %u display services; every request is forwarded", count);
@@ -209,7 +211,7 @@ long nm_own_create_context(void **rend_out, const void *pixel_format, void *shar
     nm_fill_dispatch((GLIFunctionDispatch *)table);
     if (dummy_table) nm_fill_dispatch((GLIFunctionDispatch *)dummy_table);
     *rend_out = c;
-    nm_log("context layer: created context %p on %s", (void *)c, nm_mesa_backend_name());
+    nm_log("context layer: created context %p on %s", (void *)c, nm_mesa_backend_name());   /* names the renderer actually in use */
     return NM_OK;
 }
 

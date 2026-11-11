@@ -148,3 +148,91 @@ char *strndup(const char *s, size_t max)
     d[n] = 0;
     return d;
 }
+
+/*
+ * The Vulkan driver's own gaps on the older releases (it is linked with this file too): a random-bytes call, a
+ * power-of-ten helper the compiler emits, and four more directory calls. Each is rebuilt from what 10.6 has.
+ */
+#include <dirent.h>
+#include <math.h>
+
+int CCRandomGenerateBytes(void *bytes, size_t count)
+{
+    unsigned char *p = bytes;
+    for (size_t i = 0; i < count; i += 4) {
+        uint32_t r = arc4random();
+        for (size_t k = 0; k < 4 && i + k < count; k++) p[i + k] = (unsigned char)(r >> (8 * k));
+    }
+    return 0;   /* kCCSuccess */
+}
+
+float __exp10f(float x) { return powf(10.0f, x); }
+double __exp10(double x) { return pow(10.0, x); }
+
+int linkat(int fd1, const char *path1, int fd2, const char *path2, int flags)
+{
+    char a[PATH_MAX], b[PATH_MAX];
+    (void)flags;
+    if (nm_at_path(fd1, path1, a) != 0 || nm_at_path(fd2, path2, b) != 0) return -1;
+    return link(a, b);
+}
+
+/* Cloning files is a later file-system feature; callers fall back to copying when it is refused. */
+int fclonefileat(int srcfd, int dst_dirfd, const char *dst, int flags)
+{
+    (void)srcfd; (void)dst_dirfd; (void)dst; (void)flags;
+    errno = ENOTSUP;
+    return -1;
+}
+
+#undef dirfd
+int dirfd(DIR *d) { return d ? d->__dd_fd : -1; }
+
+DIR *fdopendir(int fd)
+{
+    char path[PATH_MAX];
+    if (fcntl(fd, F_GETPATH, path) != 0) return NULL;
+    DIR *d = opendir(path);
+    if (d) close(fd);   /* the stream owns a descriptor of its own; the caller's is consumed as the real call does */
+    return d;
+}
+
+/*
+ * Calls the Rust standard library of the 10.6 driver build makes that 10.6 lacks: three more directory-relative
+ * calls, the rename with flags (10.12), and the standard-directory enumeration (10.12).
+ */
+int fchmodat(int dirfd, const char *path, mode_t mode, int flags)
+{
+    char full[PATH_MAX];
+    (void)flags;
+    if (nm_at_path(dirfd, path, full) != 0) return -1;
+    return chmod(full, mode);
+}
+
+int mkdirat(int dirfd, const char *path, mode_t mode)
+{
+    char full[PATH_MAX];
+    if (nm_at_path(dirfd, path, full) != 0) return -1;
+    return mkdir(full, mode);
+}
+
+int renameat(int fd1, const char *from, int fd2, const char *to)
+{
+    char a[PATH_MAX], b[PATH_MAX];
+    if (nm_at_path(fd1, from, a) != 0 || nm_at_path(fd2, to, b) != 0) return -1;
+    return rename(a, b);
+}
+
+/* Flag 0x4 asks that an existing destination is not replaced. Checked then renamed: not atomic as the real call
+ * is, which matters only to two processes racing for one name. Other flags are refused. */
+int renamex_np(const char *from, const char *to, unsigned int flags)
+{
+    struct stat st;
+    if (flags & ~0x4u) { errno = EINVAL; return -1; }
+    if ((flags & 0x4u) && lstat(to, &st) == 0) { errno = EEXIST; return -1; }
+    return rename(from, to);
+}
+
+/* An enumeration that is empty from the start: callers fall back to their defaults. */
+unsigned int sysdir_start_search_path_enumeration(int dir, int domain_mask) { (void)dir; (void)domain_mask; return 0; }
+unsigned int sysdir_get_next_search_path_enumeration(unsigned int state, char *path) { (void)state; if (path) path[0] = 0; return 0; }
