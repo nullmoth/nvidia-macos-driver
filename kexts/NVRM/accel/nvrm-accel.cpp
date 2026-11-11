@@ -31,8 +31,11 @@
 #include "IOAccelTask.h"
 #include "IOAccelMemoryMap.h"
 // Where Apple's video-memory object keeps its physical address (the field its own withPhysicalAddress and
-// getPhysicalSegment use): +0xc8 from 10.15 on, +0xb8 on 10.13 and 10.14, whose memory base class is 16 bytes smaller.
-#if defined(NM_ERA) && NM_ERA < 1015
+// getPhysicalSegment use): +0xc8 from 10.15 on, +0xb8 on 10.12 to 10.14, whose memory base class is 16 bytes smaller,
+// +0x78 on 10.11 (all three of the family's own methods that touch it agree on each release).
+#if defined(NM_ERA) && NM_ERA < 1012
+enum { kNvVidMemPhysOff = 0x78 };
+#elif defined(NM_ERA) && NM_ERA < 1015
 enum { kNvVidMemPhysOff = 0xb8 };
 #else
 enum { kNvVidMemPhysOff = 0xc8 };
@@ -1188,7 +1191,7 @@ IOAccelMemory *NVDisplayPipe::initFramebufferResource(unsigned int index, IOAcce
 static NVVidMemory *nvres_vidmem(IOAccelResource2 *r)
 {
     if (!r) return nullptr;
-    OSObject *o = *(OSObject **)((unsigned char *)r + 0x88);
+    OSObject *o = *(OSObject **)((unsigned char *)r + kNvResVidMem);
     return OSDynamicCast(NVVidMemory, o);
 }
 
@@ -1994,9 +1997,14 @@ static bool nvFamLock(NVAccel *a, bool tryOnly)
     if (!lk) return false;
     if (tryOnly) { if (!IOLockTryLock(lk)) return false; }
     else {
+#if defined(NM_ERA) && NM_ERA < 1100
+        // The waiter count beside the lock is not confirmed on these releases; the lock itself is (same place on all).
+        IOLockLock(lk);
+#else
         OSIncrementAtomic((volatile SInt32 *)(b + 0x90));
         IOLockLock(lk);
         OSDecrementAtomic((volatile SInt32 *)(b + 0x90));
+#endif
     }
     _ZN22IOGraphicsAccelerator29lock_busyEv(a);
     a->acceleratorDidLock("", 0);
@@ -2057,9 +2065,9 @@ static bool nvSVDiag() { return gSVDiag > 0 && OSDecrementAtomic(&gSVDiag) > 0; 
 static unsigned nvAccelSurfDirty(void *cache, NVResource *res, unsigned plane)
 {
     volatile unsigned char *r = (volatile unsigned char *)res;
-    unsigned char type = r[0x14];
-    unsigned int fl = *(volatile unsigned int *)(r + 0xc);
-    volatile unsigned short *valid = *(unsigned short *volatile *)(r + 0x30);
+    unsigned char type = r[kNvResType];
+    unsigned int fl = *(volatile unsigned int *)(r + kNvResFlags);
+    volatile unsigned short *valid = *(unsigned short *volatile *)(r + kNvResValid);
     if (type != 0xc0 || (fl & 0x8000) || !valid || plane > 15) return NVRM_SS_NO_CACHE;
     if (!gNVSVPendLock) gNVSVPendLock = IOSimpleLockAlloc();
     if (!nvSVPend(_ZNK9IOSurface12getSurfaceIDEv(*(void *volatile *)((unsigned char *)cache + 0x10)), 1, res)) return NVRM_SS_NO_CACHE;
@@ -2076,10 +2084,10 @@ static bool nvAccelRestoreParkedForDirty(NVResource *res, NVVidMemory *vm, unsig
 {
     if (!res || !vm || vm->fRmHandle || !vm->fParkHandle) return true;
     const volatile unsigned char *r = (const volatile unsigned char *)res;
-    const unsigned flags = *(const volatile unsigned *)(r + 0xc);
-    const volatile unsigned short *valid = *(unsigned short *volatile const *)(r + 0x30);
+    const unsigned flags = *(const volatile unsigned *)(r + kNvResFlags);
+    const volatile unsigned short *valid = *(unsigned short *volatile const *)(r + kNvResValid);
     const unsigned long long want = *(const volatile unsigned long long *)((const unsigned char *)vm + 0x40);
-    if (vm->fScanout || r[0x14] != 0xc0 || (flags & 0x8000) || !valid || plane > 15 ||
+    if (vm->fScanout || r[kNvResType] != 0xc0 || (flags & 0x8000) || !valid || plane > 15 ||
         !want || vm->fParkBytes < want || !vm->fParkPhys || !vm->fParkKva)
         return true;  // Preserve the original refusal and CPU-copy fallback.
     void *const handle = vm->fParkHandle;
@@ -2144,7 +2152,7 @@ static IOReturn nvAccelSurfVram(NVAccel *owner, struct NVRMSurfShareEsc *p, task
                              cache ? 1 : 0, res ? 1 : 0, (vm && vm->fRmHandle) ? 1 : 0);
         if (gNVSVDirty + gNVSVDirtyRefused <= 6 || ((gNVSVDirty + gNVSVDirtyRefused) & 4095) == 0)
             ALOG("surfvram dirty: surface %u plane %u type 0x%x -> %#x (dirty %u, refused %u)", p->surfaceID, p->plane,
-                 res ? (unsigned)((volatile unsigned char *)res)[0x14] : 0u, p->status, gNVSVDirty, gNVSVDirtyRefused);
+                 res ? (unsigned)((volatile unsigned char *)res)[kNvResType] : 0u, p->status, gNVSVDirty, gNVSVDirtyRefused);
         if (cache) ((OSObject *)cache)->release();
         nvFamUnlock(a);
         ((OSObject *)surf)->release();
@@ -2215,14 +2223,14 @@ static IOBufferMemoryDescriptor *nvSVStage(unsigned long long len)
 void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long long a3)
 {
     volatile unsigned char *r = (volatile unsigned char *)this;
-    void *cache = *(void *volatile *)(r + 0xe0);
+    void *cache = *(void *volatile *)(r + kNvResCache);
     NVVidMemory *vm = nvres_vidmem(this);
     struct NVRMRmHandles h; nvSVZero(&h, sizeof h);
-    void *surf = (r[0x14] == 0xc0 && cache) ? *(void *volatile *)((unsigned char *)cache + 0x10) : nullptr;
+    void *surf = (r[kNvResType] == 0xc0 && cache) ? *(void *volatile *)((unsigned char *)cache + 0x10) : nullptr;
     if (nvSVDiag()) {
-        volatile unsigned short *vd = *(unsigned short *volatile *)(r + 0x30);
+        volatile unsigned short *vd = *(unsigned short *volatile *)(r + kNvResValid);
         ALOG("SVDIAG pageoff surface %u type 0x%x vm %d rm %d scanout %d valid0 %#x valid6 %#x", surf ? _ZNK9IOSurface12getSurfaceIDEv(surf) : 0u,
-             (unsigned)r[0x14], vm ? 1 : 0, (vm && vm->fRmHandle) ? 1 : 0, vm ? (int)vm->fScanout : -1, vd ? vd[0] : 0xffff, vd ? vd[6] : 0xffff);
+             (unsigned)r[kNvResType], vm ? 1 : 0, (vm && vm->fRmHandle) ? 1 : 0, vm ? (int)vm->fScanout : -1, vd ? vd[0] : 0xffff, vd ? vd[6] : 0xffff);
     }
     if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(fAccel, &h)) {
         NV_FAM_PAGEOFF(ev, a1, out, a3);
@@ -2247,9 +2255,9 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             if ((int)(ns / 1000) > gPoUnlockedMaxUs) gPoUnlockedMaxUs = (int)(ns / 1000);
             OSAddAtomic64(1, &gCntPoUnlocked);
             // while the lock was free the family may have changed the resource: read everything again
-            cache = *(void *volatile *)(r + 0xe0);
+            cache = *(void *volatile *)(r + kNvResCache);
             vm = nvres_vidmem(this);
-            surf = (r[0x14] == 0xc0 && cache) ? *(void *volatile *)((unsigned char *)cache + 0x10) : nullptr;
+            surf = (r[kNvResType] == 0xc0 && cache) ? *(void *volatile *)((unsigned char *)cache + 0x10) : nullptr;
             if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(fAccel, &h)) { NV_FAM_PAGEOFF(ev, a1, out, a3); return; }
         } else {
             if (gPoUnlocked && a && nvSurfIsPending(sid)) OSAddAtomic64(1, &gCntPoNotOwner);
@@ -2327,7 +2335,7 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
     else ALOG("surfvram pageoff: res %p CE copy TIMED OUT -- surface pages stay wired (%llu B)", this, len);
     if (ok) {
         nvSVPend(_ZNK9IOSurface12getSurfaceIDEv(surf), 0);
-        volatile unsigned short *valid = *(unsigned short *volatile *)(r + 0x30);
+        volatile unsigned short *valid = *(unsigned short *volatile *)(r + kNvResValid);
         if (valid) valid[0] |= 1;
         gNVSVPageoff++;
     } else gNVSVPageoffFail++;
@@ -2545,7 +2553,7 @@ static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pip
         OSAddAtomic64(1, &gCntIopFlipMiss);
         if (kmem) nvAccelIopCachePut(s, res, vm, kmem, bytes);
     }
-    volatile unsigned short *valid = res ? *(unsigned short *volatile *)((volatile unsigned char *)res + 0x30) : nullptr;
+    volatile unsigned short *valid = res ? *(unsigned short *volatile *)((volatile unsigned char *)res + kNvResValid) : nullptr;
     const bool vramNewest = valid && (valid[6] & 1u);
     if (!kmem) return nvAccelIopFlipNo(4);
     if (!vramNewest) return nvAccelIopFlipNo(5);
@@ -2657,7 +2665,7 @@ static bool nvAccelSurfCopyReady(IOSurface *s, unsigned head)
             void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, (void *)s, 0);
             OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
             NVResource *res = OSDynamicCast(NVResource, ctx);
-            volatile unsigned short *valid = res ? *(unsigned short *volatile *)((volatile unsigned char *)res + 0x30) : nullptr;
+            volatile unsigned short *valid = res ? *(unsigned short *volatile *)((volatile unsigned char *)res + kNvResValid) : nullptr;
             if (!res || !valid || (valid[0] & 1u)) ready = true;
             else if (!nvAccelIopCopyNeedsPageoff(false, nvAccelResPluginWrote(res))) { ready = true; OSAddAtomic64(1, &gCntIopCopyUnwritten); }
             else { bool out = false; res->pageoff(nullptr, true, &out, 0); ready = out || (valid[0] & 1u); }
@@ -3110,8 +3118,8 @@ static void nvAccelResStats(IOAccelResource2 *res, const char *tag)
     if (!res) { ALOG("  swap %s: (null)", tag); return; }
     NVVidMemory *vm = nvres_vidmem(res);
     const unsigned char *r = (const unsigned char *)res;
-    const unsigned w     = *(const volatile unsigned short *)(r + 0xb0);
-    const unsigned h     = *(const volatile unsigned short *)(r + 0xb2);
+    const unsigned w     = *(const volatile unsigned short *)(r + kNvResWidth);
+    const unsigned h     = *(const volatile unsigned short *)(r + kNvResHeight);
     const unsigned pitch = *(const volatile unsigned int   *)(r + 0xb8);
     if (!vm || !vm->fKva || !pitch || !w || !h) {
         ALOG("  swap %s: %ux%u pitch %u vm %p kva %p scanout %d -- NOT SAMPLEABLE",
@@ -3136,8 +3144,8 @@ bool nvAccelResHasContent(IOAccelResource2 *res)
     NVVidMemory *vm = nvres_vidmem(res);
     if (!vm || !vm->fKva) return false;
     const unsigned char *r = (const unsigned char *)res;
-    const unsigned w     = *(const volatile unsigned short *)(r + 0xb0);
-    const unsigned h     = *(const volatile unsigned short *)(r + 0xb2);
+    const unsigned w     = *(const volatile unsigned short *)(r + kNvResWidth);
+    const unsigned h     = *(const volatile unsigned short *)(r + kNvResHeight);
     const unsigned pitch = *(const volatile unsigned int   *)(r + 0xb8);
     if (!w || !h || pitch < 4) return false;
     const volatile unsigned int *px = (const volatile unsigned int *)vm->fKva;
@@ -3226,8 +3234,8 @@ static bool nvAccelFlipTo(IOAccelResource2 *res)
     if (vm->fScanout) { NVFLIPWHY("nvAccelFlipTo: already the scanout"); return false; }
 
     const unsigned char *r = (const unsigned char *)res;
-    const unsigned w     = *(const volatile unsigned short *)(r + 0xb0);
-    const unsigned h     = *(const volatile unsigned short *)(r + 0xb2);
+    const unsigned w     = *(const volatile unsigned short *)(r + kNvResWidth);
+    const unsigned h     = *(const volatile unsigned short *)(r + kNvResHeight);
     const unsigned pitch = *(const volatile unsigned int   *)(r + 0xb8);
     if (!w || !h || !pitch) { NVFLIPWHY("nvAccelFlipTo: geometry %ux%u pitch %u", w, h, pitch); return false; }
 
