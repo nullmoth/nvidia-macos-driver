@@ -20,13 +20,15 @@ the kernel accelerator's bodies are not written, and nothing here is part of a p
 | `glue/build_glue.sh` | generates, compiles and link-checks the table for a release and runs the extension tests |
 | `mesa/patch_zink_no_moltenvk.py`, `mesa/zink-no-moltenvk.patch` | lets zink build on this platform without the MoltenVK headers (script and the resulting diff) |
 | `kext/nm_accel_contract.h` | the kernel accelerator's user-client contract: argument shapes of the 18 public surface methods and our private client |
-| `kext/NMLegacyAccel.cpp` | accelerator stub that checks call shapes against the contract and answers unsupported; cannot match hardware |
-| `kext/build_kext.sh` | builds the stub against the 10.7 and 10.11 kernel headers and checks its imports against each release |
+| `kext/NMLegacyAccel.cpp` | accelerator with memory-backed surfaces: the public surface client and our private client; its personality cannot match hardware |
+| `kext/build_kext.sh` | builds the accelerator against the kernel headers of 10.6 to 10.13 and checks its imports against each release's kernel |
 | `context/nm_mesa.c` | gallium front end: pipe screen (CPU rasteriser or zink), contexts on Mesa's state tracker, the framebuffer that is copied to caller memory on flush |
 | `context/nm_context.c` | the engine contract served by this bundle: renderer-info and pixel-format nodes, contexts, drawables, parameters 910 / 997 / 999, with a named software stand-in for kernel surfaces in test builds |
 | `context/nm_compat.c` | two C library calls Mesa needs that 10.11 lacks |
 | `context/build_context.sh` | builds the engine with the context layer for 10.11, checks exports and imports, and runs the end-to-end test that draws through the table on the CPU rasteriser and counts pixels |
 | `mesa/build_mesa_gl.sh` | builds Mesa's static libraries (API layer, state tracker, zink, CPU rasteriser) for a deployment target |
+| `context/build_releases.sh` | runs the context build and its tests for every release from 10.13 down to 10.7 with that release's headers, lists and libraries |
+| `package/stage.sh` | assembles the per-release folder tree and manifest; copies build outputs only |
 | `tools/usersym.py` | import checker used by the build scripts |
 | `build_skeleton.sh` | builds both skeletons for every release and both user architectures against the 10.6 SDK and compares exports |
 
