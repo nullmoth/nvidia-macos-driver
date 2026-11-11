@@ -94,8 +94,9 @@ echo "$LIST" | while read rel kd md gd; do
     esac
     case $rel in
       11|12|13|14) echo "  - No link test here: from 11 on kexts are linked into a kernel collection by a tool that needs an Intel Mac"
-             echo "    running that release. First step on the test disk is that collection build; it stops before changing anything."
-             ;;&
+             echo "    running that release. First step on the test disk is that collection build; it stops before changing anything.";;
+    esac
+    case $rel in
       11|12) echo "  - The accelerator's long not-exported list is not a defect list: Apple ships no standalone accelerator family"
              echo "    binary for this release, so the kit check cannot see the family's names. Tables, sizes and fields were"
              echo "    checked against the release's kernel collection instead (map, section 2j/2k).";;
