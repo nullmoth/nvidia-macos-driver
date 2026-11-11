@@ -341,7 +341,9 @@ NVGL_ZERO_NET(NVMTLGLPointerType)
 - (MTLDataType)bufferDataType { return _dtype; }
 - (MTLStructType *)bufferStructType { return nil; }
 - (MTLPointerType *)bufferPointerType {
-    NVMTLGLPointerType *p = [NVMTLGLPointerType new]; p->_elem = _dtype; p->_access = _access; p->_size = _size; p->_align = _align;
+    // MTLPointerType arrives with macOS 10.13: before it the runtime drops this subclass and the class answers nil
+    NVMTLGLPointerType *p = [NVMTLGLPointerType new]; if (!p) return nil;
+    p->_elem = _dtype; p->_access = _access; p->_size = _size; p->_align = _align;
     return (MTLPointerType *)p;
 }
 - (id)dataTypeDescription { return _type == MTLBindingTypeBuffer ? (id)[self bufferPointerType] : nil; }

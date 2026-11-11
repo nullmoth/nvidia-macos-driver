@@ -2514,7 +2514,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     unsigned long f = 0, p = 0, b = 0, g = 0;
     if (lf) {
         f = (unsigned long)lf.functions.count;
-        b = (unsigned long)lf.binaryFunctions.count;
+        b = (unsigned long)NVMTL_SINCE(11.0, NSUInteger, lf.binaryFunctions.count, 0);
         g = (unsigned long)lf.groups.count;
         if ([lf respondsToSelector:@selector(privateFunctions)])
             p = (unsigned long)[(NSArray *)[lf valueForKey:@"privateFunctions"] count];
@@ -2831,6 +2831,9 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 }
 - (NSArray *)counterSets { return @[nvmtl_timestamp_counter_set()]; }
 - (id<MTLCounterSampleBuffer>)newCounterSampleBufferWithDescriptor:(MTLCounterSampleBufferDescriptor *)desc error:(NSError **)err {
+  // Counter sample buffers arrive with macOS 10.15. An app built with a newer SDK can still find this method on an older
+  // system and call it with the nil descriptor that system gives it; it gets nil there.
+  if (@available(macOS 10.15, *)) {
     const NSUInteger n = desc.sampleCount;
     NSInteger code = MTLCounterSampleBufferErrorInvalid;
     const char *why = !desc ? "no descriptor"
@@ -2848,6 +2851,9 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     b->_pool = pool; b->_count = n; b->_storage = desc.storageMode; b->_label = [desc.label copy]; b->_dev = self;
     if (err) *err = nil;
     return b;
+  }
+  if (err) *err = nil;
+  return nil;
 }
 - (void)sampleTimestamps:(MTLTimestamp *)cpu gpuTimestamp:(MTLTimestamp *)gpu {
     uint64_t c = 0, g = 0;
@@ -3180,8 +3186,10 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
     }
     d.depthAttachmentPixelFormat = md.depthAttachmentPixelFormat; d.stencilAttachmentPixelFormat = md.stencilAttachmentPixelFormat;
     d.rasterSampleCount = md.rasterSampleCount ?: 1; d.alphaToCoverageEnabled = md.alphaToCoverageEnabled;
-    d.fragmentLinkedFunctions = NVMTL_SINCE(14.0, MTLLinkedFunctions *, md.fragmentLinkedFunctions, nil);
-    d.supportIndirectCommandBuffers = NVMTL_SINCE(14.0, BOOL, md.supportIndirectCommandBuffers, NO);
+    if (@available(macOS 14.0, *)) {   // both properties reach mesh pipeline descriptors with macOS 14
+        d.fragmentLinkedFunctions = md.fragmentLinkedFunctions;
+        d.supportIndirectCommandBuffers = md.supportIndirectCommandBuffers;
+    }
     NVMTLRenderPipelineState *ps = (NVMTLRenderPipelineState *)[self newRenderPipelineStateWithDescriptor:d error:&pe];
     if (!ps) { *why = [NSString stringWithFormat:@"\"%@\" + \"%@\": no render pipeline (%@)", mf->_fname, [ffn name], pe.localizedDescription ?: @"?"]; return nil; }
     *kout = kp;
