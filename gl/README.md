@@ -15,6 +15,13 @@ part of a package.
 | `engine/nm_gli.h` | the engine-level contract as read from the binaries: parameter numbers, argument blocks, drawable types, renderer-info and pixel-format layouts, with compile-time offset checks |
 | `engine/nm_engine.c` | the engine bundle: forwards every entry to Apple's renamed engine and, with `NM_GL_LOG` set, records each call with its parameter number and argument bytes |
 | `engine/build_engine.sh` | builds the bundle for x86_64 and i386 against the 10.6 SDK, compares exports with the measured lists, runs the host tests, checks imports |
+| `glue/gen_dispatch.py` | generates the file that fills Apple's per-context function table for one release: a thunk into Mesa, one of our Apple-extension entries, or a refusal per slot |
+| `glue/nm_apple_ext.c` | the Apple-extension entries Mesa lacks (fences, object tests, purgeable objects, texture range, flush-render) |
+| `glue/build_glue.sh` | generates, compiles and link-checks the table for a release and runs the extension tests |
+| `mesa/patch_zink_no_moltenvk.py`, `mesa/zink-no-moltenvk.patch` | lets zink build on this platform without the MoltenVK headers (script and the resulting diff) |
+| `kext/nm_accel_contract.h` | the kernel accelerator's user-client contract: argument shapes of the 18 public surface methods and our private client |
+| `kext/NMLegacyAccel.cpp` | accelerator stub that checks call shapes against the contract and answers unsupported; cannot match hardware |
+| `kext/build_kext.sh` | builds the stub against the 10.7 and 10.11 kernel headers and checks its imports against each release |
 | `tools/usersym.py` | import checker used by the build scripts |
 | `build_skeleton.sh` | builds both skeletons for every release and both user architectures against the 10.6 SDK and compares exports |
 
