@@ -5,6 +5,8 @@
 //   10.14 and later : one layout, 64-bit pitches and sizes.
 //   10.12, 10.13    : pitches and sizes are 32-bit, so everything after them sits 8 bytes lower.
 //   10.11           : the head of the object is laid out differently as well.
+// The surface cache object the resource points to is the same on 10.11 to 15: surface +0x10 (its init), control context
+// +0x20 (its setControlFunc).
 // Width and height on 10.11 are taken from the 10.12 layout (the fields either side of them match); 10.11 has no
 // getResourceInfo to confirm them.
 #pragma once
