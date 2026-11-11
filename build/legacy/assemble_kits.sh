@@ -27,9 +27,9 @@ echo "$LIST" | while read rel kd md gd; do
   have_k=""; for x in NVRM NVRMFB NVRMAGDC NVAccel; do
     [ -f "$B/out/$kd/$x.kext/Contents/MacOS/$x" ] && { cp -R "$B/out/$kd/$x.kext" "$D/kexts/"; have_k="$have_k $x"; }
   done
-  # 10.8 has no graphics-control class at all and 10.9/10.10 lack its eight reserved slots, which our subclass's table
-  # names: the kext cannot link there. It is kept out of kexts/ so nobody loads it by copying the folder.
-  case $rel in 10.8|10.9|10.10) [ -d "$D/kexts/NVRMAGDC.kext" ] && { mkdir -p "$D/held-back"; mv "$D/kexts/NVRMAGDC.kext" "$D/held-back/"; have_k=${have_k/ NVRMAGDC/}; } ;; esac
+  # 10.8 has no graphics-control class at all: the kext cannot link there. It is kept out of kexts/ so nobody loads
+  # it by copying the folder. (On 10.9 and 10.10 it links since the reserved slots are no longer named there.)
+  case $rel in 10.8) [ -d "$D/kexts/NVRMAGDC.kext" ] && { mkdir -p "$D/held-back"; mv "$D/kexts/NVRMAGDC.kext" "$D/held-back/"; have_k=${have_k/ NVRMAGDC/}; } ;; esac
   for x in NVRM NVRMFB NVRMAGDC NVAccel; do [ -f "$B/out/$kd/$x.missing.txt" ] && cp "$B/out/$kd/$x.missing.txt" "$D/kexts/$x.not-exported.txt"; done
   have_m=no; [ "$md" != "-" ] && [ -d "$B/metal/stage/$md/payload" ] && { mkdir -p "$D/userland"; cp -R "$B/metal/stage/$md/payload" "$B/metal/stage/$md/MANIFEST.txt" "$B/metal/stage/$md/IMPORTS.txt" "$D/userland/"; have_m=yes; }
   [ "$md" != "-" ] && [ -d "$B/metal/stage/$md/options" ] && cp -R "$B/metal/stage/$md/options" "$D/options"
@@ -48,6 +48,13 @@ echo "$LIST" | while read rel kd md gd; do
     case " $have_k " in *" NVAccel "*) echo "             NVAccel is the Metal-side accelerator (subclasses Apple's accelerator family of this release).";;
       *) echo "             No NVAccel: this release has no Metal; acceleration is the OpenGL accelerator under opengl/.";; esac
     [ -n "$slots" ] && echo "             accelerator table check: $slots"
+    # link test with this release's own kext linker, built from the release's published kernel source (10.6 to 10.15)
+    if [ -f "$B/kxld/results/$rel.txt" ]; then
+      echo "             link test with this release's own kernel kext linker (Apple's kexts as controls, then ours):"
+      grep -E "^  com\.nullmoth\.[A-Za-z.]+: (LINKED|REFUSED)" "$B/kxld/results/$rel.txt" | sed -E 's/ \(linker return.*//; s/^  /               /'
+      grep -E "controls linked|negative control" "$B/kxld/results/$rel.txt" | sed 's/^-- /               /'
+      cp "$B/kxld/results/$rel.txt" "$D/kexts/link-test.txt"
+    fi
     for x in NVRM NVRMFB NVRMAGDC NVAccel; do f="$D/kexts/$x.not-exported.txt"; [ -s "$f" ] && echo "             $x: $(wc -l < "$f" | tr -d ' ') names the kernel or Apple's kexts do not export on this release (listed in kexts/$x.not-exported.txt)"; done
     case " $have_k " in *" NVRMAGDC "*) ;; *) echo "             No NVRMAGDC: the graphics-control family it attaches to does not exist on this release.";; esac
     echo "userland/  : $( [ $have_m = yes ] && echo "Metal plugin, translator, NVK, loader, codec library, daemon; payload/ mirrors the install paths (MANIFEST.txt)" || echo "none (Metal does not exist on this release)")"
@@ -86,12 +93,16 @@ echo "$LIST" | while read rel kd md gd; do
       *) echo "  - Accelerator differs from the shipping one only by reserved pads in the tables; fields and sizes match the shipping release.";;
     esac
     case $rel in
+      11|12|13|14) echo "  - No link test here: from 11 on kexts are linked into a kernel collection by a tool that needs an Intel Mac"
+             echo "    running that release. First step on the test disk is that collection build; it stops before changing anything."
+             ;;&
       11|12) echo "  - The accelerator's long not-exported list is not a defect list: Apple ships no standalone accelerator family"
              echo "    binary for this release, so the kit check cannot see the family's names. Tables, sizes and fields were"
              echo "    checked against the release's kernel collection instead (map, section 2j/2k).";;
-      10.8|10.9|10.10) echo "  - NVRMAGDC is in held-back/, not kexts/: this release's graphics-control class is missing (10.8) or lacks the"
-             echo "    eight reserved slots our subclass names (10.9, 10.10), so it cannot link here (kexts/NVRMAGDC.not-exported.txt)."
+      10.8) echo "  - NVRMAGDC is in held-back/, not kexts/: this release has no graphics-control class, so it cannot link here."
              echo "    It only adds GPU selection and power policy; the display and the accelerator do not depend on it.";;
+      10.6) echo "  - Link test: NVRM names one class of the ACPI family (IOACPIPlatformDevice); no copy of the 10.6 ACPI family"
+             echo "    kext was on hand, so that one name is not verified here. Everything else in NVRM resolved.";;
     esac
   } > "$D/README.txt"
   ( cd "$D" && find . -type f ! -name MANIFEST.sha256 -print0 | sort -z | xargs -0 shasum -a 256 > MANIFEST.sha256 )

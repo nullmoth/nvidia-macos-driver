@@ -22,9 +22,13 @@ public:
                                               unsigned long *out, unsigned long *outSize, IOExternalMethodArguments *args) = 0;
     virtual IOReturn vendor_doDeviceAttribute(unsigned int cmd, unsigned long *in, unsigned long inSize,
                                               unsigned long *out, unsigned long *outSize, AGDCClientState_t *state);
+    // The eight reserved slots exist from 10.11 on; on 10.9 and 10.10 Apple's class ends at vendor_doDeviceAttribute
+    // (same slots before it), and naming slots the class does not have leaves them unresolved at load.
+#if !defined(NM_ERA) || NM_ERA >= 1011
     virtual void _RESERVEDAppleGraphicsDeviceControl0(); virtual void _RESERVEDAppleGraphicsDeviceControl1();
     virtual void _RESERVEDAppleGraphicsDeviceControl2(); virtual void _RESERVEDAppleGraphicsDeviceControl3();
     virtual void _RESERVEDAppleGraphicsDeviceControl4(); virtual void _RESERVEDAppleGraphicsDeviceControl5();
     virtual void _RESERVEDAppleGraphicsDeviceControl6(); virtual void _RESERVEDAppleGraphicsDeviceControl7();
+#endif
 };
 static_assert(sizeof(AppleGraphicsDeviceControl) == 0x110, "AppleGraphicsDeviceControl is 0x110 bytes in 15.7.9");

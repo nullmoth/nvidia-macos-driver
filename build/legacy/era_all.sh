@@ -11,7 +11,8 @@ while read era mv kit tag khdr; do
   if [ -d "$B/gen-$era" ]; then export ACCEL_HDR="$B/gen-$era"; else unset ACCEL_HDR; fi
   # names the release's kernel exports, for the duplicate-global rule of the kernel's kext linker (before 11 only:
   # from 11 on kexts are linked into a collection by a different tool that has no such rule)
-  unset KERN_SYMS
+  unset KERN_SYMS FAMBIN
+  [ $era -lt 1100 ] && export FAMBIN=$(find "$B/kdk/$kit" -type f -name IOAcceleratorFamily2 -not -path "*dSYM*" | head -1)
   if [ $era -lt 1100 ]; then
     kern=$(find "$B/kdk/$kit" -type f \( -name kernel -o -name mach_kernel \) -not -path "*dSYM*" -not -path "*DEBUG*" -size +1000k | head -1)
     [ -n "$kern" ] && { xcrun nm -arch x86_64 -gU "$kern" | awk '{print $NF}' | sort -u > "$B/vt/kernsyms-$mv.txt"; export KERN_SYMS="$B/vt/kernsyms-$mv.txt"; }
