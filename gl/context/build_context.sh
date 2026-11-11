@@ -85,6 +85,14 @@ if [ $# -gt 0 ]; then
   # weak imports count too: a weak symbol the release lacks is a null pointer at the call
   wm=$(grep -E 'weak +[0-9]+ missing +[1-9]' "$OUT/imports.txt" | wc -l | xargs); echo "libraries with a weak import the release lacks: $wm"; [ "$wm" = 0 ] || fail=1
 fi
+# the shims that replace descriptor-relative and exclusive calls: the same source with three names prefixed, run in
+# a fresh directory
+rm -rf "$OUT/compat-work"; mkdir -p "$OUT/compat-work"
+if clang $A -std=c11 -Wall -Wextra -Werror -O2 -Dfchmodat=nm_fchmodat -Dfdopendir=nm_fdopendir -Drenamex_np=nm_renamex_np -c "$H/nm_compat.c" -o "$OUT/nm_compat_test.o" > "$OUT/compat_test.build.log" 2>&1 &&
+   clang $A -std=c11 -Wall -Wextra -Werror -Dfchmodat=nm_fchmodat -Dfdopendir=nm_fdopendir -Drenamex_np=nm_renamex_np -o "$OUT/compat_test" "$H/test/compat_test.c" "$OUT/nm_compat_test.o" >> "$OUT/compat_test.build.log" 2>&1; then
+  "$OUT/compat_test" "$OUT/compat-work" > "$OUT/compat_test.out" 2>&1 || { fail=1; grep '^FAIL' "$OUT/compat_test.out"; }
+  echo "shims: $(tail -1 "$OUT/compat_test.out")"
+else fail=1; echo "shim test build failed"; head -8 "$OUT/compat_test.build.log" | cut -c1-220; fi
 clang -arch x86_64 -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations -Wno-four-char-constants -I"$OUT/inc" -o "$OUT/context_test" "$H/test/context_test.c" \
   -framework IOSurface -framework CoreFoundation > "$OUT/context_test.build.log" 2>&1 || { fail=1; head -12 "$OUT/context_test.build.log" | cut -c1-220; }
 [ -x "$OUT/context_test" ] && { "$OUT/context_test" "$T" "$SLOTS" 2> "$OUT/context_test.stderr" | tee "$OUT/context_test.out"; rc=${PIPESTATUS[0]}; [ $rc = 0 ] || { fail=1; echo "context_test exit $rc"; tail -5 "$OUT/context_test.stderr"; }; }

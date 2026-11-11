@@ -16,11 +16,15 @@ while read era mv kit tag khdr; do
     -c "$H/NMLegacyAccel.cpp" -o "$O/NMLegacyAccel.o" > "$O/compile.log" 2>&1; rc=$?
   e=$(grep -cE '^[^ ]+:[0-9]+:[0-9]+: (fatal )?error:' "$O/compile.log")
   echo "release $mv: compile rc=$rc errors=$e"; [ $rc = 0 ] || { fail=1; grep -E 'error:' "$O/compile.log" | head -6 | cut -c1-220; continue; }
-  xcrun clang++ -arch x86_64 -mmacosx-version-min=$mv -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "$O/NMLegacyAccel.o" \
+  # the module information (identifier, version, start and stop), without which the kernel's kext linker refuses the kext
+  xcrun clang -arch x86_64 -mmacosx-version-min=$mv -mkernel -nostdinc -I"$B/sdk/$khdr" -idirafter "$RES" -DKERNEL -DKERNEL_PRIVATE -DAPPLE -DNeXT \
+    -Wno-everything -O2 -c "$H/nm_kmod_info.c" -o "$O/nm_kmod_info.o" >> "$O/compile.log" 2>&1 || { echo "release $mv: module info compile FAILED"; tail -4 "$O/compile.log"; fail=1; continue; }
+  xcrun clang++ -arch x86_64 -mmacosx-version-min=$mv -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "$O/NMLegacyAccel.o" "$O/nm_kmod_info.o" \
     -o "$O/NMLegacyAccel.kext/Contents/MacOS/NMLegacyAccel" > "$O/link.log" 2>&1; rc=$?
   [ $rc = 0 ] || { echo "release $mv: LINK FAILED"; grep -v 'built for newer' "$O/link.log" | head -6; fail=1; continue; }
   cp "$H/Info.plist" "$O/NMLegacyAccel.kext/Contents/"
   xcrun nm -arch x86_64 -u "$O/NMLegacyAccel.kext/Contents/MacOS/NMLegacyAccel" > "$O/NMLegacyAccel.imports.txt"
+  xcrun nm -arch x86_64 "$O/NMLegacyAccel.kext/Contents/MacOS/NMLegacyAccel" | grep -q ' _kmod_info$' || { echo "release $mv: no module information in the binary"; fail=1; }
   # the personality must not be able to match anything
   grep -q 'NMLegacyAccelStubNeverMatches' "$O/NMLegacyAccel.kext/Contents/Info.plist" || { echo "release $mv: personality is NOT gated"; fail=1; }
   echo "release $mv: linked, $(wc -l < "$O/NMLegacyAccel.imports.txt" | xargs) imports, classes $(xcrun nm -arch x86_64 "$O/NMLegacyAccel.kext/Contents/MacOS/NMLegacyAccel" | grep -c 'gMetaClassE$')"

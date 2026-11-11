@@ -193,7 +193,16 @@ DIR *fdopendir(int fd)
     char path[PATH_MAX];
     if (fcntl(fd, F_GETPATH, path) != 0) return NULL;
     DIR *d = opendir(path);
-    if (d) close(fd);   /* the stream owns a descriptor of its own; the caller's is consumed as the real call does */
+    if (!d) return NULL;
+    /* The path was read back from the descriptor and could have been renamed or replaced since: the directory
+     * opened by name must be the very one the caller holds, or the call fails. */
+    struct stat a, b;
+    if (fstat(fd, &a) != 0 || fstat(d->__dd_fd, &b) != 0 || a.st_dev != b.st_dev || a.st_ino != b.st_ino) {
+        closedir(d);
+        errno = EBADF;
+        return NULL;
+    }
+    close(fd);          /* the stream owns a descriptor of its own; the caller's is consumed as the real call does */
     return d;
 }
 
@@ -204,7 +213,8 @@ DIR *fdopendir(int fd)
 int fchmodat(int dirfd, const char *path, mode_t mode, int flags)
 {
     char full[PATH_MAX];
-    (void)flags;
+    /* No flag can be honoured through a path: "do not follow a link" is refused rather than silently followed. */
+    if (flags != 0) { errno = EOPNOTSUPP; return -1; }
     if (nm_at_path(dirfd, path, full) != 0) return -1;
     return chmod(full, mode);
 }
@@ -223,14 +233,19 @@ int renameat(int fd1, const char *from, int fd2, const char *to)
     return rename(a, b);
 }
 
-/* Flag 0x4 asks that an existing destination is not replaced. Checked then renamed: not atomic as the real call
- * is, which matters only to two processes racing for one name. Other flags are refused. */
+/* Flag 0x4 asks that an existing destination is not replaced. That is done with a hard link, which the system
+ * creates only if the name is free, followed by removing the old name: no window in which another process's
+ * file can be replaced. Where a link cannot be made (a directory, a volume without links) the call reports
+ * "not supported" and the caller takes its own fallback. Other flags are refused. */
 int renamex_np(const char *from, const char *to, unsigned int flags)
 {
-    struct stat st;
     if (flags & ~0x4u) { errno = EINVAL; return -1; }
-    if ((flags & 0x4u) && lstat(to, &st) == 0) { errno = EEXIST; return -1; }
-    return rename(from, to);
+    if (!(flags & 0x4u)) return rename(from, to);
+    if (link(from, to) != 0) {
+        if (errno != EEXIST && errno != ENOENT && errno != EACCES && errno != ENAMETOOLONG) errno = ENOTSUP;
+        return -1;
+    }
+    return unlink(from);
 }
 
 /* An enumeration that is empty from the start: callers fall back to their defaults. */
