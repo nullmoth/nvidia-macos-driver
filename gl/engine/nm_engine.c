@@ -39,8 +39,9 @@
 #ifdef NM_ENGINE_TEST
 #include <sys/stat.h>
 #endif
-#ifdef NM_ENGINE_SYSLOG
 #include <syslog.h>
+#ifdef NM_ENGINE_OWNER
+#include "../context/nm_own.h"
 #endif
 
 #define NM_EXPORT __attribute__((visibility("default")))
@@ -94,8 +95,10 @@ static inline int nm_recording(void)
 #endif
 }
 
-/* One write() (or one syslog call) per line so lines from different threads never interleave. */
-static void nm_log(const char *fmt, ...)
+/* One write() (or one syslog call) per line so lines from different threads never interleave.
+ * Not static: the context layer records through it too (hidden visibility, never exported). */
+void nm_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void nm_log(const char *fmt, ...)
 {
     if (!nm_recording()) return;
     char buf[1024];
@@ -177,11 +180,33 @@ static void nm_open(void)
     nm_log("open %s: %d of %d entry points present", path, found, NM_IDX_COUNT);
 }
 
+/*
+ * A request this bundle does not serve itself goes to the original engine. Whether Apple's engine behaves the
+ * same from a renamed folder is not yet known, so that hand-over is never silent: the first time each entry is
+ * forwarded, one line goes to the system log, in every build (the text is fixed; nothing a caller controls).
+ */
+static unsigned char nm_forward_noted[NM_IDX_COUNT];
 static inline nm_fn8 nm_apple(int idx)
 {
     pthread_once(&nm.once, nm_open);
+    if (nm.fn[idx] && !nm_forward_noted[idx]) {
+        nm_forward_noted[idx] = 1;
+        syslog(LOG_NOTICE, "nm-gl: %s is not served here; forwarding to the original engine", nm_names[idx]);
+    }
     return nm.fn[idx];
 }
+
+#ifdef NM_ENGINE_OWNER
+#define NM_OWNER 1
+#else
+/* Without the context layer nothing is owned; these make the routing below compile away. */
+#define NM_OWNER 0
+static inline int nm_own_active(void) { return 0; }
+static inline int nm_own_is_context(const void *c) { (void)c; return 0; }
+static inline long nm_own_set_integer(void *c, int p, const void *v) { (void)c; (void)p; (void)v; return 0; }
+static inline long nm_own_get_integer(void *c, int p, void *v) { (void)c; (void)p; (void)v; return 0; }
+static inline long nm_own_attach_drawable(void *c, int t, const void *d, int s, int o) { (void)c; (void)t; (void)d; (void)s; (void)o; return 0; }
+#endif
 
 /* ---- entry points with a measured signature ------------------------------------------------------------- */
 
@@ -190,7 +215,14 @@ static inline nm_fn8 nm_apple(int idx)
 NM_EXPORT int gliGetVersion(int *major, int *minor, int *engine_id)
 {
     nm_fn8 f = nm_apple(NM_IDX_gliGetVersion);
-    if (!f) return 0;
+    if (!f) {
+        /* no original engine: an engine in its own right only when the context layer serves requests */
+        if (!nm_own_active()) return 0;
+        if (major) *major = NM_GLI_VERSION_MAJOR;
+        if (minor) *minor = NM_GLI_VERSION_MINOR;
+        if (engine_id) *engine_id = 0x6e6d;
+        return 1;
+    }
     int r = (int)(f((intptr_t)major, (intptr_t)minor, (intptr_t)engine_id, 0, 0, 0, 0, 0) & 0xff);
     nm_log("gliGetVersion -> %d major=%d minor=%d id=0x%x", r, major ? *major : -1, minor ? *minor : -1,
            engine_id ? (unsigned)*engine_id : 0u);
@@ -213,6 +245,11 @@ static void nm_log_param(const char *who, intptr_t ctx, int pname, const void *v
 /* (context, parameter, pointer). OWNED later: 910, 997, 998, 999 on a context of ours. */
 NM_EXPORT intptr_t gliSetInteger(intptr_t ctx, int pname, const void *value)
 {
+    if (nm_own_is_context((void *)ctx)) {
+        intptr_t o = nm_own_set_integer((void *)ctx, pname, value);
+        nm_log_param("gliSetInteger (own)", ctx, pname, value, o, 1);
+        return o;
+    }
     nm_fn8 f = nm_apple(NM_IDX_gliSetInteger);
     if (!f) return 10004; /* the framework's "invalid context" code: there is no engine to hold one */
     intptr_t r = f(ctx, pname, (intptr_t)value, 0, 0, 0, 0, 0);
@@ -223,6 +260,12 @@ NM_EXPORT intptr_t gliSetInteger(intptr_t ctx, int pname, const void *value)
 /* (context, parameter, pointer). The window server's first call is (NULL, 224, &size). */
 NM_EXPORT intptr_t gliGetInteger(intptr_t ctx, int pname, void *value)
 {
+    /* the table-size query comes with a null context; when the context layer serves requests the size is ours */
+    if (nm_own_is_context((void *)ctx) || (nm_own_active() && !ctx && pname == NM_CP_DISPATCH_TABLE_SIZE)) {
+        intptr_t o = nm_own_get_integer((void *)ctx, pname, value);
+        nm_log_param("gliGetInteger (own)", ctx, pname, value, o, 1);
+        return o;
+    }
     nm_fn8 f = nm_apple(NM_IDX_gliGetInteger);
     if (!f) return 10004;
     intptr_t r = f(ctx, pname, (intptr_t)value, 0, 0, 0, 0, 0);
@@ -233,6 +276,11 @@ NM_EXPORT intptr_t gliGetInteger(intptr_t ctx, int pname, void *value)
 /* (context, type, descriptor, virtual screen, options). OWNED later: a context of ours attached to a surface. */
 NM_EXPORT intptr_t gliAttachDrawableWithOptions(intptr_t ctx, int type, const void *desc, int screen, int options)
 {
+    if (nm_own_is_context((void *)ctx)) {
+        intptr_t o = nm_own_attach_drawable((void *)ctx, type, desc, screen, options);
+        nm_log("gliAttachDrawableWithOptions (own) ctx=%p type=0x%x -> %ld", (void *)ctx, type, (long)o);
+        return o;
+    }
     nm_fn8 f = nm_apple(NM_IDX_gliAttachDrawableWithOptions);
     if (!f) return 10004;
     if (nm_recording()) {
@@ -267,17 +315,93 @@ NM_EXPORT intptr_t gliAttachDrawable(intptr_t ctx, int type, const void *desc, i
         return r;                                                                                          \
     }
 
-NM_FORWARD(gliInitializeLibrary)       /* seven arguments at the framework's call site */
 NM_FORWARD(gliTerminateLibrary)
-NM_FORWARD(gliQueryRendererInfo)       /* OWNED later: our renderer's records are appended to the object */
-NM_FORWARD(gliDestroyRendererInfo)
-NM_FORWARD(gliChoosePixelFormat)       /* OWNED later: a request that selects our renderer */
-NM_FORWARD(gliDestroyPixelFormat)
-NM_FORWARD(gliCreateContext)
 NM_FORWARD(gliCreateContextWithShared)
-NM_FORWARD(gliDestroyContext)
 NM_FORWARD(gliGetAttribute)
 NM_FORWARD(gliSetAttribute)
 NM_FORWARD(gliCopyAttributes)
 NM_FORWARD(gliGetMemoryAnnotationList) /* 10.9 and later; absent from the 10.7 and 10.8 engines */
 NM_FORWARD(gliSwapBuffers)             /* resolved by the 10.7 window server only */
+
+/* ---- entries the context layer can serve ---------------------------------------------------------------- */
+#if NM_OWNER
+
+/* Seven arguments at the framework's call site; the first three are the display services, their framebuffer
+ * indices and the count. The context layer looks at them first, then the original engine is initialised too. */
+NM_EXPORT intptr_t gliInitializeLibrary(intptr_t a0, intptr_t a1, intptr_t a2, intptr_t a3, intptr_t a4, intptr_t a5,
+                                        intptr_t a6, intptr_t a7)
+{
+    nm_own_library_init((const uint32_t *)a0, (const uint8_t *)a1, (unsigned)a2);
+    nm_fn8 f = nm_apple(NM_IDX_gliInitializeLibrary);
+    intptr_t r = f ? f(a0, a1, a2, a3, a4, a5, a6, a7) : 0;
+    nm_log("gliInitializeLibrary(count %u) -> %p%s", (unsigned)a2, (void *)r, f ? "" : " (no original engine)");
+    return r;
+}
+
+/* The engine's objects are linked lists of nodes. A node of ours goes first and points at the original engine's
+ * list, so a caller that walks the list sees both and a caller that takes the first node gets ours. */
+NM_EXPORT intptr_t gliQueryRendererInfo(void **out, unsigned display_mask)
+{
+    if (!out) return 10008;
+    *out = NULL;
+    nm_fn8 f = nm_apple(NM_IDX_gliQueryRendererInfo);
+    intptr_t r = f ? f((intptr_t)out, display_mask, 0, 0, 0, 0, 0, 0) : 10003;
+    void **mine = nm_own_renderer_info(display_mask);
+    if (mine) { *mine = (r == 0) ? *out : NULL; *out = mine; r = 0; }
+    nm_log("gliQueryRendererInfo(mask 0x%x) -> %ld, first node %s", display_mask, (long)r, mine ? "ours" : "the original engine's");
+    return r;
+}
+
+NM_EXPORT intptr_t gliChoosePixelFormat(void **out, const void *attributes)
+{
+    if (!out) return 10008;
+    *out = NULL;
+    nm_fn8 f = nm_apple(NM_IDX_gliChoosePixelFormat);
+    intptr_t r = f ? f((intptr_t)out, (intptr_t)attributes, 0, 0, 0, 0, 0, 0) : 10002;
+    void **mine = nm_own_pixel_format(attributes);
+    if (mine) { *mine = (r == 0) ? *out : NULL; *out = mine; r = 0; }
+    nm_log("gliChoosePixelFormat -> %ld, first node %s", (long)r, mine ? "ours" : "the original engine's");
+    return r;
+}
+
+static intptr_t nm_destroy_list(void *node, int idx, int (*is_ours)(const void *))
+{
+    void *rest = node;
+    if (is_ours(node)) { rest = *(void **)node; nm_own_free_node(node); }
+    if (!rest) return 0;
+    nm_fn8 f = nm_apple(idx);
+    return f ? f((intptr_t)rest, 0, 0, 0, 0, 0, 0, 0) : 0;
+}
+NM_EXPORT intptr_t gliDestroyRendererInfo(void *node) { return nm_destroy_list(node, NM_IDX_gliDestroyRendererInfo, nm_own_is_renderer_info); }
+NM_EXPORT intptr_t gliDestroyPixelFormat(void *node)  { return nm_destroy_list(node, NM_IDX_gliDestroyPixelFormat, nm_own_is_pixel_format); }
+
+/* (out context, pixel format, share, table, second table, flags), as the 10.11.6 window server calls it. A pixel
+ * format of ours makes a context of ours; any other goes to the engine that made it. */
+NM_EXPORT intptr_t gliCreateContext(void **rend_out, const void *pixel_format, void *share, void *table, void *dummy_table, intptr_t flags)
+{
+    if (nm_own_is_pixel_format(pixel_format)) {
+        intptr_t o = nm_own_create_context(rend_out, pixel_format, share, table, dummy_table, flags);
+        nm_log("gliCreateContext (own) -> %ld", (long)o);
+        return o;
+    }
+    nm_fn8 f = nm_apple(NM_IDX_gliCreateContext);
+    if (!f) return 10002;
+    return f((intptr_t)rend_out, (intptr_t)pixel_format, (intptr_t)share, (intptr_t)table, (intptr_t)dummy_table, flags, 0, 0);
+}
+
+NM_EXPORT intptr_t gliDestroyContext(void *rend)
+{
+    if (nm_own_is_context(rend)) return nm_own_destroy_context(rend);
+    nm_fn8 f = nm_apple(NM_IDX_gliDestroyContext);
+    return f ? f((intptr_t)rend, 0, 0, 0, 0, 0, 0, 0) : 10004;
+}
+
+#else
+NM_FORWARD(gliInitializeLibrary)       /* seven arguments at the framework's call site */
+NM_FORWARD(gliQueryRendererInfo)
+NM_FORWARD(gliDestroyRendererInfo)
+NM_FORWARD(gliChoosePixelFormat)
+NM_FORWARD(gliDestroyPixelFormat)
+NM_FORWARD(gliCreateContext)
+NM_FORWARD(gliDestroyContext)
+#endif

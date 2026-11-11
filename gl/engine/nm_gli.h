@@ -193,6 +193,39 @@ typedef struct {
     nm_pixel_format_record record[];
 } nm_pixel_format;
 
+/*
+ * The two objects above are the FRAMEWORK's own (what CGL keeps and describes to applications). What an engine
+ * returns is one level down and was read from the 10.11.6 window server, which walks the engine's objects itself,
+ * and from Apple's engine: a singly linked list of nodes, each a pointer to the next node followed by the same
+ * record. So every field sits 8 bytes lower than in the framework's object (64-bit layout): the window server
+ * reads renderer id at 0x8, flags at 0xc, colour mode at 0x14, depth at 0x1c, stencil at 0x20, aux buffers at
+ * 0x26 and display mask at 0x34 of a pixel-format node, and colour modes at 0x14 and video memory at 0x4c of a
+ * renderer-info node. It copies 0x38 bytes of a pixel-format node. Engine entry points:
+ *     int gliChoosePixelFormat(nm_pixel_format_node **out, const void *attributes);   0 on success
+ *     int gliQueryRendererInfo(nm_renderer_node **out, unsigned display_mask);        0 on success
+ */
+typedef struct nm_renderer_node {
+    struct nm_renderer_node *next;
+    nm_renderer_record rec;
+} nm_renderer_node;
+typedef struct nm_pixel_format_node {
+    struct nm_pixel_format_node *next;
+    nm_pixel_format_record rec;
+} nm_pixel_format_node;
+#if defined(__LP64__)
+_Static_assert(offsetof(nm_pixel_format_node, rec.renderer_id) == 0x8 && offsetof(nm_pixel_format_node, rec.flags) == 0xc &&
+               offsetof(nm_pixel_format_node, rec.color_mode) == 0x14 && offsetof(nm_pixel_format_node, rec.depth_mode) == 0x1c &&
+               offsetof(nm_pixel_format_node, rec.stencil_mode) == 0x20 && offsetof(nm_pixel_format_node, rec.aux_buffers) == 0x26 &&
+               offsetof(nm_pixel_format_node, rec.display_mask) == 0x34, "pixel-format node as the window server reads it");
+_Static_assert(offsetof(nm_renderer_node, rec.color_modes) == 0x14 && offsetof(nm_renderer_node, rec.video_memory_mb) == 0x4c,
+               "renderer-info node as the window server reads it");
+#endif
+
+/* Mode bits (public, OpenGL/CGLRenderers.h) used when filling the records. */
+enum { NM_BUF_MONOSCOPIC = 0x1, NM_BUF_SINGLE = 0x4, NM_BUF_DOUBLE = 0x8 };
+enum { NM_BITS_0 = 0x1, NM_BITS_24 = 0x1000, NM_BITS_32 = 0x4000 };            /* depth and stencil sizes */
+enum { NM_COLOR_RGB888 = 0x4000, NM_COLOR_ARGB8888 = 0x8000 };
+
 /* The framework reads each field at (16 + offset) + index * record size; these are those numbers. */
 _Static_assert(sizeof(nm_renderer_record) == 0x90, "renderer record is 144 bytes");
 _Static_assert(offsetof(nm_renderer_info, record) == 0x10, "records start after a 16-byte header");
