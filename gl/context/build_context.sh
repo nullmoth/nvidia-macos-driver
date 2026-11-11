@@ -15,11 +15,12 @@
 # The 10.11 SDK held by the build host has headers but no link libraries, so the link uses the current SDK's
 # libraries at deployment target 10.11 and step 4 is what ties the result to 10.11.6.
 set -uo pipefail
-FW=${1:?}; MB=${2:?}; OUT=${3:?}; shift 3; H=$(cd "$(dirname "$0")" && pwd); G=$(dirname "$H"); mkdir -p "$OUT"; fail=0
+GLH=${1:?OpenGL headers of the release}; IOSH=${2:?IOSurface headers}; MB=${3:?}; OUT=${4:?}; REL=${5:?release, e.g. 10.11}; TGT=${6:?deployment target}; SLOTS=${7:?table slots of the release}; shift 7; H=$(cd "$(dirname "$0")" && pwd); G=$(dirname "$H"); mkdir -p "$OUT"; fail=0
 ERR='^[^ ]+:[0-9]+:[0-9]+: (fatal )?error:'
 MS=$(cd "$MB/.." && pwd)   # Mesa source root: the build dir sits inside it
 nm -arch x86_64 -g "$MB/src/mesa/glapi/shared-glapi/libglapi.a" | grep ' T __dispatch_stub_' > "$OUT/mesa-stubs.txt"
-python3 "$G/glue/gen_dispatch.py" "$FW/OpenGL.framework/Versions/A/Headers/gliDispatch.h" "$OUT/mesa-stubs.txt" "$OUT/nm_dispatch.c" "$OUT/dispatch.report.txt" || fail=1
+python3 "$G/glue/gen_dispatch.py" "$GLH/gliDispatch.h" "$OUT/mesa-stubs.txt" "$OUT/nm_dispatch.c" "$OUT/dispatch.report.txt" || fail=1
+[ "$SLOTS" = auto ] && SLOTS=$(sed -n 's/^table entries \([0-9]*\).*/\1/p' "$OUT/dispatch.report.txt" | head -1)
 # Mesa's compile flags for a gallium source, from its own build description
 python3 - "$MB" > "$OUT/mesa.flags" <<'PY'
 import json, shlex, sys, os
@@ -34,8 +35,8 @@ print(" ".join(shlex.quote(x) for x in out))
 PY
 # the 10.11 headers are reached as <OpenGL/...> and <IOSurface/...> through a private include root (the unpacked
 # frameworks have no top-level Headers link, so they cannot be used with -F)
-mkdir -p "$OUT/inc"; for fw in OpenGL IOSurface; do ln -sfn "$FW/$fw.framework/Versions/A/Headers" "$OUT/inc/$fw"; done
-A="-arch x86_64 -mmacosx-version-min=10.11"
+mkdir -p "$OUT/inc"; ln -sfn "$GLH" "$OUT/inc/OpenGL"; ln -sfn "$IOSH" "$OUT/inc/IOSurface"
+A="-arch x86_64 -mmacosx-version-min=$TGT"
 W="-Wall -Wextra -Werror -Wno-deprecated-declarations -fvisibility=hidden -O2"
 cc_apple() { clang $A -std=c11 $W -I"$OUT/inc" -I"$G/glue" "$@"; }
 obj() { # <name> <log> <command...>
@@ -55,7 +56,7 @@ done
 LIBS=$(find "$MB/src" -name '*.a' | grep -v '/drivers/zink/' | sort | tr '\n' ' ')
 echo "Mesa static libraries linked: $(echo $LIBS | wc -w | xargs)"
 # only the engine entry points leave the bundle (Mesa's own symbols stay inside); the test build adds its two hooks
-sed 's/^/_/' "$G/names/gli-framework-10.11.txt" > "$OUT/exports-product.txt"; echo _gliSwapBuffers >> "$OUT/exports-product.txt"
+(sed 's/^/_/' "$G/names/gli-framework-$REL.txt"; echo _gliSwapBuffers; echo _gliCreateContextWithShared; echo _gliGetMemoryAnnotationList) | sort -u > "$OUT/exports-product.txt"
 (cat "$OUT/exports-product.txt"; echo _nm_test_own_software; echo _nm_test_register_surface) > "$OUT/exports-test.txt"
 for v in product test; do
   clang++ $A -bundle -Wl,-exported_symbols_list,"$OUT/exports-$v.txt" -o "$OUT/GLEngine-$v" "$OUT/nm_engine-$v.o" "$OUT/nm_context-$v.o" "$OUT/nm_dispatch.o" "$OUT/nm_apple_ext.o" "$OUT/nm_mesa.o" "$OUT/nm_compat.o" \
@@ -66,7 +67,7 @@ done
 [ $fail = 0 ] || { echo "result: FAIL"; exit 1; }
 P=$OUT/GLEngine-product; T=$OUT/GLEngine-test
 nm -arch x86_64 -gU "$P" | awk '{print $NF}' | sed 's/^_//' | sort > "$OUT/product.exports"
-for f in "$G/names/gli-framework-10.11.txt" "$G/names/gli-windowserver-10.11.txt"; do
+for f in "$G/names/gli-framework-$REL.txt" "$G/names/gli-windowserver-$REL.txt"; do
   miss=$(comm -23 <(sort "$f") "$OUT/product.exports" | xargs)
   echo "product exports against $(basename "$f" .txt): $(wc -l < "$f" | xargs) names required, missing $(echo $miss | wc -w | xargs) $miss"; [ -z "$miss" ] || fail=1
 done
@@ -74,11 +75,11 @@ extra=$(grep -cvE '^gli' "$OUT/product.exports"); echo "product exports that are
 n=$(strings -a "$P" | grep -cE 'NM_GL_LOG|NM_GL_APPLE_ENGINE'); h=$(nm -arch x86_64 "$P" | grep -cE 'nm_test_'); ht=$(nm -arch x86_64 "$T" | grep -cE 'nm_test_')
 echo "product bundle: test variable names $n, test hooks $h (control, test bundle: $ht hooks)"; [ "$n" = 0 ] && [ "$h" = 0 ] && [ "$ht" -ge 2 ] || fail=1
 if [ $# -gt 0 ]; then
-  python3 "$G/tools/usersym.py" "$P" "the given 10.11.6 libraries" "$@" | tee "$OUT/imports.txt" | cut -c1-160; grep -q "missing 0$" "$OUT/imports.txt" || fail=1
+  python3 "$G/tools/usersym.py" "$P" "the libraries of $REL" "$@" | tee "$OUT/imports.txt" | cut -c1-160; grep -q "missing 0$" "$OUT/imports.txt" || fail=1
   # weak imports count too: a weak symbol the release lacks is a null pointer at the call
   wm=$(grep -E 'weak +[0-9]+ missing +[1-9]' "$OUT/imports.txt" | wc -l | xargs); echo "libraries with a weak import the release lacks: $wm"; [ "$wm" = 0 ] || fail=1
 fi
 clang -arch x86_64 -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations -Wno-four-char-constants -I"$OUT/inc" -o "$OUT/context_test" "$H/test/context_test.c" \
   -framework IOSurface -framework CoreFoundation > "$OUT/context_test.build.log" 2>&1 || { fail=1; head -12 "$OUT/context_test.build.log" | cut -c1-220; }
-[ -x "$OUT/context_test" ] && { "$OUT/context_test" "$T" 2> "$OUT/context_test.stderr" | tee "$OUT/context_test.out"; rc=${PIPESTATUS[0]}; [ $rc = 0 ] || { fail=1; echo "context_test exit $rc"; tail -5 "$OUT/context_test.stderr"; }; }
+[ -x "$OUT/context_test" ] && { "$OUT/context_test" "$T" "$SLOTS" 2> "$OUT/context_test.stderr" | tee "$OUT/context_test.out"; rc=${PIPESTATUS[0]}; [ $rc = 0 ] || { fail=1; echo "context_test exit $rc"; tail -5 "$OUT/context_test.stderr"; }; }
 echo "result: $([ $fail = 0 ] && echo PASS || echo FAIL)"; exit $fail

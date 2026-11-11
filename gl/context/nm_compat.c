@@ -74,3 +74,59 @@ FILE *open_memstream(char **bufp, size_t *sizep)
     if (!f) { free(m->buf); free(m); return NULL; }
     return f;
 }
+
+/*
+ * Releases before 10.10 also lack the directory-relative file calls, and releases before 10.12 mkostemp. Mesa
+ * uses them for its on-disk shader cache only. Each is rebuilt from the older call: a directory descriptor is
+ * turned into its path with F_GETPATH.
+ */
+#include <fcntl.h>
+#include <limits.h>
+#include <stdarg.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static int nm_at_path(int dirfd, const char *path, char *out)
+{
+    if (!path) { errno = EFAULT; return -1; }
+    if (path[0] == '/' || dirfd == AT_FDCWD) {
+        if (strlen(path) >= PATH_MAX) { errno = ENAMETOOLONG; return -1; }
+        strcpy(out, path);
+        return 0;
+    }
+    char dir[PATH_MAX];
+    if (fcntl(dirfd, F_GETPATH, dir) != 0) return -1;
+    if (strlen(dir) + 1 + strlen(path) >= PATH_MAX) { errno = ENAMETOOLONG; return -1; }
+    snprintf(out, PATH_MAX, "%s/%s", dir, path);
+    return 0;
+}
+
+int openat(int dirfd, const char *path, int flags, ...)
+{
+    char full[PATH_MAX];
+    mode_t mode = 0;
+    if (flags & O_CREAT) { va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap); }
+    if (nm_at_path(dirfd, path, full) != 0) return -1;
+    return open(full, flags, mode);
+}
+
+int unlinkat(int dirfd, const char *path, int flags)
+{
+    char full[PATH_MAX];
+    if (nm_at_path(dirfd, path, full) != 0) return -1;
+    return (flags & AT_REMOVEDIR) ? rmdir(full) : unlink(full);
+}
+
+int fstatat(int dirfd, const char *path, struct stat *st, int flags)
+{
+    char full[PATH_MAX];
+    if (nm_at_path(dirfd, path, full) != 0) return -1;
+    return (flags & AT_SYMLINK_NOFOLLOW) ? lstat(full, st) : stat(full, st);
+}
+
+int mkostemp(char *tmpl, int flags)
+{
+    int fd = mkstemp(tmpl);
+    if (fd >= 0 && (flags & O_CLOEXEC)) (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+    return fd;
+}
