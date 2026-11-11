@@ -19,16 +19,21 @@
 #define GL_CONDITION_SATISFIED            0x911C
 #define GL_SYNC_FLUSH_COMMANDS_BIT        0x00000001
 
+/* The sync-object types under our own names: the OpenGL headers of 10.6 do not declare them (sync objects came
+ * with a later OpenGL version), and these are the same pointer and 64-bit integer every later header declares. */
+typedef struct nm_gl_sync_object *nm_glsync;
+typedef unsigned long long nm_gluint64;
+
 /* Mesa's API-layer entry stubs (they act on the thread's current Mesa context). */
 extern void _dispatch_stub_Flush(void);
 extern void _dispatch_stub_Finish(void);
-extern GLsync _dispatch_stub_FenceSync(GLenum condition, GLbitfield flags);
-extern GLenum _dispatch_stub_ClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 wait_ns);
-extern void _dispatch_stub_DeleteSync(GLsync sync);
+extern nm_glsync _dispatch_stub_FenceSync(GLenum condition, GLbitfield flags);
+extern GLenum _dispatch_stub_ClientWaitSync(nm_glsync sync, GLbitfield flags, nm_gluint64 wait_ns);
+extern void _dispatch_stub_DeleteSync(nm_glsync sync);
 
 /* 1,024 live fences is far above what any caller read so far keeps (the window server keeps one per display). */
 #define NM_MAX_FENCES 1024
-static struct { unsigned char used; GLsync sync; } nm_fence[NM_MAX_FENCES];
+static struct { unsigned char used; nm_glsync sync; } nm_fence[NM_MAX_FENCES];
 static pthread_mutex_t nm_fence_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void nm_apple_flush_render_APPLE(GLIContext ctx)  { nm_gl_enter(ctx); _dispatch_stub_Flush(); }
@@ -56,7 +61,7 @@ void nm_apple_delete_fences_APPLE(GLIContext ctx, GLsizei n, const GLuint *fence
         GLuint f = fences[k];
         if (f == 0 || f >= NM_MAX_FENCES) continue;
         pthread_mutex_lock(&nm_fence_lock);
-        GLsync s = nm_fence[f].used ? nm_fence[f].sync : NULL;
+        nm_glsync s = nm_fence[f].used ? nm_fence[f].sync : NULL;
         nm_fence[f].used = 0; nm_fence[f].sync = NULL;
         pthread_mutex_unlock(&nm_fence_lock);
         if (s) _dispatch_stub_DeleteSync(s);
@@ -77,20 +82,20 @@ void nm_apple_set_fence_APPLE(GLIContext ctx, GLuint fence)
 {
     if (!nm_apple_is_fence_APPLE(ctx, fence)) { nm_gl_refuse(ctx, "set_fence_APPLE: not a fence"); return; }
     nm_gl_enter(ctx);
-    GLsync s = _dispatch_stub_FenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    nm_glsync s = _dispatch_stub_FenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     pthread_mutex_lock(&nm_fence_lock);
-    GLsync old = nm_fence[fence].sync;
+    nm_glsync old = nm_fence[fence].sync;
     nm_fence[fence].sync = s;
     pthread_mutex_unlock(&nm_fence_lock);
     if (old) _dispatch_stub_DeleteSync(old);
 }
 
 /* A wait of 0 tests, a long wait finishes. A fence that was never set counts as passed, as the extension says. */
-static GLboolean nm_fence_wait(GLIContext ctx, GLuint fence, GLuint64 wait_ns)
+static GLboolean nm_fence_wait(GLIContext ctx, GLuint fence, nm_gluint64 wait_ns)
 {
     if (fence == 0 || fence >= NM_MAX_FENCES) return 1;
     pthread_mutex_lock(&nm_fence_lock);
-    GLsync s = nm_fence[fence].used ? nm_fence[fence].sync : NULL;
+    nm_glsync s = nm_fence[fence].used ? nm_fence[fence].sync : NULL;
     pthread_mutex_unlock(&nm_fence_lock);
     if (!s) return 1;
     nm_gl_enter(ctx);

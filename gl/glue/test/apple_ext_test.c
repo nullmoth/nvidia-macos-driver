@@ -10,9 +10,9 @@ void nm_gl_enter(GLIContext c) { (void)c; enters++; }
 void nm_gl_refuse(GLIContext c, const char *e) { (void)c; (void)e; refusals++; }
 void _dispatch_stub_Flush(void) { flushes++; }
 void _dispatch_stub_Finish(void) { finishes++; }
-GLsync _dispatch_stub_FenceSync(GLenum c, GLbitfield f) { (void)c; (void)f; return (GLsync)(long)(0x1000 + ++syncs_made); }
-GLenum _dispatch_stub_ClientWaitSync(GLsync s, GLbitfield f, GLuint64 t) { (void)s; (void)f; (void)t; return signalled ? 0x911A : 0x911B; }
-void _dispatch_stub_DeleteSync(GLsync s) { (void)s; syncs_deleted++; }
+void *_dispatch_stub_FenceSync(GLenum c, GLbitfield f) { (void)c; (void)f; return (void *)(long)(0x1000 + ++syncs_made); }
+GLenum _dispatch_stub_ClientWaitSync(void *s, GLbitfield f, unsigned long long t) { (void)s; (void)f; (void)t; return signalled ? 0x911A : 0x911B; }
+void _dispatch_stub_DeleteSync(void *s) { (void)s; syncs_deleted++; }
 
 void nm_apple_flush_render_APPLE(GLIContext);
 void nm_apple_gen_fences_APPLE(GLIContext, GLsizei, GLuint *);
