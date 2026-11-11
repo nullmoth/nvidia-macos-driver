@@ -247,6 +247,9 @@ for d in ("iofam", "re"):
             extra = sorted(x for x in fwd if x not in known and not x.startswith(("IOAccelSurface", "IOAccelDisplayPipe", "IOAccelDisplayMachine")) and x not in ("OSSet", "OSObject", "IOService", "IOFramebuffer", "IOMemoryDescriptor", "task", "IOUserClient", "OSDictionary", "OSArray", "IOInterruptEventSource", "OSString", "OSSymbol", "IOWorkLoop", "IOPCIDevice", "IOSurface", "IOTimerEventSource", "IOCommandGate", "OSData", "IOMemoryMap", "IOExternalMethodArguments", "IOExternalMethodDispatch", "OSNumber", "IORegistryEntry"))
             # the stereo mode is a named enum in Apple's signatures, so it must be one here for the names to match
             t = t.replace("typedef unsigned int IOAccelStereoMode;", "enum IOAccelStereoMode : unsigned int { kIOAccelStereoModeNone = 0 };")
+            # same for the swap request: these releases name the enum in the method's signature
+            assert "typedef unsigned int eDoSwap;" in t, "swap request type not found in the shared types header"
+            t = t.replace("typedef unsigned int eDoSwap;", "enum eDoSwap : unsigned int { kDoSwapNone = 0 };")
             t += "\n// names only this release's tables use\n" + "".join(f"class {x};\n" for x in extra) + "class IOAccelSurface2;\nclass IOAccelDisplayPipe2;\nclass IOAccelDisplayMachine2;\n"
         open(os.path.join(out, p), "w").write(t); written += 1
 print(f"era {era}: {written} headers written to {out}")
