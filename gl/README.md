@@ -1,7 +1,10 @@
 # OpenGL for the releases that composite through OpenGL (10.6 to 10.13)
 
-Status: under construction. The engine renders through Mesa's CPU rasteriser in host tests; the Vulkan backend and
-the kernel accelerator's bodies are not written, and nothing here is part of a package.
+Status: built and checked offline for 10.6 to 10.13; never run on a GPU or on any of those releases. The engine
+carries Mesa's state tracker with zink linked in and the Vulkan driver beside it, both import-checked against each
+release's own libraries; host tests render through the CPU rasteriser only. The accelerator's two card-facing hooks
+(video-memory surfaces, present into the scanout) go through the framebuffer kext's platform functions and are
+compiled and symbol-checked per release; its personality cannot match hardware. Nothing here is part of a package.
 
 ## What is in this folder
 
@@ -20,7 +23,9 @@ the kernel accelerator's bodies are not written, and nothing here is part of a p
 | `glue/build_glue.sh` | generates, compiles and link-checks the table for a release and runs the extension tests |
 | `mesa/patch_zink_no_moltenvk.py`, `mesa/zink-no-moltenvk.patch` | lets zink build on this platform without the MoltenVK headers (script and the resulting diff) |
 | `kext/nm_accel_contract.h` | the kernel accelerator's user-client contract: argument shapes of the 18 public surface methods and our private client |
-| `kext/NMLegacyAccel.cpp` | accelerator with memory-backed surfaces: the public surface client and our private client; its personality cannot match hardware |
+| `kext/NMLegacyAccel.cpp` | accelerator: the public surface client, our private client, surfaces in system or video memory, present into the framebuffer kext's scanout; its personality cannot match hardware |
+| `kext/nm_present.h`, `kext/test/present_test.c` | the bounds-checked copy of a surface into a scanout, and its host test with a no-clipping control |
+| `mesa/build_nvk_floor.sh` | builds the Vulkan driver for a deployment floor (10.6, 10.7, 10.11); at 10.6 with a Rust standard library rebuilt without thread-local storage |
 | `kext/build_kext.sh` | builds the accelerator against the kernel headers of 10.6 to 10.13 and checks its imports against each release's kernel |
 | `context/nm_mesa.c` | gallium front end: pipe screen (CPU rasteriser or zink), contexts on Mesa's state tracker, the framebuffer that is copied to caller memory on flush |
 | `context/nm_context.c` | the engine contract served by this bundle: renderer-info and pixel-format nodes, contexts, drawables, parameters 910 / 997 / 999, with a named software stand-in for kernel surfaces in test builds |
