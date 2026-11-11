@@ -26,6 +26,8 @@
 			<string>NMLegacyAccelerator</string>
 			<key>IOMatchCategory</key>
 			<string>IOAccelerator</string>
+			<key>NMGPUSurfaces</key>
+			<false/>
 			<key>IOProviderClass</key>
 			<string>NMLegacyAccelStubNeverMatches</string>
 		</dict>
