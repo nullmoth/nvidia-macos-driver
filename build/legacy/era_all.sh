@@ -7,6 +7,8 @@ export SRC=${SRC:-$B/legacy-src/kexts} OGKM=${OGKM:?set OGKM to the patched open
 while read era mv kit tag khdr; do
   [ -n "$ONLY" ] && [ "$ONLY" != "$mv" ] && continue
   rm -rf "$B/out/$mv"; echo "=================== macOS $mv"
+  # headers regenerated for this release from its own tables (gen_era_headers.py), when they exist
+  if [ -d "$B/gen-$era" ]; then export ACCEL_HDR="$B/gen-$era"; else unset ACCEL_HDR; fi
   bash "$H/era_kexts.sh" $era $mv "$S/$khdr" "$B/out/$mv" 2>&1 | cut -c1-200
   python3 "$H/era_symcheck.py" "$B/out/$mv" "$B/kdk/$kit" "$tag" 2>&1 | cut -c1-140
 done <<LIST

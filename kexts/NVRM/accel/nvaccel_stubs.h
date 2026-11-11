@@ -103,8 +103,19 @@ class NVSurface : public IOAccelLegacySurface {
     OSDeclareDefaultStructors(NVSurface)
     NM_TAHOE_FWD(NVSurface)
 public:
+#if defined(NM_ERA) && NM_ERA < 1015
+    // macOS 10.13 and 10.14: one surface class, with these two where the newer family has the sync command and a pad.
+    // canTmpAlloc answers 1, as Apple's own NVIDIA surface does on these releases.
+    void submitSwapFlush(IOAccelEvent* a0, IOAccelResource2* a1, IOAccelResource2* a2, IOAccelSwapFlushRec const* a3, unsigned int a4, unsigned int a5, unsigned int a6, IOAccelBounds const* a7) APPLE_KEXT_OVERRIDE { ALOG("NVSurface::submitSwapFlush"); }
+    bool canTmpAlloc(unsigned int a0) APPLE_KEXT_OVERRIDE { return true; }
+    // The family keeps these two to itself on these releases (not exported), so a vendor surface supplies its own,
+    // as every Apple vendor driver of the time does.
+    void submitCopyForward(IOAccelEvent* a0, unsigned int a1, IOAccelResource2* a2, IOAccelResource2* a3, IOAccelBounds const* a4, unsigned int a5) APPLE_KEXT_OVERRIDE { ALOG("NVSurface::submitCopyForward"); }
+    void submitUpdate(unsigned int a0, IOAccelBounds* a1, unsigned int a2) APPLE_KEXT_OVERRIDE { ALOG("NVSurface::submitUpdate"); }
+#else
     void setSyncCommand(unsigned int* a0, unsigned int& a1, unsigned int& a2, _AMDSurfaceSwapSyncOptions const& a3) const APPLE_KEXT_OVERRIDE { ALOG("NVSurface::setSyncCommand"); }
     void _pure335() APPLE_KEXT_OVERRIDE { ALOG("NVSurface::_pure335"); }
+#endif
     bool copyFromBuffer(int a0, int a1, int a2, int a3, unsigned int a4, unsigned int a5, IOAccelEvent* a6, IOAccelResource2* a7, IOAccelSysMemory* a8, unsigned int a9, unsigned long long a10, unsigned int a11) APPLE_KEXT_OVERRIDE { ALOG("NVSurface::copyFromBuffer"); return false; }
     bool copyToBuffer(int a0, int a1, int a2, int a3, unsigned int a4, unsigned int a5, IOAccelEvent* a6, IOAccelResource2* a7, IOAccelSysMemory* a8, unsigned int a9, unsigned long long a10, unsigned int a11) APPLE_KEXT_OVERRIDE { ALOG("NVSurface::copyToBuffer"); return false; }
     void submitSwapCopy(IOAccelEvent* a0, IOAccelResource2* a1, IOAccelResource2* a2) APPLE_KEXT_OVERRIDE {
@@ -163,18 +174,31 @@ class NVGLContext : public IOAccelGLContext2 {
     OSDeclareDefaultStructors(NVGLContext)
     NM_TAHOE_FWD(NVGLContext)
 public:
+#if defined(NM_ERA) && NM_ERA < 1015
+    // the same four pure slots, under the names the 10.14 vendor drivers give them
+    void addDrawableToChannel(IOAccelDrawable2* a0) APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::addDrawableToChannel"); }
+    void removeDrawableFromChannel(IOAccelDrawable2* a0) APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::removeDrawableFromChannel"); }
+    void setCompatibleSurfaceMode(unsigned long long* a0, unsigned long long a1, int a2) APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::setCompatibleSurfaceMode"); }
+    void get_temp_allocation_info(IOAccelDrawable2* a0, unsigned int* a1, unsigned int* a2) APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::get_temp_allocation_info"); }
+#else
     void _pure362() APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::_pure362"); }
     void _pure363() APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::_pure363"); }
     void _pure364() APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::_pure364"); }
     void _pure367() APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::_pure367"); }
+#endif
 };
 OSDefineMetaClassAndStructors(NVGLContext, IOAccelGLContext2)
 class NV2DContext : public IOAccel2DContext2 {
     OSDeclareDefaultStructors(NV2DContext)
     NM_TAHOE_FWD(NV2DContext)
 public:
+#if defined(NM_ERA) && NM_ERA < 1015
+    void blitCopy(IOAccelEvent* a0, IOAccelResource2* a1, IOAccelResource2* a2, IOAccel2DBlitRectStruc* a3, unsigned int a4) APPLE_KEXT_OVERRIDE { ALOG("NV2DContext::blitCopy"); }
+    void blitFill(IOAccelEvent* a0, unsigned int a1, IOAccelResource2* a2, IOAccel2DBlitRectStruc* a3, unsigned int a4) APPLE_KEXT_OVERRIDE { ALOG("NV2DContext::blitFill"); }
+#else
     void _pure362() APPLE_KEXT_OVERRIDE { ALOG("NV2DContext::_pure362"); }
     void _pure363() APPLE_KEXT_OVERRIDE { ALOG("NV2DContext::_pure363"); }
+#endif
 };
 OSDefineMetaClassAndStructors(NV2DContext, IOAccel2DContext2)
 class NVCLContext : public IOAccelCLContext2 {

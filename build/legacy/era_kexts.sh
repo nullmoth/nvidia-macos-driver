@@ -29,7 +29,15 @@ cc NVRMFB "$SRC/NVRMFB/fb/nvrm-fb.cpp" -I"$SRC/NVRMFB" -I"$SRC/NVRMFB/fb"
 cc NVRMAGDC "$SRC/NVRMAGDC/nvrm-agdc.cpp" -I"$SRC/NVRMAGDC"
 # NVAccel is built against our own reconstruction of Apple's accelerator family (made from macOS 15), so a clean
 # compile says nothing about fit: the symbol check against the release's real family is the measure.
-cc NVAccel "$SRC/NVRM/accel/nvrm-accel.cpp" -I"$SRC/NVRM" -I"$SRC/NVRM/accel" -I"$SRC/NVRM/accel/iofam" -I"$SRC/NVRM/accel/re"
+# ACCEL_HDR=<dir with iofam/ and re/ generated for this release by gen_era_headers.py> replaces the macOS 15 family headers.
+# The accelerator source is staged so the regenerated headers take the place of the macOS 15 ones for every include,
+# including the ones the source makes by plain file name. The vendor subclasses (nvaccel_stubs.h) carry hand-written
+# members and are NOT regenerated: what they must gain or lose on a release shows up as compile errors.
+AS="$SRC/NVRM/accel"
+if [ -n "${ACCEL_HDR:-}" ]; then
+  rm -rf "$O/NVRM-src"; cp -R "$SRC/NVRM" "$O/NVRM-src"; AS="$O/NVRM-src/accel"; rm -rf "$AS/iofam" "$AS/re"; cp -R "$ACCEL_HDR/iofam" "$ACCEL_HDR/re" "$AS/"
+fi
+cc NVAccel "$AS/nvrm-accel.cpp" -I"$SRC/NVRM" -I"$AS/iofam" -I"$AS/re" -I"$AS"
 # The three C sources of NVRM: one with the kext's own flags, two with the RM core's command line (rmcc.py).
 xcrun clang -arch x86_64 -mmacosx-version-min=$MV -mkernel -nostdinc -I"$O/shim" -I"$KHDR" -idirafter "$RES" -I"$SRC/NVRM" "${RMINC[@]}" "${KMSINC[@]}" \
   -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT "${RMDEFS[@]}" -x c -std=gnu11 -fno-builtin -fno-common -Wno-everything -O2 \
