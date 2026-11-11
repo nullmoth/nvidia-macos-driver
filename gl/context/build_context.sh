@@ -60,7 +60,7 @@ echo "Mesa static libraries linked: $(echo $LIBS | wc -w | xargs)"
 (cat "$OUT/exports-product.txt"; echo _nm_test_own_software; echo _nm_test_register_surface) > "$OUT/exports-test.txt"
 for v in product test; do
   clang++ $A -bundle -Wl,-exported_symbols_list,"$OUT/exports-$v.txt" -o "$OUT/GLEngine-$v" "$OUT/nm_engine-$v.o" "$OUT/nm_context-$v.o" "$OUT/nm_dispatch.o" "$OUT/nm_apple_ext.o" "$OUT/nm_mesa.o" "$OUT/nm_compat.o" \
-    $LIBS -framework IOSurface -framework CoreFoundation -lz -Wl,-dead_strip -Wl,-no_warn_duplicate_libraries > "$OUT/link-$v.log" 2>&1; rc=$?
+    $LIBS -framework IOSurface -framework IOKit -framework CoreFoundation -lz -Wl,-dead_strip -Wl,-no_warn_duplicate_libraries > "$OUT/link-$v.log" 2>&1; rc=$?
   echo "link $v bundle: rc=$rc, undefined symbols reported $(grep -c '^  "_' "$OUT/link-$v.log"), size $(stat -f %z "$OUT/GLEngine-$v" 2>/dev/null || echo 0) bytes"
   [ $rc = 0 ] || { fail=1; grep -A1 '^  "_' "$OUT/link-$v.log" | head -24 | cut -c1-200; }
 done

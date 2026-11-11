@@ -6,13 +6,21 @@
  * Kernel surfaces. Two requests name a surface of the kernel accelerator by id: attaching a context to one
  * (drawable types 0x50 and 0x5a) and showing one as a texture (parameters 997 and 999). Both go through
  * nm_surface_lookup(), which is where the accelerator's private client (kext/nm_accel_contract.h, "buffer behind
- * a surface id") plugs in. That client has no body yet, so the lookup has exactly two outcomes today:
+ * a surface id") plugs in:
  *   - host tests: the surface is a block of the test's memory registered under the id (NM SOFTWARE SURFACE
  *     FALLBACK below), drawn into or uploaded from by copy;
+ *   - with our accelerator present: the private client is asked for the surface and its pages are mapped into
+ *     this process (the accelerator's memory-backed surfaces; GPU-backed ones will hand out a memory handle);
  *   - anything else: the request fails with an error and is logged. It never succeeds silently with nothing shown.
+ * The accelerator-present path cannot be run without loading the kext, so it is proved by compile, link and
+ * import checks only.
  */
 #include <OpenGL/gliDispatch.h>
 #include <IOSurface/IOSurface.h>
+#include <IOKit/IOKitLib.h>
+#include <mach/mach.h>
+
+#include "../kext/nm_accel_contract.h"
 
 #include "../engine/nm_gli.h"
 #include "../glue/nm_glue.h"
@@ -87,12 +95,35 @@ int nm_own_is_pixel_format(const void *n)  { return nm_is(n, 'p'); }
 int nm_own_is_context(const void *c)       { return nm_is(c, 'c'); }
 void nm_own_free_node(void *n) { nm_untrack(n); free(n); }
 
+/* The connection to our accelerator's private client, opened once when the library is initialised. */
+static io_connect_t nm_accel_connect;
+
+/* The accelerator of ours is recognised by its class in the registry. For every display service of that class
+ * the display's bit is added to the mask this renderer serves (bit = position in the list the caller passed:
+ * INFERRED to be the display index, as the callers build the list per display). */
 void nm_own_library_init(const uint32_t *services, const uint8_t *framebuffer_indices, unsigned count)
 {
-    /* The accelerator of ours is recognised by its class in the registry. That check, and with it the Vulkan
-     * backend, arrives with the kext; until then a normal build owns nothing and says so. */
-    (void)services; (void)framebuffer_indices;
+    (void)framebuffer_indices;
+    for (unsigned i = 0; services && i < count && i < 32; i++) {
+        io_service_t svc = (io_service_t)services[i];
+        if (!svc || !IOObjectConformsTo(svc, "NMLegacyAccelerator")) continue;
+        if (!nm_accel_connect) {
+            io_connect_t c = 0;
+            if (IOServiceOpen(svc, mach_task_self(), NM_GL_CLIENT_TYPE, &c) != KERN_SUCCESS) { nm_log("context layer: accelerator found but its private client would not open"); continue; }
+            struct nm_gl_version v = { 0, 0 }; size_t vs = sizeof v;
+            if (IOConnectCallStructMethod(c, NM_GL_METHOD_GET_VERSION, NULL, 0, &v, &vs) != KERN_SUCCESS || v.contract != NM_GL_CONTRACT_VERSION) {
+                nm_log("context layer: accelerator speaks contract %u, this bundle %u; not used", v.contract, NM_GL_CONTRACT_VERSION);
+                IOServiceClose(c);
+                continue;
+            }
+            nm_accel_connect = c;
+        }
+        own.display_mask |= 1u << i;
+        own.backend = NM_BACKEND_SOFTWARE;   /* memory-backed surfaces: the CPU rasteriser draws; zink replaces it with GPU-backed ones */
+        own.active = 1;
+    }
     if (!own.active) nm_log("context layer: no accelerator of ours among %u display services; every request is forwarded", count);
+    else nm_log("context layer: serving display mask 0x%x", own.display_mask);
 }
 
 uint32_t nm_own_table_size(void) { return (uint32_t)sizeof(GLIFunctionDispatch); }
@@ -241,9 +272,36 @@ static int nm_surface_lookup(uint32_t id, struct nm_surface *s)
     for (int i = 0; i < 16; i++)
         if (nm_test_surface[i].base && nm_test_surface[i].id == id) { *s = nm_test_surface[i]; return 0; }
 #endif
-    (void)s;
-    nm_log("surface %u: the accelerator's private client is not available, so the buffer behind the surface cannot be found", id);
-    return -1;
+    if (!nm_accel_connect) {
+        nm_log("surface %u: the accelerator's private client is not available, so the buffer behind the surface cannot be found", id);
+        return -1;
+    }
+    struct nm_gl_surface_query q = { id, 0x405 };
+    struct nm_gl_surface_buffer b; size_t bs = sizeof b;
+    memset(&b, 0, sizeof b);
+    kern_return_t kr = IOConnectCallStructMethod(nm_accel_connect, NM_GL_METHOD_SURFACE_BUFFER, &q, sizeof q, &b, &bs);
+    if (kr != KERN_SUCCESS || bs < sizeof b || !b.width || !b.height) { nm_log("surface %u: the accelerator does not know it (0x%x)", id, kr); return -1; }
+    /* one mapping per (surface, generation): a reshape replaces the pages, so the old mapping is dropped */
+    static struct { uint32_t id, generation; mach_vm_address_t addr; mach_vm_size_t size; } map[32];
+    static pthread_mutex_t map_lock = PTHREAD_MUTEX_INITIALIZER;
+    int rc = -1;
+    pthread_mutex_lock(&map_lock);
+    int slot = -1, free_slot = -1;
+    for (int i = 0; i < 32; i++) { if (map[i].addr && map[i].id == id) slot = i; else if (!map[i].addr && free_slot < 0) free_slot = i; }
+    if (slot >= 0 && map[slot].generation != b.generation) {
+        IOConnectUnmapMemory(nm_accel_connect, id, mach_task_self(), map[slot].addr);
+        map[slot].addr = 0; free_slot = slot; slot = -1;
+    }
+    if (slot < 0 && free_slot >= 0) {
+        mach_vm_address_t addr = 0; mach_vm_size_t size = 0;
+        if (IOConnectMapMemory(nm_accel_connect, id, mach_task_self(), &addr, &size, kIOMapAnywhere) == KERN_SUCCESS && size >= b.size) {
+            slot = free_slot; map[slot].id = id; map[slot].generation = b.generation; map[slot].addr = addr; map[slot].size = size;
+        }
+    }
+    if (slot >= 0) { *s = (struct nm_surface){ id, (int)b.width, (int)b.height, (int)b.row_bytes, (void *)(uintptr_t)map[slot].addr }; rc = 0; }
+    pthread_mutex_unlock(&map_lock);
+    if (rc != 0) nm_log("surface %u: its pages could not be mapped", id);
+    return rc;
 }
 
 /* ---- drawables -------------------------------------------------------------------------------------------- */
