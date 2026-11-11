@@ -27,6 +27,9 @@ echo "$LIST" | while read rel kd md gd; do
   have_k=""; for x in NVRM NVRMFB NVRMAGDC NVAccel; do
     [ -f "$B/out/$kd/$x.kext/Contents/MacOS/$x" ] && { cp -R "$B/out/$kd/$x.kext" "$D/kexts/"; have_k="$have_k $x"; }
   done
+  # 10.8 has no graphics-control class at all and 10.9/10.10 lack its eight reserved slots, which our subclass's table
+  # names: the kext cannot link there. It is kept out of kexts/ so nobody loads it by copying the folder.
+  case $rel in 10.8|10.9|10.10) [ -d "$D/kexts/NVRMAGDC.kext" ] && { mkdir -p "$D/held-back"; mv "$D/kexts/NVRMAGDC.kext" "$D/held-back/"; have_k=${have_k/ NVRMAGDC/}; } ;; esac
   for x in NVRM NVRMFB NVRMAGDC NVAccel; do [ -f "$B/out/$kd/$x.missing.txt" ] && cp "$B/out/$kd/$x.missing.txt" "$D/kexts/$x.not-exported.txt"; done
   have_m=no; [ "$md" != "-" ] && [ -d "$B/metal/stage/$md/payload" ] && { mkdir -p "$D/userland"; cp -R "$B/metal/stage/$md/payload" "$B/metal/stage/$md/MANIFEST.txt" "$B/metal/stage/$md/IMPORTS.txt" "$D/userland/"; have_m=yes; }
   [ "$md" != "-" ] && [ -d "$B/metal/stage/$md/options" ] && cp -R "$B/metal/stage/$md/options" "$D/options"
@@ -85,8 +88,9 @@ echo "$LIST" | while read rel kd md gd; do
       11|12) echo "  - The accelerator's long not-exported list is not a defect list: Apple ships no standalone accelerator family"
              echo "    binary for this release, so the kit check cannot see the family's names. Tables, sizes and fields were"
              echo "    checked against the release's kernel collection instead (map, section 2j/2k).";;
-      10.8|10.9|10.10) echo "  - NVRMAGDC: the graphics-control family of this release lacks several entry points the kext overrides or calls"
-             echo "    (kexts/NVRMAGDC.not-exported.txt). Leave NVRMAGDC out on first boot; it only adds GPU selection and power policy.";;
+      10.8|10.9|10.10) echo "  - NVRMAGDC is in held-back/, not kexts/: this release's graphics-control class is missing (10.8) or lacks the"
+             echo "    eight reserved slots our subclass names (10.9, 10.10), so it cannot link here (kexts/NVRMAGDC.not-exported.txt)."
+             echo "    It only adds GPU selection and power policy; the display and the accelerator do not depend on it.";;
     esac
   } > "$D/README.txt"
   ( cd "$D" && find . -type f ! -name MANIFEST.sha256 -print0 | sort -z | xargs -0 shasum -a 256 > MANIFEST.sha256 )
