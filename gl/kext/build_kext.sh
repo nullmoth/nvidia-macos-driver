@@ -11,7 +11,7 @@ K=System/Library/Frameworks/Kernel.framework/Versions/A/Headers; RES="$(xcrun cl
 while read era mv kit tag khdr; do
   O=$OUT/$mv; rm -rf "$O"; mkdir -p "$O/NMLegacyAccel.kext/Contents/MacOS"
   xcrun clang++ -arch x86_64 -mmacosx-version-min=$mv -fapple-kext -mkernel -nostdinc -I"$B/sdk/$khdr" -idirafter "$RES" \
-    -DNM_ERA=$era -include "$ROOT/kexts/compat/nm_era.h" -I"$H" -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
+    -DNM_ERA=$era -include "$ROOT/kexts/compat/nm_era.h" -I"$H" -I"$ROOT/kexts/NVRM" -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
     -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common -Wall -Wextra -Wno-unused-parameter -Wno-everything -ferror-limit=0 -O2 \
     -c "$H/NMLegacyAccel.cpp" -o "$O/NMLegacyAccel.o" > "$O/compile.log" 2>&1; rc=$?
   e=$(grep -cE '^[^ ]+:[0-9]+:[0-9]+: (fatal )?error:' "$O/compile.log")
@@ -49,4 +49,13 @@ if clang -std=c11 -Wall -Wextra -Werror -o "$OUT/host/table_test" "$H/test/table
   echo "control (first version's logic): exit $orc, $(grep -c '^FAIL' "$OUT/host/old.out") arms fail: $(grep '^FAIL' "$OUT/host/old.out" | cut -c7-60 | tr '\n' ';')"
   [ $orc != 0 ] && [ "$(grep -c '^FAIL' "$OUT/host/old.out")" -ge 3 ] || { echo "control did not fail on the old logic"; fail=1; }
 else echo "host test build failed"; head -5 "$OUT/host/build.log"; fail=1; fi
+# host test of the copy into a scanout, and its control: the same arms against a copy without clipping must fail
+# (it writes outside the scanout, so it may also crash: any non-zero exit counts)
+if clang -std=c11 -Wall -Wextra -Werror -o "$OUT/host/present_test" "$H/test/present_test.c" >> "$OUT/host/build.log" 2>&1 &&
+   clang -std=c11 -Wall -Wextra -Werror -DNM_PRESENT_NO_CLIP -o "$OUT/host/present_test_noclip" "$H/test/present_test.c" >> "$OUT/host/build.log" 2>&1; then
+  "$OUT/host/present_test" || fail=1
+  "$OUT/host/present_test_noclip" > "$OUT/host/noclip.out" 2>&1; orc=$?
+  echo "control (no clipping): exit $orc, $(grep -c '^FAIL' "$OUT/host/noclip.out") arms fail"
+  [ $orc != 0 ] || { echo "control did not fail without clipping"; fail=1; }
+else echo "present test build failed"; tail -5 "$OUT/host/build.log"; fail=1; fi
 echo "result: $([ $fail = 0 ] && echo PASS || echo FAIL)"; exit $fail

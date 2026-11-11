@@ -8,9 +8,14 @@
  * This file implements both cross-process pieces of the contract with surfaces backed by ordinary kernel memory:
  * the surface table, shape and reshape, CPU locks that map the buffer into the caller, and the private client
  * through which the engine finds and maps the buffer behind any surface id. That is a complete accelerator for a
- * renderer that draws with the CPU. What it does not do is touch the GPU or a display: binding a surface's buffer
- * to GPU memory and showing a surface on the framebuffer are the two marked hooks (NEEDS HARDWARE), because they
- * go through the resource-manager and framebuffer kexts and cannot be exercised without the card.
+ * renderer that draws with the CPU. Two hooks reach the card, both through the framebuffer kext's named platform
+ * functions (nvrm_vram_abi.h), so this kext links against nothing of the resource manager:
+ *   - a surface's buffer can be video memory (property NMGPUSurfaces, off unless the personality sets it), with
+ *     system memory as the fallback whenever the framebuffer refuses or is absent;
+ *   - a flush from a privileged client (the window server) copies the surface into the scanout of the
+ *     framebuffers named by the mask.
+ * Both are written against the framebuffer kext's source and have been compiled and symbol-checked only; neither
+ * has run on a card.
  * The personality in Info.plist names a provider class that does not exist, so the kext cannot attach to anything
  * until that line is changed for an approved hardware run.
  */
@@ -22,6 +27,8 @@
 #include <IOKit/IOUserClient.h>
 #include <IOKit/graphics/IOAccelerator.h>
 #include <IOKit/graphics/IOAccelSurfaceConnect.h>
+#include "nvrm_vram_abi.h"
+#include "nm_present.h"
 
 #include "nm_accel_contract.h"
 #include "nm_surface_table.h"
@@ -64,52 +71,28 @@ static bool nm_shape_ok(const nm_surface_method_shape &s, const IOExternalMethod
 /* ---- surfaces --------------------------------------------------------------------------------------------- */
 
 #define NM_MAX_SURFACE_DIM 16384   /* larger than any display or window these releases create */
+#define NM_RETIRED_SLOTS 64        /* chosen: reshapes in flight at once; when full, new surfaces use system memory */
+#define NM_FB_CLASS "NVRMNVDAFramebuffer"
 
+class NMLegacyAccelerator;
 class NMLegacySurface : public OSObject
 {
     OSDeclareDefaultStructors(NMLegacySurface)
 public:
-    uint32_t fID, fMode, fWidth, fHeight, fRowBytes, fGeneration, fFlushes;
+    uint32_t fID, fMode, fWidth, fHeight, fRowBytes, fGeneration, fFlushes, fPresented;
+    int32_t fX, fY;                        /* where the shape puts the surface on its framebuffer */
     void *fOwner;                          /* the surface client that created it; only that client reshapes it */
-    IOBufferMemoryDescriptor *fBuffer;     /* 32-bit BGRA rows, top row first; NULL until the first shape */
-    static NMLegacySurface *withID(uint32_t id, uint32_t mode, void *owner);
+    IOMemoryDescriptor *fBuffer;           /* 32-bit BGRA rows, top row first; NULL until the first shape */
+    void *fKva;                            /* the same rows in the kernel's address space */
+    NMLegacyAccelerator *fAccel;           /* not retained: every client stops before the accelerator does */
+    struct NVRMVramRequest fVram;          /* handle != NULL: fBuffer is video memory the framebuffer kext allocated */
+    static NMLegacySurface *withID(uint32_t id, uint32_t mode, void *owner, NMLegacyAccelerator *accel);
     virtual void free();
     /* (Re)allocates the buffer for a new size. The old pages stay alive for whoever still has them mapped. */
     IOReturn reshape(uint32_t width, uint32_t height);
+    void dropBuffer();
 };
 OSDefineMetaClassAndStructors(NMLegacySurface, OSObject)
-
-NMLegacySurface *NMLegacySurface::withID(uint32_t id, uint32_t mode, void *owner)
-{
-    NMLegacySurface *s = new NMLegacySurface;
-    if (!s || !s->init()) { if (s) s->release(); return NULL; }
-    s->fID = id; s->fMode = mode; s->fOwner = owner;
-    s->fWidth = s->fHeight = s->fRowBytes = s->fGeneration = s->fFlushes = 0; s->fBuffer = NULL;
-    return s;
-}
-
-void NMLegacySurface::free()
-{
-    if (fBuffer) { fBuffer->release(); fBuffer = NULL; }
-    OSObject::free();
-}
-
-IOReturn NMLegacySurface::reshape(uint32_t width, uint32_t height)
-{
-    if (width == 0 || height == 0 || width > NM_MAX_SURFACE_DIM || height > NM_MAX_SURFACE_DIM) return kIOReturnBadArgument;
-    if (fBuffer && width == fWidth && height == fHeight) return kIOReturnSuccess;
-    vm_size_t size = round_page((vm_size_t)width * 4u * (vm_size_t)height);
-    /* NEEDS HARDWARE: with the card present this is where the buffer becomes GPU memory allocated through the
-     * resource manager, so the Vulkan driver can render into it without a copy. */
-    IOBufferMemoryDescriptor *b = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
-        kIODirectionInOut | kIOMemoryKernelUserShared, size, page_size);
-    if (!b) return kIOReturnNoMemory;
-    bzero(b->getBytesNoCopy(), size);
-    if (fBuffer) fBuffer->release();
-    fBuffer = b; fWidth = width; fHeight = height; fRowBytes = width * 4u;
-    fGeneration++;
-    return kIOReturnSuccess;
-}
 
 class NMLegacyAccelerator : public IOAccelerator
 {
@@ -117,7 +100,21 @@ class NMLegacyAccelerator : public IOAccelerator
     IOLock *fLock;
     nm_surface_table *fTable;                    /* who owns which id, and who was granted what */
     NMLegacySurface *fSurf[NM_TABLE_SLOTS];      /* the surface in each table slot */
+    /* Video memory given up by a surface while a client may still have it mapped. It goes back to the framebuffer
+     * kext only when ours is the last reference to its descriptor, so no mapping ever outlives the memory. */
+    struct Retired { IOMemoryDescriptor *desc; struct NVRMVramRequest req; IOService *fb; } fRetired[NM_RETIRED_SLOTS];
+    const OSSymbol *fSymAlloc, *fSymFree, *fSymScanout;
+    bool fGPUSurfaces;
+    void reapRetired(bool final);                /* accelerator lock held */
 public:
+    /* The framebuffer service with this dependent index (retained), or NULL. Never waits. */
+    IOService *copyFramebuffer(uint32_t index);
+    /* Video memory for a surface, zeroed. False means "use system memory": property off, no framebuffer, refused,
+     * or the retired list is full. Accelerator lock held. */
+    bool allocVram(vm_size_t size, struct NVRMVramRequest *req, IOMemoryDescriptor **desc);
+    void retireVram(IOMemoryDescriptor *desc, const struct NVRMVramRequest *req);   /* accelerator lock held */
+    /* Copies a surface's rows into the scanout of each framebuffer in the mask. Returns how many it reached. */
+    uint32_t present(NMLegacySurface *s, uint32_t mask);
     virtual bool start(IOService *provider);
     virtual void stop(IOService *provider);
     virtual IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler);
@@ -132,6 +129,58 @@ public:
     void unlock() { IOLockUnlock(fLock); }
 };
 
+NMLegacySurface *NMLegacySurface::withID(uint32_t id, uint32_t mode, void *owner, NMLegacyAccelerator *accel)
+{
+    NMLegacySurface *s = new NMLegacySurface;
+    if (!s || !s->init()) { if (s) s->release(); return NULL; }
+    s->fID = id; s->fMode = mode; s->fOwner = owner; s->fAccel = accel;
+    s->fWidth = s->fHeight = s->fRowBytes = s->fGeneration = s->fFlushes = s->fPresented = 0;
+    s->fX = s->fY = 0; s->fBuffer = NULL; s->fKva = NULL;
+    bzero(&s->fVram, sizeof s->fVram);
+    return s;
+}
+
+/* Accelerator lock held, or the last reference going away. */
+void NMLegacySurface::dropBuffer()
+{
+    if (!fBuffer) return;
+    if (fVram.handle && fAccel) fAccel->retireVram(fBuffer, &fVram);   /* takes over our reference */
+    else fBuffer->release();
+    fBuffer = NULL; fKva = NULL; bzero(&fVram, sizeof fVram);
+}
+
+void NMLegacySurface::free()
+{
+    if (fBuffer && fVram.handle && fAccel) { fAccel->lock(); dropBuffer(); fAccel->unlock(); }
+    else dropBuffer();
+    OSObject::free();
+}
+
+IOReturn NMLegacySurface::reshape(uint32_t width, uint32_t height)
+{
+    if (width == 0 || height == 0 || width > NM_MAX_SURFACE_DIM || height > NM_MAX_SURFACE_DIM) return kIOReturnBadArgument;
+    if (fBuffer && width == fWidth && height == fHeight) return kIOReturnSuccess;
+    vm_size_t size = round_page((vm_size_t)width * 4u * (vm_size_t)height);
+    /* Video memory first when the accelerator allows it, so the buffer the engine renders for is already on the
+     * card; system memory otherwise. Either way the pages are zeroed before anyone can map them. */
+    struct NVRMVramRequest req; IOMemoryDescriptor *d = NULL; void *kva = NULL;
+    bzero(&req, sizeof req);
+    if (fAccel && fAccel->allocVram(size, &req, &d)) kva = req.kva;
+    else {
+        bzero(&req, sizeof req);
+        IOBufferMemoryDescriptor *b = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+            kIODirectionInOut | kIOMemoryKernelUserShared, size, page_size);
+        if (!b) return kIOReturnNoMemory;
+        kva = b->getBytesNoCopy();
+        bzero(kva, size);
+        d = b;
+    }
+    dropBuffer();
+    fBuffer = d; fKva = kva; fVram = req; fWidth = width; fHeight = height; fRowBytes = width * 4u;
+    fGeneration++;
+    return kIOReturnSuccess;
+}
+
 /* ---- the public surface client --------------------------------------------------------------------------- */
 
 class NMLegacySurfaceClient : public IOUserClient
@@ -144,6 +193,7 @@ class NMLegacySurfaceClient : public IOUserClient
     int32_t fPid;           /* the opening process: the owner of the surface this connection creates */
     IOLock *fCallLock;      /* one external method at a time per connection; stop() takes it to wait out a call in flight */
     bool fStopped;
+    bool fPrivileged;       /* administrator privilege at open: only such a client's flush reaches a display */
     IOReturn dispatch(uint32_t selector, IOExternalMethodArguments *a);
     IOReturn setIDMode(uint32_t id, uint32_t mode);
     IOReturn setShape(const IOAccelDeviceRegion *region);
@@ -164,6 +214,7 @@ bool NMLegacySurfaceClient::initWithTask(task_t owningTask, void *securityID, UI
     if (type != NM_SURFACE_CLIENT_TYPE || !IOUserClient::initWithTask(owningTask, securityID, type)) return false;
     fTask = owningTask; fSurface = NULL; fMap = NULL; fAccel = NULL; fStopped = false;
     fPid = proc_selfpid();               /* initWithTask runs in the opening process's context */
+    fPrivileged = IOUserClient::clientHasPrivilege(securityID, kIOClientPrivilegeAdministrator) == kIOReturnSuccess;
     fCallLock = IOLockAlloc();
     return fCallLock != NULL;
 }
@@ -199,7 +250,7 @@ IOReturn NMLegacySurfaceClient::setIDMode(uint32_t id, uint32_t mode)
         fSurface->fMode = mode;
         return kIOReturnSuccess;
     }
-    NMLegacySurface *s = NMLegacySurface::withID(id, mode, this);
+    NMLegacySurface *s = NMLegacySurface::withID(id, mode, this, fAccel);
     if (!s) return kIOReturnNoMemory;
     IOReturn r = fAccel->addSurface(s, fPid);
     if (r != kIOReturnSuccess) { s->release(); return r; }
@@ -214,6 +265,7 @@ IOReturn NMLegacySurfaceClient::setShape(const IOAccelDeviceRegion *region)
     unlockSurface();                     /* a mapping of the old buffer must not outlive the reshape */
     fAccel->lock();
     IOReturn r = fSurface->reshape((uint32_t)region->bounds.w, (uint32_t)region->bounds.h);
+    if (r == kIOReturnSuccess) { fSurface->fX = region->bounds.x; fSurface->fY = region->bounds.y; }
     fAccel->unlock();
     return r;
 }
@@ -225,7 +277,7 @@ IOReturn NMLegacySurfaceClient::lockSurface(IOExternalMethodArguments *a)
     /* The buffer pointer and the geometry are read under the accelerator's lock, with the buffer retained, so a
      * reshape from this or any other path cannot free it between the read and the mapping. */
     fAccel->lock();
-    IOBufferMemoryDescriptor *buf = fSurface->fBuffer;
+    IOMemoryDescriptor *buf = fSurface->fBuffer;
     uint32_t rowBytes = fSurface->fRowBytes, width = fSurface->fWidth, height = fSurface->fHeight;
     if (buf) buf->retain();
     fAccel->unlock();
@@ -298,9 +350,10 @@ IOReturn NMLegacySurfaceClient::dispatch(uint32_t selector, IOExternalMethodArgu
         return kIOReturnSuccess;
     case kIOAccelSurfaceFlush:
         if (!fSurface) return kIOReturnNotReady;
-        /* NEEDS HARDWARE: showing the surface on the framebuffers named by the mask (flip or copy into the
-         * scanout the framebuffer kext drives). Counted so a caller's flushes can be seen in the registry. */
+        /* Only the window server's surfaces go to a display: it composites everyone else's, and an ordinary
+         * process must not be able to paint the screen by naming a position. Every flush is counted. */
         fSurface->fFlushes++;
+        if (fPrivileged) fSurface->fPresented += fAccel->present(fSurface, (uint32_t)a->scalarInput[0]);
         return kIOReturnSuccess;
     case kIOAccelSurfaceRead:
     default:
@@ -416,7 +469,10 @@ IOReturn NMLegacyGLClient::dispatch(uint32_t selector, IOExternalMethodArguments
         bzero(&b, sizeof b);
         fAccel->lock();
         IOReturn r = s->fBuffer ? kIOReturnSuccess : kIOReturnNotReady;
-        b.memory_handle = 0;             /* no GPU memory object: the pages are reached by mapping type = id */
+        /* Always 0: the pages are reached by mapping type = id, also when they are video memory. Naming the
+         * buffer to the Vulkan driver needs a resource-manager handle duplicated into that driver's client, which
+         * the framebuffer kext's platform functions do not offer. */
+        b.memory_handle = 0;
         b.size = (uint64_t)s->fRowBytes * s->fHeight;
         b.width = s->fWidth; b.height = s->fHeight; b.row_bytes = s->fRowBytes;
         b.format = s->fMode & kIOAccelSurfaceModeColorDepthBits;
@@ -457,6 +513,13 @@ bool NMLegacyAccelerator::start(IOService *provider)
     if (!fLock || !fTable) return false;
     bzero(fTable, sizeof(nm_surface_table));
     bzero(fSurf, sizeof fSurf);
+    bzero(fRetired, sizeof fRetired);
+    fSymAlloc = OSSymbol::withCString(NVRM_VRAM_FN_ALLOC);
+    fSymFree = OSSymbol::withCString(NVRM_VRAM_FN_FREE);
+    fSymScanout = OSSymbol::withCString(NVRM_VRAM_FN_SCANOUT);
+    if (!fSymAlloc || !fSymFree || !fSymScanout) return false;
+    /* Off unless the personality says otherwise: video-memory surfaces have never run on a card. */
+    fGPUSurfaces = getProperty("NMGPUSurfaces") == kOSBooleanTrue;
     /* No IOGLBundleName: Apple's engine must not look for a renderer bundle for this accelerator. The engine at
      * the framework's engine path recognises the accelerator by class instead. */
     registerService();
@@ -465,9 +528,130 @@ bool NMLegacyAccelerator::start(IOService *provider)
 
 void NMLegacyAccelerator::stop(IOService *provider)
 {
+    if (fLock) { lock(); reapRetired(true); unlock(); }
+    if (fSymAlloc) { fSymAlloc->release(); fSymAlloc = NULL; }
+    if (fSymFree) { fSymFree->release(); fSymFree = NULL; }
+    if (fSymScanout) { fSymScanout->release(); fSymScanout = NULL; }
     if (fTable) { IOFree(fTable, sizeof(nm_surface_table)); fTable = NULL; }
     if (fLock) { IOLockFree(fLock); fLock = NULL; }
     IOAccelerator::stop(provider);
+}
+
+/* ---- the two hooks that reach the card ------------------------------------------------------------------- */
+
+IOService *NMLegacyAccelerator::copyFramebuffer(uint32_t index)
+{
+    OSDictionary *match = IOService::serviceMatching(NM_FB_CLASS);
+    if (!match) return NULL;
+    OSIterator *it = IOService::getMatchingServices(match);
+    match->release();
+    if (!it) return NULL;
+    IOService *found = NULL, *first = NULL;
+    while (OSObject *o = it->getNextObject()) {
+        IOService *fb = OSDynamicCast(IOService, o);
+        if (!fb) continue;
+        OSNumber *n = OSDynamicCast(OSNumber, fb->getProperty("IOFBDependentIndex"));
+        if (n && n->unsigned32BitValue() == index) { found = fb; break; }
+        if (!first && !n) first = fb;
+    }
+    /* one head with no index published is head 0 */
+    if (!found && index == 0) found = first;
+    if (found) found->retain();
+    it->release();
+    return found;
+}
+
+void NMLegacyAccelerator::reapRetired(bool final)
+{
+    for (int i = 0; i < NM_RETIRED_SLOTS; i++) {
+        Retired *r = &fRetired[i];
+        if (!r->desc) continue;
+        if (r->desc->getRetainCount() > 1) {
+            /* still mapped somewhere: the memory is never handed back under a live mapping, even at stop */
+            if (final) IOLog("NMLegacyAccel: %llu bytes of video memory left allocated, still mapped at stop\n", r->req.actualSize);
+            continue;
+        }
+        r->desc->release();
+        r->fb->callPlatformFunction(fSymFree, false, &r->req, NULL, NULL, NULL);
+        r->fb->release();
+        bzero(r, sizeof *r);
+    }
+}
+
+bool NMLegacyAccelerator::allocVram(vm_size_t size, struct NVRMVramRequest *req, IOMemoryDescriptor **desc)
+{
+    if (!fGPUSurfaces) return false;
+    reapRetired(false);
+    int freeSlots = 0;
+    for (int i = 0; i < NM_RETIRED_SLOTS; i++) if (!fRetired[i].desc) freeSlots++;
+    if (freeSlots == 0) return false;   /* nowhere to park this one later: do not start */
+    IOService *fb = copyFramebuffer(0);
+    if (!fb) return false;
+    bzero(req, sizeof *req);
+    req->version = NVRM_VRAM_ABI_VERSION;
+    req->size = size;
+    IOReturn r = fb->callPlatformFunction(fSymAlloc, false, req, NULL, NULL, NULL);
+    bool ok = r == kIOReturnSuccess && req->handle && req->phys && req->kva && req->actualSize >= size;
+    IOMemoryDescriptor *d = NULL;
+    if (ok) {
+        d = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)req->phys, (IOByteCount)size, kIODirectionInOut);
+        if (d) bzero(req->kva, size);
+        else ok = false;
+    }
+    if (!ok && r == kIOReturnSuccess && req->handle) fb->callPlatformFunction(fSymFree, false, req, NULL, NULL, NULL);
+    fb->release();
+    if (!ok) return false;
+    *desc = d;
+    return true;
+}
+
+void NMLegacyAccelerator::retireVram(IOMemoryDescriptor *desc, const struct NVRMVramRequest *req)
+{
+    IOService *fb = copyFramebuffer(0);
+    for (int i = 0; fb && i < NM_RETIRED_SLOTS; i++) {
+        if (fRetired[i].desc) continue;
+        fRetired[i].desc = desc; fRetired[i].req = *req; fRetired[i].fb = fb;
+        reapRetired(false);
+        return;
+    }
+    /* No framebuffer to return it to, or no slot (allocVram keeps one free per live buffer only in the common
+     * case): the memory stays allocated rather than being freed under a possible mapping. */
+    if (fb) fb->release();
+    IOLog("NMLegacyAccel: %llu bytes of video memory not returned\n", req->actualSize);
+    desc->release();
+}
+
+uint32_t NMLegacyAccelerator::present(NMLegacySurface *s, uint32_t mask)
+{
+    /* Geometry and the buffer are taken under the lock with the descriptor retained; the copy runs outside it.
+     * A reshape meanwhile retires the old buffer, which waits for this reference before the memory goes back. */
+    lock();
+    IOMemoryDescriptor *buf = s->fBuffer;
+    const uint8_t *src = (const uint8_t *)s->fKva;
+    uint32_t sw = s->fWidth, sh = s->fHeight, srow = s->fRowBytes;
+    int32_t sx = s->fX, sy = s->fY;
+    if (buf) buf->retain();
+    unlock();
+    if (!buf || !src) { if (buf) buf->release(); return 0; }
+    if (mask == 0) mask = 1;
+    uint32_t reached = 0;
+    for (uint32_t head = 0; head < 8; head++) {
+        if (!(mask & (1u << head))) continue;
+        IOService *fb = copyFramebuffer(head);
+        if (!fb) continue;
+        struct NVRMVramRequest q;
+        bzero(&q, sizeof q);
+        q.version = NVRM_VRAM_ABI_VERSION;
+        IOReturn r = fb->callPlatformFunction(fSymScanout, false, &q, NULL, NULL, NULL);
+        fb->release();
+        if (r != kIOReturnSuccess || !q.kva || !q.pitch || q.width == 0 || q.height == 0) continue;
+        /* every bound is checked inside (nm_present.h, tested on the host) */
+        if (nm_present_copy(src, sw, sh, srow, sx, sy, (uint8_t *)q.kva, q.width, q.height, q.pitch, q.actualSize,
+                            (q.flags & NVRM_VRAM_SCANOUT_30BIT) != 0) == 0) continue;
+        reached++;
+    }
+    buf->release();
+    return reached;
 }
 
 static IOReturn nm_table_error(int e)
