@@ -3042,7 +3042,7 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
                     (unsigned long)lf.functions.count,
                     (unsigned long)([lf respondsToSelector:@selector(privateFunctions)]
                                     ? [(NSArray *)[(id)lf valueForKey:@"privateFunctions"] count] : 0),
-                    (unsigned long)lf.binaryFunctions.count, (unsigned long)lf.groups.count,
+                    (unsigned long)NVMTL_SINCE(11.0, NSUInteger, lf.binaryFunctions.count, 0), (unsigned long)lf.groups.count,
                     (unsigned long)[dylibs count]);
             fclose(lg);
         }
