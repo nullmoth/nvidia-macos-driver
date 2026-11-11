@@ -1,5 +1,6 @@
 // av1dec.c: see av1dec.h. Section numbers refer to the AV1 specification.
 #include "av1dec.h"
+#include "nv_floor.h"
 #include "blocklinear.h"
 #include "av1tables.h"
 #include "av1probs.h"
@@ -13,7 +14,7 @@
 #include "nvdec_drv.h"
 
 static NvU32 hi(NvU64 a) { return (NvU32)(a >> 8); }
-static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+static double now_ms(void) { struct timespec t; NV_CLOCK_GETTIME(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 static int alloc(Rm *rm, RmMem *m, size_t size)
 {
     if (rm_mem_alloc(rm, m, (size + 0xfff) & ~(size_t)0xfff, 0x1000, true, true, true)) return -1;

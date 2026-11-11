@@ -26,7 +26,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
-static double nowms(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1e6; }
+static double nowms(void) { return NV_CLOCK_NS(CLOCK_MONOTONIC_RAW) / 1e6; }
 
 typedef struct CMBaseProtocolVTable CMBaseProtocolVTable;
 typedef struct CMBaseProtocolTable CMBaseProtocolTable;
@@ -331,14 +331,14 @@ static OSStatus start_av1(DState *s, VTVideoDecoderSession session, CMVideoForma
 static OSStatus start_hevc(DState *s, VTVideoDecoderSession session, CMVideoFormatDescriptionRef fmt)
 {
     size_t count = 0; int nalLen = 4;
-    OSStatus st = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, 0, NULL, NULL, &count, &nalLen);
+    OSStatus st = NV13(CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, 0, NULL, NULL, &count, &nalLen), kVTVideoDecoderBadDataErr);
     if (st || !count) { DLOG("startSession: no HEVC parameter sets (%d)", (int)st); return kVTVideoDecoderBadDataErr; }
     s->nalLen = nalLen;
     HevcParams *pp = calloc(1, sizeof *pp); if (!pp) return kVTVideoDecoderMalfunctionErr;
     unsigned W = 0, H = 0; int depth = 0, cdepth = 0, cf = -1, cw = 0, ch = 0; bool full = false;
     for (size_t i = 0; i < count; i++) {
         const uint8_t *ps; size_t n;
-        if (CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, i, &ps, &n, NULL, NULL) || n < 2 || ((ps[0] >> 1) & 63) != HEVC_NAL_SPS) continue;
+        if (NV13(CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, i, &ps, &n, NULL, NULL), 1) || n < 2 || ((ps[0] >> 1) & 63) != HEVC_NAL_SPS) continue;
         const int id = hevc_parse_sps(pp, ps, n); if (id < 0) continue;
         const HevcSps *sp = &pp->sps[id];
         if ((unsigned)sp->width > W) W = (unsigned)sp->width;
@@ -359,7 +359,7 @@ static OSStatus start_hevc(DState *s, VTVideoDecoderSession session, CMVideoForm
     s->opened = true;
     for (size_t i = 0; i < count; i++) {                        // the decoder keeps its own parameter sets
         const uint8_t *ps; size_t n;
-        if (!CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, i, &ps, &n, NULL, NULL) && n) hevcdec_nal(s->hevc, ps, n);
+        if (!NV13(CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fmt, i, &ps, &n, NULL, NULL), 1) && n) hevcdec_nal(s->hevc, ps, n);
     }
     const OSType pf = cf == 3 ? (depth == 8 ? (full ? kCVPixelFormatType_444YpCbCr8BiPlanarFullRange : kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange)
                                             : (full ? kCVPixelFormatType_444YpCbCr10BiPlanarFullRange : kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange))
@@ -527,8 +527,8 @@ static OSStatus set_output(DState *s, VTVideoDecoderSession session, CMVideoForm
     // colour description and HDR metadata from the format description (the extension keys are the attachment keys), as
     // Apple's decoders attach them
     const CFStringRef ck[] = { kCMFormatDescriptionExtension_ColorPrimaries, kCMFormatDescriptionExtension_TransferFunction, kCMFormatDescriptionExtension_YCbCrMatrix,
-                               kCMFormatDescriptionExtension_MasteringDisplayColorVolume, kCMFormatDescriptionExtension_ContentLightLevelInfo };
-    for (int i = 0; i < 5; i++) { CFTypeRef x = CMFormatDescriptionGetExtension(fmt, ck[i]); if (x) CFDictionarySetValue(col, ck[i], x); }
+                               NV13_DO(kCMFormatDescriptionExtension_MasteringDisplayColorVolume, kCMFormatDescriptionExtension_ContentLightLevelInfo) };
+    for (int i = 0; i < (int)(sizeof ck / sizeof ck[0]); i++) { CFTypeRef x = CMFormatDescriptionGetExtension(fmt, ck[i]); if (x) CFDictionarySetValue(col, ck[i], x); }
     s->colour = col;
     DLOG("startSession: pixel buffer attributes -> %d (%s range)", (int)st, full ? "full" : "video");
     return noErr;
@@ -930,6 +930,7 @@ __attribute__((visibility("default"))) OSStatus NVDecVT_CreateInstance(FourCharC
 {
     const FourCharCode entry = codec;   // 'hev1' / 'avc3' (parameter sets may also come in band) decode as HEVC / H.264
     if (codec == CODEC_HEV1) codec = kCMVideoCodecType_HEVC; else if (codec == CODEC_AVC3) codec = kCMVideoCodecType_H264;
+    if (!NV_HEVC_HDR && codec == kCMVideoCodecType_HEVC) return kVTCouldNotFindVideoDecoderErr;   // a system before macOS 10.13 has no HEVC
     if (codec != kCMVideoCodecType_H264 && codec != kCMVideoCodecType_HEVC && codec != CODEC_VP9 && codec != CODEC_AV1 && !is_mpeg12(codec) && codec != kCMVideoCodecType_MPEG4Video) return kVTCouldNotFindVideoDecoderErr;
     CMBaseObjectRef obj = NULL;
     OSStatus st = CMDerivedObjectCreate(al, &gDVT.base, VTVideoDecoderGetClassID(), &obj);
@@ -990,7 +991,7 @@ OSStatus NVDecVT_Register(int rating)
     if (!av1Vp9Only && !getenv("NVENCVT_NO_HEV1")) { OSStatus s3 = reg(CODEC_AVC3, info, (void *)NVDecVT_CreateInstance); DLOG("registered %s for avc3 -> %d", DECODER_ID, (int)s3); }
     CFRelease(info);
     DLOG("registered %s -> %d (rating %d)", DECODER_ID, (int)st, rating);
-    if (!av1Vp9Only && !h264Only && !getenv("NVENCVT_NO_HEVCDEC")) {   // HEVC (NVENCVT_NO_HEVCDEC=1 leaves it out): above NullMoth's own HEVC decoder too
+    if (NV_HEVC_HDR && !av1Vp9Only && !h264Only && !getenv("NVENCVT_NO_HEVCDEC")) {   // HEVC (NVENCVT_NO_HEVCDEC=1 leaves it out): above NullMoth's own HEVC decoder too
         const void *vh[] = { CFSTR(DECODER_ID_HEVC), CFSTR("NVDEC - HEVC - mickys/nvenc"), nr, kCFBooleanTrue };
         CFDictionaryRef ih = CFDictionaryCreate(NULL, k, vh, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         OSStatus sh = reg(kCMVideoCodecType_HEVC, ih, (void *)NVDecVT_CreateInstance);

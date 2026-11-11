@@ -1,5 +1,6 @@
 // vp8dec.c: see vp8dec.h. Section numbers refer to RFC 6386.
 #include "vp8dec.h"
+#include "nv_floor.h"
 #include "vp8tables.h"
 #include "blocklinear.h"
 #include <stdio.h>
@@ -12,7 +13,7 @@
 #include "nvdec_drv.h"
 
 static NvU32 hi(NvU64 a) { return (NvU32)(a >> 8); }
-static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+static double now_ms(void) { struct timespec t; NV_CLOCK_GETTIME(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 
 // ---- boolean decoder (7.3) ----
 typedef struct { const uint8_t *b, *e; unsigned value, range; int bits; } Bd;

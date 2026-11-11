@@ -23,7 +23,7 @@ check('the profiles are listed only when NVMTL_NVENC_HEVC_444=1', 'if (hevc444_e
 check('the switch is read from the environment and is off when unset', 'getenv("NVMTL_NVENC_HEVC_444")' in src and 'return e && e[0]' in src)
 check('naming the profile selects 4:4:4 input formats only, so VideoToolbox converts anything else', 'if (s->want444 && !s->av1) {' in src
       and src.count('kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange') >= 3)
-check('the 10-bit 4:4:4 profile selects 10-bit', 'bool ten = CFEqual(v, kVTProfileLevel_HEVC_Main10_AutoLevel) || CFEqual(v, NV_PROFILE_MAIN44410);' in src)
+check('the 10-bit 4:4:4 profile selects 10-bit', 'bool ten = NV13(CFEqual(v, kVTProfileLevel_HEVC_Main10_AutoLevel), false) || CFEqual(v, NV_PROFILE_MAIN44410);' in src)
 check('the profile reads back as the one asked for', 'ProfileLevel) && s->hevc && s->want444) v = CFRetain(s->ten ? NV_PROFILE_MAIN44410 : NV_PROFILE_MAIN444)' in src)
 check('a frame that is not 4:4:4 under a 4:4:4 profile is refused', '(s->want444 && !s->c444) ||' in src)
 sys.exit(1 if fails else 0)

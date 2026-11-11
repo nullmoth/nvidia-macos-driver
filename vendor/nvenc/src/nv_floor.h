@@ -17,6 +17,16 @@
 
 #define NV_FLOOR __MAC_OS_X_VERSION_MIN_REQUIRED
 #define NV_AT_LEAST(v) (defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED >= (v))
+#if NV_AT_LEAST(101200)
+#define NV_FLOOR_HAS_10_12 1
+#else
+#define NV_FLOOR_HAS_10_12 0
+#endif
+#if NV_AT_LEAST(101300)
+#define NV_FLOOR_HAS_10_13 1
+#else
+#define NV_FLOOR_HAS_10_13 0
+#endif
 #if NV_AT_LEAST(101400)
 #define NV_FLOOR_HAS_10_14 1
 #else
@@ -101,6 +111,52 @@ static inline void *nv_aligned_alloc(size_t alignment, size_t size) {
     return posix_memalign(&p, alignment, size) == 0 ? p : NULL;
 }
 #define NV_ALIGNED_ALLOC(alignment, size) nv_aligned_alloc(alignment, size)
+#endif
+
+// HEVC and HDR metadata arrive with macOS 10.13 (the parameter-set calls, the HEVC profile levels, the mastering-display
+// and content-light keys, the sRGB, PQ and HLG transfer tags). A build for 10.12 or 10.11 serves only those two
+// systems, which have none of it, so it is compiled out there: no HEVC encoder or decoder is registered and the HDR
+// keys are not carried. NV13(with, without) picks an expression, NV13_DO(...) keeps or drops statements or table rows.
+#if NV_FLOOR_HAS_10_13
+#define NV_HEVC_HDR 1
+#define NV13(with, without) (with)
+#define NV13_DO(...) __VA_ARGS__
+#else
+#define NV_HEVC_HDR 0
+#define NV13(with, without) (without)
+#define NV13_DO(...)
+#endif
+// one transfer tag arrives with macOS 10.12
+#if NV_FLOOR_HAS_10_12
+#define NV12_DO(...) __VA_ARGS__
+#else
+#define NV12_DO(...)
+#endif
+
+// The POSIX clocks arrive with macOS 10.12; a build for 10.11 reads the Mach absolute time, which is what the monotonic
+// clocks report there.
+#if NV_FLOOR_HAS_10_12
+#define NV_CLOCK_GETTIME(id, ts) clock_gettime(id, ts)
+#define NV_CLOCK_NS(id) clock_gettime_nsec_np(id)
+#else
+#include <time.h>
+#include <mach/mach_time.h>
+static inline unsigned long long nv_mach_ns(void) {
+    static mach_timebase_info_data_t tb;
+    if (!tb.denom) mach_timebase_info(&tb);
+    return mach_absolute_time() * tb.numer / tb.denom;
+}
+static inline unsigned long long nv_clock_ns(void) {
+    if (__builtin_available(macOS 10.12, *)) return clock_gettime_nsec_np(_CLOCK_MONOTONIC_RAW);
+    return nv_mach_ns();
+}
+static inline int nv_clock_gettime(struct timespec *ts) {
+    if (__builtin_available(macOS 10.12, *)) return clock_gettime(_CLOCK_MONOTONIC, ts);
+    const unsigned long long ns = nv_mach_ns();
+    ts->tv_sec = (time_t)(ns / 1000000000ull); ts->tv_nsec = (long)(ns % 1000000000ull); return 0;
+}
+#define NV_CLOCK_GETTIME(id, ts) nv_clock_gettime(ts)
+#define NV_CLOCK_NS(id) nv_clock_ns()
 #endif
 
 // A table entry that holds the address of a symbol newer than the floor holds NULL on an older system.
