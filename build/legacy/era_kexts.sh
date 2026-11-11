@@ -74,6 +74,14 @@ link() { local name=$1; shift; mkdir -p "$O/$name.kext/Contents/MacOS"
 [ "$(grep -cE "$RX" "$O/NVRMFB.err")" = 0 ] && link NVRMFB "$O/NVRMFB.o"
 [ "$(grep -cE "$RX" "$O/NVRMAGDC.err")" = 0 ] && link NVRMAGDC "$O/NVRMAGDC.o"
 [ "$(grep -cE "$RX" "$O/NVAccel.err")" = 0 ] && link NVAccel "$O/NVAccel.o"
+# Before 11 the kernel links kexts itself and cannot reach a family method that is not exported: carry our own
+# copies of the ones Apple's headers define inline (inherited_asm.py), and link the accelerator again with them.
+if [ -n "${FAMBIN:-}" ] && [ -f "$FAMBIN" ] && [ -f "$O/NVAccel.kext/Contents/MacOS/NVAccel" ]; then
+  python3 "$(dirname "$0")/inherited_asm.py" "$FAMBIN" "$O/NVAccel.kext/Contents/MacOS/NVAccel" "$O/NVAccel-inherited.s" | sed "s/^/era $ERA NVAccel: /"
+  if grep -q globl "$O/NVAccel-inherited.s"; then
+    xcrun clang -arch x86_64 -mmacosx-version-min=$MV -c "$O/NVAccel-inherited.s" -o "$O/NVAccel-inherited.o" && link NVAccel "$O/NVAccel.o" "$O/NVAccel-inherited.o"
+  fi
+fi
 # Bundle what linked: the property lists name kernel interface version 8.0 (10.4), so one list serves every release.
 plist() { case $1 in NVRM) echo "$SRC/NVRM/Info.plist";; NVRMFB) echo "$SRC/NVRMFB/fb/Info.plist";; NVRMAGDC) echo "$SRC/NVRMAGDC/Info.plist";; NVAccel) echo "$SRC/NVRM/accel/Info.plist";; esac; }
 KX=()
