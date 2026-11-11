@@ -14,12 +14,19 @@ for c, cv in fam.items():
     S = cv["slots"]; pure = [i for i, s in enumerate(S) if s == "___cxa_pure_virtual"]
     names = [meth(s) if s != "___cxa_pure_virtual" else None for s in S]
     donors = []
+    famdef = [i for i, x in enumerate(S) if re.match(r"__ZNK?\d+(IOAccel|IOGraphicsAccelerator)", x)]   # slots the family itself defines
     for vk, vv in vend.items():
-        V = vv["slots"]
-        if len(V) < len(S): continue
-        agree = sum(1 for i in range(len(S)) if S[i] == V[i]); own = sum(1 for i in range(len(S)) if S[i] != V[i])
-        if agree >= max(20, int(0.5 * len(S))): donors.append((agree, vk, V))
-    donors.sort(reverse=True)
+        V = vv["slots"]; vcls = vk.split(":", 1)[1]; vpre = ("__ZN%d%s" % (len(vcls), vcls), "__ZNK%d%s" % (len(vcls), vcls))
+        if len(V) < len(S) or not famdef: continue
+        # a real subclass keeps every family-defined slot or overrides it with a method of its OWN class, and fills
+        # each pure slot with a method of its own class or of a class between it and the family base
+        ok = all(V[i] == S[i] or V[i].startswith(vpre) or V[i] == "___cxa_pure_virtual" or not re.match(r"__ZNK?\d+(IOAccel|IOGraphicsAccelerator)", V[i]) for i in famdef)
+        keep = sum(1 for i in famdef if V[i] == S[i])
+        base_agree = sum(1 for i in range(len(S)) if i not in pure and S[i] == V[i])
+        if ok and keep >= max(3, int(0.5 * len(famdef))) and base_agree >= int(0.7 * (len(S) - len(pure))): donors.append((keep, vk, V))
+    # the family's own subclasses are the authority for a base's slot names; vendor drivers come after
+    famfile = sys.argv[1].split("/")[-1].replace(".json", "")
+    donors.sort(key=lambda d: (d[1].split(":")[0] == famfile, d[0]), reverse=True)
     for i in pure:
         total_pure += 1
         for agree, vk, V in donors:

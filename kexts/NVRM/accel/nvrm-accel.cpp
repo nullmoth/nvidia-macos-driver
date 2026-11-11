@@ -30,6 +30,13 @@
 #include "IOAccelLegacyDisplayMachine.h"
 #include "IOAccelTask.h"
 #include "IOAccelMemoryMap.h"
+// Where Apple's video-memory object keeps its physical address (the field its own withPhysicalAddress and
+// getPhysicalSegment use): +0xc8 from 10.15 on, +0xb8 on 10.13 and 10.14, whose memory base class is 16 bytes smaller.
+#if defined(NM_ERA) && NM_ERA < 1015
+enum { kNvVidMemPhysOff = 0xb8 };
+#else
+enum { kNvVidMemPhysOff = 0xc8 };
+#endif
 #include "../nvrm_gpuva_abi.h"
 #include "nvaccel_lock_owner.h"
 #include "../nvrm_devtab.h"
@@ -1165,7 +1172,7 @@ IOAccelMemory *NVDisplayPipe::initFramebufferResource(unsigned int index, IOAcce
     m->fScanout = true;
     m->fPhys    = r.phys;
     m->fBytes   = r.actualSize;
-    *(volatile unsigned long long *)((unsigned char *)m + 0xc8) = r.phys;
+    *(volatile unsigned long long *)((unsigned char *)m + kNvVidMemPhysOff) = r.phys;
     ALOG("NVDisplayPipe::initFramebufferResource(head %u, index %u, res %p) -> vidmem %p over the LIVE SCANOUT "
          "phys 0x%llx %u x %u pitch %u (%llu bytes)",
          head, index, res, m, (unsigned long long)r.phys, r.width, r.height, r.pitch,
@@ -1235,7 +1242,7 @@ bool NVVidMemory::allocPhysical()
 {
     if (fScanout) {
         if (!fPhys || !fBytes) { ALOG("NVVidMemory::allocPhysical(%p): scanout with no address", this); return false; }
-        *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = fPhys;
+        *(volatile unsigned long long *)((unsigned char *)this + kNvVidMemPhysOff) = fPhys;
         ALOG("NVVidMemory::allocPhysical(%p): SCANOUT phys 0x%llx (%llu bytes) -- already backed, nothing allocated",
              this, fPhys, fBytes);
         return true;
@@ -1253,7 +1260,7 @@ bool NVVidMemory::allocPhysical()
         if (fParkBytes >= want) {
             fRmHandle = fParkHandle; fKva = fParkKva; fPhys = fParkPhys; fBytes = fParkBytes; fAllocationCookie = fParkCookie;
             fParkHandle = nullptr; fParkKva = nullptr; fParkPhys = fParkBytes = fParkCookie = 0;
-            *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = fPhys;
+            *(volatile unsigned long long *)((unsigned char *)this + kNvVidMemPhysOff) = fPhys;
             OSAddAtomic64(1, &gCntVmUnparked);
             return true;
         }
@@ -1283,7 +1290,7 @@ bool NVVidMemory::allocPhysical()
     }
     fRmHandle = r.handle; fKva = r.kva; fPhys = r.phys; fBytes = r.actualSize; fAllocationCookie = r.allocationCookie;
     OSAddAtomic64(1, &gCntVmAlloc); OSAddAtomic64((SInt64)fBytes, &gCntVmAllocBytes);
-    *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = fPhys;
+    *(volatile unsigned long long *)((unsigned char *)this + kNvVidMemPhysOff) = fPhys;
     ALOGV("NVVidMemory::allocPhysical(%p): %llu bytes of REAL VRAM -- phys 0x%llx kva %p [BAR1 %llu]",
          this, fBytes, fPhys, fKva, r.mappedTotal);
     return true;
@@ -1294,7 +1301,7 @@ void NVVidMemory::deallocPhysical()
     if (fScanout) {
         ALOG("NVVidMemory::deallocPhysical(%p): SCANOUT -- not ours to free, only forgetting it", this);
         fPhys = 0; fBytes = 0; fScanout = false;
-        *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = 0;
+        *(volatile unsigned long long *)((unsigned char *)this + kNvVidMemPhysOff) = 0;
         return;
     }
     if (!fRmHandle) return;
@@ -1312,7 +1319,7 @@ void NVVidMemory::deallocPhysical()
         releaseVram(fRmHandle, fKva, fBytes, fAllocationCookie);
     }
     fRmHandle = nullptr; fKva = nullptr; fPhys = 0; fBytes = 0; fAllocationCookie = 0;
-    *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = 0;
+    *(volatile unsigned long long *)((unsigned char *)this + kNvVidMemPhysOff) = 0;
 }
 
 void NVVidMemory::releaseVram(void *handle, void *kva, unsigned long long bytes, unsigned long long cookie)
@@ -1342,6 +1349,22 @@ void NVVidMemory::free()
     IOAccelVidMemory::free();
 }
 
+#if defined(NM_ERA) && NM_ERA < 1015
+// macOS 10.13 and 10.14: the IOSurface kext exports no id, size or format accessors (drivers read the object), and its
+// memory-descriptor accessor is not const. The fields are where 10.15's own accessors read them (id +0xc, width +0x90,
+// height +0x94, bytes per row +0x98, pixel format +0xa4); every 10.14 method that touches them on 10.15 still does.
+extern "C" void *_ZN9IOSurface19getMemoryDescriptorEv(void *surface);
+class IOSurface {
+    template <typename T> T nmField(unsigned off) const { return *(const volatile T *)((const unsigned char *)this + off); }
+public:
+    IOMemoryDescriptor *getMemoryDescriptor() const { return (IOMemoryDescriptor *)_ZN9IOSurface19getMemoryDescriptorEv((void *)this); }
+    unsigned long long  getWidth() const { return nmField<unsigned int>(0x90); }
+    unsigned long long  getHeight() const { return nmField<unsigned int>(0x94); }
+    unsigned long long  getBytesPerRow() const { return nmField<unsigned int>(0x98); }
+    unsigned int        getPixelFormat() const { return nmField<unsigned int>(0xa4); }
+    unsigned int        getSurfaceID() const { return nmField<unsigned int>(0xc); }
+};
+#else
 class IOSurface {
 public:
     IOMemoryDescriptor *getMemoryDescriptor() const;
@@ -1351,6 +1374,7 @@ public:
     unsigned int        getPixelFormat() const;
     unsigned int        getSurfaceID() const;
 };
+#endif
 class IOAccelDisplayPipeTransaction2 {
 public:
     IOSurface *getPlaneIOSurface(unsigned int, unsigned int) const;
@@ -1946,8 +1970,15 @@ void *_ZN13IOSurfaceRoot13lookupSurfaceEjP4task(void *root, unsigned int id, tas
 void *_ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej(void *accel, void *surface, unsigned int plane);
 void  _ZN16IOAccelVidMemory4wireEv(void *vidmem);
 void  _ZN20IOSurfaceDeviceCache10setCurrentEv(void *cache);
+#if defined(NM_ERA) && NM_ERA < 1015
+}
+static inline void *_ZNK9IOSurface19getMemoryDescriptorEv(void *surface) { return _ZN9IOSurface19getMemoryDescriptorEv(surface); }
+static inline unsigned int _ZNK9IOSurface12getSurfaceIDEv(void *surface) { return ((const IOSurface *)surface)->getSurfaceID(); }
+extern "C" {
+#else
 void *_ZNK9IOSurface19getMemoryDescriptorEv(void *surface);
 unsigned int _ZNK9IOSurface12getSurfaceIDEv(void *surface);
+#endif
 void  _ZN22IOGraphicsAccelerator29lock_busyEv(void *accel);
 void  _ZN22IOGraphicsAccelerator211unlock_busyEv(void *accel);
 }
@@ -2338,7 +2369,13 @@ static void nvAccelIopCachePut(IOSurface *s, NVResource *res, NVVidMemory *vm, v
     if (drop) ((OSObject *)drop)->release();
 }
 extern "C" {
+#if defined(NM_ERA) && NM_ERA < 1015
+// one display-pipe class on these releases, so the same function carries that class's name
+void _ZN19IOAccelDisplayPipe226signalTransactionInterruptEPv(void *pipe, void *arg);
+#define _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv _ZN19IOAccelDisplayPipe226signalTransactionInterruptEPv
+#else
 void _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(void *pipe, void *arg);
+#endif
 struct thread_call *thread_call_allocate(void (*func)(void *, void *), void *param0);
 int thread_call_enter(struct thread_call *call);
 }
