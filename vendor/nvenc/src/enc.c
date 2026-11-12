@@ -1,5 +1,6 @@
 // enc.c: see enc.h.
 #include "enc.h"
+#include "nv_floor.h"
 #include "h264enctmpl.h"
 #include "blocklinear.h"
 #include "h264hdr.h"
@@ -23,7 +24,7 @@
 enum { OFF_ME = 0x400, OFF_MD = 0x500, OFF_Q = 0x600, OFF_SLICE = 0x700, OFF_AV1_TILE = 0x800, SETUP_SIZE = 0x1000 };   // room for ENC_MAX_SLICES controls
 enum { LOG2_MAX_FRAME_NUM = 8 };
 
-static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+static double now_ms(void) { struct timespec t; NV_CLOCK_GETTIME(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 
 // AV1: the RC data buffer's activity and pass-2 areas (the driver's offsets: 0x100 + n, 0x100 + 2n; n = 64 bytes per MB, in pages)
 static size_t av1_rc_area(const Enc *e) { return (((size_t)e->wmb * e->hmb * 64) + 0xfff) & ~(size_t)0xfff; }

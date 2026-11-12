@@ -24,6 +24,7 @@
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
+#include "../nvmtl_avail.h"
 
 static int g_trace_l = -1;
 #define LLOG(...) do { if (g_trace_l < 0) g_trace_l = getenv("ELFHOST_TRACE") != NULL; \

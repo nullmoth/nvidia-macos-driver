@@ -22,9 +22,9 @@ def check(name, ok, detail=''):
 
 
 check('the H.264 and HEVC encoders declare EnableLowLatencyRateControl as a selection property',
-      'sk[] = { kVTCompressionPropertyKey_ProfileLevel, kVTVideoEncoderSpecification_EnableLowLatencyRateControl }' in src)
+      'sk[] = { kVTCompressionPropertyKey_ProfileLevel, NV_SYM(11_3, 11.3, kVTVideoEncoderSpecification_EnableLowLatencyRateControl) }' in src)
 check('the key is accepted when set, so a session that names it is not refused',
-      'CFEqual(key, kVTVideoEncoderSpecification_EnableLowLatencyRateControl)) {' in src)
+      'NV_IS(11_3, 11.3, key, kVTVideoEncoderSpecification_EnableLowLatencyRateControl)) {' in src)
 
 if len(sys.argv) >= 3 and platform.system() == 'Darwin' and shutil.which('clang'):
     lib, hdr = sys.argv[1], sys.argv[2]

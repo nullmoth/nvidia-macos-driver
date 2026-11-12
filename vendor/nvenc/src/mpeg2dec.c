@@ -1,5 +1,6 @@
 // mpeg2dec.c: see mpeg2dec.h. Section numbers refer to ISO/IEC 13818-2.
 #include "mpeg2dec.h"
+#include "nv_floor.h"
 #include "blocklinear.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,7 +12,7 @@
 #include "nvdec_drv.h"
 
 static NvU32 hi(NvU64 a) { return (NvU32)(a >> 8); }
-static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+static double now_ms(void) { struct timespec t; NV_CLOCK_GETTIME(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 
 // scan 0 (zigzag, Figure 7-2): scan position -> raster position
 static const uint8_t zigzag[64] = {

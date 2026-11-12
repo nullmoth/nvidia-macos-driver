@@ -1,5 +1,6 @@
 // vp9dec.c: see vp9dec.h. Section numbers refer to the VP9 specification v0.7.
 #include "vp9dec.h"
+#include "nv_floor.h"
 #include "vp9tables.h"
 #include "blocklinear.h"
 #include <stdio.h>
@@ -12,7 +13,7 @@
 #include "nvdec_drv.h"
 
 static NvU32 hi(NvU64 a) { return (NvU32)(a >> 8); }
-static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+static double now_ms(void) { struct timespec t; NV_CLOCK_GETTIME(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 
 int vp9dec_open(Vp9Dec *d, Rm *rm, unsigned maxW, unsigned maxH, int bit_depth)
 {

@@ -1789,6 +1789,7 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
 - (void)removeAllDebugMarkers {}
 - (id)newSharedTextureHandle {
     if (_parent || !_shareable || !_surf) return nil;
+  if (@available(macOS 10.14, *)) {   // shared texture handles arrive with macOS 10.14
     if (![MTLSharedTextureHandle instancesRespondToSelector:@selector(initWithIOSurface:label:)]) {
         static int said; if (!said++) nvlog("newSharedTextureHandle: MTLSharedTextureHandle has no -initWithIOSurface:label: on this OS - nil (apps1)");
         return nil; }
@@ -1796,6 +1797,8 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
     if (!h) { static int said; if (said++ < 4) nvlog("newSharedTextureHandle: Metal refused surface %u (its kMetalRegistryID names no live device) - nil (apps1)",
                                                    IOSurfaceGetID(_surf)); }
     return h;
+  }
+  return nil;
 }
 - (id<MTLTexture>)remoteStorageTexture { return nil; }
 - (id<MTLTexture>)newRemoteTextureViewForDevice:(id<MTLDevice>)d {
@@ -1967,8 +1970,9 @@ static NVMTLTexture *nvmtl_texbuf_view(NVMTLTexture *t, MTLPixelFormat f) {
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (!t->_backBuf || nvmtl_pixfmt_public(f, &vkf, &bpp, &a8) || a8 || !bpp || !t->_backBPR || t->_backBPR % bpp) {
         nvlog("newTextureView: texture-buffer view as format %lu is not carried -> nil", (unsigned long)f); return nil; }
-    MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:f width:t->_backBPR / bpp
-                                                                            resourceOptions:[t->_backBuf resourceOptions] usage:t->_usage];
+    MTLTextureDescriptor *d = NVMTL_SINCE(10.14, MTLTextureDescriptor *, [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:f width:t->_backBPR / bpp
+                                                                            resourceOptions:[t->_backBuf resourceOptions] usage:t->_usage], nil);
+    if (!d) return nil;   // texture buffers arrive with macOS 10.14
     return nvmtl_texbuf_make(t->_backBuf, d, t->_backOff);
 }
 - (id<MTLTexture>)nvmtlViewWithFormat:(MTLPixelFormat)f levels:(NSRange)levels {
@@ -2064,7 +2068,7 @@ static uint32_t nvmtl_tex_attach_vkfmt(NVMTLTexture *t, int *a8) {
     NSRange levels = [[d valueForKey:@"levelRange"] rangeValue], slices = [[d valueForKey:@"sliceRange"] rangeValue];
     MTLTextureSwizzleChannels sw = { 0, 0, 0, 0 };
     { id v = [d valueForKey:@"swizzle"];
-      if ([v isKindOfClass:[NSValue class]] && !strcmp([(NSValue *)v objCType], @encode(MTLTextureSwizzleChannels))) [(NSValue *)v getValue:&sw size:sizeof sw]; }
+      if ([v isKindOfClass:[NSValue class]] && !strcmp([(NSValue *)v objCType], @encode(MTLTextureSwizzleChannels))) { if (@available(macOS 10.13, *)) [(NSValue *)v getValue:&sw size:sizeof sw]; else [(NSValue *)v getValue:&sw]; } }
     if (f == MTLPixelFormatInvalid) f = self.pixelFormat;
     if (!levels.length) levels = NSMakeRange(0, self.mipmapLevelCount);
     if (!slices.length) slices = NSMakeRange(0, self.textureType == MTLTextureTypeCube ? 6 : self.textureType == MTLTextureTypeCubeArray ? self.arrayLength * 6 : self.arrayLength);
@@ -2978,7 +2982,7 @@ static size_t nvmtl_fc_width(NSUInteger dataType)
         NSMutableDictionary *indices=[NSMutableDictionary new];
         for(NSTextCheckingResult *m in [re matchesInString:air options:0 range:NSMakeRange(0,air.length)])
             indices[[air substringWithRange:[m rangeAtIndex:1]]]=@([[air substringWithRange:[m rangeAtIndex:2]] longLongValue]);
-        MTLFunctionConstantValues *merged=[MTLFunctionConstantValues new];
+        MTLFunctionConstantValues *merged=NVMTL_SINCE(10.12, MTLFunctionConstantValues *, [MTLFunctionConstantValues new], nil);
         NSUInteger applied=0;
         for(id v in named) {
             Ivar ni=class_getInstanceVariable([v class],"_name"),ti=class_getInstanceVariable([v class],"_dataType"),di=class_getInstanceVariable([v class],"_data");
@@ -3163,9 +3167,9 @@ static uint64_t nvmtl_resid_pipe(id o, uint64_t *slot) {
 - (MTLSize)requiredThreadsPerObjectThreadgroup { return _reqObj; }
 - (MTLSize)requiredThreadsPerMeshThreadgroup { return _reqMesh; }
 - (NSString *)label { return _descriptor.label; }
-- (BOOL)supportIndirectCommandBuffers { return _descriptor.supportIndirectCommandBuffers; }
+- (BOOL)supportIndirectCommandBuffers { return NVMTL_SINCE(10.14, BOOL, _descriptor.supportIndirectCommandBuffers, NO); }
 - (MTLResourceID)gpuResourceID {
-    MTLResourceID r; r._impl = _descriptor.supportIndirectCommandBuffers ? nvmtl_resid_pipe(self, &_resid) : 0; return r; }
+    MTLResourceID r; r._impl = NVMTL_SINCE(10.14, BOOL, _descriptor.supportIndirectCommandBuffers, NO) ? nvmtl_resid_pipe(self, &_resid) : 0; return r; }
 - (NSUInteger)imageblockSampleLength { return 0; }
 - (NSUInteger)imageblockMemoryLengthForDimensions:(MTLSize)d { return 0; }
 - (MTLShaderValidation)shaderValidation { return MTLShaderValidationDisabled; }
@@ -3592,10 +3596,10 @@ static void nvmtl_use_heap(NVMTLCommandBuffer *cb, id<MTLHeap> value) {
 }
 
 @implementation NVMTLCounter
-- (NSString *)name { return MTLCommonCounterTimestamp; }
+- (NSString *)name { return NVMTL_SINCE(10.15, NSString *, MTLCommonCounterTimestamp, @"timestamp"); }
 @end
 @implementation NVMTLCounterSet
-- (NSString *)name { return MTLCommonCounterSetTimestamp; }
+- (NSString *)name { return NVMTL_SINCE(10.15, NSString *, MTLCommonCounterSetTimestamp, @"timestamp"); }
 - (NSArray *)counters { return _counters; }
 @end
 id<MTLCounterSet> nvmtl_timestamp_counter_set(void)
@@ -3947,9 +3951,9 @@ static NSString *nvmtl_sampvar_key(MTLRenderPipelineDescriptor *d, NVMTLFunction
     static int off = -1; if (off < 0) off = getenv("NVMTL_NO_SAMPVAR") != NULL;
     if (off || !d || !vf || !vf->_air || (ff && !ff->_air)) return nil;
     MTLRenderPipelineDescriptor *c = [d copy]; c.vertexFunction = nil; c.fragmentFunction = nil; c.label = @"";
-    for (MTLLinkedFunctions *lf in @[c.vertexLinkedFunctions ?: (id)[NSNull null], c.fragmentLinkedFunctions ?: (id)[NSNull null]]) {
+    for (MTLLinkedFunctions *lf in @[NVMTL_SINCE(12.0, id, c.vertexLinkedFunctions, nil) ?: (id)[NSNull null], NVMTL_SINCE(12.0, id, c.fragmentLinkedFunctions, nil) ?: (id)[NSNull null]]) {
         if ((id)lf == [NSNull null]) continue;
-        if (lf.functions.count || lf.binaryFunctions.count || lf.groups.count || lf.privateFunctions.count) return nil;
+        if (lf.functions.count || NVMTL_SINCE(11.0, NSUInteger, lf.binaryFunctions.count, 0) || lf.groups.count || NVMTL_SINCE(12.0, NSUInteger, lf.privateFunctions.count, 0)) return nil;
     }
     NSString *ds = c.description; NSRange nl = [ds rangeOfString:@"\n"];
     if (nl.location != NSNotFound) ds = [ds substringFromIndex:nl.location];
@@ -4099,10 +4103,10 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     NVMTLCommandBuffer *cb = _cb;
     memset(&_pass, 0, sizeof _pass); cb->_c.depth_view = NULL; _hzAttSkip = 0;
     for (int i = 0; i < NVMTL_NCOL; i++) _colTex[i] = nil;
-    _tileW = (uint32_t)d.tileWidth; _tileH = (uint32_t)d.tileHeight; _tilePs = nil;
+    _tileW = (uint32_t)NVMTL_SINCE(11.0, NSUInteger, d.tileWidth, 0); _tileH = (uint32_t)NVMTL_SINCE(11.0, NSUInteger, d.tileHeight, 0); _tilePs = nil;
     MTLSamplePosition sample[8];
-    NSUInteger sampleCount = [d getSamplePositions:NULL count:0];
-    if (sampleCount && sampleCount <= 8) [d getSamplePositions:sample count:sampleCount];
+    NSUInteger sampleCount = NVMTL_SINCE(10.13, NSUInteger, [d getSamplePositions:NULL count:0], 0);
+    if (sampleCount && sampleCount <= 8) { if (@available(macOS 10.13, *)) [d getSamplePositions:sample count:sampleCount]; }
     if (sampleCount == 1) return [self nvmtlSamplePositionError:@"sample positions: custom single-sample pattern is not a Metal descriptor contract"];
     if (sampleCount > 8) return [self nvmtlSamplePositionError:@"sample positions: more than eight positions; pass refused"];
     if (sampleCount) {
@@ -4111,10 +4115,10 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
             _pass.sample_pattern.position[i] = (nvmtl_sample_position){ sample[i].x, sample[i].y };
         if (!nvmtl_sample_pattern_valid(&_pass.sample_pattern)) return [self nvmtlSamplePositionError:@"sample positions: invalid positions; pass refused"];
     }
-    _pass.depth_store_options = (uint32_t)d.depthAttachment.storeActionOptions;
+    _pass.depth_store_options = (uint32_t)NVMTL_SINCE(10.13, NSUInteger, d.depthAttachment.storeActionOptions, 0);
     if (d.depthAttachment.storeAction == MTLStoreActionCustomSampleDepthStore)
         _pass.depth_store_options |= MTLStoreActionOptionCustomSamplePositions;
-    _pass.stencil_store_options = (uint32_t)d.stencilAttachment.storeActionOptions;
+    _pass.stencil_store_options = (uint32_t)NVMTL_SINCE(10.13, NSUInteger, d.stencilAttachment.storeActionOptions, 0);
     if (d.stencilAttachment.texture && _pass.stencil_store_options)
         return [self nvmtlSamplePositionError:@"sample positions: stencil store options are illegal"];
     if ((_pass.depth_store_options | _pass.stencil_store_options) & ~MTLStoreActionOptionCustomSamplePositions)
@@ -4184,8 +4188,8 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
                 MTLRenderPassAttachmentDescriptor *rw_ = dr ? (MTLRenderPassAttachmentDescriptor *)da : (MTLRenderPassAttachmentDescriptor *)sa;
                 if (nvmtl_vk_cmd_attachment_view_n(&cb->_c, [r nvi], 1, r->_baseLevel + (uint32_t)rw_.resolveLevel, r->_baseSlice + (uint32_t)rw_.resolveSlice, NL, 0, 0, &_pass.dresview, &rw, &rh)) return NO;
                 _pass.dres = [r nvi];
-                _pass.dresmode = dr ? 1u + (uint32_t)da.depthResolveFilter : 0u;
-                _pass.sresmode = sr ? 1u + (uint32_t)sa.stencilResolveFilter : 0u;
+                _pass.dresmode = dr ? 1u + (uint32_t)NVMTL_SINCE(10.14, NSUInteger, da.depthResolveFilter, 0) : 0u;
+                _pass.sresmode = sr ? 1u + (uint32_t)NVMTL_SINCE(10.14, NSUInteger, sa.stencilResolveFilter, 0) : 0u;
                 [cb->_resources addObject:r];
             } else if (drx) { nvlog("encoder: par1 depth/stencil resolve texture is a %s, not our texture — pass REFUSED", object_getClassName(drx)); return NO; }
         }
@@ -4201,18 +4205,19 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
         if (sa.texture && nvmtl_load_keeps(sa.loadAction)) load |= NVMTL_LOAD_STENCIL;
     }
     _pass.clear_depth = (float)da.clearDepth; _pass.clear_stencil = sa.clearStencil;
+    const NSUInteger rtW = NVMTL_SINCE(10.15, NSUInteger, d.renderTargetWidth, 0), rtH = NVMTL_SINCE(10.15, NSUInteger, d.renderTargetHeight, 0);
     if (!any) {
         // A pass with no attachments: the fragment shader writes through images or buffers only, sized by the descriptor's
         // renderTargetWidth/Height (Blender Eevee's shadow pages, 8192x8192 with image atomics). Vulkan draws it as a render
         // pass with no attachments and a framebuffer of that size. Refusing it crashed Blender on its first shadowed frame
         // (#152). Metal requires the size for such a pass, so a pass without one is still refused.
-        if (!d.renderTargetWidth || !d.renderTargetHeight) {
+        if (!rtW || !rtH) {
             nvlog("encoder: apps2 a render pass with no attachments and no renderTargetWidth/Height — pass REFUSED"); return NO; }
-        w = (uint32_t)d.renderTargetWidth; h = (uint32_t)d.renderTargetHeight;
+        w = (uint32_t)rtW; h = (uint32_t)rtH;
         static int said; if (said++ < 4) nvlog("encoder: render pass with no attachments, %ux%u (writes through images/buffers only)", w, h);
     }
-    if (d.renderTargetWidth && d.renderTargetWidth < w) w = (uint32_t)d.renderTargetWidth;
-    if (d.renderTargetHeight && d.renderTargetHeight < h) h = (uint32_t)d.renderTargetHeight;
+    if (rtW && rtW < w) w = (uint32_t)rtW;
+    if (rtH && rtH < h) h = (uint32_t)rtH;
     _pass.load = _load = load; _pass.w = w; _pass.h = h; _pass.layers = NL;
     { static uint32_t seen[16]; static unsigned nseen;
       const uint32_t shape = (uint32_t)d.colorAttachments[0].loadAction
@@ -5789,7 +5794,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
                   why ? "; range kept out: " : "", why ? why : "");
             return nil; }
     }
-    t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)d.hazardTrackingMode << MTLResourceHazardTrackingModeShift)
+    t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)NVMTL_SINCE(10.15, NSUInteger, d.hazardTrackingMode, 0) << MTLResourceHazardTrackingModeShift)
              | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
     t->_fmt = d.pixelFormat; t->_mips = mips; t->_usage = d.usage;
     t->_q = nvmtl_device_queue(); t->_stex = t->_i.storage == 1; t->_rbSwap = rbSwapPl;
@@ -6376,9 +6381,9 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     // device's own timestamp counters, and take the layer only where ours needs <= 90% of MPS's time.
     id<MTLCounterSampleBuffer> tsb = nil;
     if (nvmtl_nvconv_timed()) {
-        MTLCounterSampleBufferDescriptor *td = [MTLCounterSampleBufferDescriptor new];
-        td.counterSet = nvmtl_timestamp_counter_set(); td.sampleCount = 2 + 2 * NVC_NC * NVC_NVAR; td.storageMode = MTLStorageModeShared;
-        tsb = [dev newCounterSampleBufferWithDescriptor:td error:nil];
+        MTLCounterSampleBufferDescriptor *td = NVMTL_SINCE(10.15, MTLCounterSampleBufferDescriptor *, [MTLCounterSampleBufferDescriptor new], nil);
+        if (@available(macOS 10.15, *)) { td.counterSet = nvmtl_timestamp_counter_set(); td.sampleCount = 2 + 2 * NVC_NC * NVC_NVAR; td.storageMode = MTLStorageModeShared; }
+        tsb = td ? [dev newCounterSampleBufferWithDescriptor:td error:nil] : nil;   // no counter sample buffers before macOS 10.15
     }
     if (tsb) [e sampleCountersInBuffer:tsb atSampleIndex:0 withBarrier:YES];
     e->_nvcIn = YES; [e dispatchThreadgroups:grid threadsPerThreadgroup:tg]; e->_nvcIn = NO;
@@ -7466,9 +7471,11 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     NVMTLParallelRenderCommandEncoder *p = [NVMTLParallelRenderCommandEncoder new];
     _nEnc++;
     p->_cb = self; p->_desc = [d copy]; p->_subs = [NSMutableArray new]; p->_lock = [NSLock new];
-    MTLSamplePosition copiedSample[8]; NSUInteger copiedCount = [d getSamplePositions:NULL count:0];
-    if (copiedCount && copiedCount <= 8) [d getSamplePositions:copiedSample count:copiedCount];
-    if (copiedCount <= 8) [p->_desc setSamplePositions:copiedSample count:copiedCount];
+    MTLSamplePosition copiedSample[8]; NSUInteger copiedCount = NVMTL_SINCE(10.13, NSUInteger, [d getSamplePositions:NULL count:0], 0);
+    if (@available(macOS 10.13, *)) {   // a pass descriptor has no sample positions before macOS 10.13
+        if (copiedCount && copiedCount <= 8) [d getSamplePositions:copiedSample count:copiedCount];
+        if (copiedCount <= 8) [p->_desc setSamplePositions:copiedSample count:copiedCount];
+    }
 
     nvlog("parallelRenderCommandEncoderWithDescriptor: -> %p (sub-encoders record, endEncoding replays into one pass)", (__bridge void *)p);
     return p;
@@ -7517,7 +7524,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 // lookup per process. A failed report switches the reporting off for the process.
 static io_service_t nvmtl_late_service(void) {
     io_iterator_t it = 0; io_service_t found = 0, svc;
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("NMXGPU"), &it) != KERN_SUCCESS) return 0;
+    if (IOServiceGetMatchingServices(NVMTL_IO_MAIN_PORT, IOServiceMatching("NMXGPU"), &it) != KERN_SUCCESS) return 0;
     while (!found && (svc = IOIteratorNext(it))) {
         CFTypeRef pct = IORegistryEntryCreateCFProperty(svc, CFSTR("nullmoth-floor-percent"), kCFAllocatorDefault, 0);
         if (pct) { CFRelease(pct); found = svc; } else IOObjectRelease(svc);
@@ -7648,7 +7655,8 @@ static void nvmtl_late_present(void) {
     [self nvmtlRecordDrawable:drawable presentation:^{ [drawable presentAtTime:t]; }];
 }
 - (void)presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)d {
-    [self nvmtlRecordDrawable:drawable presentation:^{ [drawable presentAfterMinimumDuration:d]; }];
+    // a drawable takes a minimum duration from macOS 10.15.4; before that it is presented at once
+    [self nvmtlRecordDrawable:drawable presentation:^{ if (@available(macOS 10.15.4, *)) [drawable presentAfterMinimumDuration:d]; else [drawable present]; }];
 }
 
 - (void)pushDebugGroup:(NSString *)g { nvtrace("GROUP %s", g.UTF8String ?: "?"); }
@@ -8255,12 +8263,12 @@ static int nvp_fast_off(void) {
 - (void)setColorStoreAction:(MTLStoreAction)a atIndex:(NSUInteger)i { _desc.colorAttachments[i].storeAction = a; }
 - (void)setDepthStoreAction:(MTLStoreAction)a { _desc.depthAttachment.storeAction = a; }
 - (void)setStencilStoreAction:(MTLStoreAction)a { _desc.stencilAttachment.storeAction = a; }
-- (void)setColorStoreActionOptions:(MTLStoreActionOptions)o atIndex:(NSUInteger)i { _desc.colorAttachments[i].storeActionOptions = o; }
-- (void)setDepthStoreActionOptions:(MTLStoreActionOptions)o { _desc.depthAttachment.storeActionOptions = o; }
+- (void)setColorStoreActionOptions:(MTLStoreActionOptions)o atIndex:(NSUInteger)i { if (@available(macOS 10.13, *)) _desc.colorAttachments[i].storeActionOptions = o; }
+- (void)setDepthStoreActionOptions:(MTLStoreActionOptions)o { if (@available(macOS 10.13, *)) _desc.depthAttachment.storeActionOptions = o; }
 - (void)setStencilStoreActionOptions:(MTLStoreActionOptions)o {
     if (o) [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain
         code:MTLCommandBufferErrorInternal userInfo:@{NSLocalizedDescriptionKey:@"stencil store options are illegal"}]];
-    _desc.stencilAttachment.storeActionOptions = o;
+    if (@available(macOS 10.13, *)) _desc.stencilAttachment.storeActionOptions = o;
 }
 - (void)insertDebugSignpost:(NSString *)s {}
 - (void)pushDebugGroup:(NSString *)g { nvtrace("GROUP %s", g.UTF8String ?: "?"); }
@@ -8311,17 +8319,17 @@ static int nvmtl_curve_from_descriptor(id g, nvmtl_geom *o, NSMutableSet *track)
 uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int *instance, uint32_t *instance_count, NSMutableSet *track)
 {
     *instance = 0; *instance_count = 0;
-    if ([desc isKindOfClass:[MTLInstanceAccelerationStructureDescriptor class]]) {
+    if ([desc isKindOfClass:NVMTL_SINCE(11.0, Class, [MTLInstanceAccelerationStructureDescriptor class], Nil)]) {
         *instance = 1; *instance_count = (uint32_t)((MTLInstanceAccelerationStructureDescriptor *)desc).instanceCount; return 0;
     }
-    if (![desc isKindOfClass:[MTLPrimitiveAccelerationStructureDescriptor class]]) {
+    if (![desc isKindOfClass:NVMTL_SINCE(11.0, Class, [MTLPrimitiveAccelerationStructureDescriptor class], Nil)]) {
         nvlog("acceleration structure: %s is not carried (primitive and instance descriptors are)", NSStringFromClass([desc class]).UTF8String); return 0;
     }
     NSArray *gs = ((MTLPrimitiveAccelerationStructureDescriptor *)desc).geometryDescriptors; uint32_t n = 0;
     for (MTLAccelerationStructureGeometryDescriptor *g in gs) {
         if (n >= max) { nvlog("acceleration structure: more than %u geometries — the rest are dropped", max); break; }
         nvmtl_geom *o = &out[n]; memset(o, 0, sizeof *o); o->opaque = g.opaque ? 1 : 0;
-        if ([g isKindOfClass:[MTLAccelerationStructureTriangleGeometryDescriptor class]]) {
+        if ([g isKindOfClass:NVMTL_SINCE(11.0, Class, [MTLAccelerationStructureTriangleGeometryDescriptor class], Nil)]) {
             MTLAccelerationStructureTriangleGeometryDescriptor *t = (MTLAccelerationStructureTriangleGeometryDescriptor *)g;
             NVMTLBuffer *vb = (NVMTLBuffer *)t.vertexBuffer;
             if (!vb) { nvlog("acceleration structure: triangle geometry %u has no vertex buffer - built EMPTY, keeping its index", n);
@@ -8381,7 +8389,7 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
             if (ib) { if (track) [track addObject:ib]; o->indices = nvmtl_vk_buffer_address(&ib->_b) + t.indexBufferOffset;
                       o->index_type = t.indexType == MTLIndexTypeUInt16 ? 0 : 1; o->max_vertex = 0xFFFFFF; }
             else { o->index_type = 1000165000u ; o->max_vertex = o->count ? o->count * 3 - 1 : 0; }
-        } else if ([g isKindOfClass:[MTLAccelerationStructureBoundingBoxGeometryDescriptor class]]) {
+        } else if ([g isKindOfClass:NVMTL_SINCE(11.0, Class, [MTLAccelerationStructureBoundingBoxGeometryDescriptor class], Nil)]) {
             MTLAccelerationStructureBoundingBoxGeometryDescriptor *b = (MTLAccelerationStructureBoundingBoxGeometryDescriptor *)g;
             NVMTLBuffer *bb = (NVMTLBuffer *)b.boundingBoxBuffer;
             if (!bb) { nvlog("acceleration structure: box geometry %u has no buffer - built EMPTY, keeping its index", n);
@@ -8448,7 +8456,7 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
     uint32_t n = nvmtl_geoms_from_descriptor(desc, geoms, NVMTL_MAX_GEOMS, &instance, &icount, _cb->_resources);
     uint64_t scratch_addr = (nvmtl_vk_buffer_address(&sc->_b) + soff + 255ull) & ~255ull;
     if (![dst nvmtlEnsureCreated:instance]) return;
-    if (!instance && [desc isKindOfClass:[MTLPrimitiveAccelerationStructureDescriptor class]]) {
+    if (!instance && [desc isKindOfClass:NVMTL_SINCE(11.0, Class, [MTLPrimitiveAccelerationStructureDescriptor class], Nil)]) {
         NSArray *gd = ((MTLPrimitiveAccelerationStructureDescriptor *)desc).geometryDescriptors; uint32_t add = 0;
         if (gd.count) {
             const NSUInteger o0 = [(MTLAccelerationStructureGeometryDescriptor *)gd[0] intersectionFunctionTableOffset]; BOOL same = YES, affine = YES;
@@ -8467,12 +8475,12 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
         MTLInstanceAccelerationStructureDescriptor *idesc = (MTLInstanceAccelerationStructureDescriptor *)desc;
         NVMTLBuffer *ib = (NVMTLBuffer *)idesc.instanceDescriptorBuffer;
         if (!ib) { nvlog("build acceleration structure: instance descriptors nil"); return; }
-        const MTLMatrixLayout matrixLayout = idesc.instanceTransformationMatrixLayout;
+        const MTLMatrixLayout matrixLayout = NVMTL_SINCE(15.0, MTLMatrixLayout, idesc.instanceTransformationMatrixLayout, MTLMatrixLayoutColumnMajor);
         if (matrixLayout != MTLMatrixLayoutColumnMajor && matrixLayout != MTLMatrixLayoutRowMajor) {
             [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal userInfo:@{NSLocalizedDescriptionKey:@"Unsupported acceleration-structure instance matrix layout"}]];
             return;
         }
-        const MTLAccelerationStructureInstanceDescriptorType itype = idesc.instanceDescriptorType;
+        const MTLAccelerationStructureInstanceDescriptorType itype = NVMTL_SINCE(12.0, MTLAccelerationStructureInstanceDescriptorType, idesc.instanceDescriptorType, MTLAccelerationStructureInstanceDescriptorTypeDefault);
         if (itype != MTLAccelerationStructureInstanceDescriptorTypeDefault && itype != MTLAccelerationStructureInstanceDescriptorTypeUserID &&
             itype != MTLAccelerationStructureInstanceDescriptorTypeIndirect) {
             nvlog("build acceleration structure: instance descriptor type %lu is not carried (Default, UserID and Indirect are)", (unsigned long)itype); return; }
