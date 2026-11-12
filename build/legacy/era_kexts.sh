@@ -88,6 +88,10 @@ KX=()
 for k in NVRM NVRMFB NVRMAGDC NVAccel; do
   [ -f "$O/$k.kext/Contents/MacOS/$k" ] || continue
   cp "$(plist $k)" "$O/$k.kext/Contents/Info.plist"; xcrun strip -S "$O/$k.kext/Contents/MacOS/$k" 2>/dev/null; KX+=("$O/$k.kext")
+  # 10.11 to 10.14 declare IOSurface compatible from version 87.0: a kext asking for 1.0 is refused before it is
+  # linked (seen loading the kits in each release's own kernel). The other releases accept 1.0.
+  case "$k:$MV" in NVAccel:10.11|NVAccel:10.12|NVAccel:10.13|NVAccel:10.14)
+    /usr/libexec/PlistBuddy -c "Set :OSBundleLibraries:com.apple.iokit.IOSurface 87.0" "$O/$k.kext/Contents/Info.plist" || fail=1;; esac
 done
 [ ${#KX[@]} -gt 0 ] && { bash "$(dirname "$0")/../check_kext_libraries.sh" "${KX[@]}" || fail=1; }
 ( cd "$O" && rm -f kexts-$MV.tar.gz && tar czf kexts-$MV.tar.gz $(for k in "${KX[@]}"; do basename "$k"; done) ) && echo "era $ERA: packed $(ls "$O"/kexts-$MV.tar.gz) $(stat -f %z "$O/kexts-$MV.tar.gz") bytes: $(for k in "${KX[@]}"; do basename "$k" .kext; done | tr '\n' ' ')"
