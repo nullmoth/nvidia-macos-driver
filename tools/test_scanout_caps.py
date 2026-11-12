@@ -23,6 +23,7 @@ fixture = r'''
 using NvU32=uint32_t;using NvU64=uint64_t;using NvBool=bool;
 enum { NV_TRUE=1,NV_FALSE=0 };
 #define FBLOG(...) ((void)0)
+#include "HDR_RESERVE"
 #define FBLOGV(...) ((void)0)
 static bool PE_parse_boot_argn(const char *,void *,int) { return false; }
 struct NvKmsKapiDisplayModeTimings {
@@ -39,7 +40,7 @@ struct Kms {
 struct NVRMNVDAFramebuffer {
     Kms *fKms=nullptr;void *fDev=this;unsigned fDisplay=1,fIndex=0;
     NvU32 fW=0,fH=0,fScalerMaxW=0,fScalerMaxH=0,fRasterMaxW=0;
-    NvU64 fSize=0,fAllocSize=0;
+    NvU64 fSize=0,fAllocSize=0,fModesAllocSize=0;
     void computeScanoutCaps(NvU32 pitchAlign);
 };
 static NvKmsKapiDisplayMode mode(unsigned w,unsigned h,unsigned hz) {
@@ -97,6 +98,6 @@ int main() {
 '''
 with tempfile.TemporaryDirectory() as directory:
     path = pathlib.Path(directory)
-    (path / 'test.cpp').write_text(fixture + method + checks)
+    (path / 'test.cpp').write_text(fixture.replace('HDR_RESERVE', str(root / 'kexts/NVRMFB/fb/nvrmfb_scanout_reserve.h')) + method + checks)
     subprocess.run(['clang++', '-std=c++17', str(path / 'test.cpp'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)

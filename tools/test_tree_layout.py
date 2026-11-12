@@ -7,7 +7,7 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 ALLOWED = {".github", ".gitignore", "AGENTS.md", "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE", "NOTICE", "README.md", "SECURITY.md",
-           "build", "dlss", "docs", "kexts", "licenses", "nvk", "package", "plugin", "tools", "translator", "vendor"}
+           "build", "dlss", "docs", "gl", "kexts", "licenses", "nvk", "package", "plugin", "tools", "translator", "vendor"}
 
 
 def top_level(names):
