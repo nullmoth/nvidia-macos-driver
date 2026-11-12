@@ -1,0 +1,108 @@
+--- a/src/gallium/drivers/zink/meson.build
++++ b/src/gallium/drivers/zink/meson.build
+@@ -55,6 +55,7 @@
+ )
+ 
+ zink_c_args = []
++zink_cpp_args = []
+ inc_zink_vk = []
+ zink_link_args = []
+ 
+@@ -77,7 +78,9 @@
+     endif
+     inc_zink_vk += include_directories(moltenvk_includes)
+   else
+-    error('moltenvk-dir is required but not set.')
++    # no MoltenVK: the Vulkan driver underneath is not a Metal translation layer
++    zink_c_args += ['-DZINK_NO_MOLTENVK']
++    zink_cpp_args += ['-DZINK_NO_MOLTENVK']
+   endif
+ 
+   zink_c_args += ['-x','objective-c'] # Put compiler into objective-C mode to allow for MacOS types, like IOSurface and CAMetalLayer
+@@ -106,6 +109,7 @@
+     idep_vulkan_wsi_defines, idep_vulkan_util, dep_libdrm, vulkan_wsi_deps, idep_ntv,
+   ],
+   c_args: zink_c_args,
++  cpp_args: zink_cpp_args,
+ )
+ 
+ zink_deps = [libzink]
+--- a/src/gallium/drivers/zink/zink_instance.py
++++ b/src/gallium/drivers/zink/zink_instance.py
+@@ -81,7 +81,7 @@
+ 
+ #include <vulkan/vulkan_core.h>
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(ZINK_NO_MOLTENVK)
+ #include "MoltenVK/mvk_vulkan.h"
+ // Source of MVK_VERSION
+ #include "MoltenVK/mvk_config.h"
+--- a/src/gallium/drivers/zink/zink_resource.c
++++ b/src/gallium/drivers/zink/zink_resource.c
+@@ -60,7 +60,7 @@
+ #define DRM_FORMAT_MOD_LINEAR 0
+ #endif
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(ZINK_NO_MOLTENVK)
+ #include "MoltenVK/mvk_vulkan.h"
+ // Source of MVK_VERSION
+ #include "MoltenVK/mvk_config.h"
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -72,7 +72,12 @@
+ #include <unistd.h>
+ #if DETECT_OS_APPLE
+ /* See the vulkan-loader-rpath meson option for how to specify rpath at build time. */
++#ifdef ZINK_NO_MOLTENVK
++#define VK_LIBNAME "@loader_path/libvulkan_nouveau.dylib"
++#define ZINK_DIRECT_DRIVER 1
++#else
+ #define VK_LIBNAME "@rpath/libvulkan.1.dylib"
++#endif
+ #elif DETECT_OS_ANDROID
+ #define VK_LIBNAME "libvulkan.so"
+ #else
+@@ -80,7 +85,7 @@
+ #endif
+ #endif
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(ZINK_NO_MOLTENVK)
+ #include "MoltenVK/mvk_vulkan.h"
+ // Source of MVK_VERSION
+ #include "MoltenVK/mvk_config.h"
+@@ -3511,10 +3516,18 @@
+       goto fail;
+    }
+ 
++#ifdef ZINK_DIRECT_DRIVER
++   /* a driver exports its instance entry point under the loader-interface name; the device entry point is asked
++    * of the instance once it exists */
++   screen->vk_GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)util_dl_get_proc_address(screen->loader_lib, "vk_icdGetInstanceProcAddr");
++   screen->vk_GetDeviceProcAddr = NULL;
++   if (!screen->vk_GetInstanceProcAddr) {
++#else
+    screen->vk_GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)util_dl_get_proc_address(screen->loader_lib, "vkGetInstanceProcAddr");
+    screen->vk_GetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)util_dl_get_proc_address(screen->loader_lib, "vkGetDeviceProcAddr");
+    if (!screen->vk_GetInstanceProcAddr ||
+        !screen->vk_GetDeviceProcAddr) {
++#endif
+       if (!screen->driver_name_is_inferred)
+          mesa_loge("ZINK: failed to get proc address");
+       goto fail;
+@@ -3543,6 +3556,13 @@
+       goto fail;
+    }
+    screen->instance = instance;
++#ifdef ZINK_DIRECT_DRIVER
++   screen->vk_GetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)screen->vk_GetInstanceProcAddr(instance, "vkGetDeviceProcAddr");
++   if (!screen->vk_GetDeviceProcAddr) {
++      mesa_loge("ZINK: the driver has no device entry point");
++      goto fail;
++   }
++#endif
+    screen->instance_info = &instance_info;
+    simple_mtx_unlock(&instance_lock);
+ 
