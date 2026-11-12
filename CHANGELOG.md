@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.0
+
+### Fixes
+- A monitor that came up as a 1920x1080 television after some restarts, with its own resolutions missing until a cold start: the memory a display scans out of no longer depends on the first identification the monitor sends.
+- The uninstaller also removes the hybrid laptop panel drivers.
+
+### Experimental: older macOS releases
+- Driver kits for macOS 14 Sonoma down to Mac OS X 10.7 Lion, one per release, each compiled for that release and linked with that release's own kernel linker. None has been run on a card.
+- `install-legacy.sh` in each kit checks the kit, test-links it against the running system and prepares the GPU firmware before it changes anything. The display driver starts on `nvfb=1`; the accelerator stays off until `nvaccel=1` is added.
+
 ## 2.9
 
 2.9 is the last 2.x release for macOS 15 Sequoia and macOS 26 Tahoe. It carries every fix we had for both systems, on GTX 16 and RTX 20, 30, 40, and 50 cards, plus a large set of new features. New features that have not been proven on enough hardware are **off by default** and listed under "Experimental" below: you switch them on one at a time from the 1401 Mac app.
