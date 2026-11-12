@@ -215,7 +215,8 @@ __attribute__((constructor)) static void nvmtl_mfx_profile_install(void) {
     nvmtl_mfx_dlss_on = nvmtl_dlss_wanted() != 0;
     if (!nvmtl_mfx_native_on && !nvmtl_mfx_dlss_on) return;
     if (nvmtl_mfx_dlss_on) { nvmtl_mfx_rr_install(); nvmtl_mfx_fg_install(); nvmtl_mfx_mtl4fx_install(); }
-    Class type = MTLFXTemporalScalerDescriptor.class;
+    Class type = Nil;
+    if (@available(macOS 13.0, *)) type = [MTLFXTemporalScalerDescriptor class];   // no MetalFX before macOS 13
     Method support = class_getClassMethod(type, @selector(supportsDevice:));
     Method min = class_getClassMethod(type, @selector(supportedInputContentMinScaleForDevice:));
     Method max = class_getClassMethod(type, @selector(supportedInputContentMaxScaleForDevice:));

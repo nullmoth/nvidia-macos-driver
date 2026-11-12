@@ -83,7 +83,7 @@ static BOOL nvmtl_dlss_float_format(MTLPixelFormat f) {
     if (!(self = [super init])) return nil;
     _inW = d.inputWidth; _inH = d.inputHeight; _outW = d.outputWidth; _outH = d.outputHeight;
     _fmtColor = d.colorTextureFormat; _fmtDepth = d.depthTextureFormat; _fmtMotion = d.motionTextureFormat; _fmtOutput = d.outputTextureFormat;
-    _reactiveEnabled = d.reactiveMaskTextureEnabled; _fmtReactive = _reactiveEnabled ? d.reactiveMaskTextureFormat : MTLPixelFormatInvalid;
+    _reactiveEnabled = NVMTL_SINCE(14.4, BOOL, d.reactiveMaskTextureEnabled, NO); _fmtReactive = _reactiveEnabled ? NVMTL_SINCE(14.4, MTLPixelFormat, d.reactiveMaskTextureFormat, MTLPixelFormatInvalid) : MTLPixelFormatInvalid;
     _hdr = nvmtl_dlss_float_format(_fmtColor);
     _mvLowRes = !nvmtl_dlss_desc_flag(d, @selector(isOutputResolutionMotionVectorsEnabled));
     _mvJittered = nvmtl_dlss_desc_flag(d, @selector(isJitteredMotionVectorsEnabled));

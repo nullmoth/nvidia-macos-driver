@@ -22,6 +22,7 @@
 #   PKG_CONFIG_PATH must reach LLVMSPIRVLib.pc (SPIRV-LLVM-Translator matching the LLVM) for the native mesa_clc build
 #   NVK_SYSROOT     x86_64 prefix holding lib/pkgconfig for zlib (and any other library the build needs)
 #   NVK_JOBS        parallel jobs (default 6)
+#   NVK_FLOOR       macOS deployment floor (default 15.0, the release)
 #   NVK_EXTRA_PATCHES  space-separated names of extra patches in nvk/ applied last (e.g. nvk-upstream-nak)
 #   NVK_REF_EXPORTS optional file with the exported symbols to compare against (one name per line, sorted)
 #
@@ -33,6 +34,9 @@ MESA_GIT=${1:?mesa git dir}; OGKM=${2:?open-gpu-kernel-modules 610.57.04 tree}; 
 HERE=$(cd "$(dirname "$0")/.." && pwd); NVK=$HERE/nvk
 BASE=$(cat "$NVK/MESA_BASE")
 JOBS=${NVK_JOBS:-6}
+# The release is built for macOS 15. NVK_FLOOR builds for another deployment floor (test builds for older systems; add
+# NVK_EXTRA_PATCHES=nvk-legacy-floor below macOS 12).
+FLOOR=${NVK_FLOOR:-15.0}
 [ -n "${NVK_PATH:-}" ] && export PATH="$NVK_PATH:$PATH"
 
 case $REL in
@@ -89,9 +93,9 @@ SYS=${NVK_SYSROOT:-}
 X=$OUT/x86_64-nvk.ini
 cat > "$X" <<EOT
 [binaries]
-c = ['clang', '-arch', 'x86_64', '-mmacosx-version-min=15.0']
-cpp = ['clang++', '-arch', 'x86_64', '-mmacosx-version-min=15.0']
-objc = ['clang', '-arch', 'x86_64', '-mmacosx-version-min=15.0']
+c = ['clang', '-arch', 'x86_64', '-mmacosx-version-min=$FLOOR']
+cpp = ['clang++', '-arch', 'x86_64', '-mmacosx-version-min=$FLOOR']
+objc = ['clang', '-arch', 'x86_64', '-mmacosx-version-min=$FLOOR']
 rust = ['rustc', '--target', 'x86_64-apple-darwin']
 ar = 'ar'
 strip = 'strip'
@@ -103,7 +107,7 @@ cpu = 'x86_64'
 endian = 'little'
 [properties]
 pkg_config_libdir = '$SYS/lib/pkgconfig'
-bindgen_clang_arguments = ['--target=x86_64-apple-darwin', '-mmacosx-version-min=15.0']
+bindgen_clang_arguments = ['--target=x86_64-apple-darwin', '-mmacosx-version-min=$FLOOR']
 EOT
 
 # -oso_prefix makes the object paths in the unstripped output (which the linker hashes into LC_UUID) relative to the

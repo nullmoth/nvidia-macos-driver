@@ -1,5 +1,6 @@
 // hevcdec.c: see hevcdec.h. Section numbers refer to ITU-T H.265.
 #include "hevcdec.h"
+#include "nv_floor.h"
 #include "blocklinear.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,7 +12,7 @@
 #include "nvdec_drv.h"
 
 static NvU32 hi(NvU64 a) { return (NvU32)(a >> 8); }
-static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+static double now_ms(void) { struct timespec t; NV_CLOCK_GETTIME(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 
 int hevcdec_open(HevcDec *d, Rm *rm, unsigned maxW, unsigned maxH, int bit_depth, int chroma_format)
 {

@@ -26,6 +26,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <time.h>
+#include "nvmtl_avail.h"
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_log_failure.h"
 #include "nvmtl_failed_air.h"
@@ -251,7 +252,7 @@ static bool nvmtl_gpu_profile_string(CFStringRef key, char *out, size_t n)
 {
     bool ok = false;
     io_iterator_t it = IO_OBJECT_NULL;
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOPCIDevice"), &it) != KERN_SUCCESS) return false;
+    if (IOServiceGetMatchingServices(NVMTL_IO_MAIN_PORT, IOServiceMatching("IOPCIDevice"), &it) != KERN_SUCCESS) return false;
     for (io_object_t o; !ok && (o = IOIteratorNext(it)); IOObjectRelease(o)) {
         CFTypeRef d = IORegistryEntryCreateCFProperty(o, CFSTR("nvrm-gpu-profile"), kCFAllocatorDefault, 0);
         if (!d) continue;
@@ -554,7 +555,7 @@ __attribute__((constructor)) static void nvmtl_nvdec_in_decode_service(void)
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         uint32_t dev = 0;
         io_iterator_t it = IO_OBJECT_NULL;
-        if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOPCIDevice"), &it) == KERN_SUCCESS) {
+        if (IOServiceGetMatchingServices(NVMTL_IO_MAIN_PORT, IOServiceMatching("IOPCIDevice"), &it) == KERN_SUCCESS) {
             for (io_object_t o; !dev && (o = IOIteratorNext(it)); IOObjectRelease(o)) {
                 CFDataRef v = IORegistryEntryCreateCFProperty(o, CFSTR("vendor-id"), kCFAllocatorDefault, 0);
                 CFDataRef c = IORegistryEntryCreateCFProperty(o, CFSTR("class-code"), kCFAllocatorDefault, 0);
@@ -695,7 +696,7 @@ static bool nvmtl_other_metal_gpu(void)
 {
     bool found = false;
     io_iterator_t it = 0;
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOAccelerator"), &it) != KERN_SUCCESS) return false;
+    if (IOServiceGetMatchingServices(NVMTL_IO_MAIN_PORT, IOServiceMatching("IOAccelerator"), &it) != KERN_SUCCESS) return false;
     io_service_t s;
     while (!found && (s = IOIteratorNext(it))) {
         io_name_t cls = {0};
@@ -861,7 +862,7 @@ static BOOL nvmtl_card_wanted(mach_port_t port)
     unsigned long long ids[16]; unsigned n = 0; int nvidia = 0;
     for (int cls = 0; cls < 2; cls++) {
         io_iterator_t it = 0;
-        if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching(cls ? "NMXAccel" : "NVAccel"), &it) != KERN_SUCCESS) continue;
+        if (IOServiceGetMatchingServices(NVMTL_IO_MAIN_PORT, IOServiceMatching(cls ? "NMXAccel" : "NVAccel"), &it) != KERN_SUCCESS) continue;
         for (io_service_t s; (s = IOIteratorNext(it)); IOObjectRelease(s)) {
             uint64_t id = 0; if (!cls) nvidia++;
             if (n < 16 && IORegistryEntryGetRegistryEntryID(s, &id) == KERN_SUCCESS) ids[n++] = id;
@@ -886,7 +887,7 @@ static BOOL nvmtl_card_wanted(mach_port_t port)
             nvmtl_nmx_pci(port, &vid, &did, &bus, &dev, &fn, &have_loc);
             int same = 0;   /* GPUs of the same model: "vendor:device" cannot tell them apart, the PCI location can */
             io_iterator_t it = 0;
-            if (vid && IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("NMXAccel"), &it) == KERN_SUCCESS) {
+            if (vid && IOServiceGetMatchingServices(NVMTL_IO_MAIN_PORT, IOServiceMatching("NMXAccel"), &it) == KERN_SUCCESS) {
                 for (io_service_t s; (s = IOIteratorNext(it)); IOObjectRelease(s)) {
                     uint16_t v2 = 0, d2 = 0; unsigned b2, e2, f2; int h2;
                     nvmtl_nmx_pci(s, &v2, &d2, &b2, &e2, &f2, &h2);
@@ -938,7 +939,16 @@ static void nvmtl_install_hw_resource_pools(id dev)
            read, it creates no device, before touching the accelerator */
         char v[32] = {0}; size_t n = sizeof v - 1;
         int major = sysctlbyname("kern.osproductversion", v, &n, NULL, 0) == 0 ? atoi(v) : 0;
+#if defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED < 150000
+        /* a test build for an older floor: its lowest system is the floor it was built for (the loader refuses anything
+           older), so the lower bound moves to that floor's major version. The version key does not exist before
+           macOS 10.13.4; only a build whose floor is below 10.14 accepts an unreadable version. */
+        const int lowest = __MAC_OS_X_VERSION_MIN_REQUIRED >= 110000 ? __MAC_OS_X_VERSION_MIN_REQUIRED / 10000 : 10;
+        const int unreadable = major == 0 && __MAC_OS_X_VERSION_MIN_REQUIRED < 101400;
+        if (!unreadable && (major < lowest || major > 26)) { nvlog("  macOS %s is not supported by this build: no device", v[0] ? v : "unknown"); return nil; }
+#else
         if (major < 15 || major > 26) { nvlog("  macOS %s is not supported by this driver: no device", v[0] ? v : "unknown"); return nil; }
+#endif
     }
     if (!nvmtl_card_wanted(port)) return nil;   // nvmultigpu=1 only: this process drives another card
     self = [super initWithAcceleratorPort:port];
@@ -1286,7 +1296,7 @@ id nvmtl_sparse_heap_texture(NVMTLHeap *heap, MTLTextureDescriptor *d) {
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8) || a8) { nvlog("sparse heap: pixel format %lu is not carried -> nil", (unsigned long)d.pixelFormat); return nil; }
     NVMTLTexture *t = [NVMTLTexture new];
-    t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)d.hazardTrackingMode << MTLResourceHazardTrackingModeShift) | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
+    t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)NVMTL_SINCE(10.15, NSUInteger, d.hazardTrackingMode, 0) << MTLResourceHazardTrackingModeShift) | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
     t->_fmt = d.pixelFormat;
     const uint32_t layers = d.textureType == MTLTextureType2DArray ? (uint32_t)d.arrayLength : 1u;
     if (nvmtl_vk_image_create_sparse((uint32_t)d.width, (uint32_t)d.height, vkf, bpp, (uint32_t)(d.mipmapLevelCount ? d.mipmapLevelCount : 1), layers, &t->_i)) return nil;
@@ -1377,7 +1387,7 @@ static id<MTLTexture> nvmtl_make_y422_texture(MTLTextureDescriptor *d, NVMTLText
     }
     if (nvmtl_alloc_blocked()) return nil;
     NVMTLTexture *t = [NVMTLTexture new];
-    t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)d.hazardTrackingMode << MTLResourceHazardTrackingModeShift)
+    t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)NVMTL_SINCE(10.15, NSUInteger, d.hazardTrackingMode, 0) << MTLResourceHazardTrackingModeShift)
              | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
     t->_fbo = nvmtl_desc_fbo(d);
     t->_fmt = d.pixelFormat;
@@ -1650,7 +1660,7 @@ static char nvmtl_surface_cache_key;
     if (!w || !h || w > UINT32_MAX || h > UINT32_MAX) return nil;
     if (surf && plane >= MAX((size_t)1, IOSurfaceGetPlaneCount(surf))) return nil;
     NVMTLTexture *t = [NVMTLTexture new];
-    t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)d.hazardTrackingMode << MTLResourceHazardTrackingModeShift)
+    t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)NVMTL_SINCE(10.15, NSUInteger, d.hazardTrackingMode, 0) << MTLResourceHazardTrackingModeShift)
              | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
     t->_fbo = nvmtl_desc_fbo(d);
     t->_fmt = d.pixelFormat;
@@ -1872,6 +1882,7 @@ static void nvmtl_stitch_dump(const char *what, NSString *dag, NSArray *fns, id 
         id<MTLLibrary> twin = [self nvmtlAppleTwinOf:(NVMTLLibrary *)ours->_lib];
         id<MTLFunction> af = nil;
         if (twin && ours->_specName.length) {
+          if (@available(macOS 11.0, *)) {   // function descriptors and specialised names arrive with macOS 11
             MTLFunctionDescriptor *fd = [MTLFunctionDescriptor functionDescriptor];
             fd.name = fname; fd.specializedName = ours->_specName;
             if (ours->_fcv) fd.constantValues = ours->_fcv;
@@ -1879,12 +1890,15 @@ static void nvmtl_stitch_dump(const char *what, NSString *dag, NSArray *fns, id 
             af = [twin newFunctionWithDescriptor:fd error:&fe];
             if (!af) nvlog("  %s: apple twin refused \"%s\" as \"%s\": %s", what, fname.UTF8String,
                            ours->_specName.UTF8String, [fe localizedDescription].UTF8String ?: "(no reason)");
+          }
         }
         if (twin && !af && ours->_fcv) {
+          if (@available(macOS 10.12, *)) {   // function constants arrive with macOS 10.12
             NSError *fe = nil;
             af = [twin newFunctionWithName:fname constantValues:ours->_fcv error:&fe];
             if (!af) nvlog("  %s: apple twin refused \"%s\" with its constant values: %s", what,
                            fname.UTF8String, [fe localizedDescription].UTF8String ?: "(no reason)");
+          }
         }
         if (twin && !af) af = [twin newFunctionWithName:fname];
         if (!af) {
@@ -1980,7 +1994,7 @@ static void nvmtl_stitch_dump(const char *what, NSString *dag, NSArray *fns, id 
     struct objc_super sup = { self, class_getSuperclass(object_getClass(self)) };
     id apple = ((id (*)(struct objc_super *, SEL, id, id, NSError **))objc_msgSendSuper)(&sup, @selector(newLibraryWithSource:options:error:), src, opt, err);
     id<MTLLibrary> mine = [self nvmtlBridgeAppleLibrary:apple what:"newLibraryWithSource" error:err];
-    nvmtl_note_compile_dylibs(mine, opt.libraries);
+    nvmtl_note_compile_dylibs(mine, NVMTL_SINCE(11.0, NSArray *, opt.libraries, nil));
     return mine;
 }
 - (void)newLibraryWithSource:(NSString *)src options:(MTLCompileOptions *)opt completionHandler:(MTLNewLibraryCompletionHandler)h {
@@ -2187,8 +2201,8 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
             object_getClassName(vfn), object_getClassName(ffn)]);
     NVMTLFunction *vf = (NVMTLFunction *)vfn, *ff = (NVMTLFunction *)ffn;
     { NSError *le = nil;
-      id<MTLFunction> lv = nvmtl_link_stage(vfn, d.vertexLinkedFunctions, d.vertexPreloadedLibraries, &le);
-      id<MTLFunction> lfr = lv ? (noFrag ? ffn : nvmtl_link_stage(ffn, d.fragmentLinkedFunctions, d.fragmentPreloadedLibraries, &le)) : nil;
+      id<MTLFunction> lv = nvmtl_link_stage(vfn, NVMTL_SINCE(12.0, MTLLinkedFunctions *, d.vertexLinkedFunctions, nil), NVMTL_SINCE(12.0, NSArray *, d.vertexPreloadedLibraries, nil), &le);
+      id<MTLFunction> lfr = lv ? (noFrag ? ffn : nvmtl_link_stage(ffn, NVMTL_SINCE(12.0, MTLLinkedFunctions *, d.fragmentLinkedFunctions, nil), NVMTL_SINCE(12.0, NSArray *, d.fragmentPreloadedLibraries, nil), &le)) : nil;
       if (!lv || !lfr) { if (err) *err = le; return nil; }
       vf = (NVMTLFunction *)lv; ff = (NVMTLFunction *)lfr; }
     id samplePayload = nvmtl_function_reflection(ff)[@"fragment_sample_positions"];
@@ -2308,7 +2322,7 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
     NSData *flk = nvmtl_varying_link(vf, ffx); const void *fsb = flk ? flk.bytes : ffx->_spirv.bytes; size_t fsl = flk ? flk.length : ffx->_spirv.length;
     uint32_t tpt = 0, tcps = 0; int prc;
     if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps)) {
-        if (d.tessellationFactorFormat != MTLTessellationFactorFormatHalf)
+        if (NVMTL_SINCE(10.12, NSUInteger, d.tessellationFactorFormat, MTLTessellationFactorFormatHalf) != MTLTessellationFactorFormatHalf)
             return nvmtl_fail(err, @"tess pipeline: REFUSED - tessellationFactorFormat is not Half");
         NSDictionary *tr = nvmtl_function_reflection(vf)[@"tessellation"]; if (![tr isKindOfClass:[NSDictionary class]]) tr = nil;
         NSNumber *rn = [tr[@"control_point_count"] isKindOfClass:[NSNumber class]] ? tr[@"control_point_count"] : nil;
@@ -2322,9 +2336,9 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
         if (!n || n > 32)
             return nvmtl_fail(err, [NSString stringWithFormat:@"tess pipeline: REFUSED - %@ has no fixed control-point count in 1..32 (%u)", vf->_fname, n]);
         if (!tr) nvlog("tess pipeline: %s has no reflection - its instance_id Location is inferred from the interface", vf->_fname.UTF8String ?: "?");
-        float mf = (float)d.maxTessellationFactor; if (mf > 64.0f) mf = 64.0f; if (mf < 1.0f) mf = 1.0f;
-        nvk_tess_desc td = { tpt, n, (uint32_t)d.tessellationPartitionMode, (uint32_t)d.tessellationOutputWindingOrder,
-            (uint32_t)d.tessellationFactorStepFunction, d.isTessellationFactorScaleEnabled ? 1u : 0u, (uint32_t)d.tessellationControlPointIndexType,
+        float mf = (float)NVMTL_SINCE(10.12, NSUInteger, d.maxTessellationFactor, 16); if (mf > 64.0f) mf = 64.0f; if (mf < 1.0f) mf = 1.0f;
+        nvk_tess_desc td = { tpt, n, (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationPartitionMode, 0), (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationOutputWindingOrder, 0),
+            (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationFactorStepFunction, 0), NVMTL_SINCE(10.12, BOOL, d.isTessellationFactorScaleEnabled, NO) ? 1u : 0u, (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationControlPointIndexType, 0),
             mf, rl ? rl.intValue : -1 };
         prc = nvmtl_vk_pipeline_create_rt(vf->_spirv.bytes, vf->_spirv.length, fsb, fsl, &rt, vin.nattr ? &vin : NULL, rsc, &td, &ps->_p);
     } else {
@@ -2339,14 +2353,14 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
         return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: vkCreateGraphicsPipelines FAILED (%@ / %@)", vf->_fname, ff->_fname]); }
     nvlog("newRenderPipelineStateWithDescriptor: -> %p (VkPipeline from %lu+%lu B of SPIR-V)",
           (__bridge void *)ps, (unsigned long)vf->_spirv.length, (unsigned long)ff->_spirv.length); nvmtl_render_keep_linked(ps, vf, ff);
-          if (d.supportIndirectCommandBuffers) nvmtl_icb_register_pipeline(ps, NO);
+          if (NVMTL_SINCE(10.14, BOOL, d.supportIndirectCommandBuffers, NO)) nvmtl_icb_register_pipeline(ps, NO);
           return ps; }
 
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d options:(MTLPipelineOption)o
                                                           reflection:(MTLAutoreleasedRenderPipelineReflection *)r error:(NSError **)err {
     d = nvmtl_gl_rewrite_descriptor(d, err); if (!d) { if (r) *r = nil; return nil; }
     if (o & MTLPipelineOptionFailOnBinaryArchiveMiss) {
-        NSString *why = nvmtl_archive_refusal(d.binaryArchives, nvmtl_archive_key_render(d));
+        NSString *why = nvmtl_archive_refusal(NVMTL_SINCE(11.0, NSArray *, d.binaryArchives, nil), nvmtl_archive_key_render(d));
         if (why) { if (r) *r = nil; return nvmtl_fail(err, why); }
     }
     id<MTLRenderPipelineState> ps = [self newRenderPipelineStateWithDescriptor:d error:err];
@@ -2496,40 +2510,41 @@ static NSString *nvmtl_tg_mismatch(id fn, NSUInteger ask, const char *who) {
 }
 static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     if (!d) return;
-    MTLLinkedFunctions *lf = d.linkedFunctions;
+    MTLLinkedFunctions *lf = NVMTL_SINCE(11.0, MTLLinkedFunctions *, d.linkedFunctions, nil);
     unsigned long f = 0, p = 0, b = 0, g = 0;
     if (lf) {
         f = (unsigned long)lf.functions.count;
-        b = (unsigned long)lf.binaryFunctions.count;
+        b = (unsigned long)NVMTL_SINCE(11.0, NSUInteger, lf.binaryFunctions.count, 0);
         g = (unsigned long)lf.groups.count;
         if ([lf respondsToSelector:@selector(privateFunctions)])
             p = (unsigned long)[(NSArray *)[lf valueForKey:@"privateFunctions"] count];
     }
     nvlog("computePipelineDescriptor: \"%s\" linked=%s functions=%lu private=%lu binary=%lu groups=%lu maxTG=%lu multWidth=%d",
           d.computeFunction.name.UTF8String ?: "(nil)", lf ? "YES" : "no", f, p, b, g,
-          (unsigned long)d.maxTotalThreadsPerThreadgroup,
+          (unsigned long)NVMTL_SINCE(10.14, NSUInteger, d.maxTotalThreadsPerThreadgroup, 0),
           (int)d.threadGroupSizeIsMultipleOfThreadExecutionWidth);
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)d options:(MTLPipelineOption)o
                                                           reflection:(MTLAutoreleasedComputePipelineReflection *)r error:(NSError **)err {
     nvmtl_log_compute_descriptor(d);
     if (o & MTLPipelineOptionFailOnBinaryArchiveMiss) {
-        NSString *why = nvmtl_archive_refusal(d.binaryArchives, nvmtl_archive_key_compute(d.computeFunction));
+        NSString *why = nvmtl_archive_refusal(NVMTL_SINCE(11.0, NSArray *, d.binaryArchives, nil), nvmtl_archive_key_compute(d.computeFunction));
         if (why) { if (r) *r = nil; return nvmtl_fail(err, why); }
     }
     NSError *le = nil; id<MTLFunction> kfn = nvmtl_link_kernel(d, &le);
     if (!kfn) { if (err) *err = le; if (r) *r = nil; return nil; }
-    if (d.stageInputDescriptor && [(id)kfn isKindOfClass:[NVMTLFunction class]]) {
-        NSError *se = nil; NVMTLFunction *sf = nvmtl_kernel_with_stage_in((NVMTLFunction *)kfn, d.stageInputDescriptor, &se);
+    MTLStageInputOutputDescriptor *stageIn = NVMTL_SINCE(10.12, MTLStageInputOutputDescriptor *, d.stageInputDescriptor, nil);
+    if (stageIn && [(id)kfn isKindOfClass:[NVMTLFunction class]]) {
+        NSError *se = nil; NVMTLFunction *sf = nvmtl_kernel_with_stage_in((NVMTLFunction *)kfn, stageIn, &se);
         if (!sf) { if (err) *err = se; if (r) *r = nil; return nil; }
         kfn = sf;
     }
-    NSString *tgWhy = nvmtl_tg_mismatch(kfn, d.maxTotalThreadsPerThreadgroup, "compute pipeline");
+    NSString *tgWhy = nvmtl_tg_mismatch(kfn, NVMTL_SINCE(10.14, NSUInteger, d.maxTotalThreadsPerThreadgroup, 0), "compute pipeline");
     if (tgWhy) { if (r) *r = nil; return nvmtl_fail(err, tgWhy); }
     id<MTLComputePipelineState> ps = [self newComputePipelineStateWithFunction:kfn error:err];
-    if ([(id)ps isKindOfClass:[NVMTLComputePipelineState class]]) { ((NVMTLComputePipelineState *)ps)->_icb = d.supportIndirectCommandBuffers;
-        if (d.supportIndirectCommandBuffers) nvmtl_icb_register_pipeline(ps, YES);
-        ((NVMTLComputePipelineState *)ps)->_askT = d.maxTotalThreadsPerThreadgroup;
+    if ([(id)ps isKindOfClass:[NVMTLComputePipelineState class]]) { ((NVMTLComputePipelineState *)ps)->_icb = NVMTL_SINCE(11.0, BOOL, d.supportIndirectCommandBuffers, NO);
+        if (NVMTL_SINCE(11.0, BOOL, d.supportIndirectCommandBuffers, NO)) nvmtl_icb_register_pipeline(ps, YES);
+        ((NVMTLComputePipelineState *)ps)->_askT = NVMTL_SINCE(10.14, NSUInteger, d.maxTotalThreadsPerThreadgroup, 0);
         ((NVMTLComputePipelineState *)ps)->_reqTG = nvmtl_desc_size(d, @selector(requiredThreadsPerThreadgroup));
         ((NVMTLComputePipelineState *)ps)->_label = [d.label copy]; }
     if (r) *r = ps ? (MTLComputePipelineReflection *)nvmtl_compute_reflection(kfn) : nil;
@@ -2652,7 +2667,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
             @"address_mode_s":addresses[sd.sAddressMode],@"address_mode_t":addresses[sd.tAddressMode],@"address_mode_r":addresses[sd.rAddressMode],
             @"coordinates":@"Pixel",@"compare_function":compare[sd.compareFunction],@"max_anisotropy":@(sd.maxAnisotropy),
             @"lod_min_clamp":@(sd.lodMinClamp),@"lod_max_clamp":@(sd.lodMaxClamp),
-            @"border_color":(@[@"TransparentBlack",@"OpaqueBlack",@"OpaqueWhite"])[MIN((NSUInteger)sd.borderColor,2u)],
+            @"border_color":(@[@"TransparentBlack",@"OpaqueBlack",@"OpaqueWhite"])[MIN(NVMTL_SINCE(10.12, NSUInteger, sd.borderColor, 0),2u)],
             @"reduction":@"WeightedAverage",@"lod_bias":@0};
         nvlog("pixel sampler: %s",s->_pixelState.description.UTF8String);
     }
@@ -2662,11 +2677,11 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     if (sd.normalizedCoordinates && !getenv("NVMTL_NO_SAMPLER_CONTRACT")) {
         if ((NSUInteger)sd.minFilter > 1 || (NSUInteger)sd.magFilter > 1 || (NSUInteger)sd.mipFilter > 2 ||
             (NSUInteger)sd.sAddressMode > 5 || (NSUInteger)sd.tAddressMode > 5 || (NSUInteger)sd.rAddressMode > 5 ||
-            (NSUInteger)sd.compareFunction > 7 || (NSUInteger)sd.borderColor > 2 || sd.maxAnisotropy < 1 || sd.maxAnisotropy > 16) return nil;
+            (NSUInteger)sd.compareFunction > 7 || NVMTL_SINCE(10.12, NSUInteger, sd.borderColor, 0) > 2 || sd.maxAnisotropy < 1 || sd.maxAnisotropy > 16) return nil;
         nvmtl_sampler_desc request = { .min_filter = (uint32_t)sd.minFilter, .mag_filter = (uint32_t)sd.magFilter,
             .mip_filter = (uint32_t)sd.mipFilter, .address_s = (uint32_t)sd.sAddressMode, .address_t = (uint32_t)sd.tAddressMode,
             .address_r = (uint32_t)sd.rAddressMode, .compare_function = (uint32_t)sd.compareFunction,
-            .max_anisotropy = (uint32_t)sd.maxAnisotropy, .border_color = (uint32_t)sd.borderColor,
+            .max_anisotropy = (uint32_t)sd.maxAnisotropy, .border_color = (uint32_t)NVMTL_SINCE(10.12, NSUInteger, sd.borderColor, 0),
             .lod_min = sd.lodMinClamp, .lod_max = sd.lodMaxClamp };
         failed = nvmtl_vk_sampler_create_desc(&request, &s->_s);
     } else
@@ -2816,6 +2831,9 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 }
 - (NSArray *)counterSets { return @[nvmtl_timestamp_counter_set()]; }
 - (id<MTLCounterSampleBuffer>)newCounterSampleBufferWithDescriptor:(MTLCounterSampleBufferDescriptor *)desc error:(NSError **)err {
+  // Counter sample buffers arrive with macOS 10.15. An app built with a newer SDK can still find this method on an older
+  // system and call it with the nil descriptor that system gives it; it gets nil there.
+  if (@available(macOS 10.15, *)) {
     const NSUInteger n = desc.sampleCount;
     NSInteger code = MTLCounterSampleBufferErrorInvalid;
     const char *why = !desc ? "no descriptor"
@@ -2833,6 +2851,9 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     b->_pool = pool; b->_count = n; b->_storage = desc.storageMode; b->_label = [desc.label copy]; b->_dev = self;
     if (err) *err = nil;
     return b;
+  }
+  if (err) *err = nil;
+  return nil;
 }
 - (void)sampleTimestamps:(MTLTimestamp *)cpu gpuTimestamp:(MTLTimestamp *)gpu {
     uint64_t c = 0, g = 0;
@@ -2921,11 +2942,13 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
 - (BOOL)supportsFeatureSet:(MTLFeatureSet)fs API_DEPRECATED("Use supportsFamily instead", macos(10.11, 13.0), ios(8.0, 16.0), tvos(9.0, 16.0)) { return fs >= 10000 && fs <= 10005; }
 - (id<MTLHeap>)newHeapWithDescriptor:(MTLHeapDescriptor *)hd {
     if (!hd || !hd.size) { nvlog("newHeapWithDescriptor: no size"); return nil; }
-    if (hd.type == MTLHeapTypeSparse) {   // NVMTL_SPARSE_TEXTURES=1: one device memory carved into 64 KiB pages
+    const MTLHeapType hdType = NVMTL_SINCE(10.15, MTLHeapType, hd.type, MTLHeapTypeAutomatic);   // heaps before macOS 10.15 are all automatic
+    const MTLHazardTrackingMode hdHazard = NVMTL_SINCE(10.15, MTLHazardTrackingMode, hd.hazardTrackingMode, MTLHazardTrackingModeDefault);
+    if (hdType == MTLHeapTypeSparse) {   // NVMTL_SPARSE_TEXTURES=1: one device memory carved into 64 KiB pages
         if (!nvmtl_vk_sparse_textures_ok()) { nvlog("newHeapWithDescriptor: a sparse heap needs NVMTL_SPARSE_TEXTURES=1 and sparse residency on this device -> nil"); return nil; }
         const NSUInteger size = (hd.size + NVMTL_SPARSE_BLOCK_BYTES - 1) / NVMTL_SPARSE_BLOCK_BYTES * NVMTL_SPARSE_BLOCK_BYTES;
         NVMTLHeap *sh = [NVMTLHeap new];
-        sh->_dev = self; sh->_size = size; sh->_used = 0; sh->_storage = MTLStorageModePrivate; sh->_cache = hd.cpuCacheMode; sh->_type = MTLHeapTypeSparse; sh->_hazard = hd.hazardTrackingMode;
+        sh->_dev = self; sh->_size = size; sh->_used = 0; sh->_storage = MTLStorageModePrivate; sh->_cache = hd.cpuCacheMode; sh->_type = MTLHeapTypeSparse; sh->_hazard = hdHazard;
         if (nvmtl_vk_heap_create(size, 0, &sh->_hm)) { nvlog("newHeapWithDescriptor: SPARSE %lu bytes FAILED", (unsigned long)size); return nil; }
         const uint32_t npages = (uint32_t)(size / NVMTL_SPARSE_BLOCK_BYTES);
         sh->_poolBits = calloc(nvmtl_page_pool_words(npages), sizeof(uint64_t)); if (!sh->_poolBits) return nil;
@@ -2934,9 +2957,9 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
         return sh;
     }
     NVMTLHeap *h = [NVMTLHeap new];
-    h->_dev = self; h->_size = hd.size; h->_used = 0; h->_storage = hd.storageMode; h->_cache = hd.cpuCacheMode; h->_type = hd.type;
-    h->_hazard = hd.hazardTrackingMode;
-    if (hd.type == MTLHeapTypePlacement) {
+    h->_dev = self; h->_size = hd.size; h->_used = 0; h->_storage = hd.storageMode; h->_cache = hd.cpuCacheMode; h->_type = hdType;
+    h->_hazard = hdHazard;
+    if (hdType == MTLHeapTypePlacement) {
         if (nvmtl_vk_heap_create(hd.size, hd.storageMode == MTLStorageModeShared, &h->_hm)) { nvlog("newHeapWithDescriptor: PLACEMENT %lu bytes FAILED", (unsigned long)hd.size); return nil; }
         nvlog("newHeapWithDescriptor: PLACEMENT %lu bytes (%s) -> %p", (unsigned long)hd.size, hd.storageMode == MTLStorageModeShared ? "shared" : "private", (__bridge void *)h);
         return h;
@@ -3163,8 +3186,10 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
     }
     d.depthAttachmentPixelFormat = md.depthAttachmentPixelFormat; d.stencilAttachmentPixelFormat = md.stencilAttachmentPixelFormat;
     d.rasterSampleCount = md.rasterSampleCount ?: 1; d.alphaToCoverageEnabled = md.alphaToCoverageEnabled;
-    d.fragmentLinkedFunctions = md.fragmentLinkedFunctions;
-    d.supportIndirectCommandBuffers = md.supportIndirectCommandBuffers;
+    if (@available(macOS 14.0, *)) {   // both properties reach mesh pipeline descriptors with macOS 14
+        d.fragmentLinkedFunctions = md.fragmentLinkedFunctions;
+        d.supportIndirectCommandBuffers = md.supportIndirectCommandBuffers;
+    }
     NVMTLRenderPipelineState *ps = (NVMTLRenderPipelineState *)[self newRenderPipelineStateWithDescriptor:d error:&pe];
     if (!ps) { *why = [NSString stringWithFormat:@"\"%@\" + \"%@\": no render pipeline (%@)", mf->_fname, [ffn name], pe.localizedDescription ?: @"?"]; return nil; }
     *kout = kp;

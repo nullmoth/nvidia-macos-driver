@@ -1,0 +1,239 @@
+NVK for a macOS floor below 12: applied last with NVK_EXTRA_PATCHES=nvk-legacy-floor (build/build_nvk.sh, NVK_FLOOR=<floor>).
+The device open no longer reads the main-port data symbol that only macOS 12 and later export; the window-surface
+code and the memory stream check at run time for what arrived after the floor; and a build for OS X 10.11 defines
+inside the library the two libSystem calls of macOS 10.12 that its Rust half binds (nvrm_floor_shim.c, empty at any
+other floor). The release build does not apply this patch.
+
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
+@@ -1,6 +1,9 @@
+ #include "../../nvmtl_cfg.h"
+ #include "nvrm_xnu.h"
+ #include <IOKit/IOKitLib.h>
++/* The I/O Kit calls take a null port to mean the default main port. kIOMainPortDefault is the named form of that null
++ * and is a data symbol only macOS 12 and later export, so a build for an older floor must not read it. */
++#define NVRM_IO_MAIN_PORT ((mach_port_t)MACH_PORT_NULL)
+ #include <mach/mach.h>
+ #include <sys/mman.h>
+ #include <fcntl.h>
+@@ -143,16 +146,16 @@
+     if (want_id && *want_id) {
+         char *end = NULL; unsigned long long id = strtoull(want_id, &end, 10);
+         if (*end == 0 && id) {
+-            svc = IOServiceGetMatchingService(kIOMainPortDefault, IORegistryEntryIDMatching(id));
++            svc = IOServiceGetMatchingService(NVRM_IO_MAIN_PORT, IORegistryEntryIDMatching(id));
+             if (svc && !IOObjectConformsTo(svc, "NVAccel")) { IOObjectRelease(svc); svc = 0; }
+         }
+         if (!svc) { fprintf(stderr, "nvrm_xnu: NVK_ACCEL_ID=%s names no NVAccel\n", want_id); errno = ENODEV; return -1; }
+     } else {
+-        svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"));
++        svc = IOServiceGetMatchingService(NVRM_IO_MAIN_PORT, IOServiceMatching("NVAccel"));
+     }
+     uint32_t open_type = 0x4E560000u | type;
+     if (!svc) {
+-        svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVRM"));
++        svc = IOServiceGetMatchingService(NVRM_IO_MAIN_PORT, IOServiceMatching("NVRM"));
+         open_type = type;
+     }
+     if (!svc) { fprintf(stderr, "nvrm_xnu: no NVAccel and no NVRM service\n"); errno = ENODEV; return -1; }
+@@ -162,7 +165,7 @@
+         // the accelerator is there but would not vend one — fall back rather than lose the GPU
+         fprintf(stderr, "nvrm_xnu: IOServiceOpen(NVAccel, 0x%08x) 0x%08x — falling back to NVRM\n", open_type, kr);
+         IOObjectRelease(svc);
+-        svc = (want_id && *want_id) ? 0 : IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVRM"));
++        svc = (want_id && *want_id) ? 0 : IOServiceGetMatchingService(NVRM_IO_MAIN_PORT, IOServiceMatching("NVRM"));
+         if (svc) kr = IOServiceOpen(svc, mach_task_self(), type, &conn);
+     }
+     if (svc) IOObjectRelease(svc);
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_floor_shim.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_floor_shim.c
+@@ -0,0 +1,44 @@
++/* nvrm_floor_shim.c: two libSystem calls that arrive with macOS 10.12, for a build whose floor is OS X 10.11.
++ *
++ * The Rust standard library inside this driver is built for 10.12 and binds clock_gettime and fclonefileat as required
++ * symbols; 10.11 exports neither, so the library would not load there. Defined here, both names resolve inside the
++ * library itself. On a system that has the real call it is used (looked up in the next image); on 10.11 the clock is
++ * the Mach absolute time (wall time for the real-time clock) and the clone call reports "not supported", which makes
++ * its caller copy the file the ordinary way. A build for 10.12 or later compiles nothing from this file. */
++#include <Availability.h>
++#if defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED < 101200
++#include <dlfcn.h>
++#include <errno.h>
++#include <stdint.h>
++#include <time.h>
++#include <sys/time.h>
++#include <mach/mach_time.h>
++
++int clock_gettime(clockid_t id, struct timespec *ts)
++{
++    static int (*real)(clockid_t, struct timespec *); static int looked;
++    if (!looked) { real = (int (*)(clockid_t, struct timespec *))dlsym(RTLD_NEXT, "clock_gettime"); looked = 1; }
++    if (real) return real(id, ts);
++    if (!ts) { errno = EINVAL; return -1; }
++    if (id == _CLOCK_REALTIME) {
++        struct timeval tv; gettimeofday(&tv, NULL);
++        ts->tv_sec = tv.tv_sec; ts->tv_nsec = (long)tv.tv_usec * 1000; return 0;
++    }
++    static mach_timebase_info_data_t tb;
++    if (!tb.denom) mach_timebase_info(&tb);
++    const uint64_t ns = mach_absolute_time() * tb.numer / tb.denom;
++    ts->tv_sec = (time_t)(ns / 1000000000ull); ts->tv_nsec = (long)(ns % 1000000000ull);
++    return 0;
++}
++
++int fclonefileat(int srcfd, int dst_dirfd, const char *dst, uint32_t flags);
++int fclonefileat(int srcfd, int dst_dirfd, const char *dst, uint32_t flags)
++{
++    static int (*real)(int, int, const char *, uint32_t); static int looked;
++    if (!looked) { real = (int (*)(int, int, const char *, uint32_t))dlsym(RTLD_NEXT, "fclonefileat"); looked = 1; }
++    if (real) return real(srcfd, dst_dirfd, dst, flags);
++    errno = ENOTSUP; return -1;
++}
++#else
++typedef int nvrm_floor_shim_is_empty_at_this_floor;
++#endif
+--- a/src/nouveau/vulkan/meson.build
++++ b/src/nouveau/vulkan/meson.build
+@@ -127,7 +127,7 @@
+ )
+ 
+ if host_machine.system() == 'darwin'
+-  nvrm_files += files('nvkmd/nvrm/nvrm_xnu.c')
++  nvrm_files += files('nvkmd/nvrm/nvrm_xnu.c', 'nvkmd/nvrm/nvrm_floor_shim.c')
+ endif
+ nvk_files += nvrm_files
+ 
+--- a/src/util/memstream.c
++++ b/src/util/memstream.c
+@@ -64,7 +64,12 @@
+ 
+    return success;
+ #else
+-   FILE *const f = open_memstream(bufp, sizep);
++   /* open_memstream arrives with macOS 10.13; before it there is no memory stream and the caller gets "failed" */
++   FILE *f = NULL;
++#ifdef __APPLE__
++   if (__builtin_available(macOS 10.13, *))
++#endif
++      f = open_memstream(bufp, sizep);
+    mem->f = f;
+    return f != NULL;
+ #endif
+--- a/src/vulkan/wsi/wsi_common_metal_layer.m
++++ b/src/vulkan/wsi/wsi_common_metal_layer.m
+@@ -87,7 +87,11 @@
+          *wants_edr = true;
+          break;
+       case VK_COLOR_SPACE_DISPLAY_P3_LINEAR_EXT:
+-         color_space_name = kCGColorSpaceLinearDisplayP3;
++         /* a colour space name that arrived in a later macOS is a null symbol on an older one */
++         if (@available(macOS 12.0, *))
++            color_space_name = kCGColorSpaceLinearDisplayP3;
++         else
++            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+          *wants_edr = true;
+          break;
+       case VK_COLOR_SPACE_DCI_P3_NONLINEAR_EXT:
+@@ -99,15 +103,24 @@
+          *wants_edr = false;
+          break;
+       case VK_COLOR_SPACE_BT2020_LINEAR_EXT:
+-         color_space_name = kCGColorSpaceLinearITUR_2020;
++         if (@available(macOS 12.0, *))
++            color_space_name = kCGColorSpaceLinearITUR_2020;
++         else
++            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+          *wants_edr = false;
+          break;
+       case VK_COLOR_SPACE_HDR10_ST2084_EXT:
+-         color_space_name = kCGColorSpaceITUR_2100_PQ;
++         if (@available(macOS 11.0, *))
++            color_space_name = kCGColorSpaceITUR_2100_PQ;
++         else
++            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+          *wants_edr = true;
+          break;
+       case VK_COLOR_SPACE_HDR10_HLG_EXT:
+-         color_space_name = kCGColorSpaceITUR_2100_HLG;
++         if (@available(macOS 11.0, *))
++            color_space_name = kCGColorSpaceITUR_2100_HLG;
++         else
++            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+          *wants_edr = true;
+          break;
+       case VK_COLOR_SPACE_ADOBERGB_NONLINEAR_EXT:
+@@ -139,7 +152,8 @@
+ wsi_metal_layer_set_immediate(const CAMetalLayer *metal_layer,
+                               bool enable_immediate)
+ {
+-   metal_layer.displaySyncEnabled = !enable_immediate;
++   if (@available(macOS 10.13, *))
++      metal_layer.displaySyncEnabled = !enable_immediate;
+ }
+ 
+ VkResult
+@@ -160,17 +174,25 @@
+       if (result != VK_SUCCESS)
+          return result;
+ 
+-      if (metal_layer.device == nil)
+-         metal_layer.device = metal_layer.preferredDevice;
++      if (metal_layer.device == nil) {
++         /* a layer has no preferred device before macOS 10.15: take the system default there */
++         if (@available(macOS 10.15, *))
++            metal_layer.device = metal_layer.preferredDevice;
++         else
++            metal_layer.device = [MTLCreateSystemDefaultDevice() autorelease];
++      }
+ 
+       /* So acquire timeout works */
+-      metal_layer.allowsNextDrawableTimeout = YES;
++      if (@available(macOS 10.13, *))
++         metal_layer.allowsNextDrawableTimeout = YES;
+       metal_layer.framebufferOnly = framebuffer_only;
+ 
+-      metal_layer.maximumDrawableCount = image_count;
++      if (@available(macOS 10.13.2, *))
++         metal_layer.maximumDrawableCount = image_count;
+       metal_layer.drawableSize = (CGSize){.width = width, .height = height};
+       metal_layer.opaque = enable_opaque;
+-      metal_layer.displaySyncEnabled = !enable_immediate;
++      if (@available(macOS 10.13, *))
++         metal_layer.displaySyncEnabled = !enable_immediate;
+       metal_layer.pixelFormat = metal_format;
+ 
+       metal_layer.colorspace = cg_color_space;
+@@ -260,10 +282,13 @@
+       NSData* content_info = [NSData dataWithBytesNoCopy:&light_level
+                                                   length:sizeof(light_level)
+                                             freeWhenDone:false];
+-      CAEDRMetadata* edr_metadata = [CAEDRMetadata HDR10MetadataWithDisplayInfo:display_info
+-                                                                    contentInfo:content_info
+-                                                             opticalOutputScale:1];
+-      metal_layer.EDRMetadata = edr_metadata;
++      /* extended-range metadata arrives with macOS 10.15; an older layer has nowhere to put it */
++      if (@available(macOS 10.15, *)) {
++         CAEDRMetadata* edr_metadata = [CAEDRMetadata HDR10MetadataWithDisplayInfo:display_info
++                                                                       contentInfo:content_info
++                                                                opticalOutputScale:1];
++         metal_layer.EDRMetadata = edr_metadata;
++      }
+    }
+ }
+ 
+@@ -289,9 +314,12 @@
+ {
+    @autoreleasepool {
+       id<CAMetalDrawable> drawable = (id<CAMetalDrawable>)drawable_ptr;
+-      [drawable addPresentedHandler: ^(id<MTLDrawable> mtlDrwbl) {
+-         presented_handler(present_info_ptr, present_id);
+-      }];
++      /* a drawable reports its presentation from macOS 10.15.4; before that the handler is never called */
++      if (@available(macOS 10.15.4, *)) {
++         [drawable addPresentedHandler: ^(id<MTLDrawable> mtlDrwbl) {
++            presented_handler(present_info_ptr, present_id);
++         }];
++      }
+    }
+ }
+ 
