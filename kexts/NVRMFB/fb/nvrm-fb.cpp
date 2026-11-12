@@ -46,6 +46,7 @@ static inline thread_call_t nvrmfbCall(thread_call_func_t fn, thread_call_param_
 }
 #include "nvrm-hud.h"
 #include "nvrm-fb-safety.h"
+#include "nvrmfb_scanout_reserve.h"
 #include <IOKit/i2c/IOI2CInterface.h>
 #include "../nvrm_ddc_abi.h"
 #include "../nvrm_off_bar.h"
@@ -559,7 +560,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     // Widest raster offered when it fits the scanout memory. Separate from the scaler limit: a 5120x1440 monitor whose
     // firmware started at 2560x1440 has a 3840-wide scaler limit, yet 5120x1440 needs less memory than 3840x2160.
     NvU32 fRasterMaxW = 0;
-    NvU64 fAllocSize = 0, fMemBytes = 0;
+    NvU64 fAllocSize = 0, fMemBytes = 0, fModesAllocSize = 0;
     // The scanout and cursor bytes this head mapped into BAR1 (video memory only), counted once into gVramDisplayBytes.
     NvU64 fScanoutBarBytes = 0, fCursorBarBytes = 0;
     unsigned fModeSwitches = 0, fValidateCalls = 0, fValidateOk = 0;
@@ -1436,6 +1437,13 @@ bool NVRMNVDAFramebuffer::kapiInit()
         mp.useVideoMemory = kTryOrder[t];
         mp.compressible   = &compressible;
         fMem = fKms->allocateMemory(fDev, &mp);
+        // the floor is extra: when it cannot be had, the size the mode list asks for is tried before the boot size
+        if (!fMem && fModesAllocSize && fModesAllocSize < mp.size) {
+            FBLOG("%s: allocateMemory(%llu) with the reserve floor failed -- trying the mode list's %llu", what,
+                  (unsigned long long)mp.size, (unsigned long long)fModesAllocSize);
+            fAllocSize = fModesAllocSize; mp.size = fModesAllocSize;
+            fMem = fKms->allocateMemory(fDev, &mp);
+        }
         if (!fMem && mp.size != fSize) {
             FBLOG("%s: allocateMemory(%llu) for scaled modes failed -- falling back to the boot size %llu (no mode above %ux%u)",
                   what, (unsigned long long)mp.size, fSize, fW, fH);
@@ -1807,7 +1815,8 @@ void NVRMNVDAFramebuffer::adoptSwappedDisplay()
     const NvU64 keepAlloc = fAllocSize;
     const NvU32 oldW = fScalerMaxW, oldH = fScalerMaxH;
     computeScanoutCaps(fPitchAlign);
-    const bool short_ = fAllocSize > keepAlloc;
+    // the new monitor keeps its own ceilings when its largest desktop fits in the memory this start really allocated
+    const bool short_ = !nvrmfb_scanout_fits(fScalerMaxW, fScalerMaxH, fPitchAlign, fMemBytes);
     fAllocSize = keepAlloc;
     // ceilings past the allocation would let a desktop scan out beyond the end of its memory: keep the ones that fit
     if (short_) { fScalerMaxW = oldW; fScalerMaxH = oldH; fRasterMaxW = oldW; }
@@ -3629,7 +3638,10 @@ void NVRMNVDAFramebuffer::computeScanoutCaps(NvU32 pitchAlign)
       } }
     const NvU64 mp_ = ((NvU64)fScalerMaxW * 4 + pitchAlign - 1) & ~((NvU64)pitchAlign - 1);
     fAllocSize = (mp_ * fScalerMaxH + 0xffff) & ~0xffffull;
-    if (fAllocSize < fSize) fAllocSize = fSize;
+    // the reservation has a floor that does not depend on the first EDID (nvrmfb_scanout_reserve.h); the ceilings
+    // above stay those of the mode list
+    fModesAllocSize = fAllocSize > fSize ? fAllocSize : fSize;   // what the mode list alone asks for
+    fAllocSize = nvrmfb_scanout_reserve(fAllocSize, fSize, pitchAlign);
 }
 // Users on HDMI and DisplayPort (RTX 3050/3060/4060, 144-240 Hz panels) saw only 60 Hz: macOS's EDID parse handed
 // validateDetailedTiming nothing above 60 Hz for those panels, while NVKMS parses the same EDID (CTA-861 and DisplayID
