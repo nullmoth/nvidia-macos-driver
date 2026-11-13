@@ -264,6 +264,7 @@ class NVRMBacklightHandler : public IODisplayParameterHandler {
     bool fEdp = false; unsigned fEdpGpu = 0, fEdpDisplay = 0; EdpBacklightCaps fEdpCaps = {};   // DPCD brightness fallback, see publishBacklight
     bool fHaveSaved = false;            // NVRAM held a saved level when this handler was made
     volatile bool fUserSeen = false;    // a user request other than a start-up default has arrived
+    volatile bool fUserMoved = false;   // a user request below the maximum has arrived (ends external restores)
     OSDictionary *fParameters = nullptr;
     static void applyFire(thread_call_param_t me, thread_call_param_t);
     static void persistFire(thread_call_param_t me, thread_call_param_t);
@@ -277,8 +278,54 @@ public:
     bool doDataSet(const OSSymbol *, OSData *) override { return false; }
     bool doUpdate() override { return true; }
     void free() override;
+    int restoreExternal(SInt32 level);
 };
 OSDefineMetaClassAndStructors(NVRMBacklightHandler, IODisplayParameterHandler)
+// The internal panel's handler, for debug.nvrmfb_backlight_restore. Set by publishBacklight once the handler is
+// registered, cleared by stop() before the handler is released; read and retained under gBacklightLock.
+static IOLock *gBacklightLock = nullptr;
+static NVRMBacklightHandler *gBacklightHandler = nullptr;
+static void nvrmBacklightPublishGlobal(NVRMBacklightHandler *h)
+{
+    if (!gBacklightLock) { IOLock *l = IOLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void * volatile *)&gBacklightLock)) IOLockFree(l); }
+    if (!gBacklightLock) return;
+    IOLockLock(gBacklightLock);
+    if (h) h->retain();
+    NVRMBacklightHandler *old = gBacklightHandler;
+    gBacklightHandler = h;
+    IOLockUnlock(gBacklightLock);
+    if (old) old->release();
+}
+static void nvrmBacklightClearGlobal(NVRMBacklightHandler *h)
+{
+    if (!gBacklightLock || !h) return;
+    IOLockLock(gBacklightLock);
+    const bool mine = gBacklightHandler == h;
+    if (mine) gBacklightHandler = nullptr;
+    IOLockUnlock(gBacklightLock);
+    if (mine) h->release();
+}
+// Write-only: a logical level 0..65535 to restore while the user has not moved the brightness this boot. Firmware that
+// drops NVRAM writes (OpenCore with DisableVariableWrite and no emulated NVRAM) brings /options back with an old level at
+// every restart; the installed backlight job keeps its own copy of the last level and writes it here when /options
+// disagrees with it. Reading returns -1.
+static int nvrmfbBacklightRestoreSysctl SYSCTL_HANDLER_ARGS
+{
+    int v = -1;
+    int err = sysctl_handle_int(oidp, &v, 0, req);
+    if (err || !req->newptr) return err;
+    if (!gBacklightLock) return ENODEV;
+    IOLockLock(gBacklightLock);
+    NVRMBacklightHandler *h = gBacklightHandler;
+    if (h) h->retain();
+    IOLockUnlock(gBacklightLock);
+    if (!h) return ENODEV;
+    err = h->restoreExternal((SInt32)v);
+    h->release();
+    return err;
+}
+SYSCTL_PROC(_debug, OID_AUTO, nvrmfb_backlight_restore, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0,
+            nvrmfbBacklightRestoreSysctl, "I", "restore a saved panel brightness (0..65535) before the user has moved it this boot");
 const OSSymbol *NVRMBacklightHandler::sBrightnessProbe = nullptr;
 const OSSymbol *NVRMBacklightHandler::sLinearBrightnessProbe = nullptr;
 
@@ -381,7 +428,10 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
     if (nvrm_backlight_startup_default(userRequest, (UInt32)level, fHaveSaved, fUserSeen, OSAddAtomic(0, &fUserLevel))) {
         BLLOG("backlight: first user request is the maximum with a saved level -- start-up default, not saved");
         userRequest = false;
-    } else if (userRequest) fUserSeen = true;
+    } else if (userRequest) {
+        fUserSeen = true;
+        if (level < (SInt32)kNVRMBacklightMax) fUserMoved = true;
+    }
     if (userRequest) {
         uint64_t deadline;
         clock_interval_to_deadline(kNVRMBacklightSaveDelaySeconds, kSecondScale, &deadline);
@@ -399,6 +449,35 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
     fPending = level;
     thread_call_enter(fApply);
     return true;
+}
+
+// debug.nvrmfb_backlight_restore: the same restore setDisplay makes from /options, for a level kept outside NVRAM.
+int NVRMBacklightHandler::restoreExternal(SInt32 level)
+{
+    if (level < 0 || level > (SInt32)kNVRMBacklightMax) return EINVAL;
+    if (!nvrm_backlight_external_restore_ok(fUserMoved, level)) {
+        BLLOG("backlight: external restore of logical %d refused -- the user already moved the brightness this boot", (int)level);
+        return EBUSY;
+    }
+    __atomic_store_n(&fUserLevel, level, __ATOMIC_SEQ_CST);
+    // Treated like a level read from /options at start: the display stack's start-up request for the maximum is then
+    // clamped to it instead of replacing it. Requests seen so far were all for the maximum (fUserMoved is clear), so
+    // they were start-up defaults too, and the next one is treated the same way.
+    fHaveSaved = true;
+    fUserSeen = false;
+    if (fParameters) {
+        IODisplay::setParameter(fParameters, gIODisplayBrightnessKey, level);
+        IODisplay::setParameter(fParameters, gIODisplayLinearBrightnessKey, level);
+    }
+    // Keep /options in step for this boot, so the variable shows what the panel shows; a firmware that keeps writes
+    // stores it as usual.
+    IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
+    if (options) (void)nvrm_backlight_write(options, (UInt32)level);
+    OSSafeReleaseNULL(options);
+    BLLOG("backlight: external restore logical=%d/65535 (a level kept outside NVRAM)", (int)level);
+    fPending = level;
+    thread_call_enter(fApply);
+    return 0;
 }
 
 void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
@@ -606,6 +685,9 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     // This instance exists because a display appeared after boot (see gNDpyBoot), and its connect handler has already
     // been fired once -- see connectNotifyFire and enableController.
     bool fHotplugBorn = false, fConnectFired = false;
+    // The connect interrupt came due before the framework had registered its handler; registerForInterruptType fires
+    // it as soon as the handler arrives (see connectNotifyFire).
+    volatile SInt32 fConnectOwed = 0;
     bool fEdidSwapped = false;
     void adoptSwappedDisplay();
     void takeEdid(const NvU8 *src, NvU32 size);
@@ -1667,7 +1749,15 @@ void NVRMNVDAFramebuffer::connectNotifyFire(thread_call_param_t p0, thread_call_
     if (!me) return;
     NVRMCallReference callReference(me);
     if (OSAddAtomic(0, &me->fStopping)) return;
-    if (!me->fConnect.proc) { FBLOG("fb%u connect notify: nothing registered yet", me->fIndex); return; }
+    if (!me->fConnect.proc) {
+        // IOFramebuffer::open registers the connect handler after enableController, and on a display plugged in after
+        // boot the open can take longer than the 1.5 s delay. Dropping the notification here left such a display dark
+        // until a restart: nothing fired it again. Owe it instead; registerForInterruptType pays it.
+        OSCompareAndSwap(0, 1, &me->fConnectOwed);
+        FBLOG("fb%u connect notify: nothing registered yet -- it fires when the framework registers its connect handler", me->fIndex);
+        return;
+    }
+    OSCompareAndSwap(1, 0, &me->fConnectOwed);
     me->fConnectFired = true;
     FBLOG("fb%u -> connect interrupt (the framework's registered handler)", me->fIndex);
     me->fConnect.proc(me->fConnect.target, me->fConnect.ref);
@@ -3273,7 +3363,7 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
     if (fHwVblCb && fKms && fDev) {
         fKms->unregisterVblankIntrCallback(fDev, fHead, fHwVblCb); fHwVblCb = nullptr;
     }
-    if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
+    if (fBacklight) { nvrmBacklightClearGlobal(fBacklight); fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
     if (fGamma) { IOFree(fGamma, sizeof *fGamma); fGamma = nullptr; fGammaOn = false; }
     if (fWakeGate) { if (IOWorkLoop *wl = getWorkLoop()) wl->removeEventSource(fWakeGate); OSSafeReleaseNULL(fWakeGate); }
     if (fSleepTap) { fSleepTap->remove(); fSleepTap = nullptr; }
@@ -3327,6 +3417,8 @@ void NVRMNVDAFramebuffer::publishBacklight()
     fBacklight->setName("backlight");
     if (!fBacklight->attach(this)) { OSSafeReleaseNULL(fBacklight); FBLOG("fb%u: backlight handler attach failed", fIndex); return; }
     fBacklight->registerService(kIOServiceSynchronous);
+    nvrmBacklightPublishGlobal(fBacklight);
+    { static volatile SInt32 once; if (OSCompareAndSwap(0, 1, &once)) sysctl_register_oid(&sysctl__debug_nvrmfb_backlight_restore); }
     FBLOG("fb%u: panel backlight at %u%% -- brightness keys and slider through AppleBacklightDisplay", fIndex, (unsigned)level);
 }
 
@@ -3781,6 +3873,19 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
             b.horizontalSyncConfig = k.flags.hSyncPos ? 1 : 0; b.verticalSyncConfig = k.flags.vSyncPos ? 1 : 0;
             b.dscCompressedBitsPerPixel = 0; b.dscSliceWidth = 0; b.dscSliceHeight = 0;
             b.detailedTimingModeID = 0x10000u | (i << 8) | copy;
+            // A derived timing is not one of the display's own modes, so NVKMS decides at mode set whether the panel can
+            // take it, and some cannot (eDP panels that accept only their EDID timings). The test pass of switchMode then
+            // refuses it, and WindowServer still shows the rate as selected while the panel stays where it was. Ask
+            // NVKMS the same question here (the timing setDisplayMode will submit) and offer only what it accepts.
+            {
+                struct NvKmsKapiDisplayMode dm = {};
+                dtToKapi(&b, &dm);
+                if (!fKms->validateDisplayMode || !fKms->validateDisplayMode(fDev, fDisplay, &dm)) {
+                    FBLOG("fb%u derived refresh rate %ux%u @%u Hz (native %u Hz / %u): NVKMS refused the timing -- not offered",
+                          fIndex, k.hVisible, k.vVisible, dhzWant, hz, div);
+                    continue;
+                }
+            }
             fDT[n++] = b; added++;
             FBLOG("fb%u derived refresh rate: %ux%u @%u Hz (native %u Hz / %u) as dt 0x%x", fIndex, k.hVisible, k.vVisible,
                   dhzWant, hz, div, b.detailedTimingModeID);
@@ -5571,6 +5676,12 @@ IOReturn NVRMNVDAFramebuffer::registerForInterruptType(IOSelect type, IOFBInterr
     if (type == kIOFBConnectInterruptType) {
         fConnect = { proc, target, ref }; if (interruptRef) *interruptRef = &fConnect;
         FBLOG("registerForInterruptType '%s' -> CONNECT REGISTERED", t);
+        // A connect notification that came due before this registration (connectNotifyFire found no handler). It runs
+        // from the thread call, not here: the framework is inside its own open path while it registers.
+        if (proc && OSAddAtomic(0, &fConnectOwed)) {
+            FBLOG("fb%u: the connect interrupt owed since the mode set fires now that the handler is registered", fIndex);
+            notifyConnectionChanged(100);
+        }
         return kIOReturnSuccess;
     }
     FBLOG("registerForInterruptType '%s' -> REFUSED (unsupported)", t);

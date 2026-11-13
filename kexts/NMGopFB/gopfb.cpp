@@ -234,11 +234,12 @@ bool NMGopFB::start(IOService *provider)
     if (!pci) return false;
     pci->setMemoryEnable(true);
     if (!adoptFirmwareFramebuffer(pci)) return false;
-    if (!IOFramebuffer::start(provider)) { OSSafeReleaseNULL(fSurfMap); return false; }
     // Head 4 of the NVIDIA accelerator: WindowServer composites this panel on the NVIDIA card and the display pipe copies
-    // each frame into the mapping.
+    // each frame into the mapping. Set before IOFramebuffer::start: start() attaches the shared controller only when the
+    // dependent ID already exists, and the power change registerPowerDriver() queues needs that controller.
     setProperty("IOFBDependentID", 0x4E56524D00000001ull, 64);
     setProperty("IOFBDependentIndex", 4ull, 32);
+    if (!IOFramebuffer::start(provider)) { OSSafeReleaseNULL(fSurfMap); return false; }
     GFBLOG("hybrid: provider NMGopFB %ux%u pitch %u level %d (CPU-mapped scanout, no VRAM)", fWidth, fHeight, fRowBytes, fHyLevel);
     setProperty("NMGopFBHybridLevel", (unsigned long long)fHyLevel, 32);
     setProperty("built-in", kOSBooleanTrue);

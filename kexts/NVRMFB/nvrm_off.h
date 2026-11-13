@@ -83,6 +83,16 @@ static inline bool nvrm_backlight_startup_default(bool userRequest, UInt32 level
     return userRequest && haveSaved && !userSeen && level == (UInt32)kNVRMBacklightMax && userLevel < (SInt32)kNVRMBacklightMax;
 }
 
+// A level restored from outside the kernel (debug.nvrmfb_backlight_restore, written by the installed backlight job from
+// its own copy of the last level) is for firmware that does not keep NVRAM variables across a restart, where /options
+// comes back with an old value. It is taken only while the user has not moved the brightness this boot: a request for
+// exactly the maximum does not count as moving it (the display stack sends one at every start, see above), any other
+// user request does, and from then on the user's choice wins.
+static inline bool nvrm_backlight_external_restore_ok(bool userMoved, SInt32 level)
+{
+    return !userMoved && level >= 0 && level <= (SInt32)kNVRMBacklightMax;
+}
+
 static inline bool nvrm_backlight_write(IORegistryEntry *options, UInt32 level)
 {
     if (!options || level > kNVRMBacklightMax) return false;
