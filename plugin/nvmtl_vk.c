@@ -308,6 +308,7 @@ void nvmtl_heaps_dump(FILE *f, void (*emit)(void *, const char *));   /* NVMTLOb
 // attributed to whatever ran next. Same shape as the image grace and the page lifetime. NVMTL_BUFFER_GRACE=0 turns it off.
 typedef struct nvmtl_bgrace { nvk_buffer b; nvmtl_pl_node life; } nvmtl_bgrace;
 static nvmtl_pl_state g_bg; static pthread_mutex_t g_bg_lock = PTHREAD_MUTEX_INITIALIZER;
+static void nvmtl_buffer_grace_reap(void);
 static int nvmtl_buffer_grace_on(void)
 {
     static int on = -1;
@@ -357,10 +358,11 @@ static void nvmtl_life_abandon(void)
 {
     pthread_mutex_lock(&g_grace_lock); ++g_cmd_abandoned; pthread_mutex_unlock(&g_grace_lock);
 }
-static uint64_t nvmtl_life_submit(void)
+static uint64_t nvmtl_life_submit(unsigned recordings)
 {
     pthread_mutex_lock(&g_grace_lock);
-    uint64_t id = ++g_cmd_submitted;
+    // One queue submission can complete both the main recording and its upload prologue.
+    uint64_t id = (g_cmd_submitted += recordings);
     pthread_mutex_unlock(&g_grace_lock);
     return id;
 }
@@ -8323,6 +8325,7 @@ int nvmtl_vk_cmd_abandon(nvk_cmdbuf *c)
     nvmtl_life_abandon();
     nvmtl_hz_forget((VkCommandBuffer)c->cb);
     nvmtl_cmd_retire(c);
+    nvmtl_buffer_grace_reap();
     return 0;
 }
 
@@ -8438,9 +8441,9 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     uint64_t *const pt = f->pt;
     if (c && c->dead) return -3;   // made after the loss: nothing was recorded, nothing is in flight
     if (g_state != 1 || !c || !c->cb) return -2;
-    if (c->counter_error || nvmtl_counter_flush(c)) { nvmtl_cmd_retire(c); return -1; }
+    if (c->counter_error || nvmtl_counter_flush(c)) { nvmtl_vk_cmd_abandon(c); return -1; }
     VkCommandBuffer counter_reset = VK_NULL_HANDLE;
-    if (nvmtl_counter_reset_finish(c, &counter_reset)) { nvmtl_cmd_retire(c); return -1; }
+    if (nvmtl_counter_reset_finish(c, &counter_reset)) { nvmtl_vk_cmd_abandon(c); return -1; }
     c->timing.clock = nvmtl_clock_snapshot();
     c->timing.host_before_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     if (c->timing_pool && !c->in_rp)
@@ -8453,11 +8456,11 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     const uint32_t wseq = nvmtl_keep_on() ? nvmtl_wit_record(c) : 0;
     VkResult result = pvkEndCommandBuffer(c->cb);
     const uint64_t sB = nvmtl_perf_now();
-    if (result != VK_SUCCESS) { nvmtl_cmd_retire(c); return -1; }
+    if (result != VK_SUCCESS) { nvmtl_vk_cmd_abandon(c); return -1; }
     VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; VkFence fence;
     result = pvkCreateFence(g_dev, &fci, NULL, &fence);
     const uint64_t sC = nvmtl_perf_now();
-    if (result != VK_SUCCESS) { nvmtl_cmd_retire(c); return -1; }
+    if (result != VK_SUCCESS) { nvmtl_vk_cmd_abandon(c); return -1; }
     nvmtl_prologue *const pre = &f->pre;
     pthread_mutex_lock(&nvmtl_submit_mutex);
     if (pro && nvmtl_pre_submit_hook) {
@@ -8478,7 +8481,7 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
         if (pre->n && pr == VK_SUCCESS) cbs[ncb++] = pre->cb.cb;
         else {
             if (pre->n) { g_pre_fail++; nvlog("vk: pre-submit prologue End -> %d - %u uploads/fills (%llu bytes) LOST, the GPU keeps the old bytes", pr, pre->n, pre->bytes); }
-            nvmtl_cmd_retire(&pre->cb); nvmtl_pre_drop(pre); pre->begun = 0;
+            nvmtl_vk_cmd_abandon(&pre->cb); nvmtl_pre_drop(pre); pre->begun = 0;
         }
     }
     cbs[ncb++] = c->cb;
@@ -8490,7 +8493,7 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     result = g_state == 1 ? pvkQueueSubmit(g_queue, 1, &si, fence) : VK_ERROR_DEVICE_LOST;
     /* Keep the software sequence in the same order as actual queue submissions.
        A later submit must never acquire an earlier lifetime sequence. */
-    c->fx_seq = nvmtl_life_submit();
+    c->fx_seq = nvmtl_life_submit(1 + (pre->begun != 0));
     pthread_mutex_unlock(&nvmtl_submit_mutex);
     pt[4] = nvmtl_perf_now();
     for (nvmtl_address_page *pg = c->address_pages; pg; pg = pg->next) nvmtl_pl_stamp(&pg->life, c->fx_seq);
@@ -8647,12 +8650,21 @@ void nvmtl_vk_buffer_destroy(nvk_buffer *b)
             nvmtl_fx_note_buffer_gone(b, (b->pool ? NVMTL_FX_POOLED : 0) | (b->placed ? NVMTL_FX_PLACED : 0));
             nvmtl_live_relabel(b, NVMTL_LV_DYING);
             g->b = *b; memset(b, 0, sizeof *b);
-            nvmtl_pl_stamp(&g->life, g_cmd_submitted);
+            // Recorded buffer/alias references can belong to command buffers not submitted yet.
+            pthread_mutex_lock(&g_grace_lock);
+            nvmtl_pl_stamp(&g->life, nvmtl_grace_seq_locked());
             pthread_mutex_lock(&g_bg_lock); nvmtl_pl_made(&g_bg);
             const int now = nvmtl_pl_release(&g_bg, &g->life, __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE), 0);
             pthread_mutex_unlock(&g_bg_lock);
+            pthread_mutex_unlock(&g_grace_lock);
             if (now) { t_grace_reaping = 1; nvmtl_vk_buffer_destroy_body(&g->b); t_grace_reaping = 0; free(g); }
             nvmtl_perf_note(NVP_BUFDEL, t0, n);
+            return;
+        }
+        if (b->host_release) {
+            // Losing an import's grace record must not release pages still used by the GPU.
+            nvlog("buffer grace: allocation failed; retaining imported buffer and host storage");
+            memset(b, 0, sizeof *b);
             return;
         }
     }
@@ -8663,7 +8675,17 @@ void nvmtl_vk_buffer_destroy(nvk_buffer *b)
 static void nvmtl_buffer_grace_reap(void)
 {
     nvmtl_pl_node *due; unsigned n;
-    pthread_mutex_lock(&g_bg_lock); n = nvmtl_pl_reap(&g_bg, __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE), &due); pthread_mutex_unlock(&g_bg_lock);
+    pthread_mutex_lock(&g_grace_lock);
+    pthread_mutex_lock(&g_bg_lock);
+    // Once every recording has submitted or been abandoned, no future submit can
+    // read these retired buffers. Cancelled recordings must not leave an unreachable
+    // sequence stamp behind; already submitted readers still wait for their fence.
+    if (nvmtl_grace_seq_locked() == g_cmd_submitted)
+        for (nvmtl_pl_node *e = g_bg.cooling; e; e = e->cool)
+            if (e->last_seq > g_cmd_submitted) e->last_seq = g_cmd_submitted;
+    n = nvmtl_pl_reap(&g_bg, __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE), &due);
+    pthread_mutex_unlock(&g_bg_lock);
+    pthread_mutex_unlock(&g_grace_lock);
     t_grace_reaping = 1;
     while (due) { nvmtl_pl_node *e = due; due = e->cool; nvmtl_bgrace *g = (nvmtl_bgrace *)((char *)e - offsetof(nvmtl_bgrace, life)); nvmtl_vk_buffer_destroy_body(&g->b); free(g); }
     t_grace_reaping = 0;
@@ -8695,7 +8717,10 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
     }
     if (!b->placed && b->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL); g_alloc_bytes -= b->alloc;
                                 if (was_charged) nvmtl_vk_budget_discharge(b->alloc); }
+    void (*release)(void *) = b->host_release;
+    void *context = b->host_context;
     memset(b, 0, sizeof *b);
+    if (release) release(context);
 }
 
 void nvmtl_vk_buffer_retire(nvk_buffer *b)

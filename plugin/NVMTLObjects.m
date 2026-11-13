@@ -979,6 +979,14 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
           st ? "read/write" : "read", (unsigned long)offset, (__bridge void *)t);
     return t;
 }
+static void nvmtl_host_buffer_release(void *retained)
+{
+    @autoreleasepool {
+        void (^release)(void) = CFBridgingRelease(retained);
+        release();
+    }
+}
+
 @implementation NVMTLBuffer
 @dynamic sparseBufferTier;
 - (IOSurfaceRef)iosurface { return NULL; }
@@ -1077,6 +1085,19 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
 - (void)removeAllDebugMarkers {}
 void nvmtl_vk_buffer_retire(nvk_buffer *b);
 - (void)dealloc {
+    // retire clears these structs; preserve the caller's original allocation first.
+    nvk_buffer *host = _shadow.imported ? &_shadow : &_b;
+    void *hostPtr = _hostPtr ?: host->map;
+    NSUInteger hostLen = (NSUInteger)(_hostLen ?: host->size);
+    void (^hostDealloc)(void *, NSUInteger) = _hostDealloc;
+    _hostDealloc = nil;
+    if (hostDealloc && host->imported) {
+        // A grace-held import still names these pages. Release them only after vkFreeMemory.
+        void (^release)(void) = ^{ hostDealloc(hostPtr, hostLen); };
+        host->host_release = nvmtl_host_buffer_release;
+        host->host_context = (__bridge_retained void *)release;
+        hostDealloc = nil;
+    }
     if (_b.buf && nvmtl_trace_on()) nvtrace("BUFFREE 0x%llx len %zu", (unsigned long long)nvmtl_vk_buffer_address(&_b), _b.size);
     for (uint32_t k = 0; k < _nbpk; k++) nvmtl_vk_image_destroy(&_bpk[k].img);
     free(_bpk); _bpk = NULL; _nbpk = 0;
@@ -1085,8 +1106,7 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
     if (_subHeap) { NVMTLHeap *h = _subHeap; NSUInteger c = _subCharge; _subHeap = nil; _subCharge = 0;
                     if (_subPlaced && c) { _subPlaced = NO; [h nvmtlGiveRange:_heapOffset length:c]; }
                     [h nvmtlReleaseSubAllocation:c]; }
-    if (_hostDealloc) { void (^d)(void *, NSUInteger) = _hostDealloc; _hostDealloc = nil;
-                        d(_hostPtr ?: _b.map, (NSUInteger)(_hostLen ?: _b.size)); } }
+    if (hostDealloc) hostDealloc(hostPtr, hostLen); }
 - (MTLStorageMode)storageMode { return _storage; }
 - (void *)contents { nvmtl_buf_settle(self); if (_swc && _hostPtr) return _hostPtr; return _shadow.map ? _shadow.map : (_hostPtr ? _hostPtr : _b.map); }
 - (id<MTLHeap>)heap { return _heap ?: _subHeap; }
