@@ -327,8 +327,8 @@ static NSMutableSet *nvmtl_identity_set(NSUInteger cap) {
     return (__bridge_transfer NSMutableSet *)CFSetCreateMutable(kCFAllocatorDefault, (CFIndex)cap, &cb);
 }
 @implementation NVMTLResSet
-- (instancetype)init { if ((self = [super init])) _s = nvmtl_identity_set(0); return self; }
-- (instancetype)initWithCapacity:(NSUInteger)n { if ((self = [super init])) _s = nvmtl_identity_set(n); return self; }
+- (instancetype)init { if ((self = [super init])) { _s = nvmtl_identity_set(0); _w = nvmtl_identity_set(0); } return self; }
+- (instancetype)initWithCapacity:(NSUInteger)n { if ((self = [super init])) { _s = nvmtl_identity_set(n); _w = nvmtl_identity_set(n); } return self; }
 // 10-07 (a user's crash report, RTX 5060 Ti): Hackintool died in -[__NSSetM member:] under -addObject:, called
 // from setFragmentTexture on CoreAnimation's async-render workqueue thread. NSMutableSet is not thread-safe and nothing
 // here serialised it, so every operation now holds _lk. Enumeration hands out a snapshot, never the live set.
@@ -352,24 +352,33 @@ static NSMutableSet *nvmtl_identity_set(NSUInteger cap) {
     // driver, that both misses the bug and invents one, is worse than no test.
     id member = [_s member:o]; BOOL had = member != nil;
     if (!had) { [_s addObject:o]; member = o; }
+    [_w addObject:member];
     // An equal object need not be the object retained by NSMutableSet. Cache only the retained member's address.
     _mru[_mruNext++ & 7] = (__bridge const void *)member;
     os_unfair_lock_unlock(&_lk); if (!had) nvmtl_resref(o, 1); }
+- (void)addReadOnlyObject:(id)o { if (!o) return; const void *p = (__bridge const void *)o; os_unfair_lock_lock(&_lk);
+    for (unsigned k = 0; k < 8; k++) if (_mru[k] == p) { os_unfair_lock_unlock(&_lk); return; }
+    id member = [_s member:o]; BOOL had = member != nil;
+    if (!had) [_s addObject:o];
+    os_unfair_lock_unlock(&_lk); if (!had) nvmtl_resref(o, 1); }
+- (BOOL)isWrittenObject:(id)o { if (!o) return NO; os_unfair_lock_lock(&_lk);
+    BOOL w = [_w member:o] != nil; os_unfair_lock_unlock(&_lk); return w; }
 - (void)removeObject:(id)o { if (!o) return; os_unfair_lock_lock(&_lk); id member = [_s member:o];
-    if (member) [_s removeObject:member];
+    if (member) { [_s removeObject:member]; [_w removeObject:member]; }
     for (unsigned k = 0; k < 8; k++) if (_mru[k] == (__bridge const void *)member) _mru[k] = NULL;
     os_unfair_lock_unlock(&_lk); if (member) nvmtl_resref(member, -1); }
 // Clearing, copying and sealing never go through -allObjects. That array is autoreleased into the CALLER's pool, and
 // these run on the app's own commit thread: Geekbench 7 never drains that pool, so every resource a command buffer had
 // ever touched stayed alive, and Super Resolution filled VRAM with 9 MB MPS buffers until allocations were refused.
 // The sets below are owned (+1) and released at the end of scope.
-- (void)removeAllObjects { NSMutableSet *fresh = nvmtl_identity_set(0), *old;
-    os_unfair_lock_lock(&_lk); old = _s; _s = fresh; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
+- (void)removeAllObjects { NSMutableSet *fresh = nvmtl_identity_set(0), *freshW = nvmtl_identity_set(0), *old, *oldW;
+    os_unfair_lock_lock(&_lk); old = _s; oldW = _w; _s = fresh; _w = freshW; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
+    (void)oldW;
     for (id o in old) nvmtl_resref(o, -1); }
 - (id)copyWithZone:(NSZone *)z { atomic_fetch_add(&gRes2Tick, 1);
     NVMTLResSet *c = [NVMTLResSet new];
-    os_unfair_lock_lock(&_lk); NSMutableSet *m = [_s mutableCopy]; os_unfair_lock_unlock(&_lk);
-    c->_s = m;
+    os_unfair_lock_lock(&_lk); NSMutableSet *m = [_s mutableCopy], *mw = [_w mutableCopy]; os_unfair_lock_unlock(&_lk);
+    c->_s = m; c->_w = mw;
     for (id o in m) nvmtl_resref(o, 1);
     return c; }
 - (id)mutableCopyWithZone:(NSZone *)z { return [self copyWithZone:z]; }
@@ -378,10 +387,33 @@ static NSMutableSet *nvmtl_identity_set(NSUInteger cap) {
 // being in the part: the command buffer stopped holding it while the GPU work still used it. Membership moves to one
 // new owner, so each resource's residency count is unchanged; the new set's -dealloc gives it back.
 - (NVMTLResSet *)nvmtlTakeAll { atomic_fetch_add(&gRes2Tick, 1);
-    NVMTLResSet *taken = [NVMTLResSet new]; NSMutableSet *empty = taken->_s;
-    os_unfair_lock_lock(&_lk); taken->_s = _s; _s = empty; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
+    NVMTLResSet *taken = [NVMTLResSet new]; NSMutableSet *empty = taken->_s, *emptyW = taken->_w;
+    os_unfair_lock_lock(&_lk); taken->_s = _s; taken->_w = _w; _s = empty; _w = emptyW; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
     return taken; }
+- (void)nvmtlSyncWrittenFrom:(NVMTLResSet *)src {
+    if (!src) return;
+    os_unfair_lock_lock(&src->_lk); NSMutableSet *ms = [src->_s copy], *mw = [src->_w copy]; os_unfair_lock_unlock(&src->_lk);
+    os_unfair_lock_lock(&_lk);
+    for (id o in ms) if (![mw member:o]) [_w removeObject:o];
+    os_unfair_lock_unlock(&_lk);
+}
 - (void)dealloc { for (id o in _s) nvmtl_resref(o, -1); }
+@end
+@interface NVMTLResSet (SubmissionCopyQuery)
+- (BOOL)nvmtlIsBufferWritten:(id)buf;
+- (BOOL)nvmtlHasMutableHostCopy:(id)buf;
+@end
+@implementation NVMTLResSet (SubmissionCopyQuery)
+- (BOOL)nvmtlIsBufferWritten:(id)buf {
+    if (![buf isKindOfClass:[NVMTLBuffer class]]) return YES;
+    NVMTLBuffer *b = buf;
+    return [self isWrittenObject:b] || b->_texSeen;
+}
+- (BOOL)nvmtlHasMutableHostCopy:(id)buf {
+    if (![buf isKindOfClass:[NVMTLBuffer class]]) return YES;
+    NVMTLBuffer *b = buf;
+    return b->_everGpuWritten || b->_texSeen || [self isWrittenObject:b];
+}
 @end
 
 static BOOL nvmtl_purge_eligible(NVMTLTexture *t) {
@@ -7148,7 +7180,7 @@ static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbS
     NVMTLBuffer *s = (NVMTLBuffer *)src, *d = (NVMTLBuffer *)dst;
     if (!s || !d) { nvlog("blit copyFromBuffer: nil"); return; }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    [_cb->_resources addObject:s];
+    [(NVMTLResSet *)_cb->_resources addReadOnlyObject:s];
     [_cb->_resources addObject:d];
     if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &s->_b, so, &d->_b, dof, size)) nvlog("blit copyFromBuffer: FAILED");
 }
@@ -7307,7 +7339,7 @@ static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbS
     NVMTLBuffer *b = (NVMTLBuffer *)src; NVMTLTexture *t = (NVMTLTexture *)dst;
     if (!b || !t) { nvlog("blit copyFromBuffer:toTexture: nil"); return; }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    [_cb->_resources addObject:b];
+    [(NVMTLResSet *)_cb->_resources addReadOnlyObject:b];
     [_cb->_resources addObject:t];
     if (nvmtl_rb_root(t) && [t nvi]->mtl_type != 7 && size.depth == 1) {   // buffer bytes are Metal's BGR10A2 layout
         NVMTLTexture *tmp = nvmtl_rb_temp(_cb, t.device, size.width, size.height);

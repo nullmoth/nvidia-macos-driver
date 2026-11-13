@@ -279,7 +279,7 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
 @interface NVMTLBuffer () { @public NSString *_label; MTLResourceOptions _ropt;
   int _resRefs, _rstate, _lruReg, _wantOn; uint64_t _lastUse;
   uint64_t _useEp;
-  BOOL _texSeen;
+  BOOL _texSeen, _everGpuWritten;
 } @end
 @interface NVMTLTexture () { @public NSString *_label; MTLResourceOptions _ropt; BOOL _shareable; BOOL _fbo;
   MTLTextureSwizzleChannels _swz; BOOL _hasSwz; void *_swzView;
@@ -293,7 +293,10 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
 } @end
 void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 #include <os/lock.h>
-@interface NVMTLResSet : NSMutableSet { @public NSMutableSet *_s; os_unfair_lock _lk; const void *_mru[8]; unsigned _mruNext; }
+@interface NVMTLResSet : NSMutableSet { @public NSMutableSet *_s, *_w; os_unfair_lock _lk; const void *_mru[8]; unsigned _mruNext; }
+- (void)addReadOnlyObject:(id)o;
+- (BOOL)isWrittenObject:(id)o;
+- (void)nvmtlSyncWrittenFrom:(NVMTLResSet *)src;
 - (NVMTLResSet *)nvmtlTakeAll;
 @end
 @interface NVMTLFunction () { @public NSString *_label; } @end
