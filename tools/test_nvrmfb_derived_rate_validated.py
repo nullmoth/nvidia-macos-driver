@@ -52,10 +52,10 @@ arm("a refused test pass still returns an error to IOFramebuffer (kIOReturnUnsup
 
 
 def old_source():
-    base = subprocess.run(["git", "-C", str(ROOT), "log", "--format=%H", "-n", "1", "--", REL],
-                          capture_output=True, text=True, check=True).stdout.strip()
-    dirty = subprocess.run(["git", "-C", str(ROOT), "diff", "--quiet", "HEAD", "--", REL]).returncode != 0
-    rev = "HEAD" if dirty else base + "~1"
+    # the commit that introduced the check, found by its log text, so later commits to the file do not move the base
+    intro = subprocess.run(["git", "-C", str(ROOT), "log", "--format=%H", "-S", "NVKMS refused the timing -- not offered",
+                            "--", REL], capture_output=True, text=True, check=True).stdout.split()
+    rev = intro[-1] + "~1" if intro else "HEAD"
     return subprocess.run(["git", "-C", str(ROOT), "show", f"{rev}:{REL}"], capture_output=True, text=True,
                           check=True).stdout
 

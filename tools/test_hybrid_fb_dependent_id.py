@@ -79,9 +79,11 @@ old_tree = Path(sys.argv[2]) if len(sys.argv) > 2 else None
 def read_old(rel):
     if old_tree:
         return (old_tree / rel).read_text(encoding="utf-8")
-    base = subprocess.run(["git", "-C", str(ROOT), "log", "--format=%H", "-n", "1", "--", rel],
-                          capture_output=True, text=True, check=True).stdout.strip()
-    rev = base if subprocess.run(["git", "-C", str(ROOT), "diff", "--quiet", "HEAD", "--", rel]).returncode else base + "~1"
+    # the commit that moved the properties first, found by its comment text, so later commits do not move the base
+    intro = subprocess.run(["git", "-C", str(ROOT), "log", "--format=%H", "-S", "Set before IOFramebuffer::start" if "gopfb" in rel
+                            else "Before IOFramebuffer::start, so start() attaches", "--", rel],
+                           capture_output=True, text=True, check=True).stdout.split()
+    rev = intro[-1] + "~1" if intro else "HEAD"
     return subprocess.run(["git", "-C", str(ROOT), "show", f"{rev}:{rel}"], capture_output=True, text=True,
                           check=True).stdout
 
