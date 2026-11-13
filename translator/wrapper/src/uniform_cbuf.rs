@@ -161,6 +161,183 @@ impl<'a> ConstantInts<'a> {
     }
 }
 
+// ANGLE uses typed nested structs rather than Apple's runtime array of words.
+// Preserve its layout and load types; promote only pointers whose complete use
+// graph consists of fixed, in-bounds accesses and ordinary readonly loads.
+fn promote_typed(mut m: rspirv::dr::Module, root: u32, block: u32, limit: u32) -> Result<(Vec<u8>, u32), String> {
+    let mut defs: HashMap<_, _> = m.types_global_values.iter()
+        .filter_map(|i| Some((i.result_id?, i.clone()))).collect();
+    fn decoration(m: &rspirv::dr::Module, ty: u32, member: Option<u32>, key: Decoration) -> Option<u32> {
+        m.annotations.iter().find_map(|i| match (member, i.class.opcode, i.operands.as_slice()) {
+            (None, Op::Decorate, [Operand::IdRef(t), Operand::Decoration(k), Operand::LiteralBit32(v)])
+                if *t == ty && *k == key => Some(*v),
+            (Some(n), Op::MemberDecorate, [Operand::IdRef(t), Operand::LiteralBit32(a), Operand::Decoration(k), Operand::LiteralBit32(v)])
+                if *t == ty && *a == n && *k == key => Some(*v),
+            _ => None,
+        })
+    }
+    fn size(m: &rspirv::dr::Module, defs: &HashMap<u32, Instruction>, c: &mut ConstantInts<'_>, ty: u32, depth: u32) -> Option<u32> {
+        if depth >= 64 { return None; }
+        let t = defs.get(&ty)?;
+        match t.class.opcode {
+            Op::TypeInt | Op::TypeFloat if t.operands.first() == Some(&Operand::LiteralBit32(32)) => Some(4),
+            Op::TypeVector => {
+                let element = size(m, defs, c, id(t.operands.first()?)?, depth + 1)?;
+                let count = lit(t.operands.get(1)?)?;
+                if element != 4 || !(2..=4).contains(&count) { return None; }
+                element.checked_mul(count)
+            }
+            Op::TypeArray => {
+                let element = size(m, defs, c, id(t.operands.first()?)?, depth + 1)?;
+                let count = c.constant(id(t.operands.get(1)?)?, 0)?.index()?;
+                let stride = decoration(m, ty, None, Decoration::ArrayStride)?;
+                if count == 0 || stride < element || stride % 4 != 0 { return None; }
+                stride.checked_mul(count - 1)?.checked_add(element)
+            }
+            Op::TypeStruct => {
+                let mut end = 0;
+                for (n, member) in t.operands.iter().enumerate() {
+                    let off = decoration(m, ty, Some(n as u32), Decoration::Offset)?;
+                    let bytes = size(m, defs, c, id(member)?, depth + 1)?;
+                    if off < end || off % 4 != 0 { return None; }
+                    end = off.checked_add(bytes)?;
+                }
+                Some(end)
+            }
+            // Matrices, runtime arrays, narrow scalars and opaque types retain
+            // the original path until their layout has its own proof.
+            _ => None,
+        }
+    }
+    if !m.annotations.iter().any(|a| a.class.opcode == Op::Decorate && a.operands ==
+        [Operand::IdRef(block), Operand::Decoration(Decoration::Block)]) {
+        return Err("typed GL uniform lacks block layout".into());
+    }
+    let mut constants = ConstantInts::new(&m);
+    // AIR represents trailing struct padding as an i8 array. A Uniform block
+    // containing it would require uniform 8-bit storage support. Omit that
+    // member in a private copy of the block, only after proving no use reaches
+    // it. Never mutate a struct shared with another buffer or load it whole.
+    let tail = defs.get(&block).and_then(|t| t.operands.last()).and_then(id).and_then(|t| defs.get(&t));
+    let trim_tail = tail.is_some_and(|t| t.class.opcode == Op::TypeArray
+        && t.operands.first().and_then(id).and_then(|e| defs.get(&e)).is_some_and(|e|
+            e.class.opcode == Op::TypeInt && e.operands.first() == Some(&Operand::LiteralBit32(8))));
+    if trim_tail { defs.get_mut(&block).unwrap().operands.pop(); }
+    let bytes = size(&m, &defs, &mut constants, block, 0).ok_or("unsupported typed GL uniform layout")?;
+    if bytes == 0 || bytes > limit { return Err("typed GL uniform exceeds constant-buffer range".into()); }
+    let mut derived = HashMap::from([(root, (block, 0u32))]);
+    loop {
+        let mut grew = false;
+        for i in m.functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instructions) {
+            let Some(n) = i.result_id else { continue };
+            if derived.contains_key(&n) { continue; }
+            let Some(&(mut ty, mut off)) = i.operands.first().and_then(id).and_then(|v| derived.get(&v)) else { continue };
+            match i.class.opcode {
+                Op::CopyObject if i.operands.len() == 1 => {}
+                Op::AccessChain | Op::InBoundsAccessChain => {
+                    for operand in &i.operands[1..] {
+                        let index = id(operand).and_then(|v| constants.constant(v, 0)).and_then(ConstantInt::index)
+                            .ok_or("dynamically indexed typed GL uniform")?;
+                        let t = defs.get(&ty).ok_or("missing typed GL uniform type")?;
+                        let (next, delta) = match t.class.opcode {
+                            Op::TypeStruct => (
+                                t.operands.get(index as usize).and_then(id).ok_or("typed GL uniform member out of bounds")?,
+                                decoration(&m, ty, Some(index), Decoration::Offset).ok_or("typed GL uniform member lacks offset")?),
+                            Op::TypeArray | Op::TypeVector => {
+                                let count = if t.class.opcode == Op::TypeArray {
+                                    t.operands.get(1).and_then(id).and_then(|v| constants.constant(v, 0)).and_then(ConstantInt::index)
+                                } else { t.operands.get(1).and_then(lit) }.ok_or("typed GL uniform length missing")?;
+                                if index >= count { return Err("typed GL uniform index out of bounds".into()); }
+                                let stride = if t.class.opcode == Op::TypeArray {
+                                    decoration(&m, ty, None, Decoration::ArrayStride).ok_or("typed GL uniform stride missing")?
+                                } else { 4 };
+                                (t.operands.first().and_then(id).ok_or("typed GL uniform element missing")?,
+                                 index.checked_mul(stride).ok_or("typed GL uniform offset overflow")?)
+                            }
+                            _ => return Err("unsupported typed GL uniform access chain".into()),
+                        };
+                        ty = next; off = off.checked_add(delta).ok_or("typed GL uniform offset overflow")?;
+                    }
+                }
+                _ => continue,
+            }
+            let pointer = i.result_type.and_then(|v| defs.get(&v)).ok_or("typed GL uniform pointer missing")?;
+            if pointer.class.opcode != Op::TypePointer || pointer.operands !=
+                [Operand::StorageClass(StorageClass::StorageBuffer), Operand::IdRef(ty)] {
+                return Err("unexpected typed GL uniform pointer type".into());
+            }
+            derived.insert(n, (ty, off)); grew = true;
+        }
+        if !grew { break; }
+    }
+    let mut loads = 0;
+    for i in m.all_inst_iter() {
+        for (at, operand) in i.operands.iter().enumerate() {
+            let Some(&(ty, off)) = id(operand).and_then(|v| derived.get(&v)) else { continue };
+            match i.class.opcode {
+                Op::Name | Op::Decorate | Op::DecorateId if at == 0 => {}
+                Op::EntryPoint if at >= 3 => {}
+                Op::GroupDecorate if at >= 1 => {}
+                Op::AccessChain | Op::InBoundsAccessChain | Op::CopyObject
+                    if at == 0 && i.result_id.is_some_and(|v| derived.contains_key(&v)) => {}
+                Op::Load if at == 0 && i.result_type == Some(ty) => {
+                    if !defs.get(&ty).is_some_and(|t| matches!(t.class.opcode, Op::TypeInt | Op::TypeFloat | Op::TypeVector)) {
+                        return Err("unsupported typed GL uniform aggregate load".into());
+                    }
+                    if i.operands.len() > 1 && !matches!(i.operands.get(1), Some(Operand::MemoryAccess(a)) if *a == MemoryAccess::ALIGNED) {
+                        return Err("unsupported typed GL uniform load memory operands".into());
+                    }
+                    let end = size(&m, &defs, &mut constants, ty, 0).and_then(|n| off.checked_add(n))
+                        .ok_or("typed GL uniform load range overflow")?;
+                    if end > bytes { return Err("typed GL uniform load out of bounds".into()); }
+                    loads += 1;
+                }
+                _ => return Err(format!("typed GL uniform pointer escapes through {:?}", i.class.opcode)),
+            }
+        }
+    }
+    if loads == 0 { return Err("typed GL uniform has no supported loads".into()); }
+    drop(constants);
+    let mut next = m.header.as_ref().ok_or("missing SPIR-V header")?.bound;
+    let mut pointers = HashMap::new();
+    let mut types = Vec::new();
+    let promoted_block = if trim_tail {
+        let n = next; next = next.checked_add(1).ok_or("typed GL uniform ID space exhausted")?;
+        types.push(inst(Op::TypeStruct, None, Some(n), defs[&block].operands.clone()));
+        n
+    } else { block };
+    let pointees: BTreeSet<_> = derived.values().map(|&(ty, _)| ty).collect();
+    for ty in pointees {
+        let n = next; next = next.checked_add(1).ok_or("typed GL uniform ID space exhausted")?;
+        pointers.insert(ty, n);
+        types.push(inst(Op::TypePointer, None, Some(n), vec![Operand::StorageClass(StorageClass::Uniform), Operand::IdRef(if ty == block { promoted_block } else { ty })]));
+    }
+    let position = m.types_global_values.iter().position(|i| i.result_id == Some(root)).unwrap();
+    m.types_global_values.splice(position..position, types);
+    let variable = m.types_global_values.iter_mut().find(|i| i.result_id == Some(root)).unwrap();
+    variable.result_type = Some(pointers[&block]); variable.operands[0] = Operand::StorageClass(StorageClass::Uniform);
+    for i in m.functions.iter_mut().flat_map(|f| &mut f.blocks).flat_map(|b| &mut b.instructions) {
+        if let Some(&(ty, _)) = i.result_id.and_then(|n| derived.get(&n)) { i.result_type = Some(pointers[&ty]); }
+    }
+    m.annotations.retain(|a| !(a.class.opcode == Op::Decorate
+        && a.operands.first() == Some(&Operand::IdRef(root))
+        && matches!(a.operands.get(1), Some(Operand::Decoration(Decoration::NonWritable | Decoration::Restrict | Decoration::Aliased)))));
+    if trim_tail {
+        let annotations: Vec<_> = m.annotations.iter().filter(|a| a.operands.first() == Some(&Operand::IdRef(block))
+            && (a.class.opcode == Op::Decorate || (a.class.opcode == Op::MemberDecorate
+                && a.operands.get(1).and_then(lit).is_some_and(|n| (n as usize) < defs[&block].operands.len()))))
+            .map(|a| { let mut a = a.clone(); a.operands[0] = Operand::IdRef(promoted_block); a }).collect();
+        m.annotations.extend(annotations);
+    }
+    for a in &mut m.annotations {
+        if a.class.opcode == Op::Decorate && a.operands.get(..2) == Some(&[Operand::IdRef(root), Operand::Decoration(Decoration::Binding)]) {
+            a.operands[2] = Operand::LiteralBit32(BINDING);
+        }
+    }
+    m.header.as_mut().unwrap().bound = next;
+    Ok((m.assemble().iter().flat_map(|w| w.to_le_bytes()).collect(), bytes))
+}
+
 pub fn promote(bytes: &[u8], binding: u32, limit: u32) -> Result<(Vec<u8>, u32), String> {
     if binding >= 32 || limit < 4 { return Err("invalid GL uniform slot/range".into()); }
     let mut m = rspirv::dr::load_bytes(bytes).map_err(|e| e.to_string())?;
@@ -184,8 +361,12 @@ pub fn promote(bytes: &[u8], binding: u32, limit: u32) -> Result<(Vec<u8>, u32),
     if deco(root, Decoration::NonWritable).is_none() { return Err("GL uniform lacks read-only metadata".into()); }
     let block = var.result_type.and_then(|p| defs.get(&p)).and_then(|p| p.operands.get(1)).and_then(id)
         .ok_or("GL uniform has no block type")?;
-    let structure = defs.get(&block).filter(|s| s.class.opcode == Op::TypeStruct && s.operands.len() == 1)
-        .ok_or("GL uniform is not a one-member block")?;
+    let structure = defs.get(&block).filter(|s| s.class.opcode == Op::TypeStruct)
+        .ok_or("GL uniform is not a block")?;
+    if structure.operands.len() != 1 || structure.operands.first().and_then(id)
+        .and_then(|n| defs.get(&n)).is_none_or(|t| t.class.opcode != Op::TypeRuntimeArray) {
+        return promote_typed(m, root, block, limit);
+    }
     if deco(block, Decoration::Block).is_none()
         || !m.annotations.iter().any(|a| a.operands == [
             Operand::IdRef(block), Operand::LiteralBit32(0), Operand::Decoration(Decoration::Offset), Operand::LiteralBit32(0)]) {
@@ -405,6 +586,84 @@ mod tests {
     }
 
     fn bytes(m: &Module) -> Vec<u8> { m.assemble().iter().flat_map(|w| w.to_le_bytes()).collect() }
+
+    fn typed_module() -> Module {
+        let mut m = module(true);
+        let at = m.types_global_values.iter().position(|i| i.result_id == Some(4)).unwrap();
+        m.types_global_values.splice(at..at, [
+            inst(Op::Constant, Some(2), Some(22), vec![Operand::LiteralBit32(2)]),
+            inst(Op::TypeVector, None, Some(24), vec![Operand::IdRef(3), Operand::LiteralBit32(4)]),
+        ]);
+        let array = m.types_global_values.iter_mut().find(|i| i.result_id == Some(4)).unwrap();
+        *array = inst(Op::TypeArray, None, Some(4), vec![Operand::IdRef(24), Operand::IdRef(22)]);
+        let at = m.types_global_values.iter().position(|i| i.result_id == Some(5)).unwrap();
+        m.types_global_values.insert(at, inst(Op::TypeStruct, None, Some(25), vec![Operand::IdRef(4)]));
+        m.types_global_values.iter_mut().find(|i| i.result_id == Some(5)).unwrap().operands = vec![Operand::IdRef(25), Operand::IdRef(25)];
+        m.types_global_values.iter_mut().find(|i| i.result_id == Some(9)).unwrap().operands = vec![Operand::LiteralBit32(1)];
+        for i in &mut m.annotations {
+            if i.operands.get(..2) == Some(&[Operand::IdRef(4), Operand::Decoration(Decoration::ArrayStride)]) {
+                i.operands[2] = Operand::LiteralBit32(16);
+            }
+        }
+        for (ty, member, offset) in [(5, 1, 32), (25, 0, 0)] {
+            m.annotations.push(inst(Op::MemberDecorate, None, None, vec![Operand::IdRef(ty), Operand::LiteralBit32(member), Operand::Decoration(Decoration::Offset), Operand::LiteralBit32(offset)]));
+        }
+        m.functions[0].blocks[0].instructions[0].operands = [15, 9, 8, 9, 22].map(Operand::IdRef).to_vec();
+        m
+    }
+
+    #[test]
+    fn typed_nested_struct_array_and_vector_preserve_layout() {
+        let (output, extent) = promote(&bytes(&typed_module()), 7, 65536).unwrap();
+        assert_eq!(extent, 64);
+        let m = rspirv::dr::load_bytes(output).unwrap();
+        let variable = m.types_global_values.iter().find(|i| i.result_id == Some(15)).unwrap();
+        assert_eq!(variable.operands, [Operand::StorageClass(StorageClass::Uniform)]);
+        assert_eq!(m.functions[0].blocks[0].instructions[1].result_type, Some(3));
+        use spirv_tools::val::Validator;
+        spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2)).validate(&m.assemble(), None).unwrap();
+    }
+
+    #[test]
+    fn typed_uniform_rejects_unsafe_layout_accesses_and_aliases() {
+        let mut cases = Vec::new();
+        let mut m = typed_module(); m.functions[0].blocks[0].instructions[0].operands[3] = Operand::IdRef(22); cases.push(m); // index 2 in array[2]
+        let mut m = typed_module(); m.types_global_values.iter_mut().find(|i| i.result_id == Some(22)).unwrap().operands[0] = Operand::LiteralBit32(u32::MAX); cases.push(m);
+        let mut m = typed_module(); m.functions[0].blocks[0].instructions.insert(1, inst(Op::Store, None, None, vec![Operand::IdRef(20), Operand::IdRef(8)])); cases.push(m);
+        let mut m = typed_module(); m.functions[0].blocks[0].instructions[1].operands.push(Operand::MemoryAccess(MemoryAccess::VOLATILE)); cases.push(m);
+        let mut m = typed_module(); m.annotations.retain(|a| !(a.class.opcode == Op::MemberDecorate && a.operands.first() == Some(&Operand::IdRef(25)))); cases.push(m);
+        let mut m = typed_module(); m.types_global_values.push(inst(Op::Variable, Some(6), Some(30), vec![Operand::StorageClass(StorageClass::Private), Operand::IdRef(15)])); cases.push(m);
+        let mut m = typed_module(); *m.types_global_values.iter_mut().find(|i| i.result_id == Some(9)).unwrap() = inst(Op::Undef, Some(2), Some(9), vec![]); cases.push(m);
+        for m in cases { assert!(promote(&bytes(&m), 7, 65536).is_err()); }
+        assert!(promote(&bytes(&typed_module()), 7, 63).is_err());
+    }
+
+    #[test]
+    fn unused_narrow_tail_is_cloned_away_without_uniform_8bit_storage() {
+        let mut m = typed_module();
+        m.capabilities.push(inst(Op::Capability, None, None, vec![Operand::Capability(Capability::StorageBuffer8BitAccess)]));
+        m.extensions.push(inst(Op::Extension, None, None, vec![Operand::LiteralString("SPV_KHR_8bit_storage".into())]));
+        let at = m.types_global_values.iter().position(|i| i.result_id == Some(5)).unwrap();
+        m.types_global_values.splice(at..at, [
+            inst(Op::TypeInt, None, Some(26), vec![Operand::LiteralBit32(8), Operand::LiteralBit32(0)]),
+            inst(Op::TypeArray, None, Some(27), vec![Operand::IdRef(26), Operand::IdRef(22)]),
+            inst(Op::TypePointer, None, Some(28), vec![Operand::StorageClass(StorageClass::StorageBuffer), Operand::IdRef(27)]),
+        ]);
+        m.types_global_values.iter_mut().find(|i| i.result_id == Some(5)).unwrap().operands.push(Operand::IdRef(27));
+        m.annotations.push(inst(Op::Decorate, None, None, vec![Operand::IdRef(27), Operand::Decoration(Decoration::ArrayStride), Operand::LiteralBit32(1)]));
+        m.annotations.push(inst(Op::MemberDecorate, None, None, vec![Operand::IdRef(5), Operand::LiteralBit32(2), Operand::Decoration(Decoration::Offset), Operand::LiteralBit32(64)]));
+        let (output, extent) = promote(&bytes(&m), 7, 65536).unwrap();
+        assert_eq!(extent, 64);
+        let output = rspirv::dr::load_bytes(output).unwrap();
+        assert_eq!(output.types_global_values.iter().find(|i| i.result_id == Some(5)).unwrap().operands.len(), 3);
+        use spirv_tools::val::Validator;
+        spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2)).validate(&output.assemble(), None).unwrap();
+        let mut access = m.clone();
+        access.functions[0].blocks[0].instructions.insert(0, inst(Op::AccessChain, Some(28), Some(29), vec![Operand::IdRef(15), Operand::IdRef(22)]));
+        assert!(promote(&bytes(&access), 7, 65536).is_err());
+        m.functions[0].blocks[0].instructions.insert(0, inst(Op::Load, Some(5), Some(29), vec![Operand::IdRef(15)]));
+        assert!(promote(&bytes(&m), 7, 65536).is_err());
+    }
 
     #[test]
     fn uint_and_float_words_preserve_the_load_type() {

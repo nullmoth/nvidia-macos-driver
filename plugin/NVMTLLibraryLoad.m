@@ -2252,7 +2252,8 @@ static uint32_t nvmtl_gl_uniform_index(id function)
     for (NSString *key in names[@"args"]) {
         // AIR names contain argument names, not access qualifiers. The reflected
         // address space and ReadOnly access below decide whether promotion is safe.
-        if (![key hasPrefix:@"buffer:"] || ![names[@"args"][key] isEqual:expected]) continue;
+        NSString *name = names[@"args"][key];
+        if (![key hasPrefix:@"buffer:"] || (![name isEqual:expected] && ![name isEqual:@"ANGLE_userUniforms"])) continue;
         NSUInteger slot = [[key substringFromIndex:7] integerValue];
         if (slot >= 32 || found != UINT32_MAX) return UINT32_MAX;
         for (NSDictionary *binding in nvmtl_function_reflection(fn)[@"bindings"])

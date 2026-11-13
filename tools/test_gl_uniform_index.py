@@ -36,8 +36,14 @@ int main(void){@autoreleasepool{
  f->_names=@{@"args":@{@"buffer:7":@"vs_uniform_buffer",@"buffer:8":@"vs_uniform_buffer"}};assert(nvmtl_gl_uniform_index(f)==UINT32_MAX);
  f->_names=@{@"args":@{@"buffer:7":@"unrelated_buffer"}};assert(nvmtl_gl_uniform_index(f)==UINT32_MAX);
  f->_stage=@"fragment";f->_names=@{@"args":@{@"buffer:7":@"fs_uniform_buffer"}};assert(nvmtl_gl_uniform_index(f)==7);
+ f->_names=@{@"args":@{@"buffer:7":@"ANGLE_userUniforms"}};assert(nvmtl_gl_uniform_index(f)==7);
+ f->_stage=@"vertex";assert(nvmtl_gl_uniform_index(f)==7);
+ f->_reflection=@{@"bindings":@[binding(7,2,@"ReadWrite")]};assert(nvmtl_gl_uniform_index(f)==UINT32_MAX);
+ f->_reflection=@{@"bindings":@[binding(7,1,@"ReadOnly")]};assert(nvmtl_gl_uniform_index(f)==UINT32_MAX);
+ f->_names=@{@"args":@{@"buffer:7":@"ANGLE_angleUniforms"}};f->_reflection=@{@"bindings":@[binding(7,2,@"ReadOnly")]};assert(nvmtl_gl_uniform_index(f)==UINT32_MAX);
+ f->_names=@{@"args":@{@"buffer:7":@"ANGLE_userUniforms",@"buffer:8":@"vs_uniform_buffer"}};f->_reflection=@{@"bindings":@[binding(7,2,@"ReadOnly"),binding(8,2,@"ReadOnly")]};assert(nvmtl_gl_uniform_index(f)==UINT32_MAX);
  f->_air=nil;assert(nvmtl_gl_uniform_index(f)==UINT32_MAX);objc_setAssociatedObject(f,&kNVMTLGLUniformIndex,@7,OBJC_ASSOCIATION_RETAIN_NONATOMIC);assert(nvmtl_gl_uniform_index(f)==7);
- assert(nvmtl_gl_uniform_index(nil)==UINT32_MAX);puts("PASS actual names schema, vertex/fragment, readonly/address-space/slot rejection, ambiguity, unrelated names, inherited specialization");
+ assert(nvmtl_gl_uniform_index(nil)==UINT32_MAX);puts("PASS actual names schema, native GL and ANGLE vertex/fragment, readonly/address-space/slot rejection, ambiguity, unrelated names, inherited specialization");
 }}
 '''
 with tempfile.TemporaryDirectory(prefix='nvmtl-uniform-index-') as directory:
