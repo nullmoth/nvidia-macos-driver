@@ -2381,9 +2381,29 @@ static BOOL nvmtl_air_grid_only_scan(NSString *ll, NSString *fname)
     }
     return NO;
 }
+// The answer for one kernel of one AIR text never changes, but it is asked once per pipeline state, and VideoToolbox's
+// pixel-transfer session builds a new pipeline for every frame it converts: Photo Booth's camera thread spent 854 of its
+// samples in this scan (issue #568), each scan a walk over the whole module text. The answer is kept per AIR string
+// object (weak key, so it goes with the text) and kernel name.
+static NSMapTable<NSString *, NSMutableDictionary<NSString *, NSNumber *> *> *g_gridonly_memo;
+static os_unfair_lock g_gridonly_memo_lock = OS_UNFAIR_LOCK_INIT;
 BOOL nvmtl_air_grid_only(NVMTLFunction *fn)
 {
-    return fn ? nvmtl_air_grid_only_scan(fn->_air, fn->_fname) : NO;
+    if (!fn) return NO;
+    NSString *air = fn->_air, *name = fn->_fname;
+    if (!air.length || !name.length) return nvmtl_air_grid_only_scan(air, name);
+    os_unfair_lock_lock(&g_gridonly_memo_lock);
+    if (!g_gridonly_memo) g_gridonly_memo = [NSMapTable weakToStrongObjectsMapTable];
+    NSNumber *hit = [g_gridonly_memo objectForKey:air][name];
+    os_unfair_lock_unlock(&g_gridonly_memo_lock);
+    if (hit) return hit.boolValue;
+    const BOOL r = nvmtl_air_grid_only_scan(air, name);
+    os_unfair_lock_lock(&g_gridonly_memo_lock);
+    NSMutableDictionary *per = [g_gridonly_memo objectForKey:air];
+    if (!per) { per = [NSMutableDictionary new]; [g_gridonly_memo setObject:per forKey:air]; }
+    per[[name copy]] = @(r);
+    os_unfair_lock_unlock(&g_gridonly_memo_lock);
+    return r;
 }
 
 // One `air.struct_type_info` tuple: members of `i32 offset, i32 size, i32 count, !"type", !"name",
