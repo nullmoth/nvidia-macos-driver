@@ -66,8 +66,36 @@ ifb = (ROOT / FILES["NMIntelFB"]).read_text(encoding="utf-8")
 panel = start_bodies(ifb, "NMIntelFB")[-1]
 arm("NMIntelFB: a surface that will not map stops start before IOFramebuffer::start (no controller-less framebuffer)",
     panel.find("if (!fSurfMap) {") != -1 and panel.find("if (!fSurfMap) {") < panel.index("IOFramebuffer::start(provider)"))
-arm("NMIntelFB: a failed IOFramebuffer::start releases the surface mapping it now owns",
-    "OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false;" in panel)
+PUBLISHERS = ("resumeCapture();", "tcStart();", "gDmcTarget = this;", "publishBacklight();")
+
+
+def map_before_publish(body):
+    """The surface map check returns before anything that publishes state other threads can reach."""
+    m = body.find("if (!fSurfMap) {")
+    return m >= 0 and all(body.find(x) > m for x in PUBLISHERS)
+
+
+arm("NMIntelFB: the surface-map failure return comes before resumeCapture, tcStart, the DMC target and the backlight",
+    map_before_publish(panel))
+fail_ret = panel[panel.index("if (!IOFramebuffer::start(provider)) {"):]
+fail_ret = fail_ret[:fail_ret.index("return false;")]
+arm("NMIntelFB: a failed IOFramebuffer::start (after state is published) runs the shared unwind", "startUnwind();" in fail_ret)
+unwind = ifb[ifb.index("void NMIntelFB::startUnwind()"):]
+unwind = unwind[:unwind.index("\n}\n")]
+arm("NMIntelFB: the unwind clears the DMC target under its lock, frees the blob, the Type-C timer, external heads, "
+    "resume capture, the backlight and both mappings",
+    all(x in unwind for x in ("IOLockLock(gDmcLock)", "if (gDmcTarget == this) gDmcTarget = nullptr;", "IOFree(fDmcBlob",
+                              "thread_call_free(fTcTimer)", "nmhd_stop(&fHeads, &fHeadOps)", "fResumeOn = false;",
+                              "thread_call_free(fResumeCall)", "fBacklight->detach(this)", "OSSafeReleaseNULL(fSurfMap)",
+                              "OSSafeReleaseNULL(fMMIO)")))
+stop = ifb[ifb.index("void NMIntelFB::stop(IOService *provider)"):]
+stop = stop[:stop.index("\n}\n")]
+arm("NMIntelFB: stop() uses the same unwind, so the two cannot drift apart", "startUnwind();" in stop)
+# Negative control: the first fix's order (map check after the DMC target and tcStart) must be caught.
+first_fix = subprocess.run(["git", "-C", str(ROOT), "show", "13a9a0bc:kexts/NMIntelFB/intelfb.cpp"],
+                           capture_output=True, text=True)
+arm("negative control: the map-after-publish order of the first fix is caught",
+    first_fix.returncode == 0 and not map_before_publish(start_bodies(first_fix.stdout, "NMIntelFB")[-1]))
 nvfb = (ROOT / "kexts/NVRMFB/fb/nvrm-fb.cpp").read_text(encoding="utf-8")
 arm("NVRMFB still sets its dependent ID before super::start (the reference order)",
     nvfb.index('setProperty("IOFBDependentID"') < nvfb.index("if (!super::start(provider)) {"))
