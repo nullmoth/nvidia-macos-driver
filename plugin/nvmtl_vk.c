@@ -36,6 +36,7 @@
 #include "nvmtl_y422_convert.h"
 #include "nvmtl_icb_record.h"
 #include "nvmtl_copy_compat.h"
+#include "nvmtl_buffer_texture.h"
 #include "nvmtl_sampler_state.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
 static int g_scalar_layout;
@@ -11046,7 +11047,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
         nvlog("buffer texture: bytesPerRow %zu cannot hold %u texels of %u B", row_pitch, w, bpp); return -1; }
     if (g_linmod && row_pitch % 32) {
         nvlog("buffer texture: bytesPerRow %zu is not a multiple of 32 B (the texture header's linear pitch unit)", row_pitch); return -1; }
-    if (offset > b->size || (size_t)row_pitch * (h - 1) + (size_t)w * bpp > b->size - offset) {
+    if (!nvmtl_buffer_texture_fits(b->size, offset, w, h, bpp, row_pitch) || offset > SIZE_MAX - b->moff) {
         nvlog("buffer texture: %ux%u at offset %zu pitch %zu overruns the %zu-byte buffer", w, h, offset, row_pitch, b->size); return -1; }
     PFN_vkGetPhysicalDeviceFormatProperties gfp = (PFN_vkGetPhysicalDeviceFormatProperties)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFormatProperties");
     VkFormatProperties fp; memset(&fp, 0, sizeof fp);
