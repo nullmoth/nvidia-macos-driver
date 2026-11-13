@@ -1088,10 +1088,33 @@ static void nvmtl_dlss_device_features(VkPhysicalDeviceVulkan11Features *v11, Vk
     nvlog("dlss: core 1.1/1.2 device features widened to what the device supports");
 }
 
+// GPU clock boost, chosen per process before NVK reads it. Since 2.9 every process asked RM for full clocks as its
+// first channel came up (per burst of work, or held for its life): during the login rush a process whose channel was
+// starting at that moment took a PBDMA error (error notifier info32 0x20) on its second submit and lost the GPU for
+// good - the Dock's helpers, iconservicesagent, Telegram, the lock screen's SecurityAgent (whose nil pipeline then
+// divides by zero inside VFX). Measured on macOS 26.7.1, RTX 5060: per-burst 4 of 4 boots and held 2 of 2 boots lost
+// a process at login, no boost 0 of 3. WindowServer starts first and holds the boost for the session, so the GPU
+// still runs at full clocks; no other process asks. An explicit NVRM_610_BOOST (environment or nvrm610.conf) wins.
+static void nvmtl_boost_policy(void)
+{
+    if (getenv("NVRM_610_BOOST")) return;
+    FILE *f = fopen("/Library/GPUBundles/nvmtl/nvrm610.conf", "r");
+    if (f) {
+        char line[256]; int set = 0;
+        while (fgets(line, sizeof line, f)) if (!strncmp(line, "BOOST=", 6) || !strncmp(line, "NVRM_610_BOOST=", 15)) set = 1;
+        fclose(f);
+        if (set) return;
+    }
+    const char *me = getprogname();
+    const int ws = me && !strcmp(me, "WindowServer");
+    setenv("NVRM_610_BOOST", ws ? "hold" : "0", 0);
+    nvlog("vk: GPU clock boost %s in %s (WindowServer holds it for the session; other processes do not ask)", ws ? "held" : "not requested", me ?: "?");
+}
 static int nvmtl_vk_initialize(void)
 {
     if (g_state) return g_state == 1 ? 0 : -1;
     g_state = -1;
+    nvmtl_boost_policy();
     if (!getenv("NVRM_FLUSH_TIMEOUT_MS")) {
         char budget[32]; snprintf(budget, sizeof budget, "%ld", nvmtl_gpu_wait_budget_ms());
         setenv("NVRM_FLUSH_TIMEOUT_MS", budget, 1);
