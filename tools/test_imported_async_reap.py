@@ -38,7 +38,7 @@ check('NVMTLBuffer -dealloc marks _b and _shadow sync_free before retire when _h
 nvk_buf_decl = vk_h[vk_h.index('typedef struct { void *buf;'):vk_h.index('} nvk_buffer;') + len('} nvk_buffer;')]
 grace_decl = vk_c[vk_c.index('typedef struct nvmtl_bgrace'):vk_c.index('static void nvmtl_live_add(')]
 prod_start = vk_c.index('// Imported host-pointer async reaper:')
-prod_end = vk_c.index('\nvoid nvmtl_vk_buffer_retire(nvk_buffer *b)')
+prod_end = vk_c.index('\nstatic void nvmtl_bpark_put_now(nvk_buffer *b)\n{')
 prod_c = vk_c[prod_start:prod_end]
 
 HARNESS = f'''
@@ -109,6 +109,7 @@ static void (*pvkUnmapMemory)(VkDevice, VkDeviceMemory) = mock_UnmapMemory;
 
 {grace_decl}
 {prod_c}
+static void nvmtl_bpark_put_now(nvk_buffer *b) {{ (void)b; }}
 
 static void drain_reaper(void) {{
     pthread_mutex_lock(&g_ireap_lock);

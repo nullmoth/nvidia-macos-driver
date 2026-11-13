@@ -1737,7 +1737,7 @@ static int  private_pool_on(void);
 static int  private_pool_buffer_create(size_t size, nvk_buffer *out);
 static int  image_pool_bind(nvk_image *out);
 static void image_pool_release(nvk_image *out);
-#define NVMTL_BUFPARK_N     32
+#define NVMTL_BUFPARK_N     256
 #define NVMTL_BUFPARK_BYTES (1024ull << 20)
 #define NVMTL_BUFPARK_MAX1  (512ull << 20)
 #define NVMTL_BUFPARK_AGE_NS (5000000000ull)   /* parked memory (system RAM is wired) is let go after 5 s unused */
@@ -8763,13 +8763,20 @@ void nvmtl_vk_buffer_destroy(nvk_buffer *b)
     nvmtl_vk_buffer_destroy_body(b);
     nvmtl_perf_note(NVP_BUFDEL, t0, n);
 }
-// Graced buffers whose last possible reader has completed are destroyed now (called where the completed sequence advances).
+static void nvmtl_bpark_put_now(nvk_buffer *b);
+// Graced buffers whose last possible reader has completed are parked or destroyed now (called where the completed sequence advances).
 static void nvmtl_buffer_grace_reap(void)
 {
     nvmtl_pl_node *due; unsigned n;
     pthread_mutex_lock(&g_bg_lock); n = nvmtl_pl_reap(&g_bg, __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE), &due); pthread_mutex_unlock(&g_bg_lock);
     t_grace_reaping = 1;
-    while (due) { nvmtl_pl_node *e = due; due = e->cool; nvmtl_bgrace *g = (nvmtl_bgrace *)((char *)e - offsetof(nvmtl_bgrace, life)); nvmtl_vk_buffer_destroy_body(&g->b); free(g); }
+    while (due) {
+        nvmtl_pl_node *e = due; due = e->cool;
+        nvmtl_bgrace *g = (nvmtl_bgrace *)((char *)e - offsetof(nvmtl_bgrace, life));
+        if (e->reuse) nvmtl_bpark_put_now(&g->b);
+        else nvmtl_vk_buffer_destroy_body(&g->b);
+        free(g);
+    }
     t_grace_reaping = 0;
     if (n && (g_bg.reaped & 0xFFF) < n) nvlog("vk: buffer grace: %llu freed buffers destroyed after their submits completed so far, %llu held now",
                                             (unsigned long long)g_bg.reaped, (unsigned long long)g_bg.ncool);
@@ -8806,14 +8813,10 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
     memset(b, 0, sizeof *b);
 }
 
-void nvmtl_vk_buffer_retire(nvk_buffer *b)
+static void nvmtl_bpark_put_now(nvk_buffer *b)
 {
     if (g_state != 1 || !b || !b->buf) return;
-    if (!bpark_on() || b->pool || b->placed || b->imported || b->moff || !b->mem || !b->alloc || b->alloc > NVMTL_BUFPARK_MAX1) {
-        nvmtl_vk_buffer_destroy(b); return; }
-    const uint64_t t0 = nvmtl_perf_now();
-    const size_t n = b->size;
-    nvk_buffer ev[NVMTL_BUFPARK_N + 1]; unsigned nev = 0;
+    nvk_buffer ev[NVMTL_BUFPARK_N]; unsigned nev = 0;
     pthread_mutex_lock(&g_bpark_lock);
     const uint64_t pnow = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     while (g_bpark_n && (g_bpark_n >= NVMTL_BUFPARK_N || g_bpark_bytes + b->alloc > NVMTL_BUFPARK_BYTES
@@ -8828,6 +8831,33 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b)
     for (unsigned k = 0; k < nev; k++) bpark_free(&ev[k]);
     if (nev) atomic_fetch_add(&g_bpark_evicted, nev);
     atomic_fetch_add(&g_bpark_parked, 1); bpark_census("park");
+}
+
+void nvmtl_vk_buffer_retire(nvk_buffer *b)
+{
+    if (g_state != 1 || !b || !b->buf) return;
+    if (!bpark_on() || b->pool || b->placed || b->imported || b->bind_lost || b->moff || !b->mem || !b->alloc || b->alloc > NVMTL_BUFPARK_MAX1) {
+        nvmtl_vk_buffer_destroy(b); return; }
+    const uint64_t t0 = nvmtl_perf_now();
+    const size_t n = b->size;
+    if (nvmtl_buffer_grace_on()) {
+        const uint64_t sub = atomic_load(&g_cmd_submitted);
+        if (sub > __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE)) {
+            nvmtl_bgrace *g = calloc(1, sizeof *g);
+            if (!g) { nvmtl_vk_buffer_destroy(b); return; }
+            nvmtl_live_relabel(b, NVMTL_LV_DYING);
+            g->b = *b; memset(b, 0, sizeof *b);
+            nvmtl_pl_stamp(&g->life, sub);
+            pthread_mutex_lock(&g_bg_lock);
+            nvmtl_pl_made(&g_bg);
+            const int now = nvmtl_pl_release(&g_bg, &g->life, __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE), 1);
+            pthread_mutex_unlock(&g_bg_lock);
+            if (now) { nvmtl_bpark_put_now(&g->b); free(g); }
+            nvmtl_perf_note(NVP_BUFDEL, t0, n);
+            return;
+        }
+    }
+    nvmtl_bpark_put_now(b);
     nvmtl_perf_note(NVP_BUFDEL, t0, n);
 }
 
