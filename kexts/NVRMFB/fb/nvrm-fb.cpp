@@ -606,6 +606,9 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     // This instance exists because a display appeared after boot (see gNDpyBoot), and its connect handler has already
     // been fired once -- see connectNotifyFire and enableController.
     bool fHotplugBorn = false, fConnectFired = false;
+    // The connect interrupt came due before the framework had registered its handler; registerForInterruptType fires
+    // it as soon as the handler arrives (see connectNotifyFire).
+    volatile SInt32 fConnectOwed = 0;
     bool fEdidSwapped = false;
     void adoptSwappedDisplay();
     void takeEdid(const NvU8 *src, NvU32 size);
@@ -1667,7 +1670,15 @@ void NVRMNVDAFramebuffer::connectNotifyFire(thread_call_param_t p0, thread_call_
     if (!me) return;
     NVRMCallReference callReference(me);
     if (OSAddAtomic(0, &me->fStopping)) return;
-    if (!me->fConnect.proc) { FBLOG("fb%u connect notify: nothing registered yet", me->fIndex); return; }
+    if (!me->fConnect.proc) {
+        // IOFramebuffer::open registers the connect handler after enableController, and on a display plugged in after
+        // boot the open can take longer than the 1.5 s delay. Dropping the notification here left such a display dark
+        // until a restart: nothing fired it again. Owe it instead; registerForInterruptType pays it.
+        OSCompareAndSwap(0, 1, &me->fConnectOwed);
+        FBLOG("fb%u connect notify: nothing registered yet -- it fires when the framework registers its connect handler", me->fIndex);
+        return;
+    }
+    OSCompareAndSwap(1, 0, &me->fConnectOwed);
     me->fConnectFired = true;
     FBLOG("fb%u -> connect interrupt (the framework's registered handler)", me->fIndex);
     me->fConnect.proc(me->fConnect.target, me->fConnect.ref);
@@ -5584,6 +5595,12 @@ IOReturn NVRMNVDAFramebuffer::registerForInterruptType(IOSelect type, IOFBInterr
     if (type == kIOFBConnectInterruptType) {
         fConnect = { proc, target, ref }; if (interruptRef) *interruptRef = &fConnect;
         FBLOG("registerForInterruptType '%s' -> CONNECT REGISTERED", t);
+        // A connect notification that came due before this registration (connectNotifyFire found no handler). It runs
+        // from the thread call, not here: the framework is inside its own open path while it registers.
+        if (proc && OSAddAtomic(0, &fConnectOwed)) {
+            FBLOG("fb%u: the connect interrupt owed since the mode set fires now that the handler is registered", fIndex);
+            notifyConnectionChanged(100);
+        }
         return kIOReturnSuccess;
     }
     FBLOG("registerForInterruptType '%s' -> REFUSED (unsupported)", t);
