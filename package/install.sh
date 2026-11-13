@@ -734,8 +734,22 @@ amfi_note() {
 amfi_note "$ba"
 # WhateverGreen's boot screen copy (on unless gfxrst=4) reads a console mapping macOS may already have freed when this
 # driver's display first opens, and the Mac panics in IOFramebuffer::postOpen.
+# A note alone left machines unprotected, so the installer also adds gfxrst=4 to the NVRAM boot-args when no gfxrst is
+# set (a gfxrst the user chose stays). OpenCore configs that write their own boot-args at every start replace the NVRAM
+# value, so the note about config.plist stays; uninstall.sh removes only a gfxrst=4 recorded here as added.
+weg_gfxrst() {   # $1 = current boot-args; prints the boot-args to write, or nothing when no change is due
+  case " $1 " in *" gfxrst="*) return 0;; esac
+  if [ -n "$1" ]; then echo "$1 gfxrst=4"; else echo "gfxrst=4"; fi
+}
 if kmutil showloaded --list-only --bundle-identifier as.vit9696.WhateverGreen 2>/dev/null | grep -q WhateverGreen; then
-  case " $ba " in *" gfxrst=4 "*) ;; *) echo "   NOTE: WhateverGreen is loaded and boot-args lack 'gfxrst=4' — add it in your OpenCore config.plist, or the Mac can panic when the NVIDIA display first opens";; esac
+  nb=$(weg_gfxrst "$ba")
+  if [ -n "$nb" ]; then
+    if nvram boot-args="$nb" 2>/dev/null; then
+      mkdir -p /Library/NullMoth && echo "gfxrst=4" > /Library/NullMoth/added-boot-args
+      echo "   WhateverGreen is loaded: added gfxrst=4 to the NVRAM boot-args (its boot screen copy can panic the Mac when the NVIDIA display first opens)"
+    fi
+    echo "   NOTE: also add 'gfxrst=4' to boot-args in your OpenCore config.plist — a config that sets boot-args at every start replaces the NVRAM value"
+  fi
 fi
 
 # Optional DLSS 4 / 4.5 files: downloaded from NVIDIA on this Mac and checked against pinned hashes. A failure here

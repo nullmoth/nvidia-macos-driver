@@ -650,6 +650,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler) override;
     void publishStartupTiming();
     void publishRotatedSizes(bool force = true);
+    bool fRotSizesOurs = false;   // the display's scale-resolutions were put there by publishRotatedSizes
     bool dtIsCurrent(const IODetailedTimingInformationV2 &d) const;
     bool dtIsBootRaster(const IODetailedTimingInformationV2 &d) const;
     IODetailedTimingInformationV2 fCurDT = {};
@@ -3624,7 +3625,9 @@ void NVRMNVDAFramebuffer::publishRotatedSizes(bool force)
     }
     const bool want = (fTransform & kIOScaleSwapAxes) && fBootW && fBootH;
     const bool have = attrs->getObject("scale-resolutions") != nullptr;
-    if ((!want && !have) || (want && have && !force)) { attrs->release(); return; }
+    // Withdraw only what this driver offered. A display override can carry its own scale-resolutions (the usual way
+    // to turn HiDPI on for a monitor); removing those on a display that is not rotated took its HiDPI sizes away.
+    if ((!want && (!have || !fRotSizesOurs)) || (want && have && !force)) { attrs->release(); return; }
     OSDictionary *d = OSDictionary::withDictionary(attrs);
     attrs->release();
     if (!d) return;
@@ -3643,6 +3646,7 @@ void NVRMNVDAFramebuffer::publishRotatedSizes(bool force)
         d->setObject("scale-resolutions", a);
         a->release();
     }
+    fRotSizesOurs = want;
     disp->setProperty("IODisplayAttributes", d);
     d->release();
     if (want) FBLOG("fb%u: scale-resolutions %ux%u%s offered to macOS for the rotated layout (transform 0x%x)", fIndex, fBootW, fBootH,
