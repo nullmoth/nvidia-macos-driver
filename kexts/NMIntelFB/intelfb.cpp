@@ -303,6 +303,7 @@ public:
     IOService *probe(IOService *provider, SInt32 *score) override;
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
+    void startUnwind();   // undo everything start() published; shared by a failed start and stop()
 
     IOReturn enableController() override { return kIOReturnSuccess; }
     bool isConsoleDevice() override { return true; }
@@ -549,6 +550,25 @@ bool NMIntelFB::start(IOService *provider)
     ifbStep(NMH_STEP_MMIO);
     if (!adoptFirmwareMode()) { OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false; }
     ifbStep(NMH_STEP_ADOPT);
+    // Head 4 of the NVIDIA accelerator (NVAccel): WindowServer composites this panel on the NVIDIA card and the
+    // display pipe copies each frame into fSurfMap.
+    // The dependent ID and index must exist before IOFramebuffer::start. start() attaches the framebuffer to its
+    // shared controller only when it finds a dependent ID; set later, the controller stays unset until open(), and the
+    // power change queued by registerPowerDriver() below takes the controller's lock through a null pointer (page fault
+    // in IOFramebuffer::powerStateWillChangeTo at boot). NVRMFB sets them before start for the same reason.
+    // The mapping is made here, before resumeCapture, tcStart and the DMC target publish anything another thread can
+    // reach, so a failure to map needs nothing undone but the register mapping.
+    if (IODeviceMemory *sm = IODeviceMemory::withRange(fApertureBase + fSurf, (IOPhysicalLength)fRowBytes * fHeight)) {
+        fSurfMap = sm->map(kIOMapWriteCombineCache); sm->release();
+    }
+    if (!fSurfMap) {
+        // Without the mapping there is no head 4 and no dependent ID, so no controller either: starting would hit the
+        // same null controller on the first power change. Leave the panel to the firmware framebuffer.
+        IFBLOG("the surface would not map write-combined: leaving the panel to the firmware framebuffer");
+        OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false;
+    }
+    setProperty("IOFBDependentID", 0x4E56524D00000001ull, 64);
+    setProperty("IOFBDependentIndex", 4ull, 32);
     resumeCapture();
     tcStart();
     { int a = 0; fDmcOn = PE_parse_boot_argn("nmhybriddmc", &a, sizeof a) && a == 1;
@@ -557,27 +577,10 @@ bool NMIntelFB::start(IOService *provider)
       if (!gDmcLock) { IOLock *l = IOLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void * volatile *)&gDmcLock)) IOLockFree(l); }
       if (gDmcLock) { IOLockLock(gDmcLock); gDmcTarget = this; IOLockUnlock(gDmcLock); } }
     publishBacklight();   // before IOFramebuffer::start: IOFramebuffer::open looks for a service named "backlight"
-    // Head 4 of the NVIDIA accelerator (NVAccel): WindowServer composites this panel on the NVIDIA card and the
-    // display pipe copies each frame into fSurfMap.
-    // The dependent ID and index must exist before IOFramebuffer::start. start() attaches the framebuffer to its
-    // shared controller only when it finds a dependent ID; set later, the controller stays unset until open(), and the
-    // power change queued by registerPowerDriver() below takes the controller's lock through a null pointer (page fault
-    // in IOFramebuffer::powerStateWillChangeTo at boot). NVRMFB sets them before start for the same reason.
-    if (IODeviceMemory *sm = IODeviceMemory::withRange(fApertureBase + fSurf, (IOPhysicalLength)fRowBytes * fHeight)) {
-        fSurfMap = sm->map(kIOMapWriteCombineCache); sm->release();
-    }
-    if (!fSurfMap) {
-        // Without the mapping there is no head 4 and no dependent ID, so no controller either: starting would hit the
-        // same null controller on the first power change. Leave the panel to the firmware framebuffer.
-        IFBLOG("the surface would not map write-combined: leaving the panel to the firmware framebuffer");
-        if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
-        OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false;
-    }
-    setProperty("IOFBDependentID", 0x4E56524D00000001ull, 64);
-    setProperty("IOFBDependentIndex", 4ull, 32);
     if (!IOFramebuffer::start(provider)) {
-        if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
-        OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false;
+        // resumeCapture, tcStart and the DMC target already published state other threads reach: undo all of it.
+        startUnwind();
+        return false;
     }
     ifbStep(NMH_STEP_FB_START);
     ifbStep(NMH_STEP_PUBLISHED);
@@ -593,11 +596,12 @@ bool NMIntelFB::start(IOService *provider)
     return true;
 }
 
-void NMIntelFB::stop(IOService *provider)
+// Undoes what start() published before IOFramebuffer::start: the DMC target and its blob, the Type-C timer and any
+// external heads, the resume capture, the backlight service, and the mappings. Used by a failed start and by stop(),
+// so the two cannot drift apart.
+void NMIntelFB::startUnwind()
 {
     fStopping = true;
-    if (fHyReady && fRing.live != -1) hybridHome();
-    if (fOwnReady && nmh_own_may_free(&fOwn)) ownRelease();
     fResumeOn = false;
     if (gDmcLock) IOLockLock(gDmcLock);
     if (gDmcTarget == this) gDmcTarget = nullptr;
@@ -616,6 +620,14 @@ void NMIntelFB::stop(IOService *provider)
     if (fBacklight) { fBacklight->terminate(kIOServiceSynchronous); fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
     fPwmPeriod = 0;
     OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr;
+}
+
+void NMIntelFB::stop(IOService *provider)
+{
+    fStopping = true;
+    if (fHyReady && fRing.live != -1) hybridHome();
+    if (fOwnReady && nmh_own_may_free(&fOwn)) ownRelease();
+    startUnwind();
     IOFramebuffer::stop(provider);
 }
 
