@@ -15,6 +15,7 @@ def between(source, start, end):
 
 
 fixture = r'''#include <cassert>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -149,6 +150,7 @@ struct NVRMBacklightHandler : IODisplayParameterHandler {
     bool fEdp = false;
     bool fHaveSaved = false;
     volatile bool fUserSeen = false;
+    volatile bool fUserMoved = false;
     OSDictionary *fParameters = nullptr;
     static const OSSymbol *sBrightnessProbe, *sLinearBrightnessProbe;
     bool init() { return true; }
@@ -156,6 +158,7 @@ struct NVRMBacklightHandler : IODisplayParameterHandler {
     static NVRMBacklightHandler *withRM(IOService *, NvU32);
     bool setDisplay(IODisplay *) override;
     bool doIntegerSet(OSDictionary *, const OSSymbol *, UInt32);
+    int restoreExternal(SInt32);
     static void applyFire(thread_call_param_t, thread_call_param_t);
     static void persistFire(thread_call_param_t, thread_call_param_t);
 };
@@ -320,6 +323,28 @@ int main() {
     assert(fresh->doIntegerSet(&user, gIODisplayBrightnessKey, 65535));
     NVRMBacklightHandler::applyFire(fresh, nullptr); fireSave(fresh);
     assert(savedValue() == 65535);
+    // A level kept outside NVRAM (debug.nvrmfb_backlight_restore): NVRAM came back with an old maximum. Before the user
+    // moves the brightness, the restore is applied, shown, written to /options, and the start-up maximum stays clamped.
+    setSaved(100);   // a legacy one-byte record: 100 % -> logical 65535
+    auto lost = NVRMBacklightHandler::withRM(&rm, 100);
+    IODisplay lostDisplay;
+    assert(lost->setDisplay(&lostDisplay));
+    NVRMBacklightHandler::applyFire(lost, nullptr);
+    assert(lost->doIntegerSet(&user, gIODisplayBrightnessKey, 65535));   // the display stack's start-up maximum
+    NVRMBacklightHandler::applyFire(lost, nullptr);
+    assert(lost->restoreExternal(16384) == 0);
+    assert(lost->fUserLevel == 16384 && lost->fPending == 16384 && savedValue() == 16384);
+    assert(lostDisplay.parameters->values[gIODisplayBrightnessKey] == 16384);
+    NVRMBacklightHandler::applyFire(lost, nullptr);
+    assert(rm.lastPercent == nvrm_backlight_to_percent(16384));
+    assert(lost->doIntegerSet(&user, gIODisplayBrightnessKey, 65535));   // a repeated start-up maximum is not a choice
+    NVRMBacklightHandler::applyFire(lost, nullptr);
+    assert(rm.lastPercent == nvrm_backlight_to_percent(16384));
+    assert(lost->restoreExternal(70000) == EINVAL && lost->restoreExternal(-1) == EINVAL);
+    // once the user moves the slider, an external restore is refused and the user's level stays
+    assert(lost->doIntegerSet(&user, gIODisplayBrightnessKey, 20000));
+    NVRMBacklightHandler::applyFire(lost, nullptr);
+    assert(lost->restoreExternal(16384) == EBUSY && lost->fUserLevel == 20000);
     puts("PASS: fractional targets survive probes, hardware-percent quantization, power requests and restart; legacy storage, endpoints and failed writes are covered.");
 }
 '''
