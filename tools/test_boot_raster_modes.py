@@ -48,6 +48,8 @@ struct Kms {
     int getDisplayMode(void *,unsigned,unsigned index,NvKmsKapiDisplayMode *mode,NvBool *valid,NvBool *pref) {
         if(index>=modes.size())return -1;*mode=modes[index];*valid=true;*pref=index==1;return 1;
     }
+    // A derived rate is offered only when NVKMS accepts its timing; this stand-in accepts every timing.
+    NvBool (*validateDisplayMode)(void *,unsigned,const NvKmsKapiDisplayMode *)=[](void *,unsigned,const NvKmsKapiDisplayMode *)->NvBool{return true;};
 };
 struct NVRMNVDAFramebuffer {
     bool fInternal=false;Kms *fKms=nullptr;void *fDev=this;unsigned fDisplay=1,fIndex=0;
@@ -57,6 +59,7 @@ struct NVRMNVDAFramebuffer {
     void setProperty(const char *,unsigned long long,unsigned) {}
     unsigned addKmsRefreshModes(unsigned n);
     unsigned addDsrModes(unsigned n);
+    static void dtToKapi(const IODetailedTimingInformationV2 *,NvKmsKapiDisplayMode *) {}
 };
 static NvKmsKapiDisplayMode mode(unsigned w,unsigned h,unsigned hz) {
     NvKmsKapiDisplayMode m;auto &k=m.timings;k.hVisible=w;k.vVisible=h;
