@@ -632,7 +632,15 @@ static void nvmtl_gsub_census(void) {
 // A texture over a copy-backed buffer must refresh the same bytes as a direct
 // buffer binding. Keep direct managed-buffer writeback and copy each backing once.
 static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL writtenOnly) {
-    SEL writtenSel = writtenOnly ? sel_registerName("nvmtlIsBufferWritten:") : NULL;
+    static SEL cachedWrittenSel;
+    SEL writtenSel = NULL;
+    if (writtenOnly) {
+        writtenSel = __atomic_load_n(&cachedWrittenSel, __ATOMIC_RELAXED);
+        if (!writtenSel) {
+            writtenSel = sel_registerName("nvmtlIsBufferWritten:");
+            __atomic_store_n(&cachedWrittenSel, writtenSel, __ATOMIC_RELAXED);
+        }
+    }
     BOOL trackWritten = writtenSel && [resources respondsToSelector:writtenSel];
     NSMutableSet<NVMTLBuffer *> *copies = nil;
     for (id resource in resources) {
@@ -666,7 +674,12 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
     // A sealed part's membership and its buffers' backing modes do not change.
     // The ahead pass can retry a held part many times: discover its upload
     // backings once, but refresh their bytes only when it actually submits.
-    SEL mutableSel = sel_registerName("nvmtlHasMutableHostCopy:");
+    static SEL cachedMutableSel;
+    SEL mutableSel = __atomic_load_n(&cachedMutableSel, __ATOMIC_RELAXED);
+    if (!mutableSel) {
+        mutableSel = sel_registerName("nvmtlHasMutableHostCopy:");
+        __atomic_store_n(&cachedMutableSel, mutableSel, __ATOMIC_RELAXED);
+    }
     BOOL queryMutable = [part->resources respondsToSelector:mutableSel];
     part->copyInputs = nvmtl_submission_copies(part->resources, NO);
     for (NVMTLBuffer *buffer in part->copyInputs) {
@@ -686,7 +699,12 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
     // still pending in this buffer or on another active command buffer, and NVMTL_GSUB_HOSTPTR_LIFT=1 lifts the per-part
     // hold. While prior GPU work exists and any remaining unsubmitted part carries mutable legacy host copies, hold ahead
     // submission so the worker runs sync_out -> sync_in in order.
-    SEL priorSel = sel_registerName("nvmtlHasPriorQueueWork");
+    static SEL cachedPriorSel;
+    SEL priorSel = __atomic_load_n(&cachedPriorSel, __ATOMIC_RELAXED);
+    if (!priorSel) {
+        priorSel = sel_registerName("nvmtlHasPriorQueueWork");
+        __atomic_store_n(&cachedPriorSel, priorSel, __ATOMIC_RELAXED);
+    }
     BOOL priorWork = _parts.count > 1 ||
         ([self respondsToSelector:priorSel] && ((BOOL (*)(id, SEL))[self methodForSelector:priorSel])(self, priorSel));
     if (priorWork) {
