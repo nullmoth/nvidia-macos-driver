@@ -211,8 +211,9 @@ check('the two lookups take no mutex (they run in the interrupt path) and read t
 # The translator's wording changed, nothing matched, the function came back nil, and the system's icon and
 # glass shaders drew nothing. The decision now asks the translator for the references, with the old wordings
 # only as a fallback for a translator that cannot answer.
-_vl = lib.split('BOOL nvmtl_needs_visible_link(NSString *air, NSString *why)\n{')[1].split('\n}\n')[0] \
-      if 'BOOL nvmtl_needs_visible_link(NSString *air, NSString *why)\n{' in lib else ''
+# The decision itself lives in the uncached function; nvmtl_needs_visible_link keeps its definite answers per AIR text.
+_vlsig = 'static BOOL nvmtl_needs_visible_link_uncached(NSString *air, NSString *why, BOOL *definite)\n{'
+_vl = lib.split(_vlsig)[1].split('\n}\n')[0] if _vlsig in lib else ''
 check('deferring a function to pipeline creation asks the translator for its visible references first',
       bool(_vl) and _vl.index('xlate_vrefs(') < _vl.index('rangeOfString:')
       and 'no linked function supplies it' in _vl)
