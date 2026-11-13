@@ -1138,6 +1138,7 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
     // the deallocator receives (NULL, 0) for an imported buffer.
     void *hostForDealloc = _hostPtr ?: (_shadow.imported ? _shadow.map : _b.map);
     const NSUInteger hostLength = (NSUInteger)(_hostLen ?: _b.size);
+    if (_hostDealloc) { _b.sync_free = 1; _shadow.sync_free = 1; }
     nvmtl_vk_buffer_retire(&_b); if (_shadow.buf) nvmtl_vk_buffer_retire(&_shadow);
     if (_swc) { nvmtl_swc_free((nvmtl_swc *)_swc); free(_swc); _swc = NULL; }
     if (_subHeap) { NVMTLHeap *h = _subHeap; NSUInteger c = _subCharge; _subHeap = nil; _subCharge = 0;

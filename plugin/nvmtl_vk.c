@@ -182,8 +182,8 @@ static long nvmtl_gpu_wait_budget_ms(void)
     cached = (me && strcmp(me, "WindowServer") == 0) ? 5000 : 60000;
     return cached;
 }
-static size_t g_alloc_bytes;
-static uint64_t g_buf_made, g_buf_gone, g_img_made, g_img_gone;
+static _Atomic size_t g_alloc_bytes;
+static _Atomic uint64_t g_buf_made, g_buf_gone, g_img_made, g_img_gone;
 static uint64_t g_pool_blocks, g_pool_live, g_pool_bytes;
 static uint64_t g_img_align, g_sys_align;
 void (*nvmtl_purge_report_hook)(const char *why);
@@ -323,6 +323,7 @@ static void nvmtl_vw_tic_note(const void *view);   /* the view's descriptor indi
 static void nvmtl_tabshadow_tick(void);              /* the GPU-side shadow of NVK's image table, every few submits and at every table growth */
 static void nvmtl_vw_note_died(const void *view);
 static void nvmtl_buffer_grace_reap(void);
+static void nvmtl_imported_reap_poke(void);
 static void nvmtl_fx_note_buffer_gone(nvk_buffer *b, uint32_t where);
 static __thread const char *t_fx_dying;   // the label the next image death on this thread is recorded under
 void nvmtl_vk_image_dying_label(const char *label) { t_fx_dying = label; }
@@ -2022,13 +2023,13 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
     VKCK(pvkBindBufferMemory(g_dev, out->buf, out->mem, 0), "vkBindBufferMemory");
     if (host_visible) { VkResult mr_ = pvkMapMemory(g_dev, out->mem, 0, VK_WHOLE_SIZE, 0, &out->map); if (mr_ != VK_SUCCESS) {
         nvlog("vk: vkMapMemory -> %d with %llu buffers live (%llu made, %llu gone), %zu bytes allocated, memory type %d", mr_,
-              (unsigned long long)(g_buf_made - g_buf_gone), (unsigned long long)g_buf_made, (unsigned long long)g_buf_gone, g_alloc_bytes, mt);
+              (unsigned long long)(g_buf_made - g_buf_gone), (unsigned long long)g_buf_made, (unsigned long long)g_buf_gone, (size_t)g_alloc_bytes, mt);
         return -1; } }
     g_alloc_bytes += mr.size;
     g_buf_made++;
     if (host_visible && out->map) out->fresh = 1;
     if ((g_buf_made & 0xFFF) == 0) nvlog("buffer census: %llu made, %llu gone, %llu live, %zu bytes allocated; pool %llu blocks, %llu pooled live, %llu bytes in ranges",
-        (unsigned long long)g_buf_made, (unsigned long long)g_buf_gone, (unsigned long long)(g_buf_made - g_buf_gone), g_alloc_bytes,
+        (unsigned long long)g_buf_made, (unsigned long long)g_buf_gone, (unsigned long long)(g_buf_made - g_buf_gone), (size_t)g_alloc_bytes,
         (unsigned long long)g_pool_blocks, (unsigned long long)g_pool_live, (unsigned long long)g_pool_bytes);
     { static int said[2]; if (!said[!!host_visible]) { said[!!host_visible] = 1;
         nvlog("vk: buffers (host_visible=%d) take memory type %d flags 0x%x heap %u", host_visible, mt,
@@ -8571,6 +8572,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     // Every submit up to this one has completed (one in-order queue): dead images whose last possible reader was
     // among them can go now (NVMTL_IMAGE_GRACE).
     if (c->fx_seq) { pthread_mutex_lock(&g_grace_lock); if (c->fx_seq > g_cmd_finished_seq) __atomic_store_n(&g_cmd_finished_seq, c->fx_seq, __ATOMIC_RELEASE); pthread_mutex_unlock(&g_grace_lock);
+                     nvmtl_imported_reap_poke();
                      nvmtl_image_grace_reap(); nvmtl_page_cool_reap(); nvmtl_buffer_grace_reap(); nvmtl_slot_drop_reap();
                      nvmtl_tabshadow_tick(); }
     if (c->wseq && c->wseq != NVMTL_WSEQ_BLIND) {
@@ -8636,6 +8638,107 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     return 0;
 }
 
+// Imported host-pointer async reaper: Apple's OpenCL-on-Metal bridge wraps page-aligned host pointers via
+// newBufferWithBytesNoCopy: (VK_EXT_external_memory_host) and drops them in bursts when command buffers finish.
+// Running nvRmApiFree synchronously on nvmtl_pump_queue serialized 8.4 s of ioctl stalls across Geekbench OpenCL.
+// Eligible ONLY once buffer-grace proves every in-flight submit has completed, ONLY for imported buffers
+// (mem->base.map == NULL in NVK, so dev->mappings is untouched), and NEVER when _hostDealloc is set (sync_free).
+#define NVMTL_IREAP_CAP       64u
+#define NVMTL_IREAP_MAX_BYTES (512ull << 20)
+typedef struct { void *buf, *mem; size_t alloc; } nvmtl_ireap_item;
+static pthread_mutex_t g_ireap_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_ireap_cv   = PTHREAD_COND_INITIALIZER;
+static nvmtl_ireap_item g_ireap_q[NVMTL_IREAP_CAP];
+static unsigned g_ireap_head, g_ireap_n;
+static uint64_t g_ireap_bytes;
+static int g_ireap_scheduled;
+static dispatch_queue_t g_ireap_dq;
+static dispatch_once_t g_ireap_once;
+static _Atomic uint64_t g_ireap_queued, g_ireap_freed, g_ireap_sync_fallback;
+static int nvmtl_imported_reap_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_SYNC_IMPORT_FREE");
+        on = !(e && e[0] == '1');
+        nvlog("vk: imported host-pointer async reaper %s (NVMTL_SYNC_IMPORT_FREE=%s)",
+              on ? "ON (grace-retired imported buffers unpin off the submit pump)" : "OFF", e ? e : "unset");
+    }
+    return on;
+}
+static void nvmtl_imported_reap_poke(void)
+{
+    if (atomic_load_explicit(&g_ireap_queued, memory_order_relaxed) ==
+        atomic_load_explicit(&g_ireap_freed, memory_order_relaxed))
+        return;
+    pthread_mutex_lock(&g_ireap_lock);
+    pthread_cond_broadcast(&g_ireap_cv);
+    pthread_mutex_unlock(&g_ireap_lock);
+}
+static void nvmtl_imported_reap_worker(void *ctx)
+{
+    (void)ctx;
+    size_t prev_alloc = 0;
+    for (;;) {
+        pthread_mutex_lock(&g_ireap_lock);
+        if (prev_alloc) { g_ireap_bytes -= prev_alloc; prev_alloc = 0; pthread_cond_broadcast(&g_ireap_cv); }
+        if (!g_ireap_n) { g_ireap_scheduled = 0; pthread_cond_broadcast(&g_ireap_cv); pthread_mutex_unlock(&g_ireap_lock); return; }
+        nvmtl_ireap_item it = g_ireap_q[g_ireap_head];
+        g_ireap_head = (g_ireap_head + 1u) % NVMTL_IREAP_CAP;
+        g_ireap_n--;
+        const int congested = g_ireap_n >= NVMTL_IREAP_CAP / 2u;
+        pthread_mutex_unlock(&g_ireap_lock);
+        prev_alloc = it.alloc;
+        if (atomic_load(&g_state) == 1) {
+            pvkDestroyBuffer(g_dev, (VkBuffer)it.buf, NULL);
+            if (!congested && atomic_load(&g_cmd_submitted) > __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE)) {
+                pthread_mutex_lock(&g_ireap_lock);
+                if (g_ireap_n < NVMTL_IREAP_CAP / 2u && atomic_load(&g_cmd_submitted) > __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE)) {
+                    struct timespec ts = { 0, 2000000L };
+                    pthread_cond_timedwait_relative_np(&g_ireap_cv, &g_ireap_lock, &ts);
+                }
+                pthread_mutex_unlock(&g_ireap_lock);
+            }
+            pvkFreeMemory(g_dev, (VkDeviceMemory)it.mem, NULL);
+        }
+        g_alloc_bytes -= it.alloc;
+        const uint64_t k = atomic_fetch_add(&g_ireap_freed, 1) + 1;
+        if (!(k & (k - 1)) && k >= 64)
+            nvlog("vk: imported reaper: %llu freed off-pump (%llu sync fallbacks)",
+                  (unsigned long long)k, (unsigned long long)atomic_load(&g_ireap_sync_fallback));
+    }
+}
+static void nvmtl_imported_reap_init(void *ctx)
+{
+    (void)ctx;
+    dispatch_queue_attr_t a = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);
+    g_ireap_dq = dispatch_queue_create("com.nullmoth.nvmtl.imported_reap", a);
+}
+static int nvmtl_imported_reap_enqueue(const nvk_buffer *b)
+{
+    if (!b || !b->imported || b->pool || b->placed || b->bind_lost || b->bar1 || b->sync_free || !b->buf || !b->mem)
+        return 0;
+    if (!nvmtl_buffer_grace_on() || !nvmtl_imported_reap_on()) return 0;
+    dispatch_once_f(&g_ireap_once, NULL, nvmtl_imported_reap_init);
+    if (!g_ireap_dq) return 0;
+    int start = 0;
+    pthread_mutex_lock(&g_ireap_lock);
+    if (g_ireap_n >= NVMTL_IREAP_CAP || g_ireap_bytes + b->alloc > NVMTL_IREAP_MAX_BYTES) {
+        pthread_mutex_unlock(&g_ireap_lock);
+        atomic_fetch_add(&g_ireap_sync_fallback, 1);
+        return 0;
+    }
+    const unsigned idx = (g_ireap_head + g_ireap_n) % NVMTL_IREAP_CAP;
+    g_ireap_q[idx] = (nvmtl_ireap_item){ b->buf, b->mem, b->alloc };
+    g_ireap_n++;
+    g_ireap_bytes += b->alloc;
+    if (!g_ireap_scheduled) { g_ireap_scheduled = 1; start = 1; }
+    pthread_mutex_unlock(&g_ireap_lock);
+    atomic_fetch_add(&g_ireap_queued, 1);
+    if (start) dispatch_async_f(g_ireap_dq, NULL, nvmtl_imported_reap_worker);
+    return 1;
+}
+
 static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b);
 static __thread int t_grace_reaping;   /* set while the grace reap destroys: the death was recorded at the app's free */
 void nvmtl_vk_buffer_destroy(nvk_buffer *b)
@@ -8680,6 +8783,10 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
     g_buf_gone++;
     if (!t_grace_reaping) nvmtl_fx_note_buffer_gone(b, (b->pool ? NVMTL_FX_POOLED : 0) | (b->placed ? NVMTL_FX_PLACED : 0));
     nvmtl_live_remove(b);
+    if (nvmtl_imported_reap_enqueue(b)) {
+        memset(b, 0, sizeof *b);
+        return;
+    }
     pvkDestroyBuffer(g_dev, (VkBuffer)b->buf, NULL);
     if (b->pool) pool_buffer_release(b);
     if (!b->placed && !b->imported && b->mem && b->map && pvkUnmapMemory) { pvkUnmapMemory(g_dev, (VkDeviceMemory)b->mem); b->map = NULL; }
@@ -11285,7 +11392,7 @@ static int pool_buffer_create_in(int vram, size_t size, nvk_buffer *out)
     *out = pb; out->pool = blk; out->poff = off; out->alloc = len; out->size = size;
     if (!out->map && blk->heap.map) out->map = (uint8_t *)blk->heap.map + off;
     if ((g_buf_made & 0xFFF) == 0) nvlog("buffer census: %llu made, %llu gone, %llu live, %zu bytes allocated; pool %llu blocks, %llu pooled live, %llu bytes in ranges",
-        (unsigned long long)g_buf_made, (unsigned long long)g_buf_gone, (unsigned long long)(g_buf_made - g_buf_gone), g_alloc_bytes,
+        (unsigned long long)g_buf_made, (unsigned long long)g_buf_gone, (unsigned long long)(g_buf_made - g_buf_gone), (size_t)g_alloc_bytes,
         (unsigned long long)g_pool_blocks, (unsigned long long)g_pool_live, (unsigned long long)g_pool_bytes);
     return 0;
 }
