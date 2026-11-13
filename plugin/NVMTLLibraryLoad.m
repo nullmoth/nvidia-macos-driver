@@ -2940,8 +2940,33 @@ BOOL nvmtl_air_reads_function_table(NSString *air)
 // 26 that is the system's icon and Liquid Glass shaders: icons missing pieces, glass menus drawn as a flat tint.
 // The translator lists the references itself, so ask it. The known messages stay as a fallback for a translator
 // that cannot answer, so a query that cannot run never reads as "no references".
+// The answer for one AIR text never changes, but newFunctionWithName: asks it on every call: VideoToolbox's
+// pixel-transfer shaders (System Settings > Displays thumbnails, issue #567) were scanned to the end of their text
+// on each call, about three quarters of the pane's main-thread time. The result is kept per AIR string object
+// (weak key, so it goes when the text does). Only a definite answer from the translator is kept.
+static NSMapTable<NSString *, NSNumber *> *g_vlink_memo;
+static os_unfair_lock g_vlink_memo_lock = OS_UNFAIR_LOCK_INIT;
+static BOOL nvmtl_needs_visible_link_uncached(NSString *air, NSString *why, BOOL *definite);
 BOOL nvmtl_needs_visible_link(NSString *air, NSString *why)
 {
+    if (!air.length) return nvmtl_needs_visible_link_uncached(air, why, NULL);
+    os_unfair_lock_lock(&g_vlink_memo_lock);
+    if (!g_vlink_memo) g_vlink_memo = [NSMapTable weakToStrongObjectsMapTable];
+    NSNumber *hit = [g_vlink_memo objectForKey:air];
+    os_unfair_lock_unlock(&g_vlink_memo_lock);
+    if (hit) return hit.boolValue;
+    BOOL definite = NO;
+    const BOOL r = nvmtl_needs_visible_link_uncached(air, why, &definite);
+    if (definite) {
+        os_unfair_lock_lock(&g_vlink_memo_lock);
+        [g_vlink_memo setObject:@(r) forKey:air];
+        os_unfair_lock_unlock(&g_vlink_memo_lock);
+    }
+    return r;
+}
+static BOOL nvmtl_needs_visible_link_uncached(NSString *air, NSString *why, BOOL *definite)
+{
+    if (definite) *definite = NO;
     if (air.length && nvmtl_xlate_ready() && xlate_vrefs) {
         uint8_t *out = NULL; size_t len = 0; char e[256] = {0};
         if (xlate_vrefs(air.UTF8String, &out, &len, e, sizeof e) == 0) {
@@ -2949,8 +2974,10 @@ BOOL nvmtl_needs_visible_link(NSString *air, NSString *why)
             xlate_free(out, len);
             // the query lists direct references only; a function that calls through a visible or intersection
             // function table has none, and nvmtl_link_stage links it from the table candidates
-            if ([refs isKindOfClass:[NSArray class]])
+            if ([refs isKindOfClass:[NSArray class]]) {
+                if (definite) *definite = YES;
                 return [(NSArray *)refs count] > 0 || nvmtl_air_reads_function_table(air);
+            }
         }
     }
     return why && ([why rangeOfString:@"visible function reference"].location != NSNotFound
