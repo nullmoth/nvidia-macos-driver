@@ -278,6 +278,7 @@ private:
     // go (display versions 12 and 13). It never takes a PHY, so a dock keeps its USB lanes.
     thread_call_t fTcTimer = nullptr; struct nmt_port fTcPort[4]; uint32_t fTcLast[4] = {0, 0, 0, 0}; unsigned fTcN = 0;
     void tcStart();
+    void startUnwind();
     static void tcFire(thread_call_param_t p0, thread_call_param_t);
     // External test heads (boot-arg nmhybridext=1, display versions 12 and 13): when a cable arrives on a Type-C port the whole bring-up of
     // nm_hybrid_extmode.h runs on a second pipe with a colour-bar buffer mapped into the graphics table, and unplug takes it down. The
@@ -570,15 +571,11 @@ bool NMIntelFB::start(IOService *provider)
         // Without the mapping there is no head 4 and no dependent ID, so no controller either: starting would hit the
         // same null controller on the first power change. Leave the panel to the firmware framebuffer.
         IFBLOG("the surface would not map write-combined: leaving the panel to the firmware framebuffer");
-        if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
-        OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false;
+        startUnwind(); return false;
     }
     setProperty("IOFBDependentID", 0x4E56524D00000001ull, 64);
     setProperty("IOFBDependentIndex", 4ull, 32);
-    if (!IOFramebuffer::start(provider)) {
-        if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
-        OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false;
-    }
+    if (!IOFramebuffer::start(provider)) { startUnwind(); return false; }
     ifbStep(NMH_STEP_FB_START);
     ifbStep(NMH_STEP_PUBLISHED);
     IFBLOG("hybrid: provider NMIntelFB %ux%u pitch %u display version %u level %d (CPU-mapped scanout, no VRAM)",
@@ -591,6 +588,26 @@ bool NMIntelFB::start(IOService *provider)
     registerPowerDriver(this, kPowerStates, 2);
     IFBLOG("built-in panel published (%ux%u)", fWidth, fHeight);
     return true;
+}
+
+// A start that fails after the capture, the Type-C monitor and the firmware-loader target were set up must take them
+// all down again: the timers call back into this object and gDmcTarget points at it, and a failed start is followed by
+// the object's release. The same steps stop() takes, without the parts that only exist once the framebuffer started.
+void NMIntelFB::startUnwind()
+{
+    fStopping = true;
+    fResumeOn = false;
+    if (gDmcLock) IOLockLock(gDmcLock);
+    if (gDmcTarget == this) gDmcTarget = nullptr;
+    if (fDmcBlob) { IOFree(fDmcBlob, fDmcLen); fDmcBlob = nullptr; }
+    if (gDmcLock) IOLockUnlock(gDmcLock);
+    if (fTcTimer) { thread_call_cancel(fTcTimer); while (!thread_call_free(fTcTimer)) { thread_call_cancel(fTcTimer); IOSleep(5); } fTcTimer = nullptr; }
+    if (fExtOn) { nmhd_stop(&fHeads, &fHeadOps); fExtOn = false; }
+    if (fResumeCall) { thread_call_cancel(fResumeCall); while (!thread_call_free(fResumeCall)) { thread_call_cancel(fResumeCall); IOSleep(5); } fResumeCall = nullptr; }
+    if (fSnap) { IOFree(fSnap, sizeof *fSnap); fSnap = nullptr; }
+    if (fFwPte) { IOFree(fFwPte, (size_t)(fFwPteCount * sizeof(uint64_t))); fFwPte = nullptr; }
+    if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
+    OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr;
 }
 
 void NMIntelFB::stop(IOService *provider)
