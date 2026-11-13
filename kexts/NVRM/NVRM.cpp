@@ -62,6 +62,10 @@ __private_extern__ int _kext_apple_cc = __APPLE_CC__;
 
 #define LOG(fmt, ...) do { kprintf("NVRM-xnu: " fmt "\n", ##__VA_ARGS__); IOLog("NVRM-xnu: " fmt "\n", ##__VA_ARGS__); } while (0)
 
+// Longest a utilization firmware read may take before it counts as hung (chosen by us: two orders above a control
+// round trip, an order below the firmware's own timeout); the read's real duration is logged when it trips.
+static const uint64_t kUtilHangNs = 500ull * 1000 * 1000;
+
 extern "C" { NvBool nvkms_xnu_load(void); }
 class NVRM;
 #include "nvrm_devtab.h"
@@ -2402,7 +2406,18 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
         IOLockLock(fUtilizationLock);
         const bool ready = !fUtilizationStopping && !isInactive() && fAdapter && fPassDone >= 2 &&
                            OSAddAtomic(0, &fGpuPm) == kGpuPmRunning;
+        // A hung firmware read must not be repeated: it holds the RM's exclusive lock for its whole duration, and
+        // re-issued every second it keeps other processes and the window server blocked, which stalls shutdown.
+        // Longer than kUtilHangNs is a firmware that stopped answering, not a slow GPU, so the sampler stops for the
+        // rest of this boot; a fast failure keeps retrying.
+        const uint64_t utilT0 = mach_absolute_time();
         const bool ok = ready && nvrm_query_utilization(fNv.gpu_id, &fUtilizationState, sample);
+        uint64_t utilNs = 0; absolutetime_to_nanoseconds(mach_absolute_time() - utilT0, &utilNs);
+        if (ready && utilNs > kUtilHangNs) {
+            fUtilizationStopping = true;
+            LOG("utilization: a firmware read took %llu ms (limit %llu) - sampling stopped for this boot so the RM lock is not held again",
+                (unsigned long long)(utilNs / 1000000ull), (unsigned long long)(kUtilHangNs / 1000000ull));
+        }
         IOLockUnlock(fUtilizationLock);
         nv_xnu_pm_exit(counted);
         return ok ? kIOReturnSuccess : (ready ? kIOReturnIOError : kIOReturnNotReady);
