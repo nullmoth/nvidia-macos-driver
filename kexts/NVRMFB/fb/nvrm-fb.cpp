@@ -3781,6 +3781,19 @@ unsigned NVRMNVDAFramebuffer::addKmsRefreshModes(unsigned n)
             b.horizontalSyncConfig = k.flags.hSyncPos ? 1 : 0; b.verticalSyncConfig = k.flags.vSyncPos ? 1 : 0;
             b.dscCompressedBitsPerPixel = 0; b.dscSliceWidth = 0; b.dscSliceHeight = 0;
             b.detailedTimingModeID = 0x10000u | (i << 8) | copy;
+            // A derived timing is not one of the display's own modes, so NVKMS decides at mode set whether the panel can
+            // take it, and some cannot (eDP panels that accept only their EDID timings). The test pass of switchMode then
+            // refuses it, and WindowServer still shows the rate as selected while the panel stays where it was. Ask
+            // NVKMS the same question here (the timing setDisplayMode will submit) and offer only what it accepts.
+            {
+                struct NvKmsKapiDisplayMode dm = {};
+                dtToKapi(&b, &dm);
+                if (!fKms->validateDisplayMode || !fKms->validateDisplayMode(fDev, fDisplay, &dm)) {
+                    FBLOG("fb%u derived refresh rate %ux%u @%u Hz (native %u Hz / %u): NVKMS refused the timing -- not offered",
+                          fIndex, k.hVisible, k.vVisible, dhzWant, hz, div);
+                    continue;
+                }
+            }
             fDT[n++] = b; added++;
             FBLOG("fb%u derived refresh rate: %ux%u @%u Hz (native %u Hz / %u) as dt 0x%x", fIndex, k.hVisible, k.vVisible,
                   dhzWant, hz, div, b.detailedTimingModeID);
