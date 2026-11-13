@@ -186,6 +186,37 @@ fn a_sampler_array_past_the_sampler_indices_of_a_stage_fallbacks() {
 
 const TEXTURE_ENV: &str = include_str!("fixtures/gl/sampler_array_through_texture_env.ll");
 
+#[test]
+fn a_single_element_sampler_array_through_angles_texture_env_keeps_its_sampler() {
+    let source = TEXTURE_ENV
+        .replace("[2 x", "[1 x")
+        .replace(", 2>", ", 1>")
+        .replace("i32 0, i32 2, !\"air.", "i32 0, i32 1, !\"air.")
+        .replace("i64 0, i64 1", "i64 0, i64 0")
+        .replace("i32 0, i64 1", "i32 0, i64 0");
+    // Remove the second element's stores, now aliases of the first: each env
+    // field has one dominating store, just as ANGLE emits for one shadow map.
+    let source = source.lines().filter(|line| {
+        !line.trim_start().starts_with("store ptr %21,")
+            && !line.trim_start().starts_with("store ptr %24,")
+    }).collect::<Vec<_>>().join("\n");
+    let retry = inline_and_forward_object_fields(&source).expect("the helper is inlined");
+    let spv = translate_native_no_retry(&retry, Stage::Fragment)
+        .unwrap_or_else(|e| panic!("a singleton sampler array must translate: {e}\n{retry}"));
+    let asm = disassemble(&spv).expect("disassemble");
+    let ops = operations(&asm);
+    let dref: Vec<&str> = ops.iter().filter_map(|(_, body)| {
+        body.strip_prefix("OpImageSampleDref")?.split_whitespace().nth(2).map(bare)
+    }).collect();
+    assert_eq!(dref.len(), 2, "both shadow samples must survive:\n{asm}");
+    let binding = metal2vulkan::reflect::sampler_resource_binding(0).unwrap();
+    for sampled_image in dref {
+        assert_eq!(sampler_binding_of(&asm, &ops, sampled_image), Some(binding),
+            "the shadow uses the singleton's sampler, not the ordinary sampler at index 2:\n{asm}");
+    }
+    spirv_val(&spv);
+}
+
 /// The binding of the sampler variable an `OpSampledImage` combines, through its `OpLoad`.
 fn sampler_binding_of(asm: &str, ops: &[(&str, &str)], sampled_image: &str) -> Option<u32> {
     let mut it = operands_of(ops, sampled_image, "OpSampledImage ")?.split_whitespace();

@@ -947,7 +947,13 @@ pub(super) fn build_stage_input(
             // variable. One `[N x sampler]` variable at the first binding compiled, but on NVK its
             // element 1 read past that count-1 binding and sampled with the wrong sampler (GPU
             // probe 10-28: linear sampler in slot 1 returned the nearest result).
-            let array_count = declared_count.filter(|count| *count > 1);
+            // Metadata omits count 1, but a byval [1 x sampler] still needs its
+            // element load materialized; treating it as a scalar loses the sampler.
+            let array_count = declared_count.filter(|count| *count > 1).or_else(|| {
+                let pointee = ptr_pointee(&defs, *pty)?;
+                let (_, count) = array_type(&defs, pointee)?;
+                (count == 1).then_some(count)
+            });
             if let Some(count) = array_count {
                 let pointee = ptr_pointee(&defs, *pty).ok_or_else(|| {
                     format!("sampler array parameter {pid} type {pty} is not a pointer")
