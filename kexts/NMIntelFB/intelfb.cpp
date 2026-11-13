@@ -511,10 +511,11 @@ bool NMIntelFB::start(IOService *provider)
     if (!fVBuf || fVBuf->prepare() != kIOReturnSuccess) { IFBLOG("virtual: no contiguous buffer"); OSSafeReleaseNULL(fVBuf); return false; }
     bzero(fVBuf->getBytesNoCopy(), fVBuf->getLength());
     fApertureBase = fVBuf->getPhysicalSegment(0, nullptr, kIOMemoryMapperNone); fApertureLen = fVBuf->getLength();
-    if (!IOFramebuffer::start(provider)) { fVBuf->complete(); OSSafeReleaseNULL(fVBuf); return false; }
     fSurfMap = fVBuf->map();
+    // Before IOFramebuffer::start, so start() attaches the shared controller (see the panel path below).
     setProperty("IOFBDependentID", 0x4E56524D00000001ull, 64);
     setProperty("IOFBDependentIndex", 4ull, 32);
+    if (!IOFramebuffer::start(provider)) { OSSafeReleaseNULL(fSurfMap); fVBuf->complete(); OSSafeReleaseNULL(fVBuf); return false; }
     if (IOWorkLoop *wl = getWorkLoop()) {
         fTimer = IOTimerEventSource::timerEventSource(this, [](OSObject *o, IOTimerEventSource *t) {
             ((NMIntelFB *)o)->sample(); t->setTimeoutMS(2000); });
@@ -556,20 +557,29 @@ bool NMIntelFB::start(IOService *provider)
       if (!gDmcLock) { IOLock *l = IOLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void * volatile *)&gDmcLock)) IOLockFree(l); }
       if (gDmcLock) { IOLockLock(gDmcLock); gDmcTarget = this; IOLockUnlock(gDmcLock); } }
     publishBacklight();   // before IOFramebuffer::start: IOFramebuffer::open looks for a service named "backlight"
-    if (!IOFramebuffer::start(provider)) {
-        if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
-        OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false;
-    }
-    ifbStep(NMH_STEP_FB_START);
     // Head 4 of the NVIDIA accelerator (NVAccel): WindowServer composites this panel on the NVIDIA card and the
-    // display pipe copies each frame into fSurfMap. Without NVAccel the panel stays a plain framebuffer.
+    // display pipe copies each frame into fSurfMap.
+    // The dependent ID and index must exist before IOFramebuffer::start. start() attaches the framebuffer to its
+    // shared controller only when it finds a dependent ID; set later, the controller stays unset until open(), and the
+    // power change queued by registerPowerDriver() below takes the controller's lock through a null pointer (page fault
+    // in IOFramebuffer::powerStateWillChangeTo at boot). NVRMFB sets them before start for the same reason.
     if (IODeviceMemory *sm = IODeviceMemory::withRange(fApertureBase + fSurf, (IOPhysicalLength)fRowBytes * fHeight)) {
         fSurfMap = sm->map(kIOMapWriteCombineCache); sm->release();
     }
-    if (fSurfMap) {
-        setProperty("IOFBDependentID", 0x4E56524D00000001ull, 64);
-        setProperty("IOFBDependentIndex", 4ull, 32);
-    } else IFBLOG("the surface would not map write-combined: NVIDIA rendering stays off for this panel");
+    if (!fSurfMap) {
+        // Without the mapping there is no head 4 and no dependent ID, so no controller either: starting would hit the
+        // same null controller on the first power change. Leave the panel to the firmware framebuffer.
+        IFBLOG("the surface would not map write-combined: leaving the panel to the firmware framebuffer");
+        if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
+        OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false;
+    }
+    setProperty("IOFBDependentID", 0x4E56524D00000001ull, 64);
+    setProperty("IOFBDependentIndex", 4ull, 32);
+    if (!IOFramebuffer::start(provider)) {
+        if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
+        OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false;
+    }
+    ifbStep(NMH_STEP_FB_START);
     ifbStep(NMH_STEP_PUBLISHED);
     IFBLOG("hybrid: provider NMIntelFB %ux%u pitch %u display version %u level %d (CPU-mapped scanout, no VRAM)",
            fWidth, fHeight, fRowBytes, fVer, fHyLevel);

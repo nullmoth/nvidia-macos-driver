@@ -657,6 +657,69 @@ cat > "$BGP" <<EOF || die "write the boot-guard job's plist"
 EOF
 chmod 644 "$BGP" && chown root:wheel "$BGP" || die "boot-guard job permissions"
 ok "a start counts as good once the desktop is up"
+# Panel brightness on firmware that does not keep NVRAM writes (OpenCore with DisableVariableWrite and no emulated NVRAM):
+# the driver saves the level in the NVRAM variable nullmoth-backlight, which then comes back at every restart holding an
+# old value. This job keeps its own copy of the variable on disk and, at start, gives it back to the driver
+# (debug.nvrmfb_backlight_restore) only when the variable disagrees with that copy. Where NVRAM works both agree and the
+# job changes nothing; the driver refuses the restore once the user has moved the brightness this boot.
+BL=/Library/NullMoth/backlight.sh; BLP=/Library/LaunchDaemons/com.nullmoth.backlight.plist
+launchctl bootout system/com.nullmoth.backlight 2>/dev/null || true
+cat > "$BL.tmp" <<'EOF' || die "write the backlight job"
+#!/bin/bash
+# Written by the NVIDIA driver install: keeps the panel brightness when the firmware drops NVRAM writes.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+V=7C436110-AB2A-4BBB-A880-FE41995C9F82; F=/Library/NullMoth/backlight.level; LOG=/Library/NullMoth/backlight.log
+OID=debug.nvrmfb_backlight_restore
+# The variable as six hex digits: version 2 and the little-endian 16-bit level. Empty when absent or another version.
+cur() {
+  v=$(nvram -x -p 2>/dev/null | plutil -extract "$V:nullmoth-backlight" raw -o - - 2>/dev/null | base64 -D 2>/dev/null | od -An -tx1 | tr -d ' \n')
+  case $v in 02[0-9a-f][0-9a-f][0-9a-f][0-9a-f]) echo "$v";; esac
+}
+note() {
+  echo "$(date) $*" >> "$LOG"
+  # bounded: the last 200 lines
+  [ "$(wc -l < "$LOG")" -le 200 ] || { tail -n 200 "$LOG" > "$LOG.tmp" && mv -f "$LOG.tmp" "$LOG"; }
+}
+saved=$(cat "$F" 2>/dev/null)
+case $saved in 02[0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) saved=;; esac
+# The entry point exists once the internal panel's brightness control is up; no panel within two minutes: nothing to do.
+n=0
+until sysctl -n $OID >/dev/null 2>&1; do
+  n=$((n + 1)); [ "$n" -le 60 ] || exit 0
+  sleep 2
+done
+now=$(cur)
+if [ -n "$saved" ] && [ "$now" != "$saved" ]; then
+  lvl=$(( 0x${saved:2:2} + 0x${saved:4:2} * 256 ))
+  if sysctl -w $OID=$lvl >/dev/null 2>&1; then
+    note "NVRAM held ${now:-nothing}, the saved copy $saved: level $lvl restored"
+  else
+    note "NVRAM held ${now:-nothing}, the saved copy $saved: the driver refused the restore (brightness already moved)"
+  fi
+fi
+last=$saved
+save() {
+  v=$(cur)
+  [ -n "$v" ] && [ "$v" != "$last" ] || return 0
+  printf '%s\n' "$v" > "$F.tmp" && mv -f "$F.tmp" "$F" && last=$v
+}
+# Copy the variable every 30 s and once more at shutdown (launchd sends TERM).
+trap 'save; exit 0' TERM INT
+while :; do
+  sleep 30 & wait $!
+  save
+done
+EOF
+chmod 755 "$BL.tmp" && chown root:wheel "$BL.tmp" && mv -f "$BL.tmp" "$BL" || die "install the backlight job"
+cat > "$BLP" <<EOF || die "write the backlight job's plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Label</key><string>com.nullmoth.backlight</string>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>$BL</string></array>
+<key>RunAtLoad</key><true/></dict></plist>
+EOF
+chmod 644 "$BLP" && chown root:wheel "$BLP" || die "backlight job permissions"
+ok "panel brightness is kept on disk too, for firmware that drops NVRAM writes"
 
 ba=$(nvram boot-args 2>/dev/null | cut -f2-)
 for a in nvfb=1 nvaccel=1; do case " $ba " in *" $a "*) ;; *) echo "   NOTE: boot-args lack '$a' — add it in your OpenCore config.plist (README: Install — by hand), or let the 1401 Mac app set OpenCore up";; esac; done
