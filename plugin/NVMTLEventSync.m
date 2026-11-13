@@ -375,6 +375,10 @@ static int nvmtl_skip_empty_on(void) {
     part->commands = _c;
     memset(&_c, 0, sizeof(_c));
     part->resources = [(NVMTLResSet *)_resources nvmtlTakeAll]; part->surfaces = [_surfDirty copy];
+    if (_hostPublications.count) {
+        objc_setAssociatedObject(part, nvmtl_host_pubs_key, [_hostPublications copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [_hostPublications removeAllObjects];
+    }
     // Another process may read an IOSurface once its writer is scheduled, and nothing orders its queue after ours.
     // A surface whose VRAM is shared is covered by the kernel (a CPU lock's page-off waits for the pending write); one we
     // write through a private image is copied out only after the GPU has finished, and a CPU lock does not wait for that.
@@ -540,7 +544,7 @@ static int nvmtl_skip_empty_on(void) {
     // autorelease pool can keep thousands of finished command buffers alive during a long loop (Geekbench 7 does),
     // and holding these until the command buffer itself died filled VRAM until allocations were refused.
     [_scratch removeAllObjects]; _e78Ring = nil; _e78RingOff = 0; memset(_g79BRing, 0, sizeof _g79BRing);
-    [(NVMTLResSet *)_resources removeAllObjects]; [_stTwins removeAllObjects];
+    [(NVMTLResSet *)_resources removeAllObjects]; [_stTwins removeAllObjects]; [_hostPublications removeAllObjects];
     // Applications may retain completed command buffers. Pending overwrite
     // bookkeeping must not keep their IOSurfaces and VRAM alive indefinitely.
     [_surfOverwrites removeAllObjects]; _surfOverwrites = nil;
@@ -636,7 +640,7 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
     // backings once, but refresh their bytes only when it actually submits.
     part->copyInputs = nvmtl_submission_copies(part->resources, NO);
     for (NVMTLBuffer *buffer in part->copyInputs) {
-        if (buffer->_hostPtr) { part->hasHostCopies = YES; break; }
+        if (buffer->_hostPtr && !nvmtl_owned_host_shadow_buf(buffer)) { part->hasHostCopies = YES; break; }
     }
     part->copyInputsPrepared = YES;
 }
@@ -779,6 +783,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
             for (NVMTLTexture *texture in nvmtl_ws_part_landed(self, _nextPart, settled)) if (![texture nvmtlSurfaceOut]) published = NO;
             if (!nvmtl_ws_publish_settled(settled, self)) published = NO;
             for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, YES)) nvmtl_buffer_sync_out(buffer);
+            nvmtl_part_publish_host(part);
         }
         if (!published) {
             // -3: the command buffer was made after the GPU was lost. Metal reports a removed GPU as DeviceRemoved (11).

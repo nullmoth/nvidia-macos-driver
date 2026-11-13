@@ -39,8 +39,8 @@ static inline void nvmtl_buf_settle(NVMTLBuffer *b) {
         __atomic_store_n(&b->_zshadow, 0, __ATOMIC_RELEASE); return; }
     while (__atomic_load_n(&b->_zshadow, __ATOMIC_ACQUIRE) == 2) sched_yield();
 }
-/* a buffer with a working copy and a caller pointer (_swc and _hostPtr): the caller's pages are what the CPU sees and _shadow is only the staging for the transfers */
-static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); if (b->_swc && b->_hostPtr) return b->_hostPtr; return b->_shadow.map ? b->_shadow.map : b->_b.map; }
+/* a buffer with a caller pointer (_hostPtr): the caller's pages are what the CPU sees and _shadow (if any) is staging */
+static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return b->_hostPtr ? b->_hostPtr : (b->_shadow.map ? b->_shadow.map : b->_b.map); }
 @interface NVMTLTexture : NSObject <MTLTexture> {
   @public nvk_image _i; nvk_queue *_q; IOSurfaceRef _surf; MTLPixelFormat _fmt; NSUInteger _plane;
   NVMTLHeap *_heap; NSUInteger _heapOffset;
@@ -135,6 +135,7 @@ extern id gNVMTLMainDevice;
   NSMutableArray *_handlers;
   NSMutableArray *_scratch;
   NSMutableSet *_resources;
+  NSMutableSet *_hostPublications; // owned managed staging: publish caller pages after this part finishes
   NSMutableSet *_surfDirty;
   NSMutableSet *_surfOverwrites; // contents defined by writes recorded in this command buffer
   unsigned _nEnc, _nEnd, _nHandlers, _nStatus, _nEnqueue, _nLabel, _nPresent, _nWait;

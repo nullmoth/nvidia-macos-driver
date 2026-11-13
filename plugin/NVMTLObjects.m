@@ -78,6 +78,18 @@ static MTLDataType nvmtl_air_fc_type(NSString *t) {
 static void nvmtl_buffer_sync_in(NVMTLBuffer *b);
 @class NVMTLCommandBuffer;
 static void nvmtl_buffer_sync_out(NVMTLBuffer *b);
+// Local managed NoCopy owned staging: an unimportable caller range gets owned coherent staging as its managed shadow
+// (!_swc), and the caller's pointer stays the CPU view.
+static BOOL nvmtl_owned_host_shadow(NVMTLBuffer *b) {
+    return b && !b->_swc && b->_storage == MTLStorageModeManaged && b->_hostPtr && b->_shadow.map
+        && !b->_shadow.imported && !b->_b.map;
+}
+#define NVMTL_OWNED_HOST_SHADOW_HELPERS 1
+static const void *const nvmtl_host_pubs_key = &nvmtl_host_pubs_key;
+static inline BOOL nvmtl_owned_host_shadow_buf(NVMTLBuffer *b) {
+    return b && !b->_swc && b->_hostPtr && b->_shadow.map && !b->_b.map;
+}
+static void nvmtl_part_publish_host(id part);
 static void nvbt(const char *tag, int *count, int max) {
     if (*count >= max) return; (*count)++;
     extern const char *nvmtl_log_path(void);
@@ -1080,15 +1092,19 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
     if (_b.buf && nvmtl_trace_on()) nvtrace("BUFFREE 0x%llx len %zu", (unsigned long long)nvmtl_vk_buffer_address(&_b), _b.size);
     for (uint32_t k = 0; k < _nbpk; k++) nvmtl_vk_image_destroy(&_bpk[k].img);
     free(_bpk); _bpk = NULL; _nbpk = 0;
+    // Retire clears the buffer descriptors (parked or destroyed): take the no-copy caller pointer and length first, or
+    // the deallocator receives (NULL, 0) for an imported buffer.
+    void *hostForDealloc = _hostPtr ?: (_shadow.imported ? _shadow.map : _b.map);
+    const NSUInteger hostLength = (NSUInteger)(_hostLen ?: _b.size);
     nvmtl_vk_buffer_retire(&_b); if (_shadow.buf) nvmtl_vk_buffer_retire(&_shadow);
     if (_swc) { nvmtl_swc_free((nvmtl_swc *)_swc); free(_swc); _swc = NULL; }
     if (_subHeap) { NVMTLHeap *h = _subHeap; NSUInteger c = _subCharge; _subHeap = nil; _subCharge = 0;
                     if (_subPlaced && c) { _subPlaced = NO; [h nvmtlGiveRange:_heapOffset length:c]; }
                     [h nvmtlReleaseSubAllocation:c]; }
     if (_hostDealloc) { void (^d)(void *, NSUInteger) = _hostDealloc; _hostDealloc = nil;
-                        d(_hostPtr ?: _b.map, (NSUInteger)(_hostLen ?: _b.size)); } }
+                        d(hostForDealloc, hostLength); } }
 - (MTLStorageMode)storageMode { return _storage; }
-- (void *)contents { nvmtl_buf_settle(self); if (_swc && _hostPtr) return _hostPtr; return _shadow.map ? _shadow.map : (_hostPtr ? _hostPtr : _b.map); }
+- (void *)contents { nvmtl_buf_settle(self); return _hostPtr ? _hostPtr : (_shadow.map ? _shadow.map : _b.map); }
 - (id<MTLHeap>)heap { return _heap ?: _subHeap; }
 - (NSUInteger)heapOffset { return _heapOffset; }
 - (NSUInteger)length { return _b.size; }
@@ -1098,7 +1114,11 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
     if (_shadow.map) {
         if (r.location >= _b.size) return;
         NSUInteger n = MIN(r.length, _b.size - r.location);
-        if (n) nvmtl_managed_mark(self, r.location, r.location + n);
+        if (n) {
+            if (nvmtl_owned_host_shadow(self))
+                memcpy((char *)_shadow.map + r.location, (const char *)_hostPtr + r.location, n);
+            nvmtl_managed_mark(self, r.location, r.location + n);
+        }
         return;
     }
     nvmtl_buffer_sync_in(self); }
@@ -7405,6 +7425,10 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
         if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &b->_b, 0, &b->_shadow, 0, b->_b.size))
             [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
                 userInfo:@{NSLocalizedDescriptionKey:@"Cannot encode managed buffer synchronization"}]];
+        else if (nvmtl_owned_host_shadow(b)) {
+            if (!_cb->_hostPublications) _cb->_hostPublications = [NSMutableSet new];
+            [_cb->_hostPublications addObject:b];
+        }
     }
     if ([(id)r isKindOfClass:[NVMTLTexture class]]) {
         NVMTLTexture *t = (NVMTLTexture *)r;
@@ -7415,6 +7439,10 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
             if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &bb->_b, 0, &bb->_shadow, 0, bb->_b.size))
                 [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
                     userInfo:@{NSLocalizedDescriptionKey:@"Cannot encode managed buffer-texture synchronization"}]];
+            else if (nvmtl_owned_host_shadow(bb)) {
+                if (!_cb->_hostPublications) _cb->_hostPublications = [NSMutableSet new];
+                [_cb->_hostPublications addObject:bb];
+            }
         }
     }
 }
@@ -8835,4 +8863,25 @@ static void nvmtl_buffer_sync_out(NVMTLBuffer *b)
     const uint64_t t0 = nvmtl_perf_now();
     memcpy(b->_hostPtr, b->_b.map, b->_hostLen);
     nvmtl_perf_note(NVP_SYNCOUT, t0, b->_hostLen);
+}
+
+#import <objc/runtime.h>
+#ifndef NVMTL_OWNED_HOST_SHADOW_HELPERS
+static const void *const nvmtl_host_pubs_key = &nvmtl_host_pubs_key;
+// Owned managed NoCopy staging (!b->_swc && b->_hostPtr && b->_shadow.map && !b->_b.map): published to the caller's
+// pages only by the exact submission part that encoded its synchronizeResource: GPU->staging copy.
+static inline BOOL nvmtl_owned_host_shadow_buf(NVMTLBuffer *b) {
+    return b && !b->_swc && b->_hostPtr && b->_shadow.map && !b->_b.map;
+}
+#endif
+static void nvmtl_buffer_publish_host(NVMTLBuffer *b) {
+    if (!nvmtl_owned_host_shadow_buf(b)) return;
+    const size_t n = MIN(b->_hostLen, MIN(b->_b.size, b->_shadow.size));
+    const uint64_t t0 = nvmtl_perf_now();
+    if (n) memcpy(b->_hostPtr, b->_shadow.map, n);
+    nvmtl_perf_note(NVP_SYNCOUT, t0, n);
+}
+static void nvmtl_part_publish_host(id part) {
+    NSSet *pubs = part ? objc_getAssociatedObject(part, nvmtl_host_pubs_key) : nil;
+    for (NVMTLBuffer *b in pubs) nvmtl_buffer_publish_host(b);
 }
