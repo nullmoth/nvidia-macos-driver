@@ -3794,15 +3794,22 @@ static void nvmtl_hz_render_writes(NVMTLCommandBuffer *cb, NVMTLRenderPipelineSt
     if (ok) memcpy(c->hz_tmask, p->_p.gmask, sizeof c->hz_tmask);
     c->hz_wm_dirty = 1;
 }
+static uint32_t nvmtl_ps_writable_buffers(NVMTLComputePipelineState *ps) {
+    static int forceAll = -1;
+    if (forceAll < 0) { const char *e = getenv("NVMTL_COMPUTE_WRITE_ALL"); forceAll = e && e[0] == '1'; }
+    if (forceAll || !ps) return 0xffffffffu;
+    if (!__atomic_load_n(&ps->_hzReady, __ATOMIC_ACQUIRE)) {
+        const nvmtl_hz_writes f = nvmtl_hz_fn_writes(ps->_function);
+        ps->_hzBuf = f.buf; memcpy(ps->_hzTex, f.tex, sizeof f.tex); __atomic_store_n(&ps->_hzReady, 1, __ATOMIC_RELEASE);
+    }
+    return ps->_hzBuf;
+}
 static void nvmtl_hz_compute_writes(NVMTLCommandBuffer *cb, NVMTLComputePipelineState *ps) {
     nvk_cmdbuf *c = &cb->_c;
     nvmtl_hz_writes w = kNVMTLHzAll;
     if (ps) {
-        if (!__atomic_load_n(&ps->_hzReady, __ATOMIC_ACQUIRE)) {
-            const nvmtl_hz_writes f = nvmtl_hz_fn_writes(ps->_function);
-            ps->_hzBuf = f.buf; memcpy(ps->_hzTex, f.tex, sizeof f.tex); __atomic_store_n(&ps->_hzReady, 1, __ATOMIC_RELEASE);
-        }
-        w.buf = ps->_hzBuf; memcpy(w.tex, ps->_hzTex, sizeof w.tex);
+        w.buf = nvmtl_ps_writable_buffers(ps);
+        memcpy(w.tex, ps->_hzTex, sizeof w.tex);
     }
     c->hz_bufw[0] = w.buf; c->hz_bufw[1] = 0;
     memcpy(c->hz_texw[0], w.tex, sizeof w.tex); memset(c->hz_texw[1], 0, sizeof c->hz_texw[1]);
@@ -6170,11 +6177,13 @@ static void nvmtl_g79_flush(NVMTLCommandBuffer *cb) {
     // usage wins. An indirect dispatch reaches them only through argument buffers, so nothing else moves them into the
     // layout a shader access needs; see nvmtlPrepareIndirectImages.
     NSMutableDictionary *_indirectImages;
-    NSData *_e78Key;
+    id _e78Key;
+    NSUInteger _tgFastIdx, _tgFastLen;
     NVMTLComputePipelineState *_e78VarFor, *_e78VarSel;
     NSUInteger _e78NDisp; BOOL _e78Concurrent, _e78Loose;
     BOOL _g79Bar;
 }
+- (void)nvmtlMarkWrittenBuffers;
 @end
 enum { NVMTL_E78_RING = 64 * 1024, NVMTL_E78_RING_ALIGN = 256, NVMTL_E78_RING_MAX = 16 * 1024 };
 static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, size_t *off) {
@@ -6589,9 +6598,13 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
     if ((_samplers.count || _tgLen.count) && _e78VarSel && _e78VarFor == _ps && nvmtl_enc78_on(NVMTL_E78_H5)) {
         selected = _e78VarSel; nvmtl_enc78_count(E78C_VARHIT, 1);
     } else if (_samplers.count || _tgLen.count) {
-        if (!_e78Key || !nvmtl_enc78_on(NVMTL_E78_H5))
-            _e78Key = [NSJSONSerialization dataWithJSONObject:@{@"s": _samplers ?: @{}, @"tg": _tgLen ?: @{}} options:NSJSONWritingSortedKeys error:NULL];
-        NSData *key = _e78Key;
+        if (!_e78Key || !nvmtl_enc78_on(NVMTL_E78_H5)) {
+            if (_samplers.count == 0 && _tgLen.count == 1 && _tgFastIdx < 0x7FFFu && _tgFastLen < (1ull << 40))
+                _e78Key = @((((uint64_t)(_tgFastIdx + 1u)) << 40) | (uint64_t)_tgFastLen);
+            else
+                _e78Key = [NSJSONSerialization dataWithJSONObject:@{@"s": _samplers ?: @{}, @"tg": _tgLen ?: @{}} options:NSJSONWritingSortedKeys error:NULL];
+        }
+        id key = _e78Key;
         nvmtl_enc78_count(E78C_VARMISS, 1);
         @synchronized (_ps) {
             if (!_ps->_samplerVariants) _ps->_samplerVariants = [NSMutableDictionary new];
@@ -6603,6 +6616,10 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
                 NSData *spirv = nvmtl_translate_variant(_ps->_function, _samplers, _tgLen, &why);
                 if (spirv) {
                     selected = [NVMTLComputePipelineState new];
+                    selected->_function = _ps->_function;
+                    selected->_hzBuf = _ps->_hzBuf;
+                    memcpy(selected->_hzTex, _ps->_hzTex, sizeof _ps->_hzTex);
+                    selected->_hzReady = _ps->_hzReady;
                     if (nvmtl_vk_compute_pipeline_create(spirv.bytes, spirv.length, &selected->_p)) {
                         selected = nil; why = @"Vulkan compute pipeline creation failed";
                     }
@@ -6678,8 +6695,10 @@ static int nvmtl_zprobe_on(void);
         return;
     }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    // the same buffer at the same index of this encoder is already held by the command buffer's set
-    if (i >= NVMTL_NBUFAT || _baObj[i] != (id)nb) [_cb->_resources addObject:nb];
+    // Bound buffers start read-only in the command buffer's set and are promoted to written at dispatch time only for
+    // slots the pipeline's reflection may write (nvmtlMarkWrittenBuffers).
+    if (i >= NVMTL_NBUFAT) [_cb->_resources addObject:nb];
+    else if (_baObj[i] != (id)nb) [(NVMTLResSet *)_cb->_resources addReadOnlyObject:nb];
     if (i < NVMTL_NBUFAT) { _baObj[i] = nb; _baOff[i] = off; _baN[i] = 2; }
     if (nvmtl_hz_bind_buffer(&_cb->_c, nvmtl_hz_untracked_buf(nb), NVMTL_SET_VERTEX, (uint32_t)i, &nb->_b, off)) nvlog("compute setBuffer: bind FAILED");
     if (nvmtl_zprobe_on()) {
@@ -6867,7 +6886,18 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     while (out[0] * out[1] * out[2] > 128 && out[2] % 2 == 0) out[2] /= 2;
     while (out[0] * out[1] * out[2] > 128 && out[0] > 32 && out[0] % 2 == 0) out[0] /= 2;
 }
+- (void)nvmtlMarkWrittenBuffers {
+    if (!_cb) return;
+    if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
+    uint32_t m = nvmtl_ps_writable_buffers(_ps);
+    while (m) {
+        const unsigned k = (unsigned)__builtin_ctz(m);
+        m &= m - 1u;
+        if (_baN[k] == 2 && _baObj[k]) [_cb->_resources addObject:_baObj[k]];
+    }
+}
 - (void)dispatchThreadgroups:(MTLSize)grid threadsPerThreadgroup:(MTLSize)tg {
+    [self nvmtlMarkWrittenBuffers];
     if (_ps && _ps->_sassKernel) {
         int ran = nvmtl_sass_dispatch(self, grid, tg, 0, !_ps->_sassOnly);
         if (ran) { if (ran > 0 && _cb->_stTwins.count) nvmtl_storage_twins_out(_cb); return; }
@@ -6893,6 +6923,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
 }
 - (void)dispatchThreads:(MTLSize)threads threadsPerThreadgroup:(MTLSize)tg {
+    [self nvmtlMarkWrittenBuffers];
     if (_ps && _ps->_sassKernel) {
         int ran = nvmtl_sass_dispatch(self, threads, tg, 1, !_ps->_sassOnly);
         if (ran) { if (ran > 0 && _cb->_stTwins.count) nvmtl_storage_twins_out(_cb); return; }
@@ -6931,11 +6962,25 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
                          (unsigned long)w, (unsigned long)h);
 }
 - (void)setThreadgroupMemoryLength:(NSUInteger)len atIndex:(NSUInteger)i {
+    static NSString *const kSmallIdx[16] = {
+        @"0", @"1", @"2", @"3", @"4", @"5", @"6", @"7",
+        @"8", @"9", @"10", @"11", @"12", @"13", @"14", @"15"
+    };
     if (!_tgLen) _tgLen = [NSMutableDictionary new];
     if (nvmtl_zprobe_on()) nvlog("ZENC tgMemory   idx %-3lu length %lu", (unsigned long)i, (unsigned long)len);
-    NSUInteger was = [_tgLen[@(i).stringValue] unsignedIntegerValue];
-    if (len) _tgLen[@(i).stringValue] = @(len);
-    else     [_tgLen removeObjectForKey:@(i).stringValue];
+    NSString *key = i < 16 ? kSmallIdx[i] : @(i).stringValue;
+    NSUInteger was = [_tgLen[key] unsignedIntegerValue];
+    if (len) {
+        _tgLen[key] = @(len);
+        if (_tgLen.count == 1) { _tgFastIdx = i; _tgFastLen = len; }
+    } else {
+        [_tgLen removeObjectForKey:key];
+        if (_tgLen.count == 1) {
+            NSString *only = _tgLen.allKeys.firstObject;
+            _tgFastIdx = (NSUInteger)only.integerValue;
+            _tgFastLen = [_tgLen[only] unsignedIntegerValue];
+        }
+    }
     if (was != len) { _e78Key = nil; _e78VarSel = nil; }
 }
 // GPU-encoded dispatches (NVMTL_GPU_ICB=1). The threadgroup size a kernel recorded is only in the GPU record, and Vulkan needs it when the
@@ -7066,7 +7111,11 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
                          threadsPerThreadgroup:(MTLSize)tg {
     NVMTLBuffer *nb = (NVMTLBuffer *)buf;
     if (!nb) { nvlog("dispatchThreadgroupsWithIndirectBuffer: nil"); return; }
-    nvmtl_retain_resource(_cb, nb);
+    if (_cb) {
+        if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
+        [(NVMTLResSet *)_cb->_resources addReadOnlyObject:nb];
+    }
+    [self nvmtlMarkWrittenBuffers];
     // a pipeline with only compiled machine code has no Vulkan pipeline to run an indirect dispatch on
     if (_ps && _ps->_sassOnly) {
         [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
@@ -7106,7 +7155,12 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     return YES;
 }
 - (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u {
-    nvmtl_retain_resource(_cb, r);
+    if (r && _cb && [(id)r isKindOfClass:[NVMTLBuffer class]] && !(u & MTLResourceUsageWrite)) {
+        if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
+        [(NVMTLResSet *)_cb->_resources addReadOnlyObject:r];
+    } else {
+        nvmtl_retain_resource(_cb, r);
+    }
     nvmtl_hz_use(_cb, r, u);
     if ([(id)r isKindOfClass:[NVMTLTexture class]]) {
         NVMTLTexture *t = (NVMTLTexture *)r;
