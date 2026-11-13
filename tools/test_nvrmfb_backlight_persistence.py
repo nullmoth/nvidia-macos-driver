@@ -95,6 +95,11 @@ static bool OSCompareAndSwap(UInt32 oldValue, UInt32 newValue, volatile UInt32 *
 #define OSDeclareDefaultStructors(type)
 #define OSDefineMetaClassAndStructors(type, base)
 #define BLLOG(...) do {} while (0)
+// The handler takes this lock around its flags and its parameter dictionary; the stand-in counts the pairs.
+struct IOLock { int held = 0; int taken = 0; };
+static IOLock gBacklightLockStorage; static IOLock *gBacklightLock = &gBacklightLockStorage;
+static void IOLockLock(IOLock *l) { assert(l->held == 0); l->held = 1; l->taken++; }
+static void IOLockUnlock(IOLock *l) { assert(l->held == 1); l->held = 0; }
 struct IOService : IORegistryEntry {
     IOReturn result = kIOReturnSuccess;
     NvU32 lastPercent = 0;
@@ -332,7 +337,7 @@ int main() {
     NVRMBacklightHandler::applyFire(lost, nullptr);
     assert(lost->doIntegerSet(&user, gIODisplayBrightnessKey, 65535));   // the display stack's start-up maximum
     NVRMBacklightHandler::applyFire(lost, nullptr);
-    assert(lost->restoreExternal(16384) == 0);
+    { int before = gBacklightLock->taken; assert(lost->restoreExternal(16384) == 0); assert(gBacklightLock->taken > before && gBacklightLock->held == 0); }
     assert(lost->fUserLevel == 16384 && lost->fPending == 16384 && savedValue() == 16384);
     assert(lostDisplay.parameters->values[gIODisplayBrightnessKey] == 16384);
     NVRMBacklightHandler::applyFire(lost, nullptr);

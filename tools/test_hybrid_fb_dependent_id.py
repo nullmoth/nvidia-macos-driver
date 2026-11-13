@@ -66,8 +66,23 @@ ifb = (ROOT / FILES["NMIntelFB"]).read_text(encoding="utf-8")
 panel = start_bodies(ifb, "NMIntelFB")[-1]
 arm("NMIntelFB: a surface that will not map stops start before IOFramebuffer::start (no controller-less framebuffer)",
     panel.find("if (!fSurfMap) {") != -1 and panel.find("if (!fSurfMap) {") < panel.index("IOFramebuffer::start(provider)"))
-arm("NMIntelFB: a failed IOFramebuffer::start releases the surface mapping it now owns",
-    "OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr; return false;" in panel)
+# Every failure after the capture, the Type-C monitor and the loader target exist goes through one unwind.
+i = ifb.index("void NMIntelFB::startUnwind()"); unwind = ifb[i:ifb.index("void NMIntelFB::stop(", i)]
+late = panel[panel.index("tcStart();"):]
+arm("NMIntelFB: a failed IOFramebuffer::start and an unmapped surface both unwind before returning",
+    "if (!IOFramebuffer::start(provider)) { startUnwind(); return false; }" in late
+    and "startUnwind(); return false;" in late[late.index("if (!fSurfMap) {"):late.index("setProperty(\"IOFBDependentID\"")])
+arm("NMIntelFB: no failure return after tcStart skips the unwind",
+    late.count("return false;") == late.count("startUnwind(); return false;"))
+for what, text in [("the loader target is cleared under its lock", "if (gDmcTarget == this) gDmcTarget = nullptr;"),
+                   ("the firmware blob is freed", "IOFree(fDmcBlob, fDmcLen)"),
+                   ("the Type-C timer is cancelled and freed", "thread_call_free(fTcTimer)"),
+                   ("the resume call is cancelled and freed", "thread_call_free(fResumeCall)"),
+                   ("external heads are stopped", "nmhd_stop(&fHeads, &fHeadOps)"),
+                   ("the surface and register mappings are released", "OSSafeReleaseNULL(fSurfMap); OSSafeReleaseNULL(fMMIO); fRegs = nullptr;")]:
+    arm("NMIntelFB unwind: " + what, text in unwind)
+arm("control: the unwind check notices a return that skips it",
+    (late + " return false;").count("return false;") != (late + " return false;").count("startUnwind(); return false;"))
 nvfb = (ROOT / "kexts/NVRMFB/fb/nvrm-fb.cpp").read_text(encoding="utf-8")
 arm("NVRMFB still sets its dependent ID before super::start (the reference order)",
     nvfb.index('setProperty("IOFBDependentID"') < nvfb.index("if (!super::start(provider)) {"))

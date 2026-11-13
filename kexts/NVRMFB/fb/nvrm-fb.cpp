@@ -401,8 +401,12 @@ bool NVRMBacklightHandler::setDisplay(IODisplay *display)
     IODisplay::addParameter(params, sLinearBrightnessProbe, 0, kNVRMBacklightMax);
     IODisplay::setParameter(params, sLinearBrightnessProbe, initial);
     display->setProperty(gIODisplayParametersKey, params);
-    OSSafeReleaseNULL(fParameters);
+    // The restore sysctl reads fParameters from its own thread: swap under the lock it snapshots under, release after.
+    if (gBacklightLock) IOLockLock(gBacklightLock);
+    OSDictionary *replaced = fParameters;
     fParameters = params;
+    if (gBacklightLock) IOLockUnlock(gBacklightLock);
+    OSSafeReleaseNULL(replaced);
     if (fRestoreLevel >= 0) {
         fPending = fRestoreLevel;
         fRestoreLevel = -1;
@@ -425,12 +429,17 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
             paramName == sBrightnessProbe ? sLinearBrightnessProbe : sBrightnessProbe, level);
     }
     bool userRequest = params && params->getObject(gIODisplayValueKey);
-    if (nvrm_backlight_startup_default(userRequest, (UInt32)level, fHaveSaved, fUserSeen, OSAddAtomic(0, &fUserLevel))) {
-        BLLOG("backlight: first user request is the maximum with a saved level -- start-up default, not saved");
-        userRequest = false;
-    } else if (userRequest) {
+    // The three flags are also written by the restore sysctl; decide and record under the lock it uses.
+    if (gBacklightLock) IOLockLock(gBacklightLock);
+    const bool startupDefault = nvrm_backlight_startup_default(userRequest, (UInt32)level, fHaveSaved, fUserSeen, OSAddAtomic(0, &fUserLevel));
+    if (!startupDefault && userRequest) {
         fUserSeen = true;
         if (level < (SInt32)kNVRMBacklightMax) fUserMoved = true;
+    }
+    if (gBacklightLock) IOLockUnlock(gBacklightLock);
+    if (startupDefault) {
+        BLLOG("backlight: first user request is the maximum with a saved level -- start-up default, not saved");
+        userRequest = false;
     }
     if (userRequest) {
         uint64_t deadline;
@@ -455,19 +464,30 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
 int NVRMBacklightHandler::restoreExternal(SInt32 level)
 {
     if (level < 0 || level > (SInt32)kNVRMBacklightMax) return EINVAL;
-    if (!nvrm_backlight_external_restore_ok(fUserMoved, level)) {
+    // This runs on the caller's thread while the display's own thread may be in setDisplay or doIntegerSet: the check,
+    // the flags and a retained snapshot of the parameter dictionary are taken under one lock.
+    OSDictionary *shown = nullptr;
+    if (gBacklightLock) IOLockLock(gBacklightLock);
+    const bool allowed = nvrm_backlight_external_restore_ok(fUserMoved, level);
+    if (allowed) {
+        __atomic_store_n(&fUserLevel, level, __ATOMIC_SEQ_CST);
+        fHaveSaved = true;
+        fUserSeen = false;
+        shown = fParameters;
+        if (shown) shown->retain();
+    }
+    if (gBacklightLock) IOLockUnlock(gBacklightLock);
+    if (!allowed) {
         BLLOG("backlight: external restore of logical %d refused -- the user already moved the brightness this boot", (int)level);
         return EBUSY;
     }
-    __atomic_store_n(&fUserLevel, level, __ATOMIC_SEQ_CST);
     // Treated like a level read from /options at start: the display stack's start-up request for the maximum is then
     // clamped to it instead of replacing it. Requests seen so far were all for the maximum (fUserMoved is clear), so
     // they were start-up defaults too, and the next one is treated the same way.
-    fHaveSaved = true;
-    fUserSeen = false;
-    if (fParameters) {
-        IODisplay::setParameter(fParameters, gIODisplayBrightnessKey, level);
-        IODisplay::setParameter(fParameters, gIODisplayLinearBrightnessKey, level);
+    if (shown) {
+        IODisplay::setParameter(shown, gIODisplayBrightnessKey, level);
+        IODisplay::setParameter(shown, gIODisplayLinearBrightnessKey, level);
+        shown->release();
     }
     // Keep /options in step for this boot, so the variable shows what the panel shows; a firmware that keeps writes
     // stores it as usual.
