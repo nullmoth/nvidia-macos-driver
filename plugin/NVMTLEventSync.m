@@ -435,6 +435,7 @@ static int nvmtl_skip_empty_on(void) {
     // completed and the next dispatch wrote its destroyed image view (NVK abort in get_sampled_image_view_desc under
     // nvk_UpdateDescriptorSets: mediaanalysisd, Safari, wallpapers).
     if (restart) for (id o in (NVMTLResSet *)part->resources) [(NVMTLResSet *)_resources addObject:o];
+    // Local: the part's read-only members go back to read-only, and out of the MRU -addObject: just put them in.
     if (restart) [(NVMTLResSet *)_resources nvmtlSyncWrittenFrom:(NVMTLResSet *)part->resources];
     if (restart && nvmtl_vk_cmd_begin(&_queue->_q, &_c)) {
         _cbError = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorOutOfMemory
@@ -824,6 +825,9 @@ static void nvmtl_gsub_ahead_pass1(void) {
                 if (!result) nvmtl_vk_inflight_free(f);
             }
         }
+        // Local: a part that failed to submit still reports "scheduled" before its errored completion, as Metal (and the
+        // upstream order, which marked before submitting) does, so addScheduledHandler: blocks always run.
+        if (result) [self nvmtlMarkScheduled];
         if (result == -2) {
             if (!nvmtl_quarantined_parts) nvmtl_quarantined_parts = [NSMutableArray new];
             [nvmtl_quarantined_parts addObject:part];

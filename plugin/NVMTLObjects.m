@@ -390,11 +390,21 @@ static NSMutableSet *nvmtl_identity_set(NSUInteger cap) {
     NVMTLResSet *taken = [NVMTLResSet new]; NSMutableSet *empty = taken->_s, *emptyW = taken->_w;
     os_unfair_lock_lock(&_lk); taken->_s = _s; taken->_w = _w; _s = empty; _w = emptyW; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
     return taken; }
+// After a seal that goes on recording hands the part's members back through -addObject: (all of them marked written):
+// the members the part only read become read-only again. Each also leaves the MRU: -addObject: returns early on an MRU
+// hit, so a write binding of it after the event boundary would otherwise stay read-only, its sync-out would be skipped
+// and the CPU would never see the GPU's write.
 - (void)nvmtlSyncWrittenFrom:(NVMTLResSet *)src {
     if (!src) return;
     os_unfair_lock_lock(&src->_lk); NSMutableSet *ms = [src->_s copy], *mw = [src->_w copy]; os_unfair_lock_unlock(&src->_lk);
     os_unfair_lock_lock(&_lk);
-    for (id o in ms) if (![mw member:o]) [_w removeObject:o];
+    for (id o in ms) {
+        if ([mw member:o]) continue;
+        id member = [_s member:o];
+        [_w removeObject:o];
+        for (unsigned k = 0; k < 8; k++)
+            if (_mru[k] == (__bridge const void *)o || (member && _mru[k] == (__bridge const void *)member)) _mru[k] = NULL;
+    }
     os_unfair_lock_unlock(&_lk);
 }
 - (void)dealloc { for (id o in _s) nvmtl_resref(o, -1); }
