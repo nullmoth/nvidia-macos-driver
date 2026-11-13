@@ -56,6 +56,7 @@ static void check(int ok, const char *name) { checks++; printf("%s %s\n", ok ? "
     ('static inline uint32_t nvmtl_lvl(', True),
     ('static inline uint32_t nvmtl_blocks(', True),
     ('static int nvmtl_copy_has_image(', False),
+    ('static int nvmtl_copy_into_multisample(', False),
     ('int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(', True),
     ('int nvmtl_vk_cmd_copy_image_to_buffer_level_layer(', True),
 ]) + r'''
