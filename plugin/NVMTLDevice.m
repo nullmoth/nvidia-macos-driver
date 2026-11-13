@@ -1297,7 +1297,7 @@ static inline BOOL nvmtl_bgr10_storage_remap(MTLTextureDescriptor *d, uint32_t *
     { static int said; if (!said++) nvlog("texture: writable BGR10A2Unorm is held as R10G10B10A2 so kernels can store to it"); }
     return YES;
 }
-// GBGR422 / BGRG422 (NVMTL_YUV422=1): a full-width RGBA8 image holding what Metal's sampler returns, with the packed bytes
+// GBGR422 / BGRG422 (on by default, NVMTL_YUV422=0 turns them off): a full-width RGBA8 image holding what Metal's sampler returns, with the packed bytes
 // kept beside it (nvmtl_yuv422.h). Sampling works for any shader; the texture is filled by replaceRegion and read by
 // getBytes. Blits, views, render targets and IOSurface backing are refused, each with a log line.
 // ---- sparse heaps and textures (NVMTL_SPARSE_TEXTURES=1; nvmtl_sparse_map.h) ----
@@ -1372,7 +1372,9 @@ void nvmtl_sparse_update(id<MTLTexture> tex, MTLSparseTextureMappingMode mode, M
 }
 static id<MTLTexture> nvmtl_make_y422_texture(MTLTextureDescriptor *d, NVMTLTexture *t) {
     const char *on = getenv("NVMTL_YUV422");
-    if (!on || on[0] != '1') { static int said; if (!said++) nvlog("newTextureWithDescriptor: 4:2:2 pixel format %lu is not carried (NVMTL_YUV422=1 turns it on) -> nil", (unsigned long)d.pixelFormat); return nil; }
+    // On unless NVMTL_YUV422=0. Apple's drivers create both 4:2:2 formats for every process and CoreVideo hands camera
+    // frames (2vuy, yuvs) to Metal as these textures; refusing them left a camera preview black.
+    if (on && on[0] == '0') { static int said; if (!said++) nvlog("newTextureWithDescriptor: 4:2:2 pixel format %lu is switched off (NVMTL_YUV422=0) -> nil", (unsigned long)d.pixelFormat); return nil; }
     if (d.textureType != MTLTextureType2D || d.mipmapLevelCount != 1 || d.arrayLength > 1 || d.depth != 1 || d.sampleCount > 1 ||
         !d.width || !d.height || (d.width & 1u) || d.width > 16384 || d.height > 16384 ||
         (d.usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget))) {
@@ -1677,7 +1679,7 @@ static char nvmtl_surface_cache_key;
              | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
     t->_fbo = nvmtl_desc_fbo(d);
     t->_fmt = d.pixelFormat;
-    if (nvmtl_y422_is_format((uint32_t)d.pixelFormat)) {   // a video frame: NVMTL_YUV422=1, decoded on use, never cached or written back
+    if (nvmtl_y422_is_format((uint32_t)d.pixelFormat)) {   // a video frame: decoded on use, never cached or written back
         if (!surf || w != IOSurfaceGetWidthOfPlane(surf, (uint32_t)plane) || h != IOSurfaceGetHeightOfPlane(surf, (uint32_t)plane)) { nvlog("4:2:2 texture over an IOSurface plane: size mismatch or no surface - nil"); return nil; }
         id<MTLTexture> made = nvmtl_make_y422_texture(d, t);
         if (made) { t->_y422Surf = (IOSurfaceRef)CFRetain(surf); t->_y422Plane = plane; }
