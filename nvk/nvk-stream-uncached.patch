@@ -1,0 +1,23 @@
+diff -ruN a/src/nouveau/vulkan/nvk_mem_stream.c b/src/nouveau/vulkan/nvk_mem_stream.c
+--- a/src/nouveau/vulkan/nvk_mem_stream.c	2026-11-13 15:12:44
++++ b/src/nouveau/vulkan/nvk_mem_stream.c	2026-11-13 15:12:44
+@@ -26,12 +26,13 @@
+ static inline enum nvkmd_mem_flags
+ nvk_b80_gart_flags(void)
+ {
+-   static int uncached = -1;
+-   if (uncached < 0) {
+-      const char *e = nvmtl_cfg_getenv("NVK_CMDPOOL_GPU_UNCACHED");
+-      uncached = e && e[0] == '1';
+-   }
+-   return uncached ? NVKMD_MEM_GART : (enum nvkmd_mem_flags)(NVKMD_MEM_GART | NVK69_MEM_GPU_CACHED);
++   /* A stream chunk is appended to while the GPU is still reading its earlier part: each push and each upload
++    * lands right behind the last one, often in the same cache line. The GPU's cache does not see CPU writes, and
++    * the host fetches the next push before the engine has run the invalidate that ends the previous one, so a
++    * cached chunk let it read the line as it was before the new words were written: the header of the new push
++    * was missing and the channel stopped with an invalid pushbuffer entry. Stream memory is read once, in order,
++    * and gains nothing from the cache; it is never cached. */
++   return NVKMD_MEM_GART;
+ }
+ 
+ static VkResult

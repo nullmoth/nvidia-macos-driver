@@ -54,7 +54,7 @@ accel() {
   cp -R "$OUT/accel-all/15/NVAccel.kext" "$OUT/kexts/accel/" && cp -R "$OUT/accel-all/26/NVAccel.kext" "$OUT/kexts/accel26/"
 }
 nvk() {
-  bash "$HERE/build/build_nvk.sh" "$MESA" "$OGKM610" "$OUT/nvk-build" 2.9 || return 1
+  bash "$HERE/build/build_nvk.sh" "$MESA" "$OGKM610" "$OUT/nvk-build" 3.0 || return 1
   mkdir -p "$OUT/nvk" && cp "$OUT/nvk-build/libvulkan_nouveau.dylib" "$OUT/nvk/" && cat "$OUT/nvk-build/BUILD.txt"
 }
 boost() {
