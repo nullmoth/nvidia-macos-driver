@@ -340,24 +340,35 @@ static NSMutableSet *nvmtl_identity_set(NSUInteger cap) {
     // driver, that both misses the bug and invents one, is worse than no test.
     id member = [_s member:o]; BOOL had = member != nil;
     if (!had) { [_s addObject:o]; member = o; }
+    if (_readOnly) [_readOnly removeObject:member];   // a later write upgrades a read-only copy source
+    // MRU entries are writable, so its fast path cannot skip a read-to-write upgrade.
     // An equal object need not be the object retained by NSMutableSet. Cache only the retained member's address.
     _mru[_mruNext++ & 7] = (__bridge const void *)member;
     os_unfair_lock_unlock(&_lk); if (!had) nvmtl_resref(o, 1); }
+// Only an explicitly read-only first use qualifies; an unknown or writable use never downgrades.
+- (void)addReadOnlyObject:(id)o { if (!o) return; os_unfair_lock_lock(&_lk);
+    id member = [_s member:o]; BOOL had = member != nil;
+    if (!had) { [_s addObject:o];
+        if (!_readOnly) _readOnly = nvmtl_identity_set(0);   // ordinary writable bindings need no extra set
+        [_readOnly addObject:o]; }
+    os_unfair_lock_unlock(&_lk); if (!had) nvmtl_resref(o, 1); }
+- (BOOL)isWrittenObject:(id)o { os_unfair_lock_lock(&_lk);
+    BOOL written = ![_readOnly member:o]; os_unfair_lock_unlock(&_lk); return written; }
 - (void)removeObject:(id)o { if (!o) return; os_unfair_lock_lock(&_lk); id member = [_s member:o];
-    if (member) [_s removeObject:member];
+    if (member) { [_s removeObject:member]; [_readOnly removeObject:member]; }
     for (unsigned k = 0; k < 8; k++) if (_mru[k] == (__bridge const void *)member) _mru[k] = NULL;
     os_unfair_lock_unlock(&_lk); if (member) nvmtl_resref(member, -1); }
 // Clearing, copying and sealing never go through -allObjects. That array is autoreleased into the CALLER's pool, and
 // these run on the app's own commit thread: Geekbench 7 never drains that pool, so every resource a command buffer had
 // ever touched stayed alive, and Super Resolution filled VRAM with 9 MB MPS buffers until allocations were refused.
 // The sets below are owned (+1) and released at the end of scope.
-- (void)removeAllObjects { NSMutableSet *fresh = nvmtl_identity_set(0), *old;
-    os_unfair_lock_lock(&_lk); old = _s; _s = fresh; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
+- (void)removeAllObjects { NSMutableSet *fresh = nvmtl_identity_set(0), *old, *oldRO;
+    os_unfair_lock_lock(&_lk); old = _s; oldRO = _readOnly; _s = fresh; _readOnly = nil; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
     for (id o in old) nvmtl_resref(o, -1); }
 - (id)copyWithZone:(NSZone *)z { atomic_fetch_add(&gRes2Tick, 1);
     NVMTLResSet *c = [NVMTLResSet new];
-    os_unfair_lock_lock(&_lk); NSMutableSet *m = [_s mutableCopy]; os_unfair_lock_unlock(&_lk);
-    c->_s = m;
+    os_unfair_lock_lock(&_lk); NSMutableSet *m = [_s mutableCopy], *ro = [_readOnly mutableCopy]; os_unfair_lock_unlock(&_lk);
+    c->_s = m; c->_readOnly = ro;
     for (id o in m) nvmtl_resref(o, 1);
     return c; }
 - (id)mutableCopyWithZone:(NSZone *)z { return [self copyWithZone:z]; }
@@ -366,8 +377,8 @@ static NSMutableSet *nvmtl_identity_set(NSUInteger cap) {
 // being in the part: the command buffer stopped holding it while the GPU work still used it. Membership moves to one
 // new owner, so each resource's residency count is unchanged; the new set's -dealloc gives it back.
 - (NVMTLResSet *)nvmtlTakeAll { atomic_fetch_add(&gRes2Tick, 1);
-    NVMTLResSet *taken = [NVMTLResSet new]; NSMutableSet *empty = taken->_s;
-    os_unfair_lock_lock(&_lk); taken->_s = _s; _s = empty; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
+    NVMTLResSet *taken = [NVMTLResSet new]; NSMutableSet *empty = taken->_s, *emptyRO = taken->_readOnly;
+    os_unfair_lock_lock(&_lk); taken->_s = _s; taken->_readOnly = _readOnly; _s = empty; _readOnly = emptyRO; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
     return taken; }
 - (void)dealloc { for (id o in _s) nvmtl_resref(o, -1); }
 @end
@@ -7123,7 +7134,7 @@ static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbS
     NVMTLBuffer *s = (NVMTLBuffer *)src, *d = (NVMTLBuffer *)dst;
     if (!s || !d) { nvlog("blit copyFromBuffer: nil"); return; }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    [_cb->_resources addObject:s];
+    [(NVMTLResSet *)_cb->_resources addReadOnlyObject:s];
     [_cb->_resources addObject:d];
     if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &s->_b, so, &d->_b, dof, size)) nvlog("blit copyFromBuffer: FAILED");
 }
@@ -7282,7 +7293,7 @@ static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbS
     NVMTLBuffer *b = (NVMTLBuffer *)src; NVMTLTexture *t = (NVMTLTexture *)dst;
     if (!b || !t) { nvlog("blit copyFromBuffer:toTexture: nil"); return; }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    [_cb->_resources addObject:b];
+    [(NVMTLResSet *)_cb->_resources addReadOnlyObject:b];
     [_cb->_resources addObject:t];
     if (nvmtl_rb_root(t) && [t nvi]->mtl_type != 7 && size.depth == 1) {   // buffer bytes are Metal's BGR10A2 layout
         NVMTLTexture *tmp = nvmtl_rb_temp(_cb, t.device, size.width, size.height);
