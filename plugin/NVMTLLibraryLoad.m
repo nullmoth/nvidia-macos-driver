@@ -3543,27 +3543,6 @@ static id<MTLVisibleFunctionTable> nvmtl_vft_new(MTLVisibleFunctionTableDescript
     return t;
 }
 
-@implementation NVMTLRenderPipelineState (RT3IntersectionTables)
-- (id<MTLIntersectionFunctionTable>)newIntersectionFunctionTableWithDescriptor:(MTLIntersectionFunctionTableDescriptor *)d stage:(MTLRenderStages)st {
-    return nvmtl_ift_new(d, "render newIntersectionFunctionTableWithDescriptor");
-}
-@end
-@implementation NVMTLRenderCommandEncoder (RT3IntersectionTables)
-- (void)setVertexIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)t atBufferIndex:(NSUInteger)i {
-    if (t && ![(id)t isKindOfClass:[NVMTLIntersectionFunctionTable class]]) { nvlog("setVertexIntersectionFunctionTable: foreign %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
-    [self setVertexBuffer:t ? ((NVMTLIntersectionFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
-}
-- (void)setFragmentIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)t atBufferIndex:(NSUInteger)i {
-    if (t && ![(id)t isKindOfClass:[NVMTLIntersectionFunctionTable class]]) { nvlog("setFragmentIntersectionFunctionTable: foreign %s - REFUSED", NSStringFromClass([(id)t class]).UTF8String); return; }
-    [self setFragmentBuffer:t ? ((NVMTLIntersectionFunctionTable *)t)->_buf : nil offset:0 atIndex:i];
-}
-- (void)setVertexIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
-    for (NSUInteger k = 0; k < r.length; k++) [self setVertexIntersectionFunctionTable:ts[k] atBufferIndex:r.location + k];
-}
-- (void)setFragmentIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __nullable [])ts withBufferRange:(NSRange)r {
-    for (NSUInteger k = 0; k < r.length; k++) [self setFragmentIntersectionFunctionTable:ts[k] atBufferIndex:r.location + k];
-}
-@end
 // The archive keeps the pipeline keys (what FailOnBinaryArchiveMiss checks) and, with them, the metallib of every
 // library a recorded function came from, so a saved archive carries the AIR it was made from.
 @interface NVMTLBinaryArchive : NSObject <MTLBinaryArchive> { @public NSMutableSet<NSString *> *_keys; NSString *_label;

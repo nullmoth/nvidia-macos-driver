@@ -2238,20 +2238,6 @@ static uint32_t nvmtl_tex_attach_vkfmt(NVMTLTexture *t, int *a8) {
 // MTLTextureViewDescriptor. The descriptor is read by key because the plugin is built for macOS 15, where the class does
 // not exist. A field left at zero means "as the texture is": no pixel format keeps the texture's, an empty level or slice
 // range covers every level or slice, and an all-zero swizzle is the identity.
-- (id<MTLTexture>)newTextureViewWithDescriptor:(id)d {
-    if (!d) return nil;
-    MTLPixelFormat f = [[d valueForKey:@"pixelFormat"] unsignedIntegerValue];
-    MTLTextureType tt = (MTLTextureType)[[d valueForKey:@"textureType"] unsignedIntegerValue];
-    NSRange levels = [[d valueForKey:@"levelRange"] rangeValue], slices = [[d valueForKey:@"sliceRange"] rangeValue];
-    MTLTextureSwizzleChannels sw = { 0, 0, 0, 0 };
-    { id v = [d valueForKey:@"swizzle"];
-      if ([v isKindOfClass:[NSValue class]] && !strcmp([(NSValue *)v objCType], @encode(MTLTextureSwizzleChannels))) { if (@available(macOS 10.13, *)) [(NSValue *)v getValue:&sw size:sizeof sw]; else [(NSValue *)v getValue:&sw]; } }
-    if (f == MTLPixelFormatInvalid) f = self.pixelFormat;
-    if (!levels.length) levels = NSMakeRange(0, self.mipmapLevelCount);
-    if (!slices.length) slices = NSMakeRange(0, self.textureType == MTLTextureTypeCube ? 6 : self.textureType == MTLTextureTypeCubeArray ? self.arrayLength * 6 : self.arrayLength);
-    if (!sw.red && !sw.green && !sw.blue && !sw.alpha) sw = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha);
-    return [self newTextureViewWithPixelFormat:f textureType:tt levels:levels slices:slices swizzle:sw];
-}
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)f textureType:(MTLTextureType)tt
                                          levels:(NSRange)levels slices:(NSRange)slices
                                         swizzle:(MTLTextureSwizzleChannels)sw {
@@ -5010,10 +4996,6 @@ static NVMTLBuffer *nvmtl_icb_scratch(uint32_t slots) {
 // macOS 26: a logical-to-physical colour attachment map. Measured on Apple GPUs, a Metal 3 encoder accepts it and nothing
 // changes, because a Metal 3 render pipeline always uses the identity mapping (only Metal 4 pipelines inherit the map).
 // Without the method the call is an unrecognized selector and the app stops.
-- (void)setColorAttachmentMap:(id)map {
-    static int said;
-    if (map && !said++) nvlog("render encoder setColorAttachmentMap: a Metal 3 pipeline uses the identity mapping, so the map has no effect, as on Apple GPUs (said once)");
-}
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)type indexCount:(NSUInteger)count indexType:(MTLIndexType)it
                   indexBuffer:(id<MTLBuffer>)ib indexBufferOffset:(NSUInteger)off
                 instanceCount:(NSUInteger)instances baseVertex:(NSInteger)baseVertex baseInstance:(NSUInteger)baseInstance {

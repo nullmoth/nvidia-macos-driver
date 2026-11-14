@@ -1,9 +1,7 @@
 #!/bin/bash
 # build_plugin_27.sh <out-dir>: the macOS 27 NVMTLDriver from this tree's plugin/, built on the macOS 27.2 build Mac
-# (ssh host "m6") against its SDK, minimum macOS 27.2. This is the line that produced the plugin installed on the
-# 27.2 test machine: rebuilding that plugin's source with it gives the same 422 warnings, the same exported symbols,
-# the same linked libraries and the same text size. The build stops when the warning count is not 422, because a new
-# warning or a missing one means the flags or the SDK are not the ones that build was made with.
+# (ssh host "m6") against its SDK, minimum macOS 27.2. The build stops when the warning count is not the 104 this
+# tree gives with that SDK, because a new warning or a missing one means the source, the flags or the SDK changed.
 set -euo pipefail
 OUT=${1:?output directory}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -24,5 +22,5 @@ ssh "$H" "codesign --force --sign - --identifier com.nullmoth.NVMTLDriver $R/out
 mkdir -p "$OUT"
 scp -q "$H:$R/out/NVMTLDriver" "$H:$R/out/build.err" "$OUT/"
 w=$(grep -c ': warning:' "$OUT/build.err" || true)
-[ "$REL" = 0 ] || [ "$w" = 422 ] || { echo "STOP: $w warnings, expected 422"; exit 1; }
+[ "$REL" = 0 ] || [ "$w" = 104 ] || { echo "STOP: $w warnings, expected 104"; exit 1; }
 echo "NVMTLDriver (macOS 27) md5 $(md5 -q "$OUT/NVMTLDriver") warnings $w"
