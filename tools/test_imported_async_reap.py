@@ -3,6 +3,7 @@
 
 Compiles the production async reaper, buffer-grace, and nvmtl_vk_buffer_destroy_body straight from plugin/nvmtl_vk.c
 and plugin/nvmtl_vk.h, and checks:
+  0. With no opt-in, an imported buffer is freed on the caller's thread after its fence.
   1. An imported buffer freed while a submit is still in flight stays alive in g_bg until g_cmd_finished_seq catches up.
   2. Once grace completes, an imported buffer with sync_free == 0 is destroyed on the serial background queue, not the
      caller's thread.
@@ -10,6 +11,7 @@ and plugin/nvmtl_vk.h, and checks:
      before nvmtl_vk_buffer_destroy returns.
   4. A non-imported mapped buffer (!imported && map != NULL) is never offloaded and runs pvkUnmapMemory synchronously.
   5. Flooding > NVMTL_IREAP_CAP buffers hits bounded backpressure (sync fallback) and leaves zero leaked bytes/handles."""
+import os
 import pathlib
 import re
 import subprocess
@@ -132,8 +134,21 @@ static nvk_buffer make_buf(uintptr_t tag, size_t sz, int imported, int sync_free
     return b;
 }}
 
-int main(void) {{
+int main(int argc, char **argv) {{
     const uint64_t main_tid = cur_tid();
+    if (argc == 2 && !strcmp(argv[1], "sync")) {{
+        atomic_store(&g_cmd_submitted, 1);
+        nvk_buffer imported = make_buf(1, 65536, 1, 0);
+        nvmtl_vk_buffer_destroy(&imported);
+        if (atomic_load(&g_free_mem_n) != 0 || g_bg.ncool != 1) return 1;
+        __atomic_store_n(&g_cmd_finished_seq, 1, __ATOMIC_RELEASE);
+        nvmtl_buffer_grace_reap();
+        return !(atomic_load(&g_free_mem_n) == 1 && atomic_load(&g_last_free_tid) == main_tid &&
+                 atomic_load(&g_ireap_queued) == 0 && g_alloc_bytes == 0 && g_bg.ncool == 0);
+    }}
+
+    const nvk_buffer surface_alias = {{ .buf = (void *)1, .mem = (void *)2, .imported = 1 }};
+    if (nvmtl_imported_reap_enqueue(&surface_alias)) return 2;
 
     /* 1. In-flight submit holds an imported buffer in g_bg until g_cmd_finished_seq catches up. */
     atomic_store(&g_cmd_submitted, 5);
@@ -215,7 +230,15 @@ with tempfile.TemporaryDirectory(prefix='nvmtl-ireap-') as d:
                        capture_output=True, text=True)
     check('production imported reaper + buffer grace + atexit slice compiles cleanly (minos 15.0)', r.returncode == 0, r.stderr[-800:])
     if r.returncode == 0:
-        out = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
+        env = {k: v for k, v in os.environ.items() if k not in ('NVMTL_SYNC_IMPORT_FREE', 'NVMTL_BUFFER_GRACE')}
+        for setting in (None, '1'):
+            if setting is not None:
+                env['NVMTL_SYNC_IMPORT_FREE'] = setting
+            sync = subprocess.run([str(exe), 'sync'], env=env, capture_output=True, text=True, timeout=30)
+            check(f'imported memory frees synchronously after grace with NVMTL_SYNC_IMPORT_FREE={setting or "unset"}',
+                  sync.returncode == 0, sync.stderr[-400:])
+        env['NVMTL_SYNC_IMPORT_FREE'] = '0'
+        out = subprocess.run([str(exe)], env=env, capture_output=True, text=True, timeout=30)
         check('harness exited 0', out.returncode == 0, out.stderr[-400:])
         if out.returncode == 0:
             vals = list(map(int, out.stdout.split()))
