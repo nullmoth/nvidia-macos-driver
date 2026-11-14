@@ -49,6 +49,28 @@ fn apply_rsc(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::pas
     o
 }
 
+// Tile shading (see metal2vulkan::tile_mode). The driver says once what the device is, and per translation whether the
+// function is a tile function. A module that names an imageblock gets the layout whose imageblock planes sit inside the
+// driver's storage-image band; every other module keeps the default layout, so nothing else changes.
+#[no_mangle]
+pub extern "C" fn nvmtl_translate_set_tile_defaults(flags: u32) { metal2vulkan::tile_mode::set_defaults(flags); }
+#[no_mangle]
+pub extern "C" fn nvmtl_translate_set_tile_flags(flags: u32) { metal2vulkan::tile_mode::set_flags(flags); }
+/// Byte offsets of the threadgroup arguments within the tile's memory (tile_mode::PERSISTENT_TG); index = Metal index.
+#[no_mangle]
+pub extern "C" fn nvmtl_translate_set_tile_tg_offsets(offsets: *const u32, count: u32) {
+    let n = if offsets.is_null() { 0 } else { (count as usize).min(32) };
+    let list: Vec<u32> = (0..n).map(|i| unsafe { *offsets.add(i) }).collect();
+    metal2vulkan::tile_mode::set_tg_offsets(&list);
+}
+fn apply_tile(mut o: metal2vulkan::passes::TransformOptions, ll: &str) -> metal2vulkan::passes::TransformOptions {
+    use metal2vulkan::tile_mode as tile;
+    if tile::has(tile::BAND) && tile::mentions_imageblock(ll) {
+        o.descriptor_layout = tile::band_layout(o.descriptor_layout);
+    }
+    o
+}
+
 fn apply_tg(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::passes::TransformOptions {
     o = apply_rsc(o);
     // Bit 2 is an explicit guarantee from the plugin: no rate map can be created or bound.
@@ -83,6 +105,8 @@ fn formatless_options(ll: &str, st: Stage, caps: u32) -> Option<metal2vulkan::pa
 fn translate_one(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
     // one parse per distinct text for the whole translation, its retries included
     metal2vulkan::with_parse_cache(|| translate_with_pointer_retry(ll, |ll| translate_one_as_written(ll, st)))
+        // NVK refuses an access wider than its declared alignment, so every translation ends with this split
+        .map(|spv| metal2vulkan::psb_align_split::split_underaligned_physical_vector_accesses(&spv))
 }
 
 // Keep the same translation options on both attempts. In particular, the
@@ -157,12 +181,59 @@ fn translate_with_pointer_retry(
 fn translate_one_as_written(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
     let caps = CAPS.load(Ordering::Relaxed);
     if let Some(o) = if caps != 0 { formatless_options(ll, st, caps) } else { None } {
-        match metal2vulkan::translate_native_no_retry_constructed_with_options(ll, st, apply_tg(o)) {
+        match metal2vulkan::translate_native_no_retry_constructed_with_options(ll, st, apply_tile(apply_tg(o), ll)) {
             Ok(v) => return Ok(v),
             Err(e) => eprintln!("nvmtl_translate: formatless storage images refused, falling back: {e}"),
         }
     }
-    metal2vulkan::translate_native_no_retry_constructed_with_options(ll, st, apply_tg(metal2vulkan::passes::TransformOptions::default()))
+    metal2vulkan::translate_native_no_retry_constructed_with_options(ll, st, apply_tile(apply_tg(metal2vulkan::passes::TransformOptions::default()), ll))
+}
+
+/// AIR address space 8 is the MSL 4.1 generic space. Resolve it to the one concrete space its values come from.
+///
+/// macOS 27's MetalPerformanceShaders is compiled as MSL 4.1: the data pointer of `metal::array_ref` and the `this` of
+/// its helpers are generic. Apple's compiler resolves them statically (infer-address-spaces) before codegen. In the 27.2
+/// MPS libraries every value enters space 8 through `addrspacecast ptr %x to ptr addrspace(8)` from space 0 - the
+/// kernel's array_ref<void> argument (the address table) or a thread-local array (topk's table of buffer pointers) -
+/// and none leaves it. When that holds, every space-8 value is a space-0 value, so the module is read with space 8
+/// spelled as space 0 and the casts become no-ops.
+///
+/// Anything else - a cast into space 8 from another space, or a cast out of it - would need runtime address-space
+/// dispatch. The text is then left as it is, and the emitter refuses the unresolved generic pointer by name.
+fn unify_device_space(ll: &str) -> std::borrow::Cow<'_, str> {
+    if !ll.contains("addrspace(8)") {
+        return std::borrow::Cow::Borrowed(ll);
+    }
+    if generic_space_roots_are_all_space_0(ll).is_err() {
+        return std::borrow::Cow::Borrowed(ll);
+    }
+    std::borrow::Cow::Owned(ll.replace("ptr addrspace(8)", "ptr"))
+}
+
+/// Every cast into space 8 starts from a space-0 pointer, no cast leaves space 8, and space 8 appears only as the
+/// pointer type `ptr addrspace(8)`. The error names the first violation.
+fn generic_space_roots_are_all_space_0(ll: &str) -> Result<(), String> {
+    for line in ll.lines() {
+        let mut rest = line;
+        while let Some(p) = rest.find("addrspacecast") {
+            let tail = &rest[p + "addrspacecast".len()..];
+            let tail = tail.trim_start().trim_start_matches('(').trim_start();
+            if tail.starts_with("ptr addrspace(8)") {
+                return Err(format!("a cast leaves the generic space: {}", line.trim()));
+            }
+            if let Some(to) = tail.find(" to ") {
+                let (from, dest) = (&tail[..to], &tail[to + 4..]);
+                if dest.starts_with("ptr addrspace(8)") && from.starts_with("ptr addrspace(") {
+                    return Err(format!("a cast into the generic space starts outside space 0: {}", line.trim()));
+                }
+            }
+            rest = &tail[tail.len().min(1)..];
+        }
+    }
+    if ll.replace("ptr addrspace(8)", "").contains("addrspace(8)") {
+        return Err("space 8 appears outside a pointer type".into());
+    }
+    Ok(())
 }
 
 #[no_mangle]
@@ -180,6 +251,8 @@ pub extern "C" fn nvmtl_translate(
     };
     if ll.is_null() || stage.is_null() || out.is_null() || out_len.is_null() { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let st = match unsafe { CStr::from_ptr(stage) }.to_str() {
         Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
         _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
@@ -227,6 +300,8 @@ pub extern "C" fn nvmtl_visible_refs(
     };
     if ll.is_null() || out.is_null() || out_len.is_null() { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let syms = match metal2vulkan::linked_functions::visible_function_reference_symbols(ll) {
         Ok(v) => v, Err(e) => { set_err(&e); return -1; }
     };
@@ -254,6 +329,8 @@ pub extern "C" fn nvmtl_link_visible(
     if ll.is_null() || stage.is_null() || out.is_null() || out_len.is_null() { return -1; }
     if n > 0 && (syms.is_null() || mods.is_null()) { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let st = match unsafe { CStr::from_ptr(stage) }.to_str() {
         Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
         _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
@@ -291,6 +368,8 @@ pub extern "C" fn nvmtl_link_externs(
     };
     if ll.is_null() || out.is_null() || out_len.is_null() || (n > 0 && mods.is_null()) { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let mut modules = Vec::with_capacity(n);
     for i in 0..n {
         let mp = unsafe { *mods.add(i) };
@@ -323,6 +402,8 @@ pub extern "C" fn nvmtl_lower_mesh(
     };
     if ll.is_null() || entry.is_null() || out_k.is_null() || out_k_len.is_null() || out_v.is_null() || out_v_len.is_null() || layout.is_null() { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let entry = match unsafe { CStr::from_ptr(entry) }.to_str() { Ok(s) => s, Err(_) => { set_err("entry is not utf-8"); return -1; } };
     let m = match metal2vulkan::mesh_lower::lower_mesh(ll, entry) { Ok(m) => m, Err(e) => { set_err(&e); return -1; } };
     let give = |text: String, o: *mut *mut u8, ol: *mut usize| {
@@ -419,6 +500,8 @@ pub extern "C" fn nvmtl_link_runtime(
     if ll.is_null() || stage.is_null() || out.is_null() || out_len.is_null() { return -1; }
     if (nref > 0 && (refs.is_null() || ref_mods.is_null())) || (ncand > 0 && (cands.is_null() || cand_mods.is_null())) { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let st = match unsafe { CStr::from_ptr(stage) }.to_str() {
         Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
         _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
@@ -469,6 +552,8 @@ pub extern "C" fn nvmtl_translate_fc(
     if ll.is_null() || stage.is_null() || out.is_null() || out_len.is_null() { return -1; }
     if n > 0 && (indices.is_null() || sizes.is_null() || payloads.is_null()) { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let st = match unsafe { CStr::from_ptr(stage) }.to_str() {
         Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
         _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
@@ -527,11 +612,13 @@ pub extern "C" fn nvmtl_reflect(
     };
     if ll.is_null() || stage.is_null() || out.is_null() || out_len.is_null() { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let st = match unsafe { CStr::from_ptr(stage) }.to_str() {
         Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
         _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
     };
-    let refl = match metal2vulkan::reflect_sanitized(ll, st, metal2vulkan::passes::TransformOptions::default()) {
+    let refl = match metal2vulkan::reflect_sanitized(ll, st, apply_tile(metal2vulkan::passes::TransformOptions::default(), ll)) {
         Ok(r) => r,
         Err(e) => { set_err(&e); return -1; }
     };
@@ -560,6 +647,8 @@ pub extern "C" fn nvmtl_reflect_fc(
     if ll.is_null() || stage.is_null() || out.is_null() || out_len.is_null() { return -1; }
     if n > 0 && (indices.is_null() || sizes.is_null() || payloads.is_null()) { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let st = match unsafe { CStr::from_ptr(stage) }.to_str() {
         Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
         _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
@@ -576,7 +665,7 @@ pub extern "C" fn nvmtl_reflect_fc(
         Ok(v) => v,
         Err(e) => { set_err(&format!("AIR specialization: {e}")); return -1; }
     };
-    let refl = match metal2vulkan::reflect_sanitized(specialized.as_ref(), st, metal2vulkan::passes::TransformOptions::default()) {
+    let refl = match metal2vulkan::reflect_sanitized(specialized.as_ref(), st, apply_tile(metal2vulkan::passes::TransformOptions::default(), specialized.as_ref())) {
         Ok(r) => r,
         Err(e) => { set_err(&e); return -1; }
     };
@@ -768,7 +857,7 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
             }
         }
         if used==0 && a8==0{return translate_one(ll,st)}
-        let opts=apply_tg(opts);
+        let opts=apply_tile(apply_tg(opts),ll);
         translate_with_pointer_retry(ll, |ll| {
             metal2vulkan::translate_native_no_retry_constructed_with_options(ll,st,opts)
         })
@@ -914,5 +1003,103 @@ declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr a
         assert_eq!(workgroup_array_elements_after_sampler_translation(None), 512, "no length: the default");
         assert_eq!(workgroup_array_elements_after_sampler_translation(Some(16384)), 1024, "16384 bytes of float4");
         assert_eq!(workgroup_array_elements_after_sampler_translation(Some(4096)), 256, "4096 bytes of float4");
+    }
+}
+
+#[cfg(test)]
+mod unified_space_tests {
+    use super::*;
+
+    const HEADER: &str = r#"target triple = "spirv-unknown-vulkan1.2"
+%ArrayRef = type { ptr addrspace(8), i64 }
+%State = type { %ArrayRef }
+@next_buffer = internal addrspace(2) global i32 5
+"#;
+
+    // Result ids of every OpStore whose value is an OpConstantNull, read straight from the SPIR-V words.
+    fn null_stores(spv: &[u8]) -> usize {
+        let w: Vec<u32> = spv.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let (mut nulls, mut stores) = (std::collections::HashSet::new(), Vec::new());
+        let mut i = 5;
+        while i < w.len() {
+            let (count, op) = ((w[i] >> 16) as usize, w[i] & 0xffff);
+            if count == 0 { break; }
+            if op == 46 { nulls.insert(w[i + 2]); }
+            if op == 62 { stores.push(w[i + 2]); }
+            i += count;
+        }
+        stores.iter().filter(|v| nulls.contains(v)).count()
+    }
+
+    #[test]
+    fn space_8_pointers_read_as_generic() {
+        let text = "%t = addrspacecast ptr %b to ptr addrspace(8)\n  %e = getelementptr ptr addrspace(1), ptr addrspace(8) %t, i64 4";
+        let out = unify_device_space(text);
+        assert_eq!(out, "%t = addrspacecast ptr %b to ptr\n  %e = getelementptr ptr addrspace(1), ptr %t, i64 4");
+        assert!(matches!(unify_device_space("no unified space"), std::borrow::Cow::Borrowed(_)));
+        // a device pointer cast into the generic space has no single space-0 reading: left for the emitter to refuse
+        let mixed = "%t = addrspacecast ptr addrspace(1) %b to ptr addrspace(8)";
+        assert!(matches!(unify_device_space(mixed), std::borrow::Cow::Borrowed(_)));
+        assert!(generic_space_roots_are_all_space_0("%u = addrspacecast ptr addrspace(8) %t to ptr addrspace(1)").is_err());
+    }
+
+    // MPS's array_ref<void> argument cast into space 8 and stored into its array_ref must keep the table address.
+    #[test]
+    fn a_buffer_array_argument_cast_to_space_8_keeps_its_table_address() {
+        let ll = format!("{HEADER}{}", r#"
+define void @k(ptr %buffers) {
+entry:
+  %t = addrspacecast ptr %buffers to ptr addrspace(8)
+  %state = alloca %State, align 8
+  %f = getelementptr inbounds %State, ptr %state, i64 0, i32 0, i32 0
+  store ptr addrspace(8) %t, ptr %f, align 8
+  %loaded = load ptr addrspace(8), ptr %f, align 8
+  %slot = getelementptr inbounds ptr addrspace(1), ptr addrspace(8) %loaded, i64 4
+  %dst = load ptr addrspace(1), ptr addrspace(8) %slot, align 8
+  store float 1.0, ptr addrspace(1) %dst, align 4
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, ptr addrspace(2) @next_buffer, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_name", !"array_ref<void>", !"air.arg_name", !"buffers"}
+"#);
+        let spv = translate_one(&unify_device_space(&ll), Stage::Kernel).expect("translate");
+        assert_eq!(null_stores(&spv), 0, "the array_ref took a null base");
+    }
+
+    // topk builds its table in thread memory from three buffer arguments and casts that into space 8. Read as device
+    // memory the cast crossed address spaces and the emitter refused the kernel.
+    #[test]
+    fn a_thread_local_table_cast_to_space_8_translates() {
+        let ll = format!("{HEADER}{}", r#"
+define void @k(ptr addrspace(1) %a, ptr addrspace(1) %b) {
+entry:
+  %table = alloca [2 x ptr addrspace(1)], align 8
+  %t0 = getelementptr inbounds [2 x ptr addrspace(1)], ptr %table, i64 0, i64 0
+  store ptr addrspace(1) %a, ptr %t0, align 8
+  %t1 = getelementptr inbounds [2 x ptr addrspace(1)], ptr %table, i64 0, i64 1
+  store ptr addrspace(1) %b, ptr %t1, align 8
+  %u = addrspacecast ptr %t0 to ptr addrspace(8)
+  %state = alloca %State, align 8
+  %f = getelementptr inbounds %State, ptr %state, i64 0, i32 0, i32 0
+  store ptr addrspace(8) %u, ptr %f, align 8
+  %loaded = load ptr addrspace(8), ptr %f, align 8
+  %slot = getelementptr inbounds ptr addrspace(1), ptr addrspace(8) %loaded, i64 1
+  %dst = load ptr addrspace(1), ptr addrspace(8) %slot, align 8
+  store float 1.0, ptr addrspace(1) %dst, align 4
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3, !4}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"float", !"air.arg_name", !"a"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"float", !"air.arg_name", !"b"}
+"#);
+        translate_one(&unify_device_space(&ll), Stage::Kernel).expect("translate");
     }
 }

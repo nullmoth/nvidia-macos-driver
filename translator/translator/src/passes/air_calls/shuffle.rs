@@ -84,6 +84,27 @@ pub(in crate::passes) fn lower_quad_shuffle_rotate_down(
     result_type: Word,
     args: &[Word],
 ) -> Result<Vec<Instruction>, String> {
+    lower_quad_shuffle_rotate(ctx, result, result_type, args, false)
+}
+
+pub(in crate::passes) fn lower_quad_shuffle_rotate_up(
+    ctx: &mut Ctx,
+    result: Word,
+    result_type: Word,
+    args: &[Word],
+) -> Result<Vec<Instruction>, String> {
+    lower_quad_shuffle_rotate(ctx, result, result_type, args, true)
+}
+
+// Rotating up by d reads the lane d below, wrapping within the group: (lane - d) mod size, which the mask after the
+// subtraction gives for any d because the group size is a power of two.
+fn lower_quad_shuffle_rotate(
+    ctx: &mut Ctx,
+    result: Word,
+    result_type: Word,
+    args: &[Word],
+    up: bool,
+) -> Result<Vec<Instruction>, String> {
     let scope = ctx.const_uint(Scope::Subgroup as u32);
     let mut insts = Vec::new();
     let delta = subgroup_shuffle_index_u32(ctx, args[1], &mut insts)?;
@@ -111,7 +132,7 @@ pub(in crate::passes) fn lower_quad_shuffle_rotate_down(
     ));
     let local_plus_delta = ctx.module.fresh_id();
     insts.push(Instruction::new(
-        Op::IAdd,
+        if up { Op::ISub } else { Op::IAdd },
         Some(uint),
         Some(local_plus_delta),
         vec![Operand::IdRef(local), Operand::IdRef(delta)],
@@ -152,6 +173,27 @@ pub(in crate::passes) fn lower_simd_shuffle_rotate_down(
     result_type: Word,
     args: &[Word],
 ) -> Result<Vec<Instruction>, String> {
+    lower_simd_shuffle_rotate(ctx, result, result_type, args, false)
+}
+
+pub(in crate::passes) fn lower_simd_shuffle_rotate_up(
+    ctx: &mut Ctx,
+    result: Word,
+    result_type: Word,
+    args: &[Word],
+) -> Result<Vec<Instruction>, String> {
+    lower_simd_shuffle_rotate(ctx, result, result_type, args, true)
+}
+
+// Rotating up by d reads the lane d below, wrapping within the group: (lane - d) mod size, which the mask after the
+// subtraction gives for any d because the group size is a power of two.
+fn lower_simd_shuffle_rotate(
+    ctx: &mut Ctx,
+    result: Word,
+    result_type: Word,
+    args: &[Word],
+    up: bool,
+) -> Result<Vec<Instruction>, String> {
     let scope = ctx.const_uint(Scope::Subgroup as u32);
     let mut insts = Vec::new();
     let delta = subgroup_shuffle_index_u32(ctx, args[1], &mut insts)?;
@@ -161,7 +203,7 @@ pub(in crate::passes) fn lower_simd_shuffle_rotate_down(
     let simd_base = metal_simd_lane_base_u32(ctx, subgroup_lane, simd_lane, &mut insts);
     let local_plus_delta = ctx.module.fresh_id();
     insts.push(Instruction::new(
-        Op::IAdd,
+        if up { Op::ISub } else { Op::IAdd },
         Some(uint),
         Some(local_plus_delta),
         vec![Operand::IdRef(simd_lane), Operand::IdRef(delta)],

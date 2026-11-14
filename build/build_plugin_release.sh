@@ -10,7 +10,8 @@ REV=${1:?git revision}; OUT=${2:?output directory}
 H=${NULLMOTH_BUILD_HOST:?set NULLMOTH_BUILD_HOST to the build Mac ssh host}
 BASE=${NULLMOTH_BUILD_ROOT:?set NULLMOTH_BUILD_ROOT to the build folder on that Mac}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-R=$BASE/build/plugin-release
+# Parallel builds (one per branch) pass their own directory so they do not wipe each other.
+R=${NVMTL_BUILD_DIR:-$BASE/build/plugin-release}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 git -C "$HERE" archive "$REV" plugin | tar x -C "$TMP"

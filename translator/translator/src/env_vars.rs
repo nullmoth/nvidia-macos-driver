@@ -9,6 +9,8 @@ pub struct EnvVar {
 pub const REGISTRY: &[EnvVar] = &[
     EnvVar { name: "METAL2VULKAN_OWNED_DUMP", default: "unset", effect: "path to dump an owned SPIR-V contract failure (debug)" },
     EnvVar { name: "METAL2VULKAN_RQ_DEBUG", default: "off", effect: "trace ray-query call lowering (debug)" },
+    EnvVar { name: "METAL2VULKAN_TILE_TG_OFFSETS", default: "unset", effect: "with METAL2VULKAN_TILE bit 8: the byte offset of each threadgroup argument inside the tile's memory, comma separated by argument index" },
+    EnvVar { name: "METAL2VULKAN_TILE", default: "unset", effect: "translate as a tile-shading driver does: bits of tile_mode (1 planes in the storage band, 2 no pixel interlock, 4 tile function, 8 persistent tile memory)" },
 
     EnvVar {
         name: "METAL2VULKAN_VAL_PAR",

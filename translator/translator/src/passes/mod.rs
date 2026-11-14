@@ -217,6 +217,13 @@ fn fragment_imageblock_format(type_name: &str) -> Option<FragmentImageblockForma
         "half4" => (ImageFormat::Rgba16f, ImageComp::Float, 16, 4),
         "uchar4" => (ImageFormat::Rgba8ui, ImageComp::Uint, 8, 4),
         "ushort" => (ImageFormat::R16ui, ImageComp::Uint, 16, 1),
+        "uchar" => (ImageFormat::R8ui, ImageComp::Uint, 8, 1),
+        "float" => (ImageFormat::R32f, ImageComp::Float, 32, 1),
+        "float4" => (ImageFormat::Rgba32f, ImageComp::Float, 32, 4),
+        "uint" => (ImageFormat::R32ui, ImageComp::Uint, 32, 1),
+        "uint4" => (ImageFormat::Rgba32ui, ImageComp::Uint, 32, 4),
+        "int" => (ImageFormat::R32i, ImageComp::Sint, 32, 1),
+        "int4" => (ImageFormat::Rgba32i, ImageComp::Sint, 32, 4),
         _ => return None,
     };
     Some(FragmentImageblockFormat {
@@ -363,6 +370,7 @@ struct Ctx {
     fragment_imageblock_vars: HashMap<u32, (Word, Word)>,
     fragment_sample_positions_var: Option<Word>,
     uses_fragment_imageblock: bool,
+    tile_tg_vars: Vec<air_calls::tile_tg::TileTgVar>,
     fragment_imageblock_coord_var: Option<Word>,
     writes_frag_depth: bool,
 }
@@ -457,6 +465,7 @@ impl Ctx {
             fragment_imageblock_vars: HashMap::default(),
             fragment_sample_positions_var: None,
             uses_fragment_imageblock: false,
+            tile_tg_vars: Vec::new(),
             fragment_imageblock_coord_var: None,
             writes_frag_depth: false,
         }
@@ -1468,6 +1477,8 @@ impl Ctx {
 mod access;
 mod air_calls;
 mod aliased_imageblock;
+mod tile_explicit;
+mod tile_origin;
 mod emitted_inline;
 mod finalize;
 mod latch_trampoline;
@@ -3013,6 +3024,10 @@ pub(crate) fn transform_with_options_and_sidecar(
     resources::route_texture_array_elements_through_heap(&mut ctx, entry_idx);
     ctx.emit_sidecar.local_pointer_field_stores.clear();
     ctx.emit_sidecar.aggregate_pointer_values.clear();
+    if matches!(stage, Stage::Kernel) {
+        // a tile function's threadgroup memory outlives the dispatch
+        air_calls::tile_tg::lower_tile_memory(&mut ctx, entry_idx)?;
+    }
     finalize(&mut ctx, entry_idx, &stage, frag, vert)?;
     for function_idx in 0..ctx.module.functions.len() {
         drop_overindexed_zero_tail(&mut ctx, function_idx);

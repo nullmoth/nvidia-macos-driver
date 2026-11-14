@@ -2205,6 +2205,7 @@ mod tests {
             ],
             byval_param_pointees: vec![None; 3],
             is_static_initializer: false,
+            is_internal: false,
             blocks: Vec::new(),
             loop_controls: HashMap::default(),
         };
@@ -2217,6 +2218,7 @@ mod tests {
             params: vec![("%named".to_string(), LlType::Int(32))],
             byval_param_pointees: vec![None],
             is_static_initializer: false,
+            is_internal: false,
             blocks: Vec::new(),
             loop_controls: HashMap::default(),
         };

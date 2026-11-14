@@ -108,7 +108,8 @@ impl Ctx {
                     "implicit imageblock attachment {attachment} rate {data_rate} exceeds the descriptor ABI band"
                 )
             })?;
-        let image_ty = self.ty_storage_image(Dim::Dim2D, true, format, comp);
+        let arrayed = !crate::tile_mode::has(crate::tile_mode::BAND);
+        let image_ty = self.ty_storage_image(Dim::Dim2D, arrayed, format, comp);
         let var = self.descriptor_variable(image_ty, binding);
         self.implicit_imageblock_vars
             .insert((attachment, data_rate), (var, image_ty, format));

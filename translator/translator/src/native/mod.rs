@@ -1,4 +1,9 @@
+mod air_atomic_v29;
+mod air_atomic_wait;
+mod air_tensor;
+pub(crate) mod air_curves;
 mod air_text;
+mod sampler_array_index;
 mod async_copy;
 mod cfg;
 #[cfg(test)]
@@ -42,6 +47,39 @@ use crate::spirv_module::Instruction;
 use crate::spirv_module::Module;
 use crate::spirv_module::Operand;
 pub(crate) fn lower_air_text(san_ll: &str) -> std::borrow::Cow<'_, str> {
+    // AIR 2.9 atomics carry one more operand than every earlier version; put them in the older spelling first
+    let atomics = air_atomic_v29::lower_air29_atomics(san_ll);
+    // then a runtime-indexed sampler array becomes one sample per element
+    match sampler_array_index::lower_dynamic_sampler_arrays(&atomics) {
+        std::borrow::Cow::Borrowed(_) => match atomics {
+            std::borrow::Cow::Borrowed(borrowed) => lower_air_text_after_v29(borrowed),
+            std::borrow::Cow::Owned(owned) => std::borrow::Cow::Owned(lower_air_text_after_v29(&owned).into_owned()),
+        },
+        std::borrow::Cow::Owned(owned) => std::borrow::Cow::Owned(lower_air_text_after_v29(&owned).into_owned()),
+    }
+}
+
+fn lower_air_text_after_v29(san_ll: &str) -> std::borrow::Cow<'_, str> {
+    // Metal 4 tensors next: they turn the tensor handle into plain device memory the later passes already understand
+    match air_tensor::lower_tensors(san_ll) {
+        std::borrow::Cow::Borrowed(borrowed) => lower_air_text_after_tensors_curves(borrowed),
+        std::borrow::Cow::Owned(owned) => {
+            std::borrow::Cow::Owned(lower_air_text_after_tensors_curves(&owned).into_owned())
+        }
+    }
+}
+
+fn lower_air_text_after_tensors_curves(san_ll: &str) -> std::borrow::Cow<'_, str> {
+    // ray-traced curves become an intersection query over the boxes the driver builds for them
+    match air_curves::lower_curve_intersections(san_ll) {
+        std::borrow::Cow::Borrowed(borrowed) => lower_air_text_after_tensors(borrowed),
+        std::borrow::Cow::Owned(owned) => {
+            std::borrow::Cow::Owned(lower_air_text_after_tensors(&owned).into_owned())
+        }
+    }
+}
+
+fn lower_air_text_after_tensors(san_ll: &str) -> std::borrow::Cow<'_, str> {
     // first: older toolchains write a constexpr sampler as an integer in the call, which reflection and the sampler pass
     // only know in the metadata form
     match inline_sampler::lower_inline_sampler_constants(san_ll) {
@@ -100,6 +138,22 @@ fn lower_air_text_rest(san_ll: &str) -> std::borrow::Cow<'_, str> {
 }
 
 pub(crate) fn lower_air_text_owned(san_ll: String) -> String {
+    let san_ll = match air_atomic_v29::lower_air29_atomics(&san_ll) {
+        std::borrow::Cow::Borrowed(_) => san_ll,
+        std::borrow::Cow::Owned(lowered) => lowered,
+    };
+    let san_ll = match sampler_array_index::lower_dynamic_sampler_arrays(&san_ll) {
+        std::borrow::Cow::Borrowed(_) => san_ll,
+        std::borrow::Cow::Owned(lowered) => lowered,
+    };
+    let san_ll = match air_tensor::lower_tensors(&san_ll) {
+        std::borrow::Cow::Borrowed(_) => san_ll,
+        std::borrow::Cow::Owned(lowered) => lowered,
+    };
+    let san_ll = match air_curves::lower_curve_intersections(&san_ll) {
+        std::borrow::Cow::Borrowed(_) => san_ll,
+        std::borrow::Cow::Owned(lowered) => lowered,
+    };
     let san_ll = match inline_sampler::lower_inline_sampler_constants(&san_ll) {
         std::borrow::Cow::Borrowed(_) => san_ll,
         std::borrow::Cow::Owned(lowered) => lowered,

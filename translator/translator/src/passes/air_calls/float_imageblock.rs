@@ -31,10 +31,12 @@ pub(in crate::passes) fn lower_implicit_imageblock_load(
         Some(image),
         vec![Operand::IdRef(var)],
     ));
-    ctx.image_dims.insert(image, (Dim::Dim2D, true));
+    let arrayed = !crate::tile_mode::has(crate::tile_mode::BAND);
+    ctx.image_dims.insert(image, (Dim::Dim2D, arrayed));
     ctx.image_comp.insert(image, comp);
     ctx.image_storage.insert(image);
-    let coord = build_fetch_coord(ctx, Dim::Dim2D, true, args[1], Some(args[2]), &mut out)?;
+    let coord = build_fetch_coord(ctx, Dim::Dim2D, arrayed, args[1], Some(args[2]).filter(|_| arrayed), &mut out)?;
+    let coord = tile_local_to_target(ctx, coord, &mut out)?;
     let read_result = if conversion != ImageblockConversion::None || lanes != 4 {
         ctx.module.fresh_id()
     } else {
@@ -127,17 +129,19 @@ pub(in crate::passes) fn lower_implicit_imageblock_store(
         Some(image),
         vec![Operand::IdRef(var)],
     ));
-    ctx.image_dims.insert(image, (Dim::Dim2D, true));
+    let arrayed = !crate::tile_mode::has(crate::tile_mode::BAND);
+    ctx.image_dims.insert(image, (Dim::Dim2D, arrayed));
     ctx.image_comp.insert(image, comp);
     ctx.image_storage.insert(image);
     let coord = build_fetch_coord(
         ctx,
         Dim::Dim2D,
-        true,
+        arrayed,
         abi_args[1],
-        Some(abi_args[2]),
+        Some(abi_args[2]).filter(|_| arrayed),
         &mut out,
     )?;
+    let coord = tile_local_to_target(ctx, coord, &mut out)?;
     let value = if conversion != ImageblockConversion::None {
         let storage_value_ty = if lanes == 1 {
             match conversion {
@@ -217,6 +221,20 @@ pub(in crate::passes) fn lower_implicit_imageblock_store(
     Ok(out)
 }
 
+/// An implicit imageblock coordinate is tile-local. When the plane is the whole render target (a tile function run by a
+/// driver that emulates tile memory), the tile's origin is added. This covers the loads and stores `aliased_imageblock`
+/// stages, whose coordinate is the thread's position in the tile.
+fn tile_local_to_target(
+    ctx: &mut Ctx,
+    coord: Word,
+    out: &mut Vec<Instruction>,
+) -> Result<Word, String> {
+    if !crate::tile_mode::has(crate::tile_mode::TILE_KERNEL) {
+        return Ok(coord);
+    }
+    crate::passes::tile_origin::add_tile_origin(ctx, coord, out)
+}
+
 fn implicit_imageblock_constants(
     ctx: &Ctx,
     name: &str,
@@ -238,7 +256,7 @@ fn implicit_imageblock_format(
 
     let format = crate::meta::implicit_imageblock_texture_format(name)?
         .ok_or_else(|| format!("{name} is not an implicit imageblock intrinsic"))?;
-    let lowered = match format {
+    let mut lowered = match format {
         TextureFormat::R16f => {
             require_storage_image_extended_formats(ctx);
             (
@@ -295,6 +313,12 @@ fn implicit_imageblock_format(
         }
         _ => return Err(format!("{name} has unsupported implicit imageblock format")),
     };
+    // A tile driver binds the render pass's own attachments as the planes, in whatever format each has (rgba8, rgb10a2,
+    // bgra8, ...); the shader's data type only says how the value is read and written, so the plane has no format of
+    // its own and the hardware converts. The conversion to half or float above stays: it is of the value, not the texel.
+    if crate::tile_mode::has(crate::tile_mode::BAND) {
+        lowered.0 = ImageFormat::Unknown;
+    }
     Ok(lowered)
 }
 

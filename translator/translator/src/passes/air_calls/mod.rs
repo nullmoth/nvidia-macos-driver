@@ -30,6 +30,7 @@ mod ray_query;
 pub(in crate::passes) use ray_query::*;
 mod agx_emask;
 mod block_split;
+pub(in crate::passes) mod tile_tg;
 mod imageblock_block_copy;
 pub(in crate::passes) use agx_emask::*;
 pub(in crate::passes) use imageblock_block_copy::*;

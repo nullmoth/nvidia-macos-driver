@@ -21,6 +21,7 @@ static inline NSMutableData *nvmtl_fc_storage(NSUInteger count) {
     void *_hostPtr; size_t _hostLen; id _hostDealloc;
     NVMTLHeap *_subHeap; NSUInteger _subCharge; BOOL _aliased;
     nvk_buffer _shadow; int _syncOut; int _zshadow;
+    uint8_t _gpuMayWrite;   /* a compute pass bound it or a blit copied into it: its GPU side can be the newer one */
     NSUInteger _dirtyLo, _dirtyHi; } @end
 #include <sched.h>
 static inline void nvmtl_buf_settle(NVMTLBuffer *b) {
@@ -63,6 +64,15 @@ static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return 
   NSDictionary *_refl; NSDictionary *_airNames; NSArray *_arguments;
   id _lib; id _fcv; NSString *_specName; BOOL _needsLink; } @end
 NSDictionary *nvmtl_function_reflection(NVMTLFunction *function);
+BOOL nvmtl4_texture_refused_sparse(MTLTextureDescriptor *d, const char *who);   // NVMTL4Extras.m
+// NVMTLSparseTex.m
+BOOL nvmtl4_texture_has_sparse_state(id t);
+BOOL nvmtl4_texture_is_placement_sparse(MTLTextureDescriptor *d);
+id nvmtl4_new_placement_sparse_texture(id<MTLDevice> dev, MTLTextureDescriptor *d);
+id nvmtl4_new_sparse_heap_texture(NVMTLHeap *heap, MTLTextureDescriptor *d);
+id nvmtl4_new_sparse_heap(NVMTLHeap *h, MTLHeapDescriptor *hd);
+id nvmtl4_new_resource_state_encoder(id cb);
+MTLSize nvmtl4_sparse_tile_size(NSUInteger textureType, NSUInteger pixelFormat, NSUInteger sampleCount, NSInteger pageSize);
 NSDictionary *nvmtl_air_names(NVMTLFunction *function);
 uint64_t nvmtl_resid_for_texture(id t);
 void nvmtl_resid_texture_gone(uint64_t token);
@@ -79,7 +89,7 @@ uint64_t nvmtl_resid_for_sampler(id s);
 @interface NVMTLArgument : NSObject { @public NSString *_name; MTLArgumentType _type; MTLBindingAccess _access; NSUInteger _index; BOOL _active;
   NSUInteger _arrayLength, _bufAlign, _bufSize; MTLDataType _bufDataType; NVMTLStructType *_bufStruct; NVMTLPointerType *_bufPtr;
   MTLTextureType _texType; MTLDataType _texDataType; BOOL _depth; } @end
-@interface NVMTLRenderPipelineReflection : NSObject { @public NSArray *_v, *_f, *_o, *_m; } @end
+@interface NVMTLRenderPipelineReflection : NSObject { @public NSArray *_v, *_f, *_o, *_m, *_t; } @end
 @interface NVMTLComputePipelineReflection : NSObject { @public NSArray *_a; } @end
 NSArray<NVMTLArgument *> *nvmtl_arguments_for_function(NVMTLFunction *fn);
 NVMTLArgument *nvmtl_argument_for_buffer(NVMTLFunction *fn, NSUInteger index);
@@ -139,6 +149,7 @@ extern id gNVMTLMainDevice;
   NSCondition *_completionCondition;
   dispatch_group_t _callbackGroup, _scheduledGroup;
   BOOL _wasScheduled, _executionDone, _completionReady, _scheduleAfterPublish;
+  uint64_t _commitNs;   // CLOCK_UPTIME_RAW at commit, for the completion-latency counters
   NSMutableArray *_signals;
   NSMutableArray *_waits;
 }
@@ -159,7 +170,7 @@ extern id gNVMTLMainDevice;
 @interface NVMTLFence : NSObject <MTLFence> { @public id<MTLDevice> _dev; NSString *_label; } @end
 @interface NVMTLResidencySet : NSObject <MTLResidencySet> { @public id<MTLDevice> _dev; NSString *_label; NSMutableArray *_allocs; } @end
 @interface NVMTLEvent : NSObject <MTLEvent> { @public id<MTLDevice> _dev; NSString *_label; uint64_t _value; NSCondition *_condition; } @end
-@interface NVMTLSharedEvent : NSObject <MTLSharedEvent> { @public id<MTLDevice> _dev; NSString *_label; uint64_t _value; NSCondition *_condition; NSMutableArray *_notifications; } @end
+@interface NVMTLSharedEvent : NSObject <MTLSharedEvent> { @public id<MTLDevice> _dev; NSString *_label; uint64_t _value; NSCondition *_condition; NSMutableArray *_notifications; void *_xp; } @end
 @interface NVMTLHeap : NSObject <MTLHeap> {
   @public id<MTLDevice> _dev; NSUInteger _size; NSUInteger _used;
   MTLStorageMode _storage; MTLCPUCacheMode _cache; NSString *_label;
@@ -201,7 +212,8 @@ extern id gNVMTLMainDevice;
   NSMutableDictionary *_sassTextures, *_sassSamplers;   // by Metal index, for kernels run from machine code
 } @end
 @interface NVMTLBlitCommandEncoder : NSObject <MTLBlitCommandEncoder> { @public NVMTLCommandBuffer *_cb; __weak NVMTLCommandBuffer *_owner; } @end
-@interface NVMTLAccelerationStructure : NVMTLBuffer <MTLAccelerationStructure> { @public nvk_accel _as; nvk_buffer _uid; nvk_buffer _scratch; uint32_t _iftAdd; } @end
+@interface NVMTLAccelerationStructure : NVMTLBuffer <MTLAccelerationStructure> { @public NSUInteger _reqSize; nvk_accel _as; nvk_buffer _uid; nvk_buffer _scratch; uint32_t _iftAdd;
+  size_t _curveWords; /* words of a primitive structure's curve block, at word 2 of _uid (NVMTLCurves.m); 0 = no curves */ } @end
 @interface NVMTLAccelerationStructureCommandEncoder : NSObject <MTLAccelerationStructureCommandEncoder> { @public NVMTLCommandBuffer *_cb; __weak NVMTLCommandBuffer *_owner; } @end
 uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int *instance, uint32_t *instance_count, NSMutableSet *track);
 #define NVMTL_NBUFAT 32   /* buffer argument indices an encoder tracks (Metal has 31) */
@@ -230,7 +242,22 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
 - (BOOL)nvmtlBuildPass:(MTLRenderPassDescriptor *)d;
 - (BOOL)nvmtlBeginPassLoad:(uint32_t)load;
 - (void)nvmtlApplyDepthStencil;
+- (void)nvmtlCloseVisibility;
 @end
+// Tile shading (NVMTLTile.m): the render encoder's tile bindings and dispatch, and the hooks the draw path calls.
+@interface NVMTLRenderCommandEncoder (NVMTLTile)
+- (BOOL)nvmtlTileInterceptPipeline:(id<MTLRenderPipelineState>)ps;   // YES when ps is a tile pipeline, which is then the tile state's, not a draw's
+- (void)nvmtlTileBeforePassBegins;   // hand planes the tile function wrote back to their attachments
+- (void)nvmtlTileDrawPipeline:(NVMTLRenderPipelineState *)p;   // make a draw pipeline's imageblock planes exist and bind them
+- (void)nvmtlTileEndEncoding;
+@end
+NSUInteger nvmtl_tile_dim(NVMTLRenderCommandEncoder *e, int axis);   // 0 width, 1 height
+void nvmtl_tile_note_pass(NVMTLRenderCommandEncoder *e, MTLRenderPassDescriptor *d);
+NSUInteger nvmtl_tile_sample_bytes(NVMTLRenderPipelineState *p);
+// A tile pipeline state from a Metal 3 descriptor; what the Metal 4 compiler builds its own tile descriptors into.
+id<MTLRenderPipelineState> nvmtl_tile_pipeline_create(MTLTileRenderPipelineDescriptor *descriptor, NSError **error);
+// The Metal 4 compiler builds a tile pipeline through this (it takes the device it compiles for; there is one device).
+#define NVMTL4_TILE_CREATE(device, descriptor, error) nvmtl_tile_pipeline_create((descriptor), (error))
 
 NSArray<NSDictionary *> *nvmtl_embedded_bindings(NVMTLFunction *function);
 void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NVMTLBuffer *__strong const *bufAt, const NSUInteger *offAt);
@@ -335,9 +362,12 @@ typedef struct { nvk_image img; uint32_t key[12]; NSUInteger off, len; } nvmtl_p
                          os_unfair_lock _lzl; } @end
 @interface NVMTLBuffer () { @public nvmtl_park_t *_bpk; uint32_t _nbpk; os_unfair_lock _bpl; } @end
 // What this buffer last put in the Metal 4 address table: base, end, and the table epoch at the time. -gpuAddress
-// skips the table (one global lock) while all three still hold - see nvmtl_m4_note_current.
+// skips the table (one global lock) while all three still hold - see nvmtl4_note_current (NVMTL4Core.m).
 @interface NVMTLBuffer () { @public _Atomic uint64_t _m4note[3]; } @end
 @interface NVMTLTexture () { @public BOOL _bparkable; } @end
+// A texture made from a buffer at a place the GPU cannot address as an image (see nvmtl_mirror_make): it owns an image
+// of its own, and these say where in which buffer its texels really live. _mirShadow is what was last copied.
+@interface NVMTLTexture () { @public NVMTLBuffer *_mirBuf; NSUInteger _mirOff, _mirBPR; uint8_t *_mirShadow; size_t _mirRow; } @end
 static void nvmtl_heap_park(NVMTLHeap *h, nvk_image *img, const uint32_t *key, NSUInteger off, NSUInteger len);
 void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared);
 @interface NVMTLIndirectCommandBuffer () { @public uint32_t _purge; } @end

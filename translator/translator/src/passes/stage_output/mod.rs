@@ -459,7 +459,7 @@ pub(in crate::passes) fn rewrite_return(
         }
     }
     if ret_locs.is_empty() {
-        if ctx.uses_fragment_imageblock {
+        if ctx.uses_fragment_imageblock && !crate::tile_mode::has(crate::tile_mode::NO_INTERLOCK) {
             return Err(
                 "fragment imageblock entry has no value return at which to end pixel interlock"
                     .to_string(),
@@ -636,16 +636,15 @@ pub(in crate::passes) fn rewrite_return(
                         }
                     };
                     let converted = ctx.module.fresh_id();
-                    stores.push(Instruction::new(
-                        match format.component {
-                            ImageComp::Float => Op::FConvert,
-                            ImageComp::Uint => Op::UConvert,
-                            ImageComp::Sint => Op::SConvert,
-                        },
-                        Some(wide_ty),
-                        Some(converted),
-                        vec![Operand::IdRef(member)],
-                    ));
+                    crate::passes::tile_explicit::convert_imageblock_value(
+                        ctx,
+                        &mut stores,
+                        format.component,
+                        member,
+                        member_ty,
+                        wide_ty,
+                        converted,
+                    );
                     let texel = if format.lanes == 1 {
                         let texel = ctx.module.fresh_id();
                         stores.push(Instruction::new(
@@ -1041,7 +1040,7 @@ pub(in crate::passes) fn rewrite_return(
         for output in &outputs {
             replacement.extend(output.stores(ctx, retval, declared_outputs_must_be_written));
         }
-        if ctx.uses_fragment_imageblock {
+        if ctx.uses_fragment_imageblock && !crate::tile_mode::has(crate::tile_mode::NO_INTERLOCK) {
             replacement.push(Instruction::new(
                 Op::EndInvocationInterlockEXT,
                 None,

@@ -10,10 +10,16 @@ pub(in crate::passes) fn bind_kernel_grid_push_constant_once(
     }
     let uint_ty = ctx.ty_uint();
     let block_ty = ctx.module.fresh_id();
+    // a tile function's block also carries the tile size, tile count and tile memory stride the driver pushes
+    let members = if crate::tile_mode::has(crate::tile_mode::TILE_KERNEL) {
+        crate::passes::tile_origin::TILE_BLOCK_MEMBERS
+    } else {
+        12
+    };
     ctx.new_globals.push(type_inst(
         Op::TypeStruct,
         block_ty,
-        (0..12).map(|_| Operand::IdRef(uint_ty)).collect(),
+        (0..members).map(|_| Operand::IdRef(uint_ty)).collect(),
     ));
     ctx.module.annotations.push(Instruction::new(
         Op::Decorate,
@@ -24,7 +30,7 @@ pub(in crate::passes) fn bind_kernel_grid_push_constant_once(
             Operand::Decoration(Decoration::Block),
         ],
     ));
-    for member in 0..12 {
+    for member in 0..members {
         ctx.module.annotations.push(Instruction::new(
             Op::MemberDecorate,
             None,

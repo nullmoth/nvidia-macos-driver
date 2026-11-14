@@ -1,0 +1,28 @@
+binding a type 37 index 0
+    access = 1
+    isUsed = 1
+    isArgument = 1
+    tensorDataType = 16
+    indexType = 29
+    dimensions = extents rank 2: -1 -1
+binding b type 37 index 1
+    access = 1
+    isUsed = 1
+    isArgument = 1
+    tensorDataType = 143
+    indexType = 37
+    dimensions = extents rank 3: -1 -1 -1
+binding c type 37 index 3
+    access = 1
+    isUsed = 1
+    isArgument = 1
+    tensorDataType = 3
+    indexType = 29
+    dimensions = extents rank 2: 4 8
+binding out type 0 index 2
+    access = 1
+    isUsed = 1
+    isArgument = 1
+    tensorDataType: (not KVC)
+    indexType: (not KVC)
+    dimensions: (not KVC)

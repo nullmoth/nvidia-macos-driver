@@ -1,0 +1,40 @@
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
+@@ -371,6 +371,21 @@
+       h = 0x5eb00000u | (__atomic_add_fetch(&nvrm_host_handle_next, 1, __ATOMIC_RELAXED) & 0xfffffu);
+       st = nvRmApiAllocMemory(&drm, pdev->hDevice, h, NV01_MEMORY_SYSTEM_OS_DESCRIPTOR, NVRM_HOST_OS02_FLAGS, host_ptr, size_B - 1);
+    }
++   /* Pages this process may only read cannot be pinned for writing: the kernel driver answers NOT_SUPPORTED (it tried
++    * the pin, then its I/O-memory lookup). Such memory is asked for again read-only; the device then maps it read-only
++    * too, which is all a buffer the application cannot write itself can need. */
++   if (st == NV_ERR_NOT_SUPPORTED || st == NV_ERR_INVALID_ADDRESS) {
++      const NV_STATUS first = st;
++      st = NV_ERR_INSERT_DUPLICATE_NAME;
++      for (int tries = 0; tries < 16 && st == NV_ERR_INSERT_DUPLICATE_NAME; tries++) {
++         h = 0x5eb00000u | (__atomic_add_fetch(&nvrm_host_handle_next, 1, __ATOMIC_RELAXED) & 0xfffffu);
++         st = nvRmApiAllocMemory(&drm, pdev->hDevice, h, NV01_MEMORY_SYSTEM_OS_DESCRIPTOR,
++                                 NVRM_HOST_OS02_FLAGS | DRF_DEF(OS02, _FLAGS, _ALLOC_USER_READ_ONLY, _YES), host_ptr, size_B - 1);
++      }
++      { static uint64_t n; if ((n++ == 0 || (n & 0x3ff) == 0) && nvkmd_nvrm_diag_on())
++           fprintf(stderr, "nvrm: host pointer %p (%llu KB): writable pin refused (%#x), read-only pin -> %#x (#%llu)\n",
++                   host_ptr, (unsigned long long)(size_B >> 10), first, st, (unsigned long long)n); }
++   }
+    if (st != NV_OK)
+       return vk_errorf(log_obj, VK_ERROR_INVALID_EXTERNAL_HANDLE, "NV_ESC_RM_ALLOC_MEMORY(OS descriptor %p, %llu B) -> NV_STATUS %#x",
+                        host_ptr, (unsigned long long)size_B, st);
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_va.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_va.c
+@@ -180,6 +180,13 @@
+    }
+    NvU64 dmaOffset = va_offset_B;
+    NV_STATUS nvRes = nvRmApiMapMemoryDma(&rm, pdev->hDevice, va->hMemoryVirt, mem->hMemoryPhys, mem_offset_B, range_B, gpuMapFlags, &dmaOffset);
++   /* Pages pinned read-only (a host pointer the application itself cannot write) are device-read-only to the resource
++    * manager: it refuses the read-write mapping above, and the same mapping read-only is the right one. */
++   if (nvRes == NV_ERR_INVALID_ARGUMENT && mem->isSystemMem) {
++      dmaOffset = va_offset_B;
++      nvRes = nvRmApiMapMemoryDma(&rm, pdev->hDevice, va->hMemoryVirt, mem->hMemoryPhys, mem_offset_B, range_B,
++                                  gpuMapFlags | DRF_DEF(OS46, _FLAGS, _ACCESS, _READ_ONLY), &dmaOffset);
++   }
+    if (nvRes != NV_OK) {
+       fprintf(stderr, "[!] nvRes: %#x\n", nvRes);
+       /* NVMTL apps-rmreason: the RM status rides back in the VkResult's message, not only on a stderr nobody reads */

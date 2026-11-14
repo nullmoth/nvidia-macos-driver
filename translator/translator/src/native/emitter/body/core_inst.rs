@@ -326,7 +326,7 @@ impl Emitter {
                         (name.clone(), phi_ty.clone(), parsed_incoming.clone());
                     return self.emit_phi_resolved(name, &phi_ty, parsed_incoming, instructions);
                 }
-            } else if inst.opcode == "bitcast" {
+            } else if matches!(inst.opcode.as_str(), "bitcast" | "addrspacecast") {
                 if let Some((src, dst_text)) = inst.bitcast() {
                     let (name, src) = (name.clone(), src.clone());
                     return self.emit_bitcast_resolved(src, dst_text, name, instructions);
@@ -1826,6 +1826,13 @@ impl Emitter {
         }
         if self.param_values.contains(src_name) {
             self.param_values.insert(name.to_string());
+        }
+        // A cast does not move the pointer, so it keeps the source's device address. Without this, a
+        // cast of a buffer-array kernel argument (MPS's `addrspacecast ptr %buffers to ptr addrspace(8)`,
+        // stored into its array_ref) had no address when stored, the store wrote a null constant, every
+        // table entry then read 0, and the kernel wrote to a small address (depthwiseConv_3x3, 0x79000).
+        if let Some(address) = self.bda_direct_addresses.get(src_name).copied() {
+            self.bda_direct_addresses.insert(name.to_string(), address);
         }
     }
 
