@@ -95,7 +95,7 @@ fn split_module(module: &mut SpirvModule) -> usize {
         if let Some(p) = types.psb_pointee(*id) { if d.class.opcode == Op::TypePointer { psb_ptr.entry(p).or_insert(*id); } }
     }
     let mut changed = 0usize;
-    let mut fresh = |module: &mut SpirvModule| module.fresh_id();
+    let fresh = |module: &mut SpirvModule| module.fresh_id();
     let function_count = module.functions.len();
     for fi in 0..function_count {
         let block_count = module.functions[fi].blocks.len();

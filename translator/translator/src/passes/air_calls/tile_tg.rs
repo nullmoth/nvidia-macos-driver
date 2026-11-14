@@ -26,6 +26,7 @@ struct Leaf {
     path: Vec<u32>,
     ty: Word,
     bits: u32,
+    #[allow(dead_code)] // recorded with the leaf for the layout dump; the copy itself goes by bit width
     float: bool,
 }
 
