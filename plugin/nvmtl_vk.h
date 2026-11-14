@@ -14,7 +14,9 @@ typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int
                  uint32_t reg; /* handle in the live GPU-range registry (nvmtl_live.h), 0 when unregistered */
                  int fresh; /* host-visible memory from its own vkAllocateMemory: zeroed by the kernel, never recycled */
                  uint64_t parked_ns; /* when the buffer park took it (CLOCK_UPTIME_RAW) */  void *lost_mem; int bind_lost;
-                 uint8_t hz_ut; /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */ } nvk_buffer;
+                 uint8_t hz_ut; /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */
+                 /* Imported host storage must outlive its VkDeviceMemory, including buffer grace. */
+                 void (*host_release)(void *); void *host_context; } nvk_buffer;
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_fault_context.h"
 #include "nvmtl_page_life.h"
