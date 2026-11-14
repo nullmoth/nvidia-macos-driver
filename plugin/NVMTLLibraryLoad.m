@@ -3351,8 +3351,11 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
         if (err) *err = nvmtl_link_err(why);
         return nil;
     }
-    if (dumpDir)
+    if (dumpDir) {
         [spv writeToFile:[dumpDir stringByAppendingFormat:@"/%@.spv", fn->_fname] atomically:YES];
+        // one file per variant as well: the name alone keeps only the last one
+        [spv writeToFile:[dumpDir stringByAppendingFormat:@"/%@.%@.spv", fn->_fname, fn->_specName ?: @"plain"] atomically:YES];
+    }
     nvlog("link: \"%s\" linked %lu -> %lu B AIR, %zu constant(s) -> %lu B SPIR-V", fn->_fname.UTF8String,
           (unsigned long)fn->_air.length, (unsigned long)linked.length, k2, (unsigned long)spv.length);
     NVMTLFunction *nf = [NVMTLFunction new];

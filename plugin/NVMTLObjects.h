@@ -236,7 +236,7 @@ int nvmtl_gpu_icb_on(void);
 uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int *instance, uint32_t *instance_count, NSMutableSet *track);
 #define NVMTL_NBUFAT 32   /* buffer argument indices an encoder tracks (Metal has 31) */
 @interface NVMTLRenderCommandEncoder : NSObject <MTLRenderCommandEncoder> {
-  @public NVMTLCommandBuffer *_cb; NVMTLTexture *_target; float _clear[4]; BOOL _begun;
+  @public NVMTLCommandBuffer *_cb; NVMTLTexture *_target; NVMTLTexture *_target1; unsigned _testDraws; uint32_t _surfColMask; float _clear[4]; BOOL _begun;
   NVMTLTexture *_resolve; uint32_t _passSamples;
   int _cull; uint32_t _passFmt; int _passDepth;
   uint32_t _load; BOOL _hasVP, _hasSC; float _vp[6]; uint32_t _sc[4];

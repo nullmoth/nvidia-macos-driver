@@ -3983,6 +3983,26 @@ static nvk_cmdbuf *nvmtl_hz_blit_open(NVMTLCommandBuffer *cb, id src, id dst) {
     if (cr) { static _Atomic unsigned said; if (atomic_fetch_add(&said, 1) < 4) nvlog("encoder: a fetch copy failed - the draw is skipped"); return NO; }
     return YES;
 }
+// A colour attachment that is an IOSurface's shared memory is a linear image, and the Vulkan layer renders a linear image
+// through a tiled copy of it that is written back when the pass ends. A fragment shader reading that attachment inside the
+// pass ([[color(n)]]) is given the linear image, so it saw what the surface held before the pass and none of the pass's
+// own draws: a layer blended in the shader replaced everything under it. The pass ends and begins again with every
+// attachment loaded before such a draw, so the linear image holds what the earlier draws wrote.
+- (BOOL)nvmtlSurfaceFetchRestart {
+    if (!_begun) return NO;
+    uint32_t keep = 0;
+    for (uint32_t i = 0; i < _passSig.ncol; i++) if (_passSig.cfmts[i]) keep |= NVMTL_LOAD_COLOUR(i);
+    if (_passSig.has_depth) keep |= NVMTL_LOAD_DEPTH;
+    if (_ps && _ps->_p.has_stencil) keep |= NVMTL_LOAD_STENCIL;
+    const BOOL visibility = _visActive || _visPending;
+    [self nvmtlCloseVisibility];
+    nvmtl_vk_cmd_end_render(&_cb->_c);
+    _begun = NO; _pass.load |= keep; _load |= keep; _visPending = visibility;
+    NVMTLRenderPipelineState *resume = _ps;
+    if (resume) [self setRenderPipelineState:resume];
+    if (!_begun) { nvlog("encoder: the render pass could not RESUME before a draw that reads a surface attachment - the rest of this encoder is not drawn"); return NO; }
+    return YES;
+}
 - (void)nvmtlHzRestart:(BOOL)forceFull {
     if (forceFull) _hzFull = YES;
     if (!_begun) return;
@@ -4159,6 +4179,7 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     }
     if(!_cb->_resources)_cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:selected];
     if (selected->_p.fetch_copy && _begun && ![self nvmtlFetchCopy:&selected->_p]) return NO;
+    if ((selected->_p.fetch_mask & _surfColMask) && _begun && ![self nvmtlSurfaceFetchRestart]) return NO;
     nvmtl_vk_cmd_bind_pipeline(&_cb->_c,&selected->_p);
     nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX,   (NVMTLFunction *)_ps->_descriptor.vertexFunction,   _vbufAt, _vbufOff);
     nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, (NVMTLFunction *)_ps->_descriptor.fragmentFunction, _fbufAt, _fbufOff);
@@ -4198,6 +4219,7 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     if (!cb->_resources) cb->_resources = [NVMTLResSet new];
     uint32_t load = 0, w = UINT32_MAX, h = UINT32_MAX; BOOL any = NO;
     const uint32_t NL = d.renderTargetArrayLength > 1 ? (uint32_t)d.renderTargetArrayLength : 1u;
+    _surfColMask = 0;
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
         MTLRenderPassColorAttachmentDescriptor *ca = d.colorAttachments[i];
         id<MTLTexture> tx = ca.texture, rx = ca.resolveTexture;
@@ -4210,6 +4232,7 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
         int ta8 = 0; uint32_t tvk = nvmtl_tex_attach_vkfmt(t, &ta8);
         if (nvmtl_vk_cmd_attachment_view_n(&cb->_c, [t nvi], 0, t->_baseLevel + (uint32_t)ca.level, t->_baseSlice + zslice, NL, tvk, ta8, &_pass.colview[i], &cw, &ch)) return NO;
         _pass.col[i] = [t nvi]; _pass.colw[i] = cw; _pass.colh[i] = ch;
+        if ((t->_parent ? t->_parent : t)->_surf) _surfColMask |= 1u << i;
         if (nvmtl_hz_untracked_tex(t)) _hzAttSkip |= 1u << i;
         _pass.col_level[i] = t->_baseLevel + (uint32_t)ca.level; _pass.col_layer[i] = t->_baseSlice + zslice;
         if (_pass.col_level[i]) (t->_parent ?: t)->_mipsWritten = YES;
@@ -4726,7 +4749,16 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 // Test builds only. While /tmp/nvmtl-passdump-request exists, the first colour target of every render pass is copied
 // out after the pass and written to /tmp/nvmtl-pass-<pid>-<n>-<w>x<h>-f<format>.raw when its command buffer completes
 // (at most 400 files), so a wrong picture can be followed pass by pass. A format it has no pixel size for is skipped.
-static void nvmtl_pass_dump(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
+// Test builds: /tmp/nvmtl-drawlimit holds "width height count". In a pass whose first colour target has that size only
+// the first <count> indexed draws run, so the saved targets show the pass as it stood after that draw.
+static int nvmtl_test_draw_limit(NVMTLRenderCommandEncoder *e) {
+    if (!e->_target || access("/tmp/nvmtl-drawlimit", F_OK) != 0) return 0;
+    unsigned w = 0, h = 0, n = 0; FILE *f = fopen("/tmp/nvmtl-drawlimit", "r"); if (!f) return 0;
+    int got = fscanf(f, "%u %u %u", &w, &h, &n); fclose(f);
+    if (got != 3 || e->_target.width != w || e->_target.height != h) return 0;
+    return ++e->_testDraws > n;
+}
+static void nvmtl_pass_dump(NVMTLCommandBuffer *cb, NVMTLTexture *t, int att) {
     static _Atomic unsigned seq; const unsigned n = atomic_fetch_add(&seq, 1); if (n >= 400) return;
     const NSUInteger w = t.width, h = t.height; const MTLPixelFormat pf = t.pixelFormat; NSUInteger bpp = 0;
     switch (pf) { case MTLPixelFormatR8Unorm: bpp = 1; break; case MTLPixelFormatR16Float: case MTLPixelFormatRG8Unorm: bpp = 2; break;
@@ -4741,18 +4773,21 @@ static void nvmtl_pass_dump(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     [be endEncoding];
     const int pid = getpid();
     [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; char path[200];
-        snprintf(path, sizeof path, "/tmp/nvmtl-pass-%d-%03u-%lux%lu-f%lu.raw", pid, n, (unsigned long)w, (unsigned long)h, (unsigned long)pf);
+        snprintf(path, sizeof path, "/tmp/nvmtl-pass-%d-%03u-a%d-%lux%lu-f%lu.raw", pid, n, att, (unsigned long)w, (unsigned long)h, (unsigned long)pf);
         FILE *f = fopen(path, "wb"); if (!f) { nvlog("pass dump: cannot write %s (errno %d)", path, errno); return; }
         fwrite(buf.contents, 1, w * h * bpp, f); fclose(f); }];
 }
 #endif
 - (void)endEncoding {
-    NVMTLCommandBuffer *dumpCb = _cb; NVMTLTexture *dumpTarget = _target;
+    NVMTLCommandBuffer *dumpCb = _cb; NVMTLTexture *dumpTarget = _target; NVMTLTexture *dumpTarget1 = _target1;
     [self nvmtlEndEncodingBody];
 #if !NVMTL_RELEASE
-    if (dumpCb && dumpTarget && access("/tmp/nvmtl-passdump-request", F_OK) == 0) nvmtl_pass_dump(dumpCb, dumpTarget);
+    if (dumpCb && dumpTarget && access("/tmp/nvmtl-passdump-request", F_OK) == 0) {
+        nvmtl_pass_dump(dumpCb, dumpTarget, 0);
+        if (dumpTarget1 && [(id)dumpTarget1 isKindOfClass:[NVMTLTexture class]]) nvmtl_pass_dump(dumpCb, dumpTarget1, 1);
+    }
 #else
-    (void)dumpCb; (void)dumpTarget;
+    (void)dumpCb; (void)dumpTarget; (void)dumpTarget1;
 #endif
 }
 - (void)nvmtlEndEncodingBody {
@@ -5034,6 +5069,9 @@ static NVMTLBuffer *nvmtl_icb_scratch(uint32_t slots) {
                   indexBuffer:(id<MTLBuffer>)ib indexBufferOffset:(NSUInteger)off
                 instanceCount:(NSUInteger)instances baseVertex:(NSInteger)baseVertex baseInstance:(NSUInteger)baseInstance {
     if (!_begun) { nvlog("drawIndexedPrimitives with no pipeline set"); return; }
+#if !NVMTL_RELEASE
+    if (nvmtl_test_draw_limit(self)) return;
+#endif
     NVMTLBuffer *b = (NVMTLBuffer *)ib;
     if (!b) { nvlog("drawIndexedPrimitives with no index buffer"); return; }
     nvmtl_retain_resource(_cb, b);
@@ -7771,6 +7809,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     NVMTLRenderCommandEncoder *e = [NVMTLRenderCommandEncoder new];
     _nEnc++;
     e->_cb = self; e->_target = (NVMTLTexture *)d.colorAttachments[0].texture;
+    e->_target1 = (NVMTLTexture *)d.colorAttachments[1].texture;
     if (!_resources) _resources = [NVMTLResSet new];
     if (e->_target) [_resources addObject:e->_target];
     if (d.depthAttachment.texture) [_resources addObject:d.depthAttachment.texture];
