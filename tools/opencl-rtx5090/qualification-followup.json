@@ -1,5 +1,5 @@
 {
-  "scope": "Functional requalification of hardened launcher f3622bf8 with unchanged native payloads and profile; these follow-up scored runs are load-contaminated, not a clean-idle performance repeat.",
+  "scope": "Comparative functional qualification of the original v2 launcher and hardened f3622bf8 launcher with unchanged native payloads and profile; these follow-up scored runs are load-contaminated, not a clean-idle performance repeat.",
   "gui_runs": [
     {
       "public_result": "https://browser.geekbench.com/v7/gpu/401226",
@@ -51,7 +51,9 @@
         }
       },
       "functional_status": "PASS",
-      "no_other_recognized_benchmark": true
+      "no_other_recognized_benchmark": true,
+      "launcher_sha256": "05ee166e77cb9d9ede840ad3230a36b434ea8a0d1de1c77b532c35194ba8d530",
+      "temporary_path_guard": false
     },
     {
       "public_result": "https://browser.geekbench.com/v7/gpu/401246",
@@ -112,7 +114,9 @@
       ],
       "performance_status": "CAPTURE_LOAD",
       "functional_status": "PASS",
-      "no_other_recognized_benchmark": true
+      "no_other_recognized_benchmark": true,
+      "launcher_sha256": "f3622bf88403a3e9e961a8d3305ee0bf6bc1f86d4484059445a0b2cf64db8855",
+      "temporary_path_guard": true
     },
     {
       "public_result": "https://browser.geekbench.com/v7/gpu/401256",
@@ -168,7 +172,9 @@
         "capture_absent": true
       },
       "functional_status": "PASS",
-      "no_other_recognized_benchmark": true
+      "no_other_recognized_benchmark": true,
+      "launcher_sha256": "f3622bf88403a3e9e961a8d3305ee0bf6bc1f86d4484059445a0b2cf64db8855",
+      "temporary_path_guard": true
     },
     {
       "public_result": "https://browser.geekbench.com/v7/gpu/401284",
@@ -217,7 +223,9 @@
         }
       },
       "functional_status": "PASS",
-      "no_other_recognized_benchmark": true
+      "no_other_recognized_benchmark": true,
+      "launcher_sha256": "f3622bf88403a3e9e961a8d3305ee0bf6bc1f86d4484059445a0b2cf64db8855",
+      "temporary_path_guard": true
     }
   ],
   "cli_run": {
@@ -234,7 +242,8 @@
     "score": 249140,
     "geekbench_url": "https://browser.geekbench.com/v7/gpu/401279",
     "exceeds_300k": false,
-    "functional_status": "PASS"
+    "functional_status": "PASS",
+    "temporary_path_guard": true
   },
   "interpretation": [
     "All follow-up runs completed with the intended runtime images and unchanged system/driver hashes; no recognized kernel fault.",
