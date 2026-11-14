@@ -197,12 +197,11 @@ options:
         ..TransformOptions::default()
     };
     // METAL2VULKAN_TILE=<bits of metal2vulkan::tile_mode>: translate as a tile-shading driver does
-    if let Some(bits) = env::var("METAL2VULKAN_TILE").ok().and_then(|v| v.parse::<u32>().ok()) {
+    if let Some(bits) = metal2vulkan::env_vars::tile_flags() {
         use metal2vulkan::tile_mode;
         tile_mode::set_flags(bits);
         // METAL2VULKAN_TILE_TG_OFFSETS=<byte offset of threadgroup(0)>,<of threadgroup(1)>,...
-        if let Ok(list) = env::var("METAL2VULKAN_TILE_TG_OFFSETS") {
-            let offsets: Vec<u32> = list.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        if let Some(offsets) = metal2vulkan::env_vars::tile_tg_offsets() {
             tile_mode::set_tg_offsets(&offsets);
         }
         if tile_mode::has(tile_mode::BAND) && fs::read_to_string(&src).is_ok_and(|text| tile_mode::mentions_imageblock(&text)) {

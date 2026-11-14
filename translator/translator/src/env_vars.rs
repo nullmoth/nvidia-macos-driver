@@ -246,6 +246,16 @@ pub fn relooper_max_blocks(fallback: usize) -> usize {
         .unwrap_or(fallback)
 }
 
+/// METAL2VULKAN_TILE: the tile_mode bits the command-line tool translates with.
+pub fn tile_flags() -> Option<u32> {
+    std::env::var("METAL2VULKAN_TILE").ok().and_then(|v| v.parse::<u32>().ok())
+}
+
+/// METAL2VULKAN_TILE_TG_OFFSETS: the byte offset of each threadgroup argument, comma separated.
+pub fn tile_tg_offsets() -> Option<Vec<u32>> {
+    std::env::var("METAL2VULKAN_TILE_TG_OFFSETS").ok().map(|list| list.split(',').filter_map(|v| v.trim().parse().ok()).collect())
+}
+
 pub fn nest_stages() -> Option<OsString> {
     std::env::var_os("METAL2VULKAN_NEST")
 }
