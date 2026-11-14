@@ -332,3 +332,84 @@ impl Emitter {
         Ok(result)
     }
 }
+
+/// Which half of an atomic's ordering a SPIR-V instruction can carry: OpAtomicLoad takes no release bit and
+/// OpAtomicStore no acquire bit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::native::emitter) enum AtomicRole {
+    Load,
+    Store,
+    ReadModifyWrite,
+}
+
+/// Scope operand of an AIR atomic (thread 0, threadgroup 1, device 2, simdgroup 4) as the SPIR-V scope, or the one
+/// implied by the pointer's address space when the operand is not one of those constants.
+pub(in crate::native::emitter) fn atomic_requested_scope(
+    call: &LlCall,
+    scope_index: usize,
+    pointer_scope: Scope,
+) -> Scope {
+    match call.args.get(scope_index).and_then(|a| super::air_i32_literal(&a.value)) {
+        Some(0) => Scope::Invocation,
+        Some(1) => Scope::Workgroup,
+        Some(2) => Scope::Device,
+        Some(4) => Scope::Subgroup,
+        _ => pointer_scope,
+    }
+}
+
+/// Memory semantics for one AIR atomic: the semantics the emitter always used (`base`) with the ordering the shader
+/// asked for added on top, never removed. The order operand carries memory_order in its low byte and, for AIR 2.9
+/// shaders, the mem_flags operand shifted left by 8 (`air_atomic_v29` folds it in). memory_order values are
+/// relaxed 0, acquire 2, release 3, acq_rel 4, seq_cst 5. Vulkan forbids sequentially consistent semantics without the
+/// Vulkan memory model, so seq_cst becomes acquire-release, which is no weaker for the operations a shader can see.
+/// mem_flags device 1, threadgroup 2, texture 4 select the memory classes the ordering applies to; with none given the
+/// class of the atomic's own pointer is used.
+pub(in crate::native::emitter) fn atomic_requested_semantics(
+    call: &LlCall,
+    order_index: usize,
+    pointer_scope: Scope,
+    base: MemorySemantics,
+    role: AtomicRole,
+) -> MemorySemantics {
+    let encoded = call
+        .args
+        .get(order_index)
+        .and_then(|a| super::air_i32_literal(&a.value))
+        .unwrap_or(0);
+    let (order, flags) = ((encoded & 0xff) as u32, (encoded >> 8) as u32);
+    let (acquire, release) = match order {
+        2 => (true, false),
+        3 => (false, true),
+        4 | 5 => (true, true),
+        _ => (false, false),
+    };
+    let acquire = acquire && role != AtomicRole::Store;
+    let release = release && role != AtomicRole::Load;
+    if !acquire && !release {
+        return base;
+    }
+    let mut semantics = base;
+    semantics |= match (acquire, release) {
+        (true, true) => MemorySemantics::ACQUIRE_RELEASE,
+        (true, false) => MemorySemantics::ACQUIRE,
+        _ => MemorySemantics::RELEASE,
+    };
+    if flags & 1 != 0 {
+        semantics |= MemorySemantics::UNIFORM_MEMORY;
+    }
+    if flags & 2 != 0 {
+        semantics |= MemorySemantics::WORKGROUP_MEMORY;
+    }
+    if flags & 4 != 0 {
+        semantics |= MemorySemantics::IMAGE_MEMORY;
+    }
+    if flags == 0 {
+        semantics |= if pointer_scope == Scope::Workgroup {
+            MemorySemantics::WORKGROUP_MEMORY
+        } else {
+            MemorySemantics::UNIFORM_MEMORY
+        };
+    }
+    semantics
+}

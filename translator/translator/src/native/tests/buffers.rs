@@ -410,6 +410,191 @@ entry:
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+// MPS's depthwiseConv_3x3 casts its buffer-array argument (`addrspacecast ptr %buffers to ptr addrspace(8)`,
+// read as address space 1 by the wrapper) before storing it into its array_ref. The cast once lost the
+// argument's device address, the store wrote a null constant, and every table entry read 0.
+// Once LLVM inlines and SROAs an MPS kernel, it indexes its array_ref<void> argument directly. Entry 2 is
+// table[location + 2]; the raw view once read it from the buffer bound at the argument's location, so the kernel used
+// that buffer's data as pointers (depthwiseConv_3x3 faulted on a float-valued address).
+#[test]
+fn native_device_buffer_array_indexed_directly_reads_the_address_table() {
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+@next_buffer = internal addrspace(2) global i32 5
+
+define void @k(ptr %buffers) {
+entry:
+  %e = getelementptr inbounds ptr addrspace(1), ptr %buffers, i64 2
+  %dst = load ptr addrspace(1), ptr %e, align 8
+  store float 1.0, ptr addrspace(1) %dst, align 4
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, ptr addrspace(2) @next_buffer, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_name", !"array_ref<void>", !"air.arg_name", !"buffers"}
+"#;
+    let spv = crate::translate_native_no_retry_constructed_with_options(
+        ll,
+        Stage::Kernel,
+        passes::TransformOptions::default(),
+    )
+    .expect("translate");
+    let module = load_bytes(&spv).expect("load translated module");
+    let bindings = module
+        .annotations
+        .iter()
+        .filter_map(|instruction| match instruction.operands.as_slice() {
+            [Operand::IdRef(_), Operand::Decoration(Decoration::Binding), Operand::LiteralBit32(b)] => Some(*b),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !bindings.contains(&0) && bindings.contains(&640),
+        "the array_ref read buffer binding 0 instead of the address table (bindings {bindings:?}):\n{}",
+        disassemble(&spv).unwrap()
+    );
+}
+
+// MPS's NDArrayVectorMatrixMultiply casts its buffer array to a device pointer and hands it through two
+// helpers to the _MPSNDArrays constructor, which stores it into the array_ref. The store once wrote a null
+// placeholder sourced from the argument's private pointer, and the store contract refused the module.
+#[test]
+fn native_device_buffer_array_cast_through_helpers_keeps_direct_address_in_local_aggregate() {
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+%ArrayRef = type { ptr addrspace(1), i64 }
+%State = type { %ArrayRef }
+@next_buffer = internal addrspace(2) global i32 5
+
+define void @k(ptr %buffers) {
+entry:
+  %t = addrspacecast ptr %buffers to ptr addrspace(1)
+  call void @tmpl(ptr addrspace(1) %t, i64 5)
+  ret void
+}
+
+define internal void @tmpl(ptr addrspace(1) %tab, i64 %n) {
+entry:
+  %state = alloca %State, align 8
+  call void @ctor(ptr %state, ptr addrspace(1) %tab, i64 %n)
+  %f = getelementptr inbounds %State, ptr %state, i64 0, i32 0, i32 0
+  %loaded = load ptr addrspace(1), ptr %f, align 8
+  %slot = getelementptr inbounds ptr addrspace(1), ptr addrspace(1) %loaded, i64 4
+  %dst = load ptr addrspace(1), ptr addrspace(1) %slot, align 8
+  store float 1.0, ptr addrspace(1) %dst, align 4
+  ret void
+}
+
+define internal void @ctor(ptr %s, ptr addrspace(1) %p, i64 %n) {
+entry:
+  %f = getelementptr inbounds %State, ptr %s, i64 0, i32 0, i32 0
+  store ptr addrspace(1) %p, ptr %f, align 8
+  %g = getelementptr inbounds %State, ptr %s, i64 0, i32 0, i32 1
+  store i64 %n, ptr %g, align 8
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, ptr addrspace(2) @next_buffer, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_name", !"array_ref<void>", !"air.arg_name", !"buffers"}
+"#;
+    let spv = crate::translate_native_no_retry_constructed_with_options(
+        ll,
+        Stage::Kernel,
+        passes::TransformOptions::default(),
+    )
+    .expect("translate");
+    let module = load_bytes(&spv).expect("load translated module");
+    let nulls = module
+        .types_global_values
+        .iter()
+        .filter(|instruction| instruction.class.opcode == Op::ConstantNull)
+        .filter_map(|instruction| instruction.result_id)
+        .collect::<HashSet<_>>();
+    let null_stores = module
+        .all_inst_iter()
+        .filter(|instruction| {
+            instruction.class.opcode == Op::Store
+                && matches!(instruction.operands.get(1), Some(Operand::IdRef(v)) if nulls.contains(v))
+        })
+        .count();
+    assert_eq!(
+        null_stores,
+        0,
+        "the buffer-array address reached the array_ref as a null constant:\n{}",
+        disassemble(&spv).unwrap()
+    );
+}
+
+#[test]
+fn native_device_buffer_array_cast_keeps_direct_address_in_local_aggregate() {
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+%ArrayRef = type { ptr addrspace(1), i64 }
+%State = type { %ArrayRef }
+@next_buffer = internal addrspace(2) global i32 5
+
+define void @k(ptr %buffers) {
+entry:
+  %table = addrspacecast ptr %buffers to ptr addrspace(1)
+  %state = alloca %State, align 8
+  %field = getelementptr inbounds %State, ptr %state, i64 0, i32 0, i32 0
+  store ptr addrspace(1) %table, ptr %field, align 8
+  %loaded = load ptr addrspace(1), ptr %field, align 8
+  %slot = getelementptr inbounds ptr addrspace(1), ptr addrspace(1) %loaded, i64 4
+  %dst = load ptr addrspace(1), ptr addrspace(1) %slot, align 8
+  store float 1.0, ptr addrspace(1) %dst, align 4
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, ptr addrspace(2) @next_buffer, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_name", !"array_ref<void>", !"air.arg_name", !"buffers"}
+"#;
+    // The path the driver's translator library takes.
+    let spv = crate::translate_native_no_retry_constructed_with_options(
+        ll,
+        Stage::Kernel,
+        passes::TransformOptions::default(),
+    )
+    .expect("translate");
+    let module = load_bytes(&spv).expect("load translated module");
+    let nulls = module
+        .types_global_values
+        .iter()
+        .filter(|instruction| instruction.class.opcode == Op::ConstantNull)
+        .filter_map(|instruction| instruction.result_id)
+        .collect::<HashSet<_>>();
+    let function_pointers = module
+        .all_inst_iter()
+        .filter(|instruction| {
+            matches!(instruction.class.opcode, Op::AccessChain | Op::InBoundsAccessChain)
+        })
+        .filter_map(|instruction| instruction.result_id)
+        .collect::<HashSet<_>>();
+    let null_field_stores = module
+        .all_inst_iter()
+        .filter(|instruction| {
+            instruction.class.opcode == Op::Store
+                && matches!(instruction.operands.first(), Some(Operand::IdRef(p)) if function_pointers.contains(p))
+                && matches!(instruction.operands.get(1), Some(Operand::IdRef(v)) if nulls.contains(v))
+        })
+        .count();
+    assert_eq!(
+        null_field_stores,
+        0,
+        "the cast buffer-array address was stored as a null constant:\n{}",
+        disassemble(&spv).unwrap()
+    );
+}
+
 #[test]
 fn native_device_buffer_array_keeps_direct_buffer_pointer_phi_network_modeled() {
     let ll = r#"
@@ -903,6 +1088,9 @@ entry:
 }
 
 #[test]
+// The first load is entry 0 of the address table, a device pointer (buffer 0's address). It was typed as a generic
+// pointer when an array_ref<void> argument was read as the buffer at its location; read as the table it is the
+// device pointer it holds.
 fn native_device_pointer_round_trips_through_direct_pointer_alloca() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
@@ -910,10 +1098,10 @@ target triple = "spirv-unknown-vulkan1.2"
 
 define void @k(ptr %buffers) {
 entry:
-  %table = load ptr, ptr %buffers, align 8
-  %slot = getelementptr inbounds ptr addrspace(1), ptr %table, i64 0
-  %slot_alias = bitcast ptr %slot to ptr
-  %buffer = load ptr addrspace(1), ptr %slot_alias, align 8
+  %table = load ptr addrspace(1), ptr %buffers, align 8
+  %slot = getelementptr inbounds ptr addrspace(1), ptr addrspace(1) %table, i64 0
+  %slot_alias = bitcast ptr addrspace(1) %slot to ptr addrspace(1)
+  %buffer = load ptr addrspace(1), ptr addrspace(1) %slot_alias, align 8
   %cursor = alloca ptr addrspace(1), align 8
   store ptr addrspace(1) %buffer, ptr %cursor, align 8
   %current = load ptr addrspace(1), ptr %cursor, align 8

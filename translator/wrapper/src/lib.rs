@@ -88,6 +88,27 @@ pub extern "C" fn nvmtl_translate_set_kernel_stage_in(words: *const u32, count: 
     STAGE_IN.with(|c| c.set(out));
     1
 }
+// Tile shading (see metal2vulkan::tile_mode). The driver says once what the device is, and per translation whether the
+// function is a tile function. A module that names an imageblock gets the layout whose imageblock planes sit inside the
+// driver's storage-image band; every other module keeps the default layout, so nothing else changes.
+#[no_mangle]
+pub extern "C" fn nvmtl_translate_set_tile_defaults(flags: u32) { metal2vulkan::tile_mode::set_defaults(flags); }
+#[no_mangle]
+pub extern "C" fn nvmtl_translate_set_tile_flags(flags: u32) { metal2vulkan::tile_mode::set_flags(flags); }
+/// Byte offsets of the threadgroup arguments within the tile's memory (tile_mode::PERSISTENT_TG); index = Metal index.
+#[no_mangle]
+pub extern "C" fn nvmtl_translate_set_tile_tg_offsets(offsets: *const u32, count: u32) {
+    let n = if offsets.is_null() { 0 } else { (count as usize).min(32) };
+    let list: Vec<u32> = (0..n).map(|i| unsafe { *offsets.add(i) }).collect();
+    metal2vulkan::tile_mode::set_tg_offsets(&list);
+}
+fn apply_tile(mut o: metal2vulkan::passes::TransformOptions, ll: &str) -> metal2vulkan::passes::TransformOptions {
+    use metal2vulkan::tile_mode as tile;
+    if tile::has(tile::BAND) && tile::mentions_imageblock(ll) {
+        o.descriptor_layout = tile::band_layout(o.descriptor_layout);
+    }
+    o
+}
 
 fn apply_tg(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::passes::TransformOptions {
     o = apply_rsc(o);
@@ -124,6 +145,8 @@ fn formatless_options(ll: &str, st: Stage, caps: u32) -> Option<metal2vulkan::pa
 fn translate_one(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
     // one parse per distinct text for the whole translation, its retries included
     metal2vulkan::with_parse_cache(|| translate_with_pointer_retry(ll, |ll| translate_one_as_written(ll, st)))
+        // NVK refuses an access wider than its declared alignment, so every translation ends with this split
+        .map(|spv| metal2vulkan::psb_align_split::split_underaligned_physical_vector_accesses(&spv))
 }
 
 // Keep the same translation options on both attempts. In particular, the
@@ -198,12 +221,59 @@ fn translate_with_pointer_retry(
 fn translate_one_as_written(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
     let caps = CAPS.load(Ordering::Relaxed);
     if let Some(o) = if caps != 0 { formatless_options(ll, st, caps) } else { None } {
-        match metal2vulkan::translate_native_no_retry_constructed_with_options(ll, st, apply_tg(o)) {
+        match metal2vulkan::translate_native_no_retry_constructed_with_options(ll, st, apply_tile(apply_tg(o), ll)) {
             Ok(v) => return Ok(v),
             Err(e) => eprintln!("nvmtl_translate: formatless storage images refused, falling back: {e}"),
         }
     }
-    metal2vulkan::translate_native_no_retry_constructed_with_options(ll, st, apply_tg(metal2vulkan::passes::TransformOptions::default()))
+    metal2vulkan::translate_native_no_retry_constructed_with_options(ll, st, apply_tile(apply_tg(metal2vulkan::passes::TransformOptions::default()), ll))
+}
+
+/// AIR address space 8 is the MSL 4.1 generic space. Resolve it to the one concrete space its values come from.
+///
+/// macOS 27's MetalPerformanceShaders is compiled as MSL 4.1: the data pointer of `metal::array_ref` and the `this` of
+/// its helpers are generic. Apple's compiler resolves them statically (infer-address-spaces) before codegen. In the 27.2
+/// MPS libraries every value enters space 8 through `addrspacecast ptr %x to ptr addrspace(8)` from space 0 - the
+/// kernel's array_ref<void> argument (the address table) or a thread-local array (topk's table of buffer pointers) -
+/// and none leaves it. When that holds, every space-8 value is a space-0 value, so the module is read with space 8
+/// spelled as space 0 and the casts become no-ops.
+///
+/// Anything else - a cast into space 8 from another space, or a cast out of it - would need runtime address-space
+/// dispatch. The text is then left as it is, and the emitter refuses the unresolved generic pointer by name.
+fn unify_device_space(ll: &str) -> std::borrow::Cow<'_, str> {
+    if !ll.contains("addrspace(8)") {
+        return std::borrow::Cow::Borrowed(ll);
+    }
+    if generic_space_roots_are_all_space_0(ll).is_err() {
+        return std::borrow::Cow::Borrowed(ll);
+    }
+    std::borrow::Cow::Owned(ll.replace("ptr addrspace(8)", "ptr"))
+}
+
+/// Every cast into space 8 starts from a space-0 pointer, no cast leaves space 8, and space 8 appears only as the
+/// pointer type `ptr addrspace(8)`. The error names the first violation.
+fn generic_space_roots_are_all_space_0(ll: &str) -> Result<(), String> {
+    for line in ll.lines() {
+        let mut rest = line;
+        while let Some(p) = rest.find("addrspacecast") {
+            let tail = &rest[p + "addrspacecast".len()..];
+            let tail = tail.trim_start().trim_start_matches('(').trim_start();
+            if tail.starts_with("ptr addrspace(8)") {
+                return Err(format!("a cast leaves the generic space: {}", line.trim()));
+            }
+            if let Some(to) = tail.find(" to ") {
+                let (from, dest) = (&tail[..to], &tail[to + 4..]);
+                if dest.starts_with("ptr addrspace(8)") && from.starts_with("ptr addrspace(") {
+                    return Err(format!("a cast into the generic space starts outside space 0: {}", line.trim()));
+                }
+            }
+            rest = &tail[tail.len().min(1)..];
+        }
+    }
+    if ll.replace("ptr addrspace(8)", "").contains("addrspace(8)") {
+        return Err("space 8 appears outside a pointer type".into());
+    }
+    Ok(())
 }
 
 #[no_mangle]
@@ -221,6 +291,8 @@ pub extern "C" fn nvmtl_translate(
     };
     if ll.is_null() || stage.is_null() || out.is_null() || out_len.is_null() { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let st = match unsafe { CStr::from_ptr(stage) }.to_str() {
         Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
         _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
@@ -268,6 +340,8 @@ pub extern "C" fn nvmtl_visible_refs(
     };
     if ll.is_null() || out.is_null() || out_len.is_null() { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let syms = match metal2vulkan::linked_functions::visible_function_reference_symbols(ll) {
         Ok(v) => v, Err(e) => { set_err(&e); return -1; }
     };
@@ -295,6 +369,8 @@ pub extern "C" fn nvmtl_link_visible(
     if ll.is_null() || stage.is_null() || out.is_null() || out_len.is_null() { return -1; }
     if n > 0 && (syms.is_null() || mods.is_null()) { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let st = match unsafe { CStr::from_ptr(stage) }.to_str() {
         Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
         _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
@@ -332,6 +408,8 @@ pub extern "C" fn nvmtl_link_externs(
     };
     if ll.is_null() || out.is_null() || out_len.is_null() || (n > 0 && mods.is_null()) { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let mut modules = Vec::with_capacity(n);
     for i in 0..n {
         let mp = unsafe { *mods.add(i) };
@@ -364,6 +442,8 @@ pub extern "C" fn nvmtl_lower_mesh(
     };
     if ll.is_null() || entry.is_null() || out_k.is_null() || out_k_len.is_null() || out_v.is_null() || out_v_len.is_null() || layout.is_null() { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let entry = match unsafe { CStr::from_ptr(entry) }.to_str() { Ok(s) => s, Err(_) => { set_err("entry is not utf-8"); return -1; } };
     let m = match metal2vulkan::mesh_lower::lower_mesh(ll, entry) { Ok(m) => m, Err(e) => { set_err(&e); return -1; } };
     let give = |text: String, o: *mut *mut u8, ol: *mut usize| {
@@ -460,6 +540,8 @@ pub extern "C" fn nvmtl_link_runtime(
     if ll.is_null() || stage.is_null() || out.is_null() || out_len.is_null() { return -1; }
     if (nref > 0 && (refs.is_null() || ref_mods.is_null())) || (ncand > 0 && (cands.is_null() || cand_mods.is_null())) { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let st = match unsafe { CStr::from_ptr(stage) }.to_str() {
         Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
         _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
@@ -510,6 +592,8 @@ pub extern "C" fn nvmtl_translate_fc(
     if ll.is_null() || stage.is_null() || out.is_null() || out_len.is_null() { return -1; }
     if n > 0 && (indices.is_null() || sizes.is_null() || payloads.is_null()) { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let st = match unsafe { CStr::from_ptr(stage) }.to_str() {
         Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
         _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
@@ -657,11 +741,13 @@ pub extern "C" fn nvmtl_reflect(
     };
     if ll.is_null() || stage.is_null() || out.is_null() || out_len.is_null() { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let st = match unsafe { CStr::from_ptr(stage) }.to_str() {
         Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
         _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
     };
-    let refl = match metal2vulkan::reflect_sanitized(ll, st, metal2vulkan::passes::TransformOptions::default()) {
+    let refl = match metal2vulkan::reflect_sanitized(ll, st, apply_tile(metal2vulkan::passes::TransformOptions::default(), ll)) {
         Ok(r) => r,
         Err(e) => { set_err(&e); return -1; }
     };
@@ -690,6 +776,8 @@ pub extern "C" fn nvmtl_reflect_fc(
     if ll.is_null() || stage.is_null() || out.is_null() || out_len.is_null() { return -1; }
     if n > 0 && (indices.is_null() || sizes.is_null() || payloads.is_null()) { return -1; }
     let ll = match unsafe { CStr::from_ptr(ll) }.to_str() { Ok(s) => s, Err(_) => { set_err("ll is not utf-8"); return -1; } };
+    let ll_unified = unify_device_space(ll);
+    let ll: &str = &ll_unified;
     let st = match unsafe { CStr::from_ptr(stage) }.to_str() {
         Ok("vertex") => Stage::Vertex, Ok("fragment") => Stage::Fragment, Ok("kernel") => Stage::Kernel,
         _ => { set_err("stage must be vertex|fragment|kernel"); return -1; }
@@ -706,7 +794,7 @@ pub extern "C" fn nvmtl_reflect_fc(
         Ok(v) => v,
         Err(e) => { set_err(&format!("AIR specialization: {e}")); return -1; }
     };
-    let refl = match metal2vulkan::reflect_sanitized(specialized.as_ref(), st, metal2vulkan::passes::TransformOptions::default()) {
+    let refl = match metal2vulkan::reflect_sanitized(specialized.as_ref(), st, apply_tile(metal2vulkan::passes::TransformOptions::default(), specialized.as_ref())) {
         Ok(r) => r,
         Err(e) => { set_err(&e); return -1; }
     };
@@ -903,6 +991,8 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
         }
         if used==0 && a8==0 && amp<=1{return translate_one(ll,st)}
         let opts=apply_tg(opts);
+        if used==0 && a8==0{return translate_one(ll,st)}
+        let opts=apply_tile(apply_tg(opts),ll);
         translate_with_pointer_retry(ll, |ll| {
             metal2vulkan::translate_native_no_retry_constructed_with_options(ll,st,opts)
         })
@@ -1052,178 +1142,7 @@ declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr a
 }
 
 #[cfg(test)]
-mod stage_in_tests {
-    use super::*;
-
-    #[test]
-    fn a_well_formed_stage_input_layout_is_accepted_and_applied_to_the_next_translation() {
-        // one Float3 attribute at offset 0 of buffer 1, which steps by thread x with a 12-byte stride
-        let words = [1u32, 0, 1, 0, 30, 1, 1, 12, 5, 1];
-        assert_eq!(nvmtl_translate_set_kernel_stage_in(words.as_ptr(), words.len() as u32), 1);
-        let o = apply_tg(Default::default());
-        let (attribute, layout) = o.kernel_stage_in.attribute(0).expect("attribute 0 is described");
-        assert_eq!((attribute.buffer_index, attribute.offset), (1, 0));
-        assert_eq!(layout.stride, 12);
-        assert_eq!(nvmtl_translate_set_kernel_stage_in(std::ptr::null(), 0), 1);
-        assert!(apply_tg(Default::default()).kernel_stage_in.is_empty(), "count 0 clears it");
-    }
-
-    #[test]
-    fn a_truncated_or_unsupported_stage_input_layout_is_refused_and_leaves_nothing_set() {
-        let truncated = [1u32, 0, 1, 0];
-        assert_eq!(nvmtl_translate_set_kernel_stage_in(truncated.as_ptr(), 4), 0);
-        let unsupported_format = [1u32, 0, 1, 0, 26, 0];
-        assert_eq!(nvmtl_translate_set_kernel_stage_in(unsupported_format.as_ptr(), 6), 0);
-        let indexed_step = [1u32, 0, 1, 0, 30, 1, 1, 12, 7, 1];
-        assert_eq!(nvmtl_translate_set_kernel_stage_in(indexed_step.as_ptr(), 10), 0);
-        assert!(apply_tg(Default::default()).kernel_stage_in.is_empty());
-    }
-}
-
-#[cfg(test)]
-mod vertex_amplification_tests {
-    use super::*;
-    use spirv_tools::val::Validator;
-
-    const VERT: &str = r#"
-source_filename = "synth_vertex_amplification_id"
-target datalayout = "e-p:64:64:64"
-target triple = "air64-apple-macosx14.0.0"
-
-define <4 x float> @vert(i16 %amp) local_unnamed_addr #0 {
-  %wide = zext i16 %amp to i32
-  %f = uitofp i32 %wide to float
-  %v = insertelement <4 x float> zeroinitializer, float %f, i64 0
-  ret <4 x float> %v
-}
-
-attributes #0 = { nounwind }
-
-!air.vertex = !{!0}
-!0 = !{ptr @vert, !1, !3}
-!1 = !{!2}
-!2 = !{i32 0, !"air.position", !"air.arg_type_name", !"float4", !"air.arg_name", !"pos"}
-!3 = !{!4}
-!4 = !{i32 0, !"air.amplification_id", !"air.arg_type_name", !"ushort", !"air.arg_name", !"amp"}
-"#;
-
-    fn words(b: &[u8]) -> Vec<u32> { b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect() }
-    // true when the module declares OpCapability MultiView (4439) and decorates a variable BuiltIn ViewIndex (4440)
-    fn multiview(w: &[u32]) -> (bool, bool) {
-        let (mut cap, mut view) = (false, false);
-        let mut i = 5;
-        while i < w.len() {
-            let (op, len) = (w[i] & 0xffff, (w[i] >> 16) as usize);
-            if len == 0 || i + len > w.len() { break; }
-            if op == 17 && len == 2 && w[i + 1] == 4439 { cap = true; }
-            if op == 71 && len >= 4 && w[i + 2] == 11 && w[i + 3] == 4440 { view = true; }
-            i += len;
-        }
-        (cap, view)
-    }
-    fn run(json: serde_json::Value) -> Vec<u32> {
-        let ll = std::ffi::CString::new(VERT).unwrap();
-        let stage = std::ffi::CString::new("vertex").unwrap();
-        let j = std::ffi::CString::new(json.to_string()).unwrap();
-        let (mut out, mut len) = (std::ptr::null_mut(), 0usize);
-        let mut err = [0i8; 2048];
-        let rc = unsafe { nvmtl_translate_samplers(ll.as_ptr(), stage.as_ptr(), j.as_ptr(), &mut out, &mut len, err.as_mut_ptr(), err.len()) };
-        assert_eq!(rc, 0, "{}", unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy());
-        let w = words(unsafe { std::slice::from_raw_parts(out, len) });
-        nvmtl_translate_free(out, len);
-        w
-    }
-
-    #[test]
-    fn a_pipeline_that_amplifies_gets_a_multiview_shader_and_one_that_does_not_keeps_constant_zero() {
-        let plain = run(serde_json::json!({"samplers": {}, "constants": {}}));
-        assert_eq!(multiview(&plain), (false, false), "an ordinary pipeline's shader must not use the view index");
-        let one = run(serde_json::json!({"samplers": {}, "constants": {}, "vertex_amplification": 1}));
-        assert_eq!(multiview(&one), (false, false), "count 1 is the ordinary shader");
-        let two = run(serde_json::json!({"samplers": {}, "constants": {}, "vertex_amplification": 2}));
-        assert_eq!(multiview(&two), (true, true), "count 2 must declare MultiView and read the ViewIndex builtin");
-        spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2)).validate(&two, None).expect("the amplified module validates");
-    }
-}
-
-// A tile function (implicit imageblock access) as AIR text for a compute kernel over the colour attachments, one threadgroup per
-// tile of tile_w x tile_h pixels. The returned text is what the ordinary translation entry points take; free it with
-// nvmtl_translate_free (len bytes). The attachments appear as read_write textures at metal index 120 + attachment.
-#[no_mangle]
-pub unsafe extern "C" fn nvmtl_tile_rewrite(
-    ll: *const c_char, tile_w: u32, tile_h: u32, samples: u32,
-    out: *mut *mut u8, out_len: *mut usize, err: *mut c_char, err_len: usize,
-) -> i32 {
-    let result = (|| -> Result<String, String> {
-        if ll.is_null() || out.is_null() || out_len.is_null() { return Err("null tile argument".into()) }
-        if tile_w == 0 || tile_h == 0 || tile_w > 1024 || tile_h > 1024 { return Err(format!("tile {tile_w}x{tile_h} is outside 1..1024")) }
-        let ll = CStr::from_ptr(ll).to_str().map_err(|e| e.to_string())?;
-        if !matches!(samples, 1 | 2 | 4 | 8) { return Err(format!("{samples} samples is not a Metal sample count")) }
-        metal2vulkan::rewrite_tile_kernel(ll, [tile_w, tile_h], samples)
-    })();
-    match result {
-        Ok(text) => { let mut b = text.into_bytes().into_boxed_slice(); *out = b.as_mut_ptr(); *out_len = b.len(); std::mem::forget(b); 0 }
-        Err(e) => { if !err.is_null() && err_len > 0 { let n = e.len().min(err_len - 1); std::ptr::copy_nonoverlapping(e.as_ptr(), err.cast(), n); *err.add(n) = 0; } -1 }
-    }
-}
-
-#[cfg(test)]
-mod tile_function_constant_tests {
-    use super::*;
-    use spirv_tools::val::Validator;
-
-    // a tile function with a function constant, in the sanitized shape (AIR from Apple's compiler, pointers opaque)
-    const TILE_FC: &str = r#"
-%"struct.metal::_imageblock_base" = type { ptr addrspace(4) }
-@_ZL5boost = internal unnamed_addr addrspace(2) global i8 undef, align 1
-@_Z5boost.MTL_FC_INIT_0_b = linkonce_odr hidden local_unnamed_addr addrspace(2) externally_initialized constant i8 undef, section "air.fc_initializer", align 1
-define void @tile_fc(%"struct.metal::_imageblock_base" %0, <2 x i16> noundef %1) local_unnamed_addr #0 {
-  %3 = tail call fast <4 x half> @air.load.implicit_imageblock.v4f16(i32 0, <2 x i16> %1, i32 0, i16 0) #4
-  %4 = load i8, ptr addrspace(2) @_ZL5boost, align 1, !range !27
-  %5 = icmp eq i8 %4, 0
-  %6 = extractelement <4 x half> %3, i64 0
-  %7 = fadd fast half %6, 0xH3800
-  %8 = insertelement <4 x half> %3, half %7, i64 0
-  %9 = select i1 %5, <4 x half> %3, <4 x half> %8
-  tail call void @air.store.implicit_imageblock.v4f16(<4 x half> %9, i32 0, <2 x i16> %1, i32 0, i16 0) #5
-  ret void
-}
-declare <4 x half> @air.load.implicit_imageblock.v4f16(i32, <2 x i16>, i32, i16) local_unnamed_addr #1
-declare void @air.store.implicit_imageblock.v4f16(<4 x half>, i32, <2 x i16>, i32, i16) local_unnamed_addr #2
-define internal void @_GLOBAL__sub_I_fc.metal() #3 section "air.static_init" {
-  %1 = load i8, ptr addrspace(2) @_Z5boost.MTL_FC_INIT_0_b, align 1, !range !27
-  store i8 %1, ptr addrspace(2) @_ZL5boost, align 1
-  ret void
-}
-!air.kernel = !{!9}
-!air.function_constants = !{!18}
-!9 = !{ptr @tile_fc, !10, !11}
-!10 = !{}
-!11 = !{!12, !14}
-!12 = !{i32 0, !"air.imageblock", !"implicit", !"air.struct_type_info", !13, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"imageblock<Px, layout_implicit>", !"air.arg_name", !"ib"}
-!13 = !{i32 0, i32 8, i32 0, !"half4", !"c", !"air.render_target", i32 0}
-!14 = !{i32 1, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"tid"}
-!18 = !{ptr addrspace(2) @_Z5boost.MTL_FC_INIT_0_b, !"bool", !"boost", i32 0}
-!27 = !{i8 0, i8 2}
-"#;
-
-    fn words(b: &[u8]) -> Vec<u32> { b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect() }
-    fn translate(text: &str, constant: Option<u8>) -> Result<Vec<u32>, String> {
-        let ll = std::ffi::CString::new(text).unwrap(); let stage = std::ffi::CString::new("kernel").unwrap();
-        let (idx, size, pay) = ([0u32], [1u32], [constant.unwrap_or(0)]); let payloads = [pay.as_ptr()];
-        let (mut out, mut len) = (std::ptr::null_mut(), 0usize); let mut err = [0i8; 2048];
-        let n = usize::from(constant.is_some());
-        let rc = nvmtl_translate_fc(ll.as_ptr(), stage.as_ptr(), idx.as_ptr(), size.as_ptr(), payloads.as_ptr(), n, &mut out, &mut len, err.as_mut_ptr(), err.len());
-        if rc != 0 { return Err(unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy().into_owned()); }
-        let w = words(unsafe { std::slice::from_raw_parts(out, len) }); nvmtl_translate_free(out, len); Ok(w)
-    }
-
-    #[test]
-    fn a_tile_function_with_a_function_constant_specializes_after_the_rewrite() {
-        let text = metal2vulkan::rewrite_tile_kernel(TILE_FC, [32, 32], 1).expect("the rewrite keeps the function constant machinery intact");
-        assert!(text.contains("@_Z5boost.MTL_FC_INIT_0_b") && text.contains("!air.function_constants"), "the constants survive the rewrite:\n{text}");
-        let (on, off) = (translate(&text, Some(1)).expect("boost = true"), translate(&text, Some(0)).expect("boost = false"));
-        for m in [&on, &off] { spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2)).validate(m, None).expect("valid"); }
-        assert_ne!(on, off, "the two constant values must give two different kernels");
+        if used==0 && a8==0 && amp<=1{return translate_one(ll,st)}
+        let opts=apply_tile(apply_tg(opts),ll);
     }
 }

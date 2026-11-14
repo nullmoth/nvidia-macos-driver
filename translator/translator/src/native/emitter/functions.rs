@@ -1545,6 +1545,20 @@ impl Emitter {
                     let address =
                         self.combine_pointer_payload_words(low, high, &mut instructions)?;
                     self.pointer_payload_words.insert(name.clone(), (low, high));
+                    // An array_ref<void> argument (a generic pointer with buffer metadata) is the address table, not
+                    // the buffer bound at its location: entry i is table[location + i]. Its raw view addressed binding
+                    // `location` directly, so a kernel that indexes the argument without first storing it into an
+                    // array_ref (MPS kernels once LLVM has inlined and SROA'd them) read buffer 0's data as pointers
+                    // and faulted on a float-valued address. Reading it through its own device address reaches the table.
+                    if matches!(self.values.get(&name).map(|v| &v.1), Some(LlType::Ptr(0)))
+                        && self.data_buffer_params.contains(&name)
+                    {
+                        if let Some(raw) = self.raw_offsets.get_mut(&name) {
+                            raw.device_addr_base = Some(address);
+                            self.used_device_address = true;
+                        }
+                        self.pointer_storage.insert(name.clone(), StorageClass::PhysicalStorageBuffer);
+                    }
                     self.bda_direct_addresses.insert(name, address);
                 }
             }

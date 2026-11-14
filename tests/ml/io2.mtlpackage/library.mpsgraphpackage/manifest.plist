@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Package Version</key>
+	<dict>
+		<key>7.0.63</key>
+		<dict>
+			<key>ANERegionsHash</key>
+			<dict/>
+			<key>Adapters by rank</key>
+			<dict/>
+			<key>Binary File Resources</key>
+			<dict/>
+			<key>Callables</key>
+			<dict/>
+			<key>CallablesHash</key>
+			<integer>9223372036854775807</integer>
+			<key>Data File Names</key>
+			<array/>
+			<key>GPU adapter present</key>
+			<string>NO</string>
+			<key>Optimized Modules</key>
+			<dict/>
+			<key>Optimized No Device Modules</key>
+			<dict/>
+			<key>Optimized No Device Resources Used</key>
+			<dict/>
+			<key>Optimized Resources Used</key>
+			<dict/>
+			<key>Original</key>
+			<string>original_model_0.mpsgraph</string>
+			<key>Original Module Serialized</key>
+			<true/>
+			<key>Original Resources Used</key>
+			<array/>
+			<key>RDFFMap</key>
+			<dict/>
+			<key>Resource Offsets</key>
+			<dict/>
+			<key>Resource Storage Mode</key>
+			<integer>1</integer>
+		</dict>
+	</dict>
+</dict>
+</plist>

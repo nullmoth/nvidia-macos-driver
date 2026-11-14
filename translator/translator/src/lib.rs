@@ -21,12 +21,14 @@ pub mod mesh_lower;
 pub mod meta;
 pub mod native;
 pub mod passes;
+pub mod psb_align_split;
 mod passthrough;
 pub mod reflect;
 mod spirv_binary;
 mod spirv_module;
 mod spirv_operand;
 mod spirv_variable_ptr;
+pub mod tile_mode;
 pub mod tools;
 pub(crate) mod types;
 
@@ -607,11 +609,9 @@ pub fn specialize_runtime_table_module(
             },
         )
         .collect();
-    if entries.is_empty() && (!indices.is_empty() || from_body) {
-        return Err(
-            "the kernel reads a visible function table but the pipeline links no functions".into(),
-        );
-    }
+    // A pipeline may be built with binary linking on and nothing linked yet (Metal 4 adds functions later through
+    // newComputePipelineStateWithBinaryFunctions:). Its tables then hold only the null entry; a call through one is
+    // undefined in Metal, as on Apple GPUs, and here it reaches no function.
     let linkage = linked_functions::LinkedFunctionLinkage {
         visible_references: references,
         visible_tables: indices

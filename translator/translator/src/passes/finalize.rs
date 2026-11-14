@@ -160,7 +160,7 @@ pub(in crate::passes) fn finalize(
                 ],
             ));
         }
-        if ctx.uses_fragment_imageblock {
+        if ctx.uses_fragment_imageblock && !crate::tile_mode::has(crate::tile_mode::NO_INTERLOCK) {
             let capability = spirv::Capability::FragmentShaderPixelInterlockEXT;
             if !ctx.module.capabilities.iter().any(|instruction| {
                 instruction.operands.as_slice() == [Operand::Capability(capability)]
@@ -259,6 +259,12 @@ pub(in crate::passes) fn finalize(
                     _ => None,
                 })
                 .unwrap_or("unnamed");
+            if name.starts_with("__tensorops_impl_") {
+                return Err(format!(
+                    "unsupported Metal Performance Primitives tensor operation: {name} has no lowering \
+                     (unresolved external shader function)"
+                ));
+            }
             return Err(format!("unresolved external shader function: {name}"));
         }
     }

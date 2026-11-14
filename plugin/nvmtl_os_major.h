@@ -23,6 +23,7 @@ static inline int nvmtl_os_major_from(const char *product, const char *darwin)
     }
     if (major && !compat) return major;
     const int d = (darwin && darwin[0]) ? atoi(darwin) : 0;
+    if (d >= 27) return d;               /* from macOS 27 the kernel carries the system's own number */
     if (d >= 25) return d + 1;           /* Darwin 25 = macOS 26 */
     if (d >= 20) return d - 9;           /* Darwin 20 = macOS 11 ... Darwin 24 = macOS 15 */
     return major;                        /* an older kernel: 10.16 cannot occur there; keep what was read */

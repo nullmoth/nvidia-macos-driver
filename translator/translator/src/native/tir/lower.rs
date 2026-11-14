@@ -481,7 +481,7 @@ pub(in crate::native) fn push_inst_line(
             diag_line,
             shuffle_mask,
         },
-        "bitcast" => TirInstData::Bitcast {
+        "bitcast" | "addrspacecast" => TirInstData::Bitcast {
             destination: bitcast.map(|parsed| parsed.1),
             identity: identity_ptr_bitcast.is_some(),
         },

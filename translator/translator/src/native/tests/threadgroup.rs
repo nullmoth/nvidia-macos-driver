@@ -3359,6 +3359,79 @@ declare i32 @air.atomic.local.add.u.i32(ptr addrspace(3), i32, i32, i32, i1)
     let _ = std::fs::remove_dir_all(tmp);
 }
 
+fn lower_one_subgroup_call(call: &str, declare: &str, ty: &str, tag: &str) -> String {
+    let ll = format!(
+        r#"
+target triple = "spirv-unknown-vulkan1.2"
+define void @k({ty} %x, i16 %delta, ptr addrspace(1) %out) {{
+entry:
+  {call}
+  store {ty} %r, ptr addrspace(1) %out, align 4
+  ret void
+}}
+
+{declare}
+
+!air.kernel = !{{!0}}
+!0 = !{{ptr @k, !1, !2}}
+!1 = !{{}}
+!2 = !{{!3}}
+!3 = !{{i32 2, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_name", !"{ty}", !"air.arg_name", !"out"}}
+"#
+    );
+    let tmp = std::env::temp_dir().join(format!("metal2vulkan_native_{tag}_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let spv = crate::translate_sanitized_native(&ll, Stage::Kernel, &tmp).expect("translate");
+    if std::process::Command::new("spirv-val").arg("--version").output().is_ok() {
+        tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
+    }
+    disassemble(&spv).expect("disassemble")
+}
+
+#[test]
+fn native_air_simd_shuffle_rotate_up_subtracts_the_delta_before_wrapping() {
+    let asm = lower_one_subgroup_call(
+        "%r = tail call float @air.simd_shuffle_rotate_up.f32(float %x, i16 %delta)",
+        "declare float @air.simd_shuffle_rotate_up.f32(float, i16)",
+        "float",
+        "rotate_up",
+    );
+    assert_eq!(asm.matches("OpGroupNonUniformShuffle ").count(), 1, "{asm}");
+    assert!(asm.contains("OpISub"), "{asm}");
+    assert!(asm.contains("OpBitwiseAnd"), "{asm}");
+    assert!(!asm.contains("air.simd_shuffle_rotate_up"), "{asm}");
+}
+
+#[test]
+fn native_air_simd_product_reduces_over_32_lanes() {
+    let asm = lower_one_subgroup_call(
+        "%r = tail call float @air.simd_product.f32(float %x)",
+        "declare float @air.simd_product.f32(float)",
+        "float",
+        "simd_product",
+    );
+    assert!(asm.contains("OpGroupNonUniformFMul"), "{asm}");
+    assert!(asm.contains("ClusteredReduce"), "{asm}");
+}
+
+#[test]
+fn native_air_simd_prefix_products_are_shuffle_scans_with_identity_in_lane_zero() {
+    let inclusive = lower_one_subgroup_call(
+        "%r = tail call i32 @air.simd_prefix_inclusive_product.u.i32(i32 %x)",
+        "declare i32 @air.simd_prefix_inclusive_product.u.i32(i32)",
+        "i32",
+        "prefix_product_in",
+    );
+    assert_eq!(inclusive.matches("OpGroupNonUniformShuffleUp").count(), 5, "{inclusive}");
+    assert_eq!(inclusive.matches("OpIMul").count(), 5, "{inclusive}");
+    let exclusive = lower_one_subgroup_call(
+        "%r = tail call i32 @air.simd_prefix_exclusive_product.u.i32(i32 %x)",
+        "declare i32 @air.simd_prefix_exclusive_product.u.i32(i32)",
+        "i32",
+        "prefix_product_ex",
+    );
+    assert_eq!(exclusive.matches("OpGroupNonUniformShuffleUp").count(), 6, "{exclusive}");
+}
 // Three dispatch-tail-guard arms lived here and were removed with the pass itself. They are
 // worth naming because they all PASSED while the thing they guarded was wrong, which is the trap: each arm
 // tested the pass against its own premise instead of against the plugin. The premise was that a Metal

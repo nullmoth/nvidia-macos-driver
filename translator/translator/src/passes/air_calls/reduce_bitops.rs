@@ -7,14 +7,36 @@ pub(in crate::passes) fn lower_quad_sum(
     result_type: Word,
     value: Word,
 ) -> Result<Vec<Instruction>, String> {
+    lower_quad_combine(ctx, result, result_type, value, false)
+}
+
+pub(in crate::passes) fn lower_quad_product(
+    ctx: &mut Ctx,
+    result: Word,
+    result_type: Word,
+    value: Word,
+) -> Result<Vec<Instruction>, String> {
+    lower_quad_combine(ctx, result, result_type, value, true)
+}
+
+// A quad's sum or product: two exclusive-or exchanges, one along each axis, combined with the operation.
+fn lower_quad_combine(
+    ctx: &mut Ctx,
+    result: Word,
+    result_type: Word,
+    value: Word,
+    product: bool,
+) -> Result<Vec<Instruction>, String> {
     let elem_ty = element_type(ctx, result_type);
     let Some(elem_def) = type_def_of(ctx, elem_ty) else {
-        return Err("quad sum element type is undefined".to_string());
+        return Err("quad reduction element type is undefined".to_string());
     };
-    let add = match elem_def.class.opcode {
-        Op::TypeFloat => Op::FAdd,
-        Op::TypeInt => Op::IAdd,
-        _ => return Err("quad sum element type is not numeric".to_string()),
+    let add = match (elem_def.class.opcode, product) {
+        (Op::TypeFloat, false) => Op::FAdd,
+        (Op::TypeInt, false) => Op::IAdd,
+        (Op::TypeFloat, true) => Op::FMul,
+        (Op::TypeInt, true) => Op::IMul,
+        _ => return Err("quad reduction element type is not numeric".to_string()),
     };
     let scope = ctx.const_uint(Scope::Subgroup as u32);
     let mut insts = Vec::new();
@@ -237,6 +259,111 @@ pub(in crate::passes) fn lower_simd_sum(
         Some(result_type),
         Some(result),
         vec![Operand::IdRef(native), Operand::IdRef(partition_prefix)],
+    ));
+    Ok(insts)
+}
+
+/// simd_product and the prefix products. The reduction is a clustered reduce of 32 lanes like the sum. The scans are
+/// built from shuffles instead of the native scan: a product has no inverse (the sum's scan removes the other 32-lane
+/// partitions of a wider subgroup by subtracting), so the inclusive scan doubles its reach each step within the
+/// partition and the exclusive scan shifts it up one lane, with 1 in the first lane. Scalar 32-bit float and integer only.
+pub(in crate::passes) fn lower_simd_product(
+    ctx: &mut Ctx,
+    result: Word,
+    result_type: Word,
+    value: Word,
+    operation: GroupOperation,
+) -> Result<Vec<Instruction>, String> {
+    let Some(def) = type_def_of(ctx, result_type) else {
+        return Err("simd product type is undefined".to_string());
+    };
+    let (mul, group_mul, one) = match (def.class.opcode, def.operands.first()) {
+        (Op::TypeFloat, Some(Operand::LiteralBit32(32))) => {
+            (Op::FMul, Op::GroupNonUniformFMul, ctx.const_float(1.0))
+        }
+        (Op::TypeInt, _) => (Op::IMul, Op::GroupNonUniformIMul, ctx.const_int_of(result_type, 1)),
+        _ => {
+            return Err(
+                "unsupported simd product: only scalar 32-bit float and integer values are lowered".to_string()
+            )
+        }
+    };
+    let scope = ctx.const_uint(Scope::Subgroup as u32);
+    if operation == GroupOperation::Reduce {
+        let operands = group_reduce_operands(ctx, scope, operation, value);
+        return Ok(vec![Instruction::new(group_mul, Some(result_type), Some(result), operands)]);
+    }
+    let uint = ctx.ty_uint();
+    let bool_ty = ctx.ty_bool();
+    let mut insts = Vec::new();
+    let lane = subgroup_lane_index_u32(ctx, &mut insts);
+    let local = ctx.module.fresh_id();
+    insts.push(Instruction::new(
+        Op::BitwiseAnd,
+        Some(uint),
+        Some(local),
+        vec![Operand::IdRef(lane), Operand::IdRef(ctx.const_uint(31))],
+    ));
+    let mut running = value;
+    for delta in [1u32, 2, 4, 8, 16] {
+        let below = ctx.module.fresh_id();
+        insts.push(Instruction::new(
+            Op::GroupNonUniformShuffleUp,
+            Some(result_type),
+            Some(below),
+            vec![Operand::IdScope(scope), Operand::IdRef(running), Operand::IdRef(ctx.const_uint(delta))],
+        ));
+        let product = ctx.module.fresh_id();
+        insts.push(Instruction::new(
+            mul,
+            Some(result_type),
+            Some(product),
+            vec![Operand::IdRef(running), Operand::IdRef(below)],
+        ));
+        let has_source = ctx.module.fresh_id();
+        insts.push(Instruction::new(
+            Op::UGreaterThanEqual,
+            Some(bool_ty),
+            Some(has_source),
+            vec![Operand::IdRef(local), Operand::IdRef(ctx.const_uint(delta))],
+        ));
+        let next = ctx.module.fresh_id();
+        insts.push(Instruction::new(
+            Op::Select,
+            Some(result_type),
+            Some(next),
+            vec![Operand::IdRef(has_source), Operand::IdRef(product), Operand::IdRef(running)],
+        ));
+        running = next;
+    }
+    if operation == GroupOperation::InclusiveScan {
+        insts.push(Instruction::new(
+            Op::CopyObject,
+            Some(result_type),
+            Some(result),
+            vec![Operand::IdRef(running)],
+        ));
+        return Ok(insts);
+    }
+    let shifted = ctx.module.fresh_id();
+    insts.push(Instruction::new(
+        Op::GroupNonUniformShuffleUp,
+        Some(result_type),
+        Some(shifted),
+        vec![Operand::IdScope(scope), Operand::IdRef(running), Operand::IdRef(ctx.const_uint(1))],
+    ));
+    let first = ctx.module.fresh_id();
+    insts.push(Instruction::new(
+        Op::IEqual,
+        Some(bool_ty),
+        Some(first),
+        vec![Operand::IdRef(local), Operand::IdRef(ctx.const_uint(0))],
+    ));
+    insts.push(Instruction::new(
+        Op::Select,
+        Some(result_type),
+        Some(result),
+        vec![Operand::IdRef(first), Operand::IdRef(one), Operand::IdRef(shifted)],
     ));
     Ok(insts)
 }

@@ -477,10 +477,63 @@ pub struct ImplicitImageblockAttachment {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AliasedImageblockPlane {
+    /// The render-target attachment the plane aliases; for an explicit plane, the member's index in the structure.
     pub attachment: u32,
     pub offset: u32,
     pub format: TextureFormat,
+    /// The implicit imageblock intrinsic suffix; for an explicit plane, the member's Metal type name ("half4").
     pub intrinsic_suffix: &'static str,
+    /// The plane is a member of an explicit-layout imageblock a tile driver keeps in storage images (see
+    /// `tile_mode::TILE_KERNEL`), not a render-target attachment.
+    pub explicit: bool,
+}
+
+/// Metal type name of an explicit imageblock member a tile driver can keep in a storage image: the types a fragment
+/// shader's imageblock supports.
+pub fn explicit_imageblock_member_type_name(ty: &AirType) -> Option<&'static str> {
+    Some(match ty {
+        AirType::Scalar(AirScalar::Half) => "half",
+        AirType::Vec { scalar: AirScalar::Half, lanes: 4 } => "half4",
+        AirType::Scalar(AirScalar::Float) => "float",
+        AirType::Vec { scalar: AirScalar::Float, lanes: 4 } => "float4",
+        AirType::Scalar(AirScalar::UInt) => "uint",
+        AirType::Vec { scalar: AirScalar::UInt, lanes: 4 } => "uint4",
+        AirType::Scalar(AirScalar::SInt) => "int",
+        AirType::Vec { scalar: AirScalar::SInt, lanes: 4 } => "int4",
+        AirType::Scalar(AirScalar::UChar) => "uchar",
+        AirType::Vec { scalar: AirScalar::UChar, lanes: 4 } => "uchar4",
+        AirType::Scalar(AirScalar::UShort) => "ushort",
+        _ => return None,
+    })
+}
+
+/// One plane per member of an explicit-layout imageblock structure, each addressed by member index.
+pub fn explicit_imageblock_planes(
+    layout: &AirType,
+) -> Result<Option<Vec<AliasedImageblockPlane>>, String> {
+    let AirType::Struct(members) = layout else {
+        return Ok(None);
+    };
+    if members.is_empty() {
+        return Ok(None);
+    }
+    let mut planes = Vec::with_capacity(members.len());
+    for (index, member) in members.iter().enumerate() {
+        let Some(type_name) = explicit_imageblock_member_type_name(&member.ty) else {
+            return Err(format!(
+                "explicit imageblock member {index} has type {:?}, which no storage-image plane represents",
+                member.ty
+            ));
+        };
+        planes.push(AliasedImageblockPlane {
+            attachment: index as u32,
+            offset: member.offset,
+            format: TextureFormat::R32ui,
+            intrinsic_suffix: type_name,
+            explicit: true,
+        });
+    }
+    Ok(Some(planes))
 }
 
 pub fn aliased_imageblock_planes(
@@ -522,6 +575,7 @@ pub fn aliased_imageblock_planes(
             offset: member.offset,
             format,
             intrinsic_suffix,
+            explicit: false,
         });
     }
     Ok(Some(planes))
@@ -654,6 +708,7 @@ fn parse_air_kernel_meta_with_nodes(
     let mut roles = vec![];
     let mut unmodelled_input_params: Vec<(u32, String)> = vec![];
     let mut aliased_implicit_imageblock_params: Vec<u32> = vec![];
+    let mut staged_explicit_imageblock_params: Vec<u32> = vec![];
     let mut function_constant_buffer_locations = HashMap::default();
     let mut buffer_layouts = HashMap::default();
     let mut imageblock_layouts = HashMap::default();
@@ -738,7 +793,7 @@ fn parse_air_kernel_meta_with_nodes(
                 KernRole::Texture(loc)
             }
             "instance_acceleration_structure" | "primitive_acceleration_structure"
-                if ll.contains("_intersection_query.") || ll.contains("@air.intersect.") =>
+                if uses_intersection_query(ll) || ll.contains("@air.intersect.") =>
             {
                 KernRole::AccelerationStructureShadow(resource_location(node, idx))
             }
@@ -765,6 +820,11 @@ fn parse_air_kernel_meta_with_nodes(
                 }
                 if strs.iter().any(|s| s == "alias_implicit_imageblock") {
                     aliased_implicit_imageblock_params.push(idx);
+                } else if crate::tile_mode::has(crate::tile_mode::TILE_KERNEL)
+                    && node.contains("!\"explicit\"")
+                {
+                    // run as a tile function, an explicit imageblock holds what the pass's fragments left in it
+                    staged_explicit_imageblock_params.push(idx);
                 }
                 KernRole::Other
             }
@@ -831,6 +891,16 @@ fn parse_air_kernel_meta_with_nodes(
                 writes: true,
             });
         }
+        aliased_implicit_imageblock_planes.insert(*param, planes);
+    }
+    for param in &staged_explicit_imageblock_params {
+        let Some(layout) = imageblock_layouts.get(param) else {
+            continue;
+        };
+        let Some(planes) = explicit_imageblock_planes(layout).ok().flatten() else {
+            continue;
+        };
+        aliased_implicit_imageblock_params.push(*param);
         aliased_implicit_imageblock_planes.insert(*param, planes);
     }
     Some(KernMeta {
@@ -948,7 +1018,13 @@ fn queried_acceleration_structure_role(ll: &str, role: &str) -> bool {
     matches!(
         role,
         "instance_acceleration_structure" | "primitive_acceleration_structure"
-    ) && (ll.contains("_intersection_query.") || ll.contains("@air.intersect."))
+    ) && (uses_intersection_query(ll) || ll.contains("@air.intersect."))
+}
+
+/// Whether the module runs an intersection query: tagged (air.next_intersection_query.instancing) or, for an
+/// intersection_query<> with no tags, untagged (air.next_intersection_query).
+fn uses_intersection_query(ll: &str) -> bool {
+    ll.contains("_intersection_query.") || ll.contains("_intersection_query(")
 }
 
 fn body_uses_acceleration_structure_shadow(ll: &str) -> bool {
