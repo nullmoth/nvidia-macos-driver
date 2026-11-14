@@ -1,0 +1,29 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Check out the change
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          # Full history: negative controls read earlier revisions of the source.
+          fetch-depth: 0
+      - name: Show the tools in use
+        run: python3 --version && clang --version
+      - name: Host tests
+        run: python3 tools/run_all_tests.py -j 3
