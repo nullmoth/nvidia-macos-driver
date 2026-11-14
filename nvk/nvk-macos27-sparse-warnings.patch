@@ -1,0 +1,19 @@
+--- a/src/nouveau/nil/tiling.rs	2026-11-13 19:30:09
++++ b/src/nouveau/nil/tiling.rs	2026-11-13 19:30:09
+@@ -367,6 +367,8 @@
+         .to_px(sample_layout)
+ }
+ 
++// The sparse image layout comes from the Apple tile shapes, so this one has no caller left.
++#[allow(dead_code)]
+ pub fn sparse_block_extent_B(
+     format: Format,
+     dim: ImageDim,
+@@ -384,6 +386,7 @@
+ }
+ 
+ impl Tiling {
++    #[allow(dead_code)]
+     pub fn sparse(
+         dev: &nil_rs_bindings::nv_device_info,
+         format: Format,

@@ -11,8 +11,6 @@
 #include "nvmtl_vk.h"
 #include "nvmtl_multiview.h"
 #include "nvmtl_caps_query.h"
-#include "nvmtl_sparse_query.h"
-#include "nvmtl_sparse_map.h"
 #include "nvmtl_counter_heap.h"
 #include "nvmtl_icb_range.h"
 #include "nvmtl_yuv422.h"
@@ -440,16 +438,3 @@ NSDictionary *nvmtl_index_argument_fields(NSArray *fields);
 // a blit that names a 4:2:2 texture is refused (its packed bytes are not the image's bytes); 1 = refused
 int nvmtl_y422_blit_refused(id tex, const char *what);
 #include "nvmtl_icb_record.h"
-// tile shading (NVMTL_TILE_SHADING=1): a tile pipeline is a render pipeline state object that holds the tile function; its compute
-// pipelines (the function rewritten for one tile size) are made on first use
-@interface NVMTLRenderPipelineState () { @public NVMTLFunction *_tileFn; NSMutableDictionary *_tileCps; uint32_t _tileSamples; } @end
-@interface NVMTLRenderCommandEncoder () { @public NVMTLRenderPipelineState *_tilePs; NVMTLTexture *_colTex[NVMTL_NCOL]; NSMutableDictionary *_tileBuf, *_tileByt, *_tileTex, *_tileTg; uint32_t _tileW, _tileH; NSMutableDictionary *_tileSmp, *_tileVft, *_tileIft, *_tileAs; } @end
-int nvmtl_tile_on(void);
-#define NVMTL_TILE_TEXTURE_BASE 120u   /* the translator's TILE_TEXTURE_BASE: attachment A is texture 120 + A */
-id nvmtl_tile_compute_pipeline(NVMTLRenderPipelineState *tp, uint32_t tw, uint32_t th, NSString **why);
-// sparse textures and heaps (NVMTL_SPARSE_TEXTURES=1)
-@interface NVMTLHeap () { @public BOOL _sparse; nvmtl_page_pool _pool; uint64_t *_poolBits; } @end
-@interface NVMTLTexture () { @public NVMTLHeap *_sparseHeap; NSMutableDictionary *_sparseTiles; int _sparseTailFirst; uint32_t _sparseTailPages; } @end
-@interface NVMTLResourceStateCommandEncoder : NSObject <MTLResourceStateCommandEncoder> { @public NVMTLCommandBuffer *_cb; NSString *_label; } @end
-id nvmtl_sparse_heap_texture(NVMTLHeap *heap, MTLTextureDescriptor *d);
-void nvmtl_sparse_update(id<MTLTexture> tex, MTLSparseTextureMappingMode mode, MTLRegion region, NSUInteger mip, NSUInteger slice);
