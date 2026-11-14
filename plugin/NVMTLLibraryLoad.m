@@ -143,11 +143,12 @@ static int nvmtl_xlate_ready(void) {
         strlcpy(gXlateBuildTag, gXlateTag, sizeof gXlateBuildTag);
         // Each mode below changes the SPIR-V a module translates to, so a cache entry written in one mode must never be
         // served in another: unrolled AIR, canonical pointers, argument-buffer samplers, and the two translator switches
-        // an application profile sets.
-        { const char *as = getenv("NVMTL_ARGBUF_SAMPLERS");
+        // an application profile sets, and loop exit normalization.
+        { const char *as = getenv("NVMTL_ARGBUF_SAMPLERS"), *le = getenv("METAL2VULKAN_CONVERGE_LOOP_EXIT");
           if (h && !nvmtl_spvcache_mode_tag(gXlateTag, sizeof gXlateTag, gXlateBuildTag, !getenv("NVMTL_NO_AIR_UNROLL"),
                                        getenv("NVMTL_CANONICAL_POINTERS") != NULL, as && !strcmp(as, "1"),
-                                       getenv("NVMTL_NO_PTR_PHI_LOAD") != NULL, getenv("NVMTL_NO_PIXEL_HW_FILTER") != NULL)) {
+                                       getenv("NVMTL_NO_PTR_PHI_LOAD") != NULL, getenv("NVMTL_NO_PIXEL_HW_FILTER") != NULL,
+                                       le && !strcmp(le, "1"))) {
               // A tag that cannot name every mode cannot keep the modes apart: no cache entry is read or written.
               strlcpy(gXlateTag, "untagged", sizeof gXlateTag);
               nvlog("translate: cache tag does not fit - the shader cache is OFF in this process");

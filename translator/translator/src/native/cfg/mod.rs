@@ -4,6 +4,7 @@ pub(super) mod clone_crossarm;
 mod exit_check;
 pub(super) mod structured_emit;
 mod blocks;
+pub(super) mod converge_loop_exit;
 pub(super) mod structured_order;
 
 pub(super) use clone_crossarm::rename_tokens;

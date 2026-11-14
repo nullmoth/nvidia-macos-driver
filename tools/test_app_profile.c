@@ -133,14 +133,21 @@ int main(int argc, char **argv)
     /* the shader cache's names: every mode must be in the tag, or a lookup can be served another mode's module */
     const char *build = "sha256-0446740c8cfcb42d5322c6dd852a4891bb1c3005b00d409f33ee1e72c5b3f828";
     char prof[NVMTL_SPVCACHE_TAG_MAX], plain[NVMTL_SPVCACHE_TAG_MAX], noas[NVMTL_SPVCACHE_TAG_MAX], small[80];
-    int fit = nvmtl_spvcache_mode_tag(prof, sizeof prof, build, 1, 1, 1, 1, 1);
-    nvmtl_spvcache_mode_tag(plain, sizeof plain, build, 1, 1, 1, 0, 0);
-    nvmtl_spvcache_mode_tag(noas, sizeof noas, build, 1, 1, 0, 1, 1);
+    int fit = nvmtl_spvcache_mode_tag(prof, sizeof prof, build, 1, 1, 1, 1, 1, 0);
+    nvmtl_spvcache_mode_tag(plain, sizeof plain, build, 1, 1, 1, 0, 0, 0);
+    nvmtl_spvcache_mode_tag(noas, sizeof noas, build, 1, 1, 0, 1, 1, 0);
     arm("the game's cache tag names every mode: <build>-u2-p5-as1-np-nf", fit && strlen(prof) > 16 && !strcmp(prof + strlen(prof) - 16, "-u2-p5-as1-np-nf"));
     arm("the old 80-byte tag buffer could not hold it (it kept \"-u2-p5-a\" and lost the rest): refused, not cut",
-        !nvmtl_spvcache_mode_tag(small, sizeof small, build, 1, 1, 1, 1, 1));
+        !nvmtl_spvcache_mode_tag(small, sizeof small, build, 1, 1, 1, 1, 1, 0));
     arm("with and without the profile's translator switches the tags differ", strcmp(prof, plain) != 0);
     arm("with and without argument-buffer samplers the tags differ", strcmp(prof, noas) != 0);
+    {
+        char normalized[NVMTL_SPVCACHE_TAG_MAX], expected[NVMTL_SPVCACHE_TAG_MAX];
+        snprintf(expected, sizeof expected, "%s-le1", prof);
+        arm("loop exit normalization has a distinct shader cache key",
+            nvmtl_spvcache_mode_tag(normalized, sizeof normalized, build, 1, 1, 1, 1, 1, 1)
+            && !strcmp(normalized, expected));
+    }
     {
         char dir[] = "/tmp/test_app_profile_spv_XXXXXX"; int okdir = mkdtemp(dir) != NULL;
         char a1[512], a2[512];
