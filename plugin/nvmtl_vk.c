@@ -4484,8 +4484,9 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
     // ~60k sets a second).
     static const uint64_t notb[4] = { 0, 0, 0, 0 };
     const uint64_t *tb = p->tbany ? p->tbm[which] : notb;
+    const uint32_t glkey = p->gl_uniform_layout ? p->gl_uniform_slot[which] + 1u : 0;
     const int sametb = !memcmp(t->lasttb[which], tb, sizeof notb)
-        && t->lastgl[which] == p->gl_uniform_layout
+        && t->lastgl[which] == glkey
         && (!uniform || (t->lastubuf[which] == uniform->buffer && t->lasturange[which] == uniform->range));
     int live = sametb && t->last[which] && !t->dirty[which] && t->last_idx[which] < c->nsets
                && (VkDescriptorSet)c->sets[t->last_idx[which]].set == t->last[which];
@@ -4510,9 +4511,15 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
         const nvmtl_address_page *page = (const nvmtl_address_page *)c->address_pages;
         const int samePage = !table || (t->lasttab[which] && page && (c->address_count % NVMTL_TABLES_PER_PAGE) != 0
                                         && (void *)page->buffer.buf == t->lasttab[which]);
+        // The promoted slot is read directly from the dynamic uniform
+        // descriptor, never from the address table. If only that slot changed,
+        // retain the previous immutable table and update just its UBO offset.
+        // glkey also guards a pipeline switch to a different promoted slot.
+        const int uniformOnly = p->gl_uniform_layout && p->gl_uniform_slot[which]
+            && t->chg[which][0] == (1ull << (p->gl_uniform_slot[which] - 1u));
         VkDescriptorBufferInfo ai;
-        if (covered && samePage && !c->icb_slot && (!table || !nvmtl_address_snapshot(c, which, &ai))) {
-            if (table) t->lastdyn[which] = (uint32_t)ai.offset;
+        if (covered && !c->icb_slot && (uniformOnly || (samePage && (!table || !nvmtl_address_snapshot(c, which, &ai))))) {
+            if (table && !uniformOnly) t->lastdyn[which] = (uint32_t)ai.offset;
             t->dirty[which] = 0; memset(t->chg[which], 0, sizeof t->chg[which]);
             c->dyn_out[which] = t->lastdyn[which]; c->tab_out[which] = t->lasttab[which];
             nvmtl_enc78_count(E78C_SETREUSE, 1);
@@ -4536,7 +4543,7 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
     if (!s) return s;
     t->last[which] = s; t->last_idx[which] = c->nsets - 1; t->last_hi[which] = hi; t->dirty[which] = 0;
     memcpy(t->lasttb[which], tb, sizeof notb);
-    t->lastgl[which] = p->gl_uniform_layout;
+    t->lastgl[which] = glkey;
     t->lastubuf[which] = uniform ? uniform->buffer : VK_NULL_HANDLE;
     t->lasturange[which] = uniform ? uniform->range : 0;
     t->lastdyn[which] = c->dyn_out[which]; t->lasttab[which] = c->tab_out[which];
