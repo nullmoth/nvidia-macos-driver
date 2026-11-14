@@ -155,6 +155,20 @@ kernel void nvconv5_s(device const float *src [[buffer(0)]], device const float 
                       device const float *res [[buffer(3)]], device float *dst [[buffer(4)]], constant uint *kp [[buffer(23)]], constant uint *cp [[buffer(29)]],
                       constant uint &epi [[buffer(30)]], uint3 tgp [[threadgroup_position_in_grid]], uint lid [[thread_index_in_threadgroup]])
 { threadgroup float As[BK][64 + 4]; threadgroup float Bs[BK][32 + 4]; nvconv_body<64, 32, 4, 2>(src, wts, dst, bias, res, epi, kp, cp, tgp, lid, As, Bs); }
+kernel void nvconv_cmp_loose(device const float *a [[buffer(5)]], device const float *b [[buffer(6)]], device atomic_uint *bad [[buffer(7)]],
+                             constant uint &n [[buffer(8)]], device float *sample [[buffer(9)]], uint gid [[thread_position_in_grid]],
+                             uint lane [[thread_index_in_simdgroup]])
+{
+    uint m = 0;
+    if (gid < n) {
+        const float x = a[gid], y = b[gid];
+        if (gid < 6) { sample[gid * 2] = x; sample[gid * 2 + 1] = y; }
+        m = (fabs(x - y) <= 1e-3f * fabs(x) + 1e-4f) ? 0u : 1u;
+    }
+    const uint s = simd_sum(m);
+    if (lane == 0 && s && atomic_load_explicit(bad, memory_order_relaxed) < 4096u)
+        atomic_fetch_add_explicit(bad, s, memory_order_relaxed);
+}
 kernel void nvconv_cmp(device const float *a [[buffer(5)]], device const float *b [[buffer(6)]], device atomic_uint *bad [[buffer(7)]],
                        constant uint &n [[buffer(8)]], device float *sample [[buffer(9)]], uint gid [[thread_position_in_grid]],
                        uint lane [[thread_index_in_simdgroup]])
@@ -167,7 +181,7 @@ kernel void nvconv_cmp(device const float *a [[buffer(5)]], device const float *
     if (gid < n) {
         const float x = a[gid], y = b[gid];
         if (gid < 6) { sample[gid * 2] = x; sample[gid * 2 + 1] = y; }
-        m = (fabs(x - y) <= 1e-3f * fabs(x) + 1e-4f) ? 0u : 1u;
+        m = (fabs(x - y) <= 1e-5f * fabs(x) + 1e-6f) ? 0u : 1u;
     }
     const uint s = simd_sum(m);
     if (lane == 0 && s && atomic_load_explicit(bad, memory_order_relaxed) < 4096u)
