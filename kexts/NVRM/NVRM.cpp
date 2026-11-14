@@ -39,6 +39,7 @@ extern "C" {
 // This driver is built for macOS 27 (Darwin 27) only; macOS 15 and 26 have their own. On any other kernel NVRM
 // claims nothing, so NVRMFB and NVRMAGDC, which attach to it, never start either.
 static bool nvrm_kernel_supported(void) { return version_major == 27; }
+extern "C" unsigned nv_xnu_fw_wait(unsigned cap_ms, bool *found);   // os-xnu2.cpp
 
 #include "nvrm_gpuva_abi.h"
 #define NVRM_SS_KERNEL_ABI 1
@@ -1101,6 +1102,11 @@ void NVRM::autoGo(void *p0, wait_result_t)
     } else {
         IOSleep(s->fAutoGoSettleMs);
     }
+    // The firmware file must be readable before the card is started; started by the boot loader, this thread can get
+    // here before a volume is mounted (see nv_xnu_fw_wait). The wait is bounded, and the start goes on either way so
+    // that a missing firmware is still reported by RM as before.
+    { bool fwFound = false; const unsigned fwWaited = nv_xnu_fw_wait(120000, &fwFound);
+      if (fwWaited || !fwFound) LOG("card firmware %s after waiting %u ms for the volume that holds it", fwFound ? "readable" : "still NOT readable", fwWaited); }
     s->measureBootRaster();
     { thread_t hw = THREAD_NULL; s->retain();
       if (kernel_thread_start(&NVRM::headWatch, s, &hw) == KERN_SUCCESS) thread_deallocate(hw); else s->release(); }

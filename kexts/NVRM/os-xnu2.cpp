@@ -1232,6 +1232,27 @@ static bool nv_xnu_fw_digest_ok(const nv_xnu_fw_expected *e, const void *buf, si
     hex[40] = 0;
     return !strcmp(hex, e->sha1);
 }
+// The card's firmware is a file, and this driver can be started before any volume is mounted: on macOS 27 the boot
+// loader injects it, and it asked for the firmware seven seconds before the root volume was mounted (measured: read at
+// 46.9 s, root mounted at 53.9 s, the data volume at 60.3 s). Both locations failed, RM reported "No firmware image
+// found", and the card never started. The start thread calls this first: it waits, up to cap_ms, until the firmware
+// can be opened in either location, and says how long it waited. On a start where a volume is already there (the
+// driver loaded from the auxiliary collection) the first try succeeds and nothing is waited.
+extern "C" unsigned nv_xnu_fw_wait(unsigned cap_ms, bool *found)
+{
+    static const char *const where[] = { NV_XNU_FW_DIR "gsp_ga10x.bin", NV_XNU_FW_ALT_DIR "gsp_ga10x.bin" };
+    unsigned waited = 0;
+    for (;;) {
+        for (unsigned i = 0; i < sizeof where / sizeof where[0]; i++) {
+            vfs_context_t ctx = vfs_context_current();
+            vnode_t vp = NULL;
+            if (vnode_open(where[i], FREAD, 0, 0, &vp, ctx) == 0) { vnode_close(vp, FREAD, ctx); if (found) *found = true; return waited; }
+        }
+        if (waited >= cap_ms) { if (found) *found = false; return waited; }
+        IOSleep(250); waited += 250;
+    }
+}
+
 const void *NV_API_CALL nv_get_firmware(nv_state_t *nv, nv_firmware_type_t fw_type, nv_firmware_chip_family_t fw_chip_family, const void **fw_buf, NvU32 *fw_size)
 {
     const char *path = nv_xnu_fw_path(fw_type, fw_chip_family);
