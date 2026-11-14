@@ -3840,6 +3840,7 @@ static void nvmtl_sample_counter(NVMTLCommandBuffer *cb, id sb, NSUInteger i, id
 unsigned nvmtl_apps1_resolve_miss, nvmtl_apps1_resolve_extra, nvmtl_apps1_ds_resolve_miss;
 @interface NVMTLRenderCommandEncoder () { unsigned _groupDepth, _dumpDepth; NSString *_dumpName; BOOL _dumpPso; }
 - (void)nvmtlDumpBoundFragmentBuffers;
+- (void)nvmtlEndEncodingBody;
 @end
 
 @interface NVMTLRenderCommandEncoder () { @public BOOL _hzFull; uint32_t _hzAttSkip; } @end   // NVMTL_HAZARD: keeps render passes; untracked attachments
@@ -4721,7 +4722,40 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     _visOffset = offset; _visPending = YES;
     [self nvmtlBeginVisibility];
 }
+#if !NVMTL_RELEASE
+// Test builds only. While /tmp/nvmtl-passdump-request exists, the first colour target of every render pass is copied
+// out after the pass and written to /tmp/nvmtl-pass-<pid>-<n>-<w>x<h>-f<format>.raw when its command buffer completes
+// (at most 400 files), so a wrong picture can be followed pass by pass. A format it has no pixel size for is skipped.
+static void nvmtl_pass_dump(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
+    static _Atomic unsigned seq; const unsigned n = atomic_fetch_add(&seq, 1); if (n >= 400) return;
+    const NSUInteger w = t.width, h = t.height; const MTLPixelFormat pf = t.pixelFormat; NSUInteger bpp = 0;
+    switch (pf) { case MTLPixelFormatR8Unorm: bpp = 1; break; case MTLPixelFormatR16Float: case MTLPixelFormatRG8Unorm: bpp = 2; break;
+        case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatRGBA8Unorm_sRGB: case MTLPixelFormatBGRA8Unorm: case MTLPixelFormatBGRA8Unorm_sRGB:
+        case MTLPixelFormatRG16Float: case MTLPixelFormatR32Float: bpp = 4; break;
+        case MTLPixelFormatRGBA16Float: case MTLPixelFormatRG32Float: bpp = 8; break; case MTLPixelFormatRGBA32Float: bpp = 16; break; default: break; }
+    if (!bpp || !w || !h) { nvlog("pass dump: pass %u skipped (format %lu, %lux%lu)", n, (unsigned long)pf, (unsigned long)w, (unsigned long)h); return; }
+    id<MTLBuffer> buf = [(id<MTLDevice>)gNVMTLMainDevice newBufferWithLength:w * h * bpp options:MTLResourceStorageModeShared];
+    id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder]; if (!buf || !be) { nvlog("pass dump: pass %u has no buffer or encoder", n); return; }
+    [be copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf
+        destinationOffset:0 destinationBytesPerRow:w * bpp destinationBytesPerImage:w * h * bpp];
+    [be endEncoding];
+    const int pid = getpid();
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; char path[200];
+        snprintf(path, sizeof path, "/tmp/nvmtl-pass-%d-%03u-%lux%lu-f%lu.raw", pid, n, (unsigned long)w, (unsigned long)h, (unsigned long)pf);
+        FILE *f = fopen(path, "wb"); if (!f) { nvlog("pass dump: cannot write %s (errno %d)", path, errno); return; }
+        fwrite(buf.contents, 1, w * h * bpp, f); fclose(f); }];
+}
+#endif
 - (void)endEncoding {
+    NVMTLCommandBuffer *dumpCb = _cb; NVMTLTexture *dumpTarget = _target;
+    [self nvmtlEndEncodingBody];
+#if !NVMTL_RELEASE
+    if (dumpCb && dumpTarget && access("/tmp/nvmtl-passdump-request", F_OK) == 0) nvmtl_pass_dump(dumpCb, dumpTarget);
+#else
+    (void)dumpCb; (void)dumpTarget;
+#endif
+}
+- (void)nvmtlEndEncodingBody {
     _cb->_nEnd++;
     _svFor=nil; _svKey=nil; _svSel=nil;   // nothing of this encoder's sampler choice outlives it
     if (_dumpPso) { _dumpPso = NO; [self nvmtlDumpBoundFragmentBuffers]; }
