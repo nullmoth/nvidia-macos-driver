@@ -89,7 +89,7 @@ public:
         return IOService::init(properties);
     }
     bool start(IOService *provider) override {
-        if (version_major != 24 && version_major != 25) return false;   /* the 2.x line supports macOS 15 (Darwin 24) and macOS 26 (Darwin 25) only */
+        if (version_major != 27) return false;   /* this line supports macOS 27 (Darwin 27) only; macOS 15 and 26 have their own driver */
         if(!IOService::start(provider))return false;
         // Matching IOResources gives one coordinator for the entire PCI tree.
         setProperty("selector-version","0.1.0");

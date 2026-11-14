@@ -258,7 +258,7 @@ void NMDRMDevice::stop(IOService *provider)
 
 extern "C" kern_return_t nmdrm_kmod_start(kmod_info_t *, void *)
 {
-    if (version_major != 24 && version_major != 25) return KERN_FAILURE;   /* the 2.x line supports macOS 15 (Darwin 24) and macOS 26 (Darwin 25) only */
+    if (version_major != 27) return KERN_FAILURE;   /* this line supports macOS 27 (Darwin 27) only */
     gLock = IOLockAlloc();
     if (!gLock) return KERN_FAILURE;
     gMajor = cdevsw_add(-1, &gCdevsw);
