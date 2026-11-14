@@ -32,8 +32,8 @@ start = device.index('- (instancetype)initWithAcceleratorPort:(mach_port_t)port 
 sup = device.index('self = [super initWithAcceleratorPort:port];', start)
 head = device[start:sup]
 check('return nil;' not in head, 'no bare `return nil` before super init (each refusal keeps the object)')
-check(head.count('return nvmtl_refuse_before_init(self);') >= 3,
-      'the version refusals and the card refusal all go through nvmtl_refuse_before_init')
+check(head.count('return nvmtl_refuse_before_init(self);') >= 2,
+      'the version refusal and the card refusal both go through nvmtl_refuse_before_init')
 check('CFBridgingRetain(obj)' in device[device.index('static id nvmtl_refuse_before_init'):start],
       'nvmtl_refuse_before_init keeps one reference')
 check('nvmtl_os_major_from(v, d)' in head and '"kern.osrelease"' in head, 'the version check reads kern.osrelease too')

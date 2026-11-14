@@ -52,6 +52,15 @@ included = set()
 for m in re.finditer(r'^\s*#\s*(?:include|import)\s+"([^"]+)"', device, re.M):
     if device.index(m.group(0)) > guard_at:
         included.add(m.group(1))
+# a file imported by a guarded file is inside the guarded unit too
+todo = list(included)
+while todo:
+    inner = plugin / todo.pop()
+    if not inner.is_file():
+        continue
+    for m in re.finditer(r'^\s*#\s*(?:include|import)\s+"([^"]+)"', inner.read_text(errors='replace'), re.M):
+        if m.group(1) not in included:
+            included.add(m.group(1)); todo.append(m.group(1))
 for f in sorted(plugin.rglob('*')):
     if f.suffix not in ('.m', '.c', '.h', '.mm') or not f.is_file():
         continue

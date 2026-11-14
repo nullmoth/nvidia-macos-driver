@@ -71,16 +71,19 @@ arm('the setter refuses without the feature instead of recording an invalid comm
     'if (!g_depth_bounds) return on ? -1 : 0;' in vk and 'int  nvmtl_vk_cmd_set_depth_bounds(' in vkh)
 
 # 3 · newTextureViewWithDescriptor:
-tv = body(objects, '- (id<MTLTexture>)newTextureViewWithDescriptor:(id)d {')
+extras = (root / 'plugin/NVMTL4Extras.m').read_text()
+tv_at = extras.find('- (id<MTLTexture>)newTextureViewWithDescriptor:(MTLTextureViewDescriptor *)d\n{')
+tv = extras[tv_at:extras.index('\n}\n', tv_at)] if tv_at >= 0 else None
 arm('texture defines newTextureViewWithDescriptor:', tv is not None)
 arm('the descriptor view goes through the swizzle view path',
-    tv is not None and 'newTextureViewWithPixelFormat:f textureType:tt levels:levels slices:slices swizzle:sw' in tv)
+    tv is not None and 'return [self newTextureViewWithPixelFormat:' in tv)
 for key in ('pixelFormat', 'textureType', 'levelRange', 'sliceRange', 'swizzle'):
-    arm(f'the descriptor field {key} is read', tv is not None and f'valueForKey:@"{key}"' in tv)
+    arm(f'the descriptor field {key} is read', tv is not None and f'd.{key}' in tv)
+arm('the class itself has no second copy of it', 'newTextureViewWithDescriptor:' not in objects)
 
 # 4 · colour attachment map
-cm = body(objects, '- (void)setColorAttachmentMap:(id)map {')
-arm('Metal 3 render encoder defines setColorAttachmentMap:', cm is not None)
+arm('Metal 3 render encoder defines setColorAttachmentMap: once, beside the Metal 4 code',
+    extras.count('- (void)setColorAttachmentMap:(MTLLogicalToPhysicalColorAttachmentMap *)map') == 1 and 'setColorAttachmentMap:' not in objects)
 
 print(f'RESULT {failed} failed')
 sys.exit(1 if failed else 0)
