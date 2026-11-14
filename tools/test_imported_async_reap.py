@@ -136,6 +136,15 @@ static nvk_buffer make_buf(uintptr_t tag, size_t sz, int imported, int sync_free
 
 int main(int argc, char **argv) {{
     const uint64_t main_tid = cur_tid();
+    if (argc == 2 && !strcmp(argv[1], "large")) {{
+        nvk_buffer small = make_buf(1, NVMTL_IREAP_LARGE_MIN - 4096, 1, 0);
+        nvk_buffer large = make_buf(2, NVMTL_IREAP_LARGE_MIN, 1, 0);
+        nvmtl_vk_buffer_destroy(&small);
+        if (atomic_load(&g_ireap_queued) || atomic_load(&g_last_free_tid) != main_tid) return 1;
+        nvmtl_vk_buffer_destroy(&large);
+        drain_reaper();
+        return !(atomic_load(&g_ireap_freed) == 1 && atomic_load(&g_last_free_tid) != main_tid && g_alloc_bytes == 0);
+    }}
     if (argc == 2 && !strcmp(argv[1], "sync")) {{
         atomic_store(&g_cmd_submitted, 1);
         nvk_buffer imported = make_buf(1, 65536, 1, 0);
@@ -237,6 +246,10 @@ with tempfile.TemporaryDirectory(prefix='nvmtl-ireap-') as d:
             sync = subprocess.run([str(exe), 'sync'], env=env, capture_output=True, text=True, timeout=30)
             check(f'imported memory frees synchronously after grace with NVMTL_SYNC_IMPORT_FREE={setting or "unset"}',
                   sync.returncode == 0, sync.stderr[-400:])
+        env['NVMTL_SYNC_IMPORT_FREE'] = 'large'
+        large = subprocess.run([str(exe), 'large'], env=env, capture_output=True, text=True, timeout=30)
+        check('large mode keeps buffers below 16 MiB synchronous and reaps at the threshold',
+              large.returncode == 0, large.stderr[-400:])
         env['NVMTL_SYNC_IMPORT_FREE'] = '0'
         out = subprocess.run([str(exe)], env=env, capture_output=True, text=True, timeout=30)
         check('harness exited 0', out.returncode == 0, out.stderr[-400:])

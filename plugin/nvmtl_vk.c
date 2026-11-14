@@ -8645,6 +8645,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
 // (mem->base.map == NULL in NVK, so dev->mappings is untouched), and NEVER when _hostDealloc is set (sync_free).
 #define NVMTL_IREAP_CAP       64u
 #define NVMTL_IREAP_MAX_BYTES (512ull << 20)
+#define NVMTL_IREAP_LARGE_MIN (16ull << 20)
 typedef struct { void *buf, *mem; size_t alloc; } nvmtl_ireap_item;
 static pthread_mutex_t g_ireap_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_ireap_cv   = PTHREAD_COND_INITIALIZER;
@@ -8655,17 +8656,18 @@ static int g_ireap_scheduled, g_ireap_busy, g_ireap_exiting;
 static dispatch_queue_t g_ireap_dq;
 static dispatch_once_t g_ireap_once;
 static _Atomic uint64_t g_ireap_queued, g_ireap_freed, g_ireap_sync_fallback;
-static int nvmtl_imported_reap_on(void)
+static int nvmtl_imported_reap_on(size_t alloc)
 {
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("NVMTL_SYNC_IMPORT_FREE");
         // Background unpinning sharply regressed Video Filter on the RTX 5090.
-        on = e && !strcmp(e, "0");
+        on = e && !strcmp(e, "0") ? 1 : e && !strcmp(e, "large") ? 2 : 0;
         nvlog("vk: imported host-pointer async reaper %s (NVMTL_SYNC_IMPORT_FREE=%s)",
-              on ? "ON (grace-retired imported buffers unpin off the submit pump)" : "OFF", e ? e : "unset");
+              on == 1 ? "ON (all eligible imports)" : on == 2 ? "ON (imports of 16 MiB or more)" : "OFF",
+              e ? e : "unset");
     }
-    return on;
+    return on == 1 || (on == 2 && alloc >= NVMTL_IREAP_LARGE_MIN);
 }
 static void nvmtl_imported_reap_poke(void)
 {
@@ -8747,7 +8749,7 @@ static int nvmtl_imported_reap_enqueue(const nvk_buffer *b)
 {
     if (!b || !b->imported || !b->map || !b->alloc || b->pool || b->placed || b->bind_lost || b->bar1 || b->sync_free || !b->buf || !b->mem)
         return 0;
-    if (!nvmtl_buffer_grace_on() || !nvmtl_imported_reap_on()) return 0;
+    if (!nvmtl_buffer_grace_on() || !nvmtl_imported_reap_on(b->alloc)) return 0;
     dispatch_once_f(&g_ireap_once, NULL, nvmtl_imported_reap_init);
     if (!g_ireap_dq) return 0;
     int start = 0;
