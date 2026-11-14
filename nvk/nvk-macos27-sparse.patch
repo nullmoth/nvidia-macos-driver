@@ -1,0 +1,287 @@
+diff -u a/src/nouveau/nil/cbindgen.toml b/src/nouveau/nil/cbindgen.toml
+--- a/src/nouveau/nil/cbindgen.toml
++++ b/src/nouveau/nil/cbindgen.toml
+@@ -45,6 +45,8 @@
+ "IMAGE_USAGE_SPARSE_RESIDENCY_BIT" = "NIL_IMAGE_USAGE_SPARSE_RESIDENCY_BIT"
+ "IMAGE_USAGE_VIDEO_BIT" = "NIL_IMAGE_USAGE_VIDEO_BIT"
+ "IMAGE_USAGE_UNCOMPRESSED_BIT" = "NIL_IMAGE_USAGE_UNCOMPRESSED_BIT"
++"IMAGE_USAGE_SPARSE_16K_BIT" = "NIL_IMAGE_USAGE_SPARSE_16K_BIT"
++"IMAGE_USAGE_SPARSE_FLAT_3D_BIT" = "NIL_IMAGE_USAGE_SPARSE_FLAT_3D_BIT"
+ 
+ [macro_expansion]
+ bitflags = true # We need this for the bitflags crate
+diff -u a/src/nouveau/nil/image.rs b/src/nouveau/nil/image.rs
+--- a/src/nouveau/nil/image.rs
++++ b/src/nouveau/nil/image.rs
+@@ -14,12 +14,21 @@
+ 
+ pub const MAX_LEVELS: usize = 16;
+ 
++fn sparse_mode_of(usage: ImageUsageFlags) -> u8 {
++    (if usage & IMAGE_USAGE_SPARSE_16K_BIT != 0 { crate::tiling::SPARSE_MODE_16K } else { 0 })
++        | (if usage & IMAGE_USAGE_SPARSE_FLAT_3D_BIT != 0 { crate::tiling::SPARSE_MODE_FLAT_3D } else { 0 })
++}
++
+ pub type ImageUsageFlags = u8;
+ pub const IMAGE_USAGE_2D_VIEW_BIT: ImageUsageFlags = 1 << 0;
+ pub const IMAGE_USAGE_LINEAR_BIT: ImageUsageFlags = 1 << 1;
+ pub const IMAGE_USAGE_SPARSE_RESIDENCY_BIT: ImageUsageFlags = 1 << 2;
+ pub const IMAGE_USAGE_VIDEO_BIT: ImageUsageFlags = 1 << 3;
+ pub const IMAGE_USAGE_UNCOMPRESSED_BIT: ImageUsageFlags = 1 << 4;
++/// Metal: sparse tiles of 16 KB, half the width and height of the standard 64 KB shape
++pub const IMAGE_USAGE_SPARSE_16K_BIT: ImageUsageFlags = 1 << 5;
++/// Metal: a 3D sparse image takes the 2D tile shape with depth 1, as Apple GPUs tile it
++pub const IMAGE_USAGE_SPARSE_FLAT_3D_BIT: ImageUsageFlags = 1 << 6;
+ 
+ #[derive(Clone, Debug, Copy, PartialEq, Default)]
+ #[repr(u8)]
+@@ -318,7 +327,7 @@
+                 .clamp(info.extent_px.to_B(info.format, sample_layout))
+         } else if (info.usage & IMAGE_USAGE_SPARSE_RESIDENCY_BIT) != 0 {
+             assert!((info.usage & IMAGE_USAGE_VIDEO_BIT) == 0);
+-            Tiling::sparse(dev, info.format, info.dim)
++            Tiling::sparse_mode(dev, info.format, info.dim, sparse_mode_of(info.usage))
+         } else if (info.usage & IMAGE_USAGE_VIDEO_BIT) != 0 {
+             assert!((info.usage & IMAGE_USAGE_SPARSE_RESIDENCY_BIT) == 0);
+             let mut min_tiling = Tiling::choose(
+diff -u a/src/nouveau/nil/tiling.rs b/src/nouveau/nil/tiling.rs
+--- a/src/nouveau/nil/tiling.rs
++++ b/src/nouveau/nil/tiling.rs
+@@ -324,9 +324,39 @@
+             _ => panic!("Invalid texel size"),
+         },
+         _ => panic!("Invalid sparse image dimension"),
++    }
++}
++
++/// Sparse layout modes for Metal (bits): 16 KB tiles, and 2D-shaped tiles of depth 1 for 3D images.
++pub const SPARSE_MODE_16K: u8 = 1;
++pub const SPARSE_MODE_FLAT_3D: u8 = 2;
++
++pub fn sparse_block_extent_el_mode(
++    format: Format,
++    dim: ImageDim,
++    mode: u8,
++) -> Extent4D<units::Elements> {
++    let flat = mode & SPARSE_MODE_FLAT_3D != 0 && dim == ImageDim::_3D;
++    let e = sparse_block_extent_el(format, if flat { ImageDim::_2D } else { dim });
++    if mode & SPARSE_MODE_16K != 0 && e.depth == 1 {
++        Extent4D::new(e.width / 2, e.height / 2, 1, 1)
++    } else {
++        e
+     }
+ }
+ 
++#[unsafe(no_mangle)]
++pub extern "C" fn nil_sparse_block_extent_px_mode(
++    format: Format,
++    dim: ImageDim,
++    sample_layout: SampleLayout,
++    mode: u8,
++) -> Extent4D<units::Pixels> {
++    sparse_block_extent_el_mode(format, dim, mode)
++        .to_sa(format)
++        .to_px(sample_layout)
++}
++
+ pub fn sparse_block_extent_px(
+     format: Format,
+     dim: ImageDim,
+@@ -359,8 +389,17 @@
+         format: Format,
+         dim: ImageDim,
+     ) -> Self {
+-        let sparse_block_extent_B = sparse_block_extent_B(format, dim);
++        Self::sparse_mode(dev, format, dim, 0)
++    }
+ 
++    pub fn sparse_mode(
++        dev: &nil_rs_bindings::nv_device_info,
++        format: Format,
++        dim: ImageDim,
++        mode: u8,
++    ) -> Self {
++        let sparse_block_extent_B = sparse_block_extent_el_mode(format, dim, mode).to_B(format);
++
+         assert!(sparse_block_extent_B.width.is_power_of_two());
+         assert!(sparse_block_extent_B.height.is_power_of_two());
+         assert!(sparse_block_extent_B.depth.is_power_of_two());
+diff -u a/src/nouveau/vulkan/nvk_buffer.c b/src/nouveau/vulkan/nvk_buffer.c
+--- a/src/nouveau/vulkan/nvk_buffer.c
++++ b/src/nouveau/vulkan/nvk_buffer.c
+@@ -41,7 +41,7 @@
+                        NVK_BUFFER_CREATE_CAPTURE_REPLAY_BITS))
+       alignment = MAX2(alignment, pdev->nvkmd->bind_align_B);
+    /* nvk-nvbig: a sparse buffer's binds are whole 64 KB VRAM pages (res3 binds the whole buffer) */
+-   if (create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT)
++   if ((create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) && !nvkmd_small_pages)
+       alignment = MAX2(alignment, 64ull * 1024ull);
+ 
+    return alignment;
+diff -u a/src/nouveau/vulkan/nvk_image.c b/src/nouveau/vulkan/nvk_image.c
+--- a/src/nouveau/vulkan/nvk_image.c
++++ b/src/nouveau/vulkan/nvk_image.c
+@@ -832,10 +832,11 @@
+ nvk_fill_sparse_image_fmt_props(VkImageAspectFlags aspects,
+                                 const enum pipe_format format,
+                                 const enum nil_image_dim dim,
+-                                const enum nil_sample_layout sample_layout)
++                                const enum nil_sample_layout sample_layout,
++                                uint8_t sparse_mode)
+ {
+    struct nil_Extent4D_Pixels sparse_block_extent_px =
+-      nil_sparse_block_extent_px(nil_format(format), dim, sample_layout);
++      nil_sparse_block_extent_px_mode(nil_format(format), dim, sample_layout, sparse_mode);
+ 
+    assert(sparse_block_extent_px.array_len == 1);
+ 
+@@ -906,7 +907,8 @@
+ 
+    vk_outarray_append_typed(VkSparseImageFormatProperties2, &out, props) {
+       props->properties = nvk_fill_sparse_image_fmt_props(aspects, pipe_format,
+-                                                          dim, sample_layout);
++                                                          dim, sample_layout,
++                                                          (uint8_t)nvkmd_sparse_mode);
+    }
+ }
+ 
+@@ -1020,6 +1022,12 @@
+       /* Sparse multiplane is not supported */
+       assert(image->plane_count == 1);
+       usage |= NIL_IMAGE_USAGE_SPARSE_RESIDENCY_BIT;
++      /* the Metal plugin asks for Apple's tile shapes on this thread (nvmtl_nvk_sparse_mode_v1) */
++      image->sparse_mode = (uint8_t)nvkmd_sparse_mode;
++      if (nvkmd_sparse_mode & 1)
++         usage |= NIL_IMAGE_USAGE_SPARSE_16K_BIT;
++      if (nvkmd_sparse_mode & 2)
++         usage |= NIL_IMAGE_USAGE_SPARSE_FLAT_3D_BIT;
+    }
+ 
+    if (image->vk.usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+@@ -1610,11 +1618,13 @@
+ static VkSparseImageMemoryRequirements
+ nvk_fill_sparse_image_memory_reqs(const struct nil_image *nil,
+                                   const struct nil_image *stencil_tmp,
+-                                  VkImageAspectFlags aspects)
++                                  VkImageAspectFlags aspects,
++                                  uint8_t sparse_mode)
+ {
+    VkSparseImageFormatProperties sparse_format_props =
+       nvk_fill_sparse_image_fmt_props(aspects, nil->format.p_format,
+-                                      nil->dim, nil->sample_layout);
++                                      nil->dim, nil->sample_layout,
++                                      sparse_mode);
+ 
+    assert(nil->mip_tail_first_lod <= nil->num_levels);
+    VkSparseImageMemoryRequirements sparse_memory_reqs = {
+@@ -1673,7 +1683,8 @@
+    vk_outarray_append_typed(VkSparseImageMemoryRequirements2, &out, reqs) {
+       reqs->memoryRequirements =
+          nvk_fill_sparse_image_memory_reqs(&image->planes[0].nil,
+-                                           stencil_tmp, aspects);
++                                           stencil_tmp, aspects,
++                                           image->sparse_mode);
+    };
+ }
+ 
+diff -u a/src/nouveau/vulkan/nvk_image.h b/src/nouveau/vulkan/nvk_image.h
+--- a/src/nouveau/vulkan/nvk_image.h
++++ b/src/nouveau/vulkan/nvk_image.h
+@@ -96,6 +96,9 @@
+ struct nvk_image {
+    struct vk_image vk;
+ 
++   /** The sparse tile shape mode it was made with (nvkmd_sparse_mode) */
++   uint8_t sparse_mode;
++
+    /** True if the planes are bound separately
+     *
+     * This is set based on VK_IMAGE_CREATE_DISJOINT_BIT
+diff -u a/src/nouveau/vulkan/nvkmd/nvkmd.h b/src/nouveau/vulkan/nvkmd/nvkmd.h
+--- a/src/nouveau/vulkan/nvkmd/nvkmd.h
++++ b/src/nouveau/vulkan/nvkmd/nvkmd.h
+@@ -675,5 +675,13 @@
+ {
+    return ctx->ops->sync(ctx, log_obj);
+ }
++
++/* Small-page mode for the calling thread. While on, a sparse buffer binds in 4 KB units and VRAM is allocated in
++ * physically contiguous 4 KB pages, so a Metal heap or buffer with 16 KB sparse pages can be mapped page by page.
++ * Off (the default) keeps the 64 KB big-page path. Set through nvmtl_nvk_small_pages_v1(). */
++extern __thread int nvkmd_small_pages;
++/* Sparse image tile shapes for images the calling thread creates (bit 0: 16 KB tiles, bit 1: depth-1 tiles for 3D
++ * images), set by the Metal plugin around making a sparse texture through nvmtl_nvk_sparse_mode_v1(). */
++extern __thread int nvkmd_sparse_mode;
+ 
+ #endif /* NVKMD_H */
+diff -u a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
+@@ -1458,6 +1458,24 @@
+ /* res3: the plugin's marker - this NVK's sparse buffer binds are real (patch_nvk_sparse.py). */
+ __attribute__((visibility("default"))) int nvmtl_nvk_sparse_bind_v1(void);
+ __attribute__((visibility("default"))) int nvmtl_nvk_sparse_bind_v1(void) { return 1; }
++/* Small-page mode and sparse tile shapes for the calling thread (see nvkmd.h). The Metal plugin turns them on around
++ * creating a heap, buffer or texture with 16 KB sparse pages and off again; each returns the previous state. */
++__thread int nvkmd_small_pages;
++__thread int nvkmd_sparse_mode;
++__attribute__((visibility("default"))) int nvmtl_nvk_sparse_mode_v1(int mode);
++__attribute__((visibility("default"))) int nvmtl_nvk_sparse_mode_v1(int mode)
++{
++   const int was = nvkmd_sparse_mode;
++   nvkmd_sparse_mode = mode & 3;
++   return was;
++}
++__attribute__((visibility("default"))) int nvmtl_nvk_small_pages_v1(int on);
++__attribute__((visibility("default"))) int nvmtl_nvk_small_pages_v1(int on)
++{
++   const int was = nvkmd_small_pages;
++   nvkmd_small_pages = on ? 1 : 0;
++   return was;
++}
+ 
+ static VkResult
+ nvkmd_nvrm_bind_ctx_signal(struct nvkmd_ctx *_ctx,
+diff -u a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
+@@ -196,7 +196,7 @@
+ 	/* nvk-nvbig: a big-page VRAM allocation is a whole number of 64 KB pages, and the GPU mapping of the whole
+ 	 * allocation starts on a 64 KB VA boundary, as on NVIDIA's driver (NV610-MAP.md:249-255). */
+ 	uint64_t nvbig_va_align_B = va_align_B;
+-	if (!isSystemMem && nvkmd_nvrm_vram_big()) {
++	if (!isSystemMem && nvkmd_nvrm_vram_big() && !nvkmd_small_pages) {
+ 		size_B = align64(size_B, NVK_NV_BIG_PAGE_B);
+ 		nvbig_va_align_B = MAX2(va_align_B, NVK_NV_BIG_PAGE_B);
+ 	}
+@@ -257,9 +257,12 @@
+ 			static int nonc = -1, big = -1;
+ 			if (nonc < 0) { const char *e = getenv("NVK_NO_NONCONTIG"); nonc = (e && *e && *e != '0') ? 0 : 1; }
+ 			if (big < 0) { const char *e = getenv("NVK_NO_BIGPAGE"); big = (e && *e && *e != '0') ? 0 : 1; }
+-			if (nonc)
++			/* small-page mode: 4 KB pages over ONE contiguous run, so a block-linear image placed in it keeps its
++			 * swizzle (scattered 4 KB pages are what corrupted tiled textures, see above) */
++			const int scatter = nonc && !nvkmd_small_pages, bigpg = big && !nvkmd_small_pages;
++			if (scatter)
+ 				params.attr |= DRF_DEF(OS32, _ATTR, _PHYSICALITY, _ALLOW_NONCONTIGUOUS);
+-			if (big) {
++			if (bigpg) {
+ 				params.attr &= ~(0x3u << 23);     /* NVOS32_ATTR_PAGE_SIZE is 24:23 (nvos.h) */
+ 				params.attr |= DRF_DEF(OS32, _ATTR, _PAGE_SIZE, _BIG);
+ 			}
+diff -u a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_va.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_va.c
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_va.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_va.c
+@@ -54,7 +54,11 @@
+ 		.type = NVOS32_TYPE_IMAGE,
+ 		.flags =
+ 			NVOS32_ALLOC_FLAGS_VIRTUAL |
+-			((align_B != 0) ? NVOS32_ALLOC_FLAGS_ALIGNMENT_FORCE : 0),
++			((align_B != 0) ? NVOS32_ALLOC_FLAGS_ALIGNMENT_FORCE : 0) |
++			/* A sparse range gets sparse PTEs: unbound pages read zero and drop writes instead of faulting, as
++			 * Vulkan sparse residency requires, and RM unmaps a page of such a range back to sparse. Without this
++			 * a read of an unbound page faulted the channel (FAULT_PTE). */
++			((flags & NVKMD_VA_SPARSE) ? NVOS32_ALLOC_FLAGS_SPARSE : 0),
+ 		.size = size_B,
+ 		.alignment = align_B,
+ 		.hVASpace = pdev->hVaSpace,

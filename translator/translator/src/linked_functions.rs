@@ -1050,12 +1050,9 @@ pub fn specialize_visible_function_tables(
                         entries.push(function);
                     }
                 }
-                if entries.is_empty() {
-                    return Err(format!(
-                        "linked visible function table {} has no function matching indirect call type",
-                        pointer.table.label()
-                    ));
-                }
+                // No linked function has this call's type (or nothing is linked yet: a Metal 4 pipeline built for
+                // binary linking before its functions are added). The dispatcher then has no case, and a call
+                // through it is undefined, as a call through a null or foreign handle is in Metal.
                 dispatchers.push(Dispatcher {
                     name: name.clone(),
                     entries: entries.clone(),
@@ -2365,6 +2362,20 @@ fn dispatcher_definition(
         .collect::<Vec<_>>()
         .join(", ");
     let parameter_separator = if parameters.is_empty() { "" } else { ", " };
+    if entries.is_empty() {
+        // A plain return, not `unreachable`: the dispatcher is inlined at the call, and an unreachable there left the
+        // caller's following instructions after a terminator.
+        let body = if return_type == "void" {
+            "ret void".to_string()
+        } else {
+            format!("ret {return_type} zeroinitializer")
+        };
+        return Ok(format!(
+            "define internal {return_type} {global}(i32 %metal2vulkan_slot{}{}) {{\nentry:\n  {body}\n}}\n",
+            parameter_separator,
+            parameters.join(", ")
+        ));
+    }
     let mut output = format!(
         "define internal {return_type} {global}(i32 %metal2vulkan_slot{}{}) {{\nentry:\n  switch i32 %metal2vulkan_slot, label %invalid [",
         parameter_separator,

@@ -221,6 +221,8 @@ enum { RF_COLOR, RF_DEPTH, RF_MOTION, RF_DIFFUSE, RF_SPECULAR, RF_NORMAL, RF_ROU
 - (MTLTextureUsage)depthTextureUsage { return MTLTextureUsageShaderRead; }
 - (MTLTextureUsage)motionTextureUsage { return MTLTextureUsageShaderRead; }
 - (MTLTextureUsage)reactiveTextureUsage { return MTLTextureUsageShaderRead; }
+// macOS 27 renamed reactiveTextureUsage; both answer the same.
+- (MTLTextureUsage)reactiveMaskTextureUsage { return MTLTextureUsageShaderRead; }
 - (MTLTextureUsage)diffuseAlbedoTextureUsage { return MTLTextureUsageShaderRead; }
 - (MTLTextureUsage)specularAlbedoTextureUsage { return MTLTextureUsageShaderRead; }
 - (MTLTextureUsage)normalTextureUsage { return MTLTextureUsageShaderRead; }
@@ -325,8 +327,9 @@ static id nvmtl_mfx_dlss_rr_make(id descriptor, id device) {
 //   - the current frame is evaluated and the core writes the in-between frame into outputTexture.
 // Mapping: colorTexture -> DLSSG.Backbuffer, depthTexture -> DLSSG.Depth, motionTexture -> DLSSG.MVecs,
 // outputTexture -> DLSSG.OutputInterpolated, uiTexture -> DLSSG.UI, motionVectorScale -> DLSSG.MvecScale, jitter -> DLSSG.Jitter.
-// Camera: nearPlane/farPlane/fieldOfView(degrees -> radians)/aspectRatio give the projection. The interpolator carries no
-// camera pose; when the descriptor's scaler offers worldToViewMatrix/viewToClipMatrix (the denoised scaler) the pose and
+// Camera: nearPlane/farPlane/fieldOfView(degrees -> radians)/aspectRatio give the projection. The pose comes from the
+// interpolator's own worldToViewMatrix/viewToClipMatrix (macOS 27) when the app sets them; otherwise, when the descriptor's
+// scaler offers worldToViewMatrix/viewToClipMatrix (the denoised scaler) the pose and
 // ClipToPrevClip come from them (the previous frame's matrices are kept), otherwise the pose is the origin looking down -Z
 // with an identity ClipToPrevClip and the motion vectors (which include camera motion) carry all of the movement.
 // Not mapped (logged once): deltaTime, the fence, uiTextureComposited, and anything the core takes that MetalFX never gives
@@ -345,6 +348,13 @@ static id nvmtl_mfx_dlss_rr_make(id descriptor, id device) {
     BOOL _haveHistory, _notedUnmapped, _havePrevVP, _notedScalerMotion;
     simd_float4x4 _prevVP;
     uint32_t _frame;
+    // The macOS 27 additions to MTLFXFrameInterpolatorBase. They are stored properties so an app built against the 27 SDK
+    // can set and read them; without them the first access is an unrecognized selector. Defaults are the protocol's.
+    NSUInteger _contentWidth, _contentHeight, _depthContentOffsetX, _depthContentOffsetY, _motionContentOffsetX, _motionContentOffsetY;
+    NSUInteger _outputOffsetX, _outputOffsetY, _distortionOffsetX, _distortionOffsetY, _distortionWidth, _distortionHeight;
+    simd_float4x4 _worldToViewMatrix, _viewToClipMatrix;
+    id<MTLTexture> _distortionTexture;
+    BOOL _notedRegion;
 }
 - (instancetype)initWithDescriptor:(MTLFXFrameInterpolatorDescriptor *)d;
 @end
@@ -356,6 +366,18 @@ static id nvmtl_mfx_dlss_rr_make(id descriptor, id device) {
 @synthesize nearPlane = _nearPlane, farPlane = _farPlane, fieldOfView = _fieldOfView, aspectRatio = _aspectRatio;
 @synthesize jitterOffsetX = _jitterOffsetX, jitterOffsetY = _jitterOffsetY, uiTextureComposited = _uiTextureComposited;
 @synthesize shouldResetHistory = _shouldResetHistory, depthReversed = _depthReversed;
+// Applied: worldToViewMatrix and viewToClipMatrix give the camera pose and the clip-space step from the previous frame (the
+// protocol treats both left at identity as not supplied, and the scaler's matrices are used then, as before).
+// Accepted and not yet applied: the content region (contentWidth/Height and the depth, motion and output offsets) and the
+// distortion field (distortionTexture and its region). The frame generation call has no sub-rectangle or distortion inputs
+// yet, so the whole textures are used; a value other than the default is logged once.
+@synthesize contentWidth = _contentWidth, contentHeight = _contentHeight;
+@synthesize depthContentOffsetX = _depthContentOffsetX, depthContentOffsetY = _depthContentOffsetY;
+@synthesize motionContentOffsetX = _motionContentOffsetX, motionContentOffsetY = _motionContentOffsetY;
+@synthesize outputOffsetX = _outputOffsetX, outputOffsetY = _outputOffsetY;
+@synthesize distortionOffsetX = _distortionOffsetX, distortionOffsetY = _distortionOffsetY;
+@synthesize distortionWidth = _distortionWidth, distortionHeight = _distortionHeight;
+@synthesize worldToViewMatrix = _worldToViewMatrix, viewToClipMatrix = _viewToClipMatrix, distortionTexture = _distortionTexture;
 
 // A property of the descriptor's scaler, or 0 / nil when there is no scaler or it does not have that property.
 static NSUInteger nvmtl_fg_scaler_uint(id s, SEL sel) { return s && [s respondsToSelector:sel] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(s, sel) : 0; }
@@ -384,6 +406,10 @@ static BOOL nvmtl_fg_sizes(MTLFXFrameInterpolatorDescriptor *d, NSUInteger s[4])
     if (_fmtMotion == MTLPixelFormatInvalid) _fmtMotion = (MTLPixelFormat)nvmtl_fg_scaler_uint(_scaler, @selector(motionTextureFormat));
     _motionVectorScaleX = 1.0f; _motionVectorScaleY = 1.0f; _depthReversed = YES;   // the protocol's documented default
     _nearPlane = 0.1f; _farPlane = 1000.0f; _fieldOfView = 60.0f; _aspectRatio = _outH ? (float)_outW / (float)_outH : 1.0f;
+    // The content region starts as the whole input at the origin; the distortion region at 0 x 0 means "use the content
+    // size"; identity matrices mean "not supplied".
+    _contentWidth = _inW; _contentHeight = _inH;
+    _worldToViewMatrix = matrix_identity_float4x4; _viewToClipMatrix = matrix_identity_float4x4;
     return self;
 }
 - (MTLTextureUsage)colorTextureUsage { return MTLTextureUsageShaderRead; }
@@ -440,6 +466,14 @@ static void nvmtl_fg_copy(float out[16], simd_float4x4 m) { for (int c = 0; c < 
         _notedUnmapped = YES;
         if (_fence || _deltaTime > 0 || _uiTextureComposited) nvlog("dlss: FG: deltaTime, the fence and uiTextureComposited are not mapped to NGX (ignored)");
     }
+    if (!_notedRegion && ((_contentWidth && _contentWidth != _inW) || (_contentHeight && _contentHeight != _inH) || _depthContentOffsetX ||
+                          _depthContentOffsetY || _motionContentOffsetX || _motionContentOffsetY || _outputOffsetX || _outputOffsetY || _distortionTexture)) {
+        _notedRegion = YES;
+        nvlog("dlss: FG: content region %lux%lu (depth +%lu,%lu motion +%lu,%lu output +%lu,%lu)%s is accepted and not applied - the whole textures are used",
+              (unsigned long)_contentWidth, (unsigned long)_contentHeight, (unsigned long)_depthContentOffsetX, (unsigned long)_depthContentOffsetY,
+              (unsigned long)_motionContentOffsetX, (unsigned long)_motionContentOffsetY, (unsigned long)_outputOffsetX, (unsigned long)_outputOffsetY,
+              _distortionTexture ? " and a distortion texture" : "");
+    }
     nvmtl_vk_dlss_fg_args a = {0};
     a.depth = [depth nvi]; a.depth_view = [depth nvview]; a.motion = [motion nvi]; a.motion_view = [motion nvview];
     a.output = [out nvi]; a.output_view = [out nvview];
@@ -453,7 +487,9 @@ static void nvmtl_fg_copy(float out[16], simd_float4x4 m) { for (int c = 0; c < 
     simd_float4x4 id4 = matrix_identity_float4x4, v = id4, p = id4, vp = id4;
     BOOL haveMat = NO;
     id sc = _scaler;
-    if (sc && [sc respondsToSelector:@selector(worldToViewMatrix)] && [sc respondsToSelector:@selector(viewToClipMatrix)]) {
+    const BOOL ownMat = !simd_equal(_worldToViewMatrix, id4) || !simd_equal(_viewToClipMatrix, id4);
+    if (ownMat) { v = _worldToViewMatrix; p = _viewToClipMatrix; haveMat = YES; }   // the interpolator's own matrices win
+    else if (sc && [sc respondsToSelector:@selector(worldToViewMatrix)] && [sc respondsToSelector:@selector(viewToClipMatrix)]) {
         v = ((simd_float4x4 (*)(id, SEL))objc_msgSend)(sc, @selector(worldToViewMatrix));
         p = ((simd_float4x4 (*)(id, SEL))objc_msgSend)(sc, @selector(viewToClipMatrix));
         haveMat = YES;

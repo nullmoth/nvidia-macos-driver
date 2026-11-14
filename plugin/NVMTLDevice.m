@@ -195,6 +195,9 @@ static void nvmtl_alloc_failed(const char *what) {
 - (instancetype)initWithAcceleratorPort:(mach_port_t)port;
 @end
 @protocol MTLDeviceSPI <NSObject> @end
+// Machine learning packages (NVMTL4ML.m, imported at the end of this unit).
+id nvmtl4ml_new_library(id device, NSURL *url, NSError **err);
+
 @interface NVMTLDevice : MTLIOAccelDevice <MTLDevice, MTLDeviceSPI>
 @end
 #import "NVMTLObjects.h"
@@ -777,12 +780,8 @@ static bool nvmtl_process_is_allowed(void)
     return ok;
 }
 
+static id nvmtl_sev_import(id<MTLDevice> dev, MTLSharedEventHandle *h);   // NVMTLSharedEventXProc.m
 #include "nvmtl_dlss.h"
-static BOOL nvmtl_m4_enabled(void);   // NVMTLMetal4.m, later in this translation unit
-static id<MTLCommandBuffer> nvmtl_m4_underlying(id cb);
-void nvmtl_m4_note_buffer(id buf, uint64_t addr, uint64_t length);
-int nvmtl_m4_note_current(_Atomic uint64_t note[3], uint64_t addr, uint64_t length);
-void nvmtl_m4_note_buffer_cached(id buf, uint64_t addr, uint64_t length, _Atomic uint64_t note[3]);
 #include "nvmtl_mfx_native_profile.inc"
 
 // NVMTL_WS_RT_GATE_MB=<n>: while ray tracing is available, the working-set answer is raised to at least n MB. Black-box
@@ -946,22 +945,13 @@ static id nvmtl_refuse_before_init(id obj)
 }
 - (instancetype)initWithAcceleratorPort:(mach_port_t)port {
     nvlog("-[NVMTLDevice initWithAcceleratorPort:%u] in %s", port, getprogname());
-    {   /* the 2.x driver is built for macOS 15 and 26 only: on any later macOS, or when the version cannot be
-           read, it creates no device, before touching the accelerator */
+    {   /* this driver is built for macOS 27 only (the 1401 line keeps its own 15/26 check): on any other macOS, or
+           when the version cannot be read, it creates no device, before touching the accelerator */
         char v[32] = {0}, d[32] = {0}; size_t n = sizeof v - 1, dn = sizeof d - 1;
         if (sysctlbyname("kern.osproductversion", v, &n, NULL, 0) != 0) v[0] = 0;
         if (sysctlbyname("kern.osrelease", d, &dn, NULL, 0) != 0) d[0] = 0;
         int major = nvmtl_os_major_from(v, d);   // "10.16" for a program built before macOS 11: resolved from Darwin
-#if defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED < 150000
-        /* a test build for an older floor: its lowest system is the floor it was built for (the loader refuses anything
-           older), so the lower bound moves to that floor's major version. The version key does not exist before
-           macOS 10.13.4; only a build whose floor is below 10.14 accepts an unreadable version. */
-        const int lowest = __MAC_OS_X_VERSION_MIN_REQUIRED >= 110000 ? __MAC_OS_X_VERSION_MIN_REQUIRED / 10000 : 10;
-        const int unreadable = major == 0 && __MAC_OS_X_VERSION_MIN_REQUIRED < 101400;
-        if (!unreadable && (major < lowest || major > 26)) { nvlog("  macOS %s is not supported by this build: no device", v[0] ? v : "unknown"); return nvmtl_refuse_before_init(self); }
-#else
-        if (major < 15 || major > 26) { nvlog("  macOS %s is not supported by this driver: no device", v[0] ? v : "unknown"); return nvmtl_refuse_before_init(self); }
-#endif
+        if (major != 27) { nvlog("  macOS %s is not supported by this driver: no device", v[0] ? v : "unknown"); return nvmtl_refuse_before_init(self); }
     }
     if (!nvmtl_card_wanted(port)) return nvmtl_refuse_before_init(self);   // nvmultigpu=1 only: this process drives another card
     self = [super initWithAcceleratorPort:port];
@@ -1392,6 +1382,7 @@ static id<MTLTexture> nvmtl_make_y422_texture(MTLTextureDescriptor *d, NVMTLText
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
     if (nvmtl_vk_init()) return nil;
+    if (nvmtl4_texture_is_placement_sparse(d)) return nvmtl4_new_placement_sparse_texture(self, d);
     if (d.textureType == MTLTextureTypeTextureBuffer) {
         extern int nvmtl_pixfmt_public(MTLPixelFormat f, uint32_t *vk, uint32_t *bpp, int *a8);
         uint32_t vkf = 0, bpp = 0; int a8 = 0;
@@ -1836,6 +1827,32 @@ static void nvmtl_stitch_dump(const char *what, NSString *dag, NSArray *fns, id 
         NSString *on = [outn respondsToSelector:@selector(name)] ? [outn performSelector:@selector(name)] : nil;
         nvlog("  graph \"%s\": %lu node(s), output \"%s\"", gn.UTF8String ?: "?",
               (unsigned long)nodes.count, on.UTF8String ?: "-");
+        // The stitched function's parameters come from the graph's input nodes (MTLFunctionStitchingInputNode), which
+        // exist only as arguments of function nodes, so an input no node reads cannot be part of the graph. Measured:
+        // MPS's kernel declares reductionStitched::write_fn with three parameters and Apple's stitcher returns it with
+        // two; the link stage drops the trailing argument (nvmtl_canon.h). One line per graph with the input indices
+        // its nodes read, past nvlog's dedupe, so a run shows the count the stitcher was given. Only with NVMTL_CANON=1:
+        // WindowServer and Core Animation stitch too, and nothing here may run for them unless the link change is on.
+        if (getenv("NVMTL_CANON") && !strcmp(getenv("NVMTL_CANON"), "1")) {
+            NSMutableIndexSet *ins = [NSMutableIndexSet new];
+            NSMutableArray *all = [NSMutableArray arrayWithArray:nodes ?: @[]]; if (outn) [all addObject:outn];
+            for (id n in all) {
+                NSArray *args = [n respondsToSelector:@selector(arguments)] ? [n performSelector:@selector(arguments)] : nil;
+                for (id a in args) if ([a respondsToSelector:@selector(argumentIndex)]) {
+                    const NSUInteger ix = [[a valueForKey:@"argumentIndex"] unsignedIntegerValue];
+                    if (ix < 4096) [ins addIndex:ix];   // addIndex: raises on NSNotFound
+                }
+            }
+            NSMutableString *list = [NSMutableString new];
+            [ins enumerateIndexesUsingBlock:^(NSUInteger i, BOOL *stop) { [list appendFormat:@"%s%lu", list.length ? "," : "", (unsigned long)i]; }];
+            FILE *lg = fopen(nvmtl_log_path(), "a");
+            if (lg) {
+                fprintf(lg, "pid %d NVMTL: stitch: graph \"%s\" reads input(s) {%s}, highest index + 1 = %lu%s\n", getpid(), gn.UTF8String ?: "?",
+                        list.UTF8String, (unsigned long)(ins.count ? ins.lastIndex + 1 : 0),
+                        ins.count && ins.count != ins.lastIndex + 1 ? " - an index in between is never read" : "");
+                fclose(lg);
+            }
+        }
         for (id n in nodes) {
             NSString *nn = [n respondsToSelector:@selector(name)] ? [n performSelector:@selector(name)] : nil;
             NSArray *args = [n respondsToSelector:@selector(arguments)]
@@ -2039,6 +2056,8 @@ static void nvmtl_stitch_dump(const char *what, NSString *dag, NSArray *fns, id 
 }
 - (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)err {
     if (err) *err = nil;
+    // A machine learning package is a directory the framework's own loader opens, not a metallib to translate.
+    if ([url.pathExtension isEqualToString:@"mtlpackage"]) return nvmtl4ml_new_library(self, url, err);
     NSString *fp = url.isFileURL ? url.absoluteURL.path : nil; struct stat s0; int st0 = fp ? stat(fp.fileSystemRepresentation, &s0) : -1;
     NSData *d = [NSData dataWithContentsOfURL:url];
     if (!d && url.path.length) {
@@ -2170,6 +2189,94 @@ static NVMTLFunction *nvmtl_empty_fragment(void) {
     });
     return fn;
 }
+// Harvest mode (diagnostic). NVMTL_HARVEST=1, read only in a process that set NVMTL_PROCESS_ENV=1: a compute or render
+// pipeline whose translation, link or creation fails gets a stand-in instead of nil - a compute kernel that does nothing
+// (its threadgroup size still follows each dispatch, through spec constants 0..2) or a vertex stage that emits a degenerate
+// position with an empty fragment stage - so the app keeps running and one run collects every refused function. Each
+// refusal is logged once ("HARVEST: refused <name> <reason>") and its AIR is written to $NVMTL_LINK_DUMP/harvest/<name>.ll
+// with <name>.fc.txt in the link dump's format. The stand-ins compute nothing: results of such a run are wrong by design.
+static BOOL nvmtl_harvest_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_HARVEST");
+        on = nvmtl_process_env_on() && e && !strcmp(e, "1");
+        if (on) nvlog("HARVEST: on - refused pipelines get no-op stand-ins; dumps go to %s/harvest", getenv("NVMTL_LINK_DUMP") ?: "(NVMTL_LINK_DUMP unset: no dumps)");
+    }
+    return on == 1;
+}
+static NVMTLFunction *nvmtl_harvest_noop_kernel(void) {
+    static NVMTLFunction *fn; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // GLCompute main that returns at once; WorkgroupSize is a spec-constant composite of SpecId 0, 1, 2 like the
+        // translator's kernels, so the dispatch-time threadgroup variants apply unchanged.
+        static const uint32_t w[] = { 0x07230203, 0x00010000, 0, 11, 0,
+            0x00020011, 1, 0x0003000E, 0, 1,
+            0x0005000F, 5, 3, 0x6E69616D, 0,
+            0x00040047, 7, 1, 0, 0x00040047, 8, 1, 1, 0x00040047, 9, 1, 2, 0x00040047, 10, 11, 25,
+            0x00020013, 1, 0x00030021, 2, 1, 0x00040015, 5, 32, 0, 0x00040017, 6, 5, 3,
+            0x00040032, 5, 7, 1, 0x00040032, 5, 8, 1, 0x00040032, 5, 9, 1, 0x00060033, 6, 10, 7, 8, 9,
+            0x00050036, 1, 3, 0, 2, 0x000200F8, 4, 0x000100FD, 0x00010038 };
+        NVMTLFunction *f = [NVMTLFunction new];
+        f->_spirv = [NSData dataWithBytes:w length:sizeof w]; f->_fname = @"(harvest no-op kernel)"; f->_stage = @"kernel";
+        fn = f;
+    });
+    return fn;
+}
+static NVMTLFunction *nvmtl_harvest_noop_vertex(void) {
+    static NVMTLFunction *fn; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // Vertex main that writes Position = (0, 0, 0, 0): every primitive is degenerate and nothing is rasterized.
+        static const uint32_t w[] = { 0x07230203, 0x00010000, 0, 11, 0,
+            0x00020011, 1, 0x0003000E, 0, 1,
+            0x0006000F, 0, 1, 0x6E69616D, 0, 8,
+            0x00040047, 8, 11, 0,
+            0x00020013, 2, 0x00030021, 3, 2, 0x00030016, 5, 32, 0x00040017, 6, 5, 4, 0x00040020, 7, 3, 6,
+            0x0004003B, 7, 8, 3, 0x0004002B, 5, 9, 0, 0x0007002C, 6, 10, 9, 9, 9, 9,
+            0x00050036, 2, 1, 0, 3, 0x000200F8, 4, 0x0003003E, 8, 10, 0x000100FD, 0x00010038 };
+        NVMTLFunction *f = [NVMTLFunction new];
+        f->_spirv = [NSData dataWithBytes:w length:sizeof w]; f->_fname = @"(harvest no-op vertex)"; f->_stage = @"vertex";
+        fn = f;
+    });
+    return fn;
+}
+// One log line and one dump per function name for the life of the process.
+static void nvmtl_harvest_record(id fnObj, NSString *reason) {
+    NSString *name = [(id)fnObj conformsToProtocol:@protocol(MTLFunction)] ? ((id<MTLFunction>)fnObj).name : nil;
+    if (!name.length) name = @"(unnamed)";
+    static NSMutableSet *seen; static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
+    os_unfair_lock_lock(&lk);
+    if (!seen) seen = [NSMutableSet new];
+    const BOOL fresh = ![seen containsObject:name];
+    if (fresh) [seen addObject:name];
+    os_unfair_lock_unlock(&lk);
+    if (!fresh) return;
+    NSString *why = [[reason ?: @"(no reason given)" componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]] componentsJoinedByString:@" "];
+    { FILE *lg = fopen(nvmtl_log_path(), "a");   // past nvlog's per-site dedupe: every refused function gets its line
+      if (lg) { fprintf(lg, "pid %d NVMTL: HARVEST: refused %s %s\n", getpid(), name.UTF8String, why.UTF8String); fclose(lg); } }
+    const char *root = getenv("NVMTL_LINK_DUMP");
+    if (!root || root[0] != '/') return;
+    NSString *dir = [@(root) stringByAppendingPathComponent:@"harvest"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+    NSString *file = [[name stringByReplacingOccurrencesOfString:@"/" withString:@"_"] stringByReplacingOccurrencesOfString:@" " withString:@"_"];
+    NSString *base = [dir stringByAppendingPathComponent:file];
+    NVMTLFunction *f = [(id)fnObj isKindOfClass:[NVMTLFunction class]] ? (NVMTLFunction *)fnObj : nil;
+    NSString *air = f ? f->_air : nil;
+    [(air ?: [NSString stringWithFormat:@"; no AIR kept for %@ (%s)\n", name, object_getClassName(fnObj)])
+        writeToFile:[base stringByAppendingString:@".ll"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    // the link dump's fc.txt: "stage <stage>", then "<index> <size> <bytes...>" per constant
+    NSMutableString *t = [NSMutableString stringWithFormat:@"stage %@\n", f && f->_stage ? f->_stage : @""];
+    if (f && [f->_fc isKindOfClass:[NSDictionary class]]) {
+        for (NSString *k in [[(NSDictionary *)f->_fc allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+            NSArray *a = ((NSDictionary *)f->_fc)[k];
+            if (![a isKindOfClass:[NSArray class]]) continue;
+            [t appendFormat:@"%ld %lu", (long)[k integerValue], (unsigned long)a.count];
+            for (NSNumber *b in a) [t appendFormat:@" %02x", (unsigned)[b unsignedCharValue]];
+            [t appendString:@"\n"];
+        }
+    } else if (f && f->_fc) [t appendFormat:@"# constants as %s: %@\n", object_getClassName(f->_fc), f->_fc];
+    [t appendFormat:@"# reason %@\n", why];
+    [t writeToFile:[base stringByAppendingString:@".fc.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+}
 MTLRenderPipelineDescriptor *nvmtl_gl_rewrite_descriptor(MTLRenderPipelineDescriptor *d, NSError **err);
 NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, NSString **err);
 NSData *nvmtl_translate_samplers_amp(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, uint32_t amp, NSString **err);
@@ -2198,6 +2305,24 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
           fn->_specName.length ? " fc " : "", fn->_specName.length ? fn->_specName.UTF8String : "", pipe);
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)err {
+    id<MTLRenderPipelineState> ps = [self nvmtlRenderPipelineCore:d error:err];
+    if (ps || !d || !nvmtl_harvest_on()) return ps;
+    static __thread int inStandIn;
+    if (inStandIn) return nil;
+    NSString *why = err && *err ? (*err).localizedDescription : @"(no error returned)";
+    if (d.vertexFunction) nvmtl_harvest_record(d.vertexFunction, why);
+    if (d.fragmentFunction) nvmtl_harvest_record(d.fragmentFunction, why);
+    MTLRenderPipelineDescriptor *s = [d copy];
+    s.vertexFunction = nvmtl_harvest_noop_vertex(); s.fragmentFunction = nvmtl_empty_fragment();
+    inStandIn = 1;
+    NSError *e2 = nil; ps = [self nvmtlRenderPipelineCore:s error:&e2];
+    if (!ps) { s.vertexDescriptor = nil; e2 = nil; ps = [self nvmtlRenderPipelineCore:s error:&e2]; }   // no attributes at all
+    inStandIn = 0;
+    if (ps) { if (err) *err = nil; }
+    else nvlog("HARVEST: the stand-in render pipeline was refused too: %s", e2.localizedDescription.UTF8String ?: "?");
+    return ps;
+}
+- (id<MTLRenderPipelineState>)nvmtlRenderPipelineCore:(MTLRenderPipelineDescriptor *)d error:(NSError **)err {
     if (err) *err = nil;
     // Work on a copy: some descriptor getters (vertexLinkedFunctions, ...) create their object on first read, and the
     // caller's descriptor then no longer equals a fresh one. Apple's GL keys its built-in (blit) pipelines by the
@@ -2215,6 +2340,18 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
              "(from a library entry point this driver does not implement)",
             object_getClassName(vfn), object_getClassName(ffn)]);
     NVMTLFunction *vf = (NVMTLFunction *)vfn, *ff = (NVMTLFunction *)ffn;
+    // Apple refuses a pipeline with rasterization off whose vertex function still returns something (measured: nil +
+    // error, sync and async): with nothing rasterized, the vertex stage may only write memory.
+    if (!d.rasterizationEnabled && vf->_air.length && vf->_fname.length) {
+        NSString *def = [NSString stringWithFormat:@" @%@(", vf->_fname];
+        NSRange at = [vf->_air rangeOfString:def];
+        if (at.location != NSNotFound) {
+            NSRange line = [vf->_air lineRangeForRange:NSMakeRange(at.location, 0)];
+            NSString *head = [vf->_air substringWithRange:NSMakeRange(line.location, at.location - line.location)];
+            if ([head hasPrefix:@"define "] && ![head containsString:@" void"])
+                return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: rasterization is disabled, so vertex function %@ must return void", vf->_fname]);
+        }
+    }
     { NSError *le = nil;
       id<MTLFunction> lv = nvmtl_link_stage(vfn, NVMTL_SINCE(12.0, MTLLinkedFunctions *, d.vertexLinkedFunctions, nil), NVMTL_SINCE(12.0, NSArray *, d.vertexPreloadedLibraries, nil), &le);
       id<MTLFunction> lfr = lv ? (noFrag ? ffn : nvmtl_link_stage(ffn, NVMTL_SINCE(12.0, MTLLinkedFunctions *, d.fragmentLinkedFunctions, nil), NVMTL_SINCE(12.0, NSArray *, d.fragmentPreloadedLibraries, nil), &le)) : nil;
@@ -2547,6 +2684,10 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
         if (why) { if (r) *r = nil; return nvmtl_fail(err, why); }
     }
     NSError *le = nil; id<MTLFunction> kfn = nvmtl_link_kernel(d, &le);
+    if (!kfn && d.computeFunction && nvmtl_harvest_on()) {
+        if (r) *r = nil;
+        return [self nvmtlHarvestCompute:d.computeFunction why:le.localizedDescription ?: @"link failed" error:err];
+    }
     if (!kfn) { if (err) *err = le; if (r) *r = nil; return nil; }
     MTLStageInputOutputDescriptor *stageIn = NVMTL_SINCE(10.12, MTLStageInputOutputDescriptor *, d.stageInputDescriptor, nil);
     if (stageIn && [(id)kfn isKindOfClass:[NVMTLFunction class]]) {
@@ -2555,6 +2696,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
         kfn = sf;
     }
     NSString *tgWhy = nvmtl_tg_mismatch(kfn, NVMTL_SINCE(10.14, NSUInteger, d.maxTotalThreadsPerThreadgroup, 0), "compute pipeline");
+    if (tgWhy && nvmtl_harvest_on()) { if (r) *r = nil; return [self nvmtlHarvestCompute:kfn why:tgWhy error:err]; }
     if (tgWhy) { if (r) *r = nil; return nvmtl_fail(err, tgWhy); }
     id<MTLComputePipelineState> ps = [self newComputePipelineStateWithFunction:kfn error:err];
     if ([(id)ps isKindOfClass:[NVMTLComputePipelineState class]]) { ((NVMTLComputePipelineState *)ps)->_icb = NVMTL_SINCE(11.0, BOOL, d.supportIndirectCommandBuffers, NO);
@@ -2646,8 +2788,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     return t;
 }
 - (id<MTLSharedEvent>)newSharedEventWithHandle:(MTLSharedEventHandle *)h {
-    nvlog("newSharedEventWithHandle: %p -> nil (cross-process shared events are not built; apps3)", (__bridge void *)h);
-    return nil;
+    return nvmtl_sev_import(self, h);
 }
 
 - (id<MTLDepthStencilState>)newDepthStencilStateWithDescriptor:(MTLDepthStencilDescriptor *)dd {
@@ -2707,6 +2848,19 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     return s; }
 
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)fn error:(NSError **)err {
+    id<MTLComputePipelineState> ps = [self nvmtlComputePipelineCore:fn error:err];
+    if (ps || !fn || !nvmtl_harvest_on()) return ps;
+    return [self nvmtlHarvestCompute:fn why:err && *err ? (*err).localizedDescription : @"(no error returned)" error:err];
+}
+// The no-op stand-in for a refused kernel (harvest mode only).
+- (id<MTLComputePipelineState>)nvmtlHarvestCompute:(id)fn why:(NSString *)why error:(NSError **)err {
+    nvmtl_harvest_record(fn, why);
+    NSError *e2 = nil; id<MTLComputePipelineState> ps = [self nvmtlComputePipelineCore:nvmtl_harvest_noop_kernel() error:&e2];
+    if (ps) { if (err) *err = nil; }
+    else nvlog("HARVEST: the stand-in kernel was refused too: %s", e2.localizedDescription.UTF8String ?: "?");
+    return ps;
+}
+- (id<MTLComputePipelineState>)nvmtlComputePipelineCore:(id<MTLFunction>)fn error:(NSError **)err {
     if (err) *err = nil;
     if (nvmtl_vk_init()) return nvmtl_fail(err, @"newComputePipelineState: Vulkan is not up in this process");
     if (fn && ![(id)fn isKindOfClass:[NVMTLFunction class]])
@@ -2770,6 +2924,20 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     ps->_attrT = nvmtl_air_max_tg(f);
     if (nvmtl_vk_compute_pipeline_create(f->_spirv.bytes, f->_spirv.length, &ps->_p)) {
         return nvmtl_fail(err, @"newComputePipelineState: vkCreateComputePipelines FAILED"); }
+    // NVMTL_PSTAT=1: one line per kernel name with NAK's statistics (GPRs, max warps/SM, spills, shared memory), so a
+    // kernel that is slow on the GPU can be told apart as register-bound, spilling or simply doing too much work
+    {
+        static int pst = -1; if (pst < 0) { const char *e = getenv("NVMTL_PSTAT"); pst = e && *e == '1'; }
+        static NSMutableSet *seen; static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
+        if (pst && f->_fname.length) {
+            os_unfair_lock_lock(&lk); if (!seen) seen = [NSMutableSet new];
+            const BOOL fresh = ![seen containsObject:f->_fname]; if (fresh) [seen addObject:f->_fname]; os_unfair_lock_unlock(&lk);
+            if (fresh) { extern int nvmtl_vk_pipeline_stats(void *pipe, char *out, size_t n);
+                char st[600] = { 0 };
+                if (nvmtl_vk_pipeline_stats(ps->_p.pipe, st, sizeof st) == 0) nvlog_every("kstat: %s | %s", f->_fname.UTF8String, st);
+                else nvlog_every("kstat: %s | statistics unavailable (no NVMTL_PSTAT in the driver, the extension, or a pipeline)", f->_fname.UTF8String); }
+        }
+    }
     if (g_app_edit_last) {
         objc_setAssociatedObject(ps, &g_app_edit_ps_key, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         nvlog("profile: %s: edited kernel %s (module %08x -> %08x)", g_app_profile->exe, f->_fname.UTF8String,
@@ -2818,6 +2986,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
         nvmtl_rt_count_bump(NVMTL_RT_AS_SYSMEM);
     } else nvmtl_rt_count_bump(NVMTL_RT_AS_VRAM);
     nvmtl_alloc_ok();
+    a->_reqSize = size;
     nvlog("newAccelerationStructureWithSize:%lu -> %p", (unsigned long)size, (__bridge void *)a); return a;
 }
 - (id<MTLAccelerationStructure>)newAccelerationStructureWithDescriptor:(MTLAccelerationStructureDescriptor *)desc {
@@ -2947,7 +3116,16 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
         case MTLGPUFamilyMac2: case MTLGPUFamilyCommon1: case MTLGPUFamilyCommon2: case MTLGPUFamilyCommon3: return YES;
         case 2001 : return YES;
         case 5001 : { struct nvmtl_caps c = { 0, 0 }; return nvmtl_claim_metal3(&c) ? YES : NO; }   // MTLGPUFamilyMetal3
-        case 5002 : { struct nvmtl_caps c = { 0, 0 }; return nvmtl_claim_metal3(&c) && nvmtl_m4_enabled() ? YES : NO; }   // MTLGPUFamilyMetal4: the Metal 4 command model in NVMTLMetal4.m, on top of Metal 3
+        // Metal 4 (5002): the MTL4 queue, command buffers, argument tables, compiler, tensors, machine learning passes,
+        // placement sparse resources and counter heaps are all carried (NVMTL4*.m), on top of Metal 3. The API exists
+        // from macOS 26, so the family is claimed there only. The Apple GPU families stay unclaimed: they select
+        // Apple-only kernels in frameworks.
+        case 5002 : {
+            static int on = -1;
+            if (on < 0) on = [[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){ 26, 0, 0 }] ? 1 : 0;
+            struct nvmtl_caps c = { 0, 0 };
+            return on == 1 && nvmtl_claim_metal3(&c) ? YES : NO;
+        }
         default: break;
     }
     if ((NSInteger)f >= 1001 && (NSInteger)f <= 1009) return nvmtl_family_answer(f, (NSInteger)f <= 1000 + nvmtl_apple_family_max(), "Apple family");
@@ -2972,11 +3150,29 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
         return sh;
     }
     NVMTLHeap *h = [NVMTLHeap new];
-    h->_dev = self; h->_size = hd.size; h->_used = 0; h->_storage = hd.storageMode; h->_cache = hd.cpuCacheMode; h->_type = hdType;
-    h->_hazard = hdHazard;
-    if (hdType == MTLHeapTypePlacement) {
-        if (nvmtl_vk_heap_create(hd.size, hd.storageMode == MTLStorageModeShared, &h->_hm)) { nvlog("newHeapWithDescriptor: PLACEMENT %lu bytes FAILED", (unsigned long)hd.size); return nil; }
-        nvlog("newHeapWithDescriptor: PLACEMENT %lu bytes (%s) -> %p", (unsigned long)hd.size, hd.storageMode == MTLStorageModeShared ? "shared" : "private", (__bridge void *)h);
+    h->_dev = self; h->_size = hd.size; h->_used = 0; h->_storage = hd.storageMode; h->_cache = hd.cpuCacheMode; h->_type = hd.type;
+    h->_hazard = hd.hazardTrackingMode;
+    if (hd.type == MTLHeapTypeSparse) return nvmtl4_new_sparse_heap(h, hd);
+    if (hd.type == MTLHeapTypePlacement) {
+        // A heap whose memory backs 16 KB sparse pages is allocated in 4 KB GPU pages (NVK small-page mode), so a
+        // 16 KB page of it can be mapped on its own; every other heap keeps 64 KB big pages.
+        NSInteger sp = 0;
+        if ([hd respondsToSelector:@selector(maxCompatiblePlacementSparsePageSize)])
+            sp = ((NSInteger (*)(id, SEL))objc_msgSend)(hd, @selector(maxCompatiblePlacementSparsePageSize));
+        const int was = sp == 101 /* MTLSparsePageSize16 (SDK value) */ ? nvmtl_vk_small_pages(1) : -1;
+        // an app's Shared placement heap may take VRAM (NVMTL_HEAP_APP_SHARED); one that can back sparse pages keeps
+        // system RAM, since sparse binding into it was only ever proven on the old memory types
+        const int bad = nvmtl_vk_heap_create(hd.size, hd.storageMode == MTLStorageModeShared ? (sp ? 1 : NVMTL_HEAP_APP_SHARED) : 0, &h->_hm);
+        if (was >= 0) nvmtl_vk_small_pages(was);
+        if (bad) { nvlog("newHeapWithDescriptor: PLACEMENT %lu bytes FAILED", (unsigned long)hd.size); return nil; }
+        // VRAM holds whatever this process left there, and a fresh MTLHeap must read zero (see nvmtl_vk_heap_zero), so a
+        // Shared placement heap that took VRAM is cleared like the automatic heaps are; system RAM arrives zeroed
+        if (h->_hm.bar1) nvmtl_vk_heap_zero(&h->_hm, "shared placement (VRAM through BAR1)");
+        // the memory type actually allocated, not the policy's intent: the old line's neighbour "placement-heap memory types:
+        // 0x7" is a BITMASK of allowed type indices {0,1,2}, and was misread as property flags 0x7
+        nvlog("newHeapWithDescriptor: PLACEMENT %lu bytes (%s) memory type %u flags 0x%x (%s) -> %p", (unsigned long)hd.size,
+              hd.storageMode == MTLStorageModeShared ? "shared" : "private", h->_hm.memtype, nvmtl_vk_memtype_flags(h->_hm.memtype),
+              h->_hm.bar1 ? "VRAM through BAR1" : (nvmtl_vk_memtype_flags(h->_hm.memtype) & 1u) ? "VRAM" : "SYSTEM RAM", (__bridge void *)h);
         return h;
     }
     if (!getenv("NVMTL_NO_HEAP_ALIAS") && (hd.storageMode == MTLStorageModePrivate || hd.storageMode == MTLStorageModeShared))
@@ -3039,6 +3235,38 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
     NVMTLArgumentEncoder *e = [NVMTLArgumentEncoder new];
     e->_fields = fields; e->_fieldByIndex = nvmtl_index_argument_fields(fields);
     nvlog("newArgumentEncoderWithArguments: %lu descriptor(s) -> %lu field(s), %lu bytes", (unsigned long)args.count, (unsigned long)fields.count, (unsigned long)off);
+    return e;
+}
+// Metal 3: the encoder for an argument buffer described by reflection (a pipeline's MTLBufferBinding). The system base
+// class answers this by building a layout and asking the driver for an indirect argument encoder, which aborts when
+// the driver has none: an application that draws with VFX (Weather's animated backgrounds) died there before its
+// first frame. The binding already carries everything this driver's encoder needs - each member's [[id]] and byte
+// offset, arrays with their strides, nested structs - so the encoder is built from those directly.
+static void nvmtl_binding_fields(MTLStructType *st, NSUInteger base, NSUInteger idBase, NSMutableArray *out, unsigned depth) {
+    if (!st || depth > 8) return;
+    for (MTLStructMember *m in st.members) {
+        NSUInteger off = base + m.offset, aid = idBase + m.argumentIndex;
+        if (m.dataType == MTLDataTypeStruct) { nvmtl_binding_fields(m.structType, off, idBase, out, depth + 1); continue; }
+        if (m.dataType == MTLDataTypeArray) {
+            MTLArrayType *at = m.arrayType; NSUInteger n = at.arrayLength, stride = at.stride, idStride = at.argumentIndexStride;
+            for (NSUInteger k = 0; k < n; k++) {
+                if (at.elementType == MTLDataTypeStruct) nvmtl_binding_fields(at.elementStructType, off + k * stride, idBase + k * idStride, out, depth + 1);
+                else [out addObject:@{ @"argument_index": @(aid + k * idStride), @"field_offset": @(off + k * stride), @"buffer_index": @(NSUIntegerMax), @"descriptor_built": @YES }];
+            }
+            continue;
+        }
+        [out addObject:@{ @"argument_index": @(aid), @"field_offset": @(off), @"buffer_index": @(NSUIntegerMax), @"descriptor_built": @YES }];
+    }
+}
+- (id<MTLArgumentEncoder>)newArgumentEncoderWithBufferBinding:(id<MTLBufferBinding>)binding {
+    MTLStructType *st = [(id)binding respondsToSelector:@selector(bufferStructType)] ? binding.bufferStructType : nil;
+    NSMutableArray *fields = [NSMutableArray new];
+    nvmtl_binding_fields(st, 0, 0, fields, 0);
+    if (!fields.count) { nvlog("newArgumentEncoderWithBufferBinding: %s has no struct members -> nil", ((id<MTLBinding>)binding).name.UTF8String ?: "?"); return nil; }
+    NVMTLArgumentEncoder *e = [NVMTLArgumentEncoder new];
+    e->_fields = fields; e->_fieldByIndex = nvmtl_index_argument_fields(fields);
+    e->_airSize = binding.bufferDataSize; e->_airAlign = binding.bufferAlignment;
+    nvlog("newArgumentEncoderWithBufferBinding: %s -> %lu field(s), %lu bytes", ((id<MTLBinding>)binding).name.UTF8String ?: "?", (unsigned long)fields.count, (unsigned long)e->_airSize);
     return e;
 }
 - (NSUInteger)currentAllocatedSize { return (NSUInteger)nvmtl_vk_allocated_bytes(); }
@@ -3275,14 +3503,23 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
 
 #import "NVMTLDevice_contract.m"
 
+#import "NVMTLCurves.m"
 #import "NVMTLObjects.m"
+#import "NVMTLSharedEventXProc.m"
+#import "NVMTL4Extras.m"
+#import "NVMTLSparseTex.m"
 #import "NVMTLMetalFXDLSS.m"
 #import "NVMTLForward.m"
 #import "NVMTLLibraryLoad.m"
+#import "NVMTL4Compiler.m"
 #import "NVMTLGL.m"
 #import "NVMTLGLVBlank.m"
 #import "NVMTLEmbedded.m"
-#import "NVMTLMetal4.m"
+#import "NVMTL4Core.m"
+#import "NVMTL4Glue.m"
+#import "NVMTL4ML.m"
 #import "NVMTLVendorCompiler.m"
 #include "nvmtl_vk.c"
+#include "nvmtl_vk_tile.c"
+#import "NVMTLTile.m"
 #import "NVMTLSass.m"

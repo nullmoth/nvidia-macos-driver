@@ -273,6 +273,11 @@ pub(super) fn llvm_pointer_storage(addrspace: u32) -> Result<StorageClass, Strin
         // payload storage of its own: the caller allocates the payload and the intersection functions write
         // through the pointer, so it is the caller's own storage under another number.
         5 => Ok(StorageClass::Private),
+        // AIR's generic space (MSL 4.1). The translator library resolves it to space 0 before the emitter runs
+        // (wrapper unify_device_space); a value still here had a source in another space and needs runtime dispatch.
+        8 => Err("native emitter: unresolved generic pointer (address space 8): a value enters it from a space \
+                  other than 0, which needs runtime address-space dispatch"
+            .to_string()),
         _ => Err(format!(
             "native emitter: unsupported LLVM pointer addrspace({addrspace})"
         )),

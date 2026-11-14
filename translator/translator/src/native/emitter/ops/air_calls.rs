@@ -112,10 +112,16 @@ impl Emitter {
                 let ptr = self.atomic_i32_pointer_id(&call.args[0], instructions)?;
                 let value =
                     self.value_id_in(&call.args[1].value, &call.args[1].ty, instructions)?;
-                let scope_kind = self.atomic_i32_scope_for_arg(&call.args[0])?;
+                let pointer_scope = self.atomic_i32_scope_for_arg(&call.args[0])?;
+                let scope_kind = atomic_requested_scope(call, 3, pointer_scope);
                 let scope = self.const_uint(scope_kind as u32)?;
-                let semantics_kind =
-                    Self::atomic_i32_memory_semantics(scope_kind, MemorySemantics::RELEASE);
+                let semantics_kind = atomic_requested_semantics(
+                    call,
+                    2,
+                    pointer_scope,
+                    Self::atomic_i32_memory_semantics(pointer_scope, MemorySemantics::RELEASE),
+                    AtomicRole::Store,
+                );
                 let semantics = self.const_uint(semantics_kind.bits())?;
                 instructions.push(Self::inst(
                     Op::AtomicStore,
@@ -336,10 +342,16 @@ impl Emitter {
                 let result_type = self.type_id(&result_ty)?;
                 let result = self.result_id(name, &result_ty)?;
                 let ptr = self.atomic_i32_pointer_id(&call.args[0], instructions)?;
-                let scope_kind = self.atomic_i32_scope_for_arg(&call.args[0])?;
+                let pointer_scope = self.atomic_i32_scope_for_arg(&call.args[0])?;
+                let scope_kind = atomic_requested_scope(call, 2, pointer_scope);
                 let scope = self.const_uint(scope_kind as u32)?;
-                let semantics_kind =
-                    Self::atomic_i32_memory_semantics(scope_kind, MemorySemantics::ACQUIRE);
+                let semantics_kind = atomic_requested_semantics(
+                    call,
+                    1,
+                    pointer_scope,
+                    Self::atomic_i32_memory_semantics(pointer_scope, MemorySemantics::ACQUIRE),
+                    AtomicRole::Load,
+                );
                 let semantics = self.const_uint(semantics_kind.bits())?;
                 instructions.push(Self::inst(
                     Op::AtomicLoad,
@@ -374,8 +386,17 @@ impl Emitter {
                 let ptr = self.atomic_f32_pointer_id(&call.args[0], instructions)?;
                 let value =
                     self.value_id_in(&call.args[1].value, &call.args[1].ty, instructions)?;
-                let scope = self.const_uint(Scope::Device as u32)?;
-                let semantics = self.const_uint(MemorySemantics::RELAXED.bits())?;
+                let scope = self.const_uint(atomic_requested_scope(call, 3, Scope::Device) as u32)?;
+                let semantics = self.const_uint(
+                    atomic_requested_semantics(
+                        call,
+                        2,
+                        Scope::Device,
+                        MemorySemantics::RELAXED,
+                        AtomicRole::ReadModifyWrite,
+                    )
+                    .bits(),
+                )?;
                 instructions.push(Self::inst(
                     Op::AtomicFAddEXT,
                     Some(result_type),
@@ -417,8 +438,17 @@ impl Emitter {
                     Some(negated),
                     vec![Operand::IdRef(value)],
                 ));
-                let scope = self.const_uint(Scope::Device as u32)?;
-                let semantics = self.const_uint(MemorySemantics::RELAXED.bits())?;
+                let scope = self.const_uint(atomic_requested_scope(call, 3, Scope::Device) as u32)?;
+                let semantics = self.const_uint(
+                    atomic_requested_semantics(
+                        call,
+                        2,
+                        Scope::Device,
+                        MemorySemantics::RELAXED,
+                        AtomicRole::ReadModifyWrite,
+                    )
+                    .bits(),
+                )?;
                 instructions.push(Self::inst(
                     Op::AtomicFAddEXT,
                     Some(result_type),
@@ -466,12 +496,23 @@ impl Emitter {
                 ));
                 let value =
                     self.value_id_in(&call.args[2].value, &call.args[2].ty, instructions)?;
-                let scope_kind = self.atomic_i32_scope_for_arg(&call.args[0])?;
+                let pointer_scope = self.atomic_i32_scope_for_arg(&call.args[0])?;
+                let scope_kind = atomic_requested_scope(call, 5, pointer_scope);
                 let scope = self.const_uint(scope_kind as u32)?;
-                let success_semantics_kind =
-                    Self::atomic_i32_memory_semantics(scope_kind, MemorySemantics::ACQUIRE_RELEASE);
-                let failure_semantics_kind =
-                    Self::atomic_i32_memory_semantics(scope_kind, MemorySemantics::ACQUIRE);
+                let success_semantics_kind = atomic_requested_semantics(
+                    call,
+                    3,
+                    pointer_scope,
+                    Self::atomic_i32_memory_semantics(pointer_scope, MemorySemantics::ACQUIRE_RELEASE),
+                    AtomicRole::ReadModifyWrite,
+                );
+                let failure_semantics_kind = atomic_requested_semantics(
+                    call,
+                    4,
+                    pointer_scope,
+                    Self::atomic_i32_memory_semantics(pointer_scope, MemorySemantics::ACQUIRE),
+                    AtomicRole::Load,
+                );
                 let success_semantics = self.const_uint(success_semantics_kind.bits())?;
                 let failure_semantics = self.const_uint(failure_semantics_kind.bits())?;
                 instructions.push(Self::inst(
@@ -552,10 +593,16 @@ impl Emitter {
         if width == 64 {
             self.require_capability(Capability::Int64Atomics);
         }
-        let scope_kind = self.atomic_i32_scope_for_arg(&call.args[0])?;
+        let pointer_scope = self.atomic_i32_scope_for_arg(&call.args[0])?;
+        let scope_kind = atomic_requested_scope(call, 3, pointer_scope);
         let scope = self.const_uint(scope_kind as u32)?;
-        let semantics_kind =
-            Self::atomic_i32_memory_semantics(scope_kind, MemorySemantics::ACQUIRE_RELEASE);
+        let semantics_kind = atomic_requested_semantics(
+            call,
+            2,
+            pointer_scope,
+            Self::atomic_i32_memory_semantics(pointer_scope, MemorySemantics::ACQUIRE_RELEASE),
+            AtomicRole::ReadModifyWrite,
+        );
         let semantics = self.const_uint(semantics_kind.bits())?;
         instructions.push(Self::inst(
             op,
@@ -584,6 +631,10 @@ fn air_barrier_memory_semantics(call: &LlCall) -> MemorySemantics {
     }
     if flags & (2 | 8) != 0 {
         semantics |= MemorySemantics::WORKGROUP_MEMORY;
+    }
+    // a tile function's imageblock lives in storage images, so a barrier over the imageblock covers image memory
+    if flags & 8 != 0 && crate::tile_mode::has(crate::tile_mode::TILE_KERNEL) {
+        semantics |= MemorySemantics::IMAGE_MEMORY;
     }
     if flags & 4 != 0 {
         semantics |= MemorySemantics::IMAGE_MEMORY;

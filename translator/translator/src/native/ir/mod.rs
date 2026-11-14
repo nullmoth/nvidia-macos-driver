@@ -115,6 +115,8 @@ pub(super) struct LlFunction {
     pub(super) params: Vec<(String, LlType)>,
     pub(super) byval_param_pointees: Vec<Option<LlType>>,
     pub(super) is_static_initializer: bool,
+    /// `internal` or `private` linkage: every caller is in this module.
+    pub(super) is_internal: bool,
     pub(super) blocks: Vec<crate::native::cfg::BodyBlock>,
     pub(super) loop_controls: HashMap<String, (spirv::LoopControl, Option<u32>)>,
 }

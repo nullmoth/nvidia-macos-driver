@@ -160,7 +160,7 @@ pub(in crate::native) fn resolve_shuffle_mask(line: &str) -> Option<(u32, Vec<u3
 }
 
 pub(in crate::native) fn resolve_bitcast(line: &str, opcode: &str) -> Option<(TypedValue, String)> {
-    if opcode != "bitcast" {
+    if !matches!(opcode, "bitcast" | "addrspacecast") {
         return None;
     }
     let cleaned = crate::native::lex::strip_comment(line).trim();

@@ -632,16 +632,15 @@ pub(in crate::passes) fn apply_bindings(
                         texel
                     };
                     let projected = ctx.module.fresh_id();
-                    loads.push(Instruction::new(
-                        match format.component {
-                            ImageComp::Float => Op::FConvert,
-                            ImageComp::Uint => Op::UConvert,
-                            ImageComp::Sint => Op::SConvert,
-                        },
-                        Some(member_ty),
-                        Some(projected),
-                        vec![Operand::IdRef(wide)],
-                    ));
+                    crate::passes::tile_explicit::convert_imageblock_value(
+                        ctx,
+                        &mut loads,
+                        format.component,
+                        wide,
+                        wide_ty,
+                        member_ty,
+                        projected,
+                    );
                     projected_values.push(Operand::IdRef(projected));
                 }
                 let projection = ctx.module.fresh_id();

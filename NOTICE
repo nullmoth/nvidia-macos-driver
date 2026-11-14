@@ -42,7 +42,7 @@ kexts/NMIntelFB  Panel brightness follows the method of WhateverXe's panel PWM (
 
 NMXAudio     The HD Audio controller and codec layers are FreeBSD's snd_hda (sys/dev/sound/pci/hda: hdac.c,
              hdaa.c, hdacc.c, hdaa_patches.c), BSD-2-Clause (licenses/FreeBSD-snd_hda-LICENSE.txt).
-             Installed on macOS 26 only, where macOS has no HD Audio driver.
+             Installed on macOS 26 and macOS 27, where macOS has no HD Audio driver.
 
 vendor/nvenc  Video encoders and decoders for NVIDIA's NVENC and NVDEC engines, offered to apps through VideoToolbox
              (libnvencvt.dylib). mickys/nvenc, https://github.com/mickys/nvenc, MIT, Copyright (c) 2026 mickys

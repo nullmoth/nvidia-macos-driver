@@ -3179,3 +3179,98 @@ declare float @air.convert.f.f32.f.f8e5m2(i8)
         "the refusal must not be the downstream shape complaint, got {error}"
     );
 }
+
+/// Scope and memory semantics (as numbers) of the first OpAtomic* instruction of `op` in a kernel whose body is one AIR
+/// 2.9 call.
+fn atomic_scope_and_semantics(call: &str, declare: &str, op: &str) -> (String, String) {
+    let ll = format!(
+        r#"
+target triple = "spirv-unknown-vulkan1.2"
+
+define void @k(ptr addrspace(1) %out, <3 x i32> %tid) {{
+entry:
+  {call}
+  ret void
+}}
+
+{declare}
+
+!air.kernel = !{{!0}}
+!0 = !{{ptr @k, !1, !2}}
+!1 = !{{}}
+!2 = !{{!3, !4}}
+!3 = !{{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"out"}}
+!4 = !{{i32 1, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint3", !"air.arg_name", !"tid"}}
+"#
+    );
+    let tmp = std::env::temp_dir().join(format!("metal2vulkan_atomic_order_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let (san, _) = crate::tools::sanitize_ll_text_with_datalayout(&ll);
+    let spv = crate::translate_sanitized_native(&san, Stage::Kernel, &tmp).expect("translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    let mut constants = crate::fxhash::HashMap::default();
+    for line in asm.lines() {
+        if let [result, "=", "OpConstant", _, value] = line.split_whitespace().collect::<Vec<_>>().as_slice() {
+            constants.insert(result.to_string(), value.to_string());
+        }
+    }
+    for line in asm.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let at = words.iter().position(|w| *w == op);
+        if let Some(at) = at {
+            // %r = OpAtomicX %type %ptr %scope %semantics ...; OpAtomicStore %ptr %scope %semantics %value
+            let ptr = if words.get(1) == Some(&"=") { at + 2 } else { at + 1 };
+            let (scope, semantics) = (words[ptr + 1], words[ptr + 2]);
+            return (constants[scope].clone(), constants[semantics].clone());
+        }
+    }
+    panic!("no {op} in:\n{asm}");
+}
+
+#[test]
+fn air29_atomic_add_acq_rel_on_device_memory_with_device_flags() {
+    // memory_order acq_rel (4), device scope (2), mem_flags device (1): acquire-release on storage-buffer memory
+    let (scope, semantics) = atomic_scope_and_semantics(
+        "%old = tail call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 4, i32 2, i32 1, i1 false)",
+        "declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32, i32, i1)",
+        "OpAtomicIAdd",
+    );
+    assert_eq!(scope, "1", "Device scope");
+    assert_eq!(semantics, "72", "AcquireRelease | UniformMemory");
+}
+
+#[test]
+fn air29_atomic_relaxed_add_keeps_relaxed_semantics_and_takes_the_scope_operand() {
+    // simdgroup scope (4) with no ordering: still relaxed, but the scope is the one the shader named
+    let (scope, semantics) = atomic_scope_and_semantics(
+        "%old = tail call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 0, i32 4, i32 0, i1 false)",
+        "declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32, i32, i1)",
+        "OpAtomicIAdd",
+    );
+    assert_eq!(scope, "3", "Subgroup scope");
+    assert_eq!(semantics, "0", "Relaxed");
+}
+
+#[test]
+fn air29_atomic_load_and_store_use_only_their_own_half_of_the_ordering() {
+    // seq_cst load on device + threadgroup memory: acquire half only (Vulkan has no sequentially consistent semantics)
+    let (_, load) = atomic_scope_and_semantics(
+        "%v = tail call i32 @air.atomic.global.load.i32(ptr addrspace(1) %out, i32 5, i32 2, i32 3, i1 false)",
+        "declare i32 @air.atomic.global.load.i32(ptr addrspace(1), i32, i32, i32, i1)",
+        "OpAtomicLoad",
+    );
+    assert_eq!(load, "322", "Acquire | UniformMemory | WorkgroupMemory");
+    // a release store keeps only the release half; an acquire store would keep none
+    let (_, store) = atomic_scope_and_semantics(
+        "tail call void @air.atomic.global.store.i32(ptr addrspace(1) %out, i32 7, i32 3, i32 2, i32 1, i1 false)",
+        "declare void @air.atomic.global.store.i32(ptr addrspace(1), i32, i32, i32, i32, i1)",
+        "OpAtomicStore",
+    );
+    assert_eq!(store, "68", "Release | UniformMemory");
+    let (_, acquire_store) = atomic_scope_and_semantics(
+        "tail call void @air.atomic.global.store.i32(ptr addrspace(1) %out, i32 7, i32 2, i32 2, i32 1, i1 false)",
+        "declare void @air.atomic.global.store.i32(ptr addrspace(1), i32, i32, i32, i32, i1)",
+        "OpAtomicStore",
+    );
+    assert_eq!(acquire_store, "0", "an acquire order on a store orders nothing");
+}

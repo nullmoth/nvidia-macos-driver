@@ -14,7 +14,8 @@ typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int
                  uint32_t reg; /* handle in the live GPU-range registry (nvmtl_live.h), 0 when unregistered */
                  int fresh; /* host-visible memory from its own vkAllocateMemory: zeroed by the kernel, never recycled */
                  uint64_t parked_ns; /* when the buffer park took it (CLOCK_UPTIME_RAW) */  void *lost_mem; int bind_lost;
-                 uint8_t hz_ut; /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */ } nvk_buffer;
+                 uint8_t hz_ut; /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */
+                 int psparse; /* placement sparse: no memory of its own, pages bound from heaps; 2 = made in NVK's small-page mode */ } nvk_buffer;
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_fault_context.h"
 #include "nvmtl_page_life.h"
@@ -25,6 +26,7 @@ typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; 
                  void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */
                  size_t hz_off, hz_len;   /* placed: the image's byte range of mem, for the hazard model (0 = all of mem) */
                  void *sparse;   /* a sparse image (NVMTL_SPARSE_TEXTURES=1): its nvmtl_vk_sparse_info, freed with the image */
+                 uint32_t sparse16; /* a sparse image with 16 KB tiles, made in NVK's small-page mode: its binds run in that mode */
                  uint8_t hz_ut; } nvk_image;   /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */
 #define NVMTL_NVAR 16
 #define NVMTL_NVAR_MAX 4096
@@ -52,6 +54,7 @@ typedef struct { void *rp; void *pipe; void *layout; int has_depth; uint32_t dfm
     uint32_t lin;
     uint64_t tbm[2][4]; uint32_t tbany;
     uint32_t fetch_mask;   /* colour attachments the fragment shader reads ([[color(n)]], set 3 binding 192+n) */
+    uint32_t ib_mask;      /* imageblock members the fragment shader reads or writes (storage images at bindings 600+n) */
     uint32_t fetch_zero;   /* framebuffer fetch is off but the fragment shader reads [[color(n)]]: set 3 holds the dummy image */
     uint32_t fetch_copy;   /* the colour attachments it reads through copies (fetch off, NVMTL_FETCH_COPY): nvmtl_fetch_copy.h */
     uint32_t stencil_emu;  /* the fragment shader's stencil export was lowered to a per-bit discard (push constant 160) */
@@ -92,6 +95,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  void *fcopyview[NVMTL_NCOL];   /* copies of the colour attachments, for fetch_copy pipelines */
                  void **fcp; unsigned nfcp, capfcp;   /* copy images this command buffer holds until it retires */
                  unsigned fetch_draw, topo;   /* the bound pipeline reads [[color(n)]] in this pass; last MTLPrimitiveType set */
+                 unsigned ib_draw;            /* the bound pipeline reads or writes imageblock planes: its draws are ordered like fetch draws */
                  /* the last framebuffer fetch set made in this command buffer and what it points at: a draw whose pass
                     and mask are the same reuses it (Core Animation draws hundreds of fetch draws per pass) */
                  void *fetch_last_set; uint32_t fetch_last_mask; void *fetch_last_view[NVMTL_NCOL];
@@ -109,6 +113,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  nvmtl_sample_pattern sample_pattern;
                  void **rvs; unsigned nrv, caprv;
                  unsigned restart_off;  /* GL turned primitive restart off (setPrimitiveRestartEnabled:NO) */
+                 int cull_mode;         /* last nvmtl_vk_cmd_set_cull mode: a split strip flips the front face per odd triangle */
                  uint32_t dyn_out[2];   /* address-table dynamic offset of the set the last snapshot returned, per stage */
                  void *tab_out[2];      /* the table page buffer that set's descriptor names */
                  /* Vulkan graphics bindings persist until changed; compute has its own bind point. */
@@ -119,6 +124,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                     sampled textures each stage's SPIR-V names; hz_dyn = the open pass began with vkCmdBeginRendering */
                  uint32_t hz_bufw[2]; uint64_t hz_texw[2][2]; uint64_t hz_tmask[2][4]; uint8_t hz_tmask_ok[2];
                  int hz_wm_dirty, hz_dyn, hz_force_full; uint32_t hz_att_skip;   /* untracked attachments: bit i colour, bit 8 depth */
+                 uint64_t managed_seq;   /* the commit this belongs to: managed-buffer bytes taken at commits up to it ride its submit */
                  const void *hzp_res; uint8_t hzp_kind, hzp_on, hzp_skip, hzp_bskip;   /* the resource of the binding being written */
                  uint8_t hz_draw_due;   /* something the next draw's hazard check must see arrived */
                  uint32_t hz_sn;   /* hazard model timing sample counter */
@@ -155,7 +161,8 @@ typedef struct { uint64_t vertices; uint32_t stride; uint32_t count; uint32_t ve
                  uint64_t boxes; uint32_t box_stride; uint32_t is_boxes;
                  /* curve geometry (NVK_CURVES=1): a box geometry whose boxes the driver writes from the control points */
                  uint32_t is_curve; uint32_t curve_flags; uint32_t cp_stride; uint32_t radius_stride;
-                 uint64_t cp_addr; uint64_t radius_addr; uint64_t curve_indices; } nvmtl_geom;
+                 uint64_t cp_addr; uint64_t radius_addr; uint64_t curve_indices; 
+                 uint32_t curve; /* 1 + index of the Metal curve geometry these boxes stand for, 0 = none (NVMTLCurves.m) */ } nvmtl_geom;
 int  nvmtl_vk_rt_available(void);
 int  nvmtl_vk_barycentrics_available(void);   // VK_KHR_fragment_shader_barycentric present and enabled-capable
 int  nvmtl_vk_accel_sizes(const nvmtl_geom *g, uint32_t ngeom, int instance, uint32_t instance_count, size_t *as_size, size_t *scratch_size);
@@ -244,6 +251,8 @@ void nvmtl_vk_ts_pool_destroy(void *pool);
 int  nvmtl_vk_cmd_ts_write(nvk_cmdbuf *c, void *pool, uint32_t idx, int barrier);
 int  nvmtl_vk_cmd_ts_resolve(nvk_cmdbuf *c, void *pool, uint32_t first, uint32_t count, nvk_buffer *dst, size_t off);
 int  nvmtl_vk_ts_read(void *pool, uint32_t first, uint32_t count, uint64_t *out);
+int  nvmtl_vk_ts_clear(void *pool, uint32_t first, uint32_t count);
+double nvmtl_vk_ts_period_ns(void);
 int  nvmtl_vk_gpu_timestamp(uint64_t *cpu_ns, uint64_t *gpu);
 int  nvmtl_vk_cmd_begin_occlusion(nvk_cmdbuf *c, uint32_t idx);
 void nvmtl_vk_cmd_end_occlusion(nvk_cmdbuf *c, uint32_t idx);
@@ -334,6 +343,7 @@ int nvmtl_vk_pre_fill(nvk_buffer *b, size_t offset, size_t size, uint32_t word);
 void nvmtl_vk_pre_hold(void *retained);
 extern void (*nvmtl_pre_release_hook)(void *);
 extern void (*nvmtl_pre_submit_hook)(void);
+extern __thread uint64_t nvmtl_pre_submit_seq;   /* managed_seq of the command buffer being submitted, while the hook runs */
 int  nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes);
 int  nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes);
 int  nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache);
@@ -352,6 +362,9 @@ void nvmtl_vk_bindless_put_storage(uint32_t slot, void *view);
 uint32_t nvmtl_vk_bindless_put_texel(void *bufview, int storage);
 uint32_t nvmtl_vk_bindless_sampler_slot(void *vksampler);
 void     nvmtl_vk_bindless_drop(uint32_t slot);
+uint32_t nvmtl_vk_bindless_range(uint32_t count);
+void     nvmtl_vk_bindless_range_set(uint32_t slot, void *view);
+void     nvmtl_vk_bindless_range_free(uint32_t first, uint32_t count);
 int  nvmtl_vk_pipeline_create_ex(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vkfmt, int hasDepth, nvk_pipeline *out);
 int  nvmtl_vk_image_view_create_ex(nvk_image *img, uint32_t vkfmt, int a8, uint32_t baseLevel, uint32_t levelCount, void **out_view);
 int  nvmtl_vk_depth_create_ex(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t aspect, nvk_image *out);
@@ -375,7 +388,9 @@ typedef struct { nvk_image *col[NVMTL_NCOL]; void *colview[NVMTL_NCOL]; uint32_t
     nvmtl_sample_pattern sample_pattern; uint32_t depth_store_options, stencil_store_options;
     uint32_t ds_level, ds_layer;
     uint32_t colfmt[NVMTL_NCOL], resfmt[NVMTL_NCOL];
-    uint32_t col_level[NVMTL_NCOL], col_layer[NVMTL_NCOL];  } nvk_pass;
+    uint32_t col_level[NVMTL_NCOL], col_layer[NVMTL_NCOL];
+    uint32_t tile_w, tile_h, tile_tg_bytes, tile_ib_sample;   /* the pass descriptor's tileWidth/tileHeight/threadgroupMemoryLength/imageblockSampleLength */
+    } nvk_pass;
 typedef struct { uint32_t ncol, cfmts[NVMTL_NCOL], has_depth, dfmt, samples, view_mask; } nvk_rtsig;
 /* the most views one multiview pass can run on this device; 0 when vertex amplification is off or the device cannot do it */
 uint32_t nvmtl_vk_multiview_views(void);
@@ -503,10 +518,14 @@ void nvmtl_vk_image_destroy(nvk_image *i);
 void nvmtl_vk_image_upload_barrier(nvk_image *img);
 void nvmtl_vk_queue_destroy(nvk_queue *q);
 size_t nvmtl_vk_allocated_bytes(void);
+uint32_t nvmtl_vk_memtype_flags(uint32_t type);   /* VkMemoryPropertyFlags of a memory type index, 0 if out of range */
 uint64_t nvmtl_vk_buffer_address(nvk_buffer *b);
 
 int nvmtl_vk_image_create_typed(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out);
-typedef struct { void *mem; void *map; size_t size; uint32_t memtype; int host_visible; } nvk_heap;
+typedef struct { void *mem; void *map; size_t size; uint32_t memtype; int host_visible; int bar1; } nvk_heap;
+/* host_visible value for an app's Shared MTLHeap (placement or automatic): VRAM through BAR1 when the process may and
+ * BAR1 has room, else system RAM like host_visible 1, with a log line either way. Only the app-heap callers pass it. */
+#define NVMTL_HEAP_APP_SHARED 2
 int  nvmtl_vk_heap_create(size_t size, int host_visible, nvk_heap *out);
 void nvmtl_vk_image_parked(nvk_image *i);     /* the image went to a park for reuse (alive, recyclable) */
 void nvmtl_vk_image_recycled(nvk_image *i);   /* a parked image was taken back into use */
@@ -527,6 +546,34 @@ int  nvmtl_vk_cmd_copy_image_sub3(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, ui
 int  nvmtl_vk_image_view_create_aspect(nvk_image *img, uint32_t vkfmt, uint32_t aspect, uint32_t baseLevel, uint32_t levelCount, void **out_view);
 void nvmtl_vk_heap_destroy(nvk_heap *h);
 int  nvmtl_vk_buffer_create_placed(size_t size, nvk_heap *heap, size_t offset, nvk_buffer *out);
+// Placement sparse buffers (macOS 26): a sparse buffer with no memory, whose pages are bound to ranges of placement heaps.
+int  nvmtl_vk_placement_sparse_buffers(void);
+int  nvmtl_vk_buffer_create_placement_sparse(size_t size, nvk_buffer *out, size_t *granule);
+int  nvmtl_vk_small_pages(int on);
+/* NVK's sparse tile shapes for images this thread makes next: bit 0 16 KB tiles, bit 1 depth-1 tiles for 3D images (Apple's
+ * shapes); returns the previous mode, -1 when the loaded NVK has no such mode */
+int  nvmtl_vk_sparse_mode(int mode);
+typedef struct { void *mem; uint32_t memtype; uint64_t buf_off, size, mem_off; } nvmtl_sparse_run;   // mem NULL = unbind
+int  nvmtl_vk_sparse_buffer_bind(nvk_buffer *b, const nvmtl_sparse_run *runs, uint32_t n);
+// Sparse (partially resident) colour textures: 2D, 2D array and 3D images with no memory, bound tile by tile.
+typedef struct {
+    uint32_t tile_w, tile_h, tile_d;     // texels per tile
+    uint32_t tile_bytes;                 // memory per tile (the binding granule)
+    uint32_t first_tail;                 // first mip level of the mip tail; == mips when the image has no tail
+    uint64_t tail_size, tail_offset, tail_stride;
+    int single_tail;                     // one tail for all array layers
+} nvk_sparse_info;
+typedef struct {
+    void *mem; uint32_t memtype; uint64_t mem_off;   // mem NULL = unbind
+    int tail;                                        // 1 = the mip tail of `layer`, else the tile at x,y,z of (mip, layer)
+    uint64_t tail_off, tail_size;                    // for a tail: the opaque range of the image to bind
+    uint32_t mip, layer; int32_t x, y, z; uint32_t w, h, d;
+} nvk_sparse_tile_run;
+int  nvmtl_vk_sparse_textures(void);
+int  nvmtl_vk_sparse_format_tile(uint32_t vkfmt, uint32_t mtl_type, uint32_t *tw, uint32_t *th, uint32_t *td, uint32_t *tile_bytes);
+int  nvmtl_vk_image_create_sparse(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage,
+                                  uint32_t mtl_type, uint32_t layers, nvk_image *out, nvk_sparse_info *info);
+int  nvmtl_vk_sparse_image_bind(nvk_image *img, const nvk_sparse_tile_run *runs, uint32_t n);
 int  nvmtl_vk_image_create_buffer_alias(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, int storage, int render,
                                         const nvk_buffer *b, size_t offset, size_t row_pitch, nvk_image *out);
 int  nvmtl_vk_image_placed_fits(const nvk_image *img, size_t len);
@@ -543,6 +590,8 @@ int nvmtl_vk_cmd_fill_buffer(nvk_cmdbuf *c, nvk_buffer *b, size_t offset, size_t
 int nvmtl_vk_cmd_write_word(nvk_cmdbuf *c, nvk_buffer *b, size_t offset, uint32_t word);
 
 int nvmtl_vk_cmd_copy_buffer(nvk_cmdbuf *c, nvk_buffer *src, size_t srcOff, nvk_buffer *dst, size_t dstOff, size_t size);
+int nvmtl_vk_cmd_copy_buffer_spread(nvk_cmdbuf *c, nvk_buffer *src, size_t srcOff, nvk_buffer *dst, size_t dstOff,
+                                    size_t elem, size_t dstStride, uint32_t count);
 
 int nvmtl_vk_cmd_copy_image(nvk_cmdbuf *c, nvk_image *src, uint32_t sx, uint32_t sy,
                         nvk_image *dst, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h);

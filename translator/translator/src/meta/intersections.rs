@@ -91,6 +91,11 @@ impl AirIntersectionFamily {
                 "primitive_motion" if !family.primitive_motion => family.primitive_motion = true,
                 "instance_motion" if !family.instance_motion => family.instance_motion = true,
                 "extended_limits" if !family.extended_limits => family.extended_limits = true,
+                "curve_data" => {
+                    return Err(format!(
+                        "unsupported Metal ray tracing curves: {callee} (Vulkan ray queries have no curve primitive)"
+                    ));
+                }
                 _ => {
                     return Err(format!(
                         "AIR intersection symbol {callee} has an unknown or duplicate token {token}"

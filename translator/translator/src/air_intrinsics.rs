@@ -435,7 +435,8 @@ pub fn air_intrinsic_disposition(name: &str) -> Option<AirIntrinsicDisposition> 
         return Some(LoweredOrStaticLinkage);
     }
 
-    if name.contains("_intersection_query.") {
+    // intersection_query<> with no tags spells its intrinsics without a suffix (air.next_intersection_query)
+    if name.contains("_intersection_query.") || name.ends_with("_intersection_query") {
         return Some(Lowered);
     }
 
@@ -615,6 +616,7 @@ pub fn air_intrinsic_disposition(name: &str) -> Option<AirIntrinsicDisposition> 
             "air.simd_shuffle",
             "air.simd_shuffle_down",
             "air.simd_shuffle_rotate_down",
+            "air.simd_shuffle_rotate_up",
             "air.simd_shuffle_and_fill_down",
             "air.simd_shuffle_and_fill_up",
             "air.simd_shuffle_up",
@@ -626,11 +628,16 @@ pub fn air_intrinsic_disposition(name: &str) -> Option<AirIntrinsicDisposition> 
             "air.quad_max",
             "air.quad_shuffle_xor",
             "air.quad_shuffle_rotate_down",
+            "air.quad_shuffle_rotate_up",
             "air.quad_shuffle_up",
             "air.quad_shuffle_down",
             "air.simd_prefix_exclusive_sum",
             "air.simd_prefix_inclusive_sum",
             "air.simd_sum",
+            "air.simd_product",
+            "air.simd_prefix_exclusive_product",
+            "air.simd_prefix_inclusive_product",
+            "air.quad_product",
             "air.simd_or",
             "air.simd_xor",
             "air.simd_and",

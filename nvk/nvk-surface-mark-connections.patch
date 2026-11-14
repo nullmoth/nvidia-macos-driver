@@ -1,0 +1,30 @@
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
+@@ -67,6 +67,27 @@
+    struct nvkmd_nvrm_pdev *pdev = nvkmd_nvrm_pdev(dev->base.pdev);
+    struct NvRmApi rm;
+    nvkmd_nvrm_dev_api_ctl(pdev, &rm);
++   /* The kernel serialises the calls of one connection. A completion mark (bit 31) releases a page-off that holds the
++    * accelerator lock, and a try-only call (bit 30) must return at once when that lock is busy; neither may queue
++    * behind a blocking call that is itself waiting for that lock. Each kind has its own connection, opened on first
++    * use and kept for the life of the process. When one cannot be opened the control connection is used, as before. */
++   const int kind = (plane & 0x80000000u) ? 0 : (plane & 0x40000000u) ? 1 : -1;
++   if (kind >= 0) {
++      static int side_fd[2] = { -2, -2 };   /* -2 not tried yet, -1 could not be opened */
++      int fd = __atomic_load_n(&side_fd[kind], __ATOMIC_ACQUIRE);
++      if (fd == -2) {
++         int opened = NVRM_OPEN(NVRM_CTL_NODE_NAME);
++         if (opened < 0) opened = -1;
++         int expected = -2;
++         if (__atomic_compare_exchange_n(&side_fd[kind], &expected, opened, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++            fd = opened;
++         } else {
++            if (opened >= 0) NVRM_CLOSE(opened);
++            fd = expected;
++         }
++      }
++      if (fd >= 0) rm.fd = fd;
++   }
+    struct NVRMSurfShareEsc e = { .surfaceID = surfaceID, .plane = plane, .hClient = pdev->hClient };
+    return nvRmApiSurfShare(&rm, NVRM_ESC_SURF_DIRTY, &e);
+ }

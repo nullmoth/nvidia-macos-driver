@@ -40,7 +40,8 @@ fn classify(name: &str) -> Option<Family> {
     if name.starts_with("air.intersect.") {
         return Some(Family::Intersect);
     }
-    if !name.contains("_intersection_query.") {
+    // intersection_query<> with no tags spells its intrinsics without a suffix (air.next_intersection_query)
+    if !name.contains("_intersection_query.") && !name.ends_with("_intersection_query") {
         return None;
     }
     let stem = name.strip_prefix("air.")?;
@@ -788,6 +789,14 @@ impl Lowering {
             query,
             committed,
         );
+        // instance i's user id is word 2*i of the side table; word 2*i+1 locates its curves (native/air_curves.rs)
+        let word = ctx.module.fresh_id();
+        out.push(Instruction::new(
+            Op::IAdd,
+            Some(self.uint),
+            Some(word),
+            vec![Operand::IdRef(iid), Operand::IdRef(iid)],
+        ));
         let word_ptr_ty = ctx.ty_ptr(StorageClass::StorageBuffer, self.uint);
         let ptr = ctx.module.fresh_id();
         out.push(Instruction::new(
@@ -797,7 +806,7 @@ impl Lowering {
             vec![
                 Operand::IdRef(side),
                 Operand::IdRef(self.c0),
-                Operand::IdRef(iid),
+                Operand::IdRef(word),
             ],
         ));
         if rty == self.uint {
@@ -840,6 +849,7 @@ impl Lowering {
             return Err(format!("ray query: getter {name} is not carried yet (object-space rays and transforms are v2)"));
         };
         let prop = prop.split("_intersection_query.").next().unwrap_or(prop);
+        let prop = prop.strip_suffix("_intersection_query").unwrap_or(prop);
         let op = match prop {
             "intersection_type" => return Ok((Op::RayQueryGetIntersectionTypeKHR, committed, true)),
             "distance" | "triangle_distance" | "bounding_box_distance" => Op::RayQueryGetIntersectionTKHR,
@@ -850,6 +860,12 @@ impl Lowering {
             "user_instance_id" => Op::RayQueryGetIntersectionInstanceCustomIndexKHR,
             "nvmtl_sbt_offset" => Op::RayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetKHR,
             "triangle_front_facing" => Op::RayQueryGetIntersectionFrontFaceKHR,
+            // without instancing object space is world space, and the object-space ray is only filled in where the
+            // traversal enters an instance: a query over a primitive structure reads the world ray instead
+            "ray_origin" if !name.contains("instancing") => return Ok((Op::RayQueryGetWorldRayOriginKHR, true, false)),
+            "ray_direction" if !name.contains("instancing") => {
+                return Ok((Op::RayQueryGetWorldRayDirectionKHR, true, false))
+            }
             "ray_origin" => Op::RayQueryGetIntersectionObjectRayOriginKHR,
             "ray_direction" => Op::RayQueryGetIntersectionObjectRayDirectionKHR,
             "object_to_world_transform" => Op::RayQueryGetIntersectionObjectToWorldKHR,
@@ -873,8 +889,33 @@ impl Lowering {
         let rty = call
             .result_type
             .ok_or("ray query getter without a result type")?;
-        let (op, committed, is_type) = self.getter(name)?;
         let mut out = Vec::new();
+        if name.contains(crate::native::air_curves::SIDE_WORD) {
+            // one word of the structure's side table, at the index the call names; 0 where no table is bound
+            let query = self.query_of(id_operand(call, 0)?)?;
+            let index = id_operand(call, 1)?;
+            match self.query_sides.get(&query).copied() {
+                Some(side) => {
+                    let word_ptr_ty = ctx.ty_ptr(StorageClass::StorageBuffer, self.uint);
+                    let ptr = ctx.module.fresh_id();
+                    out.push(Instruction::new(
+                        Op::AccessChain,
+                        Some(word_ptr_ty),
+                        Some(ptr),
+                        vec![Operand::IdRef(side), Operand::IdRef(self.c0), Operand::IdRef(index)],
+                    ));
+                    out.push(Instruction::new(Op::Load, Some(rty), Some(res), vec![Operand::IdRef(ptr)]));
+                }
+                None => out.push(Instruction::new(
+                    Op::IAdd,
+                    Some(rty),
+                    Some(res),
+                    vec![Operand::IdRef(self.c0), Operand::IdRef(self.c0)],
+                )),
+            }
+            return Ok(out);
+        }
+        let (op, committed, is_type) = self.getter(name)?;
         if matches!(
             op,
             Op::RayQueryGetIntersectionObjectToWorldKHR
@@ -1125,7 +1166,7 @@ pub(in crate::passes) fn lower_ray_queries(
     for (_, name) in families.values() {
         if !tags_are_carried(name) {
             return Err(format!(
-                "ray query: {name} — motion, curve and intersection-function shapes are not carried yet"
+                "unsupported ray query shape: {name} — motion, curve and intersection-function-buffer shapes are not carried yet"
             ));
         }
     }
@@ -1199,8 +1240,14 @@ pub(in crate::passes) fn lower_ray_queries(
                     if let Some(side) = lw.side_table_for(ctx, structure_var)? {
                         lw.query_sides.insert(query, side);
                     }
-                    let mask = id_operand(&inst, 7)?;
-                    let params = lw.params_from(&inst, 8)?;
+                    // only an instancing query carries an instance mask (operand 7); without instancing the parameter
+                    // words start there instead, and the ray meets every instance-less geometry: the full mask
+                    let (mask, first) = if name.contains("instancing") {
+                        (id_operand(&inst, 7)?, 8)
+                    } else {
+                        (ctx.const_uint(0xFF), 7)
+                    };
+                    let params = lw.params_from(&inst, first)?;
                     let mut out = Vec::new();
                     let structure = lw.load_structure(&mut out, ctx, structure_var);
                     lw.initialize(

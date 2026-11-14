@@ -105,7 +105,11 @@ pub(in crate::passes) fn fragment_imageblock_projection_type_matches(
                 && definition.operands.as_slice()
                     == [Operand::LiteralBit32(format.bits), Operand::LiteralBit32(0)]
         }
-        ImageComp::Sint => false,
+        // AIR's i32 is an unsigned SPIR-V integer here, as the other integer types are: width is what must match
+        ImageComp::Sint => {
+            definition.class.opcode == Op::TypeInt
+                && definition.operands.first() == Some(&Operand::LiteralBit32(format.bits))
+        }
     }
 }
 
@@ -384,8 +388,13 @@ pub(super) fn build_stage_input(
             .get(*param as usize)
             .is_some_and(|(pid, _)| read_params.contains(pid))
     }) {
+        let prefix = if role.starts_with("tensor") {
+            "unsupported Metal 4 tensor argument: "
+        } else {
+            ""
+        };
         return Err(format!(
-            "entry parameter {param} declares AIR role `air.{role}`, which has no lowering; \
+            "{prefix}entry parameter {param} declares AIR role `air.{role}`, which has no lowering; \
              emitting the module would silently read a zero in its place"
         ));
     }
@@ -421,7 +430,16 @@ pub(super) fn build_stage_input(
                      matched to it"
                 ));
             };
-            match crate::meta::aliased_imageblock_planes(layout) {
+            let staged = meta
+                .aliased_implicit_imageblock_planes
+                .get(param)
+                .is_some_and(|planes| planes.iter().any(|plane| plane.explicit));
+            let mapped = if staged {
+                crate::meta::explicit_imageblock_planes(layout)
+            } else {
+                crate::meta::aliased_imageblock_planes(layout)
+            };
+            match mapped {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     return Err(format!(
@@ -1050,6 +1068,11 @@ pub(super) fn build_stage_input(
                 Some(var),
                 vec![Operand::StorageClass(StorageClass::Workgroup)],
             ));
+            if crate::tile_mode::has(crate::tile_mode::PERSISTENT_TG) {
+                if let Some(metal_index) = metal_index {
+                    ctx.tile_tg_vars.push(air_calls::tile_tg::TileTgVar { var, metal_index });
+                }
+            }
             bindings.push((*pid, ParamBinding::WorkgroupMemory { var }));
         } else if role_is("buffer") {
             let pointee = ptr_pointee(&defs, *pty)
@@ -2247,10 +2270,13 @@ pub(super) fn build_stage_input(
             .iter()
             .position(|instruction| instruction.class.opcode != Op::Variable)
             .unwrap_or(block.instructions.len());
-        block.instructions.insert(
-            insert_at,
-            Instruction::new(Op::BeginInvocationInterlockEXT, None, None, vec![]),
-        );
+        // a device with no fragment shader interlock gets none; the driver orders such draws itself
+        if !crate::tile_mode::has(crate::tile_mode::NO_INTERLOCK) {
+            block.instructions.insert(
+                insert_at,
+                Instruction::new(Op::BeginInvocationInterlockEXT, None, None, vec![]),
+            );
+        }
     }
     lower_patch_control_point_calls(ctx, entry_idx, vert, &all_defs)?;
     lower_buffer_address_facts(ctx, entry_idx, BufferAddressRoles { kern, vert, frag })?;
