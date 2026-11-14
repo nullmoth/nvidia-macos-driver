@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "kind": "private-opencl-launch-package",
+  "status": "EXAMPLE_ONLY_NOT_QUALIFIED",
+  "experiment_config": {
+    "CLVK_KEEP_TEMPORARIES": "1",
+    "CLVK_CLSPV_OPTIONS": "-hack-clamp-width",
+    "CLVK_PREFER_DEVICE_LOCAL_BUFFERS": "1",
+    "NVMTL_NAK_SPILL_RETRY": "1",
+    "CLVK_MAX_FIRST_CMD_BATCH_SIZE": "10",
+    "CLVK_MAX_CMD_GROUP_SIZE": "1",
+    "CLVK_KEEP_MEMORY_ALLOCATIONS_MAPPED": "1",
+    "NVMTL_PROCESS_ENV": "1",
+    "NVMTL_NAK_ARR_SCRATCH": "0",
+    "NVRM_610_BOOST": "hold",
+    "CLVK_MAX_COMPUTE_UNITS": "170"
+  },
+  "artifacts": {
+    "Frameworks/OpenCL.framework/Versions/A/OpenCL": "56655cd6c0cb65c329bbefc7d4eb87991d513fd64f50ce13546651842c1cf7e5",
+    "bin/clspv": "a4c6fc28ea6e2a1fabf486ccf2171aada5746f74b4b9c110ca0e69cbdeff47ea",
+    "lib/libvulkan_nouveau.dylib": "7638e1919a5150438a62693ac5bdf57dbe5738676b870ff5e1024fce87360023",
+    "launch.py": "05ee166e77cb9d9ede840ad3230a36b434ea8a0d1de1c77b532c35194ba8d530"
+  },
+  "loader": "/REPLACE_WITH_ABSOLUTE_VULKAN_LOADER_PATH",
+  "loader_alias": "/REPLACE_WITH_ABSOLUTE_VULKAN_LOADER_ALIAS_PATH",
+  "external_pins": {
+    "/REPLACE_WITH_ABSOLUTE_VULKAN_LOADER_PATH": "REPLACE_WITH_VERIFIED_SHA256",
+    "/REPLACE_WITH_ABSOLUTE_NVRM610_CONFIG_PATH": "REPLACE_WITH_VERIFIED_SHA256",
+    "/REPLACE_WITH_ABSOLUTE_INSTALLED_NVMTL_DRIVER_PATH": "REPLACE_WITH_VERIFIED_SHA256",
+    "/REPLACE_WITH_ABSOLUTE_INSTALLED_NVK_PATH": "REPLACE_WITH_VERIFIED_SHA256"
+  },
+  "app": {
+    "bundle": "/REPLACE_WITH_ABSOLUTE_GEEKBENCH_APP_PATH",
+    "executables": {
+      "gui": {
+        "relative": "Contents/MacOS/Geekbench 7",
+        "CDHash": "REPLACE_WITH_VERIFIED_X86_64_CDHASH",
+        "Identifier": "REPLACE_WITH_VERIFIED_VENDOR_IDENTIFIER",
+        "TeamIdentifier": "REPLACE_WITH_VERIFIED_VENDOR_TEAM_IDENTIFIER"
+      },
+      "cli": {
+        "relative": "Contents/Resources/geekbench_avx2",
+        "CDHash": "REPLACE_WITH_VERIFIED_X86_64_CDHASH",
+        "Identifier": "REPLACE_WITH_VERIFIED_VENDOR_IDENTIFIER",
+        "TeamIdentifier": "REPLACE_WITH_VERIFIED_VENDOR_TEAM_IDENTIFIER"
+      }
+    }
+  }
+}

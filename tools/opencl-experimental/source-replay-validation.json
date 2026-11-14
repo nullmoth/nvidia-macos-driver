@@ -1,0 +1,13 @@
+{
+  "status": "PASS",
+  "replay": "12 clvk files and 5 Mesa files match pinned final sources",
+  "cpu_checks": [
+    "calibration production functions + negative control",
+    "26 selective-retry cases + 9 negative controls, ASan/UBSan",
+    "600 queue finishes + old-ownership negative control, ASan/UBSan"
+  ],
+  "input_mismatch_rejected": true,
+  "gpu_execution": false,
+  "full_rebuild": false,
+  "input_tree_changes": false
+}

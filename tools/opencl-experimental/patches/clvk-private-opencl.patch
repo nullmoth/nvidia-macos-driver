@@ -1,0 +1,1160 @@
+diff --git a/src/api.cpp b/src/api.cpp
+index 0d759a63f02a9a7fd65d64071c34f616783d5222..37f5f50a7c4f9bae3f350382addde67b2ea5027d 100644
+--- a/src/api.cpp
++++ b/src/api.cpp
+@@ -3413,7 +3413,7 @@ cl_int CLVK_API_CALL clGetEventProfilingInfo(cl_event evt,
+         return CL_PROFILING_INFO_NOT_AVAILABLE;
+     }
+ 
+-    if (!event->queue()->has_property(CL_QUEUE_PROFILING_ENABLE)) {
++    if (!event->queue_profiling_enabled()) {
+         return CL_PROFILING_INFO_NOT_AVAILABLE;
+     }
+ 
+@@ -3427,6 +3427,9 @@ cl_int CLVK_API_CALL clGetEventProfilingInfo(cl_event evt,
+         }
+         cl_ulong value = event->get_profiling_info(param_name);
+         memcpy(param_value, &value, sizeof(cl_ulong));
++        if (config.pipeline_stats() && param_name == CL_PROFILING_COMMAND_END) {
++            event->log_profiling_mapping();
++        }
+     }
+ 
+     return CL_SUCCESS;
+diff --git a/src/config.def b/src/config.def
+index a1665b38ec868e16135f377fba234ce1e3df8e05..a878f24b917f9b156e9c5f0c14955102da3bb14c 100644
+--- a/src/config.def
++++ b/src/config.def
+@@ -192,6 +192,13 @@ OPTION(uint32_t, enqueue_command_retry_sleep_us, UINT32_MAX) // UINT32_MAX meani
+ // Specify whether device memory allocations should remain persistently mapped.
+ PROPERTY(bool, keep_memory_allocations_mapped, false)
+ 
++// Prefer CPU-visible coherent device memory for buffers when available.
++// Retain the normal host-memory selection when no compatible type exists.
++OPTION(bool, prefer_device_local_buffers, false)
++
++// Diagnostic only: log actual specialized pipeline executable statistics.
++OPTION(bool, pipeline_stats, false)
++
+ // Force to build kernels in a separate thread. It brings a slight overhead when
+ // creating the thread, but can be a work-around when having issues with clang
+ // compiling in the application thread.
+diff --git a/src/device.cpp b/src/device.cpp
+index 5e0152a15ccbb5878696e92202a04484be0a4627..6a79c5c73bb00a6b16739d215040025d4e646799 100644
+--- a/src/device.cpp
++++ b/src/device.cpp
+@@ -257,6 +257,11 @@ bool cvk_device::init_extensions() {
+         VK_KHR_SHADER_FMA_EXTENSION_NAME,
+     };
+ 
++    if (config.pipeline_stats()) {
++        desired_extensions.push_back(
++            VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
++    }
++
+     if (m_properties.apiVersion < VK_MAKE_VERSION(1, 2, 0)) {
+         desired_extensions.push_back(VK_KHR_SPIRV_1_4_EXTENSION_NAME);
+         desired_extensions.push_back(
+@@ -320,6 +325,8 @@ void cvk_device::init_features(VkInstance instance) {
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES_KHR;
+     m_features_shader_fma.sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FMA_FEATURES_KHR;
++    m_features_pipeline_executable.sType =
++        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR;
+ 
+     std::vector<std::tuple<uint32_t, const char*, VkBaseOutStructure*>>
+         coreversion_extension_features = {
+@@ -358,6 +365,8 @@ void cvk_device::init_features(VkInstance instance) {
+                          m_features_queue_global_priority),
+             VER_EXT_FEAT(0, VK_KHR_SHADER_FMA_EXTENSION_NAME,
+                          m_features_shader_fma),
++            VER_EXT_FEAT(0, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME,
++                         m_features_pipeline_executable),
+ 
+ #undef VER_EXT_FEAT
+         };
+@@ -1137,6 +1146,14 @@ bool cvk_device::init(VkInstance instance) {
+ 
+     init_features(instance);
+ 
++    if (config.pipeline_stats() &&
++        (!is_vulkan_extension_enabled(
++             VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME) ||
++         !m_features_pipeline_executable.pipelineExecutableInfo)) {
++        cvk_error("CLVK_PSTAT_ERROR requested executable statistics unsupported");
++        return false;
++    }
++
+     init_command_pointers(instance);
+ 
+     build_extension_ils_list();
+@@ -1149,6 +1166,20 @@ bool cvk_device::init(VkInstance instance) {
+         return false;
+     }
+ 
++    if (config.pipeline_stats()) {
++        m_vkfns.vkGetPipelineExecutablePropertiesKHR =
++            reinterpret_cast<PFN_vkGetPipelineExecutablePropertiesKHR>(
++                vkGetDeviceProcAddr(m_dev, "vkGetPipelineExecutablePropertiesKHR"));
++        m_vkfns.vkGetPipelineExecutableStatisticsKHR =
++            reinterpret_cast<PFN_vkGetPipelineExecutableStatisticsKHR>(
++                vkGetDeviceProcAddr(m_dev, "vkGetPipelineExecutableStatisticsKHR"));
++        if (!m_vkfns.vkGetPipelineExecutablePropertiesKHR ||
++            !m_vkfns.vkGetPipelineExecutableStatisticsKHR) {
++            cvk_error("CLVK_PSTAT_ERROR executable statistics entry points missing");
++            return false;
++        }
++    }
++
+     init_spirv_environment();
+ 
+     log_limits_and_memory_information();
+@@ -1309,11 +1340,12 @@ void cvk_device::select_work_group_size(
+ }
+ 
+ cl_int cvk_device::get_device_host_timer(cl_ulong* device_timestamp,
+-                                         cl_ulong* host_timestamp) const {
++                                         cl_ulong* host_timestamp,
++                                         uint64_t* deviation) const {
+     auto vkdev = vulkan_device();
+ 
+-    uint64_t timestamps[2];
+-    uint64_t max_deviation;
++    uint64_t best_timestamps[2]{};
++    uint64_t best_deviation = 0;
+     VkCalibratedTimestampInfoEXT timestamp_infos[2] = {
+         {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, nullptr,
+          VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT},
+@@ -1327,25 +1359,39 @@ cl_int cvk_device::get_device_host_timer(cl_ulong* device_timestamp,
+         num_requested_timestamps = 2;
+     }
+ 
+-    auto res = m_vkfns.vkGetCalibratedTimestampsEXT(
+-        vkdev, num_requested_timestamps, timestamp_infos, timestamps,
+-        &max_deviation);
+-    if (res != VK_SUCCESS) {
+-        cvk_error_fn("vkGetCalibratedTimestampsEXT failed %d %s", res,
+-                     vulkan_error_string(res));
+-        return CL_OUT_OF_RESOURCES;
++    // A preempted host/device sample can otherwise shift successive events apart.
++    const uint32_t attempts = device_timestamp != nullptr ? 8 : 1;
++    for (uint32_t attempt = 0; attempt < attempts; ++attempt) {
++        uint64_t timestamps[2]{};
++        uint64_t max_deviation;
++        auto res = m_vkfns.vkGetCalibratedTimestampsEXT(
++            vkdev, num_requested_timestamps, timestamp_infos, timestamps,
++            &max_deviation);
++        if (res != VK_SUCCESS) {
++            cvk_error_fn("vkGetCalibratedTimestampsEXT failed %d %s", res,
++                         vulkan_error_string(res));
++            return CL_OUT_OF_RESOURCES;
++        }
++        if (attempt == 0 || max_deviation < best_deviation) {
++            best_timestamps[0] = timestamps[0];
++            best_timestamps[1] = timestamps[1];
++            best_deviation = max_deviation;
++        }
+     }
+ 
+-    *host_timestamp = timestamps[0];
++    *host_timestamp = best_timestamps[0];
+     if (device_timestamp != nullptr) {
+-        *device_timestamp = timestamp_to_ns(timestamps[1]);
++        *device_timestamp = timestamp_to_ns(best_timestamps[1]);
++    }
++    if (deviation != nullptr) {
++        *deviation = best_deviation;
+     }
+ 
+     return CL_SUCCESS;
+ }
+ 
+ cl_int cvk_device::update_device_host_timer_no_lock() {
+-    return get_device_host_timer(&m_sync_dev, &m_sync_host);
++    return get_device_host_timer(&m_sync_dev, &m_sync_host, &m_sync_deviation);
+ }
+ 
+ cl_int cvk_device::update_device_host_timer() {
+@@ -1353,7 +1399,8 @@ cl_int cvk_device::update_device_host_timer() {
+     return update_device_host_timer_no_lock();
+ }
+ 
+-cl_int cvk_device::device_timer_to_host(cl_ulong dev, cl_ulong& host) {
++cl_int cvk_device::device_timer_to_host(cl_ulong dev, cl_ulong& host,
++                                       uint64_t* deviation) {
+     std::lock_guard<std::mutex> lock(m_sync_mutex);
+     if (dev > m_sync_dev) {
+         cl_int err = update_device_host_timer_no_lock();
+@@ -1366,5 +1413,8 @@ cl_int cvk_device::device_timer_to_host(cl_ulong dev, cl_ulong& host) {
+     } else {
+         host = dev - (m_sync_dev - m_sync_host);
+     }
++    if (deviation != nullptr) {
++        *deviation = m_sync_deviation;
++    }
+     return CL_SUCCESS;
+ }
+diff --git a/src/device.hpp b/src/device.hpp
+index b388761a30e0a56c9f96b1a8bd0987cfbf81a38b..5c86e9de7321c3269b97039db495d370dcb6ca0b 100644
+--- a/src/device.hpp
++++ b/src/device.hpp
+@@ -35,6 +35,8 @@
+ struct cvk_vulkan_extension_functions {
+     PFN_vkGetCalibratedTimestampsEXT vkGetCalibratedTimestampsEXT;
+     PFN_vkGetBufferDeviceAddressKHR vkGetBufferDeviceAddressKHR;
++    PFN_vkGetPipelineExecutablePropertiesKHR vkGetPipelineExecutablePropertiesKHR;
++    PFN_vkGetPipelineExecutableStatisticsKHR vkGetPipelineExecutableStatisticsKHR;
+ };
+ 
+ #define MAKE_NAME_VERSION(major, minor, patch, name)                           \
+@@ -80,7 +82,9 @@ struct cvk_device : public _cl_device_id,
+             save_pipeline_cache(entry.first, entry.second);
+             vkDestroyPipelineCache(m_dev, entry.second, nullptr);
+         }
+-        vkDestroyDevice(m_dev, nullptr);
++        if (m_dev != VK_NULL_HANDLE) {
++            vkDestroyDevice(m_dev, nullptr);
++        }
+     }
+ 
+ #ifdef CLVK_UNIT_TESTING_ENABLED
+@@ -166,6 +170,12 @@ struct cvk_device : public _cl_device_id,
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+     }
+ 
++    CHECK_RETURN bool memory_index_needs_staging_readback(uint32_t index) const {
++        const auto flags = m_mem_properties.memoryTypes[index].propertyFlags;
++        return (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
++               !(flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
++    }
++
+     struct allocation_parameters {
+         VkDeviceSize size;
+         uint32_t memory_type_index;
+@@ -209,14 +219,28 @@ struct cvk_device : public _cl_device_id,
+     }
+ 
+     CHECK_RETURN uint32_t
+-    memory_type_index_for_buffer(uint32_t valid_memory_type_bits) const {
++    memory_type_index_for_buffer(uint32_t valid_memory_type_bits,
++                                 bool host_staging = false) const {
++        if (!host_staging && config.prefer_device_local_buffers()) {
++            const VkMemoryPropertyFlags required_flags =
++                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
++                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
++                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++            const auto local_type = memory_type_index_for_resource(
++                valid_memory_type_bits, required_flags, VkMemoryPropertyFlags{0});
++            if (local_type != VK_MAX_MEMORY_TYPES) {
++                cvk_debug_fn("selected device-local buffer type %u", local_type);
++                return local_type;
++            }
++        }
+         return memory_type_index_for_resource(
+             valid_memory_type_bits, ARRAY_SIZE(buffer_supported_memory_types),
+             buffer_supported_memory_types);
+     }
+ 
+     CHECK_RETURN allocation_parameters
+-    select_memory_for(VkBuffer buffer, cl_mem_flags flags) const {
++    select_memory_for(VkBuffer buffer, cl_mem_flags flags,
++                      bool host_staging = false) const {
+         UNUSED(flags);
+         VkMemoryRequirements memreqs;
+         vkGetBufferMemoryRequirements(m_dev, buffer, &memreqs);
+@@ -224,7 +248,7 @@ struct cvk_device : public _cl_device_id,
+         allocation_parameters ret;
+         ret.size = memreqs.size;
+         ret.memory_type_index =
+-            memory_type_index_for_buffer(memreqs.memoryTypeBits);
++            memory_type_index_for_buffer(memreqs.memoryTypeBits, host_staging);
+         ret.memory_coherent = memory_index_is_coherent(ret.memory_type_index);
+ 
+         return ret;
+@@ -649,9 +673,11 @@ struct cvk_device : public _cl_device_id,
+     CHECK_RETURN bool has_timer_support() const { return m_has_timer_support; }
+ 
+     CHECK_RETURN cl_int get_device_host_timer(cl_ulong* dev_ts,
+-                                              cl_ulong* host_ts) const;
++                                              cl_ulong* host_ts,
++                                              uint64_t* deviation = nullptr) const;
+     CHECK_RETURN cl_int update_device_host_timer();
+-    cl_int device_timer_to_host(cl_ulong dev, cl_ulong& host);
++    cl_int device_timer_to_host(cl_ulong dev, cl_ulong& host,
++                                uint64_t* deviation = nullptr);
+ 
+     uint64_t timestamp_to_ns(uint64_t ts) const {
+         double ns_per_tick = vulkan_limits().timestampPeriod;
+@@ -858,8 +884,10 @@ private:
+     VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR
+         m_features_queue_global_priority{};
+     VkPhysicalDeviceShaderFmaFeaturesKHR m_features_shader_fma{};
++    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR
++        m_features_pipeline_executable{};
+ 
+-    VkDevice m_dev;
++    VkDevice m_dev{VK_NULL_HANDLE};
+     std::vector<const char*> m_vulkan_device_extensions;
+ 
+     std::vector<cvk_vulkan_queue_wrapper> m_vulkan_queues;
+@@ -904,6 +932,7 @@ private:
+     std::mutex m_sync_mutex;
+     cl_ulong m_sync_host{};
+     cl_ulong m_sync_dev{};
++    uint64_t m_sync_deviation{};
+ 
+     spv_target_env m_vulkan_spirv_env;
+ 
+diff --git a/src/event.cpp b/src/event.cpp
+index 1dcf88a06db4e47cfa14157f6c1b715046516d4d..fc1029d0bdc3bbf549d2ec89ec6b381d11292aee 100644
+--- a/src/event.cpp
++++ b/src/event.cpp
+@@ -14,6 +14,46 @@
+ 
+ #include "event.hpp"
+ #include "queue.hpp"
++#include <cstdio>
++
++cvk_event::cvk_event(cvk_context* ctx, cvk_command_queue* queue)
++    : api_object(ctx), m_command_type(0), m_queue(queue),
++      m_queue_profiling_enabled(queue != nullptr &&
++                               queue->has_property(CL_QUEUE_PROFILING_ENABLE)) {}
++
++refcounted_holder<cvk_command_queue> cvk_event_command::queue_for_wait() {
++    std::lock_guard<std::mutex> lock(m_lock);
++    // Completion takes this same lock before the command can release its queue.
++    if (m_status <= CL_COMPLETE) {
++        return {};
++    }
++    return m_queue;
++}
++
++refcounted_holder<cvk_command_queue> cvk_event_combine::queue_for_wait() {
++    return m_end_event->queue_for_wait();
++}
++
++void cvk_event_command::log_profiling_mapping() const {
++    if (m_diagnostic_device_end == 0) {
++        return;
++    }
++    const int written = fprintf(stderr,
++        "CLVK_PROFILING_MAP {\"event\":\"%p\",\"queue\":\"%p\","
++        "\"command_type\":%u,\"device_start_ns\":%llu,\"device_end_ns\":%llu,"
++        "\"host_start_ns\":%llu,\"host_end_ns\":%llu,"
++        "\"start_max_deviation_ns\":%llu,\"end_max_deviation_ns\":%llu}\n",
++        static_cast<const void*>(this), static_cast<void*>(queue()),
++        command_type(), static_cast<unsigned long long>(m_diagnostic_device_start),
++        static_cast<unsigned long long>(m_diagnostic_device_end),
++        static_cast<unsigned long long>(get_profiling_info(CL_PROFILING_COMMAND_START)),
++        static_cast<unsigned long long>(get_profiling_info(CL_PROFILING_COMMAND_END)),
++        static_cast<unsigned long long>(m_diagnostic_start_deviation),
++        static_cast<unsigned long long>(m_diagnostic_end_deviation));
++    if (written < 0) {
++        cvk_error("CLVK_PROFILING_MAP_ERROR cannot write record");
++    }
++}
+ 
+ static const cl_profiling_info status_to_profiling_info[4] = {
+     CL_PROFILING_COMMAND_END,
+diff --git a/src/event.hpp b/src/event.hpp
+index 8abc3ea23d1400a615461bb113b2b44c95c96d32..b0fbdb5fd7fdb2abce89cb46258975e561620886 100644
+--- a/src/event.hpp
++++ b/src/event.hpp
+@@ -37,8 +37,11 @@ struct cvk_event_callback {
+ 
+ struct cvk_event : public _cl_event, api_object<object_magic::event> {
+ 
+-    cvk_event(cvk_context* ctx, cvk_command_queue* queue)
+-        : api_object(ctx), m_command_type(0), m_queue(queue) {}
++    cvk_event(cvk_context* ctx, cvk_command_queue* queue);
++
++    virtual refcounted_holder<cvk_command_queue> queue_for_wait() = 0;
++
++    bool queue_profiling_enabled() const { return m_queue_profiling_enabled; }
+ 
+     virtual cl_int get_status() const = 0;
+ 
+@@ -65,9 +68,12 @@ struct cvk_event : public _cl_event, api_object<object_magic::event> {
+ 
+     virtual uint64_t get_profiling_info(cl_profiling_info pinfo) const = 0;
+ 
++    virtual void log_profiling_mapping() const {}
++
+ protected:
+     cl_command_type m_command_type;
+     cvk_command_queue* m_queue;
++    const bool m_queue_profiling_enabled;
+ };
+ 
+ struct cvk_event_command : public cvk_event {
+@@ -77,6 +83,8 @@ struct cvk_event_command : public cvk_event {
+ 
+     void set_status(cl_int status) override final;
+ 
++    refcounted_holder<cvk_command_queue> queue_for_wait() override final;
++
+     void register_callback(cl_int callback_type,
+                            cvk_event_callback_pointer_type ptr,
+                            void* user_data) override final {
+@@ -121,6 +129,17 @@ struct cvk_event_command : public cvk_event {
+         return m_profiling_data[pinfo - CL_PROFILING_COMMAND_QUEUED];
+     }
+ 
++    void set_diagnostic_device_timestamps(cl_ulong start, cl_ulong end,
++                                          uint64_t start_deviation,
++                                          uint64_t end_deviation) {
++        m_diagnostic_device_start = start;
++        m_diagnostic_device_end = end;
++        m_diagnostic_start_deviation = start_deviation;
++        m_diagnostic_end_deviation = end_deviation;
++    }
++
++    void log_profiling_mapping() const override final;
++
+     static uint64_t sample_clock() {
+         auto time_point = std::chrono::steady_clock::now();
+         auto time_since_epoch = time_point.time_since_epoch();
+@@ -141,6 +160,8 @@ private:
+     std::condition_variable m_cv;
+     cl_int m_status;
+     cl_ulong m_profiling_data[4]{};
++    cl_ulong m_diagnostic_device_start = 0, m_diagnostic_device_end = 0;
++    uint64_t m_diagnostic_start_deviation = 0, m_diagnostic_end_deviation = 0;
+     cvk_command* m_cmd;
+     std::unordered_map<cl_int, std::vector<cvk_event_callback>> m_callbacks;
+ };
+@@ -186,6 +207,8 @@ struct cvk_event_combine : public cvk_event {
+ 
+     cl_int wait() override final { return m_end_event->wait(); }
+ 
++    refcounted_holder<cvk_command_queue> queue_for_wait() override final;
++
+     uint64_t get_profiling_info(cl_profiling_info pinfo) const override final {
+         if (pinfo == CL_PROFILING_COMMAND_END) {
+             return m_end_event->get_profiling_info(pinfo);
+diff --git a/src/memory.cpp b/src/memory.cpp
+index 6f32abe515e39ea14065efef4c3243ff448707e5..e8a69eb032323a40f1ff7573b73e96ab22a7c1cb 100644
+--- a/src/memory.cpp
++++ b/src/memory.cpp
+@@ -96,7 +96,21 @@ cvk_buffer::create(cvk_context* context, cl_mem_flags flags, size_t size,
+     return buffer;
+ }
+ 
+-bool cvk_buffer::init() {
++std::unique_ptr<cvk_buffer> cvk_buffer::create_host_staging(
++    cvk_context* context, size_t size, cl_int* errcode_ret) {
++    std::vector<cl_mem_properties> properties;
++    auto buffer = std::make_unique<cvk_buffer>(
++        context, CL_MEM_READ_WRITE, size, nullptr, nullptr, 0,
++        std::move(properties));
++    if (!buffer->init(true)) {
++        *errcode_ret = CL_OUT_OF_RESOURCES;
++        return nullptr;
++    }
++    *errcode_ret = CL_SUCCESS;
++    return buffer;
++}
++
++bool cvk_buffer::init(bool host_staging) {
+     auto device = m_context->device();
+     auto vkdev = device->vulkan_device();
+ 
+@@ -120,11 +134,14 @@ bool cvk_buffer::init() {
+ 
+     // Select memory type
+     cvk_device::allocation_parameters params =
+-        device->select_memory_for(m_buffer, flags());
++        device->select_memory_for(m_buffer, flags(), host_staging);
+     if (params.memory_type_index == VK_MAX_MEMORY_TYPES) {
+         return false;
+     }
+ 
++    m_staging_readback =
++        device->memory_index_needs_staging_readback(params.memory_type_index);
++
+     // Allocate memory
+     m_memory = std::make_shared<cvk_memory_allocation>(
+         vkdev, params.size, params.memory_type_index, params.memory_coherent,
+@@ -524,8 +541,8 @@ cl_int cvk_image::init_vulkan_image() {
+     if (has_any_flag(CL_MEM_COPY_HOST_PTR | CL_MEM_USE_HOST_PTR)) {
+         // Create a staging buffer to copy to the device later.
+         cl_int ret;
+-        m_init_data = cvk_buffer::create(m_context, CL_MEM_READ_ONLY,
+-                                         host_ptr_size, nullptr, &ret);
++        m_init_data = cvk_buffer::create_host_staging(m_context, host_ptr_size,
++                                                      &ret);
+         if (ret != CL_SUCCESS) {
+             cvk_error("Could not create staging buffer for image host_ptr");
+             return CL_MEM_OBJECT_ALLOCATION_FAILURE;
+diff --git a/src/memory.hpp b/src/memory.hpp
+index 050db273661e36c8779629ff16281f7c5860eb42..a09fecf5e5f119696ac06735b974129500859b95 100644
+--- a/src/memory.hpp
++++ b/src/memory.hpp
+@@ -365,7 +365,7 @@ struct cvk_buffer : public cvk_mem {
+                std::vector<cl_mem_properties>&& properties)
+         : cvk_mem(ctx, flags, size, host_ptr, parent, parent_offset,
+                   std::move(properties), CL_MEM_OBJECT_BUFFER),
+-          m_buffer(VK_NULL_HANDLE) {
++          m_buffer(VK_NULL_HANDLE), m_staging_readback(false) {
+         // Buffers currently do not require any asynchronous initialisation
+         m_init_tracker.set_state(cvk_mem_init_state::completed);
+     }
+@@ -389,6 +389,18 @@ struct cvk_buffer : public cvk_mem {
+            std::vector<cl_mem_properties>&& properties, cl_int* errcode_ret);
+     cvk_mem* create_subbuffer(cl_mem_flags, size_t origin, size_t size);
+ 
++    // Internal transfer storage must retain the CPU-cached memory preference.
++    static std::unique_ptr<cvk_buffer> create_host_staging(
++        cvk_context* context, size_t size, cl_int* errcode_ret);
++
++    bool needs_staging_readback() const {
++        if (m_parent != nullptr) {
++            const cvk_mem* parent = m_parent;
++            return static_cast<const cvk_buffer*>(parent)->needs_staging_readback();
++        }
++        return m_staging_readback;
++    }
++
+     VkBufferUsageFlags prepare_usage_flags() {
+         VkBufferUsageFlags usage_flags =
+             VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+@@ -495,9 +507,10 @@ struct cvk_buffer : public cvk_mem {
+     }
+ 
+ private:
+-    bool init();
++    bool init(bool host_staging = false);
+ 
+     VkBuffer m_buffer;
++    bool m_staging_readback;
+     std::unordered_map<void*, cvk_buffer_mapping> m_mappings;
+     std::mutex m_mappings_lock;
+ };
+@@ -721,8 +734,8 @@ struct cvk_image : public cvk_mem {
+         // TODO adapt flags depending on the map flags
+         auto buffer_size = element_size() * region[0] * region[1] * region[2];
+         cl_int err;
+-        auto buffer = cvk_buffer::create(context(), CL_MEM_READ_WRITE,
+-                                         buffer_size, nullptr, &err);
++        auto buffer = cvk_buffer::create_host_staging(context(), buffer_size,
++                                                      &err);
+ 
+         if (err != CL_SUCCESS) {
+             return false;
+diff --git a/src/program.cpp b/src/program.cpp
+index d69e2eb13ad30032bd7536454da04cafa30ee885..60a02f2e8066a450eadc76d1ce9b52b663e60a7c 100644
+--- a/src/program.cpp
++++ b/src/program.cpp
+@@ -13,9 +13,14 @@
+ // limitations under the License.
+ 
+ #include <algorithm>
++#include <chrono>
++#include <cmath>
++#include <cstdio>
+ #include <cstring>
+ #include <filesystem>
++#include <iomanip>
+ #include <iostream>
++#include <locale>
+ #include <map>
+ #include <sstream>
+ #include <system_error>
+@@ -2299,6 +2304,159 @@ cl_int cvk_entry_point::init() {
+     return CL_SUCCESS;
+ }
+ 
++bool cvk_program::pipeline_stats_hashes(std::string& original,
++                                        std::string& shader) const {
++    auto hash = [](const std::vector<uint32_t>& words, std::string& out) {
++        // cvk_sha1 encodes the message bit length in a 32-bit word.
++        if (words.size() > UINT32_MAX / (sizeof(uint32_t) * 8)) {
++            return false;
++        }
++        auto digest = cvk_sha1(words.data(),
++                               static_cast<uint32_t>(words.size() * sizeof(uint32_t)));
++        out = to_hex_string(reinterpret_cast<const uint8_t*>(digest.data()),
++                            SHA1_DIGEST_NUM_BYTES);
++        return true;
++    };
++    return hash(m_binary->code(), original) &&
++           hash(m_stripped_binary.empty() ? m_binary->code() : m_stripped_binary,
++                shader);
++}
++
++static std::string pipeline_stats_json_string(const std::string& input) {
++    static const char hex[] = "0123456789abcdef";
++    std::string out = "\"";
++    for (unsigned char c : input) {
++        if (c == '\"' || c == '\\') {
++            out += '\\';
++            out += static_cast<char>(c);
++        } else if (c < 0x20) {
++            out += "\\u00";
++            out += hex[c >> 4];
++            out += hex[c & 15];
++        } else {
++            out += static_cast<char>(c);
++        }
++    }
++    return out + '\"';
++}
++
++static bool log_pipeline_statistics(cvk_device* device, cvk_program* program,
++                                    const std::string& kernel, VkPipeline pipeline,
++                                    const cvk_spec_constant_map& constants,
++                                    const std::optional<uint32_t>& subgroup,
++                                    uint64_t create_begin, uint64_t create_end) {
++    const auto& fns = device->vkfns();
++    auto fail = [](const char* reason) {
++        cvk_error("CLVK_PSTAT_ERROR %s", reason);
++        return false;
++    };
++    std::string original_hash, shader_hash;
++    if (!program->pipeline_stats_hashes(original_hash, shader_hash)) {
++        return fail("SPIR-V exceeds diagnostic hash length limit");
++    }
++    VkPipelineInfoKHR info{};
++    info.sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR;
++    info.pipeline = pipeline;
++    uint32_t count = 0;
++    auto dev = device->vulkan_device();
++    if (fns.vkGetPipelineExecutablePropertiesKHR(dev, &info, &count, nullptr) !=
++            VK_SUCCESS || count == 0 || count > 64) {
++        return fail("invalid executable count");
++    }
++    std::vector<VkPipelineExecutablePropertiesKHR> executables(count);
++    for (auto& executable : executables) {
++        executable.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR;
++    }
++    if (fns.vkGetPipelineExecutablePropertiesKHR(dev, &info, &count,
++                                                executables.data()) != VK_SUCCESS ||
++        count == 0 || count > executables.size()) {
++        return fail("incomplete executable properties");
++    }
++    std::ostringstream row;
++    row.imbue(std::locale::classic());
++    row << "{\"schema\":1,\"kernel\":" << pipeline_stats_json_string(kernel)
++        << ",\"spirv_sha1\":\"" << original_hash
++        << "\",\"shader_sha1\":\"" << shader_hash
++        << "\",\"requested_subgroup\":";
++    if (subgroup.has_value()) row << subgroup.value();
++    else row << "null";
++    row << ",\"specialization\":{";
++    bool first = true;
++    for (const auto& constant : constants) {
++        if (!first) row << ',';
++        first = false;
++        row << '\"' << constant.first << "\":" << constant.second;
++    }
++    row << "},\"executables\":[";
++    for (uint32_t i = 0; i < count; i++) {
++        if (i) row << ',';
++        const auto& executable = executables[i];
++        row << "{\"name\":" << pipeline_stats_json_string(
++            std::string(executable.name, strnlen(executable.name, sizeof executable.name)))
++            << ",\"stages\":" << executable.stages
++            << ",\"subgroup_size\":" << executable.subgroupSize
++            << ",\"statistics\":[";
++        VkPipelineExecutableInfoKHR executable_info{};
++        executable_info.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR;
++        executable_info.pipeline = pipeline;
++        executable_info.executableIndex = i;
++        uint32_t nstats = 0;
++        if (fns.vkGetPipelineExecutableStatisticsKHR(dev, &executable_info,
++                                                    &nstats, nullptr) != VK_SUCCESS ||
++            nstats == 0 || nstats > 256) {
++            return fail("invalid statistic count");
++        }
++        std::vector<VkPipelineExecutableStatisticKHR> stats(nstats);
++        for (auto& stat : stats) {
++            stat.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR;
++        }
++        if (fns.vkGetPipelineExecutableStatisticsKHR(dev, &executable_info,
++                                                    &nstats, stats.data()) != VK_SUCCESS ||
++            nstats == 0 || nstats > stats.size()) {
++            return fail("incomplete executable statistics");
++        }
++        for (uint32_t j = 0; j < nstats; j++) {
++            if (j) row << ',';
++            const auto& stat = stats[j];
++            row << "{\"name\":" << pipeline_stats_json_string(
++                std::string(stat.name, strnlen(stat.name, sizeof stat.name)));
++            switch (stat.format) {
++            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:
++                row << ",\"format\":\"bool32\",\"value\":"
++                    << (stat.value.b32 ? "true" : "false");
++                break;
++            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:
++                row << ",\"format\":\"int64\",\"value\":" << stat.value.i64;
++                break;
++            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:
++                row << ",\"format\":\"uint64\",\"value\":" << stat.value.u64;
++                break;
++            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR:
++                if (!std::isfinite(stat.value.f64)) return fail("nonfinite statistic");
++                row << ",\"format\":\"float64\",\"value\":"
++                    << std::setprecision(17) << stat.value.f64;
++                break;
++            default:
++                return fail("unknown statistic format");
++            }
++            row << '}';
++        }
++        row << "]}";
++    }
++    auto wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
++        std::chrono::system_clock::now().time_since_epoch()).count();
++    row << "],\"create_begin_steady_ns\":" << create_begin
++        << ",\"create_end_steady_ns\":" << create_end
++        << ",\"create_duration_ns\":" << create_end - create_begin
++        << ",\"steady_ns\":" << cvk_event_command::sample_clock()
++        << ",\"wall_ns\":" << wall_ns << '}';
++    // A single stdio call prevents fragments from concurrent compiler threads.
++    if (fprintf(stderr, "CLVK_PSTAT %s\n", row.str().c_str()) < 0) {
++        return fail("cannot write statistics record");
++    }
++    return true;
++}
++
+ VkPipeline
+ cvk_entry_point::create_pipeline(const cvk_spec_constant_map& spec_constants,
+                                  const std::optional<uint32_t>& subgroup_size) {
+@@ -2344,7 +2502,9 @@ cvk_entry_point::create_pipeline(const cvk_spec_constant_map& spec_constants,
+     const VkComputePipelineCreateInfo createInfo = {
+         VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, // sType
+         nullptr,                                        // pNext
+-        0,                                              // flags
++        config.pipeline_stats()
++            ? VkPipelineCreateFlags{VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR}
++            : VkPipelineCreateFlags{0},                  // flags
+         {
+             VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, // sType
+             pipelineShaderStageCreateInfoPNext,                  // pNext
+@@ -2360,9 +2520,13 @@ cvk_entry_point::create_pipeline(const cvk_spec_constant_map& spec_constants,
+     };
+ 
+     VkPipeline pipeline;
++    const uint64_t create_begin = config.pipeline_stats()
++        ? cvk_event_command::sample_clock() : 0;
+     VkResult res = vkCreateComputePipelines(m_device->vulkan_device(),
+                                             m_program->pipeline_cache(), 1,
+                                             &createInfo, nullptr, &pipeline);
++    const uint64_t create_end = config.pipeline_stats()
++        ? cvk_event_command::sample_clock() : 0;
+ 
+     if (res != VK_SUCCESS) {
+         cvk_error_fn("Could not create compute pipeline for kernel %s: %s",
+@@ -2370,6 +2534,14 @@ cvk_entry_point::create_pipeline(const cvk_spec_constant_map& spec_constants,
+         return VK_NULL_HANDLE;
+     }
+ 
++    if (config.pipeline_stats() &&
++        !log_pipeline_statistics(m_device, m_program, m_name, pipeline,
++                                  spec_constants, subgroup_size,
++                                  create_begin, create_end)) {
++        vkDestroyPipeline(m_device->vulkan_device(), pipeline, nullptr);
++        return VK_NULL_HANDLE;
++    }
++
+     // Add to pipeline cache
+     m_pipelines[spec_constants] = pipeline;
+ 
+diff --git a/src/program.hpp b/src/program.hpp
+index 7fa7fcb104342a0363468489fa493f7e475cbd66..cd5a6135d1da70fbd3b4fd80041c7da077d9f58b 100644
+--- a/src/program.hpp
++++ b/src/program.hpp
+@@ -904,6 +904,9 @@ struct cvk_program : public _cl_program, api_object<object_magic::program> {
+ 
+     VkShaderModule shader_module() const { return m_shader_module; }
+ 
++    CHECK_RETURN bool pipeline_stats_hashes(std::string& original,
++                                            std::string& shader) const;
++
+     void complete_operation(cvk_device* device, cl_build_status status) {
+         m_dev_status[device] = status;
+         if (m_operation_callback != nullptr) {
+diff --git a/src/queue.cpp b/src/queue.cpp
+index ae2b92c97e4a0f636b5fbc4d8a14d1c5d4ac13c4..28104dcef01b2311a8fa2f9c60a171fa5e59e583 100644
+--- a/src/queue.cpp
++++ b/src/queue.cpp
+@@ -13,6 +13,12 @@
+ // limitations under the License.
+ 
+ #include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <ctime>
++#include <fcntl.h>
++#include <unistd.h>
+ #include <thread>
+ #include <unordered_set>
+ 
+@@ -24,6 +30,127 @@
+ #include "tracing.hpp"
+ #include "utils.hpp"
+ 
++// Optional process-local diagnostic. CSV I/O is outside the measured spans.
++struct staging_trace_sink {
++    FILE* file = nullptr;
++    std::mutex lock;
++    unsigned long long sequence = 0;
++
++    staging_trace_sink() {
++        const char* path = std::getenv("CLVK_STAGING_TRACE_FILE");
++        if (path == nullptr || *path == '\0') {
++            return;
++        }
++        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
++                      0600);
++        if (fd < 0 || (file = fdopen(fd, "w")) == nullptr) {
++            if (fd >= 0) {
++                close(fd);
++            }
++            cvk_error("Cannot create CLVK_STAGING_TRACE_FILE");
++            return;
++        }
++        const int header = fputs("seq,operation,mono_start_ns,epoch_start_ns,anchor_span_ns,mono_end_ns,"
++              "queue,buffer,root_buffer,root_kind,command_type,logical_bytes,"
++              "root_bytes,buffer_offset,bytes,root_cl_flags,allocation_ns,"
++              "construction_ns,submit_wait_ns,map_memcpy_ns,destruction_ns,"
++              "total_ns,status,last_completed_stage\n", file);
++        if (header < 0 || fflush(file) != 0) {
++            cvk_error("CLVK_STAGING_TRACE_ERROR cannot write header");
++            fclose(file);
++            file = nullptr;
++        }
++    }
++};
++
++static staging_trace_sink& staging_trace_output() {
++    // Executor threads drain during global-state atexit cleanup. Keep the sink
++    // alive through that cleanup; every row is flushed and the OS closes its FD.
++    static auto* sink = new staging_trace_sink;
++    return *sink;
++}
++
++static unsigned long long staging_trace_clock(clockid_t clock) {
++    struct timespec now{};
++    if (clock_gettime(clock, &now) != 0) {
++        return 0;
++    }
++    return static_cast<unsigned long long>(now.tv_sec) * 1000000000ull +
++           static_cast<unsigned long long>(now.tv_nsec);
++}
++
++struct staging_read_trace {
++    staging_trace_sink& sink;
++    unsigned long long times[5]{};
++    unsigned long long epoch = 0, anchor_span = 0;
++    unsigned last_stage = 0;
++    cl_int status = CL_COMPLETE;
++    cvk_command_queue* queue;
++    cvk_buffer* buffer;
++    const cvk_mem* backing;
++    cl_command_type command_type;
++    size_t buffer_offset, bytes;
++    const char* operation;
++
++    staging_read_trace(cvk_command_queue* q, cvk_buffer* b,
++                       const cvk_mem* root, cl_command_type type,
++                       size_t offset, size_t size,
++                       const char* op = "staged_read")
++        : sink(staging_trace_output()), queue(q), buffer(b), backing(root),
++          command_type(type), buffer_offset(offset), bytes(size), operation(op) {
++        if (sink.file != nullptr) {
++            times[0] = staging_trace_clock(CLOCK_MONOTONIC);
++            epoch = staging_trace_clock(CLOCK_REALTIME);
++            anchor_span = staging_trace_clock(CLOCK_MONOTONIC) - times[0];
++        }
++    }
++    void mark(unsigned stage) {
++        if (sink.file != nullptr) {
++            times[stage] = staging_trace_clock(CLOCK_MONOTONIC);
++            last_stage = stage;
++        }
++    }
++    void mark_host_copy() {
++        if (sink.file != nullptr) {
++            times[1] = times[2] = times[3] = times[0];
++            mark(4);
++        }
++    }
++    cl_int finish(cl_int result) {
++        status = result;
++        return result;
++    }
++    unsigned long long duration(unsigned stage) const {
++        return times[stage] && times[stage - 1]
++                   ? times[stage] - times[stage - 1] : 0;
++    }
++    ~staging_read_trace() {
++        if (sink.file == nullptr) {
++            return;
++        }
++        const auto end = staging_trace_clock(CLOCK_MONOTONIC);
++        const bool host_write = std::strcmp(operation, "host_write") == 0;
++        const bool staged_write = std::strcmp(operation, "staged_write") == 0;
++        std::lock_guard<std::mutex> guard(sink.lock);
++        const int written = fprintf(sink.file,
++                "%llu,%s,%llu,%llu,%llu,%llu,%p,%p,%p,%s,%u,%zu,%zu,%zu,%zu,"
++                "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%d,%u\n",
++                ++sink.sequence, operation, times[0], epoch, anchor_span, end,
++                static_cast<void*>(queue), static_cast<void*>(buffer),
++                static_cast<const void*>(backing),
++                buffer->parent() ? "subbuffer" : "root", command_type,
++                buffer->size(), backing->size(), buffer_offset, bytes,
++                static_cast<unsigned long long>(backing->flags()),
++                duration(1), duration(staged_write ? 3 : 2),
++                duration(staged_write ? 4 : 3), duration(staged_write ? 2 : 4),
++                host_write ? 0ull : end - times[last_stage],
++                end - times[0], status, last_stage);
++        if (written < 0 || fflush(sink.file) != 0) {
++            cvk_error("CLVK_STAGING_TRACE_ERROR cannot write record");
++        }
++    }
++};
++
+ static cvk_executor_thread_pool* get_thread_pool() {
+     auto state = get_or_init_global_state();
+     return state->thread_pool();
+@@ -43,6 +170,7 @@ cvk_command_queue::cvk_command_queue(
+       m_max_first_cmd_group_size(device->get_max_first_cmd_group_size()),
+       m_nb_batch_in_flight(0), m_nb_group_in_flight(0) {
+ 
++    staging_trace_output();
+     m_groups.push_back(std::make_unique<cvk_command_group>());
+ 
+     if (properties & CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE) {
+@@ -311,11 +439,12 @@ cl_int cvk_command_queue::wait_for_events(cl_uint num_events,
+ 
+     // Create set of queues to flush
+     std::unordered_set<cvk_command_queue*> queues_to_flush;
++    std::vector<cvk_command_queue_holder> queue_lifetimes;
+     for (cl_uint i = 0; i < num_events; i++) {
+         cvk_event* event = icd_downcast(event_list[i]);
+-
+-        if (!event->is_user_event()) {
+-            queues_to_flush.insert(event->queue());
++        auto queue = event->queue_for_wait();
++        if (queue != nullptr && queues_to_flush.insert(queue).second) {
++            queue_lifetimes.push_back(std::move(queue));
+         }
+     }
+ 
+@@ -1268,16 +1397,160 @@ cl_int cvk_command_batch::do_action() {
+     return CL_COMPLETE;
+ }
+ 
++// The existing host command completes only after both CPU and GPU copies.
++cl_int cvk_command_queue::transfer_buffer_via_staging(
++    cvk_buffer* buffer, void* host, size_t offset, size_t size,
++    cl_command_type command_type) {
++    auto* queue = this;
++    const bool write = command_type == CL_COMMAND_WRITE_BUFFER ||
++                       command_type == CL_COMMAND_WRITE_IMAGE;
++    if (!write && command_type != CL_COMMAND_READ_BUFFER &&
++        command_type != CL_COMMAND_READ_IMAGE) {
++        return CL_INVALID_VALUE;
++    }
++    if (size == 0 || offset > buffer->size() || size > buffer->size() - offset) {
++        return CL_INVALID_VALUE;
++    }
++    const size_t base = buffer->vulkan_buffer_offset();
++    if (base > SIZE_MAX - offset) {
++        return CL_INVALID_VALUE;
++    }
++    const VkDeviceSize buffer_offset = base + offset;
++    const cvk_mem* backing = buffer->parent() ? buffer->parent() : buffer;
++    if (buffer_offset > backing->size() ||
++        size > backing->size() - buffer_offset) {
++        return CL_INVALID_VALUE;
++    }
++    // Declared first so its destructor observes command/staging destruction.
++    staging_read_trace trace(queue, buffer, backing, command_type,
++                             buffer_offset, size,
++                             write ? "staged_write" : "staged_read");
++    // Hold this lease through GPU completion, CPU copy and command destruction.
++    std::unique_lock<std::mutex> lease(m_host_staging_mutex, std::defer_lock);
++    std::unique_ptr<cvk_buffer> temporary;
++    cvk_buffer* staging;
++    cl_int err = CL_SUCCESS;
++    constexpr size_t retained_limit = 128u * 1024u * 1024u;
++    if (context() != nullptr && size <= retained_limit) {
++        lease.lock();
++        if (!m_host_staging || m_host_staging->size() < size) {
++            // No user of the old storage remains while the lease is held.
++            m_host_staging.reset();
++            m_host_staging = cvk_buffer::create_host_staging(
++                context(), size, &err);
++        }
++        staging = m_host_staging.get();
++    } else {
++        // Detached internal queues must not retain their owning context.
++        temporary = cvk_buffer::create_host_staging(buffer->context(), size, &err);
++        staging = temporary.get();
++    }
++    trace.mark(1);
++    if (!staging) {
++        return trace.finish(err);
++    }
++    if (write) {
++        const bool copied = staging->copy_from(host, 0, size);
++        trace.mark(2);
++        if (!copied) {
++            return trace.finish(CL_OUT_OF_RESOURCES);
++        }
++    }
++    cvk_command_buffer commands(queue);
++    if (!commands.begin()) {
++        trace.mark(write ? 3 : 2);
++        return trace.finish(CL_OUT_OF_RESOURCES);
++    }
++    {
++        cvk_command_pool_lock_holder lock(queue);
++        const VkAccessFlags prior_access = write
++            ? VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT
++            : VK_ACCESS_MEMORY_WRITE_BIT;
++        const VkAccessFlags transfer_access = write
++            ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT;
++        VkBufferMemoryBarrier barriers[2] = {{
++            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, nullptr,
++            prior_access, transfer_access,
++            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
++            buffer->vulkan_buffer(), buffer_offset, size}, {
++            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, nullptr,
++            VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
++            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
++            staging->vulkan_buffer(), 0, size}};
++        vkCmdPipelineBarrier(commands,
++                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT |
++                                 VK_PIPELINE_STAGE_HOST_BIT,
++                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
++                             0, nullptr, write ? 2u : 1u, barriers, 0, nullptr);
++        VkBufferCopy region = write ? VkBufferCopy{0, buffer_offset, size}
++                                    : VkBufferCopy{buffer_offset, 0, size};
++        vkCmdCopyBuffer(commands,
++                        write ? staging->vulkan_buffer() : buffer->vulkan_buffer(),
++                        write ? buffer->vulkan_buffer() : staging->vulkan_buffer(),
++                        1, &region);
++        const VkAccessFlags visibility_access = write
++            ? VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT |
++                  VK_ACCESS_SHADER_READ_BIT
++            : VK_ACCESS_HOST_READ_BIT;
++        const VkPipelineStageFlags visibility_stages = write
++            ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT
++            : VK_PIPELINE_STAGE_HOST_BIT;
++        VkMemoryBarrier visibility_barrier = {
++            VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr,
++            VK_ACCESS_TRANSFER_WRITE_BIT, visibility_access};
++        vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                             visibility_stages,
++                             0, 1, &visibility_barrier, 0, nullptr, 0, nullptr);
++        if (!commands.end()) {
++            trace.mark(write ? 3 : 2);
++            return trace.finish(CL_OUT_OF_RESOURCES);
++        }
++    }
++    trace.mark(write ? 3 : 2);
++    const bool submitted = commands.submit_and_wait();
++    trace.mark(write ? 4 : 3);
++    if (!submitted) {
++        return trace.finish(CL_OUT_OF_RESOURCES);
++    }
++    if (write) {
++        return trace.finish(CL_COMPLETE);
++    }
++    const bool copied = staging->copy_to(host, 0, size);
++    trace.mark(4);
++    return trace.finish(copied ? CL_COMPLETE : CL_OUT_OF_RESOURCES);
++}
++
+ cl_int cvk_command_buffer_host_copy::do_action() {
+     bool success = false;
+ 
+     switch (m_type) {
+     case CL_COMMAND_WRITE_IMAGE:
+-    case CL_COMMAND_WRITE_BUFFER:
++    case CL_COMMAND_WRITE_BUFFER: {
++        // Large uncached device-local writes amortize a transfer submission.
++        if (config.prefer_device_local_buffers() &&
++            m_buffer->needs_staging_readback() && m_size >= 1024u * 1024u) {
++            return m_queue->transfer_buffer_via_staging(
++                m_buffer, m_ptr, m_offset, m_size, m_type);
++        }
++        const cvk_mem* backing = m_buffer;
++        if (m_buffer->parent()) {
++            backing = m_buffer->parent();
++        }
++        staging_read_trace trace(m_queue, m_buffer, backing, m_type,
++                                 m_buffer->vulkan_buffer_offset() + m_offset,
++                                 m_size, "host_write");
+         success = m_buffer->copy_from(m_ptr, m_offset, m_size);
++        trace.mark_host_copy();
++        trace.finish(success ? CL_COMPLETE : CL_OUT_OF_RESOURCES);
+         break;
++    }
+     case CL_COMMAND_READ_IMAGE:
+     case CL_COMMAND_READ_BUFFER:
++        if (config.prefer_device_local_buffers() &&
++            m_buffer->needs_staging_readback()) {
++            return m_queue->transfer_buffer_via_staging(
++                m_buffer, m_ptr, m_offset, m_size, m_type);
++        }
+         success = m_buffer->copy_to(m_ptr, m_offset, m_size);
+         break;
+     default:
+diff --git a/src/queue.hpp b/src/queue.hpp
+index 407fd61d55a89c4a678a524806c8089ccdba2078..54e861561b17b362dfacd602c20c83f1c5d3e0f9 100644
+--- a/src/queue.hpp
++++ b/src/queue.hpp
+@@ -240,6 +240,11 @@ struct cvk_command_queue : public _cl_command_queue,
+                                             _cl_event* const* event_list,
+                                             std::unique_lock<std::mutex>& lock);
+ 
++    CHECK_RETURN cl_int transfer_buffer_via_staging(cvk_buffer* buffer,
++                                                void* host,
++                                                size_t offset, size_t size,
++                                                cl_command_type command_type);
++
+     void detach_from_context();
+ 
+     TRACE_TRACK_FCT(queue_track,
+@@ -284,6 +289,9 @@ private:
+ 
+     std::unique_ptr<cvk_buffer> m_printf_buffer;
+ 
++    std::mutex m_host_staging_mutex;
++    std::unique_ptr<cvk_buffer> m_host_staging;
++
+     std::vector<std::unique_ptr<cvk_queue_controller>> m_controllers;
+ 
+     friend struct cvk_queue_controller;
+@@ -735,16 +743,24 @@ struct cvk_command_batchable : public cvk_command {
+             return perr;
+         }
+         cl_ulong start_host, end_host;
+-        perr = m_queue->device()->device_timer_to_host(start_dev, start_host);
++        uint64_t start_deviation = 0, end_deviation = 0;
++        const bool diagnostic = config.pipeline_stats();
++        perr = m_queue->device()->device_timer_to_host(
++            start_dev, start_host, diagnostic ? &start_deviation : nullptr);
+         if (perr != CL_SUCCESS) {
+             return perr;
+         }
+-        perr = m_queue->device()->device_timer_to_host(end_dev, end_host);
++        perr = m_queue->device()->device_timer_to_host(
++            end_dev, end_host, diagnostic ? &end_deviation : nullptr);
+         if (perr != CL_SUCCESS) {
+             return perr;
+         }
+         m_event->set_profiling_info(CL_PROFILING_COMMAND_START, start_host);
+         m_event->set_profiling_info(CL_PROFILING_COMMAND_END, end_host);
++        if (diagnostic) {
++            m_event->set_diagnostic_device_timestamps(
++                start_dev, end_dev, start_deviation, end_deviation);
++        }
+         return CL_SUCCESS;
+     }
+ 

@@ -1,0 +1,197 @@
+--- a/src/nouveau/compiler/nak.h
++++ b/src/nouveau/compiler/nak.h
+@@ -113,7 +113,7 @@
+ void nak_postprocess_nir(nir_shader *nir, const struct nak_compiler *nak,
+                          nir_variable_mode robust2_modes,
+                          const struct nak_fs_key *fs_key,
+-                         bool has_task_shader);
++                         bool has_task_shader, bool skip_load_sink);
+ 
+ enum ENUM_PACKED nak_ts_domain {
+    NAK_TS_DOMAIN_ISOLINE = 0,
+@@ -284,6 +284,12 @@
+                    nir_variable_mode robust2_modes,
+                    const struct nak_fs_key *fs_key,
+                    bool has_task_shader);
++
++struct nak_shader_bin *
++nak_compile_shader_with_load_sink_control(
++   nir_shader *nir, bool dump_asm, const struct nak_compiler *nak,
++   nir_variable_mode robust2_modes, const struct nak_fs_key *fs_key,
++   bool has_task_shader, bool skip_load_sink);
+ 
+ struct nak_qmd_cbuf {
+    uint32_t index;
+--- a/src/nouveau/compiler/nak/api.rs
++++ b/src/nouveau/compiler/nak/api.rs
+@@ -542,9 +542,12 @@
+     robust2_modes: nir_variable_mode,
+     fs_key: *const nak_fs_key,
+     has_task_shader: bool,
++    skip_load_sink: bool,
+ ) -> *mut nak_shader_bin {
+     unsafe {
+-        nak_postprocess_nir(nir, nak, robust2_modes, fs_key, has_task_shader)
++        nak_postprocess_nir(
++            nir, nak, robust2_modes, fs_key, has_task_shader, skip_load_sink,
++        )
+     };
+     let nak = unsafe { &*nak };
+     let nir = unsafe { &*nir };
+@@ -645,6 +648,21 @@
+     fs_key: *const nak_fs_key,
+     has_task_shader: bool,
+ ) -> *mut nak_shader_bin {
++    nak_compile_shader_with_load_sink_control(
++        nir, dump_asm, nak, robust2_modes, fs_key, has_task_shader, false,
++    )
++}
++
++#[unsafe(no_mangle)]
++pub extern "C" fn nak_compile_shader_with_load_sink_control(
++    nir: *mut nir_shader,
++    dump_asm: bool,
++    nak: *const nak_compiler,
++    robust2_modes: nir_variable_mode,
++    fs_key: *const nak_fs_key,
++    has_task_shader: bool,
++    skip_load_sink: bool,
++) -> *mut nak_shader_bin {
+     let compile = || {
+         nak_compile_shader_internal(
+             nir,
+@@ -653,6 +671,7 @@
+             robust2_modes,
+             fs_key,
+             has_task_shader,
++            skip_load_sink,
+         )
+     };
+     if DEBUG.panic() {
+--- a/src/nouveau/compiler/nak_nir.c
++++ b/src/nouveau/compiler/nak_nir.c
+@@ -2752,7 +2752,7 @@
+                     const struct nak_compiler *nak,
+                     nir_variable_mode robust2_modes,
+                     const struct nak_fs_key *fs_key,
+-                    bool has_task_shader)
++                    bool has_task_shader, bool skip_load_sink)
+ {
+    assert(nir->info.io_lowered);
+ 
+@@ -3054,7 +3054,7 @@
+    /* NVMTL b79 (patch_cg_ldsink.py): independent loads first - see nak_cg_ldsink. */
+    /* The custom load-first scheduler lengthens simultaneously live values.
+     * Separate this pressure arm from the allocator cap to measure spills. */
+-   if (!raw_pressure) OPT(nir, nak_cg_ldsink);
++   if (!raw_pressure && !skip_load_sink) OPT(nir, nak_cg_ldsink);
+ 
+    /* speed267: after GCM, sink_loop_incs and ldsink, which can move a uniform TEX handle back under the branch */
+    if (nak->sm >= 100 && getenv("NAK_TEX_UHANDLE") && getenv("NAK_TEX_UHANDLE")[0] == '1')
+--- a/src/nouveau/vulkan/nvk_shader.c
++++ b/src/nouveau/vulkan/nvk_shader.c
+@@ -73,6 +73,14 @@
+    *size = comp_size * length, *align = comp_size;
+ }
+ 
++static bool
++nvk_nak_spill_retry_enabled(void)
++{
++   const char *retry = getenv("NVMTL_NAK_SPILL_RETRY");
++   const char *no_sink = getenv("NVMTL_NAK_NO_LDSINK");
++   return retry && !strcmp(retry, "1") && !(no_sink && no_sink[0] == '1');
++}
++
+ uint64_t
+ nvk_physical_device_compiler_flags(const struct nvk_physical_device *pdev)
+ {
+@@ -84,13 +92,14 @@
+    assert(nak_flags <= UINT16_MAX);
+ 
+    /* nvk-arrscratch: arrays-to-scratch changes fragment codegen, so its switch is in every cache key (1 = off).
+-    * 26.3: was bit 14, which upstream now gives drirc ssbo_align_4b; bits 15..47 are free (nak_flags start at 48). */
++    * 26.3: bit 15 is arrays-to-scratch; bit 16 is spill retry (nak_flags start at 48). */
+    const char *as_s = getenv("NVMTL_NAK_ARR_SCRATCH");
+    const uint64_t as_off = (as_s != NULL && as_s[0] == '0') ? 1 : 0;
+    return (no_cbufs ? 1 << 12 : 0)
+       | (use_edb_buffer_views ? 1 << 13 : 0)
+       | (instance->drirc.misc.ssbo_align_4b ? 1 << 14 : 0)
+       | (as_off << 15)
++      | (nvk_nak_spill_retry_enabled() ? UINT64_C(1) << 16 : 0)
+       | (nak_flags << 48);
+ }
+ 
+@@ -600,6 +609,18 @@
+ }
+ #endif
+ 
++static bool
++nvk_nak_retry_is_better(const struct nak_shader_info *normal,
++                        const struct nak_shader_info *retry)
++{
++   const uint64_t normal_mem = (uint64_t)normal->num_spills_to_mem + normal->num_fills_from_mem;
++   const uint64_t retry_mem = (uint64_t)retry->num_spills_to_mem + retry->num_fills_from_mem;
++   const uint64_t normal_reg = (uint64_t)normal->num_spills_to_reg + normal->num_fills_from_reg;
++   const uint64_t retry_reg = (uint64_t)retry->num_spills_to_reg + retry->num_fills_from_reg;
++   return retry_mem < normal_mem && retry_reg <= normal_reg &&
++          retry->max_warps_per_sm >= normal->max_warps_per_sm;
++}
++
+ static VkResult
+ nvk_compile_nir(struct nvk_device *dev, nir_shader *nir,
+                 VkShaderCreateFlagsEXT shader_flags,
+@@ -621,10 +642,33 @@
+    if (rs->storage_buffers == VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT)
+       robust2_modes |= nir_var_mem_ssbo;
+ 
++   /* NIR debug replacement may free original children, so own the snapshot separately. */
++   nir_shader *retry_nir = NULL;
++   if (nir->info.stage == MESA_SHADER_COMPUTE && nvk_nak_spill_retry_enabled())
++      retry_nir = nir_shader_clone(NULL, nir);
++
+    shader->nak = nak_compile_shader(nir, dump_asm, pdev->nak,
+                                     robust2_modes, fs_key, has_task_shader);
+-   if (!shader->nak)
++   if (!shader->nak) {
++      ralloc_free(retry_nir);
+       return vk_errorf(pdev, VK_ERROR_UNKNOWN, "Internal compiler error in NAK");
++   }
++
++   if (retry_nir && (shader->nak->info.num_spills_to_mem ||
++                    shader->nak->info.num_fills_from_mem)) {
++      struct nak_shader_bin *retry = nak_compile_shader_with_load_sink_control(
++         retry_nir, dump_asm, pdev->nak, robust2_modes, fs_key,
++         has_task_shader, true);
++      if (retry) {
++         if (nvk_nak_retry_is_better(&shader->nak->info, &retry->info)) {
++            nak_shader_bin_destroy(shader->nak);
++            shader->nak = retry;
++            nir = retry_nir;
++         } else {
++            nak_shader_bin_destroy(retry);
++         }
++      }
++   }
+ 
+    shader->info = shader->nak->info;
+    shader->asm_str = shader->nak->asm_str;
+@@ -636,8 +680,10 @@
+       uint32_t data_size = align(nir->constant_data_size, data_align);
+ 
+       void *data = malloc(data_size);
+-      if (data == NULL)
++      if (data == NULL) {
++         ralloc_free(retry_nir);
+          return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
++      }
+ 
+       memcpy(data, nir->constant_data, nir->constant_data_size);
+ 
+@@ -652,6 +698,7 @@
+    if (dump_asm)
+       shader->nir_str = nir_shader_as_str(nir, NULL);
+ 
++   ralloc_free(retry_nir);
+    return VK_SUCCESS;
+ }
+ 

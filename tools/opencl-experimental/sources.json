@@ -1,0 +1,287 @@
+{
+  "schema": 1,
+  "scope": "Experimental process-local OpenCL source replay, not a system driver installer",
+  "clvk_sources": [
+    {
+      "path": "src/clvk",
+      "repository": "kpet/clvk",
+      "commit": "863ce0ce5150478d4b4c679a869d63f60436a8b4"
+    },
+    {
+      "path": "src/clvk/external/OpenCL-Headers",
+      "repository": "KhronosGroup/OpenCL-Headers",
+      "commit": "386ca390b2f52efeb3e1a55a500690eb8013f60e"
+    },
+    {
+      "path": "src/clvk/external/SPIRV-Headers",
+      "repository": "KhronosGroup/SPIRV-Headers",
+      "commit": "2b7475f6d664efbad4d4315c94ecec9640831e5b"
+    },
+    {
+      "path": "src/clvk/external/SPIRV-Tools",
+      "repository": "KhronosGroup/SPIRV-Tools",
+      "commit": "ba9a9e32160e2500ce1e48cc563a8fedaf596e6e"
+    },
+    {
+      "path": "src/clvk/external/clspv",
+      "repository": "google/clspv",
+      "commit": "7ee3a40e652b3649d175758f72d7af98b9450a68"
+    },
+    {
+      "path": "src/clvk/external/clspv/third_party/llvm",
+      "repository": "llvm/llvm-project",
+      "commit": "71a85ef89fc1997205104b72447e0dc2c4ad83da"
+    }
+  ],
+  "clvk_dependencies_modified": false,
+  "clvk_touched_files": {
+    "src/api.cpp": {
+      "before": "6d21a81d4ac253a1fecce75fcc6878eb620100bbabf3d20257dec8e72e9f248b",
+      "after": "4ef6e2bfe3b56f9d4b4e19b0b3e2ae239000d277fd066b367984e0aa0718bf51"
+    },
+    "src/config.def": {
+      "before": "427435dd33f6a57f04ca0f022e3028747d3d80a2763ca2b034351ec93663bced",
+      "after": "311fc081cc8e1274065e0d071f217c20131185c277cd3a4063fc68965ff90244"
+    },
+    "src/device.cpp": {
+      "before": "951b458e974c3514383aea6ba883dfc4c3097d294b8d1f155c85144d9d1512ba",
+      "after": "d7a26b87f163c17b9f2114052cb54f3264d64594edd5549ca90547a9781117c1"
+    },
+    "src/device.hpp": {
+      "before": "67587047895760cbf6374c5d1cf5c44bcc7ba68f900a9e56442ed3680de5a875",
+      "after": "1a36613815f3211904d8d4688ff17cbb9986e5a8e1f441c549710a170955fe6a"
+    },
+    "src/event.cpp": {
+      "before": "06a819282624834b394a8f8f97ff7e1aa7e3d73642d72e7589463932c74f6c87",
+      "after": "1c30b1531a3e78d9ec44bf31f29d2db055e49a7330c3fe797c44c769b2258265"
+    },
+    "src/event.hpp": {
+      "before": "79aafa3eb281996c4eff25c3bd8e07309af046937bfb637fd9ae2dd886cbb35b",
+      "after": "b47ceedab1dc7d91f6b4bb74b76bbb71fb3532f044ad4c92d47fbf0474554855"
+    },
+    "src/memory.cpp": {
+      "before": "eaad46e25c6df559d2e9ef278ba7d9e78423585abddc29616705fe3373a618d4",
+      "after": "f9080e4dd4be50e0cdee5872c53ccc439f222e2a60e2a697f981cebe21d6567a"
+    },
+    "src/memory.hpp": {
+      "before": "06c5788624f6a7eb0b46a227e2d870f7422bd69b28834ee272820c031b5ac065",
+      "after": "fa98ad156d62cb48874da46daf2cbe52c3f7876ac40e606143f160c3010a0b37"
+    },
+    "src/program.cpp": {
+      "before": "ca46e10480968b4cbd765c833f57253bf2baf25459b491449a940e7a19177fda",
+      "after": "99f4574aa5881364c79026705146c53eba524415cf2a7d731936f908010e55da"
+    },
+    "src/program.hpp": {
+      "before": "b021e7d924a64f5f1cdcc09bf6c2f3d70ef766e2d7963b7f75a624459ae95857",
+      "after": "31f033c9fbcf2769233840aea8f13d326f7f3e2809ebacbf90c37c975cec8170"
+    },
+    "src/queue.cpp": {
+      "before": "c334ef78994704c54bbd3c47413aad5263556518a8bee00fa49e6909622ed5b1",
+      "after": "4696605acf602f697fc06d7a618862465e7afd77b9d97c7d3a38102adaeff322"
+    },
+    "src/queue.hpp": {
+      "before": "d7e1a0a5e379795644944c133149f7ce35d7dd1d6f25485823948a9d08137e98",
+      "after": "550002d1a8866cd581f3aa094394f32cc1fd8eef11bc8072569eb98430758fc7"
+    }
+  },
+  "mesa_sources": [
+    {
+      "name": "mesa",
+      "commit": "90a959ebba9dbb36f2ea5176091c15d6ebdd0af0",
+      "filename": "mesa-90a959eb.tar.gz",
+      "url": "https://gitlab.freedesktop.org/mesa/mesa/-/archive/90a959ebba9dbb36f2ea5176091c15d6ebdd0af0/mesa-90a959ebba9dbb36f2ea5176091c15d6ebdd0af0.tar.gz",
+      "sha256": "457e72f9bbb2acddb6c952bd7326ad92ed37650e7c83a0e4ea51f0109a7dd7fb",
+      "bytes": 134369664
+    },
+    {
+      "name": "translator",
+      "commit": "d916d6b34ee50930e92d51db7b9a69a87b864be4",
+      "filename": "translator-d916d6b3.tar.gz",
+      "url": "https://codeload.github.com/KhronosGroup/SPIRV-LLVM-Translator/tar.gz/d916d6b34ee50930e92d51db7b9a69a87b864be4",
+      "sha256": "a3a615d1de81e64da99ff3b38a1cee10aa962944531aeb24af3bbe2f6cc7629d",
+      "bytes": 1939939
+    },
+    {
+      "name": "glslang",
+      "commit": "b5782e52ee2f7b3e40bb9c80d15b47016e008bc9",
+      "filename": "glslang-16.1.0.tar.gz",
+      "url": "https://codeload.github.com/KhronosGroup/glslang/tar.gz/b5782e52ee2f7b3e40bb9c80d15b47016e008bc9",
+      "sha256": "6c242598c332050bf3a3619d299594ca2909426935f2c86c69c7356b049347c7",
+      "bytes": 4252039
+    },
+    {
+      "name": "bindgen-cli",
+      "version": "0.72.1",
+      "filename": "bindgen-cli-0.72.1.crate",
+      "url": "https://static.crates.io/crates/bindgen-cli/bindgen-cli-0.72.1.crate",
+      "sha256": "8a408c0fcb20bf7bd4ceaf4bf990e223e3543a04b84d2394f3edeee29a0e87e2",
+      "bytes": 8668
+    },
+    {
+      "name": "cbindgen",
+      "version": "0.29.2",
+      "filename": "cbindgen-0.29.2.crate",
+      "url": "https://static.crates.io/crates/cbindgen/cbindgen-0.29.2.crate",
+      "sha256": "befbfd072a8e81c02f8c507aefce431fe5e7d051f83d48a23ffc9b9fe5a11799",
+      "bytes": 231617
+    },
+    {
+      "name": "translator-headers",
+      "commit": "575b6512579ebde466ed3dfc04e413439d14d95d",
+      "filename": "translator-headers-575b6512.tar.gz",
+      "url": "https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/575b6512579ebde466ed3dfc04e413439d14d95d",
+      "sha256": "775ee89eb77d067df3f5736e2b4bb2f5f3e39ead915f11f3d366139dcb42209d",
+      "bytes": 570306
+    },
+    {
+      "name": "cpython",
+      "version": "3.11.18",
+      "filename": "Python-3.11.18.tar.xz",
+      "url": "https://www.python.org/ftp/python/3.11.18/Python-3.11.18.tar.xz",
+      "sha256": "9120e0a653868f6e3698d36cdd99e5a58903ec9469e448f21d98f7b16d8fa290",
+      "bytes": 20351120
+    }
+  ],
+  "mesa_base": "90a959ebba9dbb36f2ea5176091c15d6ebdd0af0",
+  "mesa_required_preparation": "NullMoth 3.0 patch chain, helper headers, then nvk/dlss/patch_dlss_cache.py; before the two extra patches here",
+  "mesa_release_patch_order": [
+    "nvk-macos",
+    "nvk-fixes-after-def16",
+    "nvk-620-kernel",
+    "nvk-recycle",
+    "nvk-slab",
+    "nvk-slabdef",
+    "nvk-hubfix",
+    "nvk-perf-boost-burst",
+    "nvk-rated-tdp",
+    "nvk-gps-maxpower",
+    "nvk-metal-wsi",
+    "nvk-card-select",
+    "hwrt/ttu-nak",
+    "hwrt/ttu-rq",
+    "curves/curves",
+    "hwrt/wide",
+    "nvk-warnings",
+    "nvk-unbound-stage",
+    "nvk-diag-nofollow",
+    "nvk-stream-uncached"
+  ],
+  "nullmoth_build_inputs_sha256": {
+    "build/build_nvk.sh": "b541677f0fcb566f8e8c9f4e6441f7dbd084146f9ba70bcde671fd70398dee11",
+    "nvk/MESA_BASE": "8a1bf824f5060fac2810442f7f98f168af86f7be32f0603b25cc166c3c342404",
+    "nvk/dlss/patch_dlss_cache.py": "c2b1d5b3b45062c7b374768a32e15181d49ae839360a79c20cfe32e5f2498159",
+    "nvk/ogkm-nvos-620.patch": "cc397cb87acec85a961a95a8e938b04ea0167b2ffcf1c5ff618e8af97c00af17",
+    "nvk/ogkm-warnings.patch": "e8ed684fd6ea369c14cf5379324b4fea823418c8fec6a6daf30429a88ded524c",
+    "nvk/hwrt/nvk_hwrt.h": "d56a2a91a616bcddcbd7c96f94780fd1d67a1cde6ee28f4be4f771b4a5db0345",
+    "nvk/hwrt/nvk_hwrt_layout.h": "4b78db905569e072ee64ef4e5020db2f5fac4ff1c2fcb00088060400b08bd626",
+    "nvk/curves/nvk_curve.h": "d738be6746112791a7ed4c4d7084c476a5c5923c091251e36de735f33632b826",
+    "nvk/hwrt/encode_wide.comp": "fda9de8505368f286d365a8fe34e1219c7cb63b9b8b51b04e26cb1fb5427ef04",
+    "nvk/hwrt/encode_wide_body.h": "7483ac16d85a235783f0e4351a591b0dd0c0ec98010cb1099179f3a3d490e0e6",
+    "nvk/curves/curve_math.h": "0421e7c2f96e071908b5a9788a1f72cb1cf35eac80ff983a3e3c84e6dfad33b6",
+    "nvk/curves/curve_nir.h": "3e55df3278b7c41b0da550c0ebd5661a8574cefeb999f00884606f5a535cae84",
+    "nvk/nvk-macos.patch": "d8c6b112c1f6b86a89035fbc484da128aa86191fadd21a81f63badb25035984b",
+    "nvk/nvk-fixes-after-def16.patch": "f189d9d7c8df6739acbec054c1d65690a28691c97ec2ff8dcadc7f4941a27f2b",
+    "nvk/nvk-620-kernel.patch": "988af63e96553173ee2e0fc002503759df37c5e35d2d9df6505ed200c1e3168f",
+    "nvk/nvk-recycle.patch": "f49e522defe02aa11053c251ca83e3da026e04013241f0f0d832feda152b7295",
+    "nvk/nvk-slab.patch": "9efa2d23f323435fe6d84c1ea76ec397793f8f591d557c7e49937db95d31f8dd",
+    "nvk/nvk-slabdef.patch": "c537b8ffc0f51ce83f453b7377df2b3f1ecbef41aebd43fc962cf69074c20bd3",
+    "nvk/nvk-hubfix.patch": "39618bc806c0a5dd058b502a00d44c16049597192dadc3a233df010cc413fd92",
+    "nvk/nvk-perf-boost-burst.patch": "301229c0b0e598591f693c5f37b1f22b1cd5c17c8b877311a1b4a828e4283d30",
+    "nvk/nvk-rated-tdp.patch": "ed3edf2274faab7046d5eecb00db76d1c380dd8c9d18437269103ae455b42e2a",
+    "nvk/nvk-gps-maxpower.patch": "1e6c82f9513f02b03dd68f7205d3e5b0fba7779972abd4c9b98046055f789cd2",
+    "nvk/nvk-metal-wsi.patch": "2b0c353c4497b6d607de24fab70e8e8a10e51460b49544ce047b932ada3636ea",
+    "nvk/nvk-card-select.patch": "1539949dd35a238a734aece1f558978883f135731fba89f6456f2a92850655fa",
+    "nvk/hwrt/ttu-nak.patch": "80bb66dc9b164b9fd8c35e707040420e37f5ca3d87afd1a92e1bee92cf33aadc",
+    "nvk/hwrt/ttu-rq.patch": "dae6eaae7524993e8cefd7f7a70528dd293bb84d3ffaaa313d2b4ef8b5c12684",
+    "nvk/curves/curves.patch": "00b09d67e5b80c3a9f75da3d82a6514206bc8ad84c43f1b706314882b348c71d",
+    "nvk/hwrt/wide.patch": "a6f0c761da23b937c61228058ee66bd19154c602af39c75829917be41583cc98",
+    "nvk/nvk-warnings.patch": "02a5b9017c836371fc0c839d4822f7f3fc34f8e9858fa4845057254dc51c3d62",
+    "nvk/nvk-unbound-stage.patch": "dbc62b2fe104d68ac399a176e4b91d6486b648328de2aa078bb80b6d2fdfe2f5",
+    "nvk/nvk-diag-nofollow.patch": "aa1af3d9bdb081525d8ed066df7851c3054cb3457d99ef3235508cadb481ab2f",
+    "nvk/nvk-stream-uncached.patch": "e7251bc81e2244d7be10afd48565a90949961b269b19e728468a0aa15962a3b5"
+  },
+  "mesa_touched_files": {
+    "src/nouveau/compiler/nak.h": {
+      "before": "0b444d48b336df925f2bb3f7fd560851258f8e054d217aa916a896a82f0f0a8b",
+      "after": "36a16059566cd4bf687554a2a40a21af0f654d7ec555074432abd75b362cef65"
+    },
+    "src/nouveau/compiler/nak/api.rs": {
+      "before": "a6ea714d6f0c67fc8f06d0334627ec317fc40af9d7c7b3140d96f7fc8b8828ad",
+      "after": "b9ff259df79031de4ffb03dfe78ca71c88e079fb240b6c575dab6c0c12abd657"
+    },
+    "src/nouveau/compiler/nak_nir.c": {
+      "before": "da426321c5a83e570b19563cc3730f67bd4ecdbf1e0da327bcada821da2a38af",
+      "after": "88463f9412746006857e2cfe947ad81b327923a1d88b9f96f460fb7f75f528cf"
+    },
+    "src/nouveau/vulkan/nvk_shader.c": {
+      "before": "9b5309057a98e2d9af35d9543cfb070cc88c41b0a075b0584860eed433519133",
+      "after": "a21f5b7916c118fcefeee0d9b36c859009d43585c9ea15519fe6a5dd7d22b290"
+    },
+    "src/util/u_queue.c": {
+      "before": "b11ee37bbcd8325cbe12ce013efbac756eaa0981cca876fa1fce902b2faafe4e",
+      "after": "398b9a2d235d46494b65e159543c98c18b8218001644e05b5d7880b609820fa6"
+    }
+  },
+  "patches_sha256": {
+    "patches/clvk-private-opencl.patch": "ab9fdc42f0e8eeff8720720ca0c8ab0adc23097d8464e4954aff891558d8c55e",
+    "patches/mesa-queue-barrier-ownership.patch": "399d51edb37b010afe8259985639a03127d36b6be9b8ed0fa88eee26d61aa1d6",
+    "patches/nvk-selective-spill-retry.patch": "a2d0ea4572936bf7fa04b4f9bc2632e0a450a915dd484c8d7ebfafd6db72a26a"
+  },
+  "tested_artifacts_sha256": {
+    "build/clspv": "a4c6fc28ea6e2a1fabf486ccf2171aada5746f74b4b9c110ca0e69cbdeff47ea",
+    "build/OpenCL.framework/Versions/A/OpenCL": "56655cd6c0cb65c329bbefc7d4eb87991d513fd64f50ce13546651842c1cf7e5",
+    "private/libvulkan_nouveau.dylib": "7638e1919a5150438a62693ac5bdf57dbe5738676b870ff5e1024fce87360023"
+  },
+  "toolchain": {
+    "clang": "Apple clang 21.0.0",
+    "cmake": "3.31.10",
+    "ninja": "1.13.2",
+    "llvm": "24 snapshot 71a85ef89fc1997205104b72447e0dc2c4ad83da",
+    "rust": "1.90.0",
+    "meson": "1.9.1",
+    "bindgen": "0.72.1",
+    "cbindgen": "0.29.2",
+    "python_for_mesa_build": "3.11.18",
+    "ogkm_headers": "610.57.04",
+    "nvk_macos_deployment_target": "15.0",
+    "release_toolchain_was_different": "LLVM22/Rust1.97.1"
+  },
+  "mesa_rust_crates": [
+    {
+      "filename": "paste-1.0.14.tar.gz",
+      "url": "https://static.crates.io/crates/paste/1.0.14/download",
+      "sha256": "de3145af08024dea9fa9914f381a17b8fc6034dfb00f3a84013f7ff43f29ed4c",
+      "bytes": 18157
+    },
+    {
+      "filename": "proc-macro2-1.0.86.tar.gz",
+      "url": "https://static.crates.io/crates/proc-macro2/1.0.86/download",
+      "sha256": "5e719e8df665df0d1c8fbfd238015744736151d4445ec0836b8e628aae103b77",
+      "bytes": 48958
+    },
+    {
+      "filename": "quote-1.0.35.tar.gz",
+      "url": "https://static.crates.io/crates/quote/1.0.35/download",
+      "sha256": "291ec9ab5efd934aaf503a6466c5d5251535d108ee747472c3977cc5acc868ef",
+      "bytes": 28136
+    },
+    {
+      "filename": "rustc-hash-2.1.1.tar.gz",
+      "url": "https://static.crates.io/crates/rustc-hash/2.1.1/download",
+      "sha256": "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d",
+      "bytes": 14154
+    },
+    {
+      "filename": "syn-2.0.87.tar.gz",
+      "url": "https://static.crates.io/crates/syn/2.0.87/download",
+      "sha256": "25aa4ce346d03a6dcd68dd8b4010bcb74e54e62c90c573f394c46eae99aba32d",
+      "bytes": 278076
+    },
+    {
+      "filename": "unicode-ident-1.0.12.tar.gz",
+      "url": "https://static.crates.io/crates/unicode-ident/1.0.12/download",
+      "sha256": "3354b9ac3fae1ff6755cb6db53683adb661634f67557942dea4facebec0fee4b",
+      "bytes": 42168
+    }
+  ]
+}

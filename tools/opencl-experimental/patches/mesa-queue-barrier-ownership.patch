@@ -1,0 +1,21 @@
+--- a/src/util/u_queue.c
++++ b/src/util/u_queue.c
+@@ -530,8 +530,7 @@
+ util_queue_finish_execute(void *data, void *gdata, int num_thread)
+ {
+    util_barrier *barrier = data;
+-   if (util_barrier_wait(barrier))
+-      util_barrier_destroy(barrier);
++   util_barrier_wait(barrier);
+ }
+ 
+ void
+@@ -744,6 +743,8 @@
+       util_queue_fence_wait(&fences[i]);
+       util_queue_fence_destroy(&fences[i]);
+    }
++   /* Every worker has returned from the barrier before its fence signals. */
++   util_barrier_destroy(&barrier);
+    simple_mtx_unlock(&queue->finish_lock);
+ 
+    free(fences);
