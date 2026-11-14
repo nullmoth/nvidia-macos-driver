@@ -4202,11 +4202,15 @@ static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBuf
         page->next = c->address_pages; c->address_pages = page;
         pthread_mutex_lock(&g_pl_lock); nvmtl_pl_made(&g_pl); pthread_mutex_unlock(&g_pl_lock);
     }
-    uint64_t *addresses = (uint64_t *)((uint8_t *)page->buffer.map + slot * NVMTL_TABLE_BYTES);
+    // Assemble in ordinary CPU memory, then write the mapped page once. The dummy
+    // address is identical for every empty slot; querying it per slot costs a
+    // Vulkan call for each of the many unbound buffers in small WebGL draws.
+    uint64_t addresses[2 * NVMTL_NBUF + NVMTL_NTEX];
+    const uint64_t dummy = nvmtl_vk_buffer_address(&g_dummyBuf);
     nvmtl_bindtable *t = c->table;
     for (unsigned i = 0; i < NVMTL_NBUF; ++i) {
         nvmtl_slot *s = t ? &t->s[which][i] : NULL;
-        addresses[i] = s && s->kind == NVMTL_SLOT_BUF ? s->address + s->off : nvmtl_vk_buffer_address(&g_dummyBuf);
+        addresses[i] = s && s->kind == NVMTL_SLOT_BUF ? s->address + s->off : dummy;
     }
     uint64_t self = nvmtl_vk_buffer_address(&page->buffer);
     if (!self) nvlog("address table: page has no device address - array_ref<void> arguments will read 0");
@@ -4216,6 +4220,7 @@ static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBuf
         const nvmtl_slot *s = t ? &t->s[which][NVMTL_NBUF + i] : NULL;
         addresses[2 * NVMTL_NBUF + i] = (s && s->kind == NVMTL_SLOT_TEX && s->h) ? (uint64_t)s->size : 0;
     }
+    memcpy((uint8_t *)page->buffer.map + slot * NVMTL_TABLE_BYTES, addresses, sizeof addresses);
     *out = (VkDescriptorBufferInfo){ page->buffer.buf, slot * NVMTL_TABLE_BYTES, NVMTL_TABLE_BYTES };
     c->address_count++;
     return 0;
