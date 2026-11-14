@@ -181,8 +181,25 @@ int main(void) {{
                     atomic_load(&g_ireap_queued) == atomic_load(&g_ireap_freed) &&
                     g_alloc_bytes == 0 && g_buf_made == g_buf_gone);
 
-    printf("%d %d %d %d %d %llu %llu\\n",
-           held_in_grace, async_after_grace, sync_dealloc_ok, non_import_ok, flood_ok,
+    /* 5. Process-exit drain (nvmtl_imported_reap_atexit) drains pending items without hanging and forces post-exit sync destroy. */
+    atomic_store(&g_sleep_us, 1500);
+    for (uintptr_t k = 0; k < 24; k++) {{
+        nvk_buffer bk = make_buf(500 + k, 4096, 1, 0);
+        nvmtl_vk_buffer_destroy(&bk);
+    }}
+    nvmtl_imported_reap_atexit();
+    atomic_store(&g_sleep_us, 0);
+    const uint64_t q_after_exit = atomic_load(&g_ireap_queued);
+    nvk_buffer b_late = make_buf(999, 4096, 1, 0);
+    nvmtl_vk_buffer_destroy(&b_late);
+    int atexit_ok = (g_ireap_n == 0 && g_ireap_busy == 0 && g_ireap_bytes == 0 &&
+                     atomic_load(&g_ireap_queued) == q_after_exit &&
+                     atomic_load(&g_ireap_queued) == atomic_load(&g_ireap_freed) &&
+                     atomic_load(&g_last_free_tid) == main_tid &&
+                     g_alloc_bytes == 0 && g_buf_made == g_buf_gone);
+
+    printf("%d %d %d %d %d %d %llu %llu\\n",
+           held_in_grace, async_after_grace, sync_dealloc_ok, non_import_ok, flood_ok, atexit_ok,
            (unsigned long long)atomic_load(&g_ireap_freed),
            (unsigned long long)atomic_load(&g_ireap_sync_fallback));
     return 0;
@@ -196,19 +213,21 @@ with tempfile.TemporaryDirectory(prefix='nvmtl-ireap-') as d:
     r = subprocess.run(['xcrun', 'clang', '-O1', '-Wall', '-Wextra', '-Werror=unguarded-availability-new',
                         '-mmacosx-version-min=15.0', '-o', str(exe), str(src)],
                        capture_output=True, text=True)
-    check('production imported reaper + buffer grace slice compiles cleanly (minos 15.0)', r.returncode == 0, r.stderr[-800:])
+    check('production imported reaper + buffer grace + atexit slice compiles cleanly (minos 15.0)', r.returncode == 0, r.stderr[-800:])
     if r.returncode == 0:
         out = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
         check('harness exited 0', out.returncode == 0, out.stderr[-400:])
         if out.returncode == 0:
             vals = list(map(int, out.stdout.split()))
-            held, async_ok, sync_ok, non_imp, flood_ok, freed, fallbacks = vals
+            held, async_ok, sync_ok, non_imp, flood_ok, atexit_ok, freed, fallbacks = vals
             check('in-flight submit holds imported buffer in g_bg before any async reap', held == 1)
             check('grace-completed imported buffer (sync_free=0) frees on background worker without unmap', async_ok == 1)
             check('sync_free=1 (_hostDealloc) frees synchronously before nvmtl_vk_buffer_destroy returns', sync_ok == 1)
             check('non-imported mapped buffer unmaps and frees synchronously on caller thread', non_imp == 1)
             check('200-buffer burst exercises bounded queue backpressure with 0 leaked bytes/handles',
                   flood_ok == 1, f'async_freed={freed}, sync_fallbacks={fallbacks}')
+            check('nvmtl_imported_reap_atexit drains in-flight/queued reaps cleanly and switches post-exit destroys to sync',
+                  atexit_ok == 1)
 
 print('PASS' if not fails else f'FAILED {fails}')
 sys.exit(1 if fails else 0)

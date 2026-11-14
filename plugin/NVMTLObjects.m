@@ -3794,21 +3794,77 @@ static void nvmtl_hz_render_writes(NVMTLCommandBuffer *cb, NVMTLRenderPipelineSt
     if (ok) memcpy(c->hz_tmask, p->_p.gmask, sizeof c->hz_tmask);
     c->hz_wm_dirty = 1;
 }
+// Verify SPIR-V module-level writability independently of AIR text reflection (reflect_sanitized).
+// A compute buffer slot may skip post-submit sync_out ONLY when the translated SPIR-V uses Logical
+// addressing (OpMemoryModel AddressingModel == 0, never PhysicalStorageBuffer64 == 5348), uses no
+// decoration groups or BufferAddressTable (binding 640), and carries OpDecorate NonWritable (24)
+// from footprint::Analyzer on every set-0/1 StorageBuffer (12) OpVariable bound at that slot.
+static uint32_t nvmtl_spirv_writable_buffers(const void *p, size_t n) {
+    if (!p || (n & 3u) || n < 20) return 0xffffffffu;
+    const uint32_t *w = (const uint32_t *)p;
+    const size_t nw = n >> 2;
+    const uint32_t bound = w[3];
+    if (w[0] != 0x07230203u || !bound || bound > (1u << 22)) return 0xffffffffu;
+    uint32_t *bind = (uint32_t *)calloc(bound, sizeof *bind);
+    uint8_t *flags = (uint8_t *)calloc(bound, 1);   // 1: has Binding, 2: NonWritable, 4: set 2/3 (heap/fbfetch)
+    if (!bind || !flags) { free(bind); free(flags); return 0xffffffffu; }
+    int sawMemModel = 0, ok = 1;
+    uint32_t wr = 0;
+    for (size_t i = 5; i < nw; ) {
+        const uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
+        if (!wc || i + wc > nw) { ok = 0; break; }
+        if (op == 54) break;   // first OpFunction: header, capabilities, memory model, annotations, and globals precede this
+        if (op == 14) {        // OpMemoryModel
+            if (wc != 3 || w[i + 1] != 0) { ok = 0; break; }   // require Logical (0); PhysicalStorageBuffer64 (5348) -> write-all
+            sawMemModel = 1;
+        } else if (op == 74 || op == 75) {   // OpGroupDecorate / OpGroupMemberDecorate
+            ok = 0; break;
+        } else if (op == 71 && wc >= 3 && w[i + 1] < bound) {   // OpDecorate
+            const uint32_t id = w[i + 1], dec = w[i + 2];
+            if (dec == 24 && wc == 3) flags[id] |= 2u;
+            else if (dec == 33 && wc == 4) { bind[id] = w[i + 3]; flags[id] |= 1u; }
+            else if (dec == 34 && wc == 4 && (w[i + 3] == 2 || w[i + 3] == 3)) flags[id] |= 4u;
+        } else if (op == 59 && wc >= 4) {   // global OpVariable: w[i+1]=ResultType, w[i+2]=ResultId, w[i+3]=StorageClass
+            const uint32_t id = w[i + 2], sc = w[i + 3];
+            if (id >= bound) { ok = 0; break; }
+            if (sc == 12 && !(flags[id] & 4u)) {   // StorageBuffer in stage descriptor set (0/1)
+                if (!(flags[id] & 1u)) { ok = 0; break; }
+                const uint32_t b = bind[id];
+                if (b < 32) {
+                    if (!(flags[id] & 2u)) wr |= 1u << b;
+                } else if (b != 641u) {   // 641 = promoted read-only GL uniform; 640 (BufferAddressTable) or other -> write-all
+                    ok = 0; break;
+                }
+            }
+        }
+        i += wc;
+    }
+    free(bind);
+    free(flags);
+    return (ok && sawMemModel) ? wr : 0xffffffffu;
+}
 static uint32_t nvmtl_ps_writable_buffers(NVMTLComputePipelineState *ps) {
     static int forceAll = -1;
     if (forceAll < 0) { const char *e = getenv("NVMTL_COMPUTE_WRITE_ALL"); forceAll = e && e[0] == '1'; }
-    if (forceAll || !ps) return 0xffffffffu;
-    if (!__atomic_load_n(&ps->_hzReady, __ATOMIC_ACQUIRE)) {
+    if (forceAll || !ps || ps->_sassKernel) return 0xffffffffu;
+    if (!__atomic_load_n(&ps->_syncReady, __ATOMIC_ACQUIRE)) {
         const nvmtl_hz_writes f = nvmtl_hz_fn_writes(ps->_function);
-        ps->_hzBuf = f.buf; memcpy(ps->_hzTex, f.tex, sizeof f.tex); __atomic_store_n(&ps->_hzReady, 1, __ATOMIC_RELEASE);
+        NSData *spv = [ps->_function isKindOfClass:[NVMTLFunction class]] ? ps->_function->_spirv : nil;
+        ps->_syncBuf = f.buf | nvmtl_spirv_writable_buffers(spv.bytes, spv.length);
+        __atomic_store_n(&ps->_syncReady, 1, __ATOMIC_RELEASE);
     }
-    return ps->_hzBuf;
+    return ps->_syncBuf;
 }
 static void nvmtl_hz_compute_writes(NVMTLCommandBuffer *cb, NVMTLComputePipelineState *ps) {
     nvk_cmdbuf *c = &cb->_c;
     nvmtl_hz_writes w = kNVMTLHzAll;
     if (ps) {
-        w.buf = nvmtl_ps_writable_buffers(ps);
+        if (!__atomic_load_n(&ps->_hzReady, __ATOMIC_ACQUIRE)) {
+            const nvmtl_hz_writes f = nvmtl_hz_fn_writes(ps->_function);
+            ps->_hzBuf = f.buf; memcpy(ps->_hzTex, f.tex, sizeof f.tex);
+            __atomic_store_n(&ps->_hzReady, 1, __ATOMIC_RELEASE);
+        }
+        w.buf = ps->_hzBuf;
         memcpy(w.tex, ps->_hzTex, sizeof w.tex);
     }
     c->hz_bufw[0] = w.buf; c->hz_bufw[1] = 0;
@@ -6620,6 +6676,8 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
                     selected->_hzBuf = _ps->_hzBuf;
                     memcpy(selected->_hzTex, _ps->_hzTex, sizeof _ps->_hzTex);
                     selected->_hzReady = _ps->_hzReady;
+                    selected->_syncBuf = nvmtl_ps_writable_buffers(_ps) | nvmtl_spirv_writable_buffers(spirv.bytes, spirv.length);
+                    selected->_syncReady = 1;
                     if (nvmtl_vk_compute_pipeline_create(spirv.bytes, spirv.length, &selected->_p)) {
                         selected = nil; why = @"Vulkan compute pipeline creation failed";
                     }
@@ -6640,6 +6698,14 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
             }
         }
         _e78VarFor = _ps; _e78VarSel = selected;
+    }
+    if (selected != _ps && _cb && _cb->_resources) {
+        uint32_t extra = selected->_syncBuf & ~nvmtl_ps_writable_buffers(_ps);
+        while (extra) {
+            const unsigned k = (unsigned)__builtin_ctz(extra);
+            extra &= extra - 1u;
+            if (_baN[k] == 2 && _baObj[k]) [_cb->_resources addObject:_baObj[k]];
+        }
     }
     nvmtl_retain_resource(_cb, selected);
     nvmtl_bind_embedded_enc(_cb, NVMTL_SET_VERTEX, _ps->_function, self);

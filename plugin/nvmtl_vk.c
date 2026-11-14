@@ -8651,7 +8651,7 @@ static pthread_cond_t  g_ireap_cv   = PTHREAD_COND_INITIALIZER;
 static nvmtl_ireap_item g_ireap_q[NVMTL_IREAP_CAP];
 static unsigned g_ireap_head, g_ireap_n;
 static uint64_t g_ireap_bytes;
-static int g_ireap_scheduled;
+static int g_ireap_scheduled, g_ireap_busy, g_ireap_exiting;
 static dispatch_queue_t g_ireap_dq;
 static dispatch_once_t g_ireap_once;
 static _Atomic uint64_t g_ireap_queued, g_ireap_freed, g_ireap_sync_fallback;
@@ -8681,19 +8681,21 @@ static void nvmtl_imported_reap_worker(void *ctx)
     size_t prev_alloc = 0;
     for (;;) {
         pthread_mutex_lock(&g_ireap_lock);
-        if (prev_alloc) { g_ireap_bytes -= prev_alloc; prev_alloc = 0; pthread_cond_broadcast(&g_ireap_cv); }
-        if (!g_ireap_n) { g_ireap_scheduled = 0; pthread_cond_broadcast(&g_ireap_cv); pthread_mutex_unlock(&g_ireap_lock); return; }
+        if (prev_alloc) { g_ireap_bytes -= prev_alloc; prev_alloc = 0; g_ireap_busy = 0; pthread_cond_broadcast(&g_ireap_cv); }
+        if (!g_ireap_n || g_ireap_exiting) { g_ireap_scheduled = 0; pthread_cond_broadcast(&g_ireap_cv); pthread_mutex_unlock(&g_ireap_lock); return; }
         nvmtl_ireap_item it = g_ireap_q[g_ireap_head];
         g_ireap_head = (g_ireap_head + 1u) % NVMTL_IREAP_CAP;
         g_ireap_n--;
-        const int congested = g_ireap_n >= NVMTL_IREAP_CAP / 2u;
+        g_ireap_busy = 1;
+        const int congested = g_ireap_exiting || g_ireap_n >= NVMTL_IREAP_CAP / 2u;
         pthread_mutex_unlock(&g_ireap_lock);
         prev_alloc = it.alloc;
         if (atomic_load(&g_state) == 1) {
             pvkDestroyBuffer(g_dev, (VkBuffer)it.buf, NULL);
             if (!congested && atomic_load(&g_cmd_submitted) > __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE)) {
                 pthread_mutex_lock(&g_ireap_lock);
-                if (g_ireap_n < NVMTL_IREAP_CAP / 2u && atomic_load(&g_cmd_submitted) > __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE)) {
+                if (!g_ireap_exiting && g_ireap_n < NVMTL_IREAP_CAP / 2u &&
+                    atomic_load(&g_cmd_submitted) > __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE)) {
                     struct timespec ts = { 0, 2000000L };
                     pthread_cond_timedwait_relative_np(&g_ireap_cv, &g_ireap_lock, &ts);
                 }
@@ -8708,11 +8710,37 @@ static void nvmtl_imported_reap_worker(void *ctx)
                   (unsigned long long)k, (unsigned long long)atomic_load(&g_ireap_sync_fallback));
     }
 }
+static void nvmtl_imported_reap_atexit(void)
+{
+    pthread_mutex_lock(&g_ireap_lock);
+    g_ireap_exiting = 1;
+    pthread_cond_broadcast(&g_ireap_cv);
+    while (g_ireap_n) {
+        nvmtl_ireap_item it = g_ireap_q[g_ireap_head];
+        g_ireap_head = (g_ireap_head + 1u) % NVMTL_IREAP_CAP;
+        g_ireap_n--;
+        pthread_mutex_unlock(&g_ireap_lock);
+        if (atomic_load(&g_state) == 1) {
+            pvkDestroyBuffer(g_dev, (VkBuffer)it.buf, NULL);
+            pvkFreeMemory(g_dev, (VkDeviceMemory)it.mem, NULL);
+        }
+        g_alloc_bytes -= it.alloc;
+        atomic_fetch_add(&g_ireap_freed, 1);
+        pthread_mutex_lock(&g_ireap_lock);
+        g_ireap_bytes -= it.alloc;
+    }
+    for (int tries = 0; g_ireap_busy && tries < 40; tries++) {
+        struct timespec ts = { 0, 50000000L };
+        pthread_cond_timedwait_relative_np(&g_ireap_cv, &g_ireap_lock, &ts);
+    }
+    pthread_mutex_unlock(&g_ireap_lock);
+}
 static void nvmtl_imported_reap_init(void *ctx)
 {
     (void)ctx;
     dispatch_queue_attr_t a = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);
     g_ireap_dq = dispatch_queue_create("com.nullmoth.nvmtl.imported_reap", a);
+    if (g_ireap_dq) atexit(nvmtl_imported_reap_atexit);
 }
 static int nvmtl_imported_reap_enqueue(const nvk_buffer *b)
 {
@@ -8723,6 +8751,10 @@ static int nvmtl_imported_reap_enqueue(const nvk_buffer *b)
     if (!g_ireap_dq) return 0;
     int start = 0;
     pthread_mutex_lock(&g_ireap_lock);
+    if (g_ireap_exiting) {
+        pthread_mutex_unlock(&g_ireap_lock);
+        return 0;
+    }
     if (g_ireap_n >= NVMTL_IREAP_CAP || g_ireap_bytes + b->alloc > NVMTL_IREAP_MAX_BYTES) {
         pthread_mutex_unlock(&g_ireap_lock);
         atomic_fetch_add(&g_ireap_sync_fallback, 1);
