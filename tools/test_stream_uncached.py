@@ -85,7 +85,8 @@ arm("stream chunks are plain system memory, never the cached kind",
 arm("the cached return is the line removed", any("NVK69_MEM_GPU_CACHED" in l and "return" in l for l in minus))
 c30 = next((l for l in bld.splitlines() if l.strip().startswith("CHAIN=") and "nvk-stream-uncached" in l), "")
 c29 = [l for l in bld.splitlines() if l.strip().startswith("CHAIN=") and "nvk-diag-nofollow\" ;;" in l]
-arm("the 3.0 set applies it last", c30.rstrip().endswith('nvk-stream-uncached" ;;'))
+arm("the 3.0 set applies it last, followed only by the macOS 27 patches",
+    c30.rstrip().endswith('nvk-stream-uncached nvk-macos27-sparse nvk-macos27-sparse-warnings nvk-readonly-host-import nvk-surface-mark-connections" ;;'))
 arm("the 2.9 set is unchanged, so 2.9 still rebuilds as shipped", len(c29) == 1)
 arm("the release build uses the 3.0 set", '"$OUT/nvk-build" 3.0 ||' in inputs)
 print("FAILED" if fails else "all ok")

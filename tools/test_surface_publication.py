@@ -84,10 +84,13 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) {
     assert(!dispatch_semaphore_wait(release_read,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC)));
     memcpy(base,i->gpu,4); return 0;
 }
+@class NVMTLTexture;
+static int nvmtl_mirror_sync(NVMTLTexture *r) { (void)r; return 1; }
 @interface NVMTLTexture : NSObject {
 @public NVMTLTexture *_parent; IOSurfaceRef _surf; BOOL _vramOn, _surfSynced, _clientWritten; void *_hostPages;
     uint32_t _surfSeed, _surfGen; NSUInteger _plane; Image _i; void *_q;
     IOSurfaceRef _y422Surf;   // NULL: not a 4:2:2 texture
+    id _mirBuf;               // nil: not a view of a buffer
 }
 - (void)nvmtlY422SurfaceIn;
 - (BOOL)nvmtlSurfaceCopyable;

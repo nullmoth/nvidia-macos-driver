@@ -27,7 +27,7 @@ fixture = r'''
 #include "nvmtl_shared_wc.h"
 typedef struct { void *map; size_t size; } Buffer;
 @interface NVMTLBuffer : NSObject { @public
-    void *_hostPtr; size_t _hostLen; Buffer _b, _shadow; unsigned _syncOut, _zshadow; void *_swc;
+    void *_hostPtr; size_t _hostLen; Buffer _b, _shadow; unsigned _syncOut, _zshadow; void *_swc; uint8_t _gpuMayWrite;
 } @end
 @implementation NVMTLBuffer @end
 @interface NVMTLTexture : NSObject { @public
@@ -90,6 +90,9 @@ int main(void) { @autoreleasepool {
     assert(nvmtl_submission_copies(resources,YES).count==1);
     NVMTLBuffer *managed=[NVMTLBuffer new];
     managed->_b=(Buffer){gpu,16}; managed->_shadow=(Buffer){shadow,16}; managed->_syncOut=1;
+    // a buffer the GPU only read is not copied back: the copy would put submit-time bytes over what the caller wrote since
+    assert(!nvmtl_submission_copies([NSSet setWithObject:managed],YES));
+    managed->_gpuMayWrite=1;
     for (NVMTLBuffer *b in nvmtl_submission_copies([NSSet setWithObject:managed],YES)) nvmtl_buffer_sync_out(b);
     assert(managedCopies==1 && !managed->_syncOut && !memcmp(gpu,shadow,16));
     NVMTLBuffer *imported=[NVMTLBuffer new]; imported->_b=(Buffer){gpu,16};
