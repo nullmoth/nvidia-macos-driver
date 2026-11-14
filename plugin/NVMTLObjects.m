@@ -6135,12 +6135,13 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 
 #include "nvconv_lib.h"
 @interface NVMTLComputeCommandEncoder () { @public uint8_t _nvcKP[528]; uint32_t _nvcKPLen; uint8_t _nvcCP[272]; uint32_t _nvcCPLen; BOOL _nvcIn; } @end
-static id<MTLComputePipelineState> g_nvc_ps[17];   /* 8..10 tensor-core 3/4/5_s, 11..13 32x32 3/4/5_t, 14..15 split-K 4/5_k, 16 reduce (optional) */
+static id<MTLComputePipelineState> g_nvc_ps[18];   /* 8..10 tensor-core 3/4/5_s, 11..13 32x32 3/4/5_t, 14..15 split-K 4/5_k, 16 reduce (optional), 17 loose compare */
 static NSMutableDictionary *g_nvc_part;            /* split-K partial-sum buffer per layer key */
 #define NVC_NC 4                                   /* candidates: 0 fp32 tiles, 1 tensor cores, 2 32x32 tiles, 3 split-K */
 static int nvmtl_nvconv_mma_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_NVCONV_MMA"); on = !(e && e[0] == '0'); } return on; }
 #define NVC_CMP 6
 #define NVC_COPY 7
+#define NVC_CMP_LOOSE 17
 #define NVC_NVAR 7   /* epilogues 0-4, plus 5 and 6: residual blocks that add their own input */
 static NSMutableDictionary *g_nvc_state;
 static pthread_mutex_t g_nvc_lk = PTHREAD_MUTEX_INITIALIZER;
@@ -6199,6 +6200,12 @@ static BOOL nvmtl_nvconv_ready(id<MTLDevice> dev) {
                 g_nvc_ps[8 + i] = f ? [dev newComputePipelineStateWithFunction:f error:&err] : nil;
                 if (!g_nvc_ps[8 + i]) nvlog("nvconv: %s did not build (%s) - that candidate is off", mnames[i].UTF8String, err.description.UTF8String);
             }
+            // The fp32-tile candidate is the accuracy reference against MPS; it keeps the old fp32-order tolerance. The
+            // tensor-core candidates must match MPS under the strict tolerance in nvconv_cmp. A missing loose comparator
+            // only means the fp32 tiles are held to the strict bound too, never that an unchecked kernel runs.
+            { id<MTLFunction> f = [lib newFunctionWithName:@"nvconv_cmp_loose"];
+              g_nvc_ps[NVC_CMP_LOOSE] = f ? [dev newComputePipelineStateWithFunction:f error:&err] : nil;
+              if (!g_nvc_ps[NVC_CMP_LOOSE]) nvlog("nvconv: nvconv_cmp_loose did not build (%s) - fp32 tiles use the strict bound", err.description.UTF8String); }
             g_nvc_part = [NSMutableDictionary new];
             g_nvc_state = [NSMutableDictionary new];
         }
@@ -6436,7 +6443,7 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
         nvmtl_nvconv_run_c(e, cps[pass], cg[pass], v | shuf << 8, pass == 3, partV, nsplit, nar, M * cout);   // epilogue low byte, depth-to-space above
         if (tsb) [e sampleCountersInBuffer:tsb atSampleIndex:ts0 + 1 withBarrier:YES];
         if (v == 0 && !pass) copyOut(@"ours0", scratch, 0, nspan);
-        e->_ps = (NVMTLComputePipelineState *)g_nvc_ps[NVC_CMP]; e->_tgLen = nil; e->_nvcIn = YES;
+        e->_ps = (NVMTLComputePipelineState *)(pass == 0 && g_nvc_ps[NVC_CMP_LOOSE] ? g_nvc_ps[NVC_CMP_LOOSE] : g_nvc_ps[NVC_CMP]); e->_tgLen = nil; e->_nvcIn = YES;
         [e setBuffer:outBuf offset:outOff atIndex:5]; [e setBuffer:scratch offset:0 atIndex:6]; [e setBuffer:res offset:32 * pass + v * 4 atIndex:7];
         [e setBytes:&n length:4 atIndex:8]; [e setBuffer:res offset:32 * NVC_NC atIndex:9];
         [e dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
