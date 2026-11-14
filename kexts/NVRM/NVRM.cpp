@@ -1912,6 +1912,10 @@ IOReturn NVRM::go(uint32_t pass)
             if (msi < 0 && (type & kIOInterruptTypePCIMessaged)) msi = i;
         }
         if (msi < 0) { LOG("no MSI source on the device — refusing (the RM needs message-signalled interrupts)"); return kIOReturnUnsupported; }
+        // A second start attempt after a failed one: the first attempt's interrupt source still owns the MSI, and
+        // registering another on it fails. Drop what the failed attempt left before making the new one.
+        if (fIntSrc) { fIntSrc->disable(); if (fWorkLoop) fWorkLoop->removeEventSource(fIntSrc); fIntSrc->release(); fIntSrc = NULL; }
+        if (fWorkLoop) { fWorkLoop->release(); fWorkLoop = NULL; }
         fWorkLoop = IOWorkLoop::workLoop();
         fIntSrc = IOFilterInterruptEventSource::filterInterruptEventSource(this,
                     OSMemberFunctionCast(IOInterruptEventAction, this, &NVRM::interruptOccurred),
@@ -1924,7 +1928,10 @@ IOReturn NVRM::go(uint32_t pass)
         LOG("rm_init_adapter -> %s", ok ? "OK" : "FAILED");
         nv_xnu_dump_live_allocs();
         nv_xnu_dump_gsp_regs(nv);
-        if (!ok) return kIOReturnError;
+        if (!ok) {   // the card did not start: no interrupt may arrive for it, and a retry registers its own source
+            fIntSrc->disable(); fWorkLoop->removeEventSource(fIntSrc); fIntSrc->release(); fIntSrc = NULL;
+            return kIOReturnError;
+        }
         fAdapter = true;
         LOG("PASS 2 REACHED: the adapter is up — GSP-RM is running on the card under macOS");
         fPassDone = 2;
