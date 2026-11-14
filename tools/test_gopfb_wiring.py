@@ -37,7 +37,7 @@ arm("scan-out is answered with a CPU mapping and no VRAM address", "r->phys = 0;
 arm("import is refused with a reason (the accelerator copies) and going home is always honoured",
     "q->result = NMH_E_PROVIDER;" in src and "q->op == NMH_OP_HOME" in src)
 arm("only AMD display-class devices are matched by the personality", "0x00001002&amp;0x0000ffff" in plist and "0x00008086" not in plist and "0x000010de" not in plist.lower())
-arm("it supports macOS 15 and 26 only", "version_major != 24 && version_major != 25" in src and "-mmacosx-version-min" in build)
+arm("it supports macOS 27 only", "version_major != 27" in src and "version_major != 24" not in src and "-mmacosx-version-min" in build)
 arm("the MIT notice and the link to PrimeBridge are in the file header",
     "https://github.com/myvoow/PrimeBridge" in src and "MIT License, Copyright (c) 2026 myvoow" in src and "MIT License, Copyright (c) 2026 myvoow" in hdr)
 arm("the logic header is plain C (no kernel headers)", "#include <IOKit" not in hdr and "#include <stdint.h>" in hdr)

@@ -171,7 +171,7 @@ OSDefineMetaClassAndStructors(NMGopFB, IOFramebuffer)
 
 IOService *NMGopFB::probe(IOService *provider, SInt32 *score)
 {
-    if (version_major != 24 && version_major != 25) return nullptr;   // macOS 15 (Darwin 24) and macOS 26 (Darwin 25) only
+    if (version_major != 27) return nullptr;   // macOS 27 (Darwin 27) only
     IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
     if (!pci) return nullptr;
     if (PE_parse_boot_argn("-nmgopfboff", nullptr, 0)) { GFBLOG("off by boot-arg"); return nullptr; }
