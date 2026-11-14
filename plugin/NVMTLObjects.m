@@ -6,6 +6,7 @@
 
 #import <QuartzCore/QuartzCore.h>
 #include "nvmtl_format_twin.h"
+#include "nvmtl_buffer_texture.h"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
@@ -986,7 +987,14 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
     id<MTLTexture> t = [self newTextureWithDescriptor:d offset:offset bytesPerRow:bpr];
     if (t || !d) return t;
     void *base = [self contents];
-    if (!base || d.textureType != MTLTextureType2D || offset + bpr * d.height > _b.size) {
+    extern int nvmtl_pixfmt_public(MTLPixelFormat f, uint32_t *vk, uint32_t *bpp, int *a8);
+    uint32_t vkfmt = 0, bpp = 0, bw = 0, bh = 0, bb = 0; int a8 = 0;
+    const int formatOK = nvmtl_pixfmt_public(d.pixelFormat, &vkfmt, &bpp, &a8) == 0 &&
+                         !nvmtl_vk_format_block(vkfmt, &bw, &bh, &bb);
+    if (!base || !formatOK || !bpp || d.textureType != MTLTextureType2D ||
+        d.depth != 1 || d.arrayLength != 1 || d.mipmapLevelCount != 1 || d.sampleCount != 1 ||
+        d.width > UINT32_MAX || d.height > UINT32_MAX ||
+        !nvmtl_buffer_texture_fits(_b.size, offset, d.width, d.height, bpp, bpr) || bpr % bpp) {
         nvlog("newTiledTextureWithDescriptor: %lux%lu bpr %lu off %lu: no linear view and no CPU copy (buffer %lu B) -> nil",
               (unsigned long)d.width, (unsigned long)d.height, (unsigned long)bpr, (unsigned long)offset, (unsigned long)_b.size);
         return nil; }
