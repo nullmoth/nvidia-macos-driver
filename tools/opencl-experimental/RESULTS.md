@@ -41,7 +41,7 @@ The three totals average 315,131; their range is 0.79% of that mean. This is rep
 - Metal-first and OpenCL-first initialization both passed the dual-backend fixture, with the selected settings preserved and the expected separate installed/private libraries loaded.
 - All three final benchmark runs completed all 11 workloads, exited normally with status 0, and passed runtime image identity, kernel-fault, and unchanged-system checks. The test monitor detected no competing GPU benchmark workload. Display activity was 0 flips/s during these runs.
 - The installed-package run completed in 123.343 seconds with 121 GPU clock observations. The package launcher, actual loaded copies, and process/environment contract were checked, rather than relying only on a build-directory run.
-- The actual installed shortcut successfully launched the original GUI with the intended private OpenCL route. The GUI benchmark button and helper inheritance have not been exercised because the desktop was locked. The reported performance results are CLI results; ordinary Finder launch continues to use the installed global environment.
+- The actual installed shortcut successfully launched the original GUI with the intended private OpenCL route. At that point the GUI benchmark was still untested. The subsequent completed GUI run below validates the benchmark and helper runtime inheritance; the three results above remain CLI results. Ordinary Finder launch continues to use the installed global environment.
 
 ### Clock observations and limits
 
@@ -78,3 +78,38 @@ Private NVK       7638e1919a5150438a62693ac5bdf57dbe5738676b870ff5e1024fce873600
 The original application, installed NVMTL/Metal driver, installed NVK, nvrm610.conf, system OpenCL framework and security settings were preserved. The private NVK is qualified for this process-local Vulkan/OpenCL route and must not be represented as a tested replacement for the global NVMTL bundle. The private build also uses a different LLVM/Rust toolchain from the release binary, so comparisons against the release binary are not same-compiler comparisons.
 
 Only normal public result links are included here. Raw logs can contain private Geekbench claim links and local machine paths; those should not be published unchanged.
+
+## Subsequent user-run GUI benchmark
+
+The user launched the installed v2 shortcut and completed the benchmark in the
+original Geekbench GUI: **325,451 OpenCL**, **225,757 Path Tracer**,
+[public result 401170](https://browser.geekbench.com/v7/gpu/401170).
+The public page identifies Geekbench 7.1.0 macOS AVX2, clvk, RTX 5090
+(NVK GB202-A), and 170 compute units.
+
+| Workload | GUI score |
+| --- | ---: |
+| Background Blur | 129,574 |
+| Face Tracking | 200,356 |
+| Super Resolution | 245,724 |
+| Horizon Detection | 429,527 |
+| Photo Filter | 451,415 |
+| Video Filter | 431,230 |
+| RAW | 541,678 |
+| Feature Matching | 520,285 |
+| Path Tracer | 225,757 |
+| Particle Physics | 404,882 |
+| Fluid Simulation | 315,751 |
+
+The launcher record identifies GUI mode and the same exact experiment profile.
+The GUI log records benchmark completion and successful upload to 401170.
+Dynamic-loader records show the private OpenCL framework and private NVK in
+both the GUI process and its benchmark child; the GUI also loaded the installed
+Metal backend. The three payload hashes still match the qualified manifest, and
+the clvk error log is empty. Raw logs are kept private.
+
+This closes the previously stated GUI execution/helper-runtime gap for this run.
+It is one manual GUI run: no concurrent clock sampler, workload-overlap monitor
+or kernel-fault monitor was attached, so the earlier CLI monitoring claims do
+not extend to it. There is no controlled-condition speedup claim relative to the
+CLI runs, and neither broad conformance nor long-term GUI stability is claimed.

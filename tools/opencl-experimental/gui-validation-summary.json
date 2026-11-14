@@ -1,0 +1,15 @@
+{
+  "scope": "Completed manual GUI run; not equivalent to the instrumented CLI qualification",
+  "public_result": "https://browser.geekbench.com/v7/gpu/401170",
+  "score": 325451,
+  "path_tracer": 225757,
+  "all_11_workloads_present": true,
+  "launcher_mode": "gui",
+  "same_qualified_payload_hashes": true,
+  "same_experiment_config": true,
+  "gui_completion_and_upload_log": true,
+  "gui_and_benchmark_child_private_runtime_loads": true,
+  "clvk_error_log_empty": true,
+  "concurrent_clock_fault_overlap_monitoring": false,
+  "ordinary_finder_launch_tested": false
+}

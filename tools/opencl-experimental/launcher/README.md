@@ -55,10 +55,12 @@ benchmark verifier. The macOS environment opt-in is confined to the child
 process. Close the launched application and use the original app icon to return
 to the installed OpenCL path.
 
-The published scores are CLI measurements. GUI startup and both Metal/OpenCL
-initialization orders were validated. Starting and completing the benchmark
-from the GUI, including any helper-process environment inheritance, remains
-untested. Broad OpenCL conformance and other GPUs/macOS versions are not claimed.
+The three original published scores are CLI measurements. A subsequent manual
+GUI benchmark completed at 325,451 (result 401170); loader records confirm the
+private OpenCL/NVK libraries in its benchmark child. Both Metal/OpenCL
+initialization orders were also validated. That manual GUI run had no concurrent
+clock/fault/overlap monitor. Broad OpenCL conformance, long-term GUI stability
+and other GPUs/macOS versions are not claimed.
 
 The portable CPU contracts use temporary synthetic files and mocked signing
 responses; they do not launch an app or touch the GPU:

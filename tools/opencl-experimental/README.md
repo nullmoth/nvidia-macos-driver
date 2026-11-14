@@ -2,7 +2,8 @@
 
 This source reference captures the private clvk/NVK configuration that completed
 Geekbench 7 OpenCL runs at **313,622, 316,116 and 315,656** on an RTX 5090.
-The last result came from the installed user package. All eleven workload scores,
+The last CLI result came from the installed user package. A subsequent completed
+GUI run scored **325,451** (Path Tracer **225,757**). All eleven workload scores,
 the control experiments, clock observations and validation limits are in
 [RESULTS.md](RESULTS.md).
 
@@ -67,10 +68,11 @@ Its LLVM/Rust toolchain differs from the release build. The device's 170 compute
 units were verified before enabling the corresponding clvk override; this is not
 a suitable unconditional setting for other cards.
 
-The GUI launched with the intended libraries, but an actual GUI benchmark and
-helper inheritance were not tested because the desktop was locked. Three runs on
-one card do not establish long-term or multi-device stability. Approximately 1 Hz
-clock samples do not establish the cause of an earlier Path Tracer outlier.
+The subsequent GUI benchmark completed and its benchmark child loaded the
+intended private libraries. Three CLI runs and one manual GUI run on one card
+do not establish long-term or multi-device stability. The GUI run had no
+concurrent clock/fault/overlap monitor. Approximately 1 Hz samples from the CLI
+runs do not establish the cause of an earlier Path Tracer outlier.
 
 No proprietary Geekbench files, compiled drivers, caches, raw claim links or
 machine-specific logs are included. Source patches retain their upstream project
