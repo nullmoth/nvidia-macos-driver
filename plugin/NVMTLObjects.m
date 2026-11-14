@@ -241,10 +241,18 @@ static void nvmtl_conf_settle(void)
     done = 1;
     unsigned forgot = nvmtl_conf_forget_inherited();
     const char *me = getprogname();
-    // The main bundle's identifier; a process outside any bundle has none and gets no profile.
+    // The main bundle's identifier, including a bundled CLI in Contents/Resources.
     char bid[256] = "";
     { CFBundleRef mb = CFBundleGetMainBundle(); CFStringRef s = mb ? CFBundleGetIdentifier(mb) : NULL;
       if (s && !CFStringGetCString(s, bid, sizeof bid, kCFStringEncodingUTF8)) bid[0] = 0; }
+    if (!bid[0]) {
+        char path[PROC_PIDPATHINFO_MAXSIZE], root[PROC_PIDPATHINFO_MAXSIZE];
+        if (proc_pidpath(getpid(), path, sizeof path) > 0 && nvmtl_app_bundle_path(path, root, sizeof root)) {
+            NSString *identifier = [NSBundle bundleWithPath:@(root)].bundleIdentifier;
+            const char *value = identifier.UTF8String;
+            if (value && strlen(value) < sizeof bid) strcpy(bid, value);
+        }
+    }
     const nvmtl_app_profile *p = nvmtl_app_profile_for(me, bid, getenv("NVMTL_APP_PROFILE"));
     nvmtl_profile_ctx ctx = { p, 0 };
     for (unsigned i = 0; p && i < p->nknobs && i < 64; i++) if (getenv(p->knobs[i].key)) ctx.envBits |= 1ull << i;
