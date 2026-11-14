@@ -5169,12 +5169,29 @@ IODeviceMemory *NVRMNVDAFramebuffer::getVRAMRange()
             addr64_t pa = m->getPhysicalSegment(0, 0, kIOMemoryMapperNone);
             IOByteCount len = m->getLength();
             if (target < (NvU64)pa || target >= ((NvU64)pa + len)) continue;
-            m->retain();
+            // The range handed back here is mapped WHOLE, more than once: IOGraphicsAccelerator2::find_vram_descriptor
+            // maps it into the kernel (map(kIOMapAnywhere)) on every display event until a map succeeds, every
+            // IOAccelSurface maps it into its owner task (reset_access), and IOFramebuffer::doSetup publishes its
+            // length as the 32-bit IOFBMemorySize. Apple's framebuffers return a VRAM aperture of a few hundred MB.
+            // The whole BAR is not an answer with a resizable BAR: at 8 GB the 32-bit IOFBMemorySize truncates to 0 and
+            // the kernel map of the range does not succeed, which on macOS 27 stops the machine when WindowServer connects.
+            // So this hands back an aligned window of kVramWindow bytes inside the BAR that contains the scanout.
+            static const NvU64 kVramWindow = 256ull << 20;   // chosen: a classic 256 MB BAR1 aperture
+            const NvU64 off  = target - (NvU64)pa;
+            const NvU64 need = (NvU64)fPitch * fH + 128;     // the scanout, as getApertureRange sizes it
+            NvU64 base = off & ~(kVramWindow - 1);
+            NvU64 win  = kVramWindow;
+            if (off + need > base + win) win = ((off + need - base) + (1ull << 20) - 1) & ~((1ull << 20) - 1);
+            if (base + win > len) win = len - base;
+            IOMemoryDescriptor *sub = (win == len && base == 0)
+                ? (m->retain(), (IOMemoryDescriptor *)m)
+                : IOSubMemoryDescriptor::withSubRange(m, (IOByteCount)base, (IOByteCount)win, kIODirectionNone);
+            if (!sub) break;   // fall back to the scanout aperture below rather than hand out the whole BAR
             if (fVramLogged < 3) { fVramLogged++;
-                FBLOGV("getVRAMRange -> WHOLE BAR%u pa 0x%llx len %llu (was the %llu-byte scanout subrange)",
-                      (unsigned)i, (unsigned long long)pa, (unsigned long long)len,
-                      (unsigned long long)((NvU64)fPitch * fH + 128)); }
-            return m;
+                FBLOG("getVRAMRange -> BAR%u window pa 0x%llx len %llu (BAR len %llu, scanout at +0x%llx)",
+                      (unsigned)i, (unsigned long long)(pa + base), (unsigned long long)win,
+                      (unsigned long long)len, (unsigned long long)(off - base)); }
+            return (IODeviceMemory *)sub;
         }
     }
     if (fVramLogged < 3) { fVramLogged++;
