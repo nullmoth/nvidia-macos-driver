@@ -292,8 +292,11 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
 } @end
 void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 #include <os/lock.h>
-@interface NVMTLResSet : NSMutableSet { @public NSMutableSet *_s; os_unfair_lock _lk; const void *_mru[8]; unsigned _mruNext; }
-- (NVMTLResSet *)nvmtlTakeAll;
+@interface NVMTLResSet : NSMutableSet { @public NSMutableSet *_s, *_readOnly; os_unfair_lock _lk; const void *_mru[8]; unsigned _mruNext; }
+- (void)addReadOnlyObject:(id)o;
+- (BOOL)isWrittenObject:(id)o;
+// Sealing transfers an owned set; it must not linger in the caller's autorelease pool.
+- (NVMTLResSet *)nvmtlTakeAll NS_RETURNS_RETAINED;
 @end
 @interface NVMTLFunction () { @public NSString *_label; } @end
 // machine code compiled ahead of time for this function (NVMTLSass.m), nil otherwise

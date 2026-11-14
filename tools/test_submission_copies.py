@@ -26,8 +26,16 @@ fixture = r'''
 #include <os/lock.h>
 #include "nvmtl_shared_wc.h"
 typedef struct { void *map; size_t size; } Buffer;
+// These fixtures use ordinary NSSet resources; unknown access stays writable.
+// The production resource-set implementation is exercised by test_readonly_copyback.py.
+@interface NVMTLResSet : NSSet
+- (BOOL)isWrittenObject:(id)object;
+@end
+@implementation NVMTLResSet
+- (BOOL)isWrittenObject:(id)object { return YES; }
+@end
 @interface NVMTLBuffer : NSObject { @public
-    void *_hostPtr; size_t _hostLen; Buffer _b, _shadow; unsigned _syncOut, _zshadow; void *_swc;
+    void *_hostPtr; size_t _hostLen; Buffer _b, _shadow; unsigned _syncOut, _zshadow; void *_swc; BOOL _texSeen;
 } @end
 @implementation NVMTLBuffer @end
 @interface NVMTLTexture : NSObject { @public

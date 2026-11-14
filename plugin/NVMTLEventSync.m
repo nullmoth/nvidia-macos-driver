@@ -411,7 +411,12 @@ static int nvmtl_skip_empty_on(void) {
     // completes, as Metal's do. WAS: only the part held them, so a texture the app had released died when that part
     // completed and the next dispatch wrote its destroyed image view (NVK abort in get_sampled_image_view_desc under
     // nvk_UpdateDescriptorSets: mediaanalysisd, Safari, wallpapers).
-    if (restart) for (id o in (NVMTLResSet *)part->resources) [(NVMTLResSet *)_resources addObject:o];
+    if (restart) {
+        NVMTLResSet *previous = (NVMTLResSet *)part->resources, *next = (NVMTLResSet *)_resources;
+        for (id o in previous) {
+            if ([previous isWrittenObject:o]) [next addObject:o]; else [next addReadOnlyObject:o];
+        }
+    }
     if (restart && nvmtl_vk_cmd_begin(&_queue->_q, &_c)) {
         _cbError = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorOutOfMemory
             userInfo:@{NSLocalizedDescriptionKey:@"Could not allocate recording after event boundary"}];
@@ -607,6 +612,7 @@ static void nvmtl_gsub_census(void) {
 // A texture over a copy-backed buffer must refresh the same bytes as a direct
 // buffer binding. Keep direct managed-buffer writeback and copy each backing once.
 static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL writtenOnly) {
+    NVMTLResSet *known = [resources isKindOfClass:[NVMTLResSet class]] ? (NVMTLResSet *)resources : nil;
     NSMutableSet<NVMTLBuffer *> *copies = nil;
     for (id resource in resources) {
         if ([resource isKindOfClass:[NVMTLHeapPin class]]) {   // a used heap: its members with a host copy
@@ -616,7 +622,12 @@ static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL wr
             continue;
         }
         NVMTLBuffer *buffer = nil;
-        if ([resource isKindOfClass:[NVMTLBuffer class]]) buffer = resource;
+        if ([resource isKindOfClass:[NVMTLBuffer class]]) {
+            NVMTLBuffer *candidate = resource;
+            // Managed shadows and texture aliases retain their existing synchronization rules.
+            if (writtenOnly && candidate->_hostPtr && !candidate->_shadow.map && !candidate->_texSeen && known && ![known isWrittenObject:candidate]) continue;
+            buffer = candidate;
+        }
         else if ([resource isKindOfClass:[NVMTLTexture class]]) {
             NVMTLTexture *texture = resource;
             if (writtenOnly && texture->_usage != MTLTextureUsageUnknown &&
