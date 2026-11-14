@@ -1,6 +1,7 @@
 use super::*;
 mod air_calls;
 mod atomics;
+use atomics::{atomic_requested_scope, atomic_requested_semantics, AtomicRole};
 mod binary_ops;
 mod conversions;
 mod freeze_unary;

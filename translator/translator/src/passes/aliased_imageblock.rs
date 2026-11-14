@@ -87,8 +87,11 @@ pub(in crate::passes) fn lower_aliased_imageblock(
         let name = format!("air.load.implicit_imageblock.{}", plane.intrinsic_suffix);
         let args = plane_args(ctx, plane, coord);
         ctx.phase_value_types = Some(value_types);
-        let loaded =
-            air_calls::lower_implicit_imageblock_load(ctx, &name, texel, *member_ty, &args);
+        let loaded = if plane.explicit {
+            super::tile_explicit::load_member(ctx, plane, coord, *member_ty, texel)
+        } else {
+            air_calls::lower_implicit_imageblock_load(ctx, &name, texel, *member_ty, &args)
+        };
         value_types = ctx.phase_value_types.take().unwrap_or_default();
         preamble.extend(loaded?);
         preamble.push(Instruction::new(
@@ -112,7 +115,11 @@ pub(in crate::passes) fn lower_aliased_imageblock(
         let mut store_args = vec![value];
         store_args.extend(plane_args(ctx, plane, coord));
         ctx.phase_value_types = Some(value_types);
-        let stored = air_calls::lower_implicit_imageblock_store(ctx, &name, &store_args);
+        let stored = if plane.explicit {
+            super::tile_explicit::store_member(ctx, plane, coord, value, *member_ty)
+        } else {
+            air_calls::lower_implicit_imageblock_store(ctx, &name, &store_args)
+        };
         value_types = ctx.phase_value_types.take().unwrap_or_default();
         epilogue.extend(stored?);
     }

@@ -1228,6 +1228,9 @@ pub(in crate::passes) fn lower_simd_op(
     if name.starts_with("air.simd_shuffle_rotate_down.") && args.len() == 2 {
         return lower_simd_shuffle_rotate_down(ctx, res, rty, args).map(Some);
     }
+    if name.starts_with("air.simd_shuffle_rotate_up.") && args.len() == 2 {
+        return lower_simd_shuffle_rotate_up(ctx, res, rty, args).map(Some);
+    }
     if name.starts_with("air.simd_shuffle_and_fill_down.") && args.len() == 4 {
         return lower_simd_shuffle_and_fill_down(ctx, res, rty, args).map(Some);
     }
@@ -1284,6 +1287,9 @@ pub(in crate::passes) fn lower_simd_op(
     if name.starts_with("air.quad_shuffle_rotate_down.") && args.len() == 2 {
         return lower_quad_shuffle_rotate_down(ctx, res, rty, args).map(Some);
     }
+    if name.starts_with("air.quad_shuffle_rotate_up.") && args.len() == 2 {
+        return lower_quad_shuffle_rotate_up(ctx, res, rty, args).map(Some);
+    }
     if name.starts_with("air.quad_shuffle_up.") && args.len() == 2 {
         return lower_quad_shuffle_up(ctx, res, rty, args).map(Some);
     }
@@ -1308,6 +1314,18 @@ pub(in crate::passes) fn lower_simd_op(
     }
     if name.starts_with("air.simd_prefix_inclusive_sum.") && args.len() == 1 {
         return lower_simd_sum(ctx, res, rty, args[0], GroupOperation::InclusiveScan).map(Some);
+    }
+    if name.starts_with("air.simd_prefix_exclusive_product.") && args.len() == 1 {
+        return lower_simd_product(ctx, res, rty, args[0], GroupOperation::ExclusiveScan).map(Some);
+    }
+    if name.starts_with("air.simd_prefix_inclusive_product.") && args.len() == 1 {
+        return lower_simd_product(ctx, res, rty, args[0], GroupOperation::InclusiveScan).map(Some);
+    }
+    if name.starts_with("air.simd_product.") && args.len() == 1 {
+        return lower_simd_product(ctx, res, rty, args[0], GroupOperation::Reduce).map(Some);
+    }
+    if name.starts_with("air.quad_product.") && args.len() == 1 {
+        return lower_quad_product(ctx, res, rty, args[0]).map(Some);
     }
     if name.starts_with("air.simd_sum.") && args.len() == 1 {
         return lower_simd_sum(ctx, res, rty, args[0], GroupOperation::Reduce).map(Some);

@@ -189,13 +189,26 @@ options:
     let tmp = env::temp_dir().join(format!("metal2vulkan_{}", process::id()));
     let _ = fs::create_dir_all(&tmp);
 
-    let options = TransformOptions {
+    let mut options = TransformOptions {
         kernel_local_size,
         kernel_dispatch,
         raster_sample_count,
         vertex_amplification_count,
         ..TransformOptions::default()
     };
+    // METAL2VULKAN_TILE=<bits of metal2vulkan::tile_mode>: translate as a tile-shading driver does
+    if let Some(bits) = env::var("METAL2VULKAN_TILE").ok().and_then(|v| v.parse::<u32>().ok()) {
+        use metal2vulkan::tile_mode;
+        tile_mode::set_flags(bits);
+        // METAL2VULKAN_TILE_TG_OFFSETS=<byte offset of threadgroup(0)>,<of threadgroup(1)>,...
+        if let Ok(list) = env::var("METAL2VULKAN_TILE_TG_OFFSETS") {
+            let offsets: Vec<u32> = list.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            tile_mode::set_tg_offsets(&offsets);
+        }
+        if tile_mode::has(tile_mode::BAND) && fs::read_to_string(&src).is_ok_and(|text| tile_mode::mentions_imageblock(&text)) {
+            options.descriptor_layout = tile_mode::band_layout(options.descriptor_layout);
+        }
+    }
     let want_meta = emit_meta.is_some();
     let translated = match stage.as_str() {
         "passthrough" => translate_passthrough(&src, &tmp).map(|spv| (spv, None)),

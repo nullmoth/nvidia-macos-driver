@@ -112,7 +112,7 @@ fn role_of(node: &str) -> Result<(u32, Role), String> {
         }
         other => {
             return Err(format!(
-                "intersection function argument role {other} is not carried yet"
+                "unsupported intersection function argument role {other}: not carried yet"
             ))
         }
     };
@@ -365,14 +365,54 @@ pub fn rewrite_runtime_intersection_tables(
             .find('(')
             .map(|e| call_at + e)
             .ok_or("air.intersect call without arguments")?;
-        let tags = line[call_at + "@air.intersect.".len()..name_end].to_string();
+        let full_tags = line[call_at + "@air.intersect.".len()..name_end].to_string();
+        // A function-buffer query reads its function handles from the app's own buffer instead of a table object.
+        // Its query intrinsics carry no buffer tags, so it is reduced to the table form: the tags without the buffer
+        // markers, and the operands without the buffer's size, stride and per-ray data.
+        let is_buffer_query = full_tags.split('.').any(|t| t == "intersection_function_buffer");
+        let tags = if is_buffer_query {
+            full_tags
+                .split('.')
+                .filter(|t| !matches!(*t, "intersection_function_buffer" | "user_data"))
+                .collect::<Vec<_>>()
+                .join(".")
+        } else {
+            full_tags.clone()
+        };
         if tags.contains("motion") || tags.contains("curve") {
             return Err(format!(
                 "intersection tables: air.intersect.{tags} (motion / curve) is not carried yet"
             ));
         }
         let close = line.rfind(')').ok_or("air.intersect call unterminated")?;
-        let args = split_top(&line[name_end + 1..close]);
+        let mut args = split_top(&line[name_end + 1..close]);
+        let mut buffer_query: Option<(String, String)> = None;
+        if is_buffer_query {
+            let family = crate::meta::AirIntersectionFamily::parse(&format!("air.intersect.{full_tags}"))?
+                .ok_or("intersection function buffer call is not an air.intersect family")?;
+            if args.len() != family.argument_count() {
+                return Err(format!(
+                    "intersection function buffer: air.intersect.{full_tags} has {} operands, expected {}",
+                    args.len(),
+                    family.argument_count()
+                ));
+            }
+            let table = family.intersection_table_argument_index();
+            let value_of = |a: &String| a.split_whitespace().last().unwrap_or("").to_string();
+            if family.user_data && value_of(&args[table + 3]) != "null" {
+                return Err("unsupported intersection function buffer: per-ray user data is not carried yet".to_string());
+            }
+            buffer_query = Some((value_of(&args[table + 1]), value_of(&args[table + 2])));
+            let removed = family
+                .opaque_triangle_removed_argument_indices()
+                .ok_or("intersection function buffer family has no callback operands")?;
+            args = args
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| !removed.contains(i))
+                .map(|(_, a)| a)
+                .collect();
+        }
         if args.len() != 20 {
             return Err(format!(
                 "intersection tables: air.intersect.{tags} has {} operands, expected 20",
@@ -387,7 +427,8 @@ pub fn rewrite_runtime_intersection_tables(
             i += 1;
             continue;
         }
-        let fns = intersection_functions(candidates, &tags)?;
+        // Matched on the FULL tags: a function-buffer query's functions are declared with the buffer markers.
+        let fns = intersection_functions(candidates, &full_tags)?;
         // The payload is the ray's own scratch: the caller allocates it, every intersection function reads and
         // writes it, and the shading afterwards reads what they left. A ray that passes none is legal only when
         // no function asks for one - carrying a null pointer into a function that writes through it would
@@ -443,7 +484,16 @@ pub fn rewrite_runtime_intersection_tables(
         let members = result_members(ll, &ret_ty)?;
         let mut prologue = Vec::new();
         let inline = emit_inline(
-            &prefix, &res, &ret_ty, &members, &tags, &args, &fns, &mut declares, &mut prologue,
+            &prefix,
+            &res,
+            &ret_ty,
+            &members,
+            &tags,
+            &args,
+            &fns,
+            buffer_query.as_ref(),
+            &mut declares,
+            &mut prologue,
         )?;
         if !prologue.is_empty() {
             // After the define, and after a leading label if the body has one: an instruction placed BEFORE
@@ -658,12 +708,16 @@ fn emit_inline(
     tags: &str,
     args: &[String],
     fns: &[IsectFn],
+    buffer_query: Option<&(String, String)>,
     declares: &mut Vec<String>,
     // Lines the caller puts at the top of the function's first block. A slot has to be declared there: an
     // alloca in a block the traversal loop re-enters is a new variable each time round, and the emitter puts
     // its OpVariable where it finds it, which is not where SPIR-V allows one.
     prologue: &mut Vec<String>,
 ) -> Result<String, String> {
+    if buffer_query.is_some() && fns.iter().any(|f| f.params.iter().any(|(_, r)| matches!(r, Role::Buffer(_)))) {
+        return Err("unsupported intersection function buffer: a function reads a [[buffer]] argument, which a function buffer record does not carry".to_string());
+    }
     let q = |f: &str| format!("@air.{f}_intersection_query.{tags}");
     let get = |what: &str, ty: &str, committed: bool, decl: &mut Vec<String>| -> String {
         let g = format!(
@@ -711,6 +765,20 @@ fn emit_inline(
         "{p}.entry:\n  %{p}.q = call ptr {}()\n",
         q("allocate")
     ));
+    if buffer_query.is_some() {
+        // the committed hit's function_id (the intersection_result of a function-buffer query carries it). The slot is
+        // declared in the prologue for the same reason as the transform slots; it is zeroed here, once per query.
+        prologue.push(format!("  %{p}.fidslot = alloca i32, align 4"));
+        s.push_str(&format!("  store i32 0, ptr %{p}.fidslot, align 4\n"));
+    }
+    let record_fid = |s: &mut String| {
+        if buffer_query.is_some() {
+            s.push_str(&format!(
+                "  %{p}.fid32.{0} = trunc i64 %{p}.fid to i32\n  store i32 %{p}.fid32.{0}, ptr %{p}.fidslot, align 4\n",
+                s.len()
+            ));
+        }
+    };
     s.push_str(&format!(
         "  %{p}.asaddr = ptrtoint {} to i64\n",
         named(4)
@@ -752,17 +820,27 @@ fn emit_inline(
         "  {b} = and i32 {sbt}, 8388607\n  {f} = lshr i32 {sbt}, 23\n  {g} = mul i32 {f}, {geo}\n  {sl} = add i32 {b}, {g}\n",
         b = x("base"), sbt = x("sbt"), f = x("addg"), g = x("gadd"), geo = x("geo"), sl = x("slot")
     ));
-    s.push_str(&format!(
-        "  {} = add i32 {}, {TABLE_BUFFERS}\n  {} = zext i32 {} to i64\n",
-        x("slotw"),
-        x("slot"),
-        x("slot64"),
-        x("slotw")
-    ));
-    s.push_str(&format!(
-        "  {} = getelementptr i64, ptr addrspace(1) {}, i64 {}\n  {} = load i64, ptr addrspace(1) {}, align 8\n",
-        x("idp"), names[6].1, x("slot64"), x("fid"), x("idp")
-    ));
+    if let Some((size, stride)) = buffer_query {
+        // record `slot` of the app's function buffer starts with the function's handle (8 bytes); a record past the
+        // buffer's size selects no function, which commits the hit as opaque
+        s.push_str(&format!(
+            "  {slot64} = zext i32 {slot} to i64\n  {off} = mul i64 {slot64}, {stride}\n  {end} = add i64 {off}, 8\n  {inb} = icmp ule i64 {end}, {size}\n  {offc} = select i1 {inb}, i64 {off}, i64 0\n  {idp} = getelementptr i8, ptr addrspace(1) {table}, i64 {offc}\n  {raw} = load i64, ptr addrspace(1) {idp}, align 4\n  {fid} = select i1 {inb}, i64 {raw}, i64 0\n",
+            slot64 = x("slot64"), slot = x("slot"), off = x("recoff"), end = x("recend"), inb = x("recin"),
+            offc = x("recoffc"), idp = x("idp"), table = names[6].1, raw = x("fidraw"), fid = x("fid"),
+        ));
+    } else {
+        s.push_str(&format!(
+            "  {} = add i32 {}, {TABLE_BUFFERS}\n  {} = zext i32 {} to i64\n",
+            x("slotw"),
+            x("slot"),
+            x("slot64"),
+            x("slotw")
+        ));
+        s.push_str(&format!(
+            "  {} = getelementptr i64, ptr addrspace(1) {}, i64 {}\n  {} = load i64, ptr addrspace(1) {}, align 8\n",
+            x("idp"), names[6].1, x("slot64"), x("fid"), x("idp")
+        ));
+    }
     s.push_str(&format!(
         "  {} = icmp eq i32 {}, 2\n  br i1 {}, label %{p}.box, label %{p}.tri\n",
         x("isbox"),
@@ -788,7 +866,11 @@ fn emit_inline(
     }
     s.push_str(" ]\n");
     s.push_str(&format!(
-        "{p}.tri_commit:\n  call void @air.commit_triangle_intersection_intersection_query.{tags}(ptr %{p}.q)\n  br label %{p}.loop\n"
+        "{p}.tri_commit:\n"
+    ));
+    record_fid(&mut s);
+    s.push_str(&format!(
+        "  call void @air.commit_triangle_intersection_intersection_query.{tags}(ptr %{p}.q)\n  br label %{p}.loop\n"
     ));
     for f in boxes.iter().chain(tris.iter()) {
         let lbl = format!("{p}.{}{}", if f.bounding_box { "box" } else { "tri" }, f.id);
@@ -874,6 +956,7 @@ fn emit_inline(
             s.push_str(&format!(
                 "  br i1 %{lbl}.ok, label %{lbl}.commit, label %{p}.loop\n{lbl}.commit:\n"
             ));
+            record_fid(&mut s);
             s.push_str(&format!(
                 "  call void @air.commit_bounding_box_intersection_intersection_query.{tags}(ptr %{p}.q, float %{lbl}.t)\n  br label %{p}.loop\n"
             ));
@@ -894,8 +977,10 @@ fn emit_inline(
             s.push_str(&format!(
                 "  br i1 %{lbl}.acc, label %{lbl}.commit, label %{lbl}.skip\n"
             ));
+            s.push_str(&format!("{lbl}.commit:\n"));
+            record_fid(&mut s);
             s.push_str(&format!(
-                "{lbl}.commit:\n  call void @air.commit_triangle_intersection_intersection_query.{tags}(ptr %{p}.q)\n  br label %{lbl}.skip\n"
+                "  call void @air.commit_triangle_intersection_intersection_query.{tags}(ptr %{p}.q)\n  br label %{lbl}.skip\n"
             ));
             s.push_str(&format!(
                 "{lbl}.skip:\n  br i1 %{lbl}.go, label %{p}.loop, label %{p}.done\n"
@@ -915,15 +1000,20 @@ fn emit_inline(
     // Nine members is the plain intersection_result. A query tagged triangle_data returns eight more, the
     // columns of the two instance transforms: the shader converter names them itself in the kernels this was
     // read from - world_to_object[0..3] at 9..12, then object_to_world[0..3] at 13..16.
+    // A function-buffer query's result has one more member, function_id, between the user instance id and the
+    // barycentrics; every member from the barycentrics on moves up by one.
     const TRANSFORMS: [(&str, usize); 2] = [("world_to_object_transform", 9), ("object_to_world_transform", 13)];
-    if members.len() != 9 && members.len() != 17 {
+    let with_function_id = buffer_query.is_some() && matches!(members.len(), 10 | 18);
+    let shift = usize::from(with_function_id);
+    let plain = members.len() - shift;
+    if plain != 9 && plain != 17 {
         return Err(format!(
             "intersection tables: result {ret_ty} has {} members, not the 9 of intersection_result or the 17 of one carrying both instance transforms",
             members.len()
         ));
     }
-    if members.len() == 17 {
-        if let Some(bad) = members[9..].iter().find(|m| m.trim() != "<3 x float>") {
+    if plain == 17 {
+        if let Some(bad) = members[9 + shift..].iter().find(|m| m.trim() != "<3 x float>") {
             return Err(format!(
                 "intersection tables: result {ret_ty} member {bad} is not a transform column"
             ));
@@ -936,10 +1026,16 @@ fn emit_inline(
         ("geometry_id", 3),
         ("instance_id", 5),
         ("user_instance_id", 6),
-        ("triangle_barycentric_coord", 7),
-        ("triangle_front_facing", 8),
+        ("triangle_barycentric_coord", 7 + shift),
+        ("triangle_front_facing", 8 + shift),
     ];
     let mut agg = "undef".to_string();
+    if with_function_id {
+        s.push_str(&format!(
+            "  %{p}.cfid = load i32, ptr %{p}.fidslot, align 4\n  %{p}.aggf = insertvalue {ret_ty} {agg}, i32 %{p}.cfid, 7\n"
+        ));
+        agg = format!("%{p}.aggf");
+    }
     for (k, (what, slot)) in comm.iter().enumerate() {
         s.push_str(&format!(
             "  %{p}.c{k} = {}\n",
@@ -951,8 +1047,8 @@ fn emit_inline(
         ));
         agg = format!("%{p}.agg{k}");
     }
-    if members.len() == 17 {
-        let column = members[9].trim().to_string();
+    if plain == 17 {
+        let column = members[9 + shift].trim().to_string();
         let four = format!("{{ {column}, {column}, {column}, {column} }}");
         for (t, (what, first)) in TRANSFORMS.iter().enumerate() {
             s.push_str(&format!(
@@ -965,7 +1061,7 @@ fn emit_inline(
                 ));
                 s.push_str(&format!(
                     "  %{p}.tagg{t}{c} = insertvalue {ret_ty} {agg}, {column} %{p}.m{t}c{c}, {}\n",
-                    first + c
+                    first + shift + c
                 ));
                 agg = format!("%{p}.tagg{t}{c}");
             }
@@ -1117,5 +1213,49 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("payload but the ray passes none"), "{err}");
+    }
+
+    const KERNEL_IFB: &str = r#"define void @k(ptr addrspace(1) %0, ptr addrspace(1) %1, ptr addrspace(1) %2) {
+  %4 = tail call { i32, float, i32, i32, ptr addrspace(1), i32, i32, i32, <2 x float>, i1 } @air.intersect.intersection_function_buffer.instancing.triangle_data(<3 x float> zeroinitializer, <3 x float> <float 0.000000e+00, float 0.000000e+00, float 1.000000e+00>, float 0.000000e+00, float 1.000000e+01, ptr addrspace(1) readonly %0, i32 255, ptr addrspace(1) readonly %2, i64 4096, i64 64, ptr null, i64 0, i32 0, i32 0, i32 0, i32 0, i32 0, i32 3, i32 -1, i32 -1, i32 0, i1 false, i1 false, i1 false, i1 false) #1
+  %5 = extractvalue { i32, float, i32, i32, ptr addrspace(1), i32, i32, i32, <2 x float>, i1 } %4, 1
+  store float %5, ptr addrspace(1) %1, align 4
+  ret void
+}
+"#;
+    const ALPHA_IFB: &str = r#"define i1 @alphaTestBuffer(i32 noundef %0, <2 x float> noundef %1) local_unnamed_addr #4 {
+  ret i1 true
+}
+!air.intersection = !{!46}
+!46 = !{ptr @alphaTestBuffer, !47, !49, !"air.triangle", !"air.intersection_function_buffer", !"air.instancing", !"air.triangle_data"}
+!47 = !{!48}
+!48 = !{!"air.accept_intersection", !"air.arg_type_name", !"bool"}
+!49 = !{!50, !51}
+!50 = !{i32 0, !"air.primitive_id", !"air.arg_type_name", !"uint", !"air.arg_name", !"prim"}
+!51 = !{i32 1, !"air.barycentric_coord", !"air.arg_type_name", !"float2", !"air.arg_name", !"bary", !"air.arg_unused"}
+"#;
+
+    #[test]
+    fn a_function_buffer_intersect_reads_its_handle_from_the_record_and_calls_the_linked_function() {
+        let cands = vec![("alphaTestBuffer".to_string(), ALPHA_IFB.to_string())];
+        let out = rewrite_runtime_intersection_tables(KERNEL_IFB, "k", &cands).unwrap();
+        assert!(!out.contains("@air.intersect."), "{out}");
+        assert!(out.contains("mul i64 %ift0.slot64, 64"), "the record stride: {out}");
+        assert!(out.contains("icmp ule i64 %ift0.recend, 4096"), "the buffer size bounds the read: {out}");
+        assert!(out.contains("i64 1, label %ift0.tri1"), "handle 1 is the first linked function: {out}");
+        assert!(out.contains("call i1 @alphaTestBuffer("), "{out}");
+        assert!(out.contains("store i32 %ift0.fid32."), "the committed function id is recorded: {out}");
+        assert!(out.contains("insertvalue { i32, float, i32, i32, ptr addrspace(1), i32, i32, i32, <2 x float>, i1 } undef, i32 %ift0.cfid, 7"), "{out}");
+        assert!(out.contains("@air.reset_intersection_query.instancing.triangle_data"), "no buffer tags on the query: {out}");
+    }
+
+    #[test]
+    fn a_function_buffer_with_per_ray_user_data_is_refused_by_name() {
+        let k = KERNEL_IFB
+            .replace("intersection_function_buffer.instancing.triangle_data(", "intersection_function_buffer.instancing.triangle_data.user_data(")
+            .replace("i64 64, ptr null", "i64 64, ptr addrspace(1) %1, ptr null")
+            .replace("i1 false, i1 false, i1 false, i1 false)", "i1 false, i1 false, i32 0, i32 0)");
+        let cands = vec![("alphaTestBuffer".to_string(), ALPHA_IFB.to_string())];
+        let err = rewrite_runtime_intersection_tables(&k, "k", &cands).unwrap_err();
+        assert!(err.contains("unsupported intersection function buffer"), "{err}");
     }
 }

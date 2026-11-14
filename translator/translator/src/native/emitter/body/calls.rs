@@ -971,6 +971,21 @@ impl Emitter {
         let LlValue::Local(arg_name) = &arg.value else {
             return Ok(None);
         };
+        // A cast of a buffer-array kernel argument (MPS NDArrayVectorMatrixMultiply:
+        // `addrspacecast ptr %buffers to ptr addrspace(1)`, handed to a helper) keeps the argument's raw
+        // offset in the generic space, so the device-space branch below skipped it and the helper received the
+        // argument's private pointer where it expects a device address. The cast's own address is exact.
+        if self.bda_device_pointers {
+            let raw_is_device = self
+                .raw_offsets
+                .get(arg_name)
+                .is_some_and(|raw| matches!(raw.addrspace, 1 | 2) && !raw.unmodelable);
+            if !raw_is_device {
+                if let Some(address) = self.bda_direct_addresses.get(arg_name).copied() {
+                    return Ok(Some(address));
+                }
+            }
+        }
         let Some(raw) = self.raw_offsets.get(arg_name).cloned() else {
             return Ok(None);
         };

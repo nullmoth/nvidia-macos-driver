@@ -59,6 +59,9 @@ pub(super) fn parse_function_header(head: &str) -> Result<LlFunction, String> {
     let close = matching_paren(head, open)
         .ok_or_else(|| format!("native emitter: unmatched params in define: {head}"))?;
     let ret = parse_return_type(&head["define".len()..at])?;
+    let is_internal = head["define".len()..at]
+        .split_whitespace()
+        .any(|word| matches!(word, "internal" | "private"));
     let (params, byval_param_pointees) = parse_params(&head[open + 1..close])?;
     let is_static_initializer =
         crate::air_static_init::tail_declares_static_init_section(&head[close + 1..]);
@@ -68,6 +71,7 @@ pub(super) fn parse_function_header(head: &str) -> Result<LlFunction, String> {
         params,
         byval_param_pointees,
         is_static_initializer,
+        is_internal,
         blocks: Vec::new(),
         loop_controls: crate::fxhash::HashMap::default(),
     })

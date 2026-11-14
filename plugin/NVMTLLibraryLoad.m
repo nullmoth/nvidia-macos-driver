@@ -9,6 +9,7 @@
 #include <sys/time.h>
 #include <dirent.h>
 #import "NVMTLObjects.h"
+#import "nvmtl4_codec.h"
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include <spawn.h>
@@ -23,7 +24,20 @@ extern char **environ;
 void nvlog(const char *fmt, ...);
 
 #import <CommonCrypto/CommonDigest.h>
-#define NVMTL_AIR_OPT   "/Library/GPUBundles/nvmtl/air-opt"
+// The out-of-process AIR decoder: nvmtl-air-dis (plugin/air_dis.c) beside this plugin, built on the same upstream LLVM as the
+// in-process reader (air-runtime/libLLVM.dylib). Earlier packages ran a copy of the Metal toolchain's air-opt from
+// /Library/GPUBundles/nvmtl; that program is not ours to redistribute and is no longer looked for.
+static const char *nvmtl_air_dis_path(void) {
+    static char path[PATH_MAX]; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Dl_info info;
+        if (dladdr((const void *)&nvmtl_air_dis_path, &info) && info.dli_fname) {
+            NSString *p = [[@(info.dli_fname) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"nvmtl-air-dis"];
+            strlcpy(path, p.fileSystemRepresentation, sizeof path);
+        }
+    });
+    return path[0] ? path : NULL;
+}
 #include <unistd.h>
 static inline const char *nvmtl_pick_ll(const char *staged, const char *dev) {
     return access(staged, R_OK) == 0 ? staged : dev;
@@ -49,6 +63,13 @@ static nvmtl_lower_ex_fn xlate_lower_ex;
 typedef int (*nvmtl_to_uniform_fn)(const uint8_t *, size_t, uint8_t **, size_t *, char *, size_t);
 static nvmtl_to_uniform_fn xlate_to_uniform;   /* the table of an unlowered module moved to a Uniform block */
 static nvmtl_translate_fn xlate;
+/* Tile shading switches (translator tile_mode): the device's, set once, and the calling thread's, set around the
+   translation of a tile function (NVMTLTile.m). NULL when the translator predates them. */
+typedef void (*nvmtl_tile_flags_fn)(uint32_t);
+static nvmtl_tile_flags_fn xlate_tile_flags, xlate_tile_defaults;
+static void (*xlate_tile_tg_offsets)(const uint32_t *, uint32_t);
+static __thread uint32_t g_tile_xlate_flags;   /* part of every variant cache key while non-zero */
+static __thread uint32_t g_tile_xlate_offsets[32];   /* byte offsets of the threadgroup arguments in tile memory (flag 8), likewise */
 #include "nvmtl_spvcache_name.h"
 // The cache tag: the translator build (sha256-<64 hex>, 71 characters) plus every mode suffix. This buffer was 80 bytes,
 // so a tag with -u2 and -p5 had room for only "-a" of "-as1", and any suffix after it was silently dropped: entries
@@ -168,6 +189,12 @@ static int nvmtl_xlate_ready(void) {
         { extern int nvmtl_typed_dummies_wanted(void);
           if (setcaps) setcaps(3u | 4u | (nvmtl_typed_dummies_wanted() ? 8u : 0u)); }
         if (!setcaps) nvlog("translate: no nvmtl_translate_set_caps in this translator — written textures stay R32f-declared (one channel)");
+        xlate_tile_flags = (nvmtl_tile_flags_fn)dlsym(h, "nvmtl_translate_set_tile_flags");
+        xlate_tile_defaults = (nvmtl_tile_flags_fn)dlsym(h, "nvmtl_translate_set_tile_defaults");
+        xlate_tile_tg_offsets = (void (*)(const uint32_t *, uint32_t))dlsym(h, "nvmtl_translate_set_tile_tg_offsets");
+        if (xlate_tile_defaults && xlate_tile_flags) xlate_tile_defaults(3u);   /* planes in the storage band, no pixel interlock */
+        else { xlate_tile_flags = xlate_tile_defaults = NULL;
+               nvlog("translate: no nvmtl_translate_set_tile_flags in this translator - tile functions and imageblocks are unsupported"); }
         if (!xlate) { nvlog("translate: no nvmtl_translate symbol"); return; }
         nvlog("translate: in-process AIR->SPIR-V library loaded");
     });
@@ -572,25 +599,29 @@ static BOOL nvmtl_run_air_opt(const char *input, const char *output) {
     rc = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
     if (!rc) rc = posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
     pid_t child = -1;
-    char *argv[] = { NVMTL_AIR_OPT, "-S", (char *)input, "-o", (char *)output, NULL };
-    if (!rc) rc = posix_spawn(&child, NVMTL_AIR_OPT, &actions, NULL, argv, environ);
+    const char *tool = nvmtl_air_dis_path();
+    if (!tool) { posix_spawn_file_actions_destroy(&actions); nvlog("library: nvmtl-air-dis not found beside the plugin"); return NO; }
+    char *argv[] = { (char *)tool, "-S", (char *)input, "-o", (char *)output, NULL };
+    // an empty environment: the tool needs none, and the caller's DYLD_ and other variables are not handed on
+    char *noenv[] = { NULL };
+    if (!rc) rc = posix_spawn(&child, tool, &actions, NULL, argv, noenv);
     posix_spawn_file_actions_destroy(&actions);
-    if (rc) { nvlog("library: air-opt spawn failed: %s", strerror(rc)); return NO; }
+    if (rc) { nvlog("library: nvmtl-air-dis spawn failed: %s", strerror(rc)); return NO; }
     uint64_t deadline = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) + 20ull * 1000000000ull;
     int status = 0;
     for (;;) {
         pid_t result = waitpid(child, &status, WNOHANG);
         if (result == child) {
             if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return YES;
-            nvlog("library: air-opt failed (wait status %d)", status); return NO;
+            nvlog("library: nvmtl-air-dis failed (wait status %d)", status); return NO;
         }
         if (result < 0 && errno != EINTR) {
-            nvlog("library: air-opt wait failed: %s", strerror(errno)); return NO;
+            nvlog("library: nvmtl-air-dis wait failed: %s", strerror(errno)); return NO;
         }
         if (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) >= deadline) {
             kill(child, SIGKILL);
             while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-            nvlog("library: air-opt exceeded 20-second limit"); return NO;
+            nvlog("library: nvmtl-air-dis exceeded 20-second limit"); return NO;
         }
         usleep(10000);
     }
@@ -720,6 +751,7 @@ static void nvmtl_llvm_diagnostic(void *diagnostic, void *context) {
     char *message = nvLLVMGetDiagInfoDescription(diagnostic);
     if (message) { nvlog("library: bitcode reader: %s", message); nvLLVMDisposeMessage(message); }
 }
+static void *gLLVMLib;   // the air-runtime libLLVM, once nvmtl_bitcode_reader_ready has opened it
 static BOOL nvmtl_bitcode_reader_ready(void) {
     static dispatch_once_t once; static BOOL ready;
     dispatch_once(&once, ^{
@@ -729,6 +761,7 @@ static BOOL nvmtl_bitcode_reader_ready(void) {
                          stringByAppendingPathComponent:@"air-runtime/libLLVM.dylib"];
         void *library = dlopen(path.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
         if (!library) { nvlog("library: in-memory bitcode reader unavailable: %s", dlerror()); return; }
+        gLLVMLib = library;
 #define NV_LLVM_LOAD(name) do { nv##name = (void *)dlsym(library, #name); if (!nv##name) { nvlog("library: bitcode reader missing " #name); return; } } while (0)
         NV_LLVM_LOAD(LLVMContextCreate);
         NV_LLVM_LOAD(LLVMContextDispose);
@@ -1732,13 +1765,18 @@ NSDictionary *nvmtl_air_names(NVMTLFunction *fn)
         NSString *ll = fn->_air, *fname = fn->_fname;
         if (!ll.length || !fname.length) return fn->_airNames;
         NSMutableDictionary *nodes = [NSMutableDictionary new];
+        // A name that is not a plain identifier (a linked function's "library::function") is written quoted in the
+        // module text. WAS: only the bare form was searched, so such a function had no names at all and every member
+        // of its buffers was reported with a guessed type; Apple's effects framework stops the app on one it cannot size.
         NSString *entryLine = nil; NSString *entryNeedle = [NSString stringWithFormat:@"@%@, ", fname];
+        NSString *quotedNeedle = [NSString stringWithFormat:@"@\"%@\", ", fname];
         NSArray *lines = [ll componentsSeparatedByString:@"\n"];
         for (NSString *line in lines) {
             if (![line hasPrefix:@"!"]) continue;
             NSRange eq = [line rangeOfString:@" = !{"]; if (eq.location == NSNotFound) continue;
             nodes[[line substringToIndex:eq.location]] = line;
             if (!entryLine && [line rangeOfString:entryNeedle].location != NSNotFound) entryLine = line;
+            else if (!entryLine && [line rangeOfString:quotedNeedle].location != NSNotFound) { entryLine = line; entryNeedle = quotedNeedle; }
         }
         if (!entryLine) { nvlog("air names: no entry node for %s", fname.UTF8String); return fn->_airNames; }
         NSRange nr = [entryLine rangeOfString:entryNeedle];
@@ -1756,6 +1794,8 @@ NSDictionary *nvmtl_air_names(NVMTLFunction *fn)
             if ([line rangeOfString:@"!\"air.buffer\""].location != NSNotFound || [line rangeOfString:@"!\"air.indirect_buffer\""].location != NSNotFound) kind = @"buffer";
             else if ([line rangeOfString:@"!\"air.texture\""].location != NSNotFound) kind = @"texture";
             else if ([line rangeOfString:@"!\"air.sampler\""].location != NSNotFound) kind = @"sampler";
+            // a tensor argument binds as a buffer (the tensor table entry) but reflects as a tensor, from its type name
+            else if ([line rangeOfString:@"!\"air.tensor\""].location != NSNotFound) kind = @"tensor";
             else continue;
             NSInteger loc = nvmtl_air_i32_after(line, @"air.location_index");
             NSString *name = nvmtl_air_quoted_after(line, @"air.arg_name", 0);
@@ -2102,8 +2142,10 @@ NSData *nvmtl_translate_variant_uncached(NVMTLFunction *fn, NSDictionary *states
 NSData *nvmtl_translate_variant(NVMTLFunction *fn, NSDictionary *states, NSDictionary *tgLen, NSString **err) {
     if (!states.count && !tgLen.count) return fn->_spirv;
     if (!fn->_air || !nvmtl_xlate_ready()) return nvmtl_translate_variant_uncached(fn,states,tgLen,err);
-    NSDictionary *config=@{@"stage":fn->_stage ?: @"",@"entry":fn->_fname ?: @"",
-        @"constants":fn->_fc ?: @{},@"samplers":states ?: @{},@"threadgroup":tgLen ?: @{}};
+    NSMutableDictionary *config=[@{@"stage":fn->_stage ?: @"",@"entry":fn->_fname ?: @"",
+        @"constants":fn->_fc ?: @{},@"samplers":states ?: @{},@"threadgroup":tgLen ?: @{}} mutableCopy];
+    if (g_tile_xlate_flags) config[@"tile"]=@(g_tile_xlate_flags);   // a tile function's variant is not the compute kernel's
+    if (g_tile_xlate_flags & 8u) config[@"tileoff"]=[NSData dataWithBytes:g_tile_xlate_offsets length:sizeof g_tile_xlate_offsets].description;
     NSData *json=[NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingSortedKeys error:NULL];
     NVMTLAirDigest *airDigest=nvmtl_air_state(fn->_air);
     if(!json || !airDigest)return nvmtl_translate_variant_uncached(fn,states,tgLen,err);
@@ -2364,7 +2406,9 @@ BOOL nvmtl_air_reads_function_table(NSString *air)
                   @"@air.set_buffer_intersection_function_table",
                   @"@air.set_intersection_function_table",
                   @"!\"air.visible_function_table\"",
-                  @"!\"air.intersection_function_table\""];
+                  @"!\"air.intersection_function_table\"",
+                  // Metal 4 intersection function buffers carry no table metadata, only the intrinsic
+                  @"air.intersect.intersection_function_buffer"];
     });
     for (NSString *f in forms)
         if ([air rangeOfString:f].location != NSNotFound) return YES;
@@ -2409,6 +2453,72 @@ static NSCache *nvmtl_link_failures(void) {
 }
 static id nvmtl_link_failure_key(NVMTLFunction *fn, NSDictionary *mods, NSArray *tc, NSDictionary *fc) {
     return @[fn->_air ?: @"", fn->_stage ?: @"", mods ?: @{}, tc ?: @[], fc ?: @{}];
+}
+#include "nvmtl_canon.h"
+// NVMTL_CANON=1: a kernel that calls visible functions directly is linked and reduced in LLVM (nvmtl_canon.h) instead of
+// by the translator's textual linker. Off by default until it is proven on the device; when it is on and fails for a
+// kernel, the reason is logged and that kernel takes the textual linker as before.
+static BOOL nvmtl_canon_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_CANON"); on = e && !strcmp(e, "1");
+        if (on) nvlog("link: NVMTL_CANON=1 - direct visible-function links are made in LLVM (pipeline %s)", NVMTL_CANON_PIPELINE);
+    }
+    return on == 1;
+}
+// The kernel linked with exactly the modules its references name (each distinct module once, in name order, so the
+// result does not depend on the order the kernel mentions them in), constants folded, inlined and reduced; nil with
+// the reason in *why.
+static NSString *nvmtl_canon_link(NVMTLFunction *fn, NSArray *refs, NSDictionary<NSString *, NSString *> *mods,
+                                  NSDictionary *fc, NSString **why)
+{
+    static nvmtl_canon_api api; static const char *missing; static BOOL loaded; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        if (!nvmtl_bitcode_reader_ready() || !gLLVMLib) return;
+        missing = nvmtl_canon_api_load(&api, gLLVMLib); loaded = !missing;
+    });
+    if (!loaded) {
+        *why = missing ? [NSString stringWithFormat:@"libLLVM has no %s", missing] : @"the air-runtime libLLVM is not loaded";
+        return nil;
+    }
+    NSMutableArray<NSString *> *names = [NSMutableArray new];
+    for (NSString *r in refs) if ([r isKindOfClass:[NSString class]] && mods[r] && ![names containsObject:r]) [names addObject:r];
+    [names sortUsingComparator:^NSComparisonResult(NSString *x, NSString *y) {   // byte order, as the offline replay
+        const int c = strcmp(x.UTF8String, y.UTF8String); return c < 0 ? NSOrderedAscending : c > 0 ? NSOrderedDescending : NSOrderedSame; }];
+    NSMutableArray<NSString *> *texts = [NSMutableArray new];
+    for (NSString *r in names) { NSString *t = mods[r]; BOOL dup = NO; for (NSString *u in texts) if ([u isEqualToString:t]) { dup = YES; break; } if (!dup) [texts addObject:t]; }
+    const size_t nm = texts.count;
+    const char **mt = calloc(nm ? nm : 1, sizeof *mt); size_t *ml = calloc(nm ? nm : 1, sizeof *ml);
+    nvmtl_canon_fc *cf = calloc(fc.count ? fc.count : 1, sizeof *cf);
+    NSMutableArray<NSData *> *keep = [NSMutableArray new];
+    if (!mt || !ml || !cf) { free(mt); free(ml); free(cf); *why = @"allocation failed"; return nil; }
+    for (size_t i = 0; i < nm; i++) { NSData *d = [texts[i] dataUsingEncoding:NSUTF8StringEncoding]; [keep addObject:d]; mt[i] = d.bytes; ml[i] = d.length; }
+    size_t nfc = 0;
+    for (NSString *ki in fc) {
+        NSArray *v = fc[ki];
+        if (![v isKindOfClass:[NSArray class]] || !v.count) continue;
+        NSMutableData *b = [NSMutableData dataWithLength:v.count];
+        for (NSUInteger j = 0; j < v.count; j++) ((uint8_t *)b.mutableBytes)[j] = (uint8_t)[v[j] unsignedCharValue];
+        [keep addObject:b];
+        cf[nfc++] = (nvmtl_canon_fc){ (uint32_t)ki.integerValue, (uint32_t)v.count, b.bytes };
+    }
+    NSData *kd = [fn->_air dataUsingEncoding:NSUTF8StringEncoding];
+    nvmtl_canon_stats st; char e[1024] = { 0 };
+    char *out = kd ? nvmtl_canon_run(&api, kd.bytes, kd.length, mt, ml, nm, cf, nfc, &st, e, sizeof e) : NULL;
+    free(mt); free(ml); free(cf);
+    if (!out) { *why = [NSString stringWithUTF8String:e[0] ? e : "no output"]; return nil; }
+    NSString *text = [NSString stringWithUTF8String:out];
+    api.DisposeMessage(out);
+    if (!text) { *why = @"the canonical module is not UTF-8"; return nil; }
+    FILE *lg = fopen(nvmtl_log_path(), "a");   // one line per link, past nvlog's per-site dedupe
+    if (lg) {
+        fprintf(lg, "pid %d NVMTL: link: \"%s\" canonicalized in LLVM: %u module(s) linked, %u reference(s) bound (%u with "
+                    "trailing arguments dropped), %u unbound, %u constant(s) folded, %u unfolded, %u function(s) inlined, "
+                    "%lu -> %lu B in %.0f ms\n", getpid(), fn->_fname.UTF8String, st.linked, st.bound, st.adapted, st.unbound,
+                st.folded, st.unfolded, st.inlined, (unsigned long)fn->_air.length, (unsigned long)text.length, st.ms);
+        fclose(lg);
+    }
+    return text;
 }
 id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, NSArray *dylibs, NSError **err)
 {
@@ -2552,6 +2662,7 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
     }
     NSMutableArray *tc = [NSMutableArray new];
     int rc;
+    NSString *canonLinked = nil;   // the LLVM link's result (NVMTL_CANON=1), nil when the textual linker ran
     if (usesTable) {
         for (id c in (lf.functions ?: @[])) {
             if (![c isKindOfClass:[NVMTLFunction class]] || !((NVMTLFunction *)c)->_air.length) {
@@ -2573,23 +2684,41 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
         nvlog("link: \"%s\" reads a visible function table - %lu table candidate(s), %zu direct reference(s)", fn->_fname.UTF8String, (unsigned long)tc.count, nr);
         rc = xlate_link_rt(fn->_air.UTF8String, fn->_stage.UTF8String, rs, rm, nr, cs, cm, tc.count, &out, &len, e, sizeof e);
         free(rs); free(rm); free(cs); free(cm);
-    } else
+    } else {
+        if (nvmtl_canon_on()) {   // NVMTL_CANON=1 only; with it unset this block is never entered
+            NSString *cwhy = nil;
+            canonLinked = nvmtl_canon_link(fn, refs, mods, fc, &cwhy);
+            if (!canonLinked) {
+                FILE *lg = fopen(nvmtl_log_path(), "a");
+                if (lg) { fprintf(lg, "pid %d NVMTL: link: \"%s\" canonicalization FAILED (%s) - the textual linker is used\n",
+                                  getpid(), fn->_fname.UTF8String, cwhy.UTF8String ?: "?"); fclose(lg); }
+            }
+        }
+        if (canonLinked) rc = 0;
+        else
     rc = xlate_link(fn->_air.UTF8String, fn->_stage.UTF8String, syms, mls, n, &out, &len, e, sizeof e);
+    }
     free(syms); free(mls);
+    if (!canonLinked)
     if (rc != 0 || !out) {
         NSString *why = [NSString stringWithFormat:@"\"%@\": %s", fn->_fname, e[0] ? e : "link failed"];
         [nvmtl_link_failures() setObject:why forKey:failKey];
         if (err) *err = nvmtl_link_err(why);
         return nil;
     }
-    NSString *linked = [[NSString alloc] initWithBytes:out length:(len && out[len-1] == 0) ? len - 1 : len encoding:NSUTF8StringEncoding];
+    NSString *linked = canonLinked;
+    if (!canonLinked) {
+    linked = [[NSString alloc] initWithBytes:out length:(len && out[len-1] == 0) ? len - 1 : len encoding:NSUTF8StringEncoding];
     xlate_free(out, len);
+    }
     if (!linked) { if (err) *err = nvmtl_link_err(@"linked AIR is not UTF-8"); return nil; }
     NSString *dumpDir = nvmtl_link_dump_dir();
     if (dumpDir) {
         NSString *dir = dumpDir;
         [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
         [fn->_air writeToFile:[dir stringByAppendingFormat:@"/%@.kernel.ll", fn->_fname] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        if (canonLinked) [linked writeToFile:[dir stringByAppendingFormat:@"/%@.canon.ll", fn->_fname] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        else
         [linked writeToFile:[dir stringByAppendingFormat:@"/%@.linked.ll", fn->_fname] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         for (NSString *nm in mods) [mods[nm] writeToFile:[dir stringByAppendingFormat:@"/mod.%@.ll", nm] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         nvlog("link: dumped to %s", dir.UTF8String);
@@ -2967,7 +3096,10 @@ static id<MTLVisibleFunctionTable> nvmtl_vft_new(MTLVisibleFunctionTableDescript
     for (NSUInteger k = 0; k < r.length; k++) [self setFragmentIntersectionFunctionTable:ts[k] atBufferIndex:r.location + k];
 }
 @end
-@interface NVMTLBinaryArchive : NSObject <MTLBinaryArchive> { @public NSMutableSet<NSString *> *_keys; NSString *_label; } @end
+// The archive keeps the pipeline keys (what FailOnBinaryArchiveMiss checks) and, with them, the metallib of every
+// library a recorded function came from, so a saved archive carries the AIR it was made from.
+@interface NVMTLBinaryArchive : NSObject <MTLBinaryArchive> { @public NSMutableSet<NSString *> *_keys; NSString *_label;
+  NSMutableDictionary<NSString *, NSData *> *_libs; NSMutableArray<NSDictionary *> *_records; } @end
 static uint64_t nvmtl_fnv64(const char *s) {
     uint64_t h = 1469598103934665603ull;
     for (; s && *s; s++) { h ^= (uint8_t)*s; h *= 1099511628211ull; }
@@ -2991,6 +3123,20 @@ NSString *nvmtl_archive_key_render(MTLRenderPipelineDescriptor *d) {
 - (id<MTLDevice>)device { return (id<MTLDevice>)gNVMTLMainDevice; }
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)l { _label = [l copy]; }
+- (void)nvmtlRecord:(NSString *)key functions:(NSArray *)fns {
+    @synchronized (self) {
+        if (!_libs) { _libs = [NSMutableDictionary new]; _records = [NSMutableArray new]; }
+        for (id f in fns) {
+            if (![f isKindOfClass:[NVMTLFunction class]]) continue;
+            NVMTLFunction *fn = f; NVMTLLibrary *lib = [fn->_lib isKindOfClass:[NVMTLLibrary class]] ? fn->_lib : nil;
+            NSData *raw = lib ? (lib->_raw.length ? lib->_raw : (lib->_rawPath ? [NSData dataWithContentsOfFile:lib->_rawPath] : nil)) : nil;
+            if (!raw.length) continue;
+            NSString *h = nv4_sha256hex(raw);
+            if (!_libs[h]) _libs[h] = raw;
+            [_records addObject:@{ @"key": key, @"library": h, @"function": fn->_fname ?: @"" }];
+        }
+    }
+}
 - (BOOL)nvmtlAdd:(NSString *)key what:(const char *)what error:(NSError **)err {
     if (!key) { if (err) *err = nvmtl_b41_err([NSString stringWithFormat:@"binary archive: %s names a function this driver did not make - not added", what]); return NO; }
     @synchronized (self) { [_keys addObject:key]; }
@@ -2998,14 +3144,19 @@ NSString *nvmtl_archive_key_render(MTLRenderPipelineDescriptor *d) {
     return YES;
 }
 - (BOOL)addComputePipelineFunctionsWithDescriptor:(MTLComputePipelineDescriptor *)d error:(NSError **)err {
-    return [self nvmtlAdd:nvmtl_archive_key_compute(d.computeFunction) what:"addComputePipelineFunctions" error:err];
+    NSString *k = nvmtl_archive_key_compute(d.computeFunction);
+    BOOL ok = [self nvmtlAdd:k what:"addComputePipelineFunctions" error:err];
+    if (ok) [self nvmtlRecord:k functions:@[d.computeFunction]];
+    return ok;
 }
 - (BOOL)addRenderPipelineFunctionsWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)err {
-    return [self nvmtlAdd:nvmtl_archive_key_render(d) what:"addRenderPipelineFunctions" error:err];
+    NSString *k = nvmtl_archive_key_render(d);
+    BOOL ok = [self nvmtlAdd:k what:"addRenderPipelineFunctions" error:err];
+    if (ok) [self nvmtlRecord:k functions:@[d.vertexFunction, d.fragmentFunction]];
+    return ok;
 }
 - (BOOL)addTileRenderPipelineFunctionsWithDescriptor:(MTLTileRenderPipelineDescriptor *)d error:(NSError **)err {
-    if (err) *err = nvmtl_b41_err(@"binary archive: tile render pipelines are not implemented by this driver - not added");
-    return NO;
+    return [self nvmtlAdd:nvmtl_archive_key_compute(d.tileFunction) what:"addTileRenderPipelineFunctions" error:err];
 }
 - (BOOL)addMeshRenderPipelineFunctionsWithDescriptor:(MTLMeshRenderPipelineDescriptor *)d error:(NSError **)err {
     if (err) *err = nvmtl_b41_err(@"binary archive: mesh render pipelines are not implemented by this driver yet - not added");
@@ -3021,7 +3172,10 @@ NSString *nvmtl_archive_key_render(MTLRenderPipelineDescriptor *d) {
 - (BOOL)serializeToURL:(NSURL *)url error:(NSError **)err {
     NSArray *keys; @synchronized (self) { keys = [_keys.allObjects sortedArrayUsingSelector:@selector(compare:)]; }
     NSError *pe = nil;
-    NSData *pl = [NSPropertyListSerialization dataWithPropertyList:@{@"format": @"NVMTLBinaryArchive", @"version": @1, @"keys": keys}
+    NSDictionary *libs, *recs;
+    @synchronized (self) { libs = [_libs copy] ?: @{}; recs = (id)([_records copy] ?: @[]); }
+    NSData *pl = [NSPropertyListSerialization dataWithPropertyList:@{@"format": @"NVMTLBinaryArchive", @"version": @2, @"keys": keys,
+                                                                     @"libraries": libs, @"records": recs}
                                                             format:NSPropertyListBinaryFormat_v1_0 options:0 error:&pe];
     if (pl && [pl writeToURL:url options:NSDataWritingAtomic error:&pe]) { nvlog("binary archive %p: serialized %lu key(s) to %s", self, (unsigned long)keys.count, url.path.UTF8String); return YES; }
     if (err) *err = nvmtl_b41_err([NSString stringWithFormat:@"binary archive serializeToURL: %@ - %@", url.path, pe.localizedDescription ?: @"?"]);
@@ -3037,6 +3191,36 @@ id nvmtl_new_binary_archive(MTLBinaryArchiveDescriptor *d, NSError **err) {
         NSDictionary *pl = [NSPropertyListSerialization propertyListWithData:data options:0 format:NULL error:NULL];
         if ([pl isKindOfClass:[NSDictionary class]] && [pl[@"format"] isEqual:@"NVMTLBinaryArchive"] && [pl[@"keys"] isKindOfClass:[NSArray class]]) {
             for (id k in pl[@"keys"]) if ([k isKindOfClass:[NSString class]]) [a->_keys addObject:k];
+            if ([pl[@"libraries"] isKindOfClass:[NSDictionary class]]) a->_libs = [pl[@"libraries"] mutableCopy];
+            if ([pl[@"records"] isKindOfClass:[NSArray class]]) a->_records = [pl[@"records"] mutableCopy];
+        } else if (@available(macos 26.0, *)) {
+            // An archive written by Apple's toolchain: a fat container whose air64 slices hold the archived functions.
+            // The keys are made the way the driver keys a function it was asked to build, from the slices' own AIR.
+            NSArray<NSData *> *slices = nv4_apple_air_slices(data);
+            NSMutableArray *kernels = [NSMutableArray new], *verts = [NSMutableArray new], *frags = [NSMutableArray new];
+            for (NSData *sl in slices) {
+                dispatch_data_t dd = dispatch_data_create(sl.bytes, sl.length, dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+                NSError *le = nil; NVMTLLibrary *l = (NVMTLLibrary *)[(NVMTLDevice *)gNVMTLMainDevice newLibraryWithData:dd error:&le];
+                if (!l) { nvlog("newBinaryArchiveWithDescriptor: an air64 slice of %s did not load: %s", d.url.path.UTF8String, le.localizedDescription.UTF8String ?: "?"); continue; }
+                if (!a->_libs) a->_libs = [NSMutableDictionary new];
+                a->_libs[nv4_sha256hex(sl)] = sl;
+                for (NSString *name in l.functionNames) {
+                    id<MTLFunction> f = [l newFunctionWithName:name];
+                    NSString *stage = l->_stages[name];
+                    if ([stage isEqualToString:@"kernel"]) { NSString *k = nvmtl_archive_key_compute(f); if (k) [a->_keys addObject:k]; }
+                    else if ([stage isEqualToString:@"vertex"]) [verts addObject:f];
+                    else if ([stage isEqualToString:@"fragment"]) [frags addObject:f];
+                }
+            }
+            for (id v in verts) for (id f in frags) {
+                MTLRenderPipelineDescriptor *rd = [MTLRenderPipelineDescriptor new]; rd.vertexFunction = v; rd.fragmentFunction = f;
+                NSString *k = nvmtl_archive_key_render(rd); if (k) [a->_keys addObject:k];
+            }
+            nvlog("newBinaryArchiveWithDescriptor: %s is an Apple archive: %lu air64 slice(s) -> %lu key(s)", d.url.path.UTF8String,
+                  (unsigned long)slices.count, (unsigned long)a->_keys.count);
+            if (!slices.count)
+                nvlog("newBinaryArchiveWithDescriptor: %s is not an archive this driver wrote (%lu B) - opened EMPTY, every lookup misses",
+                      d.url.path.UTF8String, (unsigned long)data.length);
         } else
             nvlog("newBinaryArchiveWithDescriptor: %s is not an archive this driver wrote (%lu B) - opened EMPTY, every lookup misses",
                   d.url.path.UTF8String, (unsigned long)data.length);

@@ -330,6 +330,88 @@ static void nvmtl_busy_mark_done(NVMTLCommandBuffer *cb) {
 static NSMutableArray<NVMTLCommandBuffer *> *nvmtl_pending_buffers;
 static BOOL nvmtl_pumping;
 static void nvmtl_pump_buffers(void);
+
+// ---- commit-to-completion latency ------------------------------------------------------------------------------
+// Counted for every command buffer: a histogram of commit -> completion-handlers time, the maximum, and a once-a-second
+// scan of the pending list for commits older than 2 s. A client that fences on a command buffer (CoreAnimation in
+// WindowServer) times out when this path is slow or a commit never completes, and nothing else in a release log shows it.
+// Read live: `touch /private/tmp/nvmtl-stats-request` and every process that has committed writes
+// /private/tmp/nvmtl-stats-<pid>.txt on its next 1 s tick (remove the file to stop); while any commit has been stuck the
+// file is also written every 10 s. NVMTL_STATS_SIGINFO=1 adds a SIGINFO trigger.
+#define NVLAT_BUCKETS 6
+static const uint64_t nvlat_edge_ms[NVLAT_BUCKETS - 1] = {16, 50, 100, 250, 1000};
+static _Atomic uint64_t nvlat_hist[NVLAT_BUCKETS], nvlat_total, nvlat_max_ns, nvlat_stuck_scans, nvlat_stuck_max, nvlat_stuck_event;
+static void nvmtl_latency_record(uint64_t ns) {
+    atomic_fetch_add(&nvlat_total, 1);
+    uint64_t ms = ns / 1000000ull; int b = 0;
+    while (b < NVLAT_BUCKETS - 1 && ms >= nvlat_edge_ms[b]) b++;
+    atomic_fetch_add(&nvlat_hist[b], 1);
+    uint64_t m = atomic_load(&nvlat_max_ns);
+    while (ns > m && !atomic_compare_exchange_weak(&nvlat_max_ns, &m, ns)) {}
+    if (ms >= 250) nvlog("commit-latency: a commit took %llu ms to complete (>=250 ms commits so far: %llu, max %llu ms, pid %d)",
+                         (unsigned long long)ms, (unsigned long long)(atomic_load(&nvlat_hist[3]) + atomic_load(&nvlat_hist[4]) + atomic_load(&nvlat_hist[5])),
+                         (unsigned long long)(atomic_load(&nvlat_max_ns) / 1000000ull), getpid());
+}
+static void nvmtl_latency_dump(const char *why, int toFile) {
+    char t[512];
+    snprintf(t, sizeof t, "%s pid %d commits %llu  <16ms %llu  16-50 %llu  50-100 %llu  100-250 %llu  250-1000 %llu  >=1000 %llu  max %llu ms  "
+             "stuck>2s now %llu (waiting on an event %llu) worst %llu ms",
+             why, getpid(), (unsigned long long)atomic_load(&nvlat_total), (unsigned long long)atomic_load(&nvlat_hist[0]),
+             (unsigned long long)atomic_load(&nvlat_hist[1]), (unsigned long long)atomic_load(&nvlat_hist[2]), (unsigned long long)atomic_load(&nvlat_hist[3]),
+             (unsigned long long)atomic_load(&nvlat_hist[4]), (unsigned long long)atomic_load(&nvlat_hist[5]),
+             (unsigned long long)(atomic_load(&nvlat_max_ns) / 1000000ull), (unsigned long long)atomic_load(&nvlat_stuck_scans),
+             (unsigned long long)atomic_load(&nvlat_stuck_event), (unsigned long long)atomic_load(&nvlat_stuck_max));
+    nvlog("commit-latency: %s", t);
+    if (toFile) {
+        char path[96]; snprintf(path, sizeof path, "/private/tmp/nvmtl-stats-%d.txt", getpid());
+        FILE *f = fopen(path, "w"); if (f) { fprintf(f, "%s\n", t); fclose(f); }
+    }
+}
+static void nvmtl_latency_scan(void) {
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), stuck = 0, onEvent = 0, worst = 0;
+    @synchronized ([NVMTLCommandBuffer class]) {
+        for (NVMTLCommandBuffer *cb in nvmtl_pending_buffers) {
+            if (!cb->_commitNs || now - cb->_commitNs < 2000000000ull) continue;
+            stuck++; if (now - cb->_commitNs > worst) worst = now - cb->_commitNs;
+            if (cb->_nextPart < cb->_parts.count) {
+                NVMTLSubmissionPart *p = cb->_parts[cb->_nextPart];
+                if ([p isKindOfClass:[NVMTLSubmissionPart class]] && p->waitEvent) onEvent++;
+            }
+        }
+    }
+    atomic_store(&nvlat_stuck_scans, stuck); atomic_store(&nvlat_stuck_event, onEvent);
+    if (worst / 1000000ull > atomic_load(&nvlat_stuck_max)) atomic_store(&nvlat_stuck_max, worst / 1000000ull);
+}
+static void nvmtl_latency_start(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_queue_t q = dispatch_queue_create("com.nvmtl.latency", DISPATCH_QUEUE_SERIAL);
+        dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+        dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC, 100 * NSEC_PER_MSEC);
+        __block int ticks = 0;
+        dispatch_source_set_event_handler(t, ^{
+            nvmtl_latency_scan();
+            ++ticks;
+            struct stat rq;
+            if (!stat("/private/tmp/nvmtl-stats-request", &rq)) nvmtl_latency_dump("requested stats", 1);
+            // a stuck commit is the finding: say so at once the first time, then every 10 s, and keep the file current
+            if (atomic_load(&nvlat_stuck_scans) && (ticks % 10) == 1) nvmtl_latency_dump("STUCK commits not completed after 2 s", 1);
+            else if (atomic_load(&nvlat_stuck_max) && (ticks % 10) == 0) nvmtl_latency_dump("stuck history", 1);
+        });
+        dispatch_resume(t);
+        // SIGINFO is opt-in: installing a signal source replaces whatever handler the host process set, and this plugin
+        // loads into WindowServer and every app. The default on-demand read is the touch file checked by the tick above.
+        const char *si = getenv("NVMTL_STATS_SIGINFO");
+        if (si && *si == '1') {
+            static dispatch_source_t info;
+            signal(SIGINFO, SIG_IGN);
+            info = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGINFO, 0, q);
+            dispatch_source_set_event_handler(info, ^{ nvmtl_latency_scan(); nvmtl_latency_dump("SIGINFO stats", 1); });
+            dispatch_resume(info);
+        }
+        static dispatch_source_t keep; keep = t;
+    });
+}
 static BOOL nvmtl_async_commit_on(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("NVMTL_ASYNC_COMMIT"); on = !(e && e[0] == '0');
@@ -532,6 +614,7 @@ static int nvmtl_skip_empty_on(void) {
     [self nvmtlReleaseCapacity];
 }
 - (void)nvmtlFinishCallbacks {
+    if (_commitNs) nvmtl_latency_record(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - _commitNs);
     if (nvmtl_cbt_on() && _cbtSeq)
         // C seq create commit firstSubmit gpuStart gpuEnd fenceSeen done nDispatch firstKernel (ns, CLOCK_UPTIME_RAW)
         nvmtl_cbt_line("C %llu %llu %llu %llu %llu %llu %llu %llu %u %s\n", (unsigned long long)_cbtSeq,
@@ -606,8 +689,13 @@ static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL wr
             if (writtenOnly && texture->_usage != MTLTextureUsageUnknown &&
                 !(texture->_usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget))) continue;
             buffer = texture->_backBuf ?: (texture->_parent ? texture->_parent->_backBuf : nil);
+            // a texture the GPU can write, over a buffer: the buffer's GPU side can be the newer one from here on
+            if (buffer && writtenOnly) buffer->_gpuMayWrite = 1;
         }
         if (!buffer || (!buffer->_hostPtr && !buffer->_shadow.map)) continue;
+        // Copying back is for what the GPU wrote. A buffer it only read keeps the caller's bytes: the copy would put
+        // the bytes of submit time over whatever the caller has written since.
+        if (writtenOnly && !buffer->_gpuMayWrite) continue;
         if (!copies) copies = [NSMutableSet new];
         [copies addObject:buffer];
     }
@@ -712,7 +800,12 @@ static void nvmtl_gsub_ahead_pass1(void) {
             return YES;
         }
         uint64_t have = ((uint64_t(*)(id,SEL))objc_msgSend)(part->waitEvent,@selector(signaledValue));
-        if (have < part->value) { @synchronized ([NVMTLCommandBuffer class]) { part->claimed = NO; } return NO; }
+        if (have < part->value) {
+            // another process may be the one to signal: an exported event re-pumps from a watcher thread
+            if ([part->waitEvent respondsToSelector:@selector(nvmtlXpWatchPump:)])
+                ((void(*)(id,SEL,uint64_t))objc_msgSend)(part->waitEvent, @selector(nvmtlXpWatchPump:), part->value);
+            @synchronized ([NVMTLCommandBuffer class]) { part->claimed = NO; } return NO;
+        }
     }
     if (!ahead && part->commands.cb && !part->encoders && !part->resources.count && !part->surfaces.count && !part->scratch.count && nvmtl_skip_empty_on()) {
         [self nvmtlMarkScheduled];
@@ -797,6 +890,8 @@ static void nvmtl_gsub_ahead_pass1(void) {
         if (_committed) return;
         [self nvmtlReserveQueue];
         _committed = YES; _commitMarking = YES;
+        _commitNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        nvmtl_latency_start();
         if (!__atomic_load_n(&_rep, __ATOMIC_ACQUIRE)) __atomic_store_n(&_rep, nvmtl_ep_enter(), __ATOMIC_RELEASE);
         [_completionCondition lock]; _cbstatus = MTLCommandBufferStatusCommitted; [_completionCondition unlock];
         [self nvmtlSealPartWithSignal:nil value:0 restart:NO];
@@ -805,6 +900,10 @@ static void nvmtl_gsub_ahead_pass1(void) {
     // nvmtl_ws_mark_pending). This command buffer is committed and holds its queue reservation, but nothing submits it
     // (_commitMarking stops the submit-ahead pass) or completes it (it is not pending yet) before its marks are in.
     nvmtl_ws_mark_pending(self);
+    // what the caller announced in its managed buffers is taken now, before commit returns, and rides this command
+    // buffer's first submission (nvmtl_managed_take)
+    { const uint64_t seq = nvmtl_managed_take(self); _c.managed_seq = seq;
+      for (NVMTLSubmissionPart *part in _parts) if ([part isKindOfClass:[NVMTLSubmissionPart class]]) part->commands.managed_seq = seq; }
     @synchronized ([NVMTLCommandBuffer class]) {
         _commitMarking = NO;
         nvmtl_surface_register_writes(self);

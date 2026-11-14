@@ -1,0 +1,481 @@
+diff --git a/src/nouveau/vulkan/nvk_cmd_pool.c b/src/nouveau/vulkan/nvk_cmd_pool.c
+index c710fd2..812e4ab 100644
+--- a/src/nouveau/vulkan/nvk_cmd_pool.c
++++ b/src/nouveau/vulkan/nvk_cmd_pool.c
+@@ -15,6 +15,7 @@
+ #define NVK_CMR_FENCE struct nvkmd_nvrm_fence
+ #include "nvk_cmd_mem_recycle.h"
+ #include "nvk_cmd_slab.h"
++#include "util/os_time.h"
+ #include "nvkmd/nvrm/nvrm_xnu.h"
+ 
+ /* Command-pool chunk recycler (see nvk_cmd_mem_recycle.h for why and for the GPU-safety rule).
+@@ -98,24 +99,31 @@ nvk_b80_gart_flags(void)
+    return uncached ? NVKMD_MEM_GART : (enum nvkmd_mem_flags)(NVKMD_MEM_GART | NVK69_MEM_GPU_CACHED);
+ }
+ 
+-/* Slab mode (nvk_cmd_slab.h for why). NVK_CMDMEM_SLAB_KB=<kb> carves chunks from shared slabs of that size (a multiple
+- * of 64, 128..16384; unset or 0 = off: one allocation per chunk, as before). NVK_CMDMEM_SLAB_SPARE=<n> fully idle slabs
+- * kept per device before one is released (default 4). When slabs are on, the per-chunk recycler is not used: a returned
+- * slab chunk is reused by the same fence rule, without holding a connection of its own. The slab key is the nvk_device,
+- * so slabs never cross devices. */
++/* Slabs (nvk_cmd_slab.h for why and for the memory policy). ON by default.
++ * NVK_CMDMEM_SLAB_KB=<kb>        slab size, a multiple of 64, 128..16384 (default 1024 = 16 chunks); 0 = off: one
++ *                                allocation per chunk, as before (then NVK_CMDMEM_RECYCLE applies).
++ * NVK_CMDMEM_SLAB_SPARE=<n>      idle slabs per device and kind kept without waiting (default 4).
++ * NVK_CMDMEM_SLAB_KEEP=<n>       idle slabs per device and kind never released for age (default 1).
++ * NVK_CMDMEM_SLAB_IDLE_MS=<ms>   an idle slab beyond KEEP is released once idle this long (default 5000; 0 = never).
++ * Measured in Cyberpunk at 1024 KB: 79 slabs live, 275 connections for the whole process (was ~990 for command chunks
++ * alone), 98% of chunks reused, 87.1 fps avg vs 78.1 with the per-chunk recycler. The slab key is the nvk_device, so
++ * slabs never cross devices. */
+ static struct nvk_slab_alloc nvk_slabs = NVK_SLAB_ALLOC_INIT;
+ static void
+ nvk_slab_load(void)
+ {
+-   unsigned kb = nvk_cmr_knob("NVK_CMDMEM_SLAB_KB", 0, 16384);
++   unsigned kb = nvk_cmr_knob("NVK_CMDMEM_SLAB_KB", 1024, 16384);
+    kb -= kb % (NVK_CMD_MEM_SIZE / 1024);
+    if (kb && kb < 2 * (NVK_CMD_MEM_SIZE / 1024)) kb = 0;   /* one chunk per slab is the old mode with extra steps */
+    nvk_slabs.chunk_bytes = NVK_CMD_MEM_SIZE;
+    nvk_slabs.slab_bytes = (uint64_t)kb * 1024;
+    nvk_slabs.spare = nvk_cmr_knob("NVK_CMDMEM_SLAB_SPARE", 4, 64);
+-   fprintf(stderr, "nvk: command-pool chunks %s (NVK_CMDMEM_SLAB_KB=%u, %u chunks per slab, spare %u)\n",
++   nvk_slabs.keep_min = nvk_cmr_knob("NVK_CMDMEM_SLAB_KEEP", 1, 64);
++   if (nvk_slabs.keep_min > nvk_slabs.spare) nvk_slabs.keep_min = nvk_slabs.spare;
++   nvk_slabs.idle_ms = nvk_cmr_knob("NVK_CMDMEM_SLAB_IDLE_MS", 5000, 3600000);
++   fprintf(stderr, "nvk: command-pool chunks %s (NVK_CMDMEM_SLAB_KB=%u, %u chunks per slab, spare %u, keep %u, idle %llu ms)\n",
+            kb ? "carved from shared slabs" : "one allocation each", kb, kb ? kb / (NVK_CMD_MEM_SIZE / 1024) : 1,
+-           nvk_slabs.spare);
++           nvk_slabs.spare, nvk_slabs.keep_min, (unsigned long long)nvk_slabs.idle_ms);
+ }
+ static pthread_once_t nvk_slab_once = PTHREAD_ONCE_INIT;
+ static bool
+@@ -135,8 +143,9 @@ static void nvk_slab_be_fence(const void *key, struct nvkmd_nvrm_fence *out)
+ {
+    nvkmd_nvrm_fence_snapshot(((struct nvk_device *)key)->nvkmd, out);
+ }
++static uint64_t nvk_slab_be_now_ms(void) { return (uint64_t)os_time_get_nano() / 1000000ull; }
+ static const struct nvk_slab_backend nvk_slab_be = {
+-   nvk_slab_be_create, nvk_slab_be_destroy, nvk_slab_be_fence, nvkmd_nvrm_fence_passed,
++   nvk_slab_be_create, nvk_slab_be_destroy, nvk_slab_be_fence, nvkmd_nvrm_fence_passed, nvk_slab_be_now_ms,
+ };
+ static void
+ nvk_slab_census(uint64_t q)
+@@ -145,10 +154,11 @@ nvk_slab_census(uint64_t q)
+    const struct nvk_slab_stats s = nvk_slab_snapshot(&nvk_slabs, &live);
+    nvrm_xnu_live(&conns, &maps);
+    fprintf(stderr, "nvk: cmd chunks (slabs of %llu KB): requests=%llu reused=%llu carved=%llu not_ready=%llu returned=%llu "
+-           "slabs live=%u created=%llu released=%llu failed=%llu | process connections=%lld mappings=%lld\n",
++           "slabs live=%u (%llu MB) created=%llu released=%llu (idle %llu) failed=%llu | process connections=%lld mappings=%lld\n",
+            (unsigned long long)(nvk_slabs.slab_bytes >> 10), (unsigned long long)q, (unsigned long long)s.reused,
+            (unsigned long long)s.carved, (unsigned long long)s.not_ready, (unsigned long long)s.returned, live,
+-           (unsigned long long)s.slabs_created, (unsigned long long)s.slabs_released,
++           (unsigned long long)(((uint64_t)live * nvk_slabs.slab_bytes) >> 20),
++           (unsigned long long)s.slabs_created, (unsigned long long)s.slabs_released, (unsigned long long)s.released_idle,
+            (unsigned long long)s.create_failed, (long long)conns, (long long)maps);
+ }
+ 
+diff --git a/src/nouveau/vulkan/nvk_cmd_slab.h b/src/nouveau/vulkan/nvk_cmd_slab.h
+index d8af4fa..121babb 100644
+--- a/src/nouveau/vulkan/nvk_cmd_slab.h
++++ b/src/nouveau/vulkan/nvk_cmd_slab.h
+@@ -11,13 +11,21 @@
+  * Why: on macOS every CPU mapping is its own IOKit user-client connection (the kext keeps one mapping context per
+  * client), so a process holds as many connections as it has mapped allocations. Command-pool chunks were one
+  * allocation each, and Cyberpunk held ~990 of them alive at once - at the process's connection ceiling before
+- * anything else maps. The chunk recycler on its own could only keep 25% of them because there was no room left
+- * under that ceiling. With 1 MB slabs the same 990 chunks are ~62 connections, and every chunk after the first in
+- * a slab costs no kernel call at all.
++ * anything else maps. With 1 MB slabs the game ran on 79 slabs (275 connections for the whole process).
+  *
+- * GPU safety is the recycler's rule: a returned chunk carries the fence snapshot taken when it was returned and is
+- * handed out again only after that snapshot has passed. A slab is released only when none of its chunks is in use,
+- * and its free goes through the backend's own deferred free, which waits for the GPU on its own.
++ * GPU safety: a returned chunk carries the fence snapshot taken when it was returned and is handed out again only
++ * after that snapshot has passed. A slab is released only when none of its chunks is in use, and its free goes
++ * through the backend's own deferred free, which waits for the GPU on its own.
++ *
++ * Memory held, for a long-lived process (WindowServer runs this too: one queue, 50-160 small command buffers a
++ * second, for days). Two rules keep its footprint at its working set rather than its worst burst:
++ *   - placement packs: a chunk comes from the busiest slab that can give one (a returned chunk whose fence has
++ *     passed, or uncarved room), so after a burst the lightly used slabs drain completely instead of every slab
++ *     staying a little bit in use - FIFO reuse across slabs would pin all of them forever;
++ *   - idle slabs go: past `spare` idle slabs one is released at once; and any idle slab beyond `keep_min` that has been
++ *     idle for `idle_ms` is released at the next call. A quiet process ends up holding keep_min slabs per kind.
++ * Release is lazy (checked on take and put), so a process that stops submitting entirely keeps what it had until its
++ * device goes; such a process is not producing churn either.
+  *
+  * The logic is free of NVK types so the unit test runs the same code. Define NVK_CMR_FENCE first. */
+ 
+@@ -30,9 +38,14 @@
+ #ifndef NVK_CMR_FENCE
+ #error "define NVK_CMR_FENCE before including nvk_cmd_slab.h"
+ #endif
+-#ifndef NVK_CMR_SCAN
+-#define NVK_CMR_SCAN 8
+-#endif
++/* How many candidate slabs one take tests the fence of before carving instead. */
++#define NVK_SLAB_SCAN 8
++
++struct nvk_slab_free {
++   struct nvk_slab_free *next;
++   uint32_t idx;
++   NVK_CMR_FENCE fence;
++};
+ 
+ struct nvk_slab {
+    struct nvk_slab *next;
+@@ -42,16 +55,10 @@ struct nvk_slab {
+    uint64_t addr;            /* GPU VA of chunk 0 */
+    char *map;                /* CPU map of chunk 0 */
+    uint32_t nchunks, carved, outstanding;
++   struct nvk_slab_free *fhead, *ftail;   /* this slab's returned chunks, oldest first */
++   uint64_t idle_since_ms;   /* when outstanding last reached 0 (valid while outstanding == 0) */
+ };
+ 
+-struct nvk_slab_free {
+-   struct nvk_slab_free *next;
+-   struct nvk_slab *slab;
+-   uint32_t idx;
+-   NVK_CMR_FENCE fence;
+-};
+-
+-/* What a caller gets: chunk `idx` of `slab`. */
+ struct nvk_slab_chunk {
+    struct nvk_slab *slab;
+    uint32_t idx;
+@@ -66,23 +73,25 @@ struct nvk_slab_backend {
+    void (*destroy)(void *backing);   /* called without the lock */
+    void (*fence_now)(const void *dev, NVK_CMR_FENCE *out);
+    bool (*passed)(const NVK_CMR_FENCE *f);
++   uint64_t (*now_ms)(void);
+ };
+ 
+ struct nvk_slab_stats {
+-   uint64_t takes, reused, carved, not_ready, slabs_created, slabs_released, create_failed, returned;
++   uint64_t takes, reused, carved, not_ready, slabs_created, slabs_released, released_idle, create_failed, returned;
+ };
+ 
+ struct nvk_slab_alloc {
+    pthread_mutex_t lock;
+    struct nvk_slab *slabs;
+-   struct nvk_slab_free *head, *tail;   /* returned chunks, oldest first */
+    uint64_t chunk_bytes, slab_bytes;    /* slab_bytes == 0: off */
+-   unsigned spare;                      /* fully idle slabs kept per (dev, gart) before one is released */
++   unsigned spare;                      /* idle slabs per (dev, gart) kept without waiting */
++   unsigned keep_min;                   /* idle slabs per (dev, gart) never released for age */
++   uint64_t idle_ms;                    /* an idle slab beyond keep_min older than this is released; 0 = never */
+    unsigned live_slabs;
+    struct nvk_slab_stats st;
+ };
+ 
+-#define NVK_SLAB_ALLOC_INIT { PTHREAD_MUTEX_INITIALIZER, NULL, NULL, NULL, 0, 0, 0, 0, { 0 } }
++#define NVK_SLAB_ALLOC_INIT { PTHREAD_MUTEX_INITIALIZER, NULL, 0, 0, 0, 0, 0, 0, { 0 } }
+ 
+ static inline void
+ nvk_slab_fill(struct nvk_slab_alloc *a, struct nvk_slab *s, uint32_t idx, struct nvk_slab_chunk *out)
+@@ -93,44 +102,94 @@ nvk_slab_fill(struct nvk_slab_alloc *a, struct nvk_slab *s, uint32_t idx, struct
+    out->map = s->map + out->off;
+ }
+ 
+-/* A chunk for (dev, gart): a returned one whose fence has passed, else a fresh one from a slab with room, else a new
+- * slab. false only when a new slab was needed and could not be made. */
++/* Unlink `s` from the slab list and free its returned-chunk records. Lock held. */
++static inline void
++nvk_slab_unlink_locked(struct nvk_slab_alloc *a, struct nvk_slab *s)
++{
++   for (struct nvk_slab **pp = &a->slabs; *pp; pp = &(*pp)->next)
++      if (*pp == s) { *pp = s->next; break; }
++   while (s->fhead) { struct nvk_slab_free *n = s->fhead->next; free(s->fhead); s->fhead = n; }
++   s->ftail = NULL;
++   a->live_slabs--;
++}
++
++/* Pick idle slabs of (dev, gart) to release: beyond `spare` at once (the least recently idle-free first, i.e. any),
++ * and beyond `keep_min` once idle for idle_ms. Unlinks them onto *out. Lock held. */
++static inline void
++nvk_slab_trim_locked(struct nvk_slab_alloc *a, const void *dev, bool gart, uint64_t now, struct nvk_slab **out)
++{
++   unsigned idle = 0;
++   for (struct nvk_slab *k = a->slabs; k; k = k->next)
++      if (k->dev == dev && k->gart == gart && k->outstanding == 0) idle++;
++   for (struct nvk_slab *k = a->slabs, *n; k && idle > a->keep_min; k = n) {
++      n = k->next;
++      if (k->dev != dev || k->gart != gart || k->outstanding != 0) continue;
++      const bool over_spare = idle > a->spare;
++      const bool aged = a->idle_ms && now - k->idle_since_ms >= a->idle_ms;
++      if (!over_spare && !aged) continue;
++      nvk_slab_unlink_locked(a, k);
++      k->next = *out; *out = k;
++      idle--;
++      a->st.slabs_released++;
++      if (!over_spare) a->st.released_idle++;
++   }
++}
++
++static inline void
++nvk_slab_release_list(const struct nvk_slab_backend *be, struct nvk_slab *list)
++{
++   while (list) { struct nvk_slab *n = list->next; be->destroy(list->backing); free(list); list = n; }
++}
++
++/* A chunk for (dev, gart), from the busiest slab that can give one: a returned chunk whose fence has passed, else
++ * uncarved room, else a new slab. false only when a new slab was needed and could not be made. */
+ static inline bool
+ nvk_slab_take(struct nvk_slab_alloc *a, const struct nvk_slab_backend *be, const void *dev, bool gart,
+               struct nvk_slab_chunk *out)
+ {
++   const uint64_t now = be->now_ms();
++   struct nvk_slab *dead = NULL;
+    pthread_mutex_lock(&a->lock);
+    a->st.takes++;
+-   unsigned looked = 0;
+-   bool any = false;
+-   for (struct nvk_slab_free **pp = &a->head, *prev = NULL; *pp != NULL && looked < NVK_CMR_SCAN;) {
+-      struct nvk_slab_free *f = *pp;
+-      if (f->slab->dev == dev && f->slab->gart == gart) {
+-         any = true; looked++;
+-         if (be->passed(&f->fence)) {
+-            *pp = f->next;
+-            if (a->tail == f) a->tail = prev;
+-            f->slab->outstanding++;
+-            nvk_slab_fill(a, f->slab, f->idx, out);
+-            a->st.reused++;
+-            pthread_mutex_unlock(&a->lock);
+-            free(f);
+-            return true;
+-         }
+-      }
+-      prev = f; pp = &f->next;
+-   }
+-   if (any) a->st.not_ready++;
++   /* candidates with a returned chunk, busiest first (insertion into a small array) */
++   struct nvk_slab *cand[NVK_SLAB_SCAN]; unsigned nc = 0;
++   struct nvk_slab *room = NULL;
+    for (struct nvk_slab *s = a->slabs; s; s = s->next) {
+-      if (s->dev == dev && s->gart == gart && s->carved < s->nchunks) {
+-         uint32_t idx = s->carved++;
+-         s->outstanding++;
+-         nvk_slab_fill(a, s, idx, out);
+-         a->st.carved++;
+-         pthread_mutex_unlock(&a->lock);
+-         return true;
++      if (s->dev != dev || s->gart != gart) continue;
++      if (s->carved < s->nchunks && (!room || s->outstanding > room->outstanding)) room = s;
++      if (!s->fhead) continue;
++      unsigned i = nc < NVK_SLAB_SCAN ? nc++ : NVK_SLAB_SCAN;
++      if (i == NVK_SLAB_SCAN) { if (s->outstanding <= cand[NVK_SLAB_SCAN - 1]->outstanding) continue; i = NVK_SLAB_SCAN - 1; }
++      while (i > 0 && cand[i - 1]->outstanding < s->outstanding) { cand[i] = cand[i - 1]; i--; }
++      cand[i] = s;
++   }
++   struct nvk_slab *got = NULL; uint32_t idx = 0; bool from_free = false, pending = false;
++   for (unsigned i = 0; i < nc && !got; i++) {
++      struct nvk_slab *s = cand[i];
++      /* a returned chunk is taken only from a slab at least as busy as the best one with uncarved room */
++      if (room && room->outstanding > s->outstanding) break;
++      if (be->passed(&s->fhead->fence)) {
++         struct nvk_slab_free *f = s->fhead;
++         s->fhead = f->next; if (!s->fhead) s->ftail = NULL;
++         idx = f->idx; free(f);
++         got = s; from_free = true;
++      } else {
++         pending = true;
+       }
+    }
++   if (!got && pending) a->st.not_ready++;   /* a returned chunk was there but the GPU still owed it */
++   /* With no room the loop above already tried every candidate; with room, carving there beats a returned chunk in a
++    * lighter slab (it opens nothing new and leaves the lighter slab free to drain). */
++   if (!got && room) { got = room; idx = room->carved++; }
++   if (got) {
++      got->outstanding++;
++      nvk_slab_fill(a, got, idx, out);
++      if (from_free) a->st.reused++; else a->st.carved++;
++      nvk_slab_trim_locked(a, dev, gart, now, &dead);
++      pthread_mutex_unlock(&a->lock);
++      nvk_slab_release_list(be, dead);
++      return true;
++   }
+    pthread_mutex_unlock(&a->lock);
+ 
+    struct nvk_slab *s = (struct nvk_slab *)calloc(1, sizeof(*s));
+@@ -151,55 +210,24 @@ nvk_slab_take(struct nvk_slab_alloc *a, const struct nvk_slab_backend *be, const
+    return true;
+ }
+ 
+-/* Unlink slab `s` and every returned chunk of it. Lock held. */
+-static inline void
+-nvk_slab_unlink_locked(struct nvk_slab_alloc *a, struct nvk_slab *s, struct nvk_slab_free **freed)
+-{
+-   for (struct nvk_slab **pp = &a->slabs; *pp; pp = &(*pp)->next)
+-      if (*pp == s) { *pp = s->next; break; }
+-   for (struct nvk_slab_free **pp = &a->head, *prev = NULL; *pp != NULL;) {
+-      struct nvk_slab_free *f = *pp;
+-      if (f->slab == s) {
+-         *pp = f->next;
+-         if (a->tail == f) a->tail = prev;
+-         f->next = *freed; *freed = f;
+-      } else {
+-         prev = f; pp = &f->next;
+-      }
+-   }
+-   a->live_slabs--;
+-}
+-
+ /* Give a chunk back (its pool is gone or trimmed). */
+ static inline void
+ nvk_slab_put(struct nvk_slab_alloc *a, const struct nvk_slab_backend *be, struct nvk_slab *s, uint32_t idx)
+ {
+    struct nvk_slab_free *f = (struct nvk_slab_free *)calloc(1, sizeof(*f));
+-   if (f) { f->slab = s; f->idx = idx; be->fence_now(s->dev, &f->fence); }
+-   struct nvk_slab *release = NULL;
+-   struct nvk_slab_free *dropped = NULL;
++   if (f) { f->idx = idx; be->fence_now(s->dev, &f->fence); }
++   const uint64_t now = be->now_ms();
++   struct nvk_slab *dead = NULL;
+    pthread_mutex_lock(&a->lock);
+    a->st.returned++;
+-   s->outstanding--;
+-   if (f) {
+-      if (a->tail) a->tail->next = f; else a->head = f;
+-      a->tail = f;
+-   }
+-   /* With no host memory for the record the chunk is simply never handed out again; its slab is still released
+-    * normally once idle, and the backend's deferred free covers the GPU. */
+-   if (s->outstanding == 0) {
+-      unsigned idle = 0;
+-      for (struct nvk_slab *k = a->slabs; k; k = k->next)
+-         if (k->dev == s->dev && k->gart == s->gart && k->outstanding == 0) idle++;
+-      if (idle > a->spare) {
+-         nvk_slab_unlink_locked(a, s, &dropped);
+-         release = s;
+-         a->st.slabs_released++;
+-      }
+-   }
++   /* With no host memory for the record the chunk is never handed out again; the slab is still released once
++    * idle, and the backend's deferred free covers the GPU. */
++   if (f) { if (s->ftail) s->ftail->next = f; else s->fhead = f; s->ftail = f; }
++   if (--s->outstanding == 0) s->idle_since_ms = now;
++   const void *dev = s->dev; const bool gart = s->gart;
++   nvk_slab_trim_locked(a, dev, gart, now, &dead);
+    pthread_mutex_unlock(&a->lock);
+-   while (dropped) { struct nvk_slab_free *n = dropped->next; free(dropped); dropped = n; }
+-   if (release) { be->destroy(release->backing); free(release); }
++   nvk_slab_release_list(be, dead);
+ }
+ 
+ /* Device teardown: release every slab of `dev`. A slab with chunks still in use is left alone (counted, not freed:
+@@ -207,19 +235,18 @@ nvk_slab_put(struct nvk_slab_alloc *a, const struct nvk_slab_backend *be, struct
+ static inline unsigned
+ nvk_slab_drain(struct nvk_slab_alloc *a, const struct nvk_slab_backend *be, const void *dev)
+ {
+-   struct nvk_slab *mine = NULL; struct nvk_slab_free *dropped = NULL; unsigned busy = 0;
++   struct nvk_slab *mine = NULL; unsigned busy = 0;
+    pthread_mutex_lock(&a->lock);
+    for (struct nvk_slab *s = a->slabs, *n; s; s = n) {
+       n = s->next;
+       if (s->dev != dev) continue;
+       if (s->outstanding) { busy++; continue; }
+-      nvk_slab_unlink_locked(a, s, &dropped);
++      nvk_slab_unlink_locked(a, s);
+       s->next = mine; mine = s;
+       a->st.slabs_released++;
+    }
+    pthread_mutex_unlock(&a->lock);
+-   while (dropped) { struct nvk_slab_free *n = dropped->next; free(dropped); dropped = n; }
+-   while (mine) { struct nvk_slab *n = mine->next; be->destroy(mine->backing); free(mine); mine = n; }
++   nvk_slab_release_list(be, mine);
+    return busy;
+ }
+ 
+diff --git a/src/nouveau/vulkan/nvk_cmd_slab_test.c b/src/nouveau/vulkan/nvk_cmd_slab_test.c
+index e95a2ff..f668b84 100644
+--- a/src/nouveau/vulkan/nvk_cmd_slab_test.c
++++ b/src/nouveau/vulkan/nvk_cmd_slab_test.c
+@@ -36,7 +36,9 @@ static bool be_create(const void *dev, bool gart, uint64_t bytes, void **backing
+ static void be_destroy(void *backing) { free(backing); atomic_fetch_sub(&conns, 1); }
+ static void be_fence(const void *dev, mock_fence *f) { (void)dev; f->seq = atomic_load(&gpu_submitted); }
+ static bool be_passed(const mock_fence *f) { return f->seq <= atomic_load(&gpu_done); }
+-static const struct nvk_slab_backend BE = { be_create, be_destroy, be_fence, be_passed };
++static _Atomic uint64_t clock_ms;
++static uint64_t be_now(void) { return atomic_load(&clock_ms); }
++static const struct nvk_slab_backend BE = { be_create, be_destroy, be_fence, be_passed, be_now };
+ 
+ static int fails, arms;
+ #define ARM(name, cond) do { arms++; if (!(cond)) { fails++; printf("FAIL  %s\n", name); } else printf("ok    %s\n", name); } while (0)
+@@ -44,7 +46,8 @@ static int fails, arms;
+ static void reset(struct nvk_slab_alloc *a, unsigned slab_kb, unsigned spare)
+ {
+    struct nvk_slab_alloc z = NVK_SLAB_ALLOC_INIT; *a = z;
+-   a->chunk_bytes = CHUNK; a->slab_bytes = (uint64_t)slab_kb * 1024; a->spare = spare;
++   a->chunk_bytes = CHUNK; a->slab_bytes = (uint64_t)slab_kb * 1024; a->spare = spare; a->keep_min = spare < 1 ? spare : 1; a->idle_ms = 0;
++   atomic_store(&clock_ms, 1000);
+    atomic_store(&gpu_submitted, 0); atomic_store(&gpu_done, 0); atomic_store(&conns, 0); atomic_store(&conns_peak, 0);
+    atomic_store(&creates, 0);
+ }
+@@ -140,8 +143,8 @@ int main(void)
+    nvk_slab_put(&a, &BE, c[2].slab, c[2].idx); nvk_slab_put(&a, &BE, c[3].slab, c[3].idx);
+    ARM("a second fully idle slab beyond the spare is released (connection closed)", a.live_slabs == 2 && atomic_load(&conns) == 2 && a.st.slabs_released == 1);
+    bool stale = false;
+-   for (struct nvk_slab_free *f = a.head; f; f = f->next) stale |= (f->slab != c[0].slab && f->slab != c[2].slab);
+-   ARM("a released slab leaves no returned chunk behind in the free list", !stale);
++   for (struct nvk_slab *k = a.slabs; k; k = k->next) stale |= k->outstanding == 0 && k != c[0].slab && k != c[2].slab && k != c[4].slab;
++   ARM("the released slab is gone from the list", !stale);
+ 
+    reset(&a, 1024, 4);
+    nvk_slab_take(&a, &BE, &A, false, &c[0]); nvk_slab_take(&a, &BE, &B, false, &c[1]);
+@@ -165,9 +168,54 @@ int main(void)
+    for (int i = 0; i < 990; i++) nvk_slab_put(&a, &BE, many[i].slab, many[i].idx);
+    ARM("...and when every chunk comes back only the spares stay open", atomic_load(&conns) <= 2 * 4);
+ 
++   /* packing: after a burst, the returning traffic must let lightly used slabs drain */
++   reset(&a, 1024, 0);
++   static struct nvk_slab_chunk burst[160];
++   for (int i = 0; i < 160; i++) nvk_slab_take(&a, &BE, &A, false, &burst[i]);   /* 10 slabs, all full */
++   for (int i = 0; i < 160; i++) if (i % 16 >= 2) nvk_slab_put(&a, &BE, burst[i].slab, burst[i].idx);   /* 2 left in each */
++   atomic_store(&gpu_done, atomic_load(&gpu_submitted));
++   /* steady state: 20 chunks in flight, cycled 2,000 times; every take/put pair crosses a fence */
++   static struct nvk_slab_chunk ring[20];
++   for (int i = 0; i < 20; i++) nvk_slab_take(&a, &BE, &A, false, &ring[i]);
++   for (int i = 0; i < 160; i++) if (i % 16 < 2) nvk_slab_put(&a, &BE, burst[i].slab, burst[i].idx);   /* the burst's last 20 go */
++   for (int it = 0; it < 2000; it++) {
++      int k = it % 20;
++      nvk_slab_put(&a, &BE, ring[k].slab, ring[k].idx);
++      atomic_fetch_add(&gpu_submitted, 1); atomic_store(&gpu_done, atomic_load(&gpu_submitted));
++      nvk_slab_take(&a, &BE, &A, false, &ring[k]);
++   }
++   printf("      after a 160-chunk burst, 20 in flight: %u slabs live (%d connections)\n", a.live_slabs, atomic_load(&conns));
++   ARM("packing: after a burst the working set of 20 chunks settles on 2 slabs, the rest are released", a.live_slabs <= 3);
++
++   /* a long-lived low-rate process (WindowServer: one queue, ~100 small command buffers a second, for days) */
++   reset(&a, 1024, 4); a.keep_min = 1; a.idle_ms = 5000;
++   uint64_t peak_slabs = 0, held_after_quiet = 0;
++   static struct nvk_slab_chunk ws[64];
++   int ws_n = 0;
++   for (int sec = 0; sec < 3600; sec++) {                       /* one simulated hour */
++      const int burst_now = (sec % 600) == 300;                 /* a 64-chunk burst every 10 minutes (a window resize) */
++      const int want = burst_now ? 64 : 4;                      /* otherwise ~4 chunks in flight */
++      for (int tick = 0; tick < 100; tick++) {                  /* 100 command buffers a second, 10 ms apart */
++         atomic_fetch_add(&clock_ms, 10);
++         while (ws_n < want) nvk_slab_take(&a, &BE, &A, true, &ws[ws_n++]);
++         if (ws_n) { ws_n--; nvk_slab_put(&a, &BE, ws[ws_n].slab, ws[ws_n].idx); }   /* the oldest retires */
++         atomic_fetch_add(&gpu_submitted, 1); atomic_store(&gpu_done, atomic_load(&gpu_submitted) - 1);
++         if (a.live_slabs > peak_slabs) peak_slabs = a.live_slabs;
++      }
++      if (sec % 600 == 299) held_after_quiet = a.live_slabs;    /* just before the next burst */
++   }
++   printf("      WindowServer model, 1 h: peak %llu slabs, %llu slabs held after each quiet stretch, %llu released for age, "
++          "%llu created in all\n", (unsigned long long)peak_slabs, (unsigned long long)held_after_quiet,
++          (unsigned long long)a.st.released_idle, (unsigned long long)a.st.slabs_created);
++   ARM("long-lived process: between bursts the footprint returns to the working slab + 1 kept idle (2 MB), not the burst's",
++       held_after_quiet == 2);
++   ARM("long-lived process: a burst costs at most 5 slabs (64 chunks / 16 + the one in use)", peak_slabs <= 5);
++   ARM("long-lived process: slabs are not churned - fewer than 2 created per burst on average",
++       a.st.slabs_created <= 6 * 5 + 1);
++
+    /* stress */
+    (void)be_passed_checked;
+-   struct nvk_slab_alloc z = NVK_SLAB_ALLOC_INIT; SA = z; SA.chunk_bytes = CHUNK; SA.slab_bytes = 1024 * 1024; SA.spare = 4;
++   struct nvk_slab_alloc z = NVK_SLAB_ALLOC_INIT; SA = z; SA.chunk_bytes = CHUNK; SA.slab_bytes = 1024 * 1024; SA.spare = 4; SA.keep_min = 1;
+    atomic_store(&gpu_submitted, 0); atomic_store(&gpu_done, 0); atomic_store(&conns, 0); atomic_store(&conns_peak, 0);
+    pthread_t t[8];
+    for (int i = 0; i < 8; i++) pthread_create(&t[i], NULL, stress, (void *)(uintptr_t)(i + 1));

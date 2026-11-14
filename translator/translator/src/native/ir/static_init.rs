@@ -1,6 +1,6 @@
 use super::*;
 use crate::native::cfg::BodyBlock;
-use crate::native::tir::{RetEmit, TirTerminator};
+use crate::native::tir::{RetEmit, TirInst, TirTerminator};
 
 fn resolved_value(value: &TypedValue, substitutions: &HashMap<String, TypedValue>) -> TypedValue {
     let mut value = value.clone();
@@ -74,6 +74,439 @@ fn prune_constant_cfg_edges(blocks: &mut Vec<BodyBlock>) {
         }
     }
     blocks.retain(|block| reachable.contains(&block.name));
+}
+
+/// Rounds of constant-argument propagation. One round exposes callees one call level deeper
+/// than the last, so this is a call-depth bound; shader helper chains are far shallower.
+const CONSTANT_ARGUMENT_ROUNDS: usize = 8;
+
+/// Passes over one function body. Definitions normally precede uses in block order; the extra
+/// passes cover a block that is listed before the block that dominates it.
+const FUNCTION_FOLD_PASSES: usize = 4;
+
+/// Known integer fields of a first-class aggregate, sorted by field index.
+type AggregateFields = Vec<(u32, TypedValue)>;
+
+/// What every live call site agrees one argument is.
+#[derive(Clone, Debug, PartialEq)]
+enum ArgumentFact {
+    Scalar(TypedValue),
+    Fields(AggregateFields),
+}
+
+fn int_width(ty: &LlType) -> Option<u32> {
+    match ty {
+        LlType::Bool => Some(1),
+        LlType::Int(width) if (1..=64).contains(width) => Some(*width),
+        _ => None,
+    }
+}
+
+fn width_mask(width: u32) -> u64 {
+    if width >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    }
+}
+
+fn sign_extend(bits: u64, width: u32) -> i64 {
+    let shift = 64 - width;
+    ((bits << shift) as i64) >> shift
+}
+
+/// Width and zero-extended bits of an integer constant; `None` for anything else.
+fn int_bits(value: &TypedValue) -> Option<(u32, u64)> {
+    let width = int_width(&value.ty)?;
+    Some((width, constant_int(value)? & width_mask(width)))
+}
+
+/// One spelling per constant, so equal constants compare equal. A one-bit value is spelled as a
+/// boolean because that is the form the branch pruning recognises.
+fn int_constant(ty: &LlType, bits: u64) -> Option<TypedValue> {
+    let width = int_width(ty)?;
+    let bits = bits & width_mask(width);
+    Some(TypedValue {
+        ty: ty.clone(),
+        value: if width == 1 {
+            LlValue::Bool(bits != 0)
+        } else {
+            LlValue::Int(bits)
+        },
+    })
+}
+
+fn fold_int_binary(opcode: &str, lhs: &TypedValue, rhs: &TypedValue) -> Option<TypedValue> {
+    let (width, a) = int_bits(lhs)?;
+    let (rhs_width, b) = int_bits(rhs)?;
+    if width != rhs_width {
+        return None;
+    }
+    // A shift by the width or more is poison in LLVM; leave it for the emitter.
+    let in_range = b < u64::from(width);
+    let bits = match opcode {
+        "and" => a & b,
+        "or" => a | b,
+        "xor" => a ^ b,
+        "add" => a.wrapping_add(b),
+        "sub" => a.wrapping_sub(b),
+        "mul" => a.wrapping_mul(b),
+        "shl" if in_range => a << b,
+        "lshr" if in_range => a >> b,
+        "ashr" if in_range => (sign_extend(a, width) >> b) as u64,
+        _ => return None,
+    };
+    int_constant(&lhs.ty, bits)
+}
+
+fn fold_int_cast(opcode: &str, source: &TypedValue, destination: &LlType) -> Option<TypedValue> {
+    let (width, bits) = int_bits(source)?;
+    let destination_width = int_width(destination)?;
+    let bits = match opcode {
+        "trunc" if destination_width <= width => bits,
+        "zext" if destination_width >= width => bits,
+        "sext" if destination_width >= width => sign_extend(bits, width) as u64,
+        _ => return None,
+    };
+    int_constant(destination, bits)
+}
+
+fn fold_int_compare(predicate: &str, lhs: &TypedValue, rhs: &TypedValue) -> Option<bool> {
+    let (width, a) = int_bits(lhs)?;
+    let (rhs_width, b) = int_bits(rhs)?;
+    if width != rhs_width {
+        return None;
+    }
+    let (signed_a, signed_b) = (sign_extend(a, width), sign_extend(b, width));
+    Some(match predicate {
+        "eq" => a == b,
+        "ne" => a != b,
+        "ult" => a < b,
+        "ule" => a <= b,
+        "ugt" => a > b,
+        "uge" => a >= b,
+        "slt" => signed_a < signed_b,
+        "sle" => signed_a <= signed_b,
+        "sgt" => signed_a > signed_b,
+        "sge" => signed_a >= signed_b,
+        _ => return None,
+    })
+}
+
+fn operand_value(
+    inst: &TirInst,
+    index: usize,
+    substitutions: &HashMap<String, TypedValue>,
+) -> Option<TypedValue> {
+    inst.operands
+        .get(index)?
+        .as_typed_value()
+        .map(|value| resolved_value(&value, substitutions))
+}
+
+fn is_call_opcode(opcode: &str) -> bool {
+    matches!(opcode, "call" | "tail" | "musttail" | "notail")
+}
+
+fn symbol_key(name: &str) -> &str {
+    name.trim_start_matches('@').trim_matches('"')
+}
+
+fn collect_global_references(value: &LlValue, referenced: &mut HashSet<String>) {
+    match value {
+        LlValue::Global(name) => {
+            referenced.insert(symbol_key(name).to_string());
+        }
+        LlValue::Vector(values) | LlValue::Array(values) | LlValue::Struct(values) => {
+            for value in values {
+                collect_global_references(&value.value, referenced);
+            }
+        }
+        LlValue::Splat(value) => collect_global_references(&value.value, referenced),
+        LlValue::Gep(gep) => {
+            collect_global_references(&gep.base.value, referenced);
+            for index in &gep.indices {
+                collect_global_references(&index.value, referenced);
+            }
+        }
+        LlValue::IntToPtr { source, .. } => collect_global_references(&source.value, referenced),
+        LlValue::Local(_)
+        | LlValue::Bool(_)
+        | LlValue::Int(_)
+        | LlValue::SignedInt(_)
+        | LlValue::Hex(_)
+        | LlValue::Float(_)
+        | LlValue::Float32Bits(_)
+        | LlValue::HalfBits(_)
+        | LlValue::BFloatBits(_)
+        | LlValue::Zero
+        | LlValue::Undef => {}
+    }
+}
+
+fn argument_fact(
+    argument: &TypedValue,
+    aggregates: Option<&HashMap<String, AggregateFields>>,
+) -> Option<ArgumentFact> {
+    if let LlValue::Local(name) = &argument.value {
+        return aggregates?
+            .get(name)
+            .filter(|fields| !fields.is_empty())
+            .cloned()
+            .map(ArgumentFact::Fields);
+    }
+    let (_, bits) = int_bits(argument)?;
+    int_constant(&argument.ty, bits).map(ArgumentFact::Scalar)
+}
+
+/// Keeps only what this call site and every earlier one agree on.
+fn meet_argument_facts(known: &mut [Option<ArgumentFact>], site: Vec<Option<ArgumentFact>>) {
+    if known.len() != site.len() {
+        known.iter_mut().for_each(|fact| *fact = None);
+        return;
+    }
+    for (known, site) in known.iter_mut().zip(site) {
+        *known = match (known.take(), site) {
+            (Some(ArgumentFact::Scalar(a)), Some(ArgumentFact::Scalar(b))) if a == b => {
+                Some(ArgumentFact::Scalar(a))
+            }
+            (Some(ArgumentFact::Fields(a)), Some(ArgumentFact::Fields(b))) => {
+                let common = a
+                    .into_iter()
+                    .filter(|field| b.contains(field))
+                    .collect::<Vec<_>>();
+                (!common.is_empty()).then_some(ArgumentFact::Fields(common))
+            }
+            _ => None,
+        };
+    }
+}
+
+/// Folds the integer constants one function body can prove, given what is known about its
+/// parameters, removes the folded instructions and prunes the branches they decide.
+///
+/// Returns whether an instruction was folded and the aggregates whose integer fields are known.
+/// Aggregates are tracked but never substituted: they are only read back by `extractvalue` and
+/// handed to callees as facts.
+fn fold_function_constants(
+    function: &mut LlFunction,
+    globals: &HashMap<String, meta::StaticIntValue>,
+    seeds: Option<&Vec<Option<ArgumentFact>>>,
+) -> (bool, HashMap<String, AggregateFields>) {
+    let mut substitutions = HashMap::<String, TypedValue>::default();
+    let mut aggregates = HashMap::<String, AggregateFields>::default();
+    if let Some(seeds) = seeds {
+        for ((name, ty), seed) in function.params.iter().zip(seeds) {
+            match seed {
+                Some(ArgumentFact::Scalar(value)) if value.ty == *ty => {
+                    substitutions.insert(name.clone(), value.clone());
+                }
+                Some(ArgumentFact::Fields(fields)) => {
+                    aggregates.insert(name.clone(), fields.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    for _ in 0..FUNCTION_FOLD_PASSES {
+        let before = substitutions.len() + aggregates.len();
+        for block in &function.blocks {
+            let Some(typed) = block.typed.as_ref() else {
+                continue;
+            };
+            for inst in &typed.insts {
+                let Some(result) = inst.result.as_ref() else {
+                    continue;
+                };
+                if substitutions.contains_key(result) {
+                    continue;
+                }
+                let opcode = inst.opcode.as_str();
+                if opcode == "insertvalue" {
+                    if let (Some([index]), Some(base), Some(element)) = (
+                        inst.aggregate_indices().as_deref(),
+                        operand_value(inst, 0, &substitutions),
+                        operand_value(inst, 1, &substitutions),
+                    ) {
+                        let mut fields = match &base.value {
+                            LlValue::Local(name) => {
+                                aggregates.get(name).cloned().unwrap_or_default()
+                            }
+                            _ => Vec::new(),
+                        };
+                        fields.retain(|(field, _)| field != index);
+                        if let Some(value) = int_bits(&element)
+                            .and_then(|(_, bits)| int_constant(&element.ty, bits))
+                        {
+                            fields.push((*index, value));
+                        }
+                        fields.sort_by_key(|(field, _)| *field);
+                        if !fields.is_empty() {
+                            aggregates.insert(result.clone(), fields);
+                        }
+                    }
+                    continue;
+                }
+                let folded: Option<TypedValue> = (|| {
+                    if opcode == "load" {
+                        inst.load().as_ref().and_then(|load| {
+                            let LlValue::Global(global) = &load.ptr.value else {
+                                return None;
+                            };
+                            let result_ty = inst.result_ty.clone()?;
+                            let value = globals.get(global)?;
+                            match value {
+                                meta::StaticIntValue::Scalar(value) => Some(TypedValue {
+                                    ty: result_ty,
+                                    value: LlValue::Int(u64::from(*value)),
+                                }),
+                                meta::StaticIntValue::Vector(values) => {
+                                    let LlType::Vector(element, lanes) = &result_ty else {
+                                        return None;
+                                    };
+                                    if values.len() != *lanes as usize {
+                                        return None;
+                                    }
+                                    let element = (**element).clone();
+                                    let lanes = values
+                                        .iter()
+                                        .map(|value| TypedValue {
+                                            ty: element.clone(),
+                                            value: LlValue::Int(u64::from(*value)),
+                                        })
+                                        .collect();
+                                    Some(TypedValue {
+                                        ty: result_ty,
+                                        value: LlValue::Vector(lanes),
+                                    })
+                                }
+                            }
+                        })
+                    } else if opcode == "extractelement" {
+                        let mut operands = inst.operands.iter().filter_map(|operand| {
+                            operand
+                                .as_typed_value()
+                                .map(|value| resolved_value(&value, &substitutions))
+                        });
+                        let vector = operands.next()?;
+                        let index = constant_int(&operands.next()?)? as usize;
+                        let LlValue::Vector(values) = vector.value else {
+                            return None;
+                        };
+                        values.get(index).cloned()
+                    } else if opcode == "extractvalue" {
+                        let [index] = inst.aggregate_indices().as_deref()? else {
+                            return None;
+                        };
+                        let aggregate = operand_value(inst, 0, &substitutions)?;
+                        let LlValue::Local(name) = &aggregate.value else {
+                            return None;
+                        };
+                        let (_, value) = aggregates
+                            .get(name)?
+                            .iter()
+                            .find(|(field, _)| field == index)?;
+                        inst.result_ty
+                            .as_ref()
+                            .is_none_or(|ty| *ty == value.ty)
+                            .then(|| value.clone())
+                    } else if matches!(
+                        opcode,
+                        "and" | "or" | "xor" | "add" | "sub" | "mul" | "shl" | "lshr" | "ashr"
+                    ) {
+                        fold_int_binary(
+                            opcode,
+                            &operand_value(inst, 0, &substitutions)?,
+                            &operand_value(inst, 1, &substitutions)?,
+                        )
+                    } else if matches!(opcode, "trunc" | "zext" | "sext") {
+                        fold_int_cast(
+                            opcode,
+                            &operand_value(inst, 0, &substitutions)?,
+                            inst.result_ty.as_ref()?,
+                        )
+                    } else if opcode == "icmp" {
+                        let mut operands = inst.operands.iter().filter_map(|operand| {
+                            operand
+                                .as_typed_value()
+                                .map(|value| resolved_value(&value, &substitutions))
+                        });
+                        let lhs_value = operands.next()?;
+                        let rhs_value = operands.next()?;
+                        let predicate = inst.cmp_predicate().as_deref();
+                        if let Some(result) = predicate
+                            .and_then(|predicate| fold_int_compare(predicate, &lhs_value, &rhs_value))
+                        {
+                            return Some(TypedValue {
+                                ty: LlType::Bool,
+                                value: LlValue::Bool(result),
+                            });
+                        }
+                        let lhs = constant_int(&lhs_value);
+                        let rhs = constant_int(&rhs_value);
+                        match (predicate, lhs, rhs) {
+                            (Some("eq"), Some(lhs), Some(rhs)) => Some(TypedValue {
+                                ty: LlType::Bool,
+                                value: LlValue::Bool(lhs == rhs),
+                            }),
+                            (Some("ne"), Some(lhs), Some(rhs)) => Some(TypedValue {
+                                ty: LlType::Bool,
+                                value: LlValue::Bool(lhs != rhs),
+                            }),
+                            (Some("ult"), _, Some(0)) => Some(TypedValue {
+                                ty: LlType::Bool,
+                                value: LlValue::Bool(false),
+                            }),
+                            (Some("uge"), _, Some(0)) => Some(TypedValue {
+                                ty: LlType::Bool,
+                                value: LlValue::Bool(true),
+                            }),
+                            _ => None,
+                        }
+                    } else if opcode == "select" {
+                        let condition = inst
+                            .operands
+                            .first()
+                            .and_then(|operand| operand.as_typed_value())
+                            .map(|value| resolved_value(&value, &substitutions));
+                        let take_true = condition.as_ref().and_then(constant_int)? != 0;
+                        let (true_value, false_value) = inst.select_arms().as_deref()?;
+                        Some(resolved_value(
+                            if take_true { true_value } else { false_value },
+                            &substitutions,
+                        ))
+                    } else {
+                        None
+                    }
+                })();
+                if let Some(value) = folded {
+                    substitutions.insert(result.clone(), value);
+                }
+            }
+        }
+        if substitutions.len() + aggregates.len() == before {
+            break;
+        }
+    }
+    if substitutions.is_empty() {
+        return (false, aggregates);
+    }
+    let mut removed = 0usize;
+    for block in &mut function.blocks {
+        let Some(typed) = block.typed_mut() else {
+            continue;
+        };
+        let before = typed.insts.len();
+        typed.insts.retain(|inst| {
+            inst.result
+                .as_ref()
+                .is_none_or(|result| !substitutions.contains_key(result))
+        });
+        removed += before - typed.insts.len();
+        typed.substitute_values(&substitutions);
+    }
+    prune_constant_cfg_edges(&mut function.blocks);
+    (removed > 0, aggregates)
 }
 
 struct StaticInitializer {
@@ -193,131 +626,113 @@ impl LlModule {
         }
     }
 
+    /// Folds what the function constants decide, the way the vendor's optimizer does after
+    /// specialization: integer arithmetic on constants inside each function, and constants that
+    /// every live call site passes to an internal function. A shader that tests a state word in
+    /// a helper (`if (state.word & flag) hook(...)`) only loses the dead call once the word has
+    /// travelled from the entry point into that helper.
     pub(in crate::native) fn fold_static_initializer_constants(&mut self) {
         if self.static_init_globals.is_empty() {
             return;
         }
-        for function in &mut self.functions {
-            let mut substitutions = HashMap::<String, TypedValue>::default();
+        let mut seeds = HashMap::<String, Vec<Option<ArgumentFact>>>::default();
+        for _ in 0..CONSTANT_ARGUMENT_ROUNDS {
+            let mut changed = false;
+            let mut aggregates = HashMap::<String, HashMap<String, AggregateFields>>::default();
+            for function in &mut self.functions {
+                let (folded, known) = fold_function_constants(
+                    function,
+                    &self.static_init_globals,
+                    seeds.get(&function.name),
+                );
+                changed |= folded;
+                aggregates.insert(function.name.clone(), known);
+            }
+            // Call sites in functions nothing reaches any more must not hold a fact back.
+            self.prune_unreachable_function_bodies();
+            let next = self.constant_argument_facts(&aggregates);
+            if !changed && next == seeds {
+                break;
+            }
+            seeds = next;
+        }
+    }
+
+    /// For each internal function, the arguments on which all of its call sites agree.
+    ///
+    /// Sound only when every caller is visible, so a function is skipped unless it has internal
+    /// linkage, is not an entry point or static initializer, and is never used as a value. If
+    /// any instruction cannot be inspected the answer is "nothing known".
+    fn constant_argument_facts(
+        &self,
+        aggregates: &HashMap<String, HashMap<String, AggregateFields>>,
+    ) -> HashMap<String, Vec<Option<ArgumentFact>>> {
+        let unknown = |reason: &str| {
+            if crate::env_vars::retry_debug() {
+                eprintln!("[retry-debug] native IR: constant arguments not propagated: {reason}");
+            }
+            HashMap::default()
+        };
+        let mut facts = HashMap::<String, Vec<Option<ArgumentFact>>>::default();
+        let mut referenced = HashSet::<String>::default();
+        for function in &self.functions {
+            let known = aggregates.get(&function.name);
             for block in &function.blocks {
                 let Some(typed) = block.typed.as_ref() else {
-                    continue;
+                    return unknown("untyped block");
                 };
                 for inst in &typed.insts {
-                    let Some(result) = inst.result.as_ref() else {
-                        continue;
-                    };
-                    let folded: Option<TypedValue> = (|| {
-                        if inst.opcode == "load" {
-                            inst.load().as_ref().and_then(|load| {
-                                let LlValue::Global(global) = &load.ptr.value else {
-                                    return None;
-                                };
-                                let result_ty = inst.result_ty.clone()?;
-                                let value = self.static_init_globals.get(global)?;
-                                match value {
-                                    meta::StaticIntValue::Scalar(value) => Some(TypedValue {
-                                        ty: result_ty,
-                                        value: LlValue::Int(u64::from(*value)),
-                                    }),
-                                    meta::StaticIntValue::Vector(values) => {
-                                        let LlType::Vector(element, lanes) = &result_ty else {
-                                            return None;
-                                        };
-                                        if values.len() != *lanes as usize {
-                                            return None;
-                                        }
-                                        let element = (**element).clone();
-                                        let lanes = values
-                                            .iter()
-                                            .map(|value| TypedValue {
-                                                ty: element.clone(),
-                                                value: LlValue::Int(u64::from(*value)),
-                                            })
-                                            .collect();
-                                        Some(TypedValue {
-                                            ty: result_ty,
-                                            value: LlValue::Vector(lanes),
-                                        })
-                                    }
-                                }
-                            })
-                        } else if inst.opcode == "extractelement" {
-                            let mut operands = inst.operands.iter().filter_map(|operand| {
-                                operand
-                                    .as_typed_value()
-                                    .map(|value| resolved_value(&value, &substitutions))
-                            });
-                            let vector = operands.next()?;
-                            let index = constant_int(&operands.next()?)? as usize;
-                            let LlValue::Vector(values) = vector.value else {
-                                return None;
-                            };
-                            values.get(index).cloned()
-                        } else if inst.opcode == "icmp" {
-                            let mut operands = inst.operands.iter().filter_map(|operand| {
-                                operand
-                                    .as_typed_value()
-                                    .map(|value| resolved_value(&value, &substitutions))
-                            });
-                            let lhs = constant_int(&operands.next()?);
-                            let rhs = constant_int(&operands.next()?);
-                            match (inst.cmp_predicate().as_deref(), lhs, rhs) {
-                                (Some("eq"), Some(lhs), Some(rhs)) => Some(TypedValue {
-                                    ty: LlType::Bool,
-                                    value: LlValue::Bool(lhs == rhs),
-                                }),
-                                (Some("ne"), Some(lhs), Some(rhs)) => Some(TypedValue {
-                                    ty: LlType::Bool,
-                                    value: LlValue::Bool(lhs != rhs),
-                                }),
-                                (Some("ult"), _, Some(0)) => Some(TypedValue {
-                                    ty: LlType::Bool,
-                                    value: LlValue::Bool(false),
-                                }),
-                                (Some("uge"), _, Some(0)) => Some(TypedValue {
-                                    ty: LlType::Bool,
-                                    value: LlValue::Bool(true),
-                                }),
-                                _ => None,
-                            }
-                        } else if inst.opcode == "select" {
-                            let condition = inst
-                                .operands
-                                .first()
-                                .and_then(|operand| operand.as_typed_value())
-                                .map(|value| resolved_value(&value, &substitutions));
-                            let take_true = condition.as_ref().and_then(constant_int)? != 0;
-                            let (true_value, false_value) = inst.select_arms().as_deref()?;
-                            Some(resolved_value(
-                                if take_true { true_value } else { false_value },
-                                &substitutions,
-                            ))
-                        } else {
-                            None
+                    if is_call_opcode(inst.opcode.as_str()) {
+                        let Some(call) = inst.call().as_deref() else {
+                            return unknown("unparsed call");
+                        };
+                        for argument in &call.args {
+                            collect_global_references(&argument.value, &mut referenced);
                         }
-                    })();
-                    if let Some(value) = folded {
-                        substitutions.insert(result.clone(), value);
+                        let site = call
+                            .args
+                            .iter()
+                            .map(|argument| argument_fact(argument, known))
+                            .collect::<Vec<_>>();
+                        match facts.get_mut(&call.callee) {
+                            Some(agreed) => meet_argument_facts(agreed, site),
+                            None => {
+                                facts.insert(call.callee.clone(), site);
+                            }
+                        }
+                        continue;
+                    }
+                    for operand in &inst.operands {
+                        let Some(value) = operand.as_typed_value() else {
+                            return unknown("unresolved operand");
+                        };
+                        collect_global_references(&value.value, &mut referenced);
                     }
                 }
+                if let RetEmit::Value(value) = &typed.ret {
+                    collect_global_references(&value.value, &mut referenced);
+                }
             }
-            if substitutions.is_empty() {
-                continue;
-            }
-            for block in &mut function.blocks {
-                let Some(typed) = block.typed_mut() else {
-                    continue;
-                };
-                typed.insts.retain(|inst| {
-                    inst.result
-                        .as_ref()
-                        .is_none_or(|result| !substitutions.contains_key(result))
-                });
-                typed.substitute_values(&substitutions);
-            }
-            prune_constant_cfg_edges(&mut function.blocks);
         }
+        for global in &self.globals {
+            if let Some(initializer) = &global.initializer {
+                collect_global_references(&initializer.value, &mut referenced);
+            }
+        }
+        let entry = self.entry_name.as_deref();
+        facts.retain(|callee, arguments| {
+            arguments.iter().any(Option::is_some)
+                && Some(callee.as_str()) != entry
+                && !self.entry_functions.contains(callee)
+                && !referenced.contains(symbol_key(callee))
+                && self.functions.iter().any(|function| {
+                    function.name == *callee
+                        && function.is_internal
+                        && !function.is_static_initializer
+                        && function.params.len() == arguments.len()
+                })
+        });
+        facts
     }
 
     pub(in crate::native) fn inline_simple_static_initializers(&mut self) {
@@ -451,6 +866,74 @@ impl LlModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn int(width: u32, value: LlValue) -> TypedValue {
+        TypedValue {
+            ty: LlType::Int(width),
+            value,
+        }
+    }
+
+    #[test]
+    fn integer_folds_wrap_and_compare_at_the_operand_width() {
+        let folded = |opcode: &str, width: u32, a: u64, b: u64| {
+            fold_int_binary(opcode, &int(width, LlValue::Int(a)), &int(width, LlValue::Int(b)))
+                .map(|value| value.value)
+        };
+        assert_eq!(
+            folded("and", 32, 147_456, 1 << 30),
+            Some(LlValue::Int(0)),
+            "a clear flag bit must fold to zero"
+        );
+        assert_eq!(folded("add", 8, 250, 10), Some(LlValue::Int(4)), "i8 add wraps");
+        assert_eq!(folded("ashr", 8, 0x80, 7), Some(LlValue::Int(0xff)), "ashr keeps the sign");
+        assert_eq!(folded("shl", 8, 1, 8), None, "a shift by the width is poison, not zero");
+        assert_eq!(folded("udiv", 32, 8, 2), None, "division is left alone");
+        assert_eq!(
+            fold_int_binary("and", &int(32, LlValue::Int(1)), &int(8, LlValue::Int(1))),
+            None,
+            "mismatched widths are not folded"
+        );
+        assert_eq!(
+            fold_int_compare("slt", &int(8, LlValue::Int(0xff)), &int(8, LlValue::Int(0))),
+            Some(true),
+            "0xff is -1 as an i8"
+        );
+        assert_eq!(
+            fold_int_compare("ult", &int(8, LlValue::SignedInt(-1)), &int(8, LlValue::Int(0))),
+            Some(false),
+            "-1 is 255 unsigned"
+        );
+        assert_eq!(
+            fold_int_cast("sext", &int(8, LlValue::Int(0x80)), &LlType::Int(32)).map(|v| v.value),
+            Some(LlValue::Int(0xffff_ff80))
+        );
+        assert_eq!(
+            fold_int_cast("trunc", &int(32, LlValue::Int(0x104)), &LlType::Int(1)).map(|v| v.value),
+            Some(LlValue::Bool(false)),
+            "a one-bit result is spelled as a boolean so branch pruning sees it"
+        );
+        assert_eq!(
+            fold_int_cast("zext", &int(32, LlValue::Int(1)), &LlType::Float),
+            None,
+            "only integer destinations fold"
+        );
+    }
+
+    #[test]
+    fn call_sites_must_agree_before_an_argument_is_a_fact() {
+        let scalar = |value: u64| Some(ArgumentFact::Scalar(int(32, LlValue::Int(value))));
+        let fields = |value: u64| Some(ArgumentFact::Fields(vec![(0, int(32, LlValue::Int(value)))]));
+        let mut known = vec![scalar(7), scalar(7), fields(1), fields(1), scalar(3)];
+        meet_argument_facts(
+            &mut known,
+            vec![scalar(7), scalar(8), fields(1), fields(2), None],
+        );
+        assert_eq!(known, vec![scalar(7), None, fields(1), None, None]);
+        let mut known = vec![scalar(7)];
+        meet_argument_facts(&mut known, vec![scalar(7), scalar(7)]);
+        assert_eq!(known, vec![None], "a call with another argument count agrees on nothing");
+    }
 
     #[test]
     fn function_constant_default_folds_cross_storage_pointer_select() {

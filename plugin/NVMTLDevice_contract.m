@@ -94,7 +94,7 @@ static void nvbt(const char *tag, int *count, int max);
 - (NSUInteger)resourcePatchingTypeForResourceType:(NSUInteger)a0 { return 0; }
 - (void)setMetalAssertionsEnabled:(BOOL)a0 { nvlog("setMetalAssertionsEnabled: (ignored)"); }
 - (NSUInteger)singleFPConfig { return 0; }
-- (MTLSize)sparseTileSizeWithTextureType:(NSUInteger)a0 pixelFormat:(NSUInteger)a1 sampleCount:(NSUInteger)a2 { return MTLSizeMake(32, 32, 1); }
-- (MTLSize)sparseTileSizeWithTextureType:(NSUInteger)a0 pixelFormat:(NSUInteger)a1 sampleCount:(NSUInteger)a2 sparsePageSize:(NSInteger)a3 { return MTLSizeMake(32, 32, 1); }
+- (MTLSize)sparseTileSizeWithTextureType:(NSUInteger)a0 pixelFormat:(NSUInteger)a1 sampleCount:(NSUInteger)a2 { return nvmtl4_sparse_tile_size(a0, a1, a2, MTLSparsePageSize64); }
+- (MTLSize)sparseTileSizeWithTextureType:(NSUInteger)a0 pixelFormat:(NSUInteger)a1 sampleCount:(NSUInteger)a2 sparsePageSize:(NSInteger)a3 { return nvmtl4_sparse_tile_size(a0, a1, a2, a3); }
 - (MTLSize)tileSizeWithTextureType:(NSUInteger)a0 pixelFormat:(NSUInteger)a1 sampleCount:(NSUInteger)a2 { return MTLSizeMake(32, 32, 1); }
 @end
