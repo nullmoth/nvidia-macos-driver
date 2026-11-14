@@ -1314,11 +1314,8 @@ static void *nvmtl_storage_view_for(NVMTLCommandBuffer *cb, NVMTLTexture *t, BOO
     const MTLTextureUsage usage = (MTLTextureUsage)t->_usage;   // not -usage, which answers ShaderRead for Unknown
     if (!writes || !cb || cb->_c.in_rp || t->_parent || (usage && !(usage & MTLTextureUsageShaderWrite))) return NULL;
     nvk_image *im = [t nvi];
-    // a multisampled attachment gets a storage twin only for a tile function (NVMTL_TILE_SHADING=1, shaderStorageImageMultisample)
-    const BOOL ms = im && (im->samples ? im->samples : 1) > 1;
-    const BOOL msOk = ms && im->mtl_type == 4 && nvmtl_tile_on() && nvmtl_vk_ms_storage_ok();
     if (!im || !im->img || !im->w || !im->h || (im->mips ? im->mips : 1) > 1 || (im->layers ? im->layers : 1) > 1
-        || (ms ? !msOk : im->mtl_type != 2) || im->bw > 1) return NULL;
+        || im->mtl_type != 2 || (im->samples ? im->samples : 1) > 1 || im->bw > 1) return NULL;
     // Created once per texture; two command buffers may encode the same texture on different threads at once.
     @synchronized (t) {
         if (!t->_stTwin.img) {
@@ -1328,10 +1325,7 @@ static void *nvmtl_storage_view_for(NVMTLCommandBuffer *cb, NVMTLTexture *t, BOO
             // blits that decode and encode sRGB, so a kernel writes linear values and the texture ends up sRGB-encoded,
             // as a write to an sRGB texture does on Apple GPUs (Blender's edit-mode overlay wrote RGBA8Unorm_sRGB).
             const int srgb = nvmtl_vk_srgb_format(im->fmt);
-            int made = ms ? (srgb ? -1 : nvmtl_vk_image_create_ms_storage(im->w, im->h, im->fmt, im->bpp, im->samples, &t->_stTwin))
-                          : nvmtl_vk_image_create_typed(im->w, im->h, srgb ? 97u : im->fmt, srgb ? 8u : im->bpp, 0, 1, 1, 2, 1, &t->_stTwin);
-            if (ms && !made) t->_stTwin.storage = 1;
-            if (made || !t->_stTwin.storage) {
+            if (nvmtl_vk_image_create_typed(im->w, im->h, srgb ? 97u : im->fmt, srgb ? 8u : im->bpp, 0, 1, 1, 2, 1, &t->_stTwin) || !t->_stTwin.storage) {
                 if (t->_stTwin.img) nvmtl_vk_image_destroy(&t->_stTwin);
                 memset(&t->_stTwin, 0, sizeof t->_stTwin);
                 nvlog("storage twin: VkFormat %u %ux%u cannot be a storage image in optimal tiling either - shader writes to it are LOST", im->fmt, im->w, im->h);
@@ -1589,13 +1583,6 @@ unsigned long long nvmtl_tex_objs_live(void) {
 }
 unsigned long long nvmtl_tex_objs_released(void) { return nvmtl_tex_objs_gone; }
 @implementation NVMTLTexture
-// sparse textures (NVMTL_SPARSE_TEXTURES=1): where the mip tail starts, how big it is, and whether unmapped tiles read as zero
-- (NSUInteger)firstMipmapInTail { const nvmtl_vk_sparse_info *si = _i.sparse; return si ? si->first_tail : 0; }
-- (NSUInteger)tailSizeInBytes { const nvmtl_vk_sparse_info *si = _i.sparse; return si ? (NSUInteger)si->tail_size : 0; }
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunguarded-availability-new"
-- (MTLTextureSparseTier)sparseTextureTier { const nvmtl_vk_sparse_info *si = _i.sparse; return (MTLTextureSparseTier)(si ? nvmtl_sparse_tier(si->strict) : 0u); }   // macOS 26; the build targets 15
-#pragma clang diagnostic pop
 + (instancetype)alloc { nvmtl_tex_objs_made++; return [super alloc]; }
 - (void)setResponsibleProcess:(int)pid { static int said; if (!said++) nvlog("setResponsibleProcess: pid %d on a texture - per-process attribution is not kept; nothing to set (said once)", pid); }
 - (unsigned long long)protectionOptions { return 0; }
@@ -1661,13 +1648,6 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
     if (!_parent && _bparkable && _backBuf && _i.img) nvmtl_bpark_put(_backBuf, &_i, _pkey);
     if (!_parent) { nvmtl_vk_image_dying_label(_label.UTF8String); nvmtl_vk_image_destroy(&_i); }
     if (_stTwin.img) nvmtl_vk_image_destroy(&_stTwin);
-    if (_sparseHeap) {   // a sparse texture's pages go back to its heap (the mapped blocks and the mip tail)
-        @synchronized (_sparseHeap) {
-            for (NSNumber *page in _sparseTiles.allValues) nvmtl_page_free(&_sparseHeap->_pool, page.unsignedIntValue);
-            for (uint32_t k = 0; k < _sparseTailPages; k++) nvmtl_page_free(&_sparseHeap->_pool, (uint32_t)_sparseTailFirst + k);
-            _sparseHeap->_used = (NSUInteger)_sparseHeap->_pool.used * NVMTL_SPARSE_BLOCK_BYTES;
-        }
-    }
     if (_y422Surf) { CFRelease(_y422Surf); _y422Surf = NULL; }
     if (!_parent && _vramOn) { if (!nvmtl_ic_put(&_vramBuf)) nvmtl_vk_buffer_destroy(&_vramBuf); _vramOn = NO; }
     if (!_parent) nvmtl_vk_host_pages_drop(&_hostPages);
@@ -4208,8 +4188,6 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
 - (BOOL)nvmtlBuildPass:(MTLRenderPassDescriptor *)d {
     NVMTLCommandBuffer *cb = _cb;
     memset(&_pass, 0, sizeof _pass); cb->_c.depth_view = NULL; _hzAttSkip = 0;
-    for (int i = 0; i < NVMTL_NCOL; i++) _colTex[i] = nil;
-    _tileW = (uint32_t)NVMTL_SINCE(11.0, NSUInteger, d.tileWidth, 0); _tileH = (uint32_t)NVMTL_SINCE(11.0, NSUInteger, d.tileHeight, 0); _tilePs = nil;
     MTLSamplePosition sample[8];
     NSUInteger sampleCount = NVMTL_SINCE(10.13, NSUInteger, [d getSamplePositions:NULL count:0], 0);
     if (sampleCount && sampleCount <= 8) { if (@available(macOS 10.13, *)) [d getSamplePositions:sample count:sampleCount]; }
@@ -4239,7 +4217,6 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
         if (!tx) continue;
         if (![(id)tx isKindOfClass:[NVMTLTexture class]]) { nvlog("encoder: apps2 colour %u is a %s, not our texture — pass REFUSED", i, object_getClassName(tx)); return NO; }
         NVMTLTexture *t = (NVMTLTexture *)tx; uint32_t cw = 0, ch = 0;
-        _colTex[i] = t;
         uint32_t zslice = [t nvi]->mtl_type == 7 ? (uint32_t)ca.depthPlane : (uint32_t)ca.slice;
         if (ca.depthPlane && [t nvi]->mtl_type != 7) { static int said;
             if (said++ < 4) nvlog("encoder: apps2 colour %u sets depthPlane %lu on a texture of type %u, which is not 3D — depthPlane IGNORED, its slice %lu is used", i, (unsigned long)ca.depthPlane, [t nvi]->mtl_type, (unsigned long)ca.slice); }
@@ -4447,7 +4424,6 @@ static MTLPixelFormat nvmtl_swizzle_twin_mtl(MTLPixelFormat f) { return (MTLPixe
       } }
     NVMTLRenderPipelineState *p = (NVMTLRenderPipelineState *)ps;
     if (!p) { nvlog("encoder: nil render pipeline refused"); return; }
-    if (p->_tileFn) { _tilePs = p; return; }   // a tile pipeline: dispatchThreadsPerTile runs it between render-pass segments
     if (_begun && !nvmtl_vk_pipeline_compatible(&_passSig, &p->_p)) {
         static int refuse = -1;   // NVMTL_NO_PASS_TRANSITION=1: the old refusal instead of the transition below (a split switch)
         if (refuse < 0) { const char *e = getenv("NVMTL_NO_PASS_TRANSITION"); refuse = e && e[0] == '1';
@@ -5759,7 +5735,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
 - (NSUInteger)allocatedSize { return _size; }
 - (void)dealloc { for (uint32_t k = 0; k < _npk; k++) nvmtl_vk_image_destroy(&_pk[k].img);
                   free(_pk); _pk = NULL; _npk = 0;
-                  nvmtl_vk_heap_destroy(&_hm); free(_fr); _fr = NULL; free(_poolBits); _poolBits = NULL;
+                  nvmtl_vk_heap_destroy(&_hm); free(_fr); _fr = NULL;
                   for (uint32_t k = 0; k < _lzn; k++) nvmtl_vk_heap_destroy(&_lzm[k]);
                   free(_lzm); free(_lzb); free(_lzo); _lzm = NULL; _lzb = NULL; _lzo = NULL; _lzn = 0; }
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)len options:(MTLResourceOptions)opt offset:(NSUInteger)off {
@@ -8147,38 +8123,6 @@ static void nvmtl_late_present(void) {
 - (NSArray<id<MTLAllocation>> *)allAllocations { return [_allocs copy]; }
 - (NSUInteger)allocationCount { return _allocs.count; }
 - (void)commit {}
-@end
-// Sparse mapping is applied when the call is made, not at its place on the GPU timeline: a bind waits for the queue before it removes
-// anything, so work already submitted is safe, and work encoded earlier in this same command buffer sees the new mapping.
-@implementation NVMTLResourceStateCommandEncoder
-- (id<MTLDevice>)device { return (id<MTLDevice>)gNVMTLMainDevice; }
-- (NSString *)label { return _label; }
-- (void)setLabel:(NSString *)l { _label = [l copy]; }
-- (void)endEncoding { if (_cb) { _cb->_nEnd++; _cb = nil; } }
-- (void)insertDebugSignpost:(NSString *)s {}
-- (void)pushDebugGroup:(NSString *)s {}
-- (void)popDebugGroup {}
-- (void)updateFence:(id<MTLFence>)fence {}
-- (void)waitForFence:(id<MTLFence>)fence {}
-- (void)updateTextureMapping:(id<MTLTexture>)texture mode:(MTLSparseTextureMappingMode)mode region:(MTLRegion)region mipLevel:(NSUInteger)mip slice:(NSUInteger)slice {
-    nvmtl_sparse_update(texture, mode, region, mip, slice);
-}
-- (void)updateTextureMappings:(id<MTLTexture>)texture mode:(MTLSparseTextureMappingMode)mode regions:(const MTLRegion [])regions mipLevels:(const NSUInteger [])mips
-                       slices:(const NSUInteger [])slices numRegions:(NSUInteger)n {
-    for (NSUInteger i = 0; i < n; i++) nvmtl_sparse_update(texture, mode, regions[i], mips[i], slices[i]);
-}
-// MTLMapIndirectBufferFormat: a count, then that many MTLMapIndirectArguments. Read when this is encoded, so it only works for a
-// buffer the CPU wrote (a GPU-written list is not carried).
-- (void)updateTextureMapping:(id<MTLTexture>)texture mode:(MTLSparseTextureMappingMode)mode indirectBuffer:(id<MTLBuffer>)buffer indirectBufferOffset:(NSUInteger)off {
-    const uint8_t *p = (const uint8_t *)buffer.contents;
-    if (!p || off + 4 > buffer.length) { nvlog("updateTextureMapping:indirectBuffer: the buffer is not CPU-readable - REFUSED"); return; }
-    uint32_t n; memcpy(&n, p + off, 4);
-    if ((uint64_t)n * sizeof(MTLMapIndirectArguments) + 4 > buffer.length - off) { nvlog("updateTextureMapping:indirectBuffer: %u mappings do not fit the buffer - REFUSED", n); return; }
-    for (uint32_t i = 0; i < n; i++) {
-        MTLMapIndirectArguments a; memcpy(&a, p + off + 4 + (size_t)i * sizeof a, sizeof a);
-        nvmtl_sparse_update(texture, mode, MTLRegionMake3D(a.regionOriginX, a.regionOriginY, a.regionOriginZ, a.regionSizeWidth, a.regionSizeHeight, a.regionSizeDepth), a.mipMapLevel, a.sliceId);
-    }
-}
 @end
 @implementation NVMTLEvent
 - (instancetype)init { if ((self = [super init])) _condition = [NSCondition new]; return self; }

@@ -1290,76 +1290,6 @@ static inline BOOL nvmtl_bgr10_storage_remap(MTLTextureDescriptor *d, uint32_t *
 // GBGR422 / BGRG422 (on by default, NVMTL_YUV422=0 turns them off): a full-width RGBA8 image holding what Metal's sampler returns, with the packed bytes
 // kept beside it (nvmtl_yuv422.h). Sampling works for any shader; the texture is filled by replaceRegion and read by
 // getBytes. Blits, views, render targets and IOSurface backing are refused, each with a log line.
-// ---- sparse heaps and textures (NVMTL_SPARSE_TEXTURES=1; nvmtl_sparse_map.h) ----
-// A sparse heap is one VkDeviceMemory carved into 64 KiB pages. A sparse texture owns no memory until updateTextureMapping binds
-// tile blocks to pages; its mip tail is bound to a contiguous run of pages when it is made.
-id nvmtl_sparse_heap_texture(NVMTLHeap *heap, MTLTextureDescriptor *d) {
-    if ((d.textureType != MTLTextureType2D && d.textureType != MTLTextureType2DArray) || d.sampleCount > 1) {
-        nvlog("sparse heap: only single-sample 2D and 2D-array textures are carried (type %lu, %lu samples) -> nil", (unsigned long)d.textureType, (unsigned long)d.sampleCount); return nil; }
-    uint32_t vkf = 0, bpp = 0; int a8 = 0;
-    if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8) || a8) { nvlog("sparse heap: pixel format %lu is not carried -> nil", (unsigned long)d.pixelFormat); return nil; }
-    NVMTLTexture *t = [NVMTLTexture new];
-    t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)NVMTL_SINCE(10.15, NSUInteger, d.hazardTrackingMode, 0) << MTLResourceHazardTrackingModeShift) | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
-    t->_fmt = d.pixelFormat;
-    const uint32_t layers = d.textureType == MTLTextureType2DArray ? (uint32_t)d.arrayLength : 1u;
-    if (nvmtl_vk_image_create_sparse((uint32_t)d.width, (uint32_t)d.height, vkf, bpp, (uint32_t)(d.mipmapLevelCount ? d.mipmapLevelCount : 1), layers, &t->_i)) return nil;
-    t->_q = nvmtl_device_queue(); t->_usage = d.usage; t->_stex = t->_i.storage == 1;
-    nvmtl_texture_desc_swizzle(t, d);
-    const nvmtl_vk_sparse_info *si = t->_i.sparse;
-    if (si->tail_size && si->first_tail < si->mips) {
-        const uint32_t pages = (uint32_t)((si->tail_size + NVMTL_SPARSE_BLOCK_BYTES - 1) / NVMTL_SPARSE_BLOCK_BYTES);
-        int first;
-        @synchronized (heap) { first = nvmtl_page_alloc_run(&heap->_pool, pages); heap->_used = (NSUInteger)heap->_pool.used * NVMTL_SPARSE_BLOCK_BYTES; }
-        if (first < 0) { nvlog("sparse heap: no room for the %u-page mip tail -> nil", pages); nvmtl_vk_image_destroy(&t->_i); return nil; }
-        t->_sparseTailFirst = first; t->_sparseTailPages = pages;
-        if (nvmtl_vk_image_sparse_bind(&t->_i, heap->_hm.mem, NULL, 0, (uint64_t)first * NVMTL_SPARSE_BLOCK_BYTES, 1) != 0) {
-            t->_sparseTailPages = 0;
-            @synchronized (heap) { for (uint32_t k = 0; k < pages; k++) nvmtl_page_free(&heap->_pool, (uint32_t)first + k); heap->_used = (NSUInteger)heap->_pool.used * NVMTL_SPARSE_BLOCK_BYTES; }
-            nvmtl_vk_image_destroy(&t->_i); return nil; }
-    }
-    t->_sparseHeap = heap; t->_sparseTiles = [NSMutableDictionary new];
-    nvlog("sparse heap: %lux%lu texture, %u level(s), block %ux%u, tail from level %u -> %p", (unsigned long)d.width, (unsigned long)d.height, si->mips, si->gran[0], si->gran[1], si->first_tail, (__bridge void *)t);
-    return t;
-}
-void nvmtl_sparse_update(id<MTLTexture> tex, MTLSparseTextureMappingMode mode, MTLRegion r, NSUInteger mip, NSUInteger slice) {
-    NVMTLTexture *t = [(id)tex isKindOfClass:[NVMTLTexture class]] ? (NVMTLTexture *)tex : nil;
-    NVMTLHeap *heap = t ? t->_sparseHeap : nil; const nvmtl_vk_sparse_info *si = t ? t->_i.sparse : NULL;
-    if (!heap || !si) { nvlog("updateTextureMapping: not a texture of a sparse heap - ignored"); return; }
-    const uint32_t org[3] = { (uint32_t)r.origin.x, (uint32_t)r.origin.y, 0 }, size[3] = { (uint32_t)r.size.width, (uint32_t)r.size.height, 1 };
-    if (r.origin.x > UINT32_MAX || r.origin.y > UINT32_MAX || r.size.width > UINT32_MAX || r.size.height > UINT32_MAX || r.origin.z || r.size.depth > 1 || mip > 31 || slice >= si->layers) {
-        nvlog("updateTextureMapping: region/level/slice outside what a 2D sparse texture has - ignored"); return; }
-    const char *why = nvmtl_sparse_region_refusal(si->w, si->h, 1, (uint32_t)mip, si->first_tail, si->gran, org, size);
-    if (why) { nvlog("updateTextureMapping: %s - ignored", why); return; }
-    const uint64_t count = (uint64_t)((size[0] + si->gran[0] - 1) / si->gran[0]) * ((size[1] + si->gran[1] - 1) / si->gran[1]);
-    if (count > 65536) { nvlog("updateTextureMapping: %llu tile blocks in one call is over the 65536 limit - ignored", (unsigned long long)count); return; }
-    nvmtl_sparse_tile *tiles = calloc((size_t)count, sizeof *tiles);
-    nvmtl_vk_sparse_blk *blk = calloc((size_t)count, sizeof *blk); uint64_t *keys = calloc((size_t)count, sizeof *keys); int *pages = calloc((size_t)count, sizeof *pages);
-    if (!tiles || !blk || !keys || !pages) { free(tiles); free(blk); free(keys); free(pages); return; }
-    const int n = nvmtl_sparse_tiles(si->w, si->h, 1, (uint32_t)mip, si->gran, org, size, tiles, (int)count);
-    const BOOL map = mode == MTLSparseTextureMappingModeMap;
-    @synchronized (heap) {
-        int m = 0;
-        for (int i = 0; i < n; i++) {
-            const uint64_t key = ((uint64_t)(mip & 0xff) << 56) | ((uint64_t)(slice & 0xff) << 48) | ((uint64_t)tiles[i].ty << 24) | tiles[i].tx;
-            NSNumber *have = t->_sparseTiles[@(key)];
-            if (map == (have != nil)) continue;   // already mapped, or already unmapped
-            int page = map ? nvmtl_page_alloc(&heap->_pool) : have.intValue;
-            if (page < 0) { nvlog("updateTextureMapping: the sparse heap is full (%u pages) - the rest of the region stays unmapped", heap->_pool.npages); break; }
-            blk[m] = (nvmtl_vk_sparse_blk){ (uint32_t)mip, (uint32_t)slice, tiles[i].x, tiles[i].y, 0, tiles[i].w, tiles[i].h, 1, (uint64_t)page * NVMTL_SPARSE_BLOCK_BYTES };
-            keys[m] = key; pages[m] = page; m++;
-        }
-        for (int off = 0; off < m; off += 4096) {
-            const int chunk = m - off < 4096 ? m - off : 4096;
-            const int rc = nvmtl_vk_image_sparse_bind(&t->_i, map ? heap->_hm.mem : NULL, blk + off, (uint32_t)chunk, 0, 0);
-            for (int k = off; k < off + chunk; k++) {
-                if (rc == 0) { if (map) t->_sparseTiles[@(keys[k])] = @(pages[k]); else { [t->_sparseTiles removeObjectForKey:@(keys[k])]; nvmtl_page_free(&heap->_pool, (uint32_t)pages[k]); } }
-                else if (map) nvmtl_page_free(&heap->_pool, (uint32_t)pages[k]);   // the bind failed: the page goes back
-            }
-        }
-        heap->_used = (NSUInteger)heap->_pool.used * NVMTL_SPARSE_BLOCK_BYTES;
-    }
-    free(tiles); free(blk); free(keys); free(pages);
-}
 static id<MTLTexture> nvmtl_make_y422_texture(MTLTextureDescriptor *d, NVMTLTexture *t) {
     const char *on = getenv("NVMTL_YUV422");
     // On unless NVMTL_YUV422=0. Apple's drivers create both 4:2:2 formats for every process and CoreVideo hands camera
@@ -2552,70 +2482,6 @@ static NSOperationQueue *nvmtl_pipeline_compile_queue(void) {
     });
     return queue;
 }
-// Tile shading (a tile function run over the pixels of a tile, with the colour attachments as the imageblock) needs the
-// translator to lower imageblock access to the attachments and the render pass to be split around a compute dispatch;
-// neither exists here. The pipeline is refused with a reason an application can show, instead of an unrecognised
-// selector taking the process down. What does work: a fragment function that reads [[color(n)]] (framebuffer fetch) and
-// a compute kernel that uses imageblock memory (MPS).
-int nvmtl_tile_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_TILE_SHADING"); on = e && e[0] == '1'; } return on; }
-NSString *nvmtl_tile_rewrite(NSString *ll, uint32_t tw, uint32_t th, uint32_t samples, NSString **err);
-NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *idx, const uint32_t *sizes, const uint8_t *const *payloads, size_t n, NSString **err);
-// The tile function rewritten for one tile size and built as a compute pipeline (cached on the tile pipeline per size).
-id nvmtl_tile_compute_pipeline(NVMTLRenderPipelineState *tp, uint32_t tw, uint32_t th, NSString **why) {
-    NSNumber *key = @((uint64_t)tp->_tileSamples << 56 | (uint64_t)tw << 28 | th);
-    @synchronized (tp) {
-        id hit = tp->_tileCps[key]; if (hit) return hit == [NSNull null] ? nil : hit;
-        NSString *w = nil;
-        NSString *text = nvmtl_tile_rewrite(tp->_tileFn->_air, tw, th, tp->_tileSamples ? tp->_tileSamples : 1u, &w);
-        // the function's constant values apply to the rewritten kernel exactly as they would to the original
-        NSDictionary *fcs = tp->_tileFn->_fc; const size_t nfc = fcs.count;
-        uint32_t *fidx = calloc(nfc ? nfc : 1, sizeof *fidx), *fsz = calloc(nfc ? nfc : 1, sizeof *fsz); uint8_t **fpay = calloc(nfc ? nfc : 1, sizeof *fpay);
-        size_t nf = 0;
-        for (NSString *key in fcs) {
-            NSArray *bytes = fcs[key]; if (![bytes isKindOfClass:[NSArray class]] || !bytes.count || bytes.count > 64) continue;
-            uint8_t *b = malloc(bytes.count); for (NSUInteger j = 0; j < bytes.count; j++) b[j] = (uint8_t)[bytes[j] unsignedIntValue];
-            fidx[nf] = (uint32_t)key.integerValue; fsz[nf] = (uint32_t)bytes.count; fpay[nf] = b; nf++;
-        }
-        NSData *spv = text ? nvmtl_translate_with_fc(text, @"kernel", fidx, fsz, (const uint8_t *const *)fpay, nf, &w) : nil;
-        for (size_t j = 0; j < nf; j++) free(fpay[j]);
-        free(fidx); free(fsz); free(fpay);
-        id<MTLComputePipelineState> cps = nil;
-        if (spv) {
-            NVMTLFunction *v = [NVMTLFunction new]; v->_air = text; v->_spirv = spv; v->_fc = tp->_tileFn->_fc; v->_fname = tp->_tileFn->_fname; v->_stage = @"kernel";
-            NSError *e = nil; cps = [(id<MTLDevice>)gNVMTLMainDevice newComputePipelineStateWithFunction:v error:&e];
-            if (!cps) w = e.localizedDescription ?: @"the compute pipeline for the tile function was refused";
-        }
-        if (!tp->_tileCps) tp->_tileCps = [NSMutableDictionary new];
-        tp->_tileCps[key] = cps ?: (id)[NSNull null];
-        if (!cps && why) *why = w ?: @"tile function translation failed";
-        if (cps) nvlog("tile function %s: compute pipeline for %ux%u tiles built", tp->_tileFn->_fname.UTF8String ?: "?", tw, th);
-        return cps;
-    }
-}
-static NSString *nvmtl_tile_refusal(MTLTileRenderPipelineDescriptor *d) {
-    return [NSString stringWithFormat:@"tile render pipeline (%@): REFUSED - tile shading is not carried by this driver (a tile function needs imageblock "
-            "access to the colour attachments and a render pass split around a per-tile dispatch)", d.tileFunction.name ?: @"no tile function"];
-}
-- (id<MTLRenderPipelineState>)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)d options:(MTLPipelineOption)o
-                                                            reflection:(MTLAutoreleasedRenderPipelineReflection *)r error:(NSError **)err {
-    if (r) *r = nil;
-    if (nvmtl_tile_on() && [(id)d.tileFunction isKindOfClass:[NVMTLFunction class]] && ((NVMTLFunction *)d.tileFunction)->_air.length) {
-        NVMTLFunction *tf = (NVMTLFunction *)d.tileFunction;
-        NVMTLRenderPipelineState *tp = [NVMTLRenderPipelineState new]; tp->_tileFn = tf;
-        tp->_tileSamples = d.rasterSampleCount > 1 ? (uint32_t)d.rasterSampleCount : 1u;
-        if (tp->_tileSamples > 1 && !nvmtl_vk_ms_storage_ok()) return nvmtl_fail(err, @"tile render pipeline: REFUSED - a multisampled tile pipeline needs shaderStorageImageMultisample, which this device does not offer");
-        NSString *w = nil;   // translate once now (32x32 tiles) so a function that cannot be carried is refused here, with the reason
-        if (!nvmtl_tile_compute_pipeline(tp, 32, 32, &w)) { NSString *why = [NSString stringWithFormat:@"tile render pipeline (%@): REFUSED - %@", tf->_fname, w]; nvlog("%s", why.UTF8String); return nvmtl_fail(err, why); }
-        return tp;
-    }
-    NSString *why = nvmtl_tile_refusal(d); nvlog("%s", why.UTF8String);
-    return nvmtl_fail(err, why);
-}
-- (void)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)d options:(MTLPipelineOption)o
-                                completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)h {
-    NSError *e = nil; (void)[self newRenderPipelineStateWithTileDescriptor:d options:o reflection:NULL error:&e];
-    if (h) dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ h(nil, nil, e); });
-}
 - (void)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d completionHandler:(MTLNewRenderPipelineStateCompletionHandler)h {
     MTLRenderPipelineDescriptor *snapshot = [d copy];
     [nvmtl_pipeline_compile_queue() addOperationWithBlock:^{ @autoreleasepool {
@@ -3135,20 +3001,6 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
 - (BOOL)supportsFeatureSet:(MTLFeatureSet)fs API_DEPRECATED("Use supportsFamily instead", macos(10.11, 13.0), ios(8.0, 16.0), tvos(9.0, 16.0)) { return fs >= 10000 && fs <= 10005; }
 - (id<MTLHeap>)newHeapWithDescriptor:(MTLHeapDescriptor *)hd {
     if (!hd || !hd.size) { nvlog("newHeapWithDescriptor: no size"); return nil; }
-    const MTLHeapType hdType = NVMTL_SINCE(10.15, MTLHeapType, hd.type, MTLHeapTypeAutomatic);   // heaps before macOS 10.15 are all automatic
-    const MTLHazardTrackingMode hdHazard = NVMTL_SINCE(10.15, MTLHazardTrackingMode, hd.hazardTrackingMode, MTLHazardTrackingModeDefault);
-    if (hdType == MTLHeapTypeSparse) {   // NVMTL_SPARSE_TEXTURES=1: one device memory carved into 64 KiB pages
-        if (!nvmtl_vk_sparse_textures_ok()) { nvlog("newHeapWithDescriptor: a sparse heap needs NVMTL_SPARSE_TEXTURES=1 and sparse residency on this device -> nil"); return nil; }
-        const NSUInteger size = (hd.size + NVMTL_SPARSE_BLOCK_BYTES - 1) / NVMTL_SPARSE_BLOCK_BYTES * NVMTL_SPARSE_BLOCK_BYTES;
-        NVMTLHeap *sh = [NVMTLHeap new];
-        sh->_dev = self; sh->_size = size; sh->_used = 0; sh->_storage = MTLStorageModePrivate; sh->_cache = hd.cpuCacheMode; sh->_type = MTLHeapTypeSparse; sh->_hazard = hdHazard;
-        if (nvmtl_vk_heap_create(size, 0, &sh->_hm)) { nvlog("newHeapWithDescriptor: SPARSE %lu bytes FAILED", (unsigned long)size); return nil; }
-        const uint32_t npages = (uint32_t)(size / NVMTL_SPARSE_BLOCK_BYTES);
-        sh->_poolBits = calloc(nvmtl_page_pool_words(npages), sizeof(uint64_t)); if (!sh->_poolBits) return nil;
-        nvmtl_page_pool_init(&sh->_pool, sh->_poolBits, npages); sh->_sparse = YES;
-        nvlog("newHeapWithDescriptor: SPARSE %lu bytes, %u pages -> %p", (unsigned long)size, npages, (__bridge void *)sh);
-        return sh;
-    }
     NVMTLHeap *h = [NVMTLHeap new];
     h->_dev = self; h->_size = hd.size; h->_used = 0; h->_storage = hd.storageMode; h->_cache = hd.cpuCacheMode; h->_type = hd.type;
     h->_hazard = hd.hazardTrackingMode;
