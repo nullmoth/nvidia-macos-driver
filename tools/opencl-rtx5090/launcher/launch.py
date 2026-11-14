@@ -78,6 +78,11 @@ def environment(root, manifest, run, cache, inherited):
                TMPDIR=str(run / 'tmp'), CLVK_LOG='1', CLVK_LOG_DEST='file:' + str(run / 'clvk-errors.log'),
                CLVK_IGNORE_OUT_OF_ORDER_EXECUTION='0', CLVK_QUEUE_PROFILING_USE_TIMESTAMP_QUERIES='0')
     env.update(manifest['experiment_config'])
+    # shortcut: clvk shells out; reject unquoted temp paths until it uses argv.
+    for key in ('CLVK_COMPILER_TEMP_DIR', 'TMPDIR'):
+        path = env[key]
+        if not Path(path).is_absolute() or shlex.quote(path) != path:
+            raise RuntimeError('Compiler temporary path must be absolute and shell-safe: ' + key)
     return env
 
 

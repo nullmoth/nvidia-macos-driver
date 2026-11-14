@@ -1,4 +1,4 @@
-# Experimental process-local OpenCL for RTX 5090
+# Qualified process-local OpenCL profile for RTX 5090
 
 This source reference captures the private clvk/NVK configuration that completed
 Geekbench 7 OpenCL runs at **313,622, 316,116 and 315,656** on an RTX 5090.
@@ -7,9 +7,9 @@ GUI run scored **325,451** (Path Tracer **225,757**). All eleven workload scores
 the control experiments, clock observations and validation limits are in
 [RESULTS.md](RESULTS.md).
 
-The aim is to make the measured implementation reviewable. This directory is an
-experimental patch and reproduction bundle, not an automatic installer or a
-change to the default NullMoth release. It is a follow-up to
+This directory contains the source patches, launcher and reproduction checks
+for the tested RTX 5090 configuration. Qualification is limited to this explicit
+process profile; it does not enable the profile in the default NullMoth release. It is a follow-up to
 [#524](https://github.com/nullmoth/nvidia-macos-driver/pull/524); that PR's v2.7.2
 Metal/OpenCL changes are a different execution path.
 
@@ -51,14 +51,18 @@ binary hashes and application/dependency identity checks before use; the example
 does not authorize running an unqualified binary.
 
 The recorded hardware checks passed all 12 correctness gates, both Metal/OpenCL
-initialization orders, the installed-package CLI benchmark, and GUI startup.
+initialization orders, the installed-package CLI benchmark, and completed GUI benchmarks.
 [validation-summary.json](validation-summary.json) records the gate outcomes.
-These are the original qualification results, not claims that a newly rebuilt
-publication tree has been benchmarked.
+The final qualification repeats all 12 hardware gates and both initialization
+orders. Clean source replay and runtime rebuilds reproduce the measured OpenCL
+and NVK payloads byte-for-byte; see [SOURCE.md](SOURCE.md) and
+[build-validation-summary.json](build-validation-summary.json). Pinned compiler
+and static dependencies were reused. The launcher additionally rejects unsafe
+temporary paths, with portable regression coverage integrated into the host suite.
 
-## Scope and remaining work
+## Qualified scope
 
-The scores are from genuine Geekbench CLI runs with a private OpenCL framework
+The scores are from genuine Geekbench CLI and GUI runs with a private OpenCL framework
 and private NVK selected only for that process. The original app, global NVMTL and
 NVK libraries, system OpenCL framework, configuration and security settings were
 unchanged. Ordinary Finder launch continues to use the normal installed route.
@@ -68,11 +72,17 @@ Its LLVM/Rust toolchain differs from the release build. The device's 170 compute
 units were verified before enabling the corresponding clvk override; this is not
 a suitable unconditional setting for other cards.
 
-The subsequent GUI benchmark completed and its benchmark child loaded the
-intended private libraries. Three CLI runs and one manual GUI run on one card
-do not establish long-term or multi-device stability. The GUI run had no
-concurrent clock/fault/overlap monitor. Approximately 1 Hz samples from the CLI
-runs do not establish the cause of an earlier Path Tracer outlier.
+The GUI benchmark child loaded the intended private libraries. Follow-up
+clock, fault and desktop-load monitoring also exposed substantial interference
+from active screen capture; those low results are retained in RESULTS.md.
+Run scored benchmarks with screen recording and other GPU work stopped.
+The host suite passes 243 tests; four existing failures reproduce on the
+unchanged upstream base. Three additional standalone C++ tests pass.
+[host-validation-summary.json](host-validation-summary.json) lists the exact
+baseline failures and unavailable build-input checks. This is qualification
+on one RTX 5090/macOS installation, not Khronos conformance, other-device
+coverage or a long-term soak result. Approximately 1 Hz clock samples cannot
+resolve short transients or prove the cause of the older Path Tracer outlier.
 
 No proprietary Geekbench files, compiled drivers, caches, raw claim links or
 machine-specific logs are included. Source patches retain their upstream project

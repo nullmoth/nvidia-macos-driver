@@ -1,0 +1,247 @@
+{
+  "scope": "Functional requalification of hardened launcher f3622bf8 with unchanged native payloads and profile; these follow-up scored runs are load-contaminated, not a clean-idle performance repeat.",
+  "gui_runs": [
+    {
+      "public_result": "https://browser.geekbench.com/v7/gpu/401226",
+      "seconds": 128.6,
+      "clock_samples": 127,
+      "clock_coverage_ok": true,
+      "display_flips_per_second": 125.16,
+      "log_stream_ready": true,
+      "no_recognized_kernel_fault": true,
+      "unchanged_system": true,
+      "gui_parent_private_runtime": true,
+      "benchmark_child_private_runtime": true,
+      "gui_completed": true,
+      "clvk_error_log_empty": true,
+      "score": 122627,
+      "path_tracer": 107398,
+      "subscores": [
+        44116,
+        74701,
+        82890,
+        95209,
+        125634,
+        151508,
+        215419,
+        250232,
+        107398,
+        206667,
+        159185
+      ],
+      "performance_status": "REGRESSION_OBSERVED",
+      "capture_cpu_observation": 8.6,
+      "windowserver_cpu_observation": 74.6,
+      "capture_observation_scope": "single contemporaneous process sample; continuous CPU recording unavailable for this run",
+      "telemetry": {
+        "graphics_mhz": {
+          "min": 2565.0,
+          "median": 2820.0,
+          "max": 2820.0
+        },
+        "memory_mhz": {
+          "min": 14001.0,
+          "median": 14001.0,
+          "max": 14001.0
+        },
+        "temperature_c": {
+          "min": 42.6,
+          "median": 47.5,
+          "max": 53.8
+        }
+      },
+      "functional_status": "PASS",
+      "no_other_recognized_benchmark": true
+    },
+    {
+      "public_result": "https://browser.geekbench.com/v7/gpu/401246",
+      "seconds": 130.84,
+      "clock_samples": 130,
+      "clock_coverage_ok": true,
+      "display_flips_per_second": 124.19,
+      "log_stream_ready": true,
+      "no_recognized_kernel_fault": true,
+      "unchanged_system": true,
+      "gui_parent_private_runtime": true,
+      "benchmark_child_private_runtime": true,
+      "gui_completed": true,
+      "clvk_error_log_empty": true,
+      "telemetry": {
+        "graphics_mhz": {
+          "min": 2542.0,
+          "median": 2820.0,
+          "max": 2820.0
+        },
+        "memory_mhz": {
+          "min": 14001.0,
+          "median": 14001.0,
+          "max": 14001.0
+        },
+        "temperature_c": {
+          "min": 44.1,
+          "median": 49.3,
+          "max": 55.7
+        }
+      },
+      "activity_summary": {
+        "WindowServer": {
+          "min": 47.2,
+          "median": 83.85,
+          "max": 105.5
+        },
+        "SkyComputerUseService": {
+          "min": 1.4,
+          "median": 8.7,
+          "max": 12.1
+        }
+      },
+      "score": 123007,
+      "path_tracer": 103350,
+      "subscores": [
+        51085,
+        78927,
+        88898,
+        110481,
+        145874,
+        146012,
+        216730,
+        216991,
+        103350,
+        175142,
+        135860
+      ],
+      "performance_status": "CAPTURE_LOAD",
+      "functional_status": "PASS",
+      "no_other_recognized_benchmark": true
+    },
+    {
+      "public_result": "https://browser.geekbench.com/v7/gpu/401256",
+      "seconds": 115.83,
+      "clock_samples": 115,
+      "clock_coverage_ok": true,
+      "display_flips_per_second": 40.1,
+      "log_stream_ready": true,
+      "no_recognized_kernel_fault": true,
+      "unchanged_system": true,
+      "gui_parent_private_runtime": true,
+      "benchmark_child_private_runtime": true,
+      "gui_completed": true,
+      "clvk_error_log_empty": true,
+      "score": 287609,
+      "path_tracer": 223921,
+      "subscores": [
+        49203,
+        190518,
+        234224,
+        417351,
+        438518,
+        404612,
+        530191,
+        500990,
+        223921,
+        384852,
+        299294
+      ],
+      "performance_status": "STARTUP_CAPTURE_CONTAMINATED",
+      "telemetry": {
+        "graphics_mhz": {
+          "min": 2430.0,
+          "median": 2452.0,
+          "max": 2820.0
+        },
+        "memory_mhz": {
+          "min": 14001.0,
+          "median": 14001.0,
+          "max": 14001.0
+        },
+        "temperature_c": {
+          "min": 47.7,
+          "median": 49.5,
+          "max": 60.3
+        }
+      },
+      "post_capture_activity": {
+        "samples": 169,
+        "seconds": 91.07,
+        "display_flips_per_second": 17.27,
+        "windowserver_cpu_median": 0.9,
+        "capture_absent": true
+      },
+      "functional_status": "PASS",
+      "no_other_recognized_benchmark": true
+    },
+    {
+      "public_result": "https://browser.geekbench.com/v7/gpu/401284",
+      "seconds": 131.16,
+      "clock_samples": 130,
+      "clock_coverage_ok": true,
+      "display_flips_per_second": 120.12,
+      "log_stream_ready": true,
+      "no_recognized_kernel_fault": true,
+      "unchanged_system": true,
+      "gui_parent_private_runtime": true,
+      "benchmark_child_private_runtime": true,
+      "gui_completed": true,
+      "clvk_error_log_empty": true,
+      "score": 193577,
+      "path_tracer": 142546,
+      "subscores": [
+        69454,
+        125931,
+        141790,
+        271206,
+        265986,
+        236176,
+        298588,
+        346084,
+        142546,
+        276229,
+        166354
+      ],
+      "performance_status": "CONCURRENT_DESKTOP_LOAD",
+      "telemetry": {
+        "graphics_mhz": {
+          "min": 2610.0,
+          "median": 2805.0,
+          "max": 2820.0
+        },
+        "memory_mhz": {
+          "min": 14001.0,
+          "median": 14001.0,
+          "max": 14001.0
+        },
+        "temperature_c": {
+          "min": 47.8,
+          "median": 50.4,
+          "max": 55.7
+        }
+      },
+      "functional_status": "PASS",
+      "no_other_recognized_benchmark": true
+    }
+  ],
+  "cli_run": {
+    "reason": "natural_exit",
+    "seconds": 122.251,
+    "launcher_contract": true,
+    "validation": true,
+    "image_identity": true,
+    "unchanged": true,
+    "no_kernel_fault": true,
+    "clock_samples": 120,
+    "clock_coverage_ok": true,
+    "display_flips_per_second": 146.21,
+    "score": 249140,
+    "geekbench_url": "https://browser.geekbench.com/v7/gpu/401279",
+    "exceeds_300k": false,
+    "functional_status": "PASS"
+  },
+  "interpretation": [
+    "All follow-up runs completed with the intended runtime images and unchanged system/driver hashes; no recognized kernel fault.",
+    "Screen capture remained active in 401226/401246. Stopping it early in 401256 restored the later ten workloads to prior levels while the first workload remained low.",
+    "401279/401284 had substantial desktop activity; an active browser game was observed after the last run. Its individual causal contribution was not isolated.",
+    "The overlap detector recognizes benchmark/test executables, not every browser or desktop GPU workload. Display flips and activity observations expose this limitation.",
+    "Monitor-interval flip averages include setup/upload. Approximately 1 Hz telemetry cannot exclude short clock transients.",
+    "No new clean-idle 300k+ repeat is claimed. Historical 313622/316116/315656 CLI and 325451 manual GUI evidence is retained."
+  ]
+}

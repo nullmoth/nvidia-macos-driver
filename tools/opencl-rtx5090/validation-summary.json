@@ -1,18 +1,53 @@
 {
-  "scope": "Recorded hardware validation of the qualified binaries, not a new test of a rebuilt publication tree.",
+  "scope": "Repeated hardware checks of the exact source-reproduced 56655/7638 payloads on 2026-11-15; final explicit profile.",
   "gates": [
     {
-      "mode": "physical-query",
+      "mode": "fp32",
       "status": "PASS",
       "reason": "natural_exit",
       "returncode": 0,
-      "seconds": 3.752,
+      "seconds": 4.187,
       "validation": true,
       "image_identity": true,
       "no_kernel_fault": true,
       "unchanged": true,
-      "clock_samples": 0,
-      "display_flips_per_second": 0.0
+      "display_flips_per_second": 0.24
+    },
+    {
+      "mode": "api",
+      "status": "PASS",
+      "reason": "natural_exit",
+      "returncode": 0,
+      "seconds": 4.965,
+      "validation": true,
+      "image_identity": true,
+      "no_kernel_fault": true,
+      "unchanged": true,
+      "display_flips_per_second": 0.6
+    },
+    {
+      "mode": "memory-large68",
+      "status": "PASS",
+      "reason": "natural_exit",
+      "returncode": 0,
+      "seconds": 4.577,
+      "validation": true,
+      "image_identity": true,
+      "no_kernel_fault": true,
+      "unchanged": true,
+      "display_flips_per_second": 0.87
+    },
+    {
+      "mode": "memory-use",
+      "status": "PASS",
+      "reason": "natural_exit",
+      "returncode": 0,
+      "seconds": 3.957,
+      "validation": true,
+      "image_identity": true,
+      "no_kernel_fault": true,
+      "unchanged": true,
+      "display_flips_per_second": 0.76
     },
     {
       "mode": "workgroup",
@@ -24,24 +59,70 @@
       "image_identity": true,
       "no_kernel_fault": true,
       "unchanged": true,
-      "clock_samples": 0,
-      "display_flips_per_second": 0.0
+      "display_flips_per_second": 0.25
     },
     {
-      "mode": "memory-copy",
+      "mode": "numeric",
       "status": "PASS",
       "reason": "natural_exit",
       "returncode": 0,
-      "seconds": 3.967,
+      "seconds": 6.632,
       "validation": true,
       "image_identity": true,
       "no_kernel_fault": true,
       "unchanged": true,
-      "clock_samples": 0,
-      "display_flips_per_second": 0.0
+      "display_flips_per_second": 0.45
     },
     {
-      "mode": "memory-use",
+      "mode": "readback",
+      "status": "PASS",
+      "reason": "natural_exit",
+      "returncode": 0,
+      "seconds": 5.604,
+      "validation": true,
+      "image_identity": true,
+      "no_kernel_fault": true,
+      "unchanged": true,
+      "display_flips_per_second": 0.71
+    },
+    {
+      "mode": "metadata",
+      "status": "PASS",
+      "reason": "natural_exit",
+      "returncode": 0,
+      "seconds": 3.821,
+      "validation": true,
+      "image_identity": true,
+      "no_kernel_fault": true,
+      "unchanged": true,
+      "display_flips_per_second": 0.52
+    },
+    {
+      "mode": "physical-query",
+      "status": "PASS",
+      "reason": "natural_exit",
+      "returncode": 0,
+      "seconds": 3.755,
+      "validation": true,
+      "image_identity": true,
+      "no_kernel_fault": true,
+      "unchanged": true,
+      "display_flips_per_second": 0.8
+    },
+    {
+      "mode": "native-gemm",
+      "status": "PASS",
+      "reason": "natural_exit",
+      "returncode": 0,
+      "seconds": 3.963,
+      "validation": true,
+      "image_identity": true,
+      "no_kernel_fault": true,
+      "unchanged": true,
+      "display_flips_per_second": 0.5
+    },
+    {
+      "mode": "memory-copy",
       "status": "PASS",
       "reason": "natural_exit",
       "returncode": 0,
@@ -50,112 +131,46 @@
       "image_identity": true,
       "no_kernel_fault": true,
       "unchanged": true,
-      "clock_samples": 0,
-      "display_flips_per_second": 0.0
-    },
-    {
-      "mode": "memory-large68",
-      "status": "PASS",
-      "reason": "natural_exit",
-      "returncode": 0,
-      "seconds": 4.6,
-      "validation": true,
-      "image_identity": true,
-      "no_kernel_fault": true,
-      "unchanged": true,
-      "clock_samples": 0,
-      "display_flips_per_second": 0.0
-    },
-    {
-      "mode": "api",
-      "status": "PASS",
-      "reason": "natural_exit",
-      "returncode": 0,
-      "seconds": 4.963,
-      "validation": true,
-      "image_identity": true,
-      "no_kernel_fault": true,
-      "unchanged": true,
-      "clock_samples": 0,
-      "display_flips_per_second": 0.0
-    },
-    {
-      "mode": "numeric",
-      "status": "PASS",
-      "reason": "natural_exit",
-      "returncode": 0,
-      "seconds": 6.644,
-      "validation": true,
-      "image_identity": true,
-      "no_kernel_fault": true,
-      "unchanged": true,
-      "clock_samples": 0,
-      "display_flips_per_second": 0.0
-    },
-    {
-      "mode": "fp32",
-      "status": "PASS",
-      "reason": "natural_exit",
-      "returncode": 0,
-      "seconds": 4.186,
-      "validation": true,
-      "image_identity": true,
-      "no_kernel_fault": true,
-      "unchanged": true,
-      "clock_samples": 0,
-      "display_flips_per_second": 0.0
-    },
-    {
-      "mode": "readback",
-      "status": "PASS",
-      "reason": "natural_exit",
-      "returncode": 0,
-      "seconds": 5.445,
-      "validation": true,
-      "image_identity": true,
-      "no_kernel_fault": true,
-      "unchanged": true,
-      "clock_samples": 0,
-      "display_flips_per_second": 0.0
-    },
-    {
-      "mode": "metadata",
-      "status": "PASS",
-      "reason": "natural_exit",
-      "returncode": 0,
-      "seconds": 3.749,
-      "validation": true,
-      "image_identity": true,
-      "no_kernel_fault": true,
-      "unchanged": true,
-      "clock_samples": 0,
-      "display_flips_per_second": 0.0
+      "display_flips_per_second": 1.01
     },
     {
       "mode": "conversion",
       "status": "PASS",
       "reason": "natural_exit",
       "returncode": 0,
-      "seconds": 3.988,
+      "seconds": 3.995,
       "validation": true,
       "image_identity": true,
       "no_kernel_fault": true,
       "unchanged": true,
-      "clock_samples": 0,
-      "display_flips_per_second": 0.0
+      "display_flips_per_second": 0.75
+    }
+  ],
+  "dual_backend": [
+    {
+      "status": "PASS",
+      "order": "--metal-first",
+      "returncode": 0,
+      "reason": "natural_exit",
+      "unchanged": true,
+      "no_kernel_fault": true,
+      "required_images_present": true,
+      "selected_knobs_preserved": true,
+      "seconds": 4.307,
+      "scope": "dual API correctness; no GUI benchmark claim"
     },
     {
-      "mode": "native-gemm",
       "status": "PASS",
-      "reason": "natural_exit",
+      "order": "--opencl-first",
       "returncode": 0,
-      "seconds": 3.954,
-      "validation": true,
-      "image_identity": true,
-      "no_kernel_fault": true,
+      "reason": "natural_exit",
       "unchanged": true,
-      "clock_samples": 0,
-      "display_flips_per_second": 0.0
+      "no_kernel_fault": true,
+      "required_images_present": true,
+      "selected_knobs_preserved": true,
+      "seconds": 4.309,
+      "scope": "dual API correctness; no GUI benchmark claim"
     }
-  ]
+  ],
+  "rerun_note": "First native-GEMM repeat passed numerical/image/fault checks but snapshot detected crash reports produced by concurrent upstream CPU negative controls. Repeated after CPU suite stopped: all checks PASS. The contaminated observation was not counted as a pass."
 }

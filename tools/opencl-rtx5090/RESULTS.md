@@ -113,3 +113,54 @@ It is one manual GUI run: no concurrent clock sampler, workload-overlap monitor
 or kernel-fault monitor was attached, so the earlier CLI monitoring claims do
 not extend to it. There is no controlled-condition speedup claim relative to the
 CLI runs, and neither broad conformance nor long-term GUI stability is claimed.
+
+## Final source and launcher qualification
+
+The final launcher adds one temporary-path guard; the native OpenCL, clspv and
+NVK payload hashes and performance settings are unchanged. Clean source replay,
+all 20 clvk translation units and the full 1,275-action NVK runtime build were
+checked. Canonical diagnostic paths and the original signing identifier produce
+byte-identical measured OpenCL and NVK payloads. Pinned compiler/static
+dependencies were reused; see [SOURCE.md](SOURCE.md).
+
+All **12 hardware correctness gates** and **both Metal/OpenCL initialization
+orders** passed again. The temporary-path guard passed 21 rejection cases and a
+negative control. The normal host test runner now discovers the launcher tests.
+It reports **243 pass / 4 fail / 0 skip / 9 not run**. The four failures reproduce
+on unchanged upstream `87e524ab` because historical negative-control commits are
+unavailable. Three standalone C++ cases additionally pass; the standalone DLSS
+worker has the same incomplete link recipe on the base. Four external-build
+checks remain unrun. [host-validation-summary.json](host-validation-summary.json)
+records their names and prerequisites; the upstream suite is not fully green.
+
+### Desktop-load observations retained
+
+| Run | OpenCL | Path Tracer | Display flips/s over monitor interval | Condition |
+| --- | ---: | ---: | ---: | --- |
+| [401226](https://browser.geekbench.com/v7/gpu/401226), GUI | 122,627 | 107,398 | 125.16 | Capture active throughout |
+| [401246](https://browser.geekbench.com/v7/gpu/401246), GUI | 123,007 | 103,350 | 124.19 | Capture active throughout |
+| [401256](https://browser.geekbench.com/v7/gpu/401256), GUI | 287,609 | 223,921 | 40.10 | Capture removed early; startup still contaminated |
+| [401279](https://browser.geekbench.com/v7/gpu/401279), CLI | 249,140 | — | 146.21 | Desktop active |
+| [401284](https://browser.geekbench.com/v7/gpu/401284), GUI | 193,577 | 142,546 | 120.12 | Capture removed at child spawn; desktop active |
+
+Every run completed all workloads and verified the intended private runtime;
+no recognized kernel fault or global-driver/configuration change was detected.
+The hardened-launcher CLI run also passed its actual argv/environment/identity
+contract. These functional passes are **not** 300k performance passes.
+
+With capture active, GPU graphics clocks had a 2,820 MHz median and memory stayed
+at 14,001 MHz: a sampled low-clock state does not explain those broad drops.
+In 401256, after capture stopped, WindowServer CPU had a 0.9% median over the
+remaining observation window. The later ten scores returned near the earlier
+CLI results; Background Blur remained 49,203. This supports capture interference,
+but is not a clean full-run A/B experiment. The subsequent runs had other desktop
+activity, including a browser game observed after the last run. Its individual
+contribution was not measured. No new idle-desktop 300k+ repeat is claimed.
+
+The benchmark-overlap detector does not recognize all browser/desktop work;
+its absence of a second recognized benchmark is not an idle-desktop guarantee.
+The full sanitized observations and clock ranges are in
+[qualification-followup.json](qualification-followup.json). Run score comparisons
+with screen capture, games and other GPU activity stopped. Qualification here
+covers correctness and this explicit RTX 5090 process profile; it does not promise
+the historical 325k result during concurrent desktop workloads.

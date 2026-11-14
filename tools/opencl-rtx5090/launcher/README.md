@@ -1,8 +1,11 @@
 # Process-local launcher reference
 
-`launch.py` is the unchanged launcher used by the qualified private package.
-It executes the original, vendor-signed Geekbench application with a private
-OpenCL framework and NVK ICD. It does not install a system driver, change
+`launch.py` adds a temporary-path guard to the launcher used by the qualified
+private package. The historical CLI and GUI results below used the earlier
+launcher; this five-line validation change leaves the three native binaries and
+measured process settings unchanged. It executes the original, vendor-signed
+Geekbench application with a private OpenCL framework and NVK ICD.
+It does not install a system driver, change
 `nvrm610.conf`, re-sign Geekbench, or change the normal Finder launch path.
 
 `package.example.json` is intentionally incomplete and is **not an installable
@@ -31,14 +34,16 @@ vendor team/identifier with your own signing identity. The framework and private
 NVK must pass macOS code-signature validation. A rebuild may have different
 hashes and must be qualified again; changing the manifest alone is not proof
 of compatibility. The `status` field is explanatory metadata, not an approval
-gate in this unchanged launcher.
+gate in this launcher.
 
 Cache directories are keyed by all three binary hashes and the exact experiment
 configuration, so changed builds or options do not reuse the measured cache
 identity. Compiler executable paths are shell-quoted because clvk's external
-compiler interface constructs a shell command. Keep source/output temporary
-paths free of shell metacharacters: the tested compiler-path fix does not make
-all of clvk's shell arguments arbitrary-path safe.
+compiler interface constructs a shell command. The launcher rejects relative
+temporary paths and paths requiring shell quoting before executing the app.
+It checks the final `CLVK_COMPILER_TEMP_DIR` and `TMPDIR`, including manifest
+overrides. This protects clvk's unquoted generated source/output paths; it does
+not make every clvk shell argument arbitrary-path safe.
 
 After hardware correctness, ABI/identity, dual Metal/OpenCL coexistence and
 benchmark qualification, invoke as a normal user:

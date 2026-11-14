@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "status": "PASS",
+  "scope": "Detached-source runtime rebuild and CPU source checks; existing pinned compiler dependencies and same-source Mesa host tools reused",
+  "full_llvm_or_clspv_toolchain_rebuild": false,
+  "source_replay": {
+    "clvk_commit": "863ce0ce5150478d4b4c679a869d63f60436a8b4",
+    "all_clvk_tracked_files_matching": 117,
+    "clvk_changed_files": 12,
+    "mesa_commit": "90a959ebba9dbb36f2ea5176091c15d6ebdd0af0",
+    "release_patch_count": 20,
+    "release_inputs_matching": 32,
+    "helper_headers_and_sources": 7,
+    "dlss_preparation": true,
+    "additional_mesa_patches": 2,
+    "mesa_changed_files": 5,
+    "rejects": 0
+  },
+  "cpu_regressions": {
+    "source_replay": "PASS",
+    "source_mismatch_negative": "PASS",
+    "calibration_and_negative_control": "PASS",
+    "selector_cases": 26,
+    "selector_negative_controls": 9,
+    "selector_sanitizers": [
+      "ASan",
+      "UBSan"
+    ],
+    "queue_finish_calls": 600,
+    "queue_paused_waiters": 16,
+    "queue_old_ownership_negative_control": "PASS",
+    "queue_sanitizers": [
+      "ASan",
+      "UBSan"
+    ],
+    "input_sources_unchanged": true
+  },
+  "clvk_rebuild": {
+    "translation_units": 20,
+    "fresh_object_files": true,
+    "elapsed_seconds": 7.843,
+    "native_text_sections_identical": true,
+    "exports_identical": true,
+    "signed_binary_identical": true,
+    "signed_sha256": "56655cd6c0cb65c329bbefc7d4eb87991d513fd64f50ce13546651842c1cf7e5",
+    "strict_codesign": "PASS"
+  },
+  "nvk_rebuild": {
+    "fresh_build_directory": true,
+    "build_actions": 1275,
+    "initial_elapsed_seconds": 64.879,
+    "canonical_path_rebuild_actions": 21,
+    "canonical_path_rebuild_elapsed_seconds": 24.486,
+    "warnings": 0,
+    "unresolved_strong_dynamic_symbols": 0,
+    "exports_identical": true,
+    "export_count": 2454,
+    "native_text_sections_identical": true,
+    "unsigned_binary_identical": true,
+    "unsigned_sha256": "b531715d7501cf37e6216e00ebd2efb3791b446dc5aad580e29a9c802ce794f7",
+    "signed_binary_identical": true,
+    "signed_sha256": "7638e1919a5150438a62693ac5bdf57dbe5738676b870ff5e1024fce87360023",
+    "strict_codesign": "PASS",
+    "first_location_difference": "Rust diagnostic file paths caused string-size/relocation differences; reproducing the reference path prefix made the unsigned binary identical",
+    "reference_signature_identifier": "libvulkan_nouveau-5555494414fed495e4f135d4884a258eac93a2ad",
+    "source_algorithm_changes_to_obtain_identity": false
+  },
+  "existing_dependencies_sha256": {
+    "clspv": "a4c6fc28ea6e2a1fabf486ccf2171aada5746f74b4b9c110ca0e69cbdeff47ea",
+    "SPIRV-Tools": "bde7220a484b50bfbef591327019c6f12f56c6ccdf182df30b91df93ab7d2e55",
+    "SPIRV-Tools-opt": "303e612e752b1d5cef82ad8fe426c499bb9b64c8e316a81b67931fe8a9f7c5a3",
+    "SPIRV-Tools-link": "5d14f124ba3b86be255e3e12c239562a9c14322cde896353cde55dee31f1206c",
+    "mesa_clc": "26b23a9806c403d2549e67c3a33edf058238bacfd29288a33357741475c8379a",
+    "vtn_bindgen2": "ac8f31608537c8ba0884b2f9dae0a94013decc4ab9bec7fb4f5d4878bb897efb"
+  },
+  "installed_system_and_qualified_artifacts_unchanged": true,
+  "gpu_execution_during_these_checks": false
+}

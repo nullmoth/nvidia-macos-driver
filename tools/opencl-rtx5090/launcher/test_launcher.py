@@ -85,6 +85,22 @@ with tempfile.TemporaryDirectory() as directory:
     assert env['CLVK_IGNORE_OUT_OF_ORDER_EXECUTION'] == '0'
     assert env['CLVK_QUEUE_PROFILING_USE_TIMESTAMP_QUERIES'] == '0'
     assert env['VK_DRIVER_FILES'] == env['VK_ICD_FILENAMES']
+    # The compiler executable is quoted; clvk appends generated paths unquoted.
+    for component in ('with space', "single'quote", 'double"quote', '$HOME',
+                      '$(touch sentinel)', '`touch sentinel`', 'semi;colon',
+                      'new\nline', 'tab\tname', 'pipe|name', 'amp&name',
+                      'in<name', 'out>name', 'star*name', 'glob?name', '[glob]'):
+        rejected(lambda: launch.environment(root, manifest, temporary / component,
+                                             temporary / 'cache', inherited))
+    rejected(lambda: launch.environment(root, manifest, Path('relative'),
+                                         temporary / 'cache', inherited))
+    # Validate the final environment, including overrides of launcher-owned keys.
+    for key in ('CLVK_COMPILER_TEMP_DIR', 'TMPDIR'):
+        for value in ('relative', str(temporary / 'own key;unsafe')):
+            changed = copy.deepcopy(manifest)
+            changed['experiment_config'][key] = value
+            rejected(lambda: launch.environment(root, changed, temporary / 'run',
+                                                 temporary / 'cache', inherited))
     identity = launch.cache_identity(manifest)
     reordered = copy.deepcopy(manifest)
     reordered['experiment_config'] = dict(reversed(list(manifest['experiment_config'].items())))
@@ -97,4 +113,4 @@ with tempfile.TemporaryDirectory() as directory:
     assert launch.argv_for('cli', manifest)[1:] == [
         '--gpu', 'OpenCL', '--gpu-platform-id', '0', '--gpu-device-id', '0']
 
-print('PASS: privilege, payload/dependency/identity, containment, environment, quoting, cache, argv')
+print('PASS: privilege, payload/dependency/identity, containment, environment, quoting, temporary-path guards, cache, argv')

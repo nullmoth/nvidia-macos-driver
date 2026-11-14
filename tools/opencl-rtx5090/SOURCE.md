@@ -172,3 +172,75 @@ The private NVK is for clvk's Vulkan API use only. Do not replace the system
 NVK library: the installed Metal plugin also depends on a guarded internal
 layout/LC_UUID contract which this private build does not satisfy. Normal
 Finder launches and the global OpenCL/Metal drivers are outside this bundle.
+
+## Detached-source build qualification
+
+The published source patches reproduced both qualified runtime binaries byte
+for byte. All 20 clvk runtime translation units were freshly compiled from a
+detached patched checkout. NVK completed 1,275 actions in an empty build
+directory against freshly prepared pinned Mesa sources, with zero warnings and
+zero unresolved strong dynamic symbols. All 117 tracked clvk files, all 32
+release-preparation inputs and all five touched Mesa files matched the recorded
+hashes. Native code sections, exports and strict code signatures passed. The
+source replay and CPU regression checks also passed again.
+
+This qualification reused pinned clspv/SPIRV-Tools static dependencies, LLVM and
+the same-source Mesa host tools; it did **not** rebuild the complete LLVM/clspv
+toolchain. No installed files changed. Dependency hashes and complete outcomes
+are recorded in [build-validation-summary.json](build-validation-summary.json).
+
+| Reproduced artifact | SHA-256 |
+| --- | --- |
+| Signed OpenCL framework | `56655cd6c0cb65c329bbefc7d4eb87991d513fd64f50ce13546651842c1cf7e5` |
+| Stripped NVK before signing | `b531715d7501cf37e6216e00ebd2efb3791b446dc5aad580e29a9c802ce794f7` |
+| Signed NVK | `7638e1919a5150438a62693ac5bdf57dbe5738676b870ff5e1024fce87360023` |
+
+The first relocated NVK build embedded different Rust diagnostic paths. All
+19,839 nonempty C-string entries matched after replacing only that prefix. A
+final Rust path remap and 21 rebuild actions produced the exact unsigned
+reference binary without source or optimization changes. Exact ad-hoc signature
+identity also required the reference's signing identifier. For this optional
+byte-identity check, set `QUALIFIED_NVK` to the verified reference library,
+`FRESH_MESA` to the fresh prepared Mesa root and `PRIVATE_NVK_COPY` to a private
+output filename. Keep the pinned build-tool environment described above.
+
+```sh
+REFERENCE_EMBEDDED_PREFIX="$(python3 - "$QUALIFIED_NVK" <<'PY'
+import hashlib
+import subprocess
+import sys
+from pathlib import Path
+library = Path(sys.argv[1])
+assert hashlib.sha256(library.read_bytes()).hexdigest() == (
+    '7638e1919a5150438a62693ac5bdf57dbe5738676b870ff5e1024fce87360023')
+suffix = '/build/src/compiler/rust/libcompiler.rlib.p/structured/cfg.rs'
+lines = subprocess.check_output(['strings', '-a', str(library)], text=True).splitlines()
+prefixes = {line[:-len(suffix)] for line in lines if line.endswith(suffix)}
+assert len(prefixes) == 1
+print(prefixes.pop())
+PY
+)"
+ORIGINAL_RUST_ARGS="$(python3 - "$FRESH_MESA/build/meson-private/cmd_line.txt" <<'PY'
+import configparser
+import sys
+config = configparser.ConfigParser(interpolation=None)
+config.read(sys.argv[1])
+print(config['options']['rust_args'])
+PY
+)"
+meson configure "$FRESH_MESA/build" \
+  "-Drust_args=$ORIGINAL_RUST_ARGS --remap-path-prefix=$FRESH_MESA=$REFERENCE_EMBEDDED_PREFIX"
+ninja -C "$FRESH_MESA/build" -j5 src/nouveau/vulkan/libvulkan_nouveau.dylib
+cp "$FRESH_MESA/build/src/nouveau/vulkan/libvulkan_nouveau.dylib" "$PRIVATE_NVK_COPY"
+strip -S "$PRIVATE_NVK_COPY"
+shasum -a 256 "$PRIVATE_NVK_COPY" # Must match the unsigned hash above.
+codesign --force --sign - \
+  --identifier libvulkan_nouveau-5555494414fed495e4f135d4884a258eac93a2ad \
+  "$PRIVATE_NVK_COPY"
+codesign --verify --strict "$PRIVATE_NVK_COPY"
+shasum -a 256 "$PRIVATE_NVK_COPY" # Must match the signed hash above.
+```
+
+This recipe checks reference build identity; it does not establish GPU
+performance or compatibility on another device. GPU qualification is recorded
+separately in [RESULTS.md](RESULTS.md).

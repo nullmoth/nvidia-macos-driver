@@ -1,0 +1,122 @@
+{
+  "schema": 1,
+  "scope": "CPU host qualification at the final tools/opencl-rtx5090 path, including the updated launcher and its top-level CI wrapper. No GPU execution is represented by this record.",
+  "upstream_base": "87e524ab",
+  "command": "python3 tools/run_all_tests.py -j 3",
+  "host_suite": {
+    "passed": 243,
+    "failed": 4,
+    "skipped": 0,
+    "not_run": 9,
+    "total": 256,
+    "exit_code": 1
+  },
+  "new_launcher_ci_wrapper": {
+    "test": "test_opencl_rtx5090.py",
+    "status": "PASS"
+  },
+  "baseline_comparison": {
+    "scope": "Only the four failing tests were rerun on the unchanged upstream base with the same test environment; this is not a full baseline-suite run.",
+    "passed": 0,
+    "failed": 4,
+    "same_failures": true,
+    "failures": [
+      {
+        "test": "test_hybrid_fb_dependent_id.py",
+        "reason": "Historical first-fix negative control cannot read its required commit.",
+        "missing_commit": "13a9a0bc"
+      },
+      {
+        "test": "test_no_category_shadowing.py",
+        "reason": "Historical negative control cannot read its required commit.",
+        "missing_commit": "c6619e54"
+      },
+      {
+        "test": "test_nvencvt_diag.py",
+        "reason": "Historical negative control cannot read its required commit.",
+        "missing_commit": "406d9824"
+      },
+      {
+        "test": "test_pageoff_hold.py",
+        "reason": "Historical negative control cannot read its required commit.",
+        "missing_commit": "406d9824"
+      }
+    ],
+    "test_files_identical_to_upstream_base": true,
+    "checkout_is_shallow": false
+  },
+  "additional_standalone_cpu_checks": [
+    {
+      "test": "test_nvrm_utilization.cpp",
+      "status": "PASS",
+      "compiler": "clang++ -std=c++17",
+      "scope": "Default CPU fixture layouts; optional NVIDIA-header and captured-buffer variants were not run."
+    },
+    {
+      "test": "test_nvrmfb_audio_match.cpp",
+      "status": "PASS",
+      "compiler": "clang++ -std=c++17"
+    },
+    {
+      "test": "test_primary_gpu_range.cpp",
+      "status": "PASS",
+      "compiler": "clang++ -std=c++17"
+    },
+    {
+      "test": "test_dlss_worker.c",
+      "status": "LINK_FAILED",
+      "compiler": "clang, with plugin and pinned Mesa Vulkan include directories",
+      "baseline_status": "SAME_LINK_FAILURE",
+      "unresolved_symbols": [
+        "nvlog_every",
+        "nvmtl_heap_lazy_census",
+        "nvmtl_heaps_dump"
+      ],
+      "test_and_production_source_identical_to_upstream_base": true
+    }
+  ],
+  "runner_not_run_but_covered_elsewhere": [
+    {
+      "test": "test_claims.c",
+      "coverage": "Built and exercised by the passing test_claims.sh."
+    }
+  ],
+  "remaining_build_input_tests_not_run": [
+    {
+      "test": "test_fcwarm.py",
+      "requires": "A translator library built from the corresponding source, a local fixed_frag.ll shader fixture, and function-constant specialization sets."
+    },
+    {
+      "test": "test_gl_translation.py",
+      "requires": "A translator library built from the corresponding source, spirv-val supporting Vulkan 1.2 and scalar block layout, and spirv-as."
+    },
+    {
+      "test": "test_resource_phi_fold.py",
+      "requires": "The corresponding translator Cargo dependency directory containing libspirv-*.rlib, and rustc."
+    },
+    {
+      "test": "test_patch_chain.sh",
+      "requires": "A pristine NVIDIA open-gpu-kernel-modules 620.70.06 source tree."
+    }
+  ],
+  "test_environment": {
+    "python": "Official CPython 3.14.0 universal2, extracted and used locally without installation.",
+    "python_package_url": "https://www.python.org/ftp/python/3.14.0/python-3.14.0-macos11.pkg",
+    "python_package_sha256": "d2c02d66a8b57370bfe414da12e8888ba73ded91d786bf9008e0554466e629c2",
+    "python_package_verification": "Digest matches the official Sigstore bundle; pkgutil verified the Python Software Foundation BMM5U3QVKW installer signature and Apple notarization.",
+    "python_version_reason": "test_fw_fetch.py requires Python 3.14 compression.zstd, beyond the developer guide's general Python 3.12 minimum.",
+    "python_loading": "Process-local DYLD_FRAMEWORK_PATH and DYLD_LIBRARY_PATH; no global framework installation or PYTHONHOME override.",
+    "bytecode_writes": "Disabled with PYTHONDONTWRITEBYTECODE=1.",
+    "driver_environment": "Inherited NVMTL_, NVK_, NAK_, NVRM_, METAL2VULKAN_, MESA_, NIR_, RADV_, ACO_ and ELFHOST_ variables were removed only from the test child environment.",
+    "vulkan_headers": "CPATH points to the include directory of the pinned Mesa 90a959eb source tree recorded in sources.json.",
+    "nvdec_headers": "NVDEC_HEADERS points to src/nouveau/headers/nvidia/video in that same Mesa tree.",
+    "zstd_fixture_compressor": "ZSTD points to a local adapter accepting only -q -c and compressing stdin with the real CPython 3.14 compression.zstd implementation. It creates the DLSS test archive; the production decoder and test assertions were unchanged. A standalone zstd CLI was not installed."
+  },
+  "limitations": [
+    "The upstream host suite is not fully green: four historical negative-control failures reproduce on the unchanged upstream base.",
+    "The additional standalone DLSS worker test has the same incomplete link recipe on the candidate and upstream base.",
+    "Four tests requiring external build inputs remain unrun.",
+    "No test assertions or unrelated production code were changed to conceal failures.",
+    "Global software installation and driver settings were unchanged."
+  ]
+}
