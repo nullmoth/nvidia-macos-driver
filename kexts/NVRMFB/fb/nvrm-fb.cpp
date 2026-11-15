@@ -5439,9 +5439,20 @@ IOReturn NVRMNVDAFramebuffer::setPowerState(unsigned long ordinal, IOService *de
     ddcSetPowered(ordinal != 0);
     if (ordinal) {
         fPowerOn = true;
-        // a failed wake stays retryable (fHeadSlept kept) but WindowServer is still told the display is on, as 1.14.7 did:
-        // without the notification it never redraws, and the head can sit black with nothing left to retry it (review)
-        (void)setHeadPower(true);
+        // A failed wake stays retryable (fHeadSlept kept) but WindowServer is still told the display is on, as 1.14.7
+        // did: without the notification it never redraws, and the head can sit black with nothing left to retry it.
+        // The return value used to be thrown away, and that was the wrong half to keep: the GPU's own wake work
+        // (NVRMGpuPower -> gpuWakeFire) can run BEFORE IOPM delivers this call - the 2026-11-14 22:12 wake did exactly
+        // that - so it saw fPowerOn still false and parked the head. This call is then the only thing that can light
+        // it, and nothing retries a failure here. Queue the GPU wake call when it fails.
+        if (!setHeadPower(true)) {
+            if (fGpuWake) {
+                FBLOG("power on: head %u did not light - queueing the GPU wake call to retry", fHead);
+                scheduleCall(fGpuWake, 0);
+            } else {
+                FBLOG("power on: head %u did not light and there is no wake call to retry it", fHead);
+            }
+        }
         // A system sleep cleared pagingState (IOGraphics' system work, with kIOFBNotifyWillSleep to every client).
         // This override replaces IOFramebuffer::setPowerState, so the family's wake work never runs, and
         // handleEvent() does nothing off the controller's power thread - so no client ever saw kIOFBNotifyDidWake,
@@ -5450,7 +5461,13 @@ IOReturn NVRMNVDAFramebuffer::setPowerState(unsigned long ordinal, IOService *de
         // DidPowerOn too. Only after a real system sleep: at start pagingState is still clear too, and the wake work
         // then sent every client a DidWake at boot.
         if (!pagingState && fSysSlept) { fSysSlept = false; familyDidWake(); }
-        else handleEvent(kIOFBNotifyDidPowerOn);
+        else {
+            // Reaching here with paging off means the family wake work never ran and nothing will set pagingState
+            // later; WindowServer would wait for it forever. Record which of the two reasons it was.
+            FBLOG("power on: paging %u, system-sleep flag %u - family wake work not run",
+                  (unsigned)pagingState, (unsigned)fSysSlept);
+            handleEvent(kIOFBNotifyDidPowerOn);
+        }
     } else {
         handleEvent(kIOFBNotifyWillPowerOff);
         fPowerOn = false;
@@ -5523,13 +5540,21 @@ IOReturn NVRMNVDAFramebuffer::familyDidWakeGated(void *, void *, void *, void *)
     const SInt32 owed = fWillSleepOff;
     IOReturn r1 = deliverFramebufferNotification(kIOFBNotifyDidWake, (void *)true);
     IOReturn r2 = deliverFramebufferNotification(kIOFBNotifyDidWake, (void *)false);
-    for (SInt32 i = 1; i < owed; ++i)
-        r2 = deliverFramebufferNotification(kIOFBNotifyDidWake, (void *)false);
-    IOReturn r3 = deliverFramebufferNotification(kIOFBNotifyDidPowerOn, (void *)false);
+    // Paging on and WindowServer woken BEFORE the owed DidWake(false) replay. The replay is bookkeeping for
+    // IOGraphicsAccelerator2's WillSleep count, and it costs one synchronous round to every client per dark wake that
+    // arrived since the last full wake - a normal day here collects dozens of those. WindowServer sleeps in _extEntry
+    // on fServerConnect until pagingState is set, so leaving that behind the replay turned a slow wake into a display
+    // that never came back: nothing retries the wake once this function returns.
     pagingState = true;
     fWakeGate->commandWakeup(&fServerConnect, false);   // IOGraphicsWorkLoop::wakeupGate, as handleEvent(DidWake) does
-    FBLOG("system wake: clients told DidWake true and %d x false (0x%x/0x%x) for %d sleep(s), DidPowerOn (0x%x), "
-          "paging on, WindowServer woken", owed > 1 ? (int)owed : 1, r1, r2, (int)owed, r3);
+    const uint64_t replayStart = mach_absolute_time();
+    for (SInt32 i = 1; i < owed; ++i)
+        r2 = deliverFramebufferNotification(kIOFBNotifyDidWake, (void *)false);
+    uint64_t replayNs = 0; absolutetime_to_nanoseconds(mach_absolute_time() - replayStart, &replayNs);
+    IOReturn r3 = deliverFramebufferNotification(kIOFBNotifyDidPowerOn, (void *)false);
+    FBLOG("system wake: paging on, WindowServer woken; clients told DidWake true and %d x false (0x%x/0x%x) for %d "
+          "sleep(s), replay %llu ms, DidPowerOn (0x%x)", owed > 1 ? (int)owed : 1, r1, r2, (int)owed,
+          replayNs / 1000000ULL, r3);
     fWillSleepOff = 0;
     return kIOReturnSuccess;
 }
@@ -5556,8 +5581,16 @@ void NVRMNVDAFramebuffer::gpuWakeFire(thread_call_param_t p0, thread_call_param_
         FBLOG("GPU back: head %u left as is (slept %u, power %u)", me->fHead, (unsigned)me->fHeadSlept, (unsigned)me->fPowerOn);
         return;
     }
-    const bool ok = me->setHeadPower(true);   // a rejected wake stays retryable on the next power request
-    FBLOG("GPU back: head %u re-lit -> %s", me->fHead, ok ? "ok" : "FAILED");
+    bool ok = me->setHeadPower(true);   // a rejected wake stays retryable on the next power request
+    if (ok) {
+        FBLOG("GPU back: head %u re-lit -> ok", me->fHead);
+    } else {
+        // After a system wake nothing asks for head power again, so one failure leaves the display dark until the
+        // next login. The usual cause is a scanout allocation that is not back yet: give it a moment and try once more.
+        IOSleep(500);
+        ok = me->setHeadPower(true);
+        FBLOG("GPU back: head %u re-lit on the second try -> %s", me->fHead, ok ? "ok" : "FAILED");
+    }
 }
 IOReturn NVRMNVDAFramebuffer::setAttributeForConnection(IOIndex connectIndex, IOSelect attribute, uintptr_t value)
 {
