@@ -41,6 +41,83 @@ int main(int argc, char **argv)
         !nvmtl_app_profile_for("Cyberpunk2077Helper", "com.cdprojektred.cyberpunk.steam", NULL) && !nvmtl_app_profile_for("REDprelauncher", "com.cdprojektred.cyberpunk.steam", NULL));
     if (!cp) { printf("FAIL: %d failed\n", fails); return 1; }
 
+    /* Blender's versioned profile and its deferred renderer setting. */
+    {
+        const char *B = "org.blenderfoundation.blender", *V = "3.6.23";
+        const nvmtl_app_profile *bl = nvmtl_app_profile_for_version("Blender", B, V, NULL);
+        arm("Blender 3.6.23 gets only canonical pointers, scoped to Metal", bl && bl->nknobs == 1
+            && !strcmp(bl->knobs[0].key, "NVMTL_CANONICAL_POINTERS") && !strcmp(bl->knobs[0].value, "1")
+            && bl->knobs[0].backend == NVMTL_APP_BACKEND_METAL);
+        const char *inside[] = { "3.5.0", "3.5.1", "3.5.10", "3.6.0", "3.6.9", "3.6.10", "3.6.23", "3.6.24",
+                                 "4.0.0", "4.0.1", "4.0.2" };
+        int all = bl != NULL;
+        for (size_t i = 0; i < sizeof inside / sizeof inside[0]; i++)
+            all &= nvmtl_app_profile_for_version("Blender", B, inside[i], NULL) == bl;
+        arm("Blender 3.5.0 through 4.0.2 matches, including both bounds and multi-digit patch versions", all);
+        const char *outside[] = { "3.3.21", "3.4.99", "4.0.3", "4.0.10", "4.1.0", "4.2.23", "4.5.15", "5.0.0" };
+        int matched = 0;
+        for (size_t i = 0; i < sizeof outside / sizeof outside[0]; i++)
+            matched |= nvmtl_app_profile_for_version("Blender", B, outside[i], NULL) != NULL;
+        arm("Blender below 3.5.0 or above 4.0.2 gets no profile", !matched);
+        const char *invalid[] = { NULL, "", "3.6", "3.6.", "3.6.23.1", "3.6.23-alpha", "3.6.23+build",
+                                  " 3.6.23", "3.6.23 ", "+3.6.23", "3.-6.23", "03.6.23", "3.06.23", "3.6.023",
+                                  "3.6.999999999999999999999999999999999999" };
+        matched = 0;
+        for (size_t i = 0; i < sizeof invalid / sizeof invalid[0]; i++)
+            matched |= nvmtl_app_profile_for_version("Blender", B, invalid[i], NULL) != NULL;
+        arm("Blender with a missing, malformed, suffixed or overflowing version gets no profile", !matched);
+        arm("an incomplete, malformed or reversed version range matches nothing",
+            !nvmtl_app_version_in_range(V, "3.5.0", NULL) && !nvmtl_app_version_in_range(V, NULL, "4.0.2")
+            && !nvmtl_app_version_in_range(V, "3.5", "4.0.2") && !nvmtl_app_version_in_range(V, "4.0.2", "3.5.0"));
+        arm("Blender still requires its executable and bundle: no helper, other case, other bundle or missing bundle",
+            !nvmtl_app_profile_for_version("BlenderHelper", B, V, NULL)
+            && !nvmtl_app_profile_for_version("blender", B, V, NULL)
+            && !nvmtl_app_profile_for_version("Blender", "com.example.blender", V, NULL)
+            && !nvmtl_app_profile_for_version("Blender", NULL, V, NULL));
+        arm("NVMTL_APP_PROFILE=0 disables Blender, while 1 still requires a version in range",
+            !nvmtl_app_profile_for_version("Blender", B, V, "0")
+            && nvmtl_app_profile_for_version("Blender", B, V, "1") == bl
+            && !nvmtl_app_profile_for_version("Blender", B, "4.5.0", "1"));
+        arm("Cyberpunk's unrestricted profile ignores the supplied application version",
+            nvmtl_app_profile_for_version("Cyberpunk2077", "com.cdprojektred.cyberpunk.steam", V, NULL) == cp
+            && nvmtl_app_profile_for_version("Cyberpunk2077", "com.cdprojektred.cyberpunk.steam", "unknown", NULL) == cp);
+
+        arm("Blender has one deferred Metal setting and none for common or OpenGL stages",
+            nvmtl_app_profile_knob_count(bl, NVMTL_APP_BACKEND_ANY) == 0
+            && nvmtl_app_profile_knob_count(bl, NVMTL_APP_BACKEND_METAL) == 1
+            && nvmtl_app_profile_knob_count(bl, NVMTL_APP_BACKEND_OPENGL) == 0);
+        nvmtl_app_backend backend = NVMTL_APP_BACKEND_ANY;
+        arm("Blender's exported selection maps OpenGL=1 and Metal=2 without renderer-load timing",
+            bl && !strcmp(bl->backend_query_symbol, "GPU_backend_type_selection_get")
+            && nvmtl_app_profile_backend(bl, 1, &backend) && backend == NVMTL_APP_BACKEND_OPENGL
+            && nvmtl_app_profile_backend(bl, 2, &backend) && backend == NVMTL_APP_BACKEND_METAL);
+        arm("an unset or foreign Blender backend is not guessed, and Cyberpunk has no application query",
+            !nvmtl_app_profile_backend(bl, 0, &backend) && !nvmtl_app_profile_backend(bl, 8, &backend)
+            && !cp->backend_query_symbol && !nvmtl_app_profile_backend(cp, 1, &backend));
+
+        clear(bl);
+        char brec[128] = ""; unsigned bkept = 9;
+        arm("Blender identification alone does not enable canonical pointers",
+            nvmtl_app_profile_apply(bl, NULL, NULL, brec, sizeof brec, &bkept) == 0
+            && !getenv("NVMTL_CANONICAL_POINTERS") && !brec[0] && bkept == 0);
+        arm("Blender's OpenGL backend leaves canonical pointers disabled",
+            nvmtl_app_profile_apply_backend(bl, NVMTL_APP_BACKEND_OPENGL, NULL, NULL,
+                                            brec, sizeof brec, &bkept) == 0
+            && !getenv("NVMTL_CANONICAL_POINTERS") && !brec[0] && bkept == 0);
+        arm("Blender's Metal backend enables canonical pointers and records the setting",
+            nvmtl_app_profile_apply_backend(bl, NVMTL_APP_BACKEND_METAL, NULL, NULL,
+                                            brec, sizeof brec, &bkept) == 1
+            && !strcmp(getenv("NVMTL_CANONICAL_POINTERS"), "1")
+            && !strcmp(brec, "NVMTL_CANONICAL_POINTERS=1") && bkept == 0);
+        clear(bl);
+        setenv("NVMTL_CANONICAL_POINTERS", "user", 1); brec[0] = 0;
+        arm("an explicit user value still wins when Blender's Metal stage settles",
+            nvmtl_app_profile_apply_backend(bl, NVMTL_APP_BACKEND_METAL, user_says,
+                                            "NVMTL_CANONICAL_POINTERS", brec, sizeof brec, &bkept) == 0
+            && !strcmp(getenv("NVMTL_CANONICAL_POINTERS"), "user") && !brec[0] && bkept == 1);
+        clear(bl);
+    }
+
     const char *others[] = { "WindowServer", "Steam", "Cyberpunk2077Helper", "cyberpunk2077", "Cyberpunk2077.exe",
                              "Cyberpunk 2077", "REDprelauncher", "Geekbench 6", "" };
     int any = 0;

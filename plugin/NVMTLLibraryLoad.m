@@ -131,7 +131,26 @@ static nvmtl_promote_uniform_fn xlate_promote_uniform;
 typedef int (*nvmtl_tile_rewrite_fn)(const char *, uint32_t, uint32_t, uint32_t, uint8_t **, size_t *, char *, size_t);
 static nvmtl_tile_rewrite_fn xlate_tile_rewrite;
 
+static nvmtl_app_backend nvmtl_translation_backend(void) {
+    if (!g_app_profile || !g_app_profile->backend_query_symbol) return NVMTL_APP_BACKEND_ANY;
+    typedef int (*nvmtl_backend_query_fn)(void);
+    nvmtl_backend_query_fn query = (nvmtl_backend_query_fn)dlsym(RTLD_MAIN_ONLY,
+                                                                 g_app_profile->backend_query_symbol);
+    nvmtl_app_backend backend;
+    return query && nvmtl_app_profile_backend(g_app_profile, query(), &backend)
+         ? backend : NVMTL_APP_BACKEND_ANY;
+}
+
+static void nvmtl_translation_profile_settle(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const nvmtl_app_backend backend = nvmtl_translation_backend();
+        if (backend != NVMTL_APP_BACKEND_ANY) nvmtl_app_profile_settle_backend(backend);
+    });
+}
+
 static int nvmtl_xlate_ready(void) {
+    nvmtl_translation_profile_settle();
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         Dl_info info; NSString *bundled = nil;
@@ -912,6 +931,7 @@ static NSString *nvmtl_air_in_memory(NSData *air) {
 }
 
 static NSString *nvmtl_air_to_text(NSData *air) {
+    nvmtl_translation_profile_settle();
     NSString *cache = nvmtl_aircache_path(air);
     NSString *hit = [NSString stringWithContentsOfFile:cache encoding:NSUTF8StringEncoding error:nil];
     if (hit.length) { gAirHit++; return nvmtl_air_text_made(hit); }
