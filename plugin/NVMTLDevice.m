@@ -39,8 +39,8 @@
 #include "nvmtl_gpu_policy.h"
 #include "nvmtl_card_select.h"
 extern uint64_t nvmtl_card_registry_id;   // nvmtl_vk.c
-// The application profile matched for this process (nvmtl_app_profile.h), or NULL. Set once by nvmtl_conf_settle
-// (NVMTLObjects.m), which reads nvrm610.conf and applies the profile before any knob is read.
+// The application profile matched for this process (nvmtl_app_profile.h), or NULL. NVMTLObjects.m applies its common
+// settings at load and any backend-specific settings before the first shader translation.
 static const nvmtl_app_profile *g_app_profile;
 static void nvmtl_conf_settle(void);
 // Set by the last compute pipeline creation on this thread: 1 when the profile's kernel edit was applied to its module.

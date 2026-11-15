@@ -189,6 +189,7 @@ static void nvmtl_conf_read_file(unsigned forgot)
 // Which profile keys the user set: in this process's kept environment before the conf file was read (bit i = knob i),
 // or in the user's block of the conf file.
 typedef struct { const nvmtl_app_profile *p; uint64_t envBits; } nvmtl_profile_ctx;
+static nvmtl_profile_ctx g_app_profile_ctx;
 static int nvmtl_profile_user_set(const char *key, void *vctx)
 {
     const nvmtl_profile_ctx *c = vctx;
@@ -196,6 +197,27 @@ static int nvmtl_profile_user_set(const char *key, void *vctx)
         if (!strcmp(c->p->knobs[i].key, key)) { if ((c->envBits >> i) & 1) return 1; break; }
     for (unsigned i = 0; i < g_conf_nmine; i++) if (!strcmp(g_conf_mine[i], key)) return 1;
     return 0;
+}
+
+// Backend-specific profile settings settle exactly once, immediately before the first AIR translation, from the
+// application's authoritative selection query. Settling before the translator opens also makes its AIR and SPIR-V
+// cache identities describe the selected mode.
+static void nvmtl_app_profile_settle_backend(nvmtl_app_backend backend)
+{
+    const nvmtl_app_profile *p = g_app_profile;
+    const unsigned deferred = nvmtl_app_profile_knob_count(p, NVMTL_APP_BACKEND_METAL)
+                            + nvmtl_app_profile_knob_count(p, NVMTL_APP_BACKEND_OPENGL);
+    if (!p || !deferred || backend == NVMTL_APP_BACKEND_ANY) return;
+    char rec[3072]; const char *had = getenv("NVMTL_CONF_SET");
+    snprintf(rec, sizeof rec, "%s", had ? had : "");
+    unsigned kept = 0;
+    const unsigned set = nvmtl_app_profile_apply_backend(p, backend, nvmtl_profile_user_set,
+                                                         &g_app_profile_ctx, rec, sizeof rec, &kept);
+    if (rec[0]) setenv("NVMTL_CONF_SET", rec, 1);
+    const unsigned selected = nvmtl_app_profile_knob_count(p, backend);
+    const char *name = backend == NVMTL_APP_BACKEND_OPENGL ? "OpenGL" : "Metal";
+    nvlog("profile: %s: %s backend: %u setting(s) applied, %u left as the user set them, %u for the other backend skipped",
+          p->exe, name, set, kept, deferred - selected);
 }
 // NVMTL_OS_VERSION=<major>[.<minor>[.<patch>]]: this process is told the operating system is at least that version
 // ("0" = never, even for a profile). The application profile can carry a version too (nvmtl_app_profile.h): Cyberpunk
@@ -229,16 +251,21 @@ static void nvmtl_conf_settle(void)
     done = 1;
     unsigned forgot = nvmtl_conf_forget_inherited();
     const char *me = getprogname();
-    // The main bundle's identifier; a process outside any bundle has none and gets no profile.
-    char bid[256] = "";
+    // Use the release version, not CFBundleVersion (Blender 3.6 uses a build date there). Missing, non-string or
+    // oversized metadata stays empty, so it cannot match a version-restricted profile. No bundle means no profile.
+    char bid[256] = "", app_version[64] = "";
     { CFBundleRef mb = CFBundleGetMainBundle(); CFStringRef s = mb ? CFBundleGetIdentifier(mb) : NULL;
-      if (s && !CFStringGetCString(s, bid, sizeof bid, kCFStringEncodingUTF8)) bid[0] = 0; }
-    const nvmtl_app_profile *p = nvmtl_app_profile_for(me, bid, getenv("NVMTL_APP_PROFILE"));
+      if (s && !CFStringGetCString(s, bid, sizeof bid, kCFStringEncodingUTF8)) bid[0] = 0;
+      CFTypeRef v = mb ? CFBundleGetValueForInfoDictionaryKey(mb, CFSTR("CFBundleShortVersionString")) : NULL;
+      if (v && CFGetTypeID(v) == CFStringGetTypeID()
+          && !CFStringGetCString((CFStringRef)v, app_version, sizeof app_version, kCFStringEncodingUTF8)) app_version[0] = 0; }
+    const nvmtl_app_profile *p = nvmtl_app_profile_for_version(me, bid, app_version,
+                                                               getenv("NVMTL_APP_PROFILE"));
     nvmtl_profile_ctx ctx = { p, 0 };
     for (unsigned i = 0; p && i < p->nknobs && i < 64; i++) if (getenv(p->knobs[i].key)) ctx.envBits |= 1ull << i;
     nvmtl_conf_read_file(forgot);
     nvmtl_os_version_override(me, bid);
-    if (p && !nvmtl_app_profile_for(me, bid, getenv("NVMTL_APP_PROFILE"))) {
+    if (p && !nvmtl_app_profile_for_version(me, bid, app_version, getenv("NVMTL_APP_PROFILE"))) {
         nvlog("profile: %s: off (NVMTL_APP_PROFILE=0)", me);
         p = NULL;
     }
@@ -271,9 +298,13 @@ static void nvmtl_conf_settle(void)
         }
     }
     if (rec[0]) setenv("NVMTL_CONF_SET", rec, 1);
+    g_app_profile_ctx = ctx;
     g_app_profile = p;
-    nvlog("profile: %s (%s): %u setting(s) applied, %u left as the user set them%s; shader cache %s", me, bid, set, kept,
-          p->shader_from ? "; one kernel edit armed" : "", air[0] ? air : (getenv("NVMTL_AIRCACHE") ?: "shared"));
+    const unsigned deferred = nvmtl_app_profile_knob_count(p, NVMTL_APP_BACKEND_METAL)
+                            + nvmtl_app_profile_knob_count(p, NVMTL_APP_BACKEND_OPENGL);
+    nvlog("profile: %s (%s): %u common setting(s) applied, %u left as the user set them, %u backend setting(s) deferred%s; shader cache %s",
+          me, bid, set, kept, deferred, p->shader_from ? "; one kernel edit armed" : "",
+          air[0] ? air : (getenv("NVMTL_AIRCACHE") ?: "shared"));
 }
 __attribute__((constructor)) static void nvmtl_conf_knobs(void) { nvmtl_conf_settle(); }
 static int nvmtl_dontcare_clears(void) {
