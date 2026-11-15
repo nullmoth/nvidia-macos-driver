@@ -104,6 +104,12 @@ static inline bool nvrmEdidSameDisplay(const unsigned char *a, const unsigned ch
 {
     return a && b && a[8] == b[8] && a[9] == b[9] && a[10] == b[10] && a[11] == b[11];
 }
+// HKC T2751U (2163:2751) accepted brightness writes 40 ms after a brightness read over DP AUX.
+static inline bool nvrmDdcFastBrightnessRead(const unsigned char *edid, unsigned size, unsigned connectorType)
+{
+    return connectorType == 0x400 && size >= 128 &&
+           edid[8] == 0x21 && edid[9] == 0x63 && edid[10] == 0x51 && edid[11] == 0x27;
+}
 // "<VVVV>-<PPPP>.bin": vendor = bytes 8..9 as stored (big-endian), product = bytes 11,10 (stored little-endian).
 static inline void nvrmEdidOverrideName(const unsigned char *real, char *out, unsigned size)
 {
