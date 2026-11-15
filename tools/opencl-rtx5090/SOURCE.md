@@ -136,7 +136,7 @@ private Python 3.11.18. The NVK cross-build otherwise used the repository's
 release-3.0 flags, x86_64 target, macOS 15.0 deployment floor, eight jobs, zero
 compiler/linker warnings and no unresolved strong dynamic symbols. Strip debug
 symbols and ad-hoc sign the private library. Export differences from the release
-must be reviewed; they are not an instruction to relax a global driver ABI gate.
+must be reviewed; they are not an instruction to skip consumer-ABI and Metal validation.
 
 ## Exact measured process profile
 
@@ -168,10 +168,19 @@ preserved the explicit profile and cleared inherited backend overrides before
 opting in. `NVMTL_NAK_ARR_SCRATCH=0` and `NVRM_610_BOOST=hold` matched that
 machine's existing configuration/profile; hold is not an overclock.
 
-The private NVK is for clvk's Vulkan API use only. Do not replace the system
-NVK library: the installed Metal plugin also depends on a guarded internal
-layout/LC_UUID contract which this private build does not satisfy. Normal
-Finder launches and the global OpenCL/Metal drivers are outside this bundle.
+The private NVK is qualified here for process-local clvk use. Its different
+LC_UUID disables optional raw-layout fault diagnostics in the installed Metal
+plugin; the installed NVK already triggers the same guard. This is not a
+rendering ABI rejection. A separate six-run, selected-process Metal comparison
+passed compute, render, IOSurface/readback and cross-queue event checks with
+candidate spill retry both disabled and enabled. It does not qualify a global
+replacement, WindowServer, sleep/resume or a long-term soak.
+
+The private clvk framework is not a drop-in replacement for Apple's OpenCL.
+A consumer strongly linked to `gcl_free` loads with Apple's framework but fails
+with the private framework because that symbol is missing. Apple IOSurface and
+OpenGL-sharing entrypoints are also absent. Normal vendor-app Finder launches
+and the global OpenCL/Metal drivers remain outside this bundle.
 
 ## Detached-source build qualification
 
