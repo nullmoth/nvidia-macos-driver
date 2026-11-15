@@ -5593,12 +5593,15 @@ void NVRMNVDAFramebuffer::publishDdcBus()
     fDdcOn = false;
     if (fInternal || !PE_parse_boot_argn("nvrmfbddc", &on, sizeof on) || !on) return;
     OSArray *buses = OSArray::withCapacity(1);
-    OSDictionary *bus = OSDictionary::withCapacity(3);
+    OSDictionary *bus = OSDictionary::withCapacity(4);
+    // IOGraphics requires a bus ID to start the interface. It scopes bus 0 to this framebuffer.
+    OSNumber *id = OSNumber::withNumber((UInt64)0, 32);
     OSNumber *type = OSNumber::withNumber((UInt64)kIOI2CBusTypeI2C, 32);
     OSNumber *tx = OSNumber::withNumber((UInt64)((1u << kIOI2CNoTransactionType) | (1u << kIOI2CSimpleTransactionType) |
                                                  (1u << kIOI2CDDCciReplyTransactionType)), 32);
     OSNumber *flags = OSNumber::withNumber((UInt64)0, 32);
-    if (buses && bus && type && tx && flags) {
+    if (buses && bus && id && type && tx && flags) {
+        bus->setObject(kIOI2CInterfaceIDKey, id);
         bus->setObject(kIOI2CBusTypeKey, type); bus->setObject(kIOI2CTransactionTypesKey, tx);
         bus->setObject(kIOI2CSupportedCommFlagsKey, flags);
         buses->setObject(bus);
