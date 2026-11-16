@@ -7,10 +7,6 @@ Quadro RTX). Based on [NullMoth's driver](https://github.com/nullmoth/nvidia-mac
 **[Driver downloads](https://github.com/HighDelay/nvidia-macos-driver-nvk/releases)** ·
 [Card support](docs/CARD-SUPPORT.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
-The 2.9 integration candidate is awaiting local testing. Its
-[integration notes](docs/UPSTREAM-2.9-INTEGRATION.md) describe the repaired shader
-work, parser hardening and retained fork hardware/rendering paths.
-
 ## Install — by hand
 
 1. Configure [OpenCore](docs/OPENCORE-SETUP.md): required boot arguments, SIP,
