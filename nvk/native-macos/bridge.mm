@@ -381,6 +381,33 @@ id<MTLDevice> metal_device(const VkPhysicalDeviceProperties &props) {
    return nil;
 }
 
+#ifdef NVKBRIDGE_WINE
+// Wine creates the window's layer with the system-default Intel or AMD device,
+// before Vulkan chooses NVIDIA. Only defer this initial foreign
+// binding; an NVIDIA-bound layer must retain the existing device checks.
+// Called under registry so a second surface cannot reset an owned layer.
+void prepare_surface_device(CAMetalLayer *layer) {
+   id<MTLDevice> initial=layer.device;
+   if (!initial || !initial.registryID) return;
+   for (const auto &entry:surfaces)
+      if (entry.second->layer==layer) return;
+   io_iterator_t iterator{};
+   if (IOServiceGetMatchingServices(kIOMainPortDefault,IOServiceMatching("NVAccel"),&iterator)) return;
+   bool found=false,complete=true,owned=false;
+   for (io_service_t service;(service=IOIteratorNext(iterator));IOObjectRelease(service)) {
+      uint64_t identifier=0;
+      if (IORegistryEntryGetRegistryEntryID(service,&identifier) || !identifier) complete=false;
+      else { found=true;owned|=identifier==initial.registryID; }
+   }
+   complete&=IOIteratorIsValid(iterator);
+   IOObjectRelease(iterator);
+   if (found && complete && !owned && layer.device==initial) {
+      layer.device=nil;
+      fprintf(stderr,"NVK Bridge: deferred initial non-NVIDIA layer device to Vulkan selection\n");
+   }
+}
+#endif
+
 VkResult VKAPI_CALL create_instance(const VkInstanceCreateInfo *info, const VkAllocationCallbacks *alloc, VkInstance *result) {
    if (!initialize()) return VK_ERROR_INCOMPATIBLE_DRIVER;
    std::vector<const char *> extensions;
@@ -632,7 +659,11 @@ VkResult VKAPI_CALL create_surface(VkInstance instance,const VkMetalSurfaceCreat
    if (nvkbridge_hud::enabled()) surface->hud=std::make_shared<nvkbridge_hud::State>();
 #endif
    *out=(VkSurfaceKHR)(uintptr_t)next_handle.fetch_add(1);
-   std::lock_guard<std::mutex> lock(registry); surfaces[*out]=surface;
+   std::lock_guard<std::mutex> lock(registry);
+#ifdef NVKBRIDGE_WINE
+   prepare_surface_device(surface->layer);
+#endif
+   surfaces[*out]=surface;
    return VK_SUCCESS;
 }
 void VKAPI_CALL destroy_surface(VkInstance,VkSurfaceKHR surface,const VkAllocationCallbacks *) {

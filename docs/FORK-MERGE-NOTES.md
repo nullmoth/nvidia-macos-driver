@@ -1,5 +1,27 @@
 # Retained fork changes for upstream merges
 
+## Wine hybrid window binding, 2026-11-16
+
+Keep the Wine-only initial-layer repair in `nvk/native-macos/bridge.mm`. Wine
+creates its Metal layer with the system-default device, which can be Intel or
+AMD even though DXVK selected NVIDIA. At new surface creation, defer a foreign
+binding only after complete NVAccel registry enumeration. Preserve NVIDIA-bound
+layers, already-owned layers, enumeration failures, the exact PCI/Metal match
+and all later device/drawable mismatch checks. Native Minecraft and Zink retain
+their existing paths. Rebuild the Wine frontend for future full packages rather
+than reusing the original v3.0.1 frontend.
+
+`surface_device_test.mm` checks production binding with simulated adapters;
+existing host checks retain small-BAR, async/reuse and lifetime coverage. On
+Intel UHD 770 + CMP 40HX, the original Wine-default layer failed while explicit
+NVIDIA and deferred layers each displayed 180 changing-color GPU-copy frames.
+Patched game testing on that setup and AMD/laptop testing remain unqualified.
+
+`build/package_bridge_update.py` is a one-time updater for the published
+v3.0.1-nvk provider, with isolated transaction tests under `tools/bridge-update`.
+Do not make this a recurring separate release asset. Future full driver packages
+include the repaired frontend normally.
+
 ## Small-BAR video-encoder headroom, 2026-11-16
 
 Keep the display-aware framebuffer surface budget. For known BAR1 apertures
