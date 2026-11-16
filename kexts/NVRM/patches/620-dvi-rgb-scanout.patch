@@ -1,0 +1,143 @@
+--- a/kapi/src/nvkms-kapi.c
++++ b/kapi/src/nvkms-kapi.c
+@@ -2528,6 +2528,32 @@
+     params->overrides = NVKMS_MODE_VALIDATION_NO_RRX1K_CHECK;
+ }
+ 
++/* DVI scanout is RGB at eight bits per component.  In particular, do not
++ * expose timings which NVKMS can accept only after changing them to YUV420:
++ * the KAPI mode has no YUV disposition and this client supplies RGB surfaces
++ * and requires its own primary completion notifier. */
++static NvBool KapiDviRgb8(
++    struct NvKmsKapiDevice *device, NvKmsKapiDisplay display,
++    struct NvKmsDpyOutputColorParams *color)
++{
++    struct NvKmsKapiStaticDisplayInfo dpy = { };
++    struct NvKmsKapiConnectorInfo connector = { };
++
++    if (!GetStaticDisplayInfo(device, display, &dpy) ||
++        !GetConnectorInfo(device, dpy.connectorHandle, &connector) ||
++        connector.signalFormat != NVKMS_CONNECTOR_SIGNAL_FORMAT_TMDS ||
++        (connector.type != NVKMS_CONNECTOR_TYPE_DVI_D &&
++         connector.type != NVKMS_CONNECTOR_TYPE_DVI_I)) {
++        return NV_FALSE;
++    }
++
++    color->format = NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_FORMAT_RGB;
++    color->formatSpecified = NV_TRUE;
++    color->bpc = NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_8;
++    color->bpcSpecified = NV_TRUE;
++    return NV_TRUE;
++}
++
+ static int GetDisplayMode
+ (
+     struct NvKmsKapiDevice *device,
+@@ -2552,6 +2578,8 @@
+                                   &paramsValidate.request.modeValidation);
+ 
+     paramsValidate.request.modeIndex = modeIndex;
++    const NvBool dviRgb8 = KapiDviRgb8(device, display,
++                                      &paramsValidate.request.dpyOutputColor);
+ 
+     status = nvkms_ioctl_from_kapi(device->pKmsOpen,
+                                    NVKMS_IOCTL_VALIDATE_MODE_INDEX,
+@@ -2571,7 +2599,20 @@
+ 
+ 
+     if (valid != NULL) {
+-        *valid = paramsValidate.reply.valid;
++        *valid = paramsValidate.reply.valid &&
++            (!dviRgb8 || paramsValidate.reply.yuv420Mode == NV_YUV420_MODE_NONE);
++    }
++    if (dviRgb8 && !paramsValidate.reply.end && paramsValidate.reply.valid &&
++        paramsValidate.reply.yuv420Mode != NV_YUV420_MODE_NONE) {
++        static NvU32 reports;
++        if (reports++ < 8) {
++            nvEvoLog(EVO_LOG_INFO,
++                     "[kapi] DVI display 0x%x mode %u: omit YUV420 disposition %u (%ux%u pclk %u)",
++                     display, modeIndex, paramsValidate.reply.yuv420Mode,
++                     paramsValidate.reply.mode.timings.hVisible,
++                     paramsValidate.reply.mode.timings.vVisible,
++                     paramsValidate.reply.mode.timings.pixelClockHz);
++        }
+     }
+ 
+     if (preferredMode != NULL) {
+@@ -2644,6 +2685,8 @@
+ 
+ 
+     NvKmsKapiDisplayModeToKapi(mode, &paramsValidate.request.mode);
++    const NvBool dviRgb8 = KapiDviRgb8(device, display,
++                                      &paramsValidate.request.dpyOutputColor);
+ 
+     status = nvkms_ioctl_from_kapi(device->pKmsOpen,
+                                    NVKMS_IOCTL_VALIDATE_MODE,
+@@ -2660,7 +2703,8 @@
+         return NV_FALSE;
+     }
+ 
+-    return paramsValidate.reply.valid;
++    return paramsValidate.reply.valid &&
++        (!dviRgb8 || paramsValidate.reply.yuv420Mode == NV_YUV420_MODE_NONE);
+ }
+ 
+ static NvBool AssignSyncObjectConfig(
+@@ -3513,6 +3557,17 @@
+         paramsHead->colorBpcSpecified =
+             (headModeSetConfig->colorBpc !=
+              NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_UNKNOWN);
++
++        /* Use exactly the same DVI colour contract for validation and commit. */
++        if (headModeSetConfig->numDisplays == 1) {
++            struct NvKmsDpyOutputColorParams color = { };
++            if (KapiDviRgb8(device, headModeSetConfig->displays[0], &color)) {
++                paramsHead->colorFormat = color.format;
++                paramsHead->colorFormatSpecified = color.formatSpecified;
++                paramsHead->colorBpc = color.bpc;
++                paramsHead->colorBpcSpecified = color.bpcSpecified;
++            }
++        }
+     }
+ 
+     return NV_TRUE;
+@@ -3602,6 +3657,39 @@
+ 
+ done:
+ 
++    if (params != NULL && commit && status &&
++        params->reply.status == NVKMS_SET_MODE_STATUS_SUCCESS) {
++        static NvU32 reports;
++        for (NvU32 head = 0; head < NVKMS_KAPI_MAX_HEADS; head++) {
++            const struct NvKmsKapiHeadModeSetConfig *hc =
++                &requestedConfig->headRequestedConfig[head].modeSetConfig;
++            struct NvKmsDpyOutputColorParams color = { };
++            if (!(requestedConfig->headsMask & NVBIT(head)) ||
++                !hc->bActive || hc->numDisplays != 1 || reports >= 8 ||
++                !KapiDviRgb8(device, hc->displays[0], &color)) continue;
++            NvS64 values[4] = { -1, -1, -1, -1 };
++            const enum NvKmsDpyAttribute attrs[4] = {
++                NV_KMS_DPY_ATTRIBUTE_HEAD, NV_KMS_DPY_ATTRIBUTE_HW_HEAD,
++                NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_FORMAT,
++                NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC
++            };
++            for (NvU32 i = 0; i < ARRAY_LEN(attrs); i++) {
++                struct NvKmsGetDpyAttributeParams attr = { };
++                attr.request.deviceHandle = device->hKmsDevice;
++                attr.request.dispHandle = device->hKmsDisp;
++                attr.request.dpyId = nvNvU32ToDpyId(hc->displays[0]);
++                attr.request.attribute = attrs[i];
++                if (nvkms_ioctl_from_kapi(device->pKmsOpen, NVKMS_IOCTL_GET_DPY_ATTRIBUTE,
++                                         &attr, sizeof(attr))) values[i] = attr.reply.value;
++            }
++            reports++;
++            nvEvoLog(EVO_LOG_INFO,
++                     "[kapi] DVI display 0x%x: RGB8 mode %ux%u pclk %u accepted; apiHead %lld hwHead %lld format %lld bpc %lld",
++                     hc->displays[0], hc->mode.timings.hVisible, hc->mode.timings.vVisible,
++                     hc->mode.timings.pixelClockHz, (long long)values[0], (long long)values[1],
++                     (long long)values[2], (long long)values[3]);
++        }
++    }
+     if (params != NULL) {
+         nvKmsKapiFree(params);
+     }

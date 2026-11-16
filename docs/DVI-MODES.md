@@ -1,4 +1,4 @@
-# DVI timing selection
+# DVI timing and RGB scanout
 
 Some DVI-to-HDMI displays are detected and have readable EDIDs but stay black
 because their preferred timing fails NVIDIA's modeset validation.
@@ -12,7 +12,28 @@ modes; the public KAPI conversion omits that metadata. The same display's
 This is consistent with metadata loss during conversion, rather than an absent
 connector or unreadable EDID.
 
-## Repair
+With NVIDIA 620, the same display could also start with a stretched, green/pink
+image and disappear when rotated. Its initial primary flip was accepted but
+never completed, so subsequent modesets correctly stopped at the completion
+guard. The RGB8 repair below restores a working scanout without bypassing that
+guard.
+
+## RGB8 validation and modesets
+
+`kexts/NVRM/patches/620-dvi-rgb-scanout.patch` makes digital TMDS DVI-D/DVI-I
+use explicit RGB at eight bits per component in indexed validation, explicit
+validation and full modeset conversion. Modes with a remaining software or
+hardware YUV420 disposition are not advertised as valid: the public KAPI mode
+cannot carry that sideband and the framebuffer supplies RGB surfaces.
+
+Validation and commit use the same color contract. HDMI, DisplayPort, internal
+panels, analog DVI-I and connector-query failures retain their existing policy.
+The patch keeps NVIDIA's EDID/link checks and the framebuffer's completion,
+surface-lifetime, cursor and rotation handling. It adds no KAPI ABI or boot
+argument. Rebuild NVRM and its NVKMS archive; the matching framebuffer,
+accelerators and AGDC need no code changes.
+
+## Startup timing fallback
 
 For digital TMDS DVI-D/DVI-I only, explicitly validate the chosen startup timing
 before sizing the boot raster and scanout. If it fails, search the enumerated
@@ -35,19 +56,31 @@ Presentation, rotation, cursor lifetime and parked-VRAM behavior are unchanged.
 
 ## Validation
 
-The user confirmed the ITY now displays an image alongside the HDMI VA2209 on
-Tahoe 26.7.1. Boot logs show the fallback selected 1080p75 and both initial modesets
-succeeded. That test used `nvfbcontrollers=0`; four-head independent rotation,
-other DVI adapters, sleep/wake and other GPUs remain unqualified.
+The earlier startup-selector test used shared controllers and selected 1080p75
+after rejecting the preferred timing. On 2026-11-16, the user confirmed the RGB8
+candidate fixes both DVI output and rotation with the HDMI monitor still working
+on RTX 2060 SUPER / Tahoe 26.7.1. The loaded binary identity was verified. Boot
+logs show RGB8 at 1920×1080 with a 174.57 MHz pixel clock, successful later
+modesets, and no prior-completion faults or modeset refusals during the test.
+Four-head independent rotation, other DVI adapters, sleep/wake, Sequoia and
+other GPUs remain unqualified.
+
+`python3 tools/test_kapi_dvi_rgb.py --ogkm <pristine-NVIDIA-source>` applies the
+actual KAPI patches and checks the production validators and full modeset
+converter under ASan/UBSan. It covers DVI RGB8, all YUV420 dispositions,
+validation/commit consistency, other connectors and query failures. Negative
+controls verify that removing either the disposition filter or modeset policy
+fails the test. Both isolated kernel-link cases, with and without optional
+components, passed on Tahoe.
 
 `python3 tools/test_dvi_modes.py` builds the production selector and extracts
 the startup, EDID matching and refresh-publication methods for ASan/UBSan checks.
 It covers the recorded timing rejection, native-resolution preservation, both
 validators, nearest refresh, unchanged valid modes, enumeration errors/bounds,
-other resolutions and HDMI/DP/LVDS/analog isolation. Use `--ogkm` or `OGKM` for
-NVIDIA headers outside the default `~/ogkm615` directory.
+other resolutions and HDMI/DP/LVDS/analog isolation. Use `--ogkm` or `OGKM` to
+select the NVIDIA source headers.
 
 Runtime properties are `NVRMDviModeSelectionVersion=1`,
 `NVRMDviModeFallbackApplied` and, when used, `NVRMDviReplacementModeIndex`.
-No new boot argument is required. Rebuild NVRMFB for this repair; the existing
-matching accelerator and AGDC binaries remain suitable.
+The startup selector lives in NVRMFB; changes to that selector require rebuilding
+NVRMFB. The RGB8 policy above lives in NVRM/NVKMS.

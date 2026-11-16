@@ -21,7 +21,7 @@ bash build/build_nvrm.sh "$PWD/kexts/NVRM" \
 
 `JOBS=4` can limit the RM/KMS compiler processes. The RM step requires a clean,
 pinned checkout and refuses to reuse an existing work tree. It applies only
-this fork's five NVIDIA patches, without fuzz, and adds the Darwin platform
+this fork's NVIDIA patches, without fuzz, and adds the Darwin platform
 declarations needed by the public build. The source identity, patch hashes and
 archive digests are recorded. The final kext build verifies those identities
 before linking; it refuses an existing output folder.

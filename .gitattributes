@@ -9,3 +9,4 @@ tools/test_stage_package.py text eol=lf
 zink/mesa-zink-nvk.patch text eol=lf whitespace=-blank-at-eol
 video/nvenc-turing.patch text eol=lf whitespace=-blank-at-eol
 nvk/nvk-small-bar-memory.patch text eol=lf whitespace=-blank-at-eol
+kexts/NVRM/patches/620-dvi-rgb-scanout.patch text eol=lf whitespace=-blank-at-eol

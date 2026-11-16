@@ -1963,6 +1963,23 @@ report does not isolate either change as the mirroring fix. Keep controller
 splitting disabled in ordinary packages and retain the independent identity and
 timing-reporting correctness repairs.
 
+## Digital DVI RGB scanout, 2026-11-16
+
+Retain `620-dvi-rgb-scanout.patch`: digital TMDS DVI-D/DVI-I uses RGB8 in
+indexed and explicit mode validation and the full modeset converter. Reject
+remaining YUV420 dispositions because the public KAPI mode omits that sideband.
+Keep validation and commit consistent. HDMI/DP/internal/analog connectors and
+failed connector queries retain their existing color policy. Preserve EDID/link
+validation, strict completion witnesses and surface retirement; never clear a
+submission fault to force a later rotation through.
+
+The user confirmed corrected DVI output and rotation alongside HDMI on RTX 2060
+SUPER / Tahoe 26.7.1 with the verified candidate loaded. RGB8 modesets succeeded
+without the previous completion fault. Sanitized production-policy tests and
+negative controls, existing DVI/concurrency tests and isolated Tahoe kernel links
+passed. Other GPUs, adapters, Sequoia and sleep/wake remain untested. See
+[DVI modes](DVI-MODES.md).
+
 ## DVI startup timing validation
 
 Retain `nvrm-dvi-modes.h` and its startup call before the boot raster/scanout is
