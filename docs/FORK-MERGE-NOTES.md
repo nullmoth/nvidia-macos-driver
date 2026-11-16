@@ -36,9 +36,10 @@ pass; the plugin passes eight sRGB bridge cases, 96 render/publication cases,
 four existing storage-write cases and 16 capture-format readback cases on
 that GPU. These GPU tests use the previously loaded kernel. Isolated and
 installed Tahoe collections link successfully, retaining external extensions
-at permanent paths. The private candidate is installed for a reboot and live
-OBS test; capture smoothness, Sequoia execution and other BAR1/GPU setups remain
-unqualified. Package/release preparation remains held.
+at permanent paths. After reboot, the candidate NVRM is verified loaded and
+the user confirms OBS capture stutter is resolved on that setup. Sequoia
+execution and other BAR1/GPU setups remain unqualified. Package/release
+preparation remains held.
 
 ## Login-window l10r frames, 2026-11-16
 
