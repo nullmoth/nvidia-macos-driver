@@ -78,7 +78,10 @@ def generation_bumps_on_every_head_change(src):
 
 
 def slot_scoped_to_escape(src):
-    m = re.search(r'IOReturn NVRMUserClient::esc\(uint32_t cmd, void \*data, uint32_t size\)\n\{\n    Gate g\(fGate\);\n(.*?)\n', src)
+    # Stateless surface marks may return before the gate; they never call RM or
+    # populate a mapping slot. Stateful dispatch still scopes it under the gate.
+    m = re.search(r'IOReturn NVRMUserClient::esc\(uint32_t cmd, void \*data, uint32_t size\)\n\{.*?'
+                  r'    Gate g\(fGate\);\n(.*?)\n', src, re.S)
     scope = re.search(r'struct NvMapPendingScope \{ NvMapPendingScope\(\) \{ mapPendingClearThread\(\); \} '
                       r'~NvMapPendingScope\(\) \{ mapPendingClearThread\(\); \} \};', src)
     return bool(m and 'NvMapPendingScope pendingScope;' in m.group(1) and scope)

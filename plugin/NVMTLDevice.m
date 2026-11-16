@@ -1725,12 +1725,11 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
                     // can draw into the same surface even if this one only
                     // samples it. A format/tiling can support storage but
                     // still lose COLOR_ATTACHMENT usage in the alias helper.
-                    // Keep the shared import only with real render/storage
-                    // support; optimal images use the existing copy path.
-                    if (!(t->_i.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) || (stex && !t->_i.storage)) {
-                        nvlog("item 7: surface %u linear VkFormat %u lacks required %s support - private image",
-                              (unsigned)IOSurfaceGetID(surf), vkf,
-                              !(t->_i.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ? "render-target" : "storage");
+                    // Keep the renderability check; missing linear storage can
+                    // use the tiled GPU publication path below instead.
+                    if (!(t->_i.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+                        nvlog("item 7: surface %u linear VkFormat %u lacks required render-target support - private image",
+                              (unsigned)IOSurfaceGetID(surf), vkf);
                         nvmtl_vk_image_destroy(&t->_i);
                         nvmtl_vk_buffer_destroy(&vb);
                         goto private_image;
@@ -1740,9 +1739,19 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
                     // implicit linear render shadows are invisible to sampled
                     // descriptors when a pass mixes linear/tiled attachments.
                     // Publish through the family's linear image with a GPU copy.
-                    if (stex && ((t->_ropt >> MTLResourceStorageModeShift) & 0xF) == MTLStorageModeManaged) {
+                    // sRGB capture textures may request Unknown usage, including
+                    // writable UNORM views. Their linear alias is sampleable and
+                    // renderable but cannot itself carry storage writes. Retain
+                    // it for GPU publication and use an optimal image with real
+                    // storage (native or compatible-view), rather than discarding
+                    // the import and round-tripping pixels through system memory.
+                    if (stex && (!t->_i.storage || ((t->_ropt >> MTLResourceStorageModeShift) & 0xF) == MTLStorageModeManaged)) {
                         nvk_image optimal = { 0 };
                         if (nvmtl_vk_image_create_typed(w, h, vkf, bpp, a8, 1, stex, 2u, 1u, &optimal)) {
+                            nvmtl_vk_image_destroy(&t->_i); nvmtl_vk_buffer_destroy(&vb); goto private_image;
+                        }
+                        if (!optimal.storage) {
+                            nvmtl_vk_image_destroy(&optimal);
                             nvmtl_vk_image_destroy(&t->_i); nvmtl_vk_buffer_destroy(&vb); goto private_image;
                         }
                         t->_surfaceLinear = t->_i; t->_i = optimal;

@@ -1,5 +1,45 @@
 # Retained fork changes for upstream merges
 
+## Capture completion dispatch and sRGB imports, 2026-11-16
+
+Keep the stateless surface GPU-mark path ahead of the NVRM user-client gate.
+Capture pageoff can hold the accelerator lock while waiting for a ready mark;
+WindowServer's next dirty escape can hold the client gate while waiting for
+that accelerator lock. Serializing the ready mark behind the same gate closes
+the cycle and forces capture to reach its 100 ms deadline.
+
+Only an exact-size, current-version `NVRM_ESC_SURF_DIRTY` GPU mark bypasses
+the client gate, mapping scope and PM accounting. It accesses only NVAccel's
+separately locked pending table, so it needs no initialized RM adapter or GPU
+power transition. Preserve NVAccel's WindowServer authorization, disabled-mark
+fallback and readiness waits. Refuse new marks after client cleanup starts;
+in-flight marks use no client RM/mapping state. Keep the accelerator service
+reference retained and atomically published, releasing concurrent losers.
+Ordinary surface and RM operations retain their existing gate and PM handling.
+
+When a renderable linear IOSurface import lacks requested storage support,
+retain it as `_surfaceLinear` and use an optimal image with native or compatible
+UNORM storage views. Preserve the existing GPU import/publication ordering,
+local backing cache and three-word generation tags. A compatible storage view
+does not make the base sRGB view writable. Keep the renderability refusal,
+private fallback on allocation/capability failures and direct linear imports
+when tiled storage is unnecessary. CPU-modified or stale-tagged surfaces still
+require the existing upload path; this does not eliminate every CPU copy.
+
+`tools/test_surface_mark_dispatch.py` exercises production dispatch, completion
+waits, authorization, concurrent service discovery and client cleanup with
+ASan/UBSan and TSan. Its gated negative control reproduces the timeout.
+Drawable/import, publication, queue and storage-view host regressions cover
+the tiled bridge and retained fallbacks. RTX 2060 SUPER / Tahoe 26.7.1 / OBS
+33.0.1 stacks establish the original lock cycle. Private NVRM/plugin builds
+pass; the plugin passes eight sRGB bridge cases, 96 render/publication cases,
+four existing storage-write cases and 16 capture-format readback cases on
+that GPU. These GPU tests use the previously loaded kernel. Isolated and
+installed Tahoe collections link successfully, retaining external extensions
+at permanent paths. The private candidate is installed for a reboot and live
+OBS test; capture smoothness, Sequoia execution and other BAR1/GPU setups remain
+unqualified. Package/release preparation remains held.
+
 ## Login-window l10r frames, 2026-11-16
 
 Retain the narrow backport of upstream
@@ -1454,8 +1494,9 @@ independent Metal wrappers. See [command cache validation](NVMTL-COMMAND-CACHES.
 
 Preserve the Photo Booth follow-up to upstream PR #433: request an actual
 storage view before importing eligible non-framebuffer-only app drawables.
-If a linear alias drops requested storage usage, release it and use the private
-fallback; never advertise a nonexistent writable view. Keep WindowServer's
+If a linear alias drops requested storage usage, use the tiled GPU bridge
+described above when its optimal image supports those views; otherwise retain
+the private fallback. Never advertise a nonexistent writable view. Keep WindowServer's
 requested usage unchanged. Also retain Photo Booth's preview-only orientation
 adapter, gated by process/bundle identity and actual NVMTL CAMetalLayer
 drawables. Do not disable Zink, change camera buffers/saved photos, or globally

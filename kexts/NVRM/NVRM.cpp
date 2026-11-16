@@ -349,7 +349,8 @@ private:
     // Guards fMapList and nothing else. It is separate from fGate because RM writes another client's context from inside
     // that client's neighbour's esc(), and because bind does not hold fGate. Nothing that takes another lock runs under it.
     IOLock *fMapLock = nullptr;
-    // Held across esc() and clientMemoryForType() and across the teardown in clientClose. The RM
+    // Held across stateful esc() calls, clientMemoryForType() and the teardown in clientClose. Stateless
+    // surface GPU marks use only NVAccel's pending-table lock so completion can unblock capture pageoff. The RM
     // callbacks below it (nv_acquire_file_va and friends) must NOT take it: they run
     // nested inside esc() for this same client and IOLock is not recursive.
     struct Gate {
@@ -2321,8 +2322,48 @@ IOReturn NVRMUserClient::sEsc(OSObject *target, void *reference, IOExternalMetho
     kern_os_free(buf);
     return r;
 }
+// Both the ordinary surface escape and the stateless GPU marks use this service.
+// Its retained reference is published atomically: different clients (and the
+// completion lane below) can discover it concurrently without leaking a loser.
+static IOService *nvrmSurfaceAccelerator()
+{
+    static IOService *volatile accel;
+    IOService *a = __atomic_load_n(&accel, __ATOMIC_ACQUIRE);
+    if (!a) {
+        OSDictionary *m = IOService::serviceMatching("NVAccel");
+        IOService *found = m ? IOService::waitForMatchingService(m, 100ULL * 1000 * 1000) : nullptr;
+        if (m) m->release();
+        if (found && !OSCompareAndSwapPtr(nullptr, found, (void *volatile *)&accel)) found->release();
+        a = __atomic_load_n(&accel, __ATOMIC_ACQUIRE);
+    }
+    return a;
+}
+static IOReturn nvrmSurfaceEscape(struct NVRMSurfShareEsc *ss, uint32_t cmd)
+{
+    ss->hSrcClient = ss->hSrcMemory = 0;
+    ss->status = NVRM_SS_OFF;
+    IOService *accel = nvrmSurfaceAccelerator();
+    if (!accel) return kIOReturnSuccess;
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVACCEL_SS_FN);
+    if (sym) { accel->callPlatformFunction(sym, false, ss, (void *)current_task(), (void *)(uintptr_t)cmd, NULL); sym->release(); }
+    return kIOReturnSuccess;
+}
 IOReturn NVRMUserClient::esc(uint32_t cmd, void *data, uint32_t size)
 {
+    // A capture pageoff holds the accelerator lock while waiting for a GPU mark.
+    // WindowServer can hold fGate while its next dirty escape waits for that lock;
+    // taking fGate for the ready mark then deadlocks until the 100 ms timeout.
+    // Only versioned GPU marks bypass it. They touch the accelerator's separately
+    // locked pending table, never this client's RM/file/mapping state or hardware,
+    // so they also need no PM use. IOKit keeps the client alive during the method,
+    // the cached service is retained, and NVAccel still authorizes WindowServer.
+    if (cmd == NVRM_ESC_SURF_DIRTY && data && size == sizeof(struct NVRMSurfShareEsc)) {
+        struct NVRMSurfShareEsc *ss = (struct NVRMSurfShareEsc *)data;
+        if (ss->version == NVRM_SURFSHARE_VERSION && (ss->plane & NVRM_SS_PLANE_GPU_MARK)) {
+            if (__atomic_load_n(&fCleaned, __ATOMIC_ACQUIRE)) return kIOReturnNotAttached;
+            return nvrmSurfaceEscape(ss, cmd);
+        }
+    }
     Gate g(fGate);
     NvMapPendingScope pendingScope;   // a mapping-length slot never outlives this escape
     if (!fOwner || fOwner->fPassDone < 2) { static bool once; if (!once) { once = true; kprintf("NVRM-xnu: esc 0x%x refused: adapter not up (run nvrmctl go 2)\n", cmd); } return kIOReturnNotReady; }
@@ -2354,15 +2395,7 @@ IOReturn NVRMUserClient::esc(uint32_t cmd, void *data, uint32_t size)
     case NVRM_ESC_SURF_DIRTY:
     case NVRM_ESC_SURF_VRAM: {
         if (size != sizeof(struct NVRMSurfShareEsc)) return kIOReturnBadArgument;
-        struct NVRMSurfShareEsc *ss = (struct NVRMSurfShareEsc *)data;
-        ss->status = NVRM_SS_OFF;
-        static IOService *accel;
-        if (!accel) { OSDictionary *m = IOService::serviceMatching("NVAccel");
-                      if (m) { accel = IOService::waitForMatchingService(m, 100ULL * 1000 * 1000); m->release(); } }
-        if (!accel) return kIOReturnSuccess;
-        const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVACCEL_SS_FN);
-        if (sym) { accel->callPlatformFunction(sym, false, ss, (void *)current_task(), (void *)(uintptr_t)cmd, NULL); sym->release(); }
-        return kIOReturnSuccess;
+        return nvrmSurfaceEscape((struct NVRMSurfShareEsc *)data, cmd);
     }
     default: {
         NV_STATUS st = rm_ioctl(NULL, nv, &fNvfp, cmd, data, size);
