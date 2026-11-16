@@ -5,8 +5,8 @@ An RTX 2060 SUPER with 256 MiB BAR1 failed H.264 session creation while
 desktop surfaces held most of the aperture. The encoder maps 33.5 MiB of
 video memory; the old 16 MiB RM margin could not accommodate it. Keep the
 display accounting, leave room for the codec plus existing RM use, and
-retain the policy on larger apertures. This host check does not qualify
-encoder operation on an installed kernel.
+retain the previous policy on larger and unknown apertures. This host check
+does not qualify encoder operation on an installed kernel.
 """
 import pathlib
 import subprocess
@@ -32,6 +32,7 @@ def check(name, ok, detail=''):
 
 
 prog = r'''#include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 typedef unsigned long long uint64_t; typedef long long SInt64;
 #define NVRM_VRAM_BAR1_BUDGET (192ull * 1024ull * 1024ull)
@@ -89,14 +90,33 @@ with tempfile.TemporaryDirectory() as t:
             check(f'desktop, display, 1080p encoder and existing RM mappings fit with display={display}',
                   current > 0 and current + display + encoder_maps + 16 * MB <= BAR256)
 
-        # Smaller apertures reserve proportionally; a display that consumes the window
-        # must refuse video-memory grants instead of restoring an overcommitted budget.
-        for bar in (64 * MB, 128 * MB, BAR256):
+        # Smaller known apertures reserve proportionally, with a 16 MiB minimum.
+        # A full aperture must refuse new grants rather than overcommit.
+        for bar in (32 * MB, 64 * MB, 128 * MB, BAR256):
             display = bar // 4
             check(f'{bar // MB} MiB BAR leaves room for display and other RM mappings',
-                  budget(bar, display) + display + bar // 4 <= bar)
+                  budget(bar, display) + display + max(16 * MB, bar // 4) <= bar)
             check(f'{bar // MB} MiB BAR with no remaining room refuses new surface grants',
                   budget(bar, bar) == 0 and budget(bar, bar + MB) == 0)
+
+        # Freeze the preceding policy independently, including the unknown-size,
+        # unmeasured-display, disabled-accounting and full-display fallbacks.
+        def preceding_budget(bar, display, aware):
+            if bar >= 4 * 1024 * MB:
+                return bar // 2
+            fraction = bar // 4 * 3
+            fallback = fraction if 0 < bar < BAR256 else max(OLD192, fraction)
+            if not aware or display <= 0 or display + 16 * MB >= bar:
+                return fallback
+            return bar - display - 16 * MB
+
+        for bar in (0, 512 * MB,
+                    1024 * MB, 2 * 1024 * MB, 4 * 1024 * MB, 8 * 1024 * MB, 16 * 1024 * MB):
+            cases = [(display, aware) for display in (-1, 0, disp_recording, bar, bar + MB)
+                     for aware in (0, 1)]
+            check(f'{bar // MB} MiB BAR retains every preceding budget/fallback decision',
+                  all(budget(bar, display, aware) == preceding_budget(bar, display, aware)
+                      for display, aware in cases))
 
         # 4. the display toggle off restores the exact old fixed fraction (the safety valve).
         check('negative control: debug.nvrmfb_vram_display_aware=0 restores the old 192 MB fraction',

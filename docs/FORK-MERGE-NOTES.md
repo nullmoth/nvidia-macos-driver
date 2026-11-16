@@ -2,22 +2,25 @@
 
 ## Small-BAR video-encoder headroom, 2026-11-16
 
-Keep the display-aware framebuffer surface budget and reserve one quarter of
-known BAR1 apertures up to 256 MiB for other RM mappings and fragmentation.
+Keep the display-aware framebuffer surface budget. For known BAR1 apertures
+of at most 256 MiB, reserve one quarter of the aperture, with a 16 MiB minimum,
+for other RM mappings and fragmentation.
 The previous 16 MiB margin could not accommodate the retained Turing H.264
 encoder's 33.5 MiB of CPU-mapped video memory at 1080p. If scanout and the
 reservation fill the aperture, refuse new surface grants so the existing
-system-memory fallback can handle them. Preserve the larger-aperture policies,
-including the half-window budget at 8 GiB, and the capture completion repair.
+system-memory fallback can handle them. Preserve larger and unknown apertures'
+previous budget and fallback decisions, including the half-window budget at
+8 GiB, and the capture completion repair.
 This changes NVRMFB budgeting; codec binaries and OBS settings are retained.
 
 On RTX 2060 SUPER / Tahoe 26.7.1 / 256 MiB BAR1, the loaded candidate was
 verified after reboot and the user confirmed OBS recording works. The OBS log
 records 2,039 frames at 1080p60 with hardware H.264; isolated 1080p hardware
 H.264 and HEVC encode/decode roundtrips also pass. The budget regression fails
-on the preceding implementation. Smaller apertures and the unchanged 8 GiB
-policy have host checks; other GPUs, Sequoia execution, higher resolutions and
-concurrent encoding sessions remain unqualified for this repair.
+on the preceding implementation. Smaller apertures have host checks; larger
+and unknown apertures, including 8 GiB, are checked against their preceding
+policy. Other GPUs, Sequoia execution, higher resolutions and concurrent
+encoding sessions remain unqualified for this repair.
 
 ## Metal metadata and binding caches, 2026-11-16
 

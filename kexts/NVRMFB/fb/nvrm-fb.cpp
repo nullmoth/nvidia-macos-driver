@@ -112,11 +112,13 @@ static inline uint64_t nvrmSurfaceBudget(uint64_t barLen, SInt64 displayBytes)
         return nvrmVramBudget(barLen);                     // display not measured yet -- keep the conservative policy
     // On a 256 MB aperture, a single 1080p H.264 session maps 33.5 MB of video memory, including a contiguous
     // 15.9375 MB reconstruction buffer. A 16 MB margin let desktop surfaces starve that session (RM 0x51), even
-    // though total VRAM was plentiful. Keep a quarter of a small aperture available to RM, codecs and fragmentation;
-    // the 16 MB margin is unchanged above 256 MB. Large resizable BARs return above, keeping their half-window policy.
-    const uint64_t margin = barLen && barLen <= (256ull << 20) ? barLen / 4 : 16ull << 20;
+    // though total VRAM was plentiful. Reserve a quarter of known apertures up to 256 MB, with a 16 MB minimum.
+    // Larger and unknown apertures retain their previous policy, including the half-window budget returned above.
+    const bool reserveForEncoder = barLen && barLen <= (256ull << 20);
+    const uint64_t margin = reserveForEncoder && barLen >= (64ull << 20) ? barLen / 4 : 16ull << 20;
     const uint64_t reserve = (uint64_t)displayBytes + margin;
-    if (reserve >= barLen) return 0;                       // no room: let the existing system-memory fallback handle it
+    if (reserve >= barLen)
+        return reserveForEncoder ? 0 : nvrmVramBudget(barLen); // small BAR: use the existing system-memory fallback
     return barLen - reserve;
 }
 
