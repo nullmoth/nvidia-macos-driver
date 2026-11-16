@@ -22,6 +22,14 @@ v3.0.1-nvk provider, with isolated transaction tests under `tools/bridge-update`
 Do not make this a recurring separate release asset. Future full driver packages
 include the repaired frontend normally.
 
+After the affected user confirms the patched game works, remove the v3.0.1-only
+package builder and updater implementation/transaction tests from `main`; this
+cleanup need not wait for another driver version. Until that confirmation, keep
+the tooling available for follow-up repairs. Retain the production bridge fix
+and `surface_device_test.mm`. Keep all published v3.0.1 archives, including the
+complete bridge updater and full driver package. Preserve the linked setup and
+rollback guide, or pin release links to its existing commit before moving it.
+
 ## Small-BAR video-encoder headroom, 2026-11-16
 
 Keep the display-aware framebuffer surface budget. For known BAR1 apertures
