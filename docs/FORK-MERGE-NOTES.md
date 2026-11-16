@@ -1,5 +1,28 @@
 # Retained fork changes for upstream merges
 
+## Login-window l10r frames, 2026-11-16
+
+Retain the narrow backport of upstream
+[`1285e17`](https://github.com/nullmoth/nvidia-macos-driver/commit/1285e179d2593bd6700b035215c8ffcea552a765).
+Tahoe can present login/lock frames as `l10r` (ARGB2101010). The earlier selective
+integration imported its conversion helper but retained a BGRA-only accelerator
+copy path, leaving these frames refused and the panel black with a live cursor.
+This matches the reported RTX 2060 / Tahoe 26.7 / 256 MiB BAR1 symptom; it is a
+format-handling defect, not a reason to change BAR1 sizing or allocation policy.
+
+Convert only copied l10r pixels into the existing 8-bit scanout. Preserve BGRA
+copies, the BGRA-only zero-copy flip, GPU/source-readiness ordering, mapping
+bounds and the existing NVIDIA 620 interface. Intel-panel l10r frames must bypass
+raw copies, retain the frame lease through conversion, and finish or cancel it
+once. Convert the visible width only, validate destination pitch and retain
+`debug.nvaccel_iop_l10r`. Broader HDR/30-bit scanout changes are not dependencies.
+
+`tools/test_iop_login_frame.py` runs the production transaction, source mapping
+and frame lease: 34 sanitizer cases pass, with refusal/raw-copy negative controls.
+Existing BAR1, console parking, flip-validity, Intel-panel and gamma-guard checks
+also pass. These host checks do not qualify a real login or either accelerator
+binary. Driver builds, installation and release preparation remain held.
+
 ## WindowServer small-image pooling, 2026-11-16
 
 Keep optimal-image pooling enabled by default only for the exact `WindowServer`
