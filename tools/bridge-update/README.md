@@ -44,8 +44,8 @@ reinstalling the original v3.0.1-nvk driver.
 The affected Intel UHD 770 + CMP 40HX setup returned surface-loss errors with
 Wine's Intel-bound layer. Both explicitly NVIDIA-bound and deferred-layer probes
 displayed changing colors and completed 180 GPU-copy presents on that machine.
-The patched game's rendering still needs confirmation there. AMD hybrid systems
-and muxless laptops have not been tested.
+The affected user confirmed Star Rail now renders correctly after installing
+the update. AMD hybrid systems and muxless laptops have not been tested.
 
 Production surface-binding regression checks and existing bridge host checks
 cover the initial foreign device, unchanged NVIDIA/native paths, later mismatch

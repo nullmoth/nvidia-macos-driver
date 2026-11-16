@@ -15,20 +15,17 @@ than reusing the original v3.0.1 frontend.
 existing host checks retain small-BAR, async/reuse and lifetime coverage. On
 Intel UHD 770 + CMP 40HX, the original Wine-default layer failed while explicit
 NVIDIA and deferred layers each displayed 180 changing-color GPU-copy frames.
-Patched game testing on that setup and AMD/laptop testing remain unqualified.
+The affected user confirmed Star Rail rendering after installing the update.
+AMD hybrid systems and muxless laptops remain untested.
 
-`build/package_bridge_update.py` is a one-time updater for the published
-v3.0.1-nvk provider, with isolated transaction tests under `tools/bridge-update`.
+The v3.0.1-only builder, updater implementation and transaction tests were
+removed from `main` after that confirmation. Their original source remains in
+[commit 0805a9d](https://github.com/HighDelay/nvidia-macos-driver-nvk/commit/0805a9d).
+Retain the production bridge fix and `surface_device_test.mm`. Keep all published
+v3.0.1 archives, including the complete bridge updater and full driver package,
+and the linked [setup/rollback guide](../tools/bridge-update/README.md).
 Do not make this a recurring separate release asset. Future full driver packages
 include the repaired frontend normally.
-
-After the affected user confirms the patched game works, remove the v3.0.1-only
-package builder and updater implementation/transaction tests from `main`; this
-cleanup need not wait for another driver version. Until that confirmation, keep
-the tooling available for follow-up repairs. Retain the production bridge fix
-and `surface_device_test.mm`. Keep all published v3.0.1 archives, including the
-complete bridge updater and full driver package. Preserve the linked setup and
-rollback guide, or pin release links to its existing commit before moving it.
 
 ## Small-BAR video-encoder headroom, 2026-11-16
 
