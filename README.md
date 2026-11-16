@@ -37,6 +37,9 @@ The installer offers experimental **Intel laptop panel support** (`NMIntelFB`),
 default **No**, for internal screens wired to an unsupported Intel GPU. Existing
 opt-ins survive updates. See [when to enable it](docs/INTEL-PANEL.md).
 
+Experimental [notebook TGP support](docs/NOTEBOOK-TGP.md) is available with
+`nvrmtgp=1`; it stays off by default and uses the laptop firmware's power budget.
+
 Optional [NMXAudio HD Audio](docs/OPTIONAL-AUDIO.md) is offered separately on
 Tahoe, also defaulting to **No**. Existing independent audio drivers are preserved.
 

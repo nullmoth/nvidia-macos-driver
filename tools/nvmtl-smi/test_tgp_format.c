@@ -9,7 +9,7 @@ int main(void)
     static char buf[1024];
     struct tgp_view v = { 0, 0, 0, 0, 0, 0 };
     run(&v, buf, sizeof buf);
-    arm("without the sysctls it says the manager is off and prints no readings", strstr(buf, "tgp_mode off (boot-arg nvrmtgp=1 not set)") && !strstr(buf, "controls_sent"));
+    arm("without the sysctls it explains the opt-in and laptop requirement without readings", strstr(buf, "tgp_mode inactive (requires nvrmtgp=1 and a detected laptop battery)") && !strstr(buf, "controls_sent"));
     v = (struct tgp_view){ 1, 1, 1, 1, 0, 1 };
     run(&v, buf, sizeof buf);
     arm("on mains with the mode sent reads on / mains", strstr(buf, "tgp_mode on") && strstr(buf, "power source mains") && strstr(buf, "controls_sent 1 last_status 0x0"));

@@ -18,6 +18,7 @@ Optional boot arguments, for troubleshooting:
 | `-nvrmnogo` | the driver idles until `nvrmctl go <pass>` instead of starting the GPU itself. |
 | `-nvrmnobootscreen` | do not snapshot the boot screen. |
 | `-nvrmnopm` | turns off system sleep support: NVRM stays out of the power tree, as before it had one. A Mac that sleeps then comes back without the GPU. See [docs/SLEEP-WAKE.md](SLEEP-WAKE.md). |
+| `nvrmtgp=1` | experimental laptop-only TGP budget on mains power, reset on battery; off by default. Requires battery detection and a mobile NVIDIA GPU. See [setup, telemetry and rollback](NOTEBOOK-TGP.md). |
 
 Add every key you set to `NVRAM → Delete` as well, so the values are rewritten each boot.
 

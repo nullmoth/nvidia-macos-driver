@@ -1,5 +1,38 @@
 # Retained fork changes for upstream merges
 
+## Optional notebook TGP manager, 2026-11-16
+
+Retain the narrow backport of upstream
+[`dfe54e0`](https://github.com/nullmoth/nvidia-macos-driver/commit/dfe54e0329308a8acd8de5e1246354454fcb557a).
+It requires explicit `nvrmtgp=1`, battery detection and enabled system PM;
+the RM helper also rejects non-mobile GPUs. It sends only the firmware's
+TGP-mode enable/reset command under API-then-GPU locks, never a wattage or
+generic control. The existing single-adapter telemetry contract is retained.
+
+Keep the dedicated work-loop timer, stable per-service owner, gated lifecycle
+transitions and terminal stop. Drain before closing the PM gate or tearing
+down RM; resume only after successful RM/NVKMS recovery and PM gate reopening.
+Cancel/disable queued work under the same gate. Preserve allocation-failure
+cleanup, module-stop sysctl unregistering and atomic telemetry/live settings.
+Unknown source readings cannot enable a budget and reset one already applied;
+live disable works on unknown readings too. Bound failed enable attempts but
+retain reset attempts for an applied budget. See [setup and rollback](NOTEBOOK-TGP.md).
+
+The production manager and RM helper pass 49 checks under both memory and
+thread sanitizers,
+including charger decisions, missing readings, mobile/full-power refusal,
+failure bounds, concurrent live settings and suspend/stop callback races.
+Negative controls remove the mobile guard, drain or terminal stop and fail.
+The private NVRM links against the unchanged, source-verified NVIDIA 620.70.06
+archives; an isolated Tahoe collection includes the candidate and all eight
+existing extension identities. Laptop wattage, charger/battery transitions,
+thermal behavior, sleep/resume and Sequoia execution remain unqualified.
+The historical display-sleep fixture fails identically on the unchanged base;
+the other 11 selected existing host suites pass, with PERFMON tested separately.
+Packaging, installation and release preparation stay held for this backport.
+The stable Mesa, 2.8 NVK patch chain and broader power/token/display boundary
+remain unchanged.
+
 ## Capture completion dispatch and sRGB imports, 2026-11-16
 
 Keep the stateless surface GPU-mark path ahead of the NVRM user-client gate.
@@ -691,7 +724,8 @@ Before each merge:
 The current upstream ancestry is **3.0 at `87e524ab36f12d17c04626d6cf7fc3bde1cc63e4`**,
 integrated from the repaired 2.9 base `7412cdde81447f78da0ebb64216dc258d8beaedb`.
 This is a selective implementation merge: legacy support and the incompatible
-power/token/display chain remain excluded. The matched kernel/NVK patch chain
+power/token/display chain remain excluded. The optional notebook TGP manager
+above is an independent, later backport. The matched kernel/NVK patch chain
 still follows 2.8 at `60fb7255e18c31fe0747091fd9a961f30c1cd82a`, integrated
 on 2026-11-08 with `18ba05f38b5eadea8b5ae05834bb51c61fb4c5c3` (2.7.2) as
 the common ancestor. The preceding 2.7.2 integration used

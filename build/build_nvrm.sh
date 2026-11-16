@@ -39,7 +39,7 @@ for archive, marker in [(tree / 'src/nvidia/_out/Darwin_x86_64/libnvkernel.a', '
 PY
 # Every C++ source the kext needs, listed; a new .cpp that is not named here stops the build instead of being left out.
 CXX_SOURCES=( NVRM.cpp nv_xnu_power.cpp nv_xnu_stubs.cpp nvkms_shaders.cpp nvrm_fbinfo.cpp nvrm_gpuva.cpp
-              nvrm_surfshare.cpp os-nvkms-xnu.cpp os-xnu.cpp os-xnu2.cpp )
+              nvrm_power.cpp nvrm_surfshare.cpp os-nvkms-xnu.cpp os-xnu.cpp os-xnu2.cpp )
 for f in "$SRC"/*.cpp; do
   b=$(basename "$f"); found=0
   for s in "${CXX_SOURCES[@]}"; do [ "$s" = "$b" ] && found=1; done
@@ -76,6 +76,9 @@ OBJS+=("$OUT/nvrm_kapi_fields.o")
 # nvrm_pageoff.c includes RM-internal headers: compiled with the RM's own command line for osapi.c (rmcc.py)
 OGKM="$OGKM" python3 -B "$HERE/../kexts/NVRM/rmcc.py" "$SRC/nvrm_pageoff.c" "$OUT/nvrm_pageoff.o" 2>"$OUT/pageoff.err" || { echo "STOP: nvrm_pageoff.c did not compile"; tail "$OUT/pageoff.err"; exit 1; }
 OBJS+=("$OUT/nvrm_pageoff.o")
+# The notebook TGP control also needs RM-internal GPU headers and matching definitions.
+OGKM="$OGKM" python3 -B "$HERE/../kexts/NVRM/rmcc.py" "$SRC/nvrm_pmgr.c" "$OUT/nvrm_pmgr.o" 2>"$OUT/pmgr.err" || { echo "STOP: nvrm_pmgr.c did not compile"; tail "$OUT/pmgr.err"; exit 1; }
+OBJS+=("$OUT/nvrm_pmgr.o")
 xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "${OBJS[@]}" \
   "$NV/_out/Darwin_x86_64/libnvkernel.a" "$KMSLIB" -o "$OUT/NVRM.kext/Contents/MacOS/NVRM" 2>"$OUT/link.err" || { echo "STOP: link failed"; grep -v "built for newer" "$OUT/link.err" | head; exit 1; }
 cp "$SRC/Info.plist" "$OUT/NVRM.kext/Contents/Info.plist"

@@ -1,8 +1,9 @@
 # Building the fork's NVIDIA 620.70.06 kext
 
 This rebuilds NVRM from the fork's OS interfaces and NVIDIA's open source RM/KMS
-cores. It does not install anything, modify EFI, or adopt the upstream 2.9 kernel,
-renderer, power or display policies. Use macOS with Xcode Command Line Tools,
+cores. It does not install anything, modify EFI, or switch to the upstream 2.9
+kernel/renderer ABI or broader display policies. The narrow
+[notebook TGP backport](NOTEBOOK-TGP.md) remains opt-in. Use macOS with Xcode Command Line Tools,
 Python 3 and enough free space for an isolated build.
 
 Fetch a clean checkout of NVIDIA's 620.70.06 revision, then use a new work folder:

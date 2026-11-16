@@ -3,7 +3,7 @@
 //   cc -std=c11 -Wall -Wextra -I../kexts/NVRM -o /tmp/test_nvrm_power_policy test_nvrm_power_policy.c && /tmp/test_nvrm_power_policy
 //
 // Negative controls that must FIRE: a policy that sent the budget on battery, never took it off when the charger went,
-// flapped on an unknown reading, or kept state across a resume fails here.
+// enabled on an unknown reading, ignored live disable, or kept state across a resume fails here.
 
 #include "nvrm_power_policy.h"
 #include <stdio.h>
@@ -20,9 +20,11 @@ int main(void)
     CHECK(nvrm_tgp_want(1, 1, 0) == 1, "the charger came back: TGP mode goes on again");
     CHECK(nvrm_tgp_want(0, 1, 1) == 0, "the live rollback (enable 0) takes it off even on mains");
     CHECK(nvrm_tgp_want(0, 1, -1) == 0, "with enable 0 it is never turned on");
-    CHECK(nvrm_tgp_want(1, -1, 1) == -1, "an unknown power source keeps what was applied (no flapping)");
+    CHECK(nvrm_tgp_want(1, -1, 1) == 0, "a lost power-source reading resets an applied budget");
+    CHECK(nvrm_tgp_want(1, -1, 0) == -1, "an unknown power source cannot enable a budget");
+    CHECK(nvrm_tgp_want(0, -1, 1) == 0, "live disable resets the budget even when the power source is unknown");
     CHECK(nvrm_tgp_want(1, -1, -1) == -1, "an unknown power source with nothing sent sends nothing (needs a reading)");
-    CHECK(!nvrm_tgp_gave_up(NVRM_TGP_MAX_FAILS - 1) && nvrm_tgp_gave_up(NVRM_TGP_MAX_FAILS), "five refusals in a row stop the manager");
+    CHECK(!nvrm_tgp_gave_up(NVRM_TGP_MAX_FAILS - 1) && nvrm_tgp_gave_up(NVRM_TGP_MAX_FAILS), "five refusals stop further enables until resume");
     CHECK(nvrm_tgp_state_after_resume() == -1, "after a resume the firmware has forgotten: start from nothing sent");
     CHECK(nvrm_tgp_want(1, 1, nvrm_tgp_state_after_resume()) == 1, "after a resume on mains it is sent again");
 

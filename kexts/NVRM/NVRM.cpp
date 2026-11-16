@@ -6,6 +6,7 @@
 
 #include "nvrm_off.h"
 #include "nv-xnu.h"
+#include "nvrm_power.h"
 #include "nvrm_utilization.h"
 #include "nvrm_bar_limits.h"
 
@@ -155,6 +156,7 @@ private:
     nv_state_t   fNv = {};
     bool         fPrivateState = false;
     bool         fAdapter = false;
+    NVRMPower   *fPower = nullptr;
     IOLock      *fUtilizationLock = nullptr;
     void        *fUtilizationState = nullptr;
     bool         fUtilizationStopping = false;
@@ -626,6 +628,7 @@ bool NVRM::start(IOService *provider)
     UInt8 bus = fPCI->getBusNumber(), dev = fPCI->getDeviceNumber(), fn = fPCI->getFunctionNumber();
     nv_xnu_register_pci(fPCI, 0, bus, dev, fn);
     nv_xnu_power_refresh();        // read the power source here, where no firmware lock is held
+    fPower = nvrm_power_create();  // opt-in laptop only; remains disarmed until the adapter is up
     nv_xnu_register_all_pci();   // RM's chipset init needs the whole PCI tree (host bridge, root ports)
     nv_state_t *nv = &fNv;
     nv->pci_info.domain    = 0;
@@ -1670,6 +1673,7 @@ IOReturn NVRM::go(uint32_t pass)
         }
         publishGpuProfile();
         if (nvkms_xnu_load()) nvrm_display_publish(this, fNv.gpu_id);
+        nvrm_power_start(fPower, &fNv);
     }
     return kIOReturnSuccess;
 }
@@ -1692,6 +1696,7 @@ void NVRM::interruptOccurred(IOInterruptEventSource *src, int count)
 
 void NVRM::stop(IOService *provider)
 {
+    nvrm_power_stop(fPower);  // drain before PMstop or any RM adapter teardown
     // Keep the lock until free(): another service can retain this object and
     // call its platform interface after stop(), when it must answer NotReady.
     if (fUtilizationLock) {
@@ -1719,6 +1724,7 @@ void NVRM::stop(IOService *provider)
 
 void NVRM::free()
 {
+    nvrm_power_release(fPower); fPower = nullptr;
     if (fUtilizationLock) { IOLockFree(fUtilizationLock); fUtilizationLock = nullptr; }
     super::free();
 }
@@ -1742,6 +1748,7 @@ void NVRM::gpuSuspend()
 {
     uint64_t t0 = mach_absolute_time();
     fPmCycles++;
+    nvrm_power_suspend(fPower);  // drain before closing the RM PM gate
     OSCompareAndSwap(kGpuPmRunning, kGpuPmSuspended, &fGpuPm);
     setProperty("nvrm-pm", "suspended");
     LOG("sleep #%u: suspending the GPU (NVKMS, then RM standby)", fPmCycles);
@@ -1778,6 +1785,7 @@ void NVRM::gpuResume()
     OSCompareAndSwap(kGpuPmSuspended, ok ? kGpuPmRunning : kGpuPmLost, &fGpuPm);
     nvkms_xnu_resume(fNv.gpu_id, ok);
     nv_xnu_pm_open();   // also when lost: RM then answers the waiting calls with errors instead of leaving them blocked
+    if (ok) nvrm_power_resume(fPower);
     setProperty("nvrm-pm", ok ? "running" : "lost (resume failed)");
     uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     LOG("wake #%u: rm_power_management(RESUME) -> 0x%x, user channels restarted -> 0x%x, %llu ms - %s", fPmCycles,
@@ -2415,4 +2423,4 @@ IOReturn NVRMUserClient::sGo(OSObject *target, void *reference, IOExternalMethod
 }
 
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d) { return KERN_SUCCESS; }
-extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return KERN_SUCCESS; }
+extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { nvrm_power_fini(); return KERN_SUCCESS; }

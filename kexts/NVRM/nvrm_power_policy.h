@@ -8,8 +8,9 @@
 //   ac          last power-source reading: 1 mains, 0 battery, -1 unknown
 //   state       what the firmware was last told: 1 on, 0 off, -1 nothing yet
 //
-// The answer is the value to send, or -1 to send nothing. An unknown power source keeps what was applied rather than
-// flapping, but the first decision needs a reading.
+// The answer is the value to send, or -1 to send nothing. An unknown source
+// cannot enable TGP mode; an already applied budget is reset if the reading is
+// lost. The live disable always works, including with an unknown power source.
 
 #ifndef NVRM_POWER_POLICY_H
 #define NVRM_POWER_POLICY_H
@@ -18,12 +19,14 @@
 
 static inline int nvrm_tgp_want(int enable, int ac, int state)
 {
-    int want = (ac < 0) ? state : ((enable && ac == 1) ? 1 : 0);
+    if (enable && ac < 0 && state != 1) return -1;
+    int want = (enable && ac == 1) ? 1 : 0;
     if (want < 0 || want == state) return -1;
     return want;
 }
 
-// After this many refused controls in a row the manager stops trying until the next resume.
+// After this many refusals stop trying to enable until resume. Disabling an
+// applied budget remains available, including after failures.
 static inline int nvrm_tgp_gave_up(unsigned fails) { return fails >= NVRM_TGP_MAX_FAILS; }
 
 // A suspended GPU cannot take a control, and the firmware forgets TGP mode across a power cycle: the manager is held
