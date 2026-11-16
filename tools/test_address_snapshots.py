@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise production address snapshots and texture invalidation under ASan/UBSan."""
 import pathlib
+import os
 import re
 import subprocess
 import tempfile
@@ -16,7 +17,7 @@ macros = section('#define NVMTL_NBUF ', '#define NVMTL_DISPATCH_PC_BYTES')
 slot = re.search(r'typedef struct \{ uint8_t kind;.*?\} nvmtl_slot;', src, re.S).group(0)
 table = re.search(r'typedef struct \{ nvmtl_slot s\[.*?\} nvmtl_bindtable;', src, re.S).group(0)
 page = section('#define NVMTL_TABLES_PER_PAGE', '\n#include "nvmtl_pool_cost.inc"')
-bindings = section('static int nvmtl_bind_slot(', '\nint nvmtl_vk_emb_same(')
+bindings = section('static int g_addr_tex_inc', '\nint nvmtl_vk_emb_same(')
 view = section('int nvmtl_vk_bind_texture_view(', '\nint nvmtl_vk_bind_storage_view(')
 snapshot = section('static int nvmtl_address_snapshot(', '\nstatic void nvmtl_spirv_retarget_set(')
 fixture = r'''
@@ -26,6 +27,7 @@ fixture = r'''
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 #include <mach/mach.h>
 #include <vulkan/vulkan.h>
 #include "nvmtl_vk.h"
@@ -98,7 +100,9 @@ int main(void) {
     assert(allocations==2); // crossed the 256-snapshot page boundary
     assert(!nvmtl_address_snapshot(&c,1,&info)); check(&c,1,&info);
     assert(!nvmtl_vk_bind_texture_view(&c,0,0,(void *)0x19800));
-    assert(!t->address_tex_valid[0] && t->address_tex_valid[1]);
+    assert(t->address_tex_valid[1]);
+    if (nvmtl_addr_tex_inc_on()) assert(t->address_tex_valid[0] && (t->address_tex_dirty[0][0]&1));
+    else assert(!t->address_tex_valid[0]);
     assert(!nvmtl_address_snapshot(&c,0,&info)); check(&c,0,&info);
     assert(!nvmtl_vk_bind_texture_view(&c,0,0,(void *)0x19800)); assert(t->address_tex_valid[0]);
     assert(!nvmtl_bind_slot(&c,0,NVMTL_NBUF,NVMTL_SLOT_TEXBUF,(void *)0x19800,0));
@@ -108,6 +112,20 @@ int main(void) {
     assert(!nvmtl_address_snapshot(&c,0,&info)); check(&c,0,&info);
     assert(!words(&c,&info)[2*NVMTL_NBUF+127]);
     assert(nvmtl_vk_bind_texture_view(&c,0,NVMTL_NTEX,(void *)0x18000)==-1);
+    // Churn every word boundary in both stages, including multiple changes
+    // before a snapshot. Compare each immutable result with the slot table.
+    for(unsigned round=0;round<1000;round++) {
+        const unsigned stage=round&1;
+        for(unsigned j=0;j<5;j++) {
+            const unsigned i=(round*31+j*63)%NVMTL_NTEX;
+            void *handle=(round+j)%3?(void *)(uintptr_t)(0x20000+8*(round*5+j)):NULL;
+            if(j&1) assert(!nvmtl_bind_slot(&c,stage,NVMTL_NBUF+i,NVMTL_SLOT_TEXBUF,handle,0));
+            else assert(!nvmtl_vk_bind_texture_view(&c,stage,i,handle));
+        }
+        assert(!nvmtl_address_snapshot(&c,stage,&info)); check(&c,stage,&info);
+        assert(!t->address_tex_dirty[stage][0] && !t->address_tex_dirty[stage][1]);
+        assert(!memcmp(old,saved,sizeof saved));
+    }
     // All 321 binding slots need distinct dirty bits. High storage slots must
     // not overwrite adjacent generation/cache fields.
     for(unsigned stage=0;stage<2;stage++) {
@@ -134,4 +152,6 @@ with tempfile.TemporaryDirectory(prefix='nvmtl-address-snapshot-') as directory:
     subprocess.run(['xcrun', 'clang', '-O2', '-Werror', '-fsanitize=address,undefined',
                     '-I' + str(root / 'plugin'), '-I' + str(pathlib.Path.home() / 'Vulkan-Headers/include'),
                     str(work / 'test.c'), '-o', str(work / 'test')], check=True)
-    subprocess.run([str(work / 'test')], check=True)
+    for incremental in ('1', '0'):
+        subprocess.run([str(work / 'test')], check=True,
+                       env={**os.environ, 'NVMTL_ADDR_TEX_INC': incremental, 'NVMTL_ADDR_TEX_VERIFY': '1'})

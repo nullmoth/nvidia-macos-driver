@@ -3039,6 +3039,7 @@ typedef struct { nvmtl_slot s[2][NVMTL_NBIND];
                  uint8_t dirty[2]; VkDescriptorSet last[2]; unsigned last_idx[2]; uint32_t last_hi[2]; uint64_t lastw[2][4];
                  uint64_t chg[2][NVMTL_BINDING_WORDS]; uint64_t texgen[2]; const void *emb_fn[2]; uint64_t emb_gen[2]; uint32_t emb_n[2];
                  uint64_t address_tex[2][NVMTL_NTEX]; uint8_t address_tex_valid[2];
+                 uint64_t address_tex_dirty[2][(NVMTL_NTEX + 63) / 64];   /* entries of a valid address_tex whose slot changed since */
                  uint64_t emb_key[2][NVMTL_EMB_KEYMAX];
                  uint32_t lastdyn[2]; void *lasttab[2];
                  uint64_t lasttb[2][4];   /* the texel-buffer mask the last set was written with */
@@ -3763,6 +3764,28 @@ static void nvmtl_vk_bindless_drop_now(uint32_t slot)
 
 int nvmtl_vk_bind_buffer_offset(nvk_cmdbuf *c, uint32_t set, uint32_t index, size_t offset);
 
+// Each texture change dirties its own cached address entry. Buffer-only changes
+// leave these entries intact; each GPU snapshot still receives its own copy.
+// Keep a full-rebuild fallback and an optional comparison for diagnostics.
+static int g_addr_tex_inc, g_addr_tex_verify;
+static pthread_once_t g_addr_tex_once = PTHREAD_ONCE_INIT;
+static void nvmtl_addr_tex_options(void)
+{
+    const char *inc = getenv("NVMTL_ADDR_TEX_INC"), *verify = getenv("NVMTL_ADDR_TEX_VERIFY");
+    g_addr_tex_inc = !(inc && inc[0] == '0');
+    g_addr_tex_verify = verify && verify[0] == '1';
+}
+static int nvmtl_addr_tex_inc_on(void)
+{
+    pthread_once(&g_addr_tex_once, nvmtl_addr_tex_options);
+    return g_addr_tex_inc;
+}
+static int nvmtl_addr_tex_verify_on(void)
+{
+    pthread_once(&g_addr_tex_once, nvmtl_addr_tex_options);
+    return g_addr_tex_verify;
+}
+
 static int nvmtl_bind_slot(nvk_cmdbuf *c, uint32_t set, uint32_t binding, uint8_t kind, void *h, size_t off)
 {
     if (set > 1 || binding >= NVMTL_NBIND) return -1;
@@ -3785,7 +3808,11 @@ static int nvmtl_bind_slot(nvk_cmdbuf *c, uint32_t set, uint32_t binding, uint8_
         t->dirty[set] = 1;
         t->chg[set][binding >> 6] |= 1ull << (binding & 63);
         if (kind != NVMTL_SLOT_BUF || sl->kind != NVMTL_SLOT_BUF) t->texgen[set]++;
-        if (binding >= NVMTL_NBUF && binding < NVMTL_NBUF + NVMTL_NTEX) t->address_tex_valid[set] = 0;
+        if (binding >= NVMTL_NBUF && binding < NVMTL_NBUF + NVMTL_NTEX) {
+            const uint32_t k = binding - NVMTL_NBUF;
+            if (nvmtl_addr_tex_inc_on()) t->address_tex_dirty[set][k >> 6] |= 1ull << (k & 63);
+            else t->address_tex_valid[set] = 0;
+        }
     }
     if (sl->kind != kind || sl->h != h) nvmtl_hz_slot_bound(c, t, set, binding, kind, h);   // hazard keys change only with the handle
     sl->kind = kind; sl->h = h; sl->off = off;
@@ -4162,6 +4189,8 @@ static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBuf
     // texture-index portion in this recording's bind table, then copy it into
     // each immutable GPU snapshot. Texture/view/texel transitions invalidate it
     // in nvmtl_bind_slot; nvmtl_vk_bind_texture_view fills size before a snapshot.
+    // A changed slot marks its entry (nvmtl_addr_tex_inc_on); only the marked entries are recomputed here, after
+    // nvmtl_vk_bind_texture_view has written their size.
     if (t) {
         if (!t->address_tex_valid[which]) {
             for (unsigned i = 0; i < NVMTL_NTEX; ++i) {
@@ -4169,6 +4198,27 @@ static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBuf
                 t->address_tex[which][i] = s->kind == NVMTL_SLOT_TEX && s->h ? (uint64_t)s->size : 0;
             }
             t->address_tex_valid[which] = 1;
+            memset(t->address_tex_dirty[which], 0, sizeof t->address_tex_dirty[which]);
+        } else {
+            for (unsigned w = 0; w < (NVMTL_NTEX + 63) / 64; w++) {
+                for (uint64_t bits = t->address_tex_dirty[which][w]; bits; bits &= bits - 1) {
+                    const unsigned i = w * 64 + (unsigned)__builtin_ctzll(bits);
+                    if (i >= NVMTL_NTEX) break;
+                    const nvmtl_slot *s = &t->s[which][NVMTL_NBUF + i];
+                    t->address_tex[which][i] = s->kind == NVMTL_SLOT_TEX && s->h ? (uint64_t)s->size : 0;
+                }
+                t->address_tex_dirty[which][w] = 0;
+            }
+            if (nvmtl_addr_tex_verify_on()) {
+                static _Atomic unsigned said;
+                for (unsigned i = 0; i < NVMTL_NTEX; ++i) {
+                    const nvmtl_slot *s = &t->s[which][NVMTL_NBUF + i];
+                    const uint64_t want = s->kind == NVMTL_SLOT_TEX && s->h ? (uint64_t)s->size : 0;
+                    if (t->address_tex[which][i] != want && atomic_fetch_add(&said, 1) < 16)
+                        nvlog("vk: address-table texture entry %u of set %u FAILED its check: cached %llu, slot says %llu", i, which,
+                              (unsigned long long)t->address_tex[which][i], (unsigned long long)want);
+                }
+            }
         }
         memcpy(addresses + 2 * NVMTL_NBUF, t->address_tex[which], sizeof t->address_tex[which]);
     } else memset(addresses + 2 * NVMTL_NBUF, 0, NVMTL_NTEX * sizeof(uint64_t));
@@ -4308,6 +4358,17 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
 static VkDescriptorSet nvmtl_snapshot_set_m(nvk_cmdbuf *c, uint32_t which, uint32_t stex_hi, const uint64_t *mask, const uint64_t *tb)
 { return nvmtl_snapshot_set_md(c, which, stex_hi, mask, tb, VK_NULL_HANDLE, NULL, NULL); }
 #define NVMTL_COPY_HAS(m, i) ((m) && (((m)[(i) >> 6] >> ((i) & 63)) & 1))
+static int g_snap_walk;
+static pthread_once_t g_snap_walk_once = PTHREAD_ONCE_INIT;
+static void nvmtl_snap_walk_options(void)
+{
+    const char *e = getenv("NVMTL_SNAP_WALK"); g_snap_walk = !(e && e[0] == '0');
+}
+static int nvmtl_snap_walk_on(void)
+{
+    pthread_once(&g_snap_walk_once, nvmtl_snap_walk_options);
+    return g_snap_walk;
+}
 static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint32_t stex_hi, const uint64_t *mask, const uint64_t *tb,
                                              VkDescriptorSet from, const uint64_t *copym, const VkDescriptorBufferInfo *uniform)
 {
@@ -4402,7 +4463,14 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
     VkDescriptorImageInfo  dummyS = { g_dummySampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
     nvmtl_bindtable *t = (nvmtl_bindtable *)c->table;
     uint32_t nw = 0;
-    for (uint32_t i = 0; i < NVMTL_STEX_BASE; i++) {
+    // Sparse masks visit only named bindings, preserving ascending write order.
+    // A null mask or NVMTL_SNAP_WALK=0 retains the full walk.
+    uint64_t walk[(NVMTL_STEX_BASE + 63) / 64];
+    const int sparse = mask && nvmtl_snap_walk_on();
+    for (uint32_t k = 0; k < (NVMTL_STEX_BASE + 63) / 64; k++) walk[k] = sparse ? mask[k] : ~0ull;
+    if (NVMTL_STEX_BASE & 63) walk[NVMTL_STEX_BASE >> 6] &= (1ull << (NVMTL_STEX_BASE & 63)) - 1;
+    for (uint32_t wi = 0; wi < (NVMTL_STEX_BASE + 63) / 64; wi++) for (uint64_t bits = walk[wi]; bits; ) {
+        const uint32_t i = wi * 64 + (uint32_t)__builtin_ctzll(bits); bits &= bits - 1;
         if (!NVMTL_E78_HAS(mask, i)) continue;
         VkDescriptorType ty = binding_type(i);
         const nvmtl_slot *sl = nvmtl_slot_checked(t ? &t->s[which][i] : NULL, which, i);

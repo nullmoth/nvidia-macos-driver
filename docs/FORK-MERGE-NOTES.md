@@ -1,5 +1,37 @@
 # Retained fork changes for upstream merges
 
+## Metal metadata and binding caches, 2026-11-16
+
+Keep the shared AIR digest and function-constant results restricted to text
+marked immutable by the loader. Preserve literal function-table detection,
+unrecognized constant-row counts and fresh analysis for external mutable text.
+Surface cache keys must retain all seven identity fields. The resource-set
+member cache contains only retained members and is invalidated on removal,
+clear and transfer; identity membership and sealing ownership remain required.
+
+Descriptor snapshots walk named mask bits in ascending order and preserve the
+null-mask, storage-image, texel-buffer, descriptor-copy and GL-uniform paths.
+Address snapshots update changed texture entries independently in each stage,
+while keeping every GPU snapshot immutable. With `NVMTL_PROCESS_ENV=1`,
+`NVMTL_SNAP_WALK=0`, `NVMTL_ADDR_TEX_INC=0` and `NVMTL_RESSET_CACHE=0` individually
+restore the corresponding previous CPU path. `NVMTL_ADDR_TEX_VERIFY=1` compares
+cached texture entries with a full rebuild. Keep diagnostic formatting and
+empty visibility-group allocation out of ordinary render work.
+
+A partial IOSurface wrapper must use private backing: its upload or GPU write
+cannot validate untouched pixels in the family's VRAM. Whole-surface imports,
+padded rows and the sRGB tiled publication bridge retain their existing paths.
+Allow bounded 1D/1D-array texture views, with exactly one slice for a 1D view.
+
+The private macOS 15-targeted plugin builds and passes 22 focused host suites,
+including sanitizer coverage for cache lifetime, concurrent sealing and sparse
+descriptor equivalence. On RTX 2060 SUPER / Tahoe 26.7.1, the partial-surface and
+1D-view regressions fail on the preceding build and pass on the candidate.
+The sRGB, render-feedback, capture-format, sampler-transition and command-binding
+GPU checks also pass. These results do not qualify desktop installation,
+Sequoia, other GPUs or application FPS. Kernel, Mesa, video-encoding and presentation
+changes are outside this update; package and release preparation remain held.
+
 ## Optional notebook TGP manager, 2026-11-16
 
 Retain the narrow backport of upstream

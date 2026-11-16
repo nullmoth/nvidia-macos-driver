@@ -23,6 +23,7 @@ static char kNVMTLRenderVert, kNVMTLRenderFrag;
 static char kNVMTLMeshInfo;
 static char kNVMTLMeshBinds;
 // defined in NVMTLLibraryLoad.m
+static BOOL nvmtl_air_analysis_cacheable(NSString *ll);
 static int nvmtl_xlate_ready(void);
 static id<MTLIntersectionFunctionTable> nvmtl_ift_new(MTLIntersectionFunctionTableDescriptor *d, const char *what);
 static id<MTLVisibleFunctionTable> nvmtl_vft_new(MTLVisibleFunctionTableDescriptor *d, const char *what);

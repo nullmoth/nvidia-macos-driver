@@ -6,6 +6,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 source = (ROOT / 'plugin/NVMTLLibraryLoad.m').read_text()
+objects = (ROOT / 'plugin/NVMTLObjects.m').read_text()
 
 
 def section(start, end):
@@ -18,6 +19,7 @@ fixture = r'''
 #import <objc/runtime.h>
 #include <assert.h>
 #include <stdatomic.h>
+#include <CommonCrypto/CommonDigest.h>
 @interface NVMTLFunction : NSObject { @public NSString *_air, *_fname; } @end
 @implementation NVMTLFunction @end
 static _Atomic unsigned queries, scans;
@@ -42,6 +44,14 @@ static BOOL nvmtl_air_grid_only_scan(NSString *air, NSString *name) {
 }
 @@GRID_WRAPPER@@
 @@LINK@@
+static _Atomic unsigned hashes;
+static unsigned char *counted_hash(const void *data, CC_LONG len, unsigned char *md) {
+    atomic_fetch_add(&hashes,1); return CC_SHA256(data,len,md);
+}
+#define CC_SHA256 counted_hash
+@@AIR_KEY@@
+#undef CC_SHA256
+@@CONSTANTS@@
 static NSString *air_text(NSString *prefix, BOOL mark) {
     NSString *padding = [@"; padding\n" stringByPaddingToLength:8192 withString:@"; padding\n" startingAtIndex:0];
     NSString *text = [prefix stringByAppendingString:padding];
@@ -70,6 +80,14 @@ int main(void) { @autoreleasepool {
         assert(nvmtl_needs_visible_link(visible, nil));
     }
     assert(queries == 3);
+    for (NSString *form in @[@"@air.get_function_pointer_visible_function_table",
+             @"@air.get_size_visible_function_table", @"@air.is_null_visible_function_table",
+             @"@air.get_null_intersection_function_table", @"@air.set_buffer_intersection_function_table",
+             @"@air.set_intersection_function_table", @"!\"air.visible_function_table\"",
+             @"!\"air.intersection_function_table\""]) assert(nvmtl_air_reads_function_table(form));
+    assert(!nvmtl_air_reads_function_table(@"function_table"));
+    assert(!nvmtl_air_reads_function_table(@"@air.get_size_visible_function_tablé"));
+    assert(!nvmtl_air_reads_function_table(nil));
     NSString *failed = air_text(@"; query can recover\n", YES);
     query_mode = 1;
     assert(nvmtl_needs_visible_link(failed, @"no linked function supplies it"));
@@ -119,19 +137,50 @@ int main(void) { @autoreleasepool {
             assert(!nvmtl_needs_visible_link(other, nil));
         }
     });
-    puts("PASS: shared immutable AIR, entry separation, positive/negative link queries, failures/recovery, mutable inputs, bounded storage and concurrent readers");
+    // A diagnostic key hashes a shared module once across new functions.
+    NSString *constants=air_text(@"!1 = !{ptr @f.MTL_FC_INIT_a, !\"float\", !\"alpha\", i32 7, i1 true}\n"
+                                 "!2 = !{ptr @f.MTL_FC_INIT_unrecognized}\n",YES);
+    uint64_t key=0; NSArray *constantRows=nil;
+    for(unsigned i=0;i<1000;i++) {
+        NVMTLFunction *f=[NVMTLFunction new];f->_air=constants;
+        uint64_t next=nvmtl_function_air_key(f); assert(next && (!key || key==next)); key=next;
+        NSUInteger count=0;NSArray *rows=nvmtl_air_function_constants(constants,&count);
+        assert(count==2 && rows.count==1 && [rows[0][@"name"] isEqualToString:@"alpha"] && [rows[0][@"required"] boolValue]);
+        assert(!constantRows || rows==constantRows);constantRows=rows;
+    }
+    assert(hashes==1);
+    NSUInteger n=99;assert(!nvmtl_air_function_constants(nil,&n).count && !n);
+    NSArray *emptyRows=nvmtl_air_function_constants(air,&n);
+    assert(!emptyRows.count && !n && emptyRows==nvmtl_air_function_constants(air,NULL));
+    NSMutableString *editable=[constants mutableCopy];NVMTLFunction *edit=[NVMTLFunction new];edit->_air=editable;
+    uint64_t oldKey=nvmtl_function_air_key(edit);
+    assert(nvmtl_air_function_constants(editable,&n).count==1 && n==2);
+    [editable appendString:@"\n!3 = !{ptr @f.MTL_FC_INIT_b, !\"int\", !\"beta\", i32 8, i1 false}\n"];
+    assert(nvmtl_air_function_constants(editable,&n).count==2 && n==3 && nvmtl_function_air_key(edit)!=oldKey);
+    dispatch_apply(64,dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^(size_t i) { @autoreleasepool {
+        (void)i;
+        NVMTLFunction *f=[NVMTLFunction new];f->_air=constants;
+        NSUInteger rows=0;assert(nvmtl_function_air_key(f)==key);
+        assert(nvmtl_air_function_constants(constants,&rows)==constantRows && rows==2);
+    }});
+    assert(!nvmtl_function_air_key(nil));
+    puts("PASS: shared immutable AIR, literal table searches, digest/constant reuse, row accounting, mutable inputs, failures/recovery, bounded storage and concurrent readers");
 } }
 '''
 markers = section('static const void *NVMTL_AIRTEXT_KEY', '// newFunctionWithName scanned')
 grid = section('static NSArray<NSString *> *nvmtl_air_tuple_tokens(', 'BOOL nvmtl_air_grid_only(')
 wrapper = section('BOOL nvmtl_air_grid_only(', '// One `air.struct_type_info`')
 link = section('BOOL nvmtl_air_reads_function_table(', '// A link that failed')
-for key, value in [('MARKERS', markers), ('GRID', grid), ('GRID_WRAPPER', wrapper), ('LINK', link)]:
+air_key=objects[objects.index('uint64_t nvmtl_function_air_key('):objects.index('static void nvmtl_heap_register(')]
+start=objects.index('static NSArray<NSDictionary *> *nvmtl_air_function_constants(')
+constants=objects[start:objects.index('- (NSDictionary<NSString *, MTLFunctionConstant *> *)functionConstantsDictionary',start)]
+for key, value in [('MARKERS', markers), ('GRID', grid), ('GRID_WRAPPER', wrapper), ('LINK', link),
+                   ('AIR_KEY',air_key),('CONSTANTS',constants)]:
     fixture = fixture.replace('@@' + key + '@@', value)
 with tempfile.TemporaryDirectory(prefix='nvmtl-air-analysis-') as directory:
     p = Path(directory)
     (p / 'test.m').write_text(fixture)
-    subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-O2', '-Wall', '-Wextra', '-Werror',
+    subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations',
                     '-fsanitize=address,undefined', '-fno-sanitize-recover=all', str(p / 'test.m'),
                     '-framework', 'Foundation', '-o', str(p / 'test')], check=True)
     subprocess.run([str(p / 'test')], check=True, timeout=30)

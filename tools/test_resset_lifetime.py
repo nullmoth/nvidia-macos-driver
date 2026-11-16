@@ -29,6 +29,9 @@ def resset(objects, header):
     if 'static NSMutableSet *nvmtl_identity_set(' in objects:   # the old build (negative control) predates it
         impl = objects[objects.index('static NSMutableSet *nvmtl_identity_set('):objects.index('@implementation NVMTLResSet')] + impl
     iface = re.search(r'@interface NVMTLResSet : NSMutableSet .*?@end', header, re.S).group(0)
+    size = re.search(r'^#define NVMTL_RESSET_DM\s+\d+.*$', header, re.M)
+    if size:
+        iface = size.group(0) + '\n' + iface
     return iface + '\n' + impl
 
 

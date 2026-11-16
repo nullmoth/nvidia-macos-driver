@@ -2998,8 +2998,11 @@ BOOL nvmtl_air_reads_function_table(NSString *air)
                   @"!\"air.visible_function_table\"",
                   @"!\"air.intersection_function_table\""];
     });
+    // Every ASCII form contains this suffix. Reject ordinary modules with one
+    // literal search before checking the individual intrinsics and metadata.
+    if ([air rangeOfString:@"_function_table" options:NSLiteralSearch].location == NSNotFound) return NO;
     for (NSString *f in forms)
-        if ([air rangeOfString:f].location != NSNotFound) return YES;
+        if ([air rangeOfString:f options:NSLiteralSearch].location != NSNotFound) return YES;
     return NO;
 }
 

@@ -32,6 +32,9 @@ impl = impl[:impl.index('@end') + 4]
 # the identity-hashed set the class allocates sits just above it in NVMTLObjects.m
 impl = objects[objects.index('static NSMutableSet *nvmtl_identity_set('):objects.index('@implementation NVMTLResSet')] + impl
 iface = re.search(r'@interface NVMTLResSet : NSMutableSet .*?@end', header, re.S).group(0)
+size = re.search(r'^#define NVMTL_RESSET_DM\s+\d+.*$', header, re.M)
+if size:
+    iface = size.group(0) + '\n' + iface
 
 HARNESS = r'''
 #import <Foundation/Foundation.h>
@@ -164,7 +167,29 @@ static int enumerationTest(const char *mode) {
     assert(!snapshotProbe);
     puts("PASS"); return 0;
 }
+static int cacheTest(void) { @autoreleasepool {
+    NSMutableArray *tokens=[NSMutableArray new];
+    for(unsigned i=0;i<512;i++) [tokens addObject:[Tok new]];
+    NVMTLResSet *set=[NVMTLResSet new];
+    for(unsigned pass=0;pass<4;pass++) for(id token in tokens) [set addObject:token];
+    assert(set.count==tokens.count);
+    // More live members than cache slots exercise collisions and MRU eviction.
+    for(id token in tokens) {
+        [set removeObject:token]; assert(set.count==tokens.count-1 && ![set member:token]);
+        [set addObject:token]; assert(set.count==tokens.count && [set member:token]==token);
+    }
+    NVMTLResSet *part=[set nvmtlTakeAll]; assert(!set.count && part.count==tokens.count);
+    for(id token in tokens) [set addObject:token]; assert(set.count==tokens.count);
+    NVMTLResSet *copy=[set copy]; assert(copy.count==tokens.count);
+    [set removeAllObjects]; assert(!set.count);
+    for(id token in tokens) [set addObject:token]; assert(set.count==tokens.count);
+    [part removeAllObjects]; [copy removeAllObjects]; [set removeAllObjects];
+    assert(!atomic_load(&gRefs));
+    puts("PASS: member-cache collisions, repeated adds, removal/re-add, transfer, copy and clear");
+    return 0;
+} }
 int main(int argc, char **argv) {
+    if (!strcmp(argv[1],"cache")) return cacheTest();
     if (argc != 2) return 2;
     if (!strncmp(argv[1], "enum-", 5)) return enumerationTest(argv[1]);
     if (argv[1][0] == 'l' || argv[1][0] == 'e') { printf("%ld\n", lazyRace(argv[1][0] == 'e')); return 0; }
@@ -200,6 +225,9 @@ with tempfile.TemporaryDirectory() as d:
     if r.returncode:
         print(r.stderr[-2000:])
         sys.exit('could not compile the production NVMTLResSet - check is UNKNOWN, not clean')
+    for enabled in ('1','0'):
+        subprocess.run([str(exe),'cache'],check=True,timeout=30,
+                       env={**os.environ,'NVMTL_RESSET_CACHE':enabled})
     runs = {}
     for mode in ('old', 'new'):
         out = subprocess.run([str(exe), mode], capture_output=True, text=True, timeout=300).stdout.split()

@@ -1604,6 +1604,20 @@ static void nvmtl_vram_tag_set(IOSurfaceRef surf, NSUInteger plane, uint32_t see
 // is never handed out past NVMTL_VRAM_KEEP_AGE_NS from its import, so a backing the family replaced is picked up again
 // as before. A private image's imported surface pages (nvmtl_vk_image_write_host / _read_host) are kept the same way:
 // pinning and mapping them costs more than copying a 1080p frame. NVMTL_VRAM_KEEP=0 turns both off.
+// A family VRAM validity tag covers all visible surface pixels. A partial
+// wrapper must use private backing so its upload cannot publish stale pixels
+// outside its own region as current. Row padding need not be covered.
+static int nvmtl_surf_wrap_whole(IOSurfaceRef surf, uint32_t w, uint32_t h, uint32_t bpp)
+{
+    const size_t width = IOSurfaceGetWidth(surf);
+    const size_t ew = IOSurfaceGetElementWidth(surf) ?: 1;
+    const size_t bytes = IOSurfaceGetBytesPerElement(surf);
+    const size_t elements = width / ew + (width % ew != 0);
+    const size_t pixel = bpp ?: 4;
+    if (!width || !bytes || elements > SIZE_MAX / bytes || w > SIZE_MAX / pixel) return 0;
+    return h == IOSurfaceGetHeight(surf) && (size_t)w * pixel >= elements * bytes;
+}
+
 #define NVMTL_VRAM_KEEP_N       64
 #define NVMTL_VRAM_KEEP_IDLE_NS (250ull * 1000 * 1000)
 #define NVMTL_VRAM_KEEP_AGE_NS  (2000ull * 1000 * 1000)
@@ -1717,7 +1731,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
 {
     if (surf && plane == 0 && IOSurfaceGetPlaneCount(surf) <= 1 && nvmtl_vk_surface_share_on()) {
         size_t row = IOSurfaceGetBytesPerRow(surf), sh = IOSurfaceGetHeight(surf);
-        if ((size_t)w * (bpp ? bpp : 4) <= row && h <= sh && row % 32 == 0) {
+        if ((size_t)w * (bpp ? bpp : 4) <= row && h <= sh && row % 32 == 0 && nvmtl_surf_wrap_whole(surf, w, h, bpp)) {
             nvk_buffer vb; uint64_t born = 0;
             if (!nvmtl_vram_keep_get(0, surf, 0, row * h, &vb, &born)) {
                 if (!nvmtl_vk_image_create_buffer_alias(w, h, vkf, bpp, a8, stex, 1, &vb, 0, row, &t->_i)) {
@@ -1781,7 +1795,7 @@ private_image:
         nvlog("item 7: surface %u %ux%u plane %lu -> a private image, copied in and out (%s; row %zu bytes, %zu plane(s))",
               (unsigned)IOSurfaceGetID(surf), w, h, (unsigned long)plane,
               (plane != 0 || pplanes > 1) ? "more than one plane" : ((size_t)w * (bpp ? bpp : 4) > prow || h > IOSurfaceGetHeight(surf)) ? "image larger than the surface"
-              : (prow % 32) ? "the row is not a multiple of 32 bytes" : "the family VRAM could not be used", prow, pplanes);
+              : (prow % 32) ? "the row is not a multiple of 32 bytes" : !nvmtl_surf_wrap_whole(surf, w, h, bpp) ? "a part of the surface" : "the family VRAM could not be used", prow, pplanes);
     }
     const int rc = nvmtl_vk_image_create_typed(w, h, vkf, bpp, a8, 1, stex, 2u, 1u, &t->_i);
     if (!rc && surf) (void)nvmtl_vram_keep_get(1, surf, plane, 0, &t->_hostPages, &t->_vramBorn);
@@ -1843,7 +1857,11 @@ static char nvmtl_surface_cache_key;
     // drawable. Request the real storage view before importing family VRAM;
     // the private fallback already makes eligible formats writable.
     if (!wantStex && nvmtl_surface_widen_usage(t->_fbo) && !a8 && nvmtl_vk_format_is_storage(vkf)) wantStex = 1;
-    NSArray *key = surf ? @[@(IOSurfaceGetID(surf)), @(plane), @(w), @(h), @(d.pixelFormat), @(t->_ropt), @(t->_fbo)] : nil;
+    // NSArray keys with the same element count collide. Preserve every identity
+    // field in a byte key so surface wrappers can use content hashing.
+    NSData *key = nil;
+    if (surf) { const uint64_t k7[7] = { IOSurfaceGetID(surf), plane, w, h, d.pixelFormat, t->_ropt, (uint64_t)t->_fbo };
+                key = [NSData dataWithBytes:k7 length:sizeof k7]; }
     NVMTLTexture *backing = key ? [cache objectForKey:key] : nil;
     // Private and Managed tiled backings are local to this device. Repeated
     // wrappers of the same surface must share that image,
@@ -2838,7 +2856,9 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
             @"lod_min_clamp":@(sd.lodMinClamp),@"lod_max_clamp":@(sd.lodMaxClamp),
             @"border_color":(@[@"TransparentBlack",@"OpaqueBlack",@"OpaqueWhite"])[MIN((NSUInteger)sd.borderColor,2u)],
             @"reduction":@"WeightedAverage",@"lod_bias":@0};
-        nvlog("pixel sampler: %s",s->_pixelState.description.UTF8String);
+        // Release logging drops this informational line unless the process opts
+        // in. Avoid constructing a dictionary description when it cannot emit.
+        if (!NVMTL_RELEASE || nvmtl_process_env_on()) nvlog("pixel sampler: %s",s->_pixelState.description.UTF8String);
     }
     int linear = (sd.minFilter == MTLSamplerMinMagFilterLinear || sd.magFilter == MTLSamplerMinMagFilterLinear);
     int repeat = (sd.sAddressMode == MTLSamplerAddressModeRepeat);

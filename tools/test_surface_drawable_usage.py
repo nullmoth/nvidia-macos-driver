@@ -10,7 +10,7 @@ sys.path.insert(0,str(root/'tools/rotation'))
 from test_support import method
 source=(root/'plugin/NVMTLDevice.m').read_text()
 policy=method(source,'static BOOL nvmtl_surface_widen_usage(')+'\n'+method(source,'static NSUInteger nvmtl_surface_usage(')
-image=method(source,'static int nvmtl_surface_image_create(')
+image=method(source,'static int nvmtl_surf_wrap_whole(')+'\n'+method(source,'static int nvmtl_surface_image_create(')
 fixture=r'''
 #include <assert.h>
 #include <stdint.h>
@@ -37,9 +37,13 @@ static unsigned g_surf_vram,g_surf_private;
 static unsigned image_drops,buffer_drops,private_requests,alias_requests,host_requests;
 static int drop_storage,drop_render,alias_failure,private_failure,tag_current;
 static int optimal_storage=1,import_failure,typed_fail_at;
+static size_t surface_width=512,surface_element=4,surface_ew=1;
 #define nvlog(...) ((void)0)
 static unsigned IOSurfaceGetPlaneCount(IOSurfaceRef s) { return 0; }
 static unsigned IOSurfaceGetBytesPerRow(IOSurfaceRef s) { return 2048; }
+static size_t IOSurfaceGetWidth(IOSurfaceRef s) { return surface_width; }
+static size_t IOSurfaceGetBytesPerElement(IOSurfaceRef s) { return surface_element; }
+static size_t IOSurfaceGetElementWidth(IOSurfaceRef s) { return surface_ew; }
 static unsigned IOSurfaceGetHeight(IOSurfaceRef s) { return 64; }
 static unsigned IOSurfaceGetID(IOSurfaceRef s) { return 1; }
 static unsigned IOSurfaceGetSeed(IOSurfaceRef s) { return 7; }
@@ -53,7 +57,7 @@ static void nvmtl_vk_buffer_destroy(nvk_buffer *b) { assert(b->allocated);buffer
 static void nvmtl_vram_keep_put(int host,IOSurfaceRef surf,NSUInteger plane,nvk_buffer *b,uint64_t born) { nvmtl_vk_buffer_destroy(b); }
 static int nvmtl_vk_image_create_typed(uint32_t w,uint32_t h,uint32_t f,uint32_t bpp,int a8,unsigned mips,int storage,unsigned type,unsigned layers,nvk_image *out) { private_requests++;if(private_failure||typed_fail_at==(int)private_requests)return -1;out->img=(void*)3;out->storage=storage?optimal_storage:0;return 0; }
 @@IMAGE@@
-static void reset(void) { g_surf_vram=g_surf_private=image_drops=buffer_drops=private_requests=alias_requests=host_requests=0;drop_storage=drop_render=alias_failure=private_failure=tag_current=import_failure=typed_fail_at=0;optimal_storage=1; }
+static void reset(void) { g_surf_vram=g_surf_private=image_drops=buffer_drops=private_requests=alias_requests=host_requests=0;drop_storage=drop_render=alias_failure=private_failure=tag_current=import_failure=typed_fail_at=0;optimal_storage=1;surface_width=512;surface_element=4;surface_ew=1; }
 int main(int argc,char **argv) {
  assert(argc==2);program=argv[1];int ws=!strcmp(program,"WindowServer");
  assert(nvmtl_surface_usage(1,0,0)==(ws?1:5));
@@ -66,6 +70,21 @@ int main(int argc,char **argv) {
  NVMTLTexture t={0};reset();
  assert(!nvmtl_surface_image_create(&t,(void*)1,0,512,64,44,4,0,1));
  assert(t._vramOn && t._i.storage && alias_requests==1 && !private_requests && !buffer_drops && !image_drops);
+ // Partial width/height must not import VRAM or mark untouched pixels current.
+ for(unsigned shorter=0;shorter<2;shorter++) {
+  memset(&t,0,sizeof t);reset();tag_current=1;
+  assert(!nvmtl_surface_image_create(&t,(void*)1,0,shorter?512:256,shorter?32:64,44,4,0,1));
+  assert(!t._vramOn && !t._surfaceLinear.img && !alias_requests && private_requests==1 && host_requests==1);
+  assert(!t._surfSynced && !g_surf_vram && g_surf_private==1);
+ }
+ // Visible pixels, not row padding, determine coverage. Packed elements
+ // round up without overflowing; invalid or unrepresentable layouts refuse.
+ surface_width=511;assert(nvmtl_surf_wrap_whole((void*)1,511,64,4));
+ surface_width=513;surface_ew=2;surface_element=8;
+ assert(!nvmtl_surf_wrap_whole((void*)1,513,64,4));
+ assert(nvmtl_surf_wrap_whole((void*)1,514,64,4));
+ surface_width=SIZE_MAX;surface_ew=1;assert(!nvmtl_surf_wrap_whole((void*)1,512,64,4));
+ surface_element=0;assert(!nvmtl_surf_wrap_whole((void*)1,512,64,4));
  // Unknown sRGB usage needs compatible UNORM storage writes. Preserve the
  // successful linear import and use the existing tiled publication bridge.
  // Native storage and compatible-view-only storage are both valid; neither
@@ -96,6 +115,7 @@ int main(int argc,char **argv) {
  // renderable private backing, including when their descriptor is Unknown.
  for(unsigned storage=0;storage<2;storage++) {
   memset(&t,0,sizeof t);reset();drop_render=1;
+  surface_width=128;surface_element=8;
   assert(!nvmtl_surface_image_create(&t,(void*)1,0,128,64,97,8,0,storage));
   assert(!t._vramOn && t._i.storage && alias_requests==1 && private_requests==1 && buffer_drops==1 && image_drops==1);
  }
@@ -105,11 +125,13 @@ int main(int argc,char **argv) {
  // A fresh Managed GPU image must not inherit the shared image's "synced"
  // state before importing its pixels. Its publication image stays owned.
  memset(&t,0,sizeof t);reset();tag_current=1;t._ropt=MTLStorageModeManaged<<MTLResourceStorageModeShift;
+ surface_width=128;surface_element=8;
  assert(!nvmtl_surface_image_create(&t,(void*)1,0,128,64,97,8,0,1));
  assert(t._vramOn && t._i.img==(void*)3 && t._surfaceLinear.img==(void*)2 && !t._surfSynced);
  assert(private_requests==1 && !buffer_drops && !image_drops);
  // Plain read-only imports, including WindowServer's, retain direct VRAM.
  memset(&t,0,sizeof t);reset();tag_current=1;t._ropt=MTLStorageModeManaged<<MTLResourceStorageModeShift;
+ surface_width=128;surface_element=8;
  assert(!nvmtl_surface_image_create(&t,(void*)1,0,128,64,97,8,0,0));
  assert(t._vramOn && !t._surfaceLinear.img && t._surfSynced && !private_requests);
  for(int managed=0;managed<2;managed++) {

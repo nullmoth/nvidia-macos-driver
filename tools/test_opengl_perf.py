@@ -198,6 +198,9 @@ int main(void) {
 '''
 
 iface = re.search(r'@interface NVMTLResSet : NSMutableSet .*?@end', header, re.S).group(0)
+size = re.search(r'^#define NVMTL_RESSET_DM\s+\d+.*$', header, re.M)
+if size:
+    iface = size.group(0) + '\n' + iface
 impl = section(objects, '@implementation NVMTLResSet', '\n@end') + '\n@end\n'
 # the identity-hashed set the class allocates sits just above it in NVMTLObjects.m
 impl = objects[objects.index('static NSMutableSet *nvmtl_identity_set('):objects.index('@implementation NVMTLResSet')] + impl
