@@ -110,9 +110,13 @@ static inline uint64_t nvrmSurfaceBudget(uint64_t barLen, SInt64 displayBytes)
     if (barLen >= (4ull << 30)) return barLen / 2;        // resizable BAR: half, the display is a rounding error
     if (!gVramDisplayAware || displayBytes <= 0)
         return nvrmVramBudget(barLen);                     // display not measured yet -- keep the conservative policy
-    const uint64_t margin = 16ull << 20;                   // RM's own BAR1 mappings are not tracked in gVramMappedBytes
+    // On a 256 MB aperture, a single 1080p H.264 session maps 33.5 MB of video memory, including a contiguous
+    // 15.9375 MB reconstruction buffer. A 16 MB margin let desktop surfaces starve that session (RM 0x51), even
+    // though total VRAM was plentiful. Keep a quarter of a small aperture available to RM, codecs and fragmentation;
+    // the 16 MB margin is unchanged above 256 MB. Large resizable BARs return above, keeping their half-window policy.
+    const uint64_t margin = barLen && barLen <= (256ull << 20) ? barLen / 4 : 16ull << 20;
     const uint64_t reserve = (uint64_t)displayBytes + margin;
-    if (reserve >= barLen) return nvrmVramBudget(barLen);  // pathological (display fills the window) -- fall back
+    if (reserve >= barLen) return 0;                       // no room: let the existing system-memory fallback handle it
     return barLen - reserve;
 }
 
