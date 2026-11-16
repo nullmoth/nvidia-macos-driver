@@ -1,5 +1,26 @@
 # Retained fork changes for upstream merges
 
+## WindowServer small-image pooling, 2026-11-16
+
+Keep optimal-image pooling enabled by default only for the exact `WindowServer`
+process on NVIDIA. Other applications retain their existing opt-in behavior;
+`NVMTL_IMAGE_POOL=0` restores individual allocations. Preserve the 4 MiB image
+limit, 32 MiB blocks, two retained idle blocks, ordinary-allocation fallback and
+the separate external, linear, placed, large and dedicated-image paths.
+
+Publish fresh VRAM pool blocks only after their GPU clear succeeds. Heap creation,
+clearing and destruction must stay outside the pool lock because retirement can
+take that lock. Recheck for a usable block after clearing and discard redundant
+private blocks; a failed clear must release its block and fall back. Retain the
+two-thread publication/failure fixtures in `tools/test_image_pool.py` and the
+concurrent texture/corner-readback coverage in `tools/bench_texture_churn.m`.
+
+On RTX 2060 SUPER with macOS 26.7.1, isolated texture-creation CPU fell about 46%.
+GPU correctness checks passed, and the user reported normal rendering and lower
+CPU after reboot. Manual interaction captures averaged about 60% then 34% of one
+core, but the scripted desktop phases showed no consistent reduction. These
+results do not establish a general desktop gain or qualify other GPUs/OS versions.
+
 ## Native NVK D3D12 descriptor sets, 2026-11-14
 
 Keep the matched vkd3d-nvk `3.1-nvk.2` pair, source patch, licenses and build

@@ -11792,19 +11792,37 @@ static pool_block *pool_take_vram(int vram, uint32_t bits, size_t reserved, size
     pthread_mutex_lock(&g_pool_lock);
     pool_block *blk = *pool_head(vram); int got = 0;
     for (; blk; blk = blk->next) if ((bits & (1u << blk->heap.memtype)) && pool_block_take(blk, reserved, off)) { got = 1; break; }
+    if (got) {
+        blk->nlive++; g_pool_live++; g_pool_bytes += reserved;
+        pthread_mutex_unlock(&g_pool_lock);
+        return blk;
+    }
+    pthread_mutex_unlock(&g_pool_lock);
+
+    // Creating/clearing a heap can submit and retire GPU work, which can take the pool lock. Keep the new block
+    // private until its clear has completed: publishing it first lets another encoder submit a write which that
+    // late clear can overwrite. A failed clear leaves no usable block and falls back to an ordinary allocation.
+    pool_block *fresh = calloc(1, sizeof *fresh);
+    if (!fresh || nvmtl_vk_heap_create(NVMTL_POOL_BLOCK, 0, &fresh->heap)) { free(fresh); return NULL; }
+    if (!(bits & (1u << fresh->heap.memtype)) || !pool_block_take(fresh, reserved, off)
+        || nvmtl_vk_heap_zero(&fresh->heap, what)) {
+        nvmtl_vk_heap_destroy(&fresh->heap); free(fresh->fr); free(fresh); return NULL;
+    }
+    fresh->vram = vram;
+
+    // Another encoder may have supplied a usable block while this one was being cleared. Prefer it and return the
+    // unused new heap, so concurrent first allocations do not leave a block per encoding thread in the pool.
+    pthread_mutex_lock(&g_pool_lock);
+    for (blk = *pool_head(vram); blk; blk = blk->next)
+        if ((bits & (1u << blk->heap.memtype)) && pool_block_take(blk, reserved, off)) { got = 1; break; }
     if (!got) {
-        pool_block *fresh = calloc(1, sizeof *fresh);
-        if (!fresh || nvmtl_vk_heap_create(NVMTL_POOL_BLOCK, 0, &fresh->heap)) { free(fresh); pthread_mutex_unlock(&g_pool_lock); return NULL; }
-        if (!(bits & (1u << fresh->heap.memtype)) || !pool_block_take(fresh, reserved, off)) {
-            nvmtl_vk_heap_destroy(&fresh->heap); free(fresh); pthread_mutex_unlock(&g_pool_lock); return NULL; }
-        fresh->vram = vram; fresh->next = *pool_head(vram); *pool_head(vram) = fresh; g_pool_blocks++; blk = fresh;
+        fresh->next = *pool_head(vram); *pool_head(vram) = fresh; g_pool_blocks++; blk = fresh;
         nvlog("%s pool: %zu MiB block, memory type %u, %llu pool blocks in all", what, fresh->heap.size >> 20, fresh->heap.memtype, (unsigned long long)g_pool_blocks);
+        fresh = NULL;
     }
     blk->nlive++; g_pool_live++; g_pool_bytes += reserved;
     pthread_mutex_unlock(&g_pool_lock);
-    // A fresh VRAM block is cleared outside the pool lock (the clear submits and waits, and a submit's retire can take
-    // that lock). The block is already listed, but every use of a range in it is a later submit on the in-order queue.
-    if (!got) nvmtl_vk_heap_zero(&blk->heap, what);
+    if (fresh) { nvmtl_vk_heap_destroy(&fresh->heap); free(fresh->fr); free(fresh); }
     return blk;
 }
 static int private_pool_buffer_create(size_t size, nvk_buffer *out)
@@ -11827,15 +11845,22 @@ static int private_pool_buffer_create(size_t size, nvk_buffer *out)
     g_buf_made++;
     return 0;
 }
-/* NVMTL_IMAGE_POOL=1: ordinary optimal colour images of up to NVMTL_POOL_MAX bytes share VRAM blocks of their own, the
-   same way. External, linear, placed and dedicated images keep their paths. Returns -1 when the image is to be bound the
-   usual way. */
-static int image_pool_bind(nvk_image *out)
+/* WindowServer repeatedly creates small intermediate images while scrolling/moving windows. Pool their memory to
+   avoid an RM allocation/free per image. Other processes keep their existing opt-in; NVMTL_IMAGE_POOL=0 restores
+   individual allocations in WindowServer too. External, linear, placed, large and dedicated images keep their paths. */
+static int image_pool_on(void)
 {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("NVMTL_IMAGE_POOL"); on = e && e[0] == '1';
-        if (on) nvlog("vk: optimal images of up to %u KB share %u MiB VRAM blocks (NVMTL_IMAGE_POOL=1)", NVMTL_POOL_MAX >> 10, NVMTL_POOL_BLOCK >> 20); }
-    if (!on) return -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_IMAGE_POOL"), *me = getprogname();
+        on = e ? e[0] == '1' : nvmtl_vk_vendor() == 0x10de && me && !strcmp(me, "WindowServer");
+        if (on) nvlog("vk: optimal images of up to %u KB share %u MiB VRAM blocks (NVMTL_IMAGE_POOL=0 disables)", NVMTL_POOL_MAX >> 10, NVMTL_POOL_BLOCK >> 20);
+    }
+    return on;
+}
+static int image_pool_bind(nvk_image *out)
+{
+    if (!image_pool_on()) return -1;
     VkMemoryDedicatedRequirements dedicated = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS };
     VkMemoryRequirements2 requirements = { VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dedicated };
     VkImageMemoryRequirementsInfo2 info = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2, NULL, (VkImage)out->img };
