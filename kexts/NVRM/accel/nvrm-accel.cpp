@@ -15,6 +15,8 @@
 #include <IOKit/IOLib.h>
 #include <string.h>
 #include "../../NMIntelFB/panel_bridge_abi.h"
+// PCIDriverKit cannot replace a kernel extension's PCI access.
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #include <IOKit/pci/IOPCIDevice.h>
 #include <pexpert/pexpert.h>
 #include <libkern/OSKextLib.h>
@@ -56,7 +58,12 @@ static bool nvaccel_verbose() { static int v = -1; if (v < 0) { int x = 0; v = P
 #include <IOKit/IODeviceMemory.h>
 #include "tahoe_fwd.h"   // macOS 26: inherited slots Apple no longer exports, forwarded through its vtables
 #include "nvaccel_stubs.h"
+// Keep warnings in the bundled NVKMS headers scoped to those external declarations.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wsign-conversion"
+#pragma clang diagnostic ignored "-Wimplicit-int-conversion"
 #include "nvkms-kapi.h"
+#pragma clang diagnostic pop
 #include <sys/sysctl.h>
 #include <libkern/OSAtomic.h>
 #include "nv_iop_pixel.h"
@@ -2596,7 +2603,7 @@ static NVIntelCopyResult nvAccelIntelDirect(NVAccel *a, IOService *fb, unsigned 
     return result;
 }
 
-static unsigned nvVaAllocLogged, nvVaMapLogged;
+static unsigned nvVaAllocLogged;
 
 static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
                                             unsigned long long len, unsigned long long align)
