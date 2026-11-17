@@ -13,7 +13,7 @@ class IOAccelSubmitter2 : public IOUserClient {
 public:
     virtual void * getOwningTask() const = 0;
     virtual void * getGPUTask() const = 0;
-    virtual void getOwningTaskPid() const = 0;
+    virtual int getOwningTaskPid() const = 0;
     virtual void affectedByHardwareReset(bool, unsigned int) = 0;
     virtual void retireCommandBuffer(IOAccelEventFence*);
     virtual bool shouldHardwareCommandNooped() = 0;

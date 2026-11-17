@@ -13,7 +13,7 @@ class IOAccelContext2 : public IOAccelSubmitter2 {
 public:
     virtual void * getOwningTask() const APPLE_KEXT_OVERRIDE;
     virtual void * getGPUTask() const APPLE_KEXT_OVERRIDE;
-    virtual void getOwningTaskPid() const APPLE_KEXT_OVERRIDE;
+    virtual int getOwningTaskPid() const APPLE_KEXT_OVERRIDE;
     virtual void affectedByHardwareReset(bool, unsigned int) APPLE_KEXT_OVERRIDE;
     virtual bool shouldHardwareCommandNooped() APPLE_KEXT_OVERRIDE;
     virtual void contextStart();

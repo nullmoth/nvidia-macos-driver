@@ -26,7 +26,7 @@
 #define NM_TAHOE_FWD_NVGLContext \
     void * getOwningTask() const override; \
     void * getGPUTask() const override; \
-    void getOwningTaskPid() const override; \
+    int getOwningTaskPid() const override; \
     void retireCommandBuffer(IOAccelEventFence* a0) override; \
     void setSubmissionError(unsigned int a0) override; \
     bool isOpportunisticWorkload() const override; \
@@ -39,7 +39,7 @@
 #define NM_TAHOE_FWD_NV2DContext \
     void * getOwningTask() const override; \
     void * getGPUTask() const override; \
-    void getOwningTaskPid() const override; \
+    int getOwningTaskPid() const override; \
     void retireCommandBuffer(IOAccelEventFence* a0) override; \
     void setSubmissionError(unsigned int a0) override; \
     bool isOpportunisticWorkload() const override; \
@@ -51,7 +51,7 @@
 #define NM_TAHOE_FWD_NVCLContext \
     void * getOwningTask() const override; \
     void * getGPUTask() const override; \
-    void getOwningTaskPid() const override; \
+    int getOwningTaskPid() const override; \
     void retireCommandBuffer(IOAccelEventFence* a0) override; \
     void setSubmissionError(unsigned int a0) override; \
     bool isOpportunisticWorkload() const override; \
@@ -63,7 +63,7 @@
 #define NM_TAHOE_FWD_NVVideoContext \
     void * getOwningTask() const override; \
     void * getGPUTask() const override; \
-    void getOwningTaskPid() const override; \
+    int getOwningTaskPid() const override; \
     void retireCommandBuffer(IOAccelEventFence* a0) override; \
     void setSubmissionError(unsigned int a0) override; \
     bool isOpportunisticWorkload() const override; \
@@ -105,7 +105,7 @@ __attribute__((naked)) void NVSurface::submitUpdate(unsigned int a0, IOAccelBoun
 __attribute__((naked)) void NVDisplayPipe::setStereo(IOAccelStereoMode a0) { __asm__("movq __ZTV24IOAccelLegacyDisplayPipe@GOTPCREL(%rip), %r11\n\tjmpq *2480(%r11)"); } \
 __attribute__((naked)) void * NVGLContext::getOwningTask() const { __asm__("movq __ZTV17IOAccelGLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2416(%r11)"); } \
 __attribute__((naked)) void * NVGLContext::getGPUTask() const { __asm__("movq __ZTV17IOAccelGLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2424(%r11)"); } \
-__attribute__((naked)) void NVGLContext::getOwningTaskPid() const { __asm__("movq __ZTV17IOAccelGLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2432(%r11)"); } \
+__attribute__((naked)) int NVGLContext::getOwningTaskPid() const { __asm__("movq __ZTV17IOAccelGLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2432(%r11)"); } \
 __attribute__((naked)) void NVGLContext::retireCommandBuffer(IOAccelEventFence* a0) { __asm__("movq __ZTV17IOAccelGLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2448(%r11)"); } \
 __attribute__((naked)) void NVGLContext::setSubmissionError(unsigned int a0) { __asm__("movq __ZTV17IOAccelGLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2480(%r11)"); } \
 __attribute__((naked)) bool NVGLContext::isOpportunisticWorkload() const { __asm__("movq __ZTV17IOAccelGLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2536(%r11)"); } \
@@ -117,7 +117,7 @@ __attribute__((naked)) void NVGLContext::getFrameDelimiter() { __asm__("movq __Z
 __attribute__((naked)) void NVGLContext::processSwap(eDoSwap a0) { __asm__("movq __ZTV17IOAccelGLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2944(%r11)"); } \
 __attribute__((naked)) void * NV2DContext::getOwningTask() const { __asm__("movq __ZTV17IOAccel2DContext2@GOTPCREL(%rip), %r11\n\tjmpq *2416(%r11)"); } \
 __attribute__((naked)) void * NV2DContext::getGPUTask() const { __asm__("movq __ZTV17IOAccel2DContext2@GOTPCREL(%rip), %r11\n\tjmpq *2424(%r11)"); } \
-__attribute__((naked)) void NV2DContext::getOwningTaskPid() const { __asm__("movq __ZTV17IOAccel2DContext2@GOTPCREL(%rip), %r11\n\tjmpq *2432(%r11)"); } \
+__attribute__((naked)) int NV2DContext::getOwningTaskPid() const { __asm__("movq __ZTV17IOAccel2DContext2@GOTPCREL(%rip), %r11\n\tjmpq *2432(%r11)"); } \
 __attribute__((naked)) void NV2DContext::retireCommandBuffer(IOAccelEventFence* a0) { __asm__("movq __ZTV17IOAccel2DContext2@GOTPCREL(%rip), %r11\n\tjmpq *2448(%r11)"); } \
 __attribute__((naked)) void NV2DContext::setSubmissionError(unsigned int a0) { __asm__("movq __ZTV17IOAccel2DContext2@GOTPCREL(%rip), %r11\n\tjmpq *2480(%r11)"); } \
 __attribute__((naked)) bool NV2DContext::isOpportunisticWorkload() const { __asm__("movq __ZTV17IOAccel2DContext2@GOTPCREL(%rip), %r11\n\tjmpq *2536(%r11)"); } \
@@ -128,7 +128,7 @@ __attribute__((naked)) void NV2DContext::invalidate() { __asm__("movq __ZTV17IOA
 __attribute__((naked)) void NV2DContext::getFrameDelimiter() { __asm__("movq __ZTV17IOAccel2DContext2@GOTPCREL(%rip), %r11\n\tjmpq *2752(%r11)"); } \
 __attribute__((naked)) void * NVCLContext::getOwningTask() const { __asm__("movq __ZTV17IOAccelCLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2416(%r11)"); } \
 __attribute__((naked)) void * NVCLContext::getGPUTask() const { __asm__("movq __ZTV17IOAccelCLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2424(%r11)"); } \
-__attribute__((naked)) void NVCLContext::getOwningTaskPid() const { __asm__("movq __ZTV17IOAccelCLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2432(%r11)"); } \
+__attribute__((naked)) int NVCLContext::getOwningTaskPid() const { __asm__("movq __ZTV17IOAccelCLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2432(%r11)"); } \
 __attribute__((naked)) void NVCLContext::retireCommandBuffer(IOAccelEventFence* a0) { __asm__("movq __ZTV17IOAccelCLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2448(%r11)"); } \
 __attribute__((naked)) void NVCLContext::setSubmissionError(unsigned int a0) { __asm__("movq __ZTV17IOAccelCLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2480(%r11)"); } \
 __attribute__((naked)) bool NVCLContext::isOpportunisticWorkload() const { __asm__("movq __ZTV17IOAccelCLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2536(%r11)"); } \
@@ -139,7 +139,7 @@ __attribute__((naked)) void NVCLContext::invalidate() { __asm__("movq __ZTV17IOA
 __attribute__((naked)) void NVCLContext::getFrameDelimiter() { __asm__("movq __ZTV17IOAccelCLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2752(%r11)"); } \
 __attribute__((naked)) void * NVVideoContext::getOwningTask() const { __asm__("movq __ZTV20IOAccelVideoContext2@GOTPCREL(%rip), %r11\n\tjmpq *2416(%r11)"); } \
 __attribute__((naked)) void * NVVideoContext::getGPUTask() const { __asm__("movq __ZTV20IOAccelVideoContext2@GOTPCREL(%rip), %r11\n\tjmpq *2424(%r11)"); } \
-__attribute__((naked)) void NVVideoContext::getOwningTaskPid() const { __asm__("movq __ZTV20IOAccelVideoContext2@GOTPCREL(%rip), %r11\n\tjmpq *2432(%r11)"); } \
+__attribute__((naked)) int NVVideoContext::getOwningTaskPid() const { __asm__("movq __ZTV20IOAccelVideoContext2@GOTPCREL(%rip), %r11\n\tjmpq *2432(%r11)"); } \
 __attribute__((naked)) void NVVideoContext::retireCommandBuffer(IOAccelEventFence* a0) { __asm__("movq __ZTV20IOAccelVideoContext2@GOTPCREL(%rip), %r11\n\tjmpq *2448(%r11)"); } \
 __attribute__((naked)) void NVVideoContext::setSubmissionError(unsigned int a0) { __asm__("movq __ZTV20IOAccelVideoContext2@GOTPCREL(%rip), %r11\n\tjmpq *2480(%r11)"); } \
 __attribute__((naked)) bool NVVideoContext::isOpportunisticWorkload() const { __asm__("movq __ZTV20IOAccelVideoContext2@GOTPCREL(%rip), %r11\n\tjmpq *2536(%r11)"); } \

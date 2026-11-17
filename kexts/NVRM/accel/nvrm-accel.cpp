@@ -95,6 +95,9 @@ uint64_t mach_continuous_time(void);
 void absolutetime_to_nanoseconds(uint64_t abstime, uint64_t *result);
 void proc_selfname(char *buf, int size);
 }
+#ifndef NMX_ACCEL
+#include "nvaccel_gpu_accounting.h"
+#endif
 static volatile SInt64 gCntVmAlloc, gCntVmAllocBytes, gCntVmDealloc, gCntVmDeallocBytes, gCntVmRefused,
                        gCntResNew, gCntResFree, gCntMapCommit, gCntMapRelease, gCntMapFree;
 static void nvaccelInstallSysctl(void);
@@ -634,6 +637,23 @@ public:
     IOService *fNVRM = nullptr;
     IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
                            IOUserClient **handler) APPLE_KEXT_OVERRIDE {
+#ifndef NMX_ACCEL
+        if (type == NV_GPU_ACCOUNTING_CLIENT) {
+            if (!handler) return kIOReturnBadArgument;
+            *handler = nullptr;
+            NVGPUAccountingClient *client = OSTypeAlloc(NVGPUAccountingClient);
+            if (!client) return kIOReturnNoMemory;
+            if (!client->initWithTask(owningTask, securityID, type, nullptr)) {
+                client->release(); return kIOReturnNoResources;
+            }
+            if (!client->attach(this)) { client->release(); return kIOReturnNoResources; }
+            if (!client->start(this)) {
+                client->detach(this); client->release(); return kIOReturnNoResources;
+            }
+            *handler = client;
+            return kIOReturnSuccess;
+        }
+#endif
         if ((type & 0xFFFF0000u) != 0x4E560000u) {
             IOReturn fr = IOGraphicsAccelerator2::newUserClient(owningTask, securityID, type, handler);
             if (fUcLogged < 40) { fUcLogged++;
@@ -760,6 +780,9 @@ public:
         bool r = IOGraphicsAccelerator2::start(provider);
         ALOG("IOGraphicsAccelerator2::start -> %d", r);
         if (r) {
+#ifndef NMX_ACCEL
+            setProperty(NV_GPU_ACCOUNTING_PROPERTY, (unsigned long long)NV_GPU_ACCOUNTING_VERSION, 32);
+#endif
             // Tells the Metal plugin that NVResource::pageoff waits for a surface WindowServer's GPU is still writing
             // (nvSurfWaitReady). Only then does the plugin mark WindowServer's surfaces newest in VRAM at commit; with an
             // accelerator that does not wait, that mark would let a CPU lock or a copied present read a surface before

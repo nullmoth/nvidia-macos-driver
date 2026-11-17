@@ -14,13 +14,16 @@ R=$BASE/build/plugin-release
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 ARCHIVE=(plugin)
+ACCOUNTING_ABI=kexts/NVRM/nvrm_gpu_accounting_abi.h
+if git -C "$HERE" cat-file -e "$REV:$ACCOUNTING_ABI" 2>/dev/null; then ARCHIVE+=("$ACCOUNTING_ABI"); fi
 for header in tools/rotation/gpu_protocol.h tools/rotation/gpu_shader.h; do
   if git -C "$HERE" cat-file -e "$REV:$header" 2>/dev/null; then ARCHIVE+=("$header"); fi
 done
 git -C "$HERE" archive "$REV" "${ARCHIVE[@]}" | tar x -C "$TMP"
-ssh "$H" "rm -rf $R/src $R/out $R/tools && mkdir -p $R/src $R/out"
+ssh "$H" "rm -rf $R/src $R/out $R/tools $R/kexts && mkdir -p $R/src $R/out"
 rsync -a "$TMP/plugin/" "$H:$R/src/"
 if [ -d "$TMP/tools" ]; then rsync -a "$TMP/tools/" "$H:$R/tools/"; fi
+if [ -d "$TMP/kexts" ]; then rsync -a "$TMP/kexts/" "$H:$R/kexts/"; fi
 ssh "$H" "cd $R/src && xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -bundle -fobjc-arc -O2 -DNVMTL_RELEASE=1 \
   -Wno-protocol -Wno-incomplete-implementation -Werror=unguarded-availability-new \
   -I$BASE/build/gpu-src/mesa/include -o ../out/NVMTLDriver NVMTLDevice.m nvmtl_dlss.c dlss/elfhost.c dlss/lnxlibc.c \

@@ -103,12 +103,14 @@ static uint16_t nvmtl_pci_vendor_of(io_service_t accel)
 /* the vendor of the accelerator a Metal device was made on (0 if the port is neither of ours); the first one wins */
 /* registry entry id of the accelerator this process is bound to; 0 = not bound (the first accelerator is used) */
 uint64_t nvmtl_card_registry_id;
+#include "nvmtl_gpu_accounting.c"
 uint16_t nvmtl_vk_set_accelerator(mach_port_t accel)
 {
     uint16_t v = 0;
     if (accel && IOObjectConformsTo(accel, "NMXAccel")) { v = nvmtl_pci_vendor_of(accel); if (v != 0x1002 && v != 0x8086) v = 0; }
     else if (accel && IOObjectConformsTo(accel, "NVAccel")) v = 0x10de;
     if (v && !g_vendor) g_vendor = v;
+    if (v == 0x10de && g_vendor == v) nvmtl_gpu_accounting_open(accel);
     return v;
 }
 /* a process that starts Vulkan before Metal makes a device: NVIDIA when its accelerator runs, else the AMD/Intel one */
@@ -8756,7 +8758,7 @@ static void nvmtl_pre_drop(nvmtl_prologue *p)
     for (unsigned i = 0; i < p->nhold; i++) if (p->hold[i] && nvmtl_pre_release_hook) nvmtl_pre_release_hook(p->hold[i]);
     p->nhold = 0;
 }
-struct nvmtl_inflight { nvk_cmdbuf *c; VkFence fence; nvmtl_prologue pre; uint64_t pt[8]; };
+struct nvmtl_inflight { nvk_cmdbuf *c; VkFence fence; nvmtl_prologue pre; uint64_t pt[8]; uint64_t accounting_submitted; };
 nvmtl_inflight *nvmtl_vk_inflight_new(void) { return calloc(1, sizeof(nvmtl_inflight)); }
 void nvmtl_vk_inflight_free(nvmtl_inflight *f) { free(f); }
 void nvmtl_vk_gsub_nvk_stats(uint64_t *out, unsigned n)
@@ -8854,6 +8856,8 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     nvmtl_wit_control(wseq);
     const uint64_t sE = nvmtl_perf_now();
     if (pt[0]) { pt[1] = pt[0] + (sA - pt[0]) + (sD - sC); pt[2] = pt[1] + (sB - sA) + (sE - sD); pt[3] = pt[2] + (sC - sB); }
+    if (atomic_load_explicit(&g_accounting_on, memory_order_relaxed))
+        f->accounting_submitted = mach_absolute_time();
     result = g_state == 1 ? pvkQueueSubmit(g_queue, 1, &si, fence) : VK_ERROR_DEVICE_LOST;
     /* Keep the software sequence in the same order as actual queue submissions.
        A later submit must never acquire an earlier lifetime sequence. */
@@ -8965,6 +8969,10 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
             double a, b;
             if (nvmtl_vk_interval_seconds(&c->timing, &a, &b)) c->timing.valid = 0;
         }
+    }
+    if (c->timing.valid && f->accounting_submitted) {
+        nvmtl_gpu_accounting_complete(&c->timing, f->accounting_submitted);
+        f->accounting_submitted = 0;
     }
     nvmtl_dt_collect(c);
     if (c->pt_pool && c->pt_n) {

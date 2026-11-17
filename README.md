@@ -138,6 +138,11 @@ renderer plus **8-bit BGRA SDR capture**. Other apps continue using Zink.
 Select your display in **macOS Screen Capture**.
 [Details and opt-out](docs/ZINK-OPENGL.md#obs-display-capture-compatibility).
 
+## Activity Monitor GPU usage
+
+Per-process **GPU %** and **GPU Time** for Metal applications are optional and
+**off by default**. [Enable or disable accounting](docs/GPU-UTILIZATION.md#per-process-metal-accounting-experimental).
+
 ## Additional video codecs
 
 The codec addon adds **VP8/VP9 hardware decoding on RTX 20**, retaining the

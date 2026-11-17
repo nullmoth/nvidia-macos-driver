@@ -64,6 +64,9 @@ CATALOG = [
       effect="relaunch the application"),
     S("app-profiles", "Performance", "Built-in per-application profiles", "conf", "NVMTL_APP_PROFILE", "bool",
       "On by default; off turns every shipped per-application profile off.", effect="relaunch the application"),
+    S("gpu-accounting", "Performance", "Activity Monitor per-process GPU usage", "conf", "NVMTL_GPU_ACCOUNTING", "bool",
+      "Off by default; on reports completed Metal work as GPU % and GPU Time. Adds a small amount of CPU work and batched reports while active.",
+      effect="relaunch applications; log out and back in for WindowServer"),
     S("local-map-sysmem", "Performance", "Keep CPU-written memory in system RAM", "conf", "NVK_LOCAL_MAP_SYSMEM", "bool",
       "On by default for stability; off places it in video memory (faster in some games, unsafe for the desktop).", effect="restart"),
 ]
@@ -252,7 +255,7 @@ def selftest():
     arm("a shipped line with the same key outside the block is never edited", conf_set("NVMTL_FPS_LIMIT=30\n", "NVMTL_FPS_LIMIT", "60").startswith("NVMTL_FPS_LIMIT=30\n"))
     arm("removing the last setting removes the empty block", conf_set(c2, "NVMTL_FPS_LIMIT", None) == conf)
     arm("every line this tool writes passes the installer's keep rule",
-        all(KEPT.match("%s=%s" % (s["key"], normalize(s, v))) for s, v in [(BY_ID["fps-limit"], "Game=60,*=0"), (BY_ID["app-profiles"], "off"), (BY_ID["local-map-sysmem"], "on")]))
+        all(KEPT.match("%s=%s" % (s["key"], normalize(s, v))) for s, v in [(BY_ID["fps-limit"], "Game=60,*=0"), (BY_ID["app-profiles"], "off"), (BY_ID["local-map-sysmem"], "on"), (BY_ID["gpu-accounting"], "on")]))
     arm("queue depth is 1 to 32 and refuses 0 or 33 (0 would mean 'off' to nobody)", normalize(BY_ID["queue-depth"], "4") == "4" and refuses("queue-depth", "33") and refuses("queue-depth", "0"))
     arm("the shader cache limit takes megabytes, 0 turns trimming off, 10 is refused as too small", normalize(BY_ID["shader-cache-mb"], "4096") == "4096"
         and normalize(BY_ID["shader-cache-mb"], "0") == "0" and refuses("shader-cache-mb", "10"))

@@ -38,6 +38,10 @@ arm("the package's own settings are the new ones", "NVK_NEW=2" in out and "OLD=1
 arm("anything that is not a driver knob is dropped", "rm -rf" not in out, out)
 rc, out, log = run("OLD=1\n", "NVK_NEW=2\n")
 arm("no block: the file is exactly the package's", rc == 0 and out == "NVK_NEW=2\n", repr(out))
+for accounting in ("0", "1"):
+    rc, out, log = run(f"{M0}\nNVMTL_GPU_ACCOUNTING={accounting}\n{M1}\n", "NVK_NEW=2\n")
+    arm(f"GPU accounting choice {accounting} survives an update",
+        rc == 0 and f"NVMTL_GPU_ACCOUNTING={accounting}\n" in out, log)
 rc, out, log = run(None, "NVK_NEW=2\n")
 arm("a first install (no old file) works", rc == 0 and out == "NVK_NEW=2\n", log)
 print(f"{len(fails)} failed")
