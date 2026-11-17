@@ -2,11 +2,30 @@
 
 Current fork builds target NVIDIA **620.70.06**, revision
 `e6a2e01579fbbd1ca2ed43fef2ee2589e9bd8bd9`; see
-[the complete build recipe](../../../docs/NVRM-BUILD.md). The five patches below
+[the complete build recipe](../../../docs/NVRM-BUILD.md). The archived patches below
 retain the same behavior. Completion contexts are adjusted to 620; NVIDIA's
 620 FSP cleanup already clears `pPollEvent`, so that already-fixed hunk is
 removed while the OS timer handle clear remains. The older instructions below
 describe the origin of those repairs, not the current build target.
+
+## Hardware vblank after partial modesets
+
+`620-vblank-restore-unchanged-heads.patch` restores RG semaphore interrupts on
+active, unchanged API heads. NVIDIA disables them on every head before a
+committed modeset, but its unchanged-head return skips re-enabling them. Reuse
+the existing enable helper and modeset update; retain unchanged timings,
+head mappings, callback registrations and the inactive-head guard.
+
+`tools/test_modeset_vblank_restore.py --ogkm <pristine-620-checkout>` compiles
+the production disable loop, enable helper and unchanged-head branch against
+display-engine doubles. Sanitized partial-mode, reconnect and fallback checks
+pass; the unpatched negative control reproduces the missing interrupts.
+The RTX 2060 SUPER desktop remains smooth with the trial loaded, but that GPU
+reports this interrupt method unsupported and retains its timer fallback.
+Hardware interrupt restoration, mixed-refresh and remote playback validation
+are still pending.
+
+## Archived display and RM repairs
 
 The framebuffer and accelerator allocation interface changes must be built and installed together. Use the NVRMFB framebuffer source and the matching NVRM headers from this revision.
 

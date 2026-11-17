@@ -1,5 +1,40 @@
 # Retained fork changes for upstream merges
 
+## Hardware vblank after partial modesets, 2026-11-17
+
+Retain `620-vblank-restore-unchanged-heads.patch`. NVIDIA 620.70.06 disables
+RG semaphore interrupts on all API heads before applying a committed modeset,
+but restores only changed heads. Restore active unchanged heads through the
+existing guarded enable helper in the same modeset update. Preserve inactive
+heads, callback ownership, timing, mappings and the ordinary changed-head path.
+The macOS framebuffer otherwise retains a registered callback that stops firing
+and uses its software-timer fallback. There is no per-frame change.
+
+The production disable loop, enable helper and unchanged-head branch pass
+ASan/UBSan checks for partial changes across two display engines, preserved
+callbacks/timings, reconnects, absent capabilities and 200 repeated modesets.
+The unpatched control loses unchanged-head interrupts as expected. This defect
+also exists in the NVIDIA core used by v2.9 and current driver upstream; it
+does not establish the cause of a reported playback version regression.
+On RTX 2060 SUPER / Tahoe 26.7.1 / 8 GiB BAR1, the trial UUID is verified
+loaded after reboot. With two 1080p75 displays, the user reports smooth desktop
+behavior and flip-timeout/late counters are zero. However, NVKMS explicitly
+reports RG semaphore interrupts unsupported on this platform: the existing
+timer fallback remains active, so this does not exercise the repaired hardware
+interrupt path or establish the cause of the perceived improvement.
+The user also reports smooth behavior after the requested single-display
+refresh-change check. The repaired interrupt path and remote RTX 4070 Laptop
+playback remain unqualified on hardware.
+
+The private NVRM builds and links isolated Tahoe collections
+with the current machine's eight extensions and with the package's core and
+optional drivers. Install, rollback and injected-failure restoration pass on
+an isolated filesystem fixture; the link preflights left installed files and
+collections unchanged. The user subsequently approved the private NVRM install;
+the original NVRM and auxiliary collection are backed up for rollback.
+Sequoia execution remains untested. Keep the private trial separate from the
+held release assets until explicitly staged for a package test.
+
 ## Rejected convolution diagnostics, 2026-11-17
 
 Keep rejected-convolution diagnostic formatting, string allocation and locking

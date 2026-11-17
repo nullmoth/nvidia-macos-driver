@@ -1,0 +1,28 @@
+--- a/src/nvkms-modeset.c
++++ b/src/nvkms-modeset.c
+@@ -3282,16 +3282,23 @@
+         nvGetPrimaryHwHeadFromMask(pProposedApiHead->hwHeadsMask);
+     NVDpyEvoPtr pDpyEvo =
+         nvGetOneArbitraryDpyEvo(pProposedApiHead->dpyIdList, pDispEvo);
+     NvU32 head;
+ 
+     /*
+-     * If nothing changed about this head's configuration, then there
+-     * is nothing to do.
++     * The modeset disabled RG semaphore interrupts on every apiHead. Even
++     * unchanged heads must have them restored or their registered callbacks
++     * stop receiving hardware vblanks. Keep their mode and mapping intact;
++     * inactive heads have no primary hardware head and stay disabled.
+      */
+     if (!pProposedApiHead->changed) {
++        if (proposedPrimaryHead != NV_INVALID_HEAD) {
++            EnableVBlankRgSemaphoreInterruptOneApiHead(pDispEvo, apiHead,
++                                                       proposedPrimaryHead,
++                                                       updateState);
++        }
+         return;
+     }
+ 
+     /* Check for disabled heads. */
+ 
+     if (nvDpyIdListIsEmpty(pProposedApiHead->dpyIdList)) {
