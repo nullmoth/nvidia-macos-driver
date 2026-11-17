@@ -577,11 +577,17 @@ static const void *NVMTL_AIRDIGEST_KEY = &NVMTL_AIRDIGEST_KEY;
 static const void *NVMTL_AIRTEXT_KEY = &NVMTL_AIRTEXT_KEY;
 static const void *NVMTL_AIRLINK_KEY = &NVMTL_AIRLINK_KEY;
 static const void *NVMTL_AIRGRID_KEY = &NVMTL_AIRGRID_KEY;
-// Marks text nvmtl_air_to_text made; it is never edited, so state can be kept on it.
+// Marks loader-owned text; it is never edited, so state can be kept on it.
 static const void *NVMTL_AIRTG_KEY = &NVMTL_AIRTG_KEY;
 static NSString *nvmtl_air_text_made(NSString *s) {
     if (s.length >= 4096) objc_setAssociatedObject(s, NVMTL_AIRTEXT_KEY, @YES, OBJC_ASSOCIATION_RETAIN);
     return s;
+}
+// Linkers and lowerers return fresh bytes too. Copy and mark their immutable
+// text just like decoded AIR, so dispatch does not rehash a linked module.
+static NSString *nvmtl_air_text_from_bytes(const void *bytes, NSUInteger length) {
+    if (!bytes) return nil;
+    return nvmtl_air_text_made([[NSString alloc] initWithBytes:bytes length:length encoding:NSUTF8StringEncoding]);
 }
 static BOOL nvmtl_air_analysis_cacheable(NSString *ll) {
     return ll.length >= 4096 && objc_getAssociatedObject(ll, NVMTL_AIRTEXT_KEY) != nil;
@@ -2670,7 +2676,7 @@ NSString *nvmtl_tile_rewrite(NSString *ll, uint32_t tw, uint32_t th, uint32_t sa
     if (!nvmtl_xlate_ready() || !xlate_tile_rewrite) { if (err) *err = @"this translator cannot rewrite tile functions"; return nil; }
     uint8_t *out = NULL; size_t len = 0; char e[512] = {0};
     if (xlate_tile_rewrite(ll.UTF8String, tw, th, samples, &out, &len, e, sizeof e)) { if (err) *err = @(e); return nil; }
-    NSString *text = [[NSString alloc] initWithBytes:out length:len encoding:NSUTF8StringEncoding]; xlate_free(out, len);
+    NSString *text = nvmtl_air_text_from_bytes(out, len); xlate_free(out, len);
     return text;
 }
 // a8: Metal A8Unorm colour attachments (bit per location); the variant writes the output's alpha into the R8 lane.
@@ -2962,7 +2968,7 @@ static NVMTLFunction *nvmtl_link_dylibs(NVMTLFunction *fn, NSArray *dylibs, NSEr
         if (err) *err = nvmtl_b41_err([NSString stringWithFormat:@"dylib: \"%@\" needs %@ - %s; searched%@", fn->_fname, want, e[0] ? e : "link failed", from.length ? from : @" nothing (no preloadedLibraries, no compile-time libraries, no DYNL)"]);
         return nil;
     }
-    NSString *linked = [[NSString alloc] initWithBytes:out length:(len && out[len-1] == 0) ? len - 1 : len encoding:NSUTF8StringEncoding];
+    NSString *linked = nvmtl_air_text_from_bytes(out, (len && out[len-1] == 0) ? len - 1 : len);
     xlate_free(out, len);
     if (!linked) { if (err) *err = nvmtl_b41_err(@"dylib: linked AIR is not UTF-8"); return nil; }
     nvlog("dylib: \"%s\" extern(s) %s resolved from %zu module(s):%s (%lu -> %lu B AIR)", fn->_fname.UTF8String, want.UTF8String, n,
@@ -3225,7 +3231,7 @@ id<MTLFunction> nvmtl_link_stage(id<MTLFunction> kIn, MTLLinkedFunctions *lfIn, 
         if (err) *err = nvmtl_link_err(why);
         return nil;
     }
-    NSString *linked = [[NSString alloc] initWithBytes:out length:(len && out[len-1] == 0) ? len - 1 : len encoding:NSUTF8StringEncoding];
+    NSString *linked = nvmtl_air_text_from_bytes(out, (len && out[len-1] == 0) ? len - 1 : len);
     xlate_free(out, len);
     if (!linked) { if (err) *err = nvmtl_link_err(@"linked AIR is not UTF-8"); return nil; }
     NSString *dumpDir = nvmtl_link_dump_dir();
@@ -3636,7 +3642,7 @@ static NSData *nvmtl_mesh_translate_fc(NSString *ll, NSString *stage, NSDictiona
 
 static NSString *nvmtl_mesh_text(uint8_t *p, size_t n) {
     if (!p) return nil;
-    NSString *s = [[NSString alloc] initWithBytes:p length:(n && p[n-1] == 0) ? n - 1 : n encoding:NSUTF8StringEncoding];
+    NSString *s = nvmtl_air_text_from_bytes(p, (n && p[n-1] == 0) ? n - 1 : n);
     xlate_free(p, n);
     return s;
 }

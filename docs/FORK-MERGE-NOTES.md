@@ -1,5 +1,24 @@
 # Retained fork changes for upstream merges
 
+## Linked compute shader hash reuse, 2026-11-17
+
+Mark copied linker, tile-lowering and mesh-lowering output as immutable AIR,
+as for decoded modules. The metadata-cache change in `d04dd86` left this text
+unmarked, causing every compute dispatch to hash the whole module again.
+Preserve fresh analysis for external mutable text, the existing cache keys and
+shader bytes, and the WindowServer image-pooling optimization in `87f5cd9`.
+
+On RTX 2060 SUPER / Tahoe 26.7.1 / 8 GiB BAR1, the isolated linked-dispatch
+probe drops from about 55 ms to 1.1 ms per 1,000 dispatches with identical
+integer output. Reverting only `87f5cd9` retains the slowdown; restoring only
+the old function-key memoization removes it. Direct and indirect dispatch,
+binding, descriptor and sanitized cache/lifetime checks pass, including a
+missing-marker negative control. The clean Geekbench run scores
+[73,075](https://browser.geekbench.com/v7/gpu/409848), versus
+[59,616](https://browser.geekbench.com/v7/gpu/409737) before the repair and
+[74,840](https://browser.geekbench.com/v7/gpu/409717) on v3.0.
+Other GPUs and Sequoia execution remain untested for this repair.
+
 ## Wine hybrid window binding, 2026-11-16
 
 Keep the Wine-only initial-layer repair in `nvk/native-macos/bridge.mm`. Wine

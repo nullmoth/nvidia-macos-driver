@@ -164,7 +164,34 @@ int main(void) { @autoreleasepool {
         assert(nvmtl_air_function_constants(constants,&rows)==constantRows && rows==2);
     }});
     assert(!nvmtl_function_air_key(nil));
-    puts("PASS: shared immutable AIR, literal table searches, digest/constant reuse, row accounting, mutable inputs, failures/recovery, bounded storage and concurrent readers");
+    // Linker/lowerer output must retain the same immutable-text contract as
+    // decoded AIR. Repeated dispatches used to rehash all these bytes each time.
+    NSMutableData *compiled = [[constants dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    NSString *linked = nvmtl_air_text_from_bytes(compiled.bytes, compiled.length);
+    assert([linked isEqualToString:constants]);
+    memset(compiled.mutableBytes, 'x', compiled.length); // the text owns a copy
+    NVMTLFunction *linkedFn = [NVMTLFunction new]; linkedFn->_air = linked;
+    before = hashes;
+    for (unsigned i = 0; i < 1000; i++) {
+        assert(nvmtl_function_air_key(linkedFn) == key);
+        NVMTLFunction *fresh = [NVMTLFunction new]; fresh->_air = linked;
+        assert(nvmtl_function_air_key(fresh) == key);
+    }
+    assert(hashes == before + 1);
+    NSString *different = [constants stringByAppendingString:@"; different link\n"];
+    NSData *bytes = [different dataUsingEncoding:NSUTF8StringEncoding];
+    NVMTLFunction *otherLink = [NVMTLFunction new];
+    otherLink->_air = nvmtl_air_text_from_bytes(bytes.bytes, bytes.length);
+    assert(nvmtl_function_air_key(otherLink) != key);
+    // A mutable copy of trusted text is external again; edits stay visible.
+    editable = [linked mutableCopy]; edit = [NVMTLFunction new]; edit->_air = editable;
+    oldKey = nvmtl_function_air_key(edit);
+    [editable appendString:@"; mutable edit\n"];
+    assert(nvmtl_function_air_key(edit) != oldKey);
+    assert(!nvmtl_air_text_from_bytes(NULL, 0));
+    const unsigned char invalid[] = {0xff};
+    assert(!nvmtl_air_text_from_bytes(invalid, sizeof invalid));
+    puts("PASS: decoded/linked immutable AIR, literal table searches, digest/constant reuse, row accounting, mutable inputs, failures/recovery, bounded storage and concurrent readers");
 } }
 '''
 markers = section('static const void *NVMTL_AIRTEXT_KEY', '// newFunctionWithName scanned')
