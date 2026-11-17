@@ -31,6 +31,14 @@ extern "C" void *nv_xnu_gpu_os_device(void);
 
 static IOLock *gKmsLock;
 static bool    gKmsLoaded;
+static int gKmsSkipMaxPclk;
+SYSCTL_INT(_debug, OID_AUTO, nvrm_kms_skip_max_pclk, CTLFLAG_RD, &gKmsSkipMaxPclk, 0,
+           "Bypass maximum display pixel-clock validation");
+extern "C" NvBool nvkms_xnu_skip_max_pclk(void)
+{
+    return gKmsSkipMaxPclk == 1 ? NV_TRUE : NV_FALSE;
+}
+
 struct nvkms_timer_t;
 static IOSimpleLock *gKmsTimerQueueLock;
 static thread_call_t gKmsTimerWorker;
@@ -176,6 +184,10 @@ extern "C" {
 NvBool nvkms_xnu_load(void)
 {
     if (gKmsLoaded) return NV_TRUE;
+    int skipMaxPclk = 0;
+    PE_parse_boot_argn("nvkmsnomaxpclk", &skipMaxPclk, sizeof skipMaxPclk);
+    gKmsSkipMaxPclk = skipMaxPclk == 1;
+
     if (!gKmsLock) gKmsLock = IOLockAlloc();
     if (!gKmsLock) return NV_FALSE;
     if (!gKmsTimerQueueLock) gKmsTimerQueueLock = IOSimpleLockAlloc();
@@ -189,6 +201,10 @@ NvBool nvkms_xnu_load(void)
     kprintf("NVRM-xnu: nvKmsModuleLoad -> %u\n", ok);
     if (!ok) return NV_FALSE;
     gKmsLoaded = true;
+    sysctl_register_oid(&sysctl__debug_nvrm_kms_skip_max_pclk);
+    kprintf("NVRM-xnu: maximum pixel-clock validation %s\n",
+            gKmsSkipMaxPclk ? "disabled" : "enabled");
+
     sysctl_register_oid(&sysctl__debug_nvrm_kms_timer_depth);
     sysctl_register_oid(&sysctl__debug_nvrm_kms_timer_max_depth);
     sysctl_register_oid(&sysctl__debug_nvrm_kms_timer_executed);
