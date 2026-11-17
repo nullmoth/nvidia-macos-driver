@@ -102,6 +102,7 @@ def stage(base, zink, output, components=None, native_gld=False, records=None, w
         base_tools.bundle(base / 'Library/GPUBundles' / (name + '.bundle'), name)
     for name in ('libvulkan_nouveau.dylib', 'libvulkan.1.4.362.dylib', 'nvk_icd.json'):
         base_tools.regular(base / BASE_RUNTIME / name)
+    base_tools.validate_wine_frontend(base / BASE_RUNTIME / 'wine')
     for name in ZINK_FILES:
         base_tools.regular(zink / name)
     if native_gld:

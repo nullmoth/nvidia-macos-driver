@@ -11,6 +11,7 @@ import io
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -375,10 +376,23 @@ class StagePackage(unittest.TestCase):
                     "LICENSES/Wine-LGPL-2.1.txt": b"Wine"}
         for name, data in payloads.items():
             self.put(runtime / name, data)
+        frontend = {"schema_version": 1,
+                    "source_files": {name: STAGE.digest(ROOT / name) for name in (
+                        "nvk/native-macos/bridge.mm", "nvk/native-macos/present_worker.h",
+                        "plugin/nvmtl_fd_token.h", "plugin/nvmtl_rebind_import.h",
+                        "nvk/native-macos/present_hud.h", "nvk/wine-macos/build.py")},
+                    "commands": [["clang++", "-DNVKBRIDGE_WINE=1"]],
+                    "files": {name: STAGE.digest(runtime / name) for name in (
+                        "lib/libnvk_wine.dylib", "lib/libnvk_renderer.dylib")}}
+        for key, name in (("entry", "lib/libnvk_wine.dylib"), ("renderer", "lib/libnvk_renderer.dylib")):
+            frontend[key] = {"path": name, "sha256": frontend["files"][name]}
+        payloads["FRONTEND-BUILD.json"] = json.dumps(frontend).encode()
+        self.put(runtime / "FRONTEND-BUILD.json", payloads["FRONTEND-BUILD.json"])
         fields = {"schema_version": 1, "kind": "provider", "runtime_id": "test-wine-runtime",
                   "platform": {"os": "macos", "arch": "x86_64", "minimum_macos": "15.5"},
                   "entry": {"path": "lib/libnvk_wine.dylib"}, "renderer": {"path": "lib/libnvk_renderer.dylib"},
                   "dxvk": {"version": "3.1.1+nvk-shared-fallback"},
+                  "frontend_build": "FRONTEND-BUILD.json",
                   "launch_defaults": {"DXVK_CONFIG": "dxvk.enableDescriptorBuffer = False"},
                   "files": {name: hashlib.sha256(data).hexdigest() for name, data in payloads.items()}}
         self.put(runtime / "nvk-wine-runtime.json", json.dumps(fields).encode())
@@ -409,6 +423,60 @@ class StagePackage(unittest.TestCase):
         self.assert_manifest(destination)
         self.assert_manifest(self.output)
         self.assert_unchanged()
+
+    def test_old_wine_provider_without_frontend_provenance_is_rejected(self):
+        runtime = self.wine_runtime()
+        manifest = runtime / "nvk-wine-runtime.json"
+        fields = json.loads(manifest.read_text())
+        del fields["frontend_build"]
+        del fields["files"]["FRONTEND-BUILD.json"]
+        (runtime / "FRONTEND-BUILD.json").unlink()
+        manifest.write_text(json.dumps(fields))
+        STAGE.write_manifest(runtime)
+        with self.assertRaisesRegex(ValueError, "current frontend provenance"):
+            self.stage()
+        self.assertFalse(self.output.exists())
+
+    def test_inherited_wine_frontend_is_checked_without_an_explicit_replacement(self):
+        runtime = self.wine_runtime()
+        destination = self.base / STAGE.WINE
+        shutil.copytree(runtime, destination, symlinks=True)
+        self.args.wine_runtime = None
+        record = destination / "FRONTEND-BUILD.json"
+        data = json.loads(record.read_text())
+        data["source_files"]["nvk/native-macos/bridge.mm"] = "0" * 64
+        record.write_text(json.dumps(data))
+        self.seal_base()
+        with self.assertRaisesRegex(ValueError, "Wine frontend source mismatch"):
+            self.stage()
+        self.assertFalse(self.output.exists())
+        self.assert_unchanged()
+
+    def test_frontend_reuse_requires_current_source_wine_build_and_matching_binaries(self):
+        runtime = self.wine_runtime()
+        record = runtime / "FRONTEND-BUILD.json"
+        original = json.loads(record.read_text())
+        changes = (
+            (lambda data: data["source_files"].update({"nvk/native-macos/bridge.mm": "0" * 64}),
+             "Wine frontend source mismatch"),
+            (lambda data: data.update(commands=[["clang++"]]), "not built for Wine"),
+            (lambda data: data["entry"].update(sha256="0" * 64), "binary/build mismatch"),
+            (lambda data: data["files"].update({"lib/libnvk_renderer.dylib": "0" * 64}),
+             "binary/build mismatch"),
+        )
+        for change, message in changes:
+            with self.subTest(message=message):
+                data = json.loads(json.dumps(original))
+                change(data)
+                record.write_text(json.dumps(data))
+                manifest = runtime / "nvk-wine-runtime.json"
+                fields = json.loads(manifest.read_text())
+                fields["files"]["FRONTEND-BUILD.json"] = STAGE.digest(record)
+                manifest.write_text(json.dumps(fields))
+                STAGE.write_manifest(runtime)
+                with self.assertRaisesRegex(ValueError, message):
+                    self.stage()
+                self.assertFalse(self.output.exists())
 
     def test_mismatched_wine_dxvk_pair_is_rejected_before_publishing(self):
         runtime = self.wine_runtime()

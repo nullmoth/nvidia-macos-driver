@@ -284,6 +284,32 @@ def validate_minecraft_runtime(root, checker):
     return files
 
 
+def validate_wine_frontend(root, record_name="FRONTEND-BUILD.json"):
+    """Require the normal Wine build, including the retained hybrid repair."""
+    require(record_name in ("FRONTEND-BUILD.json", "BUILD.json"), "unexpected frontend build record")
+    record_path = root / record_name
+    regular(record_path)
+    record = json.loads(record_path.read_text())
+    sources = ("nvk/native-macos/bridge.mm", "nvk/native-macos/present_worker.h",
+               "plugin/nvmtl_fd_token.h", "plugin/nvmtl_rebind_import.h",
+               "nvk/native-macos/present_hud.h", "nvk/wine-macos/build.py")
+    require(record.get("schema_version") == 1, "incompatible Wine frontend build record")
+    for name in sources:
+        require(record.get("source_files", {}).get(name) == digest(REPO / name),
+                "Wine frontend source mismatch; rebuild to retain hybrid GPU support: " + name)
+    require(any(isinstance(command, list) and "-DNVKBRIDGE_WINE=1" in command
+                for command in record.get("commands", [])), "frontend was not built for Wine")
+    for key, relative in (("entry", "lib/libnvk_wine.dylib"),
+                          ("renderer", "lib/libnvk_renderer.dylib")):
+        regular(root / relative)
+        expected = digest(root / relative)
+        require(record.get(key, {}).get("path") == relative
+                and record[key].get("sha256") == expected
+                and record.get("files", {}).get(relative) == expected,
+                "Wine frontend binary/build mismatch: " + relative)
+    return record
+
+
 def validate_wine_runtime(root, checker):
     require(root.is_dir() and not root.is_symlink(), "missing Wine/NVK provider directory")
     validate_links(root.resolve())
@@ -312,9 +338,9 @@ def validate_wine_runtime(root, checker):
             require(fields["vkd3d"].get("fork_version") == "3.1-nvk.2",
                     "unexpected native-NVK vkd3d fork build")
             required.add("vkd3d/source-changes.patch")
-    if fields.get("frontend_build") is not None:
-        require(fields["frontend_build"] == "FRONTEND-BUILD.json", "unexpected frontend provenance record")
-        required.add("FRONTEND-BUILD.json")
+    require(fields.get("frontend_build") == "FRONTEND-BUILD.json",
+            "Wine provider needs current frontend provenance; rebuild to retain hybrid GPU support")
+    required.add("FRONTEND-BUILD.json")
     if fields.get("dlss") is not None:
         require(isinstance(fields["dlss"], dict) and fields.get("vkd3d") is not None
                 and fields.get("presentation", {}).get("wine_child_options") == 1,
@@ -332,6 +358,7 @@ def validate_wine_runtime(root, checker):
     require(fields.get("entry", {}).get("path") == "lib/libnvk_wine.dylib"
             and fields.get("renderer", {}).get("path") == "lib/libnvk_renderer.dylib",
             "unexpected Wine/NVK library paths")
+    validate_wine_frontend(root)
     alias = root / "lib/libMoltenVK.dylib"
     require(alias.is_symlink() and os.readlink(alias) == "libnvk_wine.dylib", "incorrect Wine/NVK provider alias")
     regular(checker)
@@ -429,6 +456,8 @@ def stage(args):
     minecraft_files = validate_minecraft_runtime(minecraft, base / "nullmoth-runtime-check") if minecraft else ()
     wine = getattr(args, "wine_runtime", None)
     wine_files = validate_wine_runtime(wine, base / "nullmoth-runtime-check") if wine else ()
+    if not wine and (base / WINE).exists():
+        validate_wine_frontend(base / WINE)
     video = getattr(args, "video_runtime", None)
     if video:
         video = video.resolve(strict=True)

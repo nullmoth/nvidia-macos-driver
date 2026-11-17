@@ -79,7 +79,9 @@ binding only after complete NVAccel registry enumeration. Preserve NVIDIA-bound
 layers, already-owned layers, enumeration failures, the exact PCI/Metal match
 and all later device/drawable mismatch checks. Native Minecraft and Zink retain
 their existing paths. Rebuild the Wine frontend for future full packages rather
-than reusing the original v3.0.1 frontend.
+than reusing the original v3.0.1 frontend. Both provider assembly and full-driver
+packaging require current frontend source hashes, a Wine build record and matching
+binary hashes; keep these checks when changing the release tooling.
 
 `surface_device_test.mm` checks production binding with simulated adapters;
 existing host checks retain small-BAR, async/reuse and lifetime coverage. On
@@ -93,8 +95,8 @@ removed from `main` after that confirmation. Their original source remains in
 [commit 0805a9d](https://github.com/HighDelay/nvidia-macos-driver-nvk/commit/0805a9d).
 Retain the production bridge fix and `surface_device_test.mm`, and keep local
 v3.0.1 recovery archives and the linked
-[setup/rollback guide](../tools/bridge-update/README.md). The user requested
-retiring the v3.0.1 GitHub release after publishing its v3.0.2 replacement.
+[setup/rollback guide](../tools/bridge-update/README.md). Keep the v3.0.1 GitHub
+release available as a prerelease.
 Do not make this a recurring separate release asset. Full driver packages from
 v3.0.2 include the repaired frontend normally.
 

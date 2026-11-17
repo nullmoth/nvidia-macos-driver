@@ -49,6 +49,11 @@ class RendererUpgradeTests(unittest.TestCase):
         shutil.copyfile(self.private, self.frontend / provider.CRITICAL[1])
         self.record = {key: {"path": relative, "sha256": provider.digest(self.frontend / relative)}
                        for key, relative in zip(("entry", "renderer"), provider.CRITICAL[:2])}
+        # The build-guard cases exercise provenance after the base runtime check.
+        checker = self.frontend / "bin/nvk-runtime"
+        checker.parent.mkdir()
+        checker.write_text("#!/bin/sh\nexit 0\n")
+        checker.chmod(0o755)
         self.save()
         self.addCleanup(self.directory.cleanup)
 
@@ -95,6 +100,31 @@ class RendererUpgradeTests(unittest.TestCase):
         self.save()
         with self.assertRaises(subprocess.CalledProcessError):
             provider.validate_frontend(self.frontend, self.private, self.original)
+
+    def test_provider_build_rejects_missing_hybrid_frontend_provenance(self):
+        base = self.frontend
+        (base / "nvk-wine-runtime.json").write_text(json.dumps({
+            "dxvk": {"version": "3.1.1+nvk-shared-fallback"}}))
+        output = base.with_name(base.name + "-must-not-be-created") / "provider"
+        with self.assertRaisesRegex(ValueError, "retain hybrid GPU support"):
+            provider.build(base, output)
+        self.assertFalse(output.parent.exists())
+
+    def test_provider_build_checks_both_inherited_and_explicit_frontend_sources(self):
+        base = self.frontend
+        (base / "nvk-wine-runtime.json").write_text(json.dumps({
+            "dxvk": {"version": "3.1.1+nvk-shared-fallback"},
+            "frontend_build": "FRONTEND-BUILD.json"}))
+        stale = {**self.record, "schema_version": 1,
+                 "source_files": {"nvk/native-macos/bridge.mm": "0" * 64}}
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit):
+                record = base / ("BUILD.json" if explicit else "FRONTEND-BUILD.json")
+                record.write_text(json.dumps(stale))
+                output = base.with_name(base.name + "-must-not-be-created") / "provider"
+                with self.assertRaisesRegex(ValueError, "Wine frontend source mismatch"):
+                    provider.build(base, output, frontend=base if explicit else None)
+                self.assertFalse(output.parent.exists())
 
 
 if __name__ == "__main__":

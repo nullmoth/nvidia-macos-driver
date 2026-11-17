@@ -39,6 +39,17 @@ class PackageZinkTests(unittest.TestCase):
         for name in ('libvulkan_nouveau.dylib', 'libvulkan.1.4.362.dylib'):
             self.put(self.base / pkg.BASE_RUNTIME / name, b'base runtime')
         self.put(self.base / pkg.BASE_RUNTIME / 'nvk_icd.json', json.dumps({'ICD': {'library_path': '/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib'}}).encode())
+        wine = self.base / pkg.BASE_RUNTIME / 'wine'
+        frontend = {'schema_version': 1, 'source_files': {name: pkg.base_tools.digest(ROOT/name) for name in (
+            'nvk/native-macos/bridge.mm', 'nvk/native-macos/present_worker.h',
+            'plugin/nvmtl_fd_token.h', 'plugin/nvmtl_rebind_import.h',
+            'nvk/native-macos/present_hud.h', 'nvk/wine-macos/build.py')},
+            'commands': [['clang++', '-DNVKBRIDGE_WINE=1']], 'files': {}}
+        for key, name in (('entry', 'lib/libnvk_wine.dylib'), ('renderer', 'lib/libnvk_renderer.dylib')):
+            self.put(wine/name, name.encode())
+            frontend['files'][name] = pkg.base_tools.digest(wine/name)
+            frontend[key] = {'path': name, 'sha256': frontend['files'][name]}
+        self.put(wine/'FRONTEND-BUILD.json', json.dumps(frontend).encode())
         self.put(self.base / 'Users/Shared/nvfw/nvidia/615.78.08/gsp_tu10x.bin', b'firmware')
         self.put(self.base / 'licenses/base-notice.txt', b'keep this notice')
         for name in pkg.ZINK_FILES:
@@ -197,6 +208,16 @@ class PackageZinkTests(unittest.TestCase):
     def test_tampered_base_is_rejected_without_output(self):
         self.put(self.base / 'VERSION', b'tampered')
         with self.assertRaisesRegex(ValueError, 'SHA256SUMS mismatch'):
+            self.stage()
+        self.assertFalse(self.out.exists())
+
+    def test_full_package_rejects_a_stale_hybrid_wine_frontend(self):
+        record = self.base/pkg.BASE_RUNTIME/'wine/FRONTEND-BUILD.json'
+        data = json.loads(record.read_text())
+        data['source_files']['nvk/native-macos/bridge.mm'] = '0'*64
+        record.write_text(json.dumps(data))
+        pkg.base_tools.write_manifest(self.base)
+        with self.assertRaisesRegex(ValueError, 'Wine frontend source mismatch'):
             self.stage()
         self.assertFalse(self.out.exists())
 

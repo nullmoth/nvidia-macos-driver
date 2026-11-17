@@ -16,6 +16,8 @@ import tarfile
 import tempfile
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "build"))
+from stage_package import validate_wine_frontend
 CRITICAL = (
     "lib/libnvk_wine.dylib", "lib/libnvk_renderer.dylib",
     "bin/nvk-runtime", "dxvk/x64/d3d11.dll", "dxvk/x64/dxgi.dll",
@@ -243,6 +245,12 @@ def build(base, output, vkd3d_archive=None, vkd3d_source=None, frontend=None,
     source = json.loads((base / "nvk-wine-runtime.json").read_text())
     if source["dxvk"]["version"] != "3.1.1+nvk-shared-fallback":
         raise ValueError("Use the repaired DXVK 3.1.1 pair, not the stock release")
+    if frontend:
+        validate_wine_frontend(frontend.resolve(strict=True), "BUILD.json")
+    else:
+        if source.get("frontend_build") != "FRONTEND-BUILD.json":
+            raise ValueError("Rebuild the Wine frontend to retain hybrid GPU support")
+        validate_wine_frontend(base)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".wine-nvk-", dir=output.parent) as temporary:
         root = Path(temporary) / "provider"
