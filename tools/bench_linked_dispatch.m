@@ -2,8 +2,10 @@
 // integer output and timing both AIR-key lookup and command recording.
 // No installed driver files are changed.
 // clang -fobjc-arc -O2 tools/bench_linked_dispatch.m -framework Foundation -framework Metal -framework IOKit -o bench_linked_dispatch
-// bench_linked_dispatch path/to/NVMTLDriver [dispatches=1000] [operations=128] [mode=0]
+// bench_linked_dispatch path/to/NVMTLDriver [dispatches=1000] [operations=128] [mode=0] [rejected-convolution=0]
 // Modes: 0 dispatchThreads, 1 dispatchThreadgroups, 2 indirect threadgroups.
+// rejected-convolution=1 uses MPS's convolution entry name with an unsupported
+// parameter layout. Its original integer shader must still run unchanged.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <IOKit/IOKitLib.h>
@@ -40,7 +42,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     int draws = argc > 2 ? atoi(argv[2]) : 1000;
     unsigned operations = argc > 3 ? (unsigned)atoi(argv[3]) : 128;
     int mode = argc > 4 ? atoi(argv[4]) : 0;
-    if (draws < 1 || draws > 10000 || operations > 512 || mode < 0 || mode > 2) return 2;
+    int rejected = argc > 5 ? atoi(argv[5]) : 0;
+    if (draws < 1 || draws > 10000 || operations > 512 || mode < 0 || mode > 2 || rejected < 0 || rejected > 1) return 2;
     void *handle = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!handle) { fprintf(stderr, "load: %s\n", dlerror()); return 2; }
     io_service_t accel = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"));
@@ -54,6 +57,8 @@ int main(int argc, char **argv) { @autoreleasepool {
         "[[visible]] uint transform(uint x);\n"
         "kernel void linked(device uint *out [[buffer(0)]], uint i [[thread_position_in_grid]]) {\n"
         "out[i] = enabled ? transform(i) : i; }\n";
+    NSString *kernelName = rejected ? @"ndArrayConvolution2D" : @"linked";
+    if (rejected) ks = [ks stringByReplacingOccurrencesOfString:@"void linked(" withString:@"void ndArrayConvolution2D("];
     NSMutableString *vs = [NSMutableString stringWithString:
         @"#include <metal_stdlib>\nusing namespace metal;\n[[visible]] uint transform(uint x) {\n"];
     for (unsigned i = 0; i < operations; i++)
@@ -65,7 +70,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     MTLFunctionConstantValues *fc = [MTLFunctionConstantValues new];
     BOOL enabled = YES;
     [fc setConstantValue:&enabled type:MTLDataTypeBool atIndex:0];
-    id<MTLFunction> kernel = [kl newFunctionWithName:@"linked" constantValues:fc error:&error];
+    id<MTLFunction> kernel = [kl newFunctionWithName:kernelName constantValues:fc error:&error];
     id<MTLFunction> visible = [vl newFunctionWithName:@"transform"];
     if (!kernel || !visible) { fprintf(stderr, "functions: %s\n", error.description.UTF8String); return 2; }
     MTLComputePipelineDescriptor *pd = [MTLComputePipelineDescriptor new];
@@ -114,7 +119,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         }
         if (frame >= 0) times[frame] = elapsed;
     }}
-    printf("PASS mode=%s dispatches=%d operations=%u frames=9 median_record_cpu_ms=%.6f outputs=64/64\n",
-        mode == 0 ? "threads" : mode == 1 ? "threadgroups" : "indirect", draws, operations, median(times, 9));
+    printf("PASS mode=%s kernel=%s dispatches=%d operations=%u frames=9 median_record_cpu_ms=%.6f outputs=64/64\n",
+        mode == 0 ? "threads" : mode == 1 ? "threadgroups" : "indirect", kernelName.UTF8String, draws, operations, median(times, 9));
     return 0;
 }}

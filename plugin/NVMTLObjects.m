@@ -6277,6 +6277,13 @@ static void nvmtl_nvc_report(const char *fmt, ...) {
     (void)fmt;
 #endif
 }
+static inline BOOL nvmtl_nvc_diagnostics_on(void) {
+#if NVMTL_RELEASE
+    return nvmtl_process_env_on();
+#else
+    return YES;
+#endif
+}
 // Each distinct (reason, dispatch grid) is logged once, up to 96: a flat first-16 cap was spent entirely on Face
 // Tracking, so the Super Resolution layers' reasons (the 1.5 s 9216x32 dispatch) never reached the log.
 static void nvmtl_nvc_skip_log(const char *why, MTLSize grid) {
@@ -6292,7 +6299,9 @@ static void nvmtl_nvc_skip_log(const char *why, MTLSize grid) {
                      (unsigned long)grid.width, (unsigned long)grid.height, (unsigned long)grid.depth, k);
     if (fresh) nvmtl_nvc_report("skip %s | grid %lux%lux%lu", why, (unsigned long)grid.width, (unsigned long)grid.height, (unsigned long)grid.depth);
 }
-#define NVC_SKIP(why) do { nvmtl_nvc_skip_log(why, grid); return 0; } while (0)
+// A rejected layer still runs MPS on every dispatch. Do not format its reason,
+// allocate an NSString or lock the diagnostic set when release logging is off.
+#define NVC_SKIP(why) do { if (nvmtl_nvc_diagnostics_on()) nvmtl_nvc_skip_log(why, grid); return 0; } while (0)
 static BOOL nvmtl_nvconv_ready(id<MTLDevice> dev) {
     static int on = -1;
     if (on >= 0) return on;
@@ -6409,10 +6418,13 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     if (e->_nvcIn || !e->_ps || !e->_ps->_function || ![e->_ps->_function->_fname isEqualToString:@"ndArrayConvolution2D"]) return 0;
     const uint32_t nar = e->_nvcKPLen == 368 ? 3 : e->_nvcKPLen == 448 ? 4 : e->_nvcKPLen == 528 ? 5 : 0;
     if (!nar || e->_nvcCPLen != 272) {
-        char why[200]; const uint32_t *w = (const uint32_t *)e->_nvcKP;
-        snprintf(why, sizeof why, "parameter blocks %u / %u bytes (first array sizes %u,%u,%u,%u, second %u,%u,%u,%u)", e->_nvcKPLen, e->_nvcCPLen,
-                 w[4], w[5], w[6], w[7], w[24], w[25], w[26], w[27]);
-        NVC_SKIP(why);
+        if (nvmtl_nvc_diagnostics_on()) {
+            char why[200]; const uint32_t *w = (const uint32_t *)e->_nvcKP;
+            snprintf(why, sizeof why, "parameter blocks %u / %u bytes (first array sizes %u,%u,%u,%u, second %u,%u,%u,%u)", e->_nvcKPLen, e->_nvcCPLen,
+                     w[4], w[5], w[6], w[7], w[24], w[25], w[26], w[27]);
+            nvmtl_nvc_skip_log(why, grid);
+        }
+        return 0;
     }
     id<MTLDevice> dev = [e->_cb device];
     if (!nvmtl_nvconv_ready(dev)) return 0;
@@ -6438,18 +6450,24 @@ static int nvmtl_nvconv_try(NVMTLComputeCommandEncoder *e, MTLSize grid, MTLSize
     const uint32_t shuf = (ow > dw && dw && ow % dw == 0) ? ow / dw : 1;
     if (oh != dh * shuf || ow != dw * shuf || (uint64_t)oc * shuf * shuf != cout || kp[ob + 7] != batch || shuf > 255 ||
         (shuf > 1 && !nvmtl_nvconv_shuffle_enabled())) {
-        char why[200]; snprintf(why, sizeof why, "output sizes %u,%u,%u,%u vs cout %u, %ux%u, batch %u (in %ux%ux%u k%ux%u, nar %u)",
-                                kp[ob + 4], kp[ob + 5], kp[ob + 6], kp[ob + 7], cout, dw, dh, batch, sw, sh, cin, kw, kh, nar);
         static _Atomic unsigned shufTaken;
         if (nvmtl_nvconv_dump_offsets(e, grid, tg, nar, dev, "shuf", &shufTaken)) return 1;
-        NVC_SKIP(why); }
+        if (nvmtl_nvc_diagnostics_on()) {
+            char why[200]; snprintf(why, sizeof why, "output sizes %u,%u,%u,%u vs cout %u, %ux%u, batch %u (in %ux%ux%u k%ux%u, nar %u)",
+                                    kp[ob + 4], kp[ob + 5], kp[ob + 6], kp[ob + 7], cout, dw, dh, batch, sw, sh, cin, kw, kh, nar);
+            nvmtl_nvc_skip_log(why, grid);
+        }
+        return 0; }
     // Strided output (a concat branch) is fine as long as no two outputs alias: channels innermost and dense, each wider
     // dimension at least as far apart as the one inside it spans. The dense layout is the case where all are equal.
     if (kp[ob + 8] != 1 || (ow > 1 && kp[ob + 9] < oc) || (oh > 1 && kp[ob + 10] < (uint64_t)(ow > 1 ? kp[ob + 9] : oc) * ow) ||
         (batch > 1 && kp[ob + 11] < (uint64_t)(oh > 1 ? kp[ob + 10] : (ow > 1 ? kp[ob + 9] : oc)) * oh)) {
-        char why[160]; snprintf(why, sizeof why, "output strides %u,%u,%u,%u for cout %u x %u x %u (sizes %u,%u,%u,%u)",
-                                kp[ob + 8], kp[ob + 9], kp[ob + 10], kp[ob + 11], cout, dw, dh, kp[ob + 4], kp[ob + 5], kp[ob + 6], kp[ob + 7]);
-        NVC_SKIP(why); }
+        if (nvmtl_nvc_diagnostics_on()) {
+            char why[160]; snprintf(why, sizeof why, "output strides %u,%u,%u,%u for cout %u x %u x %u (sizes %u,%u,%u,%u)",
+                                    kp[ob + 8], kp[ob + 9], kp[ob + 10], kp[ob + 11], cout, dw, dh, kp[ob + 4], kp[ob + 5], kp[ob + 6], kp[ob + 7]);
+            nvmtl_nvc_skip_log(why, grid);
+        }
+        return 0; }
     if (nar >= 4 && (kp[44] != cout || kp[48] != 1)) NVC_SKIP("bias descriptor");
     // the residual is only read, through its own strides (nvconv.metal), so any layout is fine; only its span must fit
     if (nar == 5 && (kp[64] != cout || kp[65] != dw || kp[66] != dh || kp[67] != batch))

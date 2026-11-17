@@ -1,5 +1,21 @@
 # Retained fork changes for upstream merges
 
+## Rejected convolution diagnostics, 2026-11-17
+
+Keep rejected-convolution diagnostic formatting, string allocation and locking
+out of ordinary release dispatches. `NVMTL_PROCESS_ENV=1` retains those logs,
+and development builds retain their existing diagnostics. Rejection still
+runs the original shader; kernel selection, output verification and timing
+gates are unchanged.
+
+On RTX 2060 SUPER / Tahoe 26.7.1 / 8 GiB BAR1, 2,000 rejected linked dispatches
+drop from about 6.0 ms to 2.3 ms of recording CPU with exact integer output.
+Ordinary dispatches and opted-in logging retain their preceding timings.
+Binding, descriptor reuse, partial IOSurface, render-format and sampler GPU
+checks pass. This targeted CPU saving is not an application FPS claim.
+The combined hash-reuse and diagnostic-guard build scores
+[73,543](https://browser.geekbench.com/v7/gpu/409935) in a clean Geekbench run.
+
 ## Linked compute shader hash reuse, 2026-11-17
 
 Mark copied linker, tile-lowering and mesh-lowering output as immutable AIR,
