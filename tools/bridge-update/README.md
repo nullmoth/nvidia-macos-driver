@@ -1,5 +1,10 @@
 # Wine bridge update for v3.0.1-nvk
 
+The full driver includes this repair starting with **v3.0.2-nvk**. Use the
+[current driver release](https://github.com/HighDelay/nvidia-macos-driver-nvk/releases/latest).
+The instructions below describe the retired v3.0.1-only supplement for users
+who already have a copy.
+
 Install `nvidia-nvk-bridge-update-3.0.1-nvk.tar.gz` for an **iGPU + NVIDIA dGPU**
 setup if you play games through **Wine, CrossOver or YAAGL**. It corrects Wine's
 initial window binding when the system-default Metal device is Intel or AMD.

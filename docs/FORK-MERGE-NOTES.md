@@ -40,11 +40,12 @@ AMD hybrid systems and muxless laptops remain untested.
 The v3.0.1-only builder, updater implementation and transaction tests were
 removed from `main` after that confirmation. Their original source remains in
 [commit 0805a9d](https://github.com/HighDelay/nvidia-macos-driver-nvk/commit/0805a9d).
-Retain the production bridge fix and `surface_device_test.mm`. Keep all published
-v3.0.1 archives, including the complete bridge updater and full driver package,
-and the linked [setup/rollback guide](../tools/bridge-update/README.md).
-Do not make this a recurring separate release asset. Future full driver packages
-include the repaired frontend normally.
+Retain the production bridge fix and `surface_device_test.mm`, and keep local
+v3.0.1 recovery archives and the linked
+[setup/rollback guide](../tools/bridge-update/README.md). The user requested
+retiring the v3.0.1 GitHub release after publishing its v3.0.2 replacement.
+Do not make this a recurring separate release asset. Full driver packages from
+v3.0.2 include the repaired frontend normally.
 
 ## Small-BAR video-encoder headroom, 2026-11-16
 
