@@ -1,0 +1,14 @@
+--- a/kapi/src/nvkms-kapi.c
++++ b/kapi/src/nvkms-kapi.c
+@@ -2528,2 +2528,11 @@ static void InitNvKmsModeValidationParams(
+     params->overrides = NVKMS_MODE_VALIDATION_NO_RRX1K_CHECK;
++#ifdef NV_DARWIN
++    /* Honor the macOS opt-in override for maximum pixel-clock validation. */
++    extern NvBool nvkms_xnu_skip_max_pclk(void);
++
++    if (nvkms_xnu_skip_max_pclk())
++    {
++        params->overrides |= NVKMS_MODE_VALIDATION_NO_MAX_PCLK_CHECK;
++    }
++#endif
+ }
