@@ -328,7 +328,9 @@ def build(base, output, vkd3d_archive=None, vkd3d_source=None, frontend=None,
                                 "DXVK_HUD": "devinfo,fps,frametimes,scale=1.25",
                                 "WINEDLLOVERRIDES": "d3d11,dxgi=n"},
             "validation": {"inherited_binaries": ("DXVK/D3D12/NGX unchanged; refreshed Vulkan frontend/backend recorded in FRONTEND-BUILD.json and BUILD.json"
-                                                   if renderer_update else "Vulkan and DXVK binaries copied byte-for-byte from source_runtime_id"),
+                                                   if renderer_update else
+                                                   "Renderer/DXVK/D3D12/NGX unchanged; refreshed Vulkan frontend recorded in FRONTEND-BUILD.json"
+                                                   if frontend else "Vulkan and DXVK binaries copied byte-for-byte from source_runtime_id"),
                            "helper": "Rebuilt; run the setup/rollback tests on this output",
                            "external_wine_crossover": "Not qualified by packaging"},
         }
