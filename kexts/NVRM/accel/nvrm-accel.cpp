@@ -1874,6 +1874,8 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_hit);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_miss);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_async);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_flips);
     { extern struct sysctl_oid sysctl__debug_nvaccel_svdiag; sysctl_register_oid(&sysctl__debug_nvaccel_svdiag); }
+    { extern struct sysctl_oid sysctl__debug_nvaccel_pageoff_pooled, sysctl__debug_nvaccel_pageoff_pool_chunks;
+      sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_pooled); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_pool_chunks); }
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu);    sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_on);
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_marks); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_waits);
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_timeouts); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_wait_max_us);
@@ -2228,6 +2230,52 @@ static IOBufferMemoryDescriptor *nvSVStage(unsigned long long len)
     return b;
 }
 
+// Surfaces larger than the single staging buffer (64 MB) used to take the per-page path. Their pages are scattered, so
+// the copy engine got one 4 KB copy per page: a 6000x6000 BGRA surface was 35,157 submissions, 106 ms for 144 MB
+// (1.35 GB/s), and a CPU read of a GPU-written Core Image result cost 117 ms where a blit costs 17. They now stage
+// through a pool of 4 MB physically contiguous chunks: NVRM sees one run per chunk and coalesces it (36 copies for
+// that surface), then the CPU copies each chunk into the surface pages. A 4 MB contiguous chunk is far easier to get
+// than one contiguous buffer the size of the surface. All pool state is guarded by the stage lock.
+#define NV_SV_CHUNK      (4ull << 20)
+#define NV_SV_POOL_MAX   128u                        /* 512 MB: the largest surface staged through the pool */
+#define NV_SV_POOL_IDLE  (10ull * 1000000000ull)     /* chunks are freed once no large page-off used them for 10 s */
+static IOBufferMemoryDescriptor *gNVSVPool[NV_SV_POOL_MAX];
+static unsigned gNVSVPoolN, gNVSVPoolNoBuf, gNVSVPoolBackoff;
+static uint64_t gNVSVPoolLast;
+static SInt64 gCntPageoffPooled, gCntPoolChunks;
+NVACCEL_CNT(nvaccel_pageoff_pooled, gCntPageoffPooled, "page-offs staged through the 4 MB chunk pool");
+NVACCEL_CNT(nvaccel_pageoff_pool_chunks, gCntPoolChunks, "4 MB chunks the page-off pool holds now");
+static void nvSVPoolFree(void)
+{
+    while (gNVSVPoolN) { IOBufferMemoryDescriptor *b = gNVSVPool[--gNVSVPoolN]; gNVSVPool[gNVSVPoolN] = nullptr; b->complete(); b->release(); }
+    gCntPoolChunks = 0;
+}
+static void nvSVPoolTrimIdle(void)
+{
+    if (!gNVSVPoolN) return;
+    uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - gNVSVPoolLast, &ns);
+    if (ns > NV_SV_POOL_IDLE) nvSVPoolFree();
+}
+static bool nvSVPoolGrow(unsigned need)
+{
+    if (need > NV_SV_POOL_MAX) return false;
+    if (gNVSVPoolN < need && gNVSVPoolBackoff) { gNVSVPoolBackoff--; return false; }
+    while (gNVSVPoolN < need) {
+        IOBufferMemoryDescriptor *b = IOBufferMemoryDescriptor::withOptions(kIODirectionInOut | kIOMemoryPhysicallyContiguous,
+                                                                          (vm_size_t)NV_SV_CHUNK, PAGE_SIZE);
+        if (b && b->prepare() != kIOReturnSuccess) { b->release(); b = nullptr; }
+        if (!b) {
+            gNVSVPoolNoBuf++; gNVSVPoolBackoff = 1024;
+            ALOG("surfvram pageoff: chunk %u of %u (4 MB, physically contiguous) not available (miss %u) -- per-page copies for the next 1024 large surfaces",
+                 gNVSVPoolN, need, gNVSVPoolNoBuf);
+            return false;
+        }
+        gNVSVPool[gNVSVPoolN++] = b;
+    }
+    gCntPoolChunks = gNVSVPoolN;
+    return true;
+}
+
 // The family's own page-off. From 10.12 on it forwards to the short form, whose base body is empty; before 10.12 the
 // family has no body at all, so there is nothing to call.
 #if defined(NM_ERA) && NM_ERA < 1012
@@ -2291,10 +2339,53 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
     if (len > vm->fBytes) len = vm->fBytes;
     unsigned long long pages = (len + 4095) >> 12;
     bool ok = false; unsigned st = NVRM_SS_OFF; unsigned long long usec = 0, cpuUs = 0;
-    bool staged = false;
+    bool staged = false, pooled = false;
     if (IOLock *lk = nvSVStageLock()) {
         IOLockLock(lk);
+        nvSVPoolTrimIdle();
         IOBufferMemoryDescriptor *sb = nvSVStage(len);
+        if (!sb && len > (64ull << 20) && pages) {
+            const unsigned need = (unsigned)((len + NV_SV_CHUNK - 1) / NV_SV_CHUNK);
+            const unsigned long long per = NV_SV_CHUNK / 4096;
+            unsigned long long *ppa = nvSVPoolGrow(need) ? (unsigned long long *)IOMalloc(pages * sizeof *ppa) : nullptr;
+            bool runs = ppa != nullptr;
+            for (unsigned c = 0; runs && c < need; c++) {
+                IOByteCount cl = 0;
+                const addr64_t cp = gNVSVPool[c]->getPhysicalSegment(0, &cl, kIOMemoryMapperNone);
+                if (!cp || cl < NV_SV_CHUNK) { runs = false; break; }
+                for (unsigned long long k = 0; k < per && c * per + k < pages; k++) ppa[c * per + k] = cp + k * 4096;
+            }
+            if (runs) {
+                struct NVRMSurfPageoff q; nvSVZero(&q, sizeof q);
+                q.version = NVRM_SS_RM_VERSION; q.status = NVRM_SS_OFF; q.kapiDevice = h.kapiDevice; q.kapiMemory = vm->fRmHandle;
+                q.pages = ppa; q.pageCount = pages; q.length = len;
+                IOService *nvrm = nvAccelNVRM(fAccel);
+                const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVRM_SS_FN_PAGEOFF);
+                if (nvrm && sym) nvrm->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr);
+                if (sym) sym->release();
+                st = q.status; usec = q.usec;
+                if (st == 0) {
+                    const uint64_t t0 = mach_absolute_time();
+                    ok = true;
+                    for (unsigned c = 0; ok && c < need; c++) {
+                        const unsigned long long off = (unsigned long long)c * NV_SV_CHUNK;
+                        const IOByteCount n = (IOByteCount)((len - off) < NV_SV_CHUNK ? (len - off) : NV_SV_CHUNK);
+                        ok = md->writeBytes((IOByteCount)off, gNVSVPool[c]->getBytesNoCopy(), n) == n;
+                    }
+                    cpuUs = (mach_absolute_time() - t0) / 1000;
+                    if (!ok) st = NVRM_SS_TOO_SMALL;
+                    else OSAddAtomic64(1, &gCntPageoffPooled);
+                } else if (st == 0x65u) {
+                    // the copy engine may still write these chunks: never free or reuse them (as the single buffer)
+                    ALOG("surfvram pageoff: CE copy TIMED OUT into the chunk pool -- abandoning %u chunks", gNVSVPoolN);
+                    for (unsigned c = 0; c < gNVSVPoolN; c++) gNVSVPool[c] = nullptr;
+                    gNVSVPoolN = 0; gCntPoolChunks = 0;
+                }
+                staged = pooled = true;
+                gNVSVPoolLast = mach_absolute_time();
+            }
+            if (ppa) IOFree(ppa, pages * sizeof *ppa);
+        }
         IOByteCount sl = 0;
         addr64_t sp = sb ? sb->getPhysicalSegment(0, &sl, kIOMemoryMapperNone) : 0;
         unsigned long long *spa = (sp && sl >= len && pages) ? (unsigned long long *)IOMalloc(pages * sizeof *spa) : nullptr;
@@ -2357,7 +2448,7 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
     if (out) *out = ok;
     if (gNVSVPageoff + gNVSVPageoffFail <= 8 || ((gNVSVPageoff + gNVSVPageoffFail) & 1023) == 0)
         ALOG("surfvram pageoff: res %p %llu B on the copy engine -> %#x in %llu us%s + cpu %llu us (ok %u, failed %u, staged %u)",
-             this, len, st, usec, staged ? " (staged)" : " (per page)", cpuUs, gNVSVPageoff, gNVSVPageoffFail, gNVSVStaged);
+             this, len, st, usec, pooled ? " (pooled)" : staged ? " (staged)" : " (per page)", cpuUs, gNVSVPageoff, gNVSVPageoffFail, gNVSVStaged);
 }
 
 static IOSurface *gIopFlipFront[kNvMaxFB], *gIopFlipPrev[kNvMaxFB];
