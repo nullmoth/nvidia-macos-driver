@@ -51,6 +51,21 @@ Read two existing ones before writing yours, for example `tools/test_stream_unca
 part is. `build/build_release_inputs.sh` builds everything a release package is made from; its header lists the tools
 and source trees it expects and the environment variables that point at them.
 
+Build the AIR reader and optimizer from the LLVM **21.1.8** source release with
+`build/build_air_runtime.sh <llvm source> <out> <zstd include dir> <libzstd.1.dylib>` (CMake and Ninja required).
+Extract the matching `cmake` and `third-party` archives beside the LLVM source directory, named `cmake/` and
+`third-party/`. Use the zstd headers matching the package's library. Pass `--air-runtime <out>` to
+`package/finish_package.sh` to stage this runtime and its licence. The build restricts LLVM's dynamic exports to its C
+interface; a general-purpose LLVM dylib can share incompatible weak C++ definitions with Apple's GPUCompiler LLVM.
+The package gate requires the runtime and all LLVM C entry points used by the plugin and decoder. It checks that
+internal symbols stay private through dynamic exports and weak bindings, including runtimes from a base package.
+
+Run `AIR_RUNTIME=<out>/air-runtime/libLLVM.dylib python3 tools/test_air_runtime.py` to exercise both LLVM loading
+orders. `AIR_RUNTIME_BASELINE=<old libLLVM.dylib>` also enables the original crash as a negative control. For isolated
+OpenGL application tests, set `ISOLATED_PRELOAD_LIBRARY` to the system GPUCompiler `libLLVM.dylib` when using
+`tools/isolate_metal_device.m`, and verify the actual dyld image order. Loading the private driver first can conceal
+this conflict; startup and rendering must also pass with the system LLVM already loaded.
+
 Rebuild both accelerators whenever `nvrm_vram_abi.h` or `nvrm_gpuva_abi.h` changes: an accelerator built against an
 older ABI loads, but the framebuffer driver refuses all its memory requests and the desktop stays black.
 

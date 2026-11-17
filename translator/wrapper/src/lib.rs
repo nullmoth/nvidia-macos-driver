@@ -82,9 +82,16 @@ pub extern "C" fn nvmtl_translate_set_kernel_stage_in(words: *const u32, count: 
     if nl as usize > out.layouts.len() { return 0; }
     for i in 0..nl as usize {
         let Some(&[buffer_index, stride, step, rate]) = take(4) else { return 0 };
-        let step = match step { 0 => StageInStep::Constant, 5 => StageInStep::GridX, 6 => StageInStep::GridY, _ => return 0 };
+        let step = match step { 0 => StageInStep::Constant, 5 => StageInStep::GridX, 6 => StageInStep::GridY, 7 => StageInStep::GridXIndexed, 8 => StageInStep::GridYIndexed, _ => return 0 };
         out.layouts[i] = Some(StageInLayout { buffer_index, stride, step, rate: rate.max(1) });
     }
+    if let Some(tail) = w.get(at..) {
+        if !tail.is_empty() {
+            if let &[buffer, ty] = tail { if buffer >= 31 || ty > 1 { return 0; } out.index_buffer=Some((buffer,ty)); }
+            else { return 0; }
+        }
+    }
+    if out.layouts.iter().flatten().any(|l| matches!(l.step,StageInStep::GridXIndexed|StageInStep::GridYIndexed)) && out.index_buffer.is_none() { return 0; }
     STAGE_IN.with(|c| c.set(out));
     1
 }
@@ -133,13 +140,31 @@ fn translate_with_pointer_retry(
 ) -> Result<Vec<u8>, String> {
     match translate(ll) {
         Ok(v) => Ok(v),
-        // A future loop-edge pointer load can refer to the same immutable local
-        // object field as an earlier load. Before scalar replacement its source
-        // is not yet emitted, so pointer-phi construction cannot recover that
-        // identity. Inline the helpers and forward only fields whose sole store
-        // dominates the reads and whose complete address-use graph is known.
+        // Blender 4.1 exposed a general interprocedural pointer-provenance gap: an entry point can
+        // store one or more resource pointers in local object fields, then a helper can read those
+        // fields after the emitter's per-function provenance has been cleared. Ideally a structural
+        // pre-emission pass would prove that such fields are immutable and non-escaping, inline only
+        // the relevant helpers, and forward their pointer values before emission. That would also
+        // cover type-valid silent miscompilations, but it would change modules that currently
+        // translate successfully and needs substantially broader alias and control-flow coverage.
+        // Keep this fix deliberately small: invoke the existing conservative whole-module recovery
+        // only for the hard type-contract failure observed here, leaving every successful first
+        // translation unchanged. The recovery still forwards only fields whose sole store dominates
+        // all reads and whose complete address-use graph is known.
         Err(e) if e.contains("pointer merge storage mismatch")
-            || (e.contains("pointer phi") && e.contains("differing structural sources")) =>
+            || (e.contains("pointer phi") && e.contains("differing structural sources"))
+            // A recovered record pointer must index an array inside the buffer block. Offsetting
+            // the block itself is type-valid SPIR-V but undefined for nonzero object indices.
+            || e.contains("owned pointer arithmetic on a buffer block requires a zero element")
+            // A helper's aggregate copy can also reach LLVM padding fields absent from AIR's
+            // reflected struct. Forwarding the original typed pointer retains that full layout.
+            || (e.contains("owned InBoundsAccessChain violates its access-chain contract")
+                && e.contains("selects member") && e.contains("TypeStruct"))
+            || (e.contains("owned Load violates its pointer-pointee and value-type contract")
+                && e.contains("TypePointer Function")
+                && e.contains("TypeInt 64")
+                && e.contains("but the result type is")
+                && e.contains("TypePointer UniformConstant")) =>
         {
             let Some(inlined) = metal2vulkan::inline_and_forward_object_fields(ll) else { return Err(e) };
             if let Some(path) = std::env::var_os("NVMTL_DUMP_RETRY_LL") {
@@ -156,7 +181,12 @@ fn translate_with_pointer_retry(
         // A sampler in an argument buffer that also holds buffer pointers ("is not a sampler"), or in an array of samplers
         // there ("exact sampler state was not recovered"), fails the same way with no helper to inline: it gets the retry
         // on its text as written, its argument-buffer samplers read from the sampler heap.
-        Err(e) if e.contains("sampler operand is a pointer") || e.contains("pointer placeholder")
+        // A local resource phi with null/undef or loop-carried arms must also
+        // forward its object fields before emission, rather than reading zeros.
+        // Start with ordinary samplers; use the existing sampler-heap retry only
+        // if the inlined module still requires it.
+        Err(e) if e.contains("local resource pointer phi requires field forwarding")
+            || e.contains("sampler operand is a pointer") || e.contains("pointer placeholder")
             || e.contains("missing pointer storage") || e.contains("sampler operand is not a sampler")
             || e.contains("runtime sampler specialization cannot recover an exact state after pointer selection")
             // ANGLE's user main left as a call takes the uniform-buffer pointer as an argument, which the emitter types
@@ -175,7 +205,8 @@ fn translate_with_pointer_retry(
                       else { "with argument-buffer samplers from the sampler heap" };
             // The call-crossing failures hold no argument-buffer sampler; in the sampler-heap mode their inlined
             // uniform-buffer read came out as a null constant (#419), so the ordinary translation goes first for them.
-            let call_crossing = e.contains("owned OpFunctionCall argument type disagrees")
+            let call_crossing = e.contains("local resource pointer phi requires field forwarding")
+                || e.contains("owned OpFunctionCall argument type disagrees")
                 || e.contains("owned IAdd operands do not match") || e.contains("references undefined id");
             if call_crossing {
                 if let Some(text) = inlined.as_deref() {
@@ -1056,6 +1087,37 @@ mod stage_in_tests {
     use super::*;
 
     #[test]
+    fn indexed_stage_input_retains_index_width_and_step_axis() {
+        for step in [7, 8] {
+            for index_type in [0, 1] {
+                let words = [1, 0, 1, 4, 29, 1, 1, 16, step, 1, 2, index_type];
+                assert_eq!(nvmtl_translate_set_kernel_stage_in(words.as_ptr(), words.len() as u32), 1);
+                let options = apply_tg(Default::default());
+                assert_eq!(options.kernel_stage_in.index_buffer, Some((2, index_type)));
+                let (_, layout) = options.kernel_stage_in.attribute(0).unwrap();
+                let expected = if step == 7 {
+                    metal2vulkan::passes::StageInStep::GridXIndexed
+                } else {
+                    metal2vulkan::passes::StageInStep::GridYIndexed
+                };
+                assert_eq!(layout.step, expected);
+                nvmtl_translate_set_kernel_stage_in(std::ptr::null(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_stage_input_index_descriptors_are_refused() {
+        for tail in [&[2u32][..], &[31, 0], &[2, 2], &[2, 1, 0]] {
+            nvmtl_translate_set_kernel_stage_in(std::ptr::null(), 0);
+            let mut words = vec![1, 0, 1, 4, 29, 1, 1, 16, 7, 1];
+            words.extend_from_slice(tail);
+            assert_eq!(nvmtl_translate_set_kernel_stage_in(words.as_ptr(), words.len() as u32), 0);
+            assert!(apply_tg(Default::default()).kernel_stage_in.is_empty());
+        }
+    }
+
+    #[test]
     fn a_well_formed_stage_input_layout_is_accepted_and_applied_to_the_next_translation() {
         // one Float3 attribute at offset 0 of buffer 1, which steps by thread x with a 12-byte stride
         let words = [1u32, 0, 1, 0, 30, 1, 1, 12, 5, 1];
@@ -1225,5 +1287,171 @@ define internal void @_GLOBAL__sub_I_fc.metal() #3 section "air.static_init" {
         let (on, off) = (translate(&text, Some(1)).expect("boost = true"), translate(&text, Some(0)).expect("boost = false"));
         for m in [&on, &off] { spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2)).validate(m, None).expect("valid"); }
         assert_ne!(on, off, "the two constant values must give two different kernels");
+    }
+}
+
+#[cfg(test)]
+mod blender_function_constant_tests {
+    use super::*;
+    use spirv_tools::val::Validator;
+
+    const VERTEX_POINTER_TABLE: &str =
+        include_str!("../tests/fixtures/blender_vertex_pointer_table.ll");
+    const UNIFORM_COLOR_FIELD: &str =
+        include_str!("../tests/fixtures/blender_uniform_color_field.ll");
+    const OBJECT_MATRIX_ARRAY: &str =
+        include_str!("../tests/fixtures/blender_object_matrix_array.ll");
+    const NESTED_UNIFORM_PADDING: &str =
+        include_str!("../tests/fixtures/blender_nested_uniform_padding.ll");
+
+    fn validate(spv: &[u8], message: &str) {
+        let words = spv
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2))
+            .validate(&words, None)
+            .unwrap_or_else(|error| panic!("{message}: {error}"));
+    }
+
+    #[test]
+    fn a_helper_can_read_blenders_local_vertex_buffer_pointer_table_after_specialization() {
+        let value = 7u32.to_le_bytes().to_vec();
+        let specialized = metal2vulkan::specialize_air_function_constants(
+            VERTEX_POINTER_TABLE,
+            &[(0, value.clone())],
+        )
+        .expect("specialize the buffer-base function constant");
+        let original_error = translate_one_as_written(&specialized, Stage::Vertex)
+            .expect_err("the as-written module must exercise the cross-function pointer-table refusal");
+        assert!(
+            original_error.contains(
+                "owned Load violates its pointer-pointee and value-type contract"
+            ) && original_error.contains("TypePointer Function")
+                && original_error.contains("TypeInt 64")
+                && original_error.contains("TypePointer UniformConstant"),
+            "unexpected direct translation error: {original_error}"
+        );
+
+        let ll = std::ffi::CString::new(VERTEX_POINTER_TABLE).unwrap();
+        let stage = std::ffi::CString::new("vertex").unwrap();
+        let indices = [0u32];
+        let sizes = [value.len() as u32];
+        let payloads = [value.as_ptr()];
+        let (mut out, mut len) = (std::ptr::null_mut(), 0usize);
+        let mut error = [0i8; 2048];
+        let result = nvmtl_translate_fc(
+            ll.as_ptr(),
+            stage.as_ptr(),
+            indices.as_ptr(),
+            sizes.as_ptr(),
+            payloads.as_ptr(),
+            1,
+            &mut out,
+            &mut len,
+            error.as_mut_ptr(),
+            error.len(),
+        );
+        assert_eq!(
+            result,
+            0,
+            "{}",
+            unsafe { CStr::from_ptr(error.as_ptr()) }.to_string_lossy()
+        );
+        let spv = unsafe { std::slice::from_raw_parts(out, len) };
+        validate(spv, "the retried Blender vertex module must validate");
+        nvmtl_translate_free(out, len);
+    }
+
+    #[test]
+    fn a_helper_can_read_blenders_float4_uniform_after_the_buffer_pointer_is_stored() {
+        let direct = translate_one_as_written(UNIFORM_COLOR_FIELD, Stage::Fragment)
+            .expect("buffer layout inference must preserve the uniform's struct member offsets");
+        validate(&direct, "the Blender uniform module must validate directly");
+
+        let spv = translate_one(UNIFORM_COLOR_FIELD, Stage::Fragment)
+            .expect("translate the Blender uniform module through the wrapper");
+        validate(&spv, "the Blender fragment module must validate");
+    }
+
+    #[test]
+    fn a_helper_indexes_object_records_inside_a_buffer_instead_of_offsetting_its_block() {
+        let direct = translate_one_as_written(OBJECT_MATRIX_ARRAY, Stage::Vertex)
+            .expect("late record accesses must construct a runtime array without inlining helpers");
+        let spv = translate_one(OBJECT_MATRIX_ARRAY, Stage::Vertex)
+            .expect("the wrapper must retain the repaired record layout");
+        assert_eq!(spv, direct);
+        validate(&spv, "the object matrix array must validate");
+        use rspirv::binary::Disassemble;
+        let module = rspirv::dr::load_bytes(&spv).unwrap();
+        let asm = module.disassemble();
+        assert!(asm.contains("OpTypeRuntimeArray"), "{asm}");
+        assert!(asm.contains("ArrayStride 128"), "{asm}");
+        assert!(!asm.contains("OpPtrAccessChain"), "{asm}");
+    }
+
+    #[test]
+    fn a_nullable_local_resource_phi_preserves_its_field_instead_of_reading_zero() {
+        for source in [
+            include_str!("../tests/fixtures/local_resource_phi.ll"),
+            include_str!("../tests/fixtures/loop_resource_phi.ll"),
+        ] {
+            if source.contains("%active =") {
+                for direct in [
+                    translate_one_as_written(source, Stage::Kernel),
+                    metal2vulkan::with_argument_buffer_samplers(|| {
+                        translate_one_as_written(source, Stage::Kernel)
+                    }),
+                ] {
+                    assert!(direct.unwrap_err().contains("local resource pointer phi requires field forwarding"));
+                }
+            }
+            let spv = translate_one(source, Stage::Kernel).expect("forward the immutable resource field");
+            validate(&spv, "the recovered resource read must validate");
+            use rspirv::dr::Operand;
+            use rspirv::spirv::{Op, StorageClass};
+            let module = rspirv::dr::load_bytes(&spv).unwrap();
+            let definitions: std::collections::HashMap<_, _> = module.types_global_values.iter()
+                .chain(module.functions.iter().flat_map(|f| f.blocks.iter())
+                    .flat_map(|b| b.instructions.iter()))
+                .filter_map(|i| Some((i.result_id?, i))).collect();
+            let buffer_reads = definitions.values().filter(|i| {
+                if i.class.opcode != Op::Load { return false; }
+                let Some(Operand::IdRef(ptr)) = i.operands.first() else { return false; };
+                let Some(ty) = definitions.get(ptr).and_then(|p| p.result_type)
+                    .and_then(|t| definitions.get(&t)) else { return false; };
+                matches!(ty.operands.first(), Some(Operand::StorageClass(StorageClass::StorageBuffer)))
+            }).count();
+            assert!(buffer_reads > 0, "the input buffer must actually be read");
+        }
+    }
+
+    #[test]
+    fn object_info_index_survives_opaque_pointer_recovery() {
+        let source = include_str!("../tests/fixtures/object_info_index.ll");
+        let spv = translate_one(source, Stage::Vertex).unwrap();
+        validate(&spv, "dynamic ObjectInfos access must validate");
+        use rspirv::binary::Disassemble;
+        let asm = rspirv::dr::load_bytes(&spv).unwrap().disassemble();
+        assert!(asm.contains("ArrayStride 64"), "{asm}");
+        assert!(asm.lines().any(|l| l.contains("OpMemberDecorate") && l.ends_with("2 Offset 48")), "{asm}");
+        let index = asm.lines().find(|l| l.contains("OpUConvert")).unwrap().split_whitespace().next().unwrap();
+        let buffer_ptrs: Vec<_> = asm.lines().filter(|l| l.contains("OpTypePointer StorageBuffer")).map(|l| l.split_whitespace().next().unwrap()).collect();
+        assert!(asm.lines().any(|l| l.contains("OpInBoundsAccessChain") && l.split_whitespace().nth(3).is_some_and(|ty| buffer_ptrs.contains(&ty)) && l.split_whitespace().skip(5).any(|word| word == index)), "dynamic index was lost: {asm}");
+    }
+
+    #[test]
+    fn a_helper_can_copy_nested_uniform_padding_missing_from_reflection() {
+        let error = translate_one_as_written(NESTED_UNIFORM_PADDING, Stage::Fragment)
+            .expect_err("the reflected nested struct omits the LLVM padding member");
+        assert!(error.contains("owned InBoundsAccessChain violates its access-chain contract")
+            && error.contains("selects member 2") && error.contains("TypeStruct"), "{error}");
+        let spv = translate_one(NESTED_UNIFORM_PADDING, Stage::Fragment)
+            .expect("forwarding must preserve the LLVM struct including its padding");
+        validate(&spv, "the nested uniform copy must validate");
+        use rspirv::binary::Disassemble;
+        let asm = rspirv::dr::load_bytes(&spv).unwrap().disassemble();
+        assert!(asm.lines().any(|line| line.contains("OpMemberDecorate") && line.ends_with("1 Offset 16")), "{asm}");
+        assert!(asm.lines().any(|line| line.contains("OpMemberDecorate") && line.ends_with("2 Offset 12")), "{asm}");
     }
 }

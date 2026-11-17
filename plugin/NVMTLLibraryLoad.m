@@ -709,6 +709,7 @@ static char *(*nvLLVMPrintModuleToString)(void *);
 static void (*nvLLVMDisposeModule)(void *);
 static void (*nvLLVMDisposeMessage)(char *);
 static char *(*nvLLVMGetDiagInfoDescription)(void *);
+static const char *(*nvLLVMGetValueName2)(void *, size_t *);
 static void *(*nvLLVMRunPasses)(void *, const char *, void *, void *);
 static void *(*nvLLVMCreatePassBuilderOptions)(void);
 static void (*nvLLVMDisposePassBuilderOptions)(void *);
@@ -847,6 +848,7 @@ static BOOL nvmtl_bitcode_reader_ready(void) {
         nvLLVMGetDiagInfoSeverity = (int (*)(void *))dlsym(library, "LLVMGetDiagInfoSeverity");
         if (!nvLLVMGetDiagInfoSeverity) nvlog("library: bitcode reader has no LLVMGetDiagInfoSeverity - reader errors are logged only");
 #undef NV_LLVM_LOAD
+        nvLLVMGetValueName2 = dlsym(library, "LLVMGetValueName2");
         nvLLVMRunPasses = dlsym(library, "LLVMRunPasses"); nvLLVMCreatePassBuilderOptions = dlsym(library, "LLVMCreatePassBuilderOptions");
         nvLLVMDisposePassBuilderOptions = dlsym(library, "LLVMDisposePassBuilderOptions");
         nvLLVMGetErrorMessage = dlsym(library, "LLVMGetErrorMessage"); nvLLVMDisposeErrorMessage = dlsym(library, "LLVMDisposeErrorMessage");
@@ -870,7 +872,7 @@ static BOOL nvmtl_air_unroll_wanted(NSData *air) {
 // before it gets there: a library over the cap falls through to the out-of-process path below, where a
 // crash costs a failed translation instead of the app.
 #define NVMTL_AIR_MAX_BYTES (64u * 1024u * 1024u)
-static NSString *nvmtl_air_in_memory(NSData *air) {
+static NSString *nvmtl_air_in_memory_options(NSData *air, BOOL glKernel) {
     if (!nvmtl_bitcode_reader_ready()) return nil;
     if (air.length < 4 || air.length > NVMTL_AIR_MAX_BYTES) {
         nvlog("library: bitcode blob is %lu bytes - outside [4, %u], not read in process",
@@ -884,6 +886,26 @@ static NSString *nvmtl_air_in_memory(NSData *air) {
     void *module = NULL; NSString *result = nil;
     gAirError = 0;
     if (buffer && !nvLLVMParseBitcodeInContext2(context, buffer, &module) && module && !gAirError) {
+        if (glKernel) {
+            if (!nvLLVMRunPasses) { gAirError = 1; }
+            else {
+                const char *(*getName)(void *, size_t *) = nvLLVMGetValueName2;
+                if (!getName) { gAirError = 1; }
+                else {
+                    const nvmtl_llvm_walk *w = &gLLVMWalk;
+                    unsigned inl = w->GetEnumAttributeKindForName("alwaysinline", 12);
+                    for (void *fn = w->GetFirstFunction(module); fn; fn = w->GetNextFunction(fn)) {
+                        size_t n = 0; const char *name = getName(fn, &n);
+                        if ((n >= 8 && !memcmp(name, "gld_air.", 8)) || (n >= 14 && !memcmp(name, "#internal_main", 14)) || w->GetLinkage(fn)==8 || w->GetLinkage(fn)==9)
+                            w->AddAttributeAtIndex(fn, ~0u, w->CreateEnumAttribute(context, inl, 0));
+                    }
+                    void *opts = nvLLVMCreatePassBuilderOptions();
+                    void *e = nvLLVMRunPasses(module, "always-inline,default<O1>", NULL, opts);
+                    nvLLVMDisposePassBuilderOptions(opts);
+                    if (e) { gAirError=1; char *m=nvLLVMGetErrorMessage(e); nvlog("GL kernel optimization failed: %s",m);nvLLVMDisposeErrorMessage(m); }
+                }
+            }
+        }
         if (nvLLVMRunPasses && nvmtl_air_unroll_wanted(air)) {
             void *opts = nvLLVMCreatePassBuilderOptions();
             void *err = nvLLVMRunPasses(module, NVMTL_AIR_UNROLL_PIPELINE, NULL, opts);
@@ -936,7 +958,7 @@ static NSString *nvmtl_air_to_text(NSData *air) {
     NSString *hit = [NSString stringWithContentsOfFile:cache encoding:NSUTF8StringEncoding error:nil];
     if (hit.length) { gAirHit++; return nvmtl_air_text_made(hit); }
     gAirMiss++;
-    NSString *memoryIR = nvmtl_air_in_memory(air);
+    NSString *memoryIR = nvmtl_air_in_memory_options(air, NO);
     if (memoryIR.length) {
         NSString *text = [memoryIR copy], *file = [cache copy];
         nvmtl_cache_io(^{ if ([text writeToFile:file atomically:YES encoding:NSUTF8StringEncoding error:nil]) gAirStored++; });
@@ -2556,7 +2578,7 @@ NSArray<NSDictionary *> *nvmtl_embedded_bindings(NVMTLFunction *function)
     }
 }
 
-NSData *nvmtl_translate_variant_uncached(NVMTLFunction *fn, NSDictionary *states, NSDictionary *tgLen, NSString **err) {
+static NSData *nvmtl_translate_variant_body(NVMTLFunction *fn, NSDictionary *states, NSDictionary *tgLen, NSString **err) {
     if (!states.count && !tgLen.count && !g_translate_variant_forced) return fn->_spirv;
     if (!fn->_air || !nvmtl_xlate_ready()) { if(err)*err=@"specialization has no AIR or translator";return nil; }
     if (states.count && !xlate_sampler) { if(err)*err=@"sampler specialization has no translator";return nil; }
@@ -2614,11 +2636,26 @@ NSData *nvmtl_translate_variant_uncached(NVMTLFunction *fn, NSDictionary *states
     return data;
 }
 
+// Sampler/threadgroup variants must retain the same stage-input layout as the base pipeline.
+// The translator setting is thread-local; clear it even when translation refuses a variant.
+NSData *nvmtl_translate_variant_uncached(NVMTLFunction *fn, NSDictionary *states, NSDictionary *tgLen, NSString **err) {
+    NSData *layout = fn->_kernelStageIn;
+    if (!layout.length) return nvmtl_translate_variant_body(fn, states, tgLen, err);
+    if (!nvmtl_xlate_ready() || !xlate_stagein ||
+        !xlate_stagein(layout.bytes, (uint32_t)(layout.length / sizeof(uint32_t)))) {
+        if (err) *err = @"compute variant: translator refused retained stage-input layout";
+        return nil;
+    }
+    @try { return nvmtl_translate_variant_body(fn, states, tgLen, err); }
+    @finally { xlate_stagein(NULL, 0); if (xlate_tglen) xlate_tglen(NULL, 0); }
+}
+
 NSData *nvmtl_translate_variant(NVMTLFunction *fn, NSDictionary *states, NSDictionary *tgLen, NSString **err) {
     if (!states.count && !tgLen.count) return fn->_spirv;
     if (!fn->_air || !nvmtl_xlate_ready()) return nvmtl_translate_variant_uncached(fn,states,tgLen,err);
     NSDictionary *config=@{@"stage":fn->_stage ?: @"",@"entry":fn->_fname ?: @"",
-        @"constants":fn->_fc ?: @{},@"samplers":states ?: @{},@"threadgroup":tgLen ?: @{}};
+        @"constants":fn->_fc ?: @{},@"samplers":states ?: @{},@"threadgroup":tgLen ?: @{},
+        @"stageInput":[fn->_kernelStageIn base64EncodedStringWithOptions:0] ?: @""};
     NSData *json=[NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingSortedKeys error:NULL];
     NVMTLAirDigest *airDigest=nvmtl_air_state(fn->_air);
     if(!json || !airDigest)return nvmtl_translate_variant_uncached(fn,states,tgLen,err);
@@ -2771,7 +2808,7 @@ static NSError *nvmtl_stagein_err(NSString *m) {
     return [NSError errorWithDomain:MTLLibraryErrorDomain code:MTLLibraryErrorCompileFailure userInfo:@{NSLocalizedDescriptionKey: m}];
 }
 static NSString *nvmtl_stage_in_words(MTLStageInputOutputDescriptor *sd, NSMutableData *words) {
-    uint32_t a[1 + 16 * 4 + 1 + 31 * 4]; uint32_t n = 1, na = 0; uint32_t bufs[31]; uint32_t nb = 0;
+    uint32_t a[1 + 16 * 4 + 1 + 31 * 4 + 2]; uint32_t n = 1, na = 0; uint32_t bufs[31]; uint32_t nb = 0;
     for (NSUInteger i = 0; i < 16; i++) {
         MTLAttributeDescriptor *at = [sd.attributes objectAtIndexedSubscript:i];
         if (at.format == MTLAttributeFormatInvalid) continue;
@@ -2787,6 +2824,9 @@ static NSString *nvmtl_stage_in_words(MTLStageInputOutputDescriptor *sd, NSMutab
         MTLBufferLayoutDescriptor *ly = [sd.layouts objectAtIndexedSubscript:bufs[k]];
         a[n++] = bufs[k]; a[n++] = (uint32_t)ly.stride; a[n++] = (uint32_t)ly.stepFunction; a[n++] = (uint32_t)ly.stepRate;
     }
+    BOOL indexed=NO;
+    for (uint32_t k=0;k<nb;k++) { NSUInteger step=sd.layouts[bufs[k]].stepFunction; indexed |= step==7 || step==8; }
+    if(indexed) { a[n++]=(uint32_t)sd.indexBufferIndex; a[n++]=(uint32_t)sd.indexType; }
     [words appendBytes:a length:n * sizeof a[0]];
     return nil;
 }
@@ -2826,6 +2866,7 @@ NVMTLFunction *nvmtl_kernel_with_stage_in(NVMTLFunction *fn, MTLStageInputOutput
         nvlog("compute stage-in: \"%s\" translated with %lu word(s) of layout -> %lu B", fn->_fname.UTF8String, (unsigned long)(words.length / 4), (unsigned long)spirv.length);
     }
     NVMTLFunction *sf = [NVMTLFunction new];
+    sf->_kernelStageIn = [words copy];
     sf->_spirv = spirv; sf->_fname = fn->_fname; sf->_stage = fn->_stage; sf->_air = fn->_air; sf->_fc = fn->_fc;
     sf->_lib = fn->_lib; sf->_fcv = fn->_fcv; sf->_specName = fn->_specName; sf->_needsLink = NO;
     return sf;

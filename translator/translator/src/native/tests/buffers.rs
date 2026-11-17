@@ -18,6 +18,64 @@ use spirv::{Capability, Decoration, Op, Scope, SelectionControl, StorageClass, W
 use std::path::PathBuf;
 
 #[test]
+fn recovered_buffer_field_preserves_struct_offsets_and_flat_vector_indices() {
+    // Reduced from Blender 4.5's grid vertex shader. The helper's buffer pointer
+    // is recovered after emission, so its entry parameter can still be untyped.
+    // Both accesses return float4, but member 1 and vector element 1 differ by
+    // 112 bytes. Validation alone cannot distinguish the incorrect translation.
+    let template = r#"
+%State = type { ptr addrspace(2) }
+%Record = type { [8 x <4 x float>], <4 x float> }
+
+define <4 x float> @vertex_main(ptr addrspace(2) %buffer) {
+entry:
+  %state = alloca %State, align 8
+  %field = getelementptr inbounds %State, ptr %state, i64 0, i32 0
+  store ptr addrspace(2) %buffer, ptr %field, align 8
+  %position = call <4 x float> @read_field(ptr %state)
+  ret <4 x float> %position
+}
+
+define internal <4 x float> @read_field(ptr %state) {
+entry:
+  %field = getelementptr inbounds %State, ptr %state, i64 0, i32 0
+  %buffer = load ptr addrspace(2), ptr %field, align 8
+  %address = getelementptr inbounds ACCESS
+  %value = load <4 x float>, ptr addrspace(2) %address, align 16
+  ret <4 x float> %value
+}
+
+!air.vertex = !{!0}
+!0 = !{ptr @vertex_main, !1, !3}
+!1 = !{!2}
+!2 = !{!"air.position", !"air.arg_type_name", !"float4", !"air.arg_name", !"position"}
+!3 = !{!4}
+!4 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 2, !"air.struct_type_info", !5, !"air.arg_type_size", i32 144, !"air.arg_type_align_size", i32 16, !"air.arg_type_name", !"Record", !"air.arg_name", !"buffer"}
+!5 = !{i32 0, i32 16, i32 8, !"float4", !"steps", i32 128, i32 16, i32 0, !"float4", !"size"}
+"#;
+    for (access, offset) in [
+        ("%Record, ptr addrspace(2) %buffer, i64 0, i32 1", 128),
+        ("<4 x float>, ptr addrspace(2) %buffer, i64 1", 16),
+    ] {
+        let ll = template.replace("ACCESS", access);
+        let tmp = std::env::temp_dir().join(format!(
+            "metal2vulkan_recovered_buffer_offset_{}_{}", std::process::id(), offset
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let (spv, reflection) = crate::translate_sanitized_native_reflected(
+            &ll, Stage::Vertex, &tmp, passes::TransformOptions::default(),
+        ).expect("translate recovered buffer access");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let footprint = reflection.binding_at(crate::reflect::ResourceKind::Buffer, 0)
+            .and_then(|binding| binding.footprint.as_ref()).expect("buffer footprint");
+        assert_eq!(footprint.static_ranges,
+            vec![crate::reflect::BufferByteRange { offset, size: 16 }], "{access}");
+        assert!(!footprint.has_unbounded_access, "{footprint:?}");
+        assert_no_pointer_bitcasts(&spv);
+    }
+}
+
+#[test]
 fn native_null_rooted_pointer_recurrence_is_valid_by_construction() {
     let ll = r#"
 define void @walk(ptr addrspace(1) %flag) {

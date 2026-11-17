@@ -116,6 +116,17 @@ impl Emitter {
                 }
             }
         }
+        if let LlValue::Global(root) = &gep.base.value {
+            if addrspace == 3 && self.byte_view_reinterpret_globals.contains(root) {
+                let raw = self.apply_raw_gep(RawBufferOffset::root(root.clone(), addrspace), &parsed_source_ty, &gep.indices)?;
+                let pointee = gep_pointee(&parsed_source_ty, &gep.indices)?;
+                self.pointer_storage.insert(name.to_string(), StorageClass::Workgroup);
+                self.pointer_pointees.insert(name.to_string(), pointee.clone());
+                self.raw_offsets.insert(name.to_string(), raw);
+                self.define_unmodeled_pointer_value(name, addrspace, &pointee)?;
+                return Ok(self.values.get(name).map(|(id, _)| *id));
+            }
+        }
         if let LlValue::Local(base_name) = &gep.base.value {
             if let Some(raw_base) = self.raw_offsets.get(base_name).cloned() {
                 let base_storage = self.pointer_storage_for(&gep.base.value, addrspace)?;

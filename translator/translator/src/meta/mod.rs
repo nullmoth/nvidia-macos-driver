@@ -426,6 +426,8 @@ pub enum KernRole {
     ThreadPositionInThreadgroup,
     ThreadgroupsPerGrid,
     ThreadsPerGrid,
+    StageInGridOrigin,
+    StageInGridSize,
     ThreadgroupPositionInGrid,
     ThreadIndexInThreadgroup,
     ExecutionGroup {
@@ -543,6 +545,8 @@ impl KernRole {
             | Self::DispatchThreadsPerThreadgroup
             | Self::ThreadPositionInThreadgroup
             | Self::ThreadgroupsPerGrid
+            | Self::StageInGridOrigin
+            | Self::StageInGridSize
             | Self::ThreadsPerGrid
             | Self::ThreadgroupPositionInGrid
             | Self::ThreadIndexInThreadgroup
@@ -555,6 +559,10 @@ impl KernRole {
 }
 
 impl KernMeta {
+    pub fn uses_stage_in_region(&self) -> bool {
+        self.roles.iter().any(|(_,r)| matches!(r,KernRole::StageInput(_)|KernRole::StageInGridOrigin|KernRole::StageInGridSize))
+    }
+
     pub fn role_of(&self, idx: u32) -> Option<&KernRole> {
         self.roles.iter().find(|(i, _)| *i == idx).map(|(_, r)| r)
     }
@@ -774,6 +782,8 @@ fn parse_air_kernel_meta_with_nodes(
             "thread_position_in_threadgroup" => KernRole::ThreadPositionInThreadgroup,
             "threadgroups_per_grid" => KernRole::ThreadgroupsPerGrid,
             "threads_per_grid" => KernRole::ThreadsPerGrid,
+            "stage_in_grid_origin" => KernRole::StageInGridOrigin,
+            "stage_in_grid_size" => KernRole::StageInGridSize,
             "threadgroup_position_in_grid" => KernRole::ThreadgroupPositionInGrid,
             "thread_index_in_threadgroup" => KernRole::ThreadIndexInThreadgroup,
             "thread_position_in_grid" => KernRole::ThreadPositionInGrid,
@@ -1789,6 +1799,8 @@ pub const AIR_SYSTEM_VALUE_ROLES: &[&str] = &[
     "thread_position_in_grid",
     "thread_position_in_threadgroup",
     "threadgroup_position_in_grid",
+    "stage_in_grid_origin",
+    "stage_in_grid_size",
     "threadgroups_per_grid",
     "threads_per_grid",
     "threads_per_threadgroup",
@@ -1872,6 +1884,8 @@ pub const KERNEL_INPUT_ROLES: &[&str] = &[
     "thread_position_in_grid",
     "thread_position_in_threadgroup",
     "threadgroup_position_in_grid",
+    "stage_in_grid_origin",
+    "stage_in_grid_size",
     "threadgroups_per_grid",
     "threads_per_grid",
     "threads_per_threadgroup",

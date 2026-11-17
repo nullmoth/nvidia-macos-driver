@@ -158,6 +158,7 @@ static PFN_vkGetCalibratedTimestampsEXT pvkGetCalibratedTimestampsEXT;
 static nvmtl_gpu_clock g_gpu_clock;
 static char g_name[256];
 static VkPhysicalDeviceLimits g_lim;
+static uint32_t g_viewport_limit = 1;
 static uint32_t g_sm_count;
 static _Atomic int g_state;
 /* device-loss bookkeeping (nvmtl_vk_note_loss) */
@@ -410,7 +411,7 @@ void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, siz
     X(vkDestroyPipeline) X(vkDestroyRenderPass) X(vkCreateGraphicsPipelines) X(vkCreateComputePipelines) X(vkCmdDispatch) X(vkCmdPushConstants) X(vkCreateCommandPool) X(vkAllocateCommandBuffers) X(vkBeginCommandBuffer) \
     X(vkCmdBeginRenderPass) X(vkCmdBindPipeline) X(vkCmdDraw) X(vkCmdEndRenderPass) X(vkEndCommandBuffer) \
     X(vkQueueSubmit) X(vkQueueBindSparse) X(vkGetImageSparseMemoryRequirements) X(vkCreateFence) X(vkWaitForFences) X(vkResetFences) X(vkDestroyFence) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyBuffer) \
-    X(vkCmdPipelineBarrier) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkDeviceWaitIdle) X(vkFreeCommandBuffers) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetPrimitiveTopology) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdBindVertexBuffers) X(vkCreateDescriptorSetLayout) X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkDestroyDescriptorSetLayout) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets) X(vkCreateSampler) X(vkDestroySampler) X(vkFreeDescriptorSets) X(vkCmdSetBlendConstants) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdFillBuffer) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkGetBufferDeviceAddress) X(vkCmdWriteTimestamp) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdBeginQuery) X(vkCmdEndQuery) X(vkCmdCopyQueryPoolResults) X(vkGetQueryPoolResults) X(vkDestroyQueryPool) X(vkResetQueryPool) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatchIndirect) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) \
+    X(vkCmdPipelineBarrier) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkDeviceWaitIdle) X(vkFreeCommandBuffers) X(vkCmdSetViewportWithCount) X(vkCmdSetScissorWithCount) X(vkCmdSetPrimitiveTopology) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdBindVertexBuffers) X(vkCreateDescriptorSetLayout) X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkDestroyDescriptorSetLayout) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets) X(vkCreateSampler) X(vkDestroySampler) X(vkFreeDescriptorSets) X(vkCmdSetBlendConstants) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdFillBuffer) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkGetBufferDeviceAddress) X(vkCmdWriteTimestamp) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdBeginQuery) X(vkCmdEndQuery) X(vkCmdCopyQueryPoolResults) X(vkGetQueryPoolResults) X(vkDestroyQueryPool) X(vkResetQueryPool) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatchIndirect) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) \
     X(vkDestroyBuffer) X(vkFreeMemory) X(vkDestroyImage) X(vkDestroyImageView) X(vkDestroyFramebuffer) X(vkDestroyCommandPool) \
     X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetDepthBiasEnable) \
     X(vkCmdSetDepthBoundsTestEnable) X(vkCmdSetDepthBounds)
@@ -1451,6 +1452,9 @@ static int nvmtl_vk_initialize(void)
     // mapping is an MMU FAULT_PTE that kills the channel (WoW at the login screen). Bounds-checked buffer and
     // vertex-fetch access turns those reads into zeros instead.
     enabled.robustBufferAccess = supported.robustBufferAccess;
+    enabled.multiViewport = supported.multiViewport;
+    g_viewport_limit = supported.multiViewport ? g_lim.maxViewports : 1;
+    if (g_viewport_limit > NVMTL_MAX_VIEWPORTS) g_viewport_limit = NVMTL_MAX_VIEWPORTS;
 #if !NVMTL_RELEASE
     // speed267 measurement arm only: NVMTL_NO_ROBUST=1 drops robustBufferAccess, to price what the bounds checks
     // cost (GB7 raw_process compiles every uchar4 store into 4 branch-guarded byte stores with it on).
@@ -2934,7 +2938,7 @@ int nvmtl_vk_image_create(uint32_t w, uint32_t h, nvk_image *out) { return nvmtl
 #define NVMTL_STEX_BASE (NVMTL_ADDRESS_BINDING + 1)
 #define NVMTL_STEX_BINDING_NUMBER 480
 #define NVMTL_NBIND (NVMTL_STEX_BASE + NVMTL_NSTEX)
-#define NVMTL_DISPATCH_PC_BYTES 48
+#define NVMTL_DISPATCH_PC_BYTES 72
 _Static_assert(NVMTL_STEX_BINDING_NUMBER == 480 && NVMTL_NSTEX == 128, "nvmtl_spirv_stex_hi() scans for this band by value");
 
 #define NVMTL_MAX_SETS 4096
@@ -4673,18 +4677,49 @@ static int nvmtl_fbfetch_on(void)
     return on;
 }
 #define NVMTL_STENCIL_EMU_OFFSET 160u   /* the translator's native::stencil_export::STENCIL_EXPORT_PUSH_OFFSET */
-/* the translator's stencil-export lowering: a push-constant block member at offset 160 (stencil emulation, see NVMTL_SEMU_DRAW) */
+static const uint32_t *nvmtl_spirv_type(const uint32_t *w, size_t nw, uint32_t opcode, uint32_t id)
+{
+    for (size_t i = 5; i < nw; ) {
+        const uint32_t wc = w[i] >> 16;
+        if (!wc || wc > nw - i) return NULL;
+        if ((w[i] & 0xffffu) == opcode && wc >= 2 && w[i + 1] == id) return &w[i];
+        i += wc;
+    }
+    return NULL;
+}
+/* Match the translator's stencil-export push-constant ABI, not an arbitrary Offset decoration.
+ * Eevee's ordinary uniform structs also contain members at offset 160. Treating those shaders as
+ * stencil exporters changes the application's stencil reference during a draw and can reject
+ * pixels that should pass. Blender 4.2's deferred combine shader exposed this false match. */
 uint32_t nvmtl_spirv_stencil_emu(const void *code, size_t bytes)
 {
     const uint32_t *w = (const uint32_t *)code; const size_t nw = bytes / 4;
-    if (nw < 5 || w[0] != 0x07230203u) return 0;
+    if (bytes % 4 || nw < 5 || w[0] != 0x07230203u) return 0;
+    uint32_t pointer = 0;
     for (size_t i = 5; i < nw; ) {
         uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
-        if (!wc || i + wc > nw) break;
-        if (op == 72 && wc == 5 && w[i + 3] == 35 && w[i + 4] == 160u) return 1;   // OpMemberDecorate .. Offset 160
+        if (!wc || wc > nw - i) return 0;
+        if (op == 59 && wc >= 4 && w[i + 3] == 9) { // OpVariable PushConstant
+            if (pointer) return 0;
+            pointer = w[i + 1];
+        }
         i += wc;
     }
-    return 0;
+    if (!pointer) return 0;
+    const uint32_t *p = nvmtl_spirv_type(w, nw, 32, pointer); // OpTypePointer
+    if (!p || (p[0] >> 16) != 4 || p[2] != 9) return 0;
+    const uint32_t *s = nvmtl_spirv_type(w, nw, 30, p[3]); // OpTypeStruct, one member
+    if (!s || (s[0] >> 16) != 3) return 0;
+    const uint32_t *t = nvmtl_spirv_type(w, nw, 21, s[2]); // OpTypeInt, 32 bits
+    if (!t || (t[0] >> 16) != 4 || t[2] != 32) return 0;
+    int block = 0, offset = 0;
+    for (size_t i = 5; i < nw; i += w[i] >> 16) {
+        const uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
+        if (op == 71 && wc == 3 && w[i + 1] == s[1] && w[i + 2] == 2) block = 1;
+        if (op == 72 && wc == 5 && w[i + 1] == s[1] && w[i + 2] == 0 && w[i + 3] == 35
+            && w[i + 4] == NVMTL_STENCIL_EMU_OFFSET) offset = 1;
+    }
+    return block && offset;
 }
 uint32_t nvmtl_spirv_fetch_mask(const void *code, size_t bytes)
 {
@@ -5989,9 +6024,9 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, NULL, 0,
         td ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_FALSE };
     VkPipelineTessellationStateCreateInfo tss = { VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO, NULL, 0, 1 };
-    VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, NULL, 0, 1, NULL, 1, NULL };
+    VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, NULL, 0, 0, NULL, 0, NULL };
     // At most 25 states with stencil, depth bounds, dynamic vertex stride, line width, sample locations and dynamic-state3.
-    VkDynamicState dyn[26] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE,
+    VkDynamicState dyn[26] = { VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT, VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT, VK_DYNAMIC_STATE_CULL_MODE,
         VK_DYNAMIC_STATE_BLEND_CONSTANTS, VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_DEPTH_BIAS,
         VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY, VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE, VK_DYNAMIC_STATE_FRONT_FACE,
         VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE, VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
@@ -7101,9 +7136,10 @@ void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_
         for (uint32_t x = 0; x < gc[0]; x += cap[0]) {
             uint32_t off[3] = { x, y, z }, n[3];
             for (int d = 0; d < 3; d++) n[d] = gc[d] - off[d] < cap[d] ? gc[d] - off[d] : cap[d];
-            uint32_t pc[12] = { threads[0], threads[1], threads[2],
+            uint32_t pc[18] = { threads[0], threads[1], threads[2],
                                 tbase[0] + off[0] * local[0], tbase[1] + off[1] * local[1], tbase[2] + off[2] * local[2],
                                 gbase[0] + off[0], gbase[1] + off[1], gbase[2] + off[2], groups[0], groups[1], groups[2] };
+            memcpy(pc + 12, c->stage_in_region, sizeof c->stage_in_region);
             pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES, pc);
             nvmtl_fx_note_dispatch(c, p);
             pvkCmdDispatch(c->cb, n[0], n[1], n[2]);
@@ -7184,7 +7220,8 @@ void nvmtl_vk_cmd_dispatch_indirect_tg(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffe
     // 0x80000000 | threadgroup size: the shader takes threads_per_grid and threadgroups_per_grid from NumWorkgroups
     // (translator stage_input/kernel_grid.rs), the grid the GPU actually dispatched
     const uint32_t F = 0x80000000u;
-    uint32_t pc[12] = { F | tg[0], F | tg[1], F | tg[2], 0, 0, 0, 0, 0, 0, F, F, F };
+    uint32_t pc[18] = { F | tg[0], F | tg[1], F | tg[2], 0, 0, 0, 0, 0, 0, F, F, F };
+    memcpy(pc + 12, c->stage_in_region, sizeof c->stage_in_region);
     pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES, pc);
     nvmtl_fx_note_dispatch(c, p);
     nvmtl_igw_note(c, b, off, tg);
@@ -7638,7 +7675,9 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) c->fetchview[i] = (i < ncol && cf[i]) ? ps->colview[i] : NULL;
     if (p->pipe) nvmtl_vk_cmd_bind_pipeline(c, p);
     VkViewport vp = { 0, (float)ps->h, (float)ps->w, -(float)ps->h, 0, 1 }; VkRect2D sc = { { 0, 0 }, { ps->w, ps->h } };
-    pvkCmdSetViewport(c->cb, 0, 1, &vp); pvkCmdSetScissor(c->cb, 0, 1, &sc);
+    c->viewport_count = c->scissor_count = 1;
+    c->scissors[0] = (nvk_scissor){ 0, 0, ps->w, ps->h };
+    pvkCmdSetViewportWithCount(c->cb, 1, &vp); pvkCmdSetScissorWithCount(c->cb, 1, &sc);
     return 0;
 }
 int nvmtl_vk_cmd_begin_render_ms(nvk_cmdbuf *c, nvk_image *img, nvk_pipeline *p, const float clear[4], uint32_t load, nvk_image *resolve)
@@ -7962,14 +8001,45 @@ int nvmtl_vk_cmd_empty_pass(nvk_cmdbuf *c, const nvk_pass *ps)
 }
 int nvmtl_vk_cmd_begin_render(nvk_cmdbuf *c, nvk_image *img, nvk_pipeline *p, const float clear[4])
 { return nvmtl_vk_cmd_begin_render_ex(c, img, p, clear, 0); }
+/* Metal's single scissor applies to every viewport. Vulkan instead requires a scissor
+   for each viewport and equal dynamic counts. Keep the original scissors so changing
+   the viewport count, or setting the two arrays in either order, preserves that state. */
+static void nvmtl_vk_emit_scissors(nvk_cmdbuf *c)
+{
+    VkRect2D rects[NVMTL_MAX_VIEWPORTS];
+    for (uint32_t i = 0; i < c->viewport_count; i++) {
+        const nvk_scissor *r = &c->scissors[i < c->scissor_count ? i : 0];
+        rects[i] = (VkRect2D){ { r->x, r->y }, { r->w, r->h } };
+    }
+    pvkCmdSetScissorWithCount(c->cb, c->viewport_count, rects);
+}
+void nvmtl_vk_cmd_set_viewports(nvk_cmdbuf *c, const nvk_viewport *v, uint32_t count)
+{
+    if (!v || !count || count > g_viewport_limit) { nvlog("vk: unsupported viewport count %u", count); return; }
+    VkViewport vp[NVMTL_MAX_VIEWPORTS];
+    for (uint32_t i = 0; i < count; i++) {
+        float zn = v[i].zn, zf = v[i].zf;
+        /* Preserve the single-viewport depth clamp: NVK requires [0,1]; NaN maps to
+           Metal's default endpoints. Negative height converts Metal's Y direction. */
+        if (!(zn >= 0.0f)) zn = 0.0f; else if (zn > 1.0f) zn = 1.0f;
+        if (!(zf >= 0.0f)) zf = isnan(zf) ? 1.0f : 0.0f; else if (zf > 1.0f) zf = 1.0f;
+        vp[i] = (VkViewport){ v[i].x, v[i].y + v[i].h, v[i].w, -v[i].h, zn, zf };
+    }
+    c->viewport_count = count;
+    pvkCmdSetViewportWithCount(c->cb, count, vp);
+    nvmtl_vk_emit_scissors(c);
+}
 void nvmtl_vk_cmd_set_viewport(nvk_cmdbuf *c, float x, float y, float w, float h, float zn, float zf)
 {
-    /* Vulkan requires minDepth/maxDepth in [0,1] and NVK asserts it (nvk_emit_viewport "0.0 <= zmin && zmin <= 1.0");
-       Apple GPUs take any value. 1.10 crash reports (10-11, RTX 4060): mediaanalysisd's Live Text draw aborted there on
-       every run. The !(>=) form also sends NaN to Metal's defaults, 0 and 1. */
-    if (!(zn >= 0.0f)) zn = 0.0f; else if (zn > 1.0f) zn = 1.0f;
-    if (!(zf >= 0.0f)) zf = isnan(zf) ? 1.0f : 0.0f; else if (zf > 1.0f) zf = 1.0f;
-    VkViewport vp = { x, y + h, w, -h, zn, zf }; pvkCmdSetViewport(c->cb, 0, 1, &vp);
+    nvk_viewport v = { x, y, w, h, zn, zf };
+    nvmtl_vk_cmd_set_viewports(c, &v, 1);
+}
+void nvmtl_vk_cmd_set_scissors(nvk_cmdbuf *c, const nvk_scissor *r, uint32_t count)
+{
+    if (!r || !count || count > g_viewport_limit) { nvlog("vk: unsupported scissor count %u", count); return; }
+    memcpy(c->scissors, r, count * sizeof *r);
+    c->scissor_count = count;
+    nvmtl_vk_emit_scissors(c);
 }
 static void nvmtl_vk_zero_dummies(void)
 {
@@ -8110,7 +8180,7 @@ void nvmtl_vk_cmd_draw(nvk_cmdbuf *c, uint32_t first, uint32_t count, uint32_t i
     NVMTL_SEMU_DRAW(c, pvkCmdDraw(c->cb, count, n, first, baseInstance));
 }
 void nvmtl_vk_cmd_set_scissor(nvk_cmdbuf *c, int32_t x, int32_t y, uint32_t w, uint32_t h)
-{ VkRect2D r = { { x, y }, { w, h } }; pvkCmdSetScissor(c->cb, 0, 1, &r); }
+{ nvk_scissor r = { x, y, w, h }; nvmtl_vk_cmd_set_scissors(c, &r, 1); }
 void nvmtl_vk_cmd_bind_pipeline(nvk_cmdbuf *c, nvk_pipeline *p) {
     p = nvmtl_uniform_cbuf_pick(c, p);
     if (p->pipe && c->graphics_pipeline == p->pipe) return;

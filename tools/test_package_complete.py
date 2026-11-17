@@ -7,12 +7,15 @@ check_package.sh runs it at build time, and the staging scripts list what they a
 package/finish_package.sh runs the whole last stage in one order.
 
 usage: test_package_complete.py   (the staging arms need a Mac with clang)"""
-import hashlib, plistlib, shutil, subprocess, tempfile, unittest
+import hashlib, importlib.util, plistlib, shutil, subprocess, tempfile, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PKG = ROOT / "package"
 INSTALL = (PKG / "install.sh").read_text()
+spec = importlib.util.spec_from_file_location("air_check", ROOT / "build/check_air_runtime.py")
+air_check = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(air_check)
 
 
 def run(*a):
@@ -139,6 +142,8 @@ class Finish(unittest.TestCase):
 
     def finish(self, *extra):
         t = self.t
+        if "--air-runtime" not in extra and not (self.root / "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime/libLLVM.dylib").exists():
+            extra = (*extra, "--air-runtime", self.air_runtime(True))
         return run(PKG / "finish_package.sh", self.root, "--nvencvt", t / "nvencvt.dylib", "--air-dis", t / "nvmtl-air-dis",
                    "--nmsmn", t / "NMSMN.kext", t / "ryzenadj", hashlib.sha256(b"r").hexdigest(), *extra)
 
@@ -157,6 +162,64 @@ class Finish(unittest.TestCase):
         r = self.finish()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("stray", r.stdout)
+
+    def air_runtime(self, private):
+        runtime = self.t / "llvm"
+        (runtime / "air-runtime").mkdir(parents=True)
+        source = runtime / "probe.c"
+        source.write_text("".join(f"void {name}(void){{}}\n" for name in sorted(air_check.required_api_names())) +
+                          "void internal_llvm_function(void){}\n")
+        exports = runtime / "exports"
+        exports.write_text("_LLVM*\n")
+        lib = runtime / "air-runtime/libLLVM.dylib"
+        command = ["clang", "-arch", "x86_64", "-dynamiclib", "-o", str(lib), str(source)]
+        if private:
+            command.append("-Wl,-exported_symbols_list," + str(exports))
+        subprocess.run(command, capture_output=True, check=True)
+        subprocess.run(["codesign", "-f", "-s", "-", str(lib)], capture_output=True, check=True)
+        (runtime / "LICENSE.txt").write_text("fixture licence\n")
+        return runtime
+
+    def test_private_air_runtime_and_licence_are_staged_and_listed(self):
+        runtime = self.air_runtime(True)
+        r = self.finish("--air-runtime", runtime)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        bundle = self.root / "Library/GPUBundles/NVMTLDriver.bundle/Contents"
+        self.assertEqual((bundle / "MacOS/air-runtime/libLLVM.dylib").read_bytes(),
+                         (runtime / "air-runtime/libLLVM.dylib").read_bytes())
+        self.assertEqual((bundle / "Resources/air-runtime/LLVM-LICENSE.txt").read_bytes(),
+                         (runtime / "LICENSE.txt").read_bytes())
+        r = subprocess.run(["shasum", "-a", "256", "--strict", "-c", "SHA256SUMS", "--quiet"],
+                           cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_air_runtime_with_internal_exports_is_refused(self):
+        r = self.finish("--air-runtime", self.air_runtime(False))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("exports internal symbols", r.stdout + r.stderr)
+
+    def test_unsafe_air_runtime_carried_by_base_package_is_refused(self):
+        runtime = self.air_runtime(False)
+        rel = "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime/libLLVM.dylib"
+        (self.root / rel).parent.mkdir(parents=True)
+        shutil.copy(runtime / "air-runtime/libLLVM.dylib", self.root / rel)
+        run(PKG / "sums_refresh.sh", self.root, rel)
+        r = self.finish()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("exports internal symbols", r.stdout + r.stderr)
+
+    def test_a_package_without_air_runtime_is_refused(self):
+        bundle = self.root / "Library/GPUBundles/NVMTLDriver.bundle/Contents"
+        (bundle / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.nullmoth.test",
+            "CFBundleExecutable": "NVMTLDriver", "CFBundlePackageType": "BNDL"}))
+        shutil.copy(self.t / "nvmtl-boost", bundle / "MacOS/NVMTLDriver")
+        run(PKG / "sums_refresh.sh", self.root, "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver")
+        r = self.finish()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        (self.root / "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime/libLLVM.dylib").unlink()
+        r = run(PKG / "check_package.sh", self.root)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("lacks air-runtime/libLLVM.dylib", r.stdout + r.stderr)
 
     def test_a_carried_linux_library_is_refused(self):
         # packages up to 2.8.1 carried NVIDIA's closed compiler libraries as ELF files; the Mach-O checks never saw them

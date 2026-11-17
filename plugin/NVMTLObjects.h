@@ -70,6 +70,7 @@ static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); if (b->
 @end
 @interface NVMTLFunction : NSObject <MTLFunction> { @public NSData *_spirv; NSString *_fname; NSString *_stage; NSString *_air; NSDictionary *_fc; NSArray *_embedded; unsigned char _bcHash[32]; BOOL _bcHashed;
   NSDictionary *_refl; NSDictionary *_airNames; NSArray *_arguments;
+  NSData *_kernelStageIn; // immutable serialized layout retained by runtime compute variants
   id _lib; id _fcv; NSString *_specName; BOOL _needsLink; } @end
 NSDictionary *nvmtl_function_reflection(NVMTLFunction *function);
 NSDictionary *nvmtl_air_names(NVMTLFunction *function);
@@ -196,6 +197,7 @@ extern id gNVMTLMainDevice;
   MTLDepthClipMode _clip; BOOL _hasClip;
   id _ds; float _bias, _slope, _clamp; BOOL _hasBias;
   id _cps; NSMutableArray *_kbufs; MTLSize _grid, _tg; BOOL _isCompute;
+  MTLRegion _stageInRegion;
 } @end
 @interface NVMTLIndirectCommandBuffer : NSObject <MTLIndirectCommandBuffer> {
   @public NSMutableArray<NVMTLIndirectCommand *> *_cmds; id<MTLDevice> _dev; NSString *_label;
@@ -212,6 +214,7 @@ int nvmtl_gpu_icb_on(void);
 @interface NVMTLComputeCommandEncoder : NSObject <MTLComputeCommandEncoder> {
   @public NVMTLCommandBuffer *_cb; NVMTLComputePipelineState *_ps; NSMutableArray *_scratch; NSMutableDictionary *_samplers;
   NSMutableDictionary *_tgLen;
+  MTLRegion _stageInRegion; NVMTLBuffer *_stageInIndirect; NSUInteger _stageInIndirectOffset;
   // The binding table, by Metal buffer index: the buffer, its offset and, for setBytes, the inline length and base.
   // Plain arrays: WAS an NSMutableDictionary of NSArrays, three allocations on every setBuffer (a large part of the
   // ~2.5 us of host time per dispatch against Apple's ~0.3 us). _baN: 0 unbound, 2 = buffer+offset, 4 = setBytes form.
@@ -229,7 +232,7 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
   @public NVMTLCommandBuffer *_cb; NVMTLTexture *_target; float _clear[4]; BOOL _begun;
   NVMTLTexture *_resolve; uint32_t _passSamples;
   int _cull; uint32_t _passFmt; int _passDepth;
-  uint32_t _load; BOOL _hasVP, _hasSC; float _vp[6]; uint32_t _sc[4];
+  uint32_t _load, _vpCount, _scCount; nvk_viewport _vp[NVMTL_MAX_VIEWPORTS]; nvk_scissor _sc[NVMTL_MAX_VIEWPORTS];
   NSMutableDictionary *_vertexSamplers, *_fragmentSamplers;
   NSData *_pixelSamplerKey; // sampler specialization depends on values, not the draw or pipeline
   NSMutableArray *_pixelSamplerKeys; // at most eight recent value snapshots, owned by this encoder

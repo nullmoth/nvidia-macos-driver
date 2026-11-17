@@ -3112,6 +3112,45 @@ fn describe_element_view(
     )
 }
 
+fn owned_block_pointer_offset_error(
+    module: &crate::spirv_module::Module,
+    definitions: &HashMap<Word, &Instruction>,
+    value_types: &HashMap<Word, Word>,
+) -> Option<String> {
+    let blocks = module.annotations.iter().filter_map(|annotation| {
+        match annotation.operands.as_slice() {
+            [Operand::IdRef(target), Operand::Decoration(spirv::Decoration::Block | spirv::Decoration::BufferBlock)]
+                if annotation.class.opcode == Op::Decorate => Some(*target),
+            _ => None,
+        }
+    }).collect::<HashSet<_>>();
+    module.all_inst_iter().find_map(|instruction| {
+        if !matches!(instruction.class.opcode, Op::PtrAccessChain | Op::InBoundsPtrAccessChain) {
+            return None;
+        }
+        let [Operand::IdRef(base), Operand::IdRef(element), ..] = instruction.operands.as_slice() else {
+            return None;
+        };
+        let (storage, pointee) = pointer_type_shape(*value_types.get(base)?, definitions)?;
+        if storage != spirv::StorageClass::StorageBuffer || !blocks.contains(&pointee) {
+            return None;
+        }
+        let zero = definitions.get(element).is_some_and(|definition| {
+            definition.class.opcode == Op::ConstantNull
+                || (definition.class.opcode == Op::Constant
+                    && integer_constant_value(*element, definitions) == Some(0))
+        });
+        // SPIR-V defines a nonzero PtrAccessChain Element on a Block as undefined behavior.
+        // EEVEE exposed this when a helper recovered a buffer pointer after layout selection:
+        // a record array became a single block, and later object indices silently read wrong data.
+        // Reject it even when spirv-val accepts the types; the existing pointer-field retry can
+        // expose those accesses early enough to construct an actual runtime array instead.
+        (!zero).then(|| format!(
+            "native emitter: owned pointer arithmetic on a buffer block requires a zero element: base %{base}, element %{element}"
+        ))
+    })
+}
+
 fn owned_access_chain_error(
     instruction: &Instruction,
     definitions: &HashMap<Word, &Instruction>,
@@ -5481,6 +5520,9 @@ pub(crate) fn owned_module_failures(
             OwnedModuleFailure::TypeConstruction(failure.error)
         });
     }
+    if let Some(error) = owned_block_pointer_offset_error(module, &definitions, &value_types) {
+        record!(OwnedModuleFailure::TypeConstruction(error));
+    }
     if let Some(error) = module
         .all_inst_iter()
         .find_map(|instruction| owned_memory_type_error(instruction, &definitions, &value_types))
@@ -6746,6 +6788,35 @@ mod tests {
             ));
         }
         module
+    }
+
+    #[test]
+    fn block_pointer_offsets_must_be_proven_zero() {
+        for opcode in [Op::PtrAccessChain, Op::InBoundsPtrAccessChain] {
+            for (constant_op, operands, rejected) in [
+                (Op::Constant, vec![Operand::LiteralBit32(0)], false),
+                (Op::ConstantNull, vec![], false),
+                (Op::Constant, vec![Operand::LiteralBit32(1)], true),
+                (Op::SpecConstant, vec![Operand::LiteralBit32(0)], true),
+                (Op::Undef, vec![], true),
+            ] {
+                let mut module = module_with_storage_block(true);
+                module.types_global_values.push(Instruction::new(constant_op, Some(12), Some(24), operands));
+                module.functions[0].blocks[0].instructions.insert(0, Instruction::new(
+                    opcode, Some(22), Some(25), vec![Operand::IdRef(23), Operand::IdRef(24)],
+                ));
+                let check = |module: &Module| {
+                    let definitions = module.all_inst_iter().filter_map(|i| Some((i.result_id?, i))).collect();
+                    let value_types = module.all_inst_iter().filter_map(|i| Some((i.result_id?, i.result_type?))).collect();
+                    owned_block_pointer_offset_error(module, &definitions, &value_types)
+                };
+                assert_eq!(check(&module).is_some(), rejected, "{opcode:?}, {constant_op:?}");
+                // Arithmetic on a record (not the descriptor's Block) stays legal. The existing
+                // access-chain checks handle its type and the runtime array supplies its bounds.
+                module.annotations.retain(|i| i.operands.get(1) != Some(&Operand::Decoration(spirv::Decoration::Block)));
+                assert!(check(&module).is_none());
+            }
+        }
     }
 
     #[test]

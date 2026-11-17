@@ -120,6 +120,7 @@ pub(in crate::passes) enum ParamBinding {
     LoadVar { var: Word, ty: Word },
     /// A kernel stage-in attribute read from the application's buffer by the pipeline's stage-in layout.
     StageInAttribute {
+        index_buffer: Option<(Word, u32)>,
         var: Word,
         value_ty: Word,
         index_var: Word,
@@ -367,7 +368,7 @@ pub(super) fn build_stage_input(
     let mut global_invocation_id_var: Option<Word> = None;
     let mut kernel_grid_push_constant_var: Option<Word> = None;
     if let Some(range) = ctx.kernel_dispatch.push_constant_range() {
-        bind_kernel_grid_push_constant_once(ctx, &mut kernel_grid_push_constant_var, range.offset);
+        bind_kernel_grid_push_constant_once(ctx, &mut kernel_grid_push_constant_var, range.offset, kern.is_some_and(KernMeta::uses_stage_in_region));
     }
     let stage_input_bindings = kern.map(KernMeta::stage_input_bindings).unwrap_or_default();
     let mut stage_in_buffer_vars: HashMap<u32, Word> = HashMap::default();
@@ -517,6 +518,8 @@ pub(super) fn build_stage_input(
                 }
                 Some(KernRole::ThreadgroupsPerGrid) => s == "threadgroups_per_grid",
                 Some(KernRole::ThreadsPerGrid) => s == "threads_per_grid",
+                Some(KernRole::StageInGridOrigin) => s == "stage_in_grid_origin",
+                Some(KernRole::StageInGridSize) => s == "stage_in_grid_size",
                 Some(KernRole::ThreadgroupPositionInGrid) => s == "threadgroup_position_in_grid",
                 Some(KernRole::ThreadIndexInThreadgroup) => s == "thread_index_in_threadgroup",
                 Some(KernRole::ThreadPositionInGrid) => s == "thread_position_in_grid",
@@ -682,9 +685,24 @@ pub(super) fn build_stage_input(
                 &mut global_invocation_id_var,
                 BuiltIn::GlobalInvocationId,
             );
+            let index_buffer = if matches!(layout.step, StageInStep::GridXIndexed | StageInStep::GridYIndexed) {
+                let (slot, ty) = ctx.kernel_stage_in.index_buffer.ok_or("indexed stage-in has no index descriptor")?;
+                let uint_ty = ctx.ty_uint();
+                let rta = ctx.ty_runtime_array(uint_ty);
+                let block_ty = ctx.module.fresh_id();
+                ctx.new_globals.push(type_inst(Op::TypeStruct, block_ty, vec![Operand::IdRef(rta)]));
+                let ptr_ty = ctx.ty_ptr(StorageClass::StorageBuffer, block_ty);
+                let index = ctx.module.fresh_id();
+                ctx.new_globals.push(Instruction::new(Op::Variable, Some(ptr_ty), Some(index), vec![Operand::StorageClass(StorageClass::StorageBuffer)]));
+                let binding=buffer_resource_binding(descriptor_layout,slot)?;
+                decorate_binding(&mut ctx.module,index,descriptor_layout.set,binding);
+                buffer_structs.push((index,block_ty));
+                Some((index,ty))
+            } else { None };
             bindings.push((
                 *pid,
                 ParamBinding::StageInAttribute {
+                    index_buffer,
                     var,
                     value_ty: *pty,
                     index_var,
@@ -1194,6 +1212,9 @@ pub(super) fn build_stage_input(
                             layout_defs.entry(id).or_insert_with(|| g.clone());
                         }
                     }
+                    let flat_elem = flat_elem.filter(|element| !buffer_accesses_prove_struct_layout(
+                        ctx, &ctx.module.functions[entry_idx], *pid, *element, st, &layout_defs,
+                    ));
                     if let Some(elem) = flat_elem {
                         let already_has_wrapper_member0 = access_chains_include_wrapper_member0(
                             &defs,
@@ -1229,8 +1250,7 @@ pub(super) fn build_stage_input(
                                 typed_aliases: vec![],
                             },
                         )
-                    } else if !pointee_is_scalar
-                        && buffer_has_multi_index_access_chains(
+                    } else if buffer_has_multi_index_access_chains(
                             &ctx.module.functions[entry_idx],
                             *pid,
                         )
@@ -1241,6 +1261,8 @@ pub(super) fn build_stage_input(
                             st,
                         )
                     {
+                        // Opaque pointer recovery can leave a scalar pointee even when
+                        // reflection and access paths prove an array of records.
                         let rta = ctx.ty_runtime_array(st);
                         let block = ctx.module.fresh_id();
                         ctx.new_globals.push(type_inst(
@@ -1753,6 +1775,12 @@ pub(super) fn build_stage_input(
                     },
                 ));
             }
+        } else if role_is("stage_in_grid_origin") || role_is("stage_in_grid_size") {
+            let var = kernel_grid_push_constant_var.ok_or("stage-in region requires the dynamic dispatch payload")?;
+            let lanes = scalar_or_vector_component(&defs, *pty).and_then(|(_, lanes)| lanes).unwrap_or(1);
+            bindings.push((*pid, ParamBinding::LoadKernelDispatchField {
+                var, first_member: if role_is("stage_in_grid_origin") { 12 } else { 15 }, out_ty: *pty, lanes,
+            }));
         } else if role_is("threads_per_grid") {
             match ctx.kernel_dispatch {
                 crate::reflect::KernelDispatch::ThreadsFixed { .. }

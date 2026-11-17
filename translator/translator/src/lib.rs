@@ -298,6 +298,12 @@ fn build_reflection(
                 .unwrap_or_else(reflect::KernelDispatch::safe_default),
         );
     }
+    if reflection.kernel_stage_in_region.is_some() {
+        let base=reflection.kernel_dispatch.and_then(|d|d.push_constant_range()).ok_or("stage-in region requires a dispatch push-constant payload")?;
+        let offset=base.offset.checked_add(base.size).ok_or("stage-in region offset overflow")?;
+        offset.checked_add(24).ok_or("stage-in region extent overflow")?;
+        reflection.kernel_stage_in_region=Some(reflect::KernelDispatchPushConstantRange { offset, size: 24 });
+    }
     let runtime_sampler_indices = reflection
         .bindings
         .iter()
@@ -915,6 +921,14 @@ pub fn translate_native_no_retry_constructed_with_options(
             Err(failure.error)
         }
     };
+    // Raw buffer construction cannot repair a lost local resource identity. Let
+    // the caller forward immutable object fields and retry the complete module;
+    // accepting a validating raw fallback here can silently remove its reads.
+    if let Err(error) = &primary {
+        if error.contains("local resource pointer phi requires field forwarding") {
+            return Err(error.clone());
+        }
+    }
     // the inline retry builds its buffers raw first: on Blender Eevee's deferred light shader the typed construction of
     // the inlined module validated and rendered black, the raw one lit the scene as the reference GPU does
     if raw_buffers_first_on() {
@@ -1421,6 +1435,9 @@ fn translate_sanitized_with_meta_prevalidated_carrier(
     };
     let translated = match primary_finished {
         Ok(finished) => Ok(finished),
+        Err(emit_err) if emit_err.contains("local resource pointer phi requires field forwarding") => {
+            Err(emit_err)
+        }
         Err(emit_err) if rc.needs_raw_construction() => {
             let constructed = rc.construct_raw().map_err(|construction_error| {
                 format!("{emit_err}; raw construction failed: {construction_error}")
