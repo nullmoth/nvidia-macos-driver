@@ -141,6 +141,7 @@ def stage(base, zink, output, components=None, native_gld=False, records=None, w
     with tempfile.TemporaryDirectory(prefix='.zink-package-', dir=output.parent) as temp:
         payload = Path(temp) / 'pkgroot'
         copy_bundle(base, payload)
+        shutil.copy2(ROOT / 'docs/GPU-UTILIZATION.md', payload / 'GPU-UTILIZATION.md')
         audio_identity = stage_optional_audio(payload)
         webkit_identity = stage_webkit(payload, webkit_fixup_build, run)
         # Always bundle the real framebuffer, outside Library/Extensions. Only

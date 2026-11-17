@@ -40,6 +40,7 @@ These checks do not establish that a new package boots successfully.
 - [MPV and other Vulkan applications](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/nvk/native-macos/APPLICATIONS.md)
 - [Wine / CrossOver, DXVK, D3D12 and DLSS](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/nvk/wine-macos/INSTALL.md)
 - [Optional MetalFX DLSS](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/docs/METALFX-DLSS.md)
+- [Optional Activity Monitor GPU usage (off by default)](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/docs/GPU-UTILIZATION.md)
 - [Video codecs](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/video/INSTALL.md)
 - [Zink OpenGL and OBS compatibility](https://github.com/HighDelay/nvidia-macos-driver-nvk/blob/main/docs/ZINK-OPENGL.md)
 

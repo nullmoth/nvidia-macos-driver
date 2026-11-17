@@ -17,6 +17,7 @@ GUIDES = {
     Path('WINE-NVK.md'): 'Wine-CrossOver.md',
     Path('VIDEO-CODECS.md'): 'Video-codecs.md',
     Path('METALFX-DLSS.md'): 'MetalFX-DLSS.md',
+    Path('GPU-UTILIZATION.md'): 'GPU-Utilization.md',
     ZINK / 'ZINK-OPENGL.md': 'Zink-OpenGL.md',
 }
 GUIDE_SOURCES = {
@@ -25,6 +26,7 @@ GUIDE_SOURCES = {
     Path('WINE-NVK.md'): Path('nvk/wine-macos/INSTALL.md'),
     Path('VIDEO-CODECS.md'): Path('video/INSTALL.md'),
     Path('METALFX-DLSS.md'): Path('docs/METALFX-DLSS.md'),
+    Path('GPU-UTILIZATION.md'): Path('docs/GPU-UTILIZATION.md'),
     ZINK / 'ZINK-OPENGL.md': Path('docs/ZINK-OPENGL.md'),
 }
 ZINK_REPORTS = (
