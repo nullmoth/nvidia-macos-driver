@@ -405,6 +405,93 @@ pub(in crate::passes) fn body_buf_elem_type(ctx: &Ctx, func: &Function, pid: Wor
     elements.next().is_none().then_some(element)
 }
 
+pub(in crate::passes) fn buffer_accesses_prove_struct_layout(
+    ctx: &Ctx,
+    func: &Function,
+    pid: Word,
+    element: Word,
+    struct_ty: Word,
+    defs: &HashMap<Word, Instruction>,
+) -> bool {
+    // A recovered pointer can have a scalar placeholder type even when its
+    // single access index is a struct member ordinal. Blender's grid size is
+    // member 1 at byte 128, not float4 element 1 at byte 16. Rejecting the flat
+    // interpretation alone is insufficient: CoreAnimation also uses flat views
+    // whose indices are not valid metadata members. Select the struct only when
+    // every root use is accounted for and every direct access preserves both
+    // its type and AIR offset. Keep this proof local: only pointer copies and
+    // bitcasts preserve the root address here. An escaping pointer, aggregate,
+    // phi/select or pointer-arithmetic chain retains the existing layout.
+    let (size, align) = crate::passes::stage_input::layout_ty_size_align(ctx, element, defs);
+    let stride = u64::from(crate::layout::round_up_u32(size, align));
+    if stride == 0 {
+        return false;
+    }
+    let mut aliases = crate::fxhash::set_from([pid]);
+    loop {
+        let mut changed = false;
+        for instruction in func.blocks.iter().flat_map(|block| &block.instructions) {
+            if matches!(instruction.class.opcode, Op::CopyObject | Op::Bitcast)
+                && matches!(instruction.operands.as_slice(), [Operand::IdRef(source)] if aliases.contains(source))
+            {
+                let Some(result) = instruction.result_id else { return false };
+                if instruction.result_type.and_then(|ty| ptr_pointee(defs, ty)).is_none() {
+                    return false;
+                }
+                changed |= aliases.insert(result);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut differs_from_flat = false;
+    for instruction in func.blocks.iter().flat_map(|block| &block.instructions) {
+        for (index, operand) in instruction.operands.iter().enumerate() {
+            if matches!(operand, Operand::IdRef(id) if aliases.contains(id))
+                && !(index == 0 && matches!(instruction.class.opcode,
+                    Op::CopyObject | Op::Bitcast | Op::AccessChain | Op::InBoundsAccessChain))
+            {
+                // Do not infer safety from the subset of uses we recognize.
+                return false;
+            }
+        }
+        if !matches!(instruction.class.opcode, Op::AccessChain | Op::InBoundsAccessChain)
+        {
+            continue;
+        }
+        let Some(Operand::IdRef(root)) = instruction.operands.first() else {
+            continue;
+        };
+        if !aliases.contains(root) {
+            continue;
+        }
+        let indices = instruction.operands[1..].iter().map(|operand| {
+            let Operand::IdRef(index) = operand else { return None };
+            u32::try_from(const_int_literal(defs, *index)?).ok()
+        }).collect::<Option<Vec<_>>>();
+        let Some(indices) = indices else { return false };
+        let Some(fact) = ctx.emit_sidecar.buffer_access_offsets.iter().find(|fact| {
+            Some(fact.id) == instruction.result_id && aliases.contains(&fact.root)
+        }) else {
+            // This is a positive proof, not a fallback based on missing facts.
+            return false;
+        };
+        let Ok(byte_offset) = u32::try_from(fact.byte_offset) else { return false };
+        let Some(target) = instruction.result_type.and_then(|ty| ptr_pointee(defs, ty)) else {
+            return false;
+        };
+        let path = rewrites::air_struct_access_path_at_byte_offset(ctx, defs, struct_ty, byte_offset, target);
+        if path.as_deref() != Some(indices.as_slice()) {
+            return false;
+        }
+        if let [index] = indices.as_slice() {
+            differs_from_flat |= u64::from(*index).checked_mul(stride) != Some(fact.byte_offset);
+        }
+    }
+    differs_from_flat
+}
+
 pub(in crate::passes) fn body_buf_flat_scalar_element_type(
     ctx: &Ctx,
     func: &Function,
@@ -489,6 +576,7 @@ pub(in crate::passes) fn texture_dims(
                 || name.starts_with("air.get_height_texture")
                 || name.starts_with("air.get_depth_texture")
                 || name.starts_with("air.get_array_size_texture")
+                || name.starts_with("air.get_array_size_depth")
                 || name.starts_with("air.get_width_depth")
                 || name.starts_with("air.get_height_depth")
                 || name.starts_with("air.get_depth_depth")
@@ -612,6 +700,7 @@ fn is_size_query(name: &str) -> bool {
         || name.starts_with("air.get_height_texture")
         || name.starts_with("air.get_depth_texture")
         || name.starts_with("air.get_array_size_texture")
+        || name.starts_with("air.get_array_size_depth")
         || name.starts_with("air.get_width_depth")
         || name.starts_with("air.get_height_depth")
         || name.starts_with("air.get_depth_depth")
@@ -770,6 +859,51 @@ fn sample_dim(name: &str) -> (Dim, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn struct_layout_requires_a_valid_member_at_the_recorded_byte_offset() {
+        let mut module = Module::new();
+        module.types_global_values = vec![
+            Instruction::new(Op::TypeFloat, None, Some(1), vec![Operand::LiteralBit32(32)]),
+            Instruction::new(Op::TypeVector, None, Some(2), vec![Operand::IdRef(1), Operand::LiteralBit32(4)]),
+            Instruction::new(Op::TypeInt, None, Some(3), vec![Operand::LiteralBit32(32), Operand::LiteralBit32(0)]),
+            Instruction::new(Op::TypePointer, None, Some(4), vec![Operand::StorageClass(StorageClass::UniformConstant), Operand::IdRef(2)]),
+            Instruction::new(Op::Constant, Some(3), Some(5), vec![Operand::LiteralBit32(8)]),
+            Instruction::new(Op::TypeArray, None, Some(6), vec![Operand::IdRef(2), Operand::IdRef(5)]),
+            Instruction::new(Op::TypeStruct, None, Some(7), vec![Operand::IdRef(6), Operand::IdRef(2)]),
+            Instruction::new(Op::Constant, Some(3), Some(8), vec![Operand::LiteralBit32(1)]),
+            Instruction::new(Op::Constant, Some(3), Some(9), vec![Operand::LiteralBit32(11)]),
+        ];
+        module.functions.push(Function {
+            def: None, end: None, parameters: vec![],
+            blocks: vec![Block {
+                label: Some(Instruction::new(Op::Label, None, Some(20), vec![])),
+                instructions: vec![Instruction::new(Op::InBoundsAccessChain, Some(4), Some(101),
+                    vec![Operand::IdRef(100), Operand::IdRef(8)])],
+            }],
+        });
+        let mut ctx = Ctx::new(module);
+        let defs = type_defs(&ctx.module);
+        ctx.emit_sidecar.buffer_access_offsets.push(crate::emit_sidecar::BufferAccessOffset {
+            id: 101, root: 100, byte_offset: 128,
+        });
+        assert!(buffer_accesses_prove_struct_layout(&ctx, &ctx.module.functions[0], 100, 2, 7, &defs));
+
+        // CoreAnimation's failing variant had an index outside the metadata
+        // struct. Conflicting flat-offset evidence must not select that struct.
+        ctx.module.functions[0].blocks[0].instructions[0].operands[1] = Operand::IdRef(9);
+        assert!(!buffer_accesses_prove_struct_layout(&ctx, &ctx.module.functions[0], 100, 2, 7, &defs));
+        assert_eq!(body_buf_elem_type(&ctx, &ctx.module.functions[0], 100), Some(2));
+
+        // A valid member number and result type alone are not enough either.
+        ctx.module.functions[0].blocks[0].instructions[0].operands[1] = Operand::IdRef(8);
+        ctx.emit_sidecar.buffer_access_offsets[0].byte_offset = 64;
+        assert!(!buffer_accesses_prove_struct_layout(&ctx, &ctx.module.functions[0], 100, 2, 7, &defs));
+        ctx.emit_sidecar.buffer_access_offsets[0].byte_offset = 16;
+        assert!(!buffer_accesses_prove_struct_layout(&ctx, &ctx.module.functions[0], 100, 2, 7, &defs));
+        ctx.emit_sidecar.buffer_access_offsets.clear();
+        assert!(!buffer_accesses_prove_struct_layout(&ctx, &ctx.module.functions[0], 100, 2, 7, &defs));
+    }
 
     #[test]
     fn buffer_discovery_follows_exact_by_value_wrapper_field() {

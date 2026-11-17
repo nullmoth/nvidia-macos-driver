@@ -12,7 +12,7 @@ pub(crate) fn decorate_unwritten_descriptors(module: &mut Module) {
     nonwritable::decorate_unwritten_descriptors(module);
 }
 
-pub const REFLECTION_VERSION: u32 = 56;
+pub const REFLECTION_VERSION: u32 = 58;
 
 pub const RAY_INSTANCE_USER_ID_TABLE_BINDING: u32 = 31;
 
@@ -1380,6 +1380,9 @@ pub struct ShaderReflection {
     pub local_size: Option<[u32; 3]>,
     pub max_work_group_size: Option<u32>,
     pub kernel_dispatch: Option<KernelDispatch>,
+    /// Optional stage-in payload: GPU address of origin.xyz/size.xyz followed by reserved words; separate from dispatch bounds.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub kernel_stage_in_region: Option<KernelDispatchPushConstantRange>,
     #[cfg_attr(feature = "serde", serde(default))]
     pub fragment_sample_positions: Option<SamplePositionPushConstantRange>,
     pub vertex_builtins: Option<VertexBuiltins>,
@@ -2341,6 +2344,7 @@ impl ShaderReflection {
             local_size: None,
             max_work_group_size: None,
             kernel_dispatch: None,
+            kernel_stage_in_region: None,
             fragment_sample_positions: None,
             vertex_builtins: None,
             tessellation: None,
@@ -2532,6 +2536,7 @@ impl ShaderReflection {
             local_size: None,
             max_work_group_size: None,
             kernel_dispatch: None,
+            kernel_stage_in_region: None,
             fragment_sample_positions: None,
             vertex_builtins: Some(vertex_builtins),
             tessellation: meta.tessellation.as_ref().map(|tessellation| {
@@ -2749,6 +2754,7 @@ impl ShaderReflection {
             local_size: Some(local_size),
             max_work_group_size: meta.max_work_group_size,
             kernel_dispatch: Some(KernelDispatch::safe_default()),
+            kernel_stage_in_region: meta.uses_stage_in_region().then_some(KernelDispatchPushConstantRange { offset: 48, size: 24 }),
             fragment_sample_positions: None,
             vertex_builtins: None,
             tessellation: None,

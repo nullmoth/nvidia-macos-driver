@@ -26,6 +26,9 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools"
 # name -> why this runner cannot run it
 NEEDS_INPUT = {
+    "test_compute_stage_in.py": "requires an explicit isolated plugin, NVK directory, and a real GPU",
+    "test_translation_resource_reads.py": "needs a built translator; accepts a pre-fix library for negative controls",
+    "test_translation_local_field_args.py": "needs a built translator; accepts a pre-fix library for negative controls",
     "test_fcwarm.py": "needs a built libnvmtl_translate.dylib and a shader file (build step)",
     "test_gl_translation.py": "needs a built libnvmtl_translate.dylib (build step)",
     "test_resource_phi_fold.py": "needs a built libnvmtl_translate.dylib (build step)",

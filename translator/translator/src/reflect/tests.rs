@@ -1601,6 +1601,7 @@ fn reflection_serde_covers_every_reflection_field() {
         local_size: Some([8, 8, 1]),
         max_work_group_size: Some(256),
         kernel_dispatch: Some(KernelDispatch::ThreadsDynamic { offset: 16 }),
+        kernel_stage_in_region: None,
         fragment_sample_positions: None,
         vertex_builtins: Some(VertexBuiltins {
             uses_vertex_index: true,

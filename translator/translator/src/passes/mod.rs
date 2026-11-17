@@ -69,6 +69,8 @@ pub enum StageInStep {
     /// Element `thread_position_in_grid.x / rate` (or `.y`).
     GridX,
     GridY,
+    GridXIndexed,
+    GridYIndexed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +86,7 @@ pub const STAGE_IN_MAX_LAYOUTS: usize = 31;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct KernelStageIn {
+    pub index_buffer: Option<(u32, u32)>,
     pub attributes: [Option<StageInAttribute>; STAGE_IN_MAX_ATTRIBUTES],
     pub layouts: [Option<StageInLayout>; STAGE_IN_MAX_LAYOUTS],
 }
@@ -3121,6 +3124,7 @@ pub(crate) fn transform_with_options_and_sidecar(
     split_workgroup_ptr_access_chain_descent(&mut ctx, entry_idx);
     decorate_ptr_access_chain_base_strides(&mut ctx);
     ctx.module.types_global_values.append(&mut ctx.new_globals);
+    crate::spirv_variable_ptr::lower_storage_buffer_record_arrays(&mut ctx.module);
     stage_input::drop_unconsumed_placeholder_descriptor_loads(&mut ctx);
     module_cleanup::drop_unreferenced_global_variables(&mut ctx.module);
     module_cleanup::gc_dead_globals(&mut ctx);

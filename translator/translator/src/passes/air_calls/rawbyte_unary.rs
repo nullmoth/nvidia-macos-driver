@@ -306,6 +306,7 @@ pub(in crate::passes) fn is_image_size_query(name: &str) -> bool {
         || name.starts_with("air.get_height_texture")
         || name.starts_with("air.get_depth_texture")
         || name.starts_with("air.get_array_size_texture")
+        || name.starts_with("air.get_array_size_depth")
         || name.starts_with("air.get_width_depth")
         || name.starts_with("air.get_height_depth")
         || name.starts_with("air.get_depth_depth")

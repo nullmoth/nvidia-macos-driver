@@ -745,7 +745,7 @@ impl<'a> Analyzer<'a> {
         let pointer = self.definitions.get(&pointer_ty).copied()?;
         let block_ty = pointer.operands.get(1).and_then(id_ref)?;
         let block = self.definitions.get(&block_ty).copied()?;
-        if block.class.opcode != Op::TypeStruct || block.operands.len() != 12 {
+        if block.class.opcode != Op::TypeStruct || !matches!(block.operands.len(), 12 | 18) {
             return None;
         }
         let first_offset = *self.decorations.member_offsets.get(&(block_ty, 0))?;

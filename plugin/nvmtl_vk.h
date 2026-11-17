@@ -80,14 +80,20 @@ typedef struct {
 void nvmtl_vk_clock_refresh(void);
 int nvmtl_vk_interval_seconds(const nvmtl_gpu_interval *t, double *start, double *end);
 
+#define NVMTL_MAX_VIEWPORTS 16
+typedef struct { float x, y, w, h, zn, zf; } nvk_viewport;
+typedef struct { int32_t x, y; uint32_t w, h; } nvk_scissor;
 typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view; void *table;
                  void **fbs; unsigned nfb, capfb;
                  nvk_setref *sets; unsigned nsets, capsets;
                  void *address_pages; unsigned address_count;
                  uint64_t *icb_tabs[2]; unsigned icb_ntabs, icb_slot;   /* GPU-encoded ICB replay: per-slot address table copies (vertex, fragment) and the one in use, 1-based, 0 = none */
                  unsigned nobind, skipped;
+                 uint32_t stage_in_region[6];
                  void *dcache[32]; void *dcachepool; unsigned ndcache, dcache_gl_uniform;
                  unsigned in_rp, occlusion_reset; uint32_t wseq;
+                 uint32_t viewport_count, scissor_count;
+                 nvk_scissor scissors[NVMTL_MAX_VIEWPORTS];
                  void *fetchview[NVMTL_NCOL];   /* the open pass's colour views, read by [[color(n)]] framebuffer fetch */
                  void *fcopyview[NVMTL_NCOL];   /* copies of the colour attachments, for fetch_copy pipelines */
                  void **fcp; unsigned nfcp, capfcp;   /* copy images this command buffer holds until it retires */
@@ -225,6 +231,8 @@ int  nvmtl_vk_image_create_ms_storage(uint32_t w, uint32_t h, uint32_t vkfmt, ui
 int  nvmtl_vk_image_create_ms_full(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, uint32_t samples, uint32_t mtl_type, uint32_t layers, nvk_image *out);
 int  nvmtl_vk_depth_create_ms(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t aspect, uint32_t samples, nvk_image *out);
 int  nvmtl_vk_pipeline_create_vin_ms(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vkfmt, uint32_t depthfmt, const void *blend, const void *vin, uint32_t samples, void *out);
+void nvmtl_vk_cmd_set_viewports(nvk_cmdbuf *c, const nvk_viewport *v, uint32_t count);
+void nvmtl_vk_cmd_set_scissors(nvk_cmdbuf *c, const nvk_scissor *r, uint32_t count);
 void nvmtl_vk_cmd_set_viewport(nvk_cmdbuf *c, float x, float y, float w, float h, float zn, float zf);
 void nvmtl_vk_cmd_draw(nvk_cmdbuf *c, uint32_t first, uint32_t count, uint32_t instances, uint32_t baseInstance);
 int  nvmtl_vk_cmd_clear_image(nvk_cmdbuf *c, nvk_image *img, const float clear[4]);

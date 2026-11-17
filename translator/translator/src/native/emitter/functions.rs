@@ -216,6 +216,7 @@ pub(in crate::native::emitter) fn is_air_texture_operation(callee: &str) -> bool
         || callee.starts_with("air.get_height_texture")
         || callee.starts_with("air.get_depth_texture")
         || callee.starts_with("air.get_array_size_texture")
+        || callee.starts_with("air.get_array_size_depth")
         || callee.starts_with("air.get_width_depth")
         || callee.starts_with("air.get_height_depth")
         || callee.starts_with("air.get_depth_depth")
@@ -2430,6 +2431,13 @@ impl Emitter {
         {
             return Ok(LlType::Int(32));
         }
+        if global.addrspace == 3 && self.byte_view_reinterpret_globals.contains(&global.name) {
+            let (size, _) = self.raw_type_size_align(&ty)?;
+            if size == 0 || size % 4 != 0 || size / 4 > u32::MAX as u64 || crate::native::tir::type_contains_pointer(&ty, &self.ir.types) {
+                return Err("workgroup byte view requires a nonempty word-sized pointer-free allocation".into());
+            }
+            return Ok(LlType::Array(Box::new(LlType::Int(32)), (size / 4) as u32));
+        }
         if global.addrspace != 3 && self.byte_view_reinterpret_globals.contains(&global.name) {
             if let Some(size) = i8_leaf_byte_size(&ty) {
                 return Ok(LlType::Array(Box::new(LlType::Int(8)), size));
@@ -2464,6 +2472,9 @@ impl Emitter {
                     };
                     let declared_ty = self.resolve_type(declared_ty)?;
                     let source_ty = self.resolve_type(&gep.source_ty)?;
+                    if source_ty == LlType::Int(8) && globals.iter().any(|g| g.name == *base && g.addrspace == 3) {
+                        reinterpreted.insert(base.clone());
+                    }
                     if source_ty != declared_ty && i8_leaf_byte_size(&declared_ty).is_some() {
                         reinterpreted.insert(base.clone());
                     }

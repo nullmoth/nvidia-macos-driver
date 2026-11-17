@@ -370,6 +370,7 @@ pub(crate) fn air_image_intrinsic(name: &str) -> bool {
                 "air.get_height_texture",
                 "air.get_depth_texture",
                 "air.get_array_size_texture",
+                "air.get_array_size_depth",
                 "air.get_width_depth",
                 "air.get_height_depth",
                 "air.get_depth_depth",
