@@ -687,6 +687,16 @@ impl Emitter {
         if !has_unmodeled {
             return Ok(false);
         }
+        // Nested/loop-carried phis can hide a local resource behind null/undef
+        // initial arms. Treating the remaining placeholder as zero silently drops
+        // real buffer reads. Recover the immutable object fields before emission:
+        // attaching field identity to only the late phi is insufficient for the
+        // complete access graph (including scalar reads and sampler operands).
+        if self.common_unresolved_local_field(incoming).is_none()
+            && self.recoverable_local_field_phi(incoming).is_some()
+        {
+            return Err("native emitter: local resource pointer phi requires field forwarding".into());
+        }
         self.emit_pointer_nullness_phi(name, incoming, result_ty, instructions)?;
         // Every incoming value loads the same local pointer field (Hades' DistanceFieldFancy reloads its uniform
         // pointer from the shader object after a discard and merges the two loads): the phi is one more load of that
@@ -725,6 +735,45 @@ impl Emitter {
             }
         }
         common.cloned()
+    }
+
+    fn recoverable_local_field_phi(&self, incoming: &[(LlValue, String)]) -> Option<LocalPointerField> {
+        let mut common = None;
+        let mut visiting = HashSet::default();
+        for (value, _) in incoming {
+            if !self.collect_local_field_phi(value, &mut common, &mut visiting) {
+                return None;
+            }
+        }
+        common
+    }
+
+    fn collect_local_field_phi(
+        &self,
+        value: &LlValue,
+        common: &mut Option<LocalPointerField>,
+        visiting: &mut HashSet<String>,
+    ) -> bool {
+        // Control-flow reconstruction introduces null/undef initial values and
+        // loop-carried phis. All concrete arms must still name the same field.
+        // Nullness is carried by emit_pointer_nullness_phi independently; do not
+        // discard the resource identity merely because an inactive arm is null.
+        if matches!(value, LlValue::Zero | LlValue::Undef) {
+            return true;
+        }
+        let LlValue::Local(name) = value else { return false };
+        if let Some(key) = self.unresolved_local_field_loads.get(name) {
+            if let Some(seen) = common { return seen == key; }
+            *common = Some(key.clone());
+            return true;
+        }
+        let Some(incoming) = self.tir_phi_incomings.get(name) else { return false };
+        if !visiting.insert(name.clone()) { return true; }
+        let result = incoming.iter().all(|(value, _)| {
+            self.collect_local_field_phi(value, common, visiting)
+        });
+        visiting.remove(name);
+        result
     }
 
     pub(in crate::native::emitter) fn forward_gep_base_is_unmodeled(&self, name: &str) -> bool {

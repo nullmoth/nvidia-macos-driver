@@ -693,6 +693,17 @@ impl Emitter {
                     ));
                 }
             }
+            if let Some(id) = self.leading_local_field_call_arg_id(
+                &call.callee,
+                index,
+                &param_name,
+                &param_ty,
+                &arg,
+                instructions,
+            )? {
+                ids.push(id);
+                continue;
+            }
             ids.push(self.value_id_in(&arg.value, &arg.ty, instructions)?);
         }
         for value in &nullness_args {
@@ -700,6 +711,56 @@ impl Emitter {
         }
         ids.extend(workgroup_cursors);
         Ok(ids)
+    }
+
+    fn leading_local_field_call_arg_id(
+        &mut self,
+        callee: &str,
+        index: usize,
+        param_name: &str,
+        param_ty: &LlType,
+        arg: &TypedValue,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<Option<Word>, String> {
+        if self.resolve_type(param_ty)? != LlType::Ptr(0)
+            || self.pointer_storage_for(&arg.value, 0)? != StorageClass::Function
+        {
+            return Ok(None);
+        }
+        let Some(expected) = self.function_param_concrete_pointee(callee, index, param_name) else {
+            return Ok(None);
+        };
+        let expected = self.resolve_type(&expected)?;
+        // Pointer-bearing local values use a separate integer payload model.
+        if function_storage_local_type(&expected) != expected {
+            return Ok(None);
+        }
+        let Some(actual) = self.pointer_pointee_for_value(&arg.value)? else {
+            return Ok(None);
+        };
+        let actual = self.resolve_type(&actual)?;
+        let Some((_, path)) = first_aggregate_leaf(&actual, &|ty| *ty == expected, false) else {
+            return Ok(None);
+        };
+        if path.is_empty() {
+            return Ok(None);
+        }
+        // An opaque AIR pointer can name both a local aggregate and its first
+        // field. SPIR-V helper parameters are typed: pass the field address so
+        // inlining cannot turn a field store into a store to the whole aggregate.
+        let base = self.value_id_in(&arg.value, &arg.ty, instructions)?;
+        let pointer_type = self.ptr_type_id(StorageClass::Function, &expected)?;
+        let result = self.fresh();
+        let zero = self.const_uint(0)?;
+        let mut operands = vec![Operand::IdRef(base)];
+        operands.extend(path.iter().map(|_| Operand::IdRef(zero)));
+        instructions.push(Self::inst(
+            Op::InBoundsAccessChain,
+            Some(pointer_type),
+            Some(result),
+            operands,
+        ));
+        Ok(Some(result))
     }
 
     fn data_buffer_array_call_arg_id(

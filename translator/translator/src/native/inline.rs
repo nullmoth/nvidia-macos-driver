@@ -1,5 +1,5 @@
 use crate::fxhash::{HashMap, HashSet};
-use super::lex::split_top_level;
+use super::lex::{matching_delim, split_top_level};
 
 pub(super) fn inline_direct_function_pointer_consumers(
     san_ll: &str,
@@ -451,8 +451,9 @@ fn parse_call_args(args_str: &str) -> Option<Vec<String>> {
 fn arg_value_token(chunk: &str) -> Option<String> {
     let toks = super::lex::split_top_level_whitespace(chunk);
     let last = *toks.last()?;
-    if last.starts_with('%') {
-        return Some(last.to_string());
+    // A splat's parenthesized scalar is only its payload, not the whole value.
+    if toks.len() >= 2 && toks[toks.len() - 2] == "splat" {
+        return Some(format!("splat {last}"));
     }
     Some(last.to_string())
 }
@@ -533,11 +534,13 @@ fn rename_phi_pred_labels(line: &str, label_map: &HashMap<String, String>) -> St
         };
         out.push_str(&rest[..=open]);
         let after = &rest[open + 1..];
-        let Some(close) = after.find(']') else {
+        // Incoming aggregate constants may contain nested array types and values.
+        // Match the whole incoming edge before rewriting its predecessor label.
+        let Some(close) = matching_delim(rest, open, '[', ']') else {
             out.push_str(after);
             break;
         };
-        let inner = &after[..close];
+        let inner = &rest[open + 1..close];
         let parts = split_top_level(inner, ',');
         if parts.len() == 2 {
             let val = parts[0].trim();
@@ -551,7 +554,7 @@ fn rename_phi_pred_labels(line: &str, label_map: &HashMap<String, String>) -> St
             out.push_str(inner);
         }
         out.push(']');
-        rest = &after[close + 1..];
+        rest = &rest[close + 1..];
     }
     out
 }
@@ -1168,7 +1171,10 @@ fn inline_one(
         if non_void.len() == 1 {
             let mut return_value = HashMap::default();
             return_value.insert(result.clone(), non_void[0].0.clone());
-            for line in &mut after_relabeled {
+            // LLVM block order is not dominance order: a use in a successor
+            // (including a loop exit) may precede this call in the text. Replace
+            // every caller use when removing the call's result definition.
+            for line in new_body.iter_mut().chain(after_relabeled.iter_mut()) {
                 *line = rename_line(line, &return_value, &HashMap::default());
             }
         } else {
@@ -1233,18 +1239,19 @@ fn inline_single_block_leaf(
         replacement.push(rename_line(line, &value_map, &HashMap::default()));
     }
     let returned = returned?;
+    let mut before = body[..idx].to_vec();
     let mut after = body[idx + 1..].to_vec();
     if let Some(result) = &call.result {
         if returned.is_empty() {
             return None;
         }
         let result_map = crate::fxhash::map_from([(result.clone(), returned)]);
-        for line in &mut after {
+        for line in before.iter_mut().chain(after.iter_mut()) {
             *line = rename_line(line, &result_map, &HashMap::default());
         }
     }
     let mut new_body = Vec::with_capacity(body.len() + replacement.len());
-    new_body.extend_from_slice(&body[..idx]);
+    new_body.extend(before);
     new_body.extend(replacement);
     new_body.extend(after);
     Some(new_body)
@@ -1397,11 +1404,13 @@ fn relabel_phi_preds(line: &str, bcall: Option<&str>, cont: &str) -> String {
         };
         out.push_str(&rest[..=open]);
         let after = &rest[open + 1..];
-        let Some(close) = after.find(']') else {
+        // Incoming aggregate constants may contain nested array types and values.
+        // Match the whole incoming edge before rewriting its predecessor label.
+        let Some(close) = matching_delim(rest, open, '[', ']') else {
             out.push_str(after);
             break;
         };
-        let inner = &after[..close];
+        let inner = &rest[open + 1..close];
         let parts = split_top_level(inner, ',');
         if parts.len() == 2 {
             let val = parts[0].trim();
@@ -1416,7 +1425,7 @@ fn relabel_phi_preds(line: &str, bcall: Option<&str>, cont: &str) -> String {
             out.push_str(inner);
         }
         out.push(']');
-        rest = &after[close + 1..];
+        rest = &rest[close + 1..];
     }
     out
 }
@@ -1432,6 +1441,99 @@ fn is_phi_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phi_predecessors_preserve_nested_array_constants() {
+        let line = "%p = phi %Record [ %dynamic, %other ], [ { [4 x float] [float 1.0, float 0.0, float 0.0, float 1.0], [3 x float] poison }, %fallback ]";
+        let mut labels = HashMap::default();
+        labels.insert("other".to_string(), "new.other".to_string());
+        labels.insert("fallback".to_string(), "new.fallback".to_string());
+        let expected = line
+            .replace("%other ]", "%new.other ]")
+            .replace("%fallback ]", "%new.fallback ]");
+        assert_eq!(rename_phi_pred_labels(line, &labels), expected);
+        assert_eq!(
+            relabel_phi_preds(line, Some("fallback"), "continued"),
+            line.replace("%fallback ]", "%continued ]")
+        );
+        let array = "%p = phi [2 x [2 x i32]] [ [[2 x i32] [i32 1, i32 2], [2 x i32] [i32 3, i32 4]], %fallback ], [ %v, %other ]";
+        assert_eq!(
+            rename_phi_pred_labels(array, &labels),
+            array
+                .replace("%fallback ]", "%new.fallback ]")
+                .replace("%other ]", "%new.other ]")
+        );
+        assert_eq!(
+            relabel_phi_preds(array, Some("fallback"), "continued"),
+            array.replace("%fallback ]", "%continued ]")
+        );
+    }
+
+    #[test]
+    fn inlining_preserves_aggregate_phi_edges() {
+        let source = r#"
+%Record = type { [2 x float], i32 }
+define internal %Record @choose(i1 %condition, %Record %value) {
+entry:
+  br i1 %condition, label %dynamic, label %fallback
+dynamic:
+  br label %merge
+fallback:
+  br label %merge
+merge:
+  %result = phi %Record [ %value, %dynamic ], [ { [2 x float] [float 1.0, float 0.0], i32 7 }, %fallback ]
+  ret %Record %result
+}
+define %Record @main(i1 %condition, %Record %value) {
+entry:
+  %result = call %Record @choose(i1 %condition, %Record %value)
+  ret %Record %result
+}
+"#;
+        let out = inline_nonrecursive_internal_calls(source);
+        assert!(!out.contains("call %Record @choose"), "{out}");
+        let phi = out
+            .lines()
+            .find(|line| line.contains(" = phi %Record"))
+            .unwrap();
+        assert!(
+            phi.contains("[ { [2 x float] [float 1.0, float 0.0], i32 7 }, %.inl0.fallback ]"),
+            "{out}"
+        );
+        assert!(out.contains(".inl0.fallback:"), "{out}");
+
+        let source = r#"
+%Record = type { [2 x float], i32 }
+define internal void @side_effect(ptr %output) {
+entry:
+  store i32 1, ptr %output
+  ret void
+}
+define %Record @main(i1 %condition, %Record %value, ptr %output) {
+entry:
+  br i1 %condition, label %dynamic, label %fallback
+dynamic:
+  br label %merge
+fallback:
+  call void @side_effect(ptr %output)
+  br label %merge
+merge:
+  %result = phi %Record [ %value, %dynamic ], [ { [2 x float] [float 1.0, float 0.0], i32 7 }, %fallback ]
+  ret %Record %result
+}
+"#;
+        let out = inline_nonrecursive_internal_calls(source);
+        assert!(!out.contains("call void @side_effect"), "{out}");
+        let phi = out
+            .lines()
+            .find(|line| line.contains(" = phi %Record"))
+            .unwrap();
+        assert!(
+            phi.contains("[ { [2 x float] [float 1.0, float 0.0], i32 7 }, %.inl0.cont ]"),
+            "{out}"
+        );
+        assert!(out.contains(".inl0.cont:"), "{out}");
+    }
 
     #[test]
     fn repeated_inlining_starts_after_existing_namespace() {
@@ -3313,5 +3415,48 @@ mod builder_forward_tests {
     fn a_module_without_aggregates_is_borrowed() {
         let src = "define void @k() {\n  ret void\n}\n";
         assert!(matches!(forward_builder_pointer_fields(src), std::borrow::Cow::Borrowed(_)));
+    }
+}
+
+#[cfg(test)]
+mod splat_argument_tests {
+    #[test]
+    fn inlined_vector_constant_keeps_its_splat_constructor() {
+        let args = super::parse_call_args(
+            "<3 x float> splat (float -1.000000e+00), i32 noundef 7, <3 x float> %v",
+        ).unwrap();
+        assert_eq!(args, vec!["splat (float -1.000000e+00)", "7", "%v"]);
+    }
+}
+
+#[cfg(test)]
+mod return_use_tests {
+    use super::*;
+
+    #[test]
+    fn single_return_replaces_uses_in_textually_earlier_successors() {
+        // The exit is printed before its dominating call block. Both inline
+        // implementations must preserve the returned aggregate at that use.
+        let body = [
+            "entry:", "  br label %call_block", "exit:",
+            "  %item = extractvalue { i32, i32 } %value, 0", "  ret i32 %item",
+            "call_block:", "  %value = call { i32, i32 } @helper(i32 37)",
+            "  br label %exit",
+        ].map(str::to_string).to_vec();
+        for preserve_cfg in [false, true] {
+            let signature = parse_def_header(
+                "define internal { i32, i32 } @helper(i32 %x) {"
+            ).unwrap();
+            let callee = ["entry:",
+                "  %pair = insertvalue { i32, i32 } zeroinitializer, i32 %x, 0",
+                "  ret { i32, i32 } %pair",
+            ].map(str::to_string).to_vec();
+            let functions = crate::fxhash::map_from([("@helper".into(), (signature, callee))]);
+            let result = inline_one(body.clone(), 6, &functions, &mut 0, preserve_cfg)
+                .expect("inline aggregate return").join("\n");
+            assert!(!result.contains("%value"), "removed call result is still used: {result}");
+            assert!(result.contains("extractvalue { i32, i32 } %.inl0.pair, 0"), "{result}");
+            assert!(result.contains("insertvalue { i32, i32 } zeroinitializer, i32 37, 0"), "{result}");
+        }
     }
 }

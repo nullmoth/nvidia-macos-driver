@@ -33,6 +33,14 @@ else
 fi
 # The plugin's AIR decoder must be the package's own (build/build_air_dis.sh).
 [ -x "$ROOT/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/nvmtl-air-dis" ] || { echo "STOP: the plugin bundle lacks nvmtl-air-dis"; fail=1; }
+# A general-purpose LLVM dylib exports weak C++ definitions that collide with Apple's GPUCompiler LLVM. Check the
+# dynamic exports and bindings before signing off a package, including packages assembled from an older base tree.
+AIRLIB="$ROOT/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime/libLLVM.dylib"
+if [ -f "$AIRLIB" ]; then
+  python3 "$(dirname "$0")/../build/check_air_runtime.py" "$AIRLIB" || fail=1
+elif [ -f "$ROOT/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver" ]; then
+  echo "STOP: the plugin bundle lacks air-runtime/libLLVM.dylib"; fail=1
+fi
 # Every executable file we ship is ours or built from licensed open source. A program signed by Apple (the Metal toolchain's
 # air-opt shipped in 2.0 to 2.8.1 this way) is not ours to redistribute, and no library may load from outside the system
 # and the folders this package installs (a build machine's path, Homebrew or MacPorts would load whatever is there).

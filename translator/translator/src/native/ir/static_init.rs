@@ -19,13 +19,21 @@ fn resolved_value(value: &TypedValue, substitutions: &HashMap<String, TypedValue
 }
 
 fn constant_int(value: &TypedValue) -> Option<u64> {
-    match value.value {
-        LlValue::Bool(value) => Some(u64::from(value)),
-        LlValue::Int(value) => Some(value),
-        LlValue::SignedInt(value) => Some(value as u64),
-        LlValue::Zero => Some(0),
-        _ => None,
-    }
+    let raw = match value.value {
+        LlValue::Bool(value) => u64::from(value),
+        LlValue::Int(value) => value,
+        LlValue::SignedInt(value) => value as u64,
+        LlValue::Zero => 0,
+        _ => return None,
+    };
+    // Integer equality compares the declared-width bit pattern. In particular,
+    // an i32 function constant spelled 4294967295 is the same value as i32 -1.
+    let bits = match value.ty {
+        LlType::Bool => 1,
+        LlType::Int(bits @ 1..=64) => bits,
+        _ => return None,
+    };
+    Some(raw & (u64::MAX >> (64 - bits)))
 }
 
 fn prune_constant_cfg_edges(blocks: &mut Vec<BodyBlock>) {
@@ -214,6 +222,12 @@ impl LlModule {
                                     return None;
                                 };
                                 let result_ty = inst.result_ty.clone()?;
+                                // This summary stores u32 lanes. Wider loads must keep their
+                                // runtime initializer rather than folding a truncated value.
+                                if matches!(&result_ty, LlType::Int(33..))
+                                    || matches!(&result_ty, LlType::Vector(elem, _) if matches!(elem.as_ref(), LlType::Int(33..))) {
+                                    return None;
+                                }
                                 let value = self.static_init_globals.get(global)?;
                                 match value {
                                     meta::StaticIntValue::Scalar(value) => Some(TypedValue {
@@ -860,5 +874,46 @@ define void @main() {
             .find(|function| function.name == "main")
             .expect("entry");
         assert_eq!(entry.carrier_insts().count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod width_regression {
+    use super::*;
+    #[test]
+    fn sentinel_equality_respects_integer_width() {
+        for bits in [8u32,16,32,64] {
+            let mask=u64::MAX >> (64-bits);
+            for (pred,expected) in [("eq", "%yes"),("ne", "%no")] {
+                let ll=format!(r#"
+@source.MTL_FC_INIT_0_i = internal addrspace(2) externally_initialized constant i{bits} {mask}, section "air.fc_initializer"
+@value = internal addrspace(2) global i{bits} undef
+define internal void @_GLOBAL__sub_I_test() section "air.static_init" {{
+  %v = load i{bits}, ptr addrspace(2) @source.MTL_FC_INIT_0_i
+  store i{bits} %v, ptr addrspace(2) @value
+  ret void
+}}
+define i32 @main() {{
+entry:
+  %v = load i{bits}, ptr addrspace(2) @value
+  %c = icmp {pred} i{bits} %v, -1
+  br i1 %c, label %yes, label %no
+yes:
+  ret i32 7
+no:
+  ret i32 9
+}}
+"#);
+                let mut m=LlModule::parse_with_stage_meta(&ll,None,Some("main")).unwrap();
+                m.inline_simple_static_initializers();m.fold_static_initializer_constants();
+                let f=m.functions.iter().find(|f|f.name=="main").unwrap();
+                let labels=f.blocks.iter().map(|b|b.name.as_str()).collect::<Vec<_>>();
+                if bits == 64 {
+                    assert_eq!(labels,vec!["%entry","%yes","%no"],"wide load must remain dynamic");
+                } else {
+                    assert_eq!(labels,vec!["%entry",expected],"i{bits} {pred}");
+                }
+            }
+        }
     }
 }

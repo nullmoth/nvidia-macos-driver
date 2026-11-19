@@ -1,6 +1,6 @@
 #!/bin/bash
 # finish_package.sh <pkgroot> --nvencvt <libnvencvt.dylib> --air-dis <nvmtl-air-dis> --nmsmn <NMSMN.kext> <ryzenadj> <sha256>
-#                   [--boost <nvmtl-boost>] [--vulkan-loader <loader out dir>]
+#                   [--boost <nvmtl-boost>] [--vulkan-loader <loader out dir>] [--air-runtime <build out dir>]
 # The package build's last stage, in one fixed order: the video codec library, the Ryzen power parts, the optional boost
 # daemon and Vulkan loader, then sums_complete.sh, then check_package.sh. Each staging script refreshes its own SHA256SUMS
 # lines; nothing here rewrites the whole list, so a file the base tree carries without a line still fails the check instead
@@ -8,13 +8,14 @@
 # would not run the completeness check).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-ROOT=${1:?usage: finish_package.sh <pkgroot> --nvencvt <lib> --air-dis <bin> --nmsmn <kext> <ryzenadj> <sha256> [--boost <bin>] [--vulkan-loader <dir>]}
+ROOT=${1:?usage: finish_package.sh <pkgroot> --nvencvt <lib> --air-dis <bin> --nmsmn <kext> <ryzenadj> <sha256> [--boost <bin>] [--vulkan-loader <dir>] [--air-runtime <dir>]}
 shift
-NVENC=; AIRDIS=; NKEXT=; NBIN=; NSHA=; BOOST=; VLOAD=
+NVENC=; AIRDIS=; NKEXT=; NBIN=; NSHA=; BOOST=; VLOAD=; AIRRUNTIME=
 while [ $# -gt 0 ]; do
   case "$1" in
     --nvencvt) NVENC=${2:?}; shift 2;;
     --air-dis) AIRDIS=${2:?}; shift 2;;
+    --air-runtime) AIRRUNTIME=${2:?}; shift 2;;
     --nmsmn) NKEXT=${2:?}; NBIN=${3:?}; NSHA=${4:?}; shift 4;;
     --boost) BOOST=${2:?}; shift 2;;
     --vulkan-loader) VLOAD=${2:?}; shift 2;;
@@ -33,7 +34,17 @@ lipo -archs "$AIRDIS" | grep -qx x86_64 || { echo "finish_package: $AIRDIS is no
 cp "$AIRDIS" "$ROOT/$AD" && chmod 755 "$ROOT/$AD"
 codesign -f -s - "$ROOT/$AD" >/dev/null 2>&1 || { echo "finish_package: could not sign nvmtl-air-dis" >&2; exit 1; }
 bash "$HERE/sums_refresh.sh" "$ROOT" "$AD"
-# The two files above went into a bundle that was sealed before they existed. Seal it again and check the seal, then
+if [ -n "$AIRRUNTIME" ]; then
+  python3 "$HERE/../build/check_air_runtime.py" "$AIRRUNTIME/air-runtime/libLLVM.dylib"
+  AL="Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/air-runtime/libLLVM.dylib"
+  LICENSE="Library/GPUBundles/NVMTLDriver.bundle/Contents/Resources/air-runtime/LLVM-LICENSE.txt"
+  # The base package retains its zstd dependency and licence; this step replaces only LLVM.
+  mkdir -p "$(dirname "$ROOT/$AL")" "$(dirname "$ROOT/$LICENSE")"
+  cp "$AIRRUNTIME/air-runtime/libLLVM.dylib" "$ROOT/$AL"
+  cp "$AIRRUNTIME/LICENSE.txt" "$ROOT/$LICENSE"
+  bash "$HERE/sums_refresh.sh" "$ROOT" "$AL" "$LICENSE"
+fi
+# The staged files went into a previously sealed bundle. Seal it again and check the seal, then
 # refresh the lines of the seal's own files and of files that already had a line (signing rewrites a Mach-O's signature);
 # a file with no line stays without one, so the completeness check below still refuses it.
 B="Library/GPUBundles/NVMTLDriver.bundle"

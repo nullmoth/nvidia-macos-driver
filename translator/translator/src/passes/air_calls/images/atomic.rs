@@ -49,6 +49,16 @@ pub(in crate::passes) fn lower_atomic_texture(
             args.len()
         ));
     }
+    // AIR fetch/exchange calls can carry a spatial offset after the coordinate
+    // and optional array layer. For example, Eevee's 2d_array fetch_min has
+    // seven operands: image, xy, layer, offset_xy, value4, order, scope.
+    // Preserve the older offset-free form; never treat offset_xy as value4,
+    // and apply the offset before appending the array layer.
+    let offset_at = (matches!(op.as_str(),
+        "fetch_add" | "fetch_sub" | "fetch_and" | "fetch_or" | "fetch_xor"
+        | "fetch_min" | "fetch_max" | "exchange") && args.len() == min_args + 1)
+        .then_some(after_coord);
+    let value_at = value_at.map(|index| index + usize::from(offset_at.is_some()));
     let mut image = resolve_image_value(ctx, args[0]);
     if !image_is_storage(ctx, image) {
         image = recovered_image_for_private_operand(ctx, image, name, ImageOperandUse::Storage)
@@ -77,7 +87,22 @@ pub(in crate::passes) fn lower_atomic_texture(
     };
     let mut out = Vec::new();
     let layer = arrayed.then(|| args[coord_at + 1]);
-    let coord = build_fetch_coord(ctx, dim, arrayed, args[coord_at], layer, &mut out)?;
+    let spatial_coord = if let Some(offset_at) = offset_at {
+        let (coord, coord_ty) =
+            coerce_image_coord32_typed(ctx, args[coord_at], &mut out, "texture atomic coordinate")?;
+        let (offset, offset_ty) =
+            coerce_image_coord32_typed(ctx, args[offset_at], &mut out, "texture atomic offset")?;
+        if coord_ty != offset_ty {
+            return Err(format!("{name} coordinate and offset shapes differ"));
+        }
+        let sum = ctx.module.fresh_id();
+        out.push(Instruction::new(Op::IAdd, Some(coord_ty), Some(sum),
+            vec![Operand::IdRef(coord), Operand::IdRef(offset)]));
+        sum
+    } else {
+        args[coord_at]
+    };
+    let coord = build_fetch_coord(ctx, dim, arrayed, spatial_coord, layer, &mut out)?;
     let uint = ctx.ty_uint();
     let elem = if signed { ctx.ty_sint() } else { uint };
     let lane0t =

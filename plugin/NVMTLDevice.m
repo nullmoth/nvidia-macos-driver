@@ -39,8 +39,8 @@
 #include "nvmtl_gpu_policy.h"
 #include "nvmtl_card_select.h"
 extern uint64_t nvmtl_card_registry_id;   // nvmtl_vk.c
-// The application profile matched for this process (nvmtl_app_profile.h), or NULL. Set once by nvmtl_conf_settle
-// (NVMTLObjects.m), which reads nvrm610.conf and applies the profile before any knob is read.
+// The application profile matched for this process (nvmtl_app_profile.h), or NULL. NVMTLObjects.m applies its common
+// settings at load and any backend-specific settings before the first shader translation.
 static const nvmtl_app_profile *g_app_profile;
 static void nvmtl_conf_settle(void);
 // Set by the last compute pipeline creation on this thread: 1 when the profile's kernel edit was applied to its module.
@@ -1285,6 +1285,17 @@ static BOOL nvmtl_desc_fbo(MTLTextureDescriptor *d) {
     SEL s = sel_registerName("framebufferOnly");
     return d && [d respondsToSelector:s] && ((BOOL (*)(id, SEL))objc_msgSend)(d, s);
 }
+// Unknown usage permits shader writes too. Allocate native storage support up front for optimal images:
+// the lazy storage twin only covers a single 2D level/layer, so an Unknown array otherwise loses its writes
+// (for example, Blender 3.5's EEVEE lighting LUT upload). Use the same decision for heap sizing and allocation.
+// Formats requiring conversion and linear/IOSurface textures retain their existing storage-twin paths.
+static BOOL nvmtl_optimal_storage_requested(MTLTextureDescriptor *d, uint32_t vkf, int a8)
+{
+    if (d.usage & MTLTextureUsageShaderWrite) return YES;
+    return d.usage == MTLTextureUsageUnknown && !a8 && d.sampleCount == 1 &&
+           d.textureType != MTLTextureType2DMultisample && d.textureType != MTLTextureType2DMultisampleArray &&
+           nvmtl_vk_format_is_storage(vkf);
+}
 // BGR10A2Unorm (VkFormat 58) cannot be a storage image on NVIDIA; a writable private texture of it is created as
 // R10G10B10A2 (VkFormat 64): same bits per channel, storage-capable. YES when the format was swapped. Without this a
 // kernel's stores to such a texture went to the dummy storage image (Cyberpunk's tonemapped output is BGR10A2).
@@ -1420,7 +1431,7 @@ static id<MTLTexture> nvmtl_make_y422_texture(MTLTextureDescriptor *d, NVMTLText
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     const BOOL rbSwap = nvmtl_bgr10_storage_remap(d, &vkf);
-    int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    int wantStex = nvmtl_optimal_storage_requested(d, vkf, a8);
     if (d.textureType == MTLTextureType2DMultisample || d.textureType == MTLTextureType2DMultisampleArray) {
         if (d.mipmapLevelCount != 1 || d.depth != 1) { nvlog("newTextureWithDescriptor: invalid multisample color descriptor"); return nil; }
         if (wantStex) { static _Atomic unsigned long msw; const unsigned long k = atomic_fetch_add(&msw, 1) + 1;
@@ -2170,6 +2181,8 @@ static NVMTLFunction *nvmtl_empty_fragment(void) {
     });
     return fn;
 }
+id<MTLFunction> nvmtl_gl_function(id f, NSError **err);
+void nvmtl_gl_tag_compute_reflection(id r, id fn);
 MTLRenderPipelineDescriptor *nvmtl_gl_rewrite_descriptor(MTLRenderPipelineDescriptor *d, NSError **err);
 NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, NSString **err);
 NSData *nvmtl_translate_samplers_amp(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, uint32_t amp, NSString **err);
@@ -2497,6 +2510,9 @@ static NSString *nvmtl_tile_refusal(MTLTileRenderPipelineDescriptor *d) {
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)fn options:(MTLPipelineOption)o
                                                         reflection:(MTLAutoreleasedComputePipelineReflection *)r error:(NSError **)err {
+    id<MTLFunction> bridged = nvmtl_gl_function(fn, err);
+    if (fn && !bridged) { if (r) *r = nil; return nil; }
+    fn = bridged;
     id<MTLComputePipelineState> ps = [self newComputePipelineStateWithFunction:fn error:err];
     if (r) *r = ps ? (MTLComputePipelineReflection *)nvmtl_compute_reflection(fn) : nil;
     return ps;
@@ -2542,6 +2558,9 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)d options:(MTLPipelineOption)o
                                                           reflection:(MTLAutoreleasedComputePipelineReflection *)r error:(NSError **)err {
     nvmtl_log_compute_descriptor(d);
+    id<MTLFunction> bridged = nvmtl_gl_function(d.computeFunction, err);
+    if (d.computeFunction && !bridged) { if (r) *r = nil; return nil; }
+    if (bridged != d.computeFunction) { d = [d copy]; d.computeFunction = bridged; }
     if (o & MTLPipelineOptionFailOnBinaryArchiveMiss) {
         NSString *why = nvmtl_archive_refusal(NVMTL_SINCE(11.0, NSArray *, d.binaryArchives, nil), nvmtl_archive_key_compute(d.computeFunction));
         if (why) { if (r) *r = nil; return nvmtl_fail(err, why); }
@@ -2563,6 +2582,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
         ((NVMTLComputePipelineState *)ps)->_reqTG = nvmtl_desc_size(d, @selector(requiredThreadsPerThreadgroup));
         ((NVMTLComputePipelineState *)ps)->_label = [d.label copy]; }
     if (r) *r = ps ? (MTLComputePipelineReflection *)nvmtl_compute_reflection(kfn) : nil;
+    if (r && *r) nvmtl_gl_tag_compute_reflection(*r, d.computeFunction);
     return ps;
 }
 - (void)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)d options:(MTLPipelineOption)o
@@ -2709,6 +2729,9 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)fn error:(NSError **)err {
     if (err) *err = nil;
     if (nvmtl_vk_init()) return nvmtl_fail(err, @"newComputePipelineState: Vulkan is not up in this process");
+    id<MTLFunction> bridged = nvmtl_gl_function(fn, err);
+    if (fn && !bridged) return nil;
+    fn = bridged;
     if (fn && ![(id)fn isKindOfClass:[NVMTLFunction class]])
         return nvmtl_fail(err, [NSString stringWithFormat:
             @"newComputePipelineState: REFUSED - this function is not ours: %s", object_getClassName(fn)]);
@@ -2996,7 +3019,7 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
     uint32_t mtl_type = (uint32_t)d.textureType;
     uint32_t layers = nvmtl_vk_layers_for_desc(mtl_type, (uint32_t)d.arrayLength, (uint32_t)d.depth);
     if (nvmtl_vk_image_size_align((uint32_t)d.width, (uint32_t)d.height, depth ? dvk : vkf, (uint32_t)d.mipmapLevelCount, mtl_type, layers, depth,
-                                  (d.usage & MTLTextureUsageShaderWrite) != 0 && !a8, &sz, &al)) { sz = d.width * d.height * (bpp ? bpp : 4); al = 256; }
+                                  !depth && !a8 && nvmtl_optimal_storage_requested(d, vkf, a8), &sz, &al)) { sz = d.width * d.height * (bpp ? bpp : 4); al = 256; }
     MTLSizeAndAlign r = { sz, al }; return r;
 }
 - (id<MTLIndirectCommandBuffer>)newIndirectCommandBufferWithDescriptor:(MTLIndirectCommandBufferDescriptor *)d

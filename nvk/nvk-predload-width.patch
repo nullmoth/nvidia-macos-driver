@@ -1,0 +1,37 @@
+Keep non-hardware-width reads in the normal NIR memory legalization path.
+Applies after the 3.0 patch chain to Mesa 90a959eb (MIT licensed).
+
+--- a/src/nouveau/compiler/nak_nir.c
++++ b/src/nouveau/compiler/nak_nir.c
+@@ -2579,6 +2579,20 @@
+    return enabled;
+ }
+ 
++/* This pass runs before nir_lower_mem_access_bit_sizes. Converting an
++ * unsupported width/alignment to load_global_nv would bypass that legalization
++ * and reach MemType::from_size with, for example, a 12-byte vec3 read. Keep
++ * those reads in their original control flow for the normal lowering path.
++ */
++static bool
++nak_cg_predload_width_supported(unsigned components, unsigned bit_size,
++                                unsigned align)
++{
++   const unsigned bytes = components * bit_size / 8;
++   return bytes != 0 && bytes <= 16 && (bytes & (bytes - 1)) == 0 &&
++          bytes <= align;
++}
++
+ /* Instructions of one if side that nak_cg_predload may move above the if: pure ALU, constants, and global loads
+  * that are neither volatile nor coherent (those become predicated). -1 for anything else. */
+ static int
+@@ -2599,6 +2613,10 @@
+              intr->intrinsic != nir_intrinsic_load_global_constant)
+             return -1;
+          if (nir_intrinsic_access(intr) & (ACCESS_VOLATILE | ACCESS_COHERENT))
++            return -1;
++         if (!nak_cg_predload_width_supported(intr->def.num_components,
++                                              intr->def.bit_size,
++                                              nir_intrinsic_align(intr)))
+             return -1;
+          (*loads)++;
+          n++;

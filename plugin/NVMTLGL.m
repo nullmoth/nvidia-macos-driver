@@ -59,7 +59,7 @@ static NSData *nvmtl_gl_lower(NSData *ir, NSData *pd, NSData **retData, NSString
 }
 
 static id<MTLFunction> nvmtl_gl_make_function(NSData *bc, NSString *name, NSString *stage, NSData *retData, NSError **err) {
-    NSString *ll = nvmtl_air_to_text(bc);
+    NSString *ll = [stage isEqualToString:@"kernel"] ? nvmtl_air_in_memory_options(bc, YES) : nvmtl_air_to_text(bc);
     if (!ll) return nvmtl_fail(err, @"GL: the plugin's AIR would not decode");
     NVMTLLibrary *lib = [NVMTLLibrary new];
     lib->_fns = @{name: bc}; lib->_stages = @{name: stage}; lib->_airs = @{name: ll}; lib->_externs = nvmtl_externs_of_airs(lib->_airs);
@@ -83,7 +83,7 @@ id<MTLFunction> nvmtl_gl_function(id f, NSError **err) {
     id pdo = [f respondsToSelector:sel_registerName("pluginData")] ? ((id (*)(id, SEL))objc_msgSend)(f, sel_registerName("pluginData")) : nil;
     NSData *pd = [pdo isKindOfClass:[NSData class]] ? pdo : nil;
     NSUInteger ft = [(id<MTLFunction>)f functionType];
-    NSString *stage = ft == MTLFunctionTypeVertex ? @"vertex" : ft == MTLFunctionTypeFragment ? @"fragment" : nil;
+    NSString *stage = ft == MTLFunctionTypeVertex ? @"vertex" : ft == MTLFunctionTypeFragment ? @"fragment" : ft == MTLFunctionTypeKernel ? @"kernel" : nil;
     if (!ir.length || !pd || !stage)
         return nvmtl_fail(err, [NSString stringWithFormat:@"GL: function not bridgeable (GL IR %lu B, pluginData %s, functionType %lu)",
                                 (unsigned long)ir.length, pd ? "present" : "MISSING - never specialized", (unsigned long)ft]);
