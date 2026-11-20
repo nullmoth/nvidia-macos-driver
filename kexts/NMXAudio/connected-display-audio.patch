@@ -1,0 +1,1339 @@
+diff --git a/realmac27/audio/NMXAudio/build.sh b/realmac27/audio/NMXAudio/build.sh
+index 30cb638529479697d6255af749884b8fd98b1e7a..3db4ff53c0b9240635c72233d0cf7f2c3ed4a48e 100755
+--- a/realmac27/audio/NMXAudio/build.sh
++++ b/realmac27/audio/NMXAudio/build.sh
+@@ -9,10 +9,10 @@ OUT=$1
+ cd "$A"
+ mkdir -p gen obj
+ for m in "$F/pcm/channel_if.m" "$F/pcm/mixer_if.m" "$F/pci/hda/hdac_if.m"; do
+-    /opt/homebrew/bin/python3 mkif.py "$m" "gen/$(basename "$m" .m).h"
++    "${PYTHON3:-python3}" mkif.py "$m" "gen/$(basename "$m" .m).h"
+ done
+ rm -f obj/*.o
+-for s in "$F/pci/hda/hdac.c" "$F/pci/hda/hdacc.c" "$F/pci/hda/hdaa.c" "$F/pci/hda/hdaa_patches.c" nmx_snd_compat.c nmx_pcm.c nmx_audio_stubs.c; do
++for s in "$F/pci/hda/hdac.c" "$F/pci/hda/hdacc.c" freebsd-hda/hdaa.c freebsd-hda/hdaa_patches.c nmx_snd_compat.c nmx_pcm.c nmx_display_eld.c nmx_audio_stubs.c; do
+     ./cc-snd.sh "$s" > "log-$(basename "$s" .c).txt" 2>&1 || { grep -A3 error: "log-$(basename "$s" .c).txt" | head -20; exit 1; }
+ done
+ # the IOKit side, as ccxx.sh compiles NMXGPU's (Kernel.framework headers only, never the FreeBSD tree) plus the sound
+diff --git a/realmac27/audio/NMXAudio/freebsd-hda/hdaa.c b/realmac27/audio/NMXAudio/freebsd-hda/hdaa.c
+index b41e26c04d1d369f2fabaeb5280b2dc7032a4f43..aaf87979b47dfd86f2015c7484d1a39a501c16c3 100644
+--- a/realmac27/audio/NMXAudio/freebsd-hda/hdaa.c
++++ b/realmac27/audio/NMXAudio/freebsd-hda/hdaa.c
+@@ -46,6 +46,7 @@
+ #include <dev/sound/pci/hda/hda_reg.h>
+ 
+ #include "mixer_if.h"
++#include "nmx_pcm.h"
+ 
+ #define hdaa_lock(devinfo)	mtx_lock((devinfo)->lock)
+ #define hdaa_unlock(devinfo)	mtx_unlock((devinfo)->lock)
+@@ -763,6 +764,162 @@ hdaa_eld_handler(struct hdaa_widget *w)
+ 	hdaa_channels_handler(&devinfo->as[w->bindas]);
+ }
+ 
++/* Keep the playback route in step with the same pin state used by CoreAudio. */
++static bool
++nmx_hda_refresh_pin(struct hdaa_widget *pin, bool present, const uint8_t *eld,
++    unsigned size)
++{
++	bool changed = pin->eld_len != size ||
++	    (size && (pin->eld == NULL || memcmp(pin->eld, eld, size) != 0));
++	if (changed) {
++		uint8_t *replacement = NULL;
++		if (size) {
++			replacement = malloc(size, M_HDAA, M_NOWAIT);
++			if (replacement == NULL)
++				return false;
++			memcpy(replacement, eld, size);
++		}
++		if (pin->eld)
++			free(pin->eld, M_HDAA);
++		pin->eld = replacement;
++		pin->eld_len = size;
++	}
++	if (changed || pin->wclass.pin.connected != present) {
++		pin->wclass.pin.connected = present;
++		hdaa_channels_handler(&pin->devinfo->as[pin->bindas]);
++	}
++	return true;
++}
++
++/*
++ * Read the ELD of the pin that actually feeds this PCM. The cached ELD only
++ * tracks validity changes, so it cannot identify a swap from one valid sink
++ * to another. A multi-pin association has no single display identity.
++ */
++int
++nmx_hda_display_endpoint(device_t dev, struct nmx_display_endpoint *endpoint)
++{
++	struct hdaa_pcm_devinfo *pcm = device_get_ivars(dev);
++	if (pcm == NULL || pcm->playas < 0)
++		return NMX_DISPLAY_LOCAL;
++
++	struct hdaa_devinfo *info = pcm->devinfo;
++	struct hdaa_audio_as *association = &info->as[pcm->playas];
++	int status = NMX_DISPLAY_LOCAL, count = 0;
++	struct hdaa_widget *pin = NULL;
++	hdaa_lock(info);
++	for (unsigned i = 0; i < nitems(association->pins); ++i) {
++		if (association->pins[i] <= 0)
++			continue;
++		struct hdaa_widget *widget = hdaa_widget_get(info, association->pins[i]);
++		if (widget == NULL || !widget->enable)
++			continue;
++		++count;
++		if (HDA_PARAM_PIN_CAP_DP(widget->wclass.pin.cap) ||
++		    HDA_PARAM_PIN_CAP_HDMI(widget->wclass.pin.cap))
++			pin = widget;
++	}
++	if (pin == NULL)
++		goto done;
++	status = NMX_DISPLAY_UNAVAILABLE;
++	if (endpoint == NULL || count != 1 || pin->bindas != pcm->playas ||
++	    association->num_chans == 0)
++		goto done;
++
++	uint8_t eld[128];
++	uint32_t sense = hda_command(info->dev, HDA_CMD_GET_PIN_SENSE(0, pin->nid));
++	const uint32_t required = HDA_CMD_GET_PIN_SENSE_PRESENCE_DETECT |
++	    HDA_CMD_GET_PIN_SENSE_ELD_VALID;
++	if (sense == HDA_INVALID)
++		goto done;
++	if ((sense & required) != required) {
++		nmx_hda_refresh_pin(pin, (sense & HDA_CMD_GET_PIN_SENSE_PRESENCE_DETECT) != 0, NULL, 0);
++		goto done;
++	}
++
++	uint32_t result = hda_command(info->dev, HDA_CMD_GET_HDMI_DIP_SIZE(0, pin->nid, 0x08));
++	unsigned size = result & 0xff;
++	if (result == HDA_INVALID || size < 20 || size > sizeof(eld))
++		goto done;
++	for (unsigned i = 0; i < size; ++i) {
++		result = hda_command(info->dev, HDA_CMD_GET_HDMI_ELDD(0, pin->nid, i));
++		if (result == HDA_INVALID || !(result & 0x80000000u))
++			goto done;
++		eld[i] = result & 0xff;
++		if (i == 2) {
++			unsigned baseline = 4u + 4u * eld[2];
++			if (baseline < 20 || baseline > size)
++				goto done;
++			size = baseline;
++		}
++	}
++	sense = hda_command(info->dev, HDA_CMD_GET_PIN_SENSE(0, pin->nid));
++	if (sense != HDA_INVALID && (sense & required) == required &&
++	    nmx_hda_refresh_pin(pin, true, eld, size) &&
++	    nmx_parse_display_eld(eld, size, endpoint))
++		status = NMX_DISPLAY_CONNECTED;
++done:
++	hdaa_unlock(info);
++	return status;
++}
++
++int
++nmx_hda_label_role(device_t dev, int direction)
++{
++	struct hdaa_pcm_devinfo *pcm = device_get_ivars(dev);
++	if (pcm == NULL)
++		return NMX_AUDIO_ROLE_UNKNOWN;
++	int index = direction == NMX_DIR_PLAY ? pcm->playas : pcm->recas;
++	if (index < 0)
++		return NMX_AUDIO_ROLE_UNKNOWN;
++
++	struct hdaa_devinfo *info = pcm->devinfo;
++	int role = NMX_AUDIO_ROLE_UNKNOWN;
++	hdaa_lock(info);
++	const struct hdaa_audio_as *association = &info->as[index];
++	for (unsigned i = 0; i < nitems(association->pins); ++i) {
++		if (association->pins[i] <= 0)
++			continue;
++		struct hdaa_widget *pin = hdaa_widget_get(info, association->pins[i]);
++		if (pin == NULL || !pin->enable)
++			continue;
++		int candidate;
++		switch (HDA_CONFIG_DEFAULTCONF_DEVICE(pin->wclass.pin.config)) {
++		case HDA_CONFIG_DEFAULTCONF_DEVICE_LINE_OUT:
++			candidate = NMX_AUDIO_ROLE_LINE_OUT;
++			break;
++		case HDA_CONFIG_DEFAULTCONF_DEVICE_SPEAKER:
++			candidate = NMX_AUDIO_ROLE_SPEAKER;
++			break;
++		case HDA_CONFIG_DEFAULTCONF_DEVICE_HP_OUT:
++			candidate = NMX_AUDIO_ROLE_HEADPHONES;
++			break;
++		case HDA_CONFIG_DEFAULTCONF_DEVICE_SPDIF_OUT:
++		case HDA_CONFIG_DEFAULTCONF_DEVICE_DIGITAL_OTHER_OUT:
++			candidate = NMX_AUDIO_ROLE_DIGITAL_OUT;
++			break;
++		case HDA_CONFIG_DEFAULTCONF_DEVICE_LINE_IN:
++			candidate = NMX_AUDIO_ROLE_LINE_IN;
++			break;
++		case HDA_CONFIG_DEFAULTCONF_DEVICE_MIC_IN:
++			candidate = NMX_AUDIO_ROLE_MICROPHONE;
++			break;
++		default:
++			candidate = NMX_AUDIO_ROLE_UNKNOWN;
++			break;
++		}
++		/* A grouped output with different jack roles keeps its combo name. */
++		if (candidate == NMX_AUDIO_ROLE_UNKNOWN ||
++		    (role != NMX_AUDIO_ROLE_UNKNOWN && candidate != role)) {
++			role = NMX_AUDIO_ROLE_UNKNOWN;
++			break;
++		}
++		role = candidate;
++	}
++	hdaa_unlock(info);
++	return role;
++}
++
+ /*
+  * Pin sense initializer.
+  */
+diff --git a/realmac27/audio/NMXAudio/nmx_audio_kext.cpp b/realmac27/audio/NMXAudio/nmx_audio_kext.cpp
+index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb86c1b361b 100644
+--- a/realmac27/audio/NMXAudio/nmx_audio_kext.cpp
++++ b/realmac27/audio/NMXAudio/nmx_audio_kext.cpp
+@@ -16,6 +16,8 @@
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOLocks.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/IOWorkLoop.h>
+ #include <IOKit/pci/IOPCIDevice.h>
+ #include <IOKit/IONVRAM.h>
+ #include <libkern/c++/OSData.h>
+@@ -28,9 +30,12 @@
+ #include <libkern/version.h>
+ #include <mach/kmod.h>
+ #include <pexpert/pexpert.h>
++#include <sys/errno.h>
+ #include <kern/thread.h>
+ #include "nmx_port.h"
+ #include "nmx_pcm.h"
++#include "nmx_audio_locale.h"
++#include "nmx_display_gain.h"
+ 
+ /* FreeBSD's format and mixer constants the engine needs (sys/soundcard.h); the C side owns everything else */
+ #define NMX_AFMT_S16_LE 0x00000010
+@@ -48,6 +53,26 @@ void *devclass_create(const char *name);
+ int devclass_add_driver(void *dc, void *driver, int pass, void **dcp);
+ }
+ 
++static NMXAudioLocaleCode g_locale = NMX_AUDIO_LOCALE_EN;
++
++static const char *audioText(const char *key)
++{
++    return nmxAudioText(g_locale, key);
++}
++
++static const char *pcmLabel(struct snddev_info *pcm, int direction)
++{
++    switch (nmx_pcm_label_role(pcm, direction)) {
++    case NMX_AUDIO_ROLE_LINE_OUT: return audioText(NMX_AUDIO_TEXT_LINE_OUT);
++    case NMX_AUDIO_ROLE_SPEAKER: return audioText(NMX_AUDIO_TEXT_INTERNAL_SPEAKER);
++    case NMX_AUDIO_ROLE_HEADPHONES: return audioText(NMX_AUDIO_TEXT_HEADPHONES);
++    case NMX_AUDIO_ROLE_DIGITAL_OUT: return audioText(NMX_AUDIO_TEXT_DIGITAL_OUT);
++    case NMX_AUDIO_ROLE_LINE_IN: return audioText(NMX_AUDIO_TEXT_LINE_IN);
++    case NMX_AUDIO_ROLE_MICROPHONE: return audioText(NMX_AUDIO_TEXT_MICROPHONE);
++    default: return nmx_pcm_name(pcm);
++    }
++}
++
+ /* ---- the engine: one channel (play or record) of one PCM device */
+ 
+ class NMXAudioEngine : public IOAudioEngine {
+@@ -55,6 +80,7 @@ class NMXAudioEngine : public IOAudioEngine {
+     struct snddev_info *sc_;
+     struct pcm_channel *ch_;
+     bool output_;
++    const char *displayName_ = nullptr;
+     void *ring_;
+     UInt32 ringBytes_, frameBytes_, frames_, lastPtr_;
+     UInt32 sampleBits_;
+@@ -64,9 +90,13 @@ class NMXAudioEngine : public IOAudioEngine {
+     static IOReturn muteChanged(OSObject *target, IOAudioControl *, SInt32, SInt32 v);
+     SInt32 volume_ = 75;
+     bool muted_ = false;
++    UInt32 displayLevels_ = 0x00646464; // master, left, right; bit 24 is mute
++    void setDisplayLevel(UInt32 shift, UInt32 mask, UInt32 level);
++    void detachChannel();
+ public:
+-    bool initFor(struct snddev_info *sc, struct pcm_channel *ch);
++    bool initFor(struct snddev_info *sc, struct pcm_channel *ch, const char *displayName);
+     bool initHardware(IOService *provider) override;
++    void stop(IOService *provider) override;
+     void free() override;
+     UInt32 getCurrentSampleFrame() override;
+     IOReturn performAudioEngineStart() override;
+@@ -92,13 +122,14 @@ OSString *NMXAudioEngine::getGlobalUniqueID()
+     return OSString::withCString(id);
+ }
+ 
+-bool NMXAudioEngine::initFor(struct snddev_info *sc, struct pcm_channel *ch)
++bool NMXAudioEngine::initFor(struct snddev_info *sc, struct pcm_channel *ch, const char *displayName)
+ {
+     if (!IOAudioEngine::init(nullptr))
+         return false;
+     sc_ = sc;
+     ch_ = ch;
+     output_ = nmx_chan_dir(ch) == NMX_DIR_PLAY;
++    displayName_ = output_ ? displayName : nullptr;
+     return true;
+ }
+ 
+@@ -135,7 +166,7 @@ bool NMXAudioEngine::initHardware(IOService *provider)
+         return false;
+     frames_ = ringBytes_ / frameBytes_;
+ 
+-    setDescription(nmx_pcm_name(sc_));
++    setDescription(displayName_ ? displayName_ : pcmLabel(sc_, nmx_chan_dir(ch_)));
+     IOAudioSampleRate sr = { rate, 0 };
+     setSampleRate(&sr);
+     setNumSampleFramesPerBuffer(frames_);
+@@ -160,14 +191,22 @@ bool NMXAudioEngine::initHardware(IOService *provider)
+     addAudioStream(stream_);
+     stream_->release();
+ 
+-    /* volume and mute go to the codec's own amplifiers (hdaa's OSS mixer: VOLUME on the output path, RECLEV on input) */
+-    IOAudioLevelControl *vol = IOAudioLevelControl::createVolumeControl(75, 0, 100, (-64 << 16), 0,
+-        kIOAudioControlChannelIDAll, kIOAudioControlChannelNameAll, 0,
+-        output_ ? kIOAudioControlUsageOutput : kIOAudioControlUsageInput);
+-    if (vol) {
+-        vol->setValueChangeHandler(volumeChanged, this);
+-        addDefaultAudioControl(vol);
+-        vol->release();
++    const UInt32 usage = output_ ? kIOAudioControlUsageOutput : kIOAudioControlUsageInput;
++    const auto addLevel = [&](UInt32 channel, const char *name, SInt32 initial) {
++        auto *control = IOAudioLevelControl::createVolumeControl(initial, 0, 100, -(64 * 65536), 0,
++            channel, name, channel, usage);
++        if (control) {
++            control->setValueChangeHandler(volumeChanged, this);
++            addDefaultAudioControl(control);
++            control->release();
++        }
++    };
++    addLevel(kIOAudioControlChannelIDAll, kIOAudioControlChannelNameAll, displayName_ ? 100 : 75);
++    if (displayName_) {
++        addLevel(kIOAudioControlChannelIDDefaultLeft, audioText(NMX_AUDIO_TEXT_LEFT), 100);
++        addLevel(kIOAudioControlChannelIDDefaultRight, audioText(NMX_AUDIO_TEXT_RIGHT), 100);
++        if (nmx_pcm_mixer_devs(sc_) & (1u << NMX_MIXER_VOLUME))
++            nmx_pcm_mixer_set(sc_, NMX_MIXER_VOLUME, 100, 100);
+     }
+     IOAudioToggleControl *mute = IOAudioToggleControl::createMuteControl(false, kIOAudioControlChannelIDAll,
+         kIOAudioControlChannelNameAll, 0, output_ ? kIOAudioControlUsageOutput : kIOAudioControlUsageInput);
+@@ -182,21 +221,48 @@ bool NMXAudioEngine::initHardware(IOService *provider)
+     return true;
+ }
+ 
+-void NMXAudioEngine::free()
++void NMXAudioEngine::detachChannel()
+ {
+     if (ch_ != nullptr) {
+-        nmx_chan_set_engine(ch_, nullptr);
+         if (started_)
+             nmx_chan_stop(ch_);
++        nmx_chan_clear_engine(ch_, this);
++        ch_ = nullptr;
++        started_ = false;
+     }
++}
++
++void NMXAudioEngine::stop(IOService *provider)
++{
++    IOAudioEngine::stop(provider);
++    detachChannel();
++}
++
++void NMXAudioEngine::free()
++{
++    detachChannel();
+     IOAudioEngine::free();
+ }
+ 
+-IOReturn NMXAudioEngine::volumeChanged(OSObject *target, IOAudioControl *, SInt32, SInt32 v)
++void NMXAudioEngine::setDisplayLevel(UInt32 shift, UInt32 mask, UInt32 level)
++{
++    UInt32 old = __atomic_load_n(&displayLevels_, __ATOMIC_RELAXED);
++    while (!__atomic_compare_exchange_n(&displayLevels_, &old, (old & ~(mask << shift)) | (level << shift),
++                                         true, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
++}
++
++IOReturn NMXAudioEngine::volumeChanged(OSObject *target, IOAudioControl *control, SInt32, SInt32 v)
+ {
+     NMXAudioEngine *e = OSDynamicCast(NMXAudioEngine, target);
+     if (e == nullptr)
+         return kIOReturnBadArgument;
++    if (e->displayName_) {
++        const UInt32 channel = control->getChannelID();
++        if (channel > kIOAudioControlChannelIDDefaultRight || v < 0 || v > 100)
++            return kIOReturnBadArgument;
++        e->setDisplayLevel(channel * 8, 0xff, static_cast<UInt32>(v));
++        return kIOReturnSuccess;
++    }
+     e->volume_ = v;
+     unsigned lvl = e->muted_ ? 0 : (unsigned)v;
+     nmx_pcm_mixer_set(e->sc_, e->output_ ? NMX_MIXER_VOLUME : NMX_MIXER_RECLEV, lvl, lvl);
+@@ -208,6 +274,10 @@ IOReturn NMXAudioEngine::muteChanged(OSObject *target, IOAudioControl *, SInt32,
+     NMXAudioEngine *e = OSDynamicCast(NMXAudioEngine, target);
+     if (e == nullptr)
+         return kIOReturnBadArgument;
++    if (e->displayName_) {
++        e->setDisplayLevel(24, 1, v != 0);
++        return kIOReturnSuccess;
++    }
+     e->muted_ = v != 0;
+     unsigned lvl = e->muted_ ? 0 : (unsigned)e->volume_;
+     nmx_pcm_mixer_set(e->sc_, e->output_ ? NMX_MIXER_VOLUME : NMX_MIXER_RECLEV, lvl, lvl);
+@@ -261,6 +331,16 @@ void NMXAudioEngine::blockDone()
+ IOReturn NMXAudioEngine::clipOutputSamples(const void *mixBuf, void *sampleBuf, UInt32 first, UInt32 n,
+                                            const IOAudioStreamFormat *, IOAudioStream *)
+ {
++    if (displayName_) {
++        using namespace nmx_display_gain;
++        const UInt32 levels = __atomic_load_n(&displayLevels_, __ATOMIC_RELAXED);
++        const auto gains = precompute({levels & 0xff, (levels >> 8) & 0xff, (levels >> 16) & 0xff, (levels >> 24) != 0});
++        const auto *mix = static_cast<const float *>(mixBuf);
++        const bool written = sampleBits_ == 32
++            ? writeStereo(mix, frames_, static_cast<SInt32 *>(sampleBuf), frames_, first, n, gains)
++            : writeStereo(mix, frames_, static_cast<SInt16 *>(sampleBuf), frames_, first, n, gains);
++        return written ? kIOReturnSuccess : kIOReturnBadArgument;
++    }
+     const float *in = (const float *)mixBuf + first * 2;
+     UInt32 count = n * 2;
+     if (sampleBits_ == 32) {
+@@ -303,9 +383,20 @@ IOReturn NMXAudioEngine::convertInputSamples(const void *sampleBuf, void *destBu
+ class NMXAudioDevice : public IOAudioDevice {
+     OSDeclareDefaultStructors(NMXAudioDevice)
+     struct snddev_info *sc_;
++    struct nmx_display_endpoint display_ {};
++    bool hasDisplay_ = false;
+ public:
+     struct snddev_info *softc() const { return sc_; }
+-    bool initFor(struct snddev_info *sc) { sc_ = sc; return IOAudioDevice::init(nullptr); }
++    bool hasDisplay() const { return hasDisplay_; }
++    bool initFor(struct snddev_info *sc, const struct nmx_display_endpoint *display)
++    {
++        sc_ = sc;
++        if (display) {
++            display_ = *display;
++            hasDisplay_ = true;
++        }
++        return IOAudioDevice::init(nullptr);
++    }
+     bool initHardware(IOService *provider) override;
+ };
+ OSDefineMetaClassAndStructors(NMXAudioDevice, IOAudioDevice)
+@@ -314,14 +405,18 @@ bool NMXAudioDevice::initHardware(IOService *provider)
+ {
+     if (!IOAudioDevice::initHardware(provider))
+         return false;
+-    const char *name = nmx_pcm_name(sc_);
++    const char *name = hasDisplay_ ? (display_.name[0] ? display_.name : audioText(NMX_AUDIO_TEXT_DISPLAY_AUDIO))
++                                   : pcmLabel(sc_, nmx_chan_dir(nmx_pcm_chan(sc_, 0)));
+     setDeviceName(name);
+     setDeviceShortName(name);
+     setManufacturerName("NullMoth");
++    if (hasDisplay_)
++        setDeviceTransportType(display_.connector == 1 ? kIOAudioDeviceTransportTypeDisplayPort : kIOAudioDeviceTransportTypeHdmi);
+     int engines = 0;
+     for (int i = 0; i < nmx_pcm_nchan(sc_); i++) {
+         NMXAudioEngine *e = new NMXAudioEngine;
+-        if (e && e->initFor(sc_, nmx_pcm_chan(sc_, i)) && activateAudioEngine(e) == kIOReturnSuccess)
++        if (e && e->initFor(sc_, nmx_pcm_chan(sc_, i), hasDisplay_ ? name : nullptr) &&
++            activateAudioEngine(e) == kIOReturnSuccess)
+             engines++;
+         if (e)
+             e->release();
+@@ -336,19 +431,39 @@ class NMXAudio : public IOService {
+     IOPCIDevice *pci_;
+     void *dev_;
+     volatile int attach_;
++    struct DisplayPCM {
++        struct snddev_info *pcm = nullptr;
++        struct nmx_display_endpoint sink {};
++        bool published = false;
++        unsigned missed = 0;
++    };
++    DisplayPCM displays_[16];
++    IOWorkLoop *displayLoop_ = nullptr;
++    IOTimerEventSource *displayTimer_ = nullptr;
++    bool displayPowered_ = false;
++    bool displayStopping_ = false;
+     static void attachThread(void *arg, wait_result_t);
++    static void displayPoll(OSObject *target, IOTimerEventSource *timer);
++    void startDisplayPoll();
+ public:
+     IOService *probe(IOService *provider, SInt32 *score) override;
+     bool start(IOService *provider) override;
+     void stop(IOService *provider) override;
+     IOReturn setPowerState(unsigned long state, IOService *device) override;
++    void trackDisplay(struct snddev_info *sc);
++    void forgetDisplay(struct snddev_info *sc);
+ };
+ OSDefineMetaClassAndStructors(NMXAudio, IOService)
+ 
+-static IOLock *g_lock;
++// Serializes attach, periodic CoreAudio publication and PCM removal. The
++// FreeBSD attach/detach calls can themselves register and unregister PCMs.
++static IORecursiveLock *g_lock;
+ static bool g_started;
+ static NMXAudio *g_attaching;          /* the controller whose drivers are attaching (attaches run one at a time) */
+ static OSArray *g_devices;             /* the NMXAudioDevice objects published */
++static OSArray *g_controllers;
++
++static void loadLocale();
+ 
+ static bool enabled()
+ {
+@@ -384,20 +499,21 @@ bool NMXAudio::start(IOService *provider)
+     IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
+     if (pci == nullptr || g_lock == nullptr || !IOService::start(provider))
+         return false;
+-    IOLockLock(g_lock);
++    IORecursiveLockLock(g_lock);
+     if (!g_started) {
+         int err = nmx_port_start();
+         if (err == 0)
+             err = register_drivers();
+         if (err) {
+-            IOLockUnlock(g_lock);
++            IORecursiveLockUnlock(g_lock);
+             IOLog("NMXAudio: the driver layer did not start (%d)\n", err);
+             IOService::stop(provider);
+             return false;
+         }
++        loadLocale();
+         g_started = true;
+     }
+-    IOLockUnlock(g_lock);
++    IORecursiveLockUnlock(g_lock);
+     pci->setMemoryEnable(true);
+     pci->setBusMasterEnable(true);
+     pci_ = pci;
+@@ -432,6 +548,31 @@ static IODTNVRAM *nmx_nvram()
+     return n;
+ }
+ 
++static void loadLocale()
++{
++    char value[64] = {};
++    if (PE_parse_boot_argn("nmxaudiolang", value, sizeof(value))) {
++        value[sizeof(value) - 1] = 0;
++        g_locale = nmxAudioLocale(value);
++        return;
++    }
++    auto *nvram = nmx_nvram();
++    if (!nvram)
++        return;
++    OSObject *property = nvram->copyProperty("prev-lang:kbd");
++    if (auto *string = OSDynamicCast(OSString, property)) {
++        g_locale = nmxAudioLocale(string->getCStringNoCopy());
++    } else if (auto *data = OSDynamicCast(OSData, property)) {
++        if (data->getLength() < sizeof(value)) {
++            memcpy(value, data->getBytesNoCopy(), data->getLength());
++            g_locale = nmxAudioLocale(value);
++        }
++    }
++    if (property)
++        property->release();
++    nvram->release();
++}
++
+ static bool nmx_marker_set()
+ {
+     IODTNVRAM *n = nmx_nvram();
+@@ -474,7 +615,7 @@ static int g_guard;     /* 0 = not checked this boot, 1 = armed by this boot, -1
+ void NMXAudio::attachThread(void *arg, wait_result_t)
+ {
+     NMXAudio *self = (NMXAudio *)arg;
+-    IOLockLock(g_lock);
++    IORecursiveLockLock(g_lock);
+     if (g_guard == 0) {
+         if (nmx_marker_set()) {
+             g_guard = -1;
+@@ -485,17 +626,19 @@ void NMXAudio::attachThread(void *arg, wait_result_t)
+         }
+     }
+     if (g_guard < 0) {
+-        IOLockUnlock(g_lock);
++        IORecursiveLockUnlock(g_lock);
+         IOLog("NMXAudio: the last boot stopped while audio was starting; audio stays off this boot\n");
+         self->setProperty("nullmoth-audio-state", "parked: the last boot stopped while audio was starting");
+         self->attach_ = -1;
+         self->release();
+         return;
+     }
++    g_controllers->setObject(self);
+     g_attaching = self;
+     self->dev_ = nmx_port_attach_pci(self->pci_);
+     g_attaching = nullptr;
+-    IOLockUnlock(g_lock);
++    self->displayPowered_ = self->dev_ != nullptr;
++    IORecursiveLockUnlock(g_lock);
+     if (self->dev_ == nullptr) {
+         IOLog("NMXAudio: no driver took %04x:%04x\n", self->pci_->configRead16(kIOPCIConfigVendorID),
+               self->pci_->configRead16(kIOPCIConfigDeviceID));
+@@ -509,6 +652,7 @@ void NMXAudio::attachThread(void *arg, wait_result_t)
+         self->pci_->joinPMtree(self);
+         self->registerPowerDriver(self, states, 2);
+         self->registerService();
++        self->startDisplayPoll();
+         self->attach_ = 1;
+     }
+     /* the guard comes off once audio has run for two minutes (the first controller's thread does it) */
+@@ -521,24 +665,125 @@ void NMXAudio::attachThread(void *arg, wait_result_t)
+     self->release();
+ }
+ 
+-/* pcm_register: hdaa finished a PCM device; publish it as an audio device under the controller being attached */
+-extern "C" void nmx_audio_publish(struct snddev_info *sc)
++static bool publishDevice(NMXAudio *owner, struct snddev_info *sc, const nmx_display_endpoint *sink)
+ {
+-    NMXAudio *owner = g_attaching;
+-    if (owner == nullptr || nmx_pcm_nchan(sc) == 0)
+-        return;
+     NMXAudioDevice *d = new NMXAudioDevice;
+-    if (d == nullptr || !d->initFor(sc) || !d->attach(owner) || !d->start(owner)) {
++    if (d == nullptr)
++        return false;
++    const bool attached = d->initFor(sc, sink) && d->attach(owner);
++    const bool started = attached && d->start(owner);
++    if (started) {
++        g_devices->setObject(d);
++    } else {
+         IOLog("NMXAudio: %s could not be published\n", nmx_pcm_name(sc));
+-        if (d) {
++        if (attached)
++            d->detach(owner);
++    }
++    d->release();
++    return started;
++}
++
++// Use IOKit termination for display detach so CoreAudio drops the HAL entry.
++static bool unpublishDevice(struct snddev_info *sc)
++{
++    for (unsigned i = 0; i < g_devices->getCount(); i++) {
++        auto *d = OSDynamicCast(NMXAudioDevice, g_devices->getObject(i));
++        if (!d || d->softc() != sc)
++            continue;
++        if (d->hasDisplay()) {
++            if (!d->terminate(kIOServiceRequired | kIOServiceSynchronous))
++                return false;
++        } else {
++            IOService *owner = d->getProvider();
++            d->stop(owner);
+             d->detach(owner);
+-            d->release();
+         }
++        g_devices->removeObject(i);
++        break;
++    }
++    return true;
++}
++
++void NMXAudio::trackDisplay(struct snddev_info *sc)
++{
++    for (auto &display : displays_) {
++        if (display.pcm == nullptr) {
++            display.pcm = sc;
++            return;
++        }
++    }
++    IOLog("NMXAudio: display PCM limit reached\n");
++}
++
++void NMXAudio::forgetDisplay(struct snddev_info *sc)
++{
++    for (auto &display : displays_) {
++        if (display.pcm == sc) {
++            display = {};
++            return;
++        }
++    }
++}
++
++void NMXAudio::startDisplayPoll()
++{
++    bool tracked = false;
++    for (const auto &display : displays_)
++        tracked |= display.pcm != nullptr;
++    if (!tracked)
++        return;
++    displayLoop_ = IOWorkLoop::workLoop();
++    if (!displayLoop_)
++        return;
++    displayTimer_ = IOTimerEventSource::timerEventSource(this, displayPoll);
++    if (!displayTimer_ || displayLoop_->addEventSource(displayTimer_) != kIOReturnSuccess) {
++        if (displayTimer_)
++            displayTimer_->release();
++        displayTimer_ = nullptr;
++        displayLoop_->release();
++        displayLoop_ = nullptr;
+         return;
+     }
+-    if (g_devices)
+-        g_devices->setObject(d);
+-    d->release();
++    displayTimer_->setTimeoutMS(350);
++}
++
++void NMXAudio::displayPoll(OSObject *target, IOTimerEventSource *timer)
++{
++    auto *owner = static_cast<NMXAudio *>(target);
++    IORecursiveLockLock(g_lock);
++    if (owner->displayPowered_ && !owner->displayStopping_) {
++        for (auto &display : owner->displays_) {
++            if (!display.pcm)
++                continue;
++            nmx_display_endpoint sink {};
++            const bool present = nmx_pcm_display_endpoint(display.pcm, &sink) == NMX_DISPLAY_CONNECTED;
++            display.missed = present ? 0 : display.missed + (display.missed < 2);
++            const bool changed = present &&
++                (sink.connector != display.sink.connector || sink.manufacturer != display.sink.manufacturer ||
++                 sink.product != display.sink.product || strcmp(sink.name, display.sink.name) != 0);
++            if (display.published && (changed || display.missed == 2) && unpublishDevice(display.pcm))
++                display.published = false;
++            if (present && !display.published && publishDevice(owner, display.pcm, &sink)) {
++                display.sink = sink;
++                display.published = true;
++            }
++        }
++    }
++    if (!owner->displayStopping_)
++        timer->setTimeoutMS(1000);
++    IORecursiveLockUnlock(g_lock);
++}
++
++/* pcm_register runs on the attaching controller, before its poller starts. */
++extern "C" void nmx_audio_publish(struct snddev_info *sc)
++{
++    NMXAudio *owner = g_attaching;
++    if (!owner || nmx_pcm_nchan(sc) == 0)
++        return;
++    if (nmx_pcm_display_endpoint(sc, nullptr) == NMX_DISPLAY_LOCAL)
++        publishDevice(owner, sc, nullptr);
++    else
++        owner->trackDisplay(sc);
+ }
+ 
+ extern "C" void nmx_audio_diag_publish(const char *text)
+@@ -547,20 +792,19 @@ extern "C" void nmx_audio_diag_publish(const char *text)
+         g_attaching->setProperty("nmx-hda-diag", text);
+ }
+ 
+-extern "C" void nmx_audio_unpublish(struct snddev_info *sc)
++extern "C" int nmx_audio_unpublish(struct snddev_info *sc)
+ {
+-    if (g_devices == nullptr)
+-        return;
+-    for (unsigned i = 0; i < g_devices->getCount(); i++) {
+-        NMXAudioDevice *d = OSDynamicCast(NMXAudioDevice, g_devices->getObject(i));
+-        if (d && d->softc() == sc) {
+-            IOService *owner = d->getProvider();
+-            d->stop(owner);
+-            d->detach(owner);
+-            g_devices->removeObject(i);
+-            return;
++    IORecursiveLockLock(g_lock);
++    const bool removed = unpublishDevice(sc);
++    if (removed) {
++        for (unsigned i = 0; i < g_controllers->getCount(); ++i) {
++            auto *owner = OSDynamicCast(NMXAudio, g_controllers->getObject(i));
++            if (owner)
++                owner->forgetDisplay(sc);
+         }
+     }
++    IORecursiveLockUnlock(g_lock);
++    return removed ? 0 : EBUSY;
+ }
+ 
+ extern "C" void nmx_audio_block_done(void *engine, struct pcm_channel *)
+@@ -574,18 +818,38 @@ void NMXAudio::stop(IOService *provider)
+         IOSleep(100);
+     if (attach_ == 1)
+         PMstop();
++    IORecursiveLockLock(g_lock);
++    displayStopping_ = true;
++    IORecursiveLockUnlock(g_lock);
++    if (displayTimer_) {
++        displayTimer_->cancelTimeout();
++        displayLoop_->removeEventSource(displayTimer_);
++        displayTimer_->release();
++        displayLoop_->release();
++        displayTimer_ = nullptr;
++        displayLoop_ = nullptr;
++    }
++    IORecursiveLockLock(g_lock);
+     nmx_port_detach(dev_);
+     dev_ = nullptr;
++    const unsigned index = g_controllers->getNextIndexOfObject(this, 0);
++    if (index < g_controllers->getCount())
++        g_controllers->removeObject(index);
++    IORecursiveLockUnlock(g_lock);
+     IOService::stop(provider);
+ }
+ 
+ IOReturn NMXAudio::setPowerState(unsigned long state, IOService *)
+ {
++    IORecursiveLockLock(g_lock);
++    displayPowered_ = false;
+     if (dev_ != nullptr) {
+         int err = nmx_port_power(dev_, state != 0);
++        displayPowered_ = state != 0 && err == 0;
+         if (err)
+             IOLog("NMXAudio: %s returned %d\n", state ? "resume" : "suspend", err);
+     }
++    IORecursiveLockUnlock(g_lock);
+     return kIOPMAckImplied;
+ }
+ 
+@@ -596,9 +860,10 @@ kern_return_t nmx_audio_kmod_stop(kmod_info_t *ki, void *data);
+ 
+ kern_return_t nmx_audio_kmod_start(kmod_info_t *, void *)
+ {
+-    g_lock = IOLockAlloc();
++    g_lock = IORecursiveLockAlloc();
+     g_devices = OSArray::withCapacity(8);
+-    return g_lock && g_devices ? KERN_SUCCESS : KERN_FAILURE;
++    g_controllers = OSArray::withCapacity(4);
++    return g_lock && g_devices && g_controllers ? KERN_SUCCESS : KERN_FAILURE;
+ }
+ 
+ kern_return_t nmx_audio_kmod_stop(kmod_info_t *, void *)
+@@ -607,8 +872,10 @@ kern_return_t nmx_audio_kmod_stop(kmod_info_t *, void *)
+         nmx_port_stop();
+     if (g_devices)
+         g_devices->release();
++    if (g_controllers)
++        g_controllers->release();
+     if (g_lock)
+-        IOLockFree(g_lock);
++        IORecursiveLockFree(g_lock);
+     return KERN_SUCCESS;
+ }
+ 
+diff --git a/realmac27/audio/NMXAudio/nmx_display_eld.c b/realmac27/audio/NMXAudio/nmx_display_eld.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b44a3b38378c4e0ad41b975a6f314ec6ff84d75
+--- /dev/null
++++ b/realmac27/audio/NMXAudio/nmx_display_eld.c
+@@ -0,0 +1,113 @@
++#include "nmx_display_eld.h"
++
++#include <string.h>
++
++#define NMX_ELD_VERSION 2u
++#define NMX_ELD_FIXED_BYTES 20u
++#define NMX_ELD_MAX_BASELINE_DWORDS 20u /* version 2 supports at most 80 baseline bytes */
++#define NMX_ELD_MAX_BYTES 128u
++#define NMX_ELD_MAX_MONITOR_NAME 16u
++#define NMX_ELD_MAX_SADS 15u
++#define NMX_SAD_FORMAT_LPCM 1u
++#define NMX_SAD_RATE_48000 (1u << 2)
++#define NMX_SAD_SIZE_16BIT (1u << 0)
++
++static bool
++nmx_ascii_printable(uint8_t c)
++{
++    return c >= 0x20u && c <= 0x7eu;
++}
++
++static bool
++nmx_ascii_space(char c)
++{
++    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
++}
++
++static void
++nmx_copy_monitor_name(const uint8_t *src, size_t length, char dst[32])
++{
++    char filtered[17];
++    size_t used = 0;
++    size_t first, last, out = 0;
++
++    for (size_t i = 0; i < length && used < sizeof(filtered) - 1; i++) {
++        if (nmx_ascii_printable(src[i]))
++            filtered[used++] = (char)src[i];
++    }
++    filtered[used] = '\0';
++
++    first = 0;
++    while (first < used && nmx_ascii_space(filtered[first]))
++        first++;
++    last = used;
++    while (last > first && nmx_ascii_space(filtered[last - 1]))
++        last--;
++
++    while (first < last && out < 31)
++        dst[out++] = filtered[first++];
++    dst[out] = '\0';
++}
++
++bool
++nmx_parse_display_eld(const uint8_t *eld, size_t eld_len,
++                      struct nmx_display_endpoint *out)
++{
++    struct nmx_display_endpoint parsed = {0};
++    size_t baseline_end, required_end, sad_offset;
++    unsigned version, baseline_dwords, monitor_name_len, sad_count, connector;
++    bool supports_engine_format = false;
++
++    if (out == NULL)
++        return false;
++    memset(out, 0, sizeof(*out));
++
++    if (eld == NULL || eld_len < NMX_ELD_FIXED_BYTES || eld_len > NMX_ELD_MAX_BYTES)
++        return false;
++
++    version = (unsigned)(eld[0] >> 3);
++    if (version != NMX_ELD_VERSION)
++        return false;
++
++    baseline_dwords = eld[2];
++    if (baseline_dwords < 4u || baseline_dwords > NMX_ELD_MAX_BASELINE_DWORDS)
++        return false;
++    baseline_end = 4u + (size_t)baseline_dwords * 4u;
++    if (baseline_end > eld_len)
++        return false;
++
++    monitor_name_len = (unsigned)(eld[4] & 0x1fu);
++    sad_count = (unsigned)(eld[5] >> 4);
++    connector = (unsigned)((eld[5] >> 2) & 0x03u);
++    if (monitor_name_len > NMX_ELD_MAX_MONITOR_NAME || sad_count > NMX_ELD_MAX_SADS)
++        return false;
++    if (connector > 1u)
++        return false;
++
++    required_end = NMX_ELD_FIXED_BYTES + (size_t)monitor_name_len + (size_t)sad_count * 3u;
++    if (required_end > baseline_end || required_end > eld_len)
++        return false;
++
++    sad_offset = NMX_ELD_FIXED_BYTES + monitor_name_len;
++    for (unsigned i = 0; i < sad_count; i++) {
++        const uint8_t *sad = eld + sad_offset + (size_t)i * 3u;
++        unsigned format = (unsigned)((sad[0] >> 3) & 0x0fu);
++        unsigned channels = (unsigned)(sad[0] & 0x07u) + 1u;
++        bool rate_48000 = (sad[1] & NMX_SAD_RATE_48000) != 0;
++        bool size_16bit = (sad[2] & NMX_SAD_SIZE_16BIT) != 0;
++
++        if (format == NMX_SAD_FORMAT_LPCM && channels >= 2u && rate_48000 && size_16bit) {
++            supports_engine_format = true;
++            break;
++        }
++    }
++    if (!supports_engine_format)
++        return false;
++
++    parsed.connector = (uint8_t)connector;
++    parsed.manufacturer = (uint16_t)(((uint16_t)eld[16] << 8) | eld[17]);
++    parsed.product = (uint16_t)(((uint16_t)eld[19] << 8) | eld[18]);
++    nmx_copy_monitor_name(eld + NMX_ELD_FIXED_BYTES, monitor_name_len, parsed.name);
++    *out = parsed;
++    return true;
++}
+diff --git a/realmac27/audio/NMXAudio/nmx_pcm.c b/realmac27/audio/NMXAudio/nmx_pcm.c
+index 139a4f281435190d371a5b1dc8f98a6aa50e52b0..266d391767606783d52ac92462fba71cc030c04a 100644
+--- a/realmac27/audio/NMXAudio/nmx_pcm.c
++++ b/realmac27/audio/NMXAudio/nmx_pcm.c
+@@ -25,6 +25,7 @@ struct pcm_channel {
+ 	uint32_t format, speed;
+ 	int running;
+ 	void *engine;			/* set by the engine; chn_intr reports blocks to it */
++	unsigned engine_readers;	/* drain a pending block notification on detach */
+ };
+ 
+ int snd_unit = -1;
+@@ -163,7 +164,9 @@ int pcm_unregister(device_t dev)
+ 	struct snddev_info *sc = softc(dev);
+ 	if (!sc->registered)
+ 		return 0;
+-	nmx_audio_unpublish(sc);
++	int error = nmx_audio_unpublish(sc);
++	if (error != 0)
++		return error;
+ 	for (int i = 0; i < sc->nchan; i++) {
+ 		struct pcm_channel *c = sc->chan[i];
+ 		if (c->running)
+@@ -195,8 +198,11 @@ void pcm_setflags(device_t dev, uint32_t val) { softc(dev)->flags = val; }
+ 
+ void chn_intr(struct pcm_channel *c)
+ {
+-	if (c->engine != NULL)
+-		nmx_audio_block_done(c->engine, c);
++	__atomic_add_fetch(&c->engine_readers, 1, __ATOMIC_SEQ_CST);
++	void *engine = __atomic_load_n(&c->engine, __ATOMIC_SEQ_CST);
++	if (engine != NULL)
++		nmx_audio_block_done(engine, c);
++	__atomic_sub_fetch(&c->engine_readers, 1, __ATOMIC_SEQ_CST);
+ }
+ 
+ int snd_setup_intr(device_t dev, struct resource *res, int flags, driver_intr_t hand, void *param, void **cookiep)
+@@ -337,12 +343,37 @@ int nmx_chan_stop(struct pcm_channel *c)
+ }
+ 
+ uint32_t nmx_chan_getptr(struct pcm_channel *c) { return CHANNEL_GETPTR(c->obj, c->data); }
+-void nmx_chan_set_engine(struct pcm_channel *c, void *engine) { c->engine = engine; }
++void nmx_chan_set_engine(struct pcm_channel *c, void *engine)
++{
++	__atomic_store_n(&c->engine, engine, __ATOMIC_RELEASE);
++}
++
++void nmx_chan_clear_engine(struct pcm_channel *c, void *engine)
++{
++	if (__atomic_compare_exchange_n(&c->engine, &engine, NULL, 0,
++	    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
++		while (__atomic_load_n(&c->engine_readers, __ATOMIC_SEQ_CST) != 0)
++			pause("nmxengine", 1);
++	}
++}
+ 
+ int nmx_pcm_nchan(struct snddev_info *sc) { return sc->nchan; }
+ struct pcm_channel *nmx_pcm_chan(struct snddev_info *sc, int i) { return i >= 0 && i < sc->nchan ? sc->chan[i] : NULL; }
+ const char *nmx_pcm_name(struct snddev_info *sc) { return device_get_desc(sc->dev); }
+ 
++int nmx_hda_display_endpoint(device_t dev, struct nmx_display_endpoint *endpoint);
++int nmx_hda_label_role(device_t dev, int direction);
++
++int nmx_pcm_display_endpoint(struct snddev_info *sc, struct nmx_display_endpoint *endpoint)
++{
++	return nmx_hda_display_endpoint(sc->dev, endpoint);
++}
++
++int nmx_pcm_label_role(struct snddev_info *sc, int direction)
++{
++	return nmx_hda_label_role(sc->dev, direction);
++}
++
+ static int child_index(device_t dev)
+ {
+ 	device_t *kids = NULL;
+diff --git a/realmac27/audio/NMXAudio/xnuinc/nmx_audio_locale.h b/realmac27/audio/NMXAudio/xnuinc/nmx_audio_locale.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..efda9f4c032706dc7ccaffe9cbc2886c01baaf9d
+--- /dev/null
++++ b/realmac27/audio/NMXAudio/xnuinc/nmx_audio_locale.h
+@@ -0,0 +1,104 @@
++/* Original NMXAudio localization helper. No AppleHDA or SimpleHDA strings/code. */
++#ifndef NMX_AUDIO_LOCALE_H
++#define NMX_AUDIO_LOCALE_H
++
++#include <stddef.h>
++#if defined(KERNEL)
++#include <libkern/libkern.h>
++#else
++#include <string.h>
++#endif
++
++typedef enum NMXAudioLocaleCode {
++    NMX_AUDIO_LOCALE_EN = 0,
++    NMX_AUDIO_LOCALE_ZH_CN,
++    NMX_AUDIO_LOCALE_ZH_TW,
++    NMX_AUDIO_LOCALE_JA,
++    NMX_AUDIO_LOCALE_KO,
++    NMX_AUDIO_LOCALE_FR,
++    NMX_AUDIO_LOCALE_DE,
++    NMX_AUDIO_LOCALE_ES
++} NMXAudioLocaleCode;
++
++#define NMX_AUDIO_TEXT_DISPLAY_AUDIO  "display_audio"
++#define NMX_AUDIO_TEXT_INTERNAL_SPEAKER "internal_speaker"
++#define NMX_AUDIO_TEXT_HEADPHONES "headphones"
++#define NMX_AUDIO_TEXT_LINE_OUT "line_out"
++#define NMX_AUDIO_TEXT_DIGITAL_OUT "digital_out"
++#define NMX_AUDIO_TEXT_MICROPHONE "microphone"
++#define NMX_AUDIO_TEXT_LINE_IN "line_in"
++#define NMX_AUDIO_TEXT_LEFT "left"
++#define NMX_AUDIO_TEXT_RIGHT "right"
++#define NMX_AUDIO_TEXT_REAR_ANALOG "rear_analog"
++#define NMX_AUDIO_TEXT_FRONT_ANALOG "front_analog"
++
++/* Accepts locale strings such as "en-US:0" from prev-lang:kbd. */
++static inline NMXAudioLocaleCode nmxAudioLocale(const char *locale) {
++    char tag[64];
++    size_t used = 0;
++    const char *p = locale;
++    if (!p) return NMX_AUDIO_LOCALE_EN;
++    while (*p && *p != ':') {
++        unsigned char c = (unsigned char)*p++;
++        if (used + 1 >= sizeof(tag)) return NMX_AUDIO_LOCALE_EN;
++        if (c == '-') c = '_';
++        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + ('a' - 'A'));
++        tag[used++] = (char)c;
++    }
++    tag[used] = '\0';
++    if (used == 0) return NMX_AUDIO_LOCALE_EN;
++
++    if (tag[0] == 'z' && tag[1] == 'h' && (tag[2] == '_' || tag[2] == '\0')) {
++        const char *part = tag + (tag[2] == '_' ? 3 : 2);
++        while (*part) {
++            const char *end = part;
++            size_t len;
++            while (*end && *end != '_') ++end;
++            len = (size_t)(end - part);
++            if ((len == 4 && memcmp(part, "hant", 4) == 0) ||
++                (len == 2 && (memcmp(part, "tw", 2) == 0 || memcmp(part, "hk", 2) == 0 || memcmp(part, "mo", 2) == 0)))
++                return NMX_AUDIO_LOCALE_ZH_TW;
++            if ((len == 4 && memcmp(part, "hans", 4) == 0) ||
++                (len == 2 && (memcmp(part, "cn", 2) == 0 || memcmp(part, "sg", 2) == 0)))
++                return NMX_AUDIO_LOCALE_ZH_CN;
++            part = *end ? end + 1 : end;
++        }
++        return NMX_AUDIO_LOCALE_ZH_CN;
++    }
++
++    if (tag[0] == 'e' && tag[1] == 'n' && (tag[2] == '_' || tag[2] == '\0')) return NMX_AUDIO_LOCALE_EN;
++    if (tag[0] == 'j' && tag[1] == 'a' && (tag[2] == '_' || tag[2] == '\0')) return NMX_AUDIO_LOCALE_JA;
++    if (tag[0] == 'k' && tag[1] == 'o' && (tag[2] == '_' || tag[2] == '\0')) return NMX_AUDIO_LOCALE_KO;
++    if (tag[0] == 'f' && tag[1] == 'r' && (tag[2] == '_' || tag[2] == '\0')) return NMX_AUDIO_LOCALE_FR;
++    if (tag[0] == 'd' && tag[1] == 'e' && (tag[2] == '_' || tag[2] == '\0')) return NMX_AUDIO_LOCALE_DE;
++    if (tag[0] == 'e' && tag[1] == 's' && (tag[2] == '_' || tag[2] == '\0')) return NMX_AUDIO_LOCALE_ES;
++    return NMX_AUDIO_LOCALE_EN;
++}
++
++static inline const char *nmxAudioText(NMXAudioLocaleCode locale, const char *key) {
++    typedef struct NMXAudioLocaleEntry {
++        const char *key;
++        const char *text[8];
++    } NMXAudioLocaleEntry;
++    static const NMXAudioLocaleEntry entries[] = {
++        { NMX_AUDIO_TEXT_DISPLAY_AUDIO, { "Display Audio", "显示器音频", "顯示器音訊", "ディスプレイオーディオ", "디스플레이 오디오", "Audio de l’écran", "Bildschirm-Audio", "Audio de pantalla" } },
++        { NMX_AUDIO_TEXT_INTERNAL_SPEAKER, { "Internal Speaker", "内置扬声器", "內置揚聲器", "内蔵スピーカー", "내장 스피커", "Haut-parleur interne", "Interner Lautsprecher", "Altavoz interno" } },
++        { NMX_AUDIO_TEXT_HEADPHONES, { "Headphones", "耳机", "耳機", "ヘッドフォン", "헤드폰", "Écouteurs", "Kopfhörer", "Auriculares" } },
++        { NMX_AUDIO_TEXT_LINE_OUT, { "Line Out", "线路输出", "線路輸出", "ライン出力", "라인 출력", "Sortie ligne", "Line-Ausgang", "Salida de línea" } },
++        { NMX_AUDIO_TEXT_DIGITAL_OUT, { "Digital Out", "数字输出", "數位輸出", "デジタル出力", "디지털 출력", "Sortie numérique", "Digitalausgang", "Salida digital" } },
++        { NMX_AUDIO_TEXT_MICROPHONE, { "Microphone", "麦克风", "麥克風", "マイク", "마이크", "Microphone", "Mikrofon", "Micrófono" } },
++        { NMX_AUDIO_TEXT_LINE_IN, { "Line In", "线路输入", "線路輸入", "ライン入力", "라인 입력", "Entrée ligne", "Line-Eingang", "Entrada de línea" } },
++        { NMX_AUDIO_TEXT_LEFT, { "Left", "左", "左", "左", "왼쪽", "Gauche", "Links", "Izquierda" } },
++        { NMX_AUDIO_TEXT_RIGHT, { "Right", "右", "右", "右", "오른쪽", "Droite", "Rechts", "Derecha" } },
++        { NMX_AUDIO_TEXT_REAR_ANALOG, { "Rear Analog", "后置模拟", "後置類比", "リアアナログ", "후면 아날로그", "Analogique arrière", "Analog hinten", "Analógico trasero" } },
++        { NMX_AUDIO_TEXT_FRONT_ANALOG, { "Front Analog", "前置模拟", "前置類比", "フロントアナログ", "전면 아날로그", "Analogique avant", "Analog vorn", "Analógico delantero" } }
++    };
++    size_t i;
++    if (!key) return (const char *)0;
++    if ((unsigned)locale >= 8U) locale = NMX_AUDIO_LOCALE_EN;
++    for (i = 0; i < sizeof(entries) / sizeof(entries[0]); ++i)
++        if (strcmp(key, entries[i].key) == 0) return entries[i].text[(unsigned)locale];
++    return key;
++}
++
++#endif
+diff --git a/realmac27/audio/NMXAudio/xnuinc/nmx_display_eld.h b/realmac27/audio/NMXAudio/xnuinc/nmx_display_eld.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..00cd0440ee52236c362ddfe3da9e0d34f75dc264
+--- /dev/null
++++ b/realmac27/audio/NMXAudio/xnuinc/nmx_display_eld.h
+@@ -0,0 +1,24 @@
++#ifndef NMX_DISPLAY_ELD_H
++#define NMX_DISPLAY_ELD_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++struct nmx_display_endpoint {
++    uint8_t connector;       /* 0 = HDMI, 1 = DisplayPort */
++    uint16_t manufacturer;   /* EDID manufacturer ID, in EDID byte order */
++    uint16_t product;        /* EDID product code, decoded little-endian */
++    char name[32];           /* trimmed printable ASCII; empty when ELD has no usable name */
++};
++
++/*
++ * Parse a version-2 baseline ELD for the audio format NMXAudio currently opens:
++ * stereo LPCM, 48 kHz, 16-bit. The caller must gate this parser on live pin presence.
++ * Returns true only for a valid HDMI/DP ELD that advertises that format.
++ * On failure, clears `out` so callers cannot accidentally retain a prior sink.
++ */
++bool nmx_parse_display_eld(const uint8_t *eld, size_t eld_len,
++                           struct nmx_display_endpoint *out);
++
++#endif
+diff --git a/realmac27/audio/NMXAudio/xnuinc/nmx_display_gain.h b/realmac27/audio/NMXAudio/xnuinc/nmx_display_gain.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..5041d704bafdfa94faacea6ef0ad60da7f4c3a1f
+--- /dev/null
++++ b/realmac27/audio/NMXAudio/xnuinc/nmx_display_gain.h
+@@ -0,0 +1,123 @@
++#ifndef NMX_DISPLAY_GAIN_H
++#define NMX_DISPLAY_GAIN_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++namespace nmx_display_gain {
++
++// A value snapshot suitable for passing into the sample callback. Callers own
++// synchronization when updating these controls on a live audio engine.
++struct Levels {
++    unsigned master = 100;
++    unsigned left = 100;
++    unsigned right = 100;
++    bool muted = false;
++};
++
++struct ChannelGains {
++    float left = 1.0f;
++    float right = 1.0f;
++};
++
++inline float levelGain(unsigned level) noexcept
++{
++    if (level >= 100)
++        return 1.0f; // Keep unity exact; do not run it through a curve.
++    return static_cast<float>(level) / 100.0f;
++}
++
++// Linear attenuation is deliberate here: this helper does not impose a dB
++// curve. The master gain multiplies each independent channel gain.
++inline ChannelGains precompute(const Levels &levels) noexcept
++{
++    if (levels.muted)
++        return {0.0f, 0.0f};
++    const float master = levelGain(levels.master);
++    return {master * levelGain(levels.left), master * levelGain(levels.right)};
++}
++
++inline float boundedGain(float gain) noexcept
++{
++    if (!(gain == gain)) // NaN
++        return 0.0f;
++    if (gain <= 0.0f)
++        return 0.0f;
++    if (gain >= 1.0f)
++        return 1.0f;
++    return gain;
++}
++
++template <typename Sample>
++struct PcmTraits {
++    static_assert(sizeof(Sample) == 0, "only signed 16-bit and 32-bit PCM are supported");
++};
++
++template <>
++struct PcmTraits<int16_t> {
++    static int16_t fromFloat(float scaled) noexcept
++    {
++        return scaled >= 1.0f ? static_cast<int16_t>(0x7fff)
++                              : static_cast<int16_t>(scaled * 32768.0f);
++    }
++};
++
++template <>
++struct PcmTraits<int32_t> {
++    static int32_t fromFloat(float scaled) noexcept
++    {
++        return scaled >= 1.0f ? static_cast<int32_t>(0x7fffffff)
++                              : static_cast<int32_t>(scaled * 2147483648.0f);
++    }
++};
++
++template <typename Sample>
++inline Sample quantize(float input, float gain) noexcept
++{
++    // A NaN-to-integer cast is undefined. Treat NaN as silence, then apply
++    // gain before clipping so an over-range source can still be attenuated.
++    if (!(input == input))
++        input = 0.0f;
++    float scaled = input * boundedGain(gain);
++    if (!(scaled == scaled))
++        scaled = 0.0f;
++    if (scaled > 1.0f)
++        scaled = 1.0f;
++    else if (scaled < -1.0f)
++        scaled = -1.0f;
++    return PcmTraits<Sample>::fromFloat(scaled);
++}
++
++// Convert interleaved float stereo into a bounded portion of an int16/int32
++// ring. `firstFrame` and `numFrames` address both buffers; no wraparound is
++// performed. The caller must pass a complete source-frame count for validation.
++template <typename Sample>
++inline bool writeStereo(const float *mix,
++                        size_t mixFrames,
++                        Sample *ring,
++                        size_t ringFrames,
++                        size_t firstFrame,
++                        size_t numFrames,
++                        const ChannelGains &gains) noexcept
++{
++    const size_t maxFrames = static_cast<size_t>(-1) / 2;
++    if (mixFrames > maxFrames || ringFrames > maxFrames ||
++        firstFrame > mixFrames || numFrames > mixFrames - firstFrame ||
++        firstFrame > ringFrames || numFrames > ringFrames - firstFrame ||
++        (numFrames != 0 && (mix == nullptr || ring == nullptr)))
++        return false;
++
++    const size_t endFrame = firstFrame + numFrames;
++    const float leftGain = boundedGain(gains.left);
++    const float rightGain = boundedGain(gains.right);
++    for (size_t frame = firstFrame; frame < endFrame; ++frame) {
++        const size_t sample = frame * 2;
++        ring[sample] = quantize<Sample>(mix[sample], leftGain);
++        ring[sample + 1] = quantize<Sample>(mix[sample + 1], rightGain);
++    }
++    return true;
++}
++
++} // namespace nmx_display_gain
++
++#endif // NMX_DISPLAY_GAIN_H
+diff --git a/realmac27/audio/NMXAudio/xnuinc/nmx_pcm.h b/realmac27/audio/NMXAudio/xnuinc/nmx_pcm.h
+index 1c87587f7a647f8fa2b52ae26924a382507748a2..1bf2ac3a64e6c80c31f70794ca2c0283fd0018e1 100644
+--- a/realmac27/audio/NMXAudio/xnuinc/nmx_pcm.h
++++ b/realmac27/audio/NMXAudio/xnuinc/nmx_pcm.h
+@@ -5,6 +5,7 @@
+ #ifndef NMX_PCM_H
+ #define NMX_PCM_H
+ #include <stdint.h>
++#include "nmx_display_eld.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -16,6 +17,22 @@ struct pcm_channel;
+ #define NMX_DIR_PLAY 1
+ #define NMX_DIR_REC  3
+ 
++enum {
++    NMX_DISPLAY_LOCAL,
++    NMX_DISPLAY_UNAVAILABLE,
++    NMX_DISPLAY_CONNECTED
++};
++
++enum {
++    NMX_AUDIO_ROLE_UNKNOWN,
++    NMX_AUDIO_ROLE_LINE_OUT,
++    NMX_AUDIO_ROLE_SPEAKER,
++    NMX_AUDIO_ROLE_HEADPHONES,
++    NMX_AUDIO_ROLE_DIGITAL_OUT,
++    NMX_AUDIO_ROLE_LINE_IN,
++    NMX_AUDIO_ROLE_MICROPHONE
++};
++
+ /* one play or record channel of a PCM device */
+ int nmx_chan_dir(struct pcm_channel *c);
+ /* formats the codec accepts (FreeBSD AFMT_* | channel count), 0-terminated; and its rate range */
+@@ -29,11 +46,14 @@ int nmx_chan_start(struct pcm_channel *c);
+ int nmx_chan_stop(struct pcm_channel *c);
+ uint32_t nmx_chan_getptr(struct pcm_channel *c);	/* byte offset in the ring the hardware has reached */
+ void nmx_chan_set_engine(struct pcm_channel *c, void *engine);
++void nmx_chan_clear_engine(struct pcm_channel *c, void *engine);
+ 
+ /* PCM device */
+ int nmx_pcm_nchan(struct snddev_info *sc);
+ struct pcm_channel *nmx_pcm_chan(struct snddev_info *sc, int i);
+ const char *nmx_pcm_name(struct snddev_info *sc);	/* "Realtek ALC897 (Analog)" etc. */
++int nmx_pcm_display_endpoint(struct snddev_info *sc, struct nmx_display_endpoint *endpoint);
++int nmx_pcm_label_role(struct snddev_info *sc, int direction);
+ /* where the PCM device sits, stable across boots: the controller's PCI address, then the device's position under its
+  * codec. Unit numbers are not stable (two controllers attach in parallel), and names repeat (four identical HDMI pins) */
+ void nmx_pcm_location(struct snddev_info *sc, char *buf, size_t len);
+@@ -42,7 +62,7 @@ int nmx_pcm_mixer_set(struct snddev_info *sc, unsigned dev, unsigned left, unsig
+ 
+ /* the engine side (nmx_audio_engine.cpp) */
+ void nmx_audio_publish(struct snddev_info *sc);		/* pcm_register: make the IOAudioDevice */
+-void nmx_audio_unpublish(struct snddev_info *sc);	/* pcm_unregister */
++int nmx_audio_unpublish(struct snddev_info *sc);	/* pcm_unregister */
+ void nmx_audio_block_done(void *engine, struct pcm_channel *c);	/* chn_intr: one DMA block played/recorded */
+ 
+ #ifdef __cplusplus
