@@ -13,7 +13,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SRC = (ROOT / "package/install.sh").read_text()
-start = SRC.index('step "2. package integrity"')
+start = SRC.index('step "2. 软件包完整性检查"')
 end = SRC.index("for target in 15 26; do", start)
 BLOCK = SRC[start:end]
 assert "STAGE=$(mktemp -d /var/tmp/" in BLOCK, "the private copy moved: update this test's anchor"
@@ -77,14 +77,14 @@ with tempfile.TemporaryDirectory() as d:
     t = pathlib.Path(d); here = package(t)
     (here / "Library/Extensions/NVRM.kext/Contents/MacOS/NVRM").write_bytes(b"changed-before")
     rc, out = run(t, here)
-    arm("a file changed before the check is refused", rc != 0 and "SHA256SUMS mismatch" in out, out)
+    arm("a file changed before the check is refused", rc != 0 and "SHA256SUMS 校验不匹配" in out, out)
 
 for label, target in (("an absolute link", "/etc/hosts"), ("a ../ link", "../../../../outside")):
     with tempfile.TemporaryDirectory() as d:
         t = pathlib.Path(d); (t / "outside").write_bytes(b"vulkan")
         here = package(t, [("libvulkan.dylib", target)])
         rc, out = run(t, here)
-        arm(f"{label} out of the package is refused", rc != 0 and "link that leaves the package" in out, out)
+        arm(f"{label} out of the package is refused", rc != 0 and "指向软件包目录之外的链接" in out, out)
 
 with tempfile.TemporaryDirectory() as d:
     t = pathlib.Path(d); here = package(t)

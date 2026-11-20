@@ -75,7 +75,7 @@ class NativeGLDInstall(Install):
     def test_lookup_failure_restores_plugin_runtime_personalities_and_collection(self):
         result = self.run_install(FAKE_GLD_LOOKUP_FAIL='1')
         self.assert_restored(result)
-        self.assertIn('does not trust the installed OpenGL bundle', result.stdout + result.stderr)
+        self.assertIn('macOS 不信任已安装的 OpenGL 组件', result.stdout + result.stderr)
         self.assert_creates(1)
 
     def test_sequoia_native_install_uses_sequoia_accelerator(self):
@@ -94,7 +94,7 @@ class NativeGLDInstall(Install):
         info.write_bytes(plistlib.dumps(data));self.refresh_manifest()
         result = self.run_install()
         self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
-        self.assertIn('does not enable native Zink for macOS 15',result.stdout+result.stderr)
+        self.assertIn('未为 macOS 15 启用原生 Zink',result.stdout+result.stderr)
         self.assertFalse((self.root/'creates').exists())
 
     def test_sequoia_native_lookup_failure_rolls_back(self):
@@ -162,7 +162,7 @@ if name=='kmutil' and a[0]=='inspect':
         self.external_extension()
         result = self.run_install(FAKE_DROP_EXTERNAL='live')
         self.assert_restored(result)
-        self.assertIn('new collection dropped org.test.External', result.stdout + result.stderr)
+        self.assertIn('新内核集合未包含 org.test.External', result.stdout + result.stderr)
         self.assert_creates(2)
 
     def test_external_extension_in_writable_parent_is_rejected(self):
@@ -229,7 +229,7 @@ if name=='kmutil' and a[0]=='inspect':
         self.cached_extension(second_copy=True)
         result = self.run_install()
         self.assert_restored(result)
-        self.assertIn('Ambiguous',result.stdout+result.stderr)
+        self.assertIn('发现多个已安装的',result.stdout+result.stderr)
         self.assertFalse((self.root/'creates').exists())
 
 

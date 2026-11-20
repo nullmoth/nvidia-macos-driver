@@ -88,7 +88,7 @@ class IntelPanelInstall(Install):
 
     def test_removal_rejects_collection_still_containing_panel(self):
         self.existing();r=self.run_panel('no',EXPECT_PANEL='1');self.assert_restored(r)
-        self.assertIn('retained deselected NMIntelFB',r.stderr);self.assert_creates(1)
+        self.assertIn('已取消选择的 NMIntelFB',r.stderr);self.assert_creates(1)
 
     def test_preflight_missing_panel_stops_before_live_changes(self):
         r=self.run_panel('yes',EXPECT_PANEL='1',MISSING_PANEL='1');self.assert_restored(r)
@@ -106,7 +106,7 @@ class IntelPanelInstall(Install):
         import shutil
         shutil.rmtree(self.panel);self.refresh_manifest()
         r=self.run_panel('yes');self.assert_restored(r)
-        self.assertIn('lacks the optional',r.stderr)
+        self.assertIn('缺少可选的 Intel 内屏 kext',r.stderr)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)
