@@ -655,6 +655,8 @@ static struct {
     UInt32 pushes, rows;
     // Read back with ioreg ("nvrm-console-copier"): on macOS 27 this stage's kernel log never reaches the unified log.
     IOService *pub;
+    IOService *rmSvc;                                  // NVRMFB names its scanout here once its mode is set
+    UInt64 fbScanout; UInt32 fbPitch; UInt64 msFb;
     UInt32 phPushes[3], phRows[3], pausedTicks;        // per RM BAR1 state: 0 firmware window, 1 paused, 2 static
     UInt64 msStart, msFirstPause, msResume, msLastPush, msStop;
     UInt64 staticOff;
@@ -673,10 +675,10 @@ static void nvrmConsPublish(void)
 {
     if (!gCons.pub) return;
     char b[320];
-    snprintf(b, sizeof b, "fw %u/%u paused %u static %u/%u off 0x%llx blk 0x%x->0x%x pres %d bound %d ask %u 0x%llx fb 0x%llx | ms start %llu pause %llu resume %llu "
+    snprintf(b, sizeof b, "fw %u/%u paused %u static %u/%u off 0x%llx blk 0x%x->0x%x pres %d bound %d fbms %llu ask %u 0x%llx fb 0x%llx | ms start %llu pause %llu resume %llu "
              "last %llu stop %llu (%s) moved %s at %llu",
              gCons.phPushes[0], gCons.phRows[0], gCons.pausedTicks, gCons.phPushes[2], gCons.phRows[2], gCons.staticOff,
-             gCons.blk0, gCons.blkNow, (int)gCons.preserved, (int)gCons.bound, gCons.askCalls, gCons.askBase, gCons.fbCpu, gCons.msStart, gCons.msFirstPause, gCons.msResume, gCons.msLastPush, gCons.msStop,
+             gCons.blk0, gCons.blkNow, (int)gCons.preserved, (int)gCons.bound, gCons.msFb, gCons.askCalls, gCons.askBase, gCons.fbCpu, gCons.msStart, gCons.msFirstPause, gCons.msResume, gCons.msLastPush, gCons.msStop,
              gCons.stopWhy[0] ? gCons.stopWhy : "running",
              !gCons.movedTo ? "no" : (gCons.movedTo & 1) ? "phys" : "virt", gCons.msMoved);
     gCons.pub->setProperty("nvrm-console-copier", b);
@@ -747,7 +749,20 @@ static void nvrmConsTick(thread_call_param_t, thread_call_param_t)
     NvU32 blk = 0;
     const int br = nvrm_bar1_block(gCons.nv, &blk);
     UInt64 want = 0;
-    if (br == 1) {
+    // NVRMFB's scanout, once it has set its mode: the head shows that surface from then on, so the pushes go there
+    // (through its own BAR1 mapping, not the firmware screen's) until WindowServer connects and NVRMFB clears it.
+    UInt64 fbs = 0; UInt32 fbp = 0;
+    if (gCons.rmSvc) {
+        OSNumber *n = OSDynamicCast(OSNumber, gCons.rmSvc->getProperty("nvrmfb-console-scanout"));
+        OSNumber *q = OSDynamicCast(OSNumber, gCons.rmSvc->getProperty("nvrmfb-console-pitch"));
+        fbs = n ? n->unsigned64BitValue() : 0; fbp = q ? q->unsigned32BitValue() : 0;
+    }
+    if (fbs && !gCons.fbScanout) gCons.msFb = nvrmConsMs();
+    if (gCons.fbScanout && !fbs) { nvrmConsStop("WindowServer"); IOLockUnlock(gCons.lock); return; }
+    gCons.fbScanout = fbs; gCons.fbPitch = fbp;
+    if (fbs && fbp == gCons.rowBytes) {
+        want = fbs;
+    } else if (br == 1) {
         gCons.blkNow = blk;
         // The value before RM touched BAR1 is only trusted while RM has no BAR1 address space yet.
         if (!gCons.haveBlk && st == 0) { gCons.haveBlk = true; gCons.blk0 = blk; }
@@ -792,7 +807,7 @@ static void nvrmConsTick(thread_call_param_t, thread_call_param_t)
         gCons.full = false;
         if (n) {
             gCons.pushes++; gCons.rows += n; gCons.msLastPush = nvrmConsMs();
-            const int ph = (st == 2) ? 2 : 0;
+            const int ph = (st == 2 || gCons.fbScanout) ? 2 : 0;
             gCons.phPushes[ph]++; gCons.phRows[ph] += n;
         }
     }
@@ -804,9 +819,9 @@ static void nvrmConsTick(thread_call_param_t, thread_call_param_t)
 }
 
 // Called at the BAR1 move on a verbose start whose console the move took away. False = the console stays off.
-static bool nvrmConsStart(const PE_Video &pv, UInt64 bar1Base, IOService *pub)
+static bool nvrmConsStart(const PE_Video &pv, UInt64 bar1Base, IOService *pub, IOService *rmSvc)
 {
-    gCons.pub = pub;
+    gCons.pub = pub; gCons.rmSvc = rmSvc;
     if (pv.v_depth != 32 || !pv.v_rowBytes || !pv.v_height || !pv.v_width) return false;
     const size_t len = (size_t)pv.v_rowBytes * pv.v_height;
     gCons.lock = IOLockAlloc();
@@ -1908,7 +1923,7 @@ bool NVRM::placeLargeBar1()
         if (nvrmConsoleLostByMove(con, fwBar1, fwBar1Size, bar1Base, bar1Size, verbose)) {
             // The console is off until the copier's first tick hands it a RAM copy of the screen (see gCons above).
             getPlatform()->setConsoleInfo(0, kPEDisableScreen);
-            gNvrmConsoleAwaitsRm = nvrmConsStart(pv, bar1Base, fPCI);
+            gNvrmConsoleAwaitsRm = nvrmConsStart(pv, bar1Base, fPCI, this);
             LOG("bar1: verbose console 0x%llx -> RAM copy pushed through the new BAR1 0x%llx: %s", con, bar1Base,
                 gNvrmConsoleAwaitsRm ? "on" : "could not start, console stays off");
             fPCI->setProperty("nvrm-console-moved-to", bar1Base, 64);
