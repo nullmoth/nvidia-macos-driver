@@ -659,7 +659,8 @@ static struct {
     UInt64 msStart, msFirstPause, msResume, msLastPush, msStop;
     UInt64 staticOff;
     char stopWhy[24];
-    bool haveBlk; UInt32 blk0, blkNow; bool preserved;
+    bool haveBlk; UInt32 blk0, blkNow; bool preserved, bound;
+    UInt32 askCalls; UInt64 askBase, fbCpu;           // what RM was told the console base is, and BAR1 as RM sees it
     UInt64 movedTo, msMoved;
 } gCons;
 
@@ -672,10 +673,10 @@ static void nvrmConsPublish(void)
 {
     if (!gCons.pub) return;
     char b[320];
-    snprintf(b, sizeof b, "fw %u/%u paused %u static %u/%u off 0x%llx blk 0x%x->0x%x pres %d | ms start %llu pause %llu resume %llu "
+    snprintf(b, sizeof b, "fw %u/%u paused %u static %u/%u off 0x%llx blk 0x%x->0x%x pres %d bound %d ask %u 0x%llx fb 0x%llx | ms start %llu pause %llu resume %llu "
              "last %llu stop %llu (%s) moved %s at %llu",
              gCons.phPushes[0], gCons.phRows[0], gCons.pausedTicks, gCons.phPushes[2], gCons.phRows[2], gCons.staticOff,
-             gCons.blk0, gCons.blkNow, (int)gCons.preserved, gCons.msStart, gCons.msFirstPause, gCons.msResume, gCons.msLastPush, gCons.msStop,
+             gCons.blk0, gCons.blkNow, (int)gCons.preserved, (int)gCons.bound, gCons.askCalls, gCons.askBase, gCons.fbCpu, gCons.msStart, gCons.msFirstPause, gCons.msResume, gCons.msLastPush, gCons.msStop,
              gCons.stopWhy[0] ? gCons.stopWhy : "running",
              !gCons.movedTo ? "no" : (gCons.movedTo & 1) ? "phys" : "virt", gCons.msMoved);
     gCons.pub->setProperty("nvrm-console-copier", b);
@@ -750,12 +751,16 @@ static void nvrmConsTick(thread_call_param_t, thread_call_param_t)
         gCons.blkNow = blk;
         // The value before RM touched BAR1 is only trusted while RM has no BAR1 address space yet.
         if (!gCons.haveBlk && st == 0) { gCons.haveBlk = true; gCons.blk0 = blk; }
-        const bool rmBound = gCons.haveBlk && blk != gCons.blk0 && (blk & (1u << 9));
+        // Once RM has bound BAR1 it stays bound for this start: a later read of the old value (a register read while
+        // the GPU is busy can return 0) must never send the pushes back to offset 0 of RM's address space.
+        if (gCons.haveBlk && blk != gCons.blk0 && (blk & (1u << 9))) gCons.bound = true;
+        if (st != 0 && !gCons.haveBlk) gCons.bound = true;   // RM is past the point the old value could be taken
+        const bool rmBound = gCons.bound;
         gCons.preserved = nvrm_bar1_console_preserved(gCons.nv) != 0;
         if (gCons.haveBlk && !rmBound) want = gCons.bar1Base;
         else if (rmBound && gCons.preserved) want = gCons.bar1Base;
         else if (rmBound && st == 2) want = gCons.bar1Base + off;
-    } else if (br == 0 && st == 0 && !gCons.rmDone) {
+    } else if (br == 0 && st == 0 && !gCons.rmDone && !gCons.bound) {
         want = gCons.bar1Base;                          // no GPU object yet: RM has not touched BAR1
     } else if (br == -1) {
         if (st == 0 && !gCons.rmDone) want = gCons.bar1Base;
@@ -821,6 +826,8 @@ extern "C" bool nvrm_console_fw_base(NvU64 *pBase)
 {
     if (!gCons.lock || gCons.stopped || !gCons.bar1Base) return false;
     *pBase = gCons.bar1Base;
+    gCons.askCalls++; gCons.askBase = gCons.bar1Base;
+    if (gCons.nv && gCons.nv->fb) gCons.fbCpu = (UInt64)gCons.nv->fb->cpu_address;
     return true;
 }
 
