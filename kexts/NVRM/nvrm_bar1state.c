@@ -16,9 +16,11 @@
 #include <osapi.h>
 #include "gpu/gpu.h"
 #include "kernel/gpu/bus/kern_bus.h"
+#include "published/hopper/gh100/dev_vm.h"
 #pragma clang diagnostic pop
 
 int nvrm_bar1_console_state(nv_state_t *nv, NvU64 *pStaticStart);
+int nvrm_bar1_block(nv_state_t *nv, NvU32 *pBlock);
 
 /*
  * Where the verbose console may write VRAM through BAR1 while RM starts.
@@ -40,4 +42,20 @@ int nvrm_bar1_console_state(nv_state_t *nv, NvU64 *pStaticStart)
     if (!pKernelBus->bar1[0].bStaticBar1Enabled) return 1;
     if (pStaticStart) *pStaticStart = pKernelBus->bar1[0].staticBar1.startOffset;
     return 2;
+}
+
+/*
+ * The BAR1 bind register (Hopper and later, BAR1_BLOCK_LOW_ADDR: MODE bit 9, physical 0 / virtual 1). RM building its
+ * BAR1 address space does not change what BAR1 reaches; only the bind does, and RM binds after the static mapping is
+ * made. Returns 0 when no GPU object exists yet, 1 with *pBlock read, -1 on an older chip (no such register here).
+ */
+int nvrm_bar1_block(nv_state_t *nv, NvU32 *pBlock)
+{
+    if (pBlock) *pBlock = 0;
+    if (nv == NULL) return 0;
+    OBJGPU *pGpu = NV_GET_NV_PRIV_PGPU(nv);
+    if (pGpu == NULL) return 0;
+    if (!IsGH100orBetter(pGpu)) return -1;
+    if (pBlock) *pBlock = GPU_VREG_RD32(pGpu, NV_VIRTUAL_FUNCTION_PRIV_FUNC_BAR1_BLOCK_LOW_ADDR);
+    return 1;
 }
