@@ -141,8 +141,9 @@ int main(void){
  const int families[]={GPU_ADA,GPU_TU117,GPU_AMPERE,GPU_TU10X,GPU_NONE};
  const unsigned expectedEncoder[]={7,3,0,0,0};
  const unsigned legacy=1|2|16|32|64|128|256|512;
- const unsigned expectedDecoder[]={legacy|4,legacy,16|4,8|16,0};
+ const unsigned expectedDecoder[]={legacy|4,legacy,1|2|4|16|256,8|16,0};
  const char *settings[]={"NVENCVT_ANY_GPU","NVENCVT_AMPERE_ENC","NVENCVT_AMPERE_ALL_DEC","NVENCVT_TURING_ALL_DEC",
+ "NVENCVT_AMPERE_H264_DEC","NVMTL_NO_NVDEC_HEVC",
  "NVENCVT_NO_DEC","NVENCVT_NO_HEVC","NVENCVT_NO_AV1","NVENCVT_NO_HEVCDEC","NVENCVT_NO_HEV1","NVENCVT_NO_VP9DEC",
  "NVENCVT_NO_VP8DEC","NVENCVT_NO_AV1DEC","NVENCVT_NO_MPEG2DEC","NVENCVT_NO_MPEG4DEC","NVENCVT_LOG"};
  for(unsigned n=0;n<sizeof settings/sizeof *settings;n++)unsetenv(settings[n]);
@@ -159,6 +160,18 @@ int main(void){
  encoders=decoders=0;
  assert(NVEncVT_RegisterCodecs(1100,0)!=noErr&&NVEncVT_RegisterCodecs(1100,4)!=noErr);
  assert(!encoders&&!decoders);
+ selected=GPU_AMPERE;encoders=decoders=0;setenv("NVENCVT_AMPERE_ALL_DEC","1",1);
+ assert(NVEncVT_RegisterCodecs(1100,1)==noErr&&encoders==0&&decoders==(legacy|4));
+ unsetenv("NVENCVT_AMPERE_ALL_DEC");setprogname("VTDecoderXPCService");encoders=decoders=0;
+ assert(NVEncVT_RegisterCodecs(1100,1)==noErr&&encoders==0&&decoders==(4|16));
+ setenv("NVENCVT_AMPERE_H264_DEC","1",1);encoders=decoders=0;
+ assert(NVEncVT_RegisterCodecs(1100,1)==noErr&&encoders==0&&decoders==(1|4|16|256));
+ setprogname("codec-policy-test");unsetenv("NVENCVT_AMPERE_H264_DEC");
+ setenv("NVMTL_NO_NVDEC_HEVC","1",1);encoders=decoders=0;
+ assert(NVEncVT_RegisterCodecs(1100,1)==noErr&&encoders==0&&decoders==(1|4|16|256));
+ unsetenv("NVMTL_NO_NVDEC_HEVC");setenv("NVENCVT_AMPERE_H264_DEC","0",1);encoders=decoders=0;
+ assert(NVEncVT_RegisterCodecs(1100,1)==noErr&&encoders==0&&decoders==(2|4|16));
+ unsetenv("NVENCVT_AMPERE_H264_DEC");
  selected=GPU_TU10X;encoders=decoders=0;setenv("NVENCVT_TURING_ALL_DEC","1",1);
  assert(NVEncVT_Register(1100)==noErr&&encoders==0&&decoders==(legacy|8));
  puts("PASS: complete registrar sets retain Ada/TU117/Ampere/TU10x codecs; decoder-only, encoder-only, combined and invalid scopes");
