@@ -612,8 +612,154 @@ extern "C" { IOMemoryDescriptor *nv_pm_ram_submd(NvU64, NvU64, int); bool nv_pm_
 #define super IOService
 OSDefineMetaClassAndStructors(NVRM, IOService)
 static bool gRmInitDone = false;
-// Set when BAR1 moved under a verbose console: the console waits, off, at the new BAR1 start until RM is up.
+// Set when BAR1 moved under a verbose console (the copier below then carries the console through RM's start).
 static bool gNvrmConsoleAwaitsRm;
+
+extern "C" int nvrm_bar1_console_state(nv_state_t *nv, NvU64 *pStaticStart);   // nvrm_bar1state.c
+
+/*
+ * The verbose console through the BAR1 move and RM's start, the way a real Mac keeps drawing text until the window
+ * server takes the screen.
+ *
+ * The firmware's screen stays in VRAM and the head keeps scanning it out; only the CPU's window onto it moves, and
+ * during RM's start that window changes meaning twice. The kernel console maps a physical framebuffer uncached, so
+ * drawing (and scrolling, which reads the whole screen back) straight through BAR1 crawled at about half a second per
+ * line. So the console draws into a cached copy in RAM, and a timer pushes the rows that changed to VRAM through a
+ * write-combined mapping:
+ *   - before RM builds its BAR1 address space, BAR1 offset 0 is VRAM 0 (where the firmware's screen is);
+ *   - while RM builds and binds it, nothing is written (the window is about to change);
+ *   - once RM is up with its static BAR1 mapping, VRAM X is at BAR1 offset (startOffset + X), the screen is repainted
+ *     whole there, and the push goes on. RM keeps that VRAM reserved as the console region for its whole life, so
+ *     these writes never land on memory RM gave anyone else. Writing at BAR1 offset 0 after RM is up is what
+ *     corrupted the desktop before: that offset is RM's own dynamic mappings, not the screen.
+ * The copier stops when someone else moves the console (the framebuffer at takeover), or after 15 minutes.
+ */
+static struct {
+    IOLock *lock;
+    thread_call_t call;
+    nv_state_t *nv;
+    UInt8 *shadow, *mirror;            // what the console draws / what VRAM holds
+    UInt32 rowBytes, height, width;
+    UInt64 bar1Base;
+    UInt64 targetPhys;                 // where the pushes go now (0 = paused)
+    IOMemoryDescriptor *md; IOMemoryMap *map; UInt8 *vram;
+    bool rmDone, rmUp, started, stopped, full;
+    UInt64 deadline;
+    UInt32 pushes, rows;
+} gCons;
+
+static void nvrmConsUnmap(void)
+{
+    if (gCons.map) { gCons.map->release(); gCons.map = NULL; }
+    if (gCons.md) { gCons.md->release(); gCons.md = NULL; }
+    gCons.vram = NULL; gCons.targetPhys = 0;
+}
+
+static bool nvrmConsMap(UInt64 phys)
+{
+    nvrmConsUnmap();
+    const UInt64 len = (UInt64)gCons.rowBytes * gCons.height;
+    gCons.md = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)phys, (IOByteCount)len, kIODirectionInOut);
+    if (!gCons.md) return false;
+    gCons.map = gCons.md->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapWriteCombineCache);
+    if (!gCons.map) { nvrmConsUnmap(); return false; }
+    gCons.vram = (UInt8 *)gCons.map->getVirtualAddress();
+    gCons.targetPhys = phys;
+    return gCons.vram != NULL;
+}
+
+static void nvrmConsStop(const char *why)
+{
+    gCons.stopped = true;
+    nvrmConsUnmap();
+    IOLog("NVRM: verbose console copier stopped (%s) after %u pushes, %u rows\n", why, gCons.pushes, gCons.rows);
+}
+
+static void nvrmConsTick(thread_call_param_t, thread_call_param_t)
+{
+    IOLockLock(gCons.lock);
+    if (gCons.stopped) { IOLockUnlock(gCons.lock); return; }
+    if (!gCons.started) {
+        // First tick: take the screen as it is (one slow uncached read through BAR1 offset 0, where it still is), then
+        // hand the console the RAM copy. The kernel uses a base without bit 0 as an already mapped virtual address.
+        if (!nvrmConsMap(gCons.bar1Base)) { nvrmConsStop("map"); IOLockUnlock(gCons.lock); return; }
+        const UInt64 len = (UInt64)gCons.rowBytes * gCons.height;
+        memcpy(gCons.shadow, gCons.vram, (size_t)len);
+        memcpy(gCons.mirror, gCons.shadow, (size_t)len);
+        PE_Video pv; bzero(&pv, sizeof pv);
+        IOPlatformExpert *pe = IOService::getPlatform();
+        if (!pe || pe->getConsoleInfo(&pv) != kIOReturnSuccess) { nvrmConsStop("console info"); IOLockUnlock(gCons.lock); return; }
+        pv.v_baseAddr = (unsigned long)gCons.shadow;
+        pe->setConsoleInfo(&pv, kPEBaseAddressChange);
+        pe->setConsoleInfo(0, kPEEnableScreen);
+        gCons.started = true;
+        IOLog("NVRM: verbose console drawing into RAM, pushed to VRAM through BAR1 0x%llx\n", gCons.bar1Base);
+    } else {
+        PE_Video pv; bzero(&pv, sizeof pv);
+        IOPlatformExpert *pe = IOService::getPlatform();
+        if (pe && pe->getConsoleInfo(&pv) == kIOReturnSuccess && ((UInt64)pv.v_baseAddr & ~3ull) != (UInt64)gCons.shadow) {
+            nvrmConsStop("console moved"); IOLockUnlock(gCons.lock); return;
+        }
+    }
+    if (mach_absolute_time() > gCons.deadline) { nvrmConsStop("time"); IOLockUnlock(gCons.lock); return; }
+
+    NvU64 off = 0;
+    const int st = nvrm_bar1_console_state(gCons.nv, &off);
+    UInt64 want = 0;
+    if (st == 0 && !gCons.rmDone) want = gCons.bar1Base;
+    else if (st == 2 && gCons.rmUp) want = gCons.bar1Base + off;
+    if (gCons.rmDone && !gCons.rmUp) { nvrmConsStop("RM did not start"); IOLockUnlock(gCons.lock); return; }
+    if (want != gCons.targetPhys) {
+        if (!want) nvrmConsUnmap();
+        else if (!nvrmConsMap(want)) { nvrmConsStop("remap"); IOLockUnlock(gCons.lock); return; }
+        else {
+            gCons.full = true;
+            IOLog("NVRM: verbose console now pushed to BAR1 offset 0x%llx (RM BAR1 state %d)\n", want - gCons.bar1Base, st);
+        }
+    }
+    if (gCons.vram) {
+        UInt32 n = 0;
+        for (UInt32 y = 0; y < gCons.height; y++) {
+            const size_t o = (size_t)y * gCons.rowBytes;
+            if (!gCons.full && !memcmp(gCons.shadow + o, gCons.mirror + o, gCons.rowBytes)) continue;
+            memcpy(gCons.mirror + o, gCons.shadow + o, gCons.rowBytes);
+            memcpy(gCons.vram + o, gCons.mirror + o, gCons.rowBytes);
+            n++;
+        }
+        gCons.full = false;
+        if (n) { gCons.pushes++; gCons.rows += n; }
+    }
+    IOLockUnlock(gCons.lock);
+    uint64_t d; clock_interval_to_deadline(33, kMillisecondScale, &d);
+    thread_call_enter_delayed(gCons.call, d);
+}
+
+// Called at the BAR1 move on a verbose start whose console the move took away. False = the console stays off.
+static bool nvrmConsStart(const PE_Video &pv, UInt64 bar1Base)
+{
+    if (pv.v_depth != 32 || !pv.v_rowBytes || !pv.v_height || !pv.v_width) return false;
+    const size_t len = (size_t)pv.v_rowBytes * pv.v_height;
+    gCons.lock = IOLockAlloc();
+    gCons.shadow = (UInt8 *)IOMallocZero(len);
+    gCons.mirror = (UInt8 *)IOMallocZero(len);
+    gCons.call = thread_call_allocate(nvrmConsTick, NULL);
+    if (!gCons.lock || !gCons.shadow || !gCons.mirror || !gCons.call) return false;   // a few MB lost on a failed start
+    gCons.rowBytes = (UInt32)pv.v_rowBytes; gCons.height = (UInt32)pv.v_height; gCons.width = (UInt32)pv.v_width;
+    gCons.bar1Base = bar1Base;
+    uint64_t d; clock_interval_to_deadline(15 * 60, kSecondScale, &d); gCons.deadline = d;
+    thread_call_enter(gCons.call);
+    return true;
+}
+
+// Around rm_init_adapter: which nv to ask about BAR1, and whether RM came up.
+static void nvrmConsRm(nv_state_t *nv, int phase, bool ok)
+{
+    if (!gCons.lock) return;
+    IOLockLock(gCons.lock);
+    if (phase == 0) gCons.nv = nv;
+    else { gCons.rmDone = true; gCons.rmUp = ok; }
+    IOLockUnlock(gCons.lock);
+}
 
 
 // Turing (TU102/TU104/TU106/TU117 = 0x1E00-0x1FFF, TU116 = 0x2180-0x21FF) needs about ten seconds after the BAR1 move
@@ -1680,20 +1826,11 @@ bool NVRM::placeLargeBar1()
             fPCI->setProperty("nvrm-console-move", why);
         }
         if (nvrmConsoleLostByMove(con, fwBar1, fwBar1Size, bar1Base, bar1Size, verbose)) {
-            // The firmware's screen is still in VRAM and the head still scans it out; only the window the CPU reaches
-            // it through moved. Drawing through the new window now is wrong twice over: until RM is up the window does
-            // not reach that screen (each line costs about half a second and the start crawls), and once RM is up its
-            // start is mapped wherever RM chose. RM itself keeps the firmware console reachable, the way Linux's efifb
-            // survives the driver loading: when the console base it is told equals BAR1's CPU address, it maps the
-            // console's VRAM at BAR1 offset 0 before anything else (kbusInitBar1, bPreserveBar1ConsoleEnabled). So the
-            // console is switched off and pointed at the start of the new BAR1 here, and switched back on once
-            // rm_init_adapter has made that mapping.
+            // The console is off until the copier's first tick hands it a RAM copy of the screen (see gCons above).
             getPlatform()->setConsoleInfo(0, kPEDisableScreen);
-            PE_Video nv = pv;
-            nv.v_baseAddr = (unsigned long)(bar1Base | 1);     // a physical base, as IOPCIConfigurator passes it
-            getPlatform()->setConsoleInfo(&nv, kPEBaseAddressChange);
-            gNvrmConsoleAwaitsRm = true;
-            LOG("bar1: verbose console 0x%llx -> start of the new BAR1 0x%llx, off until RM maps it there", con, bar1Base);
+            gNvrmConsoleAwaitsRm = nvrmConsStart(pv, bar1Base);
+            LOG("bar1: verbose console 0x%llx -> RAM copy pushed through the new BAR1 0x%llx: %s", con, bar1Base,
+                gNvrmConsoleAwaitsRm ? "on" : "could not start, console stays off");
             fPCI->setProperty("nvrm-console-moved-to", bar1Base, 64);
         }
     }
@@ -1949,17 +2086,11 @@ IOReturn NVRM::go(uint32_t pass)
         fIntSrc->enable();
         nv->interrupt_line = (NvU32)msi;
         LOG("MSI %d armed; calling rm_init_adapter() — GSP boot from inside macOS", msi);
+        nvrmConsRm(nv, 0, false);
         NvBool ok = rm_init_adapter(NULL, nv);
         LOG("rm_init_adapter -> %s", ok ? "OK" : "FAILED");
-        if (gNvrmConsoleAwaitsRm) {
-            // RM has mapped the firmware console at BAR1 offset 0 (or failed to start, and the screen stays off).
-            gNvrmConsoleAwaitsRm = false;
-            if (ok && getPlatform()) {
-                getPlatform()->setConsoleInfo(0, kPEEnableScreen);
-                LOG("bar1: verbose console back on through RM's BAR1 console mapping");
-                fPCI->setProperty("nvrm-console-resumed", true);
-            }
-        }
+        nvrmConsRm(nv, 1, ok);
+        if (gNvrmConsoleAwaitsRm) fPCI->setProperty("nvrm-console-resumed", (bool)ok);
         nv_xnu_dump_live_allocs();
         nv_xnu_dump_gsp_regs(nv);
         if (!ok) {   // the card did not start: no interrupt may arrive for it, and a retry registers its own source
