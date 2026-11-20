@@ -73,31 +73,38 @@ static inline void nvrm_scan_cea(const uint8_t *edid, size_t edid_len, struct nv
     }
     scan->has_audio = scan->sad_count != 0;
 }
+// EDID product-name descriptors hold at most 13 printable ASCII characters.
+static inline uint8_t nvrm_edid_product_name(const uint8_t *edid, size_t size, char (*name)[14])
+{
+    (*name)[0] = 0;
+    if (!edid || size < 128) return 0;
+    for (size_t offset = 54; offset <= 108; offset += 18) {
+        const uint8_t *descriptor = edid + offset;
+        if (descriptor[0] || descriptor[1] || descriptor[2] || descriptor[3] != 0xfc || descriptor[4])
+            continue;
+        uint8_t length = 0;
+        for (unsigned i = 0; i < 13; ++i) {
+            const uint8_t ch = descriptor[5 + i];
+            if (ch == 0x0a || ch == 0) break;
+            if (ch < 0x20 || ch > 0x7e) { length = 0; break; }
+            (*name)[length++] = (char)ch;
+        }
+        while (length && (*name)[length - 1] == ' ') --length;
+        (*name)[length] = 0;
+        if (length) return length;
+    }
+    return 0;
+}
+
 // Returns the number of bytes written to out (a multiple of 4), or 0 if the EDID is too short/malformed to describe a
 // sink. out must hold at least NVRM_ELD_MAX bytes. conn_type is NVRM_ELD_CONN_HDMI or NVRM_ELD_CONN_DP.
 static inline size_t nvrm_build_eld(const uint8_t *edid, size_t edid_len, int conn_type, uint8_t *out)
 {
     if (!edid || !out || edid_len < 128) return 0;             // no base block, nothing to describe
 
-    // --- base block: manufacturer name (bytes 8 and 9), product code (bytes 10 and 11), monitor name (0xFC descriptor) ---
     uint8_t mfr0 = edid[8], mfr1 = edid[9], prod0 = edid[10], prod1 = edid[11];
-
-    // The four 18-byte descriptors live at 54, 72, 90, 108. A display-product-name descriptor has the 5-byte prefix
-    // 00 00 00 FC 00 and up to 13 name bytes, terminated by 0x0A and padded with spaces.
-    char name[14]; uint8_t mnl = 0;
-    for (int d = 0; d < 4 && mnl == 0; d++) {
-        size_t o = (size_t)(54 + d * 18);
-        if (o + 18 > 128) break;
-        if (edid[o] == 0 && edid[o+1] == 0 && edid[o+2] == 0 && edid[o+3] == 0xFC && edid[o+4] == 0) {
-            for (int i = 0; i < 13; i++) {
-                uint8_t ch = edid[o + 5 + (size_t)i];
-                if (ch == 0x0A) break;                          // EDID line terminator
-                name[mnl++] = (char)ch;
-            }
-            while (mnl > 0 && name[mnl-1] == ' ') mnl--;         // trim the space padding
-        }
-    }
-    if (mnl > 13) mnl = 13;
+    char name[14];
+    uint8_t mnl = nvrm_edid_product_name(edid, edid_len, &name);
 
     // --- CEA-861 extension block: Short Audio Descriptors and the speaker-allocation byte ---
     struct nvrm_cea_scan cea;

@@ -24,6 +24,8 @@ fixture = r'''
 #include <cstring>
 #include <vector>
 #include "nvrm_ddc_abi.h"
+#include "nvrm_ddc_vcp.h"
+#include "nvrm_eld.h"
 #include "nvrm-fb-safety.h"
 typedef int IOReturn; typedef uint32_t UInt32; typedef uint32_t IOOptionBits; typedef uint64_t UInt64;
 enum { kIOReturnSuccess=0, kIOReturnUnsupported=-1, kIOReturnUnsupportedMode=-2, kIOReturnBadArgument=-3, kIOReturnNoDevice=-4, kIOReturnBadArgumentX=-9, kIOReturnBusy=-10, kMillisecondScale=1000 };
@@ -62,6 +64,71 @@ static IOI2CRequest req(unsigned char *w, unsigned wn, unsigned char *r, unsigne
     IOI2CRequest q{}; q.sendTransactionType = wn ? kIOI2CSimpleTransactionType : 0; q.sendAddress = 0x6E; q.sendBytes = wn; q.sendBuffer = (uintptr_t)w;
     q.replyTransactionType = rn ? kIOI2CDDCciReplyTransactionType : 0; q.replyAddress = 0x6F; q.replyBytes = rn; q.replyBuffer = (uintptr_t)r; return q;
 }
+
+static void checkVolume(FB &fb)
+{
+    uint8_t query[5], reply[11] = {}, write[7];
+    const uint8_t getVolume[] = {0x51, 0x82, 0x01, 0x62, 0xde};
+    const uint8_t setVolume[] = {0x51, 0x84, 0x03, 0x62, 0x00, 0x2a, 0xf0};
+    nvrmVcpGet(kNvrmVcpSpeakerVolume, query);
+    assert(memcmp(query, getVolume, sizeof query) == 0);
+    nvrmVcpSet(kNvrmVcpSpeakerVolume, 42, write);
+    assert(memcmp(write, setVolume, sizeof write) == 0);
+
+    gReply = {0x6e, 0x88, 0x02, 0x00, 0x62, 0x00, 0x00, 0x64, 0x00, 0x2a, 0};
+    auto checksum = [](uint8_t *bytes) {
+        bytes[10] = 0x50;
+        for (size_t i = 0; i < 10; ++i) bytes[10] ^= bytes[i];
+    };
+    checksum(gReply.data());
+    auto request = req(query, sizeof query, reply, sizeof reply);
+    assert(fb.doI2CRequest(0, nullptr, &request) == kIOReturnSuccess);
+    uint32_t value = 0, maximum = 0;
+    assert(nvrmVcpParse(kNvrmVcpSpeakerVolume, reply, request.replyBytes, value, maximum) == NVRMVcpReply::valid);
+    assert(value == 42 && maximum == 100);
+    assert(nvrmVcpParse(kNvrmVcpBrightness, reply, sizeof reply, value, maximum) == NVRMVcpReply::retry);
+    assert(nvrmVcpParse(kNvrmVcpSpeakerVolume, reply, sizeof reply - 1, value, maximum) == NVRMVcpReply::retry);
+    reply[9] = 101;
+    assert(nvrmVcpParse(kNvrmVcpSpeakerVolume, reply, sizeof reply, value, maximum) == NVRMVcpReply::retry);
+    checksum(reply);
+    assert(nvrmVcpParse(kNvrmVcpSpeakerVolume, reply, sizeof reply, value, maximum) == NVRMVcpReply::retry);
+    reply[3] = 1;
+    checksum(reply);
+    assert(nvrmVcpParse(kNvrmVcpSpeakerVolume, reply, sizeof reply, value, maximum) == NVRMVcpReply::unsupported);
+    reply[3] = 0;
+    reply[7] = 255;
+    reply[9] = 255;
+    checksum(reply);
+    assert(nvrmVcpParse(kNvrmVcpSpeakerVolume, reply, sizeof reply, value, maximum) == NVRMVcpReply::muted);
+    assert(value == 1 && maximum == 254);
+    reply[9] = 0;
+    checksum(reply);
+    assert(nvrmVcpParse(kNvrmVcpSpeakerVolume, reply, sizeof reply, value, maximum) == NVRMVcpReply::unsupported);
+    reply[9] = 254;
+    checksum(reply);
+    assert(nvrmVcpParse(kNvrmVcpSpeakerVolume, reply, sizeof reply, value, maximum) == NVRMVcpReply::valid);
+    assert(value == 254 && maximum == 254);
+    puts("PASS: volume VCP framing, checksum, unsupported opcodes, reported range and reserved values");
+}
+
+static void checkDisplayName()
+{
+    uint8_t edid[128] = {};
+    auto *descriptor = edid + 108;
+    descriptor[3] = 0xfc;
+    memcpy(descriptor + 5, "Redmi 215 NF\n", 13);
+    char name[14];
+    assert(nvrm_edid_product_name(edid, sizeof edid, &name) == 12);
+    assert(strcmp(name, "Redmi 215 NF") == 0);
+    memcpy(descriptor + 5, "T2751U\n      ", 13);
+    assert(nvrm_edid_product_name(edid, sizeof edid, &name) == 6);
+    assert(strcmp(name, "T2751U") == 0);
+    descriptor[5] = 0x80;
+    assert(nvrm_edid_product_name(edid, sizeof edid, &name) == 0 && name[0] == 0);
+    assert(nvrm_edid_product_name(edid, sizeof edid - 1, &name) == 0 && name[0] == 0);
+    puts("PASS: EDID product names are per display and reject malformed descriptors");
+}
+
 int main() {
     FB fb; unsigned char w[6] = {0x51, 0x82, 0x01, 0x10, 0x00, 0x00}, r[40] = {};
     // DDC/CI "get VCP 0x10": write 0x6E, wait, read 0x6F; the reply says 8 payload bytes of 40 asked for
@@ -123,6 +190,8 @@ int main() {
     unsigned char unframed[4] = {1, 2, 3, 4}; assert(nvrmDdcReplyLength(unframed, 4) == 4);
     assert(nvrmDdcReplyDelayMs(0) == 40 && nvrmDdcReplyDelayMs(100000000ull) == 100 && nvrmDdcReplyDelayMs(9000000000ull) == 500);
     puts("PASS: DDC/CI request translation, address whitelist, 40 ms reply wait, reply framing, dead display, opt-in");
+    checkVolume(fb);
+    checkDisplayName();
 }
 '''
 with tempfile.TemporaryDirectory() as d:

@@ -1,4 +1,25 @@
-# Volume and mute for display audio (NMHDA, off by default)
+# Volume for external displays
+
+## Monitor hardware volume over DDC/CI
+
+With `nvrmfbddc=1`, NVRMFB can publish the IOKit `speaker-volume` display
+parameter for external displays that advertise audio in EDID and return a
+valid DDC/CI VCP `0x62` volume range. Each control follows its framebuffer
+through hotplug. An existing display volume provider retains ownership.
+`NVRMDisplayProductName` on the framebuffer reports the EDID model name.
+The same name is carried in ELD when an audio association is available.
+
+Check for `speaker-volume` with `IODisplayGetIntegerRangeParameter`. Write a
+value in the reported range with `IODisplaySetIntegerParameter` and verify the
+result on the monitor or with a fresh Get VCP request. The control uses the
+monitor's hardware range and excludes the reserved fixed-volume and mute
+values in MCCS 2.2. Control Center and the Sound settings still depend on a
+separate CoreAudio output and its controls.
+
+The probe and write scheduling follow the per-display approach used by
+[DisplayBrightness](https://github.com/Xiaoheixu/DisplayBrightness).
+
+## Volume and mute for CoreAudio outputs (NMHDA, off by default)
 
 A display connected to an NVIDIA card gets an audio output from NMHDA, but a display has no volume of its own, so macOS shows
 no slider for it and the keyboard volume keys do nothing. `nmhdavol=1` in the boot arguments adds the missing control.
