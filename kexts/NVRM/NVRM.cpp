@@ -617,6 +617,7 @@ static bool gNvrmConsoleAwaitsRm;
 
 extern "C" int nvrm_bar1_console_state(nv_state_t *nv, NvU64 *pStaticStart);   // nvrm_bar1state.c
 extern "C" int nvrm_bar1_block(nv_state_t *nv, NvU32 *pBlock);
+extern "C" int nvrm_bar1_console_preserved(nv_state_t *nv);
 
 /*
  * The verbose console through the BAR1 move and RM's start, the way a real Mac keeps drawing text until the window
@@ -630,7 +631,9 @@ extern "C" int nvrm_bar1_block(nv_state_t *nv, NvU32 *pBlock);
  *   - until RM binds BAR1 to its own page tables (the bind register still holds what it held before RM started, or
  *     says physical), BAR1 offset 0 is VRAM 0, where the firmware's screen is. RM building its address space does not
  *     change that; on this card it starts ~2 s into RM's start and the bind comes much later, after the GSP boot;
- *   - once RM has bound BAR1 with its static mapping (made before the bind), VRAM X is at BAR1 offset
+ *   - RM is told the console is at the start of BAR1 (nv_get_screen_info), so when it binds BAR1 it first maps the
+ *     console's VRAM at BAR1 offset 0 (bBar1ConsolePreserved) and the pushes go on at offset 0 with no gap;
+ *   - otherwise, once RM has bound BAR1 with its static mapping (made before the bind), VRAM X is at BAR1 offset
  *     (startOffset + X): the screen is repainted whole there and the push goes on;
  *   - bound with no static mapping, or the bind register not readable yet: nothing is written. RM keeps that VRAM reserved as the console region for its whole life, so
  *     these writes never land on memory RM gave anyone else. Writing at BAR1 offset 0 after RM is up is what
@@ -656,7 +659,7 @@ static struct {
     UInt64 msStart, msFirstPause, msResume, msLastPush, msStop;
     UInt64 staticOff;
     char stopWhy[24];
-    bool haveBlk; UInt32 blk0, blkNow;
+    bool haveBlk; UInt32 blk0, blkNow; bool preserved;
     UInt64 movedTo, msMoved;
 } gCons;
 
@@ -669,11 +672,12 @@ static void nvrmConsPublish(void)
 {
     if (!gCons.pub) return;
     char b[320];
-    snprintf(b, sizeof b, "fw %u/%u paused %u static %u/%u off 0x%llx blk 0x%x->0x%x | ms start %llu pause %llu resume %llu "
-             "last %llu stop %llu (%s) moved 0x%llx at %llu",
+    snprintf(b, sizeof b, "fw %u/%u paused %u static %u/%u off 0x%llx blk 0x%x->0x%x pres %d | ms start %llu pause %llu resume %llu "
+             "last %llu stop %llu (%s) moved %s at %llu",
              gCons.phPushes[0], gCons.phRows[0], gCons.pausedTicks, gCons.phPushes[2], gCons.phRows[2], gCons.staticOff,
-             gCons.blk0, gCons.blkNow, gCons.msStart, gCons.msFirstPause, gCons.msResume, gCons.msLastPush, gCons.msStop,
-             gCons.stopWhy[0] ? gCons.stopWhy : "running", gCons.movedTo, gCons.msMoved);
+             gCons.blk0, gCons.blkNow, (int)gCons.preserved, gCons.msStart, gCons.msFirstPause, gCons.msResume, gCons.msLastPush, gCons.msStop,
+             gCons.stopWhy[0] ? gCons.stopWhy : "running",
+             !gCons.movedTo ? "no" : (gCons.movedTo & 1) ? "phys" : "virt", gCons.msMoved);
     gCons.pub->setProperty("nvrm-console-copier", b);
 }
 
@@ -747,7 +751,9 @@ static void nvrmConsTick(thread_call_param_t, thread_call_param_t)
         // The value before RM touched BAR1 is only trusted while RM has no BAR1 address space yet.
         if (!gCons.haveBlk && st == 0) { gCons.haveBlk = true; gCons.blk0 = blk; }
         const bool rmBound = gCons.haveBlk && blk != gCons.blk0 && (blk & (1u << 9));
+        gCons.preserved = nvrm_bar1_console_preserved(gCons.nv) != 0;
         if (gCons.haveBlk && !rmBound) want = gCons.bar1Base;
+        else if (rmBound && gCons.preserved) want = gCons.bar1Base;
         else if (rmBound && st == 2) want = gCons.bar1Base + off;
     } else if (br == 0 && st == 0 && !gCons.rmDone) {
         want = gCons.bar1Base;                          // no GPU object yet: RM has not touched BAR1
@@ -807,6 +813,14 @@ static bool nvrmConsStart(const PE_Video &pv, UInt64 bar1Base, IOService *pub)
     gCons.bar1Base = bar1Base;
     uint64_t d; clock_interval_to_deadline(15 * 60, kSecondScale, &d); gCons.deadline = d;
     thread_call_enter(gCons.call);
+    return true;
+}
+
+// For nv_get_screen_info: while the copier runs, the screen RM must keep reachable is at the start of BAR1.
+extern "C" bool nvrm_console_fw_base(NvU64 *pBase)
+{
+    if (!gCons.lock || gCons.stopped || !gCons.bar1Base) return false;
+    *pBase = gCons.bar1Base;
     return true;
 }
 
