@@ -1,0 +1,51 @@
+--- a/realmac27/audio/bsdcompat/src/nmx_port.c
++++ b/realmac27/audio/bsdcompat/src/nmx_port.c
+@@ -28,6 +28,12 @@
+ void nmx_taskqueue_fini(void);
+ 
+ static int stage;       /* how far start got, so a failed start unwinds exactly what it did */
++/* HD Audio vends IOAudioFamily services directly and has no devfs front end. */
++#if defined(NMX_AUDIO_ONLY)
++#define NMX_SYSINIT_STAGE 7
++#else
++#define NMX_SYSINIT_STAGE 8
++#endif
+ 
+ int nmx_port_start(void)
+ {
+@@ -41,7 +47,9 @@
+     STEP(nmx_sleepq_init());
+     STEP(nmx_callout_init());
+     STEP(nmx_taskqueue_init());
++#if !defined(NMX_AUDIO_ONLY)
+     STEP(nmx_xnu_devfs_init());
++#endif
+     STEP(nmx_sysinit_run());
+ #undef STEP
+     return 0;
+@@ -49,10 +57,12 @@
+ 
+ void nmx_port_stop(void)
+ {
+-    if (stage >= 8)
++    if (stage >= NMX_SYSINIT_STAGE)
+         nmx_sysuninit_run();
++#if !defined(NMX_AUDIO_ONLY)
+     if (stage >= 7)
+         nmx_xnu_devfs_fini();
++#endif
+     if (stage >= 6)
+         nmx_taskqueue_fini();
+     if (stage >= 5)
+@@ -70,7 +80,11 @@
+ 
+ int nmx_port_busy(void)
+ {
++#if defined(NMX_AUDIO_ONLY)
++    return 0;
++#else
+     return nmx_xnu_devfs_busy();
++#endif
+ }
+ 
+ /* the boot framebuffer, as the kext read it from the platform before the first attach (see nmx_port.h) */
