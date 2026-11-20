@@ -1751,14 +1751,32 @@ bool NVRMNVDAFramebuffer::kapiInit()
     if (consoleSilenced && fPhys && fPitch && fW && fH && (NvU64)fPitch * fH <= fSize && getPlatform()) {
         char vb[4] = { 0 };
         if (PE_parse_boot_argn("-v", vb, sizeof vb)) {
+            // Until WindowServer connects, the head still scans out the firmware's own screen, not this surface, so
+            // text drawn here would never be seen. The firmware screen is still in VRAM where the firmware drew it;
+            // only the window the CPU reaches it through moved. BARs are aligned to their size, so its offset in
+            // VRAM is the old console address modulo the firmware's BAR1 size, and it is reached at that offset in the
+            // new BAR1. The surface is used only when that cannot be worked out.
+            NvU64 home = fPhys; unsigned homePitch = fPitch; const char *where = "the boot head's scanout";
+            IOService *nub = pciNub();
+            OSNumber *fwMb = nub ? OSDynamicCast(OSNumber, nub->getProperty("nvrm-bar1-firmware-mb")) : NULL;
+            OSNumber *nowMb = nub ? OSDynamicCast(OSNumber, nub->getProperty("nvrm-bar1-mb")) : NULL;
+            const NvU64 fwSize = fwMb ? (fwMb->unsigned64BitValue() << 20) : 0;
+            const NvU64 nowSize = nowMb ? (nowMb->unsigned64BitValue() << 20) : 0;
+            const unsigned gopPitch = fConsPitch ? fConsPitch : 8192;
+            if (fVtFbBase && fBar1Base && fwSize && !(fwSize & (fwSize - 1)) && nowSize) {
+                const NvU64 off = fVtFbBase & (fwSize - 1);
+                if (off + (NvU64)gopPitch * fH <= nowSize) {
+                    home = fBar1Base + off; homePitch = gopPitch; where = "the firmware screen through the new BAR1";
+                }
+            }
             PE_Video nv; nvu_zero(&nv, sizeof nv);
-            nv.v_baseAddr = (unsigned long)(fPhys | 1);
-            nv.v_rowBytes = fPitch; nv.v_width = fW; nv.v_height = fH; nv.v_depth = 32;
+            nv.v_baseAddr = (unsigned long)(home | 1);
+            nv.v_rowBytes = homePitch; nv.v_width = fW; nv.v_height = fH; nv.v_depth = 32;
             getPlatform()->setConsoleInfo(&nv, kPEBaseAddressChange);
             getPlatform()->setConsoleInfo(0, kPEEnableScreen);
             fConsHomed = true;
-            FBLOG("kernel console moved to the boot head's scanout (pitch %u, %ux%u) and switched on (verbose start)",
-                  fPitch, fW, fH);
+            FBLOG("kernel console moved to %s at 0x%llx (pitch %u, %ux%u) and switched on (verbose start)",
+                  where, (unsigned long long)home, homePitch, fW, fH);
         }
     }
     return true;
