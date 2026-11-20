@@ -612,6 +612,9 @@ extern "C" { IOMemoryDescriptor *nv_pm_ram_submd(NvU64, NvU64, int); bool nv_pm_
 #define super IOService
 OSDefineMetaClassAndStructors(NVRM, IOService)
 static bool gRmInitDone = false;
+// Set when BAR1 moved under a verbose console: the console waits, off, at the new BAR1 start until RM is up.
+static bool gNvrmConsoleAwaitsRm;
+
 
 // Turing (TU102/TU104/TU106/TU117 = 0x1E00-0x1FFF, TU116 = 0x2180-0x21FF) needs about ten seconds after the BAR1 move
 // before the display can be armed: its GSP firmware is still settling, and arming earlier left a GTX 1660 SUPER and an
@@ -1677,24 +1680,21 @@ bool NVRM::placeLargeBar1()
             fPCI->setProperty("nvrm-console-move", why);
         }
         if (nvrmConsoleLostByMove(con, fwBar1, fwBar1Size, bar1Base, bar1Size, verbose)) {
-            // The firmware's screen is the same VRAM it was: the head still scans it out, and only the window the CPU
-            // reaches it through moved. So the console follows the window to the same offset and stays on, and a verbose
-            // start keeps showing its text instead of freezing until the framebuffer takes over. It is silenced only
-            // when that offset does not fit in the new window (it then would draw where nothing decodes, about half a
-            // second per line).
-            const UInt64 off = con - fwBar1;
-            const UInt64 need = (UInt64)pv.v_rowBytes * (UInt64)pv.v_height;
-            if (need && off + need <= bar1Size) {
-                PE_Video nv = pv;
-                nv.v_baseAddr = (unsigned long)((bar1Base + off) | 1);     // a physical base, as IOPCIConfigurator passes it
-                getPlatform()->setConsoleInfo(&nv, kPEBaseAddressChange);
-                getPlatform()->setConsoleInfo(0, kPEEnableScreen);
-                LOG("bar1: verbose console moved with BAR1: 0x%llx -> 0x%llx (+%llu B), on", con, bar1Base + off, need);
-                fPCI->setProperty("nvrm-console-moved-to", bar1Base + off, 64);
-            } else {
-                getPlatform()->setConsoleInfo(0, kPEDisableScreen);
-                LOG("bar1: verbose console at 0x%llx is no longer decoded after the move - silenced until the framebuffer takes over", con);
-            }
+            // The firmware's screen is still in VRAM and the head still scans it out; only the window the CPU reaches
+            // it through moved. Drawing through the new window now is wrong twice over: until RM is up the window does
+            // not reach that screen (each line costs about half a second and the start crawls), and once RM is up its
+            // start is mapped wherever RM chose. RM itself keeps the firmware console reachable, the way Linux's efifb
+            // survives the driver loading: when the console base it is told equals BAR1's CPU address, it maps the
+            // console's VRAM at BAR1 offset 0 before anything else (kbusInitBar1, bPreserveBar1ConsoleEnabled). So the
+            // console is switched off and pointed at the start of the new BAR1 here, and switched back on once
+            // rm_init_adapter has made that mapping.
+            getPlatform()->setConsoleInfo(0, kPEDisableScreen);
+            PE_Video nv = pv;
+            nv.v_baseAddr = (unsigned long)(bar1Base | 1);     // a physical base, as IOPCIConfigurator passes it
+            getPlatform()->setConsoleInfo(&nv, kPEBaseAddressChange);
+            gNvrmConsoleAwaitsRm = true;
+            LOG("bar1: verbose console 0x%llx -> start of the new BAR1 0x%llx, off until RM maps it there", con, bar1Base);
+            fPCI->setProperty("nvrm-console-moved-to", bar1Base, 64);
         }
     }
     return true;
@@ -1951,6 +1951,15 @@ IOReturn NVRM::go(uint32_t pass)
         LOG("MSI %d armed; calling rm_init_adapter() — GSP boot from inside macOS", msi);
         NvBool ok = rm_init_adapter(NULL, nv);
         LOG("rm_init_adapter -> %s", ok ? "OK" : "FAILED");
+        if (gNvrmConsoleAwaitsRm) {
+            // RM has mapped the firmware console at BAR1 offset 0 (or failed to start, and the screen stays off).
+            gNvrmConsoleAwaitsRm = false;
+            if (ok && getPlatform()) {
+                getPlatform()->setConsoleInfo(0, kPEEnableScreen);
+                LOG("bar1: verbose console back on through RM's BAR1 console mapping");
+                fPCI->setProperty("nvrm-console-resumed", true);
+            }
+        }
         nv_xnu_dump_live_allocs();
         nv_xnu_dump_gsp_regs(nv);
         if (!ok) {   // the card did not start: no interrupt may arrive for it, and a retry registers its own source
