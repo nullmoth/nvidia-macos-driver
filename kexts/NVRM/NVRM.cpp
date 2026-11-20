@@ -616,6 +616,7 @@ static bool gRmInitDone = false;
 static bool gNvrmConsoleAwaitsRm;
 
 extern "C" int nvrm_bar1_console_state(nv_state_t *nv, NvU64 *pStaticStart);   // nvrm_bar1state.c
+extern "C" int nvrm_bar1_block(nv_state_t *nv, NvU32 *pBlock);
 
 /*
  * The verbose console through the BAR1 move and RM's start, the way a real Mac keeps drawing text until the window
@@ -626,13 +627,16 @@ extern "C" int nvrm_bar1_console_state(nv_state_t *nv, NvU64 *pStaticStart);   /
  * drawing (and scrolling, which reads the whole screen back) straight through BAR1 crawled at about half a second per
  * line. So the console draws into a cached copy in RAM, and a timer pushes the rows that changed to VRAM through a
  * write-combined mapping:
- *   - before RM builds its BAR1 address space, BAR1 offset 0 is VRAM 0 (where the firmware's screen is);
- *   - while RM builds and binds it, nothing is written (the window is about to change);
- *   - once RM is up with its static BAR1 mapping, VRAM X is at BAR1 offset (startOffset + X), the screen is repainted
- *     whole there, and the push goes on. RM keeps that VRAM reserved as the console region for its whole life, so
+ *   - until RM binds BAR1 to its own page tables (the bind register still holds what it held before RM started, or
+ *     says physical), BAR1 offset 0 is VRAM 0, where the firmware's screen is. RM building its address space does not
+ *     change that; on this card it starts ~2 s into RM's start and the bind comes much later, after the GSP boot;
+ *   - once RM has bound BAR1 with its static mapping (made before the bind), VRAM X is at BAR1 offset
+ *     (startOffset + X): the screen is repainted whole there and the push goes on;
+ *   - bound with no static mapping, or the bind register not readable yet: nothing is written. RM keeps that VRAM reserved as the console region for its whole life, so
  *     these writes never land on memory RM gave anyone else. Writing at BAR1 offset 0 after RM is up is what
  *     corrupted the desktop before: that offset is RM's own dynamic mappings, not the screen.
- * The copier stops when someone else moves the console (the framebuffer at takeover), or after 15 minutes.
+ * If someone else moves the console the copier records where and keeps going (it then finds no changed rows); it
+ * stops after 15 minutes.
  */
 static struct {
     IOLock *lock;
@@ -652,6 +656,8 @@ static struct {
     UInt64 msStart, msFirstPause, msResume, msLastPush, msStop;
     UInt64 staticOff;
     char stopWhy[24];
+    bool haveBlk; UInt32 blk0, blkNow;
+    UInt64 movedTo, msMoved;
 } gCons;
 
 static UInt64 nvrmConsMs(void)
@@ -663,10 +669,11 @@ static void nvrmConsPublish(void)
 {
     if (!gCons.pub) return;
     char b[320];
-    snprintf(b, sizeof b, "fw %u/%u paused %u static %u/%u off 0x%llx | ms start %llu pause %llu resume %llu last %llu stop %llu (%s)",
+    snprintf(b, sizeof b, "fw %u/%u paused %u static %u/%u off 0x%llx blk 0x%x->0x%x | ms start %llu pause %llu resume %llu "
+             "last %llu stop %llu (%s) moved 0x%llx at %llu",
              gCons.phPushes[0], gCons.phRows[0], gCons.pausedTicks, gCons.phPushes[2], gCons.phRows[2], gCons.staticOff,
-             gCons.msStart, gCons.msFirstPause, gCons.msResume, gCons.msLastPush, gCons.msStop,
-             gCons.stopWhy[0] ? gCons.stopWhy : "running");
+             gCons.blk0, gCons.blkNow, gCons.msStart, gCons.msFirstPause, gCons.msResume, gCons.msLastPush, gCons.msStop,
+             gCons.stopWhy[0] ? gCons.stopWhy : "running", gCons.movedTo, gCons.msMoved);
     gCons.pub->setProperty("nvrm-console-copier", b);
 }
 
@@ -723,17 +730,31 @@ static void nvrmConsTick(thread_call_param_t, thread_call_param_t)
     } else {
         PE_Video pv; bzero(&pv, sizeof pv);
         IOPlatformExpert *pe = IOService::getPlatform();
-        if (pe && pe->getConsoleInfo(&pv) == kIOReturnSuccess && ((UInt64)pv.v_baseAddr & ~3ull) != (UInt64)gCons.shadow) {
-            nvrmConsStop("console moved"); IOLockUnlock(gCons.lock); return;
+        const UInt64 now = (pe && pe->getConsoleInfo(&pv) == kIOReturnSuccess) ? (UInt64)pv.v_baseAddr : 0;
+        if (now && (now & ~3ull) != (UInt64)gCons.shadow && now != gCons.movedTo) {
+            gCons.movedTo = now; gCons.msMoved = nvrmConsMs(); nvrmConsPublish();
         }
     }
     if (mach_absolute_time() > gCons.deadline) { nvrmConsStop("time"); IOLockUnlock(gCons.lock); return; }
 
     NvU64 off = 0;
     const int st = nvrm_bar1_console_state(gCons.nv, &off);
+    NvU32 blk = 0;
+    const int br = nvrm_bar1_block(gCons.nv, &blk);
     UInt64 want = 0;
-    if (st == 0 && !gCons.rmDone) want = gCons.bar1Base;
-    else if (st == 2 && gCons.rmUp) want = gCons.bar1Base + off;
+    if (br == 1) {
+        gCons.blkNow = blk;
+        // The value before RM touched BAR1 is only trusted while RM has no BAR1 address space yet.
+        if (!gCons.haveBlk && st == 0) { gCons.haveBlk = true; gCons.blk0 = blk; }
+        const bool rmBound = gCons.haveBlk && blk != gCons.blk0 && (blk & (1u << 9));
+        if (gCons.haveBlk && !rmBound) want = gCons.bar1Base;
+        else if (rmBound && st == 2) want = gCons.bar1Base + off;
+    } else if (br == 0 && st == 0 && !gCons.rmDone) {
+        want = gCons.bar1Base;                          // no GPU object yet: RM has not touched BAR1
+    } else if (br == -1) {
+        if (st == 0 && !gCons.rmDone) want = gCons.bar1Base;
+        else if (st == 2 && gCons.rmUp) want = gCons.bar1Base + off;
+    }
     if (gCons.rmDone && !gCons.rmUp) { nvrmConsStop("RM did not start"); IOLockUnlock(gCons.lock); return; }
     if (!want) {
         gCons.pausedTicks++;
